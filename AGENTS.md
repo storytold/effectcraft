@@ -105,6 +105,12 @@ reproduce an image (for example, point lists traced from someone else's icon).
 See `CLAUDE.md`: pure Rust, dependency layering (`cargo xtask layers`), exact `Tick` time, everything is
 a command, everything is agent-drivable, and the quality gates (`cargo xtask ci`) before every commit.
 
+Shared real-file test corpora (Photoshop-authored PSDs, etc.) live in
+[`storytold/photocraft-corpus`](https://github.com/storytold/photocraft-corpus), explained in
+[craftrules `standards/test-corpora.md`](https://github.com/storytold/craftrules/blob/main/standards/test-corpora.md).
+Never commit large binary fixtures to this repo; fetch them pinned by commit and sha256-verified,
+as PhotoCraft does with `cargo xtask corpus`.
+
 ## See also
 
 - [docs/gaps.md](docs/gaps.md): where EffectCraft falls short of After Effects and the prioritised workstreams (G1–G9); read it before choosing work
