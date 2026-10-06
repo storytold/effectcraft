@@ -393,9 +393,11 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
     app.ui.project_scroll = app.ui.project_scroll.clamp(0.0, max_scroll);
     let scroll = app.ui.project_scroll;
-    if max_scroll > 0.0 {
+    // Resizing can leave no usable track. Avoid division by zero and an inverted
+    // clamp range; on a short positive track the thumb fits the available height.
+    if max_scroll > 0.0 && content_h > 0.0 && list.height() > 8.0 {
         let track = Rect::from_min_max(pos2(rect.max.x - 6.0, list.min.y + 1.0), pos2(rect.max.x - 2.0, list.max.y - 7.0));
-        let th = (track.height() * list.height() / content_h).clamp(16.0, track.height());
+        let th = (track.height() * list.height() / content_h).clamp(16.0_f32.min(track.height()), track.height());
         let thumb = Rect::from_min_size(pos2(track.min.x, track.min.y + (track.height() - th) * (scroll / max_scroll)), vec2(track.width(), th));
         let vresp = ui.interact(track.expand2(vec2(2.0, 0.0)), egui::Id::new("proj-vscroll"), Sense::drag());
         p.rect_filled(thumb, 2.0, if vresp.hovered() || vresp.dragged() { t.text_dim } else { t.text_faint });
