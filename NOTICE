@@ -15,3 +15,10 @@ list (author, source, license) is in ATTRIBUTION.md.
 Inter (assets/fonts/Inter-*.ttf) — SIL Open Font License 1.1. See assets/fonts/OFL-Inter.txt.
 Noto Serif (assets/fonts/NotoSerif-Regular.ttf) — SIL Open Font License 1.1. See assets/fonts/OFL-NotoSerif.txt.
 JetBrains Mono (assets/fonts/JetBrainsMono-Regular.ttf) — SIL Open Font License 1.1. See assets/fonts/OFL-JetBrainsMono.txt.
+
+Windows x64 MSVC builds bundle the native DirectX shader compiler through mach-dxcompiler-rs.
+The wrapper and mach-dxcompiler integration use MIT licensing; the underlying DXC/LLVM/Clang
+code uses the University of Illinois/NCSA Open Source License and additional permissive
+third-party terms. See licenses/static-dxc/PROVENANCE.md and the accompanying unmodified
+license and notice texts. These compiler notices are included in Windows x64 MSI and
+portable ZIP distributions.

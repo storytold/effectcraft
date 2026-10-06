@@ -25,5 +25,10 @@ log = { workspace = true }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 pollster = { workspace = true }
 
+# wgpu's DX12 Auto compiler prefers bundled DXC on supported Windows builds.
+# Keep the native compiler download out of ARM64, GNU, macOS, Linux and wasm builds.
+[target.'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))'.dependencies]
+wgpu = { workspace = true, features = ["static-dxc"] }
+
 [dev-dependencies]
 effectcraft-text = { workspace = true }

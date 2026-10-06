@@ -87,6 +87,21 @@ $Stage = Join-Path $TargetDir "windows-package\$Arch"
 Remove-Item -Recurse -Force $Stage -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $Stage | Out-Null
 Copy-Item (Join-Path $Bin 'effectcraft.exe'), (Join-Path $Bin 'effectcraft-cli.exe') $Stage
+Copy-Item (Join-Path $Root 'NOTICE') $Stage
+
+# The x64 MSVC manifest enables static DXC; its binary archive contains no notices.
+# Keep the exact license texts alongside both installed and portable binaries.
+$StaticDxc = if ($Arch -eq 'x64') { '1' } else { '0' }
+if ($StaticDxc -eq '1') {
+  $DxcSource = Join-Path $Root 'licenses\static-dxc'
+  $DxcStage = Join-Path $Stage 'licenses\static-dxc'
+  New-Item -ItemType Directory -Force -Path $DxcStage | Out-Null
+  foreach ($f in 'PROVENANCE.md', 'mach-dxcompiler-rs-LICENSE.txt', 'mach-dxcompiler-LICENSE.txt',
+      'mach-dxcompiler-LICENSE-MIT.txt', 'DirectXShaderCompiler-LICENSE.TXT', 'DirectXShaderCompiler-ThirdPartyNotices.txt') {
+    # A missing required notice is a packaging error, including with -SkipBuild.
+    Copy-Item -LiteralPath (Join-Path $DxcSource $f) -Destination $DxcStage
+  }
+}
 
 & (Join-Path $PSScriptRoot 'sign.ps1') (Join-Path $Stage 'effectcraft.exe') (Join-Path $Stage 'effectcraft-cli.exe')
 
@@ -95,6 +110,7 @@ $Msi = Join-Path $Dist "effectcraft-$Version-windows-$Arch.msi"
 Invoke-Native 'wix build' {
   wix build (Join-Path $PSScriptRoot 'effectcraft.wxs') -arch $Arch `
     -d "Version=$MsiVersion" -d "BinDir=$Stage" -d "IconPath=$(Join-Path $Root 'assets\app-icon\effectcraft.ico')" `
+    -d "StaticDxc=$StaticDxc" `
     -o $Msi
 }
 # wix writes its debug symbols (.wixpdb) next to the MSI; keep them out of the release assets.
@@ -106,9 +122,12 @@ $Portable = Join-Path $TargetDir "windows-package\effectcraft-$Version-windows-$
 Remove-Item -Recurse -Force $Portable -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $Portable | Out-Null
 Copy-Item (Join-Path $Stage '*.exe') $Portable
-foreach ($f in 'README.md', 'LICENSE', 'LICENSE-MIT', 'LICENSE-APACHE') {
+foreach ($f in 'README.md', 'LICENSE', 'LICENSE-MIT', 'LICENSE-APACHE', 'NOTICE') {
   $p = Join-Path $Root $f
   if (Test-Path $p) { Copy-Item $p $Portable }
+}
+if ($StaticDxc -eq '1') {
+  Copy-Item -LiteralPath (Join-Path $Stage 'licenses') -Destination $Portable -Recurse
 }
 $Zip = Join-Path $Dist "effectcraft-$Version-windows-$Arch-portable.zip"
 Remove-Item -Force $Zip -ErrorAction SilentlyContinue

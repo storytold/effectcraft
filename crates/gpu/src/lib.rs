@@ -395,3 +395,5 @@ mod tests_fx_vr;
 mod tests_fx_warp;
 #[cfg(test)]
 mod tests_particles;
+#[cfg(all(test, target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+mod tests_static_dxc;

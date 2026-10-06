@@ -9,6 +9,9 @@
   taking over the user's default app for them).
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <?ifndef StaticDxc ?>
+    <?define StaticDxc = 0 ?>
+  <?endif ?>
   <Package
       Name="EffectCraft"
       Manufacturer="Learning Machines LLC"
@@ -31,12 +34,21 @@
     <Property Id="ARPHELPLINK" Value="https://discord.gg/artcraft" />
 
     <StandardDirectory Id="ProgramFiles6432Folder">
-      <Directory Id="INSTALLFOLDER" Name="EffectCraft" />
+      <Directory Id="INSTALLFOLDER" Name="EffectCraft">
+        <?if $(var.StaticDxc) = 1 ?>
+          <Directory Id="LicensesFolder" Name="licenses">
+            <Directory Id="StaticDxcLicensesFolder" Name="static-dxc" />
+          </Directory>
+        <?endif ?>
+      </Directory>
     </StandardDirectory>
     <StandardDirectory Id="ProgramMenuFolder" />
 
     <Feature Id="Main" Title="EffectCraft" Level="1">
       <ComponentGroupRef Id="EffectcraftFiles" />
+      <?if $(var.StaticDxc) = 1 ?>
+        <ComponentGroupRef Id="StaticDxcNotices" />
+      <?endif ?>
     </Feature>
   </Package>
 
@@ -55,6 +67,31 @@
       <Component Id="EffectcraftCli">
         <File Id="EffectcraftCliExe" Source="$(var.BinDir)\effectcraft-cli.exe" KeyPath="yes" />
       </Component>
+      <Component Id="EffectcraftNotice">
+        <File Id="EffectcraftNoticeFile" Source="$(var.BinDir)\NOTICE" KeyPath="yes" />
+      </Component>
     </ComponentGroup>
+    <?if $(var.StaticDxc) = 1 ?>
+      <ComponentGroup Id="StaticDxcNotices" Directory="StaticDxcLicensesFolder">
+        <Component Id="StaticDxcProvenance">
+          <File Id="StaticDxcProvenanceFile" Source="$(var.BinDir)\licenses\static-dxc\PROVENANCE.md" KeyPath="yes" />
+        </Component>
+        <Component Id="StaticDxcWrapperLicense">
+          <File Id="StaticDxcWrapperLicenseFile" Source="$(var.BinDir)\licenses\static-dxc\mach-dxcompiler-rs-LICENSE.txt" KeyPath="yes" />
+        </Component>
+        <Component Id="StaticDxcIntegrationTerms">
+          <File Id="StaticDxcIntegrationTermsFile" Source="$(var.BinDir)\licenses\static-dxc\mach-dxcompiler-LICENSE.txt" KeyPath="yes" />
+        </Component>
+        <Component Id="StaticDxcIntegrationLicense">
+          <File Id="StaticDxcIntegrationLicenseFile" Source="$(var.BinDir)\licenses\static-dxc\mach-dxcompiler-LICENSE-MIT.txt" KeyPath="yes" />
+        </Component>
+        <Component Id="StaticDxcCompilerLicense">
+          <File Id="StaticDxcCompilerLicenseFile" Source="$(var.BinDir)\licenses\static-dxc\DirectXShaderCompiler-LICENSE.TXT" KeyPath="yes" />
+        </Component>
+        <Component Id="StaticDxcCompilerNotices">
+          <File Id="StaticDxcCompilerNoticesFile" Source="$(var.BinDir)\licenses\static-dxc\DirectXShaderCompiler-ThirdPartyNotices.txt" KeyPath="yes" />
+        </Component>
+      </ComponentGroup>
+    <?endif ?>
   </Fragment>
 </Wix>
