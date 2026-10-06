@@ -1642,6 +1642,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 }
                 lp.text(pos2(indent + 10.0, cy), Align2::LEFT_CENTER, name, Tokens::ui(12.0), t.text);
                 text_anim_popups(app, ui, &lp, layer, *uid, cw.switches, cy, &mut actions);
+                shape_add_popup(app, ui, layer, *uid, cw.switches, cy, &mut actions);
                 dash_buttons(app, ui, &lp, layer, *uid, cw.switches, cy, &mut actions);
                 // Mask mode + inverted inline.
                 if let Some(g) = layer.props.find_group(*uid)
@@ -2363,8 +2364,21 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             app.session.history.merge_key = None;
             continue;
         }
-        if let Err(e) = crate::menus::invoke(app, &ctx, &id, params) {
-            app.ui.status = e;
+        let shape_target = (id == "layer.addShapeItem")
+            .then(|| (params.get("layer").and_then(serde_json::Value::as_u64), params.get("group").and_then(serde_json::Value::as_u64)));
+        match crate::menus::invoke(app, &ctx, &id, params) {
+            Ok(result) => {
+                if let Some((Some(layer), Some(group))) = shape_target
+                    && let Some(uid) = result.get("uid").and_then(serde_json::Value::as_u64)
+                {
+                    app.ui.timeline.open_layers.insert(layer);
+                    app.ui.timeline.open_groups.extend([group, uid]);
+                    if let Err(e) = app.session.execute("prop.select", json!({"layer": layer, "prop": uid, "selectKeys": false})) {
+                        app.ui.status = e.to_string();
+                    }
+                }
+            }
+            Err(e) => app.ui.status = e,
         }
     }
 }
@@ -2506,6 +2520,88 @@ fn dash_buttons(
         if resp.clicked() {
             actions.push((id.into(), json!({"layer": layer.id.0, "prop": stroke})));
         }
+    }
+}
+
+/// Add paths, paints and operators to the exact Contents row that opened the menu.
+fn shape_add_popup(app: &mut EffectcraftApp, ui: &mut egui::Ui, layer: &Layer, uid: u64, x: f32, cy: f32, actions: &mut Vec<(String, serde_json::Value)>) {
+    if !matches!(layer.source, LayerSource::Shape)
+        || !layer.props.sub("contents").and_then(|root| root.find_group(uid)).is_some_and(|g| g.match_id == "contents")
+    {
+        return;
+    }
+    const ITEMS: &[(&str, &str)] = &[
+        ("Group", "group"),
+        ("Rectangle", "rect"),
+        ("Ellipse", "ellipse"),
+        ("Polystar", "star"),
+        ("Polygon", "polygon"),
+        ("Fill", "fill"),
+        ("Stroke", "stroke"),
+        ("Gradient Fill", "gradientFill"),
+        ("Merge Paths", "merge"),
+        ("Offset Paths", "offset"),
+        ("Pucker & Bloat", "pucker"),
+        ("Repeater", "repeater"),
+        ("Round Corners", "round"),
+        ("Trim Paths", "trimPaths"),
+        ("Twist", "twist"),
+        ("Wiggle Paths", "wiggle"),
+        ("Zig Zag", "zigzag"),
+    ];
+    let t = app.tokens;
+    let br = Rect::from_min_size(pos2(x + 4.0, cy - 9.0), vec2(55.0, 18.0));
+    let pop = egui::Id::new(("tl-shape-add-popup", uid));
+    if ui.add_enabled_ui(!layer.switches.locked, |ui| widgets::dropdown(ui, br, "Add", &t, egui::Id::new(("tl-shape-add", uid)))).inner.clicked() {
+        widgets::open_popup(ui, pop);
+    }
+    app.auto.add(&format!("timeline.group.{uid}.shapeAdd"), br, "Add Shape Item");
+    if !widgets::popup_is_open(ui, pop) {
+        return;
+    }
+    let mut chosen = None;
+    let area = egui::Area::new(pop.with("area")).order(egui::Order::Foreground).fixed_pos(br.left_bottom()).show(ui.ctx(), |ui| {
+        egui::Frame::popup(ui.style()).show(ui, |ui| {
+            ui.set_min_width(160.0);
+            egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                for (label, kind) in ITEMS {
+                    let response = ui.add_enabled(!layer.switches.locked, egui::Button::selectable(false, *label));
+                    app.auto.add(&format!("timeline.group.{uid}.shapeAdd.{kind}"), response.rect, label);
+                    if response.clicked() {
+                        chosen = Some(*kind);
+                    }
+                }
+            });
+        });
+    });
+    let outside_press = ui.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|pos| !area.response.rect.contains(pos)));
+    if chosen.is_some() || outside_press || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        ui.data_mut(|d| d.insert_temp(pop.with("open"), false));
+    }
+    if let Some(kind) = chosen {
+        let Some(contents) = layer.props.find_group(uid) else { return };
+        let index = shape_add_index(contents, kind, ui.input(|i| i.modifiers.alt));
+        actions.push(("layer.addShapeItem".into(), json!({"layer": layer.id.0, "group": uid, "kind": kind, "index": index})));
+    }
+}
+
+/// Timeline additions follow path/paint/operator ordering; Alt appends, as does Repeater.
+fn shape_add_index(contents: &PropGroup, kind: &str, append: bool) -> usize {
+    if append || kind == "repeater" {
+        return contents.children.len();
+    }
+    let is_path = |id: &str| matches!(id, "group" | "path" | "rect" | "ellipse" | "star");
+    let after_path = || contents.children.iter().rposition(|node| is_path(node.match_id())).map_or(0, |i| i + 1);
+    if matches!(kind, "group" | "rect" | "ellipse" | "star" | "polygon") {
+        after_path()
+    } else if matches!(kind, "fill" | "stroke" | "gradientFill") {
+        contents.children.iter().position(|node| matches!(node.match_id(), "fill" | "stroke" | "gfill" | "gstroke")).unwrap_or_else(after_path)
+    } else {
+        contents
+            .children
+            .iter()
+            .rposition(|node| matches!(node.match_id(), "merge" | "offset" | "pucker" | "repeater" | "round" | "trim" | "twist" | "wiggle" | "zigzag"))
+            .map_or_else(after_path, |i| i + 1)
     }
 }
 

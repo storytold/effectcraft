@@ -969,6 +969,12 @@ fn mask_props(s: &mut Session, p: &Value) -> Result<Value> {
 fn add_shape_item(s: &mut Session, p: &Value) -> Result<Value> {
     let (cid, lid) = layer_p(s, p, "layer.addShapeItem")?;
     let kind = str_p(p, "kind").ok_or_else(|| bad("layer.addShapeItem", "missing `kind`"))?.to_string();
+    let index = p
+        .get("index")
+        .map(|value| {
+            value.as_u64().map(|n| usize::try_from(n).unwrap_or(usize::MAX)).ok_or_else(|| bad("layer.addShapeItem", "`index` must be a nonnegative integer"))
+        })
+        .transpose()?;
     // `group`: a uid or a property path (`contents/group`).
     let group_uid = match p.get("group") {
         Some(Value::String(path)) => Some(
@@ -1008,7 +1014,8 @@ fn add_shape_item(s: &mut Session, p: &Value) -> Result<Value> {
                 .ok_or_else(|| bad("layer.addShapeItem", "no such group"))?,
             None => contents,
         };
-        target.children.push(g.into());
+        let index = index.unwrap_or(target.children.len()).min(target.children.len());
+        target.children.insert(index, g.into());
         Ok(uid)
     })?;
     // The new item's property path, ready for prop.set / add_keyframe (`contents/trim#2/end`).
@@ -1313,7 +1320,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Add (Shape)",
             [],
             None,
-            "{layer?, kind: group|rect|ellipse|star|polygon|fill|stroke|gfill|trim|repeater|round|offset|pucker|twist|zigzag|wiggle|merge, group?: uid|path} → {uid, path}",
+            "{layer?, kind: group|rect|ellipse|star|polygon|fill|stroke|gfill|trim|repeater|round|offset|pucker|twist|zigzag|wiggle|merge, group?: uid|path, index?: nonnegative integer} → {uid, path}",
             has_layers,
             add_shape_item
         ),

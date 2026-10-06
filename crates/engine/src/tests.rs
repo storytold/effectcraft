@@ -93,6 +93,38 @@ fn layer_workflow_with_undo() {
 }
 
 #[test]
+fn shape_add_index_is_optional_bounded_and_validated_before_editing() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"width": 64, "height": 64, "duration": 1})).unwrap();
+    let layer = s.execute("layer.newShape", json!({})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.addShapeItem", json!({"layer": layer, "kind": "fill"})).unwrap();
+    s.execute("layer.addShapeItem", json!({"layer": layer, "kind": "rect", "index": 0})).unwrap();
+    s.execute("layer.addShapeItem", json!({"layer": layer, "kind": "repeater", "index": u64::MAX})).unwrap();
+    let order = |s: &Session| {
+        s.active_comp()
+            .unwrap()
+            .layer(effectcraft_project::LayerId(layer))
+            .unwrap()
+            .props
+            .sub("contents")
+            .unwrap()
+            .groups()
+            .map(|g| g.match_id.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(order(&s), vec!["rect", "fill", "repeater"]);
+    for index in [json!(-1), json!(0.5), json!("0"), json!(null)] {
+        assert!(s.execute("layer.addShapeItem", json!({"layer": layer, "kind": "ellipse", "index": index})).is_err());
+        assert_eq!(order(&s), vec!["rect", "fill", "repeater"]);
+    }
+    // Invalid requests must not add undo entries.
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(order(&s), vec!["rect", "fill"]);
+    s.execute("edit.redo", json!({})).unwrap();
+    assert_eq!(order(&s), vec!["rect", "fill", "repeater"]);
+}
+
+#[test]
 fn text_shape_mask_matte_parent() {
     let mut s = Session::default();
     s.execute("comp.new", json!({"width": 800, "height": 450, "duration": 3})).unwrap();
