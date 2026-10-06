@@ -12,9 +12,11 @@ fn spec(id: &'static str, name: &'static str, category: &'static str, params: Ve
     EffectSpec { id, name, category, params, render, gpu: false, float: true }
 }
 
-/// AE's Blurriness is roughly a radius; our Gaussian uses sigma = blurriness / 2.
-fn blur_sigma(blurriness: f64) -> f64 {
-    blurriness.max(0.0) * 0.5
+/// Modern Gaussian Blur's sigma in layer pixels, before the render scale is applied.
+/// Enforce its declared numeric range for evaluated/imported values too; the narrower
+/// slider range only controls dragging. NaN keeps the existing zero-blur fallback.
+pub fn gaussian_blur_sigma(blurriness: f64) -> f64 {
+    blurriness.max(0.0).clamp(0.0, 3000.0) * 0.5
 }
 
 fn dims_xy(dim: u32) -> (f64, f64) {
@@ -26,7 +28,7 @@ fn dims_xy(dim: u32) -> (f64, f64) {
 }
 
 fn gaussian(ctx: &EffectCtx, mut b: Buf) -> Buf {
-    let s = blur_sigma(ctx.params.f("blurriness")) * b.scale;
+    let s = gaussian_blur_sigma(ctx.params.f("blurriness")) * b.scale;
     if s <= 0.0 {
         return b;
     }
@@ -737,6 +739,60 @@ pub fn specs() -> Vec<EffectSpec> {
 mod tests {
     use super::*;
     use crate::{EffectEnv, run_fx};
+
+    fn tiny_blur_impulse() -> Image {
+        let mut img = Image::new(3, 1);
+        img.set(1, 0, [0.25, 0.5, 1.0, 1.0]);
+        img
+    }
+
+    #[test]
+    fn gaussian_sigma_preserves_valid_values_and_bounds_invalid_inputs() {
+        for (value, expected) in [
+            (f64::NEG_INFINITY, 0.0),
+            (-1.0, 0.0),
+            (0.0, 0.0),
+            (0.1, 0.05),
+            (37.0, 18.5),
+            (3000.0, 1500.0),
+            (3001.0, 1500.0),
+            (2e100, 1500.0),
+            (f64::INFINITY, 1500.0),
+            (f64::NAN, 0.0),
+        ] {
+            assert_eq!(gaussian_blur_sigma(value), expected, "blurriness {value}");
+        }
+    }
+
+    #[test]
+    fn gaussian_clamps_evaluated_blurriness_to_its_declared_hard_range() {
+        let spec = crate::find("ec.blur.gaussian").unwrap();
+        let param = spec.params.iter().find(|p| p.id == "blurriness").unwrap();
+        let ParamUi::Slider { min, max, slider_min, slider_max, .. } = &param.ui else { panic!("Gaussian blurriness must declare its range") };
+        assert_eq!((*min, *max), (0.0, 3000.0));
+        assert_eq!((*slider_min, *slider_max), (0.0, 50.0), "the narrow drag range is distinct from the valid numeric range");
+        let run = |blurriness| {
+            run_fx("ec.blur.gaussian", &[("blurriness", num(blurriness)), ("repeatEdge", Value::Bool(true))], tiny_blur_impulse(), 0.0, EffectEnv::default())
+        };
+        let expected = run(*max);
+        // This value overflows the old radius calculation immediately in debug builds;
+        // in release its wrapped radii produce an unblurred impulse. Repeat edges avoids
+        // any padding allocation, and the valid maximum needs only tiny row sums.
+        let actual = run(2e100);
+        assert_eq!(actual.img, expected.img);
+        assert_eq!(actual.offset, expected.offset);
+        assert_eq!(actual.scale, expected.scale);
+    }
+
+    #[test]
+    fn gaussian_preserves_ordinary_blurriness_results() {
+        let img = tiny_blur_impulse();
+        let expected = gaussian_blur(&img, 18.5, 18.5, true);
+        let actual = run_fx("ec.blur.gaussian", &[("blurriness", num(37.0)), ("repeatEdge", Value::Bool(true))], img, 0.0, EffectEnv::default());
+        assert_eq!(actual.img, expected);
+        assert_eq!(actual.offset, [0.0, 0.0]);
+        assert_eq!(actual.scale, 1.0);
+    }
 
     /// A bright square on mid grey.
     fn scene() -> effectcraft_raster::Image {

@@ -232,7 +232,7 @@ fn dims_xy(dim: u32) -> (f64, f64) {
 }
 
 fn gaussian(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
-    let s = ctx.params.f("blurriness").max(0.0) * 0.5 * b.scale;
+    let s = effectcraft_effects::gaussian_blur_sigma(ctx.params.f("blurriness")) * b.scale;
     if s <= 0.0 {
         return Some(b);
     }
