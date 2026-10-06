@@ -473,7 +473,9 @@ pub async fn worker_frame(json: String) {
     }
     for (r, px) in replies {
         post_reply(&r, px.as_deref());
-        if let (FrameReply::Frame { width, height, .. }, Some(px), Some(key)) = (&r, &px, &disk) {
+        if let (FrameReply::Frame { width, height, .. }, Some(px), Some(key)) = (&r, &px, &disk)
+            && effectcraft_engine::render::disk_cache::frame_cacheable(*width, *height, px)
+        {
             let entry = effectcraft_engine::render::disk_cache::frame_entry(*width, *height, px);
             let name = format!("{key}.ecc");
             match JsFuture::from(crate::diskcache::cache_write(&name, js_sys::Uint8Array::from(&entry[..]))).await {

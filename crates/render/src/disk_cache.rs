@@ -29,9 +29,17 @@ use effectcraft_raster::Image;
 /// File format version (part of the folder layout).
 const VERSION: &str = "v1";
 const MAGIC: &[u8; 4] = b"ECDC";
+/// Optional persistence only: larger images still render, but are not cached on disk.
+/// This accommodates 8K RGBA8 frames and exceeds native layer-writer admission.
+const MAX_CACHE_RAW_BYTES: usize = 256 << 20;
+/// Worst-case LZ4 block overhead, size prefix, typed header and seal.
+pub const MAX_CACHE_FILE_BYTES: usize = MAX_CACHE_RAW_BYTES + MAX_CACHE_RAW_BYTES / 255 + 128;
 /// Pending writes before new ones are dropped.
 #[cfg(not(target_arch = "wasm32"))]
 const QUEUE_LIMIT: usize = 64;
+/// Pinned inputs plus conservative encoder/sealing scratch, including the active job.
+#[cfg(not(target_arch = "wasm32"))]
+const QUEUE_BYTES: usize = 1 << 30;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Kind {
@@ -208,12 +216,88 @@ impl LayerPrefetch {
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 enum Job {
     Write(Kind, u128, Vec<u8>),
+    #[cfg(not(target_arch = "wasm32"))]
+    Frame(u128, u32, u32, Vec<u8>),
+    #[cfg(not(target_arch = "wasm32"))]
+    Layer(u128, Arc<Buf>),
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+impl Job {
+    fn id(&self) -> (Kind, u128) {
+        match self {
+            Self::Write(kind, key, _) => (*kind, *key),
+            Self::Frame(key, ..) => (Kind::Frame, *key),
+            Self::Layer(key, _) => (Kind::Layer, *key),
+        }
+    }
+
+    fn reserved_bytes(&self) -> Option<usize> {
+        match self {
+            Self::Write(_, _, payload) => payload.capacity().checked_mul(2)?.checked_add(32),
+            Self::Frame(_, w, h, rgba) => {
+                if !frame_cacheable(*w, *h, rgba) {
+                    return None;
+                }
+                // LZ4 worst-case expansion, payload growth and sealed entry, plus pinned input.
+                rgba.capacity().checked_add(rgba.len().checked_mul(5)?)?.checked_add(256)
+            }
+            Self::Layer(_, buf) => {
+                let raw = layer_raw_len(buf)?;
+                let retained = buf.img.data.capacity().checked_mul(std::mem::size_of::<effectcraft_raster::Px>())?;
+                // Byte planes, worst-case LZ4 output, payload and sealed entry. Arc inputs
+                // can also be in RAM cache; count them conservatively as pinned memory.
+                retained.checked_add(raw.checked_mul(6)?)?.checked_add(256)
+            }
+        }
+    }
+}
+
+#[derive(Default)]
 struct Queue {
     jobs: std::collections::VecDeque<Job>,
     busy: bool,
+    clearing: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    pending: std::collections::HashSet<(Kind, u128)>,
+    #[cfg(not(target_arch = "wasm32"))]
+    reserved_bytes: usize,
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+enum Admission {
+    Queued,
+    Duplicate,
+    Dropped,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Queue {
+    fn admit(&mut self, job: Job, byte_limit: usize) -> Admission {
+        let id = job.id();
+        if self.pending.contains(&id) {
+            return Admission::Duplicate;
+        }
+        let Some(bytes) = job.reserved_bytes() else { return Admission::Dropped };
+        let reservation = self.reserved_bytes.checked_add(bytes);
+        if self.clearing || self.pending.len() >= QUEUE_LIMIT || reservation.is_none_or(|n| n > byte_limit) {
+            return Admission::Dropped;
+        }
+        self.reserved_bytes += bytes;
+        self.pending.insert(id);
+        self.jobs.push_back(job);
+        Admission::Queued
+    }
+
+    fn finished(&mut self, id: (Kind, u128), reserved: usize) {
+        self.busy = false;
+        self.pending.remove(&id);
+        self.reserved_bytes = self.reserved_bytes.saturating_sub(reserved);
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+type WriterGate = (std::sync::mpsc::SyncSender<()>, std::sync::mpsc::Receiver<()>);
 
 pub struct DiskCache {
     dir: PathBuf,
@@ -226,6 +310,9 @@ pub struct DiskCache {
     dropped: AtomicU64,
     tmp_counter: AtomicU64,
     queue: Arc<(Mutex<Queue>, Condvar)>,
+    purge_lock: Mutex<()>,
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    writer_gate: Mutex<Option<WriterGate>>,
     /// Layer buffers that took less than this to render are not written (ms).
     min_layer_ms: AtomicU64,
 }
@@ -298,7 +385,10 @@ impl DiskCache {
             evictions: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
             tmp_counter: AtomicU64::new(0),
-            queue: Arc::new((Mutex::new(Queue { jobs: Default::default(), busy: false }), Condvar::new())),
+            queue: Arc::new((Mutex::new(Queue::default()), Condvar::new())),
+            purge_lock: Mutex::new(()),
+            #[cfg(all(test, not(target_arch = "wasm32")))]
+            writer_gate: Mutex::new(None),
             min_layer_ms: AtomicU64::new(30),
         });
         dc.rescan();
@@ -399,12 +489,22 @@ impl DiskCache {
 
     /// Delete every entry (Edit ▸ Purge ▸ All Disk Cache / Empty Disk Cache).
     pub fn clear(&self) {
+        let Ok(_purge) = self.purge_lock.lock() else { return };
+        if let Ok(mut q) = self.queue.0.lock() {
+            q.clearing = true;
+            self.queue.1.notify_all();
+        } else {
+            return;
+        }
         self.flush();
         if let Ok(mut g) = self.index.lock() {
             g.clear();
         }
         for kind in [Kind::Frame, Kind::Layer] {
             let _ = std::fs::remove_dir_all(self.dir.join(kind.dir()));
+        }
+        if let Ok(mut q) = self.queue.0.lock() {
+            q.clearing = false;
         }
     }
 
@@ -430,31 +530,34 @@ impl DiskCache {
             return None;
         }
         let path = self.path(kind, key);
-        let data = std::fs::read(&path).ok();
-        let ok = data.as_deref().and_then(|d| verify(d, kind));
-        match ok {
-            Some(payload) => {
-                let payload = payload.to_vec();
-                self.hits.fetch_add(1, Ordering::Relaxed);
-                if let Ok(mut g) = self.index.lock() {
-                    g.touch(kind, key);
-                }
-                // Persist the recency for the next session (best effort).
-                if let Ok(f) = std::fs::File::options().append(true).open(&path) {
-                    let _ = f.set_modified(std::time::SystemTime::now());
-                }
-                Some(payload)
-            }
-            None => {
-                self.misses.fetch_add(1, Ordering::Relaxed);
-                // Gone (another process evicted it) or damaged: forget it.
-                if data.is_some() {
-                    let _ = std::fs::remove_file(&path);
-                }
-                self.forget(kind, key);
-                None
-            }
+        if let Some(mut data) = read_entry_file(&path)
+            && verify(&data, kind).is_some()
+        {
+            // Strip the seal in place instead of retaining a second copy of the payload.
+            data.truncate(data.len() - 8);
+            data.drain(..8);
+            Some(data)
+        } else {
+            self.reject(kind, key);
+            None
         }
+    }
+
+    fn hit(&self, kind: Kind, key: u128) {
+        self.hits.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut g) = self.index.lock() {
+            g.touch(kind, key);
+        }
+        // Persist the recency for the next session (best effort).
+        if let Ok(f) = std::fs::File::options().append(true).open(self.path(kind, key)) {
+            let _ = f.set_modified(std::time::SystemTime::now());
+        }
+    }
+
+    fn reject(&self, kind: Kind, key: u128) {
+        self.misses.fetch_add(1, Ordering::Relaxed);
+        let _ = std::fs::remove_file(self.path(kind, key));
+        self.forget(kind, key);
     }
 
     fn forget(&self, kind: Kind, key: u128) {
@@ -466,18 +569,32 @@ impl DiskCache {
     fn enqueue(&self, kind: Kind, key: u128, payload: Vec<u8>) {
         #[cfg(target_arch = "wasm32")]
         {
+            if self.queue.0.lock().is_ok_and(|q| q.clearing) {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
             self.write_now(kind, key, &payload);
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let (m, cv) = &*self.queue;
-            let Ok(mut q) = m.lock() else { return };
-            if q.jobs.len() >= QUEUE_LIMIT {
+            self.enqueue_job(Job::Write(kind, key, payload));
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn enqueue_job(&self, job: Job) {
+        let id = job.id();
+        if self.contains(id.0, id.1) {
+            return;
+        }
+        let (m, cv) = &*self.queue;
+        let Ok(mut q) = m.lock() else { return };
+        match q.admit(job, QUEUE_BYTES) {
+            Admission::Queued => cv.notify_all(),
+            Admission::Duplicate => {}
+            Admission::Dropped => {
                 self.dropped.fetch_add(1, Ordering::Relaxed);
-                return;
             }
-            q.jobs.push_back(Job::Write(kind, key, payload));
-            cv.notify_all();
         }
     }
 
@@ -526,25 +643,47 @@ impl DiskCache {
 
     pub fn get_frame(&self, key: u128) -> Option<Frame8> {
         let p = self.read(Kind::Frame, key)?;
-        decode_frame(&p)
+        let frame = decode_frame(&p);
+        if frame.is_some() {
+            self.hit(Kind::Frame, key);
+        } else {
+            self.reject(Kind::Frame, key);
+        }
+        frame
     }
 
     /// Queue a frame for writing (8-bit premultiplied RGBA, `width * height * 4` bytes).
     pub fn put_frame(&self, key: u128, width: u32, height: u32, rgba: &[u8]) {
-        if self.contains(Kind::Frame, key) || rgba.len() != width as usize * height as usize * 4 {
+        if self.contains(Kind::Frame, key) || !frame_cacheable(width, height, rgba) {
             return;
         }
         self.enqueue(Kind::Frame, key, encode_frame(width, height, rgba));
     }
 
+    /// Transfer an owned RGBA buffer to the native disk writer, without caller-side compression.
+    /// Admission includes its capacity and encoding scratch; a full queue drops optional work.
+    /// On the browser this retains the borrowed API's behavior.
+    pub fn put_frame_owned(&self, key: u128, width: u32, height: u32, rgba: Vec<u8>) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.enqueue_job(Job::Frame(key, width, height, rgba));
+        #[cfg(target_arch = "wasm32")]
+        self.put_frame(key, width, height, &rgba);
+    }
+
     pub fn get_layer(&self, key: u128) -> Option<Buf> {
         let p = self.read(Kind::Layer, key)?;
-        decode_layer(&p)
+        let layer = decode_layer(&p);
+        if layer.is_some() {
+            self.hit(Kind::Layer, key);
+        } else {
+            self.reject(Kind::Layer, key);
+        }
+        layer
     }
 
     /// Queue a layer buffer for writing.
     pub fn put_layer(&self, key: u128, buf: &Buf) {
-        if self.contains(Kind::Layer, key) {
+        if self.contains(Kind::Layer, key) || layer_raw_len(buf).is_none() {
             return;
         }
         self.enqueue(Kind::Layer, key, encode_layer(buf));
@@ -552,12 +691,16 @@ impl DiskCache {
 
     /// Write a layer buffer synchronously (tests).
     pub fn put_layer_now(&self, key: u128, buf: &Buf) {
-        self.write_now(Kind::Layer, key, &encode_layer(buf));
+        if layer_raw_len(buf).is_some() {
+            self.write_now(Kind::Layer, key, &encode_layer(buf));
+        }
     }
 
     /// Write a frame synchronously (tests).
     pub fn put_frame_now(&self, key: u128, width: u32, height: u32, rgba: &[u8]) {
-        self.write_now(Kind::Frame, key, &encode_frame(width, height, rgba));
+        if frame_cacheable(width, height, rgba) {
+            self.write_now(Kind::Frame, key, &encode_frame(width, height, rgba));
+        }
     }
 }
 
@@ -582,12 +725,21 @@ fn writer(dc: std::sync::Weak<DiskCache>, q: Arc<(Mutex<Queue>, Condvar)>) {
             }
         };
         let Some(cache) = dc.upgrade() else { return };
+        #[cfg(test)]
+        if let Some((entered, release)) = cache.writer_gate.lock().ok().and_then(|mut g| g.take()) {
+            let _ = entered.send(());
+            let _ = release.recv();
+        }
+        let id = job.id();
+        let reserved = job.reserved_bytes().unwrap_or(0);
         match job {
             Job::Write(kind, key, payload) => cache.write_now(kind, key, &payload),
+            Job::Frame(key, w, h, rgba) => cache.write_now(Kind::Frame, key, &encode_frame(w, h, &rgba)),
+            Job::Layer(key, buf) => cache.write_now(Kind::Layer, key, &encode_layer(&buf)),
         }
         drop(cache);
         if let Ok(mut g) = m.lock() {
-            g.busy = false;
+            g.finished(id, reserved);
         }
         cv.notify_all();
     }
@@ -607,6 +759,7 @@ pub fn seal(kind: Kind, payload: &[u8]) -> Vec<u8> {
 
 /// A sealed frame entry ([`seal`] of the encoded frame): what the browser's frame workers
 /// write to the Origin Private File System.
+/// Persistence callers check [`frame_cacheable`] before encoding.
 pub fn frame_entry(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
     seal(Kind::Frame, &encode_frame(width, height, rgba))
 }
@@ -618,6 +771,7 @@ pub fn read_frame_entry(data: &[u8]) -> Option<Frame8> {
 
 /// A sealed layer-buffer entry: what the browser's frame workers write to the Origin Private
 /// File System (`layers/<32 hex>.ecc`).
+/// Persistence callers check [`layer_cacheable`] before encoding.
 pub fn layer_entry(buf: &Buf) -> Vec<u8> {
     seal(Kind::Layer, &encode_layer(buf))
 }
@@ -633,6 +787,12 @@ impl crate::cache::LayerStore for DiskCache {
     }
     fn put_layer(&self, key: u128, buf: &Buf) {
         DiskCache::put_layer(self, key, buf);
+    }
+    fn put_layer_shared(&self, key: u128, buf: Arc<Buf>) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.enqueue_job(Job::Layer(key, buf));
+        #[cfg(target_arch = "wasm32")]
+        self.put_layer(key, &buf);
     }
     fn min_layer_ms(&self) -> u64 {
         DiskCache::min_layer_ms(self)
@@ -675,8 +835,12 @@ fn decode_frame(p: &[u8]) -> Option<Frame8> {
     }
     let w = u32::from_le_bytes(p[0..4].try_into().ok()?);
     let h = u32::from_le_bytes(p[4..8].try_into().ok()?);
-    let rgba = lz4_flex::decompress_size_prepended(&p[8..]).ok()?;
-    (rgba.len() == w as usize * h as usize * 4).then_some(Frame8 { width: w, height: h, rgba })
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let expected = cache_raw_len(w, h, 4)?;
+    let rgba = decompress_cache(p.get(8..)?, expected)?;
+    Some(Frame8 { width: w, height: h, rgba })
 }
 
 fn encode_layer(b: &Buf) -> Vec<u8> {
@@ -708,25 +872,85 @@ fn decode_layer(p: &[u8]) -> Option<Buf> {
     }
     let w = u32::from_le_bytes(p[0..4].try_into().ok()?);
     let h = u32::from_le_bytes(p[4..8].try_into().ok()?);
-    let f = |i: usize| -> Option<f64> { Some(f64::from_le_bytes(p[i..i + 8].try_into().ok()?)) };
+    let f = |i: usize| -> Option<f64> { Some(f64::from_le_bytes(p.get(i..i.checked_add(8)?)?.try_into().ok()?)) };
     let offset = [f(8)?, f(16)?];
     let scale = f(24)?;
-    let planes = lz4_flex::decompress_size_prepended(&p[32..]).ok()?;
-    let n = w as usize * h as usize;
-    if planes.len() != n * 16 {
+    if !offset.iter().all(|v| v.is_finite()) || !scale.is_finite() || scale <= 0.0 {
         return None;
     }
-    let mut img = Image::new(w, h);
+    let raw = cache_raw_len(w, h, 16)?;
+    let n = raw / 16;
+    let planes = decompress_cache(p.get(32..)?, raw)?;
+    let mut data = Vec::new();
+    data.try_reserve_exact(n).ok()?;
+    data.resize(n, [0.0; 4]);
+    let mut img = Image { width: w, height: h, data };
     for (i, px) in img.data.iter_mut().enumerate() {
         for c in 0..4 {
             let mut bytes = [0u8; 4];
             for (k, byte) in bytes.iter_mut().enumerate() {
-                *byte = planes[(k * 4 + c) * n + i];
+                *byte = *planes.get((k * 4 + c) * n + i)?;
             }
             px[c] = f32::from_le_bytes(bytes);
         }
     }
     Some(Buf { img, offset, scale })
+}
+
+fn cache_raw_len(w: u32, h: u32, bytes_per_pixel: usize) -> Option<usize> {
+    let bytes = (w as usize).checked_mul(h as usize)?.checked_mul(bytes_per_pixel)?;
+    (bytes <= MAX_CACHE_RAW_BYTES).then_some(bytes)
+}
+
+fn layer_raw_len(buf: &Buf) -> Option<usize> {
+    let bytes = cache_raw_len(buf.img.width, buf.img.height, 16)?;
+    (bytes / 16 == buf.img.data.len() && buf.offset.iter().all(|v| v.is_finite()) && buf.scale.is_finite() && buf.scale > 0.0).then_some(bytes)
+}
+
+/// Whether the frame fits the optional disk-cache limit and its dimensions match its pixels.
+pub fn frame_cacheable(width: u32, height: u32, rgba: &[u8]) -> bool {
+    frame_cache_len(width, height) == Some(rgba.len())
+}
+
+/// RGBA bytes of a valid optional cached frame, for checking before pixel conversion/allocation.
+pub fn frame_cache_len(width: u32, height: u32) -> Option<usize> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    cache_raw_len(width, height, 4)
+}
+
+/// Whether a layer fits the optional disk-cache limit and has valid geometry/pixel metadata.
+pub fn layer_cacheable(buf: &Buf) -> bool {
+    layer_raw_len(buf).is_some()
+}
+
+fn decompress_cache(compressed: &[u8], expected: usize) -> Option<Vec<u8>> {
+    let declared = u32::from_le_bytes(compressed.get(..4)?.try_into().ok()?) as usize;
+    if expected > MAX_CACHE_RAW_BYTES || declared != expected {
+        return None;
+    }
+    let mut out = Vec::new();
+    out.try_reserve_exact(expected).ok()?;
+    out.resize(expected, 0);
+    let written = lz4_flex::block::decompress_into(compressed.get(4..)?, &mut out).ok()?;
+    (written == expected).then_some(out)
+}
+
+fn read_entry_file(path: &Path) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = usize::try_from(file.metadata().ok()?.len()).ok()?;
+    if len > MAX_CACHE_FILE_BYTES {
+        return None;
+    }
+    let mut data = Vec::new();
+    data.try_reserve_exact(len).ok()?;
+    data.resize(len, 0);
+    file.read_exact(&mut data).ok()?;
+    // A file growing after metadata was read must not escape the allocation limit.
+    let mut extra = [0u8; 1];
+    (file.read(&mut extra).ok()? == 0).then_some(data)
 }
 
 // ---------------------------------------------------------------- content keys
@@ -852,6 +1076,208 @@ mod tests {
         Buf { img, offset: [1.5, -2.25], scale: 0.5 }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    fn gate_writer(dc: &DiskCache) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::SyncSender<()>) {
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        *dc.writer_gate.lock().unwrap() = Some((entered_tx, release_rx));
+        (entered_rx, release_tx)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn owned_frames_encode_on_writer_and_deduplicate_independently_of_layers() {
+        use crate::cache::LayerStore;
+        let dc = DiskCache::open(tmpdir("owned-frame"), 1 << 30).unwrap();
+        let (entered, release) = gate_writer(&dc);
+        let rgba = [4, 2, 1, 255].repeat(4);
+        dc.put_frame_owned(42, 2, 2, rgba.clone());
+        entered.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        assert!(!dc.contains(Kind::Frame, 42), "the caller returned before encoding/writing");
+        dc.put_frame_owned(42, 2, 2, vec![0; 16]);
+        dc.put_layer_shared(42, Arc::new(buf(3, 2, 2)));
+        let pending = dc.queue.0.lock().unwrap().pending.len();
+        release.send(()).unwrap();
+        dc.flush();
+        assert_eq!(pending, 2, "frame and layer numeric keys have independent identities");
+        assert_eq!(dc.get_frame(42).unwrap().rgba, rgba);
+        assert!(dc.get_layer(42).is_some());
+        assert_eq!(dc.stats().writes, 2);
+        assert_eq!(dc.queue.0.lock().unwrap().reserved_bytes, 0);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn owned_frame_admission_retains_capacity_and_rejected_work_can_retry() {
+        let mut rgba = Vec::with_capacity(256);
+        rgba.resize(16, 255);
+        let ptr = rgba.as_ptr();
+        let capacity = rgba.capacity();
+        let job = Job::Frame(1, 2, 2, rgba);
+        let cost = job.reserved_bytes().unwrap();
+        assert_eq!(cost, capacity + 5 * 16 + 256);
+        let mut q = Queue::default();
+        assert!(matches!(q.admit(job, cost), Admission::Queued));
+        let active = q.jobs.pop_front().unwrap();
+        let Job::Frame(_, _, _, retained) = &active else { panic!("expected frame") };
+        assert_eq!(retained.as_ptr(), ptr, "admission moves the original allocation");
+        q.busy = true;
+        assert!(matches!(q.admit(Job::Frame(2, 2, 2, vec![0; 16]), cost), Admission::Dropped));
+        assert_eq!(q.reserved_bytes, cost);
+        q.finished(active.id(), active.reserved_bytes().unwrap());
+        assert!(matches!(q.admit(Job::Frame(2, 2, 2, vec![0; 16]), cost), Admission::Queued));
+        assert!(matches!(q.admit(Job::Frame(3, u32::MAX, u32::MAX, vec![]), QUEUE_BYTES), Admission::Dropped));
+        assert!(matches!(q.admit(Job::Frame(3, 0, 2, vec![]), QUEUE_BYTES), Admission::Dropped));
+        assert!(matches!(q.admit(Job::Frame(3, 2, 2, vec![0; 15]), QUEUE_BYTES), Admission::Dropped));
+        assert_eq!(q.pending.len(), 1);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn failed_owned_frame_write_releases_reservation_for_retry() {
+        let dc = DiskCache::open(tmpdir("owned-frame-failure"), 1 << 30).unwrap();
+        let blocker = dc.dir.join(Kind::Frame.dir());
+        std::fs::write(&blocker, b"not a directory").unwrap();
+        dc.put_frame_owned(42, 2, 2, vec![7; 16]);
+        dc.flush();
+        assert!(!dc.contains(Kind::Frame, 42));
+        assert_eq!(dc.queue.0.lock().unwrap().reserved_bytes, 0);
+        std::fs::remove_file(blocker).unwrap();
+        dc.put_frame_owned(42, 2, 2, vec![8; 16]);
+        dc.flush();
+        assert_eq!(dc.get_frame(42).unwrap().rgba, vec![8; 16]);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn clear_drains_owned_frame_encoding_and_rejects_concurrent_admission() {
+        let dc = DiskCache::open(tmpdir("owned-frame-clear"), 1 << 30).unwrap();
+        let (entered, release) = gate_writer(&dc);
+        dc.put_frame_owned(1, 2, 2, vec![7; 16]);
+        entered.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        let clearing = dc.clone();
+        let thread = std::thread::spawn(move || clearing.clear());
+        {
+            let (mutex, cv) = &*dc.queue;
+            let mut q = mutex.lock().unwrap();
+            while !q.clearing {
+                let (next, timeout) = cv.wait_timeout(q, std::time::Duration::from_secs(10)).unwrap();
+                q = next;
+                assert!(!timeout.timed_out());
+            }
+        }
+        dc.put_frame_owned(2, 2, 2, vec![8; 16]);
+        release.send(()).unwrap();
+        thread.join().unwrap();
+        dc.flush();
+        assert_eq!(dc.stats().dropped, 1);
+        assert!(dc.keys(Kind::Frame).is_empty());
+        assert!(dc.get_frame(1).is_none() && dc.get_frame(2).is_none());
+        dc.put_frame_owned(2, 2, 2, vec![9; 16]);
+        dc.flush();
+        assert_eq!(dc.get_frame(2).unwrap().rgba, vec![9; 16]);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn shared_layer_is_retained_once_and_flush_covers_encoding() {
+        use crate::cache::LayerStore;
+        let dc = DiskCache::open(tmpdir("shared"), 1 << 30).unwrap();
+        let (entered, release) = gate_writer(&dc);
+        let b = Arc::new(buf(3, 33, 17));
+        dc.put_layer_shared(42, b.clone());
+        entered.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        let refs = Arc::strong_count(&b);
+        assert_eq!(refs, 2, "the writer retains the original pixels without cloning or encoding them on the caller");
+        dc.put_layer_shared(42, b.clone());
+        assert_eq!(Arc::strong_count(&b), refs, "duplicate work does not retain another buffer");
+        {
+            let q = dc.queue.0.lock().unwrap();
+            assert!(q.busy && q.jobs.is_empty());
+            assert_eq!(q.pending.len(), 1);
+            assert!(q.reserved_bytes > 0, "active encoding still owns its reservation");
+        }
+        assert!(!dc.contains(Kind::Layer, 42), "encoding has not begun");
+        release.send(()).unwrap();
+        dc.flush();
+        let back = dc.get_layer(42).unwrap();
+        assert_eq!((back.img, back.offset, back.scale), (b.img.clone(), b.offset, b.scale));
+        assert_eq!(dc.stats().writes, 1);
+        let q = dc.queue.0.lock().unwrap();
+        assert!(q.pending.is_empty());
+        assert_eq!(q.reserved_bytes, 0);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn admission_counts_active_memory_and_rejected_keys_can_retry() {
+        let b = Arc::new(buf(1, 2, 2));
+        let cost = Job::Layer(1, b.clone()).reserved_bytes().unwrap();
+        let mut q = Queue::default();
+        assert!(matches!(q.admit(Job::Layer(1, b.clone()), cost), Admission::Queued));
+        let active = q.jobs.pop_front().unwrap();
+        q.busy = true;
+        assert!(matches!(q.admit(Job::Layer(2, b.clone()), cost), Admission::Dropped));
+        assert_eq!(q.pending.len(), 1);
+        assert_eq!(q.reserved_bytes, cost);
+        q.finished(active.id(), active.reserved_bytes().unwrap());
+        assert!(matches!(q.admit(Job::Layer(2, b.clone()), cost), Admission::Queued));
+        let mut invalid = buf(1, 2, 2);
+        invalid.img.width = u32::MAX;
+        assert!(matches!(q.admit(Job::Layer(3, Arc::new(invalid)), QUEUE_BYTES), Admission::Dropped));
+        assert_eq!(q.pending.len(), 1);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn failed_shared_write_releases_reservation_for_retry() {
+        use crate::cache::LayerStore;
+        let dc = DiskCache::open(tmpdir("shared-failure"), 1 << 30).unwrap();
+        let blocker = dc.dir.join(Kind::Layer.dir());
+        std::fs::write(&blocker, b"not a directory").unwrap();
+        let b = Arc::new(buf(7, 3, 3));
+        dc.put_layer_shared(42, b.clone());
+        dc.flush();
+        assert!(!dc.contains(Kind::Layer, 42));
+        assert_eq!(dc.queue.0.lock().unwrap().reserved_bytes, 0);
+        std::fs::remove_file(blocker).unwrap();
+        dc.put_layer_shared(42, b);
+        dc.flush();
+        assert!(dc.get_layer(42).is_some());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn clear_gates_producers_until_pending_encoding_is_drained() {
+        use crate::cache::LayerStore;
+        let dc = DiskCache::open(tmpdir("shared-clear"), 1 << 30).unwrap();
+        let (entered, release) = gate_writer(&dc);
+        let b = Arc::new(buf(3, 3, 3));
+        dc.put_layer_shared(1, b.clone());
+        entered.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        let clearing = dc.clone();
+        let thread = std::thread::spawn(move || clearing.clear());
+        {
+            let (mutex, cv) = &*dc.queue;
+            let mut q = mutex.lock().unwrap();
+            while !q.clearing {
+                let (next, timeout) = cv.wait_timeout(q, std::time::Duration::from_secs(10)).unwrap();
+                q = next;
+                assert!(!timeout.timed_out());
+            }
+        }
+        dc.put_layer_shared(2, b.clone());
+        assert_eq!(dc.stats().dropped, 1);
+        release.send(()).unwrap();
+        thread.join().unwrap();
+        dc.flush();
+        assert!(dc.keys(Kind::Layer).is_empty());
+        assert!(dc.get_layer(1).is_none() && dc.get_layer(2).is_none());
+        dc.put_layer_shared(2, b);
+        dc.flush();
+        assert!(dc.get_layer(2).is_some());
+    }
+
     #[test]
     fn index_evicts_least_recently_used() {
         let mut ix = DiskIndex::default();
@@ -870,6 +1296,126 @@ mod tests {
         assert_eq!(ix.keys(Kind::Frame), vec![1]);
         ix.clear();
         assert!(ix.is_empty() && ix.total() == 0);
+    }
+
+    #[test]
+    fn frame_dimensions_cannot_wrap_to_an_empty_payload() {
+        let entry = frame_entry(1 << 31, 1 << 31, &[]);
+        assert!(read_frame_entry(&entry).is_none());
+    }
+
+    #[test]
+    fn layer_dimensions_cannot_wrap_to_an_empty_payload() {
+        let b = Buf { img: Image { width: 1 << 31, height: 1 << 31, data: vec![] }, offset: [0.0; 2], scale: 1.0 };
+        let entry = layer_entry(&b);
+        assert!(read_layer_entry(&entry).is_none());
+    }
+
+    #[test]
+    fn decoder_checks_declared_sizes_and_limits_before_allocating() {
+        assert_eq!(cache_raw_len(7680, 4320, 4), Some(132_710_400));
+        assert_eq!(cache_raw_len(8192, 8192, 4), Some(MAX_CACHE_RAW_BYTES));
+        assert_eq!(cache_raw_len(8192, 8193, 4), None);
+        assert_eq!(cache_raw_len(u32::MAX, u32::MAX, 16), None);
+        assert!(decompress_cache(&u32::MAX.to_le_bytes(), 4).is_none());
+        assert!(decompress_cache(&((MAX_CACHE_RAW_BYTES + 1) as u32).to_le_bytes(), MAX_CACHE_RAW_BYTES + 1).is_none());
+        assert!(decompress_cache(&[], 0).is_none());
+        assert!(decompress_cache(&[0; 4], 4).is_none());
+
+        let mut frame = encode_frame(2, 2, &[1; 16]);
+        frame[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(read_frame_entry(&seal(Kind::Frame, &frame)).is_none());
+        let mut layer = encode_layer(&buf(1, 2, 2));
+        layer[32..36].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(read_layer_entry(&seal(Kind::Layer, &layer)).is_none());
+        // A truthful prefix cannot disguise a different decompressed size or corrupt block.
+        let mut frame = encode_frame(2, 2, &[1; 15]);
+        frame[8..12].copy_from_slice(&16u32.to_le_bytes());
+        assert!(decode_frame(&frame).is_none());
+        let mut frame = encode_frame(2, 2, &[1; 17]);
+        frame[8..12].copy_from_slice(&16u32.to_le_bytes());
+        assert!(decode_frame(&frame).is_none());
+        assert!(decompress_cache(&[4, 0, 0, 0, 255], 4).is_none());
+    }
+
+    #[test]
+    fn layer_metadata_must_be_finite_with_positive_scale() {
+        let valid = buf(1, 2, 2);
+        for (field, value) in [(8, f64::NAN), (16, f64::INFINITY), (24, f64::NEG_INFINITY), (24, 0.0), (24, -1.0)] {
+            let mut payload = encode_layer(&valid);
+            payload[field..field + 8].copy_from_slice(&value.to_le_bytes());
+            assert!(read_layer_entry(&seal(Kind::Layer, &payload)).is_none());
+        }
+        let empty = Buf { img: Image { width: 0, height: 3, data: vec![] }, offset: [-1.0, 2.0], scale: 0.5 };
+        let back = read_layer_entry(&layer_entry(&empty)).unwrap();
+        assert_eq!((back.img, back.offset, back.scale), (empty.img, empty.offset, empty.scale));
+        assert!(read_frame_entry(&frame_entry(3, 0, &[])).is_none());
+        assert!(read_frame_entry(&frame_entry(0, 3, &[])).is_none());
+        assert!(!frame_cacheable(3, 0, &[]));
+    }
+
+    #[test]
+    fn valid_checksums_do_not_keep_malformed_entries_or_count_as_hits() {
+        let dc = DiskCache::open(tmpdir("bad-dimensions"), 1 << 30).unwrap();
+        dc.write_now(Kind::Frame, 1, &encode_frame(1 << 31, 1 << 31, &[]));
+        let invalid = Buf { img: Image { width: 1 << 31, height: 1 << 31, data: vec![] }, offset: [0.0; 2], scale: 1.0 };
+        dc.write_now(Kind::Layer, 2, &encode_layer(&invalid));
+        assert!(dc.get_frame(1).is_none());
+        assert!(dc.get_layer(2).is_none());
+        assert_eq!((dc.stats().hits, dc.stats().misses, dc.stats().entries), (0, 2, 0));
+        assert!(!dc.path(Kind::Frame, 1).exists() && !dc.path(Kind::Layer, 2).exists());
+        dc.put_frame(1, 2, 2, &[2; 16]);
+        dc.put_layer(2, &buf(2, 2, 2));
+        dc.flush();
+        assert!(dc.get_frame(1).is_some() && dc.get_layer(2).is_some());
+        assert_eq!((dc.stats().hits, dc.stats().misses, dc.stats().entries), (2, 2, 2));
+    }
+
+    #[test]
+    fn persistence_rejects_invalid_buffers_without_encoding() {
+        use crate::cache::LayerStore;
+        let dc = DiskCache::open(tmpdir("invalid-writes"), 1 << 30).unwrap();
+        let invalid = Buf { img: Image { width: 1 << 31, height: 1 << 31, data: vec![] }, offset: [0.0; 2], scale: 1.0 };
+        dc.put_frame(1, 1 << 31, 1 << 31, &[]);
+        dc.put_frame_now(2, 1 << 31, 1 << 31, &[]);
+        dc.put_layer(3, &invalid);
+        dc.put_layer_now(4, &invalid);
+        dc.put_layer_shared(5, Arc::new(invalid));
+        dc.flush();
+        assert_eq!(dc.stats().entries, 0);
+        for (i, value) in [f64::NAN, f64::INFINITY, -1.0, 0.0].into_iter().enumerate() {
+            let mut invalid = buf(2, 2, 2);
+            invalid.scale = value;
+            let key = i as u128 + 10;
+            dc.put_layer(key, &invalid);
+            dc.put_layer_shared(key, Arc::new(invalid));
+            dc.flush();
+            assert!(!dc.contains(Kind::Layer, key));
+            dc.put_layer_shared(key, Arc::new(buf(2, 2, 2)));
+            dc.flush();
+            assert!(dc.get_layer(key).is_some());
+        }
+    }
+
+    #[test]
+    fn browser_layer_store_rejects_invalid_entries_without_suppressing_retry() {
+        use crate::cache::{LayerStore, PrefetchStore};
+        let store = PrefetchStore::default();
+        let mut invalid = buf(2, 2, 2);
+        invalid.img.width = u32::MAX;
+        store.put_layer(42, &invalid);
+        assert!(store.take_writes().is_empty());
+        invalid = buf(2, 2, 2);
+        invalid.scale = f64::INFINITY;
+        store.put_layer(42, &invalid);
+        assert!(store.take_writes().is_empty());
+        let valid = buf(2, 2, 2);
+        store.put_layer(42, &valid);
+        let writes = store.take_writes();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].0, 42);
+        assert!(store.provide(42, &writes[0].1));
+        assert_eq!(store.get_layer(42).unwrap().img, valid.img);
     }
 
     #[test]

@@ -441,9 +441,11 @@ export async function cacheList() {
 }
 
 /// An entry's bytes.
-export async function cacheRead(name) {
+export async function cacheRead(name, maxBytes) {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) throw new Error("invalid disk cache read limit");
   const [dir, file] = await entryDir(name);
   const f = await (await dir.getFileHandle(file)).getFile();
+  if (f.size > maxBytes) throw new Error("disk cache entry exceeds read limit");
   return new Uint8Array(await f.arrayBuffer());
 }
 

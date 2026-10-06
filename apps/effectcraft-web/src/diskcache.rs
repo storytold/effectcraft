@@ -34,13 +34,18 @@ extern "C" {
     #[wasm_bindgen(js_name = cacheList)]
     fn cache_list() -> js_sys::Promise;
     #[wasm_bindgen(js_name = cacheRead)]
-    pub(crate) fn cache_read(name: &str) -> js_sys::Promise;
+    fn cache_read_limited(name: &str, max_bytes: usize) -> js_sys::Promise;
     #[wasm_bindgen(js_name = cacheWrite)]
     pub(crate) fn cache_write(name: &str, bytes: js_sys::Uint8Array) -> js_sys::Promise;
     #[wasm_bindgen(js_name = cacheDelete)]
     fn cache_delete(names: js_sys::Array) -> js_sys::Promise;
     #[wasm_bindgen(js_name = cacheClear)]
     fn cache_clear() -> js_sys::Promise;
+}
+
+/// Reject oversized OPFS files before JavaScript allocates their bytes or Rust copies them.
+pub(crate) fn cache_read(name: &str) -> js_sys::Promise {
+    cache_read_limited(name, disk_cache::MAX_CACHE_FILE_BYTES)
 }
 
 #[derive(Default)]

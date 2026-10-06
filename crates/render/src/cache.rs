@@ -175,14 +175,16 @@ impl LayerCache {
         if self.gated() {
             return;
         }
-        let started = self.inner.lock().ok().and_then(|mut g| g.missed_at.remove(&key));
+        let render_ms = self.inner.lock().ok().and_then(|mut g| g.missed_at.remove(&key)).map(|t| t.elapsed().as_secs_f64() * 1e3);
+        // Make the reusable pixels available before optional persistence. Native stores
+        // can retain this Arc and compress it on their writer instead of the render thread.
+        self.insert_mem(key, buf.clone());
         if let Some((dc, dk)) = self.disk_key(key) {
-            let slow = started.is_some_and(|t| t.elapsed().as_secs_f64() * 1e3 >= dc.min_layer_ms() as f64);
+            let slow = render_ms.is_some_and(|ms| ms >= dc.min_layer_ms() as f64);
             if slow {
-                dc.put_layer(dk, &buf);
+                dc.put_layer_shared(dk, buf);
             }
         }
-        self.insert_mem(key, buf);
     }
 
     fn insert_mem(&self, key: u64, buf: Arc<Buf>) {
@@ -254,6 +256,11 @@ pub trait LayerStore: Send + Sync {
     fn get_layer(&self, key: u128) -> Option<Arc<Buf>>;
     /// Keep a buffer that was slow to render.
     fn put_layer(&self, key: u128, buf: &Buf);
+    /// Keep an owned buffer without copying its pixels. Stores with an asynchronous encoder
+    /// override this; the default preserves existing browser/custom-store behavior.
+    fn put_layer_shared(&self, key: u128, buf: Arc<Buf>) {
+        self.put_layer(key, &buf);
+    }
     /// Buffers faster to render than this (ms) are not stored.
     fn min_layer_ms(&self) -> u64 {
         0
@@ -379,6 +386,9 @@ impl LayerStore for PrefetchStore {
     }
 
     fn put_layer(&self, key: u128, buf: &Buf) {
+        if !crate::disk_cache::layer_cacheable(buf) {
+            return;
+        }
         let Ok(mut s) = self.st.lock() else { return };
         if s.known.insert(key) {
             s.writes.push((key, crate::disk_cache::layer_entry(buf)));
@@ -616,4 +626,47 @@ pub fn derive(key: u64, i: u64) -> u64 {
     let mut h = KeyHasher(key);
     i.hash(&mut h);
     h.finish()
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod async_persistence_tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    struct BlockedStore {
+        entered: mpsc::SyncSender<()>,
+        release: Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl LayerStore for BlockedStore {
+        fn get_layer(&self, _key: u128) -> Option<Arc<Buf>> {
+            None
+        }
+        fn put_layer(&self, _key: u128, _buf: &Buf) {
+            if self.entered.send(()).is_ok()
+                && let Ok(release) = self.release.lock()
+            {
+                let _ = release.recv();
+            }
+        }
+    }
+
+    #[test]
+    fn ram_pixels_are_available_while_persistence_is_blocked() {
+        let (entered_tx, entered_rx) = mpsc::sync_channel(0);
+        let (release_tx, release_rx) = mpsc::sync_channel(0);
+        let cache = Arc::new(LayerCache::new(1 << 20));
+        cache.set_store(Some((Arc::new(BlockedStore { entered: entered_tx, release: Mutex::new(release_rx) }), 3)));
+        assert!(cache.get(42).is_none());
+        let b = Arc::new(Buf { img: effectcraft_raster::Image::new(2, 2), offset: [1.5, -2.25], scale: 0.5 });
+        let writing = cache.clone();
+        let pixels = b.clone();
+        let thread = std::thread::spawn(move || writing.insert(42, pixels));
+        entered_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        let available = cache.get(42);
+        // Release the test gate before asserting, so a failure cannot strand its thread.
+        release_tx.send(()).unwrap();
+        thread.join().unwrap();
+        assert!(Arc::ptr_eq(&available.unwrap(), &b));
+    }
 }
