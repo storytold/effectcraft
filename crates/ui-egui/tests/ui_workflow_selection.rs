@@ -58,6 +58,52 @@ fn timeline_shift_click_selects_range_and_ctrl_toggles() {
     click(&mut h, p, Modifiers::COMMAND);
     assert_eq!(h.state().session.state.selected_layers, vec![ids[0], ids[2]]);
 }
+
+fn timeline_context_duplicate_targets(duration_bar: bool) {
+    let mut h = harness();
+    let ids: Vec<LayerId> = h.state().session.active_comp().unwrap().layers.iter().map(|l| l.id).collect();
+    let selected = vec![ids[0], ids[1]];
+    let open_menu = |h: &mut Harness<'_, EffectcraftApp>, id: LayerId| {
+        let r = rect(h, &format!("timeline.layer.{}.{}", id.0, if duration_bar { "bar" } else { "row" }));
+        let p = if duration_bar { r.center() } else { pos2(r.min.x + 210.0, r.center().y) };
+        for pressed in [true, false] {
+            h.input_mut().events.push(Event::PointerMoved(p));
+            h.input_mut().events.push(Event::PointerButton { pos: p, button: PointerButton::Secondary, pressed, modifiers: Modifiers::NONE });
+            h.step();
+        }
+        h.run_steps(3);
+    };
+    h.state_mut().session.execute("layer.select", json!({"layers":selected.iter().map(|id| id.0).collect::<Vec<_>>()})).unwrap();
+    h.run_steps(3);
+    open_menu(&mut h, ids[0]);
+    assert_eq!(h.state().session.state.selected_layers, selected, "opening the selected layer's context menu must preserve its group");
+    h.get_by_label("Duplicate").click();
+    h.run_steps(3);
+    assert_eq!(h.state().session.active_comp().unwrap().layers.len(), ids.len() + 2, "Duplicate must act on both selected layers");
+    assert_eq!(h.state().session.state.selected_layers.len(), 2);
+    assert!(h.state().session.state.selected_layers.iter().all(|id| !ids.contains(id)));
+
+    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+    h.state_mut().session.execute("layer.select", json!({"layers":selected.iter().map(|id| id.0).collect::<Vec<_>>()})).unwrap();
+    h.run_steps(3);
+    open_menu(&mut h, ids[2]);
+    h.get_by_label("Duplicate").click();
+    h.run_steps(3);
+    assert_eq!(h.state().session.active_comp().unwrap().layers.len(), ids.len() + 1, "an unselected context target must act alone");
+    assert_eq!(h.state().session.state.selected_layers.len(), 1);
+    assert!(!ids.contains(&h.state().session.state.selected_layers[0]));
+}
+
+#[test]
+fn timeline_row_context_duplicate_preserves_selected_group() {
+    timeline_context_duplicate_targets(false);
+}
+
+#[test]
+fn timeline_bar_context_duplicate_preserves_selected_group() {
+    timeline_context_duplicate_targets(true);
+}
+
 #[test]
 fn timeline_empty_outline_marquee_selects_layers() {
     let mut h = harness();

@@ -1372,7 +1372,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                         _ => start_rename(&ctx, layer.id.0, &layer.name),
                     }
                 }
-                layer_context_menu(&row_resp, layer, &mut actions);
+                layer_context_menu(&row_resp, layer, &comp, &selected, &mut actions);
                 // Switches.
                 let sws: [(Icon, bool, &str, bool); 8] = [
                     (Icon::Shy, sw.shy, "shy", true),
@@ -1566,7 +1566,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     if (body.clicked() || body.drag_started()) && !is_sel {
                         actions.push(("layer.select".into(), json!({"layers": [layer.id.0], "add": ui.input(|i| i.modifiers.shift)})));
                     }
-                    layer_context_menu(&body, layer, &mut actions);
+                    layer_context_menu(&body, layer, &comp, &selected, &mut actions);
                     let drag_key = format!("bar-{}", layer.id.0);
                     for (resp, kind) in [(&body, "move"), (&lin, "in"), (&lout, "out")] {
                         if resp.dragged() {
@@ -2610,8 +2610,14 @@ fn zoom_at(app: &mut EffectcraftApp, comp: &Comp, tm: TMap, k: f64, at_x: f32) {
     app.ui.timeline.pps = Some(npps);
 }
 
-fn layer_context_menu(resp: &egui::Response, layer: &Layer, actions: &mut Vec<(String, serde_json::Value)>) {
-    resp.context_menu(|ui| layer_menu(ui, &[layer.id.0], actions));
+fn layer_context_menu(resp: &egui::Response, layer: &Layer, comp: &Comp, selected: &[LayerId], actions: &mut Vec<(String, serde_json::Value)>) {
+    resp.context_menu(|ui| {
+        // Opening a selected row keeps its group. Resolve it only for the open menu,
+        // in composition order, and let each command enforce its own lock behavior.
+        let layers: Vec<u64> =
+            if selected.contains(&layer.id) { comp.layers.iter().filter(|l| selected.contains(&l.id)).map(|l| l.id.0).collect() } else { vec![layer.id.0] };
+        layer_menu(ui, &layers, actions);
+    });
 }
 
 /// Shared layer actions for Timeline rows and Composition context menus.
