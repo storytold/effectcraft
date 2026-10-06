@@ -87,6 +87,54 @@ fn builds_a_comp_end_to_end() {
 }
 
 #[test]
+fn add_solid_retains_source_pixel_aspect_and_optional_duration() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"
+        var c = app.project.items.addComp("PAR", 100, 100, 2, 3, 30);
+        var square = c.layers.addSolid([1, 0, 0], "Square", 20, 10, 1);
+        var wide = c.layers.addSolid([0, 1, 0], "Wide", 20, 10, 1.5, 0.5);
+        var inherited = c.layers.addSolid([0, 0, 1], "Inherited", 20, 10);
+        var minimum = c.layers.addSolid([1, 1, 1], "Minimum", 20, 10, 0.01);
+        var maximum = c.layers.addSolid([1, 1, 1], "Maximum", 20, 10, 100);
+        [square.source.pixelAspect, wide.source.pixelAspect, inherited.source.pixelAspect,
+         square.outPoint, wide.outPoint, inherited.outPoint, c.pixelAspect,
+         minimum.source.pixelAspect, maximum.source.pixelAspect]
+        "#,
+    );
+    assert_eq!(o.result, json!([1, 1.5, 2, 3, 0.5, 3, 2, 0.01, 100]));
+    let (_, c) = comp_named(&s, "PAR");
+    for (name, expected) in [("Square", 1.0), ("Wide", 1.5), ("Inherited", 2.0), ("Minimum", 0.01), ("Maximum", 100.0)] {
+        let effectcraft_engine::project::LayerSource::Solid { item } = layer(c, name).source else { panic!("expected solid") };
+        let effectcraft_engine::project::ItemKind::Solid(solid) = &s.project.item(item).unwrap().kind else { panic!("expected solid source") };
+        assert_eq!(solid.pixel_aspect, expected);
+    }
+    assert_eq!(layer(c, "Wide").out_point.seconds(), 0.5);
+}
+
+#[test]
+fn add_solid_rejects_invalid_pixel_aspect_before_creating_items() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"
+        var c = app.project.items.addComp("PAR", 100, 100, 2, 3, 30);
+        var invalid = [0, -1, NaN, Infinity, -Infinity, true, 0.009, 100.001, null];
+        var rejected = 0;
+        for (var i = 0; i < invalid.length; i++) {
+            try { c.layers.addSolid([1, 0, 0], "Invalid", 20, 10, invalid[i]); }
+            catch (e) { rejected++; }
+        }
+        [rejected, c.numLayers, app.project.numItems]
+        "#,
+    );
+    assert_eq!(o.result, json!([9, 0, 1]));
+    assert_eq!(s.project.items.len(), 1);
+    assert!(s.history.undo.iter().all(|entry| entry.0 != "New Solid"));
+}
+
+#[test]
 fn fill_parameters_use_documented_match_names() {
     // M13.15: `ADBE Fill-0002` is Fill's Color (All Masks is -0007), not the second row.
     let mut s = session();
