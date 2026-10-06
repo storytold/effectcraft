@@ -86,6 +86,43 @@ pub fn character(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let target = text_target(app);
     let enabled = target.is_some();
     let doc = target.as_ref().map(|t| t.doc.clone()).unwrap_or_default();
+    let footer = if target.as_ref().is_none_or(|tt| tt.range.is_some()) { 20.0 } else { 0.0 };
+    let body = Rect::from_min_max(rect.min, pos2(rect.max.x, (rect.max.y - footer).max(rect.min.y)));
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body).id_salt("character-scroll"));
+    child.set_clip_rect(body.intersect(ui.clip_rect()));
+    let actions = egui::ScrollArea::vertical()
+        .id_salt("character-controls")
+        .auto_shrink([false, false])
+        .max_height(body.height())
+        .show(&mut child, |ui| {
+            let content = Rect::from_min_size(ui.cursor().min, vec2(ui.available_width(), body.height()));
+            character_controls(app, ui, content, &doc, enabled)
+        })
+        .inner;
+    // Selection status stays fixed while the formatting controls scroll.
+    match &target {
+        None => {
+            p.text(pos2(rect.center().x, rect.max.y - 10.0), Align2::CENTER_CENTER, "Select a text layer", Tokens::ui(11.0), t.text_faint);
+        }
+        Some(tt) if tt.range.is_some() => {
+            let [a, b] = tt.range.unwrap_or_default();
+            let msg = if a == b { "Editing: caret (applies to typed text)".to_string() } else { format!("Editing: {} characters selected", b - a) };
+            p.text(pos2(rect.min.x + 10.0, rect.max.y - 14.0), Align2::LEFT_CENTER, msg, Tokens::ui(10.5), t.text_faint);
+        }
+        _ => {}
+    }
+    let Some(tt) = target else { return };
+    for a in actions {
+        if let Err(e) = crate::menus::invoke(app, &ctx, "layer.setText", tt.params(a)) {
+            app.ui.status = e;
+        }
+    }
+}
+
+fn character_controls(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect, doc: &TextDoc, enabled: bool) -> Vec<serde_json::Value> {
+    let t = app.tokens;
+    // Inherit the fixed viewport clip; the content rectangle moves with scrolling.
+    let p = ui.painter().clone();
     let mut y = rect.min.y + 10.0;
     let x0 = rect.min.x + 10.0;
     let w = rect.width() - 20.0;
@@ -230,6 +267,7 @@ pub fn character(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
     app.auto.add("character.ligatures", lr, "Ligatures");
     p.text(pos2(x0 + 20.0, y + 7.0), Align2::LEFT_CENTER, "Ligatures", Tokens::ui(11.5), t.text_dim);
+    let mut bottom = y + 14.0;
     // OpenType: a popup with the font's layout features (like the Character panel's OpenType menu).
     let or = Rect::from_min_size(pos2(sr.max.x + 6.0, sr.min.y), vec2(78.0, 22.0));
     let opop = egui::Id::new("char-opentype-pop");
@@ -239,7 +277,7 @@ pub fn character(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         widgets::open_popup(ui, opop);
     }
     app.auto.add("character.opentype", or, "OpenType");
-    opentype_popup(app, ui, opop, pos2((or.max.x - 300.0).max(rect.min.x), or.max.y), &doc, &mut actions);
+    opentype_popup(app, ui, opop, pos2((or.max.x - 300.0).max(rect.min.x), or.max.y), doc, &mut actions);
     // Vertical type: Tate-Chu-Yoko and Standard Vertical Roman Alignment (Character panel menu).
     if doc.vertical {
         y += 22.0;
@@ -255,6 +293,7 @@ pub fn character(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             app.auto.add(&format!("character.{key}"), cr, label);
             p.text(pos2(cr.max.x + 6.0, y + 7.0), Align2::LEFT_CENTER, label, Tokens::ui(11.0), t.text_dim);
         }
+        bottom = y + 14.0;
     }
     // Variable Font Axes: one value per axis of a variable font (`character.axis.<tag>`).
     let face = effectcraft_engine::text::resolve(&doc.font, &doc.style).face;
@@ -272,6 +311,7 @@ pub fn character(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             let (r, nv, _) =
                 widgets::hot_number_at(ui, pos2(fx + 34.0, fy), egui::Id::new(("char-axis", &tag)), v as f64, 1.0, (a.min as f64, a.max as f64), 0, "", &t);
             app.auto.add(&format!("character.axis.{tag}"), r, &a.name);
+            bottom = bottom.max(r.max.y);
             if let Some(nv) = nv
                 && enabled
             {
@@ -279,23 +319,8 @@ pub fn character(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             }
         }
     }
-    match &target {
-        None => {
-            p.text(pos2(rect.center().x, rect.max.y - 20.0), Align2::CENTER_CENTER, "Select a text layer", Tokens::ui(11.0), t.text_faint);
-        }
-        Some(tt) if tt.range.is_some() => {
-            let [a, b] = tt.range.unwrap_or_default();
-            let msg = if a == b { "Editing: caret (applies to typed text)".to_string() } else { format!("Editing: {} characters selected", b - a) };
-            p.text(pos2(x0, rect.max.y - 14.0), Align2::LEFT_CENTER, msg, Tokens::ui(10.5), t.text_faint);
-        }
-        _ => {}
-    }
-    let Some(tt) = target else { return };
-    for a in actions {
-        if let Err(e) = crate::menus::invoke(app, &ctx, "layer.setText", tt.params(a)) {
-            app.ui.status = e;
-        }
-    }
+    ui.expand_to_include_rect(Rect::from_min_max(rect.min, pos2(rect.max.x, bottom + 10.0)));
+    actions
 }
 
 /// The Character panel's OpenType popup: feature toggles (dimmed when the font lacks them),
