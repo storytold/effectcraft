@@ -222,13 +222,17 @@ fn prop_row(
         }
         Value::Scalar(v) if matches!(prop.ui, ParamUi::Angle) => {
             let (rev, deg) = fw::split_angle(*v);
-            let prefix = format!("{rev}x{}", if deg < 0.0 { "-" } else { "+" });
-            let g = p.layout_no_wrap(prefix, Tokens::ui(12.0), t.hot_text);
+            // `{rev}x` (whole turns) and `±deg°`, each its own field (AE).
+            let (rr, nr, _) = widgets::hot_revolutions_at(ui, pos2(vx, cy - 9.0), egui::Id::new(("ec-rev", uid)), rev, &t);
+            app.auto.add(&format!("effectControls.prop.{uid}.revolutions"), rr, &format!("{} revolutions", prop.name));
+            if let Some(nr) = nr {
+                set(actions, json!(fw::with_revolutions(*v, nr)));
+            }
+            let g = p.layout_no_wrap(if deg < 0.0 { "-" } else { "+" }.to_string(), Tokens::ui(12.0), t.hot_text);
             let gw = g.size().x;
-            p.galley(pos2(vx + 2.0, cy - g.size().y / 2.0), g, t.hot_text);
-            let (vr, nv, _) = widgets::hot_number_at(ui, pos2(vx + gw, cy - 9.0), egui::Id::new(("ec-v", uid)), deg.abs(), 0.5, (-1e9, 1e9), 1, "°", &t);
-            let full = Rect::from_min_max(pos2(vx, vr.min.y), vr.max);
-            app.auto.add(&format!("effectControls.prop.{uid}.value"), full, &fw::format_angle(*v, 1));
+            p.galley(pos2(rr.max.x, cy - g.size().y / 2.0), g, t.hot_text);
+            let (vr, nv, _) = widgets::hot_number_at(ui, pos2(rr.max.x + gw, cy - 9.0), egui::Id::new(("ec-v", uid)), deg.abs(), 0.5, (-1e9, 1e9), 1, "°", &t);
+            app.auto.add(&format!("effectControls.prop.{uid}.value"), vr, &fw::format_angle(*v, 1));
             if let Some(nv) = nv {
                 // The field edits the degrees part; the revolutions stay.
                 let signed = if deg < 0.0 || (deg == 0.0 && *v < 0.0) { -nv } else { nv };

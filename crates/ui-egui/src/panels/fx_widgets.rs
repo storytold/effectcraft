@@ -28,6 +28,20 @@ pub fn format_angle(v: f64, decimals: usize) -> String {
     format!("{rev}x{sign}{:.decimals$}°", deg.abs())
 }
 
+/// `v` with its revolutions set to `rev`, keeping the degrees as displayed: the degrees take
+/// the sign of the new turns (as [`split_angle`] shows them), so the result reads `{rev}x` with
+/// the same degree number (`0x+30°` → 2 → `2x+30°`; `-1x-30°` → 1 → `1x+30°`; 0 keeps the
+/// degrees' own sign). Within one sign this is a step of 360° per turn.
+pub fn with_revolutions(v: f64, rev: i64) -> f64 {
+    let (_, deg) = split_angle(v);
+    let deg = match rev.signum() {
+        1 => deg.abs(),
+        -1 => -deg.abs(),
+        _ => deg,
+    };
+    rev as f64 * 360.0 + deg
+}
+
 /// Parse typed angles: `45`, `-30.5°`, `1x+45`, `-1x-40°`, `2x` (revolutions only).
 pub fn parse_angle(s: &str) -> Option<f64> {
     let s = s.trim().trim_end_matches('°').trim().replace(',', ".");
@@ -526,6 +540,19 @@ mod tests {
         assert_eq!(format_angle(-400.0, 1), "-1x-40.0°");
         assert_eq!(format_angle(720.0, 0), "2x+0°");
         assert_eq!(split_angle(-360.0), (-1, 0.0));
+    }
+
+    #[test]
+    fn setting_revolutions_keeps_the_degrees() {
+        assert_eq!(with_revolutions(30.0, 3), 1110.0);
+        assert_eq!(with_revolutions(405.0, 0), 45.0);
+        assert_eq!(with_revolutions(405.0, -2), -765.0);
+        assert_eq!(with_revolutions(-390.0, 1), 390.0);
+        assert_eq!(with_revolutions(-390.0, 0), -30.0);
+        assert_eq!(with_revolutions(-390.0, -3), -1110.0);
+        for (v, r) in [(30.0, 3), (-390.0, 1), (-30.0, -2), (725.5, 0)] {
+            assert_eq!(split_angle(with_revolutions(v, r)).0, r, "{v} → {r}x");
+        }
     }
 
     #[test]

@@ -74,6 +74,37 @@ pub fn hot_number_at(
     (rect, out, resp.drag_stopped())
 }
 
+/// Pointer pixels per whole turn when scrubbing an angle's revolutions.
+const PX_PER_TURN: f64 = 8.0;
+
+/// The revolutions part of an After Effects angle (`2x`): a hot number of whole turns, the same
+/// field as [`hot_number_at`] (drag to scrub, click to type). Typing
+/// sets the count (rounded); dragging steps one turn per [`PX_PER_TURN`] pixels (Shift ×10,
+/// Cmd/Ctrl ×0.1), accumulating sub-turn movement across frames.
+/// Returns (rect, Some(new turns) when changed, drag finished).
+pub fn hot_revolutions_at(ui: &mut Ui, rect_min: egui::Pos2, id: egui::Id, rev: i64, t: &Tokens) -> (Rect, Option<i64>, bool) {
+    let typing = ui.data(|d| d.get_temp::<String>(id.with("editing")).is_some());
+    let acc_id = id.with("turns");
+    let (r, nv, stopped) = hot_number_at(ui, rect_min, id, rev as f64, 1.0 / PX_PER_TURN, (-1e6, 1e6), 0, "x", t);
+    let mut out = None;
+    if let Some(nv) = nv {
+        if typing {
+            out = nv.is_finite().then(|| nv.round() as i64);
+        } else {
+            let acc = ui.data(|d| d.get_temp::<f64>(acc_id)).unwrap_or(0.0) + (nv - rev as f64);
+            let steps = acc.trunc();
+            ui.data_mut(|d| d.insert_temp(acc_id, acc - steps));
+            if steps != 0.0 {
+                out = Some(rev + steps as i64);
+            }
+        }
+    }
+    if stopped {
+        ui.data_mut(|d| d.remove::<f64>(acc_id));
+    }
+    (r, out, stopped)
+}
+
 /// A colour swatch; returns the response (click opens the picker in the caller).
 pub fn swatch(ui: &mut Ui, rect: Rect, c: [f32; 4], id: egui::Id, t: &Tokens) -> Response {
     let resp = ui.interact(rect, id, Sense::click());

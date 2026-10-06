@@ -2706,14 +2706,18 @@ fn value_editor(
                 _ => (-1e9, 1e9, 1, 1.0),
             };
             if matches!(prop.ui, ParamUi::Angle) {
-                let rev = (v / 360.0).trunc();
-                let deg = v - rev * 360.0;
-                p.text(pos2(x, at.y), Align2::LEFT_CENTER, format!("{}x", rev as i64), Tokens::ui(12.0), t.hot_text);
-                x += 22.0;
+                // `{rev}x` and the signed degrees (-390° = `-1x -30.0°`), each its own field.
+                let (rev, deg) = super::fx_widgets::split_angle(*v);
+                let (rr, nr, _) = widgets::hot_revolutions_at(ui, pos2(x, y), egui::Id::new(("v-rev", uid)), rev, &t);
+                app.auto.add(&format!("timeline.prop.{uid}.revolutions"), rr, &format!("{} revolutions", prop.name));
+                if let Some(nr) = nr {
+                    set(actions, json!(super::fx_widgets::with_revolutions(*v, nr)));
+                }
+                x = rr.max.x + 2.0;
                 let (r, nv, _) = widgets::hot_number_at(ui, pos2(x, y), egui::Id::new(("v", uid, 0)), deg, speed, (-1e9, 1e9), 1, "°", &t);
                 app.auto.add(&format!("timeline.prop.{uid}.value"), r, &prop.name);
                 if let Some(nv) = nv {
-                    set(actions, json!(rev * 360.0 + nv));
+                    set(actions, json!(rev as f64 * 360.0 + nv));
                 }
             } else {
                 let suffix = if matches!(prop.ui, ParamUi::Percent) || prop.match_id == "opacity" { "%" } else { "" };
