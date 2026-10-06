@@ -46,7 +46,7 @@ panel registers an element id; both are enforced by `crates/ui-egui/tests/ui_age
 
 | Method | Params | Result |
 |---|---|---|
-| `ui.inspect` | `{}` | Window size, pixels per point, fps, serialized `UiState`, playback, time, active comp, selection, open dialog, last render ms. |
+| `ui.inspect` | `{}` | Window size, pixels per point, fps, serialized `UiState`, playback, time, active comp, selection, open dialog, last render ms, viewer request-to-install timing. |
 | `ui.elements` | `{prefix?}` | `[{id, label, rect: [x, y, w, h]}]`: the widgets drawn in the last frame, in points. |
 | `ui.set` | `{tool?, workspace?, theme?, focused?, viewer?, timeline?, menuBar?, home?}` | `viewer: {zoom (null = fit), res: Full\|Half\|Third\|Quarter\|Auto, pan: [x,y], grid, rulers, safeMargins, transparencyGrid}`; `timeline: {pps (null = fit), start, graphEditor, showModes, openLayers: [ids], openGroups: [uids]}`. |
 | `ui.panel.show` / `ui.panel.close` | `{panel}` | Panels: `Project`, `Composition`, `Timeline`, `EffectControls`, `EffectsPresets`, `Info`, `Preview`, `Character`, `Paragraph`, `Align` and others. |
@@ -54,6 +54,20 @@ panel registers an element id; both are enforced by `crates/ui-egui/tests/ui_age
 | `ui.resize` | `{width, height}` | Resizes the window (points). |
 | `ui.focus` | `{}` | Activates the window and takes keyboard focus. Agents normally avoid this, because the app is started without stealing focus. |
 | `app.quit` | `{force?}` | Closes the app. A modified project shows the Save / Don't Save / Cancel prompt first (automation ids `dialog.unsaved.save`, `dialog.unsaved.dontSave`, `dialog.unsaved.cancel`) unless `force: true`. |
+
+`ui.inspect.viewerTiming` has `pending` and the latest completed `last` sample (initially null).
+The sample identifies `content`, `comp`, `frame`, `scale` (render scale × 1000), `view` and `opts`.
+`totalMs` measures the first request for the desired frame through successful viewer texture
+installation or reuse. Duplicate paints and revision-only changes do not restart it; superseded
+frames cannot complete the current demand. This is not physical display presentation or input latency.
+
+`queueMs`, `preparationMs` and `installationMs` divide that interval at job start and RAM availability.
+Preparation includes disk lookup, conversion and, for remote workers, scheduling/message transfer;
+it is not pure shader execution time. Work already completed by prefetch is excluded. A RAM hit
+has `cached: true`, zero queue/preparation, and its remaining lookup/install wait in `installationMs`.
+If it is evicted and rendered again before installation, `cached` becomes false. Phase values are
+null when bounded job metadata is unavailable; total timing remains available. Purging clears timing.
+The original `renderMs` readout retains its existing urgent-job timing semantics.
 
 ## Input
 

@@ -499,10 +499,30 @@ pub(crate) fn resolution_label(res: Resolution, scale: f64) -> String {
 /// options, show channel, reset exposure, exposure, take / show snapshot, Fast Previews, the 3D
 /// renderer and view, and the current time.
 pub(crate) fn bottom_bar(app: &mut EffectcraftApp, ui: &mut egui::Ui, bar: Rect, zoom: f32, fit: f32, time: Tick, comp: &Comp) {
+    ui.painter().rect_filled(bar, 0.0, app.tokens.panel_bg);
+    ui.painter().line_segment([bar.left_top(), bar.right_top()], Stroke::new(1.0, app.tokens.separator));
+    let mut rail = ui.new_child(egui::UiBuilder::new().max_rect(bar));
+    rail.set_clip_rect(bar.intersect(ui.clip_rect()));
+    rail.spacing_mut().scroll = egui::style::ScrollStyle {
+        bar_width: 6.0,
+        bar_inner_margin: 0.0,
+        bar_outer_margin: 0.0,
+        dormant_handle_opacity: 0.7,
+        dormant_background_opacity: 0.1,
+        ..egui::style::ScrollStyle::solid()
+    };
+    egui::ScrollArea::horizontal().id_salt("composition-bottom-bar").auto_shrink([false, false]).max_height(bar.height()).show_viewport(
+        &mut rail,
+        |ui, viewport| {
+            let content = Rect::from_min_size(ui.cursor().min, vec2(bar.width(), viewport.height()));
+            bottom_bar_contents(app, ui, content, zoom, fit, time, comp);
+        },
+    );
+}
+
+fn bottom_bar_contents(app: &mut EffectcraftApp, ui: &mut egui::Ui, bar: Rect, zoom: f32, fit: f32, time: Tick, comp: &Comp) {
     let t = app.tokens;
     let p = ui.painter().clone();
-    p.rect_filled(bar, 0.0, t.panel_bg);
-    p.line_segment([bar.left_top(), bar.right_top()], Stroke::new(1.0, t.separator));
     let cy = bar.center().y;
     let mut x = bar.min.x + 8.0;
     let ppp = ui.ctx().pixels_per_point();
@@ -564,13 +584,14 @@ pub(crate) fn bottom_bar(app: &mut EffectcraftApp, ui: &mut egui::Ui, bar: Rect,
     }
     x = r.max.x + 6.0;
 
-    let tog = |ui: &mut egui::Ui, auto: &mut crate::automation::Registry, x: &mut f32, icon: Icon, on: bool, id: &str, tip: &str| -> (bool, Rect) {
-        let r = Rect::from_min_size(pos2(*x, cy - 11.0), vec2(22.0, 22.0));
-        let resp = widgets::icon_button(ui, r, icon, on, &t, egui::Id::new(("vw-btn", id))).on_hover_text(tip);
-        auto.add(&format!("viewer.{id}"), r, tip);
-        *x += 24.0;
-        (resp.clicked(), r)
-    };
+    let tog =
+        |ui: &mut egui::Ui, auto: &mut crate::automation::Registry, x: &mut f32, icon: Icon, on: bool, id: &str, tip: &str| -> (bool, Rect, egui::Response) {
+            let r = Rect::from_min_size(pos2(*x, cy - 11.0), vec2(22.0, 22.0));
+            let resp = widgets::icon_button(ui, r, icon, on, &t, egui::Id::new(("vw-btn", id))).on_hover_text(tip);
+            auto.add(&format!("viewer.{id}"), r, tip);
+            *x += 24.0;
+            (resp.clicked(), r, resp)
+        };
     if tog(ui, &mut app.auto, &mut x, Icon::Checker, app.ui.viewer.transparency_grid, "transparency", "Toggle Transparency Grid").0 {
         app.ui.viewer.transparency_grid = !app.ui.viewer.transparency_grid;
     }
@@ -590,7 +611,7 @@ pub(crate) fn bottom_bar(app: &mut EffectcraftApp, ui: &mut egui::Ui, bar: Rect,
     // Grid and guide options.
     let v = &app.ui.viewer;
     let any = v.grid || v.safe_margins || v.proportional_grid || (v.guides && !comp.guides.is_empty()) || v.rulers;
-    let (clicked, gr) = tog(ui, &mut app.auto, &mut x, Icon::Grid, any, "grid", "Choose grid and guide options");
+    let (clicked, gr, _) = tog(ui, &mut app.auto, &mut x, Icon::Grid, any, "grid", "Choose grid and guide options");
     if clicked {
         toggle_popup(ui, "vw-grid-pop");
     }
@@ -618,7 +639,7 @@ pub(crate) fn bottom_bar(app: &mut EffectcraftApp, ui: &mut egui::Ui, bar: Rect,
     }
     // Show Channel and Color Management Settings.
     let vo = app.session.state.viewer.clone();
-    let (clicked, cr) = tog(ui, &mut app.auto, &mut x, Icon::Channel, vo.channel != Channel::Rgb, "channel", "Show Channel and Color Management Settings");
+    let (clicked, cr, _) = tog(ui, &mut app.auto, &mut x, Icon::Channel, vo.channel != Channel::Rgb, "channel", "Show Channel and Color Management Settings");
     if clicked {
         toggle_popup(ui, "vw-channel-pop");
     }
@@ -660,15 +681,16 @@ pub(crate) fn bottom_bar(app: &mut EffectcraftApp, ui: &mut egui::Ui, bar: Rect,
         }
     }
     let showing = showing_snapshot(app, ui.ctx());
-    let (_, sr) = tog(ui, &mut app.auto, &mut x, Icon::ShowSnapshot, showing, "showSnapshot", "Show Snapshot (hold)");
+    let (_, _, sr) = tog(ui, &mut app.auto, &mut x, Icon::ShowSnapshot, showing, "showSnapshot", "Show Snapshot (hold)");
     // Show Snapshot works while the button is held, like F5.
-    let held = ui.input(|i| i.pointer.primary_down()) && ui.input(|i| i.pointer.press_origin()).is_some_and(|o| sr.contains(o));
+    let held = sr.is_pointer_button_down_on() && ui.input(|i| i.pointer.primary_down());
     if app.session.snapshot.is_some() && held != app.session.state.viewer.show_snapshot {
         let _ = app.session.execute("view.showSnapshot", json!({"value": held}));
     }
     // Fast Previews.
     let fp = vo.fast_previews;
-    let (clicked, fr) = tog(ui, &mut app.auto, &mut x, Icon::Sparkle, fp != FastPreviews::Off || app.ui.viewer.fast_preview, "fastPreviews", "Fast Previews");
+    let (clicked, fr, _) =
+        tog(ui, &mut app.auto, &mut x, Icon::Sparkle, fp != FastPreviews::Off || app.ui.viewer.fast_preview, "fastPreviews", "Fast Previews");
     if clicked {
         toggle_popup(ui, "vw-fast-pop");
     }
@@ -680,7 +702,16 @@ pub(crate) fn bottom_bar(app: &mut EffectcraftApp, ui: &mut egui::Ui, bar: Rect,
     // 3D renderer + view.
     if comp.has_3d() {
         let r = Rect::from_min_size(pos2(x, cy - 10.0), vec2(96.0, 20.0));
-        let _ = widgets::dropdown(ui, r, "Classic 3D", &t, egui::Id::new("vw-3d"));
+        let renderer = match comp.renderer {
+            effectcraft_engine::project::Renderer::Classic3D => "Classic 3D",
+            effectcraft_engine::project::Renderer::Advanced3D => "Advanced 3D",
+        };
+        if widgets::dropdown(ui, r, renderer, &t, egui::Id::new("vw-3d")).on_hover_text("Open composition renderer settings").clicked() {
+            match super::dialogs::open_comp_settings(app) {
+                Ok(()) => app.dialog_state.comp.tab = super::comp_settings::Tab::Renderer,
+                Err(e) => app.ui.status = e,
+            }
+        }
         app.auto.add("viewer.renderer3d", r, "3D Renderer");
         x = r.max.x + 4.0;
         let cid = app.session.active_comp_id();
@@ -709,6 +740,7 @@ pub(crate) fn bottom_bar(app: &mut EffectcraftApp, ui: &mut egui::Ui, bar: Rect,
     let tr = Rect::from_min_size(pos2(x + 4.0, cy - 9.0), g.size() + vec2(8.0, 4.0));
     p.galley(pos2(tr.min.x + 4.0, tr.min.y + 2.0), g, t.timecode);
     app.auto.add("viewer.timecode", tr, "Current time");
+    ui.expand_to_include_rect(Rect::from_min_max(bar.min, pos2(tr.max.x + 8.0, bar.max.y)));
     // Right: render time.
     let ms = app.frames.last_ms.lock().map(|v| *v).unwrap_or(0.0);
     if tr.max.x + 50.0 < bar.max.x {
@@ -719,6 +751,192 @@ pub(crate) fn bottom_bar(app: &mut EffectcraftApp, ui: &mut egui::Ui, bar: Rect,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn renderer_app(renderer: effectcraft_engine::project::Renderer) -> EffectcraftApp {
+        let mut s = effectcraft_engine::Session::default();
+        s.execute("comp.new", json!({"name":"Original tiny renderer fixture", "width":2, "height":2, "duration":1})).unwrap();
+        s.execute("layer.newSolid", json!({"color":"#406080"})).unwrap();
+        let cid = s.active_comp_id().unwrap();
+        let comp = std::sync::Arc::make_mut(&mut s.project).comp_mut(cid).unwrap();
+        comp.renderer = renderer;
+        comp.layers[0].switches.three_d = true;
+        EffectcraftApp::new(s)
+    }
+
+    fn draw_renderer_bar(app: &mut EffectcraftApp, ctx: &egui::Context, events: Vec<egui::Event>) -> egui::FullOutput {
+        draw_toolbar(app, ctx, events, 900.0)
+    }
+
+    fn draw_toolbar(app: &mut EffectcraftApp, ctx: &egui::Context, events: Vec<egui::Event>, width: f32) -> egui::FullOutput {
+        let comp = app.session.active_comp().unwrap().clone();
+        app.auto.begin_frame();
+        ctx.run_ui(egui::RawInput { events, ..Default::default() }, |ui| {
+            bottom_bar(app, ui, Rect::from_min_size(Pos2::ZERO, vec2(width, 32.0)), 1.0, 1.0, Tick::ZERO, &comp);
+        })
+    }
+
+    #[test]
+    fn toolbar_respects_the_parent_panel_clip() {
+        let mut app = renderer_app(effectcraft_engine::project::Renderer::Advanced3D);
+        let comp = app.session.active_comp().unwrap().clone();
+        let ctx = egui::Context::default();
+        let clip = Rect::from_min_max(pos2(0.0, 16.0), pos2(900.0, 32.0));
+        let output = ctx.run_ui(Default::default(), |ui| {
+            ui.set_clip_rect(clip);
+            bottom_bar(&mut app, ui, Rect::from_min_size(Pos2::ZERO, vec2(900.0, 32.0)), 1.0, 1.0, Tick::ZERO, &comp);
+        });
+        let text = output.shapes.iter().find(|s| matches!(&s.shape, egui::epaint::Shape::Text(t) if t.galley.job.text.starts_with("Advanced 3D"))).unwrap();
+        assert!(clip.contains_rect(text.clip_rect), "toolbar expanded its parent clip: {:?}", text.clip_rect);
+    }
+
+    #[test]
+    fn clipped_snapshot_control_does_not_capture_a_neighboring_panel_press() {
+        let mut app = renderer_app(effectcraft_engine::project::Renderer::Advanced3D);
+        app.session.snapshot = Some(effectcraft_engine::viewer::Snapshot {
+            comp: app.session.active_comp_id().unwrap(),
+            time: Tick::ZERO,
+            scale: 1.0,
+            image: std::sync::Arc::new(effectcraft_engine::render::Image::new(2, 2)),
+        });
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            draw_toolbar(&mut app, &ctx, vec![], 300.0).drop_without_applying_deltas();
+        }
+        let e = app.auto.find("viewer.showSnapshot").unwrap();
+        let pos = Rect::from_min_size(pos2(e.rect[0], e.rect[1]), vec2(e.rect[2], e.rect[3])).center();
+        assert!(pos.x > 300.0);
+        draw_toolbar(
+            &mut app,
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() },
+            ],
+            300.0,
+        )
+        .drop_without_applying_deltas();
+        assert!(!app.session.state.viewer.show_snapshot, "an invisible button captured a press outside its panel");
+        draw_toolbar(
+            &mut app,
+            &ctx,
+            vec![egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() }],
+            900.0,
+        )
+        .drop_without_applying_deltas();
+        for _ in 0..3 {
+            draw_toolbar(&mut app, &ctx, vec![], 900.0).drop_without_applying_deltas();
+        }
+        let e = app.auto.find("viewer.showSnapshot").unwrap();
+        let pos = Rect::from_min_size(pos2(e.rect[0], e.rect[1]), vec2(e.rect[2], e.rect[3])).center();
+        for pressed in [true, false] {
+            draw_toolbar(
+                &mut app,
+                &ctx,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() },
+                ],
+                900.0,
+            )
+            .drop_without_applying_deltas();
+            assert_eq!(app.session.state.viewer.show_snapshot, pressed, "the visible snapshot button still works while held");
+        }
+    }
+
+    #[test]
+    fn compact_toolbar_scrolls_to_its_clipped_controls_and_keeps_them_clickable() {
+        let mut app = renderer_app(effectcraft_engine::project::Renderer::Advanced3D);
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            draw_toolbar(&mut app, &ctx, vec![], 300.0).drop_without_applying_deltas();
+        }
+        let current_rect = |app: &EffectcraftApp, id: &str| {
+            let e = app.auto.elements.iter().find(|e| e.id == id).unwrap();
+            Rect::from_min_size(pos2(e.rect[0], e.rect[1]), vec2(e.rect[2], e.rect[3]))
+        };
+        assert!(current_rect(&app, "viewer.renderer3d").min.x > 300.0);
+        draw_toolbar(
+            &mut app,
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(pos2(150.0, 12.0)),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: vec2(-400.0, 0.0),
+                    modifiers: Default::default(),
+                    phase: egui::TouchPhase::Move,
+                },
+            ],
+            300.0,
+        )
+        .drop_without_applying_deltas();
+        for _ in 0..8 {
+            draw_toolbar(&mut app, &ctx, vec![], 300.0).drop_without_applying_deltas();
+        }
+        let renderer = current_rect(&app, "viewer.renderer3d");
+        assert!(renderer.min.x >= 0.0 && renderer.max.x <= 300.0, "renderer remains clipped: {renderer:?}");
+        let pos = renderer.center();
+        for pressed in [true, false] {
+            draw_toolbar(
+                &mut app,
+                &ctx,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() },
+                ],
+                300.0,
+            )
+            .drop_without_applying_deltas();
+        }
+        assert_eq!(app.dialog, Some(crate::Dialog::CompSettings));
+        assert_eq!(app.dialog_state.comp.tab, super::super::comp_settings::Tab::Renderer);
+    }
+
+    #[test]
+    fn renderer_toolbar_displays_the_compositions_actual_renderer() {
+        let mut app = renderer_app(effectcraft_engine::project::Renderer::Advanced3D);
+        let ctx = egui::Context::default();
+        let output = draw_renderer_bar(&mut app, &ctx, vec![]);
+        let texts: Vec<&str> = output
+            .shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::epaint::Shape::Text(t) => Some(t.galley.job.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.iter().any(|s| s.starts_with("Advanced")), "rendered toolbar texts: {texts:?}");
+        assert!(!texts.contains(&"Classic 3D"));
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn renderer_toolbar_opens_renderer_settings_without_changing_the_document() {
+        for renderer in [effectcraft_engine::project::Renderer::Classic3D, effectcraft_engine::project::Renderer::Advanced3D] {
+            let mut app = renderer_app(renderer);
+            let ctx = egui::Context::default();
+            draw_renderer_bar(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+            let element = app.auto.find("viewer.renderer3d").unwrap();
+            let pos = pos2(element.rect[0] + element.rect[2] / 2.0, element.rect[1] + element.rect[3] / 2.0);
+            let revision = app.session.revision;
+            for pressed in [true, false] {
+                draw_renderer_bar(
+                    &mut app,
+                    &ctx,
+                    vec![
+                        egui::Event::PointerMoved(pos),
+                        egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() },
+                    ],
+                )
+                .drop_without_applying_deltas();
+            }
+            assert_eq!(app.dialog, Some(crate::Dialog::CompSettings));
+            assert_eq!(app.dialog_state.comp.tab, super::super::comp_settings::Tab::Renderer);
+            assert_eq!(app.dialog_state.comp.advanced_3d, renderer == effectcraft_engine::project::Renderer::Advanced3D);
+            assert_eq!(app.session.active_comp().unwrap().renderer, renderer);
+            assert_eq!(app.session.revision, revision);
+        }
+    }
 
     #[test]
     fn bar_labels_match_after_effects() {

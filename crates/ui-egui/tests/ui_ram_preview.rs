@@ -25,6 +25,32 @@ fn shown_cached(h: &Harness<'_, EffectcraftApp>, comp: u64) -> bool {
 }
 
 #[test]
+fn viewer_timing_is_installed_once_and_exposed_to_automation() {
+    let mut s = Session::default();
+    let c = s.execute("comp.new", json!({"name": "Timing", "width": 64, "height": 36, "duration": 1})).unwrap()["comp"].as_u64().unwrap();
+    s.execute("layer.newSolid", json!({"color": "#3080ff"})).unwrap();
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(|_| EffectcraftApp::new(s));
+    settle(&mut h);
+    let first = h.state().frames.viewer_timing();
+    assert!(!first.pending);
+    let sample = first.last.unwrap();
+    assert_eq!(sample.comp, c);
+    assert_eq!(sample.frame, 0);
+    let phases = sample.queue_ms.unwrap() + sample.preparation_ms.unwrap() + sample.installation_ms.unwrap();
+    assert!((phases - sample.total_ms).abs() < 0.001);
+    h.run_steps(3);
+    assert_eq!(h.state().frames.viewer_timing().last.unwrap().total_ms, sample.total_ms, "repainting the same frame preserves its sample");
+    let inspection = effectcraft_ui_egui::control::inspect(h.state(), &h.ctx);
+    assert_eq!(inspection["viewerTiming"]["pending"], false);
+    assert_eq!(inspection["viewerTiming"]["last"]["comp"], c);
+    assert_eq!(inspection["viewerTiming"]["last"]["scale"], sample.scale);
+    h.state().frames.clear();
+    assert!(h.state().frames.viewer_timing().last.is_none());
+    settle(&mut h);
+    assert_eq!(h.state().frames.viewer_timing().last.unwrap().comp, c);
+}
+
+#[test]
 fn an_edit_in_another_comp_keeps_the_cached_frames_and_undo_finds_them_again() {
     let mut s = Session::default();
     let b = s.execute("comp.new", json!({"name": "B", "width": 64, "height": 36, "duration": 1})).unwrap()["comp"].as_u64().unwrap();

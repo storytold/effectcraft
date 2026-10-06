@@ -227,8 +227,8 @@ pub struct EffectcraftApp {
     pub(crate) waveforms: panels::waveform::Cache,
     /// Last reveal shortcut and when (double-press shortcuts such as LL).
     pub(crate) last_reveal: Option<(String, f64)>,
-    /// Settings revision applied to the theme, tooltips and caches.
-    applied_prefs: Option<u64>,
+    /// Applied settings revision and viewer smoothing, used to refresh installed samplers.
+    applied_prefs: Option<(u64, bool)>,
     /// A previous run that didn't exit cleanly (shown by `Dialog::Recovery`).
     pub recovery: Option<effectcraft_engine::autosave::Recovery>,
     /// Docked groups laid out last frame: (active panel, group rect) — `~` maximizes the one
@@ -323,10 +323,12 @@ impl EffectcraftApp {
 
     /// Apply changed settings: theme and brightness, label colours, tool tips, preview caches.
     pub fn apply_prefs(&mut self, ctx: &egui::Context) {
-        if self.applied_prefs == Some(self.session.prefs_revision) {
+        if self.applied_prefs.map(|(revision, _)| revision) == Some(self.session.prefs_revision) {
             return;
         }
-        self.applied_prefs = Some(self.session.prefs_revision);
+        let smooth = self.session.prefs.viewer_zoom_smooth();
+        let sampler_changed = self.applied_prefs.is_some_and(|(_, previous)| previous != smooth);
+        self.applied_prefs = Some((self.session.prefs_revision, smooth));
         let p = &self.session.prefs;
         self.ui.theme = theme::ThemeKind::from_name(&p.appearance.theme).unwrap_or_default();
         self.tokens = Tokens::from_prefs(p);
@@ -336,6 +338,12 @@ impl EffectcraftApp {
         self.ui.cache_when_idle = p.previews.cache_frames_when_idle;
         self.ui.viewer.fast_preview = p.previews.fast_previews;
         self.frames.set_budget(p.cache_budgets(self.session.sys_memory).preview);
+        if sampler_changed {
+            // Sampling changes require fresh installed handles, not a new render.
+            panels::viewer::purge_textures(self, ctx);
+            panels::viewers::purge_textures(self);
+            ctx.request_repaint();
+        }
     }
 
     /// Change settings from the UI (applied next frame and saved).
@@ -639,7 +647,9 @@ impl EffectcraftApp {
         let key = self.frame_key(comp, frame, scale);
         let t = c.frame_rate.tick_of(frame);
         let opts = self.frame_opts(comp, scale);
-        if urgent {
+        if urgent && !self.playback.playing {
+            self.frames.request_interactive(&self.render_source(), key, comp, t, opts);
+        } else if urgent {
             self.frames.request_urgent(&self.render_source(), key, comp, t, opts);
         } else {
             self.frames.request(&self.render_source(), key, comp, t, opts);
@@ -1226,7 +1236,12 @@ impl EffectcraftApp {
                         self.ui.status = e;
                     }
                 }
-                effectcraft_engine::Event::PurgeCaches => self.frames.clear(),
+                effectcraft_engine::Event::PurgeCaches => {
+                    self.frames.clear();
+                    panels::viewer::purge_textures(self, ctx);
+                    panels::viewers::purge_textures(self);
+                    ctx.request_repaint();
+                }
             }
         }
     }
@@ -1235,6 +1250,7 @@ impl EffectcraftApp {
         let ctx = ui.ctx().clone();
         self.auto.begin_frame();
         self.frames.set_context(&ctx);
+        self.frames.begin_secondary_paint();
         if self.session.render_job.is_some() {
             self.session.poll_render();
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
@@ -1316,6 +1332,7 @@ impl EffectcraftApp {
         panels::scriptui_view::show_windows(self, &ctx);
         panels::learn::coach(self, &ctx);
         self.draw_toast(ui, full);
+        self.frames.end_secondary_paint();
     }
 
     fn draw_toast(&mut self, ui: &mut egui::Ui, full: egui::Rect) {

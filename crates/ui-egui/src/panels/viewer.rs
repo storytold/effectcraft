@@ -17,6 +17,9 @@ use crate::state::Tool;
 use crate::theme::Tokens;
 use crate::{EffectcraftApp, widgets};
 
+#[cfg(test)]
+mod tests;
+
 /// Viewer mapping published each frame (for the control channel and other panels).
 #[derive(Clone, Copy, Debug)]
 pub struct ViewerMap {
@@ -327,6 +330,110 @@ fn parent_inverse(ctx: &EvalCtx, layer: &Layer) -> Mat3 {
     }
 }
 
+/// A pane's installed texture, independent of the raw shared frame cache.
+#[derive(Clone)]
+struct SecondaryTexture {
+    key: crate::frames::FrameKey,
+    display: u64,
+    texture: egui::TextureHandle,
+}
+
+fn secondary_id(slot: crate::frames::SecondarySlot) -> egui::Id {
+    egui::Id::new(("viewer-secondary", slot))
+}
+
+/// A purge or same-metadata footage reload invalidates installed pixels too.
+/// Ordinary RAM eviction leaves these textures available until their demand changes.
+pub(crate) fn purge_textures(app: &mut EffectcraftApp, ctx: &egui::Context) {
+    use crate::frames::SecondarySlot;
+    ctx.data_mut(|d| {
+        for slot in [SecondarySlot::Top, SecondarySlot::Front, SecondarySlot::Right, SecondarySlot::LockedSplit] {
+            d.remove::<SecondaryTexture>(secondary_id(slot));
+        }
+        d.remove::<(u64, egui::TextureHandle)>(egui::Id::new("viewer-display-tex"));
+    });
+    app.viewer_tex = None;
+    app.viewer_shown = None;
+    app.viewer_image = None;
+    if let Some((id, _, _)) = app.viewer_native.take()
+        && let Some(rs) = &app.wgpu
+    {
+        rs.renderer.write().free_texture(&id);
+    }
+    // A pending browser readback owns the old Arc; it must not refill the new slot.
+    app.viewer_readback = Default::default();
+    vt::set_texture_roi(ctx, None);
+}
+
+fn secondary_scale(fit: f32, ctx: &egui::Context) -> f64 {
+    let scale = f64::from(fit * ctx.pixels_per_point());
+    if scale.is_finite() { (scale * 8.0).ceil().clamp(1.0, 8.0) / 8.0 } else { 0.125 }
+}
+
+/// Request original CPU pixels without rendering during the UI redraw. Display conversion
+/// belongs to this pane's texture and never changes the shared preview cache.
+fn secondary_texture(
+    app: &EffectcraftApp,
+    ctx: &egui::Context,
+    slot: crate::frames::SecondarySlot,
+    cid: effectcraft_engine::project::ItemId,
+    t: Tick,
+    opts: effectcraft_engine::render::RenderOpts,
+    color_managed: bool,
+) -> Option<egui::TextureHandle> {
+    use std::hash::{Hash, Hasher};
+    let hash = |s: String| {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        s.hash(&mut h);
+        h.finish()
+    };
+    let comp = app.session.project.comp(cid)?;
+    let key = crate::frames::FrameKey {
+        revision: app.session.revision,
+        content: app.frames.content_of(&app.session.project, app.session.revision, cid),
+        comp: cid.0,
+        frame: comp.frame_rate.frame_at(t),
+        scale: (opts.scale * 1000.0) as u32,
+        view: hash(format!("{:?}", opts.view)),
+        // Exact ticks matter for expression-driven and subframe views.
+        opts: hash(format!("{opts:?}:{}", t.0)),
+    };
+    let display = if color_managed {
+        hash(format!(
+            "{:?}:{}:{:?}:{}",
+            app.session.project.settings, app.session.prefs_revision, app.session.state.viewer.simulation, app.session.state.viewer.display_color_management
+        ))
+    } else {
+        0
+    };
+    let id = secondary_id(slot);
+    let old: Option<SecondaryTexture> = ctx.data(|d| d.get_temp(id));
+    if let Some(old) = &old
+        && old.key == key
+        && old.display == display
+    {
+        app.frames.retain_secondary(slot, key);
+        return Some(old.texture.clone());
+    }
+    let mut src = app.render_source();
+    src.gpu = None;
+    src.gpu_display = false;
+    app.frames.request_secondary(&src, slot, key, cid, t, opts);
+    if let Some(crate::frames::FrameImage::Cpu(raw)) = app.frames.get(&key) {
+        let mut ci = (*raw).clone();
+        if color_managed && let Some(dc) = effectcraft_engine::viewer::DisplayColor::of(&app.session) {
+            let mut px: Vec<[u8; 4]> = ci.pixels.iter().map(|c| c.to_array()).collect();
+            dc.apply(&mut px);
+            ci = egui::ColorImage::new(ci.size, px.into_iter().map(|a| Color32::from_rgba_premultiplied(a[0], a[1], a[2], a[3])).collect());
+        }
+        let texture = ctx.load_texture(format!("viewer-secondary-{slot:?}"), ci, zoom_texture_options(app.session.prefs.viewer_zoom_smooth()));
+        ctx.data_mut(|d| d.insert_temp(id, SecondaryTexture { key, display, texture: texture.clone() }));
+        return Some(texture);
+    }
+    // A previous frame of this camera can stay visible while its replacement is pending.
+    old.filter(|old| old.key.comp == key.comp && old.key.view == key.view && old.display == display).map(|old| old.texture)
+}
+
 /// Draw the extra views of a 2- or 4-view layout and return the main view's rectangle.
 fn aux_views(
     app: &mut EffectcraftApp,
@@ -363,33 +470,31 @@ fn aux_views(
     let (cw, ch) = (comp.width as f32, comp.height as f32);
     let views = app.session.state.views3d.get(&cid).cloned().unwrap_or_default();
     let share = app.session.state.share_view_options;
-    for (i, (r, v)) in aux.into_iter().enumerate() {
+    for (r, v) in aux {
         p.rect_filled(r, 0.0, bg);
         let fit = ((r.width() - 20.0) / cw).min((r.height() - 20.0) / ch).max(0.01);
         let cr = Rect::from_center_size(r.center(), vec2(cw * fit, ch * fit));
-        let scale = (fit * ctx.pixels_per_point()).min(1.0) as f64;
+        let scale = secondary_scale(fit, &ctx);
         let cam = views.cam(v, comp.width as f64, comp.height as f64).state();
-        let key = {
-            use std::hash::{Hash, Hasher};
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            (app.session.revision, cid.0, t.0, i, scale.to_bits(), format!("{cam:?}")).hash(&mut h);
-            h.finish()
+        let slot = match v {
+            View3D::Front => crate::frames::SecondarySlot::Front,
+            View3D::Right => crate::frames::SecondarySlot::Right,
+            _ => crate::frames::SecondarySlot::Top,
         };
-        let id = egui::Id::new(("viewer-aux", i));
-        let cached: Option<(u64, egui::TextureHandle)> = ctx.data(|d| d.get_temp(id));
-        let tex = match cached {
-            Some((k, tex)) if k == key => tex,
-            _ => {
-                let opts = effectcraft_engine::render::RenderOpts { scale, view: comp.has_3d().then_some(cam), draft: true, ..Default::default() };
-                let img = app.session.render(cid, t, opts);
-                let tex = ctx.load_texture(format!("viewer-aux-{i}"), crate::frames::to_color_image(&img), egui::TextureOptions::LINEAR);
-                ctx.data_mut(|d| d.insert_temp(id, (key, tex.clone())));
-                tex
-            }
+        let opts = effectcraft_engine::render::RenderOpts {
+            scale,
+            view: comp.has_3d().then_some(cam),
+            draft: true,
+            nested_switches: app.session.prefs.general.switches_affect_nested_comps,
+            draft_shadows: app.session.prefs.three_d.realtime_shadows,
+            ..Default::default()
         };
+        let tex = secondary_texture(app, &ctx, slot, cid, t, opts, false);
         let b = comp.background;
         p.rect_filled(cr, 0.0, Color32::from_rgb((b[0] * 255.0) as u8, (b[1] * 255.0) as u8, (b[2] * 255.0) as u8));
-        p.image(tex.id(), cr, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+        if let Some(tex) = tex {
+            p.image(tex.id(), cr, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+        }
         p.rect_stroke(cr, 0.0, Stroke::new(1.0, Color32::from_black_alpha(160)), StrokeKind::Outside);
         if share && app.ui.viewer.safe_margins {
             for k in [0.9, 0.8] {
@@ -420,38 +525,23 @@ fn locked_pane(app: &mut EffectcraftApp, ui: &mut egui::Ui, full: Rect, bg: Colo
     let (cw, ch) = (comp.width as f32, comp.height as f32);
     let fit = ((r.width() - 20.0) / cw).min((r.height() - 44.0) / ch).max(0.01);
     let cr = Rect::from_center_size(r.center(), vec2(cw * fit, ch * fit));
-    let scale = (fit * ctx.pixels_per_point()).min(1.0) as f64;
+    let scale = secondary_scale(fit, &ctx);
     let t = app.session.time_of(lv.comp);
     let cam = (lv.view != View3D::ActiveCamera && comp.has_3d())
         .then(|| app.session.state.views3d.get(&lv.comp).cloned().unwrap_or_default().cam(lv.view, comp.width as f64, comp.height as f64).state());
-    let dc = effectcraft_engine::viewer::DisplayColor::of(&app.session);
-    let key = {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        (app.session.revision, lv.comp.0, t.0, scale.to_bits(), format!("{cam:?}{}", dc.is_some())).hash(&mut h);
-        h.finish()
+    let opts = effectcraft_engine::render::RenderOpts {
+        scale,
+        view: cam,
+        nested_switches: app.session.prefs.general.switches_affect_nested_comps,
+        draft_shadows: app.session.prefs.three_d.realtime_shadows,
+        ..Default::default()
     };
-    let id = egui::Id::new("viewer-locked");
-    let cached: Option<(u64, egui::TextureHandle)> = ctx.data(|d| d.get_temp(id));
-    let tex = match cached {
-        Some((k, tex)) if k == key => tex,
-        _ => {
-            let opts = effectcraft_engine::render::RenderOpts { scale, view: cam, ..Default::default() };
-            let img = app.session.render(lv.comp, t, opts);
-            let mut ci = crate::frames::to_color_image(&img);
-            if let Some(dc) = dc {
-                let mut px: Vec<[u8; 4]> = ci.pixels.iter().map(|c| c.to_array()).collect();
-                dc.apply(&mut px);
-                ci = egui::ColorImage::new(ci.size, px.into_iter().map(|a| Color32::from_rgba_premultiplied(a[0], a[1], a[2], a[3])).collect());
-            }
-            let tex = ctx.load_texture("viewer-locked", ci, egui::TextureOptions::LINEAR);
-            ctx.data_mut(|d| d.insert_temp(id, (key, tex.clone())));
-            tex
-        }
-    };
+    let tex = secondary_texture(app, &ctx, crate::frames::SecondarySlot::LockedSplit, lv.comp, t, opts, true);
     let b = comp.background;
     p.rect_filled(cr, 0.0, Color32::from_rgb((b[0] * 255.0) as u8, (b[1] * 255.0) as u8, (b[2] * 255.0) as u8));
-    p.image(tex.id(), cr, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+    if let Some(tex) = tex {
+        p.image(tex.id(), cr, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+    }
     p.rect_stroke(cr, 0.0, Stroke::new(1.0, Color32::from_black_alpha(160)), StrokeKind::Outside);
     let label = format!("Locked: {name} \u{2014} {}", if comp.has_3d() { lv.view.label() } else { "Active Camera" });
     p.text(r.left_top() + vec2(8.0, 8.0), Align2::LEFT_TOP, &label, Tokens::ui(11.0), Color32::from_white_alpha(210));
@@ -578,6 +668,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         } else if let Some((_, k)) = app.viewer_shown.as_mut() {
             // The same frame at a later revision (an edit elsewhere, an undo): it shows that one.
             k.revision = key.revision;
+            app.frames.viewer_installed(key);
         }
     }
     if app.ui.viewer.transparency_grid {
@@ -1916,4 +2007,5 @@ fn show_frame(app: &mut EffectcraftApp, ctx: &egui::Context, key: crate::frames:
             app.viewer_image = None;
         }
     }
+    app.frames.viewer_installed(key);
 }

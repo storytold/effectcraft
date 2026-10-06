@@ -520,6 +520,7 @@ pub fn inspect(app: &EffectcraftApp, ctx: &egui::Context) -> Value {
         "elements": app.auto.previous.len(),
         "dialog": app.dialog.map(|d| format!("{d:?}")),
         "renderMs": app.frames.last_ms.lock().map(|v| *v).unwrap_or(0.0),
+        "viewerTiming": app.frames.viewer_timing(),
     })
 }
 

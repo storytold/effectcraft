@@ -14,8 +14,11 @@ use serde_json::json;
 
 use crate::EffectcraftApp;
 use crate::dock::PanelKind;
-use crate::frames::{FrameImage, FrameKey};
+use crate::frames::{FrameImage, FrameKey, SecondarySlot};
 use crate::theme::Tokens;
+
+#[cfg(test)]
+mod tests;
 
 /// A passive viewer's texture: the frame it shows.
 pub enum PassiveTexture {
@@ -92,10 +95,15 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, id: u32, rect: Rect) {
             // Render at the size it is drawn (eighths, so resizing reuses frames), at most 100%.
             let scale = ((fit * ctx.pixels_per_point()) as f64 * 8.0).ceil().clamp(1.0, 8.0) / 8.0;
             let frame = c.frame_rate.frame_at(app.session.time_of(cid));
-            app.request_frame(cid, frame, scale);
             let key = app.frame_key(cid, frame, scale);
-            if let Some(img) = app.frames.get(&key) {
-                set_texture(app, &ctx, id, key, img);
+            let slot = SecondarySlot::Viewer(id);
+            if app.passive_tex.get(&id).is_some_and(|(installed, _)| *installed == key) {
+                app.frames.retain_secondary(slot, key);
+            } else {
+                app.frames.request_secondary(&app.render_source(), slot, key, cid, c.frame_rate.tick_of(frame), app.frame_opts(cid, scale));
+                if let Some(img) = app.frames.get(&key) {
+                    set_texture(app, &ctx, id, key, img);
+                }
             }
             match app.passive_tex.get(&id).filter(|(k, _)| k.comp == cid.0) {
                 Some((_, tex)) => {
@@ -155,6 +163,13 @@ fn set_texture(app: &mut EffectcraftApp, ctx: &egui::Context, id: u32, key: Fram
 fn free(app: &EffectcraftApp, tex: Option<PassiveTexture>) {
     if let (Some(PassiveTexture::Gpu(id, _)), Some(rs)) = (tex, &app.wgpu) {
         rs.renderer.write().free_texture(&id);
+    }
+}
+
+/// Invalidate every installed passive frame, releasing registered GPU textures as well.
+pub(crate) fn purge_textures(app: &mut EffectcraftApp) {
+    for (_, (_, texture)) in std::mem::take(&mut app.passive_tex) {
+        free(app, Some(texture));
     }
 }
 
