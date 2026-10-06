@@ -33,7 +33,9 @@ impl Accelerator for TimedAccel {
     }
     fn comp_frame(&self, _r: &Renderer, _comp: ItemId, _t: Tick) -> Option<crate::Image> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        std::thread::sleep(self.delay);
+        if !self.delay.is_zero() {
+            std::thread::sleep(self.delay);
+        }
         // The centre of the comp, as the CPU draws it (a red solid).
         self.handle.then(|| {
             let mut img = crate::Image::new(200, 100);
@@ -101,13 +103,20 @@ fn auto_backend_moves_light_comps_to_the_cpu() {
 }
 
 #[test]
-fn auto_backend_keeps_fast_accelerators() {
-    // As fast as the CPU (ties stay on the accelerator): every frame but the CPU warm-up and
-    // re-probes.
-    let (p, cid) = project();
-    let fast = TimedAccel::new(0, true);
-    let asked = frames(&p, cid, &fast, Backend::Auto, 40);
-    assert!(asked >= 36, "asked {asked} of 40");
+fn auto_pick_keeps_equally_fast_accelerators() {
+    // Fixed measured costs prove the tie policy without treating a zero-delay mock's
+    // allocation and scheduler time as equal to a CPU render on a busy machine.
+    let pick = AutoPick::default();
+    let key = AutoKey::new(ItemId(7), 1.0, false);
+    let mut gpu_frames = 0;
+    for _ in 0..40 {
+        let gpu = pick.choose(key);
+        gpu_frames += usize::from(gpu);
+        pick.record(key, gpu, 1.0);
+    }
+    assert_eq!(gpu_frames, 40 - AutoPick::WARMUP as usize);
+    let stats = pick.stats(key).unwrap();
+    assert_eq!((stats.cpu_ms, stats.gpu_ms), (Some(1.0), Some(1.0)));
 }
 
 #[test]
@@ -148,4 +157,51 @@ fn auto_pick_follows_changing_costs() {
     // Keys are separate per comp, scale and path.
     assert!(pick.stats(AutoKey::new(ItemId(7), 1.0, true)).is_none());
     assert!(pick.stats(AutoKey::new(ItemId(7), 0.5, false)).is_none());
+}
+
+#[test]
+fn auto_pick_recovers_from_zero_resolution_samples() {
+    let pick = AutoPick::default();
+    let key = AutoKey::new(ItemId(7), 1.0, false);
+    for _ in 0..AutoPick::WARMUP {
+        pick.record(key, true, 0.0);
+        pick.record(key, false, 1.0);
+    }
+    assert_eq!(pick.stats(key).unwrap().gpu_ms, Some(0.0));
+    // A coarse clock can round tiny warm-up work to zero. The first positive
+    // measurement must establish a baseline, rather than be capped at twice zero.
+    pick.record(key, true, 10.0);
+    assert_eq!(pick.stats(key).unwrap().gpu_ms, Some(10.0));
+    assert!(!pick.choose(key), "the genuinely faster CPU should now win");
+    pick.record(key, true, 100.0);
+    assert_eq!(pick.stats(key).unwrap().gpu_ms, Some(13.0));
+    pick.record(key, true, -0.0);
+    assert_eq!(pick.stats(key).unwrap().gpu_ms, Some(6.5));
+}
+
+#[test]
+fn auto_pick_ignores_invalid_measurements_without_changing_history() {
+    let pick = AutoPick::default();
+    let key = AutoKey::new(ItemId(7), 1.0, false);
+    let invalid = [f64::NAN, -1.0, f64::INFINITY, f64::NEG_INFINITY];
+    for ms in invalid {
+        pick.record(key, true, ms);
+        pick.record(key, false, ms);
+    }
+    assert!(pick.stats(key).is_none(), "invalid timings must not begin warm-up");
+    for _ in 0..AutoPick::WARMUP {
+        pick.record(key, true, 2.0);
+        pick.record(key, false, 1.0);
+    }
+    pick.declined(key);
+    let before = pick.stats(key).unwrap();
+    for ms in invalid {
+        pick.record(key, true, ms);
+        pick.record(key, false, ms);
+    }
+    let after = pick.stats(key).unwrap();
+    assert_eq!((after.cpu_ms, after.gpu_ms), (before.cpu_ms, before.gpu_ms));
+    assert_eq!((after.cpu_frames, after.gpu_frames), (before.cpu_frames, before.gpu_frames));
+    assert_eq!(after.since_probe, before.since_probe);
+    assert_eq!(after.declined, before.declined);
 }

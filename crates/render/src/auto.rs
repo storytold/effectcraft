@@ -100,8 +100,12 @@ impl AutoPick {
     /// The warm-up keeps the fastest of its counted frames; after that the average follows
     /// improvements quickly and slow-downs gradually, and a single frame counts at most twice
     /// the average (a stall of the machine does not flip the choice for a whole re-probe
-    /// period).
+    /// period). Invalid measurements are ignored; a zero estimate from clock resolution
+    /// takes its first positive post-warm-up sample as a new baseline.
     pub fn record(&self, key: AutoKey, gpu: bool, ms: f64) {
+        if !ms.is_finite() || ms < 0.0 {
+            return;
+        }
         let Ok(mut m) = self.stats.lock() else { return };
         let s = m.entry(key).or_default();
         let (avg, frames) = if gpu { (&mut s.gpu_ms, &mut s.gpu_frames) } else { (&mut s.cpu_ms, &mut s.cpu_frames) };
@@ -115,6 +119,7 @@ impl AutoPick {
         *avg = Some(match *avg {
             None => ms,
             Some(a) if *frames <= Self::WARMUP => a.min(ms),
+            Some(0.0) => ms,
             Some(a) if ms < a => a + (ms - a) * Self::ALPHA_DOWN,
             Some(a) => a + (ms.min(2.0 * a) - a) * Self::ALPHA,
         });
