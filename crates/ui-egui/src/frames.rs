@@ -933,6 +933,50 @@ mod tests {
         assert_eq!(at(&s, b), b0);
     }
 
+    /// Issue #103: the Audio, Lock and Shy switches and Hide Shy Layers don't change a pixel, so
+    /// the comp keeps its content and its cached frames (a nested comp's too); the Video switch
+    /// still changes it, and undo finds every state's frames again.
+    #[test]
+    fn audio_lock_and_shy_switches_keep_the_cached_frames() {
+        use effectcraft_engine::Session;
+        use serde_json::json;
+        let mut s = Session::default();
+        let inner = ItemId(s.execute("comp.new", json!({"name": "In", "width": 8, "height": 8, "duration": 1})).unwrap()["comp"].as_u64().unwrap());
+        s.execute("layer.newSolid", json!({"comp": inner.0, "color": "#ff0000"})).unwrap();
+        let a = ItemId(s.execute("comp.new", json!({"name": "A", "width": 8, "height": 8, "duration": 1})).unwrap()["comp"].as_u64().unwrap());
+        s.execute("layer.newSolid", json!({"comp": a.0, "color": "#00ff00"})).unwrap();
+        s.execute("layer.addItem", json!({"comp": a.0, "item": inner.0})).unwrap();
+        let f = Frames::default();
+        let frame = |s: &Session| FrameKey { content: f.content_of(&s.project, s.revision, a), ..key(0, 0, 0) };
+        let k0 = frame(&s);
+        insert(&f, k0);
+        let switches = [("audio", false), ("lock", true), ("shy", true)];
+        for (sw, v) in switches {
+            s.execute("layer.setSwitch", json!({"comp": a.0, "layers": ["#1", "#2"], "switch": sw, "value": v})).unwrap();
+            assert_eq!(frame(&s), k0, "{sw}");
+            s.execute("layer.setSwitch", json!({"comp": inner.0, "layers": ["#1"], "switch": sw, "value": v})).unwrap();
+            assert_eq!(frame(&s), k0, "{sw} in the nested comp");
+        }
+        s.execute("comp.setSwitch", json!({"comp": a.0, "switch": "hideShy", "value": true})).unwrap();
+        assert_eq!(frame(&s), k0, "Hide Shy Layers");
+        assert!(f.is_cached(&frame(&s)));
+        // The Video switch changes the pixels.
+        s.execute("layer.setSwitch", json!({"comp": a.0, "layers": ["#1"], "switch": "video", "value": false})).unwrap();
+        let k1 = frame(&s);
+        assert_ne!(k1, k0, "video");
+        assert!(!f.is_cached(&k1));
+        insert(&f, k1);
+        // Undo walks back through every state: each finds its frame.
+        s.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(frame(&s), k0);
+        for _ in 0..switches.len() * 2 {
+            s.execute("edit.undo", json!({})).unwrap();
+            assert_eq!(frame(&s), k0);
+        }
+        s.execute("edit.redo", json!({})).unwrap();
+        assert_eq!(frame(&s), k0);
+    }
+
     #[test]
     fn a_long_drag_keeps_a_bounded_number_of_states() {
         use effectcraft_engine::Session;

@@ -339,6 +339,37 @@ fn edits_invalidate_cached_layers() {
     }
 }
 
+/// Issue #103: the Audio, Lock and Shy switches (and the comp's Hide Shy Layers) don't change a
+/// pixel, so they keep every cached layer: nothing re-renders. The disk cache's comp content key
+/// stays too, while the Video switch still changes it.
+#[test]
+fn audio_lock_and_shy_switches_keep_cached_layers() {
+    let (p, cid) = cache_scene();
+    let t = Tick::from_seconds_f64(0.5);
+    let cache = crate::LayerCache::default();
+    let orig = render_cached(&p, cid, t, Some(&cache));
+    let s0 = cache.stats();
+    render_cached(&p, cid, t, Some(&cache));
+    let s1 = cache.stats();
+    let mut q = p.clone();
+    let c = q.comp_mut(cid).unwrap();
+    c.hide_shy = true;
+    for l in &mut c.layers {
+        l.switches.audio = false;
+        l.switches.locked = true;
+        l.switches.shy = true;
+    }
+    let again = render_cached(&q, cid, t, Some(&cache));
+    let s2 = cache.stats();
+    assert_same(&again, &orig, "same pixels");
+    assert_eq!((s2.hits - s1.hits, s2.misses - s1.misses), (s1.hits - s0.hits, s1.misses - s0.misses), "nothing re-rendered: {s0:?} {s1:?} {s2:?}");
+    assert!(s2.hits > s1.hits);
+    let key = |p: &Project| crate::disk_cache::comp_content_key(p, cid);
+    assert_eq!(key(&q), key(&p), "the disk cache keeps its frames");
+    q.comp_mut(cid).unwrap().layers[2].switches.video = false;
+    assert_ne!(key(&q), key(&p), "the Video switch changes the frames");
+}
+
 #[test]
 fn time_dependent_effects_rerender_every_frame() {
     let (mut p, cid, comp) = setup();

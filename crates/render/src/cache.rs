@@ -21,7 +21,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 
 use effectcraft_effects::Buf;
-use effectcraft_project::{ItemKind, Layer, LayerSource, Node, PropGroup};
+use effectcraft_project::{Comp, ItemKind, Layer, LayerSource, Node, PropGroup, Switches};
 
 use crate::eval::EvalCtx;
 
@@ -412,6 +412,131 @@ impl std::fmt::Write for KeyHasher {
     }
 }
 
+/// A layer's switches as far as its pixels go: the ones that can't change a rendered pixel are
+/// set to their defaults, so cache keys don't see them and toggling them keeps every cached frame
+/// (issue #103). Those are Audio (only the audio mix reads it, `crate::audio`; effects that read
+/// another layer's audio read its footage whatever the switch), Lock and Shy (Timeline editing
+/// and display only: the renderer draws locked and shy layers alike).
+pub fn pixel_switches(s: &Switches) -> Switches {
+    Switches { audio: true, locked: false, shy: false, ..s.clone() }
+}
+
+/// `comp` as far as its pixels go: its layers' [`pixel_switches`] and Hide Shy Layers off (it
+/// hides shy layers in the Timeline, not in the render), or `None` when it already is.
+pub fn pixel_comp(comp: &Comp) -> Option<Comp> {
+    if !comp.hide_shy && comp.layers.iter().all(|l| l.switches == pixel_switches(&l.switches)) {
+        return None;
+    }
+    let mut c = comp.clone();
+    c.hide_shy = false;
+    for l in &mut c.layers {
+        l.switches = pixel_switches(&l.switches);
+    }
+    Some(c)
+}
+
+/// Do `a` and `b` render the same pixels: are they equal but for what [`pixel_comp`] ignores?
+/// (Without copying either. The fields are listed in full, so a new one can't be missed.)
+pub fn same_pixels(a: &Comp, b: &Comp) -> bool {
+    let Comp {
+        width,
+        height,
+        pixel_aspect,
+        frame_rate,
+        duration,
+        display_start,
+        background,
+        work_area,
+        layers,
+        markers,
+        shutter_angle,
+        shutter_phase,
+        motion_blur_samples,
+        motion_blur_adaptive_limit,
+        renderer,
+        hide_shy: _,
+        enable_motion_blur,
+        enable_frame_blending,
+        draft_3d,
+        preserve_frame_rate,
+        preserve_resolution,
+        poster_time,
+        global_light,
+        guides,
+        essential,
+    } = a;
+    *width == b.width
+        && *height == b.height
+        && *pixel_aspect == b.pixel_aspect
+        && *frame_rate == b.frame_rate
+        && *duration == b.duration
+        && *display_start == b.display_start
+        && *background == b.background
+        && *work_area == b.work_area
+        && *markers == b.markers
+        && *shutter_angle == b.shutter_angle
+        && *shutter_phase == b.shutter_phase
+        && *motion_blur_samples == b.motion_blur_samples
+        && *motion_blur_adaptive_limit == b.motion_blur_adaptive_limit
+        && *renderer == b.renderer
+        && *enable_motion_blur == b.enable_motion_blur
+        && *enable_frame_blending == b.enable_frame_blending
+        && *draft_3d == b.draft_3d
+        && *preserve_frame_rate == b.preserve_frame_rate
+        && *preserve_resolution == b.preserve_resolution
+        && *poster_time == b.poster_time
+        && *global_light == b.global_light
+        && *guides == b.guides
+        && *essential == b.essential
+        && layers.len() == b.layers.len()
+        && layers.iter().zip(&b.layers).all(|(x, y)| same_layer_pixels(x, y))
+}
+
+fn same_layer_pixels(a: &Layer, b: &Layer) -> bool {
+    let Layer {
+        id,
+        name,
+        source,
+        label,
+        comment,
+        start_time,
+        in_point,
+        out_point,
+        stretch,
+        switches,
+        blend_mode,
+        preserve_transparency,
+        track_matte,
+        parent,
+        markers,
+        markers_locked,
+        auto_orient,
+        environment,
+        environment_background,
+        props,
+    } = a;
+    *id == b.id
+        && *name == b.name
+        && *source == b.source
+        && *label == b.label
+        && *comment == b.comment
+        && *start_time == b.start_time
+        && *in_point == b.in_point
+        && *out_point == b.out_point
+        && *stretch == b.stretch
+        && pixel_switches(switches) == pixel_switches(&b.switches)
+        && *blend_mode == b.blend_mode
+        && *preserve_transparency == b.preserve_transparency
+        && *track_matte == b.track_matte
+        && *parent == b.parent
+        && *markers == b.markers
+        && *markers_locked == b.markers_locked
+        && *auto_orient == b.auto_orient
+        && *environment == b.environment
+        && *environment_background == b.environment_background
+        && *props == b.props
+}
+
 fn hash_debug(h: &mut KeyHasher, v: &impl std::fmt::Debug) {
     use std::fmt::Write;
     let _ = write!(h, "{v:?}");
@@ -558,7 +683,7 @@ fn key_any(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool, fo
     draft.hash(&mut h);
     layer.id.hash(&mut h);
     hash_debug(&mut h, &layer.source);
-    hash_debug(&mut h, &layer.switches);
+    hash_debug(&mut h, &pixel_switches(&layer.switches));
     // Mask motion blur and effects that read the shutter depend on whether the layer is motion
     // blurred in this render and on the comp's shutter.
     if layer.masks().is_some_and(|m| !m.children.is_empty()) || layer.effects().is_some_and(|fx| !fx.children.is_empty()) {

@@ -810,7 +810,15 @@ pub fn comp_content_key(project: &effectcraft_project::Project, comp: effectcraf
         let Some(it) = project.item(id) else { continue };
         h.write_u64(id.0);
         h.write(it.name.as_bytes());
-        hash_debug(&mut h, &it.kind);
+        // Switches that can't change a pixel (Audio, Lock, Shy, Hide Shy Layers) are left out:
+        // toggling them keeps the frames (issue #103).
+        match &it.kind {
+            ItemKind::Comp(c) => match crate::cache::pixel_comp(c) {
+                Some(pc) => hash_debug(&mut h, &ItemKind::Comp(std::sync::Arc::new(pc))),
+                None => hash_debug(&mut h, &it.kind),
+            },
+            k => hash_debug(&mut h, k),
+        }
         if let ItemKind::Footage(f) = &it.kind {
             footage_stamp(&mut h, f);
         }
