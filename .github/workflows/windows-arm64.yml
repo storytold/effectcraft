@@ -1,0 +1,149 @@
+# Windows on ARM (#94): package the ARM64 release the way release.yml does (cross-compiled on an
+# x64 runner, unsigned here), then install that MSI on a Windows 11 ARM64 runner and run it, and
+# run the test suite natively on ARM64.
+name: Windows ARM64
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - "**/Cargo.toml"
+      - "**/build.rs"
+      - .github/workflows/windows-arm64.yml
+      - packaging/windows/**
+  schedule:
+    - cron: "41 4 * * 1" # weekly, so drift in the runner images shows up
+  workflow_dispatch:
+
+concurrency:
+  group: windows-arm64-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  package:
+    name: package (cross-compiled on x64)
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          targets: aarch64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: windows-arm64-package
+      - name: Install WiX
+        shell: pwsh
+        run: dotnet tool install --global wix --version 5.0.2
+      - name: Build and package (unsigned)
+        shell: pwsh
+        env:
+          DIST: ${{ github.workspace }}\dist\arm64
+        run: ./packaging/windows/package.ps1 -Arch arm64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: effectcraft-windows-arm64
+          path: dist/arm64/*
+          if-no-files-found: error
+          retention-days: 7
+
+  install:
+    name: install and run on ARM64
+    needs: package
+    runs-on: windows-11-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: effectcraft-windows-arm64
+          path: dist
+      - name: Install the MSI, check it, run it, uninstall it
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $msi = (Get-ChildItem dist/*.msi | Select-Object -First 1).FullName
+          $p = Start-Process msiexec.exe -ArgumentList '/i', "`"$msi`"", '/qn', '/l*v', 'install.log' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content install.log -Tail 60; throw "msiexec /i exited $($p.ExitCode)" }
+          $dir = Join-Path $env:ProgramFiles 'EffectCraft'
+          foreach ($check in @(@('effectcraft.exe', 2), @('effectcraft-cli.exe', 3))) {
+            $path = Join-Path $dir $check[0]
+            if (-not (Test-Path $path)) { Get-ChildItem -Recurse $env:ProgramFiles -Filter $check[0] | Select-Object -First 3; throw "$($check[0]) not installed in $dir" }
+            $bytes = [System.IO.File]::ReadAllBytes($path)
+            $pe = [BitConverter]::ToInt32($bytes, 0x3C)
+            $machine = [BitConverter]::ToUInt16($bytes, $pe + 4)
+            $subsystem = [BitConverter]::ToUInt16($bytes, $pe + 0x5C)
+            if ($machine -ne 0xAA64) { throw "$($check[0]) is for machine 0x$('{0:X}' -f $machine), not ARM64" }
+            if ($subsystem -ne $check[1]) { throw "$($check[0]) has PE subsystem $subsystem, expected $($check[1])" }
+            Write-Output "ok $path (ARM64, PE subsystem $subsystem)"
+          }
+
+          # The installed CLI runs natively (CPU compositor, no GPU needed). Build a small project
+          # through the engine, save it, reopen it, edit and read it back, render a frame, encode a
+          # short H.264 clip, export Lottie and run a script.
+          $cli = Join-Path $dir 'effectcraft-cli.exe'
+          # Pass the JSON arguments' quotes through to the CLI unchanged.
+          $PSNativeCommandArgumentPassing = 'Standard'
+          function Invoke-Cli {
+            $out = & $cli @args 2>&1 | Out-String
+            if ($LASTEXITCODE -ne 0) { Write-Output $out; throw "effectcraft-cli $($args -join ' ') exited $LASTEXITCODE" }
+            return $out
+          }
+          New-Item -ItemType Directory -Force smoke | Out-Null
+          Set-Location smoke
+          Invoke-Cli --version
+          Invoke-Cli info --demo --json | Out-Null
+          Invoke-Cli run --empty `
+            comp.new '{"name":"Smoke","width":320,"height":180,"frameRate":10,"duration":1}' `
+            layer.newSolid '{"name":"Bg","color":"#204060"}' `
+            layer.newText '{"text":"Hello ARM64","size":32,"fill":"#ffffff","name":"Title"}' `
+            effect.apply '{"layer":"Title","effect":"Gaussian Blur"}' `
+            --save-as smoke.ecproj | Out-Null
+          if (-not (Test-Path smoke.ecproj)) { throw 'smoke.ecproj was not saved' }
+          Invoke-Cli set Smoke Title effects/#1/blurriness 4 smoke.ecproj --save | Out-Null
+          Invoke-Cli set Smoke Title transform/position '[60,90]' --time 0 smoke.ecproj --save | Out-Null
+          Invoke-Cli set Smoke Title transform/position '[260,90]' --time 0.9 smoke.ecproj --save | Out-Null
+          $blur = Invoke-Cli get Smoke Title effects/#1/blurriness smoke.ecproj --json
+          if ($blur -notmatch '"value":\s*4(\.0)?\b') { Write-Output $blur; throw 'blurriness did not read back as 4' }
+          $pos = Invoke-Cli get Smoke Title transform/position --time 0.45 smoke.ecproj --json
+          if ($pos -notmatch '"value":\[160(\.0)?,90(\.0)?') { Write-Output $pos; throw 'position did not interpolate to [160,90] at 0.45 s' }
+          Invoke-Cli render-frame --comp Smoke --time 0.5 --out frame.png smoke.ecproj | Out-Null
+          Invoke-Cli render --comp Smoke --format h264 --out clip.mp4 smoke.ecproj | Out-Null
+          Invoke-Cli exec file.exportLottie '{"comp":"Smoke","path":"smoke.json"}' smoke.ecproj | Out-Null
+          $script = Invoke-Cli script --eval 'app.project.activeItem.layer(1).name' smoke.ecproj
+          if ($script -notmatch 'Title') { Write-Output $script; throw 'the script did not read the Title layer' }
+          foreach ($f in 'frame.png', 'clip.mp4', 'smoke.json') {
+            if (-not (Test-Path $f) -or (Get-Item $f).Length -eq 0) { throw "$f was not written" }
+            Write-Output "ok $f ($((Get-Item $f).Length) bytes)"
+          }
+          Set-Location ..
+          Write-Output 'ok effectcraft-cli: built, saved, reopened, edited, rendered, encoded and exported a project on ARM64'
+
+          $p = Start-Process msiexec.exe -ArgumentList '/x', "`"$msi`"", '/qn' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "msiexec /x exited $($p.ExitCode)" }
+          if (Test-Path (Join-Path $dir 'effectcraft.exe')) { throw 'uninstall left effectcraft.exe behind' }
+          Write-Output 'ok uninstalled'
+
+  test:
+    name: test (native ARM64)
+    runs-on: windows-11-arm
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: windows-arm64-test
+      - name: Test
+        # GPU tests skip themselves when the runner has no adapter (as on FreeBSD and CI Linux).
+        run: cargo test --workspace --locked

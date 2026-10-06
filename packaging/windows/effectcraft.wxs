@@ -30,6 +30,7 @@
     <Property Id="ARPURLUPDATEINFO" Value="https://getartcraft.com/apps/effectcraft" />
     <Property Id="ARPHELPLINK" Value="https://discord.gg/artcraft" />
 
+    <!-- Program Files for -arch x64 and arm64, Program Files (x86) for -arch x86. -->
     <StandardDirectory Id="ProgramFiles6432Folder">
       <Directory Id="INSTALLFOLDER" Name="EffectCraft" />
     </StandardDirectory>

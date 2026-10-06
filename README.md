@@ -179,7 +179,12 @@ See [docs/agents.md](docs/agents.md) and [docs/control-protocol.md](docs/control
 
 ## Get started
 
-You need [Rust](https://rustup.rs/) 1.95 or newer.
+Installers for macOS, Windows and Linux, and the web build, are on the
+[Releases page](https://github.com/storytold/effectcraft/releases). Windows builds come for x64,
+x86 and ARM64 (Windows on ARM, no emulation); every ARM64 change is installed and tested on ARM64
+hardware in CI.
+
+To build from source you need [Rust](https://rustup.rs/) 1.95 or newer.
 
 ```sh
 git clone https://github.com/storytold/effectcraft
