@@ -74,28 +74,84 @@ pub struct DirectorySource {
 impl DirectorySource {
     /// The platform's standard font folders.
     pub fn system() -> Self {
-        let mut dirs: Vec<PathBuf> = Vec::new();
-        let home = std::env::var_os("HOME").map(PathBuf::from);
-        if cfg!(target_os = "macos") {
+        Self { dirs: system_font_dirs(FontPlatform::current(), |k| std::env::var_os(k)) }
+    }
+}
+
+/// Which family of operating system to look for font folders on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FontPlatform {
+    MacOs,
+    Windows,
+    /// Linux, the BSDs and other fontconfig-style Unixes.
+    Unix,
+    /// No font folders (the web).
+    None,
+}
+
+impl FontPlatform {
+    /// The platform this build runs on.
+    pub fn current() -> Self {
+        if cfg!(target_arch = "wasm32") {
+            Self::None
+        } else if cfg!(target_os = "macos") {
+            Self::MacOs
+        } else if cfg!(windows) {
+            Self::Windows
+        } else if cfg!(unix) {
+            Self::Unix
+        } else {
+            Self::None
+        }
+    }
+}
+
+/// The font folders to scan on `platform`, given the environment (`env("WINDIR")`, …). Pure, so
+/// every platform's list can be tested anywhere.
+///
+/// Windows: the system folder `%WINDIR%\Fonts` (falling back to `%SystemRoot%`, then
+/// `C:\Windows`) and the per-user folder `%LOCALAPPDATA%\Microsoft\Windows\Fonts` that
+/// "Install" (without "for all users") puts fonts in since Windows 10 1809.
+pub fn system_font_dirs(platform: FontPlatform, env: impl Fn(&str) -> Option<std::ffi::OsString>) -> Vec<PathBuf> {
+    let var = |k: &str| env(k).filter(|v| !v.is_empty());
+    let home = var("HOME").map(PathBuf::from);
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    match platform {
+        FontPlatform::MacOs => {
             dirs.extend(["/System/Library/Fonts", "/Library/Fonts"].map(PathBuf::from));
             if let Some(h) = &home {
                 dirs.push(h.join("Library/Fonts"));
             }
-        } else if cfg!(windows) {
-            let win = std::env::var_os("WINDIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("C:\\Windows"));
-            dirs.push(win.join("Fonts"));
-            if let Some(l) = std::env::var_os("LOCALAPPDATA") {
-                dirs.push(PathBuf::from(l).join("Microsoft\\Windows\\Fonts"));
+        }
+        FontPlatform::Windows => {
+            // Joined with a backslash rather than `Path::join` so the list is the same whichever OS
+            // builds it (tests run on macOS and Linux too).
+            let win_join = |base: std::ffi::OsString, rel: &str| {
+                let mut p = base;
+                if !p.to_string_lossy().ends_with(['\\', '/']) {
+                    p.push("\\");
+                }
+                p.push(rel);
+                PathBuf::from(p)
+            };
+            let windir = var("WINDIR").or_else(|| var("SystemRoot")).unwrap_or_else(|| "C:\\Windows".into());
+            dirs.push(win_join(windir, "Fonts"));
+            if let Some(l) = var("LOCALAPPDATA") {
+                dirs.push(win_join(l, "Microsoft\\Windows\\Fonts"));
+            } else if let Some(u) = var("USERPROFILE") {
+                dirs.push(win_join(u, "AppData\\Local\\Microsoft\\Windows\\Fonts"));
             }
-        } else if cfg!(unix) && !cfg!(target_arch = "wasm32") {
+        }
+        FontPlatform::Unix => {
             dirs.extend(["/usr/share/fonts", "/usr/local/share/fonts"].map(PathBuf::from));
             if let Some(h) = &home {
                 dirs.push(h.join(".local/share/fonts"));
                 dirs.push(h.join(".fonts"));
             }
         }
-        Self { dirs }
+        FontPlatform::None => {}
     }
+    dirs
 }
 
 fn walk(dir: &std::path::Path, depth: u32, out: &mut Vec<PathBuf>) {
@@ -316,7 +372,7 @@ pub fn scan_system() -> usize {
     if system_scanned() {
         return 0;
     }
-    let n = if cfg!(target_arch = "wasm32") { 0 } else { add_source(&DirectorySource::system()) };
+    let n = if FontPlatform::current() == FontPlatform::None { 0 } else { add_source(&DirectorySource::system()) };
     db().write().unwrap_or_else(|e| e.into_inner()).scanned = true;
     n
 }
@@ -345,7 +401,9 @@ pub fn native_families() -> std::collections::BTreeMap<String, String> {
     all_faces().into_iter().filter_map(|f| Some((f.info.family.clone(), f.info.native_family.clone()?))).collect()
 }
 
-/// Families with their style names, sorted by family; styles in weight order.
+/// Families with their style names, sorted by family; styles in weight order. Includes the
+/// system fonts: the first call scans the system font folders (once per process; nothing to scan
+/// on the web), so a font menu never shows only the bundled families (#100).
 pub fn families() -> Vec<(String, Vec<String>)> {
     let mut m: std::collections::BTreeMap<String, Vec<(bool, u16, String)>> = Default::default();
     for f in all_faces() {
@@ -652,6 +710,42 @@ mod tests {
         // Inter Bold Italic: nearest is Italic (400) → synth bold
         let bi = resolve("Inter", "Bold Italic");
         assert!(face(bi.face).info.italic && bi.synth_bold && !bi.synth_italic);
+    }
+
+    fn env<'a>(vars: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<std::ffi::OsString> + 'a {
+        move |k| vars.iter().find(|(n, _)| *n == k).map(|(_, v)| (*v).into())
+    }
+
+    fn dirs(p: FontPlatform, vars: &[(&str, &str)]) -> Vec<String> {
+        system_font_dirs(p, env(vars)).into_iter().map(|d| d.to_string_lossy().into_owned()).collect()
+    }
+
+    /// #100: Windows scans the system and the per-user font folders, from the environment.
+    #[test]
+    fn windows_font_dirs() {
+        let vars = [("WINDIR", "C:\\WINDOWS"), ("LOCALAPPDATA", "C:\\Users\\ana\\AppData\\Local"), ("USERPROFILE", "C:\\Users\\ana")];
+        assert_eq!(dirs(FontPlatform::Windows, &vars), ["C:\\WINDOWS\\Fonts", "C:\\Users\\ana\\AppData\\Local\\Microsoft\\Windows\\Fonts"]);
+        // A trailing separator is not doubled; SystemRoot stands in for a missing WINDIR; the
+        // per-user folder is found from USERPROFILE without LOCALAPPDATA.
+        assert_eq!(
+            dirs(FontPlatform::Windows, &[("SystemRoot", "D:\\Win\\"), ("USERPROFILE", "D:\\Users\\bo")]),
+            ["D:\\Win\\Fonts", "D:\\Users\\bo\\AppData\\Local\\Microsoft\\Windows\\Fonts"]
+        );
+        // Nothing set (or set empty): the default Windows folder.
+        assert_eq!(dirs(FontPlatform::Windows, &[("WINDIR", "")]), ["C:\\Windows\\Fonts"]);
+    }
+
+    #[test]
+    fn mac_unix_and_web_font_dirs() {
+        let home = [("HOME", "/home/ana")];
+        assert_eq!(dirs(FontPlatform::MacOs, &home), ["/System/Library/Fonts", "/Library/Fonts", "/home/ana/Library/Fonts"]);
+        assert_eq!(dirs(FontPlatform::Unix, &home), ["/usr/share/fonts", "/usr/local/share/fonts", "/home/ana/.local/share/fonts", "/home/ana/.fonts"]);
+        assert!(dirs(FontPlatform::None, &home).is_empty());
+        if cfg!(target_os = "macos") {
+            assert_eq!(FontPlatform::current(), FontPlatform::MacOs);
+        } else if cfg!(windows) {
+            assert_eq!(FontPlatform::current(), FontPlatform::Windows);
+        }
     }
 
     #[test]
