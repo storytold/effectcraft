@@ -859,15 +859,18 @@ pub fn layout(ui: &mut egui::Ui, node: &mut DockNode, rect: Rect, t: &Tokens, pa
             }
         }
         DockNode::Split { vertical, size, a, b } => {
-            let g = t.gap;
             let total = if *vertical { rect.height() } else { rect.width() };
+            let g = t.gap.min(total.max(0.0));
             let avail = (total - g).max(0.0);
+            // Both children must fit even when a nested split is smaller than
+            // their usual minimum. Shrink the minimum and gutter together.
+            let minimum = 20.0_f32.min(avail * 0.5);
             let first = match *size {
                 SplitSize::Ratio(r) => avail * r,
-                SplitSize::FixedA(px) => px.min(avail - 20.0),
-                SplitSize::FixedB(px) => avail - px.min(avail - 20.0),
+                SplitSize::FixedA(px) => px,
+                SplitSize::FixedB(px) => avail - px,
             }
-            .clamp(20.0_f32.min(avail), (avail - 20.0).max(0.0));
+            .clamp(minimum, avail - minimum);
             let (ra, gutter, rb) = if *vertical {
                 (
                     Rect::from_min_max(rect.min, pos2(rect.max.x, rect.min.y + first)),
@@ -891,9 +894,10 @@ pub fn layout(ui: &mut egui::Ui, node: &mut DockNode, rect: Rect, t: &Tokens, pa
             }
             if resp.dragged() {
                 let d = if *vertical { resp.drag_delta().y } else { resp.drag_delta().x };
-                let nf = (first + d).clamp(40.0, (avail - 40.0).max(40.0));
+                let drag_minimum = 40.0_f32.min(avail * 0.5);
+                let nf = (first + d).clamp(drag_minimum, avail - drag_minimum);
                 *size = match *size {
-                    SplitSize::Ratio(_) => SplitSize::Ratio(nf / avail.max(1.0)),
+                    SplitSize::Ratio(_) => SplitSize::Ratio(if avail > 0.0 { nf / avail } else { 0.5 }),
                     SplitSize::FixedA(_) => SplitSize::FixedA(nf),
                     SplitSize::FixedB(_) => SplitSize::FixedB(avail - nf),
                 };
