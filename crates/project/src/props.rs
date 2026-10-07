@@ -1,5 +1,6 @@
 //! The property tree: groups and properties with stable uids and match ids, addressed by paths.
 
+use effectcraft_color::Label;
 use effectcraft_keyframe::{Keyframe, Value};
 use effectcraft_time::Tick;
 use serde::{Deserialize, Serialize};
@@ -247,11 +248,22 @@ pub struct PropGroup {
     pub name: String,
     #[serde(default)]
     pub kind: GroupKind,
+    /// Presentation label of an effect instance; independent of its layer label.
+    #[serde(default = "no_effect_label", skip_serializing_if = "effect_label_is_none")]
+    pub effect_label: Label,
     /// fx switch for effects, eye for shape groups, etc.
     #[serde(default = "yes")]
     pub enabled: bool,
     #[serde(default)]
     pub children: Vec<Node>,
+}
+
+fn no_effect_label() -> Label {
+    Label::None
+}
+
+fn effect_label_is_none(label: &Label) -> bool {
+    *label == Label::None
 }
 
 fn yes() -> bool {
@@ -333,7 +345,7 @@ pub fn parse_path(s: &str) -> Vec<Seg> {
 
 impl PropGroup {
     pub fn new(uid: Uid, match_id: &str, name: &str) -> PropGroup {
-        PropGroup { uid, match_id: match_id.into(), name: name.into(), kind: GroupKind::Plain, enabled: true, children: vec![] }
+        PropGroup { uid, match_id: match_id.into(), name: name.into(), kind: GroupKind::Plain, effect_label: Label::None, enabled: true, children: vec![] }
     }
     pub fn with(mut self, n: impl Into<Node>) -> PropGroup {
         self.children.push(n.into());

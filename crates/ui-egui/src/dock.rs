@@ -393,6 +393,24 @@ pub fn workspace(name: &str) -> DockNode {
 }
 
 impl DockNode {
+    /// The complete tabbed or stacked panel group containing `panel`. Splits are workspace
+    /// structure, not a group; keep the walk iterative for deeply nested saved layouts.
+    pub fn panel_group(&self, panel: PanelKind) -> Option<&DockNode> {
+        let mut pending = vec![self];
+        while let Some(node) = pending.pop() {
+            match node {
+                DockNode::Split { a, b, .. } => {
+                    pending.push(b);
+                    pending.push(a);
+                }
+                DockNode::Tabs { panels, .. } if panels.contains(&panel) => return Some(node),
+                DockNode::Stack { entries } if entries.iter().any(|e| e.panel == panel) => return Some(node),
+                _ => {}
+            }
+        }
+        None
+    }
+
     /// Every panel in the tree.
     pub fn panels(&self, out: &mut Vec<PanelKind>) {
         match self {
@@ -467,8 +485,10 @@ impl DockNode {
                 *self = (**a).clone();
             }
         } else if let DockNode::Tabs { panels, active } = self {
+            let shown = panels.get(*active).copied();
             panels.retain(|x| *x != p);
-            *active = (*active).min(panels.len().saturating_sub(1));
+            // Keep a surviving active panel; otherwise prefer its successor, then predecessor.
+            *active = shown.and_then(|p| panels.iter().position(|x| *x == p)).unwrap_or((*active).min(panels.len().saturating_sub(1)));
         } else if let DockNode::Stack { entries } = self {
             entries.retain(|e| e.panel != p);
         }
@@ -692,8 +712,9 @@ impl Layout {
         let mut found = false;
         for f in &mut self.floating {
             if let Some(i) = f.panels.iter().position(|x| *x == p) {
+                let shown = f.panels.get(f.active).copied();
                 f.panels.remove(i);
-                f.active = f.active.min(f.panels.len().saturating_sub(1));
+                f.active = shown.and_then(|p| f.panels.iter().position(|x| *x == p)).unwrap_or(f.active.min(f.panels.len().saturating_sub(1)));
                 found = true;
             }
         }
@@ -782,6 +803,8 @@ pub struct Group {
 #[derive(Debug, Clone, PartialEq)]
 pub enum DockAction {
     Activate(PanelKind),
+    /// Maximize or restore the complete group containing this panel.
+    ToggleMaximize(PanelKind),
     /// Expand/collapse a stacked panel.
     ToggleStacked(PanelKind),
     Focus(PanelKind),
@@ -836,90 +859,131 @@ pub struct TabDeco {
 
 /// Lay out the tree into group rects (with `gap` gutters) and handle gutter dragging.
 pub fn layout(ui: &mut egui::Ui, node: &mut DockNode, rect: Rect, t: &Tokens, path: &str, out: &mut Vec<Group>, reg: &mut crate::automation::Registry) {
+    layout_at_depth(ui, node, rect, t, path, out, reg, 0);
+}
+
+// Bound this display traversal only. An overdeep branch is omitted for this paint;
+// the saved workspace is not rewritten. Other DockNode traversals have their own policy.
+const MAX_LAYOUT_DEPTH: usize = 128;
+#[allow(clippy::too_many_arguments)]
+fn layout_at_depth(
+    ui: &mut egui::Ui,
+    node: &mut DockNode,
+    rect: Rect,
+    t: &Tokens,
+    path: &str,
+    out: &mut Vec<Group>,
+    reg: &mut crate::automation::Registry,
+    depth: usize,
+) {
+    if depth >= MAX_LAYOUT_DEPTH
+        || ![rect.min.x, rect.min.y, rect.max.x, rect.max.y, rect.width(), rect.height()].into_iter().all(f32::is_finite)
+        || rect.width() < 0.0
+        || rect.height() < 0.0
+    {
+        return;
+    }
     match node {
         DockNode::Tabs { panels, active } => {
             let tab_h = if panels.len() == 1 && panels[0].compact() { 8.0 } else { t.tab_h };
-            let content = Rect::from_min_max(pos2(rect.min.x, rect.min.y + tab_h), rect.max);
+            let head = tab_h.max(0.0).clamp(0.0, rect.height());
+            let content = Rect::from_min_max(pos2(rect.min.x, (rect.min.y + head).min(rect.max.y)), rect.max);
             out.push(Group { path: path.to_string(), rect, content, panels: panels.clone(), active: *active, stacked: None });
         }
         DockNode::Stack { entries } => {
             // A header for every entry; the open panels' bodies share the rest.
-            let head = t.tab_h;
-            let g = t.gap;
+            let head = t.tab_h.max(0.0).clamp(0.0, rect.height());
+            let g = t.gap.max(0.0).clamp(0.0, rect.height());
             let n = entries.len() as f32;
             let avail = rect.height() - n * head - (n - 1.0).max(0.0) * g;
             let bodies = stack_bodies(entries, avail);
             let mut y = rect.min.y;
             let mut drag = None;
             for (i, e) in entries.iter().enumerate() {
+                if y >= rect.max.y {
+                    break;
+                }
                 let body = bodies.get(i).copied().unwrap_or(0.0);
                 let r = Rect::from_min_max(pos2(rect.min.x, y), pos2(rect.max.x, (y + head + body).min(rect.max.y)));
-                let content = Rect::from_min_max(pos2(r.min.x, r.min.y + head), r.max);
+                let content = Rect::from_min_max(pos2(r.min.x, (r.min.y + head).min(r.max.y)), r.max);
                 let group = format!("{path}s{i}");
                 // The gap below a panel resizes the open panels on either side of it.
                 let above = entries.get(..=i).and_then(|s| s.iter().rposition(|x| x.open));
                 let below = entries.get(i + 1..).and_then(|s| s.iter().position(|x| x.open)).map(|k| i + 1 + k);
                 if let (Some(above), Some(below)) = (above, below) {
-                    let gap = Rect::from_min_max(pos2(rect.min.x, r.max.y), pos2(rect.max.x, r.max.y + g));
-                    if let Some(d) = gutter(ui, gap, true, &group, t, reg) {
+                    let gap = Rect::from_min_max(pos2(rect.min.x, r.max.y), pos2(rect.max.x, (r.max.y + g).min(rect.max.y)));
+                    if let Some(d) = gutter(ui, gap, rect, true, &group, t, reg) {
                         drag = Some((above, below, d));
                     }
                 }
                 out.push(Group { path: group, rect: r, content, panels: vec![e.panel], active: 0, stacked: Some(e.open) });
-                y = r.max.y + g;
+                y = (r.max.y + g).min(rect.max.y);
             }
             if let Some((above, below, d)) = drag {
                 resize_stacked(entries, &bodies, above, below, d);
             }
         }
         DockNode::Split { vertical, size, a, b } => {
-            let g = t.gap;
             let total = if *vertical { rect.height() } else { rect.width() };
+            let g = t.gap.max(0.0).clamp(0.0, total);
             let avail = (total - g).max(0.0);
+            // Preserve 20-point children when they fit; otherwise share the available
+            // space equally. Corrupt saved sizes get a balanced display fallback.
+            let minimum = 20.0_f32.min(avail * 0.5);
             let first = match *size {
-                SplitSize::Ratio(r) => avail * r,
-                SplitSize::FixedA(px) => px.min(avail - 20.0),
-                SplitSize::FixedB(px) => avail - px.min(avail - 20.0),
+                SplitSize::Ratio(r) if r.is_finite() => avail * r.clamp(0.0, 1.0),
+                SplitSize::FixedA(px) if px.is_finite() => px.clamp(0.0, avail),
+                SplitSize::FixedB(px) if px.is_finite() => avail - px.clamp(0.0, avail),
+                _ => avail * 0.5,
             }
-            .clamp(20.0_f32.min(avail), (avail - 20.0).max(0.0));
+            .clamp(minimum, avail - minimum);
             let (ra, gutter_rect, rb) = if *vertical {
+                let split = (rect.min.y + first).min(rect.max.y);
+                let end = (split + g).min(rect.max.y);
                 (
-                    Rect::from_min_max(rect.min, pos2(rect.max.x, rect.min.y + first)),
-                    Rect::from_min_max(pos2(rect.min.x, rect.min.y + first), pos2(rect.max.x, rect.min.y + first + g)),
-                    Rect::from_min_max(pos2(rect.min.x, rect.min.y + first + g), rect.max),
+                    Rect::from_min_max(rect.min, pos2(rect.max.x, split)),
+                    Rect::from_min_max(pos2(rect.min.x, split), pos2(rect.max.x, end)),
+                    Rect::from_min_max(pos2(rect.min.x, end), rect.max),
                 )
             } else {
+                let split = (rect.min.x + first).min(rect.max.x);
+                let end = (split + g).min(rect.max.x);
                 (
-                    Rect::from_min_max(rect.min, pos2(rect.min.x + first, rect.max.y)),
-                    Rect::from_min_max(pos2(rect.min.x + first, rect.min.y), pos2(rect.min.x + first + g, rect.max.y)),
-                    Rect::from_min_max(pos2(rect.min.x + first + g, rect.min.y), rect.max),
+                    Rect::from_min_max(rect.min, pos2(split, rect.max.y)),
+                    Rect::from_min_max(pos2(split, rect.min.y), pos2(end, rect.max.y)),
+                    Rect::from_min_max(pos2(end, rect.min.y), rect.max),
                 )
             };
-            if let Some(d) = gutter(ui, gutter_rect, *vertical, path, t, reg) {
-                let nf = (first + d).clamp(40.0, (avail - 40.0).max(40.0));
+            if let Some(d) = gutter(ui, gutter_rect, rect, *vertical, path, t, reg)
+                && avail > 0.0
+            {
+                // A zero-size parent cannot produce a ratio. Use f64 for the
+                // addition so a finite pointer delta cannot overflow first + d.
+                let minimum = 40.0_f32.min(avail * 0.5);
+                let nf = (f64::from(first) + f64::from(d)).clamp(f64::from(minimum), f64::from(avail - minimum)) as f32;
                 *size = match *size {
-                    SplitSize::Ratio(_) => SplitSize::Ratio(nf / avail.max(1.0)),
+                    SplitSize::Ratio(_) => SplitSize::Ratio(nf / avail),
                     SplitSize::FixedA(_) => SplitSize::FixedA(nf),
                     SplitSize::FixedB(_) => SplitSize::FixedB(avail - nf),
                 };
             }
-            layout(ui, a, ra, t, &format!("{path}a"), out, reg);
-            layout(ui, b, rb, t, &format!("{path}b"), out, reg);
+            layout_at_depth(ui, a, ra, t, &format!("{path}a"), out, reg, depth + 1);
+            layout_at_depth(ui, b, rb, t, &format!("{path}b"), out, reg, depth + 1);
         }
     }
 }
 
 /// A gap between dock areas that drags to resize them (`vertical`: up and down), with a slightly
 /// larger hit area than the gap. Returns the drag this frame.
-fn gutter(ui: &mut egui::Ui, gap: Rect, vertical: bool, path: &str, t: &Tokens, reg: &mut crate::automation::Registry) -> Option<f32> {
-    let hit = gap.expand2(if vertical { vec2(0.0, 3.0) } else { vec2(3.0, 0.0) });
+fn gutter(ui: &mut egui::Ui, gap: Rect, parent: Rect, vertical: bool, path: &str, t: &Tokens, reg: &mut crate::automation::Registry) -> Option<f32> {
+    let hit = gap.expand2(if vertical { vec2(0.0, 3.0) } else { vec2(3.0, 0.0) }).intersect(parent);
     let resp = ui.interact(hit, egui::Id::new(("dock-gutter", path.to_string())), Sense::drag());
     reg.add(&format!("dock.gutter.{path}"), hit, "gutter");
     if resp.hovered() || resp.dragged() {
         ui.ctx().set_cursor_icon(if vertical { egui::CursorIcon::ResizeVertical } else { egui::CursorIcon::ResizeHorizontal });
         ui.painter().rect_filled(gap, 0.0, t.focus.gamma_multiply(if resp.dragged() { 0.9 } else { 0.4 }));
     }
-    resp.dragged().then(|| if vertical { resp.drag_delta().y } else { resp.drag_delta().x })
+    resp.dragged().then(|| if vertical { resp.drag_delta().y } else { resp.drag_delta().x }).filter(|d| d.is_finite())
 }
 
 /// The least body height of an open stacked panel (when the stack has room for it).
@@ -998,7 +1062,7 @@ pub fn draw_group_chrome(ui: &mut egui::Ui, g: &Group, focused: PanelKind, t: &T
     }
     let mut out = Chrome::default();
     let painter = ui.painter().clone();
-    painter.rect_filled(g.rect, t.radius, t.panel_bg);
+    painter.rect_filled(g.rect, 0.0, t.panel_bg);
     let active_panel = g.panels.get(g.active).copied();
     let compact = g.panels.len() == 1 && g.panels[0].compact();
     if compact {
@@ -1031,7 +1095,7 @@ pub fn draw_group_chrome(ui: &mut egui::Ui, g: &Group, focused: PanelKind, t: &T
             }
         }
         let ai = entries.iter().position(|e| e.active).unwrap_or(0);
-        let strip = Rect::from_min_size(g.rect.min, vec2(g.rect.width(), t.tab_h));
+        let strip = Rect::from_min_size(g.rect.min, vec2(g.rect.width().max(0.0), t.tab_h.max(0.0))).intersect(g.rect);
         if t.gradients {
             // Settings ▸ Appearance ▸ Use Gradients.
             crate::theme::gradient_rect(&painter, strip.shrink2(vec2(t.radius, 0.0)), t.grad_top(t.panel_bg), t.panel_bg);
@@ -1044,36 +1108,45 @@ pub fn draw_group_chrome(ui: &mut egui::Ui, g: &Group, focused: PanelKind, t: &T
             Some(id) => DockAction::CloseDoc(e.panel, id),
             None => DockAction::Close(e.panel),
         };
-        let mut x = strip.min.x + 12.0;
-        let text_y = strip.min.y + 16.0;
-        for (k, e) in entries.iter().enumerate() {
-            let p = &e.panel;
-            // A collapsed stacked panel's header is plain text (no underline or panel menu).
-            let is_active = k == ai && g.stacked != Some(false);
-            let galley = painter.layout_no_wrap(e.label.clone(), Tokens::ui(12.0), if is_active { t.tab_text_active } else { t.tab_text });
-            let menu_w = if is_active { 20.0 } else { 0.0 };
-            // The lock belongs to the panel: on its shown document's tab only.
-            let lock = e.deco.is_some_and(|d| d.viewer) && (e.doc.is_none() || is_active);
-            // × (active tab only), swatch and lock before the label.
-            let deco_w = match e.deco {
-                Some(d) if d.viewer => (if is_active { 16.0 } else { 0.0 }) + 14.0 + if lock { 16.0 } else { 0.0 },
+        let natural_width = |k: usize, e: &Entry| {
+            let active = k == ai && g.stacked != Some(false);
+            let lock = e.deco.is_some_and(|d| d.viewer) && (e.doc.is_none() || active);
+            let decorations = match e.deco {
+                Some(d) if d.viewer => (if active { 16.0 } else { 0.0 }) + 14.0 + if lock { 16.0 } else { 0.0 },
                 Some(_) => 14.0,
                 None => 0.0,
             };
-            let w = galley.size().x + 16.0 + menu_w + deco_w;
-            if x + w > strip.max.x - 20.0 && k > ai {
-                let r = Rect::from_min_size(pos2(strip.max.x - 22.0, strip.min.y + 6.0), vec2(18.0, 20.0));
-                let resp = ui.interact(r, egui::Id::new(("tab-overflow", g.path.clone())), Sense::click());
-                icons::paint(&painter, r.shrink(4.0).translate(vec2(-2.0, 0.0)), Icon::ChevronRight, t.tab_text);
-                icons::paint(&painter, r.shrink(4.0).translate(vec2(2.0, 0.0)), Icon::ChevronRight, t.tab_text);
-                if resp.clicked()
-                    && let Some(next) = entries.get((ai + 1) % entries.len())
-                {
-                    out.actions.push(activate(next));
-                }
+            painter.layout_no_wrap(e.label.clone(), Tokens::ui(12.0), t.tab_text).size().x + 16.0 + if active { 20.0 } else { 0.0 } + decorations
+        };
+        let widths: Vec<f32> = entries.iter().enumerate().map(|(k, e)| natural_width(k, e)).collect();
+        let left_padding = 8.0_f32.min(strip.width().max(0.0));
+        let overflow = entries.len() > 1 && widths.iter().sum::<f32>() + 4.0 * entries.len().saturating_sub(1) as f32 > strip.width() - left_padding;
+        let overflow_width = if overflow { 20.0_f32.min((strip.width() - left_padding).max(0.0)) } else { 0.0 };
+        let tab_right = strip.max.x - overflow_width;
+        let available = (tab_right - strip.min.x - left_padding).max(0.0);
+        // Slide the visible window so an earlier long caption cannot push the active tab away.
+        let mut first = 0;
+        let mut through_active = widths.iter().take(ai.saturating_add(1)).sum::<f32>() + 4.0 * ai as f32;
+        while first < ai && through_active > available {
+            through_active -= widths.get(first).copied().unwrap_or(0.0) + 4.0;
+            first += 1;
+        }
+        let mut x = strip.min.x + left_padding;
+        let text_y = strip.center().y;
+        for (k, e) in entries.iter().enumerate().skip(first) {
+            let p = &e.panel;
+            // A collapsed stacked panel's header is plain text (no underline or panel menu).
+            let is_active = k == ai && g.stacked != Some(false);
+            let menu_w = if is_active { 20.0 } else { 0.0 };
+            // The lock belongs to the panel: on its shown document's tab only.
+            let lock = e.deco.is_some_and(|d| d.viewer) && (e.doc.is_none() || is_active);
+            let desired = widths.get(k).copied().unwrap_or(0.0);
+            if x >= tab_right || (k > ai && x + desired > tab_right) {
                 break;
             }
-            let tab = Rect::from_min_size(pos2(x, strip.min.y), vec2(w, t.tab_h));
+            let w = desired.min((tab_right - x).max(0.0));
+            let tab = Rect::from_min_size(pos2(x, strip.min.y), vec2(w, strip.height()));
+            let painter = painter.with_clip_rect(tab.intersect(ui.clip_rect()));
             match out.tabs.iter_mut().find(|(q, _)| q == p) {
                 Some((_, r)) => *r = r.union(tab),
                 None => out.tabs.push((*p, tab)),
@@ -1092,11 +1165,13 @@ pub fn draw_group_chrome(ui: &mut egui::Ui, g: &Group, focused: PanelKind, t: &T
                 reg.add(&format!("panel.tab.{}", p.id()), tab, &e.label);
             }
             let mut label_x = tab.min.x + 8.0;
+            let mut control_under_pointer = false;
             if let Some(d) = e.deco {
                 let mut dx = tab.min.x + 6.0;
-                if is_active && d.viewer {
+                if is_active && d.viewer && tab.height() >= 14.0 && dx + 12.0 <= tab.max.x - menu_w {
                     let cr = Rect::from_center_size(pos2(dx + 5.0, text_y), vec2(10.0, 10.0));
-                    let cresp = ui.interact(cr.expand(2.0), egui::Id::new(("tab-close", g.path.clone(), k)), Sense::click());
+                    control_under_pointer |= ui.ctx().pointer_interact_pos().is_some_and(|pos| cr.expand(2.0).intersect(tab).contains(pos));
+                    let cresp = ui.interact(cr.expand(2.0).intersect(tab), egui::Id::new(("tab-close", g.path.clone(), k)), Sense::click());
                     let cc = if cresp.hovered() { t.tab_text_active } else { t.tab_text };
                     let kk = 3.5;
                     painter.line_segment([cr.center() + vec2(-kk, -kk), cr.center() + vec2(kk, kk)], Stroke::new(1.2, cc));
@@ -1111,9 +1186,10 @@ pub fn draw_group_chrome(ui: &mut egui::Ui, g: &Group, focused: PanelKind, t: &T
                 painter.rect_filled(sw, 1.0, d.swatch);
                 dx += 14.0;
                 label_x = dx;
-                if lock {
+                if lock && tab.height() >= 16.0 && dx + 14.0 <= tab.max.x - menu_w {
                     let lr = Rect::from_center_size(pos2(dx + 6.0, text_y), vec2(12.0, 12.0));
-                    let lresp = ui.interact(lr.expand(2.0), egui::Id::new(("tab-lock", g.path.clone(), k)), Sense::click());
+                    control_under_pointer |= ui.ctx().pointer_interact_pos().is_some_and(|pos| lr.expand(2.0).intersect(tab).contains(pos));
+                    let lresp = ui.interact(lr.expand(2.0).intersect(tab), egui::Id::new(("tab-lock", g.path.clone(), k)), Sense::click());
                     let lc = if d.locked {
                         t.tab_text_active
                     } else if lresp.hovered() {
@@ -1129,24 +1205,30 @@ pub fn draw_group_chrome(ui: &mut egui::Ui, g: &Group, focused: PanelKind, t: &T
                     label_x = dx + 16.0;
                 }
             }
-            let label_w = galley.size().x;
+            let caption_right = (tab.max.x - menu_w).max(tab.min.x);
             let col = if is_active || resp.hovered() { t.tab_text_active } else { t.tab_text };
-            painter.galley_with_override_text_color(pos2(label_x, text_y - galley.size().y / 2.0), galley, col);
-            if is_active {
-                let mr = Rect::from_center_size(pos2(label_x + label_w + 12.0, text_y), vec2(12.0, 10.0));
-                let mresp = ui.interact(mr.expand(3.0), egui::Id::new(("tab-menu", g.path.clone())), Sense::click());
+            if label_x < caption_right {
+                crate::widgets::text_fit(&painter, pos2(label_x, text_y), Align2::LEFT_CENTER, &e.label, Tokens::ui(12.0), caption_right - label_x, col);
+            }
+            if is_active && tab.width() >= 20.0 && tab.height() >= 10.0 {
+                let mr = Rect::from_center_size(pos2(tab.max.x - 10.0, text_y), vec2(12.0, 10.0));
+                control_under_pointer |= ui.ctx().pointer_interact_pos().is_some_and(|pos| mr.expand(3.0).intersect(tab).contains(pos));
+                let mresp = ui.interact(mr.expand(3.0).intersect(tab), egui::Id::new(("tab-menu", g.path.clone())), Sense::click());
                 reg.add(&format!("panel.menu.{}", p.id()), mr, "panel menu");
                 let mc = if mresp.hovered() { t.tab_text_active } else { t.tab_text };
                 for dy in [-3.5, 0.0, 3.5] {
                     painter.line_segment([pos2(mr.min.x, mr.center().y + dy), pos2(mr.max.x, mr.center().y + dy)], Stroke::new(1.5, mc));
                 }
-                let uy = strip.min.y + 23.0;
-                painter.line_segment([pos2(label_x, uy), pos2(mr.max.x, uy)], Stroke::new(1.0, t.tab_text_active));
+                let uy = strip.max.y - 3.0;
+                painter.line_segment([pos2(label_x.min(mr.max.x), uy), pos2(mr.max.x, uy)], Stroke::new(1.0, t.tab_text_active));
                 if mresp.clicked() {
                     out.actions.push(DockAction::PanelMenu(*p, mr.left_bottom()));
                 }
             }
-            if resp.clicked() {
+            if resp.double_clicked() && is_active && g.stacked.is_none() && !control_under_pointer {
+                out.actions.push(DockAction::ToggleMaximize(*p));
+                out.actions.push(DockAction::Focus(*p));
+            } else if resp.clicked() {
                 if g.stacked.is_some() {
                     out.actions.push(DockAction::ToggleStacked(*p));
                 } else {
@@ -1157,7 +1239,34 @@ pub fn draw_group_chrome(ui: &mut egui::Ui, g: &Group, focused: PanelKind, t: &T
             if resp.middle_clicked() {
                 out.actions.push(close(e));
             }
-            x += w + 8.0;
+            x += w + 4.0;
+        }
+        if overflow && overflow_width > 0.0 && strip.height() > 0.0 {
+            let r = Rect::from_min_max(pos2(tab_right, strip.min.y), strip.max);
+            let resp = ui.interact(r, egui::Id::new(("tab-overflow", g.path.clone())), Sense::click());
+            let p = painter.with_clip_rect(r.intersect(ui.clip_rect()));
+            icons::paint(&p, r.shrink(4.0), Icon::ChevronRight, t.tab_text);
+            if let Some(panel) = active_panel {
+                reg.add(&format!("panel.tabOverflow.{}", panel.id()), r, "Next hidden tab");
+            }
+            if resp.clicked()
+                && let Some(next) = entries.get((ai + 1) % entries.len())
+            {
+                out.actions.push(activate(next));
+            }
+            x = strip.max.x;
+        }
+        // The unused tab well has the same maximize/restore gesture as the active caption.
+        let well = Rect::from_min_max(pos2(x.min(strip.max.x), strip.min.y), strip.max);
+        if well.width() > 0.0
+            && let Some(panel) = active_panel
+        {
+            let response = ui.interact(well, egui::Id::new(("tab-well", g.path.clone())), Sense::click());
+            reg.add(&format!("panel.tabWell.{}", panel.id()), well, "Empty panel tab area");
+            if response.double_clicked() {
+                out.actions.push(DockAction::ToggleMaximize(panel));
+                out.actions.push(DockAction::Focus(panel));
+            }
         }
     }
     // focus outline
@@ -1180,8 +1289,242 @@ pub fn placeholder(ui: &mut egui::Ui, rect: Rect, t: &Tokens, text: &str) {
 }
 
 #[cfg(test)]
+#[path = "dock_split_safety_tests.rs"]
+mod split_safety_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use egui::Color32;
+
+    struct LongTabFixture {
+        ctx: egui::Context,
+        tokens: Tokens,
+        group: Group,
+        registry: crate::automation::Registry,
+        time: f64,
+    }
+    impl LongTabFixture {
+        fn new(width: f32, active: usize) -> Self {
+            let ctx = egui::Context::default();
+            let tokens = Tokens::for_kind(crate::theme::ThemeKind::Dark);
+            crate::theme::install(&ctx, &tokens);
+            let rect = Rect::from_min_size(pos2(20.0, 20.0), vec2(width, 200.0));
+            Self {
+                ctx,
+                tokens,
+                group: Group {
+                    path: "long-tab-bounds".into(),
+                    rect,
+                    content: rect,
+                    panels: vec![PanelKind::Composition, PanelKind::Layer],
+                    active,
+                    stacked: None,
+                },
+                registry: Default::default(),
+                time: 0.0,
+            }
+        }
+        fn frame(&mut self, events: Vec<egui::Event>) -> (Chrome, bool) {
+            self.time += 0.02;
+            self.registry.begin_frame();
+            let title = |_: PanelKind| "Original synthetic very long composition caption ".repeat(20);
+            let decos = [PanelKind::Composition, PanelKind::Layer].map(|panel| (panel, TabDeco { swatch: Color32::GRAY, locked: false, viewer: true }));
+            let info = TabInfo { title: &title, decos: &decos, docs: &[] };
+            let mut chrome = Chrome::default();
+            let mut adjacent_clicked = false;
+            let output = self.ctx.run_ui(egui::RawInput { time: Some(self.time), events, ..Default::default() }, |ui| {
+                let adjacent = Rect::from_min_size(pos2(self.group.rect.max.x + 2.0, self.group.rect.min.y), vec2(100.0, self.tokens.tab_h));
+                adjacent_clicked = ui.interact(adjacent, egui::Id::new("adjacent-group-hit"), Sense::click()).clicked();
+                chrome = draw_group_chrome(ui, &self.group, PanelKind::Composition, &self.tokens, &mut self.registry, &info);
+            });
+            let strip = Rect::from_min_size(self.group.rect.min, vec2(self.group.rect.width(), self.tokens.tab_h));
+            for shape in &output.shapes {
+                if matches!(shape.shape, egui::epaint::Shape::Text(_)) {
+                    assert!(strip.contains_rect(shape.clip_rect), "caption paint escapes the header clip");
+                }
+            }
+            output.drop_without_applying_deltas();
+            for element in &self.registry.elements {
+                let rect = Rect::from_min_size(pos2(element.rect[0], element.rect[1]), vec2(element.rect[2], element.rect[3]));
+                assert!(strip.contains_rect(rect), "{} escapes header: {rect:?}", element.id);
+            }
+            for (_, rect) in &chrome.tabs {
+                assert!(strip.contains_rect(*rect), "tab hit rectangle escapes header");
+            }
+            (chrome, adjacent_clicked)
+        }
+        fn click(&mut self, pos: egui::Pos2) -> (Chrome, bool) {
+            self.frame(vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
+            ]);
+            self.frame(vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE },
+            ])
+        }
+        fn center(&self, id: &str) -> egui::Pos2 {
+            let e = self.registry.elements.iter().find(|e| e.id == id).unwrap();
+            pos2(e.rect[0] + e.rect[2] / 2.0, e.rect[1] + e.rect[3] / 2.0)
+        }
+    }
+
+    #[test]
+    fn narrow_long_active_and_earlier_tabs_keep_controls_and_overflow_reachable() {
+        for active in [0, 1] {
+            for width in [100.0, 180.0] {
+                let mut fixture = LongTabFixture::new(width, active);
+                fixture.frame(vec![]);
+                fixture.frame(vec![]);
+                let panel = fixture.group.panels[active];
+                for suffix in ["close", "lock", "menu"] {
+                    let id = if suffix == "menu" { format!("panel.menu.{}", panel.id()) } else { format!("panel.tab.{}.{suffix}", panel.id()) };
+                    let pos = fixture.center(&id);
+                    let (result, _) = fixture.click(pos);
+                    assert!(
+                        result.actions.iter().any(|action| match suffix {
+                            "close" => *action == DockAction::Close(panel),
+                            "lock" => *action == DockAction::ToggleLock(panel),
+                            _ => matches!(action, DockAction::PanelMenu(p, _) if *p == panel),
+                        }),
+                        "{suffix} lost its clickable target"
+                    );
+                    assert!(!result.actions.iter().any(|a| matches!(a, DockAction::ToggleMaximize(_))));
+                }
+                let pos = fixture.center(&format!("panel.tabOverflow.{}", panel.id()));
+                let (result, _) = fixture.click(pos);
+                let next = fixture.group.panels[(active + 1) % 2];
+                assert!(result.actions.contains(&DockAction::Activate(next)), "hidden tabs must remain reachable");
+            }
+        }
+    }
+
+    #[test]
+    fn long_tab_does_not_steal_clicks_from_an_adjacent_group() {
+        for active in [0, 1] {
+            let mut fixture = LongTabFixture::new(100.0, active);
+            fixture.frame(vec![]);
+            fixture.frame(vec![]);
+            let pos = pos2(fixture.group.rect.max.x + 30.0, fixture.group.rect.min.y + fixture.tokens.tab_h / 2.0);
+            let (result, adjacent) = fixture.click(pos);
+            assert!(adjacent, "long caption stole neighboring group's pointer target");
+            assert!(result.actions.is_empty(), "outside click activated a tab/control: {:?}", result.actions);
+        }
+    }
+
+    #[test]
+    fn very_small_long_tab_headers_never_register_escaped_targets() {
+        for width in [0.0, 8.0, 24.0, 60.0] {
+            let mut fixture = LongTabFixture::new(width, 0);
+            fixture.frame(vec![]);
+            fixture.frame(vec![]);
+        }
+    }
+    #[test]
+    fn compact_tab_controls_stay_inside_the_header_and_remain_clickable() {
+        let ctx = egui::Context::default();
+        let mut tokens = Tokens::for_kind(crate::theme::ThemeKind::Dark);
+        tokens.tab_h = 26.0;
+        let rect = Rect::from_min_size(pos2(20.0, 20.0), vec2(480.0, 200.0));
+        let group = Group {
+            path: "fixture".to_string(),
+            rect,
+            content: Rect::from_min_max(pos2(rect.min.x, rect.min.y + tokens.tab_h), rect.max),
+            panels: vec![PanelKind::Composition],
+            active: 0,
+            stacked: None,
+        };
+        let title = |_: PanelKind| "Composition Original Fixture".to_string();
+        let decos = [(PanelKind::Composition, TabDeco { swatch: Color32::GRAY, locked: false, viewer: true })];
+        let info = TabInfo { title: &title, decos: &decos, docs: &[] };
+        let mut reg = crate::automation::Registry::default();
+        let mut actions = Vec::new();
+        let mut draw = |events| {
+            reg.begin_frame();
+            actions.clear();
+            ctx.run_ui(egui::RawInput { events, ..Default::default() }, |ui| {
+                actions = draw_group_chrome(ui, &group, PanelKind::Composition, &tokens, &mut reg, &info).actions;
+            })
+            .drop_without_applying_deltas();
+            (reg.elements.clone(), actions.clone())
+        };
+        let (controls, _) = draw(vec![]);
+        let header = Rect::from_min_size(rect.min, vec2(rect.width(), tokens.tab_h));
+        for id in ["panel.tab.Composition.close", "panel.tab.Composition.lock", "panel.menu.Composition"] {
+            let control = controls.iter().find(|e| e.id == id).unwrap();
+            let r = Rect::from_min_size(pos2(control.rect[0], control.rect[1]), vec2(control.rect[2], control.rect[3]));
+            assert!(header.contains_rect(r), "{id} escapes compact header: {r:?}");
+            assert!((r.center().y - header.center().y).abs() < 0.01, "{id} is off-center");
+        }
+        let menu = controls.iter().find(|e| e.id == "panel.menu.Composition").unwrap();
+        let pos = pos2(menu.rect[0] + menu.rect[2] / 2.0, menu.rect[1] + menu.rect[3] / 2.0);
+        draw(vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
+        ]);
+        let (_, actions) =
+            draw(vec![egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE }]);
+        assert!(actions.iter().any(|a| matches!(a, DockAction::PanelMenu(PanelKind::Composition, _))));
+    }
+
+    #[test]
+    fn viewer_tab_close_lock_and_menu_double_click_do_not_maximize() {
+        use egui::{Event, Modifiers, PointerButton};
+        for control in ["close", "lock", "menu"] {
+            let ctx = egui::Context::default();
+            let tokens = Tokens::for_kind(crate::theme::ThemeKind::Dark);
+            crate::theme::install(&ctx, &tokens);
+            let mut registry = crate::automation::Registry::default();
+            let group = Group {
+                path: "viewer-control-test".into(),
+                rect: Rect::from_min_size(pos2(20.0, 20.0), vec2(700.0, 300.0)),
+                content: Rect::from_min_size(pos2(20.0, 50.0), vec2(700.0, 270.0)),
+                panels: vec![PanelKind::Composition, PanelKind::Layer],
+                active: 0,
+                stacked: None,
+            };
+            let title = |panel: PanelKind| panel.title().to_string();
+            let decos = [(PanelKind::Composition, TabDeco { swatch: Color32::RED, locked: false, viewer: true })];
+            let info = TabInfo { title: &title, decos: &decos, docs: &[] };
+            let mut actions = Vec::new();
+            registry.begin_frame();
+            ctx.run_ui(egui::RawInput { time: Some(0.0), ..Default::default() }, |ui| {
+                actions.extend(draw_group_chrome(ui, &group, PanelKind::Composition, &tokens, &mut registry, &info).actions);
+            })
+            .drop_without_applying_deltas();
+            // Use the actual decorated-control geometry, not the caption's overlapping rect.
+            let id = if control == "menu" { "panel.menu.Composition".to_string() } else { format!("panel.tab.Composition.{control}") };
+            let element = registry.elements.iter().find(|e| e.id == id).unwrap();
+            let pos = pos2(element.rect[0] + element.rect[2] / 2.0, element.rect[1] + element.rect[3] / 2.0);
+            for (index, pressed) in [true, false, true, false].into_iter().enumerate() {
+                registry.begin_frame();
+                ctx.run_ui(
+                    egui::RawInput {
+                        time: Some(1.0 + index as f64 * 0.02),
+                        events: vec![
+                            Event::PointerMoved(pos),
+                            Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE },
+                        ],
+                        ..Default::default()
+                    },
+                    |ui| {
+                        actions.extend(draw_group_chrome(ui, &group, PanelKind::Composition, &tokens, &mut registry, &info).actions);
+                    },
+                )
+                .drop_without_applying_deltas();
+            }
+            assert!(!actions.iter().any(|a| matches!(a, DockAction::ToggleMaximize(_))), "{control}");
+            assert!(
+                actions.iter().any(|a| match control {
+                    "close" => matches!(a, DockAction::Close(PanelKind::Composition)),
+                    "lock" => matches!(a, DockAction::ToggleLock(PanelKind::Composition)),
+                    _ => matches!(a, DockAction::PanelMenu(PanelKind::Composition, _)),
+                }),
+                "{control} must retain its original action"
+            );
+        }
+    }
 
     #[test]
     fn stacked_panels_toggle_open_close() {
@@ -1419,5 +1762,62 @@ mod tests {
         let back: DockNode = serde_json::from_str(&s).unwrap();
         assert_eq!(back, d);
         assert_eq!(PanelKind::from_name("effects & presets"), Some(PanelKind::EffectsPresets));
+    }
+
+    #[test]
+    fn closing_docked_tabs_keeps_the_active_panel_and_selects_a_neighbor_when_removed() {
+        use PanelKind::*;
+        for (active, closed, visible) in [
+            (1, Project, EffectControls),
+            (1, History, EffectControls),
+            (1, EffectControls, History),
+            (2, History, EffectControls),
+            (usize::MAX, Project, History),
+        ] {
+            let mut d = hsplit(SplitSize::FixedA(300.0), tabs(&[Project, EffectControls, History], active), tabs(&[Composition], 0));
+            d.close(closed);
+            assert!(d.is_visible(visible), "closing {closed:?} with index {active} must show {visible:?}");
+            assert!(!d.contains(closed));
+            assert!(d.is_visible(Composition));
+            let encoded = serde_json::to_string(&d).unwrap();
+            assert_eq!(serde_json::from_str::<DockNode>(&encoded).unwrap(), d);
+        }
+        let mut only = tabs(&[Project], usize::MAX);
+        only.close(Project);
+        assert_eq!(only, tabs(&[], 0));
+    }
+
+    #[test]
+    fn removing_floating_tabs_keeps_the_active_panel_and_preserves_other_groups() {
+        use PanelKind::*;
+        let untouched = Floating { panels: vec![Info, Audio], active: 1, rect: [500.0, 80.0, 300.0, 200.0] };
+        for (active, removed, visible) in [
+            (1, Project, EffectControls),
+            (1, History, EffectControls),
+            (1, EffectControls, History),
+            (2, History, EffectControls),
+            (usize::MAX, Project, History),
+        ] {
+            let root = tabs(&[Composition], 0);
+            let rect = [40.0, 60.0, 320.0, 240.0];
+            let mut layout =
+                Layout { root: root.clone(), floating: vec![Floating { panels: vec![Project, EffectControls, History], active, rect }, untouched.clone()] };
+            assert!(layout.unfloat(removed));
+            let group = &layout.floating[0];
+            assert_eq!(group.panels.get(group.active), Some(&visible), "removing {removed:?} with index {active} must show {visible:?}");
+            assert!(!group.panels.contains(&removed));
+            assert_eq!(group.rect, rect);
+            assert_eq!(layout.floating[1], untouched);
+            assert_eq!(layout.root, root);
+            let before = layout.clone();
+            assert!(!layout.unfloat(Tracker));
+            assert_eq!(layout, before);
+        }
+        let mut only = Layout {
+            root: tabs(&[Composition], 0),
+            floating: vec![Floating { panels: vec![Project], active: usize::MAX, rect: [0.0, 0.0, 100.0, 100.0] }, untouched.clone()],
+        };
+        assert!(only.unfloat(Project));
+        assert_eq!(only.floating, vec![untouched]);
     }
 }

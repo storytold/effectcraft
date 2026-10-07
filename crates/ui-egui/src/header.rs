@@ -4,7 +4,7 @@
 use egui::{Align2, Color32, Rect, Sense, Stroke, pos2, vec2};
 use serde_json::json;
 
-use crate::icons::{self, Icon};
+use crate::icons::Icon;
 use crate::state::Tool;
 use crate::theme::Tokens;
 use crate::widgets;
@@ -16,32 +16,32 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     p.rect_filled(rect, 0.0, t.header_bg);
     p.line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0, t.app_bg));
     let cy = rect.center().y;
-    let mut x = rect.min.x + if app.integrated_titlebar && !app.ui.show_menu_bar { 80.0 } else { 10.0 };
+    let mut x = rect.min.x + if app.integrated_titlebar && !app.ui.show_menu_bar { 80.0 } else { 6.0 };
 
     // Brand mark.
-    let brand = Rect::from_min_size(pos2(x, cy - 12.0), vec2(24.0, 24.0));
+    let brand = Rect::from_min_size(pos2(x, cy - 9.0), vec2(18.0, 18.0));
     paint_logo(&p, brand);
     let bresp = ui.interact(brand, egui::Id::new("brand"), Sense::click());
     app.auto.add("header.about", brand, "About EffectCraft");
     if bresp.on_hover_text("About EffectCraft").clicked() {
         app.dialog = Some(Dialog::About);
     }
-    x += 32.0;
+    x += 24.0;
 
     // Home.
-    let home = Rect::from_min_size(pos2(x, cy - 13.0), vec2(26.0, 26.0));
+    let home = Rect::from_min_size(pos2(x, cy - 12.0), vec2(24.0, 24.0));
     if widgets::icon_button(ui, home, Icon::Home, app.ui.start_screen, &t, egui::Id::new("tool-home")).on_hover_text("Home").clicked() {
         app.ui.start_screen = !app.ui.start_screen;
     }
     app.auto.add("header.home", home, "Home");
-    x += 30.0;
+    x += 28.0;
     p.line_segment([pos2(x, cy - 10.0), pos2(x, cy + 10.0)], Stroke::new(1.0, t.separator));
     x += 6.0;
 
     // Tool slots (with group separators after camera tools and pan-behind).
     for (si, slot) in Tool::SLOTS.iter().enumerate() {
         let cur = app.ui.slot_tools.get(si).copied().unwrap_or(slot[0]);
-        let r = Rect::from_min_size(pos2(x, cy - 13.0), vec2(26.0, 26.0));
+        let r = Rect::from_min_size(pos2(x, cy - 12.0), vec2(24.0, 24.0));
         let active = slot.contains(&app.ui.tool);
         let id = egui::Id::new(("tool-slot", si));
         let resp = widgets::icon_button(ui, r, cur.icon(), active, &t, id);
@@ -59,7 +59,8 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             None => cur.label().to_string(),
         };
         let resp = resp.on_hover_text(tip);
-        if resp.clicked() {
+        let (choice, suppress_click) = if slot.len() > 1 { tool_flyout(&resp, slot, app.ui.tool, &mut app.auto) } else { (None, false) };
+        if resp.clicked() && !suppress_click {
             app.ui.tool = cur;
         }
         // Ctrl+double-click Pan Behind: Center Anchor Point in Layer Content.
@@ -70,18 +71,13 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         {
             app.ui.status = e;
         }
-        if slot.len() > 1 {
-            resp.context_menu(|ui| {
-                for tool in slot.iter() {
-                    if ui.selectable_label(app.ui.tool == *tool, tool.label()).clicked() {
-                        app.ui.tool = *tool;
-                        app.ui.slot_tools[si] = *tool;
-                        ui.close();
-                    }
-                }
-            });
+        if let Some(tool) = choice {
+            app.ui.tool = tool;
+            if let Some(slot_tool) = app.ui.slot_tools.get_mut(si) {
+                *slot_tool = tool;
+            }
         }
-        x += 28.0;
+        x += 26.0;
         if matches!(si, 2 | 5 | 7 | 10 | 13) {
             x += 4.0;
             p.line_segment([pos2(x, cy - 10.0), pos2(x, cy + 10.0)], Stroke::new(1.0, t.separator));
@@ -131,27 +127,23 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     p.text(pos2(snap.max.x + 4.0, cy), Align2::LEFT_CENTER, "Snapping", Tokens::ui(12.0), t.text_dim);
 
     // Right side: community buttons, workspaces.
-    let mut rx = rect.max.x - 10.0;
-    let discord = Rect::from_min_max(pos2(rx - 104.0, cy - 13.0), pos2(rx, cy + 13.0));
-    let dresp = ui.interact(discord, egui::Id::new("hdr-discord"), Sense::click());
-    let dc = Color32::from_rgb(0x58, 0x65, 0xf2);
-    p.rect_filled(discord, 13.0, if dresp.hovered() { dc.gamma_multiply(1.2) } else { dc });
-    icons::paint(&p, Rect::from_center_size(pos2(discord.min.x + 16.0, cy), vec2(14.0, 14.0)), Icon::Chat, Color32::WHITE);
-    p.text(pos2(discord.min.x + 28.0, cy), Align2::LEFT_CENTER, "Discord", Tokens::semibold(12.0), Color32::WHITE);
+    let mut rx = rect.max.x - 6.0;
+    let discord = Rect::from_min_max(pos2(rx - 24.0, cy - 12.0), pos2(rx, cy + 12.0));
+    let dresp = widgets::icon_button(ui, discord, Icon::Chat, false, &t, egui::Id::new("hdr-discord"));
     app.auto.add("header.discord", discord, "Join the ArtCraft Discord");
     if dresp.on_hover_text("Join the ArtCraft community on Discord").clicked() {
         let _ = app.session.execute("help.discord", json!({}));
     }
-    rx = discord.min.x - 6.0;
+    rx = discord.min.x - 2.0;
     for (id, icon, tip, cmd) in
         [("hdr-github", Icon::Code, "EffectCraft on GitHub", "help.github"), ("hdr-web", Icon::Globe, "EffectCraft on getartcraft.com", "help.appPage")]
     {
-        let r = Rect::from_min_max(pos2(rx - 26.0, cy - 13.0), pos2(rx, cy + 13.0));
+        let r = Rect::from_min_max(pos2(rx - 24.0, cy - 12.0), pos2(rx, cy + 12.0));
         if widgets::icon_button(ui, r, icon, false, &t, egui::Id::new(id)).on_hover_text(tip).clicked() {
             let _ = app.session.execute(cmd, json!({}));
         }
         app.auto.add(&format!("header.{}", &id[4..]), r, tip);
-        rx = r.min.x - 4.0;
+        rx = r.min.x - 2.0;
     }
     rx -= 10.0;
     p.line_segment([pos2(rx, cy - 10.0), pos2(rx, cy + 10.0)], Stroke::new(1.0, t.separator));
@@ -182,7 +174,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     for name in shown {
         let g = p.layout_no_wrap(name.to_string(), Tokens::ui(12.0), t.text);
         let w = g.size().x + 16.0;
-        let r = Rect::from_min_max(pos2(rx - w, cy - 13.0), pos2(rx, cy + 13.0));
+        let r = Rect::from_min_max(pos2(rx - w, cy - 12.0), pos2(rx, cy + 12.0));
         if r.min.x < x + 120.0 {
             break;
         }
@@ -205,6 +197,96 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         }
         rx = r.min.x - 2.0;
     }
+}
+
+/// A primary-button hold reveals grouped tools; secondary click remains an immediate shortcut.
+/// Remember one opening per press, and consume that press's release so it cannot activate the
+/// original tool or close the flyout immediately. No application/document state lives in this timer.
+fn tool_hold(response: &egui::Response) -> (bool, bool) {
+    const HOLD_SECONDS: f64 = 0.4;
+    let ctx = &response.ctx;
+    let fired_id = response.id.with("tool-hold-fired");
+    let cancelled_id = response.id.with("tool-hold-cancelled");
+    let owned_id = response.id.with("tool-hold-owned");
+    let max_distance = ctx.options(|o| o.input_options.max_click_dist);
+    let (down, pressed, released, elapsed, moved) = ctx.input(|i| {
+        (
+            i.pointer.primary_down(),
+            i.pointer.primary_pressed(),
+            i.pointer.primary_released(),
+            i.pointer.press_start_time().map(|start| i.time - start),
+            i.pointer.press_origin().zip(i.pointer.latest_pos()).is_some_and(|(start, now)| start.distance(now) > max_distance),
+        )
+    });
+    if pressed {
+        // egui's interaction radius may claim nearby presses outside the painted button.
+        // A hold must begin inside this tool as well as belonging to its response.
+        let owns_press = response.is_pointer_button_down_on() && ctx.input(|i| i.pointer.press_origin().is_some_and(|pos| response.rect.contains(pos)));
+        ctx.data_mut(|d| {
+            d.remove::<bool>(fired_id);
+            d.remove::<bool>(cancelled_id);
+            d.insert_temp(owned_id, owns_press);
+        });
+    }
+    let fired = ctx.data(|d| d.get_temp::<bool>(fired_id)).unwrap_or(false);
+    if !down {
+        // Keep the latch for all passes of the release frame (egui may perform a sizing pass).
+        if !released {
+            ctx.data_mut(|d| {
+                d.remove::<bool>(fired_id);
+                d.remove::<bool>(cancelled_id);
+                d.remove::<bool>(owned_id);
+            });
+        }
+        return (false, fired && released);
+    }
+    if moved {
+        ctx.data_mut(|d| d.insert_temp(cancelled_id, true));
+    }
+    let cancelled = ctx.data(|d| d.get_temp::<bool>(cancelled_id)).unwrap_or(false);
+    if fired {
+        return (false, true);
+    }
+    // egui retires a click-only widget's press after its maximum click duration,
+    // even without pointer movement. Keep the original owner for a delayed frame.
+    let owned = ctx.data(|d| d.get_temp::<bool>(owned_id)).unwrap_or(false);
+    if owned
+        && !cancelled
+        && let Some(elapsed) = elapsed.filter(|v| v.is_finite() && *v >= 0.0)
+    {
+        if elapsed >= HOLD_SECONDS {
+            ctx.data_mut(|d| d.insert_temp(fired_id, true));
+            return (true, true);
+        }
+        ctx.request_repaint_after(std::time::Duration::from_secs_f64(HOLD_SECONDS - elapsed));
+    }
+    (false, false)
+}
+
+fn tool_flyout(response: &egui::Response, tools: &[Tool], current: Tool, reg: &mut crate::automation::Registry) -> (Option<Tool>, bool) {
+    let (held_open, suppress_click) = tool_hold(response);
+    let command = if held_open || response.secondary_clicked() {
+        Some(egui::SetOpenCommand::Bool(true))
+    } else if response.clicked() && !suppress_click {
+        Some(egui::SetOpenCommand::Bool(false))
+    } else {
+        None
+    };
+    let mut choice = None;
+    egui::Popup::menu(response)
+        .open_memory(command)
+        .close_behavior(if suppress_click { egui::PopupCloseBehavior::IgnoreClicks } else { egui::PopupCloseBehavior::CloseOnClick })
+        .show(|ui| {
+            for tool in tools {
+                let response = ui.selectable_label(current == *tool, tool.label());
+                reg.add(&format!("tools.flyout.{tool:?}"), response.rect, tool.label());
+                if response.clicked() {
+                    choice = Some(*tool);
+                    ui.close();
+                }
+            }
+        });
+    (choice, suppress_click)
 }
 
 /// Puppet tool options: Mesh: Show, Expansion, Density (for new meshes and the selected
@@ -321,5 +403,135 @@ pub fn paint_logo(p: &egui::Painter, r: Rect) {
     });
     if let Some(t) = tex {
         p.image(t.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::{Event, Modifiers, PointerButton};
+
+    struct Fixture {
+        ctx: egui::Context,
+        tool: Tool,
+        reg: crate::automation::Registry,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            Self { ctx: egui::Context::default(), tool: Tool::Hand, reg: crate::automation::Registry::default() }
+        }
+
+        fn frame(&mut self, time: f64, events: Vec<Event>) {
+            self.reg.begin_frame();
+            self.ctx
+                .run_ui(egui::RawInput { time: Some(time), events, ..Default::default() }, |ui| {
+                    let r = Rect::from_min_size(pos2(20.0, 20.0), vec2(24.0, 24.0));
+                    let response = ui.interact(r, egui::Id::new("fixture-tool"), Sense::click());
+                    let (choice, suppress_click) = tool_flyout(&response, &[Tool::Rectangle, Tool::Ellipse], self.tool, &mut self.reg);
+                    if response.clicked() && !suppress_click {
+                        self.tool = Tool::Rectangle;
+                    }
+                    if let Some(tool) = choice {
+                        self.tool = tool;
+                    }
+                })
+                .drop_without_applying_deltas();
+        }
+
+        fn popup_open(&self) -> bool {
+            egui::Popup::is_id_open(&self.ctx, egui::Id::new("fixture-tool").with("popup"))
+        }
+    }
+
+    fn button(pos: egui::Pos2, button: PointerButton, pressed: bool) -> Vec<Event> {
+        vec![Event::PointerMoved(pos), Event::PointerButton { pos, button, pressed, modifiers: Modifiers::NONE }]
+    }
+
+    #[test]
+    fn tool_flyout_short_click_selects_without_opening() {
+        let mut fixture = Fixture::new();
+        let pos = pos2(32.0, 32.0);
+        fixture.frame(0.0, vec![]);
+        fixture.frame(0.1, button(pos, PointerButton::Primary, true));
+        fixture.frame(0.2, button(pos, PointerButton::Primary, false));
+        assert_eq!(fixture.tool, Tool::Rectangle);
+        assert!(!fixture.popup_open());
+    }
+
+    #[test]
+    fn tool_flyout_hold_survives_release_and_allows_a_new_tool_choice() {
+        let mut fixture = Fixture::new();
+        let pos = pos2(32.0, 32.0);
+        fixture.frame(0.0, vec![]);
+        fixture.frame(0.1, button(pos, PointerButton::Primary, true));
+        fixture.frame(0.3, vec![]);
+        assert!(!fixture.popup_open());
+        fixture.frame(0.6, vec![]);
+        assert!(fixture.popup_open());
+        fixture.frame(0.65, button(pos, PointerButton::Primary, false));
+        fixture.frame(0.7, vec![]);
+        assert!(fixture.popup_open(), "the initiating release must not close the menu");
+        assert_eq!(fixture.tool, Tool::Hand, "the initiating release must not select the original tool");
+        let choice = fixture.reg.elements.iter().find(|e| e.id == "tools.flyout.Ellipse").unwrap();
+        let pos = pos2(choice.rect[0] + choice.rect[2] / 2.0, choice.rect[1] + choice.rect[3] / 2.0);
+        fixture.frame(0.8, button(pos, PointerButton::Primary, true));
+        fixture.frame(0.9, button(pos, PointerButton::Primary, false));
+        assert_eq!(fixture.tool, Tool::Ellipse);
+        assert!(!fixture.popup_open());
+    }
+
+    #[test]
+    fn tool_flyout_hold_opens_even_when_the_next_frame_arrives_late() {
+        let mut fixture = Fixture::new();
+        let pos = pos2(32.0, 32.0);
+        fixture.frame(0.0, vec![]);
+        fixture.frame(0.1, button(pos, PointerButton::Primary, true));
+        fixture.frame(1.2, vec![]);
+        assert!(fixture.popup_open(), "a slow frame is not a pointer drag");
+        fixture.frame(1.3, button(pos, PointerButton::Primary, false));
+        assert!(fixture.popup_open());
+        assert_eq!(fixture.tool, Tool::Hand);
+    }
+
+    #[test]
+    fn tool_flyout_hold_does_not_claim_a_press_from_outside_the_button() {
+        let mut fixture = Fixture::new();
+        let outside = pos2(19.0, 32.0);
+        let inside = pos2(21.0, 32.0);
+        fixture.frame(0.0, vec![]);
+        fixture.frame(0.1, button(outside, PointerButton::Primary, true));
+        // Cross the edge without exceeding egui's click-distance tolerance.
+        fixture.frame(0.2, vec![Event::PointerMoved(inside)]);
+        fixture.frame(1.2, vec![]);
+        fixture.frame(1.3, button(inside, PointerButton::Primary, false));
+        assert!(!fixture.popup_open());
+        assert_eq!(fixture.tool, Tool::Hand);
+    }
+
+    #[test]
+    fn tool_flyout_secondary_click_and_escape_preserve_the_tool() {
+        let mut fixture = Fixture::new();
+        let pos = pos2(32.0, 32.0);
+        fixture.frame(0.0, vec![]);
+        fixture.frame(0.1, button(pos, PointerButton::Secondary, true));
+        fixture.frame(0.2, button(pos, PointerButton::Secondary, false));
+        assert!(fixture.popup_open());
+        fixture.frame(0.3, vec![Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }]);
+        assert!(!fixture.popup_open());
+        assert_eq!(fixture.tool, Tool::Hand);
+    }
+
+    #[test]
+    fn tool_flyout_drag_does_not_open_a_hold_menu() {
+        let mut fixture = Fixture::new();
+        let pos = pos2(32.0, 32.0);
+        fixture.frame(0.0, vec![]);
+        fixture.frame(0.1, button(pos, PointerButton::Primary, true));
+        fixture.frame(0.3, vec![Event::PointerMoved(pos2(90.0, 80.0))]);
+        fixture.frame(0.7, vec![]);
+        fixture.frame(0.8, button(pos2(90.0, 80.0), PointerButton::Primary, false));
+        assert!(!fixture.popup_open());
+        assert_eq!(fixture.tool, Tool::Hand);
     }
 }

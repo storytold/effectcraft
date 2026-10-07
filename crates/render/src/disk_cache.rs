@@ -739,6 +739,17 @@ fn hash_debug(h: &mut Hash128, v: &impl std::fmt::Debug) {
     h.write(&[0xff]);
 }
 
+/// Feed borrowed render structures into the persistent 128-bit hash without cloning a comp.
+struct ContentHasher<'a>(&'a mut Hash128);
+impl std::hash::Hasher for ContentHasher<'_> {
+    fn finish(&self) -> u64 {
+        self.0.finish() as u64
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        self.0.write(bytes);
+    }
+}
+
 /// A file's size and modification time (so edited footage gets new keys).
 fn file_stamp(h: &mut Hash128, path: &str) {
     if path.is_empty() {
@@ -811,7 +822,10 @@ pub fn comp_content_key(project: &effectcraft_project::Project, comp: effectcraf
         h.write_u64(id.0);
         h.write(it.name.as_bytes());
         match &it.kind {
-            ItemKind::Comp(c) => hash_debug(&mut h, &c.pixel_form()),
+            ItemKind::Comp(c) => {
+                h.write(b"comp-pixel-structure-1");
+                crate::cache::hash_comp_structure(&mut ContentHasher(&mut h), c);
+            }
             k => hash_debug(&mut h, k),
         }
         if let ItemKind::Footage(f) = &it.kind {
@@ -887,6 +901,49 @@ mod tests {
         assert_eq!(parse_entry_name(&entry_name(key)), Some(key));
         assert_eq!(parse_entry_name("abc.ecc"), None);
         assert_eq!(parse_entry_name(&format!("{key:032x}.tmp.1")), None);
+    }
+
+    #[test]
+    fn nested_effect_labels_reuse_persisted_frames_but_parameter_edits_miss() {
+        use effectcraft_color::Label;
+        use effectcraft_keyframe::Value;
+        use effectcraft_project::{Comp, GroupKind, ItemKind, LayerSource, Project, PropGroup, Property, Solid, build};
+        use effectcraft_time::{FrameRate, Tick};
+        let mut project = Project::default();
+        let comp = Comp::new(4, 4, FrameRate::FPS_30, Tick::from_seconds_f64(1.0));
+        let inner = project.add_item("Inner", Label::None, None, ItemKind::Comp(comp.clone().into()));
+        let solid = project.add_item("Solid", Label::None, None, ItemKind::Solid(Solid { width: 4, height: 4, color: [0.2, 0.4, 0.6], pixel_aspect: 1.0 }));
+        let mut layer = build::layer(&mut project, &comp, "Original layer", LayerSource::Solid { item: solid }, (4, 4), None);
+        let mut group = PropGroup::new(900, "originalFixture", "Original effect").with(Property::new(901, "amount", "Amount", Value::Scalar(3.0)));
+        group.kind = GroupKind::Effect { effect: "ec.blur.gaussian".into() };
+        layer.props.group_mut("effects").unwrap().children.push(group.into());
+        project.comp_mut(inner).unwrap().layers.push(layer);
+        let outer = project.add_item("Outer", Label::None, None, ItemKind::Comp(comp.clone().into()));
+        let nested = build::layer(&mut project, &comp, "Nested", LayerSource::Comp { item: inner }, (4, 4), None);
+        project.comp_mut(outer).unwrap().layers.push(nested);
+        let key = |project: &Project| frame_key(comp_content_key(project, outer), 3, 1000, 0);
+        let original_key = key(&project);
+        let dir = tmpdir("effect-labels");
+        let cache = DiskCache::open(&dir, 4096).unwrap();
+        let rgba = vec![32; 4 * 4 * 4];
+        cache.put_frame_now(original_key, 4, 4, &rgba);
+        let mut labeled = project.clone();
+        let inner_comp = labeled.comp_mut(inner).unwrap();
+        inner_comp.layers[0].props.group_mut("effects/#1").unwrap().effect_label = Label::Purple;
+        // Preserve upstream switch normalization alongside the new label omission.
+        inner_comp.layers[0].switches.audio = false;
+        inner_comp.layers[0].switches.locked = true;
+        inner_comp.layers[0].switches.shy = true;
+        inner_comp.hide_shy = true;
+        assert_eq!(key(&labeled), original_key);
+        assert_eq!(cache.get_frame(key(&labeled)).unwrap().rgba, rgba);
+        let reloaded = Project::from_json(&labeled.to_file_json().unwrap()).unwrap();
+        assert_eq!(key(&reloaded), original_key);
+        let reopened = DiskCache::open(&dir, 4096).unwrap();
+        assert_eq!(reopened.get_frame(key(&reloaded)).unwrap().rgba, rgba);
+        labeled.comp_mut(inner).unwrap().layers[0].props.prop_mut("effects/#1/amount").unwrap().value = Value::Scalar(8.0);
+        assert_ne!(key(&labeled), original_key);
+        assert!(reopened.get_frame(key(&labeled)).is_none());
     }
 
     #[test]

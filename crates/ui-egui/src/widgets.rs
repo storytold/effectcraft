@@ -115,8 +115,8 @@ pub fn select_all(ctx: &egui::Context, id: egui::Id, text: &str) {
 pub fn swatch(ui: &mut Ui, rect: Rect, c: [f32; 4], id: egui::Id, t: &Tokens) -> Response {
     let resp = ui.interact(rect, id, Sense::click());
     let col = Color32::from_rgb((c[0].clamp(0.0, 1.0) * 255.0) as u8, (c[1].clamp(0.0, 1.0) * 255.0) as u8, (c[2].clamp(0.0, 1.0) * 255.0) as u8);
-    ui.painter().rect_filled(rect, 2.0, col);
-    ui.painter().rect_stroke(rect, 2.0, Stroke::new(1.0, if resp.hovered() { t.text } else { t.field_border }), StrokeKind::Inside);
+    ui.painter().rect_filled(rect, t.radius_sm, col);
+    ui.painter().rect_stroke(rect, t.radius_sm, Stroke::new(1.0, if resp.hovered() { t.text } else { t.field_border }), StrokeKind::Inside);
     resp
 }
 
@@ -152,7 +152,7 @@ pub fn twirl(ui: &mut Ui, rect: Rect, open: bool, id: egui::Id, t: &Tokens) -> R
 pub fn icon_toggle(ui: &mut Ui, rect: Rect, icon: Icon, on: bool, t: &Tokens, id: egui::Id, on_color: Option<Color32>) -> Response {
     let resp = ui.interact(rect, id, Sense::click());
     if resp.hovered() {
-        ui.painter().rect_filled(rect, 2.0, t.hover);
+        ui.painter().rect_filled(rect, t.radius_sm, t.hover);
     }
     let col = if on { on_color.unwrap_or(t.icon) } else { t.text_faint.gamma_multiply(0.7) };
     if on || resp.hovered() {
@@ -165,17 +165,11 @@ pub fn icon_toggle(ui: &mut Ui, rect: Rect, icon: Icon, on: bool, t: &Tokens, id
 pub fn icon_button(ui: &mut Ui, rect: Rect, icon: Icon, active: bool, t: &Tokens, id: egui::Id) -> Response {
     let resp = ui.interact(rect, id, Sense::click());
     if active {
-        ui.painter().rect_filled(rect, 4.0, t.accent);
+        ui.painter().rect_filled(rect, t.radius_sm, t.accent);
     } else if resp.hovered() {
-        ui.painter().rect_filled(rect, 4.0, t.hover);
+        ui.painter().rect_filled(rect, t.radius_sm, t.hover);
     }
-    let col = if active {
-        Color32::WHITE
-    } else if resp.hovered() {
-        t.icon_active
-    } else {
-        t.icon
-    };
+    let col = if active || resp.hovered() { t.icon_active } else { t.icon };
     icons::paint(ui.painter(), rect.shrink(rect.width() * 0.22), icon, col);
     resp
 }
@@ -191,29 +185,32 @@ pub fn text_fit(p: &egui::Painter, pos: egui::Pos2, align: Align2, text: &str, f
     rect
 }
 
-/// Rounded search field with a magnifier icon.
+/// Compact search field with a magnifier icon and visible keyboard focus.
 pub fn search_field(ui: &mut Ui, rect: Rect, text: &mut String, hint: &str, t: &Tokens) -> Response {
-    let h = rect.height();
-    ui.painter().rect_filled(rect, h / 2.0, t.field_bg);
-    ui.painter().rect_stroke(rect, h / 2.0, Stroke::new(1.0, t.field_border), StrokeKind::Inside);
+    ui.painter().rect_filled(rect, t.radius_sm, t.field_bg);
+    ui.painter().rect_stroke(rect, t.radius_sm, Stroke::new(1.0, t.field_border), StrokeKind::Inside);
     icons::paint(ui.painter(), Rect::from_center_size(pos2(rect.min.x + 12.0, rect.center().y), vec2(12.0, 12.0)), Icon::Search, t.text_dim);
     let inner = Rect::from_min_max(pos2(rect.min.x + 22.0, rect.min.y + 1.0), pos2(rect.max.x - 8.0, rect.max.y - 1.0));
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(inner));
-    child.add(
+    let resp = child.add(
         egui::TextEdit::singleline(text)
             .hint_text(hint)
             .frame(egui::Frame::NONE)
             .desired_width(inner.width())
             .font(Tokens::ui(12.0))
             .vertical_align(egui::Align::Center),
-    )
+    );
+    if resp.has_focus() {
+        ui.painter().rect_stroke(rect, t.radius_sm, Stroke::new(1.0, t.focus), StrokeKind::Inside);
+    }
+    resp
 }
 
 /// Dropdown-looking control ("Full ▾").
 pub fn dropdown(ui: &mut Ui, rect: Rect, text: &str, t: &Tokens, id: egui::Id) -> Response {
     let resp = ui.interact(rect, id, Sense::click());
-    ui.painter().rect_filled(rect, 3.0, if resp.hovered() { t.hover } else { t.field_bg });
-    ui.painter().rect_stroke(rect, 3.0, Stroke::new(1.0, t.field_border), StrokeKind::Inside);
+    ui.painter().rect_filled(rect, t.radius_sm, if resp.hovered() { t.hover } else { t.field_bg });
+    ui.painter().rect_stroke(rect, t.radius_sm, Stroke::new(1.0, t.field_border), StrokeKind::Inside);
     // Text that doesn't fit before the arrow is elided (narrow panels).
     let room = rect.width() - 7.0 - 18.0;
     let fits = |s: &str| ui.painter().layout_no_wrap(s.to_string(), Tokens::ui(11.5), t.text).size().x <= room;
@@ -248,7 +245,10 @@ pub fn text_button(ui: &mut Ui, rect: Rect, text: &str, primary: bool, t: &Token
     } else {
         t.hover
     };
-    ui.painter().rect_filled(rect, rect.height() / 2.0, bg);
+    ui.painter().rect_filled(rect, t.radius_sm, bg);
+    if !primary {
+        ui.painter().rect_stroke(rect, t.radius_sm, Stroke::new(1.0, t.field_border), StrokeKind::Inside);
+    }
     ui.painter().text(rect.center(), Align2::CENTER_CENTER, text, Tokens::medium(12.0), if primary { Color32::WHITE } else { t.text });
     resp
 }
@@ -257,8 +257,8 @@ pub fn text_button(ui: &mut Ui, rect: Rect, text: &str, primary: bool, t: &Token
 pub fn checkbox(ui: &mut Ui, rect: Rect, on: bool, t: &Tokens, id: egui::Id) -> Response {
     let resp = ui.interact(rect, id, Sense::click());
     let b = Rect::from_center_size(rect.center(), vec2(12.0, 12.0));
-    ui.painter().rect_filled(b, 2.0, if on { t.accent } else { t.field_bg });
-    ui.painter().rect_stroke(b, 2.0, Stroke::new(1.0, if on { t.accent } else { t.field_border }), StrokeKind::Inside);
+    ui.painter().rect_filled(b, t.radius_sm, if on { t.accent } else { t.field_bg });
+    ui.painter().rect_stroke(b, t.radius_sm, Stroke::new(1.0, if on { t.accent } else { t.field_border }), StrokeKind::Inside);
     if on {
         let p = |x: f32, y: f32| pos2(b.min.x + x * b.width(), b.min.y + y * b.height());
         ui.painter().line(vec![p(0.2, 0.52), p(0.42, 0.74), p(0.8, 0.28)], Stroke::new(1.6, Color32::WHITE));

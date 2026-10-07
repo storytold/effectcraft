@@ -142,12 +142,31 @@ pub fn panel_menu_popup(app: &mut EffectcraftApp, ui: &mut egui::Ui) {
                 app.edit_layout(|l| l.float(panel, r));
                 close = true;
             }
-            if !floating && ui.button(if app.ui.maximized == Some(panel) { "Restore Panel Size" } else { "Maximize Panel" }).clicked() {
+            if ui.button(if app.maximized_contains(panel) { "Restore Panel Size" } else { "Maximize Panel" }).clicked() {
                 app.toggle_maximize(panel);
                 close = true;
             }
             ui.separator();
             match panel {
+                PanelKind::EffectControls => {
+                    for (name, key, value) in [
+                        ("Show Effect Label Swatch", "appearance.showEffectLabelSwatch", app.session.prefs.appearance.show_effect_label_swatch),
+                        (
+                            "Use Label Color for Effect Background",
+                            "appearance.useLabelColorForEffectBackground",
+                            app.session.prefs.appearance.use_label_color_for_effect_background,
+                        ),
+                    ] {
+                        let response = ui.selectable_label(value, name);
+                        app.auto.add(&format!("effectControls.panelMenu.{key}"), response.rect, name);
+                        if response.clicked() {
+                            if let Err(error) = app.session.execute("prefs.set", serde_json::json!({"key": key, "value": !value})) {
+                                app.ui.status = error.to_string();
+                            }
+                            close = true;
+                        }
+                    }
+                }
                 PanelKind::Timeline => {
                     for (label, id) in [
                         ("Hide Shy Layers", "hideShy"),

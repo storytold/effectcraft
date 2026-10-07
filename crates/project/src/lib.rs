@@ -623,8 +623,36 @@ impl Switches {
     }
 }
 
+impl PropGroup {
+    /// Authored property content, excluding presentation-only effect labels. Keep traversal
+    /// iterative and borrowed so comparing cached snapshots does not copy a property tree.
+    pub fn same_pixels(&self, other: &Self) -> bool {
+        let header_matches = |a: &Self, b: &Self| {
+            let PropGroup { uid, match_id, name, kind, effect_label: _, enabled, children } = a;
+            *uid == b.uid && *match_id == b.match_id && *name == b.name && *kind == b.kind && *enabled == b.enabled && children.len() == b.children.len()
+        };
+        if !header_matches(self, other) {
+            return false;
+        }
+        let mut ancestry = vec![self.children.iter().zip(&other.children)];
+        while let Some(children) = ancestry.last_mut() {
+            match children.next() {
+                Some((Node::Prop(a), Node::Prop(b))) if a == b => {}
+                Some((Node::Group(a), Node::Group(b))) if header_matches(a, b) => {
+                    ancestry.push(a.children.iter().zip(&b.children));
+                }
+                Some(_) => return false,
+                None => {
+                    ancestry.pop();
+                }
+            }
+        }
+        true
+    }
+}
+
 impl Layer {
-    /// Draws the same pixels as `o`: equal but for the Audio, Lock and Shy switches.
+    /// Draws the same pixels as `o`: equal but for Audio, Lock, Shy and effect labels.
     pub fn same_pixels(&self, o: &Layer) -> bool {
         // Every field (no `..`: a new field must be considered here); the property tree last.
         let Layer {
@@ -668,13 +696,13 @@ impl Layer {
             && *auto_orient == o.auto_orient
             && *environment == o.environment
             && *environment_background == o.environment_background
-            && *props == o.props
+            && props.same_pixels(&o.props)
     }
 }
 
 impl Comp {
     /// Draws the same pixels as `o`: equal but for its layers' Audio, Lock and Shy switches and
-    /// Hide Shy Layers.
+    /// Hide Shy Layers and presentation-only effect labels.
     pub fn same_pixels(&self, o: &Comp) -> bool {
         // Every field (no `..`: a new field must be considered here); the layers last.
         let Comp {

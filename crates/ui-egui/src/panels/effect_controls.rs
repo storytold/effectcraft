@@ -888,6 +888,46 @@ fn histogram_only(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter
 
 // ---------------------------------------------------------------------------------------------
 
+/// Subtle presentation tint. Selection remains the theme's selection colour regardless of
+/// custom label colours, so labeling cannot hide which effect is selected.
+fn effect_header_fill(t: &Tokens, label: effectcraft_engine::color::Label, selected: bool, tint: bool) -> Color32 {
+    if selected {
+        return t.row_selected;
+    }
+    if tint && label != effectcraft_engine::color::Label::None { t.header_bg.lerp_to_gamma(t.label(label), 0.12) } else { t.header_bg }
+}
+
+/// Returns the horizontal space reserved for the optional label swatch.
+fn effect_label_picker(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, g: &PropGroup, layer: &Layer, rect: Rect, actions: &mut Actions) -> f32 {
+    if !app.session.prefs.appearance.show_effect_label_swatch {
+        return 0.0;
+    }
+    let t = app.tokens;
+    let response = ui.interact(rect, egui::Id::new(("ec-label", g.uid)), Sense::click()).on_hover_text("Effect label colour");
+    let col = if g.effect_label == effectcraft_engine::color::Label::None { t.text_dim } else { t.label(g.effect_label) };
+    p.rect_filled(rect.shrink(3.0), t.radius_sm, col);
+    p.rect_stroke(rect.shrink(3.0), t.radius_sm, Stroke::new(1.0, t.field_border), egui::StrokeKind::Inside);
+    app.auto.add(&format!("effectControls.effect.{}.label", g.uid), rect, "Effect label colour");
+    egui::Popup::menu(&response).show(|ui| {
+        for (index, label) in effectcraft_engine::color::Label::ALL.into_iter().enumerate() {
+            let name = app.session.prefs.label_name(label);
+            let row = ui
+                .horizontal(|ui| {
+                    let (swatch, _) = ui.allocate_exact_size(vec2(12.0, 12.0), Sense::hover());
+                    ui.painter().rect_filled(swatch, t.radius_sm, if label == effectcraft_engine::color::Label::None { t.text_dim } else { t.label(label) });
+                    ui.selectable_label(g.effect_label == label, &name)
+                })
+                .inner;
+            app.auto.add(&format!("effectControls.effect.{}.label.{index}", g.uid), row.rect, &name);
+            if row.clicked() {
+                actions.push(("effect.setLabel".into(), json!({"layer": layer.id.0, "effect": g.uid, "label": index})));
+                ui.close();
+            }
+        }
+    });
+    22.0
+}
+
 pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
     let p = ui.painter().with_clip_rect(rect);
@@ -944,9 +984,12 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         y += 26.0;
         let open = !app.ui.fx_closed.contains(&g.uid);
         let selected = app.session.state.selected_props.iter().any(|(l, u)| *l == layer.id && *u == g.uid);
-        bp.rect_filled(r, 0.0, if selected { Color32::from_rgb(0x2f, 0x3a, 0x52) } else { Color32::from_rgb(0x2a, 0x2a, 0x2a) });
+        bp.rect_filled(r, 0.0, effect_header_fill(&t, g.effect_label, selected, app.session.prefs.appearance.use_label_color_for_effect_background));
         let fxr = Rect::from_center_size(pos2(r.min.x + 14.0, r.center().y), vec2(16.0, 16.0));
-        if widgets::icon_toggle(ui, fxr, Icon::Fx, g.enabled, &t, egui::Id::new(("ec-fx", g.uid)), None).clicked() {
+        if widgets::icon_toggle(ui, fxr, Icon::Eye, g.enabled, &t, egui::Id::new(("ec-fx", g.uid)), None)
+            .on_hover_text(if g.enabled { "Disable effect" } else { "Enable effect" })
+            .clicked()
+        {
             actions.push(("effect.toggle".into(), json!({"layer": layer.id.0, "effect": g.uid})));
         }
         app.auto.add(&format!("effectControls.effect.{}.fx", g.uid), fxr, &g.name);
@@ -959,29 +1002,54 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             }
         }
         app.auto.add(&format!("effectControls.effect.{}.twirl", g.uid), tw, &g.name);
-        bp.text(pos2(tw.max.x + 6.0, r.center().y), Align2::LEFT_CENTER, &g.name, Tokens::semibold(12.0), t.text);
-        let reset = Rect::from_min_size(pos2(r.max.x - 96.0, r.min.y + 4.0), vec2(40.0, 18.0));
-        let rresp = ui.interact(reset, egui::Id::new(("ec-reset", g.uid)), Sense::click());
-        bp.text(reset.center(), Align2::CENTER_CENTER, "Reset", Tokens::ui(11.5), if rresp.hovered() { t.hot_text } else { t.text_dim });
-        app.auto.add(&format!("effectControls.effect.{}.reset", g.uid), reset, "Reset");
-        if rresp.clicked() {
-            actions.push(("effect.reset".into(), json!({"layer": layer.id.0, "effect": g.uid})));
+        let reset = Rect::from_center_size(pos2(r.max.x - 38.0, r.center().y), vec2(22.0, 22.0));
+        let about = Rect::from_center_size(pos2(r.max.x - 13.0, r.center().y), vec2(22.0, 22.0));
+        // Narrow dock splits retain disclosure/visibility without overlapping action targets.
+        // Reset remains available in the effect's context menu when its icon cannot fit.
+        let show_reset = reset.min.x >= tw.max.x + 4.0;
+        let show_about = about.min.x >= tw.max.x + 4.0;
+        let action_left = if show_reset {
+            reset.min.x
+        } else if show_about {
+            about.min.x
+        } else {
+            r.max.x
+        };
+        let label_rect = Rect::from_center_size(pos2(tw.max.x + 11.0, r.center().y), vec2(18.0, 18.0));
+        let label_width = if label_rect.max.x <= action_left - 4.0 { effect_label_picker(app, ui, &bp, g, &layer, label_rect, &mut actions) } else { 0.0 };
+        let name_left = tw.max.x + 6.0 + label_width;
+        let name_rect = Rect::from_min_max(pos2(name_left, r.min.y), pos2((action_left - 4.0).max(name_left), r.max.y));
+        widgets::text_fit(
+            &bp.with_clip_rect(name_rect.intersect(body)),
+            name_rect.left_center(),
+            Align2::LEFT_CENTER,
+            &g.name,
+            Tokens::semibold(12.0),
+            name_rect.width(),
+            t.text,
+        );
+        if show_reset {
+            let rresp = widgets::icon_button(ui, reset, Icon::Reset, false, &t, egui::Id::new(("ec-reset", g.uid))).on_hover_text("Reset effect");
+            app.auto.add(&format!("effectControls.effect.{}.reset", g.uid), reset, "Reset");
+            if rresp.clicked() {
+                actions.push(("effect.reset".into(), json!({"layer": layer.id.0, "effect": g.uid})));
+            }
         }
-        // About…: the effect's name and category (AE's About dialog).
-        let about = Rect::from_min_size(pos2(r.max.x - 50.0, r.min.y + 4.0), vec2(44.0, 18.0));
-        let aresp = ui.interact(about, egui::Id::new(("ec-about", g.uid)), Sense::click());
-        bp.text(about.center(), Align2::CENTER_CENTER, "About...", Tokens::ui(11.5), if aresp.hovered() { t.hot_text } else { t.text_dim });
-        app.auto.add(&format!("effectControls.effect.{}.about", g.uid), about, "About");
+        // Information remains available without taking space from the effect name.
         let apop = egui::Id::new(("ec-about-pop", g.uid));
-        if aresp.clicked() {
-            widgets::open_popup(ui, apop);
+        if show_about {
+            let aresp = widgets::icon_button(ui, about, Icon::Info, false, &t, egui::Id::new(("ec-about", g.uid))).on_hover_text("About this effect");
+            app.auto.add(&format!("effectControls.effect.{}.about", g.uid), about, "About");
+            if aresp.clicked() {
+                widgets::open_popup(ui, apop);
+            }
         }
         if let Some(spec) = effectcraft_engine::effects::find(effect) {
             let lines = vec![spec.name.to_string(), format!("Category: {}", spec.category), "EffectCraft built-in effect (MIT OR Apache-2.0)".to_string()];
             let _ = widgets::popup_menu(ui, apop, about.left_bottom(), &lines, None);
         }
         let hresp = ui.interact(
-            Rect::from_min_max(pos2(tw.max.x, r.min.y), pos2(reset.min.x - 4.0, r.max.y)),
+            Rect::from_min_max(pos2(tw.max.x + label_width, r.min.y), pos2((action_left - 4.0).max(tw.max.x + label_width), r.max.y)),
             egui::Id::new(("ec-hdr", g.uid)),
             Sense::click_and_drag(),
         );
@@ -1224,6 +1292,43 @@ pub fn viewer_hook(
     for (id, params) in actions {
         if let Err(e) = crate::menus::invoke(app, &ctx, &id, params) {
             app.ui.status = e;
+        }
+    }
+}
+
+#[cfg(test)]
+mod effect_label_tests {
+    use super::*;
+    use crate::theme::ThemeKind;
+    use effectcraft_engine::color::Label;
+
+    fn contrast(a: Color32, b: Color32) -> f64 {
+        let luminance = |c: Color32| {
+            let channel = |value: u8| {
+                let value = f64::from(value) / 255.0;
+                if value <= 0.04045 { value / 12.92 } else { ((value + 0.055) / 1.055).powf(2.4) }
+            };
+            0.2126 * channel(c.r()) + 0.7152 * channel(c.g()) + 0.0722 * channel(c.b())
+        };
+        let (a, b) = (luminance(a), luminance(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    #[test]
+    fn effect_label_tint_preserves_selection_across_themes_and_custom_colours() {
+        for kind in [ThemeKind::Dark, ThemeKind::Darker, ThemeKind::Light] {
+            let mut t = Tokens::for_kind(kind);
+            for colour in [Color32::BLACK, Color32::WHITE, Color32::RED] {
+                t.labels.fill(colour);
+                for label in Label::ALL {
+                    assert_eq!(effect_header_fill(&t, label, true, true), t.row_selected);
+                    assert_eq!(effect_header_fill(&t, label, false, false), t.header_bg);
+                    for selected in [true, false] {
+                        assert!(contrast(t.text, effect_header_fill(&t, label, selected, true)) >= 4.5, "unreadable title: {kind:?}, {label:?}, {colour:?}");
+                    }
+                }
+                assert_eq!(effect_header_fill(&t, Label::None, false, true), t.header_bg);
+            }
         }
     }
 }

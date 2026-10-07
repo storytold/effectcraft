@@ -360,6 +360,47 @@ fn paste(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"effects": uids}))
 }
 
+/// Set an effect instance's presentation label without changing effect parameters.
+fn set_label(s: &mut Session, p: &Value) -> Result<Value> {
+    let c = "effect.setLabel";
+    let label = match p.get("label") {
+        Some(Value::Number(n)) => n.as_u64().and_then(|n| usize::try_from(n).ok()).and_then(|n| effectcraft_color::Label::ALL.get(n)).copied(),
+        Some(Value::String(name)) => s.prefs.label_from_name(name),
+        _ => None,
+    }
+    .ok_or_else(|| bad(c, "missing or unknown `label` (name or index 0-16)"))?;
+    let (cid, lid, uid) = match p.get("effect") {
+        Some(Value::Number(number)) => {
+            let number = number.as_u64().filter(|number| *number > 0).ok_or_else(|| bad(c, "effect must be a positive uid or 1-based index"))?;
+            let (cid, lid) = super::layer_p(s, p, c)?;
+            let effects = s.project.comp(cid).and_then(|comp| comp.layer(lid)).and_then(|layer| layer.effects()).ok_or_else(|| bad(c, "no effects"))?;
+            let group = effects
+                .groups()
+                .find(|group| group.uid == number)
+                .or_else(|| usize::try_from(number - 1).ok().and_then(|index| effects.groups().nth(index)))
+                .ok_or_else(|| bad(c, "no such effect"))?;
+            (cid, lid, group.uid)
+        }
+        None | Some(Value::String(_)) => find_fx(s, p, c)?,
+        _ => return Err(bad(c, "effect must be a uid, 1-based index or name")),
+    };
+    let is_effect = s
+        .project
+        .comp(cid)
+        .and_then(|comp| comp.layer(lid))
+        .and_then(|layer| layer.props.find_group(uid))
+        .is_some_and(|group| matches!(group.kind, GroupKind::Effect { .. }));
+    if !is_effect {
+        return Err(bad(c, "not an effect instance"));
+    }
+    s.edit("Effect Label", None, |proj, _| {
+        let group = layer_mut(proj, cid, lid)?.props.find_group_mut(uid).ok_or_else(|| bad(c, "effect disappeared"))?;
+        group.effect_label = label;
+        Ok(())
+    })?;
+    Ok(json!({"effect": uid, "label": label.name()}))
+}
+
 /// Effect Controls' Reset: every parameter back to its default. Animated parameters get a
 /// keyframe at the current time with the default value (as in After Effects); static ones
 /// change their value.
@@ -434,6 +475,7 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("effect.duplicate", "Duplicate Effect", [], None, "{layer?, effect}", has_layers, duplicate),
         cmd!("effect.copy", "Copy Effects", [], None, "{layer?, effect? | effects?: [uid|name|index]} (default: the selected effects)", has_layers, copy),
         cmd!("effect.paste", "Paste Effects", [], None, "{layers?} — adds the copied effects to the layers", has_layers, paste),
+        cmd!("effect.setLabel", "Set Effect Label", [], None, "{layer?, effect?: uid|1-based index|name, label: name|0-16}", has_layers, set_label),
         cmd!("effect.reset", "Reset Effect", [], None, "{layer?, effect}", has_layers, reset),
         crate::query!("effect.list", "List Effects", "{filter?}", list),
         crate::query!(

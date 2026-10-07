@@ -344,7 +344,7 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
             "maximizePanel" => {
                 let p = match panel_of("panel") {
                     Some(p) => p?,
-                    None => app.panel_at(ctx.pointer_hover_pos()),
+                    None => app.panel_at_in(ctx, ctx.pointer_hover_pos()),
                 };
                 app.toggle_maximize(p);
                 return Ok(json!({"maximized": app.ui.maximized}));

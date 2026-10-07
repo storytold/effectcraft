@@ -393,7 +393,7 @@ impl EffectcraftApp {
     /// Show panel `p` (opening it in its usual place if it is closed), bring it to the front and
     /// give it the focus: Window ▸ <panel>.
     pub fn show_panel(&mut self, p: PanelKind) {
-        if !self.ui.floating.iter().any(|f| f.panels.contains(&p)) && self.ui.maximized.is_some_and(|m| m != p) {
+        if self.ui.maximized.is_some() && !self.maximized_contains(p) {
             self.ui.maximized = None;
         }
         self.raise_panel(p);
@@ -404,6 +404,14 @@ impl EffectcraftApp {
     /// without moving the focus (a comp opening brings up its viewer, an effect applied brings up
     /// Effect Controls).
     pub fn raise_panel(&mut self, p: PanelKind) {
+        // A maximized stack solos a display copy. Switch that temporary anchor instead
+        // of opening the saved entry, so restoring keeps its expansion and height.
+        if self.ui.maximized.is_some_and(
+            |anchor| matches!(self.ui.dock.panel_group(anchor), Some(dock::DockNode::Stack { entries }) if entries.iter().any(|entry| entry.panel == p)),
+        ) {
+            self.ui.maximized = Some(p);
+            return;
+        }
         if let Some(f) = self.ui.floating.iter_mut().find(|f| f.panels.contains(&p)) {
             f.active = f.panels.iter().position(|x| *x == p).unwrap_or(0);
             return;
@@ -1406,7 +1414,7 @@ impl EffectcraftApp {
         let header_h = 40.0;
         let header = egui::Rect::from_min_size(egui::pos2(full.min.x, top), egui::vec2(full.width(), header_h));
         header::show(self, ui, header);
-        let body = egui::Rect::from_min_max(egui::pos2(full.min.x + 4.0, header.max.y + 2.0), egui::pos2(full.max.x - 4.0, full.max.y - 4.0));
+        let body = egui::Rect::from_min_max(egui::pos2(full.min.x + t.gap, header.max.y + t.gap), egui::pos2(full.max.x - t.gap, full.max.y - t.gap));
         self.dock_area(ui, body);
         panels::precomp::mini_flowchart(self, &ctx);
         panels::home::capture_thumbnail(self);

@@ -118,6 +118,8 @@ page!(Appearance {
     brightness: f64 = 0.0,
     use_label_color_for_handles: bool = true,
     use_label_color_for_tabs: bool = true,
+    show_effect_label_swatch: bool = true,
+    use_label_color_for_effect_background: bool = true,
     cycle_mask_colors: bool = true,
     use_gradients: bool = true,
     /// macOS: draw the menu bar inside the window instead of the system menu bar.
@@ -978,6 +980,8 @@ pub fn pages() -> Vec<Page> {
                 Section("Labels and Colors"),
                 s("appearance.useLabelColorForHandles", "Use Label Color for Layer Handles and Paths", B, true),
                 s("appearance.useLabelColorForTabs", "Use Label Color for Related Tabs", B, true),
+                s("appearance.showEffectLabelSwatch", "Show Effect Label Swatch", B, true),
+                s("appearance.useLabelColorForEffectBackground", "Use Label Color for Effect Background", B, true),
                 s("appearance.cycleMaskColors", "Cycle Mask Colors", B, true),
                 s("appearance.useGradients", "Use Gradients", B, true),
                 Section("Menu Bar"),

@@ -25,7 +25,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use effectcraft_engine::project::{Comp, ItemId, ItemKind, LayerSource, Node, Project, PropGroup};
 use effectcraft_engine::render::disk_cache::{self, DiskCache};
@@ -36,6 +36,9 @@ use rayon::prelude::*;
 
 /// Comp identities (and the project snapshots behind them) the RAM preview keeps frames of.
 const MAX_KEEPERS: usize = 64;
+/// Independent of in-flight keeper retention; hash collisions only cause bounded cache misses.
+const MAX_IDENTITY_CANDIDATES: usize = 4;
+const MAX_COMP_FINGERPRINTS: usize = 128;
 
 /// GPU frames kept for RAM preview (bytes of video memory) at first. wgpu can't tell how much
 /// video memory there is: each time the device runs out, the budget halves (to
@@ -210,6 +213,53 @@ pub struct RenderSource {
 /// ([`Frames::identity`]).
 type Identity = (u64, Option<Arc<Project>>);
 
+type CanonicalIdentity = (u64, Arc<Project>);
+type FingerprintKey = (u64, u64);
+
+/// A bounded index, separate from keepers (which may grow while jobs remain in flight).
+#[derive(Default)]
+struct IdentityIndex {
+    buckets: HashMap<FingerprintKey, Vec<CanonicalIdentity>>,
+    order: VecDeque<(FingerprintKey, u64)>,
+}
+
+impl IdentityIndex {
+    fn candidates(&self, key: FingerprintKey) -> Vec<CanonicalIdentity> {
+        self.buckets.get(&key).cloned().unwrap_or_default()
+    }
+
+    fn remove(&mut self, key: FingerprintKey, id: u64) {
+        if let Some(bucket) = self.buckets.get_mut(&key) {
+            bucket.retain(|(candidate, _)| *candidate != id);
+            if bucket.is_empty() {
+                self.buckets.remove(&key);
+            }
+        }
+        self.order.retain(|entry| *entry != (key, id));
+    }
+
+    fn insert(&mut self, key: FingerprintKey, canonical: CanonicalIdentity) {
+        self.remove(key, canonical.0);
+        if let Some(bucket) = self.buckets.get(&key)
+            && bucket.len() >= MAX_IDENTITY_CANDIDATES
+            && let Some((id, _)) = bucket.first()
+        {
+            self.remove(key, *id);
+        }
+        while self.order.len() >= MAX_KEEPERS {
+            let Some((old_key, id)) = self.order.front().copied() else { break };
+            self.remove(old_key, id);
+        }
+        self.order.push_back((key, canonical.0));
+        self.buckets.entry(key).or_default().push(canonical);
+    }
+}
+
+/// Invoke exact comparisons only after the caller has released the index lock.
+fn matching_identity(candidates: Vec<CanonicalIdentity>, mut equivalent: impl FnMut(&Project) -> bool) -> Option<CanonicalIdentity> {
+    candidates.into_iter().find(|(_, project)| equivalent(project))
+}
+
 /// Content keys of (project revision, comp), computed once per revision.
 type ContentKeys = Arc<Mutex<HashMap<(u64, u64), u128>>>;
 
@@ -233,20 +283,21 @@ fn content_key(keys: &ContentKeys, project: &Project, revision: u64, comp: u64) 
 /// hands out), and by value the project settings and the footage, solids and proxies it uses.
 /// With expressions in its comps (which can read anything) every item counts.
 pub fn comp_content(project: &Project, comp: ItemId) -> u64 {
-    comp_content_with(project, comp, |_, c| Arc::as_ptr(c))
+    comp_content_with(project, comp, &content_graph(project, comp), |_, c| Arc::as_ptr(c) as usize as u64)
 }
 
-/// [`comp_content`] with each comp's address given by `addr`.
-fn comp_content_with(project: &Project, comp: ItemId, addr: impl Fn(ItemId, &Arc<Comp>) -> *const Comp) -> u64 {
-    use std::hash::{Hash, Hasher};
+struct ContentGraph {
+    ids: Vec<ItemId>,
+    expressions: bool,
+}
+
+fn content_graph(project: &Project, comp: ItemId) -> ContentGraph {
     fn has_expression(g: &PropGroup) -> bool {
         g.children.iter().any(|c| match c {
             Node::Prop(p) => p.expr.is_some(),
             Node::Group(sub) => has_expression(sub),
         })
     }
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    format!("{:?}", project.settings).hash(&mut h);
     let mut seen = BTreeSet::new();
     let mut stack = vec![comp];
     let mut expressions = false;
@@ -262,22 +313,47 @@ fn comp_content_with(project: &Project, comp: ItemId, addr: impl Fn(ItemId, &Arc
             expressions = expressions || has_expression(&l.props);
         }
     }
-    let ids: Vec<ItemId> = if expressions { project.items.keys().copied().collect() } else { seen.into_iter().collect() };
-    for id in ids {
+    ContentGraph { ids: if expressions { project.items.keys().copied().collect() } else { seen.into_iter().collect() }, expressions }
+}
+
+/// [`comp_content`] with either pointer identities or semantic fingerprints for each comp.
+fn comp_content_with(project: &Project, comp: ItemId, graph: &ContentGraph, token: impl Fn(ItemId, &Arc<Comp>) -> u64) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    format!("{:?}", project.settings).hash(&mut h);
+    for &id in &graph.ids {
         let Some(it) = project.item(id) else { continue };
         id.0.hash(&mut h);
-        if expressions {
+        if graph.expressions {
             // (`comp("Name")`, `footage("Name")`)
             it.name.hash(&mut h);
         }
         match &it.kind {
-            ItemKind::Comp(c) => (addr(id, c) as usize).hash(&mut h),
+            ItemKind::Comp(c) => token(id, c).hash(&mut h),
             k => format!("{k:?}").hash(&mut h),
         }
         format!("{:?}", it.proxy).hash(&mut h);
     }
     comp.0.hash(&mut h);
     h.finish()
+}
+
+fn same_graph_pixels(project: &Project, base: &Project, graph: &ContentGraph) -> bool {
+    if project.settings != base.settings || (graph.expressions && !project.items.keys().eq(base.items.keys())) {
+        return false;
+    }
+    graph.ids.iter().all(|&id| match (project.item(id), base.item(id)) {
+        (Some(a), Some(b)) => {
+            (!graph.expressions || a.name == b.name)
+                && a.proxy == b.proxy
+                && match (&a.kind, &b.kind) {
+                    (ItemKind::Comp(a), ItemKind::Comp(b)) => Arc::ptr_eq(a, b) || a.same_pixels(b),
+                    (a, b) => a == b,
+                }
+        }
+        (None, None) => true,
+        _ => false,
+    })
 }
 
 /// Hash of render options (part of [`FrameKey`] and of the disk key).
@@ -370,8 +446,10 @@ pub struct Frames {
     /// [`comp_content`] identities by (revision, comp), with the project that keeps an identity
     /// found by [`Frames::identity`] in another project.
     identities: Mutex<HashMap<(u64, u64), Identity>>,
-    /// The last new identity of each comp and its project (see [`Frames::identity`]).
-    bases: Mutex<HashMap<u64, (u64, Arc<Project>)>>,
+    /// Semantic candidates; bounded independently of retained in-flight frames.
+    identity_index: Mutex<IdentityIndex>,
+    /// Weak references prevent address reuse from returning another comp's fingerprint.
+    comp_fingerprints: Mutex<HashMap<usize, (Weak<Comp>, u64)>>,
     /// A project snapshot for each identity handed out, with when it was last asked for (see
     /// [`Frames::content_of`]); the counter.
     keepers: Mutex<(u64, HashMap<u64, (u64, Arc<Project>)>)>,
@@ -402,7 +480,8 @@ impl Default for Frames {
             content_keys: Arc::default(),
             gpu_retired: Arc::default(),
             identities: Mutex::default(),
-            bases: Mutex::default(),
+            identity_index: Mutex::default(),
+            comp_fingerprints: Mutex::default(),
             keepers: Mutex::default(),
             remote: None,
             remote_busy: Arc::default(),
@@ -512,28 +591,49 @@ impl Frames {
         id
     }
 
-    /// The [`comp_content`] identity of `comp` in `project`, or the comp's last new identity when
-    /// every comp it draws is the same or draws the same pixels there ([`Comp::same_pixels`]:
-    /// only Audio, Lock or Shy switches changed), so toggling those keeps the cached frames
-    /// (#103). That identity hashes the addresses of the comps in its project, which is
-    /// returned to keep them.
+    fn comp_fingerprint(&self, comp: &Arc<Comp>) -> u64 {
+        let addr = Arc::as_ptr(comp) as usize;
+        let known = self
+            .comp_fingerprints
+            .lock()
+            .ok()
+            .and_then(|m| m.get(&addr).and_then(|(weak, fingerprint)| weak.upgrade().filter(|old| Arc::ptr_eq(old, comp)).map(|_| *fingerprint)));
+        if let Some(fingerprint) = known {
+            return fingerprint;
+        }
+        // Full property traversal happens once per retained Comp Arc, outside all UI/cache locks.
+        let fingerprint = effectcraft_engine::render::cache::comp_pixel_fingerprint(comp);
+        if let Ok(mut m) = self.comp_fingerprints.lock() {
+            if m.len() >= MAX_COMP_FINGERPRINTS {
+                m.clear();
+            }
+            m.insert(addr, (Arc::downgrade(comp), fingerprint));
+        }
+        fingerprint
+    }
+
+    /// Reuse a canonical identity only after exact equality of its graph's pixel inputs.
+    /// Fingerprints filter unrelated history; no scan of keepers or file metadata is needed.
+    /// Both hashing and exact comparisons run outside locks, even while frames are in flight.
     fn identity(&self, project: &Arc<Project>, comp: ItemId) -> Identity {
-        let plain = comp_content(project, comp);
-        let Ok(mut bases) = self.bases.lock() else { return (plain, None) };
-        if let Some((base_id, base)) = bases.get(&comp.0)
-            && *base_id != plain
-            && comp_content_with(project, comp, |id, c| match base.item(id).map(|i| &i.kind) {
-                Some(ItemKind::Comp(b)) if Arc::ptr_eq(b, c) || b.same_pixels(c) => Arc::as_ptr(b),
-                _ => Arc::as_ptr(c),
-            }) == *base_id
-        {
-            return (*base_id, Some(base.clone()));
+        self.identity_checked(project, comp, |_| {})
+    }
+
+    fn identity_checked(&self, project: &Arc<Project>, comp: ItemId, mut compared: impl FnMut(&Project)) -> Identity {
+        let graph = content_graph(project, comp);
+        let plain = comp_content_with(project, comp, &graph, |_, c| Arc::as_ptr(c) as usize as u64);
+        let fingerprint = comp_content_with(project, comp, &graph, |_, c| self.comp_fingerprint(c));
+        let key = (comp.0, fingerprint);
+        let candidates = self.identity_index.lock().map(|index| index.candidates(key)).unwrap_or_default();
+        let found = matching_identity(candidates, |base| {
+            compared(base);
+            same_graph_pixels(project, base, &graph)
+        });
+        let canonical = found.clone().unwrap_or_else(|| (plain, project.clone()));
+        if let Ok(mut index) = self.identity_index.lock() {
+            index.insert(key, canonical);
         }
-        if bases.len() > MAX_KEEPERS {
-            bases.clear();
-        }
-        bases.insert(comp.0, (plain, project.clone()));
-        (plain, None)
+        found.map_or((plain, None), |(id, base)| (id, Some(base)))
     }
 
     pub fn is_cached(&self, k: &FrameKey) -> bool {
@@ -1031,6 +1131,153 @@ mod tests {
         assert!(frames.is_cached(&next), "CPU retry can still publish");
         assert_eq!(frames.inflight(), 0);
         assert!(frames.queue.lock().unwrap().running.is_empty());
+    }
+
+    #[test]
+    fn semantic_identity_filters_drag_history_before_exact_comparisons() {
+        use effectcraft_engine::Session;
+        use serde_json::json;
+        let mut s = Session::default();
+        let comp = ItemId(s.execute("comp.new", json!({"name": "Blur", "width": 4, "height": 4, "duration": 1})).unwrap()["comp"].as_u64().unwrap());
+        let layer = s.execute("layer.newSolid", json!({"comp": comp.0, "color": "#ff0000"})).unwrap()["layer"].as_u64().unwrap();
+        let effect =
+            s.execute("effect.apply", json!({"comp": comp.0, "layers": [layer], "effect": "ec.blur.gaussian"})).unwrap()["effects"][0].as_u64().unwrap();
+        let prop = s.project.comp(comp).unwrap().layers[0].props.find_group(effect).unwrap().get("blurriness").unwrap().uid;
+        let frames = Frames::default();
+        let mut comparisons = 0;
+        let mut recent = None;
+        for value in 1..=200 {
+            s.execute("prop.set", json!({"comp": comp.0, "layer": layer, "prop": prop, "value": value, "merge": "drag"})).unwrap();
+            let (id, _) = frames.identity_checked(&s.project, comp, |_| comparisons += 1);
+            // Model snapshots retained by outstanding jobs, beyond the normal keeper limit.
+            frames.keepers.lock().unwrap().1.insert(id, (value, s.project.clone()));
+            let frame = FrameKey { content: id, comp: comp.0, ..key(0, 0, 0) };
+            insert(&frames, frame);
+            if value == 190 {
+                recent = Some((s.project.clone(), frame));
+            }
+            let index = frames.identity_index.lock().unwrap();
+            assert!(index.order.len() <= MAX_KEEPERS);
+            assert!(index.buckets.values().all(|bucket| bucket.len() <= MAX_IDENTITY_CANDIDATES));
+            assert!(frames.comp_fingerprints.lock().unwrap().len() <= MAX_COMP_FINGERPRINTS);
+        }
+        assert!(frames.keepers.lock().unwrap().1.len() > MAX_KEEPERS);
+        assert_eq!(comparisons, 0, "new blur values must not compare earlier property trees");
+        let (snapshot, frame) = recent.unwrap();
+        let FrameImage::Cpu(before) = frames.get(&frame).unwrap() else { panic!("CPU fixture") };
+        let mut relabeled = (*snapshot).clone();
+        relabeled.comp_mut(comp).unwrap().layers[0].props.find_group_mut(effect).unwrap().effect_label = effectcraft_engine::color::Label::Blue;
+        let (id, _) = frames.identity_checked(&Arc::new(relabeled), comp, |_| {
+            comparisons += 1;
+            assert!(frames.identity_index.try_lock().is_ok(), "exact comparison cannot hold the index lock");
+            assert!(frames.comp_fingerprints.try_lock().is_ok(), "exact comparison cannot hold the fingerprint lock");
+            assert!(frames.keepers.try_lock().is_ok(), "exact comparison cannot hold the keeper lock");
+        });
+        assert_eq!(comparisons, 1, "a labeled undo snapshot has just one semantic candidate");
+        assert_eq!(id, frame.content);
+        let FrameImage::Cpu(after) = frames.get(&FrameKey { content: id, ..frame }).unwrap() else { panic!("CPU fixture") };
+        assert!(Arc::ptr_eq(&before, &after));
+    }
+
+    #[test]
+    fn fingerprint_collisions_are_bounded_and_require_exact_graph_equality() {
+        use effectcraft_engine::Session;
+        use serde_json::json;
+        let mut s = Session::default();
+        let comp = ItemId(s.execute("comp.new", json!({"name": "Collision", "width": 4, "height": 4, "duration": 1})).unwrap()["comp"].as_u64().unwrap());
+        let mut index = IdentityIndex::default();
+        let key = (comp.0, 7); // Deliberately give different content the same fingerprint.
+        for id in 0..20 {
+            let mut project = (*s.project).clone();
+            project.comp_mut(comp).unwrap().width = 5 + id as u32;
+            index.insert(key, (id, Arc::new(project)));
+        }
+        assert_eq!(index.order.len(), MAX_IDENTITY_CANDIDATES);
+        let graph = content_graph(&s.project, comp);
+        let mut comparisons = 0;
+        assert!(
+            matching_identity(index.candidates(key), |base| {
+                comparisons += 1;
+                same_graph_pixels(&s.project, base, &graph)
+            })
+            .is_none()
+        );
+        assert_eq!(comparisons, MAX_IDENTITY_CANDIDATES);
+        index.insert(key, (99, s.project.clone()));
+        let matched = matching_identity(index.candidates(key), |base| same_graph_pixels(&s.project, base, &graph)).unwrap();
+        assert_eq!(matched.0, 99);
+        assert_eq!(index.order.len(), MAX_IDENTITY_CANDIDATES);
+    }
+
+    #[test]
+    fn comp_fingerprint_cache_does_not_keep_compositions_alive() {
+        let frames = Frames::default();
+        let mut s = effectcraft_engine::Session::default();
+        let comp =
+            ItemId(s.execute("comp.new", serde_json::json!({"name": "Weak", "width": 4, "height": 4, "duration": 1})).unwrap()["comp"].as_u64().unwrap());
+        let ItemKind::Comp(original) = &s.project.item(comp).unwrap().kind else { panic!("comp fixture") };
+        let mut isolated = Arc::new((**original).clone());
+        let old = Arc::downgrade(&isolated);
+        let first = frames.comp_fingerprint(&isolated);
+        assert_eq!(Arc::strong_count(&isolated), 1, "fingerprint entries must be weak");
+        Arc::make_mut(&mut isolated).width += 1;
+        assert!(old.upgrade().is_none());
+        assert_ne!(frames.comp_fingerprint(&isolated), first);
+    }
+
+    #[test]
+    fn effect_labels_keep_full_frames_through_nested_edits_and_undo() {
+        use effectcraft_engine::Session;
+        use serde_json::json;
+        let mut s = Session::default();
+        let id = |v: serde_json::Value, k: &str| v[k].as_u64().unwrap();
+        let inner = ItemId(id(s.execute("comp.new", json!({"name": "Inner", "width": 4, "height": 4, "duration": 1})).unwrap(), "comp"));
+        let solid = id(s.execute("layer.newSolid", json!({"comp": inner.0, "color": "#ff0000"})).unwrap(), "layer");
+        let inner_fx =
+            s.execute("effect.apply", json!({"comp": inner.0, "layers": [solid], "effect": "ec.blur.gaussian"})).unwrap()["effects"][0].as_u64().unwrap();
+        let prop = s.project.comp(inner).unwrap().layers[0].props.find_group(inner_fx).unwrap().get("blurriness").unwrap().uid;
+        let outer = ItemId(id(s.execute("comp.new", json!({"name": "Outer", "width": 4, "height": 4, "duration": 1})).unwrap(), "comp"));
+        let nested = id(s.execute("layer.addItem", json!({"comp": outer.0, "item": inner.0})).unwrap(), "layer");
+        let outer_fx =
+            s.execute("effect.apply", json!({"comp": outer.0, "layers": [nested], "effect": "ec.blur.gaussian"})).unwrap()["effects"][0].as_u64().unwrap();
+        let frames = Frames::default();
+        let frame = |s: &Session| FrameKey { revision: s.revision, content: frames.content_of(&s.project, s.revision, outer), comp: outer.0, ..key(0, 0, 0) };
+        let disk = |s: &Session| disk_cache::comp_content_key(&s.project, outer);
+        let initial = frame(&s);
+        let initial_disk = disk(&s);
+        insert(&frames, initial);
+        let FrameImage::Cpu(pixels) = frames.get(&initial).unwrap() else { panic!("CPU fixture") };
+        for (comp, layer, effect, label) in [(outer, nested, outer_fx, "Blue"), (inner, solid, inner_fx, "Red")] {
+            s.execute("effect.setLabel", json!({"comp": comp.0, "layer": layer, "effect": effect, "label": label})).unwrap();
+            assert_eq!(frame(&s), initial, "label in {comp:?} changes RAM identity");
+            assert_eq!(disk(&s), initial_disk, "label in {comp:?} changes disk identity");
+            let FrameImage::Cpu(reused) = frames.get(&frame(&s)).unwrap() else { panic!("CPU fixture") };
+            assert!(Arc::ptr_eq(&pixels, &reused), "reuse the installed cache buffer");
+            s.execute("edit.undo", json!({})).unwrap();
+            assert_eq!(frame(&s), initial);
+            s.execute("edit.redo", json!({})).unwrap();
+            assert_eq!(frame(&s), initial);
+        }
+        let loaded = Project::from_json(&s.project.to_file_json().unwrap()).unwrap();
+        assert_eq!(disk_cache::comp_content_key(&loaded, outer), initial_disk, "serialized labels cannot change disk identity");
+        s.execute("prop.set", json!({"comp": inner.0, "layer": solid, "prop": prop, "value": 12.0})).unwrap();
+        let edited = frame(&s);
+        let edited_disk = disk(&s);
+        assert_ne!(edited, initial, "authored effect parameters must invalidate RAM");
+        assert_ne!(edited_disk, initial_disk, "authored effect parameters must invalidate disk");
+        assert!(!frames.is_cached(&edited));
+        insert(&frames, edited);
+        s.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(frame(&s), initial, "undo must recover the pre-label canonical identity");
+        assert_eq!(disk(&s), initial_disk);
+        assert!(frames.is_cached(&frame(&s)));
+        s.execute("edit.redo", json!({})).unwrap();
+        assert_eq!(frame(&s), edited);
+        assert_eq!(disk(&s), edited_disk);
+        assert!(frames.is_cached(&frame(&s)));
+        s.execute("layer.setSwitch", json!({"comp": inner.0, "layers": [solid], "switch": "video", "value": false})).unwrap();
+        assert_ne!(frame(&s), edited, "Video remains a semantic change");
+        assert_ne!(disk(&s), edited_disk);
     }
 
     fn key(content: u64, frame: i64, opts: u64) -> FrameKey {

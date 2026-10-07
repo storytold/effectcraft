@@ -6,9 +6,11 @@ use std::sync::{Arc, Mutex};
 
 use effectcraft_engine::Session;
 use effectcraft_engine::project::ItemId;
+use effectcraft_engine::remote::{FrameMsg, FrameReply, FrameServer, Mirror};
 use effectcraft_engine::time::Tick;
 use effectcraft_ui_egui::EffectcraftApp;
 use effectcraft_ui_egui::audio::{AudioDevice, AudioFeed};
+use effectcraft_ui_egui::frames::{RemoteDone, RemoteFrame, RemoteFrames, RemoteJob};
 use egui::{Event, Modifiers, pos2};
 use egui_kittest::Harness;
 use serde_json::json;
@@ -27,6 +29,54 @@ impl AudioDevice for Fake {
     }
     fn stop(&mut self) {
         self.0.lock().unwrap().1 = true;
+    }
+}
+
+/// Real CPU frames whose completion is controlled by the test, rather than worker timing.
+struct HeldFrames {
+    state: Mutex<(Mirror, FrameServer, Vec<(RemoteDone, RemoteFrame)>, u64)>,
+}
+
+impl HeldFrames {
+    fn new(s: &Session) -> Self {
+        Self { state: Mutex::new((Mirror::default(), FrameServer::new(s.footage.clone(), s.expr.clone()), Vec::new(), 0)) }
+    }
+    fn pending(&self) -> usize {
+        self.state.lock().unwrap().2.len()
+    }
+    fn deliver(&self) {
+        let frames = std::mem::take(&mut self.state.lock().unwrap().2);
+        for (done, frame) in frames {
+            done(Ok(frame));
+        }
+    }
+}
+
+impl RemoteFrames for HeldFrames {
+    fn slots(&self) -> usize {
+        2
+    }
+    fn start(&self, job: RemoteJob, done: RemoteDone) {
+        let mut state = self.state.lock().unwrap();
+        let (mirror, server, pending, next) = &mut *state;
+        if let Some(sync) = mirror.sync(job.revision, &job.project) {
+            assert!(server.handle(sync).is_empty());
+        }
+        *next += 1;
+        let replies = server.handle(FrameMsg::Render {
+            id: *next,
+            revision: job.revision,
+            comp: job.comp,
+            time: job.t,
+            opts: Box::new(job.opts),
+            disk: None,
+            layers: false,
+            prefetch: Vec::new(),
+        });
+        match replies.into_iter().next() {
+            Some((FrameReply::Frame { width, height, ms, .. }, Some(rgba))) => pending.push((done, RemoteFrame { width, height, rgba, ms })),
+            other => panic!("CPU frame failed: {:?}", other.map(|reply| reply.0)),
+        }
     }
 }
 
@@ -114,7 +164,9 @@ fn cmd_dragging_the_current_time_scrubs_and_an_idle_scrub_closes() {
 #[test]
 fn preview_with_audio_shows_every_frame_and_sounds_once_cached() {
     let fake = Fake::default();
-    let (app, cid) = setup(true, &fake);
+    let (mut app, cid) = setup(true, &fake);
+    let worker = Arc::new(HeldFrames::new(&app.session));
+    app.frames.set_remote(Some(worker.clone()));
     // A little under one frame of input time per step.
     let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_step_dt(1.0 / 31.0).build_eframe(|_| app);
     h.run_steps(2);
@@ -125,10 +177,17 @@ fn preview_with_audio_shows_every_frame_and_sounds_once_cached() {
     let now = h.ctx.input(|i| i.time);
     h.state_mut().play(now);
     assert!(h.state().playback.audio_held && h.state().audio.is_none(), "nothing is cached: no sound yet");
+    h.step();
+    assert!(h.state().frames.dispatch_remote() > 0);
+    assert!(worker.pending() > 0 && h.state().frames.remote_busy() > 0, "frames are in flight but withheld");
+    h.step();
+    assert!(h.state().playback.audio_held && h.state().audio.is_none(), "in-flight frames do not count as cached");
     let mut last = frame(&h);
     let mut shown = 0;
     for _ in 0..2000 {
+        worker.deliver();
         h.step();
+        h.state().frames.dispatch_remote();
         if h.state().audio.is_some() {
             break;
         }
@@ -136,12 +195,24 @@ fn preview_with_audio_shows_every_frame_and_sounds_once_cached() {
         assert!(f == last || f == last + 1 || f < last, "{last} → {f}: a frame was skipped");
         shown += usize::from(f != last);
         last = f;
-        std::thread::sleep(std::time::Duration::from_millis(1));
     }
     assert!(h.state().audio.is_some() && fake.0.lock().unwrap().0.is_some(), "the sound started once the frames ahead were cached");
     assert!(shown > 0, "frames played silently first");
     // A frame that isn't cached stops the sound rather than being skipped.
     h.state().frames.clear();
     h.step();
-    assert!(h.state().audio.is_none() && h.state().playback.audio_held && h.state().playback.playing);
+    assert!(h.state().audio.is_none() && h.state().playback.audio_held && h.state().playback.playing, "cache miss holds audio without stopping preview");
+    h.state().frames.dispatch_remote();
+    assert!(worker.pending() > 0 && h.state().frames.remote_busy() > 0, "replacement frames cannot arrive until released");
+    h.step();
+    assert!(h.state().audio.is_none() && h.state().playback.audio_held && h.state().playback.playing, "still held while replacements are in flight");
+    for _ in 0..2000 {
+        worker.deliver();
+        h.step();
+        h.state().frames.dispatch_remote();
+        if h.state().audio.is_some() {
+            break;
+        }
+    }
+    assert!(h.state().audio.is_some() && h.state().playback.playing && !h.state().playback.audio_held, "cached replacement frames resume sound");
 }

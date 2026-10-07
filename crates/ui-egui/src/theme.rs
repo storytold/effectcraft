@@ -1,7 +1,7 @@
 //! Design tokens. Every widget reads colours/sizes from [`Tokens`] so themes apply everywhere.
 //!
 //! The default theme follows the look of After Effects' dark UI (values estimated from public
-//! documentation and product knowledge, tuned by eye; see `plan/aftereffects/README.md` §2). Fonts
+//! documentation and product knowledge, tuned by eye; exact visual parity still needs live comparison). Fonts
 //! are Inter + JetBrains Mono (OFL).
 
 use std::sync::Arc;
@@ -53,6 +53,8 @@ pub struct Tokens {
     pub row_alt: Color32,
     pub row_selected: Color32,
     pub hot_text: Color32,
+    /// Expression-enabled controls and expression source text.
+    pub expression: Color32,
     pub tl_bg: Color32,
     pub tl_ruler_bg: Color32,
     pub tl_ruler_tick: Color32,
@@ -96,7 +98,7 @@ impl Tokens {
     /// The gradient top colour for a fill (a little lighter), or the fill itself when gradients
     /// are off.
     pub fn grad_top(&self, c: Color32) -> Color32 {
-        if self.gradients { c.lerp_to_gamma(Color32::WHITE, 0.06) } else { c }
+        if self.gradients { c.lerp_to_gamma(Color32::WHITE, 0.02) } else { c }
     }
 }
 
@@ -104,28 +106,29 @@ impl Tokens {
     pub fn for_kind(kind: ThemeKind) -> Self {
         let dark = Tokens {
             kind,
-            app_bg: Color32::from_rgb(0x12, 0x12, 0x12),
-            header_bg: Color32::from_rgb(0x1f, 0x1f, 0x1f),
-            panel_bg: Color32::from_rgb(0x23, 0x23, 0x23),
-            tab_text: Color32::from_rgb(0x9a, 0x9a, 0x9a),
+            app_bg: Color32::from_rgb(0x16, 0x16, 0x16),
+            header_bg: Color32::from_rgb(0x24, 0x24, 0x24),
+            panel_bg: Color32::from_rgb(0x2b, 0x2b, 0x2b),
+            tab_text: Color32::from_rgb(0xb0, 0xb0, 0xb0),
             tab_text_active: Color32::from_rgb(0xe3, 0xe3, 0xe3),
             focus: Color32::from_rgb(0x2d, 0x8c, 0xeb),
             accent: Color32::from_rgb(0x2d, 0x8c, 0xeb),
             accent_hover: Color32::from_rgb(0x4a, 0xa0, 0xf5),
-            text: Color32::from_rgb(0xc8, 0xc8, 0xc8),
-            text_dim: Color32::from_rgb(0x9a, 0x9a, 0x9a),
-            text_faint: Color32::from_rgb(0x8c, 0x8c, 0x8c),
+            text: Color32::from_rgb(0xd4, 0xd4, 0xd4),
+            text_dim: Color32::from_rgb(0xb0, 0xb0, 0xb0),
+            text_faint: Color32::from_rgb(0x94, 0x94, 0x94),
             icon: Color32::from_rgb(0xb4, 0xb4, 0xb4),
             icon_active: Color32::from_rgb(0xf0, 0xf0, 0xf0),
-            hover: Color32::from_rgb(0x30, 0x30, 0x30),
+            hover: Color32::from_rgb(0x38, 0x38, 0x38),
             pressed: Color32::from_rgb(0x45, 0x45, 0x45),
-            field_bg: Color32::from_rgb(0x17, 0x17, 0x17),
-            field_border: Color32::from_rgb(0x3a, 0x3a, 0x3a),
-            separator: Color32::from_rgb(0x34, 0x34, 0x34),
-            row: Color32::from_rgb(0x23, 0x23, 0x23),
-            row_alt: Color32::from_rgb(0x27, 0x27, 0x27),
-            row_selected: Color32::from_rgb(0x3a, 0x3a, 0x3a),
-            hot_text: Color32::from_rgb(0x3d, 0x8f, 0xf5),
+            field_bg: Color32::from_rgb(0x1d, 0x1d, 0x1d),
+            field_border: Color32::from_rgb(0x49, 0x49, 0x49),
+            separator: Color32::from_rgb(0x3b, 0x3b, 0x3b),
+            row: Color32::from_rgb(0x2b, 0x2b, 0x2b),
+            row_alt: Color32::from_rgb(0x2e, 0x2e, 0x2e),
+            row_selected: Color32::from_rgb(0x45, 0x45, 0x45),
+            hot_text: Color32::from_rgb(0x49, 0x97, 0xef),
+            expression: Color32::from_rgb(0xe8, 0x7c, 0x5c),
             tl_bg: Color32::from_rgb(0x1b, 0x1b, 0x1b),
             tl_ruler_bg: Color32::from_rgb(0x23, 0x23, 0x23),
             tl_ruler_tick: Color32::from_rgb(0x70, 0x70, 0x70),
@@ -135,16 +138,16 @@ impl Tokens {
             cache_green: Color32::from_rgb(0x3c, 0xa6, 0x4c),
             cache_blue: Color32::from_rgb(0x3a, 0x6f, 0xd8),
             keyframe: Color32::from_rgb(0xa8, 0xa8, 0xa8),
-            keyframe_selected: Color32::from_rgb(0x3d, 0x8f, 0xf5),
+            keyframe_selected: Color32::from_rgb(0x49, 0x97, 0xef),
             pasteboard: Color32::from_rgb(0x1a, 0x1a, 0x1a),
-            timecode: Color32::from_rgb(0x3d, 0x8f, 0xf5),
+            timecode: Color32::from_rgb(0x49, 0x97, 0xef),
             danger: Color32::from_rgb(0xe0, 0x4a, 0x3c),
             warning: Color32::from_rgb(0xe8, 0x9a, 0x2c),
             labels: default_labels(),
-            radius: 6.0,
-            radius_sm: 3.0,
-            gap: 4.0,
-            tab_h: 30.0,
+            radius: 2.0,
+            radius_sm: 1.0,
+            gap: 3.0,
+            tab_h: 26.0,
             row_h: 19.0,
             gradients: true,
         };
@@ -172,6 +175,8 @@ impl Tokens {
                 text_dim: Color32::from_rgb(0x5a, 0x5a, 0x5a),
                 text_faint: Color32::from_rgb(0x68, 0x68, 0x68),
                 hot_text: Color32::from_rgb(0x00, 0x5a, 0x9c),
+                expression: Color32::from_rgb(0x90, 0x31, 0x1b),
+                warning: Color32::from_rgb(0x8c, 0x4e, 0x00),
                 timecode: Color32::from_rgb(0x00, 0x5a, 0x9c),
                 icon: Color32::from_rgb(0x3c, 0x3c, 0x3c),
                 icon_active: Color32::from_rgb(0x10, 0x10, 0x10),
@@ -315,10 +320,10 @@ pub fn apply_visuals(ctx: &egui::Context, t: &Tokens) {
     v.selection.stroke = Stroke::new(1.0, Color32::WHITE);
     v.hyperlink_color = t.accent;
     v.window_stroke = Stroke::new(1.0, t.field_border);
-    v.window_corner_radius = egui::CornerRadius::same(8);
-    v.menu_corner_radius = egui::CornerRadius::same(6);
-    v.popup_shadow = egui::epaint::Shadow { offset: [0, 6], blur: 20, spread: 0, color: Color32::from_black_alpha(150) };
-    v.window_shadow = egui::epaint::Shadow { offset: [0, 10], blur: 36, spread: 0, color: Color32::from_black_alpha(170) };
+    v.window_corner_radius = egui::CornerRadius::same(t.radius as u8);
+    v.menu_corner_radius = egui::CornerRadius::same(t.radius_sm as u8);
+    v.popup_shadow = egui::epaint::Shadow { offset: [0, 3], blur: 8, spread: 0, color: Color32::from_black_alpha(150) };
+    v.window_shadow = egui::epaint::Shadow { offset: [0, 4], blur: 12, spread: 0, color: Color32::from_black_alpha(170) };
     for w in [&mut v.widgets.noninteractive, &mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
         w.corner_radius = egui::CornerRadius::same(t.radius_sm as u8);
     }
@@ -341,10 +346,10 @@ pub fn apply_visuals(ctx: &egui::Context, t: &Tokens) {
     v.widgets.open.weak_bg_fill = t.hover;
     ctx.set_visuals(v);
     ctx.global_style_mut(|s| {
-        s.spacing.item_spacing = egui::vec2(6.0, 4.0);
-        s.spacing.button_padding = egui::vec2(8.0, 3.0);
-        s.spacing.interact_size.y = 22.0;
-        s.spacing.menu_margin = egui::Margin::same(5);
+        s.spacing.item_spacing = egui::vec2(4.0, t.gap);
+        s.spacing.button_padding = egui::vec2(6.0, 2.0);
+        s.spacing.interact_size.y = 20.0;
+        s.spacing.menu_margin = egui::Margin::same(3);
         s.text_styles.insert(TextStyle::Body, FontId::new(12.0, FontFamily::Proportional));
         s.text_styles.insert(TextStyle::Button, FontId::new(12.0, FontFamily::Proportional));
         s.text_styles.insert(TextStyle::Small, FontId::new(11.0, FontFamily::Proportional));

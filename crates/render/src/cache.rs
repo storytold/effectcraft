@@ -412,10 +412,140 @@ impl std::fmt::Write for KeyHasher {
     }
 }
 
-fn hash_debug(h: &mut KeyHasher, v: &impl std::fmt::Debug) {
+fn hash_debug<H: Hasher>(h: &mut H, v: &impl std::fmt::Debug) {
     use std::fmt::Write;
-    let _ = write!(h, "{v:?}");
+    struct Writer<'a, H>(&'a mut H);
+    impl<H: Hasher> std::fmt::Write for Writer<'_, H> {
+        fn write_str(&mut self, text: &str) -> std::fmt::Result {
+            self.0.write(text.as_bytes());
+            Ok(())
+        }
+    }
+    let _ = write!(Writer(h), "{v:?}");
     Hasher::write_u8(h, 0xff);
+}
+
+/// Hash the ordered render structure without presentation-only effect label colors. Property
+/// Debug includes every authored value, keyframe, expression, and property flag as before.
+/// Group fields are explicit so a newly added field requires an intentional cache decision.
+fn hash_group_header<H: Hasher>(h: &mut H, group: &PropGroup) {
+    let PropGroup { uid, match_id, name, kind, effect_label: _, enabled, children } = group;
+    uid.hash(h);
+    match_id.hash(h);
+    name.hash(h);
+    hash_debug(h, kind);
+    enabled.hash(h);
+    children.len().hash(h);
+}
+
+fn hash_group_structure<H: Hasher>(h: &mut H, group: &PropGroup) {
+    hash_group_header(h, group);
+    // Iterators borrow the existing tree: no group cloning, no string formatting of a whole
+    // subtree, and no recursive calls. Only the active ancestry occupies traversal storage.
+    let mut ancestry = vec![group.children.iter()];
+    while let Some(children) = ancestry.last_mut() {
+        match children.next() {
+            Some(Node::Prop(prop)) => {
+                0_u8.hash(h);
+                hash_debug(h, prop);
+            }
+            Some(Node::Group(group)) => {
+                1_u8.hash(h);
+                hash_group_header(h, group);
+                ancestry.push(group.children.iter());
+            }
+            None => {
+                ancestry.pop();
+            }
+        }
+    }
+}
+
+fn hash_node_structure(h: &mut KeyHasher, node: &Node) {
+    match node {
+        Node::Prop(prop) => {
+            0_u8.hash(h);
+            hash_debug(h, prop);
+        }
+        Node::Group(group) => {
+            1_u8.hash(h);
+            hash_group_structure(h, group);
+        }
+    }
+}
+
+/// Borrowed composition structure for persistent frame identity. Keep all existing semantic
+/// inputs, excluding only the switches already normalized by `Comp::pixel_form` and effect
+/// labels. Exhaustive destructuring forces future model fields to receive a cache decision.
+pub(crate) fn hash_comp_structure<H: Hasher>(h: &mut H, comp: &effectcraft_project::Comp) {
+    let effectcraft_project::Comp {
+        width,
+        height,
+        pixel_aspect,
+        frame_rate,
+        duration,
+        display_start,
+        background,
+        work_area,
+        layers,
+        markers,
+        shutter_angle,
+        shutter_phase,
+        motion_blur_samples,
+        motion_blur_adaptive_limit,
+        renderer,
+        hide_shy: _,
+        enable_motion_blur,
+        enable_frame_blending,
+        draft_3d,
+        preserve_frame_rate,
+        preserve_resolution,
+        poster_time,
+        global_light,
+        guides,
+        essential,
+    } = comp;
+    hash_debug(h, &(width, height, pixel_aspect, frame_rate, duration, display_start, background, work_area, markers));
+    hash_debug(h, &(shutter_angle, shutter_phase, motion_blur_samples, motion_blur_adaptive_limit, renderer, enable_motion_blur, enable_frame_blending));
+    hash_debug(h, &(draft_3d, preserve_frame_rate, preserve_resolution, poster_time, global_light, guides, essential));
+    layers.len().hash(h);
+    for layer in layers {
+        let Layer {
+            id,
+            name,
+            source,
+            label,
+            comment,
+            start_time,
+            in_point,
+            out_point,
+            stretch,
+            switches,
+            blend_mode,
+            preserve_transparency,
+            track_matte,
+            parent,
+            markers,
+            markers_locked,
+            auto_orient,
+            environment,
+            environment_background,
+            props,
+        } = layer;
+        hash_debug(h, &(id, name, source, label, comment, start_time, in_point, out_point, stretch));
+        hash_debug(h, &(switches.pixels(), blend_mode, preserve_transparency, track_matte, parent, markers, markers_locked, auto_orient));
+        hash_debug(h, &(environment, environment_background));
+        hash_group_structure(h, props);
+    }
+}
+
+/// In-memory composition fingerprint excluding presentation-only switches and effect labels.
+/// This is a candidate filter, not proof of equality: callers reusing pixels must also compare
+/// `Comp::same_pixels`. Dependencies and project settings belong to the caller's graph key.
+pub fn comp_pixel_fingerprint(comp: &effectcraft_project::Comp) -> u64 {
+    let mut h = KeyHasher(0xcbf2_9ce4_8422_2325);
+    hash_comp_structure(&mut h, comp);
+    h.finish()
 }
 
 /// Time-based layer content: does any part of the source/effects read the clock directly
@@ -577,7 +707,7 @@ fn key_any(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool, fo
             continue;
         }
         // Static structure: values, keyframes, expressions, enabled flags, effect ids, modes.
-        hash_debug(&mut h, c);
+        hash_node_structure(&mut h, c);
         if let Node::Group(g) = c {
             hash_values(&mut h, ctx, layer, g);
         }
@@ -606,7 +736,7 @@ fn key_any(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool, fo
 pub fn styles_key(ctx: &EvalCtx, layer: &Layer, content_key: u64) -> u64 {
     let mut h = KeyHasher(content_key ^ 0x9e37_79b9_7f4a_7c15);
     if let Some(g) = layer.layer_styles() {
-        hash_debug(&mut h, g);
+        hash_group_structure(&mut h, g);
         hash_values(&mut h, ctx, layer, g);
     }
     h.finish()
@@ -617,4 +747,96 @@ pub fn derive(key: u64, i: u64) -> u64 {
     let mut h = KeyHasher(key);
     i.hash(&mut h);
     h.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use effectcraft_color::Label;
+    use effectcraft_keyframe::{Keyframe, Value};
+    use effectcraft_project::build::{self, Ids};
+    use effectcraft_project::{Comp, ItemId, ItemKind, Project, Solid};
+    use effectcraft_time::{FrameRate, Tick};
+
+    fn fixture() -> (Project, ItemId, Comp, Layer) {
+        let mut project = Project::default();
+        let comp = Comp::new(4, 4, FrameRate::FPS_30, Tick::from_seconds_f64(1.0));
+        let cid = project.add_item("Original cache fixture", Label::None, None, ItemKind::Comp(comp.clone().into()));
+        let solid =
+            project.add_item("Original solid", Label::None, None, ItemKind::Solid(Solid { color: [0.2, 0.4, 0.6], width: 4, height: 4, pixel_aspect: 1.0 }));
+        let mut layer = build::layer(&mut project, &comp, "Original layer", LayerSource::Solid { item: solid }, (4, 4), None);
+        let mut next = project.next_id;
+        let mut ids = Ids(&mut next);
+        let spec = effectcraft_effects::find("ec.blur.gaussian").unwrap();
+        let mut effect = effectcraft_effects::instantiate(spec, &mut ids, spec.name, [4.0, 4.0]);
+        let nested = ids.group("fixtureNested", "Original nested group").with(ids.prop("amount", "Amount", Value::Scalar(12.0)));
+        effect.children.push(nested.into());
+        layer.props.sub_mut("effects").unwrap().children.push(effect.into());
+        effectcraft_project::styles::add_style(&mut layer, &mut ids, "dropShadow", &comp.global_light, true).unwrap();
+        project.next_id = next;
+        (project, cid, comp, layer)
+    }
+
+    fn content(project: &Project, cid: ItemId, comp: &Comp, layer: &Layer) -> u64 {
+        layer_key(&EvalCtx::new(project, cid, comp, Tick::ZERO), layer, 1.0, false, false).unwrap()
+    }
+
+    #[test]
+    fn effect_label_colors_preserve_cached_layer_keys_and_buffers() {
+        let (project, cid, comp, baseline) = fixture();
+        let key = content(&project, cid, &comp, &baseline);
+        let cache = LayerCache::new(4096);
+        let pixels = Arc::new(Buf { img: crate::Image::filled(4, 4, [0.2, 0.4, 0.6, 1.0]), offset: [0.0; 2], scale: 1.0 });
+        cache.insert(key, pixels.clone());
+        let mut labeled = baseline.clone();
+        labeled.props.group_mut("effects").unwrap().effect_label = Label::Red;
+        labeled.props.group_mut("effects/#1").unwrap().effect_label = Label::Blue;
+        labeled.props.group_mut("effects/#1/fixtureNested").unwrap().effect_label = Label::Yellow;
+        let relabeled_key = content(&project, cid, &comp, &labeled);
+        assert_eq!(key, relabeled_key);
+        assert!(Arc::ptr_eq(&cache.get(relabeled_key).unwrap(), &pixels));
+        assert_eq!(cache.stats().hits, 1);
+        // Preserve every authored semantic input rather than stripping an entire group.
+        for edit in 0..8 {
+            let mut changed = labeled.clone();
+            match edit {
+                0 => changed.props.prop_mut("effects/#1/blurriness").unwrap().value = Value::Scalar(8.0),
+                1 => changed.props.group_mut("effects/#1").unwrap().enabled = false,
+                2 => changed.props.group_mut("effects/#1/fixtureNested").unwrap().name.push_str(" renamed"),
+                3 => changed.props.group_mut("effects/#1/fixtureNested").unwrap().uid += 1,
+                4 => changed.props.group_mut("effects/#1/fixtureNested").unwrap().match_id.push_str(" changed"),
+                5 => changed.props.group_mut("effects/#1/fixtureNested").unwrap().kind = effectcraft_project::GroupKind::Indexed,
+                6 => changed.props.prop_mut("effects/#1/fixtureNested/amount").unwrap().keys.push(Keyframe::new(Tick::ZERO, Value::Scalar(20.0))),
+                _ => {
+                    changed.props.prop_mut("effects/#1/fixtureNested/amount").unwrap().expr =
+                        Some(effectcraft_project::Expression { text: "value + 1".into(), enabled: true })
+                }
+            }
+            let changed_key = content(&project, cid, &comp, &changed);
+            assert_ne!(key, changed_key, "semantic edit {edit} must invalidate the content");
+            assert!(cache.get(changed_key).is_none());
+        }
+        let mut reordered = labeled;
+        reordered.props.group_mut("effects/#1").unwrap().children.reverse();
+        assert_ne!(key, content(&project, cid, &comp, &reordered));
+    }
+
+    #[test]
+    fn effect_label_colors_preserve_nested_style_keys_but_not_style_changes() {
+        let (project, cid, comp, baseline) = fixture();
+        let ctx = EvalCtx::new(&project, cid, &comp, Tick::ZERO);
+        let base_content = content(&project, cid, &comp, &baseline);
+        let key = styles_key(&ctx, &baseline, base_content);
+        let mut labeled = baseline.clone();
+        let group = effectcraft_project::styles::GROUP;
+        labeled.props.group_mut(group).unwrap().effect_label = Label::Red;
+        labeled.props.group_mut(&format!("{group}/dropShadow")).unwrap().effect_label = Label::Blue;
+        assert_eq!(base_content, content(&project, cid, &comp, &labeled));
+        assert_eq!(key, styles_key(&ctx, &labeled, base_content));
+        let mut disabled = labeled.clone();
+        disabled.props.group_mut(&format!("{group}/dropShadow")).unwrap().enabled = false;
+        assert_ne!(key, styles_key(&ctx, &disabled, base_content));
+        labeled.props.prop_mut(&format!("{group}/dropShadow/opacity")).unwrap().value = Value::Scalar(35.0);
+        assert_ne!(key, styles_key(&ctx, &labeled, base_content));
+    }
 }

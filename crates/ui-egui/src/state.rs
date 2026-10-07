@@ -561,7 +561,7 @@ pub struct UiState {
     /// Floating panels of the saved workspaces.
     #[serde(default)]
     pub saved_floating: std::collections::BTreeMap<String, Vec<crate::dock::Floating>>,
-    /// The panel maximized to fill the dock area (`~`), if any.
+    /// Anchor panel of the group maximized to fill the dock area (`~`), if any.
     #[serde(default)]
     pub maximized: Option<PanelKind>,
     /// Locked Composition / Timeline tabs (panel ids): opening another composition does not

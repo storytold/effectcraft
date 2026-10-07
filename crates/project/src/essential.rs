@@ -487,7 +487,15 @@ fn build_group(project: &Project, comp: ItemId, eg: &EssentialGraphics, old: Opt
             }
         }
     }
-    PropGroup { uid, match_id: GROUP.into(), name: "Essential Properties".into(), kind: GroupKind::Essential { overridden: keep }, enabled: true, children }
+    PropGroup {
+        uid,
+        match_id: GROUP.into(),
+        name: "Essential Properties".into(),
+        kind: GroupKind::Essential { overridden: keep },
+        effect_label: effectcraft_color::Label::None,
+        enabled: true,
+        children,
+    }
 }
 
 fn find_prop<'a>(nodes: &'a [Node], m: &str) -> Option<&'a Property> {

@@ -99,6 +99,10 @@ pub enum Icon {
     Plus,
     Minus,
     Close,
+    /// A generic circular return arrow for restoring default values.
+    Reset,
+    /// A generic circled information marker.
+    Info,
     Link,
     MountainSmall,
     MountainLarge,
@@ -517,6 +521,16 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
         Loop => {
             pen.arc(8.0, 8.0, 5.0, 200.0, 520.0);
             pen.fill(&[(1.8, 5.5), (5.2, 5.5), (3.2, 8.5)]);
+        }
+        Reset => {
+            pen.arc(8.0, 8.0, 5.0, -110.0, 160.0);
+            pen.line(&[(3.0, 2.5), (3.0, 6.0), (6.5, 6.0)]);
+        }
+        Info => {
+            pen.circle(8.0, 8.0, 6.0);
+            pen.dot(8.0, 4.7, 0.7);
+            pen.line(&[(7.0, 7.0), (8.0, 7.0), (8.0, 11.3)]);
+            pen.line(&[(6.8, 11.3), (9.2, 11.3)]);
         }
         Snapshot => {
             pen.closed(&[(2.0, 5.0), (5.0, 5.0), (6.0, 3.5), (10.0, 3.5), (11.0, 5.0), (14.0, 5.0), (14.0, 12.5), (2.0, 12.5)]);
