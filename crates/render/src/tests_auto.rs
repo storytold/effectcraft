@@ -102,12 +102,18 @@ fn auto_backend_moves_light_comps_to_the_cpu() {
 
 #[test]
 fn auto_backend_keeps_fast_accelerators() {
-    // As fast as the CPU (ties stay on the accelerator): every frame but the CPU warm-up and
-    // re-probes.
+    // Chosen fast samples make this a deterministic routing test, not a speed benchmark.
+    // Actual Renderer paths still warm both sides and record each completed frame.
     let (p, cid) = project();
-    let fast = TimedAccel::new(0, true);
+    let key = AutoKey::new(cid, 1.0, false);
+    let fast = TimedAccel { pick: AutoPick::with_test_costs(key, 5.0, 1.0), ..TimedAccel::new(0, true) };
     let asked = frames(&p, cid, &fast, Backend::Auto, 40);
     assert!(asked >= 36, "asked {asked} of 40");
+    let stats = fast.pick.stats(key).unwrap();
+    assert_eq!(asked, 37);
+    assert_eq!((stats.gpu_frames, stats.cpu_frames), (37, 3));
+    assert_eq!((stats.gpu_ms, stats.cpu_ms), (Some(1.0), Some(5.0)));
+    assert_eq!(stats.since_probe, 34); // REPROBE=48 is not reached in these forty frames.
 }
 
 #[test]
@@ -148,4 +154,82 @@ fn auto_pick_follows_changing_costs() {
     // Keys are separate per comp, scale and path.
     assert!(pick.stats(AutoKey::new(ItemId(7), 1.0, true)).is_none());
     assert!(pick.stats(AutoKey::new(ItemId(7), 0.5, false)).is_none());
+}
+
+#[test]
+fn auto_test_costs_are_instance_local_and_exact_key_only() {
+    let key = AutoKey::new(ItemId(7), 0.5, true);
+    let chosen = AutoPick::with_test_costs(key, 5.0, 1.0);
+    let measured = AutoPick::default();
+    for pick in [&chosen, &measured] {
+        for _ in 0..AutoPick::WARMUP {
+            pick.record(key, true, 6.0);
+            pick.record(key, false, 12.0);
+        }
+    }
+    let stats = chosen.stats(key).unwrap();
+    assert_eq!((stats.gpu_ms, stats.cpu_ms), (Some(1.0), Some(5.0)));
+    let stats = measured.stats(key).unwrap();
+    assert_eq!((stats.gpu_ms, stats.cpu_ms), (Some(6.0), Some(12.0)));
+    for other in [AutoKey::new(ItemId(8), 0.5, true), AutoKey::new(ItemId(7), 1.0, true), AutoKey::new(ItemId(7), 0.5, false)] {
+        for _ in 0..AutoPick::WARMUP {
+            chosen.record(other, true, 6.0);
+            chosen.record(other, false, 12.0);
+        }
+        let stats = chosen.stats(other).unwrap();
+        assert_eq!((stats.gpu_ms, stats.cpu_ms), (Some(6.0), Some(12.0)));
+    }
+}
+
+#[test]
+fn auto_warmup_keeps_fastest_counted_sample_and_reprobes_at_exact_boundary() {
+    let pick = AutoPick::default();
+    let key = AutoKey::new(ItemId(7), 1.0, false);
+    assert!(pick.choose(key));
+    pick.record(key, true, 1000.0);
+    assert!(!pick.choose(key));
+    pick.record(key, false, 1000.0);
+    let stats = pick.stats(key).unwrap();
+    assert_eq!((stats.gpu_ms, stats.cpu_ms), (None, None));
+    for (gpu, cpu) in [(9.0, 5.0), (10.0, 7.0)] {
+        assert!(pick.choose(key));
+        pick.record(key, true, gpu);
+        assert!(!pick.choose(key));
+        pick.record(key, false, cpu);
+    }
+    let stats = pick.stats(key).unwrap();
+    assert_eq!((stats.gpu_ms, stats.cpu_ms), (Some(9.0), Some(5.0)));
+    for _ in 0..AutoPick::REPROBE {
+        assert!(!pick.choose(key));
+        pick.record(key, false, 5.0);
+    }
+    assert_eq!(pick.stats(key).unwrap().since_probe, AutoPick::REPROBE);
+    assert!(pick.choose(key));
+    assert_eq!(pick.stats(key).unwrap().since_probe, 0);
+    pick.record(key, true, 9.0);
+    assert!(!pick.choose(key));
+}
+
+#[test]
+fn auto_margin_ties_and_capped_outlier_recovery_use_measured_samples() {
+    let key = AutoKey::new(ItemId(7), 1.0, false);
+    for (cpu_ms, gpu_chosen) in [(8.49, false), (8.5, true), (10.0, true)] {
+        let pick = AutoPick::default();
+        for _ in 0..AutoPick::WARMUP {
+            pick.record(key, true, 10.0);
+            pick.record(key, false, cpu_ms);
+        }
+        assert_eq!(pick.choose(key), gpu_chosen);
+    }
+    let pick = AutoPick::default();
+    for _ in 0..AutoPick::WARMUP {
+        pick.record(key, true, 10.0);
+        pick.record(key, false, 8.5);
+    }
+    pick.record(key, true, 1_000_000.0);
+    assert_eq!(pick.stats(key).unwrap().gpu_ms, Some(13.0));
+    assert!(!pick.choose(key));
+    pick.record(key, true, 1.0);
+    assert_eq!(pick.stats(key).unwrap().gpu_ms, Some(7.0));
+    assert!(pick.choose(key));
 }

@@ -52,9 +52,26 @@ pub struct AutoStats {
 #[derive(Default)]
 pub struct AutoPick {
     stats: Mutex<HashMap<AutoKey, AutoStats>>,
+    // Fixture-only chosen samples, not a production clock or performance measurement.
+    #[cfg(test)]
+    test_costs: Option<TestCosts>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+struct TestCosts {
+    key: AutoKey,
+    cpu_ms: f64,
+    gpu_ms: f64,
 }
 
 impl AutoPick {
+    /// Drive real Renderer routing/recording with known samples for one exact key.
+    /// Default histories and all non-test builds retain their measured elapsed costs.
+    #[cfg(test)]
+    pub(crate) fn with_test_costs(key: AutoKey, cpu_ms: f64, gpu_ms: f64) -> Self {
+        Self { test_costs: Some(TestCosts { key, cpu_ms, gpu_ms }), ..Default::default() }
+    }
     /// Frames measured on each side before choosing (the first is not counted).
     pub const WARMUP: u32 = 3;
     /// Weight of a new sample in the running average (slower / faster than the average).
@@ -102,6 +119,8 @@ impl AutoPick {
     /// the average (a stall of the machine does not flip the choice for a whole re-probe
     /// period).
     pub fn record(&self, key: AutoKey, gpu: bool, ms: f64) {
+        #[cfg(test)]
+        let ms = self.test_costs.filter(|costs| costs.key == key).map_or(ms, |costs| if gpu { costs.gpu_ms } else { costs.cpu_ms });
         let Ok(mut m) = self.stats.lock() else { return };
         let s = m.entry(key).or_default();
         let (avg, frames) = if gpu { (&mut s.gpu_ms, &mut s.gpu_frames) } else { (&mut s.cpu_ms, &mut s.cpu_frames) };
