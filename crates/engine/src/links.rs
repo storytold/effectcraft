@@ -15,7 +15,7 @@ pub const SIBLINGS: &[(&str, &str)] = &[
     ("VectorCraft", "vectorcraft"),
     ("FilmCraft", "filmcraft"),
     ("LightCraft", "lightcraft"),
-    ("PrintCraft", "printcraft"),
+    ("PdfCraft", "pdfcraft"),
     ("DesignCraft", "designcraft"),
 ];
 

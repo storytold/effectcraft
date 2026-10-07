@@ -47,7 +47,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Other ArtCraft Apps",
             [],
             None,
-            "{app: photocraft|vectorcraft|filmcraft|lightcraft|printcraft|designcraft, kind?: page|github}",
+            "{app: photocraft|vectorcraft|filmcraft|lightcraft|pdfcraft|designcraft, kind?: page|github}",
             always,
             sibling
         ),
