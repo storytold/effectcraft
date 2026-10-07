@@ -390,6 +390,25 @@ impl EffectcraftApp {
         v
     }
 
+    /// Feed this frame's share of the queued synthetic input (control channel `ui.click`,
+    /// `ui.drag`…) into `raw_input`. Pointer events go one per frame so egui sees press → moves
+    /// → release as a real gesture.
+    pub fn feed_synthetic(&mut self, raw_input: &mut egui::RawInput) {
+        if !self.synthetic.is_empty() {
+            // Pointer events go one per frame so egui sees press → moves → release as a real drag.
+            let pointer = |e: &egui::Event| matches!(e, egui::Event::PointerMoved(_) | egui::Event::PointerButton { .. } | egui::Event::MouseWheel { .. });
+            let n = if pointer(&self.synthetic[0]) {
+                1
+            } else {
+                self.synthetic
+                    .iter()
+                    .position(|e| pointer(e) || matches!(e, egui::Event::Key { pressed: false, .. }))
+                    .map_or(self.synthetic.len(), |i| if pointer(&self.synthetic[i]) { i.max(1) } else { i + 1 })
+            };
+            raw_input.events.extend(self.synthetic.drain(..n));
+        }
+    }
+
     /// Show panel `p` (opening it in its usual place if it is closed), bring it to the front and
     /// give it the focus: Window ▸ <panel>.
     pub fn show_panel(&mut self, p: PanelKind) {
@@ -1492,19 +1511,7 @@ impl eframe::App for EffectcraftApp {
     }
 
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
-        if !self.synthetic.is_empty() {
-            // Pointer events go one per frame so egui sees press → moves → release as a real drag.
-            let pointer = |e: &egui::Event| matches!(e, egui::Event::PointerMoved(_) | egui::Event::PointerButton { .. } | egui::Event::MouseWheel { .. });
-            let n = if pointer(&self.synthetic[0]) {
-                1
-            } else {
-                self.synthetic
-                    .iter()
-                    .position(|e| pointer(e) || matches!(e, egui::Event::Key { pressed: false, .. }))
-                    .map_or(self.synthetic.len(), |i| if pointer(&self.synthetic[i]) { i.max(1) } else { i + 1 })
-            };
-            raw_input.events.extend(self.synthetic.drain(..n));
-        }
+        self.feed_synthetic(raw_input);
     }
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
