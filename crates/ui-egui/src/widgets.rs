@@ -24,17 +24,22 @@ pub fn hot_number_at(
     let galley = ui.painter().layout_no_wrap(text, Tokens::ui(12.0), t.hot_text);
     let rect = Rect::from_min_size(rect_min, galley.size() + vec2(4.0, 4.0));
     if let Some(mut buf) = editing {
+        // Capture cancellation before TextEdit can consume the key event.
+        let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
         let er = Rect::from_min_size(rect_min - vec2(2.0, 1.0), vec2((galley.size().x + 24.0).max(54.0), 18.0));
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(er));
         let r = child.add(egui::TextEdit::singleline(&mut buf).desired_width(er.width()).font(Tokens::ui(12.0)).margin(egui::Margin::symmetric(2, 1)));
         let mut out = None;
-        if r.lost_focus() {
-            let txt = buf.trim().trim_end_matches(suffix).trim().replace(',', ".");
-            if !ui.input(|i| i.key_pressed(egui::Key::Escape))
-                && let Ok(v) = txt.parse::<f64>()
-                && v.is_finite()
-            {
-                out = Some(v.clamp(range.0, range.1));
+        if escape {
+            r.surrender_focus();
+            ui.data_mut(|d| d.remove::<String>(editing_id));
+        } else if r.lost_focus() {
+            // Bound normalization as well as evaluation; do not copy arbitrary pasted input.
+            if buf.len() <= 512 {
+                let txt = buf.trim().trim_end_matches(suffix).trim().replace(',', ".");
+                if let Ok(v) = crate::numeric_entry::parse(&txt) {
+                    out = Some(v.clamp(range.0, range.1));
+                }
             }
             ui.data_mut(|d| d.remove::<String>(editing_id));
         } else {

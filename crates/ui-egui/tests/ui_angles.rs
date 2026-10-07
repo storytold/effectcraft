@@ -191,3 +191,83 @@ fn commit_edits(click_away: bool) {
         }
     }
 }
+
+#[test]
+fn arithmetic_angle_components_commit_across_panels_with_one_undo() {
+    for panel in [Panel::EffectControls, Panel::Timeline, Panel::Properties] {
+        for click_away in [false, true] {
+            // Fractional negative revolutions retain the existing integer truncation contract;
+            // this is a regression guard, not a measured After Effects rounding claim.
+            for (revolutions, text, expected) in [(true, "2*3", 2190.5), (false, "4/2", 362.0), (true, "-3/2", -329.5)] {
+                let (mut h, layer, uid) = harness(panel, 390.5);
+                let undo = h.state().session.history.undo.len();
+                let p = component(&h, panel, uid, revolutions);
+                begin_edit(&mut h, p, text);
+                if click_away {
+                    click(&mut h, pos2(1200.0, 900.0));
+                } else {
+                    key(&mut h, Key::Enter, Modifiers::NONE);
+                }
+                assert_eq!(angle(&h, layer, uid), expected, "{panel:?}: {text}, click-away={click_away}");
+                assert_eq!(h.state().session.history.undo.len(), undo + 1);
+                assert!(h.state_mut().session.undo());
+                assert_eq!(angle(&h, layer, uid), 390.5);
+                assert!(h.state_mut().session.redo());
+                assert_eq!(angle(&h, layer, uid), expected);
+            }
+        }
+    }
+}
+
+#[test]
+fn escaped_angle_input_is_discarded_on_reopen_even_with_same_frame_click_away() {
+    for panel in [Panel::EffectControls, Panel::Timeline, Panel::Properties] {
+        for revolutions in [false, true] {
+            for click_away in [false, true] {
+                let (mut h, layer, uid) = harness(panel, 390.5);
+                let undo = h.state().session.history.undo.len();
+                let p = component(&h, panel, uid, revolutions);
+                begin_edit(&mut h, p, "8*9");
+                h.input_mut().events.push(Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
+                let away = pos2(1200.0, 900.0);
+                if click_away {
+                    h.input_mut().events.push(Event::PointerMoved(away));
+                    h.input_mut().events.push(Event::PointerButton {
+                        pos: away,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: Modifiers::NONE,
+                    });
+                }
+                h.step();
+                h.input_mut().events.push(Event::Key { key: Key::Escape, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::NONE });
+                if click_away {
+                    h.input_mut().events.push(Event::PointerButton {
+                        pos: away,
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        modifiers: Modifiers::NONE,
+                    });
+                }
+                h.run_steps(3);
+                assert_eq!(angle(&h, layer, uid), 390.5);
+                assert_eq!(h.state().session.history.undo.len(), undo);
+                assert!(!h.ctx.egui_wants_keyboard_input());
+                let p = component(&h, panel, uid, revolutions);
+                click(&mut h, p);
+                assert!(h.ctx.egui_wants_keyboard_input());
+                key(&mut h, Key::End, Modifiers::NONE);
+                // Append without Select All: reopening must start from the authored component,
+                // not the canceled arithmetic string.
+                h.input_mut().events.push(Event::Text("+2".into()));
+                h.step();
+                key(&mut h, Key::Enter, Modifiers::NONE);
+                let expected = if revolutions { 1110.5 } else { 392.5 };
+                assert_eq!(angle(&h, layer, uid), expected, "{panel:?}: canceled input leaked on reopen");
+                assert_eq!(h.state().session.history.undo.len(), undo + 1);
+                assert!(h.state_mut().session.undo());
+                assert_eq!(angle(&h, layer, uid), 390.5);
+            }
+        }
+    }
+}

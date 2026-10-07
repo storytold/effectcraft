@@ -20,6 +20,7 @@ pub mod i18n;
 pub mod icons;
 pub mod menus;
 pub mod native_menu;
+mod numeric_entry;
 pub mod panels;
 pub mod prefs_live;
 pub mod state;
