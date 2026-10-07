@@ -93,6 +93,9 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         width: if kind.is_vectorscope() { size } else { (plot.width() as u32).clamp(64, 768) },
         height: if kind.is_vectorscope() { size } else { (plot.height() as u32).clamp(32, 512) },
     };
+    if kind != ScopeKind::Histogram && !crate::frames::presentation_check(ui.ctx(), [o.width as usize, o.height as usize], &mut app.ui.status) {
+        return;
+    }
     let time = app.session.time();
     let key = (app.session.revision, cid.0, time.0, format!("{}{}{}{}{}x{}", st.scope, st.standard, st.float, st.clamp, o.width, o.height), 0);
     let ctx = ui.ctx().clone();
@@ -115,6 +118,9 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     };
     graticule(&p, plot, kind, &o, &t);
     if let Some(tex) = &cached.tex {
+        if !crate::frames::presentation_check(&ctx, tex.size(), &mut app.ui.status) {
+            return;
+        }
         p.image(tex.id(), plot, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
     } else {
         histogram(&p, plot, &cached.scope);

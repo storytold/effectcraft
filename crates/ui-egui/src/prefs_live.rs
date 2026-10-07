@@ -105,6 +105,11 @@ fn video_preview(app: &mut EffectcraftApp, ctx: &egui::Context) {
         (true, Some(k), Some((ck, t))) if ck == k => Some(t),
         (true, Some(k), prev) => match app.viewer_pixels() {
             Some(img) => {
+                if let Err(error) = crate::frames::presentation_image(ctx, &img) {
+                    app.ui.status = error.message().to_owned();
+                    ctx.data_mut(|d| d.remove::<(FrameKey, egui::TextureHandle)>(tex_id));
+                    return;
+                }
                 let opts = crate::panels::viewer::zoom_texture_options(app.session.prefs.viewer_zoom_smooth());
                 let t = match prev {
                     Some((_, mut t)) => {
@@ -120,6 +125,7 @@ fn video_preview(app: &mut EffectcraftApp, ctx: &egui::Context) {
         },
         (_, _, prev) => prev.map(|p| p.1),
     };
+    let tex = tex.filter(|t| crate::frames::presentation_check(ctx, t.size(), &mut app.ui.status));
     let title =
         format!("Video Preview — {}", app.session.active_comp_id().and_then(|c| app.session.project.item(c)).map(|i| i.name.clone()).unwrap_or_default());
     let mut builder = egui::ViewportBuilder::default().with_title(title).with_inner_size([960.0, 540.0]);
@@ -130,7 +136,9 @@ fn video_preview(app: &mut EffectcraftApp, ctx: &egui::Context) {
     ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("effectcraft-video-preview"), builder, |vctx, _| {
         egui::CentralPanel::default().frame(egui::Frame::NONE.fill(Color32::BLACK)).show(vctx, |ui| {
             let area = ui.max_rect();
-            if let Some(t) = &tex {
+            if let Some(t) = &tex
+                && crate::frames::presentation_check(ui.ctx(), t.size(), &mut app.ui.status)
+            {
                 let [w, h] = t.size().map(|x| x.max(1) as f32);
                 let s = (area.width() / w).min(area.height() / h);
                 let r = Rect::from_center_size(area.center(), egui::vec2(w * s, h * s));
@@ -143,5 +151,43 @@ fn video_preview(app: &mut EffectcraftApp, ctx: &egui::Context) {
     });
     if closed && let Err(e) = app.set_pref("video.enableOutput", Value::Bool(false)) {
         app.ui.status = e;
+    }
+}
+
+#[cfg(test)]
+mod presentation_tests {
+    use super::*;
+
+    // Headless tests inspect real output deltas but have no texture renderer.
+    // Clear them even when an assertion unwinds, as required by egui 0.36.
+    struct TestOutput(egui::FullOutput);
+    impl std::ops::Deref for TestOutput {
+        type Target = egui::FullOutput;
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+    impl Drop for TestOutput {
+        fn drop(&mut self) {
+            self.0.textures_delta.clear();
+        }
+    }
+
+    #[test]
+    fn malformed_video_pixels_stop_before_upload_or_viewport_creation() {
+        let ctx = egui::Context::default();
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.session.prefs.video.enable_output = true;
+        app.session.prefs.video.disable_when_background = false;
+        let key = FrameKey { revision: 1, content: 1, comp: 1, frame: 0, scale: 1000, view: 0, opts: 0 };
+        app.viewer_shown = Some((egui::TextureId::Managed(0), key));
+        app.viewer_image = Some(std::sync::Arc::new(egui::ColorImage { size: [2, 1], pixels: vec![Color32::WHITE], source_size: egui::vec2(2.0, 1.0) }));
+        let revision = app.session.revision;
+        let output = TestOutput(ctx.run_ui(egui::RawInput::default(), |ui| video_preview(&mut app, ui.ctx())));
+        assert!(app.ui.status.contains("pixel count"));
+        assert!(ctx.data(|d| d.get_temp::<(FrameKey, egui::TextureHandle)>(egui::Id::new("video-preview-tex"))).is_none());
+        assert!(!output.viewport_output.contains_key(&egui::ViewportId::from_hash_of("effectcraft-video-preview")));
+        assert_eq!(app.session.revision, revision);
+        assert!(app.frames.failure(&key).is_none(), "pane-local conversion error does not poison main renderer");
     }
 }

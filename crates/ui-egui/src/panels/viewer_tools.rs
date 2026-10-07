@@ -336,7 +336,15 @@ fn transformed(img: &egui::ColorImage, ch: Channel, colorized: bool, stops: f32,
 /// Draw the frame into `comp_rect`: the rendered frame (covering the region of interest when one
 /// is set), or the snapshot while Show Snapshot is on / F5 is held, through Show Channel and the
 /// exposure. Fast Previews ▸ Wireframe draws layer outlines instead.
-pub(crate) fn draw_frame(app: &mut EffectcraftApp, ctx: &egui::Context, painter: &egui::Painter, comp_rect: Rect, cid: ItemId, ectx: &EvalCtx) {
+pub(crate) fn draw_frame(
+    app: &mut EffectcraftApp,
+    ctx: &egui::Context,
+    painter: &egui::Painter,
+    comp_rect: Rect,
+    cid: ItemId,
+    ectx: &EvalCtx,
+    requested: &crate::frames::FrameKey,
+) {
     let opts = app.session.state.viewer.clone();
     let snap = showing_snapshot(app, ctx);
     // Settings ▸ Video ▸ Mirror on Computer Monitor off: playback goes to Video Preview only.
@@ -370,6 +378,9 @@ pub(crate) fn draw_frame(app: &mut EffectcraftApp, ctx: &egui::Context, painter:
     let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
     if snap {
         let Some(s) = app.session.snapshot.clone() else { return };
+        if !crate::frames::presentation_check(ctx, [s.image.width as usize, s.image.height as usize], &mut app.ui.status) {
+            return;
+        }
         let key = {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -387,8 +398,15 @@ pub(crate) fn draw_frame(app: &mut EffectcraftApp, ctx: &egui::Context, painter:
                 tex
             }
         };
+        if !crate::frames::presentation_check(ctx, tex.size(), &mut app.ui.status) {
+            return;
+        }
         painter.image(tex.id(), comp_rect, uv, Color32::WHITE);
         painter.text(comp_rect.left_top() + vec2(6.0, 6.0), Align2::LEFT_TOP, "Snapshot", Tokens::ui(11.0), SNAP_COLOR);
+        return;
+    }
+    // Non-raster presentation and deliberate snapshots above do not need cached pixels.
+    if !app.viewer_shown.as_ref().is_some_and(|(_, shown)| crate::frames::same_view(requested, shown)) {
         return;
     }
     // A GPU frame (the web viewer): drawn straight from its texture; Show Channel / exposure
@@ -414,6 +432,9 @@ pub(crate) fn draw_frame(app: &mut EffectcraftApp, ctx: &egui::Context, painter:
             Some([x, y, w, h]) => Rect::from_min_size(comp_rect.min + vec2((x * zoom) as f32, (y * zoom) as f32), vec2((w * zoom) as f32, (h * zoom) as f32)),
             None => comp_rect,
         };
+        if !crate::frames::presentation_check(ctx, tex.size(), &mut app.ui.status) {
+            return;
+        }
         if plain {
             painter.image(tex.id(), rect, uv, Color32::WHITE);
             return;
@@ -421,6 +442,10 @@ pub(crate) fn draw_frame(app: &mut EffectcraftApp, ctx: &egui::Context, painter:
         rect
     };
     let Some(src) = app.viewer_image.clone() else { return };
+    if let Err(error) = crate::frames::presentation_image(ctx, &src) {
+        app.ui.status = error.message().to_owned();
+        return;
+    }
     let zoom_opts = super::viewer::zoom_texture_options(app.session.prefs.viewer_zoom_smooth());
     let key = {
         use std::hash::{Hash, Hasher};
@@ -437,6 +462,9 @@ pub(crate) fn draw_frame(app: &mut EffectcraftApp, ctx: &egui::Context, painter:
             tex
         }
     };
+    if !crate::frames::presentation_check(ctx, tex.size(), &mut app.ui.status) {
+        return;
+    }
     painter.image(tex.id(), rect, uv, Color32::WHITE);
 }
 

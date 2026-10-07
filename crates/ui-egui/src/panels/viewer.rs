@@ -397,11 +397,17 @@ fn aux_views(
             _ => {
                 let opts = effectcraft_engine::render::RenderOpts { scale, view: comp.has_3d().then_some(cam), draft: true, ..Default::default() };
                 let img = app.session.render(cid, t, opts);
+                if !crate::frames::presentation_check(&ctx, [img.width as usize, img.height as usize], &mut app.ui.status) {
+                    continue;
+                }
                 let tex = ctx.load_texture(format!("viewer-aux-{i}"), crate::frames::to_color_image(&img), egui::TextureOptions::LINEAR);
                 ctx.data_mut(|d| d.insert_temp(id, (key, tex.clone())));
                 tex
             }
         };
+        if !crate::frames::presentation_check(&ctx, tex.size(), &mut app.ui.status) {
+            continue;
+        }
         let b = comp.background;
         p.rect_filled(cr, 0.0, Color32::from_rgb((b[0] * 255.0) as u8, (b[1] * 255.0) as u8, (b[2] * 255.0) as u8));
         p.image(tex.id(), cr, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
@@ -449,24 +455,33 @@ fn locked_pane(app: &mut EffectcraftApp, ui: &mut egui::Ui, full: Rect, bg: Colo
     let id = egui::Id::new("viewer-locked");
     let cached: Option<(u64, egui::TextureHandle)> = ctx.data(|d| d.get_temp(id));
     let tex = match cached {
-        Some((k, tex)) if k == key => tex,
+        Some((k, tex)) if k == key => Some(tex),
         _ => {
             let opts = effectcraft_engine::render::RenderOpts { scale, view: cam, ..Default::default() };
             let img = app.session.render(lv.comp, t, opts);
-            let mut ci = crate::frames::to_color_image(&img);
-            if let Some(dc) = dc {
-                let mut px: Vec<[u8; 4]> = ci.pixels.iter().map(|c| c.to_array()).collect();
-                dc.apply(&mut px);
-                ci = egui::ColorImage::new(ci.size, px.into_iter().map(|a| Color32::from_rgba_premultiplied(a[0], a[1], a[2], a[3])).collect());
+            if crate::frames::presentation_check(&ctx, [img.width as usize, img.height as usize], &mut app.ui.status) {
+                let mut ci = crate::frames::to_color_image(&img);
+                if let Some(dc) = dc {
+                    let mut px: Vec<[u8; 4]> = ci.pixels.iter().map(|c| c.to_array()).collect();
+                    dc.apply(&mut px);
+                    ci = egui::ColorImage::new(ci.size, px.into_iter().map(|a| Color32::from_rgba_premultiplied(a[0], a[1], a[2], a[3])).collect());
+                }
+                let tex = ctx.load_texture("viewer-locked", ci, egui::TextureOptions::LINEAR);
+                ctx.data_mut(|d| d.insert_temp(id, (key, tex.clone())));
+                Some(tex)
+            } else {
+                None
             }
-            let tex = ctx.load_texture("viewer-locked", ci, egui::TextureOptions::LINEAR);
-            ctx.data_mut(|d| d.insert_temp(id, (key, tex.clone())));
-            tex
         }
     };
+
     let b = comp.background;
     p.rect_filled(cr, 0.0, Color32::from_rgb((b[0] * 255.0) as u8, (b[1] * 255.0) as u8, (b[2] * 255.0) as u8));
-    p.image(tex.id(), cr, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+    if let Some(tex) = tex
+        && crate::frames::presentation_check(&ctx, tex.size(), &mut app.ui.status)
+    {
+        p.image(tex.id(), cr, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+    }
     p.rect_stroke(cr, 0.0, Stroke::new(1.0, Color32::from_black_alpha(160)), StrokeKind::Outside);
     let label = format!("Locked: {name} \u{2014} {}", if comp.has_3d() { lv.view.label() } else { "Active Camera" });
     p.text(r.left_top() + vec2(8.0, 8.0), Align2::LEFT_TOP, &label, Tokens::ui(11.0), Color32::from_white_alpha(210));
@@ -605,7 +620,18 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let snap_expr = app.session.expr.clone();
     let ectx = EvalCtx { project: &snap_project, comp_id: cid, comp: &comp, time, expr: snap_expr.as_deref(), footage: None };
     // The frame (or snapshot) through Show Channel and exposure; ROI frames cover the region.
-    vt::draw_frame(app, &ctx, &painter, comp_rect, cid, &ectx);
+    if let Some((tex, shown)) = &app.viewer_tex
+        && app.viewer_shown.is_some_and(|(id, _)| id == tex.id())
+        && let Err(error) = crate::frames::presentation_size(&ctx, tex.size())
+    {
+        app.ui.status = error.message().to_owned();
+        app.frames.reject_presentation(*shown, error);
+        app.viewer_shown = None;
+        app.viewer_tex = None;
+        app.viewer_image = None;
+    }
+    let retained = app.viewer_shown.as_ref().is_some_and(|(_, shown)| crate::frames::same_view(&key, shown));
+    vt::draw_frame(app, &ctx, &painter, comp_rect, cid, &ectx, &key);
     if app.ui.viewer.extended.is_some() {
         // The comp frame outlined over the extended render.
         painter.rect_stroke(comp_rect, 0.0, Stroke::new(1.0, Color32::from_gray(150)), StrokeKind::Outside);
@@ -901,6 +927,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
 
     // Interaction.
     let resp = ui.interact(area, egui::Id::new("viewer-interact"), Sense::click_and_drag());
+    preview_failure_banner(app, ui, &painter, area, &key, retained);
     let menu_hits_id = egui::Id::new(("viewer-menu-hits", cid.0));
     if resp.secondary_clicked()
         && let Some(pos) = resp.interact_pointer_pos()
@@ -1912,6 +1939,10 @@ fn show_frame(app: &mut EffectcraftApp, ctx: &egui::Context, key: crate::frames:
     let opts = zoom_texture_options(smooth);
     match img {
         FrameImage::Cpu(img) => {
+            if let Err(error) = crate::frames::presentation_image(ctx, &img) {
+                app.frames.reject_presentation(key, error);
+                return;
+            }
             match &mut app.viewer_tex {
                 Some((tex, k)) if tex.size() == img.size => {
                     tex.set((*img).clone(), opts);
@@ -1941,5 +1972,373 @@ fn show_frame(app: &mut EffectcraftApp, ctx: &egui::Context, key: crate::frames:
             // Pixels are read back on demand (viewer_pixels).
             app.viewer_image = None;
         }
+    }
+}
+
+fn preview_failure_rects(area: Rect) -> Option<(Rect, Rect)> {
+    let width = area.width();
+    let height = area.height();
+    if ![area.min.x, area.min.y, area.max.x, area.max.y, width, height].iter().all(|v| v.is_finite()) || width <= 8.0 || height <= 8.0 {
+        return None;
+    }
+    let inner = area.shrink(4.0);
+    let banner = Rect::from_min_size(inner.min, vec2(inner.width(), inner.height().min(24.0)));
+    let retry = Rect::from_min_max(pos2((banner.max.x - banner.width().min(58.0)).max(banner.min.x), banner.min.y), banner.max);
+    // Finite large coordinates can also lose the small button width to f32 rounding.
+    if retry.width() <= 0.0 || retry.height() <= 0.0 || !area.contains_rect(banner) || !banner.contains_rect(retry) {
+        return None;
+    }
+    Some((banner, retry))
+}
+
+fn preview_failure_banner(app: &mut EffectcraftApp, ui: &mut egui::Ui, painter: &egui::Painter, area: Rect, key: &crate::frames::FrameKey, retained: bool) {
+    let Some(failure) = app.frames.failure(key) else { return };
+    let Some((banner, retry)) = preview_failure_rects(area) else { return };
+    let t = app.tokens;
+    painter.rect_filled(banner, 2.0, t.panel_bg);
+    let outdated = retained && app.viewer_shown.as_ref().is_some_and(|(_, shown)| *shown != *key);
+    let label = if outdated { "Preview outdated — rendering failed" } else { "Preview rendering failed" };
+    painter.with_clip_rect(Rect::from_min_max(banner.min, pos2(retry.min.x, banner.max.y))).text(
+        banner.left_center() + vec2(5.0, 0.0),
+        Align2::LEFT_CENTER,
+        label,
+        Tokens::ui(11.0),
+        t.warning,
+    );
+    app.auto.add("viewer.preview.error", banner, label);
+    let response = ui.interact(retry, egui::Id::new("preview-retry"), Sense::click()).on_hover_text(failure.message());
+    let button_painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(retry));
+    button_painter.rect_filled(retry, 2.0, if response.hovered() { t.pressed } else { t.hover });
+    button_painter.text(retry.center(), Align2::CENTER_CENTER, "Retry", Tokens::medium(12.0), t.text);
+    app.auto.add("viewer.preview.retry", retry, "Retry preview rendering");
+    if response.clicked() {
+        app.frames.retry_failed_previews();
+    }
+}
+
+#[cfg(test)]
+mod preview_failure_ui_tests {
+    use super::*;
+    use crate::frames::{CheckedRemoteDone, FailureKind, PreviewFailure, RemoteDone, RemoteFrame, RemoteFrames, RemoteJob};
+    use egui_kittest::Harness;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    // Headless tests inspect real output deltas but have no texture renderer.
+    // Clear them even when an assertion unwinds, as required by egui 0.36.
+    struct TestOutput(egui::FullOutput);
+    impl std::ops::Deref for TestOutput {
+        type Target = egui::FullOutput;
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+    impl Drop for TestOutput {
+        fn drop(&mut self) {
+            self.0.textures_delta.clear();
+        }
+    }
+
+    #[test]
+    fn cpu_install_rechecks_live_limit_and_never_marks_rejected_pixels_shown() {
+        let ctx = egui::Context::default();
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        let key = crate::frames::FrameKey { revision: 1, content: 1, comp: 1, frame: 0, scale: 1000, view: 0, opts: 0 };
+        let image = Arc::new(egui::ColorImage::new([1025, 1], vec![egui::Color32::WHITE; 1025]));
+        let first = TestOutput(ctx.run_ui(egui::RawInput { max_texture_side: Some(2048), ..Default::default() }, |ui| {
+            let ctx = ui.ctx();
+            show_frame(&mut app, ctx, key, crate::frames::FrameImage::Cpu(image.clone()));
+        }));
+        assert!(app.viewer_shown.is_some());
+        let id = app.viewer_tex.as_ref().unwrap().0.id();
+        assert!(first.textures_delta.set.iter().any(|(texture, _)| *texture == id));
+        let rejected = TestOutput(ctx.run_ui(egui::RawInput { max_texture_side: Some(1024), ..Default::default() }, |ui| {
+            let ctx = ui.ctx();
+            show_frame(&mut app, ctx, key, crate::frames::FrameImage::Cpu(image.clone()));
+        }));
+        assert!(!rejected.textures_delta.set.iter().any(|(texture, _)| *texture == id));
+        assert_eq!(app.frames.failure(&key).unwrap().kind, FailureKind::Retryable);
+        // Failed installation preserves the prior identity; normal paint suppresses it when
+        // its own dimensions no longer fit. No new texture or successful key is published.
+        assert_eq!(app.viewer_tex.as_ref().unwrap().0.id(), id);
+        app.frames.retry_failed_previews();
+        let recovered = TestOutput(ctx.run_ui(egui::RawInput { max_texture_side: Some(2048), ..Default::default() }, |ui| {
+            let ctx = ui.ctx();
+            show_frame(&mut app, ctx, key, crate::frames::FrameImage::Cpu(image.clone()));
+        }));
+        assert!(recovered.textures_delta.set.iter().any(|(texture, _)| *texture == id));
+    }
+
+    #[test]
+    fn malformed_display_pixels_are_rejected_before_transform_without_new_texture() {
+        let mut s = effectcraft_engine::Session::default();
+        s.execute("comp.new", json!({"width":32,"height":32,"duration":1})).unwrap();
+        s.state.viewer.exposure = 1.0;
+        let project = s.project.clone();
+        let cid = s.active_comp_id().unwrap();
+        let comp = project.comp(cid).unwrap();
+        let ectx = EvalCtx { project: &project, comp_id: cid, comp, time: Tick::ZERO, expr: None, footage: None };
+        let mut app = EffectcraftApp::new(s);
+        let key = app.frame_key(cid, 0, 1.0);
+        let ctx = egui::Context::default();
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            let ctx = ui.ctx();
+            show_frame(&mut app, ctx, key, crate::frames::FrameImage::Cpu(Arc::new(egui::ColorImage::new([1, 1], vec![Color32::WHITE]))));
+        })
+        .drop_without_applying_deltas();
+        let old = app.viewer_shown.unwrap();
+        app.viewer_image = Some(Arc::new(egui::ColorImage { size: [2, 1], pixels: vec![Color32::WHITE], source_size: vec2(2.0, 1.0) }));
+        let revision = app.session.revision;
+        let output = TestOutput(ctx.run_ui(egui::RawInput::default(), |root_ui| {
+            let ctx = root_ui.ctx().clone();
+            egui::CentralPanel::default().show(root_ui, |ui| {
+                vt::draw_frame(&mut app, &ctx, ui.painter(), Rect::from_min_size(pos2(0.0, 0.0), vec2(320.0, 320.0)), cid, &ectx, &key);
+            });
+        }));
+        assert!(app.ui.status.contains("pixel count"));
+        assert!(ctx.data(|d| d.get_temp::<(u64, egui::TextureHandle)>(egui::Id::new("viewer-display-tex"))).is_none());
+        assert!(!output.shapes.iter().any(|s| draws_texture(&s.shape, old.0)));
+        assert_eq!(app.session.revision, revision);
+        assert_eq!(app.viewer_shown.unwrap(), old, "rejected display transform does not publish replacement identity");
+    }
+    #[test]
+    fn pending_new_main_key_keeps_old_limit_error_visible_without_poisoning_request() {
+        struct Pending;
+        impl RemoteFrames for Pending {
+            fn slots(&self) -> usize {
+                1
+            }
+            fn start(&self, _: RemoteJob, _: RemoteDone) {}
+        }
+        let mut s = effectcraft_engine::Session::default();
+        s.execute("comp.new", json!({"width":32,"height":32,"duration":1})).unwrap();
+        let cid = s.active_comp_id().unwrap();
+        let mut app = EffectcraftApp::new(s);
+        app.ui.viewer.res = crate::state::Resolution::Full;
+        app.frames.set_remote(Some(Arc::new(Pending)));
+        let old = app.frame_key(cid, 0, 1.0);
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx, &app.tokens);
+        ctx.run_ui(egui::RawInput { max_texture_side: Some(2048), ..Default::default() }, |ui| {
+            let ctx = ui.ctx();
+            app.frames.set_context(ctx);
+            show_frame(&mut app, ctx, old, crate::frames::FrameImage::Cpu(Arc::new(egui::ColorImage::new([1025, 1], vec![Color32::WHITE; 1025]))));
+        })
+        .drop_without_applying_deltas();
+        let texture = app.viewer_shown.unwrap().0;
+        app.session.execute("layer.newSolid", json!({"width":16,"height":16})).unwrap();
+        let requested = app.frame_key(cid, 0, 1.0);
+        assert_ne!(old, requested);
+        let output = TestOutput(ctx.run_ui(egui::RawInput { max_texture_side: Some(1024), ..Default::default() }, |root_ui| {
+            let ctx = root_ui.ctx().clone();
+            app.frames.set_context(&ctx);
+            egui::CentralPanel::default().show(root_ui, |ui| {
+                show(&mut app, ui, Rect::from_min_size(pos2(0.0, 0.0), vec2(640.0, 480.0)));
+            });
+        }));
+        assert!(app.frames.failure(&old).is_some());
+        assert!(app.frames.failure(&requested).is_none(), "pending new content does not inherit old image rejection");
+        assert!(app.ui.status.contains("preview texture limit"));
+        assert!(app.viewer_shown.is_none());
+        assert!(!output.shapes.iter().any(|s| draws_texture(&s.shape, texture)));
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct RequestIdentity {
+        revision: u64,
+        comp: u64,
+        tick: i64,
+        opts_hash: u64,
+        scale_bits: u64,
+    }
+    struct Remote {
+        fail: AtomicBool,
+        calls: AtomicUsize,
+        requests: std::sync::Mutex<Vec<RequestIdentity>>,
+    }
+    impl RemoteFrames for Remote {
+        fn slots(&self) -> usize {
+            1
+        }
+        fn start(&self, _: RemoteJob, _: RemoteDone) {
+            panic!("expected typed completion");
+        }
+        fn start_checked(&self, job: RemoteJob, done: CheckedRemoteDone) {
+            let identity = RequestIdentity {
+                revision: job.revision,
+                comp: job.comp.0,
+                tick: job.t.0,
+                opts_hash: crate::frames::opts_hash(&job.opts),
+                scale_bits: job.opts.scale.to_bits(),
+            };
+            {
+                let mut requests = self.requests.lock().unwrap();
+                assert!(requests.len() < 128, "bounded fixture request trace overflow");
+                requests.push(identity);
+            }
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail.load(Ordering::SeqCst) {
+                done(Err(PreviewFailure::new(FailureKind::Content, "synthetic bounded renderer failure")));
+            } else {
+                done(Ok(RemoteFrame { width: 2, height: 2, rgba: [20, 40, 60, 255].repeat(4), ms: 1.0 }));
+            }
+        }
+    }
+    fn harness() -> (Harness<'static, EffectcraftApp>, Arc<Remote>, u64) {
+        let mut s = effectcraft_engine::Session::default();
+        let other = s.execute("comp.new", json!({"name": "Other", "width": 32, "height": 32, "duration": 1})).unwrap()["comp"].as_u64().unwrap();
+        s.execute("comp.new", json!({"name": "Main", "width": 32, "height": 32, "duration": 1})).unwrap();
+        let remote = Arc::new(Remote { fail: AtomicBool::new(false), calls: AtomicUsize::new(0), requests: std::sync::Mutex::new(Vec::with_capacity(128)) });
+        let installed = remote.clone();
+        let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_| {
+            let mut app = EffectcraftApp::new(s);
+            app.frames.set_remote(Some(installed));
+            app
+        });
+        h.run_steps(4);
+        h.state().frames.dispatch_remote();
+        h.run_steps(3);
+        assert!(h.state().viewer_shown.is_some(), "success installed real viewer texture");
+        (h, remote, other)
+    }
+    fn draws_texture(shape: &egui::Shape, id: egui::TextureId) -> bool {
+        match shape {
+            egui::Shape::Mesh(mesh) => mesh.texture_id == id,
+            egui::Shape::Vec(shapes) => shapes.iter().any(|s| draws_texture(s, id)),
+            _ => false,
+        }
+    }
+    #[test]
+    fn failed_edit_keeps_same_view_pixels_visibly_outdated_and_retry_installs_success() {
+        let (mut h, remote, _) = harness();
+        let old = h.state().viewer_shown.unwrap();
+        remote.fail.store(true, Ordering::SeqCst);
+        h.state_mut().session.execute("layer.newSolid", json!({"color": "#ff8030"})).unwrap();
+        let opts = h.state().frame_opts(effectcraft_project::ItemId(old.1.comp), 1.0);
+        let failed_request = RequestIdentity {
+            revision: h.state().session.revision,
+            comp: old.1.comp,
+            tick: 0,
+            opts_hash: crate::frames::opts_hash(&opts),
+            scale_bits: opts.scale.to_bits(),
+        };
+        h.step();
+        h.state().frames.dispatch_remote();
+        h.run_steps(3);
+        assert_eq!(h.state().viewer_shown.unwrap(), old, "no failed pixels installed or marked current");
+        assert!(h.output().shapes.iter().any(|s| draws_texture(&s.shape, old.0)), "last valid texture remains actually painted");
+        assert_eq!(h.state().auto.find("viewer.preview.error").unwrap().label, "Preview outdated — rendering failed");
+        let before_repaints = remote.requests.lock().unwrap().clone();
+        assert_eq!(before_repaints.iter().filter(|request| **request == failed_request).count(), 1, "the desired edited frame failed exactly once");
+        for _ in 0..20 {
+            h.step();
+            h.state().frames.dispatch_remote();
+        }
+        let after_repaints = remote.requests.lock().unwrap().clone();
+        assert_eq!(after_repaints.iter().filter(|request| **request == failed_request).count(), 1, "repaint cannot repeat the exact failed admission");
+        let prefetches = &after_repaints[before_repaints.len()..];
+        assert!(!prefetches.is_empty(), "paused lookahead still admits independent frames");
+        assert!(
+            prefetches.iter().enumerate().all(|(index, request)| !before_repaints.contains(request) && !prefetches[..index].contains(request)),
+            "no other content-failed frame is redispatched during repaint"
+        );
+        assert!(
+            prefetches.iter().all(|request| {
+                request.revision == failed_request.revision
+                    && request.comp == failed_request.comp
+                    && request.tick > failed_request.tick
+                    && request.opts_hash == failed_request.opts_hash
+                    && request.scale_bits == failed_request.scale_bits
+            }),
+            "additional repaint requests belong only to distinct later frames in the same view"
+        );
+        remote.fail.store(false, Ordering::SeqCst);
+        let e = h.state().auto.find("viewer.preview.retry").unwrap().clone();
+        let pos = egui::pos2(e.rect[0] + e.rect[2] * 0.5, e.rect[1] + e.rect[3] * 0.5);
+        h.input_mut().events.extend([
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
+            egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE },
+        ]);
+        h.step();
+        h.step();
+        h.state().frames.dispatch_remote();
+        h.run_steps(3);
+        assert_eq!(
+            remote.requests.lock().unwrap().iter().filter(|request| **request == failed_request).count(),
+            2,
+            "manual Retry redispatches the exact failed frame once"
+        );
+        assert_ne!(h.state().viewer_shown.unwrap().1, old.1);
+        assert_eq!(
+            h.state().viewer_shown.unwrap().1,
+            h.state().frame_key(effectcraft_project::ItemId(failed_request.comp), 0, 1.0),
+            "the successful current frame is installed"
+        );
+        assert!(h.output().shapes.iter().any(|s| draws_texture(&s.shape, h.state().viewer_shown.unwrap().0)), "successful retry pixels are actually painted");
+        assert!(h.state().auto.find("viewer.preview.error").is_none());
+    }
+    #[test]
+    fn failed_other_comp_never_paints_the_old_compositions_texture() {
+        let (mut h, remote, other) = harness();
+        let old = h.state().viewer_shown.unwrap();
+        remote.fail.store(true, Ordering::SeqCst);
+        h.state_mut().session.execute("comp.open", json!({"comp": other})).unwrap();
+        h.step();
+        h.state().frames.dispatch_remote();
+        h.run_steps(3);
+        assert!(h.state().viewer_shown.is_none_or(|(_, k)| k.comp != other));
+        assert!(!h.output().shapes.iter().any(|s| draws_texture(&s.shape, old.0)), "different comp never paints retained old pixels");
+        assert_eq!(h.state().auto.find("viewer.preview.error").unwrap().label, "Preview rendering failed");
+    }
+    #[test]
+    fn failure_banner_hit_targets_stay_inside_tiny_or_empty_viewers() {
+        for [w, h] in [[0.0, 0.0], [4.0, 4.0], [9.0, 9.0], [20.0, 12.0], [80.0, 30.0], [200.0, 80.0]] {
+            let area = Rect::from_min_size(pos2(10.0, 20.0), vec2(w, h));
+            if let Some((banner, retry)) = preview_failure_rects(area) {
+                for rect in [banner, retry] {
+                    assert!(rect.width() > 0.0 && rect.height() > 0.0);
+                    assert!(area.contains_rect(rect));
+                    assert!([rect.min.x, rect.min.y, rect.max.x, rect.max.y].iter().all(|v| v.is_finite()));
+                }
+            } else {
+                assert!(w <= 8.0 || h <= 8.0);
+            }
+        }
+        for area in [
+            Rect::from_min_max(pos2(-f32::MAX, 0.0), pos2(f32::MAX, 30.0)),
+            Rect::from_min_max(pos2(0.0, -f32::MAX), pos2(200.0, f32::MAX)),
+            Rect::from_min_max(pos2(f32::NAN, 0.0), pos2(200.0, 30.0)),
+            Rect::from_min_max(pos2(0.0, 0.0), pos2(f32::INFINITY, 30.0)),
+            Rect::from_min_max(pos2(1e30, 0.0), pos2(1.001e30, 30.0)),
+        ] {
+            assert!(preview_failure_rects(area).is_none(), "hostile/precision-lost bounds must not register malformed controls: {area:?}");
+        }
+    }
+    #[test]
+    fn wireframe_without_any_cached_frame_still_paints_layer_outlines() {
+        let mut s = effectcraft_engine::Session::default();
+        s.execute("comp.new", json!({"width": 32, "height": 32, "duration": 1})).unwrap();
+        s.execute("layer.newSolid", json!({"width": 16, "height": 16})).unwrap();
+        s.state.viewer.fast_previews = effectcraft_engine::commands::viewer_cmds::FastPreviews::Wireframe;
+        let project = s.project.clone();
+        let cid = s.active_comp_id().unwrap();
+        let comp = project.comp(cid).unwrap();
+        let ectx = EvalCtx { project: &project, comp_id: cid, comp, time: Tick::ZERO, expr: None, footage: None };
+        let mut app = EffectcraftApp::new(s);
+        assert!(app.viewer_shown.is_none());
+        let key = app.frame_key(cid, 0, 1.0);
+        let ctx = egui::Context::default();
+        let output = TestOutput(ctx.run_ui(egui::RawInput::default(), |root_ui| {
+            let ctx = root_ui.ctx().clone();
+            egui::CentralPanel::default().show(root_ui, |ui| {
+                vt::draw_frame(&mut app, &ctx, ui.painter(), Rect::from_min_size(pos2(0.0, 0.0), vec2(320.0, 320.0)), cid, &ectx, &key);
+            });
+        }));
+        assert!(
+            output.shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Path(p) if p.closed && p.points.len() == 4)),
+            "wireframe is independent of cached raster success"
+        );
+        assert!(app.viewer_shown.is_none());
     }
 }

@@ -122,13 +122,18 @@ pub fn draw_overlay(
             let x0 = -inp.offset[0] / inp.scale;
             let y0 = -inp.offset[1] / inp.scale;
             let rect = [x0, y0, x0 + w as f64 / inp.scale, y0 + h as f64 / inp.scale];
+            if !crate::frames::presentation_check(ctx, img.size, &mut app.ui.status) {
+                return;
+            }
             let tex = ctx.load_texture("roto-overlay", img, egui::TextureOptions::NEAREST);
             let c = Overlay { key, tex, rect };
             ctx.data_mut(|d| d.insert_temp(id, c.clone()));
             Some(c)
         }
     };
-    if let Some(ov) = ov {
+    if let Some(ov) = ov
+        && crate::frames::presentation_check(ctx, ov.tex.size(), &mut app.ui.status)
+    {
         let r = Rect::from_min_max(to_screen([ov.rect[0], ov.rect[1]]), to_screen([ov.rect[2], ov.rect[3]]));
         painter.image(ov.tex.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
     }

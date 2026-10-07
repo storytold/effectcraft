@@ -56,14 +56,19 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let cached: Option<((u64, i64, u64), egui::TextureHandle, [u32; 2])> = ctx.data(|d| d.get_temp(tid));
         let tex = match cached {
             Some((k, tex, size)) if k == key => Some((tex, size)),
-            _ => app.session.footage.frame(view.item, f, view.time).map(|img| {
+            _ => app.session.footage.frame(view.item, f, view.time).and_then(|img| {
+                if !crate::frames::presentation_check(&ctx, [img.width as usize, img.height as usize], &mut app.ui.status) {
+                    return None;
+                }
                 let ci = egui::ColorImage::from_rgba_unmultiplied([img.width as usize, img.height as usize], &img.to_rgba8());
                 let tex = ctx.load_texture("footage-panel", ci, egui::TextureOptions::LINEAR);
                 ctx.data_mut(|d| d.insert_temp(tid, (key, tex.clone(), [img.width, img.height])));
-                (tex, [img.width, img.height])
+                Some((tex, [img.width, img.height]))
             }),
         };
-        if let Some((tex, [w, h])) = tex {
+        if let Some((tex, [w, h])) = tex
+            && crate::frames::presentation_check(&ctx, tex.size(), &mut app.ui.status)
+        {
             let s = ((area.width() - 20.0) / w as f32).min((area.height() - 20.0) / h as f32).max(0.01);
             let r = Rect::from_center_size(area.center(), vec2(w as f32 * s, h as f32 * s));
             super::viewer::checker(&p.with_clip_rect(area), r);

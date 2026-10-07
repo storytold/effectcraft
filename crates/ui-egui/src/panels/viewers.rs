@@ -103,6 +103,16 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, id: u32, rect: Rect) {
             if let Some(img) = app.frames.get(&key) {
                 set_texture(app, &ctx, id, key, img);
             }
+            if let Some((shown, PassiveTexture::Cpu(tex))) = app.passive_tex.get(&id)
+                && let Err(error) = crate::frames::presentation_size(&ctx, tex.size())
+            {
+                app.ui.status = error.message().to_owned();
+                app.frames.reject_presentation(*shown, error);
+                app.passive_tex.remove(&id);
+            }
+            if let Some(error) = app.frames.failure(&key) {
+                app.ui.status = error.message().to_owned();
+            }
             match app.passive_tex.get(&id).filter(|(k, _)| k.comp == cid.0) {
                 Some((_, tex)) => {
                     p.image(tex.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
@@ -126,6 +136,17 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, id: u32, rect: Rect) {
 
 /// Keep the frame viewer `id` shows in its texture.
 fn set_texture(app: &mut EffectcraftApp, ctx: &egui::Context, id: u32, key: FrameKey, img: FrameImage) {
+    if let FrameImage::Cpu(cpu) = &img
+        && let Err(error) = crate::frames::presentation_image(ctx, cpu)
+    {
+        app.frames.reject_presentation(key, error);
+        if let Some((_, PassiveTexture::Cpu(tex))) = app.passive_tex.get(&id)
+            && crate::frames::presentation_size(ctx, tex.size()).is_err()
+        {
+            app.passive_tex.remove(&id);
+        }
+        return;
+    }
     if app.passive_tex.get(&id).is_some_and(|(k, _)| *k == key) {
         return;
     }
@@ -258,4 +279,92 @@ pub fn on_close(app: &mut EffectcraftApp, p: PanelKind) {
 pub fn title(app: &EffectcraftApp, id: u32) -> Option<String> {
     let c = comp_of(app, id)?;
     Some(format!("Composition {}", app.session.project.item(c)?.name))
+}
+
+#[cfg(test)]
+mod presentation_limit_tests {
+    use super::*;
+
+    // Headless tests inspect real output deltas but have no texture renderer.
+    // Clear them even when an assertion unwinds, as required by egui 0.36.
+    struct TestOutput(egui::FullOutput);
+    impl std::ops::Deref for TestOutput {
+        type Target = egui::FullOutput;
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+    impl Drop for TestOutput {
+        fn drop(&mut self) {
+            self.0.textures_delta.clear();
+        }
+    }
+
+    #[test]
+    fn passive_same_key_revalidates_limit_before_reusing_or_updating_pixels() {
+        let ctx = egui::Context::default();
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        let key = FrameKey { revision: 1, content: 1, comp: 1, frame: 0, scale: 1000, view: 0, opts: 0 };
+        let img = FrameImage::Cpu(Arc::new(egui::ColorImage::new([1025, 1], vec![Color32::WHITE; 1025])));
+        let first = TestOutput(ctx.run_ui(egui::RawInput { max_texture_side: Some(2048), ..Default::default() }, |ui| {
+            let ctx = ui.ctx();
+            set_texture(&mut app, ctx, 1, key, img.clone());
+        }));
+        let old = app.passive_tex.get(&1).unwrap().1.id();
+        assert!(first.textures_delta.set.iter().any(|(id, _)| *id == old));
+        let rejected = TestOutput(ctx.run_ui(egui::RawInput { max_texture_side: Some(1024), ..Default::default() }, |ui| {
+            let ctx = ui.ctx();
+            set_texture(&mut app, ctx, 1, key, img.clone());
+        }));
+        assert!(!rejected.textures_delta.set.iter().any(|(id, _)| *id == old));
+        assert!(!app.passive_tex.contains_key(&1));
+        assert_eq!(app.frames.failure(&key).unwrap().kind, crate::frames::FailureKind::Retryable);
+        app.frames.retry_failed_previews();
+        let recovered = TestOutput(ctx.run_ui(egui::RawInput { max_texture_side: Some(2048), ..Default::default() }, |ui| {
+            let ctx = ui.ctx();
+            set_texture(&mut app, ctx, 1, key, img.clone());
+        }));
+        let new = app.passive_tex.get(&1).unwrap().1.id();
+        assert!(recovered.textures_delta.set.iter().any(|(id, _)| *id == new));
+    }
+
+    #[test]
+    fn pending_new_passive_key_reports_old_limit_rejection_without_poisoning_request() {
+        struct Pending;
+        impl crate::frames::RemoteFrames for Pending {
+            fn slots(&self) -> usize {
+                1
+            }
+            fn start(&self, _: crate::frames::RemoteJob, _: crate::frames::RemoteDone) {}
+        }
+        let mut session = effectcraft_engine::Session::default();
+        session.execute("comp.new", json!({"width":32,"height":32,"duration":1})).unwrap();
+        let cid = session.active_comp_id().unwrap();
+        let mut app = EffectcraftApp::new(session);
+        app.ui.viewers.insert(1, Some(cid.0));
+        app.frames.set_remote(Some(Arc::new(Pending)));
+        let old = app.frame_key(cid, 0, 1.0);
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx, &app.tokens);
+        ctx.run_ui(egui::RawInput { max_texture_side: Some(2048), ..Default::default() }, |ui| {
+            let ctx = ui.ctx();
+            app.frames.set_context(ctx);
+            set_texture(&mut app, ctx, 1, old, FrameImage::Cpu(Arc::new(egui::ColorImage::new([1025, 1], vec![Color32::WHITE; 1025]))));
+        })
+        .drop_without_applying_deltas();
+        let texture = app.passive_tex.get(&1).unwrap().1.id();
+        app.session.execute("layer.newSolid", json!({"width":16,"height":16})).unwrap();
+        let requested = app.frame_key(cid, 0, 1.0);
+        assert_ne!(old, requested);
+        let output = TestOutput(ctx.run_ui(egui::RawInput { max_texture_side: Some(1024), ..Default::default() }, |root_ui| {
+            let ctx = root_ui.ctx().clone();
+            app.frames.set_context(&ctx);
+            egui::CentralPanel::default().show(root_ui, |ui| show(&mut app, ui, 1, Rect::from_min_size(pos2(0.0, 0.0), vec2(640.0, 480.0))));
+        }));
+        assert!(app.frames.failure(&old).is_some());
+        assert!(app.frames.failure(&requested).is_none());
+        assert!(app.ui.status.contains("preview texture limit"));
+        assert!(!app.passive_tex.contains_key(&1));
+        assert!(!output.shapes.iter().any(|s| matches!(&s.shape,egui::Shape::Mesh(mesh) if mesh.texture_id==texture)));
+    }
 }

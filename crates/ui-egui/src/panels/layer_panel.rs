@@ -142,7 +142,10 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             let mut r = Renderer::new(&app.session.project, &*app.session.footage, RenderOpts { scale, ..Default::default() });
             r.expr = app.session.expr.as_deref();
             r.cache = Some(&app.session.layer_cache);
-            r.layer_input(&ectx, &layer, view).map(|buf| {
+            r.layer_input(&ectx, &layer, view).and_then(|buf| {
+                if !crate::frames::presentation_check(&ctx, [buf.img.width as usize, buf.img.height as usize], &mut app.ui.status) {
+                    return None;
+                }
                 let img = crate::frames::to_color_image(&buf.img);
                 let x0 = -buf.offset[0] / buf.scale;
                 let y0 = -buf.offset[1] / buf.scale;
@@ -150,11 +153,13 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 let tex = ctx.load_texture("layer-panel", img, egui::TextureOptions::LINEAR);
                 let c = Tex { key, tex, rect };
                 ctx.data_mut(|d| d.insert_temp(tex_id(), c.clone()));
-                c
+                Some(c)
             })
         }
     };
-    if let Some(tx) = &tex {
+    if let Some(tx) = &tex
+        && crate::frames::presentation_check(&ctx, tx.tex.size(), &mut app.ui.status)
+    {
         let r = Rect::from_min_max(to_screen([tx.rect[0], tx.rect[1]]), to_screen([tx.rect[2], tx.rect[3]]));
         painter.image(tx.tex.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
     }

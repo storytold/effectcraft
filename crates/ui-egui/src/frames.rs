@@ -23,6 +23,10 @@
 //! registers with egui-wgpu and draws directly; pixels are read back only when something needs
 //! them (Info panel, eyedroppers, histograms).
 
+mod failures;
+
+pub use failures::{FailureKind, PreviewFailure, presentation_check, presentation_image, presentation_size, same_view};
+
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -316,6 +320,8 @@ pub struct RemoteFrame {
 
 /// Called once with a remote frame (or why there is none).
 pub type RemoteDone = Box<dyn FnOnce(Result<RemoteFrame, String>) + Send>;
+/// Typed completion seam for future admission-aware workers; legacy strings remain retryable.
+pub type CheckedRemoteDone = Box<dyn FnOnce(Result<RemoteFrame, PreviewFailure>) + Send>;
 
 /// Renders viewer frames elsewhere (the browser's frame worker), so the UI thread never does.
 pub trait RemoteFrames: Send + Sync {
@@ -324,6 +330,11 @@ pub trait RemoteFrames: Send + Sync {
     fn slots(&self) -> usize;
     /// Start rendering `job`; `done` runs when the frame arrives.
     fn start(&self, job: RemoteJob, done: RemoteDone);
+    /// Legacy transports have no reliable permanent-error classification. Never inspect strings
+    /// to decide that a document is unrenderable; use bounded backoff for all of them.
+    fn start_checked(&self, job: RemoteJob, done: CheckedRemoteDone) {
+        self.start(job, Box::new(move |r| done(r.map_err(|e| PreviewFailure::new(FailureKind::Retryable, &e)))));
+    }
     /// Drop cached intermediate results (Edit ▸ Purge).
     fn purge(&self) {}
     /// It renders GPU effects (its own GPU device): frames with effects go to it rather than
@@ -367,6 +378,8 @@ pub struct Frames {
     pub last_ms: Arc<Mutex<f64>>,
     content_keys: ContentKeys,
     gpu_retired: Arc<AtomicBool>,
+    failures: Arc<Mutex<failures::Failures>>,
+    failure_clock: web_time::Instant,
     /// [`comp_content`] identities by (revision, comp), with the project that keeps an identity
     /// found by [`Frames::identity`] in another project.
     identities: Mutex<HashMap<(u64, u64), Identity>>,
@@ -406,6 +419,8 @@ impl Default for Frames {
             keepers: Mutex::default(),
             remote: None,
             remote_busy: Arc::default(),
+            failures: Arc::default(),
+            failure_clock: web_time::Instant::now(),
         }
     }
 }
@@ -431,6 +446,7 @@ impl Frames {
     /// cannot restore an invalid texture after this removal.
     pub fn retire_gpu(&self) {
         self.gpu_retired.store(true, Ordering::Release);
+        self.retry_failed_previews();
         if let Ok(mut cache) = self.cache.lock() {
             let keys: Vec<_> = cache.map.iter().filter_map(|(key, image)| image.is_gpu().then_some(*key)).collect();
             for key in keys {
@@ -454,6 +470,13 @@ impl Frames {
         self.remote_slots().max(1)
     }
     pub fn set_context(&mut self, ctx: &egui::Context) {
+        let id = egui::Id::new("preview-presentation-limit");
+        let limit = ctx.input(|i| i.max_texture_side);
+        let previous = ctx.data(|d| d.get_temp::<usize>(id));
+        ctx.data_mut(|d| d.insert_temp(id, limit));
+        if previous.is_some_and(|old| old != limit) {
+            self.retry_failed_previews();
+        }
         if self.ctx.is_none() {
             self.ctx = Some(ctx.clone());
         }
@@ -468,6 +491,13 @@ impl Frames {
     pub fn get(&self, k: &FrameKey) -> Option<FrameImage> {
         let mut c = self.cache.lock().ok()?;
         let img = c.map.get(k).cloned()?;
+        if let (Some(ctx), FrameImage::Cpu(cpu)) = (&self.ctx, &img)
+            && let Err(error) = presentation_image(ctx, cpu)
+        {
+            drop(c);
+            self.reject_presentation(*k, error);
+            return None;
+        }
         c.touch(k);
         Some(img)
     }
@@ -576,9 +606,17 @@ impl Frames {
     /// Change the RAM preview cache budget (Settings ▸ Memory & CPU), evicting the oldest
     /// frames when it shrinks.
     pub fn set_budget(&self, bytes: usize) {
-        if let Ok(mut c) = self.cache.lock() {
+        let changed = if let Ok(mut c) = self.cache.lock() {
+            let changed = c.budget != bytes;
             c.budget = bytes;
             c.evict_to_budget();
+            changed
+        } else {
+            false
+        };
+        // Do not take failure state while holding cache: completion takes failure then cache.
+        if changed {
+            self.retry_failed_previews();
         }
     }
 
@@ -586,7 +624,34 @@ impl Frames {
         self.cache.lock().map(|c| c.budget).unwrap_or(0)
     }
 
+    /// Forget failure backoff after an explicit retry, purge or device/worker recovery.
+    /// This does not duplicate or cancel an existing in-flight job.
+    pub fn retry_failed_previews(&self) {
+        if let Ok(mut f) = self.failures.lock() {
+            f.recover();
+        }
+        if let Some(ctx) = &self.ctx {
+            ctx.request_repaint();
+        }
+    }
+
+    /// Reject an unusable cached CPU frame without clearing a valid older view.
+    pub fn reject_presentation(&self, key: FrameKey, error: PreviewFailure) {
+        if let Ok(mut failures) = self.failures.lock() {
+            let epoch = failures.epoch;
+            failures.record(key, epoch, error, self.failure_clock.elapsed());
+            if let Ok(mut cache) = self.cache.lock() {
+                cache.remove(&key);
+            }
+        }
+    }
+
+    pub fn failure(&self, key: &FrameKey) -> Option<PreviewFailure> {
+        self.failures.lock().ok()?.get(key)
+    }
+
     pub fn clear(&self) {
+        self.retry_failed_previews();
         if let Some(r) = &self.remote {
             r.purge();
         }
@@ -614,6 +679,14 @@ impl Frames {
     }
 
     fn request_with(&self, src: &RenderSource, key: FrameKey, comp: ItemId, t: Tick, opts: RenderOpts, urgent: bool) {
+        if let Some(delay) = self.failures.lock().ok().and_then(|f| f.delay(&key, self.failure_clock.elapsed())) {
+            if let Some(ctx) = &self.ctx
+                && delay != std::time::Duration::MAX
+            {
+                ctx.request_repaint_after(delay);
+            }
+            return;
+        }
         if self.is_cached(&key) {
             return;
         }
@@ -641,7 +714,8 @@ impl Frames {
         }
         q.seq += 1;
         let seq = q.seq;
-        q.jobs.push(Job { key, src: src.clone(), comp, t, opts, urgent, seq });
+        let failure_epoch = self.failures.lock().map(|f| f.epoch).unwrap_or(0);
+        q.jobs.push(Job { key, src: src.clone(), comp, t, opts, urgent, seq, failure_epoch });
         drop(q);
         #[cfg(not(target_arch = "wasm32"))]
         if self.remote.is_none() {
@@ -671,11 +745,14 @@ impl Frames {
             last: self.last_ms.clone(),
             content_keys: self.content_keys.clone(),
             gpu_retired: self.gpu_retired.clone(),
+            failures: self.failures.clone(),
+            failure_clock: self.failure_clock,
         }
     }
 
     /// Render frames with `remote` from now on (`None`: on this thread again).
     pub fn set_remote(&mut self, remote: Option<Arc<dyn RemoteFrames>>) {
+        self.retry_failed_previews();
         self.remote = remote;
     }
 
@@ -744,21 +821,29 @@ impl Frames {
             let t0 = web_time::Instant::now();
             let disk_key = remote.disk().then(|| frame_disk_key(&w.content_keys, &job.src.project, &key, opts_hash(&job.opts)));
             let rj = RemoteJob { project: job.src.project.clone(), revision: key.revision, comp: job.comp, t: job.t, opts: job.opts, disk_key };
-            remote.start(
+            let failure_epoch = job.failure_epoch;
+            remote.start_checked(
                 rj,
-                Box::new(move |r: Result<RemoteFrame, String>| {
+                Box::new(move |r: Result<RemoteFrame, PreviewFailure>| {
                     if let Ok(mut b) = busy.lock() {
                         *b = b.saturating_sub(1);
                     }
                     match r {
                         Ok(f) => {
-                            let img = egui::ColorImage::from_rgba_premultiplied([f.width as usize, f.height as usize], &f.rgba);
-                            fw.finish_key(key, urgent, FrameImage::Cpu(Arc::new(img)), t0);
+                            let budget = fw.cache.lock().map(|c| c.budget).unwrap_or(0);
+                            let img = match failures::remote_image(&f, budget, fw.ctx.as_ref().map(|ctx| ctx.input(|i| i.max_texture_side))) {
+                                Ok(img) => img,
+                                Err(error) => {
+                                    fw.failed(key, urgent, failure_epoch, error);
+                                    return;
+                                }
+                            };
+                            fw.finish_key(key, urgent, FrameImage::Cpu(Arc::new(img)), t0, failure_epoch);
                         }
                         Err(e) => {
-                            // Not rendered (a stale revision, a lost worker): the viewer asks again.
-                            log::debug!("remote frame: {e}");
-                            fw.release(key, urgent);
+                            // Unknown transport failures wait for bounded backoff, never permanent string-based rejection.
+                            log::debug!("remote frame: {}", e.message());
+                            fw.failed(key, urgent, failure_epoch, e);
                         }
                     }
                 }),
@@ -800,6 +885,8 @@ struct Worker {
     last: Arc<Mutex<f64>>,
     content_keys: ContentKeys,
     gpu_retired: Arc<AtomicBool>,
+    failures: Arc<Mutex<failures::Failures>>,
+    failure_clock: web_time::Instant,
 }
 
 impl Worker {
@@ -826,14 +913,16 @@ impl Worker {
                 Some(ci) => ci,
                 None => {
                     // Not "in progress" forever: the viewer asks for it again.
-                    self.release(job.key, job.urgent);
+                    self.failed(job.key, job.urgent, job.failure_epoch, PreviewFailure::new(FailureKind::Retryable, "Preview rendering panicked"));
                     return true;
                 }
             },
         };
         // Publish the shared frame and wake the viewer before optional RGBA conversion
         // and compression. Persistence still runs on this worker, using the same snapshot.
-        self.finish(&job, ci.clone(), t0);
+        if !self.finish(&job, ci.clone(), t0) {
+            return true;
+        }
         if !disk_hit && let (Some((dc, k)), FrameImage::Cpu(img)) = (&disk, &ci) {
             let rgba: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
             dc.put_frame(*k, img.size[0] as u32, img.size[1] as u32, &rgba);
@@ -845,22 +934,53 @@ impl Worker {
     }
 
     /// Store a finished frame and release its job.
-    fn finish(&self, job: &Job, img: FrameImage, t0: web_time::Instant) {
-        self.finish_key(job.key, job.urgent, img, t0);
+    fn finish(&self, job: &Job, img: FrameImage, t0: web_time::Instant) -> bool {
+        self.finish_key(job.key, job.urgent, img, t0, job.failure_epoch)
     }
 
-    fn finish_key(&self, key: FrameKey, urgent: bool, img: FrameImage, t0: web_time::Instant) {
-        if urgent && let Ok(mut l) = self.last.lock() {
-            *l = t0.elapsed().as_secs_f64() * 1000.0;
-        }
-        if let Ok(mut c) = self.cache.lock()
-            && (!img.is_gpu() || !self.gpu_retired.load(Ordering::Acquire))
-        {
-            c.insert(key, img);
+    fn failed(&self, key: FrameKey, urgent: bool, epoch: u64, failure: PreviewFailure) {
+        if let Ok(mut f) = self.failures.lock() {
+            f.record(key, epoch, failure, self.failure_clock.elapsed());
         }
         self.release(key, urgent);
     }
 
+    fn finish_key(&self, key: FrameKey, urgent: bool, img: FrameImage, t0: web_time::Instant, epoch: u64) -> bool {
+        if let (Some(ctx), FrameImage::Cpu(cpu)) = (&self.ctx, &img)
+            && let Err(error) = presentation_image(ctx, cpu)
+        {
+            self.failed(key, urgent, epoch, error);
+            return false;
+        }
+        // Hold the generation guard through publication, so recovery/new failures cannot race
+        // a late success. Release it BEFORE queue bookkeeping (request takes queue then epoch).
+        let Ok(mut failures) = self.failures.lock() else {
+            self.release(key, urgent);
+            return false;
+        };
+        if epoch != failures.epoch {
+            drop(failures);
+            self.release(key, urgent);
+            return false;
+        }
+        let mut published = false;
+        if let Ok(mut c) = self.cache.lock()
+            && (!img.is_gpu() || !self.gpu_retired.load(Ordering::Acquire))
+        {
+            c.insert(key, img);
+            failures.succeeded(&key);
+            published = true;
+        }
+        drop(failures);
+        if published
+            && urgent
+            && let Ok(mut l) = self.last.lock()
+        {
+            *l = t0.elapsed().as_secs_f64() * 1000.0;
+        }
+        self.release(key, urgent);
+        published
+    }
     /// The job of `key` is no longer queued or running (rendered or dropped).
     fn release(&self, key: FrameKey, urgent: bool) {
         if let Ok(mut inf) = self.inflight.lock() {
@@ -994,6 +1114,7 @@ struct Job {
     opts: RenderOpts,
     urgent: bool,
     seq: u64,
+    failure_epoch: u64,
 }
 
 #[derive(Default)]
@@ -1027,7 +1148,8 @@ mod tests {
         let next = key(1, 1, 0);
         frames.inflight.lock().unwrap().insert(next);
         frames.queue.lock().unwrap().running.insert(next);
-        worker.finish_key(next, false, img(), web_time::Instant::now());
+        let epoch = frames.failures.lock().unwrap().epoch;
+        worker.finish_key(next, false, img(), web_time::Instant::now(), epoch);
         assert!(frames.is_cached(&next), "CPU retry can still publish");
         assert_eq!(frames.inflight(), 0);
         assert!(frames.queue.lock().unwrap().running.is_empty());
@@ -1227,5 +1349,235 @@ mod tests {
         assert_eq!(at(&s), o1, "a mute after a real edit keeps that edit's frames");
         switch(&mut s, inner, solid, "video", true);
         assert_ne!(at(&s), o1);
+    }
+}
+
+#[cfg(test)]
+mod failure_dispatch_tests {
+    use super::*;
+    use effectcraft_engine::Session;
+    use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct TypedRemote {
+        calls: AtomicUsize,
+        good: AtomicBool,
+    }
+    impl RemoteFrames for TypedRemote {
+        fn slots(&self) -> usize {
+            1
+        }
+        fn start(&self, _: RemoteJob, _: RemoteDone) {
+            panic!("typed route must be used");
+        }
+        fn start_checked(&self, _: RemoteJob, done: CheckedRemoteDone) {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.good.load(Ordering::SeqCst) {
+                done(Ok(RemoteFrame { width: 1, height: 1, rgba: vec![20, 40, 60, 255], ms: 1.0 }));
+            } else {
+                done(Err(PreviewFailure::new(FailureKind::Content, "synthetic admission error")));
+            }
+        }
+    }
+    fn fixture() -> (Frames, RenderSource, ItemId, FrameKey, Arc<TypedRemote>) {
+        let mut s = Session::default();
+        let cid = ItemId(s.execute("comp.new", json!({"width": 8, "height": 8, "duration": 1})).unwrap()["comp"].as_u64().unwrap());
+        let source = RenderSource {
+            project: s.project.clone(),
+            footage: s.footage.clone(),
+            expr: None,
+            layer_cache: Arc::default(),
+            gpu: None,
+            gpu_display: false,
+            disk: None,
+        };
+        let remote = Arc::new(TypedRemote { calls: AtomicUsize::new(0), good: AtomicBool::new(false) });
+        let mut f = Frames::default();
+        f.set_remote(Some(remote.clone()));
+        let key = FrameKey { revision: 1, content: 1, comp: cid.0, frame: 0, scale: 1000, view: 0, opts: 0 };
+        (f, source, cid, key, remote)
+    }
+    #[test]
+    fn repeated_paint_does_not_redispatch_a_typed_failure_and_edit_retry_success_recover() {
+        let (f, src, cid, key, remote) = fixture();
+        for _ in 0..1000 {
+            f.request_urgent(&src, key, cid, Tick::ZERO, RenderOpts::default());
+            f.dispatch_remote();
+        }
+        assert_eq!(remote.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(f.inflight(), 0);
+        assert_eq!(f.remote_busy(), 0);
+        assert!(!f.urgent_pending());
+        assert!(!f.is_cached(&key));
+        assert_eq!(f.failure(&key).unwrap().kind, FailureKind::Content);
+        let edited = FrameKey { content: 2, revision: 2, ..key };
+        remote.good.store(true, Ordering::SeqCst);
+        f.request_urgent(&src, edited, cid, Tick::ZERO, RenderOpts::default());
+        assert_eq!(f.dispatch_remote(), 1);
+        assert!(f.is_cached(&edited), "changed content is not blocked by old error");
+        f.retry_failed_previews();
+        f.request_urgent(&src, key, cid, Tick::ZERO, RenderOpts::default());
+        assert_eq!(f.dispatch_remote(), 1);
+        assert!(f.is_cached(&key));
+        assert!(f.failure(&key).is_none());
+        assert_eq!(remote.calls.load(Ordering::SeqCst), 3);
+    }
+    #[test]
+    fn failed_options_and_frames_do_not_block_other_requests_and_success_clears_diagnostics() {
+        let (f, src, cid, key, remote) = fixture();
+        f.request(&src, key, cid, Tick::ZERO, RenderOpts::default());
+        f.dispatch_remote();
+        remote.good.store(true, Ordering::SeqCst);
+        for next in [FrameKey { frame: 1, ..key }, FrameKey { opts: 1, ..key }, FrameKey { view: 1, ..key }] {
+            f.request(&src, next, cid, Tick::ZERO, RenderOpts::default());
+            assert_eq!(f.dispatch_remote(), 1);
+            assert!(f.is_cached(&next));
+        }
+        // A valid materialized success for the original request resolves its diagnostic.
+        let epoch = f.failures.lock().unwrap().epoch;
+        f.worker().finish_key(
+            key,
+            false,
+            FrameImage::Cpu(Arc::new(egui::ColorImage::new([1, 1], vec![egui::Color32::WHITE]))),
+            web_time::Instant::now(),
+            epoch,
+        );
+        assert!(f.failure(&key).is_none());
+        assert!(f.is_cached(&key));
+        assert_eq!(remote.calls.load(Ordering::SeqCst), 4);
+    }
+    #[test]
+    fn legacy_error_strings_use_retryable_backoff_without_permanent_string_classification() {
+        struct OldRemote(AtomicUsize);
+        impl RemoteFrames for OldRemote {
+            fn slots(&self) -> usize {
+                1
+            }
+            fn start(&self, _: RemoteJob, done: RemoteDone) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                done(Err("invalid composition; stale worker; out of memory".into()));
+            }
+        }
+        let (mut f, src, cid, key, _) = fixture();
+        let old = Arc::new(OldRemote(AtomicUsize::new(0)));
+        f.set_remote(Some(old.clone()));
+        f.request(&src, key, cid, Tick::ZERO, RenderOpts::default());
+        f.dispatch_remote();
+        assert_eq!(f.failure(&key).unwrap().kind, FailureKind::Retryable);
+        // Give the ledger an explicit logical instant; no timing sleeps/flaky repaint loop.
+        assert!(f.failures.lock().unwrap().delay(&key, std::time::Duration::ZERO).is_some());
+        assert!(f.failures.lock().unwrap().delay(&key, std::time::Duration::from_secs(60)).is_none());
+        assert_eq!(old.0.load(Ordering::SeqCst), 1);
+    }
+    #[test]
+    fn delayed_pre_recovery_success_cannot_clear_a_new_failure_or_publish_pixels() {
+        struct Held(Mutex<Option<CheckedRemoteDone>>);
+        impl RemoteFrames for Held {
+            fn slots(&self) -> usize {
+                1
+            }
+            fn start(&self, _: RemoteJob, _: RemoteDone) {
+                panic!("typed route")
+            }
+            fn start_checked(&self, _: RemoteJob, done: CheckedRemoteDone) {
+                *self.0.lock().unwrap() = Some(done);
+            }
+        }
+        let (mut f, src, cid, key, _) = fixture();
+        let held = Arc::new(Held(Mutex::default()));
+        f.set_remote(Some(held.clone()));
+        f.request_urgent(&src, key, cid, Tick::ZERO, RenderOpts::default());
+        assert_eq!(f.dispatch_remote(), 1);
+        f.retry_failed_previews();
+        let epoch = f.failures.lock().unwrap().epoch;
+        // Model a newer typed evaluator failure while the old transport completion is held.
+        // Current scheduler still prevents concurrent same-key dispatch; this deliberately
+        // exercises the publication seam needed by typed/native callers and PR115 leases.
+        f.worker().failed(key, true, epoch, PreviewFailure::new(FailureKind::Content, "new generation error"));
+        let done = held.0.lock().unwrap().take().unwrap();
+        done(Ok(RemoteFrame { width: 1, height: 1, rgba: vec![0, 0, 0, 255], ms: 1.0 }));
+        assert_eq!(f.failure(&key).unwrap().message(), "new generation error");
+        assert!(!f.is_cached(&key), "late pre-recovery success is not published");
+        assert_eq!(f.remote_busy(), 0);
+        assert_eq!(f.inflight(), 0);
+    }
+    #[test]
+    fn actual_input_limit_accepts_boundary_and_rejects_cached_frame_after_decrease() {
+        struct Boundary;
+        impl RemoteFrames for Boundary {
+            fn slots(&self) -> usize {
+                1
+            }
+            fn start(&self, _: RemoteJob, done: RemoteDone) {
+                done(Ok(RemoteFrame { width: 8, height: 1, rgba: vec![40; 32], ms: 1.0 }));
+            }
+        }
+        let (mut f, src, cid, key, _) = fixture();
+        let ctx = egui::Context::default();
+        ctx.input_mut(|i| i.max_texture_side = 8);
+        f.set_context(&ctx);
+        f.set_remote(Some(Arc::new(Boundary)));
+        f.request_urgent(&src, key, cid, Tick::ZERO, RenderOpts::default());
+        assert_eq!(f.dispatch_remote(), 1);
+        assert!(f.get(&key).is_some());
+        assert_eq!(f.remote_busy(), 0);
+        ctx.input_mut(|i| i.max_texture_side = 7);
+        f.set_context(&ctx);
+        assert!(f.get(&key).is_none(), "same key is revalidated against the live presentation limit");
+        assert!(!f.is_cached(&key));
+        assert_eq!(f.failure(&key).unwrap().kind, FailureKind::Retryable);
+        ctx.input_mut(|i| i.max_texture_side = 8);
+        f.set_context(&ctx);
+        assert!(f.failure(&key).is_none(), "device limit change releases backoff without a content edit");
+        f.request_urgent(&src, key, cid, Tick::ZERO, RenderOpts::default());
+        assert_eq!(f.dispatch_remote(), 1);
+        assert!(f.get(&key).is_some());
+    }
+    #[test]
+    fn invalid_or_over_budget_remote_pixels_release_once_without_publication() {
+        struct Bad {
+            size: [u32; 2],
+            bytes: Vec<u8>,
+            calls: AtomicUsize,
+        }
+        impl RemoteFrames for Bad {
+            fn slots(&self) -> usize {
+                1
+            }
+            fn start(&self, _: RemoteJob, done: RemoteDone) {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                done(Ok(RemoteFrame { width: self.size[0], height: self.size[1], rgba: self.bytes.clone(), ms: 1.0 }));
+            }
+        }
+        for (size, bytes, budget) in [([u32::MAX; 2], vec![], 16), ([2, 2], vec![0; 3], 16), ([2, 2], vec![0; 16], 8), ([9, 1], vec![0; 36], 64)] {
+            let (mut f, src, cid, key, _) = fixture();
+            f.set_budget(budget);
+            let ctx = egui::Context::default();
+            // No font frame: this exercises actual input state without a tiny font atlas.
+            ctx.input_mut(|i| i.max_texture_side = 8);
+            f.set_context(&ctx);
+            let bad = Arc::new(Bad { size, bytes, calls: AtomicUsize::new(0) });
+            f.set_remote(Some(bad.clone()));
+            f.request_urgent(&src, key, cid, Tick::ZERO, RenderOpts::default());
+            assert_eq!(f.dispatch_remote(), 1);
+            assert!(!f.is_cached(&key));
+            assert_eq!(f.failure(&key).unwrap().kind, FailureKind::Retryable);
+            assert_eq!(f.inflight(), 0);
+            assert_eq!(f.remote_busy(), 0);
+            assert!(!f.urgent_pending());
+            assert_eq!(bad.calls.load(Ordering::SeqCst), 1);
+            f.retry_failed_previews();
+            assert!(f.failure(&key).is_none(), "explicit retry releases failure state");
+            if size == [9, 1] {
+                ctx.input_mut(|i| i.max_texture_side = 16);
+                f.set_context(&ctx);
+                f.request_urgent(&src, key, cid, Tick::ZERO, RenderOpts::default());
+                assert_eq!(f.dispatch_remote(), 1);
+                assert!(f.is_cached(&key), "live limit recovery admits the formerly rejected pixels");
+                assert!(f.failure(&key).is_none());
+                assert_eq!(f.remote_busy(), 0);
+                assert_eq!(f.inflight(), 0);
+            }
+        }
     }
 }
