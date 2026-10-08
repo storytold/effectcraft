@@ -1,5 +1,5 @@
-//! Modal dialogs: About (with community links), New Composition / Composition Settings, Solid
-//! Settings and the command palette (Camera/Light Settings live in `dialogs_3d`).
+//! Modal dialogs: About (community links, Contributors and Models credits), New Composition /
+//! Composition Settings, Solid Settings and the command palette (Camera/Light Settings live in `dialogs_3d`).
 
 use effectcraft_engine::project::{ItemId, ItemKind, LayerId, LayerSource};
 use egui::{Align2, Color32, Rect, Sense, pos2, vec2};
@@ -194,67 +194,49 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context) {
     }
 }
 
+/// About tabs: About · Contributors · Models.
+const ABOUT_TABS: [(&str, &str); 3] = [("About", "about"), ("Contributors", "contributors"), ("Models", "models")];
+/// Height of the Contributors / Models tab bodies (they scroll inside it).
+const CREDITS_HEIGHT: f32 = 380.0;
+
 fn about(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     let mut close = false;
     let mut cmd: Option<&str> = None;
-    modal(ctx, "About EffectCraft", vec2(520.0, 400.0), t, |ui| {
-        let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 96.0), Sense::hover());
-        let p = ui.painter();
-        p.rect_filled(r, 10.0, Color32::from_rgb(0x1b, 0x22, 0x3c));
-        crate::header::paint_logo(p, Rect::from_min_size(r.min + vec2(18.0, 20.0), vec2(56.0, 56.0)));
-        p.text(r.min + vec2(90.0, 34.0), Align2::LEFT_CENTER, "EffectCraft", Tokens::semibold(24.0), Color32::WHITE);
-        p.text(
-            r.min + vec2(90.0, 62.0),
-            Align2::LEFT_CENTER,
-            format!("Version {}  •  Motion graphics & VFX in pure Rust", env!("CARGO_PKG_VERSION")),
-            Tokens::ui(12.0),
-            t.text_dim,
-        );
-        ui.add_space(12.0);
-        ui.label("A clean-room, open-source compositor for motion graphics and visual effects: native on macOS, Windows and Linux, and in the browser. Part of the ArtCraft family of creative apps.");
-        ui.add_space(14.0);
-        let links: [(Icon, &str, &str, &str); 4] = [
-            (Icon::Chat, "Join the ArtCraft Discord", effectcraft_engine::links::DISCORD, "help.discord"),
-            (Icon::Globe, "ArtCraft website", effectcraft_engine::links::WEBSITE, "help.website"),
-            (Icon::Sparkle, "EffectCraft home page", effectcraft_engine::links::APP_PAGE, "help.appPage"),
-            (Icon::Code, "Source code on GitHub", effectcraft_engine::links::GITHUB, "help.github"),
-        ];
-        for (icon, label, url, c) in links {
-            let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
-            let p = ui.painter();
-            let discord = c == "help.discord";
-            p.rect_filled(
-                r,
-                6.0,
-                if discord {
-                    Color32::from_rgb(0x58, 0x65, 0xf2)
-                } else if resp.hovered() {
-                    t.hover
-                } else {
-                    t.field_bg
-                },
-            );
-            let foreground = if discord { Color32::WHITE } else { t.text };
-            icons::paint(p, Rect::from_center_size(pos2(r.min.x + 18.0, r.center().y), vec2(15.0, 15.0)), icon, foreground);
-            p.text(pos2(r.min.x + 36.0, r.center().y), Align2::LEFT_CENTER, label, Tokens::medium(12.5), foreground);
-            p.text(
-                pos2(r.max.x - 12.0, r.center().y),
-                Align2::RIGHT_CENTER,
-                url,
-                Tokens::ui(11.0),
-                if discord { Color32::from_white_alpha(200) } else { t.text_dim },
-            );
-            app.auto.add(&format!("about.{c}"), r, label);
-            if resp.clicked() {
-                cmd = Some(c);
+    let tab_id = egui::Id::new("about_tab");
+    modal(ctx, "About EffectCraft", vec2(680.0, 520.0), t, |ui| {
+        let mut tab = ui.data_mut(|d| d.get_temp::<usize>(tab_id)).unwrap_or(0);
+        ui.horizontal(|ui| {
+            for (i, (label, id)) in ABOUT_TABS.iter().enumerate() {
+                let r = ui.selectable_label(tab == i, *label);
+                app.auto.add(&format!("about.tab.{id}"), r.rect, label);
+                if r.clicked() {
+                    tab = i;
+                }
             }
-            ui.add_space(4.0);
+        });
+        ui.data_mut(|d| d.insert_temp(tab_id, tab));
+        ui.separator();
+        match tab {
+            1 | 2 => {
+                let h = CREDITS_HEIGHT.min(ui.available_height().max(120.0));
+                ui.allocate_ui(vec2(ui.available_width(), h), |ui| {
+                    ui.set_max_height(h);
+                    if tab == 1 {
+                        crate::credits::contributors_ui(ui, &mut app.auto);
+                    } else {
+                        crate::credits::models_ui(ui);
+                    }
+                });
+            }
+            _ => about_main(app, ui, t, &mut cmd),
         }
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("MIT OR Apache-2.0 • Fonts: Inter, JetBrains Mono (OFL)").small().color(t.text_faint));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Close").clicked() {
+                let r = ui.button("Close");
+                app.auto.add("about.close", r.rect, "Close");
+                if r.clicked() {
                     close = true;
                 }
             });
@@ -265,6 +247,62 @@ fn about(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     }
     if close {
         app.dialog = None;
+    }
+}
+
+/// The About tab: logo, version, blurb and community links.
+fn about_main(app: &mut EffectcraftApp, ui: &mut egui::Ui, t: &Tokens, cmd: &mut Option<&'static str>) {
+    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 96.0), Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(r, 10.0, Color32::from_rgb(0x1b, 0x22, 0x3c));
+    crate::header::paint_logo(p, Rect::from_min_size(r.min + vec2(18.0, 20.0), vec2(56.0, 56.0)));
+    p.text(r.min + vec2(90.0, 34.0), Align2::LEFT_CENTER, "EffectCraft", Tokens::semibold(24.0), Color32::WHITE);
+    p.text(
+        r.min + vec2(90.0, 62.0),
+        Align2::LEFT_CENTER,
+        format!("Version {}  •  Motion graphics & VFX in pure Rust", env!("CARGO_PKG_VERSION")),
+        Tokens::ui(12.0),
+        t.text_dim,
+    );
+    ui.add_space(12.0);
+    ui.label("A clean-room, open-source compositor for motion graphics and visual effects: native on macOS, Windows and Linux, and in the browser. Part of the ArtCraft family of creative apps.");
+    ui.add_space(14.0);
+    let links: [(Icon, &str, &str, &'static str); 4] = [
+        (Icon::Chat, "Join the ArtCraft Discord", effectcraft_engine::links::DISCORD, "help.discord"),
+        (Icon::Globe, "ArtCraft website", effectcraft_engine::links::WEBSITE, "help.website"),
+        (Icon::Sparkle, "EffectCraft home page", effectcraft_engine::links::APP_PAGE, "help.appPage"),
+        (Icon::Code, "Source code on GitHub", effectcraft_engine::links::GITHUB, "help.github"),
+    ];
+    for (icon, label, url, c) in links {
+        let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
+        let p = ui.painter();
+        let discord = c == "help.discord";
+        p.rect_filled(
+            r,
+            6.0,
+            if discord {
+                Color32::from_rgb(0x58, 0x65, 0xf2)
+            } else if resp.hovered() {
+                t.hover
+            } else {
+                t.field_bg
+            },
+        );
+        let foreground = if discord { Color32::WHITE } else { t.text };
+        icons::paint(p, Rect::from_center_size(pos2(r.min.x + 18.0, r.center().y), vec2(15.0, 15.0)), icon, foreground);
+        p.text(pos2(r.min.x + 36.0, r.center().y), Align2::LEFT_CENTER, label, Tokens::medium(12.5), foreground);
+        p.text(
+            pos2(r.max.x - 12.0, r.center().y),
+            Align2::RIGHT_CENTER,
+            url,
+            Tokens::ui(11.0),
+            if discord { Color32::from_white_alpha(200) } else { t.text_dim },
+        );
+        app.auto.add(&format!("about.{c}"), r, label);
+        if resp.clicked() {
+            *cmd = Some(c);
+        }
+        ui.add_space(4.0);
     }
 }
 

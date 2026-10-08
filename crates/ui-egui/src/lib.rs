@@ -11,6 +11,7 @@ pub mod audio;
 pub mod automation;
 pub mod bench;
 pub mod control;
+pub mod credits;
 pub mod dock;
 pub mod dock_ui;
 pub mod frames;

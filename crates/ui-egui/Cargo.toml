@@ -34,3 +34,6 @@ image = { workspace = true }
 egui_kittest = { workspace = true, features = ["eframe", "wgpu"] }
 pollster = "0.4"
 effectcraft-host = { workspace = true }
+
+[build-dependencies]
+serde_json = { workspace = true }

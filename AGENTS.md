@@ -111,6 +111,12 @@ Shared real-file test corpora (Photoshop-authored PSDs, etc.) live in
 Never commit large binary fixtures to this repo; fetch them pinned by commit and sha256-verified,
 as PhotoCraft does with `cargo xtask corpus`.
 
+**Contributor credits are compiled in.** About ▸ Contributors/Models come from
+`contributors/contributors.json`, baked into the binary by `crates/ui-egui/build.rs` (never read at run
+time). Regenerate it with `python3 ../craftrules/scripts/contributors.py .` and commit it; never
+hand-edit it. GitHub usernames only; display and real names only with consent recorded in craftrules
+`contributors/people.toml`. See [docs/contributors.md](docs/contributors.md).
+
 ## See also
 
 - [docs/gaps.md](docs/gaps.md): where EffectCraft falls short of After Effects and the prioritised workstreams (G1–G9); read it before choosing work
@@ -119,4 +125,5 @@ as PhotoCraft does with `cargo xtask corpus`.
 - [docs/testing.md](docs/testing.md): oracle tests, criteria, benchmarks
 - [docs/agents.md](docs/agents.md): driving EffectCraft over MCP / the control channel, and the agent work loop
 - [docs/control-protocol.md](docs/control-protocol.md): control-channel method reference
+- [docs/contributors.md](docs/contributors.md): the About window's contributor and model credits
 - [ATTRIBUTION.md](ATTRIBUTION.md): asset index
