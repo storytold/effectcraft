@@ -828,7 +828,11 @@ pub fn layer(project: &mut Project, comp: &Comp, name: &str, source: LayerSource
     } else {
         crate::AutoOrient::Off
     };
-    let switches = Switches { three_d: source.is_model(), ..Switches::default() };
+    let switches = Switches {
+        three_d: source.is_model(),
+        collapse: matches!(source, LayerSource::Text | LayerSource::Shape),
+        ..Switches::default()
+    };
     Layer {
         id,
         name: comp.unique_layer_name(name),

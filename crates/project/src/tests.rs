@@ -121,3 +121,15 @@ fn project_files_name_their_version_and_always_read_back() {
     assert!(crate::is_newer_version("0.2.0", "0.1.9") && crate::is_newer_version("1.0.0-rc.1", "0.9.9"));
     assert!(!crate::is_newer_version("0.1.1", "0.1.1") && !crate::is_newer_version("0.1.0", "0.1.1"));
 }
+
+#[test]
+fn shape_and_text_layers_default_to_continuous_rasterization() {
+    let (mut p, cid) = project_with_layer();
+    let comp = p.comp(cid).unwrap().clone();
+    let shape = build::layer(&mut p, &comp, "Shape 1", LayerSource::Shape, (100, 100), None);
+    assert!(shape.switches.collapse, "shape layers default to continuous rasterization");
+    let text = build::layer(&mut p, &comp, "Text 1", LayerSource::Text, (100, 100), None);
+    assert!(text.switches.collapse, "text layers default to continuous rasterization");
+    let solid = build::layer(&mut p, &comp, "Solid 1", LayerSource::Null, (100, 100), None);
+    assert!(!solid.switches.collapse, "other layers default to uncollapsed");
+}

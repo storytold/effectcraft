@@ -19,6 +19,7 @@ pub(crate) struct SelKey {
     pub v: f64,
     pub dim: usize,
     pub editable: bool,
+    pub constrained: bool,
 }
 
 /// Transform box geometry (data space): [t0, v0, t1, v1].
@@ -169,10 +170,13 @@ pub(crate) fn transform_box(
                 params["valueAnchor"] = json!(st.anchor[1]);
             }
         }
-        let mut dims: Vec<usize> = keys.iter().map(|k| k.dim).collect();
-        dims.sort_unstable();
-        dims.dedup();
-        params["dims"] = json!(dims);
+        let any_constrained = keys.iter().any(|k| k.constrained);
+        if !any_constrained {
+            let mut dims: Vec<usize> = keys.iter().map(|k| k.dim).collect();
+            dims.sort_unstable();
+            dims.dedup();
+            params["dims"] = json!(dims);
+        }
         if params.as_object().is_some_and(|m| m.len() > 2) {
             actions.push(("keys.transform".into(), params));
         }
@@ -239,6 +243,11 @@ mod snap_tests {
         // 1.53 s is 3 points from the marker: snaps; 1.6 s (10 points) doesn't.
         assert_eq!(snap_px(tm, 1.53, &cands, 6.0), 1.5);
         assert_eq!(snap_px(tm, 1.6, &[1.5], 6.0), 1.6);
+        let mut app = EffectcraftApp::new(s);
+        app.ui.timeline.graph_snap = true;
+        assert_eq!(snap_time(&app, tm, 1.53, &[]), 1.5);
+        app.ui.timeline.graph_snap = false;
+        assert_eq!(snap_time(&app, tm, 1.53, &[]), 1.53);
     }
 }
 

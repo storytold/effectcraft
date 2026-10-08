@@ -60,6 +60,8 @@ struct Curve<'a> {
     keys: Vec<KeyPt>,
     /// Values editable in the value graph (not spatial / combined dimensions).
     editable: bool,
+    /// Whether dimensions are constrained together (Scale / Shape Size).
+    constrained: bool,
 }
 
 /// Properties shown: the selected ones, or every animated property of the selected layers.
@@ -110,7 +112,8 @@ fn curves<'a>(app: &EffectcraftApp, comp: &'a Comp, ectx: &EvalCtx, tm: TMap, pl
         let Some(l) = comp.layer(lid) else { continue };
         let Some(pr) = l.props.find(uid) else { continue };
         let spatial = pr.spatial && matches!(pr.value, Value::Vec2(_) | Value::Vec3(_));
-        let dims = if speed && spatial { 1 } else { shown_dims(l, pr) };
+        let constrained = super::timeline::is_prop_constrained(app, l, pr);
+        let dims = if (speed && spatial) || constrained { 1 } else { shown_dims(l, pr) };
         for d in 0..dims {
             let color = if dims > 1 { DIM_COLORS[d % 4] } else { PROP_COLORS[pi % PROP_COLORS.len()] };
             let mut pts = Vec::with_capacity(n);
@@ -156,7 +159,7 @@ fn curves<'a>(app: &EffectcraftApp, comp: &'a Comp, ectx: &EvalCtx, tm: TMap, pl
                 };
                 keys.push(KeyPt { idx: i, time: k.time, t: kt, v, sel: ks, handles });
             }
-            out.push(Curve { layer: l, prop: pr, dim: d, color, pts, keys, editable: !spatial });
+            out.push(Curve { layer: l, prop: pr, dim: d, color, pts, keys, editable: !spatial, constrained });
         }
     }
     out
@@ -282,7 +285,7 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
     // Transform box around several selected keys (inside below the keys, handles above).
     let sel_keys: Vec<super::graph_tools::SelKey> = cs
         .iter()
-        .flat_map(|c| c.keys.iter().filter(|k| k.sel).map(move |k| super::graph_tools::SelKey { t: k.t, v: k.v, dim: c.dim, editable: c.editable }))
+        .flat_map(|c| c.keys.iter().filter(|k| k.sel).map(move |k| super::graph_tools::SelKey { t: k.t, v: k.v, dim: c.dim, editable: c.editable, constrained: c.constrained }))
         .collect();
     let all_key_times: Vec<(u64, usize, f64)> = cs.iter().flat_map(|c| c.keys.iter().map(move |k| (c.prop.uid, k.idx, k.t))).collect();
     super::graph_tools::transform_box(app, ui, &pc, &sel_keys, tm, &ymap, &vmap, speed, false, actions);
@@ -313,7 +316,11 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
                     let mut dt = (tm.t(pt.x) - k.t) * if h.out { 1.0 } else { -1.0 };
                     dt = dt.max(h.dur * 0.001);
                     let influence = (dt / h.dur.max(1e-9) * 100.0).clamp(0.1, 100.0);
-                    let sp = if speed {
+                    let shift = ui.input(|i| i.modifiers.shift);
+                    let sp = if shift {
+                        // Holding Shift snaps the handle horizontally so it is level with the keyframe (slope = 0).
+                        0.0
+                    } else if speed {
                         let mag = vmap(pt.y).max(0.0);
                         if h.speed < 0.0 { -mag } else { mag }
                     } else {
@@ -321,7 +328,7 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
                         dv / dt * if h.out { 1.0 } else { -1.0 }
                     };
                     let mut params = json!({"layer": lid.0, "prop": uid, "time": k.time.seconds(), "side": side, "speed": sp, "influence": influence, "merge": format!("ghandle-{uid}-{}", k.idx)});
-                    if c.editable {
+                    if c.editable && !c.constrained {
                         params["dim"] = json!(d);
                     }
                     actions.push(("keys.setEase".into(), params));
@@ -375,7 +382,9 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
                 let mut params = json!({"timeOffset": t - g.t, "merge": "graph-key", "fromStart": true});
                 if value_ok && !speed && c.editable {
                     params["valueOffset"] = json!(vmap(pt.y) - vmap(g.press.y));
-                    params["dim"] = json!(d);
+                    if !c.constrained {
+                        params["dim"] = json!(d);
+                    }
                 }
                 actions.push(("keys.transform".into(), params));
             }
