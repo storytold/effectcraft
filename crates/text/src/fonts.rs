@@ -6,8 +6,12 @@
 //! bold/italic needed when the family lacks that style; a full name (`Yu Gothic Bold`) or
 //! PostScript name (`YuGothic-Bold`, how After Effects scripts name fonts) is accepted too.
 //! Unknown families fall back to Inter. [`fallback_for`] finds a face for a character the chosen
-//! face lacks: bundled faces first, then the system's usual family for the character's script
-//! (CJK), then any installed face that covers it.
+//! face lacks: bundled faces first, then (for Japanese) the craft-fonts faces, then the system's
+//! usual family for the character's script (CJK), then any installed face that covers it.
+//!
+//! [`CRAFT_FONTS`] are the fonts from the optional craft-fonts build input (`CRAFT_FONTS_DIR`, see
+//! `crates/text/build.rs`); the `Jpan` ones are registered after the bundled faces (origin
+//! `"craft-fonts"`). Empty in a build without it, where Japanese falls back to system fonts only.
 
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock, RwLock};
@@ -25,6 +29,30 @@ pub static INTER_BOLD: &[u8] = include_bytes!("../../../assets/fonts/Inter-Bold.
 pub static INTER_ITALIC: &[u8] = include_bytes!("../../../assets/fonts/Inter-Italic.ttf");
 pub static JETBRAINS_MONO_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/JetBrainsMono-Regular.ttf");
 pub static NOTO_SERIF_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/NotoSerif-Regular.ttf");
+
+/// A font from the optional craft-fonts build input (empty unless built with `CRAFT_FONTS_DIR`).
+pub struct CraftFont {
+    pub family: &'static str,
+    pub style: &'static str,
+    /// ISO 15924 scripts the font is for, e.g. `"Jpan"`.
+    pub scripts: &'static [&'static str],
+    pub bytes: &'static [u8],
+}
+
+include!(concat!(env!("OUT_DIR"), "/craft_fonts.rs"));
+
+/// The craft-fonts faces for Japanese (`Jpan`), BIZ UDPGothic (the UI face) first, then the
+/// Mincho families, each in manifest order. Empty in a build without craft-fonts.
+pub fn craft_fonts_jpan() -> Vec<&'static CraftFont> {
+    let mut v: Vec<&'static CraftFont> = CRAFT_FONTS.iter().filter(|f| f.scripts.contains(&"Jpan")).collect();
+    v.sort_by_key(|f| !f.family.eq_ignore_ascii_case(CRAFT_UI_FAMILY));
+    v
+}
+
+/// The craft-fonts family preferred for UI (and sans-serif) Japanese text.
+pub const CRAFT_UI_FAMILY: &str = "BIZ UDPGothic";
+/// The craft-fonts families preferred for serif (Mincho) Japanese text, in order.
+const CRAFT_SERIF_FAMILIES: &[&str] = &["Shippori Mincho", "BIZ UDMincho"];
 
 /// The default family for new text.
 pub const DEFAULT_FAMILY: &str = "Inter";
@@ -270,6 +298,11 @@ fn db() -> &'static RwLock<Db> {
         for b in [INTER_REGULAR, INTER_MEDIUM, INTER_SEMIBOLD, INTER_BOLD, INTER_ITALIC, JETBRAINS_MONO_REGULAR, NOTO_SERIF_REGULAR] {
             for n in read_faces_bytes(b) {
                 push(&mut db, info_from(n, FaceData::Static(b), "bundled"));
+            }
+        }
+        for cf in craft_fonts_jpan() {
+            for n in read_faces_bytes(cf.bytes) {
+                push(&mut db, info_from(n, FaceData::Static(cf.bytes), "craft-fonts"));
             }
         }
         RwLock::new(db)
@@ -597,8 +630,8 @@ fn fallback_cache() -> &'static RwLock<std::collections::HashMap<(u32, FaceId), 
     CACHE.get_or_init(Default::default)
 }
 
-/// A face that covers `c`, preferring `prefer`. Bundled faces and faces already loaded are tried
-/// first (cheap); then, for CJK characters, the platform's usual family for that language, in the
+/// A face that covers `c`, preferring `prefer`. Bundled faces, then for Japanese the craft-fonts
+/// faces, then faces already loaded are tried first (cheap); then, for CJK characters, the platform's usual family for that language, in the
 /// preferred face's style; then any installed face that covers the character. `prefer` when
 /// nothing does (the glyph renders as the missing-glyph box).
 pub fn fallback_for(c: char, prefer: FaceId) -> FaceId {
@@ -612,6 +645,11 @@ pub fn fallback_for(c: char, prefer: FaceId) -> FaceId {
         if f.has_char(c) {
             return f.id;
         }
+    }
+    // Japanese: the craft-fonts faces (when built with them) before any system font, so the text
+    // looks the same on every platform and the web build has Japanese at all.
+    if let Some(id) = craft_fallback(c, &p.info) {
+        return id;
     }
     for f in faces.iter().filter(|f| f.info.origin != "bundled" && f.bytes.get().is_some()) {
         if f.has_char(c) {
@@ -632,6 +670,45 @@ pub fn fallback_for(c: char, prefer: FaceId) -> FaceId {
     let found = system_fallback(c, &p.info.style);
     fallback_cache().write().unwrap_or_else(|e| e.into_inner()).insert(key, found);
     found.unwrap_or(prefer)
+}
+
+/// Whether a face is a serif design (Mincho / Ming / Song for CJK), from its family name.
+fn is_serif(family: &str) -> bool {
+    let f = family.to_ascii_lowercase();
+    (f.contains("serif") && !f.contains("sans")) || ["mincho", "ming", "song", "times", "georgia", "garamond"].iter().any(|k| f.contains(k))
+}
+
+/// A craft-fonts face for a Japanese character: Mincho families for serif text, BIZ UDPGothic
+/// otherwise, in the preferred face's style. Han ideographs only when the locale puts Japanese
+/// first (a Chinese or Korean locale keeps its own system families). `None` without craft-fonts.
+fn craft_fallback(c: char, prefer: &FaceInfo) -> Option<FaceId> {
+    match script_of(c) {
+        FallbackScript::Japanese => {}
+        FallbackScript::Han if han_order()[0] == FallbackScript::Japanese => {}
+        _ => return None,
+    }
+    let faces = all_faces();
+    let craft: Vec<&Arc<Face>> = faces.iter().filter(|f| f.info.origin == "craft-fonts").collect();
+    if craft.is_empty() {
+        return None;
+    }
+    let mut order: Vec<&str> = if is_serif(&prefer.family) { CRAFT_SERIF_FAMILIES.to_vec() } else { vec![CRAFT_UI_FAMILY] };
+    for f in std::iter::once(CRAFT_UI_FAMILY).chain(CRAFT_SERIF_FAMILIES.iter().copied()) {
+        if !order.contains(&f) {
+            order.push(f);
+        }
+    }
+    let (w, it) = style_wants(&prefer.style);
+    for fam in order {
+        let best = craft
+            .iter()
+            .filter(|f| f.info.family.eq_ignore_ascii_case(fam) && f.has_char(c))
+            .min_by_key(|f| (if f.info.italic == it { 0 } else { 1000 }) + (f.info.weight as i32 - w as i32).unsigned_abs());
+        if let Some(f) = best {
+            return Some(f.id);
+        }
+    }
+    craft.iter().find(|f| f.has_char(c)).map(|f| f.id)
 }
 
 /// The script-aware then exhaustive search behind [`fallback_for`].
@@ -778,6 +855,51 @@ mod tests {
         assert!(!has_bold || w >= 600, "{} {}", f.info.family, f.info.style);
         // Cached: the second call is a lookup.
         assert_eq!(fallback_for('水', inter), f.id);
+    }
+
+    /// With craft-fonts (`CRAFT_FONTS_DIR`), Japanese text falls back to its faces before any
+    /// system font: BIZ UDPGothic for sans text, a Mincho for serif text, with real glyphs.
+    #[test]
+    fn craft_fonts_render_japanese() {
+        if craft_fonts_jpan().is_empty() {
+            eprintln!("built without craft-fonts (CRAFT_FONTS_DIR unset); skipping");
+            return;
+        }
+        let jp_first = han_order()[0] == FallbackScript::Japanese;
+        let inter = resolve("Inter", "Regular").face;
+        let serif = resolve("Noto Serif", "Regular").face;
+        for c in "日本語の文字".chars().filter(|c| jp_first || script_of(*c) == FallbackScript::Japanese) {
+            let sans = face(fallback_for(c, inter));
+            assert_eq!(sans.info.origin, "craft-fonts", "{c} → {}", sans.info.family);
+            assert!(sans.info.family.eq_ignore_ascii_case(CRAFT_UI_FAMILY), "{c} → {}", sans.info.family);
+            assert!(sans.has_char(c));
+            let m = face(fallback_for(c, serif));
+            assert!(CRAFT_SERIF_FAMILIES.iter().any(|f| m.info.family.eq_ignore_ascii_case(f)), "{c} → {}", m.info.family);
+        }
+        // The bold cut for bold text.
+        let bold = face(fallback_for('あ', resolve("Inter", "Bold").face));
+        assert!(bold.info.family.eq_ignore_ascii_case(CRAFT_UI_FAMILY) && bold.info.weight >= 600, "{} {}", bold.info.family, bold.info.style);
+        // Layout: no missing glyphs (glyph id 0) in the shaped text.
+        let l = crate::layout_text("日本語の文字", &crate::TextStyle { family: "Inter".into(), size: 30.0, ..Default::default() }, &Default::default());
+        assert!(!l.glyphs.is_empty() && l.glyphs.iter().all(|g| g.id != 0), "{:?}", l.glyphs.iter().map(|g| g.id).collect::<Vec<_>>());
+        // The families can also be chosen directly.
+        assert!(!resolve(CRAFT_UI_FAMILY, "Bold").missing);
+    }
+
+    /// Without craft-fonts nothing changes: no extra faces, and Japanese goes straight to the
+    /// system search.
+    #[test]
+    fn works_without_craft_fonts() {
+        let craft = all_faces().iter().filter(|f| f.info.origin == "craft-fonts").count();
+        let n: usize = craft_fonts_jpan().iter().map(|f| read_faces_bytes(f.bytes).len()).sum();
+        assert_eq!(craft, n);
+        let inter = face(resolve("Inter", "Regular").face);
+        if CRAFT_FONTS.is_empty() {
+            assert_eq!(craft, 0);
+            assert_eq!(craft_fallback('あ', &inter.info), None);
+        }
+        assert_eq!(craft_fallback('A', &inter.info), None, "Latin never uses craft-fonts");
+        assert_eq!(fallback_for('A', inter.id), inter.id);
     }
 
     #[test]

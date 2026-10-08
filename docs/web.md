@@ -64,7 +64,7 @@ device of their own), `?nosw` (don't register the service worker).
 | export writes (`effectcraft-export`) | the job's `sink` (`effectcraft_host::FileExporter { sink }`): files land in the table and download after the render; several files (an image sequence) download as one stored `.zip` |
 | rfd file dialogs | `<input type=file>` for File ▸ Open / Import; drop files anywhere on the page (`.ecproj` opens, everything else imports); "Save As" / "Output To" pick a download name |
 | Media Browser on the file system | browser storage and folders opened with the File System Access API (below) |
-| system fonts | not scanned; the bundled fonts (Inter, Noto Serif, JetBrains Mono) are always there |
+| system fonts | not scanned; the bundled fonts (Inter, Noto Serif, JetBrains Mono) are always there, plus BIZ UDPGothic Regular for Japanese (UI and text) when built with craft-fonts (`CRAFT_FONTS_DIR`, AGENTS.md; release builds do; +4.5 MB of `.wasm`) |
 | TCP control channel / MCP | `window.effectcraft` (below) |
 | cpal audio output | Web Audio (below) |
 | GPU compositor on the desktop's wgpu device | the same compositor on eframe's WebGPU device, and GPU effects on each frame worker's own WebGPU device (below) |

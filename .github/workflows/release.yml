@@ -30,6 +30,11 @@ env:
   RUST_BACKTRACE: 1
   EFFECTCRAFT_BUILD_SHA: ${{ github.sha }}
   INPUT_VERSION: ${{ inputs.version }}
+  # Official builds embed the shared fonts from storytold/craft-fonts (checked out at a pinned
+  # commit in every build job; see craftrules standards/fonts.md). REQUIRED makes a missing or
+  # broken checkout a build error instead of a silent build without the fonts.
+  CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
+  CRAFT_FONTS_REQUIRED: "1"
 
 jobs:
   version:
@@ -70,6 +75,12 @@ jobs:
       EFFECTCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
     steps:
       - uses: actions/checkout@v4
+      - name: Check out craft-fonts (pinned)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: storytold/craft-fonts
+          ref: abb83316d96aa59c1cf64784289e378fe9fa5695
+          path: craft-fonts
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin, x86_64-apple-darwin
@@ -120,6 +131,12 @@ jobs:
       EFFECTCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
     steps:
       - uses: actions/checkout@v4
+      - name: Check out craft-fonts (pinned)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: storytold/craft-fonts
+          ref: abb83316d96aa59c1cf64784289e378fe9fa5695
+          path: craft-fonts
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -170,6 +187,12 @@ jobs:
       NFPM_VERSION: 2.47.0
     steps:
       - uses: actions/checkout@v4
+      - name: Check out craft-fonts (pinned)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: storytold/craft-fonts
+          ref: abb83316d96aa59c1cf64784289e378fe9fa5695
+          path: craft-fonts
       - name: Install build and packaging tools
         run: |
           sudo apt-get update
@@ -215,6 +238,12 @@ jobs:
       WASM_BINDGEN_VERSION: 0.2.129
     steps:
       - uses: actions/checkout@v4
+      - name: Check out craft-fonts (pinned)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: storytold/craft-fonts
+          ref: abb83316d96aa59c1cf64784289e378fe9fa5695
+          path: craft-fonts
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown

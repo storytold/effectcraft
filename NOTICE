@@ -15,3 +15,7 @@ list (author, source, license) is in ATTRIBUTION.md.
 Inter (assets/fonts/Inter-*.ttf) — SIL Open Font License 1.1. See assets/fonts/OFL-Inter.txt.
 Noto Serif (assets/fonts/NotoSerif-Regular.ttf) — SIL Open Font License 1.1. See assets/fonts/OFL-NotoSerif.txt.
 JetBrains Mono (assets/fonts/JetBrainsMono-Regular.ttf) — SIL Open Font License 1.1. See assets/fonts/OFL-JetBrainsMono.txt.
+
+Builds made with craft-fonts (CRAFT_FONTS_DIR; all official releases) also embed the fonts listed in
+https://github.com/storytold/craft-fonts/blob/main/ATTRIBUTION.md, under the SIL Open Font License 1.1
+(their licence texts ship with the packages as OFL-<family>.txt).

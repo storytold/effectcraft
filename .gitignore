@@ -5,3 +5,5 @@ target/
 /log
 .DS_Store
 .claude/worktrees/
+# The optional craft-fonts build input, checked out here by CI (AGENTS.md, "Fonts")
+/craft-fonts/

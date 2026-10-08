@@ -70,6 +70,16 @@ Screenshots of EffectCraft itself, rendered headlessly, showing only procedurall
   (sidecars `.attribution`).
 - Example effect plug-in: `examples/plugins/posterize-bands` (plug-in API v1, WebAssembly).
 
+## Fonts from craft-fonts (optional build input, not files in this repo)
+
+Builds made with `CRAFT_FONTS_DIR` (all official releases; see [AGENTS.md](AGENTS.md)) embed the
+Japanese fonts of [storytold/craft-fonts](https://github.com/storytold/craft-fonts): BIZ UDPGothic
+(Regular, Bold), Shippori Mincho and BIZ UDMincho (Regular) on native platforms, BIZ UDPGothic Regular
+only on the web. They are not in this repository. Each is under the SIL Open Font License 1.1
+(OFL-1.1); authors, sources and pinned upstream commits are in
+[craft-fonts' ATTRIBUTION.md](https://github.com/storytold/craft-fonts/blob/main/ATTRIBUTION.md), and
+release packages carry their licences as `OFL-<family>.txt`.
+
 ## Trained models (optional downloads, not bundled)
 
 The repository and the installers contain no model weights. These models are downloaded only when

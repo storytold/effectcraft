@@ -13,12 +13,23 @@ cargo test --workspace
 cargo xtask ci                           # what every commit must pass
 ```
 
+Optional: build with the shared fonts from [craft-fonts](https://github.com/storytold/craft-fonts)
+(Japanese UI and text fallback; release builds always do), and run their tests:
+
+```sh
+git clone https://github.com/storytold/craft-fonts ../craft-fonts
+CRAFT_FONTS_DIR="$PWD/../craft-fonts" cargo test --workspace
+```
+
 ## Ground rules
 
 - **Clean room.** Work from After Effects' public documentation and its observable behaviour only.
   Never use Adobe artwork, presets or code, and never copy GPL/LGPL/AGPL code.
 - **Every asset is attributed.** Add a `.attribution` sidecar and an [ATTRIBUTION.md](ATTRIBUTION.md)
   row; `cargo xtask assets` checks it.
+- **Fonts live in [craft-fonts](https://github.com/storytold/craft-fonts).** Never commit font
+  files here; add a font there and use it through `CRAFT_FONTS_DIR` (see AGENTS.md and
+  [craftrules `standards/fonts.md`](https://github.com/storytold/craftrules/blob/main/standards/fonts.md)).
 - **Layering.** Nothing below the interface layer depends on UI or OS crates; see
   [docs/architecture.md](docs/architecture.md).
 - **Everything is a command.** New features are engine commands with an id, label, menu path,

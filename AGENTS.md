@@ -83,6 +83,27 @@ reproduce an image (for example, point lists traced from someone else's icon).
    non-open asset is allowed, and this exception never covers third-party marks (Adobe, Discord, GitHub
    and other logos stay out; draw a generic icon instead).
 
+### Fonts live in craft-fonts
+
+Font assets shared by the Crafting Apps live in
+[`storytold/craft-fonts`](https://github.com/storytold/craft-fonts), never in this repo: **don't commit
+font files here** (the small Latin UI fonts already in `assets/fonts/`, Inter, Noto Serif and
+JetBrains Mono, stay). A new font goes into craft-fonts (file, licence, manifest line, attribution).
+EffectCraft uses it as an **optional build input**, never a Cargo dependency:
+
+```sh
+git clone https://github.com/storytold/craft-fonts ../craft-fonts
+CRAFT_FONTS_DIR="$PWD/../craft-fonts" cargo run -p effectcraft
+```
+
+Use an absolute path: `build.rs` runs in `crates/text`, so a relative one resolves from there.
+`crates/text/build.rs` embeds the fonts in its `fonts/manifest.txt` as
+`effectcraft_text::fonts::CRAFT_FONTS` (wasm32: only BIZ UDPGothic Regular, for the download size);
+unset, `CRAFT_FONTS` is empty and the app builds, tests and runs as before. The Japanese faces are the
+UI's last fallback in every egui family and the text engine's Japanese fallback before system fonts.
+Tests that need them skip when `CRAFT_FONTS` is empty. Release builds set `CRAFT_FONTS_DIR` and
+`CRAFT_FONTS_REQUIRED=1`. Standard: [craftrules `standards/fonts.md`](https://github.com/storytold/craftrules/blob/main/standards/fonts.md).
+
 ## 2. Clean-room code
 
 - Never read, disassemble or copy anything inside Adobe application bundles; file names and listings only.
