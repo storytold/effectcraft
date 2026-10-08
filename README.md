@@ -239,15 +239,9 @@ send us right now.
 
 ## Downloads
 
-Every [release](https://github.com/storytold/effectcraft/releases/latest) ships these builds. `<ver>` is the
-version number; `SHA256SUMS.txt` lists a checksum for every file.
+**New to EffectCraft?** Download it from the [EffectCraft page on getartcraft.com](https://getartcraft.com/apps/effectcraft). That's the easiest way to install it.
 
-### macOS
-
-| Build | File | Notes |
-|---|---|---|
-| App, universal (Apple silicon + Intel) | `effectcraft-<ver>-macos-universal.dmg` | Signed and notarized |
-| Command-line tool, universal | `effectcraft-cli-<ver>-macos-universal.zip` | Signed and notarized |
+**Want a specific build or format?** On GitHub, the [latest release](https://github.com/storytold/effectcraft/releases/latest) has every build listed below, and [all releases](https://github.com/storytold/effectcraft/releases) has earlier versions and their notes. `<ver>` in the file names is the version number, and `SHA256SUMS.txt` lists a checksum for every file.
 
 ### Windows
 
@@ -258,6 +252,13 @@ version number; `SHA256SUMS.txt` lists a checksum for every file.
 | x86 (32-bit) | `effectcraft-<ver>-windows-x86.msi` | `effectcraft-<ver>-windows-x86-portable.zip` |
 
 Installers and executables are code-signed.
+
+### macOS
+
+| Build | File | Notes |
+|---|---|---|
+| App, universal (Apple silicon + Intel) | `effectcraft-<ver>-macos-universal.dmg` | Signed and notarized |
+| Command-line tool, universal | `effectcraft-cli-<ver>-macos-universal.zip` | Signed and notarized |
 
 ### Linux
 
