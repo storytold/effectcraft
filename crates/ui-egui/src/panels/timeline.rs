@@ -2161,6 +2161,9 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         }
     }
     ui.set_clip_rect(full_clip);
+    outline_empty.context_menu(|ui| {
+        timeline_empty_context_menu(ui, &mut actions);
+    });
     if outline_empty.clicked() && !ui.input(|i| i.modifiers.shift || i.modifiers.command) {
         actions.push(("layer.select".into(), json!({"layers": []})));
     }
@@ -2224,6 +2227,9 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             actions.push(("layer.select".into(), json!({"layers": []})));
         }
     }
+    empty.context_menu(|ui| {
+        timeline_empty_context_menu(ui, &mut actions);
+    });
     if let (true, Some(origin), Some(cur)) =
         (empty.dragged(), empty.interact_pointer_pos().and_then(|_| ctx.input(|i| i.pointer.press_origin())), empty.interact_pointer_pos())
     {
@@ -2815,6 +2821,35 @@ fn kind_name(k: MatteKind) -> &'static str {
     }
 }
 
+/// Context menu items to create a new layer (Text, Solid, Light, Camera, Null, Shape, Adjustment).
+pub(crate) fn new_layer_items(ui: &mut egui::Ui, actions: &mut Vec<(String, serde_json::Value)>) {
+    let mut item = |ui: &mut egui::Ui, label: &str, cmd: &str, params: serde_json::Value| {
+        if ui.button(label).clicked() {
+            actions.push((cmd.into(), params));
+            ui.close();
+        }
+    };
+    item(ui, "Text", "layer.newText", json!({"text": "Text"}));
+    item(ui, "Solid…", "app.solidSettings", json!({}));
+    item(ui, "Light…", "layer.newLight", json!({}));
+    item(ui, "Camera…", "layer.newCamera", json!({}));
+    item(ui, "Null Object", "layer.newNull", json!({}));
+    item(ui, "Shape Layer", "layer.newShape", json!({"kind": "none"}));
+    item(ui, "Adjustment Layer", "layer.newAdjustment", json!({}));
+}
+
+/// Context menu for empty areas of the Timeline (no layer clicked).
+pub(crate) fn timeline_empty_context_menu(ui: &mut egui::Ui, actions: &mut Vec<(String, serde_json::Value)>) {
+    ui.menu_button("New", |ui| {
+        new_layer_items(ui, actions);
+    });
+    ui.separator();
+    if ui.button("Composition Settings…").clicked() {
+        actions.push(("comp.settings".into(), json!({})));
+        ui.close();
+    }
+}
+
 fn layer_context_menu(resp: &egui::Response, layer: &Layer, actions: &mut Vec<(String, serde_json::Value)>) {
     resp.context_menu(|ui| layer_menu(ui, &[layer.id.0], actions));
 }
@@ -2822,6 +2857,9 @@ fn layer_context_menu(resp: &egui::Response, layer: &Layer, actions: &mut Vec<(S
 /// Shared layer actions for Timeline rows and Composition context menus.
 pub(crate) fn layer_menu(ui: &mut egui::Ui, layers: &[u64], actions: &mut Vec<(String, serde_json::Value)>) {
     let Some(&id) = layers.first() else { return };
+    ui.menu_button("New", |ui| {
+        new_layer_items(ui, actions);
+    });
     let mut item = |ui: &mut egui::Ui, label: &str, cmd: &str, params: serde_json::Value| {
         if ui.button(label).clicked() {
             actions.push(("layer.select".into(), json!({"layers": layers})));
@@ -2829,15 +2867,6 @@ pub(crate) fn layer_menu(ui: &mut egui::Ui, layers: &[u64], actions: &mut Vec<(S
             ui.close();
         }
     };
-    ui.menu_button("New", |ui| {
-        item(ui, "Text", "layer.newText", json!({"text": "Text"}));
-        item(ui, "Solid…", "app.solidSettings", json!({}));
-        item(ui, "Light…", "layer.newLight", json!({}));
-        item(ui, "Camera…", "layer.newCamera", json!({}));
-        item(ui, "Null Object", "layer.newNull", json!({}));
-        item(ui, "Shape Layer", "layer.newShape", json!({"kind": "none"}));
-        item(ui, "Adjustment Layer", "layer.newAdjustment", json!({}));
-    });
     item(ui, "Layer Settings…", "layer.settings", json!({}));
     ui.separator();
     ui.menu_button("Masks", |ui| {
@@ -2902,6 +2931,20 @@ fn constrained(c: &[f64], d: usize, v: f64) -> Vec<f64> {
         .collect()
 }
 
+/// Whether a property supports linking/constraining components (Scale, Shape Size, Mask Feather).
+pub(crate) fn is_prop_linkable(layer: &Layer, prop: &Property) -> bool {
+    let uid = prop.uid;
+    let pct = matches!(prop.ui, ParamUi::Percent);
+    let feather = prop.match_id == "feather" && layer.props.parent_of(uid).is_some_and(|g| matches!(g.kind, GroupKind::Mask { .. }));
+    let shape_size = (prop.match_id == "size" || prop.name == "Size") && matches!(layer.source, LayerSource::Shape);
+    feather || (pct && prop.match_id == "scale") || shape_size
+}
+
+/// Whether a property's components are currently constrained / linked together.
+pub(crate) fn is_prop_constrained(app: &EffectcraftApp, layer: &Layer, prop: &Property) -> bool {
+    is_prop_linkable(layer, prop) && !app.ui.timeline.unlinked.contains(&prop.uid)
+}
+
 /// Inline value editor for a property row; pushes `prop.set` actions.
 fn value_editor(
     app: &mut EffectcraftApp,
@@ -2951,10 +2994,11 @@ fn value_editor(
             let pct = matches!(prop.ui, ParamUi::Percent);
             // Mask Feather: two linked values, never negative (as in After Effects, #203).
             let feather = prop.match_id == "feather" && layer.props.parent_of(uid).is_some_and(|g| matches!(g.kind, GroupKind::Mask { .. }));
-            let range = if feather { (0.0, 1e9) } else { (-1e9, 1e9) };
-            // Scale and Mask Feather: the chain link (Constrain Proportions, on by default).
-            let linkable = feather || (pct && prop.match_id == "scale");
-            let linked = linkable && !app.ui.timeline.unlinked.contains(&uid);
+            let shape_size = (prop.match_id == "size" || prop.name == "Size") && matches!(layer.source, LayerSource::Shape);
+            let range = if feather || shape_size { (0.0, 1e9) } else { (-1e9, 1e9) };
+            // Scale, Mask Feather and Shape Size: the chain link (Constrain Proportions, on by default).
+            let linkable = is_prop_linkable(layer, prop);
+            let linked = is_prop_constrained(app, layer, prop);
             if linkable {
                 let lr = Rect::from_center_size(pos2(x + 7.0, at.y), vec2(14.0, 14.0));
                 let resp = ui.interact(lr, egui::Id::new(("tl-link", uid)), Sense::click()).on_hover_text("Constrain Proportions");
@@ -3257,5 +3301,27 @@ mod tests {
         assert!(bar.r() < red.r() && bar.r() > bar.g() + 30 && bar.g() >= red.g().min(0x3a) - 1);
         let sel = bar_color(red, true);
         assert!(sel.r() > bar.r());
+    }
+
+    #[test]
+    fn constrained_scales_proportional_values() {
+        let c = [100.0, 50.0];
+        let res = constrained(&c, 0, 200.0);
+        assert_eq!(res, vec![200.0, 100.0]);
+        let res2 = constrained(&c, 1, 25.0);
+        assert_eq!(res2, vec![50.0, 25.0]);
+    }
+
+    #[test]
+    fn scale_and_shape_size_are_linkable_and_constrained_by_default() {
+        let mut app = app();
+        let comp = app.session.active_comp().unwrap().clone();
+        let layer = &comp.layers[0];
+        let scale_prop = layer.props.prop("transform/scale").unwrap();
+        assert!(is_prop_linkable(layer, scale_prop));
+        assert!(is_prop_constrained(&app, layer, scale_prop));
+        // Unlinking via timeline unlinks the property.
+        app.ui.timeline.unlinked.insert(scale_prop.uid);
+        assert!(!is_prop_constrained(&app, layer, scale_prop));
     }
 }
