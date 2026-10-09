@@ -1,7 +1,8 @@
 //! Deleting Project items that compositions use asks first, as in After Effects: the Delete key
 //! and the Project panel's trash button (`project.delete` through the UI) show how many layers in
 //! how many compositions go with the items (`project.usage`). Items nothing uses are deleted at
-//! once. Agents running `project.delete` with `engine.execute` are never asked.
+//! once. Agents running `project.delete` with `engine.execute` are never asked, and neither is
+//! Delete Project Items Without Confirmation (Shift+Delete in the Project panel).
 //!
 //! Automation ids: `dialog.deleteItems.delete`, `dialog.deleteItems.cancel`.
 
@@ -16,8 +17,6 @@ use crate::{Dialog, EffectcraftApp};
 #[derive(Clone, Debug, Default)]
 pub struct Pending {
     pub command: Option<(Value, Value)>,
-    /// The next `project.delete` runs without asking (the user answered Delete).
-    pub answered: bool,
 }
 
 fn plural(n: u64, one: &str, many: &str) -> String {
@@ -27,7 +26,7 @@ fn plural(n: u64, one: &str, many: &str) -> String {
 /// Whether `id` needs the prompt first. When it does, the prompt opens holding the command and
 /// the caller must not run it (it runs once the user answers Delete).
 pub fn guard(app: &mut EffectcraftApp, id: &str, params: &Value) -> bool {
-    if id != "project.delete" || std::mem::take(&mut app.dialog_state.delete_items.answered) {
+    if id != "project.delete" {
         return false;
     }
     let Ok(usage) = app.session.execute("project.usage", params.clone()) else { return false };
@@ -79,9 +78,14 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     app.dialog = None;
     app.dialog_state.delete_items.command = None;
     if delete {
-        app.dialog_state.delete_items.answered = true;
-        if let Err(e) = crate::menus::invoke(app, ctx, "project.delete", params) {
-            app.ui.status = e;
-        }
+        // An error is already in the status bar.
+        let _ = delete_confirmed(app, ctx, params);
     }
+}
+
+/// Run `project.delete` with `params` without the prompt: this request is already confirmed (the
+/// prompt's Delete, or Delete Project Items Without Confirmation). The confirmation goes with the
+/// request, so it can't carry over to a later deletion.
+pub fn delete_confirmed(app: &mut EffectcraftApp, ctx: &egui::Context, params: Value) -> Result<Value, String> {
+    crate::menus::run_engine(app, ctx, "project.delete", params)
 }
