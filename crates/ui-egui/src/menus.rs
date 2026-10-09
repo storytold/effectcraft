@@ -300,6 +300,14 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
             None => Err("select a Render Queue item first".into()),
         };
     }
+    // Shift+Delete deletes the Project panel's selection without asking; it does nothing in the
+    // other panels.
+    if id == "project.deleteWithoutConfirmation" {
+        if app.ui.focused != PanelKind::Project {
+            return Ok(Value::Null);
+        }
+        return crate::panels::delete_items::delete_confirmed(app, ctx, json!({}));
+    }
     let now = ctx.input(|i| i.time);
     // Closing a modified project asks to save it first; the command runs once answered.
     if crate::panels::unsaved::guard(app, id, &params) {
@@ -713,6 +721,8 @@ pub fn frontend(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, p: Valu
         }
         // View ▸ New Viewer.
         "view.newViewer" => json!({"viewer": crate::panels::viewers::new_viewer(app)}),
+        // Run by id (control channel, MCP): the Project panel's selection, whatever has focus.
+        "project.deleteWithoutConfirmation" => crate::panels::delete_items::delete_confirmed(app, ctx, json!({}))?,
         "window.scriptPanel" => {
             let id = p.get("window").and_then(Value::as_u64).ok_or("no ScriptUI panel window")? as u32;
             app.show_panel(PanelKind::ScriptPanel(id));
@@ -1496,6 +1506,9 @@ pub fn handle_shortcuts(app: &mut EffectcraftApp, ctx: &egui::Context) {
         // key presses: map them back to the keys (with the modifiers held) so Edit ▸ Copy, Cut,
         // Paste and their variants (Ctrl+Alt+C…) run.
         let held = if i.modifiers.command { i.modifiers } else { egui::Modifiers::COMMAND };
+        // On Windows, Shift+Delete is the old Cut key and arrives as Cut too. The Project panel
+        // has no clipboard: there it is Shift+Delete (Delete Project Items Without Confirmation).
+        let shift_delete = !i.modifiers.command && i.modifiers.shift && app.ui.focused == PanelKind::Project;
         i.events
             .iter()
             .filter_map(|e| match e {
@@ -1510,6 +1523,7 @@ pub fn handle_shortcuts(app: &mut EffectcraftApp, ctx: &egui::Context) {
                 }
                 egui::Event::Key { key: egui::Key::Space, pressed: false, .. } => Some((egui::Key::Space, egui::Modifiers::NONE, false)),
                 egui::Event::Copy if clipboard => Some((egui::Key::C, held, true)),
+                egui::Event::Cut if clipboard && shift_delete => Some((egui::Key::Delete, i.modifiers, true)),
                 egui::Event::Cut if clipboard => Some((egui::Key::X, held, true)),
                 egui::Event::Paste(_) if clipboard => Some((egui::Key::V, held, true)),
                 _ => None,
