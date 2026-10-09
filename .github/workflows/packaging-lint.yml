@@ -1,5 +1,6 @@
 # Quick static checks for the release pipeline (seconds, no Rust build): workflow syntax,
-# packaging shell/PowerShell scripts, and the Linux desktop/AppStream/Flatpak metadata.
+# packaging shell/PowerShell scripts, and the Linux desktop/AppStream/Flatpak metadata. Plus a
+# Windows MSI install test with stub binaries (install folder, upgrade, repair, uninstall).
 name: Packaging lint
 
 on:
@@ -66,3 +67,16 @@ jobs:
           EOF
       - name: FreeBSD package layout (stub binaries)
         run: bash packaging/freebsd/package.sh --dry-run
+
+  windows-msi:
+    name: Windows MSI install folder (stub binaries)
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install WiX
+        shell: pwsh
+        run: dotnet tool install --global wix --version 5.0.2
+      - name: Install, upgrade, repair and uninstall
+        shell: pwsh
+        run: ./packaging/windows/test-msi.ps1
