@@ -36,3 +36,8 @@ display_name = "ShirokoWaWu"
 [people.sanyamsingh001]
 display_name = "sanyamsingh001"
 sync_github_name = false
+
+[people.tylerjenningsw]
+real_name = "Tyler Jennings"
+display_name = "Tyler Jennings"
+sync_github_name = false
