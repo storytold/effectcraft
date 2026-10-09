@@ -1530,6 +1530,11 @@ impl eframe::App for EffectcraftApp {
     fn on_exit(&mut self) {
         // Clean exit: no crash recovery next launch.
         self.session.end_recovery();
+
+        #[cfg(target_os = "macos")]
+        {
+            std::process::exit(0);
+        }
     }
 
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
