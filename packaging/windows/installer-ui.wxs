@@ -1,0 +1,198 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  EffectCraft installer wizard: original dialogs built from Windows Installer's own controls and
+  events (no WixUI library), included by effectcraft.wxs with <UIRef Id="EffectcraftUI" />.
+
+    fresh install:  DestDlg (folder, Change... opens BrowseDlg) -> ReadyDlg -> ProgressDlg -> ExitDlg
+    upgrade:        ReadyDlg (the installed copy's folder, not editable) -> ProgressDlg -> ExitDlg
+    already there:  MaintDlg (Repair or Remove) -> ProgressDlg -> ExitDlg
+
+  Silent installs (/qn) skip all of this; pass INSTALLFOLDER="..." to choose the folder there.
+  Folder controls edit INSTALLFOLDER indirectly through _BrowseProperty; SetTargetPath checks the
+  path and applies it, and Windows Installer reports a bad path itself.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Fragment>
+    <UI Id="EffectcraftUI">
+      <TextStyle Id="EcText" FaceName="Segoe UI" Size="9" />
+      <TextStyle Id="EcTitle" FaceName="Segoe UI" Size="12" Bold="yes" />
+      <Property Id="DefaultUIFont" Value="EcText" />
+      <Property Id="ErrorDialog" Value="ErrorDlg" />
+      <Property Id="_BrowseProperty" Value="INSTALLFOLDER" />
+
+      <!-- Choose the destination folder (fresh installs only). -->
+      <Dialog Id="DestDlg" Width="370" Height="270" Title="[ProductName] Setup">
+        <Control Id="Title" Type="Text" X="20" Y="15" Width="330" Height="20" Transparent="yes" NoPrefix="yes" Text="{\EcTitle}Choose where to install [ProductName]" />
+        <Control Id="Description" Type="Text" X="20" Y="45" Width="330" Height="30" NoPrefix="yes" Text="[ProductName] will be installed in this folder. Type a different folder, or click Change to browse for one." />
+        <Control Id="FolderLabel" Type="Text" X="20" Y="85" Width="330" Height="12" Text="&amp;Destination folder:" />
+        <Control Id="Folder" Type="PathEdit" X="20" Y="100" Width="260" Height="18" Property="_BrowseProperty" Indirect="yes" />
+        <Control Id="ChangeFolder" Type="PushButton" X="290" Y="99" Width="60" Height="20" Text="&amp;Change...">
+          <Publish Event="SpawnDialog" Value="BrowseDlg" />
+        </Control>
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="&amp;Back" Disabled="yes" />
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="&amp;Next">
+          <Publish Event="SetTargetPath" Value="[_BrowseProperty]" Order="1" />
+          <Publish Event="NewDialog" Value="ReadyDlg" Order="2" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="Cancel">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+      </Dialog>
+
+      <!-- Folder browser: drive/folder list, up one level, new folder. -->
+      <Dialog Id="BrowseDlg" Width="370" Height="270" Title="[ProductName] Setup">
+        <Control Id="Title" Type="Text" X="20" Y="15" Width="330" Height="20" Transparent="yes" NoPrefix="yes" Text="{\EcTitle}Browse for a folder" />
+        <Control Id="LookInLabel" Type="Text" X="20" Y="47" Width="44" Height="12" Text="&amp;Look in:" />
+        <Control Id="LookIn" Type="DirectoryCombo" X="66" Y="45" Width="220" Height="80" Property="_BrowseProperty" Indirect="yes" Fixed="yes" Remote="yes">
+          <Subscribe Event="IgnoreChange" Attribute="IgnoreChange" />
+        </Control>
+        <Control Id="Up" Type="PushButton" X="292" Y="44" Width="28" Height="18" Text="&amp;Up" ToolTip="Up one level">
+          <Publish Event="DirectoryListUp" Value="0" />
+        </Control>
+        <Control Id="NewFolder" Type="PushButton" X="322" Y="44" Width="28" Height="18" Text="Ne&amp;w" ToolTip="Create a new folder">
+          <Publish Event="DirectoryListNew" Value="0" />
+        </Control>
+        <Control Id="Folders" Type="DirectoryList" X="20" Y="68" Width="330" Height="120" Property="_BrowseProperty" Indirect="yes" Sunken="yes" TabSkip="no" />
+        <Control Id="PathLabel" Type="Text" X="20" Y="196" Width="330" Height="12" Text="&amp;Folder name:" />
+        <Control Id="Path" Type="PathEdit" X="20" Y="210" Width="330" Height="18" Property="_BrowseProperty" Indirect="yes" />
+        <Control Id="OK" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="OK">
+          <Publish Event="SetTargetPath" Value="[_BrowseProperty]" Order="1" />
+          <Publish Event="EndDialog" Value="Return" Order="2" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="Cancel">
+          <Publish Event="Reset" Value="0" Order="1" />
+          <Publish Event="EndDialog" Value="Return" Order="2" />
+        </Control>
+      </Dialog>
+
+      <!-- Last stop before anything changes: shows the folder that will be used. -->
+      <Dialog Id="ReadyDlg" Width="370" Height="270" Title="[ProductName] Setup">
+        <Control Id="Title" Type="Text" X="20" Y="15" Width="330" Height="20" Transparent="yes" NoPrefix="yes" Text="{\EcTitle}Ready to install [ProductName]" />
+        <Control Id="InstallText" Type="Text" X="20" Y="45" Width="330" Height="24" NoPrefix="yes" Text="[ProductName] [ProductVersion] will be installed in:" HideCondition="WIX_UPGRADE_DETECTED" />
+        <Control Id="UpgradeText" Type="Text" X="20" Y="45" Width="330" Height="24" NoPrefix="yes" Text="[ProductName] is already installed. Version [ProductVersion] will replace it in the same folder:" Hidden="yes" ShowCondition="WIX_UPGRADE_DETECTED" />
+        <Control Id="Destination" Type="Text" X="20" Y="72" Width="330" Height="36" NoPrefix="yes" Text="[INSTALLFOLDER]" />
+        <Control Id="Prompt" Type="Text" X="20" Y="116" Width="330" Height="24" NoPrefix="yes" Text="Click Install to continue." />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="&amp;Back" DisableCondition="WIX_UPGRADE_DETECTED">
+          <Publish Event="NewDialog" Value="DestDlg" />
+        </Control>
+        <Control Id="Install" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" ElevationShield="yes" Text="&amp;Install">
+          <Publish Event="EndDialog" Value="Return" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="Cancel">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+      </Dialog>
+
+      <!-- Opening the MSI when this version is already installed. -->
+      <Dialog Id="MaintDlg" Width="370" Height="270" Title="[ProductName] Setup">
+        <Control Id="Title" Type="Text" X="20" Y="15" Width="330" Height="20" Transparent="yes" NoPrefix="yes" Text="{\EcTitle}[ProductName] is already installed" />
+        <Control Id="Description" Type="Text" X="20" Y="45" Width="330" Height="24" NoPrefix="yes" Text="Repair puts back missing or damaged files in its folder. Remove uninstalls it; your projects are not touched." />
+        <Control Id="Repair" Type="PushButton" X="20" Y="80" Width="80" Height="20" Default="yes" ElevationShield="yes" Text="&amp;Repair">
+          <Publish Event="ReinstallMode" Value="ecmus" Order="1" />
+          <Publish Event="Reinstall" Value="ALL" Order="2" />
+          <Publish Event="EndDialog" Value="Return" Order="3" />
+        </Control>
+        <Control Id="Remove" Type="PushButton" X="20" Y="108" Width="80" Height="20" ElevationShield="yes" Text="Re&amp;move">
+          <Publish Event="Remove" Value="ALL" Order="1" />
+          <Publish Event="EndDialog" Value="Return" Order="2" />
+        </Control>
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="Cancel">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+      </Dialog>
+
+      <Dialog Id="ProgressDlg" Width="370" Height="270" Title="[ProductName] Setup" Modeless="yes">
+        <Control Id="Title" Type="Text" X="20" Y="15" Width="330" Height="20" Transparent="yes" NoPrefix="yes" Text="{\EcTitle}Working on [ProductName]" />
+        <Control Id="Description" Type="Text" X="20" Y="45" Width="330" Height="24" NoPrefix="yes" Text="Please wait. This can take a minute." />
+        <Control Id="Action" Type="Text" X="20" Y="80" Width="330" Height="12" NoPrefix="yes">
+          <Subscribe Event="ActionText" Attribute="Text" />
+        </Control>
+        <Control Id="Progress" Type="ProgressBar" X="20" Y="96" Width="330" Height="12" ProgressBlocks="yes" Text="Progress">
+          <Subscribe Event="SetProgress" Attribute="Progress" />
+        </Control>
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Default="yes" Cancel="yes" Text="Cancel">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+      </Dialog>
+
+      <Dialog Id="CancelDlg" Width="260" Height="85" Title="[ProductName] Setup" NoMinimize="yes">
+        <Control Id="Text" Type="Text" X="10" Y="15" Width="240" Height="30" NoPrefix="yes" Text="Cancel [ProductName] setup? Nothing will be changed." />
+        <Control Id="Yes" Type="PushButton" X="132" Y="57" Width="56" Height="17" Text="&amp;Yes">
+          <Publish Event="EndDialog" Value="Exit" />
+        </Control>
+        <Control Id="No" Type="PushButton" X="194" Y="57" Width="56" Height="17" Default="yes" Cancel="yes" Text="&amp;No">
+          <Publish Event="EndDialog" Value="Return" />
+        </Control>
+      </Dialog>
+
+      <!-- Windows Installer's messages (a bad folder, low disk space, ...) and files in use. -->
+      <Dialog Id="ErrorDlg" Width="270" Height="105" Title="[ProductName] Setup" ErrorDialog="yes">
+        <Control Id="ErrorText" Type="Text" X="10" Y="10" Width="250" Height="60" NoPrefix="yes" TabSkip="no" Text="Error" />
+        <Control Id="Y" Type="PushButton" X="100" Y="80" Width="56" Height="17" TabSkip="yes" Text="&amp;Yes"><Publish Event="EndDialog" Value="ErrorYes" /></Control>
+        <Control Id="A" Type="PushButton" X="100" Y="80" Width="56" Height="17" TabSkip="yes" Text="Abort"><Publish Event="EndDialog" Value="ErrorAbort" /></Control>
+        <Control Id="C" Type="PushButton" X="100" Y="80" Width="56" Height="17" TabSkip="yes" Text="Cancel"><Publish Event="EndDialog" Value="ErrorCancel" /></Control>
+        <Control Id="I" Type="PushButton" X="100" Y="80" Width="56" Height="17" TabSkip="yes" Text="&amp;Ignore"><Publish Event="EndDialog" Value="ErrorIgnore" /></Control>
+        <Control Id="N" Type="PushButton" X="100" Y="80" Width="56" Height="17" TabSkip="yes" Text="&amp;No"><Publish Event="EndDialog" Value="ErrorNo" /></Control>
+        <Control Id="O" Type="PushButton" X="100" Y="80" Width="56" Height="17" TabSkip="yes" Text="OK"><Publish Event="EndDialog" Value="ErrorOk" /></Control>
+        <Control Id="R" Type="PushButton" X="100" Y="80" Width="56" Height="17" TabSkip="yes" Text="&amp;Retry"><Publish Event="EndDialog" Value="ErrorRetry" /></Control>
+      </Dialog>
+
+      <Dialog Id="FilesInUse" Width="370" Height="270" Title="[ProductName] Setup" KeepModeless="yes">
+        <Control Id="Title" Type="Text" X="20" Y="15" Width="330" Height="20" Transparent="yes" NoPrefix="yes" Text="{\EcTitle}Close these programs" />
+        <Control Id="Description" Type="Text" X="20" Y="45" Width="330" Height="24" NoPrefix="yes" Text="These programs are using files setup needs to update. Close them, then click Retry." />
+        <Control Id="List" Type="ListBox" X="20" Y="75" Width="330" Height="140" Property="FileInUseProcess" Sunken="yes" TabSkip="yes" />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+        <Control Id="Retry" Type="PushButton" X="168" Y="243" Width="56" Height="17" Default="yes" Text="&amp;Retry"><Publish Event="EndDialog" Value="Retry" /></Control>
+        <Control Id="Ignore" Type="PushButton" X="236" Y="243" Width="56" Height="17" Text="&amp;Ignore"><Publish Event="EndDialog" Value="Ignore" /></Control>
+        <Control Id="Exit" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="E&amp;xit"><Publish Event="EndDialog" Value="Exit" /></Control>
+      </Dialog>
+
+      <!-- The three endings: finished, cancelled, failed. -->
+      <Dialog Id="ExitDlg" Width="370" Height="270" Title="[ProductName] Setup">
+        <Control Id="Title" Type="Text" X="20" Y="15" Width="330" Height="20" Transparent="yes" NoPrefix="yes" Text="{\EcTitle}[ProductName] setup is complete" />
+        <Control Id="Description" Type="Text" X="20" Y="45" Width="330" Height="36" NoPrefix="yes" Text="Click Finish to close setup." />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+        <Control Id="Finish" Type="PushButton" X="304" Y="243" Width="56" Height="17" Default="yes" Cancel="yes" Text="&amp;Finish">
+          <Publish Event="EndDialog" Value="Return" />
+        </Control>
+      </Dialog>
+      <Dialog Id="UserExitDlg" Width="370" Height="270" Title="[ProductName] Setup">
+        <Control Id="Title" Type="Text" X="20" Y="15" Width="330" Height="20" Transparent="yes" NoPrefix="yes" Text="{\EcTitle}Setup was cancelled" />
+        <Control Id="Description" Type="Text" X="20" Y="45" Width="330" Height="36" NoPrefix="yes" Text="[ProductName] was not changed. Run setup again to install it." />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+        <Control Id="Finish" Type="PushButton" X="304" Y="243" Width="56" Height="17" Default="yes" Cancel="yes" Text="&amp;Finish">
+          <Publish Event="EndDialog" Value="Exit" />
+        </Control>
+      </Dialog>
+      <Dialog Id="FatalErrorDlg" Width="370" Height="270" Title="[ProductName] Setup">
+        <Control Id="Title" Type="Text" X="20" Y="15" Width="330" Height="20" Transparent="yes" NoPrefix="yes" Text="{\EcTitle}Setup did not finish" />
+        <Control Id="Description" Type="Text" X="20" Y="45" Width="330" Height="48" NoPrefix="yes" Text="Something went wrong, and setup put back what was there before. Run setup again, or report it at https://github.com/storytold/effectcraft/issues." />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+        <Control Id="Finish" Type="PushButton" X="304" Y="243" Width="56" Height="17" Default="yes" Cancel="yes" Text="&amp;Finish">
+          <Publish Event="EndDialog" Value="Exit" />
+        </Control>
+      </Dialog>
+
+      <InstallUISequence>
+        <Show Dialog="DestDlg" Before="ProgressDlg" Condition="NOT Installed AND NOT WIX_UPGRADE_DETECTED" />
+        <Show Dialog="ReadyDlg" After="DestDlg" Condition="NOT Installed AND WIX_UPGRADE_DETECTED" />
+        <Show Dialog="MaintDlg" After="ReadyDlg" Condition="Installed AND NOT REMOVE AND NOT REINSTALL" />
+        <Show Dialog="ProgressDlg" Before="ExecuteAction" />
+        <Show Dialog="ExitDlg" OnExit="success" />
+        <Show Dialog="UserExitDlg" OnExit="cancel" />
+        <Show Dialog="FatalErrorDlg" OnExit="error" />
+      </InstallUISequence>
+      <!-- msiexec /a (an administrative image) gets the same progress and endings. -->
+      <AdminUISequence>
+        <Show Dialog="ProgressDlg" Before="ExecuteAction" />
+        <Show Dialog="ExitDlg" OnExit="success" />
+        <Show Dialog="UserExitDlg" OnExit="cancel" />
+        <Show Dialog="FatalErrorDlg" OnExit="error" />
+      </AdminUISequence>
+    </UI>
+  </Fragment>
+</Wix>
