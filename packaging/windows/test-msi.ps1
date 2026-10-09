@@ -19,6 +19,7 @@
 #>
 param([string] $Work = (Join-Path ([IO.Path]::GetTempPath()) 'effectcraft-msi-test'))
 $ErrorActionPreference = 'Stop'
+trap { Write-Output "FAILED: $_"; exit 1 }
 $Root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $AppPaths = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\effectcraft.exe'
 
@@ -72,9 +73,10 @@ if (Test-Path -LiteralPath $Default) { throw "a custom install also wrote $Defau
 
 Invoke-Msiexec 'upgrade without a folder' @('/i', "`"$($Msi['0.0.2'])`"")
 Assert-InstalledIn $Custom
+# Read single values: Get-ItemProperty throws on some machines' malformed Uninstall entries.
 $arp = @(Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall' |
-  Get-ItemProperty | Where-Object { $_.DisplayName -eq 'EffectCraft' })
-if ($arp.Count -ne 1 -or $arp[0].DisplayVersion -ne '0.0.2') { throw "expected one EffectCraft 0.0.2 in Apps, found: $($arp.DisplayVersion -join ', ')" }
+  ForEach-Object { if ($_.GetValue('DisplayName') -eq 'EffectCraft') { $_.GetValue('DisplayVersion') } })
+if ($arp.Count -ne 1 -or $arp[0] -ne '0.0.2') { throw "expected one EffectCraft 0.0.2 in Apps, found: $($arp -join ', ')" }
 
 Remove-Item -LiteralPath (Join-Path $Custom 'effectcraft-cli.exe')
 Invoke-Msiexec 'repair' @('/fa', "`"$($Msi['0.0.2'])`"")
