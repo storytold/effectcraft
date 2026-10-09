@@ -63,15 +63,16 @@ enum ShiftDelete {
 fn shift_delete(h: &mut Harness<'_, EffectcraftApp>, how: ShiftDelete) {
     match how {
         ShiftDelete::Key => key(h, Key::Delete, Modifiers::SHIFT),
-        ShiftDelete::WindowsCut => {
-            h.input_mut().events.push(Event::ModifiersChanged(Modifiers::SHIFT));
-            h.step();
-            h.input_mut().events.push(Event::Cut);
-            h.step();
-            h.input_mut().events.push(Event::ModifiersChanged(Modifiers::NONE));
-            h.run_steps(2);
-        }
+        // Shift down, Cut and Shift up all in one frame.
+        ShiftDelete::WindowsCut => frame(h, &[Event::ModifiersChanged(Modifiers::SHIFT), Event::Cut, Event::ModifiersChanged(Modifiers::NONE)]),
     }
+}
+
+/// Queue `events` together and run them as one frame.
+fn frame(h: &mut Harness<'_, EffectcraftApp>, events: &[Event]) {
+    h.input_mut().events.extend(events.iter().cloned());
+    h.step();
+    h.run_steps(2);
 }
 
 const SHIFT_DELETE: [ShiftDelete; 2] = [ShiftDelete::Key, ShiftDelete::WindowsCut];
@@ -334,5 +335,32 @@ fn shift_delete_in_other_panels_keeps_project_items() {
         shift_delete(&mut h, how);
         assert_eq!(h.state().dialog, None);
         assert!(items.iter().all(|i| h.state().session.project.item(*i).is_some()), "{how:?} in the Composition panel");
+    }
+}
+
+/// A Cut is read with the modifiers held where it is among the frame's events, not those held
+/// after the frame: Shift released in the same frame is still Shift+Delete, and a Ctrl+X followed
+/// in the same frame by Ctrl up and Shift down is not.
+#[test]
+fn a_cut_is_read_with_the_modifiers_where_it_is_in_the_frame() {
+    use Event::{Cut, ModifiersChanged as M};
+    let (shift, ctrl, none) = (Modifiers::SHIFT, Modifiers::COMMAND, Modifiers::NONE);
+    // (held from the frame before, this frame's events, whether the solid in use goes)
+    let cases: [(Modifiers, Vec<Event>, bool); 5] = [
+        (shift, vec![Cut, M(none)], true),
+        (ctrl, vec![Cut, M(none), M(shift)], false),
+        (none, vec![M(shift), Cut, M(none)], true),
+        (none, vec![M(ctrl), Cut, M(none), M(shift)], false),
+        (shift, vec![M(none), Cut, M(shift)], false),
+    ];
+    for (n, (before, events, deletes)) in cases.into_iter().enumerate() {
+        let (mut h, items, _) = harness();
+        let solid = items[1];
+        click(&mut h, &format!("project.item.{}.name", solid.0), Modifiers::NONE);
+        frame(&mut h, &[M(before)]);
+        frame(&mut h, &events);
+        frame(&mut h, &[M(none)]);
+        assert_eq!(h.state().dialog, None, "case {n}: no prompt");
+        assert_eq!(h.state().session.project.item(solid).is_none(), deletes, "case {n}: {events:?} after {before:?}");
     }
 }
