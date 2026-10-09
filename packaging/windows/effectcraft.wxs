@@ -4,7 +4,7 @@
 
     wix build effectcraft.wxs -arch x64 -d Version=1.2.3 -d BinDir=... -d IconPath=... -o out.msi
 
-  Per-machine install into Program Files, a Start Menu shortcut, `.pcraft` owned by EffectCraft,
+  Per-machine install into Program Files (or a folder the user picks), a Start Menu shortcut, `.pcraft` owned by EffectCraft,
   and EffectCraft offered under "Open with" for PSD/PSB and the image formats it reads (without
   taking over the user's default app for them).
 -->
@@ -30,6 +30,16 @@
     <Property Id="ARPURLUPDATEINFO" Value="https://getartcraft.com/apps/effectcraft" />
     <Property Id="ARPHELPLINK" Value="https://discord.gg/artcraft" />
 
+    <!-- An upgrade, repair or silent reinstall goes where the installed copy already is: the App Paths
+         "Path" value written below. A folder passed on the command line (INSTALLFOLDER=...) wins. -->
+    <Property Id="INSTALLFOLDER" Secure="yes" />
+    <Property Id="PREVIOUSINSTALLFOLDER" Secure="yes">
+      <RegistrySearch Id="PreviousInstallFolder" Root="HKLM" Type="directory"
+          Key="Software\Microsoft\Windows\CurrentVersion\App Paths\effectcraft.exe" Name="Path" />
+    </Property>
+    <SetProperty Id="INSTALLFOLDER" Value="[PREVIOUSINSTALLFOLDER]" After="AppSearch" Sequence="both"
+        Condition="PREVIOUSINSTALLFOLDER AND NOT INSTALLFOLDER" />
+
     <StandardDirectory Id="ProgramFiles6432Folder">
       <Directory Id="INSTALLFOLDER" Name="EffectCraft" />
     </StandardDirectory>
@@ -50,6 +60,7 @@
         </File>
 
         <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\effectcraft.exe" Value="[#EffectcraftExe]" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\effectcraft.exe" Name="Path" Value="[INSTALLFOLDER]" Type="string" />
       </Component>
 
       <Component Id="EffectcraftCli">
