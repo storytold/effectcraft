@@ -4,8 +4,8 @@
 
 use std::io::Write;
 
-use effectcraft_project::Comp;
 use effectcraft_project::render_queue::{AudioFormat, Channels, OutputFormat, ProResProfile};
+use effectcraft_project::{ColorSpace, Comp};
 use effectcraft_time::{FrameRate, TICKS_PER_SECOND, Tick};
 use filmcraft_isobmff::{Brand, FourCc, Mp4Writer, PcmConfig, SampleEntry, TrackConfig, WriteSample, WriterOptions};
 use rayon::prelude::*;
@@ -139,13 +139,18 @@ fn prores_profile(p: ProResProfile) -> filmcraft_prores::Profile {
 }
 
 impl ProRes {
-    fn new(w: u32, h: u32, profile: ProResProfile, channels: Channels) -> ProRes {
+    fn new(w: u32, h: u32, profile: ProResProfile, channels: Channels, srgb_transfer: bool) -> ProRes {
         // Alpha needs a 4444 flavour.
         let profile = if channels == Channels::Rgba && !profile.is_4444() { ProResProfile::P4444 } else { profile };
         let profile = prores_profile(profile);
         let alpha = channels == Channels::Rgba;
         let mut cfg = filmcraft_prores::EncoderConfig::new(profile, w, h);
         cfg.encode_alpha = alpha;
+        // The renderer returns encoded output pixels; describe sRGB without changing their
+        // values or the BT.709 YCbCr matrix (H.273 transfer code 13).
+        if srgb_transfer {
+            cfg.color.transfer = 13;
+        }
         ProRes { enc: filmcraft_prores::Encoder::with_config(cfg), profile, w, h, alpha }
     }
     fn is_444(&self) -> bool {
@@ -256,11 +261,13 @@ pub(crate) async fn movie(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut St
         Channels::Rgba if fmt != OutputFormat::ProRes => Channels::Rgb,
         c => c,
     };
+    let color = &job.project.settings;
+    let srgb_transfer = channels != Channels::Alpha && (color.working_space.is_none() || color.output_space.unwrap_or(ColorSpace::Srgb) == ColorSpace::Srgb);
     let mut venc: Box<dyn VideoEncoder> = match fmt {
         OutputFormat::H264 => Box::new(H264::new(w, h, rate, job.output.bitrate_kbps)?),
         OutputFormat::Hevc => Box::new(crate::hevc_av1::Hevc::new(w, h, rate, job.output)?),
         OutputFormat::Av1 => Box::new(crate::hevc_av1::Av1::new(w, h, rate, job.output)?),
-        _ => Box::new(ProRes::new(w, h, job.output.prores_profile, if channels == Channels::Alpha { Channels::Rgb } else { channels })),
+        _ => Box::new(ProRes::new(w, h, job.output.prores_profile, if channels == Channels::Alpha { Channels::Rgb } else { channels }, srgb_transfer)),
     };
     let brand = if fmt == OutputFormat::ProRes { Brand::Mov } else { Brand::Mp4 };
     let batch = batch_size();

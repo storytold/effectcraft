@@ -233,6 +233,55 @@ fn prores_4444_with_alpha() {
     }
 }
 
+/// Motion blur creates fractional alpha on moving edges. Both the app decoder and ffmpeg
+/// must decode every frame of a ProRes 4444 output, including those edge samples (#293).
+#[test]
+fn prores_4444_motion_blur_preserves_fractional_alpha() {
+    use effectcraft_keyframe::{Keyframe, Value};
+    let d = out_dir("prores4444-motion-blur");
+    let (mut p, cid) = project(None);
+    let comp = p.comp_mut(cid).unwrap();
+    comp.shutter_angle = 360.0;
+    comp.shutter_phase = -180.0;
+    let layer = &mut comp.layers[0];
+    layer.in_point = Tick::ZERO;
+    layer.switches.motion_blur = true;
+    layer.props.prop_mut("transform/position").unwrap().keys = vec![
+        Keyframe::new(Tick::ZERO, Value::Vec3([12.0, H as f64 / 2.0, 0.0])),
+        Keyframe::new(Tick::from_seconds_f64(1.2), Value::Vec3([52.0, H as f64 / 2.0, 0.0])),
+    ];
+    let om = OutputModule { channels: Channels::Rgba, prores_profile: ProResProfile::P4444, ..OutputModule::for_format(OutputFormat::ProRes) };
+    let path = d.join("blur.mov");
+    run(&p, cid, &NoFootage, &om, &path);
+    let footage = effectcraft_media::probe(&path).expect("probe blurred alpha ProRes");
+    let pool = MediaPool::new();
+    let mut fractional = 0;
+    let mut unblurred_project = p.clone();
+    unblurred_project.comp_mut(cid).unwrap().layers[0].switches.motion_blur = false;
+    let mut blur_changes_alpha = false;
+    for k in 0..FRAMES {
+        let time = footage.frame_rate.tick_of(k as i64);
+        let reference = effectcraft_render::render_frame(&p, cid, time, 1.0);
+        let unblurred = effectcraft_render::render_frame(&unblurred_project, cid, time, 1.0);
+        assert_eq!((reference.width, reference.height), (unblurred.width, unblurred.height));
+        blur_changes_alpha |= reference.data.iter().zip(&unblurred.data).any(|(blurred, sharp)| (blurred[3] - sharp[3]).abs() > 0.015);
+        let decoded = pool.frame_at(&footage, time).expect("decode blurred alpha ProRes");
+        let oracle = ffmpeg_frame(&path, k);
+        for (i, expected) in reference.data.iter().enumerate() {
+            let alpha = expected[3];
+            if alpha > 0.02 && alpha < 0.98 {
+                fractional += 1;
+            }
+            assert!((decoded.data[i][3] - alpha).abs() < 0.015, "frame {k}, pixel {i}: alpha {} vs {alpha}", decoded.data[i][3]);
+            if let Some(oracle) = &oracle {
+                assert!((oracle.data[i][3] - alpha).abs() < 0.015, "ffmpeg frame {k}, pixel {i}: alpha {} vs {alpha}", oracle.data[i][3]);
+            }
+        }
+    }
+    assert!(fractional > 0, "the fixture has motion-blurred, partly transparent edges");
+    assert!(blur_changes_alpha, "motion blur must change alpha compared with the same unblurred fixture");
+}
+
 fn check_still_dir(dir: &Path, ext: &str, tol: f32, alpha: bool) {
     for k in 0..FRAMES {
         let path = sequence_path(&dir.join(format!("f_[#####].{ext}")).to_string_lossy(), k as i64);
