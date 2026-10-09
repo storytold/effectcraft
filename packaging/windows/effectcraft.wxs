@@ -33,14 +33,23 @@
     <Property Id="ARPHELPLINK" Value="https://discord.gg/artcraft" />
 
     <!-- An upgrade, repair or silent reinstall goes where the installed copy already is: the App Paths
-         "Path" value written below. A folder passed on the command line (INSTALLFOLDER=...) wins. -->
+         "Path" value written below, or for releases before it (0.6.0 and earlier, which could be put
+         elsewhere with INSTALLFOLDER=...) the folder of the effectcraft.exe that App Paths names. A
+         "file" search with no FileSearch inside yields that file's folder. A folder passed on the
+         command line (INSTALLFOLDER=...) wins. -->
     <Property Id="INSTALLFOLDER" Secure="yes" />
     <Property Id="PREVIOUSINSTALLFOLDER" Secure="yes">
       <RegistrySearch Id="PreviousInstallFolder" Root="HKLM" Type="directory"
           Key="Software\Microsoft\Windows\CurrentVersion\App Paths\effectcraft.exe" Name="Path" />
     </Property>
+    <Property Id="PREVIOUSEXEFOLDER" Secure="yes">
+      <RegistrySearch Id="PreviousExeFolder" Root="HKLM" Type="file"
+          Key="Software\Microsoft\Windows\CurrentVersion\App Paths\effectcraft.exe" />
+    </Property>
     <SetProperty Id="INSTALLFOLDER" Value="[PREVIOUSINSTALLFOLDER]" After="AppSearch" Sequence="both"
         Condition="PREVIOUSINSTALLFOLDER AND NOT INSTALLFOLDER" />
+    <SetProperty Id="INSTALLFOLDER" Action="SetINSTALLFOLDERFromExe" Value="[PREVIOUSEXEFOLDER]"
+        After="SetINSTALLFOLDER" Sequence="both" Condition="PREVIOUSEXEFOLDER AND NOT INSTALLFOLDER" />
 
     <StandardDirectory Id="ProgramFiles6432Folder">
       <Directory Id="INSTALLFOLDER" Name="EffectCraft" />
