@@ -955,6 +955,7 @@ Effect
   ---
   Manage Effects... | effect.manage
   Load Effect Plug-in... | effect.plugins.load
+  Load OpenFX Plug-in... | effect.plugins.loadOfx
   ---
   @effects
 Animation

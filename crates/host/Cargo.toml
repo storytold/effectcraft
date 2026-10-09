@@ -21,6 +21,12 @@ effectcraft-plugin = { workspace = true }
 # WebAssembly effect plug-ins run in wasmi on native builds.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 effectcraft-plugin = { workspace = true, features = ["wasm"] }
+# OpenFX plug-ins are native code run without a sandbox: opt-in (`openfx`), never on the web build.
+effectcraft-ofx = { workspace = true, optional = true }
+
+[features]
+# Load OpenFX image-effect plug-ins (docs/ofx.md). Off by default.
+openfx = ["dep:effectcraft-ofx"]
 
 [dev-dependencies]
 serde_json = { workspace = true }

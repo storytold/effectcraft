@@ -49,7 +49,7 @@ fn rust_plugins_apply_by_id() {
         version: "1".into(),
         author: String::new(),
         description: String::new(),
-        params: vec![PluginParam { id: "on".into(), name: "On".into(), kind: PluginParamKind::Checkbox { default: true } }],
+        params: vec![PluginParam { id: "on".into(), name: "On".into(), kind: PluginParamKind::Checkbox { default: true }, group: String::new() }],
     };
     register_plugin(Arc::new(Swap { m })).unwrap();
     let (mut s, l) = setup();
@@ -62,7 +62,7 @@ fn rust_plugins_apply_by_id() {
     assert!(p[0] > 0.99 && p[2] < 0.01, "{p:?}");
     let list = s.execute("effect.plugins.list", json!({})).unwrap();
     assert!(list["plugins"].as_array().unwrap().iter().any(|p| p["id"] == "org.test.swap" && p["category"] == "Channel"));
-    assert_eq!(list["api"], 1);
+    assert_eq!(list["api"], 2);
     assert!(s.execute("effect.list", json!({"filter": "swap red"})).unwrap().as_array().unwrap().len() == 1);
 }
 
@@ -158,4 +158,23 @@ fn plugin_loading_reports_bad_modules_and_survives_failing_renders() {
     s.execute("effect.apply", json!({"layer": l, "effect": "org.test.host.good"})).unwrap();
     assert_eq!(px(&s), before);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// OpenFX is opt-in (`openfx` feature): without it the commands are disabled and refuse with an
+/// error instead of loading anything; with it the session can load plug-ins.
+#[test]
+fn openfx_commands_follow_the_build_feature() {
+    let mut s = effectcraft_host::session();
+    let list = s.execute("effect.plugins.list", json!({})).unwrap();
+    if cfg!(feature = "openfx") {
+        assert_eq!(list["ofx"], true);
+        assert!(s.is_enabled("effect.plugins.scanOfx") && s.is_enabled("effect.plugins.loadOfx"));
+        // A path with nothing to load is an error, not a crash.
+        assert!(s.execute("effect.plugins.loadOfx", json!({"path": "/no/such/plugin.ofx.bundle"})).is_err());
+    } else {
+        assert_eq!(list["ofx"], false);
+        assert!(!s.is_enabled("effect.plugins.scanOfx") && !s.is_enabled("effect.plugins.loadOfx"));
+        assert!(s.execute("effect.plugins.scanOfx", json!({})).is_err());
+        assert!(s.execute("effect.plugins.loadOfx", json!({"path": "x.ofx"})).is_err());
+    }
 }

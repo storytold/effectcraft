@@ -101,6 +101,15 @@ configuration from these Apache-2.0 projects:
 - `crates/segment/src/mobilesam.rs` follows the MobileSAM, TinyViT and Segment Anything
   architectures and their Apache-2.0 reference code.
 
+And from this BSD-3-Clause project:
+
+- `crates/ofx/src/ffi.rs` (and the test plug-in's `examples/ofx/ec-test-ofx/src/ffi.rs`) transcribe
+  the interface of the OpenFX API headers (`ofxCore.h`, `ofxProperty.h`, `ofxParam.h`,
+  `ofxImageEffect.h` and the other suite headers): struct layouts, status codes and property,
+  action and suite names. Copyright OpenFX and contributors to the OpenFX project (The Open Effects
+  Association / Academy Software Foundation), https://github.com/AcademySoftwareFoundation/openfx,
+  BSD-3-Clause. No host implementation code is copied.
+
 ## First-party brand marks
 
 The ArtCraft name, wordmark and logos are trademarks of the ArtCraft Team. They are not open source and are not

@@ -425,6 +425,14 @@ pub struct Session {
     /// Loads WebAssembly effect plug-ins (set by the host that links `effectcraft-plugin` with
     /// its runtime): `effect.plugins.load`.
     pub plugin_loader: Option<PluginLoader>,
+    /// Loads OpenFX plug-ins (native hosts built with the `openfx` feature link `effectcraft-ofx`):
+    /// `effect.plugins.loadOfx`, `effect.plugins.scanOfx`.
+    pub ofx_loader: Option<OfxLoader>,
+    /// Where `effect.plugins.scanOfx` looks for OpenFX plug-ins (the host's defaults).
+    pub ofx_search_paths: Vec<std::path::PathBuf>,
+    /// Forgets the OpenFX crash blocklist (plug-ins skipped because they crashed the app while
+    /// loading): `effect.plugins.scanOfx {"retry": true}`.
+    pub ofx_clear_blocklist: Option<fn()>,
     /// ScriptUI windows and panels opened by scripts (see [`scriptui`]).
     pub script_ui: scriptui::ScriptUi,
     /// The last physical-memory reading (Settings ▸ Memory & CPU budgets); `None` = unknown
@@ -482,6 +490,11 @@ pub type ScriptRunner = fn(&mut Session, &ScriptRequest) -> Value;
 /// describes it (`{id, name, category, version, api, params}`).
 pub type PluginLoader = fn(&[u8], &str) -> std::result::Result<Value, String>;
 
+/// Loads OpenFX plug-ins from a path (an `.ofx` binary, an `.ofx.bundle` folder, or a folder
+/// scanned recursively) into the effect registry and describes them
+/// (`{loaded: [{id, name, category, ofxId, context, bundle}], errors: [..]}`).
+pub type OfxLoader = fn(&str) -> std::result::Result<Value, String>;
+
 impl Default for Session {
     fn default() -> Self {
         let project = Arc::new(Project::default());
@@ -529,6 +542,9 @@ impl Default for Session {
             snapshot: None,
             script: None,
             plugin_loader: None,
+            ofx_loader: None,
+            ofx_search_paths: vec![],
+            ofx_clear_blocklist: None,
             script_ui: scriptui::ScriptUi::default(),
             sys_memory: None,
             key_move: None,

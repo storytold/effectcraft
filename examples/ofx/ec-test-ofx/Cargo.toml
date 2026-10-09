@@ -1,0 +1,17 @@
+[package]
+name = "ec-test-ofx"
+description = "Test OpenFX plug-in for EffectCraft's OFX host: Invert, Echo, Border, Mix and an all-parameter-types effect"
+version = "1.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Standalone (no dependencies): build with `cargo build --release` in this folder, then copy the
+# library to `ec-test-ofx.ofx.bundle/Contents/<Win64|Linux-x86-64|MacOS>/ec-test-ofx.ofx`.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+opt-level = 2

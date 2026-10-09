@@ -963,6 +963,7 @@ impl<'a> Renderer<'a> {
             working_space: self.pipe.space,
             working_linear: self.pipe.linear,
             shutter: self.mb_on(ctx, layer).then_some((ctx.comp.shutter_angle, ctx.comp.shutter_phase, ctx.comp.motion_blur_samples)),
+            layer_span: eval::layer_span(self.project, layer),
         };
         // Video effects in stack order (index, group, spec); disabled and audio effects skipped.
         let stack: Vec<(usize, &effectcraft_project::PropGroup, &'static effectcraft_effects::EffectSpec)> = fx

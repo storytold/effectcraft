@@ -1,6 +1,7 @@
 //! # effectcraft-plugin (L3)
 //!
-//! Loads **WebAssembly effect plug-ins** (plug-in API v1, see `docs/plugins.md`) into the effect
+//! Loads **WebAssembly effect plug-ins** (plug-in ABI v1, see `docs/plugins.md`; the native
+//! plug-in API 2 additions such as layer parameters and host services are not part of it) into the effect
 //! registry ([`effectcraft_effects::plugin`]). A plug-in is a `.wasm` (or `.wat`) module with
 //! no imports that exports:
 //!
@@ -59,7 +60,7 @@ pub fn loader(bytes: &[u8], source: &str) -> Result<serde_json::Value, String> {
         "name": spec.name,
         "category": spec.category,
         "version": m.as_ref().map(|m| m.version.clone()).unwrap_or_default(),
-        "api": PLUGIN_API_VERSION,
+        "api": m.as_ref().map(|m| m.api).unwrap_or(PLUGIN_API_VERSION),
         "params": spec.params.len(),
     }))
 }

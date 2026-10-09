@@ -23,3 +23,7 @@ effectcraft-time = { workspace = true }
 serde_json = { workspace = true }
 image = { workspace = true }
 cpu-time = "1"
+
+[features]
+# OpenFX image-effect plug-ins (docs/ofx.md): native code run without a sandbox. Off by default.
+openfx = ["effectcraft-host/openfx"]

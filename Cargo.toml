@@ -44,6 +44,7 @@ effectcraft-script = { path = "crates/script" }
 effectcraft-hevcenc = { path = "crates/hevcenc" }
 effectcraft-av1enc = { path = "crates/av1enc" }
 effectcraft-plugin = { path = "crates/plugin" }
+effectcraft-ofx = { path = "crates/ofx" }
 
 # foundation
 thiserror = "2"
@@ -51,6 +52,8 @@ serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 log = "0.4"
 rayon = "1"
+# Loads native OpenFX plug-in binaries (crates/ofx only; MIT/ISC)
+libloading = "0.8"
 # std::time::Instant/SystemTime on native; the browser clock on wasm32 (std's panic there).
 web-time = "1"
 gif = "0.14"

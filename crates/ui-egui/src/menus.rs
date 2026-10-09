@@ -1150,6 +1150,7 @@ fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) -> Option<Res
         "file.runScript" if params.get("name").is_none() => ("path", Ask::Open(&["jsx", "js", "jsonl", "json", "txt"])),
         "file.installScript" | "file.installScriptUIPanel" => ("path", Ask::Open(&["jsx", "js"])),
         "effect.plugins.load" if params.get("folder").is_none() => ("path", Ask::Open(&["wasm", "wat"])),
+        "effect.plugins.loadOfx" => ("path", Ask::Open(&["ofx"])),
         "file.replaceFootage" => ("path", Ask::Import),
         "file.collectFiles" => ("folder", Ask::Save("Collected Files")),
         "file.saveCopyAsXml" => ("path", Ask::Save("Untitled Project.ecprojx")),

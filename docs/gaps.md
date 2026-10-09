@@ -194,6 +194,10 @@ The most important missing piece: it turns every other estimate here into a meas
 - After Effects SDK plug-ins cannot run in EffectCraft. Our own WebAssembly plug-in API exists
   ([plugins.md](plugins.md)). Grow it: documentation, examples, and original effects that cover
   what the most common third-party plug-ins are used for (particles, glows, 3D objects, sabers).
+- OpenFX: builds with the opt-in `openfx` feature host OFX image-effect plug-ins ([ofx.md](ofx.md)),
+  the plug-in standard many vendors also ship (checked with RE:Vision RSMB and Twixtor and Boris FX
+  Sapphire on Windows). CPU only: no GPU rendering and no on-screen overlays yet; native code runs
+  without a sandbox, so it is off by default.
 - Features that come from third parties in After Effects are extensions in EffectCraft too, built
   on the same extension points as After Effects: scripts, ScriptUI panels and effect plug-ins
   ([plugins.md](plugins.md#extension-points-compared-with-after-effects) compares them). ScriptUI
