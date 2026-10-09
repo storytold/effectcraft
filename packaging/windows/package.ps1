@@ -93,7 +93,7 @@ Copy-Item (Join-Path $Bin 'effectcraft.exe'), (Join-Path $Bin 'effectcraft-cli.e
 # ---- MSI ---------------------------------------------------------------------------------------
 $Msi = Join-Path $Dist "effectcraft-$Version-windows-$Arch.msi"
 Invoke-Native 'wix build' {
-  wix build (Join-Path $PSScriptRoot 'effectcraft.wxs') -arch $Arch `
+  wix build (Join-Path $PSScriptRoot 'effectcraft.wxs') (Join-Path $PSScriptRoot 'installer-ui.wxs') -arch $Arch `
     -d "Version=$MsiVersion" -d "BinDir=$Stage" -d "IconPath=$(Join-Path $Root 'assets\app-icon\effectcraft.ico')" `
     -o $Msi
 }

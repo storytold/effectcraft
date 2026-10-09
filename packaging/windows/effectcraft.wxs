@@ -2,7 +2,7 @@
 <!--
   EffectCraft MSI (WiX Toolset v5: `dotnet tool install -g wix`). Built by package.ps1:
 
-    wix build effectcraft.wxs -arch x64 -d Version=1.2.3 -d BinDir=... -d IconPath=... -o out.msi
+    wix build effectcraft.wxs installer-ui.wxs -arch x64 -d Version=1.2.3 -d BinDir=... -d IconPath=... -o out.msi
 
   Per-machine install into Program Files (or a folder the user picks), a Start Menu shortcut, `.pcraft` owned by EffectCraft,
   and EffectCraft offered under "Open with" for PSD/PSB and the image formats it reads (without
@@ -23,6 +23,8 @@
     <MajorUpgrade AllowSameVersionUpgrades="yes"
         DowngradeErrorMessage="A newer version of EffectCraft is already installed." />
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+    <!-- The setup wizard (installer-ui.wxs): pick the folder on a fresh install. -->
+    <UIRef Id="EffectcraftUI" />
 
     <Icon Id="EffectcraftIcon.ico" SourceFile="$(var.IconPath)" />
     <Property Id="ARPPRODUCTICON" Value="EffectcraftIcon.ico" />
