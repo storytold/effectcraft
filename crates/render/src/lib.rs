@@ -681,18 +681,22 @@ impl<'a> Renderer<'a> {
         Region::Full
     }
 
-    /// Rasterisation scale of a layer's source: the output scale, or — for Continuously
-    /// Rasterize text and shape layers — the output scale times the layer's on-screen scale
-    /// (quarter-octave steps, rounded up, so vector content is drawn at its final size and
-    /// stays sharp when scaled up).
+    /// Rasterisation scale of a layer's source: the output scale, or — for text layers, which are
+    /// always continuously rasterised, and Continuously Rasterize shape layers and vector footage —
+    /// the output scale times the layer's on-screen scale (exactly for text; quarter-octave steps,
+    /// rounded up, for the rest), so vector content is drawn at its final size and stays sharp
+    /// when scaled up.
     pub fn raster_scale(&self, ctx: &EvalCtx, layer: &Layer) -> f64 {
         let s = self.opts.scale;
-        let vector = match layer.source {
-            LayerSource::Text | LayerSource::Shape => true,
-            LayerSource::Footage { item } => matches!(self.project.item(item).map(|i| &i.kind), Some(ItemKind::Footage(f)) if is_vector_footage(f)),
+        let continuous = match layer.source {
+            LayerSource::Text => true,
+            LayerSource::Shape => layer.switches.collapse,
+            LayerSource::Footage { item } => {
+                layer.switches.collapse && matches!(self.project.item(item).map(|i| &i.kind), Some(ItemKind::Footage(f)) if is_vector_footage(f))
+            }
             _ => false,
         };
-        if !layer.switches.collapse || !vector {
+        if !continuous {
             return s;
         }
         let (l2c, _) = ctx.layer_to_comp(layer);
@@ -705,7 +709,10 @@ impl<'a> Renderer<'a> {
         if !k.is_finite() || k <= 1e-6 {
             return s;
         }
-        let mut k = 2f64.powf((k.log2() * 4.0).ceil() / 4.0).clamp(1.0 / 16.0, 64.0);
+        // Text is drawn at exactly its on-screen scale: a scale animating across a quarter-octave
+        // step would otherwise switch resolution between nearly equal frames, and the text pops.
+        let k = if matches!(layer.source, LayerSource::Text) { k } else { 2f64.powf((k.log2() * 4.0).ceil() / 4.0) };
+        let mut k = k.clamp(1.0 / 16.0, 64.0);
         // Keep the buffer within about 16 million pixels.
         if let Some(b) = content_bounds(ctx, layer) {
             let area = ((b[2] - b[0]) * (b[3] - b[1])).max(1.0) * s * s;

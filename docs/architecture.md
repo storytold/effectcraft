@@ -354,8 +354,9 @@ hierarchical block-matching optical flow and a bidirectional warp (Pixel Motion,
 its nested layers straight into the parent with concatenated transforms (one resample), so
 nested blend modes and adjustment layers act on the parent's layers; nested 3D layers use the
 parent's camera and lights and, when the precomp layer is 3D, are depth-sorted with the parent's
-3D run. Masks, effects or styles force a flattened render. On text and shape layers the switch is
-Continuously Rasterize: the source is rasterised at its on-screen scale. Quality: Draft samples
+3D run. Masks, effects or styles force a flattened render. Text layers are always rasterised at
+exactly their on-screen scale, so animated scale never pops; on shape layers and vector footage the
+switch is Continuously Rasterize and does the same in quarter-octave steps. Quality: Draft samples
 nearest-neighbour, Wireframe draws the layer bounds. Slip edit (`layer.slip`, Alt+PageUp/Down,
 dragging the source bar in the timeline) moves the source under fixed in/out points.
 
