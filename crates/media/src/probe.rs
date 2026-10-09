@@ -1,31 +1,19 @@
 //! Probing: describe a file as an [`effectcraft_project::Footage`].
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use effectcraft_project::{AlphaMode, Footage, FootageKind};
 use effectcraft_time::{FrameRate, Tick};
 
-use crate::{MediaError, Result, STILL_EXTENSIONS, ext_of, rate_from_fc};
+use crate::{MediaError, Result, ext_of, rate_from_fc};
 
 /// Frame rate given to image sequences on import (After Effects' default preference).
 pub const DEFAULT_SEQUENCE_RATE: FrameRate = FrameRate::FPS_30;
 
-/// Probe a file. Stills whose name ends in a frame number (`shot_0001.png`) with at least one
-/// numbered sibling are imported as an image sequence; use [`probe_single`] to import one frame.
+/// Probe one file. Image sequences are made by the engine, which groups numbered stills
+/// (`effectcraft_engine::sequence`) and probes their first frame here.
 pub fn probe(path: impl AsRef<Path>) -> Result<Footage> {
-    let path = path.as_ref();
-    if STILL_EXTENSIONS.contains(&ext_of(path).as_str()) {
-        let files = sequence_files(path);
-        if files.len() >= 2 {
-            return probe_sequence(&files);
-        }
-    }
-    probe_single(path)
-}
-
-/// Probe a file without image-sequence detection.
-pub fn probe_single(path: impl AsRef<Path>) -> Result<Footage> {
     let path = path.as_ref();
     let bytes = std::fs::read(path).map_err(|e| MediaError::Io(format!("{}: {e}", path.display())))?;
     if crate::MODEL_EXTENSIONS.contains(&ext_of(path).as_str()) {
@@ -175,60 +163,4 @@ fn probe_still_bytes(path: &str, bytes: &[u8], fmt: image::ImageFormat) -> Resul
         }
     };
     Ok(still_footage(path, w, h, fmt, has_alpha))
-}
-
-fn probe_sequence(files: &[PathBuf]) -> Result<Footage> {
-    let first = &files[0];
-    let mut f = probe_single(first)?;
-    f.kind = FootageKind::Sequence;
-    f.frame_rate = DEFAULT_SEQUENCE_RATE;
-    f.duration = DEFAULT_SEQUENCE_RATE.tick_of(files.len() as i64);
-    f.sequence = files.iter().map(|p| p.to_string_lossy().to_string()).collect();
-    Ok(f)
-}
-
-/// Split a file stem into (prefix, frame number digits). `None` when it does not end in digits.
-fn split_number(stem: &str) -> Option<(&str, &str)> {
-    let digits = stem.bytes().rev().take_while(u8::is_ascii_digit).count();
-    (digits > 0).then(|| stem.split_at(stem.len() - digits))
-}
-
-/// The numbered files of the image sequence `path` belongs to (sorted by frame number; empty when
-/// the name has no frame number). Siblings must share the prefix and extension.
-pub fn sequence_files(path: impl AsRef<Path>) -> Vec<PathBuf> {
-    let path = path.as_ref();
-    let ext = ext_of(path);
-    let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { return Vec::new() };
-    let Some((prefix, _)) = split_number(stem) else { return Vec::new() };
-    let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
-    let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
-    let mut out: Vec<(u64, PathBuf)> = rd
-        .filter_map(|e| e.ok())
-        .filter_map(|e| {
-            let p = e.path();
-            if ext_of(&p) != ext || !p.is_file() {
-                return None;
-            }
-            let s = p.file_stem()?.to_str()?;
-            let (pre, num) = split_number(s)?;
-            if pre != prefix {
-                return None;
-            }
-            Some((num.parse().ok()?, p))
-        })
-        .collect();
-    out.sort();
-    out.into_iter().map(|(_, p)| p).collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn split_numbers() {
-        assert_eq!(split_number("shot_0012"), Some(("shot_", "0012")));
-        assert_eq!(split_number("shot"), None);
-        assert_eq!(split_number("v2_10"), Some(("v2_", "10")));
-    }
 }

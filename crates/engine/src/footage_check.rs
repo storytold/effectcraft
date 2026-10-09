@@ -51,6 +51,7 @@ pub fn start(s: &mut Session, items: Option<Vec<ItemId>>, wait: bool) -> crate::
     }
     let services = s.services.clone();
     let importer = s.importer.clone();
+    let rate = s.sequence_rate();
     let n = jobs.len();
     s.spawn_task("footageCheck", format!("Checking footage ({n} items)"), wait, move |ctl| {
         let mut found: Vec<(ItemId, Found)> = Vec::with_capacity(jobs.len());
@@ -69,7 +70,23 @@ pub fn start(s: &mut Session, items: Option<Vec<ItemId>>, wait: bool) -> crate::
             };
             // Saved without metadata (a hand-written or converted project): probe it now.
             let needs_probe = present && f.width == 0 && f.height == 0 && f.kind != FootageKind::Audio;
-            match importer.as_ref().filter(|_| needs_probe).map(|imp| imp.probe(&f.path)) {
+            let probed = importer.as_ref().filter(|_| needs_probe).map(|imp| match f.kind {
+                // A sequence keeps its files; its first one gives the metadata.
+                FootageKind::Sequence if !f.sequence.is_empty() => imp.probe(&f.path).map(|one| {
+                    let mut nf = Footage {
+                        width: one.width,
+                        height: one.height,
+                        pixel_aspect: one.pixel_aspect,
+                        has_video: one.has_video,
+                        codec: one.codec,
+                        ..f.clone()
+                    };
+                    nf.sync_sequence_duration();
+                    nf
+                }),
+                _ => crate::sequence::probe_path(imp.as_ref(), services.as_ref(), &f.path, rate),
+            });
+            match probed {
                 Some(Ok(mut nf)) => {
                     nf.alpha = f.alpha;
                     nf.loop_count = f.loop_count;

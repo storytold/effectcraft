@@ -9,8 +9,8 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::Instant;
 
-use effectcraft_media::{MediaPool, probe, probe_single};
-use effectcraft_project::{AlphaMode, FootageKind, ItemId};
+use effectcraft_media::{MediaPool, probe};
+use effectcraft_project::{AlphaMode, Footage, FootageKind, ItemId, MissingFrames};
 use effectcraft_raster::Image;
 use effectcraft_render::FootageSource;
 use effectcraft_time::{FrameRate, TICKS_PER_SECOND, Tick};
@@ -359,9 +359,12 @@ fn vp9_webm_frames() {
 #[test]
 fn png_sequence_import() {
     let Some(first) = png_sequence() else { return };
-    let f = probe(&first).expect("probe");
-    assert_eq!(f.kind, FootageKind::Sequence);
-    assert_eq!(f.sequence.len(), 10);
+    // One file probes as a still; the engine groups numbered files into the sequence.
+    let mut f = probe(&first).expect("probe");
+    assert_eq!(f.kind, FootageKind::Still);
+    f.kind = FootageKind::Sequence;
+    f.sequence = (1..=10).map(|n| first.with_file_name(format!("seq_{n:04}.png")).to_string_lossy().to_string()).collect();
+    f.sync_sequence_duration();
     assert_eq!((f.width, f.height), (320, 240));
     assert_eq!(f.duration, FrameRate::FPS_30.tick_of(10));
     let pool = MediaPool::new();
@@ -374,9 +377,43 @@ fn png_sequence_import() {
     looped.loop_count = 2;
     let img = pool.frame_at(&looped, t_of(f.frame_rate, 13)).expect("frame");
     assert_eq!(*img, load_png(&first.with_file_name("seq_0004.png")));
-    // a single frame of it
-    let one = probe_single(&first).expect("probe");
-    assert_eq!(one.kind, FootageKind::Still);
+}
+
+/// A gap in a sequence's numbering shows colour bars (Missing Frames ▸ Show Placeholder), the
+/// frame before it (Hold) or nothing at all (Skip: the files play back to back) (#297).
+#[test]
+fn sequence_gaps_show_placeholders_hold_or_close_up() {
+    let dir = fixtures().join(format!("gap-seq-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    // Frames 1, 2 and 4: frame 3 is missing. Each frame is a flat grey of its number.
+    let grey = |n: u8| image::RgbaImage::from_pixel(8, 4, image::Rgba([n * 50, n * 50, n * 50, 255]));
+    let mut files = vec![];
+    for n in [1u8, 2, 4] {
+        let p = dir.join(format!("gap_{n:03}.png"));
+        grey(n).save(&p).expect("write png");
+        files.push(p.to_string_lossy().to_string());
+    }
+    let mut f =
+        Footage { kind: FootageKind::Sequence, sequence: files, missing_frames: MissingFrames::Placeholder, ..probe(dir.join("gap_001.png")).expect("probe") };
+    f.sync_sequence_duration();
+    assert_eq!(f.duration, f.frame_rate.tick_of(4), "frames 1-4");
+    let pool = MediaPool::new();
+    let at = |f: &Footage, n: i64| pool.frame_at(f, t_of(f.frame_rate, n)).expect("frame");
+    let level = |img: &Image| (img.get(0, 0)[0] * 255.0).round() as u32;
+    assert_eq!(level(&at(&f, 1)), 100);
+    // The placeholder: colour bars across the frame, starting with 75 % white.
+    let bars = at(&f, 2);
+    assert_eq!((bars.width, bars.height), (8, 4));
+    assert_eq!(bars.get(0, 0), [0.75, 0.75, 0.75, 1.0]);
+    assert_eq!(bars.get(7, 3), [0.0, 0.0, 0.75, 1.0], "blue on the right");
+    assert_eq!(level(&at(&f, 3)), 200);
+    f.missing_frames = MissingFrames::Hold;
+    assert_eq!(level(&at(&f, 2)), 100, "holds frame 2");
+    f.missing_frames = MissingFrames::Skip;
+    f.sync_sequence_duration();
+    assert_eq!(f.duration, f.frame_rate.tick_of(3));
+    assert_eq!(level(&at(&f, 2)), 200, "frame 4 follows frame 2");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

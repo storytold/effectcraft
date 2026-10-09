@@ -120,9 +120,8 @@ fn file_info(s: &mut Session, p: &Value) -> Result<Value> {
     let path = str_p(p, "path").ok_or_else(|| bad("mediaBrowser.fileInfo", "missing `path`"))?;
     let (created, modified, size) = mb::file_dates(path);
     let mut v = json!({"path": path, "kind": mb::kind_of(path), "size": size, "created": created.map(mb::iso_date), "modified": modified.map(mb::iso_date)});
-    if let Some(imp) = s.importer.clone()
-        && matches!(mb::kind_of(path), Some("video" | "image" | "audio" | "model"))
-        && let Ok(f) = imp.probe(path)
+    if matches!(mb::kind_of(path), Some("video" | "image" | "audio" | "model"))
+        && let Ok(f) = s.probe_footage(path)
     {
         v["footage"] = mb::footage_metadata(&f);
     }

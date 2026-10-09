@@ -10,6 +10,7 @@ use effectcraft_time::{FrameRate, Tick};
 use serde_json::{Value, json};
 
 use super::{CommandSpec, always, b_p, bad, f_p, has_comp, has_project_selection, str_p};
+use crate::sequence::SequenceOptions;
 use crate::{EngineError, Result, Session, cmd};
 
 fn has_footage_selection(s: &Session) -> std::result::Result<(), String> {
@@ -552,6 +553,10 @@ pub(crate) struct Interpretation {
     fields: Option<effectcraft_project::FieldOrder>,
     profile: Option<Option<effectcraft_project::ColorSpace>>,
     linear: Option<bool>,
+    /// Image sequences: Missing Frames.
+    missing: Option<effectcraft_project::MissingFrames>,
+    /// Image sequences: Start Frame (`Some(None)` = the first file's number).
+    start: Option<Option<i64>>,
 }
 
 impl Interpretation {
@@ -598,12 +603,32 @@ impl Interpretation {
             None => None,
         };
         it.linear = super::b_p(p, "linearLight");
+        it.missing = match str_p(p, "missingFrames") {
+            Some(m) => Some(effectcraft_project::MissingFrames::parse(m).ok_or_else(|| bad(cmd, format!("missingFrames: placeholder|hold|skip, not `{m}`")))?),
+            None => None,
+        };
+        // Start Frame: a frame number, or "file" for the first file's.
+        it.start = match p.get("startFrame") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(f)) if f == "file" => Some(None),
+            Some(v) => Some(Some(
+                v.as_f64()
+                    .filter(|x| x.is_finite() && x.abs() <= 1.0e9)
+                    .map(|x| x.round() as i64)
+                    .ok_or_else(|| bad(cmd, "startFrame: a frame number (up to 1e9), or \"file\""))?,
+            )),
+        };
         Ok(it)
     }
 
     pub(crate) fn apply(&self, f: &mut Footage, guessed: Option<(AlphaMode, [f32; 3])>) {
         let before = f.frame_rate;
         self.apply_settings(f, guessed);
+        // A sequence's length is its frames (Missing Frames and Start Frame decide how many).
+        if f.kind == FootageKind::Sequence && !f.sequence.is_empty() {
+            f.sync_sequence_duration();
+            return;
+        }
         // Conforming keeps the frames and changes how long they last (12 frames at 30 fps are
         // 0.4 s; conformed to 12 fps, 1 s). Stills have no frame rate of their own.
         let (old, new) = (before.as_f64(), f.frame_rate.as_f64());
@@ -651,6 +676,16 @@ impl Interpretation {
         }
         if let Some(v) = self.linear {
             f.linear_light = v;
+        }
+        if f.kind == FootageKind::Sequence {
+            if let Some(m) = self.missing {
+                f.missing_frames = m;
+            }
+            if let Some(start) = self.start {
+                // The first file's own number needn't be stored (it follows the files).
+                let first = f.sequence.first().and_then(|p| effectcraft_project::sequence::frame_number(p));
+                f.start_frame = start.filter(|n| Some(*n) != first);
+            }
         }
     }
 }
@@ -728,7 +763,8 @@ fn interpret(s: &mut Session, p: &Value) -> Result<Value> {
             Some(ItemKind::Footage(f)) => Some(json!({
                 "item": i.0, "alpha": format!("{:?}", f.alpha), "matteColor": f.premul_color, "invertAlpha": f.invert_alpha,
                 "fields": f.fields.label(), "pixelAspect": f.pixel_aspect, "loop": f.loop_count, "frameRate": f.frame_rate.as_f64(),
-                "linearLight": f.linear_light,
+                "linearLight": f.linear_light, "missingFrames": f.missing_frames.id(), "startFrame": f.first_frame_number(),
+                "frames": f.sequence_frames(),
             })),
             _ => None,
         })
@@ -775,8 +811,11 @@ fn replace_footage(s: &mut Session, p: &Value) -> Result<Value> {
     let path = str_p(p, "path").ok_or_else(|| bad("file.replaceFootage", "missing `path`"))?.to_string();
     let item = *items_p(s, p).first().ok_or_else(|| bad("file.replaceFootage", "select footage"))?;
     let importer = s.importer.clone().ok_or_else(|| EngineError::Other("media import is not available in this build".into()))?;
-    let f = importer.probe(&path).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
-    let name = std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or(path.clone());
+    // A numbered still brings its image sequence, as on import (`sequence: false` for one frame).
+    let opts = SequenceOptions::from_params(p);
+    let src = crate::sequence::source_of(s.services.as_ref(), &path, opts);
+    let f = crate::sequence::probe(importer.as_ref(), &src, s.sequence_rate()).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+    let name = src.name();
     s.edit("Replace Footage", None, |proj, _| {
         let it = proj.item_mut(item).ok_or_else(|| bad("file.replaceFootage", "no such item"))?;
         it.name = name;
@@ -843,11 +882,14 @@ fn replace_with_solid(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn reload(s: &mut Session, p: &Value) -> Result<Value> {
     let items = items_p(s, p);
-    let Some(importer) = s.importer.clone() else { return Err(EngineError::Other("media import is not available in this build".into())) };
+    if s.importer.is_none() {
+        return Err(EngineError::Other("media import is not available in this build".into()));
+    }
     let mut updates = vec![];
     for i in &items {
         if let Some(ItemKind::Footage(f)) = s.project.item(*i).map(|x| &x.kind) {
-            let mut nf = match importer.probe(&f.path) {
+            // An image sequence picks up frames added to (or removed from) its run.
+            let mut nf = match s.probe_footage(&f.path) {
                 Ok(n) => n,
                 Err(_) => Footage { missing: true, ..f.clone() },
             };
@@ -855,6 +897,13 @@ fn reload(s: &mut Session, p: &Value) -> Result<Value> {
             nf.alpha = f.alpha;
             nf.loop_count = f.loop_count;
             nf.pixel_aspect = f.pixel_aspect;
+            if nf.kind == FootageKind::Sequence && f.kind == FootageKind::Sequence {
+                nf.frame_rate = f.frame_rate;
+                nf.native_rate = f.native_rate;
+                nf.missing_frames = f.missing_frames;
+                nf.start_frame = f.start_frame;
+                nf.sync_sequence_duration();
+            }
             updates.push((*i, nf));
         }
     }
@@ -954,7 +1003,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Main...",
             ["File", "Interpret Footage"],
             Some("Cmd+Alt+G"),
-            "{items?, frameRate?: fps|\"file\", alpha?: straight|premultiplied|ignore|guess, guessAlpha?, matteColor?, invertAlpha?, loop?, pixelAspect?, fields?: off|upper|lower, colorProfile?: srgb|rec709|rec2020|p3|auto, linearLight?}",
+            "{items?, frameRate?: fps|\"file\", alpha?: straight|premultiplied|ignore|guess, guessAlpha?, matteColor?, invertAlpha?, loop?, pixelAspect?, fields?: off|upper|lower, colorProfile?: srgb|rec709|rec2020|p3|auto, linearLight?, missingFrames?: placeholder|hold|skip (image sequences: what a gap in the numbering shows), startFrame?: number|\"file\" (image sequences: the frame number at the footage's first frame)}",
             has_footage_selection,
             interpret
         ),
@@ -976,7 +1025,15 @@ pub fn specs() -> Vec<CommandSpec> {
             has_interpretation,
             apply_interpretation
         ),
-        cmd!("file.replaceFootage", "File...", ["File", "Replace Footage"], Some("Cmd+H"), "{path, item?}", has_footage_selection, replace_footage),
+        cmd!(
+            "file.replaceFootage",
+            "File...",
+            ["File", "Replace Footage"],
+            Some("Cmd+H"),
+            "{path, item?, sequence?: bool (default true: a numbered still brings its image sequence), alphabetical?: bool}",
+            has_footage_selection,
+            replace_footage
+        ),
         cmd!(
             "file.replaceWithPlaceholder",
             "Placeholder...",

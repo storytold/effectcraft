@@ -1200,8 +1200,12 @@ fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) -> Option<Res
     if matches!(id, "file.import" | "file.importMultiple") {
         p.insert("background".into(), Value::Bool(true));
     }
-    // Photoshop files ask how to import them first.
-    if id == "file.import" && crate::panels::dialogs::open_form(app, id, &Value::Object(p.clone())) {
+    // Photoshop files ask how to import them first; numbered stills whether to import them as an
+    // image sequence.
+    let picked = Value::Object(p.clone());
+    if id == "file.import" && crate::panels::dialogs::open_form(app, id, &picked)
+        || matches!(id, "file.import" | "file.importMultiple") && crate::panels::forms::open_import_sequence(app, &picked)
+    {
         return Some(Ok(json!({"dialog": id})));
     }
     // Save (untitled) becomes Save As.

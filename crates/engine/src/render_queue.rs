@@ -608,8 +608,8 @@ impl Session {
         if item.post_render.is_none() {
             return Ok(None);
         }
-        let importer = self.importer.clone().ok_or("media import is not available in this build")?;
-        let footage = importer.probe(path)?;
+        // A rendered image sequence's first file brings the sequence.
+        let footage = self.probe_footage(path)?;
         if item.post_render == PostRenderAction::SetProxy {
             crate::commands::proxy_set(self, item.comp, footage).map_err(|e| e.to_string())?;
             self.toast(format!("Proxy set from {path}"));

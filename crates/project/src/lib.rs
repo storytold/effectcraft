@@ -11,6 +11,7 @@ pub mod essential;
 pub mod props;
 pub mod render_queue;
 pub mod render_templates;
+pub mod sequence;
 pub mod styles;
 pub mod tracking;
 
@@ -21,6 +22,7 @@ pub use effectcraft_color::ColorSpace;
 use effectcraft_color::{BlendMode, Label};
 use effectcraft_time::{FrameRate, Tick};
 pub use props::{Expression, FeatherFalloff, GroupKind, MaskMode, MaskMotionBlur, Node, ParamUi, PropGroup, Property, Uid, parse_path};
+pub use sequence::MissingFrames;
 use serde::{Deserialize, Serialize};
 
 pub use effectcraft_keyframe as keyframe;
@@ -963,6 +965,13 @@ pub struct Footage {
     /// PDF / Illustrator footage: the page shown (0-based; File ▸ Import ▸ Page).
     #[serde(default, skip_serializing_if = "is_default")]
     pub page: u32,
+    /// Image sequences: Interpret Footage ▸ Missing Frames ([`sequence`]).
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub missing_frames: MissingFrames,
+    /// Image sequences: Interpret Footage ▸ Start Frame, the frame number at the footage's first
+    /// frame (`None` = the first file's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_frame: Option<i64>,
 }
 
 fn is_default<T: Default + PartialEq>(v: &T) -> bool {
@@ -995,6 +1004,8 @@ impl Default for Footage {
             data: None,
             layer: None,
             page: 0,
+            missing_frames: MissingFrames::Skip,
+            start_frame: None,
         }
     }
 }

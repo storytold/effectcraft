@@ -237,10 +237,10 @@ fn import_export_helpers() {
     p.import.drag_import_as = "compLayerSizes".into();
     assert_eq!(p.drag_import_as(), "compositionLayerSizes");
     assert_eq!(
-        super::commands::missing_frames_for_tests(&["a_001.png".into(), "a_002.png".into(), "a_005.png".into(), "a_007.png".into()]).unwrap(),
+        crate::sequence::missing_report(&["a_001.png".into(), "a_002.png".into(), "a_005.png".into(), "a_007.png".into()]).unwrap(),
         "3 missing frames (3–4, 6)"
     );
-    assert!(super::commands::missing_frames_for_tests(&["a1.png".into(), "a2.png".into()]).is_none());
+    assert!(crate::sequence::missing_report(&["a1.png".into(), "a2.png".into()]).is_none());
     // Append Bit Depth to File Name.
     assert_eq!(p.output_name("/out/Comp 1.png", 16), "/out/Comp 1.png");
     p.export.append_bits_to_name = true;

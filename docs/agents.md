@@ -205,8 +205,12 @@ build real projects through these interfaces; they are worked examples of everyt
   then `keys.velocity {"outSpeed":0,"outInfluence":33.33}`.
 * **Gradients**: `set_property {"path":"contents/gfill/colors","value":["#0080ff","#ffff00"]}` or
   `{"colors":[[0,"#0080ff"],[1,[1,1,0]]],"opacities":[[0,1],[1,0.5]]}`.
-* **Image sequences** import at 30 fps (Settings ▸ Import); `file.interpretFootage {"items":[id],
-  "frameRate":12}` conforms them (the item and layers that ran to its end get the new length).
+* **Image sequences**: `file.import {"paths":["/r/shot_0001.png"]}` imports the file's whole
+  numbered run as one item (several picked frames: that range; a folder: each run in it;
+  `"sequence": false`: one still; `"alphabetical": true`: Force Alphabetical Order) at
+  `frameRate` or 30 fps (Settings ▸ Import). `file.interpretFootage {"items":[id],
+  "frameRate":12, "startFrame":1001}` conforms them (the
+  item and layers that ran to its end get the new length). See [footage.md](footage.md).
 * **Multi-layer OpenEXR**: `layer.channels {layer}` lists a footage layer's EXR layers and
   channels (`{"layers":[{"name":"diffuse","rgba":["diffuse.R","diffuse.G","diffuse.B",""]}]}`);
   EXtractoR shows them when its `red` / `green` / `blue` / `alpha` are set to those names

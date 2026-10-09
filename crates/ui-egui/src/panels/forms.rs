@@ -126,27 +126,74 @@ fn has(p: &Value, keys: &[&str]) -> bool {
     keys.iter().any(|k| p.get(*k).is_some())
 }
 
-/// If `id` is a dialog command invoked without its parameters, open its form and return true.
+/// The files of an import's parameters (`paths` or `path`).
+fn import_paths(p: &Value) -> Vec<String> {
+    match p.get("paths").or(p.get("path")) {
+        Some(Value::Array(a)) => a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
+        Some(Value::String(x)) => vec![x.clone()],
+        _ => vec![],
+    }
+}
+
+/// The import includes a file with one of these (lowercase) extensions.
+fn imports_ext(p: &Value, exts: &[&str]) -> bool {
+    import_paths(p).iter().any(|s| s.rsplit('.').next().is_some_and(|e| exts.contains(&e.to_ascii_lowercase().as_str())))
+}
+
 /// The import includes a Photoshop document.
 fn is_layered(p: &Value) -> bool {
-    let psd = |v: &Value| v.as_str().is_some_and(|s| matches!(s.rsplit('.').next().map(str::to_ascii_lowercase).as_deref(), Some("psd" | "psb")));
-    match p.get("paths").or(p.get("path")) {
-        Some(Value::Array(a)) => a.iter().any(psd),
-        Some(v) => psd(v),
-        None => false,
-    }
+    imports_ext(p, &["psd", "psb"])
 }
 
 /// The import includes a PDF or Illustrator file (which may have several pages).
 fn is_pdf(p: &Value) -> bool {
-    let pdf = |v: &Value| v.as_str().is_some_and(|s| matches!(s.rsplit('.').next().map(str::to_ascii_lowercase).as_deref(), Some("pdf" | "ai")));
-    match p.get("paths").or(p.get("path")) {
-        Some(Value::Array(a)) => a.iter().any(pdf),
-        Some(v) => pdf(v),
-        None => false,
-    }
+    imports_ext(p, &["pdf", "ai"])
 }
 
+/// File ▸ Import ▸ File… picked numbered stills that import as image sequences: ask, as After
+/// Effects' "<format> Sequence" checkbox in its Import dialog does (rfd's native dialog can't
+/// carry a checkbox), with Force Alphabetical Order and the frame rate. `p`: the import's
+/// parameters. Returns whether the dialog opened. Dropped files and agents' `file.import`
+/// don't ask (`sequence` defaults to on).
+pub fn open_import_sequence(app: &mut EffectcraftApp, p: &Value) -> bool {
+    if has(p, &["sequence", "alphabetical"]) {
+        return false;
+    }
+    let runs = effectcraft_engine::sequence::sequences(app.session.services.as_ref(), &import_paths(p), false);
+    if runs.is_empty() {
+        return false;
+    }
+    let fields = sequence_fields(app, &runs);
+    form(app, "Import Image Sequence", "file.import", p.clone(), fields);
+    true
+}
+
+/// The Import Image Sequence dialog's fields for `runs` (each a sequence's files).
+fn sequence_fields(app: &EffectcraftApp, runs: &[Vec<String>]) -> Vec<Field> {
+    use effectcraft_engine::project::sequence::sequence_name;
+    let first = runs.first().map(Vec::as_slice).unwrap_or_default();
+    let ext = first.first().and_then(|f| f.rsplit_once('.')).map(|(_, e)| e.to_ascii_uppercase()).unwrap_or_default();
+    let what = |files: &[String]| {
+        let name = sequence_name(files).unwrap_or_default();
+        match effectcraft_engine::sequence::missing_report(files) {
+            Some(gaps) => format!("{name}: {} files, {gaps}", files.len()),
+            None => format!("{name}: {} files", files.len()),
+        }
+    };
+    let note = match runs {
+        [one] => format!("{} – numbered stills of one image sequence.", what(one)),
+        _ => format!("{} image sequences: {}.", runs.len(), runs.iter().map(|r| what(r)).collect::<Vec<_>>().join("; ")),
+    };
+    vec![
+        Field::note("note", &note),
+        Field::bool("sequence", &format!("{ext} Sequence"), true),
+        Field::bool("alphabetical", "Force alphabetical order", false),
+        Field::num("frameRate", "Frame rate (fps)", app.session.prefs.import.sequence_fps),
+        Field::note("after", "Change the frame rate, alpha, missing frames and start frame later with File ▸ Interpret Footage."),
+    ]
+}
+
+/// If `id` is a dialog command invoked without its parameters, open its form and return true.
 pub fn open_form(app: &mut EffectcraftApp, id: &str, p: &Value) -> bool {
     let s = &app.session;
     let comp = s.active_comp();
@@ -346,7 +393,22 @@ pub fn open_form(app: &mut EffectcraftApp, id: &str, p: &Value) -> bool {
             ],
         ),
         "file.interpretFootage" | "file.interpretProxy"
-            if !has(p, &["frameRate", "alpha", "loop", "pixelAspect", "colorProfile", "fields", "invertAlpha", "matteColor", "linearLight"]) =>
+            if !has(
+                p,
+                &[
+                    "frameRate",
+                    "alpha",
+                    "loop",
+                    "pixelAspect",
+                    "colorProfile",
+                    "fields",
+                    "invertAlpha",
+                    "matteColor",
+                    "linearLight",
+                    "missingFrames",
+                    "startFrame",
+                ],
+            ) =>
         {
             let proxy = id == "file.interpretProxy";
             let f = s.state.project_selection.first().and_then(|i| s.project.item(*i)).and_then(|it| match (&it.kind, &it.proxy) {
@@ -356,53 +418,67 @@ pub fn open_form(app: &mut EffectcraftApp, id: &str, p: &Value) -> bool {
             });
             let Some(f) = f else { return false };
             let hex = |c: [f32; 3]| format!("#{:02x}{:02x}{:02x}", (c[0] * 255.0).round() as u8, (c[1] * 255.0).round() as u8, (c[2] * 255.0).round() as u8);
-            (
-                if proxy { "Interpret Footage: Proxy".into() } else { "Interpret Footage".into() },
-                vec![
-                    // Main Options ▸ Alpha.
-                    Field::choice(
-                        "alpha",
-                        "Alpha",
-                        &[
-                            ("Interpret Straight - Unmatted", json!("straight")),
-                            ("Interpret Premultiplied - Matted With Color", json!("premultiplied")),
-                            ("Ignore", json!("ignore")),
-                            ("Guess", json!("guess")),
-                        ],
-                        f.alpha as usize,
-                    ),
-                    Field::text("matteColor", "Matte color (premultiplied)", &hex(f.premul_color)),
-                    Field::bool("invertAlpha", "Invert Alpha", f.invert_alpha),
-                    // Main Options ▸ Frame Rate, Fields and Pulldown, Other Options.
-                    Field::num("frameRate", "Assume this frame rate", f.frame_rate.as_f64()),
-                    Field::choice(
-                        "fields",
-                        "Separate Fields",
-                        &[("Off", json!("off")), ("Upper Field First", json!("upper")), ("Lower Field First", json!("lower"))],
-                        f.fields as usize,
-                    ),
-                    Field::num("pixelAspect", "Pixel Aspect Ratio", f.pixel_aspect),
-                    Field::num("loop", "Loop (times)", f.loop_count as f64),
-                    // Color.
-                    Field::choice(
-                        "colorProfile",
-                        "Assign Profile",
-                        &[
-                            ("Embedded / sRGB", json!("auto")),
-                            ("sRGB IEC61966-2.1", json!("srgb")),
-                            ("HDTV (Rec. 709)", json!("rec709")),
-                            ("Rec. 2020", json!("rec2020")),
-                            ("Display P3", json!("p3")),
-                            ("ACEScg", json!("acescg")),
-                            ("ACES2065-1", json!("aces2065")),
-                            ("Rec. 2100 PQ", json!("rec2100pq")),
-                            ("Rec. 2100 HLG", json!("rec2100hlg")),
-                        ],
-                        f.color_profile.map_or(0, |c| 1 + effectcraft_engine::project::ColorSpace::ALL.iter().position(|x| *x == c).unwrap_or(0)),
-                    ),
-                    Field::bool("linearLight", "Interpret As Linear Light", f.linear_light),
-                ],
-            )
+            let mut fields = vec![
+                // Main Options ▸ Alpha.
+                Field::choice(
+                    "alpha",
+                    "Alpha",
+                    &[
+                        ("Interpret Straight - Unmatted", json!("straight")),
+                        ("Interpret Premultiplied - Matted With Color", json!("premultiplied")),
+                        ("Ignore", json!("ignore")),
+                        ("Guess", json!("guess")),
+                    ],
+                    f.alpha as usize,
+                ),
+                Field::text("matteColor", "Matte color (premultiplied)", &hex(f.premul_color)),
+                Field::bool("invertAlpha", "Invert Alpha", f.invert_alpha),
+                // Main Options ▸ Frame Rate, Fields and Pulldown, Other Options.
+                Field::num("frameRate", "Assume this frame rate", f.frame_rate.as_f64()),
+                Field::choice(
+                    "fields",
+                    "Separate Fields",
+                    &[("Off", json!("off")), ("Upper Field First", json!("upper")), ("Lower Field First", json!("lower"))],
+                    f.fields as usize,
+                ),
+                Field::num("pixelAspect", "Pixel Aspect Ratio", f.pixel_aspect),
+                Field::num("loop", "Loop (times)", f.loop_count as f64),
+                // Color.
+                Field::choice(
+                    "colorProfile",
+                    "Assign Profile",
+                    &[
+                        ("Embedded / sRGB", json!("auto")),
+                        ("sRGB IEC61966-2.1", json!("srgb")),
+                        ("HDTV (Rec. 709)", json!("rec709")),
+                        ("Rec. 2020", json!("rec2020")),
+                        ("Display P3", json!("p3")),
+                        ("ACEScg", json!("acescg")),
+                        ("ACES2065-1", json!("aces2065")),
+                        ("Rec. 2100 PQ", json!("rec2100pq")),
+                        ("Rec. 2100 HLG", json!("rec2100hlg")),
+                    ],
+                    f.color_profile.map_or(0, |c| 1 + effectcraft_engine::project::ColorSpace::ALL.iter().position(|x| *x == c).unwrap_or(0)),
+                ),
+                Field::bool("linearLight", "Interpret As Linear Light", f.linear_light),
+            ];
+            // Image sequences: what a gap in the numbering shows, and the first frame's number.
+            if f.kind == effectcraft_engine::project::FootageKind::Sequence {
+                use effectcraft_engine::project::MissingFrames;
+                let at = fields.iter().position(|x| x.key == "frameRate").map_or(fields.len(), |i| i + 1);
+                let gaps = effectcraft_engine::sequence::missing_report(&f.sequence).unwrap_or_else(|| "no missing frames".into());
+                let options: Vec<(&str, Value)> = MissingFrames::ALL.iter().map(|m| (m.label(), json!(m.id()))).collect();
+                let sel = MissingFrames::ALL.iter().position(|m| *m == f.missing_frames).unwrap_or(0);
+                fields.splice(
+                    at..at,
+                    [
+                        Field::note("sequenceInfo", &format!("Image sequence: {} files, {} frames; {gaps}.", f.sequence.len(), f.sequence_frames())),
+                        Field::choice("missingFrames", "Missing Frames", &options, sel),
+                        Field::num("startFrame", "Start Frame", f.first_frame_number() as f64),
+                    ],
+                );
+            }
+            (if proxy { "Interpret Footage: Proxy".into() } else { "Interpret Footage".into() }, fields)
         }
         "file.projectSettings" if p.as_object().is_none_or(|m| m.is_empty()) => {
             let st = &s.project.settings;
@@ -668,10 +744,20 @@ pub fn open_form(app: &mut EffectcraftApp, id: &str, p: &Value) -> bool {
 pub fn show_form(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     let mut f = app.dialog_state.form.clone();
     let (mut ok, mut close) = (false, false);
-    let h = 120.0 + f.fields.len() as f32 * 30.0;
+    // Rows are 30 px; a note wraps at about 40 characters a line, so OK and Cancel stay in view.
+    let rows: f32 = f
+        .fields
+        .iter()
+        .map(|fl| match &fl.kind {
+            FieldKind::Note(text) => 10.0 + 15.0 * (text.chars().count() as f32 / 40.0).ceil().max(1.0),
+            _ => 30.0,
+        })
+        .sum();
+    let h = 120.0 + rows;
     let mut regs: Vec<(String, egui::Rect, String)> = vec![];
     let mut browse: Option<usize> = None;
-    super::dialogs::modal(ctx, &f.title.clone(), vec2(440.0, h), t, |ui| {
+    // Wide enough for a label column and a 240 px popup without a horizontal scroll bar.
+    super::dialogs::modal(ctx, &f.title.clone(), vec2(480.0, h), t, |ui| {
         egui::Grid::new("form-grid").num_columns(2).spacing([14.0, 10.0]).show(ui, |ui| {
             for (i, fl) in f.fields.iter_mut().enumerate() {
                 ui.label(&fl.label);
@@ -705,7 +791,16 @@ pub fn show_form(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                         })
                         .inner
                     }
-                    FieldKind::Note(text) => ui.add(egui::Label::new(egui::RichText::new(text.as_str()).small()).wrap()).rect,
+                    // A fixed width: in the grid's value column a wrapping label would otherwise
+                    // shrink to a word per line.
+                    FieldKind::Note(text) => {
+                        ui.scope(|ui| {
+                            ui.set_width(220.0);
+                            ui.add(egui::Label::new(egui::RichText::new(text.as_str()).small()).wrap())
+                        })
+                        .inner
+                        .rect
+                    }
                     FieldKind::Bool(b) => ui.checkbox(b, "").rect,
                     FieldKind::Choice { options, sel } => {
                         let cur = options.get(*sel).map(|o| o.0.clone()).unwrap_or_default();

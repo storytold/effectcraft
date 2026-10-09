@@ -40,8 +40,11 @@ fn has_proxy(s: &Session) -> std::result::Result<(), String> {
 
 /// Probe a proxy file through the importer.
 fn probe(s: &Session, path: &str, cmd: &str) -> Result<Footage> {
-    let importer = s.importer.clone().ok_or_else(|| EngineError::Other("media import is not available in this build".into()))?;
-    let f = importer.probe(path).map_err(|e| bad(cmd, format!("{path}: {e}")))?;
+    if s.importer.is_none() {
+        return Err(EngineError::Other("media import is not available in this build".into()));
+    }
+    // The first frame of a proxy sequence (Create Proxy ▸ Movie renders one) brings the rest.
+    let f = s.probe_footage(path).map_err(|e| bad(cmd, format!("{path}: {e}")))?;
     if !f.has_video {
         return Err(bad(cmd, format!("{path} has no video to use as a proxy")));
     }

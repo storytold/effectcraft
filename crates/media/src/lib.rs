@@ -23,7 +23,7 @@ mod pool;
 mod probe;
 
 pub use pool::{DEFAULT_BUDGET, MediaPool, PoolStats};
-pub use probe::{DEFAULT_SEQUENCE_RATE, probe, probe_bytes, probe_model, probe_single, sequence_files};
+pub use probe::{DEFAULT_SEQUENCE_RATE, probe, probe_bytes, probe_model};
 
 /// Errors from probing or decoding footage.
 #[derive(Debug, thiserror::Error)]

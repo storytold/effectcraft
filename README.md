@@ -210,6 +210,9 @@ cargo run --release -p effectcraft-cli -- render --out intro.mp4    # render the
 cargo xtask web --serve 8765                # the browser build on http://127.0.0.1:8765/ (docs/web.md)
 ```
 
+New to it? [docs/footage.md](docs/footage.md) covers importing footage and image sequences and
+Interpret Footage.
+
 To work on it: `cargo test --workspace`, and `cargo xtask ci` before every commit (format, lints,
 tests, layering, asset attribution and the WebAssembly build). See [CONTRIBUTING.md](CONTRIBUTING.md),
 [docs/architecture.md](docs/architecture.md) and [docs/testing.md](docs/testing.md).

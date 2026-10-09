@@ -37,6 +37,7 @@ pub mod remote;
 pub mod render_queue;
 pub mod roto;
 pub mod scriptui;
+pub mod sequence;
 mod session_settings;
 pub mod shortcuts;
 pub mod storage;
@@ -110,6 +111,19 @@ pub trait Services: Send + Sync {
         }
         self.write_file(path, data)
     }
+    /// The files in folder `dir` (full paths; no folders, no hidden files), for image-sequence
+    /// detection on import. Empty when it can't be read.
+    fn list_dir(&self, dir: &str) -> Vec<String> {
+        let Ok(rd) = std::fs::read_dir(if dir.is_empty() { "." } else { dir }) else { return vec![] };
+        rd.filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_file()) && !e.file_name().to_string_lossy().starts_with('.'))
+            .map(|e| e.path().to_string_lossy().to_string())
+            .collect()
+    }
+    /// Whether `path` is a folder (dropped or picked folders import their files).
+    fn is_dir(&self, path: &str) -> bool {
+        std::path::Path::new(path).is_dir()
+    }
 }
 
 /// Native filesystem.
@@ -125,11 +139,15 @@ impl Services for FsServices {
 
 /// Imports media files into the project (implemented by the media layer).
 pub trait Importer: Send + Sync {
-    /// Probe a file and return footage metadata.
+    /// Probe one file and return footage metadata. Image sequences are the engine's
+    /// ([`sequence`]): it groups numbered stills and probes their first file here.
     fn probe(&self, path: &str) -> std::result::Result<effectcraft_project::Footage, String>;
     /// A footage file's bytes are now at `path` (extracted from a template): hosts whose media
     /// layer reads from memory (the browser) register them; file-based ones need nothing.
     fn register(&self, _path: &str, _data: &[u8]) {}
+    /// An image sequence's other frames (its first was probed) are footage now: hosts whose
+    /// media layer reads from memory (the browser) register them; file-based ones need nothing.
+    fn add_frames(&self, _paths: &[String]) {}
 }
 
 /// A keyframe reference: layer, property uid, key time (layer time).
@@ -1012,6 +1030,8 @@ mod tests_project_items;
 mod tests_proxy;
 #[cfg(test)]
 mod tests_rig3d;
+#[cfg(test)]
+mod tests_sequence;
 #[cfg(test)]
 mod tests_settings;
 #[cfg(test)]

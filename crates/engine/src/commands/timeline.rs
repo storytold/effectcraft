@@ -40,11 +40,12 @@ fn import_timeline(s: &mut Session, p: &Value) -> Result<Value> {
     };
     let importer = s.importer.clone();
     let services = s.services.clone();
+    let rate = s.sequence_rate();
     let mut probe = move |m: &str| -> Option<effectcraft_project::Footage> {
         if !services.exists(m) {
             return None;
         }
-        importer.as_ref()?.probe(m).ok()
+        crate::sequence::probe_path(importer.as_deref()?, services.as_ref(), m, rate).ok()
     };
     let res = s.edit("Import Timeline", None, |proj, st| {
         let r = effectcraft_interchange::import(proj, &bytes, format, &opts, &mut probe).map_err(|e| EngineError::Other(e.to_string()))?;

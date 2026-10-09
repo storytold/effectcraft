@@ -257,3 +257,109 @@ fn dropped_files_show_import_progress_then_the_items_they_made() {
 fn card_id(h: &Harness<'_, EffectcraftApp>) -> String {
     h.state().auto.query("import.job.").first().map(|e| e.id.clone()).unwrap_or_default()
 }
+
+/// Probes any existing file as a 64×32 PNG still.
+struct Stills;
+
+impl effectcraft_engine::Importer for Stills {
+    fn probe(&self, path: &str) -> Result<effectcraft_engine::project::Footage, String> {
+        if !std::path::Path::new(path).is_file() {
+            return Err(format!("{path}: no such file"));
+        }
+        Ok(effectcraft_engine::project::Footage { path: path.into(), width: 64, height: 32, has_video: true, codec: "PNG".into(), ..Default::default() })
+    }
+}
+
+/// A fresh folder holding empty `frame_0001.png` … `frame_000<n>.png`.
+fn frames(tag: &str, n: u32) -> std::path::PathBuf {
+    let d = std::env::temp_dir().join(format!("ec-ui-seq-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    for k in 1..=n {
+        std::fs::write(d.join(format!("frame_{k:04}.png")), b"").unwrap();
+    }
+    d
+}
+
+fn click_id(h: &mut Harness<'_, EffectcraftApp>, id: &str) {
+    // A dialog that just opened settles its size and place in a frame or two.
+    h.run_steps(3);
+    let p = rect(h, id).center();
+    h.event(Event::PointerMoved(p));
+    h.step();
+    h.event(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    h.step();
+    h.event(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.run_steps(2);
+}
+
+/// (name, sequence files) of every footage item.
+fn footage_items(h: &Harness<'_, EffectcraftApp>) -> Vec<(String, usize)> {
+    h.state()
+        .session
+        .project
+        .items
+        .values()
+        .filter_map(|i| match &i.kind {
+            effectcraft_engine::project::ItemKind::Footage(f) => Some((i.name.clone(), f.sequence.len())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// #297: File ▸ Import ▸ File… on one numbered still asks, as After Effects' "PNG Sequence"
+/// checkbox does, whether to import its whole run as one image sequence (and at what frame
+/// rate); unticked, the file imports as a still.
+#[test]
+fn import_dialog_offers_the_image_sequence_option() {
+    let (mut h, _) = harness();
+    let dir = frames("dialog", 3);
+    let pick = dir.join("frame_0002.png").to_string_lossy().to_string();
+    h.state_mut().session.importer = Some(Arc::new(Stills));
+    h.state_mut().hooks.pick_files = Some(Box::new(move |_: &[&str]| vec![pick.clone()]));
+    let ctx = h.ctx.clone();
+    effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "file.import", json!({})).unwrap();
+    h.run_steps(2);
+    assert_eq!(h.state().dialog, Some(effectcraft_ui_egui::Dialog::Form));
+    let label = |h: &Harness<'_, EffectcraftApp>, id: &str| h.state().auto.find(id).map(|e| e.label.clone());
+    assert_eq!(label(&h, "form.field.sequence").as_deref(), Some("PNG Sequence"));
+    assert!(label(&h, "form.field.alphabetical").is_some() && label(&h, "form.field.frameRate").is_some());
+    assert!(footage_items(&h).is_empty(), "nothing imported before OK");
+    click_id(&mut h, "form.ok");
+    step_until(&mut h, |h| !footage_items(h).is_empty());
+    assert_eq!(footage_items(&h), [("frame_[0001-0003].png".to_string(), 3)]);
+
+    // Unticked: the picked file alone, as a still.
+    effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "file.import", json!({})).unwrap();
+    h.run_steps(2);
+    click_id(&mut h, "form.field.sequence");
+    click_id(&mut h, "form.ok");
+    step_until(&mut h, |h| footage_items(h).len() == 2);
+    assert_eq!(footage_items(&h)[1], ("frame_0002.png".to_string(), 0));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #297: every frame of a sequence dropped on the window arrives as one image sequence (it used
+/// to make one item per frame), and Interpret Footage shows its Missing Frames and Start Frame.
+#[test]
+fn dropped_frames_import_as_one_sequence_with_sequence_interpretation() {
+    let (mut h, _) = harness();
+    let dir = frames("drop", 4);
+    h.state_mut().session.importer = Some(Arc::new(Stills));
+    for k in 1..=4 {
+        h.input_mut().dropped_files.push(Arc::new(Dropped(dir.join(format!("frame_{k:04}.png")))));
+    }
+    h.run_steps(2);
+    step_until(&mut h, |h| !footage_items(h).is_empty());
+    h.run_steps(2);
+    assert_eq!(footage_items(&h), [("frame_[0001-0004].png".to_string(), 4)]);
+    assert!(h.state().dialog.is_none(), "drops don't ask");
+    // Interpret Footage on it (the import selected it).
+    let ctx = h.ctx.clone();
+    effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "file.interpretFootage", json!({})).unwrap();
+    h.run_steps(2);
+    for id in ["form.field.missingFrames", "form.field.startFrame", "form.field.frameRate", "form.field.alpha"] {
+        assert!(h.state().auto.find(id).is_some(), "{id}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
