@@ -177,7 +177,6 @@ fn effect_scrubbing_uses_adaptive_resolution_and_settles_on_release() {
     h.state_mut().session.execute("layer.select", json!({"layers":[id.0]})).unwrap();
     h.state_mut().session.execute("effect.apply", json!({"effect":"Gaussian Blur"})).unwrap();
     h.state_mut().session.execute("view.fastPreviewMode", json!({"mode":"adaptive"})).unwrap();
-    h.state_mut().ui.viewer.res = effectcraft_ui_egui::state::Resolution::Auto;
     let ctx = h.ctx.clone();
     effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "window.panel", json!({"panel":"effectControls"})).unwrap();
     h.run_steps(3);
@@ -188,12 +187,12 @@ fn effect_scrubbing_uses_adaptive_resolution_and_settles_on_release() {
     h.run_steps(2);
     assert!(h.state().ui.viewer.property_interacting);
     assert!(h.state().viewer_scale(1.0, 1.0) < 1.0);
-    h.state_mut().ui.viewer.res = effectcraft_ui_egui::state::Resolution::Full;
+    h.state_mut().session.execute("view.res.full", json!({})).unwrap();
     assert_eq!(h.state().viewer_scale(1.0, 1.0), 1.0);
     pointer(&mut h, a + vec2(30.0, 0.0), false, Modifiers::NONE);
     h.run_steps(2);
     assert!(!h.state().ui.viewer.property_interacting);
-    h.state_mut().ui.viewer.res = effectcraft_ui_egui::state::Resolution::Auto;
+    h.state_mut().session.execute("view.res.auto", json!({})).unwrap();
     assert_eq!(h.state().viewer_scale(1.0, 1.0), 1.0);
 }
 

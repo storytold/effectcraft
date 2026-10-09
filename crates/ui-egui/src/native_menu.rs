@@ -310,7 +310,6 @@ pub fn state_key(app: &EffectcraftApp) -> u64 {
     s.keymaps.active.hash(&mut h);
     let v = &app.ui.viewer;
     (v.rulers, v.guides, v.snap_guides, v.lock_guides, v.grid, v.snap_grid, v.show_layer_controls, v.pasteboard).hash(&mut h);
-    v.res.label().hash(&mut h);
     (app.ui.cache_when_idle, app.session.prefs.preview.active().include_audio, &app.ui.workspace, app.dialog.is_some()).hash(&mut h);
     h.finish()
 }

@@ -283,6 +283,71 @@ pub enum Renderer {
     Advanced3D,
 }
 
+/// A composition's Resolution (the Composition panel's Resolution/Down Sample Factor popup, View ▸
+/// Resolution): how many of its pixels the viewer renders. Auto follows the magnification.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Resolution {
+    #[default]
+    Auto,
+    Full,
+    Half,
+    Third,
+    Quarter,
+    /// View ▸ Resolution ▸ Custom: render every n-th pixel (2..=40).
+    Custom(u8),
+}
+
+impl Resolution {
+    pub const ALL: [Resolution; 5] = [Resolution::Auto, Resolution::Full, Resolution::Half, Resolution::Third, Resolution::Quarter];
+    pub fn label(self) -> &'static str {
+        match self {
+            Resolution::Auto => "Auto",
+            Resolution::Full => "Full",
+            Resolution::Half => "Half",
+            Resolution::Third => "Third",
+            Resolution::Quarter => "Quarter",
+            Resolution::Custom(_) => "Custom",
+        }
+    }
+    pub fn is_auto(&self) -> bool {
+        *self == Resolution::Auto
+    }
+    /// The down-sample factor (render every n-th pixel); `None` for Auto.
+    pub fn factor(self) -> Option<u8> {
+        match self {
+            Resolution::Auto => None,
+            Resolution::Full => Some(1),
+            Resolution::Half => Some(2),
+            Resolution::Third => Some(3),
+            Resolution::Quarter => Some(4),
+            Resolution::Custom(n) => Some(n),
+        }
+    }
+    /// The resolution that renders every `n`-th pixel (1 = Full … 4 = Quarter; up to 40).
+    pub fn from_factor(n: u64) -> Resolution {
+        match n.clamp(1, 40) {
+            1 => Resolution::Full,
+            2 => Resolution::Half,
+            3 => Resolution::Third,
+            4 => Resolution::Quarter,
+            n => Resolution::Custom(n as u8),
+        }
+    }
+    /// Render scale for a viewer magnification (and display pixel density).
+    pub fn scale(self, zoom: f32, ppp: f32) -> f64 {
+        match self.factor() {
+            Some(n) => 1.0 / f64::from(n.clamp(1, 40)),
+            // As in After Effects, Auto renders the pixels the magnification needs: the coarsest
+            // whole factor that still gives every screen pixel a rendered one (Full above 50 %,
+            // Half down to 33.3 %, Third down to 25 %, Quarter below), never fewer (#417).
+            None => {
+                let n = (1.0 / (zoom * ppp) as f64 + 1e-3).floor();
+                if n >= 1.0 { 1.0 / n.min(4.0) } else { 1.0 }
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Comp {
     pub width: u32,
@@ -336,6 +401,11 @@ pub struct Comp {
     /// Essential Graphics: the controls this comp exposes to instances and templates.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub essential: Option<essential::EssentialGraphics>,
+    /// The Composition panel's Resolution, saved with the project as in After Effects. It changes
+    /// what the viewer renders, not the comp's pixels ([`Comp::same_pixels`]), and stays out of
+    /// the undo history.
+    #[serde(default, skip_serializing_if = "Resolution::is_auto")]
+    pub resolution: Resolution,
 }
 
 /// A viewer guide line: vertical guides sit at an x position, horizontal ones at a y position.
@@ -381,6 +451,7 @@ impl Comp {
             guides: vec![],
             global_light: styles::GlobalLight::default(),
             essential: None,
+            resolution: Resolution::Auto,
         }
     }
     /// Whether the composition has a frame at its time `t`: nested, it shows nothing before it
@@ -680,8 +751,8 @@ impl Layer {
 }
 
 impl Comp {
-    /// Draws the same pixels as `o`: equal but for its layers' Audio, Lock and Shy switches and
-    /// Hide Shy Layers.
+    /// Draws the same pixels as `o`: equal but for its layers' Audio, Lock and Shy switches, Hide
+    /// Shy Layers and the viewer's Resolution.
     pub fn same_pixels(&self, o: &Comp) -> bool {
         // Every field (no `..`: a new field must be considered here); the layers last.
         let Comp {
@@ -710,6 +781,7 @@ impl Comp {
             global_light,
             guides,
             essential,
+            resolution: _,
         } = self;
         *width == o.width
             && *height == o.height
@@ -738,14 +810,15 @@ impl Comp {
             && layers.iter().zip(&o.layers).all(|(a, b)| a.same_pixels(b))
     }
 
-    /// The comp with those switches at their defaults (borrowed when they already are), for
-    /// keys that hash the whole comp.
+    /// The comp with those switches and the Resolution at their defaults (borrowed when they
+    /// already are), for keys that hash the whole comp.
     pub fn pixel_form(&self) -> std::borrow::Cow<'_, Comp> {
-        if !self.hide_shy && self.layers.iter().all(|l| l.switches == l.switches.pixels()) {
+        if !self.hide_shy && self.resolution.is_auto() && self.layers.iter().all(|l| l.switches == l.switches.pixels()) {
             return std::borrow::Cow::Borrowed(self);
         }
         let mut c = self.clone();
         c.hide_shy = false;
+        c.resolution = Resolution::Auto;
         for l in &mut c.layers {
             l.switches = l.switches.pixels();
         }

@@ -180,6 +180,10 @@ build real projects through these interfaces; they are worked examples of everyt
 * **Nested comps**: `comp.settings {preserveFrameRate, preserveResolution}` (Composition Settings ▸
   Advanced); `comp.info` / `get_comp` report both. A precomp layer shows nothing outside its
   nested comp's span.
+* **Viewer Resolution** belongs to each comp and is saved with the project, as in After Effects:
+  `view.res.full|half|third|quarter|auto {comp?}` or `view.res.custom {factor: 1..40, comp?}`
+  (headless too; no undo step, the project becomes modified). `comp.info` reports `resolution`
+  and `resolutionFactor` (`null` for Auto).
 * **Several footage items at once**: `file.newCompFromSelection {single, dimensionsFrom, duration,
   sequence, overlap, overlapDuration, transition, addToRenderQueue}` is one undo step (select the
   items first: `project.select`).

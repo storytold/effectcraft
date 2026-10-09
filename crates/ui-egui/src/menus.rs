@@ -34,7 +34,6 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     uic!("playback.stop", "Stop", [], None),
     uic!("view.fit", "Fit", [], Some("Shift+/")),
     uic!("view.actualSize", "100%", [], Some("/")),
-    uic!("view.res.auto", "Resolution: Auto", [], None),
     uic!("viewer.nudge.up", "Move Selected Layers Up 1 Pixel at Current Magnification", [], Some("ArrowUp")),
     uic!("viewer.nudge.down", "Move Selected Layers Down 1 Pixel at Current Magnification", [], Some("ArrowDown")),
     uic!("viewer.nudge.left", "Move Selected Layers Left 1 Pixel at Current Magnification", [], Some("ArrowLeft")),
@@ -459,10 +458,6 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
         crate::panels::markers_ui::open_dialog(app, crate::panels::markers_ui::MarkerRef { layer, index })?;
         return Ok(json!({"dialog": id}));
     }
-    if id == "view.res.auto" {
-        app.ui.viewer.res = Resolution::Auto;
-        return Ok(Value::Null);
-    }
     if let Some(th) = id.strip_prefix("view.theme.") {
         let k = crate::theme::ThemeKind::from_name(th).ok_or("unknown theme")?;
         app.set_theme(ctx, k);
@@ -825,33 +820,19 @@ pub fn frontend(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, p: Valu
             v.zoom = Some(next);
             json!({"zoom": next})
         }
-        "view.res.full" | "view.res.half" | "view.res.third" | "view.res.quarter" => {
-            let r = id.trim_start_matches("view.res.");
-            v.res = Resolution::ALL.into_iter().find(|x| x.label().eq_ignore_ascii_case(r)).ok_or("unknown resolution")?;
-            Value::Null
-        }
+        // View ▸ Resolution ▸ Custom without a factor (the engine sets the comp's resolution).
         "view.res.custom" => {
-            match p.get("factor").and_then(Value::as_u64) {
-                Some(n) => {
-                    v.res = match n.clamp(1, 40) {
-                        1 => Resolution::Full,
-                        n => Resolution::Custom(n as u8),
-                    };
-                }
-                None => {
-                    let cur = match v.res {
-                        Resolution::Custom(n) => n as f64,
-                        _ => 2.0,
-                    };
-                    crate::panels::dialogs::form(
-                        app,
-                        "Custom Resolution",
-                        "view.res.custom",
-                        json!({}),
-                        vec![crate::panels::dialogs::Field::num("factor", "Render every n-th pixel", cur)],
-                    );
-                }
-            }
+            let cur = match app.viewer_res() {
+                Resolution::Custom(n) => f64::from(n),
+                _ => 2.0,
+            };
+            crate::panels::dialogs::form(
+                app,
+                "Custom Resolution",
+                "view.res.custom",
+                json!({}),
+                vec![crate::panels::dialogs::Field::num("factor", "Render every n-th pixel", cur)],
+            );
             Value::Null
         }
         "view.rulers" => toggle(&mut v.rulers, &p),
@@ -1274,9 +1255,6 @@ pub(crate) fn entry_checked(app: &EffectcraftApp, e: &MenuEntry) -> Option<bool>
         "view.layerControls" => Some(v.show_layer_controls),
         "playback.cacheWhenIdle" => Some(app.ui.cache_when_idle),
         "playback.audio" => Some(app.session.prefs.preview.active().include_audio),
-        "view.res.full" | "view.res.half" | "view.res.third" | "view.res.quarter" => {
-            Some(v.res.label().eq_ignore_ascii_case(e.command.trim_start_matches("view.res.")))
-        }
         "window.workspace" => Some(pstr("name").is_some_and(|n| n == app.ui.workspace)),
         "view.panelBackground" if e.params.get("pick").is_none() => {
             let cur = match v.pasteboard {

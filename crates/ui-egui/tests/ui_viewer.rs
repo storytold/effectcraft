@@ -162,6 +162,56 @@ fn viewer_press_prefers_a_selected_layer_under_the_pointer() {
     assert_eq!(h.state().session.state.selected_layers, vec![front], "nothing selected: the topmost layer");
 }
 
+/// Each composition keeps its Resolution, saved with the project as in After Effects: chosen for
+/// comp A in the viewer's popup, it is still A's after showing comp B, costs no undo step, keeps
+/// A's cached frames and is read back from the saved file (#417).
+#[test]
+fn each_comp_keeps_its_viewer_resolution() {
+    use effectcraft_ui_egui::state::Resolution;
+    let mut h = harness();
+    let a = h.state().session.active_comp_id().unwrap();
+    let content = |h: &Harness<'_, EffectcraftApp>, c| {
+        let s = h.state();
+        s.frames.content_of(&s.session.project, s.session.revision, c)
+    };
+    let (before, steps) = (content(&h, a), h.state().session.history.undo.len());
+    for id in ["viewer.resolution", "viewer.resolutionItem.1"] {
+        let at = rect(&h, id).center();
+        click(&mut h, at);
+    }
+    assert_eq!(h.state().viewer_res(), Resolution::Half);
+    assert_eq!(h.state().session.project.comp(a).unwrap().resolution, Resolution::Half);
+    assert_eq!(h.state().session.history.undo.len(), steps, "no undo step");
+    assert_eq!(content(&h, a), before, "the comp's cached frames stay valid");
+    // Comp B starts at Auto and gets its own (here through the control channel's `ui.set`).
+    h.state_mut().session.execute("comp.new", json!({"name": "Other", "width": 320, "height": 180, "duration": 2})).unwrap();
+    h.run_steps(3);
+    let b = h.state().session.active_comp_id().unwrap();
+    assert_ne!(a, b);
+    assert_eq!(h.state().viewer_res(), Resolution::Auto);
+    let (req, _reply) = effectcraft_ui_egui::control::ControlRequest::new("ui.set", json!({"viewer": {"res": "quarter"}}));
+    let ctx = h.ctx.clone();
+    let _ = effectcraft_ui_egui::control::handle(h.state_mut(), &ctx, &req);
+    assert_eq!(h.state().viewer_res(), Resolution::Quarter);
+    let ctx = h.ctx.clone();
+    assert_eq!(effectcraft_ui_egui::control::inspect(h.state(), &ctx)["ui"]["viewer"]["res"], json!("Quarter"));
+    // Back to comp A: its resolution again.
+    h.state_mut().session.open_comp(a);
+    h.run_steps(3);
+    assert_eq!(h.state().viewer_res(), Resolution::Half);
+    assert!(h.state().viewer_scale(1.0, 1.0) == 0.5);
+    // Saved and opened again.
+    let path = std::env::temp_dir().join(format!("ec-viewer-res-{}.ecproj", std::process::id()));
+    h.state_mut().session.execute("file.saveAs", json!({"path": path.to_string_lossy()})).unwrap();
+    let mut s = Session::default();
+    s.execute("file.open", json!({"path": path.to_string_lossy()})).unwrap();
+    let _ = std::fs::remove_file(&path);
+    s.open_comp(b);
+    let app = EffectcraftApp::new(s);
+    assert_eq!(app.viewer_res(), Resolution::Quarter);
+    assert_eq!(app.session.project.comp(a).unwrap().resolution, Resolution::Half);
+}
+
 #[test]
 fn bottom_bar_in_after_effects_order() {
     let h = harness();
@@ -1610,7 +1660,7 @@ fn full_resolution_frames_wider_than_the_texture_limit_fit() {
     let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
     // (egui's font atlas needs 1024.)
     h.input_mut().max_texture_side = Some(1024);
-    h.state_mut().ui.viewer.res = effectcraft_ui_egui::state::Resolution::Full;
+    h.state_mut().session.execute("view.res.full", json!({})).unwrap();
     let full = |h: &mut Harness<'_, EffectcraftApp>| h.state_mut().viewer_pixels().is_some_and(|px| px.size == [2400, 400]);
     for _ in 0..400 {
         h.step();
@@ -1619,6 +1669,6 @@ fn full_resolution_frames_wider_than_the_texture_limit_fit() {
         }
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
-    assert!(full(&mut h), "the full-size frame is shown (and stays readable): {:?}", h.state().ui.viewer.res);
+    assert!(full(&mut h), "the full-size frame is shown (and stays readable): {:?}", h.state().viewer_res());
     assert_eq!(h.state().viewer_texture_size(), Some([800, 134]), "2400×400 averaged by 3");
 }

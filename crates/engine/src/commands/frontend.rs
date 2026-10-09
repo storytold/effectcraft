@@ -1,4 +1,4 @@
-//! Frontend-only commands: viewer zoom/resolution/overlays, panels, workspaces, dialogs and app
+//! Frontend-only commands: viewer zoom/overlays, panels, workspaces, dialogs and app
 //! chrome. They live in the registry so every menu entry is a command (menus, shortcuts, the
 //! control channel and MCP all see them); running one emits [`crate::Event::Frontend`] and the UI
 //! performs it. Headless sessions accept and ignore them.
@@ -57,11 +57,6 @@ pub fn specs() -> Vec<CommandSpec> {
         // Viewer.
         fe!("view.zoomIn", "Zoom In", ["View"], Some("."), "{}", has_comp),
         fe!("view.zoomOut", "Zoom Out", ["View"], Some(","), "{}", has_comp),
-        fe!("view.res.full", "Full", ["View", "Resolution"], Some("Cmd+J"), "{}", has_comp),
-        fe!("view.res.half", "Half", ["View", "Resolution"], Some("Cmd+Shift+J"), "{}", has_comp),
-        fe!("view.res.third", "Third", ["View", "Resolution"], None, "{}", has_comp),
-        fe!("view.res.quarter", "Quarter", ["View", "Resolution"], Some("Cmd+Alt+Shift+J"), "{}", has_comp),
-        fe!("view.res.custom", "Custom...", ["View", "Resolution"], None, "{factor?: 1..40 (render every n-th pixel)}", has_comp),
         fe!("view.rulers", "Show Rulers", ["View"], Some("Cmd+R"), "{value?}", always),
         fe!("view.panelBackground", "Panel Background Color", [], None, "{color?: black|darkGray|mediumGray|lightGray|white|custom|#hex, pick?: true}", always),
         fe!("view.guides", "Show Guides", ["View"], Some("Cmd+;"), "{value?}", always),

@@ -172,7 +172,10 @@ options are never shown. When the budget (Settings ▸ Memory & CPU) is full the
 shown frames go first, and frames of an older revision are dropped as soon as the project
 changes. The timeline's green bar counts the frames of exactly what the viewer shows.
 Resolution Auto renders the pixels the magnification needs, as in After Effects (Full above
-50 %, Half down to 33.3 %, Third down to 25 %, then Quarter). Below 100 % the viewer averages
+50 %, Half down to 33.3 %, Third down to 25 %, then Quarter). The Resolution is the comp's
+(`Comp::resolution`, saved with the project): setting it is no undo step (undo, redo and history
+jumps carry the current values over) and, like the Shy switches, it is outside
+`Comp::same_pixels`, so cached frames stay valid. Below 100 % the viewer averages
 instead of skipping pixels (Viewer Zoom Quality More Accurate): GPU frames carry a mip chain
 sampled trilinearly, CPU frames go up averaged down by the whole factor that leaves about one
 texel per screen pixel.

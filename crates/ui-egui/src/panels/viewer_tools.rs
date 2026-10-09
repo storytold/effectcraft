@@ -574,14 +574,14 @@ pub(crate) fn bottom_bar(app: &mut EffectcraftApp, ui: &mut egui::Ui, bar: Rect,
     // Resolution / down-sample factor.
     let r = Rect::from_min_size(pos2(x, cy - 10.0), vec2(84.0, 20.0));
     let scale = app.viewer_scale(zoom, ppp);
-    if widgets::dropdown(ui, r, &resolution_label(app.ui.viewer.res, scale), &t, egui::Id::new("vw-res"))
+    let res = app.viewer_res();
+    if widgets::dropdown(ui, r, &resolution_label(res, scale), &t, egui::Id::new("vw-res"))
         .on_hover_text(crate::i18n::tr("Resolution/Down Sample Factor Popup"))
         .clicked()
     {
         toggle_popup(ui, "vw-res-pop");
     }
     app.auto.add("viewer.resolution", r, "Resolution/Down Sample Factor");
-    let res = app.ui.viewer.res;
     let items: Vec<(String, bool)> = vec![
         ("Full".into(), res == Resolution::Full),
         ("Half".into(), res == Resolution::Half),

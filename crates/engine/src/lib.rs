@@ -650,9 +650,38 @@ impl Session {
         self.events.push(Event::ProjectChanged { revision: self.revision });
     }
 
+    /// Set a comp's Resolution. As in After Effects it is saved with the project (which becomes
+    /// modified) but is no undo step, and it changes no pixels: the comp's cached frames stay
+    /// valid ([`effectcraft_project::Comp::same_pixels`]).
+    pub fn set_resolution(&mut self, comp: ItemId, r: effectcraft_project::Resolution) -> Result<()> {
+        if self.project.comp(comp).ok_or(EngineError::NoComp)?.resolution == r {
+            return Ok(());
+        }
+        Arc::make_mut(&mut self.project).comp_mut(comp).ok_or(EngineError::NoComp)?.resolution = r;
+        self.bump();
+        Ok(())
+    }
+
+    /// Keep what lives outside the undo history (each comp's Resolution) as it is in `from`, the
+    /// project before undo, redo or a history jump restored another state.
+    pub(crate) fn keep_view_settings(&mut self, from: &Project) {
+        let keep: Vec<(ItemId, effectcraft_project::Resolution)> =
+            self.project.comps().filter_map(|(id, c)| from.comp(*id).map(|f| (*id, f.resolution)).filter(|(_, r)| *r != c.resolution)).collect();
+        if keep.is_empty() {
+            return;
+        }
+        let p = Arc::make_mut(&mut self.project);
+        for (id, r) in keep {
+            if let Some(c) = p.comp_mut(id) {
+                c.resolution = r;
+            }
+        }
+    }
+
     pub fn undo(&mut self) -> bool {
         let Some((label, p)) = self.history.undo.pop() else { return false };
         let cur = std::mem::replace(&mut self.project, p);
+        self.keep_view_settings(&cur);
         self.history.redo.push((label, cur));
         self.history.merge_key = None;
         self.sanitize_state();
@@ -663,6 +692,7 @@ impl Session {
     pub fn redo(&mut self) -> bool {
         let Some((label, p)) = self.history.redo.pop() else { return false };
         let cur = std::mem::replace(&mut self.project, p);
+        self.keep_view_settings(&cur);
         self.history.undo.push((label, cur));
         self.history.merge_key = None;
         self.sanitize_state();
