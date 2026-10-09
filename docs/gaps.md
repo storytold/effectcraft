@@ -80,6 +80,12 @@ The most important missing piece: it turns every other estimate here into a meas
   Project items, multiple selection and undo. They check that an unrelated Timeline layer stays,
   an empty Project selection does nothing, viewer focus still deletes layers, and typing or
   dialogs do not delete items.
+- Regression evidence for [#484](https://github.com/storytold/effectcraft/issues/484): the
+  `shift_delete_*` input tests in `ui_project_delete`, checked headlessly on Windows, press
+  Shift+Delete both as a key and as the Cut event Windows sends for it. Items in use go without
+  the prompt, with their layers, in one undo step, for single items, multiple selections and
+  folder contents. Nothing happens with an empty selection, in other panels, while typing or with
+  a dialog open, and the next Delete still asks.
 - Regression evidence for the reports of 6 October, checked headlessly on Windows: real pointer
   drags in `ui_drag_drop` (Project items into the Timeline between layers and at a time, and onto
   the viewer; an effect onto a layer in the viewer: #85, #88, #89), `ui_render_queue` (a template
