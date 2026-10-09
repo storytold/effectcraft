@@ -9,7 +9,7 @@
     2. upgrades to 0.0.2 without naming a folder: it must stay in that folder (found from the
        installed effectcraft.exe, as there is no Path value yet),
     3. upgrades to 0.0.3 the same way (found from the Path value 0.0.2 wrote),
-    4. repairs a deleted file there,
+    4. repairs a damaged (unversioned) CLI there with the wizard's Repair mode,
     5. uninstalls: files and the App Paths registration go,
     6. installs 0.0.3 with no folder: it must land in Program Files, then uninstalls.
   The wizard itself needs a person (or the snapshot steps in the PR); this covers what msiexec /qn
@@ -54,9 +54,11 @@ function Assert-InstalledIn([string] $Dir, [switch] $NoPathValue) {
 Remove-Item -Recurse -Force $Work -ErrorAction SilentlyContinue
 $Bin = Join-Path $Work 'bin'
 New-Item -ItemType Directory -Force -Path $Bin | Out-Null
-# Any GUI and console executables will do: the MSI only copies them.
+# The MSI only copies these. The app is versioned (it embeds VERSIONINFO); the real CLI has no
+# version resource, so its stand-in is an unversioned file too: Windows Installer keeps a changed
+# unversioned file on repair unless the repair mode forces it.
 Copy-Item (Join-Path $env:SystemRoot 'System32\notepad.exe') (Join-Path $Bin 'effectcraft.exe')
-Copy-Item (Join-Path $env:SystemRoot 'System32\whoami.exe') (Join-Path $Bin 'effectcraft-cli.exe')
+[IO.File]::WriteAllText((Join-Path $Bin 'effectcraft-cli.exe'), 'effectcraft-cli stand-in')
 
 # 0.0.1 stands in for 0.6.0 and earlier: the same package without the App Paths "Path" value.
 $Wxs = Join-Path $PSScriptRoot 'effectcraft.wxs'
@@ -97,9 +99,19 @@ $arp = @(Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstal
   ForEach-Object { if ($_.GetValue('DisplayName') -eq 'EffectCraft') { $_.GetValue('DisplayVersion') } })
 if ($arp.Count -ne 1 -or $arp[0] -ne '0.0.3') { throw "expected one EffectCraft 0.0.3 in Apps, found: $($arp -join ', ')" }
 
-Remove-Item -LiteralPath (Join-Path $Custom 'effectcraft-cli.exe')
-Invoke-Msiexec 'repair' @('/fa', "`"$($Msi['0.0.3'])`"")
+# Repair the way the wizard's Repair button does: damage the CLI in place (a later write time, as a
+# user edit or corruption would have), repair with the wizard's REINSTALLMODE, compare contents.
+$mode = [regex]::Match((Get-Content -Raw (Join-Path $PSScriptRoot 'installer-ui.wxs')), 'Event="ReinstallMode" Value="([^"]+)"').Groups[1].Value
+if (-not $mode) { throw 'no ReinstallMode in installer-ui.wxs' }
+$cli = Join-Path $Custom 'effectcraft-cli.exe'
+Start-Sleep -Seconds 2
+[IO.File]::WriteAllText($cli, 'damaged')
+Invoke-Msiexec "repair ($mode)" @('/i', "`"$($Msi['0.0.3'])`"", 'REINSTALL=ALL', "REINSTALLMODE=$mode")
 Assert-InstalledIn $Custom
+if ((Get-FileHash -LiteralPath $cli).Hash -ne (Get-FileHash -LiteralPath (Join-Path $Bin 'effectcraft-cli.exe')).Hash) {
+  throw "repair ($mode) left the damaged effectcraft-cli.exe in place"
+}
+Write-Output "ok repair ($mode) restored effectcraft-cli.exe"
 
 Invoke-Msiexec 'uninstall the custom install' @('/x', "`"$($Msi['0.0.3'])`"")
 if (Test-Path -LiteralPath (Join-Path $Custom 'effectcraft.exe')) { throw 'uninstall left effectcraft.exe behind' }

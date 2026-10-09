@@ -90,7 +90,10 @@
         <Control Id="Title" Type="Text" X="20" Y="15" Width="330" Height="20" Transparent="yes" NoPrefix="yes" Text="{\EcTitle}[ProductName] is already installed" />
         <Control Id="Description" Type="Text" X="20" Y="45" Width="330" Height="24" NoPrefix="yes" Text="Repair puts back missing or damaged files in its folder. Remove uninstalls it; your projects are not touched." />
         <Control Id="Repair" Type="PushButton" X="20" Y="80" Width="80" Height="20" Default="yes" ElevationShield="yes" Text="&amp;Repair">
-          <Publish Event="ReinstallMode" Value="ecmus" Order="1" />
+          <!-- "a": put back every file, whatever its version or date. With "e"/"o" a changed
+               unversioned file (effectcraft-cli.exe has no version resource) counts as a user edit
+               and is kept, and "c" only checks files that carry an MSI checksum. -->
+          <Publish Event="ReinstallMode" Value="amus" Order="1" />
           <Publish Event="Reinstall" Value="ALL" Order="2" />
           <Publish Event="EndDialog" Value="Return" Order="3" />
         </Control>
