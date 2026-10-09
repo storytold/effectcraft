@@ -1,0 +1,4 @@
+{
+  "edit_allow": ["*"],
+  "bash_allow": ["*"]
+}

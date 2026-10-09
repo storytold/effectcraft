@@ -454,3 +454,33 @@ fn mcp_autosave_is_opt_in_and_rejects_invalid_combinations() {
     assert!(!String::from_utf8_lossy(&out.stderr).contains("panicked"));
     std::fs::remove_dir_all(config).unwrap();
 }
+
+/// `render --bitrate` (#440) targets the bitrate in VP9 WebM, which otherwise encodes to a quality.
+#[test]
+fn render_bitrate_applies_to_vp9_webm() {
+    let root = tmp("webm-bitrate");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let project = root.join("x.ecproj");
+    let p = project.to_str().unwrap();
+    ok_json(&[
+        "run",
+        "comp.new",
+        r##"{"name":"T","width":320,"height":180,"duration":1}"##,
+        "layer.newSolid",
+        r##"{"width":320,"height":180}"##,
+        "effect.apply",
+        r##"{"layer":"#1","effect":"ec.noise.fractal"}"##,
+        "--empty",
+        "--save-as",
+        p,
+    ]);
+    let size = |kbps: &str| {
+        let out = root.join(format!("b{kbps}.webm"));
+        ok_json(&["render", "--project", p, "--start", "0", "--end", "0.5", "--bitrate", kbps, "--out", out.to_str().unwrap()]);
+        std::fs::metadata(&out).unwrap().len()
+    };
+    let (low, high) = (size("100"), size("8000"));
+    assert!(high > low, "100 kbps: {low} bytes, 8000 kbps: {high} bytes");
+    let _ = std::fs::remove_dir_all(&root);
+}

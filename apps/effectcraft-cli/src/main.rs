@@ -670,6 +670,10 @@ fn render(args: &Args, json_out: bool) -> Result<(), Failure> {
         }
         if let Some(v) = args.num("--bitrate")? {
             p["bitrate"] = json!(v);
+            // VP9 WebM encodes by quality unless told to target the bitrate (#440).
+            if p["format"].as_str().is_some_and(|f| f.eq_ignore_ascii_case("webm")) {
+                p["webmBitrate"] = json!(true);
+            }
         }
         for (flag, key) in [
             ("--profile", "profile"),
