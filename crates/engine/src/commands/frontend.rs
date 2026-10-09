@@ -106,5 +106,15 @@ pub fn specs() -> Vec<CommandSpec> {
         fe!("layer.openLayer", "Open Layer", ["Layer"], None, "{layer?}", has_layers),
         fe!("effect.manage", "Manage Effects...", ["Effect"], None, "{}", always),
         fe!("anim.browsePresets", "Browse Presets...", ["Animation"], None, "{}", always),
+        // Project panel: delete the selected items without the prompt that Delete shows when
+        // compositions use them. The UI runs `project.delete` (agents can run it directly).
+        fe!(
+            "project.deleteWithoutConfirmation",
+            "Delete Project Items Without Confirmation",
+            [],
+            Some("Shift+Delete"),
+            "{} — the Project panel's selection, with the layers that use it; one undo step",
+            always
+        ),
     ]
 }
