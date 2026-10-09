@@ -715,7 +715,8 @@ pub fn frontend(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, p: Valu
             Value::Null
         }
         "app.quit" => {
-            std::process::exit(0);            
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            Value::Null          
         }
         "app.commandPalette" => {
             app.dialog_state.palette_query = p.get("query").and_then(Value::as_str).unwrap_or_default().to_string();
