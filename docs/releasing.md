@@ -66,6 +66,13 @@ jobs are refused by the environment's branch rule, and no draft release is made.
 The ARM64 MSI is installed and run on ARM64 hardware by
 [`windows-arm64.yml`](../.github/workflows/windows-arm64.yml).
 
+The MSI's setup wizard ([`installer-ui.wxs`](../packaging/windows/installer-ui.wxs)) lets people
+choose the install folder; upgrades and repairs reuse it, and `INSTALLFOLDER="..."` picks it for a
+silent (`/qn`) install. [`packaging-lint.yml`](../.github/workflows/packaging-lint.yml) install-tests
+that with stub binaries ([`test-msi.ps1`](../packaging/windows/test-msi.ps1)): a custom folder,
+an upgrade that keeps it, a repair, uninstall, and the Program Files default. The wizard pages
+themselves are checked by hand.
+
 Every binary reports its version: `effectcraft --version`, `effectcraft-cli --version` and
 *Help › About EffectCraft*.
 
