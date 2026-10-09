@@ -523,7 +523,7 @@ impl Inner {
                 let i = Self::frame_index(footage.frame_rate, t, footage.sequence_frames(), footage.loop_count);
                 match footage.sequence_file(i) {
                     Some(path) => Loc { key: key(path, 0), media_t: None },
-                    // A gap in the numbering (Missing Frames ▸ Show Placeholder).
+                    // A gap in the numbering: colour bars, as in After Effects.
                     None => Loc { key: key(PLACEHOLDER, ((footage.width as i64) << 32) | footage.height as i64), media_t: None },
                 }
             }

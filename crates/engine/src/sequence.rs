@@ -12,7 +12,7 @@
 //! picking every frame of a sequence imports it there too.
 
 use effectcraft_project::sequence::{frame_number, missing_frame_ranges, sequence_name, split_frame_number};
-use effectcraft_project::{Footage, FootageKind, MissingFrames};
+use effectcraft_project::{Footage, FootageKind};
 use effectcraft_time::FrameRate;
 
 use crate::{Importer, Services};
@@ -186,8 +186,8 @@ pub fn sequences(services: &dyn Services, paths: &[String], alphabetical: bool) 
 }
 
 /// Probe what a [`Source`] makes. A sequence is its first file's footage with every file, at
-/// `rate`, showing gaps in its numbering as placeholders (or closing them up when
-/// alphabetical).
+/// `rate`, showing gaps in its numbering as placeholders, as in After Effects (in Force
+/// Alphabetical Order the files play one after another).
 pub fn probe(importer: &dyn Importer, src: &Source, rate: FrameRate) -> Result<Footage, String> {
     let Source::Sequence { files, alphabetical } = src else { return importer.probe(src.path()) };
     let mut f = importer.probe(src.path())?;
@@ -196,7 +196,7 @@ pub fn probe(importer: &dyn Importer, src: &Source, rate: FrameRate) -> Result<F
     }
     f.kind = FootageKind::Sequence;
     f.sequence = files.clone();
-    f.missing_frames = if *alphabetical { MissingFrames::Skip } else { MissingFrames::Placeholder };
+    f.alphabetical = *alphabetical;
     f.start_frame = None;
     f.frame_rate = rate;
     f.native_rate = None;

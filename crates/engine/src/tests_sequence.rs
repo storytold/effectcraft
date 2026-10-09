@@ -1,8 +1,8 @@
 //! Image sequences (#297): File ▸ Import with the "<format> Sequence" option, picked ranges,
-//! folders, Force Alphabetical Order, the import frame rate, Replace Footage, and Interpret
-//! Footage ▸ Missing Frames / Start Frame.
+//! folders, Force Alphabetical Order, the import frame rate, Replace Footage, missing frames
+//! (placeholders, as in After Effects) and Interpret Footage ▸ Start Frame.
 
-use effectcraft_project::{Footage, FootageKind, ItemId, ItemKind, MissingFrames};
+use effectcraft_project::{Footage, FootageKind, ItemId, ItemKind};
 use effectcraft_time::{FrameRate, Tick};
 use serde_json::{Value, json};
 
@@ -58,7 +58,7 @@ fn one_picked_numbered_file_imports_its_run_as_one_sequence() {
     assert_eq!(r["items"].as_array().unwrap().len(), 1, "{r}");
     let (name, f) = footage(&s, &r["items"][0]);
     assert_eq!(name, "shot_[0001-0005].png");
-    assert_eq!((f.kind, f.sequence.len(), f.missing_frames), (FootageKind::Sequence, 4, MissingFrames::Placeholder));
+    assert_eq!((f.kind, f.sequence.len(), f.alphabetical), (FootageKind::Sequence, 4, false));
     assert_eq!(f.path, at(&dir, "shot_0001.png"));
     // Frames 1–5 at Settings ▸ Import ▸ Sequence Footage (30 fps); frame 3 is a placeholder.
     assert_eq!(f.duration, FrameRate::FPS_30.tick_of(5));
@@ -118,11 +118,13 @@ fn force_alphabetical_order_takes_every_image_of_the_type() {
     let (name, f) = footage(&s, &r["items"][0]);
     let files: Vec<String> = f.sequence.iter().map(|p| crate::sequence::file_name(p)).collect();
     assert_eq!(files, ["other_7.png", "take_a.png", "take_b.png"]);
-    assert_eq!((name.as_str(), f.missing_frames), ("other_7.png", MissingFrames::Skip));
+    // Its numbering doesn't count: the files play one after another.
+    assert_eq!((name.as_str(), f.alphabetical, f.sequence_frames()), ("other_7.png", true, 3));
+    assert!(r["warnings"].as_array().is_none_or(Vec::is_empty), "{r}");
 }
 
 #[test]
-fn interpret_footage_sets_missing_frames_and_start_frame() {
+fn interpret_footage_sets_start_frame() {
     let dir = folder(&RUN);
     let mut s = session();
     let item = s.execute("file.import", json!({"paths": [at(&dir, "shot_0001.png")]})).unwrap()["items"][0].clone();
@@ -130,15 +132,11 @@ fn interpret_footage_sets_missing_frames_and_start_frame() {
     let layer = s.execute("layer.addItem", json!({"item": item})).unwrap()["layer"].as_u64().unwrap();
     let out = |s: &Session| s.active_comp().unwrap().layer(effectcraft_project::LayerId(layer)).unwrap().out_point;
     assert_eq!(out(&s), FrameRate::FPS_30.tick_of(5));
-    // Hold: the gap shows frame 2; the length stays 5 frames.
-    let r = s.execute("file.interpretFootage", json!({"items": [item], "missingFrames": "hold"})).unwrap();
-    assert_eq!((r["items"][0]["missingFrames"].as_str(), r["items"][0]["frames"].as_i64()), (Some("hold"), Some(5)));
-    assert_eq!(footage(&s, &item).1.sequence_file(2).map(crate::sequence::file_name).as_deref(), Some("shot_0002.png"));
-    // Skip: 4 frames, and the layer that ran to the end still does.
-    s.execute("file.interpretFootage", json!({"items": [item], "missingFrames": "skip"})).unwrap();
+    // Start Frame 2 trims frame 1: 4 frames, and the layer that ran to the end still does.
+    s.execute("file.interpretFootage", json!({"items": [item], "startFrame": 2})).unwrap();
     assert_eq!((footage(&s, &item).1.duration, out(&s)), (FrameRate::FPS_30.tick_of(4), FrameRate::FPS_30.tick_of(4)));
-    // Start Frame 0 with placeholders: frame 0 is missing, 6 frames in all.
-    let r = s.execute("file.interpretFootage", json!({"items": [item], "missingFrames": "placeholder", "startFrame": 0})).unwrap();
+    // Start Frame 0: frame 0 is missing (a placeholder), 6 frames in all.
+    let r = s.execute("file.interpretFootage", json!({"items": [item], "startFrame": 0})).unwrap();
     assert_eq!((r["items"][0]["startFrame"].as_i64(), r["items"][0]["frames"].as_i64()), (Some(0), Some(6)));
     assert_eq!(footage(&s, &item).1.sequence_file(0), None);
     // The first file's own number isn't stored; "file" goes back to it.
@@ -150,7 +148,7 @@ fn interpret_footage_sets_missing_frames_and_start_frame() {
     // The frame rate re-times the frames.
     s.execute("file.interpretFootage", json!({"items": [item], "frameRate": 10})).unwrap();
     assert_eq!(footage(&s, &item).1.duration, Tick::from_seconds_f64(0.5));
-    for bad in [json!({"missingFrames": "blank"}), json!({"startFrame": "x"}), json!({"startFrame": 1e300})] {
+    for bad in [json!({"startFrame": "x"}), json!({"startFrame": 1e300})] {
         let mut p = bad.clone();
         p["items"] = json!([item]);
         assert!(s.execute("file.interpretFootage", p).is_err(), "{bad}");
@@ -170,10 +168,10 @@ fn replace_footage_and_reload_keep_sequences() {
     let (name, f) = footage(&s, &item);
     assert_eq!((name.as_str(), f.sequence.len()), ("shot_[0001-0005].png", 4));
     // Reload finds a new frame and keeps the interpretation.
-    s.execute("file.interpretFootage", json!({"items": [item], "frameRate": 12, "missingFrames": "hold"})).unwrap();
+    s.execute("file.interpretFootage", json!({"items": [item], "frameRate": 12, "startFrame": 2})).unwrap();
     std::fs::write(at(&dir, "shot_0003.png"), b"").unwrap();
     s.execute("file.reloadFootage", json!({"items": [item]})).unwrap();
     let (_, f) = footage(&s, &item);
-    assert_eq!((f.sequence.len(), f.frame_rate, f.missing_frames), (5, FrameRate::from_f64(12.0), MissingFrames::Hold));
-    assert_eq!(f.duration, FrameRate::from_f64(12.0).tick_of(5));
+    assert_eq!((f.sequence.len(), f.frame_rate, f.start_frame), (5, FrameRate::from_f64(12.0), Some(2)));
+    assert_eq!(f.duration, FrameRate::from_f64(12.0).tick_of(4));
 }

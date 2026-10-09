@@ -108,7 +108,7 @@ Commands (CLI, MCP, control channel):
 - `type.recentFonts`: how many recently used fonts head the font menu
 - `type.fontNamesInEnglish`: off, fonts with a native-language family name show it
 - `import.reportMissingFrames`: gaps in an image sequence's numbering are reported on import
-  (they show as placeholders; Interpret Footage ▸ Missing Frames, see [footage.md](footage.md))
+  (they show as colour-bar placeholders, as in After Effects; see [footage.md](footage.md))
 - `import.unlabeledAlpha`: alpha of TGA / TIFF / movie footage (Ask opens Interpret Footage;
   Guess takes premultiplied for movies, straight for stills)
 - `import.dragImportAs`: layered files dropped on the window import as footage or a comp

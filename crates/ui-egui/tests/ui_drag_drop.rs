@@ -340,7 +340,8 @@ fn import_dialog_offers_the_image_sequence_option() {
 }
 
 /// #297: every frame of a sequence dropped on the window arrives as one image sequence (it used
-/// to make one item per frame), and Interpret Footage shows its Missing Frames and Start Frame.
+/// to make one item per frame), and Interpret Footage shows its Start Frame (missing frames
+/// always show colour bars, as in After Effects: there is no Missing Frames choice).
 #[test]
 fn dropped_frames_import_as_one_sequence_with_sequence_interpretation() {
     let (mut h, _) = harness();
@@ -358,8 +359,9 @@ fn dropped_frames_import_as_one_sequence_with_sequence_interpretation() {
     let ctx = h.ctx.clone();
     effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "file.interpretFootage", json!({})).unwrap();
     h.run_steps(2);
-    for id in ["form.field.missingFrames", "form.field.startFrame", "form.field.frameRate", "form.field.alpha"] {
+    for id in ["form.field.sequenceInfo", "form.field.startFrame", "form.field.frameRate", "form.field.alpha"] {
         assert!(h.state().auto.find(id).is_some(), "{id}");
     }
+    assert!(h.state().auto.find("form.field.missingFrames").is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }

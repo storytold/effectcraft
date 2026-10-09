@@ -553,8 +553,6 @@ pub(crate) struct Interpretation {
     fields: Option<effectcraft_project::FieldOrder>,
     profile: Option<Option<effectcraft_project::ColorSpace>>,
     linear: Option<bool>,
-    /// Image sequences: Missing Frames.
-    missing: Option<effectcraft_project::MissingFrames>,
     /// Image sequences: Start Frame (`Some(None)` = the first file's number).
     start: Option<Option<i64>>,
 }
@@ -603,10 +601,6 @@ impl Interpretation {
             None => None,
         };
         it.linear = super::b_p(p, "linearLight");
-        it.missing = match str_p(p, "missingFrames") {
-            Some(m) => Some(effectcraft_project::MissingFrames::parse(m).ok_or_else(|| bad(cmd, format!("missingFrames: placeholder|hold|skip, not `{m}`")))?),
-            None => None,
-        };
         // Start Frame: a frame number, or "file" for the first file's.
         it.start = match p.get("startFrame") {
             None | Some(Value::Null) => None,
@@ -624,7 +618,7 @@ impl Interpretation {
     pub(crate) fn apply(&self, f: &mut Footage, guessed: Option<(AlphaMode, [f32; 3])>) {
         let before = f.frame_rate;
         self.apply_settings(f, guessed);
-        // A sequence's length is its frames (Missing Frames and Start Frame decide how many).
+        // A sequence's length is its frames (Start Frame decides how many).
         if f.kind == FootageKind::Sequence && !f.sequence.is_empty() {
             f.sync_sequence_duration();
             return;
@@ -677,15 +671,12 @@ impl Interpretation {
         if let Some(v) = self.linear {
             f.linear_light = v;
         }
-        if f.kind == FootageKind::Sequence {
-            if let Some(m) = self.missing {
-                f.missing_frames = m;
-            }
-            if let Some(start) = self.start {
-                // The first file's own number needn't be stored (it follows the files).
-                let first = f.sequence.first().and_then(|p| effectcraft_project::sequence::frame_number(p));
-                f.start_frame = start.filter(|n| Some(*n) != first);
-            }
+        if f.kind == FootageKind::Sequence
+            && let Some(start) = self.start
+        {
+            // The first file's own number needn't be stored (it follows the files).
+            let first = f.sequence.first().and_then(|p| effectcraft_project::sequence::frame_number(p));
+            f.start_frame = start.filter(|n| Some(*n) != first);
         }
     }
 }
@@ -763,7 +754,7 @@ fn interpret(s: &mut Session, p: &Value) -> Result<Value> {
             Some(ItemKind::Footage(f)) => Some(json!({
                 "item": i.0, "alpha": format!("{:?}", f.alpha), "matteColor": f.premul_color, "invertAlpha": f.invert_alpha,
                 "fields": f.fields.label(), "pixelAspect": f.pixel_aspect, "loop": f.loop_count, "frameRate": f.frame_rate.as_f64(),
-                "linearLight": f.linear_light, "missingFrames": f.missing_frames.id(), "startFrame": f.first_frame_number(),
+                "linearLight": f.linear_light, "startFrame": f.first_frame_number(),
                 "frames": f.sequence_frames(),
             })),
             _ => None,
@@ -900,7 +891,7 @@ fn reload(s: &mut Session, p: &Value) -> Result<Value> {
             if nf.kind == FootageKind::Sequence && f.kind == FootageKind::Sequence {
                 nf.frame_rate = f.frame_rate;
                 nf.native_rate = f.native_rate;
-                nf.missing_frames = f.missing_frames;
+                nf.alphabetical = f.alphabetical;
                 nf.start_frame = f.start_frame;
                 nf.sync_sequence_duration();
             }
@@ -1003,7 +994,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Main...",
             ["File", "Interpret Footage"],
             Some("Cmd+Alt+G"),
-            "{items?, frameRate?: fps|\"file\", alpha?: straight|premultiplied|ignore|guess, guessAlpha?, matteColor?, invertAlpha?, loop?, pixelAspect?, fields?: off|upper|lower, colorProfile?: srgb|rec709|rec2020|p3|auto, linearLight?, missingFrames?: placeholder|hold|skip (image sequences: what a gap in the numbering shows), startFrame?: number|\"file\" (image sequences: the frame number at the footage's first frame)}",
+            "{items?, frameRate?: fps|\"file\", alpha?: straight|premultiplied|ignore|guess, guessAlpha?, matteColor?, invertAlpha?, loop?, pixelAspect?, fields?: off|upper|lower, colorProfile?: srgb|rec709|rec2020|p3|auto, linearLight?, startFrame?: number|\"file\" (image sequences: the frame number at the footage's first frame)}",
             has_footage_selection,
             interpret
         ),

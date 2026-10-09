@@ -3,55 +3,15 @@
 //!
 //! A sequence's files are kept in frame-number order ([`Footage::sequence`]). How its frames map
 //! to the files follows Interpret Footage: **Start Frame** ([`Footage::start_frame`]) is the
-//! frame number shown at the footage's first frame, and **Missing Frames**
-//! ([`Footage::missing_frames`]) says what a gap in the numbering shows.
-
-use serde::{Deserialize, Serialize};
+//! frame number shown at the footage's first frame. A gap in the numbering shows a placeholder
+//! (colour bars), as in After Effects, except in a sequence imported with Force Alphabetical
+//! Order ([`Footage::alphabetical`]), whose files play one after another.
 
 use crate::{Footage, FootageKind};
 
 /// The most frames an image sequence's numbering can span (a gap of millions of frames is a
 /// naming accident, such as dates in file names, not footage).
 pub const MAX_SEQUENCE_FRAMES: i64 = 10_000_000;
-
-/// Interpret Footage ▸ Missing Frames: what an image sequence shows where its numbering skips a
-/// number.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum MissingFrames {
-    /// The files play one after another and the gaps close up (and a sequence imported with
-    /// Force Alphabetical Order, whose numbering doesn't count).
-    #[default]
-    Skip,
-    /// A missing frame shows colour bars, as in After Effects.
-    Placeholder,
-    /// A missing frame shows the frame before it.
-    Hold,
-}
-
-impl MissingFrames {
-    pub const ALL: [MissingFrames; 3] = [MissingFrames::Placeholder, MissingFrames::Hold, MissingFrames::Skip];
-
-    /// The command parameter value.
-    pub fn id(self) -> &'static str {
-        match self {
-            MissingFrames::Skip => "skip",
-            MissingFrames::Placeholder => "placeholder",
-            MissingFrames::Hold => "hold",
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            MissingFrames::Skip => "Skip (close the gaps)",
-            MissingFrames::Placeholder => "Show Placeholder (color bars)",
-            MissingFrames::Hold => "Hold Previous Frame",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<MissingFrames> {
-        MissingFrames::ALL.into_iter().find(|m| m.id().eq_ignore_ascii_case(s.trim()))
-    }
-}
 
 /// Split a file stem into (prefix, frame number digits): `shot_0012` → (`shot_`, `0012`).
 /// `None` when it doesn't end in digits.
@@ -108,9 +68,9 @@ impl Footage {
         self.sequence.get(i).and_then(|p| frame_number(p))
     }
 
-    /// The numbering is used: Placeholder / Hold and a numbered first file.
+    /// The numbering is used: a numbered first file, not in Force Alphabetical Order.
     fn numbered(&self) -> Option<i64> {
-        (self.missing_frames != MissingFrames::Skip).then(|| self.file_number(0)).flatten()
+        (!self.alphabetical).then(|| self.file_number(0)).flatten()
     }
 
     /// Index of the first file numbered `n` or later.
@@ -124,9 +84,9 @@ impl Footage {
         self.start_frame.or_else(|| self.file_number(0)).unwrap_or(0)
     }
 
-    /// How many frames an image sequence has: the span of its numbering from Start Frame (with
-    /// Placeholder / Hold), or its files from Start Frame on (Skip). At least 1; 0 for other
-    /// footage.
+    /// How many frames an image sequence has: the span of its numbering from Start Frame, or its
+    /// files from Start Frame on (Force Alphabetical Order, or unnumbered files). At least 1; 0
+    /// for other footage.
     pub fn sequence_frames(&self) -> i64 {
         if !self.is_file_sequence() {
             return 0;
@@ -158,15 +118,11 @@ impl Footage {
         };
         let n = self.start_frame.unwrap_or(first).saturating_add(i);
         let k = self.first_file_from(n);
-        match self.sequence.get(k) {
-            Some(p) if frame_number(p) == Some(n) => Some(p),
-            _ if self.missing_frames == MissingFrames::Hold => self.sequence.get(k.saturating_sub(1)).map(String::as_str),
-            _ => None,
-        }
+        self.sequence.get(k).filter(|p| frame_number(p) == Some(n)).map(String::as_str)
     }
 
     /// Set an image sequence's duration to its frames at its frame rate (after its files,
-    /// frame rate, Missing Frames or Start Frame changed).
+    /// frame rate or Start Frame changed).
     pub fn sync_sequence_duration(&mut self) {
         if self.is_file_sequence() {
             self.duration = self.frame_rate.tick_of(self.sequence_frames());
@@ -178,13 +134,8 @@ impl Footage {
 mod tests {
     use super::*;
 
-    fn seq(numbers: &[i64], missing: MissingFrames) -> Footage {
-        Footage {
-            kind: FootageKind::Sequence,
-            sequence: numbers.iter().map(|n| format!("C:\\shots\\a_{n:04}.png")).collect(),
-            missing_frames: missing,
-            ..Default::default()
-        }
+    fn seq(numbers: &[i64]) -> Footage {
+        Footage { kind: FootageKind::Sequence, sequence: numbers.iter().map(|n| format!("C:\\shots\\a_{n:04}.png")).collect(), ..Default::default() }
     }
 
     #[test]
@@ -198,53 +149,62 @@ mod tests {
         let files: Vec<String> = ["/s/fx_0998.png", "/s/fx_1002.png"].map(String::from).to_vec();
         assert_eq!(sequence_name(&files).as_deref(), Some("fx_[0998-1002].png"));
         assert_eq!(sequence_name(&["/s/a.png".to_string()]), None);
-        assert_eq!(MissingFrames::parse("Hold"), Some(MissingFrames::Hold));
     }
 
     #[test]
     fn missing_frames_map_frames_to_files() {
-        // Files 1, 2, 5: frames 3 and 4 are missing.
-        let f = seq(&[1, 2, 5], MissingFrames::Placeholder);
+        // Files 1, 2, 5: frames 3 and 4 are missing and show placeholders.
+        let f = seq(&[1, 2, 5]);
         assert_eq!(f.sequence_frames(), 5);
         let at = |f: &Footage, i| f.sequence_file(i).map(|p| frame_number(p).unwrap_or(-1));
         assert_eq!((0..5).map(|i| at(&f, i)).collect::<Vec<_>>(), [Some(1), Some(2), None, None, Some(5)]);
-        let h = seq(&[1, 2, 5], MissingFrames::Hold);
-        assert_eq!((0..5).map(|i| at(&h, i)).collect::<Vec<_>>(), [Some(1), Some(2), Some(2), Some(2), Some(5)]);
-        let s = seq(&[1, 2, 5], MissingFrames::Skip);
+        // Force Alphabetical Order: the files play one after another.
+        let s = Footage { alphabetical: true, ..seq(&[1, 2, 5]) };
         assert_eq!(s.sequence_frames(), 3);
         assert_eq!((0..3).map(|i| at(&s, i)).collect::<Vec<_>>(), [Some(1), Some(2), Some(5)]);
         assert_eq!(missing_frame_ranges(&f.sequence), [(3, 4)]);
     }
 
     #[test]
+    fn projects_saved_without_the_flag_show_placeholders() {
+        // Projects saved before #297 have no `alphabetical`: their gaps show placeholders, as in
+        // After Effects; only Force Alphabetical Order is saved.
+        let f = seq(&[1, 2, 5]);
+        let json = serde_json::to_value(&f).unwrap();
+        assert!(json.get("alphabetical").is_none(), "{json}");
+        let back: Footage = serde_json::from_value(json).unwrap();
+        assert_eq!((back.alphabetical, back.sequence_frames()), (false, 5));
+        let alpha = serde_json::to_value(Footage { alphabetical: true, ..seq(&[1, 2, 5]) }).unwrap();
+        assert_eq!(serde_json::from_value::<Footage>(alpha).unwrap().sequence_frames(), 3);
+    }
+
+    #[test]
     fn start_frame_trims_or_pads_the_head() {
         let at = |f: &Footage, i| f.sequence_file(i).map(|p| frame_number(p).unwrap_or(-1));
-        let mut f = seq(&[1001, 1002, 1003], MissingFrames::Placeholder);
+        let mut f = seq(&[1001, 1002, 1003]);
         assert_eq!(f.first_frame_number(), 1001);
         f.start_frame = Some(1002);
         assert_eq!((f.sequence_frames(), at(&f, 0), at(&f, 1)), (2, Some(1002), Some(1003)));
         f.start_frame = Some(999);
         assert_eq!((f.sequence_frames(), at(&f, 0), at(&f, 2)), (5, None, Some(1001)));
-        f.missing_frames = MissingFrames::Hold;
-        assert_eq!(at(&f, 0), Some(1001), "nothing before the first file: hold it");
-        f.missing_frames = MissingFrames::Skip;
+        f.alphabetical = true;
         f.start_frame = Some(1003);
         assert_eq!((f.sequence_frames(), at(&f, 0)), (1, Some(1003)));
         // Hostile values never panic and stay bounded.
-        f.missing_frames = MissingFrames::Placeholder;
+        f.alphabetical = false;
         f.start_frame = Some(i64::MIN);
         assert_eq!(f.sequence_frames(), MAX_SEQUENCE_FRAMES);
         assert_eq!(f.sequence_file(i64::MAX), None);
         f.start_frame = Some(i64::MAX);
         assert_eq!(f.sequence_frames(), 1);
-        f.missing_frames = MissingFrames::Skip;
+        f.alphabetical = true;
         assert_eq!(f.sequence_file(-1), None);
         assert!(f.sequence_file(5).is_some());
     }
 
     #[test]
     fn duration_follows_frames_and_rate() {
-        let mut f = seq(&[1, 2, 5], MissingFrames::Placeholder);
+        let mut f = seq(&[1, 2, 5]);
         f.frame_rate = effectcraft_time::FrameRate::from_f64(10.0);
         f.sync_sequence_duration();
         assert!((f.duration.seconds() - 0.5).abs() < 1e-9);

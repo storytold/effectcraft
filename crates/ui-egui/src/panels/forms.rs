@@ -189,7 +189,7 @@ fn sequence_fields(app: &EffectcraftApp, runs: &[Vec<String>]) -> Vec<Field> {
         Field::bool("sequence", &format!("{ext} Sequence"), true),
         Field::bool("alphabetical", "Force alphabetical order", false),
         Field::num("frameRate", "Frame rate (fps)", app.session.prefs.import.sequence_fps),
-        Field::note("after", "Change the frame rate, alpha, missing frames and start frame later with File ▸ Interpret Footage."),
+        Field::note("after", "Change the frame rate, alpha and start frame later with File ▸ Interpret Footage."),
     ]
 }
 
@@ -393,22 +393,7 @@ pub fn open_form(app: &mut EffectcraftApp, id: &str, p: &Value) -> bool {
             ],
         ),
         "file.interpretFootage" | "file.interpretProxy"
-            if !has(
-                p,
-                &[
-                    "frameRate",
-                    "alpha",
-                    "loop",
-                    "pixelAspect",
-                    "colorProfile",
-                    "fields",
-                    "invertAlpha",
-                    "matteColor",
-                    "linearLight",
-                    "missingFrames",
-                    "startFrame",
-                ],
-            ) =>
+            if !has(p, &["frameRate", "alpha", "loop", "pixelAspect", "colorProfile", "fields", "invertAlpha", "matteColor", "linearLight", "startFrame"]) =>
         {
             let proxy = id == "file.interpretProxy";
             let f = s.state.project_selection.first().and_then(|i| s.project.item(*i)).and_then(|it| match (&it.kind, &it.proxy) {
@@ -462,18 +447,19 @@ pub fn open_form(app: &mut EffectcraftApp, id: &str, p: &Value) -> bool {
                 ),
                 Field::bool("linearLight", "Interpret As Linear Light", f.linear_light),
             ];
-            // Image sequences: what a gap in the numbering shows, and the first frame's number.
+            // Image sequences: their frames (missing ones show colour bars, as in After Effects)
+            // and the first frame's number.
             if f.kind == effectcraft_engine::project::FootageKind::Sequence {
-                use effectcraft_engine::project::MissingFrames;
                 let at = fields.iter().position(|x| x.key == "frameRate").map_or(fields.len(), |i| i + 1);
-                let gaps = effectcraft_engine::sequence::missing_report(&f.sequence).unwrap_or_else(|| "no missing frames".into());
-                let options: Vec<(&str, Value)> = MissingFrames::ALL.iter().map(|m| (m.label(), json!(m.id()))).collect();
-                let sel = MissingFrames::ALL.iter().position(|m| *m == f.missing_frames).unwrap_or(0);
+                let gaps = match effectcraft_engine::sequence::missing_report(&f.sequence) {
+                    _ if f.alphabetical => "files in alphabetical order".into(),
+                    Some(gaps) => format!("{gaps} shown as color bars"),
+                    None => "no missing frames".into(),
+                };
                 fields.splice(
                     at..at,
                     [
                         Field::note("sequenceInfo", &format!("Image sequence: {} files, {} frames; {gaps}.", f.sequence.len(), f.sequence_frames())),
-                        Field::choice("missingFrames", "Missing Frames", &options, sel),
                         Field::num("startFrame", "Start Frame", f.first_frame_number() as f64),
                     ],
                 );

@@ -260,11 +260,11 @@ impl Prober {
         let mut warning = None;
         // Settings ▸ Import ▸ Report Missing Frames (numbered sequences).
         if f.kind == FootageKind::Sequence
-            && f.missing_frames != effectcraft_project::MissingFrames::Skip
+            && !f.alphabetical
             && self.report_missing_frames
             && let Some(gaps) = crate::sequence::missing_report(&f.sequence)
         {
-            warning = Some(format!("{name}: {gaps} (shown as placeholders; File ▸ Interpret Footage ▸ Missing Frames)"));
+            warning = Some(format!("{name}: {gaps} (shown as placeholders)"));
         }
         // Settings ▸ Import ▸ Interpret Unlabeled Alpha As: images only (a 3D model renders its
         // own alpha, and audio and data have none).
