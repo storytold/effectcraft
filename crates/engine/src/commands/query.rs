@@ -80,6 +80,7 @@ fn comp_info(s: &mut Session, p: &Value) -> Result<Value> {
         "id": cid.0, "name": name, "width": c.width, "height": c.height, "frameRate": c.frame_rate.as_f64(), "duration": c.duration.seconds(),
         "workArea": [c.work_area.0.seconds(), c.work_area.1.seconds()], "background": c.background,
         "preserveFrameRate": c.preserve_frame_rate, "preserveResolution": c.preserve_resolution,
+        "resolution": c.resolution.label(), "resolutionFactor": c.resolution.factor(),
         "layers": c.layers.iter().enumerate().map(|(i, l)| layer_json(l, i + 1)).collect::<Vec<_>>(),
     }))
 }

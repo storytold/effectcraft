@@ -223,8 +223,16 @@ pub fn handle(app: &mut EffectcraftApp, ctx: &egui::Context, req: &ControlReques
                 if let Some(z) = v.get("zoom") {
                     app.ui.viewer.zoom = z.as_f64().map(|z| z as f32);
                 }
+                // The active comp's Resolution (`view.res.*`), saved with the project.
                 if let Some(r) = v.get("res").and_then(Value::as_str) {
-                    app.ui.viewer.res = Resolution::ALL.into_iter().find(|x| x.label().eq_ignore_ascii_case(r)).unwrap_or(app.ui.viewer.res);
+                    let Some(res) = Resolution::ALL.into_iter().find(|x| x.label().eq_ignore_ascii_case(r)) else {
+                        return err(format!("unknown resolution `{r}` (auto, full, half, third, quarter)"));
+                    };
+                    if let Some(cid) = app.session.active_comp_id()
+                        && let Err(e) = app.session.set_resolution(cid, res)
+                    {
+                        return err(e);
+                    }
                 }
                 if let Some(Value::Array(a)) = v.get("pan") {
                     app.ui.viewer.pan = [a.first().and_then(Value::as_f64).unwrap_or(0.0) as f32, a.get(1).and_then(Value::as_f64).unwrap_or(0.0) as f32];
@@ -507,11 +515,16 @@ pub fn base64(data: &[u8]) -> String {
 
 pub fn inspect(app: &EffectcraftApp, ctx: &egui::Context) -> Value {
     let size = ctx.content_rect().size();
+    let mut ui = json!(app.ui);
+    // The viewer's Resolution is the active comp's (kept in the project).
+    if let Some(v) = ui.get_mut("viewer").and_then(Value::as_object_mut) {
+        v.insert("res".into(), json!(app.viewer_res()));
+    }
     json!({
         "window": [size.x, size.y],
         "pixelsPerPoint": ctx.pixels_per_point(),
         "fps": app.fps,
-        "ui": app.ui,
+        "ui": ui,
         "playing": app.playback.playing,
         "time": app.session.time().seconds(),
         "activeComp": app.session.state.active_comp.map(|i| i.0),

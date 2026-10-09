@@ -417,8 +417,15 @@ Fixes from measured reports:
   too large (#390).
 - The viewer's Auto resolution renders the pixels the magnification needs (Full above 50 %), and
   frames shown below 100 % are averaged (GPU frames through mip levels, CPU frames by a whole
-  factor) instead of minified bilinearly (#417). Not yet: the viewer resolution and magnification
-  are not remembered between launches.
+  factor) instead of minified bilinearly (#417).
+- Each composition keeps its Resolution (Auto, Full, Half, Third, Quarter or Custom) in the
+  project, as in After Effects: switching to another comp and back, or saving and reopening the
+  project, shows the same resolution. Changing it marks the project modified but adds no undo
+  step (undo and redo keep it) and keeps the comp's cached frames; projects saved before open
+  with Auto. View ▸ Resolution and the panel's popup run `view.res.full|half|third|quarter|auto`
+  and `view.res.custom {factor}`, which now work headless too; `comp.info` reports `resolution`
+  and `resolutionFactor` (#417). Not yet: the magnification is not saved per comp, and the
+  Composition Settings dialog has no Resolution popup.
 
 ## Update: plug-ins and extensions as in After Effects; ease presets become a ScriptUI panel
 

@@ -322,6 +322,9 @@ pub fn checked(s: &Session, command: &str, params: &Value) -> Option<bool> {
         }
         "layer.markersLock" => Some(layer?.markers_locked),
         "layer.mask.hideLocked" => Some(s.state.hide_locked_masks),
+        "view.res.full" | "view.res.half" | "view.res.third" | "view.res.quarter" | "view.res.custom" => {
+            Some(comp.resolution.label().eq_ignore_ascii_case(command.trim_start_matches("view.res.")))
+        }
         "view.layout" => Some(params.get("views").and_then(Value::as_u64) == Some(s.state.view_layout.max(1) as u64)),
         "view.shareViewOptions" => Some(s.state.share_view_options),
         "view.extendedViewer" => Some(s.prefs.three_d.extended_viewer),

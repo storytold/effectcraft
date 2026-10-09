@@ -657,27 +657,26 @@ impl EffectcraftApp {
         self.viewer_image.clone()
     }
 
+    /// The viewer's Resolution: the active composition's (saved with the project).
+    pub fn viewer_res(&self) -> state::Resolution {
+        self.session.active_comp().map(|c| c.resolution).unwrap_or_default()
+    }
+
     /// The render scale used by the viewer right now.
     pub fn viewer_scale(&self, zoom: f32, ppp: f32) -> f64 {
         // The preview's Resolution (when not Auto) while it plays.
         if self.playback.playing
             && let Some(f) = self.playback.res
         {
-            let r = match f {
-                1 => state::Resolution::Full,
-                2 => state::Resolution::Half,
-                3 => state::Resolution::Third,
-                4 => state::Resolution::Quarter,
-                n => state::Resolution::Custom(n.min(40) as u8),
-            };
-            return r.scale(zoom, ppp);
+            return state::Resolution::from_factor(f.into()).scale(zoom, ppp);
         }
         // Auto follows the zoom alike while playing and paused, so frames cached while scrubbing
         // play back, and frames cached by a preview stay on screen when it stops.
-        let full = self.ui.viewer.res.scale(zoom, ppp);
+        let res = self.viewer_res();
+        let full = res.scale(zoom, ppp);
         // Fast Previews ▸ Adaptive Resolution / Fast Draft: lower resolution while dragging.
         let (_, k) = self.session.state.viewer.fast_previews.render(self.ui.viewer.interacting || self.ui.viewer.property_interacting);
-        if k < 1.0 && self.ui.viewer.res == state::Resolution::Auto {
+        if k < 1.0 && res.is_auto() {
             return full.min((full * 0.5).max(self.session.prefs.adaptive_limit()));
         }
         full
