@@ -447,23 +447,28 @@ pub fn open_form(app: &mut EffectcraftApp, id: &str, p: &Value) -> bool {
                 ),
                 Field::bool("linearLight", "Interpret As Linear Light", f.linear_light),
             ];
-            // Image sequences: their frames (missing ones show colour bars, as in After Effects)
-            // and the first frame's number.
+            // After Frame Rate: an image sequence's frames (missing ones show colour bars, as in
+            // After Effects), then Start Timecode.
+            let mut timing = Vec::new();
             if f.kind == effectcraft_engine::project::FootageKind::Sequence {
-                let at = fields.iter().position(|x| x.key == "frameRate").map_or(fields.len(), |i| i + 1);
                 let gaps = match effectcraft_engine::sequence::missing_report(&f.sequence) {
                     _ if f.alphabetical => "files in alphabetical order".into(),
                     Some(gaps) => format!("{gaps} shown as color bars"),
                     None => "no missing frames".into(),
                 };
-                fields.splice(
-                    at..at,
-                    [
-                        Field::note("sequenceInfo", &format!("Image sequence: {} files, {} frames; {gaps}.", f.sequence.len(), f.sequence_frames())),
-                        Field::num("startFrame", "Start Frame", f.first_frame_number() as f64),
-                    ],
-                );
+                timing.push(Field::note("sequenceInfo", &format!("Image sequence: {} files, {} frames; {gaps}.", f.sequence.len(), f.sequence_frames())));
             }
+            if f.kind != effectcraft_engine::project::FootageKind::Still {
+                timing.push(Field::choice(
+                    "overrideStart",
+                    "Start Timecode",
+                    &[("Use Source File Timecode", json!(false)), ("Override Start", json!(true))],
+                    usize::from(f.start_timecode.is_some()),
+                ));
+                timing.push(Field::text("startTimecode", "Override Start", &f.timecode(0)));
+            }
+            let at = fields.iter().position(|x| x.key == "frameRate").map_or(fields.len(), |i| i + 1);
+            fields.splice(at..at, timing);
             (if proxy { "Interpret Footage: Proxy".into() } else { "Interpret Footage".into() }, fields)
         }
         "file.projectSettings" if p.as_object().is_none_or(|m| m.is_empty()) => {

@@ -1,11 +1,10 @@
 //! Image sequences: numbered stills (`shot_0001.png`, `shot_0002.png`, …) played as one footage
 //! item ([`FootageKind::Sequence`]).
 //!
-//! A sequence's files are kept in frame-number order ([`Footage::sequence`]). How its frames map
-//! to the files follows Interpret Footage: **Start Frame** ([`Footage::start_frame`]) is the
-//! frame number shown at the footage's first frame. A gap in the numbering shows a placeholder
-//! (colour bars), as in After Effects, except in a sequence imported with Force Alphabetical
-//! Order ([`Footage::alphabetical`]), whose files play one after another.
+//! A sequence's files are kept in frame-number order ([`Footage::sequence`]). Its frames run from
+//! the first file's number to the last's; a gap in the numbering shows a placeholder (colour
+//! bars), as in After Effects, except in a sequence imported with Force Alphabetical Order
+//! ([`Footage::alphabetical`]), whose files play one after another.
 
 use crate::{Footage, FootageKind};
 
@@ -78,15 +77,8 @@ impl Footage {
         self.sequence.partition_point(|p| frame_number(p).is_some_and(|x| x < n))
     }
 
-    /// The frame number at the footage's first frame: Start Frame, or the first file's number
-    /// (0 when unnumbered).
-    pub fn first_frame_number(&self) -> i64 {
-        self.start_frame.or_else(|| self.file_number(0)).unwrap_or(0)
-    }
-
-    /// How many frames an image sequence has: the span of its numbering from Start Frame, or its
-    /// files from Start Frame on (Force Alphabetical Order, or unnumbered files). At least 1; 0
-    /// for other footage.
+    /// How many frames an image sequence has: the span of its numbering, or its files (Force
+    /// Alphabetical Order, or unnumbered files). At least 1; 0 for other footage.
     pub fn sequence_frames(&self) -> i64 {
         if !self.is_file_sequence() {
             return 0;
@@ -94,12 +86,9 @@ impl Footage {
         let n = match self.numbered() {
             Some(first) => {
                 let last = self.sequence.len().checked_sub(1).and_then(|i| self.file_number(i)).unwrap_or(first);
-                last.saturating_sub(self.start_frame.unwrap_or(first)).saturating_add(1)
+                last.saturating_sub(first).saturating_add(1)
             }
-            None => {
-                let skip = self.start_frame.map_or(0, |s| self.first_file_from(s));
-                self.sequence.len().saturating_sub(skip) as i64
-            }
+            None => self.sequence.len() as i64,
         };
         n.clamp(1, MAX_SEQUENCE_FRAMES)
     }
@@ -111,18 +100,15 @@ impl Footage {
             return None;
         }
         let Some(first) = self.numbered() else {
-            let skip = self.start_frame.map_or(0, |s| self.first_file_from(s));
-            let k = usize::try_from(i).ok()?.saturating_add(skip);
-            // Past the last file (Start Frame after it): the last file.
-            return self.sequence.get(k).or(self.sequence.last()).map(String::as_str);
+            return self.sequence.get(usize::try_from(i).ok()?).map(String::as_str);
         };
-        let n = self.start_frame.unwrap_or(first).saturating_add(i);
+        let n = first.saturating_add(i);
         let k = self.first_file_from(n);
         self.sequence.get(k).filter(|p| frame_number(p) == Some(n)).map(String::as_str)
     }
 
-    /// Set an image sequence's duration to its frames at its frame rate (after its files,
-    /// frame rate or Start Frame changed).
+    /// Set an image sequence's duration to its frames at its frame rate (after its files or
+    /// frame rate changed).
     pub fn sync_sequence_duration(&mut self) {
         if self.is_file_sequence() {
             self.duration = self.frame_rate.tick_of(self.sequence_frames());
@@ -179,27 +165,20 @@ mod tests {
     }
 
     #[test]
-    fn start_frame_trims_or_pads_the_head() {
+    fn start_timecode_only_relabels_source_time() {
+        // Override Start changes the timecode shown, not the frames (After Effects).
         let at = |f: &Footage, i| f.sequence_file(i).map(|p| frame_number(p).unwrap_or(-1));
-        let mut f = seq(&[1001, 1002, 1003]);
-        assert_eq!(f.first_frame_number(), 1001);
-        f.start_frame = Some(1002);
-        assert_eq!((f.sequence_frames(), at(&f, 0), at(&f, 1)), (2, Some(1002), Some(1003)));
-        f.start_frame = Some(999);
-        assert_eq!((f.sequence_frames(), at(&f, 0), at(&f, 2)), (5, None, Some(1001)));
+        let mut f = Footage { frame_rate: effectcraft_time::FrameRate::from_f64(24.0), ..seq(&[1001, 1002, 1003]) };
+        assert_eq!(f.timecode(0), "0:00:00:00");
+        f.start_timecode = Some(1001);
+        assert_eq!((f.sequence_frames(), at(&f, 0), at(&f, 2)), (3, Some(1001), Some(1003)));
+        assert_eq!((f.timecode(0).as_str(), f.timecode(2).as_str()), ("0:00:41:17", "0:00:41:19"));
+        // Hostile values never panic.
+        f.start_timecode = Some(i64::MAX);
+        let _ = f.timecode(i64::MAX);
+        assert_eq!((f.sequence_file(i64::MAX), f.sequence_file(-1)), (None, None));
         f.alphabetical = true;
-        f.start_frame = Some(1003);
-        assert_eq!((f.sequence_frames(), at(&f, 0)), (1, Some(1003)));
-        // Hostile values never panic and stay bounded.
-        f.alphabetical = false;
-        f.start_frame = Some(i64::MIN);
-        assert_eq!(f.sequence_frames(), MAX_SEQUENCE_FRAMES);
-        assert_eq!(f.sequence_file(i64::MAX), None);
-        f.start_frame = Some(i64::MAX);
-        assert_eq!(f.sequence_frames(), 1);
-        f.alphabetical = true;
-        assert_eq!(f.sequence_file(-1), None);
-        assert!(f.sequence_file(5).is_some());
+        assert_eq!((f.sequence_frames(), f.sequence_file(-1), f.sequence_file(3)), (3, None, None));
     }
 
     #[test]

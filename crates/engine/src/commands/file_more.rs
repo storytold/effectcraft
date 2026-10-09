@@ -553,8 +553,38 @@ pub(crate) struct Interpretation {
     fields: Option<effectcraft_project::FieldOrder>,
     profile: Option<Option<effectcraft_project::ColorSpace>>,
     linear: Option<bool>,
-    /// Image sequences: Start Frame (`Some(None)` = the first file's number).
-    start: Option<Option<i64>>,
+    /// Start Timecode.
+    start: Option<StartTimecode>,
+}
+
+/// Interpret Footage ▸ Start Timecode.
+#[derive(Clone, Debug)]
+enum StartTimecode {
+    /// Use Source File Timecode.
+    Source,
+    /// Override Start: a frame number.
+    Frame(i64),
+    /// Override Start: timecode, read at the footage's frame rate.
+    Timecode(String),
+}
+
+impl StartTimecode {
+    /// The highest Override Start, in frames.
+    const MAX: i64 = 1_000_000_000;
+
+    /// The frame (at `rate`) to store, `Some(None)` for Use Source; `None` when the timecode
+    /// doesn't fit at `rate`.
+    fn frame(&self, rate: FrameRate) -> Option<Option<i64>> {
+        match self {
+            StartTimecode::Source => Some(None),
+            StartTimecode::Frame(n) => Some(Some(*n)),
+            StartTimecode::Timecode(t) => Self::read(t, rate).map(Some),
+        }
+    }
+
+    fn read(t: &str, rate: FrameRate) -> Option<i64> {
+        effectcraft_time::parse_timecode(t, rate, false, 0).ok().filter(|n| (0..=Self::MAX).contains(n))
+    }
 }
 
 impl Interpretation {
@@ -601,15 +631,19 @@ impl Interpretation {
             None => None,
         };
         it.linear = super::b_p(p, "linearLight");
-        // Start Frame: a frame number, or "file" for the first file's.
-        it.start = match p.get("startFrame") {
-            None | Some(Value::Null) => None,
-            Some(Value::String(f)) if f == "file" => Some(None),
-            Some(v) => Some(Some(
-                v.as_f64()
-                    .filter(|x| x.is_finite() && x.abs() <= 1.0e9)
-                    .map(|x| x.round() as i64)
-                    .ok_or_else(|| bad(cmd, "startFrame: a frame number (up to 1e9), or \"file\""))?,
+        // Start Timecode: Use Source File Timecode (`overrideStart: false`), or Override Start
+        // (timecode or a frame number).
+        let start_err = || bad(cmd, "startTimecode: timecode (0:00:41:20) or a frame number, 0 to 1e9");
+        it.start = match (super::b_p(p, "overrideStart"), p.get("startTimecode")) {
+            (Some(false), _) => Some(StartTimecode::Source),
+            (_, None | Some(Value::Null)) => None,
+            (_, Some(Value::String(t))) => {
+                // Read at 30 fps to check it; it's read again at the footage's rate.
+                StartTimecode::read(t, FrameRate::FPS_30).ok_or_else(start_err)?;
+                Some(StartTimecode::Timecode(t.clone()))
+            }
+            (_, Some(v)) => Some(StartTimecode::Frame(
+                v.as_f64().filter(|x| x.is_finite() && (0.0..=StartTimecode::MAX as f64).contains(x)).map(|x| x.round() as i64).ok_or_else(start_err)?,
             )),
         };
         Ok(it)
@@ -618,7 +652,7 @@ impl Interpretation {
     pub(crate) fn apply(&self, f: &mut Footage, guessed: Option<(AlphaMode, [f32; 3])>) {
         let before = f.frame_rate;
         self.apply_settings(f, guessed);
-        // A sequence's length is its frames (Start Frame decides how many).
+        // A sequence's length is its frames.
         if f.kind == FootageKind::Sequence && !f.sequence.is_empty() {
             f.sync_sequence_duration();
             return;
@@ -671,12 +705,9 @@ impl Interpretation {
         if let Some(v) = self.linear {
             f.linear_light = v;
         }
-        if f.kind == FootageKind::Sequence
-            && let Some(start) = self.start
-        {
-            // The first file's own number needn't be stored (it follows the files).
-            let first = f.sequence.first().and_then(|p| effectcraft_project::sequence::frame_number(p));
-            f.start_frame = start.filter(|n| Some(*n) != first);
+        // After the frame rate: timecode is read at the footage's rate.
+        if let Some(start) = self.start.as_ref().and_then(|t| t.frame(f.frame_rate)) {
+            f.start_timecode = start;
         }
     }
 }
@@ -754,7 +785,7 @@ fn interpret(s: &mut Session, p: &Value) -> Result<Value> {
             Some(ItemKind::Footage(f)) => Some(json!({
                 "item": i.0, "alpha": format!("{:?}", f.alpha), "matteColor": f.premul_color, "invertAlpha": f.invert_alpha,
                 "fields": f.fields.label(), "pixelAspect": f.pixel_aspect, "loop": f.loop_count, "frameRate": f.frame_rate.as_f64(),
-                "linearLight": f.linear_light, "startFrame": f.first_frame_number(),
+                "linearLight": f.linear_light, "startTimecode": f.timecode(0), "overrideStart": f.start_timecode.is_some(),
                 "frames": f.sequence_frames(),
             })),
             _ => None,
@@ -888,11 +919,11 @@ fn reload(s: &mut Session, p: &Value) -> Result<Value> {
             nf.alpha = f.alpha;
             nf.loop_count = f.loop_count;
             nf.pixel_aspect = f.pixel_aspect;
+            nf.start_timecode = f.start_timecode;
             if nf.kind == FootageKind::Sequence && f.kind == FootageKind::Sequence {
                 nf.frame_rate = f.frame_rate;
                 nf.native_rate = f.native_rate;
                 nf.alphabetical = f.alphabetical;
-                nf.start_frame = f.start_frame;
                 nf.sync_sequence_duration();
             }
             updates.push((*i, nf));
@@ -994,7 +1025,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Main...",
             ["File", "Interpret Footage"],
             Some("Cmd+Alt+G"),
-            "{items?, frameRate?: fps|\"file\", alpha?: straight|premultiplied|ignore|guess, guessAlpha?, matteColor?, invertAlpha?, loop?, pixelAspect?, fields?: off|upper|lower, colorProfile?: srgb|rec709|rec2020|p3|auto, linearLight?, startFrame?: number|\"file\" (image sequences: the frame number at the footage's first frame)}",
+            "{items?, frameRate?: fps|\"file\", alpha?: straight|premultiplied|ignore|guess, guessAlpha?, matteColor?, invertAlpha?, loop?, pixelAspect?, fields?: off|upper|lower, colorProfile?: srgb|rec709|rec2020|p3|auto, linearLight?, overrideStart?: bool (false: Use Source File Timecode), startTimecode?: timecode|frame (Override Start)}",
             has_footage_selection,
             interpret
         ),

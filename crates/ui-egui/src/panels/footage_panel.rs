@@ -115,7 +115,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     p.text(
         pos2(x, bar.center().y),
         Align2::LEFT_CENTER,
-        effectcraft_engine::time::format_timecode_ae(fr.frame_at(view.time), fr, false),
+        effectcraft_engine::commands::footage_panel::timecode(Some(&item), fr, fr.frame_at(view.time)),
         Tokens::mono(12.0),
         t.timecode,
     );

@@ -1,6 +1,6 @@
 //! Image sequences (#297): File ▸ Import with the "<format> Sequence" option, picked ranges,
 //! folders, Force Alphabetical Order, the import frame rate, Replace Footage, missing frames
-//! (placeholders, as in After Effects) and Interpret Footage ▸ Start Frame.
+//! (placeholders, as in After Effects) and Interpret Footage ▸ Start Timecode.
 
 use effectcraft_project::{Footage, FootageKind, ItemId, ItemKind};
 use effectcraft_time::{FrameRate, Tick};
@@ -124,7 +124,7 @@ fn force_alphabetical_order_takes_every_image_of_the_type() {
 }
 
 #[test]
-fn interpret_footage_sets_start_frame() {
+fn interpret_footage_start_timecode_relabels_source_time() {
     let dir = folder(&RUN);
     let mut s = session();
     let item = s.execute("file.import", json!({"paths": [at(&dir, "shot_0001.png")]})).unwrap()["items"][0].clone();
@@ -132,30 +132,30 @@ fn interpret_footage_sets_start_frame() {
     let layer = s.execute("layer.addItem", json!({"item": item})).unwrap()["layer"].as_u64().unwrap();
     let out = |s: &Session| s.active_comp().unwrap().layer(effectcraft_project::LayerId(layer)).unwrap().out_point;
     assert_eq!(out(&s), FrameRate::FPS_30.tick_of(5));
-    // Start Frame 2 trims frame 1: 4 frames, and the layer that ran to the end still does.
-    s.execute("file.interpretFootage", json!({"items": [item], "startFrame": 2})).unwrap();
-    assert_eq!((footage(&s, &item).1.duration, out(&s)), (FrameRate::FPS_30.tick_of(4), FrameRate::FPS_30.tick_of(4)));
-    // Start Frame 0: frame 0 is missing (a placeholder), 6 frames in all.
-    let r = s.execute("file.interpretFootage", json!({"items": [item], "startFrame": 0})).unwrap();
-    assert_eq!((r["items"][0]["startFrame"].as_i64(), r["items"][0]["frames"].as_i64()), (Some(0), Some(6)));
-    assert_eq!(footage(&s, &item).1.sequence_file(0), None);
-    // The first file's own number isn't stored; "file" goes back to it.
-    s.execute("file.interpretFootage", json!({"items": [item], "startFrame": 1})).unwrap();
-    assert_eq!(footage(&s, &item).1.start_frame, None);
-    s.execute("file.interpretFootage", json!({"items": [item], "startFrame": 3})).unwrap();
-    s.execute("file.interpretFootage", json!({"items": [item], "startFrame": "file"})).unwrap();
-    assert_eq!(footage(&s, &item).1.start_frame, None);
-    // The frame rate re-times the frames.
-    s.execute("file.interpretFootage", json!({"items": [item], "frameRate": 10})).unwrap();
-    assert_eq!(footage(&s, &item).1.duration, Tick::from_seconds_f64(0.5));
-    for bad in [json!({"startFrame": "x"}), json!({"startFrame": 1e300})] {
+    // Override Start changes the timecode the Footage panel shows, not the frames (After Effects).
+    let r = s.execute("file.interpretFootage", json!({"items": [item], "overrideStart": true, "startTimecode": "0:00:01:10"})).unwrap();
+    assert_eq!((r["items"][0]["startTimecode"].as_str(), r["items"][0]["frames"].as_i64()), (Some("0:00:01:10"), Some(5)));
+    assert_eq!((footage(&s, &item).1.start_timecode, out(&s)), (Some(40), FrameRate::FPS_30.tick_of(5)));
+    s.execute("footage.open", json!({"item": item})).unwrap();
+    s.execute("footage.setTime", json!({"frame": 2})).unwrap();
+    assert_eq!(s.execute("footage.info", json!({})).unwrap()["timecode"], "0:00:01:12");
+    // A frame number works too; Use Source File Timecode goes back to 0.
+    s.execute("file.interpretFootage", json!({"items": [item], "startTimecode": 90})).unwrap();
+    assert_eq!(footage(&s, &item).1.start_timecode, Some(90));
+    let r = s.execute("file.interpretFootage", json!({"items": [item], "overrideStart": false, "startTimecode": "0:00:09:00"})).unwrap();
+    assert_eq!((r["items"][0]["startTimecode"].as_str(), footage(&s, &item).1.start_timecode), (Some("0:00:00:00"), None));
+    // Timecode is read at the footage's frame rate.
+    s.execute("file.interpretFootage", json!({"items": [item], "frameRate": 10, "startTimecode": "0:00:01:05"})).unwrap();
+    let f = footage(&s, &item).1;
+    assert_eq!((f.duration, f.start_timecode), (Tick::from_seconds_f64(0.5), Some(15)));
+    for bad in [json!({"startTimecode": "x"}), json!({"startTimecode": 1e300}), json!({"startTimecode": -5}), json!({"startTimecode": "-1:00"})] {
         let mut p = bad.clone();
         p["items"] = json!([item]);
         assert!(s.execute("file.interpretFootage", p).is_err(), "{bad}");
     }
     // Undo puts the interpretation back.
     s.execute("edit.undo", json!({})).unwrap();
-    assert_eq!(footage(&s, &item).1.frame_rate, FrameRate::FPS_30);
+    assert_eq!((footage(&s, &item).1.frame_rate, footage(&s, &item).1.start_timecode), (FrameRate::FPS_30, None));
 }
 
 #[test]
@@ -168,10 +168,10 @@ fn replace_footage_and_reload_keep_sequences() {
     let (name, f) = footage(&s, &item);
     assert_eq!((name.as_str(), f.sequence.len()), ("shot_[0001-0005].png", 4));
     // Reload finds a new frame and keeps the interpretation.
-    s.execute("file.interpretFootage", json!({"items": [item], "frameRate": 12, "startFrame": 2})).unwrap();
+    s.execute("file.interpretFootage", json!({"items": [item], "frameRate": 12, "startTimecode": 2})).unwrap();
     std::fs::write(at(&dir, "shot_0003.png"), b"").unwrap();
     s.execute("file.reloadFootage", json!({"items": [item]})).unwrap();
     let (_, f) = footage(&s, &item);
-    assert_eq!((f.sequence.len(), f.frame_rate, f.start_frame), (5, FrameRate::from_f64(12.0), Some(2)));
-    assert_eq!(f.duration, FrameRate::from_f64(12.0).tick_of(4));
+    assert_eq!((f.sequence.len(), f.frame_rate, f.start_timecode), (5, FrameRate::from_f64(12.0), Some(2)));
+    assert_eq!(f.duration, FrameRate::from_f64(12.0).tick_of(5));
 }

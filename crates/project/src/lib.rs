@@ -969,10 +969,11 @@ pub struct Footage {
     /// Effects; [`sequence`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub alphabetical: bool,
-    /// Image sequences: Interpret Footage ▸ Start Frame, the frame number at the footage's first
-    /// frame (`None` = the first file's).
+    /// Interpret Footage ▸ Start Timecode ▸ Override Start: the frame (at the footage's frame
+    /// rate) its timecode shows at its first frame. `None` = Use Source File Timecode (0: file
+    /// timecode isn't read). It only relabels source time, as in After Effects.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub start_frame: Option<i64>,
+    pub start_timecode: Option<i64>,
 }
 
 fn is_default<T: Default + PartialEq>(v: &T) -> bool {
@@ -1006,12 +1007,18 @@ impl Default for Footage {
             layer: None,
             page: 0,
             alphabetical: false,
-            start_frame: None,
+            start_timecode: None,
         }
     }
 }
 
 impl Footage {
+    /// Source time as the footage's timecode: its frame `frame` from Start Timecode
+    /// (`0:00:41:20`), as the Footage panel shows it.
+    pub fn timecode(&self, frame: i64) -> String {
+        effectcraft_time::format_timecode_ae(frame.saturating_add(self.start_timecode.unwrap_or(0)), self.frame_rate, false)
+    }
+
     /// The data format of data footage: `json`, `csv` or `tsv` (from the file extension).
     pub fn data_format(&self) -> Option<&'static str> {
         if self.kind != FootageKind::Data {

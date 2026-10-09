@@ -210,7 +210,7 @@ build real projects through these interfaces; they are worked examples of everyt
   `"sequence": false`: one still; `"alphabetical": true`: Force Alphabetical Order, the files
   play one after another) at `frameRate` or 30 fps (Settings ▸ Import). Missing frames show
   colour bars, as in After Effects. `file.interpretFootage {"items":[id], "frameRate":12,
-  "startFrame":1001}` conforms them (the item and layers that ran to its end get the new
+  "startTimecode":1001}` conforms them and sets Override Start (the item and layers that ran to its end get the new
   length). See [footage.md](footage.md).
 * **Multi-layer OpenEXR**: `layer.channels {layer}` lists a footage layer's EXR layers and
   channels (`{"layers":[{"name":"diffuse","rgba":["diffuse.R","diffuse.G","diffuse.B",""]}]}`);

@@ -197,7 +197,6 @@ pub fn probe(importer: &dyn Importer, src: &Source, rate: FrameRate) -> Result<F
     f.kind = FootageKind::Sequence;
     f.sequence = files.clone();
     f.alphabetical = *alphabetical;
-    f.start_frame = None;
     f.frame_rate = rate;
     f.native_rate = None;
     f.sync_sequence_duration();

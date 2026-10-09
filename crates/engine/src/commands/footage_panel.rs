@@ -47,6 +47,15 @@ fn source_timing(s: &Session, item: ItemId) -> (Option<Tick>, effectcraft_time::
     }
 }
 
+/// The Footage panel's current time: footage shows its timecode (Start Timecode), anything else
+/// time from 0.
+pub fn timecode(item: Option<&effectcraft_project::Item>, fr: effectcraft_time::FrameRate, frame: i64) -> String {
+    match item.map(|i| &i.kind) {
+        Some(ItemKind::Footage(f)) => f.timecode(frame),
+        _ => effectcraft_time::format_timecode_ae(frame, fr, false),
+    }
+}
+
 fn source_time(s: &Session, p: &Value, item: ItemId) -> Option<Tick> {
     let (_, fr) = source_timing(s, item);
     if let Some(t) = f_p(p, "time") {
@@ -194,9 +203,11 @@ fn can_edit(s: &Session) -> std::result::Result<(), String> {
 fn info(s: &mut Session, _: &Value) -> Result<Value> {
     let Some(v) = &s.state.footage_panel else { return Ok(Value::Null) };
     let (dur, fr) = source_timing(s, v.item);
-    let name = s.project.item(v.item).map(|i| i.name.clone()).unwrap_or_default();
+    let item = s.project.item(v.item);
+    let name = item.map(|i| i.name.clone()).unwrap_or_default();
+    let frame = fr.frame_at(v.time);
     Ok(
-        json!({"item": v.item.0, "name": name, "time": v.time.seconds(), "frame": fr.frame_at(v.time), "in": v.in_point.map(|t| t.seconds()), "out": v.out_point.map(|t| t.seconds()), "duration": dur.map(|d| d.seconds()), "frameRate": fr.as_f64()}),
+        json!({"item": v.item.0, "name": name, "time": v.time.seconds(), "frame": frame, "timecode": timecode(item, fr, frame), "in": v.in_point.map(|t| t.seconds()), "out": v.out_point.map(|t| t.seconds()), "duration": dur.map(|d| d.seconds()), "frameRate": fr.as_f64()}),
     )
 }
 

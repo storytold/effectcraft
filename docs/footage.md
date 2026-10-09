@@ -61,7 +61,7 @@ used, and layers that ran to the end of the footage keep doing so.
 |---|---|
 | **Alpha** | *Straight - Unmatted*, *Premultiplied - Matted With Color* (with the matte colour), *Ignore* (opaque), or *Guess* (EffectCraft looks at the first frame). *Invert Alpha* flips it. |
 | **Assume this frame rate** | The rate the frames play at. A 250-frame sequence at 25 fps lasts 10 seconds; at 24 fps, 10.4 seconds. |
-| **Start Frame** (sequences) | The frame number at the footage's first frame. It defaults to the first file's number. A higher number trims the head (start a 1001–1250 render at 1010); a lower one adds placeholder frames before the first file. |
+| **Start Timecode** | *Use Source File Timecode* (0:00:00:00), or *Override Start*: the timecode the footage's first frame shows in the Footage panel. It relabels source time only; the frames stay the same. For a 1001–1250 render at 24 fps, Override Start 0:00:41:17 (frame 1001) makes source time count from the render's own frame numbers. |
 | Fields, pixel aspect, loop, colour profile, linear light | As in After Effects. |
 
 Settings ▸ Import ▸ **Report Missing Frames** (on by default) lists the missing frame numbers
@@ -71,7 +71,8 @@ when a sequence imports; Interpret Footage lists them too.
 fields, pixel aspect, loop and colour settings to other footage.
 
 Agents: `file.interpretFootage {"items": [id], "frameRate": 24, "alpha": "premultiplied",
-"startFrame": 1001}` (`"startFrame": "file"` goes back to the first file's number).
+"startTimecode": 1001}` (timecode or a frame number; `"overrideStart": false` goes back to Use
+Source File Timecode).
 
 ## Replacing and reloading
 
