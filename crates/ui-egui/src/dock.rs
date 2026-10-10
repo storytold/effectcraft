@@ -501,8 +501,20 @@ impl DockNode {
                 },
             }
         }
-        if !add(self, p, near) && !add(self, p, PanelKind::EffectsPresets) {
-            add(self, p, PanelKind::Project);
+        if !add(self, p, near) && !add(self, p, PanelKind::EffectsPresets) && !add(self, p, PanelKind::Project) {
+            // With no preferred anchor, reopen in the first dock group rather than
+            // discarding the Window > panel command (also works after closing all panels).
+            fn first_group(n: &mut DockNode, p: PanelKind) {
+                match n {
+                    DockNode::Split { a, .. } => first_group(a, p),
+                    DockNode::Tabs { panels, active } => {
+                        panels.push(p);
+                        *active = panels.len() - 1;
+                    }
+                    DockNode::Stack { entries } => entries.push(StackEntry { panel: p, open: true, height: None }),
+                }
+            }
+            first_group(self, p);
         }
     }
 }
@@ -1417,6 +1429,26 @@ mod tests {
         let back: DockNode = serde_json::from_str(&s).unwrap();
         assert_eq!(back, d);
         assert_eq!(PanelKind::from_name("effects & presets"), Some(PanelKind::EffectsPresets));
+    }
+
+    #[test]
+    fn window_panels_reopen_after_last_panel_is_closed() {
+        use PanelKind::*;
+        for reopen in [Composition, Timeline, Project] {
+            let mut d = workspace("Minimal");
+            d.close(Composition);
+            d.close(Timeline);
+            assert_eq!(d.panel_count(), 0);
+            d.open_near(reopen, EffectsPresets);
+            assert_eq!(d.panel_count(), 1);
+            assert!(d.is_visible(reopen), "{reopen:?} must be visible");
+        }
+        let mut d = tabs(&[Audio], 0);
+        d.open_near(History, Project);
+        assert_eq!(d, tabs(&[Audio, History], 1));
+        let mut d = workspace("Minimal");
+        d.open_near(EffectsPresets, Timeline);
+        assert_eq!(d.path_of(EffectsPresets), d.path_of(Timeline));
     }
 
     #[test]
