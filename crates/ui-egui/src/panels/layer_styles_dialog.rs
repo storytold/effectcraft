@@ -115,9 +115,13 @@ fn control(ui: &mut egui::Ui, p: &Property, v: &KV) -> Option<Value> {
             let changed = egui::color_picker::color_edit_button_rgba(ui, &mut rgba, egui::color_picker::Alpha::Opaque).changed();
             changed.then(|| json!([rgba.r(), rgba.g(), rgba.b()]))
         }
-        (KV::Gradient(_), _) => {
-            ui.label(egui::RichText::new(tr("Edit in the Timeline")).weak());
-            None
+        (KV::Gradient(g), _) => {
+            let resp = ui.button(tr("Edit Gradient…"));
+            let popup = egui::Id::new(("ls-gradient-popup", p.uid));
+            if resp.clicked() {
+                crate::widgets::open_popup(ui, popup);
+            }
+            super::gradient_editor::popup(ui, popup, resp.rect, g).map(|edited| json!(edited))
         }
         _ => {
             ui.label(egui::RichText::new(format!("{v:?}").chars().take(24).collect::<String>()).weak());

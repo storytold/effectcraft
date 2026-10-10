@@ -429,6 +429,14 @@ fn prop_row(
             }
             p.rect_stroke(gr, 2.0, Stroke::new(1.0, t.field_border), egui::StrokeKind::Inside);
             app.auto.add(&format!("effectControls.prop.{uid}.value"), gr, &prop.name);
+            let resp = ui.interact(gr, egui::Id::new(("ec-gradient", uid)), Sense::click());
+            let popup = egui::Id::new(("ec-gradient-popup", uid));
+            if resp.clicked() {
+                widgets::open_popup(ui, popup);
+            }
+            if let Some(edited) = super::gradient_editor::popup(ui, popup, gr, g) {
+                set(actions, json!(edited));
+            }
         }
         _ => {}
     }
