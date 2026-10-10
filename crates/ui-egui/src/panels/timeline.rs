@@ -3605,8 +3605,18 @@ fn value_editor(
                 t.hot_text,
             );
         }
-        Value::Gradient(_) => {
+        Value::Gradient(g) => {
+            let r = Rect::from_min_size(pos2(x, y), vec2(118.0, 18.0));
+            let resp = ui.interact(r, egui::Id::new(("tl-gradient", uid)), Sense::click());
             p.text(pos2(x, at.y), Align2::LEFT_CENTER, crate::i18n::tr("Edit Gradient…"), Tokens::ui(12.0), t.hot_text);
+            app.auto.add(&format!("timeline.prop.{uid}.value"), r, &prop.name);
+            let popup = egui::Id::new(("tl-gradient-popup", uid));
+            if resp.clicked() {
+                widgets::open_popup(ui, popup);
+            }
+            if let Some(edited) = super::gradient_editor::popup(ui, popup, r, g) {
+                set(actions, json!(edited));
+            }
         }
         Value::Str(s) => {
             p.text(pos2(x, at.y), Align2::LEFT_CENTER, s.chars().take(30).collect::<String>(), Tokens::ui(12.0), t.text_dim);

@@ -19,6 +19,7 @@ pub mod fx_editors;
 pub mod fx_widgets;
 pub mod graph;
 pub mod graph_tools;
+pub mod gradient_editor;
 pub mod home;
 pub mod info;
 pub mod key_dialogs;
