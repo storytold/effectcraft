@@ -47,6 +47,10 @@ because 179 issues were closed with regression tests between 5 and 10 October.
 
 ## Every known gap, ranked
 
+**Alpha blockers: none.** Every core workflow passes the [alpha gate](roadmap.md#alpha-gate); the
+entries below are what stands between alpha and beta (gap 1 decides beta). The rough edges the
+gate lists live in gaps 5, 8, 9, 10, 11 and 17.
+
 Ranked by user impact × how many users hit it. Each entry: what's missing, evidence, impact,
 estimate, the workstream (G1–G9, below) and the parity doc it belongs to. Small single-issue bugs
 are grouped by area; the issue tracker has the rest.
@@ -286,6 +290,7 @@ Issues #41–#47 (all from the Linux AppImage 0.1.1, 5 October): panning the vie
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-10 | minor | Alpha gate checked: no alpha blockers |
 | 2026-10-10 | major | Re-measured against After Effects 2026 26.5: two numbers (breadth ≈ 91%, ready ≈ 45%), dimension table with hours, a ranked list of 25 gaps with evidence, impact, estimate and parity doc; the real-user evidence moved into a report log under G2; links follow the rename of `parity.md` to `target-app-parity.md` |
 | 2026-10-08 | minor | User issues of 6–8 October and their regression evidence |
 | 2026-10-05 | major | First honest assessment: breadth ≈ 99% vs real use ≈ 30–50%; workstreams G1–G9 |

@@ -16,7 +16,7 @@ left. [gaps.md](gaps.md) lists every known shortfall one at a time; the
 |---|---|---|
 | **Feature breadth** (does each After Effects 26.5 feature exist?) | **≈ 91%** | Estimated, weighted by area (table below). The self-graded 92-item checklist says 89 done / 3 partial (≈ 99%), but it was written before After Effects 26.2 and 26.5 and does not count animation presets, project formats or hardware; see the appendix |
 | **Ready for real work** (can an After Effects professional do client work here?) | **≈ 45%** (range 40–50%) | Estimated: 60% feature depth (≈ 50%, table below), 15% opening and delivering work files (≈ 35%), 10% performance (≈ 35%), 10% stability (≈ 45%), 5% platforms (≈ 65%) |
-| **Stage** | **alpha** | Core workflows run end to end, but `.aep` projects can't be opened, fidelity is measured for one narrow case, and 134 issues are open ([ROADMAP](../ROADMAP.md#stage)) |
+| **Stage** | **alpha** | All six core workflows pass the [alpha gate](roadmap.md#alpha-gate) on macOS and ready (≈ 45%) is above the ≈ 40% bar, but `.aep` projects can't be opened, fidelity is measured for one narrow case, and 134 issues are open ([ROADMAP](../ROADMAP.md#stage)) |
 | Remaining to **beta** (≈ 75% ready, `.aep` opens) | **≈ 350–620 Opus 5.5 agent-hours** | Estimated |
 | Remaining to **full parity** | **≈ 850–1,500 Opus 5.5 agent-hours** | Estimated |
 
@@ -1034,6 +1034,7 @@ top of this page and in items 16–18 above.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-10 | minor | Stage checked against the core-workflow alpha gate: passes, still alpha |
 | 2026-10-10 | major | Full re-measure against After Effects 2026 26.5 (installed bundle, 26.2–26.5 release notes, repository counts); two numbers (breadth ≈ 91%, ready ≈ 45%); feature-area and dimension tables with Opus 5.5 hours; `docs/parity.md` merged in as the appendix and its stale per-area table superseded |
 | 2026-10-05 | minor | Checklist updated for M3.9–M4.12 (as `docs/parity.md`) |
 | 2026-10-04 | major | Checklist audit at `d39c0e8`: ≈ 99% weighted breadth, 89 / 3 / 0 of 92 |

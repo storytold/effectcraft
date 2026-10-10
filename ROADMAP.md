@@ -23,8 +23,9 @@ Hours are one Opus 5.5 agent working sequentially, calibrated on this repository
 
 ### Stage
 
-**Alpha**, because core workflows (import, arrange, animate, preview, render) run end to end on
-three desktop platforms and the web, but: After Effects projects (`.aep`) can't be opened, which
+**Alpha**, because all six core workflows of the [alpha gate](docs/roadmap.md#alpha-gate)
+(set up, animate, text and shapes, composite, preview, save and deliver) work end to end on macOS
+and the work saves and reopens, and ready for real work (≈ 45%) is above the ≈ 40% bar. But: After Effects projects (`.aep`) can't be opened, which
 alone rules out beta; fidelity against After Effects is measured for one narrow case (scalar ease,
 168 samples); 134 issues are open, eight of them crash reports. Beta needs ≈ 75% ready and `.aep`
 opening reliably: the `.aep` owner decision and importer (80–160 h), the fidelity harness and
@@ -126,5 +127,6 @@ Come tell us what matters most to you on [Discord](https://discord.gg/artcraft).
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-10 | minor | Stage checked against the new core-workflow gate (all six pass; still alpha) |
 | 2026-10-10 | major | Rewritten to the shared progress-docs standard: stage, two numbers, dimensions, features, languages, upcoming, progress log; milestones moved to docs/roadmap.md |
 | 2026-10-05 | major | Two numbers (breadth vs real use) and workstreams G1–G9 |
