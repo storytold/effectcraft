@@ -248,7 +248,8 @@ fn multiple_selected_footage_dropped_on_empty_timeline_asks_how_to_create_comps(
     let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
     let from = rect(&h, &format!("project.item.{first}.name")).center();
-    drag(&mut h, from, rect(&h, "panel.Timeline").center(), Modifiers::NONE);
+    let to = rect(&h, "panel.Timeline").center();
+    drag(&mut h, from, to, Modifiers::NONE);
     assert_eq!(h.state().dialog, Some(effectcraft_ui_egui::Dialog::Form));
     assert!(h.state().auto.find("form.field.single").is_some());
     assert!(h.state().session.active_comp().is_none(), "no composition until the user chooses");
