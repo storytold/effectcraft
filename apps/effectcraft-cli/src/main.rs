@@ -265,7 +265,10 @@ fn main() {
         fail_usage("missing subcommand");
     }
     let cmd = args.pos.remove(0);
-    match run(&cmd, &args, json_out) {
+    let outcome = run(&cmd, &args, json_out);
+    // Plug-in helper programs would keep running (and keep stdout open) after the tool exits.
+    effectcraft_host::shutdown();
+    match outcome {
         Ok(()) if stdout_broken() => std::process::exit(1),
         Ok(()) => {}
         Err(Failure::Usage(e)) => fail_usage(&e),

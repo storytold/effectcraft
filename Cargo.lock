@@ -1339,6 +1339,7 @@ dependencies = [
  "effectcraft-expr",
  "effectcraft-interchange",
  "effectcraft-media",
+ "effectcraft-ofx",
  "effectcraft-pdf",
  "effectcraft-plugin",
  "effectcraft-project",
@@ -1435,6 +1436,19 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "effectcraft-ofx"
+version = "0.7.0"
+dependencies = [
+ "effectcraft-effects",
+ "effectcraft-keyframe",
+ "effectcraft-project",
+ "libloading",
+ "log",
+ "serde_json",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

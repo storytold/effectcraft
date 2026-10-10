@@ -139,6 +139,18 @@ fn main() -> eframe::Result {
                 if plugins.is_dir() {
                     let _ = session.execute("effect.plugins.load", json!({"folder": plugins.to_string_lossy()}));
                 }
+                // OpenFX plug-ins from the standard folders, in builds with the `openfx` feature
+                // (EFFECTCRAFT_NO_OFX=1 skips them).
+                if session.ofx_loader.is_some() && std::env::var_os("EFFECTCRAFT_NO_OFX").is_none_or(|v| v != "1") {
+                    match session.execute("effect.plugins.scanOfx", json!({})) {
+                        Ok(r) => {
+                            for e in r["errors"].as_array().into_iter().flatten() {
+                                eprintln!("effectcraft: OpenFX: {}", e.as_str().unwrap_or("error"));
+                            }
+                        }
+                        Err(e) => eprintln!("effectcraft: OpenFX: {e}"),
+                    }
+                }
                 session.config = Some(std::sync::Arc::new(effectcraft_engine::config::DirConfig::new(dir)));
             }
             session.load_settings();
@@ -213,6 +225,8 @@ fn main() -> eframe::Result {
             }))
         }),
     );
+    // Stop helper programs OpenFX plug-ins left running.
+    effectcraft_host::shutdown();
     match &result {
         Ok(()) => log::info!("the window closed"),
         Err(e) => {

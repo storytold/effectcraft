@@ -35,3 +35,7 @@ muda = { version = "0.21", default-features = false }
 objc2 = "0.6"
 # NSApplication hide / hide others / show all, and the pasteboard for Edit ▸ Paste in text fields.
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSPasteboard"] }
+
+[features]
+# OpenFX image-effect plug-ins (docs/ofx.md): native code run without a sandbox. Off by default.
+openfx = ["effectcraft-host/openfx"]

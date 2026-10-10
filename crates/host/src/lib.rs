@@ -80,7 +80,8 @@ impl Exporter for FileExporter {
 
 /// A new session with media, import, expressions, scripting and export enabled.
 pub fn session() -> Session {
-    Session {
+    #[allow(unused_mut)]
+    let mut s = Session {
         // The desktop app, the CLI and the MCP server share installed Roto Brush models.
         models_dir: config_dir().map(|d| d.join("models")),
         exporter: Some(Arc::new(FileExporter::default())),
@@ -92,7 +93,27 @@ pub fn session() -> Session {
         script_ui: effectcraft_engine::scriptui::ScriptUi { dispatch: Some(effectcraft_script::dispatch_ui), ..Default::default() },
         plugin_loader: effectcraft_plugin::wasm_available().then_some(effectcraft_plugin::loader as effectcraft_engine::PluginLoader),
         ..Default::default()
+    };
+    // OpenFX plug-ins are native code run without a sandbox: only with the `openfx` feature, never
+    // on the web build.
+    #[cfg(all(feature = "openfx", not(target_arch = "wasm32")))]
+    {
+        s.ofx_loader = Some(effectcraft_ofx::loader);
+        s.ofx_search_paths = effectcraft_ofx::default_search_paths();
+        s.ofx_clear_blocklist = Some(effectcraft_ofx::blocklist::clear);
+        // A plug-in that crashed the app while loading is remembered here and skipped next time.
+        if let Some(dir) = config_dir() {
+            effectcraft_ofx::blocklist::set_state_dir(dir);
+        }
     }
+    s
+}
+
+/// Call when the app or tool quits: stops helper programs OpenFX plug-ins started and would leave
+/// running (the `openfx` feature; nothing to do otherwise).
+pub fn shutdown() {
+    #[cfg(all(feature = "openfx", not(target_arch = "wasm32")))]
+    effectcraft_ofx::shutdown();
 }
 
 /// The platform config directory for EffectCraft (`EFFECTCRAFT_CONFIG_DIR` overrides):

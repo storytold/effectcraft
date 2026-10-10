@@ -40,6 +40,7 @@ cpal or muda. Everything in L0 to L4, the egui UI and the web app also build for
 | L3 | `interchange` | Premiere Pro interop through timeline interchange (FCP7 XML, FCPXML, OTIO, EDL, AAF, OMF via FilmCraft's `filmcraft-interchange`): sequences ↔ compositions (§6a) |
 | L3 | `lottie` | Lottie JSON / dotLottie import and export (layers, precomps, eased and spatial keyframes, shapes, masks, mattes) with a warnings list for what Lottie cannot express |
 | L3 | `plugin` | Effect plug-ins: loads sandboxed WebAssembly effect modules (plug-in API v1; the wasmi interpreter behind the `wasm` feature, on for native hosts) into the effect registry ([plugins.md](plugins.md)) |
+| L3 | `ofx` | OpenFX image-effect host: loads native OFX plug-in bundles (`.ofx.bundle`) into the effect registry through plug-in API 2. Opt-in (the hosts' `openfx` feature): it runs native code without a sandbox and is the one crate allowed `unsafe` ([ofx.md](ofx.md)); empty on wasm32 |
 | L4 | `engine` | `Session`: project, branching undo history, editor state, the command registry and menus, the ScriptUI window model (`scriptui`) |
 | L4 | `script` | Scripting: JavaScript (boa) with an After Effects-style object model (`app.project`, comps, layers, properties, render queue) and ScriptUI (dialogs, palettes, dockable panels; script-host threads so dialogs block `show()`), whose edits run engine commands; AE match names |
 | L4 | `host` | A fully wired `Session` (media, expressions, scripting, WebAssembly plug-ins, exporter) for the frontends |
