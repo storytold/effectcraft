@@ -495,6 +495,8 @@ styles, origin (`bundled`, `system`, `user`) and own-language name (`{"query":"g
 by name; `{"rescan":true}` first picks up fonts installed since launch). Pass a listed `family` and
 one of its `styles` to `layer.setText {"font", "style"}`; `text.fontFeatures` says which OpenType
 options a font draws with its own glyphs.
+A tool with its own font library can hand it over without installing it: folders listed in
+`EFFECTCRAFT_FONT_DIRS` (a path list, `:`-separated, `;` on Windows) are scanned like the system font folders.
 
 In expressions, `text.sourceText.style` / `getStyleAt(i, t)` read styles and the setters
 (`setFontSize(v, start?, count?)`, `setFillColor`, `setText`, `setJustification`…) return a
