@@ -372,7 +372,7 @@ pub fn parse_spimtx(text: &str) -> Option<FileXform> {
     }
     let mut m = [0.0; 16];
     let mut offset = [0.0; 4];
-    for (r, row) in v.chunks_exact(4).enumerate() {
+    for (r, row) in v.as_chunks::<4>().0.iter().enumerate() {
         m[r * 4..r * 4 + 3].copy_from_slice(&row[..3]);
         offset[r] = row[3] / 65535.0;
     }
