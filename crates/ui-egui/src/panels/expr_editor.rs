@@ -9,14 +9,6 @@ use egui::{Color32, FontId, Rect, Stroke, pos2, vec2};
 
 use crate::theme::Tokens;
 
-/// Syntax colours.
-const KEYWORD: Color32 = Color32::from_rgb(0xc6, 0x8a, 0xe6);
-const NUMBER: Color32 = Color32::from_rgb(0xe0, 0xb4, 0x6c);
-const STRING: Color32 = Color32::from_rgb(0x9c, 0xd0, 0x7a);
-const COMMENT: Color32 = Color32::from_rgb(0x80, 0x88, 0x90);
-const API: Color32 = Color32::from_rgb(0x6c, 0xb8, 0xf0);
-const BRACKET_BG: Color32 = Color32::from_rgb(0x4a, 0x55, 0x6a);
-
 const KEYWORDS: &[&str] = &[
     "var",
     "let",
@@ -183,8 +175,8 @@ pub fn completions(text: &str, cursor: usize) -> (String, Vec<&'static str>) {
     (word, c)
 }
 
-/// Colour runs for JavaScript: (byte start, byte end, colour).
-pub fn highlight(text: &str, base: Color32) -> Vec<(usize, usize, Color32)> {
+/// Colour runs for JavaScript in the theme's syntax colours: (byte start, byte end, colour).
+pub fn highlight(text: &str, base: Color32, t: &Tokens) -> Vec<(usize, usize, Color32)> {
     let b = text.as_bytes();
     let mut out = vec![];
     let mut i = 0;
@@ -195,35 +187,35 @@ pub fn highlight(text: &str, base: Color32) -> Vec<(usize, usize, Color32)> {
             while i < b.len() && b[i] != b'\n' {
                 i += 1;
             }
-            COMMENT
+            t.expr_comment
         } else if c == b'/' && b.get(i + 1) == Some(&b'*') {
             i += 2;
             while i < b.len() && !(b[i] == b'*' && b.get(i + 1) == Some(&b'/')) {
                 i += 1;
             }
             i = (i + 2).min(b.len());
-            COMMENT
+            t.expr_comment
         } else if c == b'"' || c == b'\'' || c == b'`' {
             i += 1;
             while i < b.len() && b[i] != c {
                 i += if b[i] == b'\\' { 2 } else { 1 };
             }
             i = (i + 1).min(b.len());
-            STRING
+            t.expr_string
         } else if c.is_ascii_digit() {
             while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'.') {
                 i += 1;
             }
-            NUMBER
+            t.expr_number
         } else if c.is_ascii_alphabetic() || c == b'_' || c == b'$' {
             while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_' || b[i] == b'$') {
                 i += 1;
             }
             let w = &text[start..i];
             if KEYWORDS.contains(&w) {
-                KEYWORD
+                t.expr_keyword
             } else if COMPLETIONS.contains(&w) {
-                API
+                t.expr_api
             } else {
                 base
             }
@@ -246,9 +238,9 @@ fn byte_of(text: &str, ci: usize) -> usize {
 }
 
 /// The layout job of the editor text: syntax colours, the matched brackets' background, wrap.
-fn layout(text: &str, font: FontId, base: Color32, p: &Scripting, brackets: Option<(usize, usize)>, wrap: f32) -> LayoutJob {
+fn layout(text: &str, font: FontId, base: Color32, t: &Tokens, p: &Scripting, brackets: Option<(usize, usize)>, wrap: f32) -> LayoutJob {
     let mut job = LayoutJob::default();
-    let runs = if p.syntax_highlighting { highlight(text, base) } else { vec![(0, text.len(), base)] };
+    let runs = if p.syntax_highlighting { highlight(text, base, t) } else { vec![(0, text.len(), base)] };
     let marks: Vec<usize> = brackets.filter(|_| p.bracket_matching).map(|(a, b)| vec![byte_of(text, a), byte_of(text, b)]).unwrap_or_default();
     for (s, e, col) in runs {
         // Split runs at the marked brackets.
@@ -263,7 +255,7 @@ fn layout(text: &str, font: FontId, base: Color32, p: &Scripting, brackets: Opti
         cuts.sort_unstable();
         cuts.dedup();
         for w in cuts.windows(2) {
-            let bg = if marks.contains(&w[0]) { BRACKET_BG } else { Color32::TRANSPARENT };
+            let bg = if marks.contains(&w[0]) { t.expr_bracket_bg } else { Color32::TRANSPARENT };
             job.append(&text[w[0]..w[1]], 0.0, TextFormat { font_id: font.clone(), color: col, background: bg, ..Default::default() });
         }
     }
@@ -280,9 +272,9 @@ pub fn editor(ui: &mut egui::Ui, id: egui::Id, buf: &mut String, rect: Rect, p: 
     let er = Rect::from_min_max(pos2(rect.min.x + gutter, rect.min.y), rect.max);
     let cursor = egui::TextEdit::load_state(ui.ctx(), id).and_then(|s| s.cursor.char_range()).map(|r| r.primary.index.0);
     let brackets = cursor.and_then(|c| matching_bracket(buf, c));
-    let pc = p.clone();
+    let (pc, tc) = (p.clone(), *t);
     let mut layouter = move |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap: f32| {
-        let job = layout(text.as_str(), font.clone(), color, &pc, brackets, wrap);
+        let job = layout(text.as_str(), font.clone(), color, &tc, &pc, brackets, wrap);
         ui.fonts_mut(|f| f.layout_job(job))
     };
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(er));

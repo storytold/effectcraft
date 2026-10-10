@@ -67,6 +67,25 @@ pub struct Tokens {
     pub row_selected: Color32,
     pub hot_text: Color32,
     pub tl_bg: Color32,
+    /// Effect Controls: header of an applied effect, and the same header while it or one of its properties is selected.
+    pub fx_header: Color32,
+    pub fx_header_active: Color32,
+    /// Timeline: time-graph row of a selected layer, and the wells behind the A/V and layer switches.
+    pub tl_row_selected: Color32,
+    pub switch_well: Color32,
+    /// Timeline: the time navigator's visible-span bar and the work area bar.
+    pub nav_bar: Color32,
+    pub work_area_bar: Color32,
+    /// Timeline expression editor: its row, the text of an enabled expression (also the name of a property with one),
+    /// the syntax colours and the matched brackets' background.
+    pub expr_bg: Color32,
+    pub expr_text: Color32,
+    pub expr_keyword: Color32,
+    pub expr_number: Color32,
+    pub expr_string: Color32,
+    pub expr_comment: Color32,
+    pub expr_api: Color32,
+    pub expr_bracket_bg: Color32,
     pub tl_ruler_bg: Color32,
     pub tl_ruler_tick: Color32,
     pub tl_ruler_text: Color32,
@@ -140,6 +159,20 @@ impl Tokens {
             row_selected: Color32::from_rgb(0x3a, 0x3a, 0x3a),
             hot_text: Color32::from_rgb(0x3d, 0x8f, 0xf5),
             tl_bg: Color32::from_rgb(0x1b, 0x1b, 0x1b),
+            fx_header: Color32::from_rgb(0x2a, 0x2a, 0x2a),
+            fx_header_active: Color32::from_rgb(0x2f, 0x3a, 0x52),
+            tl_row_selected: Color32::from_rgb(0x2a, 0x2a, 0x2a),
+            switch_well: Color32::from_rgb(0x19, 0x19, 0x19),
+            nav_bar: Color32::from_rgb(0x55, 0x55, 0x55),
+            work_area_bar: Color32::from_rgb(0x5c, 0x5c, 0x5c),
+            expr_bg: Color32::from_rgb(0x1a, 0x1a, 0x1a),
+            expr_text: Color32::from_rgb(0xe8, 0x7c, 0x5c),
+            expr_keyword: Color32::from_rgb(0xc6, 0x8a, 0xe6),
+            expr_number: Color32::from_rgb(0xe0, 0xb4, 0x6c),
+            expr_string: Color32::from_rgb(0x9c, 0xd0, 0x7a),
+            expr_comment: Color32::from_rgb(0x80, 0x88, 0x90),
+            expr_api: Color32::from_rgb(0x6c, 0xb8, 0xf0),
+            expr_bracket_bg: Color32::from_rgb(0x4a, 0x55, 0x6a),
             tl_ruler_bg: Color32::from_rgb(0x23, 0x23, 0x23),
             tl_ruler_tick: Color32::from_rgb(0x70, 0x70, 0x70),
             tl_ruler_text: Color32::from_rgb(0x9a, 0x9a, 0x9a),
@@ -197,6 +230,20 @@ impl Tokens {
                 row_alt: Color32::from_rgb(0xde, 0xde, 0xde),
                 row_selected: Color32::from_rgb(0xaa, 0xc8, 0xf0),
                 tl_bg: Color32::from_rgb(0xd2, 0xd2, 0xd2),
+                fx_header: Color32::from_rgb(0xd8, 0xd8, 0xd8),
+                fx_header_active: Color32::from_rgb(0xb0, 0xcf, 0xec),
+                tl_row_selected: Color32::from_rgb(0xc2, 0xc2, 0xc2),
+                switch_well: Color32::from_rgb(0xc4, 0xc4, 0xc4),
+                nav_bar: Color32::from_rgb(0xa0, 0xa0, 0xa0),
+                work_area_bar: Color32::from_rgb(0x9c, 0x9c, 0x9c),
+                expr_bg: Color32::from_rgb(0xec, 0xec, 0xec),
+                expr_text: Color32::from_rgb(0xa8, 0x40, 0x1c),
+                expr_keyword: Color32::from_rgb(0x7c, 0x3a, 0xa6),
+                expr_number: Color32::from_rgb(0x8a, 0x53, 0x00),
+                expr_string: Color32::from_rgb(0x2f, 0x6e, 0x1a),
+                expr_comment: Color32::from_rgb(0x5c, 0x63, 0x6b),
+                expr_api: Color32::from_rgb(0x1f, 0x5f, 0x9e),
+                expr_bracket_bg: Color32::from_rgb(0xc4, 0xd0, 0xe4),
                 tl_ruler_bg: Color32::from_rgb(0xe2, 0xe2, 0xe2),
                 tl_ruler_text: Color32::from_rgb(0x50, 0x50, 0x50),
                 pasteboard: Color32::from_rgb(0xa8, 0xa8, 0xa8),
@@ -265,6 +312,12 @@ impl Tokens {
             &mut self.row_alt,
             &mut self.row_selected,
             &mut self.tl_bg,
+            &mut self.fx_header,
+            &mut self.tl_row_selected,
+            &mut self.switch_well,
+            &mut self.nav_bar,
+            &mut self.work_area_bar,
+            &mut self.expr_bg,
             &mut self.tl_ruler_bg,
             &mut self.pasteboard,
             &mut self.work_area,
@@ -640,5 +693,38 @@ mod tests {
         }
         // Leave the operating system's locale behind for whatever runs next.
         install_script_fallbacks(&mut fonts, "system");
+    }
+
+    /// WCAG contrast ratio of two opaque colours.
+    fn contrast(a: Color32, b: Color32) -> f32 {
+        let lum = |c: Color32| {
+            let f = |v: u8| {
+                let v = v as f32 / 255.0;
+                if v <= 0.03928 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+            };
+            0.2126 * f(c.r()) + 0.7152 * f(c.g()) + 0.0722 * f(c.b())
+        };
+        let (x, y) = (lum(a), lum(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    #[test]
+    fn custom_painted_timeline_and_effect_surfaces_follow_the_theme() {
+        for kind in [ThemeKind::Dark, ThemeKind::Darker, ThemeKind::Light] {
+            let t = Tokens::for_kind(kind);
+            for (name, bg) in [("fx_header", t.fx_header), ("fx_header_active", t.fx_header_active)] {
+                assert!(contrast(t.text, bg) >= 4.5, "{kind:?} {name}: effect names must stay readable");
+            }
+            assert!(contrast(t.icon, t.switch_well) >= 3.0, "{kind:?}: switch icons must stay visible on their wells");
+            let syntax = [("text", t.expr_text), ("keyword", t.expr_keyword), ("number", t.expr_number), ("string", t.expr_string)];
+            for (name, fg) in syntax.into_iter().chain([("comment", t.expr_comment), ("api", t.expr_api)]) {
+                assert!(contrast(fg, t.expr_bg) >= 4.5, "{kind:?} expression {name}: must stay readable on the expression row");
+            }
+        }
+        let (light, dark) = (Tokens::for_kind(ThemeKind::Light), Tokens::for_kind(ThemeKind::Dark));
+        assert_ne!(light.fx_header, dark.fx_header, "Light must not keep the dark header fill");
+        assert_ne!(light.expr_bg, dark.expr_bg, "Light must not keep the dark expression row");
+        // The dark theme's expression colours would be unreadable on the Light row.
+        assert!(contrast(dark.expr_text, light.expr_bg) < 4.5 && contrast(dark.expr_string, light.expr_bg) < 4.5);
     }
 }
