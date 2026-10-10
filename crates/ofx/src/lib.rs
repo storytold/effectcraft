@@ -77,3 +77,72 @@ pub fn loader(path: &str) -> Result<serde_json::Value, String> {
         .collect();
     Ok(serde_json::json!({"loaded": loaded, "errors": report.errors}))
 }
+
+/// Helper programs plug-ins start and leave running after the host quits (Boris FX Sapphire
+/// pre-launches its preset browser on load).
+const HELPERS: &[&str] = &["preset-browser.exe"];
+
+/// Call when the app quits: stops the plug-in helper programs ([`HELPERS`]) this process started,
+/// which would otherwise keep running (and keep a CLI's output pipe open). Only direct child
+/// processes with those names are touched.
+pub fn shutdown() {
+    #[cfg(windows)]
+    win::stop_children(HELPERS);
+}
+
+#[cfg(windows)]
+mod win {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcessId, OpenProcess, PROCESS_TERMINATE, TerminateProcess};
+
+    /// Terminate this process's direct children whose executable is one of `names`, together with
+    /// everything they started (packaged helpers relaunch themselves as a child).
+    pub fn stop_children(names: &[&str]) {
+        let procs = snapshot();
+        let me = unsafe { GetCurrentProcessId() };
+        let mut doomed: Vec<u32> = procs.iter().filter(|p| p.1 == me && names.iter().any(|n| p.2.eq_ignore_ascii_case(n))).map(|p| p.0).collect();
+        let mut i = 0;
+        while let Some(&pid) = doomed.get(i) {
+            for p in procs.iter().filter(|p| p.1 == pid && p.0 != pid) {
+                if !doomed.contains(&p.0) && doomed.len() < 256 {
+                    doomed.push(p.0);
+                }
+            }
+            i += 1;
+        }
+        for pid in doomed {
+            // SAFETY: a handle opened for termination only, and closed.
+            unsafe {
+                let h = OpenProcess(PROCESS_TERMINATE, 0, pid);
+                if !h.is_null() {
+                    TerminateProcess(h, 0);
+                    CloseHandle(h);
+                }
+            }
+        }
+    }
+
+    /// (pid, parent pid, executable name) of every process.
+    fn snapshot() -> Vec<(u32, u32, String)> {
+        let mut out = Vec::new();
+        // SAFETY: plain Win32 calls on a process snapshot; the entry struct is sized as the API
+        // requires and the snapshot handle is closed.
+        unsafe {
+            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if snap == INVALID_HANDLE_VALUE {
+                return out;
+            }
+            let mut e: PROCESSENTRY32W = std::mem::zeroed();
+            e.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+            let mut more = Process32FirstW(snap, &mut e) != 0;
+            while more {
+                let len = e.szExeFile.iter().position(|&c| c == 0).unwrap_or(e.szExeFile.len());
+                out.push((e.th32ProcessID, e.th32ParentProcessID, String::from_utf16_lossy(e.szExeFile.get(..len).unwrap_or_default())));
+                more = Process32NextW(snap, &mut e) != 0;
+            }
+            CloseHandle(snap);
+        }
+        out
+    }
+}

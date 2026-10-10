@@ -225,6 +225,8 @@ fn main() -> eframe::Result {
             }))
         }),
     );
+    // Stop helper programs OpenFX plug-ins left running.
+    effectcraft_host::shutdown();
     match &result {
         Ok(()) => log::info!("the window closed"),
         Err(e) => {

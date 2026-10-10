@@ -109,6 +109,13 @@ pub fn session() -> Session {
     s
 }
 
+/// Call when the app or tool quits: stops helper programs OpenFX plug-ins started and would leave
+/// running (the `openfx` feature; nothing to do otherwise).
+pub fn shutdown() {
+    #[cfg(all(feature = "openfx", not(target_arch = "wasm32")))]
+    effectcraft_ofx::shutdown();
+}
+
 /// The platform config directory for EffectCraft (`EFFECTCRAFT_CONFIG_DIR` overrides):
 /// `~/Library/Application Support/EffectCraft` (macOS), `%APPDATA%\EffectCraft` (Windows),
 /// `$XDG_CONFIG_HOME/effectcraft` or `~/.config/effectcraft` (Linux and others).
