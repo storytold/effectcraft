@@ -33,8 +33,8 @@
     <Property Id="ARPHELPLINK" Value="https://discord.gg/artcraft" />
 
     <!-- An upgrade, repair or silent reinstall goes where the installed copy already is: the App Paths
-         "Path" value written below, or for releases before it (0.6.0 and earlier, which could be put
-         elsewhere with INSTALLFOLDER=...) the folder of the effectcraft.exe that App Paths names. A
+         "Path" value written below, or for releases before this installer change (no Path value; they
+         could be put elsewhere with INSTALLFOLDER=...) the folder of the effectcraft.exe that App Paths names. A
          "file" search with no FileSearch inside yields that file's folder. A folder passed on the
          command line (INSTALLFOLDER=...) wins. -->
     <Property Id="INSTALLFOLDER" Secure="yes" />

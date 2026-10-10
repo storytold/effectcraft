@@ -3,8 +3,8 @@
   Install-test the EffectCraft MSI's folder handling with stub binaries (no Rust build).
 
 .DESCRIPTION
-  Builds the MSI around two stand-in executables as 0.0.1 the way 0.6.0 and earlier were (no App
-  Paths "Path" value), then as 0.0.2 and 0.0.3, validates them (ICE), and, silently and per-machine:
+  Builds the MSI around two stand-in executables as 0.0.1 the way releases before this installer
+  change are (no App Paths "Path" value), then as 0.0.2 and 0.0.3, validates them (ICE), and, silently and per-machine:
     1. installs 0.0.1 into a folder with spaces and a non-ASCII name (INSTALLFOLDER=...),
     2. upgrades to 0.0.2 without naming a folder: it must stay in that folder (found from the
        installed effectcraft.exe, as there is no Path value yet),
@@ -60,7 +60,8 @@ New-Item -ItemType Directory -Force -Path $Bin | Out-Null
 Copy-Item (Join-Path $env:SystemRoot 'System32\notepad.exe') (Join-Path $Bin 'effectcraft.exe')
 [IO.File]::WriteAllText((Join-Path $Bin 'effectcraft-cli.exe'), 'effectcraft-cli stand-in')
 
-# 0.0.1 stands in for 0.6.0 and earlier: the same package without the App Paths "Path" value.
+# 0.0.1 stands in for releases before this installer change: the same package without the App
+# Paths "Path" value.
 $Wxs = Join-Path $PSScriptRoot 'effectcraft.wxs'
 $LegacyWxs = Join-Path $Work 'effectcraft-legacy.wxs'
 $pathValue = '(?m)^.*<RegistryValue [^>]*Name="Path"[^>]*/>\r?\n'
