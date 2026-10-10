@@ -101,6 +101,18 @@ fn main() -> eframe::Result {
     // Start-up milestones: with `RUST_LOG=info` they go to stderr, so a window that never
     // appears shows how far start-up got (#234).
     log::info!("effectcraft {}: opening the window", env!("CARGO_PKG_VERSION"));
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut options = options;
+    // winit has no file drag-and-drop on Wayland (only on X11), so dropping files from the file
+    // manager showed a "no" cursor. Run through XWayland when it's there; EFFECTCRAFT_WAYLAND=1
+    // keeps the native Wayland backend.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    if std::env::var_os("DISPLAY").is_some() && std::env::var_os("EFFECTCRAFT_WAYLAND").is_none() {
+        options.event_loop_builder = Some(Box::new(|b| {
+            use winit::platform::x11::EventLoopBuilderExtX11;
+            b.with_x11();
+        }));
+    }
     let result = eframe::run_native(
         "EffectCraft",
         options,
