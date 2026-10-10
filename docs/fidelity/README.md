@@ -50,12 +50,30 @@ time curve. Its closed-form inverse and a parameter-based convergence check now 
 mathematical regression test at times within `1e-12` of the midpoint; that test is additional to
 the 168 live AE samples.
 
+## Auto-Bezier spatial tangents
+
+Measured on 10 October 2026 with After Effects 2026 (26.3) by running the original
+`examples/ae-spatial-tangents.jsx` in both hosts (`AfterFX.exe -r` and `effectcraft-cli script`):
+three original Position paths, ten keys, with even and uneven key timing. The script pins spatial
+interpolation to auto-Bezier, since an AE preference can default new keys to linear.
+
+AE gives each auto-Bezier key an out tangent of (next key − previous key) / 6 and the mirrored in
+tangent, whatever the key times; an end key uses its one neighbour, (neighbour − key) / 6. That is a
+Catmull-Rom spline. EffectCraft gave end keys no tangent and scaled middle keys' tangents by the
+lengths of their segments, so all ten tangents differed. Sampled Position along an auto-Bezier path
+with Easy Ease was up to 25.1 px off, and a roving path up to 27.7 px.
+
+After the fix, all ten tangents equal AE's to the printed 0.001 px, and the two path cases are within
+0.05 px over 61 samples each; what remains is the arc-length table's sub-pixel speed. The regression
+test `spatial_auto_bezier_tangents_follow_after_effects` checks the rule on other original keys,
+including a timing change. AE's output stays local; only the script and these scores are tracked.
+
 ## Still unmeasured
 
 Rendered frame comparisons now have a deterministic `effectcraft_effects::fidelity::compare_frames`
 helper. Corpus runners can use it with locally generated host/reference frames and fail on either a
 mean or maximum channel error without committing proprietary renders.
 
-Mixed interpolation sides, non-unit durations, automatic/continuous Bezier, spatial speeds and paths,
+Mixed interpolation sides, non-unit durations, temporal automatic/continuous Bezier, spatial speeds,
 time remapping, expressions, actual rendered motion and other effects need separate corpus cases.
 The initial probe makes no claim about those features.

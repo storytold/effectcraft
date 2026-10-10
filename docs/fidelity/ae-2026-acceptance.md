@@ -12,7 +12,7 @@ platform, fonts, color settings, source files, and project parameters.
 | --- | --- | --- |
 | Work projects | Representative projects recreated or imported, edited, saved, reopened and delivered without lost state | Native AE project import and third-party AE plug-in execution remain gaps |
 | Workflow | Pointer and keyboard cases for all panels, tools, shortcuts, docking, undo, dialogs and selections | Current pass covers 34 panel layouts and selected interaction regressions; every control is not verified |
-| Animation | AE-sampled values for scalar, spatial, multidimensional and expression-driven properties, timing and interpolation | Eight scalar Rotation/ease cases, 168 samples verified against AE 26.3x87; other cases remain open |
+| Animation | AE-sampled values for scalar, spatial, multidimensional and expression-driven properties, timing and interpolation | Eight scalar Rotation/ease cases, 168 samples verified against AE 26.3x87; auto-Bezier spatial tangents (ten keys, three paths) match AE 26.3; other cases remain open |
 | Render fidelity | Original test scenes compared at 8/16/32 bpc, specified color spaces and alpha conventions; edges, impulses, gradients and temporal sequences | Most AE-rendered comparisons remain open; CPU/GPU agreement alone is insufficient |
 | Media and delivery | Real footage import, seek, frame rates, audio sync, relinking, image sequences, codec/container metadata and exports checked in downstream tools | Actual work fixtures still required |
 | Performance | Matched AE/EffectCraft input-to-present and export timings at 1080p/4K, warm/cold caches, memory/VRAM and long sessions | No claim of beating AE or measured blur response yet |

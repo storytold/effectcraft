@@ -588,7 +588,11 @@ fn loop_on_two_dimensional_position() {
     let mut f = fx();
     f.layer_mut(f.a).props.prop_mut(POS).unwrap().keys =
         vec![Keyframe::new(secs(0.0), Value::Vec3([0.0, 0.0, 0.0])), Keyframe::new(secs(1.0), Value::Vec3([100.0, 50.0, 0.0]))];
-    assert_eq!(f.pos("loopOut('offset')", 1.5), [150.0, 75.0, 0.0]);
+    // The auto-Bezier keys have tangents along the line, so the path is sampled by arc length.
+    let p = f.pos("loopOut('offset')", 1.5);
+    for (got, want) in p.into_iter().zip([150.0, 75.0, 0.0]) {
+        assert_close!(got, want, 1e-9);
+    }
 }
 
 #[test]

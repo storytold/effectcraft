@@ -770,8 +770,8 @@ fn clicking_off_a_mask_deselects_its_points() {
     assert_eq!(h.state().session.state.selected_layers, vec![LayerId(plate)], "the layer stays selected");
 }
 
-/// A straight two-key motion path shows Bezier handles at both keys (it had none), and dragging
-/// one pulls the path into a curve (#290).
+/// A straight two-key motion path shows Bezier handles at both keys, and dragging one pulls the
+/// path into a curve (#290).
 #[test]
 fn a_straight_motion_path_has_handles_to_curve_it() {
     let mut h = harness();
@@ -785,15 +785,16 @@ fn a_straight_motion_path_has_handles_to_curve_it() {
     h.run_steps(3);
     let (out0, in1) = (format!("viewer.motionPath.{}.0.out", box_id.0), format!("viewer.motionPath.{}.1.in", box_id.0));
     assert!(h.state().auto.find(&in1).is_some(), "the second key has a handle");
-    // The first key's handle lies a third of the way along the path: drag it down 150 px.
+    // The first key's auto-Bezier handle lies a sixth of the way along the path, as After Effects
+    // puts it: drag it down 150 px.
     let from = rect(&h, &out0).center();
-    assert!(from.distance(screen(&h, [200.0, 100.0])) < 2.0, "{from:?}");
-    let to = screen(&h, [200.0, 250.0]);
+    assert!(from.distance(screen(&h, [150.0, 100.0])) < 2.0, "{from:?}");
+    let to = screen(&h, [150.0, 250.0]);
     drag(&mut h, from, to);
     let p = h.state().session.active_comp().unwrap().layer(box_id).unwrap().props.prop("transform/position").unwrap().clone();
     assert!(!p.keys[0].spatial_auto);
     let t = p.keys[0].spatial_out;
-    assert!((t[0] - 100.0).abs() < 2.0 && (t[1] - 150.0).abs() < 2.0, "{t:?}");
+    assert!((t[0] - 50.0).abs() < 2.0 && (t[1] - 150.0).abs() < 2.0, "{t:?}");
     let mid = p.value_at(effectcraft_engine::time::Tick::from_seconds_f64(1.0)).as_vec3();
     assert!(mid[1] > 130.0, "the path curves: {mid:?}");
 }
