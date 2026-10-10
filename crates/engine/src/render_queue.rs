@@ -312,6 +312,17 @@ async fn run_work(w: Work, shared: &JobShared, notify: &mut dyn FnMut(&JobShared
     s.finished = true;
 }
 
+/// An unsaved macOS app launched from Finder can have `/` as its working directory.
+/// Relative renders would then target an unwritable system directory. Preserve the
+/// working directory for ordinary launches (including CLI) and other platforms.
+fn launch_output_dir(cwd: std::path::PathBuf, home: Option<std::path::PathBuf>, macos: bool) -> std::path::PathBuf {
+    if macos && cwd == std::path::Path::new("/") {
+        home.filter(|p| p.is_dir()).unwrap_or(cwd)
+    } else {
+        cwd
+    }
+}
+
 impl Session {
     /// The project's name for `[projectName]` (file stem, or "Untitled Project").
     pub fn project_name(&self) -> String {
@@ -352,7 +363,13 @@ impl Session {
         let base =
             base.or_else(|| self.path.as_deref().and_then(|s| std::path::Path::new(s).parent().map(|d| d.to_path_buf())).filter(|d| !d.as_os_str().is_empty()));
         // (the web has no working directory: relative outputs land in its virtual root)
-        let base = base.or_else(|| std::env::current_dir().ok()).or_else(|| cfg!(target_arch = "wasm32").then(|| "/".into()))?;
+        let base = base
+            .or_else(|| {
+                std::env::current_dir().ok().map(|cwd| {
+                    launch_output_dir(cwd, std::env::var_os("HOME").map(std::path::PathBuf::from), cfg!(target_os = "macos"))
+                })
+            })
+            .or_else(|| cfg!(target_arch = "wasm32").then(|| "/".into()))?;
         Some(base.join(path).to_string_lossy().to_string())
     }
 
@@ -664,5 +681,24 @@ impl Session {
         }
         let sel = self.state.project_selection.iter().copied().find(|i| self.project.comp(*i).is_some());
         self.active_comp_id().or(sel).ok_or(crate::EngineError::NoComp)
+    }
+}
+
+#[cfg(test)]
+mod launch_output_dir_tests {
+    use super::launch_output_dir;
+    use std::path::PathBuf;
+
+    #[test]
+    fn macos_finder_root_falls_back_to_home_but_other_launches_keep_cwd() {
+        let root = PathBuf::from("/");
+        // temp_dir is an existing directory on every supported desktop test platform.
+        let home = std::env::temp_dir();
+        assert!(home.is_dir());
+        assert_eq!(launch_output_dir(root.clone(), Some(home.clone()), true), home);
+        assert_eq!(launch_output_dir(root.clone(), None, true), root);
+        assert_eq!(launch_output_dir(root.clone(), Some(home.clone()), false), root);
+        let cwd = home.join("relative-working-dir");
+        assert_eq!(launch_output_dir(cwd.clone(), Some(home), true), cwd);
     }
 }
