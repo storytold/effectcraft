@@ -1212,6 +1212,36 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let ctx = ui.ctx().clone();
     let Some(cid) = app.session.active_comp_id() else {
         ui.painter().text(rect.center(), Align2::CENTER_CENTER, "(no composition)", Tokens::ui(12.0), t.text_faint);
+        // Dropping footage into an empty Timeline should create its first composition,
+        // just like dropping onto the Project panel's New Composition button (#649).
+        if let Some(crate::panels::DragPayload::Item(dragged)) = egui::DragAndDrop::payload::<crate::panels::DragPayload>(&ctx).as_deref()
+            && ui.rect_contains_pointer(rect)
+        {
+            let items: Vec<ItemId> = crate::panels::project_drop_items(app, *dragged)
+                .into_iter()
+                .map(ItemId)
+                .filter(|id| {
+                    app.session.project.item(*id).is_some_and(|item| match &item.kind {
+                        effectcraft_engine::project::ItemKind::Footage(footage) => {
+                            footage.kind != effectcraft_engine::project::FootageKind::Data
+                        }
+                        effectcraft_engine::project::ItemKind::Solid(_) => true,
+                        _ => false,
+                    })
+                })
+                .collect();
+            if !items.is_empty() {
+                ui.painter().rect_stroke(rect.shrink(2.0), 0.0, Stroke::new(2.0, t.accent), StrokeKind::Inside);
+                app.auto.add("timeline.newCompDrop", rect, "Drop footage to create a composition");
+                if ctx.input(|i| i.pointer.any_released()) {
+                    app.session.state.project_selection = items;
+                    if let Err(e) = crate::menus::invoke(app, &ctx, "file.newCompFromSelection", json!({})) {
+                        app.ui.status = e;
+                    }
+                    egui::DragAndDrop::clear_payload(&ctx);
+                }
+            }
+        }
         return;
     };
     let Some(comp) = app.session.project.comp_arc(cid) else { return };
