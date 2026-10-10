@@ -1221,11 +1221,13 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 .into_iter()
                 .map(ItemId)
                 .filter(|id| {
-                    app.session.project.item(*id).is_some_and(|item| matches!(
-                        &item.kind,
-                        effectcraft_engine::project::ItemKind::Footage(_)
-                            | effectcraft_engine::project::ItemKind::Solid(_)
-                    ))
+                    app.session.project.item(*id).is_some_and(|item| match &item.kind {
+                        effectcraft_engine::project::ItemKind::Footage(footage) => {
+                            footage.kind != effectcraft_engine::project::FootageKind::Data
+                        }
+                        effectcraft_engine::project::ItemKind::Solid(_) => true,
+                        _ => false,
+                    })
                 })
                 .collect();
             if !items.is_empty() {
