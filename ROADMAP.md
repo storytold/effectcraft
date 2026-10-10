@@ -15,6 +15,8 @@ from scratch in Rust. This page is the one-page summary; the evidence is in
 |---|---|---|
 | **Feature breadth** | **≈ 91%** | Estimated, weighted by area; the self-graded 92-item checklist says ≈ 99% |
 | **Ready for real work** | **≈ 45%** (40–50%) | Estimated; one live fidelity measurement so far |
+| **Mainstream practitioner** | **≈ 47%** | Estimated: the typical motion designer's weekly work ([how](docs/target-app-parity.md#mainstream-practitioner-and-essentials-user)) |
+| **Essentials user** | **≈ 52%** | Estimated: core features only ([how](docs/target-app-parity.md#essentials-user)) |
 | Remaining to **beta** | **≈ 350–620 Opus 5.5 agent-hours** | Estimated |
 | Remaining to **full parity** | **≈ 850–1,500 Opus 5.5 agent-hours** | Estimated; ≈ 70% parallelises |
 
@@ -127,6 +129,7 @@ Come tell us what matters most to you on [Discord](https://discord.gg/artcraft).
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-10 | minor | Headline adds mainstream practitioner (≈ 47%) and essentials user (≈ 52%) |
 | 2026-10-10 | minor | Stage checked against the new core-workflow gate (all six pass; still alpha) |
 | 2026-10-10 | major | Rewritten to the shared progress-docs standard: stage, two numbers, dimensions, features, languages, upcoming, progress log; milestones moved to docs/roadmap.md |
 | 2026-10-05 | major | Two numbers (breadth vs real use) and workstreams G1–G9 |

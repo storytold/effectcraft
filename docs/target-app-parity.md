@@ -17,6 +17,8 @@ left. [gaps.md](gaps.md) lists every known shortfall one at a time; the
 | **Feature breadth** (does each After Effects 26.5 feature exist?) | **≈ 91%** | Estimated, weighted by area (table below). The self-graded 92-item checklist says 89 done / 3 partial (≈ 99%), but it was written before After Effects 26.2 and 26.5 and does not count animation presets, project formats or hardware; see the appendix |
 | **Ready for real work** (can an After Effects professional do client work here?) | **≈ 45%** (range 40–50%) | Estimated: 60% feature depth (≈ 50%, table below), 15% opening and delivering work files (≈ 35%), 10% performance (≈ 35%), 10% stability (≈ 45%), 5% platforms (≈ 65%) |
 | **Stage** | **alpha** | All six core workflows pass the [alpha gate](roadmap.md#alpha-gate) on macOS and ready (≈ 45%) is above the ≈ 40% bar, but `.aep` projects can't be opened, fidelity is measured for one narrow case, and 134 issues are open ([ROADMAP](../ROADMAP.md#stage)) |
+| **Mainstream practitioner** (the typical motion designer's weekly work) | **≈ 47%** | Estimated: everyday depth 72% × interaction 0.90 × stability 0.90 × file exchange 0.80 ([below](#mainstream-practitioner)) |
+| **Essentials user** (core features only) | **≈ 52%** | Estimated: core depth 77% × launch/stability 0.88 × clarity 0.90 × opening files 0.85 ([below](#essentials-user)) |
 | Remaining to **beta** (≈ 75% ready, `.aep` opens) | **≈ 350–620 Opus 5.5 agent-hours** | Estimated |
 | Remaining to **full parity** | **≈ 850–1,500 Opus 5.5 agent-hours** | Estimated |
 
@@ -136,6 +138,107 @@ UI overlaps every area. With the overlaps removed: **≈ 850–1,500 h to full p
 harness and P0/P1 corpus (60–100 h), the open bug and crash backlog (40–80 h), performance to
 real-time preview at 1080p (40–70 h), Linux/Windows reliability (30–50 h), and feature depth in
 animation, masks, effects and text (100–160 h).
+
+## Ready for real work: how the number is built
+
+The full-target number is a written weighted sum, not a single judgement:
+
+| Component | Weight | Value | Source |
+|---|---:|---:|---|
+| Feature depth | 60% | 50% | Weighted feature-area table above |
+| Opening and delivering work files | 15% | 35% | [file-format-parity.md](file-format-parity.md): `.aep` / `.mogrt` / `.ffx` 0%, delivery formats strong |
+| Performance | 10% | 35% | By dimension, below |
+| Stability | 10% | 45% | By dimension, below |
+| Platforms | 5% | 65% | By dimension, below |
+| **Result** | | **46.2%**, reported as **≈ 45%** (40–50%) | Rounded down to the nearest 5: no live render comparison exists yet |
+
+Checked on 10 October 2026 when the mainstream and essentials numbers were added: it is unchanged.
+
+## Mainstream practitioner and essentials user
+
+Two narrower questions, computed the same way in every craft app (craftrules
+`standards/progress-docs.md`, "Numbers"). The stage still follows the full-target number and the
+[alpha gate](roadmap.md#alpha-gate).
+
+### Mainstream practitioner
+
+**≈ 47%** (estimated).
+
+*Can the typical professional motion designer do their weekly work here?* Areas are the alpha-gate
+workflows and their everyday tools. Left out: third-party plug-ins and `.ffx` preset libraries,
+generative/cloud AI (Object Matte, Firefly), Adobe services and team features, specialist hardware
+(video I/O, tablets), languages other than English, and areas a typical designer uses rarely
+(Advanced 3D models, 3D camera tracking, Roto Brush). Depth is for the everyday subset of each area
+(the common effects, the common formats), which is why it sits above the full feature-area table.
+
+| Area (everyday subset) | Weight | Depth | Evidence |
+|---|---:|---:|---|
+| Project and import: MOV/MP4, PNG/JPEG sequences, PSD/AI, WAV/MP3 | 10% | 75% | Import tests; #431 still imported as a sequence, #324 MP3 silence |
+| Comps, layers, blend modes, mattes, parenting, precomps | 16% | 80% | Compositor tests; #494 32-bpc blend modes, #539/#540 separated Position |
+| Keyframes, Graph Editor, easing, motion paths | 20% | 75% | 168 live samples match After Effects; #456/#457, #553, #569 |
+| Expressions: `wiggle`, `loopOut`, linking, sliders | 6% | 80% | `crates/expr` tests; no live expression oracle yet |
+| Shape layers and masks | 12% | 65% | #510, #513, #527 mask bugs; #303 Mesh Warp |
+| Text and text animators | 12% | 70% | #316 alignment inverted, #453 CJK, #583 font search |
+| Everyday effects: blurs, glow, fill/tint, curves/levels, keying, drop shadow, displacement | 10% | 70% | All present with GPU paths; unmeasured against After Effects; #514 Apply Color LUT |
+| Preview (RAM preview with audio) | 8% | 55% | #595, #304 stutter; #554, #504 late audio |
+| Render to H.264 / ProRes / PNG sequences | 6% | 75% | Encoder tests; #446 default macOS output folder, #340 ProRes 4444 tag |
+| **Average depth** | 100% | **72.2%** | |
+
+Discounts for what still stops real work:
+
+| Discount | Factor | Evidence |
+|---|---:|---|
+| Interaction fidelity | ×0.90 | UI parity ≈ 65% ([ui-parity.md](ui-parity.md)): Graph Editor jitter, snapping (#352), viewer zoom keys (#570), no multi-monitor (#486) |
+| Stability on real machines | ×0.90 | Eight open crash reports (#580, #591, #501, #426, #341, #306, #234, #511); Direct3D 12 compositor fails (#613); no CI on pull requests |
+| File exchange with After Effects users | ×0.80 | Can't open `.aep`, `.aepx`, `.mogrt` or `.ffx` sent by colleagues or bought as templates; PSD, AI, footage and rendered deliverables exchange fine |
+
+72.2% × 0.90 × 0.90 × 0.80 = **46.8%, ≈ 47%**. It sits only just above the full number because
+the gap is not in After Effects' long tail: fidelity, stability and `.aep` exchange hit
+mainstream users as hard as specialists.
+
+### Essentials user
+
+**≈ 52%** (estimated).
+
+*Can someone who only touches the core features (a social-media animator, a student, a
+first-time user) get their work done?* No advanced options, pro workflows or exchange edge cases.
+
+| Core feature | Weight | Depth | Evidence |
+|---|---:|---:|---|
+| Launch, new project, undo, save, reopen | 10% | 85% | Versioned project reopen tests, auto-save and crash recovery |
+| Import a video, picture or song | 10% | 75% | #431 a picture imported as a sequence, #324 MP3 silence |
+| New comp; move, scale, rotate, fade and trim layers | 15% | 80% | `ui_viewer`, Timeline tests |
+| Add and style text | 10% | 70% | #316, #583 |
+| Draw shapes and simple masks | 10% | 70% | Shape tool tests; #513 mask drawing feedback |
+| Keyframes and Easy Ease | 15% | 85% | Ease measured against After Effects |
+| Apply a few common effects | 10% | 75% | Effects & Presets search, Effect Controls tests |
+| Preview with sound | 10% | 65% | #595 stutter, #554 late audio |
+| Export an MP4 | 10% | 80% | H.264 encoder tests; #446 |
+| **Average depth** | 100% | **76.75%** | |
+
+| Discount | Factor | Evidence |
+|---|---:|---|
+| Launch and stability | ×0.88 | Start-up failures (#501, #234 macOS 27, #596 GPU not detected, #613 Direct3D 12); #426 timeline crash while playing |
+| Discoverability and UI clarity | ×0.90 | After Effects' dense layout reproduced faithfully; Home screen and interactive Learn tutorials help; renders fail silently on macOS until an output folder is chosen (#446); layout nitpicks (#581) |
+| Opening files people send | ×0.85 | Tutorial projects and templates arrive as `.aep` / `.mogrt`, which don't open |
+
+76.75% × 0.88 × 0.90 × 0.85 = **51.7%, ≈ 52%**.
+
+### User evidence (GitHub, 10 October 2026)
+
+Counted from all 315 issues and their comments, excluding the maintainer account and
+agent-generated maintainer replies:
+
+- **Praise:** 5 people in 5 issues say so outright: "felt almost exactly like After Effects.
+  Really impressive" (#611), "performance has been excellent" (#326), "Awesome project" (#322),
+  "Great work" (#293), "great tool and AE alternative" (#290). About 6 more open with "would love…"
+  in a feature request.
+- **"Switched from After Effects" reports:** none found. #468 is a working motion designer's
+  list of Mac issues, so people are trying it on real work.
+- **Open issues (136):** ≈ 95 are core-path bugs (masks, keyframes, timeline, preview, audio,
+  text, render, crashes; this includes 15 community `fix(...)` proposals), ≈ 40 are feature
+  requests or niche (plug-in hosting, OpenFX, ffmpeg export, Discord presence, Store listing,
+  rigging tools). Mostly core-path bugs, which matches the discounts above.
 
 ## Out of scope by design
 
@@ -1034,6 +1137,7 @@ top of this page and in items 16–18 above.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-10 | minor | Added mainstream practitioner (≈ 47%) and essentials user (≈ 52%) numbers with weights, discounts and GitHub user evidence; wrote down how the full ready number is built (unchanged at ≈ 45%) |
 | 2026-10-10 | minor | Stage checked against the core-workflow alpha gate: passes, still alpha |
 | 2026-10-10 | major | Full re-measure against After Effects 2026 26.5 (installed bundle, 26.2–26.5 release notes, repository counts); two numbers (breadth ≈ 91%, ready ≈ 45%); feature-area and dimension tables with Opus 5.5 hours; `docs/parity.md` merged in as the appendix and its stale per-area table superseded |
 | 2026-10-05 | minor | Checklist updated for M3.9–M4.12 (as `docs/parity.md`) |
