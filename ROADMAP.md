@@ -20,6 +20,14 @@ from scratch in Rust. This page is the one-page summary; the evidence is in
 | Remaining to **beta** | **≈ 350–620 Opus 5.5 agent-hours** | Estimated |
 | Remaining to **full parity** | **≈ 850–1,500 Opus 5.5 agent-hours** | Estimated; ≈ 70% parallelises |
 
+| Audience | Ready % | Hours to ~95% | Work that dominates |
+|---|---:|---:|---|
+| Full target | ≈ 45% | ≈ 850–1,500 h | `.aep`, fidelity corpus, bug backlog, performance, formats, hardware, localization |
+| Mainstream practitioner | ≈ 47% | ≈ 280–530 h | `.aep` exchange, stability, everyday fidelity and bugs, preview speed |
+| Essentials user | ≈ 52% | ≈ 150–300 h | Opening tutorial `.aep` files, start-up stability, core bugs, preview with sound |
+
+About 60–70% of these hours parallelise ([detail](docs/target-app-parity.md#readiness-by-audience)).
+
 Hours are one Opus 5.5 agent working sequentially, calibrated on this repository's history
 ([how](docs/target-app-parity.md#calibration-of-the-hours)).
 
@@ -129,6 +137,7 @@ Come tell us what matters most to you on [Discord](https://discord.gg/artcraft).
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-10 | minor | Hours to ≈ 95% for each audience |
 | 2026-10-10 | minor | Headline adds mainstream practitioner (≈ 47%) and essentials user (≈ 52%) |
 | 2026-10-10 | minor | Stage checked against the new core-workflow gate (all six pass; still alpha) |
 | 2026-10-10 | major | Rewritten to the shared progress-docs standard: stage, two numbers, dimensions, features, languages, upcoming, progress log; milestones moved to docs/roadmap.md |

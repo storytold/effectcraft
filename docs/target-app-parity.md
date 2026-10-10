@@ -22,6 +22,21 @@ left. [gaps.md](gaps.md) lists every known shortfall one at a time; the
 | Remaining to **beta** (≈ 75% ready, `.aep` opens) | **≈ 350–620 Opus 5.5 agent-hours** | Estimated |
 | Remaining to **full parity** | **≈ 850–1,500 Opus 5.5 agent-hours** | Estimated |
 
+### Readiness by audience
+
+| Audience | Ready % | Opus 5.5 agent wall-clock hours to ~95% | Work that dominates |
+|---|---:|---:|---|
+| Full target (ready for real work) | ≈ 45% | ≈ 850–1,500 h | `.aep` import, a fidelity corpus for every feature, the bug backlog, performance, hardware video, formats, localization, ecosystem |
+| Mainstream practitioner | ≈ 47% | ≈ 280–530 h | `.aep` exchange (80–160 h), stability and crash fixes (40–80 h), fidelity of the everyday features (40–70 h), everyday-area bugs and depth (60–110 h), interaction feel (30–60 h), preview speed (25–50 h) |
+| Essentials user | ≈ 52% | ≈ 150–300 h | Opening the `.aep` files tutorials ship, basic subset (60–120 h), start-up and stability (20–40 h), core-feature bugs and clarity (30–60 h), preview with sound (20–40 h), fidelity of the core features (20–40 h) |
+
+Each audience's hours are a subset of the next (essentials ≤ mainstream ≤ full). They are
+calibrated like the rest of this file ([calibration](#calibration-of-the-hours)): a behaviour bug
+with its regression test ≈ 0.1–0.3 h, a mid-size feature 1–4 h. About 60–70% parallelises across
+5–8 agents. The serial parts: the `.aep` owner decision before the importer, and the fidelity
+harness before per-feature scores. Every audience needs After Effects running on the owner's Mac
+for reference captures.
+
 The previous headline (5 October: breadth ≈ 99%, real use ≈ 30–50%) moved for these reasons:
 breadth went **down** because this pass measured against 26.5 rather than our own catalogue and
 found missing features the catalogue never listed (Object Matte, Substance materials, ACES 2.0
@@ -1137,6 +1152,7 @@ top of this page and in items 16–18 above.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-10 | minor | Readiness-by-audience table: hours to ≈ 95% for each of the three numbers; the full number stays an additive weighted sum (unchanged) |
 | 2026-10-10 | minor | Added mainstream practitioner (≈ 47%) and essentials user (≈ 52%) numbers with weights, discounts and GitHub user evidence; wrote down how the full ready number is built (unchanged at ≈ 45%) |
 | 2026-10-10 | minor | Stage checked against the core-workflow alpha gate: passes, still alpha |
 | 2026-10-10 | major | Full re-measure against After Effects 2026 26.5 (installed bundle, 26.2–26.5 release notes, repository counts); two numbers (breadth ≈ 91%, ready ≈ 45%); feature-area and dimension tables with Opus 5.5 hours; `docs/parity.md` merged in as the appendix and its stale per-area table superseded |
