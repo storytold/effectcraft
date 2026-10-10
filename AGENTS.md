@@ -114,7 +114,9 @@ as PhotoCraft does with `cargo xtask corpus`.
 
 ## See also
 
-- [docs/gaps.md](docs/gaps.md): where EffectCraft falls short of After Effects and the prioritised workstreams (G1–G9); read it before choosing work
+- [ROADMAP.md](ROADMAP.md): stage, headline numbers and what's next
+- [docs/gaps.md](docs/gaps.md): every known shortfall against After Effects, ranked, and the prioritised workstreams (G1–G9); read it before choosing work
+- [docs/target-app-parity.md](docs/target-app-parity.md): the parity numbers and how they were measured, with the per-area docs it links (UI, file formats, hardware, localization, effects, scripting); progress docs follow [craftrules `standards/progress-docs.md`](https://github.com/storytold/craftrules/blob/main/standards/progress-docs.md)
 - [CONTRIBUTING.md](CONTRIBUTING.md): setup, gates, commits, how to add things
 - [docs/architecture.md](docs/architecture.md): layers, data model, commands, pipeline
 - [docs/testing.md](docs/testing.md): oracle tests, criteria, benchmarks

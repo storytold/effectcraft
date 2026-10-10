@@ -185,13 +185,13 @@ fn capabilities(s: &mut Session, _: &Value) -> Result<Value> {
         "parity": {
             "target": "Adobe After Effects 2026",
             "summary": PARITY,
-            "doc": "docs/parity.md",
+            "doc": "docs/target-app-parity.md",
         },
     }))
 }
 
-/// The headline of `docs/parity.md` (kept in sync by hand at each audit).
-const PARITY: &str = "≈94% weighted feature parity (80 done / 12 partial / 0 missing of 92 features); 298 of 298 After Effects 2026 effects present";
+/// The headline of `docs/target-app-parity.md` (kept in sync by hand at each re-measure).
+const PARITY: &str = "≈91% feature breadth and ≈45% ready for real work (estimated parity with After Effects 2026 26.5, stage alpha); all After Effects effects present (306 registered)";
 
 fn state(s: &mut Session, _: &Value) -> Result<Value> {
     Ok(serde_json::to_value(&s.state).unwrap_or_default())

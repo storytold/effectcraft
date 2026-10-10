@@ -1,16 +1,162 @@
 # Parity with After Effects
 
-How close EffectCraft is to After Effects 2026, feature by feature, and how much work is left.
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-10 · **Change:** major (full re-measure against After Effects 2026 26.5; merged `docs/parity.md` into this file; reconciled the stale per-area rows) · **Target:** Adobe After Effects 2026 (26.5.0.89)
 
-> **Read this as a measure of breadth, not of real-world readiness.** It checks whether each
-> feature exists, using our own catalogue, graded by the agents that built it. It does not measure
-> whether the feature behaves like After Effects (nothing compares the two yet), whether After
-> Effects projects open (they don't), or how the app holds up for real users on every platform.
-> Those gaps, and the work that closes them, are in [gaps.md](gaps.md). Don't raise the numbers
-> here without the evidence gaps.md asks for. The per-area table further down has stale rows that
-> have not been reconciled with the headline.
+The authoritative assessment of how close EffectCraft is to After Effects, and how much work is
+left. [gaps.md](gaps.md) lists every known shortfall one at a time; the
+[ROADMAP](../ROADMAP.md) summarises both. Deep dives: [effects-parity.md](effects-parity.md),
+[scripting-parity.md](scripting-parity.md), [file-format-parity.md](file-format-parity.md),
+[ui-parity.md](ui-parity.md), [hardware-parity.md](hardware-parity.md),
+[localization-parity.md](localization-parity.md), and the live measurements in
+[fidelity/](fidelity/README.md).
 
-## Current status (audit at commit `d39c0e8`, 4 October 2026; updated 5 October for M3.9–M4.12)
+## Headline
+
+| Number | Value | Kind |
+|---|---|---|
+| **Feature breadth** (does each After Effects 26.5 feature exist?) | **≈ 91%** | Estimated, weighted by area (table below). The self-graded 92-item checklist says 89 done / 3 partial (≈ 99%), but it was written before After Effects 26.2 and 26.5 and does not count animation presets, project formats or hardware; see the appendix |
+| **Ready for real work** (can an After Effects professional do client work here?) | **≈ 45%** (range 40–50%) | Estimated: 60% feature depth (≈ 50%, table below), 15% opening and delivering work files (≈ 35%), 10% performance (≈ 35%), 10% stability (≈ 45%), 5% platforms (≈ 65%) |
+| **Stage** | **alpha** | Core workflows run end to end, but `.aep` projects can't be opened, fidelity is measured for one narrow case, and 134 issues are open ([ROADMAP](../ROADMAP.md#stage)) |
+| Remaining to **beta** (≈ 75% ready, `.aep` opens) | **≈ 350–620 Opus 5.5 agent-hours** | Estimated |
+| Remaining to **full parity** | **≈ 850–1,500 Opus 5.5 agent-hours** | Estimated |
+
+The previous headline (5 October: breadth ≈ 99%, real use ≈ 30–50%) moved for these reasons:
+breadth went **down** because this pass measured against 26.5 rather than our own catalogue and
+found missing features the catalogue never listed (Object Matte, Substance materials, ACES 2.0
+configs, proportional scrubbing, copy frame to clipboard, paste SVG/AI as shapes, percentage
+guides, After Effects' 621 animation presets, FBX/USD/STL models, Media Encoder-style hardware
+encoding); real use moved **up** to the upper half of the old range because the 5–10 October
+work closed 179 issues, most of them user-reported bugs fixed with regression tests, added six partial UI languages
+and a first live After Effects fidelity measurement. It is still an estimate: nothing renders a
+corpus in both apps yet.
+
+## How this was measured
+
+- **Target.** Adobe After Effects 2026, the copy installed on the owner's Mac:
+  `CFBundleShortVersionString` 26.5.0, build 26.5.0.89. The one live fidelity comparison
+  ([fidelity/README.md](fidelity/README.md)) used 26.3x87.
+- **From the installed bundle (file names and listings only, per [AGENTS.md](../AGENTS.md) §2):**
+  `Info.plist` `CFBundleDocumentTypes` (26 document types: `.aep`, `.aepx`, `.aet`, `.aetx`,
+  `.mogrt`, `.mgjson`, `.aecap`, `.aegraphic`, `.ffx`, `.ars`, `.aom`, `.jsx`, `.psd`, `.cin`,
+  `.mov`, `.pct`, `.pic`…); the `Plug-ins/Format` importers (AIFF, Animate, JPEG, OpenEXR, PNG,
+  Premiere Pro import, Photoshop layers in and out, Radiance, SGI, SVG, Targa, the standard
+  multi-format plug-in); `Plug-ins/Effects` (306 `.plugin` bundles in 231 entries);
+  `Presets` (**621** `.ffx` animation presets); `Scripts` (11 sample scripts, Startup / Shutdown /
+  ScriptUI Panels folders); `Resources/usd_plugins` (USD, FBX, glTF, OBJ, STL); `Resources/MLModels`
+  (FastMask, ShotCutDetection) and tokenizer folders (Whisper, BERT, Marian); `.lproj`
+  localisations (11 languages, [localization-parity.md](localization-parity.md)).
+  After Effects was not launched for this pass, so there is no menu dump.
+- **From Adobe's public release notes** for 26.2 (April 2026: Object Matte, displacement on
+  parametric meshes, Quick Apply, Proportional Scrubbing), 26.3 (June 2026: Advanced 3D depth of
+  field, paste SVG/AI as shapes, faster mask tracker, copy frame to clipboard, Curl Noise,
+  variable-font filter) and 26.5 (September 2026: percentage guides, Object Matte disk cache,
+  effect colour labels, a rebuilt Effect Controls panel, ACES 2.0 through OpenColorIO 2.5.1).
+- **From this repository at `origin/main` 1446e27 (10 October 2026):** 587 menu entries in the
+  After Effects-shaped menu tree (`crates/engine/src/menus.rs`), 411 registered engine commands,
+  306 registered effects (280 on the GPU, [effects.md](effects.md)), 12 export formats
+  (`OutputFormat::ALL`), the import extension lists (`crates/media/src/lib.rs`), 2,704 tests, ≈ 329,000
+  lines of Rust, 6 UI language catalogs, and the 134 open / 179 closed GitHub issues.
+- **Presence is not parity.** A feature counts toward *breadth* when it exists and works in the
+  common case; it counts toward *ready* in proportion to how much of the area a professional
+  could rely on, discounted for open bugs in it, for being unmeasured against After Effects, and
+  for being checked on one platform only.
+
+### Calibration of the hours
+
+Hours are **Opus 5.5 agent wall-clock hours**: one agent session working sequentially, tests and
+verification included. Calibrated against this repository's own history:
+
+- The whole repository (≈ 329,000 lines including tests, 1,142 commits, 233 merged PRs) was built
+  between 1 and 10 October 2026, typically by 4–8 agents at once: roughly 700–1,000 agent-hours,
+  or ≈ 350–450 lines per agent-hour. Getting to today's ≈ 45% took that; the estimate to full
+  parity is about 1–1.5× it again, because what is left is measurement, compatibility and
+  long-tail behaviour rather than new code.
+- Named arcs (from the audit notes kept below): Classic 3D ≈ 2.7 h, timeline depth (graph editor,
+  keyframe dialogs, time remapping, pen and masks) ≈ 2.3 h, 85 effects ≈ 1.2 h, the After Effects
+  menu bar ≈ 1.3 h, layer styles ≈ 0.6 h; a wave the audit priced at 21 h took ≈ 6 agent-hours
+  but landed at 80–90%.
+- Recent PRs (commit-to-merge): seven Timeline/viewer issues (#436) ≈ 0.6 h; eight tweaks from
+  #290 (#383) ≈ 1 h; image-sequence import (#384) ≈ 4 h; panel i18n infrastructure plus 384
+  Chinese strings (#398) ≈ 2–3 h; one 618-row menu language (#401 Ukrainian) ≈ 1.5–2 h; EXR
+  beauty layer + OCIO v2 configs (#449) ≈ 1.3 h. So a user-reported behaviour bug costs ≈ 0.1–0.3 h,
+  a mid-size feature 1–4 h.
+- What history can't calibrate: fidelity work (each corpus case needs After Effects running,
+  which only the owner's Mac has), `.aep` import (blocked on an owner decision), and anything
+  needing hardware we don't have. Those carry the widest ranges.
+- **Parallelism:** about 70% of the hours parallelise across 5–8 agents (effects fidelity,
+  languages, bugs, formats are independent). Serial chains: the G1 harness before per-feature
+  fidelity scores; the `.aep` decision before `.aep` work. **Needs a human:** the `.aep`
+  clean-room decision, running After Effects for oracle captures, native-speaker review of every
+  language, Windows/Linux GPU hardware for #591/#596/#613, and an optional decision on hosting
+  After Effects SDK plug-ins.
+
+## By feature area
+
+Weights are the share of a typical motion designer's working time in After Effects (animation,
+compositing and effects dominate; audio is light). Hours are to full parity for the area.
+
+| Area | Weight | Breadth | Ready | Hours | Biggest gaps (details in [gaps.md](gaps.md)) |
+|---|---:|---:|---:|---:|---|
+| Project, footage and import | 8% | 92% | 55% | 25–45 | No relative paths or relinking when a project moves; Media Browser lists TGA/DPX/HDR/AVI/MXF it can't import; any image imports as a sequence (#431); MP3 layer goes silent (#324); multi-file drops (#552, #351) |
+| Compositions, layers and compositing | 13% | 98% | 60% | 30–55 | 32-bpc blend modes differ from After Effects (#494); mask modes (#527, #510, #513); separated Position edits (#539, #540); expand precomps in place (#601) |
+| Animation: keyframes, graph editor, motion paths, puppet | 15% | 97% | 55% | 35–60 | Only scalar ease is measured against After Effects (168 samples); Graph Editor jitter and clipped buttons (#456, #457); bulk keyframing (#355); pen tools on motion paths (#553); puppet lag and jump (#586, #318); Proportional Scrubbing (26.2) |
+| Expressions and scripting | 7% | 93% | 65% | 20–40 | `.jsxbin`, Startup/Shutdown folders, `#include`; external editor (#364); see [scripting-parity.md](scripting-parity.md) |
+| Shapes, masks and roto | 9% | 93% | 45% | 30–50 | Several open mask bugs (#510, #513, #527); Roto Brush size (#509); Mesh Warp can't be dragged (#303); paste SVG/AI as shape layers (26.3) |
+| Text and typography | 7% | 94% | 50% | 20–35 | CJK text in comps renders wrongly (#453); paragraph alignment inverted (#316); squeezed text at 4:3 (#483); font search (#583); soft text at Fit (#417); variable-font filter (26.3) |
+| Effects and animation presets | 14% | 85% | 40% | 70–130 | All 306 effects exist, but rendered output is unmeasured against After Effects; 8 built-in presets against After Effects' 621; open effect bugs (#580 crash, #514, #526, #463, #369, #473); effect colour labels (26.5); see [effects-parity.md](effects-parity.md) |
+| 3D (Classic and Advanced) | 6% | 82% | 35% | 35–65 | No FBX/USD/STL models, no Substance materials, mesh displacement unverified; no 3D transform gizmos (#392, #347); Z position (#489); reflections (#261); camera aperture (#260); bevel options (#315) |
+| Tracking and AI-assisted tools | 5% | 80% | 35% | 35–70 | No Object Matte (26.2); Roto Brush (MobileSAM) and face tracking (MediaPipe) unmeasured against After Effects; camera-tracker view (#505) |
+| Preview and cache | 7% | 92% | 40% | 25–50 | Playback stutters on cached frames (#595, #304); slow scrubbing (#329); late audio (#554, #504, #335); no benchmark against After Effects |
+| Render queue and export | 7% | 85% | 55% | 25–45 | No hardware encoding; ProRes 4444 colour tag (#340); rendering over an existing file (#325); default macOS output location (#446); uncompressed single-file output (#372); HEVC/AV1 without B-frames |
+| Audio | 2% | 85% | 45% | 6–12 | Audio sync and crackle (#335); audio to keyframes depth |
+| **Weighted** | 100% | **≈ 91%** | **≈ 50%** | **≈ 360–660** | |
+
+Feature depth (≈ 50%) feeds the overall *ready* number with the other dimensions below.
+
+## By dimension
+
+| Dimension | % | Hours | Evidence | Doc |
+|---|---:|---:|---|---|
+| Features, breadth | 91% | (in features) | Table above | this file |
+| Features, ready for real work | 50% | 360–660 | Table above | this file, [gaps.md](gaps.md) |
+| UI/UX fidelity | 65% | 60–120 | After Effects-shaped menus (587 entries), panels, workspaces, shortcuts; many interaction issues still open; no multi-monitor; Effect Controls not yet like 26.5's | [ui-parity.md](ui-parity.md) |
+| File formats | 50% | 130–230 | `.aep` / `.aepx` / `.mogrt` / `.ffx` can't be read; strong modern codecs (H.264, HEVC, AV1, VP9, ProRes) | [file-format-parity.md](file-format-parity.md) |
+| Hardware | 40% | 60–120 | wgpu GPU on Metal/Vulkan/Direct3D 12/WebGPU with CPU fallback; no hardware decode/encode; Direct3D 12 compositor fails (#613); no video-out hardware | [hardware-parity.md](hardware-parity.md) |
+| Localization | 12% | 60–110 + review | Average coverage of After Effects' 10 non-English languages (measured catalog rows over ≈ 3,900 strings): menus 618/618 in 6 languages, panels in 4, effects in none; After Effects ships 11 languages fully | [localization-parity.md](localization-parity.md) |
+| Performance | 35% | 50–100 | Internal numbers only; users report stutter and slow scrubbing | [gaps.md](gaps.md#g5-performance-at-real-world-scale) |
+| Stability | 45% | 40–80 | Open crash reports #580, #591, #501, #426, #341, #306, #234, #511; no CI runs the tests on pull requests | [gaps.md](gaps.md#g3-stability-and-a-green-main) |
+| Platforms | 65% | 30–60 | Releases for macOS, Windows x64/x86/ARM64, Linux, FreeBSD and the web (more than After Effects), but Linux and Windows users hit basic bugs | [gaps.md](gaps.md#g2-real-user-reliability-on-every-platform) |
+| Ecosystem and plug-ins | 20% | 40–80 | After Effects scripts and expressions mostly carry over; no After Effects SDK plug-ins, `.ffx` presets or `.mogrt`; our WebAssembly plug-in API has no third-party plug-ins yet | [plugins.md](plugins.md) |
+| AI features | 35% | 40–80 (overlaps Tracking) | Roto Brush (MobileSAM) and face tracking (MediaPipe) as optional downloads; no Object Matte; the After Effects bundle ships Whisper, BERT and Marian tokenizers and a shot-cut model we have no equivalent of | [gaps.md](gaps.md) |
+| Agent control (beyond After Effects) | ahead | — | Every command is drivable over MCP, the control channel and the CLI | [agents.md](agents.md) |
+
+**Totals.** Summing the rows double-counts: AI overlaps Tracking, performance overlaps Preview,
+UI overlaps every area. With the overlaps removed: **≈ 850–1,500 h to full parity**, of which
+**≈ 350–620 h to beta**: `.aep` import (80–160 h, after the owner decision), the G1 fidelity
+harness and P0/P1 corpus (60–100 h), the open bug and crash backlog (40–80 h), performance to
+real-time preview at 1080p (40–70 h), Linux/Windows reliability (30–50 h), and feature depth in
+animation, masks, effects and text (100–160 h).
+
+## Out of scope by design
+
+Adobe services (Team Projects, Libraries, Stock, Media Encoder, Dynamic Link, Frame.io,
+Exchange, Firefly), third-party bundles (Cineware / Cinema 4D, Mocha), and formats without a
+public specification or permissive data (`.prproj`, `.jsxbin`, Vanishing Point `.vpe`, the
+predefined CJK CMaps in PDF import, Kodak film emulations) are not counted against breadth.
+`.aep` / `.aepx` *are* counted: they are the main file format and decide beta.
+
+---
+
+## Appendix: feature-checklist audit history
+
+Moved here from `docs/parity.md` on 10 October 2026 and kept as evidence. It scores the 92-item
+catalogue in `plan/aftereffects/feature-catalog.md`, graded by the agents that built the
+features; read it as breadth only. **Its per-area table ("By area", below) was stale**
+(Interface 75%, Project 68%, Animation 70%, Paint 0% next to a 99% headline) and is superseded by
+the feature-area table above; it is kept for its "biggest gaps" notes, which record what
+landed when.
+
+### Checklist status (audit at commit `d39c0e8`, 4 October 2026; updated 5 October for M3.9–M4.12)
 
 | Measure | Value |
 |---|---|
@@ -53,15 +199,15 @@ Out of clean-room scope (no public specification or no permissively licensed dat
 emulations. Adobe service integrations (Team Projects, Libraries, Media Encoder, Dynamic Link,
 Frame.io, Exchange) and third-party plug-ins (Cinema 4D, Mocha) are intentionally absent.
 
-### Previous audit (commit `58163a2`, 3 October 2026, evening): ≈ 98%
+#### Previous audit (commit `58163a2`, 3 October 2026, evening): ≈ 98%
 
 87 done / 5 partial / 0 missing.
 
-### Previous audit (commit `978e8d7`, 3 October 2026): ≈ 94%
+#### Previous audit (commit `978e8d7`, 3 October 2026): ≈ 94%
 
 80 done / 12 partial / 0 missing.
 
-### Previous audit (commit `fa26ad9`, 2 October 2026, late): ≈ 93%
+#### Previous audit (commit `fa26ad9`, 2 October 2026, late): ≈ 93%
 
 By area: Layers 98%, Output 95%, Compositions 95%, Automation 96%, Paint 95%, Text 95%, Import 96%,
 Animation 94%, Masks 94%, Preview 94%, Interface 93%, Shapes 93%, 3D 91%, Audio 90%, Project 90%,
@@ -80,7 +226,7 @@ thread counts — landed in M13.1 (GPU particles landed in M12.7). Render Queue 
 The sections below are the original audit (morning of 2 October, ≈ 64%) and its updates, kept for
 history.
 
-## Summary
+### Summary
 
 | Measure | Value |
 |---|---|
@@ -107,7 +253,7 @@ Work in progress at the time of the audit, not yet counted: motion tracking, pre
 keyboard shortcut editor, auto-save and crash recovery, paint and puppet tools, Lottie import and
 export.
 
-## Update after the second wave (same day, commit `e1f7241`)
+### Update after the second wave (same day, commit `e1f7241`)
 
 Motion tracking (1-, 2- and 4-point, stabilize, corner pin), paint (Brush, Clone Stamp, Eraser
 with write-on) and the puppet tools, preferences, a keyboard shortcut editor that rebinds,
@@ -129,7 +275,7 @@ hours** at the pace observed so far and **≈ 35–40 hours** if the audit's fig
 hardest remaining systems (Roto Brush, Warp Stabilizer, the 3D camera tracker, Advanced 3D, GPU
 rendering, on-canvas text editing) are where the conservative figure is most likely to be right.
 
-## Update at the end of 2 October 2026
+### Update at the end of 2 October 2026
 
 A third wave landed: viewer interactions (snapping, rulers, channels, exposure, snapshots, region
 of interest, shape pen and pen-tool family, motion-path handles, graph editor transform box),
@@ -155,7 +301,7 @@ M6.7; native macOS menus, the Composition Flowchart, Timeline column/search dept
 and every After Effects workspace in the UI-polish wave; PSD/SVG import, WebM/WAV/AIFF output and
 the disk cache in the formats wave; the 3D Camera Tracker in M12.6.)
 
-## By area
+### By area (stale; superseded on 2026-10-10 by the feature-area table at the top)
 
 | Area | Weighted parity | Remaining (agent-hours) | Biggest gaps |
 |---|---|---|---|
@@ -178,7 +324,7 @@ the disk cache in the formats wave; the 3D Camera Tracker in M12.6.)
 | Tracking | ≈ 96% | 0.3 | face tracking's trained model (MediaPipe Face Landmarker, M13.36) is an optional download; without it the classical (skin model + feature components + shape model) fitter is weak on profile views and occluded faces; Rolling Shutter Ripple is approximated by Subspace Warp's mesh density (face tracking (Outline Only / Detailed Features with Face Track Points and Extract & Copy Face Measurements), Subspace Warp's content-preserving mesh warp on subspace-smoothed trajectories, and radial lens distortion (k1, k2) in the camera bundle adjustment with Undistort Footage landed in M13.3; Rolling Shutter Repair in M9.11; point tracker, mask tracking, Warp Stabilizer and the 3D Camera Tracker in M6.x / M12.5 / M12.6) |
 | Paint | 0% | 4.0 | Brush, Clone Stamp, Eraser |
 
-## Effects still missing
+### Effects still missing
 
 The full catalogue with GPU / 32-bpc badges and per-effect status is [effects.md](effects.md)
 (generated from the registry).
@@ -186,7 +332,7 @@ The full catalogue with GPU / 32-bpc badges and per-effect status is [effects.md
 None: the 3D Camera Tracker landed in M12.6. Boris FX
 Mocha and Cineware are third-party and not counted.
 
-### Added in M9.11 (39 effects)
+#### Added in M9.11 (39 effects)
 
 | Category | Effects | Notes |
 |---|---|---|
@@ -201,7 +347,7 @@ Mocha and Cineware are third-party and not counted.
 | Utility | Color Profile Converter | Our colour spaces and ACES; rendering intents (perceptual gamut compression, relative / absolute colorimetric, saturation). |
 | Matte | Mocha shape | Mocha's export format is not public: reads a documented JSON shape format instead. |
 
-## Update: M13.5 long-tail polish
+### Update: M13.5 long-tail polish
 
 Stroke Taper / Wave / multi-segment dashes and the radial gradient highlight (SHP-2);
 variable-width mask feather points (MSK-1; mask motion blur verified by tests); the Adaptive
@@ -217,7 +363,7 @@ Reference Axes; Animate Text ▸ Variable Font Axes. Remaining in these rows: Lo
 taper/wave (the Variable Font Axes animator changes advances since M13.12, the Character panel's
 axes since M13.6; Advanced 3D's DOF has iris shapes since M13.8).
 
-## Update: M13.8 Preview panel, Align panel, Advanced 3D completion
+### Update: M13.8 Preview panel, Align panel, Advanced 3D completion
 
 - **Preview panel (PRV-1)**: Shortcut popup (Spacebar, Shift+Spacebar, Numpad 0, Shift+Numpad
   0, Alt+Numpad 0), each shortcut with its own saved options (settings `preview`): Include
@@ -238,7 +384,7 @@ axes since M13.6; Advanced 3D's DOF has iris shapes since M13.8).
   as real geometry lit by the parent (2D collapsed precomps draw nested 3D layers with the
   parent's renderer); text and shape strokes extrude as bevelled meshes in paint order.
 
-## Update: M13.22 GPU effects, part A
+### Update: M13.22 GPU effects, part A
 
 - **GPU ports (EFF-5)**: 30 more effects run on the GPU (196 GPU effects), each matching the
   CPU oracle within 1/255 (8 bpc) / 1e-3 (32 bpc) on every tested pixel, directly on a buffer
@@ -275,7 +421,7 @@ axes since M13.6; Advanced 3D's DOF has iris shapes since M13.8).
   comps. The GPU walk matches the CPU compositor on the same rasters exactly at 8 and 32 bpc,
   with only the frame's own readback.
 
-## Update: M13.13 GPU performance and the remaining GPU ports
+### Update: M13.13 GPU performance and the remaining GPU ports
 
 - **Small comps on the GPU (PRV-3)**: the GPU frame allocated (and zero-initialised) several
   full-frame RGBA f32 textures per layer; working textures now come from a pool (reused once
@@ -303,7 +449,7 @@ axes since M13.6; Advanced 3D's DOF has iris shapes since M13.8).
   Vertical Distortion render on the CPU (`gpu_supported`), since their Newton inverse wanders
   chaotically near the crease and f32 settles on other pixels.
 
-## Update: M13.11 Advanced 3D on the GPU, Essential Graphics mirrors, ScriptUI paint
+### Update: M13.11 Advanced 3D on the GPU, Essential Graphics mirrors, ScriptUI paint
 
 - **Advanced 3D on the GPU (PRV-3, 3D-3)**: a whole Advanced 3D run renders on the device
   (`gpu::adv3d`, `Renderer::prepare_adv_run`, `Accelerator::render_3d`): every motion-blur
@@ -338,7 +484,7 @@ axes since M13.6; Advanced 3D's DOF has iris shapes since M13.8).
   `drawImage`, image controls and icon buttons; script-host threads are compiled out of the
   web build (no dead code warnings).
 
-## Update: M13.5 UI completion & fidelity
+### Update: M13.5 UI completion & fidelity
 
 **Extended Viewer** (Settings ▸ 3D, the viewer's Extended Viewer button, `view.extendedViewer`):
 custom 3D views (and the Active Camera view with Draft 3D on) render the visible pasteboard
@@ -356,7 +502,7 @@ workspace bar order (Default, Review, Learn, Small Screen, Standard) and a singl
 above the viewer. Not yet: Composition Settings / Render Queue / Settings dialogs compared
 pixel by pixel (no reference captures of them yet).
 
-## Update: M13.6 panels and content tools
+### Update: M13.6 panels and content tools
 
 The last placeholder panels became real panels with automation ids: **Lumetri Scopes**
 (waveform RGB / Luma / YC, vectorscope YUV / HLS, histogram, parade RGB / YUV; Rec. 601 / 709 /
@@ -375,7 +521,7 @@ menu entries. Not yet: creating a reference frame by editing a still (After Effe
 Photoshop), Content-Aware Fill's learned model (ours is PatchMatch + flow propagation), and Media
 Browser in the web app (landed in M13.10: browser storage and File System Access folders).
 
-## Update: M13.12 import and text leftovers, test hardening
+### Update: M13.12 import and text leftovers, test hardening
 
 - **PDF / AI**: mesh shadings — free-form and lattice-form Gouraud triangle meshes (types 4, 5),
   Coons and tensor-product patch meshes (6, 7, tessellated to triangles) — and function-based
@@ -401,7 +547,7 @@ Browser in the web app (landed in M13.10: browser storage and File System Access
   wrong signatures and versions, fuel exhaustion, traps and bit-identical output; script
   `Socket` validates ports, and ScriptUI resource strings accept trailing array commas.
 
-## Update: text and viewer fidelity (G1)
+### Update: text and viewer fidelity (G1)
 
 Fixes from measured reports:
 
@@ -420,7 +566,7 @@ Fixes from measured reports:
   factor) instead of minified bilinearly (#417). Not yet: the viewer resolution and magnification
   are not remembered between launches.
 
-## Update: plug-ins and extensions as in After Effects; ease presets become a ScriptUI panel
+### Update: plug-ins and extensions as in After Effects; ease presets become a ScriptUI panel
 
 EffectCraft's core keeps After Effects parity; what After Effects users get from third parties is
 an extension, on the same extension points After Effects has ([plugins.md](plugins.md) compares
@@ -455,7 +601,7 @@ them: scripts, ScriptUI panels, effect plug-ins, with a guide to writing a panel
   Extended and Snap to Features in Collapsed Compositions and Text Layers (the layers inside
   collapsed precomp layers snap); the per-feature toggles are gone and every feature snaps.
 
-## Update: M5.9–M5.14 keyframes, M3.15 clipboard, M12.8 responsiveness
+### Update: M5.9–M5.14 keyframes, M3.15 clipboard, M12.8 responsiveness
 
 - **The app froze every 10 s on Windows** (M12.8): the cache budgets' memory reading started
   PowerShell on the UI thread and waited about a second for it. It runs on a background thread
@@ -585,7 +731,7 @@ rather than the keyed frame (Ctrl/Cmd+click averages 5 × 5 pixels); agents do t
 `effect.pickColor {effect, param, x, y, average?}` (effect space). Searching "keylight" in
 Effects & Presets, or `list_effects`, finds it.
 
-## Update: M4.9–M4.11 nested comps and motion blur
+### Update: M4.9–M4.11 nested comps and motion blur
 
 - **Composition Settings ▸ Advanced ▸ Preserve frame rate when nested or in render queue** and
   **Preserve resolution when nested** (model, renderer, Render Queue, dialog, `comp.settings`,
@@ -601,7 +747,7 @@ Not yet: collapsed precomps don't blur with the precomp layer's own motion or th
 camera's; animated content inside a layer (shape paths, text animators, nested frames) isn't
 re-rendered per sub-sample; nested comp markers on the precomp layer bar.
 
-## Update: M4.5–M4.8 cached playback
+### Update: M4.5–M4.8 cached playback
 
 - **RAM preview keys** carry the render options (Fast Previews Draft / Fast Draft, Realtime
   Shadows), so a mode switch never shows frames rendered the other way; eviction drops the least
@@ -618,7 +764,7 @@ re-rendered per sub-sample; nested comp markers on the precomp layer bar.
 Not yet: content-keyed RAM frames (an edit drops every comp's RAM frames; the disk cache keeps
 content keys), audio scrubbing, four snapshot slots.
 
-## Update: M3.14 project files
+### Update: M3.14 project files
 
 Project files name the version that wrote them (`savedBy`); opening one that a newer EffectCraft
 saved warns that what this version doesn't know is lost on saving (`file.open` reports
@@ -627,7 +773,7 @@ fails the save with a message instead of writing a project that can never be ope
 on disk is left as it was). Increment and Save and Save a Copy keep an XML project (`.ecprojx`)
 XML; a file that isn't a project says so by name.
 
-## Update: M3.13 menu bar
+### Update: M3.13 menu bar
 
 Group Shapes (Ctrl+G) and Ungroup Shapes (Ctrl+Shift+G) moved to the Layer menu itself, where
 After Effects has them; Window ▸ Learn opens the Home screen's Learn tab; Composition ▸
@@ -637,7 +783,7 @@ Window's shortcut); Layer ▸ Transform ▸ Center In View shows Ctrl+Home; "Rev
 Viewer (several unlocked Composition viewers at once; View ▸ Split with New Locked Viewer adds
 the one locked viewer the interface has).
 
-## Update: M3.12 Pre-compose and New Comp from Selection
+### Update: M3.12 Pre-compose and New Comp from Selection
 
 - **Pre-compose** makes the new composition with the original's settings (pixel aspect,
   background, motion blur shutter / samples / switch, frame blending switch, 3D renderer); it
@@ -649,7 +795,7 @@ the one locked viewer the interface has).
   (`file.newCompFromSelection {single, dimensionsFrom, duration, addToRenderQueue, sequence,
   overlap, overlapDuration, transition}`). `layer.addItem {duration}` sets a still's length.
 
-## Update: M3.11 layer commands
+### Update: M3.11 layer commands
 
 - **Lock**: locked layers can't be selected (a Timeline click, Select All, Ctrl+Up / Down step
   over them, as do shy layers while hidden) and are left alone by Clear / Delete, Arrange, the
@@ -667,7 +813,7 @@ the one locked viewer the interface has).
   matte when both were copied, else the original in the same composition (paste dropped them
   always).
 
-## Update: M3.10 Layer Settings and settings dialogs
+### Update: M3.10 Layer Settings and settings dialogs
 
 Layer ▸ Layer Settings on a solid or adjustment layer opens Solid Settings on the layer's solid
 (it did nothing before): name, size, Pixel Aspect Ratio, colour and **Affect all layers that use
@@ -679,7 +825,7 @@ for every control (`dialog.comp.*`, `dialog.solid.*`), Composition Settings take
 frame rate besides the list, New Composition starts from the settings of the last composition
 made with it, and their colour buttons show the stored sRGB colour (they showed it lighter).
 
-## Update: M3.9 unsaved changes
+### Update: M3.9 unsaved changes
 
 Closing a modified project asks first, as After Effects does: Quit and the window's close
 button, File ▸ New Project, Open Project, Open Recent, Close Project, the demo project and a Home
@@ -690,7 +836,7 @@ the project's path and `*` while it has unsaved changes. The modified mark now f
 and edits that change nothing record no undo step. Agents' `engine.execute` / MCP calls are never
 asked; the control channel's `app.quit {force: true}` skips the prompt.
 
-## Update: M13.25 Home template gallery, Simulate Output ▸ My Custom RGB
+### Update: M13.25 Home template gallery, Simulate Output ▸ My Custom RGB
 
 **Home ▸ Templates** (UI-7; File ▸ New ▸ New Project from Template…): a gallery of eight
 original built-in project templates authored in code from engine commands — Lower Third, Title
@@ -717,7 +863,7 @@ in Settings (`customRgb`) and simulated like the built-in profiles, with Preserv
 ICC profiles too (`lut8Type`, `lut16Type`, `lutAToBType` / `lutBToAType`, evaluated from the
 public ICC specification and baked into a 3D LUT for the viewer).
 
-### M13.26: Premiere Pro interop via timeline interchange
+#### M13.26: Premiere Pro interop via timeline interchange
 
 | Feature | After Effects | EffectCraft | Status |
 |---|---|---|---|
@@ -728,7 +874,7 @@ Not yet: native `.prproj` (no public specification; awaits a decision), media em
 (not extracted), Premiere effects other than Motion/Opacity/Volume, speed
 ramps, titles/graphics, and Dynamic Link.
 
-## Update: M13.23 GPU effects, part B (EFF-5)
+### Update: M13.23 GPU effects, part B (EFF-5)
 
 40 more effects run on the GPU (236 in all, with M13.22's 30), each checked against the CPU oracle (≤ 1/255 at
 8 bpc, ≤ 1e-3 at 32 bpc) directly on a buffer (full and half resolution, adjustment) and
@@ -767,7 +913,7 @@ composited at 8 and 32 bpc:
   default to the layer). Shatter's wireframe views and Foam's User Defined texture,
   Environment Map and flow-map preview render on the CPU.
 
-## Update: M13.28 GPU effects, part C (EFF-5)
+### Update: M13.28 GPU effects, part C (EFF-5)
 
 37 more effects run on the GPU, each checked against the CPU oracle (≤ 1/255 at 8 bpc, ≤ 1e-3 at
 32 bpc) directly on a buffer with masks, another layer and an audio track (full and half
@@ -799,7 +945,7 @@ resolution, adjustment) and composited at 8 and 32 bpc:
   of the pixels even at low magnification, WGSL has no f64 and Metal's fast math defeats
   double-f32 emulation.
 
-## Update: M13.29 GPU effects, part D (EFF-5)
+### Update: M13.29 GPU effects, part D (EFF-5)
 
 7 more effects run on the GPU (280 in all, with M13.28's 37), and five CPU fallbacks are gone. Each case is
 checked against the CPU oracle (≤ 1/255 at 8 bpc, ≤ 1e-3 at 32 bpc) directly on a buffer (full
@@ -829,7 +975,7 @@ are pinned bit for bit by golden hashes (`crates/effects/tests/particle_golden.r
   CPU solves the inverse map from the geometry alone and the GPU samples along it, so the chain
   stays on the GPU without a readback.
 
-## Update: M13.30 web depth and polish
+### Update: M13.30 web depth and polish
 
 - **GPU in the browser's job workers** (WEB-1): each job worker opens its own WebGPU device
   (deferred readbacks) like the frame workers. The Render Queue's export and the analyses'
@@ -851,7 +997,7 @@ are pinned bit for bit by golden hashes (`crates/effects/tests/particle_golden.r
   (default 256)}`; `templates.create {projectPath?, footageDir?}` extracts it.
 - **ICC A2B0 profiles** in View ▸ Simulate Output ▸ My Custom RGB (see above).
 
-## Highest-value gaps, in order
+### Highest-value gaps, in order
 
 1. ~~On-canvas text editing and per-character styles~~ (landed: M9.9–M9.10).
 2. ~~Effect Controls widgets: angle dial, point crosshair, eyedropper, curves and levels editors.~~ (second wave, 2 October)
@@ -882,3 +1028,13 @@ missing was interactive tooling, settings stored but not rendered, about 69 disa
 and the large systems (tracking, puppet, paint, roto). All of those have landed since; one menu
 entry stays disabled on purpose (Import ▸ Vanishing Point), and what is left is listed at the
 top of this page and in items 16–18 above.
+
+
+## Revision history
+
+| Date | Change | Summary |
+|---|---|---|
+| 2026-10-10 | major | Full re-measure against After Effects 2026 26.5 (installed bundle, 26.2–26.5 release notes, repository counts); two numbers (breadth ≈ 91%, ready ≈ 45%); feature-area and dimension tables with Opus 5.5 hours; `docs/parity.md` merged in as the appendix and its stale per-area table superseded |
+| 2026-10-05 | minor | Checklist updated for M3.9–M4.12 (as `docs/parity.md`) |
+| 2026-10-04 | major | Checklist audit at `d39c0e8`: ≈ 99% weighted breadth, 89 / 3 / 0 of 92 |
+| 2026-10-02 | major | First audit: ≈ 64% weighted breadth |

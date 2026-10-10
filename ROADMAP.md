@@ -1,74 +1,130 @@
-# Roadmap
+# EffectCraft Roadmap
 
+**Stage: alpha** · next: beta, ~30 points of "ready for real work" and ~350–620 h away
+
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-10 · **Change:** major (full re-measure against After Effects 2026 26.5; standard progress-docs layout) · **Target:** Adobe After Effects 2026 (26.5.0.89)
+
+EffectCraft aims to do what After Effects does, with the same panels, menus and behaviour, written
+from scratch in Rust. This page is the one-page summary; the evidence is in
+[docs/target-app-parity.md](docs/target-app-parity.md), the work list in
+[docs/gaps.md](docs/gaps.md), and the plan in [docs/roadmap.md](docs/roadmap.md).
+
+## Headline numbers
+
+| | Value | Kind |
+|---|---|---|
+| **Feature breadth** | **≈ 91%** | Estimated, weighted by area; the self-graded 92-item checklist says ≈ 99% |
+| **Ready for real work** | **≈ 45%** (40–50%) | Estimated; one live fidelity measurement so far |
+| Remaining to **beta** | **≈ 350–620 Opus 5.5 agent-hours** | Estimated |
+| Remaining to **full parity** | **≈ 850–1,500 Opus 5.5 agent-hours** | Estimated; ≈ 70% parallelises |
+
+Hours are one Opus 5.5 agent working sequentially, calibrated on this repository's history
+([how](docs/target-app-parity.md#calibration-of-the-hours)).
+
+### Stage
+
+**Alpha**, because core workflows (import, arrange, animate, preview, render) run end to end on
+three desktop platforms and the web, but: After Effects projects (`.aep`) can't be opened, which
+alone rules out beta; fidelity against After Effects is measured for one narrow case (scalar ease,
+168 samples); 134 issues are open, eight of them crash reports. Beta needs ≈ 75% ready and `.aep`
+opening reliably: the `.aep` owner decision and importer (80–160 h), the fidelity harness and
+P0/P1 corpus (60–100 h), the crash and bug backlog (40–80 h), performance (40–70 h),
+Linux/Windows reliability (30–50 h) and depth in animation, masks, effects and text (100–160 h).
+
+## By dimension
+
+| Dimension | % | Hours | Doc |
+|---|---:|---:|---|
+| Features: breadth | 91% | — | [target-app-parity.md](docs/target-app-parity.md#by-feature-area) |
+| Features: ready for real work | 50% | 360–660 | [target-app-parity.md](docs/target-app-parity.md#by-feature-area) |
+| UI/UX fidelity | 65% | 60–120 | [ui-parity.md](docs/ui-parity.md) |
+| File formats | 50% | 130–230 | [file-format-parity.md](docs/file-format-parity.md) |
+| Hardware | 40% | 60–120 | [hardware-parity.md](docs/hardware-parity.md) |
+| Localization | 12% | 60–110 + review | [localization-parity.md](docs/localization-parity.md) |
+| Performance | 35% | 50–100 | [gaps.md](docs/gaps.md#g5-performance-at-real-world-scale) |
+| Stability | 45% | 40–80 | [gaps.md](docs/gaps.md#g3-stability-and-a-green-main) |
+| Platforms | 65% | 30–60 | [gaps.md](docs/gaps.md#g2-real-user-reliability-on-every-platform) |
+| Ecosystem and plug-ins | 20% | 40–80 | [plugins.md](docs/plugins.md), [scripting-parity.md](docs/scripting-parity.md) |
+| AI features | 35% | 40–80 | [gaps.md](docs/gaps.md) |
+| Agent control (beyond After Effects) | ahead | — | [agents.md](docs/agents.md) |
+
+## Features
+
+| Area | Breadth | Ready | Hours |
+|---|---:|---:|---:|
+| Project, footage and import | 92% | 55% | 25–45 |
+| Compositions, layers and compositing | 98% | 60% | 30–55 |
+| Animation: keyframes, graph editor, motion paths, puppet | 97% | 55% | 35–60 |
+| Expressions and scripting ([detail](docs/scripting-parity.md)) | 93% | 65% | 20–40 |
+| Shapes, masks and roto | 93% | 45% | 30–50 |
+| Text and typography | 94% | 50% | 20–35 |
+| Effects and animation presets ([detail](docs/effects-parity.md)) | 85% | 40% | 70–130 |
+| 3D (Classic and Advanced) | 82% | 35% | 35–65 |
+| Tracking and AI-assisted tools | 80% | 35% | 35–70 |
+| Preview and cache | 92% | 40% | 25–50 |
+| Render queue and export | 85% | 55% | 25–45 |
+| Audio | 85% | 45% | 6–12 |
+
+Weights and evidence per row: [target-app-parity.md](docs/target-app-parity.md#by-feature-area).
+
+## Languages
+
+UI strings translated out of ≈ 3,900 (detail: [localization-parity.md](docs/localization-parity.md)).
+
+| Language | Status | % |
+|---|---|---:|
+| English | full | 100% |
+| Simplified Chinese | partial (menus, part of the panels) | 28% |
+| Spanish | menus only | 16% |
+| Hindi | none | 0% |
+| Arabic | none | 0% |
+| French | none | 0% |
+| Portuguese (Brazil) | menus only | 16% |
+| Indonesian | none | 0% |
+| Japanese | partial (menus, part of the panels) | 26% |
+| German | none | 0% |
+| Korean | none | 0% |
+| Vietnamese | none | 0% |
+
+Also shipped: Traditional Chinese (partial, 28%) and Ukrainian (partial, 26%). No language has had
+native-speaker review.
+
+## Upcoming
+
+Ranked; detail in [docs/roadmap.md](docs/roadmap.md) and [docs/gaps.md](docs/gaps.md).
+
+| | Next | Hours |
+|---|---|---:|
+| 1 | Fix the open crash reports; run `cargo xtask ci` on every pull request (G3) | 15–30 |
+| 2 | Fidelity harness against After Effects: rendered frames, a corpus case per P0/P1 feature (G1) | 60–100 |
+| 3 | Real-user reliability on Linux and Windows; the open mask, effect, text and 3D bugs (G2) | 100–190 |
+| 4 | `.aep` / `.aepx` import, after the owner's clean-room decision (G4) | 80–160 |
+| 5 | Performance: benchmarks at 1080p / 4K, real-time cached playback, hardware video (G5) | 50–100 |
+| 6 | Localization depth: effect names, all panels, French / German / Korean (G9) | 60–110 |
+
+Come tell us what matters most to you on [Discord](https://discord.gg/artcraft).
+
+## Progress log
+
+- 2026-10-10: Full parity re-measure against After Effects 2026 26.5 (installed bundle, 26.2–26.5
+  release notes, repository counts): breadth ≈ 91%, ready ≈ 45%, stage alpha. Progress docs
+  follow the shared standard: `docs/parity.md` became `docs/target-app-parity.md`; new
+  `docs/roadmap.md`, `localization-parity.md`, `file-format-parity.md`, `hardware-parity.md`,
+  `ui-parity.md`, `effects-parity.md` and `scripting-parity.md`.
+- 2026-10-10: Spanish (#460) and Brazilian Portuguese (#217) menu translations.
 - 2026-10-10: Japanese now translates the interface below the menu bar too: `crates/ui-egui/src/i18n/ui.rs` has a Japanese table with the same 396 rows as the Chinese ones (panels, dialogs, buttons and tooltips; the shape test keeps the three catalogs listing the same source strings). Menus were already Japanese.
 - 2026-10-09: Ukrainian now covers all 396 current panel-catalog strings, including dialogs, buttons and tooltips, alongside its menu translation. The catalog keeps the same source keys and placeholder counts as the Chinese catalogs; missing or engine-generated text still falls back to English.
 - 2026-10-09: Settings ▸ General ▸ Language now translates the interface below the menu bar as well: panels, dialogs, buttons and tooltips read their text through `crates/ui-egui/src/i18n/ui.rs`, keyed by the English source string. Simplified and Traditional Chinese are complete (384 strings); Japanese rows can follow in the same file. A test fails when a converted panel gains a hard-coded string, and another keeps the catalog free of unused rows.
 - 2026-10-08: `effectcraft-cli render --out` resolves a relative path against the working directory, like `--project` (it used the project's folder, which doubled a path that already named it). Render Queue outputs set in a project are unchanged.
 - 2026-10-08: Long-press a grouped toolbar button to choose its tools, including Horizontal/Vertical Type; releasing the hold keeps the menu open. Existing point/paragraph text creation is unchanged.
-
 - 2026-10-06: Settings ▸ General ▸ Language persists English/Japanese menu labels (`general.language`); native UI reuses installed Japanese font fallback, with no bundled CJK font. Dialog and panel contents remain English.
+- 2026-10-05: Honest assessment ([docs/gaps.md](docs/gaps.md)): breadth ≈ 99% by our own checklist, real use ≈ 30–50%; workstreams G1–G9.
+- 2026-10-04: Checklist audit at `d39c0e8`: 89 done / 3 partial / 0 missing of 92 features.
+- 2026-10-01: First commit.
 
-EffectCraft aims to do what After Effects does, with the same panels, menus and behaviour, written
-from scratch in Rust. This is where it stands. The milestones overlap; several are worked on at
-once.
+## Revision history
 
-| | Milestone | State |
+| Date | Change | Summary |
 |---|---|---|
-| M0 | Skeleton: crates, compositor, the After Effects style shell, control channel, `cargo xtask` | Done (web build: [docs/web.md](docs/web.md)) |
-| M1 | Keyframes: temporal and spatial interpolation, Easy Ease, roving, velocity | Done |
-| M2 | Compositing: 38 blend modes, track mattes, parenting, adjustment layers | Done |
-| M3 | Project operations: settings dialogs, layer commands, `.ecproj`, undo, After Effects menu bar | Done (unsaved-changes prompts, Solid / Layer Settings, lock-aware layer commands, safe project files; View ▸ New Viewer still opens only the one locked viewer) |
-| M4 | Preview: precomps, motion blur, cached playback | Done (Preserve frame rate / resolution when nested, one motion blur gate, RAM preview fixes, Cache Frames When Idle, motion blur of collapsed precomps and of animated shape / text content, content-keyed RAM preview frames) |
-| M5 | Timeline depth: graph editor, keyframe clipboard and dialogs, time remapping, pick-whips, expression editor | Done |
-| M6 | Shapes, masks and footage: shape operators, masks and the pen tool, video and image import | Done |
-| M7 | 3D: 3D layers, cameras, lights, shadows, depth of field, 3D views and camera tools | In review |
-| M8 | Expressions with the After Effects object model | Done |
-| M9 | Text and effects: text animators, layer styles, 306 effects (all 298 of After Effects') incl. time and audio effects | Done (range, wiggly and expression selectors, per-character 3D, text on a path) |
-| M10 | Export: render queue, H.264, ProRes, image sequences, GIF, audio | Done |
-| M11 | Animation tools: audio playback, meters and waveforms, Lottie import and export, presets, Motion Sketch, Wiggler, Smoother | Done |
-| M12 | Performance: layer cache, parallel and GPU compositing, disk cache, motion tracking (done); GPU versions of the remaining CPU-only effects | Mostly done |
-| M13 | Puppet tools, paint, Roto Brush, motion tracking, a plug-in API, Timeline depth | Done (trained models, open source, downloaded on demand, in a swappable model module: MobileSAM for Roto Brush 2.0 / 3.0, MediaPipe Face Landmarker for face tracking) |
-| M15 | The web app (WebAssembly, WebGPU) | Done: browser storage, Web Audio, renders and analyses in Web Workers, viewer frames and GPU effects in frame workers with their own WebGPU devices, the disk cache in the Origin Private File System, a storage manager, offline install ([docs/web.md](docs/web.md)) |
-| M14 | Built for agents: MCP server, command-line tool, control channel; Settings, keyboard shortcut editor, auto-save and crash recovery ([docs/preferences.md](docs/preferences.md)) | Done |
-
-## How far from full parity
-
-There are two honest answers, and they are far apart. The full assessment, with the evidence, is
-in [docs/gaps.md](docs/gaps.md).
-
-- **Breadth: ≈ 99%.** Almost every After Effects feature exists: 89 of 92 catalogued features
-  done and 3 partial, all 306 effects implemented, 280 of them on the GPU
-  ([docs/parity.md](docs/parity.md)). This is our own checklist, graded by the agents that built
-  the features.
-- **Real use: ≈ 30–50% (estimated, not yet measured).** Whether someone who uses After Effects for
-  a living can do client work in EffectCraft. What holds it back:
-  - **Fidelity is unmeasured.** No test compares our output with After Effects itself, and users
-    are still finding behaviour bugs in features marked done.
-  - **After Effects projects can't be opened.** EffectCraft can't read `.aep` / `.aepx` files,
-    and third-party After Effects plug-ins can't run.
-  - **Reliability is uneven across platforms.** Early Linux users hit basic problems: viewer
-    panning, panel docking, drag-and-drop import. A Windows user found the font menus offered only
-    the bundled fonts (fixed 6 October: they list every installed font). Reports of 6 October
-    covered drag and drop between panels, a Render Queue menu that ignored clicks, angle
-    revolutions, and preview with audio and with little video memory (all fixed 7 October).
-  - **AI tools are new.** Roto Brush's trained model (MobileSAM, M13.35) and face tracking's
-    (MediaPipe Face Landmarker, M13.36) are optional downloads, not yet compared with After
-    Effects.
-
-## Where we're going
-
-In priority order (details and "done" criteria in [docs/gaps.md](docs/gaps.md)):
-
-| | Workstream | Why |
-|---|---|---|
-| G1 | Measure fidelity against After Effects: a corpus of test projects rendered and sampled in both apps, scored per feature | Turns every estimate into a measurement; a feature that behaves differently is not done |
-| G2 | Real-user reliability on macOS, Windows and Linux; fix every open user issue | Basic workflows must work everywhere before more features matter |
-| G3 | Stability: a green gate on the current toolchain, fuzzing of every input | A crash loses people's work |
-| G4 | Open After Effects projects (`.aep` / `.aepx`, pending an owner decision on clean-room scope); relinking moved footage | The biggest barrier to switching |
-| G5 | Performance benchmarks at 1080p and 4K on real-world-sized projects | Unknown today |
-| G6 | Media depth: encoder efficiency, camera and phone formats | Files are larger than from mature encoders; camera formats are unverified |
-| G7 | Learned models: Roto Brush (M13.35: MobileSAM) and face tracking (M13.36: MediaPipe Face Landmarker), open source, optional downloads, swappable model module; next, measure them | Quality against After Effects is unmeasured |
-| G8 | Plug-in ecosystem on our WebAssembly plug-in API | After Effects plug-ins can't run here |
-| G9 | Localisation, accessibility, user documentation | Reach beyond English-speaking power users |
-
-Come tell us what matters most to you on [Discord](https://discord.gg/artcraft).
+| 2026-10-10 | major | Rewritten to the shared progress-docs standard: stage, two numbers, dimensions, features, languages, upcoming, progress log; milestones moved to docs/roadmap.md |
+| 2026-10-05 | major | Two numbers (breadth vs real use) and workstreams G1–G9 |

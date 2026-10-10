@@ -234,8 +234,10 @@ what breaks. It isn't yet a replacement for After Effects on client work. In par
   Settings ▸ Roto Brush) and face tracking can use Google's MediaPipe Face Landmarker (an optional
   3.8 MB download in Settings ▸ Face Tracking). Neither is compared with After Effects yet.
 
-The [ROADMAP](ROADMAP.md) has the plan and [docs/gaps.md](docs/gaps.md) the full, honest
-assessment. The web build ([docs/web.md](docs/web.md)) runs the full app in the browser.
+EffectCraft is in **alpha**: about 91% of After Effects' features exist, and we estimate it is
+about 45% of the way to replacing After Effects for professional work. The [ROADMAP](ROADMAP.md)
+has the plan, [docs/target-app-parity.md](docs/target-app-parity.md) the measurement and
+[docs/gaps.md](docs/gaps.md) every known shortfall. The web build ([docs/web.md](docs/web.md)) runs the full app in the browser.
 [Bug reports](https://github.com/storytold/effectcraft/issues) are the most useful thing you can
 send us right now.
 
