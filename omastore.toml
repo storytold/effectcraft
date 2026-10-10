@@ -1,0 +1,11 @@
+kind = "app"
+categories = ["AudioVideo", "Video"]
+icon = "assets/app-icon/hicolor/256x256/apps/ai.storyteller.effectcraft.png"
+
+[linux.x86_64]
+asset = "effectcraft-{version}-linux-x86_64.tar.gz"
+exec = "effectcraft-{version}-linux-x86_64/usr/bin/effectcraft"
+
+[linux.aarch64]
+asset = "effectcraft-{version}-linux-aarch64.tar.gz"
+exec = "effectcraft-{version}-linux-aarch64/usr/bin/effectcraft"
