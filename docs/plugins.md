@@ -251,3 +251,23 @@ effects can be registered per process.
 The API version is checked when a plug-in loads: a manifest or module for another version is
 refused with a message. Within a version the contract above does not change; additions (new
 parameter types, new optional exports) bump the version.
+
+## Rust buffer-rendering host extension
+
+The WebAssembly v1 ABI and manifests remain unchanged. The Rust `EffectPlugin` trait additionally
+provides `render_buffer(&Buf, &PluginParams, time) -> Result<Buf, String>`. Its default adapter
+clones the input and calls the existing in-place `render`, so existing Rust and WASM plug-ins
+continue to work. Override this hook to return a larger framebuffer. Keep `scale` unchanged and
+adjust `offset` so a layer point still maps to `point * scale + offset`. The host validates the
+returned dimensions, scale and offset and retains the original input on error.
+
+This is a **linked Rust host extension**, not a new WebAssembly export. A v1 `.wasm` still cannot
+resize its input. Linked effects appear in the same menus, use the same property/keyframe system,
+and run on the CPU when a GPU compositor is selected.
+
+[`examples/plugins/text-box`](../examples/plugins/text-box) implements TextBox through this hook.
+The standard host links and registers it for desktop, CLI and web sessions. It computes actual
+positive-alpha bounds after upstream effects/masks, draws a rounded fill and centered stroke behind
+the input, and expands the framebuffer as needed. The renderer already propagates `Buf.offset`
+and the expanded dimensions through placement; it does not clip to the original source rectangle.
+The final composition/ROI, downstream mattes and adjustment-layer footprints still limit output.

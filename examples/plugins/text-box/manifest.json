@@ -1,0 +1,144 @@
+{
+  "api": 1,
+  "id": "org.effectcraft.text-box",
+  "name": "TextBox",
+  "category": "Text",
+  "version": "1.1.0",
+  "author": "EffectCraft contributors",
+  "description": "Alpha-following rounded background with signed padding and an optional geometric text matte independent of fill opacity. Side padding adds to X/Y padding. Stroke is centered.",
+  "params": [
+    {
+      "id": "paddingX",
+      "name": "Padding X",
+      "type": "slider",
+      "default": 20,
+      "min": -10000,
+      "max": 10000,
+      "sliderMax": 200,
+      "sliderMin": -200
+    },
+    {
+      "id": "paddingY",
+      "name": "Padding Y",
+      "type": "slider",
+      "default": 10,
+      "min": -10000,
+      "max": 10000,
+      "sliderMax": 200,
+      "sliderMin": -200
+    },
+    {
+      "id": "fillColor",
+      "name": "Fill Color",
+      "type": "color",
+      "default": [
+        0,
+        0,
+        0,
+        1
+      ]
+    },
+    {
+      "id": "fillOpacity",
+      "name": "Fill Opacity",
+      "type": "slider",
+      "default": 100,
+      "min": 0,
+      "max": 100,
+      "sliderMax": 100
+    },
+    {
+      "id": "cornerRadius",
+      "name": "Corner Radius",
+      "type": "slider",
+      "default": 0,
+      "min": 0,
+      "max": 10000,
+      "sliderMax": 200
+    },
+    {
+      "id": "offsetX",
+      "name": "Offset X",
+      "type": "slider",
+      "default": 0,
+      "min": -10000,
+      "max": 10000,
+      "sliderMax": 200
+    },
+    {
+      "id": "offsetY",
+      "name": "Offset Y",
+      "type": "slider",
+      "default": 0,
+      "min": -10000,
+      "max": 10000,
+      "sliderMax": 200
+    },
+    {
+      "id": "paddingLeft",
+      "name": "Padding Left",
+      "type": "slider",
+      "default": 0,
+      "min": -10000,
+      "max": 10000,
+      "sliderMax": 200,
+      "sliderMin": -200
+    },
+    {
+      "id": "paddingRight",
+      "name": "Padding Right",
+      "type": "slider",
+      "default": 0,
+      "min": -10000,
+      "max": 10000,
+      "sliderMax": 200,
+      "sliderMin": -200
+    },
+    {
+      "id": "paddingTop",
+      "name": "Padding Top",
+      "type": "slider",
+      "default": 0,
+      "min": -10000,
+      "max": 10000,
+      "sliderMax": 200,
+      "sliderMin": -200
+    },
+    {
+      "id": "paddingBottom",
+      "name": "Padding Bottom",
+      "type": "slider",
+      "default": 0,
+      "min": -10000,
+      "max": 10000,
+      "sliderMax": 200,
+      "sliderMin": -200
+    },
+    {
+      "id": "strokeWidth",
+      "name": "Stroke Width",
+      "type": "slider",
+      "default": 0,
+      "min": 0,
+      "max": 10000,
+      "sliderMax": 200
+    },
+    {
+      "id": "strokeColor",
+      "name": "Stroke Color",
+      "type": "color",
+      "default": [
+        1,
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "id": "matte",
+      "name": "Matte",
+      "type": "checkbox",
+      "default": false
+    }
+  ]
+}

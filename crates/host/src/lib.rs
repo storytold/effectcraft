@@ -80,6 +80,10 @@ impl Exporter for FileExporter {
 
 /// A new session with media, import, expressions, scripting and export enabled.
 pub fn session() -> Session {
+    // Linked Rust plug-ins register once, before frontends build effect menus.
+    if let Err(e) = effectcraft_text_box::register() {
+        log::warn!("TextBox registration failed: {e}");
+    }
     Session {
         // The desktop app, the CLI and the MCP server share installed Roto Brush models.
         models_dir: config_dir().map(|d| d.join("models")),

@@ -1346,9 +1346,11 @@ dependencies = [
  "effectcraft-raster",
  "effectcraft-script",
  "effectcraft-svg",
+ "effectcraft-text-box",
  "effectcraft-time",
  "exr",
  "image",
+ "log",
  "rayon",
  "serde_json",
 ]
@@ -1579,6 +1581,15 @@ dependencies = [
  "skrifa",
  "unicode-bidi",
  "unicode-linebreak",
+]
+
+[[package]]
+name = "effectcraft-text-box"
+version = "1.1.0"
+dependencies = [
+ "effectcraft-effects",
+ "rayon",
+ "serde_json",
 ]
 
 [[package]]
