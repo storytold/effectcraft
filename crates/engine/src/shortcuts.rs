@@ -484,7 +484,7 @@ mod zoom_shortcut_tests {
         let table = ShortcutTable::build(&Keymaps::default(), &[]);
         let zoom_in = table.find("view.zoomIn").unwrap();
         let zoom_out = table.find("view.zoomOut").unwrap();
-        assert_eq!(zoom_in.defaults, ["." , "Cmd+=", "Cmd+Shift+="]);
+        assert_eq!(zoom_in.defaults, [".", "Cmd+=", "Cmd+Shift+="]);
         assert_eq!(zoom_out.defaults, [",", "Cmd+-"]);
         for (key, command) in [
             (".", "view.zoomIn"),
