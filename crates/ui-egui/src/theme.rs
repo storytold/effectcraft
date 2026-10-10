@@ -306,7 +306,7 @@ pub fn install(ctx: &egui::Context, t: &Tokens, language: &str) {
     fonts.families.insert(FontFamily::Name("medium".into()), vec!["inter-medium".into(), "inter".into()]);
     install_script_fallbacks(&mut fonts, language);
     ctx.set_fonts(fonts);
-    apply_visuals(ctx, t);
+    apply_visuals(ctx, t, false);
 }
 
 /// Scripts the bundled fonts lack beyond CJK, each probed with one of its letters: names typed in
@@ -405,11 +405,18 @@ fn is_chinese(language: &str) -> bool {
     matches!(language, "zh-hans" | "zh-hant")
 }
 
-pub fn apply_visuals(ctx: &egui::Context, t: &Tokens) {
+/// Show `t` in egui. `follow_system` hands egui the System preference instead of pinning Light or
+/// Dark: a pinned preference makes the window system fix the native window appearance, which then
+/// stops reporting OS appearance changes (macOS), so Sync with System would never switch again.
+pub fn apply_visuals(ctx: &egui::Context, t: &Tokens, follow_system: bool) {
     let light = t.kind.is_light();
     // egui keeps one style per light/dark theme and by default picks it by the system appearance;
     // pin it to ours so a fixed Dark or Light mode isn't swapped for egui's defaults.
-    ctx.set_theme(if light { egui::ThemePreference::Light } else { egui::ThemePreference::Dark });
+    ctx.set_theme(match (follow_system, light) {
+        (true, _) => egui::ThemePreference::System,
+        (false, true) => egui::ThemePreference::Light,
+        (false, false) => egui::ThemePreference::Dark,
+    });
     let mut v = if light { Visuals::light() } else { Visuals::dark() };
     v.panel_fill = t.panel_bg;
     v.window_fill = t.panel_bg;

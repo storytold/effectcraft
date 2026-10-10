@@ -426,7 +426,7 @@ impl EffectcraftApp {
         let p = &self.session.prefs;
         self.ui.theme = theme::ThemeKind::from_name(p.appearance.resolved_theme(system)).unwrap_or_default();
         self.tokens = Tokens::from_prefs(p, self.ui.theme);
-        theme::apply_visuals(ctx, &self.tokens);
+        theme::apply_visuals(ctx, &self.tokens, self.follows_system(ctx));
         let tips = p.general.show_tool_tips;
         ctx.all_styles_mut(|s| s.interaction.tooltip_delay = if tips { 0.5 } else { f32::INFINITY });
         // Settings ▸ Appearance ▸ UI Scale (#284). egui's own Ctrl+= / Ctrl+- / Ctrl+0 zoom stays
@@ -464,6 +464,15 @@ impl EffectcraftApp {
     /// desktop portal) wins over egui's, which Wayland compositors often leave empty.
     pub fn system_light(&self, ctx: &egui::Context) -> Option<bool> {
         self.hooks.system_theme.as_ref().and_then(|read| read(ctx)).or_else(|| ctx.system_theme()).map(|t| t == egui::Theme::Light)
+    }
+
+    /// Whether egui itself should follow the system appearance: Sync with System, with egui's own
+    /// report as the source (a host answer, like the Linux portal, is not egui's). Pinning Light or
+    /// Dark instead would fix the native window appearance and hide later OS changes (macOS).
+    fn follows_system(&self, ctx: &egui::Context) -> bool {
+        self.session.prefs.appearance.appearance_mode == "auto"
+            && self.hooks.system_theme.as_ref().and_then(|read| read(ctx)).is_none()
+            && ctx.system_theme().is_some()
     }
 
     /// The Tools bar's appearance button (`view.theme.toggle`): Sync with System, then Light, then
@@ -1703,6 +1712,10 @@ impl eframe::App for EffectcraftApp {
         crate::i18n::set_current(language);
         if !self.styled || self.styled_language != language {
             theme::install(ctx, &self.tokens, language);
+            // install pins the shown theme; Sync with System must go back to egui's System preference.
+            if self.follows_system(ctx) {
+                ctx.set_theme(egui::ThemePreference::System);
+            }
             self.styled_language = language;
             if !self.styled {
                 fit_window(ctx);
@@ -1889,6 +1902,29 @@ mod appearance_tests {
         app.set_pref("appearance.appearanceMode", json!("dark")).unwrap();
         app.apply_prefs(&ctx);
         assert_eq!(app.ui.theme, ThemeKind::Dark);
+    }
+
+    /// Sync with System leaves egui on its System preference (a pinned Light or Dark fixes the native
+    /// window appearance, so macOS would never report the next OS change); fixed modes still pin.
+    #[test]
+    fn sync_with_system_keeps_egui_on_the_system_preference() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        let input = || egui::RawInput { system_theme: Some(egui::Theme::Light), ..Default::default() };
+        let preference = |ctx: &egui::Context| ctx.options(|o| o.theme_preference);
+        app.set_pref("appearance.appearanceMode", json!("auto")).unwrap();
+        let _ = ctx.run_ui(input(), |ui| app.apply_prefs(ui.ctx()));
+        assert_eq!(app.ui.theme, ThemeKind::Light);
+        assert_eq!(preference(&ctx), egui::ThemePreference::System);
+        app.set_pref("appearance.appearanceMode", json!("dark")).unwrap();
+        let _ = ctx.run_ui(input(), |ui| app.apply_prefs(ui.ctx()));
+        assert_eq!(preference(&ctx), egui::ThemePreference::Dark);
+        app.set_pref("appearance.appearanceMode", json!("light")).unwrap();
+        let _ = ctx.run_ui(input(), |ui| app.apply_prefs(ui.ctx()));
+        assert_eq!(preference(&ctx), egui::ThemePreference::Light);
+        app.set_pref("appearance.appearanceMode", json!("auto")).unwrap();
+        let _ = ctx.run_ui(input(), |ui| app.apply_prefs(ui.ctx()));
+        assert_eq!(preference(&ctx), egui::ThemePreference::System);
     }
 
     /// Picking a theme (`view.theme.*`, `ui.set {theme}`) fixes the mode to its family.
