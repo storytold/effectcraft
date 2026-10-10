@@ -32,10 +32,8 @@ impl PathMeasure {
                         pts.push(p);
                     }
                 }
-                PathEl::LineTo(p) => {
-                    if pts.last().is_none_or(|q| q.distance(p) > 1e-9) {
-                        pts.push(p);
-                    }
+                PathEl::LineTo(p) if pts.last().is_none_or(|q| q.distance(p) > 1e-9) => {
+                    pts.push(p);
                 }
                 PathEl::ClosePath => {
                     closed = true;

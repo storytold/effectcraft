@@ -245,10 +245,8 @@ pub fn process(id: &str, params: &Params, buf: &mut [f32], rate: u32, start: f64
     }
     let sr = rate as f64;
     match id {
-        "ec.audio.backwards" => {
-            if params.b("swapChannels") {
-                buf.as_chunks_mut::<2>().0.iter_mut().for_each(|f| f.swap(0, 1));
-            }
+        "ec.audio.backwards" if params.b("swapChannels") => {
+            buf.as_chunks_mut::<2>().0.iter_mut().for_each(|f| f.swap(0, 1));
         }
         "ec.audio.basstreble" => {
             let bass = params.f("bass") / 100.0 * 12.0;

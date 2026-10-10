@@ -313,11 +313,9 @@ impl<'a> Interp<'a> {
                     self.path.curve_to(Point::new(n(0), n(1)), p, p);
                     self.cur = Some(p);
                 }
-                "h" => {
-                    if self.cur.is_some() {
-                        self.path.close_path();
-                        self.cur = self.start;
-                    }
+                "h" if self.cur.is_some() => {
+                    self.path.close_path();
+                    self.cur = self.start;
                 }
                 "re" => {
                     let (x, y, w, h) = (n(0), n(1), n(2), n(3));
