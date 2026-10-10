@@ -163,20 +163,24 @@ fn velocity_dialog_values_per_dimension_and_continuous() {
     undo_redo_roundtrip(&mut s, after, |s| assert_eq!(prop(s, l, "transform/scale").keys[1].in_interp, Interp::Linear));
 }
 
-/// Spatial Bezier on a straight two-key path gives both keys handles a third of the way along it
-/// (they had none), so the path can be pulled into a curve; the motion stays the same (#290).
+/// Spatial Bezier keeps the handles a key has and gives a straight linear path handles a third of
+/// the way along it (they had none), so the path can be pulled into a curve; the motion stays the
+/// same (#290). Auto-Bezier keys keep their tangents, a sixth of the way to the neighbour here.
 #[test]
 fn spatial_bezier_gives_a_straight_path_handles() {
     let (mut s, l) = setup();
     animate(&mut s, l, "transform/position", &[(0.0, json!([0, 0])), (2.0, json!([300, 0]))]);
     let mid = prop(&s, l, "transform/position").value_at(effectcraft_time::Tick::from_seconds_f64(0.7)).as_vec3();
     select_prop_keys(&mut s, l, "transform/position");
-    s.execute("keys.interpolation", json!({"spatial": "bezier"})).unwrap();
-    let p = prop(&s, l, "transform/position");
-    assert!(p.keys.iter().all(|k| !k.spatial_auto));
-    assert_eq!((p.keys[0].spatial_out, p.keys[1].spatial_in), ([100.0, 0.0, 0.0], [-100.0, 0.0, 0.0]));
-    let now = p.value_at(effectcraft_time::Tick::from_seconds_f64(0.7)).as_vec3();
-    assert!((now[0] - mid[0]).abs() < 0.01 && now[1].abs() < 1e-9, "{mid:?} → {now:?}");
+    for (from, handle) in [("autoBezier", 50.0), ("linear", 100.0)] {
+        s.execute("keys.interpolation", json!({"spatial": from})).unwrap();
+        s.execute("keys.interpolation", json!({"spatial": "bezier"})).unwrap();
+        let p = prop(&s, l, "transform/position");
+        assert!(p.keys.iter().all(|k| !k.spatial_auto));
+        assert_eq!((p.keys[0].spatial_out, p.keys[1].spatial_in), ([handle, 0.0, 0.0], [-handle, 0.0, 0.0]), "from {from}");
+        let now = p.value_at(effectcraft_time::Tick::from_seconds_f64(0.7)).as_vec3();
+        assert!((now[0] - mid[0]).abs() < 0.01 && now[1].abs() < 1e-9, "from {from}: {mid:?} → {now:?}");
+    }
 }
 
 #[test]

@@ -270,25 +270,18 @@ fn v3(v: &Value) -> [f64; 3] {
     v.as_vec3()
 }
 
-/// Auto-Bezier spatial tangents (Catmull-Rom style) for key `i`.
+/// Auto-Bezier spatial tangents for key `i`, as After Effects computes them (Catmull-Rom): the out
+/// tangent is a sixth of the way from the previous key to the next, the in tangent its mirror, and
+/// key times play no part. An end key uses its one neighbour, so the path leaves the first key
+/// and enters the last one toward the neighbouring key instead of with no tangent.
 fn auto_spatial(keys: &[Keyframe], i: usize) -> ([f64; 3], [f64; 3]) {
-    if i == 0 || i + 1 >= keys.len() {
+    if i >= keys.len() || keys.len() < 2 {
         return ([0.0; 3], [0.0; 3]);
     }
-    let a = v3(&keys[i - 1].value);
-    let b = v3(&keys[i].value);
-    let c = v3(&keys[i + 1].value);
-    let d = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
-    let dl = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-    if dl < 1e-12 {
-        return ([0.0; 3], [0.0; 3]);
-    }
-    let lin = ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2) + (b[2] - a[2]).powi(2)).sqrt();
-    let lout = ((c[0] - b[0]).powi(2) + (c[1] - b[1]).powi(2) + (c[2] - b[2]).powi(2)).sqrt();
-    let n = [d[0] / dl, d[1] / dl, d[2] / dl];
-    let tin = [-n[0] * lin / 3.0, -n[1] * lin / 3.0, -n[2] * lin / 3.0];
-    let tout = [n[0] * lout / 3.0, n[1] * lout / 3.0, n[2] * lout / 3.0];
-    (tin, tout)
+    let a = v3(&keys[i.saturating_sub(1)].value);
+    let c = v3(&keys[(i + 1).min(keys.len() - 1)].value);
+    let tout = [(c[0] - a[0]) / 6.0, (c[1] - a[1]) / 6.0, (c[2] - a[2]) / 6.0];
+    ([-tout[0], -tout[1], -tout[2]], tout)
 }
 
 /// Effective spatial tangents of key `i` (auto or stored).
@@ -298,7 +291,7 @@ pub fn spatial_tangents(keys: &[Keyframe], i: usize) -> ([f64; 3], [f64; 3]) {
 }
 
 /// Spatial tangents of key `i` as motion-path handles: [`spatial_tangents`], with a side that
-/// has none but a neighbour (the ends of an auto-Bezier path, a straight two-key path) pointing
+/// has none but a neighbour (a key whose stored tangents are zero, as on a straight path) pointing
 /// where the path leaves the key, toward the segment's next control point, a third of the way to
 /// the neighbouring key. After Effects shows Bezier handles there to drag the path into a curve.
 pub fn spatial_handles(keys: &[Keyframe], i: usize) -> ([f64; 3], [f64; 3]) {
@@ -776,6 +769,30 @@ mod tests {
         // Curved: the midpoint of the first segment lies off the straight line.
         let m = evaluate(&keys, s(0.5), true).unwrap().as_vec2();
         assert!((m[0] - m[1]).abs() > 1.0, "{m:?}");
+    }
+
+    #[test]
+    fn spatial_auto_bezier_tangents_follow_after_effects() {
+        // Measured on After Effects 26.3 with original paths (docs/fidelity/README.md): each
+        // auto-Bezier key's out tangent is (next - previous) / 6 and its in tangent the mirror,
+        // whatever the key times. End keys use their one neighbour: (neighbour - key) / 6.
+        let p = [[40.0, 300.0, 0.0], [260.0, 80.0, 20.0], [700.0, 420.0, -40.0], [1100.0, 150.0, 0.0]];
+        let mut keys: Vec<Keyframe> = [0.0, 0.2, 1.5, 1.8].iter().zip(p).map(|(&t, v)| Keyframe::new(s(t), Value::Vec3(v))).collect();
+        let sixth = |a: [f64; 3], b: [f64; 3]| [(b[0] - a[0]) / 6.0, (b[1] - a[1]) / 6.0, (b[2] - a[2]) / 6.0];
+        let neg = |v: [f64; 3]| [-v[0], -v[1], -v[2]];
+        let close = |a: [f64; 3], b: [f64; 3]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-9);
+        let want = [sixth(p[0], p[1]), sixth(p[0], p[2]), sixth(p[1], p[3]), sixth(p[2], p[3])];
+        for (i, out) in want.into_iter().enumerate() {
+            let (tin, tout) = spatial_tangents(&keys, i);
+            assert!(close(tout, out) && close(tin, neg(out)), "key {i}: {tin:?} {tout:?}");
+        }
+        // Moving a key in time leaves every tangent as it was.
+        keys[1].time = s(1.2);
+        assert!(close(spatial_tangents(&keys, 1).1, sixth(p[0], p[2])));
+        // A key between two coincident neighbours, and a lone key, have none.
+        let still = [[5.0, 5.0], [9.0, 1.0], [5.0, 5.0]].iter().enumerate().map(|(i, &v)| Keyframe::new(s(i as f64), Value::Vec2(v))).collect::<Vec<_>>();
+        assert_eq!(spatial_tangents(&still, 1), ([0.0; 3], [0.0; 3]));
+        assert_eq!(spatial_tangents(&still[..1], 0), ([0.0; 3], [0.0; 3]));
     }
 
     #[test]
