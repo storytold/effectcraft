@@ -284,6 +284,67 @@ fn transform_matrix(pr: &crate::Params, b: &Buf) -> Mat3 {
         * Mat3::translate(vec2(-anchor.0, -anchor.1))
 }
 
+/// A self-contained transform whose Shift, Z-Dist and Rotate animate together around Center.
+fn motion_curve_matrix(pr: &crate::Params, b: &Buf) -> Mat3 {
+    let center = b.to_px(pr.v2("center"));
+    let shift = pr.v2("shift");
+    let scale = pr.f("zDist") / 100.0;
+    Mat3::translate(vec2(shift[0] * b.scale, shift[1] * b.scale))
+        * Mat3::translate(vec2(center.0, center.1))
+        * Mat3::rotate_deg(pr.f("rotate"))
+        * Mat3::scale(vec2(scale, scale))
+        * Mat3::translate(vec2(-center.0, -center.1))
+}
+
+fn motion_curve_params_finite(pr: &crate::Params) -> bool {
+    let center = pr.v2("center");
+    let shift = pr.v2("shift");
+    center.into_iter().chain(shift).all(f64::is_finite) && pr.f("zDist").is_finite() && pr.f("rotate").is_finite()
+}
+
+fn motion_curve_transform(ctx: &EffectCtx, mut b: Buf) -> Buf {
+    let shutter = if ctx.params.b("useCompositionShutterAngle") {
+        ctx.env.shutter
+    } else {
+        let raw_angle = ctx.params.f("shutterAngle");
+        let raw_samples = ctx.params.f("samples");
+        let angle = raw_angle.clamp(0.0, 720.0);
+        let samples = if raw_samples.is_finite() { raw_samples.round().clamp(2.0, 64.0) as u32 } else { 16 };
+        (angle > 0.0 && angle.is_finite()).then_some((angle, -angle * 0.5, samples))
+    };
+    if let (Some((angle, phase, samples)), Some(host)) = (shutter, ctx.env.host) {
+        if angle.is_finite() && phase.is_finite() && ctx.time.is_finite() && angle > 0.0 {
+            let mut accum = Image::new(b.img.width, b.img.height);
+            let mut count = 0.0_f32;
+            let sample_count = samples.clamp(2, 64);
+            for sample in 0..sample_count {
+                let t = ctx.time + (phase + angle * sample as f64 / (sample_count - 1) as f64) / 360.0 / ctx.fps();
+                let Some(params) = host.params_at(t) else { continue };
+                if !motion_curve_params_finite(&params) { continue; }
+                let mut image = Image::new(b.img.width, b.img.height);
+                effectcraft_raster::composite_warp(
+                    &mut image,
+                    &b.img,
+                    &motion_curve_matrix(&params, &b),
+                    &effectcraft_raster::WarpOpts::default(),
+                );
+                accum.data.iter_mut().zip(&image.data).for_each(|(dst, src)| (0..4).for_each(|c| dst[c] += src[c]));
+                count += 1.0;
+            }
+            if count > 0.0 {
+                accum.data.iter_mut().for_each(|pixel| pixel.iter_mut().for_each(|channel| *channel /= count));
+                b.img = accum;
+                return b;
+            }
+        }
+    }
+    if !motion_curve_params_finite(ctx.params) { return b; }
+    let mut out = Image::new(b.img.width, b.img.height);
+    effectcraft_raster::composite_warp(&mut out, &b.img, &motion_curve_matrix(ctx.params, &b), &effectcraft_raster::WarpOpts::default());
+    b.img = out;
+    b
+}
+
 fn transform(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let anchor = b.to_px(ctx.params.v2("anchor"));
     let pos = b.to_px(ctx.params.v2("position"));
@@ -438,6 +499,20 @@ pub fn specs() -> Vec<EffectSpec> {
                 p("conversion", "Type of Conversion", Value::Enum(0), popup(&["Rect to Polar", "Polar to Rect"])),
             ],
             polar,
+        ),
+        spec(
+            "ec.distort.motiontransformblur",
+            "Motion Transform Blur",
+            vec![
+                p("center", "Center", pt(0.5, 0.5), ParamUi::Point),
+                p("shift", "Shift", pt(0.0, 0.0), ParamUi::Point),
+                p("zDist", "Z-Dist (Scale %)", num(100.0), slider(-1000.0, 1000.0, -500.0, 500.0, 1)),
+                p("rotate", "Rotate", num(0.0), ParamUi::Angle),
+                p("useCompositionShutterAngle", "Use Composition's Shutter Angle", Value::Bool(false), ParamUi::Checkbox),
+                p("shutterAngle", "Shutter Angle", num(180.0), slider(0.0, 720.0, 0.0, 360.0, 1)),
+                p("samples", "Samples", num(16.0), slider(2.0, 64.0, 2.0, 32.0, 0)),
+            ],
+            motion_curve_transform,
         ),
         spec(
             "ec.distort.transform",
