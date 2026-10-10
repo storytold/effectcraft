@@ -7,6 +7,7 @@ use effectcraft_engine::preview::PreviewShortcut;
 use effectcraft_engine::time::Tick;
 use effectcraft_ui_egui::EffectcraftApp;
 use effectcraft_ui_egui::dock::PanelKind;
+use effectcraft_ui_egui::state::Resolution;
 use egui::{Event, Pos2, pos2};
 use egui_kittest::Harness;
 use serde_json::json;
@@ -208,11 +209,50 @@ fn cache_before_playback_plays_what_fits_in_ram() {
 }
 
 #[test]
-fn auto_resolution_is_the_same_playing_and_paused() {
+fn auto_resolution_is_sharp_when_paused_and_cheap_during_playback() {
     let mut h = harness();
-    let paused = h.state().viewer_scale(0.5, 2.0);
+    let cid = h.state().session.active_comp_id().unwrap();
+    assert_eq!(h.state().ui.viewer.res, Resolution::Auto);
+    assert_eq!(h.state().viewer_scale(0.2, 1.0), 1.0);
+    let still_key = h.state().frame_key(cid, 0, 1.0);
     h.state_mut().playback.playing = true;
-    assert_eq!(h.state().viewer_scale(0.5, 2.0), paused);
+    assert_eq!(h.state().viewer_scale(0.2, 1.0), 0.25);
+    assert_ne!(still_key.scale, h.state().frame_key(cid, 0, 0.25).scale);
+    h.state_mut().playback.playing = false;
+    h.state_mut().ui.viewer.property_interacting = true;
+    assert_eq!(h.state().viewer_scale(0.2, 1.0), 0.25);
+    h.state_mut().ui.viewer.property_interacting = false;
+    assert_eq!(h.state().viewer_scale(0.2, 1.0), 1.0);
+    h.state_mut().ui.viewer.res = Resolution::Half;
+    assert_eq!(h.state().viewer_scale(0.2, 1.0), 0.5);
+}
+
+#[test]
+fn paused_auto_resolution_caps_large_comps() {
+    assert_eq!(Resolution::paused_auto_scale(1920, 1080), 1.0);
+    assert_eq!(Resolution::paused_auto_scale(4096, 2160), 1.0);
+    assert_eq!(Resolution::paused_auto_scale(8192, 4320), 0.5);
+    assert_eq!(Resolution::paused_auto_scale(16384, 8640), 0.25);
+}
+
+#[test]
+fn dragging_the_time_ruler_uses_interactive_resolution() {
+    let mut h = harness();
+    let cti = h.state().auto.find("timeline.cti").unwrap().clone();
+    let from = pos2(cti.rect[0] + cti.rect[2] / 2.0, cti.rect[1] + cti.rect[3] / 2.0);
+    h.input_mut().events.push(Event::PointerMoved(from));
+    h.step();
+    h.input_mut().events.push(Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.step();
+    let to = from + egui::vec2(40.0, 0.0);
+    h.input_mut().events.push(Event::PointerMoved(to));
+    h.step();
+    assert!(h.state().ui.viewer.property_interacting);
+    assert_eq!(h.state().viewer_scale(0.2, 1.0), 0.25);
+    h.input_mut().events.push(Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    h.run_steps(2);
+    assert!(!h.state().ui.viewer.property_interacting);
+    assert_eq!(h.state().viewer_scale(0.2, 1.0), 1.0);
 }
 
 #[test]

@@ -58,9 +58,13 @@ impl FootageSource for Frames {
 }
 
 fn setup(mode: FrameBlend, size: (u32, u32)) -> (Project, ItemId) {
+    setup_at_rates(mode, size, FrameRate::FPS_30, FrameRate::FPS_24)
+}
+
+fn setup_at_rates(mode: FrameBlend, size: (u32, u32), comp_rate: FrameRate, footage_rate: FrameRate) -> (Project, ItemId) {
     let mut p = Project::default();
     p.settings.bit_depth = BitDepth::Bpc32;
-    let comp = Comp::new(size.0, size.1, FrameRate::FPS_30, Tick::from_seconds_f64(2.0));
+    let comp = Comp::new(size.0, size.1, comp_rate, Tick::from_seconds_f64(2.0));
     let cid = p.add_item("Comp", Label::Sandstone, None, ItemKind::Comp(comp.clone().into()));
     let f = Footage {
         path: "clip.mov".into(),
@@ -68,7 +72,7 @@ fn setup(mode: FrameBlend, size: (u32, u32)) -> (Project, ItemId) {
         width: size.0,
         height: size.1,
         pixel_aspect: 1.0,
-        frame_rate: FrameRate::FPS_24,
+        frame_rate: footage_rate,
         native_rate: None,
         duration: Tick::from_seconds_f64(2.0),
         has_video: true,
@@ -84,14 +88,18 @@ fn setup(mode: FrameBlend, size: (u32, u32)) -> (Project, ItemId) {
     };
     let fid = p.add_item("clip", Label::Aqua, None, ItemKind::Footage(f));
     let mut l = build::layer(&mut p, &comp, "clip", LayerSource::Footage { item: fid }, size, None);
-    l.switches.frame_blend = mode;
+    // Keep the actual default when testing the no-blend path.
+    if mode != FrameBlend::Off {
+        l.switches.frame_blend = mode;
+    }
     p.comp_mut(cid).unwrap().layers.push(l);
     (p, cid)
 }
 
 fn frame(p: &Project, cid: ItemId, k: i64, moving: bool) -> Image {
     let src = Frames { moving };
-    Renderer::new(p, &src, RenderOpts::default()).comp_frame(cid, FrameRate::FPS_30.tick_of(k))
+    let rate = p.comp(cid).unwrap().frame_rate;
+    Renderer::new(p, &src, RenderOpts::default()).comp_frame(cid, rate.tick_of(k))
 }
 
 #[test]
@@ -108,6 +116,24 @@ fn frame_mix_blends_footage_frames() {
     let (mut p, cid) = setup(FrameBlend::FrameMix, (16, 8));
     p.comp_mut(cid).unwrap().enable_frame_blending = false;
     assert!((frame(&p, cid, 1, false).get(4, 4)[0] - 0.0).abs() < 1e-6);
+}
+
+#[test]
+fn mismatched_rates_use_a_single_source_frame_unless_blending_is_enabled() {
+    // Nearest preceding source frame, not a weighted cross-fade.
+    for (comp_rate, footage_rate, frames) in [
+        (FrameRate::FPS_30, FrameRate::FPS_24, &[(0, 0), (1, 0), (2, 1), (3, 2), (4, 3), (5, 4), (6, 4)][..]),
+        (FrameRate::FPS_24, FrameRate::FPS_30, &[(0, 0), (1, 1), (2, 2), (3, 3), (4, 5), (5, 6), (6, 7)][..]),
+    ] {
+        let (p, cid) = setup_at_rates(FrameBlend::Off, (16, 8), comp_rate, footage_rate);
+        let c = p.comp(cid).unwrap();
+        assert!(c.enable_frame_blending);
+        assert_eq!(c.layers[0].switches.frame_blend, FrameBlend::Off);
+        for &(at, source) in frames {
+            let value = frame(&p, cid, at, false).get(4, 4)[0];
+            assert!((value - source as f32 / 10.0).abs() < 1e-6, "{comp_rate:?} {footage_rate:?} frame {at}: {value}");
+        }
+    }
 }
 
 fn mae(a: &Image, b: &Image, margin: u32) -> f32 {

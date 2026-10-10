@@ -511,16 +511,14 @@ pub(crate) fn magnification_label(pct: f32) -> String {
 pub(crate) fn resolution_label(res: Resolution, scale: f64) -> String {
     match res {
         Resolution::Auto => {
-            let r = if scale >= 0.99 {
-                "Full"
-            } else if scale >= 0.49 {
-                "Half"
-            } else if scale >= 0.33 {
-                "Third"
-            } else {
-                "Quarter"
-            };
-            format!("({r})")
+            let n = (1.0 / scale.clamp(1.0 / 40.0, 1.0)).round() as u32;
+            match n {
+                1 => "(Full)".into(),
+                2 => "(Half)".into(),
+                3 => "(Third)".into(),
+                4 => "(Quarter)".into(),
+                _ => format!("(1/{n})"),
+            }
         }
         Resolution::Custom(n) => format!("Custom ({n})"),
         r => r.label().to_string(),
@@ -575,7 +573,7 @@ pub(crate) fn bottom_bar(app: &mut EffectcraftApp, ui: &mut egui::Ui, bar: Rect,
     let r = Rect::from_min_size(pos2(x, cy - 10.0), vec2(84.0, 20.0));
     let scale = app.viewer_scale(zoom, ppp);
     if widgets::dropdown(ui, r, &resolution_label(app.ui.viewer.res, scale), &t, egui::Id::new("vw-res"))
-        .on_hover_text(crate::i18n::tr("Resolution/Down Sample Factor Popup"))
+        .on_hover_text(crate::i18n::tr("Preview resolution: Auto shows full detail while paused (up to 4K), adapting during playback and dragging. Full/Half/Third/Quarter are fixed."))
         .clicked()
     {
         toggle_popup(ui, "vw-res-pop");
@@ -765,6 +763,7 @@ mod tests {
         assert_eq!(magnification_label(49.97), "50 %");
         assert_eq!(resolution_label(Resolution::Auto, 1.0), "(Full)");
         assert_eq!(resolution_label(Resolution::Auto, 0.5), "(Half)");
+        assert_eq!(resolution_label(Resolution::Auto, 0.125), "(1/8)");
         assert_eq!(resolution_label(Resolution::Quarter, 0.25), "Quarter");
         assert_eq!(resolution_label(Resolution::Custom(5), 0.2), "Custom (5)");
     }

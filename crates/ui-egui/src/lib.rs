@@ -672,11 +672,16 @@ impl EffectcraftApp {
             };
             return r.scale(zoom, ppp);
         }
-        // Auto follows the zoom alike while playing and paused, so frames cached while scrubbing
-        // play back, and frames cached by a preview stay on screen when it stops.
-        let full = self.ui.viewer.res.scale(zoom, ppp);
+        // A fitted viewer must not discard detail while paused. Playback and interaction
+        // retain zoom-based Auto resolution so their frame caches stay inexpensive.
+        let interacting = self.ui.viewer.interacting || self.ui.viewer.property_interacting;
+        let full = if self.ui.viewer.res == state::Resolution::Auto && !self.playback.playing && !interacting {
+            self.session.active_comp().map_or(1.0, |c| state::Resolution::paused_auto_scale(c.width, c.height))
+        } else {
+            self.ui.viewer.res.scale(zoom, ppp)
+        };
         // Fast Previews ▸ Adaptive Resolution / Fast Draft: lower resolution while dragging.
-        let (_, k) = self.session.state.viewer.fast_previews.render(self.ui.viewer.interacting || self.ui.viewer.property_interacting);
+        let (_, k) = self.session.state.viewer.fast_previews.render(interacting);
         if k < 1.0 && self.ui.viewer.res == state::Resolution::Auto {
             return full.min((full * 0.5).max(self.session.prefs.adaptive_limit()));
         }
@@ -1712,4 +1717,4 @@ mod gpu_failure_tests {
         app.session.execute("edit.redo", json!({})).unwrap();
         assert_eq!(app.session.render(comp, Tick::ZERO, RenderOpts::default()).data, before.data);
     }
-}
+                    }

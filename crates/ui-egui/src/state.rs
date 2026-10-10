@@ -224,7 +224,7 @@ impl Tool {
     }
 }
 
-/// Viewer resolution (Auto follows the magnification).
+/// Viewer resolution (Auto is sharp at rest and zoom-based during playback/dragging).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Resolution {
     #[default]
@@ -265,6 +265,15 @@ impl Resolution {
             Resolution::Quarter => 0.25,
             Resolution::Custom(n) => 1.0 / n.max(1) as f64,
         }
+    }
+
+    /// Full resolution for a paused frame, limited to roughly 4K worth of pixels.
+    /// Large comps use whole-pixel downsample factors to bound memory use.
+    pub fn paused_auto_scale(width: u32, height: u32) -> f64 {
+        const MAX_PIXELS: f64 = 4096.0 * 2160.0;
+        let pixels = u64::from(width) * u64::from(height);
+        let factor = ((pixels as f64 / MAX_PIXELS).sqrt().ceil() as u32).clamp(1, 40);
+        1.0 / f64::from(factor)
     }
 }
 

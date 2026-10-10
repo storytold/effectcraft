@@ -340,6 +340,22 @@ mod tests {
     }
 
     #[test]
+    fn minification_prefilters_high_frequency_details() {
+        let mut src = Image::new(8, 8);
+        for y in 0..8 {
+            for x in 0..8 {
+                let v = if (x + y) % 2 == 0 { 1.0 } else { 0.0 };
+                src.set(x, y, [v, v, v, 1.0]);
+            }
+        }
+        let out = resample(&src, 2, 2);
+        for px in out.data {
+            assert!((px[0] - 0.5).abs() < 1e-6, "{px:?}");
+            assert_eq!(px[3], 1.0);
+        }
+    }
+
+    #[test]
     fn translate_by_integer() {
         let mut src = Image::new(4, 4);
         src.set(0, 0, [1.0; 4]);
