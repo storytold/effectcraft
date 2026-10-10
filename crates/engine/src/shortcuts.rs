@@ -88,7 +88,15 @@ pub fn bindables(ui: &[UiCommand]) -> Vec<Bindable> {
     let entries = crate::menus::entries();
     for (path, e) in &entries {
         let key = binding_key(&e.command, &e.params);
-        let defaults = e.shortcut.iter().filter_map(|s| normalize(s)).collect();
+        let mut defaults: Vec<String> = e.shortcut.iter().filter_map(|s| normalize(s)).collect();
+        // Keep the AE . / , shortcuts while also supporting the standard composition
+        // zoom keys. Shift+= produces '+' on many keyboard layouts.
+        let zoom_keys: &[&str] = match e.command.as_str() {
+            "view.zoomIn" => &["Cmd+=", "Cmd+Shift+="],
+            "view.zoomOut" => &["Cmd+-"],
+            _ => &[],
+        };
+        defaults.extend(zoom_keys.iter().filter_map(|key| normalize(key)));
         push(
             Bindable {
                 key,
@@ -464,5 +472,28 @@ impl ShortcutTable {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod zoom_shortcut_tests {
+    use super::*;
+
+    #[test]
+    fn composition_zoom_supports_primary_plus_minus_without_losing_existing_keys() {
+        let table = ShortcutTable::build(&Keymaps::default(), &[]);
+        let zoom_in = table.find("view.zoomIn").unwrap();
+        let zoom_out = table.find("view.zoomOut").unwrap();
+        assert_eq!(zoom_in.defaults, ["." , "Cmd+=", "Cmd+Shift+="]);
+        assert_eq!(zoom_out.defaults, [",", "Cmd+-"]);
+        for (key, command) in [
+            (".", "view.zoomIn"),
+            ("Cmd+=", "view.zoomIn"),
+            ("Cmd+Shift+=", "view.zoomIn"),
+            (",", "view.zoomOut"),
+            ("Cmd+-", "view.zoomOut"),
+        ] {
+            assert!(table.bindings().iter().any(|(bound, b)| *bound == key && b.command == command), "{key} must invoke {command}");
+        }
     }
 }
