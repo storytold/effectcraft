@@ -574,7 +574,11 @@ PropertyBase.prototype = {
     return false;
   },
   set selected(v) {
-    if (v) __call("prop.select", { comp: this.__layer.__comp, layer: this.__layer.__id, prop: this.__uid, add: true });
+    if (v) {
+      __call("prop.select", { comp: this.__layer.__comp, layer: this.__layer.__id, prop: this.__uid, add: true });
+    } else {
+      __call("prop.select", { comp: this.__layer.__comp, layer: this.__layer.__id, prop: this.__uid, add: false });
+    }
   },
   propertyGroup: function (n) {
     var p = this;
@@ -1043,9 +1047,11 @@ Layer.prototype = {
   get comment() { return this.__info().comment; },
   get selected() { return this.__info().selected; },
   set selected(v) {
-    var sel = this.containingComp.__info().selectedLayers;
-    var on = sel.indexOf(this.__id) >= 0;
-    if (!!v !== on) __call("layer.select", { comp: this.__comp, layers: [this.__id], toggle: true });
+    if (v) {
+      __call("layer.select", { comp: this.__comp, layers: [this.__id], add: true });
+    } else {
+      __call("layer.select", { comp: this.__comp, layers: [this.__id], add: false });
+    }
   },
   get selectedProperties() {
     var c = this.containingComp.__info().selectedProperties, out = [];
@@ -1335,7 +1341,10 @@ Item.prototype = {
   get parentFolder() { return __item(this.__info().parent); },
   set parentFolder(f) { __call("project.move", { items: [this.__id], folder: f && f.__id ? f.__id : null }); },
   get selected() { return this.__info().selected; },
-  set selected(v) { if (v) __call("project.select", { items: [this.__id], add: true }); },
+  set selected(v) {
+    if (v) __call("project.select", { items: [this.__id], add: true });
+    else __call("project.select", { items: [this.__id], add: false });
+  },
   get usedIn() { return this.__info().usedIn.map(function (c) { return new CompItem(c); }); },
   remove: function () { __call("project.delete", { items: [this.__id] }); },
 };
