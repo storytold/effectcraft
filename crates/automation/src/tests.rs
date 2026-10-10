@@ -269,7 +269,9 @@ fn autosave_is_durable_before_reply_and_queries_do_not_rotate() {
     drop(s); // Abrupt process loss has no EOF cleanup; the checkpoint already exists.
     let mut restarted = server().with_autosave(&dir).unwrap();
     let init = rpc(&mut restarted, 1, "initialize", json!({}));
-    assert!(init["instructions"].as_str().unwrap().contains(path));
+    // The instructions embed the auto-save info as JSON, which escapes a Windows path's backslashes.
+    let escaped = Value::from(path).to_string();
+    assert!(init["instructions"].as_str().unwrap().contains(escaped.trim_matches('"')));
     assert_eq!(init["_meta"]["effectcraftAutoSave"]["previousSessions"][0]["autosave"], path);
     call_json(&mut restarted, "open_project", json!({"path": path}));
     assert_eq!(call_json(&mut restarted, "get_project", json!({}))["items"][0]["name"], "Durable");

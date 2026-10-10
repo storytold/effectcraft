@@ -373,7 +373,9 @@ fn mcp_autosave_survives_kill_and_restart_without_touching_desktop_settings() {
     assert_eq!(manifest["ended"], false);
     let mut restarted = McpChild::start(&config, true);
     let init = restarted.rpc("initialize", json!({}));
-    assert!(init["instructions"].as_str().unwrap().contains(path));
+    // The instructions embed the auto-save info as JSON, which escapes a Windows path's backslashes.
+    let escaped = Value::from(path).to_string();
+    assert!(init["instructions"].as_str().unwrap().contains(escaped.trim_matches('"')));
     assert_eq!(init["_meta"]["effectcraftAutoSave"]["previousSessions"][0]["autosave"], path);
     restarted.tool("open_project", json!({"path":path}));
     let comp = restarted.tool("get_comp", json!({"comp":"Survives restart"}));
