@@ -114,10 +114,8 @@ pub fn shapes(ctx: &EvalCtx, layer: &Layer) -> Vec<effectcraft_effects::MaskShap
         let mut pts: Vec<[f64; 2]> = Vec::new();
         let mut closed = false;
         kurbo::flatten(path.iter(), 0.25, |el| match el {
-            effectcraft_path::PathEl::MoveTo(p) | effectcraft_path::PathEl::LineTo(p) => {
-                if pts.last() != Some(&[p.x, p.y]) {
-                    pts.push([p.x, p.y]);
-                }
+            effectcraft_path::PathEl::MoveTo(p) | effectcraft_path::PathEl::LineTo(p) if pts.last() != Some(&[p.x, p.y]) => {
+                pts.push([p.x, p.y]);
             }
             effectcraft_path::PathEl::ClosePath => closed = true,
             _ => {}

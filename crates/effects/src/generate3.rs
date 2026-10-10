@@ -503,10 +503,8 @@ fn scan_runs(polys: &[(Vec<[f64; 2]>, bool, bool)], fill: u32, ew: f64, d: [f64;
             let entering = k % 2 == 0;
             let l = ew / sin;
             match mode {
-                0 => {
-                    if entering && k + 1 < xs.len() {
-                        out.push((t, xs[k + 1].0));
-                    }
+                0 if entering && k + 1 < xs.len() => {
+                    out.push((t, xs[k + 1].0));
                 }
                 1 => out.push((t - l * 0.5, t + l * 0.5)),
                 2 => out.push(if entering { (t, t + l) } else { (t - l, t) }),
