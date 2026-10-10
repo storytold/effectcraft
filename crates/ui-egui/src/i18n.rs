@@ -179,6 +179,14 @@ pub(crate) fn submenu(app: &EffectcraftApp, source: &str, shown: String) -> Stri
 /// Chinese After Effects documentation and the catalogs the sibling Craft apps ship; see the
 /// pull request for the rows taken from #321.
 const SIMPLIFIED_CHINESE: &[(&str, &str, &str)] = &[
+    ("", "Appearance", "外观"),
+    ("prefs.set", "Dark", "深色"),
+    ("prefs.set", "Darker", "更深"),
+    ("prefs.set", "Light", "浅色"),
+    ("prefs.set", "Studio Dark", "工作室深色"),
+    ("prefs.set", "Studio Light", "工作室浅色"),
+    ("prefs.set", "Classic", "经典"),
+    ("app.settings", "Appearance Settings...", "外观设置..."),
     ("", "EffectCraft", "EffectCraft"),
     ("app.about", "About EffectCraft...", "关于 EffectCraft..."),
     ("", "Settings...", "设置..."),
@@ -802,6 +810,14 @@ const SIMPLIFIED_CHINESE: &[(&str, &str, &str)] = &[
 /// entry per fixed menu row of the engine's menu tree, mirroring `SIMPLIFIED_CHINESE` in the
 /// vocabulary the sibling Craft apps' zh-hant catalogs use.
 const TRADITIONAL_CHINESE: &[(&str, &str, &str)] = &[
+    ("", "Appearance", "外觀"),
+    ("prefs.set", "Dark", "深色"),
+    ("prefs.set", "Darker", "更深"),
+    ("prefs.set", "Light", "淺色"),
+    ("prefs.set", "Studio Dark", "工作室深色"),
+    ("prefs.set", "Studio Light", "工作室淺色"),
+    ("prefs.set", "Classic", "經典"),
+    ("app.settings", "Appearance Settings...", "外觀設定..."),
     ("", "EffectCraft", "EffectCraft"),
     ("app.about", "About EffectCraft...", "關於 EffectCraft..."),
     ("", "Settings...", "設定..."),
@@ -1422,6 +1438,14 @@ const TRADITIONAL_CHINESE: &[(&str, &str, &str)] = &[
 ];
 
 const JAPANESE: &[(&str, &str, &str)] = &[
+    ("", "Appearance", "アピアランス"),
+    ("prefs.set", "Dark", "ダーク"),
+    ("prefs.set", "Darker", "より暗く"),
+    ("prefs.set", "Light", "ライト"),
+    ("prefs.set", "Studio Dark", "スタジオダーク"),
+    ("prefs.set", "Studio Light", "スタジオライト"),
+    ("prefs.set", "Classic", "クラシック"),
+    ("app.settings", "Appearance Settings...", "アピアランス設定..."),
     ("", "EffectCraft", "EffectCraft"),
     ("app.about", "About EffectCraft...", "EffectCraftについて..."),
     ("", "Settings...", "設定..."),

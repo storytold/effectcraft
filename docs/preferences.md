@@ -54,7 +54,7 @@ Commands (CLI, MCP, control channel):
   without input or edits, the viewer renders the work area into the RAM preview in the
   background, from the current time on, until it is cached or the budget is full
 - `previews.fastPreviews`: Fast Previews (Draft 3D, Faster Effects)
-- `appearance.theme`: Theme
+- `appearance.theme`: `dark` (default), `darker`, `light`, `studioDark`, `studioLight`, or `classic`. The Appearance submenu (application menu on macOS, View elsewhere) switches immediately and saves the choice; the Appearance settings page previews changes until OK or Cancel. Studio uses rounded panels and violet accents; Classic uses neutral gray panels, lighter gray fields, square controls, subtle bevels, and restrained blue editing accents. Control sizes, workspaces, and composition pixels do not change. Reset Appearance restores this page’s defaults.
 - `appearance.brightness`: Brightness
 - `appearance.uiScale`: UI Scale, the size of the whole interface (75–200 %, on top of the
   display's own scaling), applied as soon as it is chosen

@@ -998,7 +998,7 @@ pub fn draw_group_chrome(ui: &mut egui::Ui, g: &Group, t: &Tokens, reg: &mut cra
     }
     let mut out = Chrome::default();
     let painter = ui.painter().clone();
-    painter.rect_filled(g.rect, t.radius, t.panel_bg);
+    t.surface(&painter, g.rect, t.radius, t.panel_bg, true);
     let active_panel = g.panels.get(g.active).copied();
     let compact = g.panels.len() == 1 && g.panels[0].compact();
     if compact {
@@ -1090,6 +1090,11 @@ pub fn draw_group_chrome(ui: &mut egui::Ui, g: &Group, t: &Tokens, reg: &mut cra
             reg.add(&auto_id, tab, &e.label);
             if e.shown_doc {
                 reg.add(&format!("panel.tab.{}", p.id()), tab, &e.label);
+            }
+            if t.kind.is_studio() && (is_active || resp.hovered()) {
+                painter.rect_filled(tab.shrink2(vec2(2.0, 3.0)), t.radius_sm, if is_active { t.row_selected } else { t.hover });
+            } else if t.bevel {
+                t.surface(&painter, tab.shrink(1.0), 0.0, if is_active { t.row_selected } else { t.panel_bg }, is_active);
             }
             let mut label_x = tab.min.x + 8.0;
             if let Some(d) = e.deco {

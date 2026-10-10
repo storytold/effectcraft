@@ -213,7 +213,7 @@ pub fn handle(app: &mut EffectcraftApp, ctx: &egui::Context, req: &ControlReques
             if let Some(th) = s("theme") {
                 match crate::theme::ThemeKind::from_name(th) {
                     Some(k) => app.set_theme(ctx, k),
-                    None => return err("unknown theme (dark, darker, light)"),
+                    None => return err("unknown theme (dark, darker, light, studioDark, studioLight, classic)"),
                 }
             }
             if let Some(f) = s("focused").and_then(PanelKind::from_name) {

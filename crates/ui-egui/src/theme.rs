@@ -15,14 +15,41 @@ pub enum ThemeKind {
     Dark,
     Darker,
     Light,
+    StudioDark,
+    StudioLight,
+    Classic,
 }
 
 impl ThemeKind {
+    pub const ALL: [Self; 6] = [Self::Dark, Self::Darker, Self::Light, Self::StudioDark, Self::StudioLight, Self::Classic];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Dark => "dark",
+            Self::Darker => "darker",
+            Self::Light => "light",
+            Self::StudioDark => "studioDark",
+            Self::StudioLight => "studioLight",
+            Self::Classic => "classic",
+        }
+    }
+
+    pub fn is_light(self) -> bool {
+        matches!(self, Self::Light | Self::StudioLight | Self::Classic)
+    }
+
+    pub fn is_studio(self) -> bool {
+        matches!(self, Self::StudioDark | Self::StudioLight)
+    }
+
     pub fn from_name(s: &str) -> Option<ThemeKind> {
         match s.to_ascii_lowercase().as_str() {
             "dark" | "default" => Some(ThemeKind::Dark),
             "darker" | "darkest" => Some(ThemeKind::Darker),
             "light" => Some(ThemeKind::Light),
+            "studiodark" | "studio" => Some(ThemeKind::StudioDark),
+            "studiolight" => Some(ThemeKind::StudioLight),
+            "classic" => Some(ThemeKind::Classic),
             _ => None,
         }
     }
@@ -78,6 +105,19 @@ pub struct Tokens {
     /// Settings ▸ Appearance ▸ Use Gradients: panel tab strips and buttons get a soft vertical
     /// gradient (off: flat fills).
     pub gradients: bool,
+    /// Raised/sunken edges for the Classic style; geometry and interaction remain unchanged.
+    pub bevel: bool,
+    pub bevel_light: Color32,
+    pub bevel_dark: Color32,
+    pub fx_header: Color32,
+    pub fx_header_active: Color32,
+    pub timeline_selected: Color32,
+    pub timeline_expression: Color32,
+    pub navigator: Color32,
+    pub work_area_bar: Color32,
+    pub switch_bg: Color32,
+    pub selected_name_bg: Color32,
+    pub selected_name_text: Color32,
 }
 
 /// A vertical gradient fill (`top` → `bottom`) over `rect`.
@@ -93,6 +133,18 @@ pub fn gradient_rect(painter: &egui::Painter, rect: egui::Rect, top: Color32, bo
 }
 
 impl Tokens {
+    /// Paint a surface without changing its hit box. Classic adds raised/sunken edges.
+    pub fn surface(&self, p: &egui::Painter, r: egui::Rect, radius: f32, fill: Color32, raised: bool) {
+        p.rect_filled(r, if self.bevel { 0.0 } else { radius }, fill);
+        if self.bevel {
+            let (hi, lo) = if raised { (self.bevel_light, self.bevel_dark) } else { (self.bevel_dark, self.bevel_light) };
+            p.line_segment([r.left_bottom(), r.left_top()], Stroke::new(1.0, hi));
+            p.line_segment([r.left_top(), r.right_top()], Stroke::new(1.0, hi));
+            p.line_segment([r.right_top(), r.right_bottom()], Stroke::new(1.0, lo));
+            p.line_segment([r.right_bottom(), r.left_bottom()], Stroke::new(1.0, lo));
+        }
+    }
+
     /// The gradient top colour for a fill (a little lighter), or the fill itself when gradients
     /// are off.
     pub fn grad_top(&self, c: Color32) -> Color32 {
@@ -147,6 +199,18 @@ impl Tokens {
             tab_h: 30.0,
             row_h: 19.0,
             gradients: true,
+            bevel: false,
+            bevel_light: Color32::WHITE,
+            bevel_dark: Color32::from_gray(96),
+            fx_header: Color32::from_gray(0x2a),
+            fx_header_active: Color32::from_rgb(0x2f, 0x3a, 0x52),
+            timeline_selected: Color32::from_gray(0x2a),
+            timeline_expression: Color32::from_gray(0x1a),
+            navigator: Color32::from_gray(0x55),
+            work_area_bar: Color32::from_gray(0x5c),
+            switch_bg: Color32::from_gray(0x19),
+            selected_name_bg: Color32::from_gray(0xa6),
+            selected_name_text: Color32::from_gray(0x16),
         };
         match kind {
             ThemeKind::Dark => dark,
@@ -187,9 +251,129 @@ impl Tokens {
                 tl_ruler_bg: Color32::from_rgb(0xe2, 0xe2, 0xe2),
                 tl_ruler_text: Color32::from_rgb(0x50, 0x50, 0x50),
                 pasteboard: Color32::from_rgb(0xa8, 0xa8, 0xa8),
+                fx_header: Color32::from_gray(0xd8),
+                fx_header_active: Color32::from_rgb(0xb0, 0xcf, 0xec),
+                timeline_selected: Color32::from_gray(0xc0),
+                timeline_expression: Color32::from_gray(0xe4),
+                navigator: Color32::from_gray(0x98),
+                work_area_bar: Color32::from_gray(0x90),
+                switch_bg: Color32::from_gray(0xc0),
                 // Keyframes have no outline: dark enough to stand out on the light time graph.
                 keyframe: Color32::from_rgb(0x6c, 0x6c, 0x6c),
                 ..dark
+            },
+            ThemeKind::StudioDark => Tokens {
+                app_bg: Color32::from_rgb(14, 16, 24),
+                header_bg: Color32::from_rgb(21, 24, 34),
+                panel_bg: Color32::from_rgb(29, 32, 44),
+                field_bg: Color32::from_rgb(18, 21, 31),
+                field_border: Color32::from_rgb(64, 70, 91),
+                separator: Color32::from_rgb(48, 54, 73),
+                hover: Color32::from_rgb(49, 55, 75),
+                pressed: Color32::from_rgb(65, 72, 98),
+                text: Color32::from_rgb(228, 232, 245),
+                text_dim: Color32::from_rgb(170, 179, 204),
+                text_faint: Color32::from_rgb(146, 157, 188),
+                icon: Color32::from_rgb(195, 204, 226),
+                accent: Color32::from_rgb(112, 90, 214),
+                accent_hover: Color32::from_rgb(132, 108, 236),
+                focus: Color32::from_rgb(157, 143, 255),
+                hot_text: Color32::from_rgb(181, 167, 255),
+                timecode: Color32::from_rgb(181, 167, 255),
+                row: Color32::from_rgb(29, 32, 44),
+                row_alt: Color32::from_rgb(32, 36, 49),
+                row_selected: Color32::from_rgb(65, 56, 97),
+                tl_bg: Color32::from_rgb(22, 25, 36),
+                tl_ruler_bg: Color32::from_rgb(29, 32, 44),
+                pasteboard: Color32::from_rgb(14, 16, 24),
+                fx_header: Color32::from_rgb(38, 43, 59),
+                fx_header_active: Color32::from_rgb(65, 56, 97),
+                timeline_selected: Color32::from_rgb(40, 39, 61),
+                timeline_expression: Color32::from_rgb(22, 25, 36),
+                switch_bg: Color32::from_rgb(18, 21, 31),
+                radius: 12.0,
+                radius_sm: 7.0,
+                ..dark
+            },
+            ThemeKind::StudioLight => Tokens {
+                kind,
+                app_bg: Color32::from_rgb(226, 230, 242),
+                header_bg: Color32::from_rgb(238, 241, 249),
+                panel_bg: Color32::from_rgb(248, 250, 255),
+                field_bg: Color32::from_rgb(235, 239, 249),
+                field_border: Color32::from_rgb(175, 184, 208),
+                separator: Color32::from_rgb(208, 215, 233),
+                hover: Color32::from_rgb(224, 227, 245),
+                pressed: Color32::from_rgb(204, 207, 233),
+                accent: Color32::from_rgb(91, 68, 183),
+                accent_hover: Color32::from_rgb(111, 87, 203),
+                focus: Color32::from_rgb(91, 68, 183),
+                hot_text: Color32::from_rgb(78, 53, 164),
+                timecode: Color32::from_rgb(78, 53, 164),
+                row: Color32::from_rgb(248, 250, 255),
+                row_alt: Color32::from_rgb(237, 241, 251),
+                row_selected: Color32::from_rgb(216, 207, 246),
+                tl_bg: Color32::from_rgb(230, 235, 247),
+                tl_ruler_bg: Color32::from_rgb(238, 241, 249),
+                pasteboard: Color32::from_rgb(208, 215, 231),
+                fx_header: Color32::from_rgb(228, 233, 247),
+                fx_header_active: Color32::from_rgb(216, 207, 246),
+                timeline_selected: Color32::from_rgb(214, 211, 236),
+                timeline_expression: Color32::from_rgb(237, 241, 251),
+                switch_bg: Color32::from_rgb(217, 223, 240),
+                radius: 12.0,
+                radius_sm: 7.0,
+                ..Tokens::for_kind(ThemeKind::Light)
+            },
+            ThemeKind::Classic => Tokens {
+                kind,
+                // Neutral legacy-editor chrome: restrained relief and blue editing accents.
+                app_bg: Color32::from_gray(143),
+                header_bg: Color32::from_gray(185),
+                panel_bg: Color32::from_gray(176),
+                field_bg: Color32::from_gray(200),
+                field_border: Color32::from_gray(112),
+                separator: Color32::from_gray(140),
+                hover: Color32::from_gray(193),
+                pressed: Color32::from_gray(156),
+                text: Color32::from_gray(35),
+                text_dim: Color32::from_gray(60),
+                text_faint: Color32::from_gray(76),
+                tab_text: Color32::from_gray(62),
+                tab_text_active: Color32::from_gray(25),
+                icon: Color32::from_gray(60),
+                icon_active: Color32::from_gray(25),
+                accent: Color32::from_rgb(32, 101, 137),
+                accent_hover: Color32::from_rgb(24, 116, 158),
+                focus: Color32::from_rgb(31, 115, 155),
+                hot_text: Color32::from_rgb(12, 83, 122),
+                timecode: Color32::from_rgb(12, 83, 122),
+                row: Color32::from_gray(176),
+                row_alt: Color32::from_gray(168),
+                row_selected: Color32::from_gray(194),
+                tl_bg: Color32::from_gray(164),
+                tl_ruler_bg: Color32::from_gray(176),
+                tl_ruler_text: Color32::from_gray(64),
+                tl_ruler_tick: Color32::from_gray(96),
+                pasteboard: Color32::from_gray(144),
+                fx_header: Color32::from_gray(172),
+                fx_header_active: Color32::from_gray(188),
+                timeline_selected: Color32::from_gray(174),
+                timeline_expression: Color32::from_gray(186),
+                switch_bg: Color32::from_gray(168),
+                navigator: Color32::from_gray(153),
+                work_area_bar: Color32::from_gray(164),
+                selected_name_bg: Color32::from_gray(214),
+                selected_name_text: Color32::from_gray(32),
+                keyframe: Color32::from_gray(72),
+                keyframe_selected: Color32::from_rgb(24, 102, 148),
+                bevel_light: Color32::from_gray(210),
+                bevel_dark: Color32::from_gray(114),
+                radius: 0.0,
+                radius_sm: 0.0,
+                gradients: false,
+                bevel: true,
+                ..Tokens::for_kind(ThemeKind::Light)
             },
         }
     }
@@ -220,7 +404,7 @@ impl Tokens {
             let [r, g, b] = p.label_rgb(*l);
             t.labels[i] = Color32::from_rgb(r, g, b);
         }
-        t.gradients = p.appearance.use_gradients;
+        t.gradients = p.appearance.use_gradients && !t.bevel;
         t
     }
 
@@ -387,7 +571,7 @@ fn is_chinese(language: &str) -> bool {
 }
 
 pub fn apply_visuals(ctx: &egui::Context, t: &Tokens) {
-    let mut v = if t.kind == ThemeKind::Light { Visuals::light() } else { Visuals::dark() };
+    let mut v = if t.kind.is_light() { Visuals::light() } else { Visuals::dark() };
     v.panel_fill = t.panel_bg;
     v.window_fill = t.panel_bg;
     v.extreme_bg_color = t.field_bg;
@@ -397,10 +581,32 @@ pub fn apply_visuals(ctx: &egui::Context, t: &Tokens) {
     v.selection.stroke = Stroke::new(1.0, Color32::WHITE);
     v.hyperlink_color = t.accent;
     v.window_stroke = Stroke::new(1.0, t.field_border);
-    v.window_corner_radius = egui::CornerRadius::same(8);
-    v.menu_corner_radius = egui::CornerRadius::same(6);
-    v.popup_shadow = egui::epaint::Shadow { offset: [0, 6], blur: 20, spread: 0, color: Color32::from_black_alpha(150) };
-    v.window_shadow = egui::epaint::Shadow { offset: [0, 10], blur: 36, spread: 0, color: Color32::from_black_alpha(170) };
+    v.window_corner_radius = egui::CornerRadius::same(if t.bevel { 0 } else { (t.radius + 2.0) as u8 });
+    v.menu_corner_radius = egui::CornerRadius::same(t.radius as u8);
+    v.popup_shadow = egui::epaint::Shadow {
+        offset: [0, 6],
+        blur: 20,
+        spread: 0,
+        color: Color32::from_black_alpha(if t.bevel {
+            0
+        } else if t.kind.is_light() {
+            55
+        } else {
+            150
+        }),
+    };
+    v.window_shadow = egui::epaint::Shadow {
+        offset: [0, 10],
+        blur: 36,
+        spread: 0,
+        color: Color32::from_black_alpha(if t.bevel {
+            0
+        } else if t.kind.is_light() {
+            65
+        } else {
+            170
+        }),
+    };
     for w in [&mut v.widgets.noninteractive, &mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
         w.corner_radius = egui::CornerRadius::same(t.radius_sm as u8);
     }

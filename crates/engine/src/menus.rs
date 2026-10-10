@@ -474,6 +474,15 @@ fn effect_categories() -> Vec<MenuNode> {
 pub const TREE: &str = r#"
 [mac] EffectCraft
   About EffectCraft... | app.about
+  Appearance
+    Dark | prefs.set {"key":"appearance.theme","value":"dark"}
+    Darker | prefs.set {"key":"appearance.theme","value":"darker"}
+    Light | prefs.set {"key":"appearance.theme","value":"light"}
+    Studio Dark | prefs.set {"key":"appearance.theme","value":"studioDark"}
+    Studio Light | prefs.set {"key":"appearance.theme","value":"studioLight"}
+    Classic | prefs.set {"key":"appearance.theme","value":"classic"}
+    ---
+    Appearance Settings... | app.settings {"page":"appearance"}
   ---
   Settings...
     General... | app.settings {"page":"general"} | Cmd+Alt+;
@@ -1050,6 +1059,15 @@ Animation
   Reveal Properties with Animation | anim.reveal {"kind":"animation"}
   Reveal All Modified Properties | anim.reveal {"kind":"modified"}
 View
+  [!mac] Appearance
+    Dark | prefs.set {"key":"appearance.theme","value":"dark"}
+    Darker | prefs.set {"key":"appearance.theme","value":"darker"}
+    Light | prefs.set {"key":"appearance.theme","value":"light"}
+    Studio Dark | prefs.set {"key":"appearance.theme","value":"studioDark"}
+    Studio Light | prefs.set {"key":"appearance.theme","value":"studioLight"}
+    Classic | prefs.set {"key":"appearance.theme","value":"classic"}
+    ---
+    Appearance Settings... | app.settings {"page":"appearance"}
   New Viewer | view.newViewer
   Split with New Locked Viewer | view.splitLockedViewer
   ---

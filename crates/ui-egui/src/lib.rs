@@ -400,11 +400,7 @@ impl EffectcraftApp {
     }
 
     pub fn set_theme(&mut self, ctx: &egui::Context, k: theme::ThemeKind) {
-        let name = match k {
-            theme::ThemeKind::Dark => "dark",
-            theme::ThemeKind::Darker => "darker",
-            theme::ThemeKind::Light => "light",
-        };
+        let name = k.id();
         let _ = self.set_pref("appearance.theme", json!(name));
         self.apply_prefs(ctx);
     }

@@ -847,7 +847,7 @@ static TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "ui_set",
-        description: "Set UI state directly: tool, workspace, theme (dark|darker|light), focused panel, viewer {zoom, res, pan, grid, rulers, safeMargins, transparencyGrid}, timeline {pps, start, graphEditor, showModes, openLayers, openGroups}, menuBar, home.",
+        description: "Set UI state directly: tool, workspace, theme (dark|darker|light|studioDark|studioLight|classic), focused panel, viewer {zoom, res, pan, grid, rulers, safeMargins, transparencyGrid}, timeline {pps, start, graphEditor, showModes, openLayers, openGroups}, menuBar, home.",
         bridge_only: true,
         schema: || {
             schema(

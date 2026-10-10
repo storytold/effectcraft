@@ -49,6 +49,9 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     uic!("view.theme.dark", "Theme: Dark", [], None),
     uic!("view.theme.darker", "Theme: Darker", [], None),
     uic!("view.theme.light", "Theme: Light", [], None),
+    uic!("view.theme.studioDark", "Theme: Studio Dark", [], None),
+    uic!("view.theme.studioLight", "Theme: Studio Light", [], None),
+    uic!("view.theme.classic", "Theme: Classic", [], None),
     uic!("timeline.zoomIn", "Zoom In Time", [], Some("=")),
     uic!("timeline.zoomOut", "Zoom Out Time", [], Some("-")),
     uic!("timeline.zoomFit", "Zoom to Fit Comp", [], None),
@@ -1265,6 +1268,7 @@ pub(crate) fn entry_checked(app: &EffectcraftApp, e: &MenuEntry) -> Option<bool>
     let v = &app.ui.viewer;
     let pstr = |k: &str| e.params.get(k).and_then(Value::as_str);
     match e.command.as_str() {
+        "prefs.set" if pstr("key") == Some("appearance.theme") => Some(pstr("value") == Some(app.ui.theme.id())),
         "view.rulers" => Some(v.rulers),
         "view.guides" => Some(v.guides),
         "view.snapToGuides" => Some(v.snap_guides),

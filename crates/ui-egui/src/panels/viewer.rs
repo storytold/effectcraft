@@ -605,16 +605,18 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let r = Rect::from_min_size(pos2(x, nav.min.y + 3.0), vec2(g.size().x + 16.0, 18.0));
         let resp = ui.interact(r, egui::Id::new(("nav", oc.0)), Sense::click());
         let active = oc == cid;
-        p.rect_filled(
+        t.surface(
+            &p,
             r,
             9.0,
             if active {
-                Color32::from_rgb(0x34, 0x3c, 0x4e)
+                t.fx_header_active
             } else if resp.hovered() {
                 t.hover
             } else {
                 Color32::TRANSPARENT
             },
+            active,
         );
         p.galley_with_override_text_color(pos2(r.min.x + 8.0, r.center().y - g.size().y / 2.0), g, if active { t.tab_text_active } else { t.text_dim });
         app.auto.add(&format!("viewer.nav.{}", oc.0), r, &name);

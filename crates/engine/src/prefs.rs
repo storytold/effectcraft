@@ -35,6 +35,7 @@ pub const WINDOW_GRAPHICS: &[(&str, &str)] = &[("Automatic", "auto"), ("OpenGL (
 /// The settings whose value must be one of their choices.
 fn choices(key: &str) -> Option<&'static [(&'static str, &'static str)]> {
     match key {
+        "appearance.theme" => Some(APPEARANCE_THEMES),
         "general.language" => Some(LANGUAGES),
         "startup.windowGraphics" => Some(WINDOW_GRAPHICS),
         _ => None,
@@ -844,6 +845,10 @@ fn coerce(slot: &Value, value: Value) -> Option<Value> {
     })
 }
 
+/// Stable preference ids, shared by the Appearance page and automation clients.
+pub const APPEARANCE_THEMES: &[(&str, &str)] =
+    &[("Dark", "dark"), ("Darker", "darker"), ("Light", "light"), ("Studio Dark", "studioDark"), ("Studio Light", "studioLight"), ("Classic", "classic")];
+
 // ---------------------------------------------------------------- schema (Settings dialog)
 
 /// What a setting row edits.
@@ -1014,9 +1019,10 @@ pub fn pages() -> Vec<Page> {
             id: "appearance",
             title: "Appearance",
             items: vec![
-                s("appearance.theme", "Theme", Kind::Choice(&[("Dark", "dark"), ("Darker", "darker"), ("Light", "light")]), true),
+                s("appearance.theme", "Theme", Kind::Choice(APPEARANCE_THEMES), true),
                 s("appearance.brightness", "Brightness", Kind::Slider(-1.0, 1.0), true),
                 s("appearance.uiScale", "UI Scale", Kind::Choice(UI_SCALES), true),
+                Button { label: "Reset Appearance", command: "prefs.reset", params: "{\"page\":\"appearance\"}" },
                 Section("Labels and Colors"),
                 s("appearance.useLabelColorForHandles", "Use Label Color for Layer Handles and Paths", B, true),
                 s("appearance.useLabelColorForTabs", "Use Label Color for Related Tabs", B, true),
