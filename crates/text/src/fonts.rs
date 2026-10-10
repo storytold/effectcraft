@@ -94,8 +94,15 @@ impl DirectorySource {
                 dirs.push(h.join(".fonts"));
             }
         }
+        dirs.extend(extra_dirs(std::env::var_os("EFFECTCRAFT_FONT_DIRS").as_deref()));
         Self { dirs }
     }
+}
+
+/// Extra font folders from `EFFECTCRAFT_FONT_DIRS` (a path list, `:`-separated, `;` on Windows), so a
+/// tool can hand EffectCraft its own font library without installing the fonts system-wide.
+fn extra_dirs(var: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
+    var.map(|v| std::env::split_paths(v).filter(|p| !p.as_os_str().is_empty()).collect()).unwrap_or_default()
 }
 
 fn walk(dir: &std::path::Path, depth: u32, out: &mut Vec<PathBuf>) {
@@ -823,6 +830,14 @@ fn system_fallback(c: char, style: &str) -> Option<FaceId> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extra_font_dirs_come_from_a_path_list() {
+        assert!(extra_dirs(None).is_empty());
+        let v = std::env::join_paths(["/a/fonts", "/b/more"]).unwrap_or_default();
+        assert_eq!(extra_dirs(Some(&v)), vec![PathBuf::from("/a/fonts"), PathBuf::from("/b/more")]);
+        assert!(extra_dirs(Some(std::ffi::OsStr::new(""))).is_empty());
+    }
 
     #[test]
     fn bundled_families_and_resolution() {
