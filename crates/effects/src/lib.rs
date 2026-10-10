@@ -26,7 +26,6 @@ mod distort2;
 mod distort3;
 pub mod distort4;
 pub mod face_track;
-pub mod fidelity;
 mod generate;
 mod generate2;
 mod generate3;
@@ -300,14 +299,8 @@ pub struct LayerPixels {
 
 /// Services the renderer offers effects that look beyond their own pixels.
 pub trait EffectHost: Sync {
-    /// Pixels entering the effect stack, in effect space, before any effects. For an
-    /// adjustment layer this is the composition below it, in the effect working space.
-    fn original(&self) -> Option<&Buf> {
-        None
-    }
-
     /// Layer `id` of the same composition at the current comp time. `masks_and_effects`
-    /// selects "Effects & Masks" over "Source". `None` for missing/recursive references; own Source reads are supported.
+    /// selects "Effects & Masks" over "Source". `None` for missing/self/recursive references.
     fn layer(&self, id: u64, masks_and_effects: bool) -> Option<LayerPixels>;
     /// `frames` stereo sample frames (interleaved L R …) of layer `id`'s audio starting at comp
     /// time `start` seconds, at `rate` Hz. `None` when the layer has no audio.
@@ -1161,6 +1154,7 @@ pub const TIME_DEPENDENT: &[&str] = &[
     // Transform's motion blur and Radio Waves' birth parameters read the parameters at
     // other times.
     "ec.distort.transform",
+    "ec.distort.motiontransformblur",
     // Temporal Smoothing reads neighbouring frames.
     "ec.color.autolevels",
     "ec.color.autocontrast",
