@@ -465,6 +465,11 @@ comp space so the first frame's camera is the default comp camera (or so a chose
 the X-Z plane at the origin); `camera.createFromSolve` keys a one-node "3D Tracker Camera" on every
 frame and places text, solids, nulls or a shadow catcher and light on the target plane.
 
+**Motion Transform Blur** (`effects::distort`) animates Shift, Z-Dist (scale), Rotate and a dynamic
+Center inside one effect. Its own shutter samples evaluate those properties together at each time,
+then apply each combined transform around Center before averaging the samples. This produces one
+coherent blur for the effect's combined trajectory without changing the layer transform or anchor.
+
 **Roto Brush & Refine Edge** (`effectcraft_track::roto`, `effects::roto`, `engine::roto`):
 strokes (foreground, background, Refine Edge) are stored as JSON in the effect's hidden Strokes
 parameter with the base frame and segmentation span. Each frame is segmented by graph cut
