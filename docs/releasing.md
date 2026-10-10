@@ -58,6 +58,7 @@ jobs are refused by the environment's branch rule, and no draft release is made.
 | Windows 11 ARM64 | `effectcraft-<v>-windows-arm64.msi`, `effectcraft-<v>-windows-arm64-portable.zip` | cross-compiled on `windows-latest` |
 | Linux x86_64 | `effectcraft-<v>-linux-x86_64.{AppImage,deb,rpm,tar.gz}` | `ubuntu-22.04` |
 | Linux aarch64 | `effectcraft-<v>-linux-aarch64.{AppImage,deb,rpm,tar.gz}` | `ubuntu-22.04-arm` |
+| Linux riscv64 | `effectcraft-<v>-linux-riscv64.tar.gz` | cross-compiled on `ubuntu-26.04` |
 | Linux AppImage updates | `effectcraft-<v>-linux-{x86_64,aarch64}.AppImage.zsync` | with the AppImages |
 | Flatpak x86_64, aarch64 | `effectcraft-<v>-linux-{x86_64,aarch64}.flatpak` (the Linux tarball, repackaged) | `ubuntu-24.04`, `ubuntu-24.04-arm` |
 | FreeBSD 14+ x86_64 | `effectcraft-<v>-freebsd-x86_64.tar.gz` | a FreeBSD 14.3 VM on `ubuntu-latest` |
