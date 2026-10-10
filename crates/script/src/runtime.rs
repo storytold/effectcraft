@@ -152,7 +152,7 @@ pub(crate) fn exec(s: &mut Session, id: &str, params: J) -> Result<J, String> {
     if CREATES_LAYER.contains(&id) {
         s.state.selected_layers.clear();
     }
-    let r = s.execute(id, params);
+    let r = effectcraft_engine::prefs::with_script_origin(|| s.execute(id, params));
     if let Some(c) = target
         && prev != Some(c)
         && s.state.active_comp == Some(c)

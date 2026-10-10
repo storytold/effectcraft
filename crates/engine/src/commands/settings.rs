@@ -30,6 +30,10 @@ fn prefs_set(s: &mut Session, p: &Value) -> Result<Value> {
     for (k, v) in &pairs {
         next.set(k, v.clone()).map_err(|e| bad("prefs.set", e))?;
     }
+    // Checked on the final candidate so whole-page values, coercions and batches can't slip past.
+    if crate::prefs::script_origin() && next.scripting.allow_scripts_write_files && !s.prefs.scripting.allow_scripts_write_files {
+        return Err(bad("prefs.set", "scripts can't enable file or network access; turn on Allow Scripts to Write Files and Access Network in Preferences"));
+    }
     s.prefs = next;
     s.prefs_changed();
     s.save_prefs();

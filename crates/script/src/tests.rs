@@ -524,3 +524,28 @@ fn comp_preserves_nested_frame_rate_and_resolution() {
     let (_, c) = comp_named(&s, "Nested");
     assert!(c.preserve_frame_rate && c.preserve_resolution);
 }
+
+#[test]
+fn scripts_cannot_enable_file_and_network_access() {
+    // Every route a script has to prefs.set: single key, whole page, `values`, and a batch.
+    let attempts = [
+        "app.run('prefs.set', {key:'scripting.allowScriptsWriteFiles', value:true})",
+        "app.run('prefs.set', {key:'scripting', value:{allowScriptsWriteFiles:true}})",
+        "app.run('prefs.set', {values:{'general.recentItems':17, 'scripting.allowScriptsWriteFiles':true}})",
+        "app.run('engine.batch', {steps:[{command:'prefs.set', params:{key:'scripting.allowScriptsWriteFiles', value:true}}]})",
+    ];
+    for code in attempts {
+        let mut s = session();
+        let o = run_code(&mut s, code, "grant.jsx");
+        let e = o.error.unwrap_or_else(|| panic!("`{code}` was allowed"));
+        assert!(e.message.contains("scripts can't enable"), "{code}: {e:?}");
+        assert!(!s.prefs.scripting.allow_scripts_write_files, "{code}");
+    }
+    // The host can still grant it afterwards, and a script can change other settings.
+    let mut s = session();
+    ok(&mut s, "app.run('prefs.set', {key:'general.recentItems', value:17})");
+    assert_eq!(s.prefs.general.recent_items, 17);
+    s.execute("prefs.set", json!({"key": "scripting.allowScriptsWriteFiles", "value": true})).unwrap();
+    assert!(s.prefs.scripting.allow_scripts_write_files);
+    ok(&mut s, "app.run('prefs.set', {key:'scripting.allowScriptsWriteFiles', value:true})");
+}

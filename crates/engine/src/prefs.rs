@@ -10,6 +10,7 @@
 //! don't yet are still shown (After Effects parity of the dialog) and are listed in
 //! `docs/preferences.md`; a test keeps that list in step with the schema.
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 
 use effectcraft_color::Label;
@@ -21,6 +22,31 @@ use serde_json::{Map, Value, json};
 pub const PREFS_VERSION: u32 = 2;
 /// Settings file name in the config store.
 pub const PREFS_FILE: &str = "prefs.json";
+
+thread_local! {
+    /// True while an engine command runs on behalf of a script (which stays on this thread,
+    /// through nested commands such as `engine.batch`).
+    static SCRIPT_ORIGIN: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Run `f` as a script's engine command: `prefs.set` refuses to turn on file and network
+/// access for it, so a script can't grant itself that permission. The previous state comes
+/// back on return, error or unwind.
+pub fn with_script_origin<T>(f: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            SCRIPT_ORIGIN.with(|c| c.set(self.0));
+        }
+    }
+    let _restore = Restore(SCRIPT_ORIGIN.with(|c| c.replace(true)));
+    f()
+}
+
+/// Whether the running command was started by a script.
+pub(crate) fn script_origin() -> bool {
+    SCRIPT_ORIGIN.with(Cell::get)
+}
 
 /// Settings ▸ General ▸ Language: (label, `general.language` value).
 pub const LANGUAGES: &[(&str, &str)] =

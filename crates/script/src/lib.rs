@@ -30,7 +30,8 @@
 //!   and effects (`ADBE Transform Group`, `ADBE Position`, `ADBE Gaussian Blur 2`…).
 //! * **Security**: scripts can import/open/save projects and render, but `File` reads are limited
 //!   to the project's folder and writes (and the network) are off unless Preferences ▸ Scripting
-//!   & Expressions ▸ Allow Scripts to Write Files and Access Network is on.
+//!   & Expressions ▸ Allow Scripts to Write Files and Access Network is on. A script can't turn
+//!   that setting on itself (`prefs.set` refuses it, also inside `engine.batch`); the host must.
 //! * **ScriptUI** (`scriptui.js`, `ui.rs`): `Window` (dialog / palette / window), `Panel`,
 //!   `Group`, `Button`, `StaticText`, `EditText`, `Checkbox`, `RadioButton`, `Slider`,
 //!   `Progressbar`, `DropDownList`, `ListBox`, `TabbedPanel`/`Tab`, with `add()`, `orientation`,
