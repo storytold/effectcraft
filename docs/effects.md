@@ -3,11 +3,11 @@
 <!-- Generated from the effect registry (crates/effects/src/catalog.rs); do not edit by hand.
      Regenerate: UPDATE_DOCS=1 cargo test -p effectcraft-effects --lib effects_doc_is_current -->
 
-EffectCraft ships 306 effects with 3014 parameters in total, grouped into the same categories as the Effects & Presets panel. Every effect is our own implementation, written from public behaviour descriptions and standard image-processing literature. Parameter names, order, popup options, units, defaults and ranges follow the reference application so that projects, expressions and muscle memory carry over.
+EffectCraft ships 307 effects with 3021 parameters in total, grouped into the same categories as the Effects & Presets panel. Every effect is our own implementation, written from public behaviour descriptions and standard image-processing literature. Parameter names, order, popup options, units, defaults and ranges follow the reference application so that projects, expressions and muscle memory carry over.
 
 - **GPU**: 280 effects also run on the GPU compositor with identical results.
-- **32**: 306 effects process 32-bit float (HDR, overbright) pixels without clamping.
-- **Status**: 306 implemented in full, 0 partial (what is missing is listed).
+- **32**: 307 effects process 32-bit float (HDR, overbright) pixels without clamping.
+- **Status**: 307 implemented in full, 0 partial (what is missing is listed).
 
 Effects are addressed by id (`ec.<category>.<name>`) or display name in commands, scripts and the control channel, and every parameter by its id (`effects/#1/blurriness`).
 
@@ -153,6 +153,7 @@ Effects are addressed by id (`ec.<category>.<name>`) or display name in commands
 | Magnify | `ec.distort.magnify` | 10 | GPU | 32 | Implemented |
 | Mesh Warp | `ec.distort.meshwarp` | 3 | GPU | 32 | Implemented |
 | Mirror | `ec.distort.mirror` | 2 | GPU | 32 | Implemented |
+| Motion Transform | `ec.distort.motiontransformblur` | 7 | GPU | 32 | Implemented |
 | Offset | `ec.distort.offset` | 2 | GPU | 32 | Implemented |
 | Optics Compensation | `ec.distort.opticscompensation` | 6 | GPU | 32 | Implemented |
 | Polar Coordinates | `ec.distort.polar` | 2 | GPU | 32 | Implemented |
