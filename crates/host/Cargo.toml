@@ -10,6 +10,8 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+effectcraft-text-box = { path = "../../examples/plugins/text-box" }
+log = { workspace = true }
 effectcraft-engine = { workspace = true }
 effectcraft-project = { workspace = true }
 effectcraft-media = { workspace = true }

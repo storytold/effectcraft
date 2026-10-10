@@ -227,6 +227,16 @@ pub trait EffectPlugin: Send + Sync {
     /// Process `frame` in place. `time` is layer time in seconds. An error leaves the frame as
     /// it was (the error is logged once).
     fn render(&self, frame: &mut PluginFrame, params: &PluginParams, time: f64) -> Result<(), String>;
+    /// Rust host extension: return a new layer-space buffer, including expanded pixels.
+    /// Preserve `scale` and update `offset` when adding pixels on the left/top.
+    /// The default adapter preserves the v1 in-place contract (including WebAssembly).
+    /// An error leaves the original buffer unchanged.
+    fn render_buffer(&self, input: &Buf, params: &PluginParams, time: f64) -> Result<Buf, String> {
+        let mut output = input.clone();
+        let mut frame = PluginFrame { width: output.img.width, height: output.img.height, pixels: &mut output.img.data, scale: output.scale };
+        self.render(&mut frame, params, time)?;
+        Ok(output)
+    }
     /// Where the plug-in came from (a file path, `built-in`…), for listings.
     fn source(&self) -> String {
         "built-in".into()
@@ -337,12 +347,21 @@ fn run_slot(slot: usize, ctx: &EffectCtx, mut buf: Buf) -> Buf {
     let m = plugin.manifest();
     let flat = flatten(m, ctx, &buf);
     let params = PluginParams { manifest: m, flat: &flat };
-    let (width, height) = (buf.img.width, buf.img.height);
-    let before = buf.img.data.clone();
-    let mut frame = PluginFrame { width, height, pixels: &mut buf.img.data, scale: buf.scale };
-    if let Err(e) = plugin.render(&mut frame, &params, ctx.time) {
-        log::warn!("plug-in `{}`: {e}", m.id);
-        buf.img.data = before;
+    match plugin.render_buffer(&buf, &params, ctx.time) {
+        Ok(output) => {
+            let count = (output.img.width as usize).checked_mul(output.img.height as usize);
+            if count != Some(output.img.data.len())
+                || !output.scale.is_finite()
+                || output.scale <= 0.0
+                || output.scale != buf.scale
+                || output.offset.iter().any(|v| !v.is_finite())
+            {
+                log::warn!("plug-in `{}` returned an invalid buffer", m.id);
+            } else {
+                buf = output;
+            }
+        }
+        Err(e) => log::warn!("plug-in `{}`: {e}", m.id),
     }
     buf
 }
