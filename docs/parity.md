@@ -18,7 +18,7 @@ How close EffectCraft is to After Effects 2026, feature by feature, and how much
 | Unweighted | ≈ 98.4% (half-credit) / 99.6% (fractions) |
 | P0 / P1 / P2 | 100% / 98% / 90% (half-credit); 100% / 99.7% / 97.5% (fractions) |
 | Features done / partial / missing | 89 / 3 / 0 of 92 |
-| **Effects** | **306** effects, every one implemented in full ([effects.md](effects.md)); 280 run on the GPU |
+| **Effects** | **307** effects, every one implemented in full ([effects.md](effects.md)); 280 run on the GPU |
 | Disabled menu entries left | 1, on purpose: Import ▸ Vanishing Point (.vpe), whose format has no public specification |
 | Remaining work | ≈ 8.5 agent-hours at the pace measured so far (≈ 26 on the conservative audit scale); ≈ 3.5 without the learned-model items |
 | **Wall-clock estimate** | **≈ 2–3 hours** with five agents in parallel; ≈ 1 hour without the learned-model items |
