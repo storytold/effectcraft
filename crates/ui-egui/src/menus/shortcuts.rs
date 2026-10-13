@@ -181,7 +181,8 @@ pub(super) fn modifiers_at_start(ctx: &egui::Context) -> Option<egui::Modifiers>
 }
 
 /// The shortcut contexts active now (`effectcraft_engine::shortcuts::CONTEXT_SCOPES`): text
-/// being edited in the viewer, a paint tool or a camera tool active, a mask selected.
+/// being edited in the viewer, a paint tool or a camera tool active, a mask selected, a viewer
+/// panel focused.
 pub fn active_contexts(app: &EffectcraftApp) -> Vec<&'static str> {
     let mut out = vec![];
     if app.session.state.text_edit.is_some() {
@@ -194,6 +195,9 @@ pub fn active_contexts(app: &EffectcraftApp) -> Vec<&'static str> {
     }
     if app.session.selected_mask().is_some() {
         out.push("Mask");
+    }
+    if matches!(app.ui.focused, PanelKind::Composition | PanelKind::Layer | PanelKind::Footage | PanelKind::Viewer(_)) {
+        out.push("Viewer");
     }
     out
 }

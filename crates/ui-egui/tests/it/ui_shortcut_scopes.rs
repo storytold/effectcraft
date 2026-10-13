@@ -84,3 +84,22 @@ fn the_default_preset_has_no_two_commands_on_one_chord_in_one_scope() {
     let c = app.session.shortcuts().all_conflicts();
     assert!(c.is_empty(), "{c:?}");
 }
+
+#[test]
+fn new_folders_chord_opens_a_new_viewer_in_a_viewer_only() {
+    let folders = |app: &EffectcraftApp| app.session.project.items.values().filter(|i| matches!(i.kind, effectcraft_engine::project::ItemKind::Folder)).count();
+    let chord = Modifiers::COMMAND | Modifiers::ALT | Modifiers::SHIFT;
+    // The Timeline shares the Composition panel's shortcuts, but it isn't a viewer.
+    for focused in [PanelKind::Project, PanelKind::Timeline] {
+        let mut app = app();
+        let before = folders(&app);
+        app.ui.focused = focused;
+        press(&mut app, Key::N, chord);
+        assert_eq!(folders(&app), before + 1, "{focused:?}");
+    }
+    let mut app = app();
+    let before = folders(&app);
+    app.ui.focused = PanelKind::Composition;
+    press(&mut app, Key::N, chord);
+    assert_eq!(folders(&app), before, "in the Composition panel the chord is New Viewer");
+}
