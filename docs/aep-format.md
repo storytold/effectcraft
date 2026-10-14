@@ -300,7 +300,7 @@ out speed, at 40 out influence**). Scale key 1 of 305 (`n = 3`, in 0 / 33 %, out
 15 / 66) is `0,0, .33,.33, 15,15, .66,.66`. Component `i` uses slot `i` of each block (**V** for the
 block layout and the units, Scale speed in fractions per second and Mask Feather speed in pixels
 per second; **E** that different values per dimension sit in the slot of their dimension, because
-the tool that made the corpus applies one ease to all dimensions). `Keyframe::plain_ease_slots`
+the tool that made the corpus applies one ease to all dimensions; **V** since the exporter wrote three different eases for the three Scale dimensions and After Effects read the same three back, aep-export.md R13). `Keyframe::plain_ease_slots`
 returns the doubles as stored, `Keyframe::ease_component(i)` one component's `KeyEase`. Layout of
 the spatial template: `u32` at 8 (1 normally, 0 after the spatial auto-bezier and continuous
 switches were turned off together, 054), `f64` arc length of the segment to the next key at 16
@@ -544,7 +544,7 @@ establish is listed in the tables above with their case numbers; the tests do no
 **Properties and keyframes**
 
 - `tdb4` bytes 4, 8..11 (a descriptor per property class: **E**), 16 (0.0001: **E**), 24 (the composition pixel aspect on spatial properties: **E**), 32..48 (1.0: **E**), 56..67 (a class pair: **E**), 72..78 except 76 and 77 (**E**), 79 (**E**); `tdsb` bits other than 0x1 and 0x2 (group flags `0x401`, `0x11`, ...) and the `tdsb` 01 / 03 of the Vector Materials Group; `tdum` / `tduM` (**?**).
-- Per-dimension ease values: that dimension `i` uses slot `i` of each block (**E**; the tool that made the corpus applies one ease to all dimensions); a colour key with a non-zero ease (a colour has one ease entry; the sample reports 0 / 0); a keyed 2-D Point control (record size) and a spatial 2-D record.
+- Per-dimension ease values of a colour or a 2-D key (Scale is **V**, aep-export.md R13); a colour key with a non-zero ease (a colour has one ease entry; the sample reports 0 / 0); a keyed 2-D Point control (record size) and a spatial 2-D record.
 - The 8 stale bytes of the marker record and the bytes after the common fields of the mask path record (uninitialised memory).
 - Expressions in effect parameters, multi-line and non-ASCII expressions, the ExtendScript engine.
 - Time Remapping with extra keys, with a stretch, on a nested layer; whether keys are rescaled by a stretch.

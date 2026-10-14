@@ -125,6 +125,11 @@ verified field for something, the importer reports it instead of guessing. No so
 documentation of another `.aep` reader or converter was used; the evidence for every field is the
 generated corpus and its case numbers, not a claim about what was or was not seen elsewhere.
 
+## Export
+
+The other direction, File ▸ Export ▸ After Effects Project… (`file.exportAep`), is described in
+[aep-export.md](aep-export.md).
+
 ## Not done yet
 
 Effects, masks, shape and text layers, cameras, lights, markers, track mattes, time remapping,

@@ -1171,6 +1171,21 @@ name = "effectcraft-aep"
 version = "0.9.2"
 
 [[package]]
+name = "effectcraft-aep-export"
+version = "0.9.2"
+dependencies = [
+ "effectcraft-aep",
+ "effectcraft-aep-import",
+ "effectcraft-color",
+ "effectcraft-keyframe",
+ "effectcraft-project",
+ "effectcraft-time",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "effectcraft-aep-import"
 version = "0.9.2"
 dependencies = [
@@ -1248,6 +1263,7 @@ dependencies = [
 name = "effectcraft-engine"
 version = "0.9.2"
 dependencies = [
+ "effectcraft-aep-export",
  "effectcraft-aep-import",
  "effectcraft-color",
  "effectcraft-effects",
