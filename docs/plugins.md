@@ -161,6 +161,17 @@ It uses only After Effects' documented scripting API (`comp.selectedProperties`,
 `KeyframeEase`, `setInterpolationTypeAtKey`, `app.settings`, ScriptUI), so it is also a worked
 example of a keyframe tool.
 
+## Importing converted projects
+
+A project converter is a separate tool that moves a project from another application into
+EffectCraft with scripts on both sides: one describes the project as JSON, and an EffectCraft script
+rebuilds it. The EffectCraft side is installed as `Import Converted Project.jsx` in the Scripts
+folder. File ▸ Import ▸ Converted Project… (`file.importConvertedProject`) runs that script, which
+asks for the JSON (with `File.openDialog`), shows its options, imports the project, shows its
+progress with `Window.update()` and reports what didn't come across. The converter and its format
+live outside EffectCraft, so they change without EffectCraft changing; without the script
+installed, the menu item says what to install.
+
 ## Effect plug-ins
 
 EffectCraft loads third-party effects through a small, versioned plug-in API (**API version 1**).

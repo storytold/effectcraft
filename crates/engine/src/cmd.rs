@@ -48,6 +48,7 @@ pub mod paint;
 pub mod panels_cmds;
 pub(crate) mod path_nulls;
 mod paths;
+mod project_converter;
 mod project_items;
 pub(crate) mod prop;
 mod prop_groups;
@@ -241,6 +242,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(expr_tools::specs());
         v.extend(proxy::specs());
         v.extend(scripts::specs());
+        v.extend(project_converter::specs());
         v.extend(panels_cmds::specs());
         v.extend(footage_panel::specs());
         v.extend(autotrace::specs());
