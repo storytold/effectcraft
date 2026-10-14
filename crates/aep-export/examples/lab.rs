@@ -248,6 +248,19 @@ fn main() {
                 });
             }
         }
+        "x0" => {}
+        "x7" => {
+            // No layers, an empty folder, duplicate names, the Solids folder of the project.
+            let sf = p.add_item("Solids", Label::None, None, ItemKind::Folder);
+            p.add_item("Empty", Label::None, None, ItemKind::Folder);
+            let s = add_solid(&mut p, "Dup", 64, 64, [0.3, 0.3, 0.3], Some(sf));
+            add_solid(&mut p, "Dup", 32, 32, [0.6, 0.6, 0.6], Some(sf));
+            let a = add_comp(&mut p, "Dup", 640, 360, r25, 1.0, None);
+            add_comp(&mut p, "Dup", 640, 360, r25, 1.0, None);
+            add_comp(&mut p, "No layers", 640, 360, FrameRate::new(24, 1), 0.04, None);
+            add_layer(&mut p, a, "Dup", LayerSource::Solid { item: s }, (64, 64));
+            add_layer(&mut p, a, "Null", LayerSource::Null, (100, 100));
+        }
         "z1" => {
             let f = p.add_item("Rates", Label::Cyan, None, ItemKind::Folder);
             let long = "S".repeat(100);

@@ -104,7 +104,7 @@ wrote was accepted as it is.
 | R6 | A composition item uses its own id plus the 11 ids after it for the built-in view layers (`DLay`, 6 x `SLay`, 3 x `CLay`, `SecL`, `ldta@0`); layer ids, item ids and the hidden null solids come from one counter; `head@12` is the next free id. | `x1`-`z1` |
 | R7 | **Every property's `tdb4@12` follows the composition's time scale, including those of the view layers.** | `y1`, `z1` (AE re-save identical) |
 | R8 | Items are stored in the order the project panel sorts them (natural order of the name, digit runs as numbers, case-insensitive). A composition item is followed by `FEE ` and the 7 f-records, a footage item by the 7 f-records, a folder by nothing. | `ref-folders`; AE accepted the same order in `x3`, `z1` |
-| R9 | The `Solids` folder (id 0x19, named by `sfnm/sfid`) holds root-level solids and the hidden solids of nulls; solids with a folder keep it. | `ref1`, `x3`, `z1` |
+| R9 | The `Solids` folder (id 0x19, named by `sfnm/sfid`) holds root-level solids and the hidden solids of nulls; solids with a folder keep it. A root folder named `Solids` in the project **is** that folder (one folder, not two). It is written even when empty (an empty project opens). | `ref1`, `x0`, `x3`, `x7`, `z1` |
 | R10 | A **null layer** is an ordinary layer with `ldta@38` bit `0x80` whose source is a hidden 100 x 100 white solid; its Transform defaults are those of a 100 x 100 source. | `ref1`, `x3`, `z1` |
 | R11 | Transform properties exist in the file only at a non-default value; they sit in the order Anchor Point, Position, X/Y Position, Scale, Orientation, X/Y/Z Rotation, Opacity, Environment (the exporter inserts into that order). | `x4`, `x5` |
 | R12 | A keyed property is the keyed prototype with `lhd3` words 2, 3, 4, 7 and `ldat` rewritten (3, 5 and 20 keys); records are 128 bytes (Position / Anchor Point spatial, Scale plain), 48 bytes (Rotation, Opacity). | `x5`, `y2`, `y3` |
@@ -139,6 +139,8 @@ AE re-save of the same file differed.
 | `y1`, `y1b` | adjustment, locked / shy / solo, hidden, guide, blends, label, draft, parents, timing, bg, pixel aspect 10/11, shutter, display start, work area, 80 character and Japanese names | everything read back; `y1` exposed R5 | identical (only noise) |
 | `y2` | 5 Position keys (labels, manual tangents, roving), per-dimension Scale ease, Anchor keys, hold, disabled expression, 24 fps | all read back | only `ldat` arc lengths and the roving time |
 | `y3` | 300 layers x 20 keys, 50 fps | 300 layers | not run |
+| `x0` | empty project | opens, the `Solids` folder only | not run |
+| `x7` | no layers, an empty folder, duplicate names, a project folder named `Solids` with two solids, a one-frame composition | 8 items, one `Solids` folder with the two solids and the hidden null solid, duplicate names kept | not run |
 | `z1` | 6 rates, 6 compositions, folder, 100 character and umlaut solid names, nulls, keys, expressions | 6 rates, durations, 16 items | identical (only noise) |
 
 ## How fidelity is checked in this repository

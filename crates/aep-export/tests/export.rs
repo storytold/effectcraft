@@ -412,3 +412,21 @@ fn the_local_data_search_finds_what_it_looks_for() {
     assert_eq!(email_like("by jane.doe@example.org."), vec!["jane.doe@example.org".to_string()]);
     assert!(email_like("@@ a@b x@.org y@host").is_empty());
 }
+
+#[test]
+fn a_root_folder_named_solids_is_the_solids_folder() {
+    let mut p = Project::default();
+    let f = p.add_item("Solids", Label::None, None, ItemKind::Folder);
+    let c = add_comp(&mut p, "C", 100, 100, FrameRate::new(25, 1), 1.0, None);
+    let s = add_solid(&mut p, "Orange", 50, 50, [1.0, 0.5, 0.0], Some(f));
+    add_layer(&mut p, c, "Orange", LayerSource::Solid { item: s }, (50, 50));
+    add_layer(&mut p, c, "N", LayerSource::Null, (100, 100));
+    let r = export_all(&p);
+    let file = parse(&r.bytes).expect("parse");
+    let view = effectcraft_aep::Project::new(&file).expect("project");
+    let folders: Vec<_> = view.all_items().into_iter().filter(|i| i.kind() == Some(AepKind::Folder)).collect();
+    assert_eq!(folders.len(), 1, "one Solids folder, not two");
+    let kids: Vec<_> = folders[0].children().filter_map(|k| k.footage()).collect();
+    assert_eq!(kids.len(), 2, "the solid and the hidden null solid");
+    assert!(kids.iter().all(|k| k.is_solid));
+}

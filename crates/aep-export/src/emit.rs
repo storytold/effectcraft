@@ -41,30 +41,54 @@ struct Cx<'t> {
     /// Hidden solid items of null layers, written into the `Solids` folder.
     extra_solids: Vec<(String, Chunk<'static>)>,
     guid: u64,
+    /// A root folder named `Solids` in the project is After Effects' own `Solids` folder (id 0x19).
+    special: Option<ItemId>,
+    special_slot: Option<(Chunk<'static>, Vec<Sorted>)>,
 }
+
+/// A sortable group of chunks: name, tie-break key, chunks.
+type Sorted = (String, u64, Vec<Chunk<'static>>);
 
 pub(crate) fn emit(plan: &ProjectPlan, extra: &[u8]) -> R<Vec<u8>> {
     let t = Template::load()?;
-    let mut cx = Cx { t: &t, ids: Ids { next: FIRST_ID }, solid_ids: HashMap::new(), extra_solids: Vec::new(), guid: 0x9e37_79b9_7f4a_7c15 };
+    let special = plan.root.iter().find(|e| e.name == "Solids" && matches!(e.plan, ItemPlan::Folder(_))).map(|e| e.ec);
+    let mut cx = Cx {
+        t: &t,
+        ids: Ids { next: FIRST_ID },
+        solid_ids: HashMap::new(),
+        extra_solids: Vec::new(),
+        guid: 0x9e37_79b9_7f4a_7c15,
+        special,
+        special_slot: None,
+    };
     let mut ids_by_entry: HashMap<ItemId, u32> = HashMap::new();
     assign_ids(&plan.root, &mut cx, &mut ids_by_entry)?;
 
-    let mut root: Vec<(String, u64, Vec<Chunk<'static>>)> = Vec::new();
+    let mut root: Vec<Sorted> = Vec::new();
     build_level(&plan.root, &mut cx, &ids_by_entry, &mut |name, key, chunks| root.push((name, key, chunks)))?;
     // The Solids folder: root-level solids and the hidden solids of null layers.
-    let mut solids_children: Vec<(String, u64, Vec<Chunk<'static>>)> = Vec::new();
+    let mut solids_children: Vec<Sorted> = Vec::new();
     for (name, key, chunks) in root.iter().filter(|(_, k, _)| *k & ROOT_SOLID != 0) {
         solids_children.push((name.clone(), *key, chunks.clone()));
     }
-    root.retain(|(_, k, _)| *k & ROOT_SOLID == 0);
+    root.retain(|(_, k, c)| *k & ROOT_SOLID == 0 && !c.is_empty());
     for (i, (name, chunk)) in cx.extra_solids.iter().enumerate() {
         let mut v = vec![chunk.clone()];
         v.extend(cx.t.fset.iter().cloned());
         solids_children.push((name.clone(), i as u64, v));
     }
+    let mut folder = match cx.special_slot.take() {
+        Some((item, inner)) => {
+            solids_children.extend(inner);
+            item
+        }
+        None => {
+            let mut f = cx.t.folder_item.clone();
+            set_item_header(&mut f, SOLIDS_FOLDER_ID, 2, "Solids")?;
+            f
+        }
+    };
     sort_named(&mut solids_children);
-    let mut folder = cx.t.folder_item.clone();
-    set_item_header(&mut folder, SOLIDS_FOLDER_ID, 2, "Solids")?;
     kids_mut(list_mut(&mut folder, b"Sfdr")?)?.extend(solids_children.into_iter().flat_map(|(_, _, c)| c));
     root.push(("Solids".to_string(), 0, vec![folder]));
     sort_named(&mut root);
@@ -88,7 +112,7 @@ pub(crate) fn emit(plan: &ProjectPlan, extra: &[u8]) -> R<Vec<u8>> {
 /// Marks a root entry that goes into the `Solids` folder.
 const ROOT_SOLID: u64 = 1 << 63;
 
-fn sort_named(v: &mut [(String, u64, Vec<Chunk<'static>>)]) {
+fn sort_named(v: &mut [Sorted]) {
     v.sort_by(|a, b| natural_cmp(&a.0, &b.0).then(a.1.cmp(&b.1)));
 }
 
@@ -112,7 +136,7 @@ fn assign_ids(entries: &[Entry], cx: &mut Cx<'_>, map: &mut HashMap<ItemId, u32>
     // Iterative to bound the stack by the folder depth the plan already limits.
     let mut stack: Vec<&Entry> = entries.iter().rev().collect();
     while let Some(e) = stack.pop() {
-        let id = cx.ids.alloc()?;
+        let id = if Some(e.ec) == cx.special { SOLIDS_FOLDER_ID } else { cx.ids.alloc()? };
         match &e.plan {
             ItemPlan::Comp(_) => {
                 for _ in 0..VIEW_LAYERS {
@@ -147,8 +171,14 @@ fn build_level_depth(entries: &[Entry], cx: &mut Cx<'_>, ids: &HashMap<ItemId, u
             ItemPlan::Folder(kids) => {
                 let mut item = cx.t.folder_item.clone();
                 set_item_header(&mut item, id, e.label, &e.name)?;
-                let mut inner: Vec<(String, u64, Vec<Chunk<'static>>)> = Vec::new();
+                let mut inner: Vec<Sorted> = Vec::new();
                 build_level_depth(kids, cx, ids, &mut |n, k, c| inner.push((n, k, c)), false, depth + 1)?;
+                if root && Some(e.ec) == cx.special {
+                    // Completed once the hidden solids of null layers are known.
+                    cx.special_slot = Some((item, inner));
+                    sink(e.name.clone(), e.ec.0, Vec::new());
+                    continue;
+                }
                 sort_named(&mut inner);
                 kids_mut(list_mut(&mut item, b"Sfdr")?)?.extend(inner.into_iter().flat_map(|(_, _, c)| c));
                 sink(e.name.clone(), e.ec.0, vec![item]);
