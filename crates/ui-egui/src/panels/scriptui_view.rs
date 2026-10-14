@@ -168,13 +168,13 @@ fn draw_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, origin: egui::Pos2, 
         }
         WidgetKind::Checkbox => {
             let mut v = w.checked;
-            let r = ui.add_enabled_ui(w.enabled, |ui| ui.put(snug(rect, &w.text), egui::Checkbox::new(&mut v, &w.text))).inner;
+            let r = put_left(ui, rect, w.enabled, egui::Checkbox::new(&mut v, &w.text));
             if tip(r).clicked() {
                 acts.push(Act::Click(win, w.id));
             }
         }
         WidgetKind::RadioButton => {
-            let r = ui.add_enabled_ui(w.enabled, |ui| ui.put(snug(rect, &w.text), egui::RadioButton::new(w.checked, &w.text))).inner;
+            let r = put_left(ui, rect, w.enabled, egui::RadioButton::new(w.checked, &w.text));
             if tip(r).clicked() && !w.checked {
                 acts.push(Act::Click(win, w.id));
             }
@@ -486,10 +486,10 @@ fn mouse_events(ui: &egui::Ui, origin: egui::Pos2, area: Rect, win: u32, root: &
     ui.data_mut(|d| d.insert_temp(id, st));
 }
 
-/// Checkboxes and radio buttons sit at the left of their (possibly filled) bounds.
-fn snug(r: Rect, text: &str) -> Rect {
-    let w = (text.chars().count() as f32 * 7.0 + 26.0).min(r.width());
-    Rect::from_min_size(r.min, vec2(w, r.height()))
+/// Checkboxes and radio buttons sit at the left of their (possibly filled) bounds, however wide
+/// their label draws (`ui.put` would centre them there).
+fn put_left(ui: &mut egui::Ui, r: Rect, enabled: bool, widget: impl egui::Widget) -> egui::Response {
+    ui.scope_builder(UiBuilder::new().max_rect(r).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| ui.add_enabled(enabled, widget)).inner
 }
 
 /// Runs the actions collected while drawing a ScriptUI window as `scriptui.*` commands, in order.
