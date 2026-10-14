@@ -141,6 +141,7 @@ AE re-save of the same file differed.
 | `y3` | 300 layers x 20 keys, 50 fps | 300 layers | not run |
 | `x0` | empty project | opens, the `Solids` folder only | not run |
 | `x7` | no layers, an empty folder, duplicate names, a project folder named `Solids` with two solids, a one-frame composition | 8 items, one `Solids` folder with the two solids and the hidden null solid, duplicate names kept | not run |
+| `cli1` | written by `effectcraft-cli run --empty comp.new layer.newSolid layer.newNull prop.addKey ... file.exportAep` (the real command path) | solid + null layer, Position and Rotation keys, expression `wiggle(1,20)` | not run |
 | `z1` | 6 rates, 6 compositions, folder, 100 character and umlaut solid names, nulls, keys, expressions | 6 rates, durations, 16 items | identical (only noise) |
 
 ## How fidelity is checked in this repository
