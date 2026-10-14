@@ -1363,4 +1363,21 @@ fn time_to_frames_preserves_coercion_and_small_durations() {
     }
 }
 
+/// A layer is a property group too, as in After Effects: `thisLayer("transform")`, another
+/// layer's `("effects")("Slider Control")` or `(1)`, as the pick whip writes them with Compact
+/// English off (they failed: "not a callable function"). It is still a layer.
+#[test]
+fn layers_are_callable_property_groups() {
+    let f = fx();
+    assert_close!(f.num("thisLayer(\"transform\")(\"opacity\")", 0.0), 100.0);
+    assert_close!(f.num("thisComp.layer(\"A\")(\"effects\")(\"ec.control.slider\")(\"slider\")", 0.0), 42.0);
+    assert_close!(f.num("thisComp.layer(\"A\")(\"effects\")(\"Slider Control\")(1)", 0.0), 42.0);
+    assert_close!(f.num("thisComp.layer(1)(\"effects\")(1)(1)", 0.0), 42.0);
+    // Its own name, index and methods, and a layer as the result still reads as its index.
+    assert_close!(f.num("thisLayer.name == \"A\" ? thisComp.layer(\"B\").index : 0", 0.0), 2.0);
+    assert_close!(f.num("thisComp.layer(\"B\")", 0.0), 2.0);
+    assert_close!(f.num("thisComp.layer(thisComp.layer(\"B\"), -1).index", 0.0), 1.0);
+    assert!(f.err("thisLayer(\"nope\")").contains("no property"), "{}", f.err("thisLayer(\"nope\")"));
+}
+
 mod property_group;

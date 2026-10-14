@@ -44,7 +44,7 @@ function __finish(r) {
 
 function __result(r) {
   r = __v(r);
-  if (r !== null && typeof r === 'object' && r.__isLayer) return r.index;
+  if (r !== null && r !== undefined && r.__isLayer) return r.index;
   if (r !== null && typeof r === 'object' && r.__isTextStyle) return r.__out();
   // `[temp, temp]` where temp is a property (pick-whip 1D → 2D): read the values here, while
   // host requests can still be answered and the script re-run.
@@ -464,7 +464,7 @@ Comp.prototype = {
     __err('Composition "' + this.name + '" has no active camera');
   },
   layer: function (a, rel) {
-    if (a !== null && typeof a === 'object' && a.__isLayer) return this.layer(a.index + (rel || 0));
+    if (a !== null && a !== undefined && a.__isLayer) return this.layer(a.index + (rel || 0));
     var id = __h(__LAYER, this.__c, a);
     if (id === null) __err(typeof a === 'string' ? 'Layer named "' + a + '" does not exist' : 'Layer index ' + a + ' out of range');
     return new Layer(this.__c, id);
@@ -542,7 +542,17 @@ var thisProject = {
 
 // Layer -----------------------------------------------------------------------------------------
 
-function Layer(c, l) { this.__c = c; this.__l = l; this.__i = null; }
+// A layer is a property group too, as in After Effects: `thisLayer("transform")`, another layer's
+// `("effects")("Slider Control")`, `thisLayer(1)` (what the pick whip writes with Compact English
+// off). Callable like a group (`__mkGroup`), with the Layer methods.
+function Layer(c, l) {
+  var f = function (k) { return f.__group(k); };
+  delete f.name;
+  delete f.length;
+  Object.setPrototypeOf(f, Layer.prototype);
+  f.__c = c; f.__l = l; f.__i = null;
+  return f;
+}
 
 function __m3(m, p) {
   var x = p[0] || 0, y = p[1] || 0;
@@ -846,8 +856,9 @@ var __propHandler = {
     var v = t.value;
     if (v === null || v === undefined) return undefined;
     var x = v[k];
-    // Property groups are callable proxies: hand them over as they are, not bound like methods (#809).
-    if (x !== null && x !== undefined && x.__isGroup) return x;
+    // Property groups and layers are callable: hand them over as they are, not bound like methods
+    // (#809).
+    if (x !== null && x !== undefined && (x.__isGroup || x.__isLayer)) return x;
     return typeof x === 'function' ? x.bind(v) : x;
   },
 };
