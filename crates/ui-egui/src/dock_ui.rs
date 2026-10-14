@@ -341,7 +341,7 @@ impl EffectcraftApp {
             let mv = ui.interact(strip, id.with("strip"), Sense::drag());
             self.auto.add(&format!("panel.float.{i}.move"), strip, "Move floating panel");
             let mut nr = r;
-            if mv.dragged() {
+            if mv.dragged_by(egui::PointerButton::Primary) {
                 nr = nr.translate(mv.drag_delta());
             }
             let g = Group {
@@ -624,7 +624,7 @@ fn floating_resize_delta(ui: &mut egui::Ui, response: &egui::Response) -> egui::
     if response.drag_started() {
         response.request_focus();
     }
-    let mut delta = if response.dragged() { response.drag_delta() } else { egui::Vec2::ZERO };
+    let mut delta = if response.dragged_by(egui::PointerButton::Primary) { response.drag_delta() } else { egui::Vec2::ZERO };
     if response.has_focus() {
         ui.memory_mut(|memory| {
             memory.set_focus_lock_filter(response.id, egui::EventFilter { horizontal_arrows: true, vertical_arrows: true, ..Default::default() })

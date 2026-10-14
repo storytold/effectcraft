@@ -86,7 +86,7 @@ pub fn viewer_hook(
                     ctx.set_cursor_icon(egui::CursorIcon::Move);
                     resp.clone().on_hover_text(format!("{}: {}", g.name, pr.name));
                 }
-                if resp.dragged()
+                if resp.dragged_by(egui::PointerButton::Primary)
                     && let Some(pos) = resp.interact_pointer_pos()
                     && let Some(lp) = fw::comp_to_layer(&pm, map.to_comp(pos))
                 {

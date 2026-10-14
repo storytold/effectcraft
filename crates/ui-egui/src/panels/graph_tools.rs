@@ -139,7 +139,7 @@ pub(crate) fn transform_box(
     if (st.handle == 8) == handles {
         return;
     }
-    if resp.dragged()
+    if resp.dragged_by(egui::PointerButton::Primary)
         && let Some(pt) = resp.interact_pointer_pos()
     {
         let cur = data(pt);

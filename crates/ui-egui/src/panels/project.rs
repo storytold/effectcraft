@@ -1043,7 +1043,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
     let box_id = egui::Id::new("proj-marquee");
     if let (Some(start), Some(end)) = (ctx.input(|i| i.pointer.press_origin()), empty.interact_pointer_pos())
-        && empty.dragged()
+        && empty.dragged_by(egui::PointerButton::Primary)
     {
         let b = Rect::from_two_pos(start, end).intersect(list);
         lp.rect_filled(b, 0.0, t.accent.gamma_multiply(0.12));

@@ -587,7 +587,7 @@ fn slider_row(
     p.text(pos2(tr.max.x, tr.max.y + 4.0), Align2::RIGHT_TOP, format!("{slider_max:.dec$}"), Tokens::ui(10.5), t.text_dim);
     let sresp = ui.interact(tr.expand2(vec2(4.0, 6.0)), egui::Id::new(("ec-slider", uid)), Sense::click_and_drag());
     app.auto.add(&format!("effectControls.prop.{uid}.slider"), tr, &prop.name);
-    if (sresp.dragged() || sresp.clicked())
+    if (sresp.dragged_by(egui::PointerButton::Primary) || sresp.clicked())
         && let Some(pt) = sresp.interact_pointer_pos()
     {
         let f = ((pt.x - tr.min.x) / tr.width()).clamp(0.0, 1.0) as f64;
@@ -1643,7 +1643,7 @@ pub fn viewer_hook(
                         ctx.set_cursor_icon(egui::CursorIcon::Move);
                         resp.clone().on_hover_text(format!("{}: {}", crate::i18n::effects::group(&g.match_id, &g.name), pr.name));
                     }
-                    if resp.dragged()
+                    if resp.dragged_by(egui::PointerButton::Primary)
                         && let Some(pos) = resp.interact_pointer_pos()
                         && let Some(lp) = fw::comp_to_layer(&fm, map.to_comp(pos))
                     {

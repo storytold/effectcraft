@@ -490,7 +490,7 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
             {
                 ctx.data_mut(|dd| dd.insert_temp(key_grab_id(), KeyGrab { press: o, t: k.t }));
             }
-            if kresp.dragged()
+            if kresp.dragged_by(egui::PointerButton::Primary)
                 && let Some(pt) = kresp.interact_pointer_pos()
                 && let Some(g) = ctx.data(|dd| dd.get_temp::<KeyGrab>(key_grab_id()))
             {
@@ -520,7 +520,7 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
     if bg.clicked() {
         actions.push(("keys.select".into(), json!({"keys": []})));
     }
-    if bg.dragged()
+    if bg.dragged_by(egui::PointerButton::Primary)
         && let (Some(o), Some(cur)) = (ctx.input(|i| i.pointer.press_origin()), bg.interact_pointer_pos())
     {
         let br = Rect::from_two_pos(o, cur);

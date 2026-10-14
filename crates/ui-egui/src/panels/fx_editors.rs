@@ -353,7 +353,7 @@ fn huesat_curves(
             }
         };
         ui.data_mut(|d| d.insert_temp(drag_id, i));
-    } else if resp.dragged()
+    } else if resp.dragged_by(egui::PointerButton::Primary)
         && let (Some(i), Some(pt)) = (dragging, resp.interact_pointer_pos())
     {
         let q = to_g(pt);
@@ -523,7 +523,7 @@ fn colorama_wheel(
             d.insert_temp(drag_id, i);
             d.insert_temp(sel_id, i);
         });
-    } else if resp.dragged()
+    } else if resp.dragged_by(egui::PointerButton::Primary)
         && let (Some(i), Some(q)) = (dragging, resp.interact_pointer_pos())
         && i < pal.stops.len()
     {
@@ -994,7 +994,7 @@ pub fn reshape_overlay(
             let hr = Rect::from_center_size(s, vec2(12.0, 12.0));
             let id = egui::Id::new(("reshape-pt", g.uid, i, end));
             let resp = ui.interact(hr, id, Sense::drag());
-            let hot = resp.hovered() || resp.dragged();
+            let hot = resp.hovered() || resp.dragged_by(egui::PointerButton::Primary);
             painter.rect_filled(Rect::from_center_size(s, vec2(7.0, 7.0)), 0.0, if hot { Color32::WHITE } else { col });
             painter.rect_stroke(Rect::from_center_size(s, vec2(7.0, 7.0)), 0.0, Stroke::new(1.0, Color32::BLACK), StrokeKind::Outside);
             let which = if end == 0 { "source" } else { "dest" };
@@ -1002,7 +1002,7 @@ pub fn reshape_overlay(
             if hot {
                 ctx.set_cursor_icon(egui::CursorIcon::Move);
             }
-            if resp.dragged()
+            if resp.dragged_by(egui::PointerButton::Primary)
                 && let Some(pos) = resp.interact_pointer_pos()
                 && let Some(lp) = fw::comp_to_layer(m, map.to_comp(pos))
             {
@@ -1088,7 +1088,7 @@ pub fn mesh_warp_overlay(
         let hr = Rect::from_center_size(*s, vec2(10.0, 10.0));
         let id = egui::Id::new(("mesh-warp-vertex", g.uid, k));
         let resp = ui.interact(hr, id, Sense::drag());
-        let hot = resp.hovered() || resp.dragged();
+        let hot = resp.hovered() || resp.dragged_by(egui::PointerButton::Primary);
         let dot = Rect::from_center_size(*s, vec2(5.0, 5.0));
         painter.rect_filled(dot, 0.0, if hot { accent } else { Color32::WHITE });
         painter.rect_stroke(dot, 0.0, Stroke::new(1.0, Color32::BLACK), StrokeKind::Outside);
@@ -1097,7 +1097,7 @@ pub fn mesh_warp_overlay(
         if hot {
             ctx.set_cursor_icon(egui::CursorIcon::Move);
         }
-        if resp.dragged()
+        if resp.dragged_by(egui::PointerButton::Primary)
             && let Some(pos) = resp.interact_pointer_pos()
             && let Some(lp) = fw::comp_to_layer(fm, map.to_comp(pos))
         {

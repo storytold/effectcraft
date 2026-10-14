@@ -332,7 +332,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                 if resp.clicked() || resp.drag_started() {
                     app.dialog_state.gradient.selected = Some((track, id));
                 }
-                if resp.dragged()
+                if resp.dragged_by(egui::PointerButton::Primary)
                     && let Some(p) = resp.interact_pointer_pos()
                 {
                     app.dialog_state.gradient.move_to(track, id, pos_of(p.x));

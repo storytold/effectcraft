@@ -1494,7 +1494,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
     app.auto.add("timeline.timecode", tc_rect, &tc);
     super::toggle_time_display(app, &tc_resp);
-    if tc_resp.dragged() {
+    if tc_resp.dragged_by(egui::PointerButton::Primary) {
         let d = tc_resp.drag_delta().x as f64;
         let f = fr.frame_at(time) + (d * 0.5).round() as i64;
         let _ = app.session.execute("time.set", json!({"frame": f.max(0)}));
@@ -1564,7 +1564,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     // visible span (pulled in: zoomed in; stretched to the whole track: the whole comp).
     let nresp = ui.interact(nav, egui::Id::new("tl-nav"), Sense::drag());
     app.auto.add("timeline.navigator", nav, "Time navigator");
-    if nresp.dragged() {
+    if nresp.dragged_by(egui::PointerButton::Primary) {
         let d = nresp.drag_delta().x as f64 / nav.width() as f64 * comp.duration.seconds();
         app.ui.timeline.start = (app.ui.timeline.start + d).clamp(0.0, comp.duration.seconds());
         if app.ui.timeline.pps.is_none() {
@@ -1613,7 +1613,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     if bresp.drag_started() {
         ctx.data_mut(|d| d.insert_temp(bar_start, wa0));
     }
-    if bresp.dragged()
+    if bresp.dragged_by(egui::PointerButton::Primary)
         && let (Some(a0), Some(d)) = (ctx.data(|d| d.get_temp::<f64>(bar_start)), bresp.total_drag_delta())
     {
         let len = wa1 - wa0;
@@ -1634,7 +1634,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         p.rect_filled(handle, 2.0, t.accent);
         let resp = ui.interact(hr, egui::Id::new(("wa", set)), Sense::drag());
         app.auto.add(&format!("timeline.workArea.{set}"), hr, set);
-        if resp.dragged()
+        if resp.dragged_by(egui::PointerButton::Primary)
             && let Some(pt) = resp.interact_pointer_pos()
         {
             let mut secs = tm.t(pt.x).max(0.0);
@@ -1734,7 +1734,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         // Zoomed in, a scrub held past either end of the ruler scrolls the timeline that way
         // (faster the further), with the CTI at the edge (After Effects).
         let mut tm = tm;
-        if rresp.dragged() && app.ui.timeline.pps.is_some() {
+        if rresp.dragged_by(egui::PointerButton::Primary) && app.ui.timeline.pps.is_some() {
             let speed = edge_scroll_speed_x(tm.x0, graph_x1, x);
             if speed != 0.0 {
                 let dt = f64::from(ui.input(|i| i.stable_dt).clamp(0.0, 0.1));
@@ -1768,7 +1768,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             }
         }
         // Ctrl/Cmd-drag scrubs the audio too (After Effects).
-        if rresp.dragged()
+        if rresp.dragged_by(egui::PointerButton::Primary)
             && ui.input(|i| i.modifiers.command)
             && let Some(cid) = app.session.active_comp_id()
         {
@@ -2987,7 +2987,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         actions.push(("layer.select".into(), json!({"layers": []})));
     }
     if let (Some(start), Some(end)) = (ctx.input(|i| i.pointer.press_origin()), outline_empty.interact_pointer_pos())
-        && outline_empty.dragged()
+        && outline_empty.dragged_by(egui::PointerButton::Primary)
     {
         let box_rect = Rect::from_two_pos(start, end).intersect(outline_rect);
         lp.rect_filled(box_rect, 0.0, t.accent.gamma_multiply(0.12));
@@ -3080,7 +3080,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         actions.push(("layer.select".into(), json!({"layers": []})));
     }
     if let (true, Some(origin), Some(cur)) =
-        (empty.dragged(), empty.interact_pointer_pos().and_then(|_| ctx.input(|i| i.pointer.press_origin())), empty.interact_pointer_pos())
+        (empty.dragged_by(egui::PointerButton::Primary), empty.interact_pointer_pos().and_then(|_| ctx.input(|i| i.pointer.press_origin())), empty.interact_pointer_pos())
     {
         let br = Rect::from_two_pos(origin, cur);
         gp.rect_filled(br, 0.0, t.accent.gamma_multiply(0.12));

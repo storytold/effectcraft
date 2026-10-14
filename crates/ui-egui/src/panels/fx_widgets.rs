@@ -109,7 +109,7 @@ pub fn angle_dial(ui: &mut egui::Ui, rect: Rect, value: f64, id: egui::Id, t: &T
                 let (rev, _) = split_angle(value);
                 out = Some(rev as f64 * 360.0 + now.rem_euclid(360.0));
             }
-        } else if resp.dragged() {
+        } else if resp.dragged_by(egui::PointerButton::Primary) {
             let prev: f64 = ui.data(|d| d.get_temp(prev_id)).unwrap_or(now);
             let mut nv = value + wrap_delta(prev, now);
             if ui.input(|i| i.modifiers.shift) {
@@ -377,7 +377,7 @@ pub fn curves_graph(ui: &mut egui::Ui, rect: Rect, pts: &CurvePoints, channel: u
         if resp.drag_started() {
             ui.data_mut(|d| d.insert_temp(pencil_id, (0..=64).map(|i| pts.eval(i as f32 / 64.0)).collect::<Vec<f32>>()));
         }
-        if (resp.dragged() || resp.clicked())
+        if (resp.dragged_by(egui::PointerButton::Primary) || resp.clicked())
             && let Some(pt) = resp.interact_pointer_pos()
         {
             let mut samples: Vec<f32> = ui.data(|d| d.get_temp(pencil_id)).unwrap_or_else(|| (0..=64).map(|i| pts.eval(i as f32 / 64.0)).collect());
@@ -407,7 +407,7 @@ pub fn curves_graph(ui: &mut egui::Ui, rect: Rect, pts: &CurvePoints, channel: u
             }
         };
         ui.data_mut(|d| d.insert_temp(drag_id, i));
-    } else if resp.dragged()
+    } else if resp.dragged_by(egui::PointerButton::Primary)
         && let (Some(i), Some(pt)) = (dragging, resp.interact_pointer_pos())
     {
         let g = to_g(pt);
@@ -532,9 +532,9 @@ pub fn level_handle(ui: &mut egui::Ui, track: Rect, value: f64, fill: Color32, i
     let x = track.min.x + track.width() * value.clamp(0.0, 1.0) as f32;
     let hr = Rect::from_center_size(pos2(x, track.min.y + 4.0), vec2(12.0, 12.0));
     let resp = ui.interact(hr, id, Sense::drag());
-    triangle_marker(ui.painter(), x, track.min.y, if resp.hovered() || resp.dragged() { t.accent } else { fill }, t);
+    triangle_marker(ui.painter(), x, track.min.y, if resp.hovered() || resp.dragged_by(egui::PointerButton::Primary) { t.accent } else { fill }, t);
     let mut out = None;
-    if resp.dragged()
+    if resp.dragged_by(egui::PointerButton::Primary)
         && let Some(pt) = resp.interact_pointer_pos()
     {
         out = Some((((pt.x - track.min.x) / track.width()) as f64).clamp(0.0, 1.0));

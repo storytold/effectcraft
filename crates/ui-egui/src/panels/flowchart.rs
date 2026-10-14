@@ -283,7 +283,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let pos = layout(&g, o.vertical);
     let origin = body.min + vec2(24.0 + o.pan[0], 24.0 + o.pan[1]);
     let bg = ui.interact(body, egui::Id::new("flow-bg"), Sense::click_and_drag());
-    if bg.dragged() {
+    if bg.dragged_by(egui::PointerButton::Primary) {
         let d = bg.drag_delta();
         app.ui.flowchart.pan[0] += d.x;
         app.ui.flowchart.pan[1] += d.y;

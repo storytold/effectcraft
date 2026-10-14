@@ -1363,7 +1363,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     } else {
         app.pointer_comp = None;
     }
-    app.ui.viewer.interacting = resp.dragged();
+    app.ui.viewer.interacting = resp.dragged_by(egui::PointerButton::Primary);
     let mods = ui.input(|i| i.modifiers);
     let space_pan = super::space_hand(&ctx);
     // Pen tool: each press places a vertex (dragging pulls Bezier tangents); pressing on the

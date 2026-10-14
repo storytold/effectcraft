@@ -186,7 +186,7 @@ fn draw_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, origin: egui::Pos2, 
                 })
                 .inner;
             let r = tip(r);
-            if r.dragged() {
+            if r.dragged_by(egui::PointerButton::Primary) {
                 // Live: each step of the drag reaches the script (onChanging).
                 if r.changed() {
                     acts.push(Act::Changing(win, w.id, json!(v)));

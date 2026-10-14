@@ -295,11 +295,11 @@ pub fn span_bar(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, 
     let handle: i32 = ui.ctx().data(|m| m.get_temp(hid)).unwrap_or(0);
     if let Some(pos) = resp.interact_pointer_pos() {
         let f = f_of(pos.x);
-        if handle == 0 && (resp.clicked() || resp.dragged()) {
+        if handle == 0 && (resp.clicked() || resp.dragged_by(egui::PointerButton::Primary)) {
             let t = layer.comp_time(comp.frame_rate.tick_of(f));
             let _ = app.session.execute("time.set", json!({"time": t.seconds()}));
         }
-        if handle != 0 && resp.dragged() {
+        if handle != 0 && resp.dragged_by(egui::PointerButton::Primary) {
             p.line_segment([pos2(pos.x, track.min.y), pos2(pos.x, track.max.y)], Stroke::new(2.0, Color32::from_rgb(240, 200, 40)));
         }
         if handle != 0 && resp.drag_stopped() {

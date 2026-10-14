@@ -320,7 +320,7 @@ fn marker(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, comp: 
     if resp.drag_started() {
         ctx.data_mut(|d| d.insert_temp(drag_state_id(), (r.layer, r.index, mods.alt)));
     }
-    if resp.dragged()
+    if resp.dragged_by(egui::PointerButton::Primary)
         && let Some(pt) = resp.interact_pointer_pos()
         && let Some((layer, index, alt)) = ctx.data(|d| d.get_temp::<(Option<u64>, usize, bool)>(drag_state_id()))
     {
@@ -403,7 +403,7 @@ pub(crate) fn marker_bin(app: &mut EffectcraftApp, ui: &mut egui::Ui, comp: &Com
         snapped.min(comp.duration.seconds())
     });
     let Some(at) = at else { return };
-    if resp.dragged() {
+    if resp.dragged_by(egui::PointerButton::Primary) {
         let h = strip.height().min(10.0);
         let col = marker_color(&t, effectcraft_engine::color::Label::None);
         let p = ui.painter().with_clip_rect(strip);

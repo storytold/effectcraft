@@ -230,7 +230,7 @@ pub(crate) fn rulers(app: &mut EffectcraftApp, ui: &mut egui::Ui, map: &ViewerMa
         .on_hover_text(crate::i18n::tr("Ruler zero point (drag to move, double-click to reset)"));
     app.auto.add("viewer.ruler.origin", corner, "Ruler zero point");
     let fg = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("vw-ruler-fg")));
-    if cr.dragged()
+    if cr.dragged_by(egui::PointerButton::Primary)
         && let Some(hp) = cr.interact_pointer_pos()
     {
         fg.line_segment([pos2(inner.min.x, hp.y), pos2(inner.max.x, hp.y)], Stroke::new(1.0, t.accent));
@@ -253,7 +253,7 @@ pub(crate) fn rulers(app: &mut EffectcraftApp, ui: &mut egui::Ui, map: &ViewerMa
         if resp.hovered() {
             ui.ctx().set_cursor_icon(if vertical { egui::CursorIcon::ResizeHorizontal } else { egui::CursorIcon::ResizeVertical });
         }
-        if resp.dragged()
+        if resp.dragged_by(egui::PointerButton::Primary)
             && let Some(hp) = resp.interact_pointer_pos()
         {
             let s = Stroke::new(1.0, guide_color(app));
