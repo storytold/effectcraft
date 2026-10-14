@@ -392,6 +392,10 @@ pub type ScriptTaskRunner = fn(&mut Session) -> Value;
 /// paths, or null when cancelled).
 pub const FILE_DIALOG_EVENT: &str = "fileDialog";
 
+/// The [`ScriptUiEvent::kind`] that lets a script carry on after `Window.update()` (see
+/// [`ScriptUi::busy`]).
+pub const RESUME_EVENT: &str = "resume";
+
 /// A script waiting in `File.openDialog`, `File.saveDialog` or `Folder.selectDialog` for the app
 /// to show the system dialog (`scriptui.fileDialog` answers it).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -428,10 +432,14 @@ pub struct ScriptUi {
     pub revision: u64,
     /// The script waiting for a file dialog.
     pub file_dialog: Option<FileDialogRequest>,
-    /// A frontend shows scripts' file dialogs (the desktop app). Elsewhere (the CLI, MCP, the
-    /// web) `File.openDialog` and the others return null at once, as when cancelled.
+    /// The script (host) in the middle of its work that showed its progress with
+    /// `Window.update()`: the frontend draws a frame, then lets it carry on (`scriptui.resume`).
+    pub busy: Option<u32>,
+    /// A frontend shows the app while scripts wait (the desktop app): it shows scripts' file
+    /// dialogs and draws their progress. Elsewhere (the CLI, MCP, the web) `File.openDialog` and
+    /// the others return null at once, as when cancelled, and `Window.update()` does nothing.
     #[serde(skip)]
-    pub file_dialogs: bool,
+    pub frontend: bool,
     /// What scripts' file dialogs returned this session.
     #[serde(skip)]
     pub picked: Vec<Picked>,
@@ -844,6 +852,15 @@ pub(crate) fn file_dialog(s: &mut Session, p: &Value) -> Result<Value> {
     s.script_ui.picked.extend(paths.iter().map(|path| Picked { path: path.clone(), write: req.kind == "save" }));
     let value = if paths.is_empty() { Value::Null } else { json!(paths) };
     dispatch(s, ScriptUiEvent { window: 0, widget: 0, kind: FILE_DIALOG_EVENT.into(), value })
+}
+
+/// `scriptui.resume`: let the script that showed its progress (`Window.update()`) carry on to
+/// its next update or its end. The desktop app does after drawing a frame.
+pub(crate) fn resume(s: &mut Session, _: &Value) -> Result<Value> {
+    if s.script_ui.busy.is_none() {
+        return Err(crate::commands::bad("scriptui.resume", "no script is in the middle of its work"));
+    }
+    dispatch(s, ScriptUiEvent { window: 0, widget: 0, kind: RESUME_EVENT.into(), value: Value::Null })
 }
 
 #[cfg(test)]

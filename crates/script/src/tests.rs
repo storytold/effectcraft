@@ -23,6 +23,7 @@ mod tasks;
 mod ui;
 mod ui_more;
 mod ui_mouse;
+mod update;
 
 fn session() -> Session {
     let mut s = Session { expr: Some(Arc::new(effectcraft_expr::Expressions)), expr_check: Some(effectcraft_expr::check_syntax), ..Default::default() };

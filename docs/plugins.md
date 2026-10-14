@@ -109,7 +109,10 @@ Supported controls: `panel`, `group`, `button`, `iconbutton`, `statictext`, `edi
 `tabbedpanel` / `tab` and `image`, with ScriptUI's automatic layout (`orientation`,
 `alignChildren`, `alignment`, `margins`, `spacing`, `preferredSize`), resource strings, event
 handlers (`onClick`, `onChange`, `onChanging`, `onClose`, `addEventListener`) and `onDraw` with
-ScriptUIGraphics. Mouse events (`addEventListener("mousedown" | "mouseup" | "mousemove" |
+ScriptUIGraphics. A script doing long work calls `Window.update()` to show its progress (a
+palette's progress bar and text): the desktop app redraws then, at most every 50 ms, so it stays
+responsive instead of "Not responding", and the script's buttons work meanwhile (a Cancel
+button); without a window it does nothing. Mouse events (`addEventListener("mousedown" | "mouseup" | "mousemove" |
 "mouseover" | "mouseout" | "click", handler, capture?)`) reach the control under the pointer and
 its containers (capture, target, bubble; `stopPropagation()`), with a MouseEvent carrying
 `clientX`/`clientY` relative to the target, `button`, `detail` (click count) and the modifier

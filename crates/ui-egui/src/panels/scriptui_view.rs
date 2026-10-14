@@ -598,29 +598,30 @@ pub(crate) fn file_dialog_answered(app: &mut EffectcraftApp, paths: Vec<String>)
     report(app, r);
 }
 
-/// The floating script windows (dialogs, palettes, windows), drawn over the app.
+/// The floating script windows (dialogs, palettes, windows), drawn over the app. A script in the
+/// middle of its work (`Window.update()`) carries on once they are drawn.
 pub fn show_windows(app: &mut EffectcraftApp, ctx: &egui::Context) {
     answer_file_dialog(app, ctx);
+    let busy = app.session.script_ui.busy;
     let windows: Vec<ScriptWindow> = app.session.script_ui.windows.iter().filter(|w| w.kind != WindowKind::Panel).cloned().collect();
-    if windows.is_empty() {
-        return;
-    }
     let t = app.tokens;
     let mut acts = vec![];
     let screen = ctx.content_rect();
     let blocked = windows.iter().any(|w| w.modal);
-    if blocked {
-        // A modal dialog blocks the app behind it, as in After Effects.
+    if blocked || busy.is_some() {
+        // A modal dialog, or a script at work, blocks the app behind it.
         let r = egui::Area::new(egui::Id::unique("scriptui-modal-block")).order(egui::Order::Middle).fixed_pos(screen.min).show(ctx, |ui| {
             ui.allocate_exact_size(screen.size(), Sense::click_and_drag());
             ui.painter().rect_filled(screen, 0.0, Color32::from_black_alpha(90));
         });
-        let _ = r;
+        if busy.is_some() {
+            r.response.on_hover_cursor(egui::CursorIcon::Progress);
+        }
     }
     for w in &windows {
         let size = vec2(w.root.bounds[2] as f32, w.root.bounds[3] as f32);
         let mut open = true;
-        let order = if w.modal { egui::Order::Foreground } else { egui::Order::Middle };
+        let order = if w.modal || busy == Some(w.host) { egui::Order::Foreground } else { egui::Order::Middle };
         let resp = egui::Window::new(if w.title.is_empty() { &w.script } else { &w.title })
             .id(egui::Id::unique(("scriptui-window", w.id)))
             .order(order)
@@ -643,6 +644,11 @@ pub fn show_windows(app: &mut EffectcraftApp, ctx: &egui::Context) {
         }
     }
     perform(app, ctx, acts);
+    // The script's progress is on screen: let it work until its next update, and draw that.
+    if app.session.script_ui.busy.is_some() {
+        run(app, ctx, "scriptui.resume", json!({}));
+        ctx.request_repaint();
+    }
 }
 
 /// A dockable ScriptUI panel's content (Window ▸ `<panel>.jsx`).

@@ -32,6 +32,9 @@ pub struct Outcome {
     pub waiting: bool,
     /// What it waits for when that is a file dialog (`scriptui.fileDialog` answers).
     pub file_dialog: Option<effectcraft_engine::scriptui::FileDialogRequest>,
+    /// It is in the middle of its work: it showed its progress with `Window.update()` and
+    /// carries on at `scriptui.resume`.
+    pub busy: bool,
 }
 
 /// An uncaught script error.
@@ -60,6 +63,9 @@ impl Outcome {
         if let Some(d) = &self.file_dialog {
             j["fileDialog"] = json!(d);
         }
+        if self.busy {
+            j["busy"] = json!(true);
+        }
         j
     }
 }
@@ -81,11 +87,13 @@ pub(crate) struct Active {
     pub(crate) link: Option<crate::ui::Link>,
     /// The files `$.evalFile` is evaluating, outermost first.
     pub(crate) loading: Vec<std::path::PathBuf>,
+    /// When the script last showed its progress (`Window.update()`).
+    pub(crate) last_update: Option<web_time::Instant>,
 }
 
 impl Active {
     pub(crate) fn new(session: Session, name: &str, host: u32) -> Active {
-        Active { session, output: vec![], groups: vec![], name: name.to_string(), host, link: None, loading: vec![] }
+        Active { session, output: vec![], groups: vec![], name: name.to_string(), host, link: None, loading: vec![], last_update: None }
     }
 }
 
@@ -531,7 +539,7 @@ pub(crate) fn new_context() -> Result<Context, String> {
     let limits = ctx.runtime_limits_mut();
     limits.set_loop_iteration_limit(200_000_000);
     limits.set_recursion_limit(2000);
-    let natives: [(JsString, usize, fn(&JsValue, &[JsValue], &mut Context) -> JsResult<JsValue>); 12] = [
+    let natives: [(JsString, usize, fn(&JsValue, &[JsValue], &mut Context) -> JsResult<JsValue>); 13] = [
         (js_string!("__exec"), 2, native_exec),
         (js_string!("__query"), 2, native_query),
         (js_string!("__print"), 1, native_print),
@@ -544,6 +552,7 @@ pub(crate) fn new_context() -> Result<Context, String> {
         (js_string!("__uiModal"), 1, crate::ui::native_modal),
         (js_string!("__uiLayoutNative"), 1, crate::ui::native_layout),
         (js_string!("__fileDialog"), 5, crate::ui::native_file_dialog),
+        (js_string!("__uiUpdate"), 0, crate::ui::native_update),
     ];
     for (name, len, f) in natives {
         ctx.register_global_callable(name, len, NativeFunction::from_fn_ptr(f)).map_err(|e| e.to_string())?;

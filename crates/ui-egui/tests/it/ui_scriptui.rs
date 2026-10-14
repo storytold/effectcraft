@@ -429,3 +429,40 @@ fn script_file_dialogs_use_the_app_s_file_picker() {
     assert!(h.state().session.script_ui.file_dialog.is_none());
     assert_eq!(h.state().ui.status, "true");
 }
+
+#[test]
+fn a_working_script_shows_its_progress_and_the_app_lets_it_carry_on() {
+    let mut h = harness();
+    let code = r#"
+      var w = new Window("palette", "Importing");
+      var bar = w.add("progressbar", undefined, 0, 3);
+      var label = w.add("statictext", undefined, "Starting");
+      w.show();
+      for (var i = 1; i <= 3; i++) {
+        var t = Date.now();
+        while (Date.now() - t < 60) {}
+        app.project.items.addComp("Step " + i, 64, 64, 1, 1, 24);
+        bar.value = i;
+        label.text = "Step " + i + " of 3";
+        w.update();
+      }
+      w.close();
+      writeLn("finished");
+    "#;
+    let r = h.state_mut().session.execute("script.run", json!({"code": code, "name": "work.jsx"})).unwrap();
+    assert_eq!(r["busy"], true, "{r}");
+    // A frame draws the progress, then lets the script work to its next update.
+    h.run_steps(1);
+    let id = h.state().session.script_ui.windows[0].id;
+    assert!(h.state().auto.find(&format!("scriptui.{id}")).is_some(), "the progress window is drawn");
+    for _ in 0..10 {
+        if h.state().session.script_ui.busy.is_none() {
+            break;
+        }
+        h.run_steps(1);
+    }
+    assert!(h.state().session.script_ui.busy.is_none(), "the app let the script finish");
+    let comps = h.state().session.project.items.values().filter(|i| i.as_comp().is_some()).count();
+    assert_eq!(comps, 4, "Main and three steps");
+    assert_eq!(h.state().ui.status, "finished");
+}

@@ -14,7 +14,7 @@ use crate::run_code;
 fn session() -> Session {
     let mut s = Session { expr: Some(Arc::new(effectcraft_expr::Expressions)), ..Default::default() };
     crate::install(&mut s);
-    s.script_ui.file_dialogs = true;
+    s.script_ui.frontend = true;
     s
 }
 
@@ -71,7 +71,7 @@ fn cancelled_and_headless_dialogs_return_null() {
     let r = s.execute("scriptui.fileDialog", json!({"paths": null})).unwrap();
     assert_eq!(r["output"], "cancelled", "{r}");
     // Without an app to show them (the CLI, MCP), the dialogs return null at once.
-    s.script_ui.file_dialogs = false;
+    s.script_ui.frontend = false;
     let o = run_code(&mut s, "[File.openDialog('x'), File.saveDialog('x'), Folder.selectDialog('x')].join(',') === ',,'", "headless.jsx");
     assert!(!o.waiting && o.error.is_none(), "{o:?}");
     assert_eq!(o.result, json!(true));
