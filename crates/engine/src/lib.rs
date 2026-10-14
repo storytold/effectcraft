@@ -1214,6 +1214,8 @@ mod tests;
 #[cfg(test)]
 mod tests_3d;
 #[cfg(test)]
+mod tests_aep_export;
+#[cfg(test)]
 mod tests_aep_import;
 #[cfg(test)]
 mod tests_anim_presets;

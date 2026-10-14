@@ -1347,6 +1347,7 @@ fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) -> Option<Res
         "view.exportGuides" => ("path", Ask::Save("Guides.json")),
         "view.importGuides" => ("path", Ask::Open(&["json"])),
         "file.exportLottie" => ("path", Ask::Save("Animation.json")),
+        "file.exportAep" => ("path", Ask::Save("Project.aep")),
         "file.importLottie" => ("path", Ask::Open(&["json", "lottie"])),
         "file.importAep" => ("path", Ask::Open(&["aep"])),
         "file.importProject" => ("path", Ask::Open(&["ecproj", "ecprojx"])),
