@@ -13,6 +13,7 @@ use crate::{Outcome, run_code};
 mod callable;
 mod ease_presets;
 mod evalfile;
+mod file_dialogs;
 mod include;
 mod panels;
 #[cfg(not(windows))]

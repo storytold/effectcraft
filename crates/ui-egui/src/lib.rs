@@ -340,6 +340,9 @@ pub struct EffectcraftApp {
     pub(crate) dialog_answers: (Sender<DialogAnswer>, Receiver<DialogAnswer>),
     /// Those dialogs that are up, for blocking floating panels' OS windows meanwhile.
     pub(crate) file_dialogs: FileDialogsUp,
+    /// A script's file dialog ([`effectcraft_engine::scriptui::FileDialogRequest`]) is up without
+    /// blocking; its answer arrives with [`Self::dialog_answers`].
+    pub(crate) script_file_dialog_up: bool,
     /// Commands from the native menu bar.
     pub command_inbox: Option<Receiver<String>>,
     /// Pointer position in comp pixels (Info panel).

@@ -21,6 +21,7 @@ Guide):
 | Keyboard shortcuts for scripts (the Keyboard Shortcuts editor lists the scripts of the Scripts folder) | Edit ▸ Keyboard Shortcuts lists the scripts of File ▸ Scripts under File ▸ Scripts (`file.runScript {"name": "<file name>"}`); a key given to one is saved with the preset, File ▸ Scripts shows it, and pressing it runs the script as its menu entry does | Same. After Effects binds a key to a script's place in the alphabetical list (`ExecuteScriptMenuItem01`…), and EffectCraft binds it to the script's file name. The Window menu entries of ScriptUI panels aren't offered |
 | Running a script from the command line (`afterfx -r script.jsx`) | `effectcraft-cli script`, the control channel's and MCP's `script.run` | Same purpose, other entry points |
 | `app.settings` (kept in the preferences between sessions) | Kept in `script_settings.json` in the settings folder (`script.settings.get` / `script.settings.save`) | Same |
+| `File.openDialog`, `File.saveDialog`, `Folder.selectDialog` (and `openDlg` / `saveDlg` / `selectDlg`): the system's file dialogs | The desktop app shows the system's dialogs; what the user picks may be read (written, from a save dialog) without Allow Scripts to Write Files. Without a window (`effectcraft-cli`, MCP) and on the web they return `null`, as when cancelled | Same in the desktop app |
 | Allow Scripts to Write Files and Access Network | Settings ▸ Scripting & Expressions | Same |
 
 The settings folder is `~/Library/Application Support/EffectCraft` on macOS, `%APPDATA%\EffectCraft`
@@ -50,6 +51,13 @@ journaled and the same as the UI's action. The `effectcraft-script` crate's docs
   listed; deeper folders are not. `file.uninstallScript` removes only scripts at the top of the
   Scripts folders: delete a script in a subfolder yourself. A subfolder may be a link to another
   folder (an extension's own), and uninstall never deletes a file through it.
+* File dialogs: `File.openDialog(prompt, "JSON:*.json", multiSelect)`, `File.saveDialog(prompt,
+  filter)` and `Folder.selectDialog(prompt)` wait while the desktop app shows the system's dialog
+  (a dialog's buttons can open them too), and return a `File` (an array with `multiSelect`), a
+  `Folder` or `null`. The script may read what was picked, and write a file picked in a save
+  dialog, without Allow Scripts to Write Files. For agents, the reply that left the script waiting
+  has `"fileDialog": {kind: open|save|folder, prompt, extensions, multi, name}`, and
+  `scriptui.fileDialog {paths: [path] | null}` answers it.
 
 ## ScriptUI panels
 

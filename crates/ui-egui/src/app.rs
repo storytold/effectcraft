@@ -31,7 +31,9 @@ impl EffectcraftApp {
     /// Loads and applies the workspaces saved in the session's config directory (a failed load is reported in
     /// `ui.status`), initializes the default UI, playback and render state, and registers the frontend's commands as
     /// shortcutable `UiCommand`s on the session.
-    pub fn new(session: Session) -> Self {
+    pub fn new(mut session: Session) -> Self {
+        // Scripts' File.openDialog and the others wait for this app to show the system dialog.
+        session.script_ui.file_dialogs = true;
         let mut ui = UiState::default();
         let workspace_store = workspace_state::WorkspaceStore::load(session.config.as_deref(), &mut ui);
         EffectcraftApp {
@@ -91,6 +93,7 @@ impl EffectcraftApp {
             device_lost_close: None,
             dialog_answers: std::sync::mpsc::channel(),
             file_dialogs: FileDialogsUp::default(),
+            script_file_dialog_up: false,
             command_inbox: None,
             pointer_comp: None,
             dialog_state: Default::default(),

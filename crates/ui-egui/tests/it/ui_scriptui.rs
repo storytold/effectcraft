@@ -398,3 +398,34 @@ fn scheduled_import_reveals_its_composition_without_manual_clicks() {
     assert!(!h.state().ui.start_screen, "Home must not hide a composition opened by the scheduled import");
     h.state_mut().session.execute("scriptui.close", json!({"window":"Automatic import"})).unwrap();
 }
+
+#[test]
+fn script_file_dialogs_use_the_app_s_file_picker() {
+    let mut h = harness();
+    let dir = std::env::temp_dir().join(format!("ec-ui-file-dialog-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("export.json");
+    std::fs::write(&file, r#"{"name": "Converted"}"#).unwrap();
+    // The app's file picker: what it was asked for, and the file "the user" picks.
+    let asked = std::rc::Rc::new(std::cell::RefCell::new(vec![]));
+    let (a, f) = (asked.clone(), file.to_string_lossy().to_string());
+    h.state_mut().hooks.pick_files = Some(Box::new(move |exts: &[&str]| {
+        a.borrow_mut().push(exts.join(","));
+        vec![f.clone()]
+    }));
+    let code = r#"var f = File.openDialog("Pick an export", "Exports:*.json"); f.open("r"); var d = JSON.parse(f.read()); f.close(); app.project.items.addComp(d.name, 64, 64, 1, 1, 24); "ok""#;
+    let r = h.state_mut().session.execute("script.run", json!({"code": code, "name": "pick.jsx"})).unwrap();
+    assert_eq!(r["waiting"], true, "{r}");
+    h.run_steps(2);
+    assert_eq!(*asked.borrow(), ["json"]);
+    assert!(h.state().session.script_ui.file_dialog.is_none());
+    let comps: Vec<String> = h.state().session.project.items.values().filter(|i| i.as_comp().is_some()).map(|i| i.name.clone()).collect();
+    assert!(comps.contains(&"Converted".to_string()), "the script read the picked file: {comps:?}");
+    // Cancelled: the script gets null.
+    h.state_mut().hooks.pick_files = Some(Box::new(|_: &[&str]| vec![]));
+    let r = h.state_mut().session.execute("script.run", json!({"code": "writeLn(File.openDialog('Pick') === null)", "name": "cancel.jsx"})).unwrap();
+    assert_eq!(r["waiting"], true, "{r}");
+    h.run_steps(2);
+    assert!(h.state().session.script_ui.file_dialog.is_none());
+    assert_eq!(h.state().ui.status, "true");
+}

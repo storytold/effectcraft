@@ -677,6 +677,11 @@ fn picked_value(key: &str, paths: Vec<String>) -> Option<Value> {
 /// A file dialog shown without blocking ([`crate::Hooks::file_dialog_async`]) answered: run its
 /// command with the picked path (nothing when it was cancelled).
 pub(crate) fn dialog_answered(app: &mut EffectcraftApp, answer: crate::DialogAnswer) {
+    // A script's dialog: the script waits for the answer, cancelled too.
+    if answer.command == crate::panels::scriptui_view::FILE_DIALOG_COMMAND {
+        crate::panels::scriptui_view::file_dialog_answered(app, answer.paths);
+        return;
+    }
     let Some(v) = picked_value(answer.key, answer.paths) else { return };
     if let Err(e) = run_with_picked(app, &answer.command, answer.key, &answer.params, v) {
         app.ui.status = e;
