@@ -206,7 +206,8 @@ impl EffectcraftApp {
         let titles = self.tab_titles();
         let decos = self.tab_decos();
         let docs = self.tab_docs();
-        let title = |p: PanelKind| titles.iter().find(|(k, _)| *k == p).map(|(_, s)| s.clone()).unwrap_or_else(|| crate::i18n::panel_title(p.title()).to_string());
+        let title =
+            |p: PanelKind| titles.iter().find(|(k, _)| *k == p).map(|(_, s)| s.clone()).unwrap_or_else(|| crate::i18n::panel_title(p.title()).to_string());
         let info = dock::TabInfo { title: &title, decos: &decos, docs: &docs };
         // Where each group's tabs are (tab drags show where a tab will land between them).
         let mut tab_rects: Vec<(String, Vec<(PanelKind, Rect)>)> = vec![];
