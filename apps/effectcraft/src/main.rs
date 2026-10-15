@@ -17,6 +17,7 @@ mod appimage;
 #[cfg(target_os = "macos")]
 mod apple_events;
 mod audio_out;
+mod cloud;
 mod control_server;
 mod launch_guard;
 #[cfg(target_os = "macos")]
@@ -247,6 +248,18 @@ fn main() -> eframe::Result {
             app.hooks.system_theme = appearance::service();
             app.hooks.audio_device = Some(Box::new(audio_out::open));
             app.hooks.audio_devices = Some(Box::new(audio_out::devices));
+            // Cloud: wire the CollabCraft backend when a service URL is set. Without
+            // one the app is local-only and the interface offers nothing cloud-shaped.
+            if let Some(backend) = cloud::service(cc.egui_ctx.clone()) {
+                app.cloud.connect(backend);
+            }
+            app.share.connect(collabcraft_share::CollabCraft::from_fn(cloud::client));
+            // Open-URL hook for the device-flow browser launch from the cloud UI.
+            app.hooks.open_url = Some(Box::new(|url: &str| {
+                if let Err(e) = cloud::open_browser(url) {
+                    log::warn!("could not open a browser for {url}: {e}");
+                }
+            }));
             app.hooks.pick_folder = Some(Box::new(|| rfd::FileDialog::new().pick_folder().map(|p| p.to_string_lossy().to_string())));
             app.hooks.pick_save_file = Some(Box::new(|name: &str, ext: &str| {
                 // A default with a folder that exists opens the dialog there.
