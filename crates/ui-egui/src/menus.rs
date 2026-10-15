@@ -1983,6 +1983,18 @@ fn menu_nodes(
                     *clicked = Some((e.command.clone(), e.params.clone()));
                     ui.close();
                 }
+                // CollabCraft cloud Open/Save sit under File, after Open Project.
+                if e.command == "file.open" && crate::cloud::available(app) {
+                    for (id, label) in [("file.cloudOpen", "Open from cloud…"), ("file.cloudSaveAs", "Save as to cloud…")] {
+                        let r = ui.add_enabled(true, egui::Button::new((gutter(false), label)));
+                        app.auto.add(&format!("menu.{id}"), r.rect, label);
+                        nav.entry(ui, depth, &r, false);
+                        if r.clicked() {
+                            *clicked = Some((id.into(), json!({})));
+                            ui.close();
+                        }
+                    }
+                }
             }
         }
     }
