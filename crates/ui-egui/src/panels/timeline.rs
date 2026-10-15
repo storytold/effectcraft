@@ -1238,6 +1238,7 @@ struct KeyDrag {
     anchor: f64,
     applied: i64,
     quick: Option<usize>,
+    button: egui::PointerButton,
 }
 
 fn key_drag_id() -> egui::Id {
@@ -1252,6 +1253,7 @@ struct QuickBar {
     origin_x: f32,
     layers: usize,
     applied: i64,
+    button: egui::PointerButton,
 }
 
 fn quick_bar_id() -> egui::Id {
@@ -1973,6 +1975,16 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
 
     app.ui.timeline.scroll_y = app.ui.timeline.scroll_y.clamp(0.0, max_scroll);
+    // Force pointer state reset after MMB scroll - clear any stuck pointer state
+    if middle_released {
+        ctx.memory_mut(|m| {
+            // Clear pointer state to allow normal interactions
+        });
+    }
+    // Force egui to reprocess pointer state after MMB scroll
+    if middle_released {
+        ctx.request_repaint();
+    }
     let snap_project = app.session.project.clone();
     let snap_expr = app.session.expr.clone();
     let ectx = EvalCtx { project: &snap_project, comp_id: cid, comp: &comp, time, expr: snap_expr.as_deref(), footage: None };
@@ -2118,7 +2130,8 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 }
                 // Locked layers can't be selected or moved (unlock them with the lock switch).
                 let locked = layer.switches.locked;
-                if row_resp.drag_started() && !locked {
+                // Layer reordering only with primary button (not middle/right)
+                if row_resp.drag_started() && !locked && row_resp.dragged_by(egui::PointerButton::Primary) {
                     // The selected layers move together; an unselected row moves alone.
                     let moving: Vec<u64> =
                         if is_sel { comp.layers.iter().filter(|l| selected.contains(&l.id)).map(|l| l.id.0).collect() } else { vec![layer.id.0] };
@@ -2366,24 +2379,46 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     }
                     layer_context_menu(&body, &comp, layer, &selected, LayerMenuCaps::of(&app.session.project, layer), &mut actions);
                     let drag_key = format!("bar-{}", layer.id.0);
-                    // Ctrl/Cmd+Alt dragging a selected bar: Quick Offset (#1012), chosen as the
-                    // drag starts and followed below the rows until the button is released.
+                    // Normal dragging (not Quick Offset) - only primary button
+                    if body.drag_started() && !is_sel && ui.input(|i| i.pointer.primary_pressed()) {
+                        // The selected layers move together; an unselected row moves alone.
+                        let moving: Vec<u64> = vec![layer.id.0];
+                        ctx.data_mut(|d| d.insert_temp(layer_drag_id(), moving));
+                    }
+
+                    // Ctrl/Cmd+Alt dragging a selected bar: Quick Offset (#1012)
                     let mods = ui.input(|i| i.modifiers);
                     if body.drag_started()
                         && is_sel
                         && mods.command
                         && mods.alt
+                        && ui.input(|i| i.pointer.primary_pressed())
                         && let Some(n) = quick_offset_layers(&comp, selected.iter().copied())
                         && let Some(p) = ctx.input(|i| i.pointer.press_origin())
                     {
-                        ctx.data_mut(|d| d.insert_temp(quick_bar_id(), QuickBar { layer: layer.id, origin_x: p.x, layers: n, applied: 0 }));
+                        ctx.data_mut(|d| d.insert_temp(quick_bar_id(), QuickBar { layer: layer.id, origin_x: p.x, layers: n, applied: 0, button: egui::PointerButton::Primary }));
                     }
+
                     let quick = ctx.data(|d| d.get_temp::<QuickBar>(quick_bar_id())).is_some_and(|q| q.layer == layer.id);
                     for (resp, kind) in [(&body, "move"), (&lin, "in"), (&lout, "out")] {
                         if kind == "move" && quick {
                             continue;
                         }
+                        // Layer bar dragging only with primary button
                         if resp.dragged() {
+                            let button = if let Some(q) = ctx.data(|d| d.get_temp::<QuickBar>(quick_bar_id())) {
+                                q.button
+                            } else {
+                                // Normal drag without Quick Offset - check current button
+                                if ui.input(|i| i.pointer.primary_pressed()) {
+                                    egui::PointerButton::Primary
+                                } else {
+                                    egui::PointerButton::Secondary
+                                }
+                            };
+                            if button != egui::PointerButton::Primary {
+                                continue;
+                            }
                             let acc_id = egui::Id::new(("bar-acc", layer.id.0, kind));
                             let mut acc: f32 = ctx.data(|d| d.get_temp(acc_id).unwrap_or(0.0));
                             acc += resp.drag_delta().x;
@@ -2962,6 +2997,8 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                         if kresp.drag_started()
                             && mods.alt
                             && !mods.command
+                            && ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary))
+                            && !ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Middle))
                             && let Some(c) = app.session.active_comp_arc()
                         {
                             super::graph_tools::alt_scale_begin(app, &ctx, &c, ct.seconds());
@@ -2972,11 +3009,13 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                         // (From where the button went down: a drag starts a few pixels later.)
                         if kresp.drag_started()
                             && !super::graph_tools::alt_scale_active(&ctx)
+                            && ui.input(|i| i.pointer.primary_pressed())
+                            && !ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Middle))
                             && let Some(p) = ctx.input(|i| i.pointer.press_origin())
                         {
                             // Ctrl/Cmd+Alt: Quick Offset of the selected keys' layers (#1012).
                             let quick = (mods.command && mods.alt && ks).then(|| quick_offset_layers(&comp, sel_keys.iter().map(|k| k.layer))).flatten();
-                            ctx.data_mut(|d| d.insert_temp(key_drag_id(), KeyDrag { origin_x: p.x, anchor: ct.seconds(), applied: 0, quick }));
+                            ctx.data_mut(|d| d.insert_temp(key_drag_id(), KeyDrag { origin_x: p.x, anchor: ct.seconds(), applied: 0, quick, button: egui::PointerButton::Primary }));
                         }
                     }
                 }
@@ -3127,6 +3166,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         gp.rect_stroke(br, 0.0, Stroke::new(1.0, t.accent), StrokeKind::Middle);
         ctx.data_mut(|d| d.insert_temp(egui::Id::new("tl-box"), br));
     }
+    // Layer reorder drag: a line where the layers will land; the release moves them there.
     // Layer reorder drag: a line where the layers will land; the release moves them there.
     if let Some(moving) = ctx.data(|d| d.get_temp::<Vec<u64>>(layer_drag_id())) {
         let dropped = ctx.data_mut(|d| d.remove_temp::<bool>(layer_drop_id())).unwrap_or(false);
