@@ -1375,3 +1375,23 @@ fn scripted_levels_alpha_controls_resolve_from_the_effect() {
     );
     assert_eq!(o.result, json!([0.5, 0.5]));
 }
+
+/// A text animator property added by its After Effects name is the one asked for, not its Tracking
+/// Type companion, and it can be found again by that name (#1063).
+#[test]
+fn scripted_text_animator_property_is_the_one_asked_for() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"
+        var c = app.project.items.addComp("Track", 960, 300, 1, 3, 30);
+        var t = c.layers.addText("MOVARA");
+        var a = t.property("ADBE Text Properties").property("ADBE Text Animators").addProperty("ADBE Text Animator");
+        var props = a.property("ADBE Text Animator Properties");
+        var added = props.addProperty("ADBE Text Tracking Amount");
+        added.setValue(20);
+        [added.name, props.property("ADBE Text Tracking Amount").value, props.property("ADBE Text Tracking Amount").name]
+        "#,
+    );
+    assert_eq!(o.result, json!(["Tracking Amount", 20, "Tracking Amount"]));
+}
