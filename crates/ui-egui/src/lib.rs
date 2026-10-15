@@ -331,6 +331,8 @@ pub struct EffectcraftApp {
     pub cloud: craft_ui::cloud::CloudFiles,
     pub share: craft_ui::share::ShareDialog,
     pub presence: craft_ui::presence::PresenceBar,
+    /// Cloud Open / Save As page from the File menu, if any.
+    pub cloud_page: Option<cloud::CloudPage>,
     /// Audio preview while playing (audio clock drives playback).
     pub audio: Option<audio::AudioPlayback>,
     /// Audio scrubbing's open output (Ctrl/Cmd-drag the current time, `playback.scrubAudio`).
@@ -430,6 +432,7 @@ impl EffectcraftApp {
             cloud: craft_ui::cloud::CloudFiles::new(),
             share: craft_ui::share::ShareDialog::new(),
             presence: craft_ui::presence::PresenceBar::new().badges_only(),
+            cloud_page: None,
             audio: None,
             scrub: None,
             meter: Default::default(),
@@ -1677,6 +1680,8 @@ impl EffectcraftApp {
         self.apply_prefs(&ctx);
         // Drive cloud Open/Save/Share jobs and deliver their answers.
         craft_ui::cloud::pump(self, &ctx);
+        crate::cloud::conflict_modal(self, &ctx);
+        crate::cloud::modal(self, &ctx);
         self.handle_events(&ctx);
         panels::unsaved::on_close_requested(self, &ctx);
         let title = panels::unsaved::window_title(self);

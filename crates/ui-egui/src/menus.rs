@@ -310,6 +310,24 @@ fn only_comp(p: &Value) -> Option<effectcraft_engine::project::ItemId> {
 
 /// Execute a UI or engine command by id.
 pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: Value) -> Result<Value, String> {
+    if id == "file.cloudOpen" {
+        if !crate::cloud::available(app) {
+            return Err(crate::cloud::UNAVAILABLE.into());
+        }
+        app.cloud_page = Some(crate::cloud::CloudPage::Open);
+        return Ok(json!({"page": "open"}));
+    }
+    if id == "file.cloudSaveAs" {
+        if !crate::cloud::available(app) {
+            return Err(crate::cloud::UNAVAILABLE.into());
+        }
+        app.cloud_page = Some(crate::cloud::CloudPage::SaveAs);
+        return Ok(json!({"page": "saveAs"}));
+    }
+    // Cloud: Save routes back when the project came from CollabCraft.
+    if id == "file.save" && no_params(&params) && crate::cloud::has_target(app) {
+        return crate::cloud::save(app);
+    }
     if matches!(id, "effects.copyPresetsFolderPath" | "mediaBrowser.copySourcePath") {
         return frontend(app, ctx, id, params);
     }
@@ -1634,7 +1652,7 @@ pub(crate) fn entry_enabled(app: &EffectcraftApp, e: &MenuEntry) -> bool {
 
 /// Every menu entry, flattened with its submenu path.
 pub fn menu_items(app: &EffectcraftApp) -> Vec<MenuItem> {
-    effectcraft_engine::menus::entries()
+    let mut items: Vec<MenuItem> = effectcraft_engine::menus::entries()
         .into_iter()
         .map(|(path, e)| MenuItem {
             id: e.command.clone(),
@@ -1645,7 +1663,41 @@ pub fn menu_items(app: &EffectcraftApp) -> Vec<MenuItem> {
             checked: entry_checked(app, e),
             params: e.params.clone(),
         })
-        .collect()
+        .collect();
+    cloud_menu(&mut items, app);
+    items
+}
+
+/// File ▸ Open from cloud… / Save as to cloud… when CollabCraft is connected.
+fn cloud_menu(items: &mut Vec<MenuItem>, app: &EffectcraftApp) {
+    if !crate::cloud::available(app) {
+        return;
+    }
+    let Some(open_at) = items.iter().position(|it| it.id == "file.open") else { return };
+    let path = vec!["File".into()];
+    items.splice(
+        open_at + 1..open_at + 1,
+        [
+            MenuItem {
+                id: "file.cloudOpen".into(),
+                label: "Open from cloud…".into(),
+                path: path.clone(),
+                shortcut: None,
+                enabled: true,
+                checked: None,
+                params: json!({}),
+            },
+            MenuItem {
+                id: "file.cloudSaveAs".into(),
+                label: "Save as to cloud…".into(),
+                path,
+                shortcut: None,
+                enabled: true,
+                checked: None,
+                params: json!({}),
+            },
+        ],
+    );
 }
 
 /// Shortcut text in this OS's notation (`⇧⌘K` on macOS, `Ctrl+Shift+K` elsewhere).
