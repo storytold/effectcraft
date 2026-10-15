@@ -353,6 +353,13 @@ pub struct TimelineState {
     #[serde(skip)]
     pub before_fit: Option<(f64, f64)>,
     pub scroll_y: f32,
+    /// Middle-click drag state for testing scroll by middle-mouse dragging.
+    #[serde(skip)]
+    pub middle_drag_panel: Option<crate::dock::PanelKind>,
+    #[serde(skip)]
+    pub middle_drag_start_scroll_y: f32,
+    #[serde(skip)]
+    pub middle_drag_start_pos: Option<egui::Pos2>,
     /// Left column area width.
     pub columns_w: f32,
     /// Horizontal scroll of the outline columns (pixels) when they are wider than the pane.
@@ -442,6 +449,9 @@ impl Default for TimelineState {
             pps: None,
             before_fit: None,
             scroll_y: 0.0,
+            middle_drag_panel: None,
+            middle_drag_start_scroll_y: 0.0,
+            middle_drag_start_pos: None,
             columns_w: 560.0,
             outline_scroll: 0.0,
             show_modes: false,

@@ -17,6 +17,7 @@ use serde_json::json;
 use crate::i18n::tr;
 use crate::icons::{self, Icon};
 use crate::theme::Tokens;
+use crate::dock::PanelKind;
 use crate::{EffectcraftApp, widgets};
 
 #[derive(Clone, Debug)]
@@ -1896,6 +1897,38 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             app.ui.timeline.scroll_y = rows.iter().take(i).map(|r| row_height(r, rh)).sum();
         }
     }
+
+    // Middle-click drag scrolling for testing
+    let middle_pressed = ctx.input(|i| {
+        i.events.iter().any(|e| matches!(e, egui::Event::PointerButton { button: egui::PointerButton::Middle, pressed: true, .. }))
+    });
+    let middle_released = ctx.input(|i| {
+        i.events.iter().any(|e| matches!(e, egui::Event::PointerButton { button: egui::PointerButton::Middle, pressed: false, .. }))
+    });
+
+    if middle_pressed && app.ui.timeline.middle_drag_panel.is_none() && ui.rect_contains_pointer(rows_rect) {
+        // Start middle-click drag
+        app.ui.timeline.middle_drag_panel = Some(PanelKind::Timeline);
+        app.ui.timeline.middle_drag_start_scroll_y = app.ui.timeline.scroll_y;
+        app.ui.timeline.middle_drag_start_pos = ui.input(|i| i.pointer.latest_pos());
+    }
+
+    // End middle-click drag on release
+    if middle_released && app.ui.timeline.middle_drag_panel == Some(PanelKind::Timeline) {
+        app.ui.timeline.middle_drag_panel = None;
+        app.ui.timeline.middle_drag_start_pos = None;
+    }
+
+    if app.ui.timeline.middle_drag_panel == Some(PanelKind::Timeline) {
+        // Handle middle-click drag scrolling
+        if let Some(start_pos) = app.ui.timeline.middle_drag_start_pos {
+            if let Some(current_pos) = ui.input(|i| i.pointer.latest_pos()) {
+                let delta = (start_pos.y - current_pos.y) as f64;
+                app.ui.timeline.scroll_y = (app.ui.timeline.middle_drag_start_scroll_y + delta as f32).clamp(0.0, max_scroll);
+            }
+        }
+    }
+
     if ui.rect_contains_pointer(rows_rect) {
         let (dy, dx, zoom) = ui.input(|i| (i.smooth_scroll_delta.y, i.smooth_scroll_delta.x, i.modifiers.alt));
         // Ctrl/Cmd+wheel and a trackpad pinch reach egui as a zoom factor rather than a scroll
@@ -1932,6 +1965,13 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             ctx.request_repaint();
         }
     }
+
+    // End middle-click drag on release
+    if middle_released && app.ui.timeline.middle_drag_panel == Some(PanelKind::Timeline) {
+        app.ui.timeline.middle_drag_panel = None;
+        app.ui.timeline.middle_drag_start_pos = None;
+    }
+
     app.ui.timeline.scroll_y = app.ui.timeline.scroll_y.clamp(0.0, max_scroll);
     let snap_project = app.session.project.clone();
     let snap_expr = app.session.expr.clone();
