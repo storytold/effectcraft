@@ -12,7 +12,7 @@ use serde_json::json;
 
 /// A closed folder holding a comp, and a solid at the project root: (harness, folder, comp, solid).
 fn harness() -> (Harness<'static, EffectcraftApp>, ItemId, ItemId, ItemId) {
-    let mut s = Session::default();
+    let mut s = crate::english_test_session(Session::default());
     let comp = ItemId(s.execute("comp.new", json!({"name": "Main", "width": 320, "height": 180, "duration": 4})).unwrap()["comp"].as_u64().unwrap());
     s.execute("layer.newSolid", json!({"name": "Solid", "color": "#406080"})).unwrap();
     let solid = s.project.items.values().find(|i| matches!(i.kind, ItemKind::Solid(_))).unwrap().id;
@@ -234,7 +234,8 @@ fn dragging_in_the_empty_area_box_selects_items() {
 #[test]
 fn a_short_project_panel_draws() {
     for height in [400.0, 300.0] {
-        let mut h = Harness::builder().with_size(egui::vec2(640.0, height)).build_eframe(|_| EffectcraftApp::new(Session::default()));
+        let mut h =
+            Harness::builder().with_size(egui::vec2(640.0, height)).build_eframe(|_| EffectcraftApp::new(crate::english_test_session(Session::default())));
         h.run_steps(3);
         assert!(h.state().auto.find("project.empty").is_some(), "the Project panel drew at {height} points");
     }

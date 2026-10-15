@@ -17,7 +17,7 @@ fn pointer(h: &mut Harness<'_, EffectcraftApp>, at: Pos2, pressed: Option<bool>)
 
 #[test]
 fn view_options_drag_checks_and_unchecks_neighbours() {
-    let mut session = Session::default();
+    let mut session = crate::english_test_session(Session::default());
     session.prefs.disk.disk_cache_enabled = false;
     session.execute("comp.new", json!({"width":32,"height":32,"duration":1})).unwrap();
     let mut h = Harness::builder().with_size(vec2(1200.0, 900.0)).build_eframe(|_| EffectcraftApp::new(session));

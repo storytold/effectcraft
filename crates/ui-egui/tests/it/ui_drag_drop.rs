@@ -21,7 +21,7 @@ use serde_json::json;
 /// Comp "Main" (4 s at 30 fps, current time 1 s) with solids Top, Middle and Bottom, and comp
 /// "Clip" in the Project panel to drag in.
 fn harness() -> (Harness<'static, EffectcraftApp>, u64) {
-    let mut s = Session::default();
+    let mut s = crate::english_test_session(Session::default());
     let clip = s.execute("comp.new", json!({"name": "Clip", "width": 160, "height": 90, "frameRate": 30, "duration": 1})).unwrap()["comp"].as_u64().unwrap();
     s.execute("comp.new", json!({"name": "Main", "width": 320, "height": 180, "frameRate": 30, "duration": 4})).unwrap();
     for name in ["Bottom", "Middle", "Top"] {
@@ -294,7 +294,7 @@ fn project_items_dropped_on_new_comp_make_a_composition() {
 /// with that item's dimensions, frame rate, duration, and a source layer.
 #[test]
 fn project_footage_dropped_on_empty_timeline_creates_first_comp() {
-    let mut s = Session::default();
+    let mut s = crate::english_test_session(Session::default());
     let footage =
         s.execute("file.importPlaceholder", json!({"name": "Landscape.png", "width": 640, "height": 360, "frameRate": 24, "duration": 5})).unwrap()["item"]
             .as_u64()
@@ -318,7 +318,7 @@ fn project_footage_dropped_on_empty_timeline_creates_first_comp() {
 /// quietly creating only the dragged item or changing the composition settings.
 #[test]
 fn multiple_selected_footage_dropped_on_empty_timeline_asks_how_to_create_comps() {
-    let mut s = Session::default();
+    let mut s = crate::english_test_session(Session::default());
     let first = s.execute("file.importPlaceholder", json!({"name": "First.png", "width": 160, "height": 90})).unwrap()["item"].as_u64().unwrap();
     let second = s.execute("file.importPlaceholder", json!({"name": "Second.png", "width": 300, "height": 200})).unwrap()["item"].as_u64().unwrap();
     s.state.project_selection = vec![effectcraft_engine::project::ItemId(first), effectcraft_engine::project::ItemId(second)];
@@ -336,7 +336,7 @@ fn multiple_selected_footage_dropped_on_empty_timeline_asks_how_to_create_comps(
 /// a composition that matches the source, with that source as its first layer.
 #[test]
 fn project_footage_dropped_on_empty_viewer_creates_first_comp() {
-    let mut s = Session::default();
+    let mut s = crate::english_test_session(Session::default());
     let footage =
         s.execute("file.importPlaceholder", json!({"name": "Landscape.png", "width": 640, "height": 360, "frameRate": 24, "duration": 5})).unwrap()["item"]
             .as_u64()
@@ -360,7 +360,7 @@ fn project_footage_dropped_on_empty_viewer_creates_first_comp() {
 /// rather than silently discarding the other selected items.
 #[test]
 fn multiple_selected_footage_dropped_on_empty_viewer_asks_how_to_create_comps() {
-    let mut s = Session::default();
+    let mut s = crate::english_test_session(Session::default());
     let first = s.execute("file.importPlaceholder", json!({"name": "First.png", "width": 160, "height": 90})).unwrap()["item"].as_u64().unwrap();
     let second = s.execute("file.importPlaceholder", json!({"name": "Second.png", "width": 300, "height": 200})).unwrap()["item"].as_u64().unwrap();
     s.state.project_selection = vec![effectcraft_engine::project::ItemId(first), effectcraft_engine::project::ItemId(second)];
@@ -650,7 +650,7 @@ fn import_dialog_offers_the_image_sequence_option() {
 /// of it, as in After Effects.
 #[test]
 fn new_composition_from_footage_makes_a_comp_of_the_picked_file() {
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(Session::default()));
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(crate::english_test_session(Session::default())));
     h.run_steps(3);
     let dir = frames("fromfootage", 2);
     let pick = dir.join("frame_0002.png").to_string_lossy().to_string();
@@ -702,7 +702,8 @@ fn a_dropped_folder_imports_as_one_sequence_with_sequence_interpretation() {
 fn illustrator_import_offers_and_applies_retain_layer_sizes() {
     let path = std::env::temp_dir().join(format!("effectcraft-retain-ui-{}.ai", std::process::id()));
     std::fs::write(&path, b"%PDF-1.4\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 120 80] /Contents 4 0 R >> endobj\n4 0 obj << >> stream\n1 0 0 rg 20 15 30 20 re f\nendstream endobj\n%%EOF").unwrap();
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(effectcraft_host::session()));
+    let mut h =
+        Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(crate::english_test_session(effectcraft_host::session())));
     h.run_steps(3);
     let ctx = h.ctx.clone();
     effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "file.import", json!({"paths": [path]})).unwrap();

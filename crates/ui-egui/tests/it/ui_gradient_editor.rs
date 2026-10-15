@@ -35,7 +35,7 @@ fn gradient_fill(g: &PropGroup) -> Option<(Vec<u64>, u64)> {
 /// A 20 s comp with a rectangle shape layer holding a Gradient Fill, its rows open in the
 /// Timeline. `timing` runs on the layer first (start, stretch). Returns (harness, layer, Colors uid).
 fn setup(timing: &[(&str, serde_json::Value)]) -> (Harness<'static, EffectcraftApp>, u64, u64) {
-    let mut s = Session::default();
+    let mut s = crate::english_test_session(Session::default());
     s.execute("comp.new", json!({"name": "Main", "width": 320, "height": 180, "duration": 20})).unwrap();
     let l = s.execute("layer.newShape", json!({"kind": "rect"})).unwrap()["layer"].as_u64().unwrap();
     s.execute("layer.addShapeItem", json!({"layer": l, "kind": "gfill"})).unwrap();

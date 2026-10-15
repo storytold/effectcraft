@@ -8,7 +8,7 @@ use egui_kittest::kittest::Queryable as _;
 use serde_json::json;
 
 fn harness() -> Harness<'static, EffectcraftApp> {
-    let mut s = Session::default();
+    let mut s = crate::english_test_session(Session::default());
     s.execute("comp.new", json!({"name":"Study", "width":640,"height":360,"duration":4})).unwrap();
     for n in 0..4 {
         s.execute("layer.newSolid", json!({"name":format!("Tile {n}"),"width":80,"height":80,"color":"#406080"})).unwrap();
@@ -389,7 +389,7 @@ fn project_edit_commands_do_not_target_timeline_layers() {
 
 #[test]
 fn compact_settings_keeps_confirmation_buttons_clickable() {
-    let mut h = Harness::builder().with_size(vec2(1024.0, 768.0)).build_eframe(|_| EffectcraftApp::new(Session::default()));
+    let mut h = Harness::builder().with_size(vec2(1024.0, 768.0)).build_eframe(|_| EffectcraftApp::new(crate::english_test_session(Session::default())));
     h.state_mut().dialog = Some(effectcraft_ui_egui::Dialog::Settings);
     h.run_steps(4);
     h.get_by_label("   OK   ").click();
@@ -600,7 +600,7 @@ fn timeline_context_menu_precompose_groups_the_whole_selection() {
 #[test]
 fn timeline_context_menu_creates_shapes_and_masks_from_text() {
     use effectcraft_engine::project::LayerSource;
-    let mut s = Session::default();
+    let mut s = crate::english_test_session(Session::default());
     s.execute("comp.new", json!({"name":"Type","width":320,"height":180,"duration":4})).unwrap();
     s.execute("layer.newText", json!({"text":"Abc"})).unwrap();
     s.execute("layer.newSolid", json!({"name":"Plate","width":40,"height":40,"color":"#406080"})).unwrap();
@@ -654,7 +654,7 @@ fn layer_context_menus_offer_create_shapes_from_vector_layer_for_vector_footage(
     .unwrap();
     let png = dir.join("photo.png");
     image::RgbaImage::from_pixel(16, 16, image::Rgba([0, 128, 255, 255])).save(&png).unwrap();
-    let mut s = effectcraft_host::session();
+    let mut s = crate::english_test_session(effectcraft_host::session());
     let item = s.execute("file.import", json!({"paths": [svg.to_string_lossy()]})).unwrap()["items"][0].as_u64().unwrap();
     let raster = s.execute("file.import", json!({"paths": [png.to_string_lossy()]})).unwrap()["items"][0].as_u64().unwrap();
     s.execute("comp.new", json!({"name":"Vec","width":320,"height":180,"duration":4})).unwrap();

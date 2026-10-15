@@ -33,6 +33,7 @@ fn saved(store: &Arc<MemoryConfig>) -> Session {
 fn check_info_transaction(via_escape: bool) {
     let store = Arc::new(MemoryConfig::default());
     let mut session = Session { config: Some(store.clone()), ..Default::default() };
+    session.prefs.general.language = "en".into();
     session.prefs.disk.disk_cache_enabled = false;
     session.save_prefs();
     session.execute("comp.new", json!({"width":32,"height":32,"duration":2})).unwrap();
@@ -137,7 +138,7 @@ fn gpu_information_names_the_adapter_and_why_the_gpu_is_off() {
 
 #[test]
 fn gpu_information_dialog_stays_in_place() {
-    let mut session = Session::default();
+    let mut session = crate::english_test_session(Session::default());
     session.prefs.appearance.ui_scale = 125;
     session.execute("comp.new", json!({"width":32,"height":32,"duration":2})).unwrap();
     let mut h = Harness::builder().with_size(vec2(1280.0, 720.0)).build_eframe(|_| EffectcraftApp::new(session));
@@ -159,7 +160,7 @@ fn gpu_information_dialog_stays_in_place() {
 /// there, closed otherwise.
 #[test]
 fn gpu_information_enter_presses_ok() {
-    let mut session = Session::default();
+    let mut session = crate::english_test_session(Session::default());
     session.execute("comp.new", json!({"width":32,"height":32,"duration":2})).unwrap();
     let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(session));
     h.run_steps(4);

@@ -1107,7 +1107,7 @@ fn delete_surrounding_bytes_through_the_app_replaces_the_emoji() {
 /// Use the real viewer's outgoing caret geometry to aim the interruption at a known position.
 fn ime_interruption_editor() -> (Harness<'static, EffectcraftApp>, Pos2) {
     crate::add_canonical_test_fonts();
-    let mut s = Session::default();
+    let mut s = crate::english_test_session(Session::default());
     s.execute("comp.new", json!({"name": "Type", "width": 640, "height": 360, "duration": 2})).unwrap();
     let lid = s.execute("layer.newText", json!({"text": "abcd", "size": 80, "position": [80, 120], "justify": "left"})).unwrap()["layer"].as_u64().unwrap();
     let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).build_eframe(move |cc| {

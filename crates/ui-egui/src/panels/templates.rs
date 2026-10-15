@@ -328,6 +328,7 @@ mod tests {
     #[test]
     fn my_custom_rgb_dialog() {
         let mut app = app_with_store();
+        app.session.prefs.general.language = "en".into();
         let ctx = egui::Context::default();
         crate::theme::install(&ctx, &app.tokens, crate::i18n::language(&app));
         // Menu check marks follow the active comp's viewer.

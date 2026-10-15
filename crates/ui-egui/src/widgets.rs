@@ -517,11 +517,7 @@ fn drag_toggle(ui: &Ui, response: &Response, value: Option<bool>) -> Option<bool
                 }
                 Step::Release => held = false,
                 Step::Move if held => match drag.target {
-                    Some(target) if over => {
-                        if drag.visited.insert(response.id) && on != target {
-                            return Some(target);
-                        }
-                    }
+                    Some(target) if over && drag.visited.insert(response.id) && on != target => return Some(target),
                     None if press_seen && over => {
                         drag.pending.insert(response.id);
                     }

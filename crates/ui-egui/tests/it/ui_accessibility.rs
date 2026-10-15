@@ -18,7 +18,7 @@ use egui_kittest::kittest::{NodeT, Queryable};
 use serde_json::json;
 
 fn harness() -> Harness<'static, EffectcraftApp> {
-    let mut s = Session::default();
+    let mut s = crate::english_test_session(Session::default());
     s.execute("file.openDemoProject", json!({})).unwrap();
     // A text layer under edit gives the Character / Paragraph panels their controls.
     let _ = s.execute("layer.select", json!({"layers": ["EFFECTCRAFT"]}));

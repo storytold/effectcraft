@@ -19,7 +19,7 @@ fn harness(s: Session) -> Harness<'static, EffectcraftApp> {
 }
 
 fn session() -> Session {
-    let mut s = Session::default();
+    let mut s = crate::english_test_session(Session::default());
     s.execute("comp.new", json!({"name": "Main", "width": 320, "height": 180, "duration": 4})).unwrap();
     s
 }
