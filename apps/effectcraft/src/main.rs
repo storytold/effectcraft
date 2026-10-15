@@ -311,7 +311,7 @@ fn main() -> eframe::Result {
             if let Some(backend) = cloud::service(cc.egui_ctx.clone()) {
                 app.cloud.connect(backend);
             }
-            app.share.connect(collabcraft_share::CollabCraft::from_fn(cloud::client));
+            app.share.connect(collabcraft_share::CollabCraft::from_fn(cloud::client).for_app("effectcraft"));
             // Open-URL hook for the device-flow browser launch from the cloud UI.
             app.hooks.open_url = Some(Box::new(|url: &str| {
                 if let Err(e) = cloud::open_browser(url) {

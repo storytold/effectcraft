@@ -257,7 +257,7 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
                 // the cloud controls reflect the signed-in user rather than staying blank.
                 effectcraft_ui_egui::cloud::start(&mut app);
                 if let Some(share) = collabcraft_share::CollabCraft::from_env() {
-                    app.share.connect(share);
+                    app.share.connect(share.for_app("effectcraft"));
                 }
                 // Viewer frames render in frame workers (`?frameworkers=N`, 0 or `?noworkers`:
                 // on the page's thread), each on its own WebGPU device where the browser has
