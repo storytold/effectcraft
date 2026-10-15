@@ -14,6 +14,8 @@ effectcraft-engine = { workspace = true }
 effectcraft-host = { workspace = true }
 effectcraft-ui-egui = { workspace = true }
 egui = { workspace = true }
+craft-cloud-client = { workspace = true }
+collabcraft-share = { workspace = true }
 # `links`: links (Help menu, Discord, Settings) open in the system browser.
 eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit", "links", "wayland", "x11"] }
 serde = { workspace = true }
@@ -25,6 +27,9 @@ rfd = { workspace = true }
 pollster = { workspace = true }
 cpal = { workspace = true }
 log = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Settings ▸ Appearance ▸ Sync with System: the XDG desktop portal's colour scheme. Already in

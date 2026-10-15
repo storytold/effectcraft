@@ -42,8 +42,15 @@ fn demo(s: &mut Session, _: &Value) -> Result<Value> {
 
 pub(crate) fn open(s: &mut Session, p: &Value) -> Result<Value> {
     let path = str_p(p, "path").ok_or_else(|| bad("file.open", "missing `path`"))?;
-    let bytes = s.services.read_file(path).map_err(|e| EngineError::Other(format!("cannot read {path}: {e}")))?;
-    let text = String::from_utf8(bytes).map_err(|_| EngineError::Other("not a text project file".into()))?;
+    // `text`: pre-loaded project text, for opening from cloud storage where no on-disk path
+    // exists. When present the file system is not read, so this works on any platform including
+    // wasm32 without writing a temporary file.
+    let text = if let Some(text) = str_p(p, "text") {
+        text.to_owned()
+    } else {
+        let bytes = s.services.read_file(path).map_err(|e| EngineError::Other(format!("cannot read {path}: {e}")))?;
+        String::from_utf8(bytes).map_err(|_| EngineError::Other("not a text project file".into()))?
+    };
     // XML copies (File ▸ Save a Copy As XML…) open like the JSON project.
     let text = if crate::xml_project::is_xml(&text) { crate::xml_project::from_xml(&text).map_err(EngineError::Other)? } else { text };
     let (mut proj, repaired) =
@@ -89,6 +96,15 @@ pub(crate) fn open(s: &mut Session, p: &Value) -> Result<Value> {
 pub(crate) fn file_text(s: &Session, path: &str) -> Result<String> {
     let json = s.project.to_file_json_with_view(&s.saved_view())?;
     if crate::xml_project::is_xml_path(path) { crate::xml_project::to_xml(&json).map_err(EngineError::Other) } else { Ok(json) }
+}
+
+/// Return the current project as JSON text, without writing to disk.
+///
+/// Used by cloud Save to encode the project for upload. The caller receives
+/// `{"text": "..."}` where `text` is the same JSON a `file.save` would write.
+fn to_json_cmd(s: &mut Session, _: &Value) -> Result<Value> {
+    let text = file_text(s, "project.ecproj")?;
+    Ok(json!({"text": text}))
 }
 
 fn save_to(s: &mut Session, path: &str) -> Result<Value> {
@@ -751,5 +767,7 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
         cmd!("file.cycleBitDepth", "Cycle Project Bit Depth", [], None, "{}", always, cycle_depth),
         cmd!("render.backend", "Video Rendering and Effects", [], None, "{backend?: gpu|cpu}", always, render_backend),
+        // Returns the project as JSON text without writing to disk. Used by cloud Save.
+        cmd!("file.toJson", "Project as JSON", [], None, "{}", always, to_json_cmd),
     ]
 }

@@ -33,6 +33,8 @@ pub mod audio;
 #[cfg(target_arch = "wasm32")]
 pub mod browse;
 #[cfg(target_arch = "wasm32")]
+mod cloud;
+#[cfg(target_arch = "wasm32")]
 pub mod diskcache;
 #[cfg(target_arch = "wasm32")]
 pub mod files;

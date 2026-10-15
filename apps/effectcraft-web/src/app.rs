@@ -250,6 +250,12 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
                     app.offer_recovery(r);
                 }
                 install_hooks(&mut app);
+                // Cloud: wire the CollabCraft backend for same-origin cookie auth, and the
+                // share dialog. Both are always available when served from CollabCraft.
+                app.cloud.connect(crate::cloud::Service::new(cc.egui_ctx.clone()));
+                if let Some(share) = collabcraft_share::CollabCraft::from_env() {
+                    app.share.connect(share);
+                }
                 // Viewer frames render in frame workers (`?frameworkers=N`, 0 or `?noworkers`:
                 // on the page's thread), each on its own WebGPU device where the browser has
                 // WebGPU in workers (`?nogpuworkers`: their CPU).
