@@ -229,6 +229,10 @@ impl CloudApp for EffectcraftApp {
         self.toast = Some((text, now));
     }
 
+    fn go_to_save_as(&mut self) {
+        self.cloud_page = Some(CloudPage::SaveAs);
+    }
+
     fn app_name(&self) -> &str {
         "EffectCraft"
     }
@@ -255,6 +259,50 @@ impl CloudApp for EffectcraftApp {
             family: FontFamily::Proportional,
             bold: FontFamily::Name("semibold".into()),
         }
+    }
+}
+
+/// Which cloud page the File menu opened, if any.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloudPage {
+    Open,
+    SaveAs,
+}
+
+/// Open / Save As pages as a modal from File ▸ Open from cloud… / Save as to cloud….
+pub fn modal(app: &mut EffectcraftApp, ctx: &egui::Context) {
+    let Some(page) = app.cloud_page else { return };
+    let title = match page {
+        CloudPage::Open => "Open from cloud",
+        CloudPage::SaveAs => "Save as to cloud",
+    };
+    let mut close = false;
+    egui::Modal::new(egui::Id::new("effectcraft_cloud_page")).show(ctx, |ui| {
+        let margin = egui::Frame::popup(ui.style()).total_margin().sum();
+        let room = (ctx.content_rect().size() - margin - egui::vec2(16.0, 16.0)).max(egui::Vec2::splat(1.0));
+        let width = 680.0_f32.min(room.x);
+        ui.set_min_width(360.0_f32.min(width));
+        ui.set_max_width(width);
+        ui.label(egui::RichText::new(title).strong().size(16.0));
+        ui.add_space(10.0);
+        let body = (room.y - ui.min_size().y - 48.0).max(1.0);
+        egui::ScrollArea::vertical().id_salt(("effectcraft_cloud_page", page == CloudPage::SaveAs)).max_height(body).show(ui, |ui| match page {
+            CloudPage::Open => open_page(app, ui),
+            CloudPage::SaveAs => {
+                close = save_page(app, ui);
+            }
+        });
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Close").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    close = true;
+                }
+            });
+        });
+    });
+    if close {
+        app.cloud_page = None;
     }
 }
 
