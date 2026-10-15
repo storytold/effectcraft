@@ -110,6 +110,12 @@ fn to_fault(e: Error) -> Fault {
     }
 }
 
+/// The CollabCraft path for ending a session. The web app POSTs here on sign-out.
+///
+/// Note: the old `/logout` root is not a CollabCraft route; the correct path is
+/// `/auth/logout`.
+const LOGOUT_PATH: &str = "/auth/logout";
+
 /// Redirect to the CollabCraft sign-in page when not already on an auth page.
 fn offer_login() {
     let Some(window) = web_sys::window() else { return };
@@ -130,9 +136,21 @@ async fn fetch_logout() -> Result<(), String> {
     let init = web_sys::RequestInit::new();
     init.set_method("POST");
     init.set_credentials(web_sys::RequestCredentials::Include);
-    let req = web_sys::Request::new_with_str_and_init("/logout", &init).map_err(|e| format!("{e:?}"))?;
+    let req = web_sys::Request::new_with_str_and_init(LOGOUT_PATH, &init).map_err(|e| format!("{e:?}"))?;
     let promised = fetch.call1(global.as_ref(), req.as_ref()).map_err(|e| format!("{e:?}"))?;
     let promised: js_sys::Promise = promised.dyn_into().map_err(|_| "not a promise".to_owned())?;
     wasm_bindgen_futures::JsFuture::from(promised).await.map_err(|e| format!("{e:?}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LOGOUT_PATH;
+
+    /// Sign-out must POST to the CollabCraft path `/auth/logout`, not the bare
+    /// `/logout` that is not a CollabCraft route.
+    #[test]
+    fn logout_path_is_collabcraft_auth_route() {
+        assert_eq!(LOGOUT_PATH, "/auth/logout");
+    }
 }
