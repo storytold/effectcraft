@@ -259,7 +259,7 @@ pub fn show(
     ui.add_space(8.0);
     ui.horizontal(|ui| {
         for (tab, label, key) in [(Tab::Basic, "Basic", "basic"), (Tab::Advanced, "Advanced", "advanced"), (Tab::Renderer, "3D Renderer", "renderer")] {
-            let r = ui.selectable_label(d.tab == tab, label);
+            let r = ui.selectable_label(d.tab == tab, tr(label));
             auto.add(&format!("dialog.comp.tab.{key}"), r.rect, label);
             if r.clicked() {
                 d.tab = tab;
@@ -320,7 +320,7 @@ pub fn show(
                     let (ow, oh) = (d.width, d.height);
                     let r = ui.add(crate::widgets::drag_value(egui::DragValue::new(&mut d.width).range(4..=30000).suffix(" px")));
                     auto.add("dialog.comp.width", r.rect, "Width");
-                    let lbl = format!("Lock Aspect Ratio to {}", aspect_label(ow as f64, oh as f64));
+                    let lbl = tr_args("Lock Aspect Ratio to {}", &[&aspect_label(ow as f64, oh as f64)]);
                     let r = ui.checkbox(&mut d.lock_aspect, lbl);
                     auto.add("dialog.comp.lockAspect", r.rect, "Lock Aspect Ratio");
                     if d.lock_aspect && ow != d.width && ow > 0 {
@@ -341,11 +341,11 @@ pub fn show(
                     let cur = PIXEL_ASPECTS
                         .iter()
                         .find(|(_, v)| (v - d.pixel_aspect).abs() < 1e-3)
-                        .map(|p| p.0.to_string())
+                        .map(|p| tr(p.0).to_string())
                         .unwrap_or_else(|| format!("{:.2}", d.pixel_aspect));
                     let r = egui::ComboBox::from_id_salt("comp-par").width(220.0).selected_text(cur).show_ui(ui, |ui| {
                         for (name, v) in PIXEL_ASPECTS {
-                            if ui.selectable_label((v - d.pixel_aspect).abs() < 1e-3, *name).clicked() {
+                            if ui.selectable_label((v - d.pixel_aspect).abs() < 1e-3, tr(name)).clicked() {
                                 d.pixel_aspect = *v;
                             }
                         }
@@ -392,7 +392,7 @@ pub fn show(
                 ui.horizontal(|ui| {
                     let r = crate::widgets::srgb_color_button(ui, &mut d.bg);
                     auto.add("dialog.comp.background", r.rect, "Background Color");
-                    ui.label(color_name(d.bg));
+                    ui.label(tr(color_name(d.bg)));
                 });
                 ui.end_row();
             });

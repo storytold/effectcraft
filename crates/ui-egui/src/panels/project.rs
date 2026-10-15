@@ -443,7 +443,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     // Search.
     let sr = Rect::from_min_size(pos2(rect.min.x + 8.0, head.max.y + 2.0), vec2(rect.width() - 16.0, 22.0));
     let mut q = app.ui.project_search.clone();
-    widgets::search_field(ui, sr, &mut q, "Search project", &t);
+    widgets::search_field(ui, sr, &mut q, crate::i18n::tr("Search project"), &t);
     app.ui.project_search = q;
     app.auto.add("project.search", sr, "Search");
     // Column header: Name, Label, then the visible optional columns.

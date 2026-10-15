@@ -18,7 +18,7 @@ pub fn home_tab(app: &mut EffectcraftApp, ui: &mut egui::Ui, area: Rect) {
     p.text(
         pos2(x, y + 26.0),
         Align2::LEFT_CENTER,
-        "Hands-on tutorials that run inside EffectCraft. Do each step yourself, or press Show me.",
+        crate::i18n::tr("Hands-on tutorials that run inside EffectCraft. Do each step yourself, or press Show me."),
         Tokens::ui(11.5),
         t.text_faint,
     );
@@ -38,7 +38,7 @@ pub fn home_tab(app: &mut EffectcraftApp, ui: &mut egui::Ui, area: Rect) {
         p.circle_filled(badge.center(), 22.0, t.accent.gamma_multiply(0.25));
         p.circle_stroke(badge.center(), 22.0, Stroke::new(1.5, t.accent));
         p.text(badge.center() - vec2(0.0, 5.0), Align2::CENTER_CENTER, tut.steps.len().to_string(), Tokens::semibold(15.0), Color32::WHITE);
-        p.text(badge.center() + vec2(0.0, 10.0), Align2::CENTER_CENTER, "steps", Tokens::ui(9.0), t.text_dim);
+        p.text(badge.center() + vec2(0.0, 10.0), Align2::CENTER_CENTER, crate::i18n::tr("steps"), Tokens::ui(9.0), t.text_dim);
         let tx = badge.max.x + 16.0;
         p.text(pos2(tx, r.min.y + 22.0), Align2::LEFT_CENTER, &tut.title, Tokens::semibold(14.0), Color32::WHITE);
         p.text(pos2(tx, r.min.y + 40.0), Align2::LEFT_CENTER, format!("{} min", tut.minutes), Tokens::ui(11.0), t.text_faint);

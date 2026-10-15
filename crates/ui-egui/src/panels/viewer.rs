@@ -745,7 +745,13 @@ fn locked_pane(app: &mut EffectcraftApp, ui: &mut egui::Ui, full: Rect, bg: Colo
     // Close the locked viewer.
     let close = Rect::from_min_size(pos2(r.max.x - 26.0, r.min.y + 4.0), vec2(20.0, 20.0));
     let resp = ui.interact(close, egui::Id::new("viewer-locked-close"), Sense::click());
-    p.text(close.center(), Align2::CENTER_CENTER, "\u{00d7}", Tokens::ui(14.0), if resp.hovered() { Color32::WHITE } else { Color32::from_white_alpha(170) });
+    p.text(
+        close.center(),
+        Align2::CENTER_CENTER,
+        crate::i18n::tr("\u{00d7}"),
+        Tokens::ui(14.0),
+        if resp.hovered() { Color32::WHITE } else { Color32::from_white_alpha(170) },
+    );
     app.auto.add("viewer.locked.close", close, "Close Locked Viewer");
     if resp.clicked() {
         let _ = app.session.execute("view.closeLockedViewer", serde_json::json!({}));
@@ -2603,12 +2609,12 @@ fn empty_state(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let c = rect.center();
     p.text(c - vec2(0.0, 40.0), Align2::CENTER_CENTER, crate::i18n::tr("Composition"), Tokens::semibold(16.0), t.text);
     let b1 = Rect::from_center_size(c + vec2(0.0, 0.0), vec2(220.0, 30.0));
-    if widgets::text_button(ui, b1, "New Composition", true, &t, egui::Id::new("empty-newcomp")).clicked() {
+    if widgets::text_button(ui, b1, crate::i18n::tr("New Composition"), true, &t, egui::Id::new("empty-newcomp")).clicked() {
         crate::panels::dialogs::open_new_comp(app);
     }
     app.auto.add("viewer.empty.newComp", b1, "New Composition");
     let b2 = Rect::from_center_size(c + vec2(0.0, 40.0), vec2(220.0, 30.0));
-    if widgets::text_button(ui, b2, "New Composition From Footage", false, &t, egui::Id::new("empty-fromfootage")).clicked() {
+    if widgets::text_button(ui, b2, crate::i18n::tr("New Composition From Footage"), false, &t, egui::Id::new("empty-fromfootage")).clicked() {
         let _ = crate::menus::invoke(app, &ui.ctx().clone(), "file.import", json!({}));
     }
     app.auto.add("viewer.empty.import", b2, "New Composition From Footage");
