@@ -253,6 +253,9 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
                 // Cloud: wire the CollabCraft backend for same-origin cookie auth, and the
                 // share dialog. Both are always available when served from CollabCraft.
                 app.cloud.connect(crate::cloud::Service::new(cc.egui_ctx.clone()));
+                // Bootstrap account and root folder: this first Account job is what makes
+                // the cloud controls reflect the signed-in user rather than staying blank.
+                effectcraft_ui_egui::cloud::start(&mut app);
                 if let Some(share) = collabcraft_share::CollabCraft::from_env() {
                     app.share.connect(share);
                 }

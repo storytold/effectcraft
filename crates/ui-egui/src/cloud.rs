@@ -291,4 +291,34 @@ mod tests {
         assert_eq!(project_name("My Scene.ecproj"), "My Scene.ecproj");
         assert_eq!(project_name("a/b/c.ecproj"), "c.ecproj");
     }
+
+    /// `start` must submit `Job::Account` the first time it is called once a
+    /// backend is connected, and must not submit a second one when called again
+    /// in the same run (idempotent bootstrap).
+    ///
+    /// This is a regression for the web build where `start` was not called at
+    /// all after wiring the backend, leaving the account controls blank.
+    #[test]
+    fn start_submits_account_bootstrap_exactly_once() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        struct Cap(Arc<AtomicU32>);
+        impl CloudBackend for Cap {
+            fn submit(&self, job: Job, _post: Post) {
+                if matches!(job, Job::Account) {
+                    self.0.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+
+        let count = Arc::new(AtomicU32::new(0));
+        let mut app = crate::EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.cloud.connect(Cap(count.clone()));
+        start(&mut app);
+        assert_eq!(count.load(Ordering::Relaxed), 1, "start must submit Job::Account once");
+        // Second call in the same run: no duplicate bootstrap.
+        start(&mut app);
+        assert_eq!(count.load(Ordering::Relaxed), 1, "start is idempotent: no second Account job");
+    }
 }
