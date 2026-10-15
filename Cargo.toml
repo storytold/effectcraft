@@ -103,9 +103,9 @@ craft-ui = { version = "0.1.0", git = "https://github.com/wdunn001/craft-libs", 
 # The vendor-neutral cloud provider contract (no IO, no vendor).
 craft-cloud = { git = "https://github.com/wdunn001/craft-libs", rev = "289d562" }
 # How the desktop and web apps reach CollabCraft. No provider credential here.
-craft-cloud-client = { git = "https://github.com/wdunn001/collab-craft", rev = "80bfaec" }
+craft-cloud-client = { git = "https://github.com/wdunn001/collab-craft", rev = "3c77c3e" }
 # The share dialog's backend, wired to CollabCraft's service.
-collabcraft-share = { git = "https://github.com/wdunn001/collab-craft", rev = "80bfaec" }
+collabcraft-share = { git = "https://github.com/wdunn001/collab-craft", rev = "3c77c3e" }
 egui = "0.36"
 eframe = { version = "0.36", default-features = false }
 egui_kittest = "0.36"
