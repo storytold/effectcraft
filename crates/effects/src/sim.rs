@@ -1068,11 +1068,53 @@ fn pw_phys(ctx: &EffectCtx) -> Phys {
     }
 }
 
-fn particle_world(ctx: &EffectCtx, b: Buf) -> Buf {
-    match particle_world_plan(ctx, &b) {
-        Some(plan) => plan.finish(b),
-        None => b,
+/// CC Particle World's Particle Type ▸ Textured Square.
+const PW_TEXTURED_SQUARE: u32 = 8;
+/// CC Particle World's Particle ▸ Texture ▸ Texture Layer.
+const PW_TEXTURE_LAYER: &str = "particle/texture/textureLayer";
+
+/// Whether CC Particle World draws its Texture Layer on the particles (Textured Square with a
+/// layer chosen). Only the CPU does: the Texture Layer is a CPU-only control in `catalog`.
+fn particle_world_textured(ctx: &EffectCtx) -> bool {
+    ctx.params.e("particle/particleType") == PW_TEXTURED_SQUARE && ctx.params.get(PW_TEXTURE_LAYER).and_then(Value::as_layer).is_some()
+}
+
+fn particle_world(ctx: &EffectCtx, mut b: Buf) -> Buf {
+    let Some(plan) = particle_world_plan(ctx, &b) else { return b };
+    // The texture at the current comp time. A layer the host can't give (the effect's own
+    // layer with its effects, a reference cycle) leaves the squares in the particle colour.
+    match particle_world_textured(ctx).then(|| ctx.layer_param(PW_TEXTURE_LAYER, true)).flatten() {
+        // The particles replace the layer ([`particle_sprites`]).
+        Some(tex) => {
+            b.img = splat_textured(b.img.width, b.img.height, &plan.sprites, plan.acc, &tex);
+            b
+        }
+        None => plan.finish(b),
     }
+}
+
+/// Draw square sprites into a new transparent image of `w`×`h`, each showing the layer `tex`
+/// stretched over the square (turned with it) at the sprite's opacity.
+fn splat_textured(w: u32, hgt: u32, sprites: &[Sprite], acc: Acc, tex: &crate::LayerPixels) -> Image {
+    let mut img = Image::new(w, hgt);
+    let (tw, th) = (tex.size[0], tex.size[1]);
+    let shade = |s: &Sprite, x: f32, y: f32| {
+        // As [`sprite_shade`]'s Square, sub-pixel sprites included.
+        let (r, fade) = if s.r < 0.5 { (0.5, s.r / 0.5) } else { (s.r, 1.0) };
+        let (sn, cs) = s.rot.sin_cos();
+        let (dx, dy) = (x - s.x, y - s.y);
+        let (ux, uy) = (dx * cs + dy * sn, -dx * sn + dy * cs);
+        let e = r * 0.75;
+        let a = aa(e - ux.abs()) * aa(e - uy.abs()) * s.c[3] * fade;
+        if a <= 1e-6 {
+            return None;
+        }
+        let (u, v) = (((ux / e + 1.0) * 0.5).clamp(0.0, 1.0) as f64, ((uy / e + 1.0) * 0.5).clamp(0.0, 1.0) as f64);
+        let (px, py) = tex.buf.to_px([u * tw, v * th]);
+        Some(tex.buf.img.sample_bilinear_clamped(px, py).map(|c| c * a))
+    };
+    raster(&mut img, sprites, sprite_bbox, shade, acc);
+    img
 }
 
 /// CC Particle World's Extras ▸ Effect Camera parameters (id prefix).
@@ -1507,6 +1549,7 @@ pub fn specs() -> Vec<EffectSpec> {
                 p("physics/gravityVector/gravityY", "Gravity Y", num(1.0), slider(-1.0, 1.0, -1.0, 1.0, 2)),
                 p("physics/gravityVector/gravityZ", "Gravity Z", num(0.0), slider(-1.0, 1.0, -1.0, 1.0, 2)),
                 p("particle/particleType", "Particle Type", Value::Enum(0), popup(PARTICLE_TYPES)),
+                p(PW_TEXTURE_LAYER, "Texture Layer", Value::Layer(None), ParamUi::Layer),
                 p("particle/birthSize", "Birth Size", num(0.2), slider(0.0, 10.0, 0.0, 1.0, 3)),
                 p("particle/deathSize", "Death Size", num(0.2), slider(0.0, 10.0, 0.0, 1.0, 3)),
                 p("particle/sizeVariation", "Size Variation", num(0.0), pct()),
@@ -1891,6 +1934,53 @@ mod tests {
         assert_eq!(key(&params), key(&moved));
         moved.values.insert("extras/randomSeed".into(), num(9.0));
         assert_ne!(key(&params), key(&moved));
+    }
+
+    /// A host whose every layer is `img`.
+    struct TexHost(Image);
+    impl crate::EffectHost for TexHost {
+        fn layer(&self, _: u64, _: bool) -> Option<crate::LayerPixels> {
+            let s = [self.0.width as f64, self.0.height as f64];
+            Some(crate::LayerPixels { buf: Buf { img: self.0.clone(), offset: [0.0; 2], scale: 1.0 }, size: s })
+        }
+        fn audio(&self, _: u64, _: f64, _: usize, _: u32) -> Option<Vec<f32>> {
+            None
+        }
+    }
+
+    /// #1465: Textured Square draws the Texture Layer on each particle, not the particle colour.
+    #[test]
+    fn particle_world_textured_square_draws_the_texture_layer() {
+        // Left half green, right half blue; the particles themselves are red.
+        let mut tex = Image::new(8, 8);
+        for y in 0..8 {
+            for x in 0..8 {
+                tex.set(x, y, if x < 4 { [0.0, 1.0, 0.0, 1.0] } else { [0.0, 0.0, 1.0, 1.0] });
+            }
+        }
+        let host = TexHost(tex);
+        let vals = |layer: Option<u64>| {
+            vec![
+                ("birthRate", num(1.0)),
+                ("extras/randomSeed", num(4.0)),
+                ("particle/particleType", Value::Enum(8)),
+                ("particle/texture/textureLayer", Value::Layer(layer)),
+                ("particle/birthSize", num(1.0)),
+                ("particle/deathSize", num(1.0)),
+                ("particle/birthColor", col(1.0, 0.0, 0.0)),
+                ("particle/deathColor", col(1.0, 0.0, 0.0)),
+            ]
+        };
+        let env = EffectEnv { host: Some(&host), ..Default::default() };
+        let out = run_fx("ec.sim.ccparticleworld", &vals(Some(1)), Image::new(48, 48), 1.0, env).img;
+        let seen: Vec<_> = out.data.iter().filter(|p| p[3] > 0.05).collect();
+        assert!(!seen.is_empty(), "particles drawn");
+        assert!(seen.iter().all(|p| p[0] < 0.02 * p[3]), "no particle colour: {:?}", seen.iter().find(|p| p[0] >= 0.02 * p[3]));
+        // Both halves of the texture show: it is mapped across the square, not sampled once.
+        assert!(seen.iter().any(|p| p[1] > 2.0 * p[2]) && seen.iter().any(|p| p[2] > 2.0 * p[1]), "both texture halves");
+        // Without a texture layer the squares keep the particle colour.
+        let plain = run_fx("ec.sim.ccparticleworld", &vals(None), Image::new(48, 48), 1.0, env).img;
+        assert!(plain.data.iter().any(|p| p[3] > 0.05 && p[0] > 0.9 * p[3]));
     }
 
     #[test]

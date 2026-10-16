@@ -89,6 +89,7 @@ const CPU_ONLY_CONTROLS: &[(&str, &[&str])] = &[
     ("ec.distort.ccpowerpin", &["unstretch"]),
     ("ec.matte.refinesoft", &["reduceChatter", "useMotionBlur", "invert"]),
     ("ec.matte.refinehard", &["reduceChatter", "useMotionBlur", "invert"]),
+    ("ec.sim.ccparticleworld", &["particle/texture/textureLayer"]),
 ];
 
 /// Whether the GPU kernel of effect `id` covers the instance's current settings (see
