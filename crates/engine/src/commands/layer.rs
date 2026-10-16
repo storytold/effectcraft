@@ -218,6 +218,7 @@ fn new_shape(s: &mut Session, p: &Value) -> Result<Value> {
         .unwrap_or([300.0, 300.0]);
     // A fill, and a stroke only with a width (not the Tools bar's paint).
     let paint = super::shape_tool::paint_p(p, &Default::default(), "layer.newShape")?;
+    let round = super::shape_tool::roundness_p(p, &kind, "layer.newShape")?;
     let pos = p
         .get("position")
         .and_then(|v| v.as_array())
@@ -228,7 +229,8 @@ fn new_shape(s: &mut Session, p: &Value) -> Result<Value> {
         let mut next = proj.next_id;
         let g = super::shape_tool::shape_group(&mut Ids(&mut next), &kind, size, &paint);
         proj.next_id = next;
-        if let Some(g) = g {
+        if let Some(mut g) = g {
+            super::shape_tool::set_roundness(&mut g, round);
             super::shape_tool::add_to_contents(proj, cid, lid, g, [0.0, 0.0], "layer.newShape")?;
         }
         Ok(lid)
@@ -1603,7 +1605,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Shape Layer",
             ["Layer", "New"],
             None,
-            "{kind?: rect|rounded|ellipse|star|polygon|none, name?, size?, fill?, fillType?, fillBlend?, fillOpacity?, stroke?, strokeType?, strokeBlend?, strokeOpacity?, strokeWidth?, position?}",
+            "{kind?: rect|rounded|ellipse|star|polygon|none, name?, size?, roundness? px (rect/rounded), fill?, fillType?, fillBlend?, fillOpacity?, stroke?, strokeType?, strokeBlend?, strokeOpacity?, strokeWidth?, position?}",
             has_comp,
             new_shape
         ),

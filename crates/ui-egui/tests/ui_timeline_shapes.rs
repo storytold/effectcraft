@@ -283,3 +283,41 @@ fn ctrl_v_pastes_svg_markup_as_a_shape_layer() {
     assert_eq!(c.layers.len(), 4);
     assert_eq!(c.layers[0].name, "Oval 2");
 }
+
+/// The ⇄ Reverse Path Direction button on a shape item's row (After Effects): each click
+/// toggles the item's Path Direction as one undo step; the direction itself isn't a row.
+#[test]
+fn reverse_path_direction_button_toggles_the_path_direction() {
+    let mut s = session();
+    let l = s.execute("layer.newShape", json!({"kind": "ellipse"})).unwrap()["layer"].as_u64().unwrap();
+    let (contents, group, ellipse, fill) = {
+        let layer = s.active_comp().unwrap().layer(LayerId(l)).unwrap();
+        let g = layer.props.group("contents/group").unwrap();
+        let c = g.sub("contents").unwrap();
+        (vec![layer.props.sub("contents").unwrap().uid, c.uid], g.uid, c.sub("ellipse").unwrap().uid, c.sub("fill").unwrap().uid)
+    };
+    let mut h = harness(s);
+    open_layer(&mut h, l);
+    h.state_mut().ui.timeline.open_groups.extend(contents.into_iter().chain([group, ellipse]));
+    h.run_steps(2);
+    let dir = |h: &Harness<'_, EffectcraftApp>| {
+        let layer = h.state().session.active_comp().unwrap().layer(LayerId(l)).unwrap().clone();
+        layer.props.find_group(ellipse).unwrap().get("direction").unwrap().value.clone()
+    };
+    let button = format!("timeline.group.{ellipse}.reversePath");
+    assert!(h.state().auto.find(&format!("timeline.group.{fill}.reversePath")).is_none(), "only on path items");
+    assert_eq!(dir(&h), effectcraft_engine::keyframe::Value::Enum(0));
+    assert_eq!(h.state().auto.find(&button).map(|e| e.label.clone()).as_deref(), Some("Reverse Path Direction Off"));
+    click(&mut h, &button);
+    assert_eq!(dir(&h), effectcraft_engine::keyframe::Value::Enum(1));
+    assert_eq!(h.state().auto.find(&button).map(|e| e.label.clone()).as_deref(), Some("Reverse Path Direction On"));
+    // Path Direction stays hidden as a property row.
+    let direction = h.state().session.active_comp().unwrap().layer(LayerId(l)).unwrap().props.find_group(ellipse).unwrap().get("direction").unwrap().uid;
+    assert!(h.state().auto.find(&format!("timeline.prop.{direction}.row")).is_none(), "no Path Direction row");
+    let size = h.state().session.active_comp().unwrap().layer(LayerId(l)).unwrap().props.find_group(ellipse).unwrap().get("size").unwrap().uid;
+    assert!(h.state().auto.find(&format!("timeline.prop.{size}.row")).is_some(), "the ellipse is open (its Size row shows)");
+    click(&mut h, &button);
+    assert_eq!(dir(&h), effectcraft_engine::keyframe::Value::Enum(0));
+    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(dir(&h), effectcraft_engine::keyframe::Value::Enum(1), "each click is one undo step");
+}

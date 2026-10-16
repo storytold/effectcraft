@@ -2,7 +2,7 @@
 
 **Stage: alpha** · next: beta, ~30 points of "ready for real work" and ~350–620 h away
 
-> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-12 · **Change:** minor (open-issue count, crash list and localization share re-audited against `upstream/main` 470ea7a3) · **Target:** Adobe After Effects 2026 (26.5.0.89)
+> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-15 · **Change:** minor (mask/shape marquee routing; open-issue count, crash list and localization share re-audited against `upstream/main` 470ea7a3) · **Target:** Adobe After Effects 2026 (26.5.0.89)
 
 EffectCraft aims to do what After Effects does, with the same panels, menus and behaviour, written
 from scratch in Rust. This page is the one-page summary; the evidence is in
@@ -117,6 +117,8 @@ Come tell us what matters most to you on [Discord](https://discord.gg/artcraft).
 
 ## Progress log
 
+- 2026-10-15: Mask marquees can start over full-frame artwork; explicit shape-vertex editing retains marquees, while ordinary shape selection still drags Position. Empty vertex marquees clear vertices without changing the selected layer. Focused UI regressions added; compiled only under the owner daytime policy.
+
 - 2026-10-12: Roto Brush span edits report strokes outside a trimmed layer without panicking;
   strokes and undo history are preserved so restoring the timing allows the span edit again.
 - 2026-10-11: Ukrainian panels caught up with the Chinese catalogs. The 95 rows the panel
@@ -150,6 +152,7 @@ Come tell us what matters most to you on [Discord](https://discord.gg/artcraft).
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-15 | minor | Mask and shape marquee routing with ordinary layer movement preserved; no parity estimate change |
 | 2026-10-12 | minor | Open-issue count (134 to 216), crash list and localization share (12% to 18%) updated to match docs/gaps.md |
 | 2026-10-12 | patch | Roto Brush span validation after trimming; command regressions for both layer edges |
 | 2026-10-10 | minor | Hours to ≈ 95% for each audience |

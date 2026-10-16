@@ -1521,6 +1521,15 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     layer: h.layer,
                 }
             }),
+            // Masks and explicitly selected shape vertices own interior marquees; merely showing a shape path must not block layer movement.
+            Tool::Selection
+                if !mods.alt
+                    && paths.iter().any(|p| p.is_mask || app.session.state.selected_vertices.iter().any(|v| v.layer == p.layer && v.mask == p.uid))
+                    && vertex_hits.iter().any(|h| h.tangent.is_none())
+                    && !handle_hits.iter().any(|(_, _, h, _)| h.distance(press) < HANDLE + 2.0) =>
+            {
+                Some(Gesture::Marquee { start: press })
+            }
             // Everything starts where the button went down: by the time the pointer has moved
             // far enough to count as a drag it may have left a small handle.
             Tool::Selection => {
@@ -1840,7 +1849,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 Gesture::Overlay(ov::Drag::Guide { index, .. }) if !area.contains(pos) || !comp_rect.expand(40.0).contains(pos) => {
                     let _ = app.session.execute("view.removeGuide", json!({"index": index}));
                 }
-                Gesture::Marquee { start } if vertex_hits.iter().any(|h| h.tangent.is_none() && Rect::from_two_pos(start, pos).contains(h.pos)) => {
+                Gesture::Marquee { start } if vertex_hits.iter().any(|h| h.tangent.is_none()) => {
                     // Marquee over path vertices selects them.
                     let r = Rect::from_two_pos(start, pos);
                     let v: Vec<serde_json::Value> = vertex_hits

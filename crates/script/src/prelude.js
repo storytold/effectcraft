@@ -117,6 +117,8 @@ function __blendLabel(v) {
 
 var __interpKey = { 6612: "linear", 6613: "bezier", 6614: "hold" };
 var __matteKind = { 5013: "alpha", 5014: "alphaInverted", 5015: "luma", 5016: "lumaInverted" };
+// Shape items' Reverse Path Direction (hidden as a row; the ⇄ button sets it).
+var __PATH_DIRECTION = "ADBE Vector Shape Direction";
 var __matteEnum = { Alpha: 5013, AlphaInverted: 5014, Luma: 5015, LumaInverted: 5016 };
 var __justKey = { 7413: "left", 7414: "center", 7415: "right", 7416: "justifyLeft", 7417: "justifyCenter", 7418: "justifyRight", 7419: "justifyAll" };
 
@@ -846,6 +848,8 @@ Property.prototype.property = function () { return null; };
   // Script value → engine JSON for `prop.set` / `prop.addKey`.
   P.__toEngine = function (v, info, time) {
     var t = info.valueType;
+    // Path Direction: After Effects' 1 (Default; 2 is also normal) and 3 (Reversed) ↔ ours 0 / 1.
+    if (info.matchName === __PATH_DIRECTION) return __num(v) === 3 ? 1 : 0;
     if (t === "TEXT_DOCUMENT") {
       var td = v instanceof TextDocument ? v : new TextDocument(String(v));
       return __get("textdoc", { comp: this.__layer.__comp, layer: this.__layer.__id, uid: this.__uid, time: time, attrs: td.__attrs() });
@@ -877,6 +881,8 @@ Property.prototype.property = function () { return null; };
     return __num(v);
   };
   P.__fromEngine = function (v, info) {
+    // The object model shows popups 1-based: our reversed (1) arrives as 2, After Effects says 3.
+    if (info.matchName === __PATH_DIRECTION) return v === 2 ? 3 : 1;
     if (info.valueType === "TEXT_DOCUMENT") return TextDocument.__from(v);
     if (info.valueType === "SHAPE") {
       var s = new Shape();
@@ -897,7 +903,7 @@ Property.prototype.property = function () { return null; };
   P.setValue = function (v) {
     var info = this.__info();
     if (info.numKeys > 0) throw __err("Can not use setValue on \"" + info.name + "\": it has keyframes (use setValueAtTime or setValueAtKey)");
-    if (info.hidden) throw __err("\"" + info.name + "\" can not be set");
+    if (info.hidden && info.matchName !== __PATH_DIRECTION) throw __err("\"" + info.name + "\" can not be set");
     __call("prop.set", this.__ref({ value: this.__toEngine(v, info) }));
   };
   P.setValueAtTime = function (t, v) {

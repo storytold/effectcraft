@@ -437,6 +437,64 @@ fn numeric_string_resolves_as_id() {
     assert_eq!(r["id"].as_u64(), Some(l), "{r}");
 }
 
+/// Reverse Path Direction (the ⇄ button on Path / Rectangle / Ellipse / Polystar rows): an
+/// ellipse is drawn clockwise from 12 o'clock, so Trim Paths End 60 % covers 3 o'clock and not
+/// 9 o'clock; reversed it runs counter-clockwise and covers 9 o'clock instead. One undo step.
+#[test]
+fn reverse_path_direction_runs_trim_paths_the_other_way() {
+    let mut s = comp(200, 200);
+    let lid =
+        s.execute("layer.newShape", json!({"kind": "ellipse", "size": [120, 120], "fill": false, "stroke": [1, 1, 1], "strokeWidth": 8})).unwrap()["layer"]
+            .as_u64()
+            .unwrap();
+    s.execute("layer.addShapeItem", json!({"layer": lid, "kind": "trim", "group": "contents/group"})).unwrap();
+    let (trim_end, ellipse) = {
+        let l = s.active_comp().unwrap().layer(LayerId(lid)).unwrap();
+        let group = l.props.group("contents/group/contents").unwrap();
+        (group.sub("trim").unwrap().get("end").unwrap().uid, group.sub("ellipse").unwrap().uid)
+    };
+    s.execute("prop.set", json!({"layer": lid, "prop": trim_end, "value": 60})).unwrap();
+    // (3 o'clock, 9 o'clock) on the 60 px radius.
+    let sides = |s: &Session| (alpha_at(s, 160, 100, 0.0), alpha_at(s, 40, 100, 0.0));
+    let (r, l) = sides(&s);
+    assert!(r > 0.5 && l < 0.05, "default: clockwise from the top (right {r}, left {l})");
+
+    let out = s.execute("shape.reversePathDirection", json!({"layer": lid, "prop": ellipse})).unwrap();
+    assert_eq!(out["reversed"], json!(true));
+    let (r, l) = sides(&s);
+    assert!(l > 0.5 && r < 0.05, "reversed: counter-clockwise from the top (right {r}, left {l})");
+    let dir = |s: &Session| s.active_comp().unwrap().layer(LayerId(lid)).unwrap().props.find_group(ellipse).unwrap().get("direction").unwrap().value.clone();
+    assert_eq!(dir(&s), effectcraft_keyframe::Value::Enum(1));
+    let saved = roundtrip(&s);
+    let saved = saved
+        .comp(s.active_comp_id().unwrap())
+        .unwrap()
+        .layer(LayerId(lid))
+        .unwrap()
+        .props
+        .find_group(ellipse)
+        .unwrap()
+        .get("direction")
+        .unwrap()
+        .value
+        .clone();
+    assert_eq!(saved, dir(&s), "saved with the project");
+
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(dir(&s), effectcraft_keyframe::Value::Enum(0), "one undo step");
+    // The selected item, toggled; explicit values; only shape items with a direction.
+    s.execute("prop.select", json!({"layer": lid, "prop": ellipse})).unwrap();
+    s.execute("shape.reversePathDirection", json!({})).unwrap();
+    assert_eq!(dir(&s), effectcraft_keyframe::Value::Enum(1));
+    s.execute("shape.reversePathDirection", json!({"layer": lid, "prop": ellipse, "reversed": true})).unwrap();
+    assert_eq!(dir(&s), effectcraft_keyframe::Value::Enum(1), "reversed: true keeps it reversed");
+    s.execute("shape.reversePathDirection", json!({})).unwrap();
+    assert_eq!(dir(&s), effectcraft_keyframe::Value::Enum(0));
+    let trim = s.active_comp().unwrap().layer(LayerId(lid)).unwrap().props.group("contents/group/contents/trim").unwrap().uid;
+    assert!(s.execute("shape.reversePathDirection", json!({"layer": lid, "prop": trim})).is_err());
+    assert!(s.execute("shape.reversePathDirection", json!({"layer": lid, "prop": 999_999})).is_err());
+}
+
 /// Go to Work Area Start / End have After Effects' default keys (Shift+Home / Shift+End).
 #[test]
 fn work_area_navigation_has_after_effects_default_keys() {

@@ -1,7 +1,8 @@
 //! Shape Stroke options: the Dashes "+" / "−" buttons (Dash 2 / Gap 2, Dash 3 / Gap 3), Taper and
 //! Wave. Taper and Wave are ordinary properties of the stroke (`…/stroke/taper/startLength`); the
 //! commands here set several of them in one undo step and add the groups to strokes saved before
-//! they existed. Also the toolbar's Fill / Stroke options on selected shape layers.
+//! they existed. Also the toolbar's Fill / Stroke options on selected shape layers, and the
+//! Reverse Path Direction button (⇄) of Path / Rectangle / Ellipse / Polystar rows.
 
 use effectcraft_keyframe::{Gradient, Value as KV};
 use effectcraft_project::build::{self, EXTRA_DASHES, Ids};
@@ -51,6 +52,56 @@ fn stroke_ref(s: &Session, p: &Value, cmd: &str) -> Result<(ItemId, LayerId, Uid
         found = first;
     }
     found.map(|u| (cid, lid, u)).ok_or_else(|| bad(cmd, "the layer has no stroke"))
+}
+
+/// Shape items with a Path Direction (After Effects' "ADBE Vector Shape Direction").
+fn has_direction(g: &PropGroup) -> bool {
+    matches!(g.match_id.as_str(), "rect" | "ellipse" | "star" | "path")
+}
+
+/// Reverse Path Direction On/Off: `{layer?, prop?: shape uid, reversed?}`. Without `prop`, the
+/// selected Path / Rectangle / Ellipse / Polystar items of the layer; without `reversed`, toggles
+/// (from the first one). One undo step. Trim Paths then runs the other way round.
+fn reverse_direction(s: &mut Session, p: &Value) -> Result<Value> {
+    let c = "shape.reversePathDirection";
+    let (cid, lid) = layer_p(s, p, c)?;
+    let l = s.project.comp(cid).and_then(|comp| comp.layer(lid)).ok_or(EngineError::NoComp)?;
+    let contents = l.props.sub("contents").ok_or_else(|| bad(c, "not a shape layer"))?;
+    let uids: Vec<Uid> = match p.get("prop").and_then(Value::as_u64) {
+        Some(uid) => {
+            let g = contents.find_group(uid).ok_or_else(|| bad(c, format!("no shape item @{uid}")))?;
+            if !has_direction(g) {
+                return Err(bad(c, format!("`{}` is not a Path, Rectangle, Ellipse or Polystar", g.name)));
+            }
+            vec![uid]
+        }
+        None => s.state.selected_props.iter().filter(|(sl, su)| *sl == lid && contents.find_group(*su).is_some_and(has_direction)).map(|(_, su)| *su).collect(),
+    };
+    let Some(first) = uids.first().and_then(|u| contents.find_group(*u)) else {
+        return Err(bad(c, "select a Path, Rectangle, Ellipse or Polystar"));
+    };
+    let reversed = match p.get("reversed") {
+        None => first.get("direction").is_none_or(|d| d.value != KV::Enum(1)),
+        Some(v) => v.as_bool().ok_or_else(|| bad(c, "`reversed`: true or false"))?,
+    };
+    s.edit(if reversed { "Reverse Path Direction On" } else { "Reverse Path Direction Off" }, None, |proj, _| {
+        let mut next = proj.next_id;
+        let layer = layer_mut(proj, cid, lid)?;
+        for uid in &uids {
+            let g = layer.props.find_group_mut(*uid).ok_or_else(|| bad(c, "shape item vanished"))?;
+            let v = KV::Enum(u32::from(reversed));
+            match g.get_mut("direction") {
+                Some(d) => {
+                    d.value = v;
+                    d.keys.clear();
+                }
+                // Items saved without one get it (first, as built).
+                None => g.children.insert(0, Ids(&mut next).prop("direction", "Path Direction", v).with_ui(effectcraft_project::ParamUi::Hidden).into()),
+            }
+        }
+        proj.next_id = next;
+        Ok(json!({"reversed": reversed, "shapes": uids}))
+    })
 }
 
 fn walk_groups(g: &PropGroup, f: &mut impl FnMut(&PropGroup)) {
@@ -463,6 +514,15 @@ pub fn specs() -> Vec<CommandSpec> {
             "{layers?, fillType?: none|solid|linear|radial, strokeType?, fill?: color, stroke?: color, strokeWidth?, merge?} → {fill, stroke, strokeWidth, fillType, strokeType} (first layer)",
             has_layers,
             fill_stroke
+        ),
+        cmd!(
+            "shape.reversePathDirection",
+            "Reverse Path Direction",
+            [],
+            None,
+            "{layer?, prop?: Path/Rectangle/Ellipse/Polystar uid (default: the selected ones), reversed? (default: toggle)} → {reversed, shapes}",
+            has_layers,
+            reverse_direction
         ),
         cmd!("shape.dashes.add", "Add Dash or Gap", [], None, "{layer?, prop?: stroke uid}", has_layers, dashes_add),
         cmd!("shape.dashes.remove", "Remove Dash or Gap", [], None, "{layer?, prop?: stroke uid}", has_layers, dashes_remove),

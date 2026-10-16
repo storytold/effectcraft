@@ -2462,6 +2462,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     }
                 }
                 dash_buttons(app, ui, &lp, layer, *uid, cw.switches, cy, &mut actions);
+                direction_button(app, ui, &lp, layer, *uid, cw.switches, cy, &mut actions);
                 // Mask mode + inverted inline.
                 if let Some(g) = layer.props.find_group(*uid)
                     && let GroupKind::Mask { mode, inverted, .. } = g.kind
@@ -3594,6 +3595,46 @@ fn dash_buttons(
         if resp.clicked() {
             actions.push((id.into(), json!({"layer": layer.id.0, "prop": stroke})));
         }
+    }
+}
+
+/// Reverse Path Direction On/Off (⇄) on a Path / Rectangle / Ellipse / Polystar row, as in After
+/// Effects: lit while the path runs the other way (Trim Paths then trims from the other end).
+#[allow(clippy::too_many_arguments)]
+fn direction_button(
+    app: &mut EffectcraftApp,
+    ui: &mut egui::Ui,
+    p: &egui::Painter,
+    layer: &Layer,
+    uid: u64,
+    x: f32,
+    cy: f32,
+    actions: &mut Vec<(String, serde_json::Value)>,
+) {
+    if !matches!(layer.source, LayerSource::Shape) {
+        return;
+    }
+    let Some(g) = layer.props.find_group(uid).filter(|g| matches!(g.match_id.as_str(), "rect" | "ellipse" | "star" | "path")) else { return };
+    let on = g.get("direction").is_some_and(|d| d.value == effectcraft_engine::keyframe::Value::Enum(1));
+    let t = app.tokens;
+    let tip = if on { "Reverse Path Direction On" } else { "Reverse Path Direction Off" };
+    let r = Rect::from_center_size(pos2(x + 12.0, cy), vec2(18.0, 16.0));
+    let resp = ui.interact(r, egui::Id::new(("tl-path-dir", uid)), Sense::click()).on_hover_text(crate::i18n::tr(tip));
+    if on {
+        p.rect_filled(r.shrink(1.0), 2.0, t.accent.gamma_multiply(0.35));
+    }
+    p.rect_stroke(r.shrink(1.0), 2.0, Stroke::new(1.0, if on { t.accent } else { t.separator }), StrokeKind::Inside);
+    // ⇄: a right arrow over a left arrow (drawn, not a font glyph).
+    let c = if on || resp.hovered() { t.text } else { t.text_dim };
+    let s = Stroke::new(1.2, c);
+    let (l, rr, y1, y2) = (r.min.x + 4.5, r.max.x - 4.5, cy - 2.5, cy + 2.5);
+    p.line_segment([pos2(l, y1), pos2(rr, y1)], s);
+    p.line_segment([pos2(rr - 2.5, y1 - 2.5), pos2(rr, y1)], s);
+    p.line_segment([pos2(l, y2), pos2(rr, y2)], s);
+    p.line_segment([pos2(l + 2.5, y2 + 2.5), pos2(l, y2)], s);
+    app.auto.add(&format!("timeline.group.{uid}.reversePath"), r, tip);
+    if resp.clicked() {
+        actions.push(("shape.reversePathDirection".into(), json!({"layer": layer.id.0, "prop": uid})));
     }
 }
 

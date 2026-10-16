@@ -217,3 +217,108 @@ fn deep_nesting_errors_instead_of_overflowing_the_stack() {
     assert_eq!(crate::xml_depth(&s), 2);
     assert!(crate::parse(s.as_bytes()).is_ok());
 }
+
+/// Many small shapes over a large canvas: fills (both rules), strokes (miter, round, square
+/// caps, dashes), linear and radial gradients in user and bounding-box units, rotated and
+/// skewed shapes, shapes partly or wholly off the canvas and a clipped group.
+fn stress_svg() -> String {
+    let mut s = String::from(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"640\" height=\"400\"><defs>\
+         <linearGradient id=\"lg\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"><stop offset=\"0\" stop-color=\"#f00\"/><stop offset=\"1\" stop-color=\"#00f\" stop-opacity=\"0.5\"/></linearGradient>\
+         <radialGradient id=\"rg\" gradientUnits=\"userSpaceOnUse\" cx=\"320\" cy=\"200\" r=\"150\" fx=\"300\" fy=\"180\"><stop offset=\"0\" stop-color=\"#ff0\"/><stop offset=\"1\" stop-color=\"#0a0\"/></radialGradient>\
+         <clipPath id=\"cp\"><circle cx=\"500\" cy=\"300\" r=\"60\"/></clipPath></defs>",
+    );
+    for i in 0..60 {
+        let (x, y) = (((i * 53) % 700) as f64 - 30.0, ((i * 37) % 460) as f64 - 30.0);
+        let fill = ["#3a7", "url(#lg)", "url(#rg)", "none"][i % 4];
+        let stroke = ["none", "#222", "#c0c", "url(#lg)"][(i / 2) % 4];
+        let extra = match i % 5 {
+            0 => " stroke-linejoin=\"miter\" stroke-miterlimit=\"10\"".to_string(),
+            1 => " stroke-linecap=\"round\" stroke-linejoin=\"round\"".to_string(),
+            2 => " stroke-linecap=\"square\" stroke-dasharray=\"6 3\"".to_string(),
+            3 => format!(" transform=\"rotate({} {x} {y})\"", i * 17),
+            _ => format!(" transform=\"translate({x} {y}) skewX(20) scale(1.5 0.7)\" fill-rule=\"evenodd\""),
+        };
+        let w = 8 + (i * 7) % 50;
+        s += &format!(
+            "<path d=\"M{x} {y} l{w} 3 l-5 {w} l-{w} -9 z M{} {} l6 0 l0 6 z\" fill=\"{fill}\" stroke=\"{stroke}\" stroke-width=\"{}\" opacity=\"0.9\"{extra}/>",
+            x + 2.0,
+            y + 2.0,
+            1 + i % 7
+        );
+    }
+    s += "<g clip-path=\"url(#cp)\"><rect x=\"420\" y=\"220\" width=\"200\" height=\"200\" fill=\"url(#lg)\" stroke=\"#000\" stroke-width=\"9\"/></g></svg>";
+    s
+}
+
+fn fnv(img: &effectcraft_raster::Image) -> u64 {
+    let mut h = 0xcbf29ce484222325u64;
+    for p in &img.data {
+        for c in p {
+            for b in c.to_bits().to_le_bytes() {
+                h = (h ^ b as u64).wrapping_mul(0x100000001b3);
+            }
+        }
+    }
+    h
+}
+
+/// Rasterising each shape only within its own device bounds (it covered the whole canvas for
+/// every shape: O(shapes × canvas), minutes per frame for an Illustrator file of thousands of
+/// small shapes, SceneYard "Retro Desktop Movie Popups") keeps the output stable. Against the
+/// whole-canvas version the pixels differ only on a few anti-aliased edges (float rounding of
+/// the re-based transform: basic 26 of 20 000 pixels by at most 0.17, stress 5 of 256 000).
+#[test]
+fn rasterising_within_shape_bounds_is_stable() {
+    let stress = stress_svg();
+    let cases: [(&str, &[u8], u32, u32, f64, u64); 4] = [
+        ("basic", BASIC, 200, 100, 1.0, PINNED[0]),
+        ("paths", PATHS, 0, 0, 1.0, PINNED[1]),
+        ("stress", stress.as_bytes(), 640, 400, 1.0, PINNED[2]),
+        ("stress-2.5x", stress.as_bytes(), 1600, 1000, 2.5, PINNED[3]),
+    ];
+    for (name, bytes, w, h, scale, pinned) in cases {
+        let d = parse(bytes).unwrap();
+        let (w, h) = if w == 0 { d.pixel_size() } else { (w, h) };
+        let img = rasterize(&d, w, h, scale);
+        let got = fnv(&img);
+        if std::env::var_os("SVG_RASTER_PRINT").is_some() {
+            println!("{name}: 0x{got:016x}");
+            continue;
+        }
+        assert!(img.data.iter().any(|p| p[3] > 0.0), "{name} draws something");
+        assert_eq!(got, pinned, "{name} pixels changed");
+    }
+}
+
+const PINNED: [u64; 4] = [0xcc3e2c3d49c37fbf, 0xd99451e0745d7c28, 0x8c6ad41b7c4042cc, 0x1f2d56138fa0bc95];
+
+/// Everything a shape's fill or stroke covers on the whole canvas lies inside the rectangle it is
+/// rasterised in: bounding nothing away.
+#[test]
+fn shape_rectangles_hold_all_coverage() {
+    let d = parse(stress_svg().as_bytes()).unwrap();
+    let (w, h) = (640u32, 400u32);
+    let dst = effectcraft_raster::Image::new(w, h);
+    let mut checked = 0;
+    for (m, _, s) in d.flatten() {
+        let m = m * s.transform;
+        let path = s.geom.to_path();
+        let style = effectcraft_path::StrokeStyle { width: s.stroke.as_ref().map_or(0.0, |st| st.width), miter: 10.0, ..Default::default() };
+        let outline = effectcraft_path::stroke_outline(std::slice::from_ref(&path), &style, crate::raster::mat3(m).mean_scale());
+        for p in [Some(path.clone()), outline].into_iter().flatten() {
+            let full = effectcraft_path::fill_coverage(std::slice::from_ref(&p), &crate::raster::mat3(m), w, h, effectcraft_path::FillRule::NonZero);
+            let r = crate::raster::device_rect(&p, m, &dst);
+            for y in 0..h {
+                for x in 0..w {
+                    if full.data[(y * w + x) as usize] > 0.0 {
+                        let r = r.unwrap_or_else(|| panic!("covered pixel ({x},{y}) but no rectangle"));
+                        assert!(x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h, "({x},{y}) outside {r:?}");
+                        checked += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert!(checked > 10_000, "{checked}");
+}

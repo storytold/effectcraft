@@ -707,6 +707,27 @@ fn puppet_rigging_over_mcp() {
     assert!(text.contains("puppet.follow") && text.contains("puppet.selectPins"), "{text}");
 }
 
+#[test]
+fn round_corners_over_mcp() {
+    let mut s = server();
+    let run = |s: &mut McpServer, id: &str, params: Value| call_json(s, "command_run", json!({"id": id, "params": params}));
+    run(&mut s, "comp.new", json!({"name": "Round", "width": 200, "height": 100, "duration": 1}));
+    let id = run(&mut s, "layer.newSolid", json!({"width": 120, "height": 60, "color": "#c03030"}))["layer"].clone();
+    let d = call_json(&mut s, "describe_command", json!({"command": "layer.roundCorners"}));
+    assert!(d["schema"]["properties"]["roundness"].is_object(), "{d}");
+    let r = run(&mut s, "layer.roundCorners", json!({"layer": id, "roundness": 16}));
+    assert_eq!(r["converted"], json!([id]), "{r}");
+    let l = call_json(&mut s, "get_layer", json!({"layer": id}));
+    assert!(l.to_string().contains("Roundness"), "{l}");
+    let p = call_json(&mut s, "get_property", json!({"layer": id, "path": "contents/group/contents/rect/roundness"}));
+    assert_eq!(p["value"], 16.0, "{p}");
+    // A shape layer takes it on its rectangles; one undo step each.
+    run(&mut s, "layer.roundCorners", json!({"layer": id, "roundness": 4}));
+    call_json(&mut s, "undo", json!({}));
+    let p = call_json(&mut s, "get_property", json!({"layer": id, "path": "contents/group/contents/rect/roundness"}));
+    assert_eq!(p["value"], 16.0, "{p}");
+}
+
 /// The agent-interface audit (MCP side): every registered engine command is listed by
 /// `list_commands` with a label, params doc and JSON Schema, described by `describe_command`,
 /// and routed by `execute_command` (an unknown parameter is rejected by that very command

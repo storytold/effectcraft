@@ -8,7 +8,7 @@ use rayon::prelude::*;
 
 use crate::{BlendMode, Doc, FillRule, Gradient, GradientKind, Group, Node, Paint, Shape, Spread};
 
-fn mat3(a: Affine) -> Mat3 {
+pub(crate) fn mat3(a: Affine) -> Mat3 {
     let c = a.as_coeffs();
     Mat3([[c[0], c[2], c[4]], [c[1], c[3], c[5]], [0.0, 0.0, 1.0]])
 }
@@ -395,14 +395,15 @@ fn draw_shape(s: &Shape, m: Affine, opacity: f64, dst: &mut Image) {
     let m = m * s.transform;
     let path = s.geom.to_path();
     let bbox = path.bounding_box();
-    let (w, h) = (dst.width, dst.height);
     if let Some(fill) = &s.fill {
         let rule = match s.fill_rule {
             FillRule::NonZero => effectcraft_path::FillRule::NonZero,
             FillRule::EvenOdd => effectcraft_path::FillRule::EvenOdd,
         };
-        let cov = effectcraft_path::fill_coverage(std::slice::from_ref(&path), &mat3(m), w, h, rule);
-        paint(dst, &cov, fill, (opacity * s.fill_opacity) as f32, m, bbox);
+        if let Some(r) = device_rect(&path, m, dst) {
+            let cov = effectcraft_path::fill_coverage(std::slice::from_ref(&path), &mat3(r.local(m)), r.w, r.h, rule);
+            paint(dst, &cov, r, fill, (opacity * s.fill_opacity) as f32, m, bbox);
+        }
     }
     if let Some(st) = &s.stroke {
         let style = effectcraft_path::StrokeStyle {
@@ -422,15 +423,53 @@ fn draw_shape(s: &Shape, m: Affine, opacity: f64, dst: &mut Image) {
             taper: None,
             wave: None,
         };
-        let cov = effectcraft_path::stroke_coverage(std::slice::from_ref(&path), &style, &mat3(m), w, h);
-        paint(dst, &cov, &st.paint, (opacity * st.opacity) as f32, m, bbox);
+        // The stroke's outline (what `stroke_coverage` fills), bounded like a fill.
+        if let Some(outline) = effectcraft_path::stroke_outline(std::slice::from_ref(&path), &style, mat3(m).mean_scale())
+            && let Some(r) = device_rect(&outline, m, dst)
+        {
+            let cov = effectcraft_path::fill_coverage(std::slice::from_ref(&outline), &mat3(r.local(m)), r.w, r.h, effectcraft_path::FillRule::NonZero);
+            paint(dst, &cov, r, &st.paint, (opacity * st.opacity) as f32, m, bbox);
+        }
     }
 }
 
-/// Composite paint through coverage.
-fn paint(dst: &mut Image, cov: &Mask, p: &Paint, opacity: f32, m: Affine, bbox: kurbo::Rect) {
+/// The pixels of a canvas a shape can touch: its device-space bounding box (plus a pixel of
+/// anti-aliasing) clipped to the canvas. Rasterising and painting only there keeps a shape's
+/// cost proportional to its own size, not the canvas'.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PixRect {
+    pub(crate) x: u32,
+    pub(crate) y: u32,
+    pub(crate) w: u32,
+    pub(crate) h: u32,
+}
+
+impl PixRect {
+    /// `m` (shape → canvas) re-based so the rectangle's corner is the origin.
+    fn local(self, m: Affine) -> Affine {
+        Affine::translate((-(self.x as f64), -(self.y as f64))) * m
+    }
+}
+
+pub(crate) fn device_rect(path: &kurbo::BezPath, m: Affine, dst: &Image) -> Option<PixRect> {
+    let b = (m * path.clone()).bounding_box();
+    let (cw, ch) = (dst.width as f64, dst.height as f64);
+    if !(b.x0.is_finite() && b.y0.is_finite() && b.x1.is_finite() && b.y1.is_finite()) {
+        // Unknown extent: the whole canvas, as before.
+        return (dst.width > 0 && dst.height > 0).then_some(PixRect { x: 0, y: 0, w: dst.width, h: dst.height });
+    }
+    let x0 = (b.x0.floor() - 1.0).clamp(0.0, cw);
+    let y0 = (b.y0.floor() - 1.0).clamp(0.0, ch);
+    let x1 = (b.x1.ceil() + 1.0).clamp(0.0, cw);
+    let y1 = (b.y1.ceil() + 1.0).clamp(0.0, ch);
+    (x1 > x0 && y1 > y0).then_some(PixRect { x: x0 as u32, y: y0 as u32, w: (x1 - x0) as u32, h: (y1 - y0) as u32 })
+}
+
+/// Composite paint through coverage `cov` of the canvas rectangle `r`.
+fn paint(dst: &mut Image, cov: &Mask, r: PixRect, p: &Paint, opacity: f32, m: Affine, bbox: kurbo::Rect) {
     let w = dst.width as usize;
-    if w == 0 {
+    let (rx, ry, rw, rh) = (r.x as usize, r.y as usize, r.w as usize, r.h as usize);
+    if w == 0 || rw == 0 || cov.data.len() < rw * rh {
         return;
     }
     let shader = match p {
@@ -444,13 +483,14 @@ fn paint(dst: &mut Image, cov: &Mask, p: &Paint, opacity: f32, m: Affine, bbox: 
             Shader::Gradient(g, to_grad)
         }
     };
-    dst.data.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
-        for (x, d) in row.iter_mut().enumerate() {
-            let c = cov.data[y * w + x];
+    dst.data.par_chunks_mut(w).enumerate().skip(ry).take(rh).for_each(|(y, row)| {
+        let Some(crow) = cov.data.get((y - ry) * rw..(y - ry + 1) * rw) else { return };
+        let Some(drow) = row.get_mut(rx..rx + rw) else { return };
+        for (i, (d, &c)) in drow.iter_mut().zip(crow).enumerate() {
             if c <= 0.0 {
                 continue;
             }
-            let col = shader.at(x as f64 + 0.5, y as f64 + 0.5);
+            let col = shader.at((rx + i) as f64 + 0.5, y as f64 + 0.5);
             let a = col[3] * c * opacity;
             if a <= 0.0 {
                 continue;

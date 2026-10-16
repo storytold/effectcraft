@@ -2270,3 +2270,89 @@ fn mask_marquee_selects_vertices() {
     let sel = &h.state().session.state.selected_vertices;
     assert_eq!(sel.len(), 2, "shift-marquee adds: {sel:?}");
 }
+
+/// Selecting a pasted/vector shape exposes its paths, but does not enter vertex-edit mode.
+#[test]
+fn shape_interior_drag_moves_layer_while_explicit_vertices_remain_editable() {
+    let mut h = harness();
+    let added = h
+        .state_mut()
+        .session
+        .execute(
+            "shape.newPath",
+            json!({
+                "name": "Editable artwork", "vertices": [[120,80],[520,80],[520,280],[120,280]],
+                "closed": true, "space": "comp"
+            }),
+        )
+        .unwrap();
+    let layer = LayerId(added["layer"].as_u64().unwrap());
+    let path = added["path"].as_u64().unwrap();
+    h.state_mut().session.execute("mask.selectVertices", json!({"vertices":[]})).unwrap();
+    h.state_mut().session.execute("view.snapping", json!({"value": false})).unwrap();
+    h.state_mut().ui.tool = Tool::Selection;
+    h.run_steps(2);
+    let original = position_and_anchor(&h, layer);
+    let geometry = h.state().session.active_comp().unwrap().layer(layer).unwrap().props.find_group(path).unwrap().get("path").unwrap().value.clone();
+    assert!(h.state().auto.find(&format!("viewer.shapePath.{path}.vertex.0")).is_some());
+    let from = screen(&h, [240.0, 160.0]);
+    let to = screen(&h, [280.0, 180.0]);
+    let undo_before = h.state().session.history.undo.len();
+    drag(&mut h, from, to);
+    let moved = position_and_anchor(&h, layer);
+    assert!((moved.0[0] - original.0[0] - 40.0).abs() < 0.1, "interior drag updates Position X: {moved:?}");
+    assert!((moved.0[1] - original.0[1] - 20.0).abs() < 0.1, "interior drag updates Position Y: {moved:?}");
+    assert_eq!(moved.1, original.1, "layer movement preserves Anchor Point");
+    assert_eq!(h.state().session.active_comp().unwrap().layer(layer).unwrap().props.find_group(path).unwrap().get("path").unwrap().value, geometry);
+    assert_eq!(h.state().session.history.undo.len(), undo_before + 1, "one undo step per layer drag");
+    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(position_and_anchor(&h, layer), original);
+    h.run_steps(2);
+
+    // Grabbing a visible vertex still edits the path without moving the layer.
+    let from = rect(&h, &format!("viewer.shapePath.{path}.vertex.0")).center();
+    let to = screen(&h, [140.0, 100.0]);
+    drag(&mut h, from, to);
+    assert_eq!(position_and_anchor(&h, layer), original);
+    let changed = h.state().session.active_comp().unwrap().layer(layer).unwrap().props.find_group(path).unwrap().get("path").unwrap().value.clone();
+    let (before, after) = (geometry.as_path().unwrap(), changed.as_path().unwrap());
+    assert!((after.vertices[0][0] - before.vertices[0][0] - 20.0).abs() < 0.1);
+    assert!((after.vertices[0][1] - before.vertices[0][1] - 20.0).abs() < 0.1);
+    assert_eq!(after.vertices[1..], before.vertices[1..]);
+    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+
+    // An explicit vertex selection keeps interior marquee editing available.
+    h.state_mut().session.execute("mask.selectVertices", json!({"vertices":[{"layer":layer.0,"mask":path,"index":0}]})).unwrap();
+    h.run_steps(2);
+    let from = screen(&h, [150.0, 110.0]);
+    let to = screen(&h, [540.0, 60.0]);
+    drag(&mut h, from, to);
+    let selected = &h.state().session.state.selected_vertices;
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].index, 1, "interior marquee selects the enclosed vertex");
+    assert_eq!(position_and_anchor(&h, layer), original);
+    assert_eq!(h.state().session.active_comp().unwrap().layer(layer).unwrap().props.find_group(path).unwrap().get("path").unwrap().value, geometry);
+}
+
+#[test]
+fn full_frame_mask_marquee_preserves_layer_and_clears_an_empty_selection() {
+    let mut h = harness();
+    let plate = layer_id(&h, "Plate");
+    h.state_mut().session.execute("layer.select", json!({"layers":[plate]})).unwrap();
+    h.state_mut().session.execute("mask.new", json!({"layer":plate,"vertices":[[100,60],[500,60],[500,300],[100,300]],"closed":true})).unwrap();
+    h.state_mut().session.execute("mask.selectVertices", json!({"vertices":[]})).unwrap();
+    h.state_mut().ui.tool = Tool::Selection;
+    h.run_steps(2);
+    let transform = position_and_anchor(&h, LayerId(plate));
+    let from = screen(&h, [70.0, 40.0]);
+    let to = screen(&h, [520.0, 90.0]);
+    drag(&mut h, from, to);
+    assert_eq!(h.state().session.state.selected_vertices.len(), 2, "box over full-frame artwork selects vertices");
+    assert_eq!(position_and_anchor(&h, LayerId(plate)), transform);
+    let from = screen(&h, [70.0, 110.0]);
+    let to = screen(&h, [90.0, 140.0]);
+    drag(&mut h, from, to);
+    assert!(h.state().session.state.selected_vertices.is_empty(), "empty marquee clears the vertex selection");
+    assert_eq!(h.state().session.state.selected_layers, vec![LayerId(plate)], "empty vertex marquee preserves the selected layer");
+    assert_eq!(position_and_anchor(&h, LayerId(plate)), transform);
+}
