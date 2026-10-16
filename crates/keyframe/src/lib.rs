@@ -369,27 +369,43 @@ pub fn spatial_handles(keys: &[Keyframe], i: usize) -> ([f64; 3], [f64; 3]) {
 
 /// Effective temporal ease of key `i` for dimension `d` (auto-Bezier keys get the neighbour slope).
 fn effective_ease(keys: &[Keyframe], i: usize, d: usize, spatial: bool, out: bool) -> Ease {
-    let k = &keys[i];
+    let Some(k) = keys.get(i) else { return Ease::default() };
     let list = if out { &k.out_ease } else { &k.in_ease };
-    if k.auto_bezier && i > 0 && i + 1 < keys.len() {
-        let dt = secs(keys[i + 1].time) - secs(keys[i - 1].time);
-        let slope = if spatial {
-            let a = v3(&keys[i - 1].value);
-            let c = v3(&keys[i + 1].value);
-            ((c[0] - a[0]).powi(2) + (c[1] - a[1]).powi(2) + (c[2] - a[2]).powi(2)).sqrt() / dt.max(1e-12)
-        } else {
-            let a = keys[i - 1].value.components();
-            let c = keys[i + 1].value.components();
-            (c.get(d).unwrap_or(&0.0) - a.get(d).unwrap_or(&0.0)) / dt.max(1e-12)
-        };
-        return Ease { speed: slope, influence: 1.0 / 6.0 };
+    if k.auto_bezier {
+        if spatial
+            && let Some((start, end)) = roving_span(keys, i, out)
+            && let (Some(a), Some(b)) = (keys.get(start), keys.get(end))
+            && (a.auto_bezier || a.out_interp == Interp::Linear)
+            && (b.auto_bezier || b.in_interp == Interp::Linear)
+        {
+            let length: f64 = (start..end).map(|j| spatial_segment_length(keys, j)).sum();
+            return Ease { speed: length / (secs(b.time) - secs(a.time)).max(1e-12), influence: 1.0 / 6.0 };
+        }
+        let before = i.saturating_sub(1);
+        let after = i.saturating_add(1).min(keys.len().saturating_sub(1));
+        if (!out && before == i) || (out && after == i) {
+            return Ease::default();
+        }
+        if let (Some(a), Some(c)) = (keys.get(before), keys.get(after)) {
+            let dt = (secs(c.time) - secs(a.time)).max(1e-12);
+            let slope = if spatial {
+                let a = v3(&a.value);
+                let c = v3(&c.value);
+                ((c[0] - a[0]).powi(2) + (c[1] - a[1]).powi(2) + (c[2] - a[2]).powi(2)).sqrt() / dt
+            } else {
+                let a = a.value.components();
+                let c = c.value.components();
+                (c.get(d).unwrap_or(&0.0) - a.get(d).unwrap_or(&0.0)) / dt
+            };
+            return Ease { speed: slope, influence: 1.0 / 6.0 };
+        }
     }
     list.get(d).or(list.first()).copied().unwrap_or_default()
 }
 
 /// The ease a key side presents in the Graph Editor and the Keyframe Velocity dialog: stored
 /// Bezier eases, auto-Bezier slopes, or the equivalent of a linear side (speed of the straight
-/// segment, 33.3 % influence). `None` for hold sides and sides without a neighbour.
+/// segment, 16.67 % influence). `None` for hold sides and sides without a neighbour.
 pub fn side_ease(keys: &[Keyframe], i: usize, d: usize, spatial: bool, out: bool) -> Option<Ease> {
     let k = keys.get(i)?;
     let j = if out { i + 1 } else { i.checked_sub(1)? };
@@ -410,7 +426,7 @@ pub fn side_ease(keys: &[Keyframe], i: usize, d: usize, spatial: bool, out: bool
             let dv = b.get(d).unwrap_or(&0.0) - a.get(d).unwrap_or(&0.0);
             if out { dv } else { -dv }
         };
-        return Some(Ease { speed: dv / dur, influence: 1.0 / 3.0 });
+        return Some(Ease { speed: dv / dur, influence: 1.0 / 6.0 });
     }
     Some(effective_ease(keys, i, if is_spatial { 0 } else { d }, is_spatial, out))
 }
@@ -426,9 +442,69 @@ pub fn spatial_segment_length(keys: &[Keyframe], i: usize) -> f64 {
     SpatialSeg::new([p0, [p0[0] + out_t[0], p0[1] + out_t[1], p0[2] + out_t[2]], [p3[0] + in_t[0], p3[1] + in_t[1], p3[2] + in_t[2]], p3]).length()
 }
 
+fn roving_span(keys: &[Keyframe], key: usize, out: bool) -> Option<(usize, usize)> {
+    let segment = if out { key } else { key.checked_sub(1)? };
+    if !keys.get(segment)?.roving && !keys.get(segment.checked_add(1)?)?.roving {
+        return None;
+    }
+    let start = (0..=segment).rev().find(|i| keys.get(*i).is_some_and(|k| !k.roving))?;
+    let end = (segment + 1..keys.len()).find(|i| keys.get(*i).is_some_and(|k| !k.roving))?;
+    Some((start, end))
+}
+
+fn run_eases(keys: &[Keyframe], start: usize, end: usize, length: f64) -> (Ease, Ease) {
+    let (Some(a), Some(b)) = (keys.get(start), keys.get(end)) else { return (Ease::default(), Ease::default()) };
+    let linear = Ease { speed: length / (secs(b.time) - secs(a.time)).max(1e-12), influence: 1.0 / 6.0 };
+    let out = if a.out_interp == Interp::Bezier && !a.auto_bezier { effective_ease(keys, start, 0, true, true) } else { linear };
+    let inn = if b.in_interp == Interp::Bezier && !b.auto_bezier { effective_ease(keys, end, 0, true, false) } else { linear };
+    (out, inn)
+}
+
+fn spatial_value(keys: &[Keyframe], i: usize, progress: f64) -> Option<Value> {
+    let a = keys.get(i)?;
+    let b = keys.get(i.checked_add(1)?)?;
+    let p0 = v3(&a.value);
+    let p3 = v3(&b.value);
+    let (_, out_t) = spatial_tangents(keys, i);
+    let (in_t, _) = spatial_tangents(keys, i + 1);
+    let seg = SpatialSeg::new([p0, [p0[0] + out_t[0], p0[1] + out_t[1], p0[2] + out_t[2]], [p3[0] + in_t[0], p3[1] + in_t[1], p3[2] + in_t[2]], p3]);
+    let point = if on_chord(p0, seg.p[1], p3) && on_chord(p0, seg.p[2], p3) {
+        [p0[0] + (p3[0] - p0[0]) * progress, p0[1] + (p3[1] - p0[1]) * progress, p0[2] + (p3[2] - p0[2]) * progress]
+    } else {
+        seg.at_length(progress * seg.length())
+    };
+    Some(a.value.with_components(&point))
+}
+
+fn roving_value(keys: &[Keyframe], segment: usize, t: Tick) -> Option<Value> {
+    let (start, end) = roving_span(keys, segment, true)?;
+    let a = keys.get(start)?;
+    let b = keys.get(end)?;
+    if a.out_interp == Interp::Hold {
+        return Some(a.value.clone());
+    }
+    let total: f64 = (start..end).map(|i| spatial_segment_length(keys, i)).sum();
+    if !total.is_finite() || total <= 1e-12 {
+        return None;
+    }
+    let dur = (secs(b.time) - secs(a.time)).max(1e-12);
+    let x = ((secs(t) - secs(a.time)) / dur).clamp(0.0, 1.0);
+    let (eo, ei) = run_eases(keys, start, end, total);
+    let mut distance = ease_progress(eo.speed * dur / total, eo.influence, ei.speed * dur / total, ei.influence, x) * total;
+    for i in start..end {
+        let length = spatial_segment_length(keys, i);
+        if distance <= length || i + 1 == end {
+            return spatial_value(keys, i, if length > 1e-12 { distance / length } else { 0.0 });
+        }
+        distance -= length;
+    }
+    None
+}
+
 /// Re-time roving keyframes: each run of roving keys between two fixed (non-roving) keys gets
-/// times proportional to the motion-path length, so the layer moves through them at one
-/// constant speed (After Effects' "Rove Across Time"). The first and last keys never rove.
+/// times from cumulative path length under the fixed endpoints' temporal ease. Linear
+/// endpoints give constant speed; eased endpoints ease across the whole path. The first
+/// and last keys never rove.
 /// Returns true when any key time changed. Key order is preserved.
 pub fn retime_roving(keys: &mut [Keyframe], spatial: bool) -> bool {
     let n = keys.len();
@@ -461,11 +537,26 @@ pub fn retime_roving(keys: &mut [Keyframe], spatial: bool) -> bool {
                 acc.push(acc.last().unwrap_or(&0.0) + len);
             }
             let total = *acc.last().unwrap_or(&0.0);
+            if !total.is_finite() {
+                a = b;
+                continue;
+            }
             let (t0, t1) = (keys[a].time, keys[b].time);
+            let (eo, ei) = run_eases(keys, a, b, total);
             for (o, i) in (a + 1..b).enumerate() {
                 let f = if total > 1e-9 { acc[o + 1] / total } else { (o + 1) as f64 / (b - a) as f64 };
                 let span = i128::from(t1.0) - i128::from(t0.0);
-                let mut retimed = i128::from(t0.0) + (span as f64 * f).round() as i128;
+                let progress = if spatial && total.is_finite() && total > 1e-9 {
+                    let dur = (secs(t1) - secs(t0)).max(1e-12);
+                    let u = solve_u(0.0, eo.speed * dur / total * eo.influence, 1.0 - ei.speed * dur / total * ei.influence, 1.0, f);
+                    bez(0.0, eo.influence, 1.0 - ei.influence, 1.0, u)
+                } else {
+                    f
+                };
+                if !progress.is_finite() {
+                    continue;
+                }
+                let mut retimed = i128::from(t0.0) + (span as f64 * progress).round() as i128;
                 // Keep every roving key strictly between its neighbours: a zero-length segment would otherwise
                 // put it on a fixed key's time, and two keys can't share a time.
                 let (lo, hi) = (i128::from(keys[i - 1].time.0) + 1, i128::from(t1.0) - (b - i) as i128);
@@ -477,9 +568,6 @@ pub fn retime_roving(keys: &mut [Keyframe], spatial: bool) -> bool {
                     keys[i].time = nt;
                     changed = true;
                 }
-                // Roving keys pass speed straight through.
-                keys[i].in_interp = Interp::Linear;
-                keys[i].out_interp = Interp::Linear;
             }
         }
         a = b;
@@ -520,6 +608,12 @@ pub fn evaluate(keys: &[Keyframe], t: Tick, spatial: bool) -> Option<Value> {
 pub fn segment_value(keys: &[Keyframe], i: usize, t: Tick, spatial: bool) -> Value {
     let a = &keys[i];
     let b = &keys[i + 1];
+    if spatial
+        && matches!(a.value, Value::Vec2(_) | Value::Vec3(_))
+        && let Some(value) = roving_value(keys, i, t)
+    {
+        return value;
+    }
     if a.out_interp == Interp::Hold || !a.value.interpolates() {
         return a.value.clone();
     }
@@ -541,8 +635,8 @@ pub fn segment_value(keys: &[Keyframe], i: usize, t: Tick, spatial: bool) -> Val
         let f = if lin_out && lin_in || len <= 1e-12 {
             x
         } else {
-            let eo = if lin_out { Ease { speed: len / dur, influence: 1.0 / 3.0 } } else { effective_ease(keys, i, 0, true, true) };
-            let ei = if lin_in { Ease { speed: len / dur, influence: 1.0 / 3.0 } } else { effective_ease(keys, i + 1, 0, true, false) };
+            let eo = if lin_out { Ease { speed: len / dur, influence: 1.0 / 6.0 } } else { effective_ease(keys, i, 0, true, true) };
+            let ei = if lin_in { Ease { speed: len / dur, influence: 1.0 / 6.0 } } else { effective_ease(keys, i + 1, 0, true, false) };
             ease_progress(eo.speed * dur / len, eo.influence, ei.speed * dur / len, ei.influence, x)
         };
         // A straight path (both handles on the chord, as auto-Bezier keys on a line have) is the
@@ -561,16 +655,16 @@ pub fn segment_value(keys: &[Keyframe], i: usize, t: Tick, spatial: bool) -> Val
     let cb = b.value.components();
     if ca.is_empty() || ca.len() != cb.len() {
         // Paths, gradients: ease on dimension 0 as overall progress.
-        let eo = if lin_out { Ease { speed: 1.0 / dur, influence: 1.0 / 3.0 } } else { effective_ease(keys, i, 0, false, true) };
-        let ei = if lin_in { Ease { speed: 1.0 / dur, influence: 1.0 / 3.0 } } else { effective_ease(keys, i + 1, 0, false, false) };
+        let eo = if lin_out { Ease { speed: 1.0 / dur, influence: 1.0 / 6.0 } } else { effective_ease(keys, i, 0, false, true) };
+        let ei = if lin_in { Ease { speed: 1.0 / dur, influence: 1.0 / 6.0 } } else { effective_ease(keys, i + 1, 0, false, false) };
         let f = ease_progress(eo.speed * dur, eo.influence, ei.speed * dur, ei.influence, x);
         return a.value.lerp(&b.value, f);
     }
     let mut out = Vec::with_capacity(ca.len());
     for d in 0..ca.len() {
         let dv = cb[d] - ca[d];
-        let eo = if lin_out { Ease { speed: dv / dur, influence: 1.0 / 3.0 } } else { effective_ease(keys, i, d, false, true) };
-        let ei = if lin_in { Ease { speed: dv / dur, influence: 1.0 / 3.0 } } else { effective_ease(keys, i + 1, d, false, false) };
+        let eo = if lin_out { Ease { speed: dv / dur, influence: 1.0 / 6.0 } } else { effective_ease(keys, i, d, false, true) };
+        let ei = if lin_in { Ease { speed: dv / dur, influence: 1.0 / 6.0 } } else { effective_ease(keys, i + 1, d, false, false) };
         // Bezier in (time, value) space directly: P1 = (i0, v0 + s0*i0*dur), P2 = (1-i1, v1 - s1*i1*dur).
         let (i0, i1) = (eo.influence.clamp(0.0, 1.0), ei.influence.clamp(0.0, 1.0));
         let u = solve_u(0.0, i0, 1.0 - i1, 1.0, x);
@@ -620,6 +714,80 @@ pub fn set_key(keys: &mut Vec<Keyframe>, key: Keyframe) -> usize {
             i
         }
     }
+}
+
+/// Insert a numeric key inside a Bezier segment without replacing its existing temporal
+/// tangents with zero-speed defaults. A supplied value moves the new key, retaining the
+/// derivatives of the original curve at that time. Raw importers should continue to use set_key.
+pub fn insert_key_preserving_ease(keys: &mut Vec<Keyframe>, mut key: Keyframe, spatial: bool) -> usize {
+    if !spatial
+        && let Err(i) = keys.binary_search_by(|k| k.time.cmp(&key.time))
+        && let (Some(a), Some(b)) = (i.checked_sub(1).and_then(|j| keys.get(j)), keys.get(i))
+        && a.out_interp == Interp::Bezier
+        && b.in_interp == Interp::Bezier
+    {
+        let start = i.saturating_sub(1);
+        let av = a.value.components();
+        let bv = b.value.components();
+        let dur = secs(b.time) - secs(a.time);
+        let x = (secs(key.time) - secs(a.time)) / dur;
+        if key.value.interpolates()
+            && dur.is_finite()
+            && dur > 0.0
+            && x > 0.0
+            && x < 1.0
+            && !av.is_empty()
+            && av.len() == bv.len()
+            && key.value.dims() == av.len()
+        {
+            let mut left = Vec::with_capacity(av.len());
+            let mut incoming = Vec::with_capacity(av.len());
+            let mut outgoing = Vec::with_capacity(av.len());
+            let mut right = Vec::with_capacity(av.len());
+            for (d, (v0, v1)) in av.iter().zip(&bv).enumerate() {
+                let eo = effective_ease(keys, start, d, false, true);
+                let ei = effective_ease(keys, i, d, false, false);
+                let x1 = eo.influence.clamp(0.0, 1.0);
+                let x2 = 1.0 - ei.influence.clamp(0.0, 1.0);
+                let u = solve_u(0.0, x1, x2, 1.0, x);
+                let lerp = |a: f64, b: f64| a + (b - a) * u;
+                let xa = lerp(0.0, x1);
+                let xb = lerp(x1, x2);
+                let xc = lerp(x2, 1.0);
+                let xd = lerp(xa, xb);
+                let xe = lerp(xb, xc);
+                let y1 = v0 + eo.speed * x1 * dur;
+                let y2 = v1 - ei.speed * (1.0 - x2) * dur;
+                let ya = lerp(*v0, y1);
+                let yb = lerp(y1, y2);
+                let yc = lerp(y2, *v1);
+                let yd = lerp(ya, yb);
+                let ye = lerp(yb, yc);
+                let y = lerp(yd, ye);
+                let tangent = |delta: f64, time: f64, span: f64| Ease {
+                    speed: if time.abs() > 1e-12 { delta / (time * dur) } else { 0.0 },
+                    influence: (time / span).clamp(0.0, 1.0),
+                };
+                left.push(tangent(ya - v0, xa, x));
+                incoming.push(tangent(y - yd, x - xd, x));
+                outgoing.push(tangent(ye - y, xe - x, 1.0 - x));
+                right.push(tangent(v1 - yc, 1.0 - xc, 1.0 - x));
+            }
+            key.in_interp = Interp::Bezier;
+            key.out_interp = Interp::Bezier;
+            key.continuous = true;
+            key.auto_bezier = a.auto_bezier && b.auto_bezier;
+            key.in_ease = incoming;
+            key.out_ease = outgoing;
+            if let Some(a) = keys.get_mut(start) {
+                a.out_ease = left;
+            }
+            if let Some(b) = keys.get_mut(i) {
+                b.in_ease = right;
+            }
+        }
+    }
+    set_key(keys, key)
 }
 
 /// Index of the key exactly at `t`.
@@ -1021,3 +1189,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod tests_ae_behavior;

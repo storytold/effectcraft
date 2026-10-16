@@ -195,11 +195,18 @@ fn exec_on_keys(s: &mut Session, id: &str, params: J, targets: &J) -> Result<J, 
         let key = l.props.find(prop).and_then(|pr| pr.keys.get(usize::try_from(index).ok()?)).ok_or("the keyframe no longer exists")?;
         keys.push(KeyRef { layer: LayerId(layer), prop, time: key.time });
     }
+    // Activate before installing temporary keys: activation restores the comp's selection.
+    let previous = s.state.active_comp;
+    s.activate_comp(cid);
     let saved = std::mem::replace(&mut s.state.selected_keys, keys);
     let r = exec(s, id, params);
     let comp = s.active_comp();
     let exists = |k: &KeyRef| comp.and_then(|c| c.layer(k.layer)).and_then(|l| l.props.find(k.prop)).is_some_and(|pr| pr.keys.iter().any(|x| x.time == k.time));
     s.state.selected_keys = saved.into_iter().filter(exists).collect();
+    match previous {
+        Some(c) => s.activate_comp(c),
+        None => s.activate_comp_none(),
+    }
     r
 }
 

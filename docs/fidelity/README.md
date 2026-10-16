@@ -71,12 +71,48 @@ After the fix, all ten tangents equal AE's to the printed 0.001 px, and the two 
 test `spatial_auto_bezier_tangents_follow_after_effects` checks the rule on other original keys,
 including a timing change. AE's output stays local; only the script and these scores are tracked.
 
+## Animation behavior follow-up (15 October 2026)
+
+Thirteen original cases, 81 times each, were sampled through After Effects `26.0x67`
+and an EffectCraft `0.10.0` development CLI. They cover non-unit durations, hold and
+mixed interpolation, temporal auto/continuous Bezier, expressions, spatial auto-Bezier,
+linear/eased roving, and separated Position. Aggregate results are in
+[`animation-behavior.json`](animation-behavior.json); raw host output remains local.
+
+The initial `0.9.2` comparison exposed four problems, now covered by focused regressions:
+
+- Per-key scripting commands installed their temporary key selection before switching
+  comps, which replaced it. They now activate first and restore both comp selections,
+  including on errors. Comparisons no longer need to open each target comp first.
+- Roving keys were forced to linear and timed by distance alone. Spatial roving now
+  follows the fixed endpoints' ease across the entire path; automatic endpoints retain
+  constant speed. The eased-path maximum component error fell from 84.7021 px to
+  0.012425 px in the sampled case.
+- Linear sides of mixed curves use one-sixth influence; automatic temporal endpoints
+  use the adjacent slope. Inserting a numeric key into a Bezier segment subdivides its
+  time/value curve, preserving derivatives rather than introducing zero-speed handles.
+  Auto and continuous cases fell from 10.5759° / 8.1141° to below 0.0013°.
+- Separated Position queries combine X/Y/Z followers for both pre- and post-expression
+  reads. A follower-expression discrepancy of 9.99991 px is now below 4e-13 px.
+
+All 13 sampled cases are below 0.002° for scalar rotation and 0.05 px for spatial
+values. These are comparison tolerances, not exact parity or a general error bound.
+The small spatial residual includes arc-length approximation; arbitrary query times
+also differ slightly between hosts. An additional auto-roving probe checks stable
+retiming; regression tests also check subdivision at several insertion times.
+
+`tests_ae_behavior` modules in keyframe and script, and `ae_behavior_tests` in project,
+cover the fixes. This is property-evaluation evidence, not Graph Editor gesture,
+preview-latency, or all-project rendering acceptance. Thirty-six simple nested-comp
+frame pairs also matched placement/clipping in the local investigation; deeper
+mask/matte/effect/3D combinations remain unmeasured.
+
 ## Still unmeasured
 
 Rendered frame comparisons now have a deterministic `effectcraft_effects::fidelity::compare_frames`
 helper. Corpus runners can use it with locally generated host/reference frames and fail on either a
 mean or maximum channel error without committing proprietary renders.
 
-Mixed interpolation sides, non-unit durations, temporal automatic/continuous Bezier, spatial speeds,
-time remapping, expressions, actual rendered motion and other effects need separate corpus cases.
-The initial probe makes no claim about those features.
+Broader combinations of mixed interpolation, temporal/spatial speeds, time remapping and
+expressions, as well as actual rendered motion and other effects, need additional corpus cases.
+The bounded probes above do not establish application-wide parity.

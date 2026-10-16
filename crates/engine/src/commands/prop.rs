@@ -1,6 +1,6 @@
 //! Properties, keyframes and expressions (Animation menu + timeline/Effect Controls gestures).
 
-use effectcraft_keyframe::{Ease, Interp, Keyframe, easy_ease, key_at, set_key};
+use effectcraft_keyframe::{Ease, Interp, Keyframe, easy_ease, key_at};
 use effectcraft_project::{GroupKind, ItemId, Layer, LayerId, Property, Uid};
 use effectcraft_time::{FrameRate, Tick};
 use serde_json::{Value, json};
@@ -466,7 +466,7 @@ fn add_key(s: &mut Session, p: &Value) -> Result<Value> {
         if pr.hold_only {
             k = k.hold();
         }
-        set_key(&mut pr.keys, k);
+        effectcraft_keyframe::insert_key_preserving_ease(&mut pr.keys, k, pr.spatial);
         Ok(json!(pr.keys.len()))
     })?;
     if p.get("timeBase").is_none() {
@@ -494,7 +494,7 @@ fn toggle_key_at(pr: &mut Property, lt: Tick) -> bool {
         if pr.hold_only {
             k = k.hold();
         }
-        set_key(&mut pr.keys, k);
+        effectcraft_keyframe::insert_key_preserving_ease(&mut pr.keys, k, pr.spatial);
         true
     }
 }
@@ -1069,7 +1069,7 @@ fn interpolation(s: &mut Session, p: &Value) -> Result<Value> {
             if a {
                 keys[i].in_interp = Interp::Bezier;
                 keys[i].out_interp = Interp::Bezier;
-                keys[i].continuous = false;
+                keys[i].continuous = true;
             }
         }
         if keys[i].continuous && !keys[i].auto_bezier {

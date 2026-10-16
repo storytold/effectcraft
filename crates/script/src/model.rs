@@ -512,16 +512,14 @@ fn value(s: &Session, a: &J) -> R {
     let p = l.props.find(uid).ok_or("the property no longer exists (it was deleted)")?;
     let t = f(a, "time").map(Tick::from_seconds_f64).unwrap_or_else(|| s.time_of(cid));
     let pre = a.get("pre").and_then(J::as_bool).unwrap_or(false);
-    let v = if pre || !p.has_expression() {
-        p.value_at(l.layer_time(t))
-    } else {
-        let mut ctx = EvalCtx::new(&s.project, cid, c, t);
+    let mut ctx = EvalCtx::new(&s.project, cid, c, t);
+    // Even without a leader expression, separated Position combines its followers.
+    if !pre {
         ctx.expr = s.expr.as_deref();
-        // Sample expressions (`sampleImage`) read footage through the session's source; without
-        // it footage layers sample as transparent (#1000).
-        ctx.footage = Some(s.footage.as_ref());
-        ctx.value(l, p)
-    };
+    }
+    // Expressions using sampleImage need the session's footage source (#1000).
+    ctx.footage = Some(s.footage.as_ref());
+    let v = ctx.value(l, p);
     Ok(js_value(c, &v))
 }
 

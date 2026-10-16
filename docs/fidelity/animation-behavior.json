@@ -1,0 +1,100 @@
+{
+  "date": "2026-10-15",
+  "reference": "After Effects 26.0x67",
+  "candidate": "EffectCraft 0.10.0 development CLI",
+  "samples_per_case": 81,
+  "active_comp_workaround": false,
+  "cases": [
+    {
+      "name": "linear_nonunit",
+      "raw_max_error": 0.000520833333337814,
+      "evaluated_max_error": 0.000520833333337814,
+      "tolerance": 0.002,
+      "pass": true
+    },
+    {
+      "name": "ease_nonunit",
+      "raw_max_error": 0.000778971544789897,
+      "evaluated_max_error": 0.000778971544789897,
+      "tolerance": 0.002,
+      "pass": true
+    },
+    {
+      "name": "high_influence_nonunit",
+      "raw_max_error": 3.5569769352150615e-11,
+      "evaluated_max_error": 3.5569769352150615e-11,
+      "tolerance": 0.002,
+      "pass": true
+    },
+    {
+      "name": "hold",
+      "raw_max_error": 0,
+      "evaluated_max_error": 0,
+      "tolerance": 0.002,
+      "pass": true
+    },
+    {
+      "name": "mixed_out_hold",
+      "raw_max_error": 0,
+      "evaluated_max_error": 0,
+      "tolerance": 0.002,
+      "pass": true
+    },
+    {
+      "name": "mixed_out_linear",
+      "raw_max_error": 0.0007882392747617928,
+      "evaluated_max_error": 0.0007882392747617928,
+      "tolerance": 0.002,
+      "pass": true
+    },
+    {
+      "name": "auto_temporal",
+      "raw_max_error": 0.0009497730280401129,
+      "evaluated_max_error": 0.0009497730280401129,
+      "tolerance": 0.002,
+      "pass": true
+    },
+    {
+      "name": "continuous_temporal",
+      "raw_max_error": 0.001215682901502646,
+      "evaluated_max_error": 0.001215682901502646,
+      "tolerance": 0.002,
+      "pass": true
+    },
+    {
+      "name": "expression",
+      "raw_max_error": 0.0006510416667069308,
+      "evaluated_max_error": 0.0014023994577474497,
+      "tolerance": 0.002,
+      "pass": true
+    },
+    {
+      "name": "spatial_auto",
+      "raw_max_error": 0.01209755893856368,
+      "evaluated_max_error": 0.01209755893856368,
+      "tolerance": 0.05,
+      "pass": true
+    },
+    {
+      "name": "roving_linear",
+      "raw_max_error": 0.012121359013292476,
+      "evaluated_max_error": 0.012121359013292476,
+      "tolerance": 0.05,
+      "pass": true
+    },
+    {
+      "name": "roving_eased",
+      "raw_max_error": 0.012424785222336254,
+      "evaluated_max_error": 0.012424785222336254,
+      "tolerance": 0.05,
+      "pass": true
+    },
+    {
+      "name": "separated_position",
+      "raw_max_error": 1.4210854715202004e-14,
+      "evaluated_max_error": 3.126388037344441e-13,
+      "tolerance": 0.05,
+      "pass": true
+    }
+  ]
+}

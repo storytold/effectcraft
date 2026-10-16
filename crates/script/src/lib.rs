@@ -108,3 +108,6 @@ mod tests_ui_more;
 mod tests_evalfile;
 #[cfg(test)]
 mod tests_ui_mouse;
+
+#[cfg(test)]
+mod tests_ae_behavior;
