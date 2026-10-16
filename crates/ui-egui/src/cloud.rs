@@ -409,40 +409,23 @@ mod tests {
         });
         app.cloud.mine.path = "/Projects".into();
         app.cloud.mine.loaded = true;
-        app.cloud.mine.entries = vec![
-            entry("Titles", EntryKind::Folder, None),
-            entry("Cold Open.ecproj", EntryKind::File, None),
-            entry("End Card.ecproj", EntryKind::File, None),
-        ];
+        app.cloud.mine.entries =
+            vec![entry("Titles", EntryKind::Folder, None), entry("Cold Open.ecproj", EntryKind::File, None), entry("End Card.ecproj", EntryKind::File, None)];
         app.cloud.shared.loaded = true;
         app.cloud.shared.entries = vec![entry("Review Cut.ecproj", EntryKind::File, Some("Sam"))];
         app.cloud.save_name = "Cold Open.ecproj".into();
         app.cloud.status = Some("CollabCraft".into());
 
-        let mut h = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(1280.0, 800.0))
-            .with_pixels_per_point(1.0)
-            .wgpu()
-            .build_eframe(|_| app);
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1280.0, 800.0)).with_pixels_per_point(1.0).wgpu().build_eframe(|_| app);
         for _ in 0..12 {
             h.step();
         }
         let file = h.state().auto.find("menu.File").expect("File menu");
         let at = egui::pos2(file.rect[0] + file.rect[2] / 2.0, file.rect[1] + file.rect[3] / 2.0);
         h.input_mut().events.push(egui::Event::PointerMoved(at));
-        h.input_mut().events.push(egui::Event::PointerButton {
-            pos: at,
-            button: egui::PointerButton::Primary,
-            pressed: true,
-            modifiers: Default::default(),
-        });
+        h.input_mut().events.push(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
         h.step();
-        h.input_mut().events.push(egui::Event::PointerButton {
-            pos: at,
-            button: egui::PointerButton::Primary,
-            pressed: false,
-            modifiers: Default::default(),
-        });
+        h.input_mut().events.push(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
         h.run_steps(3);
         let menu = h.render().expect("file menu");
         menu.save(dir.join("file-menu.png")).unwrap();
