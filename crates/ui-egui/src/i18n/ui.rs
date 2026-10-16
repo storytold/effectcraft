@@ -19,7 +19,7 @@ use std::fmt::Display;
 use std::sync::OnceLock;
 
 thread_local! {
-    /// The resolved interface language ("en", "ja", "zh-hans", "zh-hant", "uk", "pt-br", "cs", "es"); "en" until the first
+    /// The resolved interface language ("en", "de", "ja", "zh-hans", "zh-hant", "uk", "pt-br", "cs", "es"); "en" until the first
     /// frame sets it.
     static CURRENT: Cell<&'static str> = const { Cell::new("en") };
 }
@@ -47,7 +47,9 @@ fn catalog(language: &str) -> Option<&'static Index> {
     static PT_BR: OnceLock<Index> = OnceLock::new();
     static CS: OnceLock<Index> = OnceLock::new();
     static ES: OnceLock<Index> = OnceLock::new();
+    static DE: OnceLock<Index> = OnceLock::new();
     let (index, rows) = match language {
+        "de" => (&DE, super::de::UI),
         "ja" => (&JA, JAPANESE),
         "zh-hans" => (&HANS, SIMPLIFIED_CHINESE),
         "zh-hant" => (&HANT, TRADITIONAL_CHINESE),
@@ -4309,7 +4311,27 @@ mod tests {
             .chain(PORTUGUESE.iter().copied())
             .chain(CZECH.iter().copied())
             .chain(SPANISH.iter().copied())
+            .chain(super::super::de::UI.iter().copied())
             .collect()
+    }
+
+    #[test]
+    fn german_panels_translate_values_and_preserve_user_content() {
+        let german_keys: Vec<_> = super::super::de::UI.iter().map(|(en, _)| *en).collect();
+        let chinese_keys: Vec<_> = SIMPLIFIED_CHINESE.iter().map(|(en, _)| *en).collect();
+        assert_eq!(german_keys, chinese_keys, "German uses the shared keys in the same order");
+        set_current("de");
+        assert_eq!(tr("Composition Name:"), "Kompositionsname:");
+        assert_eq!(tr("Label"), "Beschriftung");
+        assert_eq!(tr("Footage"), "Footage");
+        assert_eq!(tr("Enable Expression"), "Expression aktivieren");
+        assert_eq!(tr("The render queue is empty."), "Die Renderliste ist leer.");
+        assert_eq!(tr("my layer.mp4"), "my layer.mp4");
+        assert_eq!(tr("unknown future label"), "unknown future label");
+        assert_eq!(tr_args("Step {} of {}: {}", &[&1, &3, &"Import"]), "Schritt 1 von 3: Import");
+        assert_eq!(tr_args("Proxy Use: {}", &[]), "Proxy-Verwendung: ");
+        set_current("en");
+        assert_eq!(tr("Cancel"), "Cancel");
     }
 
     #[test]
@@ -4339,7 +4361,14 @@ mod tests {
         let hant: Vec<&str> = TRADITIONAL_CHINESE.iter().map(|(en, _)| *en).collect();
         assert_eq!(hans, hant, "the two Chinese catalogs list different source strings");
         // Japanese, Ukrainian and Czech may lag the Chinese catalogs: a missing row falls back to English.
-        for (name, cat) in [("Japanese", JAPANESE), ("Ukrainian", UKRAINIAN), ("Brazilian Portuguese", PORTUGUESE), ("Czech", CZECH), ("Spanish", SPANISH)] {
+        for (name, cat) in [
+            ("Japanese", JAPANESE),
+            ("Ukrainian", UKRAINIAN),
+            ("Brazilian Portuguese", PORTUGUESE),
+            ("Czech", CZECH),
+            ("Spanish", SPANISH),
+            ("German", super::super::de::UI),
+        ] {
             let extra: Vec<&str> = cat.iter().map(|(en, _)| *en).filter(|en| !hans.contains(en)).collect();
             assert!(extra.is_empty(), "the {name} catalog lists source strings the Chinese ones don't: {extra:?}");
         }

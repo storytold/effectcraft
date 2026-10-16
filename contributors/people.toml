@@ -79,6 +79,12 @@ sync_github_name = true
 real_name = "Moein Saharkhiz"
 display_name = "onlymoein"
 
+# Name supplied by this contributor for the About window.
+[people.lia-xim]
+real_name = "Matthias Ramahi"
+display_name = "Matthias Ramahi"
+sync_github_name = false
+
 [people.arnav-hiwarkar]
 display_name = "arnav-hiwarkar"
 sync_github_name = false
