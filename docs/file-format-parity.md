@@ -43,7 +43,7 @@ trips and renders, checked by tests, not against After Effects), **partial** (na
 | TIFF | R/W | yes | yes (sequence) | good |
 | OpenEXR (multi-layer, Cryptomatte) | R/W | yes | yes (32-bit sequence) | good; HTJ2K compression fails (#482); EXRs without an unnamed RGB layer decode twice (#474) |
 | Photoshop PSD / PSB | R (footage, composition) / W (layers, sequence) | yes (layers, groups, masks, styles, smart objects) | Save Frame As ▸ Photoshop Layers; no Photoshop sequence output | good, from Adobe's published spec |
-| Illustrator `.ai`, PDF, EPS | R | yes (vector, Continuously Rasterize, Create Shapes) | — | partial: no JPX / JBIG2 images, no Illustrator procset EPS |
+| Illustrator `.ai`, PDF, EPS | R | yes (vector, Continuously Rasterize, Create Shapes; Composition and Composition - Retain Layer Sizes, #1536) | — | partial: no JPX / JBIG2 images, no Illustrator procset EPS |
 | SVG | R | yes | — | good; SVG markup on the clipboard pastes as a shape layer (26.3, #738); Illustrator's own clipboard data (PDF/AI) doesn't |
 | GIF | R/W | yes | yes (animated) | good |
 | BMP | R | yes | — | good |

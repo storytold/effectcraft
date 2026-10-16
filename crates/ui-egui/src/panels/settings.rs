@@ -688,6 +688,8 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                 egui::ScrollArea::vertical().id_salt("settings-pages").max_height(body_h).auto_shrink([false, false]).show(ui, |ui| {
                     // One Tab stop for the list (the open page); Up / Down / Home / End move
                     // between the pages and the focus goes with them.
+                    // The rows touch, so the pointer never falls between two of them.
+                    ui.spacing_mut().item_spacing.y = 0.0;
                     let ctx = ui.ctx().clone();
                     let page_item = |id: &str| egui::Id::new(("settings-page", id.to_string()));
                     let on_list = all.iter().any(|q| ctx.memory(|m| m.has_focus(page_item(q.id))));

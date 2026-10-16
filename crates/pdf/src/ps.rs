@@ -700,20 +700,10 @@ impl Interp {
                             a / b
                         }
                     }
-                    "idiv" => {
-                        if b as i64 == 0 {
-                            0.0
-                        } else {
-                            ((a as i64) / (b as i64)) as f64
-                        }
-                    }
-                    "mod" => {
-                        if b as i64 == 0 {
-                            0.0
-                        } else {
-                            ((a as i64) % (b as i64)) as f64
-                        }
-                    }
+                    // `checked_*` give 0 both for a zero divisor and for the one overflowing
+                    // case, `i64::MIN / -1` (`/` and `%` panic on it in every build).
+                    "idiv" => (a as i64).checked_div(b as i64).unwrap_or(0) as f64,
+                    "mod" => (a as i64).checked_rem(b as i64).unwrap_or(0) as f64,
                     "atan" => a.atan2(b).to_degrees().rem_euclid(360.0),
                     "exp" => a.powf(b),
                     "max" => a.max(b),

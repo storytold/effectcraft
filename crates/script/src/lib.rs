@@ -106,5 +106,9 @@ mod tests_ui_more;
 // #760: `$.evalFile` and `BridgeTalk`.
 #[cfg(test)]
 mod tests_evalfile;
+// `/browser/…` is the web editor's file table, an absolute path on wasm; on Windows it has no
+// drive, so the script runtime resolves it under the current drive, where the host holds nothing.
+#[cfg(all(test, not(windows)))]
+mod tests_services;
 #[cfg(test)]
 mod tests_ui_mouse;

@@ -247,7 +247,7 @@ fn template_output_alias_fixture(case: &str) -> PathBuf {
     dir
 }
 
-fn assert_template_output_preserves_inputs(dir: &PathBuf, out: &str) {
+fn assert_template_output_preserves_inputs(dir: &PathBuf, out: &str) -> Value {
     let template_before = std::fs::read(dir.join("lt.ectemplate")).unwrap();
     let values_before = std::fs::read(dir.join("values.json")).unwrap();
     // Read the inputs before interpreting the subprocess status or error text.
@@ -272,7 +272,8 @@ fn assert_template_output_preserves_inputs(dir: &PathBuf, out: &str) {
     );
     assert!(template_preserved, "template rendering must preserve its template input when --out aliases that file");
     assert!(values_preserved, "template rendering must preserve its values input when --out aliases that file");
-    assert!(!result.status.success(), "an output alias must fail before rendering overwrites an input");
+    assert_eq!(result.status.code(), Some(1), "an output alias must fail before rendering overwrites an input");
+    serde_json::from_slice(&result.stdout).unwrap()
 }
 
 #[test]
@@ -650,5 +651,41 @@ fn template_missing_output_does_not_replace_extracted_media() {
     assert!(!dir.join("frame.png").exists(), "a missing render output must not create a default frame");
     eprintln!("MISSING_OUTPUT_REQUIRED_OUT: valid ordinary render/extraction and actual required-output usage failure verified");
     assert!(media_preserved, "missing --out must fail before overwriting previously extracted media");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn template_frame_output_cannot_alias_its_template_through_a_hard_link() {
+    use std::os::unix::fs::MetadataExt;
+
+    let dir = template_output_alias_fixture("hard-linked-template");
+    let input = dir.join("lt.ectemplate");
+    let output = dir.join("hard-linked-template.png");
+    std::fs::hard_link(&input, &output).unwrap();
+    let input_metadata = std::fs::metadata(&input).unwrap();
+    let output_metadata = std::fs::metadata(&output).unwrap();
+    assert_eq!((input_metadata.dev(), input_metadata.ino()), (output_metadata.dev(), output_metadata.ino()), "actual hard-link file identity");
+    assert_ne!(input.canonicalize().unwrap(), output.canonicalize().unwrap(), "the hard link has a distinct canonical path");
+    let reply = assert_template_output_preserves_inputs(&dir, "hard-linked-template.png");
+    assert_eq!(reply["error"], "--out hard-linked-template.png would overwrite --template lt.ectemplate", "{reply}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn template_frame_output_cannot_alias_its_values_through_a_hard_link() {
+    use std::os::unix::fs::MetadataExt;
+
+    let dir = template_output_alias_fixture("hard-linked-values");
+    let input = dir.join("values.json");
+    let output = dir.join("hard-linked-values.png");
+    std::fs::hard_link(&input, &output).unwrap();
+    let input_metadata = std::fs::metadata(&input).unwrap();
+    let output_metadata = std::fs::metadata(&output).unwrap();
+    assert_eq!((input_metadata.dev(), input_metadata.ino()), (output_metadata.dev(), output_metadata.ino()), "actual hard-link file identity");
+    assert_ne!(input.canonicalize().unwrap(), output.canonicalize().unwrap(), "the hard link has a distinct canonical path");
+    let reply = assert_template_output_preserves_inputs(&dir, "hard-linked-values.png");
+    assert_eq!(reply["error"], "--out hard-linked-values.png would overwrite --values values.json", "{reply}");
     let _ = std::fs::remove_dir_all(&dir);
 }

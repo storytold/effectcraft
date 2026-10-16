@@ -542,8 +542,23 @@ fn draw_bounds(d: &Draw, paths: &[BezPath]) -> Option<kurbo::Rect> {
         Paint::Gradient { stroke: Some(style), .. } => Some(style),
         _ => None,
     };
-    let grow = stroke.map_or(1.0, |style| style.width * style.miter.max(1.0) * 0.5 * d.xf.mean_scale().max(1.0) + 1.0);
+    let grow = stroke.map_or(1.0, |style| style.width * stroke_reach(style, paths) * 0.5 * d.xf.mean_scale().max(1.0) + 1.0);
     Some(b.inflate(grow, grow))
+}
+
+/// How far a stroke can reach past its path, in half widths: the miter limit only where a
+/// miter join exists (a path of two or more segments, or a closed one), √2 at square cap
+/// corners, else one. Padding every stroke by the miter limit made a 1080 px straight line
+/// (a wipe matte) a 4326×6366 buffer, ~440 MB per layer per frame.
+fn stroke_reach(style: &StrokeStyle, paths: &[BezPath]) -> f64 {
+    if style.is_variable() {
+        // Taper and Wave can widen the stroke: keep the widest padding.
+        return style.miter.max(std::f64::consts::SQRT_2);
+    }
+    let joins =
+        style.join == Join::Miter && paths.iter().any(|p| p.segments().nth(1).is_some() || p.elements().iter().any(|e| matches!(e, kurbo::PathEl::ClosePath)));
+    let cap = if style.cap == Cap::Square { std::f64::consts::SQRT_2 } else { 1.0 };
+    if joins { style.miter.max(cap) } else { cap }
 }
 
 /// Local-space visual bounds of a draw, as After Effects' layer bounds (`sourceRectAtTime` with

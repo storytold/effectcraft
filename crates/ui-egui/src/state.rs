@@ -335,13 +335,15 @@ impl TimelineState {
     }
 }
 
-/// Where a Timeline shortcut scrolls to.
+/// Where the Timeline scrolls to.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ScrollTo {
     /// D: the current time, centred in the time graph.
     Time,
     /// X: the topmost selected layer, at the top of the layers.
     Layer,
+    /// A revealed property, at the top of the rows.
+    Property(u64),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -419,7 +421,7 @@ pub struct TimelineState {
     /// The name column shows Source Name instead of Layer Name (click its header).
     #[serde(default)]
     pub source_name: bool,
-    /// A scroll asked for by a shortcut (D, X), done when the Timeline is next drawn.
+    /// A pending scroll, applied when the Timeline is next drawn.
     #[serde(skip)]
     pub scroll_to: Option<ScrollTo>,
 }

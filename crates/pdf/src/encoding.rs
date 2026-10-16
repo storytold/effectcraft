@@ -208,10 +208,10 @@ pub fn name_to_unicode(name: &str) -> Option<char> {
     if let Some((_, u)) = NAMES.iter().find(|(n, _)| *n == base) {
         return char::from_u32(*u);
     }
-    if let Some(h) = base.strip_prefix("uni")
-        && h.len() >= 4
-    {
-        return u32::from_str_radix(&h[..4], 16).ok().and_then(char::from_u32);
+    // `get(..4)` also insists on a character boundary: a name like `uni\u{20AC}\u{20AC}` used to
+    // panic slicing inside a multi-byte character.
+    if let Some(x) = base.strip_prefix("uni").and_then(|h| h.get(..4)) {
+        return u32::from_str_radix(x, 16).ok().and_then(char::from_u32);
     }
     if let Some(h) = base.strip_prefix('u')
         && (4..=6).contains(&h.len())
@@ -385,5 +385,13 @@ mod tests {
         assert_eq!(name_to_unicode("f_i"), Some('f'));
         assert_eq!(unicode_to_name('Ω'), "Omega");
         assert_eq!(unicode_to_name('中'), "uni4E2D");
+    }
+
+    /// A glyph name like `uni\u{20AC}\u{20AC}` (multi-byte UTF-8 after `uni`) must not slice
+    /// inside a character.
+    #[test]
+    fn multibyte_glyph_names_do_not_panic() {
+        assert_eq!(name_to_unicode("uni\u{20AC}\u{20AC}"), None);
+        assert_eq!(name_to_unicode("uni\u{20AC}"), None);
     }
 }

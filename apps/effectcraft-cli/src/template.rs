@@ -36,7 +36,20 @@ pub(super) fn validate(cmd: &str, args: &Args) -> Result<(), Failure> {
     {
         for input in ["--template", "--values"] {
             if let Some(path) = args.opt(input)
-                && std::fs::canonicalize(path).is_ok_and(|path| path == output)
+                && std::fs::canonicalize(path).is_ok_and(|path| {
+                    if path == output {
+                        return true;
+                    }
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::MetadataExt;
+                        // Distinct canonical paths can still name the same file through hard links.
+                        if let (Ok(input), Ok(output)) = (std::fs::metadata(&path), std::fs::metadata(&output)) {
+                            return input.dev() == output.dev() && input.ino() == output.ino();
+                        }
+                    }
+                    false
+                })
             {
                 return Err(Failure::Error(format!("--out {out} would overwrite {input} {path}")));
             }

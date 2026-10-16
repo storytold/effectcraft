@@ -228,9 +228,7 @@ fn copy(s: &mut Session, p: &Value) -> Result<Value> {
     }
     // Keyframes selected → copy keys (pasted at the CTI).
     if !s.state.selected_keys.is_empty() && p.get("layers").is_none() {
-        s.state.link_clipboard = None;
-        s.state.effect_clipboard.clear();
-        s.state.contents_clipboard.clear();
+        clear_clipboards(s);
         return s.execute("keys.copy", json!({}));
     }
     // Effects selected (Effect Controls / timeline) → copy the effects.
@@ -256,12 +254,14 @@ fn copy(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 /// Edit ▸ Copy with properties selected (Position, or the Transform group), as in After
-/// Effects: an animated property copies its keyframes (the selected ones, else all of them) and
-/// an unanimated one its value, for Paste onto the same properties of other layers (#493).
+/// Effects: an animated property copies its keyframes and an unanimated one its value, for Paste
+/// onto the same properties of other layers (#493). With keyframes selected only those are copied,
+/// even across several highlighted properties (#1552); a selected Transform group copies them all.
 /// `None` when no property (or Transform group) is selected.
 fn copy_properties(s: &mut Session) -> Result<Option<Value>> {
     let Some(comp) = s.active_comp() else { return Ok(None) };
     let mut leaves = vec![];
+    let mut copy_all_keys = s.state.selected_keys.is_empty();
     for (lid, uid) in &s.state.selected_props {
         let Some(l) = comp.layer(*lid) else { continue };
         if l.props.find(*uid).is_some() {
@@ -269,6 +269,7 @@ fn copy_properties(s: &mut Session) -> Result<Option<Value>> {
         } else if let Some(g) = l.props.find_group(*uid)
             && l.props.match_path_of(*uid).as_deref() == Some("transform")
         {
+            copy_all_keys = true;
             g.walk("", &mut |_, pr| leaves.push((*lid, pr.uid)));
         }
     }
@@ -286,7 +287,7 @@ fn copy_properties(s: &mut Session) -> Result<Option<Value>> {
             {
                 values.push((path, pr.value.clone()));
             }
-        } else if !keys.iter().any(|k| k.layer == *lid && k.prop == *uid) {
+        } else if copy_all_keys && !keys.iter().any(|k| k.layer == *lid && k.prop == *uid) {
             keys.extend(pr.keys.iter().map(|k| KeyRef { layer: *lid, prop: *uid, time: k.time }));
         }
     }

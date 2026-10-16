@@ -154,6 +154,7 @@ Come tell us what matters most to you on [Discord](https://discord.gg/artcraft).
 | 2026-10-12 | patch | Roto Brush span validation after trimming; command regressions for both layer edges |
 | 2026-10-10 | minor | Hours to ≈ 95% for each audience |
 | 2026-10-10 | minor | Headline adds mainstream practitioner (≈ 47%) and essentials user (≈ 52%) |
+| 2026-10-12 | minor | Shared PDF object/xref parsing with bounded app-owned conversion and preserved stream budgets; drawing, EPS and image/font policy remain unchanged |
 | 2026-10-10 | minor | Stage checked against the new core-workflow gate (all six pass; still alpha) |
 | 2026-10-10 | major | Rewritten to the shared progress-docs standard: stage, two numbers, dimensions, features, languages, upcoming, progress log; milestones moved to docs/roadmap.md |
 | 2026-10-05 | major | Two numbers (breadth vs real use) and workstreams G1–G9 |

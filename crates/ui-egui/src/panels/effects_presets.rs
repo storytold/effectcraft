@@ -8,6 +8,7 @@
 use crate::i18n::tr;
 use egui::{Align2, Color32, Rect, Sense, Stroke, pos2, vec2};
 use serde_json::json;
+use std::sync::Arc;
 
 use crate::a11y;
 use crate::icons::{self, Icon};
@@ -345,14 +346,14 @@ fn preset_row(
     name: &str,
     auto_id: &str,
     query: &str,
-    on_apply: Apply,
+    on_apply: impl Fn() -> Apply,
     apply: &mut Option<Apply>,
 ) {
     let t = app.tokens;
     let r = Rect::from_min_size(pos2(list.min.x, *y), vec2(list.width(), ROW_H));
     let id = egui::Id::new(("fxpreset", auto_id));
     let tab = nav.tab_stop(id);
-    let selected = nav.push(id, *y, 3, None, Some(on_apply.clone()));
+    let selected = nav.push(id, *y, 3, None, Some(on_apply()));
     *y += ROW_H;
     if r.max.y < list.min.y || r.min.y > list.max.y {
         return;
@@ -372,7 +373,7 @@ fn preset_row(
         nav_click(ui.ctx(), app, id);
     }
     if resp.double_clicked() {
-        *apply = Some(on_apply);
+        *apply = Some(on_apply());
     }
 }
 
@@ -491,17 +492,17 @@ fn list_keys(app: &mut EffectcraftApp, ctx: &egui::Context, nav: &Nav, list: Rec
 }
 
 /// User preset files, rescanned every few seconds (and on Refresh List).
-fn user_presets(ctx: &egui::Context, force: bool) -> Vec<PresetFile> {
+fn user_presets(ctx: &egui::Context, force: bool, scan: impl FnOnce() -> Vec<PresetFile>) -> Arc<Vec<PresetFile>> {
     let id = egui::Id::new("fx-user-presets");
     let now = ctx.input(|i| i.time);
     if !force
-        && let Some((at, v)) = ctx.data(|d| d.get_temp::<(f64, std::sync::Arc<Vec<PresetFile>>)>(id))
+        && let Some((at, v)) = ctx.data(|d| d.get_temp::<(f64, Arc<Vec<PresetFile>>)>(id))
         && now - at < 5.0
     {
-        return (*v).clone();
+        return v;
     }
-    let v = presets_dir().map(|d| scan_presets(&d)).unwrap_or_default();
-    ctx.data_mut(|d| d.insert_temp(id, (now, std::sync::Arc::new(v.clone()))));
+    let v = Arc::new(scan());
+    ctx.data_mut(|d| d.insert_temp(id, (now, v.clone())));
     v
 }
 
@@ -533,6 +534,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     app.auto.add("effects.menu", mr, "Effects & Presets options");
     let view = app.ui.effects_view.clone();
     let mark = |on: bool, l: &str| if on { format!("✓ {l}") } else { format!("    {l}") };
+    let copy_label = format!("    {}", tr("Copy Presets Folder Path"));
     let menu = vec![
         mark(view.depth == "all", "Show Effects for All Color Depths"),
         mark(view.depth == "32", "Show 32 bpc Effects Only"),
@@ -546,7 +548,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         "    Refresh List".into(),
         "    Clear Recently Used".into(),
         "-".into(),
-        format!("    {}", tr("Copy Presets Folder Path")),
+        copy_label.clone(),
     ];
     let mut force_scan = false;
     let separators = menu.iter().filter(|label| *label == "-").count();
@@ -565,7 +567,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     if i == 0 {
                         widgets::focus_when_opened(ui, mpop, &resp);
                     }
-                    if i == 12 {
+                    if label == &copy_label {
                         app.auto.add("effects.copyPresetsFolderPath", resp.rect, "Copy Presets Folder Path");
                     }
                     if resp.clicked() {
@@ -584,6 +586,11 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         }
         let v = &mut app.ui.effects_view;
         match i {
+            i if menu.get(i) == Some(&copy_label) => {
+                if let Err(e) = crate::menus::invoke(app, &ctx, "effects.copyPresetsFolderPath", json!({})) {
+                    app.ui.status = e;
+                }
+            }
             0 => v.depth = "all".into(),
             1 => v.depth = "32".into(),
             2 => v.depth = "gpu".into(),
@@ -592,11 +599,6 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             7 => v.alphabetical = true,
             9 => force_scan = true,
             10 => app.ui.effects_recent.clear(),
-            12 => {
-                if let Err(e) = crate::menus::invoke(app, &ctx, "effects.copyPresetsFolderPath", json!({})) {
-                    app.ui.status = e;
-                }
-            }
             _ => {}
         }
     }
@@ -644,8 +646,8 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 categories.push(c);
             }
         }
-        let files: Vec<PresetFile> =
-            user_presets(&ctx, force_scan).into_iter().filter(|f| query.is_empty() || f.name.to_lowercase().contains(&query)).collect();
+        let user = user_presets(&ctx, force_scan, || presets_dir().map(|d| scan_presets(&d)).unwrap_or_default());
+        let files: Vec<&PresetFile> = user.iter().filter(|f| query.is_empty() || f.name.to_lowercase().contains(&query)).collect();
         let any = !text.is_empty() || !builtin.is_empty() || !files.is_empty();
         if any && folder_row(app, ui, &lp, list, &mut y, &mut nav, "presets", "* Animation Presets", 1, 0.0, searching, None) {
             if !text.is_empty() && folder_row(app, ui, &lp, list, &mut y, &mut nav, "presets/Text", "Text", 2, 14.0, searching, None) {
@@ -660,7 +662,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                         &name,
                         &format!("effects.preset.text.{id}"),
                         &query,
-                        Apply::TextPreset(id.clone()),
+                        || Apply::TextPreset(id.clone()),
                         &mut apply,
                     );
                 }
@@ -680,7 +682,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                         name,
                         &format!("effects.preset.builtin.{id}"),
                         &query,
-                        Apply::Builtin(id.clone()),
+                        || Apply::Builtin(id.clone()),
                         &mut apply,
                     );
                 }
@@ -697,7 +699,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                         &f.name,
                         &format!("effects.preset.file.{}", f.name),
                         &query,
-                        Apply::PresetFile(f.path.clone()),
+                        || Apply::PresetFile(f.path.clone()),
                         &mut apply,
                     );
                 }
@@ -819,6 +821,64 @@ mod tests {
         let v = scan_presets(&d);
         assert_eq!(v.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), vec!["bounce", "Zoom In"]);
         assert!(scan_presets(&d.join("missing")).is_empty());
+        let ctx = egui::Context::default();
+        let set_time = |time| {
+            let mut output = ctx.run_ui(egui::RawInput { time: Some(time), ..Default::default() }, |_| {});
+            output.textures_delta.clear();
+        };
+        let scans = std::cell::Cell::new(0);
+        let scan = || {
+            scans.set(scans.get() + 1);
+            scan_presets(&d)
+        };
+        set_time(1.0);
+        let first = user_presets(&ctx, false, scan);
+        assert_eq!(first.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["bounce", "Zoom In"]);
+        std::fs::remove_file(d.join("bounce.ECPRESET")).unwrap();
+        std::fs::write(d.join("Another.ecpreset"), "{}").unwrap();
+        set_time(5.999);
+        let hit = user_presets(&ctx, false, scan);
+        assert!(Arc::ptr_eq(&first, &hit));
+        assert_eq!(hit.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["bounce", "Zoom In"]);
+        assert_eq!(scans.get(), 1);
+        set_time(6.0);
+        let expired = user_presets(&ctx, false, scan);
+        assert_eq!(expired.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["Another", "Zoom In"]);
+        std::fs::remove_file(d.join("Another.ecpreset")).unwrap();
+        let refreshed = user_presets(&ctx, true, scan);
+        assert_eq!(refreshed.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["Zoom In"]);
+        assert_eq!(scans.get(), 3);
+        assert_eq!(first.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["bounce", "Zoom In"]);
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    #[ignore = "warm custom-preset cache benchmark"]
+    fn user_preset_cache_benchmark() {
+        let ctx = egui::Context::default();
+        let files = user_presets(&ctx, false, || {
+            (0..1000).map(|i| PresetFile { name: format!("Preset {i:04}"), path: format!("/presets/Preset {i:04}.ecpreset") }).collect()
+        });
+        assert_eq!(files.first().unwrap().name, "Preset 0000");
+        assert_eq!(files.last().unwrap().name, "Preset 0999");
+        let mut before = Vec::new();
+        let mut after = Vec::new();
+        for _ in 0..5 {
+            let start = std::time::Instant::now();
+            for _ in 0..1000 {
+                let (_, shared) = ctx.data(|d| d.get_temp::<(f64, Arc<Vec<PresetFile>>)>(egui::Id::new("fx-user-presets"))).unwrap();
+                std::hint::black_box((*shared).clone());
+            }
+            before.push(start.elapsed());
+            let start = std::time::Instant::now();
+            for _ in 0..1000 {
+                std::hint::black_box(user_presets(&ctx, false, Vec::new));
+            }
+            after.push(start.elapsed());
+        }
+        assert!(Arc::ptr_eq(&files, &user_presets(&ctx, false, Vec::new)));
+        before.sort();
+        after.sort();
+        println!("1,000 custom presets, median per warm cache lookup: {:?} -> {:?}", before[2] / 1000, after[2] / 1000);
     }
 }

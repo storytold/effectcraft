@@ -187,6 +187,18 @@ fn errors_inside_a_function_wrapper_report_the_failing_line() {
     assert_eq!(e.line, Some(3), "{e:?}");
 }
 
+/// The first use of an undefined name is the one inside the function that reads it: a mention
+/// before it, in a comment, a string or another function, doesn't move the report (#1161).
+#[test]
+fn an_undefined_name_mentioned_earlier_reports_its_use_in_the_reading_function() {
+    let mut s = session();
+    let code = "// nope is mentioned here\nvar text = 'nope';\nfunction other() { return nope; }\n(function () {\n  var a = 1;\n  nope.call();\n})();\n";
+    let o = run_code(&mut s, code, "earlier.jsx");
+    let e = o.error.expect("reference error");
+    assert!(e.message.contains("nope"), "{e:?}");
+    assert_eq!(e.line, Some(6), "{e:?}");
+}
+
 #[test]
 fn match_names_and_lookups() {
     let mut s = session();
@@ -427,6 +439,32 @@ fn save_frame_to_png_writes_behind_the_file_gate() {
     assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
     // IHDR width and height.
     assert_eq!((u32::from_be_bytes(bytes[16..20].try_into().unwrap()), u32::from_be_bytes(bytes[20..24].try_into().unwrap())), (40, 30));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #1246: with Warn User When Executing Files on, a script that asserts `confirmed` itself still
+/// gets the question; only the user's answer opens the file.
+#[test]
+fn a_script_cannot_confirm_executing_a_file_for_itself() {
+    let dir = std::env::temp_dir().join(format!("ec-script-exec-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("run.txt");
+    std::fs::write(&f, "x").unwrap();
+    let q = serde_json::to_string(&f.to_string_lossy()).unwrap();
+    let mut s = session();
+    // The user allows file access; the warning stays on (the default).
+    s.execute("prefs.set", json!({"key": "scripting.allowScriptsWriteFiles", "value": true})).unwrap();
+    s.drain_events();
+    let opened = |s: &mut Session| s.drain_events().iter().any(|e| matches!(e, effectcraft_engine::Event::OpenUrl(_)));
+    for code in [
+        format!("JSON.stringify(app.run('file.executeFile', {{path: {q}, confirmed: true}}))"),
+        format!("JSON.stringify(app.run('engine.batch', {{steps: [{{command: 'file.executeFile', params: {{path: {q}, confirmed: true}}}}]}}))"),
+        format!("new File({q}).execute()"),
+    ] {
+        let o = ok(&mut s, &code);
+        assert!(!o.result.to_string().contains("opened") || o.result == json!(false), "{code}: {:?}", o.result);
+        assert!(!opened(&mut s), "{code} opened the file without asking");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1258,6 +1296,36 @@ fn effect_parameter_interpolation_and_ease() {
     assert_eq!(o.result, json!([true, true, 16.67, 33.33, true]));
 }
 
+/// #1531: the per-key methods act on a comp that isn't the active one too. Activating the keys'
+/// comp brought back its own (empty) key selection over the keys named, so the interpolation and
+/// the ease were silently dropped once another comp with a layer had been made first.
+#[test]
+fn key_interpolation_and_ease_apply_outside_the_active_comp() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"
+        var a = app.project.items.addComp("A", 400, 400, 1, 10, 20); a.layers.addNull();
+        var c = app.project.items.addComp("C", 400, 400, 1, 10, 20);
+        var n = c.layers.addNull(); n.threeDLayer = true;
+        var p = n.property("ADBE Transform Group").property("ADBE Rotate Y");
+        p.setValueAtTime(1, 0); p.setValueAtTime(2, -178);
+        for (var j = 1; j <= 2; j++) {
+          p.setInterpolationTypeAtKey(j, KeyframeInterpolationType.BEZIER, KeyframeInterpolationType.BEZIER);
+          p.setTemporalEaseAtKey(j, [new KeyframeEase(0, 60)], [new KeyframeEase(0, 60)]);
+        }
+        [p.keyOutInterpolationType(1) == KeyframeInterpolationType.BEZIER,
+         p.keyInInterpolationType(2) == KeyframeInterpolationType.BEZIER,
+         p.keyOutTemporalEase(1)[0].influence,
+         Math.round(p.valueAtTime(1.25, false) * 100) / 100]
+        "#,
+    );
+    let v = o.result;
+    assert_eq!((&v[0], &v[1], &v[2]), (&json!(true), &json!(true), &json!(60)), "{v}");
+    // Eased, not the linear -44.5.
+    assert!(v[3].as_f64().is_some_and(|x| (x - -44.5).abs() > 1.0), "{v}");
+}
+
 /// #808: sourcePointToComp and compPointToSource follow the layer's transform.
 #[test]
 fn source_point_conversions_follow_the_layer_transform() {
@@ -1374,4 +1442,43 @@ fn scripted_levels_alpha_controls_resolve_from_the_effect() {
         "#,
     );
     assert_eq!(o.result, json!([0.5, 0.5]));
+}
+
+/// After Effects resolves the Transform properties and Source Text from the layer itself, without
+/// naming their group: `layer.property("Position")` (#1348).
+#[test]
+fn layer_property_resolves_transform_and_source_text_shortcuts() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"
+        var c = app.project.items.addComp("x", 100, 100, 1, 5, 30);
+        var t = c.layers.addText("hi");
+        var s = c.layers.addSolid([1, 0, 0], "s", 100, 100, 1);
+        var listed = [t.property("Source Text"), s.property("Position"), s.property("Opacity"), s.property("Scale")].join(", ");
+        s.property("Position").setValue([30, 40]);
+        s.property("Opacity").setValue(25);
+        t.property("Source Text").setValue("bye");
+        s.threeDLayer = true;
+        [listed, s.property("Position").value[0], s.property("Opacity").value, t.property("Source Text").value.text,
+         s.property("ADBE Position").matchName, s("Anchor Point").matchName, s.property("Rotation").matchName,
+         s.property("X Rotation").matchName, s.property("Orientation").matchName]
+        "#,
+    );
+    assert_eq!(
+        o.result,
+        json!([
+            "[object Property], [object Property], [object Property], [object Property]",
+            30,
+            25,
+            "bye",
+            "ADBE Position",
+            "ADBE Anchor Point",
+            "ADBE Rotate Z",
+            "ADBE Rotate X",
+            "ADBE Orientation"
+        ])
+    );
+    let (_, c) = comp_named(&s, "x");
+    assert_eq!(layer(c, "s").props.prop("transform/opacity").unwrap().value, KV::Scalar(25.0));
 }
