@@ -10,6 +10,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+craft-pdf.workspace = true
 effectcraft-svg = { workspace = true }
 kurbo = { workspace = true }
 effectcraft-text = { workspace = true }
@@ -23,3 +24,6 @@ zune-jpeg = "0.5"
 # Encodes JPEG fixtures for the DCT image test.
 image = { workspace = true }
 effectcraft-raster = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"

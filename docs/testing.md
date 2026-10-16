@@ -70,3 +70,9 @@ date, load average, scenario, settings, metrics); `--compare OLD.jsonl` prints t
 the latest matching runs there, `--compare OLD --with NEW` compares two files without rendering.
 The table notes the 1-minute load average: on a busy machine wall time is noise, so compare
 peak memory and instructions retired, and rerun when the load differs a lot.
+
+Results files allow blank lines; corrupt records or invalid comparison fields report the file
+and line instead of being discarded. `--fail-over PCT` requires the same run keys on both sides,
+successful latest runs, and at least one comparable resource metric per run. Failed latest runs,
+missing coverage, empty results and wall-time-only measurements cannot pass the gate. Omit
+`--fail-over` for an exploratory partial comparison; failed latest runs remain visible.

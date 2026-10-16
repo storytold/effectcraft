@@ -32,7 +32,8 @@ Run it under `nice -n 10` on a busy machine; the table notes the load average of
   --with NEW.jsonl      with --compare: compare two result files, without rendering
   --fail-over PCT       with --compare: exit 1 when a matched run got more than PCT % worse in
                         CPU time, peak memory, max RSS or instructions retired (wall time is
-                        left out: it follows the machine's load)
+                        left out: it follows the machine's load). Requires matching successful
+                        latest runs and comparable resource measurements for every key
 
 Scenarios: demo (the built-in demo comp), layers (1080p, 100 solid/text/shape layers with Gaussian
 Blur, Glow, Levels, Curves, Drop Shadow and keyframes), precomps (static and animated precomps
@@ -744,7 +745,49 @@ fn append_line(path: &Path, v: &Value) -> Result<(), String> {
 
 fn read_jsonl(path: &Path) -> Result<Vec<Value>, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok(text.lines().filter(|l| !l.trim().is_empty()).filter_map(|l| serde_json::from_str(l).ok()).collect())
+    text.lines()
+        .enumerate()
+        .filter(|(_, line)| !line.trim().is_empty())
+        .map(|(index, line)| {
+            let context = |error| format!("{}:{}: {error}", path.display(), index.saturating_add(1));
+            let row: Value = serde_json::from_str(line).map_err(|error| context(format!("invalid JSON: {error}")))?;
+            validate_row(&row).map_err(context)?;
+            Ok(row)
+        })
+        .collect()
+}
+
+/// Validate comparison keys and measurements; unavailable platform metrics may be null/absent.
+fn validate_row(row: &Value) -> Result<(), String> {
+    for (field, value) in [
+        ("scenario", &row["scenario"]),
+        ("run", &row["run"]),
+        ("settings.resolution", &row["settings"]["resolution"]),
+        ("settings.format", &row["settings"]["format"]),
+    ] {
+        if value.as_str().is_none_or(|text| text.trim().is_empty()) {
+            return Err(format!("`{field}` must be a nonempty string"));
+        }
+    }
+    if row["settings"]["frames"].as_u64().is_none() {
+        return Err("`settings.frames` must be a nonnegative integer".into());
+    }
+    if row["ok"].as_bool().is_none() {
+        return Err("`ok` must be a boolean".into());
+    }
+    if !row["metrics"].is_object() {
+        return Err("`metrics` must be an object".into());
+    }
+    if row["metrics"]["wall_s"].is_null() {
+        return Err("`metrics.wall_s` is required".into());
+    }
+    for (field, _) in COMPARED {
+        let value = &row["metrics"][*field];
+        if !value.is_null() && value.as_f64().is_none_or(|number| !number.is_finite() || number < 0.0) {
+            return Err(format!("`metrics.{field}` must be a finite nonnegative number or null"));
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------------------- output
@@ -816,10 +859,10 @@ fn key_of(v: &Value) -> String {
     )
 }
 
-/// The last successful result per key (a results file accumulates runs; the latest one counts).
+/// The latest result per key, including failures that supersede older successful runs.
 fn latest_per_key(rows: &[Value]) -> BTreeMap<String, Value> {
     let mut map = BTreeMap::new();
-    for r in rows.iter().filter(|r| r["ok"] == true) {
+    for r in rows {
         map.insert(key_of(r), r.clone());
     }
     map
@@ -857,6 +900,31 @@ fn regressions(old: &BTreeMap<String, Value>, new: &BTreeMap<String, Value>, lim
 
 fn check_regressions(old: &BTreeMap<String, Value>, new: &BTreeMap<String, Value>, limit: Option<f64>) -> Result<(), String> {
     let Some(limit) = limit else { return Ok(()) };
+    if old.is_empty() || new.is_empty() {
+        return Err("insufficient benchmark evidence: baseline and candidate must contain runs".into());
+    }
+    let mut missing = vec![];
+    for (key, baseline) in old {
+        match new.get(key) {
+            None => missing.push(format!("missing candidate run: {key}")),
+            Some(candidate) => {
+                for (label, row) in [("baseline", baseline), ("candidate", candidate)] {
+                    if row["ok"] != true {
+                        missing.push(format!("failed latest {label} run: {key}"));
+                    }
+                }
+                if !GATED.iter().any(|field| pct(baseline["metrics"][*field].as_f64(), candidate["metrics"][*field].as_f64()).is_some()) {
+                    missing.push(format!("no comparable resource measurements: {key}"));
+                }
+            }
+        }
+    }
+    for key in new.keys().filter(|key| !old.contains_key(*key)) {
+        missing.push(format!("missing baseline run: {key}"));
+    }
+    if !missing.is_empty() {
+        return Err(format!("insufficient benchmark evidence:\n  {}", missing.join("\n  ")));
+    }
     let bad = regressions(old, new, limit);
     if bad.is_empty() {
         println!("no run got more than {limit}% worse");
@@ -883,6 +951,10 @@ fn compare_table(old: &BTreeMap<String, Value>, new: &BTreeMap<String, Value>) -
             n["run"].as_str().unwrap_or(""),
             n["settings"]["frames"].as_u64().unwrap_or(0)
         ));
+        if o["ok"] != true || n["ok"] != true {
+            s.push_str(&format!(" (failed latest {} run)\n", if n["ok"] != true { "candidate" } else { "baseline" }));
+            continue;
+        }
         for (field, _) in COMPARED {
             s.push_str(&format!(" {:>8}", fmt_pct(pct(o["metrics"][field].as_f64(), n["metrics"][field].as_f64()))));
         }
@@ -963,11 +1035,11 @@ mod tests {
         assert_eq!(fmt_pct(Some(25.0)), "+25.0%");
         assert_eq!(fmt_pct(None), "-");
 
-        // The latest successful run per key is the baseline; failed runs don't count.
+        // A successful run supersedes an earlier failure for the same key.
         let old = latest_per_key(&[
+            row("layers", "full", 1.0, None, false),
             row("layers", "full", 20.0, Some(1000), true),
             row("layers", "full", 10.0, Some(2000), true),
-            row("layers", "full", 1.0, None, false),
         ]);
         assert_eq!(old.len(), 1);
         let new = latest_per_key(&[row("layers", "full", 8.0, Some(1500), true), row("demo", "half", 1.0, None, true)]);

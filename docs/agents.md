@@ -10,15 +10,6 @@ user can do, an agent can do too. There are three ways in:
 | **CLI** (`effectcraft-cli exec/get/set/...`) | one-shot scripting and CI; JSON output with `--json` | no |
 | **Control channel** (`effectcraft --control 9877`) | driving and seeing the live UI; see [control-protocol.md](control-protocol.md) | yes |
 
-## Find the presets folder
-
-The native Effects & Presets panel's options menu includes **Copy Presets Folder Path**. It copies
-the folder the panel scans: `EC_PRESETS_DIR` when set, otherwise `~/Documents/EffectCraft/Presets`
-using `HOME` or `USERPROFILE`. Relative paths are resolved to an absolute path. The folder may
-not exist yet; this action does not create it.
-Over the live UI control channel, `ui.menu.invoke {"id":"effects.copyPresetsFolderPath"}` copies
-the same path and returns `{path}`. The web app reports that it has no local presets folder.
-
 ## MCP setup
 
 Build once with `cargo build --release -p effectcraft-cli`, then register the server. For Claude
@@ -51,6 +42,11 @@ Desktop, Cursor and the like) take the same `command` and `args`.
   (`render.backend`) reports `active` (`gpu` / `cpu`) and, on the CPU, `why`.
 - **Bridge** (`["mcp", "--bridge", "9877"]`): drives a running `effectcraft --control 9877`, so you
   see every change live. Bridge mode adds `screenshot` and the `ui_*` tools.
+
+After a broken connection, the bridge retries explicitly read-only control queries once.
+Engine commands, UI edits and unknown methods whose transmission or reply fails report an
+unknown outcome: the app may already have applied them. Inspect the app before explicitly
+retrying. A later call reconnects; timeouts and malformed replies are never automatically resent.
 
 ### From an installed release
 
@@ -714,3 +710,12 @@ open the demo project; without it the app starts with an empty project) and use 
 mode or the raw control channel. A good loop is: `ui_elements` to find an id, `ui_click` or `ui_drag`
 to act, then `screenshot {"panel":"Timeline"}` to check the result. `render_frame` shows the
 composition itself at any zoom.
+
+### Effects & Presets
+
+The native Effects & Presets panel's options menu includes **Copy Presets Folder Path**. It copies
+the folder the panel scans: `EC_PRESETS_DIR` when set, otherwise `~/Documents/EffectCraft/Presets`
+using `HOME` or `USERPROFILE`. Relative paths are resolved to an absolute path. The folder may
+not exist yet; this action does not create it.
+Over the live UI control channel, `ui.menu.invoke {"id":"effects.copyPresetsFolderPath"}` copies
+the same path and returns `{path}`. The web app reports that it has no local presets folder.

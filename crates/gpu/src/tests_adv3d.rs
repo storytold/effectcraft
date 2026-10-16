@@ -17,11 +17,13 @@ use crate::Gpu;
 /// A device of the test's own (the test holds [`crate::tests::hold_gpu_lock`]).
 fn gpu() -> Option<Gpu> {
     crate::tests::hold_gpu_lock();
-    let g = Gpu::headless();
-    if g.is_none() {
-        eprintln!("effectcraft-gpu adv3d tests: no GPU adapter, skipping");
+    match Gpu::try_headless() {
+        Ok(g) => Some(g),
+        Err(e) => {
+            eprintln!("effectcraft-gpu adv3d tests: no GPU ({e}), skipping");
+            crate::tests::require_gpu("effectcraft-gpu adv3d tests", Err(&e))
+        }
     }
-    g
 }
 
 fn add(p: &mut Project, cid: ItemId, src: LayerSource, edit: impl FnOnce(&mut effectcraft_project::Layer)) {

@@ -121,8 +121,10 @@ fn viewer_click_does_not_pick_through_hidden_or_locked_solo_layers() {
     }
 }
 
+/// Solo is not time-dependent (as in After Effects): outside the soloed layer's in-out range the
+/// viewer shows nothing, so neither the soloed layer nor the others can be picked.
 #[test]
-fn viewer_click_ignores_inactive_solo_layers() {
+fn viewer_click_picks_nothing_while_the_solo_layer_is_inactive() {
     let mut h = selection_harness();
     let comp = h.state().session.active_comp().unwrap();
     let (front, back) = (comp.layers[0].id, comp.layers[1].id);
@@ -133,7 +135,7 @@ fn viewer_click_ignores_inactive_solo_layers() {
     h.run_steps(3);
     let at = screen(&h, [320.0, 180.0]);
     click(&mut h, at);
-    assert_eq!(h.state().session.state.selected_layers, vec![back]);
+    assert!(h.state().session.state.selected_layers.is_empty(), "{back:?} stays excluded by solo");
 }
 
 /// A selected layer under the pointer takes the press before the layers in front of it, as in
@@ -759,6 +761,40 @@ fn motion_path_key_drag_edits_that_key() {
 fn mask_path(h: &Harness<'_, EffectcraftApp>, name: &str) -> effectcraft_engine::keyframe::ShapePath {
     let l = h.state().session.active_comp().unwrap().layers.iter().find(|l| l.name == name).unwrap().clone();
     l.masks().unwrap().groups().next().unwrap().get("path").unwrap().value.as_path().unwrap().clone()
+}
+
+/// #1544: a Shift-click with the Pen puts the next point straight below, beside or diagonal to the
+/// one before it; without Shift it goes where it was clicked.
+#[test]
+fn pen_shift_click_draws_a_straight_segment() {
+    let mut h = harness();
+    let plate = layer_id(&h, "Plate");
+    h.state_mut().session.execute("layer.select", json!({"layers": [plate]})).unwrap();
+    h.state_mut().session.execute("view.snapping", json!({"value": false})).unwrap();
+    h.state_mut().ui.tool = Tool::Pen;
+    h.run_steps(2);
+    let first = screen(&h, [100.0, 60.0]);
+    click(&mut h, first);
+    let shift_click = |h: &mut Harness<'_, EffectcraftApp>, p: Pos2| {
+        let shift = egui::Modifiers::SHIFT;
+        h.input_mut().events.push(Event::ModifiersChanged(shift));
+        h.input_mut().events.push(Event::PointerMoved(p));
+        h.step();
+        h.input_mut().events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: shift });
+        h.step();
+        h.input_mut().events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: shift });
+        h.input_mut().events.push(Event::ModifiersChanged(egui::Modifiers::NONE));
+        h.run_steps(2);
+    };
+    let down = screen(&h, [112.0, 250.0]);
+    shift_click(&mut h, down);
+    let free = screen(&h, [300.0, 290.0]);
+    click(&mut h, free);
+    let drawn = mask_path(&h, "Plate");
+    let near = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).abs() < 1.0 && (a[1] - b[1]).abs() < 1.0;
+    assert_eq!(drawn.vertices.len(), 3, "{drawn:?}");
+    assert!(near(drawn.vertices[1], [100.0, 250.0]), "straight down: {drawn:?}");
+    assert!(near(drawn.vertices[2], [300.0, 290.0]), "no Shift, no constraint: {drawn:?}");
 }
 
 /// Drawing a mask with the Pen, moving a point and undoing take one action back per undo; a
@@ -2269,4 +2305,42 @@ fn mask_marquee_selects_vertices() {
     h.run_steps(2);
     let sel = &h.state().session.state.selected_vertices;
     assert_eq!(sel.len(), 2, "shift-marquee adds: {sel:?}");
+}
+
+/// A null's eye in the Timeline hides it in the Composition viewer, as in After Effects: its box
+/// and handles go even while it is selected and a click on its box doesn't pick it; the eye back
+/// on brings them back.
+#[test]
+fn null_eye_hides_it_in_the_viewer() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Nulls", "width": 640, "height": 360, "duration": 4})).unwrap();
+    let n = s.execute("layer.newNull", json!({})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.select", json!({"layers": [n]})).unwrap();
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(move |_| EffectcraftApp::new(s));
+    h.run_steps(3);
+    let handle = format!("viewer.handle.{n}.0");
+    let eye = format!("timeline.layer.{n}.video");
+    assert!(h.state().auto.find(&handle).is_some(), "a shown null has handles");
+    // The eye is there for a null and turns its video off.
+    let at = rect(&h, &eye).center();
+    click(&mut h, at);
+    assert!(!h.state().session.active_comp().unwrap().layer(LayerId(n)).unwrap().switches.video);
+    h.run_steps(2);
+    assert!(h.state().auto.find(&handle).is_none(), "a hidden null has no handles");
+    // A click on its box doesn't pick it.
+    h.state_mut().session.execute("edit.deselectAll", json!({})).unwrap();
+    h.run_steps(40); // A new click, not a double-click.
+    let centre = screen(&h, [320.0, 180.0]);
+    click(&mut h, centre);
+    assert!(h.state().session.state.selected_layers.is_empty());
+    // The eye back on: selectable again, with its handles.
+    h.run_steps(40);
+    let at = rect(&h, &eye).center();
+    click(&mut h, at);
+    assert!(h.state().session.active_comp().unwrap().layer(LayerId(n)).unwrap().switches.video);
+    h.run_steps(40);
+    click(&mut h, centre);
+    assert_eq!(h.state().session.state.selected_layers, vec![LayerId(n)]);
+    h.run_steps(2);
+    assert!(h.state().auto.find(&handle).is_some(), "handles back with the eye on");
 }

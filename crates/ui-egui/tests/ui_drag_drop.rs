@@ -584,3 +584,28 @@ fn a_dropped_folder_imports_as_one_sequence_with_sequence_interpretation() {
     assert!(h.state().auto.find("form.field.missingFrames").is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn illustrator_import_offers_and_applies_retain_layer_sizes() {
+    let path = std::env::temp_dir().join(format!("effectcraft-retain-ui-{}.ai", std::process::id()));
+    std::fs::write(&path, b"%PDF-1.4\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 120 80] /Contents 4 0 R >> endobj\n4 0 obj << >> stream\n1 0 0 rg 20 15 30 20 re f\nendstream endobj\n%%EOF").unwrap();
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(effectcraft_host::session()));
+    h.run_steps(3);
+    let ctx = h.ctx.clone();
+    effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "file.import", json!({"paths": [path]})).unwrap();
+    h.run_steps(3);
+    assert!(h.query_by_label("Import PDF / Illustrator File").is_some());
+    click_id(&mut h, "form.field.importAs");
+    h.get_by_label("Composition - Retain Layer Sizes").click();
+    h.run_steps(2);
+    click_id(&mut h, "form.ok");
+    step_until(&mut h, |h| h.state().session.active_comp().is_some());
+    let s = &h.state().session;
+    let comp = s.active_comp().unwrap();
+    assert_eq!((comp.width, comp.height), (120, 80));
+    assert_eq!(comp.layers.len(), 1);
+    let effectcraft_engine::project::LayerSource::Footage { item } = comp.layers[0].source else { panic!("footage") };
+    let effectcraft_engine::project::ItemKind::Footage(f) = &s.project.item(item).unwrap().kind else { panic!("footage") };
+    assert_eq!((f.width, f.height), (30, 20));
+    assert!(f.layer.as_ref().unwrap().layer_size);
+}

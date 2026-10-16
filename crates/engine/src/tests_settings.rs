@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use serde_json::json;
 
-use crate::config::{ConfigStore, DirConfig, MemoryConfig, atomic_write, atomic_write_with, temp_path};
+use crate::config::{ConfigStore, DirConfig, MemoryConfig, atomic_write, atomic_write_with};
 use crate::prefs::{PREFS_FILE, Prefs};
 use crate::shortcuts::{DEFAULT_PRESET, Keymaps, normalize};
 use crate::{Session, autosave};
@@ -548,6 +548,66 @@ fn frontend_commands_are_bindable_with_panel_scope() {
 
 // ---------------------------------------------------------------- auto-save / recovery
 
+/// The names in `d`, sorted.
+fn names(d: &std::path::Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(d).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    v.sort();
+    v
+}
+
+#[cfg(unix)]
+#[test]
+fn atomic_write_overwrites_a_long_valid_filename() {
+    let d = tmp("atomic-long-name");
+    // The old `<name>.tmp` fits a 255-byte component limit for this 251-byte project name.
+    // Including the full name plus a process id and counter made an otherwise valid save fail.
+    let name = format!("{}.ecproj", "x".repeat(244));
+    assert_eq!(name.len(), 251);
+    let f = d.join(&name);
+    std::fs::write(&f, b"original project").unwrap();
+    let replacement = b"replacement project\0bytes\xff";
+    atomic_write(&f, replacement).unwrap();
+    assert_eq!(std::fs::read(&f).unwrap(), replacement);
+    assert_eq!(names(&d), [name], "no temporary file is left after overwriting the project");
+    let _ = std::fs::remove_dir_all(d);
+}
+
+#[test]
+fn concurrent_atomic_writes_each_publish_a_whole_file() {
+    // Writers of the same file used to share one `.tmp`: they truncated each other's data and
+    // the later rename failed once the first had moved it away (#1233).
+    let d = tmp("atomic-concurrent");
+    let f = d.join("shared.ecproj");
+    for round in 0..10 {
+        let contents: Vec<Vec<u8>> = (0..8u8).map(|w| vec![b'a' + w; 256 * 1024 + usize::from(w) * 1000]).collect();
+        std::thread::scope(|sc| {
+            for c in &contents {
+                let f = &f;
+                sc.spawn(move || atomic_write(f, c).expect("every writer succeeds"));
+            }
+        });
+        let got = std::fs::read(&f).unwrap();
+        assert!(contents.contains(&got), "round {round}: the file is one writer's whole data ({} bytes)", got.len());
+        assert_eq!(names(&d), ["shared.ecproj"], "round {round}: no temporary file is left");
+    }
+    let _ = std::fs::remove_dir_all(d);
+}
+
+#[cfg(unix)]
+#[test]
+fn atomic_write_does_not_follow_a_link_at_the_old_temp_name() {
+    let d = tmp("atomic-link");
+    let f = d.join("p.ecproj");
+    let victim = d.join("victim.txt");
+    std::fs::write(&victim, b"keep").unwrap();
+    // The temporary name used to be `<name>.tmp`, opened with File::create (following links).
+    std::os::unix::fs::symlink(&victim, d.join("p.ecproj.tmp")).unwrap();
+    atomic_write(&f, b"new project").unwrap();
+    assert_eq!(std::fs::read(&victim).unwrap(), b"keep", "the link's target is untouched");
+    assert_eq!(std::fs::read(&f).unwrap(), b"new project");
+    let _ = std::fs::remove_dir_all(d);
+}
+
 #[test]
 fn atomic_write_survives_a_crash_mid_write() {
     let d = tmp("atomic");
@@ -555,12 +615,12 @@ fn atomic_write_survives_a_crash_mid_write() {
     atomic_write(&f, b"version 1").unwrap();
     // The writer dies halfway through the temporary file.
     let r = atomic_write_with(&f, b"version 2 is much longer", |tmp, data| {
-        std::fs::write(tmp, &data[..5])?;
+        std::io::Write::write_all(tmp, &data[..5])?;
         Err(std::io::Error::other("power cut"))
     });
     assert!(r.is_err());
     assert_eq!(std::fs::read(&f).unwrap(), b"version 1");
-    assert!(!temp_path(&f).exists(), "the partial temp file is cleaned up");
+    assert_eq!(names(&d), ["p.ecproj"], "the partial temp file is cleaned up");
     // A temp file left by a hard kill doesn't count as an auto-save.
     std::fs::write(d.join("p auto-save 1.ecproj.tmp"), b"junk").unwrap();
     assert!(autosave::existing(&d, "p").is_empty());

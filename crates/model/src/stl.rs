@@ -175,10 +175,8 @@ fn ascii(bytes: &[u8]) -> Result<Model> {
         let Some(key) = it.next() else { continue };
         let bad = || perr(format!("STL line {}: expected three numbers", ln + 1));
         match key.to_ascii_lowercase().as_str() {
-            "solid" => {
-                if name.is_none() {
-                    name = Some(line.get(5..).unwrap_or("").trim().to_string());
-                }
+            "solid" if name.is_none() => {
+                name = Some(line.get(5..).unwrap_or("").trim().to_string());
             }
             "facet" => {
                 // `facet normal nx ny nz`

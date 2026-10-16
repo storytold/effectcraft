@@ -25,12 +25,19 @@ fn ok_json(args: &[&str]) -> Value {
     v
 }
 
+/// `std::fs::canonicalize` without Windows' `\\?\` verbatim prefix, which a child's `current_dir()` never reports.
+fn canonical(path: &std::path::Path) -> std::io::Result<PathBuf> {
+    let path = std::fs::canonicalize(path)?;
+    let plain = path.to_str().and_then(|s| s.strip_prefix(r"\\?\")).filter(|s| s.as_bytes().get(1) == Some(&b':'));
+    Ok(plain.map(PathBuf::from).unwrap_or(path))
+}
+
 fn tmp(name: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("ec-cli-test-{}", std::process::id()));
     std::fs::create_dir_all(&d).unwrap();
     // macOS's `/var` is a symlink to `/private/var`: a child process resolves its working
     // directory through `current_dir()`, which is canonical, so compare canonical paths.
-    std::fs::canonicalize(&d).unwrap_or(d).join(name)
+    canonical(&d).unwrap_or(d).join(name)
 }
 
 #[test]
@@ -160,6 +167,21 @@ fn unknown_options_are_usage_errors() {
     }
 }
 
+/// An argument that is not Unicode (a Latin-1 file name on Linux) is a usage error (exit 2)
+/// naming it, before anything runs: `std::env::args` panicked on one (exit 101).
+#[cfg(unix)]
+#[test]
+fn non_unicode_arguments_are_usage_errors() {
+    use std::os::unix::ffi::OsStrExt;
+    let name = std::ffi::OsStr::from_bytes(b"caf\xe9.png");
+    let out = bin().args(["render-frame", "--out"]).arg(name).output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("argument `caf\u{fffd}.png` is not valid Unicode"), "{err}");
+    assert!(!err.contains("panicked"), "{err}");
+    assert!(out.stdout.is_empty(), "nothing ran");
+}
+
 /// A reader that closes stdout before the CLI writes (`| head`) is not a crash: the command
 /// still does its work and exits 0, without a panic (#167).
 #[test]
@@ -260,7 +282,7 @@ fn render_out_is_relative_to_the_working_directory() {
     std::fs::create_dir_all(&proj).unwrap();
     std::fs::create_dir_all(&elsewhere).unwrap();
     // current_dir resolves aliases such as macOS /var -> /private/var.
-    let root = root.canonicalize().unwrap();
+    let root = canonical(&root).unwrap();
     let (proj, elsewhere) = (root.join("proj"), root.join("elsewhere"));
     let project = proj.join("x.ecproj");
     let p = project.to_str().unwrap();
@@ -462,6 +484,32 @@ fn mcp_autosave_is_opt_in_and_rejects_invalid_combinations() {
     std::fs::remove_dir_all(config).unwrap();
 }
 
+/// `run`/`exec renderQueue.render` (#1426): a failed item is a command error, exit 1 like
+/// `render --queue`, not a success with the failure buried in the JSON.
+#[test]
+fn a_failed_render_under_run_and_exec_exits_1() {
+    let root = tmp("render-fails");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    // The output's folder is a file, so the encoder cannot open the output.
+    let blocker = root.join("not-a-folder");
+    std::fs::write(&blocker, "x").unwrap();
+    let out = blocker.join("out.gif");
+    let add = json!({"comp": "T", "format": "gif", "output": out.to_str().unwrap()}).to_string();
+    let project = root.join("q.ecproj");
+    let steps = ["comp.new", r#"{"name":"T","width":16,"height":16,"duration":0.1}"#, "layer.newSolid", "{}", "renderQueue.add", &add];
+    ok_json(&[&["run", "--empty", "--save-as", project.to_str().unwrap()][..], &steps[..]].concat());
+
+    let (code, v) = run_json(&[&["run", "--empty"][..], &steps[..], &["renderQueue.render", r#"{"wait":true}"#][..]].concat());
+    assert_eq!(code, 1, "{v}");
+    let e = v["error"].as_str().unwrap_or_else(|| panic!("{v}"));
+    assert!(e.starts_with("renderQueue.render: T: "), "{e}");
+
+    let (code, v) = run_json(&["exec", "renderQueue.render", "--project", project.to_str().unwrap()]);
+    assert_eq!(code, 1, "{v}");
+    assert!(v["error"].as_str().is_some_and(|e| e.starts_with("T: ")), "{v}");
+}
+
 /// `render --bitrate` (#440) targets the bitrate in VP9 WebM.
 #[test]
 fn render_bitrate_applies_to_vp9_webm() {
@@ -489,5 +537,59 @@ fn render_bitrate_applies_to_vp9_webm() {
     };
     let (low, high) = (size("100"), size("8000"));
     assert!(high > low, "100 kbps: {low} bytes, 8000 kbps: {high} bytes");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Render uses the same empty/project/demo selection as the other CLI commands.
+#[test]
+fn render_empty_does_not_load_the_demo() {
+    let root = tmp("render-empty");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let project = root.join("control.ecproj");
+    let template = root.join("control.ectemplate");
+    let project_path = project.to_str().unwrap();
+    let template_path = template.to_str().unwrap();
+    let build = r#"
+var comp = app.project.items.addComp("Empty control", 64, 36, 1, 1, 30);
+var solid = comp.layers.addSolid([0, 1, 0], "Green", 64, 36, 1);
+solid.property("ADBE Transform Group").property("ADBE Opacity").addToMotionGraphicsTemplateAs(comp, "Opacity");
+"#;
+    ok_json(&["script", "--eval", build, "--save-as", project_path]);
+    let params = json!({"comp": "Empty control", "path": template_path}).to_string();
+    let exported = ok_json(&["exec", "essential.exportTemplate", &params, "--project", project_path]);
+    assert_eq!(exported["controls"], 1, "{exported}");
+    let empty = ok_json(&["info", "--empty"]);
+    assert!(empty["project"]["items"].as_array().unwrap().is_empty(), "{empty}");
+
+    let render = |options: &[&str], name: &str| {
+        let output = root.join(name);
+        assert!(!output.exists());
+        let mut args = vec!["render", "--format", "gif", "--start", "0", "--end", "0.1", "--resolution", "quarter", "--out", output.to_str().unwrap()];
+        args.extend_from_slice(options);
+        let reply = ok_json(&args);
+        assert_eq!(reply["rendered"].as_array().unwrap().len(), 1, "{reply}");
+        assert_eq!(PathBuf::from(reply["rendered"][0]["output"].as_str().unwrap()), output);
+        let bytes = std::fs::read(&output).unwrap();
+        assert!(bytes.len() >= 10 && (bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a")), "{reply}");
+        let dimensions = (u16::from_le_bytes([bytes[6], bytes[7]]), u16::from_le_bytes([bytes[8], bytes[9]]));
+        (reply["rendered"][0]["comp"].clone(), dimensions)
+    };
+    // Defaults still render the demo, and an explicit demo wins over --empty.
+    let demo = render(&[], "default.gif");
+    assert_eq!(render(&["--demo", "--empty"], "demo.gif"), demo);
+    // A supplied project wins over both flags, while template mode also accepts --empty.
+    let project_result = render(&["--project", project_path, "--demo", "--empty"], "project.gif");
+    assert_eq!(project_result, (json!("Empty control"), (16, 9)));
+    assert_eq!(render(&["--template", template_path, "--empty"], "template.gif").1, (16, 9));
+
+    let output = root.join("empty.gif");
+    assert!(!output.exists());
+    let (code, reply) =
+        run_json(&["render", "--empty", "--format", "gif", "--start", "0", "--end", "0.1", "--resolution", "quarter", "--out", output.to_str().unwrap()]);
+    let output_exists = output.exists();
+    assert!(!output_exists, "--empty must not render the demo into the requested output");
+    assert_eq!(code, 1, "{reply}");
+    assert_eq!(reply["error"], "command `renderQueue.add` is not available right now: select or open a composition", "{reply}");
     let _ = std::fs::remove_dir_all(&root);
 }

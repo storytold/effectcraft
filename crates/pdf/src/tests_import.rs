@@ -264,6 +264,43 @@ fn hostile_structures_return_errors_or_draw_nothing() {
 }
 
 #[test]
+fn inline_image_with_absurd_dimensions_falls_back_to_ei_scan() {
+    // `/W 5000000000000000000` overflows the row math (`* bpc` alone exceeds usize::MAX):
+    // `inline_len` must return `None` (scan for `EI`) instead of overflowing; the oversized
+    // image itself is then refused by size.
+    let bytes = page_pdf("q 10 0 0 10 0 0 cm BI /W 5000000000000000000 /H 100 /CS /G /BPC 8 ID \0 EI Q", "", vec![]);
+    let doc = parse(&bytes).unwrap();
+    let _ = render(&doc);
+    assert!(!doc.skipped.is_empty());
+    // A length just under `usize::MAX` passes the row math; past byte 4096 of the content the
+    // caller's `start + len` would then overflow.
+    let content = format!("{}q 10 0 0 10 0 0 cm BI /W 2305843009213693440 /H 8 /CS /G /BPC 8 ID \0 EI Q", " ".repeat(5000));
+    let doc = parse(&page_pdf(&content, "", vec![])).unwrap();
+    let _ = render(&doc);
+}
+
+#[test]
+fn smask_with_absurd_bpc_is_ignored_not_fatal() {
+    // `/BitsPerComponent 32` in a soft mask: `1u32 << bpc` must neither panic (debug)
+    // nor mistranslate samples into alpha (release); the mask is treated as absent.
+    let bytes = page_pdf(
+        "q 2 0 0 2 0 0 cm /Im Do Q",
+        "/XObject << /Im 10 0 R >>",
+        vec![
+            (
+                10,
+                "<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceGray /BitsPerComponent 8 /SMask 11 0 R >>".into(),
+                Some(vec![0x80; 4]),
+            ),
+            (11, "<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceGray /BitsPerComponent 32 >>".into(), Some(vec![0xFF; 16])),
+        ],
+    );
+    let doc = parse(&bytes).unwrap();
+    let img = render(&doc);
+    assert!(coverage(&img, 0, 0, 200, 100) > 0.0, "image still draws, opaque");
+}
+
+#[test]
 fn truncated_and_corrupt_eps_never_panic() {
     let eps = b"%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 100 100\n\
 /sq { newpath 0 0 moveto 10 0 lineto 10 10 lineto closepath } bind def\n\
@@ -374,5 +411,33 @@ fn postscript_radix_numbers_outside_2_to_36_are_not_numbers() {
     for n in ["0#7", "1#1", "37#1", "99999999999#1", "16#FF"] {
         let src = format!("%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 100 100\n{n} pop 0 0 moveto 10 10 lineto stroke\n");
         let _ = parse(src.as_bytes());
+    }
+}
+
+#[test]
+fn extreme_page_indices_have_a_printable_error() {
+    let text = Error::PageOutOfRange(usize::MAX).to_string();
+    assert!(text.starts_with("the PDF has no page "));
+}
+
+#[test]
+fn postscript_idiv_and_mod_of_i64_min_by_minus_one_give_zero() {
+    // `i64::MIN / -1` and `i64::MIN % -1` overflow, and `/` and `%` panic on them in debug and
+    // release builds. `as i64` turns any dividend at or below -2^63 into `i64::MIN` and turns
+    // a divisor of -1.5 into -1.
+    for (prog, want) in [
+        ("-9223372036854775808 -1 idiv", 0),
+        ("-9223372036854775808 -1 mod", 0),
+        ("-99999999999999999999 -1.5 idiv", 0),
+        ("2 63 exp neg -1 mod", 0),
+        // The result is 0 for a divisor that truncates to 0. Other quotients are truncated
+        // toward zero, and a remainder has the sign of the dividend.
+        ("7 0 idiv", 0),
+        ("7 0.5 mod", 0),
+        ("-7 2 idiv", -3),
+        ("-7 2 mod", -1),
+    ] {
+        let doc = eps(format!("{prog} {want} eq {{ 0 0 10 10 rectfill }} if\n").as_bytes());
+        assert_eq!(shape_names(&doc).len(), 1, "{prog}");
     }
 }
