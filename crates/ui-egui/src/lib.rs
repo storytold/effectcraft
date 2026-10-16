@@ -1673,6 +1673,9 @@ impl EffectcraftApp {
             }
             self.command_inbox = Some(rx);
         }
+        // The open Mini-Flowchart's keys, then Tab for it, before widgets and shortcuts see them.
+        panels::precomp::mini_flowchart_keys(self, &ctx);
+        menus::claim_mini_flowchart_tab(self, &ctx);
         let tab_had_widget_focus = ctx.egui_wants_keyboard_input();
         menus::handle_shortcuts(self, &ctx);
         if !ctx.input(|i| i.pointer.primary_down()) {

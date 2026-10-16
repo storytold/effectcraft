@@ -1218,8 +1218,20 @@ pub fn frontend(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, p: Valu
             Value::Null
         }
         "comp.miniFlowchart" => {
-            let at = ctx.input(|i| i.pointer.hover_pos()).unwrap_or_else(|| ctx.content_rect().center());
-            app.ui.mini_flowchart = Some([at.x, at.y]);
+            // Tab toggles it (After Effects), centred on the pointer over the active panel, else
+            // on that panel.
+            if app.ui.mini_flowchart.is_some() {
+                crate::panels::precomp::close_mini(app);
+            } else {
+                let panel = app.dock_rects.iter().rev().find(|(k, _)| *k == app.ui.focused).map(|(_, r)| *r);
+                let at = match (ctx.input(|i| i.pointer.hover_pos()), panel) {
+                    (Some(p), Some(r)) if r.contains(p) => p,
+                    (_, Some(r)) => r.center(),
+                    (Some(p), None) => p,
+                    (None, None) => ctx.content_rect().center(),
+                };
+                crate::panels::precomp::open_mini(app, [at.x, at.y], false);
+            }
             Value::Null
         }
         "track.editTargetDialog" => {
@@ -1765,6 +1777,53 @@ fn only_shift(m: egui::Modifiers) -> bool {
 /// Dispatch keyboard shortcuts (skipped while typing in a text field).
 pub fn handle_shortcuts(app: &mut EffectcraftApp, ctx: &egui::Context) {
     handle_shortcuts_impl(app, ctx, false);
+}
+
+/// After Effects: Tab toggles the Composition Mini-Flowchart while the Composition, Layer or
+/// Timeline panel is active. egui moves keyboard focus on a Tab press before the frame is drawn
+/// (from no focus to the first focusable widget, the toolbar), and that focus then held the press
+/// back from the binding, so Tab never opened it. Claim the press first, unless a text field is
+/// being edited or a widget outside the panel was reached with the keyboard (traversal goes on;
+/// Shift+Tab starts it), or a dialog or menu is open. Returns whether it ran.
+pub fn claim_mini_flowchart_tab(app: &mut EffectcraftApp, ctx: &egui::Context) -> bool {
+    let tab = ctx.input(|i| {
+        i.events.iter().any(|e| matches!(e, egui::Event::Key { key: egui::Key::Tab, pressed: true, repeat: false, modifiers, .. } if !modifiers.any()))
+    });
+    if !tab
+        || app.dialog.is_some()
+        || app.ui.start_screen
+        || app.session.active_comp_id().is_none()
+        || app.session.state.text_edit.is_some()
+        || !matches!(app.ui.focused, PanelKind::Composition | PanelKind::Viewer(_) | PanelKind::Layer | PanelKind::Timeline)
+        || crate::widgets::any_menu_open(ctx)
+        || crate::panels::shortcut_editor::recording(app)
+        || ctx.text_edit_focused()
+    {
+        return false;
+    }
+    let bound = bindings(&app.session).into_iter().any(|(m, k, id, _)| k == egui::Key::Tab && !m.any() && id == "comp.miniFlowchart");
+    if !bound {
+        return false;
+    }
+    // A widget with keyboard focus inside the active panel gives it up; one elsewhere (the
+    // toolbar, a dock tab) keeps Tab for keyboard traversal.
+    if let Some(focus) = ctx.memory(|m| m.focused()) {
+        let body = app
+            .auto
+            .find(&format!("panel.{}", app.ui.focused.id()))
+            .map(|e| egui::Rect::from_min_size(egui::pos2(e.rect[0], e.rect[1]), egui::vec2(e.rect[2], e.rect[3])));
+        let inside = ctx.read_response(focus).zip(body).is_some_and(|(r, b)| b.contains_rect(r.rect));
+        if !inside {
+            return false;
+        }
+        ctx.memory_mut(|m| m.surrender_focus(focus));
+    }
+    ctx.memory_mut(|m| m.move_focus(egui::FocusDirection::None));
+    ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab));
+    if let Err(e) = invoke(app, ctx, "comp.miniFlowchart", json!({})) {
+        app.ui.status = e;
+    }
+    true
 }
 
 /// Tab can acquire widget focus while the current frame is drawn. Dispatch its application

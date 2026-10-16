@@ -688,6 +688,9 @@ pub struct UiState {
     /// Composition Mini-Flowchart popup position (open when set).
     #[serde(default)]
     pub mini_flowchart: Option<[f32; 2]>,
+    /// The open Mini-Flowchart's keyboard selection and expanded branches.
+    #[serde(default)]
+    pub mini_flow: crate::panels::precomp::MiniFlowState,
     /// Flowchart panel options (layers, effects, solids, direction, root comp).
     #[serde(default)]
     pub flowchart: crate::panels::flowchart::FlowOptions,
@@ -750,6 +753,7 @@ impl Default for UiState {
             layer_pan: [0.0, 0.0],
             anim_tools: AnimToolsState::default(),
             mini_flowchart: None,
+            mini_flow: Default::default(),
             flowchart: Default::default(),
             scopes: Default::default(),
         }

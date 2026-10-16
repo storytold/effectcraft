@@ -465,6 +465,31 @@ Mocha and Cineware are third-party and not counted.
 | Utility | Color Profile Converter | Our colour spaces and ACES; rendering intents (perceptual gamut compression, relative / absolute colorimetric, saturation). |
 | Matte | Mocha shape | Mocha's export format is not public: reads a documented JSON shape format instead. |
 
+### Update: Composition Mini-Flowchart (Tab)
+
+- **Tab** toggles the Composition Mini-Flowchart for the active comp while the Composition, Layer
+  or Timeline panel is active, as in After Effects (also Composition ▸ Composition Mini-Flowchart
+  and the button at the right of the Composition Navigator bar). It never opened from the
+  keyboard: egui's own Tab focus traversal took the press first (it moved keyboard focus to the
+  toolbar). Tab in a text field, in a dialog, or while widgets are being traversed with the
+  keyboard (Shift+Tab starts it, or Tab from another panel) keeps its widget meaning.
+- It opens centred on the pointer (or over the active panel), with the active comp in the centre,
+  the comps that nest it on the left and the comps it nests on the right, joined by arrows. The
+  active comp keeps the accent colour wherever it is; the focused comp is outlined.
+- The "camera" is locked on the focused comp: **Left / Right** move the focus to a comp that nests
+  / is nested by it (back the way it came first), and the flowchart slides around it so the focus
+  stays in place. The comp the focus arrives on shows all its branches at once (a comp that nests
+  several comps shows them all, without reopening the popup); **Up / Down** move between the
+  focus's siblings in its column. A node's small arrow (click) expands that branch one more level.
+  Branches stop at a comp already on them (cyclic nesting) and after 12 levels of 64 comps.
+- **Enter** opens the focused comp, **Escape** or **Tab** closes; a click on a comp opens it, a
+  click outside closes.
+- Automation ids: `flowchart.mini.<comp>` (first appearance of a comp), every node
+  `flowchart.mini.up|down.<comp>.<comp>…` (its path from the focus), `flowchart.mini.focus`,
+  `flowchart.mini.sibling.<comp>` and a node's expand arrow
+  `….expand`; `ui.inspect` shows the focus and expanded branches as `ui.mini_flow`.
+  Tests: `crates/ui-egui/tests/ui_mini_flowchart.rs`.
+
 ### Update: M13.5 long-tail polish
 
 Stroke Taper / Wave / multi-segment dashes and the radial gradient highlight (SHP-2);

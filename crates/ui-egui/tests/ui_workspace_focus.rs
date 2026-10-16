@@ -124,6 +124,9 @@ fn tab_and_shift_tab_traverse_toolbar_and_space_activates_only_focused_tool() {
     let mut app = EffectcraftApp::new(session);
     app.ui.start_screen = false;
     app.ui.show_menu_bar = false;
+    // Tab is the Mini-Flowchart while the Composition, Layer or Timeline panel is active (as in
+    // After Effects, `ui_mini_flowchart.rs`); from no focus, keyboard traversal starts elsewhere.
+    app.ui.focused = PanelKind::Project;
     let mut h = Harness::builder().with_size(vec2(1400.0, 900.0)).build_eframe(move |_| app);
     h.run_steps(3);
     for _ in 0..8 {
@@ -165,6 +168,9 @@ fn tab_traversal_activates_an_inactive_dock_tab_without_editing_the_project() {
     let mut app = EffectcraftApp::new(session);
     app.ui.start_screen = false;
     app.ui.show_menu_bar = false;
+    // Tab is the Mini-Flowchart while the Composition, Layer or Timeline panel is active (as in
+    // After Effects, `ui_mini_flowchart.rs`); from no focus, keyboard traversal starts elsewhere.
+    app.ui.focused = PanelKind::Project;
     // Leave the inactive, layer-named tab visible instead of behind the overflow control.
     if let DockNode::Split { a, .. } = &mut app.ui.dock
         && let DockNode::Split { a, .. } = a.as_mut()
@@ -269,10 +275,17 @@ fn control_root_divider_drag_after_toolbar_and_dock_tab_keyboard_activation() {
     let times = d.h.state().session.state.times.clone();
     assert_eq!(d.h.state().ui.focused, PanelKind::Timeline);
     assert!(d.h.state().ui.mini_flowchart.is_none());
+    // From no focus, Tab with the Timeline active is the Mini-Flowchart (`ui_mini_flowchart.rs`):
+    // enter keyboard traversal from the Project panel, then keep traversing with the Timeline active.
+    d.ok("ui.set", json!({"focused":"Project"}), true);
     d.ok("ui.click", json!({"id":"tools.Selection"}), true);
-    for _ in 0..5 {
+    for i in 0..5 {
         d.ok("ui.key", json!({"key":"Tab"}), true);
         assert!(d.h.state().ui.mini_flowchart.is_none(), "Tab entering or traversing widgets must not also invoke the Timeline mini-flowchart shortcut");
+        if i == 0 {
+            assert!(d.h.ctx.memory(|m| m.focused()).is_some());
+            d.ok("ui.set", json!({"focused":"Timeline"}), true);
+        }
     }
     d.ok("ui.key", json!({"key":"Tab","shift":true}), true);
     d.ok("ui.key", json!({"key":"Space"}), true);
@@ -281,6 +294,7 @@ fn control_root_divider_drag_after_toolbar_and_dock_tab_keyboard_activation() {
     d.ok("ui.key", json!({"key":"Enter"}), true);
     assert_eq!(d.h.state().ui.tool, Tool::Selection);
     d.ok("ui.drag", json!({"from":{"id":"dock.gutter.aa","fx":0.5,"fy":0.5},"to":{"id":"dock.gutter.aa","fx":10.5,"fy":0.5},"steps":8}), true);
+    d.ok("ui.set", json!({"focused":"Project"}), true);
     d.ok("ui.click", json!({"id":"tools.Selection"}), true);
     // The toolbar can grow as upstream adds controls. Traverse to the actual response
     // identity rather than assuming a fixed number of focus stops.
