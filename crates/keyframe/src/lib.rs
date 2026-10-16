@@ -401,7 +401,11 @@ pub fn side_ease(keys: &[Keyframe], i: usize, d: usize, spatial: bool, out: bool
     let is_spatial = spatial && matches!(k.value, Value::Vec2(_) | Value::Vec3(_));
     if interp == Interp::Linear {
         let dur = (secs(k.time) - secs(n.time)).abs().max(1e-12);
-        let dv = if is_spatial {
+        let dv = if matches!((&k.value, &n.value), (Value::Path(_), Value::Path(_))) {
+            // A shape morph interpolates one unit of progress per segment, rather than a
+            // numeric property component. These are the units segment_value uses too.
+            1.0
+        } else if is_spatial {
             let (a, b) = if out { (i, j) } else { (j, i) };
             spatial_segment_length(keys, a.min(b))
         } else {
@@ -591,6 +595,56 @@ pub fn velocity(keys: &[Keyframe], t: Tick, spatial: bool) -> Vec<f64> {
 /// Speed (magnitude of velocity).
 pub fn speed(keys: &[Keyframe], t: Tick, spatial: bool) -> f64 {
     velocity(keys, t, spatial).iter().map(|v| v * v).sum::<f64>().sqrt()
+}
+
+/// Shape-animation timing without inventing a numeric value for a path. Progress counts
+/// completed key intervals (0 at the first key, 1 at the second…), and speed is progress/s.
+/// The Graph Editor scales these to percentages of the whole animation. This uses the same
+/// stored temporal ease and units as path interpolation; it never changes path geometry.
+pub fn path_timing(keys: &[Keyframe], t: Tick) -> Option<(f64, f64)> {
+    let first = keys.first()?;
+    let last = keys.last()?;
+    if !matches!(first.value, Value::Path(_)) {
+        return None;
+    }
+    if keys.len() == 1 || t < first.time {
+        return Some((0.0, 0.0));
+    }
+    if t > last.time {
+        return Some((keys.len().saturating_sub(1) as f64, 0.0));
+    }
+    let i = keys.partition_point(|k| k.time <= t).saturating_sub(1).min(keys.len().saturating_sub(2));
+    let a = keys.get(i)?;
+    let b = keys.get(i.checked_add(1)?)?;
+    if !matches!((&a.value, &b.value), (Value::Path(_), Value::Path(_))) {
+        return None;
+    }
+    let dur = secs(b.time) - secs(a.time);
+    if dur <= 0.0 || !dur.is_finite() {
+        return Some((i as f64, 0.0));
+    }
+    let x = ((secs(t) - secs(a.time)) / dur).clamp(0.0, 1.0);
+    if a.out_interp == Interp::Hold {
+        return Some((i as f64 + if t == b.time { 1.0 } else { 0.0 }, 0.0));
+    }
+    let linear = Ease { speed: 1.0 / dur, influence: 1.0 / 3.0 };
+    let eo = if a.out_interp == Interp::Linear { linear } else { effective_ease(keys, i, 0, false, true) };
+    let ei = if b.in_interp != Interp::Bezier { linear } else { effective_ease(keys, i + 1, 0, false, false) };
+    let (i0, i1) = (eo.influence.clamp(0.0, 1.0), ei.influence.clamp(0.0, 1.0));
+    let u = solve_u(0.0, i0, 1.0 - i1, 1.0, x);
+    let (y1, y2) = (eo.speed * dur * i0, 1.0 - ei.speed * dur * i1);
+    let f = bez(0.0, y1, y2, 1.0, u);
+    let dx = bez_d(0.0, i0, 1.0 - i1, 1.0, u);
+    let sp = if dx.abs() > 1e-12 {
+        bez_d(0.0, y1, y2, 1.0, u) / (dx * dur)
+    } else {
+        // A full-influence curve can have a flat time derivative. Sample only this
+        // segment, so a Hold jump or the next morph never creates a false speed spike.
+        let (lo, hi) = ((x - 1e-6).max(0.0), (x + 1e-6).min(1.0));
+        let at = |p| ease_progress(eo.speed * dur, eo.influence, ei.speed * dur, ei.influence, p);
+        (at(hi) - at(lo)) / ((hi - lo) * dur).max(1e-12)
+    };
+    Some((i as f64 + if f.is_finite() { f } else { x }, if sp.is_finite() { sp } else { 0.0 }))
 }
 
 /// Insert or replace (same time) a key; keeps keys sorted. Returns its index.
@@ -948,6 +1002,43 @@ mod tests {
         let keys = vec![Keyframe::new(s(0.0), Value::Path(a)), Keyframe::new(s(1.0), Value::Path(b))];
         let v = evaluate(&keys, s(0.5), false).unwrap();
         assert_eq!(v.as_path().unwrap().vertices[0], [-7.5, -7.5]);
+    }
+
+    #[test]
+    fn path_graph_timing_matches_morph_geometry_and_stored_ease_units() {
+        let a = ShapePath::polygon(&[[0.0, 0.0], [10.0, 0.0]], false);
+        let b = ShapePath::polygon(&[[100.0, 0.0], [110.0, 0.0]], false);
+        let mut keys = vec![Keyframe::new(s(0.0), Value::Path(a)), Keyframe::new(s(2.0), Value::Path(b))];
+        assert_eq!(side_ease(&keys, 0, 0, false, true).unwrap().speed, 0.5);
+        assert_eq!(side_ease(&keys, 1, 0, false, false).unwrap().speed, 0.5);
+        for eased in [false, true] {
+            if eased {
+                keys[0].out_interp = Interp::Bezier;
+                keys[0].out_ease = vec![Ease { speed: 0.2, influence: 0.45 }];
+                keys[1].in_interp = Interp::Bezier;
+                keys[1].in_ease = vec![Ease { speed: 0.1, influence: 0.6 }];
+            }
+            for t in [0.1, 0.4, 0.9, 1.2, 1.8] {
+                let (progress, speed) = path_timing(&keys, s(t)).unwrap();
+                let point = evaluate(&keys, s(t), false).unwrap().as_path().unwrap().vertices[0][0];
+                assert!((point / 100.0 - progress).abs() < 1e-12, "the graph follows the rendered morph");
+                let value_at = |at| evaluate(&keys, s(at), false).unwrap().as_path().unwrap().vertices[0][0] / 100.0;
+                let derivative = (value_at(t + 1e-5) - value_at(t - 1e-5)) / 2e-5;
+                assert!((derivative - speed).abs() < 1e-6, "{derivative} != {speed}");
+            }
+        }
+    }
+
+    #[test]
+    fn path_graph_hold_and_outside_keys_have_no_false_speed_spikes() {
+        let value = Value::Path(ShapePath::rect([0.0, 0.0], 10.0, 10.0));
+        let keys = vec![Keyframe::new(s(0.0), value.clone()).hold(), Keyframe::new(s(1.0), value.clone()), Keyframe::new(s(2.0), value)];
+        assert_eq!(path_timing(&keys, s(-1.0)), Some((0.0, 0.0)));
+        assert_eq!(path_timing(&keys, s(0.999999)), Some((0.0, 0.0)));
+        assert_eq!(path_timing(&keys, s(1.0)), Some((1.0, 1.0)));
+        assert_eq!(path_timing(&keys, s(3.0)), Some((2.0, 0.0)));
+        assert_eq!(path_timing(&[], s(0.0)), None);
+        assert_eq!(path_timing(&[Keyframe::new(s(0.0), Value::Scalar(1.0))], s(0.0)), None);
     }
 
     #[test]

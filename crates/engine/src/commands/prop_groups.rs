@@ -2,7 +2,9 @@
 //! effect, mask, shape item or text animator (what scripting's `PropertyGroup.name`, `enabled`,
 //! `remove()`, `duplicate()` and `moveTo()` do, and what agents need without a UI selection).
 
-use effectcraft_project::{ItemId, LayerId, LayerSource, Node, PropGroup, Uid};
+use std::collections::{BTreeMap, BTreeSet};
+
+use effectcraft_project::{GroupKind, ItemId, LayerId, LayerSource, Node, PropGroup, Uid};
 use serde_json::{Value, json};
 
 use super::{CommandSpec, b_p, bad, has_layers, layer_mut, layer_p, layers_p, str_p};
@@ -217,8 +219,11 @@ fn duplicate(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn move_to(s: &mut Session, p: &Value) -> Result<Value> {
     let c = "prop.moveGroup";
+    if p.get("parent").is_some() || p.get("props").is_some() {
+        return move_shape_items(s, p);
+    }
     let (cid, lid, uid) = group_ref(s, p, c, true)?;
-    let to = p.get("index").and_then(Value::as_u64).ok_or_else(|| bad(c, "missing `index` (1-based)"))? as usize;
+    let to = p.get("index").and_then(Value::as_u64).and_then(|n| usize::try_from(n).ok()).ok_or_else(|| bad(c, "missing or invalid `index` (1-based)"))?;
     s.edit("Reorder", None, |proj, _| {
         let l = layer_mut(proj, cid, lid)?;
         let parent = l.props.parent_of_mut(uid).ok_or_else(|| bad(c, "group vanished"))?;
@@ -232,12 +237,137 @@ fn move_to(s: &mut Session, p: &Value) -> Result<Value> {
     })
 }
 
+/// A bounded, ordered view of a shape tree: group, parent uid and depth from layer Contents.
+/// Moving a group must never turn a deeply nested imported tree into an unbounded walk.
+fn shape_tree(root: &PropGroup) -> Result<Vec<(&PropGroup, Option<Uid>, usize)>> {
+    let mut out = vec![];
+    let mut stack = vec![(root, None, 0usize)];
+    while let Some((group, parent, depth)) = stack.pop() {
+        if depth > super::shape_stroke::MAX_DEPTH || out.len() >= 100_000 {
+            return Err(bad("prop.moveGroup", "shape contents are too deeply nested or too large"));
+        }
+        out.push((group, parent, depth));
+        for child in group.children.iter().rev().filter_map(Node::as_group) {
+            if out.len().saturating_add(stack.len()) >= 100_000 {
+                return Err(bad("prop.moveGroup", "shape contents are too large"));
+            }
+            stack.push((child, Some(group.uid), depth + 1));
+        }
+    }
+    Ok(out)
+}
+
+/// Reparent shape items without rebuilding them: property uids, keys and expressions travel
+/// with the item. `index` counts the destination's children after removing all moving items.
+fn move_shape_items(s: &mut Session, p: &Value) -> Result<Value> {
+    let c = "prop.moveGroup";
+    let (cid, lid) = layer_p(s, p, c)?;
+    let layer = s.project.comp(cid).and_then(|comp| comp.layer(lid)).ok_or(EngineError::NoComp)?;
+    if !matches!(layer.source, LayerSource::Shape) || layer.switches.locked {
+        return Err(bad(c, "select an unlocked shape layer"));
+    }
+    let root = layer.props.sub("contents").ok_or_else(|| bad(c, "the layer has no contents"))?;
+    let tree = shape_tree(root)?;
+    let by_uid: BTreeMap<Uid, (&PropGroup, Option<Uid>, usize)> = tree.iter().map(|entry| (entry.0.uid, *entry)).collect();
+    let requested = if let Some(props) = p.get("props") {
+        let values = props.as_array().ok_or_else(|| bad(c, "`props` must be an array of group uids"))?;
+        if values.is_empty() || values.len() > 100_000 {
+            return Err(bad(c, "select at least one shape item (at most 100000)"));
+        }
+        values.iter().map(|v| v.as_u64().ok_or_else(|| bad(c, "`props` must contain group uids"))).collect::<Result<Vec<_>>>()?
+    } else {
+        vec![p.get("prop").and_then(Value::as_u64).ok_or_else(|| bad(c, "missing `prop` (group uid)"))?]
+    };
+    for uid in &requested {
+        let entry = by_uid.get(uid).ok_or_else(|| bad(c, format!("no shape item @{uid}")))?;
+        if !matches!(entry.0.kind, GroupKind::Indexed) || entry.1.is_none_or(|parent| by_uid.get(&parent).is_none_or(|(g, _, _)| g.match_id != "contents")) {
+            return Err(bad(c, "only paths, paints, operators and shape groups can be moved"));
+        }
+    }
+    // Ancestors carry their selected children with them; preserve the tree's visual order.
+    let mut items = vec![];
+    let mut selected_depth = None;
+    let requested: BTreeSet<Uid> = requested.into_iter().collect();
+    for (g, _, depth) in &tree {
+        if selected_depth.is_some_and(|d| *depth <= d) {
+            selected_depth = None;
+        }
+        if requested.contains(&g.uid) && selected_depth.is_none() {
+            items.push(g.uid);
+            selected_depth = Some(*depth);
+        }
+    }
+    let parent_arg = p.get("parent").and_then(Value::as_u64).ok_or_else(|| bad(c, "missing `parent` (Contents or shape group uid)"))?;
+    let target = by_uid.get(&parent_arg).ok_or_else(|| bad(c, "no destination group"))?;
+    let destination = if target.0.match_id == "group" { target.0.sub("contents").ok_or_else(|| bad(c, "the shape group has no contents"))? } else { target.0 };
+    if destination.match_id != "contents" {
+        return Err(bad(c, "the destination must be shape Contents"));
+    }
+    if destination.uid != root.uid
+        && !by_uid
+            .get(&destination.uid)
+            .and_then(|(_, parent, _)| *parent)
+            .and_then(|uid| by_uid.get(&uid))
+            .is_some_and(|(g, _, _)| g.match_id == "group" && matches!(g.kind, GroupKind::Indexed))
+    {
+        return Err(bad(c, "the destination must be a shape group's Contents"));
+    }
+    let dest_depth = by_uid.get(&destination.uid).map(|(_, _, d)| *d).ok_or_else(|| bad(c, "no destination contents"))?;
+    for uid in &items {
+        let group = by_uid.get(uid).map(|(g, _, _)| *g).ok_or_else(|| bad(c, "shape item vanished"))?;
+        let subtree = shape_tree(group)?;
+        if subtree.iter().any(|(g, _, _)| g.uid == destination.uid) {
+            return Err(bad(c, "a shape group cannot be moved into itself or its descendants"));
+        }
+        if subtree.iter().any(|(_, _, depth)| dest_depth.saturating_add(1).saturating_add(*depth) > super::shape_stroke::MAX_DEPTH) {
+            return Err(bad(c, "the move would nest shape contents too deeply"));
+        }
+    }
+    let parent = destination.uid;
+    let item_set: BTreeSet<Uid> = items.iter().copied().collect();
+    let remaining: Vec<Uid> = destination.children.iter().map(Node::uid).filter(|uid| !item_set.contains(uid)).collect();
+    let end = remaining.len().saturating_add(1);
+    let to = match p.get("index") {
+        Some(v) => {
+            v.as_u64().and_then(|n| usize::try_from(n).ok()).filter(|n| *n >= 1 && *n <= end).ok_or_else(|| bad(c, format!("index must be in 1..{end}")))?
+        }
+        None => end,
+    };
+    let mut order = remaining;
+    order.splice(to - 1..to - 1, items.iter().copied());
+    let reply = json!({"props": items, "parent": parent, "index": to});
+    if order == destination.children.iter().map(Node::uid).collect::<Vec<_>>() {
+        return Ok(reply);
+    }
+    s.edit("Move Shape Contents", None, |project, state| {
+        let layer = layer_mut(project, cid, lid)?;
+        let mut moving = Vec::with_capacity(items.len());
+        for uid in &items {
+            let source = layer.props.parent_of_mut(*uid).ok_or_else(|| bad(c, "shape item vanished"))?;
+            let at = source.children.iter().position(|n| n.uid() == *uid).ok_or_else(|| bad(c, "shape item vanished"))?;
+            moving.push(source.children.remove(at));
+        }
+        let destination = layer.props.find_group_mut(parent).ok_or_else(|| bad(c, "destination contents vanished"))?;
+        destination.children.splice(to - 1..to - 1, moving);
+        state.selected_props = items.iter().map(|uid| (lid, *uid)).collect();
+        Ok(reply)
+    })
+}
+
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         cmd!("prop.renameGroup", "Rename Property Group", [], None, "{layer?, prop: uid, name}", has_layers, rename),
         cmd!("prop.setGroupEnabled", "Enable Property Group", [], None, "{layer?, prop: uid, value?}", has_layers, set_enabled),
         cmd!("prop.removeGroup", "Delete Property Group", [], None, "{layer?, prop: uid}", has_layers, remove),
         cmd!("prop.duplicateGroup", "Duplicate Property Group", [], None, "{layer?, prop: uid} → {prop: new uid}", has_layers, duplicate),
-        cmd!("prop.moveGroup", "Reorder Property Group", [], None, "{layer?, prop: uid, index (1-based among its siblings)}", has_layers, move_to),
+        cmd!(
+            "prop.moveGroup",
+            "Move Property Group",
+            [],
+            None,
+            "{layer?, prop?: uid, props?: [uid], parent?: Contents|shape group uid, index?: 1-based} → position or moved items; without parent, prop and index reorder siblings; with parent, one of prop/props moves shape items, index counts remaining children and defaults to append",
+            has_layers,
+            move_to
+        ),
     ]
 }

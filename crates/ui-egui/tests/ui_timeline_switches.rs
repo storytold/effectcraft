@@ -60,6 +60,88 @@ fn motion_blur(l: &effectcraft_engine::project::Layer) -> bool {
     l.switches.motion_blur
 }
 
+/// A shape's eye hides its pixels without changing Opacity or animation, and Undo/Redo restores
+/// that visibility. Cameras, lights and nulls use the same switch even though they have no pixels.
+#[test]
+fn layer_eyes_hide_shape_pixels_and_enable_camera_light_and_null() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"width": 64, "height": 36, "duration": 1})).unwrap();
+    let shape = s.execute("layer.newShape", json!({"kind": "rect", "size": [24, 16]})).unwrap()["layer"].as_u64().unwrap();
+    for (time, value) in [(0.0, 100), (1.0, 40)] {
+        s.execute("prop.addKey", json!({"layer": shape, "path": "transform/opacity", "time": time, "value": value})).unwrap();
+    }
+    let mut others = Vec::new();
+    for command in ["layer.newNull", "layer.newLight", "layer.newCamera"] {
+        others.push(s.execute(command, json!({})).unwrap()["layer"].as_u64().unwrap());
+    }
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    h.run_steps(3);
+    let alpha = |h: &Harness<'_, EffectcraftApp>| {
+        let s = &h.state().session;
+        effectcraft_engine::render::Renderer::new(&s.project, &effectcraft_engine::render::NoFootage, Default::default())
+            .comp_frame(s.active_comp_id().unwrap(), s.time())
+            .get(32, 18)[3]
+    };
+    let opacity = |h: &Harness<'_, EffectcraftApp>| {
+        h.state().session.active_comp().unwrap().layer(LayerId(shape)).unwrap().props.prop("transform/opacity").unwrap().clone()
+    };
+    let initial_opacity = opacity(&h);
+    let before = h.state().session.history.undo.len();
+    let eye_id = format!("timeline.layer.{shape}.video");
+    assert_eq!(h.state().auto.find(&eye_id).unwrap().label, "Hide Layer");
+    assert!(alpha(&h) > 0.99);
+    let at = rect(&h, &eye_id).center();
+    drag(&mut h, at, at, 1);
+    assert_eq!(states(&h, &[shape], video), [false]);
+    assert!(alpha(&h) < 0.01, "the hidden shape has no rendered pixels");
+    assert_eq!(opacity(&h), initial_opacity, "visibility leaves opacity intact");
+    assert_eq!(h.state().auto.find(&eye_id).unwrap().label, "Show Layer");
+    assert_eq!(h.state().session.history.undo.len(), before + 1);
+    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+    h.run_steps(2);
+    assert!(alpha(&h) > 0.99);
+    h.state_mut().session.execute("edit.redo", json!({})).unwrap();
+    h.run_steps(2);
+    assert!(alpha(&h) < 0.01);
+    for id in others {
+        let at = rect(&h, &format!("timeline.layer.{id}.video")).center();
+        drag(&mut h, at, at, 1);
+        assert_eq!(states(&h, &[id], video), [false]);
+    }
+    assert!(h.state().session.active_comp().unwrap().active_camera(h.state().session.time()).is_none(), "the camera's eye disables it");
+}
+
+/// A/V Features is an optional column: hiding it must not strand a hidden layer. The row's
+/// context menu can hide/show it and remains an undoable engine command.
+#[test]
+fn hidden_av_column_keeps_layer_visibility_in_the_context_menu() {
+    let (mut h, ids) = harness();
+    let layer = ids[0];
+    h.state_mut().ui.timeline.columns.remove("av");
+    h.run_steps(2);
+    assert!(h.state().auto.find(&format!("timeline.layer.{layer}.video")).is_none());
+    for (label, expected) in [("Hide Layer", false), ("Show Layer", true)] {
+        let row = rect(&h, &format!("timeline.layer.{layer}.row"));
+        let at = pos2(row.min.x + 140.0, row.center().y);
+        h.event(Event::PointerMoved(at));
+        h.step();
+        h.event(Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed: true, modifiers: Modifiers::NONE });
+        h.step();
+        h.event(Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed: false, modifiers: Modifiers::NONE });
+        h.run_steps(3);
+        let id = format!("timeline.layer.{layer}.context.visibility");
+        assert_eq!(h.state().auto.find(&id).unwrap().label, label);
+        let button = rect(&h, &id).center();
+        let before = h.state().session.history.undo.len();
+        drag(&mut h, button, button, 1);
+        assert_eq!(states(&h, &[layer], video), [expected]);
+        assert_eq!(h.state().session.history.undo.len(), before + 1);
+        assert!(h.state().auto.find(&id).is_none(), "the menu closes after toggling");
+    }
+    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(states(&h, &[layer], video), [false]);
+}
+
 #[test]
 fn dragging_over_layer_switches_sets_them_all() {
     let (mut h, ids) = harness();

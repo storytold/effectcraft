@@ -6,7 +6,7 @@
 //! Every edit is an engine command (`keys.set`, `keys.setEase`, `keys.select`, `keys.*`).
 
 use effectcraft_engine::KeyRef;
-use effectcraft_engine::keyframe::{Interp, Value, side_ease};
+use effectcraft_engine::keyframe::{Interp, Value, path_timing, side_ease};
 use effectcraft_engine::project::{Comp, Layer, LayerId, Property};
 use effectcraft_engine::render::EvalCtx;
 use effectcraft_engine::time::Tick;
@@ -39,6 +39,8 @@ struct Handle {
     speed: f64,
     /// Segment duration (layer seconds) the influence is relative to.
     dur: f64,
+    /// Comp seconds per layer second, including a reversed Path animation's sign.
+    time_scale: f64,
 }
 
 struct KeyPt {
@@ -60,6 +62,8 @@ struct Curve<'a> {
     keys: Vec<KeyPt>,
     /// Values editable in the value graph (not spatial / combined dimensions).
     editable: bool,
+    /// Graph units per stored temporal speed unit (Path progress is shown as a percentage).
+    value_scale: f64,
 }
 
 /// Properties shown: the selected ones, or every animated property of the selected layers.
@@ -73,7 +77,9 @@ fn speed_graph(app: &EffectcraftApp, comp: &Comp) -> bool {
             let props = shown_props(app, comp);
             !props.is_empty()
                 && props.iter().all(|(lid, uid)| {
-                    comp.layer(*lid).and_then(|l| l.props.find(*uid)).is_some_and(|pr| pr.spatial && matches!(pr.value, Value::Vec2(_) | Value::Vec3(_)))
+                    comp.layer(*lid)
+                        .and_then(|l| l.props.find(*uid))
+                        .is_some_and(|pr| matches!(pr.value, Value::Path(_)) || pr.spatial && matches!(pr.value, Value::Vec2(_) | Value::Vec3(_)))
                 })
         }
     }
@@ -81,7 +87,7 @@ fn speed_graph(app: &EffectcraftApp, comp: &Comp) -> bool {
 
 fn shown_props(app: &EffectcraftApp, comp: &Comp) -> Vec<(LayerId, u64)> {
     let st = &app.session.state;
-    let numeric = |pr: &Property| !pr.value.components().is_empty() && pr.value.interpolates();
+    let graphable = |pr: &Property| pr.value.interpolates() && (!pr.value.components().is_empty() || matches!(pr.value, Value::Path(_)));
     // A selected keyframe counts as selecting its property and layer (as clicking a key does in
     // After Effects), so selecting a key in the Timeline shows its graph.
     let mut picked: Vec<(LayerId, u64)> = st.selected_props.clone();
@@ -91,12 +97,12 @@ fn shown_props(app: &EffectcraftApp, comp: &Comp) -> Vec<(LayerId, u64)> {
         }
     }
     if app.ui.timeline.graph_show_selected && !picked.is_empty() {
-        return picked.into_iter().filter(|(l, u)| comp.layer(*l).and_then(|l| l.props.find(*u)).is_some_and(numeric)).collect();
+        return picked.into_iter().filter(|(l, u)| comp.layer(*l).and_then(|l| l.props.find(*u)).is_some_and(graphable)).collect();
     }
     let mut v = vec![];
     for l in comp.layers.iter().filter(|l| st.selected_layers.contains(&l.id) || picked.iter().any(|(pl, _)| *pl == l.id)) {
         l.props.walk("", &mut |_, pr| {
-            if (pr.is_animated() || pr.has_expression()) && numeric(pr) {
+            if (pr.is_animated() || pr.has_expression()) && graphable(pr) {
                 v.push((l.id, pr.uid));
             }
         });
@@ -105,8 +111,18 @@ fn shown_props(app: &EffectcraftApp, comp: &Comp) -> Vec<(LayerId, u64)> {
 }
 
 fn shown_dims(l: &Layer, pr: &Property) -> usize {
+    if matches!(pr.value, Value::Path(_)) {
+        return 1;
+    }
     let n = pr.value.components().len();
     if pr.shown_dims > 0 && !l.is_3d() { (pr.shown_dims as usize).min(n) } else { n.min(4) }
+}
+
+/// Derive comp seconds per layer second from the actual time mapping, rather than the
+/// stretch property's serialized/display units. A malformed zero span has no usable scale.
+fn path_time_scale(layer: &Layer) -> f64 {
+    let span = (layer.comp_time(Tick::from_seconds_f64(1.0)) - layer.comp_time(Tick::ZERO)).seconds();
+    if span.is_finite() && span.abs() > 1e-9 { span } else { 1.0 }
 }
 
 /// Build the curves for the visible time span.
@@ -118,6 +134,10 @@ fn curves<'a>(app: &EffectcraftApp, comp: &'a Comp, ectx: &EvalCtx, tm: TMap, pl
         let Some(l) = comp.layer(lid) else { continue };
         let Some(pr) = l.props.find(uid) else { continue };
         let spatial = pr.spatial && matches!(pr.value, Value::Vec2(_) | Value::Vec3(_));
+        let path = matches!(pr.value, Value::Path(_));
+        let progress_scale = if path { 100.0 / pr.keys.len().saturating_sub(1).max(1) as f64 } else { 1.0 };
+        let time_scale = if path { path_time_scale(l) } else { 1.0 };
+        let value_scale = progress_scale / time_scale.abs();
         let dims = if speed && spatial { 1 } else { shown_dims(l, pr) };
         for d in 0..dims {
             let color = if dims > 1 { DIM_COLORS[d % 4] } else { PROP_COLORS[pi % PROP_COLORS.len()] };
@@ -126,7 +146,10 @@ fn curves<'a>(app: &EffectcraftApp, comp: &'a Comp, ectx: &EvalCtx, tm: TMap, pl
                 let x = plot.min.x + plot.width() * i as f32 / (n - 1) as f32;
                 let ct = tm.t(x);
                 let tt = Tick::from_seconds_f64(ct);
-                let v = if speed {
+                let v = if path {
+                    let (progress, morph_speed) = path_timing(&pr.keys, l.layer_time(tt)).unwrap_or((0.0, 0.0));
+                    if speed { morph_speed.abs() * value_scale } else { progress * progress_scale }
+                } else if speed {
                     let lt = l.layer_time(tt);
                     if spatial {
                         effectcraft_engine::keyframe::speed(&pr.keys, lt, true)
@@ -149,22 +172,25 @@ fn curves<'a>(app: &EffectcraftApp, comp: &'a Comp, ectx: &EvalCtx, tm: TMap, pl
                     let Some(e) = side_ease(&pr.keys, i, ed, pr.spatial, out_side) else { continue };
                     let j = if out_side { i + 1 } else { i - 1 };
                     let dur = (pr.keys[j].time.seconds() - k.time.seconds()).abs();
-                    side_speeds.push(e.speed.abs());
+                    side_speeds.push(e.speed.abs() * value_scale);
                     let dt = e.influence * dur * if out_side { 1.0 } else { -1.0 };
-                    let (hv, show) = if speed { (e.speed.abs(), true) } else { (k.value.components().get(d).copied().unwrap_or(0.0) + e.speed * dt, !spatial) };
+                    let key_value = if path { i as f64 * progress_scale } else { k.value.components().get(d).copied().unwrap_or(0.0) };
+                    let (hv, show) = if speed { (e.speed.abs() * value_scale, true) } else { (key_value + e.speed * dt * progress_scale, !spatial) };
                     let bezier = if out_side { k.out_interp == Interp::Bezier } else { k.in_interp == Interp::Bezier };
                     if ks && show && (bezier || speed) {
-                        handles.push(Handle { out: out_side, t: kt + dt, v: hv, speed: e.speed, dur });
+                        handles.push(Handle { out: out_side, t: kt + dt * time_scale, v: hv, speed: e.speed, dur, time_scale });
                     }
                 }
                 let v = if speed {
                     if side_speeds.is_empty() { 0.0 } else { side_speeds.iter().sum::<f64>() / side_speeds.len() as f64 }
+                } else if path {
+                    i as f64 * progress_scale
                 } else {
                     k.value.components().get(d).copied().unwrap_or(0.0)
                 };
                 keys.push(KeyPt { idx: i, time: k.time, t: kt, v, sel: ks, handles });
             }
-            out.push(Curve { layer: l, prop: pr, dim: d, color, pts, keys, editable: !spatial });
+            out.push(Curve { layer: l, prop: pr, dim: d, color, pts, keys, editable: !spatial && !path, value_scale });
         }
     }
     out
@@ -341,6 +367,13 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
         pc.text(pos2(plot.min.x + 4.0, y - 1.0), Align2::LEFT_BOTTOM, fmt(gv, step), Tokens::ui(10.0), t.text_faint);
         gv += step;
     }
+    if cs.iter().any(|c| matches!(c.prop.value, Value::Path(_))) {
+        let units = if speed { "Path morph speed (%/s)" } else { "Path animation progress (%)" };
+        let label = Rect::from_min_size(plot.min + vec2(6.0, 4.0), vec2(210.0, 18.0));
+        pc.rect_filled(label, 2.0, Color32::from_rgb(0x1d, 0x1d, 0x1d));
+        pc.text(label.left_center(), Align2::LEFT_CENTER, crate::i18n::tr(units), Tokens::ui(10.0), t.text_faint);
+        app.auto.add("timeline.graph.units", label, units);
+    }
     if cs.is_empty() {
         p.text(
             plot.center(),
@@ -430,6 +463,8 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
                                     end: (h2.t, h2.v),
                                     negative: h2.speed < 0.0,
                                     dur: h2.dur,
+                                    value_scale: c2.value_scale,
+                                    time_scale: h2.time_scale,
                                 })
                             })
                         })
@@ -562,12 +597,14 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
         "Auto",
         auto_type,
         "autoSelectGraphType",
-        "Auto-Select Graph Type (speed graph for spatial properties, else value graph)",
+        "Auto-Select Graph Type (speed graph for spatial properties and Paths, else value graph)",
     ) {
         app.ui.timeline.graph_mode = if auto_type { if speed { "speed" } else { "value" } } else { "auto" }.into();
     }
     // Choosing a graph type turns Auto-Select off, as in After Effects.
-    if text_button(app, ui, p, &mut buttons, y, "Value", !speed, "valueGraph", "Edit Value Graph") {
+    let paths_only = !cs.is_empty() && cs.iter().all(|c| matches!(c.prop.value, Value::Path(_)));
+    let (value_label, value_tip) = if paths_only { ("Progress", "Edit Path animation progress graph") } else { ("Value", "Edit Value Graph") };
+    if text_button(app, ui, p, &mut buttons, y, value_label, !speed, "valueGraph", value_tip) {
         app.ui.timeline.graph_mode = "value".into();
     }
     if text_button(app, ui, p, &mut buttons, y, "Speed", speed, "speedGraph", "Edit Speed Graph") {
@@ -739,20 +776,23 @@ struct HandleGrab {
     negative: bool,
     /// Segment duration (layer seconds) the influence is relative to.
     dur: f64,
+    value_scale: f64,
+    time_scale: f64,
 }
 
 impl HandleGrab {
     /// `keys.setEase` putting the handle's end at (`t` comp seconds, `v` in the graph).
     fn ease(&self, t: f64, v: f64, speed: bool, merge: &str) -> serde_json::Value {
         let dir = if self.out { 1.0 } else { -1.0 };
-        let dt = ((t - self.key.0) * dir).max(self.dur * 0.001);
-        let influence = (dt / self.dur.max(1e-9) * 100.0).clamp(0.1, 100.0);
+        let comp_dur = self.dur * self.time_scale.abs();
+        let dt = ((t - self.key.0) * dir * self.time_scale.signum()).max(comp_dur * 0.001);
+        let influence = (dt / comp_dur.max(1e-9) * 100.0).clamp(0.1, 100.0);
         let sp = if speed {
             let mag = v.max(0.0);
             if self.negative { -mag } else { mag }
         } else {
             (v - self.key.1) / dt * dir
-        };
+        } / self.value_scale;
         let side = if self.out { "out" } else { "in" };
         let mut params =
             json!({"layer": self.layer.0, "prop": self.prop, "time": self.time.seconds(), "side": side, "speed": sp, "influence": influence, "merge": merge});
@@ -777,7 +817,7 @@ fn shift_axes(shift: bool, dx: f32, dy: f32) -> (bool, bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::shift_axes;
+    use super::*;
 
     #[test]
     fn shift_locks_drag_to_dominant_axis() {
@@ -785,5 +825,77 @@ mod tests {
         assert_eq!(shift_axes(true, 10.0, -3.0), (true, false));
         assert_eq!(shift_axes(true, 2.0, -9.0), (false, true));
         assert_eq!(shift_axes(true, 5.0, 5.0), (true, false));
+    }
+
+    #[test]
+    fn path_graph_scale_follows_the_engine_layer_time_mapping() {
+        let mut session = effectcraft_engine::Session::default();
+        session.execute("comp.new", json!({"width": 320, "height": 180, "duration": 4})).unwrap();
+        let id = LayerId(session.execute("layer.newShape", json!({})).unwrap()["layer"].as_u64().unwrap());
+        let group = session.execute("layer.addShapeItem", json!({"layer": id.0, "kind": "path"})).unwrap()["uid"].as_u64().unwrap();
+        let uid = session.active_comp().unwrap().layer(id).unwrap().props.find_group(group).unwrap().get("path").unwrap().uid;
+        let path = effectcraft_engine::keyframe::ShapePath::rect([0.0, 0.0], 20.0, 20.0);
+        for time in [0.5, 2.5] {
+            session.execute("prop.addKey", json!({"layer": id.0, "prop": uid, "time": time, "value": path})).unwrap();
+        }
+        // comp.new defaults to 29.97 fps, so the requested times snap to frames 15 and
+        // 75: the stored interval is 2.002 seconds. Graph speed follows those exact times.
+        let key_duration = {
+            let property = session.active_comp().unwrap().layer(id).unwrap().props.find(uid).unwrap();
+            (property.keys[1].time - property.keys[0].time).seconds()
+        };
+        assert!((key_duration - 2.002).abs() < 1e-12, "the fixture exercises NTSC frame snapping: {key_duration}");
+        session.execute("prop.select", json!({"layer": id.0, "prop": uid})).unwrap();
+        let mut app = EffectcraftApp::new(session);
+        let plot = Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 240.0));
+        let tm = TMap { x0: 0.0, start: 0.0, pps: 100.0 };
+        for (percent, factor) in [(100.0, 1.0_f64), (50.0, 0.5), (200.0, 2.0), (-200.0, -2.0)] {
+            app.session.execute("layer.timeStretch", json!({"layers": [id.0], "percent": percent})).unwrap();
+            let comp = app.session.active_comp().unwrap();
+            let layer = comp.layer(id).unwrap();
+            assert_eq!(path_time_scale(layer), factor);
+            let ectx = EvalCtx::new(&app.session.project, app.session.active_comp_id().unwrap(), comp, Tick::ZERO);
+            let speed = curves(&app, comp, &ectx, tm, plot, true);
+            assert_eq!(speed.len(), 1);
+            let curve = &speed[0];
+            assert_eq!(curve.value_scale, 100.0 / factor.abs());
+            let expected_speed = 100.0 / (key_duration * factor.abs());
+            assert!((curve.keys[0].v - expected_speed).abs() < 1e-12, "{percent}% stretch: {} != {expected_speed}", curve.keys[0].v);
+            let handle = &curve.keys[0].handles[0];
+            assert!((handle.t - curve.keys[0].t - factor * key_duration / 3.0).abs() < 1e-9, "{percent}% stretch: influence uses actual key duration");
+            let progress = curves(&app, comp, &ectx, tm, plot, false);
+            assert_eq!(progress[0].keys[0].v, 0.0);
+            assert_eq!(progress[0].keys[1].v, 100.0);
+        }
+    }
+
+    #[test]
+    fn path_handles_keep_native_ease_units_when_stretched_or_reversed() {
+        for time_scale in [1.0_f64, 0.5, 2.0, -2.0] {
+            let duration = 2.0;
+            let key_time = 6.0;
+            let handle_time = key_time + time_scale * duration / 3.0;
+            let value_scale = 100.0 / time_scale.abs();
+            let grab = HandleGrab {
+                layer: LayerId(1),
+                prop: 2,
+                dim: None,
+                time: Tick::from_seconds_f64(0.5),
+                out: true,
+                key: (key_time, 0.0),
+                end: (handle_time, 0.5 * value_scale),
+                negative: false,
+                dur: duration,
+                value_scale,
+                time_scale,
+            };
+            for speed_graph in [false, true] {
+                let value = if speed_graph { 0.5 * value_scale } else { 100.0 / 3.0 };
+                let params = grab.ease(handle_time, value, speed_graph, "test");
+                assert!((params["speed"].as_f64().unwrap() - 0.5).abs() < 1e-12, "{params}");
+                assert!((params["influence"].as_f64().unwrap() - 100.0 / 3.0).abs() < 1e-12, "{params}");
+                assert!(params.get("dim").is_none());
+            }
+        }
     }
 }

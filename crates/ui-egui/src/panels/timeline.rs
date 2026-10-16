@@ -1228,6 +1228,94 @@ fn layer_drag_id() -> egui::Id {
     egui::Id::new("tl-layer-drag")
 }
 
+/// Paths, paints, operations and groups travel as whole items, preserving their property uids.
+#[derive(Clone, Debug)]
+struct ShapeDrag {
+    layer: LayerId,
+    items: Vec<u64>,
+}
+
+fn shape_drag_id() -> egui::Id {
+    egui::Id::new("tl-shape-drag")
+}
+
+/// Only indexed items directly inside shape Contents are draggable, never their fixed
+/// Transform, Stroke settings or the Contents container itself. Bound imported tree walks.
+fn shape_item_parent(layer: &Layer, uid: u64) -> Option<&PropGroup> {
+    if !matches!(layer.source, LayerSource::Shape) {
+        return None;
+    }
+    let mut stack = vec![(layer.props.sub("contents")?, 0usize)];
+    let mut visited = 0usize;
+    while let Some((group, depth)) = stack.pop() {
+        visited = visited.saturating_add(1);
+        if depth > 64 || visited > 100_000 {
+            return None;
+        }
+        for child in group.groups() {
+            if child.uid == uid {
+                return (group.match_id == "contents" && matches!(child.kind, GroupKind::Indexed)).then_some(group);
+            }
+            if visited.saturating_add(stack.len()) >= 100_000 {
+                return None;
+            }
+            stack.push((child, depth + 1));
+        }
+    }
+    None
+}
+
+fn shape_contains(group: &PropGroup, uid: u64) -> bool {
+    let mut stack = vec![(group, 0usize)];
+    let mut visited = 0usize;
+    while let Some((group, depth)) = stack.pop() {
+        visited = visited.saturating_add(1);
+        if depth > 64 || visited > 100_000 || group.uid == uid {
+            return true;
+        }
+        for child in group.groups() {
+            if visited.saturating_add(stack.len()) >= 100_000 {
+                return true;
+            }
+            stack.push((child, depth + 1));
+        }
+    }
+    false
+}
+
+struct ShapeDrop {
+    parent: u64,
+    index: usize,
+    row: Rect,
+    inside: bool,
+    line_y: f32,
+    owner: Option<u64>,
+}
+
+/// The middle of a group/Contents row nests items; the edges of an item row reorder siblings.
+/// Thus a Stroke outside a group can be dropped directly on that group's Contents, while
+/// dragging one group to another row's top or bottom changes their order.
+fn shape_drop(comp: &Comp, moving: &ShapeDrag, hit_rows: &[(Rect, Row)], pointer: Pos2) -> Option<ShapeDrop> {
+    let layer = comp.layer(moving.layer).filter(|l| !l.switches.locked)?;
+    let (rect, row) = hit_rows.iter().find(|(rect, row)| row.layer == moving.layer && rect.contains(pointer))?;
+    let RowKind::Group { uid, .. } = row.kind else { return None };
+    if moving.items.contains(&uid) {
+        return None;
+    }
+    let group = layer.props.find_group(uid)?;
+    let inside = group.match_id == "contents"
+        || (group.match_id == "group" && pointer.y > rect.min.y + rect.height() * 0.25 && pointer.y < rect.max.y - rect.height() * 0.25);
+    let parent = if inside { if group.match_id == "contents" { group } else { group.sub("contents")? } } else { shape_item_parent(layer, uid)? };
+    if moving.items.iter().any(|uid| layer.props.find_group(*uid).is_none_or(|g| shape_contains(g, parent.uid))) {
+        return None;
+    }
+    let remaining: Vec<u64> = parent.children.iter().map(Node::uid).filter(|uid| !moving.items.contains(uid)).collect();
+    let after = pointer.y >= rect.center().y;
+    let at = if inside { remaining.len() } else { remaining.iter().position(|u| *u == uid)?.saturating_add(usize::from(after)) };
+    let owner = layer.props.parent_of(parent.uid).filter(|g| g.match_id == "group").map(|g| g.uid);
+    Some(ShapeDrop { parent: parent.uid, index: at.saturating_add(1), row: *rect, inside, line_y: if after { rect.max.y } else { rect.min.y }, owner })
+}
+
 /// A keyframe drag in progress: where the pointer started, the grabbed key's comp time
 /// (seconds), how many frames the selected keys have moved so far and, for a Quick Offset
 /// (Ctrl/Cmd+Alt), how many layers it staggers.
@@ -1331,6 +1419,7 @@ fn layer_switch(
     actions: &mut Vec<(String, serde_json::Value)>,
 ) {
     let resp = widgets::icon_toggle(ui, br, icon, on, t, id, Sense::click_and_drag());
+    let resp = if name == "video" { resp.on_hover_text(if on { "Hide Layer" } else { "Show Layer" }) } else { resp };
     // Alt-click on an A/V feature sets the layer apart: the other layers go off (or locked),
     // and come back on the next Alt-click.
     if others && resp.is_pointer_button_down_on() && ui.input(|i| i.pointer.primary_pressed() && i.modifiers.alt) {
@@ -1923,7 +2012,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
     // A pick whip held near the top or bottom of the layers (or past it) scrolls them, as in
     // After Effects.
-    if ctx.data(|d| d.get_temp::<PickWhip>(pick_whip_id())).is_some()
+    if (ctx.data(|d| d.get_temp::<PickWhip>(pick_whip_id())).is_some() || ctx.data(|d| d.get_temp::<ShapeDrag>(shape_drag_id())).is_some())
         && let Some(ptr) = ctx.input(|i| i.pointer.latest_pos()).filter(|p| rect.x_range().contains(p.x))
     {
         let speed = edge_scroll_speed(rows_rect, ptr.y, rh);
@@ -1993,7 +2082,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 // A/V features.
                 let sw = &layer.switches;
                 let av_items: [(Icon, bool, &str, bool); 4] = [
-                    (Icon::Eye, sw.video, "video", layer.source.is_av()),
+                    (Icon::Eye, sw.video, "video", true),
                     (Icon::Speaker, sw.audio, "audio", layer.props.sub("audio").is_some()),
                     (Icon::Solo, sw.solo, "solo", layer.source.is_av()),
                     (Icon::Lock, sw.locked, "lock", true),
@@ -2005,7 +2094,8 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     }
                     lp.rect_filled(br.shrink(0.5), 1.0, t.switch_well);
                     layer_switch(ui, &t, r, br, icon, on, egui::Id::new(("av", layer.id.0, i)), layer.id.0, name, true, &mut actions);
-                    app.auto.add(&format!("timeline.layer.{}.{name}", layer.id.0), br, name);
+                    let label = if name == "video" { if on { "Hide Layer" } else { "Show Layer" } } else { name };
+                    app.auto.add(&format!("timeline.layer.{}.{name}", layer.id.0), br, label);
                 }
                 // Label swatch.
                 if vis.label {
@@ -2103,7 +2193,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                         None => start_rename(&ctx, layer.id.0, &layer.name),
                     }
                 }
-                layer_context_menu(&row_resp, &comp, layer, &selected, LayerMenuCaps::of(&app.session.project, layer), &mut actions);
+                layer_context_menu(&row_resp, &comp, layer, &selected, LayerMenuCaps::of(&app.session.project, layer), &mut app.auto, &mut actions);
                 // Switches.
                 let sws: [(Icon, bool, &str, bool); 8] = [
                     (Icon::Shy, sw.shy, "shy", true),
@@ -2324,7 +2414,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                             set_anchor(&ctx, cid, layer.id);
                         }
                     }
-                    layer_context_menu(&body, &comp, layer, &selected, LayerMenuCaps::of(&app.session.project, layer), &mut actions);
+                    layer_context_menu(&body, &comp, layer, &selected, LayerMenuCaps::of(&app.session.project, layer), &mut app.auto, &mut actions);
                     let drag_key = format!("bar-{}", layer.id.0);
                     // Ctrl/Cmd+Alt dragging a selected bar: Quick Offset (#1012), chosen as the
                     // drag starts and followed below the rows until the button is released.
@@ -2482,10 +2572,30 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     lp.text(pos2(ir.max.x + 4.0, cy), Align2::LEFT_CENTER, crate::i18n::tr("Inverted"), Tokens::ui(11.0), t.text_dim);
                 }
                 let gr_rect = Rect::from_min_max(pos2(indent + 8.0, r.min.y), pos2(cw.switches, r.max.y));
-                let gr = ui.interact(gr_rect, egui::Id::new(("grow", uid)), Sense::click());
+                let draggable = !layer.switches.locked && shape_item_parent(layer, *uid).is_some();
+                let gr = ui.interact(gr_rect, egui::Id::new(("grow", uid)), if draggable { Sense::click_and_drag() } else { Sense::click() });
                 app.auto.add(&format!("timeline.group.{uid}.name"), gr_rect, name);
+                if draggable {
+                    app.auto.add(&format!("timeline.group.{uid}.drag"), gr_rect, "Drag shape item to reorder or move into Contents");
+                    if gr.drag_started() {
+                        let items = if sel_group {
+                            app.session
+                                .state
+                                .selected_props
+                                .iter()
+                                .filter(|(lid, u)| *lid == layer.id && shape_item_parent(layer, *u).is_some())
+                                .map(|(_, u)| *u)
+                                .collect()
+                        } else {
+                            actions.push(("prop.select".into(), json!({"layer": layer.id.0, "prop": uid, "selectKeys": false})));
+                            vec![*uid]
+                        };
+                        ctx.data_mut(|d| d.insert_temp(shape_drag_id(), ShapeDrag { layer: layer.id, items }));
+                    }
+                }
                 if gr.clicked() && uid & (WAVE_BIT | GEOM_BIT) == 0 {
-                    actions.push(("prop.select".into(), json!({"layer": layer.id.0, "prop": uid, "selectKeys": false})));
+                    actions
+                        .push(("prop.select".into(), json!({"layer": layer.id.0, "prop": uid, "selectKeys": false, "add": ui.input(|i| i.modifiers.shift)})));
                 }
                 if gr.double_clicked() {
                     if fx.is_some() {
@@ -3087,6 +3197,35 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         gp.rect_stroke(br, 0.0, Stroke::new(1.0, t.accent), StrokeKind::Middle);
         ctx.data_mut(|d| d.insert_temp(egui::Id::new("tl-box"), br));
     }
+    // A whole shape item can change parent as well as order. Show the destination before the
+    // release; commit once, so one Undo restores the entire tree and all animated properties.
+    if let Some(moving) = ctx.data(|d| d.get_temp::<ShapeDrag>(shape_drag_id())) {
+        let cancelled = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+        let released = ctx.input(|i| !i.pointer.primary_down());
+        let target = ctx.input(|i| i.pointer.latest_pos()).filter(|ptr| outline_rect.contains(*ptr)).and_then(|ptr| shape_drop(&comp, &moving, &hit_rows, ptr));
+        if cancelled || released {
+            ctx.data_mut(|d| d.remove::<ShapeDrag>(shape_drag_id()));
+            if !cancelled && let Some(target) = target {
+                app.ui.timeline.open_groups.insert(target.parent);
+                if let Some(owner) = target.owner {
+                    app.ui.timeline.open_groups.insert(owner);
+                }
+                actions
+                    .push(("prop.moveGroup".into(), json!({"layer": moving.layer.0, "props": moving.items, "parent": target.parent, "index": target.index})));
+            }
+        } else if let Some(target) = target {
+            ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+            let painter = p.with_clip_rect(outline_rect);
+            if target.inside {
+                painter.rect_filled(target.row.intersect(outline_rect), 0.0, t.accent.gamma_multiply(0.18));
+                painter.rect_stroke(target.row.intersect(outline_rect), 0.0, Stroke::new(1.0, t.accent), StrokeKind::Inside);
+            } else {
+                painter.line_segment([pos2(cw.name, target.line_y), pos2(graph_x0 - 1.0, target.line_y)], Stroke::new(2.0, t.accent));
+            }
+        } else {
+            ctx.set_cursor_icon(egui::CursorIcon::NotAllowed);
+        }
+    }
     // Layer reorder drag: a line where the layers will land; the release moves them there.
     if let Some(moving) = ctx.data(|d| d.get_temp::<Vec<u64>>(layer_drag_id())) {
         let dropped = ctx.data_mut(|d| d.remove_temp::<bool>(layer_drop_id())).unwrap_or(false);
@@ -3529,7 +3668,7 @@ fn layer_cells(
     }
     if cw.vis.stretch {
         let cr = Rect::from_min_max(pos2(cw.stretch + 2.0, r.min.y + 1.0), pos2(cw.stretch + STRETCH_W - 2.0, r.max.y - 1.0));
-        let label = format!("{:.1}%", layer.stretch * 100.0);
+        let label = format!("{:.1}%", layer.stretch);
         let resp = ui.interact(cr, egui::Id::new(("tl-stretch", lid)), Sense::click()).on_hover_text(crate::i18n::tr("Time Stretch…"));
         lp.text(pos2(cr.min.x + 4.0, cy), Align2::LEFT_CENTER, &label, Tokens::ui(11.5), if resp.hovered() { t.hot_text } else { t.text });
         app.auto.add(&format!("timeline.layer.{lid}.stretch"), cr, &label);
@@ -3628,8 +3767,31 @@ const SHAPE_ADD_ITEMS: &[(&str, &str)] = &[
     ("zigzag", "Zig Zag"),
 ];
 
-/// A shape layer's Contents "Add:" pop-up menu: adds a shape, paint or path operation to the
-/// selected shape group, else to the layer's contents.
+/// The nearest shape Contents for a selected item, group or property. Selecting the nested
+/// Contents itself must work just as selecting its owning Group does.
+fn shape_add_contents(layer: &Layer, selected: u64) -> Option<u64> {
+    let root = layer.props.sub("contents")?;
+    if let Some(g) = root.find_group(selected) {
+        if g.match_id == "contents" {
+            return Some(g.uid);
+        }
+        if g.match_id == "group" {
+            return g.sub("contents").map(|c| c.uid);
+        }
+    }
+    let mut uid = selected;
+    for _ in 0..256 {
+        let parent = root.parent_of(uid)?;
+        if parent.match_id == "contents" {
+            return Some(parent.uid);
+        }
+        uid = parent.uid;
+    }
+    None
+}
+
+/// A shape layer's Contents "Add:" pop-up menu. A nested menu targets that Contents; the
+/// root menu follows the selected shape item, group or nested Contents.
 #[allow(clippy::too_many_arguments)]
 fn shape_add_popup(
     app: &mut EffectcraftApp,
@@ -3641,7 +3803,8 @@ fn shape_add_popup(
     cy: f32,
     actions: &mut Vec<(String, serde_json::Value)>,
 ) {
-    if !matches!(layer.source, LayerSource::Shape) || layer.props.sub("contents").is_none_or(|c| c.uid != uid) {
+    let Some(root) = layer.props.sub("contents").filter(|_| matches!(layer.source, LayerSource::Shape)) else { return };
+    if root.find_group(uid).is_none_or(|g| g.match_id != "contents") {
         return;
     }
     let t = app.tokens;
@@ -3655,18 +3818,38 @@ fn shape_add_popup(
     if resp.clicked() {
         widgets::open_popup(ui, pop);
     }
-    let opts: Vec<String> = SHAPE_ADD_ITEMS.iter().map(|(k, l)| if *k == "-" { "-".to_string() } else { l.to_string() }).collect();
-    if let Some(i) = widgets::popup_menu(ui, pop, br.left_bottom(), &opts, None)
+    let choice = if widgets::popup_is_open(ui, pop) {
+        let separators = SHAPE_ADD_ITEMS.iter().filter(|(kind, _)| *kind == "-").count();
+        widgets::popup_list(ui, pop, br.left_bottom(), Rect::NOTHING, SHAPE_ADD_ITEMS.len().saturating_sub(separators), separators, |ui| {
+            ui.set_min_width(160.0);
+            let mut choice = None;
+            for (i, (kind, label)) in SHAPE_ADD_ITEMS.iter().enumerate() {
+                if *kind == "-" {
+                    ui.separator();
+                } else {
+                    let response = ui.selectable_label(false, crate::i18n::tr(label));
+                    app.auto.add(&format!("timeline.group.{uid}.add.{kind}"), response.rect, label);
+                    if response.clicked() {
+                        choice = Some(i);
+                    }
+                }
+            }
+            choice
+        })
+    } else {
+        None
+    };
+    if let Some(i) = choice
         && let Some((kind, _)) = SHAPE_ADD_ITEMS.get(i).filter(|(k, _)| *k != "-")
     {
         let mut params = json!({"layer": layer.id.0, "kind": kind});
-        // Into the selected shape group, as After Effects does.
-        let group = app.session.state.selected_props.iter().filter(|(l, _)| *l == layer.id).find_map(|(_, u)| {
-            let g = layer.props.find_group(*u)?;
-            (g.match_id == "group" && g.sub("contents").is_some()).then_some(g.uid)
-        });
-        if let Some(g) = group {
-            params["group"] = json!(g);
+        let target = if uid != root.uid {
+            uid
+        } else {
+            app.session.state.selected_props.iter().rev().filter(|(l, _)| *l == layer.id).find_map(|(_, u)| shape_add_contents(layer, *u)).unwrap_or(root.uid)
+        };
+        if target != root.uid {
+            params["group"] = json!(target);
         }
         actions.push(("layer.addShapeItem".into(), params));
     }
@@ -3863,6 +4046,7 @@ fn layer_context_menu(
     layer: &Layer,
     selected: &[LayerId],
     caps: LayerMenuCaps,
+    auto: &mut crate::automation::Registry,
     actions: &mut Vec<(String, serde_json::Value)>,
 ) {
     let in_selection = selected.contains(&layer.id);
@@ -3870,7 +4054,18 @@ fn layer_context_menu(
         actions.push(("layer.select".into(), json!({"layers": [layer.id.0]})));
     }
     let targets: Vec<u64> = if in_selection { comp.layers.iter().filter(|l| selected.contains(&l.id)).map(|l| l.id.0).collect() } else { vec![layer.id.0] };
-    crate::widgets::context_menu(resp, |ui| layer_menu(ui, &targets, caps, actions));
+    crate::widgets::context_menu(resp, |ui| {
+        // Visibility stays reachable when A/V Features is hidden or scrolled out of view.
+        let label = if layer.switches.video { "Hide Layer" } else { "Show Layer" };
+        let button = ui.button(crate::i18n::tr(label));
+        auto.add(&format!("timeline.layer.{}.context.visibility", layer.id.0), button.rect, label);
+        if button.clicked() {
+            actions.push(("layer.setSwitch".into(), json!({"layers": targets, "switch": "video", "value": !layer.switches.video})));
+            ui.close();
+        }
+        ui.separator();
+        layer_menu(ui, &targets, caps, actions);
+    });
 }
 
 /// Shared layer actions for Timeline rows and Composition context menus.
