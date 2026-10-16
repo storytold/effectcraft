@@ -125,11 +125,16 @@ fn format_line(ts: &str, level: log::Level, thread: &str, target: &str, message:
 
 /// Install the logger (once; later calls and other installed loggers are left alone).
 pub fn install() {
+    install_with(DEFAULT_FILTER);
+}
+
+/// [`install`] with `default` as the filter when `RUST_LOG` is unset or empty (the CLI: `warn`).
+pub fn install_with(default: &str) {
     static LOGGER: Logger = Logger;
     if log::set_logger(&LOGGER).is_ok() {
         let filter = FILTER.get_or_init(|| {
             let spec = std::env::var("RUST_LOG").ok().filter(|s| !s.trim().is_empty());
-            parse_filter(spec.as_deref().unwrap_or(DEFAULT_FILTER))
+            parse_filter(spec.as_deref().unwrap_or(default))
         });
         log::set_max_level(filter.iter().map(|d| d.1).fold(LevelFilter::Info, Ord::max));
     }

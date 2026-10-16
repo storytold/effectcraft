@@ -264,6 +264,9 @@ fn value_arg(s: &str) -> Value {
 }
 
 fn main() {
+    // Warnings and errors to standard error (`RUST_LOG` overrides), so a GPU that declines
+    // frames or runs out of memory says so instead of silently rendering on the CPU.
+    effectcraft_engine::logging::install_with("warn");
     let raw: Vec<String> = std::env::args().skip(1).collect();
     if matches!(raw.first().map(String::as_str), Some("--version" | "-V" | "version")) {
         say!("effectcraft-cli {}", env!("CARGO_PKG_VERSION"));

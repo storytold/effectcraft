@@ -46,6 +46,17 @@ const POOL_BUDGET: usize = 768 << 20;
 /// Readback staging buffers kept for reuse across sizes (bytes).
 const STAGING_BUDGET: u64 = 256 << 20;
 
+/// Texture bytes an open encoder lets build up before it submits: textures it created since its
+/// last submit, plus (for the oldest open encoder only) textures released while it was open, which
+/// can't be reused or freed until it is submitted. Submitting a newer encoder frees none of those,
+/// so only the oldest reacts to them.
+///
+/// Fixed rather than scaled by adapter memory: wgpu reports no VRAM size. 1 GiB keeps a 4K frame
+/// within an 8 GB (GTX 1070) and a 24 GB (RTX 3090) card without measurable submit overhead. Without this, a 4K frame of static layers with blurs and glows
+/// (each effect run its own `Enc`, the frame's encoder open throughout) parks gigabytes and the
+/// device runs out of memory, which retires the GPU for the rest of the export.
+const PENDING_BYTES: usize = 1 << 30;
+
 /// A GPU image: premultiplied RGBA f32 in a texture (cheap to clone; immutable once written).
 /// Working images come from the context's texture pool and go back to it when the last clone
 /// is dropped.
@@ -103,6 +114,10 @@ pub(crate) struct Pool {
     free: HashMap<(u32, u32), Vec<wgpu::Texture>>,
     /// (texture, newest encoder open at its release).
     released: Vec<(wgpu::Texture, u64)>,
+    /// Bytes of `released` (the oldest open encoder submits once they pass [`PENDING_BYTES`]).
+    released_bytes: usize,
+    /// `released_bytes` and the oldest open encoder, readable without the lock (every dispatch).
+    parked: Arc<Parked>,
     /// Encoders with recorded, unsubmitted work.
     open: BTreeSet<u64>,
     next: u64,
@@ -117,6 +132,22 @@ pub(crate) struct Pool {
     /// working texture of another `Enc` before it is gone.
     owned: HashMap<u64, HashMap<(u32, u32), Vec<wgpu::Texture>>>,
     next_owner: u64,
+}
+
+/// Lock-free view of the pool for [`Enc::dispatch`] (written under the pool lock).
+#[derive(Default)]
+pub(crate) struct Parked {
+    bytes: std::sync::atomic::AtomicUsize,
+    /// Id of the oldest open encoder (0: none).
+    oldest: std::sync::atomic::AtomicU64,
+}
+
+impl Parked {
+    /// Released bytes waiting on encoder `id`'s submit (0 unless it is the oldest open one).
+    fn waiting_on(&self, id: u64) -> usize {
+        use std::sync::atomic::Ordering::Relaxed;
+        if self.oldest.load(Relaxed) == id { self.bytes.load(Relaxed) } else { 0 }
+    }
 }
 
 /// In-`Enc` texture reuse ([`Pool::owned`]); tests turn it off to compare.
@@ -156,7 +187,11 @@ fn tex_bytes(t: &wgpu::Texture) -> usize {
 impl Pool {
     fn release(&mut self, t: wgpu::Texture) {
         match self.open.last() {
-            Some(&newest) => self.released.push((t, newest)),
+            Some(&newest) => {
+                self.released_bytes += tex_bytes(&t);
+                self.released.push((t, newest));
+                self.publish();
+            }
             None => self.make_free(t),
         }
     }
@@ -173,7 +208,14 @@ impl Pool {
     fn open(&mut self) -> u64 {
         self.next += 1;
         self.open.insert(self.next);
+        self.publish();
         self.next
+    }
+
+    fn publish(&self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.parked.bytes.store(self.released_bytes, Relaxed);
+        self.parked.oldest.store(self.open.first().copied().unwrap_or(0), Relaxed);
     }
 
     /// Encoder `id` was submitted or dropped: free what no open encoder can still read.
@@ -181,10 +223,13 @@ impl Pool {
         self.open.remove(&id);
         let oldest = self.open.first().copied().unwrap_or(u64::MAX);
         if self.released.iter().all(|(_, w)| *w >= oldest) {
+            self.publish();
             return;
         }
         let (ready, wait): (Vec<_>, Vec<_>) = std::mem::take(&mut self.released).into_iter().partition(|(_, w)| *w < oldest);
+        self.released_bytes = wait.iter().map(|(t, _)| tex_bytes(t)).sum();
         self.released = wait;
+        self.publish();
         for (t, _) in ready {
             self.make_free(t);
         }
@@ -296,9 +341,14 @@ pub struct GpuContext {
     dummy_tex: wgpu::TextureView,
     dummy_buf: wgpu::Buffer,
     uploads: Mutex<Uploads>,
+    /// Keep effect-chain results on the device for the compositor (`EFFECTCRAFT_NO_HANDOFF=1`
+    /// turns it off; read once).
+    pub(crate) handoff: bool,
     upload_budget: std::sync::atomic::AtomicUsize,
     upload_full_warned: std::sync::atomic::AtomicBool,
     pool: Arc<Mutex<Pool>>,
+    /// The pool's [`Parked`] (shared, lock-free).
+    parked: Arc<Parked>,
     /// CPU ↔ GPU traffic (diagnostics: `bench --gpu`).
     pub(crate) transfers: Transfers,
     /// Readback staging buffers by size.
@@ -627,6 +677,8 @@ impl GpuContext {
             init_resource(&device, "dummy storage buffer", || buffer_init(&device, &queue, Some("dummy"), &[0u8; 16], wgpu::BufferUsages::STORAGE))?;
         let dummy_tex = init_resource(&device, "dummy texture view", || dummy.create_view(&Default::default()))?;
         let max_dim = device.limits().max_texture_dimension_2d;
+        let pool = Pool::default();
+        let parked = pool.parked.clone();
         Ok(GpuContext {
             device,
             queue,
@@ -643,9 +695,11 @@ impl GpuContext {
             dummy,
             dummy_buf,
             uploads: Mutex::new(Uploads::default()),
+            handoff: std::env::var_os("EFFECTCRAFT_NO_HANDOFF").is_none(),
             upload_budget: std::sync::atomic::AtomicUsize::new(UPLOAD_BUDGET),
             upload_full_warned: Default::default(),
-            pool: Default::default(),
+            pool: Arc::new(Mutex::new(pool)),
+            parked,
             staging: Default::default(),
             transfers: Default::default(),
             zeros: Default::default(),
@@ -932,6 +986,20 @@ impl GpuContext {
             }
         }
         let img = self.upload_image(&buf.img)?;
+        self.remember_upload(buf, img.clone());
+        Some(img)
+    }
+
+    /// `img` holds `buf`'s pixels on the device (an effect chain's result, read back into `buf`):
+    /// later [`upload_buf`](Self::upload_buf)s of this `Arc` use it instead of uploading again.
+    pub(crate) fn adopt_upload(&self, buf: &Arc<Buf>, img: GpuImage) {
+        if (img.width, img.height) == (buf.img.width, buf.img.height) {
+            self.remember_upload(buf, img);
+        }
+    }
+
+    fn remember_upload(&self, buf: &Arc<Buf>, img: GpuImage) {
+        let key = Arc::as_ptr(buf) as usize;
         if let Ok(mut u) = self.uploads.lock() {
             let bytes = buf.img.data.len() * 16;
             let now = u.clock;
@@ -963,7 +1031,6 @@ impl GpuContext {
                 }
             }
         }
-        Some(img)
     }
 
     /// Forget uploaded layer textures.
@@ -987,6 +1054,8 @@ pub(crate) struct Enc<'g> {
     /// The open command encoder and its id in the texture pool.
     enc: Option<(wgpu::CommandEncoder, u64)>,
     pending: usize,
+    /// Bytes of new textures created since the last submit (see [`PENDING_BYTES`]).
+    pending_bytes: usize,
     /// A dispatch named a kernel the device doesn't have (see [`Enc::take_missing`]).
     missing: bool,
     /// This `Enc`'s id in the texture pool (textures it may reuse at once).
@@ -1008,7 +1077,7 @@ impl Drop for Enc<'_> {
 impl<'g> Enc<'g> {
     pub fn new(g: &'g GpuContext) -> Enc<'g> {
         let owner = g.pool.lock().map(|mut p| p.register()).unwrap_or(0);
-        Enc { g, enc: None, pending: 0, missing: false, owner }
+        Enc { g, enc: None, pending: 0, pending_bytes: 0, missing: false, owner }
     }
 
     /// Whether a dispatch since the last call named a kernel the device doesn't have (one
@@ -1033,6 +1102,8 @@ impl<'g> Enc<'g> {
         let (img, reused) = self.g.pooled(w, h, self.owner);
         if reused {
             self.fill(&img, 0.0);
+        } else {
+            self.pending_bytes += tex_bytes(&img.texture);
         }
         img
     }
@@ -1040,7 +1111,10 @@ impl<'g> Enc<'g> {
     /// A new image for a kernel that writes every pixel of it (pooled; contents undefined).
     /// Under test it starts out as NaNs, so a kernel that skips pixels fails the CPU oracle.
     pub fn scratch(&mut self, w: u32, h: u32) -> GpuImage {
-        let (img, _) = self.g.pooled(w, h, self.owner);
+        let (img, reused) = self.g.pooled(w, h, self.owner);
+        if !reused {
+            self.pending_bytes += tex_bytes(&img.texture);
+        }
         if cfg!(test) {
             self.fill(&img, f32::NAN);
         }
@@ -1139,7 +1213,10 @@ impl<'g> Enc<'g> {
         }
         self.pending += 1;
         // Keep command buffers (and the transient textures they hold) bounded.
-        if self.pending >= 256 {
+        // Parked textures wait on the oldest open encoder (usually a frame's), so only its submit
+        // frees them; a newer one (an effect chain inside the frame) counts only its own.
+        let parked = self.enc.as_ref().map_or(0, |(_, id)| self.g.parked.waiting_on(*id));
+        if self.pending >= 256 || self.pending_bytes + parked >= PENDING_BYTES {
             self.submit();
         }
     }
@@ -1169,6 +1246,7 @@ impl<'g> Enc<'g> {
             }
         }
         self.pending = 0;
+        self.pending_bytes = 0;
     }
 
     /// Read an image back to the CPU (submits and waits). `None` where readback is impossible.

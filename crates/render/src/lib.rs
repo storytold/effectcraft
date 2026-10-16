@@ -462,6 +462,15 @@ pub trait Accelerator: Send + Sync {
     /// and renders the frame again, and the steps whose results arrived are served from them.
     /// The frame is done after a pass with no miss. `frame_begin` forgets the previous frame's
     /// results, `pass_begin` clears the miss. Synchronous accelerators never miss.
+    /// Take what the accelerator kept of this thread's last [`Accelerator::effects`] result
+    /// (its device image). The renderer takes it at the end of every effect stack, so it lives
+    /// no longer than one.
+    fn take_chain(&self) -> Option<ChainHold> {
+        None
+    }
+    /// `buf` is, unchanged, the result `hold` was taken for: the accelerator may keep its
+    /// device image for `buf`'s upload.
+    fn adopt(&self, _buf: &Arc<Buf>, _hold: ChainHold) {}
     fn frame_begin(&self) {}
     fn pass_begin(&self) {}
     fn pass_missed(&self) -> bool {
@@ -501,11 +510,16 @@ pub trait FxTarget {
     }
 }
 
+/// An accelerator's device-side copy of an effect chain's result ([`Accelerator::take_chain`]).
+pub type ChainHold = Box<dyn std::any::Any>;
+
 /// The CPU effect target (GPU chains go through [`Accelerator::effects`]: upload, readback).
 struct CpuFx<'a> {
     accel: Option<&'a dyn Accelerator>,
     levels: Option<f32>,
     buf: Option<Buf>,
+    /// The buffer is, unchanged, the last GPU chain's result.
+    from_gpu: bool,
 }
 
 impl FxTarget for CpuFx<'_> {
@@ -514,12 +528,14 @@ impl FxTarget for CpuFx<'_> {
         match a.effects(steps, b, self.levels) {
             Some(out) => {
                 self.buf = Some(out);
+                self.from_gpu = true;
                 true
             }
             None => false,
         }
     }
     fn cpu(&mut self, f: &mut dyn FnMut(Buf) -> Buf) {
+        self.from_gpu = false;
         if let Some(b) = self.buf.take() {
             self.buf = Some(f(b));
         }
@@ -1083,13 +1099,27 @@ impl<'a> Renderer<'a> {
 
     /// Run the first `limit` effects of the layer's stack (by position; disabled ones count) on
     /// `buf` (layer space, or the comp below for an adjustment layer).
-    fn apply_effects_timed(&self, ctx: &EvalCtx, layer: &Layer, mut buf: Buf, adjustment: bool, limit: usize, timing: Option<&mut Vec<(String, f64)>>) -> Buf {
+    fn apply_effects_timed(&self, ctx: &EvalCtx, layer: &Layer, buf: Buf, adjustment: bool, limit: usize, timing: Option<&mut Vec<(String, f64)>>) -> Buf {
+        self.apply_effects_held(ctx, layer, buf, adjustment, limit, timing).0
+    }
+
+    /// [`Renderer::apply_effects_timed`], also returning the accelerator's device copy of the
+    /// result when the stack ended with a GPU chain that nothing changed afterwards.
+    fn apply_effects_held(
+        &self,
+        ctx: &EvalCtx,
+        layer: &Layer,
+        mut buf: Buf,
+        adjustment: bool,
+        limit: usize,
+        timing: Option<&mut Vec<(String, f64)>>,
+    ) -> (Buf, Option<ChainHold>) {
         // The comp below an adjustment layer is not in its layer space: it stays as it is.
         let origin = if adjustment { [0.0; 2] } else { ctx.effect_bounds(layer).1 };
         buf.rebase(origin);
-        let mut out = self.effect_space_stack(ctx, layer, buf, adjustment, limit, timing, origin);
+        let (mut out, hold) = self.effect_space_stack(ctx, layer, buf, adjustment, limit, timing, origin);
         out.rebase([-origin[0], -origin[1]]);
-        out
+        (out, hold)
     }
 
     /// [`Renderer::apply_effects_timed`] on a buffer already in effect space (measured from
@@ -1104,10 +1134,12 @@ impl<'a> Renderer<'a> {
         limit: usize,
         timing: Option<&mut Vec<(String, f64)>>,
         origin: [f64; 2],
-    ) -> Buf {
-        let mut t = CpuFx { accel: self.active_accel(), levels: self.pipe.levels, buf: Some(buf) };
+    ) -> (Buf, Option<ChainHold>) {
+        let mut t = CpuFx { accel: self.active_accel(), levels: self.pipe.levels, buf: Some(buf), from_gpu: false };
         self.run_effect_stack(ctx, layer, adjustment, limit, timing, origin, &mut t);
-        t.buf.unwrap_or_else(|| Buf { img: Image::new(1, 1), offset: [0.0; 2], scale: self.opts.scale })
+        // Always taken, so a kept device image never outlives this stack.
+        let hold = t.accel.and_then(|a| a.take_chain()).filter(|_| t.from_gpu);
+        (t.buf.unwrap_or_else(|| Buf { img: Image::new(1, 1), offset: [0.0; 2], scale: self.opts.scale }), hold)
     }
 
     /// Run the layer's video effect stack on `target` (in effect space, measured from `origin`
@@ -1508,7 +1540,11 @@ impl<'a> Renderer<'a> {
             return Some((b, key));
         }
         let buf = self.masked_source(ctx, layer)?;
-        let buf = Arc::new(self.apply_effects_timed(ctx, layer, buf, false, usize::MAX, timing.map(|t| &mut t.effects)));
+        let (buf, hold) = self.apply_effects_held(ctx, layer, buf, false, usize::MAX, timing.map(|t| &mut t.effects));
+        let buf = Arc::new(buf);
+        if let (Some(h), Some(a)) = (hold, self.active_accel()) {
+            a.adopt(&buf, h);
+        }
         if let (Some(c), Some(k)) = (self.cache_to_keep(), key) {
             c.insert(k, buf.clone());
         }
@@ -1531,7 +1567,7 @@ impl<'a> Renderer<'a> {
         let origin = ctx.effect_bounds(layer).1;
         buf.rebase(origin);
         if effects > 0 {
-            buf = self.effect_space_stack(ctx, layer, buf, false, effects, None, origin);
+            buf = self.effect_space_stack(ctx, layer, buf, false, effects, None, origin).0;
         }
         let buf = Arc::new(buf);
         if let (Some(c), Some(k)) = (self.cache_to_keep(), key) {

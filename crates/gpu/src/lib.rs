@@ -344,6 +344,20 @@ impl Accelerator for Gpu {
         effects::run_chain(&mut Enc::new(&self.ctx), chain, buf, levels)
     }
 
+    fn take_chain(&self) -> Option<effectcraft_render::ChainHold> {
+        effects::take_last_chain().map(|h| Box::new(h) as effectcraft_render::ChainHold)
+    }
+
+    fn adopt(&self, buf: &std::sync::Arc<Buf>, hold: effectcraft_render::ChainHold) {
+        // Only the very pixels the chain was read back into (`buf` is alive, so its address
+        // cannot have been reused).
+        if let Ok(h) = hold.downcast::<(usize, GpuImage)>()
+            && h.0 == buf.img.data.as_ptr() as usize
+        {
+            self.ctx.adopt_upload(buf, h.1);
+        }
+    }
+
     fn raster_3d(&self, scene: &effectcraft_render::three_d::adv::Scene) -> Option<effectcraft_render::three_d::adv::Target> {
         self.ctx.check_health().ok()?;
         adv3d::render(&self.ctx, scene)
