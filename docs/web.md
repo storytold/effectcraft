@@ -413,7 +413,8 @@ no npm packages): load, the GPU path (WebGPU → GPU compositor, viewer on the G
 in the viewer, `render.frame`, Render Queue GIF and PNG sequence (`.zip`) downloads, a background
 render in a worker while measuring the page's event-loop gaps (must stay under 400 ms) and its
 progress, the AudioContext starting on a (simulated) key press and a tone playing through it
-with the meters moving, Save As and re-opening the saved project, persistence across a reload
+with the meters moving, Save As and re-opening the saved project, a script opening a file from
+browser storage and the footage check finding stored media, persistence across a reload
 (session snapshot, a stored project, imported media, a setting, Open Recent) and an offline
 reload through the service worker. It writes screenshots and `report.json`:
 

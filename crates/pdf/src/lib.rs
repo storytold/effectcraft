@@ -195,6 +195,27 @@ pub fn layer_doc(doc: &Doc, index: usize) -> Doc {
     d
 }
 
+/// One layer, optionally cropped to its artwork, and its original document-space top-left.
+pub fn layer_doc_with_sizes(doc: &Doc, index: usize, retain: bool) -> (Doc, [f64; 2]) {
+    let mut d = layer_doc(doc, index);
+    if !retain {
+        return (d, [0.0, 0.0]);
+    }
+    let page = kurbo::Rect::new(0.0, 0.0, doc.width, doc.height);
+    let bounds = d.artwork_bounds().map(|b| b.intersect(page)).filter(|b| b.width() > 0.0 && b.height() > 0.0);
+    let (x, y, w, h) = match bounds {
+        Some(b) => {
+            let (x, y) = (b.x0.floor(), b.y0.floor());
+            (x, y, b.x1.ceil() - x, b.y1.ceil() - y)
+        }
+        None => (0.0, 0.0, 1.0, 1.0),
+    };
+    d.width = w;
+    d.height = h;
+    d.root.transform = Affine::translate((-x, -y)) * d.root.transform;
+    (d, [x, y])
+}
+
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

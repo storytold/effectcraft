@@ -244,6 +244,17 @@ fn transform_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter,
     }
     p.text(pos2(r.min.x + 42.0, cy), Align2::LEFT_CENTER, &pr.name, Tokens::ui(12.0), t.text);
     let vx = r.min.x + (r.width() * 0.5).max(130.0);
+    let label = Rect::from_min_max(pos2(r.min.x + 42.0, r.min.y), pos2(vx - 20.0, r.max.y));
+    let resp = ui.interact(label, egui::Id::new(("props-label", uid)), Sense::click());
+    app.auto.add(&format!("{base}.label"), label, &pr.name);
+    if resp.double_clicked() {
+        app.ui.timeline.search.clear();
+        app.ui.timeline.scroll_to = Some(crate::state::ScrollTo::Property(uid));
+        if let Err(e) = crate::menus::frontend(app, ui.ctx(), "timeline.revealProps", json!({"props": [{"layer": lid, "prop": uid}]})) {
+            app.ui.status = e;
+        }
+        app.show_panel(PanelKind::Timeline);
+    }
     let merge = format!("props-{uid}");
     // With several layers selected the edit applies to all: a scrub by the same change, a typed
     // value as it is.

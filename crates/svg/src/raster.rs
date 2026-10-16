@@ -405,23 +405,7 @@ fn draw_shape(s: &Shape, m: Affine, opacity: f64, dst: &mut Image) {
         paint(dst, &cov, fill, (opacity * s.fill_opacity) as f32, m, bbox);
     }
     if let Some(st) = &s.stroke {
-        let style = effectcraft_path::StrokeStyle {
-            width: st.width,
-            cap: match st.cap {
-                crate::Cap::Butt => effectcraft_path::Cap::Butt,
-                crate::Cap::Round => effectcraft_path::Cap::Round,
-                crate::Cap::Square => effectcraft_path::Cap::Square,
-            },
-            join: match st.join {
-                crate::Join::Miter => effectcraft_path::Join::Miter,
-                crate::Join::Round => effectcraft_path::Join::Round,
-                crate::Join::Bevel => effectcraft_path::Join::Bevel,
-            },
-            miter: st.miter,
-            dash: st.dash.clone(),
-            taper: None,
-            wave: None,
-        };
+        let style = st.style();
         let cov = effectcraft_path::stroke_coverage(std::slice::from_ref(&path), &style, &mat3(m), w, h);
         paint(dst, &cov, &st.paint, (opacity * st.opacity) as f32, m, bbox);
     }

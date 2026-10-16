@@ -132,6 +132,9 @@ fn edit_path_counted<T>(s: &mut Session, p: &Value, label: &str, f: impl FnOnce(
         let roto = super::paths::is_roto(g);
         let pr = g.get_mut("path").ok_or_else(|| bad(label, "mask has no path"))?;
         let KV::Path(mut sp) = pr.value_at(lt) else { return Err(bad(label, "not a path")) };
+        // A path read from a file may have fewer tangents than vertices; the edits below index
+        // all three arrays by vertex (#1250).
+        sp.fit_tangents();
         let (r, op) = f(&mut sp)?;
         if roto {
             super::paths::roto_smooth(&mut sp);
@@ -287,6 +290,7 @@ fn edit_vertices_counted(s: &mut Session, p: &Value, label: &str, removes: bool,
             let roto = super::paths::is_roto(g);
             let Some(pr) = g.get_mut("path") else { continue };
             let KV::Path(mut sp) = pr.value_at(lt) else { continue };
+            sp.fit_tangents();
             f(&mut sp, idx);
             if roto {
                 super::paths::roto_smooth(&mut sp);

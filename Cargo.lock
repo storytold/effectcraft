@@ -1572,6 +1572,7 @@ dependencies = [
  "log",
  "rayon",
  "serde_json",
+ "symphonia",
  "thiserror 2.0.21",
 ]
 

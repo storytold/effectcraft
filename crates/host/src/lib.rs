@@ -290,7 +290,8 @@ mod tests {
         let mut s = super::session();
         s.exporter = Some(Arc::new(super::FileExporter { sink: Some(Arc::new(move |p: &str, d: Vec<u8>| g.lock().unwrap().push((p.to_string(), d)))) }));
         s.execute("file.openDemoProject", json!({})).unwrap();
-        let dir = "/no-such-dir-effectcraft-sink-test";
+        // Rooted without a drive letter is not absolute on Windows, where the engine joins it to the home drive.
+        let dir = if cfg!(windows) { "C:/no-such-dir-effectcraft-sink-test" } else { "/no-such-dir-effectcraft-sink-test" };
         s.execute(
             "renderQueue.add",
             json!({"format": "gif", "output": format!("{dir}/a.gif"), "resolution": 0.0625, "timeSpan": "custom", "start": 0.0, "end": 0.2}),

@@ -1045,3 +1045,48 @@ fn multiple_pages_and_calculator_shadings() {
     assert!(img.get(5, 25)[0] < 0.1 && img.get(95, 25)[0] > 0.9, "{:?} {:?}", img.get(5, 25), img.get(95, 25));
     assert_eq!(parse_page(&bytes, 2), Err(Error::PageOutOfRange(2)));
 }
+
+#[test]
+fn retained_layers_keep_strokes_clips_and_empty_layers() {
+    let doc = parse(&sample_pdf(false)).unwrap();
+    for i in 0..layer_names(&doc).len() {
+        let full = layer_doc(&doc, i);
+        let (cropped, offset) = layer_doc_with_sizes(&doc, i, true);
+        let (w, h) = cropped.pixel_size();
+        let image = effectcraft_svg::rasterize(&cropped, w, h, 1.0);
+        let original = effectcraft_svg::rasterize(&full, 200, 100, 1.0);
+        for y in 0..100 {
+            for x in 0..200 {
+                let a = image.get(x - offset[0] as i64, y - offset[1] as i64);
+                let b = original.get(x, y);
+                assert!(a.iter().zip(b).all(|(a, b)| (a - b).abs() < 1e-5), "layer {i} at {x},{y}: {a:?} vs {b:?}");
+            }
+        }
+    }
+    let (empty, _) = layer_doc_with_sizes(&doc, usize::MAX, true);
+    assert_eq!(empty.pixel_size(), (1, 1));
+}
+
+#[test]
+fn retained_layers_measure_transformed_artwork_without_rasterizing() {
+    let doc = effectcraft_svg::parse(br#"<svg width="120" height="80"><g transform="translate(60,0)"><rect x="10" y="20" width="30" height="10" transform="rotate(90)"/></g><path d="M 10 20 L 30 20" fill="none" stroke="red" stroke-width="4" stroke-linecap="square"/></svg>"#).unwrap();
+    let (rotated, offset) = layer_doc_with_sizes(&doc, 0, true);
+    assert_eq!(offset, [30.0, 10.0]);
+    assert_eq!(rotated.pixel_size(), (10, 30));
+    let (stroked, offset) = layer_doc_with_sizes(&doc, 1, true);
+    assert_eq!(offset, [8.0, 18.0]);
+    assert_eq!(stroked.pixel_size(), (24, 4));
+}
+
+#[test]
+fn retained_layers_preserve_artwork_beyond_the_bounds_depth_limit() {
+    let mut doc = effectcraft_svg::parse(br#"<svg width="120" height="80"><rect x="20" y="15" width="30" height="20"/></svg>"#).unwrap();
+    for _ in 0..300 {
+        let mut group = Group::new("nested");
+        group.children = std::mem::take(&mut doc.root.children);
+        doc.root.children.push(Node::Group(group));
+    }
+    let (cropped, offset) = layer_doc_with_sizes(&doc, 0, true);
+    assert_eq!(cropped.pixel_size(), (120, 80), "unknown bounds keep the full page");
+    assert_eq!(offset, [0.0, 0.0]);
+}

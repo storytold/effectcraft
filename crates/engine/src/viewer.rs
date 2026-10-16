@@ -362,7 +362,7 @@ const MAX_COLLAPSED_DEPTH: usize = 8;
 fn visible_layers<'a>(ctx: &EvalCtx<'a>, exclude: &'a [LayerId]) -> impl Iterator<Item = &'a Layer> {
     let comp = ctx.comp;
     let time = ctx.time;
-    let any_solo = comp.layers.iter().any(|l| l.switches.solo && l.source.is_av() && l.is_active_at(time));
+    let any_solo = comp.layers.iter().any(|l| l.switches.solo && l.source.is_av());
     comp.layers.iter().filter(move |l| l.is_active_at(time) && l.switches.video && (!any_solo || l.switches.solo) && !exclude.contains(&l.id))
 }
 

@@ -73,6 +73,9 @@ fn draw_comp<'a>(e: &mut Enc, r: &Renderer<'a>, ctx: &EvalCtx<'a>, canvas: &mut 
     let levels = r.pipe().levels;
     let mut i = 0;
     while i < visible.len() {
+        // A device that ran out of memory (or was lost) on an earlier layer fails every later
+        // one: give the frame back to the CPU now instead of drawing the rest of the comp.
+        e.g.check_health().ok()?;
         if visible[i].is_3d() {
             let mut j = i;
             while j < visible.len() && visible[j].is_3d() {

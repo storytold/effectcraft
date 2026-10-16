@@ -996,7 +996,9 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         // Layer Handles and Paths.
         let hs = app.session.prefs.general.path_point_size as f32 + 2.0;
         let label_handles = app.session.prefs.appearance.use_label_color_for_handles;
-        for l in comp.layers.iter().filter(|l| selected.contains(&l.id) && l.is_active_at(time)) {
+        // A layer whose Video switch is off has no box, handles or paths in the viewer (a hidden
+        // null disappears from the comp, as in After Effects), even while it is selected.
+        for l in comp.layers.iter().filter(|l| selected.contains(&l.id) && l.is_active_at(time) && l.switches.video) {
             let col = if label_handles { t.label(l.label) } else { t.accent };
             // Motion path of animated position (keyframes and spatial tangents are draggable).
             ov::motion_path(app, &painter, &map, &ectx, l, col, &mut key_hits, &mut motion_frames);
@@ -1279,6 +1281,13 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         ui.separator();
         if ui.button(copy_frame).clicked() {
             context_actions.push(("comp.copyFrame".to_owned(), serde_json::json!({"comp": cid.0})));
+            ui.close();
+        }
+        // The comp this viewer shows, which is not always the active one.
+        let settings = ui.button(crate::i18n::tr("Composition Settings…"));
+        app.auto.add("viewer.context.settings", settings.rect, "Composition Settings…");
+        if settings.clicked() {
+            context_actions.push(("comp.settings".to_owned(), serde_json::json!({"comp": cid.0})));
             ui.close();
         }
     });
@@ -2221,6 +2230,12 @@ fn pen_press(
             });
             return;
         }
+        // Shift keeps the new segment at a multiple of 45° from the vertex before it (#1544).
+        let last = p.sp.vertices.last().map(|v| p.m.apply(gv2(v[0], v[1])));
+        let c = match last {
+            Some(q) if mods.shift => constrain_45([q.x, q.y], c),
+            _ => c,
+        };
         let lp = inv.apply(gv2(c[0], c[1]));
         let lp = [lp.x, lp.y];
         if let Ok(v) = app.session.execute("mask.addVertex", json!({"layer": lid.0, "mask": uid, "point": lp})) {
@@ -2282,10 +2297,25 @@ fn pen_press(
     });
 }
 
+/// `to` moved onto the nearest line through `from` at a multiple of 45° (horizontal, vertical or
+/// diagonal), as far along it as `to` lies: the Pen's Shift-click.
+fn constrain_45(from: [f64; 2], to: [f64; 2]) -> [f64; 2] {
+    let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
+    if !(dx.is_finite() && dy.is_finite()) || (dx == 0.0 && dy == 0.0) {
+        return to;
+    }
+    let step = std::f64::consts::FRAC_PI_4;
+    let a = (dy.atan2(dx) / step).round() * step;
+    let (ux, uy) = (a.cos(), a.sin());
+    let along = dx * ux + dy * uy;
+    [from[0] + ux * along, from[1] + uy * along]
+}
+
 /// Visible, unlocked layers eligible for viewer hit tests, in front-to-back order.
-/// Solo scope matches the renderer: only active AV layers activate it, even when hidden or locked.
+/// Solo scope matches the renderer: any soloed AV layer activates it at every time (as in After
+/// Effects), even when hidden, locked or outside its in-out range.
 pub(crate) fn selectable_layers(comp: &Comp, time: Tick) -> impl Iterator<Item = &Layer> {
-    let any_solo = comp.layers.iter().any(|l| l.switches.solo && l.source.is_av() && l.is_active_at(time));
+    let any_solo = comp.layers.iter().any(|l| l.switches.solo && l.source.is_av());
     comp.layers
         .iter()
         .filter(move |l| l.is_active_at(time) && l.switches.video && !l.switches.locked && !l.is_camera() && !l.is_light() && (!any_solo || l.switches.solo))
@@ -2683,6 +2713,18 @@ fn show_frame(app: &mut EffectcraftApp, ctx: &egui::Context, key: crate::frames:
 mod tests {
     use super::*;
     use effectcraft_engine::geom::{Mat4, vec3};
+
+    /// #1544: Shift-clicking with the Pen keeps the new segment horizontal, vertical or diagonal.
+    #[test]
+    fn pen_shift_click_keeps_the_segment_at_45_degrees() {
+        let near = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).abs() < 1e-9 && (a[1] - b[1]).abs() < 1e-9;
+        let from = [100.0, 100.0];
+        assert!(near(constrain_45(from, [104.0, 180.0]), [100.0, 180.0]), "straight down");
+        assert!(near(constrain_45(from, [30.0, 97.0]), [30.0, 100.0]), "left");
+        assert!(near(constrain_45(from, [150.0, 46.0]), [152.0, 48.0]), "up and right, on the diagonal");
+        assert!(near(constrain_45(from, from), from), "on the vertex");
+        assert!(constrain_45(from, [f64::NAN, 3.0])[0].is_nan(), "a non-finite point stays as it is");
+    }
 
     /// The Rotation tool counts past a full turn in both directions, as in After Effects: the
     /// pointer going round the anchor 1.5 turns clockwise gives 540°, then back 2 turns gives

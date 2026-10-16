@@ -4,7 +4,9 @@ Vector footage from PDF files, PDF-compatible Adobe Illustrator files (`.ai`, wh
 documents) and Encapsulated PostScript (`.eps`). Files parse into the same render tree as SVG
 (`effectcraft_svg::Doc`), so they rasterise at any scale (Continuously Rasterize), convert to shape
 layers (Layer ▸ Create ▸ Create Shapes from Vector Layer) and import as compositions with one
-layer per file layer (File ▸ Import ▸ Composition).
+layer per file layer (File ▸ Import ▸ Composition). Composition - Retain Layer Sizes uses each
+layer's artwork bounds and keeps its placement on the page. Images keep their rectangular bounds;
+clipping paths constrain the bounds, while soft masks do not change them.
 
 Specifications used: **ISO 32000-1:2008** (PDF 1.7; the public Adobe edition) for the file
 structure, filters, content streams, graphics state, colour spaces, functions, shadings, text,

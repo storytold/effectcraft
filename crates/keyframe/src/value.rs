@@ -42,6 +42,16 @@ impl ShapePath {
     pub fn len(&self) -> usize {
         self.vertices.len()
     }
+    /// Give both tangent arrays one entry per vertex: missing tangents become zero (a corner),
+    /// extra ones are dropped. The three arrays are read independently from a project file, so a
+    /// loaded path can disagree with itself (#1250). Returns whether anything changed.
+    pub fn fit_tangents(&mut self) -> bool {
+        let n = self.vertices.len();
+        let changed = self.in_tangents.len() != n || self.out_tangents.len() != n;
+        self.in_tangents.resize(n, [0.0; 2]);
+        self.out_tangents.resize(n, [0.0; 2]);
+        changed
+    }
     /// Number of segments (vertex to next vertex, the closing one included).
     pub fn segment_count(&self) -> usize {
         let n = self.vertices.len();

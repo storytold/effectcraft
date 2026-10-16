@@ -75,6 +75,15 @@ sync_github_name = true
 real_name = "Robert Lee"
 sync_github_name = true
 
-[people.moecr7]
+[people.onlymoein]
 real_name = "Moein Saharkhiz"
 display_name = "onlymoein"
+
+[people.arnav-hiwarkar]
+display_name = "arnav-hiwarkar"
+sync_github_name = false
+
+[people.marcoarnulfo]
+real_name = "Marco Arnulfo"
+display_name = "Marco Arnulfo"
+sync_github_name = false

@@ -109,6 +109,15 @@ fn shown_dims(l: &Layer, pr: &Property) -> usize {
     if pr.shown_dims > 0 && !l.is_3d() { (pr.shown_dims as usize).min(n) } else { n.min(4) }
 }
 
+/// The speed graph's value of dimension `d` at layer time `lt` (one curve for a spatial property).
+fn speed_at(pr: &Property, spatial: bool, d: usize, lt: Tick) -> f64 {
+    if spatial {
+        effectcraft_engine::keyframe::speed(&pr.keys, lt, true)
+    } else {
+        effectcraft_engine::keyframe::velocity(&pr.keys, lt, false).get(d).copied().unwrap_or(0.0).abs()
+    }
+}
+
 /// Build the curves for the visible time span.
 fn curves<'a>(app: &EffectcraftApp, comp: &'a Comp, ectx: &EvalCtx, tm: TMap, plot: Rect, speed: bool) -> Vec<Curve<'a>> {
     let sel = &app.session.state.selected_keys;
@@ -126,16 +135,7 @@ fn curves<'a>(app: &EffectcraftApp, comp: &'a Comp, ectx: &EvalCtx, tm: TMap, pl
                 let x = plot.min.x + plot.width() * i as f32 / (n - 1) as f32;
                 let ct = tm.t(x);
                 let tt = Tick::from_seconds_f64(ct);
-                let v = if speed {
-                    let lt = l.layer_time(tt);
-                    if spatial {
-                        effectcraft_engine::keyframe::speed(&pr.keys, lt, true)
-                    } else {
-                        effectcraft_engine::keyframe::velocity(&pr.keys, lt, false).get(d).copied().unwrap_or(0.0).abs()
-                    }
-                } else {
-                    ectx.at(tt).value(l, pr).components().get(d).copied().unwrap_or(0.0)
-                };
+                let v = if speed { speed_at(pr, spatial, d, l.layer_time(tt)) } else { ectx.at(tt).value(l, pr).components().get(d).copied().unwrap_or(0.0) };
                 pts.push((ct, v));
             }
             let mut keys = vec![];
@@ -290,7 +290,7 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
     ctx.data_mut(|d| d.insert_temp(was_speed_id, speed));
     if ctx.data_mut(|d| d.remove_temp::<bool>(fit_pending_id())).unwrap_or(false) || type_changed {
         if cs.iter().any(|c| c.keys.iter().any(|k| k.sel)) {
-            fit_selection(app, &cs, tm, plot);
+            fit_selection(app, &cs, tm, plot, speed);
         } else {
             fit_all(app);
         }
@@ -584,7 +584,7 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
         fit_all(app);
     }
     if text_button(app, ui, p, &mut buttons, y, "Fit Selection", false, "fitSelection", "Fit selection to view") {
-        fit_selection(app, &cs, tm, plot);
+        fit_selection(app, &cs, tm, plot, speed);
     }
     buttons.x += 6.0;
     let (snap, reference, tbox) = (app.ui.timeline.graph_snap, app.ui.timeline.graph_reference, app.ui.timeline.graph_transform_box);
@@ -646,7 +646,7 @@ pub(crate) fn track_open(ctx: &egui::Context, on: bool) {
 }
 
 /// Zoom time and value to the selected keys (and their handles).
-fn fit_selection(app: &mut EffectcraftApp, cs: &[Curve], tm: TMap, plot: Rect) {
+fn fit_selection(app: &mut EffectcraftApp, cs: &[Curve], tm: TMap, plot: Rect, speed: bool) {
     let mut t0 = f64::INFINITY;
     let mut t1 = f64::NEG_INFINITY;
     let mut v0 = f64::INFINITY;
@@ -675,6 +675,26 @@ fn fit_selection(app: &mut EffectcraftApp, cs: &[Curve], tm: TMap, plot: Rect) {
                     v0 = v0.min(n.v);
                     v1 = v1.max(n.v);
                 }
+            }
+        }
+    }
+    // In the speed graph eased keys sit at speed 0 and the curve peaks between them (#1617):
+    // frame the curve from the first to the last selected key. A lone key has its handles on
+    // the speed graph, so the check above misses it: it frames its neighbouring segments here.
+    if speed {
+        for c in cs {
+            let (Some(first), Some(last)) = (c.keys.iter().position(|k| k.sel), c.keys.iter().rposition(|k| k.sel)) else { continue };
+            let (a, b) = if first == last { (first.saturating_sub(1), last + 1) } else { (first, last) };
+            let (Some(ka), Some(kb)) = (c.keys.get(a), c.keys.get(b.min(c.keys.len().saturating_sub(1)))) else { continue };
+            t0 = t0.min(ka.t);
+            t1 = t1.max(kb.t);
+            let (s0, s1) = (ka.time.seconds(), kb.time.seconds());
+            const SAMPLES: usize = 128;
+            for i in 0..=SAMPLES {
+                let lt = Tick::from_seconds_f64(s0 + (s1 - s0) * i as f64 / SAMPLES as f64);
+                let v = speed_at(c.prop, !c.editable, c.dim, lt);
+                v0 = v0.min(v);
+                v1 = v1.max(v);
             }
         }
     }

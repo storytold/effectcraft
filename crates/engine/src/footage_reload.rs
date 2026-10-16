@@ -58,6 +58,12 @@ fn psd_layer(s: &Session, path: &str, l: &SourceLayer) -> Option<(u32, Option<(u
     Some((u32::try_from(found.index).ok()?, size))
 }
 
+fn vector_size(s: &Session, f: &Footage) -> Option<(u32, u32)> {
+    let bytes = s.services.read_file(&f.path).ok()?;
+    let doc = crate::vector::vector_doc(&f.path, &bytes, f.layer.as_ref(), f.page)?.ok()?;
+    (!doc.root.children.is_empty()).then(|| doc.pixel_size())
+}
+
 /// Footage `f` as its file is now, given the importer's fresh look at the file (`probed`).
 fn refreshed(s: &Session, f: &Footage, probed: Footage) -> Footage {
     let mut nf = f.clone();
@@ -89,6 +95,7 @@ fn refreshed(s: &Session, f: &Footage, probed: Footage) -> Footage {
     match &f.layer {
         // A smart object's size is its embedded file's, recorded at import.
         Some(l) if l.embedded.is_some() => (w, h) = (f.width, f.height),
+        Some(_) if crate::vector::is_vector(f) => (w, h) = vector_size(s, f).unwrap_or((f.width, f.height)),
         Some(l) => match psd_layer(s, &f.path, l) {
             Some((index, size)) => {
                 if let Some(nl) = nf.layer.as_mut() {

@@ -510,8 +510,10 @@ fn gen_fourcolor(@builtin(global_invocation_id) gid: vec3<u32>) {
         let n = (hash_noise(u32(p.x), u32(p.y), P.u[0].y) - 0.5) * jitter * (8.0 / 255.0);
         c += vec3<f32>(n);
     }
-    let op = P.f[8].z;
-    textureStore(out, p, gen_blend(textureLoad(src, p, 0), vec4<f32>(c * op, op), P.u[0].x));
+    let o = textureLoad(src, p, 0);
+    // None keeps the layer's alpha, as the CPU path does (#1381).
+    let op = select(P.f[8].z, P.f[8].z * o.w, P.u[0].x == 255u);
+    textureStore(out, p, gen_blend(o, vec4<f32>(c * op, op), P.u[0].x));
 }
 
 // ---------------------------------------------------------------- Noise / Add Grain

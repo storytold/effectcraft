@@ -261,7 +261,10 @@ function noise(x) {
 function timeToFrames(t, fps, isDuration) {
   if (t === undefined) t = time + thisComp.displayStartTime;
   if (fps === undefined) fps = 1 / __S.fd;
-  return Math.floor(t * fps + 1e-6);
+  var frames = t * fps;
+  // The 1e-6 keeps a whole number of frames that floating point overshoots (31/24 - 5/24) whole.
+  if (isDuration && frames !== 0) return frames < 0 ? Math.floor(frames + 1e-6) : Math.ceil(frames - 1e-6);
+  return Math.floor(frames + 1e-6);
 }
 
 function framesToTime(frames, fps) {
