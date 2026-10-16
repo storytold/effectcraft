@@ -274,6 +274,90 @@ fn template_export_import_round_trip_with_overrides() {
     assert!(t.execute("essential.importTemplate", json!({"path": dir.join("bad.ectemplate").to_string_lossy()})).is_err());
 }
 
+/// `template` with `media` entries (archive name, contents) added, written to `out`.
+fn with_media(template: &str, out: &std::path::Path, media: &[(&str, &[u8])]) {
+    let mut entries = effectcraft_lottie::zip::read_stored(&std::fs::read(template).unwrap());
+    entries.extend(media.iter().map(|(n, d)| (n.to_string(), d.to_vec())));
+    std::fs::write(out, effectcraft_lottie::zip::store(&entries)).unwrap();
+}
+
+#[test]
+fn template_media_that_would_land_outside_its_folder_is_refused_before_anything_is_written() {
+    let dir = out_dir("ectemplate-media-paths");
+    let (mut s, card, _, _) = card();
+    let good = dir.join("Card.ectemplate").to_string_lossy().to_string();
+    s.execute("essential.exportTemplate", json!({"comp": card.0, "path": good})).unwrap();
+    // A file next to the templates that an escaping entry would overwrite (#1227).
+    let sentinel = dir.join("sentinel.txt");
+    std::fs::write(&sentinel, b"keep").unwrap();
+    let mut t = Session::default();
+    t.execute("comp.new", json!({"name": "Show", "width": 64, "height": 64, "frameRate": 30, "duration": 2})).unwrap();
+    for (i, name) in
+        ["media/../sentinel.txt", "media/1/../../sentinel.txt", "media/..\\sentinel.txt", "media//etc/passwd", "media/C:/x.png", "media/1/./a.png", "media/"]
+            .into_iter()
+            .enumerate()
+    {
+        let bad = dir.join(format!("bad{i}.ectemplate"));
+        // A harmless entry first: it must not be written either.
+        with_media(&good, &bad, &[("media/1/ok.png", b"fine"), (name, b"overwritten")]);
+        let items = t.project.items.len();
+        let e = t.execute("essential.importTemplate", json!({"path": bad.to_string_lossy()})).expect_err(name).to_string();
+        assert!(e.contains("outside its media folder"), "{name}: {e}");
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"keep", "{name}");
+        assert!(!dir.join(format!("bad{i} Media")).exists(), "{name}: nothing was extracted");
+        assert_eq!(t.project.items.len(), items, "{name}: the project is untouched");
+    }
+    // Nested media in an ordinary template still extracts.
+    let nested = dir.join("Nested.ectemplate");
+    with_media(&good, &nested, &[("media/7/sub/clip.png", b"data")]);
+    t.execute("essential.importTemplate", json!({"path": nested.to_string_lossy()})).unwrap();
+    assert_eq!(std::fs::read(dir.join("Nested Media/7/sub/clip.png")).unwrap(), b"data");
+}
+
+#[test]
+fn a_failed_media_write_fails_the_import_and_removes_what_it_wrote() {
+    let dir = out_dir("ectemplate-media-fail");
+    let (mut s, card, _, _) = card();
+    let good = dir.join("Card.ectemplate").to_string_lossy().to_string();
+    s.execute("essential.exportTemplate", json!({"comp": card.0, "path": good})).unwrap();
+    let t1 = dir.join("Broken.ectemplate");
+    with_media(&good, &t1, &[("media/0/first.png", b"one"), ("media/1/second.png", b"two")]);
+    // `Broken Media/1` is a file, so `1/second.png` can't be written.
+    std::fs::create_dir_all(dir.join("Broken Media")).unwrap();
+    std::fs::write(dir.join("Broken Media/1"), b"in the way").unwrap();
+    let mut t = Session::default();
+    let items = t.project.items.len();
+    let e = t.execute("essential.importTemplate", json!({"path": t1.to_string_lossy()})).unwrap_err().to_string();
+    assert!(e.contains("cannot extract"), "{e}");
+    assert!(!dir.join("Broken Media/0/first.png").exists(), "the file this import wrote is removed");
+    assert_eq!(std::fs::read(dir.join("Broken Media/1")).unwrap(), b"in the way", "what was there stays");
+    assert_eq!(t.project.items.len(), items);
+}
+
+#[cfg(unix)]
+#[test]
+fn template_media_is_not_written_through_a_symbolic_link() {
+    let dir = out_dir("ectemplate-media-link");
+    let (mut s, card, _, _) = card();
+    let good = dir.join("Card.ectemplate").to_string_lossy().to_string();
+    s.execute("essential.exportTemplate", json!({"comp": card.0, "path": good})).unwrap();
+    let elsewhere = dir.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let t1 = dir.join("Linked.ectemplate");
+    with_media(&good, &t1, &[("media/1/clip.png", b"data")]);
+    let mut t = Session::default();
+    // The media folder itself, then a folder inside it, point elsewhere.
+    std::os::unix::fs::symlink(&elsewhere, dir.join("Linked Media")).unwrap();
+    let e = t.execute("essential.importTemplate", json!({"path": t1.to_string_lossy()})).unwrap_err().to_string();
+    assert!(e.contains("symbolic link"), "{e}");
+    std::fs::remove_file(dir.join("Linked Media")).unwrap();
+    std::fs::create_dir_all(dir.join("Linked Media")).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, dir.join("Linked Media/1")).unwrap();
+    let e = t.execute("essential.importTemplate", json!({"path": t1.to_string_lossy()})).unwrap_err().to_string();
+    assert!(e.contains("symbolic link"), "{e}");
+    assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0, "nothing was written through the link");
+}
+
 #[test]
 fn media_replacement_swaps_footage_per_instance() {
     use std::sync::Arc;

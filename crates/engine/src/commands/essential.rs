@@ -891,6 +891,54 @@ pub fn read_template(bytes: &[u8]) -> std::result::Result<(Value, Project, Vec<(
     Ok((manifest, project, entries))
 }
 
+/// Where a template's media goes: `<dir>/<stem> Media`, next to the template file.
+pub fn template_media_dir(path: &str) -> std::path::PathBuf {
+    let pp = std::path::Path::new(path);
+    let dir = pp.parent().map(|d| d.to_path_buf()).unwrap_or_default();
+    let stem = pp.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "Template".into());
+    dir.join(format!("{stem} Media"))
+}
+
+/// A template media entry's path (after `media/`) as plain folder and file names, or `None`
+/// for anything that could leave the media folder: `..`, `.`, empty parts, a root or drive,
+/// `\` separators read as `/`, a `:` (drive or alternate stream) or NUL (#1227).
+fn safe_media_path(rel: &str) -> Option<std::path::PathBuf> {
+    let mut out = std::path::PathBuf::new();
+    for part in rel.split(['/', '\\']) {
+        if part.is_empty() || part == "." || part == ".." || part.contains([':', '\0']) {
+            return None;
+        }
+        out.push(part);
+    }
+    (!out.as_os_str().is_empty()).then_some(out)
+}
+
+/// Fails if `base` or anything between it and `out` (`out` included) is a symbolic link, which
+/// could send the write elsewhere. Paths that don't exist yet (or aren't on a real file system)
+/// pass.
+fn no_links(base: &std::path::Path, out: &std::path::Path) -> std::io::Result<()> {
+    let link = |p: &std::path::Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink());
+    let mut at = base.to_path_buf();
+    let check = |p: &std::path::Path| if link(p) { Err(std::io::Error::other(format!("{} is a symbolic link", p.display()))) } else { Ok(()) };
+    check(&at)?;
+    for c in out.strip_prefix(base).map_err(std::io::Error::other)?.components() {
+        at.push(c);
+        check(&at)?;
+    }
+    Ok(())
+}
+
+/// Write one extracted media file at `out` (inside `base`), refusing symbolic links on the way.
+fn write_media(s: &Session, base: &std::path::Path, out: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    no_links(base, out)?;
+    if let Some(parent) = out.parent() {
+        // Not a real file system (the web app): the services decide where files go.
+        let _ = std::fs::create_dir_all(parent);
+    }
+    no_links(base, out)?;
+    s.services.write_file(&out.to_string_lossy(), data)
+}
+
 fn import_template(s: &mut Session, p: &Value) -> Result<Value> {
     const C: &str = "essential.importTemplate";
     let path = str_p(p, "path").ok_or_else(|| bad(C, "missing `path` (.ectemplate)"))?.to_string();
@@ -898,22 +946,29 @@ fn import_template(s: &mut Session, p: &Value) -> Result<Value> {
     let (manifest, mut sub, entries) = read_template(&bytes).map_err(|e| bad(C, e))?;
     let name = manifest.get("name").and_then(Value::as_str).unwrap_or("Template").to_string();
     let tcomp = manifest.get("comp").and_then(Value::as_u64).map(ItemId).ok_or_else(|| bad(C, "manifest has no `comp`"))?;
-    // Media next to the template: `<dir>/<stem> Media/<item>/<file>`.
-    let pp = std::path::Path::new(&path);
-    let dir = pp.parent().map(|d| d.to_path_buf()).unwrap_or_default();
-    let stem = pp.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "Template".into());
-    let media_dir = dir.join(format!("{stem} Media"));
-    let mut written = std::collections::HashMap::new();
+    // Media next to the template: `<dir>/<stem> Media/<item>/<file>`. Every destination is
+    // checked before anything is written, and a failed write undoes this import's files (#1227).
+    let media_dir = template_media_dir(&path);
+    let mut plan = vec![];
     for (k, v) in entries.iter().filter(|(k, _)| k.starts_with("media/")) {
-        let rel = k.trim_start_matches("media/");
-        let out = media_dir.join(rel);
-        if let Some(parent) = out.parent() {
-            let _ = std::fs::create_dir_all(parent);
+        let rel = safe_media_path(k.trim_start_matches("media/"))
+            .ok_or_else(|| bad(C, format!("{path}: the template's media entry `{k}` would be written outside its media folder")))?;
+        plan.push((k, media_dir.join(rel), v));
+    }
+    let mut written = std::collections::HashMap::new();
+    let mut created: Vec<std::path::PathBuf> = vec![];
+    for (k, out, v) in plan {
+        let existed = std::fs::symlink_metadata(&out).is_ok();
+        if let Err(e) = write_media(s, &media_dir, &out, v) {
+            for f in &created {
+                let _ = std::fs::remove_file(f);
+            }
+            return Err(bad(C, format!("cannot extract `{k}` to {}: {e}", out.display())));
         }
-        let out_s = out.to_string_lossy().to_string();
-        if s.services.write_file(&out_s, v).is_ok() {
-            written.insert(k.clone(), out_s);
+        if !existed {
+            created.push(out.clone());
         }
+        written.insert(k.clone(), out.to_string_lossy().to_string());
     }
     for it in sub.items.values_mut() {
         if let ItemKind::Footage(f) = &mut it.kind {
@@ -961,7 +1016,14 @@ fn import_template(s: &mut Session, p: &Value) -> Result<Value> {
 fn template_info(s: &mut Session, p: &Value) -> Result<Value> {
     let path = str_p(p, "path").ok_or_else(|| bad("essential.templateInfo", "missing `path`"))?;
     let bytes = s.services.read_file(path).map_err(|e| EngineError::Other(format!("cannot read {path}: {e}")))?;
-    let (manifest, _, _) = read_template(&bytes).map_err(|e| bad("essential.templateInfo", e))?;
+    let (mut manifest, _, entries) = read_template(&bytes).map_err(|e| bad("essential.templateInfo", e))?;
+    // Where importing would write the template's media, so a confined agent's import can be
+    // checked against its write roots.
+    let media = entries.iter().filter(|(k, _)| k.starts_with("media/")).count();
+    if let Some(m) = manifest.as_object_mut() {
+        m.insert("mediaFiles".into(), json!(media));
+        m.insert("mediaFolder".into(), json!(template_media_dir(path).to_string_lossy()));
+    }
     Ok(manifest)
 }
 
