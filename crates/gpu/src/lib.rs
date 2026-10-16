@@ -83,6 +83,7 @@ mod ops;
 mod particles;
 mod readback;
 mod walk;
+mod yuv;
 
 use std::sync::Arc;
 
@@ -90,6 +91,7 @@ pub use context::{GpuContext, GpuImage, TransferStats};
 use effectcraft_effects::Buf;
 use effectcraft_project::ItemId;
 use effectcraft_raster::Image;
+use effectcraft_render::YuvDone;
 use effectcraft_render::{Accelerator, FxStep, Renderer};
 use effectcraft_time::Tick;
 pub use wgpu;
@@ -306,9 +308,14 @@ impl Gpu {
         }
     }
 
-    /// Wait for submitted GPU work with the readback deadline (benchmarks).
+    /// Wait for submitted GPU work with the readback deadline (benchmarks): work still running
+    /// past it retires the context (a hung device).
     pub fn wait(&self) {
-        let _ = self.ctx.poll_readbacks(wgpu::PollType::Wait { submission_index: None, timeout: Some(crate::readback::TIMEOUT) });
+        self.wait_for(crate::readback::TIMEOUT);
+    }
+
+    pub(crate) fn wait_for(&self, timeout: std::time::Duration) {
+        let _ = self.ctx.poll_readbacks(wgpu::PollType::Wait { submission_index: None, timeout: Some(timeout) });
     }
 }
 
@@ -333,6 +340,68 @@ impl Accelerator for Gpu {
             }
         }
         img
+    }
+
+    fn comp_frame_yuv420(&self, r: &Renderer, comp: ItemId, t: Tick, bg: [f32; 3]) -> Option<Vec<u8>> {
+        self.ctx.check_health().ok()?;
+        if !self.ctx.can_readback() || self.ctx.deferred.is_some() {
+            return None;
+        }
+        // Sizes the kernel can't take fall back before any GPU work, not after a render.
+        let (w, h) = walk::frame_size(r, comp, t)?;
+        if !yuv::supported(w, h) {
+            return None;
+        }
+        let mut e = Enc::new(&self.ctx);
+        let img = walk::render(&mut e, r, comp, t)?;
+        let yp = self.ctx.yuv.get_or_init(|| yuv::YuvPipe::new(&self.ctx.device));
+        let planes = yuv::convert(&mut e, yp, &img, bg)?;
+        // A device fault seen while the frame recorded makes the planes untrustworthy.
+        self.ctx.check_health().ok()?;
+        Some(planes)
+    }
+
+    fn comp_frame_yuv420_async(&self, r: &Renderer, comp: ItemId, t: Tick, bg: [f32; 3], done: YuvDone) -> Result<(), YuvDone> {
+        if self.ctx.check_health().is_err() || !self.ctx.can_readback() || self.ctx.deferred.is_some() {
+            return Err(done);
+        }
+        let Some((w, h)) = walk::frame_size(r, comp, t).filter(|&(w, h)| yuv::supported(w, h)) else { return Err(done) };
+        let yp = self.ctx.yuv.get_or_init(|| yuv::YuvPipe::new(&self.ctx.device));
+        // Backpressure: a slot is reserved before rendering, so at most `IN_FLIGHT` frames
+        // hold device memory at once, however many threads submit. A full set is freed by
+        // readbacks finishing (or failing at their deadline) or, when the holders are still
+        // rendering on other threads and nothing is submitted (the poll returns at once), by
+        // those renders: sleep briefly rather than spin a core.
+        let slot = loop {
+            if let Some(s) = yp.reserve() {
+                break s;
+            }
+            if !self.poll_readbacks(Some(std::time::Duration::from_millis(10))) {
+                return Err(done);
+            }
+            if let Some(s) = yp.reserve() {
+                break s;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        };
+        let mut e = Enc::new(&self.ctx);
+        let Some(img) = walk::render(&mut e, r, comp, t) else { return Err(done) };
+        let Some(stg) = yuv::record(&mut e, yp, &img, bg) else { return Err(done) };
+        drop(e);
+        // A fault seen while the frame recorded declines it here; a later one fails its
+        // readback (done(None)) through the context.
+        if self.ctx.check_health().is_err() {
+            return Err(done);
+        }
+        yuv::read_async(&self.ctx, yp, stg, yuv::planes_len(w, h) as usize, slot, done)
+    }
+
+    fn poll_readbacks(&self, wait: Option<std::time::Duration>) -> bool {
+        let kind = match wait {
+            Some(d) => wgpu::PollType::Wait { submission_index: None, timeout: Some(d) },
+            None => wgpu::PollType::Poll,
+        };
+        self.ctx.poll_readbacks_busy_ok(kind).is_ok() && self.ctx.check_health().is_ok()
     }
 
     fn supports_effect(&self, id: &str) -> bool {

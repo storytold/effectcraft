@@ -315,6 +315,12 @@ pub struct GpuContext {
     pub(crate) particle_states: crate::particles::StatesCell,
     /// Deferred readbacks (a browser worker's WebGPU device), see [`crate::deferred`].
     pub(crate) deferred: Option<Arc<crate::deferred::Deferred>>,
+    /// The adapter is a software rasteriser (llvmpipe, WARP): its float maths follows the
+    /// CPU's exactly, so the YUV tests hold it to exact parity.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) software: bool,
+    /// Export frame → YUV 4:2:0 kernel (built on first use).
+    pub(crate) yuv: std::sync::OnceLock<crate::yuv::YuvPipe>,
     readbacks: Arc<crate::readback::Readbacks>,
 }
 
@@ -650,6 +656,8 @@ impl GpuContext {
             transfers: Default::default(),
             zeros: Default::default(),
             adv3d: std::sync::OnceLock::new(),
+            yuv: std::sync::OnceLock::new(),
+            software: info.device_type == wgpu::DeviceType::Cpu,
             adv3d_raster: adv3d_unsupported.is_none(),
             particles: Default::default(),
             particle_states: Default::default(),
@@ -678,13 +686,29 @@ impl GpuContext {
 
     /// All device polling routes through this failure bridge.
     pub(crate) fn poll_readbacks(&self, kind: wgpu::PollType) -> Result<wgpu::PollStatus, String> {
+        self.poll_with(kind, false)
+    }
+
+    /// [`Self::poll_readbacks`] where a wait that times out only means the queue is still busy
+    /// (reported as [`wgpu::PollStatus::Poll`]) rather than a hung device: for callers that
+    /// poll in short slices and rely on the readback deadlines instead (the asynchronous YUV
+    /// frames). Any other poll error still retires the context.
+    pub(crate) fn poll_readbacks_busy_ok(&self, kind: wgpu::PollType) -> Result<wgpu::PollStatus, String> {
+        self.poll_with(kind, true)
+    }
+
+    fn poll_with(&self, kind: wgpu::PollType, busy_ok: bool) -> Result<wgpu::PollStatus, String> {
         self.readbacks.check()?;
-        self.device.poll(kind).map_err(|e| {
-            let error = format!("GPU readback poll: {e}");
-            self.readbacks.retire(error.clone());
-            log::error!("{error}");
-            error
-        })
+        match self.device.poll(kind) {
+            Ok(s) => Ok(s),
+            Err(wgpu::PollError::Timeout) if busy_ok => Ok(wgpu::PollStatus::Poll),
+            Err(e) => {
+                let error = format!("GPU readback poll: {e}");
+                self.readbacks.retire(error.clone());
+                log::error!("{error}");
+                Err(error)
+            }
+        }
     }
 
     /// Start a bounded buffer mapping. Retired contexts reject new requests immediately.
@@ -696,20 +720,82 @@ impl GpuContext {
         height: usize,
         done: impl FnOnce(Result<Vec<u8>, String>) + wgpu::WasmNotSend + 'static,
     ) {
-        let ticket = match self.readbacks.start(done) {
-            Ok(t) => t,
-            Err(e) => {
-                log::error!("gpu: {e}");
+        if let Err((done, e)) = self.try_map_readback(buffer, row, stride, height, done, || {}) {
+            log::error!("gpu: {e}");
+            done(Err(e));
+        }
+    }
+
+    /// [`Self::map_readback`] that hands `done` back with the reason when the request can't
+    /// start, and runs `unmapped` once the buffer is neither mapped nor waiting for a map
+    /// (after the map callback unmaps it, or at once when no map was issued): only then may the
+    /// buffer be written again.
+    pub(crate) fn try_map_readback<D>(
+        &self,
+        buffer: &wgpu::Buffer,
+        row: usize,
+        stride: usize,
+        height: usize,
+        done: D,
+        unmapped: impl FnOnce() + wgpu::WasmNotSend + 'static,
+    ) -> Result<(), (D, String)>
+    where
+        D: FnOnce(Result<Vec<u8>, String>) + wgpu::WasmNotSend + 'static,
+    {
+        struct Slot<D> {
+            done: Option<D>,
+            started: bool,
+            early: Option<Result<Vec<u8>, String>>,
+        }
+        let slot = Arc::new(Mutex::new(Slot { done: Some(done), started: false, early: None }));
+        let s2 = slot.clone();
+        let started = self.readbacks.start(move |r| {
+            let mut s = s2.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !s.started {
+                // Refused by `start`, or failed (another thread retired the context) before
+                // `start` returned: settled below.
+                s.early = Some(r);
                 return;
             }
+            let d = s.done.take();
+            drop(s);
+            if let Some(d) = d {
+                d(r);
+            }
+        });
+        let mut s = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let ticket = match started {
+            Ok(t) => t,
+            Err(e) => {
+                let d = s.done.take();
+                drop(s);
+                unmapped();
+                return match d {
+                    Some(d) => Err((d, e)),
+                    None => Ok(()),
+                };
+            }
         };
+        s.started = true;
+        if let Some(r) = s.early.take() {
+            let d = s.done.take();
+            drop(s);
+            if let Some(d) = d {
+                d(r);
+            }
+            unmapped();
+            return Ok(());
+        }
+        drop(s);
         if !ticket.active() {
-            return;
+            unmapped();
+            return Ok(());
         }
         let b = buffer.clone();
         buffer.map_async(wgpu::MapMode::Read, .., move |r| {
             if !ticket.active() {
                 b.unmap();
+                unmapped();
                 return;
             }
             let result = r.map_err(|e| format!("GPU buffer mapping: {e}")).and_then(|_| {
@@ -717,8 +803,10 @@ impl GpuContext {
                 crate::readback::packed(&view, row, stride, height)
             });
             b.unmap();
+            unmapped();
             ticket.complete(result);
         });
+        Ok(())
     }
 
     /// A bounded native readback: polling and receiving share one deadline.

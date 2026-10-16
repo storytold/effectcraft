@@ -953,3 +953,45 @@ fn shape_content_bounds_are_the_visual_edges() {
         assert!(b.iter().zip([-half, -half, half, half]).all(|(a, e)| (a - e).abs() < 1e-6), "{stroke:?}: {b:?}");
     }
 }
+
+/// Converts synchronously: answers `planes` (or declines).
+struct SyncYuv(Option<Vec<u8>>);
+impl crate::Accelerator for SyncYuv {
+    fn name(&self) -> String {
+        "sync-yuv".into()
+    }
+    fn comp_frame(&self, _r: &crate::Renderer, _comp: ItemId, _t: Tick) -> Option<crate::Image> {
+        None
+    }
+    fn comp_frame_yuv420(&self, _r: &crate::Renderer, _comp: ItemId, _t: Tick, _bg: [f32; 3]) -> Option<Vec<u8>> {
+        self.0.clone()
+    }
+    fn supports_effect(&self, _id: &str) -> bool {
+        false
+    }
+    fn effects(&self, _chain: &[crate::FxStep], _buf: &crate::Buf, _levels: Option<f32>) -> Option<crate::Buf> {
+        None
+    }
+}
+
+/// An accelerator without asynchronous readbacks still serves the asynchronous call: the
+/// callback runs once, right away, or comes back untouched when the frame is declined.
+#[test]
+fn async_yuv_defaults_to_the_synchronous_conversion() {
+    use crate::Accelerator;
+    let (p, cid, _) = setup();
+    let r = crate::Renderer::new(&p, &crate::NoFootage, Default::default());
+    let got = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+    let sink = |got: &std::sync::Arc<std::sync::Mutex<Vec<Option<Vec<u8>>>>>| -> crate::YuvDone {
+        let got = got.clone();
+        Box::new(move |b| got.lock().unwrap().push(b))
+    };
+    let a = SyncYuv(Some(vec![1, 2, 3]));
+    assert!(a.comp_frame_yuv420_async(&r, cid, Tick::ZERO, [0.0; 3], sink(&got)).is_ok());
+    assert_eq!(*got.lock().unwrap(), vec![Some(vec![1, 2, 3])]);
+    assert!(a.poll_readbacks(Some(std::time::Duration::from_millis(1))));
+    let back = SyncYuv(None).comp_frame_yuv420_async(&r, cid, Tick::ZERO, [0.0; 3], sink(&got)).expect_err("declined");
+    assert_eq!(got.lock().unwrap().len(), 1);
+    back(None);
+    assert_eq!(got.lock().unwrap().len(), 2);
+}
