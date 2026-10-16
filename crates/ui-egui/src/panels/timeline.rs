@@ -155,11 +155,41 @@ fn with_expr_rows(rows: Vec<Row>, comp: &Comp, tl: &crate::state::TimelineState,
 }
 
 /// A pick-whip drag in progress: (kind, layer, prop uid, start point). The kinds are the
-/// layer's parent pick whip, an expression's and a property's (Parent & Link column).
+/// layer's parent pick whip, an expression's and a property's (Parent & Link column) and the
+/// layer's track matte pick whip (Track Matte column).
 type PickWhip = (u8, u64, u64, Pos2);
 const WHIP_PARENT: u8 = 0;
 const WHIP_EXPR: u8 = 1;
 const WHIP_PROP: u8 = 2;
+const WHIP_MATTE: u8 = 3;
+
+/// Whether the Track Matte pick whip of `layer` can drop on `matte`: another audio/video layer
+/// (not a camera, light or audio-only layer, as the Track Matte menu lists), whose own matte chain
+/// does not lead back to `layer`.
+fn matte_target_ok(comp: &Comp, layer: LayerId, matte: LayerId) -> bool {
+    if layer == matte {
+        return false;
+    }
+    let Some(m) = comp.layer(matte).filter(|l| l.source.is_av()) else { return false };
+    let mut next = m.track_matte.map(|t| t.layer);
+    // Bounded: a loaded project may already hold a cycle that doesn't include `layer`.
+    for _ in 0..=comp.layers.len() {
+        match next {
+            Some(id) if id == layer => return false,
+            Some(id) => next = comp.layer(id).and_then(|l| l.track_matte).map(|t| t.layer),
+            None => return true,
+        }
+    }
+    true
+}
+
+/// The layers a Track Matte pick whip dragged from `src` and dropped on `matte` sets the matte
+/// of: every selected layer when `src` is one of them (as in After Effects), else `src`; those
+/// that `matte` can't be the matte of are left out.
+fn matte_whip_layers(comp: &Comp, selected: &[LayerId], src: LayerId, matte: LayerId) -> Vec<u64> {
+    let from: Vec<LayerId> = if selected.contains(&src) { selected.to_vec() } else { vec![src] };
+    from.into_iter().filter(|l| comp.layer(*l).is_some_and(|l| l.source.is_av()) && matte_target_ok(comp, *l, matte)).map(|l| l.0).collect()
+}
 
 fn pick_whip_id() -> egui::Id {
     egui::Id::new("tl-pickwhip")
@@ -2153,8 +2183,18 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     if widgets::checkbox(ui, tr, layer.preserve_transparency, &t, egui::Id::new(("pt", layer.id.0))).clicked() {
                         actions.push(("layer.setSwitch".into(), json!({"layers": [layer.id.0], "switch": "preserveTransparency"})));
                     }
-                    // Track matte: layer picker + kind.
-                    let mr = Rect::from_min_size(pos2(cw.trkmat + 2.0, cy - 9.0), vec2(104.0, 18.0));
+                    // Track matte: pick whip (After Effects 2023 and later), layer picker + kind.
+                    pick_whip(
+                        app,
+                        ui,
+                        &lp,
+                        Rect::from_center_size(pos2(cw.trkmat + 9.0, cy), vec2(15.0, 15.0)),
+                        (WHIP_MATTE, layer.id.0, 0),
+                        &format!("timeline.layer.{}.trackMatte.whip", layer.id.0),
+                        "Track Matte pick whip",
+                        crate::i18n::tr("Track Matte pick whip: drag onto a layer"),
+                    );
+                    let mr = Rect::from_min_size(pos2(cw.trkmat + 20.0, cy - 9.0), vec2(88.0, 18.0));
                     let label = match layer.track_matte {
                         Some(m) => comp.layer(m.layer).map(|l| format!("{} {}", idx_of(l.id), l.name)).unwrap_or("None".into()),
                         None => "No Track Matte".into(),
@@ -3020,11 +3060,13 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let target = hit_rows.iter().find(|(r, _)| r.contains(ptr)).map(|(r, row)| (*r, row.clone()));
         // Shown this pass or the last one (Effect Controls may draw after the Timeline).
         let pass = ctx.cumulative_pass_nr();
-        let elsewhere = (target.is_none() && kind != WHIP_PARENT)
+        let elsewhere = (target.is_none() && matches!(kind, WHIP_EXPR | WHIP_PROP))
             .then(|| ctx.data(|d| d.get_temp::<WhipTargets>(whip_targets_id())))
             .flatten()
             .filter(|(p, _)| p.saturating_add(1) >= pass)
             .and_then(|(_, targets)| targets.into_iter().find(|(r, ..)| r.contains(ptr)));
+        // A layer that can't be the track matte isn't highlighted.
+        let target = target.filter(|(_, row)| kind != WHIP_MATTE || matte_target_ok(&comp, LayerId(src_layer), row.layer));
         if let Some((tr, _)) = &target {
             fg.rect_stroke(Rect::from_min_max(tr.min, pos2(graph_x0 - 1.0, tr.max.y)), 0.0, Stroke::new(1.0, t.accent), StrokeKind::Inside);
         } else if let Some((tr, ..)) = &elsewhere {
@@ -3048,6 +3090,12 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             match (kind, target, prop_target) {
                 (WHIP_PARENT, Some((_, row)), _) if row.layer.0 != src_layer => {
                     actions.push(("layer.setParent".into(), json!({"layers": [src_layer], "parent": row.layer.0})));
+                }
+                (WHIP_MATTE, Some((_, row)), _) => {
+                    let layers = matte_whip_layers(&comp, &app.session.state.selected_layers, LayerId(src_layer), row.layer);
+                    if !layers.is_empty() {
+                        actions.push(("layer.setTrackMatte".into(), json!({"layers": layers, "matte": row.layer.0})));
+                    }
                 }
                 // The property pick whip replaces the expression with the reference (or adds one),
                 // as the expression pick whip does when its expression isn't being edited.

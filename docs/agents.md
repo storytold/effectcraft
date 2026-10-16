@@ -606,6 +606,12 @@ Extension points and the bundled extensions: [plugins.md](plugins.md).
   Dragged onto another property's name or value, in the Timeline or Effect Controls
   (`effectControls.prop.<uid>.value[.<d>]`), it runs `prop.pickWhip`: the reference replaces the
   property's expression, or is added as one, and the expression is enabled.
+* The Track Matte column (shown with the Modes, F4) has a pick whip before its layer menu
+  (`timeline.layer.<id>.trackMatte.whip`), as in After Effects 2023 and later. Dropped on another
+  layer's row it runs `layer.setTrackMatte {layers, matte}`: that layer becomes the matte (its
+  video is switched off), each layer keeping its matte mode, in one undo step; with several layers
+  selected, dragging one of their whips sets all of them. Itself, empty space, a camera, light or
+  null, or a layer whose own matte leads back to the layer do nothing.
 * A property's menu (right-click its name; entries `timeline.prop.<uid>.menu.<entry>`): Reset
   (`prop.reset`: no expression, and the property's default value, an effect parameter's or a
   Transform property's; an animated property keeps its keyframes and gets the default as a

@@ -552,31 +552,38 @@ fn blend(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 fn track_matte(s: &mut Session, p: &Value) -> Result<Value> {
-    let (cid, lid) = layer_p(s, p, "layer.setTrackMatte")?;
+    // `layers` (the Track Matte pick whip with several layers selected) or one `layer`.
+    let (cid, ids) = match p.get("layers") {
+        Some(Value::Array(_)) => layers_p(s, p)?,
+        _ => layer_p(s, p, "layer.setTrackMatte").map(|(c, l)| (c, vec![l]))?,
+    };
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
     let matte = match p.get("matte") {
         None | Some(Value::Null) => None,
         Some(v) => Some(resolve_layer(comp, v).ok_or_else(|| bad("layer.setTrackMatte", "no such matte layer"))?),
     };
-    let kind = str_p(p, "kind")
-        .map(|k| match k.to_ascii_lowercase().replace([' ', '_', '-'], "").as_str() {
-            "alphainverted" | "alphainv" => MatteKind::AlphaInverted,
-            "luma" => MatteKind::Luma,
-            "lumainverted" | "lumainv" => MatteKind::LumaInverted,
-            _ => MatteKind::Alpha,
-        })
-        .unwrap_or(MatteKind::Alpha);
+    // Without `kind` a layer keeps the mode it has (Alpha when it had no matte).
+    let kind = str_p(p, "kind").map(|k| match k.to_ascii_lowercase().replace([' ', '_', '-'], "").as_str() {
+        "alphainverted" | "alphainv" => MatteKind::AlphaInverted,
+        "luma" => MatteKind::Luma,
+        "lumainverted" | "lumainv" => MatteKind::LumaInverted,
+        _ => MatteKind::Alpha,
+    });
     s.edit("Track Matte", None, |proj, _| {
         let comp = proj.comp_mut(cid).ok_or(EngineError::NoComp)?;
         if let Some(m) = matte {
-            if m == lid {
+            if ids.contains(&m) {
                 return Err(bad("layer.setTrackMatte", "a layer can't be its own matte"));
             }
             if let Some(ml) = comp.layer_mut(m) {
                 ml.switches.video = false;
             }
         }
-        comp.layer_mut(lid).ok_or(EngineError::NoComp)?.track_matte = matte.map(|layer| TrackMatte { layer, kind });
+        for lid in &ids {
+            let l = comp.layer_mut(*lid).ok_or(EngineError::NoComp)?;
+            let kind = kind.or(l.track_matte.map(|m| m.kind)).unwrap_or_default();
+            l.track_matte = matte.map(|layer| TrackMatte { layer, kind });
+        }
         Ok(())
     })?;
     Ok(Value::Null)
@@ -1656,7 +1663,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Track Matte",
             [],
             None,
-            "{layer?, matte: layer|null, kind?: alpha|alphaInverted|luma|lumaInverted}",
+            "{layer? | layers?, matte: layer|null, kind?: alpha|alphaInverted|luma|lumaInverted (default: the mode it has)}",
             has_layers,
             track_matte
         ),

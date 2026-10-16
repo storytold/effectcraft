@@ -1647,3 +1647,23 @@ fn old_guides_load_as_pixel_guides_and_percent_round_trips() {
     // A zero-sized comp never divides by zero.
     assert!(g.px(0, 0).is_finite());
 }
+
+/// The Track Matte pick whip with several layers selected: `layers` sets the matte of all of them
+/// in one undo step, each keeping its matte mode, and switches the matte's video off.
+#[test]
+fn set_track_matte_takes_several_layers_in_one_step() {
+    let mut s = comp();
+    let a = solid(&mut s, "#ff0000");
+    let b = solid(&mut s, "#00ff00");
+    let matte = solid(&mut s, "#ffffff");
+    s.execute("layer.setTrackMatte", json!({"layer": a, "matte": b, "kind": "luma"})).unwrap();
+    s.execute("layer.setSwitch", json!({"layers": [b], "switch": "video", "value": true})).unwrap();
+    s.execute("layer.setTrackMatte", json!({"layers": [a, b], "matte": matte})).unwrap();
+    let get = |s: &Session, id: u64| layer(s, id).track_matte.map(|m| (m.layer.0, m.kind));
+    assert_eq!(get(&s, a), Some((matte, MatteKind::Luma)), "a layer keeps its mode");
+    assert_eq!(get(&s, b), Some((matte, MatteKind::Alpha)));
+    assert!(!layer(&s, matte).switches.video);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!((get(&s, a), get(&s, b)), (Some((b, MatteKind::Luma)), None), "one undo step");
+    assert!(s.execute("layer.setTrackMatte", json!({"layers": [a, matte], "matte": matte})).is_err(), "not its own matte");
+}
