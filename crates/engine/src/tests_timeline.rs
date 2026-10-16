@@ -109,6 +109,85 @@ fn keyframe_copy_paste_keeps_relative_timing_and_crosses_properties() {
 }
 
 #[test]
+fn copy_selected_keys_excludes_deselected_properties_and_stale_values() {
+    let (mut s, source) = setup();
+    s.execute("prop.set", json!({"layer": source, "path": "transform/opacity", "value": 25})).unwrap();
+    select_prop_keys(&mut s, source, "transform/opacity");
+    s.execute("edit.copy", json!({})).unwrap();
+    assert_eq!(s.state.value_clipboard.len(), 1);
+    animate(&mut s, source, "transform/position", &[(0.0, json!([10, 20, 0])), (1.0, json!([30, 40, 0]))]);
+    animate(&mut s, source, "transform/rotation", &[(0.0, json!(15)), (1.0, json!(90))]);
+    animate(&mut s, source, "transform/scale", &[(0.0, json!([50, 60, 100])), (1.0, json!([150, 160, 100]))]);
+    select_prop_keys(&mut s, source, "transform/scale");
+    s.execute(
+        "keys.select",
+        json!({"keys": [{"layer": source, "path": "transform/position", "time": 0}, {"layer": source, "path": "transform/rotation", "time": 1}], "add": true, "selectProperties": true}),
+    )
+    .unwrap();
+    s.execute(
+        "keys.select",
+        json!({"keys": [{"layer": source, "path": "transform/scale", "time": 0}, {"layer": source, "path": "transform/scale", "time": 1}], "toggle": true, "selectProperties": true}),
+    )
+    .unwrap();
+    s.execute("keys.easyEase", json!({})).unwrap();
+    assert_eq!(s.state.selected_keys.len(), 2);
+    assert_eq!(s.state.selected_props.len(), 3);
+    assert_eq!(s.execute("edit.copy", json!({})).unwrap(), json!(2));
+    assert!(s.state.value_clipboard.is_empty());
+    let target = s.execute("layer.newSolid", json!({"color": "#ff0000"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("time.set", json!({"time": 2})).unwrap();
+    s.execute("layer.select", json!({"layers": [target]})).unwrap();
+    s.execute("edit.paste", json!({})).unwrap();
+    undo_redo_roundtrip(
+        &mut s,
+        |s| {
+            for (path, time, value) in [("transform/position", 2.0, KV::Vec3([10.0, 20.0, 0.0])), ("transform/rotation", 3.0, KV::Scalar(90.0))] {
+                let p = prop(s, target, path);
+                assert_eq!(p.keys.len(), 1);
+                let k = &p.keys[0];
+                assert_eq!((k.time.seconds(), &k.value), (time, &value));
+                assert_eq!((k.in_interp, k.out_interp), (Interp::Bezier, Interp::Bezier));
+                assert_eq!(k.in_ease[0], effectcraft_keyframe::Ease::EASY);
+                assert_eq!(k.out_ease[0], effectcraft_keyframe::Ease::EASY);
+            }
+            assert_eq!(s.state.selected_keys.len(), 2);
+            assert_eq!(prop(s, target, "transform/scale").value, KV::Vec3([100.0; 3]));
+            assert!(prop(s, target, "transform/scale").keys.is_empty());
+            assert_eq!(prop(s, target, "transform/opacity").value, KV::Scalar(100.0));
+        },
+        |s| {
+            assert!(prop(s, target, "transform/position").keys.is_empty());
+            assert!(prop(s, target, "transform/rotation").keys.is_empty());
+        },
+    );
+}
+
+#[test]
+fn copy_mixed_animated_and_static_properties_keeps_the_static_value() {
+    let (mut s, source) = setup();
+    animate(&mut s, source, "transform/position", &[(0.0, json!([10, 20, 0])), (1.0, json!([30, 40, 0]))]);
+    s.execute("prop.set", json!({"layer": source, "path": "transform/rotation", "value": 45})).unwrap();
+    select_prop_keys(&mut s, source, "transform/position");
+    s.execute("prop.select", json!({"layer": source, "path": "transform/rotation", "add": true})).unwrap();
+    assert_eq!(s.execute("edit.copy", json!({})).unwrap(), json!({"keys": 2, "values": 1}));
+    let target = s.execute("layer.newSolid", json!({"color": "#ff0000"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("time.set", json!({"time": 2})).unwrap();
+    s.execute("layer.select", json!({"layers": [target]})).unwrap();
+    let undo = s.history.undo.len();
+    s.execute("edit.paste", json!({})).unwrap();
+    assert_eq!(s.history.undo.len(), undo + 1);
+    assert_eq!(prop(&s, target, "transform/rotation").value, KV::Scalar(45.0));
+    let position = prop(&s, target, "transform/position");
+    assert_eq!(
+        position.keys.iter().map(|k| (k.time.seconds(), k.value.clone())).collect::<Vec<_>>(),
+        vec![(2.0, KV::Vec3([10.0, 20.0, 0.0])), (3.0, KV::Vec3([30.0, 40.0, 0.0]))]
+    );
+    s.execute("edit.undo", json!({})).unwrap();
+    assert!(prop(&s, target, "transform/position").keys.is_empty());
+    assert_eq!(prop(&s, target, "transform/rotation").value, KV::Scalar(0.0));
+}
+
+#[test]
 fn cut_removes_keys_and_paste_restores_them() {
     let (mut s, l) = setup();
     animate(&mut s, l, "transform/opacity", &[(0.0, json!(10)), (1.0, json!(20))]);
@@ -329,6 +408,77 @@ fn pen_tool_draws_edits_and_closes_a_mask() {
     assert!(s.active_comp().unwrap().layers[0].masks().unwrap().children.is_empty());
     s.execute("edit.undo", json!({})).unwrap();
     assert_eq!(s.active_comp().unwrap().layers[0].masks().unwrap().children.len(), 1);
+}
+
+/// Cut every mask path's tangent arrays in the saved project to one entry (static values and
+/// keyframes alike), then open the result: the shape of a hand-edited or foreign file (#1250).
+fn reopen_with_short_tangents(s: &mut Session) {
+    fn cut(v: &mut Value) {
+        match v {
+            Value::Object(o) => {
+                if o.contains_key("vertices") {
+                    for k in ["in_tangents", "out_tangents"] {
+                        if let Some(Value::Array(a)) = o.get_mut(k) {
+                            a.truncate(1);
+                        }
+                    }
+                }
+                o.values_mut().for_each(cut);
+            }
+            Value::Array(a) => a.iter_mut().for_each(cut),
+            _ => {}
+        }
+    }
+    let mut j: Value = serde_json::from_str(&s.project.to_json()).unwrap();
+    cut(&mut j);
+    let p = effectcraft_project::Project::from_json(&j.to_string()).unwrap();
+    s.replace_project(p, None);
+}
+
+#[test]
+fn vertex_commands_fill_in_missing_tangents_of_a_loaded_path() {
+    let (mut s, l) = setup();
+    let m = s.execute("mask.new", json!({"layer": l, "vertices": [[10, 10], [90, 10], [90, 90]]})).unwrap()["mask"].as_u64().unwrap();
+    reopen_with_short_tangents(&mut s);
+    let path = |s: &Session| prop(s, l, "masks/#1/path").value.as_path().unwrap().clone();
+    assert_eq!(path(&s).in_tangents.len(), 1, "the file really has short tangents");
+    // Both used to index the tangent arrays by vertex and panic.
+    s.execute("mask.setVertex", json!({"layer": l, "mask": m, "index": 2, "in": [0, -20], "out": [0, 20]})).unwrap();
+    s.execute("mask.addVertex", json!({"layer": l, "mask": m, "point": [10, 90]})).unwrap();
+    let p = path(&s);
+    assert_eq!(p.vertices.len(), 4);
+    assert_eq!((p.in_tangents.len(), p.out_tangents.len()), (4, 4));
+    assert_eq!((p.in_tangents[2], p.out_tangents[2]), ([0.0, -20.0], [0.0, 20.0]));
+    assert_eq!(p.in_tangents[1], [0.0, 0.0], "a missing tangent is a corner");
+}
+
+#[test]
+fn deleting_vertices_of_a_loaded_path_with_short_tangents_does_not_panic() {
+    let (mut s, l) = setup();
+    let m = s.execute("mask.new", json!({"layer": l, "vertices": [[10, 10], [90, 10], [90, 90]]})).unwrap()["mask"].as_u64().unwrap();
+    reopen_with_short_tangents(&mut s);
+    s.execute("mask.selectVertices", json!({"vertices": [{"layer": l, "mask": m, "index": 2}]})).unwrap();
+    s.execute("mask.deleteVertices", json!({})).unwrap();
+    let p = prop(&s, l, "masks/#1/path").value.as_path().unwrap().clone();
+    assert_eq!((p.vertices.len(), p.in_tangents.len(), p.out_tangents.len()), (2, 2, 2));
+}
+
+#[test]
+fn vertex_commands_fill_in_missing_tangents_of_a_loaded_animated_path() {
+    let (mut s, l) = setup();
+    let m = s.execute("mask.new", json!({"layer": l, "vertices": [[10, 10], [90, 10], [90, 90]]})).unwrap()["mask"].as_u64().unwrap();
+    s.execute("prop.toggleAnimation", json!({"layer": l, "path": "masks/#1/path"})).unwrap();
+    s.execute("time.set", json!({"time": 1.0})).unwrap();
+    s.execute("mask.setVertex", json!({"layer": l, "mask": m, "index": 0, "point": [0, 0]})).unwrap();
+    reopen_with_short_tangents(&mut s);
+    s.execute("time.set", json!({"time": 1.0})).unwrap();
+    s.execute("mask.setVertex", json!({"layer": l, "mask": m, "index": 2, "in": [5, 5]})).unwrap();
+    s.execute("mask.addVertex", json!({"layer": l, "mask": m, "index": 3, "point": [10, 90]})).unwrap();
+    for k in &prop(&s, l, "masks/#1/path").keys {
+        let p = k.value.as_path().unwrap();
+        assert_eq!(p.vertices.len(), 4, "the other key gains the vertex too");
+        assert!(p.in_tangents.len() == 4 && p.out_tangents.len() == 4, "{p:?}");
+    }
 }
 
 #[test]

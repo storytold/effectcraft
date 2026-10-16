@@ -115,7 +115,7 @@ fn hide_other_video(s: &mut Session, p: &Value) -> Result<Value> {
     let (cid, ids) = layers_p(s, p)?;
     s.edit("Hide Other Video", None, |proj, _| {
         for l in proj.comp_mut(cid).ok_or(EngineError::NoComp)?.layers.iter_mut() {
-            if !ids.contains(&l.id) && l.source.is_av() {
+            if !ids.contains(&l.id) && (l.source.is_av() || matches!(l.source, LayerSource::Null)) {
                 l.switches.video = false;
             }
         }

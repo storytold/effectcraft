@@ -111,6 +111,13 @@ pub(crate) fn label<'a>(app: &EffectcraftApp, command: &str, source: &'a str) ->
             _ => {}
         }
     }
+    if language == "de" && matches!(command, "file.revealInFinder" | "layer.revealInFinder") {
+        match source {
+            "Reveal in Explorer" => return "Im Explorer anzeigen",
+            "Reveal in File Manager" => return "Im Dateimanager anzeigen",
+            _ => {}
+        }
+    }
     if language == "cs" && matches!(command, "file.revealInFinder" | "layer.revealInFinder") {
         match source {
             "Reveal in Explorer" => return "Zobrazit v Průzkumníku",
@@ -2034,9 +2041,9 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("view.zoomOut", "Zoom Out", "ズームアウト"),
     ("", "Resolution", "解像度"),
     ("view.res.full", "Full", "フル画質"),
-    ("view.res.half", "Half", "1/2画質"),
-    ("view.res.third", "Third", "1/3画質"),
-    ("view.res.quarter", "Quarter", "1/4画質"),
+    ("view.res.half", "Half", "1/2 画質"),
+    ("view.res.third", "Third", "1/3 画質"),
+    ("view.res.quarter", "Quarter", "1/4 画質"),
     ("view.res.custom", "Custom...", "カスタム..."),
     ("view.displayColorManagement", "Use Display Color Management", "ディスプレイカラーマネジメントを使用"),
     ("", "Simulate Output", "出力をシミュレート"),
@@ -5555,7 +5562,7 @@ const GERMAN: &[(&str, &str, &str)] = &[
     ("layer.settings", "Layer Settings...", "Ebeneneinstellungen..."),
     ("layer.openLayer", "Open Layer", "Ebene öffnen"),
     ("layer.openSource", "Open Layer Source", "Ebenenquelle öffnen"),
-    ("layer.revealInFinder", "Reveal in Finder", "Im Finder einblenden"),
+    ("layer.revealInFinder", "Reveal in Finder", "Im Finder anzeigen"),
     ("", "Mask", "Maske"),
     ("layer.addMask", "New Mask", "Neue Maske"),
     ("layer.mask.shape", "Mask Shape...", "Maskenform..."),
@@ -5565,7 +5572,7 @@ const GERMAN: &[(&str, &str, &str)] = &[
     ("layer.mask.reset", "Reset Mask", "Maske zurücksetzen"),
     ("layer.mask.remove", "Remove Mask", "Maske entfernen"),
     ("layer.mask.removeAll", "Remove All Masks", "Alle Masken entfernen"),
-    ("track.mask", "Track Mask", "Maske tracken"),
+    ("track.mask", "Track Mask", "Maske verfolgen"),
     ("", "Mode", "Modus"),
     ("layer.mask.mode", "None", "Ohne"),
     ("layer.mask.mode", "Add", "Addieren"),
@@ -5602,8 +5609,8 @@ const GERMAN: &[(&str, &str, &str)] = &[
     ("layer.hideOtherVideo", "Hide Other Video", "Anderes Video ausblenden"),
     ("layer.showAllVideo", "Show All Video", "Gesamtes Video einblenden"),
     ("layer.unlockAll", "Unlock All Layers", "Alle Ebenen entsperren"),
-    ("layer.expressions", "Enable Expressions", "Expressions aktivieren"),
-    ("layer.expressions", "Disable Expressions", "Expressions deaktivieren"),
+    ("layer.expressions", "Enable Expressions", "Ausdrücke aktivieren"),
+    ("layer.expressions", "Disable Expressions", "Ausdrücke deaktivieren"),
     ("layer.setSwitch", "Shy", "Schüchtern"),
     ("layer.setSwitch", "Lock", "Sperren"),
     ("layer.setSwitch", "Audio", "Audio"),
@@ -5631,7 +5638,7 @@ const GERMAN: &[(&str, &str, &str)] = &[
     ("layer.autoOrient", "Auto-Orient...", "Automatische Ausrichtung..."),
     ("", "Time", "Zeit"),
     ("layer.enableTimeRemap", "Enable Time Remapping", "Zeitverzerrung aktivieren"),
-    ("layer.timeReverse", "Time-Reverse Layer", "Ebenenreihenfolge umkehren"),
+    ("layer.timeReverse", "Time-Reverse Layer", "Ebene zeitlich umkehren"),
     ("layer.timeStretch", "Time Stretch...", "Zeitdehnung..."),
     ("layer.freezeFrame", "Freeze Frame", "Frame fixieren"),
     ("layer.freezeOnLastFrame", "Freeze On Last Frame", "Bei letztem Frame fixieren"),
@@ -5700,7 +5707,7 @@ const GERMAN: &[(&str, &str, &str)] = &[
     ("layer.trackMatte", "Matte with Layer Below", "Spurmaske mit Ebene darunter"),
     ("", "Layer Styles", "Ebenenstile"),
     ("layer.style.options", "Layer Style Options...", "Ebenenstiloptionen..."),
-    ("layer.style.convertToEditable", "Convert to Editable Styles", "In editierbare Formate umwandeln"),
+    ("layer.style.convertToEditable", "Convert to Editable Styles", "In bearbeitbare Stile umwandeln"),
     ("layer.style.showAll", "Show All", "Alle anzeigen"),
     ("layer.style.removeAll", "Remove All", "Alle entfernen"),
     ("layer.style.dropShadow", "Drop Shadow", "Schlagschatten"),
@@ -5715,7 +5722,7 @@ const GERMAN: &[(&str, &str, &str)] = &[
     ("path.groupShapes", "Group Shapes", "Formen gruppieren"),
     ("path.ungroupShapes", "Ungroup Shapes", "Gruppierung von Formen aufheben"),
     ("", "Arrange", "Anordnen"),
-    ("layer.arrange", "Bring Layer to Front", "Ebene ganz nach vorn"),
+    ("layer.arrange", "Bring Layer to Front", "Ebene ganz nach vorne"),
     ("layer.arrange", "Bring Layer Forward", "Ebene nach vorne"),
     ("layer.arrange", "Send Layer Backward", "Ebene nach hinten"),
     ("layer.arrange", "Send Layer to Back", "Ebene ganz nach hinten"),
@@ -6677,6 +6684,59 @@ mod tests {
         app.session.history.redo.push(("Text Čeština".into(), app.session.project.clone()));
         assert_eq!(entry(&app, &undo, "Undo File Čeština".into()), "Zpět File Čeština");
         assert_eq!(entry(&app, &redo, "Redo Text Čeština".into()), "Znovu Text Čeština");
+    }
+
+    #[test]
+    fn german_reveal_labels_follow_the_platform_file_manager() {
+        // As `czech_…` and `ukrainian_…` do. Asserted through `label`, not `entry`: `entry`
+        // returns the English for German, Russian and French, which have catalogues but are
+        // not wired into the menus (see the undo/redo match in `entry` and `supported`).
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.session.execute("prefs.set", json!({"key": "general.language", "value": "de"})).unwrap();
+        for command in ["file.revealInFinder", "layer.revealInFinder"] {
+            for (source, translated) in [
+                ("Reveal in Finder", "Im Finder anzeigen"),
+                ("Reveal in Explorer", "Im Explorer anzeigen"),
+                ("Reveal in File Manager", "Im Dateimanager anzeigen"),
+            ] {
+                assert_eq!(label(&app, command, source), translated, "{command} / {source}");
+                // Another command keeps a label that merely looks like one of these.
+                assert_eq!(label(&app, "file.openRecent", source), source);
+            }
+            assert_eq!(label(&app, command, "My file.mp4"), "My file.mp4", "a user's filename is never looked up");
+        }
+    }
+
+    #[test]
+    fn german_menu_labels_name_what_their_command_does() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.session.execute("prefs.set", json!({"key": "general.language", "value": "de"})).unwrap();
+        // "Ebenenreihenfolge umkehren" reads as reversing the stacking order, not time, and
+        // "Formate" are formats, not layer styles (#1443).
+        assert_eq!(label(&app, "layer.timeReverse", "Time-Reverse Layer"), "Ebene zeitlich umkehren");
+        assert_eq!(label(&app, "keys.timeReverse", "Time-Reverse Keyframes"), "Keyframes zeitlich umkehren");
+        assert_eq!(label(&app, "layer.style.convertToEditable", "Convert to Editable Styles"), "In bearbeitbare Stile umwandeln");
+    }
+
+    #[test]
+    fn german_uses_one_word_per_term() {
+        let german: Vec<&str> = GERMAN.iter().map(|(_, _, de)| *de).collect();
+        let with = |needle: &str| german.iter().filter(|de| de.contains(needle)).copied().collect::<Vec<_>>();
+        // "Expression" is "Ausdruck", not the English word.
+        assert!(with("Expression").is_empty(), "{:?}", with("Expression"));
+        // "Track" as a verb is "verfolgen", not "tracken".
+        assert!(with("tracken").is_empty(), "{:?}", with("tracken"));
+        // "Reveal <somewhere>" is "anzeigen". ("einblenden" stays right for "Show All",
+        // "Fade from Blur" and the like, so only the Reveal entries are checked.)
+        let reveal: Vec<&str> =
+            GERMAN.iter().filter(|(_, en, _)| en.starts_with("Reveal")).map(|(_, _, de)| *de).filter(|de| !de.to_lowercase().contains("anzeigen")).collect();
+        assert!(reveal.is_empty(), "{reveal:?}");
+        // One spelling of "to the front".
+        let vorn: Vec<&str> = german.iter().filter(|de| de.ends_with("nach vorn")).copied().collect();
+        assert!(vorn.is_empty(), "{vorn:?}");
+        // The terms those entries joined are still the majority ones.
+        assert!(with("verfolgen").len() >= 4, "{:?}", with("verfolgen"));
+        assert!(with("anzeigen").len() >= 12, "{}", with("anzeigen").len());
     }
 
     #[test]

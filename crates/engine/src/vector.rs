@@ -271,7 +271,7 @@ pub fn vector_doc(path: &str, bytes: &[u8], layer: Option<&effectcraft_project::
     Some(
         effectcraft_pdf::parse_page(bytes, page as usize)
             .map(|d| match layer {
-                Some(l) => effectcraft_pdf::layer_doc(&d, l.index as usize),
+                Some(l) => effectcraft_pdf::layer_doc_with_sizes(&d, l.index as usize, l.layer_size).0,
                 None => d,
             })
             .map_err(|e| format!("{path}: {e}")),
@@ -279,7 +279,7 @@ pub fn vector_doc(path: &str, bytes: &[u8], layer: Option<&effectcraft_project::
 }
 
 /// Import page `page` of a PDF / Illustrator / EPS document as a composition the size of the
-/// page: one footage item per file layer (each showing only that layer, continuously
+/// page: one footage item per file layer (optionally cropped to its artwork, continuously
 /// rasterisable), top layer first. Returns (comp, folder, items).
 pub fn import_vector_comp(
     proj: &mut Project,
@@ -287,11 +287,12 @@ pub fn import_vector_comp(
     bytes: &[u8],
     name: &str,
     page: u32,
-    rate: effectcraft_time::FrameRate,
-    duration: effectcraft_time::Tick,
+    retain: bool,
+    timing: (effectcraft_time::FrameRate, effectcraft_time::Tick),
 ) -> Result<(ItemId, ItemId, Vec<ItemId>), String> {
     use effectcraft_color::Label;
     use effectcraft_project::{AlphaMode, Footage, FootageKind, ItemKind, SourceLayer};
+    let (rate, duration) = timing;
     let doc = effectcraft_pdf::parse_page(bytes, page as usize).map_err(|e| format!("{path}: {e}"))?;
     let codec = effectcraft_pdf::codec(path, bytes).unwrap_or("PDF");
     let (w, h) = doc.pixel_size();
@@ -301,24 +302,33 @@ pub fn import_vector_comp(
     let mut items = vec![];
     let names = effectcraft_pdf::layer_names(&doc);
     for (i, lname) in names.iter().enumerate() {
+        let (size, offset) = if retain {
+            let (layer, offset) = effectcraft_pdf::layer_doc_with_sizes(&doc, i, true);
+            (layer.pixel_size(), offset)
+        } else {
+            ((w, h), [0.0, 0.0])
+        };
         let f = Footage {
             path: path.to_string(),
             kind: FootageKind::Still,
-            width: w,
-            height: h,
+            width: size.0,
+            height: size.1,
             pixel_aspect: 1.0,
             frame_rate: rate,
             has_video: true,
             alpha: AlphaMode::Straight,
             loop_count: 1,
             codec: codec.into(),
-            layer: Some(SourceLayer { index: i as u32, name: lname.clone(), layer_size: false, ..Default::default() }),
+            layer: Some(SourceLayer { index: i as u32, name: lname.clone(), layer_size: retain, ..Default::default() }),
             page,
             ..Default::default()
         };
         let id = proj.add_item(&format!("{lname}/{file}"), Label::Lavender, Some(folder), ItemKind::Footage(f));
         items.push(id);
-        let mut l = build::layer(proj, &comp, lname, LayerSource::Footage { item: id }, (w, h), None);
+        let mut l = build::layer(proj, &comp, lname, LayerSource::Footage { item: id }, size, None);
+        if retain && let Some(position) = l.props.prop_mut("transform/position") {
+            position.value = Value::Vec3([offset[0] + f64::from(size.0) / 2.0, offset[1] + f64::from(size.1) / 2.0, 0.0]);
+        }
         l.name = comp.unique_layer_name(lname);
         comp.layers.insert(0, l);
     }

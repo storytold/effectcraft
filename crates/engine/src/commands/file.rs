@@ -391,7 +391,7 @@ fn prepare_import(s: &mut Session, p: &Value) -> Result<PendingImport> {
                 Ok(b) if effectcraft_psd::is_psd(&b) => b,
                 Ok(b) if effectcraft_pdf::sniff(&b).is_some() && !path.to_ascii_lowercase().ends_with(".svg") => {
                     // PDF / Illustrator / EPS: one layer per file layer.
-                    match import_vector_comp(s, &path, &b, page) {
+                    match import_vector_comp(s, &path, &b, page, retain) {
                         Ok((comp, made)) => {
                             comps.push(comp);
                             items.extend(made);
@@ -540,7 +540,7 @@ pub(crate) fn import_psd_comp(s: &mut Session, path: &str, bytes: Vec<u8>, retai
 
 /// Import page `page` of a PDF / Illustrator / EPS file as a composition (one undo step).
 /// Returns (comp, items).
-fn import_vector_comp(s: &mut Session, path: &str, bytes: &[u8], page: u32) -> Result<(u64, Vec<u64>)> {
+fn import_vector_comp(s: &mut Session, path: &str, bytes: &[u8], page: u32, retain: bool) -> Result<(u64, Vec<u64>)> {
     let mut name = std::path::Path::new(path).file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "Vector".into());
     if page > 0 {
         name = format!("{name} (Page {})", page + 1);
@@ -549,7 +549,7 @@ fn import_vector_comp(s: &mut Session, path: &str, bytes: &[u8], page: u32) -> R
     let secs = if s.prefs.import.still_footage == "seconds" { s.prefs.import.still_seconds } else { 10.0 };
     let duration = rate.snap_nearest(effectcraft_time::Tick::from_seconds_f64(secs));
     let (comp, folder, items) = s.edit("Import", None, |proj, st| {
-        let r = crate::vector::import_vector_comp(proj, path, bytes, &name, page, rate, duration).map_err(EngineError::Other)?;
+        let r = crate::vector::import_vector_comp(proj, path, bytes, &name, page, retain, (rate, duration)).map_err(EngineError::Other)?;
         st.project_selection = vec![r.0];
         Ok(r)
     })?;

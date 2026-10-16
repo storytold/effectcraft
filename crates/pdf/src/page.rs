@@ -515,7 +515,7 @@ impl<'a> Interp<'a> {
                 && (p + 2 == data.len() || crate::object::is_white(data[p + 2]))
         };
         let end = match crate::image::inline_len(self.file, &d, Some(res)) {
-            Some(len) => (start + len).min(data.len()),
+            Some(len) => start.saturating_add(len).min(data.len()),
             None => {
                 let mut p = start;
                 while p + 1 < data.len() && !is_ei(p) {

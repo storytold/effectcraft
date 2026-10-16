@@ -101,6 +101,8 @@ page!(General {
     /// Path Point and Handle Size (px).
     path_point_size: u32 = 5,
     show_tool_tips: bool = true,
+    /// Step frames with an unmodified mouse wheel over the Composition viewer.
+    viewer_wheel_scrubbing: bool = false,
     /// Create New Layers at Composition Start Time (off: at the current time).
     create_layers_at_comp_start: bool = true,
     switches_affect_nested_comps: bool = true,
@@ -1144,6 +1146,7 @@ pub fn pages() -> Vec<Page> {
                 s("general.recentItems", "Recent Projects Shown", Kind::Int(1, 30, ""), true),
                 Section("Options"),
                 s("general.showToolTips", "Show Tool Tips", B, true),
+                s("general.viewerWheelScrubbing", "Scrub Composition Frames with Mouse Wheel", B, true),
                 s("general.createLayersAtCompStart", "Create Layers at Composition Start Time", B, true),
                 s("general.switchesAffectNestedComps", "Switches Affect Nested Comps", B, true),
                 s("general.defaultSpatialLinear", "Default Spatial Interpolation to Linear", B, true),

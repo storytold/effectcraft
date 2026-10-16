@@ -165,6 +165,64 @@ fn presets_apply_render_and_round_trip() {
 }
 
 #[test]
+fn cached_text_presets_keep_the_catalog_and_application_independent() {
+    let expected = [
+        ("typewriter", "Typewriter"),
+        ("fadeUpCharacters", "Fade Up Characters"),
+        ("bounceInWords", "Bounce In Words"),
+        ("trackingIn", "Tracking In"),
+        ("scramble", "Scramble"),
+        ("blurIn", "Blur In"),
+        ("jitter", "Jitter"),
+        ("dropInLines", "Drop In Lines"),
+    ];
+    let (mut s, layer) = session();
+    let catalog = s.execute("text.presets", json!({})).unwrap();
+    let mut returned = catalog.clone();
+    returned[0]["name"] = json!("Edited copy");
+    let project = s.project.clone();
+    for _ in 0..2 {
+        let names = crate::text_presets();
+        assert_eq!(names.iter().map(|(id, name)| (id.as_str(), name.as_str())).collect::<Vec<_>>(), expected);
+        for (id, _) in expected {
+            let result = s.execute("layer.applyTextPreset", json!({"layer": layer, "preset": id})).unwrap();
+            assert!(!result["animators"].as_array().unwrap().is_empty(), "{id}");
+            s.execute("edit.undo", json!({})).unwrap();
+            assert_eq!(s.project, project, "{id}: undo restores the document");
+        }
+        assert_eq!(s.execute("text.presets", json!({})).unwrap(), catalog);
+    }
+}
+
+#[test]
+#[ignore = "warm text-preset listing benchmark"]
+fn text_preset_listing_benchmark() {
+    let old = || {
+        let v: serde_json::Value = serde_json::from_str(include_str!("../presets/text_animators.json")).unwrap();
+        let presets = v["presets"].as_array().unwrap().clone();
+        presets.iter().map(|p| (p["id"].as_str().unwrap().to_string(), p["name"].as_str().unwrap().to_string())).collect::<Vec<_>>()
+    };
+    assert_eq!(old(), crate::text_presets());
+    let mut before = Vec::new();
+    let mut after = Vec::new();
+    for _ in 0..5 {
+        let start = std::time::Instant::now();
+        for _ in 0..1000 {
+            std::hint::black_box(old());
+        }
+        before.push(start.elapsed());
+        let start = std::time::Instant::now();
+        for _ in 0..1000 {
+            std::hint::black_box(crate::text_presets());
+        }
+        after.push(start.elapsed());
+    }
+    before.sort();
+    after.sort();
+    println!("Text preset names, median per warm lookup: {:?} -> {:?}", before[2] / 1000, after[2] / 1000);
+}
+
+#[test]
 fn menus_have_text_animation_entries() {
     let (s, _) = session();
     let spec = crate::commands::find("layer.enablePerChar3D").unwrap();

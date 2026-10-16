@@ -291,7 +291,7 @@ fn only_comp(p: &Value) -> Option<effectcraft_engine::project::ItemId> {
 
 /// Execute a UI or engine command by id.
 pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: Value) -> Result<Value, String> {
-    if id == "effects.copyPresetsFolderPath" {
+    if matches!(id, "effects.copyPresetsFolderPath" | "mediaBrowser.copySourcePath") {
         return frontend(app, ctx, id, params);
     }
     // Layer ▸ New ▸ Text (menu, shortcut, context menus) puts an insertion point in the centre of
@@ -880,6 +880,11 @@ pub fn frontend(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, p: Valu
     let now = ctx.input(|i| i.time);
     let v = &mut app.ui.viewer;
     Ok(match id {
+        "mediaBrowser.copySourcePath" => {
+            let path = p.get("path").and_then(Value::as_str).filter(|path| !path.is_empty()).ok_or("A source path is required")?;
+            ctx.copy_text(path.to_string());
+            json!({"path": path})
+        }
         "effects.copyPresetsFolderPath" => {
             if cfg!(target_arch = "wasm32") {
                 return Err("The web app has no local presets folder".into());
@@ -1521,6 +1526,19 @@ pub(crate) fn panel_shown(app: &EffectcraftApp, p: PanelKind) -> bool {
     }
 }
 
+/// The command a menu entry runs when chosen from a menu: Window ▸ <panel> closes a panel whose
+/// entry is checked, as in After Effects (#1630). Shortcuts and agents calling `window.panel`
+/// still only show the panel.
+pub(crate) fn menu_choice(app: &EffectcraftApp, id: String, params: Value) -> (String, Value) {
+    if id == "window.panel"
+        && let Some(p) = params.get("panel").and_then(Value::as_str).and_then(PanelKind::from_name)
+        && panel_shown(app, p)
+    {
+        return ("window.closePanel".into(), params);
+    }
+    (id, params)
+}
+
 /// Check-mark state of frontend toggles (engine state is answered by the engine).
 pub(crate) fn entry_checked(app: &EffectcraftApp, e: &MenuEntry) -> Option<bool> {
     let v = &app.ui.viewer;
@@ -1990,7 +2008,7 @@ pub fn menu_bar(app: &mut EffectcraftApp, ui: &mut egui::Ui) {
         });
     });
     crate::menu_keys::handle(&ctx, &nav);
-    if let Some((id, params)) = clicked
+    if let Some((id, params)) = clicked.map(|(id, params)| menu_choice(app, id, params))
         && let Err(e) = invoke(app, &ctx, &id, if params.is_null() { json!({}) } else { params })
     {
         app.ui.status = e;

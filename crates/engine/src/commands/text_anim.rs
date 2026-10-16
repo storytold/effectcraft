@@ -6,6 +6,7 @@ use effectcraft_project::build::{self, Ids};
 use effectcraft_project::{Layer, LayerSource, Node, PropGroup};
 use effectcraft_time::Tick;
 use serde_json::{Value, json};
+use std::sync::OnceLock;
 
 use super::{CommandSpec, b_p, bad, has_comp, layer_mut, layer_p, str_p};
 use crate::{Result, Session, cmd, query};
@@ -13,8 +14,10 @@ use crate::{Result, Session, cmd, query};
 /// The original text animator presets (`presets/text_animators.json`).
 pub const PRESETS_JSON: &str = include_str!("../../presets/text_animators.json");
 
-fn presets() -> Vec<Value> {
-    serde_json::from_str::<Value>(PRESETS_JSON).ok().and_then(|v| v.get("presets").and_then(Value::as_array).cloned()).unwrap_or_default()
+fn presets() -> &'static [Value] {
+    static PRESETS: OnceLock<Vec<Value>> = OnceLock::new();
+    PRESETS
+        .get_or_init(|| serde_json::from_str::<Value>(PRESETS_JSON).ok().and_then(|v| v.get("presets").and_then(Value::as_array).cloned()).unwrap_or_default())
 }
 
 /// (id, name) of every preset.
@@ -303,7 +306,7 @@ fn apply_preset(s: &mut Session, p: &Value) -> Result<Value> {
     let (cid, lid) = layer_p(s, p, C)?;
     let want = str_p(p, "preset").ok_or_else(|| bad(C, "`preset` id or name required"))?.to_string();
     let preset = presets()
-        .into_iter()
+        .iter()
         .find(|x| x.get("id").and_then(Value::as_str) == Some(&want) || x.get("name").and_then(Value::as_str).is_some_and(|n| n.eq_ignore_ascii_case(&want)))
         .ok_or_else(|| bad(C, format!("no preset {want}")))?;
     let name = preset.get("name").and_then(Value::as_str).unwrap_or("Preset").to_string();

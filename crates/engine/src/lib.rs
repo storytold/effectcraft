@@ -495,6 +495,8 @@ pub struct Session {
     /// Offloaded jobs that ended, newest last (kind, error): how a caller waiting for one
     /// (`wait: true` over the control channel in the browser) learns its outcome.
     pub offload_log: Vec<(offload::JobKind, Option<String>)>,
+    /// Number of older completion entries evicted from the bounded offload log.
+    pub offload_log_start: usize,
     /// Generic background tasks (Content-Aware Fill, Scene Edit Detection), see [`jobs`].
     pub tasks: Vec<jobs::Task>,
     /// Finished tasks, newest last (Progress panel, `jobs.list`).
@@ -598,6 +600,7 @@ impl Default for Session {
             offload: None,
             offloaded: vec![],
             offload_log: vec![],
+            offload_log_start: 0,
             browser: None,
             storage: None,
             tasks: vec![],

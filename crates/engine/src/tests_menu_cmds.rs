@@ -111,6 +111,38 @@ fn set_switch_others() {
     assert!(s.execute("layer.setSwitch", json!({"layers": [c], "switch": "nope", "others": true})).is_err());
 }
 
+/// A null's Video switch (the eye) works like any layer's, as in After Effects: it toggles,
+/// Alt-click and Hide Other Video take nulls along, and its children still follow it while it is
+/// hidden (parenting ignores the eye).
+#[test]
+fn null_video_switch() {
+    let mut s = comp();
+    let a = solid(&mut s, "#ff0000");
+    let n = s.execute("layer.newNull", json!({})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.setSwitch", json!({"layers": [n], "switch": "video"})).unwrap();
+    assert!(!layer(&s, n).switches.video);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert!(layer(&s, n).switches.video);
+    // Alt-click on the solid's eye hides the null too; on the null's, the solid.
+    s.execute("layer.setSwitch", json!({"layers": [a], "switch": "video", "others": true})).unwrap();
+    assert!(layer(&s, a).switches.video && !layer(&s, n).switches.video);
+    s.execute("layer.setSwitch", json!({"layers": [n], "switch": "video", "others": true})).unwrap();
+    assert!(!layer(&s, a).switches.video && layer(&s, n).switches.video);
+    s.execute("layer.showAllVideo", json!({})).unwrap();
+    s.execute("layer.hideOtherVideo", json!({"layers": [a]})).unwrap();
+    assert!(layer(&s, a).switches.video && !layer(&s, n).switches.video);
+    // The hidden null still carries its child.
+    s.execute("layer.setParent", json!({"layers": [a], "parent": n})).unwrap();
+    s.execute("prop.set", json!({"layer": n, "path": "transform/position", "value": [420, 180, 0]})).unwrap();
+    let cid = s.active_comp_id().unwrap();
+    let c = s.project.comp(cid).unwrap().clone();
+    let ctx = effectcraft_render::EvalCtx::new(&s.project, cid, &c, Tick::ZERO);
+    let child = c.layer(effectcraft_project::LayerId(a)).unwrap();
+    let (m, _) = ctx.layer_to_comp(child);
+    let centre = m.apply(effectcraft_geom::vec2(100.0, 50.0));
+    assert!((centre.x - 420.0).abs() < 1e-6 && (centre.y - 180.0).abs() < 1e-6, "{centre:?}");
+}
+
 #[test]
 fn layer_switches_menu() {
     let mut s = comp();
@@ -433,8 +465,10 @@ fn copy_a_selected_property_pastes_onto_the_same_property() {
     s.execute("prop.toggleAnimation", json!({"layer": a, "path": "transform/opacity"})).unwrap();
     s.execute("time.set", json!({"time": 1.0})).unwrap();
     s.execute("prop.set", json!({"layer": a, "path": "transform/opacity", "value": 0})).unwrap();
+    s.execute("prop.select", json!({"layer": a, "path": "transform/opacity"})).unwrap();
+    assert_eq!(s.state.selected_keys.len(), 2);
     let transform = layer(&s, a).props.sub("transform").unwrap().uid;
-    s.execute("prop.select", json!({"layer": a, "prop": transform})).unwrap();
+    s.execute("prop.select", json!({"layer": a, "prop": transform, "selectKeys": false})).unwrap();
     s.execute("edit.copy", json!({})).unwrap();
     s.execute("layer.select", json!({"layers": [b]})).unwrap();
     s.execute("time.set", json!({"time": 2.0})).unwrap();
@@ -704,6 +738,21 @@ fn sequence_layers() {
     assert!((layer(&s, b).in_point.seconds() - 1.5).abs() < 1e-6);
     assert!((layer(&s, c).in_point.seconds() - 4.0).abs() < 1e-6);
     assert_eq!(layer(&s, c).props.prop("transform/opacity").unwrap().keys.len(), 2);
+}
+
+/// File ▸ Dependencies ▸ Find Missing Fonts lists a text layer only when no face matches its
+/// font by family, PostScript or full name.
+#[test]
+fn fonts_named_by_their_postscript_or_full_name_are_not_missing() {
+    let mut s = comp();
+    // The first three name bundled faces by family, PostScript and full name; no face has the fourth.
+    let fonts = ["Noto Serif", "Inter-Bold", "Inter SemiBold", "No Such Font Family 123"];
+    let ids: Vec<u64> = fonts.iter().map(|f| s.execute("layer.newText", json!({"text": "Aa", "font": f})).unwrap()["layer"].as_u64().unwrap()).collect();
+    let r = s.execute("file.findMissing", json!({"what": "fonts"})).unwrap();
+    let listed: Vec<(u64, &str)> = r["fonts"].as_array().unwrap().iter().map(|f| (f["layer"].as_u64().unwrap(), f["font"].as_str().unwrap())).collect();
+    assert_eq!(listed, [(ids[3], fonts[3])], "{r}");
+    let f = s.execute("text.fontFeatures", json!({"layer": ids[1]})).unwrap();
+    assert_eq!((&f["family"], &f["style"], &f["missing"]), (&json!("Inter"), &json!("Bold"), &json!(false)), "{f}");
 }
 
 #[test]
@@ -1554,6 +1603,31 @@ fn interpret_footage_loop_extends_video_layers() {
     assert_eq!(out(&s, after), 6.0, "a new layer plays every loop");
     assert_eq!(out(&s, before), 6.0, "a layer that ran to the clip's end still does");
     assert_eq!(s.project.item(effectcraft_project::ItemId(p)).unwrap().duration(), Some(Tick::from_seconds_f64(6.0)));
+}
+
+/// #1068: the same for an interpreted PNG sequence — the loop count survives interpretation and
+/// a freshly dragged layer plays every cycle.
+#[test]
+fn interpret_footage_loop_extends_sequence_layers() {
+    let mut s = comp();
+    let p = s.execute("file.importPlaceholder", json!({"name": "Seq", "width": 320, "height": 240, "duration": 0.4})).unwrap()["item"].as_u64().unwrap();
+    let id = effectcraft_project::ItemId(p);
+    // Make it a sequence like the importer's grouped PNGs.
+    s.edit("Seq", None, |proj, _| {
+        if let Some(ItemKind::Footage(f)) = proj.item_mut(id).map(|i| &mut i.kind) {
+            f.kind = effectcraft_project::FootageKind::Sequence;
+            f.sequence = (0..12).map(|n| format!("/tmp/seq_{n:04}.png")).collect();
+            f.sync_sequence_duration();
+        }
+        Ok(())
+    })
+    .unwrap();
+    s.state.project_selection = vec![id];
+    s.execute("file.interpretFootage", json!({"loop": 15.0})).unwrap();
+    let l = s.execute("layer.addItem", json!({"item": p})).unwrap()["layer"].as_u64().unwrap();
+    let layer = s.active_comp().unwrap().layer(effectcraft_project::LayerId(l)).unwrap();
+    let dur = (layer.out_point - layer.in_point).seconds();
+    assert!((dur - 6.0).abs() < 0.05, "15 loops of a 0.4 s sequence: {dur}");
 }
 
 #[test]

@@ -356,13 +356,12 @@ fn find_missing(s: &mut Session, p: &Value) -> Result<Value> {
             Ok(json!({"effects": found}))
         }
         "fonts" => {
-            let families = crate::text_families();
             let mut found = vec![];
             for (cid, c) in s.project.comps() {
                 for l in &c.layers {
                     if let Some(pr) = l.props.prop("text/sourceText")
                         && let Some(doc) = pr.value.as_text()
-                        && !families.iter().any(|f| f.eq_ignore_ascii_case(&doc.font))
+                        && effectcraft_text::resolve(&doc.font, &doc.style).missing
                     {
                         found.push(json!({"comp": cid.0, "layer": l.id.0, "font": doc.font}));
                     }

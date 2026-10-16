@@ -358,6 +358,55 @@ fn path_operators_roundtrip() {
     compare_renders(&p, cid, &q, nc, 2.0 / 255.0);
 }
 
+#[test]
+fn offset_paths_miter_uses_animatable_lottie_value() {
+    let (mut p, cid) = setup();
+    let l = shape_layer(&mut p, cid, |ids| {
+        let mut animated = build::shape_simple_op(ids, "offset").unwrap();
+        animated.get_mut("miter").unwrap().keys = vec![Keyframe::new(s(0.0), Value::Scalar(5.0)), Keyframe::new(s(1.0), Value::Scalar(9.0))];
+        let mut constant = build::shape_simple_op(ids, "offset").unwrap();
+        constant.get_mut("miter").unwrap().value = Value::Scalar(6.0);
+        let mut stroke = build::shape_stroke(ids, [1.0, 1.0, 1.0, 1.0], 2.0);
+        stroke.get_mut("miter").unwrap().value = Value::Scalar(7.0);
+        vec![animated, constant, stroke]
+    });
+    push(&mut p, cid, l);
+
+    let (q, nc, warnings, json) = roundtrip(&p, cid, &ExportOptions::default());
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let shapes = &json["layers"][0]["shapes"];
+    assert_eq!(shapes[0]["ty"], "op");
+    assert_eq!(shapes[0]["ml"]["a"], json!(1));
+    assert_eq!(shapes[0]["ml"]["k"][0]["s"], json!([5.0]));
+    assert_eq!(shapes[0]["ml"]["k"][1]["s"], json!([9.0]));
+    assert_eq!(shapes[1]["ml"], json!({"a": 0, "k": 6.0}));
+    assert_eq!(shapes[2]["ty"], "st");
+    assert_eq!(shapes[2]["ml"], json!(7.0));
+    assert!(compare_comps(&p, cid, &q, nc) > 10);
+    let restored = &q.comp(nc).unwrap().layers[0];
+    assert_eq!(restored.props.group("contents/offset").unwrap().get("miter").unwrap().keys.len(), 2);
+
+    // Previously exported Offset Paths have a scalar ml; they remain importable.
+    let mut old = json;
+    old["layers"][0]["shapes"][1]["ml"] = json!(6.0);
+    let mut legacy = Project::default();
+    let bytes = serde_json::to_vec(&old).unwrap();
+    let imported = import(&mut legacy, &bytes, "Legacy", "", &mut |_| None).unwrap();
+    let constant = &legacy.comp(imported.comp).unwrap().layers[0].props;
+    let second = constant
+        .sub("contents")
+        .unwrap()
+        .children
+        .iter()
+        .filter_map(|n| match n {
+            Node::Group(g) if g.match_id == "offset" => Some(g),
+            _ => None,
+        })
+        .nth(1)
+        .unwrap();
+    assert_eq!(second.get("miter").unwrap().value, Value::Scalar(6.0));
+}
+
 // ---------------------------------------------------------------- layers
 
 #[test]

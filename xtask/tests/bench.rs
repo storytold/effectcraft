@@ -1,0 +1,134 @@
+//! Regression gates must fail when benchmark evidence is corrupt or incomplete.
+use serde_json::{Value, json};
+use std::path::PathBuf;
+use std::process::{Command, Output};
+
+struct ResultsDir(PathBuf);
+impl ResultsDir {
+    fn new() -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!("effectcraft-bench-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+        std::fs::create_dir_all(&dir).unwrap();
+        Self(dir)
+    }
+    fn compare(&self, old: &str, new: &str, gate: bool) -> Output {
+        let baseline = self.0.join("baseline.jsonl");
+        let candidate = self.0.join("candidate.jsonl");
+        std::fs::write(&baseline, old).unwrap();
+        std::fs::write(&candidate, new).unwrap();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_xtask"));
+        command.args(["bench", "--compare"]).arg(baseline).arg("--with").arg(candidate);
+        if gate {
+            command.args(["--fail-over", "5"]);
+        }
+        command.output().unwrap()
+    }
+}
+impl Drop for ResultsDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn row(scenario: &str, ok: bool) -> Value {
+    json!({"scenario": scenario, "run": "full", "ok": ok,
+        "settings": {"resolution": "full", "frames": 60, "format": "png"},
+        "metrics": {"wall_s": 1.0, "cpu_s": 2.0, "peak_footprint_bytes": 1000, "max_rss_bytes": null, "instructions": null}})
+}
+fn diagnostic(output: &Output) -> String {
+    format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr))
+}
+
+#[test]
+fn corrupt_records_report_the_input_file_and_line() {
+    let files = ResultsDir::new();
+    let valid = row("demo", true);
+    let mut missing = valid.clone();
+    missing["settings"].as_object_mut().unwrap().remove("frames");
+    let mut missing_wall = valid.clone();
+    missing_wall["metrics"].as_object_mut().unwrap().remove("wall_s");
+    let mut bad_metric = valid.clone();
+    bad_metric["metrics"]["cpu_s"] = json!("not a measurement");
+    let mut negative_metric = valid.clone();
+    negative_metric["metrics"]["cpu_s"] = json!(-1);
+    for bad in [
+        "{".into(),
+        "null".into(),
+        "[]".into(),
+        "{}".into(),
+        missing.to_string(),
+        missing_wall.to_string(),
+        bad_metric.to_string(),
+        negative_metric.to_string(),
+    ] {
+        let output = files.compare(&format!("{valid}\n"), &format!("{valid}\n\n \n{bad}\n"), true);
+        let message = diagnostic(&output);
+        assert!(!output.status.success(), "corrupt input passed: {bad}\n{message}");
+        assert!(message.contains("candidate.jsonl:4:"), "{message}");
+    }
+    let output = files.compare("{\n", &format!("{valid}\n"), false);
+    assert!(!output.status.success());
+    assert!(diagnostic(&output).contains("baseline.jsonl:1:"));
+}
+
+#[test]
+fn gates_reject_failed_latest_runs_and_missing_coverage() {
+    let files = ResultsDir::new();
+    let good = row("demo", true);
+    let failed = row("demo", false);
+    let other = row("layers", true);
+    for (old, new) in [
+        (good.to_string(), String::new()),
+        (String::new(), String::new()),
+        (good.to_string(), failed.to_string()),
+        (good.to_string(), format!("{good}\n{failed}")),
+        (format!("{good}\n{failed}"), good.to_string()),
+        (good.to_string(), other.to_string()),
+        (format!("{good}\n{other}"), good.to_string()),
+        (good.to_string(), format!("{good}\n{other}")),
+    ] {
+        let output = files.compare(&old, &new, true);
+        assert!(!output.status.success(), "incomplete gate passed: {old} -> {new}\n{}", diagnostic(&output));
+    }
+}
+
+#[test]
+fn gates_require_a_comparable_resource_metric_for_every_run() {
+    let files = ResultsDir::new();
+    let good = row("demo", true);
+    let mut wall_only = good.clone();
+    wall_only["metrics"]["cpu_s"] = Value::Null;
+    wall_only["metrics"]["peak_footprint_bytes"] = Value::Null;
+    let output = files.compare(&good.to_string(), &wall_only.to_string(), true);
+    assert!(!output.status.success(), "{}", diagnostic(&output));
+    assert!(diagnostic(&output).contains("comparable"));
+    let mut zero = good.clone();
+    zero["metrics"]["cpu_s"] = json!(0);
+    zero["metrics"]["peak_footprint_bytes"] = json!(0);
+    assert!(!files.compare(&zero.to_string(), &good.to_string(), true).status.success());
+    let mut mixed = row("layers", true);
+    mixed["metrics"] = wall_only["metrics"].clone();
+    assert!(!files.compare(&format!("{good}\n{mixed}"), &format!("{good}\n{mixed}"), true).status.success());
+}
+
+#[test]
+fn valid_results_keep_comparison_and_exploratory_mode() {
+    let files = ResultsDir::new();
+    let good = row("demo", true);
+    let failed = row("demo", false);
+    let output = files.compare(&format!("\n{failed}\n{good}\n"), &format!("{good}\n \n"), true);
+    assert!(output.status.success(), "{}", diagnostic(&output));
+    assert!(diagnostic(&output).contains("+0.0%"));
+    let mut open = good.clone();
+    open["run"] = json!("open");
+    open["settings"]["resolution"] = json!("-");
+    open["settings"]["frames"] = json!(0);
+    assert!(files.compare(&open.to_string(), &open.to_string(), true).status.success(), "project-open runs have zero rendered frames");
+    let mut regression = good.clone();
+    regression["metrics"]["cpu_s"] = json!(3);
+    assert!(!files.compare(&good.to_string(), &regression.to_string(), true).status.success());
+    let output = files.compare(&good.to_string(), &format!("{good}\n{failed}"), false);
+    assert!(output.status.success(), "exploratory comparison stays available");
+    assert!(diagnostic(&output).contains("failed"), "latest failure is visible: {}", diagnostic(&output));
+}

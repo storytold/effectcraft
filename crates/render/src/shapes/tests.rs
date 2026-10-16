@@ -424,3 +424,40 @@ fn radial_gradient_highlight_moves_the_focal_point() {
     // The outer circle is unchanged: points just outside it are black in both.
     assert!(a.get(100, 182)[0] < 0.03 && b.get(100, 182)[0] < 0.03 && b.get(100, 17)[0] < 0.03);
 }
+
+/// The layer-space buffer `super::render` draws the comp's only shape layer into.
+fn shape_buf(p: &Project, cid: ItemId) -> effectcraft_effects::Buf {
+    let comp = p.comp(cid).unwrap();
+    let ctx = crate::eval::EvalCtx::new(p, cid, comp, Tick::ZERO);
+    let layer = &comp.layers[0];
+    super::render(&ctx, layer, layer.props.sub("contents").unwrap(), 1.0)
+}
+
+#[test]
+fn straight_stroke_buffer_is_not_padded_by_the_miter_limit() {
+    // A 1080 px wide vertical wipe (a track matte): no joins, so the buffer is the line plus half
+    // the width, not 4× (Miter Limit 4) the width on every side (4326×6366, ~440 MB per frame).
+    let (p, cid) = shape_comp_sized(1080, 1920, |ids| vec![line_path(ids, [0.0, 1020.0], [0.0, -1020.0]), build::shape_stroke(ids, RED, 1080.0)]);
+    let b = shape_buf(&p, cid);
+    assert!(b.img.width <= 1090 && b.img.height <= 3130, "{}×{}", b.img.width, b.img.height);
+}
+
+#[test]
+fn miter_corner_still_fits_its_buffer() {
+    // A sharp V with a 20 px miter-joined stroke: the miter tip reaches well past half the width.
+    let (p, cid) = shape_comp(|ids| {
+        let sp = effectcraft_keyframe::ShapePath {
+            vertices: vec![[-40.0, -30.0], [0.0, 20.0], [40.0, -30.0]],
+            in_tangents: vec![[0.0; 2]; 3],
+            out_tangents: vec![[0.0; 2]; 3],
+            closed: false,
+            feather: Vec::new(),
+        };
+        vec![build::shape_path(ids, sp), build::shape_stroke(ids, RED, 20.0)]
+    });
+    // The miter tip of the V points down from (100, 70): its pixels are drawn, not clipped.
+    let img = frame(&p, cid);
+    assert!(alpha(&img, 100, 80) > 0.9, "{}", alpha(&img, 100, 80));
+    let b = shape_buf(&p, cid);
+    assert!(b.img.height as f64 >= 50.0 + 20.0 * 4.0 * 0.5, "{}", b.img.height);
+}
