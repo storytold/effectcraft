@@ -52,6 +52,30 @@ fn layer_quality_sampling_frame_blending_and_undo() {
     assert!(s.execute("layer.quality", json!({"quality": "fancy"})).is_err());
 }
 
+/// `layer.sampling {toggle}` (Alt+B, Alt+Shift+B): layers that all have the sampling already get
+/// the other one; without `toggle` it is only set.
+#[test]
+fn layer_sampling_toggles_when_every_layer_has_it() {
+    let mut s = comp();
+    let a = solid(&mut s, "#ff0000");
+    let b = solid(&mut s, "#00ff00");
+    let sampling = |s: &Session| [layer(s, a).switches.sampling, layer(s, b).switches.sampling];
+    let bicubic = json!({"layers": [a, b], "sampling": "bicubic", "toggle": true});
+    s.execute("layer.sampling", bicubic.clone()).unwrap();
+    assert_eq!(sampling(&s), [Sampling::Bicubic; 2]);
+    s.execute("layer.sampling", bicubic.clone()).unwrap();
+    assert_eq!(sampling(&s), [Sampling::Bilinear; 2]);
+    s.execute("layer.sampling", json!({"layers": [a, b], "sampling": "bilinear", "toggle": true})).unwrap();
+    assert_eq!(sampling(&s), [Sampling::Bicubic; 2]);
+    // Mixed layers all get the one asked for.
+    s.execute("layer.sampling", json!({"layers": [a], "sampling": "bilinear"})).unwrap();
+    s.execute("layer.sampling", bicubic).unwrap();
+    assert_eq!(sampling(&s), [Sampling::Bicubic; 2]);
+    // Without `toggle` it stays.
+    s.execute("layer.sampling", json!({"layers": [a, b], "sampling": "bicubic"})).unwrap();
+    assert_eq!(sampling(&s), [Sampling::Bicubic; 2]);
+}
+
 /// `layer.setSwitch {others: true}` (Alt-click on an A/V feature): the layer stands alone, the
 /// other layers come back the next time.
 #[test]
@@ -1070,6 +1094,57 @@ fn new_comp_from_selection_is_one_undo_step_with_the_dialog_options() {
 }
 
 #[test]
+fn comps_made_from_the_same_footage_get_numbered_names_as_duplicate_does() {
+    let mut s = Session::default();
+    let add = |s: &mut Session, name: &str, kind: ItemKind| std::sync::Arc::make_mut(&mut s.project).add_item(name, effectcraft_color::Label::None, None, kind);
+    let still = || {
+        ItemKind::Footage(effectcraft_project::Footage {
+            kind: effectcraft_project::FootageKind::Still,
+            width: 200,
+            height: 100,
+            has_video: true,
+            ..Default::default()
+        })
+    };
+    let clip = add(&mut s, "clip.png", still());
+    let other = add(&mut s, "other.png", still());
+    let make = |s: &mut Session, sel: Vec<effectcraft_project::ItemId>, p: Value| -> Vec<String> {
+        s.state.project_selection = sel;
+        let r = s.execute("file.newCompFromSelection", p).unwrap();
+        r["comps"].as_array().unwrap().iter().map(|c| s.project.item(effectcraft_project::ItemId(c.as_u64().unwrap())).unwrap().name.clone()).collect()
+    };
+    // The same footage again and again: "clip", "clip 2", "clip 3".
+    assert_eq!(make(&mut s, vec![clip], json!({})), ["clip"]);
+    assert_eq!(make(&mut s, vec![clip], json!({})), ["clip 2"]);
+    assert_eq!(make(&mut s, vec![clip], json!({})), ["clip 3"]);
+    // Several items at once (one comp each): every new comp has a name of its own.
+    assert_eq!(make(&mut s, vec![clip, other, clip], json!({})), ["clip 4", "other", "clip 5"]);
+    // One comp for all, named after the item it takes its settings from.
+    assert_eq!(make(&mut s, vec![clip, other], json!({"single": true})), ["clip 6"]);
+    assert_eq!(make(&mut s, vec![clip, other], json!({"single": true, "dimensionsFrom": 1})), ["other 2"]);
+    // Undo removes the latest comp and frees its name for the next one.
+    s.execute("edit.undo", json!({})).unwrap();
+    assert!(s.project.find_by_name("other 2").is_none());
+    assert_eq!(make(&mut s, vec![other], json!({})), ["other 2"]);
+    // A solid or extensionless footage still names its own first comp; the second is numbered.
+    let red = add(&mut s, "Red Solid 1", ItemKind::Solid(effectcraft_project::Solid { color: [1.0, 0.0, 0.0], width: 100, height: 100, pixel_aspect: 1.0 }));
+    assert_eq!(make(&mut s, vec![red], json!({})), ["Red Solid 1"]);
+    assert_eq!(make(&mut s, vec![red], json!({})), ["Red Solid 2"]);
+    // Duplicate numbers its copies the same way, from the same helper.
+    let first = s.project.find_by_name("clip").unwrap().id;
+    s.state.project_selection = vec![first];
+    let r = s.execute("project.duplicate", json!({})).unwrap();
+    assert_eq!(s.project.item(effectcraft_project::ItemId(r["items"][0].as_u64().unwrap())).unwrap().name, "clip 7");
+    // A comp made from a comp doesn't take its source comp's name.
+    assert_eq!(make(&mut s, vec![first], json!({})), ["clip 8"]);
+    // Several comps at once are one undo step; undoing frees all their names.
+    assert_eq!(make(&mut s, vec![clip, other], json!({})), ["clip 9", "other 3"]);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert!(s.project.find_by_name("clip 9").is_none() && s.project.find_by_name("other 3").is_none());
+    assert_eq!(make(&mut s, vec![other, clip], json!({})), ["other 3", "clip 9"]);
+}
+
+#[test]
 fn project_files_keep_their_format_warn_about_newer_versions_and_never_save_unreadable() {
     let mut s = comp();
     let a = solid(&mut s, "#ff0000");
@@ -1463,4 +1538,70 @@ fn interpret_footage_loop_from_form_float() {
         ItemKind::Footage(f) => assert_eq!(f.loop_count, 3),
         _ => panic!(),
     }
+}
+
+/// Looped video footage lasts its loops: a 2 s clip looped 3 times is a 6 s layer, and a layer
+/// that ran to the clip's end is re-timed when the loop count changes (#1045).
+#[test]
+fn interpret_footage_loop_extends_video_layers() {
+    let mut s = comp();
+    let p = s.execute("file.importPlaceholder", json!({"name": "Clip", "width": 320, "height": 240, "duration": 2})).unwrap()["item"].as_u64().unwrap();
+    let before = s.execute("layer.addItem", json!({"item": p})).unwrap()["layer"].as_u64().unwrap();
+    s.state.project_selection = vec![effectcraft_project::ItemId(p)];
+    s.execute("file.interpretFootage", json!({"loop": 3.0})).unwrap();
+    let after = s.execute("layer.addItem", json!({"item": p})).unwrap()["layer"].as_u64().unwrap();
+    let out = |s: &Session, l: u64| s.active_comp().unwrap().layer(effectcraft_project::LayerId(l)).unwrap().out_point.seconds();
+    assert_eq!(out(&s, after), 6.0, "a new layer plays every loop");
+    assert_eq!(out(&s, before), 6.0, "a layer that ran to the clip's end still does");
+    assert_eq!(s.project.item(effectcraft_project::ItemId(p)).unwrap().duration(), Some(Tick::from_seconds_f64(6.0)));
+}
+
+#[test]
+fn percentage_guides_follow_the_comp_size() {
+    let mut s = comp();
+    s.execute("view.addGuide", json!({"orientation": "vertical", "position": 25, "percent": true})).unwrap();
+    s.execute("view.addPercentGuide", json!({"orientation": "horizontal"})).unwrap();
+    s.execute("view.addGuide", json!({"orientation": "vertical", "position": 100})).unwrap();
+    let c = s.active_comp().unwrap().clone();
+    assert!(c.guides[0].percent && c.guides[1].percent && !c.guides[2].percent);
+    assert_eq!((c.guides[0].px(c.width, c.height), c.guides[1].px(c.width, c.height)), (160.0, 180.0));
+    // A comp resize moves percentage guides with it and leaves pixel guides alone.
+    s.execute("comp.settings", json!({"width": 1280, "height": 720})).unwrap();
+    let c = s.active_comp().unwrap().clone();
+    assert_eq!((c.guides[0].px(c.width, c.height), c.guides[1].px(c.width, c.height), c.guides[2].px(c.width, c.height)), (320.0, 360.0, 100.0));
+    // Dragging keeps the unit: the position arrives in comp pixels.
+    s.execute("view.moveGuide", json!({"index": 0, "position": 640})).unwrap();
+    assert_eq!(s.active_comp().unwrap().guides[0].position, 50.0);
+    // Snapping sees the pixel position.
+    let c = s.active_comp().unwrap().clone();
+    assert!(c.guides.iter().any(|g| g.percent && g.vertical && g.px(c.width, c.height) == 640.0));
+    // Converting keeps the guide where it is, and undoes in one step.
+    s.execute("view.convertGuides", json!({"to": "pixels"})).unwrap();
+    let g = s.active_comp().unwrap().guides.clone();
+    assert!(g.iter().all(|g| !g.percent));
+    assert_eq!((g[0].position, g[1].position), (640.0, 360.0));
+    s.execute("view.convertGuides", json!({"to": "percent", "index": 2})).unwrap();
+    assert_eq!(s.active_comp().unwrap().guides[2].position, 100.0 / 1280.0 * 100.0);
+    s.undo();
+    assert!(!s.active_comp().unwrap().guides[2].percent);
+    assert!(s.execute("view.convertGuides", json!({"to": "furlongs"})).is_err());
+    assert!(s.execute("view.convertGuides", json!({"index": 9})).is_err());
+    // A crop keeps percentage guides where they were on the image.
+    s.execute("view.convertGuides", json!({"to": "percent"})).unwrap();
+    s.execute("view.setRegionOfInterest", json!({"rect": [320, 0, 640, 720]})).unwrap();
+    s.execute("comp.cropToRegionOfInterest", json!({})).unwrap();
+    let c = s.active_comp().unwrap();
+    assert!((c.guides[0].px(c.width, c.height) - 320.0).abs() < 1e-9, "640 - 320 crop offset");
+}
+
+#[test]
+fn old_guides_load_as_pixel_guides_and_percent_round_trips() {
+    let old: effectcraft_project::Guide = serde_json::from_str(r#"{"vertical":true,"position":12.5}"#).unwrap();
+    assert!(!old.percent);
+    assert!(!serde_json::to_string(&old).unwrap().contains("percent"), "pixel guides stay in the old shape");
+    let g = effectcraft_project::Guide { vertical: false, position: 10.0, percent: true };
+    let back: effectcraft_project::Guide = serde_json::from_str(&serde_json::to_string(&g).unwrap()).unwrap();
+    assert_eq!(back, g);
+    // A zero-sized comp never divides by zero.
+    assert!(g.px(0, 0).is_finite());
 }

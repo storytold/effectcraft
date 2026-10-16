@@ -63,6 +63,10 @@ pub enum Req {
     Sample { comp: u64, layer: u64, x: Secs, y: Secs, rx: Secs, ry: Secs, post: bool, t: Secs },
     /// `thisProject`: `[bitsPerChannel, linearBlending, workingSpace]`.
     Project,
+    /// A layer's source item (AE's `Layer.source`): `[kind, id, name, width, height, duration,
+    /// frameDuration, pixelAspect]`, kind `"comp"` (id = the precomp's composition) or `"footage"`
+    /// (footage, solids and models), or null for layers without an item (text, shape, null…).
+    SourceInfo { comp: u64, layer: u64 },
 }
 
 /// Parse CSV/TSV text (RFC 4180 quoting) into rows of cells.
@@ -457,6 +461,28 @@ impl<'a> Resolver<'a> {
                 Resp::Bool(project.settings.blend_linear || project.settings.linearize),
                 Resp::Str(project.settings.working_space.map(|w| format!("{w:?}")).unwrap_or_default()),
             ]),
+            Req::SourceInfo { comp, layer } => {
+                let c = self.comp(*comp)?;
+                let l = self.layer(*comp, *layer)?;
+                let it = project.item(l.source.item()?)?;
+                let (kind, aspect, frame, duration) = match &it.kind {
+                    ItemKind::Comp(nc) => ("comp", nc.pixel_aspect, nc.frame_duration().seconds(), nc.duration.seconds()),
+                    ItemKind::Footage(f) => ("footage", f.pixel_aspect, f.frame_rate.frame_duration().seconds(), f.duration.seconds()),
+                    ItemKind::Solid(s) => ("footage", s.pixel_aspect, c.frame_duration().seconds(), c.duration.seconds()),
+                    ItemKind::Folder => return None,
+                };
+                let (w, h) = it.dimensions().unwrap_or((0, 0));
+                Resp::List(vec![
+                    Resp::Str(kind.into()),
+                    Resp::Num(it.id.0 as f64),
+                    Resp::Str(it.name.clone()),
+                    Resp::Num(w as f64),
+                    Resp::Num(h as f64),
+                    Resp::Num(duration),
+                    Resp::Num(frame),
+                    Resp::Num(aspect),
+                ])
+            }
             Req::Sample { comp, layer, x, y, rx, ry, post, t } => {
                 let l = self.layer(*comp, *layer)?;
                 let f = |b: &Secs| f64::from_bits(*b);

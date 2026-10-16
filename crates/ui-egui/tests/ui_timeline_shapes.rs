@@ -28,6 +28,18 @@ fn center(h: &Harness<'_, EffectcraftApp>, id: &str) -> Pos2 {
     pos2(e.rect[0] + e.rect[2] / 2.0, e.rect[1] + e.rect[3] / 2.0)
 }
 
+/// Step until the viewer's frame has rendered (frames render on background threads).
+fn settle(h: &mut Harness<'_, EffectcraftApp>) {
+    for _ in 0..600 {
+        h.step();
+        if h.state().frames.inflight() == 0 && h.state().frames.last_ms.lock().map(|v| *v > 0.0).unwrap_or(false) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    h.run_steps(2);
+}
+
 fn click_at(h: &mut Harness<'_, EffectcraftApp>, p: Pos2) {
     h.input_mut().events.push(Event::PointerMoved(p));
     h.step();
@@ -224,7 +236,7 @@ fn timeline_colour_eyedropper_samples_the_comp() {
     let mut h = harness(s);
     h.state_mut().ui.timeline.open_groups.extend(open);
     open_layer(&mut h, l);
-    h.run_steps(2);
+    settle(&mut h);
     click(&mut h, &format!("timeline.prop.{fill}.eyedropper"));
     assert_eq!(h.state().ui.fx_pick.as_ref().map(|p| (p.prop, p.kind.as_str())), Some((fill, "color")), "the eyedropper waits for a viewer click");
     let pos = effectcraft_ui_egui::panels::viewer::comp_to_screen(&h.ctx, [6.0, 6.0]).unwrap();

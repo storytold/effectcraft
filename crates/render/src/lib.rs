@@ -861,6 +861,19 @@ impl<'a> Renderer<'a> {
         Region::Full
     }
 
+    /// Whether `layer`'s processed buffer (source → masks → effects) is cached and the same as
+    /// one frame earlier: drawing it from the layer cache (an accelerator uploads it once) beats
+    /// re-running its effects every frame.
+    pub fn layer_is_static(&self, ctx: &EvalCtx, layer: &Layer) -> bool {
+        if self.cache.is_none() {
+            return false;
+        }
+        let (scale, draft, blur) = (self.raster_scale(ctx, layer), self.opts.draft, self.mb_on(ctx, layer));
+        let prev = ctx.time - ctx.comp.frame_rate.frame_duration();
+        let now = cache::layer_key(ctx, layer, scale, draft, blur);
+        now.is_some() && now == cache::layer_key(&ctx.at(prev), layer, scale, draft, blur)
+    }
+
     /// Rasterisation scale of a layer's source: the output scale, or — for text and shape layers,
     /// which are always continuously rasterised (#390, #751), and Continuously Rasterize vector
     /// footage — the output scale times the layer's on-screen scale (quarter-octave steps, rounded
@@ -1945,13 +1958,26 @@ impl<'a> Renderer<'a> {
     /// [`Self::composite_iso`] with the track matte's pixels already drawn (`matte`, e.g. a 3D
     /// matte seen through the camera); otherwise the matte layer is placed in 2D.
     pub(crate) fn composite_iso_with(&self, ctx: &EvalCtx, layer: &Layer, mut iso: Image, canvas: &mut Image, opacity: f32, matte_img: Option<Image>) {
+        self.apply_track_matte(ctx, layer, &mut iso, matte_img);
+        if layer.preserve_transparency {
+            iso.data.par_iter_mut().zip(canvas.data.par_iter()).for_each(|(p, q)| {
+                for c in p.iter_mut() {
+                    *c *= q[3];
+                }
+            });
+        }
+        canvas.blend_from(&iso, layer.blend_mode, opacity, layer.id.0 as u32);
+    }
+
+    /// Multiply `img` (comp-sized) by the layer's track matte, if it has one; `matte_img` as in
+    /// [`Self::composite_iso_with`].
+    fn apply_track_matte(&self, ctx: &EvalCtx, layer: &Layer, img: &mut Image, matte_img: Option<Image>) {
         let matte = layer.track_matte.and_then(|tm| ctx.comp.layer(tm.layer).filter(|m| m.id != layer.id).map(|m| (m, tm.kind)));
-        let preserve = layer.preserve_transparency;
         if let Some((m, kind)) = matte {
             let mimg = match matte_img {
-                Some(i) if i.width == canvas.width && i.height == canvas.height => i,
+                Some(i) if i.width == img.width && i.height == img.height => i,
                 _ => {
-                    let mut mimg = Image::new(canvas.width, canvas.height);
+                    let mut mimg = Image::new(img.width, img.height);
                     if m.is_active_at(ctx.time)
                         && let Some(mb) = self.layer_buf(ctx, m)
                     {
@@ -1961,7 +1987,7 @@ impl<'a> Renderer<'a> {
                     mimg
                 }
             };
-            iso.data.par_iter_mut().zip(mimg.data.par_iter()).for_each(|(p, q)| {
+            img.data.par_iter_mut().zip(mimg.data.par_iter()).for_each(|(p, q)| {
                 let k = match kind {
                     MatteKind::Alpha => q[3],
                     MatteKind::AlphaInverted => 1.0 - q[3],
@@ -1974,22 +2000,16 @@ impl<'a> Renderer<'a> {
                 }
             });
         }
-        if preserve {
-            iso.data.par_iter_mut().zip(canvas.data.par_iter()).for_each(|(p, q)| {
-                for c in p.iter_mut() {
-                    *c *= q[3];
-                }
-            });
-        }
-        canvas.blend_from(&iso, layer.blend_mode, opacity, layer.id.0 as u32);
     }
 
-    /// Adjustment layer: effects applied to the comp below, limited to the layer's footprint.
+    /// Adjustment layer: effects applied to the comp below, limited to the layer's footprint
+    /// and its track matte.
     fn draw_adjustment(&self, ctx: &EvalCtx, layer: &Layer, canvas: &mut Image, opacity: f32) {
         let Some(mut foot) = self.source(ctx, layer) else { return };
         let _ = masks::apply(ctx, layer, &mut foot, self.mask_blur(ctx, layer));
         let mut matte = Image::new(canvas.width, canvas.height);
         self.place(ctx, layer, &foot, &mut matte, BlendMode::Normal, 1.0);
+        self.apply_track_matte(ctx, layer, &mut matte, None);
         let o = self.roi_offset().map(|(x, y, _, _)| [-x, -y]).unwrap_or([0.0; 2]);
         let mut below = Buf { img: canvas.clone(), offset: o, scale: self.opts.scale };
         // Effects run in the working space, not the linear blending space.

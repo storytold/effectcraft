@@ -18,10 +18,11 @@
 //! ```
 //!
 //! An entry's shortcut is the command's default shortcut unless the line gives one (needed for
-//! entries with bound parameters). Adobe-service entries (Team Projects, Libraries, Bridge, Media
-//! Encoder, Behance, Creative Cloud…) are intentionally absent; the Essential Graphics workspace
-//! uses the Properties panel and the Essential Graphics panel, whose templates use EffectCraft's
-//! own open `.ectemplate` format.
+//! entries with bound parameters). A line can give further default keys after a comma
+//! (`| F3, Cmd+Shift+T`); the menus show the first. Adobe-service entries (Team Projects,
+//! Libraries, Bridge, Media Encoder, Behance, Creative Cloud…) are intentionally absent; the
+//! Essential Graphics workspace uses the Properties panel and the Essential Graphics panel, whose
+//! templates use EffectCraft's own open `.ectemplate` format.
 
 use std::sync::OnceLock;
 
@@ -61,7 +62,7 @@ fn file_name(p: &str) -> String {
 }
 
 fn dyn_entry(label: String, command: &str, params: Value) -> MenuEntry {
-    MenuEntry { label, command: command.into(), params, shortcut: None }
+    MenuEntry { label, command: command.into(), params, shortcut: None, alt_shortcuts: vec![] }
 }
 
 /// The bindable holding shortcut `keys` in the active preset (its label).
@@ -175,6 +176,9 @@ pub struct MenuEntry {
     #[serde(skip_serializing_if = "Value::is_null")]
     pub params: Value,
     pub shortcut: Option<String>,
+    /// Further default shortcuts (the menus show `shortcut`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub alt_shortcuts: Vec<String>,
 }
 
 impl MenuEntry {
@@ -434,8 +438,9 @@ pub fn parse(text: &str, mac: bool) -> Result<Vec<MenuNode>, String> {
                     };
                     // Entries with bound params state their own shortcut; plain entries use the command's.
                     let inherited = if params.is_null() { commands::find(&command).and_then(|c| c.shortcut).map(str::to_string) } else { None };
-                    let shortcut = parts.next().map(|s| s.trim().to_string()).or(inherited);
-                    out.push(MenuNode::Item(MenuEntry { label, command, params, shortcut }));
+                    let mut keys = parts.next().into_iter().flat_map(|s| s.split(", ")).map(|s| s.trim().to_string());
+                    let shortcut = keys.next().or(inherited);
+                    out.push(MenuNode::Item(MenuEntry { label, command, params, shortcut, alt_shortcuts: keys.collect() }));
                 }
                 None => {
                     let children = build(lines, i, depth + 1, mac)?;
@@ -456,8 +461,13 @@ pub fn parse(text: &str, mac: bool) -> Result<Vec<MenuNode>, String> {
 fn effect_categories() -> Vec<MenuNode> {
     let mut cats: Vec<(&str, Vec<MenuNode>)> = vec![];
     for e in crate::effects::all() {
-        let entry =
-            MenuNode::Item(MenuEntry { label: e.name.into(), command: "effect.apply".into(), params: serde_json::json!({"effect": e.id}), shortcut: None });
+        let entry = MenuNode::Item(MenuEntry {
+            label: e.name.into(),
+            command: "effect.apply".into(),
+            params: serde_json::json!({"effect": e.id}),
+            shortcut: None,
+            alt_shortcuts: vec![],
+        });
         match cats.iter_mut().find(|(c, _)| *c == e.category) {
             Some((_, v)) => v.push(entry),
             None => cats.push((e.category, vec![entry])),
@@ -528,6 +538,7 @@ File
     File... | file.import
     Multiple Files... | file.importMultiple
     Adobe Premiere Pro Project... | file.importTimeline
+    EffectCraft Project... | file.importProject
     Placeholder... | file.importPlaceholder
     Solid... | file.importSolid
     Lottie... | file.importLottie
@@ -650,7 +661,7 @@ Edit
     All 3D Cache... | edit.purge {"what":"3d"}
     Undo | edit.purgeUndo
     Image Cache Memory | edit.purge {"what":"image"}
-    Snapshot | edit.purge {"what":"snapshot"}
+    Snapshot | edit.purge {"what":"snapshot"} | Cmd+Shift+F5
   ---
   Edit Original... | edit.editOriginal
   ---
@@ -775,8 +786,8 @@ Layer
     Draft | layer.quality {"quality":"draft"} | Cmd+Shift+U
     Wireframe | layer.quality {"quality":"wireframe"} | Cmd+Alt+Shift+U
     ---
-    Bilinear | layer.sampling {"sampling":"bilinear"}
-    Bicubic | layer.sampling {"sampling":"bicubic"}
+    Bilinear | layer.sampling {"sampling":"bilinear","toggle":true} | Alt+B
+    Bicubic | layer.sampling {"sampling":"bicubic","toggle":true} | Alt+Shift+B
   Switches
     Hide Other Video | layer.hideOtherVideo
     Show All Video | layer.showAllVideo
@@ -954,7 +965,7 @@ Layer
   Pre-compose... | layer.precompose
   Scene Edit Detection... | layer.sceneEditDetection
 Effect
-  Effect Controls | window.panel {"panel":"effectControls"} | F3
+  Effect Controls | window.panel {"panel":"effectControls"} | F3, Cmd+Shift+T
   Last Effect | effect.applyLast
   Remove All | effect.removeAll
   ---
@@ -1106,6 +1117,9 @@ View
   Snap to Guides | view.snapToGuides
   Lock Guides | view.lockGuides
   Add Guide... | view.addGuide
+  Add Percentage Guide... | view.addPercentGuide
+  Convert Guides to Percentage | view.convertGuides {"to":"percent"}
+  Convert Guides to Pixels | view.convertGuides {"to":"pixels"}
   Clear Guides | view.clearGuides
   Import Guides... | view.importGuides
   Export Guides... | view.exportGuides
@@ -1203,7 +1217,7 @@ Window
   Wiggler | window.panel {"panel":"wiggler"}
   ---
   Composition | window.panel {"panel":"composition"}
-  Effect Controls | window.panel {"panel":"effectControls"} | F3
+  Effect Controls | window.panel {"panel":"effectControls"} | F3, Cmd+Shift+T
   Flowchart | window.panel {"panel":"flowchart"} | Cmd+F11
   Footage | window.panel {"panel":"footage"}
   Layer | window.panel {"panel":"layer"}

@@ -118,12 +118,23 @@ fn edited(app: &EffectcraftApp, ectx: &EvalCtx, lid: LayerId) -> Option<Edited> 
     Some(Edited { layer, doc, lay, m, inv, carets })
 }
 
-/// The topmost text layer whose text is under screen point `s`.
-fn text_layer_at(app: &EffectcraftApp, ectx: &EvalCtx, map: &ViewerMap, s: Pos2) -> Option<Edited> {
-    super::viewer::selectable_layers(ectx.comp, ectx.time)
+/// Type-tool clicks prefer a selected text layer, as viewer dragging does (#230).
+/// Double-clicks retain topmost picking. Both use the same visibility/lock/time/solo filter.
+fn text_layer_at(app: &EffectcraftApp, ectx: &EvalCtx, map: &ViewerMap, s: Pos2, prefer_selected: bool) -> Option<Edited> {
+    let mut topmost = None;
+    for e in super::viewer::selectable_layers(ectx.comp, ectx.time)
         .filter(|l| matches!(l.source, LayerSource::Text))
         .filter_map(|l| edited(app, ectx, l.id))
-        .find(|e| e.contains(map, s))
+        .filter(|e| e.contains(map, s))
+    {
+        if !prefer_selected || app.session.state.selected_layers.contains(&e.layer.id) {
+            return Some(e);
+        }
+        if topmost.is_none() {
+            topmost = Some(e);
+        }
+    }
+    topmost
 }
 
 fn exec(app: &mut EffectcraftApp, id: &str, p: Value) -> Option<Value> {
@@ -223,7 +234,7 @@ pub fn hook(
             }
         }
         if !handled && type_tool {
-            if let Some(e) = text_layer_at(app, ectx, map, pos) {
+            if let Some(e) = text_layer_at(app, ectx, map, pos, true) {
                 let ci = e.hit(map, pos);
                 exec(app, "text.edit", json!({"layer": e.layer.id.0, "caret": ci}));
                 drag = Some(Drag::Select { layer: e.layer.id });
@@ -325,7 +336,7 @@ pub fn hook(
                 owns = true;
             }
             _ if !matches!(tool, Tool::Hand | Tool::Zoom) && !tool.is_pen() && !type_tool => {
-                if let Some(e) = text_layer_at(app, ectx, map, p) {
+                if let Some(e) = text_layer_at(app, ectx, map, p, false) {
                     exec(app, "text.edit", json!({"layer": e.layer.id.0}));
                     ui.memory_mut(|m| m.request_focus(focus_id()));
                     owns = true;

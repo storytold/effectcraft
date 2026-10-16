@@ -27,6 +27,8 @@ struct Job {
 enum Found {
     Missing(bool),
     Probed(Box<Footage>),
+    /// Found again under the project's new folder (the project was moved with its footage).
+    Moved(Box<Footage>),
 }
 
 fn exists(s: &dyn crate::Services, path: &str) -> bool {
@@ -52,6 +54,7 @@ pub fn start(s: &mut Session, items: Option<Vec<ItemId>>, wait: bool) -> crate::
     let services = s.services.clone();
     let importer = s.importer.clone();
     let rate = s.sequence_rate();
+    let project_dir = s.path.as_deref().and_then(crate::commands::relink_moved::project_dir);
     let n = jobs.len();
     s.spawn_task("footageCheck", format!("Checking footage ({n} items)"), wait, move |ctl| {
         let mut found: Vec<(ItemId, Found)> = Vec::with_capacity(jobs.len());
@@ -68,6 +71,14 @@ pub fn start(s: &mut Session, items: Option<Vec<ItemId>>, wait: bool) -> crate::
                 // placeholders, as in After Effects).
                 exists(services.as_ref(), &f.path) || f.sequence.iter().any(|p| exists(services.as_ref(), p))
             };
+            // Moved with the project: the same place under the project's folder.
+            if !present
+                && let Some(dir) = &project_dir
+                && let Some(nf) = crate::commands::relink_moved::find_moved(services.as_ref(), dir, f)
+            {
+                found.push((j.id, Found::Moved(Box::new(nf))));
+                continue;
+            }
             // Saved without metadata (a hand-written or converted project): probe it now.
             let needs_probe = present && f.width == 0 && f.height == 0 && f.kind != FootageKind::Audio;
             let probed = importer.as_ref().filter(|_| needs_probe).map(|imp| match f.kind {
@@ -105,7 +116,7 @@ pub fn start(s: &mut Session, items: Option<Vec<ItemId>>, wait: bool) -> crate::
 /// not an edit (the same as After Effects marking footage missing at open).
 fn apply(s: &mut Session, found: Vec<(ItemId, Found)>) -> Value {
     let checked = found.len();
-    let (mut missing, mut probed, mut changed) = (0, 0, false);
+    let (mut missing, mut probed, mut moved, mut changed) = (0, 0, 0, false);
     let p = std::sync::Arc::make_mut(&mut s.project);
     for (id, f) in found {
         let Some(ItemKind::Footage(cur)) = p.item_mut(id).map(|i| &mut i.kind) else { continue };
@@ -122,6 +133,11 @@ fn apply(s: &mut Session, found: Vec<(ItemId, Found)>) -> Value {
                 *cur = *nf;
                 changed = true;
             }
+            Found::Moved(nf) => {
+                moved += 1;
+                *cur = *nf;
+                changed = true;
+            }
         }
     }
     if changed {
@@ -133,10 +149,17 @@ fn apply(s: &mut Session, found: Vec<(ItemId, Found)>) -> Value {
         }
         s.events.push(crate::Event::PurgeCaches);
     }
-    if missing > 0 {
-        s.toast(format!("{missing} footage item(s) missing (File ▸ Dependencies ▸ Find Missing Footage)"));
+    if moved > 0 {
+        s.toast(format!("Found {moved} footage item(s) in the project's new folder"));
     }
-    json!({"checked": checked, "missing": missing, "probed": probed})
+    if missing > 0 {
+        s.toast(format!("{missing} footage item(s) missing (File ▸ Dependencies ▸ Relink Missing Footage…)"));
+    }
+    let mut out = json!({"checked": checked, "missing": missing, "probed": probed});
+    if moved > 0 {
+        out["relinked"] = json!(moved);
+    }
+    out
 }
 
 pub(crate) fn command(s: &mut Session, p: &Value) -> crate::Result<Value> {
@@ -221,6 +244,34 @@ mod tests {
         let r = o.execute("footage.check", json!({"wait": true})).unwrap();
         assert_eq!(r["missing"], 2);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn footage_moved_with_its_project_is_found_on_open() {
+        let d = std::env::temp_dir().join(format!("ec-footage-moved-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("Job/shots")).unwrap();
+        std::fs::write(d.join("Job/shots/a.png"), b"x").unwrap();
+        // Saved on another machine: the footage sat next to the project in /Users/x/Job.
+        let mut s = session_with(&["/Users/x/Job/shots/a.png", "/Users/x/elsewhere/b.png"]);
+        let path = d.join("Job/p.ecproj");
+        s.execute("file.saveAs", json!({"path": path.to_string_lossy()})).unwrap();
+        let mut o = Session::default();
+        o.execute("file.open", json!({"path": path.to_string_lossy()})).unwrap();
+        let r = o.execute("footage.check", json!({"wait": true})).unwrap();
+        assert_eq!((r["relinked"].as_u64(), r["missing"].as_u64()), (Some(1), Some(1)), "{r}");
+        let paths: Vec<String> = o
+            .project
+            .items
+            .values()
+            .filter_map(|i| match &i.kind {
+                ItemKind::Footage(f) => Some(f.path.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(paths.contains(&d.join("Job/shots/a.png").to_string_lossy().to_string()), "{paths:?}");
+        assert!(!o.is_dirty(), "finding the files is not an edit");
+        let _ = std::fs::remove_dir_all(d);
     }
 
     #[test]

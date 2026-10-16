@@ -277,16 +277,18 @@ fn transform_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter,
             let c = value.components();
             let n = if pr.shown_dims > 0 && !(layer.is_3d() && c.len() == 3) { pr.shown_dims as usize } else { c.len() };
             let mut x = vx;
-            let link_id = egui::Id::new(("props-scale-link", lid));
-            let linked = is_scale && ui.data(|d| d.get_temp::<bool>(link_id)).unwrap_or(true);
-            if is_scale {
+            // Scale: the chain link (Constrain Proportions, on by default), sharing the
+            // Timeline's per-property state so both panels agree (#956).
+            let linkable = pr.match_id == "scale";
+            let linked = linkable && !app.ui.timeline.unlinked.contains(&uid);
+            if linkable {
                 // Constrain Proportions toggle, left of the values.
                 let lr = Rect::from_center_size(pos2(x - 12.0, cy), vec2(12.0, 12.0));
-                let resp = ui.interact(lr, link_id.with("btn"), Sense::click());
+                let resp = ui.interact(lr, egui::Id::new(("props-link", uid)), Sense::click()).on_hover_text(tr("Constrain Proportions"));
                 icons::paint(p, lr, Icon::Link, if linked { t.accent } else { t.text_faint });
                 app.auto.add(&format!("{base}.constrain"), lr, "Constrain Proportions");
-                if resp.clicked() {
-                    ui.data_mut(|d| d.insert_temp(link_id, !linked));
+                if resp.clicked() && !app.ui.timeline.unlinked.remove(&uid) {
+                    app.ui.timeline.unlinked.insert(uid);
                 }
             }
             for d in 0..n.min(c.len()) {
@@ -295,13 +297,14 @@ fn transform_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter,
                 app.auto.add(&format!("{base}.value.{d}"), vr, &pr.name);
                 if let Some(nv) = nv {
                     let mut nc = c.clone();
-                    if linked && c[d].abs() > 1e-9 {
-                        let k = nv / c[d];
-                        for v in nc.iter_mut().take(n) {
-                            *v *= k;
+                    // Alt edits one value of a linked pair, as in the Timeline.
+                    let shown = if linked && !ui.input(|i| i.modifiers.alt && !widgets::proportional_scrub(i.modifiers)) { n.min(c.len()) } else { 1 };
+                    let from = if shown == 1 { d } else { 0 };
+                    for (e, v) in widgets::constrained(c.get(from..from + shown).unwrap_or_default(), d - from, nv).into_iter().enumerate() {
+                        if let Some(slot) = nc.get_mut(from + e) {
+                            *slot = v;
                         }
                     }
-                    nc[d] = nv;
                     set(actions, json!(nc));
                 }
                 x = vr.max.x + 10.0;

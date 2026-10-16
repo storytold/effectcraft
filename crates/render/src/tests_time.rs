@@ -64,6 +64,22 @@ fn echo_blends_neighbouring_frames() {
     assert!((a - want).abs() < 0.01, "{a} vs {want}");
 }
 
+/// Time effects see the effects applied before them, as After Effects renders them (SceneYard
+/// "Task Preparation UI": Echo after CC Particle Systems II echoed the black solid under the
+/// fireworks and blacked out the white page). Fill (red) then Echo: the echoes are red.
+#[test]
+fn time_effects_see_the_effects_before_them() {
+    let (mut p, cid) = scene(Some(("ec.generate.fill", &[])));
+    let spec = effectcraft_effects::find("ec.time.echo").unwrap();
+    let mut next = p.next_id;
+    let mut g = effectcraft_effects::instantiate(spec, &mut Ids(&mut next), spec.name, [200.0, 100.0]);
+    g.prop_mut("numberOfEchoes").unwrap().value = Value::Scalar(0.0);
+    p.next_id = next;
+    p.comp_mut(cid).unwrap().layers[0].props.sub_mut("effects").unwrap().children.push(g.into());
+    let c = render(&p, cid, 1.5, None).get(100, 50);
+    assert!(c[0] > 0.99 && c[1] < 0.01 && c[2] < 0.01 && c[3] > 0.99, "{c:?}");
+}
+
 #[test]
 fn time_difference_of_static_layer_is_black() {
     let mut p = Project::default();

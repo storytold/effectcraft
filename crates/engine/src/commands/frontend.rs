@@ -37,6 +37,7 @@ pub fn specs() -> Vec<CommandSpec> {
         fe!("app.keyboardShortcuts", "Keyboard Shortcuts", ["Edit"], Some("Cmd+Alt+'"), "{}", always),
         fe!("app.templates", "Templates", [], None, "{kind: renderSettings|outputModule}", always),
         fe!("app.find", "Find", ["File"], Some("Cmd+F"), "{query?}", always),
+        fe!("effects.copyPresetsFolderPath", "Copy Presets Folder Path", [], None, "{}", always),
         // Preview.
         fe!(
             "playback.toggle",

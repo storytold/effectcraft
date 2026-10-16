@@ -5,9 +5,11 @@
 
 use crate::EffectcraftApp;
 
+/// Effect names, keyed by effect id (#821).
+pub(crate) mod effects;
 /// Translations for the panels, tooltips and dialogs below the menu bar (see the module docs).
 mod ui;
-use effectcraft_engine::menus::MenuEntry;
+use effectcraft_engine::menus::{MenuEntry, MenuNode};
 pub(crate) use ui::{set_current, tr, tr_args};
 
 /// Every language with a catalog, in the order Settings ▸ General ▸ Language lists them.
@@ -138,6 +140,15 @@ fn lookup<'a>(catalog: &[(&str, &str, &'a str)], command: &str, source: &'a str)
 }
 
 pub(crate) fn entry(app: &EffectcraftApp, e: &MenuEntry, shown: String) -> String {
+    // The generated Effect menu's entries label themselves with the effect's registry name; the
+    // catalog replaces it with the interface language's (#821). The entry keeps its command and
+    // its `{"effect": <id>}` params, so a script, an expression or the control channel is
+    // unaffected by what the menu draws.
+    if e.command == "effect.apply"
+        && let Some(id) = e.params.get("effect").and_then(|v| v.as_str())
+    {
+        return effects::name(id, &e.label);
+    }
     // Undo/redo names come from the history, so they are formatted per language here rather than
     // looked up in a catalog. An English (or untranslated) interface keeps the shown label.
     let (undo, no_undo, redo, no_redo) = match language(app) {
@@ -166,6 +177,16 @@ pub(crate) fn entry(app: &EffectcraftApp, e: &MenuEntry, shown: String) -> Strin
         // look it up as a source label (a layer literally named "File" must stay "File").
         _ => shown,
     }
+}
+
+/// The label to draw for a generated Effect-menu category submenu, or `None` for every other
+/// submenu (whose label goes through [`submenu`]).
+///
+/// The generated submenus are the only ones whose children are all `effect.apply` entries, which
+/// is what identifies them: their label is one of the registry's 21 categories, drawn as a
+/// submenu in the Effect menu and as a folder row in Effects & Presets (#821).
+pub(crate) fn effect_category(children: &[MenuNode], source: &str) -> Option<String> {
+    (!children.is_empty() && children.iter().all(|c| matches!(c, MenuNode::Item(e) if e.command == "effect.apply"))).then(|| effects::category(source))
 }
 
 pub(crate) fn submenu(app: &EffectcraftApp, source: &str, shown: String) -> String {
@@ -303,6 +324,7 @@ const SIMPLIFIED_CHINESE: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "文件..."),
     ("file.importMultiple", "Multiple Files...", "多个文件..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Adobe Premiere Pro 项目..."),
+    ("file.importProject", "EffectCraft Project...", "EffectCraft 项目..."),
     ("file.importPlaceholder", "Placeholder...", "占位符..."),
     ("file.importSolid", "Solid...", "纯色..."),
     ("file.importLottie", "Lottie...", "Lottie..."),
@@ -777,6 +799,9 @@ const SIMPLIFIED_CHINESE: &[(&str, &str, &str)] = &[
     ("view.snapToGuides", "Snap to Guides", "对齐到参考线"),
     ("view.lockGuides", "Lock Guides", "锁定参考线"),
     ("view.addGuide", "Add Guide...", "添加参考线..."),
+    ("view.addPercentGuide", "Add Percentage Guide...", "添加百分比参考线..."),
+    ("view.convertGuides", "Convert Guides to Percentage", "将参考线转换为百分比"),
+    ("view.convertGuides", "Convert Guides to Pixels", "将参考线转换为像素"),
     ("view.clearGuides", "Clear Guides", "清除参考线"),
     ("view.importGuides", "Import Guides...", "导入参考..."),
     ("view.exportGuides", "Export Guides...", "导出参考..."),
@@ -933,6 +958,7 @@ const TRADITIONAL_CHINESE: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "檔案..."),
     ("file.importMultiple", "Multiple Files...", "多個檔案..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Adobe Premiere Pro 專案..."),
+    ("file.importProject", "EffectCraft Project...", "EffectCraft 專案..."),
     ("file.importPlaceholder", "Placeholder...", "預留位置..."),
     ("file.importSolid", "Solid...", "純色..."),
     ("file.importLottie", "Lottie...", "Lottie..."),
@@ -1407,6 +1433,9 @@ const TRADITIONAL_CHINESE: &[(&str, &str, &str)] = &[
     ("view.snapToGuides", "Snap to Guides", "靠齊參考線"),
     ("view.lockGuides", "Lock Guides", "鎖定參考線"),
     ("view.addGuide", "Add Guide...", "新增參考線..."),
+    ("view.addPercentGuide", "Add Percentage Guide...", "新增百分比參考線..."),
+    ("view.convertGuides", "Convert Guides to Percentage", "將參考線轉換為百分比"),
+    ("view.convertGuides", "Convert Guides to Pixels", "將參考線轉換為像素"),
     ("view.clearGuides", "Clear Guides", "清除參考線"),
     ("view.importGuides", "Import Guides...", "匯入參考線..."),
     ("view.exportGuides", "Export Guides...", "匯出參考線..."),
@@ -1563,6 +1592,7 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("file.importPlaceholder", "Placeholder...", "プレースホルダー..."),
     ("file.importSolid", "Solid...", "平面..."),
     ("file.importLottie", "Lottie...", "Lottie..."),
+    ("file.importProject", "EffectCraft Project...", "EffectCraftプロジェクト..."),
     ("file.importVanishingPoint", "Vanishing Point (.vpe)...", "Vanishing Point (.vpe)..."),
     ("essential.importTemplate", "Essential Graphics Template...", "エッセンシャルグラフィックステンプレート..."),
     ("", "Import Recent Footage", "最近使用したフッテージを読み込み"),
@@ -2034,6 +2064,9 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("view.snapToGuides", "Snap to Guides", "ガイドにスナップ"),
     ("view.lockGuides", "Lock Guides", "ガイドをロック"),
     ("view.addGuide", "Add Guide...", "ガイドを追加..."),
+    ("view.addPercentGuide", "Add Percentage Guide...", "パーセントガイドを追加..."),
+    ("view.convertGuides", "Convert Guides to Percentage", "ガイドをパーセントに変換"),
+    ("view.convertGuides", "Convert Guides to Pixels", "ガイドをピクセルに変換"),
     ("view.clearGuides", "Clear Guides", "ガイドを消去"),
     ("view.importGuides", "Import Guides...", "ガイドを読み込み..."),
     ("view.exportGuides", "Export Guides...", "ガイドを書き出し..."),
@@ -2190,6 +2223,7 @@ const UKRAINIAN: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "Файл..."),
     ("file.importMultiple", "Multiple Files...", "Кілька файлів..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Проєкт Adobe Premiere Pro..."),
+    ("file.importProject", "EffectCraft Project...", "Проєкт EffectCraft..."),
     ("file.importPlaceholder", "Placeholder...", "Заповнювач..."),
     ("file.importSolid", "Solid...", "Суцільний колір..."),
     ("file.importLottie", "Lottie...", "Lottie..."),
@@ -2664,6 +2698,9 @@ const UKRAINIAN: &[(&str, &str, &str)] = &[
     ("view.snapToGuides", "Snap to Guides", "Прив’язувати до напрямних"),
     ("view.lockGuides", "Lock Guides", "Заблокувати напрямні"),
     ("view.addGuide", "Add Guide...", "Додати напрямну..."),
+    ("view.addPercentGuide", "Add Percentage Guide...", "Додати відсоткову напрямну..."),
+    ("view.convertGuides", "Convert Guides to Percentage", "Перетворити напрямні на відсотки"),
+    ("view.convertGuides", "Convert Guides to Pixels", "Перетворити напрямні на пікселі"),
     ("view.clearGuides", "Clear Guides", "Очистити напрямні"),
     ("view.importGuides", "Import Guides...", "Імпортувати напрямні..."),
     ("view.exportGuides", "Export Guides...", "Експортувати напрямні..."),
@@ -2821,6 +2858,7 @@ const SPANISH: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "Archivo..."),
     ("file.importMultiple", "Multiple Files...", "Varios archivos..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Proyecto de Adobe Premiere Pro..."),
+    ("file.importProject", "EffectCraft Project...", "Proyecto de EffectCraft..."),
     ("file.importPlaceholder", "Placeholder...", "Marcador de posición..."),
     ("file.importSolid", "Solid...", "Sólido..."),
     ("file.importLottie", "Lottie...", "Lottie..."),
@@ -3295,6 +3333,9 @@ const SPANISH: &[(&str, &str, &str)] = &[
     ("view.snapToGuides", "Snap to Guides", "Ajustar a las guías"),
     ("view.lockGuides", "Lock Guides", "Bloquear guías"),
     ("view.addGuide", "Add Guide...", "Añadir guía..."),
+    ("view.addPercentGuide", "Add Percentage Guide...", "Añadir guía porcentual..."),
+    ("view.convertGuides", "Convert Guides to Percentage", "Convertir guías a porcentaje"),
+    ("view.convertGuides", "Convert Guides to Pixels", "Convertir guías a píxeles"),
     ("view.clearGuides", "Clear Guides", "Borrar guías"),
     ("view.importGuides", "Import Guides...", "Importar guías..."),
     ("view.exportGuides", "Export Guides...", "Exportar guías..."),
@@ -3450,6 +3491,7 @@ const PORTUGUESE: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "Arquivo..."),
     ("file.importMultiple", "Multiple Files...", "Vários arquivos..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Projeto do Adobe Premiere Pro..."),
+    ("file.importProject", "EffectCraft Project...", "Projeto do EffectCraft..."),
     ("file.importPlaceholder", "Placeholder...", "Espaço reservado..."),
     ("file.importSolid", "Solid...", "Sólido..."),
     ("file.importLottie", "Lottie...", "Lottie..."),
@@ -3924,6 +3966,9 @@ const PORTUGUESE: &[(&str, &str, &str)] = &[
     ("view.snapToGuides", "Snap to Guides", "Encaixar nas guias"),
     ("view.lockGuides", "Lock Guides", "Bloquear guias"),
     ("view.addGuide", "Add Guide...", "Adicionar guia..."),
+    ("view.addPercentGuide", "Add Percentage Guide...", "Adicionar guia percentual..."),
+    ("view.convertGuides", "Convert Guides to Percentage", "Converter guias em porcentagem"),
+    ("view.convertGuides", "Convert Guides to Pixels", "Converter guias em pixels"),
     ("view.clearGuides", "Clear Guides", "Limpar guias"),
     ("view.importGuides", "Import Guides...", "Importar guias..."),
     ("view.exportGuides", "Export Guides...", "Exportar guias..."),
@@ -4087,6 +4132,7 @@ const RUSSIAN: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "Файл..."),
     ("file.importMultiple", "Multiple Files...", "Несколько файлов..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Проект Adobe Premiere Pro..."),
+    ("file.importProject", "EffectCraft Project...", "Проект EffectCraft..."),
     ("file.importPlaceholder", "Placeholder...", "Заполнитель..."),
     ("file.importSolid", "Solid...", "Сплошной цвет..."),
     ("file.importLottie", "Lottie...", "Lottie..."),
@@ -4555,6 +4601,9 @@ const RUSSIAN: &[(&str, &str, &str)] = &[
     ("view.snapToGuides", "Snap to Guides", "Привязывать к направляющим"),
     ("view.lockGuides", "Lock Guides", "Закрепить направляющие"),
     ("view.addGuide", "Add Guide...", "Добавить направляющую..."),
+    ("view.addPercentGuide", "Add Percentage Guide...", "Добавить процентную направляющую..."),
+    ("view.convertGuides", "Convert Guides to Percentage", "Преобразовать направляющие в проценты"),
+    ("view.convertGuides", "Convert Guides to Pixels", "Преобразовать направляющие в пиксели"),
     ("view.clearGuides", "Clear Guides", "Очистить направляющие"),
     ("view.importGuides", "Import Guides...", "Импортировать направляющие..."),
     ("view.exportGuides", "Export Guides...", "Экспортировать направляющие..."),
@@ -4716,6 +4765,7 @@ const FRENCH: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "Fichier..."),
     ("file.importMultiple", "Multiple Files...", "Plusieurs fichiers..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Projet Adobe Premiere Pro..."),
+    ("file.importProject", "EffectCraft Project...", "Projet EffectCraft..."),
     ("file.importPlaceholder", "Placeholder...", "Espace réservé..."),
     ("file.importSolid", "Solid...", "Solide..."),
     ("file.importLottie", "Lottie...", "Lottie..."),
@@ -5184,6 +5234,9 @@ const FRENCH: &[(&str, &str, &str)] = &[
     ("view.snapToGuides", "Snap to Guides", "Aimanter sur les repères"),
     ("view.lockGuides", "Lock Guides", "Verrouiller les repères"),
     ("view.addGuide", "Add Guide...", "Ajouter un repère..."),
+    ("view.addPercentGuide", "Add Percentage Guide...", "Ajouter un repère en pourcentage..."),
+    ("view.convertGuides", "Convert Guides to Percentage", "Convertir les repères en pourcentage"),
+    ("view.convertGuides", "Convert Guides to Pixels", "Convertir les repères en pixels"),
     ("view.clearGuides", "Clear Guides", "Effacer les repères"),
     ("view.importGuides", "Import Guides...", "Importer des repères..."),
     ("view.exportGuides", "Export Guides...", "Exporter des repères..."),
@@ -5345,6 +5398,7 @@ const GERMAN: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "Datei..."),
     ("file.importMultiple", "Multiple Files...", "Mehrere Dateien..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Adobe Premiere Pro-Projekt..."),
+    ("file.importProject", "EffectCraft Project...", "EffectCraft-Projekt..."),
     ("file.importPlaceholder", "Placeholder...", "Platzhalter..."),
     ("file.importSolid", "Solid...", "Farbfläche..."),
     ("file.importLottie", "Lottie...", "Lottie..."),
@@ -5813,6 +5867,9 @@ const GERMAN: &[(&str, &str, &str)] = &[
     ("view.snapToGuides", "Snap to Guides", "An Hilfslinien einrasten"),
     ("view.lockGuides", "Lock Guides", "Hilfslinien sperren"),
     ("view.addGuide", "Add Guide...", "Hilfslinie hinzufügen..."),
+    ("view.addPercentGuide", "Add Percentage Guide...", "Prozentuale Hilfslinie hinzufügen..."),
+    ("view.convertGuides", "Convert Guides to Percentage", "Hilfslinien in Prozent umwandeln"),
+    ("view.convertGuides", "Convert Guides to Pixels", "Hilfslinien in Pixel umwandeln"),
     ("view.clearGuides", "Clear Guides", "Hilfslinien entfernen"),
     ("view.importGuides", "Import Guides...", "Hilfslinien importieren..."),
     ("view.exportGuides", "Export Guides...", "Hilfslinien exportieren..."),
@@ -5974,6 +6031,7 @@ const CZECH: &[(&str, &str, &str)] = &[
     ("file.import", "File...", "Soubor..."),
     ("file.importMultiple", "Multiple Files...", "Více souborů..."),
     ("file.importTimeline", "Adobe Premiere Pro Project...", "Projekt Adobe Premiere Pro..."),
+    ("file.importProject", "EffectCraft Project...", "Projekt EffectCraft..."),
     ("file.importPlaceholder", "Placeholder...", "Zástupný záznam..."),
     ("file.importSolid", "Solid...", "Plná vrstva..."),
     ("file.importLottie", "Lottie...", "Lottie..."),
@@ -6443,6 +6501,9 @@ const CZECH: &[(&str, &str, &str)] = &[
     ("view.snapToGuides", "Snap to Guides", "Přichytávat k vodítkům"),
     ("view.lockGuides", "Lock Guides", "Zamknout vodítka"),
     ("view.addGuide", "Add Guide...", "Přidat vodítko..."),
+    ("view.addPercentGuide", "Add Percentage Guide...", "Přidat procentuální vodítko..."),
+    ("view.convertGuides", "Convert Guides to Percentage", "Převést vodítka na procenta"),
+    ("view.convertGuides", "Convert Guides to Pixels", "Převést vodítka na pixely"),
     ("view.clearGuides", "Clear Guides", "Vymazat vodítka"),
     ("view.importGuides", "Import Guides...", "Importovat vodítka..."),
     ("view.exportGuides", "Export Guides...", "Exportovat vodítka..."),
@@ -6591,7 +6652,8 @@ mod tests {
             assert_eq!(label(&app, "", source), translated);
         }
         assert_eq!(label(&app, "unknown.command", "Text"), "Text");
-        let panel = MenuEntry { label: "Layer".into(), command: "window.panel".into(), params: json!({"panel": "layer"}), shortcut: None };
+        let panel =
+            MenuEntry { label: "Layer".into(), command: "window.panel".into(), params: json!({"panel": "layer"}), shortcut: None, alt_shortcuts: vec![] };
         assert_eq!(entry(&app, &panel, "Layer: File Čeština".into()), "Vrstva: File Čeština");
         assert_eq!(
             submenu(&app, "Assign Shortcut to Workspace", "Assign Shortcut to “File Čeština” Workspace".into()),
@@ -6607,8 +6669,8 @@ mod tests {
     fn czech_undo_redo_keeps_history_labels_verbatim() {
         let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
         app.session.execute("prefs.set", json!({"key": "general.language", "value": "cs"})).unwrap();
-        let undo = MenuEntry { label: "Undo".into(), command: "edit.undo".into(), params: json!({}), shortcut: None };
-        let redo = MenuEntry { label: "Redo".into(), command: "edit.redo".into(), params: json!({}), shortcut: None };
+        let undo = MenuEntry { label: "Undo".into(), command: "edit.undo".into(), params: json!({}), shortcut: None, alt_shortcuts: vec![] };
+        let redo = MenuEntry { label: "Redo".into(), command: "edit.redo".into(), params: json!({}), shortcut: None, alt_shortcuts: vec![] };
         assert_eq!(entry(&app, &undo, "Can't Undo".into()), "Není co vrátit");
         assert_eq!(entry(&app, &redo, "Can't Redo".into()), "Není co zopakovat");
         app.session.history.undo.push(("File Čeština".into(), app.session.project.clone()));
@@ -6627,7 +6689,7 @@ mod tests {
                 ("Reveal in Explorer", "Zobrazit v Průzkumníku"),
                 ("Reveal in File Manager", "Zobrazit ve správci souborů"),
             ] {
-                let e = MenuEntry { label: source.into(), command: command.into(), params: json!({}), shortcut: None };
+                let e = MenuEntry { label: source.into(), command: command.into(), params: json!({}), shortcut: None, alt_shortcuts: vec![] };
                 assert_eq!(label(&app, command, source), translated);
                 assert_eq!(entry(&app, &e, source.into()), translated);
                 assert_eq!(label(&app, "file.openRecent", source), source);
@@ -6722,7 +6784,8 @@ mod tests {
                 ("Reveal in Explorer", "Показати у Провіднику"),
                 ("Reveal in File Manager", "Показати у файловому менеджері"),
             ] {
-                let e = MenuEntry { label: source.into(), command: command.into(), params: json!({"item": "My file.mp4"}), shortcut: None };
+                let e =
+                    MenuEntry { label: source.into(), command: command.into(), params: json!({"item": "My file.mp4"}), shortcut: None, alt_shortcuts: vec![] };
                 assert_eq!(label(&app, command, source), translated);
                 assert_eq!(entry(&app, &e, source.into()), translated);
                 assert_eq!(label(&app, "file.openRecent", source), source);
@@ -6751,7 +6814,7 @@ mod tests {
         assert_eq!(
             entry(
                 &app,
-                &MenuEntry { label: "Layer".into(), command: "window.panel".into(), params: json!({"panel":"layer"}), shortcut: None },
+                &MenuEntry { label: "Layer".into(), command: "window.panel".into(), params: json!({"panel":"layer"}), shortcut: None, alt_shortcuts: vec![] },
                 "Layer: File".into()
             ),
             "レイヤー: File"
@@ -6854,13 +6917,17 @@ mod tests {
         // Untranslated keys and dynamic labels stay verbatim.
         assert_eq!(label(&app, "unknown.command", "Text"), "Text");
         assert_eq!(
-            entry(&app, &MenuEntry { label: "Undo".into(), command: "edit.undo".into(), params: json!({}), shortcut: None }, "Undo Comp1".into()),
+            entry(
+                &app,
+                &MenuEntry { label: "Undo".into(), command: "edit.undo".into(), params: json!({}), shortcut: None, alt_shortcuts: vec![] },
+                "Undo Comp1".into()
+            ),
             "无可撤销的操作"
         );
         assert_eq!(
             entry(
                 &app,
-                &MenuEntry { label: "Layer".into(), command: "window.panel".into(), params: json!({"panel":"layer"}), shortcut: None },
+                &MenuEntry { label: "Layer".into(), command: "window.panel".into(), params: json!({"panel":"layer"}), shortcut: None, alt_shortcuts: vec![] },
                 "Layer: File".into()
             ),
             "图层: File"
@@ -6894,13 +6961,17 @@ mod tests {
         // Untranslated keys and dynamic labels stay verbatim.
         assert_eq!(label(&app, "unknown.command", "Text"), "Text");
         assert_eq!(
-            entry(&app, &MenuEntry { label: "Undo".into(), command: "edit.undo".into(), params: json!({}), shortcut: None }, "Undo Comp1".into()),
+            entry(
+                &app,
+                &MenuEntry { label: "Undo".into(), command: "edit.undo".into(), params: json!({}), shortcut: None, alt_shortcuts: vec![] },
+                "Undo Comp1".into()
+            ),
             "沒有可復原的操作"
         );
         assert_eq!(
             entry(
                 &app,
-                &MenuEntry { label: "Layer".into(), command: "window.panel".into(), params: json!({"panel":"layer"}), shortcut: None },
+                &MenuEntry { label: "Layer".into(), command: "window.panel".into(), params: json!({"panel":"layer"}), shortcut: None, alt_shortcuts: vec![] },
                 "Layer: File".into()
             ),
             "圖層: File"
@@ -6943,7 +7014,8 @@ mod tests {
         assert_eq!(label(&app, "layer.addTextAnimator", "Tracking"), "Міжлітерний інтервал");
         assert_eq!(label(&app, "edit.purgeUndo", "Undo"), "Історія скасувань");
         assert_eq!(label(&app, "unknown.command", "Text"), "Text");
-        let panel = MenuEntry { label: "Layer".into(), command: "window.panel".into(), params: json!({"panel":"layer"}), shortcut: None };
+        let panel =
+            MenuEntry { label: "Layer".into(), command: "window.panel".into(), params: json!({"panel":"layer"}), shortcut: None, alt_shortcuts: vec![] };
         assert_eq!(entry(&app, &panel, "Layer: File".into()), "Шар: File");
         assert_eq!(
             submenu(&app, "Assign Shortcut to Workspace", "Assign Shortcut to “File Україна” Workspace".into()),
@@ -6958,8 +7030,8 @@ mod tests {
     fn ukrainian_undo_redo_keeps_history_labels_verbatim() {
         let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
         app.session.execute("prefs.set", json!({"key":"general.language", "value":"uk"})).unwrap();
-        let undo = MenuEntry { label: "Undo".into(), command: "edit.undo".into(), params: json!({}), shortcut: None };
-        let redo = MenuEntry { label: "Redo".into(), command: "edit.redo".into(), params: json!({}), shortcut: None };
+        let undo = MenuEntry { label: "Undo".into(), command: "edit.undo".into(), params: json!({}), shortcut: None, alt_shortcuts: vec![] };
+        let redo = MenuEntry { label: "Redo".into(), command: "edit.redo".into(), params: json!({}), shortcut: None, alt_shortcuts: vec![] };
         assert_eq!(entry(&app, &undo, "Can't Undo".into()), "Немає дій для скасування");
         assert_eq!(entry(&app, &redo, "Can't Redo".into()), "Немає дій для повторення");
         app.session.history.undo.push(("File Україна".into(), app.session.project.clone()));
@@ -6995,13 +7067,17 @@ mod tests {
         // Untranslated keys and dynamic labels stay verbatim.
         assert_eq!(label(&app, "unknown.command", "Text"), "Text");
         assert_eq!(
-            entry(&app, &MenuEntry { label: "Undo".into(), command: "edit.undo".into(), params: json!({}), shortcut: None }, "Undo Comp1".into()),
+            entry(
+                &app,
+                &MenuEntry { label: "Undo".into(), command: "edit.undo".into(), params: json!({}), shortcut: None, alt_shortcuts: vec![] },
+                "Undo Comp1".into()
+            ),
             "No se puede deshacer"
         );
         assert_eq!(
             entry(
                 &app,
-                &MenuEntry { label: "Layer".into(), command: "window.panel".into(), params: json!({"panel":"layer"}), shortcut: None },
+                &MenuEntry { label: "Layer".into(), command: "window.panel".into(), params: json!({"panel":"layer"}), shortcut: None, alt_shortcuts: vec![] },
                 "Layer: File".into()
             ),
             "Capa: File"
@@ -7036,13 +7112,17 @@ mod tests {
         // Untranslated keys and dynamic labels stay verbatim.
         assert_eq!(label(&app, "unknown.command", "Text"), "Text");
         assert_eq!(
-            entry(&app, &MenuEntry { label: "Undo".into(), command: "edit.undo".into(), params: json!({}), shortcut: None }, "Undo Comp1".into()),
+            entry(
+                &app,
+                &MenuEntry { label: "Undo".into(), command: "edit.undo".into(), params: json!({}), shortcut: None, alt_shortcuts: vec![] },
+                "Undo Comp1".into()
+            ),
             "Não há nada para desfazer"
         );
         assert_eq!(
             entry(
                 &app,
-                &MenuEntry { label: "Layer".into(), command: "window.panel".into(), params: json!({"panel":"layer"}), shortcut: None },
+                &MenuEntry { label: "Layer".into(), command: "window.panel".into(), params: json!({"panel":"layer"}), shortcut: None, alt_shortcuts: vec![] },
                 "Layer: File".into()
             ),
             "Camada: File"

@@ -35,6 +35,8 @@ pub enum Icon {
     Eraser,
     RotoBrush,
     RefineEdge,
+    /// Object Matte: a selection box's corners around a solid object, with a click point.
+    ObjectMatte,
     /// Puppet Position Pin: a pushpin. The other pin tools add a badge at the lower right.
     Puppet,
     PuppetAdvanced,
@@ -347,6 +349,14 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.line(&[(5.0, 14.0), (6.5, 12.5)]);
             pen.line(&[(8.0, 14.0), (9.5, 12.5)]);
             pen.line(&[(11.0, 14.0), (12.5, 12.5)]);
+        }
+        ObjectMatte => {
+            // Corner brackets of a box around a filled object, and the click on it.
+            for (x, y, dx, dy) in [(2.0, 2.0, 1.0, 1.0), (14.0, 2.0, -1.0, 1.0), (14.0, 14.0, -1.0, -1.0), (2.0, 14.0, 1.0, -1.0)] {
+                pen.line(&[(x, y + 3.0 * dy), (x, y), (x + 3.0 * dx, y)]);
+            }
+            pen.dot(8.0, 8.0, 2.2);
+            pen.circle(8.0, 8.0, 4.4);
         }
         Puppet => pen.pushpin(8.0),
         PuppetAdvanced => {

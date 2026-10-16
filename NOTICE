@@ -15,3 +15,8 @@ list (author, source, license) is in ATTRIBUTION.md.
 Inter (assets/fonts/Inter-*.ttf) — SIL Open Font License 1.1. See assets/fonts/OFL-Inter.txt.
 Noto Serif (assets/fonts/NotoSerif-Regular.ttf) — SIL Open Font License 1.1. See assets/fonts/OFL-NotoSerif.txt.
 JetBrains Mono (assets/fonts/JetBrainsMono-Regular.ttf) — SIL Open Font License 1.1. See assets/fonts/OFL-JetBrainsMono.txt.
+
+The optional PDF document reader uses craft-pdf and Hayro-syntax 0.7.2, MIT OR Apache-2.0.
+The shared patched syntax source is centralized in storytold/craft-libs, transferred from
+PdfCraft revision 9ed3abe4907a127d36b12fbfeee71d7e26248da1. This parser-only use embeds no
+Hayro fonts, CMaps or image codecs; EffectCraft keeps its existing fonts and drawing filters.

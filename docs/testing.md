@@ -46,3 +46,27 @@ cargo run --release -p effectcraft-cli -- bench --n 10 --play 30
 
 prints per-layer and per-effect timings for one frame, and playback timings with and without the
 layer cache.
+
+### Render benchmark (`cargo xtask bench`)
+
+```sh
+nice -n 10 cargo xtask bench --bin target/release/effectcraft-cli   # or no --bin: one `--release` build into target/bench
+nice -n 10 cargo xtask bench --quick --compare before.jsonl        # 8 frames instead of 60, % change against an earlier run
+cargo xtask bench --project F.ecproj --comp "Main"                 # any project's comp
+```
+
+measures memory, CPU and wall time of whole `effectcraft-cli` runs, so every optimisation has a
+before and after number. It generates four deterministic scenarios into `target/bench/projects`
+with engine commands (no committed media): `demo` (the built-in demo comp), `layers` (1080p,
+100 solid, text and shape layers with Gaussian Blur, Glow, Levels, Curves, Drop Shadow and
+keyframes), `precomps` (static and animated precomps nested three deep, each used several times)
+and `footage` (a rendered PNG sequence and H.264 clip on several 1080p layers, plus a 4K still).
+Each is opened (`open`), rendered at Full and Half (PNG sequence, deleted afterwards) and as one
+frame. `/usr/bin/time -l` on macOS gives peak memory footprint, max RSS, user + sys CPU and
+instructions retired; `/usr/bin/time -v` on Linux gives max RSS and CPU; elsewhere wall time only.
+
+It prints a table and appends one JSON line per run to `target/bench/results.jsonl` (git rev,
+date, load average, scenario, settings, metrics); `--compare OLD.jsonl` prints the % change against
+the latest matching runs there, `--compare OLD --with NEW` compares two files without rendering.
+The table notes the 1-minute load average: on a busy machine wall time is noise, so compare
+peak memory and instructions retired, and rerun when the load differs a lot.

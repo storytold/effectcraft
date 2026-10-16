@@ -789,8 +789,8 @@ impl<'a, 'i> Parser<'a, 'i> {
                 // Nested viewport.
                 let x = self.attr_len(n, "x", 'x', &st);
                 let y = self.attr_len(n, "y", 'y', &st);
-                let w = n.attribute("width").and_then(|v| self.length(v, 'x', st.font_size)).unwrap_or(self.vw);
-                let h = n.attribute("height").and_then(|v| self.length(v, 'y', st.font_size)).unwrap_or(self.vh);
+                let w = n.attribute("width").and_then(|v| self.length(v, 'x', st.font_size)).filter(|v| v.is_finite()).unwrap_or(self.vw);
+                let h = n.attribute("height").and_then(|v| self.length(v, 'y', st.font_size)).filter(|v| v.is_finite()).unwrap_or(self.vh);
                 let vb = viewbox_transform(n, w, h);
                 let mut children = vec![];
                 let saved = (self.vw, self.vh);
@@ -926,7 +926,7 @@ impl<'a, 'i> Parser<'a, 'i> {
             }
             "rect" => {
                 let (w, h) = (l("width", 'x'), l("height", 'y'));
-                if w <= 0.0 || h <= 0.0 {
+                if !(w > 0.0 && h > 0.0) {
                     return None;
                 }
                 let rx_a = n.attribute("rx").and_then(|v| self.length(v, 'x', st.font_size));
@@ -981,7 +981,7 @@ impl<'a, 'i> Parser<'a, 'i> {
 
 fn viewbox(n: roxmltree::Node) -> Option<([f64; 2], f64, f64)> {
     let v = pathdata::numbers(n.attribute("viewBox")?);
-    (v.len() == 4 && v[2] > 0.0 && v[3] > 0.0).then(|| ([v[0], v[1]], v[2], v[3]))
+    (v.len() == 4 && v.iter().all(|x| x.is_finite()) && v[2] > 0.0 && v[3] > 0.0).then(|| ([v[0], v[1]], v[2], v[3]))
 }
 
 /// The viewBox → viewport transform (`preserveAspectRatio`, default `xMidYMid meet`).
@@ -1147,6 +1147,10 @@ pub fn parse(bytes: &[u8]) -> Result<Doc, Error> {
         }
         None => (pct_or("width", 'x', 300.0), pct_or("height", 'y', 150.0)),
     };
+    // Percentages use the root viewport's user space, even without a viewBox. A size that is not
+    // a finite positive number keeps the 300x150 default, so it cannot produce NaN geometry.
+    let usable = |v: f64, d: f64| if v.is_finite() && v > 0.0 { v } else { d };
+    (p.vw, p.vh) = vb.map_or((usable(dw, 300.0), usable(dh, 150.0)), |(_, w, h)| (w, h));
     let mut rst = st.clone();
     let (opacity, _) = p.cascade(root, &mut rst);
     let mut children = vec![];

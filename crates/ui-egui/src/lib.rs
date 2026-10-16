@@ -98,6 +98,8 @@ pub enum Dialog {
     DeleteItems,
     /// A gradient property's Gradient Editor (`panels::gradient_editor`, `prop.editGradient`).
     GradientEditor,
+    /// Delete a user template from Home? (`panels::templates`).
+    DeleteTemplate,
 }
 
 /// The desktop's light or dark appearance where egui cannot see it (Wayland compositors that send
@@ -448,9 +450,17 @@ impl EffectcraftApp {
     }
 
     /// Keep the saved workspaces for the next session (see [`EffectcraftApp::new`]): After
-    /// Effects' saved workspaces last until they are deleted (#320).
-    pub(crate) fn store_saved_workspaces(&mut self) {
-        self.save_workspace_state();
+    /// Effects' saved workspaces last until they are deleted (#320). `Err` when they weren't
+    /// written (#696): the change applies for this session and a later save retries it, but until
+    /// then a restart brings back what is on disk.
+    pub(crate) fn store_saved_workspaces(&mut self) -> Result<(), String> {
+        let Err(error) = self.workspace_store.save_now(self.session.config.as_deref(), &self.ui) else { return Ok(()) };
+        let message = format!("Workspace changes couldn't be saved and may be lost after a restart: {error}");
+        log::warn!("{message}");
+        self.ui.status = message.clone();
+        // The raw error, so the background retry doesn't report the same failure again.
+        self.workspace_store.error = Some(error);
+        Err(message)
     }
 
     /// Offer the frontend's commands (tools, timeline navigation…) for keyboard shortcuts.
@@ -1148,6 +1158,14 @@ impl EffectcraftApp {
         true
     }
 
+    /// A preview plays with Video off in the Preview panel (audio only): the current time stays
+    /// put, so the viewer and Timeline say so instead of looking stuck (#1118). The frame under
+    /// the audible sample, when one is known.
+    pub fn video_preview_off(&self) -> Option<Option<i64>> {
+        let p = self.playback.plan.filter(|_| self.playback.playing)?;
+        (!p.video).then_some(self.playback.audio_frame)
+    }
+
     /// The viewer shows grids, guides and safe margins (hidden while a preview without
     /// Include Overlays plays).
     pub fn overlays_visible(&self) -> bool {
@@ -1642,6 +1660,12 @@ impl EffectcraftApp {
         // Warp Stabilizer: finish analyses and start queued (re-)analyses in the background.
         if self.session.warp_job.is_some() || !self.session.warp_pending.is_empty() {
             self.session.poll_warp(true);
+            self.session.poll_roto(true);
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        // Roto Brush propagation and Object Matte tracking / Freeze: finish jobs (a Freeze writes
+        // its mattes) and start queued ones in the background.
+        if self.session.roto_job.is_some() || !self.session.roto_pending.is_empty() {
             self.session.poll_roto(true);
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }

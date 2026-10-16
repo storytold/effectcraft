@@ -67,7 +67,7 @@ fn slip_moves_the_source_under_fixed_in_and_out() {
     let r = s.execute("layer.slip", json!({"layers": [id], "delta": 5.0})).unwrap();
     assert_eq!(get(&s).start_time.seconds(), 1.0);
     assert_eq!(r["slipped"][0]["delta"], json!(0.5));
-    // Alt+PageUp / Alt+PageDown nudge by a frame.
+    // Slip by a frame.
     s.execute("layer.slipBack", json!({"layers": [id]})).unwrap();
     assert!((get(&s).start_time.seconds() - (1.0 - 1.0 / 30.0)).abs() < 1e-9);
     s.execute("layer.slipForward", json!({"layers": [id]})).unwrap();
@@ -75,8 +75,9 @@ fn slip_moves_the_source_under_fixed_in_and_out() {
     // Undo walks back through the slips.
     assert!(s.undo() && s.undo() && s.undo() && s.undo());
     assert_eq!(get(&s).start_time, Tick::ZERO);
-    assert_eq!(crate::find_command("layer.slipBack").and_then(|c| c.shortcut), Some("Alt+PageUp"));
-    assert_eq!(crate::find_command("layer.slipForward").and_then(|c| c.shortcut), Some("Alt+PageDown"));
+    // Alt+PageUp / Alt+PageDown move the layer; the one-frame slips have no default key.
+    assert_eq!(crate::find_command("layer.slipBack").and_then(|c| c.shortcut), None);
+    assert_eq!(crate::find_command("layer.slipForward").and_then(|c| c.shortcut), None);
     // Layers without a source duration can't slip.
     s.execute("layer.newSolid", json!({"color": "#ff0000"})).unwrap();
     assert!(s.execute("layer.slip", json!({"delta": 0.5})).is_err());

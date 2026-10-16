@@ -464,3 +464,109 @@ fn timeline_double_click_on_a_text_layer_edits_its_text() {
         assert_eq!(layer_doc(&h.state().session, LayerId(lid)).unwrap().text, "gamma", "typing replaced the text ({target})");
     }
 }
+
+#[test]
+fn duplicated_text_boxes_both_remain_editable() {
+    let mut a = app();
+    let original = a
+        .session
+        .execute("layer.newText", json!({"text": "alpha beta", "size": 40, "position": [40, 100], "justify": "left", "box": [40, 60, 250, 100]}))
+        .unwrap()["layer"]
+        .as_u64()
+        .unwrap();
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).build_eframe(move |_| a);
+    h.run_steps(3);
+    h.state_mut().ui.focused = PanelKind::Composition;
+    key(&mut h, Key::D, Modifiers::COMMAND);
+    let duplicate = h.state().session.state.selected_layers[0].0;
+    assert_ne!(original, duplicate);
+    h.state_mut().session.execute("prop.set", json!({"layer": duplicate, "path": "transform/position", "value": [465, 110]})).unwrap();
+    h.run_steps(3);
+    for (layer, x, text) in [(original, 80.0, "original edited"), (duplicate, 380.0, "duplicate edited")] {
+        h.run_steps(40);
+        let comp = rect(&h, "viewer.comp");
+        let k = comp.width() / 640.0;
+        let p = comp.min + egui::vec2(x * k, 85.0 * k);
+        click(&mut h, p, Modifiers::NONE);
+        click(&mut h, p, Modifiers::NONE);
+        assert_eq!(edited(&h).0, layer);
+        type_text(&mut h, text);
+        key(&mut h, Key::Escape, Modifiers::NONE);
+        assert_eq!(layer_doc(&h.state().session, LayerId(layer)).unwrap().text, text);
+    }
+}
+
+#[test]
+fn overlapping_duplicate_text_remains_editable_by_double_click_and_selected_type_tool() {
+    let mut a = app();
+    let original = a.session.execute("layer.newText", json!({"text": "alpha beta", "size": 40, "box": [40, 60, 250, 100]})).unwrap()["layer"].as_u64().unwrap();
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).build_eframe(move |_| a);
+    h.run_steps(3);
+    h.state_mut().ui.focused = PanelKind::Composition;
+    key(&mut h, Key::D, Modifiers::COMMAND);
+    let duplicate = h.state().session.state.selected_layers[0].0;
+    assert_ne!(original, duplicate);
+    let comp = rect(&h, "viewer.comp");
+    let p = comp.min + egui::vec2(80.0, 85.0) * (comp.width() / 640.0);
+    click(&mut h, p, Modifiers::NONE);
+    click(&mut h, p, Modifiers::NONE);
+    assert_eq!(edited(&h).0, duplicate, "double-click edits the topmost overlapping copy");
+    type_text(&mut h, "copy edited");
+    assert_eq!(edited(&h).1, "copy edited");
+    key(&mut h, Key::Z, Modifiers::COMMAND);
+    assert_eq!(edited(&h).1, "alpha beta", "undo restores the duplicate's text");
+    key(&mut h, Key::Escape, Modifiers::NONE);
+    h.state_mut().session.execute("layer.select", json!({"layers": [original]})).unwrap();
+    h.state_mut().ui.focused = PanelKind::Composition;
+    key(&mut h, Key::T, Modifiers::COMMAND);
+    h.run_steps(40);
+    click(&mut h, p, Modifiers::NONE);
+    assert_eq!(edited(&h).0, original, "the Type tool must honor the explicitly selected overlapping text layer");
+    key(&mut h, Key::A, Modifiers::COMMAND);
+    type_text(&mut h, "original edited");
+    assert_eq!(edited(&h).1, "original edited");
+    assert_eq!(layer_doc(&h.state().session, LayerId(duplicate)).unwrap().text, "alpha beta", "editing the original leaves the duplicate unchanged");
+    key(&mut h, Key::Z, Modifiers::COMMAND);
+    assert_eq!(edited(&h).1, "alpha beta");
+}
+
+#[test]
+fn type_tool_selected_text_preference_skips_ineligible_layers_and_falls_back_to_topmost() {
+    for exclusion in ["hidden", "locked", "inactive", "unsoloed", "outside", "unselected"] {
+        let mut a = app();
+        let mut ids = vec![];
+        for _ in 0..2 {
+            ids.push(
+                a.session.execute("layer.newText", json!({"text": "alpha beta", "size": 40, "box": [40, 60, 250, 100]})).unwrap()["layer"].as_u64().unwrap(),
+            );
+        }
+        let original = ids[0];
+        let topmost = ids[1];
+        match exclusion {
+            "hidden" | "locked" => {
+                let switch = if exclusion == "hidden" { "video" } else { "locked" };
+                a.session.execute("layer.setSwitch", json!({"layers": [original], "switch": switch, "value": exclusion == "locked"})).unwrap();
+            }
+            "inactive" => {
+                let cid = a.session.active_comp_id().unwrap();
+                std::sync::Arc::make_mut(&mut a.session.project).comp_mut(cid).unwrap().layer_mut(LayerId(original)).unwrap().out_point =
+                    effectcraft_engine::time::Tick::ZERO;
+            }
+            "unsoloed" => {
+                a.session.execute("layer.setSwitch", json!({"layers": [topmost], "switch": "solo", "value": true})).unwrap();
+            }
+            "outside" => {
+                a.session.execute("prop.set", json!({"layer": original, "path": "transform/position", "value": [500, 300]})).unwrap();
+            }
+            _ => {}
+        }
+        a.session.state.selected_layers = if exclusion == "unselected" { vec![] } else { vec![LayerId(original)] };
+        a.ui.tool = effectcraft_ui_egui::state::Tool::Type;
+        let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).build_eframe(move |_| a);
+        h.run_steps(3);
+        let comp = rect(&h, "viewer.comp");
+        let p = comp.min + egui::vec2(80.0, 85.0) * (comp.width() / 640.0);
+        click(&mut h, p, Modifiers::NONE);
+        assert_eq!(edited(&h).0, topmost, "{exclusion} selected text must not override the eligible hit");
+    }
+}

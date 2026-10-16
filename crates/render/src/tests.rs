@@ -161,6 +161,32 @@ fn track_matte_kinds_keep_and_invert() {
     }
 }
 
+/// An adjustment layer with a track matte applies its effects only where the matte allows: an
+/// Invert over a 0.25 grey with an opaque white 50×50 matte at the left of the comp (#1201).
+#[test]
+fn track_matte_limits_an_adjustment_layer() {
+    for (kind, inside) in [(MatteKind::Alpha, true), (MatteKind::AlphaInverted, false), (MatteKind::Luma, true), (MatteKind::LumaInverted, false)] {
+        let (mut p, cid, comp) = setup();
+        let mut matte = solid(&mut p, &comp, [1.0, 1.0, 1.0], 50, 50);
+        matte.props.prop_mut("transform/position").unwrap().value = Value::Vec3([50.0, 50.0, 0.0]);
+        matte.switches.video = false;
+        let mut adj = solid(&mut p, &comp, [1.0, 1.0, 1.0], 200, 100);
+        adj.switches.adjustment = true;
+        add_effect_200(&mut p, &mut adj, "ec.channel.invert", &[]);
+        adj.track_matte = Some(TrackMatte { layer: matte.id, kind });
+        let bg = solid(&mut p, &comp, [0.25, 0.25, 0.25], 200, 100);
+        let c = p.comp_mut(cid).unwrap();
+        c.layers.push(matte);
+        c.layers.push(adj);
+        c.layers.push(bg);
+        let img = render_frame(&p, cid, Tick::ZERO, 1.0);
+        let (g_in, g_out) = (img.get(50, 50)[0], img.get(150, 50)[0]);
+        let (want_in, want_out) = if inside { (0.75, 0.25) } else { (0.25, 0.75) };
+        assert!((g_in - want_in).abs() < 1e-4 && (g_out - want_out).abs() < 1e-4, "{kind:?}: {g_in} inside, {g_out} outside");
+        assert_eq!(img.get(150, 50)[3], 1.0, "{kind:?} keeps the comp opaque");
+    }
+}
+
 #[test]
 fn shape_layer_draws_fill_and_stroke() {
     let (mut p, cid, comp) = setup();

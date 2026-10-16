@@ -2,7 +2,7 @@
 //! effect, mask, shape item or text animator (what scripting's `PropertyGroup.name`, `enabled`,
 //! `remove()`, `duplicate()` and `moveTo()` do, and what agents need without a UI selection).
 
-use effectcraft_project::{GroupKind, ItemId, LayerId, LayerSource, Node, PropGroup, Uid};
+use effectcraft_project::{ItemId, LayerId, LayerSource, Node, PropGroup, Uid};
 use serde_json::{Value, json};
 
 use super::{CommandSpec, b_p, bad, has_layers, layer_mut, layer_p, layers_p, str_p};
@@ -10,7 +10,7 @@ use crate::{EngineError, Result, Session, cmd};
 
 /// Groups that can be renamed, removed, duplicated and reordered: instances in indexed lists.
 fn is_instance(g: &PropGroup) -> bool {
-    matches!(g.kind, GroupKind::Indexed | GroupKind::Effect { .. } | GroupKind::Mask { .. } | GroupKind::Tracker { .. })
+    g.is_instance()
 }
 
 /// `{layer, prop: uid}` → (comp, layer, group uid), checking that the group is an instance.

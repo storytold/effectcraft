@@ -1571,6 +1571,52 @@ fn timeline_twirl_arrows_open_layers_and_groups() {
 }
 
 #[test]
+fn command_clicking_a_group_twirl_opens_its_whole_tree() {
+    // Cmd-click (or Alt-click) the arrow of Effects, Contents, Masks…: every group under it
+    // twirls open with it, and closed again with it.
+    let mut h = harness();
+    let id = layer_id(&h, "Box");
+    h.state_mut().session.execute("effect.apply", json!({"effect": "Lumetri Color", "layers": [id]})).unwrap();
+    fn walk(g: &effectcraft_engine::project::PropGroup, out: &mut Vec<u64>) {
+        for sg in g.groups() {
+            out.push(sg.uid);
+            walk(sg, out);
+        }
+    }
+    let (effects, inner, transform) = {
+        let comp = h.state().session.active_comp().unwrap().clone();
+        let props = &comp.layer(LayerId(id)).unwrap().props;
+        let fx = props.sub("effects").unwrap();
+        let mut inner = vec![];
+        walk(fx, &mut inner);
+        (fx.uid, inner, props.sub("transform").unwrap().uid)
+    };
+    assert!(inner.len() > 1, "the effect has twirl-down groups of its own");
+    let at = rect(&h, &format!("timeline.layer.{id}.twirl")).center();
+    click(&mut h, at);
+    let at = rect(&h, &format!("timeline.group.{effects}.twirl")).center();
+    let cmd_click = |h: &mut Harness<'_, EffectcraftApp>| {
+        h.input_mut().events.push(Event::ModifiersChanged(egui::Modifiers::COMMAND));
+        h.input_mut().events.push(Event::PointerMoved(at));
+        h.step();
+        for pressed in [true, false] {
+            h.input_mut().events.push(Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::COMMAND });
+            h.step();
+        }
+        h.input_mut().events.push(Event::ModifiersChanged(Default::default()));
+        h.step();
+    };
+    cmd_click(&mut h);
+    let open = h.state().ui.timeline.open_groups.clone();
+    assert!(open.contains(&effects), "Effects twirls open");
+    assert!(inner.iter().all(|u| open.contains(u)), "and so does everything under it");
+    assert!(!open.contains(&transform), "other groups stay as they were");
+    cmd_click(&mut h);
+    let open = h.state().ui.timeline.open_groups.clone();
+    assert!(!open.contains(&effects) && !inner.iter().any(|u| open.contains(u)), "Cmd-click again closes the tree");
+}
+
+#[test]
 fn timeline_rename_commits_on_enter_and_on_click_away() {
     // The rename field (double-click a name, or Enter on a selected layer) used to grab the
     // keyboard every frame: clicking away or Enter could never leave it. (The harness can't
@@ -2087,4 +2133,140 @@ fn fit_up_to_100_follows_the_maximized_panel() {
     h.state_mut().toggle_maximize(PanelKind::Composition);
     h.run_steps(3);
     assert!((rect(&h, "viewer.comp").width() - 640.0 / ppp).abs() < 0.01);
+}
+
+/// The Rotation tool keeps counting past a full turn, as in After Effects: going round the anchor
+/// 1.5 turns clockwise gives 540° (1x +180.0°), going back 2 turns gives −180°, with no jump a
+/// revolution back where the pointer crosses the left of the anchor. One drag is one undo step.
+#[test]
+fn rotate_tool_counts_revolutions_both_ways() {
+    let mut h = harness();
+    let box_id = h.state().session.active_comp().unwrap().layers[0].id;
+    h.state_mut().session.execute("layer.select", json!({"layers": [box_id.0]})).unwrap();
+    h.state_mut().ui.tool = Tool::Rotate;
+    h.run_steps(2);
+    let rotation = |h: &Harness<'_, EffectcraftApp>| {
+        h.state().session.active_comp().unwrap().layer(box_id).unwrap().props.prop("transform/rotation").unwrap().value.as_f64()
+    };
+    let center = screen(&h, [320.0, 180.0]);
+    // Inside the 80 px box, so the drag starts on it (not on the Plate behind).
+    let r = (screen(&h, [350.0, 180.0]) - center).x;
+    let at = |deg: f64| center + vec2((deg.to_radians().cos() as f32) * r, (deg.to_radians().sin() as f32) * r);
+    let undo_before = h.state().session.history.undo.len();
+    // Press on the box, right of its anchor; then go round in 10° steps.
+    let press = center + vec2(r * 0.3, 0.0);
+    h.input_mut().events.push(Event::PointerMoved(press));
+    h.input_mut().events.push(Event::PointerButton { pos: press, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.step();
+    let mut seen = vec![];
+    let mut walk = |h: &mut Harness<'_, EffectcraftApp>, degs: Vec<f64>| {
+        for d in degs {
+            h.input_mut().events.push(Event::PointerMoved(at(d)));
+            h.step();
+            seen.push(rotation(h));
+        }
+    };
+    walk(&mut h, (0..=54).map(|i| i as f64 * 10.0).collect());
+    // The gesture applies the previous frame's pointer: hold a frame.
+    h.step();
+    let cw = rotation(&h);
+    assert!((cw - 540.0).abs() < 1.0, "1.5 turns clockwise: {cw}");
+    walk(&mut h, (1..=72).map(|i| 540.0 - i as f64 * 10.0).collect());
+    let end = at(-180.0);
+    h.input_mut().events.push(Event::PointerButton { pos: end, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    h.run_steps(2);
+    let ccw = rotation(&h);
+    assert!((ccw + 180.0).abs() < 1.0, "back two turns: {ccw}");
+    assert!(seen.windows(2).all(|w| (w[1] - w[0]).abs() <= 20.0), "no jump: {seen:?}");
+    assert_eq!(h.state().session.history.undo.len(), undo_before + 1, "one drag, one undo step");
+}
+
+/// Mask vertices multi-select with the Selection tool: Shift-click adds a vertex to the
+/// selection and Shift-clicking it again removes it; a plain click collapses to one (#1004).
+#[test]
+fn mask_shift_click_toggles_vertices() {
+    use egui::Modifiers;
+    let mut h = harness();
+    let plate = layer_id(&h, "Plate");
+    h.state_mut().session.execute("layer.select", json!({"layers": [plate]})).unwrap();
+    h.state_mut()
+        .session
+        .execute("mask.new", json!({"layer": plate, "vertices": [[100.0, 60.0], [500.0, 60.0], [500.0, 300.0], [100.0, 300.0]], "closed": true}))
+        .unwrap();
+    h.state_mut().ui.tool = Tool::Selection;
+    h.run_steps(2);
+    let (p0, p1) = (screen(&h, [100.0, 60.0]), screen(&h, [500.0, 60.0]));
+    let shift_click = |h: &mut Harness<'_, EffectcraftApp>, p: Pos2| {
+        h.input_mut().events.push(Event::ModifiersChanged(Modifiers::SHIFT));
+        h.step();
+        h.input_mut().events.push(Event::PointerMoved(p));
+        h.input_mut().events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::SHIFT });
+        h.step();
+        h.input_mut().events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::SHIFT });
+        h.step();
+        h.input_mut().events.push(Event::ModifiersChanged(Modifiers::NONE));
+        h.run_steps(2);
+    };
+    click(&mut h, p0);
+    assert_eq!(h.state().session.state.selected_vertices.len(), 1, "plain click selects one vertex");
+    shift_click(&mut h, p1);
+    assert_eq!(h.state().session.state.selected_vertices.len(), 2, "shift-click adds a second vertex");
+    shift_click(&mut h, p1);
+    assert_eq!(h.state().session.state.selected_vertices.len(), 1, "shift-click again removes it");
+}
+
+/// Dragging a marquee from empty viewer area selects the mask vertices inside it, additive
+/// with Shift, without moving the layer (#1004).
+#[test]
+fn mask_marquee_selects_vertices() {
+    let mut h = harness();
+    let plate = layer_id(&h, "Plate");
+    let bx = layer_id(&h, "Box");
+    // A full-frame layer behind leaves no empty area to start a marquee from: remove it.
+    h.state_mut().session.execute("layer.select", json!({"layers": [plate]})).unwrap();
+    h.state_mut().session.execute("edit.clear", json!({"layers": [plate]})).unwrap();
+    assert_eq!(h.state().session.active_comp().unwrap().layers.len(), 1);
+    h.state_mut().session.execute("layer.select", json!({"layers": [bx]})).unwrap();
+    h.state_mut()
+        .session
+        .execute("mask.new", json!({"layer": bx, "vertices": [[10.0, 10.0], [70.0, 10.0], [70.0, 70.0], [10.0, 70.0]], "closed": true}))
+        .unwrap();
+    h.state_mut().ui.tool = Tool::Selection;
+    h.state_mut().session.execute("mask.selectVertices", json!({"vertices": []})).unwrap();
+    h.run_steps(2);
+    // Mask vertices are layer-local; map vertex 0 to comp space (no rotation, uniform scale).
+    let (pp, aa) = {
+        let l = h.state().session.active_comp().unwrap().layer(LayerId(bx)).unwrap().clone();
+        (l.props.prop("transform/position").unwrap().value.as_vec3(), l.props.prop("transform/anchor").unwrap().value.as_vec3())
+    };
+    let v0 = [10.0 - aa[0] + pp[0], 10.0 - aa[1] + pp[1]];
+    let pos = |h: &Harness<'_, EffectcraftApp>| {
+        h.state().session.active_comp().unwrap().layer(LayerId(bx)).unwrap().props.prop("transform/position").unwrap().value.as_vec3()
+    };
+    let before = pos(&h);
+    // Drag a box around the top-left vertex only, starting/ending on empty area.
+    let (from, to) = (screen(&h, [(v0[0] - 90.0) as f32, (v0[1] - 50.0) as f32]), screen(&h, [(v0[0] + 10.0) as f32, (v0[1] + 10.0) as f32]));
+    drag(&mut h, from, to);
+    let sel = &h.state().session.state.selected_vertices;
+    assert_eq!(sel.len(), 1, "marquee selects the enclosed vertex: {sel:?}");
+    assert_eq!(sel[0].index, 0);
+    assert_eq!(pos(&h), before, "the layer does not move under a vertex marquee");
+    // Shift-marquee adds the vertices it encloses.
+    let v1 = [70.0 - aa[0] + pp[0], 10.0 - aa[1] + pp[1]];
+    let (from, to) = (screen(&h, [(v1[0] - 10.0) as f32, (v1[1] - 50.0) as f32]), screen(&h, [(v1[0] + 60.0) as f32, (v1[1] + 50.0) as f32]));
+    h.input_mut().events.push(Event::ModifiersChanged(egui::Modifiers::SHIFT));
+    h.step();
+    h.input_mut().events.push(Event::PointerMoved(from));
+    h.input_mut().events.push(Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::SHIFT });
+    h.step();
+    for i in 1..=8 {
+        h.input_mut().events.push(Event::PointerMoved(from + (to - from) * (i as f32 / 8.0)));
+        h.step();
+    }
+    h.input_mut().events.push(Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::SHIFT });
+    h.step();
+    h.input_mut().events.push(Event::ModifiersChanged(egui::Modifiers::NONE));
+    h.run_steps(2);
+    let sel = &h.state().session.state.selected_vertices;
+    assert_eq!(sel.len(), 2, "shift-marquee adds: {sel:?}");
 }

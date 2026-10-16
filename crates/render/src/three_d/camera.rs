@@ -212,18 +212,35 @@ pub fn rig_rotation(ctx: &EvalCtx, layer: &Layer) -> Mat4 {
 // ---------------------------------------------------------------- auto-orient
 
 /// Direction of travel of a layer's position (parent space) at the context time.
+///
+/// Where the position is not moving (at and after the last keyframe, before the first, or while
+/// holding) the last valid direction of travel is kept, so the layer does not snap back to its
+/// unrotated pose at the end of a path.
 fn path_tangent(ctx: &EvalCtx, layer: &Layer) -> Option<Vec3> {
     let tr = layer.transform()?;
     // Position (or its separated X/Y/Z dimensions) must be animated.
-    let moving = ["position", "positionX", "positionY", "positionZ"].iter().any(|m| tr.get(m).is_some_and(|p| p.keys.len() > 1 || p.has_expression()));
+    let dims = ["position", "positionX", "positionY", "positionZ"];
+    let moving = dims.iter().any(|m| tr.get(m).is_some_and(|p| p.keys.len() > 1 || p.has_expression()));
     if !moving {
         return None;
     }
     let dt = effectcraft_time::Tick::from_seconds_f64(0.005);
-    let a = Vec3::from(ctx.at(ctx.time - dt).v3(layer, tr, "position", [0.0; 3]));
-    let b = Vec3::from(ctx.at(ctx.time + dt).v3(layer, tr, "position", [0.0; 3]));
-    let d = b - a;
-    (d.length() > 1e-9).then(|| d.normalize())
+    let pos = |t| Vec3::from(ctx.at(t).v3(layer, tr, "position", [0.0; 3]));
+    let dir = |d: Vec3| (d.length() > 1e-9 && d.length().is_finite()).then(|| d.normalize());
+    if let Some(d) = dir(pos(ctx.time + dt) - pos(ctx.time - dt)) {
+        return Some(d);
+    }
+    // No motion here: fall back on the nearest motion before this time (a backward difference at
+    // each earlier key, latest first), then on the first motion after it.
+    let mut keys: Vec<effectcraft_time::Tick> = dims.iter().filter_map(|m| tr.get(m)).flat_map(|p| p.keys.iter().map(|k| layer.comp_time(k.time))).collect();
+
+    keys.sort();
+    keys.dedup();
+    keys.iter()
+        .rev()
+        .filter(|k| **k <= ctx.time)
+        .find_map(|&k| dir(pos(k) - pos(k - dt)))
+        .or_else(|| keys.iter().filter(|k| **k > ctx.time).find_map(|&k| dir(pos(k + dt) - pos(k))))
 }
 
 /// Auto-Orient ▸ Orient Along Path for 2D layers: extra Z rotation in degrees.

@@ -2,7 +2,7 @@
 
 **Stage: alpha** · next: beta, ~30 points of "ready for real work" and ~350–620 h away
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-10 · **Change:** major (full re-measure against After Effects 2026 26.5; standard progress-docs layout) · **Target:** Adobe After Effects 2026 (26.5.0.89)
+> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-12 · **Change:** minor (open-issue count, crash list and localization share re-audited against `upstream/main` 470ea7a3) · **Target:** Adobe After Effects 2026 (26.5.0.89)
 
 EffectCraft aims to do what After Effects does, with the same panels, menus and behaviour, written
 from scratch in Rust. This page is the one-page summary; the evidence is in
@@ -37,7 +37,7 @@ Hours are one Opus 5.5 agent working sequentially, calibrated on this repository
 (set up, animate, text and shapes, composite, preview, save and deliver) work end to end on macOS
 and the work saves and reopens, and ready for real work (≈ 45%) is above the ≈ 40% bar. But: After Effects projects (`.aep`) can't be opened, which
 alone rules out beta; fidelity against After Effects is measured for one narrow case (scalar ease,
-168 samples); 134 issues are open, eight of them crash reports. Beta needs ≈ 75% ready and `.aep`
+168 samples); 216 issues are open on 12 October, six of them crash reports (#580, #501, #426, #341, #234, #879). Beta needs ≈ 75% ready and `.aep`
 opening reliably: the `.aep` owner decision and importer (80–160 h), the fidelity harness and
 P0/P1 corpus (60–100 h), the crash and bug backlog (40–80 h), performance (40–70 h),
 Linux/Windows reliability (30–50 h) and depth in animation, masks, effects and text (100–160 h).
@@ -51,7 +51,7 @@ Linux/Windows reliability (30–50 h) and depth in animation, masks, effects and
 | UI/UX fidelity | 65% | 60–120 | [ui-parity.md](docs/ui-parity.md) |
 | File formats | 50% | 130–230 | [file-format-parity.md](docs/file-format-parity.md) |
 | Hardware | 40% | 60–120 | [hardware-parity.md](docs/hardware-parity.md) |
-| Localization | 12% | 60–110 + review | [localization-parity.md](docs/localization-parity.md) |
+| Localization | 18% | 60–110 + review | [localization-parity.md](docs/localization-parity.md) |
 | Performance | 35% | 50–100 | [gaps.md](docs/gaps.md#g5-performance-at-real-world-scale) |
 | Stability | 45% | 40–80 | [gaps.md](docs/gaps.md#g3-stability-and-a-green-main) |
 | Platforms | 65% | 30–60 | [gaps.md](docs/gaps.md#g2-real-user-reliability-on-every-platform) |
@@ -85,19 +85,19 @@ UI strings translated out of ≈ 3,900 (detail: [localization-parity.md](docs/lo
 | Language | Status | % |
 |---|---|---:|
 | English | full | 100% |
-| Simplified Chinese | partial (menus, part of the panels) | 28% |
+| Simplified Chinese | partial (menus, part of the panels) | 29% |
 | Spanish | menus only | 16% |
 | Hindi | none | 0% |
 | Arabic | none | 0% |
-| French | none | 0% |
-| Portuguese (Brazil) | menus only | 16% |
+| French | menus only | 16% |
+| Portuguese (Brazil) | partial (menus, part of the panels) | 26% |
 | Indonesian | none | 0% |
-| Japanese | partial (menus, part of the panels) | 26% |
-| German | none | 0% |
+| Japanese | partial (menus, part of the panels) | 27% |
+| German | menus only | 16% |
 | Korean | none | 0% |
 | Vietnamese | none | 0% |
 
-Also shipped: Traditional Chinese (partial, 28%) and Ukrainian (partial, 29%). No language has had
+Also shipped: Traditional Chinese (partial, 29%), Ukrainian (partial, 29%), Czech (partial, 29%) and Russian (menus only, 16%). No language has had
 native-speaker review.
 
 ## Upcoming
@@ -111,12 +111,14 @@ Ranked; detail in [docs/roadmap.md](docs/roadmap.md) and [docs/gaps.md](docs/gap
 | 3 | Real-user reliability on Linux and Windows; the open mask, effect, text and 3D bugs (G2) | 100–190 |
 | 4 | `.aep` / `.aepx` import, after the owner's clean-room decision (G4) | 80–160 |
 | 5 | Performance: benchmarks at 1080p / 4K, real-time cached playback, hardware video (G5) | 50–100 |
-| 6 | Localization depth: effect names, all panels, French / German / Korean (G9) | 60–110 |
+| 6 | Localization depth: effect names, all panels, Korean / Italian (G9) | 60–110 |
 
 Come tell us what matters most to you on [Discord](https://discord.gg/artcraft).
 
 ## Progress log
 
+- 2026-10-12: Roto Brush span edits report strokes outside a trimmed layer without panicking;
+  strokes and undo history are preserved so restoring the timing allows the span edit again.
 - 2026-10-11: Ukrainian panels caught up with the Chinese catalogs. The 95 rows the panel
   catalog gained since 9 October are translated: the Home screen (recent files, their Kind and
   Opened columns, the empty and no-match states), the viewer's toolbar tooltips, magnification,
@@ -148,8 +150,11 @@ Come tell us what matters most to you on [Discord](https://discord.gg/artcraft).
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-12 | minor | Open-issue count (134 to 216), crash list and localization share (12% to 18%) updated to match docs/gaps.md |
+| 2026-10-12 | patch | Roto Brush span validation after trimming; command regressions for both layer edges |
 | 2026-10-10 | minor | Hours to ≈ 95% for each audience |
 | 2026-10-10 | minor | Headline adds mainstream practitioner (≈ 47%) and essentials user (≈ 52%) |
+| 2026-10-12 | minor | Shared PDF object/xref parsing with bounded app-owned conversion and preserved stream budgets; drawing, EPS and image/font policy remain unchanged |
 | 2026-10-10 | minor | Stage checked against the new core-workflow gate (all six pass; still alpha) |
 | 2026-10-10 | major | Rewritten to the shared progress-docs standard: stage, two numbers, dimensions, features, languages, upcoming, progress log; milestones moved to docs/roadmap.md |
 | 2026-10-05 | major | Two numbers (breadth vs real use) and workstreams G1–G9 |

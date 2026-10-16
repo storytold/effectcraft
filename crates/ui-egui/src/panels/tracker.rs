@@ -749,7 +749,11 @@ pub fn draw_overlay(app: &mut EffectcraftApp, painter: &egui::Painter, map: &Vie
         let fbig = fq[0].distance(fq[2]) > 28.0;
         let sbig = sq[0].distance(sq[2]) > 28.0;
         let n = i + 1;
-        let hr = Rect::from_center_size(a, vec2(12.0, 12.0));
+        // Zoomed out the feature region can be smaller than the attach point's grab area: keep the
+        // grab to the region's inner half so the rest of it still grabs the point.
+        let fr = Rect::from_points(&fq);
+        let grab = if quad_contains(&fq, a) { 12.0f32.min(fr.width().min(fr.height()) * 0.5) } else { 12.0 };
+        let hr = Rect::from_center_size(a, vec2(grab, grab));
         hits.push(Hit { point: n, part: Part::Attach, rect: hr, quad: None });
         app.auto.add(&format!("viewer.track.{n}.attach"), hr, "Attach Point");
         for (k, q) in fq.iter().enumerate() {
@@ -768,7 +772,6 @@ pub fn draw_overlay(app: &mut EffectcraftApp, painter: &egui::Painter, map: &Vie
             hits.push(Hit { point: n, part: Part::SearchCorner(k), rect: r.expand(2.0), quad: None });
             app.auto.add(&format!("viewer.track.{n}.search.{k}"), r, "Search region corner");
         }
-        let fr = Rect::from_points(&fq);
         let sr = Rect::from_points(&sq);
         app.auto.add(&format!("viewer.track.{n}.feature"), fr, "Feature region");
         app.auto.add(&format!("viewer.track.{n}.search"), sr, "Search region");

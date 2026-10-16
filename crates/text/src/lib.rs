@@ -447,6 +447,65 @@ pub fn char_glyph(doc: &TextDoc, ch: char) -> (BezPath, f64) {
 mod tests {
     use super::*;
 
+    /// #1063 (item 8): After Effects scripts use CR for Source Text line breaks.
+    #[test]
+    fn carriage_returns_create_lines_without_rewriting_source_text() {
+        let lf = TextDoc::plain("Line 1\nLine 2");
+        let cr = TextDoc::plain("Line 1\rLine 2");
+        let expected = layout_doc(&lf);
+        let actual = layout_doc(&cr);
+        assert_eq!(actual.lines, 2);
+        assert_eq!(actual.bounds, expected.bounds);
+        assert_eq!(actual.line_boxes, expected.line_boxes);
+        assert_eq!(cr.text, "Line 1\rLine 2");
+        assert_eq!(actual.chars, cr.char_len());
+    }
+
+    #[test]
+    fn line_break_variants_match_in_point_box_and_vertical_text() {
+        for vertical in [false, true] {
+            for boxed in [false, true] {
+                let template = TextDoc { size: 30.0, vertical, box_size: boxed.then_some([120.0, 120.0]), ..Default::default() };
+                let expected = layout_doc(&TextDoc { text: "one two three\n\nshort\n".into(), ..template.clone() });
+                for separator in ["\r", "\r\n", "\n"] {
+                    let text = format!("one two three{separator}{separator}short{separator}");
+                    let doc = TextDoc { text: text.clone(), ..template.clone() };
+                    let actual = layout_doc(&doc);
+                    assert_eq!(actual.lines, expected.lines, "{separator:?}, boxed={boxed}, vertical={vertical}");
+                    assert_eq!(actual.bounds, expected.bounds);
+                    assert_eq!(actual.line_boxes, expected.line_boxes);
+                    assert_eq!(doc.text, text);
+                    assert_eq!(actual.chars, doc.char_len());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn crlf_preserves_unicode_style_indices_and_paragraph_formatting() {
+        for separator in ["\r", "\n", "\r\n"] {
+            let text = format!("é{separator}Beta");
+            let mut doc = TextDoc::plain(&text);
+            let start = 1 + separator.chars().count();
+            doc.apply_style(start..doc.char_len(), |s| {
+                s.size = 80.0;
+                s.fill = [0.0, 1.0, 0.0, 1.0];
+            });
+            doc.apply_para(start..start + 1, |p| p.indent_left = 30.0);
+            let layout = layout_doc(&doc);
+            assert_eq!(layout.lines, 2);
+            let glyph = layout.glyphs.iter().find(|g| g.ch == 'B').unwrap();
+            assert_eq!(glyph.char_index, start);
+            assert_eq!(glyph.line_index, 1);
+            assert_eq!(glyph.size, 80.0);
+            assert_eq!(layout.styles[glyph.run].fill, [0.0, 1.0, 0.0, 1.0]);
+            assert_eq!(layout.line_span(start), (start, doc.char_len()));
+            assert_eq!(layout.char_of_byte(doc.byte_of(start)), start);
+            assert_eq!(doc.paras().iter().map(|p| p.indent_left).collect::<Vec<_>>(), vec![0.0, 30.0]);
+            assert_eq!(doc.text, text);
+        }
+    }
+
     #[test]
     fn layout_counts_and_bounds() {
         let doc = TextDoc { text: "Hello big world".into(), size: 100.0, ..Default::default() };

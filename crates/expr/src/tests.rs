@@ -1251,3 +1251,37 @@ fn pending_text_style_baseline_setters_are_visible_to_expression_getters() {
     assert_eq!(x.num("thisComp.layer('Title').text.sourceText.style.setBaselineOption('superscript').isSuperscript ? 1 : 0", 0.0), 1.0);
     assert_eq!(x.text("var s = text.sourceText.style.setSuperscript(true); s.setText(s.isSuperscript ? 'super' : 'normal')", 0.0), "super");
 }
+
+#[test]
+fn layer_source_is_the_layers_source_item() {
+    let mut f = fx();
+    // A solid's source is an item of the solid's size and name (#809).
+    assert_close!(f.num("thisComp.layer('A').source.width", 0.0), 20.0);
+    assert_close!(f.num("thisComp.layer('A').source.height", 0.0), 20.0);
+    assert_close!(f.num("thisComp.layer('A').source.name == 'A' ? 1 : 0", 0.0), 1.0);
+    // Text and shape layers have no source item.
+    assert_close!(f.num("thisComp.layer('Title').source == null ? 1 : 0", 0.0), 1.0);
+    // A precomp layer's source is its composition.
+    let main = f.p.comp(f.cid).unwrap().clone();
+    let other = f.p.items.values().find(|i| i.name == "Other").unwrap().id;
+    let pre = build::layer(&mut f.p, &main, "Pre", LayerSource::Comp { item: other }, (64, 32), None);
+    f.p.comp_mut(f.cid).unwrap().layers.push(pre);
+    assert_close!(f.num("thisComp.layer('Pre').source.width", 0.0), 64.0);
+    assert_close!(f.num("thisComp.layer('Pre').source.numLayers", 0.0), 1.0);
+}
+
+#[test]
+fn layer_control_property_stands_for_its_layer() {
+    let mut f = fx();
+    // Layer A gets a Layer Control ("Map") that points at layer B (#809).
+    let spec = effectcraft_effects::find("ec.control.layer").unwrap();
+    let mut map = group_push(&mut f.p, |ids| effectcraft_effects::instantiate(spec, ids, "Map", [20.0, 20.0]));
+    map.prop_mut("layer").unwrap().value = Value::Layer(Some(f.b.0));
+    f.p.comp_mut(f.cid).unwrap().layers[0].props.sub_mut("effects").unwrap().children.push(map.into());
+    // effect("Map")(1) is the layer itself: its name, index, transform and value.
+    assert_close!(f.num("effect('Map')(1).name == 'B' ? 1 : 0", 0.0), 1.0);
+    assert_close!(f.num("effect('Map')(1).index", 0.0), 2.0);
+    assert_close!(f.num("effect('Map')(1).transform.position[0]", 0.0), 100.0);
+    assert_close!(f.num("effect('Map')(1).transform.scale[0]", 0.0), 100.0);
+    assert_close!(f.num("effect('Map')(1).value.name == 'B' ? 1 : 0", 0.0), 1.0);
+}

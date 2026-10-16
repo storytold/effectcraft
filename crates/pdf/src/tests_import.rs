@@ -296,6 +296,69 @@ fn truncated_and_corrupt_eps_never_panic() {
     }
 }
 
+/// Parses `body` after the header [`eps`] adds, on a thread of its own, and fails the test when
+/// parsing takes more than 20 s.
+fn eps_soon(body: &str) -> Doc {
+    let mut b = b"%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 200 100\n".to_vec();
+    b.extend_from_slice(body.as_bytes());
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || tx.send(parse(&b)).ok());
+    rx.recv_timeout(std::time::Duration::from_secs(20)).unwrap_or_else(|_| panic!("parsing {body} did not finish")).unwrap()
+}
+
+#[test]
+fn arcs_with_huge_angles_end_at_their_second_angle() {
+    use kurbo::{Point, Rect, Shape as _};
+    // `arc` raises its second angle by multiples of 360 until it is at least the first, and
+    // `arcn` lowers it until it is at most the first (PostScript Language Reference §8.2),
+    // however large the angles: the arc starts at the first angle's remainder after whole turns
+    // and ends at the second angle, the new current point. 10^18 and 10^308 are written in
+    // digits: the tokenizer reads no exponents.
+    let (e18, e308) = (format!("1{}", "0".repeat(18)), format!("1{}", "0".repeat(308)));
+    // `at(deg)` is the point at `deg` degrees on the circle of radius 10 around (50, 50), in
+    // document pixels.
+    let at = |deg: f64| Point::new(50.0 + 10.0 * deg.to_radians().cos(), 50.0 - 10.0 * deg.to_radians().sin());
+    let near = |a: Rect, b: Rect| [(a.x0, b.x0), (a.y0, b.y0), (a.x1, b.x1), (a.y1, b.y1)].iter().all(|(x, y)| (x - y).abs() < 0.05);
+    // Each program is listed with the remainders of its first and second angles after whole
+    // turns, and whether its sweep is more than 1,024 turns (a skip note is recorded, and the arc
+    // still goes around the whole circle).
+    for (body, first, second, whole) in [
+        (format!("50 50 10 {e18} 0 arc"), 280.0, 0.0, false),
+        (format!("50 50 10 {e308} 0 arc"), 296.0, 0.0, false),
+        (format!("50 50 10 0 {e18} arcn"), 0.0, 280.0, false),
+        (format!("50 50 10 0 {e308} arcn"), 0.0, 296.0, false),
+        (format!("50 50 10 0 {e18} arc"), 0.0, 280.0, true),
+        (format!("50 50 10 0 {e308} arc"), 0.0, 296.0, true),
+        (format!("50 50 10 {e18} 0 arcn"), 280.0, 0.0, true),
+        (format!("50 50 10 {e308} 0 arcn"), 296.0, 0.0, true),
+    ] {
+        let doc = eps_soon(&format!("newpath {body} currentpoint stroke 1 1 rectfill"));
+        let skipped: &[&str] = if whole { &["arc (too many turns)"] } else { &[] };
+        assert_eq!(doc.skipped, skipped, "{body}");
+        let shapes = doc.flatten();
+        assert_eq!(shapes.len(), 2, "{body}");
+        let bounds = |i: usize| (shapes[i].0 * shapes[i].2.geom.to_path()).bounding_box();
+        // An arc within one quarter of the circle is spanned by its endpoints.
+        let (a, b) = (at(first), at(second));
+        let arc = if whole { Rect::new(40.0, 40.0, 60.0, 60.0) } else { Rect::from_points(a, b) };
+        assert!(near(bounds(0), arc), "{body}: {:?}", bounds(0));
+        // The second shape is the square drawn at the current point.
+        assert!(near(bounds(1), Rect::new(b.x, b.y - 1.0, b.x + 1.0, b.y)), "{body}: {:?}", bounds(1));
+    }
+    // Sweeps of up to 1,024 turns are drawn whole: five turns counterclockwise and three
+    // clockwise wind around the disk twice, and a nonzero fill covers it.
+    let doc = eps_soon("50 50 10 0 1800 arc 50 50 10 0 -1080 arcn fill");
+    assert!(doc.skipped.is_empty(), "{:?}", doc.skipped);
+    let img = render(&doc);
+    assert!(img.get(50, 50)[3] > 0.99, "{:?}", img.get(50, 50));
+    // A longer sweep keeps the parity of its turns: 5 × 10^18 degrees is an even number of whole
+    // turns and 320 degrees, so an even-odd fill covers the center of the disk.
+    let doc = eps_soon("50 50 10 0 5000000000000000000 arc eofill");
+    assert_eq!(doc.skipped, ["arc (too many turns)"]);
+    let img = render(&doc);
+    assert!(img.get(50, 50)[3] > 0.99, "{:?}", img.get(50, 50));
+}
+
 #[test]
 fn closing_an_empty_path_is_a_no_op() {
     // "s", "b" and "b*" closed the path without a current point (kurbo asserts on that).
@@ -311,5 +374,33 @@ fn postscript_radix_numbers_outside_2_to_36_are_not_numbers() {
     for n in ["0#7", "1#1", "37#1", "99999999999#1", "16#FF"] {
         let src = format!("%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 100 100\n{n} pop 0 0 moveto 10 10 lineto stroke\n");
         let _ = parse(src.as_bytes());
+    }
+}
+
+#[test]
+fn extreme_page_indices_have_a_printable_error() {
+    let text = Error::PageOutOfRange(usize::MAX).to_string();
+    assert!(text.starts_with("the PDF has no page "));
+}
+
+#[test]
+fn postscript_idiv_and_mod_of_i64_min_by_minus_one_give_zero() {
+    // `i64::MIN / -1` and `i64::MIN % -1` overflow, and `/` and `%` panic on them in debug and
+    // release builds. `as i64` turns any dividend at or below -2^63 into `i64::MIN` and turns
+    // a divisor of -1.5 into -1.
+    for (prog, want) in [
+        ("-9223372036854775808 -1 idiv", 0),
+        ("-9223372036854775808 -1 mod", 0),
+        ("-99999999999999999999 -1.5 idiv", 0),
+        ("2 63 exp neg -1 mod", 0),
+        // The result is 0 for a divisor that truncates to 0. Other quotients are truncated
+        // toward zero, and a remainder has the sign of the dividend.
+        ("7 0 idiv", 0),
+        ("7 0.5 mod", 0),
+        ("-7 2 idiv", -3),
+        ("-7 2 mod", -1),
+    ] {
+        let doc = eps(format!("{prog} {want} eq {{ 0 0 10 10 rectfill }} if\n").as_bytes());
+        assert_eq!(shape_names(&doc).len(), 1, "{prog}");
     }
 }

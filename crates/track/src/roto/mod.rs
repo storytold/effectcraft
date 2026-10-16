@@ -59,6 +59,9 @@ pub enum StrokeKind {
     Refine,
     /// Refine Edge tool with Alt: remove from the band.
     RefineErase,
+    /// A box around the object (Object Matte): two opposite corners in `points`. Trained models
+    /// get it as their box prompt; the graph cut ignores it.
+    Box,
 }
 
 impl StrokeKind {
@@ -830,8 +833,9 @@ fn points_along(s: &Stroke, scale: f64, max: usize) -> Vec<[f32; 2]> {
     out
 }
 
-/// A model's prompt from the strokes: points along the foreground and background strokes.
-fn stroke_prompt(strokes: &[&Stroke], scale: f64) -> Prompt {
+/// A model's prompt from the strokes: points along the foreground and background strokes, and
+/// the box of a [`StrokeKind::Box`] stroke (matte pixels).
+pub fn stroke_prompt(strokes: &[&Stroke], scale: f64) -> Prompt {
     let mut points = vec![];
     for (kind, fg) in [(StrokeKind::Fg, true), (StrokeKind::Bg, false)] {
         let ss: Vec<&&Stroke> = strokes.iter().filter(|s| s.kind == kind).collect();
@@ -840,11 +844,20 @@ fn stroke_prompt(strokes: &[&Stroke], scale: f64) -> Prompt {
             points.extend(points_along(s, scale, per).into_iter().map(|p| (p, fg)));
         }
     }
-    Prompt { points, ..Default::default() }
+    let bbox = strokes.iter().filter(|s| s.kind == StrokeKind::Box).find_map(|s| box_of(s, scale));
+    Prompt { points, bbox, ..Default::default() }
 }
 
-/// Add a prior matte to a prompt: its box (a little larger), up to four points spread through
-/// its core, and the matte itself.
+/// The box `[x0, y0, x1, y1]` (matte pixels) of a box stroke: its first two points as opposite
+/// corners; `None` when they are missing, not finite or the box is empty.
+fn box_of(s: &Stroke, scale: f64) -> Option<[f32; 4]> {
+    let (a, c) = (s.points.first()?, s.points.get(1)?);
+    let v = [a[0].min(c[0]), a[1].min(c[1]), a[0].max(c[0]), a[1].max(c[1])].map(|v| (v * scale) as f32);
+    (v.iter().all(|x| x.is_finite()) && v[2] > v[0] && v[3] > v[1]).then_some(v)
+}
+
+/// Add a prior matte to a prompt: its box (a little larger; unless the prompt has one), up to
+/// four points spread through its core, and the matte itself.
 fn add_prior_prompt(prompt: &mut Prompt, soft: &[f32], w: usize, h: usize) -> bool {
     let bin: Vec<u8> = soft.iter().map(|v| (*v >= 0.5) as u8).collect();
     let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0usize, 0usize);
@@ -858,7 +871,10 @@ fn add_prior_prompt(prompt: &mut Prompt, soft: &[f32], w: usize, h: usize) -> bo
         return false;
     }
     let (mx, my) = (((x1 - x0) as f32 * 0.05).max(4.0), ((y1 - y0) as f32 * 0.05).max(4.0));
-    prompt.bbox = Some([(x0 as f32 - mx).max(0.0), (y0 as f32 - my).max(0.0), (x1 as f32 + 1.0 + mx).min(w as f32), (y1 as f32 + 1.0 + my).min(h as f32)]);
+    // A box the user drew on this frame wins over the prior's.
+    if prompt.bbox.is_none() {
+        prompt.bbox = Some([(x0 as f32 - mx).max(0.0), (y0 as f32 - my).max(0.0), (x1 as f32 + 1.0 + mx).min(w as f32), (y1 as f32 + 1.0 + my).min(h as f32)]);
+    }
     // Farthest-point picks among the core (deep inside), starting from the deepest pixel.
     let sd = matting::signed_distance(&bin, w, h);
     let deep = sd.iter().copied().fold(0.0f32, f32::max);

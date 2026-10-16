@@ -194,3 +194,22 @@ fn image_sequences_reload_by_themselves_only_with_all_footage() {
     png(&b, 128);
     assert_eq!(s.execute_checked("footage.reloadChanged", json!({})).unwrap()["files"], json!(1));
 }
+
+/// #1070: a file decoded in one project and overwritten with one of the same size is read again
+/// when a new project imports it (neither File ▸ Reload Footage nor the change watcher knows it).
+#[test]
+fn a_new_project_importing_an_overwritten_file_shows_the_new_pixels() {
+    let path = tmp("overwritten.psd");
+    std::fs::write(&path, flat(RED, false)).unwrap();
+    let (mut s, _item, cid) = flat_in_comp(&path);
+    assert!(near(pixel(&s, cid, 32, 24), RED));
+    // Another app overwrites the file with the same number of bytes.
+    save(&path, &flat(BLUE, false));
+    s.execute_checked("file.newProject", json!({})).unwrap();
+    let r = s.execute_checked("file.import", json!({"paths": [path.clone()]})).unwrap();
+    let item = r["items"][0].as_u64().unwrap();
+    s.execute_checked("comp.new", json!({"name": "C", "width": 64, "height": 48, "frameRate": 30, "duration": 1})).unwrap();
+    s.execute_checked("layer.addItem", json!({"item": item})).unwrap();
+    let cid = s.active_comp_id().unwrap();
+    assert!(near(pixel(&s, cid, 32, 24), BLUE), "stale pixels from the earlier project: {:?}", pixel(&s, cid, 32, 24));
+}

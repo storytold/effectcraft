@@ -343,6 +343,15 @@ fn matrix_val(m: Affine) -> V {
     array(m.as_coeffs().iter().map(|c| V::Num(*c)).collect())
 }
 
+/// The angle from `a` counterclockwise to `b` (degrees, 0 to 360), worked out from what is left
+/// of each after whole turns.
+fn ccw_turn(a: f64, b: f64) -> f64 {
+    (b % 360.0 - a % 360.0).rem_euclid(360.0)
+}
+
+/// The most turns one `arc` or `arcn` draws.
+const MAX_ARC_TURNS: f64 = 1024.0;
+
 /// The deepest procedure nesting run (deeper recursion stops the program).
 const MAX_CALL_DEPTH: usize = 256;
 
@@ -502,20 +511,33 @@ impl Interp {
     }
 
     fn arc(&mut self, neg: bool) {
-        let a2 = self.popn().to_radians();
-        let a1 = self.popn().to_radians();
+        let a2 = self.popn();
+        let a1 = self.popn();
         let r = self.popn();
         let c = self.user_point();
-        let mut sweep = a2 - a1;
-        if neg {
-            while sweep > 0.0 {
-                sweep -= std::f64::consts::TAU;
-            }
+        // `arc` raises `a2` by multiples of 360 until it is at least `a1`, and `arcn` lowers it
+        // until it is at most `a1` (PostScript Language Reference §8.2, `arc` and `arcn`). Those
+        // sweeps, and the first endpoint, are worked out from what is left of each angle after
+        // whole turns.
+        let sweep = if !neg && a2 < a1 {
+            ccw_turn(a1, a2)
+        } else if neg && a2 > a1 {
+            -ccw_turn(a2, a1)
         } else {
-            while sweep < 0.0 {
-                sweep += std::f64::consts::TAU;
-            }
-        }
+            a2 - a1
+        };
+        // A sweep of more than `MAX_ARC_TURNS` turns is shortened by whole pairs of turns to
+        // between `MAX_ARC_TURNS - 2` and `MAX_ARC_TURNS` turns, with a skip note. The arc still
+        // ends at `a2`, and an even-odd fill or clip of it covers the same area as the full sweep.
+        let max = MAX_ARC_TURNS * 360.0;
+        let sweep = if sweep.abs() > max {
+            self.b.skip("arc (too many turns)");
+            let s = sweep.signum();
+            s * (max - 720.0 + (s * (a2 % 720.0 - a1 % 720.0)).rem_euclid(720.0))
+        } else {
+            sweep
+        };
+        let (a1, sweep) = ((a1 % 360.0).to_radians(), sweep.to_radians());
         let start = Point::new(c.x + r * a1.cos(), c.y + r * a1.sin());
         if self.gs.cur.is_some() {
             self.line_to(start);
@@ -678,20 +700,10 @@ impl Interp {
                             a / b
                         }
                     }
-                    "idiv" => {
-                        if b as i64 == 0 {
-                            0.0
-                        } else {
-                            ((a as i64) / (b as i64)) as f64
-                        }
-                    }
-                    "mod" => {
-                        if b as i64 == 0 {
-                            0.0
-                        } else {
-                            ((a as i64) % (b as i64)) as f64
-                        }
-                    }
+                    // `checked_*` give 0 both for a zero divisor and for the one overflowing
+                    // case, `i64::MIN / -1` (`/` and `%` panic on it in every build).
+                    "idiv" => (a as i64).checked_div(b as i64).unwrap_or(0) as f64,
+                    "mod" => (a as i64).checked_rem(b as i64).unwrap_or(0) as f64,
                     "atan" => a.atan2(b).to_degrees().rem_euclid(360.0),
                     "exp" => a.powf(b),
                     "max" => a.max(b),

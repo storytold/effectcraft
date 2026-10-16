@@ -1,6 +1,8 @@
 //! EffectCraft desktop app.
 //!
-//! Usage: `effectcraft [--control <port>] [--demo|--empty|--home] [project.ecproj | media files…]`
+//! Usage: `effectcraft [--control <port>] [--demo|--empty|--home] [--] [project.ecproj | media files…]`
+//!
+//! An unknown option or a bad port prints an error and exits with status 1 before anything starts.
 //!
 //! Without a project the app starts with an empty Untitled Project, as After Effects does;
 //! `--demo` opens the demo project instead (also Help ▸ Open Demo Project).
@@ -71,22 +73,54 @@ struct Args {
     home: Option<bool>,
 }
 
-/// Parse the arguments after the program name; `None` for `--version`. `env_port` is
-/// `EFFECTCRAFT_CONTROL_PORT`.
-fn parse_args(args: impl IntoIterator<Item = String>, env_port: Option<String>) -> Option<Args> {
-    let mut out = Args { control_port: env_port.and_then(|p| p.parse().ok()), ..Default::default() };
+/// Parse the arguments after the program name; `Ok(None)` for `--version`. `env_port` is
+/// `EFFECTCRAFT_CONTROL_PORT`, used when `--control` isn't given. An unknown option or a bad port
+/// is an error, so it is neither imported as a file nor dropped; after `--` every argument is a file.
+fn parse_args(args: impl IntoIterator<Item = String>, env_port: Result<String, std::env::VarError>) -> Result<Option<Args>, String> {
+    let mut out = Args::default();
     let mut args = args.into_iter();
+    let mut options = true;
     while let Some(a) = args.next() {
+        if !options {
+            out.files.push(a);
+            continue;
+        }
         match a.as_str() {
-            "--control" => out.control_port = args.next().and_then(|p| p.parse().ok()),
+            "--" => options = false,
+            "--control" => out.control_port = Some(control_port("--control", args.next().as_deref())?),
             "--demo" => out.demo = true,
             "--empty" => out.demo = false,
             "--home" => out.home = Some(true),
-            "--version" => return None,
-            _ => out.files.push(a),
+            "--version" => return Ok(None),
+            _ => match a.strip_prefix("--control=") {
+                Some(v) => out.control_port = Some(control_port("--control", Some(v))?),
+                // macOS LaunchServices may pass a process serial number (`-psn_0_1234`), notably on
+                // the first launch of a downloaded app; it is not an option of ours.
+                None if a.starts_with("-psn_") => {}
+                None if a.starts_with('-') && a != "-" => return Err(format!("unknown option `{a}`")),
+                None => out.files.push(a),
+            },
         }
     }
-    Some(out)
+    if out.control_port.is_none() {
+        out.control_port = match env_port {
+            Ok(v) if v.is_empty() => None,
+            Ok(v) => Some(control_port("EFFECTCRAFT_CONTROL_PORT", Some(&v))?),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(std::env::VarError::NotUnicode(v)) => Some(control_port("EFFECTCRAFT_CONTROL_PORT", Some(&v.to_string_lossy()))?),
+        };
+    }
+    Ok(Some(out))
+}
+
+/// A control-channel port from 1 to 65535 (0 would listen on a port nobody is told); `name` is
+/// the flag or variable it came from.
+fn control_port(name: &str, value: Option<&str>) -> Result<u16, String> {
+    let need = format!("{name} needs a port number from 1 to 65535");
+    match value {
+        None => Err(need),
+        Some(v) => v.parse().ok().filter(|&p| p != 0).ok_or(format!("{need}, not `{v}`")),
+    }
 }
 
 fn main() -> eframe::Result {
@@ -95,9 +129,17 @@ fn main() -> eframe::Result {
     // feed the compatibility report.
     effectcraft_engine::logging::install();
     effectcraft_engine::logging::install_panic_hook();
-    let Some(Args { control_port, files, demo, home }) = parse_args(std::env::args().skip(1), std::env::var("EFFECTCRAFT_CONTROL_PORT").ok()) else {
-        println!("effectcraft {}", env!("CARGO_PKG_VERSION"));
-        return Ok(());
+    let Args { control_port, files, demo, home } = match parse_args(std::env::args().skip(1), std::env::var("EFFECTCRAFT_CONTROL_PORT")) {
+        Ok(Some(args)) => args,
+        Ok(None) => {
+            println!("effectcraft {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        // Before the session log, preferences and the window: nothing has started yet.
+        Err(e) => {
+            eprintln!("effectcraft: {e}");
+            std::process::exit(1);
+        }
     };
     // The session log lives in the settings folder (`Logs/effectcraft.log`, the previous two runs
     // kept): a launch from the Dock or a menu has no terminal. Opened after the arguments, so
@@ -321,6 +363,11 @@ fn wgpu_options(backends: Option<eframe::wgpu::Backends>) -> eframe::WgpuConfigu
         if let Some(b) = backends {
             setup.instance_descriptor.backends = b;
         }
+        // Nothing draws or dispatches indirectly, so wgpu's check of indirect arguments only costs
+        // a compute shader when the device is created, one that Metal can't compile on an Intel
+        // Iris Pro: the device is lost and the window never opens.
+        // `WGPU_VALIDATION_INDIRECT_CALL=1` turns the check back on.
+        setup.instance_descriptor.flags = setup.instance_descriptor.flags.difference(eframe::wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL).with_env();
         setup.device_descriptor = std::sync::Arc::new(|adapter| eframe::wgpu::DeviceDescriptor {
             label: Some("EffectCraft device"),
             required_limits: device_limits(adapter.limits()),
@@ -438,9 +485,18 @@ fn disable_app_nap() {
 #[cfg(test)]
 mod tests {
     use super::{Args, parse_args};
+    use std::env::VarError;
+
+    fn parse_env(args: &[&str], env_port: Result<String, VarError>) -> Result<Option<Args>, String> {
+        parse_args(args.iter().map(|a| a.to_string()), env_port)
+    }
 
     fn parse(args: &[&str]) -> Option<Args> {
-        parse_args(args.iter().map(|a| a.to_string()), None)
+        parse_env(args, Err(VarError::NotPresent)).unwrap()
+    }
+
+    fn fails(args: &[&str]) -> String {
+        parse_env(args, Err(VarError::NotPresent)).unwrap_err()
     }
 
     #[cfg(target_os = "linux")]
@@ -452,6 +508,19 @@ mod tests {
         assert!(super::wayland_drop_notice(None, None).is_none());
         assert!(super::wayland_drop_notice(Some(OsStr::new("")), None).is_none());
         assert!(super::wayland_drop_notice(Some(OsStr::new("wayland-0")), Some(OsStr::new("x11"))).is_none());
+    }
+
+    /// The window's wgpu instance skips indirect-call validation (Intel Metal, #1153).
+    #[test]
+    fn the_window_instance_skips_indirect_call_validation() {
+        if std::env::var_os("WGPU_VALIDATION_INDIRECT_CALL").is_some() {
+            return;
+        }
+        let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = super::wgpu_options(None).wgpu_setup else {
+            panic!("the default setup creates its own instance");
+        };
+        // Intel Metal can't compile the validation's compute shader, and the device is lost.
+        assert!(!setup.instance_descriptor.flags.contains(eframe::wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL));
     }
 
     /// The window's device never asks for more than the adapter offers (#198).
@@ -490,6 +559,55 @@ mod tests {
         let a = parse(&["--control", "9877", "--home", "a.ecproj"]).unwrap_or_default();
         assert_eq!((a.control_port, a.home, a.files), (Some(9877), Some(true), vec!["a.ecproj".to_string()]));
         assert_eq!(parse(&["--version"]), None);
-        assert_eq!(parse_args(Vec::new(), Some("9000".into())).map(|a| a.control_port), Some(Some(9000)));
+        assert_eq!(parse_env(&[], Ok("9000".into())).unwrap().map(|a| a.control_port), Some(Some(9000)));
+    }
+
+    /// A missing, non-numeric or zero `--control` value stops the launch instead of starting
+    /// without a control server, and the argument after `--control` isn't reinterpreted (#997).
+    #[test]
+    fn control_needs_a_port_from_1_to_65535() {
+        let need = "--control needs a port number from 1 to 65535";
+        assert_eq!(fails(&["--control"]), need);
+        assert_eq!(fails(&["--control", "--demo"]), format!("{need}, not `--demo`"));
+        assert_eq!(fails(&["--control", "--version"]), format!("{need}, not `--version`"));
+        for bad in ["abc", "0", "70000", "-1", ""] {
+            assert_eq!(fails(&["--control", bad]), format!("{need}, not `{bad}`"));
+            assert_eq!(fails(&[&format!("--control={bad}")]), format!("{need}, not `{bad}`"));
+        }
+        assert_eq!(parse(&["--control=9877"]).map(|a| a.control_port), Some(Some(9877)));
+        assert_eq!(parse(&["--control", "65535"]).map(|a| a.control_port), Some(Some(65535)));
+    }
+
+    /// An unknown option is an error, not a file to import (#997); `--` ends the options.
+    #[test]
+    fn unknown_options_are_errors_not_files() {
+        for bad in ["--automation-read-root", "--automation-write-root=/tmp", "-h", "--Demo", "--demo=yes"] {
+            assert_eq!(fails(&[bad, "/tmp/folder"]), format!("unknown option `{bad}`"));
+        }
+        // Parsed left to right: an error before `--version` wins.
+        assert_eq!(fails(&["--nope", "--version"]), "unknown option `--nope`");
+        // Finder's process serial number is ignored, not imported or refused.
+        assert_eq!(parse(&["-psn_0_12345"]).map(|a| a.files), Some(vec![]));
+        let a = parse(&["clip.mov", "-", "--", "--demo", "-name.png"]).unwrap_or_default();
+        assert_eq!(a.files, ["clip.mov", "-", "--demo", "-name.png"]);
+        assert!(!a.demo);
+    }
+
+    /// `--control` wins over `EFFECTCRAFT_CONTROL_PORT`; the variable is checked only when it is
+    /// used, so a bad value doesn't stop `--control` or `--version`.
+    #[test]
+    fn control_port_variable_is_checked_when_used() {
+        let need = "EFFECTCRAFT_CONTROL_PORT needs a port number from 1 to 65535";
+        assert_eq!(parse_env(&[], Ok("abc".into())).unwrap_err(), format!("{need}, not `abc`"));
+        assert_eq!(parse_env(&[], Ok("0".into())).unwrap_err(), format!("{need}, not `0`"));
+        assert_eq!(parse_env(&[], Ok(String::new())), Ok(Some(Args::default())));
+        assert_eq!(parse_env(&["--control", "9877"], Ok("abc".into())).unwrap().map(|a| a.control_port), Some(Some(9877)));
+        assert_eq!(parse_env(&["--version"], Ok("abc".into())), Ok(None));
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            let not_utf8 = VarError::NotUnicode(std::ffi::OsString::from_vec(vec![0x39, 0xff]));
+            assert_eq!(parse_env(&[], Err(not_utf8)).unwrap_err(), format!("{need}, not `9\u{fffd}`"));
+        }
     }
 }

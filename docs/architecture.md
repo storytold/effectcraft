@@ -72,7 +72,9 @@ All time is an integer `Tick`, 254 016 000 000 per second, the least common mult
 broadcast frame rate (×1001) and audio sample rate, so frame and sample positions are exact.
 Keyframe times are in **layer time**; `layer_time = (comp_time - start_time) / stretch`, and a
 Time Remap property overrides the source time. Commands snap layer times, keyframe times and
-comp durations to whole frames, as After Effects does. Timecode is only a display.
+comp durations to whole frames, as After Effects does, except Quick Offset (`layer.quickOffset`,
+`keys.quickOffset`), which staggers layers and keys onto subframes, as After Effects 25.4 does.
+Timecode is only a display.
 
 ## 3. Document model
 
@@ -719,3 +721,5 @@ JSON parsing is now the bulk of open), and rendering 5,000-layer comps faster.
 | Date | Change | Summary |
 |---|---|---|
 | 2026-10-10 | minor | Status line added; crate table checked against `crates/` (every crate listed); effect count and VP9 encoder description corrected |
+
+PDF document structure uses the `craft-pdf` read feature through an app-owned bounded object adapter. EffectCraft retains its drawing tree, fonts, content/image filters and EPS interpreter; ordinary object/xref limits remain 256 MiB on 64-bit and 64 MiB on 32-bit/WASM, including repair.

@@ -291,6 +291,23 @@ pub fn comp_content(project: &Project, comp: ItemId) -> u64 {
     comp_content_with(project, comp, |_, c| Arc::as_ptr(c))
 }
 
+/// Whether two versions of a comp draw the same pixels. Markers only count when an expression
+/// could read them (`markers_count`).
+fn same_pixels(a: &Comp, b: &Comp, markers_count: bool) -> bool {
+    if markers_count { a.same_pixels(b) } else { a.same_pixels_ignoring_markers(b) }
+}
+
+/// Whether a layer anywhere in the project has an expression, which can read markers.
+fn project_has_expressions(project: &Project) -> bool {
+    fn has_expression(g: &PropGroup) -> bool {
+        g.children.iter().any(|c| match c {
+            Node::Prop(p) => p.expr.is_some(),
+            Node::Group(sub) => has_expression(sub),
+        })
+    }
+    project.items.values().any(|i| matches!(&i.kind, ItemKind::Comp(c) if c.layers.iter().any(|l| has_expression(&l.props))))
+}
+
 /// [`comp_content`] with each comp's address given by `addr`.
 fn comp_content_with(project: &Project, comp: ItemId, addr: impl Fn(ItemId, &Arc<Comp>) -> *const Comp) -> u64 {
     use std::hash::{Hash, Hasher};
@@ -703,10 +720,12 @@ impl Frames {
     fn identity(&self, project: &Arc<Project>, comp: ItemId) -> Identity {
         let plain = comp_content(project, comp);
         let Ok(mut bases) = self.bases.lock() else { return (plain, None) };
+        // Markers can only change pixels through expressions, which read them.
+        let markers_count = project_has_expressions(project);
         if let Some((base_id, base)) = bases.get(&comp.0)
             && *base_id != plain
             && comp_content_with(project, comp, |id, c| match base.item(id).map(|i| &i.kind) {
-                Some(ItemKind::Comp(b)) if Arc::ptr_eq(b, c) || b.same_pixels(c) => Arc::as_ptr(b),
+                Some(ItemKind::Comp(b)) if Arc::ptr_eq(b, c) || same_pixels(b, c, markers_count) => Arc::as_ptr(b),
                 _ => Arc::as_ptr(c),
             }) == *base_id
         {
@@ -1969,5 +1988,36 @@ mod tests {
         assert_eq!(at(&s), o1, "a mute after a real edit keeps that edit's frames");
         switch(&mut s, inner, solid, "video", true);
         assert_ne!(at(&s), o1);
+    }
+
+    #[test]
+    fn markers_keep_the_frames() {
+        use effectcraft_engine::Session;
+        use serde_json::json;
+        let mut s = Session::default();
+        let id = |v: serde_json::Value, k: &str| v[k].as_u64().unwrap();
+        let outer = ItemId(id(s.execute("comp.new", json!({"name": "Outer", "width": 8, "height": 8, "duration": 1})).unwrap(), "comp"));
+        let solid = id(s.execute("layer.newSolid", json!({"comp": outer.0, "color": "#ff0000"})).unwrap(), "layer");
+        let f = Frames::default();
+        let at = |s: &Session| f.content_of(&s.project, s.revision, outer);
+        let o0 = at(&s);
+        s.execute("layer.addMarker", json!({"comp": outer.0, "layers": [solid], "time": 0.5, "comment": "beat"})).unwrap();
+        assert_eq!(at(&s), o0, "a marker changes no pixels, so it keeps the frames");
+    }
+
+    #[test]
+    fn markers_count_when_an_expression_can_read_them() {
+        use effectcraft_engine::Session;
+        use serde_json::json;
+        let mut s = Session::default();
+        let id = |v: serde_json::Value, k: &str| v[k].as_u64().unwrap();
+        let outer = ItemId(id(s.execute("comp.new", json!({"name": "Outer", "width": 8, "height": 8, "duration": 1})).unwrap(), "comp"));
+        let solid = id(s.execute("layer.newSolid", json!({"comp": outer.0, "color": "#ff0000"})).unwrap(), "layer");
+        s.execute("prop.setExpression", json!({"comp": outer.0, "layer": solid, "path": "transform/opacity", "expression": "1"})).unwrap();
+        let f = Frames::default();
+        let at = |s: &Session| f.content_of(&s.project, s.revision, outer);
+        let o0 = at(&s);
+        s.execute("layer.addMarker", json!({"comp": outer.0, "layers": [solid], "time": 0.5, "comment": "beat"})).unwrap();
+        assert_ne!(at(&s), o0, "an expression can read the marker, so the frames change");
     }
 }

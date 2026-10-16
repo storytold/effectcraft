@@ -412,6 +412,162 @@ impl Deferred {
     }
 }
 
+/// #1249: a setting changed while the analysis runs in a worker survives its result, which
+/// used to replace the whole effect with the copy the job started from.
+#[test]
+fn an_edit_made_during_an_offloaded_analysis_survives_its_result() {
+    let (mut s, clip, solid) = setup(shaky);
+    s.execute("edit.clear", json!({"layers": [solid.0]})).unwrap();
+    s.execute("layer.select", json!({"layers": [clip.0]})).unwrap();
+    s.execute("effect.apply", json!({"effect": "Warp Stabilizer"})).unwrap();
+    set_param(&mut s, clip, "stabilization/smoothness", json!(37.5));
+    let off = std::sync::Arc::new(Deferred::default());
+    s.offload = Some(off.clone());
+    s.execute_checked("warp.analyze", json!({"layer": clip.0})).unwrap();
+    // While the job runs: another setting of the same effect.
+    set_param(&mut s, clip, "stabilization/smoothness", json!(12.5));
+    let fx = |s: &Session| s.active_comp().unwrap().layer(clip).unwrap().props.prop("effects/#1/stabilization/smoothness").unwrap().value.clone();
+    off.run(s.footage.clone());
+    assert!(s.poll_offload());
+    assert!(!s.drain_events().iter().any(|e| matches!(e, crate::Event::Toast { error: true, .. })), "applied without a conflict");
+    let st = s.execute("warp.status", json!({})).unwrap();
+    assert_eq!(st["analyzed"], true, "the analysis landed: {st}");
+    assert_eq!(fx(&s), KV::Scalar(12.5), "the edit made during the analysis stays");
+    // One undo step takes the analysis back and keeps the edit.
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(fx(&s), KV::Scalar(12.5));
+    assert_eq!(s.execute("warp.status", json!({})).unwrap()["analyzed"], false);
+}
+
+fn point_track_pose(f: u32) -> ([f64; 2], f64, f64) {
+    ([150.0 + 2.0 * f as f64, 110.0 + f as f64], 0.0, 1.0)
+}
+
+/// Hold an actual point-tracking worker request so commands can edit its target before the
+/// serialized worker reply is delivered.
+fn held_point_track() -> (Session, LayerId, Uid, std::sync::Arc<Deferred>) {
+    let (mut s, clip, solid) = setup(patch_frames(point_track_pose));
+    s.execute("edit.clear", json!({"layers": [solid.0]})).unwrap();
+    s.execute("layer.select", json!({"layers": [clip.0]})).unwrap();
+    let tracker = s.execute("track.motion", json!({})).unwrap()["tracker"].as_u64().unwrap();
+    s.execute("track.setPoint", json!({"point": 1, "center": point_track_pose(0).0, "featureSize": [36, 36], "searchSize": [80, 80]})).unwrap();
+    let off = std::sync::Arc::new(Deferred::default());
+    s.offload = Some(off.clone());
+    s.execute_checked("track.analyze", json!({"direction": "forward"})).unwrap();
+    assert_eq!(off.kinds(), [crate::offload::JobKind::Track]);
+    (s, clip, tracker, off)
+}
+
+fn tracked_center(s: &Session, clip: LayerId, tracker: Uid) -> Uid {
+    s.active_comp().unwrap().layer(clip).unwrap().props.find_group(tracker).unwrap().track_points().next().unwrap().get("featureCenter").unwrap().uid
+}
+
+#[test]
+fn offloaded_conflict_preserves_state_and_reports_completion_failure() {
+    let (mut s, clip, tracker, off) = held_point_track();
+    let center = tracked_center(&s, clip, tracker);
+    s.execute("prop.set", json!({"layer": clip.0, "prop": center, "value": [180.0, 140.0]})).unwrap();
+    s.execute("prop.renameGroup", json!({"layer": clip.0, "prop": tracker, "name": "Redo survives"})).unwrap();
+    assert!(s.undo());
+    let before = s.project.clone();
+    let state = serde_json::to_value(&s.state).unwrap();
+    let steps = |s: &Session| {
+        let entries =
+            |v: &[(String, std::sync::Arc<effectcraft_project::Project>)]| v.iter().map(|(label, p)| (label.clone(), p.to_json())).collect::<Vec<_>>();
+        (
+            entries(&s.history.undo),
+            entries(&s.history.redo),
+            s.history.branches.iter().map(|b| (b.parent.to_json(), entries(&b.steps))).collect::<Vec<_>>(),
+            s.history.merge_key.clone(),
+        )
+    };
+    let history = steps(&s);
+    let inbox = s.offloaded(crate::offload::JobKind::Track).unwrap().inbox.clone();
+    off.run(s.footage.clone());
+    let (done, replies): (Vec<_>, Vec<_>) = inbox.take().into_iter().partition(|r| matches!(r, crate::offload::WorkerReply::Done));
+    assert_eq!(done.len(), 1);
+    for reply in replies {
+        inbox.push(reply);
+    }
+    s.drain_events();
+    assert!(s.poll_offload());
+    let pending = s.offloaded(crate::offload::JobKind::Track).unwrap();
+    assert!(pending.progress.error.as_ref().is_some_and(|e| e.contains("nothing was applied")));
+    assert!(!pending.progress.finished);
+    assert!(s.offload_log.is_empty(), "the error is kept before completion is logged");
+    // The current completion remains identifiable after the bounded log evicts an old entry.
+    s.offload_log = vec![(crate::offload::JobKind::Warp, None); 32];
+    for reply in done {
+        inbox.push(reply);
+    }
+    assert!(s.poll_offload());
+    assert!(std::sync::Arc::ptr_eq(&s.project, &before), "a rejected result changes no document content");
+    assert_eq!(serde_json::to_value(&s.state).unwrap(), state);
+    assert_eq!(steps(&s), history);
+    let errors: Vec<_> = s
+        .drain_events()
+        .into_iter()
+        .filter_map(|e| match e {
+            crate::Event::Toast { error: true, message } => Some(message),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(errors.len(), 1, "the apply rejection is reported once: {errors:?}");
+    assert!(errors[0].contains("nothing was applied"));
+    assert_eq!(s.offload_log.len(), 32);
+    assert_eq!(s.offload_log_start, 1);
+    let (kind, error) = s.offload_log.last().unwrap();
+    assert_eq!(*kind, crate::offload::JobKind::Track);
+    assert!(error.as_ref().is_some_and(|e| e.contains("nothing was applied")), "a rejected result must report failure to JobWaiter");
+    assert!(s.redo());
+    assert_eq!(s.active_comp().unwrap().layer(clip).unwrap().props.find_group(tracker).unwrap().name, "Redo survives");
+}
+
+#[test]
+fn offloaded_disjoint_edit_reports_success_and_keeps_one_undo_step() {
+    let (mut s, clip, tracker, off) = held_point_track();
+    s.execute("prop.renameGroup", json!({"layer": clip.0, "prop": tracker, "name": "Live track"})).unwrap();
+    s.execute("prop.setGroupEnabled", json!({"layer": clip.0, "prop": tracker, "value": false})).unwrap();
+    let undo = s.history.undo.len();
+    off.run(s.footage.clone());
+    s.drain_events();
+    assert!(s.poll_offload());
+    let layer = s.active_comp().unwrap().layer(clip).unwrap();
+    let track = layer.props.find_group(tracker).unwrap();
+    assert_eq!(track.name, "Live track");
+    assert!(!track.enabled);
+    assert_eq!(track.track_points().next().unwrap().get("featureCenter").unwrap().keys.len(), 25);
+    assert_eq!(s.history.undo.len(), undo + 1);
+    assert_eq!(s.offload_log.last(), Some(&(crate::offload::JobKind::Track, None)));
+    assert!(!s.drain_events().iter().any(|e| matches!(e, crate::Event::Toast { error: true, .. })));
+    let applied = s.project.to_json();
+    assert!(s.undo());
+    let track = s.active_comp().unwrap().layer(clip).unwrap().props.find_group(tracker).unwrap();
+    assert_eq!(track.name, "Live track");
+    assert!(!track.enabled);
+    assert!(track.track_points().next().unwrap().get("featureCenter").unwrap().keys.is_empty());
+    assert!(s.redo());
+    assert_eq!(s.project.to_json(), applied);
+}
+
+#[test]
+fn offloaded_conflict_does_not_fail_a_concurrent_analysis() {
+    let (mut s, clip, tracker, off) = held_point_track();
+    let effect = s.execute("effect.apply", json!({"effect": "Warp Stabilizer", "layers": [clip.0]})).unwrap()["effects"][0].as_u64().unwrap();
+    s.execute_checked("warp.analyze", json!({"layer": clip.0, "effect": effect})).unwrap();
+    assert_eq!(off.kinds(), [crate::offload::JobKind::Track, crate::offload::JobKind::Warp]);
+    let center = tracked_center(&s, clip, tracker);
+    s.execute("prop.set", json!({"layer": clip.0, "prop": center, "value": [180.0, 140.0]})).unwrap();
+    off.run(s.footage.clone());
+    assert!(s.poll_offload());
+    let track = s.offload_log.iter().find(|(kind, _)| *kind == crate::offload::JobKind::Track).unwrap();
+    assert!(track.1.as_ref().is_some_and(|e| e.contains("nothing was applied")));
+    let warp = s.offload_log.iter().find(|(kind, _)| *kind == crate::offload::JobKind::Warp).unwrap();
+    assert!(warp.1.is_none(), "the other analysis completed successfully: {warp:?}");
+    assert_eq!(s.execute("warp.status", json!({"layer": clip.0, "effect": effect})).unwrap()["analyzed"], true);
+    assert!(s.active_comp().unwrap().layer(clip).unwrap().props.find(center).unwrap().keys.is_empty());
+}
+
 /// M13.32: where jobs run elsewhere (the browser), `warp.status` never solves the
 /// stabilization plan on the page's thread (seconds for a long Subspace Warp clip): the
 /// analysis job sends the plan's summary with its result, and a settings change has the plan

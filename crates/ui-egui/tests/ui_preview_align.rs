@@ -118,7 +118,8 @@ fn playback_follows_the_shortcut_options() {
     h.step();
     assert!(h.state().playback.playing);
     assert_eq!(h.state().playback.shortcut, PreviewShortcut::ShiftSpacebar);
-    assert_eq!(h.state().playback.plan.unwrap().step, 2);
+    // Every frame by default (#551): Skip is 0 until the user sets it.
+    assert_eq!(h.state().playback.plan.unwrap().step, 1);
 }
 
 #[test]

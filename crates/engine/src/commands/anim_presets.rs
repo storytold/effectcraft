@@ -1,14 +1,18 @@
 //! EffectCraft's own animation preset library (Effects & Presets ▸ * Animation Presets): the
-//! Transitions category, original presets built on our Transition effects and layer opacity.
+//! Transitions category (original presets built on our Transition effects and layer opacity) and
+//! the Backgrounds category (generators, noise and colour effects driven by expressions).
 //!
 //! Each preset adds effects (with values and keyframes) and/or keys layer properties, starting
 //! at the current time, on every selected layer. The library is data
-//! (`presets/transitions.json`), written from scratch; nothing comes from After Effects' `.ffx`
-//! presets.
+//! (`presets/*.json`), written from scratch; nothing comes from After Effects' `.ffx` presets.
+//!
+//! A preset effect or layer block has `set` (static values), `keys` (`[[seconds, value], …]`
+//! from the current time), `expr` (an expression text per property) and `ease`. Values of
+//! point parameters are fractions of the layer size, like the effects' own defaults.
 
 use effectcraft_keyframe::Keyframe;
 use effectcraft_project::build::Ids;
-use effectcraft_project::{Node, Property};
+use effectcraft_project::{Expression, Node, ParamUi, Property, Value as KV};
 use effectcraft_time::Tick;
 use serde_json::{Map, Value, json};
 
@@ -19,11 +23,19 @@ use crate::{EngineError, Result, Session, cmd, query};
 /// The original transition presets (`presets/transitions.json`).
 pub const TRANSITIONS_JSON: &str = include_str!("../../presets/transitions.json");
 
+/// The original background presets (`presets/backgrounds.json`).
+pub const BACKGROUNDS_JSON: &str = include_str!("../../presets/backgrounds.json");
+
 /// Keys per animated property, so a hostile inline preset can't allocate without bound.
 const MAX_KEYS: usize = 256;
+/// Longest expression text an inline preset may carry.
+const MAX_EXPR: usize = 4096;
 
 fn presets() -> Vec<Value> {
-    serde_json::from_str::<Value>(TRANSITIONS_JSON).ok().and_then(|v| v.get("presets").and_then(Value::as_array).cloned()).unwrap_or_default()
+    [TRANSITIONS_JSON, BACKGROUNDS_JSON]
+        .iter()
+        .flat_map(|src| serde_json::from_str::<Value>(src).ok().and_then(|v| v.get("presets").and_then(Value::as_array).cloned()).unwrap_or_default())
+        .collect()
 }
 
 fn text<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
@@ -44,11 +56,16 @@ fn find_preset(want: &str) -> Option<Value> {
 
 /// Set `pr` to `v` (when given) and replace its keys with `keys` (`[[seconds, value], …]`,
 /// seconds from `at`). Returns false when nothing in the request fits the property.
-fn set_prop(pr: &mut Property, v: Option<&Value>, keys: Option<&Value>, at: Tick, ease: bool) -> bool {
+fn set_prop(pr: &mut Property, v: Option<&Value>, keys: Option<&Value>, at: Tick, ease: bool, size: [f64; 2]) -> bool {
+    // Point parameters are written as fractions of the layer size.
+    let scale = |val: KV| match val {
+        KV::Vec2(f) if matches!(pr.ui, ParamUi::Point) => KV::Vec2([f[0] * size[0], f[1] * size[1]]),
+        other => other,
+    };
     let mut ok = true;
     if let Some(v) = v {
         match json_value(v, &pr.value) {
-            Some(val) => pr.value = val,
+            Some(val) => pr.value = scale(val),
             None => ok = false,
         }
     }
@@ -58,7 +75,7 @@ fn set_prop(pr: &mut Property, v: Option<&Value>, keys: Option<&Value>, at: Tick
     for k in list.iter().take(MAX_KEYS) {
         let t = k.get(0).and_then(Value::as_f64).filter(|t| t.is_finite() && t.abs() <= 86_400.0);
         let (Some(t), Some(val)) = (t, k.get(1).and_then(|x| json_value(x, &pr.value))) else { return false };
-        let mut key = Keyframe::new(at + Tick::from_seconds_f64(t), val);
+        let mut key = Keyframe::new(at + Tick::from_seconds_f64(t), scale(val));
         if pr.hold_only {
             key = key.hold();
         } else if ease {
@@ -76,20 +93,28 @@ fn set_prop(pr: &mut Property, v: Option<&Value>, keys: Option<&Value>, at: Tick
 
 /// Apply `set` / `keys` maps to the properties under `root`; returns the paths that don't exist
 /// or don't take the given values.
-fn apply_maps(root: &mut effectcraft_project::PropGroup, spec: &Value, at: Tick) -> Vec<String> {
+fn apply_maps(root: &mut effectcraft_project::PropGroup, spec: &Value, at: Tick, size: [f64; 2]) -> Vec<String> {
     let ease = spec.get("ease").and_then(Value::as_bool).unwrap_or(false);
     let empty = Map::new();
     let set = spec.get("set").and_then(Value::as_object).unwrap_or(&empty);
     let keys = spec.get("keys").and_then(Value::as_object).unwrap_or(&empty);
+    let exprs = spec.get("expr").and_then(Value::as_object).unwrap_or(&empty);
     let mut skipped = Vec::new();
     for (path, v) in set {
-        if !root.prop_mut(path).is_some_and(|pr| set_prop(pr, Some(v), None, at, false)) {
+        if !root.prop_mut(path).is_some_and(|pr| set_prop(pr, Some(v), None, at, false, size)) {
             skipped.push(path.clone());
         }
     }
     for (path, list) in keys {
-        if !root.prop_mut(path).is_some_and(|pr| !pr.static_only && set_prop(pr, None, Some(list), at, ease)) {
+        if !root.prop_mut(path).is_some_and(|pr| !pr.static_only && set_prop(pr, None, Some(list), at, ease, size)) {
             skipped.push(path.clone());
+        }
+    }
+    for (path, text) in exprs {
+        let body = text.as_str().filter(|t| !t.trim().is_empty() && t.len() <= MAX_EXPR);
+        match (root.prop_mut(path), body) {
+            (Some(pr), Some(body)) if !pr.static_only => pr.expr = Some(Expression { text: body.to_string(), enabled: true }),
+            _ => skipped.push(path.clone()),
         }
     }
     skipped
@@ -134,13 +159,13 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
                     let same = fx.groups().filter(|g| g.match_id == spec.id).count();
                     let inst = if same == 0 { spec.name.to_string() } else { format!("{} {}", spec.name, same.saturating_add(1)) };
                     let mut g = effectcraft_effects::instantiate(spec, &mut Ids(&mut next), &inst, *size);
-                    skipped.extend(apply_maps(&mut g, ej, at).into_iter().map(|path| format!("{}/{path}", spec.id)));
+                    skipped.extend(apply_maps(&mut g, ej, at, *size).into_iter().map(|path| format!("{}/{path}", spec.id)));
                     added.push(g.uid);
                     fx.children.push(Node::Group(g));
                 }
             }
             if let Some(ls) = &layer_spec {
-                skipped.extend(apply_maps(&mut l.props, ls, at));
+                skipped.extend(apply_maps(&mut l.props, ls, at, *size));
             }
             proj.next_id = next;
         }

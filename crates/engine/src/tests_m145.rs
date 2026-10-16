@@ -661,7 +661,13 @@ fn dynamic_menus_and_window_viewer_labels() {
     assert_eq!(crate::menus::dynamic(&s, "history", &Default::default()).0.len(), s.history.undo.len());
     let a = solid(&mut s, "#ff0000");
     s.state.selected_layers = vec![LayerId(a)];
-    let entry = |cmd: &str, panel: &str| crate::menus::MenuEntry { label: "x".into(), command: cmd.into(), params: json!({"panel": panel}), shortcut: None };
+    let entry = |cmd: &str, panel: &str| crate::menus::MenuEntry {
+        label: "x".into(),
+        command: cmd.into(),
+        params: json!({"panel": panel}),
+        shortcut: None,
+        alt_shortcuts: vec![],
+    };
     assert_eq!(crate::menus::entry_label(&s, &entry("window.panel", "composition")), "Composition: Main");
     assert_eq!(crate::menus::entry_label(&s, &entry("window.panel", "timeline")), "Timeline: Main");
     assert!(crate::menus::entry_label(&s, &entry("window.panel", "layer")).starts_with("Layer: "));
@@ -700,4 +706,45 @@ fn unsaved_project_renders_to_movies_or_home_not_the_working_directory() {
     std::fs::create_dir_all(home.join("Movies")).unwrap();
     assert_eq!(crate::render_queue::default_output_base(Some(home.clone())), Some(home.join("Movies")));
     assert_eq!(crate::render_queue::default_output_base(None), None);
+}
+
+#[test]
+fn replace_with_precomp_swaps_every_use_of_the_item_for_one_new_comp() {
+    let mut s = session();
+    let main = s.active_comp_id().unwrap();
+    let l = solid(&mut s, "#ff0000");
+    s.execute("prop.set", json!({"layer": l, "path": "transform/position", "value": [10.0, 20.0]})).unwrap();
+    let item = layer(&s, l).source.item().unwrap();
+    let in_main = |s: &Session| s.project.comp(main).unwrap().layer(LayerId(l)).unwrap().clone();
+    let props = in_main(&s).props;
+    // A second comp uses the same solid for its whole 4 s (longer than Main).
+    let other =
+        ItemId(s.execute("comp.new", json!({"name": "Other", "width": 64, "height": 48, "duration": 4, "frameRate": 10})).unwrap()["comp"].as_u64().unwrap());
+    s.execute("layer.addItem", json!({"comp": other.0, "item": item.0, "time": 0.0})).unwrap();
+    let undo_before = s.history.undo.len();
+
+    let r = s.execute("file.replaceWithPrecomp", json!({"item": item.0})).unwrap();
+    assert_eq!(r["replaced"], 2);
+    let pre = ItemId(r["comp"].as_u64().unwrap());
+    let pc = s.project.comp(pre).unwrap();
+    assert_eq!((pc.width, pc.height), (32, 24));
+    assert_eq!(pc.duration, Tick::from_seconds_f64(4.0));
+    assert_eq!(pc.layers.len(), 1);
+    assert_eq!(pc.layers[0].source.item(), Some(item));
+    assert_eq!(s.project.item(pre).unwrap().name, format!("{} Comp", s.project.item(item).unwrap().name));
+    for cid in [main, other] {
+        let c = s.project.comp(cid).unwrap();
+        assert!(c.layers.iter().all(|l| matches!(l.source, effectcraft_project::LayerSource::Comp { item } if item == pre)));
+    }
+    // The layer keeps its transform; the item stays in the project; one undo step.
+    assert_eq!(in_main(&s).props, props);
+    assert!(s.project.item(item).is_some());
+    assert_eq!(s.history.undo.len(), undo_before + 1);
+    s.undo();
+    assert!(s.project.item(pre).is_none());
+    assert_eq!(in_main(&s).source.item(), Some(item));
+
+    // Compositions and folders can't be precomposed this way.
+    assert!(s.execute("file.replaceWithPrecomp", json!({"item": other.0})).is_err());
+    assert!(s.execute("file.replaceWithPrecomp", json!({"item": 999_999})).is_err());
 }

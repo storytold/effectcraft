@@ -74,6 +74,13 @@ that with stub binaries ([`test-msi.ps1`](../packaging/windows/test-msi.ps1)): a
 an upgrade that keeps it, a repair, uninstall, and the Program Files default. The wizard pages
 themselves are checked by hand.
 
+The portable zip ships [`portable.txt`](../packaging/windows/portable.txt) beside `effectcraft.exe`.
+That marker (or an `EffectCraft.portable` file) switches on portable mode: the settings folder
+(preferences, shortcuts, recovery files, logs, plug-ins) becomes `EffectCraftData\` next to the
+exe instead of `%APPDATA%\EffectCraft`. If that folder isn't writable the app logs a warning and
+uses `%APPDATA%`. The MSI has no marker. The logic is in `crates/host/src/app_dirs.rs` and works
+the same on macOS and Linux; `EFFECTCRAFT_CONFIG_DIR` still wins over it.
+
 Every binary reports its version: `effectcraft --version`, `effectcraft-cli --version` and
 *Help › About EffectCraft*.
 

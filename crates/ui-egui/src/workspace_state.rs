@@ -263,6 +263,19 @@ impl WorkspaceStore {
         self.error = None;
         Ok(true)
     }
+
+    /// An explicit save (Save Workspace, Save as New Workspace, Edit Workspaces): unlike
+    /// [`Self::save`], no settings folder or a file blocked at load is an error, not "nothing to do".
+    pub(crate) fn save_now(&mut self, config: Option<&dyn ConfigStore>, ui: &UiState) -> Result<(), String> {
+        let Some(config) = config else {
+            return Err("there is no settings folder to save them in".into());
+        };
+        if !self.writable {
+            let path = config.dir().map_or_else(|| FILE.to_string(), |dir| dir.join(FILE).display().to_string());
+            return Err(format!("{path} couldn't be loaded at startup, so it is left untouched; fix or move it and restart"));
+        }
+        self.save(Some(config), ui).map(|_| ())
+    }
 }
 
 #[cfg(test)]
@@ -283,8 +296,29 @@ mod tests {
             ui.focused = PanelKind::Project;
             ui.dock = crate::dock::workspace("Minimal");
             assert!(!store.save(Some(&config), &ui).unwrap());
+            assert!(store.save_now(Some(&config), &ui).unwrap_err().contains("couldn't be loaded"));
             assert_eq!(config.read(FILE).as_deref(), Some(text.as_str()));
         }
+    }
+
+    #[test]
+    fn explicit_save_without_a_settings_folder_is_an_error() {
+        let mut ui = UiState::default();
+        let mut store = WorkspaceStore::load(None, &mut ui);
+        ui.focused = PanelKind::Project;
+        assert!(!store.save(None, &ui).unwrap());
+        assert!(store.save_now(None, &ui).is_err());
+    }
+
+    #[test]
+    fn explicit_save_with_nothing_new_succeeds() {
+        let config = MemoryConfig::default();
+        let mut ui = UiState::default();
+        let mut store = WorkspaceStore::load(Some(&config), &mut ui);
+        ui.focused = PanelKind::Project;
+        store.save_now(Some(&config), &ui).unwrap();
+        store.save_now(Some(&config), &ui).unwrap();
+        assert!(config.read(FILE).is_some());
     }
 
     #[test]

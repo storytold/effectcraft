@@ -1,6 +1,6 @@
 # Expressions and scripting parity
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-10 · **Change:** major (first expressions and scripting checklist against After Effects 2026 26.5) · **Target:** Adobe After Effects 2026
+> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-12 · **Change:** minor (`#include` / `#target` removed from the estimate (landed in #759)) · **Target:** Adobe After Effects 2026
 
 Expressions and ExtendScript are how After Effects work is automated and how much of it is
 built: rigs, templates, studio pipelines. They are also what carries over from After Effects
@@ -34,7 +34,7 @@ our own scripts; no real-world script library has been run against both apps.
 
 ## Estimate
 
-**≈ 20–40 h**: `#include` / `#target` and Startup / Shutdown folders 4–8 h, script shortcuts 2–4 h,
+**≈ 20–40 h**: `#include` / `#target` (landed, #759) and Startup / Shutdown folders 4–8 h as first estimated (Startup / Shutdown remain), script shortcuts 2–4 h,
 a corpus of public scripts and expressions with the fixes it finds 10–20 h, an expression
 performance benchmark 4–8 h.
 
@@ -42,4 +42,5 @@ performance benchmark 4–8 h.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-12 | minor | Estimate no longer counts `#include` / `#target` (#759, `tests_include.rs`); the table row was already current |
 | 2026-10-10 | major | First expressions and scripting checklist |

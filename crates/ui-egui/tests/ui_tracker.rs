@@ -115,3 +115,53 @@ fn tracker_panel_and_track_point_widgets() {
     effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "track.editTargetDialog", json!({})).unwrap();
     assert_eq!(h.state().dialog, Some(effectcraft_ui_egui::Dialog::TrackTarget));
 }
+
+fn drag(h: &mut Harness<'_, EffectcraftApp>, from: egui::Pos2, to: egui::Pos2) {
+    h.input_mut().events.push(egui::Event::PointerMoved(from));
+    h.input_mut().events.push(egui::Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.step();
+    for i in 1..=8 {
+        h.input_mut().events.push(egui::Event::PointerMoved(from + (to - from) * (i as f32 / 8.0)));
+        h.step();
+    }
+    h.input_mut().events.push(egui::Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    h.run_steps(2);
+}
+
+/// #1067: zoomed out, a default track point's feature region is smaller on screen than the attach
+/// point's grab area, which used to swallow every press inside it: the point itself could not be
+/// grabbed. Inside the region off its centre moves the point at any zoom; the centre still grabs the
+/// attach point.
+#[test]
+fn zoomed_out_track_point_can_be_grabbed() {
+    for mag in [0.25f32, 0.5, 1.0] {
+        let mut s = Session::default();
+        s.execute("comp.new", json!({"name": "Track", "width": 1920, "height": 1080, "duration": 2})).unwrap();
+        s.execute("layer.newSolid", json!({"name": "Plate", "color": "#406080"})).unwrap();
+        s.execute("layer.select", json!({"layers": ["Plate"]})).unwrap();
+        s.execute("track.motion", json!({})).unwrap();
+        let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(move |_| EffectcraftApp::new(s));
+        h.state_mut().show_panel(PanelKind::Composition);
+        h.run_steps(3);
+        h.state_mut().ui.viewer.zoom = Some(mag);
+        h.run_steps(3);
+        let zoom = rect(&h, "viewer.comp").width() / 1920.0;
+        let point = |h: &mut Harness<'_, EffectcraftApp>| h.state_mut().session.execute("track.status", json!({})).unwrap()["tracker"]["points"][0].clone();
+        let p0 = point(&mut h);
+        let fr = rect(&h, "viewer.track.1.feature");
+        let from = fr.center() + egui::vec2(fr.width() * 0.35, 0.0);
+        drag(&mut h, from, from + egui::vec2(40.0, 20.0));
+        let p1 = point(&mut h);
+        let dx = p1["center"][0].as_f64().unwrap() - p0["center"][0].as_f64().unwrap();
+        let dy = p1["center"][1].as_f64().unwrap() - p0["center"][1].as_f64().unwrap();
+        assert!((dx - 40.0 / zoom as f64).abs() < 1.0 && (dy - 20.0 / zoom as f64).abs() < 1.0, "{mag}×: the point moved by ({dx}, {dy}), {p1}");
+        assert_eq!(p1["attachOffset"], p0["attachOffset"], "{mag}×: the attach point moves with the point");
+        let fr = rect(&h, "viewer.track.1.feature");
+        drag(&mut h, fr.center(), fr.center() + egui::vec2(40.0, 20.0));
+        let p2 = point(&mut h);
+        assert_eq!(p2["center"], p1["center"], "{mag}×: the centre grabs the attach point, not the point");
+        assert_ne!(p2["attachOffset"], p1["attachOffset"], "{mag}×: the centre grabs the attach point");
+        // Dragged out of the region, the attach point keeps its full grab area.
+        assert_eq!(rect(&h, "viewer.track.1.attach").width(), 12.0, "{mag}×");
+    }
+}

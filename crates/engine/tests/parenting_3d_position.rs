@@ -383,6 +383,29 @@ fn parenting_static_orientation_handles_signed_uniform_scale_and_gimbal_order() 
     assert!(max_corners < 1e-8 && max_pixels < 2e-5, "static uniform pose must use the existing Euler order including signed scale and gimbal angles");
 }
 
+/// A static Orientation just off gimbal lock (Y within 1e-6 degrees of ±90) keeps its world pose
+/// under a uniform parent. Recovering Euler angles from the matrix must not lose precision there.
+#[test]
+fn parenting_static_orientation_is_exact_just_off_gimbal_lock() {
+    let mut max_corners = 0.0f64;
+    for factor in [120.0, -120.0] {
+        for y in [90.0 - 1e-6, -90.0 + 1e-6] {
+            let (mut s, p, c) = fixture(true, true);
+            set(&mut s, p, "transform/orientation", json!([0.0, 0.0, 0.0]));
+            set(&mut s, p, "transform/rotationX", json!(0.0));
+            set(&mut s, p, "transform/rotationY", json!(0.0));
+            set(&mut s, p, "transform/rotation", json!(42.0));
+            set(&mut s, p, "transform/scale", json!([factor, factor, factor]));
+            set(&mut s, c, "transform/orientation", json!([23.0, y, -37.0]));
+            set(&mut s, c, "transform/scale", json!([200.0, 160.0, 150.0]));
+            let before = world(&s, c, Tick::ZERO);
+            parent(&mut s, c, Some(p), true);
+            max_corners = max_corners.max(displacement(before, world(&s, c, Tick::ZERO)));
+        }
+    }
+    assert!(max_corners < 1e-9, "a static Orientation near gimbal lock must keep its world pose: corners {max_corners}");
+}
+
 #[test]
 fn parenting_animated_orientation_and_nonuniform_parent_keep_authored_pose_boundary() {
     for animated in [true, false] {
@@ -461,4 +484,42 @@ fn parenting_uniform_parent_preserves_eased_position_at_quarter_times_and_undo()
         }
     }
     assert!(maximum_error < 1e-8, "3D uniform parent compensation must preserve eased Position at quarter and three-quarter times");
+}
+
+/// Parenting a two-node camera to a default null keeps its world frame (eye, forward, down):
+/// Position and Point of Interest are re-expressed in the null's space (#1010, #1020).
+#[test]
+fn parenting_camera_to_default_null_preserves_framing() {
+    use effectcraft_engine::render::three_d::camera::layer_frame;
+    let mut s = Session::default();
+    command(&mut s, "comp.new", json!({"name":"Camera","width":640,"height":360,"duration":2,"frameRate":24}));
+    let cam = command(&mut s, "layer.newCamera", json!({"name":"Camera 1"}))["layer"].as_u64().unwrap();
+    let null = command(&mut s, "layer.newNull", json!({"name":"Null 1"}))["layer"].as_u64().unwrap();
+    let frame = |s: &Session| {
+        let cid = s.active_comp_id().unwrap();
+        let c = s.project.comp(cid).unwrap();
+        let ctx = EvalCtx::new(&s.project, cid, c, Tick::ZERO);
+        layer_frame(&ctx, c.layer(LayerId(cam)).unwrap())
+    };
+    let authored = |s: &Session, path: &str| {
+        let cid = s.active_comp_id().unwrap();
+        s.project.comp(cid).unwrap().layer(LayerId(cam)).unwrap().props.prop(path).unwrap().value.as_vec3()
+    };
+    let (eye0, fwd0, down0) = frame(&s);
+    let (pos0, poi0) = (authored(&s, "transform/position"), authored(&s, "transform/poi"));
+    let frame_error = |(a0, b0, c0): (Vec3, Vec3, Vec3), (a1, b1, c1): (Vec3, Vec3, Vec3)| {
+        [(a0 - a1).length(), (b0 - b1).length(), (c0 - c1).length()].into_iter().fold(0.0, f64::max)
+    };
+    let undo = s.history.undo.len();
+    parent(&mut s, cam, Some(null), true);
+    assert!(frame_error(frame(&s), (eye0, fwd0, down0)) < 1e-9, "the camera frame must not move");
+    // Compensation rewrote the authored values, not just the parent pointer.
+    assert!((authored(&s, "transform/position")[0] - pos0[0]).abs() > 1.0, "position is re-expressed in the null's space");
+    assert!((authored(&s, "transform/poi")[0] - poi0[0]).abs() > 1.0, "point of interest follows it");
+    assert_eq!(s.history.undo.len(), undo + 1, "parent compensation is one undo action");
+    // Unparenting restores the authored transform and the same frame.
+    parent(&mut s, cam, None, true);
+    assert!(frame_error(frame(&s), (eye0, fwd0, down0)) < 1e-9);
+    assert_eq!(authored(&s, "transform/position"), pos0, "unparenting restores position");
+    assert_eq!(authored(&s, "transform/poi"), poi0, "unparenting restores point of interest");
 }

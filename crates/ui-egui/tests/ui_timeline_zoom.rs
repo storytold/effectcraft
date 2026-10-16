@@ -163,6 +163,29 @@ fn semicolon_toggles_frame_level_and_the_whole_comp() {
     assert_eq!(h.state().ui.timeline.pps, None);
 }
 
+/// `Shift+;` zooms out to the whole comp, and again back in to the span it left.
+#[test]
+fn shift_semicolon_toggles_the_whole_comp_and_the_span_before() {
+    let (mut h, _) = harness();
+    h.state_mut().session.execute("time.set", json!({"time": 120.0})).unwrap();
+    h.run_steps(3);
+    let ctx = h.ctx.clone();
+    effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "timeline.zoomFrameToggle", json!({})).unwrap();
+    h.run_steps(2);
+    let before = (h.state().ui.timeline.start, h.state().ui.timeline.pps);
+    assert!(before.1.is_some());
+    effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "timeline.zoomFit", json!({})).unwrap();
+    assert_eq!(h.state().ui.timeline.pps, None);
+    h.run_steps(2);
+    effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "timeline.zoomFit", json!({})).unwrap();
+    assert_eq!((h.state().ui.timeline.start, h.state().ui.timeline.pps), before);
+    // With nothing to go back to, the whole comp stays.
+    h.state_mut().ui.timeline.pps = None;
+    h.state_mut().ui.timeline.before_fit = None;
+    effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "timeline.zoomFit", json!({})).unwrap();
+    assert_eq!(h.state().ui.timeline.pps, None);
+}
+
 fn space(h: &mut Harness<'_, EffectcraftApp>, pressed: bool) {
     h.event(Event::Key { key: egui::Key::Space, physical_key: None, pressed, repeat: false, modifiers: Modifiers::NONE });
     h.step();
@@ -333,11 +356,36 @@ fn dragging_out_of_the_marker_bin_adds_a_comp_marker() {
     assert_eq!(markers(&h), vec![13.0]);
     let history = &h.state().session.history.undo;
     assert_eq!((history.len(), history.last().map(|u| u.0.as_str())), (undo + 1, Some("Add Marker")), "one undo step");
-    // Numpad * (it arrives as text): Add Marker at the current time.
+    // Numpad * (it arrives as text) with no layer selected: Add Marker at the current time.
+    h.state_mut().session.execute("edit.deselectAll", json!({})).unwrap();
     h.state_mut().session.execute("time.set", json!({"time": 20.0})).unwrap();
     h.event(Event::Text("*".into()));
     h.run_steps(2);
     assert_eq!(markers(&h), vec![13.0, 20.0]);
+}
+
+/// #976: as in After Effects, Numpad * marks the selected layers at the current time; only with
+/// no layer selected does it add a composition marker.
+#[test]
+fn numpad_star_marks_the_selected_layer() {
+    let (mut h, layer) = harness();
+    let comp_markers =
+        |h: &Harness<'_, EffectcraftApp>| -> Vec<f64> { h.state().session.active_comp().unwrap().markers.iter().map(|m| m.time.seconds()).collect() };
+    let layer_markers = |h: &Harness<'_, EffectcraftApp>| -> Vec<f64> {
+        let comp = h.state().session.active_comp().unwrap();
+        comp.layer(effectcraft_engine::project::LayerId(layer)).unwrap().markers.iter().map(|m| m.time.seconds()).collect()
+    };
+    let star = |h: &mut Harness<'_, EffectcraftApp>, time: f64| {
+        h.state_mut().session.execute("time.set", json!({"time": time})).unwrap();
+        h.event(Event::Text("*".into()));
+        h.run_steps(2);
+    };
+    h.state_mut().session.execute("layer.select", json!({"layers": [layer]})).unwrap();
+    star(&mut h, 2.0);
+    assert_eq!((layer_markers(&h), comp_markers(&h)), (vec![2.0], vec![]));
+    h.state_mut().session.execute("edit.deselectAll", json!({})).unwrap();
+    star(&mut h, 3.0);
+    assert_eq!((layer_markers(&h), comp_markers(&h)), (vec![2.0], vec![3.0]));
 }
 
 /// #468: zoomed in, a CTI scrub held past the right end of the ruler scrolls the timeline (the

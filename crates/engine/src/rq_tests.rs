@@ -87,7 +87,9 @@ fn add_configure_render() {
     assert_eq!(std::path::Path::new(q[0].last_output.as_deref().unwrap()), std::path::PathBuf::from(crate::tests_stubs::tmp_out("rq/out.mov")));
     assert_eq!(q[1].status, RenderStatus::Failed("boom".into()));
     assert_eq!(q[2].status.label(), "Unqueued");
-    assert!(s.drain_events().iter().any(|e| matches!(e, Event::Toast { error: true, .. })));
+    let events = s.drain_events();
+    let toast = events.iter().find_map(|e| if let Event::Toast { message, error: true } = e { Some(message.as_str()) } else { None });
+    assert_eq!(toast, Some("Render finished with 1 failed item(s): boom"), "the toast says why (#568)");
     // Reorder, duplicate, remove, undo.
     s.execute("renderQueue.move", json!({"item": b["item"], "to": 1})).unwrap();
     assert_eq!(s.project.render_queue[0].id, b["item"].as_u64().unwrap());
@@ -112,6 +114,28 @@ fn persists_in_project_file() {
     // Projects without a queue still load.
     let old = json.replace("\"render_queue\"", "\"_ignored\"");
     assert!(effectcraft_project::Project::from_json(&old).unwrap().render_queue.is_empty());
+}
+
+#[test]
+fn failure_toast_names_the_first_reason() {
+    struct Failing;
+    impl Exporter for Failing {
+        fn formats(&self) -> Vec<OutputFormat> {
+            OutputFormat::ALL.to_vec()
+        }
+        fn export(&self, job: &ExportJob, _: &mut dyn FnMut(u64, u64) -> bool) -> Result<ExportResult, String> {
+            let name = std::path::Path::new(job.path).file_name().unwrap().to_string_lossy().into_owned();
+            Err(format!("cannot write {name}"))
+        }
+    }
+    let mut s = demo();
+    s.exporter = Some(Arc::new(Failing));
+    s.execute("renderQueue.add", json!({"format": "gif", "output": crate::tests_stubs::tmp_out("rq/first.gif")})).unwrap();
+    s.execute("renderQueue.add", json!({"format": "gif", "output": crate::tests_stubs::tmp_out("rq/second.gif")})).unwrap();
+    s.execute("renderQueue.render", json!({})).unwrap();
+    let events = s.drain_events();
+    let toast = events.iter().find_map(|e| if let Event::Toast { message, error: true } = e { Some(message.as_str()) } else { None });
+    assert_eq!(toast, Some("Render finished with 2 failed item(s), first: cannot write first.gif"));
 }
 
 #[test]

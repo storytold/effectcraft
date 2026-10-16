@@ -1,8 +1,9 @@
 //! Effect Controls operations: copy/paste, duplicate, reorder, remove (Delete), reset, and the
 //! Edit menu routing to them when effects are selected, all with undo.
 
-use effectcraft_keyframe::Value as KV;
-use effectcraft_project::{Layer, LayerId};
+use effectcraft_keyframe::{Ease, Interp, Value as KV};
+use effectcraft_project::{Layer, LayerId, PropGroup};
+use effectcraft_time::Tick;
 use serde_json::json;
 
 use crate::Session;
@@ -30,6 +31,24 @@ fn apply(s: &mut Session, lid: u64, effect: &str) -> u64 {
 fn select_effect(s: &mut Session, lid: u64, uid: u64) {
     s.state.selected_layers = vec![LayerId(lid)];
     s.state.selected_props = vec![(LayerId(lid), uid)];
+}
+
+fn effect_group(s: &Session, lid: u64, uid: u64) -> PropGroup {
+    layer(s, lid).effects().unwrap().groups().find(|g| g.uid == uid).unwrap().clone()
+}
+
+fn animate_effect(s: &mut Session, lid: u64, uid: u64, path: &str, keys: &[(f64, f64)]) {
+    let prop = effect_group(s, lid, uid).prop(path).unwrap().uid;
+    for &(time, value) in keys {
+        s.execute("prop.addKey", json!({"layer": lid, "prop": prop, "time": time, "timeBase": "comp", "value": value})).unwrap();
+    }
+}
+
+fn set_layer_clock(s: &mut Session, lid: u64, start: f64, stretch: f64) {
+    let cid = s.active_comp_id().unwrap();
+    let l = std::sync::Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(LayerId(lid)).unwrap();
+    l.start_time = Tick::from_seconds_f64(start);
+    l.stretch = stretch;
 }
 
 #[test]
@@ -60,6 +79,233 @@ fn copy_paste_effects_between_layers_with_undo() {
     s.undo();
     assert!(fx_names(&s, b).is_empty());
     assert_eq!(fx_names(&s, a), vec!["Gaussian Blur"]);
+}
+
+/// #989: copying an animated effect aligns its first key to the destination CTI.
+#[test]
+fn pasted_effect_keys_start_at_the_playhead() {
+    let (mut s, a, b) = comp_with_two_solids();
+    let blur = apply(&mut s, a, "Gaussian Blur");
+    let uid = layer(&s, a).effects().unwrap().groups().next().unwrap().get("blurriness").unwrap().uid;
+    for (time, value) in [(1.0, 10.0), (3.0, 30.0)] {
+        s.execute("prop.addKey", json!({"layer": a, "prop": uid, "time": time, "value": value})).unwrap();
+    }
+    let source = layer(&s, a);
+    select_effect(&mut s, a, blur);
+    s.execute("edit.copy", json!({})).unwrap();
+    s.execute("time.set", json!({"time": 5.0})).unwrap();
+    s.execute("layer.select", json!({"layers": [b]})).unwrap();
+    let undo = s.history.undo.len();
+    s.execute("edit.paste", json!({})).unwrap();
+    let pasted = layer(&s, b);
+    let keys = &pasted.effects().unwrap().groups().next().unwrap().get("blurriness").unwrap().keys;
+    assert_eq!(keys.iter().map(|k| pasted.comp_time(k.time).seconds()).collect::<Vec<_>>(), vec![5.0, 7.0]);
+    assert_eq!(keys.iter().map(|k| k.value.as_f64()).collect::<Vec<_>>(), vec![10.0, 30.0]);
+    assert_eq!(layer(&s, a), source, "copy and paste do not edit the source");
+    assert_eq!(s.history.undo.len(), undo + 1, "the whole paste is one undo step");
+    s.execute("edit.undo", json!({})).unwrap();
+    assert!(fx_names(&s, b).is_empty());
+    s.execute("edit.redo", json!({})).unwrap();
+    assert_eq!(layer(&s, b), pasted);
+}
+
+#[test]
+fn pasted_effects_share_one_anchor_including_nested_parameters() {
+    let (mut s, a, b) = comp_with_two_solids();
+    let blur = apply(&mut s, a, "Gaussian Blur");
+    let fractal = apply(&mut s, a, "Fractal");
+    animate_effect(&mut s, a, blur, "blurriness", &[(1.0, 10.0), (3.0, 30.0)]);
+    animate_effect(&mut s, a, fractal, "mandelbrot/mandelbrotX", &[(2.0, 1.25), (4.0, 2.5)]);
+    animate_effect(&mut s, a, fractal, "mandelbrot/mandelbrotY", &[(3.0, 0.5), (5.0, 2.0)]);
+    let static_value = effect_group(&s, a, fractal).get("setChoice").unwrap().value.clone();
+    s.state.selected_props = vec![(LayerId(a), blur), (LayerId(a), fractal)];
+    s.execute("edit.copy", json!({})).unwrap();
+    s.execute("time.set", json!({"time": 5.0})).unwrap();
+    let reply = s.execute("effect.paste", json!({"layers": [b]})).unwrap();
+    for (index, path, times) in
+        [(0, "blurriness", vec![5.0, 7.0]), (1, "mandelbrot/mandelbrotX", vec![6.0, 8.0]), (1, "mandelbrot/mandelbrotY", vec![7.0, 9.0])]
+    {
+        let group = effect_group(&s, b, reply["effects"][index].as_u64().unwrap());
+        assert_eq!(group.prop(path).unwrap().keys.iter().map(|k| k.time.seconds()).collect::<Vec<_>>(), times, "{path}");
+    }
+    let group = effect_group(&s, b, reply["effects"][1].as_u64().unwrap());
+    assert_eq!(group.get("setChoice").unwrap().value, static_value, "unanimated controls stay unchanged");
+}
+
+#[test]
+fn pasted_effects_preserve_comp_timing_and_eased_values_on_stretched_layers() {
+    for (source_start, source_stretch) in [(2.0, 100.0), (1.0, 200.0), (8.0, -200.0)] {
+        for (target_start, target_stretch) in [(0.0, 100.0), (3.0, 200.0), (8.0, -100.0)] {
+            let (mut s, a, b) = comp_with_two_solids();
+            set_layer_clock(&mut s, a, source_start, source_stretch);
+            set_layer_clock(&mut s, b, target_start, target_stretch);
+            let blur = apply(&mut s, a, "Gaussian Blur");
+            animate_effect(&mut s, a, blur, "blurriness", &[(3.0, 10.0), (5.0, 30.0)]);
+            let uid = effect_group(&s, a, blur).get("blurriness").unwrap().uid;
+            let cid = s.active_comp_id().unwrap();
+            let pr = std::sync::Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(LayerId(a)).unwrap().props.find_mut(uid).unwrap();
+            for key in &mut pr.keys {
+                key.in_interp = Interp::Bezier;
+                key.out_interp = Interp::Bezier;
+                key.in_ease = vec![Ease { speed: 7.0, influence: 0.25 }];
+                key.out_ease = vec![Ease { speed: 3.0, influence: 0.6 }];
+                key.label = 4;
+            }
+            let source = layer(&s, a);
+            let source_pr = source.props.find(uid).unwrap();
+            s.execute("effect.copy", json!({"layer": a, "effect": blur})).unwrap();
+            s.execute("time.set", json!({"time": 5.0})).unwrap();
+            let pasted = s.execute("effect.paste", json!({"layers": [b]})).unwrap()["effects"][0].as_u64().unwrap();
+            let target = layer(&s, b);
+            let target_group = target.effects().unwrap().groups().find(|g| g.uid == pasted).unwrap();
+            let target_pr = target_group.get("blurriness").unwrap();
+            let mut times: Vec<Tick> = target_pr.keys.iter().map(|k| target.comp_time(k.time)).collect();
+            times.sort();
+            assert_eq!(times, vec![Tick::from_seconds_f64(5.0), Tick::from_seconds_f64(7.0)]);
+            for offset in [0.0, 0.25, 0.75, 1.5, 2.0] {
+                let expected = source_pr.value_at(source.layer_time(Tick::from_seconds_f64(3.0 + offset))).as_f64();
+                let actual = target_pr.value_at(target.layer_time(Tick::from_seconds_f64(5.0 + offset))).as_f64();
+                assert!((expected - actual).abs() < 1e-8, "source {source_stretch} %, target {target_stretch} %, t={offset}: {expected} != {actual}");
+            }
+            assert!(target_pr.keys.iter().all(|k| k.label == 4));
+            assert_eq!(layer(&s, a), source);
+        }
+    }
+}
+
+#[test]
+fn pasted_spatial_effect_keys_preserve_the_eased_path_on_reversed_layers() {
+    for (source_stretch, target_stretch) in [(200.0, 100.0), (-200.0, 100.0), (100.0, -200.0)] {
+        let (mut s, a, b) = comp_with_two_solids();
+        set_layer_clock(&mut s, a, if source_stretch < 0.0 { 8.0 } else { 1.0 }, source_stretch);
+        set_layer_clock(&mut s, b, if target_stretch < 0.0 { 8.0 } else { 0.0 }, target_stretch);
+        let ramp = apply(&mut s, a, "Gradient Ramp");
+        let uid = effect_group(&s, a, ramp).get("start").unwrap().uid;
+        for (time, value) in [(3.0, [50.0, 25.0]), (5.0, [180.0, 75.0])] {
+            s.execute("prop.addKey", json!({"layer": a, "prop": uid, "time": time, "timeBase": "comp", "value": value})).unwrap();
+        }
+        let cid = s.active_comp_id().unwrap();
+        let pr = std::sync::Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(LayerId(a)).unwrap().props.find_mut(uid).unwrap();
+        pr.spatial = true;
+        for key in &mut pr.keys {
+            key.in_interp = Interp::Bezier;
+            key.out_interp = Interp::Bezier;
+            key.in_ease = vec![Ease { speed: 15.0, influence: 0.25 }];
+            key.out_ease = vec![Ease { speed: 30.0, influence: 0.6 }];
+            key.spatial_auto = false;
+            key.spatial_in = [-10.0, -20.0, 0.0];
+            key.spatial_out = [20.0, 5.0, 0.0];
+        }
+        let source = layer(&s, a);
+        let source_pr = source.props.find(uid).unwrap();
+        s.execute("effect.copy", json!({"layer": a, "effect": ramp})).unwrap();
+        s.execute("time.set", json!({"time": 5.0})).unwrap();
+        let pasted = s.execute("effect.paste", json!({"layers": [b]})).unwrap()["effects"][0].as_u64().unwrap();
+        let target = layer(&s, b);
+        let group = target.effects().unwrap().groups().find(|g| g.uid == pasted).unwrap();
+        let target_pr = group.get("start").unwrap();
+        for offset in [0.0, 0.25, 0.75, 1.5, 2.0] {
+            let expected = source_pr.value_at(source.layer_time(Tick::from_seconds_f64(3.0 + offset))).components();
+            let actual = target_pr.value_at(target.layer_time(Tick::from_seconds_f64(5.0 + offset))).components();
+            assert_eq!(expected.len(), actual.len());
+            assert!(expected.iter().zip(&actual).all(|(a, b)| (a - b).abs() < 0.05), "path at {offset}: {expected:?} != {actual:?}");
+        }
+    }
+}
+
+#[test]
+fn effect_clipboard_is_a_snapshot_and_repeated_paste_uses_the_target_comps_cti() {
+    let (mut s, a, _) = comp_with_two_solids();
+    let original_comp = s.active_comp_id().unwrap();
+    let blur = apply(&mut s, a, "Gaussian Blur");
+    animate_effect(&mut s, a, blur, "blurriness", &[(1.0, 10.0), (3.0, 30.0)]);
+    s.execute("effect.copy", json!({"layer": a, "effect": blur})).unwrap();
+    let clipboard = s.state.effect_clipboard.clone();
+    // Changing the source after Copy must not change what the clipboard will paste.
+    animate_effect(&mut s, a, blur, "blurriness", &[(4.0, 99.0)]);
+    s.execute("time.set", json!({"time": 9.0})).unwrap();
+    let destination = s.execute("comp.new", json!({"name": "Destination", "frameRate": 24, "duration": 10})).unwrap()["comp"].as_u64().unwrap();
+    let b = s.execute("layer.newSolid", json!({"color": "#ffffff"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("time.set", json!({"time": 4.0})).unwrap();
+    s.open_comp(original_comp);
+    for (cti, expected) in [(4.0, vec![4.0, 6.0]), (2.0, vec![2.0, 4.0])] {
+        s.state.times.insert(effectcraft_project::ItemId(destination), Tick::from_seconds_f64(cti));
+        let uid = s.execute("effect.paste", json!({"comp": destination, "layers": [b]})).unwrap()["effects"][0].as_u64().unwrap();
+        let l = s.project.comp(effectcraft_project::ItemId(destination)).unwrap().layer(LayerId(b)).unwrap();
+        let pr = l.effects().unwrap().groups().find(|g| g.uid == uid).unwrap().get("blurriness").unwrap();
+        assert_eq!(pr.keys.iter().map(|k| l.comp_time(k.time).seconds()).collect::<Vec<_>>(), expected);
+        assert_eq!(pr.keys.iter().map(|k| k.value.as_f64()).collect::<Vec<_>>(), vec![10.0, 30.0]);
+        assert_eq!(s.state.effect_clipboard, clipboard);
+    }
+}
+
+#[test]
+fn invalid_effect_paste_timing_leaves_every_target_and_history_unchanged() {
+    for stretch in [0.0, f64::NAN, f64::INFINITY, 1e-300, 1e300] {
+        let (mut s, a, b) = comp_with_two_solids();
+        let blur = apply(&mut s, a, "Gaussian Blur");
+        animate_effect(&mut s, a, blur, "blurriness", &[(1.0, 10.0), (3.0, 30.0)]);
+        s.execute("effect.copy", json!({"layer": a, "effect": blur})).unwrap();
+        set_layer_clock(&mut s, b, 0.0, stretch);
+        s.execute("time.set", json!({"time": 5.0})).unwrap();
+        let project = s.project.clone();
+        let clipboard = s.state.effect_clipboard.clone();
+        let undo = s.history.undo.len();
+        // A is valid and comes first; failure on B must roll back A's new effect too.
+        assert!(s.execute("effect.paste", json!({"layers": [a, b]})).is_err(), "{stretch}");
+        assert!(std::sync::Arc::ptr_eq(&s.project, &project));
+        assert_eq!(s.state.effect_clipboard, clipboard);
+        assert_eq!(s.history.undo.len(), undo);
+    }
+}
+
+#[test]
+fn invalid_effect_copy_keeps_the_previous_clipboard() {
+    let (mut s, a, _) = comp_with_two_solids();
+    let blur = apply(&mut s, a, "Gaussian Blur");
+    animate_effect(&mut s, a, blur, "blurriness", &[(1.0, 10.0), (3.0, 30.0)]);
+    s.execute("effect.copy", json!({"layer": a, "effect": blur})).unwrap();
+    let clipboard = s.state.effect_clipboard.clone();
+    set_layer_clock(&mut s, a, 0.0, 0.0);
+    assert!(s.execute("effect.copy", json!({"layer": a, "effect": blur})).is_err());
+    assert_eq!(s.state.effect_clipboard, clipboard);
+}
+
+#[test]
+fn effect_paste_keeps_exact_ntsc_frame_offsets() {
+    let (mut s, a, b) = comp_with_two_solids();
+    let cid = s.active_comp_id().unwrap();
+    let frame = effectcraft_time::FrameRate::new(30000, 1001).frame_duration();
+    let blur = apply(&mut s, a, "Gaussian Blur");
+    let uid = effect_group(&s, a, blur).get("blurriness").unwrap().uid;
+    let pr = std::sync::Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(LayerId(a)).unwrap().props.find_mut(uid).unwrap();
+    pr.keys = vec![
+        effectcraft_keyframe::Keyframe::new(frame.mul_ratio(11, 1), KV::Scalar(10.0)),
+        effectcraft_keyframe::Keyframe::new(frame.mul_ratio(43, 1), KV::Scalar(30.0)),
+    ];
+    s.execute("effect.copy", json!({"layer": a, "effect": blur})).unwrap();
+    let cti = frame.mul_ratio(71, 1);
+    s.state.times.insert(cid, cti);
+    let pasted = s.execute("effect.paste", json!({"layers": [b]})).unwrap()["effects"][0].as_u64().unwrap();
+    let group = effect_group(&s, b, pasted);
+    assert_eq!(group.get("blurriness").unwrap().keys.iter().map(|k| k.time).collect::<Vec<_>>(), vec![cti, cti + frame.mul_ratio(32, 1)]);
+}
+
+#[test]
+fn overflowing_effect_paste_times_return_an_error_without_an_edit() {
+    let (mut s, a, b) = comp_with_two_solids();
+    let blur = apply(&mut s, a, "Gaussian Blur");
+    animate_effect(&mut s, a, blur, "blurriness", &[(1.0, 10.0), (3.0, 30.0)]);
+    s.execute("effect.copy", json!({"layer": a, "effect": blur})).unwrap();
+    let cid = s.active_comp_id().unwrap();
+    for cti in [Tick::MAX, Tick(i64::MAX)] {
+        s.state.times.insert(cid, cti);
+        let project = s.project.clone();
+        let undo = s.history.undo.len();
+        assert!(s.execute("effect.paste", json!({"layers": [b]})).is_err());
+        assert!(std::sync::Arc::ptr_eq(&s.project, &project));
+        assert_eq!(s.history.undo.len(), undo);
+    }
 }
 
 #[test]
@@ -145,6 +391,100 @@ fn reset_keys_animated_params_at_the_cti() {
     let pr = layer(&s, a).effects().unwrap().groups().next().unwrap().get("blurriness").unwrap().clone();
     assert_eq!(pr.keys.len(), 2, "a key at the CTI with the default value");
     assert_eq!(pr.keys[1].value, KV::Scalar(0.0));
+}
+
+#[test]
+fn tint_swaps_only_its_colors_in_one_undo_step() {
+    let (mut s, a, b) = comp_with_two_solids();
+    let first = apply(&mut s, a, "Tint");
+    let target = apply(&mut s, a, "Tint");
+    let other = apply(&mut s, b, "Tint");
+    for (path, value) in [("black", json!([1.0, 0.0, 0.0, 1.0])), ("white", json!([0.0, 0.25, 1.0, 1.0])), ("amount", json!(45.0))] {
+        s.execute("prop.set", json!({"layer": a, "path": format!("effects/#2/{path}"), "value": value})).unwrap();
+    }
+    let before_a = layer(&s, a);
+    let before_b = layer(&s, b);
+    let n = s.history.undo.len();
+    s.execute("effect.swapTintColors", json!({"layer": a, "effect": target})).unwrap();
+    let swapped = layer(&s, a);
+    let g = swapped.props.find_group(target).unwrap();
+    assert_eq!(g.prop("black").unwrap().value, KV::Color([0.0, 0.25, 1.0, 1.0]));
+    assert_eq!(g.prop("white").unwrap().value, KV::Color([1.0, 0.0, 0.0, 1.0]));
+    assert_eq!(g.prop("amount").unwrap().value, KV::Scalar(45.0));
+    assert_eq!(swapped.props.find_group(first), before_a.props.find_group(first));
+    assert_eq!(layer(&s, b).props.find_group(other), before_b.props.find_group(other));
+    assert_eq!(s.history.undo.len(), n + 1);
+    assert!(s.undo());
+    assert_eq!(layer(&s, a).props, before_a.props);
+    assert!(s.redo());
+    assert_eq!(layer(&s, a).props, swapped.props);
+}
+
+#[test]
+fn tint_swap_keys_animated_colors_at_layer_time() {
+    let (mut s, a, _) = comp_with_two_solids();
+    let target = apply(&mut s, a, "Tint");
+    s.execute("prop.set", json!({"layer": a, "path": "effects/#1/black", "value": [1.0, 0.0, 0.0, 1.0]})).unwrap();
+    s.execute("prop.set", json!({"layer": a, "path": "effects/#1/white", "value": [0.0, 0.0, 1.0, 1.0]})).unwrap();
+    s.execute("prop.toggleAnimation", json!({"layer": a, "path": "effects/#1/black"})).unwrap();
+    s.execute("time.set", json!({"time": 2.0})).unwrap();
+    s.execute("prop.set", json!({"layer": a, "path": "effects/#1/black", "value": [0.0, 1.0, 0.0, 1.0]})).unwrap();
+    s.execute("layer.timeStretch", json!({"layers": [a], "percent": 200.0})).unwrap();
+    // At comp time 2s the stretched layer is at 1s, between its unchanged 0s and 2s keys.
+    let before = layer(&s, a);
+    let g = before.props.find_group(target).unwrap();
+    let lt = before.layer_time(s.time());
+    let expected = g.prop("black").unwrap().value_at(lt);
+    let keys = g.prop("black").unwrap().keys.clone();
+    select_effect(&mut s, a, target);
+    s.execute("effect.swapTintColors", json!({})).unwrap();
+    let after = layer(&s, a);
+    let g = after.props.find_group(target).unwrap();
+    let black = g.prop("black").unwrap();
+    assert_eq!(black.keys.len(), 3);
+    assert_eq!(black.keys[0], keys[0]);
+    assert_eq!(black.keys[2], keys[1]);
+    assert_eq!(black.keys[1].time, lt);
+    assert_eq!(black.keys[1].value, KV::Color([0.0, 0.0, 1.0, 1.0]));
+    assert_eq!(g.prop("white").unwrap().value, expected);
+    assert!(g.prop("white").unwrap().keys.is_empty());
+    assert!(s.undo());
+    assert_eq!(layer(&s, a).props, before.props);
+}
+
+#[test]
+fn tint_swap_rejects_invalid_targets_without_editing() {
+    let mut empty = Session::default();
+    assert!(empty.execute("effect.swapTintColors", json!({})).is_err());
+    let (mut s, a, _) = comp_with_two_solids();
+    let blur = apply(&mut s, a, "Gaussian Blur");
+    let tint = apply(&mut s, a, "Tint");
+    for params in [
+        json!({"layer": a, "effect": blur}),
+        json!({"layer": a, "effect": "missing"}),
+        json!({"layer": a, "effect": []}),
+        json!({"layer": a, "effect": 1.5}),
+        json!({"layer": a, "effect": 0}),
+        json!(false),
+    ] {
+        let before = layer(&s, a);
+        let n = s.history.undo.len();
+        assert!(s.execute("effect.swapTintColors", params).is_err());
+        assert_eq!(layer(&s, a).props, before.props);
+        assert_eq!(s.history.undo.len(), n);
+    }
+    // A damaged project's colour parameter must also fail atomically.
+    let cid = s.active_comp_id().unwrap();
+    s.edit("Break Tint", None, |p, _| {
+        p.comp_mut(cid).unwrap().layer_mut(LayerId(a)).unwrap().props.find_group_mut(tint).unwrap().prop_mut("white").unwrap().value = KV::Scalar(1.0);
+        Ok(())
+    })
+    .unwrap();
+    let before = layer(&s, a);
+    let n = s.history.undo.len();
+    assert!(s.execute("effect.swapTintColors", json!({"layer": a, "effect": tint})).is_err());
+    assert_eq!(layer(&s, a).props, before.props);
+    assert_eq!(s.history.undo.len(), n);
 }
 
 #[test]
@@ -368,4 +708,36 @@ fn ocio_effect_warns_about_unsupported_config_transforms() {
     assert!(warning(&mut s).as_str().is_some_and(|w| w.contains("no color space `nowhere`")));
     set(&mut s, "configFile", json!("/no/such/config.ocio"));
     assert!(warning(&mut s).as_str().is_some_and(|w| w.starts_with("Can't read the OCIO config")));
+}
+
+#[test]
+fn effect_colour_labels_set_clear_undo_and_round_trip() {
+    let (mut s, a, _) = comp_with_two_solids();
+    let blur = apply(&mut s, a, "Gaussian Blur");
+    let label = |s: &Session| layer(s, a).effects().unwrap().groups().next().unwrap().label;
+    assert_eq!(label(&s), None);
+    s.execute("effect.setLabel", json!({"layer": a, "effect": blur, "label": "Blue"})).unwrap();
+    assert_eq!(label(&s), Some(effectcraft_color::Label::Blue));
+    // Duplicates keep the label.
+    s.execute("effect.duplicate", json!({"layer": a, "effect": blur})).unwrap();
+    assert_eq!(layer(&s, a).effects().unwrap().groups().filter(|g| g.label.is_some()).count(), 2);
+    s.undo();
+    // It saves with the project and survives a reload.
+    let json = s.project.to_file_json().unwrap();
+    let back = effectcraft_project::Project::from_json(&json).unwrap();
+    let l = back.comp(s.active_comp_id().unwrap()).unwrap().layer(LayerId(a)).unwrap().clone();
+    assert_eq!(l.effects().unwrap().groups().next().unwrap().label, Some(effectcraft_color::Label::Blue));
+    // None (or index 0) clears it; the change undoes.
+    s.execute("effect.setLabel", json!({"layer": a, "effect": blur, "label": 0})).unwrap();
+    assert_eq!(label(&s), None);
+    s.undo();
+    assert_eq!(label(&s), Some(effectcraft_color::Label::Blue));
+    assert!(s.execute("effect.setLabel", json!({"layer": a, "effect": blur, "label": "Chartreuse"})).is_err());
+    assert!(s.execute("effect.setLabel", json!({"layer": a, "effect": blur, "label": 99})).is_err());
+    // A project saved before labels existed has none.
+    let old = json.replace("\"label\":\"Blue\"", "\"x\":0").replace("\"label\": \"Blue\"", "\"x\": 0");
+    assert_ne!(old, json, "the replace removed the effect's label");
+    let old = effectcraft_project::Project::from_json(&old).unwrap();
+    let l = old.comp(s.active_comp_id().unwrap()).unwrap().layer(LayerId(a)).unwrap().clone();
+    assert_eq!(l.effects().unwrap().groups().next().unwrap().label, None);
 }

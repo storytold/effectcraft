@@ -60,6 +60,31 @@ fn click(h: &mut Harness<'_, EffectcraftApp>, id: &str) {
 }
 
 #[test]
+fn command_clicking_a_folder_twirl_opens_the_folders_inside_it() {
+    let (mut h, folder, _, _) = harness();
+    let s = &mut h.state_mut().session;
+    let inner = s.execute("project.newFolder", json!({"name": "Inner"})).unwrap()["item"].as_u64().unwrap();
+    let deep = s.execute("project.newFolder", json!({"name": "Deep"})).unwrap()["item"].as_u64().unwrap();
+    s.execute("project.move", json!({"items": [inner], "folder": folder.0})).unwrap();
+    s.execute("project.move", json!({"items": [deep], "folder": inner})).unwrap();
+    s.execute("project.select", json!({"items": []})).unwrap();
+    h.state_mut().ui.project_open_folders.clear();
+    h.run_steps(3);
+    let p = center(&h, &format!("project.item.{}.twirl", folder.0));
+    let cmd_click = |h: &mut Harness<'_, EffectcraftApp>| {
+        h.input_mut().events.push(Event::ModifiersChanged(Modifiers::COMMAND));
+        click_at(h, p);
+        h.input_mut().events.push(Event::ModifiersChanged(Modifiers::NONE));
+        h.step();
+    };
+    cmd_click(&mut h);
+    let open = h.state().ui.project_open_folders.clone();
+    assert!([folder.0, inner, deep].iter().all(|f| open.contains(f)), "the folder and every folder inside it open");
+    cmd_click(&mut h);
+    assert!(h.state().ui.project_open_folders.is_empty(), "and close again together");
+}
+
+#[test]
 fn folder_twirl_opens_and_closes_the_folder_on_one_click() {
     let (mut h, folder, comp, _) = harness();
     let twirl = format!("project.item.{}.twirl", folder.0);
@@ -213,4 +238,56 @@ fn a_short_project_panel_draws() {
         h.run_steps(3);
         assert!(h.state().auto.find("project.empty").is_some(), "the Project panel drew at {height} points");
     }
+}
+
+/// #1058: a comp's row menu offers Composition Settings…, as After Effects' does, for the comp
+/// right-clicked even when the viewer shows another one; OK applies to that comp. Footage has none.
+#[test]
+fn comp_context_menu_opens_that_comps_settings() {
+    let (mut h, _, main, _) = harness();
+    let s = &mut h.state_mut().session;
+    let side = ItemId(s.execute("comp.new", json!({"name": "Side", "width": 640, "height": 360, "duration": 2})).unwrap()["comp"].as_u64().unwrap());
+    s.execute("comp.open", json!({"comp": main.0})).unwrap();
+    let footage = Footage { kind: FootageKind::Video, path: "clip.mp4".into(), width: 64, height: 36, has_video: true, ..Default::default() };
+    let clip = std::sync::Arc::make_mut(&mut s.project).add_item("Clip", Default::default(), None, ItemKind::Footage(footage));
+    h.run_steps(2);
+    assert_eq!(h.state().session.active_comp_id(), Some(main));
+    let right_click = |h: &mut Harness<'_, EffectcraftApp>, p: Pos2| {
+        h.input_mut().events.push(Event::PointerMoved(p));
+        h.step();
+        for pressed in [true, false] {
+            h.input_mut().events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Secondary, pressed, modifiers: Modifiers::NONE });
+            h.step();
+        }
+        h.run_steps(2);
+    };
+    let at = center(&h, &format!("project.item.{}.name", clip.0));
+    right_click(&mut h, at);
+    assert!(h.query_by_label("Rename").is_some(), "the footage menu is open");
+    assert!(h.query_by_label_contains("Composition Settings").is_none(), "footage isn't a comp");
+    h.input_mut().events.push(Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
+    h.run_steps(2);
+    let at = center(&h, &format!("project.item.{}.name", side.0));
+    right_click(&mut h, at);
+    let entry = h.query_by_label_contains("Composition Settings").expect("in the comp's menu").rect();
+    click_at(&mut h, entry.center());
+    assert_eq!(h.state().dialog, Some(Dialog::CompSettings));
+    assert_eq!(h.state().session.active_comp_id(), Some(main), "the viewer keeps its comp");
+    // A new name, then OK: Side's own size goes back to Side under it. Main's values in the
+    // dialog, or OK writing to the viewer's comp, would resize or rename the wrong one.
+    click(&mut h, "dialog.comp.name");
+    h.input_mut().events.push(Event::Key { key: egui::Key::A, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::COMMAND });
+    h.input_mut().events.push(Event::Text("Side 2".into()));
+    h.run_steps(2);
+    let undo = h.state().session.history.undo.len();
+    h.input_mut().events.push(Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
+    h.run_steps(2);
+    assert_eq!(h.state().dialog, None, "OK closed the dialog");
+    assert_eq!(h.state().session.history.undo.len(), undo + 1, "OK applied the settings");
+    let size = |h: &Harness<'_, EffectcraftApp>, c: ItemId| {
+        let s = &h.state().session;
+        (s.project.item(c).unwrap().name.clone(), s.project.comp(c).unwrap().width, s.project.comp(c).unwrap().height)
+    };
+    assert_eq!(size(&h, side), ("Side 2".into(), 640, 360), "the dialog showed and set the right-clicked comp");
+    assert_eq!(size(&h, main), ("Main".into(), 320, 180), "the open comp is untouched");
 }

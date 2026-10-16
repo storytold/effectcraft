@@ -19,6 +19,7 @@ mod image;
 mod object;
 mod page;
 mod ps;
+mod read;
 mod shading;
 mod type1;
 pub mod write;
@@ -33,6 +34,7 @@ pub enum Error {
     NoPages,
     PageOutOfRange(usize),
     NoBoundingBox,
+    Read(String),
 }
 
 impl std::fmt::Display for Error {
@@ -41,8 +43,9 @@ impl std::fmt::Display for Error {
             Error::NotVector => write!(f, "not a PDF, Illustrator or EPS file"),
             Error::Encrypted => write!(f, "encrypted PDF files are not supported"),
             Error::NoPages => write!(f, "the PDF has no pages"),
-            Error::PageOutOfRange(n) => write!(f, "the PDF has no page {}", n + 1),
+            Error::PageOutOfRange(n) => write!(f, "the PDF has no page {}", n.saturating_add(1)),
             Error::NoBoundingBox => write!(f, "the EPS file has no %%BoundingBox"),
+            Error::Read(message) => f.write_str(message),
         }
     }
 }
@@ -99,7 +102,7 @@ pub fn parse_page(bytes: &[u8], index: usize) -> Result<Doc, Error> {
 /// Number of pages (1 for EPS).
 pub fn page_count(bytes: &[u8]) -> usize {
     match sniff(bytes) {
-        Some(Format::Pdf) => page::pages(&object::File::parse(bytes)).len(),
+        Some(Format::Pdf) => object::File::parse(bytes).map(|file| page::pages(&file).len()).unwrap_or(0),
         Some(Format::Eps) => 1,
         None => 0,
     }
@@ -140,10 +143,7 @@ fn finish(nodes: Vec<Node>, flags: Vec<bool>, skipped: Vec<String>, width: f64, 
 }
 
 fn parse_pdf(bytes: &[u8], index: usize) -> Result<Doc, Error> {
-    let file = object::File::parse(bytes);
-    if file.encrypted() {
-        return Err(Error::Encrypted);
-    }
+    let file = object::File::parse(bytes)?;
     let pages = page::pages(&file);
     if pages.is_empty() {
         return Err(Error::NoPages);
@@ -160,6 +160,7 @@ fn parse_pdf(bytes: &[u8], index: usize) -> Result<Doc, Error> {
     };
     let content = page::page_content(&file, pg);
     let mut it = page::Interp::new(&file, pg.bbox);
+    it.b.skipped.extend(file.repairs.iter().cloned());
     it.run(&content, &pg.resources, Affine::IDENTITY, 0);
     let (nodes, flags, skipped) = it.b.finish();
     Ok(finish(nodes, flags, skipped, dw.max(1.0), dh.max(1.0), to_doc))
@@ -200,5 +201,7 @@ mod tests;
 mod tests_groups;
 #[cfg(test)]
 mod tests_import;
+#[cfg(test)]
+mod tests_reader;
 #[cfg(test)]
 mod tests_shading;

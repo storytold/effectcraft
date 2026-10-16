@@ -58,6 +58,18 @@ sequences, except dropped files (`"drag": true`), which import as stills as in A
 imports stills and a folder's files one by one, and `"alphabetical": true` is Force Alphabetical
 Order.
 
+## Importing another project
+
+File ▸ Import ▸ EffectCraft Project… (or an `.ecproj` / `.ecprojx` file given to File ▸ Import)
+merges that project into the open one, inside a folder named after the file, as After Effects
+imports an `.aep`. Every item, layer and property id moves past the open project's, so precomps,
+parents, track mattes, Layer Control values, Essential Graphics and tracker targets keep pointing
+at the right things. It is one undo step. Footage paths relative to the imported project resolve
+next to it.
+
+Agents: `file.importProject {"path": "/projects/titles.ecproj"}` returns the comps, the root comps,
+`primaryComp` (the only root comp, if there is one) and any missing media.
+
 ## Interpret Footage
 
 Select a footage item in the Project panel and choose **File ▸ Interpret Footage ▸ Main…**
@@ -98,6 +110,21 @@ vectors, positions and IDs are never the picture. EXtractoR reads every other la
 - **File ▸ Replace Footage ▸ File…** (Ctrl+H) points the item at another file. Pick a numbered
   file to replace it with that file's whole sequence (`file.replaceFootage {"path": …,
   "sequence": false}` for one frame).
+- **Replace with Precomposition (used N times)**, right-clicking a footage item or solid in the
+  Project panel, puts the item in a new composition of its size,
+  pixel aspect and frame rate, in the same folder, and switches every layer in every composition
+  that used the item to that composition. Layers keep their timing, transforms, effects and
+  masks, and the item stays in the project. The composition lasts as long as the footage, or as
+  the longest layer that showed a still or solid. One undo step (`file.replaceWithPrecomp
+  {"item"?}`).
+- **Relinking moved files.** `footage.relink {"item": id, "path": …}` points a missing item at
+  its file's new location, keeping its interpretation, and relinks every other missing item that
+  was in the same place relative to it (the whole folder moved, a drive was renamed, a project
+  made on Windows opened on macOS); File ▸ Replace Footage on a missing item does the same. One
+  undo step; `footage.missing` lists what is still missing.
+- **A project moved with its footage** finds it again on open: the footage check that runs after
+  File ▸ Open tries each missing file at the same place under the project's new folder, without
+  marking the project modified.
 - **File ▸ Reload Footage** (Ctrl+Alt+L) reads the files again. A sequence picks up frames
   added to its folder (a render still in progress) and keeps its interpretation.
 

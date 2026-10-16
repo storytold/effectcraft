@@ -472,6 +472,14 @@ impl DockNode {
         self.panels(&mut v);
         v.contains(&p)
     }
+    /// The tabs of the group `p` is in, in order.
+    pub fn group_of(&self, p: PanelKind) -> Option<&[PanelKind]> {
+        match self {
+            DockNode::Split { a, b, .. } => a.group_of(p).or_else(|| b.group_of(p)),
+            DockNode::Tabs { panels, .. } => panels.contains(&p).then_some(panels.as_slice()),
+            DockNode::Stack { entries } => entries.iter().find(|e| e.contains(p)).map(|e| e.panels.as_slice()),
+        }
+    }
     /// Make `p` the active tab of its group. Returns false if not present.
     pub fn activate(&mut self, p: PanelKind) -> bool {
         if !crate::dock_shared::valid_tree(self) {

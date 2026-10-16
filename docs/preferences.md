@@ -13,7 +13,8 @@ The model is `effectcraft_engine::prefs::Prefs`: serde, versioned (`version`), a
 keys (`general.undoLevels`, `autoSave.intervalMinutes`, `labels.3.name`). It is stored as
 `prefs.json` through the session's `ConfigStore` (the desktop app uses the platform config
 directory: `~/Library/Application Support/EffectCraft` on macOS, `%APPDATA%\EffectCraft` on
-Windows, `$XDG_CONFIG_HOME/effectcraft` on Linux; the web app keeps it in browser storage: the
+Windows, `$XDG_CONFIG_HOME/effectcraft` on Linux, or `EffectCraftData` beside the executable when a
+`portable.txt` sits there, as in the Windows portable zip; the web app keeps it in browser storage: the
 Origin Private File System, or IndexedDB where OPFS can't write, see [web.md](web.md)). Loading migrates older layouts, keeps unknown keys (from newer versions) and
 falls back to defaults for values that don't parse.
 

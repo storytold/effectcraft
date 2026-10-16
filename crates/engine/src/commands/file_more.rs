@@ -207,6 +207,10 @@ fn new_comp_from_selection(s: &mut Session, p: &Value) -> Result<Value> {
             let name = lead.name.rsplit_once('.').map(|(a, _)| a.to_string()).unwrap_or(lead.name.clone());
             let c = Comp { pixel_aspect, ..Comp::new(w.max(1), h.max(1), rate, dur) };
             let cid = s.edit("New Comp from Selection", None, |proj, st| {
+                // A name another item already has gets the next free number, as Duplicate gives
+                // ("clip", "clip 2", "clip 3"). The comp's own footage and solid sources don't
+                // count, so an extensionless one still names its first comp; a source comp does.
+                let name = proj.unique_item_name(&name, |i| g.contains(&i.id) && !matches!(i.kind, ItemKind::Comp(_)));
                 let cid = proj.add_item(&name, Label::Sandstone, None, ItemKind::Comp(c.into()));
                 st.project_selection = vec![cid];
                 Ok(cid)
@@ -771,9 +775,9 @@ fn interpret(s: &mut Session, p: &Value) -> Result<Value> {
     s.edit("Interpret Footage", None, |proj, _| {
         for (i, g) in items.iter().zip(&guesses) {
             let Some(ItemKind::Footage(f)) = proj.item_mut(*i).map(|x| &mut x.kind) else { continue };
-            let old = f.duration;
+            let old = f.looped_duration();
             it.apply(f, *g);
-            let new = f.duration;
+            let new = f.looped_duration();
             if new == old {
                 continue;
             }
@@ -849,14 +853,32 @@ fn replace_footage(s: &mut Session, p: &Value) -> Result<Value> {
     let src = crate::sequence::source_of(s.services.as_ref(), &path, opts);
     let f = crate::sequence::probe(importer.as_ref(), &src, s.sequence_rate()).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
     let name = src.name();
+    // Replacing a missing file relinks the other missing files that moved with it (as After Effects
+    // does when you locate one).
+    let moved = match s.project.item(item).map(|it| &it.kind) {
+        Some(ItemKind::Footage(previous)) if previous.missing || !s.services.exists(&previous.path) => {
+            super::relink_moved::moved_with(s, item, &previous.path, &path)
+        }
+        _ => vec![],
+    };
+    let relinked: Vec<u64> = moved.iter().map(|(id, _)| id.0).collect();
     s.edit("Replace Footage", None, |proj, _| {
         let it = proj.item_mut(item).ok_or_else(|| bad("file.replaceFootage", "no such item"))?;
         it.name = name;
         it.kind = ItemKind::Footage(f);
         retarget_layers(proj, item, |_| LayerSource::Footage { item });
+        for (id, nf) in moved {
+            if let Some(it) = proj.item_mut(id) {
+                it.kind = ItemKind::Footage(nf);
+            }
+        }
         Ok(())
     })?;
-    Ok(Value::Null)
+    if relinked.is_empty() {
+        return Ok(Value::Null);
+    }
+    s.toast(format!("Also relinked {} other missing footage item(s)", relinked.len()));
+    Ok(json!({"relinked": relinked}))
 }
 
 /// Point every layer using `item` at a new source kind.

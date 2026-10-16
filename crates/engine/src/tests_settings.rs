@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use serde_json::json;
 
-use crate::config::{ConfigStore, DirConfig, MemoryConfig, atomic_write, atomic_write_with, temp_path};
+use crate::config::{ConfigStore, DirConfig, MemoryConfig, atomic_write, atomic_write_with};
 use crate::prefs::{PREFS_FILE, Prefs};
 use crate::shortcuts::{DEFAULT_PRESET, Keymaps, normalize};
 use crate::{Session, autosave};
@@ -375,6 +375,89 @@ fn defaults_have_no_conflicts_and_match_the_menus() {
     assert!(t.bindables.len() > 500);
 }
 
+/// Each Fast Previews and Show Channel mode is a command with a default key.
+#[test]
+fn fast_previews_and_show_channel_modes_have_default_keys() {
+    let s = Session::default();
+    let t = s.shortcuts();
+    for (id, key) in [
+        ("view.fastPreviews.off", "Cmd+Alt+1"),
+        ("view.fastPreviews.adaptive", "Cmd+Alt+2"),
+        ("view.fastPreviews.draft", "Cmd+Alt+3"),
+        ("view.fastPreviews.fastDraft", "Cmd+Alt+4"),
+        ("view.fastPreviews.wireframe", "Cmd+Alt+5"),
+        ("view.channel.red", "Alt+1"),
+        ("view.channel.green", "Alt+2"),
+        ("view.channel.blue", "Alt+3"),
+        ("view.channel.alpha", "Alt+4"),
+        ("view.channel.redColorized", "Alt+Shift+1"),
+        ("view.channel.greenColorized", "Alt+Shift+2"),
+        ("view.channel.blueColorized", "Alt+Shift+3"),
+        ("view.channel.rgbStraight", "Alt+Shift+4"),
+    ] {
+        assert_eq!(t.shortcut_of(id, &json!(null)), Some(key), "{id}");
+    }
+    assert!(t.all_conflicts().is_empty(), "{:?}", t.all_conflicts());
+    // The commands set their mode; a channel's key again is RGB.
+    let mut s = Session::default();
+    s.execute("view.fastPreviews.fastDraft", json!({})).unwrap();
+    assert_eq!(s.state.viewer.fast_previews.id(), "fastDraft");
+    s.execute("view.channel.redColorized", json!({})).unwrap();
+    assert_eq!((s.state.viewer.channel.id(), s.state.viewer.colorized), ("red", true));
+    s.execute("view.channel.green", json!({})).unwrap();
+    assert_eq!((s.state.viewer.channel.id(), s.state.viewer.colorized), ("green", false));
+    s.execute("view.channel.green", json!({})).unwrap();
+    assert_eq!(s.state.viewer.channel.id(), "rgb");
+    // Grayscale and colorized of one channel replace each other; the same again is RGB.
+    s.execute("view.channel.redColorized", json!({})).unwrap();
+    s.execute("view.channel.red", json!({})).unwrap();
+    assert_eq!((s.state.viewer.channel.id(), s.state.viewer.colorized), ("red", false));
+    s.execute("view.channel.redColorized", json!({})).unwrap();
+    assert_eq!((s.state.viewer.channel.id(), s.state.viewer.colorized), ("red", true));
+    s.execute("view.channel.redColorized", json!({})).unwrap();
+    assert_eq!(s.state.viewer.channel.id(), "rgb");
+}
+
+/// Default keys for commands and menu entries that had none.
+#[test]
+fn default_keys_for_commands_that_had_none() {
+    let s = Session::default();
+    let t = s.shortcuts();
+    for (id, params, key) in [
+        ("edit.pasteReversedKeyframes", json!(null), "Cmd+Shift+V"),
+        ("edit.purge", json!({"what": "snapshot"}), "Cmd+Shift+F5"),
+        ("layer.sampling", json!({"sampling": "bilinear", "toggle": true}), "Alt+B"),
+        ("layer.sampling", json!({"sampling": "bicubic", "toggle": true}), "Alt+Shift+B"),
+        ("view.res.custom", json!(null), "Cmd+Alt+J"),
+        ("file.setProxy", json!(null), "Cmd+Alt+P"),
+        ("file.openRecent", json!(null), "Cmd+Alt+Shift+P"),
+        ("anim.applyRecentPreset", json!(null), "Cmd+Alt+Shift+F"),
+    ] {
+        assert_eq!(t.shortcut_of(id, &params), Some(key), "{id} {params}");
+    }
+    assert!(t.all_conflicts().is_empty(), "{:?}", t.all_conflicts());
+}
+
+/// Second default keys: on the command, or after a comma in a menu line with bound parameters.
+#[test]
+fn second_default_keys() {
+    let s = Session::default();
+    let t = s.shortcuts();
+    for (key, want) in [
+        ("edit.deselectAll", ["Cmd+Shift+A", "F2"]),
+        ("time.start", ["Home", "Cmd+Alt+ArrowLeft"]),
+        ("time.end", ["End", "Cmd+Alt+ArrowRight"]),
+        ("renderQueue.add", ["Cmd+M", "Cmd+Shift+/"]),
+        (r#"window.panel {"panel":"effectControls"}"#, ["F3", "Cmd+Shift+T"]),
+    ] {
+        assert_eq!(t.keys.get(key).map(Vec::as_slice), Some(want.map(String::from).as_slice()), "{key}");
+    }
+    // The menus keep showing the first key.
+    assert_eq!(t.shortcut_of("window.panel", &json!({"panel": "effectControls"})), Some("F3"));
+    assert_eq!(t.shortcut_of("edit.deselectAll", &json!(null)), Some("Cmd+Shift+A"));
+    assert!(t.all_conflicts().is_empty(), "{:?}", t.all_conflicts());
+}
+
 /// Cmd+Left / Cmd+Right Arrow step a frame like Page Up / Page Down (Shift: 10 frames).
 #[test]
 fn cmd_arrows_step_frames_like_page_keys() {
@@ -465,6 +548,66 @@ fn frontend_commands_are_bindable_with_panel_scope() {
 
 // ---------------------------------------------------------------- auto-save / recovery
 
+/// The names in `d`, sorted.
+fn names(d: &std::path::Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(d).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    v.sort();
+    v
+}
+
+#[cfg(unix)]
+#[test]
+fn atomic_write_overwrites_a_long_valid_filename() {
+    let d = tmp("atomic-long-name");
+    // The old `<name>.tmp` fits a 255-byte component limit for this 251-byte project name.
+    // Including the full name plus a process id and counter made an otherwise valid save fail.
+    let name = format!("{}.ecproj", "x".repeat(244));
+    assert_eq!(name.len(), 251);
+    let f = d.join(&name);
+    std::fs::write(&f, b"original project").unwrap();
+    let replacement = b"replacement project\0bytes\xff";
+    atomic_write(&f, replacement).unwrap();
+    assert_eq!(std::fs::read(&f).unwrap(), replacement);
+    assert_eq!(names(&d), [name], "no temporary file is left after overwriting the project");
+    let _ = std::fs::remove_dir_all(d);
+}
+
+#[test]
+fn concurrent_atomic_writes_each_publish_a_whole_file() {
+    // Writers of the same file used to share one `.tmp`: they truncated each other's data and
+    // the later rename failed once the first had moved it away (#1233).
+    let d = tmp("atomic-concurrent");
+    let f = d.join("shared.ecproj");
+    for round in 0..10 {
+        let contents: Vec<Vec<u8>> = (0..8u8).map(|w| vec![b'a' + w; 256 * 1024 + usize::from(w) * 1000]).collect();
+        std::thread::scope(|sc| {
+            for c in &contents {
+                let f = &f;
+                sc.spawn(move || atomic_write(f, c).expect("every writer succeeds"));
+            }
+        });
+        let got = std::fs::read(&f).unwrap();
+        assert!(contents.contains(&got), "round {round}: the file is one writer's whole data ({} bytes)", got.len());
+        assert_eq!(names(&d), ["shared.ecproj"], "round {round}: no temporary file is left");
+    }
+    let _ = std::fs::remove_dir_all(d);
+}
+
+#[cfg(unix)]
+#[test]
+fn atomic_write_does_not_follow_a_link_at_the_old_temp_name() {
+    let d = tmp("atomic-link");
+    let f = d.join("p.ecproj");
+    let victim = d.join("victim.txt");
+    std::fs::write(&victim, b"keep").unwrap();
+    // The temporary name used to be `<name>.tmp`, opened with File::create (following links).
+    std::os::unix::fs::symlink(&victim, d.join("p.ecproj.tmp")).unwrap();
+    atomic_write(&f, b"new project").unwrap();
+    assert_eq!(std::fs::read(&victim).unwrap(), b"keep", "the link's target is untouched");
+    assert_eq!(std::fs::read(&f).unwrap(), b"new project");
+    let _ = std::fs::remove_dir_all(d);
+}
+
 #[test]
 fn atomic_write_survives_a_crash_mid_write() {
     let d = tmp("atomic");
@@ -472,12 +615,12 @@ fn atomic_write_survives_a_crash_mid_write() {
     atomic_write(&f, b"version 1").unwrap();
     // The writer dies halfway through the temporary file.
     let r = atomic_write_with(&f, b"version 2 is much longer", |tmp, data| {
-        std::fs::write(tmp, &data[..5])?;
+        std::io::Write::write_all(tmp, &data[..5])?;
         Err(std::io::Error::other("power cut"))
     });
     assert!(r.is_err());
     assert_eq!(std::fs::read(&f).unwrap(), b"version 1");
-    assert!(!temp_path(&f).exists(), "the partial temp file is cleaned up");
+    assert_eq!(names(&d), ["p.ecproj"], "the partial temp file is cleaned up");
     // A temp file left by a hard kill doesn't count as an auto-save.
     std::fs::write(d.join("p auto-save 1.ecproj.tmp"), b"junk").unwrap();
     assert!(autosave::existing(&d, "p").is_empty());

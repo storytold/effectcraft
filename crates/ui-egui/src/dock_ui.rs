@@ -330,12 +330,15 @@ impl EffectcraftApp {
         ));
         let id = egui::Id::new(("floating-panel", f.panels.first().map(|p| p.id()).unwrap_or_default()));
         let mut group = None;
-        egui::Area::new(id).order(egui::Order::Middle).fixed_pos(rect.min).interactable(true).show(ctx, |ui| {
+        // Not constrained to the window: the group is drawn where its rect says (the clamp above
+        // keeps its strip reachable), so it follows the pointer past the window's edges.
+        egui::Area::new(id).order(egui::Order::Middle).fixed_pos(rect.min).constrain(false).interactable(true).show(ctx, |ui| {
             let (r, _) = ui.allocate_exact_size(rect.size(), Sense::hover());
             ui.painter().rect_filled(r.expand(1.0), t.radius, Color32::from_black_alpha(90));
             let strip = Rect::from_min_size(r.min, vec2(r.width(), t.tab_h));
             // Move by the strip (tabs, registered later, take precedence over it).
-            let mv = ui.interact(strip, id.with("move"), Sense::drag());
+            // (`id.with("move")` is the id of the `Area`'s own background widget.)
+            let mv = ui.interact(strip, id.with("strip"), Sense::drag());
             self.auto.add(&format!("panel.float.{i}.move"), strip, "Move floating panel");
             let mut nr = r;
             if mv.dragged() {

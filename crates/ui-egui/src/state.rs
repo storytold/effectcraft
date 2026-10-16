@@ -35,6 +35,8 @@ pub enum Tool {
     Eraser,
     RotoBrush,
     RefineEdge,
+    /// Object Matte: click an object (or drag a box around it) in the Composition viewer.
+    ObjectMatte,
     Puppet,
     PuppetStarch,
     PuppetBend,
@@ -59,10 +61,10 @@ impl Tool {
         &[Tool::Brush],
         &[Tool::Clone],
         &[Tool::Eraser],
-        &[Tool::RotoBrush, Tool::RefineEdge],
+        &[Tool::RotoBrush, Tool::RefineEdge, Tool::ObjectMatte],
         &[Tool::Puppet, Tool::PuppetStarch, Tool::PuppetBend, Tool::PuppetAdvanced, Tool::PuppetOverlap],
     ];
-    pub const ALL: [Tool; 30] = [
+    pub const ALL: [Tool; 31] = [
         Tool::Selection,
         Tool::Hand,
         Tool::Zoom,
@@ -88,6 +90,7 @@ impl Tool {
         Tool::Eraser,
         Tool::RotoBrush,
         Tool::RefineEdge,
+        Tool::ObjectMatte,
         Tool::Puppet,
         Tool::PuppetStarch,
         Tool::PuppetBend,
@@ -121,6 +124,7 @@ impl Tool {
             Tool::Eraser => "Eraser Tool",
             Tool::RotoBrush => "Roto Brush Tool",
             Tool::RefineEdge => "Refine Edge Tool",
+            Tool::ObjectMatte => "Object Matte Tool",
             Tool::Puppet => "Puppet Position Pin Tool",
             Tool::PuppetStarch => "Puppet Starch Pin Tool",
             Tool::PuppetBend => "Puppet Bend Pin Tool",
@@ -142,7 +146,7 @@ impl Tool {
             Tool::Pen | Tool::PenAdd | Tool::PenDelete | Tool::PenConvert | Tool::MaskFeather => Some("G"),
             Tool::Type | Tool::TypeVertical => Some("Cmd+T"),
             Tool::Brush | Tool::Clone | Tool::Eraser => Some("Cmd+B"),
-            Tool::RotoBrush | Tool::RefineEdge => Some("Alt+W"),
+            Tool::RotoBrush | Tool::RefineEdge | Tool::ObjectMatte => Some("Alt+W"),
             Tool::Puppet | Tool::PuppetStarch | Tool::PuppetBend | Tool::PuppetAdvanced | Tool::PuppetOverlap => Some("Cmd+P"),
         }
     }
@@ -173,6 +177,7 @@ impl Tool {
             Tool::Eraser => Icon::Eraser,
             Tool::RotoBrush => Icon::RotoBrush,
             Tool::RefineEdge => Icon::RefineEdge,
+            Tool::ObjectMatte => Icon::ObjectMatte,
             Tool::Puppet => Icon::Puppet,
             Tool::PuppetStarch => Icon::PuppetStarch,
             Tool::PuppetBend => Icon::PuppetBend,
@@ -305,6 +310,7 @@ impl TimelineState {
     /// reveal. Other layers keep theirs.
     pub fn apply_reveal(&mut self, layers: &[u64], kinds: Vec<String>) {
         for id in layers {
+            self.full_groups.remove(id);
             if kinds.is_empty() {
                 self.open_layers.remove(id);
                 self.layer_reveal.remove(id);
@@ -315,6 +321,27 @@ impl TimelineState {
         }
         self.reveal = kinds;
     }
+
+    /// Twirl group `uid` of `layer` by hand. Opened under a reveal, it shows all its properties
+    /// (collapse and expand an effect that shows only its revealed parameters to see them all).
+    pub fn toggle_group(&mut self, layer: u64, uid: u64) {
+        if self.open_groups.remove(&uid) {
+            return;
+        }
+        self.open_groups.insert(uid);
+        if self.layer_reveal.contains_key(&layer) {
+            self.full_groups.entry(layer).or_default().insert(uid);
+        }
+    }
+}
+
+/// Where a Timeline shortcut scrolls to.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ScrollTo {
+    /// D: the current time, centred in the time graph.
+    Time,
+    /// X: the topmost selected layer, at the top of the layers.
+    Layer,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -322,6 +349,9 @@ pub struct TimelineState {
     /// Visible span start (seconds) and pixels per second; None = fit comp.
     pub start: f64,
     pub pps: Option<f64>,
+    /// The span (`start`, `pps`) Zoom to Fit Comp left, which it goes back to when pressed again.
+    #[serde(skip)]
+    pub before_fit: Option<(f64, f64)>,
     pub scroll_y: f32,
     /// Left column area width.
     pub columns_w: f32,
@@ -344,6 +374,10 @@ pub struct TimelineState {
     /// Properties / groups (uids) shown by the `props` reveal (Animation ▸ Reveal Properties…).
     #[serde(default)]
     pub reveal_props: BTreeSet<u64>,
+    /// Groups of a revealed layer (by layer id) twirled open by hand since the reveal: they show
+    /// their whole contents, not just the revealed properties.
+    #[serde(default)]
+    pub full_groups: BTreeMap<u64, BTreeSet<u64>>,
     /// Graph Editor: `auto` (Auto-Select Graph Type, the default: the speed graph when every
     /// property shown is spatial, else the value graph), `value` or `speed`.
     #[serde(default = "auto_graph")]
@@ -385,6 +419,9 @@ pub struct TimelineState {
     /// The name column shows Source Name instead of Layer Name (click its header).
     #[serde(default)]
     pub source_name: bool,
+    /// A scroll asked for by a shortcut (D, X), done when the Timeline is next drawn.
+    #[serde(skip)]
+    pub scroll_to: Option<ScrollTo>,
 }
 
 pub fn default_tl_columns() -> BTreeSet<String> {
@@ -403,6 +440,7 @@ impl Default for TimelineState {
         TimelineState {
             start: 0.0,
             pps: None,
+            before_fit: None,
             scroll_y: 0.0,
             columns_w: 560.0,
             outline_scroll: 0.0,
@@ -414,6 +452,7 @@ impl Default for TimelineState {
             reveal: vec![],
             layer_reveal: BTreeMap::new(),
             reveal_props: BTreeSet::new(),
+            full_groups: BTreeMap::new(),
             graph_mode: auto_graph(),
             graph_show_selected: true,
             graph_auto_zoom: true,
@@ -426,6 +465,7 @@ impl Default for TimelineState {
             unlinked: BTreeSet::new(),
             columns: default_tl_columns(),
             source_name: false,
+            scroll_to: None,
         }
     }
 }

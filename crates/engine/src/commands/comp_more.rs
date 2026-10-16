@@ -22,6 +22,7 @@ fn crop(s: &mut Session, cid: effectcraft_project::ItemId, r: [f64; 4], label: &
     let (w, h) = (effectcraft_project::limits::size_f64(r[2]), effectcraft_project::limits::size_f64(r[3]));
     s.edit(label, None, |proj, st| {
         let c = proj.comp_mut(cid).ok_or(EngineError::NoComp)?;
+        let (old_w, old_h) = (c.width, c.height);
         c.width = w;
         c.height = h;
         for l in c.layers.iter_mut().filter(|l| l.parent.is_none()) {
@@ -30,7 +31,8 @@ fn crop(s: &mut Session, cid: effectcraft_project::ItemId, r: [f64; 4], label: &
             }
         }
         for g in &mut c.guides {
-            g.position -= if g.vertical { x } else { y };
+            let px = g.px(old_w, old_h) - if g.vertical { x } else { y };
+            g.set_px(px, w, h);
         }
         st.region_of_interest = None;
         Ok(())

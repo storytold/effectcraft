@@ -806,7 +806,8 @@ fn pointwise(@builtin(global_invocation_id) gid: vec3<u32>) {
             t = clamp(t, 0.0, 1.0);
             let c0 = P.f[1].xyz;
             let c1 = P.f[2].xyz;
-            px = put(px, c0 + (c1 - c0) * t, 1.0, P.f[3].z);
+            // Keep the source alpha, as the CPU path does (#1063): the ramp fills only the shape.
+            px = put(px, c0 + (c1 - c0) * t, px.w, P.f[3].z);
         }
         case 10u: {
             let contrast = P.f[0].x;

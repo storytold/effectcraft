@@ -3,6 +3,9 @@
 The [AE 2026 replacement acceptance gates](ae-2026-acceptance.md) define the broader
 target across workflows, rendered output, work-project compatibility, performance and platforms.
 
+[Object Matte](object-matte.md) has a comparison plan (clips, prompt, per-frame IoU and the other
+metrics) but no measurement yet.
+
 The first G1 comparison measures eight original scalar Rotation cases against a live After Effects
 2026 session through AEsync 2.0.4: Easy Ease, overlapping influences, asymmetric ease, overshoot,
 descending values, equal endpoints, 100%/100% influence and 0.1%/100% influence. Each case has

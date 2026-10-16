@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use harfrust::{Direction, Feature, Tag, UnicodeBuffer};
 use unicode_bidi::{BidiInfo, Level};
 
-use effectcraft_keyframe::OpenType;
+use effectcraft_keyframe::{OpenType, text_doc::paragraph_ranges};
 
 use crate::fonts::{self, FaceId, Resolved};
 
@@ -940,13 +940,13 @@ fn paragraph(text: &str, base: usize, runs: &[(Range<usize>, TextStyle)], primar
     out
 }
 
-/// Lay out `text` (paragraphs separated by `\n`) in one style.
+/// Lay out `text` (paragraphs separated by CR, LF or CRLF) in one style.
 pub fn layout_uncached(text: &str, style: &TextStyle, para: &ParagraphStyle) -> Layout {
     layout_rich_uncached(text, &[(0..text.len(), style.clone())], std::slice::from_ref(para))
 }
 
 /// Lay out `text` with character style runs (byte ranges covering the text, in order; at least
-/// one) and paragraph settings (one per `\n`-separated paragraph; the last repeats). The wrap
+/// one) and paragraph settings (one per CR/LF/CRLF-separated paragraph; the last repeats). The wrap
 /// width is the first paragraph's.
 pub fn layout_rich_uncached(text: &str, runs: &[(Range<usize>, TextStyle)], paras: &[ParagraphStyle]) -> Layout {
     let fallback = [(0..text.len(), TextStyle::default())];
@@ -956,12 +956,10 @@ pub fn layout_rich_uncached(text: &str, runs: &[(Range<usize>, TextStyle)], para
     let width = para_at(0).width;
     let primaries: Vec<Resolved> = runs.iter().map(|(_, s)| fonts::resolve(&s.family, &s.style)).collect();
     let mut lay = Layout { missing_font: primaries.iter().any(|p| p.missing), text_len: text.len(), ..Default::default() };
-    let mut base = 0usize;
     let mut plines: Vec<(usize, ParaLine)> = Vec::new();
-    for (pi, p) in text.split('\n').enumerate() {
-        let p_clean = p.strip_suffix('\r').unwrap_or(p);
-        plines.extend(paragraph(p_clean, base, runs, &primaries, para_at(pi), width).into_iter().map(|l| (pi, l)));
-        base += p.len() + 1;
+    for (pi, span) in paragraph_ranges(text).enumerate() {
+        let p = text.get(span.bytes.clone()).unwrap_or_default();
+        plines.extend(paragraph(p, span.bytes.start, runs, &primaries, para_at(pi), width).into_iter().map(|l| (pi, l)));
     }
     let mut baseline = 0.0f32;
     for (i, (pi, pl)) in plines.into_iter().enumerate() {

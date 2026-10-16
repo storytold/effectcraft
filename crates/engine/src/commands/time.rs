@@ -100,6 +100,14 @@ fn go(s: &mut Session, p: &Value) -> Result<Value> {
         "workEnd" => comp.work_area.1 - comp.frame_duration(),
         "layerIn" => sel_layer.map(|l| l.in_point).unwrap_or(t),
         "layerOut" => sel_layer.map(|l| l.out_point - comp.frame_duration()).unwrap_or(t),
+        "nextInOut" | "prevInOut" => {
+            // In and Out points (its last frame) of the selected layers, of every layer with none
+            // selected.
+            let sel = &s.state.selected_layers;
+            let times =
+                comp.layers.iter().filter(|l| sel.is_empty() || sel.contains(&l.id)).flat_map(|l| [l.in_point, l.out_point - comp.frame_duration()]).collect();
+            step_to(times, t, comp.frame_duration(), to == "nextInOut")
+        }
         "nextKey" | "prevKey" if visible.is_some() => {
             // What the Timeline shows: keys of its revealed properties, layer and comp markers
             // and the work area (After Effects' "visible items").
@@ -148,7 +156,7 @@ fn go(s: &mut Session, p: &Value) -> Result<Value> {
             }
             step_to(times, t, comp.frame_duration(), to == "nextKey")
         }
-        _ => return Err(super::bad("time.go", "to: start|end|workStart|workEnd|layerIn|layerOut|nextKey|prevKey")),
+        _ => return Err(super::bad("time.go", "to: start|end|workStart|workEnd|layerIn|layerOut|nextInOut|prevInOut|nextKey|prevKey")),
     };
     s.set_time(target);
     Ok(report(s))
@@ -178,8 +186,15 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("time.forward10", "Forward 10 Frames", [], ["Shift+PageDown", "Cmd+Shift+ArrowRight"], "{}", has_comp, |s, _| step(s, &json!({"frames": 10}))),
         cmd!("time.back10", "Back 10 Frames", [], ["Shift+PageUp", "Cmd+Shift+ArrowLeft"], "{}", has_comp, |s, _| step(s, &json!({"frames": -10}))),
         cmd!("time.step", "Step Frames", [], None, "{frames}", has_comp, step),
-        cmd!("time.start", "Go to Start", [], Some("Home"), "{}", has_comp, |s, _| go(s, &json!({"to": "start"}))),
-        cmd!("time.end", "Go to End", [], Some("End"), "{}", has_comp, |s, _| go(s, &json!({"to": "end"}))),
+        cmd!("time.start", "Go to Start", [], ["Home", "Cmd+Alt+ArrowLeft"], "{}", has_comp, |s, _| go(s, &json!({"to": "start"}))),
+        cmd!("time.end", "Go to End", [], ["End", "Cmd+Alt+ArrowRight"], "{}", has_comp, |s, _| go(s, &json!({"to": "end"}))),
+        cmd!("time.workAreaStart", "Go to Work Area Start", [], Some("Shift+Home"), "{}", has_comp, |s, _| go(s, &json!({"to": "workStart"}))),
+        cmd!("time.workAreaEnd", "Go to Work Area End", [], Some("Shift+End"), "{}", has_comp, |s, _| go(s, &json!({"to": "workEnd"}))),
+        cmd!("time.previousInOut", "Go to Previous In or Out Point", [], Some("Cmd+Alt+Shift+ArrowLeft"), "{}", has_comp, |s, _| go(
+            s,
+            &json!({"to": "prevInOut"})
+        )),
+        cmd!("time.nextInOut", "Go to Next In or Out Point", [], Some("Cmd+Alt+Shift+ArrowRight"), "{}", has_comp, |s, _| go(s, &json!({"to": "nextInOut"}))),
         cmd!("time.layerIn", "Go to Layer In Point", [], Some("I"), "{}", has_comp, |s, _| go(s, &json!({"to": "layerIn"}))),
         cmd!("time.layerOut", "Go to Layer Out Point", [], Some("O"), "{}", has_comp, |s, _| go(s, &json!({"to": "layerOut"}))),
         cmd!(
@@ -200,7 +215,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Go To",
             [],
             None,
-            "{to: start|end|workStart|workEnd|layerIn|layerOut|nextKey|prevKey, prop?: uid, visible?: [{layer, prop}]}",
+            "{to: start|end|workStart|workEnd|layerIn|layerOut|nextInOut|prevInOut|nextKey|prevKey, prop?: uid, visible?: [{layer, prop}]}",
             has_comp,
             go
         ),

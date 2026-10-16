@@ -467,7 +467,37 @@ pub struct Comp {
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Guide {
     pub vertical: bool,
+    /// Comp pixels, or percent of the comp's width (vertical) / height (horizontal) when
+    /// [`Guide::percent`] is set.
     pub position: f64,
+    /// A percentage guide (After Effects 26.5): `position` is a percent of the comp's size, so the
+    /// guide keeps its relative place when the comp is resized. Absent in older projects.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub percent: bool,
+}
+
+impl Guide {
+    /// The comp's extent along this guide's axis, never zero.
+    fn extent(&self, width: u32, height: u32) -> f64 {
+        f64::from(if self.vertical { width } else { height }).max(1.0)
+    }
+
+    /// The guide's position in comp pixels for a comp of this size.
+    pub fn px(&self, width: u32, height: u32) -> f64 {
+        if self.percent { self.position / 100.0 * self.extent(width, height) } else { self.position }
+    }
+
+    /// Place the guide at `px` comp pixels, keeping its unit.
+    pub fn set_px(&mut self, px: f64, width: u32, height: u32) {
+        self.position = if self.percent { px / self.extent(width, height) * 100.0 } else { px };
+    }
+
+    /// Switch between pixels and percent without moving the guide on the comp.
+    pub fn set_percent(&mut self, percent: bool, width: u32, height: u32) {
+        let px = self.px(width, height);
+        self.percent = percent;
+        self.set_px(px, width, height);
+    }
 }
 
 fn yes() -> bool {
@@ -865,6 +895,23 @@ impl Comp {
             && layers.iter().zip(&o.layers).all(|(a, b)| a.same_pixels(b))
     }
 
+    /// Draws the same pixels as `o` once plain markers are ignored: they change no pixels. Protected
+    /// time markers with a duration set the timing (Responsive Design), so those still count.
+    pub fn same_pixels_ignoring_markers(&self, o: &Comp) -> bool {
+        let protected =
+            |m: &[Marker]| -> Vec<(Tick, Tick)> { m.iter().filter(|m| m.protected && m.duration > Tick::ZERO).map(|m| (m.time, m.duration)).collect() };
+        if protected(&self.markers) != protected(&o.markers) {
+            return false;
+        }
+        let mut c = self.clone();
+        c.markers = o.markers.clone();
+        for (a, b) in c.layers.iter_mut().zip(&o.layers) {
+            a.markers = b.markers.clone();
+            a.markers_locked = b.markers_locked;
+        }
+        c.same_pixels(o)
+    }
+
     /// The comp with those switches and the Resolution at their defaults (borrowed when they
     /// already are), for keys that hash the whole comp.
     pub fn pixel_form(&self) -> std::borrow::Cow<'_, Comp> {
@@ -1158,6 +1205,11 @@ impl Footage {
         self.linear_light && !self.preserve_rgb
     }
 
+    /// How long the footage plays: its duration times Interpret Footage ▸ Loop.
+    pub fn looped_duration(&self) -> Tick {
+        Tick(self.duration.0.saturating_mul(self.loop_count.max(1) as i64))
+    }
+
     /// Source time as the footage's timecode: its frame `frame` from Start Timecode
     /// (`0:00:41:20`), as the Footage panel shows it.
     pub fn timecode(&self, frame: i64) -> String {
@@ -1281,7 +1333,7 @@ impl Item {
     pub fn duration(&self) -> Option<Tick> {
         match &self.kind {
             ItemKind::Comp(c) => Some(c.duration),
-            ItemKind::Footage(f) if f.kind != FootageKind::Still => Some(f.duration),
+            ItemKind::Footage(f) if f.kind != FootageKind::Still => Some(f.looped_duration()),
             _ => None,
         }
     }
@@ -1375,12 +1427,42 @@ impl Project {
     pub fn find_by_name(&self, name: &str) -> Option<&Item> {
         self.items.values().find(|i| i.name == name)
     }
+    /// A numbered name for a copy of `base` that no project item has (Edit ▸ Duplicate): its
+    /// trailing number is dropped and the lowest free one from 2 is added (`Comp 1` → `Comp 2`,
+    /// `Name` → `Name 2`, then `Name 3`). Items for which `ignore` holds don't count.
+    pub fn numbered_item_name(&self, base: &str, ignore: impl Fn(&Item) -> bool) -> String {
+        let stem = base.trim_end_matches(|c: char| c.is_ascii_digit()).trim_end();
+        let taken = |n: &str| self.items.values().any(|i| i.name == n && !ignore(i));
+        (2u64..).map(|k| format!("{stem} {k}")).find(|n| !taken(n)).unwrap_or_default()
+    }
+    /// `base` when no project item has that name, else the next free numbered name as
+    /// [`Project::numbered_item_name`] gives it. Items for which `ignore` holds don't count.
+    pub fn unique_item_name(&self, base: &str, ignore: impl Fn(&Item) -> bool) -> String {
+        if self.items.values().any(|i| i.name == base && !ignore(i)) { self.numbered_item_name(base, ignore) } else { base.to_string() }
+    }
     pub fn folder_named(&self, name: &str) -> Option<ItemId> {
         self.items.values().find(|i| i.is_folder() && i.name == name).map(|i| i.id)
     }
     /// Find the comp that contains `layer`.
     pub fn comp_of_layer(&self, layer: LayerId) -> Option<ItemId> {
         self.comps().find(|(_, c)| c.layer(layer).is_some()).map(|(id, _)| *id)
+    }
+    /// The compositions whose layers use `item` as their source (footage, solid, 3D model or
+    /// precomp), each with how many of its layers do, ordered by comp name then id. Only direct
+    /// layers count, as in After Effects' Project panel ("used 3 times"): a solid inside a precomp
+    /// is used by the precomp, not by the comps that nest it. The total is the sum of the counts.
+    pub fn item_users(&self, item: ItemId) -> Vec<(ItemId, usize)> {
+        let mut users: Vec<(ItemId, String, usize)> = self
+            .items
+            .iter()
+            .filter_map(|(id, it)| {
+                let comp = it.as_comp()?;
+                let n = comp.layers.iter().filter(|l| l.source.item() == Some(item)).count();
+                (n > 0).then(|| (*id, it.name.to_lowercase(), n))
+            })
+            .collect();
+        users.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+        users.into_iter().map(|(id, _, n)| (id, n)).collect()
     }
     /// Whether comp `inner` is (transitively) nested inside comp `outer` (to prevent cycles).
     pub fn comp_contains(&self, outer: ItemId, inner: ItemId) -> bool {
@@ -1394,10 +1476,11 @@ impl Project {
     pub fn fix_next_id(&mut self) {
         let mut m = self.next_id;
         for (id, it) in &self.items {
-            m = m.max(id.0 + 1);
+            // Saturating: a damaged file's ids must not overflow (the import then refuses it).
+            m = m.max(id.0.saturating_add(1));
             if let ItemKind::Comp(c) = &it.kind {
                 for l in &c.layers {
-                    m = m.max(l.id.0 + 1).max(l.props.max_uid() + 1);
+                    m = m.max(l.id.0.saturating_add(1)).max(l.props.max_uid().saturating_add(1));
                 }
             }
         }

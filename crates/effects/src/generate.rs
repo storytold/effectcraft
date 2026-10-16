@@ -44,7 +44,9 @@ fn gradient_ramp(ctx: &EffectCtx, mut b: Buf) -> Buf {
             }
             let t = t.clamp(0.0, 1.0);
             let c = [c0[0] + (c1[0] - c0[0]) * t, c0[1] + (c1[1] - c0[1]) * t, c0[2] + (c1[2] - c0[2]) * t];
-            put(px, c, 1.0, blend);
+            // The ramp fills only where the layer has alpha (#1063), so it keeps the source alpha.
+            let a = px[3];
+            put(px, c, a, blend);
         }
     });
     b
@@ -398,6 +400,24 @@ mod generator_tests {
 
     fn red() -> Image {
         Image::filled(32, 32, [1.0, 0.0, 0.0, 1.0])
+    }
+
+    #[test]
+    fn gradient_ramp_stays_inside_the_layer_alpha() {
+        // #1063: a shape's transparent pixels stay transparent; the ramp fills only the shape.
+        let mut img = Image::filled(40, 24, [1.0, 0.0, 0.0, 1.0]);
+        for (i, p) in img.data.iter_mut().enumerate() {
+            let a = if i % 40 < 10 { 0.0 } else { 1.0 };
+            *p = p.map(|c| c * a);
+        }
+        for blend in [0.0, 50.0] {
+            let o = run_fx("ec.generate.gradientramp", &[("blend", num(blend))], img.clone(), 0.0, EffectEnv::default());
+            for (src, out) in img.data.iter().zip(&o.img.data) {
+                assert!((src[3] - out[3]).abs() < 1e-6, "blend {blend}: alpha {} became {}", src[3], out[3]);
+                assert!(out[..3].iter().all(|&c| c <= out[3] + 1e-6), "blend {blend}: premultiplied colour above alpha");
+            }
+            assert!(o.img.data.iter().any(|p| p[3] > 0.99), "blend {blend}: the ramp is drawn inside the shape");
+        }
     }
 
     #[test]

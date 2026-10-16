@@ -126,6 +126,8 @@ pub fn dialog(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     let (mut ok, mut cancel, mut delete) = (false, false, false);
     // Cmd+Backspace (Ctrl elsewhere) is Delete, in a text field too.
     let delete_key = super::dialogs::ui_command_key(ctx, egui::Key::Backspace);
+    // Cmd+Enter (Ctrl elsewhere) is OK, also in Comment, where Enter types a new line.
+    let ok_key = super::dialogs::ui_command_key(ctx, egui::Key::Enter);
     let title = d.title.clone();
     super::dialogs::modal(ctx, &title, vec2(520.0, 560.0), t, |ui| {
         egui::Grid::new("marker-grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
@@ -222,7 +224,7 @@ pub fn dialog(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     app.dialog_state.marker = d.clone();
     delete |= delete_key && !ok && !cancel;
     // Enter is OK, unless a text field has it.
-    if ok || (!cancel && !delete && super::dialogs::ui_enter(ctx)) {
+    if ok || (!cancel && !delete && (ok_key || super::dialogs::ui_enter(ctx))) {
         if let Err(e) = app.session.execute("markers.set", draft_params(&d)) {
             app.ui.status = e.to_string();
         }
@@ -518,6 +520,20 @@ mod tests {
         assert_eq!(app.session.execute("markers.list", json!({})).unwrap()[0]["chapter"], "Entered");
         open_dialog(&mut app, MarkerRef { layer: None, index: 0 }).unwrap();
         // Also from a focused text field: Tab to one, then press the key.
+        for _ in 0..40 {
+            if ctx.egui_wants_keyboard_input() {
+                break;
+            }
+            crate::panels::dialogs::press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::NONE);
+        }
+        assert!(ctx.egui_wants_keyboard_input(), "a text field has focus");
+        // Cmd+Enter is OK from a focused text field, without typing a new line into it.
+        app.dialog_state.marker.chapter = "Cmd".into();
+        crate::panels::dialogs::press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::COMMAND);
+        assert!(app.dialog.is_none());
+        let m = &app.session.execute("markers.list", json!({})).unwrap()[0];
+        assert_eq!((m["chapter"].as_str(), m["comment"].as_str()), (Some("Cmd"), Some("hello")));
+        open_dialog(&mut app, MarkerRef { layer: None, index: 0 }).unwrap();
         for _ in 0..40 {
             if ctx.egui_wants_keyboard_input() {
                 break;

@@ -67,6 +67,8 @@ Screenshots of EffectCraft itself, rendered headlessly, showing only procedurall
   Drop In Lines): `crates/engine/presets/text_animators.json` (sidecar `.attribution`).
 - Transition animation presets (23: wipes, clock and fan reveals, blinds, dissolves, card flips, CC wipes, fades):
   `crates/engine/presets/transitions.json` (sidecar `.attribution`).
+- Backgrounds animation presets (23: drifting gradients, fog, cloud and smoke, plasma and magma, cells and crystals, scrolling grids
+  and checks, pulse rings, bokeh, light sweep): `crates/engine/presets/backgrounds.json` (sidecar `.attribution`).
 - Sample scripts (File ▸ Scripts) and ScriptUI panel: `crates/engine/scripts/Rename Layers.jsx`,
   `crates/engine/scripts/Sort Layers by In Point.jsx`, `crates/engine/scripts/Create Null at Selected Layers.jsx`,
   `crates/engine/scripts/Render Queue Batch.jsx`, `crates/engine/scripts/ScriptUI Panels/Layer Tools.jsx`

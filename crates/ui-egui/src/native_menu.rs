@@ -169,8 +169,16 @@ pub fn build(app: &EffectcraftApp) -> NativeMenu {
                 MenuNode::Submenu { label, children } => {
                     let mut kids = vec![];
                     rec(app, children, &id, &mut kids);
-                    let shown = effectcraft_engine::menus::submenu_label(&app.session, label, &crate::menus::dyn_ctx(&app.ui.workspace, &[]));
-                    out.push(NativeNode::Submenu { label: crate::i18n::submenu(app, label, shown), children: kids });
+                    // The generated Effect menu's category submenus draw the catalog's name
+                    // (#821); every other submenu goes through the menu catalog.
+                    let shown = crate::i18n::effect_category(children, label).unwrap_or_else(|| {
+                        crate::i18n::submenu(
+                            app,
+                            label,
+                            effectcraft_engine::menus::submenu_label(&app.session, label, &crate::menus::dyn_ctx(&app.ui.workspace, &[])),
+                        )
+                    });
+                    out.push(NativeNode::Submenu { label: shown, children: kids });
                 }
                 MenuNode::Item(e) => {
                     let role = match e.command.as_str() {
@@ -429,6 +437,7 @@ mod tests {
     #[test]
     fn saved_workspaces_are_in_the_native_workspace_menu() {
         let mut app = app();
+        app.session.config = Some(std::sync::Arc::new(effectcraft_engine::config::MemoryConfig::default()));
         let ctx = egui::Context::default();
         crate::menus::invoke(&mut app, &ctx, "window.saveWorkspaceAs", json!({"name": "My Layout"})).unwrap();
         let entry = |app: &EffectcraftApp| build(app).items().into_iter().find(|i| i.label == "My Layout").cloned();

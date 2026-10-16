@@ -40,6 +40,7 @@ pub mod mocha_shape;
 mod noise;
 mod noise2;
 mod noise3;
+pub mod object_matte;
 mod obsolete;
 mod ocio;
 pub mod ocio_config;
@@ -109,7 +110,7 @@ pub use time_fx::{PixelMotion, TimewarpPlan, TwStep, pmb_plan, posterized_time, 
 // effectcraft-gpu fx_tone.
 pub use ocio::color_stabilizer_maps;
 // GPU effects, part B (3D Channel, Immersive Video, colour management, simulation render passes).
-pub use channel3d::{CRYPTO_LAYERS, id_color, selection_hashes};
+pub use channel3d::{CRYPTO_LAYERS, crypto_aux_image, id_color, selection_hashes};
 pub use ocio::{ColorOp, Straight, Tf, color_program};
 pub use sim::{Acc, Blob, Bubble, Post, Shape, Sprite, SpritePlan, Tint, bubble_list, drizzle_drops, mercury_blobs, sprite_plan};
 pub use sim2::{
@@ -354,8 +355,8 @@ pub trait EffectHost: Sync {
         self.layer(id, false)
     }
     /// The effect's own layer at another **layer time** `layer_time` (seconds): its source with
-    /// masks applied, followed by the first `effects` effects of its stack (0 = none, which is
-    /// what After Effects' Time effects see). `None` when unavailable (no host, recursion
+    /// masks applied, followed by the first `effects` effects of its stack (0 = none; the host
+    /// never goes past the effect being rendered). `None` when unavailable (no host, recursion
     /// limit, adjustment layers). Time effects use this to read neighbouring frames.
     fn self_at(&self, _layer_time: f64, _effects: usize) -> Option<Buf> {
         None
@@ -533,6 +534,7 @@ pub fn registry() -> &'static [EffectSpec] {
         v.extend(camera_tracker::specs());
         v.extend(face_track::specs());
         v.extend(roto::specs());
+        v.extend(object_matte::specs());
         v.sort_by(|a, b| a.category.cmp(b.category).then(a.name.cmp(b.name)));
         for s in v.iter_mut() {
             if GPU_EFFECTS.contains(&s.id) {
@@ -841,7 +843,15 @@ pub const PARAM_GROUPS: &[(&str, &str)] = &[
 
 /// Display names of nested parameter groups by match id.
 fn group_name(m: &str) -> &str {
-    warp_stab::GROUPS.iter().chain(roto::GROUPS).chain(keylight::GROUPS).chain(PARAM_GROUPS).find(|(id, _)| *id == m).map(|(_, n)| *n).unwrap_or(m)
+    warp_stab::GROUPS
+        .iter()
+        .chain(roto::GROUPS)
+        .chain(object_matte::GROUPS)
+        .chain(keylight::GROUPS)
+        .chain(PARAM_GROUPS)
+        .find(|(id, _)| *id == m)
+        .map(|(_, n)| *n)
+        .unwrap_or(m)
 }
 
 /// The nested group at `path` (`borders/autoScale`) under `g`, created on first use.
@@ -1216,6 +1226,7 @@ pub const TIME_DEPENDENT: &[&str] = &[
     camera_tracker::ID,
     // Each frame has its own segmentation.
     roto::ID,
+    object_matte::ID,
 ];
 
 /// See [`TIME_DEPENDENT`].

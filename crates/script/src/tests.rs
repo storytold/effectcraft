@@ -31,6 +31,33 @@ fn layer<'a>(c: &'a Comp, name: &str) -> &'a Layer {
     c.layers.iter().find(|l| l.name == name).unwrap_or_else(|| panic!("no layer {name}"))
 }
 
+/// #1063 (item 8): Source Text retains CR while sourceRectAtTime sees both lines.
+#[test]
+fn carriage_return_source_text_has_multiline_script_bounds() {
+    let mut s = session();
+    let result = ok(
+        &mut s,
+        r#"
+        var comp = app.project.items.addComp("Line breaks", 640, 360, 1, 1, 30);
+        var crDoc = new TextDocument("Line 1\rLine 2");
+        crDoc.font = "Inter";
+        crDoc.fontSize = 40;
+        var lfDoc = new TextDocument("Line 1\nLine 2");
+        lfDoc.font = "Inter";
+        lfDoc.fontSize = 40;
+        var cr = comp.layers.addText(crDoc);
+        var lf = comp.layers.addText(lfDoc);
+        var crRect = cr.sourceRectAtTime(0, false);
+        var lfRect = lf.sourceRectAtTime(0, false);
+        [cr.text.sourceText.value.text, crRect.height, lfRect.height, crRect.width, lfRect.width]
+        "#,
+    );
+    assert_eq!(result.result[0], "Line 1\rLine 2");
+    assert!(result.result[1].as_f64().unwrap() > 40.0);
+    assert_eq!(result.result[1], result.result[2]);
+    assert_eq!(result.result[3], result.result[4]);
+}
+
 #[test]
 fn builds_a_comp_end_to_end() {
     let mut s = session();
@@ -137,6 +164,24 @@ fn errors_report_line_and_column() {
     assert_eq!(o.output, vec!["before"]);
     // Errors from the object model point at the user's line.
     let o = run_code(&mut s, "var c = app.project.items.addComp('C', 10, 10, 1, 1, 24);\n\nc.layer(5);\n", "range.jsx");
+    let e = o.error.expect("range error");
+    assert!(e.message.contains("out of range"), "{e:?}");
+    assert_eq!(e.line, Some(3), "{e:?}");
+}
+
+/// A script wrapped in a function (the usual `(function () { ... })();` shape) reports the line
+/// that failed, not the wrapper's line (#1063).
+#[test]
+fn errors_inside_a_function_wrapper_report_the_failing_line() {
+    let mut s = session();
+    let o = run_code(&mut s, "(function () {\n  var a = 1;\n  throw new Error('inside');\n})();\n", "thrown.jsx");
+    let e = o.error.expect("thrown");
+    assert_eq!(e.message, "inside");
+    assert_eq!(e.line, Some(3), "{e:?}");
+    let o = run_code(&mut s, "(function () {\n  var a = 1;\n  nope.call();\n})();\n", "reference.jsx");
+    let e = o.error.expect("reference error");
+    assert_eq!(e.line, Some(3), "{e:?}");
+    let o = run_code(&mut s, "(function () {\n  var c = app.project.items.addComp('C', 10, 10, 1, 1, 24);\n  c.layer(5);\n})();\n", "range.jsx");
     let e = o.error.expect("range error");
     assert!(e.message.contains("out of range"), "{e:?}");
     assert_eq!(e.line, Some(3), "{e:?}");
@@ -359,6 +404,29 @@ fn security_gate_for_files() {
     assert_eq!(std::fs::read_to_string(dir.join("w.txt")).unwrap(), "written\n");
     let o = ok(&mut s, &format!("var f = new File({}); f.open('r'); f.readln()", q(&dir.join("secret.txt"))));
     assert_eq!(o.result, json!("outside"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #816: CompItem.saveFrameToPng writes the frame as a PNG, behind the file-write preference.
+#[test]
+fn save_frame_to_png_writes_behind_the_file_gate() {
+    let dir = std::env::temp_dir().join(format!("ec-save-frame-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let png = dir.join("frame.png");
+    let mut s = session();
+    let code = format!(
+        "var c = app.project.items.addComp('F', 40, 30, 1, 2, 25); c.layers.addSolid([1, 0, 0], 'S', 40, 30, 1); c.saveFrameToPng(1, new File({}))",
+        serde_json::to_string(&png.to_string_lossy()).unwrap()
+    );
+    let o = run_code(&mut s, &code, "frame.jsx");
+    assert!(o.error.expect("refused").message.contains("Allow Scripts to Write Files"));
+    assert!(!png.exists() || std::fs::metadata(&png).unwrap().len() == 0);
+    s.prefs.scripting.allow_scripts_write_files = true;
+    ok(&mut s, &code);
+    let bytes = std::fs::read(&png).unwrap();
+    assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+    // IHDR width and height.
+    assert_eq!((u32::from_be_bytes(bytes[16..20].try_into().unwrap()), u32::from_be_bytes(bytes[20..24].try_into().unwrap())), (40, 30));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -698,6 +766,36 @@ fn group_selected_false_deselects_masks_and_effects() {
     assert_eq!(out.result, json!([[true, true], [false, true], [false, false]]));
 }
 
+/// A layer selected by script in a comp that is not open stays selected for the next script:
+/// every comp keeps its own layer selection (#1001).
+#[test]
+fn layer_selection_in_a_closed_comp_survives_to_the_next_script() {
+    let mut s = session();
+    let out = ok(
+        &mut s,
+        r#"
+        var a = app.project.items.addComp("Active", 400, 300, 1, 2, 25);
+        a.openInViewer();
+        var c = app.project.items.addComp("Other", 400, 300, 1, 2, 25);
+        c.layers.addText("A");
+        c.layers.addText("B");
+        c.layer("B").selected = true;
+        c.selectedLayers.length + " " + c.layer("B").selected + " " + a.selectedLayers.length
+        "#,
+    );
+    assert_eq!(out.result, json!("1 true 0"));
+    // A second script call, the way a panel talks to the app over the control channel.
+    let out = ok(
+        &mut s,
+        r#"
+        var c = null;
+        for (var k = 1; k <= app.project.numItems; k++) { if (app.project.item(k).name === "Other") c = app.project.item(k); }
+        c.selectedLayers.length + " " + c.layer("B").selected
+        "#,
+    );
+    assert_eq!(out.result, json!("1 true"));
+}
+
 /// Probes every file as a 64x32 still (the media layer's single-file probe).
 struct Stills;
 impl effectcraft_engine::Importer for Stills {
@@ -729,6 +827,79 @@ fn import_options_sequence_picks_one_still_or_the_run() {
     ok(&mut s, &format!("var io = new ImportOptions(new File('{pick}')); io.sequence = true; app.project.importFile(io);"));
     assert_eq!(kind_of(&s, "shot_[0001-0003].png"), FootageKind::Sequence);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #813: FootageItem proxies, replaceWithSequence and mainSource.conformFrameRate.
+#[test]
+fn footage_proxies_sequences_and_conform_rate() {
+    use effectcraft_engine::project::ItemKind;
+    let dir = std::env::temp_dir().join(format!("ec-script-proxy-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for n in ["shot_0001.png", "shot_0002.png", "take_0001.png", "take_0002.png", "proxy.png"] {
+        std::fs::write(dir.join(n), b"").unwrap();
+    }
+    let p = |n: &str| dir.join(n).to_string_lossy().replace('\\', "/");
+    let mut s = session();
+    s.importer = Some(Arc::new(Stills));
+    let o = ok(
+        &mut s,
+        &format!(
+            "var io = new ImportOptions(new File('{}')); io.sequence = true; var item = app.project.importFile(io);\
+             var same = item.mainSource === item.mainSource;\
+             item.mainSource.conformFrameRate = 12; var c12 = item.mainSource.conformFrameRate, fr = item.frameRate;\
+             item.mainSource.conformFrameRate = 0; var c0 = item.mainSource.conformFrameRate;\
+             var before = [item.useProxy, item.proxySource];\
+             item.setProxy(new File('{}')); var set = [item.useProxy, item.proxySource.file.name];\
+             item.useProxy = false; var off = item.useProxy;\
+             item.setProxyToNone(); var none = item.proxySource;\
+             item.replaceWithSequence(new File('{}'), false);\
+             [same, c12, fr, c0, before[0], before[1], set[0], set[1], off, none]",
+            p("shot_0001.png"),
+            p("proxy.png"),
+            p("take_0001.png")
+        ),
+    );
+    assert_eq!(o.result, json!([true, 12, 12, 0, false, null, true, "proxy.png", false, null]));
+    let paths: Vec<String> =
+        s.project.items.values().filter_map(|i| if let ItemKind::Footage(f) = &i.kind { Some(f.path.replace('\\', "/")) } else { None }).collect();
+    assert!(paths.iter().any(|f| f.contains("take_")), "replaced with the take sequence: {paths:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A flat green footage source, so `sampleImage` on a footage layer has known pixels.
+struct Flat;
+impl effectcraft_engine::render::FootageSource for Flat {
+    fn frame(
+        &self,
+        _item: effectcraft_engine::project::ItemId,
+        f: &effectcraft_engine::project::Footage,
+        _t: effectcraft_engine::time::Tick,
+    ) -> Option<Arc<effectcraft_engine::render::Image>> {
+        Some(Arc::new(effectcraft_engine::render::Image::filled(f.width.max(1), f.height.max(1), [0.0, 1.0, 0.0, 1.0])))
+    }
+}
+
+/// `sampleImage` on a footage layer reads the footage's pixels from a script, not transparent
+/// black: the expression evaluator needs the session's footage source (#1000).
+#[test]
+fn sample_image_reads_footage_pixels_in_scripts() {
+    let mut s = session();
+    s.footage = Arc::new(Flat);
+    s.importer = Some(Arc::new(Stills));
+    let out = ok(
+        &mut s,
+        r#"
+        var comp = app.project.items.addComp("Scene", 640, 360, 1, 1, 25);
+        comp.openInViewer();
+        var img = comp.layers.add(app.project.importFile(new ImportOptions(new File("/tmp/ec-flat.png"))));
+        img.name = "Img";
+        var cc = comp.layers.addNull().property("ADBE Effect Parade").addProperty("ADBE Color Control").property(1);
+        cc.expression = 'thisComp.layer("Img").sampleImage([32, 16], [0.5, 0.5], true, time);';
+        var v = cc.valueAtTime(0, false);
+        [v[0], v[1], v[2], v[3], cc.expressionError];
+        "#,
+    );
+    assert_eq!(out.result, json!([0, 1, 0, 1, ""]), "green footage sampled, not transparent black");
 }
 
 #[test]
@@ -826,6 +997,55 @@ fn script_remove_keys_batches_a_range_as_one_edit() {
     assert_eq!(restored.result, json!(5));
     let invalid = run_code(&mut s, "app.project.item(1).layer(1).transform.rotation.removeKeys(0, 2)", "remove-keys-range.jsx");
     assert!(invalid.error.is_some());
+}
+
+/// #814: one key is looked up without serialising the whole list (removeKey on a property with
+/// thousands of keys was linear in the key count), and the key calls behave as before.
+#[test]
+fn script_key_lookup_fetches_only_that_key() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        "var c = app.project.items.addComp('Keys', 100, 100, 1, 100, 25); var p = c.layers.addNull().transform.rotation;\
+         var ts = [], vs = []; for (var i = 0; i < 2000; i++) { ts.push(i / 25); vs.push(i); } p.setValuesAtTimes(ts, vs);\
+         var q = { comp: p.__layer.__comp, layer: p.__layer.__id, uid: p.__uid };\
+         q.index = 2; var one = __get('keys', q); q.index = 2000; var none = __get('keys', q);\
+         p.removeKey(p.numKeys); p.removeKey(1);\
+         var err = ''; try { p.keyTime(1999); } catch (e) { err = e.message; }\
+         [one.count, one.key.time, none.key, p.numKeys, p.keyTime(1), p.keyValue(1998), err]",
+    );
+    assert_eq!(o.result, json!([2000, 0.08, null, 1998, 0.04, 1998, "keyIndex 1999 is out of range 1..1998"]));
+}
+
+/// #815: a stroke's Dashes use After Effects' match names, and addProperty with them returns
+/// Dash 1 / Gap 1 / Offset or adds the Dash 2 / Gap 2 pair.
+#[test]
+fn script_stroke_dashes_use_after_effects_match_names() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        "function names(g) { var a = []; for (var i = 1; i <= g.numProperties; i++) a.push(g.property(i).matchName); return a.join(','); }\
+         var comp = app.project.items.addComp('Names', 100, 100, 1, 10, 25);\
+         var contents = comp.layers.addShape().property('ADBE Root Vectors Group'); contents.addProperty('ADBE Vector Shape - Rect');\
+         var d = contents.addProperty('ADBE Vector Graphic - Stroke').property('ADBE Vector Stroke Dashes');\
+         var before = names(d);\
+         var dash1 = d.addProperty('ADBE Vector Stroke Dash 1'); dash1.setValue(12);\
+         var gap2 = d.addProperty('ADBE Vector Stroke Gap 2');\
+         var err = ''; try { d.addProperty('ADBE Vector Stroke Dash 9'); } catch (e) { err = e.message; }\
+         [before, dash1.matchName, d.property('ADBE Vector Stroke Dash 1').value, d.property('ADBE Vector Stroke Offset').matchName, gap2.matchName, names(d), err]",
+    );
+    assert_eq!(
+        o.result,
+        json!([
+            "ADBE Vector Stroke Dash 1,ADBE Vector Stroke Gap 1,ADBE Vector Stroke Offset",
+            "ADBE Vector Stroke Dash 1",
+            12,
+            "ADBE Vector Stroke Offset",
+            "ADBE Vector Stroke Gap 2",
+            "ADBE Vector Stroke Dash 1,ADBE Vector Stroke Gap 1,ADBE Vector Stroke Dash 2,ADBE Vector Stroke Gap 2,ADBE Vector Stroke Offset",
+            "Can not add \"ADBE Vector Stroke Dash 9\" to Dashes"
+        ])
+    );
 }
 
 #[test]
@@ -1009,4 +1229,149 @@ fn scripted_text_range_selector_resolves_and_is_the_only_selector() {
         "#,
     );
     assert_eq!(o.result, json!([1, "ADBE Text Selector", 50, 100, "ADBE Text Percent Offset"]));
+}
+
+/// `setInterpolationTypeAtKey` and `setTemporalEaseAtKey` (`keys.interpolation` / `keys.velocity`)
+/// act on effect parameters too, not just transform properties (#994).
+#[test]
+fn effect_parameter_interpolation_and_ease() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"
+        var c = app.project.items.addComp("E", 100, 100, 1, 5, 25);
+        var l = c.layers.addNull();
+        var slider = l.property("ADBE Effect Parade").addProperty("ADBE Slider Control").property(1);
+        slider.setValuesAtTimes([0, 1, 2], [0, 50, 100]);
+        slider.setInterpolationTypeAtKey(1, KeyframeInterpolationType.BEZIER, KeyframeInterpolationType.BEZIER);
+        slider.setTemporalEaseAtKey(2, [new KeyframeEase(0, 16.67)], [new KeyframeEase(0, 33.33)]);
+        var point = l.property("ADBE Effect Parade").addProperty("ADBE Point3D Control").property(1);
+        point.setValuesAtTimes([0, 1], [[0, 0, 0], [50, 50, 50]]);
+        point.setInterpolationTypeAtKey(1, KeyframeInterpolationType.BEZIER, KeyframeInterpolationType.BEZIER);
+        [slider.keyInInterpolationType(1) == KeyframeInterpolationType.BEZIER,
+         slider.keyOutInterpolationType(1) == KeyframeInterpolationType.BEZIER,
+         slider.keyInTemporalEase(2)[0].influence,
+         slider.keyOutTemporalEase(2)[0].influence,
+         point.keyInInterpolationType(1) == KeyframeInterpolationType.BEZIER];
+        "#,
+    );
+    assert_eq!(o.result, json!([true, true, 16.67, 33.33, true]));
+}
+
+/// #808: sourcePointToComp and compPointToSource follow the layer's transform.
+#[test]
+fn source_point_conversions_follow_the_layer_transform() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"
+        var comp = app.project.items.addComp("Repro", 1920, 1080, 1, 10, 25);
+        var layer = comp.layers.addSolid([1, 0, 0], "S", 200, 100, 1);
+        layer.transform.position.setValue([400, 300]);
+        layer.transform.scale.setValue([50, 50]);
+        var a = layer.sourcePointToComp([0, 0]);
+        var b = layer.compPointToSource([400, 300]);
+        [a[0], a[1], b[0], b[1]]
+        "#,
+    );
+    let v = o.result;
+    let near = |x: &Value, want: f64| x.as_f64().is_some_and(|g| (g - want).abs() < 1e-6);
+    assert!(near(&v[0], 350.0) && near(&v[1], 275.0), "{v}");
+    assert!(near(&v[2], 100.0) && near(&v[3], 50.0), "{v}");
+}
+
+/// #1063: a script asks a light's options for After Effects' "ADBE Casts Shadows".
+#[test]
+fn light_options_accept_the_after_effects_casts_shadows_name() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"
+        var comp = app.project.items.addComp("Repro", 1920, 1080, 1, 10, 25);
+        var light = comp.layers.addLight("Key", [100, 100]);
+        var c = light.property("ADBE Light Options Group").property("ADBE Casts Shadows");
+        c == null ? "null" : c.name
+        "#,
+    );
+    assert_ne!(o.result, json!("null"), "{:?}", o.result);
+}
+
+/// A Google Earth Studio camera export: transform and camera shortcuts on the camera layer, keys
+/// set through them, and Convert Expression to Keyframes run on the selected property (#1077).
+#[test]
+fn earth_studio_style_script_keys_the_camera() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"
+        var comp = app.project.items.addComp("Orbit", 1920, 1080, 1, 1, 10);
+        comp.openInViewer();
+        var cam = comp.layers.addCamera("Camera", ["960", "540"]);
+        cam.locked = true;
+        var pos = cam.position, rx = cam.xRotation, ry = cam.yRotation, rz = cam.zRotation, zoom = cam.zoom;
+        cam.autoOrient = AutoOrientType.NO_AUTO_ORIENT;
+        var ints = comp.layers.addNull();
+        ints.name = "ints";
+        ints.threeDLayer = true;
+        ints.position.setValuesAtTimes([0, 0.5], [[100, 200, 300], [110, 220, 330]]);
+        rx.setValuesAtTimes([0, 0.5], [181, 182]);
+        ry.setValuesAtTimes([0, 0.5], [39, 38]);
+        rz.setValuesAtTimes([0, 0.5], [87, 86]);
+        pos.expression = 'thisComp.layer("ints").transform.position';
+        var id = app.findMenuCommandId("Convert Expression to Keyframes");
+        if (id && pos.canSetExpression && pos.expressionEnabled) {
+          pos.selected = true;
+          app.executeCommand(id);
+          pos.selected = false;
+          ints.remove();
+        }
+        zoom.setValueAtTime(0, 1500);
+        zoom.setValueAtTime(0.5, 1600);
+        [pos.numKeys, rx.numKeys, ry.numKeys, rz.numKeys, zoom.numKeys, comp.numLayers,
+         cam.pointOfInterest.matchName, cam.orientation.matchName, cam.depthOfField.matchName,
+         cam.focusDistance.matchName, cam.aperture.matchName, cam.blurLevel.matchName]
+        "#,
+    );
+    assert_eq!(
+        o.result,
+        json!([
+            10,
+            2,
+            2,
+            2,
+            2,
+            1,
+            "ADBE Anchor Point",
+            "ADBE Orientation",
+            "ADBE Camera Depth of Field",
+            "ADBE Camera Focus Distance",
+            "ADBE Camera Aperture",
+            "ADBE Camera Blur Level"
+        ])
+    );
+    let (_, c) = comp_named(&s, "Orbit");
+    let cam = layer(c, "Camera");
+    let p = cam.props.prop("transform/position").unwrap();
+    assert_eq!(p.keys[5].value, KV::Vec3([110.0, 220.0, 330.0]));
+    assert!(!p.expr.as_ref().unwrap().enabled);
+    assert_eq!(cam.props.prop("transform/rotationX").unwrap().keys[1].value, KV::Scalar(182.0));
+    assert_eq!(cam.props.prop("cameraOptions/zoom").unwrap().keys[1].value, KV::Scalar(1600.0));
+}
+
+/// Pro Levels2's Alpha controls sit one group down (under Alpha), so a script finds them by their
+/// name on the effect as well as through the group (#1063).
+#[test]
+fn scripted_levels_alpha_controls_resolve_from_the_effect() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"
+        var c = app.project.items.addComp("Levels", 320, 180, 1, 3, 30);
+        var l = c.layers.addSolid([1, 0, 0], "S", 320, 180, 1);
+        var fx = l.property("ADBE Effect Parade").addProperty("ADBE Pro Levels2");
+        fx.property("Alpha Input White").setValue(0.5);
+        [fx.property("Alpha").property("Alpha Input White").value, fx.property("Alpha Input White").value]
+        "#,
+    );
+    assert_eq!(o.result, json!([0.5, 0.5]));
 }

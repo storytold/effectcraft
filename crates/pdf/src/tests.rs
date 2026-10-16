@@ -48,7 +48,10 @@ fn pdf_paths_clip_gradient_and_layers() {
         assert_eq!(page_count(&bytes), 1);
         let doc = parse(&bytes).unwrap();
         assert_eq!((doc.width, doc.height), (200.0, 100.0));
-        assert_eq!(layer_names(&doc), vec!["Background", "Art"], "object stream {objstm}");
+        assert_eq!(layer_names(&doc), vec!["Background", "Art"], "object stream {objstm}, skipped: {:?}", doc.skipped);
+        if objstm {
+            assert!(doc.skipped.iter().any(|warning| warning.contains("recovered PDF object")), "the malformed xref repair is reported");
+        }
         assert!(doc.skipped.contains(&"text (no font)".to_string()), "{:?}", doc.skipped);
         let (w, h) = doc.pixel_size();
         let img = effectcraft_svg::rasterize(&doc, w, h, 1.0);
@@ -196,7 +199,7 @@ fn nested_bomb_in_the_second_flate_filter_is_refused() {
     const MAX: usize = 1 << 20;
     let flate = object::Obj::Name("FlateDecode".into());
     let chain: object::Dict = [("Filter".to_string(), object::Obj::Array(vec![flate.clone(), flate]))].into_iter().collect();
-    let file = object::File::parse(b"");
+    let file = object_file(vec![]);
     let mut nested = miniz_oxide::deflate::compress_to_vec_zlib(&vec![0u8; 16 << 20], 6);
     nested.resize(MAX - 1, 0);
     let raw = miniz_oxide::deflate::compress_to_vec_zlib(&nested, 6);
@@ -206,7 +209,7 @@ fn nested_bomb_in_the_second_flate_filter_is_refused() {
 
 fn bounded_filter(dict: &str, raw: &[u8], max: usize) -> Option<Vec<u8>> {
     let object::Obj::Dict(d) = object::Lexer::new(dict.as_bytes(), 0).next().unwrap() else { panic!("not a dictionary") };
-    object::decode_stream_within(&object::File::parse(b""), &d, raw, max)
+    object::decode_stream_within(&object_file(vec![]), &d, raw, max)
 }
 
 #[test]
@@ -660,9 +663,31 @@ fn tiling_patterns_coloured_and_uncoloured() {
     assert_eq!(at(115, 15)[3], 0.0);
 }
 
+/// Build isolated interpreter objects without presenting a function or colour space as a
+/// document catalog. Complete-document parsing is covered by the page and reader fixtures.
+fn object_file(objs: Objs) -> object::File {
+    let objects = objs
+        .into_iter()
+        .map(|(number, body, stream)| {
+            let mut lexer = object::Lexer::new(body.as_bytes(), 0);
+            let value = lexer.next().unwrap();
+            let value = lexer.maybe_ref(value);
+            let value = match stream {
+                Some(bytes) => {
+                    let object::Obj::Dict(dict) = value else { panic!("stream fixture must have a dictionary") };
+                    object::Obj::Stream(dict, bytes)
+                }
+                None => value,
+            };
+            ((number, 0), value)
+        })
+        .collect();
+    object::File { objects, trailers: vec![], repairs: vec![] }
+}
+
 /// Object 1 of a file holding just `objs`, read as a function.
 fn read_function(objs: Objs) -> color::Func {
-    color::Func::read(&object::File::parse(&pdf(&objs, 1)), &object::Obj::Ref(1, 0))
+    color::Func::read(&object_file(objs), &object::Obj::Ref(1, 0))
 }
 
 /// A sampled (type 0) function, read from a file holding just its stream.
@@ -672,7 +697,7 @@ fn read_sampled_function(dict: &str, data: Vec<u8>) -> color::Func {
 
 /// Object 1 of a file holding just `objs`, read as a colour space.
 fn read_color_space(objs: Objs) -> color::Cs {
-    color::color_space(&object::File::parse(&pdf(&objs, 1)), &object::Obj::Ref(1, 0), None)
+    color::color_space(&object_file(objs), &object::Obj::Ref(1, 0), None)
 }
 
 #[test]

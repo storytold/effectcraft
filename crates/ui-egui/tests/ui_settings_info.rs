@@ -154,3 +154,34 @@ fn gpu_information_dialog_stays_in_place() {
         assert!((current.min - start.min).length() < 1.0, "GPU Information dialog moved");
     }
 }
+
+/// Enter presses OK, the dialog's default button: back to Settings when it was opened from
+/// there, closed otherwise.
+#[test]
+fn gpu_information_enter_presses_ok() {
+    let mut session = Session::default();
+    session.execute("comp.new", json!({"width":32,"height":32,"duration":2})).unwrap();
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(session));
+    h.run_steps(4);
+    let enter = |h: &mut Harness<'_, EffectcraftApp>| {
+        for pressed in [true, false] {
+            h.event(Event::Key { key: Key::Enter, physical_key: Some(Key::Enter), pressed, repeat: false, modifiers: Modifiers::NONE });
+            h.step();
+        }
+        h.run_steps(3);
+    };
+    let ctx = h.ctx.clone();
+    menus::invoke(h.state_mut(), &ctx, "app.gpuInfo", json!({})).unwrap();
+    h.run_steps(3);
+    assert_eq!(h.state().dialog, Some(Dialog::Info));
+    enter(&mut h);
+    assert!(h.state().dialog.is_none(), "Enter closed GPU Information");
+
+    menus::invoke(h.state_mut(), &ctx, "app.settings", json!({"page":"previews"})).unwrap();
+    h.run_steps(3);
+    let at = rect(&h, "settings.button.GPU Information").center();
+    click(&mut h, at);
+    assert_eq!(h.state().dialog, Some(Dialog::Info));
+    enter(&mut h);
+    assert_eq!(h.state().dialog, Some(Dialog::Settings), "Enter returned to the pending Settings transaction");
+}

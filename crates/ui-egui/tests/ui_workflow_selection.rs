@@ -1,6 +1,6 @@
 //! User-reported selection, Project deletion, and render-queue drop regressions.
 use effectcraft_engine::{Session, project::LayerId};
-use effectcraft_ui_egui::{EffectcraftApp, dock::PanelKind};
+use effectcraft_ui_egui::{Dialog, EffectcraftApp, dock::PanelKind};
 use egui::{Event, Modifiers, PointerButton, Pos2, Rect, pos2, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable as _;
@@ -87,6 +87,50 @@ fn timeline_empty_outline_marquee_selects_layers() {
     let last = rect(&h, &format!("timeline.layer.{}.row", ids[3].0));
     drag(&mut h, pos2(area.min.x + 210.0, last.max.y + 25.0), pos2(area.min.x + 215.0, top.min.y + 2.0), Modifiers::NONE);
     assert_eq!(h.state().session.state.selected_layers, ids);
+}
+/// A plain click on empty track area (beside a layer's bar or below the last layer) deselects
+/// the layers, as in After Effects; Shift / Cmd keep the selection, a click on a bar selects
+/// its layer and a key marquee that catches nothing leaves nothing selected.
+#[test]
+fn timeline_click_on_empty_track_area_deselects_layers() {
+    let mut h = harness();
+    let ids: Vec<LayerId> = h.state().session.active_comp().unwrap().layers.iter().map(|l| l.id).collect();
+    let select = |h: &mut Harness<'_, EffectcraftApp>, layers: &[LayerId]| {
+        let layers: Vec<u64> = layers.iter().map(|l| l.0).collect();
+        h.state_mut().session.execute("layer.select", json!({"layers": layers})).unwrap();
+        h.run_steps(2);
+    };
+    h.state_mut().session.execute("layer.timing", json!({"layers": [ids[1].0], "in": 1.5, "out": 2.5})).unwrap();
+    select(&mut h, &ids[..2]);
+    let bar = rect(&h, &format!("timeline.layer.{}.bar", ids[1].0));
+    let before = pos2(bar.min.x - 30.0, bar.center().y);
+    let after = pos2(bar.max.x + 30.0, bar.center().y);
+    click(&mut h, before, Modifiers::NONE);
+    assert!(h.state().session.state.selected_layers.is_empty(), "a click beside the bar deselects");
+    click(&mut h, bar.center(), Modifiers::NONE);
+    assert_eq!(h.state().session.state.selected_layers, vec![ids[1]], "a click on the bar selects its layer");
+    click(&mut h, after, Modifiers::SHIFT);
+    assert_eq!(h.state().session.state.selected_layers, vec![ids[1]], "Shift-click on empty keeps the selection");
+    click(&mut h, after, Modifiers::COMMAND);
+    assert_eq!(h.state().session.state.selected_layers, vec![ids[1]], "Cmd-click on empty keeps the selection");
+    click(&mut h, after, Modifiers::NONE);
+    assert!(h.state().session.state.selected_layers.is_empty());
+    // Below the last layer, in the track area and in the outline.
+    let last = rect(&h, &format!("timeline.layer.{}.bar", ids[3].0));
+    select(&mut h, &ids);
+    click(&mut h, pos2(last.center().x, last.max.y + 30.0), Modifiers::NONE);
+    assert!(h.state().session.state.selected_layers.is_empty(), "a click below the last layer deselects");
+    let outline = rect(&h, "timeline.layerMarquee");
+    select(&mut h, &ids);
+    click(&mut h, pos2(outline.min.x + 210.0, last.max.y + 30.0), Modifiers::NONE);
+    assert!(h.state().session.state.selected_layers.is_empty(), "so does one below the layers in the outline");
+    // A key marquee over empty track area that catches nothing.
+    select(&mut h, &ids[1..2]);
+    drag(&mut h, after, pos2(after.x + 60.0, after.y + 4.0), Modifiers::NONE);
+    assert!(h.state().session.state.selected_layers.is_empty(), "an empty marquee leaves nothing selected");
+    select(&mut h, &ids[1..2]);
+    drag(&mut h, after, pos2(after.x + 60.0, after.y + 4.0), Modifiers::SHIFT);
+    assert_eq!(h.state().session.state.selected_layers, vec![ids[1]], "a Shift marquee keeps the selection");
 }
 #[test]
 fn project_clear_deletes_items_and_undo_restores_them() {
@@ -507,4 +551,89 @@ fn project_context_move_to_root_acts_on_the_whole_selection() {
     for id in &solids[..2] {
         assert_eq!(project.item(effectcraft_engine::project::ItemId(*id)).unwrap().parent, None);
     }
+}
+
+/// Timeline right-click "Pre-compose…" groups every selected layer into one composition,
+/// like Layer > Pre-compose does, from both the outline row and the layer bar
+/// (#985, #1003).
+#[test]
+fn timeline_context_menu_precompose_groups_the_whole_selection() {
+    let right_click = |h: &mut Harness<'_, EffectcraftApp>, p: Pos2| {
+        for pressed in [true, false] {
+            h.input_mut().events.push(Event::PointerMoved(p));
+            h.input_mut().events.push(Event::PointerButton { pos: p, button: PointerButton::Secondary, pressed, modifiers: Modifiers::NONE });
+            h.step();
+        }
+        h.run_steps(3);
+    };
+    let row = |h: &Harness<'_, EffectcraftApp>, id: LayerId| {
+        let r = rect(h, &format!("timeline.layer.{}.row", id.0));
+        pos2(r.min.x + 210.0, r.center().y)
+    };
+    let bar = |h: &Harness<'_, EffectcraftApp>, id: LayerId| rect(h, &format!("timeline.layer.{}.bar", id.0)).center();
+    for via_bar in [false, true] {
+        let mut h = harness();
+        let ids: Vec<LayerId> = h.state().session.active_comp().unwrap().layers.iter().map(|l| l.id).collect();
+        let mut want: Vec<String> =
+            h.state().session.active_comp().unwrap().layers.iter().filter(|l| l.id == ids[0] || l.id == ids[1]).map(|l| l.name.clone()).collect();
+        want.sort();
+        h.state_mut().session.execute("layer.select", json!({"layers":[ids[0].0, ids[1].0]})).unwrap();
+        h.run_steps(3);
+        let p = if via_bar { bar(&h, ids[1]) } else { row(&h, ids[1]) };
+        right_click(&mut h, p);
+        h.get_by_label("Pre-compose…").click();
+        h.run_steps(3);
+        assert_eq!(h.state().dialog, Some(Dialog::Precompose), "via_bar={via_bar}: Pre-compose opens its dialog");
+        let ok = rect(&h, "dialog.precompose.ok").center();
+        click(&mut h, ok, Modifiers::NONE);
+        h.run_steps(3);
+        // The dialog opens the new composition holding both nested layers.
+        let mut nested: Vec<String> = h.state().session.active_comp().unwrap().layers.iter().map(|l| l.name.clone()).collect();
+        nested.sort();
+        assert_eq!(nested, want, "via_bar={via_bar}: both selected layers are nested");
+    }
+}
+
+/// A text layer's timeline context menu offers Create Shapes from Text and Create Masks from
+/// Text (After Effects), which convert the layer; a non-text layer does not show them (#872).
+#[test]
+fn timeline_context_menu_creates_shapes_and_masks_from_text() {
+    use effectcraft_engine::project::LayerSource;
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name":"Type","width":320,"height":180,"duration":4})).unwrap();
+    s.execute("layer.newText", json!({"text":"Abc"})).unwrap();
+    s.execute("layer.newSolid", json!({"name":"Plate","width":40,"height":40,"color":"#406080"})).unwrap();
+    s.execute("edit.deselectAll", json!({})).unwrap();
+    let text = s.active_comp().unwrap().layers.iter().find(|l| matches!(l.source, LayerSource::Text)).unwrap().id.0;
+    let plate = s.active_comp().unwrap().layers.iter().find(|l| l.name == "Plate").unwrap().id.0;
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    h.run_steps(3);
+    let row = |h: &Harness<'_, EffectcraftApp>, id: u64| {
+        let r = rect(h, &format!("timeline.layer.{id}.row"));
+        pos2(r.min.x + 210.0, r.center().y)
+    };
+    let right_click = |h: &mut Harness<'_, EffectcraftApp>, p: Pos2| {
+        for pressed in [true, false] {
+            h.input_mut().events.push(Event::PointerMoved(p));
+            h.input_mut().events.push(Event::PointerButton { pos: p, button: PointerButton::Secondary, pressed, modifiers: Modifiers::NONE });
+            h.step();
+        }
+        h.run_steps(3);
+    };
+    // The text layer offers both conversions; Create Shapes from Text works.
+    h.state_mut().session.execute("layer.select", json!({"layers": [text]})).unwrap();
+    h.run_steps(3);
+    let at = row(&h, text);
+    right_click(&mut h, at);
+    h.get_by_label("Create Shapes from Text").click();
+    h.run_steps(3);
+    let shapes = h.state().session.active_comp().unwrap().layers.iter().filter(|l| matches!(l.source, LayerSource::Shape)).count();
+    assert_eq!(shapes, 1, "a shape layer was created from the text");
+    // A non-text layer does not show the text conversions.
+    h.state_mut().session.execute("layer.select", json!({"layers": [plate]})).unwrap();
+    h.run_steps(3);
+    let at = row(&h, plate);
+    right_click(&mut h, at);
+    assert!(h.query_by_label("Create Shapes from Text").is_none(), "no text conversion for a solid");
+    assert!(h.query_by_label("Create Masks from Text").is_none(), "no text conversion for a solid");
 }

@@ -132,6 +132,10 @@ impl Session {
             },
         };
         self.layer_cache.set_disk(Some((dc.clone(), footage_salt(&self.project))));
+        // Roto Brush / Object Matte segmentations persist there too (held weakly: switching the
+        // disk cache off drops it).
+        let store: std::sync::Arc<dyn effectcraft_effects::roto::SegStore> = dc.clone();
+        effectcraft_effects::roto::set_seg_store(Some(std::sync::Arc::downgrade(&store)));
         self.disk_cache = Some(dc);
     }
 

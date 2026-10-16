@@ -349,6 +349,25 @@ fn changed_from(g: &PropGroup, default: &PropGroup, out: &mut Vec<Uid>) {
     }
 }
 
+/// What of effect group `g` differs from `new`, a new instance of the effect: parameters with
+/// another value, and in full the groups a new instance lacks (puppet meshes and pins, paint
+/// strokes: what the user made).
+fn effect_changes(g: &PropGroup, new: &PropGroup, out: &mut Vec<Uid>) {
+    for c in &g.children {
+        match c {
+            Node::Prop(pr) => {
+                if new.get(&pr.match_id).is_some_and(|d| d.value != pr.value) && !out.contains(&pr.uid) {
+                    out.push(pr.uid);
+                }
+            }
+            Node::Group(sg) => match new.sub(&sg.match_id) {
+                Some(d) => effect_changes(sg, d, out),
+                None => out.push(sg.uid),
+            },
+        }
+    }
+}
+
 fn reveal(s: &mut Session, p: &Value) -> Result<Value> {
     let kind = str_p(p, "kind").unwrap_or("keyframes").to_string();
     let cid = super::comp_id(s, p)?;
@@ -361,11 +380,11 @@ fn reveal(s: &mut Session, p: &Value) -> Result<Value> {
         let anchor = [w as f64 / 2.0, h as f64 / 2.0];
         let center = [comp.width as f64 / 2.0, comp.height as f64 / 2.0];
         // Properties at the top of the layer's tree (Time Remap): enabled time remapping is a
-        // modification in itself.
+        // modification in itself, so it reveals even with no keys left on it (#990).
         for pr in l.props.props() {
             let hit = match kind.as_str() {
-                "keyframes" => pr.is_animated(),
-                "animation" => pr.is_animated() || pr.has_expression(),
+                "keyframes" => pr.is_animated() || pr.match_id == "timeRemap",
+                "animation" => pr.is_animated() || pr.has_expression() || pr.match_id == "timeRemap",
                 _ => pr.match_id == "timeRemap" || modified(pr, "", anchor, center),
             };
             if hit {
@@ -389,10 +408,28 @@ fn reveal(s: &mut Session, p: &Value) -> Result<Value> {
                     found.push(pr.uid);
                 }
             });
-            // Modified: effects and masks count as modifications in full (AE reveals them).
-            if kind == "modified" && matches!(top.match_id.as_str(), "effects" | "masks") {
+            // Modified: masks count as modifications in full (AE reveals them).
+            if kind == "modified" && top.match_id == "masks" {
                 for g in top.groups() {
                     found.push(g.uid);
+                }
+            }
+            // Modified: an effect's parameters that differ from a new instance's.
+            if kind == "modified" && top.match_id == "effects" {
+                let size = effectcraft_render::effect_bounds(&s.project, comp, l).0;
+                for g in top.groups() {
+                    let spec = match &g.kind {
+                        GroupKind::Effect { effect } => effectcraft_effects::find(effect),
+                        _ => None,
+                    };
+                    // A missing plug-in's defaults aren't known: the effect shows in full.
+                    let Some(spec) = spec else {
+                        found.push(g.uid);
+                        continue;
+                    };
+                    let mut next = 0;
+                    let new = effectcraft_effects::instantiate(spec, &mut Ids(&mut next), "", size);
+                    effect_changes(g, &new, &mut found);
                 }
             }
             if kind == "modified" && top.match_id == "text" {

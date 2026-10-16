@@ -1,0 +1,7 @@
+asset:        backgrounds.json
+title:        EffectCraft Backgrounds animation presets (Soft Gradient Drift, Aurora Veil, Slow Fog, Cloud Bank, Dark Smoke, Ember Haze, Magma Flow, Ice Flow, Pastel Plasma, Cell Drift, Crystal Facets, Hex Mosaic, Mirrored Silk, Water Caustics, Blueprint Grid, Checker Scroll, Scrolling Stripes, Pulse Rings, Bokeh Drift, Spotlight Floor, Dawn Sky, Sweeping Light, Grainy Wash)
+author:       EffectCraft contributors
+source:       original work
+license:      MIT OR Apache-2.0
+added:        2026-10-12 by vangel76 (Claude Code agent, gap 7, #1096)
+notes:        Effect choices, colours, values and expressions written from scratch for EffectCraft on its own generator, noise, colour and stylize effects; not derived from any Adobe preset (.ffx) or its values.

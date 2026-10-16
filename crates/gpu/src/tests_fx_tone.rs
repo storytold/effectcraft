@@ -183,3 +183,8 @@ fn color_stabilizer() {
         }
     }
 }
+
+#[test]
+fn gradient_ramp_matches_the_cpu() {
+    effect_case("ec.generate.gradientramp", &[]);
+}

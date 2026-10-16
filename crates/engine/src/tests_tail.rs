@@ -436,3 +436,13 @@ fn numeric_string_resolves_as_id() {
     let r = s.execute("layer.tree", json!({"layer": l.to_string(), "comp": cid.0.to_string()})).unwrap();
     assert_eq!(r["id"].as_u64(), Some(l), "{r}");
 }
+
+/// Go to Work Area Start / End have After Effects' default keys (Shift+Home / Shift+End).
+#[test]
+fn work_area_navigation_has_after_effects_default_keys() {
+    let s = Session::default();
+    for (id, key) in [("time.workAreaStart", "Shift+Home"), ("time.workAreaEnd", "Shift+End")] {
+        let b = s.shortcuts().find(id).unwrap_or_else(|| panic!("{id} is bindable"));
+        assert_eq!(b.defaults, [key.to_string()], "{id}");
+    }
+}

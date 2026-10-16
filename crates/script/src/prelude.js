@@ -715,6 +715,15 @@ PropertyGroup.prototype.addProperty = function (name) {
     var p = { comp: L.__comp, layer: L.__id, kind: r.shape };
     if (r.group !== null && r.group !== undefined) p.group = r.group;
     uid = __call("layer.addShapeItem", p).uid;
+  } else if (r.kind === "existing") {
+    uid = r.uid;
+  } else if (r.kind === "dash") {
+    // Dash/Gap 2 and 3 come as a pair: add pairs until the one asked for exists.
+    var dp = { comp: L.__comp, layer: L.__id, prop: r.stroke };
+    for (var n = 0; n < 3 && !this.property(name); n++) __call("shape.dashes.add", dp);
+    var added = this.property(name);
+    if (!added) throw __err("Can not add \"" + name + "\" to Dashes");
+    return added;
   } else if (r.kind === "animator") {
     uid = __call("layer.addTextAnimator", { comp: L.__comp, layer: L.__id, properties: [] }).animator;
   } else if (r.kind === "animatorProperty") {
@@ -828,10 +837,11 @@ Property.prototype.property = function () { return null; };
   };
   P.__keys = function () { return __get("keys", { comp: this.__layer.__comp, layer: this.__layer.__id, uid: this.__uid }); };
   P.__key = function (i) {
-    var k = this.__keys();
     i = __num(i, "keyIndex");
-    if (i < 1 || i > k.length || Math.floor(i) !== i) throw __err("keyIndex " + i + " is out of range 1.." + k.length);
-    return k[i - 1];
+    // Only the key asked for: fetching the whole list made every key call linear (#814).
+    var r = i >= 1 && Math.floor(i) === i ? __get("keys", { comp: this.__layer.__comp, layer: this.__layer.__id, uid: this.__uid, index: i - 1 }) : null;
+    if (!r || !r.key) throw __err("keyIndex " + i + " is out of range 1.." + (r ? r.count : this.numKeys));
+    return r.key;
   };
   // Script value → engine JSON for `prop.set` / `prop.addKey`.
   P.__toEngine = function (v, info, time) {
@@ -1285,8 +1295,12 @@ AVLayer.prototype.constructor = AVLayer;
   P.sourceRectAtTime = function (t, extents) {
     return __get("sourceRect", { comp: this.__comp, layer: this.__id, time: __num(t, "time"), extents: !!extents });
   };
-  P.sourcePointToComp = function (p) { return p; };
-  P.compPointToSource = function (p) { return p; };
+  // Source ↔ comp points, through the layer's transform and its parents' at the comp's time (#808).
+  function pointIn(layer, p, toComp) {
+    return __get("pointConvert", { comp: layer.__comp, layer: layer.__id, point: [__num(p[0], "point"), __num(p[1], "point")], toComp: toComp, time: layer.containingComp.time });
+  }
+  P.sourcePointToComp = function (p) { return pointIn(this, p, true); };
+  P.compPointToSource = function (p) { return pointIn(this, p, false); };
   P.replaceSource = function () { throw __err("replaceSource is not supported yet"); };
   P.openInViewer = function () { __call("layer.openLayer", this.__p1()); return null; };
 })();
@@ -1304,6 +1318,14 @@ Object.defineProperty(ShapeLayer.prototype, "source", { get: function () { retur
 function CameraLayer(comp, id) { return this.__init(comp, id, "CameraLayer"); }
 CameraLayer.prototype = Object.create(Layer.prototype);
 CameraLayer.prototype.constructor = CameraLayer;
+// Camera scripts (Google Earth Studio exports among them) key `cameraLayer.position`,
+// `.xRotation` and `.zoom` directly, as on AVLayer: return the live Property objects.
+["pointOfInterest", "position", "orientation", "xRotation", "yRotation", "zRotation"].forEach(function (name) {
+  Object.defineProperty(CameraLayer.prototype, name, { get: function () { return this.transform[name]; } });
+});
+["zoom", "depthOfField", "focusDistance", "aperture", "blurLevel"].forEach(function (name) {
+  Object.defineProperty(CameraLayer.prototype, name, { get: function () { return this.cameraOptions[name]; } });
+});
 
 function LightLayer(comp, id) { return this.__init(comp, id, "LightLayer"); }
 LightLayer.prototype = Object.create(Layer.prototype);
@@ -1490,8 +1512,14 @@ AVItem.prototype = Object.create(Item.prototype);
   def("hasVideo", function () { return this.__info().hasVideo; });
   def("hasAudio", function () { return this.__info().hasAudio; });
   def("footageMissing", function () { return !!this.__info().footageMissing; });
-  def("useProxy", function () { return false; });
-  def("proxySource", function () { return null; });
+  def("useProxy", function () { var p = this.__info().proxy; return !!(p && p.enabled); }, function (v) {
+    if (!this.__info().proxy) throw __err("\"" + this.name + "\" has no proxy");
+    __call("file.useProxy", { item: this.__id, on: !!v });
+  });
+  def("proxySource", function () {
+    var p = this.__info().proxy;
+    return p ? { isStill: !!p.isStill, file: p.file ? new File(p.file) : null, hasAlpha: false, toString: function () { return "[object FileSource]"; } } : null;
+  });
   def("isMediaReplacementCompatible", function () { return false; });
   def("time", function () { return 0; });
 })();
@@ -1600,6 +1628,14 @@ CompItem.prototype.constructor = CompItem;
     __call("essential.rename", { comp: this.__id, control: c[i - 1].id, name: String(name) });
     return String(name);
   };
+  // After Effects' CompItem.saveFrameToPng(time, file): Composition ▸ Save Frame As ▸ File at
+  // `time` (comp seconds), behind the scripting file gate like other writes (#816).
+  P.saveFrameToPng = function (time, file) {
+    var f = __str(file);
+    if (!f) throw __err("saveFrameToPng: missing file");
+    __file("write", f, "");
+    __call("comp.saveFrameAs", { comp: this.__id, path: f, time: __num(time, "time") });
+  };
   P.openInEssentialGraphics = function () { __call("comp.openInEssentialGraphics", { comp: this.__id }); };
   P.exportAsMotionGraphicsTemplate = function (overwrite, path) {
     var f = __str(path);
@@ -1623,14 +1659,42 @@ FootageItem.prototype.constructor = FootageItem;
 Object.defineProperty(FootageItem.prototype, "file", {
   get: function () { var f = this.__info().file; return f ? new File(f) : null; },
 });
+// The item's FootageSource: one live object per FootageItem, as in After Effects (#813).
+function FootageSource(item) { this.__item = item; }
+FootageSource.prototype = {
+  constructor: FootageSource,
+  __info: function () { return this.__item.__info(); },
+  get isStill() { return !!this.__info().isStill; },
+  get color() { return this.__info().color; },
+  get file() { var i = this.__info(); return i.kind !== "solid" && i.file ? new File(i.file) : null; },
+  get missingFootagePath() { var i = this.__info(); return i.footageMissing ? i.file : ""; },
+  get loop() { return this.__info().loop; },
+  get hasAlpha() { return false; },
+  get nativeFrameRate() { return this.__info().nativeFrameRate || 0; },
+  get displayFrameRate() { return this.__info().frameRate; },
+  // Interpret Footage ▸ Conform to frame rate; 0 uses the file's own rate.
+  get conformFrameRate() { return this.__info().conformFrameRate || 0; },
+  set conformFrameRate(v) {
+    v = __num(v, "conformFrameRate");
+    if (v < 0) throw __err("conformFrameRate must be 0 or a frame rate");
+    __call("file.interpretFootage", { items: [this.__item.__id], frameRate: v === 0 ? "file" : v });
+  },
+  toString: function () { return this.__info().kind === "solid" ? "[object SolidSource]" : "[object FileSource]"; },
+};
 Object.defineProperty(FootageItem.prototype, "mainSource", {
   get: function () {
-    var i = this.__info();
-    if (i.kind === "solid") return { isStill: true, color: i.color, hasAlpha: false, toString: function () { return "[object SolidSource]"; } };
-    return { isStill: !!i.isStill, file: i.file ? new File(i.file) : null, missingFootagePath: i.footageMissing ? i.file : "", loop: i.loop, hasAlpha: false, toString: function () { return "[object FileSource]"; } };
+    if (!this.__mainSource) Object.defineProperty(this, "__mainSource", { value: new FootageSource(this) });
+    return this.__mainSource;
   },
 });
 FootageItem.prototype.replace = function (f) { __call("file.replaceFootage", { item: this.__id, path: __str(f) }); };
+FootageItem.prototype.replaceWithSequence = function (f, forceAlphabetical) {
+  __call("file.replaceFootage", { item: this.__id, path: __str(f), sequence: true, alphabetical: !!forceAlphabetical });
+};
+// Proxies (footage and comps). A numbered still brings its sequence, so the two setters agree.
+AVItem.prototype.setProxy = function (f) { __call("file.setProxy", { item: this.__id, path: __str(f) }); };
+AVItem.prototype.setProxyWithSequence = function (f) { __call("file.setProxy", { item: this.__id, path: __str(f) }); };
+AVItem.prototype.setProxyToNone = function () { __call("file.setProxyNone", { item: this.__id }); };
 FootageItem.prototype.replaceWithSolid = function (color, name, w, h) {
   __call("file.replaceWithSolid", { item: this.__id, color: [color[0], color[1], color[2]], width: w, height: h });
   if (name !== undefined) this.name = name;

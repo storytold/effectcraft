@@ -168,10 +168,12 @@ fn a_key_clicked_in_the_timeline_shows_in_the_graph_editor() {
 #[test]
 fn graph_editor_drags_move_every_selected_key_and_shift_keeps_an_axis() {
     let (mut h, id, uid) = harness();
+    // Opened before selecting, so it fits all graphs (the whole comp) rather than the two keys.
+    h.state_mut().ui.timeline.graph_editor = true;
+    h.run_steps(2);
     let s = &mut h.state_mut().session;
     s.execute("prop.select", json!({"layer": id.0, "prop": uid})).unwrap();
     s.execute("keys.selectAll", json!({})).unwrap();
-    h.state_mut().ui.timeline.graph_editor = true;
     h.run_steps(4);
     let at = |h: &Harness<'_, EffectcraftApp>, i: usize| {
         let e = h.state().auto.find(&format!("timeline.graph.key.{uid}.0.{i}")).unwrap_or_else(|| panic!("no graph key {i}")).clone();
@@ -434,4 +436,33 @@ fn ctrl_alt_scrub_in_the_timeline_is_proportional() {
     assert!(moved[2] > 1.0, "the last selected layer moved: {moved:?}");
     assert!(moved[0].abs() < 1e-9, "the first selected layer stays: {moved:?}");
     assert!((moved[1] - moved[2] / 2.0).abs() < 1e-6, "the middle one moves by half: {moved:?}");
+}
+
+/// #1171: in the speed graph an end key sits at its one side's speed, so it rises with the handle
+/// being dragged; once it left the plot its handles were skipped and the drag stopped at the top
+/// edge. A drag that ends above the graph keeps raising the speed as far as the pointer goes.
+#[test]
+fn speed_graph_handle_drags_upward_past_the_top() {
+    let (mut h, id, uid) = harness();
+    let s = &mut h.state_mut().session;
+    s.execute("prop.select", json!({"layer": id.0, "prop": uid})).unwrap();
+    s.execute("keys.selectAll", json!({})).unwrap();
+    s.execute("keys.easyEase", json!({})).unwrap();
+    h.state_mut().ui.timeline.graph_editor = true;
+    h.state_mut().ui.timeline.graph_mode = "speed".into();
+    h.run_steps(4);
+    let out_speed = |h: &Harness<'_, EffectcraftApp>| {
+        h.state().session.active_comp().unwrap().layer(id).unwrap().props.prop("transform/opacity").unwrap().keys[0].out_ease[0].speed
+    };
+    let e = h.state().auto.find(&format!("timeline.graph.handle.{uid}.0.0.out")).cloned().expect("the first key's out handle shows");
+    let at = pos2(e.rect[0] + e.rect[2] / 2.0, e.rect[1] + e.rect[3] / 2.0);
+    drag(&mut h, at, at + egui::vec2(0.0, -40.0), Default::default());
+    let short = out_speed(&h);
+    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+    h.run_steps(4);
+    assert_eq!(out_speed(&h), 0.0);
+    drag(&mut h, at, at + egui::vec2(0.0, -400.0), Default::default());
+    let long = out_speed(&h);
+    // The speed per pixel depends on the graph's fitted scale; only the proportion matters.
+    assert!(short > 0.0 && long > 9.0 * short, "40 px up gave {short}, 400 px up gave {long}");
 }

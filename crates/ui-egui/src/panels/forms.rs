@@ -357,6 +357,13 @@ pub fn open_form(app: &mut EffectcraftApp, id: &str, p: &Value) -> bool {
                 ],
             )
         }
+        "view.addPercentGuide" if !has(p, &["position"]) => (
+            "Add Percentage Guide".into(),
+            vec![
+                Field::choice("orientation", "Orientation", &[("Vertical", json!("vertical")), ("Horizontal", json!("horizontal"))], 0),
+                Field::num("position", "Position (percent of the composition)", 50.0),
+            ],
+        ),
         // Several items selected: After Effects' New Composition from Selection dialog.
         "file.newCompFromSelection"
             if s.state.project_selection.len() > 1 && !has(p, &["single", "dimensionsFrom", "duration", "sequence", "addToRenderQueue"]) =>
@@ -750,6 +757,87 @@ pub fn open_form(app: &mut EffectcraftApp, id: &str, p: &Value) -> bool {
     true
 }
 
+/// The label and control rows of a form: the part of [`show_form`] that scrolls.
+fn form_grid(ui: &mut egui::Ui, f: &mut Form, regs: &mut Vec<(String, egui::Rect, String)>, browse: &mut Option<usize>, focused: &mut bool) {
+    egui::Grid::new("form-grid").num_columns(2).spacing([14.0, 10.0]).show(ui, |ui| {
+        for (i, fl) in f.fields.iter_mut().enumerate() {
+            ui.label(tr(&fl.label));
+            let r = match &mut fl.kind {
+                FieldKind::Number { value, speed } => {
+                    let dec = if *speed < 0.01 { 5 } else { 3 };
+                    let r = ui.add(crate::widgets::drag_value(egui::DragValue::new(value).speed(*speed).max_decimals(dec)));
+                    // The first field takes the keyboard when the form opens. (A number edits
+                    // as text once focused; the selection is clamped to what it shows.)
+                    if !std::mem::replace(focused, true) {
+                        crate::widgets::focus_on_open(ui.ctx(), &r, &" ".repeat(64));
+                    }
+                    r.rect
+                }
+                FieldKind::Text(s) => {
+                    let r = ui.add(egui::TextEdit::singleline(s).desired_width(220.0));
+                    if !std::mem::replace(focused, true) {
+                        crate::widgets::focus_on_open(ui.ctx(), &r, s);
+                    }
+                    r.rect
+                }
+                FieldKind::Path { value, .. } => {
+                    ui.horizontal(|ui| {
+                        let r = ui.add(egui::TextEdit::singleline(value).desired_width(150.0)).rect;
+                        let b = ui.button(tr("Browse…"));
+                        regs.push((format!("form.field.{}.browse", fl.key), b.rect, "Browse…".into()));
+                        if b.clicked() {
+                            *browse = Some(i);
+                        }
+                        r
+                    })
+                    .inner
+                }
+                FieldKind::SavePath(value) => {
+                    ui.horizontal(|ui| {
+                        let r = ui.add(egui::TextEdit::singleline(value).desired_width(150.0)).rect;
+                        let b = ui.button(tr("Browse…"));
+                        regs.push((format!("form.field.{}.browse", fl.key), b.rect, "Browse…".into()));
+                        if b.clicked() {
+                            *browse = Some(i);
+                        }
+                        r
+                    })
+                    .inner
+                }
+                // A fixed width: in the grid's value column a wrapping label would otherwise
+                // shrink to a word per line.
+                FieldKind::Note(text) => {
+                    ui.scope(|ui| {
+                        ui.set_width(220.0);
+                        ui.add(egui::Label::new(egui::RichText::new(tr(text.as_str())).small()).wrap())
+                    })
+                    .inner
+                    .rect
+                }
+                FieldKind::Bool(b) => ui.checkbox(b, "").rect,
+                FieldKind::Choice { options, sel } => {
+                    let cur = options.get(*sel).map(|o| o.0.clone()).unwrap_or_default();
+                    // The column keeps its width: a long choice (a GPU adapter's name) ends in an
+                    // ellipsis instead of widening the form past the dialog (#978).
+                    egui::ComboBox::from_id_salt(("form", fl.key.as_str()))
+                        .selected_text(tr(&cur))
+                        .width(240.0)
+                        .truncate()
+                        .show_ui(ui, |ui| {
+                            for (i, (l, _)) in options.iter().enumerate() {
+                                ui.selectable_value(sel, i, tr(l));
+                            }
+                        })
+                        .response
+                        .rect
+                }
+            };
+            regs.push((format!("form.field.{}", fl.key), r, fl.label.clone()));
+            ui.end_row();
+        }
+    });
+}
+
 pub fn show_form(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     let mut f = app.dialog_state.form.clone();
     let (mut ok, mut close) = (false, false);
@@ -766,83 +854,13 @@ pub fn show_form(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     let mut regs: Vec<(String, egui::Rect, String)> = vec![];
     let mut browse: Option<usize> = None;
     let mut focused = false;
-    // Project Settings needs room for its labels and the selected GPU adapter name. At the
-    // generic form width its grid overflows, pushing the buttons off the visible area (#978).
-    let width = if f.title == "Project Settings" { 800.0 } else { 480.0 };
-    super::dialogs::modal(ctx, &f.title.clone(), vec2(width, h), t, |ui| {
-        egui::Grid::new("form-grid").num_columns(2).spacing([14.0, 10.0]).show(ui, |ui| {
-            for (i, fl) in f.fields.iter_mut().enumerate() {
-                ui.label(tr(&fl.label));
-                let r = match &mut fl.kind {
-                    FieldKind::Number { value, speed } => {
-                        let dec = if *speed < 0.01 { 5 } else { 3 };
-                        let r = ui.add(crate::widgets::drag_value(egui::DragValue::new(value).speed(*speed).max_decimals(dec)));
-                        // The first field takes the keyboard when the form opens. (A number edits
-                        // as text once focused; the selection is clamped to what it shows.)
-                        if !std::mem::replace(&mut focused, true) {
-                            crate::widgets::focus_on_open(ui.ctx(), &r, &" ".repeat(64));
-                        }
-                        r.rect
-                    }
-                    FieldKind::Text(s) => {
-                        let r = ui.add(egui::TextEdit::singleline(s).desired_width(220.0));
-                        if !std::mem::replace(&mut focused, true) {
-                            crate::widgets::focus_on_open(ui.ctx(), &r, s);
-                        }
-                        r.rect
-                    }
-                    FieldKind::Path { value, .. } => {
-                        ui.horizontal(|ui| {
-                            let r = ui.add(egui::TextEdit::singleline(value).desired_width(150.0)).rect;
-                            let b = ui.button(tr("Browse…"));
-                            regs.push((format!("form.field.{}.browse", fl.key), b.rect, "Browse…".into()));
-                            if b.clicked() {
-                                browse = Some(i);
-                            }
-                            r
-                        })
-                        .inner
-                    }
-                    FieldKind::SavePath(value) => {
-                        ui.horizontal(|ui| {
-                            let r = ui.add(egui::TextEdit::singleline(value).desired_width(150.0)).rect;
-                            let b = ui.button(tr("Browse…"));
-                            regs.push((format!("form.field.{}.browse", fl.key), b.rect, "Browse…".into()));
-                            if b.clicked() {
-                                browse = Some(i);
-                            }
-                            r
-                        })
-                        .inner
-                    }
-                    // A fixed width: in the grid's value column a wrapping label would otherwise
-                    // shrink to a word per line.
-                    FieldKind::Note(text) => {
-                        ui.scope(|ui| {
-                            ui.set_width(220.0);
-                            ui.add(egui::Label::new(egui::RichText::new(tr(text.as_str())).small()).wrap())
-                        })
-                        .inner
-                        .rect
-                    }
-                    FieldKind::Bool(b) => ui.checkbox(b, "").rect,
-                    FieldKind::Choice { options, sel } => {
-                        let cur = options.get(*sel).map(|o| o.0.clone()).unwrap_or_default();
-                        egui::ComboBox::from_id_salt(("form", fl.key.as_str()))
-                            .selected_text(tr(&cur))
-                            .width(240.0)
-                            .show_ui(ui, |ui| {
-                                for (i, (l, _)) in options.iter().enumerate() {
-                                    ui.selectable_value(sel, i, tr(l));
-                                }
-                            })
-                            .response
-                            .rect
-                    }
-                };
-                regs.push((format!("form.field.{}", fl.key), r, fl.label.clone()));
-                ui.end_row();
-            }
+    // Wide enough for a label column and a 240 px popup. Only the fields scroll, and only
+    // vertically: OK and Cancel sit under the scroll area, so they are always in view (#978).
+    super::dialogs::modal_fit(ctx, &f.title.clone(), vec2(480.0, h), t, |ui, _| {
+        let footer = 14.0 + ui.spacing().interact_size.y + 2.0 * ui.spacing().item_spacing.y;
+        let max_height = (super::dialogs::modal_space(ctx).y - 84.0 - footer).max(40.0);
+        egui::ScrollArea::vertical().max_height(max_height).auto_shrink([false, true]).show(ui, |ui| {
+            form_grid(ui, &mut f, &mut regs, &mut browse, &mut focused);
         });
         ui.add_space(14.0);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -905,7 +923,8 @@ pub(crate) fn close_info(app: &mut EffectcraftApp) {
 
 pub fn show_info(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     let (title, body) = app.dialog_state.info.clone();
-    let mut close = false;
+    // Enter presses OK, the default (and only) button.
+    let mut close = !ctx.egui_wants_keyboard_input() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
     // The text wraps within this small dialog; avoid a horizontal scrollbar changing its height.
     super::dialogs::modal_vertical(ctx, &title, vec2(440.0, 160.0), t, |ui| {
         ui.label(tr(&body));

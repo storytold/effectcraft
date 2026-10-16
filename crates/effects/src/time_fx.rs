@@ -1,10 +1,11 @@
 //! Time effects (Effect > Time): Echo, Posterize Time, Time Difference, Time Displacement,
 //! Timewarp, CC Force Motion Blur, CC Wide Time and Pixel Motion Blur.
 //!
-//! These read the layer at *other* layer times through [`EffectHost::self_at`] with zero
-//! preceding effects: like After Effects' Time effects they see the layer's source with its
-//! masks and ignore effects applied before them (precompose to include those). Without a host
-//! (tests, thumbnails) they pass their input through.
+//! These read the layer at *other* layer times through [`EffectHost::self_at`]: its source with
+//! its masks and the effects applied before them, as After Effects renders them (SceneYard:
+//! Echo after CC Particle Systems II echoes the fireworks, not the black solid under them;
+//! Posterize Time after Turbulent Displace steps the displacement). Without a host (tests,
+//! thumbnails) they pass their input through.
 //!
 //! Timewarp's Pixel Motion estimates block-matching optical flow between neighbouring frames
 //! ([`effectcraft_raster::flow`]); Pixel Motion Blur averages sub-frame samples.
@@ -169,7 +170,8 @@ fn fetch(ctx: &EffectCtx, times: &[f64]) -> Option<Frames> {
     let mut uniq: Vec<i64> = times.iter().map(|t| (t * 1e6).round() as i64).collect();
     uniq.sort_unstable();
     uniq.dedup();
-    let bufs: Vec<(i64, Option<Buf>)> = uniq.iter().map(|&k| (k, host.self_at(k as f64 / 1e6, 0))).collect();
+    // Every effect before this one (the host bounds the count to them).
+    let bufs: Vec<(i64, Option<Buf>)> = uniq.iter().map(|&k| (k, host.self_at(k as f64 / 1e6, usize::MAX))).collect();
     let first = bufs.iter().find_map(|(_, b)| b.as_ref())?;
     let scale = first.scale;
     // Union of every frame's extent in layer pixels (offset = where layer (0,0) sits).
@@ -1014,7 +1016,8 @@ mod tests {
             None
         }
         fn self_at(&self, t: f64, effects: usize) -> Option<Buf> {
-            assert_eq!(effects, 0);
+            // Time effects see every effect before them.
+            assert_eq!(effects, usize::MAX);
             let v = if self.static_layer { 0.4 } else { t as f32 };
             Some(Buf { img: Image::filled(6, 4, [v, v, v, 1.0]), offset: [0.0; 2], scale: 1.0 })
         }

@@ -404,7 +404,7 @@ export function frameWorkerStart(base, onMessage, gpu) {
 // ends in a checksum) and read the layer buffers they prefetch; the page lists, reads and
 // deletes.
 const CACHE_ROOT = "effectcraft-cache";
-const CACHE_KINDS = ["frames", "layers"];
+const CACHE_KINDS = ["frames", "layers", "mattes"];
 const cacheDirHandles = {};
 
 async function cacheDir(kind = "frames") {
@@ -419,6 +419,7 @@ async function cacheDir(kind = "frames") {
 /// The folder and file name of an entry name (`layers/<hex>.ecc` or `<hex>.ecc`).
 async function entryDir(name) {
   if (name.startsWith("layers/")) return [await cacheDir("layers"), name.slice(7)];
+  if (name.startsWith("mattes/")) return [await cacheDir("mattes"), name.slice(7)];
   return [await cacheDir("frames"), name];
 }
 

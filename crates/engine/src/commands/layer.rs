@@ -283,7 +283,7 @@ fn add_item(s: &mut Session, p: &Value) -> Result<Value> {
                 &serde_json::json!({"comp": cid.0, "item": item.0, "time": f_p(p, "time"), "index": p.get("index"), "position": p.get("position")}),
             );
         }
-        ItemKind::Footage(f) => (LayerSource::Footage { item }, (f.width, f.height), Some(f.duration)),
+        ItemKind::Footage(f) => (LayerSource::Footage { item }, (f.width, f.height), Some(f.looped_duration())),
         ItemKind::Solid(so) => (LayerSource::Solid { item }, (so.width, so.height), None),
         ItemKind::Folder => return Err(bad("layer.addItem", "folders can't be layers")),
     };
@@ -647,6 +647,28 @@ impl ParentFix {
                     }
                 }
             }
+            // Cameras and lights aim with Point of Interest: move it by the same parent-space
+            // change, so a two-node rig keeps its world frame (#1010, #1020).
+            if let Some(pr) = tr.get_mut("poi") {
+                pr.value = map_position(&pr.value);
+                for key in &mut pr.keys {
+                    key.value = map_position(&key.value);
+                    for tangent in [&mut key.spatial_in, &mut key.spatial_out] {
+                        let v = m.apply_vec(effectcraft_geom::Vec3::from(*tangent));
+                        *tangent = [v.x, v.y, v.z];
+                    }
+                }
+                if let Some(factor) = position_speed
+                    .filter(|_| pr.spatial)
+                    .filter(|factor| pr.keys.iter().flat_map(|key| key.in_ease.iter().chain(&key.out_ease)).all(|ease| (ease.speed * *factor).is_finite()))
+                {
+                    for key in &mut pr.keys {
+                        for ease in key.in_ease.iter_mut().chain(&mut key.out_ease) {
+                            ease.speed *= factor;
+                        }
+                    }
+                }
+            }
             if let Some((orientation, factor)) = self.pose_3d {
                 if let Some(pr) = tr.get_mut("orientation") {
                     pr.value = KV::Vec3(orientation);
@@ -743,13 +765,15 @@ fn uniform_parent_pose(m: effectcraft_geom::Mat4, orientation: [f64; 3]) -> Opti
         return Some((orientation, factor));
     }
     let r = (rotation * Mat4::orientation(Vec3::from(orientation))).0;
-    let sy = (-r[2][0]).clamp(-1.0, 1.0);
-    let y = sy.asin();
-    let (x, z) = if (1.0 - sy * sy).sqrt() > 1e-9 { (r[2][1].atan2(r[2][2]), r[1][0].atan2(r[0][0])) } else { ((-r[1][2]).atan2(r[1][1]), 0.0) };
+    // atan2 rather than asin: near ±90 degrees asin loses precision, while cos(y) stays exact.
+    let cy = r[0][0].hypot(r[1][0]);
+    let y = (-r[2][0]).atan2(cy);
+    let (x, z) = if cy > 1e-9 { (r[2][1].atan2(r[2][2]), r[1][0].atan2(r[0][0])) } else { ((-r[1][2]).atan2(r[1][1]), 0.0) };
     Some(([x.to_degrees(), y.to_degrees(), z.to_degrees()], factor))
 }
 
-/// A parent change retains 2D transforms and the world-space anchor of 3D AV layers. Position is
+/// A parent change retains 2D transforms and the world-space anchor of 3D layers (Position,
+/// and Point of Interest for two-node cameras and lights). Position is
 /// re-expressed in the new parent's space (`None`: the composition), evaluated at the current
 /// time.
 pub(crate) fn parent_fixes(s: &Session, cid: ItemId, ids: &[LayerId], parent: Option<LayerId>) -> Vec<ParentFix> {
@@ -793,7 +817,10 @@ pub(crate) fn parent_fixes(s: &Session, cid: ItemId, ids: &[LayerId], parent: Op
         })
     };
     if let Some(inv) = space_3d(parent).inverse().filter(|m| m.0.iter().flatten().all(|v| v.is_finite())) {
-        for layer in comp.layers.iter().filter(|l| ids.contains(&l.id) && l.is_3d() && !l.is_camera() && !l.is_light() && l.parent != parent) {
+        // Cameras and lights compensate like 3D layers (Position, and Point of Interest for
+        // two-node rigs), so parenting keeps the world frame (#1010, #1020). They have no
+        // Scale, so `pose_3d` below stays `None` and Orientation is kept as authored.
+        for layer in comp.layers.iter().filter(|l| ids.contains(&l.id) && l.is_3d() && l.parent != parent) {
             let m = inv * space_3d(layer.parent);
             if m.0.iter().flatten().all(|v| v.is_finite()) {
                 let pose_3d = layer.transform().and_then(|tr| {
@@ -919,6 +946,14 @@ fn timing(s: &mut Session, p: &Value) -> Result<Value> {
                     let d = t - l.out_point;
                     shift(l, d);
                 }
+                "moveInToStart" => {
+                    let d = Tick::ZERO - l.in_point;
+                    shift(l, d);
+                }
+                "moveOutToEnd" => {
+                    let d = comp_dur - l.out_point;
+                    shift(l, d);
+                }
                 "trimInToTime" => l.in_point = t.min(l.out_point - fd),
                 "trimOutToTime" => l.out_point = t.max(l.in_point + fd),
                 _ => {
@@ -951,6 +986,20 @@ fn timing(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(Value::Null)
 }
 
+/// `p` with `key` set.
+fn with(p: &Value, key: &str, v: Value) -> Value {
+    let mut p = if p.is_object() { p.clone() } else { json!({}) };
+    p[key] = v;
+    p
+}
+
+/// Move the layers `frames` frames in time (Alt+Page Up / Page Down, with Shift ten frames).
+fn move_frames(s: &mut Session, p: &Value, frames: i64) -> Result<Value> {
+    let (cid, _) = layers_p(s, p)?;
+    let delta = s.project.comp(cid).ok_or(EngineError::NoComp)?.frame_rate.tick_of(frames).seconds();
+    timing(s, &with(p, "delta", json!(delta)))
+}
+
 /// Slip edit: move a layer's source (footage or precomp) under its fixed in and out points, like
 /// dragging the source-duration bar in After Effects. `delta` in seconds or `frames`; positive
 /// moves the source later. Clamped so the source still covers the in–out span. Keyframes and
@@ -972,7 +1021,7 @@ fn slip(s: &mut Session, p: &Value) -> Result<Value> {
         }
         let dur = match &l.source {
             LayerSource::Footage { item } => match s.project.item(*item).map(|i| &i.kind) {
-                Some(ItemKind::Footage(f)) if f.kind != effectcraft_project::FootageKind::Still => Some(Tick(f.duration.0 * f.loop_count.max(1) as i64)),
+                Some(ItemKind::Footage(f)) if f.kind != effectcraft_project::FootageKind::Still => Some(f.looped_duration()),
                 _ => None,
             },
             LayerSource::Comp { item } => s.project.comp(*item).map(|c| c.duration),
@@ -1580,6 +1629,16 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("layer.select", "Select Layers", [], None, "{layers: [id|name|#n], add?, toggle?}", has_comp, select),
         cmd!("layer.selectNext", "Select Next Layer", [], Some("Cmd+ArrowDown"), "{add?}", has_comp, select_next),
         cmd!("layer.selectPrevious", "Select Previous Layer", [], Some("Cmd+ArrowUp"), "{add?}", has_comp, select_prev),
+        cmd!("layer.extendSelectionNext", "Extend Selection to Next Layer", [], Some("Cmd+Shift+ArrowDown"), "{}", has_comp, |s, _| select_step(
+            s,
+            &json!({"add": true}),
+            1
+        )),
+        cmd!("layer.extendSelectionPrevious", "Extend Selection to Previous Layer", [], Some("Cmd+Shift+ArrowUp"), "{}", has_comp, |s, _| select_step(
+            s,
+            &json!({"add": true}),
+            -1
+        )),
         cmd!(
             "layer.setSwitch",
             "Layer Switch",
@@ -1607,17 +1666,29 @@ pub fn specs() -> Vec<CommandSpec> {
             "Layer Timing",
             [],
             None,
-            "{layers?, op?: moveInToTime|moveOutToTime|trimInToTime|trimOutToTime, delta?, start?, in?, out?, inDelta?, outDelta? (seconds, per layer), merge?}",
+            "{layers?, op?: moveInToTime|moveOutToTime|moveInToStart|moveOutToEnd|trimInToTime|trimOutToTime, delta?, start?, in?, out?, inDelta?, outDelta? (seconds, per layer), merge?}",
             has_layers,
             timing
         ),
+        cmd!("layer.moveInToStart", "Move Layer In Point to Beginning of Comp", [], Some("Alt+Home"), "{layers?}", has_layers, |s, p| timing(
+            s,
+            &with(p, "op", json!("moveInToStart"))
+        )),
+        cmd!("layer.moveOutToEnd", "Move Layer Out Point to End of Comp", [], Some("Alt+End"), "{layers?}", has_layers, |s, p| timing(
+            s,
+            &with(p, "op", json!("moveOutToEnd"))
+        )),
+        cmd!("layer.moveEarlier", "Move Layers 1 Frame Earlier", [], Some("Alt+PageUp"), "{layers?}", has_layers, |s, p| move_frames(s, p, -1)),
+        cmd!("layer.moveLater", "Move Layers 1 Frame Later", [], Some("Alt+PageDown"), "{layers?}", has_layers, |s, p| move_frames(s, p, 1)),
+        cmd!("layer.moveEarlier10", "Move Layers 10 Frames Earlier", [], Some("Alt+Shift+PageUp"), "{layers?}", has_layers, |s, p| move_frames(s, p, -10)),
+        cmd!("layer.moveLater10", "Move Layers 10 Frames Later", [], Some("Alt+Shift+PageDown"), "{layers?}", has_layers, |s, p| move_frames(s, p, 10)),
         cmd!("layer.slip", "Slip Edit", [], None, "{layers?, delta? (seconds) | frames?, merge?}", has_layers, slip),
-        cmd!("layer.slipBack", "Slip Edit 1 Frame Earlier", [], Some("Alt+PageUp"), "{layers?}", has_layers, |s, p| {
+        cmd!("layer.slipBack", "Slip Edit 1 Frame Earlier", [], None, "{layers?}", has_layers, |s, p| {
             let mut p = p.clone();
             p["frames"] = json!(-1);
             slip(s, &p)
         }),
-        cmd!("layer.slipForward", "Slip Edit 1 Frame Later", [], Some("Alt+PageDown"), "{layers?}", has_layers, |s, p| {
+        cmd!("layer.slipForward", "Slip Edit 1 Frame Later", [], None, "{layers?}", has_layers, |s, p| {
             let mut p = p.clone();
             p["frames"] = json!(1);
             slip(s, &p)

@@ -8,7 +8,7 @@ use crate::i18n::tr;
 use effectcraft_engine::keyframe::Value as KV;
 use effectcraft_engine::project::styles::{BLENDING, STYLES};
 use effectcraft_engine::project::{Layer, LayerId, ParamUi, Property};
-use egui::{Align2, vec2};
+use egui::vec2;
 use serde_json::{Value, json};
 
 use crate::theme::Tokens;
@@ -138,36 +138,57 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     let lt = l.layer_time(time);
     let mut actions: Vec<(String, Value)> = Vec::new();
     let mut close: Option<bool> = None;
-    super::dialogs::modal(ctx, &format!("Layer Style — {}", l.name), vec2(720.0, 520.0), t, |ui| {
-        ui.horizontal_top(|ui| {
+    super::dialogs::modal_fit(ctx, &format!("Layer Style — {}", l.name), vec2(720.0, 520.0), t, |ui, height| {
+        // OK and Cancel stay at the bottom, in view; the list and the style's controls scroll
+        // above them (#1062).
+        let (mut body, body_h) = super::dialogs::above_footer(ui, height, |foot| {
+            foot.horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let ok = ui.button(tr("OK"));
+                    app.auto.add("dialog.layerStyle.ok", ok.rect, "OK");
+                    if ok.clicked() {
+                        close = Some(true);
+                    }
+                    let cancel = ui.button(tr("Cancel"));
+                    app.auto.add("dialog.layerStyle.cancel", cancel.rect, "Cancel");
+                    if cancel.clicked() {
+                        close = Some(false);
+                    }
+                });
+            });
+        });
+        {
+            let ui = &mut body;
             // Style list.
             ui.vertical(|ui| {
                 ui.set_width(200.0);
-                let mut entries = vec![(BLENDING, "Blending Options")];
-                entries.extend(STYLES.iter().copied());
-                for (id, name) in entries {
-                    ui.horizontal(|ui| {
-                        if id != BLENDING {
-                            let g = styles.as_ref().and_then(|s| s.sub(id));
-                            let mut on = g.is_some_and(|g| g.enabled);
-                            if ui.checkbox(&mut on, "").changed() {
-                                if g.is_none() {
-                                    actions.push(("layer.style.add".into(), json!({"layers": [lid], "style": id})));
-                                } else {
-                                    actions.push(("layer.style.toggle".into(), json!({"layer": lid, "style": id, "value": on})));
+                egui::ScrollArea::vertical().id_salt("ls-list").max_height(body_h).min_scrolled_height(0.0).show(ui, |ui| {
+                    let mut entries = vec![(BLENDING, "Blending Options")];
+                    entries.extend(STYLES.iter().copied());
+                    for (id, name) in entries {
+                        ui.horizontal(|ui| {
+                            if id != BLENDING {
+                                let g = styles.as_ref().and_then(|s| s.sub(id));
+                                let mut on = g.is_some_and(|g| g.enabled);
+                                if ui.checkbox(&mut on, "").changed() {
+                                    if g.is_none() {
+                                        actions.push(("layer.style.add".into(), json!({"layers": [lid], "style": id})));
+                                    } else {
+                                        actions.push(("layer.style.toggle".into(), json!({"layer": lid, "style": id, "value": on})));
+                                    }
                                 }
+                            } else {
+                                ui.add_space(24.0);
                             }
-                        } else {
-                            ui.add_space(24.0);
-                        }
-                        let r = ui.selectable_label(sel == id, name);
-                        if r.clicked() {
-                            app.dialog_state.layer_style.selected = id.to_string();
-                        }
-                        let rect = r.rect;
-                        app.auto.add(&format!("dialog.layerStyle.list.{id}"), rect, name);
-                    });
-                }
+                            let r = ui.selectable_label(sel == id, name);
+                            if r.clicked() {
+                                app.dialog_state.layer_style.selected = id.to_string();
+                            }
+                            let rect = r.rect;
+                            app.auto.add(&format!("dialog.layerStyle.list.{id}"), rect, name);
+                        });
+                    }
+                });
             });
             ui.separator();
             // Controls of the selected style.
@@ -180,42 +201,39 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                     ui.label(egui::RichText::new(tr("Not applied: tick it in the list to add it.")).weak());
                     return;
                 };
-                egui::ScrollArea::vertical().max_height(400.0).show(ui, |ui| {
-                    egui::Grid::new("ls-grid").num_columns(2).spacing(vec2(12.0, 6.0)).show(ui, |ui| {
-                        g.walk("", &mut |_, p| {
-                            if matches!(p.ui, ParamUi::Hidden) {
-                                return;
-                            }
-                            let lbl = ui.label(&p.name);
-                            let v = p.value_at(lt);
-                            if let Some(nv) = control(ui, p, &v) {
-                                actions.push((
-                                    "prop.set".into(),
-                                    json!({"layer": lid, "prop": p.uid, "value": nv, "merge": format!("layer-style-dialog-{}", p.uid)}),
-                                ));
-                            }
-                            let path = g.match_path_of(p.uid).unwrap_or_default();
-                            app.auto.add(&format!("dialog.layerStyle.prop.{sel}/{path}"), lbl.rect, &p.name);
-                            ui.end_row();
+                // Both ways, in the room left under the heading: in a narrow window (or at a high UI
+                // Scale) the controls scroll sideways rather than being cut off.
+                egui::ScrollArea::both()
+                    .id_salt("ls-controls")
+                    .max_width(ui.available_width().max(0.0))
+                    .max_height(ui.available_height().max(0.0))
+                    .min_scrolled_width(0.0)
+                    .min_scrolled_height(0.0)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        egui::Grid::new("ls-grid").num_columns(2).spacing(vec2(12.0, 6.0)).show(ui, |ui| {
+                            g.walk("", &mut |_, p| {
+                                if matches!(p.ui, ParamUi::Hidden) {
+                                    return;
+                                }
+                                let lbl = ui.label(&p.name);
+                                let v = p.value_at(lt);
+                                let edit = ui.scope(|ui| control(ui, p, &v));
+                                if let Some(nv) = edit.inner {
+                                    actions.push((
+                                        "prop.set".into(),
+                                        json!({"layer": lid, "prop": p.uid, "value": nv, "merge": format!("layer-style-dialog-{}", p.uid)}),
+                                    ));
+                                }
+                                let path = g.match_path_of(p.uid).unwrap_or_default();
+                                app.auto.add(&format!("dialog.layerStyle.prop.{sel}/{path}"), lbl.rect, &p.name);
+                                app.auto.add(&format!("dialog.layerStyle.value.{sel}/{path}"), edit.response.rect, &p.name);
+                                ui.end_row();
+                            });
                         });
                     });
-                });
             });
-        });
-        ui.add_space(8.0);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let ok = ui.button(tr("OK"));
-            app.auto.add("dialog.layerStyle.ok", ok.rect, "OK");
-            if ok.clicked() {
-                close = Some(true);
-            }
-            let cancel = ui.button(tr("Cancel"));
-            app.auto.add("dialog.layerStyle.cancel", cancel.rect, "Cancel");
-            if cancel.clicked() {
-                close = Some(false);
-            }
-            let _ = Align2::LEFT_CENTER;
-        });
+        }
     });
     for (id, p) in actions {
         if let Err(e) = app.session.execute(&id, p) {

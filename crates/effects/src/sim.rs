@@ -1196,18 +1196,9 @@ fn particle_world_plan(ctx: &EffectCtx, b: &Buf) -> Option<SpritePlan> {
 /// The CC particle systems' sprites with their Transfer Mode (Composite, Screen, Add, Black
 /// Background).
 fn particle_sprites(sprites: Vec<Sprite>, mode: u32) -> SpritePlan {
-    SpritePlan {
-        sprites,
-        tints: vec![],
-        acc: if mode == 2 { Acc::Add } else { Acc::Over },
-        post: Post::Combine(match mode {
-            0 => 0,
-            1 => 1,
-            2 => 2,
-            3 => 5,
-            _ => 0,
-        }),
-    }
+    // The particles replace the layer (After Effects shows no trace of the source in any
+    // Transfer Mode, which sets how the particles meet each other).
+    SpritePlan { sprites, tints: vec![], acc: if mode == 2 { Acc::Add } else { Acc::Over }, post: Post::Replace }
 }
 
 // ------------------------------------------------------------------ CC Particle Systems II
@@ -1920,8 +1911,35 @@ mod tests {
         let blank = Image::new(48, 48);
         let y = mass_y(&a, &blank);
         assert!((0.0..24.0).contains(&y), "{y}");
+        // The particles replace the layer: with none born it is empty.
         let none = run("ec.sim.ccparticlesystems2", &[("birthRate", num(0.0))], grey(20, 20), 1.0);
-        assert_eq!(none, grey(20, 20));
+        assert_eq!(none, Image::new(20, 20));
+    }
+
+    /// CC Particle World and CC Particle Systems II replace their layer with the particles, in
+    /// every Transfer Mode (which only sets how particles meet each other). SceneYard frames from
+    /// After Effects 2026 show no trace of the source solid: "Task Preparation UI" (black solids
+    /// under fireworks hid a white page), "Burnout matchstick" (a red rectangle around the
+    /// flame), "Documentary Man Falling" (a black block over the light).
+    #[test]
+    fn cc_particles_replace_their_layer() {
+        let red = || {
+            let mut img = Image::new(48, 48);
+            img.data.iter_mut().for_each(|p| *p = [0.7, 0.1, 0.1, 1.0]);
+            img
+        };
+        for id in ["ec.sim.ccparticlesystems2", "ec.sim.ccparticleworld"] {
+            for mode in 0..4 {
+                let v = vec![("birthRate", num(3.0)), ("particle/transferMode", Value::Enum(mode))];
+                let _ = run(id, &v, red(), 0.5);
+                let out = run(id, &v, red(), 1.0);
+                // No source left: the corners, far from the producer, are clear.
+                for (x, y) in [(0, 0), (47, 0), (0, 47), (47, 47)] {
+                    assert!(out.get(x, y)[3] < 1e-6, "{id} mode {mode} ({x},{y}): {:?}", out.get(x, y));
+                }
+                assert!(out.data.iter().any(|p| p[3] > 0.05), "{id} mode {mode}: particles drawn");
+            }
+        }
     }
 
     #[test]

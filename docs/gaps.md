@@ -1,6 +1,6 @@
 # Where EffectCraft falls short
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-10 · **Change:** major (re-measured against After Effects 2026 26.5; ranked gap list with estimates; numbers reconciled with target-app-parity.md) · **Target:** Adobe After Effects 2026 (26.5.0.89)
+> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-12 · **Change:** minor (issue, PR and catalog references gap 21: percentage guides and effect colour labels in; earlier change: re-audited against `upstream/main` 470ea7a3; ranked gap list from the 10 October re-measure otherwise unchanged) · **Target:** Adobe After Effects 2026 (26.5.0.89)
 
 An honest assessment of how far EffectCraft is from being a real replacement for After Effects,
 and the work that closes the gap. This document is meant for contributors and agents choosing
@@ -32,18 +32,18 @@ because 179 issues were closed with regression tests between 5 and 10 October.
 | Dimension | % | Hours | Evidence |
 |---|---:|---:|---|
 | Breadth of features | ≈ 91% | (below) | All 306 effects, the After Effects menus (587 entries) and panels, Classic and Advanced 3D, tracking, expressions, scripting, render queue. Missing: entries 7, 13, 14, 16 and 21 below |
-| Behaves like After Effects | ≈ 50%, mostly unmeasured | 360–660 (features) | The first live G1 comparison checks eight scalar Rotation/ease cases (168 samples) against After Effects 26.3x87 via AEsync 2.0.4: all pass after fixing overlapping temporal influences, maximum error below 3e-11 degrees ([fidelity/README.md](fidelity/README.md)). Nothing else is compared. An outside contributor found four bugs in features marked done within a day (PRs #6–#10); users have found well over a hundred more since, and 134 issues are open |
+| Behaves like After Effects | ≈ 50%, mostly unmeasured | 360–660 (features) | The first live G1 comparison checks eight scalar Rotation/ease cases (168 samples) against After Effects 26.3x87 via AEsync 2.0.4: all pass after fixing overlapping temporal influences, maximum error below 3e-11 degrees ([fidelity/README.md](fidelity/README.md)). Nothing else is compared. An outside contributor found four bugs in features marked done within a day (PRs #6–#10); users have found well over a hundred more since, and 216 issues are open (12 October) |
 | Opening existing After Effects work | ≈ 0% | 80–160 | `.aep` / `.aepx` / `.mogrt` / `.ffx` can't be read; After Effects plug-ins can't run. Expressions and the scripting object model are strong, so scripts and expressions carry over |
 | UI/UX fidelity | ≈ 65% | 60–120 | [ui-parity.md](ui-parity.md) |
 | File formats | ≈ 50% | 130–230 | [file-format-parity.md](file-format-parity.md) |
 | Hardware | ≈ 40% | 60–120 | [hardware-parity.md](hardware-parity.md) |
-| Localization | ≈ 12% | 60–110 + review | [localization-parity.md](localization-parity.md) |
-| Stability | ≈ 45% | 40–80 | 23 never-crash PRs landed on 4 October and the "Never crash" rules bind every crate, but crash reports are open (#580 Chromatic Aberrations pan/tilt, #591 Windows ARM64 device loss, #501 crash on startup, #426 timeline drag while playing, #341 quit on Intel Mac, #306 divider drag, #234 macOS 27 exit, #511 drag over import dialog), and no CI workflow runs `cargo xtask ci` on pull requests |
-| Real-user experience | ≈ 60%, uneven by platform | (in G2) | 179 issues closed 5–10 October, nearly all with regression tests ([log below](#real-user-report-log-510-october)); 134 open, many from Linux and Windows. Most checking still happens on macOS |
-| Performance | unknown against After Effects, ≈ 35% | 50–100 | Internal numbers only (e.g. Advanced 3D 290 ms/frame at 1080p on the GPU on an M4 Pro). Users report stutter on cached frames (#595, #304), slow scrubbing (#329), late audio (#554). No 4K / hundreds-of-layers project tested |
+| Localization | ≈ 18% | 60–110 + review | [localization-parity.md](localization-parity.md) |
+| Stability | ≈ 45% | 40–80 | 23 never-crash PRs landed on 4 October and the "Never crash" rules bind every crate, but crash reports are open (#580 Chromatic Aberrations pan/tilt, #501 crash on startup, #426 timeline drag while playing, #341 quit on Intel Mac, #234 macOS 27 exit, #879 `--gpu` export aborts on a failed allocation; #591, #306 and #511 are closed), and no CI workflow runs `cargo xtask ci` on pull requests |
+| Real-user experience | ≈ 60%, uneven by platform | (in G2) | 179 issues closed 5–10 October (as counted on 10 October), nearly all with regression tests ([log below](#real-user-report-log-510-october)); 216 open and 328 closed on 12 October, many from Linux and Windows. Most checking still happens on macOS |
+| Performance | unknown against After Effects, ≈ 35% | 50–100 | Internal numbers only (e.g. Advanced 3D 290 ms/frame at 1080p on the GPU on an M4 Pro). Users report stutter on cached frames (#595, #304; the RAM preview now prefetches nearest the playhead, 271000b2), late audio (#504, #335); slow scrubbing (#329, closed by #784) and #554 are closed. No 4K / hundreds-of-layers project tested |
 | Media formats | ≈ 75% | (in file formats) | H.264, ProRes, HEVC, AV1, VP9, image sequences and audio exist. The HEVC / AV1 encoders have no B-frames, multi-reference or SAO / CDEF, so files are larger than from mature encoders. Camera formats (BRAW, R3D, ProRes RAW, variable-frame-rate phone video) are unverified |
 | AI-assisted tools | ≈ 35% | 40–80 | Roto Brush 2.0 / 3.0 with MobileSAM (M13.35) scores IoU 0.989 on the base frame of our synthetic moving-disc test and ≥ 0.980 over 20 propagated frames (classic: 0.973). Face tracking with MediaPipe Face Landmarker (M13.36) matches Google's own pipeline to 0.85 px on a test portrait. Neither is compared with After Effects; Object Matte (26.2) is missing |
-| Maturity | early | — | First commit 1 October 2026. ≈ 329,000 lines of almost entirely agent-written Rust, 2,704 tests, 313 GitHub issues. After Effects has around 30 years of edge cases behind it |
+| Maturity | early | — | First commit 1 October 2026. ≈ 361,000 lines of almost entirely agent-written Rust (`git ls-files '*.rs'`, 12 October), 2,704 tests (10 October), 544 GitHub issues (216 open). After Effects has around 30 years of edge cases behind it |
 
 ## Every known gap, ranked
 
@@ -57,30 +57,30 @@ are grouped by area; the issue tracker has the rest.
 
 | # | Gap | Evidence | Impact | Estimate | Work · doc |
 |---:|---|---|---|---:|---|
-| 1 | **`.aep` / `.aepx` projects can't be opened** | No reader; candidate route py-aep (#248, MIT, external converter) awaits an owner decision on clean-room scope; #190 | The biggest barrier to switching: existing work, templates and client projects stay in After Effects | 80–160 h | G4 · [file-format-parity.md](file-format-parity.md) |
+| 1 | **`.aep` / `.aepx` projects can't be opened** | No reader; candidate route py-aep (#248, closed as a duplicate of #190; MIT, external converter) awaits an owner decision on clean-room scope; #190; open PRs #251 (native decoder) and #860 (external py-aep converter) | The biggest barrier to switching: existing work, templates and client projects stay in After Effects | 80–160 h | G4 · [file-format-parity.md](file-format-parity.md) |
 | 2 | **Fidelity unmeasured** beyond scalar ease | [fidelity/](fidelity/README.md): 168 samples, one property type; `compare_frames` helper exists, no corpus | Every "done" feature may still differ; users find the differences | 60–100 h harness + P0/P1 corpus; more per feature | G1 · [target-app-parity.md](target-app-parity.md) |
-| 3 | **Open crash reports** | #580, #591, #501, #426, #341, #306, #234, #511 | A crash loses work; outranks features ([AGENTS.md](../AGENTS.md)) | 10–25 h | G3 · this file |
+| 3 | **Open crash reports** | Open: #580, #501, #426, #341, #234, #879. Now closed: #591, #306, #511 | A crash loses work; outranks features ([AGENTS.md](../AGENTS.md)) | 10–25 h | G3 · this file |
 | 4 | **No CI gate on pull requests** | `.github/workflows` has release, packaging-lint, FreeBSD and Windows ARM64 jobs only; `cargo xtask ci` runs locally | Regressions reach main unseen; 49 community PRs landed in one batch (#598) | 4–8 h | G3 · this file |
-| 5 | **Playback and scrubbing feel** | #595 stutter on cached frames, #304, #329 slow scrubbing, #554 / #504 / #335 audio late or crackling, #586 puppet lag | Preview is where motion designers spend their day | 25–50 h | G5 · [hardware-parity.md](hardware-parity.md) |
-| 6 | **Linux and Windows interaction bugs** | #491 multi-layer edits, #488 rename arrows, #493, #492, #467 shortcuts, #268 drag and drop, #320 workspaces not persisting, #302 docking, #613 Direct3D 12 compositor, #596 GPU not detected | Many reports come from Linux; some Windows GPUs fail to start the compositor | 25–45 h | G2 · [ui-parity.md](ui-parity.md) |
-| 7 | **Animation presets: 31 against 621** | After Effects ships 621 `.ffx` presets (Behaviors, Backgrounds, Shapes, Synthetics, Text, Transitions…); we ship 31 original presets (8 text-animator, 23 Transitions: wipes, clock and fan reveals, blinds, dissolves, card flips, CC wipes, fades; #757) and read only our `.ecpreset`. Missing: Behaviors, Backgrounds, Shapes, Synthetics, Image and more Text | Presets are how many designers start; tutorials assume them | 15–35 h (original presets; `.ffx` reading is out of clean-room scope) | G8 · [effects-parity.md](effects-parity.md) |
-| 8 | **Mask and shape bugs** | #510, #513, #527 (first Intersect/Darken mask), #509 Roto Brush size, #303 Mesh Warp, #553 pen tools on motion paths | Masks are core compositing | 10–20 h | G2 · [target-app-parity.md](target-app-parity.md) |
-| 9 | **Effect behaviour bugs** | #580, #526 Fractal reset, #514 Apply Color LUT, #463 Curl Noise, #369 Motion Tile output size, #473 Cryptomatte selection, #474 multi-layer EXR decoded twice, #534–#536 community fixes pending | Each one breaks a look someone built | 10–20 h | G1/G2 · [effects-parity.md](effects-parity.md) |
-| 10 | **Colour pipeline differences** | #494 32-bpc blend modes clamp and apply opacity differently; #495 Working Gamma 2.4 (in, also for float footage: #750); #340 ProRes 4444 tagged bt709 but sRGB-encoded; ACES 2.0 / OCIO 2.5 configs (26.5) missing; #546 / #547 viewer colour | Wrong colour in delivery is a client-visible failure | 15–30 h | G1 · [file-format-parity.md](file-format-parity.md) |
-| 11 | **Text rendering and layout** | #453 CJK text in comps, #316 paragraph alignment inverted, #483 squeezed at 4:3, #417 soft at Fit, #583 font search, #550 toolbar font options | Text is in almost every motion graphic | 10–20 h | G2 · [ui-parity.md](ui-parity.md) |
-| 12 | **3D interaction and depth** | No 3D transform gizmos (#392, #347); Z position (#489); camera aperture (#260); reflections (#261); extruded surface materials beyond Front / Bevel / Side / Back Color (#315); 3D issue reopened (#307) | Advanced 3D is After Effects' growth area since 2023 | 20–35 h | G2 · [ui-parity.md](ui-parity.md) |
+| 5 | **Playback and scrubbing feel** | #595 stutter on cached frames (partly addressed: nearest-first RAM preview prefetch, cache bars at 1/3 resolution), #304, #504 / #335 audio late or crackling, #586 puppet lag (maintainers asked for details); #329 slow scrubbing (#784) and #554 closed | Preview is where motion designers spend their day | 25–50 h | G5 · [hardware-parity.md](hardware-parity.md) |
+| 6 | **Linux and Windows interaction bugs** | Open: #488 rename arrows (hardening landed, reporter asked for details), #492 anchor drag, #268 file drops on Wayland (winit), #613 Direct3D 12 compositor. Now closed: #491, #493, #467, #320, #302, #596 | Many reports come from Linux; some Windows GPUs fail to start the compositor | 25–45 h | G2 · [ui-parity.md](ui-parity.md) |
+| 7 | **Animation presets: 54 against 621** | After Effects ships 621 `.ffx` presets (Behaviors, Backgrounds, Shapes, Synthetics, Text, Transitions…); we ship 54 original presets (8 text-animator; 23 Transitions: wipes, clock and fan reveals, blinds, dissolves, card flips, CC wipes, fades, #757; 23 Backgrounds: drifting gradients, fog, cloud and smoke, plasma and magma, cells, hexagons, scrolling grids and checks, pulse rings, bokeh, light sweep, #1096, driven by expressions so they keep moving, not seamless loops) and read only our `.ecpreset`. Missing: Behaviors, Shapes, Synthetics, Image and more Text | Presets are how many designers start; tutorials assume them | 15–35 h (original presets; `.ffx` reading is out of clean-room scope) | G8 · [effects-parity.md](effects-parity.md) |
+| 8 | **Mask and shape bugs** | Open: #1004 mask vertex multi-select, #999 auto-pan, #1042 / #1033 vertex nodes under the bounding box, #932 Convert to Bezier Path, #959 / #960 shape group toggles and operators. Now closed: #510, #513, #527, #509, #303, #553 | Masks are core compositing | 10–20 h | G2 · [target-app-parity.md](target-app-parity.md) |
+| 9 | **Effect behaviour bugs** | #580, #463 Curl Noise, #369 Motion Tile output size, #943 Turbulent Displace Evolution, #473 Cryptomatte selection (quoted names with commas fixed, 3b7f1ace; UI and GPU time open), #474 multi-layer EXR (decode shared, faffad3a; f16 storage and cache sizing open). Closed: #526, #514, #533–#536 | Each one breaks a look someone built | 10–20 h | G1/G2 · [effects-parity.md](effects-parity.md) |
+| 10 | **Colour pipeline differences** | #340 ProRes 4444 tagged bt709 but sRGB-encoded (open); ACES 2.0 / OCIO 2.5 configs (26.5) missing; now closed: #494 32-bpc blend modes, #495 and #750 Working Gamma 2.4, #546 / #547 viewer colour | Wrong colour in delivery is a client-visible failure | 15–30 h | G1 · [file-format-parity.md](file-format-parity.md) |
+| 11 | **Text rendering and layout** | Open: #453 CJK text in comps, #316 paragraph alignment inverted (maintainers' tests show Left/Right correct; asked for a project), #417 soft at Fit (mostly fixed by #444), #550 toolbar font options. Closed: #483, #583 | Text is in almost every motion graphic | 10–20 h | G2 · [ui-parity.md](ui-parity.md) |
+| 12 | **3D interaction and depth** | No 3D transform gizmos (#392, #347); camera aperture (#260); reflections (#261); extruded surface materials beyond Front / Bevel / Side / Back Color (fb5a5e9a; #315 closed); #307 reopened (the viewer's renderer button now shows and switches the renderer, #645); Z position (#489) closed | Advanced 3D is After Effects' growth area since 2023 | 20–35 h | G2 · [ui-parity.md](ui-parity.md) |
 | 13 | **3D model formats and materials** | After Effects 26 imports FBX, USD/USDZ, STL besides glTF and OBJ (`usd_plugins`), and Substance 3D materials with mesh displacement (26.0–26.2); we read glTF, OBJ, STL (binary and ASCII, with facet colours) and FBX 7.x (binary and ASCII: meshes, hierarchy, Lambert/Phong materials and textures; no FBX animation or skinning yet) | Product shots and 3D scenes come as FBX/USDZ | 25–45 h | — · [file-format-parity.md](file-format-parity.md) |
-| 14 | **Object Matte** (26.2, disk cache in 26.5) | Not present; MobileSAM is already in `effectcraft-segment` and could back it | The new one-click roto; Roto Brush covers part of it | 15–30 h | G7 · [target-app-parity.md](target-app-parity.md) |
-| 15 | **Hardware video decode and encode** | No VideoToolbox, NVENC, Quick Sync or VA-API; #498 asks for it; FilmCraft has VideoToolbox / NVENC / VA-API paths to borrow | 4K playback and export speed | 25–45 h | G5/G6 · [hardware-parity.md](hardware-parity.md) |
-| 16 | **Localization depth** | Menus in 6 languages; panels in 4; effect names and ~1,650 effect parameter names untranslated; French, German, Korean, Italian, Russian (After Effects ships them) absent; #599 Hangul boxes on macOS | After Effects is used heavily in Japan, China, Korea, Brazil, Europe | 60–110 h + native review | G9 · [localization-parity.md](localization-parity.md) |
-| 17 | **Media Browser lists files import refuses** | `media_browser.rs` lists AVI; `media::is_importable` has none of them (Targa and Radiance HDR import since #745; DPX and Cineon since #756, log shown as stored: no Cineon Settings conversion yet; MXF OP1a / OP-Atom since #767; FilmCraft has no AVI demuxer); #431 any image imports as a sequence; #324 MP3 goes silent | Confusing failures on common VFX formats | 15–30 h | G6 · [file-format-parity.md](file-format-parity.md) |
+| 14 | **Object Matte** (26.2, disk cache in 26.5) | First slice (#783): the Object Matte effect (Effect ▸ Matte) and `objectMatte.apply` turn a point (and optional box) on a reference frame into a matte and follow the object up to 600 frames each way, or segment every frame on its own; Roto Brush's engine, cache and model (MobileSAM from Settings ▸ Roto Brush, classical graph cut without it). Since then: the Object Matte tool in the viewer (click / drag a box, hover crosshair), the box as the model's box prompt, background tracking with progress and cancel, Freeze, and segmentations kept in the disk cache (26.5). Missing: a comparison with After Effects ([plan](fidelity/object-matte.md)) | The new one-click roto | 10–20 h | G7 · [target-app-parity.md](target-app-parity.md) |
+| 15 | **Hardware video decode and encode** | No VideoToolbox, NVENC, Quick Sync or VA-API; #498 asks for it (answered: CUDA / NVENC need Nvidia's proprietary SDK through FFI, which the no-`unsafe` rule forbids); open PR #819 adds hardware decoding via `filmcraft-platform`; FilmCraft has VideoToolbox / NVENC / VA-API paths to borrow | 4K playback and export speed | 25–45 h | G5/G6 · [hardware-parity.md](hardware-parity.md) |
+| 16 | **Localization depth** | Menus in 10 languages (ja, zh-hans, zh-hant, uk, es, pt-br, ru, fr, de, cs: 624 rows each); panels in 6 (ja, zh-hans, zh-hant, uk, pt-br, cs); effect names translated in Simplified Chinese (306, plus the generated Effect menu), their ~1,650 parameter names untranslated; Korean and Italian (After Effects ships them) absent; Hangul probe added (#599 closed) | After Effects is used heavily in Japan, China, Korea, Brazil, Europe | 60–110 h + native review | G9 · [localization-parity.md](localization-parity.md) |
+| 17 | **Media Browser lists files import refuses** | `media_browser.rs` lists AVI; `media::is_importable` has none of them (Targa and Radiance HDR import since #745; DPX and Cineon since #756, log shown as stored: no Cineon Settings conversion yet; MXF OP1a / OP-Atom since #767; FilmCraft has no AVI demuxer); #431 and #324 closed | Confusing failures on common VFX formats | 15–30 h | G6 · [file-format-parity.md](file-format-parity.md) |
 | 18 | **Relative paths and relinking** | Projects store absolute footage paths; no relink when a project moves | Moving or sharing a project breaks it | 6–12 h | G4 · [file-format-parity.md](file-format-parity.md) |
 | 19 | **Plug-in ecosystem** | No After Effects SDK hosting (#600, #327 OpenFX, #334, #376 plug-in manager); our WebAssembly API has no third-party plug-ins | Many pro projects depend on Trapcode, Element, Saber… | 40–80 h for API growth; SDK hosting needs an owner decision | G8 · [scripting-parity.md](scripting-parity.md) |
 | 20 | **Multi-monitor and video output** | #486: any panel can move into a native window of its own (panel menu ▸ Move Panel to New Window, `window.panelWindow`) and so onto another screen, restored with the workspace; still missing: dragging tabs between those windows, app shortcuts while one has the focus, named workspaces remembering them, Mercury Transmit to video hardware (we have a second preview window only) | Two-screen setups are standard for professionals | 10–20 h | G2 · [hardware-parity.md](hardware-parity.md) |
-| 21 | **Small 26.x features** | Proportional Scrubbing (26.2), pasting Illustrator's own clipboard data as shapes (26.3; SVG markup on the clipboard pastes as a shape layer, #738), variable-font filter (26.3), percentage guides and effect colour labels (26.5), the rebuilt Effect Controls (26.5) | Users of the current version expect them | 15–25 h | — · [ui-parity.md](ui-parity.md) |
-| 22 | **Encoder efficiency** | HEVC / AV1 have no B-frames, multi-reference or SAO / CDEF; Opus no FEC / DTX; single-file intermediates are 8-bit uncompressed QuickTime only (#372: no 16-bpc, AVI or lossless-compressed codec); #325 render over existing file | Larger files than After Effects + Media Encoder | 20–40 h | G6 · [file-format-parity.md](file-format-parity.md) |
-| 23 | **Essential Graphics interchange** | Templates are `.ectemplate`, not `.mogrt`; #338 Scale exposes X and Y; #611 FilmCraft rejects exported `.fcgt` | Premiere editors can't use our templates | 15–30 h | — · [file-format-parity.md](file-format-parity.md) |
-| 24 | **Timeline depth requests** | #601 expand precomps in place, #602 reorderable render stack, #604 guide-only effects, #355 bulk keyframes, #425 keyframe confusion, #428 more shortcuts | Power-user speed | 15–30 h | G2 · [ui-parity.md](ui-parity.md) |
+| 21 | **Small 26.x features** | Proportional Scrubbing (26.2), pasting Illustrator's own clipboard data as shapes (26.3; SVG markup on the clipboard pastes as a shape layer, #738), variable-font filter (26.3), the rebuilt Effect Controls (26.5). Percentage guides (View ▸ Add Percentage Guide, Convert Guides to Percentage / Pixels) and effect colour labels (Effect Controls header bar and right-click Label menu, `effect.setLabel`) are in (#1095), built from the release notes' one-line descriptions and never compared with After Effects: the Timeline shows no effect label, and the labels' exact UI there is unknown | Users of the current version expect them | 10–20 h left | — · [ui-parity.md](ui-parity.md) |
+| 22 | **Encoder efficiency** | HEVC / AV1 have no B-frames, multi-reference or SAO / CDEF; Opus no FEC / DTX; single-file intermediates are 8-bit uncompressed QuickTime only (#372 closed by #778: no 16-bpc, AVI or lossless-compressed codec); #325 render over existing file | Larger files than After Effects + Media Encoder | 20–40 h | G6 · [file-format-parity.md](file-format-parity.md) |
+| 23 | **Essential Graphics interchange** | Templates are `.ectemplate`, not `.mogrt`; #338 and #611 closed | Premiere editors can't use our templates | 15–30 h | — · [file-format-parity.md](file-format-parity.md) |
+| 24 | **Timeline depth requests** | #601 expand precomps in place, #602 reorderable render stack, #604 guide-only effects, #425 keyframe confusion (#355 and #428 closed) | Power-user speed | 15–30 h | G2 · [ui-parity.md](ui-parity.md) |
 | 25 | **Accessibility** | AccessKit is enabled in eframe and tests read focus labels; the Project panel has After Effects' arrow-key navigation and named, stateful AccessKit nodes (#776), but the other panels have had no screen-reader pass or keyboard navigation audit, and there is no contrast check | Excludes users; After Effects supports screen readers poorly too | 15–30 h | G9 · [ui-parity.md](ui-parity.md) |
 
 ## Where we're going: workstreams in priority order
@@ -226,7 +226,7 @@ Issues #41–#47 (all from the Linux AppImage 0.1.1, 5 October): panning the vie
   XML overflowing the stack, now refused. Imported media and documents, expressions, scripts and
   control-channel / MCP requests are still to do.
 - Run the gate on every pull request in CI (gap 4): today no workflow runs the tests on PRs.
-- Fix the open crash reports first (gap 3).
+- Fix the open crash reports first (gap 3). Further fuzzing and crash fixes are open in PR #855.
 - Done when: the gate is green on stable, runs on every pull request, and the fuzzers run
   regularly without new crashes.
 
@@ -249,6 +249,10 @@ Issues #41–#47 (all from the Linux AppImage 0.1.1, 5 October): panning the vie
 
 - Benchmark projects at 1080p and 4K with many layers, heavy effects, long footage and nested
   comps; record preview frame times, RAM preview fill and render times on reference machines.
+  Started 10 October 2026: `cargo xtask bench` renders generated 1080p / 4K scenarios (many
+  layers with common effects, nested precomps, footage) at Full and Half and records peak memory,
+  CPU and wall time per run, with `--compare` against an earlier run (docs/testing.md, "Render
+  benchmark").
 - Compare with After Effects on the same machine where possible.
 - Done when: benchmark numbers are tracked over time and regressions fail a check.
 
@@ -283,7 +287,8 @@ Issues #41–#47 (all from the Linux AppImage 0.1.1, 5 October): panning the vie
   ([plugins.md](plugins.md#extension-points-compared-with-after-effects) compares them). ScriptUI
   panels in the user's ScriptUI Panels folder are listed in the Window menu, dock like any panel
   and open again at the next launch. Missing: the Startup and Shutdown script folders, keyboard
-  shortcuts for scripts, ExtendScript's `#include` / `#target` directives and `.jsxbin`.
+  shortcuts for scripts and `.jsxbin`; `#include` / `#target` directives landed (#759,
+  [scripting-parity.md](scripting-parity.md)).
 - Done so far: ease presets (#254) cover what ease-curve plug-ins are used for: easing curves kept
   by name and applied to pairs of keyframes. Modelled on a third-party panel, they are not core: a
   ScriptUI panel bundled as an optional extension (`extensions/scriptui-panels/Ease Presets.jsx`,
@@ -293,11 +298,12 @@ Issues #41–#47 (all from the Linux AppImage 0.1.1, 5 October): panning the vie
 
 ### G9. Reach
 
-- Localisation of the interface ([localization-parity.md](localization-parity.md)): since 6–10
+- Localisation of the interface ([localization-parity.md](localization-parity.md)): since 6–12
   October the menus are translated into Japanese, Simplified and Traditional Chinese, Ukrainian,
-  Spanish and Brazilian Portuguese, and the panel catalog covers the first four. Next: effect and
-  parameter names, the remaining panel strings, French, German and Korean, and native-speaker
-  review of all of them.
+  Spanish, Brazilian Portuguese, Russian, French, German and Czech, and the panel catalog covers
+  Japanese, both Chinese, Ukrainian, Brazilian Portuguese and Czech. Next: effect and parameter
+  names, the remaining panel strings (Spanish, Russian, French, German), Korean and Italian, and
+  native-speaker review of all of them.
 - Accessibility (keyboard navigation, screen readers, contrast), user documentation and
   tutorials.
 
@@ -316,7 +322,9 @@ Issues #41–#47 (all from the Linux AppImage 0.1.1, 5 October): panning the vie
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-12 | minor | Audited against `upstream/main` 470ea7a3: open-issue count and crash list, closed issues removed from rows 1, 3, 5, 6, 8–12, 15–17, 22–24, G8 and G9 (#759 `#include`), localization catalogs recounted (≈ 12% to ≈ 18%); rows 7, 14 and 21 left to open PRs #1102, #792 and #1098 |
 | 2026-10-10 | minor | Alpha gate checked: no alpha blockers |
+| 2026-10-12 | minor | Gap 21: percentage guides and effect colour labels added (#1095) |
 | 2026-10-10 | major | Re-measured against After Effects 2026 26.5: two numbers (breadth ≈ 91%, ready ≈ 45%), dimension table with hours, a ranked list of 25 gaps with evidence, impact, estimate and parity doc; the real-user evidence moved into a report log under G2; links follow the rename of `parity.md` to `target-app-parity.md` |
 | 2026-10-08 | minor | User issues of 6–8 October and their regression evidence |
 | 2026-10-05 | major | First honest assessment: breadth ≈ 99% vs real use ≈ 30–50%; workstreams G1–G9 |

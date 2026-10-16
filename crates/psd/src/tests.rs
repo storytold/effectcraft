@@ -252,3 +252,241 @@ fn huge_layer_bounds_error_instead_of_allocating() {
     let p = Psd::parse(bytes).unwrap();
     assert!(matches!(p.layer_pixels(0, false), Err(Error::Unsupported(_))));
 }
+
+/// `n` groups nested in each other, each holding one pixel layer (file order: bottom first).
+fn nested_groups_doc(n: usize) -> WDoc {
+    let mut d = WDoc::new(4, 4);
+    for _ in 0..n {
+        d.layers.push(WLayer::group_end());
+    }
+    for i in 0..n {
+        d.layers.push(WLayer::solid(&format!("L{i}"), Rect::new(0, 0, 1, 1), [1.0; 4]));
+        d.layers.push(WLayer::group(&format!("G{i}"), true, *b"norm"));
+    }
+    d
+}
+
+fn depth_of(nodes: &[Node]) -> usize {
+    nodes.iter().map(|n| if let Node::Group { children, .. } = n { 1 + depth_of(children) } else { 0 }).max().unwrap_or(0)
+}
+
+fn layer_indices(nodes: &[Node], out: &mut Vec<usize>) {
+    for n in nodes {
+        match n {
+            Node::Layer(i) => out.push(*i),
+            Node::Group { layer, children } => {
+                out.push(*layer);
+                layer_indices(children, out);
+            }
+        }
+    }
+}
+
+#[test]
+fn deeply_nested_groups_are_flattened_at_the_depth_limit() {
+    assert_eq!(MAX_GROUP_DEPTH, 64);
+    let n = 70;
+    let p = Psd::parse(write(&nested_groups_doc(n))).unwrap();
+    let (t, flattened) = p.tree_report();
+    assert_eq!(depth_of(&t), MAX_GROUP_DEPTH);
+    assert_eq!(flattened, 6);
+    // No layer or group record is lost, each appears exactly once (dividers are not nodes).
+    let mut seen = vec![];
+    layer_indices(&t, &mut seen);
+    seen.sort_unstable();
+    assert_eq!(seen, (n..p.layers.len()).collect::<Vec<_>>());
+    // At the limit nothing is flattened.
+    let (t, flattened) = Psd::parse(write(&nested_groups_doc(MAX_GROUP_DEPTH))).unwrap().tree_report();
+    assert_eq!((depth_of(&t), flattened), (MAX_GROUP_DEPTH, 0));
+}
+
+#[test]
+fn thousands_of_nested_groups_do_not_overflow_a_small_stack() {
+    let bytes = write(&nested_groups_doc(5000));
+    let h = std::thread::Builder::new()
+        .stack_size(2 << 20)
+        .spawn(move || {
+            let p = Psd::parse(bytes).unwrap();
+            let t = p.tree();
+            let c = t.clone();
+            assert_eq!(t, c);
+            let (_, flattened) = p.tree_report();
+            drop(t);
+            drop(c);
+            flattened
+        })
+        .unwrap();
+    assert_eq!(h.join().unwrap(), 5000 - MAX_GROUP_DEPTH);
+}
+
+#[test]
+fn non_finite_transform_and_exposure_values_are_dropped() {
+    let mut d = WDoc::new(16, 16);
+    d.layers = vec![
+        WLayer::empty("Title", vec![text_block("x", [f64::NAN, f64::INFINITY], "Inter", 12.0, [0.0; 3], 0)]),
+        WLayer::empty("Exp", vec![exposure_block(f32::NAN, f32::INFINITY, f32::NEG_INFINITY)]),
+    ];
+    let p = Psd::parse(write(&d)).unwrap();
+    let t = p.layers[0].text.as_ref().unwrap();
+    assert!(t.transform.iter().all(|v| v.is_finite()));
+    assert_eq!(t.transform, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+    assert_eq!(p.layers[1].adjustment, Some(Adjustment::Exposure { exposure: 0.0, offset: 0.0, gamma: 1.0 }));
+}
+
+#[test]
+fn non_finite_32_bit_samples_become_finite() {
+    let mut d = WDoc::new(4, 4);
+    d.depth = 32;
+    d.layers = vec![WLayer::solid("L", Rect::new(0, 0, 4, 4), [0.5, 0.5, 0.5, 1.0])];
+    let p = Psd::parse(write(&d)).unwrap();
+    let raw: Vec<u8> = [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 0.25].iter().flat_map(|v| v.to_be_bytes()).collect();
+    let mut s = vec![f32::NAN; 4];
+    p.for_each_sample(&raw, 4, 1, |i, v| s[i] = v);
+    assert_eq!(s, vec![0.0, 1.0, 0.0, 0.25]);
+    assert!(p.rgb_from([s[1], s[1], s[1], 0.0]).iter().all(|v| v.is_finite()));
+}
+
+#[test]
+fn rect_new_near_i32_max_saturates() {
+    let r = Rect::new(i32::MAX, i32::MAX, 1, i32::MAX);
+    assert_eq!((r.right, r.bottom), (i32::MAX, i32::MAX));
+    assert!(r.is_empty());
+}
+
+fn find(bytes: &[u8], needle: &[u8]) -> usize {
+    bytes.windows(needle.len()).position(|w| w == needle).expect("needle present")
+}
+
+/// The second layer record's signature overwritten.
+fn bad_signature() -> Vec<u8> {
+    let mut bytes = write(&doc_with_layers(8, ColorMode::Rgb, true));
+    let at = find(&bytes, b"8BIMmul ");
+    bytes[at] = b'X';
+    bytes
+}
+
+/// The first channel of the first layer claims more data than the file holds.
+fn bad_channel_length() -> Vec<u8> {
+    let mut bytes = write(&doc_with_layers(8, ColorMode::Rgb, true));
+    let at = find(&bytes, b"8BIMnorm");
+    let first_len = at - 4 * 6 + 2;
+    bytes[first_len..first_len + 4].copy_from_slice(&0x7fff_fff0u32.to_be_bytes());
+    bytes
+}
+
+#[test]
+fn damaged_layer_section_keeps_the_merged_image() {
+    let good = Psd::parse(write(&doc_with_layers(8, ColorMode::Rgb, true))).unwrap();
+    assert!(good.warnings.is_empty() && good.layers.len() == 3);
+    let want = good.composite().unwrap();
+    for bytes in [bad_signature(), bad_channel_length()] {
+        let p = Psd::parse(bytes).unwrap();
+        assert!(p.layers.is_empty());
+        assert_eq!(p.warnings.len(), 1, "{:?}", p.warnings);
+        assert!(p.warnings[0].contains("Layers could not be read"));
+        assert_eq!((p.width, p.height), (40, 30));
+        let got = p.composite().unwrap();
+        assert_eq!(got.data, want.data);
+    }
+}
+
+#[test]
+fn header_damage_and_missing_merged_image_still_fail() {
+    let good = write(&doc_with_layers(8, ColorMode::Rgb, true));
+    // Zero width.
+    let mut b = good.clone();
+    b[18..22].copy_from_slice(&0u32.to_be_bytes());
+    assert!(Psd::parse(b).is_err());
+    // Unknown colour mode.
+    let mut b = good.clone();
+    b[24..26].copy_from_slice(&99u16.to_be_bytes());
+    assert!(Psd::parse(b).is_err());
+    // Damaged layers and no merged image at all: nothing to fall back to.
+    let end = Psd::parse(good).unwrap().merged_offset;
+    let mut b = bad_signature();
+    b.truncate(end);
+    assert!(Psd::parse(b).is_err());
+}
+
+/// A ZIP plane body for the decoder: the plane delta-coded per row when `predict`.
+fn zip_body(raw: &[u8], w: usize, depth: u16, predict: bool) -> Vec<u8> {
+    if !predict {
+        return raw.to_vec();
+    }
+    let mut out = raw.to_vec();
+    let bps = usize::from(depth / 8);
+    for row in out.chunks_exact_mut(w * bps) {
+        if depth == 16 {
+            let mut prev = 0u16;
+            for c in row.as_chunks_mut::<2>().0 {
+                let x = u16::from_be_bytes([c[0], c[1]]);
+                c.copy_from_slice(&x.wrapping_sub(prev).to_be_bytes());
+                prev = x;
+            }
+        } else {
+            for i in (1..row.len()).rev() {
+                row[i] = row[i].wrapping_sub(row[i - 1]);
+            }
+        }
+    }
+    out
+}
+
+/// The same document with every channel and the merged image re-encoded as ZIP (`comp` 2) or
+/// ZIP with prediction (3), appended to the file data.
+fn rezip(p: &Psd, comp: u16) -> Psd {
+    let mut z = p.clone();
+    let mut data = p.data.to_vec();
+    let (depth, predict) = (p.depth, comp == 3);
+    let deflate = |body: &[u8]| {
+        let mut v = comp.to_be_bytes().to_vec();
+        v.extend(miniz_oxide::deflate::compress_to_vec_zlib(body, 6));
+        v
+    };
+    for (l, zl) in p.layers.iter().zip(&mut z.layers) {
+        for (c, zc) in l.channels.iter().zip(&mut zl.channels) {
+            let w = if c.id == -2 { l.mask.map_or(0, |m| m.rect.width() as usize) } else { l.rect.width() as usize };
+            let raw = &p.data[c.offset + 2..c.offset + c.len];
+            zc.offset = data.len();
+            data.extend(deflate(&zip_body(raw, w, depth, predict)));
+            zc.len = data.len() - zc.offset;
+        }
+    }
+    // The merged image: one ZIP stream holding all planes.
+    let (w, h) = (p.width as usize, p.height as usize);
+    let plane = w * h * usize::from(depth / 8);
+    let mut all = vec![];
+    for c in 0..usize::from(p.channels) {
+        let at = p.merged_offset + 2 + c * plane;
+        all.extend(zip_body(&p.data[at..at + plane], w, depth, predict));
+    }
+    z.merged_offset = data.len();
+    data.extend(deflate(&all));
+    z.data = data.into();
+    z
+}
+
+#[test]
+fn zip_channels_decode_like_raw_ones() {
+    for depth in [8, 16] {
+        let raw = Psd::parse(write(&doc_with_layers(depth, ColorMode::Rgb, false))).unwrap();
+        for comp in [2, 3] {
+            let zip = rezip(&raw, comp);
+            assert_eq!(zip.composite().unwrap().data, raw.composite().unwrap().data, "composite {depth} bit, compression {comp}");
+            for (i, canvas) in [(0, true), (0, false), (1, false), (2, false), (2, true)] {
+                let (want, got) = (raw.layer_pixels(i, canvas).unwrap(), zip.layer_pixels(i, canvas).unwrap());
+                assert_eq!(got.data, want.data, "layer {i} canvas {canvas}, {depth} bit, compression {comp}");
+            }
+        }
+    }
+}
+
+#[test]
+fn rle_composite_matches_the_raw_one() {
+    for depth in [8, 16] {
+        let raw = Psd::parse(write(&doc_with_layers(depth, ColorMode::Rgb, false))).unwrap();
+        let rle = Psd::parse(write(&doc_with_layers(depth, ColorMode::Rgb, true))).unwrap();
+        assert_eq!(rle.composite().unwrap().data, raw.composite().unwrap().data, "{depth} bit");
+        assert_eq!(rle.layer_pixels(2, true).unwrap().data, raw.layer_pixels(2, true).unwrap().data, "{depth} bit");
+    }
+}

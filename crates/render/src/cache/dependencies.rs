@@ -78,7 +78,7 @@ impl Dependencies<'_> {
         hash_debug(self.h, layer);
         hash_values(self.h, ctx, layer, &layer.props);
         hash_debug(self.h, &ctx.world_matrix(layer));
-        if super::time_dependent(layer) {
+        if super::time_dependent(layer, true) {
             layer.layer_time(ctx.time).0.hash(self.h);
         }
         match layer.source {

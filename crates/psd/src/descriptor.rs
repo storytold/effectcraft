@@ -174,17 +174,17 @@ fn read_value(r: &mut Reader, ty: &[u8; 4], depth: usize) -> Result<DValue> {
             let n = r.u32()?;
             DValue::ObjectArray(n, read_descriptor_at(r, depth + 1)?)
         }
-        b"doub" => DValue::Double(r.f64()?),
+        b"doub" => DValue::Double(r.f64_finite()?),
         b"UntF" => {
             let unit = String::from_utf8_lossy(&r.tag()?).into_owned();
-            DValue::UnitFloat(unit, r.f64()?)
+            DValue::UnitFloat(unit, r.f64_finite()?)
         }
         b"UnFl" => {
             let unit = String::from_utf8_lossy(&r.tag()?).into_owned();
             let n = r.u32()? as usize;
             let mut v = Vec::with_capacity(n.min(1024));
             for _ in 0..n {
-                v.push(r.f64()?);
+                v.push(r.f64_finite()?);
             }
             DValue::UnitFloats(unit, v)
         }
@@ -248,7 +248,11 @@ fn read_value(r: &mut Reader, ty: &[u8; 4], depth: usize) -> Result<DValue> {
 
 // ---------------------------------------------------------------- writing
 
-fn put_u32(out: &mut Vec<u8>, v: u32) {
+pub(crate) fn put_u16(out: &mut Vec<u8>, v: u16) {
+    out.extend_from_slice(&v.to_be_bytes());
+}
+
+pub(crate) fn put_u32(out: &mut Vec<u8>, v: u32) {
     out.extend_from_slice(&v.to_be_bytes());
 }
 
@@ -261,12 +265,19 @@ fn put_id(out: &mut Vec<u8>, id: &str) {
     out.extend_from_slice(id.as_bytes());
 }
 
-pub(crate) fn put_unicode(out: &mut Vec<u8>, s: &str) {
-    let v: Vec<u16> = s.encode_utf16().chain(std::iter::once(0)).collect();
+/// A length-prefixed UTF-16BE string (the length counts code units, including the NUL when
+/// `terminated`).
+pub(crate) fn put_utf16(out: &mut Vec<u8>, s: &str, terminated: bool) {
+    let v: Vec<u16> = s.encode_utf16().chain(terminated.then_some(0)).collect();
     put_u32(out, v.len() as u32);
     for c in v {
-        out.extend_from_slice(&c.to_be_bytes());
+        put_u16(out, c);
     }
+}
+
+/// A descriptor Unicode string: NUL-terminated.
+pub(crate) fn put_unicode(out: &mut Vec<u8>, s: &str) {
+    put_utf16(out, s, true);
 }
 
 /// Serialise a descriptor (without the version field).

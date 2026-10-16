@@ -90,7 +90,8 @@ pub fn bindables(ui: &[UiCommand]) -> Vec<Bindable> {
         let key = binding_key(&e.command, &e.params);
         // A plain entry also gets its command's further default keys.
         let alt = if e.params.is_null() { crate::commands::find(&e.command).map_or(&[][..], |c| c.alt_shortcuts) } else { &[] };
-        let defaults = e.shortcut.as_deref().into_iter().chain(alt.iter().copied()).filter_map(normalize).collect();
+        let defaults =
+            e.shortcut.as_deref().into_iter().chain(e.alt_shortcuts.iter().map(String::as_str)).chain(alt.iter().copied()).filter_map(normalize).collect();
         push(
             Bindable {
                 key,
@@ -150,6 +151,7 @@ pub fn normalize(s: &str) -> Option<String> {
     }
     let (mut ctrl, mut cmd, mut alt, mut shift) = (false, false, false, false);
     let mut key: Option<String> = None;
+    let mut physical = false;
     // `Cmd++` / `+` name the plus key.
     let (head, plus) = match s.strip_suffix("++") {
         Some(h) => (h, true),
@@ -176,6 +178,7 @@ pub fn normalize(s: &str) -> Option<String> {
     }
     for p in parts {
         match p.to_ascii_lowercase().as_str() {
+            "physical" => physical = true,
             "cmd" | "command" | "meta" | "super" | "win" => cmd = true,
             "ctrl" | "control" => ctrl = true,
             "alt" | "opt" | "option" => alt = true,
@@ -187,7 +190,7 @@ pub fn normalize(s: &str) -> Option<String> {
         key = Some("+".into());
     }
     let key = key?;
-    let mut out = String::new();
+    let mut out = if physical { "Physical+".to_string() } else { String::new() };
     for (on, m) in [(ctrl, "Ctrl+"), (cmd, "Cmd+"), (alt, "Alt+"), (shift, "Shift+")] {
         if on {
             out.push_str(m);

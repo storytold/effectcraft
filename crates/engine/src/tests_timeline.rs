@@ -597,14 +597,41 @@ fn reset_gives_a_property_its_default() {
     assert_eq!(v(&s, "transform/anchor"), KV::Vec3([50.0, 50.0, 0.0]), "the solid's centre");
     assert_eq!(v(&s, "transform/position"), KV::Vec3([200.0, 150.0, 0.0]), "the comp's centre");
     assert_eq!(v(&s, "transform/scale"), KV::Vec3([100.0; 3]));
-    assert_eq!(v(&s, "transform/rotation"), KV::Scalar(0.0));
-    assert!(!prop(&s, l, "transform/rotation").is_animated());
+    // Animated: the default becomes the key at the current time (0 s), the 1 s key stays (#1078).
+    let rot = prop(&s, l, "transform/rotation");
+    assert_eq!(rot.keys.len(), 2);
+    assert_eq!(rot.value_at(effectcraft_time::Tick::ZERO), KV::Scalar(0.0));
     assert_eq!(v(&s, "transform/opacity"), KV::Scalar(100.0));
     assert!(prop(&s, l, "transform/opacity").expr.is_none());
     assert_eq!(v(&s, "effects/#1/blurriness"), blur);
     // A given default still wins.
     s.execute("prop.reset", json!({"layer": l, "path": "transform/opacity", "default": 30})).unwrap();
     assert_eq!(v(&s, "transform/opacity"), KV::Scalar(30.0));
+}
+
+/// #1078: resetting an animated property keeps its keyframes and keys the default at the
+/// current time, as in After Effects; undo brings the old keys back.
+#[test]
+fn reset_keys_the_default_on_an_animated_property() {
+    let (mut s, l) = setup();
+    animate(&mut s, l, "transform/scale", &[(0.0, json!([50, 50, 100])), (2.0, json!([150, 150, 100]))]);
+    s.execute("time.set", json!({"time": 1})).unwrap();
+    s.execute("prop.reset", json!({"layer": l, "path": "transform/scale"})).unwrap();
+    let pr = prop(&s, l, "transform/scale");
+    let at = |sec: f64| pr.value_at(effectcraft_time::Tick::from_seconds_f64(sec));
+    assert_eq!(pr.keys.len(), 3, "the 0 s and 2 s keys stay, one is added at 1 s");
+    assert_eq!(at(0.0), KV::Vec3([50.0, 50.0, 100.0]));
+    assert_eq!(at(1.0), KV::Vec3([100.0; 3]));
+    assert_eq!(at(2.0), KV::Vec3([150.0, 150.0, 100.0]));
+    // On a key, the key takes the default.
+    s.execute("time.set", json!({"time": 2})).unwrap();
+    s.execute("prop.reset", json!({"layer": l, "path": "transform/scale"})).unwrap();
+    let pr = prop(&s, l, "transform/scale");
+    assert_eq!(pr.keys.len(), 3);
+    assert_eq!(pr.value_at(effectcraft_time::Tick::from_seconds_f64(2.0)), KV::Vec3([100.0; 3]));
+    s.execute("edit.undo", json!({})).unwrap();
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(prop(&s, l, "transform/scale").keys.len(), 2);
 }
 
 /// #363: dropped on one of the target's values the pick whip picks that dimension
@@ -750,6 +777,31 @@ fn reveal_shortcuts_take_in_time_remap() {
     }
 }
 
+/// U (and the animation reveal) still show Time Remap after its keys are gone: enabling
+/// remapping is itself the modification, so a keyless remap must not vanish from U (#990).
+#[test]
+fn reveal_shortcuts_take_in_keyless_time_remap() {
+    let (mut s, l) = precomp_setup();
+    let revealed = |s: &mut Session, kind: &str| -> Vec<u64> {
+        let r = s.execute("anim.reveal", json!({"kind": kind})).unwrap();
+        r["props"].as_array().unwrap().iter().filter(|p| p["layer"] == l).filter_map(|p| p["prop"].as_u64()).collect()
+    };
+    s.execute("layer.enableTimeRemap", json!({})).unwrap();
+    let uid = prop(&s, l, "timeRemap").uid;
+    assert_eq!(prop(&s, l, "timeRemap").keys.len(), 2);
+    // Delete both keys one at a time; remapping stays enabled.
+    for _ in 0..2 {
+        let t = prop(&s, l, "timeRemap").keys[0].time.seconds();
+        s.execute("keys.select", json!({"keys": [{"layer": l, "prop": uid, "time": t}]})).unwrap();
+        s.execute("edit.clear", json!({})).unwrap();
+    }
+    let tr = prop(&s, l, "timeRemap");
+    assert!(tr.keys.is_empty(), "remapping is still enabled, with no keys");
+    for kind in ["keyframes", "animation", "modified"] {
+        assert_eq!(revealed(&mut s, kind), vec![uid], "{kind}");
+    }
+}
+
 /// UU on a layer nothing was changed on shows nothing, whatever its kind: cameras, lights, text
 /// and nulls have their own Transform defaults, and Separate Dimensions keeps the comp centre.
 #[test]
@@ -812,6 +864,27 @@ fn modified_reveal_takes_in_options_and_layer_styles() {
     let light = s.execute("layer.newLight", json!({})).unwrap()["layer"].as_u64().unwrap();
     s.execute("prop.set", json!({"layer": light, "path": "lightOptions/intensity", "value": 40})).unwrap();
     assert_eq!(modified(&mut s, light), ["/lightOptions/intensity"]);
+}
+
+/// UU shows the parameters of an effect that differ from a new instance's, not the whole effect:
+/// a just-applied effect shows nothing, and a reset parameter goes again.
+#[test]
+fn modified_reveal_shows_changed_effect_parameters_only() {
+    let (mut s, l) = setup();
+    s.execute("layer.select", json!({"layers": [l]})).unwrap();
+    s.execute("effect.apply", json!({"effect": "ec.blur.gaussian"})).unwrap();
+    let modified = |s: &mut Session| -> Vec<String> {
+        let r = s.execute("anim.reveal", json!({"kind": "modified"})).unwrap();
+        r["props"].as_array().unwrap().iter().filter_map(|p| p["prop"].as_u64()).map(|u| path_of(s, l, u)).collect()
+    };
+    assert!(modified(&mut s).is_empty(), "{:?}", modified(&mut s));
+    s.execute("prop.set", json!({"layer": l, "path": "effects/#1/blurriness", "value": 12})).unwrap();
+    assert_eq!(modified(&mut s), ["/effects/ec.blur.gaussian/blurriness"]);
+    // Keyframed at its default value: animated, so still shown.
+    s.execute("prop.set", json!({"layer": l, "path": "effects/#1/blurriness", "value": 0})).unwrap();
+    assert!(modified(&mut s).is_empty(), "{:?}", modified(&mut s));
+    s.execute("prop.toggleAnimation", json!({"layer": l, "path": "effects/#1/blurriness"})).unwrap();
+    assert_eq!(modified(&mut s), ["/effects/ec.blur.gaussian/blurriness"]);
 }
 
 /// Enable Time Remapping on a layer extended past its source's end (its last frame frozen) puts

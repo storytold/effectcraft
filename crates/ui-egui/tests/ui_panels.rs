@@ -172,6 +172,8 @@ fn saved_workspaces_persist_across_sessions() {
 #[test]
 fn saved_workspace_is_listed_in_the_workspace_menu() {
     let mut h = harness();
+    // Saving needs a settings folder.
+    h.state_mut().session.config = Some(Arc::new(MemoryConfig::default()));
     let ctx = h.ctx.clone();
     effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "window.workspace", json!({"name": "Minimal"})).unwrap();
     effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "window.saveWorkspaceAs", json!({"name": "My Layout"})).unwrap();
@@ -464,6 +466,69 @@ fn essential_graphics_scale_keeps_constrain_proportions() {
     drag_x(&mut h, &format!("{value}.0"), 40.0);
     let unlinked = scale(&h);
     assert!(unlinked[0] > linked[0] && unlinked[1] == linked[1], "unlinked, X moves alone: {unlinked:?}");
+}
+
+/// #956: the Properties panel's Scale chain link shares the Timeline's Constrain Proportions
+/// state: unlinking in Properties unlinks the Timeline row too, and X/Y scale together only
+/// while linked.
+#[test]
+fn properties_scale_link_shares_the_timeline_state() {
+    let mut h = harness();
+    let layer = h.state().session.active_comp().unwrap().layers[0].id.0;
+    h.state_mut().session.execute("layer.select", json!({"layers": [layer]})).unwrap();
+    h.state_mut().session.execute("prop.set", json!({"layer": layer, "path": "transform/scale", "value": [100.0, 50.0]})).unwrap();
+    open(&mut h, "properties");
+    let uid = {
+        let comp = h.state().session.active_comp().unwrap();
+        let l = comp.layers.iter().find(|l| l.id.0 == layer).unwrap();
+        l.props.prop("transform/scale").unwrap().uid
+    };
+    let link = format!("properties.prop.{uid}.constrain");
+    assert!(h.state().auto.find(&link).is_some(), "the chain link is drawn");
+    let scale = |h: &Harness<'_, EffectcraftApp>| {
+        let comp = h.state().session.active_comp().unwrap();
+        let l = comp.layers.iter().find(|l| l.id.0 == layer).unwrap();
+        l.props.prop("transform/scale").unwrap().value.components()
+    };
+    // Linked: dragging X scales Y with it.
+    drag_x(&mut h, &format!("properties.prop.{uid}.value.0"), 40.0);
+    let linked = scale(&h);
+    assert!(linked[0] > 100.0, "{linked:?}");
+    assert!((linked[1] / linked[0] - 0.5).abs() < 1e-6, "Y follows X in proportion: {linked:?}");
+    // Unlinking in Properties writes the shared state, so the Timeline row unlinks too.
+    click(&mut h, &link);
+    assert!(h.state().ui.timeline.unlinked.contains(&uid), "unlinking writes the shared state");
+    drag_x(&mut h, &format!("properties.prop.{uid}.value.0"), 40.0);
+    let unlinked = scale(&h);
+    assert!(unlinked[0] > linked[0] && unlinked[1] == linked[1], "unlinked, X moves alone: {unlinked:?}");
+    // Re-linking clears it again.
+    click(&mut h, &link);
+    assert!(!h.state().ui.timeline.unlinked.contains(&uid), "re-linking clears the shared state");
+}
+
+/// Gap 7: the Backgrounds category is listed under * Animation Presets and a preset applies on double-click.
+#[test]
+fn background_presets_are_listed_and_apply() {
+    let mut h = harness();
+    let layer = h.state().session.active_comp().unwrap().layers[0].id.0;
+    h.state_mut().session.execute("layer.select", json!({"layers": [layer]})).unwrap();
+    open(&mut h, "effectsPresets");
+    h.state_mut().ui.effects_search = "slow fog".into();
+    h.run_steps(3);
+    assert!(h.state().auto.find("effects.category.presets/Backgrounds").is_some(), "the Backgrounds folder is listed");
+    let e = h.state().auto.find("effects.preset.builtin.slowFog").expect("Slow Fog is listed").clone();
+    let p: Pos2 = pos2(e.rect[0] + e.rect[2] / 2.0, e.rect[1] + e.rect[3] / 2.0);
+    h.input_mut().events.push(Event::PointerMoved(p));
+    h.step();
+    for _ in 0..2 {
+        for pressed in [true, false] {
+            h.input_mut().events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() });
+        }
+    }
+    h.run_steps(3);
+    let comp = h.state().session.active_comp().unwrap();
+    let names: Vec<String> = comp.layers[0].effects().unwrap().groups().map(|g| g.name.clone()).collect();
+    assert_eq!(names, ["Fractal Noise", "Tint"]);
 }
 
 /// #757: Effects & Presets lists the built-in Transitions presets under * Animation Presets;

@@ -185,6 +185,7 @@ fn native_host(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsV
             t: secs(num(args, 8, ctx)?),
         },
         14 => Req::Project,
+        15 => Req::SourceInfo { comp: id(args, 1, ctx)?, layer: id(args, 2, ctx)? },
         _ => return Err(JsNativeError::typ().with_message("unknown host request").into()),
     };
     let found = FRAMES.with(|f| {

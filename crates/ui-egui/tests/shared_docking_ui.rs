@@ -273,6 +273,29 @@ fn float_command_rejects_malformed_rectangles_atomically() {
     assert!(!app.edit_layout(|layout| layout.apply(Action::Float { panel: PanelKind::Project, rect: [1.0, 2.0, 300.0, 200.0] }).is_ok()));
 }
 
+/// A floating panel dragged past the window's bottom edge is drawn where its rect says: it was
+/// shifted back into the window while its rect kept moving, and its strip then clashed with the
+/// floating area's own widget ("Double use of widget ID").
+#[test]
+fn floating_panel_dragged_past_the_window_edge_is_drawn_at_its_rect() {
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(Session::default()));
+    h.run_steps(3);
+    let ctx = h.ctx.clone();
+    effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "window.floatPanel", json!({"panel": "Preview", "rect": [600.0, 400.0, 360.0, 300.0]})).unwrap();
+    h.run_steps(3);
+    let strip = rect(&h, "panel.float.0.move");
+    let from = pos2(strip.right() - 24.0, strip.center().y);
+    drag(&mut h, from, from + vec2(40.0, 420.0), Modifiers::NONE);
+    let moved = h.state().ui.floating[0].rect;
+    assert!(moved[1] + moved[3] > 1000.0, "the panel hangs past the bottom edge: {moved:?}");
+    let strip = rect(&h, "panel.float.0.move");
+    assert_eq!([strip.min.x, strip.min.y], [moved[0], moved[1]]);
+    // The strip still moves it from there.
+    let from = pos2(strip.right() - 24.0, strip.center().y);
+    drag(&mut h, from, from - vec2(30.0, 200.0), Modifiers::NONE);
+    assert_eq!(h.state().ui.floating[0].rect[1], moved[1] - 200.0);
+}
+
 fn action_state(h: &Harness<'_, EffectcraftApp>, action: &str) -> serde_json::Value {
     json!({"action": action, "dock": h.state().ui.dock, "floating": h.state().ui.floating, "focused": h.state().ui.focused})
 }

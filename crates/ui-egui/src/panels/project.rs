@@ -361,8 +361,53 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         // The details stay inside the panel (a margin on the right), cut short with "…".
         let tx = thumb.max.x + 10.0;
         let max_w = head.max.x - 10.0 - tx;
-        let r = widgets::text_fit(&p, pos2(tx, thumb.min.y + 6.0), Align2::LEFT_CENTER, &it.name, Tokens::semibold(12.0), max_w, t.text);
-        app.auto.add("project.details.name", r, &it.name);
+        // "Name ▾, used 3 times" (After Effects): the layers in every comp whose source the item
+        // is; the ▾ lists those comps and opens the one picked. Nothing for an unused item.
+        let users = app.session.project.item_users(it.id);
+        let count = users.iter().fold(0usize, |n, (_, k)| n.saturating_add(*k));
+        let name_y = thumb.min.y + 6.0;
+        if count == 0 {
+            let r = widgets::text_fit(&p, pos2(tx, name_y), Align2::LEFT_CENTER, &it.name, Tokens::semibold(12.0), max_w, t.text);
+            app.auto.add("project.details.name", r, &it.name);
+        } else {
+            let used = if count == 1 { crate::i18n::tr("used once").to_owned() } else { crate::i18n::tr_args("used {} times", &[&count]) };
+            let used = format!(", {used}");
+            let used_w = p.layout_no_wrap(used.clone(), Tokens::ui(11.0), t.text_dim).size().x;
+            let arrow_w = 14.0;
+            // The name gives way first, but keeps at least half the room; the count is cut after it.
+            let name_max = (max_w - arrow_w - used_w).max(max_w * 0.5);
+            let r = widgets::text_fit(&p, pos2(tx, name_y), Align2::LEFT_CENTER, &it.name, Tokens::semibold(12.0), name_max, t.text);
+            app.auto.add("project.details.name", r, &it.name);
+            let ar = Rect::from_min_size(pos2(r.max.x + 1.0, name_y - 7.0), vec2(arrow_w, 14.0));
+            let tip = crate::i18n::tr("Compositions that use this item");
+            let aresp = ui.interact(ar, egui::Id::new("proj-used-in"), Sense::click()).on_hover_text(tip);
+            icons::paint(&p, Rect::from_center_size(ar.center(), vec2(9.0, 9.0)), Icon::ChevronDown, if aresp.hovered() { t.text } else { t.text_dim });
+            app.auto.add("project.details.usedIn", ar, tip);
+            // The comma sits right after the arrow (its glyph ends short of the hit area).
+            let ux = ar.max.x - 3.0;
+            let room = (head.max.x - 10.0 - ux).max(0.0);
+            let ur = widgets::text_fit(&p, pos2(ux, name_y), Align2::LEFT_CENTER, &used, Tokens::ui(11.0), room, t.text_dim);
+            app.auto.add("project.details.used", ur, &used);
+            let names: Vec<(u64, String, usize)> =
+                users.iter().map(|(cid, n)| (cid.0, app.session.project.item(*cid).map(|c| c.name.clone()).unwrap_or_default(), *n)).collect();
+            let mut open = None;
+            egui::Popup::menu(&aresp).show(|ui| {
+                for (cid, name, n) in &names {
+                    let label = if *n == 1 { name.clone() } else { format!("{name} ({n})") };
+                    let b = ui.button(label);
+                    app.auto.add(&format!("project.details.usedIn.{cid}"), b.rect, name);
+                    if b.clicked() {
+                        open = Some(*cid);
+                        ui.close();
+                    }
+                }
+            });
+            if let Some(cid) = open
+                && let Err(e) = crate::menus::invoke(app, &ctx, "comp.open", json!({"comp": cid}))
+            {
+                app.ui.status = e;
+            }
+        }
         let mut lines = vec![];
         if let Some((w, h)) = it.dimensions() {
             lines.push(format!("{w} x {h} (1.00)"));
@@ -579,10 +624,21 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name)
             });
             if tresp.clicked() {
-                if open {
-                    app.ui.project_open_folders.remove(&id.0);
-                } else {
-                    app.ui.project_open_folders.insert(id.0);
+                // Alt/Cmd-click twirls every folder inside it too.
+                let mut ids = vec![*id];
+                if ui.input(|i| i.modifiers.alt || i.modifiers.command) {
+                    let mut at = 0;
+                    while let Some(f) = ids.get(at).copied() {
+                        ids.extend(app.session.project.children(Some(f)).into_iter().filter(|c| c.is_folder()).map(|c| c.id));
+                        at += 1;
+                    }
+                }
+                for f in ids {
+                    if open {
+                        app.ui.project_open_folders.remove(&f.0);
+                    } else {
+                        app.ui.project_open_folders.insert(f.0);
+                    }
                 }
             }
             app.auto.add(&format!("project.item.{}.twirl", id.0), tw, &it.name);
@@ -662,11 +718,14 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 let cell = Rect::from_min_max(pos2(x0 + 27.0, r.min.y + 1.0), pos2((x0 + 33.0 + g.size().x).min(name_clip.max.x), r.max.y - 1.0));
                 lp.with_clip_rect(name_clip.expand2(vec2(3.0, 0.0))).rect_filled(cell, 0.0, Color32::from_rgb(0xa6, 0xa6, 0xa6));
             }
-            lp.with_clip_rect(name_clip).text(
+            // Long names end in "…" before the label column instead of being cut mid-glyph.
+            widgets::text_fit(
+                &lp.with_clip_rect(name_clip),
                 pos2(x0 + 30.0, r.center().y),
                 Align2::LEFT_CENTER,
                 &it.name,
                 Tokens::ui(12.0),
+                name_clip.max.x - (x0 + 30.0) - 2.0,
                 if selected { Color32::from_gray(0x16) } else { t.text },
             );
         }
@@ -782,6 +841,11 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         }
         let footage = matches!(it.kind, ItemKind::Footage(_));
         crate::widgets::context_menu(&resp, |ui| {
+            // First on a comp, as in After Effects; for this comp, not the viewer's (#1058).
+            if matches!(it.kind, ItemKind::Comp(_)) && ui.button(crate::i18n::tr("Composition Settings…")).clicked() {
+                actions.push(("comp.settings".into(), json!({"comp": id.0})));
+                ui.close();
+            }
             if ui.button(crate::i18n::tr("Delete")).clicked() {
                 actions.push(("project.delete".into(), json!({"items": targets(app, *id, selected)})));
                 ui.close();
@@ -806,6 +870,18 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             // above): several items ask how in its dialog, as in After Effects (#360).
             if ui.button(crate::i18n::tr("New Comp from Selection")).clicked() {
                 actions.push(("file.newCompFromSelection".into(), json!({})));
+                ui.close();
+            }
+            // File ▸ Replace Footage ▸ With Precomposition: every layer using the item uses a
+            // new composition holding it instead. The label says how many layers that changes.
+            let uses: usize = app.session.project.item_users(*id).iter().map(|(_, n)| n).sum();
+            let label = match uses {
+                0 => crate::i18n::tr("Replace with Precomposition").to_owned(),
+                1 => format!("{} ({})", crate::i18n::tr("Replace with Precomposition"), crate::i18n::tr("used once")),
+                n => format!("{} ({})", crate::i18n::tr("Replace with Precomposition"), crate::i18n::tr_args("used {} times", &[&n])),
+            };
+            if (footage || matches!(it.kind, ItemKind::Solid(_))) && ui.button(label).clicked() {
+                actions.push(("file.replaceWithPrecomp".into(), json!({"item": id.0})));
                 ui.close();
             }
             ui.separator();

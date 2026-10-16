@@ -199,7 +199,7 @@ fn capabilities(s: &mut Session, _: &Value) -> Result<Value> {
 }
 
 /// The headline of `docs/target-app-parity.md` (kept in sync by hand at each re-measure).
-const PARITY: &str = "≈91% feature breadth and ≈45% ready for real work (estimated parity with After Effects 2026 26.5, stage alpha); all After Effects effects present (306 registered)";
+const PARITY: &str = "≈91% feature breadth and ≈45% ready for real work (estimated parity with After Effects 2026 26.5, stage alpha); all After Effects effects present (307 registered)";
 
 fn state(s: &mut Session, _: &Value) -> Result<Value> {
     Ok(serde_json::to_value(&s.state).unwrap_or_default())

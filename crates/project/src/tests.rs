@@ -182,3 +182,27 @@ fn project_files_remember_the_open_comps() {
     let odd = text.replacen(&format!("\"activeComp\": {}", cid.0), "\"activeComp\": \"Main\"", 1);
     assert_eq!(crate::saved_view(&odd), crate::SavedView { active_comp: None, open_comps: vec![cid] });
 }
+
+/// The Project panel's "used N times": layers in every comp that use the item directly, a precomp
+/// counted by the comps it is nested in, and an unused item used by nothing.
+#[test]
+fn item_users_count_layers_in_every_comp() {
+    let (mut p, main) = project_with_layer();
+    let sid = p.find_by_name("Red Solid").unwrap().id;
+    let comp = p.comp(main).unwrap().clone();
+    let pre = p.add_item("A Precomp", effectcraft_color::Label::Sandstone, None, ItemKind::Comp(comp.clone().into()));
+    let unused = p.add_item("Unused", effectcraft_color::Label::Red, None, ItemKind::Solid(Solid { color: [0.0; 3], width: 8, height: 8, pixel_aspect: 1.0 }));
+    // Two more layers of the solid in the precomp (it starts with one, cloned from Main), and the
+    // precomp nested in Main.
+    for _ in 0..2 {
+        let l = build::layer(&mut p, &comp, "Red Solid", LayerSource::Solid { item: sid }, (1920, 1080), None);
+        p.comp_mut(pre).unwrap().layers.push(l);
+    }
+    let nest = build::layer(&mut p, &comp, "A Precomp", LayerSource::Comp { item: pre }, (1920, 1080), None);
+    p.comp_mut(main).unwrap().layers.push(nest);
+    // Ordered by comp name: "A Precomp" before "Main".
+    assert_eq!(p.item_users(sid), vec![(pre, 3), (main, 1)]);
+    assert_eq!(p.item_users(pre), vec![(main, 1)]);
+    assert!(p.item_users(unused).is_empty());
+    assert!(p.item_users(main).is_empty());
+}

@@ -30,6 +30,7 @@ pub mod learn;
 pub mod markers_ui;
 pub mod media_panels;
 pub mod misc;
+pub mod object_matte_tool;
 pub mod paint_panels;
 pub mod panel_kit;
 pub mod path_vr_panels;

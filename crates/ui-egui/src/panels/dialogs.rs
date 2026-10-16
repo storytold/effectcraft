@@ -20,6 +20,9 @@ pub struct DialogState {
     /// from them, as in After Effects).
     pub last_new_comp: Option<CompDraft>,
     pub editing_existing: bool,
+    /// The composition Composition Settings edits (the Project panel's row menu can pick one
+    /// the viewer doesn't show).
+    pub editing_comp: Option<ItemId>,
     pub solid_name: String,
     pub solid_color: [f32; 3],
     pub solid_size: [u32; 2],
@@ -62,6 +65,8 @@ pub struct DialogState {
     pub delete_items: super::delete_items::Pending,
     /// The Gradient Editor's draft and the property it edits.
     pub gradient: super::gradient_editor::Draft,
+    /// The user template the Delete Template prompt asks about: its id and name.
+    pub delete_template: Option<(String, String)>,
 }
 
 pub fn open_new_comp(app: &mut EffectcraftApp) {
@@ -75,6 +80,11 @@ pub fn open_new_comp(app: &mut EffectcraftApp) {
 
 pub fn open_comp_settings(app: &mut EffectcraftApp) -> Result<(), String> {
     let cid = app.session.active_comp_id().ok_or("no composition is open")?;
+    open_comp_settings_for(app, cid)
+}
+
+/// Composition Settings on `cid`, open in the viewer or not.
+pub fn open_comp_settings_for(app: &mut EffectcraftApp, cid: ItemId) -> Result<(), String> {
     let c = app.session.project.comp(cid).ok_or("no composition")?;
     app.dialog_state.comp = CompDraft {
         name: app.session.project.item(cid).map(|i| i.name.clone()).unwrap_or_default(),
@@ -95,6 +105,7 @@ pub fn open_comp_settings(app: &mut EffectcraftApp) -> Result<(), String> {
         ..Default::default()
     };
     app.dialog_state.editing_existing = true;
+    app.dialog_state.editing_comp = Some(cid);
     app.dialog = Some(Dialog::CompSettings);
     Ok(())
 }
@@ -153,7 +164,7 @@ pub fn route_layer_settings(app: &mut EffectcraftApp, id: &str, params: &Value) 
 }
 
 /// The room a modal dialog may take: the window less a margin.
-fn modal_space(ctx: &egui::Context) -> egui::Vec2 {
+pub(crate) fn modal_space(ctx: &egui::Context) -> egui::Vec2 {
     (ctx.content_rect().size() - vec2(48.0, 48.0)).max(vec2(120.0, 80.0))
 }
 
@@ -178,18 +189,47 @@ fn modal_with_scroll(ctx: &egui::Context, title: &str, size: egui::Vec2, t: &Tok
 /// window.
 pub(crate) fn modal_fit(ctx: &egui::Context, title: &str, size: egui::Vec2, t: &Tokens, body: impl FnOnce(&mut egui::Ui, f32)) {
     let size = size.min(modal_space(ctx));
-    egui::Modal::new(egui::Id::new(("modal", title)))
+    let id = egui::Id::new(("modal", title));
+    // Dragging the title row moves the dialog off what it edits. The offset is kept within the
+    // window, so dragging back never has to undo a part the dialog could not follow.
+    let offset_id = id.with("offset");
+    let room = ((ctx.content_rect().size() - size) * 0.5).max(vec2(0.0, 0.0));
+    let offset = ctx.data(|d| d.get_temp::<egui::Vec2>(offset_id)).unwrap_or_default().clamp(-room, room);
+    egui::Modal::new(id)
+        .area(egui::Modal::default_area(id).anchor(Align2::CENTER_CENTER, offset))
         .backdrop_color(Color32::from_black_alpha(120))
         .frame(egui::Frame::window(&ctx.style_of(ctx.theme())).fill(t.panel_bg).inner_margin(egui::Margin::same(18)))
         .show(ctx, |ui| {
             ui.set_width(size.x - 36.0);
             ui.set_min_height(size.y - 36.0);
             // The id stays keyed on the untranslated source, so switching language cannot move it.
-            ui.label(egui::RichText::new(tr(title)).font(Tokens::semibold(15.0)).color(t.tab_text_active));
+            let head = ui.label(egui::RichText::new(tr(title)).font(Tokens::semibold(15.0)).color(t.tab_text_active));
+            let row = Rect::from_x_y_ranges(ui.max_rect().x_range(), head.rect.y_range());
+            let grip = ui.interact(row, id.with("grip"), Sense::drag()).on_hover_cursor(egui::CursorIcon::Grab);
+            if grip.dragged() {
+                let moved = (offset + grip.drag_delta()).clamp(-room, room);
+                ui.ctx().data_mut(|d| d.insert_temp(offset_id, moved));
+            }
             ui.add_space(10.0);
             let title_h = ui.cursor().top() - ui.min_rect().top();
             body(ui, (size.y - 36.0 - title_h).max(40.0));
         });
+}
+
+/// The buttons of a [`modal_fit`] body of `height`, kept in view: `footer` lays them out first,
+/// at the bottom (bottom up: its first row is the lowest), and the rest of the body gets the room
+/// above them. Returns that room (a left-to-right row, clipped to it, so a long or wide body
+/// scrolls or clips under the buttons instead of pushing them out of the dialog) and its height.
+pub(crate) fn above_footer(ui: &mut egui::Ui, height: f32, footer: impl FnOnce(&mut egui::Ui)) -> (egui::Ui, f32) {
+    let area = ui.allocate_space(vec2(ui.available_width(), height)).1;
+    let mut foot = ui.new_child(egui::UiBuilder::new().max_rect(area).layout(egui::Layout::bottom_up(egui::Align::Min)));
+    footer(&mut foot);
+    foot.add_space(8.0);
+    let body_h = (foot.min_rect().top() - area.top()).max(0.0);
+    let room = Rect::from_min_size(area.min, vec2(area.width(), body_h));
+    let mut body = ui.new_child(egui::UiBuilder::new().max_rect(room).layout(egui::Layout::left_to_right(egui::Align::Min)));
+    body.set_clip_rect(room.intersect(body.clip_rect()));
+    (body, body_h)
 }
 
 pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context) {
@@ -221,6 +261,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context) {
         Dialog::UnsavedChanges => super::unsaved::show(app, ctx, &t),
         Dialog::DeleteItems => super::delete_items::show(app, ctx, &t),
         Dialog::GradientEditor => super::gradient_editor::show(app, ctx, &t),
+        Dialog::DeleteTemplate => super::templates::show_delete(app, ctx, &t),
     }
 }
 
@@ -362,7 +403,10 @@ fn comp_settings(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens, exis
     app.dialog_state.comp = d;
     match result {
         Some(serde_json::Value::Null) => app.dialog = None,
-        Some(params) => {
+        Some(mut params) => {
+            if existing && let (Some(cid), Some(m)) = (app.dialog_state.editing_comp, params.as_object_mut()) {
+                m.insert("comp".into(), json!(cid.0));
+            }
             let r = if existing { app.session.execute("comp.settings", params) } else { app.session.execute("comp.new", params) };
             if !existing && r.is_ok() {
                 app.dialog_state.last_new_comp = Some(app.dialog_state.comp.clone());
@@ -389,11 +433,12 @@ pub(crate) fn press_key(app: &mut EffectcraftApp, ctx: &egui::Context, key: egui
 }
 
 /// The letter that answers the open confirmation with Cmd (Ctrl elsewhere): Cmd+D is Delete in
-/// Delete Items, Cmd+R is Revert in Revert Project. The native menu bar hands these keys back
+/// Delete Items, Delete Template and Delete Preset, Cmd+R is Revert in Revert Project. The native menu bar hands these keys back
 /// while the prompt is open ([`crate::native_menu::activate`]).
 pub(crate) fn command_key(app: &EffectcraftApp) -> Option<egui::Key> {
     match app.dialog? {
-        Dialog::DeleteItems => Some(egui::Key::D),
+        Dialog::DeleteItems | Dialog::DeleteTemplate => Some(egui::Key::D),
+        Dialog::Shortcuts if super::shortcut_editor::confirming(app) => Some(egui::Key::D),
         Dialog::UnsavedChanges if super::unsaved::is_revert(app) => Some(egui::Key::R),
         _ => None,
     }
@@ -568,7 +613,13 @@ fn palette(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
         .collect();
     modal(ctx, "Command Palette", vec2(560.0, 470.0), t, |ui| {
         let r = ui.add(egui::TextEdit::singleline(&mut q).hint_text(tr("Type a command or effect…")).desired_width(f32::INFINITY).font(Tokens::ui(14.0)));
-        r.request_focus();
+        // Take the keyboard when the palette opens (and if anything else takes it away), but not
+        // while the field already has it: egui's `request_focus` interrupts the IME composition,
+        // and asking on every frame cancelled the pinyin being typed, so no Chinese could be
+        // entered.
+        if !ctx.memory(|m| m.has_focus(r.id)) {
+            r.request_focus();
+        }
         ui.add_space(8.0);
         let sel = app.dialog_state.palette_sel.min(matches.len().saturating_sub(1));
         for (i, (label, id, params, sc)) in matches.iter().enumerate() {
@@ -633,6 +684,56 @@ mod tests {
             show(app, ui.ctx());
         });
         out.textures_delta.clear();
+    }
+
+    /// One frame with `events` in its input; returns what it asked the platform to do.
+    fn frame_with(app: &mut EffectcraftApp, ctx: &egui::Context, events: Vec<egui::Event>) -> egui::FullOutput {
+        let input = egui::RawInput { events, ..Default::default() };
+        let mut out = ctx.run_ui(input, |ui| {
+            app.auto.begin_frame();
+            show(app, ui.ctx());
+        });
+        out.textures_delta.clear();
+        out
+    }
+
+    /// The IME composing `text` so far (what the platform sends as the user types pinyin).
+    fn composing(text: &str) -> egui::Event {
+        egui::Event::Ime(egui::ImeEvent::Preedit { text: text.to_string(), active_range_chars: None })
+    }
+
+    /// Whether the frame asked the platform to cancel the composition in progress. winit does
+    /// that whenever egui's focus is requested (`Memory::request_focus` interrupts the IME), and
+    /// on Windows the IME then drops what is being typed.
+    fn cancels_composition(out: &egui::FullOutput) -> bool {
+        out.platform_output.ime.as_ref().is_some_and(|i| i.should_interrupt_composition)
+    }
+
+    /// The palette's search field used to take the keyboard on every frame it was drawn, and
+    /// asking egui for the focus interrupts the IME composition: the pinyin being typed was
+    /// cancelled as it was typed, so no Chinese could be entered.
+    #[test]
+    fn the_palette_leaves_a_pinyin_composition_alone() {
+        let (mut app, ctx) = app();
+        crate::menus::invoke(&mut app, &ctx, "app.commandPalette", json!({})).unwrap();
+        assert_eq!(app.dialog, Some(Dialog::CommandPalette));
+        // The field takes the keyboard when the palette opens.
+        frame(&mut app, &ctx);
+        // Typing pinyin: the composition goes on and nothing cancels it.
+        let mut typed = String::new();
+        for k in "nihao".chars() {
+            typed.push(k);
+            let out = frame_with(&mut app, &ctx, vec![composing(&typed)]);
+            assert!(out.platform_output.ime.is_some(), "the field owns the IME");
+            assert!(!cancels_composition(&out), "typing `{typed}` cancelled the composition");
+        }
+        // The whole composition is in the field (and in the query the next frame filters with).
+        assert_eq!(app.dialog_state.palette_query, "nihao");
+        // Something else taking the keyboard takes it away for a frame; the field claims it back
+        // (a request is what gets the keys back, and there is no composition to interrupt then).
+        ctx.memory_mut(|m| m.request_focus(egui::Id::new("elsewhere")));
+        assert!(frame_with(&mut app, &ctx, vec![]).platform_output.ime.is_none(), "the field lost the keyboard");
+        assert!(frame_with(&mut app, &ctx, vec![]).platform_output.ime.is_some(), "and takes it back");
     }
 
     fn solid_item(app: &EffectcraftApp, l: u64) -> ItemId {

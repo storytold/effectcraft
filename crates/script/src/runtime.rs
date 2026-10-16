@@ -151,7 +151,7 @@ pub(crate) fn exec(s: &mut Session, id: &str, params: J) -> Result<J, String> {
     if let Some(c) = target
         && prev != Some(c)
     {
-        s.state.active_comp = Some(c);
+        s.activate_comp(c);
     }
     if CREATES_LAYER.contains(&id) {
         s.state.selected_layers.clear();
@@ -163,7 +163,7 @@ pub(crate) fn exec(s: &mut Session, id: &str, params: J) -> Result<J, String> {
         && id != "comp.open"
     {
         match prev {
-            Some(p) if s.project.comp(p).is_some() => s.state.active_comp = Some(p),
+            Some(p) if s.project.comp(p).is_some() => s.activate_comp(p),
             _ => {
                 if !s.state.open_comps.contains(&c) {
                     s.state.open_comps.push(c);
@@ -547,9 +547,9 @@ pub(crate) fn script_error(e: &boa_engine::JsError, ctx: &mut Context, file: &st
     ScriptError { message, line, column, file: file.to_string() }
 }
 
-/// Line and column of an error: `at line N, col M` (syntax errors), else the innermost backtrace
-/// frame in the user's script (`file:line:col`), else (names boa can't place) the first use of
-/// the undefined name in `code`.
+/// Line and column of an error: `at line N, col M` (syntax errors), else the first use of an
+/// undefined name in `code` (boa places those at a function's start), else the innermost backtrace
+/// frame in the user's script (`file:line:col`).
 fn position(msg: &str, file: &str, code: &str) -> (Option<u32>, Option<u32>) {
     if let Some(i) = msg.find("at line ") {
         let rest = &msg[i + 8..];
@@ -563,28 +563,39 @@ fn position(msg: &str, file: &str, code: &str) -> (Option<u32>, Option<u32>) {
         let mut it = l[i..].split([':', ')']);
         Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?))
     };
+    // `ReferenceError: name is not defined`: boa places it at the start of the function that reads
+    // the name, so the first use of the name in the code is the better position (#1063).
+    let first = msg.lines().next().unwrap_or("");
+    let undefined = first.split("ReferenceError: ").nth(1).and_then(|r| r.split(" is not defined").next());
+    if let Some(at) = undefined.and_then(|name| first_use(name, code)) {
+        return (Some(at.0), Some(at.1));
+    }
     let frames: Vec<&str> = msg.lines().skip(1).collect();
     if let Some((a, b)) = frames.iter().find_map(|l| pick(l)).or_else(|| msg.lines().next().and_then(pick)) {
         return (Some(a), Some(b));
     }
-    // `ReferenceError: name is not defined` without a position.
-    let first = msg.lines().next().unwrap_or("");
-    if let Some(name) = first.split("ReferenceError: ").nth(1).and_then(|r| r.split(" is not defined").next()) {
-        for (n, line) in code.lines().enumerate() {
-            let b = line.as_bytes();
-            let mut from = 0;
-            while let Some(i) = line[from..].find(name).map(|i| i + from) {
-                let before = i.checked_sub(1).map(|j| b[j]);
-                let after = b.get(i + name.len()).copied();
-                let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'$';
-                if !before.is_some_and(|c| ident(c) || c == b'.') && !after.is_some_and(ident) {
-                    return (Some(n as u32 + 1), Some(i as u32 + 1));
-                }
-                from = i + name.len();
+    (None, None)
+}
+
+/// The first use of `name` as a whole identifier in `code`, as a 1-based line and column.
+fn first_use(name: &str, code: &str) -> Option<(u32, u32)> {
+    if name.is_empty() {
+        return None;
+    }
+    let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'$';
+    for (n, line) in code.lines().enumerate() {
+        let b = line.as_bytes();
+        let mut from = 0;
+        while let Some(i) = line.get(from..).and_then(|rest| rest.find(name)).map(|i| i + from) {
+            let before = i.checked_sub(1).and_then(|j| b.get(j).copied());
+            let after = b.get(i + name.len()).copied();
+            if !before.is_some_and(|c| ident(c) || c == b'.') && !after.is_some_and(ident) {
+                return Some((n as u32 + 1, i as u32 + 1));
             }
+            from = i + name.len();
         }
     }
-    (None, None)
+    None
 }
 
 /// Evaluate `code` in `ctx` and convert the result.

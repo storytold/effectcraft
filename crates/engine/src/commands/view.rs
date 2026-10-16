@@ -20,13 +20,56 @@ fn add_guide(s: &mut Session, p: &Value) -> Result<Value> {
         o => return Err(bad("view.addGuide", format!("orientation must be vertical or horizontal, not `{o}`"))),
     };
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
-    let position = f_p(p, "position").unwrap_or(if vertical { comp.width as f64 / 2.0 } else { comp.height as f64 / 2.0 });
-    let n = s.edit("Add Guide", None, |proj, _| {
+    let percent = p.get("percent").and_then(Value::as_bool).unwrap_or(false);
+    let default = if percent {
+        50.0
+    } else if vertical {
+        comp.width as f64 / 2.0
+    } else {
+        comp.height as f64 / 2.0
+    };
+    let position = f_p(p, "position").filter(|v| v.is_finite()).unwrap_or(default);
+    let n = s.edit(if percent { "Add Percentage Guide" } else { "Add Guide" }, None, |proj, _| {
         let c = proj.comp_mut(cid).ok_or(EngineError::NoComp)?;
-        c.guides.push(Guide { vertical, position });
+        c.guides.push(Guide { vertical, position, percent });
         Ok(c.guides.len())
     })?;
     Ok(json!({"guides": n}))
+}
+
+/// View ▸ Convert Guides to Percentage / Pixels: every guide (or just `index`) changes unit
+/// without moving on the comp.
+fn convert_guides(s: &mut Session, p: &Value) -> Result<Value> {
+    let cid = comp_id(s, p)?;
+    let percent = match str_p(p, "to").unwrap_or("percent") {
+        "percent" | "percentage" => true,
+        "pixels" | "px" => false,
+        o => return Err(bad("view.convertGuides", format!("`to` must be percent or pixels, not `{o}`"))),
+    };
+    let only = p.get("index").and_then(Value::as_u64).map(|i| i as usize);
+    let n = s.project.comp(cid).ok_or(EngineError::NoComp)?.guides.len();
+    if only.is_some_and(|i| i >= n) {
+        return Err(bad("view.convertGuides", format!("no guide {} (the comp has {n})", only.unwrap_or(0))));
+    }
+    s.edit(if percent { "Convert Guides to Percentage" } else { "Convert Guides to Pixels" }, None, |proj, _| {
+        let c = proj.comp_mut(cid).ok_or(EngineError::NoComp)?;
+        let (w, h) = (c.width, c.height);
+        for (i, g) in c.guides.iter_mut().enumerate() {
+            if only.is_none_or(|o| o == i) {
+                g.set_percent(percent, w, h);
+            }
+        }
+        Ok(())
+    })?;
+    Ok(json!({"guides": n, "percent": percent}))
+}
+
+fn add_percent_guide(s: &mut Session, p: &Value) -> Result<Value> {
+    let mut q = p.clone();
+    if let Some(o) = q.as_object_mut() {
+        o.insert("percent".into(), json!(true));
+    }
+    add_guide(s, &q)
 }
 
 fn clear_guides(s: &mut Session, p: &Value) -> Result<Value> {
@@ -128,7 +171,25 @@ macro_rules! res {
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
-        cmd!("view.addGuide", "Add Guide...", ["View"], None, "{orientation?: vertical|horizontal, position? (comp px)}", has_comp, add_guide),
+        cmd!(
+            "view.addGuide",
+            "Add Guide...",
+            ["View"],
+            None,
+            "{orientation?: vertical|horizontal, position? (comp px, or percent with percent: true), percent?: bool}",
+            has_comp,
+            add_guide
+        ),
+        cmd!(
+            "view.addPercentGuide",
+            "Add Percentage Guide...",
+            ["View"],
+            None,
+            "{orientation?: vertical|horizontal, position? (percent of the comp)}",
+            has_comp,
+            add_percent_guide
+        ),
+        cmd!("view.convertGuides", "Convert Guides to Percentage", ["View"], None, "{comp?, to?: percent|pixels, index?}", has_guides, convert_guides),
         cmd!("view.clearGuides", "Clear Guides", ["View"], None, "{comp?}", has_guides, clear_guides),
         cmd!("view.importGuides", "Import Guides...", ["View"], None, "{path}", has_comp, import_guides),
         cmd!("view.exportGuides", "Export Guides...", ["View"], None, "{path}", has_guides, export_guides),
@@ -136,7 +197,15 @@ pub fn specs() -> Vec<CommandSpec> {
         res!("view.res.half", "Half", ["View", "Resolution"], Some("Cmd+Shift+J"), Half),
         res!("view.res.third", "Third", ["View", "Resolution"], None, Third),
         res!("view.res.quarter", "Quarter", ["View", "Resolution"], Some("Cmd+Alt+Shift+J"), Quarter),
-        cmd!("view.res.custom", "Custom...", ["View", "Resolution"], None, "{factor?: 1..40 (render every n-th pixel), comp?}", has_comp, custom_resolution),
+        cmd!(
+            "view.res.custom",
+            "Custom...",
+            ["View", "Resolution"],
+            Some("Cmd+Alt+J"),
+            "{factor?: 1..40 (render every n-th pixel), comp?}",
+            has_comp,
+            custom_resolution
+        ),
         // The Composition panel's Resolution popup (not in the View menu).
         res!("view.res.auto", "Resolution: Auto", [], None, Auto),
         cmd!("view.layout", "Switch View Layout", [], None, "{views: 1|2|4}", has_comp, view_layout),

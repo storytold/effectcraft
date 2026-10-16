@@ -1,6 +1,6 @@
 # File format parity
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-10 · **Change:** major (first per-format table, measured against the After Effects 2026 26.5 bundle and this repository's import/export registries) · **Target:** Adobe After Effects 2026
+> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-12 · **Change:** minor (closed issue references re-audited against `upstream/main` 470ea7a3) · **Target:** Adobe After Effects 2026
 
 Every format After Effects reads or writes, with EffectCraft's support. After Effects' list comes
 from its installed bundle (26.5.0.89: `Info.plist` `CFBundleDocumentTypes`, `Plug-ins/Format`,
@@ -22,7 +22,7 @@ trips and renders, checked by tests, not against After Effects), **partial** (na
 
 | Format | After Effects | EffectCraft read | Write | Fidelity / notes | Tested by |
 |---|---|---|---|---|---|
-| Project `.aep` | R/W (native) | none | none | Main file format; needs an owner decision on clean-room scope (#190, #248: py-aep as an external converter). Blocks beta | — |
+| Project `.aep` | R/W (native) | none | none | Main file format; needs an owner decision on clean-room scope (#190; #248, closed as its duplicate: py-aep as an external converter; open PRs #251 and #860). Blocks beta | — |
 | XML project `.aepx` | R/W | none | none | Same decision as `.aep` | — |
 | Templates `.aet` / `.aetx` | R/W | none | none | Own `.ectemplate` (Home ▸ Templates, Save as Template) | `templates.rs` tests |
 | Motion Graphics template `.mogrt` | W (and R in Premiere) | none | none | Own `.ectemplate` Essential Graphics templates; FilmCraft rejects our `.fcgt` export (#611) | `essential.rs` tests |
@@ -70,7 +70,7 @@ trips and renders, checked by tests, not against After Effects), **partial** (na
 | BRAW, R3D, ARRIRAW | R (plug-ins / SDKs) | none | none | proprietary SDKs |
 | Variable-frame-rate phone video | R | unverified | — | needs a real-media corpus |
 | WAV, AIFF | R/W | yes | yes (16-bit PCM) | good |
-| MP3, AAC / M4A, FLAC, Ogg, Opus | R | yes | AAC and Opus inside video only | MP3 layer can go silent (#324) |
+| MP3, AAC / M4A, FLAC, Ogg, Opus | R | yes | AAC and Opus inside video only | MP3 silence (#324) is closed |
 
 ## 3D models
 
@@ -90,7 +90,7 @@ trips and renders, checked by tests, not against After Effects), **partial** (na
 | Premiere Pro `.prproj` | R (import) | none | none | Out of clean-room scope pending a decision; we interchange through FCP7 XML, FCPXML, OTIO, EDL, AAF and OMF instead (beyond After Effects) |
 | Lottie JSON / dotLottie | via third-party plug-ins | yes | yes | beyond After Effects; a warnings list names what Lottie can't express |
 | JSON / CSV / TSV data | R | yes (`footage()`, data layers) | — | good |
-| LUTs (`.cube`, `.3dl`, `.csp`, `.spi1d/3d`, CDL) | R | yes (Apply Color LUT, OCIO effects) | — | Apply Color LUT bug (#514) |
+| LUTs (`.cube`, `.3dl`, `.csp`, `.spi1d/3d`, CDL) | R | yes (Apply Color LUT, OCIO effects) | — | Apply Color LUT bug (#514) is closed |
 | OpenColorIO configs | R (OCIO 2.5.1, ACES 2.0 in 26.5) | yes (OCIO v2 subset, Blender configs) | — | partial: no ACES 2.0 output transforms |
 | Fonts (TTF, OTF, TTC, variable) | R | yes | — | good |
 | Mocha shapes | R (Mocha AE) | own documented JSON | — | Mocha's format is not public |
@@ -115,4 +115,5 @@ relinking 6–12 h, `.mogrt`-compatible templates 15–30 h (partly parallel wit
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-12 | minor | #324 and #514 marked closed; open `.aep` PRs #251 and #860 noted |
 | 2026-10-10 | major | First file format parity document, from the After Effects 26.5 bundle and this repository's import/export registries |

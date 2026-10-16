@@ -32,6 +32,28 @@ pub(crate) struct VertexHit {
     pub l2c: Mat3,
 }
 
+/// A vertex marker to draw. Markers are drawn after the layer bounding boxes so a box handle
+/// never covers a path point (#1042).
+#[derive(Clone, Copy)]
+pub(crate) struct VertexMark {
+    pub pos: Pos2,
+    pub color: Color32,
+    pub selected: bool,
+}
+
+/// Draw the vertex markers collected by [`draw_paths`], `size` points wide.
+pub(crate) fn draw_vertex_marks(painter: &egui::Painter, marks: &[VertexMark], size: f32) {
+    for m in marks {
+        let r = Rect::from_center_size(m.pos, vec2(size, size));
+        if m.selected {
+            painter.rect_filled(r, 0.0, m.color);
+        } else {
+            painter.rect_filled(r, 0.0, Color32::from_black_alpha(160));
+            painter.rect_stroke(r, 0.0, Stroke::new(1.0, m.color), StrokeKind::Inside);
+        }
+    }
+}
+
 /// A path drawn this frame (for segment hits and the free-transform box).
 #[derive(Clone)]
 pub(crate) struct PathInfo {
@@ -139,9 +161,9 @@ pub(crate) fn draw_paths(
     pen: Option<(LayerId, u64)>,
     hover: Option<Pos2>,
     hits: &mut Vec<VertexHit>,
+    marks: &mut Vec<VertexMark>,
     paths: &mut Vec<PathInfo>,
 ) {
-    let vs = app.session.prefs.general.path_point_size as f32 + 1.0;
     let (m, _) = super::viewer::l2c(ectx, l);
     let mut list: Vec<(u64, String, ShapePath, Mat3, Color32, bool)> = vec![];
     if let Some(masks) = l.masks() {
@@ -176,11 +198,8 @@ pub(crate) fn draw_paths(
                     painter.circle_filled(h, 3.0, mc);
                     hits.push(VertexHit { layer: l.id, mask: uid, index: i, pos: h, tangent: Some(out), vertex: *v, l2c: pm });
                 }
-                painter.rect_filled(Rect::from_center_size(s, vec2(vs, vs)), 0.0, mc);
-            } else {
-                painter.rect_filled(Rect::from_center_size(s, vec2(vs, vs)), 0.0, Color32::from_black_alpha(160));
-                painter.rect_stroke(Rect::from_center_size(s, vec2(vs, vs)), 0.0, Stroke::new(1.0, mc), StrokeKind::Inside);
             }
+            marks.push(VertexMark { pos: s, color: mc, selected });
             let kind = if is_mask { "mask" } else { "shapePath" };
             app.auto.add(&format!("viewer.{kind}.{uid}.vertex.{i}"), Rect::from_center_size(s, vec2(8.0, 8.0)), &name);
             hits.push(VertexHit { layer: l.id, mask: uid, index: i, pos: s, tangent: None, vertex: *v, l2c: pm });

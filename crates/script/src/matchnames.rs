@@ -72,6 +72,22 @@ const TEXT_PATH_OPTIONS: &[(&str, &str)] = &[
     ("lastMargin", "ADBE Text Last Margin"),
 ];
 
+// A stroke's Dashes, as After Effects' scripting API names them (#815).
+const STROKE_DASHES: &[(&str, &str)] = &[
+    ("dash", "ADBE Vector Stroke Dash 1"),
+    ("gap", "ADBE Vector Stroke Gap 1"),
+    ("dash2", "ADBE Vector Stroke Dash 2"),
+    ("gap2", "ADBE Vector Stroke Gap 2"),
+    ("dash3", "ADBE Vector Stroke Dash 3"),
+    ("gap3", "ADBE Vector Stroke Gap 3"),
+    ("offset", "ADBE Vector Stroke Offset"),
+];
+
+/// The Dashes child id (`dash`, `gap2`, `offset`…) for an After Effects match name.
+pub fn stroke_dash(name: &str) -> Option<&'static str> {
+    STROKE_DASHES.iter().find(|(_, m)| *m == name).map(|(id, _)| *id)
+}
+
 const TEXT_ANIMATOR: &[(&str, &str)] = &[("selectors", "ADBE Text Selectors"), ("properties", "ADBE Text Animator Properties")];
 
 const TEXT_SELECTORS: &[(&str, &str)] =
@@ -446,6 +462,9 @@ pub fn node(chain: &[&Node]) -> String {
             }
             if let Some((_, _, m)) = SHAPE_PROPS.iter().find(|(item, prop, _)| *item == pid && *prop == id) {
                 return m.to_string();
+            }
+            if pid == "dashes" {
+                return find(STROKE_DASHES, id).map(str::to_string).unwrap_or_else(own);
             }
             own()
         }

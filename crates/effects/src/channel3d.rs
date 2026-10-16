@@ -379,6 +379,49 @@ pub fn selection_hashes(sel: &str, manifest: Option<&[(String, u32)]>) -> Vec<u3
 
 pub const CRYPTO_LAYERS: [&str; 3] = ["CryptoObject", "CryptoMaterial", "CryptoAsset"];
 
+/// Rank planes as [`AuxChannels::crypto_rank_planes`] returns them.
+type RankPlanes<'a> = [(&'a [f32], &'a [f32])];
+
+/// The selection's coverage at aux pixel `i`: the summed coverage of the selected IDs over all
+/// ranks (the Cryptomatte spec's matte), clamped to 0..1.
+#[inline]
+fn crypto_matte(planes: &RankPlanes, sel: &[u32], i: usize) -> f32 {
+    planes
+        .iter()
+        .filter_map(|(id, c)| Some((*id.get(i)?, *c.get(i)?)))
+        .filter(|(id, c)| *c > 0.0 && sel.contains(&id.to_bits()))
+        .map(|(_, c)| c)
+        .sum::<f32>()
+        .clamp(0.0, 1.0)
+}
+
+/// The coverage-weighted ID colours at aux pixel `i` (the spec's preview).
+#[inline]
+fn crypto_colors(planes: &RankPlanes, i: usize) -> [f32; 3] {
+    let mut c = [0.0f32; 3];
+    for (id, cov) in planes {
+        let (Some(&id), Some(&cov)) = (id.get(i), cov.get(i)) else { continue };
+        let k = id_color(id);
+        for j in 0..3 {
+            c[j] += k[j] * cov;
+        }
+    }
+    c
+}
+
+/// Per aux pixel of Cryptomatte layer `layer`: the coverage-weighted ID colours (RGB) and the
+/// selection's coverage (A), computed in parallel with the rank planes resolved once. The GPU
+/// effect uploads this image and samples it per layer pixel.
+pub fn crypto_aux_image(a: &AuxChannels, layer: &str, sel: &[u32]) -> Image {
+    let planes = a.crypto_rank_planes(layer);
+    let mut img = Image::new(a.width, a.height);
+    img.data.par_iter_mut().enumerate().for_each(|(i, px)| {
+        let c = crypto_colors(&planes, i);
+        *px = [c[0], c[1], c[2], crypto_matte(&planes, sel, i)];
+    });
+    img
+}
+
 fn cryptomatte(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let Some(a) = aux(ctx) else { return b };
     let layers = a.crypto_layers();
@@ -392,10 +435,10 @@ fn cryptomatte(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let idx = index_map(&b, &a);
     let display = ctx.params.e("display");
     let matte_only = ctx.params.b("matteOnly");
+    let planes = a.crypto_rank_planes(&layer);
     let src = b.img.clone();
     b.img.data.par_iter_mut().enumerate().for_each(|(i, px)| {
-        let ranks = idx[i].map(|k| a.crypto_ranks(&layer, k)).unwrap_or_default();
-        let m: f32 = ranks.iter().filter(|(id, c)| *c > 0.0 && sel.contains(&id.to_bits())).map(|(_, c)| *c).sum::<f32>().clamp(0.0, 1.0);
+        let m = idx[i].map_or(0.0, |k| crypto_matte(&planes, &sel, k));
         if matte_only {
             *px = [m, m, m, m];
             return;
@@ -403,13 +446,7 @@ fn cryptomatte(ctx: &EffectCtx, mut b: Buf) -> Buf {
         *px = match display {
             // Colors: coverage-weighted ID colours (the spec's preview), selection brighter.
             0 => {
-                let mut c = [0.0f32; 3];
-                for (id, cov) in &ranks {
-                    let k = id_color(*id);
-                    for j in 0..3 {
-                        c[j] += k[j] * cov;
-                    }
-                }
+                let c = idx[i].map_or([0.0; 3], |k| crypto_colors(&planes, k));
                 let c = c.map(|v| v * (1.0 - 0.5 * m) + 0.5 * m);
                 [c[0], c[1], c[2], 1.0]
             }
@@ -690,6 +727,159 @@ mod tests {
         assert_eq!(l.get(12, 5)[0], 0.0);
         let c = run("ec.3d.identifier", &[], &h);
         assert_ne!(c.get(2, 5), c.get(12, 5));
+    }
+
+    /// The parallel aux image (rank planes resolved once) is bit-identical to the per-pixel
+    /// reduction over `crypto_ranks` it replaces.
+    #[test]
+    fn crypto_aux_image_matches_the_per_pixel_reduction() {
+        let (w, h) = (7u32, 5u32);
+        let n = (w * h) as usize;
+        let mut a = AuxChannels::new(w, h, 1.0);
+        let ids = [crypto_hash("cube"), crypto_hash("sphere"), crypto_hash("ring")].map(effectcraft_raster::channels3d::crypto_float);
+        for (k, ch) in ["00.R", "00.G", "00.B", "00.A", "01.R", "01.G", "01.B", "01.A"].iter().enumerate() {
+            let v: Vec<f32> = (0..n).map(|i| if k % 2 == 0 { ids[(i + k) % 3] } else { ((i * 7 + k * 3) % 11) as f32 / 10.0 }).collect();
+            a.channels.push((format!("CryptoObject{ch}"), v));
+        }
+        let sel = vec![crypto_hash("sphere"), crypto_hash("ring")];
+        let img = crypto_aux_image(&a, "CryptoObject", &sel);
+        for i in 0..n {
+            let ranks = a.crypto_ranks("CryptoObject", i);
+            let m: f32 = ranks.iter().filter(|(id, c)| *c > 0.0 && sel.contains(&id.to_bits())).map(|(_, c)| *c).sum::<f32>().clamp(0.0, 1.0);
+            let mut c = [0.0f32; 3];
+            for (id, cov) in &ranks {
+                let k = id_color(*id);
+                for j in 0..3 {
+                    c[j] += k[j] * cov;
+                }
+            }
+            let want = [c[0], c[1], c[2], m];
+            assert_eq!(img.data[i].map(f32::to_bits), want.map(f32::to_bits), "pixel {i}");
+        }
+    }
+
+    /// The lookup before #473, kept as the reference: the rank channels formatted and searched
+    /// by name for every pixel.
+    fn ranks_by_name(a: &AuxChannels, layer: &str, i: usize) -> Vec<(f32, f32)> {
+        let mut out = vec![];
+        for k in 0.. {
+            let get = |c: &str| a.get(&format!("{layer}{k:02}.{c}"));
+            let (Some(r), Some(g)) = (get("R"), get("G")) else { break };
+            out.push((r[i], g[i]));
+            if let (Some(b), Some(al)) = (get("B"), get("A")) {
+                out.push((b[i], al[i]));
+            }
+        }
+        out
+    }
+
+    /// The reduction before #473 over those ranks: (ID colours, selection coverage).
+    fn reduce_by_name(a: &AuxChannels, layer: &str, sel: &[u32], i: usize) -> ([f32; 3], f32) {
+        let ranks = ranks_by_name(a, layer, i);
+        let m: f32 = ranks.iter().filter(|(id, c)| *c > 0.0 && sel.contains(&id.to_bits())).map(|(_, c)| *c).sum::<f32>().clamp(0.0, 1.0);
+        let mut c = [0.0f32; 3];
+        for (id, cov) in &ranks {
+            let k = id_color(*id);
+            for j in 0..3 {
+                c[j] += k[j] * cov;
+            }
+        }
+        (c, m)
+    }
+
+    /// A 6×2 Cryptomatte layer with awkward values: NaN, ±inf, negative and -0.0 coverage, NaN
+    /// and -0.0 IDs; rank 01 has no B/A pair, rank 02 is missing, so rank 03 (filled with values
+    /// that would change every pixel) must be ignored as before.
+    fn edge_aux(with_rank_after_gap: bool) -> AuxChannels {
+        let (w, h) = (6u32, 2u32);
+        let nan_payload = f32::from_bits(0x7fc0_1234);
+        let (hs, hc) = (crypto_float(crypto_hash("sphere")), crypto_float(crypto_hash("cube")));
+        let cov = [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -0.5, -0.0, 0.0, 0.25, 1.0, 2.0, f32::MIN_POSITIVE, nan_payload, 0.5];
+        let ids = [hs, f32::NAN, hc, -0.0, 0.0, nan_payload, hs, hc, f32::NAN, hs, hc, -0.0];
+        let rot = |v: &[f32; 12], k: usize| -> Vec<f32> { (0..12).map(|i| v[(i + k) % 12]).collect() };
+        let mut a = AuxChannels::new(w, h, 1.0);
+        let mut push = |n: &str, v: Vec<f32>| a.channels.push((format!("CryptoObject{n}"), v));
+        push("00.R", rot(&ids, 0));
+        push("00.G", rot(&cov, 0));
+        push("00.B", rot(&ids, 3));
+        push("00.A", rot(&cov, 5));
+        push("01.R", rot(&ids, 7));
+        push("01.G", rot(&cov, 2));
+        if with_rank_after_gap {
+            push("03.R", vec![hs; 12]);
+            push("03.G", vec![1.0; 12]);
+            push("03.B", vec![hc; 12]);
+            push("03.A", vec![1.0; 12]);
+        }
+        a
+    }
+
+    fn edge_selection() -> Vec<u32> {
+        vec![crypto_hash("sphere"), f32::NAN.to_bits(), 0x7fc0_1234, (-0.0f32).to_bits()]
+    }
+
+    /// Edge values give bit-identical results to the lookup by name, the missing B/A pair is
+    /// skipped and a rank after a gap is ignored.
+    #[test]
+    fn crypto_aux_image_is_bit_exact_on_edge_values() {
+        let sel = edge_selection();
+        let a = edge_aux(true);
+        assert_eq!(a.crypto_rank_planes("CryptoObject").len(), 3, "00.R/G, 00.B/A, 01.R/G; not 03 after the gap");
+        let img = crypto_aux_image(&a, "CryptoObject", &sel);
+        let without_gap_rank = crypto_aux_image(&edge_aux(false), "CryptoObject", &sel);
+        for i in 0..12 {
+            let (c, m) = reduce_by_name(&a, "CryptoObject", &sel, i);
+            let want = [c[0], c[1], c[2], m];
+            assert_eq!(img.data[i].map(f32::to_bits), want.map(f32::to_bits), "pixel {i}");
+            assert_eq!(img.data[i].map(f32::to_bits), without_gap_rank.data[i].map(f32::to_bits), "pixel {i}: the rank after the gap was used");
+        }
+    }
+
+    /// The CPU effect on a 20×10 layer over the 6×2 edge aux: pixels inside the aux area match
+    /// the lookup by name bit for bit in every display mode, pixels outside it (no aux index)
+    /// get an empty matte and no ID colour.
+    #[test]
+    fn cryptomatte_cpu_path_is_bit_exact_inside_and_outside_the_aux_area() {
+        let a = edge_aux(true);
+        let host = AuxHost(Arc::new(a.clone()));
+        let names = "sphere, <7fc00000>, <7fc01234>, <80000000>";
+        assert_eq!(selection_hashes(names, None), edge_selection());
+        let src = img().data[0];
+        for (display, matte_only) in [(0, false), (1, false), (2, false), (0, true)] {
+            let out = run(
+                "ec.3d.cryptomatte",
+                &[("selection", Value::Str(names.into())), ("display", Value::Enum(display)), ("matteOnly", Value::Bool(matte_only))],
+                &host,
+            );
+            let expect = |c: [f32; 3], m: f32| -> [f32; 4] {
+                if matte_only {
+                    return [m; 4];
+                }
+                match display {
+                    0 => {
+                        let c = c.map(|v| v * (1.0 - 0.5 * m) + 0.5 * m);
+                        [c[0], c[1], c[2], 1.0]
+                    }
+                    1 => src.map(|v| v * m),
+                    _ => [src[0] * (1.0 - 0.5 * m) + 0.5 * m * src[3], src[1] * (1.0 - 0.5 * m) + 0.5 * m * src[3], src[2] * (1.0 - 0.5 * m), src[3]],
+                }
+            };
+            for (x, y) in [(0u32, 0u32), (1, 0), (5, 0), (0, 1), (3, 1), (5, 1)] {
+                let (c, m) = reduce_by_name(&a, "CryptoObject", &edge_selection(), (y * 6 + x) as usize);
+                assert_eq!(
+                    out.get(x as i64, y as i64).map(f32::to_bits),
+                    expect(c, m).map(f32::to_bits),
+                    "display {display} matteOnly {matte_only} at ({x}, {y})"
+                );
+            }
+            for (x, y) in [(6u32, 0u32), (19, 0), (0, 2), (12, 9)] {
+                assert_eq!(
+                    out.get(x as i64, y as i64).map(f32::to_bits),
+                    expect([0.0; 3], 0.0).map(f32::to_bits),
+                    "display {display} matteOnly {matte_only} outside the aux at ({x}, {y})"
+                );
+            }
+        }
     }
 
     #[test]

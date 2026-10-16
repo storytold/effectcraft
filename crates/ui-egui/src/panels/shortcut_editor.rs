@@ -12,7 +12,8 @@
 //! Automation ids: `shortcuts.preset`, `shortcuts.search`, `shortcuts.mod.<ctrl|cmd|alt|shift>`,
 //! `shortcuts.key.<Key>`, `shortcuts.row.<n>`, `shortcuts.record`, `shortcuts.assign`,
 //! `shortcuts.removeKey.<n>`, `shortcuts.resetCommand`, `shortcuts.duplicate`,
-//! `shortcuts.rename`, `shortcuts.delete`, `shortcuts.import`, `shortcuts.export`,
+//! `shortcuts.rename`, `shortcuts.delete` (asks first: `dialog.deletePreset.delete`,
+//! `dialog.deletePreset.cancel`), `shortcuts.import`, `shortcuts.export`,
 //! `shortcuts.resetPreset`, `shortcuts.close`.
 
 use crate::i18n::{tr, tr_args};
@@ -39,6 +40,8 @@ pub struct EditorState {
     pub pending: String,
     /// Rename field for the active preset.
     pub rename: Option<String>,
+    /// The preset the Delete Preset prompt asks about.
+    pub confirm_delete: Option<String>,
 }
 
 const APP_COLOR: Color32 = Color32::from_rgb(0x8e, 0x6c, 0xe8);
@@ -52,6 +55,11 @@ pub fn open(app: &mut EffectcraftApp) {
 /// `true` while the editor records keys (the dispatcher must not close the dialog on Escape).
 pub fn recording(app: &EffectcraftApp) -> bool {
     app.dialog == Some(Dialog::Shortcuts) && app.dialog_state.shortcuts.recording
+}
+
+/// `true` while Delete Preset asks over the editor (Escape answers it, not the editor).
+pub fn confirming(app: &EffectcraftApp) -> bool {
+    app.dialog == Some(Dialog::Shortcuts) && app.dialog_state.shortcuts.confirm_delete.is_some()
 }
 
 /// Shortcut text of a key event (`Cmd+Shift+K`).
@@ -215,6 +223,13 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             }
         }
     }
+    // Enter is OK, unless it belongs to the rename field, an open preset menu or the delete
+    // confirmation (where Enter is not Delete). A recorded Enter never gets here: the recorder
+    // took the frame's key events above.
+    close |= st.rename.is_none()
+        && st.confirm_delete.is_none()
+        && !egui::Popup::is_any_open(ctx)
+        && ctx.input(|i| i.modifiers.is_none() && i.key_pressed(egui::Key::Enter));
     // Modifiers: toggles, or the ones held on the keyboard.
     let held = ctx.input(|i| i.modifiers);
     let held = [held.ctrl && cfg!(target_os = "macos"), held.command, held.alt, held.shift];
@@ -237,7 +252,9 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
         }
     }
 
-    super::dialogs::modal(ctx, "Keyboard Shortcuts", vec2(1000.0, 720.0), t, |ui| {
+    // No outer scroll area: the command list takes the height left over, so OK stays in view.
+    super::dialogs::modal_fit(ctx, "Keyboard Shortcuts", vec2(1000.0, 760.0), t, |ui, height| {
+        let top = ui.cursor().top();
         // ---- preset bar
         ui.horizontal(|ui| {
             ui.label(tr("Preset:"));
@@ -269,10 +286,11 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                     st.rename = Some(active.clone());
                 }
             }
+            // A deleted preset can't be brought back: Delete asks first (the prompt below).
             let b = ui.add_enabled(custom, egui::Button::new(tr("Delete")));
             app.auto.add("shortcuts.delete", b.rect, "Delete");
             if b.clicked() {
-                run.push(("shortcuts.preset".into(), json!({"op": "delete", "name": active})));
+                st.confirm_delete = Some(active.clone());
             }
             let b = ui.add_enabled(custom, egui::Button::new(tr("Reset Preset")));
             app.auto.add("shortcuts.resetPreset", b.rect, "Reset Preset");
@@ -437,42 +455,49 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                 q.split_whitespace().all(|w| hay.contains(w))
             })
             .collect();
-        ui.allocate_ui_with_layout(vec2(ui.available_width(), 270.0), egui::Layout::left_to_right(egui::Align::Min), |ui| {
-            ui.set_height(270.0);
+        let footer = 6.0 + ui.spacing().interact_size.y + ui.spacing().item_spacing.y * 2.0;
+        let list_h = (height - (ui.cursor().top() - top) - footer).max(140.0);
+        ui.allocate_ui_with_layout(vec2(ui.available_width(), list_h), egui::Layout::left_to_right(egui::Align::Min), |ui| {
+            ui.set_height(list_h);
             // Command list.
             ui.vertical(|ui| {
                 ui.set_width(620.0);
                 let row_h = 20.0;
-                egui::ScrollArea::vertical().id_salt("sc-rows").max_height(230.0).auto_shrink([false, false]).show_rows(ui, row_h, rows.len(), |ui, range| {
-                    for i in range {
-                        let b = rows[i];
-                        let keys = table.keys.get(&b.key).cloned().unwrap_or_default();
-                        let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::click());
-                        let sel = st.selected.as_deref() == Some(b.key.as_str());
-                        if sel {
-                            ui.painter().rect_filled(r, 0.0, t.row_selected);
-                        } else if i % 2 == 1 {
-                            ui.painter().rect_filled(r, 0.0, t.row_alt);
+                egui::ScrollArea::vertical().id_salt("sc-rows").max_height(list_h - 40.0).auto_shrink([false, false]).show_rows(
+                    ui,
+                    row_h,
+                    rows.len(),
+                    |ui, range| {
+                        for i in range {
+                            let b = rows[i];
+                            let keys = table.keys.get(&b.key).cloned().unwrap_or_default();
+                            let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::click());
+                            let sel = st.selected.as_deref() == Some(b.key.as_str());
+                            if sel {
+                                ui.painter().rect_filled(r, 0.0, t.row_selected);
+                            } else if i % 2 == 1 {
+                                ui.painter().rect_filled(r, 0.0, t.row_alt);
+                            }
+                            let pp = ui.painter();
+                            pp.text(pos2(r.min.x + 6.0, r.center().y), Align2::LEFT_CENTER, &b.label, Tokens::ui(11.5), t.text);
+                            pp.text(pos2(r.min.x + 230.0, r.center().y), Align2::LEFT_CENTER, b.path.join(" > "), Tokens::ui(10.5), t.text_faint);
+                            let ks: Vec<String> = keys.iter().map(|k| crate::menus::shortcut_text(k)).collect();
+                            let col = if b.scope == APP_SCOPE { APP_COLOR } else { PANEL_COLOR };
+                            pp.text(
+                                pos2(r.max.x - 8.0, r.center().y),
+                                Align2::RIGHT_CENTER,
+                                ks.join(", "),
+                                Tokens::ui(11.5),
+                                if keys.is_empty() { t.text_faint } else { col },
+                            );
+                            app.auto.add(&format!("shortcuts.row.{i}"), r, &b.label);
+                            if resp.clicked() {
+                                st.selected = Some(b.key.clone());
+                                st.pending.clear();
+                            }
                         }
-                        let pp = ui.painter();
-                        pp.text(pos2(r.min.x + 6.0, r.center().y), Align2::LEFT_CENTER, &b.label, Tokens::ui(11.5), t.text);
-                        pp.text(pos2(r.min.x + 230.0, r.center().y), Align2::LEFT_CENTER, b.path.join(" > "), Tokens::ui(10.5), t.text_faint);
-                        let ks: Vec<String> = keys.iter().map(|k| crate::menus::shortcut_text(k)).collect();
-                        let col = if b.scope == APP_SCOPE { APP_COLOR } else { PANEL_COLOR };
-                        pp.text(
-                            pos2(r.max.x - 8.0, r.center().y),
-                            Align2::RIGHT_CENTER,
-                            ks.join(", "),
-                            Tokens::ui(11.5),
-                            if keys.is_empty() { t.text_faint } else { col },
-                        );
-                        app.auto.add(&format!("shortcuts.row.{i}"), r, &b.label);
-                        if resp.clicked() {
-                            st.selected = Some(b.key.clone());
-                            st.pending.clear();
-                        }
-                    }
-                });
+                    },
+                );
                 ui.label(RichText::new(format!("{} of {} commands", rows.len(), table.bindables.len())).color(t.text_faint));
             });
             ui.separator();
@@ -559,6 +584,41 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             close |= r.clicked();
         });
     });
+    // Delete Preset, over the editor.
+    if let Some(name) = st.confirm_delete.clone() {
+        let mut answer: Option<bool> = None;
+        super::dialogs::modal(ctx, "Delete Preset", vec2(460.0, 150.0), t, |ui| {
+            ui.label(RichText::new(format!("Delete the preset “{name}”?")).color(t.tab_text_active));
+            ui.add_space(4.0);
+            ui.label(RichText::new(tr("You can't undo this.")).color(t.text_dim).size(11.0));
+            ui.add_space(18.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let r = ui.add(egui::Button::new(RichText::new(tr("  Delete  ")).color(Color32::WHITE)).fill(t.danger));
+                app.auto.add("dialog.deletePreset.delete", r.rect, "Delete");
+                if r.clicked() {
+                    answer = Some(true);
+                }
+                let r = ui.button(tr("Cancel"));
+                app.auto.add("dialog.deletePreset.cancel", r.rect, "Cancel");
+                if r.clicked() {
+                    answer = Some(false);
+                }
+            });
+        });
+        if answer.is_none() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            answer = Some(false);
+        }
+        // Cmd+D (Ctrl elsewhere) is Delete.
+        if answer.is_none() && super::dialogs::ui_command_key(ctx, egui::Key::D) {
+            answer = Some(true);
+        }
+        if let Some(delete) = answer {
+            st.confirm_delete = None;
+            if delete {
+                run.push(("shortcuts.preset".into(), json!({"op": "delete", "name": name})));
+            }
+        }
+    }
     app.dialog_state.shortcuts = st;
     for (cmd, params) in run {
         if let Err(e) = app.session.execute(&cmd, params) {
@@ -601,6 +661,91 @@ mod tests {
         app.auto.begin_frame();
         let mut out = ctx.run_ui(egui::RawInput { events, ..Default::default() }, |ui| crate::panels::dialogs::show(app, ui.ctx()));
         out.textures_delta.clear();
+    }
+
+    #[test]
+    fn the_ok_button_stays_inside_the_dialog_in_a_small_window() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx, &app.tokens, crate::i18n::language(&app));
+        open(&mut app);
+        for size in [vec2(1680.0, 1020.0), vec2(1280.0, 720.0)] {
+            for _ in 0..3 {
+                app.auto.begin_frame();
+                let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), size)), ..Default::default() };
+                let mut out = ctx.run_ui(input, |ui| crate::panels::dialogs::show(&mut app, ui.ctx()));
+                out.textures_delta.clear();
+            }
+            let [_, y, _, h] = app.auto.find("shortcuts.close").expect("OK button").rect;
+            // The window less the modal's margin and its frame padding.
+            assert!(y + h <= size.y - 24.0 - 18.0 + 0.5, "OK ends at {} in a {size:?} window", y + h);
+        }
+    }
+
+    #[test]
+    fn enter_is_ok_except_while_recording_or_renaming() {
+        let enter = || egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() };
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx, &app.tokens, crate::i18n::language(&app));
+        // Recording: Enter is the recorded key.
+        open(&mut app);
+        app.dialog_state.shortcuts.recording = true;
+        frame(&mut app, &ctx, vec![enter()]);
+        assert_eq!(app.dialog, Some(Dialog::Shortcuts));
+        assert_eq!(app.dialog_state.shortcuts.pending, "Enter");
+        // Renaming a preset: Enter belongs to the name field.
+        app.dialog_state.shortcuts.rename = Some("Mine".into());
+        frame(&mut app, &ctx, vec![enter()]);
+        assert_eq!(app.dialog, Some(Dialog::Shortcuts));
+        // Otherwise it closes the editor, also with the search field focused.
+        app.dialog_state.shortcuts.rename = None;
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![enter()]);
+        assert_eq!(app.dialog, None);
+    }
+
+    #[test]
+    fn deleting_a_preset_asks_first() {
+        fn click(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str) {
+            let [x, y, w, h] = app.auto.find(id).unwrap_or_else(|| panic!("{id} is not on screen")).rect;
+            let pos = pos2(x + w / 2.0, y + h / 2.0);
+            let button = |pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+            for event in [egui::Event::PointerMoved(pos), button(true), button(false)] {
+                frame(app, ctx, vec![event]);
+            }
+            // Two more: the automation ids of the clicked frame age out.
+            frame(app, ctx, vec![]);
+            frame(app, ctx, vec![]);
+        }
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx, &app.tokens, crate::i18n::language(&app));
+        app.session.execute("shortcuts.preset", json!({"op": "duplicate", "from": DEFAULT_PRESET, "name": "Mine"})).unwrap();
+        app.session.execute("shortcuts.preset", json!({"op": "select", "name": "Mine"})).unwrap();
+        let has = |app: &EffectcraftApp| app.session.keymaps.names().iter().any(|n| n == "Mine");
+        open(&mut app);
+        for _ in 0..3 {
+            frame(&mut app, &ctx, vec![]);
+        }
+        assert!(app.auto.find("dialog.deletePreset.delete").is_none());
+        click(&mut app, &ctx, "shortcuts.delete");
+        assert!(has(&app) && confirming(&app), "the click only asks");
+        click(&mut app, &ctx, "dialog.deletePreset.cancel");
+        assert!(has(&app) && app.auto.find("dialog.deletePreset.delete").is_none(), "Cancel keeps the preset");
+        assert_eq!(app.dialog, Some(Dialog::Shortcuts), "the editor stays open");
+        click(&mut app, &ctx, "shortcuts.delete");
+        click(&mut app, &ctx, "dialog.deletePreset.delete");
+        assert!(!has(&app), "confirmed: the preset is gone");
+        assert!(!confirming(&app) && app.dialog == Some(Dialog::Shortcuts));
+        // Cmd+D is Delete; Enter is not.
+        app.session.execute("shortcuts.preset", json!({"op": "duplicate", "from": DEFAULT_PRESET, "name": "Mine"})).unwrap();
+        app.session.execute("shortcuts.preset", json!({"op": "select", "name": "Mine"})).unwrap();
+        app.dialog_state.shortcuts.confirm_delete = Some("Mine".into());
+        crate::panels::dialogs::press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert!(has(&app) && confirming(&app));
+        crate::panels::dialogs::press_key(&mut app, &ctx, egui::Key::D, egui::Modifiers::COMMAND);
+        assert!(!has(&app) && !confirming(&app));
     }
 
     #[test]

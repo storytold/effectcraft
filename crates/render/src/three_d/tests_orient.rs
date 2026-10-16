@@ -55,6 +55,29 @@ fn orient_along_path_2d_follows_motion() {
     assert!(x_axis.x.abs() < 1e-6 && (x_axis.y - 1.0).abs() < 1e-6, "{x_axis:?}");
 }
 
+/// #1081: a layer travelling left kept its heading until the last keyframe, then (no motion left
+/// to measure) snapped back to 0 degrees and looked flipped. It must keep its last direction of
+/// travel at the final key and after it, in 2D and 3D.
+#[test]
+fn orient_along_path_keeps_the_last_heading_at_and_after_the_end() {
+    for three_d in [false, true] {
+        let (mut p, cid, comp) = setup();
+        let mut l = solid(&mut p, &comp, three_d, [150.0, 50.0, 0.0]);
+        l.auto_orient = AutoOrient::AlongPath;
+        let end = Tick::from_seconds_f64(1.0);
+        l.props.prop_mut("transform/position").unwrap().keys =
+            vec![Keyframe::new(Tick::ZERO, Value::Vec3([150.0, 50.0, 0.0])), Keyframe::new(end, Value::Vec3([50.0, 50.0, 0.0]))];
+        p.comp_mut(cid).unwrap().layers.push(l);
+        let c = p.comp(cid).unwrap();
+        for secs in [0.5, 0.999, 1.0, 1.2, 1.9] {
+            let ctx = EvalCtx::new(&p, cid, c, Tick::from_seconds_f64(secs));
+            let x_axis = ctx.world_matrix(&c.layers[0]).apply_vec(vec3(1.0, 0.0, 0.0));
+            // Moving left (-x): the layer's x axis keeps pointing left.
+            assert!((x_axis.x + 1.0).abs() < 1e-6 && x_axis.y.abs() < 1e-6 && x_axis.z.abs() < 1e-6, "3d={three_d} t={secs}: {x_axis:?}");
+        }
+    }
+}
+
 #[test]
 fn layers_parented_to_a_camera_follow_its_rotation() {
     let (mut p, cid, comp) = setup();

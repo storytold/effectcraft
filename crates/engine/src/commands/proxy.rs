@@ -221,7 +221,7 @@ pub fn specs() -> Vec<CommandSpec> {
             has_comp_selection,
             create_proxy
         ),
-        cmd!("file.setProxy", "File...", ["File", "Set Proxy"], None, "{path, items?|item?}", has_targets, set_proxy),
+        cmd!("file.setProxy", "File...", ["File", "Set Proxy"], Some("Cmd+Alt+P"), "{path, items?|item?}", has_targets, set_proxy),
         cmd!("file.setProxyNone", "None", ["File", "Set Proxy"], None, "{items?|item?}", has_proxy, set_proxy_none),
         cmd!("file.useProxy", "Use Proxy", [], None, "{items?|item?, on?}", has_proxy, use_proxy),
         cmd!(

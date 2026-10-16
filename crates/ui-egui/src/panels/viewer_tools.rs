@@ -289,7 +289,8 @@ pub(crate) fn guide_at(app: &EffectcraftApp, comp: &Comp, map: &ViewerMap, pos: 
         return None;
     }
     comp.guides.iter().enumerate().find_map(|(i, g)| {
-        let s = map.to_screen([g.position, g.position]);
+        let px = g.px(comp.width, comp.height);
+        let s = map.to_screen([px, px]);
         let d = if g.vertical { (s.x - pos.x).abs() } else { (s.y - pos.y).abs() };
         (d < 4.0).then_some((i, g.vertical))
     })

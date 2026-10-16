@@ -610,10 +610,17 @@ impl Session {
                 let _ = t.join();
             }
             let st = job.shared.snapshot();
-            let failed = updates.iter().filter(|u| matches!(u, ItemUpdate::Finished { status: RenderStatus::Failed(_), .. })).count();
+            let failures: Vec<&str> = updates
+                .iter()
+                .filter_map(|u| if let ItemUpdate::Finished { status: RenderStatus::Failed(e), .. } = u { Some(e.as_str()) } else { None })
+                .collect();
+            let failed = failures.len();
             let stopped = updates.iter().any(|u| matches!(u, ItemUpdate::Finished { status: RenderStatus::UserStopped, .. }));
-            let msg = if failed > 0 {
-                format!("Render finished with {failed} failed item(s)")
+            // The reason is otherwise only in the Status column's tooltip (#568).
+            let msg = if let [only] = failures.as_slice() {
+                format!("Render finished with 1 failed item(s): {only}")
+            } else if let Some(first) = failures.first() {
+                format!("Render finished with {failed} failed item(s), first: {first}")
             } else if stopped {
                 "Render stopped".to_string()
             } else {

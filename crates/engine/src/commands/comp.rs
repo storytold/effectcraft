@@ -108,12 +108,7 @@ fn new_comp(s: &mut Session, p: &Value) -> Result<Value> {
     }
     apply_settings(&mut c, p);
     let id = s.edit("New Composition", None, |proj, st| {
-        let mut name = name.clone();
-        let mut k = 2;
-        while proj.items.values().any(|i| i.name == name) {
-            name = format!("{} {k}", name.trim_end_matches(|ch: char| ch.is_ascii_digit()).trim_end());
-            k += 1;
-        }
+        let name = proj.unique_item_name(&name, |_| false);
         let id = proj.add_item(&name, Label::Sandstone, None, ItemKind::Comp(c.into()));
         st.project_selection = vec![id];
         Ok(id)
@@ -159,10 +154,11 @@ fn close(s: &mut Session, p: &Value) -> Result<Value> {
     let id = comp_id(s, p)?;
     s.state.open_comps.retain(|c| *c != id);
     if s.state.active_comp == Some(id) {
-        s.state.active_comp = s.state.open_comps.last().copied();
-        s.state.selected_layers.clear();
-        s.state.selected_keys.clear();
-        s.state.selected_props.clear();
+        if let Some(next) = s.state.open_comps.last().copied() {
+            s.activate_comp(next);
+        } else {
+            s.activate_comp_none();
+        }
     }
     Ok(Value::Null)
 }

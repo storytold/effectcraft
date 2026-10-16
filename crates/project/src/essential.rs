@@ -487,7 +487,15 @@ fn build_group(project: &Project, comp: ItemId, eg: &EssentialGraphics, old: Opt
             }
         }
     }
-    PropGroup { uid, match_id: GROUP.into(), name: "Essential Properties".into(), kind: GroupKind::Essential { overridden: keep }, enabled: true, children }
+    PropGroup {
+        uid,
+        match_id: GROUP.into(),
+        name: "Essential Properties".into(),
+        kind: GroupKind::Essential { overridden: keep },
+        enabled: true,
+        label: None,
+        children,
+    }
 }
 
 fn find_prop<'a>(nodes: &'a [Node], m: &str) -> Option<&'a Property> {
@@ -701,13 +709,13 @@ pub fn with_overrides(project: &Project, comp: ItemId, overrides: &[Override]) -
 // ------------------------------------------------------------------------------ id remapping
 
 /// Shift every id (items, layers, property uids, Essential Graphics controls) of `p` by
-/// `offset`, keeping all references consistent: used when merging a template project into
-/// another project.
+/// `offset`, keeping all references consistent: used when merging a template or another project
+/// into a project. Ids from a damaged file saturate instead of overflowing.
 pub fn offset_ids(p: &mut Project, offset: u64) {
     let items = std::mem::take(&mut p.items);
     for (_, mut it) in items {
-        it.id = ItemId(it.id.0 + offset);
-        it.parent = it.parent.map(|f| ItemId(f.0 + offset));
+        it.id = ItemId(it.id.0.saturating_add(offset));
+        it.parent = it.parent.map(|f| ItemId(f.0.saturating_add(offset)));
         if let ItemKind::Comp(c) = &mut it.kind {
             let c = std::sync::Arc::make_mut(c);
             for l in &mut c.layers {
@@ -716,18 +724,18 @@ pub fn offset_ids(p: &mut Project, offset: u64) {
             if let Some(eg) = &mut c.essential {
                 fn go(v: &mut [EgControl], o: u64) {
                     for c in v {
-                        c.id += o;
+                        c.id = c.id.saturating_add(o);
                         match &mut c.kind {
                             EgKind::Property { layer, prop, links } => {
-                                *layer = LayerId(layer.0 + o);
-                                *prop += o;
+                                *layer = LayerId(layer.0.saturating_add(o));
+                                *prop = prop.saturating_add(o);
                                 for k in links {
-                                    k.layer = LayerId(k.layer.0 + o);
-                                    k.prop += o;
+                                    k.layer = LayerId(k.layer.0.saturating_add(o));
+                                    k.prop = k.prop.saturating_add(o);
                                 }
                             }
-                            EgKind::Mirror { of } => *of += o,
-                            EgKind::Media { layer } => *layer = LayerId(layer.0 + o),
+                            EgKind::Mirror { of } => *of = of.saturating_add(o),
+                            EgKind::Media { layer } => *layer = LayerId(layer.0.saturating_add(o)),
                             EgKind::Group { children } => go(children, o),
                             EgKind::Comment { .. } => {}
                         }
@@ -739,34 +747,43 @@ pub fn offset_ids(p: &mut Project, offset: u64) {
         p.items.insert(it.id, it);
     }
     p.render_queue.clear();
-    p.next_id += offset;
+    p.next_id = p.next_id.saturating_add(offset);
 }
 
 fn offset_layer(l: &mut Layer, o: u64) {
-    l.id = LayerId(l.id.0 + o);
-    l.parent = l.parent.map(|x| LayerId(x.0 + o));
+    l.id = LayerId(l.id.0.saturating_add(o));
+    l.parent = l.parent.map(|x| LayerId(x.0.saturating_add(o)));
     if let Some(tm) = &mut l.track_matte {
-        tm.layer = LayerId(tm.layer.0 + o);
+        tm.layer = LayerId(tm.layer.0.saturating_add(o));
     }
     match &mut l.source {
-        LayerSource::Footage { item } | LayerSource::Comp { item } | LayerSource::Solid { item } | LayerSource::Model { item } => *item = ItemId(item.0 + o),
+        LayerSource::Footage { item } | LayerSource::Comp { item } | LayerSource::Solid { item } | LayerSource::Model { item } => {
+            *item = ItemId(item.0.saturating_add(o))
+        }
         _ => {}
     }
     fn group(g: &mut PropGroup, o: u64, essential_parent: bool) {
-        g.uid += o;
-        if let GroupKind::Essential { overridden } = &mut g.kind {
-            for u in overridden.iter_mut() {
-                *u += o;
+        g.uid = g.uid.saturating_add(o);
+        match &mut g.kind {
+            GroupKind::Essential { overridden } => {
+                for u in overridden.iter_mut() {
+                    *u = u.saturating_add(o);
+                }
             }
+            // A tracker's Motion Target is a layer of the same comp.
+            GroupKind::Tracker { settings } => {
+                settings.target = settings.target.map(|t| LayerId(t.0.saturating_add(o)));
+            }
+            _ => {}
         }
         let is_essential = matches!(g.kind, GroupKind::Essential { .. }) || essential_parent;
         for c in &mut g.children {
             match c {
                 Node::Prop(p) => {
-                    p.uid += o;
+                    p.uid = p.uid.saturating_add(o);
                     let fix = |v: &mut Value| {
                         if let Value::Layer(Some(id)) = v {
-                            *id += o;
+                            *id = id.saturating_add(o);
                         }
                     };
                     fix(&mut p.value);
@@ -774,7 +791,7 @@ fn offset_layer(l: &mut Layer, o: u64) {
                         fix(&mut k.value);
                     }
                     if is_essential && control_of(&p.match_id).is_some() {
-                        p.match_id = match_id(control_of(&p.match_id).unwrap_or(0) + o);
+                        p.match_id = match_id(control_of(&p.match_id).unwrap_or(0).saturating_add(o));
                         // Media replacement values are item ids.
                         if matches!(p.ui, ParamUi::Hidden)
                             && let Value::Scalar(x) = &mut p.value
@@ -785,7 +802,7 @@ fn offset_layer(l: &mut Layer, o: u64) {
                 }
                 Node::Group(sub) => {
                     if is_essential && let Some(id) = control_of(&sub.match_id) {
-                        sub.match_id = match_id(id + o);
+                        sub.match_id = match_id(id.saturating_add(o));
                     }
                     group(sub, o, is_essential);
                 }
