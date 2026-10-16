@@ -2088,9 +2088,36 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 );
                 // Twirl + icon + name.
                 let tw = Rect::from_center_size(pos2(cw.name + 8.0, cy), vec2(14.0, 14.0));
-                let open = app.ui.timeline.open_layers.contains(&layer.id.0);
-                if widgets::twirl(ui, tw, open, egui::Id::new(("twirl", layer.id.0)), &t).clicked() {
-                    ui_actions.push(UiAct::ToggleLayer(layer.id.0, ui.input(|i| i.modifiers.alt || i.modifiers.command)));
+                let is_open = app.ui.timeline.open_layers.contains(&layer.id.0);
+                if widgets::twirl(ui, tw, is_open, egui::Id::new(("twirl", layer.id.0)), &t).clicked() {
+                    let alt_command = ui.input(|i| i.modifiers.alt || i.modifiers.command);
+                    let shift = ui.input(|i| i.modifiers.shift);
+
+                    // If layer is not selected, determine what selection should be
+                    let mut layers_to_select: Vec<u64> = vec![];
+
+                    if !selected.contains(&layer.id) {
+                        if shift {
+                            // SHIFT + click: keep existing selection and add this layer
+                            layers_to_select = selected.iter().map(|id| id.0).collect();
+                            layers_to_select.push(layer.id.0);
+                        } else {
+                            // Normal click: replace selection with just this layer
+                            layers_to_select = vec![layer.id.0];
+                        }
+
+                        // Send selection action FIRST
+                        actions.push(("layer.select".into(), json!({"layers": layers_to_select, "add": shift})));
+                    } else {
+                        // Layer is already selected, use it as the target for toggles
+                        layers_to_select = selected.iter().map(|id| id.0).collect();
+                    }
+
+                    // Now toggle properties for the NEW selection (layers_to_select)
+                    let target_state = !is_open;
+                    for layer_id in &layers_to_select {
+                        ui_actions.push(UiAct::ToggleLayer(*layer_id, alt_command, target_state));
+                    }
                 }
                 app.auto.add(&format!("timeline.layer.{}.twirl", layer.id.0), tw, "twirl");
                 icons::paint(&lp, Rect::from_center_size(pos2(cw.name + 24.0, cy), vec2(13.0, 13.0)), layer_icon(layer, &app.session.project), t.text_dim);
@@ -3461,13 +3488,13 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     // Apply.
     for a in ui_actions {
         match a {
-            UiAct::ToggleLayer(id, all) => {
+            UiAct::ToggleLayer(id, all, force_state) => {
                 let tl = &mut app.ui.timeline;
                 // Twirled by hand, the layer shows its whole tree again.
                 tl.reveal.clear();
                 tl.layer_reveal.remove(&id);
                 tl.full_groups.remove(&id);
-                let open = !tl.open_layers.contains(&id);
+                let open = force_state;
                 if open {
                     tl.open_layers.insert(id);
                 } else {
@@ -3621,7 +3648,7 @@ fn layer_cells(
 }
 
 enum UiAct {
-    ToggleLayer(u64, bool),
+    ToggleLayer(u64, bool, bool),
     /// Layer, group uid, and whether the whole tree under the group follows.
     ToggleGroup(u64, u64, bool),
     SetTime(Tick),
