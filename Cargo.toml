@@ -54,6 +54,8 @@ log = "0.4"
 rayon = "1"
 # std::time::Instant/SystemTime on native; the browser clock on wasm32 (std's panic there).
 web-time = "1"
+# The OS CSPRNG (the Figma bridge's pairing code).
+getrandom = "0.3"
 gif = "0.14"
 proptest = "1"
 

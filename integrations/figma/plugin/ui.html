@@ -1,0 +1,112 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root { color-scheme: light dark; }
+  body { margin: 0; padding: 12px; font: 12px/1.4 Inter, system-ui, sans-serif; color: var(--figma-color-text, #222); background: var(--figma-color-bg, #fff); }
+  .row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: #b0b0b0; flex: none; }
+  .dot.ok { background: #1bc47d; } .dot.warn { background: #f5a623; } .dot.bad { background: #f24822; }
+  .status { flex: 1; color: var(--figma-color-text-secondary, #666); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  button { width: 100%; height: 32px; border: 0; border-radius: 6px; font: 600 12px Inter, system-ui, sans-serif; color: #fff; background: var(--figma-color-bg-brand, #0d99ff); cursor: pointer; }
+  button:disabled { opacity: .45; cursor: default; }
+  .seg { display: flex; border: 1px solid var(--figma-color-border, #e5e5e5); border-radius: 6px; overflow: hidden; width: 100%; }
+  .seg label { flex: 1; text-align: center; padding: 5px 0; cursor: pointer; }
+  .seg input { display: none; }
+  .seg input:checked + span { font-weight: 600; color: var(--figma-color-text-brand, #0d99ff); }
+  input[type=text] { flex: 1; min-width: 0; height: 26px; padding: 0 8px; border: 1px solid var(--figma-color-border, #e5e5e5); border-radius: 6px; background: transparent; color: inherit; font: 12px ui-monospace, monospace; letter-spacing: .05em; }
+  .result { min-height: 32px; color: var(--figma-color-text-secondary, #666); word-break: break-word; }
+  .result.err { color: var(--figma-color-text-danger, #f24822); }
+  #pair[hidden] { display: none; }
+</style>
+</head>
+<body>
+  <div class="row"><span id="dot" class="dot"></span><span id="status" class="status">Looking for EffectCraft…</span></div>
+  <div class="row" id="pair" hidden><input id="code" type="text" placeholder="Pairing code from figma-bridge" spellcheck="false"></div>
+  <div class="row">
+    <div class="seg">
+      <label><input type="radio" name="target" value="newComp" checked><span>New comp</span></label>
+      <label><input type="radio" name="target" value="activeComp"><span>Into active comp</span></label>
+    </div>
+  </div>
+  <div class="row"><button id="send" disabled>Send to EffectCraft</button></div>
+  <div id="result" class="result"></div>
+<script>
+  var BRIDGE = 'http://localhost:7789';
+  var code = '', target = 'newComp', selection = 0, sending = false, state = { bridge: false, app: false, paired: false };
+  var $ = function (id) { return document.getElementById(id); };
+  function post(msg) { parent.postMessage({ pluginMessage: msg }, '*'); }
+
+  function render() {
+    var dot = $('dot'), st = $('status');
+    dot.className = 'dot ' + (!state.bridge ? 'bad' : (state.app && state.paired) ? 'ok' : 'warn');
+    st.textContent = !state.bridge ? 'Bridge not running: effectcraft-cli figma-bridge'
+      : !state.app ? 'Bridge running; EffectCraft not reachable' + (state.error ? ' (' + state.error + ')' : '')
+      : !state.paired ? 'Connected. Enter the pairing code'
+      : 'Connected to EffectCraft';
+    $('pair').hidden = !state.bridge || state.paired;
+    $('send').disabled = sending || !(state.bridge && state.app && state.paired) || selection === 0;
+    $('send').textContent = sending ? 'Sending…' : selection === 0 ? 'Select layers to send' : 'Send ' + selection + ' to EffectCraft';
+  }
+
+  function result(text, err) { var r = $('result'); r.textContent = text; r.className = 'result' + (err ? ' err' : ''); }
+
+  async function poll() {
+    try {
+      var r = await fetch(BRIDGE + '/status', { headers: { 'X-EffectCraft-Code': code } });
+      var j = await r.json();
+      state = { bridge: true, app: !!(j.effectcraft && j.effectcraft.connected), paired: !!j.paired, error: j.effectcraft && j.effectcraft.error };
+    } catch (e) {
+      state = { bridge: false, app: false, paired: false };
+    }
+    render();
+  }
+
+  $('code').addEventListener('change', function () { code = this.value.trim().toUpperCase(); post({ type: 'save-code', code: code }); poll(); });
+  document.querySelectorAll('input[name=target]').forEach(function (r) {
+    r.addEventListener('change', function () { target = this.value; post({ type: 'save-target', target: target }); });
+  });
+  $('send').addEventListener('click', function () { sending = true; render(); result('Collecting the selection…'); post({ type: 'collect', target: target }); });
+
+  async function send(payload) {
+    result('Sending to EffectCraft…');
+    try {
+      var r = await fetch(BRIDGE + '/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-EffectCraft-Code': code },
+        body: JSON.stringify({ payload: payload, target: target })
+      });
+      var j = await r.json();
+      if (!j.ok) throw new Error(j.error || ('HTTP ' + r.status));
+      var res = j.result || {};
+      var msg = 'Done: ' + (res.native || 0) + ' native layer(s), ' + (res.images || 0) + ' image(s)';
+      if (res.notes && res.notes.length) msg += '. ' + res.notes.length + ' note(s): ' + res.notes.slice(0, 2).join('; ');
+      result(msg);
+      post({ type: 'notify', text: 'Sent to EffectCraft' });
+    } catch (e) {
+      result('Failed: ' + (e && e.message ? e.message : e), true);
+    }
+    sending = false;
+    render();
+  }
+
+  window.onmessage = function (ev) {
+    var m = ev.data && ev.data.pluginMessage;
+    if (!m) return;
+    if (m.type === 'init') {
+      code = m.code; target = m.target; selection = m.selection;
+      $('code').value = code;
+      var radio = document.querySelector('input[name=target][value=' + target + ']');
+      if (radio) radio.checked = true;
+      poll();
+    } else if (m.type === 'selection') { selection = m.count; render(); }
+    else if (m.type === 'progress') { result(m.text); }
+    else if (m.type === 'payload') { send(m.payload); }
+    else if (m.type === 'error') { sending = false; result(m.text, true); render(); }
+  };
+  setInterval(poll, 3000);
+  render();
+</script>
+</body>
+</html>

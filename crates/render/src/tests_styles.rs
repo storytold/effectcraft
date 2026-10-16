@@ -475,3 +475,41 @@ fn gradient_glow_uses_gradient() {
     let px = img.straight(121, 50);
     assert!(px[0] > px[2], "near the edge the glow takes the gradient's start colour {px:?}");
 }
+
+#[test]
+fn repeated_drop_shadows_render_both_sides_and_respect_enabled_state() {
+    let (mut p, cid) = scene([1.0; 3], None, |p, c, l| {
+        add(p, c, l, "dropShadow");
+        set(l, "dropShadow/useGlobalLight", Value::Bool(false));
+        set(l, "dropShadow/angle", Value::Scalar(0.0));
+        set(l, "dropShadow/distance", Value::Scalar(30.0));
+        set(l, "dropShadow/size", Value::Scalar(0.0));
+        set(l, "dropShadow/color", Value::Color([1.0, 0.0, 0.0, 1.0]));
+        set(l, "dropShadow/opacity", Value::Scalar(100.0));
+        set(l, "dropShadow/blendMode", Value::Enum(NORMAL));
+        let mut next = p.next_id;
+        let mut second = st::style(&mut Ids(&mut next), "dropShadow").unwrap();
+        for (key, value) in [
+            ("useGlobalLight", Value::Bool(false)),
+            ("angle", Value::Scalar(180.0)),
+            ("distance", Value::Scalar(30.0)),
+            ("size", Value::Scalar(0.0)),
+            ("color", Value::Color([0.0, 0.0, 1.0, 1.0])),
+            ("opacity", Value::Scalar(100.0)),
+            ("blendMode", Value::Enum(NORMAL)),
+        ] {
+            second.get_mut(key).unwrap().value = value;
+        }
+        p.next_id = next;
+        l.props.sub_mut(GROUP).unwrap().children.push(second.into());
+    });
+    let img = render(&p, cid);
+    assert!(img.get(60, 50)[0] > 0.99 && img.get(60, 50)[3] > 0.99);
+    assert!(img.get(140, 50)[2] > 0.99 && img.get(140, 50)[3] > 0.99);
+    let ls = p.comp_mut(cid).unwrap().layers[0].props.sub_mut(GROUP).unwrap();
+    let uid = ls.groups().filter(|g| g.match_id == "dropShadow").last().unwrap().uid;
+    ls.find_group_mut(uid).unwrap().enabled = false;
+    let img = render(&p, cid);
+    assert!(img.get(60, 50)[0] > 0.99);
+    assert_eq!(img.get(140, 50)[3], 0.0);
+}

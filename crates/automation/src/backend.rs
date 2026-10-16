@@ -66,6 +66,14 @@ impl Backend {
             let lookup = match c.check_command(id, &params)? {
                 Some(crate::confine::Lookup::ProjectFile) => Some((crate::confine::Lookup::ProjectFile, self.run("project.summary", json!({}))?)),
                 Some(crate::confine::Lookup::RenderOutputs) => Some((crate::confine::Lookup::RenderOutputs, self.run("renderQueue.list", json!({}))?)),
+                Some(crate::confine::Lookup::FigmaAssets) => {
+                    let mut plan_params = params.clone();
+                    plan_params
+                        .as_object_mut()
+                        .ok_or_else(|| crate::Error::BadArgs("Figma import parameters must be an object".into()))?
+                        .insert("dryRun".into(), Value::Bool(true));
+                    Some((crate::confine::Lookup::FigmaAssets, self.run("file.importFigma", plan_params)?))
+                }
                 None => None,
             };
             if let Some((lookup, found)) = lookup {

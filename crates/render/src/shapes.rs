@@ -34,7 +34,8 @@ enum Paint {
     /// Gradient fill, or gradient stroke when `stroke` is set.
     Gradient {
         g: Gradient,
-        radial: bool,
+        kind: u32,
+        width: Option<[f64; 2]>,
         start: [f64; 2],
         end: [f64; 2],
         rule: FillRule,
@@ -258,7 +259,8 @@ fn collect(ctx: &EvalCtx, layer: &Layer, contents: &PropGroup, arena: &mut Vec<B
                 draws.push(Draw {
                     paint: Paint::Gradient {
                         g: gr,
-                        radial: ctx.e(layer, g, "type") == 1,
+                        kind: ctx.e(layer, g, "type"),
+                        width: matches!(ctx.group_value(layer, g, "affine"), Some(Value::Bool(true))).then(|| ctx.v2(layer, g, "widthPoint", [0.0, 100.0])),
                         start: ctx.v2(layer, g, "start", [0.0; 2]),
                         end: ctx.v2(layer, g, "end", [100.0, 0.0]),
                         rule: rule(ctx, layer, g),
@@ -427,7 +429,8 @@ fn collect(ctx: &EvalCtx, layer: &Layer, contents: &PropGroup, arena: &mut Vec<B
 /// two-point gradient: t is measured from the focal point to the circle along the ray).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct GradientRamp {
-    radial: bool,
+    kind: u32,
+    affine: Option<kurbo::Affine>,
     s: [f64; 2],
     d: [f64; 2],
     len2: f64,
@@ -435,22 +438,35 @@ pub(crate) struct GradientRamp {
 }
 
 impl GradientRamp {
-    pub(crate) fn new(radial: bool, start: [f64; 2], end: [f64; 2], highlight: (f64, f64)) -> Self {
+    pub(crate) fn new(kind: u32, start: [f64; 2], end: [f64; 2], width: Option<[f64; 2]>, highlight: (f64, f64)) -> Self {
+        let affine = width.and_then(|width| {
+            let m = kurbo::Affine::new([end[0] - start[0], end[1] - start[1], width[0] - start[0], width[1] - start[1], start[0], start[1]]);
+            (m.as_coeffs().iter().all(|v| v.is_finite()) && m.determinant().abs() > 1e-12).then(|| m.inverse())
+        });
+        let (start, end) = if affine.is_some() { ([0.0, 0.0], [1.0, 0.0]) } else { (start, end) };
         let d = [end[0] - start[0], end[1] - start[1]];
         let len2 = (d[0] * d[0] + d[1] * d[1]).max(1e-9);
         let (hl, ha) = highlight;
-        let focal = (radial && hl.abs() > 1e-6).then(|| {
+        let focal = (kind == 1 && hl.abs() > 1e-6).then(|| {
             let r = len2.sqrt();
             let a = d[1].atan2(d[0]) + ha.to_radians();
             let dist = r * (hl / 100.0).clamp(-0.99, 0.99);
             [start[0] + dist * a.cos(), start[1] + dist * a.sin()]
         });
-        GradientRamp { radial, s: start, d, len2, focal }
+        GradientRamp { kind, affine, s: start, d, len2, focal }
     }
 
     pub(crate) fn t(&self, x: f64, y: f64) -> f64 {
+        let p = self.affine.map_or(kurbo::Point::new(x, y), |m| m * kurbo::Point::new(x, y));
+        let (x, y) = (p.x, p.y);
         let (vx, vy) = (x - self.s[0], y - self.s[1]);
-        if !self.radial {
+        if self.kind == 2 {
+            return ((vy.atan2(vx) - self.d[1].atan2(self.d[0])) / std::f64::consts::TAU).rem_euclid(1.0);
+        }
+        if self.kind == 3 {
+            return ((vx * self.d[0] + vy * self.d[1]).abs() + (vy * self.d[0] - vx * self.d[1]).abs()) / self.len2;
+        }
+        if self.kind == 0 {
             return (vx * self.d[0] + vy * self.d[1]) / self.len2;
         }
         let Some(f) = self.focal else { return ((vx * vx + vy * vy) / self.len2).sqrt() };
@@ -610,9 +626,9 @@ pub fn render(ctx: &EvalCtx, layer: &Layer, contents: &PropGroup, s: f64) -> Buf
         for ((d, _, r), cov) in jobs[i..j].iter().zip(&covs) {
             match &d.paint {
                 Paint::Fill { color, .. } | Paint::Stroke { color, .. } => paint(&mut img, *r, cov, d.opacity, d.blend, |_, _| *color),
-                Paint::Gradient { g, radial, start, end, highlight, .. } => {
+                Paint::Gradient { g, kind, width, start, end, highlight, .. } => {
                     let to_local = (m * d.xf).inverse().unwrap_or(Mat3::IDENTITY);
-                    let ramp = GradientRamp::new(*radial, *start, *end, *highlight);
+                    let ramp = GradientRamp::new(*kind, *start, *end, *width, *highlight);
                     paint(&mut img, *r, cov, d.opacity, d.blend, |x, y| {
                         let p = to_local.apply(vec2(x as f64 + 0.5, y as f64 + 0.5));
                         g.sample(ramp.t(p.x, p.y))

@@ -424,3 +424,17 @@ fn radial_gradient_highlight_moves_the_focal_point() {
     // The outer circle is unchanged: points just outside it are black in both.
     assert!(a.get(100, 182)[0] < 0.03 && b.get(100, 182)[0] < 0.03 && b.get(100, 17)[0] < 0.03);
 }
+
+#[test]
+fn affine_gradient_ramps_keep_elliptical_angular_and_diamond_coordinates() {
+    // The second axis is skewed and half as long; all kinds must use the full inverse frame.
+    let ramp = |kind| super::GradientRamp::new(kind, [10.0, 20.0], [110.0, 20.0], Some([35.0, 70.0]), (0.0, 0.0));
+    assert!((ramp(1).t(22.5, 45.0) - 0.5).abs() < 1e-9);
+    assert!((ramp(2).t(22.5, 45.0) - 0.25).abs() < 1e-9);
+    assert!((ramp(2).t(-2.5, -5.0) - 0.75).abs() < 1e-9);
+    assert!((ramp(3).t(41.25, 32.5) - 0.5).abs() < 1e-9);
+    let old = super::GradientRamp::new(1, [10.0, 20.0], [110.0, 20.0], None, (0.0, 0.0));
+    assert!((old.t(10.0, 70.0) - 0.5).abs() < 1e-9);
+    let singular = super::GradientRamp::new(1, [10.0, 20.0], [110.0, 20.0], Some([210.0, 20.0]), (0.0, 0.0));
+    assert!(singular.t(10.0, 70.0).is_finite());
+}

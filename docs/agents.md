@@ -194,6 +194,7 @@ Short recipes; every step is one tool call.
 | Check the result | `render_frame {"time":1.5,"max_side":640}`; in bridge mode `screenshot {"panel":"Timeline"}` |
 | Undo a mistake | `undo {}`, or `history {}` then `history {"goto": n}` |
 | Missing media after opening | `execute_command footage.check {"wait":true}` → `{checked, missing, probed}`; then `file.findMissing {"what":"footage"}` |
+| Bring in a Figma design | `execute_command file.importFigma {"url":"https://www.figma.com/design/KEY/Name?node-id=12-345"}` (token from `FIGMA_TOKEN`); `{"payload": <Figma node JSON>}` when you already have the nodes |
 | Save | `save_project {"path":"out.ecproj"}` |
 
 The desktop app checks footage in the background after every open (a "Checking footage" job in
@@ -335,6 +336,33 @@ layer's effect bounds. For footage, solids and precomps that is the layer's own 
 and text layers have comp-sized bounds centred on their content's origin, so in a `w` × `h` comp
 the point `[w / 2, h / 2]` is that origin (a new effect's default point). `prop.get` / `prop.set`
 read and write these values as they are.
+
+### Figma designs
+
+`file.importFigma` brings Figma frames and layers in as native, editable layers. Frames become
+comps or precomps, groups become nulls with their children parented, shapes become shape layers
+with editable paths, fills, gradients and strokes. Text becomes text layers with style runs, masks
+become track mattes, and shadows become layer styles. Image fills and node types without a native
+counterpart come in as 2x PNG renders. It is one undo step.
+[`integrations/figma/README.md`](../integrations/figma/README.md) has the full mapping.
+
+* **From a link:** `{"url": "https://www.figma.com/design/KEY/Name?node-id=12-345"}`, or
+  `{"fileKey": "KEY", "nodeIds": ["12:345"]}`. It fetches `GET /v1/files/:key/nodes?geometry=paths`
+  and `GET /v1/images/:key` with a personal access token. The token comes from `token`,
+  `FIGMA_TOKEN`, or one stored with `figma.setToken {token}` (`figma.status` says which is in use).
+  The token is never journaled or saved in projects, and it is sent only to `api.figma.com`. The
+  requests go through the system `curl`. Requests on the control channel time out after 60 s, so
+  split very large selections.
+* **From JSON you already have** (the Figma REST reply, the EffectCraft plug-in's payload, a node
+  or an array of nodes): `{"payload": …}` or `{"payloadPath": "nodes.json"}`. Images go in
+  `"images": {"<node id>": {"png": "<base64>"}}`.
+* `target`: `newComp` (frame size → comp size), `activeComp` (centred in the open comp), or `auto`
+  (frames → new comps, anything else → the active comp). Use `frameRate` and `duration` for new comps.
+* `dryRun: true` returns the plan and changes nothing.
+* The reply has `{comp, comps, precomps, layers, native, images, rasterized: [{node, name, reason}],
+  notes}`. Each layer's comment holds its Figma node id (`Figma 12:345`).
+* People use the Figma plug-in instead: it sends its selection through `effectcraft-cli figma-bridge`
+  to the same command.
 
 ### Motion tracking
 

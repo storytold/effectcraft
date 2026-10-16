@@ -78,3 +78,7 @@ sync_github_name = true
 [people.moecr7]
 real_name = "Moein Saharkhiz"
 display_name = "onlymoein"
+
+[people.hakifx]
+display_name = "Elias"
+consent_source = "Explicit owner request in the FigCraft contribution PR chat, 2026-10-15: Use Elias."

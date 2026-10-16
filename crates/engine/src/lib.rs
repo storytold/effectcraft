@@ -15,6 +15,7 @@ pub mod camera_track;
 pub mod commands;
 pub mod config;
 pub mod demo;
+pub mod figma;
 pub mod footage_check;
 pub mod footage_reload;
 pub mod guard;
@@ -775,10 +776,17 @@ impl Session {
     pub fn redo(&mut self) -> bool {
         let Some((label, p)) = self.history.redo.pop() else { return false };
         let cur = std::mem::replace(&mut self.project, p);
+        let restored_comp = self.project.comps().find(|(id, _)| cur.comp(**id).is_none()).map(|(id, _)| *id);
         self.keep_view_settings(&cur);
         self.history.undo.push((label, cur));
         self.history.merge_key = None;
         self.sanitize_state();
+        // Undoing a new composition closes its tab; redo should not leave an empty viewer.
+        if self.active_comp_id().is_none()
+            && let Some(id) = restored_comp
+        {
+            self.open_comp(id);
+        }
         self.bump();
         true
     }

@@ -30,6 +30,8 @@ pub struct Confinement {
 
 /// Commands that run code, act outside the project or open other applications.
 const REFUSED: &[&str] = &[
+    // Bitmap assets can follow a sibling-directory symlink outside the project write root.
+    "edit.pasteFigCraft",
     "script.run",
     "file.runScript",
     "file.installScript",
@@ -40,6 +42,8 @@ const REFUSED: &[&str] = &[
     "layer.openSource",
     "help.revealLogFile",
     "file.autoSave",
+    // Stores a Figma access token in the settings folder.
+    "figma.setToken",
 ];
 
 /// Commands that read files named by these parameters.
@@ -64,6 +68,7 @@ const READS: &[(&str, &[&str])] = &[
     ("effect.plugins.load", &["path", "folder"]),
     ("mediaBrowser.go", &["path"]),
     ("mediaBrowser.addFavorite", &["path"]),
+    ("file.importFigma", &["payloadPath"]),
 ];
 
 /// Commands that write files named by these parameters.
@@ -87,13 +92,16 @@ const WRITES: &[(&str, &[&str])] = &[
 ];
 
 /// Commands that write where they are not told: the project's file, the Render Queue's outputs.
-const IMPLICIT_WRITES: &[&str] = &["file.save", "file.incrementAndSave", "renderQueue.render", "render.preRender"];
+/// (`file.importFigma` writes its rendered images to a folder beside the project's file.)
+const IMPLICIT_WRITES: &[&str] = &["file.save", "file.incrementAndSave", "file.importFigma", "renderQueue.render", "render.preRender"];
 
 /// What must be looked up before an implicitly writing command may run.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Lookup {
     /// The open project's file (`project.summary` → `path`).
     ProjectFile,
+    /// Every planned image destination (`file.importFigma` with `dryRun`).
+    FigmaAssets,
     /// Every output of the queued Render Queue items (`renderQueue.list`).
     RenderOutputs,
 }
@@ -189,7 +197,11 @@ impl Confinement {
             return Err(Error::BadArgs(format!("`{id}`: give `path` while file access is confined")));
         }
         if IMPLICIT_WRITES.contains(&id) && !(given && id == "file.save") {
-            return Ok(Some(if id == "file.save" || id == "file.incrementAndSave" { Lookup::ProjectFile } else { Lookup::RenderOutputs }));
+            if id == "file.importFigma" {
+                return Ok(Some(Lookup::FigmaAssets));
+            }
+            let project = matches!(id, "file.save" | "file.incrementAndSave");
+            return Ok(Some(if project { Lookup::ProjectFile } else { Lookup::RenderOutputs }));
         }
         Ok(None)
     }
@@ -202,6 +214,17 @@ impl Confinement {
                 Some(p) => self.check(p, Access::Write).map(drop),
                 None => Err(Error::BadArgs("the project has no file yet: give `path` (Save As) inside an automation write root".into())),
             },
+            Lookup::FigmaAssets => {
+                let paths = found
+                    .get("assetPaths")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| Error::BadArgs("Figma import plan did not report its asset paths; update the connected app".into()))?;
+                for path in paths {
+                    let path = path.as_str().ok_or_else(|| Error::BadArgs("Figma asset path must be a string".into()))?;
+                    self.check(path, Access::Write)?;
+                }
+                Ok(())
+            }
             Lookup::RenderOutputs => {
                 let items = found.get("items").or(Some(found)).and_then(Value::as_array).cloned().unwrap_or_default();
                 for it in items.iter().filter(|it| it.get("render").and_then(Value::as_bool) != Some(false)) {
@@ -270,7 +293,69 @@ fn resolve(p: &Path) -> Option<PathBuf> {
         if let Ok(real) = at.canonicalize() {
             return Some(rest.iter().rev().fold(real, |acc: PathBuf, c| acc.join(c)));
         }
+        // A dangling link or unreadable entry exists even when canonicalize fails.
+        // Never treat it as a new file beneath an otherwise allowed parent.
+        match at.symlink_metadata() {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            _ => return None,
+        }
         rest.push(at.file_name()?.to_os_string());
         at = at.parent()?;
+    }
+}
+
+#[cfg(test)]
+mod figma_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn figma_checks_actual_asset_destinations_not_just_the_project() {
+        let base = std::env::temp_dir().join(format!("ec-figma-confinement-{}", std::process::id()));
+        let write = base.join("write");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&write).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let confinement = Confinement::new(&[], std::slice::from_ref(&write)).unwrap();
+        let lookup = confinement.check_command("file.importFigma", &json!({})).unwrap().unwrap();
+        let plan = |path: PathBuf| json!({"path": write.join("Project.ecproj"), "assetPaths": [path]});
+        assert!(confinement.check_lookup(&lookup, &plan(write.join("Project Figma Assets/import/image.png"))).is_ok());
+        assert!(confinement.check_lookup(&lookup, &plan(outside.join("image.png"))).is_err());
+        assert!(confinement.check_lookup(&lookup, &json!({"path": write.join("Project.ecproj")})).is_err());
+        assert!(confinement.check_lookup(&lookup, &json!({"assetPaths": []})).is_ok());
+        #[cfg(unix)]
+        {
+            let assets = write.join("Project Figma Assets");
+            std::os::unix::fs::symlink(&outside, &assets).unwrap();
+            assert!(confinement.check_lookup(&lookup, &plan(assets.join("import/image.png"))).is_err());
+            std::fs::remove_file(&assets).unwrap();
+            std::fs::create_dir_all(assets.join("import")).unwrap();
+            std::os::unix::fs::symlink(outside.join("target.png"), assets.join("import/image.png")).unwrap();
+            assert!(confinement.check_lookup(&lookup, &plan(assets.join("import/image.png"))).is_err());
+        }
+        std::fs::remove_dir_all(base).unwrap();
+    }
+}
+
+#[cfg(all(test, unix))]
+mod clipboard_tests {
+    use super::*;
+
+    #[test]
+    fn clipboard_paste_cannot_follow_an_asset_directory_outside_write_roots() {
+        let base = std::env::temp_dir().join(format!("ec-clipboard-confinement-{}", std::process::id()));
+        let (allowed, outside) = (base.join("allowed"), base.join("outside"));
+        std::fs::create_dir_all(&allowed).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let assets = allowed.join("Project Figma Assets");
+        std::os::unix::fs::symlink(&outside, &assets).unwrap();
+        let policy = Confinement::new(&[], std::slice::from_ref(&allowed)).unwrap();
+        let project = allowed.join("Project.ecproj");
+        assert!(policy.check_lookup(&Lookup::ProjectFile, &serde_json::json!({"path": project})).is_ok());
+        assert!(policy.check(assets.to_str().unwrap(), Access::Write).is_err());
+        let error = policy.check_command("edit.pasteFigCraft", &serde_json::json!({"clipboard":"{}"})).unwrap_err();
+        assert!(error.to_string().contains("not available while file access is confined"));
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+        std::fs::remove_dir_all(base).unwrap();
     }
 }

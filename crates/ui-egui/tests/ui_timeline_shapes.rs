@@ -283,3 +283,58 @@ fn ctrl_v_pastes_svg_markup_as_a_shape_layer() {
     assert_eq!(c.layers.len(), 4);
     assert_eq!(c.layers[0].name, "Oval 2");
 }
+
+fn figcraft_clipboard() -> String {
+    json!({"format":"figcraft.clipboard","version":1,"warnings":[],"nodes":[
+        {"id":"frame","type":"FRAME","name":"FigCraft card","size":{"x":200,"y":100},
+         "absoluteTransform":[[1,0,0],[0,1,0]],"children":[
+          {"id":"rect","type":"RECTANGLE","name":"FigCraft rectangle","size":{"x":40,"y":20},
+           "absoluteTransform":[[1,0,10],[0,1,15]],"fills":[{"type":"SOLID","color":{"r":1,"g":0,"b":0,"a":1}}]}]}
+    ]})
+    .to_string()
+}
+
+fn figcraft_svg_clipboard() -> String {
+    let encoded = effectcraft_engine::track::roto::rle::base64_encode(figcraft_clipboard().as_bytes());
+    format!("<svg xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"10\" height=\"10\"/><metadata id=\"figcraft-clipboard-v1\">{encoded}</metadata></svg>")
+}
+
+#[test]
+fn figcraft_paste_works_in_an_empty_project_from_keyboard_and_menu() {
+    for clipboard in [figcraft_clipboard(), figcraft_svg_clipboard()] {
+        let mut h = harness(Session::default());
+        h.state_mut().ui.focused = effectcraft_ui_egui::dock::PanelKind::Project;
+        h.input_mut().events.push(Event::Paste(clipboard.clone()));
+        h.run_steps(3);
+        let comp = h.state().session.active_comp().unwrap();
+        assert_eq!(comp.layers.len(), 1, "{:?}", h.state().ui.status);
+        assert_eq!(comp.layers[0].name, "FigCraft rectangle");
+        assert_eq!(h.state().session.history.undo.len(), 1);
+
+        let mut app = EffectcraftApp::new(Session::default());
+        app.ui.focused = effectcraft_ui_egui::dock::PanelKind::Project;
+        app.hooks.clipboard_text = Some(Box::new(move || Some(clipboard.clone())));
+        let entries = effectcraft_ui_egui::menus::menu_items(&app);
+        assert!(entries.iter().any(|entry| entry.id == "edit.paste" && entry.enabled));
+        effectcraft_ui_egui::menus::invoke(&mut app, &egui::Context::default(), "edit.paste", json!({})).unwrap();
+        assert_eq!(app.session.active_comp().unwrap().layers.len(), 1);
+    }
+}
+
+#[test]
+fn damaged_figcraft_paste_does_not_paste_the_old_internal_clipboard() {
+    let (mut h, _, b, _) = two_shape_layers();
+    click(&mut h, &format!("timeline.layer.{b}.row"));
+    h.input_mut().events.push(Event::Copy);
+    h.step();
+    let before = h.state().session.project.clone();
+    for clipboard in [
+        r#"{"format":"figcraft.clipboard","version":1,"nodes":broken"#,
+        r#"<svg><rect width="10" height="10"/><metadata id="figcraft-clipboard-v1">%%%broken</metadata></svg>"#,
+    ] {
+        h.input_mut().events.push(Event::Paste(clipboard.into()));
+        h.run_steps(3);
+        assert_eq!(*h.state().session.project, *before);
+        assert!(h.state().ui.status.contains("invalid FigCraft clipboard"), "{}", h.state().ui.status);
+    }
+}

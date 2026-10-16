@@ -550,3 +550,32 @@ fn touching_glyphs_join_without_a_seam() {
     let multiply = draw(vec![glyph(4.0, 10.5, white, false), glyph(10.5, 17.0, white, false)], BlendMode::Multiply).get(10, 10);
     assert!(multiply[3] < 0.9, "{multiply:?}");
 }
+
+#[test]
+fn text_buffer_keeps_the_global_pixel_grid_at_integer_placement() {
+    let (mut p, cid, comp) = setup(400, 200);
+    let l = text_layer(&mut p, &comp, TextDoc { box_pos: [0.37, 0.61], box_size: Some([250.0, 120.0]), ..doc("Pixel grid\nSecond line", 31.25) });
+    p.comp_mut(cid).unwrap().layers.push(l);
+    let c = ctx(&p, cid, 0.0);
+    let l = &c.comp.layers[0];
+    for scale in [1.0, 1.5] {
+        let buf = super::render(&c, l, scale);
+        assert_eq!(buf.offset[0].fract(), 0.0);
+        assert_eq!(buf.offset[1].fract(), 0.0);
+        let geom = super::text_geom(&c, l).unwrap();
+        let mut direct = Image::new(600, 300);
+        let shift = [40.0, 50.0];
+        let matrix = Mat3::translate(vec2(shift[0], shift[1])) * Mat3::scale(vec2(scale, scale));
+        super::draw_glyphs(&geom, &mut direct, &matrix, scale, None);
+        let mut max_error = 0.0f32;
+        for y in 0..direct.height {
+            for x in 0..direct.width {
+                let sx = x as i64 - shift[0] as i64 + buf.offset[0] as i64;
+                let sy = y as i64 - shift[1] as i64 + buf.offset[1] as i64;
+                let alpha = if sx >= 0 && sy >= 0 && sx < i64::from(buf.img.width) && sy < i64::from(buf.img.height) { buf.img.get(sx, sy)[3] } else { 0.0 };
+                max_error = max_error.max((direct.get(i64::from(x), i64::from(y))[3] - alpha).abs());
+            }
+        }
+        assert!(max_error <= 1.0 / 255.0 + 1e-6, "scale {scale}: {max_error}");
+    }
+}

@@ -949,9 +949,11 @@ pub fn render(ctx: &EvalCtx, layer: &Layer, s: f64) -> Buf {
     }
     let Some(b) = bounds else { return empty() };
     let b = b.intersect(kurbo::Rect::new(-20000.0, -20000.0, 20000.0, 20000.0));
-    let w = ((b.width() * s).ceil() as u32 + 4).clamp(1, 16384);
-    let h = ((b.height() * s).ceil() as u32 + 4).clamp(1, 16384);
-    let offset = [-b.x0 * s + 2.0, -b.y0 * s + 2.0];
+    // Keep the layer pixel grid: a fractional buffer origin would blur even an integer placement.
+    let (x0, y0) = ((b.x0 * s).floor(), (b.y0 * s).floor());
+    let w = ((b.x1 * s).ceil() - x0 + 4.0).clamp(1.0, 16384.0) as u32;
+    let h = ((b.y1 * s).ceil() - y0 + 4.0).clamp(1.0, 16384.0) as u32;
+    let offset = [-x0 + 2.0, -y0 + 2.0];
     let mut img = Image::new(w, h);
     let base = Mat3::translate(vec2(offset[0], offset[1])) * Mat3::scale(vec2(s, s));
     draw_glyphs(&geom, &mut img, &base, s, None);

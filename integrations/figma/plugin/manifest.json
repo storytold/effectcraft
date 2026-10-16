@@ -1,0 +1,14 @@
+{
+  "name": "EffectCraft Transfer",
+  "id": "effectcraft-transfer",
+  "api": "1.0.0",
+  "main": "code.js",
+  "ui": "ui.html",
+  "editorType": ["figma"],
+  "documentAccess": "dynamic-page",
+  "networkAccess": {
+    "allowedDomains": ["none"],
+    "devAllowedDomains": ["http://localhost:7789", "http://127.0.0.1:7789"],
+    "reasoning": "Sends the selection to the EffectCraft bridge running on this computer (effectcraft-cli figma-bridge)."
+  }
+}

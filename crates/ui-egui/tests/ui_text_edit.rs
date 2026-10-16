@@ -102,6 +102,20 @@ fn modal_blocks_background_text_events() {
 }
 
 #[test]
+fn figcraft_svg_metadata_stays_text_while_editing_text() {
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| app());
+    h.state_mut().ui.tool = effectcraft_ui_egui::state::Tool::Type;
+    h.run_steps(3);
+    let point = rect(&h, "viewer.comp").center();
+    click(&mut h, point, Modifiers::NONE);
+    let clipboard = r#"<svg><metadata id="figcraft-clipboard-v1">e30=</metadata></svg>"#;
+    h.input_mut().events.push(Event::Paste(clipboard.into()));
+    h.run_steps(3);
+    assert_eq!(edited(&h).1, clipboard);
+    assert_eq!(h.state().session.active_comp().unwrap().layers.len(), 1);
+}
+
+#[test]
 fn type_tool_click_type_edit_and_commit() {
     let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).build_eframe(|_| app());
     h.state_mut().show_panel(PanelKind::Composition);

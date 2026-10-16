@@ -22,4 +22,5 @@ effectcraft-gpu = { workspace = true }
 effectcraft-time = { workspace = true }
 serde_json = { workspace = true }
 image = { workspace = true }
+getrandom = { workspace = true }
 cpu-time = "1"

@@ -25,6 +25,7 @@
 //!     on a large generated project (open, save, auto-save, undo/redo, timeline, Project panel)
 //! effectcraft-cli script FILE.jsx [F.ecproj] | --eval CODE    run an After Effects-style script
 //! effectcraft-cli mcp [--autosave | --bridge PORT]            MCP server on stdio
+//! effectcraft-cli figma-bridge [--port 7789] [--control 9877] local endpoint for the Figma plug-in
 //!
 //! Project:  --project F.ecproj (or a positional *.ecproj) | --demo | --empty   (default: demo; mcp: empty)
 //! Saving:   --save (back to --project) | --save-as F.ecproj
@@ -41,6 +42,7 @@
 
 use std::io::Write;
 
+mod figma_bridge;
 mod template;
 
 use effectcraft_automation::tools::{self, Reply};
@@ -89,7 +91,7 @@ fn stdout_broken() -> bool {
     STDOUT_FAILED.get().is_some_and(|k| *k != std::io::ErrorKind::BrokenPipe)
 }
 
-const USAGE: &str = "usage: effectcraft-cli <info|commands|exec|run|props|get|set|render-frame|render|script|mcp> [args] [--json]
+const USAGE: &str = "usage: effectcraft-cli <info|commands|exec|run|props|get|set|render-frame|render|script|mcp|figma-bridge> [args] [--json]
   info                                     project + engine summary
   commands [--filter TEXT] [--enabled]     list engine commands
   exec <command-id> [--params JSON]        run one engine command (exec --list: list them, as `commands`)
@@ -120,6 +122,9 @@ const USAGE: &str = "usage: effectcraft-cli <info|commands|exec|run|props|get|se
       [--automation-read-root DIR] [--automation-write-root DIR]
                                            confine the agent's file access: reads under a read or write root,
                                            writes under a write root (each repeatable); scripts are refused
+  figma-bridge [--port 7789] [--control 9877] [--code CODE]
+                                           local endpoint for the EffectCraft Figma plug-in: imports what it
+                                           sends into the running app (file.importFigma); prints the pairing code
 options: --project F.ecproj | --demo | --empty   --save | --save-as F   --bridge PORT   --json   --gpu
 <comp>: id or name, '-' = active comp; <layer>: id, '#n' or name; <value>: JSON or bare string";
 
@@ -144,6 +149,9 @@ const VALUED: &[&str] = &[
     "--expression",
     "--depth",
     "--eval",
+    "--port",
+    "--control",
+    "--code",
     // render
     "--template",
     "--values",
@@ -439,6 +447,14 @@ fn run(cmd: &str, args: &Args, json_out: bool) -> Result<(), Failure> {
     template::validate(cmd, args)?;
     match cmd {
         "render" => render(args, json_out)?,
+        "figma-bridge" => {
+            let port = match args.opt("--port") {
+                Some(p) => p.parse::<u16>().map_err(|_| Failure::Usage(format!("--port: not a port: {p}")))?,
+                None => 7789,
+            };
+            let control = args.opt("--control").or(args.opt("--bridge")).unwrap_or("9877").to_string();
+            figma_bridge::serve(figma_bridge::Config { port, control, code: args.opt("--code").map(str::to_string) })?;
+        }
         "bench" => bench_cmd(args)?,
         "info" => {
             let mut b = backend(args, true)?;

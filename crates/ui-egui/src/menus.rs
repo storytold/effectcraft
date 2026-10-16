@@ -300,6 +300,14 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
     if id == "layer.newText" && no_params(&params) {
         return run_engine(app, ctx, id, json!({"text": "", "edit": true}));
     }
+    let system_clipboard = if id == "edit.paste" && no_params(&params) && app.session.state.text_edit.is_none() && !ctx.text_edit_focused() {
+        ctx.data_mut(|d| d.remove_temp::<String>(system_paste_id())).or_else(|| app.hooks.clipboard_text.as_ref().and_then(|f| f()))
+    } else {
+        None
+    };
+    if let Some(text) = system_clipboard.as_ref().filter(|text| effectcraft_engine::figma::clipboard::is_clipboard_text(text)) {
+        return run_engine(app, ctx, "edit.pasteFigCraft", json!({"clipboard": text}));
+    }
     if no_params(&params) && app.ui.focused == PanelKind::Project {
         match id {
             "edit.duplicate" => return run_engine(app, ctx, "project.duplicate", json!({})),
@@ -321,11 +329,12 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
     // Edit ▸ Paste with SVG markup on the system clipboard pastes it as a shape layer (After
     // Effects 26.3). Copying in the app replaces the system clipboard with a note naming what
     // was copied, so SVG there was copied after anything copied in the app.
-    if id == "edit.paste" && no_params(&params) && app.session.state.text_edit.is_none() {
-        let text = ctx.data_mut(|d| d.remove_temp::<String>(system_paste_id())).or_else(|| app.hooks.clipboard_text.as_ref().and_then(|f| f()));
-        if let Some(svg) = text.filter(|t| effectcraft_engine::vector::is_svg_text(t)) {
-            return run_engine(app, ctx, "edit.pasteSvg", json!({"svg": svg}));
-        }
+    if id == "edit.paste"
+        && no_params(&params)
+        && app.session.state.text_edit.is_none()
+        && let Some(svg) = system_clipboard.filter(|t| effectcraft_engine::vector::is_svg_text(t))
+    {
+        return run_engine(app, ctx, "edit.pasteSvg", json!({"svg": svg}));
     }
     // Clear follows panel focus, including the Edit menu and keyboard shortcut.
     if id == "edit.clear" && params.as_object().is_some_and(|p| p.is_empty()) && app.ui.focused == PanelKind::Project {
@@ -1554,6 +1563,12 @@ pub(crate) fn entry_checked(app: &EffectcraftApp, e: &MenuEntry) -> Option<bool>
 }
 
 pub(crate) fn entry_enabled(app: &EffectcraftApp, e: &MenuEntry) -> bool {
+    if e.command == "edit.paste"
+        && app.session.state.text_edit.is_none()
+        && app.hooks.clipboard_text.as_ref().and_then(|read| read()).is_some_and(|text| effectcraft_engine::figma::clipboard::is_clipboard_text(&text))
+    {
+        return true;
+    }
     if app.ui.focused == PanelKind::Project {
         match e.command.as_str() {
             "edit.duplicate" => {
