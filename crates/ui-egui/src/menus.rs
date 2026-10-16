@@ -957,6 +957,10 @@ pub fn frontend(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, p: Valu
             app.dialog = Some(crate::Dialog::CommandPalette);
             Value::Null
         }
+        "app.fxConsole" => {
+            crate::panels::fx_console::open(app, ctx, p.get("query").and_then(Value::as_str).unwrap_or_default());
+            Value::Null
+        }
         "app.keyboardShortcuts" => {
             crate::panels::shortcut_editor::open(app);
             Value::Null
@@ -1652,7 +1656,14 @@ pub fn parse_shortcut(s: &str) -> Option<(egui::Modifiers, egui::Key)> {
             "Physical" => {}
             "Shift" => m.shift = true,
             "Alt" => m.alt = true,
-            "Ctrl" => m.ctrl = true,
+            // Off macOS Ctrl is the command key: egui reports both, so a Ctrl shortcut (the
+            // Effect Console's Ctrl+Space) must expect both to match.
+            "Ctrl" => {
+                m.ctrl = true;
+                if !cfg!(target_os = "macos") {
+                    m.command = true;
+                }
+            }
             k => {
                 key = match k {
                     ";" => Some(egui::Key::Semicolon),
@@ -1696,8 +1707,14 @@ pub type Binding = (egui::Modifiers, egui::Key, String, Value);
 /// All bindings of the active keyboard shortcut preset, most modifiers first.
 pub fn bindings(session: &effectcraft_engine::Session) -> Vec<Binding> {
     let mut v: Vec<Binding> = Vec::new();
-    for (sc, b) in session.shortcuts().bindings() {
-        if sc.starts_with("Physical+") {
+    let all = session.shortcuts().bindings();
+    let has_ctrl = |sc: &str| sc.split('+').any(|p| p == "Ctrl");
+    // Off macOS a Ctrl shortcut parses to the same modifiers as the Cmd one with the same keys:
+    // the Cmd binding (the standard one) keeps them and the Ctrl one is not bound.
+    let cmd_keys: Vec<(egui::Modifiers, egui::Key)> =
+        if cfg!(target_os = "macos") { vec![] } else { all.iter().filter(|(sc, _)| !has_ctrl(sc)).filter_map(|(sc, _)| parse_shortcut(sc)).collect() };
+    for (sc, b) in all {
+        if sc.starts_with("Physical+") || has_ctrl(sc) && parse_shortcut(sc).is_some_and(|mk| cmd_keys.contains(&mk)) {
             continue;
         }
         // Off macOS `Cmd` is Ctrl, so a custom Ctrl+Cmd shortcut would
@@ -2263,6 +2280,40 @@ mod tests {
         assert!(cmds.contains(&egui::ViewportCommand::Maximized(false)), "{cmds:?}");
     }
 
+    /// Review on #1105: off macOS `Ctrl` now parses like `Cmd` (egui reports both for the Ctrl
+    /// key), so a Ctrl binding fires there; one that would collide with a Cmd binding of the same
+    /// keys is dropped and the Cmd binding keeps working. On macOS nothing changes.
+    #[test]
+    fn ctrl_shortcuts_never_take_over_cmd_ones() {
+        let (cm, ck) = parse_shortcut("Cmd+K").unwrap();
+        let (tm, tk) = parse_shortcut("Ctrl+K").unwrap();
+        assert_eq!(ck, tk);
+        assert_eq!(cm == tm, !cfg!(target_os = "macos"));
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        let before: Vec<(egui::Modifiers, egui::Key, String)> = bindings(&app.session).into_iter().map(|b| (b.0, b.1, b.2)).collect();
+        // No default binding is dropped as a Ctrl/Cmd duplicate.
+        for (sc, b) in app.session.shortcuts().bindings() {
+            if let Some((m, k)) = parse_shortcut(sc)
+                && !(sc.contains("Ctrl") && sc.contains("Cmd"))
+                && !sc.starts_with("Physical+")
+            {
+                assert!(before.iter().any(|x| (x.0, x.1, x.2.as_str()) == (m, k, b.command.as_str())), "{sc} → {}", b.command);
+            }
+        }
+        let cmd_k: Vec<String> = before.iter().filter(|b| (b.0, b.1) == (cm, ck)).map(|b| b.2.clone()).collect();
+        // A custom Ctrl+K never steals Cmd+K's command.
+        app.session.execute("shortcuts.set", json!({"command": "tool.hand", "keys": "Ctrl+K"})).unwrap();
+        let after = bindings(&app.session);
+        let hand_k = after.iter().any(|b| b.2 == "tool.hand" && (b.0, b.1) == (tm, tk));
+        let first_k = after.iter().find(|b| (b.0, b.1) == (cm, ck)).map(|b| b.2.clone());
+        if cfg!(target_os = "macos") || cmd_k.is_empty() {
+            assert!(hand_k, "Ctrl+K binds where nothing else uses those keys");
+        } else {
+            assert!(!hand_k);
+            assert_eq!(first_k, cmd_k.first().cloned());
+        }
+    }
+
     /// The default keys of the keyboard-only commands parse and reach them.
     #[test]
     fn keyboard_only_commands_are_bound() {
@@ -2395,9 +2446,10 @@ mod tests {
         let (m, k) = parse_shortcut("Cmd+Alt+Shift+Y").unwrap();
         assert!(find(&app, "layer.newNull").contains(&(m, k)));
         // A UI command rebound in a custom preset.
-        app.session.execute("shortcuts.set", json!({"command": "tool.hand", "keys": "Ctrl+Alt+H"})).unwrap();
+        // (Ctrl+Alt+J: off macOS Ctrl+Alt+H is Cmd+Alt+H, Toggle Hold Keyframe's, and wouldn't bind.)
+        app.session.execute("shortcuts.set", json!({"command": "tool.hand", "keys": "Ctrl+Alt+J"})).unwrap();
         assert_eq!(app.session.keymaps.active, "Custom");
-        let (m2, k2) = parse_shortcut("Ctrl+Alt+H").unwrap();
+        let (m2, k2) = parse_shortcut("Ctrl+Alt+J").unwrap();
         assert_eq!(find(&app, "tool.hand"), vec![(m2, k2)]);
         app.session.execute("shortcuts.set", json!({"command": "layer.newNull", "keys": "F6"})).unwrap();
         assert_eq!(find(&app, "layer.newNull"), vec![(egui::Modifiers::NONE, egui::Key::F6)]);

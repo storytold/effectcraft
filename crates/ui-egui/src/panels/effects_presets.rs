@@ -250,7 +250,7 @@ fn preset_row(
 }
 
 /// User preset files, rescanned every few seconds (and on Refresh List).
-fn user_presets(ctx: &egui::Context, force: bool) -> Vec<PresetFile> {
+pub(crate) fn user_presets(ctx: &egui::Context, force: bool) -> Vec<PresetFile> {
     let id = egui::Id::new("fx-user-presets");
     let now = ctx.input(|i| i.time);
     if !force

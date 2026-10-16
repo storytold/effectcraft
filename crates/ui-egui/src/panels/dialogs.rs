@@ -35,6 +35,8 @@ pub struct DialogState {
     pub solid_affect_all: bool,
     pub palette_query: String,
     pub palette_sel: usize,
+    /// The Effect Console (Ctrl+Space), when open. It isn't a modal dialog: the app stays live.
+    pub fx_console: Option<super::fx_console::Console>,
     /// Settings dialog page id (`general`, `appearance`…).
     pub settings_page: String,
     /// Settings when the dialog opened (Cancel restores them).
