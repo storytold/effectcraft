@@ -369,4 +369,90 @@ mod tests {
         start(&mut app);
         assert_eq!(count.load(Ordering::Relaxed), 1, "start is idempotent: no second Account job");
     }
+
+    /// Writes File-menu, Open, and Save As PNGs when `EC_CLOUD_SHOTS` is a directory.
+    /// The account and folder are a fixture, so the pages are the real window and not a sign-in prompt.
+    #[test]
+    fn collabcraft_pages_screenshot() {
+        let Some(dir) = std::env::var_os("EC_CLOUD_SHOTS") else { return };
+        let dir = std::path::PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        struct Quiet;
+        impl CloudBackend for Quiet {
+            fn submit(&self, _job: Job, _post: Post) {}
+        }
+        fn entry(name: &str, kind: EntryKind, shared_by: Option<&str>) -> Entry {
+            Entry {
+                id: name.into(),
+                room: format!("room-{name}"),
+                name: name.into(),
+                path: "/Projects".into(),
+                kind,
+                size: if kind == EntryKind::Folder { None } else { Some(48_112) },
+                modified: Some("2026-10-16T14:00:00Z".into()),
+                mime: if kind == EntryKind::File { Some("application/json".into()) } else { None },
+                etag: Some("1".into()),
+                writable: shared_by.is_none(),
+                shared_by: shared_by.map(str::to_owned),
+            }
+        }
+
+        let mut session = effectcraft_engine::Session::default();
+        let _ = session.execute("file.openDemoProject", serde_json::json!({}));
+        let mut app = crate::EffectcraftApp::new(session);
+        app.cloud.connect(Quiet);
+        app.cloud.account = Some(Account {
+            display: "Ada".into(),
+            capabilities: vec![Capability::Files, Capability::SharedWithMe, Capability::Sharing, Capability::Etags],
+            provider_linked: true,
+        });
+        app.cloud.mine.path = "/Projects".into();
+        app.cloud.mine.loaded = true;
+        app.cloud.mine.entries = vec![
+            entry("Titles", EntryKind::Folder, None),
+            entry("Cold Open.ecproj", EntryKind::File, None),
+            entry("End Card.ecproj", EntryKind::File, None),
+        ];
+        app.cloud.shared.loaded = true;
+        app.cloud.shared.entries = vec![entry("Review Cut.ecproj", EntryKind::File, Some("Sam"))];
+        app.cloud.save_name = "Cold Open.ecproj".into();
+        app.cloud.status = Some("CollabCraft".into());
+
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1280.0, 800.0))
+            .with_pixels_per_point(1.0)
+            .wgpu()
+            .build_eframe(|_| app);
+        for _ in 0..12 {
+            h.step();
+        }
+        let file = h.state().auto.find("menu.File").expect("File menu");
+        let at = egui::pos2(file.rect[0] + file.rect[2] / 2.0, file.rect[1] + file.rect[3] / 2.0);
+        h.input_mut().events.push(egui::Event::PointerMoved(at));
+        h.input_mut().events.push(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: Default::default(),
+        });
+        h.step();
+        h.input_mut().events.push(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: Default::default(),
+        });
+        h.run_steps(3);
+        let menu = h.render().expect("file menu");
+        menu.save(dir.join("file-menu.png")).unwrap();
+
+        h.state_mut().cloud_page = Some(CloudPage::Open);
+        h.run_steps(4);
+        h.render().expect("open").save(dir.join("open.png")).unwrap();
+
+        h.state_mut().cloud_page = Some(CloudPage::SaveAs);
+        h.run_steps(4);
+        h.render().expect("save").save(dir.join("save.png")).unwrap();
+    }
 }
