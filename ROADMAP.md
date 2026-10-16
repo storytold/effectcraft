@@ -2,7 +2,7 @@
 
 **Stage: alpha** · next: beta, ~30 points of "ready for real work" and ~350–620 h away
 
-> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-15 · **Change:** minor (open-issue count, crash list and localization share re-audited against `upstream/main` 470ea7a3) · **Target:** Adobe After Effects 2026 (26.5.0.89)
+> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-12 · **Change:** minor (open-issue count, crash list and localization share re-audited against `upstream/main` 470ea7a3) · **Target:** Adobe After Effects 2026 (26.5.0.89)
 
 EffectCraft aims to do what After Effects does, with the same panels, menus and behaviour, written
 from scratch in Rust. This page is the one-page summary; the evidence is in
@@ -117,9 +117,9 @@ Come tell us what matters most to you on [Discord](https://discord.gg/artcraft).
 
 ## Progress log
 
-2026-10-15: Linux desktop builds enable the Adwaita Wayland frame and vector window
-controls. See README → Linux window controls; full GTK theme parity is not claimed.
-
+2026-10-16: Linux desktop builds enable Adwaita vector window controls without
+bundling a title font. See README → Linux window controls for platform selection;
+full GTK theme parity is not claimed.
 
 - 2026-10-12: Roto Brush span edits report strokes outside a trimmed layer without panicking;
   strokes and undo history are preserved so restoring the timing allows the span edit again.
