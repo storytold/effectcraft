@@ -1979,6 +1979,7 @@ pub fn menu_bar(app: &mut EffectcraftApp, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
     let mut clicked: Option<(String, Value)> = None;
     let mut nav = crate::menu_keys::Nav::default();
+    let mut titles = Vec::new();
     ui.horizontal_centered(|ui| {
         ui.add_space(6.0);
         egui::MenuBar::new().config(egui::containers::menu::MenuConfig::new().style(crate::widgets::menu_style)).ui(ui, |ui| {
@@ -1990,16 +1991,46 @@ pub fn menu_bar(app: &mut EffectcraftApp, ui: &mut egui::Ui) {
                     });
                     nav.top(&r.response);
                     app.auto.add(&format!("menu.{label}"), r.response.rect, label);
+                    titles.push(r.response);
                 }
             }
         });
     });
+    switch_on_hover(&ctx, &titles);
     crate::menu_keys::handle(&ctx, &nav);
     if let Some((id, params)) = clicked
         && let Err(e) = invoke(app, &ctx, &id, if params.is_null() { json!({}) } else { params })
     {
         app.ui.status = e;
     }
+}
+
+/// As in After Effects (and Windows and macOS menu bars), while a top-level menu is open, moving
+/// the pointer onto another title opens that menu instead (#1290).
+fn switch_on_hover(ctx: &egui::Context, titles: &[egui::Response]) {
+    // Only a moving pointer switches: one resting on a title must not undo Left / Right. Kept
+    // every frame, so a pointer coming back into the window counts as moving (egui's delta is
+    // zero then).
+    let pointer = ctx.pointer_hover_pos();
+    let last = ctx.data_mut(|d| std::mem::replace(d.get_temp_mut_or(last_pointer_id(), None), pointer));
+    let Some(p) = pointer.filter(|p| last != Some(*p)) else { return };
+    let ids: Vec<egui::Id> = titles.iter().map(egui::Popup::default_response_id).collect();
+    let Some(open) = ids.iter().position(|id| egui::Popup::is_id_open(ctx, *id)) else { return };
+    // `Response::hovered` is false while a menu's popup is open, so hit-test the title, and only
+    // where its own layer is on top (a submenu or dialog over the bar keeps the pointer).
+    let reaches = |t: &egui::Response| t.enabled() && t.interact_rect.contains(p) && ctx.layer_id_at(p) == Some(t.layer_id);
+    if let Some(i) = titles.iter().position(reaches)
+        && i != open
+        && let Some(id) = ids.get(i)
+    {
+        egui::Popup::open_id(ctx, *id);
+        ctx.request_repaint();
+    }
+}
+
+/// Where [`switch_on_hover`] last saw the pointer (`None`: outside the window).
+fn last_pointer_id() -> egui::Id {
+    egui::Id::new("menu-bar-last-pointer")
 }
 
 /// The entries of top-level menu `name` (the Effect menu is the Effect Controls panel's context

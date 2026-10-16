@@ -225,3 +225,122 @@ fn import_dialog_offers_mxf() {
     assert!(offered.iter().any(|e| e == "mxf"), "offered {offered:?}");
     assert!(offered.iter().any(|e| e == "mov"));
 }
+
+/// Move the pointer to `p` (no button), then let the UI settle.
+fn hover(h: &mut Harness<'_, EffectcraftApp>, p: Pos2) {
+    h.input_mut().events.push(Event::PointerMoved(p));
+    h.run_steps(3);
+}
+
+/// #1290: with a menu open, moving the pointer onto another title opens that menu instead (no
+/// second click), both ways; with the menus closed, hovering the bar opens nothing.
+#[test]
+fn hovering_another_title_switches_the_open_menu() {
+    let mut h = harness();
+    let (file, edit) = (rect(&h, "menu.File"), rect(&h, "menu.Edit"));
+    hover(&mut h, file.center());
+    hover(&mut h, edit.center());
+    assert!(!shown(&h, "Open Project") && !shown(&h, "Keyboard Shortcuts"), "hovering the closed bar opens nothing");
+    click_at(&mut h, file.center());
+    assert!(shown(&h, "Open Project"), "the click opened File");
+    hover(&mut h, edit.center());
+    assert!(shown(&h, "Keyboard Shortcuts"), "hovering Edit opened it");
+    assert!(!shown(&h, "Open Project"), "and closed File");
+    hover(&mut h, file.center());
+    assert!(shown(&h, "Open Project") && !shown(&h, "Keyboard Shortcuts"), "and back to File");
+    key(&mut h, Key::Space);
+    assert!(!h.state().playback.playing, "Space didn't start the preview behind the menu");
+    key(&mut h, Key::Escape);
+    assert!(!shown(&h, "Open Project"), "Escape closed the menu");
+    hover(&mut h, edit.center());
+    assert!(!shown(&h, "Keyboard Shortcuts"), "closed again, hovering opens nothing");
+}
+
+/// From an open submenu, the pointer reaching another title switches menus too.
+#[test]
+fn hovering_a_title_from_an_open_submenu_switches_menus() {
+    let mut h = harness();
+    let (file, edit) = (rect(&h, "menu.File"), rect(&h, "menu.Edit"));
+    click_at(&mut h, file.center());
+    let new = h.query_by(|n| n.label().is_some_and(|l| l.trim_end_matches('\u{23f5}').trim() == "New")).expect("File ▸ New").rect();
+    hover(&mut h, new.center());
+    h.run_steps(5);
+    assert!(shown(&h, "New Project from Template"), "the New submenu is open");
+    hover(&mut h, edit.center());
+    assert!(shown(&h, "Keyboard Shortcuts"), "hovering Edit opened it");
+    assert!(!shown(&h, "New Project from Template") && !shown(&h, "Open Project"), "and closed File and its submenu");
+}
+
+/// A pointer resting on a title doesn't undo Left / Right: only a moving pointer switches.
+#[test]
+fn a_resting_pointer_does_not_override_the_arrow_keys() {
+    if cfg!(target_os = "macos") {
+        // (Right / Left between menus are tested where the in-window bar is the app's menu.)
+        return;
+    }
+    let mut h = harness();
+    let file = rect(&h, "menu.File");
+    click_at(&mut h, file.center());
+    key(&mut h, Key::ArrowRight);
+    h.run_steps(3);
+    assert!(shown(&h, "Keyboard Shortcuts"), "Right opened Edit with the pointer still on File");
+    assert!(!shown(&h, "Open Project"));
+}
+
+/// Hover switching doesn't keep menus open: choosing an entry and clicking outside close them.
+#[test]
+fn switched_menus_still_close_on_a_choice_or_an_outside_click() {
+    let mut h = harness();
+    let (file, edit) = (rect(&h, "menu.File"), rect(&h, "menu.Edit"));
+    click_at(&mut h, file.center());
+    hover(&mut h, edit.center());
+    let shortcuts = h.query_by_label_contains("Keyboard Shortcuts").unwrap().rect();
+    click_at(&mut h, shortcuts.center());
+    assert_eq!(h.state().dialog, Some(effectcraft_ui_egui::Dialog::Shortcuts), "the switched-to menu's entry ran");
+    assert!(!egui::Popup::is_any_open(&h.ctx), "and closed the menus");
+    h.state_mut().dialog = None;
+    h.run_steps(2);
+    click_at(&mut h, file.center());
+    hover(&mut h, edit.center());
+    click_at(&mut h, pos2(700.0, 600.0));
+    assert!(!egui::Popup::is_any_open(&h.ctx), "an outside click closed the menus");
+}
+
+/// A title the pointer can't reach (the app is disabled under a dialog) doesn't switch menus.
+#[test]
+fn a_disabled_title_does_not_switch_menus() {
+    let mut h = harness();
+    let (file, edit) = (rect(&h, "menu.File"), rect(&h, "menu.Edit"));
+    click_at(&mut h, file.center());
+    h.state_mut().dialog = Some(effectcraft_ui_egui::Dialog::About);
+    h.run_steps(2);
+    hover(&mut h, edit.center());
+    assert!(!shown(&h, "Keyboard Shortcuts"), "Edit didn't open");
+}
+
+/// Leaving the window keeps the menu open, and coming back in over another title switches to it
+/// (egui reports no pointer movement for that first position).
+#[test]
+fn pointer_reentering_over_another_title_switches_menus() {
+    let mut h = harness();
+    let (file, edit) = (rect(&h, "menu.File"), rect(&h, "menu.Edit"));
+    click_at(&mut h, file.center());
+    h.input_mut().events.push(Event::PointerGone);
+    h.run_steps(2);
+    assert!(shown(&h, "Open Project"), "leaving the window kept File open");
+    hover(&mut h, edit.center());
+    assert!(shown(&h, "Keyboard Shortcuts"), "coming back over Edit opened it");
+    assert!(!shown(&h, "Open Project"), "and closed File");
+}
+
+/// The keyboard takes over a menu opened by hovering: Up highlights its last entry.
+#[test]
+fn arrow_keys_work_in_a_menu_opened_by_hovering() {
+    let mut h = harness();
+    let (file, edit) = (rect(&h, "menu.File"), rect(&h, "menu.Edit"));
+    click_at(&mut h, file.center());
+    hover(&mut h, edit.center());
+    key(&mut h, Key::ArrowUp);
+    let last = if cfg!(target_os = "macos") { "Keyboard Shortcuts" } else { "Preferences" };
+    assert!(focused(&h).starts_with(last), "Up went to Edit's last entry: {:?}", focused(&h));
+}
