@@ -283,7 +283,10 @@ fn render_out_is_relative_to_the_working_directory() {
             .unwrap();
         assert!(o.status.success(), "{out}: {}", String::from_utf8_lossy(&o.stderr));
         let v: Value = serde_json::from_slice(&o.stdout).unwrap();
-        PathBuf::from(v["rendered"][0]["output"].as_str().unwrap())
+        let done = PathBuf::from(v["rendered"][0]["output"].as_str().unwrap());
+        assert!(done.is_absolute(), "the CLI reports the absolute output path");
+        // Windows canonical paths may add a verbatim prefix; compare the same file.
+        done.canonicalize().unwrap()
     };
     // A path that already names the project folder is not doubled.
     let done = render(&root, "proj/x.ecproj", "proj/out/d.gif");

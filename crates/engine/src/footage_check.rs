@@ -269,7 +269,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert!(paths.contains(&d.join("Job/shots/a.png").to_string_lossy().to_string()), "{paths:?}");
+        assert!(paths.iter().any(|path| std::path::Path::new(path) == d.join("Job/shots/a.png")), "{paths:?}");
         assert!(!o.is_dirty(), "finding the files is not an edit");
         let _ = std::fs::remove_dir_all(d);
     }

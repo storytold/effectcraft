@@ -1,6 +1,6 @@
 # Roadmap detail
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-10 · **Change:** major (new file: milestones moved from ROADMAP.md, current focus and next steps with Opus 5.5 estimates) · **Target:** Adobe After Effects 2026
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-11 · **Change:** minor (shared Windows installer UI; existing folder/shortcut/launch options retained; install and uninstall completion) · **Target:** Adobe After Effects 2026
 
 Forward-looking detail behind the [ROADMAP](../ROADMAP.md). The work list itself, one gap at a
 time, is [gaps.md](gaps.md); the numbers are in [target-app-parity.md](target-app-parity.md).
@@ -85,3 +85,12 @@ To beta (≈ 75% ready and `.aep` opening): **≈ 350–620 h**. To full parity:
 |---|---|---|
 | 2026-10-10 | minor | Alpha gate: six core workflows checked; all pass, stage stays alpha |
 | 2026-10-10 | major | New file: milestones from ROADMAP.md, current focus, next steps with estimates |
+
+## Packaging update (2026-10-11)
+
+Windows setup now uses the suite's shared `craft-installer` UI, preserving existing folder,
+shortcut and launch options and app-owned installation policy. Install, uninstall and repair
+have explicit completion screens; cancellation and failure have separate endings. Source/profile
+checks, WiX UI library compilation for x64/x86/ARM64, PowerShell parsing and package identity
+comparisons pass. Full MSI linking and interactive Windows acceptance remain pending; see
+[Windows packaging](../packaging/windows/README.md).

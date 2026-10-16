@@ -48,7 +48,7 @@ fn replacing_a_missing_file_relinks_the_others_that_moved_with_it() {
     let r = s.execute("file.replaceFootage", json!({"item": a, "path": new.join("stills/a.png").to_string_lossy()})).unwrap();
     assert_eq!(r["relinked"].as_array().map(Vec::len), Some(1), "{r}");
     let after = footage_paths(&s);
-    assert!(after.iter().all(|(_, p, missing)| p.starts_with(&*new.to_string_lossy()) && !missing), "{after:?}");
+    assert!(after.iter().all(|(_, p, missing)| Path::new(p).starts_with(&new) && !missing), "{after:?}");
     // One undo step puts both back.
     s.execute("edit.undo", json!({})).unwrap();
     assert_eq!(footage_paths(&s).iter().map(|(_, p, _)| p.clone()).collect::<Vec<_>>(), before.iter().map(|(_, p, _)| p.clone()).collect::<Vec<_>>());
