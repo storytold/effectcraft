@@ -408,6 +408,43 @@ fn native_file(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsV
                 s.services.write_file(&ps, &bytes).map_err(|e| format!("Unable to write {path}: {e}"))?;
                 Ok(json!(bytes.len()))
             }
+            "rename" => {
+                #[cfg(target_os = "linux")]
+                {
+                    // Keep the write gate and compare its resolved source before using the raw path.
+                    let normalized_src = check_access(s, &path, true)?;
+                    let name = std::path::Path::new(&data);
+                    if data.contains(['/', '\\'])
+                        || name.components().count() != 1
+                        || !matches!(name.components().next(), Some(std::path::Component::Normal(_)))
+                    {
+                        return Ok(json!(false));
+                    }
+                    let src = std::path::Path::new(&path);
+                    let dst = src.with_file_name(&data);
+                    check_access(s, &dst.to_string_lossy(), true)?;
+                    match std::fs::symlink_metadata(src) {
+                        Ok(meta) if meta.file_type().is_file() => {}
+                        Ok(_) => return Err("File.rename is only supported for regular files".into()),
+                        Err(_) => return Ok(json!(false)),
+                    }
+                    match std::fs::canonicalize(src) {
+                        Ok(resolved) if resolved == normalized_src => {}
+                        Ok(_) => return Err("File.rename with ambiguous parent paths is not supported".into()),
+                        Err(_) => return Ok(json!(false)),
+                    }
+                    match std::fs::symlink_metadata(&dst) {
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Ok(_) => return Err("File.rename to an existing destination is not supported".into()),
+                        Err(_) => return Ok(json!(false)),
+                    }
+                    Ok(json!(std::fs::rename(src, &dst).is_ok()))
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    Err("File.rename is not supported".into())
+                }
+            }
             "copy" => {
                 let src = check_access(s, &path, false)?;
                 let dst = check_access(s, &data, true)?;

@@ -1375,3 +1375,331 @@ fn scripted_levels_alpha_controls_resolve_from_the_effect() {
     );
     assert_eq!(o.result, json!([0.5, 0.5]));
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn file_rename_changes_a_closed_file_basename() {
+    let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let dir = std::env::temp_dir().join(format!("ec-script-rename-{}-{nonce}", std::process::id()));
+    std::fs::create_dir(&dir).unwrap();
+    let source = dir.join("source.bin");
+    let destination = dir.join("renamed.bin");
+    let sentinel_a = dir.join("sentinel-a.bin");
+    let sentinel_b = dir.join("sentinel-b.bin");
+    let original = [0x00u8, 0x41, 0x7f, 0x80, 0xff, 0x0a];
+    let original_a = b"first unrelated file";
+    let original_b = b"second unrelated file";
+    std::fs::write(&source, original).unwrap();
+    std::fs::write(&sentinel_a, original_a).unwrap();
+    std::fs::write(&sentinel_b, original_b).unwrap();
+    assert!(!destination.try_exists().unwrap());
+
+    let mut s = session();
+    s.path = Some(dir.join("project.ecproj").to_string_lossy().to_string());
+    s.prefs.scripting.allow_scripts_write_files = true;
+    let source_json = serde_json::to_string(&source.to_string_lossy()).unwrap();
+    let outcome = run_code(&mut s, &format!("new File({source_json}).rename('renamed.bin')"), "file-rename.jsx");
+    let destination_bytes = std::fs::read(&destination);
+    let source_exists = source.try_exists();
+    let sentinel_a_bytes = std::fs::read(&sentinel_a);
+    let sentinel_b_bytes = std::fs::read(&sentinel_b);
+    let cleanup = std::fs::remove_dir_all(&dir);
+
+    assert!(outcome.error.is_none(), "script failed: {:?}\noutput: {:?}", outcome.error, outcome.output);
+    assert_eq!(outcome.result, json!(true));
+    assert_eq!(destination_bytes.unwrap(), original);
+    assert!(!source_exists.unwrap(), "the old basename must no longer exist");
+    assert_eq!(sentinel_a_bytes.unwrap(), original_a);
+    assert_eq!(sentinel_b_bytes.unwrap(), original_b);
+    cleanup.unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn file_rename_requires_the_file_write_preference() {
+    let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let dir = std::env::temp_dir().join(format!("ec-script-rename-gate-{}-{nonce}", std::process::id()));
+    std::fs::create_dir(&dir).unwrap();
+    let source = dir.join("source.bin");
+    let destination = dir.join("renamed.bin");
+    let sentinel = dir.join("sentinel.bin");
+    let original = [0x00u8, 0x41, 0x80, 0xff];
+    let sentinel_original = b"unrelated gate sentinel";
+    std::fs::write(&source, original).unwrap();
+    std::fs::write(&sentinel, sentinel_original).unwrap();
+    assert!(!destination.try_exists().unwrap());
+
+    let mut s = session();
+    s.path = Some(dir.join("project.ecproj").to_string_lossy().to_string());
+    s.prefs.scripting.allow_scripts_write_files = false;
+    let source_json = serde_json::to_string(&source.to_string_lossy()).unwrap();
+    let outcome = run_code(&mut s, &format!("new File({source_json}).rename('renamed.bin')"), "file-rename-denied.jsx");
+    let source_bytes = std::fs::read(&source);
+    let destination_exists = destination.try_exists();
+    let sentinel_bytes = std::fs::read(&sentinel);
+    let cleanup = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(source_bytes.unwrap(), original);
+    assert!(!destination_exists.unwrap(), "a denied rename must not create a destination");
+    assert_eq!(sentinel_bytes.unwrap(), sentinel_original);
+    let error = outcome.error.expect("rename must require the existing file-write preference");
+    assert!(error.message.contains("Allow Scripts to Write Files"), "{error:?}");
+    cleanup.unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn file_rename_rejects_a_path_instead_of_a_basename() {
+    let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let dir = std::env::temp_dir().join(format!("ec-script-rename-basename-{}-{nonce}", std::process::id()));
+    std::fs::create_dir(&dir).unwrap();
+    let child = dir.join("child");
+    std::fs::create_dir(&child).unwrap();
+    let source = dir.join("source.bin");
+    let destination = child.join("renamed.bin");
+    let sentinel = child.join("sentinel.bin");
+    let original = [0x00u8, 0x42, 0x81, 0xfe];
+    let sentinel_original = b"unrelated basename sentinel";
+    std::fs::write(&source, original).unwrap();
+    std::fs::write(&sentinel, sentinel_original).unwrap();
+    assert!(!destination.try_exists().unwrap());
+
+    let mut s = session();
+    s.path = Some(dir.join("project.ecproj").to_string_lossy().to_string());
+    s.prefs.scripting.allow_scripts_write_files = true;
+    let source_json = serde_json::to_string(&source.to_string_lossy()).unwrap();
+    let outcome = run_code(&mut s, &format!("new File({source_json}).rename('child/renamed.bin')"), "file-rename-basename.jsx");
+    let source_bytes = std::fs::read(&source);
+    let destination_exists = destination.try_exists();
+    let sentinel_bytes = std::fs::read(&sentinel);
+    let cleanup = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(source_bytes.unwrap(), original);
+    assert!(!destination_exists.unwrap(), "a path-valued name must not move the source into a child folder");
+    assert_eq!(sentinel_bytes.unwrap(), sentinel_original);
+    assert!(outcome.error.is_none(), "invalid basename should return false: {:?}", outcome.error);
+    assert_eq!(outcome.result, json!(false));
+    cleanup.unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn file_rename_preserves_an_existing_destination() {
+    let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let dir = std::env::temp_dir().join(format!("ec-script-rename-existing-{}-{nonce}", std::process::id()));
+    std::fs::create_dir(&dir).unwrap();
+    let source = dir.join("source.bin");
+    let destination = dir.join("renamed.bin");
+    let sentinel = dir.join("sentinel.bin");
+    let original = [0x00u8, 0x43, 0x82, 0xfd];
+    let destination_original = [0xffu8, 0x20, 0x00, 0x7f, 0x11];
+    let sentinel_original = b"unrelated destination sentinel";
+    std::fs::write(&source, original).unwrap();
+    std::fs::write(&destination, destination_original).unwrap();
+    std::fs::write(&sentinel, sentinel_original).unwrap();
+
+    let mut s = session();
+    s.path = Some(dir.join("project.ecproj").to_string_lossy().to_string());
+    s.prefs.scripting.allow_scripts_write_files = true;
+    let source_json = serde_json::to_string(&source.to_string_lossy()).unwrap();
+    let outcome = run_code(&mut s, &format!("new File({source_json}).rename('renamed.bin')"), "file-rename-existing.jsx");
+    let source_bytes = std::fs::read(&source);
+    let destination_bytes = std::fs::read(&destination);
+    let sentinel_bytes = std::fs::read(&sentinel);
+    let cleanup = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(source_bytes.unwrap(), original);
+    assert_eq!(destination_bytes.unwrap(), destination_original);
+    assert_eq!(sentinel_bytes.unwrap(), sentinel_original);
+    let error = outcome.error.expect("renaming to an existing destination remains unsupported");
+    assert!(error.message.contains("File.rename to an existing destination is not supported"), "{error:?}");
+    cleanup.unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn file_rename_refuses_open_buffer_and_close_keeps_written_bytes() {
+    let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let dir = std::env::temp_dir().join(format!("ec-script-rename-open-{}-{nonce}", std::process::id()));
+    std::fs::create_dir(&dir).unwrap();
+    let source = dir.join("source.bin");
+    let destination = dir.join("renamed.bin");
+    let sentinel = dir.join("sentinel.bin");
+    let original = b"old!!";
+    let intended = [0x00u8, 0x41, 0x80, 0xff, 0x0a];
+    let sentinel_original = b"unrelated open-buffer sentinel";
+    std::fs::write(&source, original).unwrap();
+    std::fs::write(&sentinel, sentinel_original).unwrap();
+    assert!(!destination.try_exists().unwrap());
+
+    let mut s = session();
+    s.path = Some(dir.join("project.ecproj").to_string_lossy().to_string());
+    s.prefs.scripting.allow_scripts_write_files = true;
+    let source_json = serde_json::to_string(&source.to_string_lossy()).unwrap();
+    let outcome = run_code(
+        &mut s,
+        &format!(
+            r#"
+            var f = new File({source_json});
+            f.encoding = "BINARY";
+            var opened = f.open("e");
+            var wrote = f.write(String.fromCharCode(0, 0x41, 0x80, 0xff, 10));
+            var renameError = "";
+            try {{ f.rename("renamed.bin"); }} catch (e) {{ renameError = String(e); }}
+            var reader = new File({source_json});
+            reader.encoding = "BINARY";
+            var readOpened = reader.open("r");
+            var beforeClose = reader.read();
+            var readClosed = reader.close();
+            var closed = f.close();
+            [opened, wrote, renameError.indexOf("File.rename") >= 0, readOpened, beforeClose, readClosed, closed]
+            "#,
+        ),
+        "file-rename-open.jsx",
+    );
+    let source_bytes = std::fs::read(&source);
+    let destination_metadata = std::fs::symlink_metadata(&destination);
+    let sentinel_bytes = std::fs::read(&sentinel);
+    let cleanup = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(source_bytes.unwrap(), intended, "close must still write the intended buffered bytes");
+    assert!(
+        matches!(destination_metadata, Err(ref error) if error.kind() == std::io::ErrorKind::NotFound),
+        "an open-file rename must not create or move a destination"
+    );
+    assert_eq!(sentinel_bytes.unwrap(), sentinel_original);
+    assert!(outcome.error.is_none(), "only the rename call is caught: {:?}", outcome.error);
+    assert_eq!(outcome.result, json!([true, true, true, true, "old!!", true, true]));
+    cleanup.unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn file_rename_refuses_symlink_source_and_preserves_target() {
+    let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let dir = std::env::temp_dir().join(format!("ec-script-rename-symlink-{}-{nonce}", std::process::id()));
+    std::fs::create_dir(&dir).unwrap();
+    let target = dir.join("target.bin");
+    let link = dir.join("source-link.bin");
+    let destination = dir.join("renamed.bin");
+    let sentinel = dir.join("sentinel.bin");
+    let original = [0x00u8, 0x44, 0x83, 0xfc, 0x0a];
+    let sentinel_original = b"unrelated symlink sentinel";
+    std::fs::write(&target, original).unwrap();
+    std::fs::write(&sentinel, sentinel_original).unwrap();
+    std::os::unix::fs::symlink("target.bin", &link).unwrap();
+    assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+    assert_eq!(std::fs::read(&link).unwrap(), original);
+    assert!(!destination.try_exists().unwrap());
+
+    let mut s = session();
+    s.path = Some(dir.join("project.ecproj").to_string_lossy().to_string());
+    s.prefs.scripting.allow_scripts_write_files = true;
+    let link_json = serde_json::to_string(&link.to_string_lossy()).unwrap();
+    let outcome = run_code(&mut s, &format!("new File({link_json}).rename('renamed.bin')"), "file-rename-symlink.jsx");
+    let target_bytes = std::fs::read(&target);
+    let link_bytes = std::fs::read(&link);
+    let link_metadata = std::fs::symlink_metadata(&link);
+    let link_target = std::fs::read_link(&link);
+    let destination_metadata = std::fs::symlink_metadata(&destination);
+    let sentinel_bytes = std::fs::read(&sentinel);
+    let cleanup = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(target_bytes.unwrap(), original);
+    assert_eq!(link_bytes.unwrap(), original);
+    assert!(link_metadata.unwrap().file_type().is_symlink());
+    assert_eq!(link_target.unwrap(), std::path::Path::new("target.bin"));
+    assert!(
+        matches!(destination_metadata, Err(ref error) if error.kind() == std::io::ErrorKind::NotFound),
+        "refusing a symlink source must preserve both its target and its directory entry"
+    );
+    assert_eq!(sentinel_bytes.unwrap(), sentinel_original);
+    let error = outcome.error.expect("the baseline stub and fixed symlink guard both refuse this rename");
+    assert!(error.message.contains("File.rename"), "{error:?}");
+    cleanup.unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn file_rename_refuses_ambiguous_parent_resolution_and_preserves_both_files() {
+    let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let dir = std::env::temp_dir().join(format!("ec-script-rename-parent-{}-{nonce}", std::process::id()));
+    let real = dir.join("real");
+    std::fs::create_dir_all(real.join("deep")).unwrap();
+    let source_a = dir.join("source.bin");
+    let source_b = real.join("source.bin");
+    let original_a = b"read A, keep A";
+    let original_b = b"raw B, keep B";
+    let sentinel = dir.join("sentinel.bin");
+    let sentinel_original = b"unrelated parent-resolution sentinel";
+    std::fs::write(&source_a, original_a).unwrap();
+    std::fs::write(&source_b, original_b).unwrap();
+    std::fs::write(&sentinel, sentinel_original).unwrap();
+    let link = dir.join("link");
+    std::os::unix::fs::symlink("real/deep", &link).unwrap();
+    let ambiguous = link.join("..").join("source.bin");
+    let destination_a = dir.join("renamed.bin");
+    let destination_b = real.join("renamed.bin");
+    assert_ne!(original_a.as_slice(), original_b.as_slice());
+    assert_eq!(std::fs::read(&ambiguous).unwrap(), original_b, "the raw parent path resolves to B");
+    assert_eq!(crate::runtime::normalize(&ambiguous.to_string_lossy()), source_a.canonicalize().unwrap());
+    assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+    assert_eq!(std::fs::read_link(&link).unwrap(), std::path::Path::new("real/deep"));
+    assert!(!destination_a.try_exists().unwrap());
+    assert!(!destination_b.try_exists().unwrap());
+
+    let mut s = session();
+    s.path = Some(dir.join("project.ecproj").to_string_lossy().into_owned());
+    s.prefs.scripting.allow_scripts_write_files = true;
+    let path_json = serde_json::to_string(&ambiguous.to_string_lossy()).unwrap();
+    let outcome = run_code(
+        &mut s,
+        &format!(
+            r#"
+            var f = new File({path_json});
+            f.encoding = "BINARY";
+            var opened = f.open("r");
+            var read = f.read();
+            var closed = f.close();
+            var renamed = null;
+            var renameError = "";
+            try {{ renamed = f.rename("renamed.bin"); }} catch (e) {{ renameError = String(e); }}
+            [opened, read, closed, renamed, renameError.indexOf("File.rename") >= 0]
+            "#,
+        ),
+        "file-rename-parent.jsx",
+    );
+    // Capture every file/link result before cleanup and before the first preservation assertion.
+    let source_a_bytes = std::fs::read(&source_a);
+    let source_b_bytes = std::fs::read(&source_b);
+    let link_metadata = std::fs::symlink_metadata(&link);
+    let link_target = std::fs::read_link(&link);
+    let destination_a_metadata = std::fs::symlink_metadata(&destination_a);
+    let destination_b_metadata = std::fs::symlink_metadata(&destination_b);
+    let destination_a_bytes = std::fs::read(&destination_a);
+    let destination_b_bytes = std::fs::read(&destination_b);
+    let sentinel_bytes = std::fs::read(&sentinel);
+    let cleanup = std::fs::remove_dir_all(&dir);
+
+    assert!(outcome.error.is_none(), "only the rename call is caught: {:?}", outcome.error);
+    assert_eq!(outcome.result[0], json!(true));
+    assert_eq!(outcome.result[1], json!("read A, keep A"), "the same File reads A before rename");
+    assert_eq!(outcome.result[2], json!(true), "the File must be closed before rename");
+    assert_eq!(source_a_bytes.unwrap(), original_a);
+    assert!(
+        source_b_bytes.as_ref().is_ok_and(|bytes| bytes.as_slice() == original_b.as_slice()),
+        "rename must preserve B selected only by raw parent resolution; B: {source_b_bytes:?}; destinations: {destination_a_bytes:?}, {destination_b_bytes:?}; script: {:?}",
+        outcome.result
+    );
+    assert!(link_metadata.unwrap().file_type().is_symlink());
+    assert_eq!(link_target.unwrap(), std::path::Path::new("real/deep"));
+    for destination in [destination_a_metadata, destination_b_metadata] {
+        assert!(
+            matches!(destination, Err(ref error) if error.kind() == std::io::ErrorKind::NotFound),
+            "ambiguous parent resolution must not create either destination"
+        );
+    }
+    assert_eq!(sentinel_bytes.unwrap(), sentinel_original);
+    assert_eq!(outcome.result, json!([true, "read A, keep A", true, null, true]));
+    cleanup.unwrap();
+}

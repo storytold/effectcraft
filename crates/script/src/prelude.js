@@ -270,7 +270,10 @@ File.prototype = {
   },
   remove: function () { return JSON.parse(__file("remove", this.__path)); },
   copy: function (to) { return JSON.parse(__file("copy", this.__path, __str(to))); },
-  rename: function () { throw __err("File.rename is not supported"); },
+  rename: function (newName) {
+    if (this.__mode !== null) throw __err("File.rename for open files is not supported");
+    return JSON.parse(__file("rename", this.__path, __str(newName)));
+  },
   execute: function () { return JSON.parse(__file("execute", this.__path)); },
   openDlg: function () { return null; },
   saveDlg: function () { return null; },

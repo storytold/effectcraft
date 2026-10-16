@@ -235,7 +235,8 @@ mod tests {
         paths.sort();
         // Windows joins the stored "media/..." onto the project's folder and leaves a path with mixed
         // separators; `Path` equality compares components, so both spellings are the same file.
-        let expected = ["/nonexistent/ec/abs.png", clip.to_str().unwrap(), "media/ec-relative-gone.png"];
+        let mut expected = ["/nonexistent/ec/abs.png", clip.to_str().unwrap(), "media/ec-relative-gone.png"];
+        expected.sort();
         assert_eq!(paths.len(), expected.len(), "{paths:?}");
         for (got, want) in paths.iter().zip(expected) {
             assert_eq!(std::path::Path::new(got), std::path::Path::new(want), "{paths:?}");
