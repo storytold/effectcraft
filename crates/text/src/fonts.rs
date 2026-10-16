@@ -105,17 +105,52 @@ fn extra_dirs(var: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
     var.map(|v| std::env::split_paths(v).filter(|p| !p.as_os_str().is_empty()).collect()).unwrap_or_default()
 }
 
-fn walk(dir: &std::path::Path, depth: u32, out: &mut Vec<PathBuf>) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
-    for e in rd.flatten() {
-        let p = e.path();
-        if p.is_dir() {
-            // Bounded, so a symlink loop ends.
-            if depth < 8 {
-                walk(&p, depth + 1, out);
+// Track only the current branch: aliases elsewhere in a font library remain discoverable.
+#[cfg(unix)]
+type DirectoryIdentity = (u64, u64);
+#[cfg(not(unix))]
+type DirectoryIdentity = PathBuf;
+
+#[cfg(unix)]
+fn directory_identity(_: &std::path::Path, metadata: &std::fs::Metadata) -> Option<DirectoryIdentity> {
+    use std::os::unix::fs::MetadataExt;
+    Some((metadata.dev(), metadata.ino()))
+}
+#[cfg(not(unix))]
+fn directory_identity(path: &std::path::Path, _: &std::fs::Metadata) -> Option<DirectoryIdentity> {
+    std::fs::canonicalize(path).ok()
+}
+
+fn walk(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+    struct Frame {
+        identity: DirectoryIdentity,
+        entries: std::fs::ReadDir,
+    }
+    let Ok(metadata) = std::fs::metadata(dir) else { return };
+    let Some(identity) = directory_identity(dir, &metadata) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let mut branch = vec![Frame { identity, entries }];
+    while let Some(frame) = branch.last_mut() {
+        let Some(entry) = frame.entries.next() else {
+            branch.pop();
+            continue;
+        };
+        let Ok(entry) = entry else { continue };
+        let path = entry.path();
+        // Follow links to directories and regular files, but never open stream-like entries.
+        let Ok(metadata) = std::fs::metadata(&path) else { continue };
+        if metadata.is_dir() {
+            let Some(identity) = directory_identity(&path, &metadata) else { continue };
+            if branch.iter().any(|ancestor| ancestor.identity == identity) {
+                continue;
             }
-        } else if p.extension().and_then(|x| x.to_str()).is_some_and(|x| matches!(x.to_ascii_lowercase().as_str(), "ttf" | "otf" | "ttc" | "otc")) {
-            out.push(p);
+            if let Ok(entries) = std::fs::read_dir(&path) {
+                branch.push(Frame { identity, entries });
+            }
+        } else if metadata.is_file()
+            && path.extension().and_then(|x| x.to_str()).is_some_and(|x| matches!(x.to_ascii_lowercase().as_str(), "ttf" | "otf" | "ttc" | "otc"))
+        {
+            out.push(path);
         }
     }
 }
@@ -124,7 +159,7 @@ impl FontSource for DirectorySource {
     fn faces(&self) -> Vec<FaceInfo> {
         let mut files = Vec::new();
         for d in &self.dirs {
-            walk(d, 0, &mut files);
+            walk(d, &mut files);
         }
         files.sort();
         files.dedup();
@@ -883,6 +918,88 @@ fn system_fallback(c: char, style: &str) -> Option<FaceId> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct FontTree(PathBuf);
+    impl FontTree {
+        fn new(label: &str) -> Self {
+            for attempt in 0..128 {
+                let path = std::env::temp_dir().join(format!("effectcraft-font-{label}-{}-{attempt}", std::process::id()));
+                match std::fs::create_dir(&path) {
+                    Ok(()) => return Self(path),
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => panic!("cannot create font tree: {error}"),
+                }
+            }
+            panic!("cannot allocate fresh font tree");
+        }
+    }
+    impl Drop for FontTree {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn directory_source_reaches_deep_fonts_in_sorted_path_order() {
+        let tree = FontTree::new("deep");
+        let mut dir = tree.0.clone();
+        for _ in 0..16 {
+            dir = dir.join("nested");
+        }
+        std::fs::create_dir_all(&dir).unwrap();
+        let deep = dir.join("deep.ttf");
+        let shallow = tree.0.join("z-shallow.ttf");
+        std::fs::write(&deep, INTER_BOLD).unwrap();
+        std::fs::write(&shallow, INTER_BOLD).unwrap();
+        let faces = DirectorySource { dirs: vec![tree.0.clone(), tree.0.clone()] }.faces();
+        let paths: Vec<_> = faces
+            .iter()
+            .map(|f| match &f.data {
+                FaceData::File(path) => path.clone(),
+                _ => panic!("directory source must be file-backed"),
+            })
+            .collect();
+        let mut expected = vec![deep, shallow];
+        expected.sort();
+        assert_eq!(paths, expected, "duplicate roots still deduplicate paths and preserve priority");
+        assert!(faces.iter().all(|f| f.family == "Inter" && f.style == "Bold"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_source_keeps_sibling_aliases_but_skips_ancestor_cycles() {
+        use std::os::unix::fs::symlink;
+        let tree = FontTree::new("aliases");
+        let library = tree.0.join("library");
+        std::fs::create_dir(&library).unwrap();
+        std::fs::write(library.join("font.ttf"), INTER_BOLD).unwrap();
+        symlink(".", library.join("self")).unwrap();
+        symlink("..", library.join("parent")).unwrap();
+        symlink("library", tree.0.join("alias-a")).unwrap();
+        symlink("library", tree.0.join("alias-b")).unwrap();
+        symlink("library/font.ttf", tree.0.join("linked.otf")).unwrap();
+        symlink("absent.ttf", tree.0.join("broken.ttf")).unwrap();
+        let later = FontTree::new("later");
+        std::fs::write(later.0.join("later.ttf"), INTER_BOLD).unwrap();
+        let faces = DirectorySource { dirs: vec![tree.0.clone(), later.0.clone()] }.faces();
+        let paths: Vec<_> = faces
+            .iter()
+            .map(|f| match &f.data {
+                FaceData::File(path) => path.clone(),
+                _ => panic!("directory source must be file-backed"),
+            })
+            .collect();
+        let mut expected = vec![
+            tree.0.join("alias-a/font.ttf"),
+            tree.0.join("alias-b/font.ttf"),
+            tree.0.join("library/font.ttf"),
+            tree.0.join("linked.otf"),
+            later.0.join("later.ttf"),
+        ];
+        expected.sort();
+        assert_eq!(paths, expected, "cycles must not suppress sibling aliases or a later root");
+        assert!(faces.iter().all(|f| f.family == "Inter" && f.style == "Bold"));
+    }
 
     #[test]
     fn extra_font_dirs_come_from_a_path_list() {

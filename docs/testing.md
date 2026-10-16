@@ -70,3 +70,18 @@ date, load average, scenario, settings, metrics); `--compare OLD.jsonl` prints t
 the latest matching runs there, `--compare OLD --with NEW` compares two files without rendering.
 The table notes the 1-minute load average: on a busy machine wall time is noise, so compare
 peak memory and instructions retired, and rerun when the load differs a lot.
+
+## Deep font libraries and directory aliases
+
+DirectorySource walks directory branches iteratively rather than stopping at a fixed nesting
+level. Tests discover an existing licensed Inter font sixteen directories deep, preserve final
+sorted path order and duplicate-root handling, and on Unix preserve sibling aliases while
+skipping self/parent cycles and broken links. Regular-file symlinks remain supported.
+
+On Unix, device/inode identities detect repeated ancestors, including directory aliases. Other
+platforms use canonical paths for branch identity. This is not a promise of identical bind-mount
+identity on every platform. A branch retains directory handles proportional to its depth; OS
+resource and filesystem errors are still skipped. All noncyclic alias branches are visited. Work and retained paths have no new entry or byte
+cutoff; alias-rich graphs can repeat physical subtrees many times. Concurrent
+filesystem changes and blocking filesystem operations have no hard latency guarantee. No
+Fontconfig matching or configuration-file selection behavior changes here.
