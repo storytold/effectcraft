@@ -213,6 +213,8 @@ pub(crate) fn modal_fit(ctx: &egui::Context, title: &str, size: egui::Vec2, t: &
             ui.add_space(10.0);
             let title_h = ui.cursor().top() - ui.min_rect().top();
             body(ui, (size.y - 36.0 - title_h).max(40.0));
+            // A colour picker's eyedropper samples the viewer under the dialog, but not the dialog itself.
+            crate::color_picker::note_overlay(ui.ctx(), ui.min_rect().expand(18.0));
         });
 }
 

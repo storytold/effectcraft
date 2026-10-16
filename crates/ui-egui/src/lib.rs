@@ -1614,6 +1614,9 @@ impl EffectcraftApp {
         self.apply_gpu_failure(&ctx);
         self.run_dialog_answers();
         self.auto.begin_frame();
+        if let Some(rect) = crate::color_picker::take_automation(&ctx) {
+            self.auto.add("colorPicker.eyedropper", rect, "Eyedropper");
+        }
         self.frames.set_context(&ctx);
         if self.session.render_job.is_some() {
             self.session.poll_render();

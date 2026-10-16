@@ -204,7 +204,8 @@ pub fn character(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         }
         let er = Rect::from_min_size(pos2(fs.max.x + 4.0, y + 1.0), vec2(18.0, 18.0));
         let active = app.ui.text_color_pick.as_ref().is_some_and(|pick| pick.layer == target.as_ref().map_or(0, |tt| tt.layer) && pick.field == key);
-        let eye = super::fx_widgets::eyedropper_button(ui, er, active, egui::Id::new(("char-eye", key)), &t);
+        let eye = super::fx_widgets::eyedropper_button(ui, er, active, egui::Id::new(("char-eye", key)), &t)
+            .on_hover_text(tr("Eyedropper: click, then click in the Composition panel"));
         app.auto.add(&format!("character.{key}.eyedropper"), er, &format!("{label} eyedropper"));
         if eye.clicked() {
             if active {

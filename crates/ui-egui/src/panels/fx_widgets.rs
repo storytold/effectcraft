@@ -171,12 +171,7 @@ pub fn eyedropper_button(ui: &mut egui::Ui, rect: Rect, active: bool, id: egui::
     } else {
         t.text_dim
     };
-    // A pipette: a diagonal glass tube with a bulb at the top right and a tip at the bottom left.
-    let r = rect.shrink(rect.width() * 0.2);
-    let at = |x: f32, y: f32| pos2(r.min.x + x * r.width(), r.min.y + y * r.height());
-    p.line_segment([at(0.08, 0.92), at(0.62, 0.38)], Stroke::new(2.2, col));
-    p.circle_filled(at(0.76, 0.24), r.width() * 0.2, col);
-    p.line_segment([at(0.5, 0.3), at(0.7, 0.5)], Stroke::new(1.4, col));
+    crate::color_picker::draw_pipette(p, rect, col);
     resp
 }
 

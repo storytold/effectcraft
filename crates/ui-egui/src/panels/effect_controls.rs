@@ -1455,6 +1455,7 @@ pub fn viewer_hook(
 ) {
     let t = app.tokens;
     let ctx = ui.ctx().clone();
+    crate::color_picker::note_viewer(&ctx, map.area);
     let mut actions: Actions = vec![];
     let mut point_preview = None;
     if let Some(pick) = app.ui.fx_pick.clone() {
@@ -1572,6 +1573,31 @@ pub fn viewer_hook(
                 app.ui.text_color_pick = None;
                 app.ui.status.clear();
             }
+        }
+    }
+    // A colour picker's eyedropper is armed (its popup stays open): the viewer shows the colour under
+    // the pointer, and the next press on it samples the frame into the picker. The press is read from
+    // the pointer, since a modal dialog over the viewer takes its clicks.
+    if crate::color_picker::eyedropper_armed(&ctx) {
+        let _ = ui.interact(map.area, egui::Id::new("viewer-popup-eyedropper"), Sense::click());
+        ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
+        app.viewer_pixels();
+        let chip = Rect::from_min_size(map.area.min + vec2(10.0, 10.0), vec2(220.0, 22.0));
+        painter.rect_filled(chip, 11.0, Color32::from_black_alpha(180));
+        painter.text(chip.center(), Align2::CENTER_CENTER, "Click to sample color", Tokens::ui(11.5), t.text);
+        if let Some(hp) = crate::color_picker::eyedropper_point(&ctx)
+            && let Some(img) = &app.viewer_image
+            && let Some(s) = fw::sample_frame(img, super::viewer_tools::shown_region(&ctx, map.comp), map.to_comp(hp))
+        {
+            let sw = Rect::from_min_size(hp + vec2(14.0, 14.0), vec2(26.0, 18.0));
+            painter.rect_filled(sw, 2.0, Color32::from_rgb((s[0] * 255.0) as u8, (s[1] * 255.0) as u8, (s[2] * 255.0) as u8));
+            painter.rect_stroke(sw, 2.0, Stroke::new(1.0, Color32::WHITE), egui::StrokeKind::Outside);
+        }
+        if let Some(pos) = crate::color_picker::sample_press(&ctx)
+            && let Some(img) = &app.viewer_image
+            && let Some(s) = fw::sample_frame(img, super::viewer_tools::shown_region(&ctx, map.comp), map.to_comp(pos))
+        {
+            crate::color_picker::deliver_sample(&ctx, [s[0], s[1], s[2]]);
         }
     }
     let picking = app.ui.fx_pick.is_some() || app.ui.text_color_pick.is_some();
