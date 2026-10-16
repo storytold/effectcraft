@@ -264,6 +264,54 @@ impl Image {
             }
         });
     }
+    /// Bounding box `(x0, y0, x1, y1)` (exclusive ends) of the pixels with any non-zero channel
+    /// (NaN counts as content), None when every pixel is zero. Effects use it to skip the empty
+    /// part of a buffer: a layer's buffer is often far larger than what it draws.
+    pub fn content_bounds(&self) -> Option<(u32, u32, u32, u32)> {
+        let w = self.width as usize;
+        if w == 0 || self.height == 0 {
+            return None;
+        }
+        let nz = |p: &Px| p[0] != 0.0 || p[1] != 0.0 || p[2] != 0.0 || p[3] != 0.0;
+        self.data
+            .par_chunks(w)
+            .enumerate()
+            .filter_map(|(y, row)| {
+                let f = row.iter().position(nz)?;
+                let l = row.iter().rposition(nz).unwrap_or(f);
+                Some((f as u32, y as u32, l as u32 + 1, y as u32 + 1))
+            })
+            .reduce_with(|a, b| (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3)))
+    }
+    /// The rectangle `[x0, x1) × [y0, y1)` (clamped to the image) as a new image, copied by rows.
+    pub fn crop_rect(&self, x0: u32, y0: u32, x1: u32, y1: u32) -> Image {
+        let (x1, y1) = (x1.min(self.width), y1.min(self.height));
+        let (x0, y0) = (x0.min(x1), y0.min(y1));
+        let (w, sw) = ((x1 - x0) as usize, self.width as usize);
+        let mut out = Image::new(x1 - x0, y1 - y0);
+        if w == 0 {
+            return out;
+        }
+        out.data.par_chunks_mut(w).enumerate().for_each(|(oy, row)| {
+            let s = (y0 as usize + oy) * sw + x0 as usize;
+            if let Some(src) = self.data.get(s..s + w) {
+                row.copy_from_slice(src);
+            }
+        });
+        out
+    }
+    /// Copy `src` over this image with its top-left corner at `(x, y)` (clipped).
+    pub fn paste(&mut self, src: &Image, x: u32, y: u32) {
+        let (dw, sw) = (self.width as usize, src.width as usize);
+        let w = sw.min(dw.saturating_sub(x as usize));
+        if w == 0 || dw == 0 {
+            return;
+        }
+        let (x, y) = (x as usize, y as usize);
+        self.data.par_chunks_mut(dw).skip(y).zip(src.data.par_chunks(sw)).for_each(|(row, s)| {
+            row[x..x + w].copy_from_slice(&s[..w]);
+        });
+    }
     /// Bounding box of non-transparent pixels (x0, y0, x1, y1), None if empty.
     pub fn alpha_bounds(&self) -> Option<(u32, u32, u32, u32)> {
         let w = self.width as usize;

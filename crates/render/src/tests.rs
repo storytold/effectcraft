@@ -697,6 +697,38 @@ fn effects_on_text_reach_past_the_text_bounds() {
     );
 }
 
+/// A drop shadow, a glow or a Gaussian Blur (edges not repeated) pads the buffer by its own
+/// reach, so a stack of only those skips growing an authored layer's buffer to its whole region
+/// (#659): the frame is the one the grown buffer gives. A no-op effect that needs the region (a
+/// slider) makes the comparison.
+#[test]
+fn shadow_and_glow_on_text_skip_the_layer_region() {
+    let make = |region: bool| {
+        let (mut p, cid, comp) = setup();
+        let mut l = build::layer(&mut p, &comp, "Text", LayerSource::Text, (200, 100), None);
+        l.props.prop_mut("text/sourceText").unwrap().value = Value::Text(Box::new(TextDoc { text: "Hi".into(), size: 28.0, ..Default::default() }));
+        l.props.prop_mut("transform/position").unwrap().value = Value::Vec3([70.0, 60.0, 0.0]);
+        if region {
+            add_effect_200(&mut p, &mut l, "ec.control.slider", &[]);
+        }
+        add_effect_200(
+            &mut p,
+            &mut l,
+            "ec.perspective.dropshadow",
+            &[("distance", Value::Scalar(6.0)), ("softness", Value::Scalar(8.0)), ("opacity", Value::Scalar(80.0))],
+        );
+        add_effect_200(&mut p, &mut l, "ec.stylize.glow", &[("radius", Value::Scalar(12.0))]);
+        add_effect_200(&mut p, &mut l, "ec.blur.gaussian", &[("blurriness", Value::Scalar(5.0))]);
+        p.comp_mut(cid).unwrap().layers.push(l);
+        render_frame(&p, cid, Tick::ZERO, 1.0)
+    };
+    let (own, region) = (make(false), make(true));
+    assert!(own.data.iter().filter(|px| px[3] > 0.1).count() > 200);
+    for (i, (a, b)) in own.data.iter().zip(&region.data).enumerate() {
+        assert!((0..4).all(|c| (a[c] - b[c]).abs() < 2e-3), "pixel {i}: {a:?} vs {b:?}");
+    }
+}
+
 /// #658: CC Smear drags text glyphs beyond the text layer's own bounds. Pixels smeared past
 /// the painted rectangle used to fall off its edge, so the liquid trail never appeared.
 #[test]
@@ -952,4 +984,39 @@ fn shape_content_bounds_are_the_visual_edges() {
         let b = crate::content_bounds(&ctx, &l).unwrap();
         assert!(b.iter().zip([-half, -half, half, half]).all(|(a, e)| (a - e).abs() < 1e-6), "{stroke:?}: {b:?}");
     }
+}
+
+/// Motion-blur sub-samples warp a trimmed copy of a large, mostly empty buffer; the sum is the
+/// one the whole buffer gives, magnified or minified (aligned halvings).
+#[test]
+fn motion_blur_samples_warp_the_trimmed_buffer() {
+    use crate::trim_for_samples;
+    use effectcraft_geom::{Mat3, vec2};
+    let mut img = effectcraft_raster::Image::new(640, 360);
+    for y in 200..260 {
+        for x in 330..420 {
+            let v = effectcraft_raster::hash_noise(x, y, 4);
+            img.set(x, y, [v * 0.7, v * 0.3, v, v]);
+        }
+    }
+    let (part, at) = trim_for_samples(&img).unwrap();
+    assert!(part.data.len() * 4 < img.data.len() && at[0] % 64.0 == 0.0 && at[1] % 64.0 == 0.0);
+    let shift = Mat3::translate(vec2(at[0], at[1]));
+    for sampling in [effectcraft_raster::Sampling::Bilinear, effectcraft_raster::Sampling::Bicubic] {
+        for scale in [1.3, 0.2] {
+            let (mut full, mut trimmed) = (effectcraft_raster::Image::new(400, 300), effectcraft_raster::Image::new(400, 300));
+            for i in 0..5 {
+                let m = Mat3::translate(vec2(-150.0 + 7.3 * i as f64, -60.0)) * Mat3::scale(vec2(scale, scale));
+                effectcraft_raster::accumulate_warp(&mut full, &img, &m, sampling, 0.2);
+                effectcraft_raster::accumulate_warp(&mut trimmed, &part, &(m * shift), sampling, 0.2);
+            }
+            for (i, (a, b)) in full.data.iter().zip(&trimmed.data).enumerate() {
+                assert!((0..4).all(|c| (a[c] - b[c]).abs() < 1e-5), "{sampling:?} x{scale} px {i}: {a:?} vs {b:?}");
+            }
+        }
+    }
+    // a small or mostly full buffer is used as it is
+    assert!(trim_for_samples(&effectcraft_raster::Image::new(100, 100)).is_none());
+    assert!(trim_for_samples(&effectcraft_raster::Image::filled(400, 300, [1.0; 4])).is_none());
+    assert!(trim_for_samples(&effectcraft_raster::Image::new(400, 300)).is_none());
 }

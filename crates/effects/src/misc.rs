@@ -237,14 +237,33 @@ fn drop_shadow(ctx: &EffectCtx, mut b: Buf) -> Buf {
         b.pad(pad);
     }
     let (dx, dy) = (dir.sin() * dist, -dir.cos() * dist);
+    let strength = opacity * color[3];
+    // An invisible shadow (Opacity 0, or a fully transparent colour) leaves the layer as it is.
+    if strength.is_nan() || strength <= 0.0 {
+        if only {
+            b.img = Image::new(b.img.width, b.img.height);
+        }
+        return b;
+    }
     let mut sh = Image::new(b.img.width, b.img.height);
     let src = &b.img;
-    sh.rows_mut().for_each(|(y, row)| {
-        for (x, px) in row.iter_mut().enumerate() {
-            let a = src.sample_bilinear(x as f64 + 0.5 - dx, y as f64 + 0.5 - dy)[3] * opacity * color[3];
-            *px = [color[0] * a, color[1] * a, color[2] * a, a];
-        }
-    });
+    // Only where the shifted content lands (a pixel's bilinear footprint reaches one pixel out):
+    // everywhere else the shadow is zero.
+    if let Some((x0, y0, x1, y1)) = src.content_bounds() {
+        let span = |lo: u32, hi: u32, d: f64, n: u32| -> (usize, usize) {
+            let a = (lo as f64 + d - 2.0).floor().max(0.0).min(n as f64) as usize;
+            let b = (hi as f64 + d + 2.0).ceil().max(0.0).min(n as f64) as usize;
+            (a, b.max(a))
+        };
+        let (xa, xb) = span(x0, x1, dx, sh.width);
+        let (ya, yb) = span(y0, y1, dy, sh.height);
+        sh.rows_mut().skip(ya).take(yb - ya).for_each(|(y, row)| {
+            for (x, px) in row.iter_mut().enumerate().take(xb).skip(xa) {
+                let a = src.sample_bilinear(x as f64 + 0.5 - dx, y as f64 + 0.5 - dy)[3] * strength;
+                *px = [color[0] * a, color[1] * a, color[2] * a, a];
+            }
+        });
+    }
     if soft > 0.0 {
         sh = gaussian_blur(&sh, soft / 2.0, soft / 2.0, false);
     }
@@ -779,5 +798,69 @@ mod tests {
         let red = run(&[("colors", Value::Enum(2)), ("arbitraryMap", Value::Str("0,1 1,1|0,0 1,0|0,0 1,0".into())), ("operation", Value::Enum(2))]);
         let p = red.get(6, 12);
         assert!(p[0] > 0.05 && p[1] < 1e-4 && p[2] < 1e-4, "{p:?}");
+    }
+
+    /// Drop Shadow works only where the shifted content lands, which gives the shadow it gives
+    /// over the whole buffer; an invisible shadow leaves the layer alone.
+    #[test]
+    fn drop_shadow_skips_empty_pixels() {
+        let mut img = effectcraft_raster::Image::new(200, 120);
+        for y in 50..60 {
+            for x in 80..110 {
+                img.set(x, y, [0.9, 0.8, 0.7, 1.0]);
+            }
+        }
+        img.set(110, 60, [0.2, 0.2, 0.2, 0.25]);
+        let vals = |opacity: f64, only: bool| {
+            vec![
+                ("opacity", Value::Scalar(opacity)),
+                ("distance", Value::Scalar(7.5)),
+                ("direction", Value::Scalar(120.0)),
+                ("softness", Value::Scalar(9.0)),
+                ("color", Value::Color([0.1, 0.0, 0.3, 1.0])),
+                ("shadowOnly", Value::Bool(only)),
+            ]
+        };
+        for only in [false, true] {
+            let got = run_fx("ec.perspective.dropshadow", &vals(60.0, only), img.clone(), 0.0, EffectEnv::default());
+            // the shadow computed at every pixel of the padded buffer
+            let (dist, dir, soft) = (7.5f64, 120f64.to_radians(), 9.0f64);
+            let pad = (dist + soft * 1.5).ceil() as u32 + 2;
+            let src = img.padded(pad);
+            let (dx, dy) = (dir.sin() * dist, -dir.cos() * dist);
+            let mut sh = effectcraft_raster::Image::new(src.width, src.height);
+            for y in 0..src.height {
+                for x in 0..src.width {
+                    let a = src.sample_bilinear(x as f64 + 0.5 - dx, y as f64 + 0.5 - dy)[3] * 0.6;
+                    sh.set(x, y, [0.1 * a, 0.0, 0.3 * a, a]);
+                }
+            }
+            let mut want = gaussian_blur(&sh, soft / 2.0, soft / 2.0, false);
+            if !only {
+                for (s, o) in want.data.iter_mut().zip(&src.data) {
+                    let k = 1.0 - o[3];
+                    for c in 0..4 {
+                        s[c] = o[c] + s[c] * k;
+                    }
+                }
+            }
+            assert_eq!((got.img.width, got.img.height), (want.width, want.height));
+            for (i, (p, q)) in got.img.data.iter().zip(&want.data).enumerate() {
+                assert!((0..4).all(|c| (p[c] - q[c]).abs() < 1e-6), "only {only} px {i}: {p:?} vs {q:?}");
+            }
+        }
+        let off = run_fx("ec.perspective.dropshadow", &vals(0.0, false), img.clone(), 0.0, EffectEnv::default());
+        assert_eq!(off.img.content_bounds().map(|b| (b.2 - b.0, b.3 - b.1)), Some((31, 11)));
+        let pad = off.offset[0] as u32;
+        assert_eq!(off.img.crop_rect(pad, pad, pad + 200, pad + 120), img);
+        let gone = run_fx("ec.perspective.dropshadow", &vals(0.0, true), img, 0.0, EffectEnv::default());
+        assert_eq!(gone.img.content_bounds(), None);
+        // a NaN distance or direction is no crash
+        for k in ["distance", "direction"] {
+            let mut small = effectcraft_raster::Image::new(8, 8);
+            small.set(3, 3, [1.0; 4]);
+            let vs: Vec<(&str, Value)> = vals(50.0, false).into_iter().map(|(n, v)| if n == k { (n, Value::Scalar(f64::NAN)) } else { (n, v) }).collect();
+            run_fx("ec.perspective.dropshadow", &vs, small, 0.0, EffectEnv::default());
+        }
     }
 }

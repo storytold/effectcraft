@@ -249,7 +249,10 @@ fn quantize_rect(img: &mut Image, r: PxRect, levels: f32) {
     let (x0, x1) = (r.x0 as usize, r.x1 as usize);
     img.data[r.y0 as usize * w..r.y1 as usize * w].par_chunks_mut(w).for_each(|row| {
         for p in &mut row[x0..x1] {
-            quantize_px(p, levels, inv);
+            // most of a layer's buffer is empty, and zero quantises to zero
+            if *p != [0.0; 4] {
+                quantize_px(p, levels, inv);
+            }
         }
     });
 }

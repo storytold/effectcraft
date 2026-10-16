@@ -1137,8 +1137,13 @@ impl<'a> Renderer<'a> {
         // already has, so tiling or displacement can place pixels outside the content instead
         // of losing them at its edge. Only when something will actually run, and not for an
         // adjustment layer, whose buffer is the comp below and already spans it.
+        // Effects that only reach as far as they pad (a drop shadow, a glow) don't need it.
         if !adjustment
-            && fx.groups().any(|g| g.enabled && matches!(&g.kind, GroupKind::Effect { effect } if effectcraft_effects::find(effect).is_some_and(|s| !effectcraft_effects::audio_fx::is_audio_effect(s.id)))) {
+            && fx.groups().any(|g| {
+                g.enabled
+                    && matches!(&g.kind, GroupKind::Effect { effect } if effectcraft_effects::find(effect).is_some_and(|s| !effectcraft_effects::audio_fx::is_audio_effect(s.id) && !pads_itself(g, s.id)))
+            })
+        {
             target.cover(layer_size);
         }
         let mut mask_shapes = masks::shapes(ctx, layer);
@@ -1854,11 +1859,17 @@ impl<'a> Renderer<'a> {
             composite_warp(target, &buf.img, m, &opts);
             return;
         }
-        // Sub-samples sum straight into one buffer (each warp is row-parallel).
+        // Sub-samples sum straight into one buffer (each warp is row-parallel), from just the
+        // part of the buffer that draws: trimmed once here, not once per sub-sample.
+        let trimmed = trim_for_samples(&buf.img);
+        let (src, at) = match &trimmed {
+            Some((img, at)) => (img, Mat3::translate(vec2(at[0], at[1]))),
+            None => (&buf.img, Mat3::IDENTITY),
+        };
         let mut acc = Image::new(target.width, target.height);
         let k = 1.0 / pl.matrices.len() as f32;
         for m in &pl.matrices {
-            effectcraft_raster::accumulate_warp(&mut acc, &buf.img, m, opts.sampling, k);
+            effectcraft_raster::accumulate_warp(&mut acc, src, &(*m * at), opts.sampling, k);
         }
         target.blend_from(&acc, mode, opacity, pl.seed);
     }
@@ -2305,6 +2316,31 @@ pub fn blend_frames(mode: FrameBlend, a: &Image, b: &Image, w: f32) -> Image {
 }
 
 /// Convenience: render one frame of a comp with no footage source.
+/// The part of a large, mostly empty buffer that draws, with a margin wider than any filter's
+/// footprint, and where it starts in the buffer (a multiple of 64, so minification's halvings
+/// line up as before); `None` when trimming saves little.
+fn trim_for_samples(img: &Image) -> Option<(Image, [f64; 2])> {
+    if img.data.len() < 1 << 16 {
+        return None;
+    }
+    let (x0, y0, x1, y1) = img.content_bounds()?;
+    let (x0, y0) = (x0.saturating_sub(4) / 64 * 64, y0.saturating_sub(4) / 64 * 64);
+    let (x1, y1) = (x1.saturating_add(4).min(img.width), y1.saturating_add(4).min(img.height));
+    if (x1 - x0) as u64 * (y1 - y0) as u64 * 2 > img.data.len() as u64 {
+        return None;
+    }
+    Some((img.crop_rect(x0, y0, x1, y1), [x0 as f64, y0 as f64]))
+}
+
+/// Whether an effect instance reaches only as far as it pads its buffer (see
+/// [`effectcraft_effects::content_local`]). A Gaussian Blur does unless it repeats edge pixels
+/// (then the buffer's edge is part of the look); a keyed or expression-driven switch counts as on.
+fn pads_itself(g: &effectcraft_project::PropGroup, effect: &str) -> bool {
+    effectcraft_effects::content_local(effect)
+        || (effect == "ec.blur.gaussian"
+            && g.prop("repeatEdge").is_some_and(|p| !p.is_animated() && !p.has_expression() && p.value == effectcraft_keyframe::Value::Bool(false)))
+}
+
 /// Adaptive motion-blur sample count for a layer whose corners travel `travel` output pixels
 /// during the shutter: one sample per pixel, clamped to Samples Per Frame … Adaptive Sample Limit.
 pub fn adaptive_samples(travel: f64, per_frame: u32, limit: u32) -> usize {

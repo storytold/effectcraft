@@ -208,6 +208,11 @@ fn affine_rows(
     });
 }
 
+/// Whether a composite with `opts` may change destination pixels the source leaves empty.
+fn mode_needs_full_rect(opts: &WarpOpts) -> bool {
+    opts.mode.is_stencil()
+}
+
 fn composite_warp_impl(dst: &mut Image, src: &Image, m: &Mat3, opts: &WarpOpts, allow_fast: bool, accumulate: Option<f32>) {
     if src.is_empty() || dst.is_empty() || opts.opacity <= 0.0 {
         return;
@@ -232,7 +237,17 @@ fn composite_warp_impl(dst: &mut Image, src: &Image, m: &Mat3, opts: &WarpOpts, 
         img = &level_img;
         inv = Mat3::scale(vec2(f, f)) * inv;
     }
-    let bounds = m.map_rect(&Rect::from_size(src.width as f64, src.height as f64)).inflate(1.0).round_out();
+    // What the source draws (grown past the widest filter's reach), not its whole buffer: a
+    // layer's buffer is often far larger than its content. Stencil modes change the destination
+    // where the source is empty too, so they keep the whole rectangle.
+    // (Motion-blur sub-samples come here many times with one source: the caller trims it once.)
+    let drawn = if mode_needs_full_rect(opts) || accumulate.is_some() || src.data.len() < 1 << 16 {
+        Some(Rect::from_size(src.width as f64, src.height as f64))
+    } else {
+        src.content_bounds().map(|(x0, y0, x1, y1)| Rect::new(x0 as f64, y0 as f64, x1 as f64, y1 as f64).inflate(3.0))
+    };
+    let Some(drawn) = drawn else { return };
+    let bounds = m.map_rect(&drawn).inflate(1.0).round_out();
     let full = Rect::from_size(dst.width as f64, dst.height as f64);
     let mut area = bounds.intersect(&full);
     if let Some(c) = opts.clip {
@@ -328,6 +343,32 @@ pub fn resample(src: &Image, w: u32, h: u32) -> Image {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The composite of a large, mostly empty source covers only what it draws; the result is
+    /// the reference composite's, for every filter, under rotation and scale.
+    #[test]
+    fn warp_of_a_sparse_source_matches_the_reference() {
+        let mut src = Image::new(400, 300);
+        for y in 120..150 {
+            for x in 30..70 {
+                let v = crate::hash_noise(x, y, 9);
+                src.set(x, y, [v * 0.5, v * 0.2, v, v]);
+            }
+        }
+        src.set(399, 299, [0.5, 0.5, 0.5, 0.5]);
+        for sampling in [Sampling::Nearest, Sampling::Bilinear, Sampling::Bicubic] {
+            for m in [Mat3::translate(vec2(-10.25, 20.5)), Mat3::translate(vec2(150.0, 40.0)) * Mat3::rotate_deg(17.0) * Mat3::scale(vec2(1.7, 0.8))] {
+                let opts = WarpOpts { sampling, opacity: 0.8, ..Default::default() };
+                let mut fast = Image::filled(320, 240, [0.1, 0.1, 0.1, 0.5]);
+                let mut slow = fast.clone();
+                composite_warp(&mut fast, &src, &m, &opts);
+                composite_warp_reference(&mut slow, &src, &m, &opts);
+                for (i, (a, b)) in fast.data.iter().zip(&slow.data).enumerate() {
+                    assert!((0..4).all(|c| (a[c] - b[c]).abs() < 1e-4), "{sampling:?} px {i}: {a:?} vs {b:?}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn identity_warp_copies() {

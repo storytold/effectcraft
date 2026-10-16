@@ -449,6 +449,14 @@ impl EffectCtx<'_> {
 
 pub type RenderFn = fn(&EffectCtx, Buf) -> Buf;
 
+/// Effects whose result depends only on the buffer's content and that grow the buffer themselves
+/// by their full reach (Drop Shadow pads by its distance and softness, Glow by its radius). A
+/// stack of only these doesn't need the buffer grown to the layer's whole rectangle (#659), which
+/// for text and shapes is usually the comp and far larger than what the layer paints.
+pub fn content_local(id: &str) -> bool {
+    matches!(id, "ec.perspective.dropshadow" | "ec.stylize.glow")
+}
+
 pub struct EffectSpec {
     pub id: &'static str,
     pub name: &'static str,
