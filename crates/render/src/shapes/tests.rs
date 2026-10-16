@@ -191,7 +191,8 @@ fn trim_individually_vs_simultaneously() {
 #[test]
 fn gradient_stroke_paints_gradient_along_stroke() {
     let (p, cid) = shape_comp(|ids| {
-        let g = Gradient { colors: vec![(0.0, [0.0, 0.0, 0.0, 1.0]), (1.0, [1.0, 1.0, 1.0, 1.0])], opacities: vec![(0.0, 1.0), (1.0, 1.0)] };
+        let g =
+            Gradient { colors: vec![(0.0, [0.0, 0.0, 0.0, 1.0]), (1.0, [1.0, 1.0, 1.0, 1.0])], opacities: vec![(0.0, 1.0), (1.0, 1.0)], ..Default::default() };
         vec![build::shape_rect(ids, [60.0, 60.0], [0.0, 0.0], 0.0), build::shape_gradient_stroke(ids, false, [-30.0, 0.0], [30.0, 0.0], g, 6.0)]
     });
     let img = frame(&p, cid);

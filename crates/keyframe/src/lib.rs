@@ -757,7 +757,8 @@ mod tests {
     /// in the opacity stops, so feeding its alpha into a colour stop would apply 50% twice (25%).
     #[test]
     fn gradient_tracks_sample_separately() {
-        let g = Gradient { colors: vec![(0.0, [1.0, 0.0, 0.0, 0.8]), (1.0, [0.0, 0.0, 1.0, 0.4])], opacities: vec![(0.0, 0.5), (1.0, 0.5)] };
+        let g =
+            Gradient { colors: vec![(0.0, [1.0, 0.0, 0.0, 0.8]), (1.0, [0.0, 0.0, 1.0, 0.4])], opacities: vec![(0.0, 0.5), (1.0, 0.5)], ..Default::default() };
         let c = g.color_at(0.5);
         assert!((c[0] - 0.5).abs() < 1e-6 && (c[2] - 0.5).abs() < 1e-6, "{c:?}");
         assert!((c[3] - 0.6).abs() < 1e-6, "the colour track's own alpha, without opacity: {c:?}");
@@ -771,7 +772,7 @@ mod tests {
         // Outside the stops, and with none: the ends hold, and an empty track is opaque white.
         assert_eq!(g.color_at(-1.0), [1.0, 0.0, 0.0, 0.8]);
         assert_eq!(g.color_at(2.0), [0.0, 0.0, 1.0, 0.4]);
-        let empty = Gradient { colors: vec![], opacities: vec![] };
+        let empty = Gradient { colors: vec![], opacities: vec![], ..Default::default() };
         assert_eq!((empty.color_at(0.3), empty.opacity_at(0.3)), ([1.0; 4], 1.0));
     }
 
@@ -779,7 +780,7 @@ mod tests {
     /// rejects) and each stop's RGBA come back exactly.
     #[test]
     fn typed_gradient_round_trips_one_stop_and_rgba() {
-        let one = Value::Gradient(Gradient { colors: vec![(0.25, [0.1, 0.2, 0.3, 0.7])], opacities: vec![(0.0, 1.0), (0.6, 0.35)] });
+        let one = Value::Gradient(Gradient { colors: vec![(0.25, [0.1, 0.2, 0.3, 0.7])], opacities: vec![(0.0, 1.0), (0.6, 0.35)], ..Default::default() });
         let cur = Value::Gradient(Gradient::default());
         assert_eq!(cur.coerce_json(&one.to_json()), Some(one.clone()));
         assert_eq!(cur.coerce_json(&serde_json::json!({"colors": [[0.25, [0.1, 0.2, 0.3, 0.7]]]})), None, "plain JSON needs two colours");

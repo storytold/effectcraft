@@ -1,0 +1,25 @@
+[package]
+name = "effectcraft-aep"
+description = "After Effects exported project IR import into editable EffectCraft projects"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+effectcraft-project = { workspace = true }
+effectcraft-keyframe = { workspace = true }
+effectcraft-time = { workspace = true }
+effectcraft-color = { workspace = true }
+effectcraft-effects = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["raw_value"] }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+effectcraft-render = { workspace = true }
+effectcraft-segment = { workspace = true }
+image = { workspace = true }

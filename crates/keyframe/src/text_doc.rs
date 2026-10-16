@@ -166,6 +166,53 @@ pub enum Direction {
     Rtl,
 }
 
+/// Digit shapes for Source Text. AE's Arabic option uses western digits; Hindi uses Arabic-Indic digits.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DigitSet {
+    #[default]
+    Default,
+    Arabic,
+    Hindi,
+}
+
+/// Linked local font bytes. The file stays outside the project and is verified before use.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FontFileLink {
+    pub path: String,
+    pub sha256: String,
+}
+
+impl DigitSet {
+    fn is_default(&self) -> bool {
+        *self == Self::Default
+    }
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Arabic => "arabic",
+            Self::Hindi => "hindi",
+        }
+    }
+
+    pub fn parse(v: &J) -> Option<Self> {
+        match v.as_str() {
+            Some("default") => Some(Self::Default),
+            Some("arabic") => Some(Self::Arabic),
+            Some("hindi") => Some(Self::Hindi),
+            _ => match v.as_i64()? {
+                12012 => Some(Self::Default),
+                12013 => Some(Self::Arabic),
+                12014 => Some(Self::Hindi),
+                _ => None,
+            },
+        }
+    }
+}
+
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
 /// Line-breaking composer.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Composer {
@@ -307,6 +354,14 @@ impl OpenType {
 #[serde(default)]
 pub struct CharStyle {
     pub font: String,
+    /// Version of the originally requested font, when imported from a project.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_file: Option<FontFileLink>,
+    /// Optional render-only substitute; `font` remains the editable requested face.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub render_font: Option<String>,
     pub style: String,
     pub size: f64,
     pub fill: [f32; 4],
@@ -380,6 +435,9 @@ pub struct ParaStyle {
     pub composer: Composer,
     /// Roman hanging punctuation: punctuation at the edges of paragraph text hangs outside the box.
     pub hanging_punctuation: bool,
+    /// Whether automatic word hyphenation is enabled for this paragraph.
+    #[serde(skip_serializing_if = "is_false")]
+    pub auto_hyphenate: bool,
 }
 
 impl Default for ParaStyle {
@@ -394,6 +452,12 @@ impl Default for ParaStyle {
 pub struct TextDoc {
     pub text: String,
     pub font: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_file: Option<FontFileLink>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub render_font: Option<String>,
     pub style: String,
     pub size: f64,
     pub fill: [f32; 4],
@@ -402,6 +466,8 @@ pub struct TextDoc {
     pub apply_fill: bool,
     pub apply_stroke: bool,
     pub stroke_over_fill: bool,
+    #[serde(skip_serializing_if = "DigitSet::is_default")]
+    pub digit_set: DigitSet,
     pub tracking: f64,
     /// None = auto (120% of size).
     pub leading: Option<f64>,
@@ -440,6 +506,8 @@ pub struct TextDoc {
     #[serde(default = "single_line")]
     pub composer: Composer,
     pub hanging_punctuation: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    pub auto_hyphenate: bool,
     /// Vertical type (columns right to left, characters upright).
     pub vertical: bool,
     /// Character style runs covering the text (empty = the whole text uses the base style).
@@ -455,6 +523,9 @@ impl Default for TextDoc {
         TextDoc {
             text: String::new(),
             font: "Inter".into(),
+            font_version: None,
+            font_file: None,
+            render_font: None,
             style: "Regular".into(),
             size: 72.0,
             fill: [1.0, 1.0, 1.0, 1.0],
@@ -463,6 +534,7 @@ impl Default for TextDoc {
             apply_fill: true,
             apply_stroke: false,
             stroke_over_fill: true,
+            digit_set: DigitSet::Default,
             tracking: 0.0,
             leading: None,
             justify: Justify::Left,
@@ -491,6 +563,7 @@ impl Default for TextDoc {
             direction: Direction::Ltr,
             composer: Composer::EveryLine,
             hanging_punctuation: false,
+            auto_hyphenate: false,
             vertical: false,
             runs: Vec::new(),
             paragraphs: Vec::new(),
@@ -547,6 +620,9 @@ impl TextDoc {
     pub fn base_style(&self) -> CharStyle {
         CharStyle {
             font: self.font.clone(),
+            font_version: self.font_version.clone(),
+            font_file: self.font_file.clone(),
+            render_font: self.render_font.clone(),
             style: self.style.clone(),
             size: self.size,
             fill: self.fill,
@@ -576,6 +652,9 @@ impl TextDoc {
 
     fn write_base(&mut self, s: &CharStyle) {
         self.font = s.font.clone();
+        self.font_version = s.font_version.clone();
+        self.font_file = s.font_file.clone();
+        self.render_font = s.render_font.clone();
         self.style = s.style.clone();
         self.size = s.size;
         self.fill = s.fill;
@@ -614,6 +693,7 @@ impl TextDoc {
             direction: self.direction,
             composer: self.composer,
             hanging_punctuation: self.hanging_punctuation,
+            auto_hyphenate: self.auto_hyphenate,
         }
     }
 
@@ -627,6 +707,7 @@ impl TextDoc {
         self.direction = p.direction;
         self.composer = p.composer;
         self.hanging_punctuation = p.hanging_punctuation;
+        self.auto_hyphenate = p.auto_hyphenate;
     }
 
     /// Whether every character shares one style.
@@ -909,6 +990,10 @@ impl TextDoc {
                 self.stroke_over_fill = v.as_bool().ok_or("strokeOverFill: expected a boolean")?;
                 return Ok(true);
             }
+            "digitSet" => {
+                self.digit_set = DigitSet::parse(v).ok_or("digitSet: expected default|arabic|hindi")?;
+                return Ok(true);
+            }
             "vertical" => {
                 self.vertical = v.as_bool().ok_or("vertical: expected a boolean")?;
                 return Ok(true);
@@ -981,6 +1066,9 @@ fn flag(key: &str, v: &J) -> Result<bool, String> {
 /// Character attribute keys of `layer.setText` (also used by the expression style API).
 pub const CHAR_ATTRS: &[&str] = &[
     "font",
+    "fontVersion",
+    "fontFile",
+    "renderFont",
     "style",
     "size",
     "fill",
@@ -1027,7 +1115,33 @@ pub const PARA_ATTRS: &[&str] =
 /// Set one character attribute; Ok(false) for keys that aren't character attributes.
 pub fn apply_char_attr(s: &mut CharStyle, key: &str, v: &J) -> Result<bool, String> {
     match key {
-        "font" => s.font = v.as_str().ok_or("font: expected a string")?.to_string(),
+        "font" => {
+            s.font = v.as_str().ok_or("font: expected a string")?.to_string();
+            s.font_version = None;
+            s.font_file = None;
+            s.render_font = None;
+        }
+        "fontFile" => {
+            s.font_file = match v {
+                J::Null => None,
+                J::Object(_) => Some(serde_json::from_value(v.clone()).map_err(|_| "fontFile: expected {path, sha256}")?),
+                _ => return Err("fontFile: expected {path, sha256} or null".into()),
+            };
+        }
+        "fontVersion" => {
+            s.font_version = match v {
+                J::Null => None,
+                J::String(version) if !version.is_empty() => Some(version.clone()),
+                _ => return Err("fontVersion: expected a nonempty string or null".into()),
+            };
+        }
+        "renderFont" => {
+            s.render_font = match v {
+                J::Null => None,
+                J::String(name) if !name.is_empty() => Some(name.clone()),
+                _ => return Err("renderFont: expected a nonempty string or null".into()),
+            };
+        }
         "style" => s.style = v.as_str().ok_or("style: expected a string")?.to_string(),
         "size" => s.size = num(key, v)?.clamp(0.1, 10_000.0),
         "fill" => s.fill = color_json(v).ok_or("fill: expected #rrggbb or [r, g, b]")?,
@@ -1192,6 +1306,7 @@ pub fn apply_para_attr(p: &mut ParaStyle, key: &str, v: &J) -> Result<bool, Stri
             }
         }
         "hangingPunctuation" => p.hanging_punctuation = flag(key, v)?,
+        "autoHyphenate" => p.auto_hyphenate = flag(key, v)?,
         _ => return Ok(false),
     }
     Ok(true)
@@ -1201,7 +1316,7 @@ pub fn apply_para_attr(p: &mut ParaStyle, key: &str, v: &J) -> Result<bool, Stri
 pub fn char_style_json(s: &CharStyle) -> J {
     let c = |c: [f32; 4]| J::from(vec![c[0] as f64, c[1] as f64, c[2] as f64, c[3] as f64]);
     serde_json::json!({
-        "font": s.font, "style": s.style, "size": s.size, "fill": c(s.fill), "stroke": c(s.stroke),
+        "font": s.font, "fontVersion": s.font_version, "fontFile": s.font_file, "renderFont": s.render_font, "style": s.style, "size": s.size, "fill": c(s.fill), "stroke": c(s.stroke),
         "strokeWidth": s.stroke_width, "applyFill": s.apply_fill, "applyStroke": s.apply_stroke,
         "tracking": s.tracking, "leading": s.leading.map_or(J::from("auto"), J::from), "baselineShift": s.baseline_shift,
         "hScale": s.h_scale, "vScale": s.v_scale, "tsume": s.tsume, "fauxBold": s.faux_bold, "fauxItalic": s.faux_italic,
@@ -1226,6 +1341,7 @@ pub fn para_style_json(p: &ParaStyle) -> J {
         "direction": if p.direction == Direction::Rtl { "rtl" } else { "ltr" },
         "composer": if p.composer == Composer::EveryLine { "everyLine" } else { "singleLine" },
         "hangingPunctuation": p.hanging_punctuation,
+        "autoHyphenate": p.auto_hyphenate,
     })
 }
 
@@ -1287,6 +1403,30 @@ pub fn word_at(text: &str, ci: usize) -> Range<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn digit_set_and_paragraph_hyphenation_round_trip() {
+        let mut d = TextDoc::plain("12\n34");
+        assert!(d.set_attr("digitSet", &J::from("hindi"), None).unwrap());
+        assert!(d.set_attr("autoHyphenate", &J::Bool(true), Some(0..1)).unwrap());
+        assert!(d.set_attr("fontVersion", &J::from("Version 3.019"), Some(0..2)).unwrap());
+        assert!(d.set_attr("fontFile", &serde_json::json!({"path":"/tmp/font.otf","sha256":"a".repeat(64)}), Some(0..2)).unwrap());
+        assert!(d.set_attr("renderFont", &J::from("MyriadPro-Regular"), Some(0..2)).unwrap());
+        assert_eq!(d.digit_set, DigitSet::Hindi);
+        assert_eq!(d.style_at(0).font, "Inter");
+        assert_eq!(d.style_at(0).font_version.as_deref(), Some("Version 3.019"));
+        assert_eq!(d.style_at(0).font_file.as_ref().map(|f| f.path.as_str()), Some("/tmp/font.otf"));
+        assert_eq!(d.style_at(0).render_font.as_deref(), Some("MyriadPro-Regular"));
+        assert_eq!(d.style_at(3).render_font, None);
+        assert!(d.para(0).auto_hyphenate);
+        assert!(!d.para(1).auto_hyphenate);
+        let restored: TextDoc = serde_json::from_value(serde_json::to_value(&d).unwrap()).unwrap();
+        assert_eq!(restored, d);
+        d.set_attr("font", &J::from("Inter-Bold"), Some(0..2)).unwrap();
+        assert_eq!(d.style_at(0).render_font, None);
+        assert_eq!(d.style_at(0).font_version, None);
+        assert_eq!(d.style_at(0).font_file, None);
+    }
 
     #[test]
     fn mixed_line_breaks_keep_original_byte_and_character_ranges() {

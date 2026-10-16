@@ -755,6 +755,31 @@ fn file_menu_project_ops() {
 }
 
 #[test]
+fn find_missing_fonts_reports_requested_and_render_face() {
+    let mut s = comp();
+    let layer = s.execute("layer.newText", json!({"text": "Hi"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.setText", json!({"layer": layer, "font": "Missing-Cut", "renderFont": "Inter-Bold"})).unwrap();
+    let report = s.execute("file.findMissing", json!({"what": "fonts"})).unwrap();
+    assert_eq!(report["counts"]["substituted"], 1);
+    assert_eq!(report["fonts"][0]["requested"], "Missing-Cut");
+    assert_eq!(report["fonts"][0]["selected"], "Inter-Bold");
+    assert_eq!(report["fonts"][0]["status"], "substituted");
+    s.execute("layer.setText", json!({"layer": layer, "renderFont": null})).unwrap();
+    let report = s.execute("file.findMissing", json!({"what": "fonts"})).unwrap();
+    assert_eq!(report["counts"]["missing"], 1);
+    assert_eq!(report["fonts"][0]["selected"], Value::Null);
+    s.execute("layer.setText", json!({"layer": layer, "font": "Inter-Bold"})).unwrap();
+    let report = s.execute("file.findMissing", json!({"what": "fonts"})).unwrap();
+    assert_eq!(report["counts"]["exact"], 1);
+    assert!(report["fonts"].as_array().unwrap().is_empty());
+    s.execute("layer.setText", json!({"layer": layer, "renderFont": "Inter-Regular"})).unwrap();
+    let report = s.execute("file.findMissing", json!({"what": "fonts"})).unwrap();
+    assert_eq!(report["fonts"][0]["status"], "substituted");
+    s.execute("layer.setText", json!({"layer": layer, "renderFont": null})).unwrap();
+    assert_eq!(s.execute("file.findMissing", json!({"what": "fonts"})).unwrap()["counts"]["exact"], 1);
+}
+
+#[test]
 fn consolidate_duplicate_footage() {
     let mut s = comp();
     let f = |s: &mut Session| s.execute("file.importPlaceholder", json!({})).unwrap()["item"].as_u64().unwrap();

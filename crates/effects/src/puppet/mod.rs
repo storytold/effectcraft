@@ -25,9 +25,35 @@ use effectcraft_project::build::Ids;
 use effectcraft_project::{GroupKind, ParamUi, PropGroup, Property};
 use effectcraft_raster::Image;
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::{Buf, EffectCtx, EffectSpec, Params, p, slider};
 pub use mesh::{Mesh, MeshOpts};
+
+/// Serialized rest topology from an imported Puppet mesh, in layer space.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MeshGeometry {
+    pub vertices: Vec<[f64; 2]>,
+    pub triangles: Vec<[usize; 3]>,
+}
+
+impl MeshGeometry {
+    pub fn native(self) -> Option<Mesh> {
+        if self.vertices.len() < 3
+            || self.vertices.len() > 20_000
+            || self.triangles.is_empty()
+            || self.triangles.len() > 20_000
+            || self.vertices.iter().flatten().any(|v| !v.is_finite() || v.abs() > 1_000_000.0)
+            || self
+                .triangles
+                .iter()
+                .any(|t| t.iter().any(|i| *i >= self.vertices.len()) || mesh::cross(self.vertices[t[0]], self.vertices[t[1]], self.vertices[t[2]]) <= 1e-7)
+        {
+            return None;
+        }
+        Some(Mesh { verts: self.vertices, tris: self.triangles, outline: vec![] })
+    }
+}
 
 /// Effect id of the Puppet effect.
 pub const ID: &str = "ec.distort.puppet";
@@ -168,6 +194,7 @@ pub fn is_puppet(g: &PropGroup) -> bool {
 pub struct Pin {
     pub kind: PinKind,
     pub uid: u64,
+    pub vertex_index: Option<usize>,
     pub rest: [f64; 2],
     pub position: [f64; 2],
     pub scale: f64,
@@ -183,11 +210,33 @@ pub struct MeshParams {
     pub uid: u64,
     pub seed: [f64; 2],
     pub opts: MeshOpts,
+    pub imported: Option<Arc<Mesh>>,
     pub pins: Vec<Pin>,
 }
 
 fn fd(p: &Params, k: &str, d: f64) -> f64 {
     p.get(k).map(Value::as_f64).unwrap_or(d)
+}
+
+fn imported_geometry(text: &str) -> Option<Arc<Mesh>> {
+    if text.len() > 8_000_000 {
+        return None;
+    }
+    let mut key = 0x911a_3964_017d_3015u64;
+    fnv(&mut key, text.as_bytes());
+    if let Ok(c) = CACHE.lock()
+        && let Some((_, mesh)) = c.entries.iter().find(|(k, _)| *k == key)
+    {
+        return Some(mesh.clone());
+    }
+    let mesh = Arc::new(serde_json::from_str::<MeshGeometry>(text).ok()?.native()?);
+    if let Ok(mut c) = CACHE.lock() {
+        c.entries.push((key, mesh.clone()));
+        if c.entries.len() > 16 {
+            c.entries.remove(0);
+        }
+    }
+    Some(mesh)
 }
 
 /// Parse the meshes and pins out of flattened Puppet parameters.
@@ -209,6 +258,11 @@ pub fn parse(params: &Params) -> Vec<MeshParams> {
                 pins.push(Pin {
                     kind: PinKind::from_index(params.get(&q("kind")).map(Value::as_enum).unwrap_or(0)),
                     uid: fd(params, &q("@uid"), 0.0) as u64,
+                    vertex_index: params
+                        .get(&q("ae_vertex_index"))
+                        .map(Value::as_f64)
+                        .filter(|v| v.is_finite() && *v >= 0.0 && v.fract() == 0.0 && *v <= usize::MAX as f64)
+                        .map(|v| v as usize),
                     rest,
                     position: params.get(&q("position")).map(Value::as_vec2).unwrap_or(rest),
                     scale: fd(params, &q("scale"), 100.0) / 100.0,
@@ -219,6 +273,12 @@ pub fn parse(params: &Params) -> Vec<MeshParams> {
                 });
             }
         }
+        let imported = imported_geometry(params.s(&k("imported_geometry")));
+        if imported.is_none() {
+            for pin in &mut pins {
+                pin.vertex_index = None;
+            }
+        }
         out.push(MeshParams {
             uid: fd(params, &k("@uid"), 0.0) as u64,
             seed: params.get(&k("seed")).map(Value::as_vec2).unwrap_or([0.0; 2]),
@@ -227,6 +287,7 @@ pub fn parse(params: &Params) -> Vec<MeshParams> {
                 expansion: fd(params, &k("expansion"), 3.0),
                 triangles: fd(params, &k("triangles"), 350.0),
             },
+            imported,
             pins,
         });
     }
@@ -251,6 +312,9 @@ fn fnv(h: &mut u64, bytes: &[u8]) {
 
 /// The mesh for `m` over a buffer's alpha (built once per distinct outline and options).
 pub fn mesh_for(buf: &Buf, m: &MeshParams) -> Arc<Mesh> {
+    if let Some(mesh) = &m.imported {
+        return mesh.clone();
+    }
     let (w, h) = (buf.img.width as usize, buf.img.height as usize);
     let alpha: Vec<f32> = buf.img.data.iter().map(|p| p[3]).collect();
     let mut key = 0xcbf2_9ce4_8422_2325u64;
@@ -330,7 +394,7 @@ pub fn solve(mesh: &Mesh, pins: &[Pin], refine: usize) -> Vec<[f64; 2]> {
     }
     let mut used = std::collections::HashSet::new();
     for p in pins {
-        let Some(v) = nearest(&mesh.verts, p.rest) else { continue };
+        let Some(v) = p.vertex_index.filter(|i| *i < mesh.verts.len()).or_else(|| nearest(&mesh.verts, p.rest)) else { continue };
         let r = mesh.verts[v];
         if p.kind.moves() && used.insert(v) {
             h.fixed.push((v, [p.position[0] + r[0] - p.rest[0], p.position[1] + r[1] - p.rest[1]]));

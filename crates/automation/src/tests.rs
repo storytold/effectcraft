@@ -1310,6 +1310,20 @@ fn command_tools_accept_id_as_an_alias() {
     assert!(err, "neither key is an error");
 }
 
+/// Review on #860: importing an .aep runs an outside Python interpreter, so it is refused while
+/// file access is confined, even for a file inside a read root.
+#[test]
+fn confinement_refuses_aep_import() {
+    use crate::confine::Confinement;
+    let root = std::env::temp_dir().join(format!("ec-mcp-confine-aep-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let c = Confinement::new(std::slice::from_ref(&root), &[]).unwrap();
+    let path = root.join("a.aep").to_string_lossy().into_owned();
+    let err = c.check_command("file.importAep", &json!({"path": path})).unwrap_err().to_string();
+    assert!(err.contains("not available while file access is confined"), "{err}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// #500: `--automation-read-root` / `--automation-write-root` confine the files an agent reads
 /// and writes: inside the roots works, outside (or relative, `..`, through a symbolic link, by
 /// a batch step, by Save to the project's own file, from a script) is refused.

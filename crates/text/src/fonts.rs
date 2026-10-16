@@ -9,9 +9,11 @@
 //! face lacks: bundled faces first, then the system's usual family for the character's script
 //! (CJK), then any installed face that covers it.
 
-use std::path::PathBuf;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
+use effectcraft_keyframe::text_doc::FontFileLink;
 use skrifa::instance::{LocationRef, Size};
 use skrifa::{FontRef, MetadataProvider};
 
@@ -344,6 +346,37 @@ pub fn add_font_data(data: Vec<u8>) -> Vec<FaceId> {
 /// returning early and resolving against a half-filled database.
 static SCAN: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Register one linked local face after checking its path, bytes and PostScript name.
+/// A moved or changed file stays unresolved; only verified faces enter the font database.
+pub fn register_linked(requested: &str, link: &FontFileLink) -> Option<FaceId> {
+    type Key = (String, String, String);
+    static LOADED: OnceLock<Mutex<HashMap<Key, FaceId>>> = OnceLock::new();
+    let path = Path::new(&link.path);
+    if !path.is_absolute() || link.sha256.len() != 64 || !link.sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let key = (link.path.clone(), link.sha256.clone(), requested.to_ascii_lowercase());
+    // ponytail: one registration lock; use per-file locks if large font sets make this contend.
+    let mut loaded = LOADED.get_or_init(Default::default).lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(&id) = loaded.get(&key) {
+        return Some(id);
+    }
+    const MAX_FONT_BYTES: u64 = 32 * 1024 * 1024;
+    let len = std::fs::metadata(path).ok()?.len();
+    if len == 0 || len > MAX_FONT_BYTES {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.len() as u64 > MAX_FONT_BYTES || !effectcraft_segment::sha256::hex(&bytes).eq_ignore_ascii_case(&link.sha256) {
+        return None;
+    }
+    let name = read_faces_bytes(&bytes).into_iter().find(|n| n.postscript.as_deref().is_some_and(|ps| ps.eq_ignore_ascii_case(requested)))?;
+    let info = info_from(name, FaceData::Shared(Arc::new(bytes)), "linked");
+    let id = push(&mut db().write().unwrap_or_else(|e| e.into_inner()), info);
+    loaded.insert(key, id);
+    Some(id)
+}
+
 /// Scan the system font folders once (native only; a no-op on wasm). Returns the number of faces
 /// added by this call.
 pub fn scan_system() -> usize {
@@ -448,6 +481,28 @@ pub struct Resolved {
     pub missing: bool,
 }
 
+/// How a requested editable font was resolved for rendering.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FontStatus {
+    Exact,
+    Substituted,
+    Missing,
+}
+
+/// Use an explicitly relinked render face without changing the editable requested font.
+pub fn resolve_for_render(requested: &str, style: &str, render_font: Option<&str>) -> (Resolved, FontStatus) {
+    if let Some(name) = render_font.filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case(requested)) {
+        let substitute = resolve(name, "");
+        if !substitute.missing {
+            return (substitute, FontStatus::Substituted);
+        }
+        return (resolve(requested, style), FontStatus::Missing);
+    }
+    let original = resolve(requested, style);
+    let status = if original.missing { FontStatus::Missing } else { FontStatus::Exact };
+    (original, status)
+}
+
 fn style_wants(style: &str) -> (u16, bool) {
     let s = style.to_ascii_lowercase().replace([' ', '-'], "");
     let italic = s.contains("italic") || s.contains("oblique");
@@ -485,10 +540,44 @@ pub fn resolve(family: &str, style: &str) -> Resolved {
             return r;
         }
     }
+    // An unavailable PostScript cut such as `Inter-Light` can still use an installed
+    // `Inter` Light face whose PostScript name changed between font releases.
+    if let Some((base, cut)) = postscript_style_hint(family)
+        && let Some(mut r) = resolve_in(base, cut)
+    {
+        r.missing = true; // The requested cut remains unresolved and can be relinked later.
+        return r;
+    }
     // Inter is bundled; face 0 (the first bundled face) is the last resort.
     let mut r = resolve_in(DEFAULT_FAMILY, style).unwrap_or(Resolved { face: 0, synth_bold: false, synth_italic: false, missing: true });
     r.missing = !family.is_empty() && !family.eq_ignore_ascii_case(DEFAULT_FAMILY);
     r
+}
+
+fn postscript_style_hint(name: &str) -> Option<(&str, &str)> {
+    let (family, style) = name.rsplit_once('-')?;
+    let cut = style.to_ascii_lowercase();
+    let known = [
+        "regular",
+        "book",
+        "roman",
+        "thin",
+        "hairline",
+        "extralight",
+        "ultralight",
+        "light",
+        "medium",
+        "semibold",
+        "demibold",
+        "bold",
+        "extrabold",
+        "ultrabold",
+        "black",
+        "heavy",
+        "italic",
+        "oblique",
+    ];
+    (!family.is_empty() && known.iter().any(|s| cut.starts_with(*s))).then_some((family, style))
 }
 
 fn resolve_in(family: &str, style: &str) -> Option<Resolved> {
@@ -933,6 +1022,44 @@ mod tests {
         let r = resolve("No Such Font Family 123", "Regular");
         assert_eq!(face(r.face).info.family, "Inter");
         assert!(r.missing);
+    }
+
+    #[test]
+    fn missing_postscript_cut_uses_nearest_family_style_and_stays_relinkable() {
+        // Bundled Inter is an installed-font fixture; this old cut name is intentionally absent.
+        let r = resolve("Inter-SemiBoldOld", "Regular");
+        assert_eq!(face(r.face).info.family, "Inter");
+        assert_eq!(face(r.face).info.style, "SemiBold");
+        assert!(r.missing, "the original PostScript request is still unresolved");
+        assert_eq!(postscript_style_hint("Unrelated-Family"), None);
+    }
+
+    #[test]
+    fn explicit_render_substitute_overrides_installed_face_and_clears() {
+        let (r, status) = resolve_for_render("Inter-SemiBoldOld", "Regular", Some("Inter-Bold"));
+        assert_eq!(status, FontStatus::Substituted);
+        assert_eq!(face(r.face).info.style, "Bold");
+        let (r, status) = resolve_for_render("Inter-Regular", "", Some("Inter-Bold"));
+        assert_eq!(status, FontStatus::Substituted);
+        assert_eq!(face(r.face).info.style, "Bold");
+        let (r, status) = resolve_for_render("Inter-Regular", "", None);
+        assert_eq!(status, FontStatus::Exact);
+        assert_eq!(face(r.face).info.style, "Regular");
+        assert_eq!(resolve_for_render("No Such Font", "Regular", None).1, FontStatus::Missing);
+    }
+
+    #[test]
+    fn linked_font_requires_matching_hash_and_postscript_name() {
+        let path = std::env::temp_dir().join(format!("effectcraft-linked-font-{}.ttf", std::process::id()));
+        std::fs::write(&path, INTER_REGULAR).unwrap();
+        let link = FontFileLink { path: path.to_string_lossy().into_owned(), sha256: effectcraft_segment::sha256::hex(INTER_REGULAR) };
+        let id = register_linked("Inter-Regular", &link).unwrap();
+        assert_eq!(face(id).info.postscript.as_deref(), Some("Inter-Regular"));
+        assert_eq!(face(id).info.origin, "linked");
+        assert!(register_linked("Inter-Bold", &link).is_none());
+        let bad = FontFileLink { sha256: "0".repeat(64), ..link.clone() };
+        assert!(register_linked("Inter-Regular", &bad).is_none());
+        std::fs::remove_file(path).unwrap();
     }
 
     /// Native: the system scan reads name tables only and resolves families installed there.

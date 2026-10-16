@@ -40,6 +40,8 @@ const REFUSED: &[&str] = &[
     "layer.openSource",
     "help.revealLogFile",
     "file.autoSave",
+    // Runs an outside Python interpreter on the file.
+    "file.importAep",
 ];
 
 /// Commands that read files named by these parameters.
@@ -50,6 +52,7 @@ const READS: &[(&str, &[&str])] = &[
     ("file.importMultiple", &["paths"]),
     ("file.importRecent", &["path"]),
     ("file.importLottie", &["path"]),
+    ("file.importAeIr", &["path"]),
     ("file.importTimeline", &["path"]),
     ("file.replaceFootage", &["path"]),
     ("file.relinkFootage", &["folder"]),
@@ -270,7 +273,37 @@ fn resolve(p: &Path) -> Option<PathBuf> {
         if let Ok(real) = at.canonicalize() {
             return Some(rest.iter().rev().fold(real, |acc: PathBuf, c| acc.join(c)));
         }
+        // Failed canonicalization does not make a dangling link a new regular file.
+        match at.symlink_metadata() {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            _ => return None,
+        }
         rest.push(at.file_name()?.to_os_string());
         at = at.parent()?;
+    }
+}
+
+#[cfg(all(test, unix))]
+mod symlink_tests {
+    use super::*;
+
+    #[test]
+    fn dangling_links_cannot_escape_write_roots() {
+        let base = std::env::temp_dir().join(format!("ec-confine-dangling-{}", std::process::id()));
+        let inside = base.join("inside");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&inside).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let confinement = Confinement::new(&[], std::slice::from_ref(&inside)).unwrap();
+        let check = |p: &Path| confinement.check(&p.to_string_lossy(), Access::Write);
+        assert!(check(&inside.join("new.png")).is_ok());
+        std::os::unix::fs::symlink(outside.join("missing.png"), inside.join("link.png")).unwrap();
+        assert!(check(&inside.join("link.png")).is_err());
+        std::os::unix::fs::symlink(outside.join("missing-directory"), inside.join("directory")).unwrap();
+        assert!(check(&inside.join("directory/new.png")).is_err());
+        std::fs::write(inside.join("target.png"), b"safe").unwrap();
+        std::os::unix::fs::symlink(inside.join("target.png"), inside.join("safe-link.png")).unwrap();
+        assert!(check(&inside.join("safe-link.png")).is_ok());
+        std::fs::remove_dir_all(base).unwrap();
     }
 }

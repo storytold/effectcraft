@@ -21,6 +21,7 @@ pub use kurbo;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use effectcraft_keyframe::text_doc::DigitSet;
 use effectcraft_keyframe::{BaselineOption, CharStyle, Composer, Direction, Justify, Kerning, ParaStyle, TextDoc};
 pub use fonts::{FaceId, Resolved, families, resolve};
 use kurbo::{Affine, BezPath, Point};
@@ -139,9 +140,16 @@ pub struct TextLayout {
 
 /// A character style → [`TextStyle`].
 pub fn text_style(s: &CharStyle) -> TextStyle {
+    if s.render_font.is_none()
+        && let Some(link) = &s.font_file
+    {
+        let _ = fonts::register_linked(&s.font, link);
+    }
+    let (_, font_status) = fonts::resolve_for_render(&s.font, &s.style, s.render_font.as_deref());
+    let substituted = font_status == fonts::FontStatus::Substituted;
     TextStyle {
-        family: s.font.clone(),
-        style: s.style.clone(),
+        family: if substituted { s.render_font.clone().unwrap_or_else(|| s.font.clone()) } else { s.font.clone() },
+        style: if substituted { String::new() } else { s.style.clone() },
         size: s.size as f32,
         tracking: s.tracking as f32,
         kerning: true,
@@ -193,9 +201,11 @@ pub fn paragraph_style(p: &ParaStyle, width: Option<f32>) -> ParagraphStyle {
         // The chosen direction is the paragraph's base direction (a left-to-right paragraph
         // starting with Arabic or Hebrew still runs left to right, as in After Effects).
         rtl: Some(p.direction == Direction::Rtl),
-        indent_start: p.indent_left as f32,
-        indent_end: p.indent_right as f32,
-        indent_first: p.indent_first as f32,
+        // AE keeps these paragraph values on point text but places its single line at the
+        // alignment origin; applying them shifts centred card labels away from their anchor.
+        indent_start: if width.is_some() { p.indent_left as f32 } else { 0.0 },
+        indent_end: if width.is_some() { p.indent_right as f32 } else { 0.0 },
+        indent_first: if width.is_some() { p.indent_first as f32 } else { 0.0 },
         space_before: p.space_before as f32,
         space_after: p.space_after as f32,
         every_line: p.composer == Composer::EveryLine,
@@ -220,7 +230,15 @@ const ROT90: Affine = Affine::new([0.0, 1.0, -1.0, 0.0, 0.0, 0.0]);
 /// baseline (left), its centre (centre) or end (right). Paragraph text fills `box_size` from
 /// `box_pos`. Vertical text runs down from the origin (point) or the box's top-right corner.
 pub fn layout_doc(doc: &TextDoc) -> TextLayout {
-    let text = doc.text.as_str();
+    // Keep Source Text editable as typed; only substitute the displayed digit glyphs.
+    // Character indices stay stable even though the display string has different UTF-8 offsets.
+    let displayed = match doc.digit_set {
+        DigitSet::Hindi => std::borrow::Cow::Owned(
+            doc.text.chars().map(|c| if c.is_ascii_digit() { char::from_u32(0x0660 + c as u32 - '0' as u32).unwrap_or(c) } else { c }).collect::<String>(),
+        ),
+        DigitSet::Default | DigitSet::Arabic => std::borrow::Cow::Borrowed(doc.text.as_str()),
+    };
+    let text = displayed.as_ref();
     let byte_of_char: Vec<usize> = text.char_indices().map(|(b, _)| b).chain(std::iter::once(text.len())).collect();
     let nchars = byte_of_char.len() - 1;
     let mut runs = Vec::new();
@@ -504,6 +522,45 @@ mod tests {
             assert_eq!(doc.paras().iter().map(|p| p.indent_left).collect::<Vec<_>>(), vec![0.0, 30.0]);
             assert_eq!(doc.text, text);
         }
+    }
+
+    #[test]
+    fn ae_point_text_alignment_ignores_saved_paragraph_indents() {
+        let mut doc = TextDoc { text: "MORE FREEDOM".into(), justify: Justify::Center, size: 66.0, ..Default::default() };
+        let plain = layout_doc(&doc);
+        doc.indent_left = 522.0;
+        doc.indent_right = 94.0;
+        doc.indent_first = -12.0;
+        let indented = layout_doc(&doc);
+        assert_eq!(plain.bounds, indented.bounds, "AE point text stays centred at its layer anchor");
+        assert_eq!((doc.indent_left, doc.indent_right, doc.indent_first), (522.0, 94.0, -12.0));
+        doc.box_size = Some([1088.0, 1072.0]);
+        let area = layout_doc(&doc);
+        doc.indent_left = 0.0;
+        doc.indent_right = 0.0;
+        doc.indent_first = 0.0;
+        assert_ne!(area.layout.lines[0].x, layout_doc(&doc).layout.lines[0].x, "box text still uses indents");
+    }
+
+    #[test]
+    fn hindi_digit_set_changes_display_without_rewriting_source_text() {
+        let doc = TextDoc { text: "A12B".into(), digit_set: DigitSet::Hindi, ..Default::default() };
+        let lay = layout_doc(&doc);
+        assert_eq!(doc.text, "A12B");
+        assert_eq!(lay.chars, 4);
+        assert!(lay.glyphs.iter().any(|g| g.ch == '١'));
+        assert!(lay.glyphs.iter().any(|g| g.ch == '٢'));
+        assert_eq!(lay.char_of_byte(lay.byte(2)), 2);
+    }
+
+    #[test]
+    fn render_face_override_keeps_editable_source_font() {
+        let doc = TextDoc { text: "Test".into(), font: "Inter-Regular".into(), render_font: Some("Inter-Bold".into()), ..Default::default() };
+        let lay = layout_doc(&doc);
+        assert_eq!(doc.font, "Inter-Regular");
+        assert_eq!(doc.render_font.as_deref(), Some("Inter-Bold"));
+        assert!(!lay.layout.missing_font);
+        assert_eq!(fonts::face(lay.glyphs[0].face).info.style, "Bold");
     }
 
     #[test]

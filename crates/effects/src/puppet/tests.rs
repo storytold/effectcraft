@@ -111,7 +111,7 @@ fn rect_mesh(w: f64, h: f64, tris: f64) -> Mesh {
 }
 
 fn pin(kind: PinKind, rest: [f64; 2], pos: [f64; 2]) -> Pin {
-    Pin { kind, uid: 0, rest, position: pos, scale: 1.0, rotation: 0.0, amount: 50.0, extent: 15.0, in_front: 50.0 }
+    Pin { kind, uid: 0, vertex_index: None, rest, position: pos, scale: 1.0, rotation: 0.0, amount: 50.0, extent: 15.0, in_front: 50.0 }
 }
 
 #[test]

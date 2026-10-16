@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 effectcraft-keyframe = { workspace = true }
+effectcraft-segment = { workspace = true }
 kurbo = { workspace = true }
 # Font tables, glyph outlines and metrics (MIT OR Apache-2.0).
 skrifa = { workspace = true }

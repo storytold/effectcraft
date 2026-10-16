@@ -81,7 +81,7 @@ pub(crate) fn to_gradient(j: &Json, ncolors: usize) -> Option<Value> {
     if opacities.is_empty() {
         opacities = vec![(0.0, 1.0), (1.0, 1.0)];
     }
-    Some(Value::Gradient(Gradient { colors, opacities }))
+    Some(Value::Gradient(Gradient { colors, opacities, ..Default::default() }))
 }
 
 fn blend_index(m: BlendMode) -> u32 {

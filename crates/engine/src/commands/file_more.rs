@@ -356,20 +356,47 @@ fn find_missing(s: &mut Session, p: &Value) -> Result<Value> {
             Ok(json!({"effects": found}))
         }
         "fonts" => {
-            let families = crate::text_families();
             let mut found = vec![];
+            let (mut exact, mut substituted, mut missing) = (0, 0, 0);
             for (cid, c) in s.project.comps() {
                 for l in &c.layers {
                     if let Some(pr) = l.props.prop("text/sourceText")
                         && let Some(doc) = pr.value.as_text()
-                        && !families.iter().any(|f| f.eq_ignore_ascii_case(&doc.font))
                     {
-                        found.push(json!({"comp": cid.0, "layer": l.id.0, "font": doc.font}));
+                        let mut seen = BTreeSet::new();
+                        for run in doc.runs() {
+                            let st = run.style;
+                            if !seen.insert((st.font.clone(), st.render_font.clone(), st.font_file.clone().map(|f| f.sha256))) {
+                                continue;
+                            }
+                            if st.render_font.is_none()
+                                && let Some(link) = &st.font_file
+                            {
+                                let _ = crate::text::fonts::register_linked(&st.font, link);
+                            }
+                            let (resolved, status) = crate::text::fonts::resolve_for_render(&st.font, &st.style, st.render_font.as_deref());
+                            let actual = crate::text::fonts::face(resolved.face);
+                            match status {
+                                crate::text::fonts::FontStatus::Exact => exact += 1,
+                                crate::text::fonts::FontStatus::Substituted => substituted += 1,
+                                crate::text::fonts::FontStatus::Missing => missing += 1,
+                            }
+                            if status != crate::text::fonts::FontStatus::Exact {
+                                let requested = st.font;
+                                found.push(json!({
+                                    "comp": cid.0, "layer": l.id.0, "font": requested.clone(), "requested": requested,
+                                    "status": if status == crate::text::fonts::FontStatus::Substituted { "substituted" } else { "missing" },
+                                    "selected": if status == crate::text::fonts::FontStatus::Substituted { actual.info.postscript.as_deref() } else { None },
+                                    "fallback": actual.info.postscript.as_deref(),
+                                    "font_file": st.font_file,
+                                }));
+                            }
+                        }
                     }
                 }
             }
-            s.toast(format!("{} layer(s) with missing fonts", found.len()));
-            Ok(json!({"fonts": found}))
+            s.toast(format!("{missing} missing, {substituted} substituted font(s)"));
+            Ok(json!({"fonts": found, "counts": {"exact": exact, "substituted": substituted, "missing": missing}}))
         }
         w => Err(bad("file.findMissing", format!("what: footage|effects|fonts, not `{w}`"))),
     }
@@ -851,7 +878,16 @@ fn replace_footage(s: &mut Session, p: &Value) -> Result<Value> {
     // A numbered still brings its image sequence, as on import (`sequence: false` for one frame).
     let opts = SequenceOptions::from_params(p);
     let src = crate::sequence::source_of(s.services.as_ref(), &path, opts);
-    let f = crate::sequence::probe(importer.as_ref(), &src, s.sequence_rate()).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+    let mut f = crate::sequence::probe(importer.as_ref(), &src, s.sequence_rate()).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+    if matches!(f.codec.as_str(), "AI" | "PDF" | "EPS")
+        && let Some(ItemKind::Footage(previous)) = s.project.item(item).map(|it| &it.kind)
+        && previous.layer.as_ref().is_some_and(|layer| layer.crop_bounds.is_some())
+    {
+        f.layer = previous.layer.clone();
+        f.page = previous.page;
+        f.width = previous.width;
+        f.height = previous.height;
+    }
     let name = src.name();
     // Replacing a missing file relinks the other missing files that moved with it (as After Effects
     // does when you locate one).

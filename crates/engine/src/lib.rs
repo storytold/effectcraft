@@ -98,6 +98,11 @@ pub type Result<T> = std::result::Result<T, EngineError>;
 pub trait Services: Send + Sync {
     fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>>;
     fn write_file(&self, path: &str, data: &[u8]) -> std::io::Result<()>;
+    /// Convert an After Effects project to the versioned AEP import document.
+    /// Browser hosts and hosts without the optional importer can return Unsupported.
+    fn export_aep_ir(&self, _path: &str) -> std::io::Result<Vec<u8>> {
+        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "AEP importer is not configured on this host"))
+    }
     /// Whether a file exists (the background footage check after open).
     fn exists(&self, path: &str) -> bool {
         std::path::Path::new(path).exists()
@@ -133,6 +138,9 @@ pub trait Services: Send + Sync {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+mod aep_export;
+
 /// Native filesystem.
 pub struct FsServices;
 impl Services for FsServices {
@@ -141,6 +149,10 @@ impl Services for FsServices {
     }
     fn write_file(&self, path: &str, data: &[u8]) -> std::io::Result<()> {
         config::atomic_write(std::path::Path::new(path), data)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    fn export_aep_ir(&self, path: &str) -> std::io::Result<Vec<u8>> {
+        aep_export::convert(path)
     }
 }
 
@@ -1216,6 +1228,8 @@ mod rq_tests;
 mod tests;
 #[cfg(test)]
 mod tests_3d;
+#[cfg(test)]
+mod tests_aep;
 #[cfg(test)]
 mod tests_anim_presets;
 #[cfg(test)]

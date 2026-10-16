@@ -103,6 +103,8 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 # Executable and icon carry the display name (CFBundleExecutable / CFBundleIconFile).
 cp "$WORK/bin/effectcraft" "$APP/Contents/MacOS/EffectCraft"
 cp "$ROOT/assets/app-icon/effectcraft.icns" "$APP/Contents/Resources/EffectCraft.icns"
+cp "$ROOT/packaging/aep/aep_ir_export.py" "$APP/Contents/Resources/aep_ir_export.py"
+cp "$ROOT/packaging/aep/requirements.txt" "$APP/Contents/Resources/aep-requirements.txt"
 sed -e "s/@VERSION@/$VERSION/g" -e "s/@SHORT_VERSION@/$SHORT_VERSION/g" \
   -e "s/@BUILD_SHA@/${EFFECTCRAFT_BUILD_SHA:-unknown}/g" \
   "$HERE/Info.plist.in" >"$APP/Contents/Info.plist"
@@ -159,6 +161,8 @@ echo "==> building $CLI_ZIP"
 CLI_DIR="$WORK/effectcraft-cli-$VERSION-macos-$ARCH"
 mkdir -p "$CLI_DIR"
 cp "$WORK/bin/effectcraft-cli" "$CLI_DIR/"
+cp "$ROOT/packaging/aep/convert_aep.py" "$ROOT/packaging/aep/aep_ir_export.py" \
+  "$ROOT/packaging/aep/requirements.txt" "$CLI_DIR/"
 copy_docs "$CLI_DIR"
 sign --options runtime "$CLI_DIR/effectcraft-cli"
 codesign --verify --strict --verbose=2 "$CLI_DIR/effectcraft-cli"

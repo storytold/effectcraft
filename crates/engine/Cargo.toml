@@ -24,6 +24,7 @@ effectcraft-segment = { workspace = true }
 effectcraft-track = { workspace = true }
 effectcraft-model = { workspace = true }
 effectcraft-lottie = { workspace = true }
+effectcraft-aep = { workspace = true }
 effectcraft-interchange = { workspace = true }
 effectcraft-psd = { workspace = true }
 kurbo = { workspace = true }

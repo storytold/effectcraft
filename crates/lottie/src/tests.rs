@@ -290,6 +290,7 @@ fn shape_contents_roundtrip() {
         let grad = Gradient {
             colors: vec![(0.0, [1.0, 1.0, 0.0, 1.0]), (0.5, [0.0, 1.0, 1.0, 1.0]), (1.0, [1.0, 0.0, 1.0, 1.0])],
             opacities: vec![(0.0, 1.0), (1.0, 0.5)],
+            ..Default::default()
         };
         let gfill = build::shape_gradient_fill(ids, true, [150.0, 40.0], [180.0, 40.0], grad.clone());
         let gstroke = build::shape_gradient_stroke(ids, false, [130.0, 95.0], [170.0, 95.0], grad, 4.0);

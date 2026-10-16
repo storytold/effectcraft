@@ -147,18 +147,28 @@ pub use crate::text_doc::{Justify, TextDoc};
 pub struct Gradient {
     pub colors: Vec<(f64, [f32; 4])>,
     pub opacities: Vec<(f64, f32)>,
+    /// Each stop's midpoint toward the next stop; omitted entries use 0.5.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub color_midpoints: Vec<f64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub opacity_midpoints: Vec<f64>,
 }
 
 impl Default for Gradient {
     fn default() -> Self {
-        Gradient { colors: vec![(0.0, [1.0, 1.0, 1.0, 1.0]), (1.0, [0.0, 0.0, 0.0, 1.0])], opacities: vec![(0.0, 1.0), (1.0, 1.0)] }
+        Gradient {
+            colors: vec![(0.0, [1.0, 1.0, 1.0, 1.0]), (1.0, [0.0, 0.0, 0.0, 1.0])],
+            opacities: vec![(0.0, 1.0), (1.0, 1.0)],
+            color_midpoints: vec![],
+            opacity_midpoints: vec![],
+        }
     }
 }
 
 impl Gradient {
     pub fn sample(&self, t: f64) -> [f32; 4] {
         let t = t.clamp(0.0, 1.0);
-        let col = sample_stops(&self.colors, t, |a, b, f| {
+        let col = sample_stops(&self.colors, &self.color_midpoints, t, |a, b, f| {
             let mut o = [0.0; 4];
             for i in 0..4 {
                 o[i] = a[i] + (b[i] - a[i]) * f as f32;
@@ -166,14 +176,14 @@ impl Gradient {
             o
         })
         .unwrap_or([1.0; 4]);
-        let a = sample_stops(&self.opacities, t, |a, b, f| a + (b - a) * f as f32).unwrap_or(1.0);
+        let a = sample_stops(&self.opacities, &self.opacity_midpoints, t, |a, b, f| a + (b - a) * f as f32).unwrap_or(1.0);
         [col[0], col[1], col[2], col[3] * a]
     }
 
     /// The colour stops alone at `t` (0..1), RGBA as stored: unlike [`Gradient::sample`], the
     /// opacity stops are not applied. A new colour stop takes this value.
     pub fn color_at(&self, t: f64) -> [f32; 4] {
-        sample_stops(&self.colors, t.clamp(0.0, 1.0), |a, b, f| {
+        sample_stops(&self.colors, &self.color_midpoints, t.clamp(0.0, 1.0), |a, b, f| {
             let mut o = [0.0; 4];
             for i in 0..4 {
                 o[i] = a[i] + (b[i] - a[i]) * f as f32;
@@ -185,19 +195,22 @@ impl Gradient {
 
     /// The opacity stops alone at `t` (0..1). A new opacity stop takes this value.
     pub fn opacity_at(&self, t: f64) -> f32 {
-        sample_stops(&self.opacities, t.clamp(0.0, 1.0), |a, b, f| a + (b - a) * f as f32).unwrap_or(1.0)
+        sample_stops(&self.opacities, &self.opacity_midpoints, t.clamp(0.0, 1.0), |a, b, f| a + (b - a) * f as f32).unwrap_or(1.0)
     }
 }
 
-fn sample_stops<T: Copy>(stops: &[(f64, T)], t: f64, lerp: impl Fn(T, T, f64) -> T) -> Option<T> {
+fn sample_stops<T: Copy>(stops: &[(f64, T)], midpoints: &[f64], t: f64, lerp: impl Fn(T, T, f64) -> T) -> Option<T> {
     let first = stops.first()?;
     if t <= first.0 {
         return Some(first.1);
     }
-    for w in stops.windows(2) {
+    for (i, w) in stops.windows(2).enumerate() {
         if t <= w[1].0 {
             let span = (w[1].0 - w[0].0).max(1e-12);
-            return Some(lerp(w[0].1, w[1].1, (t - w[0].0) / span));
+            let f = ((t - w[0].0) / span).clamp(0.0, 1.0);
+            let m = midpoints.get(i).copied().filter(|m| m.is_finite()).unwrap_or(0.5).clamp(1e-6, 1.0 - 1e-6);
+            let f = if f <= m { 0.5 * f / m } else { 0.5 + 0.5 * (f - m) / (1.0 - m) };
+            return Some(lerp(w[0].1, w[1].1, f));
         }
     }
     stops.last().map(|s| s.1)
@@ -255,7 +268,7 @@ fn gradient_json(j: &serde_json::Value) -> Option<Gradient> {
     let mut colors = colors;
     colors.sort_by(|a, b| a.0.total_cmp(&b.0));
     let opacities = opacities.unwrap_or_else(|| colors.iter().map(|(p, c)| (*p, c[3])).collect());
-    Some(Gradient { colors: colors.into_iter().map(|(p, c)| (p, [c[0], c[1], c[2], 1.0])).collect(), opacities })
+    Some(Gradient { colors: colors.into_iter().map(|(p, c)| (p, [c[0], c[1], c[2], 1.0])).collect(), opacities, ..Default::default() })
 }
 
 /// The value of a property.
@@ -334,7 +347,20 @@ impl Value {
                     })
                     .collect();
                 let opacities = a.opacities.iter().zip(&b.opacities).map(|(x, y)| (x.0 + (y.0 - x.0) * t, x.1 + (y.1 - x.1) * t as f32)).collect();
-                Value::Gradient(Gradient { colors, opacities })
+                let midpoint_lerp = |a: &[f64], b: &[f64], n: usize| {
+                    (0..n)
+                        .map(|i| {
+                            let x = a.get(i).copied().unwrap_or(0.5);
+                            x + (b.get(i).copied().unwrap_or(0.5) - x) * t
+                        })
+                        .collect()
+                };
+                Value::Gradient(Gradient {
+                    colors,
+                    opacities,
+                    color_midpoints: midpoint_lerp(&a.color_midpoints, &b.color_midpoints, a.colors.len().saturating_sub(1)),
+                    opacity_midpoints: midpoint_lerp(&a.opacity_midpoints, &b.opacity_midpoints, a.opacities.len().saturating_sub(1)),
+                })
             }
             _ if self.interpolates() && self.dims() > 0 && self.dims() == o.dims() => {
                 let a = self.components();
@@ -448,9 +474,11 @@ impl Value {
             }
             Value::Layer(_) => Some(Value::Layer(j.as_u64())),
             Value::Path(_) => serde_json::from_value::<ShapePath>(j.clone()).ok().map(Value::Path).or_else(|| serde_json::from_value::<Value>(j.clone()).ok()),
-            Value::Gradient(_) => {
-                serde_json::from_value::<Value>(j.clone()).ok().filter(|v| matches!(v, Value::Gradient(_))).or_else(|| gradient_json(j).map(Value::Gradient))
-            }
+            Value::Gradient(_) => serde_json::from_value::<Value>(j.clone())
+                .ok()
+                .filter(|v| matches!(v, Value::Gradient(_)))
+                .or_else(|| serde_json::from_value::<Gradient>(j.clone()).ok().map(Value::Gradient))
+                .or_else(|| gradient_json(j).map(Value::Gradient)),
         }
     }
     /// JSON for display/automation (numbers/arrays for numeric kinds).
@@ -468,5 +496,27 @@ impl Value {
             Value::Text(t) => json!(t.text),
             v => serde_json::to_value(v).unwrap_or_default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod gradient_tests {
+    use super::*;
+
+    #[test]
+    fn midpoint_affects_color_and_alpha_and_survives_editing() {
+        let g = Gradient {
+            colors: vec![(0.0, [0.0, 0.0, 0.0, 1.0]), (1.0, [1.0, 1.0, 1.0, 1.0])],
+            opacities: vec![(0.0, 0.0), (1.0, 1.0)],
+            color_midpoints: vec![0.25],
+            opacity_midpoints: vec![0.75],
+        };
+        let at = g.sample(0.25);
+        assert!((at[0] - 0.5).abs() < 1e-6);
+        assert!((g.sample(0.75)[3] - 0.5).abs() < 1e-6);
+        let json = serde_json::to_value(Value::Gradient(g.clone())).unwrap();
+        assert_eq!(Value::Gradient(Gradient::default()).coerce_json(&json), Some(Value::Gradient(g.clone())));
+        let Value::Gradient(mid) = Value::Gradient(g).lerp(&Value::Gradient(Gradient::default()), 0.5) else { panic!("gradient") };
+        assert_eq!(mid.color_midpoints[0], 0.375);
     }
 }

@@ -335,7 +335,7 @@ impl Prober {
                 .and_then(|b| effectcraft_psd::Psd::parse(b).ok())
                 .and_then(|d| find_psd_layer(&d, sel))
                 .ok_or_else(|| fail(format!("no layer {sel}")))?;
-            f.layer = Some(effectcraft_project::SourceLayer { index: index as u32, name, layer_size: false, embedded: None, placed: false });
+            f.layer = Some(effectcraft_project::SourceLayer { index: index as u32, name, layer_size: false, embedded: None, placed: false, crop_bounds: None });
         }
         Ok(Probed { name, footage: f, ask_alpha, warning })
     }

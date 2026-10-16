@@ -1243,8 +1243,11 @@ pub struct Proxy {
 
 /// A layer of a layered still (a Photoshop document, or a PDF / Illustrator / EPS file) used as
 /// footage (File ▸ Import ▸ Composition / Composition – Retain Layer Sizes, or Choose Layer).
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SourceLayer {
+    /// Authored vector artwork bounds in document pixels, retained even while offline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crop_bounds: Option<[f64; 4]>,
     /// Layer record index in the file (bottom of the stack = 0).
     pub index: u32,
     pub name: String,

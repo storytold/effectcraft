@@ -156,7 +156,7 @@ fn gradient(ids: &mut Ids, g: Gradient) -> Property {
 /// The default glow gradient: the glow colour fading to transparent.
 fn glow_gradient() -> Gradient {
     let c = [1.0, 1.0, 190.0 / 255.0, 1.0];
-    Gradient { colors: vec![(0.0, c), (1.0, c)], opacities: vec![(0.0, 1.0), (1.0, 0.0)] }
+    Gradient { colors: vec![(0.0, c), (1.0, c)], opacities: vec![(0.0, 1.0), (1.0, 0.0)], ..Default::default() }
 }
 
 /// Global Light properties as they appear on a layer (copied from the comp's setting).
@@ -279,7 +279,14 @@ pub fn style(ids: &mut Ids, id: &str) -> Option<PropGroup> {
         "gradientOverlay" => vec![
             mode(ids, "blendMode", "Blend Mode", BlendMode::Normal),
             pct(ids, "opacity", "Opacity", 100.0),
-            gradient(ids, Gradient { colors: vec![(0.0, [0.0, 0.0, 0.0, 1.0]), (1.0, [1.0, 1.0, 1.0, 1.0])], opacities: vec![(0.0, 1.0), (1.0, 1.0)] }),
+            gradient(
+                ids,
+                Gradient {
+                    colors: vec![(0.0, [0.0, 0.0, 0.0, 1.0]), (1.0, [1.0, 1.0, 1.0, 1.0])],
+                    opacities: vec![(0.0, 1.0), (1.0, 1.0)],
+                    ..Default::default()
+                },
+            ),
             pct(ids, "gradientSmoothness", "Gradient Smoothness", 100.0),
             angle(ids, "angle", "Angle", 90.0),
             pop(ids, "style", "Style", 0, GRADIENT_STYLE),

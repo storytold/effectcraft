@@ -35,6 +35,7 @@ fn gradient_value(g: &effectcraft_svg::Gradient) -> Gradient {
     Gradient {
         colors: g.stops.iter().map(|(o, c)| (*o, [c[0] as f32, c[1] as f32, c[2] as f32, 1.0])).collect(),
         opacities: g.stops.iter().map(|(o, c)| (*o, c[3] as f32)).collect(),
+        ..Default::default()
     }
 }
 

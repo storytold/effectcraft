@@ -1349,7 +1349,8 @@ mod tests {
         assert!((l.lines[1].x - 30.0).abs() < 1e-3);
         assert!(l.lines.iter().all(|ln| ln.x + ln.width <= 400.0 + 0.5));
         assert!(!l.lines[0].para_end);
-        // Point text: a right-aligned paragraph's end indent moves it left of the origin.
+        // The generic layout honours explicitly supplied point indents. `layout_doc` clears
+        // them for AE Source Text point layers (3 Item Slider parity); other callers may opt in.
         let l = layout_rich_uncached("abc", &[(0..3, s)], &[ParagraphStyle { align: Align::Right, indent_end: 12.0, ..Default::default() }]);
         assert!((l.lines[0].x + l.lines[0].width + 12.0).abs() < 1e-3);
     }

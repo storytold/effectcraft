@@ -95,7 +95,11 @@ impl Draft {
 
     /// The draft as a gradient (the tracks are always in order).
     pub fn gradient(&self) -> Gradient {
-        Gradient { colors: self.colors.iter().map(|s| (s.pos, s.value)).collect(), opacities: self.opacities.iter().map(|s| (s.pos, s.value)).collect() }
+        Gradient {
+            colors: self.colors.iter().map(|s| (s.pos, s.value)).collect(),
+            opacities: self.opacities.iter().map(|s| (s.pos, s.value)).collect(),
+            ..Gradient::default()
+        }
     }
 
     pub fn len(&self, track: Track) -> usize {
@@ -435,7 +439,15 @@ mod tests {
     use super::*;
 
     fn draft() -> Draft {
-        Draft::new(&Gradient { colors: vec![(0.0, [1.0, 0.0, 0.0, 1.0]), (1.0, [0.0, 0.0, 1.0, 1.0])], opacities: vec![(0.0, 1.0), (1.0, 0.5)] }, None, vec![])
+        Draft::new(
+            &Gradient {
+                colors: vec![(0.0, [1.0, 0.0, 0.0, 1.0]), (1.0, [0.0, 0.0, 1.0, 1.0])],
+                opacities: vec![(0.0, 1.0), (1.0, 0.5)],
+                ..Gradient::default()
+            },
+            None,
+            vec![],
+        )
     }
 
     /// Dragging the first stop past the second keeps the track in order and the same stop
@@ -443,7 +455,11 @@ mod tests {
     #[test]
     fn stops_stay_in_order_and_selected_while_moving() {
         for track in [Track::Color, Track::Opacity] {
-            let g = Gradient { colors: vec![(0.0, [1.0, 0.0, 0.0, 1.0]), (0.6, [0.0, 0.0, 1.0, 1.0])], opacities: vec![(0.0, 1.0), (0.6, 0.5)] };
+            let g = Gradient {
+                colors: vec![(0.0, [1.0, 0.0, 0.0, 1.0]), (0.6, [0.0, 0.0, 1.0, 1.0])],
+                opacities: vec![(0.0, 1.0), (0.6, 0.5)],
+                ..Gradient::default()
+            };
             let mut d = Draft::new(&g, None, vec![]);
             let first = d.id_at(track, 0).unwrap();
             d.selected = Some((track, first));
@@ -499,7 +515,7 @@ mod tests {
     #[test]
     fn unchanged_drafts_equal_their_baseline() {
         // Out-of-order and out-of-range stops come in sorted and clamped: still "unchanged".
-        let g = Gradient { colors: vec![(1.2, [0.0, 0.0, 1.0, 1.0]), (0.0, [1.0, 0.0, 0.0, 1.0])], opacities: vec![(0.5, 1.0)] };
+        let g = Gradient { colors: vec![(1.2, [0.0, 0.0, 1.0, 1.0]), (0.0, [1.0, 0.0, 0.0, 1.0])], opacities: vec![(0.5, 1.0)], ..Gradient::default() };
         let d = Draft::new(&g, None, vec![]);
         assert_eq!(d.gradient(), d.baseline);
         assert_eq!(d.gradient().colors.iter().map(|c| c.0).collect::<Vec<_>>(), vec![0.0, 1.0]);
