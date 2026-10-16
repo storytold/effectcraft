@@ -12,7 +12,7 @@
 //! effectcraft-cli render-frame [--comp C] [--time S|--frame N] [--max-side PX|--scale K] [--out F.png] [--transparent]
 //! effectcraft-cli render [--comp C] --out FILE [--format h264|hevc|av1|prores|webm|png|jpeg|tiff|exr|gif|wav|aiff] [--start S] [--end S]
 //!     [--work-area] [--fps N] [--resolution full|half|third|quarter|K] [--quality best|draft] [--channels rgb|rgba]
-//!     [--jpeg-quality N] [--bitrate KBPS] [--prores proxy|lt|standard|hq|4444|4444xq] [--audio auto|on|off]
+//!     [--jpeg-quality N] [--bitrate KBPS] [--prores proxy|lt|standard|hq|4444|4444xq] [--prores-srgb-transfer] [--audio auto|on|off]
 //!     [--profile main|main10] [--level auto|4.1] [--rate-control bitrate|quality] [--video-quality 1-100]
 //!     [--keyint FRAMES] [--webm-codec vp9|av1] [--audio-bitrate KBPS] [--opus-app audio|voice]
 //!     (a relative --out is relative to the working directory; --queue outputs follow the project's own settings)
@@ -100,11 +100,12 @@ const USAGE: &str = "usage: effectcraft-cli <info|commands|exec|run|props|get|se
   render-frame [--comp C] [--time S | --frame N] [--max-side PX | --scale K] [--out F.png] [--transparent]
   render [--comp C] --out FILE [--format F] [--start S] [--end S] [--work-area] [--fps N]
          [--resolution full|half|third|quarter|K] [--quality best|draft] [--channels rgb|rgba]
-         [--jpeg-quality N] [--bitrate KBPS] [--prores PROFILE] [--audio auto|on|off]
+         [--jpeg-quality N] [--bitrate KBPS] [--prores PROFILE] [--prores-srgb-transfer] [--audio auto|on|off]
          [--profile main|main10] [--level auto|4.1] [--rate-control bitrate|quality] [--video-quality N]
          [--keyint FRAMES] [--webm-codec vp9|av1] [--audio-bitrate KBPS] [--opus-app audio|voice] | --queue
                                            (formats h264|hevc|av1|prores|webm|png|jpeg|tiff|exr|gif|wav|aiff;
                                            --profile..--keyint: HEVC / AV1, --audio-bitrate/--opus-app: WebM Opus)
+                                           --prores-srgb-transfer tags rendered sRGB output; default keeps BT.709 for compatibility
                                            a relative --out is relative to the working directory
   render/render-frame --template T.ectemplate [--values V.json]   render one template instance
   bench [--comp C] [--time S] [--scale K] [--n N] [--play N] [--gpu [--adv3d]]   per-layer/effect render timings;
@@ -185,6 +186,7 @@ const FLAGS: &[&str] = &[
     "--transparent",
     "--work-area",
     "--queue",
+    "--prores-srgb-transfer",
     "--ops",
     "--small",
     "--adv3d",
@@ -697,6 +699,9 @@ fn render(args: &Args, json_out: bool) -> Result<(), Failure> {
             if let Some(v) = args.opt(flag) {
                 p[key] = json!(v);
             }
+        }
+        if args.flag("--prores-srgb-transfer") {
+            p["proresSrgbTransfer"] = json!(true);
         }
         if let Some(v) = args.num("--jpeg-quality")? {
             p["quality"] = json!(v);

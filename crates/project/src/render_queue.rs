@@ -1039,6 +1039,9 @@ pub struct OutputModule {
     /// Movies: frames between key frames (0 = automatic, two seconds).
     pub keyframe_interval: u32,
     pub prores_profile: ProResProfile,
+    /// ProRes: use transfer tag 13 for sRGB output. Off keeps the BT.709 compatibility tag.
+    /// Does not change pixels or apply to non-sRGB output or alpha-only exports.
+    pub prores_srgb_transfer: bool,
     pub crop: Crop,
     pub resize: Resize,
     pub audio: AudioOutput,
@@ -1073,6 +1076,7 @@ impl Default for OutputModule {
             webm_bitrate: false,
             keyframe_interval: 0,
             prores_profile: ProResProfile::Hq,
+            prores_srgb_transfer: false,
             crop: Crop::default(),
             resize: Resize::default(),
             audio: AudioOutput::Auto,
@@ -1128,7 +1132,10 @@ impl OutputModule {
         }
         match self.format {
             OutputFormat::H264 => v.push(("Bitrate", format!("{} kbps", self.bitrate_kbps))),
-            OutputFormat::ProRes => v.push(("Codec", self.prores_profile.label().into())),
+            OutputFormat::ProRes => {
+                v.push(("Codec", self.prores_profile.label().into()));
+                v.push(("sRGB Transfer Metadata", if self.prores_srgb_transfer { "On" } else { "Off" }.into()));
+            }
             OutputFormat::WebM if self.webm_bitrate => v.push(("Bitrate", format!("{} kbps", self.bitrate_kbps))),
             OutputFormat::WebM | OutputFormat::JpegSequence => v.push(("Quality", self.quality.to_string())),
             _ => {}
@@ -1475,6 +1482,25 @@ pub fn sanitize(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prores_transfer_metadata_defaults_off_in_existing_output_modules() {
+        let mut module = OutputModule {
+            channels: Channels::Rgba,
+            prores_profile: ProResProfile::P4444Xq,
+            output: "original.mov".into(),
+            ..OutputModule::for_format(OutputFormat::ProRes)
+        };
+        let mut legacy = serde_json::to_value(&module).unwrap();
+        legacy.as_object_mut().unwrap().remove("prores_srgb_transfer");
+        let restored: OutputModule = serde_json::from_value(legacy).unwrap();
+        assert!(!restored.prores_srgb_transfer);
+        assert_eq!(restored, module, "older modules retain their settings and compatibility tags");
+
+        module.prores_srgb_transfer = true;
+        let json = serde_json::to_string(&module).unwrap();
+        assert_eq!(serde_json::from_str::<OutputModule>(&json).unwrap(), module, "opt-in survives serialization");
+    }
 
     #[test]
     fn templates_and_sequences() {

@@ -306,6 +306,11 @@ build real projects through these interfaces; they are worked examples of everyt
   proresProfile: 4444, output}` then `renderQueue.render {"wait": true}`. Check a render by
   importing it (`file.import`, `file.newCompFromSelection`) and `render_frame {transparent: true}`
   for its alpha (ProRes 4444 and WebM VP9 alpha both read back as straight alpha).
+  ProRes keeps BT.709 compatibility tags by default. Set `proresSrgbTransfer: true` in
+  `renderQueue.add` or `renderQueue.setOutputModule` (CLI: `render --prores-srgb-transfer`)
+  to tag sRGB output as sRGB without changing the pixels. Keep it off when a downstream tool
+  expects BT.709 tags. Unmanaged Working Gamma 2.4, managed non-sRGB output and alpha-only
+  exports retain their existing tags. The option is saved with projects and Output Module templates.
 * **Essential Graphics**: controls can be addressed by name (`essential.set {"layer":"#1",
   "control":"Title","value":"John Smith"}`); a command that targets an explicit `comp` runs even
   when the active comp would disable it (`essential.exportTemplate {"comp":"Lower Third", …}`).

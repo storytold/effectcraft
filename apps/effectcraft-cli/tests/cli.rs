@@ -491,3 +491,94 @@ fn render_bitrate_applies_to_vp9_webm() {
     assert!(high > low, "100 kbps: {low} bytes, 8000 kbps: {high} bytes");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// ProRes transfer tagging changes only when the render invocation opts in.
+#[test]
+fn render_prores_srgb_transfer_is_opt_in() {
+    let root = tmp("prores-srgb-transfer");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let project = root.join("midtone.ecproj");
+    let p = project.to_str().unwrap();
+    ok_json(&[
+        "run",
+        "comp.new",
+        r#"{"name":"Midtone","width":32,"height":32,"duration":0.125,"frameRate":8}"#,
+        "layer.newSolid",
+        r##"{"name":"Midtone","width":32,"height":32,"color":"#cc9685"}"##,
+        "--empty",
+        "--save-as",
+        p,
+    ]);
+    for (name, opt_in, transfer) in [("default", false, "bt709"), ("srgb", true, "iec61966-2-1")] {
+        let output = root.join(format!("{name}.mov"));
+        let mut args = vec![
+            "render",
+            "--project",
+            p,
+            "--format",
+            "prores",
+            "--prores",
+            "4444xq",
+            "--channels",
+            "rgba",
+            "--audio",
+            "off",
+            "--out",
+            output.to_str().unwrap(),
+        ];
+        if opt_in {
+            args.push("--prores-srgb-transfer");
+        }
+        let rendered = ok_json(&args);
+        assert_eq!(rendered["rendered"].as_array().unwrap().len(), 1, "{rendered}");
+        // The host importer must still accept both generated movies.
+        let mut session = effectcraft_host::session();
+        let imported = session.execute("file.import", json!({"paths":[output]})).unwrap();
+        assert_eq!(imported["errors"], json!([]), "{name}: {imported}");
+        let items = imported["items"].as_array().expect("import returns an items array");
+        assert_eq!(items.len(), 1, "{name}: {imported}");
+        let id = effectcraft_engine::project::ItemId(items[0].as_u64().expect("imported item has a numeric id"));
+        let item = session.project.item(id).expect("imported item exists in the project");
+        let effectcraft_engine::project::ItemKind::Footage(footage) = &item.kind else {
+            panic!("the rendered MOV must import as footage");
+        };
+        assert!(footage.has_video && !footage.has_audio);
+        assert_eq!((footage.width, footage.height), (32, 32));
+        // Probe the encoded stream independently; importer profile defaults are not its exact transfer tag.
+        match Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=codec_name,codec_tag_string,width,height,color_primaries,color_transfer,color_space",
+                "-of",
+                "json",
+            ])
+            .arg(&output)
+            .output()
+        {
+            Ok(probed) => {
+                assert!(probed.status.success(), "{name}: ffprobe rejected {}: {}", output.display(), String::from_utf8_lossy(&probed.stderr));
+                let metadata: Value = serde_json::from_slice(&probed.stdout).expect("ffprobe stream metadata is valid JSON");
+                let streams = metadata["streams"].as_array().expect("ffprobe returns a streams array");
+                assert_eq!(streams.len(), 1, "{name}: {metadata}");
+                let stream = &streams[0];
+                assert_eq!(stream["codec_name"], "prores", "{name}: {metadata}");
+                assert_eq!(stream["codec_tag_string"], "ap4x", "{name}: CLI keeps the requested 4444 XQ profile: {metadata}");
+                assert_eq!((stream["width"].as_u64(), stream["height"].as_u64()), (Some(32), Some(32)), "{name}: {metadata}");
+                assert_eq!(stream["color_primaries"], "bt709", "{name}: {metadata}");
+                assert_eq!(stream["color_space"], "bt709", "{name}: {metadata}");
+                assert_eq!(stream["color_transfer"], transfer, "{name}: CLI opt-in must control the ProRes transfer tag: {metadata}");
+                eprintln!("CLI_COLOR_ORACLE case={name} profile=ap4x primaries=bt709 matrix=bt709 transfer={transfer}");
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!("CLI_COLOR_ORACLE_SKIPPED case={name}: ffprobe not found; skipping encoded transfer metadata oracle");
+            }
+            Err(error) => panic!("{name}: could not run ffprobe metadata oracle: {error}"),
+        }
+    }
+    let _ = std::fs::remove_dir_all(root);
+}

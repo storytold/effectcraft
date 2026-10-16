@@ -229,3 +229,38 @@ fn locked_resize_uses_height_for_height_only_output_module_updates() {
     let comp = s.project.comp(item.comp).unwrap();
     assert_eq!(item.output.output_size(comp, &item.settings), (32, 32), "explicit width retains precedence");
 }
+
+#[test]
+fn prores_transfer_metadata_is_opt_in_undoable_and_persistent() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "C", "width": 32, "height": 32, "duration": 1})).unwrap();
+    let added = s.execute("renderQueue.add", json!({"format": "prores", "channels": "rgba", "proresProfile": "4444"})).unwrap();
+    let id = added["item"].as_u64().unwrap();
+    assert_eq!(added["output"]["prores_srgb_transfer"], false);
+    let changed = s.execute("renderQueue.setOutputModule", json!({"item": id, "proresSrgbTransfer": true})).unwrap();
+    assert_eq!(changed["output"]["prores_srgb_transfer"], true);
+    assert!(s.undo());
+    assert!(!s.project.render_queue[0].output.prores_srgb_transfer);
+    assert!(s.redo());
+    assert!(s.project.render_queue[0].output.prores_srgb_transfer);
+
+    let before_invalid = s.project.to_json();
+    assert!(s.execute("renderQueue.setOutputModule", json!({"item": id, "channels": "rgb", "proresSrgbTransfer": "yes"})).is_err());
+    assert_eq!(s.project.to_json(), before_invalid, "invalid metadata options leave the project unchanged");
+
+    s.execute("renderQueue.saveTemplate", json!({"kind": "outputModule", "name": "sRGB Metadata", "item": id})).unwrap();
+    s.execute("renderQueue.setOutputModule", json!({"item": id, "proresSrgbTransfer": false})).unwrap();
+    assert!(!s.project.render_queue[0].output.prores_srgb_transfer);
+    s.execute("renderQueue.setOutputModule", json!({"item": id, "template": "sRGB Metadata"})).unwrap();
+    assert!(s.project.render_queue[0].output.prores_srgb_transfer);
+    let serialized = s.project.to_json();
+    let restored = effectcraft_project::Project::from_json(&serialized).unwrap();
+    assert_eq!(restored.render_queue, s.project.render_queue);
+    assert!(restored.render_templates.output_module("sRGB Metadata").unwrap().prores_srgb_transfer);
+
+    let mut legacy: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+    legacy["render_queue"][0]["output"].as_object_mut().unwrap().remove("prores_srgb_transfer");
+    let restored = effectcraft_project::Project::from_json(&legacy.to_string()).unwrap();
+    assert!(!restored.render_queue[0].output.prores_srgb_transfer, "existing projects retain compatibility tags");
+    assert_eq!(restored.render_queue[0].output.format, OutputFormat::ProRes);
+}

@@ -158,6 +158,7 @@ fn output_menu(it: &RenderQueueItem, available: &[OutputFormat], templates: &Ren
             for p in ProResProfile::ALL {
                 v.push((mark(o.prores_profile == p, p.label()), json!({"proresProfile": format!("{p:?}")})));
             }
+            v.push((mark(o.prores_srgb_transfer, "Tag sRGB Output as sRGB"), json!({"proresSrgbTransfer": !o.prores_srgb_transfer})));
         }
         OutputFormat::H264 => {
             v.push(("-".into(), Value::Null));

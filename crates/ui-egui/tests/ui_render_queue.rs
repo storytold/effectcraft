@@ -95,3 +95,51 @@ fn clicking_the_output_file_name_opens_the_save_dialog() {
     assert_eq!(asked.borrow().len(), 1, "Alt-click does not open the dialog");
     assert_eq!(editing(&h).map(|(item, _)| item), Some(id), "the template editor is open");
 }
+
+fn open_output_module(h: &mut Harness<'_, EffectcraftApp>, id: u64) {
+    let dd = h.state().auto.find(&format!("renderQueue.item.{id}.outputModule")).expect("Output Module menu").clone();
+    click_at(h, pos2(dd.rect[0] + dd.rect[2] / 2.0, dd.rect[1] + dd.rect[3] / 2.0));
+}
+
+#[test]
+fn prores_srgb_transfer_is_opt_in_and_persists_after_menu_input() {
+    let mut s = Session::default();
+    s.execute("file.openDemoProject", json!({})).unwrap();
+    s.execute("renderQueue.add", json!({"format": "ProRes"})).unwrap();
+    let id = s.project.render_queue[0].id;
+    let original = s.project.render_queue[0].output.clone();
+    assert!(!original.prores_srgb_transfer, "existing ProRes behavior is the default");
+    let mut app = Some(EffectcraftApp::new(s));
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| app.take().expect("app"));
+    h.ctx.data_mut(|d| d.insert_temp(egui::Id::new("rq-ui"), (vec![id], None::<u64>)));
+    h.state_mut().show_panel(PanelKind::RenderQueue);
+    h.run_steps(4);
+
+    open_output_module(&mut h, id);
+    assert!(h.query_by_label("✓ Tag sRGB Output as sRGB").is_none(), "the option starts unchecked");
+    let entry = h.query_by_label_contains("Tag sRGB Output as sRGB").expect("ProRes transfer option").rect();
+    click_at(&mut h, entry.center());
+    let output = &h.state().session.project.render_queue[0].output;
+    assert!(output.prores_srgb_transfer, "the menu click opts in");
+    assert_eq!((output.format, output.prores_profile, output.channels), (original.format, original.prores_profile, original.channels));
+    assert!(h.query_by_label_contains("Tag sRGB Output as sRGB").is_none(), "the menu closes after selection");
+
+    let saved = h.state().session.project.to_json();
+    let restored = effectcraft_engine::project::Project::from_json(&saved).unwrap();
+    assert!(restored.render_queue[0].output.prores_srgb_transfer, "the chosen option persists in the project");
+    assert_eq!(restored.render_queue[0].output, h.state().session.project.render_queue[0].output);
+
+    open_output_module(&mut h, id);
+    let checked = h.query_by_label("✓ Tag sRGB Output as sRGB").expect("the reopened menu reflects the saved choice").rect();
+    click_at(&mut h, checked.center());
+    assert!(!h.state().session.project.render_queue[0].output.prores_srgb_transfer, "the next click opts out");
+    assert!(h.state_mut().session.undo());
+    assert!(h.state().session.project.render_queue[0].output.prores_srgb_transfer);
+    assert!(h.state_mut().session.redo());
+    assert!(!h.state().session.project.render_queue[0].output.prores_srgb_transfer);
+
+    h.state_mut().session.execute("renderQueue.setOutputModule", json!({"item": id, "format": "H264"})).unwrap();
+    h.run_steps(3);
+    open_output_module(&mut h, id);
+    assert!(h.query_by_label_contains("Tag sRGB Output as sRGB").is_none(), "the option belongs only to ProRes");
+}
