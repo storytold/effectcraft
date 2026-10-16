@@ -190,6 +190,9 @@ pub fn capture_thumbnail(app: &mut EffectcraftApp) {
     app.home_thumb_saved = Some(key);
 }
 
+/// Project thumbnails kept on the Home screen (more than the recent list shows).
+const MAX_HOME_THUMBS: usize = 64;
+
 fn thumb_texture(app: &mut EffectcraftApp, ctx: &egui::Context, path: &str) -> Option<egui::TextureHandle> {
     if let Some(t) = app.home_thumbs.get(path) {
         return t.clone();
@@ -201,6 +204,10 @@ fn thumb_texture(app: &mut EffectcraftApp, ctx: &egui::Context, path: &str) -> O
         .and_then(|c| c.read(&thumb_name(path)))
         .and_then(|t| decode_thumb(&t))
         .map(|img| ctx.load_texture(format!("home-thumb-{path}"), img, egui::TextureOptions::LINEAR));
+    // Bounded: projects that left the recent list don't keep their thumbnails.
+    if app.home_thumbs.len() >= MAX_HOME_THUMBS {
+        app.home_thumbs.clear();
+    }
     app.home_thumbs.insert(path.to_string(), tex.clone());
     tex
 }

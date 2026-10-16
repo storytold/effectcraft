@@ -74,38 +74,86 @@ pub fn pattern_kind(i: u32) -> u32 {
     }
 }
 
-/// Worley distances for point (u, v) in cell units: (F1, F2, hash of the nearest cell).
+/// The feature point (x, y in cell units) of cell (gx, gy) and the cell's shade.
 /// `tile` repeats the cell layout every (columns, rows) cells.
-fn worley_r(u: f64, v: f64, disperse: f64, evo: f64, seed: u32, tile: Option<(i64, i64)>, reach: i64) -> (f64, f64, f32) {
+#[inline]
+fn cell_point(gx: i64, gy: i64, disperse: f64, evo: f64, seed: u32, tile: Option<(i64, i64)>) -> (f64, f64, f32) {
+    let (tx, ty) = match tile {
+        Some((nx, ny)) => (gx.rem_euclid(nx), gy.rem_euclid(ny)),
+        None => (gx, gy),
+    };
+    let (hx, hy) = (tx as i32 as u32, ty as i32 as u32);
+    let h1 = hash1(hx, hy, seed) as f64;
+    let h2 = hash1(hx, hy, seed.wrapping_add(1)) as f64;
+    let h3 = hash1(hx, hy, seed.wrapping_add(2)) as f64;
+    let ang = 2.0 * PI * (h3 + evo);
+    let px = gx as f64 + 0.5 + (h1 - 0.5) * disperse + 0.15 * disperse * ang.cos();
+    let py = gy as f64 + 0.5 + (h2 - 0.5) * disperse + 0.15 * disperse * ang.sin();
+    (px, py, hash1(hx, hy, seed.wrapping_add(3)))
+}
+
+/// Worley distances for point (u, v) in cell units: (F1, F2, shade of the nearest cell), over
+/// the cells within `reach` of (u, v)'s, whose feature points come from `point`.
+#[inline]
+fn worley_r(u: f64, v: f64, reach: i64, point: impl Fn(i64, i64) -> (f64, f64, f32)) -> (f64, f64, f32) {
     let (cx, cy) = (u.floor() as i64, v.floor() as i64);
     let mut f1 = f64::INFINITY;
     let mut f2 = f64::INFINITY;
     let mut id = 0.0f32;
     for j in -reach..=reach {
         for i in -reach..=reach {
-            let (gx, gy) = (cx + i, cy + j);
-            let (tx, ty) = match tile {
-                Some((nx, ny)) => (gx.rem_euclid(nx), gy.rem_euclid(ny)),
-                None => (gx, gy),
-            };
-            let (hx, hy) = (tx as i32 as u32, ty as i32 as u32);
-            let h1 = hash1(hx, hy, seed) as f64;
-            let h2 = hash1(hx, hy, seed.wrapping_add(1)) as f64;
-            let h3 = hash1(hx, hy, seed.wrapping_add(2)) as f64;
-            let ang = 2.0 * PI * (h3 + evo);
-            let px = gx as f64 + 0.5 + (h1 - 0.5) * disperse + 0.15 * disperse * ang.cos();
-            let py = gy as f64 + 0.5 + (h2 - 0.5) * disperse + 0.15 * disperse * ang.sin();
+            let (px, py, cell_id) = point(cx.wrapping_add(i), cy.wrapping_add(j));
             let d = ((px - u).powi(2) + (py - v).powi(2)).sqrt();
             if d < f1 {
                 f2 = f1;
                 f1 = d;
-                id = hash1(hx, hy, seed.wrapping_add(3));
+                id = cell_id;
             } else if d < f2 {
                 f2 = d;
             }
         }
     }
     (f1, f2, id)
+}
+
+/// Most cells a [`CellGrid`] holds (24 MB); larger layouts compute points as they go.
+const CELL_GRID_MAX: usize = 1 << 20;
+
+/// The feature points of a rectangle of cells, computed once per frame: an HQ pixel otherwise
+/// recomputes 25 cells' points (four hashes and a sine and cosine each) for each of 16 samples.
+struct CellGrid {
+    x0: i64,
+    y0: i64,
+    w: usize,
+    h: usize,
+    pts: Vec<(f64, f64, f32)>,
+}
+
+impl CellGrid {
+    /// Cells `x0..=x1` × `y0..=y1`, or `None` past [`CELL_GRID_MAX`].
+    fn new(x0: i64, x1: i64, y0: i64, y1: i64, point: impl Fn(i64, i64) -> (f64, f64, f32) + Sync) -> Option<CellGrid> {
+        let w = usize::try_from(x1.checked_sub(x0)?.checked_add(1)?).ok()?;
+        let h = usize::try_from(y1.checked_sub(y0)?.checked_add(1)?).ok()?;
+        if w.checked_mul(h)? > CELL_GRID_MAX {
+            return None;
+        }
+        let pts = (0..h)
+            .into_par_iter()
+            .flat_map_iter(|j| {
+                let gy = y0.wrapping_add(j as i64);
+                let point = &point;
+                (0..w).map(move |i| point(x0.wrapping_add(i as i64), gy))
+            })
+            .collect();
+        Some(CellGrid { x0, y0, w, h, pts })
+    }
+
+    #[inline]
+    fn get(&self, gx: i64, gy: i64) -> Option<(f64, f64, f32)> {
+        let i = usize::try_from(gx.checked_sub(self.x0)?).ok().filter(|i| *i < self.w)?;
+        let j = usize::try_from(gy.checked_sub(self.y0)?).ok().filter(|j| *j < self.h)?;
+        self.pts.get(j * self.w + i).copied()
+    }
 }
 
 fn cell_value(pattern: u32, f1: f64, f2: f64, id: f32) -> f32 {
@@ -135,45 +183,102 @@ fn overflow(v: f32, mode: u32) -> f32 {
 }
 
 fn cell_pattern(ctx: &EffectCtx, mut b: Buf) -> Buf {
-    let pattern = pattern_kind(ctx.params.e("cellPattern"));
-    let hq = (6..=10).contains(&ctx.params.e("cellPattern"));
-    let invert = ctx.params.b("invert");
-    let contrast = ctx.params.f("contrast") as f32 / 100.0;
-    let ov = ctx.params.e("overflow");
-    let disperse = ctx.params.f("disperse").clamp(0.0, 1.5);
-    let size = (ctx.params.f("size") * b.scale).max(1.0);
-    let off = b.to_px(ctx.params.v2("offset"));
-    // Static Plates keep their shades still while the cells move.
-    let mut evo = ctx.params.f("evolution") / 360.0;
-    // Cycle Evolution loops the evolution every `cycle` revolutions.
-    if ctx.params.b("evolutionOptions/cycleEvolution") {
-        evo = evo.rem_euclid(ctx.params.f("evolutionOptions/cycle").round().max(1.0));
-    }
-    let seed = (ctx.params.f("evolutionOptions/randomSeed") as i64 as u32).wrapping_mul(7919) ^ 0xce11;
-    let tile = ctx
-        .params
-        .b("tilingOptions/enableTiling")
-        .then(|| (ctx.params.f("tilingOptions/cellsHorizontal").round().max(1.0) as i64, ctx.params.f("tilingOptions/cellsVertical").round().max(1.0) as i64));
-    let subs: Vec<f64> = if hq { (0..4).map(|k| (k as f64 + 0.5) / 4.0).collect() } else { vec![0.5] };
-    let reach = if hq { 2 } else { 1 };
+    let cp = CellParams::new(ctx, &b);
+    let point = |gx: i64, gy: i64| cp.point(gx, gy);
+    // Every cell the pixels' searches reach: u and v grow with x and y.
+    let (w, h) = (b.img.width as usize, b.img.height as usize);
+    let (first, last) = (cp.subs.first().copied().unwrap_or(0.5), cp.subs.last().copied().unwrap_or(0.5));
+    let cell = |x: usize, s: f64, o: f64| ((x as f64 + s - o) / cp.size).floor() as i64;
+    let grid = (w > 0 && h > 0)
+        .then(|| {
+            CellGrid::new(
+                cell(0, first, cp.off.0).saturating_sub(cp.reach),
+                cell(w - 1, last, cp.off.0).saturating_add(cp.reach),
+                cell(0, first, cp.off.1).saturating_sub(cp.reach),
+                cell(h - 1, last, cp.off.1).saturating_add(cp.reach),
+                point,
+            )
+        })
+        .flatten();
     map_xy(&mut b.img, |x, y, _| {
-        let mut val = 0.0;
-        for sy in &subs {
-            for sx in &subs {
-                let u = (x as f64 + sx - off.0) / size;
-                let v = (y as f64 + sy - off.1) / size;
-                let (f1, f2, id) = worley_r(u, v, disperse, evo, seed, tile, reach);
-                val += cell_value(pattern, f1, f2, id);
-            }
-        }
-        let mut val = val / (subs.len() * subs.len()) as f32;
-        val = overflow((val - 0.5) * contrast + 0.5, ov);
-        if invert {
-            val = 1.0 - val;
-        }
+        let val = cp.shade(x, y, |u, v| match &grid {
+            Some(g) => worley_r(u, v, cp.reach, |gx, gy| g.get(gx, gy).unwrap_or_else(|| point(gx, gy))),
+            None => worley_r(u, v, cp.reach, point),
+        });
         [val, val, val, 1.0]
     });
     b
+}
+
+/// Cell Pattern's parameters for one frame.
+struct CellParams {
+    pattern: u32,
+    invert: bool,
+    contrast: f32,
+    ov: u32,
+    disperse: f64,
+    size: f64,
+    off: (f64, f64),
+    evo: f64,
+    seed: u32,
+    tile: Option<(i64, i64)>,
+    /// Subsample offsets on each axis.
+    subs: Vec<f64>,
+    /// Cells searched around a sample's own.
+    reach: i64,
+}
+
+impl CellParams {
+    fn new(ctx: &EffectCtx, b: &Buf) -> CellParams {
+        let hq = (6..=10).contains(&ctx.params.e("cellPattern"));
+        // Static Plates keep their shades still while the cells move.
+        let mut evo = ctx.params.f("evolution") / 360.0;
+        // Cycle Evolution loops the evolution every `cycle` revolutions.
+        if ctx.params.b("evolutionOptions/cycleEvolution") {
+            evo = evo.rem_euclid(ctx.params.f("evolutionOptions/cycle").round().max(1.0));
+        }
+        CellParams {
+            pattern: pattern_kind(ctx.params.e("cellPattern")),
+            invert: ctx.params.b("invert"),
+            contrast: ctx.params.f("contrast") as f32 / 100.0,
+            ov: ctx.params.e("overflow"),
+            disperse: ctx.params.f("disperse").clamp(0.0, 1.5),
+            size: (ctx.params.f("size") * b.scale).max(1.0),
+            off: b.to_px(ctx.params.v2("offset")),
+            evo,
+            seed: (ctx.params.f("evolutionOptions/randomSeed") as i64 as u32).wrapping_mul(7919) ^ 0xce11,
+            tile: ctx.params.b("tilingOptions/enableTiling").then(|| {
+                (ctx.params.f("tilingOptions/cellsHorizontal").round().max(1.0) as i64, ctx.params.f("tilingOptions/cellsVertical").round().max(1.0) as i64)
+            }),
+            subs: if hq { (0..4).map(|k| (k as f64 + 0.5) / 4.0).collect() } else { vec![0.5] },
+            reach: if hq { 2 } else { 1 },
+        }
+    }
+
+    #[inline]
+    fn point(&self, gx: i64, gy: i64) -> (f64, f64, f32) {
+        cell_point(gx, gy, self.disperse, self.evo, self.seed, self.tile)
+    }
+
+    /// The pixel's shade from Worley samples at its subsamples.
+    #[inline]
+    fn shade(&self, x: usize, y: usize, worley: impl Fn(f64, f64) -> (f64, f64, f32)) -> f32 {
+        let mut val = 0.0;
+        for sy in &self.subs {
+            for sx in &self.subs {
+                let u = (x as f64 + sx - self.off.0) / self.size;
+                let v = (y as f64 + sy - self.off.1) / self.size;
+                let (f1, f2, id) = worley(u, v);
+                val += cell_value(self.pattern, f1, f2, id);
+            }
+        }
+        let mut val = val / (self.subs.len() * self.subs.len()) as f32;
+        val = overflow((val - 0.5) * self.contrast + 0.5, self.ov);
+        if self.invert {
+            val = 1.0 - val;
+        }
+        val
+    }
 }
 
 // ---------------------------------------------------------------- Ellipse
@@ -1533,5 +1638,117 @@ mod tests {
         assert_eq!(CELL_PATTERNS[9], "Crystallize HQ");
         assert_ne!(std, hq);
         assert!(distinct(&hq) > distinct(&std) * 2, "{} vs {}", distinct(&hq), distinct(&std));
+    }
+
+    /// Worley distances as computed before the per-frame [`CellGrid`]: every cell's point
+    /// recomputed for every sample.
+    fn worley_old(u: f64, v: f64, disperse: f64, evo: f64, seed: u32, tile: Option<(i64, i64)>, reach: i64) -> (f64, f64, f32) {
+        let (cx, cy) = (u.floor() as i64, v.floor() as i64);
+        let mut f1 = f64::INFINITY;
+        let mut f2 = f64::INFINITY;
+        let mut id = 0.0f32;
+        for j in -reach..=reach {
+            for i in -reach..=reach {
+                let (gx, gy) = (cx + i, cy + j);
+                let (tx, ty) = match tile {
+                    Some((nx, ny)) => (gx.rem_euclid(nx), gy.rem_euclid(ny)),
+                    None => (gx, gy),
+                };
+                let (hx, hy) = (tx as i32 as u32, ty as i32 as u32);
+                let h1 = hash1(hx, hy, seed) as f64;
+                let h2 = hash1(hx, hy, seed.wrapping_add(1)) as f64;
+                let h3 = hash1(hx, hy, seed.wrapping_add(2)) as f64;
+                let ang = 2.0 * PI * (h3 + evo);
+                let px = gx as f64 + 0.5 + (h1 - 0.5) * disperse + 0.15 * disperse * ang.cos();
+                let py = gy as f64 + 0.5 + (h2 - 0.5) * disperse + 0.15 * disperse * ang.sin();
+                let d = ((px - u).powi(2) + (py - v).powi(2)).sqrt();
+                if d < f1 {
+                    f2 = f1;
+                    f1 = d;
+                    id = hash1(hx, hy, seed.wrapping_add(3));
+                } else if d < f2 {
+                    f2 = d;
+                }
+            }
+        }
+        (f1, f2, id)
+    }
+
+    fn cell_ctx_render(set: &[(&str, Value)], buf: Buf) -> (Image, Image) {
+        let s = crate::find("ec.generate.cellpattern").unwrap();
+        let mut params = Params { values: s.params.iter().map(|p| (p.id.to_string(), p.default.clone())).collect() };
+        for (k, v) in set {
+            params.values.insert(k.to_string(), v.clone());
+        }
+        let ctx = EffectCtx {
+            params: &params,
+            time: 0.0,
+            layer_size: [buf.img.width as f64, buf.img.height as f64],
+            seed: 1,
+            adjustment: false,
+            env: Default::default(),
+        };
+        let cp = CellParams::new(&ctx, &buf);
+        let mut old = buf.img.clone();
+        map_xy(&mut old, |x, y, _| {
+            let val = cp.shade(x, y, |u, v| worley_old(u, v, cp.disperse, cp.evo, cp.seed, cp.tile, cp.reach));
+            [val, val, val, 1.0]
+        });
+        (cell_pattern(&ctx, buf).img, old)
+    }
+
+    #[test]
+    fn cell_pattern_grid_matches_per_sample_points_bit_for_bit() {
+        let sets: Vec<Vec<(&str, Value)>> = vec![
+            vec![],
+            vec![("size", num(7.0)), ("disperse", num(1.5)), ("evolution", num(123.0))],
+            vec![("cellPattern", Value::Enum(9)), ("size", num(11.0)), ("offset", pt(-13.7, 41.2))],
+            vec![("cellPattern", Value::Enum(10)), ("size", num(1.0)), ("disperse", num(1.2))],
+            vec![
+                ("cellPattern", Value::Enum(7)),
+                ("size", num(5.5)),
+                ("tilingOptions/enableTiling", Value::Bool(true)),
+                ("tilingOptions/cellsHorizontal", num(3.0)),
+                ("tilingOptions/cellsVertical", num(2.0)),
+            ],
+            vec![("cellPattern", Value::Enum(6)), ("size", num(9.0)), ("evolutionOptions/randomSeed", num(77.0)), ("offset", pt(1e6, -2e6))],
+        ];
+        for set in &sets {
+            for (w, h, offset) in [(37, 29, [0.0, 0.0]), (16, 9, [-5.5, 3.25]), (0, 4, [0.0, 0.0])] {
+                let (new, old) = cell_ctx_render(set, Buf { img: Image::new(w, h), offset, scale: 1.0 });
+                let bits = |img: &Image| img.data.iter().map(|p| p.map(f32::to_bits)).collect::<Vec<_>>();
+                assert!(bits(&new) == bits(&old), "{set:?} {w}x{h}");
+            }
+        }
+        // Points outside the grid fall back to computing them.
+        let g = CellGrid::new(0, 1, 0, 1, |x, y| (x as f64, y as f64, 0.5)).unwrap();
+        assert_eq!(g.get(1, 1), Some((1.0, 1.0, 0.5)));
+        assert_eq!(g.get(2, 0), None);
+        assert_eq!(g.get(-1, 0), None);
+        assert_eq!(g.get(i64::MIN, i64::MAX), None);
+        assert!(CellGrid::new(i64::MIN, i64::MAX, 0, 0, |_, _| (0.0, 0.0, 0.0)).is_none());
+    }
+
+    /// Rough timing of Cell Pattern HQ (`cargo test -p effectcraft-effects --release --lib
+    /// cell_pattern_timing -- --ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn cell_pattern_timing() {
+        for pat in [1u32, 9] {
+            let set = [("cellPattern", Value::Enum(pat)), ("size", num(30.0))];
+            let t = std::time::Instant::now();
+            let (_, _) = cell_ctx_render(&set, Buf { img: Image::new(640, 360), offset: [0.0; 2], scale: 1.0 });
+            let both = t.elapsed();
+            let t = std::time::Instant::now();
+            let s = crate::find("ec.generate.cellpattern").unwrap();
+            let mut params = Params { values: s.params.iter().map(|p| (p.id.to_string(), p.default.clone())).collect() };
+            for (k, v) in &set {
+                params.values.insert(k.to_string(), v.clone());
+            }
+            let ctx = EffectCtx { params: &params, time: 0.0, layer_size: [640.0, 360.0], seed: 1, adjustment: false, env: Default::default() };
+            let _ = cell_pattern(&ctx, Buf { img: Image::new(640, 360), offset: [0.0; 2], scale: 1.0 });
+            let new = t.elapsed();
+            println!("pattern {pat} 640x360: new {new:?}, old ≈ {:?}", both.saturating_sub(new));
+        }
     }
 }

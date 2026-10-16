@@ -342,12 +342,14 @@ pub(crate) fn showing_snapshot(app: &EffectcraftApp, ctx: &egui::Context) -> boo
 /// Show Channel and exposure, then the display colour conversion (View ▸ Use Display Color
 /// Management / Simulate Output).
 fn transformed(img: &egui::ColorImage, ch: Channel, colorized: bool, stops: f32, dc: Option<vw::DisplayColor>) -> egui::ColorImage {
-    let mut px: Vec<[u8; 4]> = img.pixels.iter().map(|c| c.to_array()).collect();
+    use rayon::prelude::*;
+    let mut px: Vec<[u8; 4]> = img.pixels.par_iter().map(|c| c.to_array()).collect();
     if let Some(dc) = dc.filter(|_| matches!(ch, Channel::Rgb | Channel::RgbStraight)) {
         dc.apply(&mut px);
     }
-    vw::display_transform(&mut px, ch, colorized, stops);
-    egui::ColorImage::new(img.size, px.into_iter().map(|a| Color32::from_rgba_premultiplied(a[0], a[1], a[2], a[3])).collect())
+    // Per pixel, so in parallel bands (each band builds the exposure table: 256 entries).
+    px.par_chunks_mut(1 << 16).for_each(|band| vw::display_transform(band, ch, colorized, stops));
+    egui::ColorImage::new(img.size, px.into_par_iter().map(|a| Color32::from_rgba_premultiplied(a[0], a[1], a[2], a[3])).collect())
 }
 
 /// The display conversion's inputs, for the texture caches.
@@ -842,6 +844,21 @@ fn bottom_bar_contents(app: &mut EffectcraftApp, ui: &mut egui::Ui, bar: Rect, z
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Show Channel / exposure in parallel bands is the same as in one pass.
+    #[test]
+    fn display_transform_in_bands_matches_one_pass() {
+        let n = (1 << 16) * 2 + 77;
+        let px: Vec<Color32> =
+            (0..n).map(|i| Color32::from_rgba_premultiplied((i % 200) as u8, (i % 97) as u8, (i % 31) as u8, 200 + (i % 50) as u8)).collect();
+        let img = egui::ColorImage::new([n, 1], px);
+        for (ch, stops) in [(Channel::Rgb, 1.5), (Channel::Red, -0.5), (Channel::Alpha, 0.0), (Channel::RgbStraight, 2.0)] {
+            let mut one: Vec<[u8; 4]> = img.pixels.iter().map(|c| c.to_array()).collect();
+            vw::display_transform(&mut one, ch, true, stops);
+            let got: Vec<[u8; 4]> = super::transformed(&img, ch, true, stops, None).pixels.iter().map(|c| c.to_array()).collect();
+            assert!(got == one, "{ch:?}");
+        }
+    }
 
     #[test]
     fn bar_labels_match_after_effects() {

@@ -2,16 +2,17 @@
 //! [`effectcraft_ui_egui::native_menu`]'s spec of the engine's After Effects menu tree.
 //!
 //! Each frame [`NativeBar::update`] runs menu activations (the same command ids as the in-window
-//! bar), and when [`native_menu::state_key`] changed it rebuilds the spec and pushes labels,
-//! enabled and check state into the existing items; a structural change (Open Recent, a new
-//! shortcut preset) rebuilds the menu. Settings ▸ Appearance ▸ Use In-Window Menu Bar on macOS
+//! bar), and when [`native_menu::state_key`] changed (at most every
+//! [`native_menu::MENU_REFRESH_INTERVAL`]) it rebuilds the spec and, when that differs, pushes
+//! labels, enabled and check state into the existing items; a structural change (Open Recent, a
+//! new shortcut preset) rebuilds the menu. Settings ▸ Appearance ▸ Use In-Window Menu Bar on macOS
 //! swaps back to the in-window bar.
 
 use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, channel};
 
 use effectcraft_ui_egui::EffectcraftApp;
-use effectcraft_ui_egui::native_menu::{self, NativeMenu, NativeNode, Role};
+use effectcraft_ui_egui::native_menu::{self, MenuPacer, NativeMenu, NativeNode, Pace, Role};
 use muda::{CheckMenuItem, Menu, MenuEvent, PredefinedMenuItem, Submenu};
 
 /// The `muda` accelerator for a spec accelerator string.
@@ -24,7 +25,7 @@ pub struct NativeBar {
     items: HashMap<String, CheckMenuItem>,
     spec: NativeMenu,
     structure: u64,
-    state: Option<u64>,
+    pacer: MenuPacer,
     events: Receiver<MenuEvent>,
     /// The in-window-bar setting last applied (None: not yet).
     in_window: Option<bool>,
@@ -38,7 +39,7 @@ impl NativeBar {
             let _ = tx.send(e);
             ctx.request_repaint();
         }));
-        NativeBar { menu: None, items: HashMap::new(), spec: NativeMenu::default(), structure: 0, state: None, events: rx, in_window: None }
+        NativeBar { menu: None, items: HashMap::new(), spec: NativeMenu::default(), structure: 0, pacer: MenuPacer::default(), events: rx, in_window: None }
     }
 
     /// Run activations and keep the native menu in step with the app (call once per frame).
@@ -53,7 +54,7 @@ impl NativeBar {
                 }
                 self.items.clear();
             } else {
-                self.state = None;
+                self.pacer.reset();
                 self.structure = 0;
             }
         }
@@ -62,22 +63,33 @@ impl NativeBar {
                 log::warn!("menu: {err}");
             }
             // Check items toggle themselves when clicked: resync with the app.
-            self.state = None;
+            self.pacer.reset();
         }
         if in_window {
             return;
         }
-        let key = native_menu::state_key(app);
-        if self.state == Some(key) && self.menu.is_some() {
+        // While a button is held (a drag edits on every frame, each a new revision) the menu,
+        // which can't be opened meanwhile, catches up on release.
+        if self.menu.is_some() && self.pacer.applied() && ctx.input(|i| i.pointer.any_down()) {
             return;
         }
-        self.state = Some(key);
+        if self.menu.is_none() {
+            self.pacer.reset();
+        }
+        match self.pacer.check(native_menu::state_key(app), ctx.input(|i| i.time)) {
+            Pace::Current => return,
+            Pace::Later(wait) => {
+                ctx.request_repaint_after(std::time::Duration::try_from_secs_f64(wait).unwrap_or_default());
+                return;
+            }
+            Pace::Now => {}
+        }
         let spec = native_menu::build(app);
         let structure = spec.structure();
         if self.menu.is_none() || structure != self.structure {
             self.install(&spec);
             self.structure = structure;
-        } else {
+        } else if spec != self.spec {
             self.refresh(&spec);
         }
         self.spec = spec;

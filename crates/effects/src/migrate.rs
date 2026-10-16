@@ -249,9 +249,77 @@ fn is_numeric_ui(u: &ParamUi) -> bool {
     matches!(u, ParamUi::Number | ParamUi::Slider { .. } | ParamUi::Percent | ParamUi::Angle | ParamUi::Pixels)
 }
 
+/// Read-only [`prop_at`].
+fn prop_ref<'a>(g: &'a PropGroup, id: &str) -> Option<&'a Property> {
+    match id.split_once('/') {
+        None => g.get(id),
+        Some((first, rest)) => prop_ref(g.sub(first)?, rest),
+    }
+}
+
+/// Whether [`refresh`] would leave `pr` as it is.
+fn refresh_is_no_op(pr: &Property, ps: &ParamSpec, spec: &EffectSpec) -> bool {
+    if USER_EDITED_CATEGORIES.contains(&spec.category) {
+        return true;
+    }
+    if pr.name != ps.name {
+        return false;
+    }
+    match (&pr.ui, &ps.ui) {
+        // Equal option lists: no value is remapped.
+        (ParamUi::Popup { .. }, ParamUi::Popup { .. }) => pr.ui == ps.ui,
+        (_, ParamUi::Hidden) => pr.ui == ParamUi::Hidden,
+        (ParamUi::Hidden | ParamUi::Text, ParamUi::File { .. }) => false,
+        (a, b) if std::mem::discriminant(a) == std::mem::discriminant(b) || is_numeric_ui(a) && is_numeric_ui(b) => pr.ui == ps.ui,
+        _ => true,
+    }
+}
+
+/// Whether the saved instance `g` of `spec` is already up to date: [`upgrade_instance`] would
+/// leave it as it is. Read-only and allocation-free for most effects, so opening a project of
+/// current instances neither copies nor rewrites them. Errs on the side of `false` (the upgrade
+/// then runs and decides).
+pub fn is_current(spec: &EffectSpec, g: &PropGroup) -> bool {
+    // Card Wipe's old Back Layer popup.
+    if spec.id == "ec.transition.cardwipe" && g.get("backLayer").is_some_and(|pr| matches!(pr.ui, ParamUi::Popup { .. })) {
+        return false;
+    }
+    for ps in &spec.params {
+        // Missing (to be added, or moved from an old id or the top level).
+        let Some(pr) = prop_ref(g, ps.id) else { return false };
+        if !refresh_is_no_op(pr, ps, spec) {
+            return false;
+        }
+        if matches!(ps.ui, ParamUi::Layer) {
+            let sid = layer_source_id(ps.id);
+            if !spec.params.iter().any(|q| q.id == sid) && prop_ref(g, &sid).is_none() {
+                return false;
+            }
+        }
+    }
+    // Twirl-down group names (see `upgrade_instance`'s `names`); deeper than any effect nests
+    // counts as not current.
+    fn names_current(g: &PropGroup, depth: usize) -> bool {
+        g.groups().all(|sg| {
+            let n = group_name(&sg.match_id);
+            depth < 32 && (n == sg.match_id || sg.name == n) && names_current(sg, depth + 1)
+        })
+    }
+    if !USER_EDITED_CATEGORIES.contains(&spec.category) && spec.params.iter().any(|p| p.id.contains('/')) && !names_current(g, 0) {
+        return false;
+    }
+    true
+}
+
 /// Bring the saved instance `g` of `spec` up to date (see the module docs). `layer_size` sizes
 /// point defaults of added parameters. Returns whether anything changed.
 pub fn upgrade_instance(spec: &EffectSpec, g: &mut PropGroup, ids: &mut Ids, layer_size: [f64; 2]) -> bool {
+    // Most instances are current: skip the copy kept to compare against.
+    !is_current(spec, g) && upgrade_full(spec, g, ids, layer_size)
+}
+
+/// [`upgrade_instance`] without the [`is_current`] shortcut.
+fn upgrade_full(spec: &EffectSpec, g: &mut PropGroup, ids: &mut Ids, layer_size: [f64; 2]) -> bool {
     let before = g.clone();
     // Card Wipe's Back Layer was a None / Self popup; it is a layer parameter now, with "Self"
     // kept in the hidden Back Layer Is Self switch.
@@ -467,6 +535,60 @@ mod tests {
         for spec in crate::registry() {
             let mut g = instantiate(spec, &mut Ids(&mut next), spec.name, [100.0, 50.0]);
             assert!(!upgrade_instance(spec, &mut g, &mut Ids(&mut next), [100.0, 50.0]), "{} changed on upgrade", spec.id);
+        }
+    }
+
+    #[test]
+    fn is_current_never_skips_a_needed_upgrade() {
+        fn rename_groups(g: &mut PropGroup) {
+            for c in &mut g.children {
+                if let Node::Group(sg) = c {
+                    sg.name = "Old Group".into();
+                    rename_groups(sg);
+                }
+            }
+        }
+        let mut next = 1;
+        for spec in crate::registry() {
+            let fresh = instantiate(spec, &mut Ids(&mut next), spec.name, [100.0, 50.0]);
+            assert!(is_current(spec, &fresh), "{} fresh instance not current", spec.id);
+            // Old saves: each parameter missing, renamed, with other UI hints, or at top level;
+            // twirl-downs renamed.
+            let mut variants = vec![];
+            for ps in &spec.params {
+                let mut g = fresh.clone();
+                take_at(&mut g, ps.id);
+                variants.push(g);
+                let mut g = fresh.clone();
+                if let Some(pr) = take_at(&mut g, ps.id) {
+                    g.children.push(pr.into());
+                    variants.push(g);
+                }
+                let uis = [ParamUi::Hidden, ParamUi::Number, ParamUi::Checkbox, ParamUi::Popup { options: vec!["A".into(), "B".into()] }];
+                for ui in uis {
+                    let mut g = fresh.clone();
+                    if let Some(pr) = prop_at(&mut g, ps.id) {
+                        pr.ui = ui;
+                    }
+                    variants.push(g);
+                }
+                let mut g = fresh.clone();
+                if let Some(pr) = prop_at(&mut g, ps.id) {
+                    pr.name = "Old Name".into();
+                    if let ParamUi::Popup { options } = &mut pr.ui {
+                        options.reverse();
+                    }
+                }
+                variants.push(g);
+            }
+            let mut g = fresh.clone();
+            rename_groups(&mut g);
+            variants.push(g);
+            for g in variants {
+                let current = is_current(spec, &g);
+                let changed = upgrade_full(spec, &mut g.clone(), &mut Ids(&mut next), [100.0, 50.0]);
+                assert!(!(current && changed), "{}: is_current skipped an upgrade", spec.id);
+            }
         }
     }
 

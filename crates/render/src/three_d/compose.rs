@@ -465,9 +465,10 @@ fn gather<'a>(r: &Renderer<'a>, ctx: &EvalCtx<'a>, run: &[&'a Layer], out: (u32,
             its
         })
         .collect();
-    // Shadow casters outside this run (other 3D layers of the comp).
+    // Shadow casters outside this run (other 3D layers of the comp); none when this render
+    // casts no shadows (the compositors would drop them unused).
     let mut extra: Vec<Item> = vec![];
-    if lights.iter().any(|l| l.casts_shadows && l.kind != LightKind::Ambient) {
+    if r.opts.shadows() && lights.iter().any(|l| l.casts_shadows && l.kind != LightKind::Ambient) {
         let in_run: Vec<_> = run.iter().map(|l| l.id).collect();
         extra = ctx
             .comp
@@ -1045,4 +1046,53 @@ pub(crate) fn draw_sky(r: &Renderer, ctx: &EvalCtx, layer: &Layer, canvas: &mut 
             *d = [p[0] * op + d[0] * k, p[1] * op + d[1] * k, p[2] * op + d[2] * k, p[3] * op + d[3] * k];
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use effectcraft_color::Label;
+    use effectcraft_keyframe::Value;
+    use effectcraft_project::{Comp, ItemKind, LayerSource, Project, Solid, build};
+    use effectcraft_time::FrameRate;
+
+    use super::*;
+    use crate::{NoFootage, RenderOpts};
+
+    fn set(l: &mut Layer, path: &str, v: Value) {
+        l.props.prop_mut(path).unwrap_or_else(|| panic!("no {path}")).value = v;
+    }
+
+    /// Shadow casters outside a run are prepared only when the render casts shadows: a draft
+    /// render without Realtime Shadows skips them (and draws the same).
+    #[test]
+    fn casters_outside_the_run_only_with_shadows() {
+        let (w, h) = (120u32, 80u32);
+        let mut p = Project::default();
+        let comp = Comp::new(w, h, FrameRate::FPS_30, Tick::from_seconds_f64(1.0));
+        let cid = p.add_item("Comp", Label::Sandstone, None, ItemKind::Comp(comp.clone().into()));
+        let solid = |p: &mut Project, z: f64, three_d: bool| {
+            let sid = p.add_item("Solid", Label::Red, None, ItemKind::Solid(Solid { color: [1.0; 3], width: 40, height: 40, pixel_aspect: 1.0 }));
+            let mut l = build::layer(p, &comp, "Solid", LayerSource::Solid { item: sid }, (40, 40), None);
+            l.switches.three_d = three_d;
+            if three_d {
+                set(&mut l, "transform/position", Value::Vec3([60.0, 40.0, z]));
+                set(&mut l, "materialOptions/castsShadows", Value::Enum(1));
+            }
+            l
+        };
+        let mut light = build::layer(&mut p, &comp, "Light", LayerSource::Light { kind: LightKind::Parallel }, (w, h), None);
+        set(&mut light, "transform/position", Value::Vec3([60.0, 40.0, -500.0]));
+        set(&mut light, "transform/poi", Value::Vec3([60.0, 40.0, 0.0]));
+        set(&mut light, "lightOptions/castsShadows", Value::Bool(true));
+        // Light, a 3D caster, a 2D layer splitting the runs, the 3D receiver (top to bottom).
+        let layers = vec![light, solid(&mut p, -50.0, true), solid(&mut p, 0.0, false), solid(&mut p, 50.0, true)];
+        p.comp_mut(cid).unwrap_or_else(|| panic!("comp")).layers.extend(layers);
+        let c = p.comp(cid).unwrap_or_else(|| panic!("comp"));
+        let ctx = EvalCtx::new(&p, cid, c, Tick::ZERO);
+        let receiver = c.layers.iter().rev().find(|l| l.is_3d()).unwrap_or_else(|| panic!("receiver"));
+        let extra = |opts: RenderOpts| gather(&Renderer::new(&p, &NoFootage, opts), &ctx, &[receiver], (w, h)).extra.len();
+        assert_eq!(extra(RenderOpts::default()), 1, "the caster above the 2D layer");
+        assert_eq!(extra(RenderOpts { draft: true, ..Default::default() }), 1, "Realtime Shadows in Draft");
+        assert_eq!(extra(RenderOpts { draft: true, draft_shadows: false, ..Default::default() }), 0);
+    }
 }

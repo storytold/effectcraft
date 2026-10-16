@@ -110,6 +110,9 @@ pub fn drop_folder(project: &effectcraft_engine::project::Project, row: Option<I
 /// A thumbnail being rendered off the UI thread: (revision, result slot).
 type PendingThumb = (u64, Arc<Mutex<Option<Option<(u32, u32, Vec<u8>)>>>>);
 
+/// Item thumbnails kept (192 px); the least recently shown go first.
+const MAX_THUMBS: usize = 64;
+
 /// Thumbnail of a comp (its current time) or footage (first frame), cached per item/revision.
 /// Rendered on a background thread (inline on wasm32): until the new one lands the previous
 /// thumbnail stays up, so selecting a big comp or editing it never stalls the panel.
@@ -118,6 +121,8 @@ fn thumbnail(app: &EffectcraftApp, ctx: &egui::Context, it: &Item) -> Option<egu
     let pkey = egui::Id::new(("proj-thumb-pending", it.id.0));
     let rev = app.session.revision;
     let cached: Option<(u64, egui::TextureHandle)> = ctx.data(|d| d.get_temp(key));
+    // Thumbnails of items selected long ago (or deleted) don't stay for the whole session.
+    crate::thumb_lru::touch::<(u64, egui::TextureHandle)>(ctx, "proj-thumb", key, MAX_THUMBS);
     let mut tex = cached.as_ref().map(|(_, t)| t.clone());
     let have = cached.as_ref().map(|(r, _)| *r);
     // A finished render: upload it.

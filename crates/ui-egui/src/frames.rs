@@ -150,12 +150,15 @@ struct Cache {
     budget: usize,
     /// Bytes of GPU frames to keep at most ([`GPU_BUDGET`]).
     gpu_budget: usize,
+    /// Changes whenever a frame comes or goes (see [`Frames::disk_frames`]).
+    generation: u64,
     /// The playing preview, if any: evictions spare the frames it shows next.
     playhead: Option<Playhead>,
 }
 
 impl Cache {
     fn insert(&mut self, k: FrameKey, img: FrameImage) {
+        self.generation = self.generation.wrapping_add(1);
         let (sz, gpu) = (img.bytes(), img.is_gpu());
         if let Some(old) = self.map.insert(k, img) {
             self.forget(&old);
@@ -208,6 +211,7 @@ impl Cache {
     }
     fn remove(&mut self, k: &FrameKey) {
         if let Some(i) = self.map.remove(k) {
+            self.generation = self.generation.wrapping_add(1);
             self.forget(&i);
         }
     }
@@ -455,6 +459,27 @@ pub struct Frames {
     /// Where frames render instead of the UI thread (wasm32), and how many it is rendering.
     remote: Option<Arc<dyn RemoteFrames>>,
     remote_busy: Arc<Mutex<usize>>,
+    /// The cache bar's frames, remembered while nothing they depend on changes (the bar is drawn
+    /// every UI frame).
+    bar: Mutex<CacheBar>,
+}
+
+/// See [`Frames::cached_frames`] and [`Frames::disk_frames`]: (series with frame 0, what else
+/// the answer depends on, the answer), most recent last.
+#[derive(Default)]
+struct CacheBar {
+    ram: Vec<(FrameKey, u64, Vec<i64>)>,
+    disk: Vec<(FrameKey, [u64; 5], Vec<i64>)>,
+}
+
+/// Series remembered by [`CacheBar`] (the Timeline, Preview panel and playback ask for one or two).
+const BAR_SERIES: usize = 4;
+
+fn remember<K: Copy>(v: &mut Vec<(FrameKey, K, Vec<i64>)>, series: FrameKey, k: K, frames: &[i64]) {
+    if v.len() >= BAR_SERIES {
+        v.remove(0);
+    }
+    v.push((series, k, frames.to_vec()));
 }
 
 impl Default for Frames {
@@ -462,7 +487,7 @@ impl Default for Frames {
         #[cfg(not(target_arch = "wasm32"))]
         let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(2, 16);
         Frames {
-            cache: Arc::new(Mutex::new(Cache { map: HashMap::new(), order: VecDeque::new(), bytes: 0, gpu_bytes: 0, budget: 3 << 30, gpu_budget: GPU_BUDGET, playhead: None })),
+            cache: Arc::new(Mutex::new(Cache { map: HashMap::new(), order: VecDeque::new(), bytes: 0, gpu_bytes: 0, budget: 3 << 30, gpu_budget: GPU_BUDGET, generation: 0, playhead: None })),
             inflight: Arc::new(Mutex::new(HashSet::new())),
             queue: Arc::new(Mutex::new(Queue::default())),
             #[cfg(not(target_arch = "wasm32"))]
@@ -485,6 +510,7 @@ impl Default for Frames {
             keepers: Mutex::default(),
             remote: None,
             remote_busy: Arc::default(),
+            bar: Mutex::default(),
         }
     }
 }
@@ -543,15 +569,15 @@ pub fn fit_texture_by(img: egui::ColorImage, max_side: usize, min_k: usize) -> e
     average_down(&img, k)
 }
 
-/// A shared frame as texture data (see [`fit_texture_by`]): the frame itself when it needs no
-/// averaging, without copying its pixels. The viewer puts every frame a preview shows on screen;
-/// copying a 4K frame first held the UI thread for about a millisecond each time (#595).
-pub fn fit_shared_texture_by(img: &Arc<egui::ColorImage>, max_side: usize, min_k: usize) -> egui::ImageData {
+/// [`fit_texture_by`] for a shared frame: one that fits is handed to egui as it is (no copy of
+/// its pixels; egui uploads straight from the `Arc`). The viewer puts every frame a preview shows
+/// on screen; copying a 4K frame first held the UI thread for about a millisecond each time (#595).
+pub fn fit_texture_shared(img: &Arc<egui::ColorImage>, max_side: usize, min_k: usize) -> Arc<egui::ColorImage> {
     let k = fit_factor(img.size, max_side, min_k);
     if k == 1 {
-        return egui::ImageData::Color(img.clone());
+        return Arc::clone(img);
     }
-    average_down(img, k).into()
+    Arc::new(average_down(img, k))
 }
 
 /// `img` averaged down by `k` (rounded up at the edges).
@@ -749,9 +775,16 @@ impl Frames {
     /// Cached frame numbers of the series of `base` (its comp content, scale, view and render
     /// options) — for the cache bar.
     pub fn cached_frames(&self, base: &FrameKey) -> Vec<i64> {
+        let series = FrameKey { frame: 0, ..*base };
         let Ok(c) = self.cache.lock() else { return vec![] };
+        let mut bar = self.bar.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, _, v)) = bar.ram.iter().find(|(s, g, _)| *s == series && *g == c.generation) {
+            return v.clone();
+        }
         let mut v: Vec<i64> = c.map.keys().filter(|k| k.same_series(base)).map(|k| k.frame).collect();
         v.sort_unstable();
+        bar.ram.retain(|(s, ..)| *s != series);
+        remember(&mut bar.ram, series, c.generation, &v);
         v
     }
 
@@ -768,6 +801,19 @@ impl Frames {
         if src.disk.is_none() && remote.is_none() {
             return vec![];
         }
+        let oh = opts_hash(opts);
+        // Remembered until the frames in RAM or on disk, the project or the series change (the
+        // remote disk cache gets its frames with the RAM cache's).
+        let series = FrameKey { frame: 0, ..*base };
+        let ram_generation = self.cache.lock().map(|c| c.generation).unwrap_or(0);
+        let k = [base.revision, frames as u64, oh, ram_generation, src.disk.as_ref().map_or(0, |dc| dc.generation())];
+        if let Ok(bar) = self.bar.lock()
+            && let Some((_, _, v)) = bar.disk.iter().find(|(s, g, _)| *s == series && *g == k)
+        {
+            return v.clone();
+        }
+        // Native: hashing the comp never blocks timeline painting; until its key is ready a worker
+        // computes it and there are no blue frames (nothing remembered).
         #[cfg(not(target_arch = "wasm32"))]
         let content = {
             let known = self.content_keys.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&(base.revision, base.comp)).copied();
@@ -780,11 +826,15 @@ impl Frames {
         #[cfg(target_arch = "wasm32")]
         let content = content_key(&self.content_keys, &src.project, base.revision, base.comp);
         let ram: HashSet<i64> = self.cached_frames(base).into_iter().collect();
-        let oh = opts_hash(opts);
-        (0..frames.clamp(0, 100_000))
+        let v: Vec<i64> = (0..frames.clamp(0, 100_000))
             .filter(|f| !ram.contains(f))
             .filter(|f| contains(disk_cache::frame_key(content, *f, base.scale, base.view ^ oh)))
-            .collect()
+            .collect();
+        if let Ok(mut bar) = self.bar.lock() {
+            bar.disk.retain(|(s, ..)| *s != series);
+            remember(&mut bar.disk, series, k, &v);
+        }
+        v
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -845,6 +895,7 @@ impl Frames {
         }
         if let Ok(mut c) = self.cache.lock() {
             c.map.clear();
+            c.generation = c.generation.wrapping_add(1);
             c.order.clear();
             c.bytes = 0;
             c.gpu_bytes = 0;
@@ -1454,6 +1505,12 @@ mod tests {
         assert_eq!(fit_texture(img.clone(), 5).pixels, img.pixels);
         let mixed = fit_texture(egui::ColorImage::new([2, 1], vec![w, b]), 1);
         assert_eq!(mixed.pixels, vec![egui::Color32::from_rgba_premultiplied(128, 128, 128, 255)]);
+        // A shared frame that fits goes to egui as it is (no pixel copy); one that doesn't is
+        // averaged down exactly like an owned one.
+        let shared = Arc::new(img.clone());
+        assert!(Arc::ptr_eq(&fit_texture_shared(&shared, 5, 1), &shared));
+        assert_eq!(fit_texture_shared(&shared, 2, 1).pixels, out.pixels);
+        assert_eq!(fit_texture_shared(&shared, 5, 2).pixels, fit_texture_by(img, 5, 2).pixels);
     }
 
     #[test]
@@ -1758,6 +1815,42 @@ mod tests {
         insert(&f, key(1, 3, 0));
         assert!(f.is_cached(&key(1, 0, 0)) && !f.is_cached(&key(1, 1, 0)));
         assert!(f.is_cached(&key(1, 2, 0)) && f.is_cached(&key(1, 3, 0)));
+    }
+
+    /// The cache bar's frame lists are remembered, and follow frames coming and going.
+    #[test]
+    fn cache_bar_follows_the_cache() {
+        let f = Frames::default();
+        insert(&f, key(1, 3, 0));
+        assert_eq!(f.cached_frames(&key(1, 0, 0)), vec![3]);
+        assert_eq!(f.cached_frames(&key(1, 9, 0)), vec![3], "any frame of the series");
+        insert(&f, key(1, 1, 0));
+        assert_eq!(f.cached_frames(&key(1, 0, 0)), vec![1, 3]);
+        f.cache.lock().unwrap().remove(&key(1, 3, 0));
+        assert_eq!(f.cached_frames(&key(1, 0, 0)), vec![1]);
+        f.clear();
+        assert!(f.cached_frames(&key(1, 0, 0)).is_empty());
+        // Disk: a frame written to the disk cache shows; one read back into RAM doesn't.
+        let dir = std::env::temp_dir().join(format!("effectcraft-cache-bar-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let dc = DiskCache::open(&dir, 1 << 30).unwrap();
+        let src = RenderSource {
+            project: Arc::default(),
+            footage: Arc::new(effectcraft_engine::render::NoFootage),
+            expr: None,
+            layer_cache: Arc::default(),
+            gpu: None,
+            gpu_display: false,
+            disk: Some(dc.clone()),
+        };
+        let opts = RenderOpts::default();
+        assert!(f.disk_frames(&src, &key(1, 0, 0), 5, &opts).is_empty());
+        let k = frame_disk_key(&f.content_keys, &src.project, &key(1, 2, 0), opts_hash(&opts));
+        dc.put_frame_now(k, 1, 1, &[0, 0, 0, 255]);
+        assert_eq!(f.disk_frames(&src, &key(1, 0, 0), 5, &opts), vec![2]);
+        insert(&f, key(1, 2, 0));
+        assert!(f.disk_frames(&src, &key(1, 0, 0), 5, &opts).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn playhead(cur: i64, looping: bool) -> Playhead {

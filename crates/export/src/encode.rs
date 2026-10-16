@@ -10,6 +10,7 @@ use effectcraft_time::{FrameRate, Tick};
 use filmcraft_isobmff::{Brand, FourCc, Mp4Writer, PcmConfig, SampleEntry, TrackConfig, WriteSample, WriterOptions};
 use rayon::prelude::*;
 
+use crate::pipeline::Batches;
 use crate::{Cx, ExportError, Report, Result, State, batch_size, wants_audio};
 
 fn enc(e: impl std::fmt::Display) -> ExportError {
@@ -264,120 +265,120 @@ pub(crate) async fn movie(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut St
         _ => Box::new(ProRes::new(w, h, job.output.prores_profile, if channels == Channels::Alpha { Channels::Rgb } else { channels })),
     };
     let brand = if matches!(fmt, OutputFormat::ProRes | OutputFormat::Uncompressed) { Brand::Mov } else { Brand::Mp4 };
-    let batch = batch_size();
+    let batch = batch_size(job, comp);
     let render = |_: u64, img: effectcraft_raster::Image| -> Vec<u8> { job.pixels(&img, comp, channels, w, h) };
 
-    // Encode the first batch before creating tracks: encoders finalise their config on frame 1.
-    let first_end = batch.min(st.total);
-    let first: Vec<Vec<u8>> = job.frames(comp, (0..first_end).collect(), render).await;
-    let mut pending = Vec::new();
-    for (k, px) in first.iter().enumerate() {
-        pending.extend(venc.encode(px, k as u64)?);
-    }
-    drop(first);
-    st.advance(first_end)?;
+    // The next batch renders while this one encodes and muxes.
+    let total = st.total;
+    job.batches(comp, total, batch, render, async |batches: &mut Batches<'_, '_, Vec<u8>>| -> Result<Report> {
+        // Encode the first batch before creating tracks: encoders finalise their config on frame 1.
+        let first_end = batch.min(total);
+        let first: Vec<Vec<u8>> = batches.next().await?.map(|(_, _, f)| f).unwrap_or_default();
+        let mut pending = Vec::new();
+        for (k, px) in first.iter().enumerate() {
+            pending.extend(venc.encode(px, k as u64)?);
+        }
+        drop(first);
+        st.advance(first_end)?;
 
-    let path = job.place(job.path, 1);
-    let mut file = job.create(&path)?;
-    let opts = WriterOptions::new(brand);
-    let movie_ts = opts.movie_timescale.max(1) as i128;
-    let mut mux: Writer = Mp4Writer::new(&mut file, opts).map_err(mux_err)?;
-    let mut vcfg = TrackConfig::new(venc.sample_entry(), rate.num as u32);
-    if let Some(start) = venc.media_start() {
-        // An explicit edit: the convenience `media_start` edit would subtract the B-frame delay
-        // from the media duration and drop the last frame.
-        let frames_ts = st.total as i128 * rate.den as i128;
-        let seg = (frames_ts * movie_ts + rate.num as i128 / 2) / rate.num as i128;
-        vcfg.edits = vec![filmcraft_isobmff::Edit { segment_duration: seg as u64, media_time: start, media_rate: 0x10000 }];
-    }
-    let vt = mux.add_track(vcfg).map_err(mux_err)?;
-    let sr = job.output.audio_sample_rate.clamp(8_000, 192_000);
-    let with_audio = wants_audio(job);
-    let chans = if job.output.audio_channels == 1 { 1u32 } else { 2 };
-    let afmt = job.output.audio_format;
-    let mut audio = None;
-    if with_audio {
-        let (a, entry, start) = if brand == Brand::Mp4 {
-            let e = filmcraft_aac::Encoder::new(filmcraft_aac::EncoderConfig::cbr(sr, chans as usize, 160_000 * chans)).map_err(enc)?;
-            let entry = SampleEntry::aac(e.audio_specific_config(), chans, sr);
-            let priming = e.priming_samples() as i64;
-            (Audio::Aac(Box::new(e)), entry, Some(priming))
-        } else {
-            let (bits, float) = match afmt {
-                AudioFormat::S16 => (16, false),
-                AudioFormat::S24 => (24, false),
-                AudioFormat::F32 => (32, true),
+        let path = job.place(job.path, 1);
+        let mut file = job.create(&path)?;
+        let opts = WriterOptions::new(brand);
+        let movie_ts = opts.movie_timescale.max(1) as i128;
+        let mut mux: Writer = Mp4Writer::new(&mut file, opts).map_err(mux_err)?;
+        let mut vcfg = TrackConfig::new(venc.sample_entry(), rate.num as u32);
+        if let Some(start) = venc.media_start() {
+            // An explicit edit: the convenience `media_start` edit would subtract the B-frame delay
+            // from the media duration and drop the last frame.
+            let frames_ts = st.total as i128 * rate.den as i128;
+            let seg = (frames_ts * movie_ts + rate.num as i128 / 2) / rate.num as i128;
+            vcfg.edits = vec![filmcraft_isobmff::Edit { segment_duration: seg as u64, media_time: start, media_rate: 0x10000 }];
+        }
+        let vt = mux.add_track(vcfg).map_err(mux_err)?;
+        let sr = job.output.audio_sample_rate.clamp(8_000, 192_000);
+        let with_audio = wants_audio(job);
+        let chans = if job.output.audio_channels == 1 { 1u32 } else { 2 };
+        let afmt = job.output.audio_format;
+        let mut audio = None;
+        if with_audio {
+            let (a, entry, start) = if brand == Brand::Mp4 {
+                let e = filmcraft_aac::Encoder::new(filmcraft_aac::EncoderConfig::cbr(sr, chans as usize, 160_000 * chans)).map_err(enc)?;
+                let entry = SampleEntry::aac(e.audio_specific_config(), chans, sr);
+                let priming = e.priming_samples() as i64;
+                (Audio::Aac(Box::new(e)), entry, Some(priming))
+            } else {
+                let (bits, float) = match afmt {
+                    AudioFormat::S16 => (16, false),
+                    AudioFormat::S24 => (24, false),
+                    AudioFormat::F32 => (32, true),
+                };
+                let pcm = PcmConfig { bits, float, big_endian: false, signed: true, channels: chans, sample_rate: sr as f64 };
+                (Audio::Pcm, SampleEntry::pcm(pcm), None)
             };
-            let pcm = PcmConfig { bits, float, big_endian: false, signed: true, channels: chans, sample_rate: sr as f64 };
-            (Audio::Pcm, SampleEntry::pcm(pcm), None)
-        };
-        let mut c = TrackConfig::new(entry, sr);
-        c.media_start = start;
-        let at = mux.add_track(c).map_err(mux_err)?;
-        audio = Some((a, at));
-    }
-    let (span_start, span_end) = job.settings.span(comp);
-    let mut cursor = span_start.to_units_floor(sr as i64);
+            let mut c = TrackConfig::new(entry, sr);
+            c.media_start = start;
+            let at = mux.add_track(c).map_err(mux_err)?;
+            audio = Some((a, at));
+        }
+        let (span_start, span_end) = job.settings.span(comp);
+        let mut cursor = span_start.to_units_floor(sr as i64);
 
-    let write_video = |mux: &mut Writer, ps: Vec<Packet>| -> Result<()> {
-        for p in ps {
-            mux.write_sample(vt, WriteSample { data: &p.data, duration: rate.den as u32, composition_offset: p.cto, is_sync: p.key }).map_err(mux_err)?;
-        }
-        Ok(())
-    };
-    let mut write_audio_until = |mux: &mut Writer, until: Tick, cursor: &mut i64| -> Result<()> {
-        let Some((a, at)) = audio.as_mut() else { return Ok(()) };
-        let end = until.to_units_floor(sr as i64);
-        if end <= *cursor {
-            return Ok(());
-        }
-        let n = (end - *cursor) as usize;
-        let start = Tick::from_units(*cursor, i64::from(sr));
-        let start = if start.to_units_floor(i64::from(sr)) < *cursor { Tick(start.0.saturating_add(1)) } else { start };
-        let buf = mix(job, start, n, sr);
-        *cursor = end;
-        match a {
-            Audio::Aac(e) => {
-                let planar = deinterleave(&buf, chans as usize);
-                let refs: Vec<&[f32]> = planar.iter().map(Vec::as_slice).collect();
-                for au in e.encode(&refs) {
-                    mux.write_sample(*at, WriteSample { data: &au, duration: 1024, composition_offset: 0, is_sync: true }).map_err(mux_err)?;
+        let write_video = |mux: &mut Writer, ps: Vec<Packet>| -> Result<()> {
+            for p in ps {
+                mux.write_sample(vt, WriteSample { data: &p.data, duration: rate.den as u32, composition_offset: p.cto, is_sync: p.key }).map_err(mux_err)?;
+            }
+            Ok(())
+        };
+        let mut write_audio_until = |mux: &mut Writer, until: Tick, cursor: &mut i64| -> Result<()> {
+            let Some((a, at)) = audio.as_mut() else { return Ok(()) };
+            let end = until.to_units_floor(sr as i64);
+            if end <= *cursor {
+                return Ok(());
+            }
+            let n = (end - *cursor) as usize;
+            let start = Tick::from_units(*cursor, i64::from(sr));
+            let start = if start.to_units_floor(i64::from(sr)) < *cursor { Tick(start.0.saturating_add(1)) } else { start };
+            let buf = mix(job, start, n, sr);
+            *cursor = end;
+            match a {
+                Audio::Aac(e) => {
+                    let planar = deinterleave(&buf, chans as usize);
+                    let refs: Vec<&[f32]> = planar.iter().map(Vec::as_slice).collect();
+                    for au in e.encode(&refs) {
+                        mux.write_sample(*at, WriteSample { data: &au, duration: 1024, composition_offset: 0, is_sync: true }).map_err(mux_err)?;
+                    }
+                }
+                Audio::Pcm => {
+                    let pcm = pcm_bytes(&buf, afmt, false);
+                    mux.write_sample(*at, WriteSample { data: &pcm, duration: n as u32, composition_offset: 0, is_sync: true }).map_err(mux_err)?;
                 }
             }
-            Audio::Pcm => {
-                let pcm = pcm_bytes(&buf, afmt, false);
-                mux.write_sample(*at, WriteSample { data: &pcm, duration: n as u32, composition_offset: 0, is_sync: true }).map_err(mux_err)?;
+            Ok(())
+        };
+        let frame_end_time = |k: u64| -> Tick { if k >= total { span_end } else { job.settings.frame_time(comp, k) } };
+        write_video(&mut mux, pending)?;
+        write_audio_until(&mut mux, frame_end_time(first_end), &mut cursor)?;
+        while let Some((i, end, frames)) = batches.next().await? {
+            for (k, px) in frames.iter().enumerate() {
+                let ps = venc.encode(px, i + k as u64)?;
+                write_video(&mut mux, ps)?;
+            }
+            write_audio_until(&mut mux, frame_end_time(end), &mut cursor)?;
+            st.advance(end - i)?;
+        }
+        write_video(&mut mux, venc.flush()?)?;
+        write_audio_until(&mut mux, span_end, &mut cursor)?;
+        if let Some((Audio::Aac(e), at)) = audio.as_mut() {
+            for au in e.flush() {
+                mux.write_sample(*at, WriteSample { data: &au, duration: 1024, composition_offset: 0, is_sync: true }).map_err(mux_err)?;
             }
         }
-        Ok(())
-    };
-    let total = st.total;
-    let frame_end_time = |k: u64| -> Tick { if k >= total { span_end } else { job.settings.frame_time(comp, k) } };
-    write_video(&mut mux, pending)?;
-    write_audio_until(&mut mux, frame_end_time(first_end), &mut cursor)?;
-    let mut i = first_end;
-    while i < total {
-        let end = (i + batch).min(total);
-        let frames: Vec<Vec<u8>> = job.frames(comp, (i..end).collect(), render).await;
-        for (k, px) in frames.iter().enumerate() {
-            let ps = venc.encode(px, i + k as u64)?;
-            write_video(&mut mux, ps)?;
-        }
-        write_audio_until(&mut mux, frame_end_time(end), &mut cursor)?;
-        st.advance(end - i)?;
-        i = end;
-    }
-    write_video(&mut mux, venc.flush()?)?;
-    write_audio_until(&mut mux, span_end, &mut cursor)?;
-    if let Some((Audio::Aac(e), at)) = audio.as_mut() {
-        for au in e.flush() {
-            mux.write_sample(*at, WriteSample { data: &au, duration: 1024, composition_offset: 0, is_sync: true }).map_err(mux_err)?;
-        }
-    }
-    let out = mux.finish().map_err(mux_err)?;
-    out.flush().map_err(mux_err)?;
-    let bytes = file.finish()?;
-    Ok(Report { path, frames: 0, width: w, height: h, seconds: 0.0, bytes, audio: with_audio, log: None, overflow: vec![] })
+        let out = mux.finish().map_err(mux_err)?;
+        out.flush().map_err(mux_err)?;
+        let bytes = file.finish()?;
+        Ok(Report { path, frames: 0, width: w, height: h, seconds: 0.0, bytes, audio: with_audio, log: None, overflow: vec![] })
+    })
+    .await
 }
 
 #[cfg(test)]

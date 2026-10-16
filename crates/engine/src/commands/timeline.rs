@@ -124,6 +124,7 @@ fn prerender(s: &Session, cid: ItemId, lid: LayerId, path: &str) -> std::result:
         storage: None,
         label: format!("Pre-render {}", l.name),
         nested_switches: s.prefs.general.switches_affect_nested_comps,
+        memory_budget: Some(s.prefs.cache_budgets(s.sys_memory).layer),
     };
     let r = exporter.export(&job, &mut |_, _| true)?;
     Ok(Prerendered { path: r.path, width: comp.width, height: comp.height, frame_rate: comp.frame_rate, duration: end - start })

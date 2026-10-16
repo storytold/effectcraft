@@ -1028,9 +1028,88 @@ pub fn layout_rich_uncached(text: &str, runs: &[(Range<usize>, TextStyle)], para
     lay
 }
 
-fn cache() -> &'static Mutex<HashMap<u64, (u64, Arc<Layout>)>> {
-    static C: OnceLock<Mutex<HashMap<u64, (u64, Arc<Layout>)>>> = OnceLock::new();
-    C.get_or_init(Default::default)
+/// A least-recently-used cache keyed by a 64-bit content hash and bounded by an estimate of the
+/// bytes its values hold (not by entry count, so many small layouts fit where a few huge ones
+/// would not). Overflow evicts the oldest entries down to three quarters of the budget, which
+/// keeps the sort that finds them rare.
+pub(crate) struct ByteLru<V> {
+    map: HashMap<u64, LruEntry<V>>,
+    bytes: usize,
+    budget: usize,
+    clock: u64,
+}
+
+struct LruEntry<V> {
+    tick: u64,
+    bytes: usize,
+    value: V,
+}
+
+impl<V> ByteLru<V> {
+    pub(crate) fn new(budget: usize) -> Self {
+        ByteLru { map: HashMap::new(), bytes: 0, budget, clock: 0 }
+    }
+
+    /// The value under `key`, marked as just used.
+    pub(crate) fn get(&mut self, key: u64) -> Option<&V> {
+        self.clock = self.clock.wrapping_add(1);
+        let e = self.map.get_mut(&key)?;
+        e.tick = self.clock;
+        Some(&e.value)
+    }
+
+    /// Store `value` (an estimated `bytes` large) under `key`, replacing what was there. A value
+    /// larger than the whole budget is not kept.
+    pub(crate) fn insert(&mut self, key: u64, value: V, bytes: usize) {
+        if let Some(old) = self.map.remove(&key) {
+            self.bytes = self.bytes.saturating_sub(old.bytes);
+        }
+        if bytes > self.budget {
+            return;
+        }
+        self.clock = self.clock.wrapping_add(1);
+        self.map.insert(key, LruEntry { tick: self.clock, bytes, value });
+        self.bytes = self.bytes.saturating_add(bytes);
+        if self.bytes > self.budget {
+            let target = self.budget / 4 * 3;
+            let mut ages: Vec<(u64, u64)> = self.map.iter().map(|(k, e)| (e.tick, *k)).collect();
+            ages.sort_unstable();
+            for (_, k) in ages {
+                if self.bytes <= target {
+                    break;
+                }
+                if let Some(e) = self.map.remove(&k) {
+                    self.bytes = self.bytes.saturating_sub(e.bytes);
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn bytes(&self) -> usize {
+        self.bytes
+    }
+}
+
+impl Layout {
+    /// Rough heap + inline size, for cache budgets.
+    pub(crate) fn approx_bytes(&self) -> usize {
+        let lines: usize = self.lines.iter().map(|l| std::mem::size_of::<Line>() + l.carets.len() * std::mem::size_of::<(usize, f32)>()).sum();
+        std::mem::size_of::<Layout>() + self.glyphs.len() * std::mem::size_of::<Glyph>() + lines + self.underlines.len() * std::mem::size_of::<[f32; 4]>()
+    }
+}
+
+/// Shaped layouts: 32 MiB holds tens of thousands of typical titles (a few KiB each).
+const LAYOUT_CACHE_BYTES: usize = 32 << 20;
+
+fn cache() -> &'static Mutex<ByteLru<Arc<Layout>>> {
+    static C: OnceLock<Mutex<ByteLru<Arc<Layout>>>> = OnceLock::new();
+    C.get_or_init(|| Mutex::new(ByteLru::new(LAYOUT_CACHE_BYTES)))
 }
 
 /// Lay out `text` in one style (cached by text and styles).
@@ -1045,22 +1124,12 @@ pub fn layout_rich(text: &str, runs: &[(Range<usize>, TextStyle)], paras: &[Para
     runs.hash(&mut h);
     paras.hash(&mut h);
     let key = h.finish();
-    static CLOCK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let now = CLOCK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if let Some(e) = cache().lock().unwrap_or_else(|e| e.into_inner()).get_mut(&key) {
-        e.0 = now;
-        return e.1.clone();
+    if let Some(l) = cache().lock().unwrap_or_else(|e| e.into_inner()).get(key) {
+        return l.clone();
     }
     let l = Arc::new(layout_rich_uncached(text, runs, paras));
-    let mut c = cache().lock().unwrap_or_else(|e| e.into_inner());
-    if c.len() >= 512 {
-        // evict the oldest quarter
-        let mut ages: Vec<u64> = c.values().map(|v| v.0).collect();
-        ages.sort_unstable();
-        let cut = ages[ages.len() / 4];
-        c.retain(|_, v| v.0 > cut);
-    }
-    c.insert(key, (now, l.clone()));
+    let bytes = l.approx_bytes();
+    cache().lock().unwrap_or_else(|e| e.into_inner()).insert(key, l.clone(), bytes);
     l
 }
 

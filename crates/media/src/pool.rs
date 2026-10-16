@@ -578,14 +578,15 @@ impl Inner {
         if let Some(b) = lock(&self.files).get(path) {
             return Ok(b.clone());
         }
-        std::fs::read(path).map(Into::into).map_err(|e| MediaError::Io(format!("{path}: {e}")))
+        crate::open::read_file(path)
     }
 
     /// The opened movie/audio source for `path`. The first caller opens it, outside the map's
-    /// lock (reading and parsing a large file takes a moment; FLAC, MP3, Ogg and AIFF files are
-    /// decoded whole); callers asking for the same file meanwhile wait for that instead of opening
-    /// it again: a preview's frame workers, audio feeder, conform and waveform threads each
-    /// decoded a long FLAC in full at once (#408).
+    /// lock (parsing a large file takes a moment; FLAC, MP3 and AIFF files are decoded whole);
+    /// callers asking for the same file meanwhile wait for that instead of opening it again: a
+    /// preview's frame workers, audio feeder, conform and waveform threads each decoded a long
+    /// FLAC in full at once (#408). Containers are read through the file (index now, samples on
+    /// demand), not held in memory.
     fn source(&self, path: &Arc<str>) -> Option<SharedSource> {
         self.opened(path).map(|(src, _)| src)
     }
@@ -596,21 +597,14 @@ impl Inner {
         slot.get_or_init(|| {
             self.opened.fetch_add(1, Ordering::Relaxed);
             // Files on disk are read in place (the index, then samples on demand) rather than
-            // whole; in-memory files (`add_bytes`) and wasm32 builds open from bytes.
-            let in_memory = lock(&self.files).contains_key(&**path);
-            let file = std::path::Path::new(&**path);
-            let in_place = if in_memory { None } else { crate::stream::open_source(file) };
-            let in_place = in_place.map(|src| {
-                let turn = crate::stream::movie_header(file).map_or(Orientation::NoTransforms, |h| crate::probe::video_turn(&h));
-                src.map(|src| (src, turn))
-            });
-            let opened = in_place.unwrap_or_else(|| {
-                self.read(path).and_then(|bytes| {
-                    let name = std::path::Path::new(&**path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-                    let turn = crate::probe::video_turn(&bytes);
-                    filmcraft_codecs::open_bytes(&name, bytes).map(|src| (src, turn)).map_err(MediaError::from)
-                })
-            });
+            // whole; in-memory files (`add_bytes`) open from bytes. A movie shot with the camera
+            // on its side: its header says how it is shown.
+            let mem = lock(&self.files).get(&**path).cloned();
+            let turn = match mem.as_deref() {
+                Some(bytes) => crate::probe::video_turn(bytes),
+                None => crate::stream::movie_header(std::path::Path::new(&**path)).map_or(Orientation::NoTransforms, |h| crate::probe::video_turn(&h)),
+            };
+            let opened = crate::open::open_source(path, mem).map(|src| (src, turn));
             match opened {
                 Ok(s) => Some(s),
                 Err(e) => {

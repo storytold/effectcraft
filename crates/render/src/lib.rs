@@ -16,6 +16,7 @@ pub mod disk_cache;
 use color::Region;
 pub mod eval;
 pub mod masks;
+mod packed;
 pub mod passes;
 pub mod shapes;
 pub mod styles;
@@ -2391,6 +2392,8 @@ mod tests_frame_blend;
 mod tests_mask_blur;
 #[cfg(test)]
 mod tests_nested;
+#[cfg(test)]
+mod tests_packed;
 #[cfg(test)]
 mod tests_paint;
 #[cfg(test)]

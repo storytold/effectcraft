@@ -33,6 +33,9 @@ pub struct ExportJob<'a> {
     pub label: String,
     /// Settings ▸ General ▸ Switches Affect Nested Comps.
     pub nested_switches: bool,
+    /// Memory for the export's layer cache and frames in flight (the Memory & CPU layer cache
+    /// budget, see [`crate::prefs::Prefs::cache_budgets`]); `None`: the exporter's default.
+    pub memory_budget: Option<usize>,
 }
 
 /// What an export wrote.
@@ -66,6 +69,28 @@ pub trait Exporter: Send + Sync {
     /// the blocking export.
     fn export_async<'a>(&'a self, job: &'a ExportJob<'a>, progress: &'a mut dyn FnMut(u64, u64) -> bool) -> LocalFuture<'a, Result<ExportResult, String>> {
         Box::pin(async move { self.export(job, progress) })
+    }
+    /// Export the output modules of one queue item, as [`Exporter::export_async`] one after
+    /// another: the results stop at the first module that fails or is cancelled (the modules
+    /// after it are not run). `progress(module, done, total)` reports each module's progress.
+    /// The default runs them one by one; an exporter may render frames modules share once.
+    fn export_modules_async<'a>(
+        &'a self,
+        jobs: &'a [ExportJob<'a>],
+        progress: &'a mut dyn FnMut(usize, u64, u64) -> bool,
+    ) -> LocalFuture<'a, Vec<Result<ExportResult, String>>> {
+        Box::pin(async move {
+            let mut out = Vec::with_capacity(jobs.len());
+            for (mi, job) in jobs.iter().enumerate() {
+                let r = self.export_async(job, &mut |done, total| progress(mi, done, total)).await;
+                let stop = r.is_err();
+                out.push(r);
+                if stop {
+                    break;
+                }
+            }
+            out
+        })
     }
 }
 
@@ -155,6 +180,8 @@ struct Work {
     items: Vec<Vec<(RenderQueueItem, String)>>,
     /// Settings ▸ General ▸ Switches Affect Nested Comps.
     nested_switches: bool,
+    /// See [`ExportJob::memory_budget`].
+    memory_budget: usize,
 }
 
 /// Where a relative render output goes when there is no default folder and the project is unsaved:
@@ -238,6 +265,7 @@ pub(crate) async fn run_items(
         storage: s.storage_quota.clone(),
         items,
         nested_switches: s.prefs.general.switches_affect_nested_comps,
+        memory_budget: s.prefs.cache_budgets(s.sys_memory).layer,
     };
     run_work(work, shared, notify).await;
 }
@@ -266,37 +294,54 @@ async fn run_work(w: Work, shared: &JobShared, notify: &mut dyn FnMut(&JobShared
         }
         notify(shared);
         // Every output module encodes the same frames (Composition ▸ Add Output Module); the
-        // first module's file is the item's output.
+        // first module's file is the item's output. The exporter exports them as one after
+        // another with the same project and session objects (`effectcraft-export` renders frames
+        // modules share once). Each module reports its own progress (0..total again; modules
+        // exporting at once show the one furthest behind), a stop cancels the modules being
+        // written (earlier modules' files stay), and the first failing module fails the item
+        // and skips the rest.
+        let jobs: Vec<ExportJob> = modules
+            .iter()
+            .enumerate()
+            .map(|(mi, (mitem, path))| {
+                let name = w.project.item(mitem.comp).map(|i| i.name.clone()).unwrap_or_default();
+                let index = w.project.render_queue.iter().position(|i| i.id == mitem.id).map_or(0, |i| i + 1);
+                ExportJob {
+                    project: &w.project,
+                    footage: w.footage.as_ref(),
+                    expr: w.expr.as_deref(),
+                    accel: w.accel.as_deref(),
+                    item: mitem,
+                    path,
+                    storage: w.storage.as_deref(),
+                    label: format!("#{index} {name} (output module {})", mi + 1),
+                    nested_switches: w.nested_switches,
+                    memory_budget: Some(w.memory_budget),
+                }
+            })
+            .collect();
+        let mut seen: Vec<Option<(u64, u64)>> = vec![None; jobs.len()];
+        let results = w
+            .exporter
+            .export_modules_async(&jobs, &mut |mi, done, total| {
+                if let Some(s) = seen.get_mut(mi) {
+                    *s = Some((done, total));
+                }
+                let (done, total) = seen.iter().flatten().filter(|(d, t)| d < t).min_by_key(|(d, _)| *d).copied().unwrap_or((done, total));
+                {
+                    let mut s = lock(&shared.state);
+                    s.done = done;
+                    s.total = total;
+                    s.elapsed = t0.elapsed().as_secs_f64();
+                    s.item_elapsed = t1.elapsed().as_secs_f64();
+                    s.remaining = (done > 0).then(|| s.item_elapsed / done as f64 * total.saturating_sub(done) as f64);
+                }
+                notify(shared);
+                !shared.cancel.load(Ordering::Relaxed)
+            })
+            .await;
         let mut r: Result<ExportResult, String> = Err("no output module".into());
-        for (mi, (mitem, path)) in modules.iter().enumerate() {
-            let name = w.project.item(mitem.comp).map(|i| i.name.clone()).unwrap_or_default();
-            let index = w.project.render_queue.iter().position(|i| i.id == mitem.id).map_or(0, |i| i + 1);
-            let job = ExportJob {
-                project: &w.project,
-                footage: w.footage.as_ref(),
-                expr: w.expr.as_deref(),
-                accel: w.accel.as_deref(),
-                item: mitem,
-                path,
-                storage: w.storage.as_deref(),
-                label: format!("#{index} {name} (output module {})", mi + 1),
-                nested_switches: w.nested_switches,
-            };
-            let rr = w
-                .exporter
-                .export_async(&job, &mut |done, total| {
-                    {
-                        let mut s = lock(&shared.state);
-                        s.done = done;
-                        s.total = total;
-                        s.elapsed = t0.elapsed().as_secs_f64();
-                        s.item_elapsed = t1.elapsed().as_secs_f64();
-                        s.remaining = (done > 0).then(|| s.item_elapsed / done as f64 * total.saturating_sub(done) as f64);
-                    }
-                    notify(shared);
-                    !shared.cancel.load(Ordering::Relaxed)
-                })
-                .await;
+        for (mi, rr) in results.into_iter().enumerate() {
             match rr {
                 Ok(res) if mi == 0 => r = Ok(res),
                 Ok(_) => {}
@@ -505,6 +550,7 @@ impl Session {
             storage: self.storage_quota.clone(),
             items,
             nested_switches: self.prefs.general.switches_affect_nested_comps,
+            memory_budget: self.prefs.cache_budgets(self.sys_memory).layer,
         };
         let shared = Arc::new(JobShared::default());
         if wait {
@@ -688,5 +734,74 @@ impl Session {
         }
         let sel = self.state.project_selection.iter().copied().find(|i| self.project.comp(*i).is_some());
         self.active_comp_id().or(sel).ok_or(crate::EngineError::NoComp)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use effectcraft_project::render_queue::{OutputFormat, RenderStatus};
+    use serde_json::json;
+
+    use super::{ExportJob, ExportResult, Exporter, LocalFuture};
+
+    /// Exports an item's output modules in one call, at once (progress interleaved, the later
+    /// module ahead); fails modules whose path contains "fail".
+    struct Together {
+        calls: Mutex<Vec<usize>>,
+    }
+
+    impl Exporter for Together {
+        fn formats(&self) -> Vec<OutputFormat> {
+            OutputFormat::ALL.to_vec()
+        }
+        fn export(&self, _: &ExportJob, _: &mut dyn FnMut(u64, u64) -> bool) -> Result<ExportResult, String> {
+            Err("modules export together".into())
+        }
+        fn export_modules_async<'a>(
+            &'a self,
+            jobs: &'a [ExportJob<'a>],
+            progress: &'a mut dyn FnMut(usize, u64, u64) -> bool,
+        ) -> LocalFuture<'a, Vec<Result<ExportResult, String>>> {
+            Box::pin(async move {
+                self.calls.lock().unwrap().push(jobs.len());
+                for k in 0..=2 {
+                    for mi in (0..jobs.len()).rev() {
+                        assert!(progress(mi, k, 2));
+                    }
+                }
+                let mut out = vec![];
+                for j in jobs {
+                    let failed = j.path.contains("fail");
+                    out.push(if failed { Err("boom".into()) } else { Ok(ExportResult { path: j.path.to_string(), ..Default::default() }) });
+                    if failed {
+                        break;
+                    }
+                }
+                out
+            })
+        }
+    }
+
+    #[test]
+    fn an_item_hands_all_its_output_modules_to_the_exporter() {
+        // G5: the exporter gets every output module of an item at once (it renders shared
+        // frames once); the first module's file is the item's output, the first failure fails it.
+        let mut s = crate::Session::default();
+        s.execute("file.openDemoProject", json!({})).unwrap();
+        let ex = Arc::new(Together { calls: Mutex::new(vec![]) });
+        s.exporter = Some(ex.clone());
+        s.execute("renderQueue.add", json!({"output": "/tmp/rqm/main.mp4"})).unwrap();
+        s.execute("render.addOutputModule", json!({"index": 1, "format": "png"})).unwrap();
+        s.execute("renderQueue.add", json!({"output": "/tmp/rqm/second.mp4"})).unwrap();
+        s.execute("render.addOutputModule", json!({"index": 2, "format": "prores"})).unwrap();
+        s.execute("renderQueue.setOutput", json!({"index": 2, "module": 2, "path": "/tmp/rqm/fail.mov"})).unwrap();
+        s.execute("renderQueue.render", json!({})).unwrap();
+        assert_eq!(*ex.calls.lock().unwrap(), [2, 2]);
+        let q = &s.project.render_queue;
+        assert_eq!(q[0].status, RenderStatus::Done);
+        assert!(q[0].last_output.as_deref().is_some_and(|p| p.ends_with("main.mp4")), "{:?}", q[0].last_output);
+        assert_eq!(q[1].status, RenderStatus::Failed("boom".into()));
     }
 }

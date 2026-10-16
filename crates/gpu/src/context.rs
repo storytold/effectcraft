@@ -40,7 +40,7 @@ pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
 /// Uploaded layer buffers kept on the GPU by default (bytes; [`GpuContext::set_upload_budget`]).
 const UPLOAD_BUDGET: usize = 1536 << 20;
 
-/// Working textures kept for reuse once their last image is dropped (bytes).
+/// Working textures kept for reuse once their last image is dropped (bytes), at most.
 const POOL_BUDGET: usize = 768 << 20;
 
 /// Readback staging buffers kept for reuse across sizes (bytes).
@@ -107,6 +107,8 @@ pub(crate) struct Pool {
     open: BTreeSet<u64>,
     next: u64,
     bytes: usize,
+    /// Byte budget of the free textures (`None`: [`POOL_BUDGET`]).
+    budget: Option<usize>,
     /// Working textures reused / newly allocated (diagnostics, tests).
     hits: u64,
     misses: u64,
@@ -163,7 +165,7 @@ impl Pool {
 
     fn make_free(&mut self, t: wgpu::Texture) {
         let b = tex_bytes(&t);
-        if self.bytes + b > POOL_BUDGET {
+        if self.bytes + b > self.budget.unwrap_or(POOL_BUDGET) {
             return;
         }
         self.bytes += b;
@@ -237,6 +239,18 @@ impl Pool {
         self.free.clear();
         self.bytes = 0;
     }
+
+    /// Keep at most `budget` bytes of free textures from now on (drops the excess now).
+    fn set_budget(&mut self, budget: usize) {
+        self.budget = Some(budget);
+        for list in self.free.values_mut() {
+            while self.bytes > budget {
+                let Some(t) = list.pop() else { break };
+                self.bytes = self.bytes.saturating_sub(tex_bytes(&t));
+            }
+        }
+        self.free.retain(|_, l| !l.is_empty());
+    }
 }
 
 /// Uniform parameter block shared by every kernel (see `shaders/common.wgsl`).
@@ -275,6 +289,29 @@ struct Uploads {
     map: HashMap<usize, Upload>,
     bytes: usize,
     clock: u64,
+    /// Byte budget (`None`: [`UPLOAD_BUDGET`]).
+    budget: Option<usize>,
+}
+
+impl Uploads {
+    /// Drop textures whose layer buffer is gone (evicted from the layer cache, an older frame's),
+    /// then the least recently used over budget.
+    fn trim(&mut self, requested: usize) -> bool {
+        let before = self.map.len();
+        self.map.retain(|_, e| e.buf.strong_count() > 0);
+        if self.map.len() != before {
+            self.bytes = self.map.values().map(|e| e.bytes).sum();
+        }
+        let budget = self.budget.unwrap_or(requested).min(requested);
+        let over_budget = self.bytes > budget;
+        while self.bytes > budget {
+            let Some(k) = self.map.iter().min_by_key(|(_, e)| e.last_use).map(|(k, _)| *k) else { break };
+            if let Some(e) = self.map.remove(&k) {
+                self.bytes = self.bytes.saturating_sub(e.bytes);
+            }
+        }
+        over_budget
+    }
 }
 
 /// The device and everything compiled for it.
@@ -878,6 +915,9 @@ impl GpuContext {
     /// it (a small GPU); the least recently used textures go first.
     pub fn set_upload_budget(&self, bytes: usize) {
         self.upload_budget.store(bytes.max(1 << 20), std::sync::atomic::Ordering::Relaxed);
+        if let Ok(mut uploads) = self.uploads.lock() {
+            uploads.trim(self.upload_budget());
+        }
     }
 
     pub fn upload_budget(&self) -> usize {
@@ -939,31 +979,33 @@ impl GpuContext {
                 u.bytes -= old.bytes;
             }
             u.bytes += bytes;
-            // Drop textures of freed buffers, then the least recently used over budget.
-            let budget = self.upload_budget();
-            if u.bytes > budget {
-                let dead: Vec<usize> = u.map.iter().filter(|(_, e)| e.buf.strong_count() == 0).map(|(k, _)| *k).collect();
-                for k in dead {
-                    if let Some(e) = u.map.remove(&k) {
-                        u.bytes -= e.bytes;
-                    }
-                }
-            }
-            if u.bytes > budget && !self.upload_full_warned.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                log::warn!(
-                    target: "effectcraft_gpu",
-                    "GPU upload cache full ({} MB): evicting layer textures, which upload again when next used; a frame whose static layers exceed it re-uploads them every frame",
-                    budget >> 20
-                );
-            }
-            while u.bytes > budget {
-                let Some(k) = u.map.iter().min_by_key(|(_, e)| e.last_use).map(|(k, _)| *k) else { break };
-                if let Some(e) = u.map.remove(&k) {
-                    u.bytes -= e.bytes;
-                }
+            let requested = self.upload_budget();
+            let budget = u.budget.unwrap_or(requested).min(requested);
+            if u.trim(requested) && !self.upload_full_warned.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                log::warn!(target: "effectcraft_gpu", "GPU upload cache full ({} MB): evicting layer textures", budget >> 20);
             }
         }
         Some(img)
+    }
+
+    /// Size the GPU-side caches after the layer cache's memory budget (Memory & CPU settings,
+    /// after RAM Reserved for Other Applications): uploaded layer textures mirror cached layer
+    /// buffers, so they get at most the same budget and the configured upload limit, and free
+    /// working textures half of it (capped at [`POOL_BUDGET`]). On unified memory (Apple
+    /// silicon) both come out of system RAM.
+    pub fn set_cache_budget(&self, layer_cache: usize) {
+        if let Ok(mut u) = self.uploads.lock() {
+            u.budget = Some(layer_cache);
+            u.trim(self.upload_budget());
+        }
+        if let Ok(mut p) = self.pool.lock() {
+            p.set_budget((layer_cache / 2).min(POOL_BUDGET));
+        }
+    }
+
+    /// Uploaded layer textures kept: (count, bytes) (diagnostics, tests).
+    pub fn upload_stats(&self) -> (usize, usize) {
+        self.uploads.lock().map(|u| (u.map.len(), u.bytes)).unwrap_or_default()
     }
 
     /// Forget uploaded layer textures.
@@ -1385,4 +1427,48 @@ impl<'g> Enc<'g> {
 /// Mip levels of a full chain for a `w × h` texture (down to 1 × 1).
 pub(crate) fn mip_levels(w: u32, h: u32) -> u32 {
     u32::BITS - w.max(h).max(1).leading_zeros()
+}
+
+#[cfg(test)]
+mod upload_budget_tests {
+    use super::*;
+
+    fn buf(w: u32) -> Arc<Buf> {
+        Arc::new(Buf { img: Image::filled(w, 8, [0.5, 0.25, 0.125, 0.5]), offset: [0.0; 2], scale: 1.0 })
+    }
+
+    /// Textures of layer buffers that are gone are dropped at the next upload, not only once the
+    /// upload budget overflows; the budget follows the layer cache's.
+    #[test]
+    fn dead_uploads_are_purged_and_budget_follows_prefs() {
+        crate::tests::hold_gpu_lock();
+        let Some(g) = GpuContext::headless() else { return };
+        let a = buf(8);
+        let b = buf(16);
+        assert!(g.upload_buf(&a).is_some() && g.upload_buf(&b).is_some());
+        assert_eq!(g.upload_stats(), (2, (8 + 16) * 8 * 16));
+        drop(a);
+        let c = buf(4);
+        assert!(g.upload_buf(&c).is_some());
+        assert_eq!(g.upload_stats(), (2, (16 + 4) * 8 * 16), "a's texture dropped");
+        // A budget below b + c keeps the most recently used.
+        g.set_cache_budget(4 * 8 * 16 + 100);
+        assert_eq!(g.upload_stats(), (1, 4 * 8 * 16));
+        // Re-uploading the same live buffer is a hit.
+        let ups = g.transfer_stats().uploads;
+        assert!(g.upload_buf(&c).is_some());
+        assert_eq!(g.transfer_stats().uploads, ups);
+        drop(b);
+        // Both independently configured limits apply, including an immediate reduction.
+        g.set_cache_budget(4 << 20);
+        g.set_upload_budget(2 << 20);
+        let large_a = buf(8192);
+        let large_b = buf(8192);
+        assert!(g.upload_buf(&large_a).is_some() && g.upload_buf(&large_b).is_some());
+        assert_eq!(g.upload_stats(), (2, 2 << 20));
+        g.set_upload_budget(1 << 20);
+        assert_eq!(g.upload_stats(), (1, 1 << 20));
+        g.set_cache_budget(512 << 10);
+        assert_eq!(g.upload_stats(), (0, 0));
+    }
 }

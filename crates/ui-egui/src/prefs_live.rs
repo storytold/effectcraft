@@ -180,10 +180,10 @@ fn video_preview(app: &mut EffectcraftApp, ctx: &egui::Context) {
                 let opts = crate::panels::viewer::zoom_texture_options(app.session.prefs.viewer_zoom_smooth());
                 let t = match prev {
                     Some((_, mut t)) => {
-                        t.set(crate::frames::fit_texture((*img).clone(), crate::frames::max_texture_side(ctx)), opts);
+                        t.set(crate::frames::fit_texture_shared(&img, crate::frames::max_texture_side(ctx), 1), opts);
                         t
                     }
-                    None => crate::frames::load_fitted(ctx, "video-preview", (*img).clone(), opts),
+                    None => ctx.load_texture("video-preview", crate::frames::fit_texture_shared(&img, crate::frames::max_texture_side(ctx), 1), opts),
                 };
                 ctx.data_mut(|d| d.insert_temp(tex_id, (k, t.clone())));
                 Some(t)

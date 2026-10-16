@@ -238,7 +238,38 @@ struct SegCache {
     bytes: usize,
 }
 
+/// Bytes of segmentations kept at most (until [`set_cache_budget`]).
 const CACHE_BYTES: usize = 768 << 20;
+
+static CACHE_BUDGET: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(CACHE_BYTES);
+
+/// Keep at most `bytes` of segmentations (at most [`CACHE_BYTES`]); the oldest go now if the
+/// cache holds more. The app sizes it after its Memory & CPU budgets.
+pub fn set_cache_budget(bytes: usize) {
+    CACHE_BUDGET.store(bytes.min(CACHE_BYTES), std::sync::atomic::Ordering::Relaxed);
+    let mut c = cache().lock().unwrap_or_else(|e| e.into_inner());
+    trim(&mut c);
+}
+
+/// Segmentations kept: (count, bytes).
+pub fn cache_stats() -> (usize, usize) {
+    let c = cache().lock().unwrap_or_else(|e| e.into_inner());
+    (c.map.len(), c.bytes)
+}
+
+fn seg_bytes(s: &FrameSeg) -> usize {
+    s.matte.len() + s.refine.len()
+}
+
+fn trim(c: &mut SegCache) {
+    let budget = CACHE_BUDGET.load(std::sync::atomic::Ordering::Relaxed);
+    while c.bytes > budget {
+        let Some(old) = c.order.pop_front() else { break };
+        if let Some(s) = c.map.remove(&old) {
+            c.bytes = c.bytes.saturating_sub(seg_bytes(&s));
+        }
+    }
+}
 
 fn cache() -> &'static Mutex<SegCache> {
     static C: OnceLock<Mutex<SegCache>> = OnceLock::new();
@@ -256,15 +287,10 @@ pub fn store(key: u64, scale: f64, seg: Arc<FrameSeg>) {
     if c.map.contains_key(&k) {
         return;
     }
-    c.bytes += seg.matte.len() + seg.refine.len();
+    c.bytes += seg_bytes(&seg);
     c.map.insert(k, seg);
     c.order.push_back(k);
-    while c.bytes > CACHE_BYTES {
-        let Some(old) = c.order.pop_front() else { break };
-        if let Some(s) = c.map.remove(&old) {
-            c.bytes -= s.matte.len() + s.refine.len();
-        }
-    }
+    trim(&mut c);
 }
 
 /// A second-level store for segmentations, keyed like the memory cache (chain key, scale): the
@@ -801,5 +827,28 @@ mod tests {
         assert_eq!(g.sub("rotoBrushPropagation").unwrap().name, "Roto Brush Propagation");
         // Parameters the old save lacked get their defaults.
         assert_eq!(f(&params, "rotoBrushPropagation/motionDamping"), 20.0);
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    /// The segmentation cache follows the budget it is given (oldest dropped first) and never
+    /// exceeds 768 MB.
+    #[test]
+    fn segmentation_cache_follows_its_budget() {
+        let seg = |n: usize| Arc::new(FrameSeg { w: n, h: 1, matte: vec![0; n], refine: vec![0; n], ..Default::default() });
+        let base = 0x5eed_0000_0000_u64;
+        for i in 0..4 {
+            store(base + i, 1.0, seg(1000));
+        }
+        set_cache_budget(2500);
+        assert!(cache_stats().1 <= 2500);
+        assert!(cached(base + 3, 1.0).is_some(), "the newest stays");
+        assert!(cached(base, 1.0).is_none(), "the oldest went");
+        set_cache_budget(usize::MAX);
+        assert_eq!(CACHE_BUDGET.load(std::sync::atomic::Ordering::Relaxed), CACHE_BYTES);
+        forget((0..4).map(|i| base + i));
     }
 }

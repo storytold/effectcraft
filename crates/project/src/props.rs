@@ -267,11 +267,122 @@ fn yes() -> bool {
     true
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "node")]
 pub enum Node {
     Prop(Property),
     Group(PropGroup),
+}
+
+// Hand-written so the common case streams: serde's derive for an internally tagged enum buffers
+// every node (and so, nested, nearly the whole file) into its private `Content` tree before
+// converting it. Serialization always writes `"node"` first, so read it and hand the rest of the
+// map straight to the variant; only a tag found later falls back to buffering (as JSON values).
+impl<'de> Deserialize<'de> for Node {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Node, D::Error> {
+        d.deserialize_any(NodeVisitor)
+    }
+}
+
+const NODE_VARIANTS: &[&str] = &["Prop", "Group"];
+
+#[derive(Clone, Copy)]
+enum NodeTag {
+    Prop,
+    Group,
+}
+
+impl<'de> Deserialize<'de> for NodeTag {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<NodeTag, D::Error> {
+        struct V;
+        impl serde::de::Visitor<'_> for V {
+            type Value = NodeTag;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("variant identifier")
+            }
+            fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<NodeTag, E> {
+                match s {
+                    "Prop" => Ok(NodeTag::Prop),
+                    "Group" => Ok(NodeTag::Group),
+                    _ => Err(E::unknown_variant(s, NODE_VARIANTS)),
+                }
+            }
+            fn visit_u64<E: serde::de::Error>(self, i: u64) -> Result<NodeTag, E> {
+                match i {
+                    0 => Ok(NodeTag::Prop),
+                    1 => Ok(NodeTag::Group),
+                    _ => Err(E::invalid_value(serde::de::Unexpected::Unsigned(i), &"variant index 0 <= i < 2")),
+                }
+            }
+        }
+        d.deserialize_identifier(V)
+    }
+}
+
+/// A map key: the tag, or any other field (kept for the buffering fallback).
+enum NodeKey {
+    Tag,
+    Other(String),
+}
+
+impl<'de> Deserialize<'de> for NodeKey {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<NodeKey, D::Error> {
+        struct V;
+        impl serde::de::Visitor<'_> for V {
+            type Value = NodeKey;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a field name")
+            }
+            fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<NodeKey, E> {
+                Ok(if s == "node" { NodeKey::Tag } else { NodeKey::Other(s.to_owned()) })
+            }
+        }
+        d.deserialize_identifier(V)
+    }
+}
+
+struct NodeVisitor;
+
+impl<'de> serde::de::Visitor<'de> for NodeVisitor {
+    type Value = Node;
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("internally tagged enum Node")
+    }
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Node, A::Error> {
+        use serde::de::Error;
+        use serde::de::value::MapAccessDeserializer;
+        let Some(first) = map.next_key::<NodeKey>()? else { return Err(A::Error::missing_field("node")) };
+        let mut rest = serde_json::Map::new();
+        let tag = match first {
+            // Fast path: stream the remaining fields into the variant.
+            NodeKey::Tag => {
+                return match map.next_value::<NodeTag>()? {
+                    NodeTag::Prop => Property::deserialize(MapAccessDeserializer::new(map)).map(Node::Prop),
+                    NodeTag::Group => PropGroup::deserialize(MapAccessDeserializer::new(map)).map(Node::Group),
+                };
+            }
+            NodeKey::Other(k) => {
+                rest.insert(k, map.next_value()?);
+                let mut tag = None;
+                while let Some(k) = map.next_key::<NodeKey>()? {
+                    match k {
+                        NodeKey::Tag if tag.is_some() => return Err(A::Error::duplicate_field("node")),
+                        NodeKey::Tag => tag = Some(map.next_value::<NodeTag>()?),
+                        NodeKey::Other(k) => {
+                            rest.insert(k, map.next_value()?);
+                        }
+                    }
+                }
+                tag.ok_or_else(|| A::Error::missing_field("node"))?
+            }
+        };
+        let rest = serde_json::Value::Object(rest);
+        match tag {
+            NodeTag::Prop => Property::deserialize(rest).map(Node::Prop),
+            NodeTag::Group => PropGroup::deserialize(rest).map(Node::Group),
+        }
+        .map_err(A::Error::custom)
+    }
 }
 
 impl Node {
@@ -612,5 +723,167 @@ impl From<Property> for Node {
 impl From<PropGroup> for Node {
     fn from(g: PropGroup) -> Node {
         Node::Group(g)
+    }
+}
+
+#[cfg(test)]
+mod node_serde_tests {
+    use super::*;
+    use effectcraft_keyframe::ShapePath;
+
+    /// `Node` as serde derives it (the reference the hand-written `Deserialize` must match).
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(tag = "node")]
+    enum RefNode {
+        Prop(Property),
+        Group(RefGroup),
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    struct RefGroup {
+        uid: Uid,
+        #[serde(rename = "match")]
+        match_id: String,
+        name: String,
+        #[serde(default)]
+        kind: GroupKind,
+        #[serde(default = "yes")]
+        enabled: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<effectcraft_color::Label>,
+        #[serde(default)]
+        children: Vec<RefNode>,
+    }
+
+    impl From<RefNode> for Node {
+        fn from(n: RefNode) -> Node {
+            match n {
+                RefNode::Prop(p) => Node::Prop(p),
+                RefNode::Group(g) => Node::Group(PropGroup {
+                    uid: g.uid,
+                    match_id: g.match_id,
+                    name: g.name,
+                    kind: g.kind,
+                    enabled: g.enabled,
+                    label: g.label,
+                    children: g.children.into_iter().map(Node::from).collect(),
+                }),
+            }
+        }
+    }
+
+    fn tree() -> Node {
+        let mut pos = Property::new(2, "position", "Position", Value::Vec2([1.0, 2.5])).spatial();
+        pos.set_animated(true, Tick::ZERO);
+        pos.set_value_at(Tick::from_seconds_f64(1.0), Value::Vec2([3.0, -4.0]));
+        pos.expr = Some(Expression { text: "wiggle(2, 5)".into(), enabled: true });
+        let blur = Property::new(3, "blurriness", "Blurriness", Value::Scalar(0.1 + 0.2)).with_ui(ParamUi::Slider {
+            min: 0.0,
+            max: 1e3,
+            slider_min: 0.0,
+            slider_max: 50.0,
+            decimals: 1,
+        });
+        let path = Property::new(5, "path", "Mask Path", Value::Path(ShapePath::rect([0.0, 0.0], 10.0, 20.0)));
+        let mut mask = PropGroup::new(4, "mask", "Mask 1");
+        mask.kind = GroupKind::Mask {
+            mode: MaskMode::Subtract,
+            inverted: true,
+            color: [1, 2, 3],
+            locked: false,
+            motion_blur: MaskMotionBlur::Off,
+            feather_falloff: FeatherFalloff::Linear,
+            roto_bezier: true,
+        };
+        mask.children.push(path.into());
+        let mut fx = PropGroup::new(6, "ec.blur.gaussian", "Gaussian Blur");
+        fx.kind = GroupKind::Effect { effect: "ec.blur.gaussian".into() };
+        fx.enabled = false;
+        fx.label = Some(effectcraft_color::Label::Blue);
+        fx.children.push(blur.into());
+        let mut root = PropGroup::new(1, "root", "Root");
+        root.children.extend([pos.into(), mask.into(), fx.into(), PropGroup::new(7, "empty", "Empty").into()]);
+        root.into()
+    }
+
+    #[test]
+    fn node_serializes_like_the_derive_and_reads_back() {
+        let n = tree();
+        let json = serde_json::to_string(&n).unwrap();
+        let reference: RefNode = serde_json::from_str(&json).unwrap();
+        assert_eq!(serde_json::to_string(&reference).unwrap(), json);
+        assert_eq!(serde_json::to_string_pretty(&reference).unwrap(), serde_json::to_string_pretty(&n).unwrap());
+        let back: Node = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, n);
+        assert_eq!(Node::from(reference), n);
+        // Pretty files and in-memory JSON values (the control channel) read the same.
+        assert_eq!(serde_json::from_str::<Node>(&serde_json::to_string_pretty(&n).unwrap()).unwrap(), n);
+        assert_eq!(serde_json::from_value::<Node>(serde_json::to_value(&n).unwrap()).unwrap(), n);
+    }
+
+    /// Moves `"node"` to the end of every object that has it (the buffering fallback).
+    fn tag_last(v: &mut serde_json::Value) {
+        match v {
+            serde_json::Value::Object(o) => {
+                if let Some(t) = o.remove("node") {
+                    o.insert("node".into(), t);
+                }
+                o.values_mut().for_each(tag_last);
+            }
+            serde_json::Value::Array(a) => a.iter_mut().for_each(tag_last),
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn node_reads_the_tag_anywhere_and_ignores_unknown_fields() {
+        let n = tree();
+        let mut v = serde_json::to_value(&n).unwrap();
+        tag_last(&mut v);
+        let text = serde_json::to_string(&v).unwrap();
+        assert!(!text.starts_with(r#"{"node""#), "{text}");
+        assert_eq!(serde_json::from_str::<Node>(&text).unwrap(), n);
+        assert_eq!(serde_json::from_value::<Node>(v).unwrap(), n);
+
+        let prop = |s: &str| serde_json::from_str::<Node>(s).unwrap();
+        let p = Property::new(9, "opacity", "Opacity", Value::Scalar(50.0));
+        let first = r#"{"node":"Prop","uid":9,"match":"opacity","name":"Opacity","value":{"t":"Scalar","v":50.0}}"#;
+        let middle = r#"{"uid":9,"match":"opacity","node":"Prop","name":"Opacity","value":{"t":"Scalar","v":50.0}}"#;
+        let last = r#"{"uid":9,"match":"opacity","name":"Opacity","value":{"t":"Scalar","v":50.0},"node":"Prop"}"#;
+        let unknown = r#"{"node":"Prop","future":[1,{"x":2}],"uid":9,"match":"opacity","name":"Opacity","value":{"t":"Scalar","v":50.0}}"#;
+        let unknown_late = r#"{"future":{"node":"Group"},"uid":9,"match":"opacity","name":"Opacity","node":"Prop","value":{"t":"Scalar","v":50.0}}"#;
+        // Missing fields with defaults read back as them (`hold_only` is false when absent).
+        let mut p_saved = p.clone();
+        p_saved.hold_only = false;
+        for s in [first, middle, last, unknown, unknown_late] {
+            assert_eq!(prop(s), Node::Prop(p_saved.clone()), "{s}");
+            assert_eq!(serde_json::from_str::<RefNode>(s).map(Node::from).unwrap(), Node::Prop(p_saved.clone()), "{s}");
+        }
+        let g = PropGroup::new(8, "transform", "Transform");
+        for s in [
+            r#"{"node":"Group","uid":8,"match":"transform","name":"Transform"}"#,
+            r#"{"uid":8,"match":"transform","name":"Transform","node":"Group"}"#,
+            r#"{"uid":8,"node":"Group","match":"transform","name":"Transform","kind":{"kind":"Plain"},"enabled":true,"children":[]}"#,
+        ] {
+            assert_eq!(prop(s), Node::Group(g.clone()), "{s}");
+        }
+    }
+
+    #[test]
+    fn node_errors_like_the_derive() {
+        for (s, want) in [
+            (r#"{"uid":9}"#, "missing field `node`"),
+            (r#"{}"#, "missing field `node`"),
+            (r#"{"node":"Layer","uid":9}"#, "unknown variant `Layer`"),
+            (r#"{"uid":9,"node":"Layer"}"#, "unknown variant `Layer`"),
+            (r#"{"node":"Prop","uid":9}"#, "missing field `match`"),
+            (r#"{"uid":9,"node":"Group"}"#, "missing field `match`"),
+            (r#"{"uid":9,"node":"Prop","node":"Prop"}"#, "duplicate field `node`"),
+            (r#"[1,2]"#, "invalid type"),
+            (r#""Prop""#, "invalid type"),
+        ] {
+            let e = serde_json::from_str::<Node>(s).unwrap_err().to_string();
+            assert!(e.contains(want), "{s}: {e}");
+        }
     }
 }

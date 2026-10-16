@@ -6,6 +6,10 @@
 //! random-access [`ByteReader`]; [`FileReader`] serves them positional reads from the open file.
 //! Formats decoded in one go (stills, WAV, FLAC, MP3…) still read the whole file, as before.
 //! Builds without a native file system (wasm32) keep using in-memory bytes.
+//!
+//! The pool and probe open movies in place through [`crate::open`]; only [`movie_header`] is
+//! used here (movie rotation).
+#![allow(dead_code)]
 
 use std::path::Path;
 

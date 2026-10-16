@@ -77,6 +77,8 @@ impl Session {
         let b = self.prefs.cache_budgets(self.sys_memory);
         self.layer_cache.set_budget(b.layer);
         self.footage.set_cache_budget(b.media);
+        // Roto Brush segmentations (process-wide): half the layer cache's budget, at most 768 MB.
+        effectcraft_effects::roto::set_cache_budget(b.layer / 2);
     }
 
     /// Take the latest reading of the system's memory and start the next one in the background

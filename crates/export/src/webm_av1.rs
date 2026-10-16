@@ -12,6 +12,7 @@ use effectcraft_time::{TICKS_PER_SECOND, Tick};
 
 use crate::encode::VideoEncoder;
 use crate::encode::mix;
+use crate::pipeline::Batches;
 use crate::webm::{CLUSTER, EBML, INFO, OPUS_RATE, SEGMENT, TRACK_ENTRY, TRACKS, el, el_float, el_str, el_uint, id_bytes, opus_encoder, vint};
 use crate::{Cx, Report, Result, State, batch_size, io, wants_audio};
 
@@ -132,8 +133,6 @@ pub(crate) async fn webm_av1(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut
         }
     };
 
-    let batch = batch_size();
-    let mut i = 0;
     let flush_blocks = |blocks: &mut Vec<Block>, file: &mut crate::out::Out, seg_len: &mut u64| -> Result<()> {
         if !blocks.is_empty() {
             let c = cluster(blocks);
@@ -144,23 +143,26 @@ pub(crate) async fn webm_av1(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut
         Ok(())
     };
     let mut blocks = vec![];
-    while i < total {
-        let end = (i + batch).min(total);
-        // RGB, or the alpha matte alone (Channels: Alpha); AV1 in WebM carries no alpha track.
-        let channels = if job.output.channels == Channels::Alpha { Channels::Alpha } else { Channels::Rgb };
-        let frames: Vec<Vec<u8>> = job.frames(comp, (i..end).collect(), |_, img| job.pixels(&img, comp, channels, w, h)).await;
-        for (j, px) in frames.iter().enumerate() {
-            let k = i + j as u64;
-            for p in venc.encode(px, k)? {
-                blocks.push(Block { ms: frame_ms(k), track: 1, key: p.key, data: p.data });
+    // RGB, or the alpha matte alone (Channels: Alpha); AV1 in WebM carries no alpha track.
+    let channels = if job.output.channels == Channels::Alpha { Channels::Alpha } else { Channels::Rgb };
+    // The next batch renders while this one encodes.
+    let render = |_: u64, img: effectcraft_raster::Image| job.pixels(&img, comp, channels, w, h);
+    job.batches(comp, total, batch_size(job, comp), render, async |batches: &mut Batches<'_, '_, Vec<u8>>| -> Result<()> {
+        while let Some((i, end, frames)) = batches.next().await? {
+            for (j, px) in frames.iter().enumerate() {
+                let k = i + j as u64;
+                for p in venc.encode(px, k)? {
+                    blocks.push(Block { ms: frame_ms(k), track: 1, key: p.key, data: p.data });
+                }
             }
+            let t_end = if end >= total { span_end } else { job.settings.frame_time(comp, end) };
+            audio_until(t_end, &mut blocks, end >= total);
+            flush_blocks(&mut blocks, &mut file, &mut seg_len)?;
+            st.advance(end - i)?;
         }
-        let t_end = if end >= total { span_end } else { job.settings.frame_time(comp, end) };
-        audio_until(t_end, &mut blocks, end >= total);
-        flush_blocks(&mut blocks, &mut file, &mut seg_len)?;
-        st.advance(end - i)?;
-        i = end;
-    }
+        Ok(())
+    })
+    .await?;
     if total == 0 {
         audio_until(span_end, &mut blocks, true);
         flush_blocks(&mut blocks, &mut file, &mut seg_len)?;

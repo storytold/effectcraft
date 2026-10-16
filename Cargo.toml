@@ -72,6 +72,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 
 # media codecs + containers: FilmCraft's pure-Rust crates, pinned to a revision (plan/adr/0001).
 # Only `crates/media`, `crates/export` and `crates/interchange` may depend on these.
+# Header-only probing of standalone audio files (the same build FilmCraft decodes them with; MPL-2.0).
 filmcraft-codecs = { git = "https://github.com/storytold/filmcraft", rev = "2c5ba7a72619935f0481f99d59409e0d1844b234" }
 filmcraft-media = { git = "https://github.com/storytold/filmcraft", rev = "2c5ba7a72619935f0481f99d59409e0d1844b234" }
 filmcraft-frame = { git = "https://github.com/storytold/filmcraft", rev = "2c5ba7a72619935f0481f99d59409e0d1844b234" }

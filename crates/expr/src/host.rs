@@ -2,10 +2,11 @@
 //!
 //! Scripts never hold references into the project. Instead they ask for plain data
 //! ([`Req`] → [`Resp`]) through one native function. A request that isn't answered yet is
-//! recorded as a *miss* and the script is aborted; the evaluator then resolves the misses here
-//! (with full access to the project, which may recursively evaluate other expressions), memoizes
-//! the answers and runs the script again. Expressions are pure functions of these answers, so
-//! re-running is exact, and the runtime stays free of borrowed state.
+//! recorded as a *miss* (the run carries on with stand-in answers to collect the rest, and its
+//! result is discarded); the evaluator then resolves the misses here (with full access to the
+//! project, which may recursively evaluate other expressions), memoizes the answers and runs the
+//! script again. Expressions are pure functions of these answers, so re-running is exact, and
+//! the runtime stays free of borrowed state.
 
 use effectcraft_geom::{Mat3, Mat4};
 use effectcraft_keyframe::Value;
@@ -39,8 +40,11 @@ pub enum Req {
     LayerInfo { comp: u64, layer: u64 },
     /// `[path, isGroup, name, matchName, numChildren]` or null.
     Child { comp: u64, layer: u64, group: String, key: Key },
-    /// `[name, uid, kind, dims, keyTimes, keyValues, hasExpression, propertyIndex, matchName]`.
+    /// `[name, uid, kind, dims, numKeys, null, hasExpression, propertyIndex, matchName]`.
     PropInfo { comp: u64, layer: u64, path: String },
+    /// `[keyTimes (comp seconds), keyValues]`: asked only by the keyframe API, so plain value
+    /// reads don't copy every keyframe.
+    Keys { comp: u64, layer: u64, path: String },
     /// Value at comp time `t`; `pre` = keyframes only (no expression).
     Value { comp: u64, layer: u64, path: String, t: Secs, pre: bool },
     /// `[layerToComp (3×3), compToLayer, layerToWorld (4×4), worldToLayer]`, row-major.
@@ -67,6 +71,24 @@ pub enum Req {
     /// frameDuration, pixelAspect]`, kind `"comp"` (id = the precomp's composition) or `"footage"`
     /// (footage, solids and models), or null for layers without an item (text, shape, null…).
     SourceInfo { comp: u64, layer: u64 },
+}
+
+impl Req {
+    /// The comp time (bits) a request reads at, for requests that depend on time.
+    pub fn time(&self) -> Option<Secs> {
+        match self {
+            Req::Value { t, .. } | Req::Doc { t, .. } | Req::Xform { t, .. } | Req::SourceRect { t, .. } | Req::Sample { t, .. } => Some(*t),
+            _ => None,
+        }
+    }
+    /// The same request at comp time `at` (unchanged when it doesn't depend on time).
+    pub fn at(&self, at: Secs) -> Req {
+        let mut r = self.clone();
+        if let Req::Value { t, .. } | Req::Doc { t, .. } | Req::Xform { t, .. } | Req::SourceRect { t, .. } | Req::Sample { t, .. } = &mut r {
+            *t = at;
+        }
+        r
+    }
 }
 
 /// Parse CSV/TSV text (RFC 4180 quoting) into rows of cells.
@@ -366,27 +388,36 @@ impl<'a> Resolver<'a> {
             Req::PropInfo { comp, layer, path } => {
                 let (l, p) = self.prop(*comp, *layer, path)?;
                 let dims = prop_dims(l, p);
-                let times = p.keys.iter().map(|k| Resp::Num(l.comp_time(k.time).seconds())).collect();
-                let values = p.keys.iter().map(|k| value_resp(&k.value, dims)).collect();
                 let index = path.rsplit('/').next().and_then(|last| {
+                    // Only a canonical `@uid` segment names a child (`@7`, not `@07` or `@+7`).
+                    let digits =
+                        last.strip_prefix('@').filter(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()) && (d.len() == 1 || !d.starts_with('0')))?;
+                    let uid: u64 = digits.parse().ok()?;
                     let parent = path.rsplit_once('/').map(|(g, _)| g);
                     let g = match parent {
                         Some(g) => l.props.group(g)?,
                         None => &l.props,
                     };
-                    g.children.iter().position(|n| format!("@{}", n.uid()) == last).map(|i| i + 1)
+                    g.children.iter().position(|n| n.uid() == uid).map(|i| i + 1)
                 });
                 Resp::List(vec![
                     Resp::Str(p.name.clone()),
                     Resp::Num(p.uid as f64),
                     Resp::Str(kind_name(&p.value).into()),
                     Resp::Num(dims as f64),
-                    Resp::List(times),
-                    Resp::List(values),
+                    Resp::Num(p.keys.len() as f64),
+                    Resp::Null,
                     Resp::Bool(p.has_expression()),
                     Resp::Num(index.unwrap_or(1) as f64),
                     Resp::Str(p.match_id.clone()),
                 ])
+            }
+            Req::Keys { comp, layer, path } => {
+                let (l, p) = self.prop(*comp, *layer, path)?;
+                let dims = prop_dims(l, p);
+                let times = p.keys.iter().map(|k| Resp::Num(l.comp_time(k.time).seconds())).collect();
+                let values = p.keys.iter().map(|k| value_resp(&k.value, dims)).collect();
+                Resp::List(vec![Resp::List(times), Resp::List(values)])
             }
             Req::Value { comp, layer, path, t, pre } => {
                 let (l, p) = self.prop(*comp, *layer, path)?;
@@ -420,13 +451,12 @@ impl<'a> Resolver<'a> {
                         effectcraft_path::bounds(&paths).map(|b| [b.y0, b.x0, b.width(), b.height()]).unwrap_or([0.0; 4])
                     }
                     LayerSource::Shape => {
+                        // The rendered buffer's rectangle, from the geometry alone (no rasterising).
                         let contents = l.props.sub("contents")?;
-                        let buf = effectcraft_render::shapes::render(&ctx, l, contents, 1.0);
-                        if buf.img.width <= 4 {
-                            [0.0; 4]
-                        } else {
+                        match effectcraft_render::shapes::buffer_rect(&ctx, l, contents, 1.0) {
                             // `render` pads its buffer by 2 px on each side.
-                            [2.0 - buf.offset[1], 2.0 - buf.offset[0], buf.img.width as f64 - 4.0, buf.img.height as f64 - 4.0]
+                            Some((w, h, offset)) if w > 4 => [2.0 - offset[1], 2.0 - offset[0], w as f64 - 4.0, h as f64 - 4.0],
+                            _ => [0.0; 4],
                         }
                     }
                     _ => {

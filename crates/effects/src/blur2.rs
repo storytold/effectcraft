@@ -301,6 +301,14 @@ pub fn camera_lens_plain(ctx: &EffectCtx) -> bool {
     ctx.params.f("irisProperties/diffractionFringe") <= 0.0 && ctx.params.get("blurMap/blurMapLayer").and_then(|v| v.as_layer()).is_none()
 }
 
+/// Camera Lens Blur iris spans `(dy, x_left, x_right)` and their pixel counts.
+struct Iris {
+    outer: Vec<(i64, i64, i64)>,
+    inner: Vec<(i64, i64, i64)>,
+    no: f64,
+    ni: f64,
+}
+
 fn camera_lens_blur(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let r = ctx.params.f("blurRadius").max(0.0) * b.scale;
     if r < 0.5 {
@@ -406,7 +414,9 @@ fn camera_lens_blur(ctx: &EffectCtx, mut b: Buf) -> Buf {
     // 0 = an even disc, 100 = a natural halo, 500 = all of it in the ring.
     let fringe = (ctx.params.f("irisProperties/diffractionFringe") / 500.0).clamp(0.0, 1.0);
     let (w_in, w_ring) = (1.0 - fringe, 1.0 + 4.0 * fringe);
-    let iris = |radius: f64| -> (Vec<(i64, i64, i64)>, Vec<(i64, i64, i64)>) {
+    let count = |s: &[(i64, i64, i64)]| s.iter().map(|(_, l, r)| (r - l + 1) as f64).sum::<f64>();
+    // The outer and inner (fringe) iris spans of a radius, with their pixel counts summed once.
+    let iris = |radius: f64| -> Iris {
         let stretch = |mut s: Vec<(i64, i64, i64)>| {
             if aspect > 0.0 && (aspect - 1.0).abs() > 1e-6 {
                 for v in s.iter_mut() {
@@ -422,18 +432,18 @@ fn camera_lens_blur(ctx: &EffectCtx, mut b: Buf) -> Buf {
         } else {
             vec![]
         };
-        (outer, inner)
+        let (no, ni) = (count(&outer), count(&inner));
+        Iris { outer, inner, no, ni }
     };
-    let count = |s: &[(i64, i64, i64)]| s.iter().map(|(_, l, r)| (r - l + 1) as f64).sum::<f64>();
     // One blurred pixel with the given iris.
-    let blur_px = |sp: &(Vec<(i64, i64, i64)>, Vec<(i64, i64, i64)>), x: usize, y: usize| -> [f32; 4] {
-        let (outer, inner) = sp;
+    let blur_px = |sp: &Iris, x: usize, y: usize| -> [f32; 4] {
+        let Iris { outer, inner, no, ni } = sp;
+        let (no, ni) = (*no, *ni);
         let acc = if inner.is_empty() {
-            let n = count(outer).max(1.0);
+            let n = no.max(1.0);
             span_sum(outer, x, y).map(|v| v / n)
         } else {
             let (so, si) = (span_sum(outer, x, y), span_sum(inner, x, y));
-            let (no, ni) = (count(outer), count(inner));
             let norm = (w_in * ni + w_ring * (no - ni)).max(1e-9);
             std::array::from_fn(|c| (w_in * si[c] + w_ring * (so[c] - si[c])) / norm)
         };

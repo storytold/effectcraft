@@ -30,6 +30,7 @@ mod pointer_wrap;
 pub mod prefs_live;
 pub mod state;
 pub mod theme;
+mod thumb_lru;
 pub mod widgets;
 mod workspace_state;
 
@@ -51,6 +52,21 @@ const SCREENSHOT_TIMEOUT_S: f64 = 4.0;
 /// Seconds without a project change before paused prefetch resumes (see
 /// [`EffectcraftApp::editing`]).
 const EDIT_QUIET: f64 = 0.3;
+
+/// The longest a playing preview waits for its next UI frame (the meters, the end of the
+/// preview, a frame that finished rendering without waking the UI).
+const PLAYBACK_MAX_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// The repaint delay for a playing preview whose next frame is due in `secs`: the UI rebuilds
+/// at the preview's frame rate instead of the display's refresh rate. A hair late rather than
+/// early (an early wake changes nothing and needs another), never a sub-millisecond spin.
+fn until_next_frame(secs: f64) -> std::time::Duration {
+    const MIN: f64 = 0.001;
+    if !secs.is_finite() {
+        return PLAYBACK_MAX_WAIT;
+    }
+    std::time::Duration::from_secs_f64((secs + 0.0005).clamp(MIN, PLAYBACK_MAX_WAIT.as_secs_f64()))
+}
 
 /// Modal dialogs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -483,7 +499,11 @@ impl EffectcraftApp {
         ctx.set_zoom_factor(p.appearance.ui_scale as f32 / 100.0);
         self.ui.cache_when_idle = p.previews.cache_frames_when_idle;
         self.ui.viewer.fast_preview = p.previews.fast_previews;
-        self.frames.set_budget(p.cache_budgets(self.session.sys_memory).preview);
+        let budgets = p.cache_budgets(self.session.sys_memory);
+        self.frames.set_budget(budgets.preview);
+        if let Some(g) = &self.gpu {
+            g.context().set_cache_budget(budgets.layer);
+        }
     }
 
     /// Change settings from the UI (applied next frame and saved).
@@ -786,6 +806,7 @@ impl EffectcraftApp {
                     }
                 }
                 log::info!("GPU compositor: {}", effectcraft_engine::render::Accelerator::name(&g));
+                g.context().set_cache_budget(self.session.prefs.cache_budgets(self.session.sys_memory).layer);
                 self.session.accel = Some(Arc::new(g.clone()));
                 self.gpu = Some(g);
                 self.wgpu = Some(rs.clone());
@@ -1230,8 +1251,12 @@ impl EffectcraftApp {
                 self.playback.start_frame = p.first;
                 self.session.set_time(fr.tick_of(p.first));
                 self.start_audio(fr.tick_of(p.first));
+                ctx.request_repaint();
+            } else {
+                // Each finished frame wakes the UI (`Frames::release`) to queue the next ones;
+                // this is only the fallback.
+                ctx.request_repaint_after(PLAYBACK_MAX_WAIT);
             }
-            ctx.request_repaint();
             return;
         }
         let step = plan.map_or(1, |p| p.step);
@@ -1322,12 +1347,19 @@ impl EffectcraftApp {
                 self.playback.shown_at.clear();
                 self.playback.start_wall = now;
                 self.playback.start_frame = cur;
+                ctx.request_repaint();
+                return;
             }
-            ctx.request_repaint();
+            // Wake when the audible sample reaches the next frame (not at the display's refresh
+            // rate): a 24 fps preview rebuilds the UI 24 times a second, not 120.
+            let next = fr.tick_of(target.saturating_add(step.max(1))).seconds();
+            ctx.request_repaint_after(until_next_frame(next - audio::sample_time(a.clock(), a.rate).seconds()));
             return;
         }
         let elapsed = now - self.playback.start_wall;
         let n = ((elapsed * self.playback.fps) / step as f64).floor() as i64;
+        // When the wall clock reaches frame `n + 1` (the next UI frame that changes anything).
+        let next_due = self.playback.start_wall + (n.saturating_add(1) as f64 * step as f64) / self.playback.fps - now;
         let target = match plan {
             Some(p) => p.frame_after(self.playback.start_frame, n),
             None => {
@@ -1353,7 +1385,7 @@ impl EffectcraftApp {
         if !video {
             // Audio-only preview without an audio device: the clock runs, the time stays.
             self.playback.audio_frame = Some(target);
-            ctx.request_repaint();
+            ctx.request_repaint_after(until_next_frame(next_due));
             return;
         }
         if self.frames.is_cached(&FrameKey { frame: target, ..series }) {
@@ -1371,8 +1403,11 @@ impl EffectcraftApp {
             }
             self.playback.start_wall = now;
             self.playback.start_frame = fr.frame_at(self.session.time());
+            // Held at this frame: each finished frame wakes the UI (`Frames::release`).
+            ctx.request_repaint_after(until_next_frame(step as f64 / self.playback.fps));
+            return;
         }
-        ctx.request_repaint();
+        ctx.request_repaint_after(until_next_frame(next_due));
     }
 
     /// While the project keeps changing (an edit within [`EDIT_QUIET`] seconds), how long until
@@ -1967,6 +2002,27 @@ fn fit_window(ctx: &egui::Context) {
 fn overflows_screen(size: egui::Vec2, monitor: egui::Vec2) -> bool {
     const TASKBAR: f32 = 64.0;
     size.x > monitor.x || size.y > monitor.y - TASKBAR
+}
+
+#[cfg(test)]
+mod playback_pacing_tests {
+    use super::{PLAYBACK_MAX_WAIT, until_next_frame};
+    use std::time::Duration;
+
+    #[test]
+    fn a_playing_preview_wakes_when_its_next_frame_is_due_not_every_display_refresh() {
+        // 24 fps: the next frame is due in 41.7 ms, so no UI frame before then (not 120 Hz).
+        let d = until_next_frame(1.0 / 24.0);
+        assert!(d >= Duration::from_secs_f64(1.0 / 24.0) && d < Duration::from_millis(43), "{d:?}");
+        // Late, overdue or nonsense waits stay bounded: no busy spin, no sleep past the cap.
+        for overdue in [-1.0, 0.0] {
+            let d = until_next_frame(overdue);
+            assert!(d >= Duration::from_micros(999) && d <= Duration::from_millis(1), "{d:?}");
+        }
+        assert_eq!(until_next_frame(2.0), PLAYBACK_MAX_WAIT);
+        assert_eq!(until_next_frame(f64::NAN), PLAYBACK_MAX_WAIT);
+        assert_eq!(until_next_frame(f64::INFINITY), PLAYBACK_MAX_WAIT);
+    }
 }
 
 #[cfg(test)]

@@ -417,10 +417,13 @@ fn install_script_fallbacks(family_fonts: &mut FontDefinitions, language: &str) 
             if !face.has_char(probe) {
                 continue; // nothing installed covers this script
             }
-            let Some(font) = face.font() else { continue };
+            if face.font().is_none() {
+                continue;
+            }
+            let Some(bytes) = face.static_bytes() else { continue };
             seen.push(id);
-            // Use the already-read, parsed bytes rather than reading a font file twice.
-            let mut data = FontData::from_owned(font.data().as_bytes().to_vec());
+            // Share the text engine's bytes rather than reading or copying a font file again.
+            let mut data = FontData::from_static(bytes);
             data.index = face.info.index;
             family_fonts.font_data.insert(name.to_string(), Arc::new(data));
             for family in family_fonts.families.values_mut() {

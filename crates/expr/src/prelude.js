@@ -18,7 +18,7 @@ var selectorValue = [100, 100, 100];
 
 // Request ops (must match runtime.rs).
 var __COMP = 0, __COMPNAME = 1, __LAYER = 2, __LINFO = 3, __CHILD = 4, __PINFO = 5, __VALUE = 6, __XFORM = 7, __RECT = 8, __MARKERS = 9, __DOC = 10;
-var __FOOT = 11, __FDATA = 12, __SAMPLE = 13, __PROJ = 14, __SOURCE = 15;
+var __FOOT = 11, __FDATA = 12, __SAMPLE = 13, __PROJ = 14, __SOURCE = 15, __KEYS = 16;
 
 function __begin(t, v, c, l, path, uid, idx, fd, ti, tt, sv) {
   time = t;
@@ -665,7 +665,7 @@ function __mkGroup(c, l, info) {
 // Properties ------------------------------------------------------------------------------------
 
 function Prop(c, l, path) {
-  this.__c = c; this.__l = l; this.__p = path; this.__i = null;
+  this.__c = c; this.__l = l; this.__p = path; this.__i = null; this.__k = null;
   this.__self = __S !== null && c === __S.c && l === __S.l && path === __S.path;
 }
 
@@ -677,8 +677,9 @@ function __avg(vals) {
 
 function __loop(p, out, type, n, dur) {
   type = type === undefined ? 'cycle' : String(type).toLowerCase();
-  var times = p.__info[4], N = times.length, t = time;
+  var N = p.__info[4], t = time;
   if (N === 0) return p.value;
+  var times = p.__keys[0];
   var tStart, tEnd, h = 1e-3, k, ph;
   if (out) {
     tEnd = times[N - 1];
@@ -724,7 +725,9 @@ Prop.prototype = {
   get __info() { return this.__i || (this.__i = __h(__PINFO, this.__c, this.__l, this.__p)); },
   get name() { return this.__info[0]; },
   get __uid() { return this.__info[1]; },
-  get numKeys() { return this.__info[4].length; },
+  // `[times, values]`, asked for only by the keyframe API (plain reads don't copy the keys).
+  get __keys() { return this.__k || (this.__k = __h(__KEYS, this.__c, this.__l, this.__p)); },
+  get numKeys() { return this.__info[4]; },
   get propertyIndex() { return this.__info[7]; },
   get matchName() { return this.__info[8]; },
   __wrap: function (v) {
@@ -747,14 +750,15 @@ Prop.prototype = {
   speedAtTime: function (t) { return length(this.velocityAtTime(t)); },
   get speed() { return this.speedAtTime(time); },
   key: function (n) {
-    var info = this.__info, N = info[4].length;
+    var N = this.__info[4];
     if (!(n >= 1 && n <= N)) __err('Key index ' + n + ' out of range (property has ' + N + ' keys)');
     n = Math.floor(n);
-    return { time: info[4][n - 1], value: this.__wrap(info[5][n - 1]), index: n };
+    var keys = this.__keys;
+    return { time: keys[0][n - 1], value: this.__wrap(keys[1][n - 1]), index: n };
   },
   nearestKey: function (t) {
-    var times = this.__info[4];
-    if (times.length === 0) __err('Property has no keyframes');
+    if (this.__info[4] === 0) __err('Property has no keyframes');
+    var times = this.__keys[0];
     var best = 0;
     for (var i = 1; i < times.length; i++) if (Math.abs(times[i] - t) < Math.abs(times[best] - t)) best = i;
     return this.key(best + 1);

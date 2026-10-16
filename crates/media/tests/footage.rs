@@ -896,6 +896,25 @@ fn conformed_flac_audio_reads_back_like_the_decoder() {
     let _ = std::fs::remove_dir_all(&folder);
 }
 
+/// File probing describes media exactly as opening the whole file in memory does,
+/// including standalone audio through FilmCraft and indexed movie readers.
+#[test]
+fn file_probe_matches_a_whole_file_probe() {
+    let Some(flac) = sine_flac(5, 44_100, 2, "s16") else { return };
+    let mp3 = ffmpeg_fixture("sine_3s.mp3", &["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=3", "-c:a", "libmp3lame", "-b:a", "128k"]);
+    let mp3_cbr_no_tag = ffmpeg_fixture(
+        "sine_2s_notag.mp3",
+        &["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=2", "-c:a", "libmp3lame", "-write_xing", "0"],
+    );
+    let files = [Some(flac), mp3, mp3_cbr_no_tag, h264_mp4(), vp9_webm(), tone_wav(), alpha_png()];
+    for p in files.into_iter().flatten() {
+        let fast = probe(&p).expect("probe");
+        let bytes: Arc<[u8]> = std::fs::read(&p).expect("read").into();
+        let whole = effectcraft_media::probe_bytes(&p.to_string_lossy(), bytes).expect("probe bytes");
+        assert_eq!(fast, whole, "{}", p.display());
+    }
+}
+
 /// File ▸ Import of an STL part: importable by extension and probed as a 3D model item.
 #[test]
 fn stl_imports_as_a_model() {

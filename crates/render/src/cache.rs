@@ -25,6 +25,7 @@ use effectcraft_effects::Buf;
 use effectcraft_project::{ItemKind, Layer, LayerSource, Node, PropGroup};
 
 use crate::eval::EvalCtx;
+use crate::packed::PackedBuf;
 
 mod dependencies;
 
@@ -42,9 +43,21 @@ pub struct LayerCache {
 }
 
 struct Entry {
-    buf: Arc<Buf>,
+    buf: Stored,
+    /// Bytes of pixel storage (packed size when packed).
     bytes: usize,
     last_use: u64,
+    /// [`PackedBuf::pack`] declined this buffer (not on an integer grid): don't try again.
+    unpackable: bool,
+}
+
+/// How an entry keeps its pixels. Entries go in as `f32` buffers (a hit shares the `Arc`, and
+/// the GPU compositor keeps their textures while it lives); only when the cache is over budget
+/// are the least recently used ones packed (lossless, see [`crate::packed`]) before anything
+/// is evicted, and a hit on a packed entry unpacks it back to `f32`.
+enum Stored {
+    Full(Arc<Buf>),
+    Packed(Arc<PackedBuf>),
 }
 
 struct Inner {
@@ -154,9 +167,18 @@ impl LayerCache {
         match g.map.get_mut(&key) {
             Some(e) => {
                 e.last_use = now;
-                let b = e.buf.clone();
+                let stored = match &e.buf {
+                    Stored::Full(b) => Ok(b.clone()),
+                    Stored::Packed(p) => Err(p.clone()),
+                };
                 g.hits += 1;
-                Some(b)
+                match stored {
+                    Ok(b) => Some(b),
+                    Err(p) => {
+                        drop(g);
+                        Some(self.unpacked(key, &p))
+                    }
+                }
             }
             None => {
                 g.misses += 1;
@@ -190,29 +212,90 @@ impl LayerCache {
 
     fn insert_mem(&self, key: u64, buf: Arc<Buf>) {
         let bytes = buf.img.data.len() * std::mem::size_of::<effectcraft_raster::Px>();
-        let Ok(mut g) = self.inner.lock() else { return };
-        if bytes > g.budget / 4 {
-            return;
+        {
+            let Ok(mut g) = self.inner.lock() else { return };
+            if bytes > g.budget / 4 {
+                return;
+            }
+            g.clock += 1;
+            let now = g.clock;
+            if let Some(old) = g.map.insert(key, Entry { buf: Stored::Full(buf), bytes, last_use: now, unpackable: false }) {
+                g.bytes -= old.bytes;
+            }
+            g.bytes += bytes;
         }
-        g.clock += 1;
-        let now = g.clock;
-        if let Some(old) = g.map.insert(key, Entry { buf, bytes, last_use: now }) {
-            g.bytes -= old.bytes;
+        self.relieve();
+    }
+
+    /// A packed entry's pixels as `f32`: unpacked (outside the lock) and kept unpacked, as it is
+    /// in use again.
+    fn unpacked(&self, key: u64, p: &Arc<PackedBuf>) -> Arc<Buf> {
+        let buf = Arc::new(p.unpack());
+        let bytes = buf.img.data.len() * std::mem::size_of::<effectcraft_raster::Px>();
+        {
+            let Ok(mut g) = self.inner.lock() else { return buf };
+            let Some(e) = g.map.get_mut(&key) else { return buf };
+            match &e.buf {
+                // Another thread unpacked it first: share its buffer.
+                Stored::Full(b) => return b.clone(),
+                Stored::Packed(q) if !Arc::ptr_eq(p, q) => return buf,
+                Stored::Packed(_) => {}
+            }
+            let old = std::mem::replace(&mut e.bytes, bytes);
+            e.buf = Stored::Full(buf.clone());
+            g.bytes = g.bytes.saturating_sub(old) + bytes;
         }
-        g.bytes += bytes;
-        if g.bytes > g.budget {
-            // Evict least-recently used entries down to 3/4 of the budget.
-            let target = g.budget / 4 * 3;
-            let mut by_age: Vec<(u64, u64)> = g.map.iter().map(|(k, e)| (e.last_use, *k)).collect();
+        self.relieve();
+        buf
+    }
+
+    /// Over budget: pack the least recently used `f32` entries (outside the lock), then evict
+    /// least recently used entries down to 3/4 of the budget if that wasn't enough.
+    fn relieve(&self) {
+        let picked: Vec<(u64, Arc<Buf>)> = {
+            let Ok(mut g) = self.inner.lock() else { return };
+            if g.bytes <= g.budget {
+                return;
+            }
+            let excess = g.bytes - g.budget / 4 * 3;
+            let mut by_age: Vec<(u64, u64)> =
+                g.map.iter().filter(|(_, e)| matches!(e.buf, Stored::Full(_)) && !e.unpackable).map(|(k, e)| (e.last_use, *k)).collect();
             by_age.sort_unstable();
+            // Packing saves at least half (16 bpc).
+            let mut saved = 0;
+            let mut picked = vec![];
             for (_, k) in by_age {
-                if g.bytes <= target {
+                if saved >= excess {
                     break;
                 }
-                if let Some(e) = g.map.remove(&k) {
-                    g.bytes -= e.bytes;
+                if let Some(e) = g.map.get_mut(&k)
+                    && let Stored::Full(b) = &e.buf
+                {
+                    saved += e.bytes / 2;
+                    picked.push((k, b.clone()));
+                    // Not picked again by a concurrent call while this one packs it.
+                    e.unpackable = true;
                 }
             }
+            picked
+        };
+        let packed: Vec<_> = picked.into_iter().map(|(k, b)| (k, PackedBuf::pack(&b), b)).collect();
+        let Ok(mut g) = self.inner.lock() else { return };
+        for (k, p, b) in packed {
+            let Some(e) = g.map.get_mut(&k) else { continue };
+            if !matches!(&e.buf, Stored::Full(cur) if Arc::ptr_eq(cur, &b)) {
+                continue;
+            }
+            let Some(p) = p else { continue };
+            let bytes = p.bytes();
+            let old = std::mem::replace(&mut e.bytes, bytes);
+            e.buf = Stored::Packed(Arc::new(p));
+            e.unpackable = false;
+            g.bytes = g.bytes.saturating_sub(old) + bytes;
+        }
+        if g.bytes > g.budget {
+            let target = g.budget / 4 * 3;
+            evict_lru(&mut g, target);
         }
     }
 
@@ -226,16 +309,7 @@ impl LayerCache {
         let Ok(mut g) = self.inner.lock() else { return };
         g.budget = budget;
         if g.bytes > budget {
-            let mut by_age: Vec<(u64, u64)> = g.map.iter().map(|(k, e)| (e.last_use, *k)).collect();
-            by_age.sort_unstable();
-            for (_, k) in by_age {
-                if g.bytes <= budget {
-                    break;
-                }
-                if let Some(e) = g.map.remove(&k) {
-                    g.bytes -= e.bytes;
-                }
-            }
+            evict_lru(&mut g, budget);
         }
     }
 
@@ -248,6 +322,20 @@ impl LayerCache {
 
     pub fn stats(&self) -> CacheStats {
         self.inner.lock().map(|g| CacheStats { entries: g.map.len(), bytes: g.bytes, hits: g.hits, misses: g.misses }).unwrap_or_default()
+    }
+}
+
+/// Evict least recently used entries until at most `target` bytes are kept.
+fn evict_lru(g: &mut Inner, target: usize) {
+    let mut by_age: Vec<(u64, u64)> = g.map.iter().map(|(k, e)| (e.last_use, *k)).collect();
+    by_age.sort_unstable();
+    for (_, k) in by_age {
+        if g.bytes <= target {
+            break;
+        }
+        if let Some(e) = g.map.remove(&k) {
+            g.bytes -= e.bytes;
+        }
     }
 }
 

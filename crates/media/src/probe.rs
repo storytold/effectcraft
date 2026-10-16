@@ -14,21 +14,49 @@ pub const DEFAULT_SEQUENCE_RATE: FrameRate = FrameRate::FPS_30;
 
 /// Probe one file. Image sequences are made by the engine, which groups numbered stills
 /// (`effectcraft_engine::sequence`) and probes their first frame here.
+///
+/// Movies are probed from their index (read through the file, not loaded whole).
+/// Standalone audio uses FilmCraft; stills are read whole.
 pub fn probe(path: impl AsRef<Path>) -> Result<Footage> {
     let path = path.as_ref();
-    // A movie is read in place (its index), not loaded whole.
-    if let Some(src) = crate::stream::probe_source(path) {
-        let mut f = footage_from_info(&path.to_string_lossy(), src?.info());
-        let turn = crate::stream::movie_header(path).map_or(Orientation::NoTransforms, |h| video_turn(&h));
-        turn_footage(&mut f, turn);
-        return Ok(f);
-    }
-    let bytes = std::fs::read(path).map_err(|e| MediaError::Io(format!("{}: {e}", path.display())))?;
+    let p = path.to_string_lossy();
     if crate::MODEL_EXTENSIONS.contains(&ext_of(path).as_str()) {
+        let bytes = crate::open::read_file(&p)?;
         let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
-        return probe_model(&path.to_string_lossy(), &bytes, &|uri| std::fs::read(dir.join(uri)).ok());
+        return probe_model(&p, &bytes, &|uri| std::fs::read(dir.join(uri)).ok());
     }
-    probe_bytes(&path.to_string_lossy(), bytes.into())
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use filmcraft_media::reader::SharedReader;
+        let io = |e: std::io::Error| MediaError::Io(format!("{}: {e}", path.display()));
+        let file = crate::open::FileReader::open(&p).map_err(io)?;
+        let head = crate::open::head(&file).map_err(io)?;
+        if !is_still(&p, &head) {
+            let name = crate::open::file_name(&p);
+            let reader: SharedReader = Arc::new(file);
+            if let Some(src) = crate::open::open_with_reader(&name, &head, &reader) {
+                // A movie shot with the camera on its side: its header says how it is shown.
+                let mut f = footage_from_info(&p, src?.info());
+                let turn = crate::stream::movie_header(path).map_or(Orientation::NoTransforms, |h| video_turn(&h));
+                turn_footage(&mut f, turn);
+                return Ok(f);
+            }
+            let bytes = crate::open::read_whole(&*reader).map_err(io)?;
+            return probe_bytes(&p, bytes);
+        }
+        let bytes = crate::open::read_whole(&file).map_err(io)?;
+        probe_bytes(&p, bytes)
+    }
+    #[cfg(target_arch = "wasm32")]
+    probe_bytes(&p, crate::open::read_file(&p)?)
+}
+
+/// Whether [`probe_bytes`] takes a file starting with `head` as a still (or a layered / vector
+/// document) rather than handing it to FilmCraft.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+fn is_still(path: &str, head: &[u8]) -> bool {
+    let ext = ext_of(Path::new(path));
+    crate::STILL_EXTENSIONS.contains(&ext.as_str()) || crate::layered::claims(path, head) || image::guess_format(head).is_ok()
 }
 
 /// Probe a 3D model (glTF 2.0 / OBJ / STL / FBX): a [`FootageKind::Model`] item whose duration is its

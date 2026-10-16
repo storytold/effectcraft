@@ -343,6 +343,19 @@ fn quant(v: f32) -> u16 {
     (v.clamp(0.0, 1.0) * (NB - 1) as f32).round() as u16
 }
 
+/// Call `f` with each quantised pixel of column `x` in rows `y - r..=y + r` (edges repeated);
+/// generic so the per-sample histogram update inlines.
+#[inline]
+fn median_col(q: &[[u16; 4]], w: usize, h: usize, x: i64, y: usize, r: i64, mut f: impl FnMut([u16; 4])) {
+    let x = x.clamp(0, w as i64 - 1) as usize;
+    for dy in -r..=r {
+        let yy = (y as i64 + dy).clamp(0, h as i64 - 1) as usize;
+        if let Some(&v) = q.get(yy * w + x) {
+            f(v);
+        }
+    }
+}
+
 /// Per-channel median over a (2r+1)² window of the premultiplied channels (values quantised to
 /// 512 levels in 0..1, edges repeated).
 pub(crate) fn median_image(img: &Image, r: usize) -> Image {
@@ -359,14 +372,8 @@ pub(crate) fn median_image(img: &Image, r: usize) -> Image {
         let mut hist = vec![0u32; NB * 4];
         let mut med = [0usize; 4];
         let mut lt = [0usize; 4];
-        let at = |x: i64, y: i64| q[y.clamp(0, h as i64 - 1) as usize * w + x.clamp(0, w as i64 - 1) as usize];
-        let col = |x: i64, f: &mut dyn FnMut([u16; 4])| {
-            for dy in -ri..=ri {
-                f(at(x, y as i64 + dy));
-            }
-        };
         for dx in -ri..=ri {
-            col(dx, &mut |v| {
+            median_col(&q, w, h, dx, y, ri, |v| {
                 for c in 0..4 {
                     hist[c * NB + v[c] as usize] += 1;
                 }
@@ -391,7 +398,7 @@ pub(crate) fn median_image(img: &Image, r: usize) -> Image {
             if x + 1 == w {
                 break;
             }
-            col(x as i64 - ri, &mut |v| {
+            median_col(&q, w, h, x as i64 - ri, y, ri, |v| {
                 for c in 0..4 {
                     hist[c * NB + v[c] as usize] -= 1;
                     if (v[c] as usize) < med[c] {
@@ -399,7 +406,7 @@ pub(crate) fn median_image(img: &Image, r: usize) -> Image {
                     }
                 }
             });
-            col(x as i64 + ri + 1, &mut |v| {
+            median_col(&q, w, h, x as i64 + ri + 1, y, ri, |v| {
                 for c in 0..4 {
                     hist[c * NB + v[c] as usize] += 1;
                     if (v[c] as usize) < med[c] {
@@ -851,6 +858,107 @@ mod tests {
         for p in &out.img.data {
             assert!((p[0] - 0.5).abs() < 2.0 / 511.0, "{p:?}");
         }
+    }
+
+    /// Median before the per-sample `&mut dyn FnMut` became generic (the oracle).
+    fn median_image_ref(img: &Image, r: usize) -> Image {
+        let (w, h) = (img.width as usize, img.height as usize);
+        if r == 0 || w == 0 || h == 0 {
+            return img.clone();
+        }
+        let q: Vec<[u16; 4]> = img.data.par_iter().map(|p| [quant(p[0]), quant(p[1]), quant(p[2]), quant(p[3])]).collect();
+        let n = (2 * r + 1) * (2 * r + 1);
+        let half = n / 2;
+        let ri = r as i64;
+        let mut out = Image::new(img.width, img.height);
+        out.rows_mut().for_each(|(y, row)| {
+            let mut hist = vec![0u32; NB * 4];
+            let mut med = [0usize; 4];
+            let mut lt = [0usize; 4];
+            let at = |x: i64, y: i64| q[y.clamp(0, h as i64 - 1) as usize * w + x.clamp(0, w as i64 - 1) as usize];
+            let col = |x: i64, f: &mut dyn FnMut([u16; 4])| {
+                for dy in -ri..=ri {
+                    f(at(x, y as i64 + dy));
+                }
+            };
+            for dx in -ri..=ri {
+                col(dx, &mut |v| {
+                    for c in 0..4 {
+                        hist[c * NB + v[c] as usize] += 1;
+                    }
+                });
+            }
+            let rebalance = |hist: &[u32], med: &mut [usize; 4], lt: &mut [usize; 4]| {
+                for c in 0..4 {
+                    let hc = &hist[c * NB..(c + 1) * NB];
+                    while lt[c] > half {
+                        med[c] -= 1;
+                        lt[c] -= hc[med[c]] as usize;
+                    }
+                    while lt[c] + hc[med[c]] as usize <= half {
+                        lt[c] += hc[med[c]] as usize;
+                        med[c] += 1;
+                    }
+                }
+            };
+            rebalance(&hist, &mut med, &mut lt);
+            for x in 0..w {
+                row[x] = med.map(|m| m as f32 / (NB - 1) as f32);
+                if x + 1 == w {
+                    break;
+                }
+                col(x as i64 - ri, &mut |v| {
+                    for c in 0..4 {
+                        hist[c * NB + v[c] as usize] -= 1;
+                        if (v[c] as usize) < med[c] {
+                            lt[c] -= 1;
+                        }
+                    }
+                });
+                col(x as i64 + ri + 1, &mut |v| {
+                    for c in 0..4 {
+                        hist[c * NB + v[c] as usize] += 1;
+                        if (v[c] as usize) < med[c] {
+                            lt[c] += 1;
+                        }
+                    }
+                });
+                rebalance(&hist, &mut med, &mut lt);
+            }
+        });
+        out
+    }
+
+    #[test]
+    fn median_is_bit_identical_to_reference() {
+        let (w, h) = (23u32, 17u32);
+        let mut img = Image::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let a = effectcraft_raster::hash_noise(x, y, 3);
+                img.set(x, y, [effectcraft_raster::hash_noise(x, y, 4) * a, 0.5 * a, a * a, a]);
+            }
+        }
+        for r in [1usize, 2, 5, 12, 30] {
+            assert_eq!(median_image(&img, r), median_image_ref(&img, r), "r={r}");
+        }
+    }
+
+    /// Rough timing: `cargo test -p effectcraft-effects --release --lib median_timing -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn median_timing() {
+        let mut img = Image::new(1920, 1080);
+        for (i, p) in img.data.iter_mut().enumerate() {
+            let v = effectcraft_raster::hash_noise(i as u32, 0, 1);
+            *p = [v, v * 0.5, v * 0.25, 1.0];
+        }
+        let t = std::time::Instant::now();
+        std::hint::black_box(median_image_ref(&img, 10));
+        let slow = t.elapsed();
+        let t = std::time::Instant::now();
+        std::hint::black_box(median_image(&img, 10));
+        eprintln!("median r10 1080p: {slow:?} -> {:?}", t.elapsed());
     }
 
     #[test]

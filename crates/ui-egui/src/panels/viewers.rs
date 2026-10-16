@@ -91,7 +91,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, id: u32, rect: Rect) {
     p.rect_filled(rect, 0.0, t.pasteboard);
     let resp = ui.interact(rect, egui::Id::new(("passive-viewer", id)), Sense::click()).on_hover_text(tr("Click to make this viewer active"));
     app.auto.add(&format!("viewers.{id}"), rect, "Composition viewer (click to make it active)");
-    match comp_of(app, id).and_then(|cid| Some((cid, app.session.project.comp(cid)?.clone()))) {
+    match comp_of(app, id).and_then(|cid| Some((cid, app.session.project.comp_arc(cid)?))) {
         Some((cid, c)) => {
             let (cw, ch) = ((c.width.max(1) as f64 * c.pixel_aspect.max(0.01)) as f32, c.height.max(1) as f32);
             let fit = ((rect.width() - 24.0) / cw).min((rect.height() - 24.0) / ch).max(0.01);
@@ -164,12 +164,16 @@ fn set_texture(
         (FrameImage::Cpu(img), Some((_, PassiveTexture::Cpu(mut h))))
             if h.size() == crate::frames::fitted_size(img.size, crate::frames::max_texture_side(ctx)) =>
         {
-            h.set(crate::frames::fit_texture((*img).clone(), crate::frames::max_texture_side(ctx)), opts);
+            h.set(crate::frames::fit_texture_shared(&img, crate::frames::max_texture_side(ctx), 1), opts);
             PassiveTexture::Cpu(h)
         }
         (FrameImage::Cpu(img), old) => {
             free(app, old.map(|(_, t)| t));
-            PassiveTexture::Cpu(crate::frames::load_fitted(ctx, format!("viewer-{id}"), (*img).clone(), opts))
+            PassiveTexture::Cpu(ctx.load_texture(
+                format!("viewer-{id}"),
+                crate::frames::fit_texture_shared(&img, crate::frames::max_texture_side(ctx), 1),
+                opts,
+            ))
         }
         (FrameImage::Gpu(f), old) => {
             let Some(rs) = &app.wgpu else { return };

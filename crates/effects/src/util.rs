@@ -59,12 +59,27 @@ impl Plane {
         let bot = c + (d - c) * tx;
         top + (bot - top) * ty
     }
+    /// Swap rows and columns, in 32×32 tiles so both the reads and the writes stay in cache.
     pub fn transpose(&self) -> Plane {
+        const T: usize = 32;
         let (w, h) = (self.w, self.h);
         let mut out = Plane::new(h, w);
-        out.data.par_chunks_mut(h.max(1)).enumerate().for_each(|(x, col)| {
-            for y in 0..h {
-                col[y] = self.data[y * w + x];
+        if w == 0 || h == 0 {
+            return out;
+        }
+        // Each task fills `T` output rows (source columns `x0..x0 + T`), one tile of source
+        // rows at a time.
+        out.data.par_chunks_mut(h * T).enumerate().for_each(|(bi, cols)| {
+            let x0 = bi * T;
+            for y0 in (0..h).step_by(T) {
+                for (y, src) in self.data.chunks(w).enumerate().skip(y0).take(T) {
+                    let Some(src) = src.get(x0..) else { break };
+                    for (col, &v) in cols.chunks_mut(h).zip(src) {
+                        if let Some(o) = col.get_mut(y) {
+                            *o = v;
+                        }
+                    }
+                }
             }
         });
         out
@@ -752,6 +767,48 @@ pub fn poly_point_at(pts: &[[f64; 2]], closed: bool, s: f64) -> ([f64; 2], [f64;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The column-by-column transpose the tiled one replaced.
+    fn transpose_ref(p: &Plane) -> Plane {
+        let (w, h) = (p.w, p.h);
+        let mut out = Plane::new(h, w);
+        out.data.par_chunks_mut(h.max(1)).enumerate().for_each(|(x, col)| {
+            for y in 0..h {
+                col[y] = p.data[y * w + x];
+            }
+        });
+        out
+    }
+
+    #[test]
+    fn tiled_transpose_matches_reference() {
+        for (w, h) in [(1, 1), (1, 70), (70, 1), (31, 33), (32, 32), (64, 65), (100, 37), (257, 129), (0, 5), (5, 0)] {
+            let p = Plane { w, h, data: (0..w * h).map(|i| i as f32 * 0.5 - 3.0).collect() };
+            let t = p.transpose();
+            assert_eq!(t, transpose_ref(&p), "{w}x{h}");
+            assert_eq!(t.transpose(), p, "{w}x{h} round trip");
+        }
+    }
+
+    /// Rough timing: `cargo test -p effectcraft-effects --release --lib transpose_timing -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn transpose_timing() {
+        let p = Plane { w: 3840, h: 2160, data: (0..3840 * 2160).map(|i| (i % 977) as f32).collect() };
+        let t = std::time::Instant::now();
+        for _ in 0..10 {
+            std::hint::black_box(transpose_ref(&p));
+        }
+        let slow = t.elapsed() / 10;
+        let t = std::time::Instant::now();
+        for _ in 0..10 {
+            std::hint::black_box(p.transpose());
+        }
+        eprintln!("transpose 3840x2160: {slow:?} -> {:?}", t.elapsed() / 10);
+        let t = std::time::Instant::now();
+        std::hint::black_box(gauss_plane(&p, 8.0, 8.0));
+        eprintln!("gauss_plane sigma 8: {:?}", t.elapsed());
+    }
 
     #[test]
     fn sim_cache_is_seek_consistent() {

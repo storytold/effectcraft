@@ -19,7 +19,8 @@ pub mod variable;
 pub use kurbo;
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::hash::{Hash, Hasher};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use effectcraft_keyframe::{BaselineOption, CharStyle, Composer, Direction, Justify, Kerning, ParaStyle, TextDoc};
 pub use fonts::{FaceId, Resolved, families, resolve};
@@ -49,11 +50,12 @@ impl OutlinePen for Pen {
     }
 }
 
-/// Glyph outline in font units (y up), cached.
+/// Glyph outline in font units (y up), cached. Reads share a read lock, so text laid out on
+/// several threads doesn't queue on every glyph; outlines are shared, never copied.
 pub(crate) fn outline_units(face: FaceId, gid: u32) -> Option<Arc<BezPath>> {
-    static C: OnceLock<Mutex<HashMap<(FaceId, u32), Option<Arc<BezPath>>>>> = OnceLock::new();
+    static C: OnceLock<RwLock<HashMap<(FaceId, u32), Option<Arc<BezPath>>>>> = OnceLock::new();
     let c = C.get_or_init(Default::default);
-    if let Some(v) = c.lock().unwrap_or_else(|e| e.into_inner()).get(&(face, gid)) {
+    if let Some(v) = c.read().unwrap_or_else(|e| e.into_inner()).get(&(face, gid)) {
         return v.clone();
     }
     let f = fonts::face(face);
@@ -63,7 +65,7 @@ pub(crate) fn outline_units(face: FaceId, gid: u32) -> Option<Arc<BezPath>> {
         g.draw(DrawSettings::unhinted(Size::unscaled(), LocationRef::default()), &mut pen).ok()?;
         Some(Arc::new(pen.0))
     });
-    let mut m = c.lock().unwrap_or_else(|e| e.into_inner());
+    let mut m = c.write().unwrap_or_else(|e| e.into_inner());
     if m.len() > 50_000 {
         m.clear();
     }
@@ -76,7 +78,8 @@ pub(crate) fn outline_units(face: FaceId, gid: u32) -> Option<Arc<BezPath>> {
 pub fn glyph_outline(g: &Glyph) -> BezPath {
     let units = if g.variations == 0 { outline_units(g.face, g.id) } else { variable::outline_units_at(g.face, g.id, &variable::coords(g.variations)) };
     let Some(units) = units else { return BezPath::new() };
-    glyph_affine(g) * (*units).clone()
+    // Transformed straight from the shared outline (one allocation, no copy first).
+    glyph_affine(g) * &*units
 }
 
 /// Font units → the glyph's outline in pixels (size, horizontal / vertical scale, faux italic).
@@ -238,6 +241,64 @@ pub fn layout_doc(doc: &TextDoc) -> TextLayout {
     let width = doc.box_size.map(|b| if doc.vertical { b[1] } else { b[0] } as f32);
     let paras: Vec<ParagraphStyle> = doc.paras().iter().map(|p| paragraph_style(p, width)).collect();
     let lay = layout::layout_rich(text, &runs, &paras);
+    let key = DocKey {
+        lay: lay.clone(),
+        styles,
+        vertical: doc.vertical,
+        box_size: doc.box_size.map(|b| b.map(f64::to_bits)),
+        box_pos: doc.box_pos.map(f64::to_bits),
+    };
+    let hash = key.hash();
+    let hit = doc_cache().lock().unwrap_or_else(|e| e.into_inner()).get(hash).filter(|(k, _)| *k == key).map(|(_, v)| v.clone());
+    if let Some(out) = hit {
+        return (*out).clone();
+    }
+    let out = build_doc(doc, text, byte_of_char, key.styles.clone(), lay);
+    let bytes = out.approx_bytes();
+    let out = Arc::new(out);
+    doc_cache().lock().unwrap_or_else(|e| e.into_inner()).insert(hash, (key, out.clone()), bytes);
+    (*out).clone()
+}
+
+/// Everything [`build_doc`] reads besides the text, which the shaped layout is keyed by.
+struct DocKey {
+    /// The cached shaping; a re-shape (after eviction) is a different `Arc` and misses.
+    lay: Arc<Layout>,
+    styles: Vec<CharStyle>,
+    vertical: bool,
+    box_size: Option<[u64; 2]>,
+    box_pos: [u64; 2],
+}
+
+impl PartialEq for DocKey {
+    fn eq(&self, o: &Self) -> bool {
+        Arc::ptr_eq(&self.lay, &o.lay) && self.vertical == o.vertical && self.box_size == o.box_size && self.box_pos == o.box_pos && self.styles == o.styles
+    }
+}
+
+impl DocKey {
+    fn hash(&self) -> u64 {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (Arc::as_ptr(&self.lay) as usize).hash(&mut h);
+        // Debug prints every field (floats round-trip exactly); equality is checked on a hit.
+        format!("{:?}", self.styles).hash(&mut h);
+        (self.vertical, self.box_size, self.box_pos).hash(&mut h);
+        h.finish()
+    }
+}
+
+/// Finished text geometry (glyph outlines in layer space): 64 MiB.
+const DOC_CACHE_BYTES: usize = 64 << 20;
+
+#[allow(clippy::type_complexity)]
+fn doc_cache() -> &'static Mutex<layout::ByteLru<(DocKey, Arc<TextLayout>)>> {
+    static C: OnceLock<Mutex<layout::ByteLru<(DocKey, Arc<TextLayout>)>>> = OnceLock::new();
+    C.get_or_init(|| Mutex::new(layout::ByteLru::new(DOC_CACHE_BYTES)))
+}
+
+/// [`layout_doc`] past shaping: glyph outlines, indices and bounds in layer space.
+fn build_doc(doc: &TextDoc, text: &str, byte_of_char: Vec<usize>, styles: Vec<CharStyle>, lay: Arc<Layout>) -> TextLayout {
+    let nchars = byte_of_char.len().saturating_sub(1);
     let to_layer = match (doc.vertical, doc.box_size) {
         (false, Some(_)) => Affine::translate((doc.box_pos[0], doc.box_pos[1])),
         (false, None) => Affine::IDENTITY,
@@ -324,11 +385,11 @@ pub fn layout_doc(doc: &TextDoc) -> TextLayout {
                         let rc = ROT90 * c;
                         Affine::translate((rc.x - c.x, rc.y - c.y))
                     };
-                    path = t * path;
+                    path.apply_affine(t);
                     outline_xf = t * outline_xf;
                 } else {
                     // Roman characters turn on their side with the column.
-                    path = ROT90 * path;
+                    path.apply_affine(ROT90);
                     outline_xf = ROT90 * outline_xf;
                 }
             }
@@ -367,7 +428,182 @@ pub fn layout_doc(doc: &TextDoc) -> TextLayout {
     out
 }
 
+#[cfg(test)]
+mod reference {
+    //! The text geometry path before caching (outline cloned then transformed, layout rebuilt on
+    //! every call): the oracle the cached [`super::layout_doc`] must match exactly.
+    use super::*;
+
+    fn glyph_outline(g: &Glyph) -> BezPath {
+        let units = if g.variations == 0 { outline_units(g.face, g.id) } else { variable::outline_units_at(g.face, g.id, &variable::coords(g.variations)) };
+        let Some(units) = units else { return BezPath::new() };
+        glyph_affine(g) * (*units).clone()
+    }
+
+    pub(crate) fn layout_doc(doc: &TextDoc) -> TextLayout {
+        let text = doc.text.as_str();
+        let byte_of_char: Vec<usize> = text.char_indices().map(|(b, _)| b).chain(std::iter::once(text.len())).collect();
+        let nchars = byte_of_char.len() - 1;
+        let mut runs = Vec::new();
+        let mut styles = Vec::new();
+        let mut ci = 0;
+        for r in doc.runs() {
+            let a = byte_of_char[ci.min(nchars)];
+            ci += r.len;
+            let b = byte_of_char[ci.min(nchars)];
+            let mut runtime_style = text_style(&r.style);
+            runtime_style.vertical = doc.vertical && !r.style.tate_chu_yoko;
+            runs.push((a..b, runtime_style));
+            styles.push(r.style);
+        }
+        let width = doc.box_size.map(|b| if doc.vertical { b[1] } else { b[0] } as f32);
+        let paras: Vec<ParagraphStyle> = doc.paras().iter().map(|p| paragraph_style(p, width)).collect();
+        let lay = layout::layout_rich(text, &runs, &paras);
+        let to_layer = match (doc.vertical, doc.box_size) {
+            (false, Some(_)) => Affine::translate((doc.box_pos[0], doc.box_pos[1])),
+            (false, None) => Affine::IDENTITY,
+            (true, Some(b)) => Affine::translate((doc.box_pos[0] + b[0], doc.box_pos[1])) * ROT90,
+            (true, None) => ROT90,
+        };
+        let mut out = TextLayout { lines: lay.lines.len(), to_layer, vertical: doc.vertical, ..Default::default() };
+        // Map byte clusters → char/word indices.
+        let mut char_of_byte = vec![0usize; text.len() + 1];
+        let mut word_of_char = Vec::new();
+        let mut nospace_of_char = Vec::new();
+        let mut words = 0usize;
+        let mut in_word = false;
+        let mut nospace = 0usize;
+        for (ci, (b, ch)) in text.char_indices().enumerate() {
+            for k in b..b + ch.len_utf8() {
+                char_of_byte[k] = ci;
+            }
+            let space = ch.is_whitespace();
+            if !space && !in_word {
+                words += 1;
+            }
+            in_word = !space;
+            word_of_char.push(words.saturating_sub(1));
+            nospace_of_char.push(nospace);
+            if !space {
+                nospace += 1;
+            }
+        }
+        char_of_byte[text.len()] = nchars;
+        out.chars = nchars;
+        out.chars_no_space = nospace;
+        out.words = words;
+        let mut b = [f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY];
+        for (li, line) in lay.lines.iter().enumerate() {
+            let o = to_layer * Point::new(line.x as f64, line.baseline as f64);
+            out.line_boxes.push([o.x, o.y, line.width as f64, (line.ascent + line.descent) as f64]);
+            // Vertical type: Tate-Chu-Yoko groups (consecutive glyphs of tcy runs) take one em of
+            // the column; everything after them moves up by the rest of their width.
+            let tcy = |gi: usize| doc.vertical && styles.get(lay.glyphs[gi].run).is_some_and(|s| s.tate_chu_yoko);
+            let mut shift = 0.0f64;
+            let mut group: Option<(f64, f64, f64)> = None; // (start x, width, em) in layout space
+            let line_glyphs: Vec<usize> = line.glyphs.clone().collect();
+            for (k, gi) in line_glyphs.iter().copied().enumerate() {
+                let g = &lay.glyphs[gi];
+                let ci = char_of_byte.get(g.cluster).copied().unwrap_or(0);
+                let src = text[g.cluster..].chars().next().unwrap_or(' ');
+                let st = styles.get(g.run);
+                let ch = if st.is_some_and(|s| s.all_caps) { src.to_uppercase().next().unwrap_or(src) } else { src };
+                let mut path = glyph_outline(g);
+                let mut outline_xf = glyph_affine(g);
+                let next_x = lay.glyphs.get(gi + 1).filter(|_| line.glyphs.contains(&(gi + 1))).map(|n| n.x).unwrap_or(line.x + line.width);
+                let advance = (next_x - g.x) as f64;
+                let mut origin = to_layer * Point::new(g.x as f64 - shift, g.y as f64);
+                if doc.vertical && tcy(gi) {
+                    // Start of a group: measure it.
+                    if group.is_none() {
+                        let mut w = 0.0;
+                        for &gj in line_glyphs[k..].iter().take_while(|&&gj| tcy(gj)) {
+                            let nx = lay.glyphs.get(gj + 1).filter(|_| line.glyphs.contains(&(gj + 1))).map(|n| n.x).unwrap_or(line.x + line.width);
+                            w += (nx - lay.glyphs[gj].x) as f64;
+                        }
+                        group = Some((g.x as f64, w, g.size as f64));
+                    }
+                    let (x0, w, em) = group.unwrap_or((g.x as f64, advance, g.size as f64));
+                    // Upright and horizontal, centred across the column in an em-high cell.
+                    let centre = to_layer * Point::new(x0 - shift + em / 2.0, g.y as f64 - 0.35 * em);
+                    origin = Point::new(centre.x - w / 2.0 + (g.x as f64 - x0), centre.y + 0.35 * em);
+                    if line_glyphs.get(k + 1).is_none_or(|&n| !tcy(n)) {
+                        shift += w - em;
+                        group = None;
+                    }
+                } else if doc.vertical {
+                    let upright = is_cjk(src) || st.is_some_and(|s| s.vertical_roman_upright);
+                    if upright {
+                        // Anchor vertical forms using their own vertical origin and horizontal
+                        // advance, not the next glyph's pen (which includes tracking/justification).
+                        let font = fonts::face(g.face);
+                        let metrics = is_cjk(src).then(|| font.vertical_origin(g.id, g.size)).flatten();
+                        let t = if let Some((width, top)) = metrics {
+                            Affine::translate((0.35 * g.size as f64 - width * g.h_scale as f64 / 2.0, top * g.v_scale as f64))
+                        } else {
+                            let c = Point::new(advance / 2.0, -0.35 * g.size as f64);
+                            let rc = ROT90 * c;
+                            Affine::translate((rc.x - c.x, rc.y - c.y))
+                        };
+                        path = t * path;
+                        outline_xf = t * outline_xf;
+                    } else {
+                        // Roman characters turn on their side with the column.
+                        path = ROT90 * path;
+                        outline_xf = ROT90 * outline_xf;
+                    }
+                }
+                if let Some(r) = (!path.elements().is_empty()).then(|| kurbo::Shape::bounding_box(&path)) {
+                    b[0] = b[0].min(origin.x + r.x0);
+                    b[1] = b[1].min(origin.y + r.y0);
+                    b[2] = b[2].max(origin.x + r.x1);
+                    b[3] = b[3].max(origin.y + r.y1);
+                }
+                out.glyphs.push(CharGlyph {
+                    path,
+                    origin,
+                    advance,
+                    char_index: ci,
+                    char_index_no_space: nospace_of_char.get(ci).copied().unwrap_or(0),
+                    word_index: word_of_char.get(ci).copied().unwrap_or(0),
+                    line_index: li,
+                    is_space: src.is_whitespace(),
+                    ch,
+                    synth_bold: g.synth_bold,
+                    size: g.size as f64,
+                    run: g.run,
+                    face: g.face,
+                    gid: g.id,
+                    outline_xf,
+                    variations: variable::coords(g.variations).to_vec(),
+                });
+            }
+        }
+        if b[0].is_finite() {
+            out.bounds = b;
+        }
+        out.styles = styles;
+        out.byte_of_char = byte_of_char;
+        out.layout = lay;
+        out
+    }
+}
+
 impl TextLayout {
+    /// Rough size (the shared paragraph layout included), for cache budgets.
+    fn approx_bytes(&self) -> usize {
+        let glyphs: usize = self
+            .glyphs
+            .iter()
+            .map(|g| std::mem::size_of::<CharGlyph>() + std::mem::size_of_val(g.path.elements()) + g.variations.iter().map(|v| 32 + v.0.len()).sum::<usize>())
+            .sum();
+        std::mem::size_of::<TextLayout>()
+            + glyphs
+            + self.line_boxes.len() * 32
+            + self.styles.len() * std::mem::size_of::<CharStyle>()
+            + self.byte_of_char.len() * std::mem::size_of::<usize>()
+            + self.layout.approx_bytes()
+    }
     /// Character index of byte offset `b`.
     pub fn char_of_byte(&self, b: usize) -> usize {
         self.byte_of_char.partition_point(|x| *x < b).min(self.chars)
@@ -446,6 +682,112 @@ pub fn char_glyph(doc: &TextDoc, ch: char) -> (BezPath, f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Varied documents: point and paragraph text, several lines and paragraphs, kerning pairs,
+    /// sizes, families, mixed runs, caps, faux styles, vertical type and Hindi digits.
+    fn geometry_docs() -> Vec<TextDoc> {
+        let mut v = Vec::new();
+        v.push(TextDoc::plain("AVAWAY To. Wa Yo"));
+        v.push(TextDoc { text: "First line\nSecond, longer line\n\nfourth".into(), size: 48.0, ..TextDoc::plain("") });
+        v.push(TextDoc {
+            text: "Paragraph text wraps across the box width when it gets long enough to break.".into(),
+            box_size: Some([220.0, 300.0]),
+            box_pos: [-110.0, -150.0],
+            justify: Justify::JustifyLastLeft,
+            ..TextDoc::plain("")
+        });
+        for (font, size) in [("Noto Serif", 13.0), ("JetBrains Mono", 72.5), ("Inter", 200.0)] {
+            v.push(TextDoc { text: "Kerning: AV, To, LT, 1/2 fi fl".into(), font: font.into(), size, tracking: 25.0, ..TextDoc::plain("") });
+        }
+        let mut mixed = TextDoc::plain("Mixed Styles here and there");
+        mixed.apply_style(0..5, |s| {
+            s.size = 90.0;
+            s.faux_italic = true;
+        });
+        mixed.apply_style(6..12, |s| {
+            s.font = "Noto Serif".into();
+            s.all_caps = true;
+            s.h_scale = 140.0;
+            s.baseline_shift = 6.0;
+        });
+        mixed.apply_style(13..18, |s| {
+            s.kerning = Kerning::Optical;
+            s.v_scale = 60.0;
+        });
+        v.push(mixed);
+        v.push(TextDoc { text: "縦書き Roman 12".into(), vertical: true, ..TextDoc::plain("") });
+        v.push(TextDoc { text: "縦書きの段落テキスト abc".into(), vertical: true, box_size: Some([120.0, 200.0]), ..TextDoc::plain("") });
+        v.push(TextDoc { text: "".into(), ..TextDoc::plain("") });
+        v
+    }
+
+    #[test]
+    fn cached_layout_doc_matches_the_uncached_reference() {
+        for doc in geometry_docs() {
+            let want = format!("{:?}", reference::layout_doc(&doc));
+            // First call builds and caches; the second is a hit.
+            assert_eq!(format!("{:?}", layout_doc(&doc)), want, "{:?}", doc.text);
+            assert_eq!(format!("{:?}", layout_doc(&doc)), want, "{:?} (cached)", doc.text);
+        }
+    }
+
+    #[test]
+    fn layout_doc_cache_tells_apart_styles_shaping_ignores() {
+        // Fill and stroke don't change shaping, but `styles` carries them out.
+        let a = TextDoc::plain("Colour");
+        let mut b = a.clone();
+        b.apply_style_all(|s| s.fill = [0.1, 0.2, 0.3, 1.0]);
+        assert_eq!(layout_doc(&a).styles[0].fill, a.base_style().fill);
+        assert_eq!(layout_doc(&b).styles[0].fill, [0.1, 0.2, 0.3, 1.0]);
+        // The box position moves geometry without re-shaping.
+        let p = TextDoc { box_size: Some([300.0, 100.0]), box_pos: [0.0, 0.0], ..TextDoc::plain("Boxed") };
+        let q = TextDoc { box_pos: [40.0, 0.0], ..p.clone() };
+        let (lp, lq) = (layout_doc(&p), layout_doc(&q));
+        assert_eq!(lq.glyphs[0].origin.x - lp.glyphs[0].origin.x, 40.0);
+    }
+
+    #[test]
+    fn byte_lru_stays_within_its_budget_and_keeps_recent_entries() {
+        let mut c = layout::ByteLru::new(1000);
+        for k in 0..100u64 {
+            c.insert(k, k, 30);
+            // Keep entry 0 hot.
+            assert_eq!(c.get(0), Some(&0));
+            assert!(c.bytes() <= 1000);
+        }
+        assert_eq!(c.get(0), Some(&0));
+        assert_eq!(c.get(99), Some(&99));
+        assert_eq!(c.get(1), None);
+        assert!(c.len() <= 34);
+        // Replacing an entry re-counts its bytes; an oversized value isn't kept.
+        c.insert(99, 7, 500);
+        assert_eq!(c.get(99), Some(&7));
+        assert!(c.bytes() <= 1000);
+        c.insert(5000, 1, 2000);
+        assert_eq!(c.get(5000), None);
+    }
+
+    #[test]
+    #[ignore = "timing, run by hand: cargo test -p effectcraft-text --release --lib -- --ignored --nocapture timing"]
+    fn layout_doc_timing() {
+        let docs = geometry_docs();
+        let n = 200;
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            for d in &docs {
+                std::hint::black_box(reference::layout_doc(d));
+            }
+        }
+        let old = t.elapsed();
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            for d in &docs {
+                std::hint::black_box(layout_doc(d));
+            }
+        }
+        let new = t.elapsed();
+        eprintln!("layout_doc x{}: uncached {old:?}, cached {new:?}", n * docs.len());
+    }
 
     /// #1063 (item 8): After Effects scripts use CR for Source Text line breaks.
     #[test]

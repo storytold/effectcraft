@@ -4,7 +4,11 @@
 //! maths is `effectcraft_raster::scopes`; agents read the same numbers with `scopes.analyze`.
 
 use crate::i18n::tr;
+use std::sync::Arc;
+
 use effectcraft_engine::commands::panels_cmds::scope_frame;
+use effectcraft_engine::project::ItemId;
+use effectcraft_engine::raster::Image;
 use effectcraft_engine::raster::scopes::{self, ColorStandard, Scope, ScopeKind, ScopeOpts};
 use egui::{Align2, Color32, Rect, Stroke, pos2, vec2};
 use serde::{Deserialize, Serialize};
@@ -31,7 +35,6 @@ impl Default for ScopesState {
 
 const STANDARDS: [&str; 3] = ["Rec. 601", "Rec. 709", "Rec. 2020"];
 
-#[derive(Clone)]
 struct Cached {
     key: (u64, u64, i64, String, u32),
     scope: Scope,
@@ -95,21 +98,35 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         height: if kind.is_vectorscope() { size } else { (plot.height() as u32).clamp(32, 512) },
     };
     let time = app.session.time();
-    let key = (app.session.revision, cid.0, time.0, format!("{}{}{}{}{}x{}", st.scope, st.standard, st.float, st.clamp, o.width, o.height), 0);
     let ctx = ui.ctx().clone();
     let id = egui::Id::new("scopes-cache");
-    let cached: Option<Cached> = ctx.data(|d| d.get_temp(id));
+    // Shared, not copied: the scope's planes are megabytes.
+    let cached: Option<Arc<Cached>> = ctx.data(|d| d.get_temp(id));
+    let opts_key = format!("{}{}{}{}{}x{}", st.scope, st.standard, st.float, st.clamp, o.width, o.height);
+    // While playing, the scopes read the frame on screen (the comp isn't rendered again on the
+    // UI thread for every frame); paused, the comp frame at the current time in float.
+    let shown = app.playback.playing.then(|| playing_frame(app, &ctx, cid)).flatten();
+    let key = match &shown {
+        Some(img) => (app.session.revision, cid.0, Arc::as_ptr(img) as usize as i64, opts_key, 1),
+        None => (app.session.revision, cid.0, time.0, opts_key, 0),
+    };
     let cached = match cached {
         Some(c) if c.key == key => c,
+        // Playing without a frame to read: the last scopes stay up.
+        Some(c) if app.playback.playing && shown.is_none() && (c.key.1, &c.key.3) == (key.1, &key.3) => c,
         _ => {
-            let Some(frame) = scope_frame(&app.session, cid, time, 480) else { return };
+            let frame = match &shown {
+                Some(img) => app.session.project.comp(cid).map(|c| frame_of(img, c.background, 480)),
+                None => scope_frame(&app.session, cid, time, 480),
+            };
+            let Some(frame) = frame else { return };
             let scope = scopes::compute(&frame, kind, &o);
             let tex = (kind != ScopeKind::Histogram).then(|| {
                 let mono = matches!(kind, ScopeKind::WaveformLuma | ScopeKind::VectorscopeYuv | ScopeKind::VectorscopeHls);
                 let img = egui::ColorImage::from_rgba_unmultiplied([scope.width as usize, scope.height as usize], &tint(&scope, mono));
                 ctx.load_texture("lumetri-scope", img, egui::TextureOptions::LINEAR)
             });
-            let c = Cached { key, scope, tex };
+            let c = Arc::new(Cached { key, scope, tex });
             ctx.data_mut(|d| d.insert_temp(id, c.clone()));
             c
         }
@@ -120,6 +137,32 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     } else {
         histogram(&p, plot, &cached.scope);
     }
+}
+
+/// The viewer's frame of `comp` while it plays, when it shows the whole comp (no region of
+/// interest or Extended Viewer area).
+fn playing_frame(app: &EffectcraftApp, ctx: &egui::Context, comp: ItemId) -> Option<Arc<egui::ColorImage>> {
+    let c = app.session.project.comp(comp)?;
+    let (_, k) = app.viewer_shown.as_ref()?;
+    let whole = [0.0, 0.0, c.width as f64, c.height as f64];
+    (k.comp == comp.0 && super::viewer_tools::shown_region(ctx, [c.width as f32, c.height as f32]) == whole).then(|| app.viewer_image.clone()).flatten()
+}
+
+/// What [`scope_frame`] gives, from a viewer frame (premultiplied 8-bit): over the comp
+/// background `bg`, sampled down to at most `max_side` pixels on the long side.
+fn frame_of(img: &egui::ColorImage, bg: [f32; 3], max_side: usize) -> Image {
+    let [w, h] = img.size;
+    let k = w.max(h).div_ceil(max_side.max(1)).max(1);
+    let (ow, oh) = (w.div_ceil(k), h.div_ceil(k));
+    let mut out = Image::new(ow as u32, oh as u32);
+    for (i, px) in out.data.iter_mut().enumerate() {
+        let (x, y) = ((i % ow.max(1)) * k, (i / ow.max(1)) * k);
+        let Some(c) = img.pixels.get(y * w + x) else { continue };
+        let [r, g, b, a] = c.to_array().map(|v| v as f32 / 255.0);
+        let t = 1.0 - a;
+        *px = [r + bg[0] * t, g + bg[1] * t, b + bg[2] * t, 1.0];
+    }
+    out
 }
 
 /// Trace colours: green-tinted mono for luma/vectorscope, per-channel colours otherwise.
@@ -196,5 +239,22 @@ fn histogram(p: &egui::Painter, plot: Rect, s: &Scope) {
                 p.line_segment([pts[i - 1], *q], Stroke::new(1.0, cols[c]));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A viewer frame reads as `scope_frame` would: composited over the background, at most
+    /// `max_side` on the long side.
+    #[test]
+    fn viewer_frames_read_over_the_background() {
+        let px = vec![egui::Color32::from_rgba_premultiplied(128, 0, 0, 128); 1000 * 500];
+        let img = egui::ColorImage::new([1000, 500], px);
+        let f = frame_of(&img, [0.0, 0.0, 1.0], 480);
+        assert_eq!((f.width, f.height), (334, 167));
+        let p = f.data[0];
+        assert!((p[0] - 128.0 / 255.0).abs() < 1e-6 && p[1] == 0.0 && (p[2] - 127.0 / 255.0).abs() < 1e-6 && p[3] == 1.0, "{p:?}");
     }
 }

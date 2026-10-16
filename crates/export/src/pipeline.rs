@@ -2,12 +2,14 @@
 //! guide layers, frame blending, motion blur), field rendering with 3:2 pulldown, colour depth,
 //! the Output Module's crop and resize, alpha handling, storage overflow and the render log.
 
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{Receiver, Sender, SyncSender};
+use std::sync::{Arc, Mutex};
 
 use effectcraft_project::render_queue::{
-    AlphaMode, Channels, ColorDepth, CurrentOrOff, EffectsMode, FrameSample, RenderLog, ResizeQuality, SwitchOverride, log_path,
+    AlphaMode, Channels, ColorDepth, CurrentOrOff, EffectsMode, FrameSample, RenderLog, RenderSettings, ResizeQuality, SwitchOverride, TimeSpan, log_path,
 };
-use effectcraft_project::{Comp, Project};
+use effectcraft_project::{Comp, ItemId, Project};
 use effectcraft_raster::Image;
 use effectcraft_render::{Backend, LayerCache, RenderOpts, Renderer};
 use effectcraft_time::Tick;
@@ -84,6 +86,9 @@ pub(crate) struct Cx<'a> {
     /// Files written to an overflow folder.
     pub overflowed: Mutex<Vec<String>>,
     written: Mutex<Vec<String>>,
+    /// Frames rendered once for several output modules ([`fan_out`]): this module's job takes
+    /// them from here instead of rendering them.
+    feed: Option<Feed>,
 }
 
 impl<'a> std::ops::Deref for Cx<'a> {
@@ -123,15 +128,122 @@ pub(crate) fn apply_overrides(p: &mut Project, job: &Job) {
     }
 }
 
+/// What decides a job's overridden project and layer buffers: jobs with equal keys (and equal
+/// projects) render the same frames. The time span is left out (segments of one output, output
+/// modules cut at different segment frames); so is everything per output module (format, crop,
+/// resize, channels), which applies after rendering.
+#[derive(PartialEq)]
+struct WarmKey {
+    comp: ItemId,
+    settings: RenderSettings,
+    nested_switches: bool,
+    budget: usize,
+    /// Addresses of the job's footage source, expression host and accelerator: the same
+    /// session's objects.
+    footage: usize,
+    expr: Option<usize>,
+    accel: Option<usize>,
+}
+
+impl WarmKey {
+    fn of(job: &Job) -> WarmKey {
+        WarmKey {
+            comp: job.comp,
+            settings: RenderSettings { time_span: TimeSpan::LengthOfComp, ..job.settings.clone() },
+            nested_switches: job.nested_switches,
+            budget: job.options.memory_budget.unwrap_or(crate::DEFAULT_MEMORY_BUDGET),
+            footage: job.footage as *const dyn effectcraft_render::FootageSource as *const () as usize,
+            expr: job.expr.map(|e| e as *const dyn effectcraft_render::ExprHost as *const () as usize),
+            accel: job.accel.map(|a| a as *const dyn effectcraft_render::Accelerator as *const () as usize),
+        }
+    }
+}
+
+/// A finished job's project (as its Render Settings render it) and layer cache, kept for the
+/// next job that renders the same frames: a Render Queue item exports its output modules one
+/// after another, each a job of its own, and every module after the first finds the layers the
+/// first rendered in the cache instead of rendering them again. Layer buffers are keyed by
+/// their content (see [`LayerCache`]), so a warm cache gives the frames a cold one gives.
+struct Warm {
+    key: WarmKey,
+    /// The job's project before the overrides: the next job's must be equal.
+    source: Project,
+    project: Project,
+    cache: LayerCache,
+}
+
+/// How long a finished job's [`Warm`] waits for the next job (the next output module starts
+/// as soon as the previous one returns); then it is dropped with its memory.
+const WARM_FOR: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// The one kept [`Warm`], with its generation (for the timer that drops it) and when it was kept.
+static WARM: Mutex<Option<(u64, Instant, Warm)>> = Mutex::new(None);
+static WARM_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn warm_slot() -> std::sync::MutexGuard<'static, Option<(u64, Instant, Warm)>> {
+    WARM.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The kept [`Warm`] when `job` renders the same frames as the job that left it.
+fn take_warm(job: &Job) -> Option<Warm> {
+    let (_, at, warm) = warm_slot().take()?;
+    (at.elapsed() < WARM_FOR && warm.key == WarmKey::of(job) && warm.source == *job.project).then_some(warm)
+}
+
 impl<'a> Cx<'a> {
     pub fn new(job: &'a Job<'a>) -> Cx<'a> {
         let mut project = job.project.clone();
         apply_overrides(&mut project, job);
+        let cache = LayerCache::new(job.options.memory_budget.unwrap_or(crate::DEFAULT_MEMORY_BUDGET));
+        Cx::with(job, project, cache)
+    }
+
+    /// [`Cx::new`], continuing from the job that rendered the same frames just before, if any
+    /// (its project and layer cache, see [`Warm`]).
+    pub fn resume(job: &'a Job<'a>) -> Cx<'a> {
+        match take_warm(job) {
+            Some(w) => Cx::with(job, w.project, w.cache),
+            None => Cx::new(job),
+        }
+    }
+
+    /// Keep this finished job's project and layer cache for the next job ([`Cx::resume`]) for
+    /// [`WARM_FOR`]. Not on the web, where nothing would drop them after that.
+    pub fn keep_warm(self) {
+        if cfg!(target_arch = "wasm32") {
+            return;
+        }
+        let warm = Warm { key: WarmKey::of(self.job), source: self.job.project.clone(), project: self.project, cache: self.cache };
+        let generation = WARM_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // (the job kept before, if no job took it, goes now)
+        let old = warm_slot().replace((generation, Instant::now(), warm));
+        drop(old);
+        // Dropped after `WARM_FOR` unless a job took it (or kept its own) by then.
+        let expire = move || {
+            let mut slot = warm_slot();
+            let kept = if slot.as_ref().is_some_and(|(g, _, _)| *g == generation) { slot.take() } else { None };
+            drop(slot);
+            drop(kept);
+        };
+        let later = move || {
+            std::thread::sleep(WARM_FOR);
+            expire();
+        };
+        if std::thread::Builder::new().name("export-warm".into()).spawn(later).is_err() {
+            expire();
+        }
+    }
+
+    fn with(job: &'a Job<'a>, project: Project, cache: LayerCache) -> Cx<'a> {
         let frame_times = (job.options.log == RenderLog::PlusPerFrameInfo).then(|| Mutex::new(Vec::new()));
-        let cache = LayerCache::default();
         // With deferred readbacks, buffers computed from a missed pass's placeholders are not kept.
         cache.set_gate(job.accel.and_then(|a| a.miss_gate()));
-        Cx { job, project, cache, frame_times, overflowed: Mutex::new(vec![]), written: Mutex::new(vec![]) }
+        Cx { job, project, cache, frame_times, overflowed: Mutex::new(vec![]), written: Mutex::new(vec![]), feed: None }
+    }
+
+    /// The files this job opened on disk (removed when a later step of the item cancels it).
+    pub fn written(&self) -> Vec<String> {
+        self.written.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
 
     pub fn comp(&self) -> Option<&Comp> {
@@ -179,6 +291,10 @@ impl<'a> Cx<'a> {
     /// Output frames `ks`, each mapped by `f` (encoding): rendered in parallel batches, or one
     /// by one in passes when readbacks are deferred ([`Cx::deferred`]).
     pub async fn frames<T: Send>(&self, comp: &Comp, ks: Vec<u64>, f: impl Fn(u64, Image) -> T + Sync + Send) -> Vec<T> {
+        // (a renderer that stopped early leaves the frames to this job)
+        if let Some(out) = self.feed.as_ref().and_then(|feed| self.fed(feed, comp, &ks, &f)) {
+            return out;
+        }
         if self.deferred() {
             let mut out = Vec::with_capacity(ks.len());
             for k in ks {
@@ -198,6 +314,63 @@ impl<'a> Cx<'a> {
         (self.job.accel.is_some() && self.project.settings.gpu_acceleration).then(|| gpu_inflight(std::env::var(GPU_INFLIGHT_ENV).ok().as_deref()))
     }
 
+    /// Output frames `0..total` in batches of `batch` frames, each frame mapped by `f`
+    /// (encoding), handed to `body` in order through [`Batches::next`]. On native targets the
+    /// next batch renders on a scoped thread while `body` encodes the current one: at most two
+    /// batches are held, the one being encoded and the one rendered next (handed over through a
+    /// rendezvous channel). In passes (deferred readbacks), on the web and on a rayon worker (it
+    /// must not block on frames its own pool renders) batches render one after another.
+    ///
+    /// When `body` returns (done, an encode error or a stop) the renderer stops at its next
+    /// frame; a renderer that stops early (a panic) makes [`Batches::next`] an error.
+    pub async fn batches<T: Send, R>(
+        &self,
+        comp: &Comp,
+        total: u64,
+        batch: u64,
+        f: impl Fn(u64, Image) -> T + Sync + Send,
+        body: impl AsyncFnOnce(&mut Batches<'_, '_, T>) -> crate::Result<R>,
+    ) -> crate::Result<R> {
+        let batch = batch.max(1);
+        if self.feed.is_some() {
+            let f: &(dyn Fn(u64, Image) -> T + Sync + Send) = &f;
+            return body(&mut Batches { next: 0, total, batch, src: Source::Fed { cx: self, comp, f } }).await;
+        }
+        if self.deferred() || cfg!(target_arch = "wasm32") || rayon::current_thread_index().is_some() {
+            let f: &(dyn Fn(u64, Image) -> T + Sync + Send) = &f;
+            return body(&mut Batches { next: 0, total, batch, src: Source::Serial { cx: self, comp, f } }).await;
+        }
+        use rayon::prelude::*;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let stop = AtomicBool::new(false);
+        std::thread::scope(|s| {
+            let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<T>>(0);
+            let (stop, f) = (&stop, &f);
+            let renderer = s.spawn(move || {
+                let mut i = 0;
+                while i < total && !stop.load(Ordering::Relaxed) {
+                    let end = i.saturating_add(batch).min(total);
+                    // Frames not started once the encode side has stopped are skipped.
+                    let frames: Option<Vec<T>> = (i..end).into_par_iter().map(|k| (!stop.load(Ordering::Relaxed)).then(|| f(k, self.frame(comp, k)))).collect();
+                    let Some(frames) = frames else { break };
+                    if tx.send(frames).is_err() {
+                        break;
+                    }
+                    i = end;
+                }
+            });
+            let mut batches = Batches { next: 0, total, batch, src: Source::Thread(rx) };
+            let r = effectcraft_render::passes::block_on(body(&mut batches));
+            // Stop the renderer: skip its remaining frames and fail its next hand-off.
+            stop.store(true, Ordering::Relaxed);
+            drop(batches);
+            match (r, renderer.join()) {
+                (Err(_), Err(_)) => Err(crate::ExportError::Encode("rendering failed".into())),
+                (r, _) => r,
+            }
+        })
+    }
+
     /// Output frame `i`: sampled (fields, pulldown), at the colour depth, cropped and resized.
     pub fn frame(&self, comp: &Comp, i: u64) -> Image {
         effectcraft_render::passes::block_on(self.frame_async(comp, i))
@@ -205,6 +378,15 @@ impl<'a> Cx<'a> {
 
     /// [`Cx::frame`] as a future (deferred readbacks: the frame renders in passes).
     pub async fn frame_async(&self, comp: &Comp, i: u64) -> Image {
+        let (img, secs) = self.frame_timed(comp, i).await;
+        if let Some(ft) = &self.frame_times {
+            ft.lock().unwrap_or_else(|e| e.into_inner()).push((i, secs));
+        }
+        img
+    }
+
+    /// [`Cx::frame_async`] and the seconds it took, not logged.
+    async fn frame_timed(&self, comp: &Comp, i: u64) -> (Image, f64) {
         let t0 = Instant::now();
         let img = match self.job.settings.sample(comp, i) {
             FrameSample::Progressive(t) => self.render_at(t).await,
@@ -222,10 +404,24 @@ impl<'a> Cx<'a> {
             img.quantize(levels);
         }
         let img = self.crop_resize(img);
+        (img, t0.elapsed().as_secs_f64())
+    }
+
+    /// Output frames `ks`, each mapped by `f`, from the next batch of the feed (copies of the
+    /// shared frames; a frame the batch lacks renders here). `None` when the renderer stopped.
+    fn fed<T: Send>(&self, feed: &Feed, comp: &Comp, ks: &[u64], f: &(dyn Fn(u64, Image) -> T + Sync + Send)) -> Option<Vec<T>> {
+        use rayon::prelude::*;
+        let got = feed.rx.lock().unwrap_or_else(std::sync::PoisonError::into_inner).recv().ok()?;
+        let shared = |k: u64| k.checked_sub(got.start).and_then(|j| usize::try_from(j).ok()).and_then(|j| got.frames.get(j));
         if let Some(ft) = &self.frame_times {
-            ft.lock().unwrap_or_else(|e| e.into_inner()).push((i, t0.elapsed().as_secs_f64()));
+            let mut ft = ft.lock().unwrap_or_else(|e| e.into_inner());
+            ft.extend(ks.iter().filter_map(|&k| shared(k).map(|(_, secs)| (k, *secs))));
         }
-        img
+        let out = ks.par_iter().map(|&k| f(k, shared(k).map_or_else(|| self.frame(comp, k), |(img, _)| img.clone()))).collect();
+        drop(got);
+        // The renderer hands the batch to the next module (or renders on) once this one has its copy.
+        let _ = feed.ack.send(());
+        Some(out)
     }
 
     /// Output Module ▸ Crop, then Resize.
@@ -355,6 +551,189 @@ impl<'a> Cx<'a> {
         std::io::Write::write_all(&mut f, s.as_bytes()).ok()?;
         f.finish().ok()?;
         Some(path)
+    }
+}
+
+/// The batches of [`Cx::batches`], in order.
+pub(crate) struct Batches<'c, 'a, T> {
+    next: u64,
+    total: u64,
+    batch: u64,
+    src: Source<'c, 'a, T>,
+}
+
+enum Source<'c, 'a, T> {
+    /// Rendered when asked for ([`Cx::frames`]).
+    Serial { cx: &'c Cx<'a>, comp: &'c Comp, f: &'c (dyn Fn(u64, Image) -> T + Sync + Send) },
+    /// Rendered ahead on the renderer thread.
+    Thread(std::sync::mpsc::Receiver<Vec<T>>),
+    /// Rendered once for several output modules ([`fan_out`]) and mapped here.
+    Fed { cx: &'c Cx<'a>, comp: &'c Comp, f: &'c (dyn Fn(u64, Image) -> T + Sync + Send) },
+}
+
+impl<T: Send> Batches<'_, '_, T> {
+    /// The next batch: its output frames `start..end` and their mapped frames; `None` after the last.
+    pub async fn next(&mut self) -> crate::Result<Option<(u64, u64, Vec<T>)>> {
+        if self.next >= self.total {
+            return Ok(None);
+        }
+        let (i, end) = (self.next, self.next.saturating_add(self.batch).min(self.total));
+        let frames = match &self.src {
+            Source::Serial { cx, comp, f } => cx.frames(comp, (i..end).collect(), *f).await,
+            Source::Thread(rx) => rx.recv().map_err(|_| crate::ExportError::Encode("rendering stopped".into()))?,
+            Source::Fed { cx, comp, f } => {
+                let ks: Vec<u64> = (i..end).collect();
+                let feed = cx.feed.as_ref().ok_or_else(|| crate::ExportError::Encode("rendering stopped".into()))?;
+                cx.fed(feed, comp, &ks, *f).ok_or_else(|| crate::ExportError::Encode("rendering stopped".into()))?
+            }
+        };
+        self.next = end;
+        Ok(Some((i, end, frames)))
+    }
+}
+
+/// One batch rendered for the output modules of a [`fan_out`]: output frames `start..` and the
+/// seconds each took.
+struct Rendered {
+    start: u64,
+    frames: Arc<Vec<(Image, f64)>>,
+}
+
+/// A module's end of a [`fan_out`]: the batches, in order, and the acknowledgement that it has
+/// copied one. Dropped when the module's job ends.
+struct Feed {
+    rx: Mutex<Receiver<Rendered>>,
+    ack: Sender<()>,
+    /// Modules still taking frames (the renderer stops when none is left).
+    live: Arc<AtomicUsize>,
+}
+
+impl Drop for Feed {
+    fn drop(&mut self) {
+        self.live.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Whether `a` and `b` render the same output frames, so one render can feed both
+/// ([`fan_out`]): the same project, comp, Render Settings (time span included), session objects
+/// and memory budget (which sets the batches, and so the files' layout), Crop and Resize. Format,
+/// channels and the rest of the Output Module apply to the rendered frames. Audio-only formats
+/// render no frames; a sequence skipping existing files renders only some.
+pub(crate) fn shares_frames(a: &Job, b: &Job) -> bool {
+    use effectcraft_project::render_queue::OutputFormat;
+    let renders = |j: &Job| !matches!(j.output.format, OutputFormat::Wav | OutputFormat::Aiff) && !(j.output.format.is_sequence() && j.settings.skip_existing);
+    renders(a)
+        && renders(b)
+        && WarmKey::of(a) == WarmKey::of(b)
+        && a.settings == b.settings
+        && a.output.crop == b.output.crop
+        && a.output.resize == b.output.resize
+        && (std::ptr::eq(a.project, b.project) || a.project == b.project)
+}
+
+/// What a module's job returned, and the files it opened on disk.
+pub(crate) type Outcome = (crate::Result<crate::Report>, Vec<String>);
+
+/// Export output modules that render the same frames ([`shares_frames`]; `(index in the item,
+/// job)`) at once: every frame renders once, on a renderer thread with the first module's layer
+/// cache, and is handed to each module's job, which maps (converts, encodes) and writes it on a
+/// thread of its own with its own encoder and muxer. The next batch renders while the modules
+/// encode this one, as in [`Cx::batches`]; a batch goes to one module at a time and the next
+/// renders once every module has copied it, so the frames in flight are one rendering batch or
+/// one shared batch and its copies (plus each module's mapped batch).
+///
+/// `progress` hears each module's progress on the caller's thread, with its index; returning
+/// `false` cancels that module. A module that fails (not cancelled) lowers `failed` to its index,
+/// and the modules after it are cancelled at their next batch, as if they never started (the
+/// item stops at the first failing module); modules before it run to the end.
+pub(crate) fn fan_out(group: &[(usize, &Job<'_>)], failed: &AtomicUsize, progress: &mut dyn FnMut(usize, &crate::Progress) -> bool) -> Vec<Outcome> {
+    let Some(&(_, lead)) = group.first() else { return vec![] };
+    let rcx = Cx::resume(lead);
+    let live = Arc::new(AtomicUsize::new(group.len()));
+    let mut feeds = Vec::with_capacity(group.len());
+    let mut ends = Vec::with_capacity(group.len());
+    for _ in group {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Rendered>(0);
+        let (ack, acks) = std::sync::mpsc::channel::<()>();
+        feeds.push(Feed { rx: Mutex::new(rx), ack, live: live.clone() });
+        ends.push(Some((tx, acks)));
+    }
+    let (req_tx, req_rx) = std::sync::mpsc::channel::<(usize, crate::Progress, Sender<bool>)>();
+    let outcomes: Vec<Outcome> = std::thread::scope(|s| {
+        let (rcx, live) = (&rcx, &*live);
+        let renderer = s.spawn(move || render_for(rcx, ends, live));
+        let modules: Vec<_> = group
+            .iter()
+            .zip(feeds)
+            .map(|(&(index, job), feed)| {
+                let req_tx = req_tx.clone();
+                let module = s.spawn(move || {
+                    let mut cx = Cx::new(job);
+                    cx.feed = Some(feed);
+                    let (reply_tx, reply_rx) = std::sync::mpsc::channel::<bool>();
+                    let mut relay = |p: &crate::Progress| req_tx.send((index, *p, reply_tx.clone())).is_ok() && reply_rx.recv().unwrap_or(false);
+                    let r = effectcraft_render::passes::block_on(crate::run(&cx, &mut relay, Instant::now()));
+                    // (the renderer skips this module from now on)
+                    cx.feed = None;
+                    if matches!(&r, Err(e) if !matches!(e, crate::ExportError::Cancelled)) {
+                        failed.fetch_min(index, Ordering::SeqCst);
+                    }
+                    (r, cx.written())
+                });
+                (index, module)
+            })
+            .collect();
+        drop(req_tx);
+        while let Ok((index, p, reply)) = req_rx.recv() {
+            let go = progress(index, &p) && failed.load(Ordering::SeqCst) > index;
+            let _ = reply.send(go);
+        }
+        let outcomes = modules
+            .into_iter()
+            .map(|(index, m)| {
+                m.join().unwrap_or_else(|_| {
+                    failed.fetch_min(index, Ordering::SeqCst);
+                    (Err(crate::ExportError::Encode("export failed".into())), vec![])
+                })
+            })
+            .collect();
+        let _ = renderer.join();
+        outcomes
+    });
+    // A finished group leaves its layer cache for the next module or group (see `Warm`).
+    if outcomes.iter().all(|(r, _)| r.is_ok()) {
+        rcx.keep_warm();
+    }
+    outcomes
+}
+
+/// The renderer of a [`fan_out`]: the job's output frames in batches (as [`crate::batch_size`]
+/// sets them for each module alone), each handed to every module still taking frames.
+fn render_for(cx: &Cx, mut ends: Vec<Option<(SyncSender<Rendered>, Receiver<()>)>>, live: &AtomicUsize) {
+    use rayon::prelude::*;
+    let Some(comp) = cx.comp() else { return };
+    let total = cx.settings.frame_count(comp);
+    let batch = crate::batch_size(cx, comp).max(1);
+    let mut i = 0;
+    while i < total && live.load(Ordering::Relaxed) > 0 {
+        let end = i.saturating_add(batch).min(total);
+        // Frames not started once every module has stopped are skipped.
+        let frames: Option<Vec<(Image, f64)>> = (i..end)
+            .into_par_iter()
+            .map(|k| (live.load(Ordering::Relaxed) > 0).then(|| effectcraft_render::passes::block_on(cx.frame_timed(comp, k))))
+            .collect();
+        let Some(frames) = frames else { break };
+        let frames = Arc::new(frames);
+        for slot in ends.iter_mut() {
+            let Some((tx, ack)) = slot else { continue };
+            if tx.send(Rendered { start: i, frames: frames.clone() }).is_err() || ack.recv().is_err() {
+                *slot = None;
+            }
+        }
+        if ends.iter().all(Option::is_none) {
+            break;
+        }
+        i = end;
     }
 }
 
@@ -650,6 +1029,168 @@ mod tests {
         let stats = cx.cache.stats();
         assert_eq!(stats.misses, renders, "the solid rendered on the first frame only");
         assert!(stats.hits >= 9, "{stats:?}");
+    }
+
+    #[test]
+    fn the_next_output_module_continues_from_the_layer_cache() {
+        // G5: a Render Queue item with two output modules rendered every layer twice. The
+        // second module's job takes the first one's layer cache when it renders the same frames.
+        use effectcraft_color::Label;
+        use effectcraft_project::render_queue::{OutputFormat, OutputModule, RenderSettings};
+        use effectcraft_project::{ItemKind, LayerSource, Solid, build};
+        use effectcraft_time::FrameRate;
+        let mut p = Project::default();
+        let mut comp = Comp::new(32, 24, FrameRate::FPS_25, FrameRate::FPS_25.tick_of(4));
+        let sid = p.add_item("Solid", Label::Red, None, ItemKind::Solid(Solid { color: [1.0, 0.0, 0.0], width: 8, height: 8, pixel_aspect: 1.0 }));
+        comp.layers.push(build::layer(&mut p, &comp, "Solid", LayerSource::Solid { item: sid }, (8, 8), None));
+        let cid = p.add_item("Comp", Label::Sandstone, None, ItemKind::Comp(comp.into()));
+        // (two pools: a job takes the kept one only with the same footage source)
+        let (footage, other_footage) = (effectcraft_media::MediaPool::new(), effectcraft_media::MediaPool::new());
+        let settings = RenderSettings::default();
+        let (png, h264) = (OutputModule::for_format(OutputFormat::PngSequence), OutputModule::for_format(OutputFormat::H264));
+        let sink = |_: &str, _: Vec<u8>| {};
+        fn job<'a>(
+            p: &'a Project,
+            cid: ItemId,
+            settings: &'a RenderSettings,
+            output: &'a OutputModule,
+            footage: &'a dyn effectcraft_render::FootageSource,
+        ) -> Job<'a> {
+            Job {
+                project: p,
+                footage,
+                expr: None,
+                accel: None,
+                comp: cid,
+                settings,
+                output,
+                path: "/mem/x",
+                sink: None,
+                nested_switches: true,
+                options: Default::default(),
+            }
+        }
+        let mut first = job(&p, cid, &settings, &png, &footage);
+        first.sink = Some(&sink);
+        // Other tests of this binary don't export, so the kept job is this one's.
+        let r = crate::export(&first, &mut |_| true);
+        assert!(r.is_ok(), "{r:?}");
+        // A job rendering other frames does not take it (and the kept job is gone either way).
+        let half = RenderSettings { resolution: 0.5, ..RenderSettings::default() };
+        let mut edited = p.clone();
+        if let Some(c) = edited.comp_mut(cid) {
+            c.background = [0.0, 1.0, 0.0];
+        }
+        for other in [job(&p, cid, &half, &h264, &footage), job(&edited, cid, &settings, &h264, &footage), job(&p, cid, &settings, &h264, &other_footage)] {
+            assert!(crate::export(&first, &mut |_| true).is_ok());
+            assert!(take_warm(&other).is_none());
+        }
+        assert!(crate::export(&first, &mut |_| true).is_ok());
+        let second = job(&p, cid, &settings, &h264, &footage);
+        let warm = take_warm(&second).expect("the first module's job is kept");
+        assert!(take_warm(&second).is_none(), "taken once");
+        let cx = Cx::with(&second, warm.project, warm.cache);
+        let misses = cx.cache.stats().misses;
+        assert!(misses > 0);
+        let comp = cx.comp().unwrap();
+        for i in 0..4 {
+            let img = cx.frame(comp, i);
+            let mut uncached = cx.renderer();
+            uncached.cache = None;
+            assert_eq!(img.data, uncached.comp_frame(cid, settings.frame_time(comp, i)).data, "frame {i}");
+        }
+        assert_eq!(cx.cache.stats().misses, misses, "the second module rendered no layer again");
+    }
+
+    /// Run `f` with the job of a `frames`-frame comp of one solid.
+    fn with_cx<R>(frames: u64, f: impl FnOnce(&Cx, &Comp) -> R) -> R {
+        use effectcraft_color::Label;
+        use effectcraft_project::render_queue::{OutputFormat, OutputModule, RenderSettings};
+        use effectcraft_project::{ItemKind, LayerSource, Solid, build};
+        use effectcraft_render::NoFootage;
+        use effectcraft_time::FrameRate;
+        let mut p = Project::default();
+        let mut comp = Comp::new(16, 16, FrameRate::FPS_25, FrameRate::FPS_25.tick_of(frames as i64));
+        let sid = p.add_item("Solid", Label::Red, None, ItemKind::Solid(Solid { color: [1.0, 0.0, 0.0], width: 8, height: 8, pixel_aspect: 1.0 }));
+        comp.layers.push(build::layer(&mut p, &comp, "Solid", LayerSource::Solid { item: sid }, (8, 8), None));
+        let cid = p.add_item("Comp", Label::Sandstone, None, ItemKind::Comp(comp.into()));
+        let (settings, output) = (RenderSettings::default(), OutputModule::for_format(OutputFormat::H264));
+        let job = Job {
+            project: &p,
+            footage: &NoFootage,
+            expr: None,
+            accel: None,
+            comp: cid,
+            settings: &settings,
+            output: &output,
+            path: "/c/x.mp4",
+            sink: None,
+            nested_switches: true,
+            options: Default::default(),
+        };
+        let cx = Cx::new(&job);
+        let comp = cx.comp().unwrap();
+        f(&cx, comp)
+    }
+
+    #[test]
+    fn an_encode_error_stops_the_renderer() {
+        // G5 B1: the next batch renders while one encodes. An encode error returns at once;
+        // the renderer stops after at most the batch it had in flight (no hang on the hand-off).
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let batch = 4;
+        let rendered = AtomicU64::new(0);
+        let r = with_cx(batch * 10, |cx, comp| {
+            let render = |k: u64, _| {
+                rendered.fetch_add(1, Ordering::Relaxed);
+                k
+            };
+            effectcraft_render::passes::block_on(cx.batches(comp, batch * 10, batch, render, async |b: &mut Batches<'_, '_, u64>| -> crate::Result<()> {
+                let (i, end, ks) = b.next().await?.unwrap();
+                assert_eq!((i, end, ks), (0, batch, vec![0, 1, 2, 3]));
+                Err(crate::ExportError::Encode("boom".into()))
+            }))
+        });
+        assert!(matches!(r, Err(crate::ExportError::Encode(ref e)) if e == "boom"), "{r:?}");
+        let n = rendered.load(Ordering::Relaxed);
+        assert!(n <= batch * 2, "rendered {n} frames after the encoder failed");
+    }
+
+    #[test]
+    fn batches_arrive_in_order_and_a_failed_render_is_an_error() {
+        let batch = 3;
+        let got = with_cx(10, |cx, comp| {
+            effectcraft_render::passes::block_on(cx.batches(
+                comp,
+                10,
+                batch,
+                |k, _| k,
+                async |b: &mut Batches<'_, '_, u64>| -> crate::Result<Vec<(u64, u64, Vec<u64>)>> {
+                    let mut v = vec![];
+                    while let Some(x) = b.next().await? {
+                        v.push(x);
+                    }
+                    Ok(v)
+                },
+            ))
+        });
+        assert_eq!(got.unwrap(), vec![(0, 3, vec![0, 1, 2]), (3, 6, vec![3, 4, 5]), (6, 9, vec![6, 7, 8]), (9, 10, vec![9])]);
+        // A renderer that dies (a panic in the second batch) fails the export instead of
+        // ending it early with a truncated file, and does not hang.
+        let r = with_cx(10, |cx, comp| {
+            let render = |k: u64, _| {
+                assert!(k != 4, "render failure");
+                k
+            };
+            effectcraft_render::passes::block_on(cx.batches(comp, 10, batch, render, async |b: &mut Batches<'_, '_, u64>| -> crate::Result<u64> {
+                let mut n = 0;
+                while let Some((_, _, ks)) = b.next().await? {
+                    n += ks.len() as u64;
+                }
+                Ok(n)
+            }))
+        });
+        assert!(matches!(r, Err(crate::ExportError::Encode(_))), "{r:?}");
     }
 
     #[test]

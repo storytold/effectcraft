@@ -146,24 +146,30 @@ fn span_gather(img: &Image, kernels: &[(f32, Vec<(i32, f64, f64)>)], norm: f32) 
     let inv = 1.0 / norm;
     out.data.par_chunks_mut(w.max(1)).enumerate().for_each(|(y, row)| {
         for (x, o) in row.iter_mut().enumerate() {
-            let mut acc = [0.0f32; 4];
-            for (wt, spans) in kernels {
-                for &(dy, x0, x1) in spans {
-                    let sy = y as i64 + dy as i64;
-                    if sy < 0 || sy >= h {
-                        continue;
-                    }
-                    let pr = &pre[sy as usize];
-                    let (hi, lo) = (prefix_at(pr, x as f64 + x1 + 0.5), prefix_at(pr, x as f64 + x0 + 0.5));
-                    for c in 0..4 {
-                        acc[c] += (hi[c] - lo[c]) * wt;
-                    }
-                }
-            }
-            *o = acc.map(|v| v * inv);
+            *o = gather_px(&pre, h, x, y, kernels, inv);
         }
     });
     out
+}
+
+/// One output pixel of [`span_gather`] (`pre` from [`row_prefix`], `inv` = 1 / norm).
+#[inline]
+fn gather_px(pre: &[Vec<[f32; 4]>], h: i64, x: usize, y: usize, kernels: &[(f32, Vec<(i32, f64, f64)>)], inv: f32) -> [f32; 4] {
+    let mut acc = [0.0f32; 4];
+    for (wt, spans) in kernels {
+        for &(dy, x0, x1) in spans {
+            let sy = y as i64 + dy as i64;
+            if sy < 0 || sy >= h {
+                continue;
+            }
+            let Some(pr) = pre.get(sy as usize) else { continue };
+            let (hi, lo) = (prefix_at(pr, x as f64 + x1 + 0.5), prefix_at(pr, x as f64 + x0 + 0.5));
+            for c in 0..4 {
+                acc[c] += (hi[c] - lo[c]) * wt;
+            }
+        }
+    }
+    acc.map(|v| v * inv)
 }
 
 /// Boost the highlights of a premultiplied image in place.
@@ -282,22 +288,48 @@ pub fn level_weight(levels: &[f32], k: usize, r: f32) -> f32 {
 
 /// Depth-varying blur: `radius` gives each pixel's blur radius. The image is blurred at up to
 /// eight radii spanning the range and each pixel interpolates between the two levels around
-/// its own radius.
+/// its own radius. Iris kernels gather only those two levels at each pixel (a span gather costs
+/// the kernel's height per pixel); Fast Rectangle's box blur costs O(1) per pixel, so its levels
+/// are blurred whole.
 pub fn progressive_blur(img: &Image, iris: &Iris, radius: &[f32]) -> Image {
     let Some(levels) = blur_levels(radius) else { return img.clone() };
     if levels.len() == 1 {
         return bokeh_blur(img, iris, levels[0] as f64);
     }
     let (lo, hi, n) = (levels[0], levels[levels.len() - 1], levels.len());
-    let blurred: Vec<Image> = levels.par_iter().map(|&r| bokeh_blur(img, iris, r as f64)).collect();
-    let mut out = Image::new(img.width, img.height);
-    out.data.par_iter_mut().enumerate().for_each(|(i, o)| {
-        let r = radius[i];
+    // The two levels bracketing a pixel's radius and the blend between them.
+    let bracket = |i: usize| {
+        let r = radius.get(i).copied().unwrap_or(0.0);
         let f = ((r - lo) / (hi - lo) * (n - 1) as f32).clamp(0.0, (n - 1) as f32);
         let k = (f.floor() as usize).min(n - 2);
-        let t = f - k as f32;
-        let (a, b) = (blurred[k].data[i], blurred[k + 1].data[i]);
-        *o = [0, 1, 2, 3].map(|c| a[c] + (b[c] - a[c]) * t);
+        (k, f - k as f32)
+    };
+    let lerp = |a: [f32; 4], b: [f32; 4], t: f32| [0, 1, 2, 3].map(|c| a[c] + (b[c] - a[c]) * t);
+    let mut out = Image::new(img.width, img.height);
+    if iris.sides == 0 {
+        let blurred: Vec<Image> = levels.par_iter().map(|&r| bokeh_blur(img, iris, r as f64)).collect();
+        out.data.par_iter_mut().enumerate().for_each(|(i, o)| {
+            let (k, t) = bracket(i);
+            let at = |k: usize| blurred.get(k).and_then(|b| b.data.get(i)).copied().unwrap_or_default();
+            *o = lerp(at(k), at(k + 1), t);
+        });
+        return out;
+    }
+    // Per level: its kernel and 1 / norm, or `None` where [`bokeh_blur`] leaves the image as is.
+    let kernels: Vec<Option<(Vec<(f32, Vec<(i32, f64, f64)>)>, f32)>> =
+        levels.iter().map(|&r| kernel_spans(iris, r as f64).map(|(k, norm)| (k, 1.0 / norm))).collect();
+    let pre = row_prefix(img);
+    let (w, h) = (img.width as usize, img.height as i64);
+    out.data.par_chunks_mut(w.max(1)).enumerate().for_each(|(y, row)| {
+        for (x, o) in row.iter_mut().enumerate() {
+            let i = y * w + x;
+            let (k, t) = bracket(i);
+            let at = |k: usize| match kernels.get(k) {
+                Some(Some((ks, inv))) => gather_px(&pre, h, x, y, ks, *inv),
+                _ => img.data.get(i).copied().unwrap_or_default(),
+            };
+            *o = lerp(at(k), at(k + 1), t);
+        }
     });
     out
 }
@@ -370,6 +402,78 @@ mod tests {
         c.data = vec![[1.0, 0.8, 0.8, 1.0]];
         boost_highlights(&mut c, &Highlight { gain: 0.1, threshold: 0.5, saturation: 1.0 });
         assert!(c.data[0][0] - c.data[0][1] > 0.3, "more saturated: {:?}", c.data[0]);
+    }
+
+    /// The previous [`progressive_blur`]: every level blurred over the whole image.
+    fn progressive_blur_reference(img: &Image, iris: &Iris, radius: &[f32]) -> Image {
+        let Some(levels) = blur_levels(radius) else { return img.clone() };
+        if levels.len() == 1 {
+            return bokeh_blur(img, iris, levels[0] as f64);
+        }
+        let (lo, hi, n) = (levels[0], levels[levels.len() - 1], levels.len());
+        let blurred: Vec<Image> = levels.iter().map(|&r| bokeh_blur(img, iris, r as f64)).collect();
+        let mut out = Image::new(img.width, img.height);
+        for (i, o) in out.data.iter_mut().enumerate() {
+            let r = radius[i];
+            let f = ((r - lo) / (hi - lo) * (n - 1) as f32).clamp(0.0, (n - 1) as f32);
+            let k = (f.floor() as usize).min(n - 2);
+            let t = f - k as f32;
+            let (a, b) = (blurred[k].data[i], blurred[k + 1].data[i]);
+            *o = [0, 1, 2, 3].map(|c| a[c] + (b[c] - a[c]) * t);
+        }
+        out
+    }
+
+    #[test]
+    fn progressive_blur_gathers_only_the_bracketing_levels_bit_exactly() {
+        let (w, h) = (57u32, 43u32);
+        let mut img = Image::new(w, h);
+        for (i, p) in img.data.iter_mut().enumerate() {
+            let v = ((i * 7919) % 101) as f32 / 100.0;
+            let a = ((i * 104_729) % 13) as f32 / 12.0;
+            *p = [v * a, (1.0 - v) * a, 0.5 * a, a];
+        }
+        // Sharp at the top-left, up to 14 px at the bottom-right (eight levels, the lowest below
+        // the 0.3 px threshold), plus a near-constant map (one level) and a flat sharp one.
+        let ramp: Vec<f32> = (0..(w * h) as usize).map(|i| ((i % w as usize) + (i / w as usize)) as f32 / 98.0 * 14.0).collect();
+        let flat: Vec<f32> = vec![3.2; (w * h) as usize];
+        let sharp: Vec<f32> = vec![0.1; (w * h) as usize];
+        let irises = [
+            Iris::default(),
+            Iris { sides: 6, ..Default::default() },
+            Iris { sides: 5, rotation: 17.0, roundness: -0.4, aspect: 1.7, fringe: 0.0 },
+            Iris { sides: 8, roundness: 0.6, aspect: 0.6, fringe: 1.5, ..Default::default() },
+        ];
+        for iris in &irises {
+            for radius in [&ramp, &flat, &sharp] {
+                let new = progressive_blur(&img, iris, radius);
+                let old = progressive_blur_reference(&img, iris, radius);
+                assert_eq!(new.data.len(), old.data.len());
+                for (i, (a, b)) in new.data.iter().zip(&old.data).enumerate() {
+                    assert!(a.iter().zip(b).all(|(p, q)| p.to_bits() == q.to_bits()), "{iris:?} pixel {i}: {a:?} vs {b:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "timing: cargo test -p effectcraft-render --lib progressive_blur_timing -- --ignored --nocapture"]
+    fn progressive_blur_timing() {
+        let (w, h) = (640u32, 480u32);
+        let mut img = Image::new(w, h);
+        for (i, p) in img.data.iter_mut().enumerate() {
+            *p = [((i * 31) % 7) as f32 / 7.0; 4];
+        }
+        let radius: Vec<f32> = (0..(w * h) as usize).map(|i| (i / w as usize) as f32 / h as f32 * 24.0).collect();
+        let iris = Iris { sides: 6, ..Default::default() };
+        let t = std::time::Instant::now();
+        let a = progressive_blur_reference(&img, &iris, &radius);
+        let old = t.elapsed();
+        let t = std::time::Instant::now();
+        let b = progressive_blur(&img, &iris, &radius);
+        let new = t.elapsed();
+        assert_eq!(a.data, b.data);
+        println!("progressive_blur 640x480 hexagon 0..24 px: reference {old:?}, gather {new:?}");
     }
 
     #[test]

@@ -105,7 +105,14 @@ pub struct JobOptions<'a> {
     pub storage: Option<&'a dyn StorageQuota>,
     /// Overflow folders, in order.
     pub overflow: Vec<String>,
+    /// Memory for the job's layer cache and for frames rendering at once (bytes; `None`:
+    /// [`DEFAULT_MEMORY_BUDGET`]). The app passes its Memory & CPU layer cache budget (after
+    /// RAM Reserved for Other Applications).
+    pub memory_budget: Option<usize>,
 }
+
+/// [`JobOptions::memory_budget`] when the caller sets none.
+pub const DEFAULT_MEMORY_BUDGET: usize = 1 << 30;
 
 /// Progress after a batch of frames.
 #[derive(Clone, Copy, Debug, Default)]
@@ -173,8 +180,21 @@ pub fn export(job: &Job, progress: &mut dyn FnMut(&Progress) -> bool) -> Result<
 /// batches as in [`export`].
 pub async fn export_async(job: &Job<'_>, progress: &mut dyn FnMut(&Progress) -> bool) -> Result<Report> {
     let t0 = Instant::now();
-    let cx = Cx::new(job);
-    let mut r = export_with(&cx, progress, t0).await;
+    // Another output module of the same Render Queue item renders the same frames: continue
+    // from its layer cache (see `pipeline::Warm`).
+    let cx = Cx::resume(job);
+    let r = run(&cx, progress, t0).await;
+    // A finished job leaves its layer cache for the next module; a failed or cancelled one
+    // (the item stops there) drops it.
+    if r.is_ok() {
+        cx.keep_warm();
+    }
+    r
+}
+
+/// Export `cx`'s job: a cancelled job removes the files it opened; any other writes its render log.
+pub(crate) async fn run(cx: &Cx<'_>, progress: &mut dyn FnMut(&Progress) -> bool, t0: Instant) -> Result<Report> {
+    let mut r = export_with(cx, progress, t0).await;
     if matches!(r, Err(ExportError::Cancelled)) {
         cx.remove_cancelled_outputs()?;
         return r;
@@ -185,6 +205,76 @@ pub async fn export_async(job: &Job<'_>, progress: &mut dyn FnMut(&Progress) -> 
         rep.overflow = cx.overflowed.lock().unwrap_or_else(|e| e.into_inner()).clone();
     }
     r
+}
+
+/// Export the output modules of one Render Queue item (blocking): see [`export_modules_async`].
+pub fn export_modules(jobs: &[Job], progress: &mut dyn FnMut(usize, &Progress) -> bool) -> Vec<Result<Report>> {
+    effectcraft_render::passes::block_on(export_modules_async(jobs, progress))
+}
+
+/// Export the output modules of one Render Queue item, with the result of [`export`] for each
+/// module run one after another: the files are those of each module exported alone, and the
+/// results stop at the first module that fails or is cancelled (the modules after it are not
+/// run). `progress` hears each module's progress with its index; returning `false` cancels that
+/// module.
+///
+/// Modules that render the same frames ([`pipeline::shares_frames`]) export at once from one
+/// render of each frame ([`pipeline::fan_out`]), each with its own encoder and muxer; the others
+/// export alone, continuing from the previous module's layer cache. A module of such a group
+/// that fails cancels the modules after it (their files are removed; with a sink, a module that
+/// finished first has already handed its files over), and a stop cancels every module of the
+/// group being written. Frames render in passes (deferred readbacks), on the web and on a rayon
+/// worker one module at a time.
+pub async fn export_modules_async(jobs: &[Job<'_>], progress: &mut dyn FnMut(usize, &Progress) -> bool) -> Vec<Result<Report>> {
+    let n = jobs.len();
+    let together = !cfg!(target_arch = "wasm32") && rayon::current_thread_index().is_none();
+    let mut done: Vec<Option<pipeline::Outcome>> = (0..n).map(|_| None).collect();
+    // The first module (by index) that failed or was cancelled: the item stops there.
+    let failed = std::sync::atomic::AtomicUsize::new(n);
+    let stop_at = |failed: &std::sync::atomic::AtomicUsize| failed.load(std::sync::atomic::Ordering::SeqCst);
+    for i in 0..n {
+        let Some(job) = jobs.get(i) else { break };
+        if i >= stop_at(&failed) || done.get(i).is_some_and(Option::is_some) {
+            continue;
+        }
+        let shares = |j: &&Job| together && !effectcraft_render::passes::is_deferred(j.accel) && pipeline::shares_frames(job, j);
+        let group: Vec<(usize, &Job)> = std::iter::once((i, job))
+            .chain(jobs.iter().enumerate().skip(i + 1).filter(|(j, o)| *j < stop_at(&failed) && done.get(*j).is_some_and(Option::is_none) && shares(o)))
+            .collect();
+        let outcomes = if group.len() > 1 {
+            pipeline::fan_out(&group, &failed, progress)
+        } else {
+            let t0 = Instant::now();
+            let cx = Cx::resume(job);
+            let r = run(&cx, &mut |p| progress(i, p), t0).await;
+            let written = cx.written();
+            if r.is_ok() {
+                cx.keep_warm();
+            }
+            vec![(r, written)]
+        };
+        for ((index, _), outcome) in group.iter().zip(outcomes) {
+            if outcome.0.is_err() {
+                failed.fetch_min(*index, std::sync::atomic::Ordering::SeqCst);
+            }
+            if let Some(slot) = done.get_mut(*index) {
+                *slot = Some(outcome);
+            }
+        }
+    }
+    // Modules after the first failure that finished in a group before it leave no files, as if
+    // they never ran.
+    let stop = stop_at(&failed);
+    for (_, written) in done.iter().skip(stop.saturating_add(1)).flatten() {
+        for path in written {
+            if let Err(e) = std::fs::remove_file(path)
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                log::warn!("export: cannot remove {path}: {e}");
+            }
+        }
+    }
+    done.into_iter().take(stop.saturating_add(1)).map_while(|o| o.map(|(r, _)| r)).collect()
 }
 
 async fn export_with(cx: &Cx<'_>, progress: &mut dyn FnMut(&Progress) -> bool, t0: Instant) -> Result<Report> {
@@ -229,9 +319,21 @@ impl State<'_> {
     }
 }
 
-/// Frames per parallel batch.
-pub(crate) fn batch_size() -> u64 {
-    rayon::current_num_threads().clamp(2, 16) as u64
+/// Frames per parallel batch for `comp` at the Render Settings' resolution, bounded by the
+/// job's memory budget ([`frames_in_flight`]).
+pub(crate) fn batch_size(cx: &Cx, comp: &Comp) -> u64 {
+    let s = cx.settings.resolution.clamp(0.01, 4.0);
+    let (w, h) = ((comp.width as f64 * s).ceil() as u32, (comp.height as f64 * s).ceil() as u32);
+    frames_in_flight(w, h, cx.options.memory_budget.unwrap_or(DEFAULT_MEMORY_BUDGET))
+}
+
+/// Frames rendering at once: one per core (2–16), fewer when that many `w × h` frames would
+/// take more than `budget` bytes in flight (a 4K frame and the canvases and layer buffers
+/// rendering it take about four `f32` frames, ~530 MB).
+pub(crate) fn frames_in_flight(w: u32, h: u32, budget: usize) -> u64 {
+    let threads = rayon::current_num_threads().clamp(2, 16) as u64;
+    let frame = (w as u64).saturating_mul(h as u64).saturating_mul(16 * 4).max(1);
+    (budget as u64 / frame).clamp(1, threads)
 }
 
 /// Crop/pad 8-bit RGBA to `w`×`h` (codec rounding).
@@ -259,7 +361,7 @@ async fn sequence(cx: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut State<'_>) 
         Channels::Rgba if !fmt.supports_alpha() => Channels::Rgb,
         c => c,
     };
-    let batch = batch_size();
+    let batch = batch_size(cx, comp);
     let mut bytes = 0u64;
     let mut i = 0;
     while i < st.total {
@@ -369,7 +471,7 @@ async fn gif_export(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut State<'_
     let cs_per_frame = 100.0 * rate.den as f64 / rate.num as f64;
     let mut clock = 0.0f64;
     let mut emitted = 0u64;
-    let batch = batch_size();
+    let batch = batch_size(job, comp);
     let mut i = 0;
     while i < st.total {
         let end = (i + batch).min(st.total);
@@ -413,5 +515,22 @@ mod tests {
         assert_eq!(&p[12..16], &[0, 0, 0, 0]);
         assert_eq!(OutputFormat::H264.coded_size(1, 101), (2, 100));
         assert_eq!(OutputFormat::Gif.coded_size(1, 101), (1, 101));
+    }
+}
+
+#[cfg(test)]
+mod batch_tests {
+    /// Frames rendering at once are bounded by the memory budget: 4K frames get fewer than HD.
+    #[test]
+    fn batch_size_follows_frame_bytes_and_budget() {
+        let threads = rayon::current_num_threads().clamp(2, 16) as u64;
+        let gib = 1 << 30;
+        // ~530 MB per 4K frame in flight: two fit 1 GiB.
+        assert_eq!(super::frames_in_flight(3840, 2160, gib), 2.min(threads));
+        assert_eq!(super::frames_in_flight(1920, 1080, gib), 8.min(threads));
+        // Always at least one, never more than the threads.
+        assert_eq!(super::frames_in_flight(8192, 8192, 64 << 20), 1);
+        assert_eq!(super::frames_in_flight(16, 16, gib), threads);
+        assert_eq!(super::frames_in_flight(0, 0, 0), 1);
     }
 }

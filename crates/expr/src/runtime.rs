@@ -1,7 +1,7 @@
 //! The per-thread boa runtime: one `Context` with the prelude loaded, a compiled-script cache,
 //! the native functions, and the request/miss bookkeeping (see [`crate::host`]).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::mem::ManuallyDrop;
 
@@ -23,14 +23,37 @@ pub const LOOP_LIMIT: u64 = 1_000_000;
 pub const TIMED_OUT: &str = "Error: expression takes too long to evaluate";
 /// The part of boa's stack-size limit error the runtime recovers from (see [`run`]).
 const STACK_LIMIT: &str = "maximum stack size";
+/// Loop iterations per call frame once a run is only collecting misses (see [`native_host`]).
+const SPECULATIVE_LOOP_LIMIT: u64 = 10_000;
+/// Misses one run collects before it stops.
+const MAX_MISSES: usize = 512;
+/// Nesting depth from which runs stop at their first miss again: stand-in answers can ask for
+/// things the script never reads, and inside a chain of expressions reading each other (a
+/// cycle, until [`crate::MAX_DEPTH`] stops it) that extra work would multiply per level.
+const SPECULATE_DEPTH: usize = 4;
+
+/// A memoized host answer, stamped with the last run that asked for it.
+pub struct Answer {
+    resp: Resp,
+    run: u32,
+}
 
 /// Memoized host answers and pending misses of one expression evaluation.
 #[derive(Default)]
 pub struct Frame {
-    pub memo: HashMap<Req, Resp>,
+    pub memo: HashMap<Req, Answer>,
     pub misses: Vec<Req>,
+    /// The requests the current run asked for (each once, in order). After the final run this
+    /// is exactly what the expression read, which its next evaluation prefetches.
+    pub used: Vec<Req>,
+    run: u32,
+    /// Whether a run carries on past a miss (see [`native_host`]).
+    speculate: bool,
     /// What this frame evaluates: an evaluation that needs itself is a cycle.
     pub owner: Option<Owner>,
+    /// A run called `Math.random` or `Date` (however the script reached them): its result can't
+    /// be remembered.
+    pub impure: bool,
 }
 
 /// One expression evaluation: the property (comp, layer, uid), the comp time and the text.
@@ -43,14 +66,41 @@ pub struct Owner {
     pub text: String,
 }
 
+impl Frame {
+    /// The frame of an evaluation nested `depth` levels deep.
+    pub fn new(depth: usize) -> Frame {
+        Frame { speculate: depth < SPECULATE_DEPTH, ..Frame::default() }
+    }
+    pub fn insert(&mut self, req: Req, resp: Resp) {
+        self.memo.insert(req, Answer { resp, run: 0 });
+    }
+    pub fn has(&self, req: &Req) -> bool {
+        self.memo.contains_key(req)
+    }
+    pub fn answer(&self, req: &Req) -> Option<&Resp> {
+        self.memo.get(req).map(|a| &a.resp)
+    }
+    /// Move the answers to `reqs` (each listed once) out of the memo.
+    pub fn take_answers(&mut self, reqs: &[Req]) -> Option<Vec<Resp>> {
+        reqs.iter().map(|q| self.memo.remove(q).map(|a| a.resp)).collect()
+    }
+}
+
 thread_local! {
     /// Never dropped: boa's own thread-local heap may be torn down first at thread exit, and
     /// dropping GC handles after that aborts the process. The OS reclaims it with the thread.
     static RUNTIME: RefCell<Option<ManuallyDrop<Result<Runtime, String>>>> = const { RefCell::new(None) };
     /// Evaluation stack (nested when one expression reads another's value).
     pub static FRAMES: RefCell<Vec<Frame>> = const { RefCell::new(Vec::new()) };
+    /// Script runs on this thread (for tests and perf readouts).
+    static TOTAL_RUNS: Cell<u64> = const { Cell::new(0) };
     /// Script runs since the outermost evaluation on this thread began (nested ones included).
     pub static RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Script runs on this thread so far (each evaluation runs its script one or more times).
+pub fn runs() -> u64 {
+    TOTAL_RUNS.with(Cell::get)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -142,7 +192,56 @@ fn to_js(r: &Resp, ctx: &mut Context) -> JsValue {
     }
 }
 
-/// `__h(op, …)`: answer a host request from the memo, or record a miss and abort.
+/// A stand-in answer for a request that isn't answered yet, shaped like the real one so the
+/// rest of the script keeps running and reports its other misses in the same run. Results of a
+/// run with misses are thrown away, so stand-ins never reach a result.
+fn placeholder(req: &Req) -> Resp {
+    let n = Resp::Num;
+    let s = |x: &str| Resp::Str(x.into());
+    // Ids that name nothing (`-1` reads back as `u64::MAX`), so follow-up requests answer null.
+    let none = n(-1.0);
+    let ident = |k: usize| Resp::List((0..k * k).map(|i| n(if i % (k + 1) == 0 { 1.0 } else { 0.0 })).collect());
+    match req {
+        Req::CompInfo { .. } => {
+            Resp::List(vec![s(""), n(100.0), n(100.0), n(1.0), n(1.0 / 30.0), n(0.0), n(1.0), n(0.0), Resp::List(vec![n(0.0), n(0.0), n(0.0), n(1.0)])])
+        }
+        Req::CompByName { .. } | Req::LayerLookup { .. } => none,
+        Req::LayerInfo { .. } => Resp::List(vec![
+            s(""),
+            n(1.0),
+            n(0.0),
+            n(1.0),
+            n(0.0),
+            n(100.0),
+            n(100.0),
+            Resp::Null,
+            Resp::Bool(true),
+            Resp::Bool(false),
+            s(""),
+            Resp::Bool(true),
+        ]),
+        Req::Child { .. } => Resp::List(vec![s("\u{1}"), Resp::Bool(true), s(""), s(""), n(0.0), n(1.0)]),
+        Req::PropInfo { .. } => Resp::List(vec![s(""), n(0.0), s("number"), n(1.0), n(0.0), Resp::Null, Resp::Bool(false), n(1.0), s("")]),
+        Req::Keys { .. } => Resp::List(vec![Resp::List(vec![]), Resp::List(vec![])]),
+        Req::SourceInfo { .. } => Resp::List(vec![s("footage"), n(-1.0), s(""), n(100.0), n(100.0), n(1.0), n(1.0 / 30.0), n(1.0)]),
+        Req::Value { .. } => n(0.0),
+        Req::Xform { .. } => Resp::List(vec![ident(3), ident(3), ident(4), ident(4)]),
+        Req::SourceRect { .. } | Req::Sample { .. } => Resp::List(vec![n(0.0); 4]),
+        Req::Markers { .. } => Resp::List(vec![]),
+        Req::Project => Resp::List(vec![n(8.0), Resp::Bool(false), s("")]),
+        Req::Doc { .. } | Req::Footage { .. } | Req::FootageData { .. } => Resp::Null,
+    }
+}
+
+/// `__h(op, …)`: answer a host request from the memo, or record a miss.
+///
+/// A miss used to abort the run, so a script reading N things not yet known ran N+1 times (and
+/// loops over layers ran O(N²) work). Now the first miss switches the run to collecting: the
+/// miss gets a [`placeholder`] answer and the script carries on, recording every further miss,
+/// until it ends, fails, or reaches [`MAX_MISSES`] (which aborts as before). Loops are capped at
+/// [`SPECULATIVE_LOOP_LIMIT`] meanwhile, so a stand-in can't spin a loop for long. The run's
+/// result is discarded either way; the evaluator answers the misses and runs again. Evaluations
+/// nested [`SPECULATE_DEPTH`] deep abort at their first miss, as every run used to.
 fn native_host(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let op = num(args, 0, ctx)? as i64;
     let req = match op {
@@ -186,21 +285,31 @@ fn native_host(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsV
         },
         14 => Req::Project,
         15 => Req::SourceInfo { comp: id(args, 1, ctx)?, layer: id(args, 2, ctx)? },
+        16 => Req::Keys { comp: id(args, 1, ctx)?, layer: id(args, 2, ctx)?, path: string(args, 3, ctx)? },
         _ => return Err(JsNativeError::typ().with_message("unknown host request").into()),
     };
     let found = FRAMES.with(|f| {
         let mut f = f.borrow_mut();
         let frame = f.last_mut()?;
-        match frame.memo.get(&req) {
-            Some(r) => Some(r.clone()),
-            None => {
-                frame.misses.push(req);
-                None
+        if let Some(a) = frame.memo.get_mut(&req) {
+            if a.run != frame.run {
+                a.run = frame.run;
+                frame.used.push(req);
             }
+            return Some(to_js(&a.resp, ctx));
         }
+        let stop = !frame.speculate || frame.misses.len() >= MAX_MISSES;
+        let stand_in = (!stop).then(|| to_js(&placeholder(&req), ctx));
+        if frame.misses.len() < MAX_MISSES && !frame.misses.contains(&req) {
+            frame.misses.push(req);
+        }
+        if stand_in.is_some() {
+            ctx.runtime_limits_mut().set_loop_iteration_limit(SPECULATIVE_LOOP_LIMIT);
+        }
+        stand_in
     });
     match found {
-        Some(r) => Ok(to_js(&r, ctx)),
+        Some(v) => Ok(v),
         None => Err(JsNativeError::error().with_message(PENDING).into()),
     }
 }
@@ -223,6 +332,35 @@ fn native_noise(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<Js
     Ok(JsValue::from(noise::noise3(num(args, 0, ctx)?, num(args, 1, ctx)?, num(args, 2, ctx)?)))
 }
 
+/// `__impure()`: the running expression read the clock or `Math.random` (see [`IMPURE`]).
+fn native_impure(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+    FRAMES.with(|f| {
+        if let Some(fr) = f.borrow_mut().last_mut() {
+            fr.impure = true;
+        }
+    });
+    Ok(JsValue::undefined())
+}
+
+/// Wraps the sources of nondeterminism so any call marks the evaluation impure, by property
+/// access, alias or prototype (`Math["random"]`, `const M = Math; M.random()`,
+/// `Date.prototype.constructor.now()`), not only by spelling. `__impure` is then hidden.
+const IMPURE: &str = r#"(function () {
+  const mark = __impure;
+  const rnd = Math.random;
+  Object.defineProperty(Math, "random", { value: function random() { mark(); return rnd(); }, writable: false, configurable: false });
+  const D = Date;
+  const now = D.now;
+  Object.defineProperty(D, "now", { value: function now_() { mark(); return now.call(D); }, writable: false, configurable: false });
+  const P = new Proxy(D, {
+    construct(t, a, n) { mark(); return Reflect.construct(t, a, n === P ? D : n); },
+    apply(t, self, a) { mark(); return Reflect.apply(t, self, a); },
+  });
+  Object.defineProperty(D.prototype, "constructor", { value: P, writable: false, configurable: false });
+  Object.defineProperty(globalThis, "Date", { value: P, writable: false, configurable: false });
+  delete globalThis.__impure;
+})();"#;
+
 /// `__rnd(layerIndex, uid, userSeed, timeless, time, counter)`.
 fn native_random(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let timeless = arg(args, 3).to_boolean();
@@ -237,16 +375,18 @@ impl Runtime {
         let limits = ctx.runtime_limits_mut();
         limits.set_loop_iteration_limit(LOOP_LIMIT);
         limits.set_recursion_limit(400);
-        let natives: [(JsString, usize, fn(&JsValue, &[JsValue], &mut Context) -> JsResult<JsValue>); 4] = [
+        let natives: [(JsString, usize, fn(&JsValue, &[JsValue], &mut Context) -> JsResult<JsValue>); 5] = [
             (js_string!("__h"), 6, native_host),
             (js_string!("__wig"), 8, native_wiggle),
             (js_string!("__noise"), 3, native_noise),
             (js_string!("__rnd"), 6, native_random),
+            (js_string!("__impure"), 0, native_impure),
         ];
         for (name, len, f) in natives {
             ctx.register_global_callable(name, len, NativeFunction::from_fn_ptr(f)).map_err(|e| e.to_string())?;
         }
         ctx.eval(Source::from_bytes(PRELUDE)).map_err(|e| format!("expression prelude: {e}"))?;
+        ctx.eval(Source::from_bytes(IMPURE)).map_err(|e| format!("expression prelude: {e}"))?;
         let global = ctx.global_object();
         let func = |name: JsString, ctx: &mut Context| -> Result<JsObject, String> {
             global.get(name, ctx).ok().and_then(|v| v.as_object()).ok_or_else(|| "expression prelude: missing function".to_string())
@@ -280,6 +420,14 @@ impl Runtime {
             Err(e) => return Run::Done(Err(e)),
         };
         let ctx = &mut self.ctx;
+        ctx.runtime_limits_mut().set_loop_iteration_limit(LOOP_LIMIT);
+        FRAMES.with(|f| {
+            if let Some(fr) = f.borrow_mut().last_mut() {
+                fr.run = fr.run.wrapping_add(1).max(1);
+                fr.used.clear();
+            }
+        });
+        TOTAL_RUNS.with(|r| r.set(r.get().saturating_add(1)));
         let args = [
             JsValue::from(b.time),
             to_js(b.value, ctx),

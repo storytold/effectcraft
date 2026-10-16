@@ -11,7 +11,8 @@
 //!
 //! Item ids are positional (`m.3.0.2`), stable while the menu's structure stays the same; the
 //! app rebuilds the native menu when [`NativeMenu::structure`] changes and otherwise only pushes
-//! label / enabled / checked updates, and only when [`state_key`] changes.
+//! label / enabled / checked updates, and only when [`state_key`] changes — at most every
+//! [`MENU_REFRESH_INTERVAL`] ([`MenuPacer`]).
 
 use std::hash::{Hash, Hasher};
 
@@ -330,6 +331,60 @@ pub fn state_key(app: &EffectcraftApp) -> u64 {
     h.finish()
 }
 
+/// The shortest time between two native menu updates (edits that change the document on every
+/// frame, playback, scrubbing, bring it up to date about 4 times a second).
+pub const MENU_REFRESH_INTERVAL: f64 = 0.25;
+
+/// What [`MenuPacer::check`] decided.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Pace {
+    /// The menu shows this state already.
+    Current,
+    /// Update the menu now.
+    Now,
+    /// The state changed, but the last update was too recent: check again after this many seconds.
+    Later(f64),
+}
+
+/// Paces native menu updates: one when [`state_key`] changes, at most every
+/// [`MENU_REFRESH_INTERVAL`], with the last change always applied.
+#[derive(Clone, Debug, Default)]
+pub struct MenuPacer {
+    applied: Option<u64>,
+    last: Option<f64>,
+}
+
+impl MenuPacer {
+    /// Whether to update the menu for state `key` at `now` (seconds, e.g. `egui::InputState::time`).
+    /// [`Pace::Now`] counts as applied.
+    pub fn check(&mut self, key: u64, now: f64) -> Pace {
+        if self.applied == Some(key) {
+            return Pace::Current;
+        }
+        if let Some(last) = self.last {
+            let wait = last + MENU_REFRESH_INTERVAL - now;
+            // `now` going backwards (a new clock) never holds the menu back.
+            if wait > 0.0 && wait <= MENU_REFRESH_INTERVAL {
+                return Pace::Later(wait);
+            }
+        }
+        self.applied = Some(key);
+        self.last = Some(now);
+        Pace::Now
+    }
+
+    /// Whether the menu shows some state (it was updated since the last [`Self::reset`]).
+    pub fn applied(&self) -> bool {
+        self.applied.is_some()
+    }
+
+    /// Forget the applied state: the next [`Self::check`] updates right away (after a menu click,
+    /// whose check item toggled itself, or a new menu).
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
 /// Commands that act on a focused text field instead (Edit menu while typing): the egui event to
 /// send in their place.
 fn text_field_event(command: &str, clipboard: Option<String>) -> Option<Vec<egui::Event>> {
@@ -610,6 +665,26 @@ mod tests {
         let spec2 = build(&app);
         assert_ne!(spec1.structure(), spec2.structure());
         assert!(spec2.items().iter().any(|i| i.command == "file.openRecent" && i.label == "Recent Test.ecproj"));
+    }
+
+    #[test]
+    fn menu_updates_are_paced() {
+        let mut p = MenuPacer::default();
+        assert!(!p.applied());
+        assert_eq!(p.check(1, 10.0), Pace::Now);
+        assert!(p.applied());
+        assert_eq!(p.check(1, 10.01), Pace::Current);
+        // A change right after an update waits for the rest of the interval…
+        let Pace::Later(wait) = p.check(2, 10.1) else { panic!("not paced") };
+        assert!((wait - 0.15).abs() < 1e-9);
+        assert_eq!(p.check(3, 10.2), Pace::Later(10.0 + MENU_REFRESH_INTERVAL - 10.2));
+        // …then applies the latest state.
+        assert_eq!(p.check(3, 10.25), Pace::Now);
+        assert_eq!(p.check(3, 10.3), Pace::Current);
+        // A clock that went backwards doesn't hold it back; a reset updates at once.
+        assert_eq!(p.check(4, 1.0), Pace::Now);
+        p.reset();
+        assert_eq!(p.check(4, 1.01), Pace::Now);
     }
 
     #[test]

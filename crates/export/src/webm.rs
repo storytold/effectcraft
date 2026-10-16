@@ -19,6 +19,7 @@ use effectcraft_project::render_queue::{AudioFormat, Channels};
 use effectcraft_time::{TICKS_PER_SECOND, Tick};
 
 use crate::encode::{mix, pcm_bytes};
+use crate::pipeline::Batches;
 use crate::{Cx, Report, Result, State, batch_size, io, wants_audio};
 
 pub(crate) const OPUS_RATE: u32 = 48_000;
@@ -252,40 +253,39 @@ pub(crate) async fn webm(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut Sta
         }
     };
 
-    let batch = batch_size();
-    let mut i = 0;
-    while i < total {
-        let end = (i + batch).min(total);
-        // Frames render in parallel; the VP9 streams (inter-coded) encode in order, colour and
-        // alpha side by side.
-        let pixels: Vec<Vec<u8>> =
-            job.frames(comp, (i..end).collect(), |_, img| job.pixels(&img, comp, if alpha { Channels::Rgba } else { colour_channels }, w, h)).await;
-        let mut frames: Vec<Frame> = Vec::with_capacity(pixels.len());
-        for (j, px) in pixels.iter().enumerate() {
-            let (color, a) = rayon::join(
-                || {
-                    let (y, u, vv) = effectcraft_vp9enc::rgba_to_yuv420(px, w, h, false);
-                    color_enc.encode_frame(&y, &u, &vv, false)
-                },
-                || {
-                    alpha_enc.as_mut().map(|ea| {
-                        let (y, u, vv) = effectcraft_vp9enc::alpha_to_yuv420(px, w, h);
-                        ea.encode_frame(&y, &u, &vv, false).data
-                    })
-                },
-            );
-            let k = i + j as u64;
-            frames.push(Frame { ms: frame_ms(k), track: 1, key: color.key, prev_ms: (k > 0).then(|| frame_ms(k - 1)), data: color.data, alpha: a });
+    // Frames render in parallel, the next batch while this one encodes; the VP9 streams
+    // (inter-coded) encode in order, colour and alpha side by side.
+    let render = |_: u64, img: effectcraft_raster::Image| job.pixels(&img, comp, if alpha { Channels::Rgba } else { colour_channels }, w, h);
+    job.batches(comp, total, batch_size(job, comp), render, async |batches: &mut Batches<'_, '_, Vec<u8>>| -> Result<()> {
+        while let Some((i, end, pixels)) = batches.next().await? {
+            let mut frames: Vec<Frame> = Vec::with_capacity(pixels.len());
+            for (j, px) in pixels.iter().enumerate() {
+                let (color, a) = rayon::join(
+                    || {
+                        let (y, u, vv) = effectcraft_vp9enc::rgba_to_yuv420(px, w, h, false);
+                        color_enc.encode_frame(&y, &u, &vv, false)
+                    },
+                    || {
+                        alpha_enc.as_mut().map(|ea| {
+                            let (y, u, vv) = effectcraft_vp9enc::alpha_to_yuv420(px, w, h);
+                            ea.encode_frame(&y, &u, &vv, false).data
+                        })
+                    },
+                );
+                let k = i + j as u64;
+                frames.push(Frame { ms: frame_ms(k), track: 1, key: color.key, prev_ms: (k > 0).then(|| frame_ms(k - 1)), data: color.data, alpha: a });
+            }
+            drop(pixels);
+            let t_end = if end >= total { span_end } else { job.settings.frame_time(comp, end) };
+            audio_until(t_end, &mut frames, end >= total);
+            let c = cluster(&mut frames);
+            file.write_all(&c).map_err(io)?;
+            seg_len += c.len() as u64;
+            st.advance(end - i)?;
         }
-        drop(pixels);
-        let t_end = if end >= total { span_end } else { job.settings.frame_time(comp, end) };
-        audio_until(t_end, &mut frames, end >= total);
-        let c = cluster(&mut frames);
-        file.write_all(&c).map_err(io)?;
-        seg_len += c.len() as u64;
-        st.advance(end - i)?;
-        i = end;
-    }
+        Ok(())
+    })
+    .await?;
     if total == 0 {
         let mut frames = vec![];
         audio_until(span_end, &mut frames, true);

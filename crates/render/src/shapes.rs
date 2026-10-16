@@ -563,6 +563,32 @@ fn visual_bounds(d: &Draw, paths: &[BezPath]) -> Option<kurbo::Rect> {
 /// Maximum number of coverage pixels rasterised concurrently (bounds peak memory).
 const BATCH_PIXELS: usize = 8 << 20;
 
+/// Pixel size and offset of the buffer [`render`] makes for drawing bounds `b` at scale `s`.
+fn extent(b: kurbo::Rect, s: f64) -> (u32, u32, [f64; 2]) {
+    // Keep buffers sane for runaway geometry.
+    let b = b.intersect(kurbo::Rect::new(-20000.0, -20000.0, 20000.0, 20000.0));
+    let w = ((b.width() * s).ceil() as u32 + 4).clamp(1, 16384);
+    let h = ((b.height() * s).ceil() as u32 + 4).clamp(1, 16384);
+    (w, h, [-b.x0 * s + 2.0, -b.y0 * s + 2.0])
+}
+
+/// The `(width, height, offset)` of the buffer [`render`] would make, without rasterising
+/// (`sourceRectAtTime`); `None` when nothing draws (`render`'s empty 1×1 buffer).
+pub fn buffer_rect(ctx: &EvalCtx, layer: &Layer, contents: &PropGroup, s: f64) -> Option<(u32, u32, [f64; 2])> {
+    let mut arena = Vec::new();
+    let (draws, _) = collect(ctx, layer, contents, &mut arena);
+    let b = draws
+        .iter()
+        .rev()
+        .filter(|d| d.opacity > 0.0)
+        .filter_map(|d| {
+            let paths: Vec<BezPath> = d.slots.iter().filter_map(|&i| arena.get(i).cloned()).filter(|p| !p.elements().is_empty()).collect();
+            draw_bounds(d, &paths)
+        })
+        .reduce(|a, b| a.union(b))?;
+    Some(extent(b, s))
+}
+
 /// Render a shape layer's contents into a layer-space buffer at scale `s`.
 ///
 /// Each draw rasterises and composites only its own pixel rectangle; coverage masks of
@@ -582,11 +608,7 @@ pub fn render(ctx: &EvalCtx, layer: &Layer, contents: &PropGroup, s: f64) -> Buf
         })
         .collect();
     let Some(b) = resolved.iter().map(|r| r.2).reduce(|a, b| a.union(b)) else { return Buf { img: Image::new(1, 1), offset: [0.0, 0.0], scale: s } };
-    // Keep buffers sane for runaway geometry.
-    let b = b.intersect(kurbo::Rect::new(-20000.0, -20000.0, 20000.0, 20000.0));
-    let w = ((b.width() * s).ceil() as u32 + 4).clamp(1, 16384);
-    let h = ((b.height() * s).ceil() as u32 + 4).clamp(1, 16384);
-    let offset = [-b.x0 * s + 2.0, -b.y0 * s + 2.0];
+    let (w, h, offset) = extent(b, s);
     let m = Mat3::translate(vec2(offset[0], offset[1])) * Mat3::scale(vec2(s, s));
     let px_rect = |r: kurbo::Rect| -> Option<PxRect> {
         let x0 = (r.x0 * s + offset[0]).floor().max(0.0);

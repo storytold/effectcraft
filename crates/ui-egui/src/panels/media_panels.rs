@@ -25,10 +25,14 @@ use crate::{EffectcraftApp, widgets};
 
 type Thumb = Option<(egui::TextureHandle, [u32; 2])>;
 
+/// File thumbnails kept (128 px, ~64 KB each); the least recently shown go first.
+const MAX_THUMBS: usize = 256;
+
 /// Thumbnail of a file (cached per path; `None` while not decoded or not decodable).
 fn thumbnail(app: &EffectcraftApp, ctx: &egui::Context, path: &str, budget: &mut u32) -> Thumb {
     let id = egui::Id::new(("mb-thumb", path));
     if let Some(t) = ctx.data(|d| d.get_temp::<Thumb>(id)) {
+        crate::thumb_lru::touch::<Thumb>(ctx, "mb-thumb", id, MAX_THUMBS);
         return t;
     }
     if *budget == 0 {
@@ -58,6 +62,7 @@ fn thumbnail(app: &EffectcraftApp, ctx: &egui::Context, path: &str, budget: &mut
         Some((tex, [w, h]))
     })();
     ctx.data_mut(|d| d.insert_temp(id, thumb.clone()));
+    crate::thumb_lru::touch::<Thumb>(ctx, "mb-thumb", id, MAX_THUMBS);
     thumb
 }
 

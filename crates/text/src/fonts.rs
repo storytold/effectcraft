@@ -9,8 +9,9 @@
 //! face lacks: bundled faces first, then the system's usual family for the character's script
 //! (CJK), then any installed face that covers it.
 
-use std::path::PathBuf;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use skrifa::instance::{LocationRef, Size};
 use skrifa::{FontRef, MetadataProvider};
@@ -197,10 +198,20 @@ impl Face {
             .get_or_init(|| match &self.info.data {
                 FaceData::Static(b) => Some(FaceBytes::Static(b)),
                 FaceData::Shared(b) => Some(FaceBytes::Shared(b.clone())),
-                FaceData::File(p) => std::fs::read(p).ok().map(|v| FaceBytes::Shared(Arc::new(v))),
+                FaceData::File(p) => file_bytes(p).map(FaceBytes::Shared),
             })
             .as_ref()
             .map(FaceBytes::get)
+    }
+    /// The face's file for the rest of the program, shared rather than copied: for UI font
+    /// systems that take `'static` data. Faces in the database are never unloaded, so this keeps
+    /// alive nothing they don't.
+    pub fn static_bytes(&self) -> Option<&'static [u8]> {
+        self.bytes()?;
+        match self.bytes.get()?.as_ref()? {
+            FaceBytes::Static(b) => Some(*b),
+            FaceBytes::Shared(b) => Some(Box::leak(Box::new(b.clone())).as_slice()),
+        }
     }
     /// The parsed font (None if the file is missing or unreadable).
     pub fn font(&self) -> Option<FontRef<'_>> {
@@ -723,6 +734,22 @@ fn families_for(s: FallbackScript) -> &'static [&'static str] {
     }
 }
 
+/// The contents of font file `p`, read once while any face uses them: the faces of a
+/// collection (`.ttc`: a dozen CJK weights in one file of tens of megabytes) each read the whole
+/// file.
+fn file_bytes(p: &Path) -> Option<Arc<Vec<u8>>> {
+    static FILES: OnceLock<Mutex<HashMap<PathBuf, std::sync::Weak<Vec<u8>>>>> = OnceLock::new();
+    let files = FILES.get_or_init(Default::default);
+    let mut map = files.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(b) = map.get(p).and_then(std::sync::Weak::upgrade) {
+        return Some(b);
+    }
+    let b = Arc::new(std::fs::read(p).ok()?);
+    map.retain(|_, w| w.strong_count() > 0);
+    map.insert(p.to_path_buf(), Arc::downgrade(&b));
+    Some(b)
+}
+
 /// Whether a not-yet-loaded face covers `c`, reading its file without keeping the bytes (the
 /// last-resort search may look at every installed font once).
 fn file_covers(f: &Face, c: char) -> bool {
@@ -883,6 +910,26 @@ fn system_fallback(c: char, style: &str) -> Option<FaceId> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The faces of one font file (a `.ttc` collection) share one read of it, and the UI gets
+    /// those bytes rather than a copy.
+    #[test]
+    fn faces_of_one_file_share_its_bytes() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-font-bytes");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("collection.ttc");
+        std::fs::write(&p, b"not really a font").unwrap();
+        let a = file_bytes(&p).unwrap();
+        let b = file_bytes(&p).unwrap();
+        assert!(Arc::ptr_eq(&a, &b));
+        drop((a, b));
+        std::fs::write(&p, b"edited").unwrap();
+        assert_eq!(file_bytes(&p).unwrap().as_slice(), b"edited", "read again once nothing holds it");
+        let face = face(FaceId::default());
+        let bytes = face.static_bytes().unwrap();
+        assert!(std::ptr::eq(bytes.as_ptr(), face.bytes().unwrap().as_ptr()), "shared, not copied");
+        let _ = std::fs::remove_file(&p);
+    }
 
     #[test]
     fn extra_font_dirs_come_from_a_path_list() {

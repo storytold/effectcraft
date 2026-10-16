@@ -29,6 +29,50 @@ pub struct FileExporter {
     pub sink: Option<Arc<effectcraft_export::Sink>>,
 }
 
+impl FileExporter {
+    /// The `effectcraft-export` job of a queue item's output module.
+    fn job<'a>(&'a self, job: &'a ExportJob<'a>) -> effectcraft_export::Job<'a> {
+        effectcraft_export::Job {
+            project: job.project,
+            footage: job.footage,
+            expr: job.expr,
+            accel: job.accel,
+            comp: job.item.comp,
+            settings: &job.item.settings,
+            output: &job.item.output,
+            path: job.path,
+            sink: self.sink.as_deref(),
+            options: effectcraft_export::JobOptions {
+                log: job.item.log,
+                label: job.label.clone(),
+                storage: job.storage,
+                overflow: job.project.render_prefs.overflow_folders.clone(),
+                memory_budget: job.memory_budget,
+            },
+            nested_switches: job.nested_switches,
+        }
+    }
+}
+
+/// An export's result as the Render Queue reports it (a stop is [`CANCELLED`](effectcraft_engine::render_queue::CANCELLED)).
+fn result(r: effectcraft_export::Result<effectcraft_export::Report>) -> Result<ExportResult, String> {
+    match r {
+        Ok(r) => Ok(ExportResult {
+            path: r.path,
+            frames: r.frames,
+            width: r.width,
+            height: r.height,
+            bytes: r.bytes,
+            seconds: r.seconds,
+            audio: r.audio,
+            log: r.log,
+            overflow: r.overflow,
+        }),
+        Err(effectcraft_export::ExportError::Cancelled) => Err(effectcraft_engine::render_queue::CANCELLED.into()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 impl Exporter for FileExporter {
     fn formats(&self) -> Vec<OutputFormat> {
         effectcraft_export::available_formats()
@@ -42,40 +86,19 @@ impl Exporter for FileExporter {
         job: &'a ExportJob<'a>,
         progress: &'a mut dyn FnMut(u64, u64) -> bool,
     ) -> effectcraft_engine::render_queue::LocalFuture<'a, Result<ExportResult, String>> {
+        Box::pin(async move { result(effectcraft_export::export_async(&self.job(job), &mut |p| progress(p.done, p.total)).await) })
+    }
+
+    /// Modules that render the same frames export at once from one render of each frame
+    /// ([`effectcraft_export::export_modules_async`]).
+    fn export_modules_async<'a>(
+        &'a self,
+        jobs: &'a [ExportJob<'a>],
+        progress: &'a mut dyn FnMut(usize, u64, u64) -> bool,
+    ) -> effectcraft_engine::render_queue::LocalFuture<'a, Vec<Result<ExportResult, String>>> {
         Box::pin(async move {
-            let j = effectcraft_export::Job {
-                project: job.project,
-                footage: job.footage,
-                expr: job.expr,
-                accel: job.accel,
-                comp: job.item.comp,
-                settings: &job.item.settings,
-                output: &job.item.output,
-                path: job.path,
-                sink: self.sink.as_deref(),
-                options: effectcraft_export::JobOptions {
-                    log: job.item.log,
-                    label: job.label.clone(),
-                    storage: job.storage,
-                    overflow: job.project.render_prefs.overflow_folders.clone(),
-                },
-                nested_switches: job.nested_switches,
-            };
-            match effectcraft_export::export_async(&j, &mut |p| progress(p.done, p.total)).await {
-                Ok(r) => Ok(ExportResult {
-                    path: r.path,
-                    frames: r.frames,
-                    width: r.width,
-                    height: r.height,
-                    bytes: r.bytes,
-                    seconds: r.seconds,
-                    audio: r.audio,
-                    log: r.log,
-                    overflow: r.overflow,
-                }),
-                Err(effectcraft_export::ExportError::Cancelled) => Err(effectcraft_engine::render_queue::CANCELLED.into()),
-                Err(e) => Err(e.to_string()),
-            }
+            let js: Vec<effectcraft_export::Job> = jobs.iter().map(|j| self.job(j)).collect();
+            effectcraft_export::export_modules_async(&js, &mut |mi, p| progress(mi, p.done, p.total)).await.into_iter().map(result).collect()
         })
     }
 }
@@ -638,5 +661,220 @@ mod tests {
         s.execute("prop.set", json!({"layer": ctl, "path": "effects/#1/convergence", "value": true})).unwrap();
         assert!(close(v3(&s, "transform/position"), [300.0 - d, 180.0, -800.0]), "{:?}", v3(&s, "transform/position"));
         assert!(close(v3(&s, "transform/poi"), [300.0, 180.0, 0.0]), "{:?}", v3(&s, "transform/poi"));
+    }
+
+    /// Footage drawn per frame that counts the frames the renderer asks for; a `gate` makes
+    /// the first request at frame 3 or later wait until the test lets it go.
+    #[derive(Default)]
+    struct Counted {
+        asked: std::sync::Mutex<std::collections::BTreeMap<u32, u32>>,
+        gate: Option<(std::sync::mpsc::Sender<()>, std::sync::Mutex<std::sync::mpsc::Receiver<()>>)>,
+        gated: std::sync::atomic::AtomicBool,
+    }
+
+    impl effectcraft_engine::render::FootageSource for Counted {
+        fn frame(
+            &self,
+            _: effectcraft_project::ItemId,
+            _: &effectcraft_project::Footage,
+            t: effectcraft_time::Tick,
+        ) -> Option<std::sync::Arc<effectcraft_raster::Image>> {
+            let f = (t.seconds() * 10.0).round().max(0.0) as u32;
+            *self.asked.lock().unwrap().entry(f).or_default() += 1;
+            if let Some((reached, go)) = &self.gate
+                && f >= 3
+                && !self.gated.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                reached.send(()).unwrap();
+                go.lock().unwrap().recv().unwrap();
+            }
+            let mut img = effectcraft_raster::Image::new(64, 36);
+            for y in 0..36 {
+                for x in 0..64 {
+                    let v = ((x + y * 2 + f * 7) % 64) as f32 / 63.0;
+                    img.set(x, y, [v, 1.0 - v, (f as f32 / 12.0).min(1.0), 1.0]);
+                }
+            }
+            Some(std::sync::Arc::new(img))
+        }
+    }
+
+    /// A host session with a 64×36, 10 fps, 1.2 s comp showing `footage` and a queue item writing
+    /// `modules` (format, path; the first is the item's own output module).
+    fn modules_session(footage: std::sync::Arc<Counted>, modules: &[(&str, String)]) -> effectcraft_engine::Session {
+        let mut s = super::session();
+        s.execute("comp.new", json!({"name": "Modules", "width": 64, "height": 36, "frameRate": 10, "duration": 1.2})).unwrap();
+        let cid = s.active_comp_id().unwrap();
+        s.edit("clip", None, |p, _| {
+            let f = effectcraft_project::Footage {
+                path: "counted.mov".into(),
+                kind: effectcraft_project::FootageKind::Video,
+                width: 64,
+                height: 36,
+                frame_rate: effectcraft_time::FrameRate::new(10, 1),
+                duration: effectcraft_time::Tick::from_seconds_f64(1.2),
+                has_video: true,
+                codec: "SYN".into(),
+                ..Default::default()
+            };
+            let item = p.add_item("clip", effectcraft_engine::color::Label::Aqua, None, effectcraft_project::ItemKind::Footage(f));
+            let comp = p.comp(cid).unwrap().clone();
+            let l = effectcraft_project::build::layer(p, &comp, "Clip", effectcraft_project::LayerSource::Footage { item }, (64, 36), None);
+            p.comp_mut(cid).unwrap().layers.insert(0, l);
+            Ok(())
+        })
+        .unwrap();
+        s.footage = footage;
+        let (fmt, path) = &modules[0];
+        s.execute("renderQueue.add", json!({"comp": cid.0, "format": fmt, "output": path})).unwrap();
+        for (fmt, path) in &modules[1..] {
+            s.execute("render.addOutputModule", json!({"index": 1, "format": fmt, "output": path})).unwrap();
+        }
+        s
+    }
+
+    fn modules_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-out/host-modules").join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The files in `dir` by name.
+    fn files(dir: &std::path::Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+        std::fs::read_dir(dir).unwrap().map(|e| e.unwrap()).map(|e| (e.file_name().into_string().unwrap(), std::fs::read(e.path()).unwrap())).collect()
+    }
+
+    const MODULES: [(&str, &str); 3] = [("h264", "m.mp4"), ("prores", "m.mov"), ("png", "m_[##].png")];
+
+    /// G5: the host exporter hands an item's output modules to `export_modules_async`: every
+    /// frame renders once for all of them, and each file holds the bytes of its module exported
+    /// alone.
+    #[test]
+    fn output_modules_render_each_frame_once_and_write_the_bytes_they_write_alone() {
+        for n in [2, 3] {
+            let mut alone = std::collections::BTreeMap::new();
+            let mut asked_alone = 0;
+            for (fmt, name) in &MODULES[..n] {
+                let dir = modules_dir(&format!("alone-{n}-{fmt}"));
+                let footage = std::sync::Arc::new(Counted::default());
+                let mut s = modules_session(footage.clone(), &[(fmt, dir.join(name).to_string_lossy().to_string())]);
+                s.execute("renderQueue.render", json!({"wait": true})).unwrap();
+                s.poll_render();
+                assert_eq!(s.project.render_queue[0].status.label(), "Done", "{fmt}");
+                asked_alone += footage.asked.lock().unwrap().values().sum::<u32>();
+                alone.extend(files(&dir));
+            }
+            let dir = modules_dir(&format!("together-{n}"));
+            let footage = std::sync::Arc::new(Counted::default());
+            let modules: Vec<(&str, String)> = MODULES[..n].iter().map(|(f, name)| (*f, dir.join(name).to_string_lossy().to_string())).collect();
+            let mut s = modules_session(footage.clone(), &modules);
+            s.execute("renderQueue.render", json!({"wait": true})).unwrap();
+            s.poll_render();
+            let it = &s.project.render_queue[0];
+            assert_eq!(it.status.label(), "Done", "{n} modules");
+            assert!(it.last_output.as_deref().is_some_and(|o| o.ends_with("m.mp4")), "{:?}", it.last_output);
+            let asked = footage.asked.lock().unwrap().clone();
+            assert_eq!(asked.keys().copied().collect::<Vec<_>>(), (0..12).collect::<Vec<_>>(), "{n} modules: {asked:?}");
+            assert!(asked.values().all(|c| *c == 1), "{n} modules: every frame renders once: {asked:?}");
+            assert_eq!(asked_alone, 12 * n as u32, "each module alone renders every frame");
+            let together = files(&dir);
+            assert_eq!(together.keys().collect::<Vec<_>>(), alone.keys().collect::<Vec<_>>());
+            for (f, bytes) in &alone {
+                assert!(together.get(f) == Some(bytes), "{n} modules: {f} differs from the module exported alone");
+            }
+        }
+    }
+
+    /// A stop mid-way cancels the modules being written: the item is User Stopped and none of
+    /// its modules leave files.
+    #[test]
+    fn stopping_output_modules_removes_their_files() {
+        let dir = modules_dir("stop");
+        let (reached, wait) = std::sync::mpsc::channel();
+        let (go, gate) = std::sync::mpsc::channel();
+        let footage = std::sync::Arc::new(Counted { gate: Some((reached, std::sync::Mutex::new(gate))), ..Default::default() });
+        let modules: Vec<(&str, String)> = MODULES.iter().map(|(f, name)| (*f, dir.join(name).to_string_lossy().to_string())).collect();
+        let mut s = modules_session(footage.clone(), &modules);
+        s.execute("renderQueue.render", json!({"wait": false})).unwrap();
+        wait.recv_timeout(std::time::Duration::from_secs(120)).unwrap();
+        s.execute("renderQueue.stop", json!({})).unwrap();
+        go.send(()).unwrap();
+        let t0 = std::time::Instant::now();
+        while s.is_rendering() {
+            assert!(t0.elapsed().as_secs() < 120, "render did not stop");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        s.poll_render();
+        assert_eq!(s.project.render_queue[0].status.label(), "User Stopped");
+        assert!(footage.asked.lock().unwrap().len() < 12, "the render stopped mid-way");
+        assert!(files(&dir).is_empty(), "stopped modules left files: {:?}", files(&dir).keys());
+    }
+
+    /// A module that cannot write fails the item: the modules before it finish, the ones after
+    /// it leave no files.
+    #[test]
+    fn a_failing_output_module_fails_the_item() {
+        let dir = modules_dir("fail");
+        std::fs::write(dir.join("file"), b"x").unwrap();
+        let modules: Vec<(&str, String)> = [("png", "a_[##].png"), ("h264", "file/b.mp4"), ("prores", "c.mov")]
+            .iter()
+            .map(|(f, name)| (*f, dir.join(name).to_string_lossy().to_string()))
+            .collect();
+        let mut s = modules_session(std::sync::Arc::new(Counted::default()), &modules);
+        s.execute("renderQueue.render", json!({"wait": true})).unwrap();
+        s.poll_render();
+        let status = s.project.render_queue[0].status.clone();
+        assert!(matches!(status, effectcraft_engine::project::render_queue::RenderStatus::Failed(_)), "{status:?}");
+        let left = files(&dir);
+        assert!(left.contains_key("a_00.png") && left.contains_key("a_11.png"), "{:?}", left.keys());
+        assert!(!left.contains_key("c.mov"), "the module after the failing one left its file");
+    }
+
+    /// The default `Exporter::export_modules_async`: modules one after another.
+    struct OneByOne(super::FileExporter);
+
+    impl effectcraft_engine::Exporter for OneByOne {
+        fn formats(&self) -> Vec<effectcraft_engine::project::render_queue::OutputFormat> {
+            self.0.formats()
+        }
+        fn export(&self, job: &effectcraft_engine::ExportJob, progress: &mut dyn FnMut(u64, u64) -> bool) -> Result<effectcraft_engine::ExportResult, String> {
+            self.0.export(job, progress)
+        }
+    }
+
+    /// Seconds to render a 2- and 3-module item of the demo comp at half resolution with the
+    /// modules one after another (the default) and with the host exporter. Run with `--ignored
+    /// --nocapture`.
+    #[test]
+    #[ignore]
+    fn time_output_modules() {
+        let dir = modules_dir("time");
+        for n in [2, 3] {
+            for round in 0..2 {
+                let mut t = [0.0; 2];
+                for (k, together) in [false, true].into_iter().enumerate() {
+                    let mut s = super::session();
+                    if !together {
+                        s.exporter = Some(std::sync::Arc::new(OneByOne(super::FileExporter::default())));
+                    }
+                    s.execute("file.openDemoProject", json!({})).unwrap();
+                    let (fmt, name) = MODULES[0];
+                    let span = json!({"timeSpan": "custom", "start": 0.0, "end": 2.0, "resolution": 0.5});
+                    let mut p = json!({"format": fmt, "output": dir.join(name).to_string_lossy()});
+                    p.as_object_mut().unwrap().extend(span.as_object().unwrap().clone());
+                    s.execute("renderQueue.add", p).unwrap();
+                    for (fmt, name) in &MODULES[1..n] {
+                        s.execute("render.addOutputModule", json!({"index": 1, "format": fmt, "output": dir.join(name).to_string_lossy()})).unwrap();
+                    }
+                    let t0 = std::time::Instant::now();
+                    s.execute("renderQueue.render", json!({"wait": true})).unwrap();
+                    t[k] = t0.elapsed().as_secs_f64();
+                    s.poll_render();
+                    assert_eq!(s.project.render_queue[0].status.label(), "Done");
+                }
+                println!("{n} modules (round {round}): one after another {:.3} s, host exporter {:.3} s ({:.2}x)", t[0], t[1], t[0] / t[1]);
+            }
+        }
     }
 }
