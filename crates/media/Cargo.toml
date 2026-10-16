@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 effectcraft-time = { workspace = true }
+effectcraft-color = { workspace = true }
 effectcraft-project = { workspace = true }
 effectcraft-raster = { workspace = true }
 effectcraft-render = { workspace = true }

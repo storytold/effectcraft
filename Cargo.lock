@@ -1435,6 +1435,7 @@ dependencies = [
 name = "effectcraft-media"
 version = "0.10.0"
 dependencies = [
+ "effectcraft-color",
  "effectcraft-model",
  "effectcraft-pdf",
  "effectcraft-project",

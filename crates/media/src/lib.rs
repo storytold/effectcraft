@@ -25,6 +25,7 @@ pub use layered::vector_doc;
 mod pool;
 mod probe;
 mod stream;
+mod wav_markers;
 mod webp_anim;
 
 pub use pool::{DEFAULT_BUDGET, MediaPool, PoolStats};
