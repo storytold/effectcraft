@@ -539,6 +539,7 @@ File
     Multiple Files... | file.importMultiple
     Adobe Premiere Pro Project... | file.importTimeline
     EffectCraft Project... | file.importProject
+    Converted Project... | file.importConvertedProject
     Placeholder... | file.importPlaceholder
     Solid... | file.importSolid
     Lottie... | file.importLottie

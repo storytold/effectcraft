@@ -589,6 +589,8 @@ function __uiProto() {
       if (this.__modal) __uiResults[this.__wid] = this.__result;
     },
     center: function () {},
+    // Shows the script's progress while it works (see __uiUpdate).
+    update: function () { __uiUpdate(); },
     notify: function (ev) {
       var e = ev || (this.type === "edittext" || this.type === "slider" || this.type === "dropdownlist" || this.type === "listbox" ? "onChange" : "onClick");
       if (e.indexOf("on") !== 0) e = "on" + e.charAt(0).toUpperCase() + e.slice(1);

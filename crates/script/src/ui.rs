@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use boa_engine::{Context, JsResult, JsValue, js_string};
 use effectcraft_engine::Session;
-use effectcraft_engine::scriptui::{ScriptUiEvent, ScriptWindow, layout};
+use effectcraft_engine::scriptui::{FILE_DIALOG_EVENT, FileDialogRequest, RESUME_EVENT, ScriptUiEvent, ScriptWindow, layout};
 use serde_json::{Value as J, json};
 use web_time::Instant;
 
@@ -123,6 +123,90 @@ pub(crate) fn native_modal(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> 
             });
         }
     }
+}
+
+/// `__fileDialog(kind, prompt, extensionsJson, multi, name)`: `File.openDialog`,
+/// `File.saveDialog` and `Folder.selectDialog`. On a script-host thread, when a frontend shows
+/// file dialogs, the session goes back to the caller (as for a modal dialog) with a
+/// [`FileDialogRequest`] until `scriptui.fileDialog` answers; returns the picked paths as JSON,
+/// or `null` when cancelled or when nothing can show the dialog (the CLI, the Script Console,
+/// the web).
+pub(crate) fn native_file_dialog(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let kind = arg_string(args, 0, ctx)?;
+    let prompt = arg_string(args, 1, ctx)?;
+    let extensions: Vec<String> = serde_json::from_str(&arg_string(args, 2, ctx)?).unwrap_or_default();
+    let multi = args.get(3).is_some_and(JsValue::to_boolean);
+    let name = arg_string(args, 4, ctx)?;
+    let asked = with_active(|a| {
+        // One dialog at a time: another script's is still up.
+        if a.link.is_none() || !a.session.script_ui.frontend || a.session.script_ui.file_dialog.is_some() {
+            return Ok(false);
+        }
+        a.session.script_ui.file_dialog = Some(FileDialogRequest { host: a.host, kind, prompt, extensions, multi, name });
+        Ok(true)
+    })
+    .unwrap_or(false);
+    if !asked {
+        return Ok(JsValue::null());
+    }
+    let windows = snapshot(ctx);
+    let out = crate::Outcome { output: settle(), waiting: true, ..Default::default() };
+    // `dispatch_ui` lets only the answer through while the dialog is up.
+    match yield_wait(out, windows, false) {
+        Some(ev) if !ev.value.is_null() => Ok(js_str(&ev.value.to_string())),
+        _ => Ok(JsValue::null()),
+    }
+}
+
+/// How often `Window.update()` shows a script's progress at most.
+const UPDATE_EVERY: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// `__uiUpdate()`: `Window.update()`, which a script doing long work calls to show its progress
+/// (a palette's progress bar and text). On a script-host thread, when a frontend shows the app,
+/// the session goes back to it (at most every 50 ms) with [`ScriptUi::busy`] set: it draws a
+/// frame, which keeps the app responsive, and `scriptui.resume` lets the script carry on. Clicks
+/// in the script's windows meanwhile run their handlers (a Cancel button). Elsewhere (the CLI,
+/// the Script Console, the web) it does nothing.
+///
+/// [`ScriptUi::busy`]: effectcraft_engine::scriptui::ScriptUi::busy
+pub(crate) fn native_update(_: &JsValue, _: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let due = with_active(|a| {
+        let ui = &a.session.script_ui;
+        if a.link.is_none() || !ui.frontend || ui.file_dialog.is_some() || a.last_update.is_some_and(|t| t.elapsed() < UPDATE_EVERY) {
+            return Ok(false);
+        }
+        a.session.script_ui.busy = Some(a.host);
+        Ok(true)
+    })
+    .unwrap_or(false);
+    if !due {
+        return Ok(JsValue::undefined());
+    }
+    loop {
+        let windows = snapshot(ctx);
+        let out = crate::Outcome { output: settle(), waiting: true, ..Default::default() };
+        let Some(ev) = yield_wait(out, windows, false) else { return Ok(JsValue::undefined()) };
+        if ev.kind == RESUME_EVENT {
+            break;
+        }
+        if let Err(e) = dispatch_js(ctx, &ev) {
+            let line = e.line.map(|l| format!(" (line {l})")).unwrap_or_default();
+            let _ = with_active(|a| {
+                a.output.push(format!("Error{line}: {}", e.message));
+                Ok(())
+            });
+        }
+        // Still in the middle of its work: show the handler's effect, then carry on.
+        let _ = with_active(|a| {
+            a.session.script_ui.busy = Some(a.host);
+            Ok(())
+        });
+    }
+    let _ = with_active(|a| {
+        a.last_update = Some(web_time::Instant::now());
+        Ok(())
+    });
+    Ok(JsValue::undefined())
 }
 
 // ---------------------------------------------------------------- script-host threads
@@ -269,7 +353,7 @@ fn host_main(host: u32, name: String, code: String, link: Link) {
                 }
                 Some(Wake::Tick(now)) => {
                     let (ran, error) = crate::tasks::run_due(&mut ctx, host, now);
-                    out = crate::Outcome { result: json!(ran), output: settle(), error, waiting: false };
+                    out = crate::Outcome { result: json!(ran), output: settle(), error, waiting: false, ..Default::default() };
                 }
                 None => break,
             }
@@ -290,8 +374,10 @@ fn host_main(host: u32, name: String, code: String, link: Link) {
 /// Wait for the host to hand the session back; keep its link while it has windows open.
 fn receive(session: &mut Session, host: u32, end: HostEnd) -> crate::Outcome {
     match end.rx.recv() {
-        Ok(FromHost { session: s, outcome, windows, name, done, next_due }) => {
+        Ok(FromHost { session: s, mut outcome, windows, name, done, next_due }) => {
             *session = s;
+            outcome.file_dialog = session.script_ui.file_dialog.clone().filter(|d| d.host == host);
+            outcome.busy = session.script_ui.busy == Some(host);
             publish(session, host, &name, windows);
             if done {
                 session.script_ui.windows.retain(|w| w.host != host);
@@ -354,8 +440,18 @@ pub fn dispatch_ui(session: &mut Session, ev: &ScriptUiEvent) -> Result<J, Strin
     if ACTIVE.with(|a| a.try_borrow().map(|g| g.is_some()).unwrap_or(true)) {
         return Err("scripts can't drive script windows".into());
     }
-    let w = session.script_ui.window(ev.window).ok_or_else(|| format!("no script window {}", ev.window))?;
-    let (host, name) = (w.host, w.script.clone());
+    let (host, name) = if ev.kind == FILE_DIALOG_EVENT {
+        let d = session.script_ui.file_dialog.take().ok_or("no script is waiting for a file dialog")?;
+        (d.host, String::new())
+    } else if ev.kind == RESUME_EVENT {
+        (session.script_ui.busy.take().ok_or("no script is in the middle of its work")?, String::new())
+    } else {
+        let w = session.script_ui.window(ev.window).ok_or_else(|| format!("no script window {}", ev.window))?;
+        if session.script_ui.file_dialog.as_ref().is_some_and(|d| d.host == w.host) {
+            return Err("the script is waiting for its file dialog".into());
+        }
+        (w.host, w.script.clone())
+    };
     let inline = host == CONSOLE_HOST || INLINE.with(|m| m.borrow().contains_key(&host));
     if inline {
         return Ok(dispatch_inline(session, host, &name, ev).to_json());
@@ -485,7 +581,7 @@ fn tick_inline_host(session: &mut Session, host: u32, name: &str, now: Instant) 
     drop(guard);
     crate::tasks::set_epoch(host, session.script_ui.project_epoch);
     publish(session, host, name, windows);
-    crate::Outcome { result: json!(ran), output, error, waiting: false }
+    crate::Outcome { result: json!(ran), output, error, waiting: false, ..Default::default() }
 }
 
 /// Forget the session's task hosts that have ended (inline ones: that have no tasks left).

@@ -388,6 +388,41 @@ pub type ScriptUiDispatch = fn(&mut Session, &ScriptUiEvent) -> std::result::Res
 /// and updates [`Session::script_ui`]. Frontends call it every frame (see [`ScriptUi::run_tasks`]).
 pub type ScriptTaskRunner = fn(&mut Session) -> Value;
 
+/// The [`ScriptUiEvent::kind`] that answers a script's [`FileDialogRequest`] (`value`: the picked
+/// paths, or null when cancelled).
+pub const FILE_DIALOG_EVENT: &str = "fileDialog";
+
+/// The [`ScriptUiEvent::kind`] that lets a script carry on after `Window.update()` (see
+/// [`ScriptUi::busy`]).
+pub const RESUME_EVENT: &str = "resume";
+
+/// A script waiting in `File.openDialog`, `File.saveDialog` or `Folder.selectDialog` for the app
+/// to show the system dialog (`scriptui.fileDialog` answers it).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct FileDialogRequest {
+    /// The script context waiting for the answer.
+    pub host: u32,
+    /// `open`, `save` or `folder`.
+    pub kind: String,
+    pub prompt: String,
+    /// File extensions offered (`["json"]`); empty: any file.
+    pub extensions: Vec<String>,
+    /// `open`: more than one file may be picked.
+    pub multi: bool,
+    /// `save`: the suggested file name, or path (`file.saveDlg()`: the dialog opens in its folder).
+    pub name: String,
+}
+
+/// A file or folder picked in a script's file dialog: the user chose it, so the script may read
+/// it (a folder: what is in it), and write it when it was picked in a save dialog, without
+/// Preferences ▸ Scripting & Expressions ▸ Allow Scripts to Write Files and Access Network.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Picked {
+    pub path: String,
+    pub write: bool,
+}
+
 /// The open script windows.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -395,6 +430,19 @@ pub struct ScriptUi {
     pub windows: Vec<ScriptWindow>,
     /// Bumped whenever a window changes.
     pub revision: u64,
+    /// The script waiting for a file dialog.
+    pub file_dialog: Option<FileDialogRequest>,
+    /// The script (host) in the middle of its work that showed its progress with
+    /// `Window.update()`: the frontend draws a frame, then lets it carry on (`scriptui.resume`).
+    pub busy: Option<u32>,
+    /// A frontend shows the app while scripts wait (the desktop app): it shows scripts' file
+    /// dialogs and draws their progress. Elsewhere (the CLI, MCP, the web) `File.openDialog` and
+    /// the others return null at once, as when cancelled, and `Window.update()` does nothing.
+    #[serde(skip)]
+    pub frontend: bool,
+    /// What scripts' file dialogs returned this session.
+    #[serde(skip)]
+    pub picked: Vec<Picked>,
     /// The scripting engine's event hand-off (set with [`Session::script`]).
     #[serde(skip)]
     pub dispatch: Option<ScriptUiDispatch>,
@@ -769,6 +817,34 @@ pub(crate) fn close(s: &mut Session, p: &Value) -> Result<Value> {
     let window = window_p(s, p, "scriptui.close")?;
     let result = p.get("result").cloned().unwrap_or(json!(2));
     dispatch(s, ScriptUiEvent { window, widget: 0, kind: "close".into(), value: result })
+}
+
+/// `scriptui.fileDialog`: answer the script waiting for a file dialog with what was picked
+/// (nothing: cancelled). The desktop app does when the system dialog closes.
+pub(crate) fn file_dialog(s: &mut Session, p: &Value) -> Result<Value> {
+    let c = "scriptui.fileDialog";
+    let req = s.script_ui.file_dialog.clone().ok_or_else(|| crate::commands::bad(c, "no script is waiting for a file dialog"))?;
+    let mut paths: Vec<String> = match p.get("paths") {
+        Some(Value::Array(a)) => a.iter().filter_map(Value::as_str).map(str::to_string).collect(),
+        Some(Value::String(one)) => vec![one.clone()],
+        None | Some(Value::Null) => vec![],
+        Some(_) => return Err(crate::commands::bad(c, "`paths` is a list of paths, or null to cancel")),
+    };
+    if !req.multi {
+        paths.truncate(1);
+    }
+    s.script_ui.picked.extend(paths.iter().map(|path| Picked { path: path.clone(), write: req.kind == "save" }));
+    let value = if paths.is_empty() { Value::Null } else { json!(paths) };
+    dispatch(s, ScriptUiEvent { window: 0, widget: 0, kind: FILE_DIALOG_EVENT.into(), value })
+}
+
+/// `scriptui.resume`: let the script that showed its progress (`Window.update()`) carry on to
+/// its next update or its end. The desktop app does after drawing a frame.
+pub(crate) fn resume(s: &mut Session, _: &Value) -> Result<Value> {
+    if s.script_ui.busy.is_none() {
+        return Err(crate::commands::bad("scriptui.resume", "no script is in the middle of its work"));
+    }
+    dispatch(s, ScriptUiEvent { window: 0, widget: 0, kind: RESUME_EVENT.into(), value: Value::Null })
 }
 
 #[cfg(test)]

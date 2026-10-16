@@ -93,6 +93,8 @@ mod tests_callable;
 #[cfg(test)]
 mod tests_ease_presets;
 #[cfg(test)]
+mod tests_file_dialogs;
+#[cfg(test)]
 mod tests_include;
 #[cfg(test)]
 mod tests_panels;
@@ -108,3 +110,5 @@ mod tests_ui_more;
 mod tests_evalfile;
 #[cfg(test)]
 mod tests_ui_mouse;
+#[cfg(test)]
+mod tests_update;

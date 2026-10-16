@@ -436,6 +436,24 @@ pub fn specs() -> Vec<CommandSpec> {
             always,
             scriptui::close
         ),
+        cmd!(
+            "scriptui.fileDialog",
+            "Answer Script File Dialog",
+            [],
+            None,
+            "{paths: [path] | null (cancelled)} → answers the script waiting in File.openDialog / File.saveDialog / Folder.selectDialog (the reply that left it waiting has `fileDialog: {kind: open|save|folder, prompt, extensions, multi, name}`); the script may then read what was picked, and write a file picked in a save dialog",
+            always,
+            scriptui::file_dialog
+        ),
+        cmd!(
+            "scriptui.resume",
+            "Resume Script",
+            [],
+            None,
+            "{} → lets the script that showed its progress with Window.update() carry on (the reply that left it waiting has `busy: true`); it runs to its next update (at most every 50 ms) or its end",
+            always,
+            scriptui::resume
+        ),
     ]
 }
 

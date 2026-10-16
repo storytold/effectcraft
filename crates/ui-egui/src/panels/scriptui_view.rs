@@ -161,13 +161,13 @@ fn draw_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, origin: egui::Pos2, 
         }
         WidgetKind::Checkbox => {
             let mut v = w.checked;
-            let r = ui.add_enabled_ui(w.enabled, |ui| ui.put(snug(rect, &w.text), egui::Checkbox::new(&mut v, &w.text))).inner;
+            let r = put_left(ui, rect, w.enabled, egui::Checkbox::new(&mut v, &w.text));
             if tip(r).clicked() {
                 acts.push(Act::Click(win, w.id));
             }
         }
         WidgetKind::RadioButton => {
-            let r = ui.add_enabled_ui(w.enabled, |ui| ui.put(snug(rect, &w.text), egui::RadioButton::new(w.checked, &w.text))).inner;
+            let r = put_left(ui, rect, w.enabled, egui::RadioButton::new(w.checked, &w.text));
             if tip(r).clicked() && !w.checked {
                 acts.push(Act::Click(win, w.id));
             }
@@ -465,10 +465,10 @@ fn mouse_events(ui: &egui::Ui, origin: egui::Pos2, area: Rect, win: u32, root: &
     ui.data_mut(|d| d.insert_temp(id, st));
 }
 
-/// Checkboxes and radio buttons sit at the left of their (possibly filled) bounds.
-fn snug(r: Rect, text: &str) -> Rect {
-    let w = (text.chars().count() as f32 * 7.0 + 26.0).min(r.width());
-    Rect::from_min_size(r.min, vec2(w, r.height()))
+/// Checkboxes and radio buttons sit at the left of their (possibly filled) bounds, however wide
+/// their label draws (`ui.put` would centre them there).
+fn put_left(ui: &mut egui::Ui, r: Rect, enabled: bool, widget: impl egui::Widget) -> egui::Response {
+    ui.scope_builder(UiBuilder::new().max_rect(r).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| ui.add_enabled(enabled, widget)).inner
 }
 
 fn perform(app: &mut EffectcraftApp, ctx: &egui::Context, acts: Vec<Act>) {
@@ -486,42 +486,72 @@ fn perform(app: &mut EffectcraftApp, ctx: &egui::Context, acts: Vec<Act>) {
                 ("scriptui.mouse", v)
             }
         };
-        match crate::menus::invoke(app, ctx, cmd, p) {
-            Ok(r) => {
-                if let Some(e) = r.get("error").filter(|e| !e.is_null()) {
-                    let msg = e["message"].as_str().unwrap_or("script error").to_string();
-                    app.toast = Some((msg, ctx.input(|i| i.time)));
-                } else if let Some(o) = r["output"].as_str().filter(|o| !o.is_empty()) {
-                    app.ui.status = o.lines().last().unwrap_or_default().to_string();
-                }
-            }
-            Err(e) => app.ui.status = e,
-        }
+        run(app, ctx, cmd, p);
     }
 }
 
-/// The floating script windows (dialogs, palettes, windows), drawn over the app.
-pub fn show_windows(app: &mut EffectcraftApp, ctx: &egui::Context) {
-    let windows: Vec<ScriptWindow> = app.session.script_ui.windows.iter().filter(|w| w.kind != WindowKind::Panel).cloned().collect();
-    if windows.is_empty() {
-        return;
+/// Run a `scriptui.*` command: a script error becomes a toast, the last line it printed the
+/// status.
+fn run(app: &mut EffectcraftApp, ctx: &egui::Context, cmd: &str, p: Value) {
+    match crate::menus::invoke(app, ctx, cmd, p) {
+        Ok(r) => {
+            if let Some(e) = r.get("error").filter(|e| !e.is_null()) {
+                let msg = e["message"].as_str().unwrap_or("script error").to_string();
+                app.toast = Some((msg, ctx.input(|i| i.time)));
+            } else if let Some(o) = r["output"].as_str().filter(|o| !o.is_empty()) {
+                app.ui.status = o.lines().last().unwrap_or_default().to_string();
+            }
+        }
+        Err(e) => app.ui.status = e,
     }
+}
+
+/// A script waiting in `File.openDialog`, `File.saveDialog` or `Folder.selectDialog`: show the
+/// system dialog and hand the script what was picked (nothing when cancelled, or when this host
+/// has no dialog).
+fn answer_file_dialog(app: &mut EffectcraftApp, ctx: &egui::Context) {
+    let Some(req) = app.session.script_ui.file_dialog.clone() else { return };
+    let exts: Vec<&str> = req.extensions.iter().map(String::as_str).collect();
+    let paths: Vec<String> = match req.kind.as_str() {
+        "folder" => app.hooks.pick_folder.as_ref().and_then(|f| f()).into_iter().collect(),
+        "save" => {
+            let name = match (req.name.is_empty(), exts.first()) {
+                (false, _) => req.name.clone(),
+                (true, Some(e)) => format!("Untitled.{e}"),
+                (true, None) => "Untitled".into(),
+            };
+            app.hooks.save_dialog(&name).flatten().into_iter().collect()
+        }
+        _ => app.hooks.pick_files.as_ref().map(|f| f(&exts)).unwrap_or_default(),
+    };
+    let paths = if paths.is_empty() { Value::Null } else { json!(paths) };
+    run(app, ctx, "scriptui.fileDialog", json!({"paths": paths}));
+}
+
+/// The floating script windows (dialogs, palettes, windows), drawn over the app. A script in the
+/// middle of its work (`Window.update()`) carries on once they are drawn.
+pub fn show_windows(app: &mut EffectcraftApp, ctx: &egui::Context) {
+    answer_file_dialog(app, ctx);
+    let busy = app.session.script_ui.busy;
+    let windows: Vec<ScriptWindow> = app.session.script_ui.windows.iter().filter(|w| w.kind != WindowKind::Panel).cloned().collect();
     let t = app.tokens;
     let mut acts = vec![];
     let screen = ctx.content_rect();
     let blocked = windows.iter().any(|w| w.modal);
-    if blocked {
-        // A modal dialog blocks the app behind it, as in After Effects.
+    if blocked || busy.is_some() {
+        // A modal dialog, or a script at work, blocks the app behind it.
         let r = egui::Area::new(egui::Id::new("scriptui-modal-block")).order(egui::Order::Middle).fixed_pos(screen.min).show(ctx, |ui| {
             ui.allocate_exact_size(screen.size(), Sense::click_and_drag());
             ui.painter().rect_filled(screen, 0.0, Color32::from_black_alpha(90));
         });
-        let _ = r;
+        if busy.is_some() {
+            r.response.on_hover_cursor(egui::CursorIcon::Progress);
+        }
     }
     for w in &windows {
         let size = vec2(w.root.bounds[2] as f32, w.root.bounds[3] as f32);
         let mut open = true;
-        let order = if w.modal { egui::Order::Foreground } else { egui::Order::Middle };
+        let order = if w.modal || busy == Some(w.host) { egui::Order::Foreground } else { egui::Order::Middle };
         let resp = egui::Window::new(if w.title.is_empty() { &w.script } else { &w.title })
             .id(egui::Id::new(("scriptui-window", w.id)))
             .order(order)
@@ -544,6 +574,11 @@ pub fn show_windows(app: &mut EffectcraftApp, ctx: &egui::Context) {
         }
     }
     perform(app, ctx, acts);
+    // The script's progress is on screen: let it work until its next update, and draw that.
+    if app.session.script_ui.busy.is_some() {
+        run(app, ctx, "scriptui.resume", json!({}));
+        ctx.request_repaint();
+    }
 }
 
 /// A dockable ScriptUI panel's content (Window ▸ <panel>.jsx).

@@ -1,6 +1,6 @@
 # Expressions and scripting parity
 
-> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-12 · **Change:** minor (`#include` / `#target` removed from the estimate (landed in #759)) · **Target:** Adobe After Effects 2026
+> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-14 · **Change:** minor (system file dialogs for scripts; `Window.update()` shows a working script's progress) · **Target:** Adobe After Effects 2026
 
 Expressions and ExtendScript are how After Effects work is automated and how much of it is
 built: rigs, templates, studio pipelines. They are also what carries over from After Effects
@@ -20,7 +20,8 @@ our own scripts; no real-world script library has been run against both apps.
 | Expression performance | Cached, multi-frame | Per-thread boa contexts | unknown | No benchmark |
 | Scripting object model | `app`, `Project`, items, layers, properties, keys, eases, render queue, `TextDocument`, `Shape`, markers, `File`/`Folder`, `Socket`, `app.settings` | Same classes, edits run through undoable engine commands; match names table; layers, groups and properties are callable (`layer("Effects")(1)` is `.property(...)`) | good | `crates/script` tests (≈ 10 test files) |
 | `$.evalFile`, `BridgeTalk` | Evaluate another script file; identify the host application and message other Adobe applications | `$.evalFile` evaluates a file relative to the calling file (nested at most 32 deep, under the scripts' file gate) and returns its last value; `BridgeTalk` names the host honestly (`appName` `effectcraft`, its version); messaging other applications throws "not supported" | partial | `tests_evalfile.rs` (#760); no inter-application messaging |
-| ScriptUI | Dialogs, palettes, dockable panels, resource strings, `onDraw` / ScriptUIGraphics, mouse events | Same, dockable panels reopen at launch | good | `ui_scriptui`, `tests_ui*` |
+| ScriptUI | Dialogs, palettes, dockable panels, resource strings, `onDraw` / ScriptUIGraphics, mouse events, `Window.update()` | Same, dockable panels reopen at launch; `Window.update()` shows a working script's progress (the app keeps drawing, at most every 50 ms, and the script's buttons such as Cancel work) | good | `ui_scriptui`, `tests_ui*`, `tests_update` |
+| `File.openDialog`, `File.saveDialog`, `Folder.selectDialog` | The system's file dialogs | Same in the desktop app; what the user picks may be read (written, from a save dialog) without Allow Scripts to Write Files; agents answer with `scriptui.fileDialog`; `null` headless and on the web | good | `tests_file_dialogs`, `ui_scriptui` |
 | `app.scheduleTask` / `cancelTask` | One-shot and repeating tasks (polling, panel refresh) until `cancelTask` | Same: repeating tasks run every `delay` ms (at least 50 ms, at most 64 pending per script) until `cancelTask`, until they throw (reported once, then cancelled), or until their owner goes: a script's last window closing, or the project closing for scripts without windows; frontends tick them every frame, agents with `script.runTasks` | good | `tests_tasks.rs` (#773); one-shot tasks of a script file still run right after it, not after their delay |
 | Scripts menu, ScriptUI Panels folder | yes | yes | same | [plugins.md](plugins.md) |
 | Startup / Shutdown folders | yes | not run | missing | plugins.md |

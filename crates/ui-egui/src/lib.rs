@@ -364,7 +364,9 @@ struct SavedWorkspaces {
 }
 
 impl EffectcraftApp {
-    pub fn new(session: Session) -> Self {
+    pub fn new(mut session: Session) -> Self {
+        // Scripts' File.openDialog and the others wait for this app to show the system dialog.
+        session.script_ui.frontend = true;
         let mut ui = UiState::default();
         let workspace_store = workspace_state::WorkspaceStore::load(session.config.as_deref(), &mut ui);
         EffectcraftApp {

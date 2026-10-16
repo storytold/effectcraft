@@ -20,6 +20,7 @@ Guide):
 | Keyboard shortcuts for scripts (the Keyboard Shortcuts editor lists the scripts of the Scripts folder) | Shortcuts bind to commands and menu entries; the File ▸ Scripts and Window menu entries of scripts aren't offered | Gap |
 | Running a script from the command line (`afterfx -r script.jsx`) | `effectcraft-cli script`, the control channel's and MCP's `script.run` | Same purpose, other entry points |
 | `app.settings` (kept in the preferences between sessions) | Kept in `script_settings.json` in the settings folder (`script.settings.get` / `script.settings.save`) | Same |
+| `File.openDialog`, `File.saveDialog`, `Folder.selectDialog` (and `openDlg` / `saveDlg` / `selectDlg`): the system's file dialogs | The desktop app shows the system's dialogs; what the user picks may be read (written, from a save dialog) without Allow Scripts to Write Files. Without a window (`effectcraft-cli`, MCP) and on the web they return `null`, as when cancelled | Same in the desktop app |
 | Allow Scripts to Write Files and Access Network | Settings ▸ Scripting & Expressions | Same |
 
 The settings folder is `~/Library/Application Support/EffectCraft` on macOS, `%APPDATA%\EffectCraft`
@@ -40,6 +41,13 @@ journaled and the same as the UI's action. The `effectcraft-script` crate's docs
   folder). It is listed in File ▸ Scripts at once (After Effects asks for a restart).
 * `file.scripts.list` lists installed and bundled scripts and panels; `file.runScript {name}` runs
   one; `file.uninstallScript {name}` removes an installed one.
+* File dialogs: `File.openDialog(prompt, "JSON:*.json", multiSelect)`, `File.saveDialog(prompt,
+  filter)` and `Folder.selectDialog(prompt)` wait while the desktop app shows the system's dialog
+  (a dialog's buttons can open them too), and return a `File` (an array with `multiSelect`), a
+  `Folder` or `null`. The script may read what was picked, and write a file picked in a save
+  dialog, without Allow Scripts to Write Files. For agents, the reply that left the script waiting
+  has `"fileDialog": {kind: open|save|folder, prompt, extensions, multi, name}`, and
+  `scriptui.fileDialog {paths: [path] | null}` answers it.
 
 ## ScriptUI panels
 
@@ -84,7 +92,10 @@ Supported controls: `panel`, `group`, `button`, `iconbutton`, `statictext`, `edi
 `tabbedpanel` / `tab` and `image`, with ScriptUI's automatic layout (`orientation`,
 `alignChildren`, `alignment`, `margins`, `spacing`, `preferredSize`), resource strings, event
 handlers (`onClick`, `onChange`, `onChanging`, `onClose`, `addEventListener`) and `onDraw` with
-ScriptUIGraphics. Mouse events (`addEventListener("mousedown" | "mouseup" | "mousemove" |
+ScriptUIGraphics. A script doing long work calls `Window.update()` to show its progress (a
+palette's progress bar and text): the desktop app redraws then, at most every 50 ms, so it stays
+responsive instead of "Not responding", and the script's buttons work meanwhile (a Cancel
+button); without a window it does nothing. Mouse events (`addEventListener("mousedown" | "mouseup" | "mousemove" |
 "mouseover" | "mouseout" | "click", handler, capture?)`) reach the control under the pointer and
 its containers (capture, target, bubble; `stopPropagation()`), with a MouseEvent carrying
 `clientX`/`clientY` relative to the target, `button`, `detail` (click count) and the modifier
@@ -125,6 +136,17 @@ It uses only After Effects' documented scripting API (`comp.selectedProperties`,
 `Property.selectedKeys`, `keyInTemporalEase` / `keyOutTemporalEase`, `setTemporalEaseAtKey` with
 `KeyframeEase`, `setInterpolationTypeAtKey`, `app.settings`, ScriptUI), so it is also a worked
 example of a keyframe tool.
+
+## Importing converted projects
+
+A project converter is a separate tool that moves a project from another application into
+EffectCraft with scripts on both sides: one describes the project as JSON, and an EffectCraft script
+rebuilds it. The EffectCraft side is installed as `Import Converted Project.jsx` in the Scripts
+folder. File ▸ Import ▸ Converted Project… (`file.importConvertedProject`) runs that script, which
+asks for the JSON (with `File.openDialog`), shows its options, imports the project, shows its
+progress with `Window.update()` and reports what didn't come across. The converter and its format
+live outside EffectCraft, so they change without EffectCraft changing; without the script
+installed, the menu item says what to install.
 
 ## Effect plug-ins
 

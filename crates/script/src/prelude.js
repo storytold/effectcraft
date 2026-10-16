@@ -272,11 +272,28 @@ File.prototype = {
   copy: function (to) { return JSON.parse(__file("copy", this.__path, __str(to))); },
   rename: function () { throw __err("File.rename is not supported"); },
   execute: function () { return JSON.parse(__file("execute", this.__path)); },
-  openDlg: function () { return null; },
-  saveDlg: function () { return null; },
+  openDlg: function (prompt, filter, multiSelect) { return __pickFiles("open", prompt, filter, multiSelect, ""); },
+  saveDlg: function (prompt, filter) { return __pickFiles("save", prompt, filter, false, this.fsName); },
 };
-File.openDialog = function () { return null; };
-File.saveDialog = function () { return null; };
+// The system file dialogs, shown by the desktop app (elsewhere they return null, as when
+// cancelled). The filter takes the Windows form ("JSON:*.json,All files:*.*"; a
+// function, as on macOS, offers every file). A file picked here may be read (written, from a
+// save dialog) without the Allow Scripts to Write Files preference.
+function __pickFiles(kind, prompt, filter, multi, name) {
+  var exts = [];
+  if (typeof filter === "string" && !/\*\.\*/.test(filter)) {
+    var m, re = /\*\.([A-Za-z0-9]+)/g;
+    while ((m = re.exec(filter))) exts.push(m[1].toLowerCase());
+  }
+  var r = __fileDialog(kind, prompt === undefined ? "" : __str(prompt), JSON.stringify(exts), !!multi, name ? __str(name) : "");
+  var paths = r ? JSON.parse(r) : null;
+  if (!paths || !paths.length) return null;
+  if (kind === "folder") return new Folder(paths[0]);
+  if (multi) return paths.map(function (p) { return new File(p); });
+  return new File(paths[0]);
+}
+File.openDialog = function (prompt, filter, multiSelect) { return __pickFiles("open", prompt, filter, multiSelect, ""); };
+File.saveDialog = function (prompt, filter) { return __pickFiles("save", prompt, filter, false, ""); };
 File.decode = function (s) { return decodeURIComponent(s); };
 File.encode = function (s) { return encodeURIComponent(s); };
 File.fs = "EffectCraft";
@@ -314,9 +331,9 @@ Folder.prototype = {
     }
     return out;
   },
-  selectDlg: function () { return null; },
+  selectDlg: function (prompt) { return __pickFiles("folder", prompt); },
 };
-Folder.selectDialog = function () { return null; };
+Folder.selectDialog = function (prompt) { return __pickFiles("folder", prompt); };
 Object.defineProperty(Folder, "current", { get: function () { var d = __get("app").projectDir; return d ? new Folder(d) : null; } });
 Object.defineProperty(Folder, "temp", { get: function () { return null; } });
 Object.defineProperty(Folder, "desktop", { get: function () { return null; } });
