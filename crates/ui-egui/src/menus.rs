@@ -1397,6 +1397,22 @@ fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) -> Option<Res
         );
         return Some(Ok(json!({"dialog": id})));
     }
+    // The in-app browser serves Save, Open Project, folder picks and media import once the
+    // host resolved the storage directory (the Android host always has; other hosts have no
+    // `app_files_dir` and keep the blocking pickers below).
+    if app.hooks.app_files_dir.is_some() {
+        let request = match &ask {
+            Ask::Save(default) => crate::FileDialog::save(default),
+            Ask::OpenProject => crate::FileDialog::OpenProject,
+            Ask::Folder => crate::FileDialog::Folder,
+            Ask::Import => crate::FileDialog::Open { exts: MEDIA.iter().map(|e| e.to_string()).collect(), many: key == "paths" },
+            Ask::Open(exts) => crate::FileDialog::Open { exts: exts.iter().map(|e| e.to_string()).collect(), many: false },
+        };
+        let answer = crate::DialogAnswer { command: id.to_string(), key, params: params.clone(), paths: Vec::new() };
+        if let Some(response) = crate::panels::android_file::spawn(app, id, request, answer) {
+            return Some(response);
+        }
+    }
     let picked: Option<Value> = match ask {
         Ask::Folder => {
             let Some(f) = app.hooks.pick_folder.as_ref() else { return Some(Err("no folder dialog available (pass `folder`)".into())) };

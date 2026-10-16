@@ -67,6 +67,8 @@ pub struct DialogState {
     pub gradient: super::gradient_editor::Draft,
     /// The user template the Delete Template prompt asks about: its id and name.
     pub delete_template: Option<(String, String)>,
+    /// The in-app file prompt (request, answer shell, filename field, view mode).
+    pub android_file: super::android_file::AndroidFileDraft,
 }
 
 pub fn open_new_comp(app: &mut EffectcraftApp) {
@@ -262,6 +264,11 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context) {
         Dialog::DeleteItems => super::delete_items::show(app, ctx, &t),
         Dialog::GradientEditor => super::gradient_editor::show(app, ctx, &t),
         Dialog::DeleteTemplate => super::templates::show_delete(app, ctx, &t),
+        Dialog::AndroidFile => super::android_file::show(app, ctx, &t),
+    }
+    // A folder pick from Settings renders over the dialog that asked, keeping it open.
+    if d != Dialog::AndroidFile && app.dialog_state.android_file.request.is_some() {
+        super::android_file::show(app, ctx, &t);
     }
 }
 

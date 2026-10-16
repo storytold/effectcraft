@@ -24,9 +24,39 @@ fn have_ffmpeg() -> bool {
     *HAVE.get_or_init(|| Command::new("ffmpeg").arg("-version").output().is_ok_and(|o| o.status.success()))
 }
 
+/// An H.264 encoder this ffmpeg build actually ships, or `None` when it has none. Distro "free"
+/// builds often omit `libx264` (the one named historically here) but ship an alternative, so pick
+/// the first present by name rather than hard-coding one that may be absent. These tests only
+/// need *an* H.264 encoder to make an oracle fixture; the encoder identity is irrelevant.
+fn h264_encoder() -> Option<&'static str> {
+    static ENC: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
+    *ENC.get_or_init(|| {
+        let out = Command::new("ffmpeg").args(["-hide_banner", "-encoders"]).output().ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        ["libx264", "libopenh264", "h264_nvenc", "h264_vaapi", "h264_qsv", "h264_v4l2m2m", "h264_amf"]
+            .into_iter()
+            .find(|name| text.lines().any(|l| l.split_whitespace().any(|tok| tok == *name)))
+    })
+}
+
 /// Run ffmpeg to produce `name` (once; written to a temp name and renamed so concurrent test
 /// processes never see a partial file). `None` when ffmpeg is unavailable.
 fn ffmpeg_fixture(name: &str, args: &[&str]) -> Option<PathBuf> {
+    ffmpeg_fixture_inner(name, args, true)
+}
+
+/// Like [`ffmpeg_fixture`] for a fixture only one test wants, which this build of ffmpeg may not
+/// be able to make at all: H.264 High 4:2:2 10-bit needs `libx264`, and distro "free" builds often
+/// ship without it. Such a test skips with a note rather than failing on the packager's choice of
+/// ffmpeg, the same way every test here skips when ffmpeg is missing altogether.
+fn try_ffmpeg_fixture(name: &str, args: &[&str]) -> Option<PathBuf> {
+    ffmpeg_fixture_inner(name, args, false)
+}
+
+fn ffmpeg_fixture_inner(name: &str, args: &[&str], must_succeed: bool) -> Option<PathBuf> {
     if !have_ffmpeg() {
         eprintln!("ffmpeg not found: skipping");
         return None;
@@ -39,12 +69,20 @@ fn ffmpeg_fixture(name: &str, args: &[&str]) -> Option<PathBuf> {
     let ext = out.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
     let tmp = out.with_file_name(format!("tmp-{}-{:?}.{ext}", std::process::id(), std::thread::current().id()).replace(['(', ')'], ""));
     let st = Command::new("ffmpeg").args(["-hide_banner", "-loglevel", "error", "-y"]).args(args).arg(&tmp).status().expect("run ffmpeg");
-    assert!(st.success(), "ffmpeg failed for {name}");
+    if !st.success() {
+        let _ = std::fs::remove_file(&tmp);
+        if must_succeed {
+            panic!("ffmpeg failed for {name}");
+        }
+        eprintln!("this ffmpeg build cannot make {name}: skipping");
+        return None;
+    }
     std::fs::rename(&tmp, &out).expect("rename");
     Some(out)
 }
 
 fn h264_mp4() -> Option<PathBuf> {
+    let enc = h264_encoder()?;
     ffmpeg_fixture(
         "testsrc2_1080p.mp4",
         &[
@@ -57,7 +95,7 @@ fn h264_mp4() -> Option<PathBuf> {
             "-i",
             "sine=frequency=440:sample_rate=48000:duration=2",
             "-c:v",
-            "libx264",
+            enc,
             "-pix_fmt",
             "yuv420p",
             "-preset",
@@ -277,6 +315,7 @@ fn h264_audio_samples() {
 /// H.264 + AAC at 44.1 kHz in MP4 (ffmpeg writes an edit list that skips the AAC priming):
 /// 440 Hz left, a 200 → 1000 Hz sweep right, 29.97 fps.
 fn aac_44k_mp4() -> Option<PathBuf> {
+    let enc = h264_encoder()?;
     ffmpeg_fixture(
         "aac_44k.mp4",
         &[
@@ -289,7 +328,7 @@ fn aac_44k_mp4() -> Option<PathBuf> {
             "-i",
             "aevalsrc=0.5*sin(2*PI*440*t)|0.5*sin(2*PI*(200+400*t/3)*t):s=44100:d=3",
             "-c:v",
-            "libx264",
+            enc,
             "-pix_fmt",
             "yuv420p",
             "-c:a",
@@ -1054,7 +1093,7 @@ fn a_called_off_read_does_not_decode() {
 /// footage reports it (not a black frame without a word).
 #[test]
 fn an_unsupported_stream_reports_why_it_shows_no_picture() {
-    let Some(p) = ffmpeg_fixture(
+    let Some(p) = try_ffmpeg_fixture(
         "h264_high422_10bit.mp4",
         &["-f", "lavfi", "-i", "testsrc=size=320x180:rate=24:duration=1", "-c:v", "libx264", "-profile:v", "high422", "-pix_fmt", "yuv422p10le"],
     ) else {

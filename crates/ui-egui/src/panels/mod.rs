@@ -1,5 +1,8 @@
 //! Panel bodies.
 
+/// Android's in-app file browser: Save / Open Project / exports / folder picks and media
+/// import over app-private storage and (once granted) shared storage; no system picker.
+pub mod android_file;
 pub mod anim_tools;
 pub mod camera_tracker_ui;
 pub mod comp_settings;
@@ -48,6 +51,7 @@ pub mod settings;
 pub mod shortcut_editor;
 pub mod templates;
 pub mod text_panels;
+pub mod thumbs;
 pub mod timeline;
 pub mod tracker;
 pub mod unsaved;

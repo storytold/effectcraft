@@ -22,7 +22,7 @@ effectcraft-render = { workspace = true }
 effectcraft-engine = { workspace = true }
 effectcraft-gpu = { workspace = true }
 egui = { workspace = true }
-eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit"] }
+eframe = { workspace = true, features = ["default_fonts", "wgpu"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 log = { workspace = true }
@@ -33,6 +33,17 @@ image = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 sys-locale = { workspace = true }
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+# Screen-reader support on desktop. eframe 0.36 only offers `accesskit` with
+# `android-game-activity`, so Android builds (NativeActivity) go without it.
+eframe = { workspace = true, features = ["accesskit"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+# eframe's Android backend (NativeActivity via winit). Without it android-activity
+# builds with no backend and fails to compile; the headless CLI reaches eframe
+# through this crate.
+eframe = { workspace = true, features = ["android-native-activity"] }
 
 [dev-dependencies]
 egui_kittest = { workspace = true, features = ["eframe", "wgpu"] }

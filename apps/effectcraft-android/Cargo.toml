@@ -1,0 +1,74 @@
+[package]
+name = "effectcraft-android"
+description = "EffectCraft's Android entry point: the NativeActivity android_main trampoline that opens the shared app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+# NativeActivity loads this library and calls its android_main.
+crate-type = ["cdylib"]
+
+# This crate deliberately does not inherit the workspace lints. Android's NativeActivity ABI
+# requires an unmangled android_main export, and on edition 2024 that spelling
+# (#[unsafe(no_mangle)]) trips rust's unsafe_code lint, which the workspace forbids. It also
+# holds the one piece of real unsafe in the project: android_access.rs's JNI entry points to the
+# activity's raw JVM (JavaVM/JObject from_raw have no safe form), needed to check and request
+# the "All files access" grant — unsafe lives in this entry trampoline, never in the shared
+# effectcraft/ui-egui crates, which receive plain closures instead. Everything else is denied.
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+unimplemented = "deny"
+todo = "deny"
+unreachable = "deny"
+
+[dependencies]
+effectcraft = { path = "../effectcraft" }
+log = { workspace = true }
+
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity = { version = "0.6", default-features = false, features = ["native-activity"] }
+# The "All files access" grant (android_access.rs): same 0.21 instance cpal already pulls in.
+jni = "0.21"
+
+[package.metadata.android]
+package = "ai.storyteller.effectcraft"
+apk_name = "effectcraft"
+build_targets = ["aarch64-linux-android"]
+# The launcher icon: `res/mipmap-<density>/ic_launcher.png`, regenerated from the app's own
+# effectcraft.svg by packaging/icons.sh (each PNG carries an attribution sidecar). cargo-apk runs
+# `aapt package -S res`, which is what turns these into the APK's @mipmap/ic_launcher.
+resources = "res"
+
+# "All files access" (`MANAGE_EXTERNAL_STORAGE`): lets the in-app file browser reach shared
+# storage (`/storage/emulated/0`) so a save, export, autosave folder or import can land outside
+# the app-private directory. It is a special permission the app can never hold silently — the
+# user grants it on the system settings page the browser opens (`android_access.rs`) — so the
+# manifest entry alone changes nothing until they do.
+uses_permission = [{ name = "android.permission.MANAGE_EXTERNAL_STORAGE" }]
+
+[package.metadata.android.sdk]
+min_sdk_version = 28
+target_sdk_version = 35
+
+[package.metadata.android.application]
+label = "EffectCraft"
+theme = "@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen"
+icon = "@mipmap/ic_launcher"
+
+[package.metadata.android.application.activity]
+# Declared exhaustively, game-style. On OneUI (Android 16) a display sleep/wake flips a
+# config bit this activity does not list, so the system relaunches the NativeActivity —
+# and that relaunch deadlocks in the android-activity glue's unloadNativeCode (the main
+# thread waits in on_destroy while the native event-loop thread sleeps on in its looper).
+# The stall times out input dispatch, surfaces as an ANR and flashes the launcher on the
+# next launch. The activity holds no Java resources and draws everything itself, so
+# absorbing config changes natively is safe and removes the trigger entirely.
+config_changes = "orientation|keyboardHidden|screenSize|screenLayout|smallestScreenSize|density|layoutDirection|uiMode|fontScale|keyboard|navigation|touchscreen|locale|mcc|mnc|colorMode"
+label = "EffectCraft"
+launch_mode = "singleTask"
+orientation = "landscape"
+exported = true

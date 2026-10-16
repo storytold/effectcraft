@@ -411,7 +411,10 @@ pub fn scroll_bar(ui: &mut Ui, auto: &mut Registry, key: &str, track: Rect, scro
     let thumb_len = (len * len / (len + max.max(0.0)).max(1.0)).max(16.0).min(len).max(0.0);
     let travel = (len - thumb_len).max(1.0);
     let thumb_at = |s: f32| track.min[a] + (len - thumb_len) * if max > 0.0 { (s / max).clamp(0.0, 1.0) } else { 0.0 };
-    let resp = ui.interact(track.expand2(if vertical { vec2(3.0, 0.0) } else { vec2(0.0, 3.0) }), egui::Id::new(key), Sense::drag());
+    // The hit a finger lands on: a 4-point track is a 20-point target, each side widened along
+    // the bar's thin axis (#1). A mouse always had this; a touch never could.
+    let hit = track.expand2(if vertical { vec2(8.0, 2.0) } else { vec2(2.0, 8.0) });
+    let resp = ui.interact(hit, egui::Id::new(key), Sense::drag());
     let pressed = resp.is_pointer_button_down_on() && ui.input(|i| i.pointer.any_pressed());
     let mut s = scroll;
     if let Some(p) = resp.interact_pointer_pos().filter(|p| pressed && !(thumb_at(scroll)..=thumb_at(scroll) + thumb_len).contains(&p[a])) {
@@ -435,9 +438,9 @@ pub fn scroll_bar(ui: &mut Ui, auto: &mut Registry, key: &str, track: Rect, scro
 }
 
 /// Vertical scrolling for a panel that lays out its own rows: [`PanelScroll::begin`] gives the
-/// offset to draw them at (moved by the mouse wheel over `area`), [`PanelScroll::end`] takes the
-/// rows' height and draws a [`scroll_bar`] on the right edge while they overflow, so every
-/// panel can be scrolled without a wheel or touchpad (#271).
+/// offset to draw them at (moved by the mouse wheel or a finger drag over `area`),
+/// [`PanelScroll::end`] takes the rows' height and draws a [`scroll_bar`] on the right edge while
+/// they overflow, so every panel can be scrolled without a wheel or touchpad (#271, #1).
 pub struct PanelScroll {
     id: egui::Id,
     area: Rect,
@@ -451,6 +454,20 @@ impl PanelScroll {
         let (mut offset, max): (f32, f32) = ui.data(|d| d.get_temp(id)).unwrap_or_default();
         if ui.rect_contains_pointer(area) {
             offset -= ui.input(|i| i.smooth_scroll_delta.y);
+        }
+        // A drag over the panel moves the offset the same way, so a finger has a way in where
+        // there is neither a wheel nor a trackpad (#1). Registered before the rows are laid out,
+        // so whatever the panel draws on top — fields, buttons, rows that drag to apply — wins
+        // the pointer as it always did, and this only takes the drags that start on the panel's
+        // own empty space.
+        // Inset a few points from the panel's edges: the dock's resize gutters reach into the
+        // content rect (their hit is the gap expanded by 3), and they register before the panel
+        // does — a finger aiming at a divider must never land on the scroll surface instead.
+        let drag = ui.interact(area.shrink(4.0), id.with("panel-scroll-drag"), Sense::drag());
+        if drag.dragged() {
+            // With the finger: the content follows it, so down moves the offset towards zero.
+            offset -= drag.drag_delta().y;
+            ui.ctx().request_repaint();
         }
         Self { id, area, offset: offset.clamp(0.0, max.max(0.0)) }
     }
@@ -608,8 +625,35 @@ pub fn any_menu_open(ctx: &egui::Context) -> bool {
 /// (Window ▸ Workspace) got stuck at that height with its last entries scrolled out of view
 /// (#191).
 pub fn menu_scroll<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
-    let max_h = ui.ctx().content_rect().height() - 40.0;
-    egui::ScrollArea::vertical().max_height(max_h).min_scrolled_height(max_h).show(ui, add).inner
+    menu_scroll_area(ui.ctx().content_rect().height() - 40.0).show(ui, add).inner
+}
+
+/// The scroll area every menu body runs in: `max_h` points tall, and draggable to scroll with any
+/// pointer. See [`menu_drag`] for why the drag is forced on.
+fn menu_scroll_area(max_h: f32) -> egui::ScrollArea {
+    egui::ScrollArea::vertical()
+        .scroll_source(egui::containers::scroll_area::ScrollSource { drag: menu_drag(), ..egui::containers::scroll_area::ScrollSource::ALL })
+        .max_height(max_h)
+        .min_scrolled_height(max_h)
+}
+
+/// How a menu's contents respond to a drag: always, with the scroll bar and the wheel too.
+///
+/// egui's own default (`DragScroll::OnTouch`) gates drag-to-scroll behind
+/// `InputState::has_touch_screen`, and measured on a phone in landscape (2311DRK48G, 1220x2712)
+/// that gate is closed for menus: an 850 pt finger drag inside the Edit menu left it byte-for-byte
+/// unchanged, so the rows below the fold (Select All through Preferences, the last of 34) could not
+/// be reached at all (#269). Forcing the drag on opened it — the same drag now walks the menu from
+/// "Can't Undo" down to "Preferences" and back again.
+///
+/// The same drag did scroll the file browser's plain `ScrollArea`, which keeps egui's default, so
+/// touch input does reach the app and the two areas differ in more than this one setting:
+/// `ScrollSource::ALL` enables several sources of which the drag is only one, and the list may have
+/// scrolled by a fling rather than by dragging. That is left open on purpose. What is measured is
+/// the before/after on the menu itself, and a menu must never depend on that detection: if it is
+/// taller than the window it has to scroll, whatever pointer the user is holding.
+fn menu_drag() -> egui::containers::scroll_area::DragScroll {
+    egui::containers::scroll_area::DragScroll::Always
 }
 
 /// egui's menu style with no gap between the rows: the gap the app's item spacing left between
@@ -724,5 +768,120 @@ mod tests {
             let r = got.expect("the field was drawn");
             assert!((r.center().y - field.center().y).abs() < 0.5 && r.height() >= h - 2.5, "{h}: {r:?} in {field:?}");
         }
+    }
+
+    /// #269: a menu taller than its window has to be scrollable, and the Edit menu on a phone in
+    /// landscape is exactly that — 34 rows against the 21 that fit, with Select All, Label, Purge,
+    /// Templates, Keyboard Shortcuts and Preferences below the fold.
+    #[test]
+    fn a_menu_taller_than_the_window_scrolls_by_drag() {
+        // Measured on the phone (2311DRK48G, landscape): with egui's default `DragScroll::OnTouch`
+        // an 850 pt finger drag left the Edit menu byte-for-byte unchanged, while the same drag
+        // scrolled the file browser's plain ScrollArea. Forcing the drag on is what opened the menu.
+        assert_eq!(menu_drag(), egui::containers::scroll_area::DragScroll::Always, "menus must drag-scroll regardless of egui's touch-screen detection");
+
+        // And the layout really does overflow: in a 300 pt window (a phone in landscape is barely
+        // taller) the last of 42 rows starts below the bottom edge, so without scrolling the menu
+        // simply runs off the screen.
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 300.0));
+        let mut last_y = f32::MAX;
+        let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+        let mut out = ctx.run_ui(input, |ui| {
+            menu_scroll(ui, |ui| {
+                for i in 0..42 {
+                    let r = ui.label(format!("row {i}"));
+                    if i == 41 {
+                        last_y = r.rect.min.y;
+                    }
+                }
+            });
+        });
+        out.textures_delta.clear();
+        assert!(last_y > screen.height(), "the test menu must overflow its window: last row at {last_y} pt of {}", screen.height());
+    }
+
+    /// #1: the panels have neither a wheel nor a trackpad, so a drag over a panel's own empty
+    /// space has to move it. With only `smooth_scroll_delta` the offset ignored a finger
+    /// completely — the right sidebar and every `PanelScroll` panel was frozen past the fold.
+    #[test]
+    fn a_panel_scrolls_when_a_pointer_drags_its_empty_space() {
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_size(pos2(0.0, 0.0), vec2(300.0, 400.0));
+        let area = screen;
+        let id = egui::Id::new("drag-scroll-test");
+        let offset = std::cell::Cell::new(f32::NAN);
+        let run = |events: Vec<egui::Event>| {
+            // 500 points of rows in a 400 pt panel: 100 points of scroll.
+            let mut out = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), events, ..Default::default() }, |ui| {
+                let scroll = PanelScroll::begin(ui, id, area);
+                offset.set(scroll.offset);
+                scroll.end(ui, &mut Registry::default(), "drag-scroll-test", 500.0, &crate::theme::Tokens::for_kind(crate::theme::ThemeKind::Dark));
+            });
+            out.textures_delta.clear();
+        };
+        let p = |y: f32| egui::Event::PointerMoved(pos2(150.0, y));
+        let press = |y: f32, down: bool| egui::Event::PointerButton {
+            pos: pos2(150.0, y),
+            button: egui::PointerButton::Primary,
+            pressed: down,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let at = |want: f32, what: &str| {
+            let got = offset.get();
+            assert!((got - want).abs() < 0.5, "{what}: offset {got}, wanted {want}");
+        };
+        run(vec![p(300.0)]);
+        run(vec![press(300.0, true)]);
+        // The content follows the finger: up goes to later rows, down back towards the first.
+        run(vec![p(260.0)]);
+        at(40.0, "the drag moved the offset with the finger");
+        run(vec![p(220.0)]);
+        at(80.0, "and keeps following it");
+        run(vec![p(240.0)]);
+        at(60.0, "down too");
+        // Clamped at both ends, never past the rows.
+        run(vec![p(40.0)]);
+        at(100.0, "clamped at the end of the rows");
+        run(vec![press(40.0, false)]);
+        run(vec![p(250.0)]);
+        run(vec![press(250.0, true)]);
+        run(vec![p(390.0)]);
+        at(0.0, "and clamped back at the first row");
+        run(vec![press(390.0, false)]);
+    }
+
+    /// #1: the scroll bar's track is 4 points wide — a mouse always landed on its 10-point hit, a
+    /// finger could not. The drag it registers now reaches 8 points past each side, so a press
+    /// well beside the track scrolls the content (it landed on the panel underneath before).
+    #[test]
+    fn the_scroll_bar_reaches_past_its_track_for_a_finger() {
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_size(pos2(0.0, 0.0), vec2(200.0, 400.0));
+        // A horizontal bar: the widened hit runs past the track's top and bottom edges, which is
+        // where a press beside a vertical bar's track lands too (the same expansion, other axis).
+        let track = Rect::from_min_max(pos2(10.0, 300.0), pos2(190.0, 304.0));
+        // ~12 points past the track and past the thumb, so the press is a track press that
+        // centres the thumb there. The old 3-point expansion (with egui's own hit slop) reached
+        // only about 315, so before the widening this press landed on the panel and did nothing.
+        let at = pos2(170.0, 316.0);
+        let scrolled = std::cell::Cell::new(f32::NAN);
+        let run = |events: Vec<egui::Event>| {
+            let mut out = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), events, ..Default::default() }, |ui| {
+                scrolled.set(scroll_bar(
+                    ui,
+                    &mut Registry::default(),
+                    "bar-reach-test",
+                    track,
+                    0.0,
+                    100.0,
+                    &crate::theme::Tokens::for_kind(crate::theme::ThemeKind::Dark),
+                ));
+            });
+            out.textures_delta.clear();
+        };
+        run(vec![egui::Event::PointerMoved(at)]);
+        run(vec![egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE }]);
+        assert!(scrolled.get() > 0.0, "a press 12 points past the track centres the thumb there: {}", scrolled.get());
     }
 }

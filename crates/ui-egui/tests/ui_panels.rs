@@ -296,8 +296,8 @@ fn ui_scale_setting_sizes_the_interface() {
     h.run_steps(2);
     assert_eq!(scale(&h), (100, 1.0), "Cancel put it back from 200 %");
     open_settings(&mut h);
-    type_scale(&mut h, "50");
-    assert_eq!(scale(&h), (75, 0.75), "at least 75");
+    type_scale(&mut h, "10");
+    assert_eq!(scale(&h), (50, 0.5), "at least 50");
     type_scale(&mut h, "90");
     click(&mut h, "settings.ok");
     h.run_steps(2);

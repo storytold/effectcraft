@@ -7,6 +7,20 @@ work apply to everyone, people and AI agents alike, and they are not negotiable.
 
 You need [Rust](https://rustup.rs/) 1.95 or newer.
 
+On Linux the desktop app plays preview sound through `cpal`, so the build also needs the ALSA
+development headers. Without them `alsa-sys` fails at link time with an unrelated-looking error;
+`cargo xtask ci` checks for them up front and names the package:
+
+```sh
+sudo dnf install alsa-lib-devel        # Fedora
+sudo apt install libasound2-dev        # Debian / Ubuntu
+sudo pacman -S alsa-lib                # Arch
+```
+
+If you cannot install the package, point `PKG_CONFIG_PATH` at a directory holding an `alsa.pc`
+whose `Libs` line names your system's `libasound` (usually `libasound.so.2`); every CI run needs
+that variable set.
+
 ```sh
 cargo run -p effectcraft -- --demo       # the desktop app, with the demo project
 cargo test --workspace

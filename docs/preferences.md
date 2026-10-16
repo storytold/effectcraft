@@ -34,6 +34,7 @@ Commands (CLI, MCP, control channel):
 - `general.undoLevels`: Levels of Undo
 - `general.pathPointSize`: Path Point and Handle Size
 - `general.recentItems`: Recent Projects Shown
+- `general.pickerView`: the in-app file picker's view (`list` / `small` / `medium` / `large` icons, default `large`), switched with the picker's own View buttons and remembered across dialogs; both the file browser and the Open Project list use it (a host that serves the in-app picker — Android — only)
 - `general.showToolTips`: Show Tool Tips
 - `general.createLayersAtCompStart`: Create Layers at Composition Start Time
 - `general.defaultSpatialLinear`: Default Spatial Interpolation to Linear
@@ -62,7 +63,7 @@ Commands (CLI, MCP, control channel):
 - `appearance.theme`: the single theme from before appearance modes, kept for older settings files and automation. A saved file with only `theme` loads as a fixed Dark or Light mode showing it; setting it (`prefs.set`, `ui.set {"theme": …}`, `view.theme.dark|darker|light`) selects that theme and fixes the mode to its family. While the mode is Dark or Light it mirrors the theme in use.
 - `appearance.brightness`: Brightness
 - `appearance.uiScale`: UI Scale, the size of the whole interface (any whole percentage from
-  75 to 200, on top of the display's own scaling), dragged or typed; it applies as soon as it is
+  50 to 200, on top of the display's own scaling), dragged or typed; it applies as soon as it is
   dragged or entered
 - `appearance.useLabelColorForHandles`: Use Label Color for Layer Handles and Paths
 - `grids.gridColor`: Color

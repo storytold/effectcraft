@@ -374,6 +374,9 @@ fn accordion_resize_routes_pointer_and_keyboard_without_changing_closed_entries(
     }
     let DockNode::Stack { entries } = &h.state().ui.dock else { panic!("stack lost") };
     assert_eq!(entries[0].height, Some(108.0));
+    // The layout lands a frame after the state does: read the gutter where it now is, not where
+    // it sat before the keyboard resize (the registry still holds that frame's rect).
+    h.run_steps(2);
     let from = rect(&h, "dock.gutter.s0").center();
     drag(&mut h, from, from + vec2(0.0, 16.0), Modifiers::NONE);
     let DockNode::Stack { entries } = &h.state().ui.dock else { panic!("stack lost") };

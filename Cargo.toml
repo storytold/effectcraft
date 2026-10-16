@@ -208,3 +208,7 @@ codegen-units = 1
 
 [patch.crates-io]
 hayro-syntax = { git = "https://github.com/storytold/craft-libs", rev = "ca50d63b773c99f96e75c77ce5a1d21e7c9cda0d", version = "=0.7.2" }
+# The Android mouse input (see third_party/winit/README.md): eframe 0.36 pins winit
+# to 0.30 and 0.30.13 is the last 0.30 release, so the published crate is vendored
+# with its one Android file changed. Every other target compiles the published crate.
+winit = { path = "third_party/winit" }

@@ -54,10 +54,14 @@ pub const LIGHT_THEMES: &[(&str, &str)] = &[("Light", "light")];
 /// Every theme (the legacy single-theme `appearance.theme`).
 pub const THEMES: &[(&str, &str)] = &[("Dark", "dark"), ("Darker", "darker"), ("Light", "light")];
 
+/// The in-app file picker's view: (label, `general.pickerView` value).
+pub const PICKER_VIEWS: &[(&str, &str)] = &[("List", "list"), ("Small", "small"), ("Medium", "medium"), ("Large", "large")];
+
 /// The settings whose value must be one of their choices.
 fn choices(key: &str) -> Option<&'static [(&'static str, &'static str)]> {
     match key {
         "general.language" => Some(LANGUAGES),
+        "general.pickerView" => Some(PICKER_VIEWS),
         "startup.windowGraphics" => Some(WINDOW_GRAPHICS),
         "appearance.appearanceMode" => Some(APPEARANCE_MODES),
         "appearance.darkTheme" => Some(DARK_THEMES),
@@ -114,6 +118,9 @@ page!(General {
     use_system_color_picker: bool = false,
     /// Number of projects in File ▸ Open Recent.
     recent_items: u32 = 10,
+    /// The in-app file picker's view: one of `PICKER_VIEWS` (`list`, `small`, `medium`,
+    /// `large` icons), changed with the picker's own view buttons and remembered.
+    picker_view: String = "large".into(),
 });
 
 page!(Startup {
@@ -180,7 +187,7 @@ page!(Appearance {
     favorite_themes: Vec<String> = Vec::new(),
     /// User interface brightness, -1 (darker) … 1 (lighter).
     brightness: f64 = 0.0,
-    /// The size of the whole interface in percent (75–200), on top of the display's own scale.
+    /// The size of the whole interface in percent (50–200), on top of the display's own scale.
     ui_scale: u32 = 100,
     use_label_color_for_handles: bool = true,
     use_label_color_for_tabs: bool = true,
@@ -604,6 +611,9 @@ impl Prefs {
         if !is_choice(LANGUAGES, &g.language) {
             g.language = General::default().language;
         }
+        if !is_choice(PICKER_VIEWS, &g.picker_view) {
+            g.picker_view = General::default().picker_view;
+        }
         g.undo_levels = g.undo_levels.clamp(1, 99);
         g.path_point_size = g.path_point_size.clamp(3, 20);
         g.recent_items = g.recent_items.clamp(1, 30);
@@ -631,7 +641,7 @@ impl Prefs {
             _ => {}
         }
         self.appearance.brightness = self.appearance.brightness.clamp(-1.0, 1.0);
-        self.appearance.ui_scale = self.appearance.ui_scale.clamp(75, 200);
+        self.appearance.ui_scale = self.appearance.ui_scale.clamp(50, 200);
         let defaults = default_labels();
         self.labels.truncate(defaults.len());
         for d in defaults.iter().skip(self.labels.len()) {
@@ -1234,7 +1244,7 @@ pub fn pages() -> Vec<Page> {
                 s("appearance.lightTheme", "Light Theme", Kind::Choice(LIGHT_THEMES), true),
                 s("appearance.darkTheme", "Dark Theme", Kind::Choice(DARK_THEMES), true),
                 s("appearance.brightness", "Brightness", Kind::Slider(-1.0, 1.0), true),
-                s("appearance.uiScale", "UI Scale", Kind::Int(75, 200, "%"), true),
+                s("appearance.uiScale", "UI Scale", Kind::Int(50, 200, "%"), true),
                 Section("Labels and Colors"),
                 s("appearance.useLabelColorForHandles", "Use Label Color for Layer Handles and Paths", B, true),
                 s("appearance.useLabelColorForTabs", "Use Label Color for Related Tabs", B, true),

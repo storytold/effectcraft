@@ -87,10 +87,10 @@ fn prefs_set_validates_keys_types_and_ranges() {
     assert!(p.reset(Some("bogus")).is_err());
 }
 
-/// Settings ▸ Appearance ▸ UI Scale (#284): a percentage, 100 by default, kept within 75–200;
+/// Settings ▸ Appearance ▸ UI Scale (#284): a percentage, 100 by default, kept within 50–200;
 /// the dialog types or drags any whole percentage in that range (#682).
 #[test]
-fn ui_scale_is_a_percentage_from_75_to_200() {
+fn ui_scale_is_a_percentage_from_50_to_200() {
     let mut p = Prefs::default();
     assert_eq!(p.appearance.ui_scale, 100);
     p.set("appearance.uiScale", json!("150")).unwrap();
@@ -99,9 +99,9 @@ fn ui_scale_is_a_percentage_from_75_to_200() {
     p.set("appearance.uiScale", json!(500)).unwrap();
     assert_eq!(p.appearance.ui_scale, 200);
     p.set("appearance.uiScale", json!(10)).unwrap();
-    assert_eq!(p.appearance.ui_scale, 75);
+    assert_eq!(p.appearance.ui_scale, 50);
     let page = crate::prefs::pages().into_iter().find(|pg| pg.id == "appearance").unwrap();
-    let field = crate::prefs::Item::Setting { key: "appearance.uiScale", label: "UI Scale", kind: crate::prefs::Kind::Int(75, 200, "%"), live: true };
+    let field = crate::prefs::Item::Setting { key: "appearance.uiScale", label: "UI Scale", kind: crate::prefs::Kind::Int(50, 200, "%"), live: true };
     assert!(page.items.contains(&field), "Settings ▸ Appearance offers it");
     // Older settings files without it get the default.
     assert_eq!(Prefs::from_json(r#"{"version": 2, "appearance": {"theme": "light"}}"#).appearance.ui_scale, 100);
@@ -159,6 +159,23 @@ fn appearance_choices_validate_and_legacy_theme_still_selects() {
     assert_eq!(s.prefs.get("appearance.theme"), Some(json!("light")));
     s.prefs.reset(Some("appearance")).unwrap();
     assert_eq!(s.prefs.appearance, crate::prefs::Appearance::default());
+}
+
+/// The file picker's view accepts only its choices, defaults to Large icons, and a settings
+/// file edited by hand to an unknown view is repaired on load instead of breaking the picker.
+#[test]
+fn picker_view_validates_and_repairs() {
+    let mut p = Prefs::default();
+    assert_eq!(p.general.picker_view, "large");
+    p.set("general.pickerView", json!("list")).unwrap();
+    assert_eq!(p.get("general.pickerView"), Some(json!("list")));
+    assert!(p.set("general.pickerView", json!("huge")).is_err(), "only its choices");
+    // It survives the round trip through the settings file.
+    let p2 = Prefs::from_json(&p.to_json());
+    assert_eq!(p2.general.picker_view, "list");
+    // A hand-edited value falls back to the default on load.
+    let p3 = Prefs::from_json(&json!({"version": 2, "general": {"pickerView": "huge"}}).to_string());
+    assert_eq!(p3.general.picker_view, "large");
 }
 
 #[test]

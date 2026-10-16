@@ -19,8 +19,26 @@ fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures/media")
 }
 
+/// An H.264 encoder this ffmpeg build actually ships, or `None` when it has none (see the same
+/// helper in `footage.rs`: distro "free" builds often omit `libx264` and ship an alternative).
+fn h264_encoder() -> Option<&'static str> {
+    static ENC: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
+    *ENC.get_or_init(|| {
+        let out = Command::new("ffmpeg").args(["-hide_banner", "-encoders"]).output().ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        ["libx264", "libopenh264", "h264_nvenc", "h264_vaapi", "h264_qsv", "h264_v4l2m2m", "h264_amf"]
+            .into_iter()
+            .find(|name| text.lines().any(|l| l.split_whitespace().any(|tok| tok == *name)))
+    })
+}
+
 /// A 2 s 320×240 H.264 + AAC movie (written to a temp name and renamed, so concurrent test
-/// processes never see a partial file). `None` without ffmpeg.
+/// processes never see a partial file). `None` without ffmpeg, or when this build cannot encode
+/// H.264 at all — the test only measures how a movie is read, so it skips rather than asserting
+/// on the packager's choice of ffmpeg.
 fn small_mp4() -> Option<PathBuf> {
     let out = fixtures().join("in_place_small.mp4");
     if out.exists() {
@@ -29,16 +47,21 @@ fn small_mp4() -> Option<PathBuf> {
     if !Command::new("ffmpeg").arg("-version").output().is_ok_and(|o| o.status.success()) {
         return None;
     }
+    let enc = h264_encoder()?;
     std::fs::create_dir_all(fixtures()).unwrap();
     let tmp = fixtures().join(format!("in_place_tmp_{}.mp4", std::process::id()));
     let st = Command::new("ffmpeg")
         .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=30:duration=2"])
         .args(["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=2"])
-        .args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest"])
+        .args(["-c:v", enc, "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest"])
         .arg(&tmp)
         .status()
         .unwrap();
-    assert!(st.success(), "ffmpeg failed");
+    if !st.success() {
+        let _ = std::fs::remove_file(&tmp);
+        eprintln!("this ffmpeg build cannot make in_place_small.mp4: skipping");
+        return None;
+    }
     std::fs::rename(&tmp, &out).unwrap();
     Some(out)
 }

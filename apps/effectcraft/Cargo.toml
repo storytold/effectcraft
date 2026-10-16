@@ -6,6 +6,10 @@ edition.workspace = true
 license.workspace = true
 default-run = "effectcraft"
 
+[lib]
+# The desktop binary and Android's entry shim (apps/effectcraft-android) share this library.
+crate-type = ["rlib"]
+
 [lints]
 workspace = true
 
@@ -15,16 +19,28 @@ effectcraft-host = { workspace = true }
 effectcraft-ui-egui = { workspace = true }
 egui = { workspace = true }
 # `links`: links (Help menu, Discord, Settings) open in the system browser.
-eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit", "links", "wayland", "x11"] }
+eframe = { workspace = true, features = ["default_fonts", "wgpu", "links"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 # The window's monitors, size and position (src/window.rs), and macOS event-loop options (no app
 # activation when driven by an agent). The same winit eframe runs on.
 winit = { version = "0.30", default-features = false }
-rfd = { workspace = true }
 pollster = { workspace = true }
 cpal = { workspace = true }
 log = { workspace = true }
+
+[target.'cfg(target_os = "android")'.dependencies]
+# The NativeActivity handle eframe's event loop needs (`NativeOptions.android_app`); the
+# same 0.6 instance winit and eframe use, so the handle passes across crates as one type.
+android-activity = { version = "0.6", default-features = false, features = ["native-activity"] }
+[target.'cfg(not(target_os = "android"))'.dependencies]
+# File and message dialogs. rfd has no Android backend (it doesn't compile there), so
+# Android builds leave the file hooks empty and the commands fail with
+# "no file dialog available".
+rfd = { workspace = true }
+# Screen-reader support and the desktop windowing backends. eframe 0.36 only offers
+# `accesskit` with `android-game-activity`, and Wayland/X11 don't exist on Android.
+eframe = { workspace = true, features = ["accesskit", "wayland", "x11"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Settings ▸ Appearance ▸ Sync with System: the XDG desktop portal's colour scheme. Already in

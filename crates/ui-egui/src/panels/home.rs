@@ -190,7 +190,7 @@ pub fn capture_thumbnail(app: &mut EffectcraftApp) {
     app.home_thumb_saved = Some(key);
 }
 
-fn thumb_texture(app: &mut EffectcraftApp, ctx: &egui::Context, path: &str) -> Option<egui::TextureHandle> {
+pub(crate) fn thumb_texture(app: &mut EffectcraftApp, ctx: &egui::Context, path: &str) -> Option<egui::TextureHandle> {
     if let Some(t) = app.home_thumbs.get(path) {
         return t.clone();
     }

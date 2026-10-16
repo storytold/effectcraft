@@ -119,7 +119,7 @@ fn page_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, page: &Page, cur: &Value
                                 Kind::Int(lo, hi, unit) => {
                                     let mut x = v.as_i64().unwrap_or(0);
                                     // A typed number applies once entered: typing 85 into UI Scale
-                                    // doesn't resize the interface to 75 % at its first digit.
+                                    // doesn't resize the interface to 50 % at its first digit.
                                     let drag = egui::DragValue::new(&mut x).range(lo..=hi).speed(0.25).update_while_editing(false);
                                     let r = ui.add(crate::widgets::drag_value(drag));
                                     if !unit.is_empty() {
@@ -722,15 +722,27 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                 }
             }
             Act::PickFolder(k) => {
-                if let Some(f) = app.hooks.pick_folder.as_ref().and_then(|f| f()) {
+                // A host without a blocking folder dialog (Android) answers through the
+                // in-app browser while the Settings dialog stays open.
+                if app.hooks.app_files_dir.is_some() && app.hooks.pick_folder.is_none() {
+                    crate::panels::android_file::pick_folder_pref(app, &k);
+                } else if let Some(f) = app.hooks.pick_folder.as_ref().and_then(|f| f()) {
                     let _ = app.session.prefs.set(&k, json!(f));
                     app.session.prefs_changed();
                 }
             }
             Act::PickProject(k) => {
-                if let Some(f) = app.hooks.pick_open_project.as_ref().and_then(|f| f()) {
+                // As `Act::PickFolder`: without the in-app browser the button did nothing at
+                // all on a host with no blocking file dialog.
+                let opened =
+                    app.hooks.app_files_dir.is_some() && app.hooks.pick_open_project.is_none() && crate::panels::android_file::pick_project_pref(app, &k);
+                let picked: Option<String> = if opened { None } else { app.hooks.pick_open_project.as_ref().and_then(|f| f()) };
+                if let Some(f) = picked {
                     let _ = app.session.prefs.set(&k, json!(f));
                     app.session.prefs_changed();
+                } else if !opened {
+                    // A button that does nothing reads as broken; say why instead.
+                    app.ui.status = tr("No file dialog is available here; type the path instead.").to_string();
                 }
             }
             Act::PickModel(task) => {

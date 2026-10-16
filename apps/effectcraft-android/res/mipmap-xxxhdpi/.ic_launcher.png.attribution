@@ -1,0 +1,12 @@
+asset:        ic_launcher.png
+title:        EffectCraft app icon, Android mipmap-xxxhdpi (192x192)
+author:       EffectCraft contributors (drawing by the project owner in ArtCraft)
+source:       original work
+license:      MIT OR Apache-2.0
+license-file: assets/app-icon/LICENSE.txt
+added:        2026-10-13 by EffectCraft contributors (Android launcher icon)
+notes:        Launcher icon for the Android build, in the resource tree cargo apk passes to
+              aapt -S. The sidecar is dot-prefixed because aapt rejects a second resource name
+              per directory but skips dot files (see `cargo xtask assets` and packaging/icons.sh).
+              Resized from the committed 1024 px render of effectcraft.svg with Lanczos
+              resampling; packaging/icons.sh regenerates every density from that vector.
