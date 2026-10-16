@@ -230,7 +230,7 @@ pub fn swatch(ui: &mut Ui, rect: Rect, c: [f32; 4], id: egui::Id, t: &Tokens) ->
 }
 
 // The colour picker and its helpers (every colour input uses them).
-pub use crate::color_picker::{color_popup, hex_rgb, hsv_to_rgb, rgb_to_hsv, srgb_color_button, srgb_hex, srgb32};
+pub use crate::color_picker::{color_popup, eyedropper_target_id, hex_rgb, hsv_to_rgb, rgb_to_hsv, srgb_color_button, srgb_hex, srgb32};
 
 /// A twirl-down triangle; returns clicked.
 pub fn twirl(ui: &mut Ui, rect: Rect, open: bool, id: egui::Id, t: &Tokens) -> Response {

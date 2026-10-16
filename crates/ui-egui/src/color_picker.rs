@@ -49,6 +49,14 @@ pub fn color_popup(ui: &mut Ui, id: egui::Id, pos: egui::Pos2, c: &mut [f32; 3])
         out.close.get_or_insert(true);
     }
     if let Some(keep) = out.close {
+        // #1211: a disarmed or finished sample belongs to no popup any more.
+        let eye = ui.data(|d| d.get_temp::<egui::Id>(eyedropper_target_id()));
+        if eye == Some(id) {
+            ui.data_mut(|d| {
+                d.remove::<egui::Id>(eyedropper_target_id());
+                d.remove::<[f32; 3]>(id.with("picked"));
+            });
+        }
         if !keep && *c != original {
             *c = original;
             out.changed = true;
@@ -69,6 +77,12 @@ pub fn color_popup(ui: &mut Ui, id: egui::Id, pos: egui::Pos2, c: &mut [f32; 3])
 
 fn open_pass_id() -> egui::Id {
     egui::Id::new("color-picker-open-pass")
+}
+
+/// #1211: which open colour popup the viewer should hand its next eyedropper sample to;
+/// set by the popup's Eyedropper button, cleared by the viewer when it samples.
+pub fn eyedropper_target_id() -> egui::Id {
+    egui::Id::new("color-picker-eyedropper-target")
 }
 
 /// A colour picker is open: it was drawn, and stayed open, in this pass or the last one (so one
@@ -166,6 +180,12 @@ const SQUARE: f32 = 200.0;
 const SLIDER_W: f32 = 16.0;
 
 fn color_picker(ui: &mut Ui, id: egui::Id, c: &mut [f32; 3], original: [f32; 3]) -> Outcome {
+    // #1211: a sample taken in the viewer by the eyedropper arrives as `c` before the picker
+    // reads it, so HSB, fields and hex all follow.
+    if let Some(picked) = ui.data(|d| d.get_temp::<[f32; 3]>(id.with("picked"))) {
+        ui.data_mut(|d| d.remove::<[f32; 3]>(id.with("picked")));
+        *c = picked;
+    }
     let state_id = id.with("pick");
     let mut pick = match ui.data(|d| d.get_temp::<([f32; 3], [f32; 3])>(state_id)) {
         Some((hsv, rgb)) if rgb == *c => Pick { hsv, rgb },
@@ -194,6 +214,15 @@ fn color_picker(ui: &mut Ui, id: egui::Id, c: &mut [f32; 3], original: [f32; 3])
                 }
                 if ui.add_sized(vec2(72.0, 20.0), egui::Button::new(tr("Cancel"))).clicked() {
                     out.close = Some(false);
+                }
+                // #1211: arm the eyedropper; the next click in the Composition viewer samples
+                // its displayed colour (see panels::viewer).
+                if ui
+                    .add_sized(vec2(88.0, 20.0), egui::Button::new(tr("Eyedropper")))
+                    .on_hover_text(tr("Click in the Composition viewer to sample a colour"))
+                    .clicked()
+                {
+                    ui.data_mut(|d| d.insert_temp(eyedropper_target_id(), id));
                 }
             });
         });

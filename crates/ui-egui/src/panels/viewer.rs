@@ -1348,8 +1348,51 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             }
         };
         ctx.set_cursor_icon(cursor);
+        // #1211: the colour popup's eyedropper: the next click inside the monitor samples the
+        // colour shown there (content over the comp background) and hands it back to the popup.
+        let eye = ctx.data(|d| d.get_temp::<egui::Id>(crate::color_picker::eyedropper_target_id()));
+        if let Some(target) = eye {
+            ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
+            if area.contains(hp) && ui.input(|i| i.pointer.primary_pressed()) {
+                ctx.data_mut(|d| {
+                    d.remove::<egui::Id>(crate::color_picker::eyedropper_target_id());
+                });
+                let img = app.session.render(cid, app.session.time(), effectcraft_engine::render::RenderOpts::default());
+                let p = map.to_comp(hp);
+                let x = (p[0].floor().clamp(0.0, f64::from(cw.max(1.0) - 1.0))) as i64;
+                let y = (p[1].floor().clamp(0.0, f64::from(ch.max(1.0) - 1.0))) as i64;
+                let px = img.get(x, y);
+                let a = px[3].clamp(0.0, 1.0);
+                let bg = comp.background;
+                let rgb = [0usize, 1, 2].map(|i| (px[i].min(a) + bg[i] * (1.0 - a)).clamp(0.0, 1.0));
+                ctx.data_mut(|d| d.insert_temp(target.with("picked"), rgb));
+                app.ui.status = format!("{} {}", crate::i18n::tr("Eyedropper:"), crate::color_picker::srgb_hex(rgb));
+            }
+        }
+        // #1218: a physical mouse wheel (line-unit scroll) over the monitor steps through the
+        // comp frame by frame, as in After Effects. Trackpad scroll, pinch and Ctrl/Cmd+wheel
+        // still zoom around the pointer.
+        let per_line = ctx.memory(|m| m.options.input_options.line_scroll_speed);
+        let (lines, scroll) = ui.input(|i| {
+            let lines =
+                i.events.iter().fold(0.0f32, |a, e| match e {
+                    egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Line, delta, modifiers, .. } => {
+                        if modifiers.command || modifiers.ctrl || modifiers.alt { a } else { a + delta.y }
+                    }
+                    _ => a,
+                });
+            (lines, i.smooth_scroll_delta.y - lines * per_line + i.zoom_delta().ln() * 300.0)
+        });
+        if lines.abs() >= 0.01 && area.contains(hp) {
+            let frames = (lines.round() as i64).clamp(-30, 30);
+            if frames != 0 {
+                if app.playback.playing {
+                    let _ = crate::menus::invoke(app, &ctx, "playback.stop", json!({}));
+                }
+                let _ = app.session.execute("time.step", json!({"frames": frames}));
+            }
+        }
         // Scroll wheel zooms around the pointer.
-        let scroll = ui.input(|i| i.smooth_scroll_delta.y + i.zoom_delta().ln() * 300.0);
         if scroll.abs() > 0.1 && area.contains(hp) {
             let k = (scroll / 300.0).exp();
             let nz = (zoom * k).clamp(0.01, 32.0);

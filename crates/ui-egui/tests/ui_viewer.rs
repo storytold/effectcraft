@@ -2270,3 +2270,70 @@ fn mask_marquee_selects_vertices() {
     let sel = &h.state().session.state.selected_vertices;
     assert_eq!(sel.len(), 2, "shift-marquee adds: {sel:?}");
 }
+
+/// #1218: a physical mouse wheel over the monitor steps through the comp's frames;
+/// Ctrl/Cmd+wheel and trackpad scroll still zoom.
+#[test]
+fn mouse_wheel_over_the_monitor_scrubs_frames() {
+    let mut h = harness();
+    let p = rect(&h, "viewer.area").center();
+    h.input_mut().events.push(Event::PointerMoved(p));
+    h.step();
+    let t0 = h.state().session.time();
+    let none = egui::Modifiers::NONE;
+    let line = |dy: f32, modifiers: egui::Modifiers| Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Line,
+        delta: vec2(0.0, dy),
+        modifiers,
+        phase: egui::TouchPhase::Move,
+    };
+    h.input_mut().events.push(line(1.0, none));
+    h.step();
+    let t1 = h.state().session.time();
+    assert!(t1 > t0, "wheel up advanced the playhead ({t0:?} -> {t1:?})");
+    h.input_mut().events.push(line(-2.0, none));
+    h.step();
+    assert!(h.state().session.time() < t1, "two lines back moves before the single line forward");
+    // Ctrl+wheel zooms instead of scrubbing.
+    let z0 = h.state().ui.viewer.zoom;
+    let t2 = h.state().session.time();
+    let mods = egui::Modifiers { ctrl: true, command: true, ..Default::default() };
+    h.input_mut().events.push(line(3.0, mods));
+    h.step();
+    assert_eq!(h.state().session.time(), t2, "Ctrl+wheel must not scrub");
+    assert_ne!(h.state().ui.viewer.zoom, z0, "Ctrl+wheel still zooms");
+}
+
+/// #1211: with the eyedropper armed for a popup, a click in the monitor hands the colour
+/// shown at that pixel to the popup's picked slot (the plate solid is #406080).
+#[test]
+fn eyedropper_samples_the_monitor() {
+    let mut h = harness();
+    let p = rect(&h, "viewer.area").center();
+    h.input_mut().events.push(Event::PointerMoved(p));
+    h.step();
+    let target = egui::Id::new("test-popup");
+    h.ctx.data_mut(|d| d.insert_temp(effectcraft_ui_egui::widgets::eyedropper_target_id(), target));
+    click(&mut h, p);
+    let rgb: Option<[f32; 3]> = h.ctx.data(|d| d.get_temp(target.with("picked")));
+    let c = rgb.expect("the click sampled a colour");
+    // The click lands on the 80×80 Box solid (#e04020), the topmost layer there.
+    let want = [224.0 / 255.0, 64.0 / 255.0, 32.0 / 255.0];
+    for (got, w) in c.iter().zip(want) {
+        assert!((got - w).abs() < 0.02, "{c:?} vs {want:?}");
+    }
+    // Re-armed, a click off the Box samples the plate (#406080).
+    h.ctx.data_mut(|d| d.insert_temp(effectcraft_ui_egui::widgets::eyedropper_target_id(), target));
+    let corner = screen(&h, [20.0, 20.0]);
+    click(&mut h, corner);
+    let c = h.ctx.data(|d| d.get_temp::<[f32; 3]>(target.with("picked"))).expect("the second click sampled");
+    let want = [64.0 / 255.0, 96.0 / 255.0, 128.0 / 255.0];
+    for (got, w) in c.iter().zip(want) {
+        assert!((got - w).abs() < 0.02, "{c:?} vs {want:?}");
+    }
+    // One shot: the arm is gone, the next click is an ordinary click.
+    assert!(h.ctx.data(|d| d.get_temp::<egui::Id>(effectcraft_ui_egui::widgets::eyedropper_target_id())).is_none());
+    let t0 = h.state().session.time();
+    click(&mut h, p);
+    assert_eq!(h.state().session.time(), t0, "a plain click in the viewer must not move the playhead");
+}
