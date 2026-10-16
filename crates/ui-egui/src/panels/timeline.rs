@@ -2157,16 +2157,6 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 }
                 // Locked layers can't be selected or moved (unlock them with the lock switch).
                 let locked = layer.switches.locked;
-                // Layer reordering only with primary button (not middle/right)
-                if row_resp.drag_started() && !locked && row_resp.dragged_by(egui::PointerButton::Primary) {
-                    // The selected layers move together; an unselected row moves alone.
-                    let moving: Vec<u64> =
-                        if is_sel { comp.layers.iter().filter(|l| selected.contains(&l.id)).map(|l| l.id.0).collect() } else { vec![layer.id.0] };
-                    ctx.data_mut(|d| d.insert_temp(layer_drag_id(), moving));
-                }
-                if row_resp.drag_stopped() {
-                    ctx.data_mut(|d| d.insert_temp(layer_drop_id(), true));
-                }
                 app.auto.add(&format!("timeline.layer.{}.row", layer.id.0), left, &layer.name);
                 if row_resp.clicked() && !locked {
                     let m = ui.input(|i| i.modifiers);
@@ -2184,6 +2174,103 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     }
                 }
                 layer_context_menu(&row_resp, &comp, layer, &selected, LayerMenuCaps::of(&app.session.project, layer), &mut actions);
+
+                // Layer bar interactions - must happen after row context menu so we can check if bar was used
+                if !graph_on {
+                    let x_in = tm.x(layer.in_point.seconds());
+                    let x_out = tm.x(layer.out_point.seconds());
+                    let bar = Rect::from_min_max(pos2(x_in, r.min.y + 1.0), pos2(x_out, r.max.y - 1.0));
+                    // Interactions: move body, trim edges.
+                    let (body_r, in_r, out_r) = trim_zones(bar);
+                    let body = ui.interact(body_r, egui::Id::new(("bar", layer.id.0)), Sense::click_and_drag());
+                    let lin = ui.interact(in_r, egui::Id::new(("bar-in", layer.id.0)), Sense::drag());
+                    let lout = ui.interact(out_r, egui::Id::new(("bar-out", layer.id.0)), Sense::drag());
+                    app.auto.add(&format!("timeline.layer.{}.bar.in", layer.id.0), in_r, "Trim In");
+                    app.auto.add(&format!("timeline.layer.{}.bar.out", layer.id.0), out_r, "Trim Out");
+                    if lin.hovered() || lout.hovered() || lin.dragged() || lout.dragged() {
+                        trim_cursor(&ctx);
+                    }
+                    if body.double_clicked()
+                        && let Some(a) = double_click_action(layer)
+                    {
+                        actions.push(a);
+                    }
+                    let shift = ui.input(|i| i.modifiers.shift);
+                    if let Some(layers) = (body.clicked() && shift).then(|| shift_range(&ctx, cid, &comp, &rows, &selected, layer.id)).flatten() {
+                        // Shift-click: the layers from the last one clicked to this one, as in
+                        // the layer outline.
+                        actions.push(("layer.select".into(), json!({"layers": layers})));
+                    } else {
+                        // Selection only on click, not drag
+                        if body.clicked() && !is_sel {
+                            actions.push(("layer.select".into(), json!({"layers": [layer.id.0], "add": shift})));
+                        }
+                        if body.clicked() && !shift {
+                            set_anchor(&ctx, cid, layer.id);
+                        }
+                    }
+                    layer_context_menu(&body, &comp, layer, &selected, LayerMenuCaps::of(&app.session.project, layer), &mut actions);
+                    let drag_key = format!("bar-{}", layer.id.0);
+                    // Check if bar was used for dragging
+                    let used_for_bar = body.drag_started() && body.dragged_by(egui::PointerButton::Primary);
+
+                    // Ctrl/Cmd+Alt dragging a selected bar: Quick Offset (#1012)
+                    let mods = ui.input(|i| i.modifiers);
+                    if body.drag_started()
+                        && is_sel
+                        && mods.command
+                        && mods.alt
+                        && body.dragged_by(egui::PointerButton::Primary)
+                        && let Some(n) = quick_offset_layers(&comp, selected.iter().copied())
+                        && let Some(p) = ctx.input(|i| i.pointer.press_origin())
+                    {
+                        ctx.data_mut(|d| d.insert_temp(quick_bar_id(), QuickBar { layer: layer.id, origin_x: p.x, layers: n, applied: 0, button: egui::PointerButton::Primary }));
+                    }
+
+                    let quick = ctx.data(|d| d.get_temp::<QuickBar>(quick_bar_id())).is_some_and(|q| q.layer == layer.id);
+                    for (resp, kind) in [(&body, "move"), (&lin, "in"), (&lout, "out")] {
+                        if kind == "move" && quick {
+                            continue;
+                        }
+                        // Layer bar dragging only with primary button
+                        if resp.dragged_by(egui::PointerButton::Primary) {
+                            let acc_id = egui::Id::new(("bar-acc", layer.id.0, kind));
+                            let mut acc: f32 = ctx.data(|d| d.get_temp(acc_id).unwrap_or(0.0));
+                            acc += resp.drag_delta().x;
+                            let frames = ((acc as f64 / pps) / fd).trunc() as i64;
+                            if frames != 0 {
+                                acc -= (frames as f64 * fd * pps) as f32;
+                                let d = frames as f64 * fd;
+                                // Moving or trimming a selected layer acts on the whole
+                                // selection; each layer trims from its own in/out point.
+                                let targets = if is_sel { json!(selected.iter().map(|l| l.0).collect::<Vec<_>>()) } else { json!([layer.id.0]) };
+                                let params = match kind {
+                                    "move" => json!({"layers": targets, "delta": d, "merge": drag_key}),
+                                    "in" => json!({"layers": targets, "inDelta": d, "merge": drag_key}),
+                                    _ => json!({"layers": targets, "outDelta": d, "merge": drag_key}),
+                                };
+                                actions.push(("layer.timing".into(), params));
+                            }
+                            ctx.data_mut(|d| d.insert_temp(acc_id, acc));
+                        }
+                        if resp.drag_stopped() {
+                            ctx.data_mut(|d| d.remove::<f32>(egui::Id::new(("bar-acc", layer.id.0, kind))));
+                            ui_actions.push(UiAct::EndMerge);
+                        }
+                    }
+
+                    // Layer reordering only with primary button (not middle/right)
+                    // Only reorder if row was interacted with AND bar wasn't used for layer bar dragging
+                    if row_resp.drag_started() && !locked && row_resp.dragged_by(egui::PointerButton::Primary) && !used_for_bar {
+                        // The selected layers move together; an unselected row moves alone.
+                        let moving: Vec<u64> =
+                            if is_sel { comp.layers.iter().filter(|l| selected.contains(&l.id)).map(|l| l.id.0).collect() } else { vec![layer.id.0] };
+                        ctx.data_mut(|d| d.insert_temp(layer_drag_id(), moving));
+                    }
+                    if row_resp.drag_stopped() {
+                        ctx.data_mut(|d| d.insert_temp(layer_drop_id(), true));
+                    }
+                }
                 // Switches.
                 let sws: [(Icon, bool, &str, bool); 8] = [
                     (Icon::Shy, sw.shy, "shy", true),
