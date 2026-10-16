@@ -26,7 +26,7 @@ function __begin(t, v, c, l, path, uid, idx, fd, ti, tt, sv) {
   textIndex = ti;
   textTotal = tt;
   selectorValue = sv;
-  __S = { c: c, l: l, path: path, uid: uid, idx: idx, fd: fd, comp: null, layer: null, prop: null, vars: {} };
+  __S = { c: c, l: l, path: path, uid: uid, idx: idx, fd: fd, comp: null, layer: null, prop: null, vars: {}, layers: {} };
   __rc = 0;
   __seed = 0;
   __timeless = false;
@@ -44,7 +44,7 @@ function __finish(r) {
 
 function __result(r) {
   r = __v(r);
-  if (r !== null && r !== undefined && r.__isLayer) return r.index;
+  if (typeof r === 'function' && r.__isLayer) return r.index;
   if (r !== null && typeof r === 'object' && r.__isTextStyle) return r.__out();
   // `[temp, temp]` where temp is a property (pick-whip 1D → 2D): read the values here, while
   // host requests can still be answered and the script re-run.
@@ -452,10 +452,10 @@ Comp.prototype = {
     __err('Composition "' + this.name + '" has no active camera');
   },
   layer: function (a, rel) {
-    if (a !== null && a !== undefined && a.__isLayer) return this.layer(a.index + (rel || 0));
+    if (typeof a === 'function' && a.__isLayer) return this.layer(a.index + (rel || 0));
     var id = __h(__LAYER, this.__c, a);
     if (id === null) __err(typeof a === 'string' ? 'Layer named "' + a + '" does not exist' : 'Layer index ' + a + ' out of range');
-    return new Layer(this.__c, id);
+    return __layer(this.__c, id);
   },
   toString: function () { return '[object Comp]'; },
 };
@@ -542,6 +542,15 @@ function Layer(c, l) {
   return f;
 }
 
+// Layer `l` of comp `c`, made once per evaluation: a Layer is a callable function with its own
+// prototype, dearer to make than a plain object, and expressions often name the same layer many
+// times (`thisComp.layer("A")` in a loop, `.parent`).
+function __layer(c, l) {
+  if (__S === null) return new Layer(c, l);
+  var k = c + ':' + l;
+  return __S.layers[k] || (__S.layers[k] = new Layer(c, l));
+}
+
 function __m3(m, p) {
   var x = p[0] || 0, y = p[1] || 0;
   var X = m[0] * x + m[1] * y + m[2], Y = m[3] * x + m[4] * y + m[5], W = m[6] * x + m[7] * y + m[8];
@@ -576,7 +585,7 @@ Layer.prototype = {
   get parent() {
     var p = this.__info[7];
     if (p === null) __err('Layer "' + this.name + '" has no parent');
-    return new Layer(this.__c, p);
+    return __layer(this.__c, p);
   },
   get hasVideo() { return this.__info[8]; },
   get enabled() { return this.__info[11]; },
@@ -742,7 +751,7 @@ Prop.prototype = {
   get matchName() { return this.__info[8]; },
   __wrap: function (v) {
     var kind = this.__info[2];
-    if (kind === 'layer') return v === null ? null : new Layer(this.__c, v);
+    if (kind === 'layer') return v === null ? null : __layer(this.__c, v);
     if (kind === 'path' && v !== null) return new __Path(v[0], v[1], v[2], v[3]);
     return v;
   },
@@ -772,7 +781,7 @@ Prop.prototype = {
     for (var i = 1; i < times.length; i++) if (Math.abs(times[i] - t) < Math.abs(times[best] - t)) best = i;
     return this.key(best + 1);
   },
-  __seedIndex: function () { return this.__self ? __S.idx : new Layer(this.__c, this.__l).index; },
+  __seedIndex: function () { return this.__self ? __S.idx : __layer(this.__c, this.__l).index; },
   wiggle: function (freq, amp, octaves, ampMult, t) {
     if (octaves === undefined) octaves = 1;
     if (ampMult === undefined) ampMult = 0.5;
@@ -843,7 +852,7 @@ var __propHandler = {
     var x = v[k];
     // Property groups and layers are callable: hand them over as they are, not bound like methods
     // (#809).
-    if (x !== null && x !== undefined && (x.__isGroup || x.__isLayer)) return x;
+    if (typeof x === 'function' && (x.__isGroup || x.__isLayer)) return x;
     return typeof x === 'function' ? x.bind(v) : x;
   },
 };
@@ -1030,7 +1039,7 @@ function __global(name, get) {
 }
 
 __global('thisComp', function () { return __S.comp || (__S.comp = new Comp(__S.c)); });
-__global('thisLayer', function () { return __S.layer || (__S.layer = new Layer(__S.c, __S.l)); });
+__global('thisLayer', function () { return __S.layer || (__S.layer = __layer(__S.c, __S.l)); });
 __global('thisProperty', function () { return __S.prop || (__S.prop = __mkProp(__S.c, __S.l, __S.path)); });
 ['name', 'index', 'inPoint', 'outPoint', 'startTime', 'width', 'height', 'hasParent', 'parent', 'hasVideo', 'enabled', 'active',
   'transform', 'position', 'scale', 'rotation', 'opacity', 'anchorPoint', 'text', 'marker'].forEach(function (k) {
