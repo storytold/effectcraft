@@ -225,11 +225,13 @@ impl Session {
         let prefs = self.autosave_prefs();
         let fail = |e: std::io::Error| EngineError::Other(format!("auto-save failed: {e}"));
         let plan = autosave::plan_in(self.file_ops(), &prefs, self.path.as_deref(), root.as_deref(), self.autosave.last_slot).map_err(fail)?;
+        let (path, slot) = (plan.path.clone(), plan.slot);
+        let p = path.to_string_lossy().to_string();
         if self.autosave.background && !cfg!(target_arch = "wasm32") {
             let project = self.project.clone();
             let config = self.config.clone();
             let job = plan.clone();
-            let pending = autosave::PendingWrite::spawn(plan.path.clone(), move || {
+            let pending = autosave::PendingWrite::spawn(path, move || {
                 let json = project.to_json_compact();
                 match &config {
                     Some(c) => job.write(c.files(), json.as_bytes()),
@@ -238,24 +240,41 @@ impl Session {
             })
             .map_err(fail)?;
             self.autosave.pending = Some(pending);
+            // The write lands later (autosave_wait): only then does the save count as made, so a
+            // failed write leaves the unchanged dirty revision to be retried (#1231).
+            self.autosave.pending_meta = Some((p.clone(), slot, self.revision));
         } else {
             let json = self.project.to_json_compact();
             plan.write(self.file_ops(), json.as_bytes()).map_err(fail)?;
+            self.commit_autosave(p.clone(), slot, self.revision);
         }
-        let (path, slot) = (plan.path, plan.slot);
-        let p = path.to_string_lossy().to_string();
-        self.autosave.last_slot = Some(slot);
-        self.autosave.saved_revision = Some(self.revision);
-        self.autosave.last_path = Some(p.clone());
-        self.update_sentinel();
         Ok(p)
+    }
+
+    /// Record a landed auto-save: its slot, revision and path, and the recovery sentinel.
+    fn commit_autosave(&mut self, path: String, slot: u32, revision: u64) {
+        self.autosave.last_slot = Some(slot);
+        self.autosave.saved_revision = Some(revision);
+        self.autosave.last_path = Some(path);
+        self.update_sentinel();
     }
 
     /// Wait for a background auto-save ([`autosave::AutoSaveState::background`]) to land.
     pub fn autosave_wait(&mut self) -> Result<()> {
-        match self.autosave.pending.take() {
-            Some(w) => w.join().map_err(|e| EngineError::Other(format!("auto-save failed: {e}"))),
-            None => Ok(()),
+        let Some(w) = self.autosave.pending.take() else { return Ok(()) };
+        match w.join() {
+            Ok(()) => {
+                if let Some((path, slot, revision)) = self.autosave.pending_meta.take() {
+                    self.commit_autosave(path, slot, revision);
+                }
+                Ok(())
+            }
+            Err(e) => {
+                // Nothing was written: drop the failed job's bookkeeping and keep the previous
+                // (unchanged) one, so the same revision is saved again on the next interval.
+                self.autosave.pending_meta = None;
+                Err(EngineError::Other(format!("auto-save failed: {e}")))
+            }
         }
     }
 

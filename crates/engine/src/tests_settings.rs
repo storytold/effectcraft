@@ -688,6 +688,72 @@ fn autosave_tick_waits_for_the_interval_and_changes() {
     let _ = std::fs::remove_dir_all(d);
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_failed_background_autosave_is_retried() {
+    // A store whose auto-save writes fail once, like a disk that is briefly full or read-only.
+    struct FailFirstAutoSave {
+        failed: std::sync::atomic::AtomicBool,
+    }
+    impl crate::config::FileOps for FailFirstAutoSave {
+        fn list(&self, dir: &std::path::Path) -> Vec<(String, std::time::SystemTime)> {
+            crate::config::StdFiles.list(dir)
+        }
+        fn write(&self, path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+            let autosave = path.file_name().is_some_and(|n| n.to_string_lossy().contains("auto-save"));
+            if autosave && !self.failed.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                return Err(std::io::Error::other("disk full"));
+            }
+            crate::config::StdFiles.write(path, data)
+        }
+        fn remove(&self, path: &std::path::Path) -> std::io::Result<()> {
+            crate::config::StdFiles.remove(path)
+        }
+        fn is_file(&self, path: &std::path::Path) -> bool {
+            crate::config::StdFiles.is_file(path)
+        }
+    }
+    struct Store {
+        files: FailFirstAutoSave,
+    }
+    impl ConfigStore for Store {
+        fn read(&self, _: &str) -> Option<String> {
+            None
+        }
+        fn write(&self, _: &str, _: &str) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn remove(&self, _: &str) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn files(&self) -> &dyn crate::config::FileOps {
+            &self.files
+        }
+    }
+    let d = tmp("autosave-retry");
+    let mut s = session_with_comp();
+    s.config = Some(Arc::new(Store { files: FailFirstAutoSave { failed: std::sync::atomic::AtomicBool::new(false) } }));
+    s.autosave.background = true;
+    s.execute("file.saveAs", json!({"path": d.join("T.ecproj").to_string_lossy()})).unwrap();
+    s.execute(
+        "prefs.set",
+        json!({"values": {"autoSave.intervalMinutes": 1, "autoSave.location": "custom", "autoSave.folder": d.join("custom").to_string_lossy()}}),
+    )
+    .unwrap();
+    s.execute("layer.newNull", json!({})).unwrap();
+    assert!(s.autosave_tick(1000.0).is_none(), "the first tick starts the clock");
+    // The background write fails once.
+    let failed = s.autosave_now().unwrap();
+    assert!(s.autosave_wait().is_err(), "the failing write reports its error");
+    assert!(!std::path::Path::new(&failed).exists(), "the failed auto-save wrote nothing");
+    assert_ne!(s.autosave.last_path.as_deref(), Some(failed.as_str()), "the bookkeeping does not claim the failed write");
+    // The revision is still unsaved: the next interval must retry it, not skip it.
+    let retried = s.autosave_tick(1061.0).expect("a failed auto-save is retried on the next interval").unwrap();
+    s.autosave_wait().unwrap();
+    assert!(std::path::Path::new(&retried).exists(), "the retried auto-save landed: {retried}");
+    let _ = std::fs::remove_dir_all(d);
+}
+
 #[test]
 fn crash_recovery_detects_an_unclean_exit() {
     let d = tmp("recovery");

@@ -31,6 +31,10 @@ pub struct AutoSaveState {
     pub background: bool,
     /// The background write in flight, if any.
     pub pending: Option<PendingWrite>,
+    /// What a background write commits when it lands: `(path, slot, revision)`. Applied to the
+    /// bookkeeping (and the recovery sentinel) only after the write succeeds, so a failed save is
+    /// retried instead of being taken for the saved revision (#1231).
+    pub pending_meta: Option<(String, u32, u64)>,
     /// Wall-clock seconds of the last auto-save (or of the first tick).
     pub last: Option<f64>,
     /// Slot written last in this session.
