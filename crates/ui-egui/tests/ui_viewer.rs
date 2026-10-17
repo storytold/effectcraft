@@ -2344,3 +2344,56 @@ fn null_eye_hides_it_in_the_viewer() {
     h.run_steps(2);
     assert!(h.state().auto.find(&handle).is_some(), "handles back with the eye on");
 }
+
+/// #1642: a null stays visible after deselection, without selection handles.
+#[test]
+fn unselected_null_keeps_its_outline() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Nulls", "width": 640, "height": 360, "duration": 4})).unwrap();
+    let n = s.execute("layer.newNull", json!({})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.select", json!({"layers": [n]})).unwrap();
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(move |_| EffectcraftApp::new(s));
+    h.run_steps(3);
+    // Use the selected box's actual geometry, so transformed nulls use the same outline.
+    let corners: Vec<Pos2> = (0..4).map(|i| rect(&h, &format!("viewer.handle.{n}.{i}")).center()).collect();
+    fn count(shape: &egui::Shape, corners: &[Pos2]) -> usize {
+        match shape {
+            egui::Shape::Path(p) => usize::from(p.closed && p.points == corners),
+            egui::Shape::Vec(v) => v.iter().map(|s| count(s, corners)).sum(),
+            _ => 0,
+        }
+    }
+    let outlines = |h: &Harness<'_, EffectcraftApp>| h.output().shapes.iter().map(|s| count(&s.shape, &corners)).sum::<usize>();
+    assert_eq!(outlines(&h), 1, "one selected outline");
+    h.state_mut().session.execute("edit.deselectAll", json!({})).unwrap();
+    h.run_steps(3);
+    assert_eq!(outlines(&h), 1, "deselection keeps the null visible");
+    assert!(h.state().auto.find(&format!("viewer.handle.{n}.0")).is_none());
+    assert!(h.state().auto.find(&format!("viewer.anchor.{n}")).is_none());
+    h.state_mut().ui.viewer.show_layer_controls = false;
+    h.run_steps(2);
+    assert_eq!(outlines(&h), 0, "Show Layer Controls hides the outline");
+    h.state_mut().ui.viewer.show_layer_controls = true;
+    h.state_mut().session.execute("layer.setSwitch", json!({"layers": [n], "switch": "video", "value": false})).unwrap();
+    h.run_steps(2);
+    assert_eq!(outlines(&h), 0, "the Video switch hides an unselected null too");
+    h.state_mut().session.execute("layer.setSwitch", json!({"layers": [n], "switch": "video", "value": true})).unwrap();
+    h.run_steps(2);
+    assert_eq!(outlines(&h), 1, "the Video switch restores the outline");
+    // Solo scope matches picking: a soloed AV layer hides unsoloed nulls, even outside its range.
+    let solid = h.state_mut().session.execute("layer.newSolid", json!({"name": "Solo", "color": "#406080", "width": 40, "height": 40})).unwrap()["layer"]
+        .as_u64()
+        .unwrap();
+    h.state_mut().session.execute("layer.setSwitch", json!({"layers": [solid], "switch": "solo", "value": true})).unwrap();
+    h.state_mut().session.execute("edit.deselectAll", json!({})).unwrap();
+    h.run_steps(3);
+    assert_eq!(outlines(&h), 0, "an unsoloed null follows solo scope");
+    let cid = h.state().session.active_comp_id().unwrap();
+    std::sync::Arc::make_mut(&mut h.state_mut().session.project).comp_mut(cid).unwrap().layer_mut(LayerId(solid)).unwrap().out_point =
+        effectcraft_engine::time::Tick::ZERO;
+    h.run_steps(2);
+    assert_eq!(outlines(&h), 0, "an inactive soloed layer still sets solo scope");
+    h.state_mut().session.execute("layer.setSwitch", json!({"layers": [n], "switch": "solo", "value": true})).unwrap();
+    h.run_steps(2);
+    assert_eq!(outlines(&h), 1, "a soloed null keeps its outline");
+}

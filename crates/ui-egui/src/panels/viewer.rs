@@ -996,6 +996,19 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         // Layer Handles and Paths.
         let hs = app.session.prefs.general.path_point_size as f32 + 2.0;
         let label_handles = app.session.prefs.appearance.use_label_color_for_handles;
+        // Nulls are rig controls: their outlines remain visible without selection (#1642).
+        // Keep this separate from selected layers so they gain no handles, anchors or paths. Solo
+        // scope matches picking (`selectable_layers`), so a null that can't be clicked isn't drawn.
+        let any_solo = comp.layers.iter().any(|l| l.switches.solo && l.source.is_av());
+        for l in comp.layers.iter().filter(|l| {
+            matches!(l.source, LayerSource::Null) && !selected.contains(&l.id) && l.is_active_at(time) && l.switches.video && (!any_solo || l.switches.solo)
+        }) {
+            let outline = layer_outline(&ectx, l);
+            if outline.len() > 2 {
+                let col = if label_handles { t.label(l.label) } else { t.accent };
+                painter.add(egui::Shape::closed_line(outline.into_iter().map(|p| map.to_screen(p)).collect(), Stroke::new(1.0, col)));
+            }
+        }
         // A layer whose Video switch is off has no box, handles or paths in the viewer (a hidden
         // null disappears from the comp, as in After Effects), even while it is selected.
         for l in comp.layers.iter().filter(|l| selected.contains(&l.id) && l.is_active_at(time) && l.switches.video) {
