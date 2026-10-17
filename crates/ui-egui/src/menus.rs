@@ -17,11 +17,20 @@ pub struct UiCommand {
     pub label: &'static str,
     pub menu: &'static [&'static str],
     pub shortcut: Option<&'static str>,
+    /// Shortcut scope; none: from the id (`timeline.*`, `view.*`), else the application.
+    pub scope: Option<&'static str>,
 }
 
 macro_rules! uic {
     ($id:literal, $label:literal, [$($m:literal),*], $sc:expr) => {
-        UiCommand { id: $id, label: $label, menu: &[$($m),*], shortcut: $sc }
+        UiCommand { id: $id, label: $label, menu: &[$($m),*], shortcut: $sc, scope: None }
+    };
+}
+
+/// A UI-only command whose shortcut works in one panel or context only.
+macro_rules! uis {
+    ($id:literal, $label:literal, $scope:literal, $sc:expr) => {
+        UiCommand { id: $id, label: $label, menu: &[], shortcut: $sc, scope: Some($scope) }
     };
 }
 
@@ -31,7 +40,7 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     uic!("playback.ramPreview", "Preview (Numpad 0)", [], Some("Num0")),
     uic!("playback.preview.shiftSpacebar", "Preview (Shift+Spacebar)", [], Some("Shift+Space")),
     uic!("playback.preview.shiftNumpad0", "Preview (Shift+Numpad 0)", [], Some("Shift+Num0")),
-    uic!("playback.preview.altNumpad0", "Preview (Alt+Numpad 0)", [], Some("Alt+Num0")),
+    uic!("playback.preview.altNumpad0", "Preview (Alt+Numpad 0)", [], Some("Alt+Num0, Ctrl+Alt+0")),
     uic!("playback.stop", "Stop", [], None),
     uic!("view.fit", "Fit", [], Some("Shift+/")),
     uic!("view.actualSize", "100%", [], Some("/")),
@@ -138,6 +147,38 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     uic!("window.floatPanel", "Undock Panel", [], None),
     uic!("window.closePanel", "Close Panel", [], None),
     uic!("window.panelWindow", "Move Panel to New Window", [], None),
+    // The formatting shortcuts of the text being edited in a viewer.
+    uis!("text.format.alignLeft", "Align Text Left / Top", "TextEditing", Some("Cmd+Shift+L")),
+    uis!("text.format.alignCenter", "Align Text Center", "TextEditing", Some("Cmd+Shift+C")),
+    uis!("text.format.alignRight", "Align Text Right / Bottom", "TextEditing", Some("Cmd+Shift+R")),
+    uis!("text.format.justifyLeft", "Justify Text, Last Line Left", "TextEditing", Some("Cmd+Shift+J")),
+    uis!("text.format.justifyRight", "Justify Text, Last Line Right", "TextEditing", Some("Cmd+Alt+Shift+J")),
+    uis!("text.format.justifyAll", "Justify Text, Force Last Line", "TextEditing", Some("Cmd+Shift+F")),
+    uis!("text.format.allCaps", "All Caps", "TextEditing", Some("Cmd+Shift+K")),
+    uis!("text.format.smallCaps", "Small Caps", "TextEditing", Some("Cmd+Alt+Shift+K")),
+    uis!("text.format.superscript", "Superscript", "TextEditing", Some("Cmd+Shift+=")),
+    uis!("text.format.subscript", "Subscript", "TextEditing", Some("Cmd+Alt+Shift+=")),
+    uis!("text.format.horizontalScale100", "Set Horizontal Scale to 100%", "TextEditing", Some("Cmd+Shift+X")),
+    uis!("text.format.verticalScale100", "Set Vertical Scale to 100%", "TextEditing", Some("Cmd+Alt+Shift+X")),
+    uis!("text.format.autoLeading", "Auto Leading", "TextEditing", Some("Cmd+Alt+Shift+A")),
+    uis!("text.format.tracking0", "Reset Tracking to 0", "TextEditing", Some("Cmd+Shift+Q")),
+    uis!("text.format.size-2", "Decrease Font Size by 2", "TextEditing", Some("Cmd+Shift+,")),
+    uis!("text.format.size2", "Increase Font Size by 2", "TextEditing", Some("Cmd+Shift+.")),
+    uis!("text.format.size-10", "Decrease Font Size by 10", "TextEditing", Some("Cmd+Alt+Shift+,")),
+    uis!("text.format.size10", "Increase Font Size by 10", "TextEditing", Some("Cmd+Alt+Shift+.")),
+    uis!("text.format.leading2", "Increase Leading by 2", "TextEditing", Some("Alt+ArrowDown")),
+    uis!("text.format.leading-2", "Decrease Leading by 2", "TextEditing", Some("Alt+ArrowUp")),
+    uis!("text.format.leading10", "Increase Leading by 10", "TextEditing", Some("Cmd+Alt+ArrowDown")),
+    uis!("text.format.leading-10", "Decrease Leading by 10", "TextEditing", Some("Cmd+Alt+ArrowUp")),
+    uis!("text.format.baseline-2", "Decrease Baseline Shift by 2", "TextEditing", Some("Alt+Shift+ArrowDown")),
+    uis!("text.format.baseline2", "Increase Baseline Shift by 2", "TextEditing", Some("Alt+Shift+ArrowUp")),
+    uis!("text.format.baseline-10", "Decrease Baseline Shift by 10", "TextEditing", Some("Cmd+Alt+Shift+ArrowDown")),
+    uis!("text.format.baseline10", "Increase Baseline Shift by 10", "TextEditing", Some("Cmd+Alt+Shift+ArrowUp")),
+    uis!("text.format.tracking-20", "Decrease Kerning or Tracking by 20", "TextEditing", Some("Alt+ArrowLeft")),
+    uis!("text.format.tracking20", "Increase Kerning or Tracking by 20", "TextEditing", Some("Alt+ArrowRight")),
+    uis!("text.format.tracking-100", "Decrease Kerning or Tracking by 100", "TextEditing", Some("Cmd+Alt+ArrowLeft")),
+    uis!("text.format.tracking100", "Increase Kerning or Tracking by 100", "TextEditing", Some("Cmd+Alt+ArrowRight")),
+    uis!("text.format.composer", "Toggle Paragraph Composer", "TextEditing", Some("Cmd+Alt+Shift+T")),
 ];
 
 pub fn panel_command_id(p: PanelKind) -> String {
@@ -595,6 +636,9 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
             app.ui.viewer.fit_up_to_100 = false;
             app.ui.viewer.pan = [0.0, 0.0];
             return Ok(Value::Null);
+        }
+        id if id.starts_with("text.format.") => {
+            return crate::panels::text_panels::format(app, ctx, id.trim_start_matches("text.format."));
         }
         "timeline.scrollToTime" => app.ui.timeline.scroll_to = Some(crate::state::ScrollTo::Time),
         "timeline.scrollToLayer" => app.ui.timeline.scroll_to = Some(crate::state::ScrollTo::Layer),
@@ -1770,9 +1814,50 @@ fn modifiers_at_start(ctx: &egui::Context) -> Option<egui::Modifiers> {
     })
 }
 
+/// The shortcut contexts active now (`effectcraft_engine::shortcuts::CONTEXT_SCOPES`): text
+/// being edited in the viewer, a paint tool or a camera tool active, a mask selected, a viewer
+/// panel focused.
+pub fn active_contexts(app: &EffectcraftApp) -> Vec<&'static str> {
+    let mut out = vec![];
+    if app.session.state.text_edit.is_some() {
+        out.push("TextEditing");
+    }
+    match app.ui.tool {
+        Tool::Brush | Tool::Clone | Tool::Eraser => out.push("Paint"),
+        Tool::Orbit | Tool::PanCamera | Tool::Dolly => out.push("Camera"),
+        _ => {}
+    }
+    // (The mask itself, not one of its properties: with Mask Path selected the letters stay
+    // the Timeline's reveal keys.)
+    if app.session.selected_mask().is_some_and(|m| app.session.state.selected_props.contains(&m)) {
+        out.push("Mask");
+    }
+    if matches!(app.ui.focused, PanelKind::Composition | PanelKind::Layer | PanelKind::Footage | PanelKind::Viewer(_)) {
+        out.push("Viewer");
+    }
+    out
+}
+
+/// The command the active preset binds to `key` + `mods` in the context `scope`: for the code
+/// that owns the keyboard while that context is active (text being edited takes its keys itself).
+pub fn context_binding(app: &EffectcraftApp, scope: &str, key: egui::Key, mods: egui::Modifiers) -> Option<String> {
+    let table = app.session.shortcuts();
+    bindings(&app.session)
+        .into_iter()
+        .filter(|(m, k, ..)| *k == key && mods_match(*m, mods))
+        .find(|(_, _, id, params)| table.find(&effectcraft_engine::shortcuts::binding_key(id, params)).is_some_and(|b| b.scope == scope))
+        .map(|(_, _, id, _)| id)
+}
+
 /// Only Shift held (Shift+Delete, not Ctrl/Alt+Shift+Delete).
 fn only_shift(m: egui::Modifiers) -> bool {
     m.shift && !m.alt && !m.ctrl && !m.command && !m.mac_cmd
+}
+
+/// Add Marker from the keyboard marks the selected layers; only with none selected does it add
+/// a composition marker (#976).
+fn marker_command(app: &EffectcraftApp, id: String) -> String {
+    if id == "comp.addMarker" && !app.session.state.selected_layers.is_empty() { "layer.addMarker".to_owned() } else { id }
 }
 
 /// Dispatch keyboard shortcuts (skipped while typing in a text field).
@@ -1882,9 +1967,7 @@ fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only
         let bound = app.session.shortcuts().bindings().into_iter().find(|(k, _)| *k == "Num*").map(|(_, b)| (b.command.clone(), b.params.clone()));
         // As in After Effects, it marks the selected layers; only with none selected does it add
         // a composition marker (#976).
-        let bound = bound.map(|(id, params)| {
-            if id == "comp.addMarker" && !app.session.state.selected_layers.is_empty() { ("layer.addMarker".to_owned(), params) } else { (id, params) }
-        });
+        let bound = bound.map(|(id, params)| (marker_command(app, id), params));
         if let Some((id, params)) = bound
             && let Err(e) = invoke(app, ctx, &id, if params.is_null() { json!({}) } else { params })
         {
@@ -1896,6 +1979,13 @@ fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only
     }
     let binds = bindings(&app.session);
     for (key, mods, pressed, physical_key) in events {
+        // (Per event: a shortcut can change the tool, the selection or the focused panel.)
+        let (focused, contexts) = (app.ui.focused.id(), active_contexts(app));
+        let rank = |id: &str, params: &Value| {
+            let key = effectcraft_engine::shortcuts::binding_key(id, params);
+            let scope = app.session.shortcuts().find(&key).map_or(effectcraft_engine::shortcuts::APP_SCOPE, |b| b.scope.as_str());
+            effectcraft_engine::shortcuts::scope_rank(scope, &focused, &contexts)
+        };
         // Plain Spacebar runs its shortcut (Play Current Preview) on the release: held, it is
         // the Hand tool (After Effects), and a drag with it must not start or stop playback.
         if key == egui::Key::Space && (!pressed || !mods.any()) {
@@ -1957,10 +2047,17 @@ fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only
         // Explicit physical bindings distinguish keys that a layout reports with the same
         // logical name (for example AZERTY's minus and right parenthesis).
         let physical = physical_key.and_then(|key| {
-            app.session.shortcuts().bindings().into_iter().find_map(|(sc, b)| {
-                let (m, k) = parse_shortcut(sc.strip_prefix("Physical+")?)?;
-                (k == key && mods_match(m, mods)).then(|| (b.command.clone(), b.params.clone()))
-            })
+            app.session
+                .shortcuts()
+                .bindings()
+                .into_iter()
+                .filter_map(|(sc, b)| {
+                    let (m, k) = parse_shortcut(sc.strip_prefix("Physical+")?)?;
+                    (k == key && mods_match(m, mods)).then_some(b)
+                })
+                .filter_map(|b| rank(&b.command, &b.params).map(|r| (r, b)))
+                .min_by_key(|(r, _)| *r)
+                .map(|(_, b)| (b.command.clone(), b.params.clone()))
         });
         if let Some((id, params)) = physical {
             if let Err(e) = invoke(app, ctx, &id, if params.is_null() { json!({}) } else { params }) {
@@ -1968,12 +2065,15 @@ fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only
             }
             continue;
         }
-        if let Some((_, _, id, params)) = binds.iter().filter(|(m, k, ..)| *k == key && mods_match(*m, mods)).min_by_key(|(_, _, id, params)| {
-            // The focused panel wins over an application command sharing its chord.
-            let key = effectcraft_engine::shortcuts::binding_key(id, params);
-            app.session.shortcuts().find(&key).is_none_or(|b| b.scope != app.ui.focused.id())
-        }) {
-            let (id, params) = (id.clone(), if params.is_null() { json!({}) } else { params.clone() });
+        // The narrowest active scope wins a chord: an active context, the focused panel, the
+        // application. A context's shortcut doesn't run outside it.
+        let chosen = binds
+            .iter()
+            .filter(|(m, k, ..)| *k == key && mods_match(*m, mods))
+            .filter_map(|(_, _, id, params)| rank(id, params).map(|r| (r, id, params)))
+            .min_by_key(|(r, ..)| *r);
+        if let Some((_, id, params)) = chosen {
+            let (id, params) = (marker_command(app, id.clone()), if params.is_null() { json!({}) } else { params.clone() });
             if id == "edit.paste"
                 && let Some(t) = &pasted
             {
@@ -2215,7 +2315,7 @@ mod tests {
     #[test]
     fn every_ui_shortcut_parses() {
         for c in UI_COMMANDS {
-            if let Some(sc) = c.shortcut {
+            for sc in c.shortcut.into_iter().flat_map(|s| s.split(", ")) {
                 assert!(parse_shortcut(sc).is_some() || sc == "Num*", "{sc}");
             }
         }
@@ -2241,9 +2341,11 @@ mod tests {
     #[test]
     fn ui_and_menu_shortcuts_do_not_collide() {
         let app = EffectcraftApp::new(effectcraft_engine::Session::default());
-        let mut seen: std::collections::BTreeMap<(String, String), (String, String)> = Default::default();
+        // A chord is bound once per scope.
+        let mut seen: std::collections::BTreeMap<(String, String, String), (String, String)> = Default::default();
         for (m, k, id, params) in bindings(&app.session) {
-            let key = (format!("{m:?}"), format!("{k:?}"));
+            let scope = app.session.shortcuts().find(&effectcraft_engine::shortcuts::binding_key(&id, &params)).map(|b| b.scope.clone()).unwrap_or_default();
+            let key = (scope, format!("{m:?}"), format!("{k:?}"));
             let target = (id.clone(), params.to_string());
             if let Some(prev) = seen.get(&key) {
                 assert_eq!(prev, &target, "{key:?} bound to {prev:?} and {target:?}");

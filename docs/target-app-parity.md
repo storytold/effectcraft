@@ -811,7 +811,7 @@ it against After Effects ([gaps.md](gaps.md)).
 - Agents use `face.models`, `face.model.select`, `face.model.download`, `face.model.install` and
   `face.model.remove`; `track.mask` reports the engine it tried first as `faceModel`.
 
-Since (M13.32): View ▸ New Viewer (Alt+Shift+N, also in the Composition panel menu) opens
+Since (M13.32): View ▸ New Viewer (Alt+Shift+N, in a viewer also Cmd+Alt+Shift+N; also in the Composition panel menu) opens
 another Composition viewer as its own panel, as in After Effects. The viewer in use is locked,
 so it keeps its comp. One viewer is active: it is the interactive one and shows the active comp.
 The others show their own comp's frame at that comp's current time, and a click (or their tab)
