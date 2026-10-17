@@ -456,7 +456,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let render_b = Rect::from_min_size(pos2(top.max.x - 12.0 - bw, top.min.y + 34.0), vec2(bw, 26.0));
     let stop_b = Rect::from_min_size(pos2(render_b.min.x - 8.0 - bw, render_b.min.y), vec2(bw, 26.0));
     let can_render = !rendering && queue.iter().any(RenderQueueItem::is_queued) && !available.is_empty();
-    if widgets::text_button(ui, render_b, "Render", can_render, &t, egui::Id::new("rq-render")).clicked() && can_render {
+    if widgets::text_button(ui, render_b, crate::i18n::tr("Render"), can_render, &t, egui::Id::new("rq-render")).clicked() && can_render {
         actions.push(("renderQueue.render", json!({"wait": false})));
     }
     app.auto.add("renderQueue.render", render_b, "Render");
@@ -469,7 +469,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     p.text(pos2(nb.max.x + 5.0, nb.center().y), Align2::LEFT_CENTER, tr("Notify"), Tokens::ui(11.5), t.text_dim);
     app.auto.add("renderQueue.notify", nb, if notify { "Notify: on" } else { "Notify: off" });
     if rendering {
-        if widgets::text_button(ui, stop_b, "Stop", false, &t, egui::Id::new("rq-stop")).clicked() {
+        if widgets::text_button(ui, stop_b, crate::i18n::tr("Stop"), false, &t, egui::Id::new("rq-stop")).clicked() {
             actions.push(("renderQueue.stop", json!({})));
         }
         app.auto.add("renderQueue.stop", stop_b, "Stop");

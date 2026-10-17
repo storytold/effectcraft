@@ -6961,6 +6961,35 @@ mod tests {
         }
     }
 
+    /// The dock's tab titles are `PanelKind::title()`; the panels the Window menu lists are drawn in
+    /// the interface language through their `(window.panel, title)` rows. `History` and `ScriptUI
+    /// Panel` are in no menu and keep their English names, which is what this pins.
+    #[test]
+    fn the_dock_draws_every_panel_it_can_in_the_interface_language() {
+        use crate::dock::PanelKind;
+        const WITHOUT_A_ROW: &[&str] = &["History", "ScriptUI Panel"];
+        for (name, catalog, code) in [("ja", JAPANESE, "ja"), ("zh-hans", SIMPLIFIED_CHINESE, "zh-hans"), ("zh-hant", TRADITIONAL_CHINESE, "zh-hant")] {
+            // The dock asks both catalogs, so a title may be named by either.
+            ui::set_current(code);
+            for p in PanelKind::ALL {
+                let title = p.title();
+                let in_menu = catalog.iter().any(|(c, en, _)| *c == "window.panel" && *en == title);
+                let in_panel = ui::tr(title) != title;
+                assert_eq!(
+                    in_menu || in_panel,
+                    !WITHOUT_A_ROW.contains(&title),
+                    "{name}: {title} is {}named by a catalog and {}in the exception list",
+                    if in_menu || in_panel { "" } else { "not " },
+                    if WITHOUT_A_ROW.contains(&title) { "" } else { "not " }
+                );
+            }
+        }
+        ui::set_current("en");
+        // The dock asks the catalog rather than drawing the English name.
+        let dock_ui = include_str!("dock_ui.rs");
+        assert!(dock_ui.contains(r#"crate::i18n::label(self, "window.panel", p.title())"#), "dock_ui.rs no longer asks the catalog for the panel titles");
+    }
+
     #[test]
     fn zh_hans_translates_labels_computed_titles_and_keeps_names_verbatim() {
         let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());

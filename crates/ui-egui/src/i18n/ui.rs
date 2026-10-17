@@ -1370,6 +1370,21 @@ const SIMPLIFIED_CHINESE: &[(&str, &str)] = &[
     ("Total Offset", "总偏移"),
     ("Per Layer", "每个图层"),
     ("Track", "跟踪"),
+    ("Apply", "应用"),
+    ("Analyze", "分析"),
+    ("Create Camera", "创建摄像机"),
+    ("Add Point", "添加点"),
+    ("Remove Point", "移除点"),
+    ("Render", "渲染"),
+    ("Save Current as Template…", "将当前项存为模板…"),
+    ("New Composition From Footage", "从素材新建合成"),
+    ("Search effects and presets", "搜索效果和预设"),
+    ("Search project", "搜索项目"),
+    ("Search", "搜索"),
+    ("(no composition)", "没有合成"),
+    ("per second", "每秒"),
+    ("Waveform", "波形"),
+    ("steps", "步"),
 ];
 
 const TRADITIONAL_CHINESE: &[(&str, &str)] = &[
@@ -2099,6 +2114,21 @@ const TRADITIONAL_CHINESE: &[(&str, &str)] = &[
     ("Total Offset", "總偏移"),
     ("Per Layer", "每個圖層"),
     ("Track", "追蹤"),
+    ("Apply", "套用"),
+    ("Analyze", "分析"),
+    ("Create Camera", "建立攝影機"),
+    ("Add Point", "添加點"),
+    ("Remove Point", "移除點"),
+    ("Render", "算圖"),
+    ("Save Current as Template…", "將目前項目存為範本…"),
+    ("New Composition From Footage", "從素材新增合成"),
+    ("Search effects and presets", "搜尋效果與預設"),
+    ("Search project", "搜尋專案"),
+    ("Search", "搜尋"),
+    ("(no composition)", "沒有合成"),
+    ("per second", "每秒"),
+    ("Waveform", "波形"),
+    ("steps", "步驟"),
 ];
 
 /// Ukrainian (uk): original translations of the same interface rows as the Chinese catalogs.
@@ -4473,6 +4503,89 @@ mod tests {
                         assert!(before.ends_with("tr("), "{path}: the `{marker}` label `{}` is not in the catalog", &line[q..]);
                     }
                     from = at + marker.len();
+                }
+            }
+        }
+    }
+
+    /// Labels drawn through a helper's *argument* or through `Painter::text` are invisible to the
+    /// scan above, which only looks at a literal right after the call token: a `widgets::` helper
+    /// takes its label as its second or third argument, and `Painter::text` takes the string third.
+    /// Both shapes are checked here, so an English literal there is caught like any other.
+    #[test]
+    fn helper_and_painter_labels_are_translated() {
+        /// The `widgets.rs` helpers that draw a label, and which argument holds it.
+        const HELPER_LABELS: &[(&str, usize)] =
+            &[("text_button", 2), ("search_field", 3), ("text_field", 3), ("dropdown", 2), ("dropdown_tip", 2), ("text_fit", 3), ("check_label", 1)];
+        /// Literals that draw as they are: a brand, a value, a separator, a unit, and the kerning
+        /// sample pair the Character panel shows.
+        const VERBATIM: &[&str] = &["EffectCraft", "32", "dB", "···", "×", "V/A"];
+
+        /// The top-level arguments of a call, given the text after its `(`.
+        fn args_of(s: &str) -> Vec<&str> {
+            let (mut out, mut depth, mut start, mut instr) = (Vec::new(), 0i32, None, false);
+            for (i, c) in s.char_indices() {
+                match c {
+                    '"' if !instr => {
+                        instr = true;
+                        if start.is_none() {
+                            start = Some(i);
+                        }
+                    }
+                    '"' => instr = false,
+                    '(' | '[' | '{' if !instr => depth += 1,
+                    ')' | ']' | '}' if !instr => {
+                        if depth == 0 {
+                            break;
+                        }
+                        depth -= 1;
+                    }
+                    ',' if !instr && depth == 0 => {
+                        if let Some(st) = start {
+                            out.push(s[st..i].trim());
+                        }
+                        start = None;
+                    }
+                    c if !instr && !c.is_whitespace() && start.is_none() => start = Some(i),
+                    _ => {}
+                }
+            }
+            if let Some(st) = start {
+                out.push(s[st..].trim());
+            }
+            out
+        }
+
+        for (path, source) in CONVERTED {
+            // The test modules of these files draw nothing; they hold sample strings.
+            let source = source.split("#[cfg(test)]").next().unwrap_or(source);
+            for (n, line) in source.lines().enumerate() {
+                let code = line.split("//").next().unwrap_or(line);
+                let check = |args: Vec<&str>, index: usize, what: &str| {
+                    let Some(arg) = args.get(index) else { return };
+                    // A single character is a symbol or a glyph, not interface text - the same
+                    // exemption the call-shape scan above makes.
+                    let inner = arg.strip_prefix('"').and_then(|a| a.strip_suffix('"')).filter(|i| !i.contains('"'));
+                    match inner {
+                        Some(text) if text.chars().count() >= 2 && !VERBATIM.contains(&text) => {
+                            panic!("{path}:{}: the interface text {arg} that {what} draws is not in the catalog", n + 1);
+                        }
+                        _ => {}
+                    }
+                };
+                for (call, index) in HELPER_LABELS {
+                    let marker = format!("widgets::{call}(");
+                    let mut from = 0;
+                    while let Some(at) = code[from..].find(&marker) {
+                        let at = from + at + marker.len();
+                        check(args_of(&code[at..]), *index, &format!("widgets::{call}"));
+                        from = at;
+                    }
+                }
+                let mut from = 0;
+                while let Some(at) = code[from..].find(".text(") {
+                    from = at + 6;
+                    check(args_of(&code[from..]), 2, "Painter::text");
                 }
             }
         }
