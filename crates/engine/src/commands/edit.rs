@@ -115,6 +115,11 @@ fn duplicate(s: &mut Session, p: &Value) -> Result<Value> {
         if !items.is_empty() {
             return super::prop_groups::duplicate_contents(s, &items);
         }
+        // Text animators or their selectors selected → duplicate them inside their text layers.
+        let items = super::prop_groups::selected_animator_items(s);
+        if !items.is_empty() {
+            return super::prop_groups::duplicate_contents(s, &items);
+        }
     }
     let (cid, ids) = layers_p(s, p)?;
     let new = s.edit("Duplicate", None, |proj, st| {

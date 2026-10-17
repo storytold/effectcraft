@@ -100,6 +100,22 @@ pub(crate) fn selected_contents(s: &Session) -> Vec<(LayerId, Uid)> {
     out
 }
 
+/// Text animators and their selectors selected on the active comp's text layers, top to bottom.
+/// A selector inside a selected animator isn't listed, since it is copied with it.
+pub(crate) fn selected_animator_items(s: &Session) -> Vec<(LayerId, Uid)> {
+    let mut out = vec![];
+    let Some(c) = s.active_comp().filter(|_| !s.state.selected_props.is_empty()) else { return out };
+    for l in c.layers.iter().filter(|l| matches!(l.source, LayerSource::Text)) {
+        if let Some(animators) = l.props.group("text/animators") {
+            let selected = |u: Uid| s.state.selected_props.contains(&(l.id, u));
+            let mut uids = vec![];
+            collect_selected(animators, &selected, &mut uids, 0);
+            out.extend(uids.into_iter().map(|u| (l.id, u)));
+        }
+    }
+    out
+}
+
 fn collect_selected(g: &PropGroup, selected: &dyn Fn(Uid) -> bool, out: &mut Vec<Uid>, depth: usize) {
     if depth > super::shape_stroke::MAX_DEPTH {
         return;
@@ -174,8 +190,9 @@ pub(crate) fn paste_contents(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"contents": pasted.iter().map(|(_, u)| *u).collect::<Vec<_>>()}))
 }
 
-/// Edit ▸ Duplicate with shape items selected: each is copied in place, above the original and
-/// named as After Effects does ("Rectangle 1" → "Rectangle 2"), and the copies are selected.
+/// Edit ▸ Duplicate with shape items, text animators or selectors selected: each is copied in
+/// place, above the original and named as After Effects does ("Rectangle 1" → "Rectangle 2"),
+/// and the copies are selected.
 pub(crate) fn duplicate_contents(s: &mut Session, items: &[(LayerId, Uid)]) -> Result<Value> {
     let c = "edit.duplicate";
     let cid = s.active_comp_id().ok_or(EngineError::NoComp)?;
@@ -183,7 +200,7 @@ pub(crate) fn duplicate_contents(s: &mut Session, items: &[(LayerId, Uid)]) -> R
         let mut next = proj.next_id;
         let mut out = vec![];
         for (lid, uid) in items {
-            let parent = layer_mut(proj, cid, *lid)?.props.parent_of_mut(*uid).ok_or_else(|| bad(c, "the shape item is gone"))?;
+            let parent = layer_mut(proj, cid, *lid)?.props.parent_of_mut(*uid).ok_or_else(|| bad(c, "the group is gone"))?;
             let Some((i, Node::Group(g))) = parent.children.iter().enumerate().find(|(_, n)| n.uid() == *uid) else { continue };
             let mut g = g.clone();
             g.reassign_uids(&mut next);
