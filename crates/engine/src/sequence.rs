@@ -98,7 +98,7 @@ fn extension(path: &str) -> String {
 
 /// Stills that can form a sequence (not layered or vector documents, which import as comps).
 fn sequenceable(path: &str) -> bool {
-    crate::media_browser::kind_of(path) == Some("image") && !matches!(extension(path).as_str(), "svg" | "psd" | "psb")
+    crate::media_browser::kind_of(path) == Some("image") && !matches!(extension(path).as_str(), "svg" | "psd" | "psb" | "arw")
 }
 
 /// The run a still belongs to: (folder, name prefix, extension); alphabetical runs ignore the
@@ -331,6 +331,17 @@ mod tests {
         // The Sequence checkbox: one picked file brings its whole run.
         let on = group(&t, &strs(&["/s/a_0002.png"]), opts(serde_json::json!({"sequence": true})));
         assert!(matches!(on.as_slice(), [Source::Sequence { files, .. }] if files.len() == 3), "{on:?}");
+    }
+
+    #[test]
+    fn numbered_camera_photos_are_individual_stills() {
+        let t = Table(vec!["/photos/DSC_0001.ARW", "/photos/DSC_0002.ARW"]);
+        assert_eq!(crate::media_browser::kind_of("/photos/DSC_0001.ARW"), Some("image"));
+        assert_eq!(
+            group(&t, &strs(&["/photos"]), SequenceOptions::default()),
+            [Source::File("/photos/DSC_0001.ARW".into()), Source::File("/photos/DSC_0002.ARW".into())]
+        );
+        assert!(sequences(&t, &strs(&["/photos/DSC_0001.ARW"]), true).is_empty());
     }
 
     #[test]

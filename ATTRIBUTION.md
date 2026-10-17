@@ -16,6 +16,7 @@ iconography, images or other Adobe assets; open licences only; every asset attri
 | `assets/fonts/Inter-Italic.ttf` | The Inter Project Authors | https://github.com/rsms/inter | OFL-1.1 (`assets/fonts/OFL-Inter.txt`) |
 | `assets/fonts/NotoSerif-Regular.ttf` | The Noto Project Authors | https://github.com/notofonts/latin-greek-cyrillic | OFL-1.1 (`assets/fonts/OFL-NotoSerif.txt`) |
 | `assets/fonts/JetBrainsMono-Regular.ttf` | The JetBrains Mono Project Authors | https://github.com/JetBrains/JetBrainsMono | OFL-1.1 (`assets/fonts/OFL-JetBrainsMono.txt`) |
+| Camera colour matrices used by `crates/media/src/raw.rs` through pinned `lightcraft-raw` | LightCraft contributors; Academy Software Foundation/rawtoaces-data; Weta Digital, scitech, Jonathon Irons/NPL; CIE | [LightCraft attribution](https://github.com/storytold/lightcraft/blob/b70ae1741e8236757377ca85eecaafb8788a82ab/assets/ATTRIBUTION.md), rawtoaces-data v1.1.0 | Apache-2.0 (`LICENSE-APACHE`); CIE colour-matching data CC-BY-4.0 (see `NOTICE` and `crates/media/src/raw.rs.attribution`) |
 | `apps/effectcraft-web/web/favicon.svg` | EffectCraft contributors | Original work: web app icon, a copy of `assets/app-icon/effectcraft-small.svg` (the unicorn app icon) | MIT OR Apache-2.0 (`assets/app-icon/LICENSE.txt`) |
 | `packaging/macos/dmg/background.svg` | @XusBadia | Original work: macOS DMG Finder window background, derived from the EffectCraft app icon (`assets/app-icon/effectcraft.svg`); rendered to a TIFF by `packaging/macos/package.sh` at package time | MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`) |
 | `assets/app-icon/effectcraft-1024.png` | EffectCraft contributors | Original work: effectCraft app icon, 1024 px (owner's ArtCraft unicorn drawing, vectorised) | MIT OR Apache-2.0 (`assets/app-icon/LICENSE.txt`) |
@@ -76,6 +77,8 @@ Screenshots of EffectCraft itself, rendered headlessly, showing only procedurall
 - Bundled extension (ScriptUI panel) with its twelve built-in ease presets:
   `extensions/scriptui-panels/Ease Presets.jsx` (sidecar `.attribution`).
 - Example effect plug-in: `examples/plugins/posterize-bands` (plug-in API v1, WebAssembly).
+- Original synthetic TIFF/EP sensor mosaics and constant ARW2 conformance blocks generated
+  in memory by `crates/media/src/raw.rs` (tests); no camera photographs or embedded previews.
 
 ## Trained models (optional downloads, not bundled)
 

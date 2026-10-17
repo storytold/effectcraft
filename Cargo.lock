@@ -1460,6 +1460,9 @@ dependencies = [
  "filmcraft-time",
  "gif",
  "image",
+ "lightcraft-color",
+ "lightcraft-raw",
+ "lightcraft-tiff",
  "log",
  "rayon",
  "serde_json",
@@ -3121,6 +3124,72 @@ dependencies = [
 ]
 
 [[package]]
+name = "lightcraft-color"
+version = "0.5.0"
+source = "git+https://github.com/storytold/lightcraft?rev=b70ae1741e8236757377ca85eecaafb8788a82ab#b70ae1741e8236757377ca85eecaafb8788a82ab"
+dependencies = [
+ "lightcraft-geom",
+ "serde",
+]
+
+[[package]]
+name = "lightcraft-geom"
+version = "0.5.0"
+source = "git+https://github.com/storytold/lightcraft?rev=b70ae1741e8236757377ca85eecaafb8788a82ab#b70ae1741e8236757377ca85eecaafb8788a82ab"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "lightcraft-meta"
+version = "0.5.0"
+source = "git+https://github.com/storytold/lightcraft?rev=b70ae1741e8236757377ca85eecaafb8788a82ab#b70ae1741e8236757377ca85eecaafb8788a82ab"
+dependencies = [
+ "lightcraft-geom",
+ "lightcraft-tiff",
+ "quick-xml 0.38.4",
+ "serde",
+]
+
+[[package]]
+name = "lightcraft-raster"
+version = "0.5.0"
+source = "git+https://github.com/storytold/lightcraft?rev=b70ae1741e8236757377ca85eecaafb8788a82ab#b70ae1741e8236757377ca85eecaafb8788a82ab"
+dependencies = [
+ "lightcraft-color",
+ "lightcraft-geom",
+ "rayon",
+ "serde",
+]
+
+[[package]]
+name = "lightcraft-raw"
+version = "0.5.0"
+source = "git+https://github.com/storytold/lightcraft?rev=b70ae1741e8236757377ca85eecaafb8788a82ab#b70ae1741e8236757377ca85eecaafb8788a82ab"
+dependencies = [
+ "lightcraft-color",
+ "lightcraft-geom",
+ "lightcraft-meta",
+ "lightcraft-raster",
+ "lightcraft-tiff",
+ "miniz_oxide 0.8.9",
+ "rayon",
+ "serde",
+ "thiserror 2.0.21",
+ "zune-core",
+ "zune-jpeg",
+]
+
+[[package]]
+name = "lightcraft-tiff"
+version = "0.5.0"
+source = "git+https://github.com/storytold/lightcraft?rev=b70ae1741e8236757377ca85eecaafb8788a82ab#b70ae1741e8236757377ca85eecaafb8788a82ab"
+dependencies = [
+ "serde",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "linebender_resource_handle"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4243,6 +4312,15 @@ name = "quick-error"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a993555f31e5a609f617c12db6250dedcac1b0a85076912c436e6fc9b2c8e6a3"
+
+[[package]]
+name = "quick-xml"
+version = "0.38.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b66c2058c55a409d601666cffe35f04333cf1013010882cec174a7467cd4e21c"
+dependencies = [
+ "memchr",
+]
 
 [[package]]
 name = "quick-xml"
@@ -5830,7 +5908,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "338e30461b3a2b67d70eb30a6d89f8e0c93a833e07d2ae89085cd070c4a00ac0"
 dependencies = [
  "proc-macro2",
- "quick-xml",
+ "quick-xml 0.41.0",
  "quote",
 ]
 

@@ -198,7 +198,7 @@ fn sort_entries(entries: &mut [Entry]) {
 }
 
 const VIDEO: &[&str] = &["mp4", "m4v", "mov", "webm", "mkv", "avi", "mxf", "gif"];
-const IMAGE: &[&str] = &["png", "jpg", "jpeg", "tif", "tiff", "exr", "bmp", "webp", "psd", "psb", "svg", "tga", "dpx", "cin", "hdr"];
+const IMAGE: &[&str] = &["png", "jpg", "jpeg", "tif", "tiff", "exr", "bmp", "webp", "psd", "psb", "svg", "tga", "dpx", "cin", "hdr", "arw"];
 const AUDIO: &[&str] = &["wav", "aif", "aiff", "mp3", "m4a", "aac", "flac", "ogg", "opus"];
 const DATA: &[&str] = &["json", "csv", "tsv", "mgjson"];
 const MODEL: &[&str] = &["gltf", "glb", "obj", "stl", "fbx"];

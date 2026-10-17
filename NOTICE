@@ -16,6 +16,18 @@ Inter (assets/fonts/Inter-*.ttf) — SIL Open Font License 1.1. See assets/fonts
 Noto Serif (assets/fonts/NotoSerif-Regular.ttf) — SIL Open Font License 1.1. See assets/fonts/OFL-NotoSerif.txt.
 JetBrains Mono (assets/fonts/JetBrainsMono-Regular.ttf) — SIL Open Font License 1.1. See assets/fonts/OFL-JetBrainsMono.txt.
 
+Sony RAW camera colour matrices are supplied by lightcraft-raw at revision
+b70ae1741e8236757377ca85eecaafb8788a82ab (ArtCraft Team and LightCraft contributors, 2026).
+Its spectral table is derived from camera spectral sensitivities measured by Weta Digital,
+scitech and Jonathon Irons at the National Physical Laboratory, training reflectances and
+model aliases in rawtoaces-data v1.1.0 (Academy Software Foundation, Apache-2.0), and the
+CIE 1931 colour-matching functions distributed with that data (CIE, CC-BY-4.0).
+LightCraft fitted the matrices from those measurements; EffectCraft uses that table unchanged.
+Source: https://github.com/AcademySoftwareFoundation/rawtoaces-data/tree/5cfa53707b053594b2d0d48e8019fb56e6582d6c
+LightCraft attribution: https://github.com/storytold/lightcraft/blob/b70ae1741e8236757377ca85eecaafb8788a82ab/assets/ATTRIBUTION.md
+Apache-2.0 licence: LICENSE-APACHE.
+CC-BY-4.0 licence: https://creativecommons.org/licenses/by/4.0/
+
 The optional PDF document reader uses craft-pdf and Hayro-syntax 0.7.2, MIT OR Apache-2.0.
 The shared patched syntax source is centralized in storytold/craft-libs, transferred from
 PdfCraft revision 9ed3abe4907a127d36b12fbfeee71d7e26248da1. This parser-only use embeds no

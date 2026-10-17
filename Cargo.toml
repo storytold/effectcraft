@@ -71,6 +71,11 @@ harfrust = { version = "0.12", default-features = false, features = ["std"] }
 exr = "1.74"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
+# First-party, clean-room sensor decoding and camera colour model (media only).
+lightcraft-raw = { git = "https://github.com/storytold/lightcraft", rev = "b70ae1741e8236757377ca85eecaafb8788a82ab", default-features = false }
+lightcraft-color = { git = "https://github.com/storytold/lightcraft", rev = "b70ae1741e8236757377ca85eecaafb8788a82ab" }
+lightcraft-tiff = { git = "https://github.com/storytold/lightcraft", rev = "b70ae1741e8236757377ca85eecaafb8788a82ab" }
+
 # media codecs + containers: FilmCraft's pure-Rust crates, pinned to a revision (plan/adr/0001).
 # Only `crates/media`, `crates/export` and `crates/interchange` may depend on these.
 filmcraft-codecs = { git = "https://github.com/storytold/filmcraft", rev = "2c5ba7a72619935f0481f99d59409e0d1844b234" }

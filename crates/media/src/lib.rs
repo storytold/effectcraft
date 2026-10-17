@@ -24,6 +24,7 @@ mod layered;
 pub use layered::vector_doc;
 mod pool;
 mod probe;
+mod raw;
 mod stream;
 mod webp_anim;
 
@@ -60,7 +61,7 @@ impl From<filmcraft_media::MediaError> for MediaError {
 
 /// File extensions recognised as stills.
 pub const STILL_EXTENSIONS: &[&str] =
-    &["png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "bmp", "exr", "tga", "hdr", "psd", "psb", "svg", "pdf", "ai", "eps"];
+    &["png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "bmp", "exr", "tga", "hdr", "psd", "psb", "svg", "pdf", "ai", "eps", "arw"];
 /// File extensions recognised as audio-only files.
 pub const AUDIO_EXTENSIONS: &[&str] = filmcraft_media::AUDIO_EXTENSIONS;
 /// File extensions recognised as movies.

@@ -553,6 +553,30 @@ fn import_dialog_offers_the_image_sequence_option() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn import_file_picker_offers_arw_and_keeps_numbered_photos_individual() {
+    let (mut h, _) = harness();
+    let initial_dialog = h.state().dialog;
+    let dir = frames("arw-picker", 0);
+    let pick = dir.join("DSC_0001.ARW");
+    std::fs::write(&pick, b"").unwrap();
+    let pick = pick.to_string_lossy().to_string();
+    h.state_mut().session.importer = Some(Arc::new(Stills));
+    h.state_mut().hooks.pick_files = Some(Box::new(move |extensions: &[&str]| {
+        assert!(extensions.contains(&"arw"));
+        vec![pick.clone()]
+    }));
+    let ctx = h.ctx.clone();
+    effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "file.import", json!({})).unwrap();
+    assert_eq!(h.state().dialog, initial_dialog, "ARW must not open an image-sequence dialog");
+    step_until(&mut h, |h| !footage_items(h).is_empty());
+    h.run_steps(2);
+    assert_eq!(footage_items(&h), [("DSC_0001.ARW".to_string(), 0)]);
+    assert!(h.state().auto.find("form.field.sequence").is_none(), "ARW must not offer image-sequence interpretation");
+    assert!(h.state().auto.find("form.field.alphabetical").is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// #297: a folder of frames dropped on the window arrives as one image sequence, and Interpret
 /// Footage shows its frames and Start Timecode (missing frames always show colour bars, as in
 /// After Effects: there is no Missing Frames choice). #431: dropped files import as stills, one

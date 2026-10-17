@@ -23,7 +23,11 @@ pub fn probe(path: impl AsRef<Path>) -> Result<Footage> {
         turn_footage(&mut f, turn);
         return Ok(f);
     }
-    let bytes = std::fs::read(path).map_err(|e| MediaError::Io(format!("{}: {e}", path.display())))?;
+    let bytes = if ext_of(path) == "arw" {
+        crate::raw::read_file(path)?
+    } else {
+        std::fs::read(path).map_err(|e| MediaError::Io(format!("{}: {e}", path.display())))?
+    };
     if crate::MODEL_EXTENSIONS.contains(&ext_of(path).as_str()) {
         let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
         return probe_model(&path.to_string_lossy(), &bytes, &|uri| std::fs::read(dir.join(uri)).ok());
@@ -68,6 +72,9 @@ pub fn probe_model(path: &str, bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Ve
 
 /// Probe in-memory file contents; `path` names the footage (and is stored as `Footage::path`).
 pub fn probe_bytes(path: &str, bytes: Arc<[u8]>) -> Result<Footage> {
+    if crate::raw::recognizes(path, &bytes) {
+        return crate::raw::probe(path, &bytes);
+    }
     // DPX / Cineon film scans (our own reader; `image` has none).
     if let Some(f) = crate::dpx::probe(path, &bytes)? {
         return Ok(f);

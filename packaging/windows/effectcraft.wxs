@@ -89,6 +89,18 @@
       <Component Id="EffectcraftCli">
         <File Id="EffectcraftCliExe" Source="$(var.BinDir)\effectcraft-cli.exe" KeyPath="yes" />
       </Component>
+      <Component Id="EffectcraftMitLicense">
+        <File Source="$(var.BinDir)\LICENSE-MIT" KeyPath="yes" />
+      </Component>
+      <Component Id="EffectcraftApacheLicense">
+        <File Source="$(var.BinDir)\LICENSE-APACHE" KeyPath="yes" />
+      </Component>
+      <Component Id="EffectcraftNotice">
+        <File Source="$(var.BinDir)\NOTICE" KeyPath="yes" />
+      </Component>
+      <Component Id="EffectcraftAttribution">
+        <File Source="$(var.BinDir)\ATTRIBUTION.md" KeyPath="yes" />
+      </Component>
 
       <!-- A component under the user's profile folders needs an HKCU key path (ICE38, ICE43). -->
       <Component Id="DesktopShortcut" Directory="DesktopFolder" Condition="DESKTOPSHORTCUT = &quot;1&quot;">
