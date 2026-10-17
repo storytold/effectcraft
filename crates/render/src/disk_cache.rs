@@ -779,6 +779,18 @@ fn hash_debug(h: &mut Hash128, v: &impl std::fmt::Debug) {
     h.write(&[0xff]);
 }
 
+/// Extra identity mixed into [`file_stamp`] when `std::fs::metadata` cannot describe `path`
+/// (the browser's virtual file table). Native files still use size and mtime.
+static VIRTUAL_STAMP: Mutex<Option<fn(&str, &mut Hash128)>> = Mutex::new(None);
+
+/// Install (or clear) a stamp for paths with no native metadata. The callback must be durable
+/// across reloads: hash file bytes (or a stored content hash), not a session-only version.
+pub fn set_virtual_file_stamp(f: Option<fn(&str, &mut Hash128)>) {
+    if let Ok(mut g) = VIRTUAL_STAMP.lock() {
+        *g = f;
+    }
+}
+
 /// A file's size and modification time (so edited footage gets new keys).
 fn file_stamp(h: &mut Hash128, path: &str) {
     if path.is_empty() {
@@ -791,6 +803,12 @@ fn file_stamp(h: &mut Hash128, path: &str) {
         {
             h.write_u64(d.as_nanos() as u64);
         }
+        return;
+    }
+    if let Ok(g) = VIRTUAL_STAMP.lock()
+        && let Some(stamp) = *g
+    {
+        stamp(path, h);
     }
 }
 
@@ -1081,5 +1099,44 @@ mod tests {
         for k in 0..5u128 {
             assert_eq!(b.get_layer(k).unwrap().img, buf(k as u32, 16, 16).img);
         }
+    }
+
+    /// Paths with no native metadata take identity from [`set_virtual_file_stamp`] (#1253).
+    #[test]
+    fn virtual_file_bytes_change_content_keys() {
+        use effectcraft_project::build;
+        use effectcraft_project::{Comp, Footage, ItemKind, LayerSource, Project};
+        use effectcraft_time::{FrameRate, Tick};
+
+        fn project() -> (Project, effectcraft_project::ItemId) {
+            let mut p = Project::default();
+            let f = Footage { path: "/virtual.mov".into(), width: 16, height: 9, duration: Tick::from_seconds_f64(1.0), has_video: true, ..Default::default() };
+            let fid = p.add_item("virtual.mov", effectcraft_color::Label::None, None, ItemKind::Footage(f));
+            let comp = Comp::new(16, 9, FrameRate::FPS_30, Tick::from_seconds_f64(1.0));
+            let l = build::layer(&mut p, &comp, "clip", LayerSource::Footage { item: fid }, (16, 9), None);
+            let mut comp = comp;
+            comp.layers = vec![l];
+            let cid = p.add_item("C", effectcraft_color::Label::None, None, ItemKind::Comp(comp.into()));
+            (p, cid)
+        }
+
+        set_virtual_file_stamp(Some(|path, h| {
+            if path == "/virtual.mov" {
+                h.write(b"media-a");
+            }
+        }));
+        let (p, cid) = project();
+        let a = footage_salt(&p);
+        let ka = comp_content_key(&p, cid);
+        set_virtual_file_stamp(Some(|path, h| {
+            if path == "/virtual.mov" {
+                h.write(b"media-b");
+            }
+        }));
+        let b = footage_salt(&p);
+        let kb = comp_content_key(&p, cid);
+        set_virtual_file_stamp(None);
+        assert_ne!(a, b, "replaced virtual media must not reuse the salt");
+        assert_ne!(ka, kb, "replaced virtual media must not reuse the frame key");
     }
 }
