@@ -132,3 +132,31 @@ fn valid_results_keep_comparison_and_exploratory_mode() {
     assert!(output.status.success(), "exploratory comparison stays available");
     assert!(diagnostic(&output).contains("failed"), "latest failure is visible: {}", diagnostic(&output));
 }
+
+/// With `--repeat`, a summary row (metrics = medians) follows the runs; comparison uses it.
+/// The last raw run (cpu 2.0, +0 %) differs from the median (2.2, +10 %), so only the summary fails
+/// the 5 % gate. Both sides are summaries, so the mixed-sample check stays out of the way.
+#[test]
+fn repeat_summary_rows_are_compared_by_median() {
+    let dir = ResultsDir::new();
+    let summary = |cpu: f64| {
+        let mut r = row("demo", true);
+        r["metrics"]["cpu_s"] = json!(cpu);
+        r["kind"] = json!("summary");
+        r["summary"] = json!({"runs": 3, "failed": 0, "stats": {}});
+        format!("{r}\n")
+    };
+    let baseline = summary(2.0);
+    let mut candidate = String::new();
+    for wall in [1.1, 9.0, 1.0] {
+        let mut r = row("demo", true);
+        r["metrics"]["cpu_s"] = json!(wall * 2.0);
+        candidate.push_str(&format!("{r}\n"));
+    }
+    let raw_only = dir.compare(&baseline, &candidate, false);
+    assert!(diagnostic(&raw_only).contains("median of 3→1 run"), "{}", diagnostic(&raw_only));
+    candidate.push_str(&summary(2.2));
+    let output = dir.compare(&baseline, &candidate, true);
+    assert!(!output.status.success(), "{}", diagnostic(&output));
+    assert!(diagnostic(&output).contains("cpu_s +10.0%"), "{}", diagnostic(&output));
+}
