@@ -64,7 +64,7 @@ fn font_and_scale_controls_override_per_instance() {
         let mut v = vec![];
         g.walk("", &mut |_, p| {
             if let Some(c) = essential::control_of(&p.match_id) {
-                v.push(essential::Override { control: c, value: p.value.clone() });
+                v.push(essential::Override { control: c, value: p.value.clone(), keys: vec![] });
             }
         });
         v
@@ -101,4 +101,57 @@ fn open_in_essential_graphics_sets_the_primary_comp() {
             .any(|e| matches!(e, Event::Frontend { command, params } if command == "window.panel" && params["panel"] == "essentialGraphics"))
     );
     assert_eq!(s.execute("essential.list", json!({})).unwrap()["name"], "A");
+}
+
+#[test]
+fn instance_keyframes_reach_the_comp_so_expressions_can_look_ahead() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Inner", "width": 32, "height": 32, "frameRate": 30, "duration": 2})).unwrap();
+    let inner = s.active_comp_id().unwrap();
+    let text = s.execute("layer.newText", json!({"text": "Hi"})).unwrap()["layer"].as_u64().unwrap();
+    let ctl = s.execute("essential.addProperty", json!({"layer": text, "path": "transform/opacity"})).unwrap()["controls"][0].as_u64().unwrap();
+    let keys = vec![
+        effectcraft_keyframe::Keyframe::new(effectcraft_time::Tick::ZERO, KV::Scalar(0.0)),
+        effectcraft_keyframe::Keyframe::new(effectcraft_time::Tick::from_seconds_f64(1.0), KV::Scalar(100.0)),
+    ];
+    let over = [essential::Override { control: ctl, value: KV::Scalar(25.0), keys: keys.clone() }];
+    let p = essential::with_overrides(&s.project, inner, &over).unwrap();
+    let pr = p.comp(inner).unwrap().layer(effectcraft_project::LayerId(text)).unwrap().props.prop("transform/opacity").unwrap();
+    assert_eq!(pr.keys, keys);
+    assert_eq!(pr.value, KV::Scalar(25.0));
+}
+
+#[test]
+fn keys_set_on_an_instance_are_passed_to_the_nested_comp_render() {
+    use effectcraft_project::LayerId;
+    use effectcraft_time::Tick;
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Inner", "width": 32, "height": 32, "frameRate": 30, "duration": 2})).unwrap();
+    let inner = s.active_comp_id().unwrap();
+    let solid = s.execute("layer.newSolid", json!({"name": "BG", "color": "#ffffff"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("essential.addProperty", json!({"layer": solid, "path": "transform/opacity"})).unwrap();
+    s.execute("comp.new", json!({"name": "Scene", "width": 32, "height": 32, "frameRate": 30, "duration": 2})).unwrap();
+    let scene = s.active_comp_id().unwrap();
+    let inst = s.execute("layer.addItem", json!({"item": inner.0, "time": 0.0})).unwrap()["layer"].as_u64().unwrap();
+    let path = s.execute("essential.instance", json!({"layer": inst})).unwrap()["controls"][0]["path"].as_str().unwrap().to_string();
+    s.execute("prop.addKey", json!({"layer": inst, "path": path, "time": 0.0, "value": 0.0})).unwrap();
+    s.execute("prop.addKey", json!({"layer": inst, "path": path, "time": 1.0, "value": 100.0})).unwrap();
+    // At 0.25 s the nested comp's opacity carries the instance's keys, so it reads the instance's
+    // value half a second ahead too (valueAtTime), not only the current one.
+    let nested_opacity = |s: &Session| {
+        let comp = s.project.comp(scene).unwrap();
+        let layer = comp.layer(LayerId(inst)).unwrap();
+        let ctx = effectcraft_render::EvalCtx::new(&s.project, scene, comp, Tick::from_seconds_f64(0.25));
+        let over = effectcraft_render::essential_overrides(&ctx, layer);
+        let p = essential::with_overrides(&s.project, inner, &over).unwrap();
+        p.comp(inner).unwrap().layer(LayerId(solid)).unwrap().props.prop("transform/opacity").unwrap().clone()
+    };
+    let pr = nested_opacity(&s);
+    let ahead = s.project.comp(scene).unwrap().layer(LayerId(inst)).unwrap().props.prop(&path).unwrap().value_at(Tick::from_seconds_f64(0.75));
+    assert_eq!(pr.keys.len(), 2);
+    assert_eq!(pr.value_at(Tick::from_seconds_f64(0.75)), ahead);
+    assert_ne!(pr.value_at(Tick::from_seconds_f64(0.75)), pr.value_at(Tick::from_seconds_f64(0.25)));
+    // With Time Remap the instance's layer time is not the nested comp's time: only the value.
+    s.execute("layer.enableTimeRemap", json!({"layers": [inst]})).unwrap();
+    assert!(nested_opacity(&s).keys.is_empty());
 }

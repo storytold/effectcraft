@@ -369,12 +369,19 @@ pub fn essential_overrides(ctx: &EvalCtx, layer: &Layer) -> Vec<effectcraft_proj
     use effectcraft_project::essential;
     let over = essential::overridden(layer);
     let Some(g) = essential::group(layer).filter(|_| !over.is_empty()) else { return vec![] };
+    // Instance keys are in layer time, which is the nested comp's time unless Time Remap or
+    // Responsive Design - Time (a stretched precomp with protected regions) maps it.
+    let responsive = (layer.stretch - 100.0).abs() > 1e-9
+        && matches!(layer.source, LayerSource::Comp { item } if ctx.project.comp(item).is_some_and(|nc| !eval::protected_regions(nc).is_empty()));
+    let same_time = layer.props.get("timeRemap").is_none() && !responsive;
     let mut out = vec![];
     g.walk("", &mut |_, p| {
         if over.contains(&p.uid)
             && let Some(control) = essential::control_of(&p.match_id)
         {
-            out.push(essential::Override { control, value: ctx.value(layer, p) });
+            // An expression on the instance property replaces its keys.
+            let keys = if same_time && !p.has_expression() { p.keys.clone() } else { vec![] };
+            out.push(essential::Override { control, value: ctx.value(layer, p), keys });
         }
     });
     out

@@ -15,7 +15,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::props::{GroupKind, Node, ParamUi, PropGroup, Property, Uid};
-use crate::{ItemId, ItemKind, Layer, LayerId, LayerSource, Project, Value};
+use crate::{ItemId, ItemKind, Keyframe, Layer, LayerId, LayerSource, Project, Value};
 
 /// Match id of the Essential Properties group on precomp layers.
 pub const GROUP: &str = "essential";
@@ -652,10 +652,14 @@ pub fn sync_project(before: &Project, after: &mut Project) {
 pub struct Override {
     pub control: u64,
     pub value: Value,
+    /// The instance property's keyframes, already in the nested comp's time. Empty when the
+    /// property is not keyed (or its keys can't be mapped); expressions in the comp then see
+    /// only `value`.
+    pub keys: Vec<Keyframe>,
 }
 
 /// The project as an instance of `comp` renders it: each overridden control's source property
-/// set to the instance value (keyframes dropped; its expression, if any, still applies) and
+/// set to the instance value and keyframes (its expression, if any, still applies) and
 /// replaced media swapped in. `None` when nothing applies.
 pub fn with_overrides(project: &Project, comp: ItemId, overrides: &[Override]) -> Option<Project> {
     let eg = project.comp(comp)?.essential.clone()?;
@@ -683,7 +687,7 @@ pub fn with_overrides(project: &Project, comp: ItemId, overrides: &[Override]) -
             EgKind::Property { .. } => {
                 for (layer, prop) in ctl.kind.targets() {
                     if let Some(pr) = c.layer_mut(layer).and_then(|l| l.props.find_mut(prop)) {
-                        pr.keys.clear();
+                        pr.keys = o.keys.clone();
                         pr.value = o.value.clone();
                         any = true;
                     }
