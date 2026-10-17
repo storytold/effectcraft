@@ -25,6 +25,12 @@ fn rows(m: &Mat3) -> [[f32; 4]; 3] {
     m.0.map(|r| [r[0] as f32, r[1] as f32, r[2] as f32, 0.0])
 }
 
+/// What [`rows`] rounded off (`f64 - f32`), so a shader can rebuild the f64 coefficients as
+/// hi + lo pairs and map pixels as precisely as the CPU's f64 math.
+fn rows_lo(m: &Mat3) -> [[f32; 4]; 3] {
+    m.0.map(|r| [(r[0] - r[0] as f32 as f64) as f32, (r[1] - r[1] as f32 as f64) as f32, (r[2] - r[2] as f32 as f64) as f32, 0.0])
+}
+
 /// Box-filter halving (minification pre-filter).
 pub fn half(e: &mut Enc, src: &GpuImage) -> GpuImage {
     let out = e.scratch(src.width.div_ceil(2).max(1), src.height.div_ceil(2).max(1));
@@ -99,6 +105,10 @@ pub fn warp_q(
     p.f[2] = r[2];
     p.f[3] = [opacity, accumulate.unwrap_or(1.0), levels.unwrap_or(0.0), levels.map_or(0.0, |v| 1.0 / v)];
     p.f[4] = [x0 as f32, y0 as f32, x1 as f32, y1 as f32];
+    let lo = rows_lo(&inv);
+    p.f[5] = lo[0];
+    p.f[6] = lo[1];
+    p.f[7] = [1.0, 0.0, 0.0, 0.0];
     let mut out = e.scratch(dst.width, dst.height);
     e.pixels("warp_blend", &p, &img, Some(dst), &out, None);
     out.levels = levels;
