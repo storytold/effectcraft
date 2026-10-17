@@ -125,25 +125,50 @@ pub(crate) fn label<'a>(app: &EffectcraftApp, command: &str, source: &'a str) ->
             _ => {}
         }
     }
-    match language {
-        "ja" => lookup(JAPANESE, command, source),
-        "zh-hans" => lookup(SIMPLIFIED_CHINESE, command, source),
-        "zh-hant" => lookup(TRADITIONAL_CHINESE, command, source),
-        "uk" => lookup(UKRAINIAN, command, source),
-        "es" => lookup(SPANISH, command, source),
-        "pt-br" => lookup(PORTUGUESE, command, source),
-        "ru" => lookup(RUSSIAN, command, source),
-        "fr" => lookup(FRENCH, command, source),
-        "de" => lookup(GERMAN, command, source),
-        "cs" => lookup(CZECH, command, source),
-        _ => source,
-    }
+    menu_catalog(language).map_or(source, |catalog| lookup(catalog, command, source))
+}
+
+/// The menu catalog for `language`; `None` for English.
+fn menu_catalog(language: &str) -> Option<&'static [(&'static str, &'static str, &'static str)]> {
+    Some(match language {
+        "ja" => JAPANESE,
+        "zh-hans" => SIMPLIFIED_CHINESE,
+        "zh-hant" => TRADITIONAL_CHINESE,
+        "uk" => UKRAINIAN,
+        "es" => SPANISH,
+        "pt-br" => PORTUGUESE,
+        "ru" => RUSSIAN,
+        "fr" => FRENCH,
+        "de" => GERMAN,
+        "cs" => CZECH,
+        _ => return None,
+    })
 }
 
 /// `source` looked up in `catalog` by (command, English label); the source itself when the pair is
 /// absent, so computed labels and user names stay verbatim.
 fn lookup<'a>(catalog: &[(&str, &str, &'a str)], command: &str, source: &'a str) -> &'a str {
     catalog.iter().find(|(id, en, _)| *id == command && *en == source).map(|(_, _, translated)| *translated).unwrap_or(source)
+}
+
+/// The text a context menu draws for an item that runs `command` with `params` (#1308).
+///
+/// The Timeline's and the Composition panel's context menus repeat menu-bar commands, so they read
+/// the menu bar's row for the same command, and an `effect.apply` item draws the effect's name as
+/// the Effect menu does. The menu tree writes the ellipsis as `...` where the context menus write
+/// `…`. A label with no menu row (Delete, which the menu bar calls Clear) goes through the panel
+/// catalog. Only the drawn text is translated: the automation label stays the English `source`.
+pub(crate) fn context_item(command: &str, params: &serde_json::Value, source: &str) -> String {
+    if command == "effect.apply"
+        && let Some(id) = params.get("effect").and_then(|v| v.as_str())
+    {
+        return effects::name(id, source);
+    }
+    let ascii = source.strip_suffix('…').map(|s| format!("{s}..."));
+    let key = ascii.as_deref().unwrap_or(source);
+    menu_catalog(ui::current())
+        .and_then(|catalog| catalog.iter().find(|(id, en, _)| *id == command && *en == key))
+        .map_or_else(|| tr(source).to_string(), |(_, _, translated)| (*translated).to_string())
 }
 
 pub(crate) fn entry(app: &EffectcraftApp, e: &MenuEntry, shown: String) -> String {

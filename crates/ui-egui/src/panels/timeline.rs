@@ -2977,7 +2977,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     ("shape", "Shape Layer", "layer.newShape", json!({"kind": "none"})),
                     ("adjustment", "Adjustment Layer", "layer.newAdjustment", json!({})),
                 ] {
-                    let response = ui.button(label);
+                    let response = ui.button(crate::i18n::context_item(command, &params, label));
                     app.auto.add(&format!("timeline.context.{area}.{key}"), response.rect, label);
                     if response.clicked() {
                         actions.push((command.into(), params));
@@ -3823,7 +3823,7 @@ fn prop_menu(
 ) {
     let (l, uid) = (layer.id.0, prop.uid);
     let mut item = |ui: &mut egui::Ui, key: &str, label: &str, selected: bool, cmd: &str, params: serde_json::Value| {
-        let resp = ui.add(egui::Button::new(label).selected(selected));
+        let resp = ui.add(egui::Button::new(crate::i18n::context_item(cmd, &params, label)).selected(selected));
         auto.add(&format!("timeline.prop.{uid}.menu.{key}"), resp.rect, label);
         if resp.clicked() {
             actions.push((cmd.into(), params));
@@ -3904,7 +3904,7 @@ fn layer_context_menu(
 pub(crate) fn layer_menu(ui: &mut egui::Ui, layers: &[u64], caps: LayerMenuCaps, actions: &mut Vec<(String, serde_json::Value)>) {
     let Some(&id) = layers.first() else { return };
     let mut item = |ui: &mut egui::Ui, label: &str, cmd: &str, params: serde_json::Value| {
-        if ui.button(label).clicked() {
+        if ui.button(crate::i18n::context_item(cmd, &params, label)).clicked() {
             actions.push(("layer.select".into(), json!({"layers": layers})));
             actions.push((cmd.into(), params));
             ui.close();
@@ -3912,7 +3912,7 @@ pub(crate) fn layer_menu(ui: &mut egui::Ui, layers: &[u64], caps: LayerMenuCaps,
     };
     ui.menu_button(crate::i18n::tr("New"), |ui| {
         item(ui, "Text", "layer.newText", json!({}));
-        item(ui, "Solid…", "app.solidSettings", json!({}));
+        item(ui, "Solid…", "layer.newSolid", json!({}));
         item(ui, "Light…", "layer.newLight", json!({}));
         item(ui, "Camera…", "layer.newCamera", json!({}));
         item(ui, "Null Object", "layer.newNull", json!({}));
@@ -3943,7 +3943,7 @@ pub(crate) fn layer_menu(ui: &mut egui::Ui, layers: &[u64], caps: LayerMenuCaps,
         item(ui, "Time-Reverse Layer", "layer.timeReverse", json!({"layers": layers}));
         item(ui, "Time Stretch…", "layer.timeStretch", json!({}));
         item(ui, "Freeze Frame", "layer.freezeFrame", json!({"layers": layers}));
-        item(ui, "Freeze on Last Frame", "layer.freezeOnLastFrame", json!({"layers": layers}));
+        item(ui, "Freeze On Last Frame", "layer.freezeOnLastFrame", json!({"layers": layers}));
     });
     ui.menu_button(crate::i18n::tr("Markers"), |ui| {
         item(ui, "Add Marker", "layer.addMarker", json!({"layers": layers}));
@@ -4012,7 +4012,7 @@ fn effects_submenu(ui: &mut egui::Ui, layers: &[u64], item: &mut dyn FnMut(&mut 
     widgets::menu_scroll(ui, |ui| {
         for (cat, mut fx) in cats {
             fx.sort_by_key(|e| e.name.to_ascii_lowercase());
-            ui.menu_button(cat, |ui| {
+            ui.menu_button(crate::i18n::effects::category(cat), |ui| {
                 widgets::menu_scroll(ui, |ui| {
                     for e in fx {
                         item(ui, e.name, "effect.apply", json!({"effect": e.id, "layers": layers}));
@@ -4582,6 +4582,81 @@ mod tests {
         let comp = app.session.active_comp().unwrap().clone();
         let c = snap_candidates(&comp, &build_rows(&app, &comp));
         assert!(c.contains(&comp.duration.seconds()) && c.contains(&0.0));
+    }
+
+    /// Every string drawn by one frame of `draw`.
+    fn drawn_text(mut draw: impl FnMut(&mut egui::Ui)) -> Vec<String> {
+        fn collect(shape: &egui::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(t) => out.push(t.galley.text().to_string()),
+                egui::Shape::Vec(v) => v.iter().for_each(|s| collect(s, out)),
+                _ => {}
+            }
+        }
+        let ctx = egui::Context::default();
+        ctx.run_ui(Default::default(), |ui| draw(ui)).textures_delta.clear();
+        let mut frame = ctx.run_ui(Default::default(), |ui| draw(ui));
+        frame.textures_delta.clear();
+        let mut out = Vec::new();
+        frame.shapes.iter().for_each(|c| collect(&c.shape, &mut out));
+        out
+    }
+
+    /// #1308: the layer context menu draws its items in the interface language, from the menu
+    /// bar's rows for the same commands (whose ellipsis is `...`), and its Effects submenu draws
+    /// the categories the Effect menu does; the actions it records stay the same.
+    #[test]
+    fn the_layer_context_menu_draws_in_the_interface_language() {
+        let caps = LayerMenuCaps { vector: true, text: false };
+        let mut actions = Vec::new();
+        crate::i18n::set_current("zh-hans");
+        let menu = drawn_text(|ui| layer_menu(ui, &[7], caps, &mut actions));
+        let effects = drawn_text(|ui| effects_submenu(ui, &[7], &mut |_: &mut egui::Ui, _: &str, _: &str, _: serde_json::Value| {}));
+        crate::i18n::set_current("en");
+        let english = drawn_text(|ui| layer_menu(ui, &[7], caps, &mut actions));
+        for label in ["新建", "图层设置...", "从矢量图层创建形状", "预合成...", "重复", "拆分图层", "删除"] {
+            assert!(menu.iter().any(|t| t == label), "{label} missing from {menu:?}");
+        }
+        assert!(!menu.iter().any(|t| t.is_ascii()), "English left in {menu:?}");
+        assert!(effects.iter().any(|t| t == "模糊和锐化"), "{effects:?}");
+        assert!(!effects.iter().any(|t| t == "Blur & Sharpen"), "{effects:?}");
+        for label in ["Layer Settings…", "Duplicate", "Delete"] {
+            assert!(english.iter().any(|t| t == label), "{label} missing from {english:?}");
+        }
+        assert!(actions.is_empty());
+    }
+
+    /// The property context menu draws its items in the interface language too: the commands the
+    /// menu bar has from its rows, Reset, Edit Value… and Remove Expression from the panel catalog.
+    /// The automation labels stay English.
+    #[test]
+    fn the_property_context_menu_draws_in_the_interface_language() {
+        let mut s = effectcraft_engine::Session::default();
+        s.execute("comp.new", json!({"name": "Main", "width": 64, "height": 64, "duration": 4})).unwrap();
+        let l = s.execute("layer.newSolid", json!({"name": "Plate", "color": "#406080"})).unwrap()["layer"].as_u64().unwrap();
+        let opacity = s.active_comp().unwrap().layer(LayerId(l)).unwrap().props.prop("transform/opacity").unwrap().uid;
+        s.execute("prop.setExpression", json!({"layer": l, "prop": opacity})).unwrap();
+        let comp = s.active_comp_id().unwrap();
+        let layer = s.active_comp().unwrap().layer(LayerId(l)).unwrap().clone();
+        let (position, opacity) = (layer.props.prop("transform/position").unwrap(), layer.props.prop("transform/opacity").unwrap());
+        let (mut auto, mut actions) = (crate::automation::Registry::default(), Vec::new());
+        let mut menu = |language| {
+            crate::i18n::set_current(language);
+            let mut drawn = drawn_text(|ui| prop_menu(ui, &mut auto, comp, &layer, position, &mut actions));
+            drawn.extend(drawn_text(|ui| prop_menu(ui, &mut auto, comp, &layer, opacity, &mut actions)));
+            drawn
+        };
+        let chinese = menu("zh-hans");
+        let english = menu("en");
+        for label in ["重置", "编辑值…", "单独尺寸", "添加表达式", "移除表达式", "向基本图形添加属性"] {
+            assert!(chinese.iter().any(|t| t == label), "{label} missing from {chinese:?}");
+        }
+        assert!(!chinese.iter().any(|t| t.is_ascii()), "English left in {chinese:?}");
+        for label in ["Reset", "Edit Value…", "Separate Dimensions", "Remove Expression", "Add Property to Essential Graphics"] {
+            assert!(english.iter().any(|t| t == label), "{label} missing from {english:?}");
+        }
+        assert!(auto.elements.iter().any(|e| e.label == "Remove Expression"), "the automation label stays English");
+        assert!(actions.is_empty());
     }
 
     /// UI fidelity (M13.5): compact After Effects-like rows and muted label-coloured bars.
