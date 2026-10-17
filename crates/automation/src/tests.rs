@@ -1380,3 +1380,89 @@ fn automation_roots_confine_file_access() {
     assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 1, "only the unconfined save");
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// #1228: exporting a template packs the footage its comp uses, files the agent never named, so
+/// with file access confined each must be inside a read root.
+#[test]
+fn a_confined_template_export_packs_only_footage_inside_the_read_roots() {
+    use crate::confine::Confinement;
+    use effectcraft_engine::project::{Footage, FootageKind, ItemKind, LayerSource, build};
+    let base = std::env::temp_dir().join(format!("ec-mcp-template-sources-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let (read, write, outside) = (base.join("in"), base.join("out"), base.join("elsewhere"));
+    for d in [&read, &write, &outside] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let p = |d: &std::path::Path, f: &str| d.join(f).to_string_lossy().into_owned();
+    let png = |path: &std::path::Path, rgb: [u8; 3]| image::RgbaImage::from_pixel(4, 4, image::Rgba([rgb[0], rgb[1], rgb[2], 255])).save(path).unwrap();
+    png(&outside.join("secret.png"), [1, 2, 3]);
+    png(&read.join("pic.png"), [255, 0, 0]);
+    for i in 0..3 {
+        png(&read.join(format!("seq_{i:03}.png")), [0, 255, 0]);
+    }
+    // A project in the read root with one comp per footage source.
+    let mut s = Session::default();
+    let mut comps = vec![];
+    for (name, footage) in [
+        ("Outside", Footage { path: p(&outside, "secret.png"), kind: FootageKind::Still, width: 4, height: 4, has_video: true, ..Default::default() }),
+        ("Inside", Footage { path: p(&read, "pic.png"), kind: FootageKind::Still, width: 4, height: 4, has_video: true, ..Default::default() }),
+        (
+            "Sequence",
+            Footage {
+                path: p(&read, "seq_000.png"),
+                sequence: (0..3).map(|i| p(&read, &format!("seq_{i:03}.png"))).collect(),
+                kind: FootageKind::Still,
+                width: 4,
+                height: 4,
+                has_video: true,
+                ..Default::default()
+            },
+        ),
+    ] {
+        s.execute("comp.new", json!({"name": name, "width": 16, "height": 16, "frameRate": 30, "duration": 1})).unwrap();
+        let cid = s.active_comp_id().unwrap();
+        {
+            let proj = std::sync::Arc::make_mut(&mut s.project);
+            let item = proj.add_item(name, Default::default(), None, ItemKind::Footage(footage));
+            let comp = proj.comp(cid).unwrap().clone();
+            let layer = build::layer(proj, &comp, name, LayerSource::Footage { item }, (4, 4), None);
+            let ItemKind::Comp(c) = &mut proj.item_mut(cid).unwrap().kind else { panic!("comp") };
+            std::sync::Arc::make_mut(c).layers.push(layer);
+        }
+        let l = s.project.comp(cid).unwrap().layers[0].id.0;
+        s.execute("essential.addProperty", json!({"layer": l, "path": "transform/opacity"})).unwrap();
+        comps.push(cid.0);
+    }
+    let sources = s.execute("essential.templateSources", json!({"comp": comps[2]})).unwrap();
+    assert_eq!(sources["files"].as_array().unwrap().len(), 3, "{sources}");
+    s.execute("file.saveAs", json!({"path": p(&read, "project.ecproj")})).unwrap();
+
+    let mut m = McpServer::new(Backend::headless(Session::default()));
+    m.backend().confine(Confinement::new(std::slice::from_ref(&read), std::slice::from_ref(&write)).unwrap());
+    call_json(&mut m, "open_project", json!({"path": p(&read, "project.ecproj")}));
+    let export = |m: &mut McpServer, comp: u64, file: &str| {
+        call(m, "execute_command", json!({"command": "essential.exportTemplate", "params": {"comp": comp, "path": p(&write, file)}}))
+    };
+    // Footage outside every root: refused, and nothing is written.
+    let (c, err) = export(&mut m, comps[0], "outside.ectemplate");
+    assert!(err, "{c:?}");
+    let msg = c[0]["text"].as_str().unwrap_or_default();
+    assert!(msg.contains("can't be packed") && msg.contains("secret.png"), "{msg}");
+    assert!(!write.join("outside.ectemplate").exists());
+    // Nor in a batch, where it can't be checked step by step.
+    let (_, err) =
+        call(&mut m, "batch", json!({"steps": [{"command": "essential.exportTemplate", "params": {"comp": comps[0], "path": p(&write, "batch.ectemplate")}}]}));
+    assert!(err);
+    assert!(!write.join("batch.ectemplate").exists());
+    // Footage and an image sequence inside the read root export as before.
+    let (c, err) = export(&mut m, comps[1], "inside.ectemplate");
+    assert!(!err, "{c:?}");
+    let (c, err) = export(&mut m, comps[2], "sequence.ectemplate");
+    assert!(!err, "{c:?}");
+    let secret = std::fs::read(outside.join("secret.png")).unwrap();
+    for f in ["inside.ectemplate", "sequence.ectemplate"] {
+        let bytes = std::fs::read(write.join(f)).unwrap();
+        assert!(!bytes.windows(secret.len()).any(|w| w == secret.as_slice()), "{f} doesn't carry the outside file");
+    }
+    let _ = std::fs::remove_dir_all(&base);
+}
