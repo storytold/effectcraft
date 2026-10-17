@@ -2307,6 +2307,44 @@ fn mask_marquee_selects_vertices() {
     assert_eq!(sel.len(), 2, "shift-marquee adds: {sel:?}");
 }
 
+/// #1218: frame stepping is optional, and consumes the entire wheel gesture.
+#[test]
+fn mouse_wheel_over_the_monitor_scrubs_frames() {
+    let mut h = harness();
+    h.state_mut().session.execute("prefs.set", json!({"key": "general.viewerWheelScrubbing", "value": true})).unwrap();
+    let p = rect(&h, "viewer.area").center();
+    h.input_mut().events.push(Event::PointerMoved(p));
+    h.step();
+    let t0 = h.state().session.time();
+    let none = egui::Modifiers::NONE;
+    let line = |dy: f32, modifiers: egui::Modifiers| Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Line,
+        delta: vec2(0.0, dy),
+        modifiers,
+        phase: egui::TouchPhase::Move,
+    };
+    let z0 = h.state().ui.viewer.zoom;
+    h.input_mut().events.push(line(1.0, none));
+    h.step();
+    let t1 = h.state().session.time();
+    for _ in 0..20 {
+        assert_eq!(h.state().ui.viewer.zoom, z0, "frame wheel must never zoom");
+        h.step();
+    }
+    assert!(t1 > t0, "wheel up advanced the playhead ({t0:?} -> {t1:?})");
+    h.input_mut().events.push(line(-2.0, none));
+    h.step();
+    assert!(h.state().session.time() < t1, "two lines back moves before the single line forward");
+    // Ctrl+wheel zooms instead of scrubbing.
+    let z0 = h.state().ui.viewer.zoom;
+    let t2 = h.state().session.time();
+    let mods = egui::Modifiers { ctrl: true, command: true, ..Default::default() };
+    h.input_mut().events.push(line(3.0, mods));
+    h.step();
+    assert_eq!(h.state().session.time(), t2, "Ctrl+wheel must not scrub");
+    assert_ne!(h.state().ui.viewer.zoom, z0, "Ctrl+wheel still zooms");
+}
+
 /// A null's eye in the Timeline hides it in the Composition viewer, as in After Effects: its box
 /// and handles go even while it is selected and a click on its box doesn't pick it; the eye back
 /// on brings them back.
@@ -2343,4 +2381,24 @@ fn null_eye_hides_it_in_the_viewer() {
     assert_eq!(h.state().session.state.selected_layers, vec![LayerId(n)]);
     h.run_steps(2);
     assert!(h.state().auto.find(&handle).is_some(), "handles back with the eye on");
+}
+
+#[test]
+fn mouse_wheel_zooms_by_default_without_stepping_frames() {
+    let mut h = harness();
+    assert!(!h.state().session.prefs.general.viewer_wheel_scrubbing);
+    let p = rect(&h, "viewer.area").center();
+    h.input_mut().events.push(Event::PointerMoved(p));
+    h.step();
+    let t0 = h.state().session.time();
+    let z0 = h.state().ui.viewer.zoom;
+    h.input_mut().events.push(Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Line,
+        delta: vec2(0.0, 1.0),
+        modifiers: egui::Modifiers::NONE,
+        phase: egui::TouchPhase::Move,
+    });
+    h.run_steps(20);
+    assert_eq!(h.state().session.time(), t0);
+    assert_ne!(h.state().ui.viewer.zoom, z0);
 }

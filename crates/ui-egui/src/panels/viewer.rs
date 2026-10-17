@@ -1357,8 +1357,40 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             }
         };
         ctx.set_cursor_icon(cursor);
+        // Use raw events for the optional frame wheel: egui's smoothed delta continues
+        // after the event frame and would otherwise zoom while stepping the playhead.
+        let scrub = app.session.prefs.general.viewer_wheel_scrubbing;
+        let (lines, scroll) = ui.input(|i| {
+            if !scrub {
+                return (0.0, i.smooth_scroll_delta.y + i.zoom_delta().ln() * 300.0);
+            }
+            let mut lines = 0.0;
+            let mut points = 0.0;
+            for event in &i.events {
+                if let egui::Event::MouseWheel { unit, delta, modifiers, .. } = event
+                    && !modifiers.command
+                    && !modifiers.ctrl
+                    && !modifiers.alt
+                {
+                    match unit {
+                        egui::MouseWheelUnit::Line => lines += delta.y,
+                        egui::MouseWheelUnit::Point => points += delta.y,
+                        egui::MouseWheelUnit::Page => points += delta.y * area.height(),
+                    }
+                }
+            }
+            (lines, points + i.zoom_delta().ln() * 300.0)
+        });
+        if lines.abs() >= 0.01 && area.contains(hp) {
+            let frames = (lines.round() as i64).clamp(-30, 30);
+            if frames != 0 {
+                if app.playback.playing {
+                    let _ = crate::menus::invoke(app, &ctx, "playback.stop", json!({}));
+                }
+                let _ = app.session.execute("time.step", json!({"frames": frames}));
+            }
+        }
         // Scroll wheel zooms around the pointer.
-        let scroll = ui.input(|i| i.smooth_scroll_delta.y + i.zoom_delta().ln() * 300.0);
         if scroll.abs() > 0.1 && area.contains(hp) {
             let k = (scroll / 300.0).exp();
             let nz = (zoom * k).clamp(0.01, 32.0);
