@@ -468,6 +468,8 @@ impl GpuContext {
             include_str!("shaders/sky.wgsl"),
         ]
         .concat();
+        #[cfg(test)]
+        let src = src + crate::tests::MATH_PROBE_SHADER;
         let module = init_resource(&device, "kernels shader module", || {
             device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("effectcraft kernels"), source: wgpu::ShaderSource::Wgsl(src.into()) })
         })?;
@@ -545,6 +547,8 @@ impl GpuContext {
             .map(|(e, layout)| Ok((*e, build(e, layout)?)))
             .collect::<Result<HashMap<_, _>, String>>()?;
         let mut unavailable = vec![];
+        #[cfg(test)]
+        pipelines.insert("math_probe", build("math_probe", &layout)?);
         for e in EFFECT_ENTRIES
             .iter()
             .chain(crate::fx_color::KERNELS)

@@ -16,7 +16,7 @@ fn fxv_unpremul(p: vec4<f32>) -> vec4<f32> {
 fn fxv_equi_dir(x: f32, y: f32, w: f32, h: f32) -> vec3<f32> {
     let lon = (x / w - 0.5) * 2.0 * FXV_PI;
     let lat = (0.5 - y / h) * FXV_PI;
-    return vec3<f32>(cos(lat) * sin(lon), sin(lat), cos(lat) * cos(lon));
+    return vec3<f32>(cos_p(lat) * sin_p(lon), sin_p(lat), cos_p(lat) * cos_p(lon));
 }
 
 // vr::equi_px.
@@ -168,7 +168,7 @@ fn fxv_dir(kind: u32, fov: f32, x: f32, y: f32, w: f32, h: f32) -> vec4<f32> {
             cu = u / r;
             cv = v / r;
         }
-        return vec4<f32>(sin(th) * cu, cos(th), sin(th) * cv, 1.0);
+        return vec4<f32>(sin_p(th) * cu, cos_p(th), sin_p(th) * cv, 1.0);
     }
     if (kind == 4u) {
         let half = radians(clamp(fov, 1.0, 360.0) / 2.0);
@@ -186,7 +186,7 @@ fn fxv_dir(kind: u32, fov: f32, x: f32, y: f32, w: f32, h: f32) -> vec4<f32> {
             cu = u / r;
             cv = v / r;
         }
-        return vec4<f32>(sin(th) * cu, sin(th) * cv, cos(th), 1.0);
+        return vec4<f32>(sin_p(th) * cu, sin_p(th) * cv, cos_p(th), 1.0);
     }
     let t = tan(radians(clamp(fov, 1.0, 179.0) / 2.0));
     let u = (x / w * 2.0 - 1.0) * t;
@@ -519,8 +519,8 @@ fn fxv_gen(@builtin(global_invocation_id) gid: vec3<u32>) {
                 var s = px;
                 if (al >= 1e-9) {
                     let new_th = th * (1.0 - P.f[0][c] * weight);
-                    let perp = normalize(d - center * cos(th));
-                    let nd = center * cos(new_th) + perp * sin(new_th);
+                    let perp = normalize(d - center * cos_p(th));
+                    let nd = center * cos_p(new_th) + perp * sin_p(new_th);
                     let q = fxv_equi_px(nd, w, h);
                     s = fxv_sample_equi(q.x, q.y);
                 }

@@ -633,50 +633,9 @@ fn fp2_hextile(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (!fp2_inside(p)) {
         return;
     }
-    let cx = P.f[0].x;
-    let cy = P.f[0].y;
-    let r = P.f[0].z;
-    let smear = P.f[0].w;
-    let sn = P.f[1].x;
-    let cs = P.f[1].y;
-    let mode = P.u[0].x;
-    let dx = f32(p.x) + 0.5 - cx;
-    let dy = f32(p.y) + 0.5 - cy;
-    let u = dx * cs + dy * sn;
-    let v = -dx * sn + dy * cs;
-    // stylize3::hex_cell (cube rounding).
-    let q = (0.5773502691896257 * u - v / 3.0) / r;
-    let rr = (2.0 / 3.0 * v) / r;
-    let ccy = -q - rr;
-    var rx = round_away(q);
-    let ry = round_away(ccy);
-    var rz = round_away(rr);
-    let ddx = abs(rx - q);
-    let ddy = abs(ry - ccy);
-    let ddz = abs(rz - rr);
-    if (ddx > ddy && ddx > ddz) {
-        rx = -ry - rz;
-    } else if (ddy <= ddz) {
-        rz = -rx - ry;
-    }
-    let hx = r * 1.7320508075688772 * (rx + rz / 2.0);
-    let hy = r * 1.5 * rz;
-    var lu = u - hx;
-    var lv = v - hy;
-    let odd = imod(i32(rx) + i32(rz), 2) == 1;
-    if ((mode == 1u || mode == 2u) && odd) {
-        lu = -lu;
-    }
-    if (mode == 2u && odd) {
-        lv = -lv;
-    }
-    let ox = lu * cs - lv * sn;
-    let oy = lu * sn + lv * cs;
-    let tx = cx + ox;
-    let ty = cy + oy;
-    let sx = tx + (f32(p.x) + 0.5 - tx) * smear;
-    let sy = ty + (f32(p.y) + 0.5 - ty) * smear;
-    textureStore(out, p, sample_bilinear_clamped(src, sx, sy));
+    // Cell membership and reflection were decided in the CPU effect's f64 geometry.
+    let i = (gid.y * u32(out_dims().x) + gid.x) * 2u;
+    textureStore(out, p, sample_bilinear_clamped(src, data[i], data[i + 1u]));
 }
 
 // ---------------------------------------------------------------- CC Mr. Smoothie (stylize3::smoothie)
