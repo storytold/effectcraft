@@ -28,7 +28,7 @@ use serde_json::json;
 
 use super::viewer::ViewerMap;
 use crate::theme::Tokens;
-use crate::{EffectcraftApp, widgets};
+use crate::{EffectcraftApp, a11y, widgets};
 
 /// The tracker whose points the viewer shows.
 struct Active {
@@ -413,12 +413,14 @@ pub fn editor(
     let b1 = Rect::from_min_size(pos2(r.min.x + 24.0, r.min.y + 4.0), vec2(84.0, 22.0));
     let b2 = Rect::from_min_size(pos2(b1.max.x + 8.0, b1.min.y), vec2(84.0, 22.0));
     let b3 = Rect::from_min_size(pos2(b2.max.x + 8.0, b1.min.y), vec2(110.0, 22.0));
-    if widgets::text_button(ui, b1, "Analyze", false, &t, egui::Id::new(("ct-analyze", g.uid))).clicked() && !busy {
+    let analyze = widgets::text_button(ui, b1, tr("Analyze"), false, &t, egui::Id::new(("ct-analyze", g.uid)));
+    a11y::button(&analyze, tr("Analyze"), !busy);
+    if analyze.clicked() && !busy {
         actions.push(("camera.analyze".into(), me.clone()));
     }
     app.auto.add(&format!("effectControls.cameraTracker.{}.analyze", g.uid), b1, "Analyze");
     if running {
-        if widgets::text_button(ui, b2, "Cancel", false, &t, egui::Id::new(("ct-cancel", g.uid))).clicked() {
+        if widgets::text_button(ui, b2, tr("Cancel"), false, &t, egui::Id::new(("ct-cancel", g.uid))).clicked() {
             actions.push(("camera.cancel".into(), json!({})));
         }
         app.auto.add(&format!("effectControls.cameraTracker.{}.cancel", g.uid), b2, "Cancel");
@@ -426,7 +428,7 @@ pub fn editor(
     let params = effectcraft_engine::camera_track::static_params(g);
     let solve = ct::solve(&params);
     if solve.is_some() {
-        if widgets::text_button(ui, b3, "Create Camera", false, &t, egui::Id::new(("ct-camera", g.uid))).clicked() {
+        if widgets::text_button(ui, b3, tr("Create Camera"), false, &t, egui::Id::new(("ct-camera", g.uid))).clicked() {
             actions.push(("camera.create".into(), me.clone()));
         }
         app.auto.add(&format!("effectControls.cameraTracker.{}.createCamera", g.uid), b3, "Create Camera");
@@ -443,16 +445,15 @@ pub fn editor(
             None => "Not analyzed: click Analyze".into(),
         },
     };
-    p.text(pos2(r.min.x + 24.0, r.min.y + 38.0), Align2::LEFT_CENTER, status, Tokens::ui(11.5), t.text_dim);
+    p.text(pos2(r.min.x + 24.0, r.min.y + 38.0), Align2::LEFT_CENTER, &status, Tokens::ui(11.5), t.text_dim);
+    // The status is painted text; a read-out gives assistive technology the same words.
+    let line = |y: f32| Rect::from_min_size(pos2(r.min.x + 24.0, r.min.y + y), vec2((r.width() - 32.0).max(24.0), 16.0));
+    a11y::readout(ui, egui::Id::new(("ct-status", g.uid)), line(30.0), &status);
     if let Some(sv) = &solve {
         let f = sv.focal();
-        p.text(
-            pos2(r.min.x + 24.0, r.min.y + 56.0),
-            Align2::LEFT_CENTER,
-            format!("{} solved points · Horizontal Angle of View {:.1}°", sv.points.len(), sv.hfov(f)),
-            Tokens::ui(11.5),
-            t.text_faint,
-        );
+        let solved = format!("{} solved points · Horizontal Angle of View {:.1}°", sv.points.len(), sv.hfov(f));
+        p.text(pos2(r.min.x + 24.0, r.min.y + 56.0), Align2::LEFT_CENTER, &solved, Tokens::ui(11.5), t.text_faint);
+        a11y::readout(ui, egui::Id::new(("ct-solved", g.uid)), line(48.0), &solved);
     }
 }
 

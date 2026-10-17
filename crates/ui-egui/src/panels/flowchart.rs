@@ -6,7 +6,7 @@
 //! [`build`] is pure and cycle-safe (a comp nested in itself is drawn once, with an edge back),
 //! so agents get the same graph through `flowchart.graph`.
 
-use crate::i18n::tr_args;
+use crate::i18n::{tr, tr_args};
 use std::collections::{BTreeMap, BTreeSet};
 
 use effectcraft_engine::project::{ItemId, ItemKind, LayerSource, Project};
@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 
 use crate::icons::{self, Icon};
 use crate::theme::Tokens;
-use crate::{EffectcraftApp, widgets};
+use crate::{EffectcraftApp, a11y, widgets};
 
 /// Flowchart panel options (the panel's switches).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -233,6 +233,19 @@ pub fn command(app: &mut EffectcraftApp, id: &str, p: &Value) -> Result<Value, S
     Ok(json!({"layers": o.layers, "effects": o.effects, "solids": o.solids, "direction": if o.vertical { "tb" } else { "lr" }, "root": o.root}))
 }
 
+/// What a node is, in words.
+fn kind_name(kind: &str) -> String {
+    match kind {
+        "comp" => tr("Composition"),
+        "footage" => tr("Footage"),
+        "solid" => tr("Solid"),
+        "layer" => tr("Layer"),
+        "effect" => tr("Effect"),
+        other => other,
+    }
+    .to_string()
+}
+
 fn kind_style(kind: &str) -> (Icon, Color32) {
     match kind {
         "comp" => (Icon::Comp, Color32::from_rgb(0x3d, 0x5a, 0x8c)),
@@ -267,10 +280,16 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         ("layers", "Layers", o.layers),
         ("solids", "Solids", o.solids),
     ] {
-        let w = 18.0 + label.len() as f32 * 6.6;
+        let label = tr(label);
+        let w = 18.0 + label.chars().count() as f32 * 6.6;
         let r = Rect::from_min_size(pos2(x - w, bar.min.y + 5.0), vec2(w, 20.0));
         x -= w + 6.0;
-        if widgets::text_button(ui, r, label, on, &t, egui::Id::new(("flow-opt", key))).clicked() {
+        let resp = widgets::text_button(ui, r, label, on, &t, egui::Id::new(("flow-opt", key)));
+        if key != "direction" {
+            // Effects, Layers and Solids stay pressed while they are on.
+            a11y::toggle_button(&resp, label, on);
+        }
+        if resp.clicked() {
             let v = if key == "direction" { json!({"direction": if o.vertical { "lr" } else { "tb" }}) } else { json!({key: !on}) };
             cmds.push(("flowchart.options".into(), v));
         }
@@ -282,7 +301,10 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let g = build(&app.session.project, rid, &o);
     let pos = layout(&g, o.vertical);
     let origin = body.min + vec2(24.0 + o.pan[0], 24.0 + o.pan[1]);
-    let bg = ui.interact(body, egui::Id::new("flow-bg"), Sense::click_and_drag());
+    // Panned with the mouse (or the wheel); the keyboard moves between the nodes and the view
+    // follows, so the background is not a Tab stop.
+    let bg = ui.interact(body, egui::Id::new("flow-bg"), Sense::CLICK | Sense::DRAG);
+    a11y::role_name(&bg, egui::accesskit::Role::Group, &tr_args("Flowchart: {}", &[&root_name]));
     if bg.dragged() {
         let d = bg.drag_delta();
         app.ui.flowchart.pan[0] += d.x;
@@ -315,14 +337,44 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         gp.add(egui::Shape::convex_polygon(vec![e, e + l, e + r], col, Stroke::NONE));
     }
     let cmd_down = ui.input(|i| i.modifiers.command || i.modifiers.ctrl);
+    let node_id = |id: &str| egui::Id::new(("flow-node", id));
+    // What a node does: opened (as a double click), revealed (as a Cmd/Ctrl click).
+    let open_cmd = |n: &FlowNode| -> Option<(String, Value)> {
+        match (n.kind, n.item, n.comp) {
+            ("comp", Some(c), _) | (_, _, Some(c)) => Some(("comp.open".into(), json!({"comp": c}))),
+            _ => None,
+        }
+    };
+    let reveal_cmds = |n: &FlowNode| -> Vec<(String, Value)> {
+        match (n.item, n.comp, n.layer) {
+            // Items in the Project panel, layers selected in their comp.
+            (Some(item), ..) => vec![("project.select".into(), json!({"items": [item]})), ("window.panel".into(), json!({"panel": "project"}))],
+            (None, Some(c), Some(l)) => vec![("comp.open".into(), json!({"comp": c})), ("layer.select".into(), json!({"layers": [l]}))],
+            _ => vec![],
+        }
+    };
+    // One Tab stop for the chart: the selected node (the first one drawn without a selection);
+    // the arrow keys move between the others.
+    let drawn: Vec<bool> = (0..g.nodes.len()).map(|i| rect_of(i).intersects(body)).collect();
+    let is_drawn = |i: usize| drawn.get(i).copied().unwrap_or(false);
+    let cursor = o.selected.as_deref().and_then(|s| idx.get(s).copied()).filter(|i| is_drawn(*i)).or_else(|| drawn.iter().position(|d| *d));
+    let size = g.nodes.len();
     for (i, n) in g.nodes.iter().enumerate() {
         let r = rect_of(i);
-        if !r.intersects(body) {
+        if !is_drawn(i) {
             continue;
         }
         let (icon, fill) = kind_style(n.kind);
         let selected = o.selected.as_deref() == Some(n.id.as_str());
-        let resp = ui.interact(r.intersect(body), egui::Id::new(("flow-node", &n.id)), Sense::click());
+        let sense = if cursor == Some(i) { Sense::click() } else { Sense::CLICK };
+        let resp = ui.interact(r.intersect(body), node_id(&n.id), sense);
+        if a11y::take_pending_focus(&ctx, "flow", resp.id) {
+            resp.request_focus();
+        }
+        if resp.gained_focus() {
+            app.ui.flowchart.selected = Some(n.id.clone());
+            app.ui.focused = crate::dock::PanelKind::Flowchart;
+        }
         let fill = if resp.hovered() { fill.gamma_multiply(1.25) } else { fill };
         gp.rect_filled(r, 5.0, fill);
         gp.rect_stroke(
@@ -331,6 +383,9 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             Stroke::new(if selected { 2.0 } else { 1.0 }, if selected { t.accent } else { Color32::from_black_alpha(120) }),
             StrokeKind::Inside,
         );
+        if resp.has_focus() {
+            gp.rect_stroke(r.expand(2.0), 6.0, Stroke::new(2.0, t.text), StrokeKind::Outside);
+        }
         icons::paint(&gp, Rect::from_center_size(pos2(r.min.x + 16.0, r.center().y), vec2(14.0, 14.0)), icon, Color32::WHITE);
         gp.with_clip_rect(r.shrink(2.0).intersect(body)).text(
             pos2(r.min.x + 30.0, r.center().y),
@@ -340,31 +395,100 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             Color32::WHITE,
         );
         app.auto.add(&format!("flowchart.node.{}", n.id), r, &n.label);
+        // "Mid, Composition, uses 2": the node's name, what it is and how many nodes it leads to.
+        let uses = g.edges.iter().filter(|(a, _)| *a == n.id).count();
+        let name =
+            if uses > 0 { tr_args("{}, {}, uses {}", &[&n.label, &kind_name(n.kind), &uses]) } else { tr_args("{}, {}", &[&n.label, &kind_name(n.kind)]) };
+        a11y::list_item(&resp, &name, selected, i.saturating_add(1), size);
         if resp.clicked() {
             app.ui.flowchart.selected = Some(n.id.clone());
+            app.ui.focused = crate::dock::PanelKind::Flowchart;
             if cmd_down {
-                // Reveal: items in the Project panel, layers selected in their comp.
-                match (n.item, n.comp, n.layer) {
-                    (Some(item), ..) => {
-                        cmds.push(("project.select".into(), json!({"items": [item]})));
-                        cmds.push(("window.panel".into(), json!({"panel": "project"})));
-                    }
-                    (None, Some(c), Some(l)) => {
-                        cmds.push(("comp.open".into(), json!({"comp": c})));
-                        cmds.push(("layer.select".into(), json!({"layers": [l]})));
-                    }
-                    _ => {}
-                }
+                cmds.extend(reveal_cmds(n));
             }
         }
         if resp.double_clicked() {
-            match (n.kind, n.item, n.comp) {
-                ("comp", Some(c), _) => cmds.push(("comp.open".into(), json!({"comp": c}))),
-                (_, _, Some(c)) => cmds.push(("comp.open".into(), json!({"comp": c}))),
+            cmds.extend(open_cmd(n));
+        }
+        resp.on_hover_text(tr_args("{} — double-click to open, {}-click to reveal", &[&n.label, &(if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" })]));
+    }
+
+    // Keyboard, with a node focused (or after a click, when nothing has the focus): Up / Down and
+    // Home / End move through the nodes, Right goes to a node this one uses and Left back to one
+    // that uses it, Enter opens (as a double click), Space reveals (as a Cmd/Ctrl click). The
+    // focus follows, and the view pans to keep the node in sight.
+    let focused = ctx.memory(|m| m.focused());
+    let on_node = focused.is_some_and(|f| g.nodes.iter().any(|n| node_id(&n.id) == f));
+    let by_mouse = focused.is_none() && app.ui.focused == crate::dock::PanelKind::Flowchart;
+    if (on_node || by_mouse) && app.dialog.is_none() && !widgets::any_menu_open(&ctx) {
+        let keys: Vec<egui::Key> = ctx.input(|i| {
+            i.events
+                .iter()
+                .filter_map(|e| match e {
+                    egui::Event::Key { key, pressed: true, modifiers, .. } if !modifiers.any() => Some(*key),
+                    _ => None,
+                })
+                .collect()
+        });
+        let mut at = o.selected.as_deref().and_then(|s| idx.get(s).copied()).or(cursor);
+        let mut moved = None;
+        for key in keys {
+            use egui::Key;
+            let last = g.nodes.len().checked_sub(1);
+            let to = match (key, last) {
+                (Key::ArrowDown, Some(last)) => Some(at.map_or(0, |a| a.saturating_add(1).min(last))),
+                (Key::ArrowUp, Some(last)) => Some(at.map_or(last, |a| a.saturating_sub(1))),
+                (Key::Home, Some(_)) if on_node => Some(0),
+                (Key::End, Some(last)) if on_node => Some(last),
+                (Key::ArrowRight, _) => at
+                    .and_then(|a| g.nodes.get(a))
+                    .and_then(|n| g.edges.iter().find(|(from, _)| *from == n.id))
+                    .and_then(|(_, to)| idx.get(to.as_str()).copied()),
+                (Key::ArrowLeft, _) => at
+                    .and_then(|a| g.nodes.get(a))
+                    .and_then(|n| g.edges.iter().find(|(_, to)| *to == n.id))
+                    .and_then(|(from, _)| idx.get(from.as_str()).copied()),
+                _ => None,
+            };
+            if let Some(n) = to.and_then(|to| g.nodes.get(to)) {
+                at = to;
+                app.ui.flowchart.selected = Some(n.id.clone());
+                moved = Some(n.id.clone());
+                continue;
+            }
+            let Some(n) = at.and_then(|a| g.nodes.get(a)) else { continue };
+            match key {
+                Key::Enter => cmds.extend(open_cmd(n)),
+                Key::Space if on_node => cmds.extend(reveal_cmds(n)),
                 _ => {}
             }
         }
-        resp.on_hover_text(tr_args("{} — double-click to open, {}-click to reveal", &[&n.label, &(if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" })]));
+        if let Some(i) = moved.as_deref().and_then(|m| idx.get(m).copied()) {
+            // Pan so the node is inside the view, with a margin.
+            let r = rect_of(i);
+            let (mut dx, mut dy) = (0.0, 0.0);
+            if r.min.x < body.min.x + 16.0 {
+                dx = body.min.x + 16.0 - r.min.x;
+            } else if r.max.x > body.max.x - 16.0 {
+                dx = body.max.x - 16.0 - r.max.x;
+            }
+            if r.min.y < body.min.y + 16.0 {
+                dy = body.min.y + 16.0 - r.min.y;
+            } else if r.max.y > body.max.y - 16.0 {
+                dy = body.max.y - 16.0 - r.max.y;
+            }
+            app.ui.flowchart.pan[0] += dx;
+            app.ui.flowchart.pan[1] += dy;
+            app.ui.focused = crate::dock::PanelKind::Flowchart;
+            if on_node && let Some(id) = moved.as_deref() {
+                a11y::focus_next_pass(&ctx, "flow", node_id(id));
+            }
+            ctx.request_repaint();
+        }
+        // The arrows are the chart's, not egui's spatial focus moves.
+        if on_node {
+            ctx.memory_mut(|m| m.move_focus(egui::FocusDirection::None));
+        }
     }
     for (id, params) in cmds {
         if let Err(e) = crate::menus::invoke(app, &ctx, &id, params) {

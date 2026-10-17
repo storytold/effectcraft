@@ -245,6 +245,10 @@ pub fn twirl(ui: &mut Ui, rect: Rect, open: bool, id: egui::Id, t: &Tokens) -> R
         vec![c + vec2(-0.8 * k, -1.6 * k), c + vec2(0.8 * k, 0.0), c + vec2(-0.8 * k, 1.6 * k)]
     };
     ui.painter().add(egui::Shape::line(pts, Stroke::new(1.4, col)));
+    // A button that opens and closes something; the caller names it.
+    crate::a11y::role(&resp, egui::accesskit::Role::Button);
+    crate::a11y::expanded(&resp, open);
+    focus_outline(ui, &resp, t);
     resp
 }
 
@@ -258,6 +262,10 @@ pub fn icon_toggle(ui: &mut Ui, rect: Rect, icon: Icon, on: bool, t: &Tokens, id
     if on || resp.hovered() {
         icons::paint(ui.painter(), rect.shrink(rect.width() * 0.18), icon, if on { t.icon } else { t.text_faint });
     }
+    // A switch; the caller names it.
+    crate::a11y::role(&resp, egui::accesskit::Role::Button);
+    crate::a11y::checked(&resp, on);
+    focus_outline(ui, &resp, t);
     resp
 }
 
@@ -277,6 +285,8 @@ pub fn icon_button(ui: &mut Ui, rect: Rect, icon: Icon, active: bool, t: &Tokens
         t.icon
     };
     icons::paint(ui.painter(), rect.shrink(rect.width() * 0.22), icon, col);
+    // An icon has no text: the caller names the button.
+    crate::a11y::role(&resp, egui::accesskit::Role::Button);
     focus_outline(ui, &resp, t);
     resp
 }
@@ -318,7 +328,7 @@ fn field(ui: &mut Ui, rect: Rect, text: &mut String, hint: &str, t: &Tokens, sea
     }
     let inner = Rect::from_min_max(pos2(rect.min.x + if search { 22.0 } else { 9.0 }, rect.min.y + 1.0), pos2(rect.max.x - 8.0, rect.max.y - 1.0));
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(inner));
-    child.add(
+    let resp = child.add(
         egui::TextEdit::singleline(text)
             .hint_text(hint)
             .frame(egui::Frame::NONE)
@@ -327,7 +337,10 @@ fn field(ui: &mut Ui, rect: Rect, text: &mut String, hint: &str, t: &Tokens, sea
             .min_size(inner.size())
             .font(Tokens::ui(12.0))
             .vertical_align(egui::Align::Center),
-    )
+    );
+    // The hint is the field's visible name (the caller can give it a better one).
+    crate::a11y::name(&resp, hint);
+    resp
 }
 
 /// Dropdown-looking control ("Full ▾").
@@ -358,6 +371,10 @@ pub fn dropdown_tip(ui: &mut Ui, rect: Rect, text: &str, tip: Option<&str>, t: &
     };
     ui.painter().text(pos2(rect.min.x + 7.0, rect.center().y), Align2::LEFT_CENTER, shown, Tokens::ui(11.5), t.text);
     icons::paint(ui.painter(), Rect::from_center_size(pos2(rect.max.x - 9.0, rect.center().y), vec2(8.0, 8.0)), Icon::ChevronDown, t.text_dim);
+    // A drop-down showing `text`; the caller names what it sets.
+    crate::a11y::role(&resp, egui::accesskit::Role::ComboBox);
+    crate::a11y::name_value(&resp, "", text);
+    focus_outline(ui, &resp, t);
     if let Some(tip) = tip {
         return resp.on_hover_text(tip.to_string());
     }
@@ -379,6 +396,8 @@ pub fn text_button(ui: &mut Ui, rect: Rect, text: &str, primary: bool, t: &Token
     };
     ui.painter().rect_filled(rect, rect.height() / 2.0, bg);
     ui.painter().text(rect.center(), Align2::CENTER_CENTER, text, Tokens::medium(12.0), if primary { Color32::WHITE } else { t.text });
+    crate::a11y::role_name(&resp, egui::accesskit::Role::Button, text);
+    focus_outline(ui, &resp, t);
     resp
 }
 
@@ -392,6 +411,10 @@ pub fn checkbox(ui: &mut Ui, rect: Rect, on: bool, t: &Tokens, id: egui::Id) -> 
         let p = |x: f32, y: f32| pos2(b.min.x + x * b.width(), b.min.y + y * b.height());
         ui.painter().line(vec![p(0.2, 0.52), p(0.42, 0.74), p(0.8, 0.28)], Stroke::new(1.6, Color32::WHITE));
     }
+    // A check box; the caller names it.
+    crate::a11y::role(&resp, egui::accesskit::Role::CheckBox);
+    crate::a11y::checked(&resp, on);
+    focus_outline(ui, &resp, t);
     resp
 }
 
@@ -411,7 +434,9 @@ pub fn scroll_bar(ui: &mut Ui, auto: &mut Registry, key: &str, track: Rect, scro
     let thumb_len = (len * len / (len + max.max(0.0)).max(1.0)).max(16.0).min(len).max(0.0);
     let travel = (len - thumb_len).max(1.0);
     let thumb_at = |s: f32| track.min[a] + (len - thumb_len) * if max > 0.0 { (s / max).clamp(0.0, 1.0) } else { 0.0 };
-    let resp = ui.interact(track.expand2(if vertical { vec2(3.0, 0.0) } else { vec2(0.0, 3.0) }), egui::Id::new(key), Sense::drag());
+    // Dragged with the mouse only: a Tab stop that no key could move would be a trap. The panels
+    // scroll with their own keys (the arrows, Page Up / Page Down) and the wheel.
+    let resp = ui.interact(track.expand2(if vertical { vec2(3.0, 0.0) } else { vec2(0.0, 3.0) }), egui::Id::new(key), Sense::DRAG);
     let pressed = resp.is_pointer_button_down_on() && ui.input(|i| i.pointer.any_pressed());
     let mut s = scroll;
     if let Some(p) = resp.interact_pointer_pos().filter(|p| pressed && !(thumb_at(scroll)..=thumb_at(scroll) + thumb_len).contains(&p[a])) {
@@ -453,6 +478,22 @@ impl PanelScroll {
             offset -= ui.input(|i| i.smooth_scroll_delta.y);
         }
         Self { id, area, offset: offset.clamp(0.0, max.max(0.0)) }
+    }
+
+    /// Scroll the panel `id` (a [`PanelScroll`] kept under that id) so the content from `top` to
+    /// `bottom` is in view of a `view` tall list, from the next pass.
+    pub fn reveal(ctx: &egui::Context, id: egui::Id, top: f32, bottom: f32, view: f32) {
+        let (offset, max): (f32, f32) = ctx.data(|d| d.get_temp(id)).unwrap_or_default();
+        let wanted = if top < offset {
+            top
+        } else if bottom > offset + view {
+            bottom - view
+        } else {
+            offset
+        }
+        .max(0.0);
+        // (`max` is last frame's overflow; the next `end` measures it again.)
+        ctx.data_mut(|d| d.insert_temp(id, (wanted, max.max(wanted))));
     }
 
     /// The rows were `content` points tall: keep the offset, with the scroll bar registered for
@@ -537,6 +578,30 @@ pub fn label_popup(
     })
 }
 
+/// This pass's input has no mouse press or release: whatever just happened (a control activated,
+/// a list opened, an entry chosen) came from the keyboard or an assistive technology.
+pub fn by_keyboard(ui: &Ui) -> bool {
+    !ui.input(|i| i.pointer.any_pressed() || i.pointer.any_released())
+}
+
+/// Put the keyboard on `entry` of the popup list `id` the pass the list opens, so Up / Down and
+/// Enter work it and Escape closes it. (The pass count tells a fresh opening from a list that has
+/// been open for some passes.)
+pub fn focus_when_opened(ui: &Ui, id: egui::Id, entry: &Response) {
+    let key = id.with("focus-pass");
+    let pass = ui.ctx().cumulative_pass_nr();
+    let previous = ui.data_mut(|d| {
+        let previous = d.get_temp::<u64>(key);
+        d.insert_temp(key, pass);
+        previous
+    });
+    // A list opened with the mouse keeps the keyboard where it was: a widget with the focus
+    // pauses the application's shortcuts (Space, Ctrl+Z) until the focus is lost.
+    if previous.is_none_or(|p| p.saturating_add(1) < pass) && by_keyboard(ui) {
+        entry.request_focus();
+    }
+}
+
 /// Show a popup menu anchored at `pos` with string options; returns the chosen index.
 pub fn popup_menu(ui: &mut Ui, id: egui::Id, pos: egui::Pos2, options: &[String], current: Option<usize>) -> Option<usize> {
     if !popup_is_open(ui, id) {
@@ -546,11 +611,20 @@ pub fn popup_menu(ui: &mut Ui, id: egui::Id, pos: egui::Pos2, options: &[String]
     popup_list(ui, id, pos, Rect::NOTHING, options.len().saturating_sub(seps), seps, |ui| {
         ui.set_min_width(160.0);
         let mut chosen = None;
+        let mut first = true;
         for (i, o) in options.iter().enumerate() {
             if o == "-" {
                 ui.separator();
-            } else if ui.selectable_label(current == Some(i), o).clicked() {
-                chosen = Some(i);
+            } else {
+                let r = ui.selectable_label(current == Some(i), o);
+                // The keyboard starts on the current entry (the first one, with none current).
+                if current == Some(i) || (current.is_none() && first) {
+                    focus_when_opened(ui, id, &r);
+                }
+                first = false;
+                if r.clicked() {
+                    chosen = Some(i);
+                }
             }
         }
         chosen

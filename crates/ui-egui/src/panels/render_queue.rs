@@ -20,6 +20,7 @@ use effectcraft_engine::project::render_templates::RenderTemplates;
 use egui::{Align2, Color32, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use serde_json::{Value, json};
 
+use crate::a11y;
 use crate::theme::Tokens;
 use crate::widgets::check_label as mark;
 use crate::{EffectcraftApp, widgets};
@@ -50,6 +51,11 @@ pub fn utc_stamp(unix: u64) -> String {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + i64::from(m <= 2);
     format!("{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}", rem / 3600, rem / 60 % 60, rem % 60)
+}
+
+/// A queue item's row: its click area, keyboard focus and accessibility node.
+fn row_id(item: u64) -> egui::Id {
+    egui::Id::new(("rq-row", item))
 }
 
 fn status_color(t: &Tokens, s: &RenderStatus) -> Color32 {
@@ -456,14 +462,18 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let render_b = Rect::from_min_size(pos2(top.max.x - 12.0 - bw, top.min.y + 34.0), vec2(bw, 26.0));
     let stop_b = Rect::from_min_size(pos2(render_b.min.x - 8.0 - bw, render_b.min.y), vec2(bw, 26.0));
     let can_render = !rendering && queue.iter().any(RenderQueueItem::is_queued) && !available.is_empty();
-    if widgets::text_button(ui, render_b, "Render", can_render, &t, egui::Id::new("rq-render")).clicked() && can_render {
+    let render_resp = widgets::text_button(ui, render_b, "Render", can_render, &t, egui::Id::new("rq-render"));
+    a11y::button(&render_resp, "Render", can_render);
+    if render_resp.clicked() && can_render {
         actions.push(("renderQueue.render", json!({"wait": false})));
     }
     app.auto.add("renderQueue.render", render_b, "Render");
     // Notify (sound + notification when the queue finishes).
     let notify = app.session.project.render_prefs.notify;
     let nb = Rect::from_min_size(pos2(render_b.min.x - 8.0 - 2.0 * bw - 8.0, render_b.min.y + 4.0), vec2(18.0, 18.0));
-    if widgets::checkbox(ui, nb, notify, &t, egui::Id::new("rq-notify")).clicked() {
+    let notify_resp = widgets::checkbox(ui, nb, notify, &t, egui::Id::new("rq-notify"));
+    a11y::check_box(&notify_resp, tr("Notify"), notify, true);
+    if notify_resp.clicked() {
         actions.push(("renderQueue.setNotify", json!({"notify": !notify})));
     }
     p.text(pos2(nb.max.x + 5.0, nb.center().y), Align2::LEFT_CENTER, tr("Notify"), Tokens::ui(11.5), t.text_dim);
@@ -496,8 +506,9 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             }
         }
     };
-    p.text(pos2(bar.min.x + 8.0, bar.center().y), Align2::LEFT_CENTER, bar_text, Tokens::ui(11.5), t.text);
+    p.text(pos2(bar.min.x + 8.0, bar.center().y), Align2::LEFT_CENTER, &bar_text, Tokens::ui(11.5), t.text);
     app.auto.add("renderQueue.progress", bar, &format!("{:.0}%", frac * 100.0));
+    a11y::progress(&ui.interact(bar, egui::Id::new("rq-progress"), Sense::hover()), &bar_text, frac);
 
     // ---------------------------------------------------------- column header
     let head = Rect::from_min_size(pos2(rect.min.x, top.max.y), vec2(rect.width(), HEAD_H));
@@ -534,6 +545,9 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     if queue.is_empty() {
         lp.text(pos2(list.center().x, list.min.y + 30.0), Align2::CENTER_CENTER, tr("The render queue is empty."), Tokens::ui(12.0), t.text_faint);
     }
+    let ctx = ui.ctx().clone();
+    // Where each item's row starts in the scrolled content, for the keys.
+    let mut tops: Vec<(u64, f32)> = Vec::new();
     let editing_id = egui::Id::new("rq-edit-output");
     let mut editing: Option<(u64, String)> = ui.data(|d| d.get_temp(editing_id));
     for (k, it) in queue.iter().enumerate() {
@@ -553,11 +567,20 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 t.row_alt
             },
         );
-        let row_resp = ui.interact(row, egui::Id::new(("rq-row", it.id)), Sense::click());
-        if row_resp.clicked() {
+        let row_resp = ui.interact(row, row_id(it.id), Sense::click());
+        tops.push((it.id, row.min.y - list.min.y + scroll.offset));
+        if a11y::take_pending_focus(&ctx, "rq", row_resp.id) {
+            row_resp.request_focus();
+        }
+        if row_resp.clicked() || row_resp.gained_focus() {
             selected = Some(it.id);
             app.ui.focused = crate::dock::PanelKind::RenderQueue;
         }
+        if row_resp.has_focus() {
+            lp.rect_stroke(row.shrink(0.5), 0.0, Stroke::new(1.0, t.accent), StrokeKind::Inside);
+        }
+        let comp_item = app.session.project.item(it.comp);
+        let name = comp_item.map(|i| i.name.clone()).unwrap_or_else(|| "(missing composition)".into());
         let item_id = it.id;
         crate::widgets::context_menu(&row_resp, |ui| {
             if ui.button(tr("Duplicate")).clicked() {
@@ -580,7 +603,9 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         app.auto.add(&aid("row"), row, &format!("#{n}"));
         let is_open = open.contains(&it.id);
         let tw = Rect::from_center_size(pos2(cx_twirl + 8.0, row.center().y), vec2(14.0, 14.0));
-        if widgets::twirl(ui, tw, is_open, egui::Id::new(("rq-twirl", it.id)), &t).clicked() {
+        let tw_resp = widgets::twirl(ui, tw, is_open, egui::Id::new(("rq-twirl", it.id)), &t);
+        a11y::disclosure(&tw_resp, &tr_args(if is_open { "Hide details of {}" } else { "Show details of {}" }, &[&name]), is_open);
+        if tw_resp.clicked() {
             if is_open {
                 open.retain(|i| *i != it.id);
             } else {
@@ -589,15 +614,15 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         }
         app.auto.add(&aid("twirl"), tw, "Twirl");
         let cb = Rect::from_center_size(pos2(cx_render + 20.0, row.center().y), vec2(18.0, 18.0));
-        if widgets::checkbox(ui, cb, it.render, &t, egui::Id::new(("rq-cb", it.id))).clicked() && !rendering {
+        let cb_resp = widgets::checkbox(ui, cb, it.render, &t, egui::Id::new(("rq-cb", it.id)));
+        a11y::check_box(&cb_resp, &format!("{}: {name}", tr("Render")), it.render, !rendering);
+        if cb_resp.clicked() && !rendering {
             actions.push(("renderQueue.setRender", json!({"item": it.id, "render": !it.render})));
         }
         app.auto.add(&aid("render"), cb, if it.render { "Render: on" } else { "Render: off" });
-        let comp_item = app.session.project.item(it.comp);
         let label_col = comp_item.map(|i| t.label(i.label)).unwrap_or(t.text_faint);
         lp.rect_filled(Rect::from_center_size(pos2(cx_label + 6.0, row.center().y), vec2(10.0, 10.0)), 2.0, label_col);
         lp.text(pos2(cx_num + 2.0, row.center().y), Align2::LEFT_CENTER, n.to_string(), Tokens::ui(12.0), t.text_dim);
-        let name = comp_item.map(|i| i.name.clone()).unwrap_or_else(|| "(missing composition)".into());
         lp.text(pos2(cx_name + 2.0, row.center().y), Align2::LEFT_CENTER, &name, Tokens::ui(12.0), t.text);
         let status = if rendering && let Some(pr) = progress.as_ref().filter(|p| p.current == Some(it.id)) {
             format!("Rendering {:.0}%", if pr.total > 0 { pr.done as f64 * 100.0 / pr.total as f64 } else { 0.0 })
@@ -610,6 +635,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             ui.interact(st_rect, egui::Id::new(("rq-st", it.id)), Sense::hover()).on_hover_text(e);
         }
         app.auto.add(&aid("status"), st_rect, &status);
+        a11y::tree_item(&row_resp, &format!("{n}. {name}, {status}"), is_sel, 1, Some(is_open));
         if let Some(s) = it.started {
             lp.text(pos2(cx_started + 2.0, row.center().y), Align2::LEFT_CENTER, utc_stamp(s), Tokens::ui(11.5), t.text_dim);
         } else {
@@ -641,11 +667,16 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             let dd = Rect::from_min_size(pos2(ix + 70.0, r.min.y + 3.0), vec2(220.0, ROW_H - 6.0));
             let did = egui::Id::new(("rq-dd", it.id, sub));
             let shown: String = if summary.chars().count() > 31 { summary.chars().take(30).chain(std::iter::once('…')).collect() } else { summary.clone() };
-            if widgets::dropdown(ui, dd, &shown, &t, did).clicked() && !rendering {
+            let dd_resp = widgets::dropdown(ui, dd, &shown, &t, did);
+            a11y::combo_box(&dd_resp, label.trim_end_matches(':'), &summary, !rendering);
+            if dd_resp.clicked() && !rendering {
                 widgets::open_popup(ui, did);
             }
             let labels: Vec<String> = menu.iter().map(|(l, _)| l.clone()).collect();
             if let Some(i) = widgets::popup_menu(ui, did, dd.left_bottom(), &labels, None) {
+                if widgets::by_keyboard(ui) {
+                    dd_resp.request_focus();
+                }
                 let mut params = menu[i].1.clone();
                 if let Some(f) = params.get("form").and_then(Value::as_str) {
                     forms.push((it.clone(), f.to_string()));
@@ -673,11 +704,16 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 let ld = Rect::from_min_size(pos2(r.max.x - 190.0, r.min.y + 3.0), vec2(150.0, ROW_H - 6.0));
                 lp.text(pos2(ld.min.x - 6.0, r.center().y), Align2::RIGHT_CENTER, tr("Log:"), Tokens::ui(11.5), t.text_dim);
                 let lid = egui::Id::new(("rq-log", it.id));
-                if widgets::dropdown(ui, ld, it.log.label(), &t, lid).clicked() && !rendering {
+                let log_resp = widgets::dropdown(ui, ld, it.log.label(), &t, lid);
+                a11y::combo_box(&log_resp, tr("Log:").trim_end_matches(':'), it.log.label(), !rendering);
+                if log_resp.clicked() && !rendering {
                     widgets::open_popup(ui, lid);
                 }
                 let llabels: Vec<String> = RenderLog::ALL.iter().map(|l| mark(it.log == *l, l.label())).collect();
                 if let Some(i) = widgets::popup_menu(ui, lid, ld.left_bottom(), &llabels, None) {
+                    if widgets::by_keyboard(ui) {
+                        log_resp.request_focus();
+                    }
                     actions.push(("renderQueue.setLog", json!({"item": it.id, "log": RenderLog::ALL[i].label()})));
                 }
                 app.auto.add(&aid("log"), ld, it.log.label());
@@ -688,13 +724,23 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             lp.text(pos2(ox, r.center().y), Align2::LEFT_CENTER, tr("Output To:"), Tokens::ui(11.5), t.text_dim);
             let odd = Rect::from_min_size(pos2(ox + 62.0, r.min.y + 3.0), vec2(22.0, ROW_H - 6.0));
             let oid = egui::Id::new(("rq-out", it.id));
-            if widgets::dropdown(ui, odd, "", &t, oid).clicked() && !rendering {
+            let out_resp = widgets::dropdown(ui, odd, "", &t, oid);
+            a11y::combo_box(
+                &out_resp,
+                tr("Output To:").trim_end_matches(':'),
+                &app.session.resolve_output(it).unwrap_or_else(|| "Not yet specified".into()),
+                !rendering,
+            );
+            if out_resp.clicked() && !rendering {
                 widgets::open_popup(ui, oid);
             }
             app.auto.add(&aid("outputTo"), odd, "Output To");
             let omenu = output_to_menu(it);
             let olabels: Vec<String> = omenu.iter().map(|(l, _)| l.clone()).collect();
             if let Some(i) = widgets::popup_menu(ui, oid, odd.left_bottom(), &olabels, None) {
+                if widgets::by_keyboard(ui) {
+                    out_resp.request_focus();
+                }
                 if omenu[i].1.get("choose").is_some() {
                     match pick_output(app, it) {
                         Some(Some(path)) => actions.push(("renderQueue.setOutput", json!({"item": it.id, "path": path}))),
@@ -712,6 +758,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 let mut buf = editing.as_ref().map(|(_, b)| b.clone()).unwrap_or_default();
                 let mut child = ui.new_child(egui::UiBuilder::new().max_rect(path_rect));
                 let resp = child.add(egui::TextEdit::singleline(&mut buf).desired_width(path_rect.width()).font(Tokens::ui(11.5)));
+                a11y::text_input(&resp, tr("Output file name template"), &buf);
                 if resp.lost_focus() {
                     if ui.input(|i| i.key_pressed(egui::Key::Enter)) && !buf.trim().is_empty() {
                         actions.push(("renderQueue.setOutput", json!({"item": it.id, "path": buf.trim()})));
@@ -724,6 +771,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             } else {
                 let shown = app.session.resolve_output(it).unwrap_or_else(|| "Not yet specified".into());
                 let resp = ui.interact(path_rect, egui::Id::new(("rq-path", it.id)), Sense::click());
+                a11y::button(&resp, &tr_args("Output file: {}", &[&shown]), !rendering);
                 let col = if resp.hovered() { t.accent_hover } else { t.hot_text };
                 lp.with_clip_rect(path_rect.intersect(list)).text(pos2(path_rect.min.x, r.center().y), Align2::LEFT_CENTER, &shown, Tokens::ui(11.5), col);
                 // Clicking the file name opens the save dialog (Output Movie To); Alt-click, or a
@@ -753,6 +801,69 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         None => d.remove::<(u64, String)>(editing_id),
     });
 
+    // Keyboard: Up / Down move between the queued items, Home / End go to the first / last, Right
+    // and Left open and close the item's settings, Enter and Space do the same (Space only with a
+    // row focused: otherwise it plays the preview). The focus follows the selection.
+    let focused = ctx.memory(|m| m.focused());
+    let on_row = focused.is_some_and(|f| queue.iter().any(|i| row_id(i.id) == f));
+    let by_mouse = focused.is_none() && app.ui.focused == crate::dock::PanelKind::RenderQueue;
+    if (on_row || by_mouse) && editing.is_none() && app.dialog.is_none() && !widgets::any_menu_open(&ctx) {
+        let keys: Vec<egui::Key> = ctx.input(|i| {
+            i.events
+                .iter()
+                .filter_map(|e| match e {
+                    egui::Event::Key { key, pressed: true, modifiers, .. } if !modifiers.any() => Some(*key),
+                    _ => None,
+                })
+                .collect()
+        });
+        let mut moved = None;
+        for key in keys {
+            use egui::Key;
+            let at = selected.and_then(|s| queue.iter().position(|i| i.id == s));
+            let Some(last) = queue.len().checked_sub(1) else { break };
+            let to = match key {
+                Key::ArrowDown => Some(at.map_or(0, |a| a.saturating_add(1).min(last))),
+                Key::ArrowUp => Some(at.map_or(last, |a| a.saturating_sub(1))),
+                Key::Home if on_row => Some(0),
+                Key::End if on_row => Some(last),
+                _ => None,
+            };
+            if let Some(item) = to.and_then(|to| queue.get(to)) {
+                selected = Some(item.id);
+                moved = Some(item.id);
+                continue;
+            }
+            let Some(item) = selected.filter(|s| queue.iter().any(|i| i.id == *s)) else { continue };
+            match key {
+                Key::ArrowRight if !open.contains(&item) => open.push(item),
+                Key::ArrowLeft => open.retain(|i| *i != item),
+                Key::Enter | Key::Space if on_row || key == Key::Enter => {
+                    if open.contains(&item) {
+                        open.retain(|i| *i != item);
+                    } else {
+                        open.push(item);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(item) = moved {
+            if let Some((_, top)) = tops.iter().find(|(id, _)| *id == item) {
+                widgets::PanelScroll::reveal(&ctx, egui::Id::new("rq-scroll"), *top, *top + ROW_H, list.height());
+            }
+            app.ui.focused = crate::dock::PanelKind::RenderQueue;
+            if on_row {
+                a11y::focus_next_pass(&ctx, "rq", row_id(item));
+            }
+            ctx.request_repaint();
+        }
+        // The arrows are the queue's, not egui's spatial focus moves.
+        if on_row {
+            ctx.memory_mut(|m| m.move_focus(egui::FocusDirection::None));
+        }
+    }
+
     // Delete removes the selected item when the panel has focus.
     if app.ui.focused == crate::dock::PanelKind::RenderQueue
         && editing.is_none()
@@ -760,7 +871,8 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         && let Some(id) = selected
         && app.dialog.is_none()
         && ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))
-        && !ui.ctx().egui_wants_keyboard_input()
+        // (A focused queue row is not typing; any other focused widget may be.)
+        && (on_row || !ui.ctx().egui_wants_keyboard_input())
     {
         actions.push(("renderQueue.remove", json!({"item": id})));
         selected = None;
@@ -790,7 +902,6 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
 
     open.retain(|id| queue.iter().any(|i| i.id == *id));
     ui.data_mut(|d| d.insert_temp(state_id, (open, selected)));
-    let ctx = ui.ctx().clone();
     for (it, f) in forms {
         open_menu_form(app, &it, &f);
     }
