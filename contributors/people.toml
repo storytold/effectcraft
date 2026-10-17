@@ -59,6 +59,10 @@ sync_github_name = false
 real_name = "Valentin Klein"
 display_name = "Valentin Klein"
 
+[people.guillehr2]
+real_name = "Guillem Hermida"
+sync_github_name = true
+
 [people.Losminek]
 sync_github_name = true
 
