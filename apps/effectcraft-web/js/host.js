@@ -315,7 +315,15 @@ function spawn(base) {
 /// path, bytes)` receives "reply" (json), "file" (path, bytes: a rendered file to download),
 /// "store" (path, bytes: a file to keep in browser storage) and "error" (json = message).
 export function workerRun(id, json, files, base, onMessage) {
-  const w = idle.pop() ?? spawn(base);
+  let w;
+  try {
+    w = idle.pop() ?? spawn(base);
+  } catch (e) {
+    // `new Worker` throws at once when the page's origin is opaque (a sandboxed iframe): the job
+    // fails like one whose worker didn't start.
+    setTimeout(() => onMessage("error", String((e && e.message) || e), null, null));
+    return;
+  }
   running.set(id, w);
   w.ready.then(() => {
     w.worker.onmessage = (e) => {
@@ -380,7 +388,17 @@ const frameWorkers = [];
 /// GPU effects on it.
 export function frameWorkerStart(base, onMessage, gpu) {
   const index = frameWorkers.length;
-  const worker = new Worker(new URL("worker.js", base), { type: "module", name: `effectcraft-frames-${index}` });
+  let worker;
+  try {
+    worker = new Worker(new URL("worker.js", base), { type: "module", name: `effectcraft-frames-${index}` });
+  } catch (e) {
+    // The constructor throws at once when the page's origin is opaque (a sandboxed iframe). The
+    // slot stays, and the failure is reported like a worker that died, after the caller has
+    // recorded the index: frames then render on the page's thread (as with `?noworkers`).
+    frameWorkers.push(null);
+    setTimeout(() => onMessage(index, undefined, undefined, String((e && e.message) || e || "frame worker failed")));
+    return index;
+  }
   worker.onmessage = (e) => {
     const m = e.data;
     if (m && m.type === "frameReply") onMessage(index, m.json, m.bytes ? new Uint8Array(m.bytes) : null, undefined);

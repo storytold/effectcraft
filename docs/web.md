@@ -156,8 +156,9 @@ of the project:
 
 Frames without effects that the WebGPU compositor can finish alone still render on the page
 (they stay on the GPU, no readback); everything else (frames with effects, 3D runs, the Software
-Only renderer, WebGL2) goes to the workers. If no worker is usable, frames render on the page's
-thread as before. `effectcraft.info().frameWorkers` reports `{workers, alive, busy, rendered,
+Only renderer, WebGL2) goes to the workers. If no worker is usable (one that failed to start, or
+one the browser refused to create, as in a sandboxed iframe), frames render on the page's thread
+as before. `effectcraft.info().frameWorkers` reports `{workers, alive, busy, rendered,
 failed, lastMs, syncs, syncBytes, gpu, gpuFrames, lastPasses, diskHits}` (`gpu`: each worker's
 adapter, `{cpu: why}` without one, `null` until it reported).
 
@@ -425,8 +426,9 @@ node apps/effectcraft-web/tests/smoke.mjs --url http://127.0.0.1:8765/ --out tar
 
 `apps/effectcraft-web/tests/workers.mjs` checks the job-worker plumbing (`js/host.js`,
 `web/worker.js`) under Node with a fake `Worker`, without a build: a replaced file is sent to a
-reused worker again even at the same size, and a worker that fails to start fails its job and is
-terminated (`node apps/effectcraft-web/tests/workers.mjs`).
+reused worker again even at the same size, a worker that fails to start fails its job and is
+terminated, and a `new Worker` that throws (a sandboxed iframe) fails the job and reports the
+frame worker dead instead of stopping startup (`node apps/effectcraft-web/tests/workers.mjs`).
 
 `apps/effectcraft-web/tests/page.mjs` checks page-side helpers of `js/host.js` the same way with
 a fake DOM: a picked file that can't be read is reported while the others are added, and the
