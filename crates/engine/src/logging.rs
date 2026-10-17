@@ -5,15 +5,15 @@
 //! terminal, so that file is what a bug report can attach. The last few hundred warnings and
 //! errors are also kept in memory for the System Compatibility Report.
 //!
-//! Levels: `info` for EffectCraft's own crates, `warn` for everything else (wgpu and naga are
-//! chatty). `RUST_LOG` replaces that (a level such as `debug`, or per target:
+//! Levels by default ([`DEFAULT_FILTER`]): `info` for EffectCraft's own crates, `warn` for
+//! everything else (wgpu and naga are chatty). `RUST_LOG` replaces that (a level such as `debug`, or per target:
 //! `effectcraft=debug,wgpu=warn`).
 //!
 //! Help ▸ Enable Logging ([`set_enabled`], the `help.enableLogging` command) additionally appends
 //! every EffectCraft record to `Logs/EffectCraft Log.txt`, across launches.
 //!
-//! Frontends call [`install`] once at startup and the desktop app [`attach_session_log`] once the
-//! settings folder is known; records logged before that are kept (up to [`MAX_PENDING`]) and
+//! Frontends call [`install`] (or [`install_with`] for another default, as the CLI does with `warn`)
+//! once at startup and the desktop app [`attach_session_log`] once the settings folder is known; records logged before that are kept (up to [`MAX_PENDING`]) and
 //! written first. Writing never panics: a file that can't be created or written leaves standard
 //! error as the only sink. Never log the control-channel token.
 
@@ -125,11 +125,16 @@ fn format_line(ts: &str, level: log::Level, thread: &str, target: &str, message:
 
 /// Install the logger (once; later calls and other installed loggers are left alone).
 pub fn install() {
+    install_with(DEFAULT_FILTER);
+}
+
+/// [`install`] with `default` as the filter when `RUST_LOG` is unset or empty.
+pub fn install_with(default: &str) {
     static LOGGER: Logger = Logger;
     if log::set_logger(&LOGGER).is_ok() {
         let filter = FILTER.get_or_init(|| {
             let spec = std::env::var("RUST_LOG").ok().filter(|s| !s.trim().is_empty());
-            parse_filter(spec.as_deref().unwrap_or(DEFAULT_FILTER))
+            parse_filter(spec.as_deref().unwrap_or(default))
         });
         log::set_max_level(filter.iter().map(|d| d.1).fold(LevelFilter::Info, Ord::max));
     }
@@ -349,6 +354,15 @@ mod tests {
         assert_eq!(level_for(&f, "effectcraft_ui_egui::app"), LevelFilter::Info);
         assert_eq!(level_for(&f, "wgpu_core::device"), LevelFilter::Warn);
         assert_eq!(level_for(&f, "naga"), LevelFilter::Warn);
+    }
+
+    /// The CLI's default (`warn`): warnings from every crate, no info chatter on stderr.
+    #[test]
+    fn the_cli_filter_shows_only_warnings() {
+        let f = parse_filter("warn");
+        assert_eq!(level_for(&f, "effectcraft_gpu::context"), LevelFilter::Warn);
+        assert_eq!(level_for(&f, "effectcraft_engine::render_queue"), LevelFilter::Warn);
+        assert_eq!(level_for(&f, "wgpu_core::device"), LevelFilter::Warn);
     }
 
     #[test]

@@ -271,6 +271,9 @@ fn utf8_args(raw: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Vec<St
 }
 
 fn main() {
+    // Warnings and errors to standard error (`RUST_LOG` overrides), so a GPU that declines
+    // frames or runs out of memory says so instead of silently rendering on the CPU.
+    effectcraft_engine::logging::install_with("warn");
     let raw = match utf8_args(std::env::args_os().skip(1)) {
         Ok(raw) => raw,
         Err(e) => fail_usage(&e),
