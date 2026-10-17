@@ -315,6 +315,12 @@ pub struct GpuContext {
     pub(crate) particle_states: crate::particles::StatesCell,
     /// Deferred readbacks (a browser worker's WebGPU device), see [`crate::deferred`].
     pub(crate) deferred: Option<Arc<crate::deferred::Deferred>>,
+    /// The adapter is a software rasteriser (llvmpipe, WARP): its float maths follows the
+    /// CPU's exactly, so the YUV tests hold it to exact parity.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) software: bool,
+    /// Export frame → YUV 4:2:0 kernel (built on first use).
+    pub(crate) yuv: std::sync::OnceLock<crate::yuv::YuvPipe>,
     readbacks: Arc<crate::readback::Readbacks>,
 }
 
@@ -650,6 +656,8 @@ impl GpuContext {
             transfers: Default::default(),
             zeros: Default::default(),
             adv3d: std::sync::OnceLock::new(),
+            yuv: std::sync::OnceLock::new(),
+            software: info.device_type == wgpu::DeviceType::Cpu,
             adv3d_raster: adv3d_unsupported.is_none(),
             particles: Default::default(),
             particle_states: Default::default(),

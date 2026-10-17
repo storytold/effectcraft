@@ -39,6 +39,12 @@ pub(crate) fn gpu_inflight(var: Option<&str>) -> usize {
     }
 }
 
+/// An H.264 export frame: RGBA8 to convert, or planes the accelerator already converted.
+pub(crate) enum H264Frame {
+    Rgba(Vec<u8>),
+    Yuv420(Vec<u8>),
+}
+
 /// `render` then `encode` over the frames `ks`, results in `ks` order.
 ///
 /// Without `cap` every frame renders and encodes in one parallel batch (the CPU path, as
@@ -250,6 +256,52 @@ impl<'a> Cx<'a> {
             ft.lock().unwrap_or_else(|e| e.into_inner()).push((i, t0.elapsed().as_secs_f64()));
         }
         img
+    }
+
+    /// Output frame `i` as the H.264 export's 4:2:0 planes at `w`×`h`, rendered and converted
+    /// by the accelerator ([`effectcraft_render::Accelerator::comp_frame_yuv420`]). Only for
+    /// frames that need nothing done after the render (progressive, at the project's depth, no
+    /// crop or resize, rendered at exactly `w`×`h`). `None`: render it with [`Cx::frame`].
+    pub fn yuv420_frame(&self, comp: &Comp, i: u64, w: u32, h: u32) -> Option<Vec<u8>> {
+        if self.deferred() {
+            return None;
+        }
+        let FrameSample::Progressive(t) = self.job.settings.sample(comp, i) else { return None };
+        let depth = self.job.settings.color_depth;
+        if depth != ColorDepth::Current && depth.resolve(self.project.settings.bit_depth).levels().is_some() {
+            return None;
+        }
+        let om = self.job.output;
+        let scale = self.job.settings.resolution.clamp(0.01, 4.0);
+        let size = |n: u32| ((n as f64 * scale).round() as u32).max(1);
+        if om.resize.enabled || (size(comp.width), size(comp.height)) != (w, h) || om.crop.edges(w, h, scale) != (0, 0, 0, 0) {
+            return None;
+        }
+        let t0 = Instant::now();
+        let r = self.renderer();
+        let planes = r.active_accel()?.comp_frame_yuv420(&r, self.job.comp, t, comp.background)?;
+        let (cw, ch) = (w.div_ceil(2) as usize, h.div_ceil(2) as usize);
+        if planes.len() != w as usize * h as usize + 2 * cw * ch {
+            return None;
+        }
+        if let Some(ft) = &self.frame_times {
+            ft.lock().unwrap_or_else(|e| e.into_inner()).push((i, t0.elapsed().as_secs_f64()));
+        }
+        Some(planes)
+    }
+
+    /// Output frames `ks` for the H.264 encoder: the accelerator's planes
+    /// ([`Cx::yuv420_frame`]) where it can, otherwise `rgba` of the frame rendered as usual.
+    pub(crate) fn h264_frames(&self, comp: &Comp, ks: Vec<u64>, w: u32, h: u32, rgba: impl Fn(u64, Image) -> Vec<u8> + Sync + Send) -> Vec<H264Frame> {
+        map_frames(
+            ks,
+            self.gpu_cap(),
+            |k| match self.yuv420_frame(comp, k, w, h) {
+                Some(p) => H264Frame::Yuv420(p),
+                None => H264Frame::Rgba(rgba(k, self.frame(comp, k))),
+            },
+            |_, f| f,
+        )
     }
 
     /// Output Module ▸ Crop, then Resize.

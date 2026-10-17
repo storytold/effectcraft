@@ -83,6 +83,7 @@ mod ops;
 mod particles;
 mod readback;
 mod walk;
+mod yuv;
 
 use std::sync::Arc;
 
@@ -337,6 +338,25 @@ impl Accelerator for Gpu {
             }
         }
         img
+    }
+
+    fn comp_frame_yuv420(&self, r: &Renderer, comp: ItemId, t: Tick, bg: [f32; 3]) -> Option<Vec<u8>> {
+        self.ctx.check_health().ok()?;
+        if !self.ctx.can_readback() || self.ctx.deferred.is_some() {
+            return None;
+        }
+        // Sizes the kernel can't take fall back before any GPU work, not after a render.
+        let (w, h) = walk::frame_size(r, comp, t)?;
+        if !yuv::supported(w, h) {
+            return None;
+        }
+        let mut e = Enc::new(&self.ctx);
+        let img = walk::render(&mut e, r, comp, t)?;
+        let yp = self.ctx.yuv.get_or_init(|| yuv::YuvPipe::new(&self.ctx.device));
+        let planes = yuv::convert(&mut e, yp, &img, bg)?;
+        // A device fault seen while the frame recorded makes the planes untrustworthy.
+        self.ctx.check_health().ok()?;
+        Some(planes)
     }
 
     fn supports_effect(&self, id: &str) -> bool {

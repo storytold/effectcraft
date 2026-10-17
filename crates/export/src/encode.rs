@@ -10,6 +10,7 @@ use effectcraft_time::{FrameRate, Tick};
 use filmcraft_isobmff::{Brand, FourCc, Mp4Writer, PcmConfig, SampleEntry, TrackConfig, WriteSample, WriterOptions};
 use rayon::prelude::*;
 
+use crate::pipeline::H264Frame;
 use crate::{Cx, ExportError, Report, Result, State, batch_size, wants_audio};
 
 fn enc(e: impl std::fmt::Display) -> ExportError {
@@ -30,6 +31,10 @@ pub(crate) trait VideoEncoder {
     fn sample_entry(&self) -> SampleEntry;
     fn encode(&mut self, rgba: &[u8], index: u64) -> Result<Vec<Packet>>;
     fn flush(&mut self) -> Result<Vec<Packet>>;
+    /// Encode a frame already in 8-bit 4:2:0 (Y, U, V planes); only H.264 takes them.
+    fn encode_yuv420(&mut self, _planes: &[u8], _index: u64) -> Result<Vec<Packet>> {
+        Err(ExportError::Encode("this encoder takes RGBA frames".into()))
+    }
     /// Edit-list media start (B-frame delay) in the track timescale.
     fn media_start(&self) -> Option<i64> {
         None
@@ -79,6 +84,14 @@ impl VideoEncoder for H264 {
         let ps = self.enc.try_encode(&frame, index as i64 * self.rate.den).map_err(enc)?;
         Ok(self.packets(ps))
     }
+    fn encode_yuv420(&mut self, planes: &[u8], index: u64) -> Result<Vec<Packet>> {
+        let (w, cw, ch) = (self.w as usize, (self.w as usize).div_ceil(2), (self.h as usize).div_ceil(2));
+        let (y, uv) = planes.split_at(w * self.h as usize);
+        let (u, v) = uv.split_at(cw * ch);
+        let frame = filmcraft_h264enc::YuvFrame { y, u, v, y_stride: w, uv_stride: cw };
+        let ps = self.enc.try_encode(&frame, index as i64 * self.rate.den).map_err(enc)?;
+        Ok(self.packets(ps))
+    }
     fn flush(&mut self) -> Result<Vec<Packet>> {
         let ps = self.enc.flush();
         Ok(self.packets(ps))
@@ -88,33 +101,7 @@ impl VideoEncoder for H264 {
     }
 }
 
-/// BT.709 limited-range 8-bit 4:2:0 from RGBA8 (2×2 chroma average; alpha ignored).
-pub(crate) fn rgba_to_yuv420(rgba: &[u8], w: usize, h: usize, y: &mut Vec<u8>, u: &mut Vec<u8>, v: &mut Vec<u8>) {
-    let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
-    y.resize(w * h, 0);
-    u.resize(cw * ch, 0);
-    v.resize(cw * ch, 0);
-    y.par_chunks_mut(w * 2).zip(u.par_chunks_mut(cw).zip(v.par_chunks_mut(cw))).enumerate().for_each(|(cy, (yr, (ur, vr)))| {
-        let rows = yr.len() / w;
-        let mut acc = vec![(0f32, 0f32, 0f32); cw];
-        for dy in 0..rows {
-            let src = &rgba[(cy * 2 + dy) * w * 4..][..w * 4];
-            for x in 0..w {
-                let (r, g, b) = (src[x * 4] as f32 / 255.0, src[x * 4 + 1] as f32 / 255.0, src[x * 4 + 2] as f32 / 255.0);
-                let l = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-                yr[dy * w + x] = (16.0 + 219.0 * l).round().clamp(1.0, 254.0) as u8;
-                let a = &mut acc[x / 2];
-                a.0 += (b - l) / 1.8556;
-                a.1 += (r - l) / 1.5748;
-                a.2 += 1.0;
-            }
-        }
-        for (cx, a) in acc.iter().enumerate() {
-            ur[cx] = (128.0 + 224.0 * a.0 / a.2).round().clamp(1.0, 254.0) as u8;
-            vr[cx] = (128.0 + 224.0 * a.1 / a.2).round().clamp(1.0, 254.0) as u8;
-        }
-    });
-}
+pub(crate) use effectcraft_raster::yuv::rgba_to_yuv420;
 
 // ---------------------------------------------------------------- ProRes
 
@@ -266,13 +253,24 @@ pub(crate) async fn movie(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut St
     let brand = if matches!(fmt, OutputFormat::ProRes | OutputFormat::Uncompressed) { Brand::Mov } else { Brand::Mp4 };
     let batch = batch_size();
     let render = |_: u64, img: effectcraft_raster::Image| -> Vec<u8> { job.pixels(&img, comp, channels, w, h) };
+    // H.264 frames the accelerator can convert itself come back as planes (12 MB instead of
+    // 133 MB of RGBA f32 read back at 4K); everything else renders and converts as before.
+    // Deferred readbacks (a browser worker) keep their pass-based path: no blocking there.
+    let gpu_yuv = fmt == OutputFormat::H264 && channels == Channels::Rgb && !job.deferred();
+    let frames = async |ks: Vec<u64>| -> Vec<H264Frame> {
+        if gpu_yuv { job.h264_frames(comp, ks, w, h, render) } else { job.frames(comp, ks, render).await.into_iter().map(H264Frame::Rgba).collect() }
+    };
+    let encode = |venc: &mut Box<dyn VideoEncoder>, f: &H264Frame, index: u64| match f {
+        H264Frame::Rgba(px) => venc.encode(px, index),
+        H264Frame::Yuv420(p) => venc.encode_yuv420(p, index),
+    };
 
     // Encode the first batch before creating tracks: encoders finalise their config on frame 1.
     let first_end = batch.min(st.total);
-    let first: Vec<Vec<u8>> = job.frames(comp, (0..first_end).collect(), render).await;
+    let first = frames((0..first_end).collect()).await;
     let mut pending = Vec::new();
-    for (k, px) in first.iter().enumerate() {
-        pending.extend(venc.encode(px, k as u64)?);
+    for (k, f) in first.iter().enumerate() {
+        pending.extend(encode(&mut venc, f, k as u64)?);
     }
     drop(first);
     st.advance(first_end)?;
@@ -358,9 +356,9 @@ pub(crate) async fn movie(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut St
     let mut i = first_end;
     while i < total {
         let end = (i + batch).min(total);
-        let frames: Vec<Vec<u8>> = job.frames(comp, (i..end).collect(), render).await;
-        for (k, px) in frames.iter().enumerate() {
-            let ps = venc.encode(px, i + k as u64)?;
+        let batch_frames = frames((i..end).collect()).await;
+        for (k, f) in batch_frames.iter().enumerate() {
+            let ps = encode(&mut venc, f, i + k as u64)?;
             write_video(&mut mux, ps)?;
         }
         write_audio_until(&mut mux, frame_end_time(end), &mut cursor)?;
