@@ -63,8 +63,7 @@ pub const STILL_EXTENSIONS: &[&str] =
     &["png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "bmp", "exr", "tga", "hdr", "psd", "psb", "svg", "pdf", "ai", "eps"];
 /// File extensions recognised as audio-only files.
 pub const AUDIO_EXTENSIONS: &[&str] = filmcraft_media::AUDIO_EXTENSIONS;
-/// File extensions recognised as movies.
-pub const VIDEO_EXTENSIONS: &[&str] = &["mp4", "m4v", "mov", "mkv", "webm", "mxf"];
+pub use effectcraft_project::VIDEO_EXTENSIONS;
 
 /// File extensions recognised as 3D models (Advanced 3D model layers).
 pub const MODEL_EXTENSIONS: &[&str] = &["gltf", "glb", "obj", "stl", "fbx"];

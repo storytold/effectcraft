@@ -168,9 +168,14 @@ fn tone_wav() -> Option<PathBuf> {
 
 /// Frame `n` of `src` as RGBA PNG extracted by ffmpeg (Y'CbCr → RGB with the BT.709 matrix).
 fn reference_frame(src: &Path, n: usize) -> Image {
+    reference_frame_in(src, n, "bt709")
+}
+
+/// [`reference_frame`] of a movie whose Y'CbCr is in `matrix` (`bt601` for Motion JPEG).
+fn reference_frame_in(src: &Path, n: usize, matrix: &str) -> Image {
     let stem = src.file_stem().expect("stem").to_string_lossy().to_string();
     let name = format!("ref_{stem}_{n}.png");
-    let vf = format!("select='eq(n\\,{n})',scale=in_color_matrix=bt709:in_range=auto:out_range=pc:flags=bilinear+accurate_rnd+full_chroma_int,format=rgba");
+    let vf = format!("select='eq(n\\,{n})',scale=in_color_matrix={matrix}:in_range=auto:out_range=pc:flags=bilinear+accurate_rnd+full_chroma_int,format=rgba");
     let p = ffmpeg_fixture(&name, &["-i", src.to_str().expect("utf8"), "-vf", &vf, "-fps_mode", "passthrough", "-frames:v", "1"]).expect("ffmpeg");
     load_png(&p)
 }
@@ -472,12 +477,12 @@ fn dnxhd_mxf() -> Option<PathBuf> {
     )
 }
 
-/// MXF is importable footage (After Effects imports it), whatever the extension's case.
+/// MXF and AVI are importable footage (After Effects imports them), whatever the extension's case.
 #[test]
-fn mxf_is_importable() {
-    assert!(effectcraft_media::is_importable(Path::new("/media/A001C003.mxf")));
-    assert!(effectcraft_media::is_importable(Path::new("/media/A001C003.MXF")));
-    assert!(!effectcraft_media::is_importable(Path::new("/media/A001C003.avi")), "no AVI demuxer yet");
+fn mxf_and_avi_are_importable() {
+    for name in ["A001C003.mxf", "A001C003.MXF", "capture.avi", "CAPTURE.AVI"] {
+        assert!(effectcraft_media::is_importable(&Path::new("/media").join(name)), "{name}");
+    }
 }
 
 #[test]
@@ -521,6 +526,124 @@ fn mxf_dnxhd_frames() {
         eprintln!("mxf dnxhd frame {n}: {db:.2} dB");
         assert!(db > 35.0, "frame {n}: {db:.2} dB");
     }
+}
+
+fn mjpeg_avi() -> Option<PathBuf> {
+    ffmpeg_fixture(
+        "testsrc2_mjpeg_pcm.avi",
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=640x360:rate=25:duration=2",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000:duration=2",
+            "-c:v",
+            "mjpeg",
+            "-q:v",
+            "2",
+            "-pix_fmt",
+            "yuvj420p",
+            "-c:a",
+            "pcm_s16le",
+            "-ac",
+            "2",
+        ],
+    )
+}
+
+#[test]
+fn avi_mjpeg_with_pcm_audio() {
+    let Some(p) = mjpeg_avi() else { return };
+    let f = probe(&p).expect("probe");
+    assert_eq!(f.kind, FootageKind::Video);
+    assert_eq!((f.width, f.height), (640, 360));
+    assert_eq!(f.frame_rate, FrameRate::FPS_25);
+    assert!((f.duration.seconds() - 2.0).abs() < 0.1, "duration {:?}", f.duration.seconds());
+    assert!(f.has_video && f.has_audio);
+    assert_eq!(f.codec, "Motion JPEG");
+    let pool = MediaPool::new();
+    for n in [0usize, 1, 30, 7, 49] {
+        let img = pool.frame_at(&f, t_of(f.frame_rate, n as i64)).expect("frame");
+        let db = psnr(&img, &reference_frame_in(&p, n, "bt601"));
+        assert!(db > 35.0, "frame {n}: {db:.2} dB");
+    }
+    let s = pool.audio_samples(&f, Tick(TICKS_PER_SECOND / 2), 4800, 48_000);
+    assert_eq!(s.len(), 9600);
+    let rms = (s.iter().map(|v| v * v).sum::<f32>() / s.len() as f32).sqrt();
+    assert!((rms - 0.0625).abs() < 0.01, "rms {rms}");
+}
+
+/// An AVI whose video FilmCraft can't decode imports, and says why it shows no picture (as an
+/// unsupported stream in any other container does), rather than failing as a broken file.
+#[test]
+fn avi_with_an_unsupported_codec_says_so() {
+    let Some(p) = ffmpeg_fixture("testsrc2_xvid.avi", &["-f", "lavfi", "-i", "testsrc2=size=320x180:rate=25:duration=1", "-c:v", "mpeg4", "-vtag", "XVID"])
+    else {
+        return;
+    };
+    let f = probe(&p).expect("a valid AVI imports");
+    assert_eq!((f.kind, f.width, f.height), (FootageKind::Video, 320, 180));
+    let pool = MediaPool::new();
+    if pool.frame(ItemId(1), &f, Tick::ZERO).is_some() {
+        // FilmCraft decodes MPEG-4 Part 2 now: nothing to report
+        assert_eq!(pool.problem(&f), None);
+        return;
+    }
+    let why = pool.problem(&f).expect("a failed frame leaves a reason");
+    assert!(why.contains("MPEG-4 Part 2") && why.contains("isn't supported"), "{why}");
+}
+
+/// A file that only looks like an AVI is an import error that says so.
+#[test]
+fn an_invalid_avi_is_an_import_error() {
+    let e = probe_bytes("broken.avi", Arc::from(&b"RIFF\x10\0\0\0AVI LIST\0\0\0\0garbage"[..])).expect_err("not an AVI");
+    assert!(e.to_string().contains("invalid AVI"), "{e}");
+}
+
+/// A damaged AVI imports: a truncated recording as far as it goes, and a packet that doesn't
+/// decode loses its own frame only, with a reason that says the file is damaged rather than
+/// unsupported.
+#[test]
+fn a_damaged_avi_loses_only_what_is_damaged() {
+    let Some(p) = mjpeg_avi() else { return };
+    let bytes = std::fs::read(&p).expect("read");
+    let full = probe(&p).expect("probe");
+    let pool = MediaPool::new();
+
+    let cut: Arc<[u8]> = bytes[..bytes.len() / 3].into();
+    let f = probe_bytes("cut.avi", cut.clone()).expect("a truncated AVI imports");
+    assert!(f.duration > Tick::ZERO && f.duration < full.duration, "{:?} of {:?}", f.duration, full.duration);
+    pool.add_bytes("cut.avi", cut);
+    let last = f.frame_rate.frame_at(f.duration - Tick(1));
+    assert!(pool.frame(ItemId(1), &f, t_of(f.frame_rate, last)).is_some(), "its last frame");
+
+    // Garble the JPEG data of the video chunk of frame 10.
+    let mut bad = bytes.clone();
+    let mut at = bad.windows(4).position(|w| w == b"movi").expect("movi") + 4;
+    let mut video = 0;
+    while let Some(head) = bad.get(at..at + 8) {
+        let size = u32::from_le_bytes([head[4], head[5], head[6], head[7]]) as usize;
+        if &head[2..4] == b"dc" {
+            if video == 10 {
+                bad[at + 8 + 200..at + 8 + size.min(3000)].iter_mut().enumerate().for_each(|(i, b)| *b = if i % 7 == 0 { 0xFF } else { 0 });
+                break;
+            }
+            video += 1;
+        }
+        at += 8 + size + size % 2;
+    }
+    assert_eq!(video, 10, "found frame 10's chunk");
+    let f = probe_bytes("bad.avi", bad.clone().into()).expect("a damaged AVI imports");
+    pool.add_bytes("bad.avi", bad.into());
+    assert!(pool.frame(ItemId(2), &f, t_of(f.frame_rate, 10)).is_none(), "the damaged frame");
+    for n in [9, 11, 30] {
+        assert!(pool.frame(ItemId(2), &f, t_of(f.frame_rate, n)).is_some(), "frame {n}");
+    }
+    let why = pool.problem(&f).expect("a failed frame leaves a reason");
+    assert!(why.contains("can't be decoded") && !why.contains("isn't supported"), "{why}");
 }
 
 #[test]

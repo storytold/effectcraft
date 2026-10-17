@@ -1155,13 +1155,14 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         app.auto.add("viewer.warpBanner", r, &text);
     }
 
-    // Footage that can't be decoded (no decoder for its codec / profile): say why on the layer
-    // instead of leaving a black picture.
+    // Footage (or the proxy in use for footage or a precomp) that can't be decoded (no decoder
+    // for its codec / profile): say why on the layer instead of leaving a black picture.
     let mut notices = 0;
     for layer in comp.layers.iter().filter(|l| l.is_active_at(time) && l.switches.video) {
-        let effectcraft_engine::project::LayerSource::Footage { item } = &layer.source else { continue };
-        let Some(effectcraft_engine::project::ItemKind::Footage(f)) = app.session.project.item(*item).map(|i| &i.kind) else { continue };
-        let Some(why) = app.session.footage.problem(f) else { continue };
+        let (effectcraft_engine::project::LayerSource::Footage { item } | effectcraft_engine::project::LayerSource::Comp { item }) = &layer.source else {
+            continue;
+        };
+        let Some(why) = app.session.project.item(*item).and_then(|i| app.session.footage.item_problem(i)) else { continue };
         if notices >= 3 {
             break;
         }

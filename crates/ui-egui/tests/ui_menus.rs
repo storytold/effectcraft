@@ -205,10 +205,10 @@ fn relink_restores_decoded_pixels_and_invalidates_viewer_content() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
-/// #767: File ▸ Import ▸ File… offers MXF footage (OP1a / OP-Atom from broadcast cameras and
-/// Avid), which the Media Browser lists and the importer reads.
+/// #767, #1701: File ▸ Import ▸ File… and the proxy dialog offer every movie type the importer
+/// reads (MXF from broadcast cameras and Avid, AVI, …), the list the Media Browser goes by too.
 #[test]
-fn import_dialog_offers_mxf() {
+fn import_and_proxy_dialogs_offer_every_movie_type() {
     use std::cell::RefCell;
     use std::rc::Rc;
 
@@ -219,11 +219,15 @@ fn import_dialog_offers_mxf() {
         *seen.borrow_mut() = exts.iter().map(|e| e.to_string()).collect();
         Vec::new()
     }));
-    let result = effectcraft_ui_egui::menus::invoke(&mut app, &egui::Context::default(), "file.import", json!({})).unwrap();
-    assert!(result.is_null(), "cancelled: nothing imported");
-    let offered = offered.borrow();
-    assert!(offered.iter().any(|e| e == "mxf"), "offered {offered:?}");
-    assert!(offered.iter().any(|e| e == "mov"));
+    for (command, still) in [("file.import", "psd"), ("file.setProxy", "png")] {
+        let result = effectcraft_ui_egui::menus::invoke(&mut app, &egui::Context::default(), command, json!({})).unwrap();
+        assert!(result.is_null(), "{command} cancelled: nothing done");
+        let offered = offered.borrow();
+        for ext in effectcraft_project::VIDEO_EXTENSIONS.iter().chain([&still]) {
+            assert!(offered.iter().any(|e| e == ext), "{command} offers {ext}: {offered:?}");
+        }
+        assert!(offered.iter().any(|e| e == "avi"), "{command}: {offered:?}");
+    }
 }
 
 /// #1059: opening the demo from the start screen and immediately pressing Spacebar previews

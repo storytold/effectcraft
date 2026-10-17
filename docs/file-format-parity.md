@@ -65,7 +65,7 @@ trips and renders, checked by tests, not against After Effects), **partial** (na
 | Apple ProRes (422 family, 4444) | R/W | yes | yes | good; 4444 colour tag wrong (#340); no ProRes RAW |
 | WebM / Matroska (VP9, AV1, Opus) | R (limited) | yes, incl. VP9 alpha | yes | beyond After Effects |
 | MXF (OP1a / OP-Atom) | R/W | yes (FilmCraft's demuxer: AVC, MPEG-2 incl. XDCAM / D-10, VC-3 / DNxHD, ProRes; PCM audio) | none | partial: import (#767), checked against ffmpeg; no MXF output |
-| AVI | R | none | none | Media Browser lists it |
+| AVI | R | yes (FilmCraft's demuxer: AVI 1.0 / OpenDML; Motion JPEG, H.264, HEVC, uncompressed; PCM, MP3, MP2, AC-3 audio) | none | partial: import (#1701), checked against ffmpeg; H.264 needs its parameter sets in the chunks (global headers and copies with an `avcC` record don't decode until storytold/filmcraft#2303), and a damaged video index loses the video (storytold/filmcraft#2302); DV, MPEG-4 Part 2 (DivX / Xvid) and other legacy codecs import but show why they have no picture; no AVI output |
 | DNxHD / DNxHR | R/W | unverified (FilmCraft decodes it; reachable only inside `.mov`) | none | — |
 | BRAW, R3D, ARRIRAW | R (plug-ins / SDKs) | none | none | proprietary SDKs |
 | Variable-frame-rate phone video | R | unverified | — | needs a real-media corpus |
