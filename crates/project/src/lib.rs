@@ -779,6 +779,16 @@ impl Default for Switches {
 // What a frame's pixels depend on. Caches key on it: the Audio, Lock and Shy switches and Hide
 // Shy Layers don't change pixels, so toggling them keeps cached frames (#103).
 
+/// A protected time marker with a duration sets the comp's timing (Responsive Design), so it is
+/// part of the pixels even where plain markers are not.
+fn is_timing_marker(m: &Marker) -> bool {
+    m.protected && m.duration > Tick::ZERO
+}
+
+fn timing_markers(m: &[Marker]) -> impl Iterator<Item = (Tick, Tick)> + '_ {
+    m.iter().filter(|m| is_timing_marker(m)).map(|m| (m.time, m.duration))
+}
+
 impl Switches {
     /// These switches with Audio, Lock and Shy at their defaults.
     pub fn pixels(&self) -> Switches {
@@ -789,6 +799,12 @@ impl Switches {
 impl Layer {
     /// Draws the same pixels as `o`: equal but for the Audio, Lock and Shy switches.
     pub fn same_pixels(&self, o: &Layer) -> bool {
+        self.same_pixels_with(o, true)
+    }
+
+    /// [`Self::same_pixels`], with the markers counting only when `with_markers` (they are read by
+    /// expressions alone, so a project without any can edit them freely).
+    pub fn same_pixels_with(&self, o: &Layer, with_markers: bool) -> bool {
         // Every field (no `..`: a new field must be considered here); the property tree last.
         let Layer {
             id,
@@ -826,7 +842,7 @@ impl Layer {
             && *preserve_transparency == o.preserve_transparency
             && *track_matte == o.track_matte
             && *parent == o.parent
-            && *markers == o.markers
+            && (!with_markers || *markers == o.markers)
             && *markers_locked == o.markers_locked
             && *auto_orient == o.auto_orient
             && *environment == o.environment
@@ -839,6 +855,14 @@ impl Comp {
     /// Draws the same pixels as `o`: equal but for its layers' Audio, Lock and Shy switches, Hide
     /// Shy Layers and the viewer's Resolution.
     pub fn same_pixels(&self, o: &Comp) -> bool {
+        self.same_pixels_with(o, true)
+    }
+
+    /// [`Self::same_pixels`], with the comp's and its layers' markers counting only when
+    /// `with_markers`: only expressions read them, so while none does, adding or moving a marker
+    /// (even during playback) leaves every rendered frame valid. Protected time markers with a
+    /// duration set the timing (Responsive Design), so those always count.
+    pub fn same_pixels_with(&self, o: &Comp, with_markers: bool) -> bool {
         // Every field (no `..`: a new field must be considered here); the layers last.
         let Comp {
             width,
@@ -876,7 +900,7 @@ impl Comp {
             && *display_start == o.display_start
             && *background == o.background
             && *work_area == o.work_area
-            && *markers == o.markers
+            && (if with_markers { *markers == o.markers } else { timing_markers(markers).eq(timing_markers(&o.markers)) })
             && *shutter_angle == o.shutter_angle
             && *shutter_phase == o.shutter_phase
             && *motion_blur_samples == o.motion_blur_samples
@@ -892,37 +916,36 @@ impl Comp {
             && *guides == o.guides
             && *essential == o.essential
             && layers.len() == o.layers.len()
-            && layers.iter().zip(&o.layers).all(|(a, b)| a.same_pixels(b))
-    }
-
-    /// Draws the same pixels as `o` once plain markers are ignored: they change no pixels. Protected
-    /// time markers with a duration set the timing (Responsive Design), so those still count.
-    pub fn same_pixels_ignoring_markers(&self, o: &Comp) -> bool {
-        let protected =
-            |m: &[Marker]| -> Vec<(Tick, Tick)> { m.iter().filter(|m| m.protected && m.duration > Tick::ZERO).map(|m| (m.time, m.duration)).collect() };
-        if protected(&self.markers) != protected(&o.markers) {
-            return false;
-        }
-        let mut c = self.clone();
-        c.markers = o.markers.clone();
-        for (a, b) in c.layers.iter_mut().zip(&o.layers) {
-            a.markers = b.markers.clone();
-            a.markers_locked = b.markers_locked;
-        }
-        c.same_pixels(o)
+            && layers.iter().zip(&o.layers).all(|(a, b)| a.same_pixels_with(b, with_markers))
     }
 
     /// The comp with those switches and the Resolution at their defaults (borrowed when they
     /// already are), for keys that hash the whole comp.
     pub fn pixel_form(&self) -> std::borrow::Cow<'_, Comp> {
-        if !self.hide_shy && self.resolution.is_auto() && self.layers.iter().all(|l| l.switches == l.switches.pixels()) {
+        self.pixel_form_with(true)
+    }
+
+    /// [`Self::pixel_form`], also without the comp's plain markers and its layers' markers when not
+    /// `with_markers` (see [`Self::same_pixels_with`] and [`Project::reads_markers`]).
+    pub fn pixel_form_with(&self, with_markers: bool) -> std::borrow::Cow<'_, Comp> {
+        if !self.hide_shy
+            && self.resolution.is_auto()
+            && self.layers.iter().all(|l| l.switches == l.switches.pixels())
+            && (with_markers || (self.markers.iter().all(is_timing_marker) && self.layers.iter().all(|l| l.markers.is_empty())))
+        {
             return std::borrow::Cow::Borrowed(self);
         }
         let mut c = self.clone();
         c.hide_shy = false;
         c.resolution = Resolution::Auto;
+        if !with_markers {
+            c.markers.retain(is_timing_marker);
+        }
         for l in &mut c.layers {
             l.switches = l.switches.pixels();
+            if !with_markers {
+                l.markers.clear();
+            }
         }
         std::borrow::Cow::Owned(c)
     }
@@ -1378,6 +1401,21 @@ impl Default for Project {
 }
 
 impl Project {
+    /// Some layer has an expression, which can read markers (`marker.key(1)`, `numKeys`,
+    /// `nearestKey`...). Only then do the markers of comps and layers affect what is rendered, so
+    /// frame caches ignore them otherwise.
+    pub fn reads_markers(&self) -> bool {
+        let mut found = false;
+        for (_, c) in self.comps() {
+            for l in &c.layers {
+                if !found {
+                    l.props.walk("", &mut |_, p| found |= p.expr.is_some());
+                }
+            }
+        }
+        found
+    }
+
     /// Allocate an id (items, layers and property uids share one counter).
     pub fn alloc(&mut self) -> u64 {
         let id = self.next_id;
