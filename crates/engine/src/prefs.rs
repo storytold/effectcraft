@@ -310,6 +310,11 @@ page!(Scripting {
     bracket_matching: bool = true,
     word_wrap: bool = false,
     error_banner: bool = true,
+    /// Start the localhost control channel (agents, MCP `--bridge`) on every launch, as
+    /// `--control <port>` does, but without its agent-launch behaviour (focus, Home screen,
+    /// crash recovery stay as usual).
+    agent_control: bool = false,
+    agent_control_port: u32 = 9877,
 });
 
 impl Scripting {
@@ -1397,6 +1402,9 @@ pub fn pages() -> Vec<Page> {
                 s("scripting.bracketMatching", "Bracket Matching", B, true),
                 s("scripting.wordWrap", "Word Wrap", B, true),
                 s("scripting.errorBanner", "Show Expression Error Banner", B, true),
+                Section("Agents"),
+                s("scripting.agentControl", "Let Agents Control EffectCraft (localhost control channel)", B, true),
+                s("scripting.agentControlPort", "Control Channel Port", Kind::Int(1024, 65535, ""), true),
                 Note("Expressions use the JavaScript engine. Script errors report their file and line in the Script Console; there is no step debugger."),
             ],
         },

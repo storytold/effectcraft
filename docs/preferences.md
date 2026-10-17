@@ -160,6 +160,10 @@ Commands (CLI, MCP, control channel):
   the Timeline's expression editor
 - `scripting.errorBanner`: a banner along the bottom of the Composition panel names the first
   failing expression (click: reveal it)
+- `scripting.agentControl`, `scripting.agentControlPort`: the desktop app starts the control
+  channel ([control-protocol.md](control-protocol.md)) on this port at every launch, so agents and
+  `effectcraft-cli mcp --bridge <port>` can drive it; unlike `--control`, the window still takes
+  focus and the Home screen and crash recovery behave as usual. Takes effect at the next launch
 - `roto.model` (Settings ▸ Roto Brush): the segmentation model Roto Brush 2.0 / 3.0 use,
   `classical` (built in) or `mobilesam` (once installed). The page lists every registered model
   with its authors, licence, size, source and status, with Download, Install from File… and
