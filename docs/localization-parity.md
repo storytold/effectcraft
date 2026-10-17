@@ -73,7 +73,7 @@ the true percentages are slightly lower.
 | Indonesian | `id` | 0 | — | Latin, fine | no | none (After Effects: none) | 8–12 h + review |
 | Japanese | `ja` | 1,034 (≈ 27%): menus 624 rows, panels 410 | Panels and dialogs partly | Japanese system fallback; vertical text and Tate-Chu-Yoko in text layers; IME | no | partial | 6–9 h + review |
 | German | `de` | 624 (≈ 16%) | Menus only (open PR #666 adds interface translations) | Latin, fine | no | menus only | 7–10 h + review |
-| Korean | `ko` | 0 | — | Hangul fallback probe added (#599, closed); not checked on macOS here | no | none | 9–13 h + review |
+| Korean | `ko` | 628 fixed menu rows + 687 panel/settings rows (catalog counts; keys can overlap) | Existing translated panels and settings; effect names, parameters, engine errors and tutorials remain English | Existing system Hangul fallback; macOS/web still need platform review | pending | partial | Remaining engine/effect text + native review |
 | Vietnamese | `vi` | 0 | — | Latin with stacked diacritics; untested | no | none (After Effects: none) | 8–12 h + review |
 
 Other languages EffectCraft ships (3):

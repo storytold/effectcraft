@@ -41,8 +41,8 @@ impl EffectcraftApp {
         }
         let Some(comp) = self.session.active_comp() else { return out };
         if let Some(l) = self.session.state.selected_layers.first().and_then(|id| comp.layer(*id)) {
-            out.push((PanelKind::EffectControls, format!("Effect Controls {}", l.name)));
-            out.push((PanelKind::Properties, format!("Properties: {}", l.name)));
+            out.push((PanelKind::EffectControls, format!("{} {}", crate::i18n::panel_title("Effect Controls"), l.name)));
+            out.push((PanelKind::Properties, format!("{}: {}", crate::i18n::panel_title("Properties"), l.name)));
         }
         out
     }
@@ -206,7 +206,8 @@ impl EffectcraftApp {
         let titles = self.tab_titles();
         let decos = self.tab_decos();
         let docs = self.tab_docs();
-        let title = |p: PanelKind| titles.iter().find(|(k, _)| *k == p).map(|(_, s)| s.clone()).unwrap_or_else(|| p.title().to_string());
+        let title =
+            |p: PanelKind| titles.iter().find(|(k, _)| *k == p).map(|(_, s)| s.clone()).unwrap_or_else(|| crate::i18n::panel_title(p.title()).to_string());
         let info = dock::TabInfo { title: &title, decos: &decos, docs: &docs };
         // Where each group's tabs are (tab drags show where a tab will land between them).
         let mut tab_rects: Vec<(String, Vec<(PanelKind, Rect)>)> = vec![];

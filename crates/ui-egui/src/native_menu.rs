@@ -192,7 +192,9 @@ pub fn build(app: &EffectcraftApp) -> NativeMenu {
                         if role == Role::Hide && !services_added {
                             out.push(NativeNode::Predefined {
                                 role: Role::Services,
-                                label: if crate::i18n::japanese(app) {
+                                label: if crate::i18n::korean(app) {
+                                    "서비스"
+                                } else if crate::i18n::japanese(app) {
                                     "サービス"
                                 } else if crate::i18n::simplified(app) {
                                     "服务"

@@ -274,7 +274,8 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     // Small Screen, Standard.
     let shown = ["Standard", "Small Screen", "Learn", "Review", "Default"];
     for name in shown {
-        let g = p.layout_no_wrap(name.to_string(), Tokens::ui(12.0), t.text);
+        let label = crate::i18n::label(app, "window.workspace", name);
+        let g = p.layout_no_wrap(label.to_string(), Tokens::ui(12.0), t.text);
         let w = g.size().x + 16.0;
         let r = Rect::from_min_max(pos2(rx - w, cy - 13.0), pos2(rx, cy + 13.0));
         if r.min.x < x + 120.0 {
