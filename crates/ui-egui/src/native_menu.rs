@@ -206,6 +206,8 @@ pub fn build(app: &EffectcraftApp) -> NativeMenu {
                                     "Serviços"
                                 } else if crate::i18n::czech(app) {
                                     "Služby"
+                                } else if crate::i18n::arabic(app) {
+                                    "الخدمات"
                                 } else {
                                     "Services"
                                 }
