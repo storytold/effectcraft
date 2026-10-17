@@ -212,6 +212,34 @@ fn prefs_commands_get_set_reset_and_persist() {
     );
 }
 
+/// Effects & Presets' starred effects live in the settings (#1692): they come back in the next
+/// session, un-starring sticks too, Reset All keeps them, and a hand-edited list loses its
+/// repeats and empty ids on load.
+#[test]
+fn effects_favorites_persist_across_sessions() {
+    let store = Arc::new(MemoryConfig::default());
+    let mut s = Session { config: Some(store.clone()), ..Default::default() };
+    assert!(s.prefs.toggle_effect_favorite("ADBE Gaussian Blur 2"));
+    assert!(s.prefs.toggle_effect_favorite("ADBE Glo2"));
+    s.save_prefs();
+    let reopen = |store: &Arc<MemoryConfig>| {
+        let mut s = Session { config: Some(store.clone()), ..Default::default() };
+        s.load_settings();
+        s
+    };
+    let mut s2 = reopen(&store);
+    assert_eq!(s2.prefs.effects_favorites, ["ADBE Gaussian Blur 2", "ADBE Glo2"]);
+    assert!(!s2.prefs.toggle_effect_favorite("ADBE Glo2"), "un-starred");
+    s2.save_prefs();
+    let mut s3 = reopen(&store);
+    assert_eq!(s3.prefs.effects_favorites, ["ADBE Gaussian Blur 2"]);
+    s3.execute("prefs.reset", json!({})).unwrap();
+    assert!(s3.prefs.is_effect_favorite("ADBE Gaussian Blur 2"), "Reset All keeps the stars");
+    let edited = store.read(PREFS_FILE).unwrap().replace("\"effectsFavorites\": [", "\"effectsFavorites\": [\"\", \"ADBE Glo2\", \"ADBE Glo2\", ");
+    store.write(PREFS_FILE, &edited).unwrap();
+    assert_eq!(reopen(&store).prefs.effects_favorites, ["ADBE Glo2", "ADBE Gaussian Blur 2"]);
+}
+
 /// Composition Settings presets the user saves live in the settings: they persist, a save with
 /// an existing name replaces it, they survive Reset All, and invalid ones (from a hand-edited
 /// settings file) are dropped on load.
