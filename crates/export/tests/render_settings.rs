@@ -419,6 +419,90 @@ fn cancelled_export_removes_only_files_it_opened() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// Export `format` to `path` on disk; `cancel` stops at the third progress report: after the
+/// first batch, which a movie encodes before it opens its file, and one more.
+fn export_to_disk(p: &Project, cid: ItemId, format: OutputFormat, path: &str, cancel: bool) -> Result<Report, effectcraft_export::ExportError> {
+    let settings = RenderSettings::default();
+    let om = OutputModule::for_format(format);
+    let job = Job {
+        project: p,
+        footage: &NoFootage,
+        expr: None,
+        accel: None,
+        comp: cid,
+        settings: &settings,
+        output: &om,
+        path,
+        sink: None,
+        nested_switches: true,
+        options: JobOptions::default(),
+    };
+    let mut reports = 0;
+    export(&job, &mut |_| {
+        reports += 1;
+        !cancel || reports < 3
+    })
+}
+
+/// Names in `dir`, sorted.
+fn names(dir: &std::path::Path) -> Vec<String> {
+    let mut v: Vec<_> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    v.sort();
+    v
+}
+
+#[test]
+fn cancelling_an_export_over_an_existing_file_keeps_the_previous_render() {
+    use effectcraft_export::ExportError;
+    let dir = std::env::temp_dir().join(format!("ec-overwrite-cancel-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (p, cid) = project(FrameRate::new(25, 1), |_, _| {});
+    // A movie: the file being replaced stays as it was, untruncated (#1230).
+    let movie = dir.join("clip.mp4");
+    std::fs::write(&movie, b"previous render").unwrap();
+    let r = export_to_disk(&p, cid, OutputFormat::H264, movie.to_str().unwrap(), true);
+    assert!(matches!(r, Err(ExportError::Cancelled)), "{r:?}");
+    assert_eq!(std::fs::read(&movie).unwrap(), b"previous render");
+    assert_eq!(names(&dir), ["clip.mp4"], "no temporary file is left behind");
+    // A sequence: a frame that was already there is never deleted. Frames finished before the
+    // cancel may hold the new render; the rest keep the old one.
+    let seq = dir.join("seq_[#####].png");
+    for i in 0..50 {
+        std::fs::write(dir.join(format!("seq_{i:05}.png")), b"previous frame").unwrap();
+    }
+    let r = export_to_disk(&p, cid, OutputFormat::PngSequence, seq.to_str().unwrap(), true);
+    assert!(matches!(r, Err(ExportError::Cancelled)), "{r:?}");
+    let mut replaced = 0;
+    for i in 0..50 {
+        let d = std::fs::read(dir.join(format!("seq_{i:05}.png"))).unwrap_or_else(|e| panic!("frame {i} was removed: {e}"));
+        if d.starts_with(b"\x89PNG") {
+            replaced += 1;
+        } else {
+            assert_eq!(d, b"previous frame", "frame {i}");
+        }
+    }
+    assert!(replaced < 50, "the export was cancelled before the end");
+    assert_eq!(names(&dir).len(), 51, "no temporary file is left behind: {:?}", names(&dir));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_finished_export_replaces_the_existing_file() {
+    let dir = std::env::temp_dir().join(format!("ec-overwrite-done-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (p, cid) = project(FrameRate::new(25, 1), |_, _| {});
+    let movie = dir.join("clip.mp4");
+    std::fs::write(&movie, b"previous render").unwrap();
+    let report = export_to_disk(&p, cid, OutputFormat::H264, movie.to_str().unwrap(), false).expect("export");
+    let d = std::fs::read(&movie).unwrap();
+    assert_eq!(&d[4..8], b"ftyp", "the new movie is in place");
+    assert!(report.bytes > 0 && report.bytes == d.len() as u64, "{} vs {}", report.bytes, d.len());
+    assert_eq!(names(&dir), ["clip.mp4"], "no temporary file is left behind");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// A GPU compositor stand-in that renders every frame solid green (the CPU draws the bar and the
 /// block on black) and keeps Auto's timing history.
 #[derive(Default)]
