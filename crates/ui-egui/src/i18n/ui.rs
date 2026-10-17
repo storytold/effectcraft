@@ -1370,6 +1370,37 @@ const SIMPLIFIED_CHINESE: &[(&str, &str)] = &[
     ("Total Offset", "总偏移"),
     ("Per Layer", "每个图层"),
     ("Track", "跟踪"),
+    ("Selection Tool", "选择工具"),
+    ("Hand Tool", "抓手工具"),
+    ("Zoom Tool", "缩放工具"),
+    ("Orbit Around Cursor Tool", "绕行摄像机工具"),
+    ("Pan Under Cursor Tool", "平移摄像机工具"),
+    ("Dolly Towards Cursor Tool", "推拉摄像机工具"),
+    ("Rotation Tool", "旋转工具"),
+    ("Pan Behind (Anchor Point) Tool", "向后平移工具"),
+    ("Rectangle Tool", "矩形工具"),
+    ("Rounded Rectangle Tool", "圆角矩形工具"),
+    ("Ellipse Tool", "椭圆工具"),
+    ("Polygon Tool", "多边形工具"),
+    ("Star Tool", "星形工具"),
+    ("Pen Tool", "钢笔工具"),
+    ("Add Vertex Tool", "添加顶点工具"),
+    ("Delete Vertex Tool", "删除顶点工具"),
+    ("Convert Vertex Tool", "转换顶点工具"),
+    ("Mask Feather Tool", "蒙版羽化工具"),
+    ("Horizontal Type Tool", "横排文字工具"),
+    ("Vertical Type Tool", "直排文字工具"),
+    ("Brush Tool", "画笔工具"),
+    ("Clone Stamp Tool", "仿制图章工具"),
+    ("Eraser Tool", "橡皮擦工具"),
+    ("Roto Brush Tool", "Roto 笔刷工具"),
+    ("Refine Edge Tool", "调整边缘工具"),
+    ("Object Matte Tool", "对象遮罩工具"),
+    ("Puppet Position Pin Tool", "人偶位置控点工具"),
+    ("Puppet Starch Pin Tool", "人偶扑粉控点工具"),
+    ("Puppet Bend Pin Tool", "人偶弯曲控点工具"),
+    ("Puppet Advanced Pin Tool", "人偶高级控点工具"),
+    ("Puppet Overlap Pin Tool", "人偶重叠控点工具"),
 ];
 
 const TRADITIONAL_CHINESE: &[(&str, &str)] = &[
@@ -2099,6 +2130,37 @@ const TRADITIONAL_CHINESE: &[(&str, &str)] = &[
     ("Total Offset", "總偏移"),
     ("Per Layer", "每個圖層"),
     ("Track", "追蹤"),
+    ("Selection Tool", "選取工具"),
+    ("Hand Tool", "手形工具"),
+    ("Zoom Tool", "縮放工具"),
+    ("Orbit Around Cursor Tool", "繞行攝影機工具"),
+    ("Pan Under Cursor Tool", "平移攝影機工具"),
+    ("Dolly Towards Cursor Tool", "推拉攝影機工具"),
+    ("Rotation Tool", "旋轉工具"),
+    ("Pan Behind (Anchor Point) Tool", "向後平移工具"),
+    ("Rectangle Tool", "矩形工具"),
+    ("Rounded Rectangle Tool", "圓角矩形工具"),
+    ("Ellipse Tool", "橢圓工具"),
+    ("Polygon Tool", "多邊形工具"),
+    ("Star Tool", "星形工具"),
+    ("Pen Tool", "筆型工具"),
+    ("Add Vertex Tool", "添加頂點工具"),
+    ("Delete Vertex Tool", "刪除頂點工具"),
+    ("Convert Vertex Tool", "轉換頂點工具"),
+    ("Mask Feather Tool", "遮色片羽化工具"),
+    ("Horizontal Type Tool", "橫排文字工具"),
+    ("Vertical Type Tool", "垂直文字工具"),
+    ("Brush Tool", "筆刷工具"),
+    ("Clone Stamp Tool", "仿製圖章工具"),
+    ("Eraser Tool", "橡皮擦工具"),
+    ("Roto Brush Tool", "Roto 筆刷工具"),
+    ("Refine Edge Tool", "調整邊緣工具"),
+    ("Object Matte Tool", "物件遮色片工具"),
+    ("Puppet Position Pin Tool", "人偶位置控點工具"),
+    ("Puppet Starch Pin Tool", "人偶撲粉控點工具"),
+    ("Puppet Bend Pin Tool", "人偶彎曲控點工具"),
+    ("Puppet Advanced Pin Tool", "人偶高級控點工具"),
+    ("Puppet Overlap Pin Tool", "人偶重疊控點工具"),
 ];
 
 /// Ukrainian (uk): original translations of the same interface rows as the Chinese catalogs.
@@ -4268,6 +4330,9 @@ mod tests {
         ("panels/shortcut_editor.rs", include_str!("../panels/shortcut_editor.rs")),
         ("panels/templates.rs", include_str!("../panels/templates.rs")),
         ("panels/text_panels.rs", include_str!("../panels/text_panels.rs")),
+        // The 31 tool names are drawn by `header.rs` from `Tool::label()` and their sources live
+        // here, which is the case the comment above describes (#1451).
+        ("state.rs", include_str!("../state.rs")),
         ("panels/timeline.rs", include_str!("../panels/timeline.rs")),
         ("panels/tracker.rs", include_str!("../panels/tracker.rs")),
         ("panels/unsaved.rs", include_str!("../panels/unsaved.rs")),
@@ -4476,6 +4541,36 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The toolbar draws the tool names from `Tool::label()`, so the two drawn sites have to ask this
+    /// catalog while the automation labels keep the English name (`ui.set {"tool": …}` and the
+    /// `tool.*` dispatch go through `Tool::from_name`).
+    #[test]
+    fn the_toolbar_asks_the_catalog_for_the_tool_names() {
+        let header = include_str!("../header.rs");
+        for call in ["crate::i18n::tr(tool.label())", "crate::i18n::tr(cur.label())"] {
+            assert!(header.contains(call), "header.rs no longer draws {call}");
+        }
+        assert!(
+            header.contains("app.auto.add(&format!(\"tools.select.{tool:?}\"), row.rect, tool.label())"),
+            "the automation label must stay the English tool name"
+        );
+    }
+
+    /// The 31 tool names (#1451) are keyed by `Tool::label()`'s English source: the toolbar tooltip
+    /// and the flyout rows ask this catalog, so a translated interface draws them translated, while
+    /// `app.auto` and `Tool::from_name` keep the English label.
+    #[test]
+    fn every_tool_name_is_translated() {
+        use crate::state::Tool;
+        for language in ["zh-hans", "zh-hant"] {
+            set_current(language);
+            for tool in Tool::ALL {
+                assert_ne!(tr(tool.label()), tool.label(), "{language}: {} has no row", tool.label());
+            }
+        }
+        set_current("en");
     }
 
     /// The Settings pages come from the engine as data, so the literal scan above cannot see them:
