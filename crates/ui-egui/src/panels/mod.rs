@@ -131,6 +131,53 @@ pub(crate) fn space_hand(ctx: &egui::Context) -> bool {
     ctx.input(|i| i.key_down(egui::Key::Space)) && !ctx.egui_wants_keyboard_input()
 }
 
+/// What a scroll gesture over a viewer (Composition, Layer) does this frame.
+pub(crate) struct ViewerScroll {
+    /// Points to pan by: a two-finger trackpad scroll.
+    pub pan: egui::Vec2,
+    /// Factor to zoom by around the pointer: a pinch, Ctrl/Cmd+scroll, a mouse wheel, or
+    /// Alt + a trackpad scroll.
+    pub zoom: f32,
+}
+
+/// Splits the frame's scroll input into a viewer pan and a zoom: a mouse wheel zooms and a
+/// trackpad's two-finger scroll pans.
+///
+/// A wheel scrolls in lines, but in a browser and with some high-resolution wheels it scrolls in
+/// points like a trackpad does, so the unit alone doesn't tell them apart. A scroll in points is
+/// a trackpad's once it has shown what a wheel can't do: a touch phase (macOS reports where the
+/// fingers land), movement on both axes at once, or a pinch. That holds until a wheel scrolls in
+/// lines. Until then the vertical part zooms; the horizontal part always pans.
+pub(crate) fn viewer_scroll(ctx: &egui::Context) -> ViewerScroll {
+    let id = egui::Id::new("viewer-scroll-trackpad");
+    // The scroll is smoothed over the frames after its event, so the device is remembered.
+    let was: bool = ctx.data(|d| d.get_temp(id)).unwrap_or(false);
+    let trackpad = ctx.input(|i| {
+        i.events.iter().fold(was, |t, e| match e {
+            egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta, phase, modifiers, .. } => {
+                // Shift turns a wheel's scroll sideways, which is still one axis.
+                t || *phase == egui::TouchPhase::Start || (delta.x != 0.0 && delta.y != 0.0 && !modifiers.shift)
+            }
+            egui::Event::MouseWheel { .. } => false,
+            egui::Event::Zoom(_) => true,
+            _ => t,
+        })
+    });
+    if trackpad != was {
+        ctx.data_mut(|d| d.insert_temp(id, trackpad));
+    }
+    let (scroll, pinch, alt) = ctx.input(|i| (i.smooth_scroll_delta, i.zoom_delta(), i.modifiers.alt));
+    let pinch = if pinch.is_finite() && pinch > 0.0 { pinch } else { 1.0 };
+    let scroll = if scroll.x.is_finite() && scroll.y.is_finite() { scroll } else { egui::Vec2::ZERO };
+    if trackpad && !alt {
+        ViewerScroll { pan: scroll, zoom: pinch }
+    } else if alt {
+        ViewerScroll { pan: egui::Vec2::ZERO, zoom: pinch * (scroll.y / 300.0).exp() }
+    } else {
+        ViewerScroll { pan: egui::vec2(scroll.x, 0.0), zoom: pinch * (scroll.y / 300.0).exp() }
+    }
+}
+
 pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: PanelKind, rect: Rect) {
     match p {
         PanelKind::Composition => viewers::show(app, ui, 0, rect),
