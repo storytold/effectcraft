@@ -421,6 +421,10 @@ pub fn spatial_segment_length(keys: &[Keyframe], i: usize) -> f64 {
     let (Some(a), Some(b)) = (keys.get(i), keys.get(next)) else { return 0.0 };
     let p0 = v3(&a.value);
     let p3 = v3(&b.value);
+    // A segment whose ends coincide has no motion path (#1196, #1197).
+    if p0 == p3 {
+        return 0.0;
+    }
     let (_, out_t) = spatial_tangents(keys, i);
     let (in_t, _) = spatial_tangents(keys, next);
     SpatialSeg::new([p0, [p0[0] + out_t[0], p0[1] + out_t[1], p0[2] + out_t[2]], [p3[0] + in_t[0], p3[1] + in_t[1], p3[2] + in_t[2]], p3]).length()
@@ -534,6 +538,11 @@ pub fn segment_value(keys: &[Keyframe], i: usize, t: Tick, spatial: bool) -> Val
     if is_spatial {
         let p0 = v3(&a.value);
         let p3 = v3(&b.value);
+        // Two identical position keys hold: a zero-length chord with non-zero auto-Bezier
+        // tangents (the neighbours move) must not detour off the point and back (#1196, #1197).
+        if p0 == p3 {
+            return a.value.clone();
+        }
         let (_, out_t) = spatial_tangents(keys, i);
         let (in_t, _) = spatial_tangents(keys, i + 1);
         let seg = SpatialSeg::new([p0, [p0[0] + out_t[0], p0[1] + out_t[1], p0[2] + out_t[2]], [p3[0] + in_t[0], p3[1] + in_t[1], p3[2] + in_t[2]], p3]);
@@ -700,6 +709,42 @@ mod tests {
         assert!(keys[0].roving);
         assert!(keys[0].spatial_continuous);
         assert_eq!(keys[0].value, Value::Vec2([40.0, 50.0]));
+    }
+
+    fn position_chain(eased: bool) -> Vec<Keyframe> {
+        let mut keys = vec![
+            Keyframe::new(s(0.0), Value::Vec2([0.0, 0.0])),
+            Keyframe::new(s(1.0), Value::Vec2([100.0, 100.0])),
+            Keyframe::new(s(2.0), Value::Vec2([100.0, 100.0])),
+            Keyframe::new(s(3.0), Value::Vec2([200.0, 200.0])),
+        ];
+        if eased {
+            for k in &mut keys {
+                *k = k.clone().eased();
+            }
+        }
+        keys
+    }
+
+    // #1196, #1197: two Position keys with the same value hold, whether the neighbours move
+    // (auto-Bezier spatial tangents) and whether the pair was easy-eased (F9).
+    #[test]
+    fn equal_value_spatial_keys_do_not_detour() {
+        for eased in [false, true] {
+            let keys = position_chain(eased);
+            for i in 1..20 {
+                let t = 1.0 + i as f64 * 0.05;
+                let v = evaluate(&keys, s(t), true).unwrap();
+                assert_eq!(v, Value::Vec2([100.0, 100.0]), "t={t} eased={eased}");
+            }
+            assert_eq!(spatial_segment_length(&keys, 1), 0.0);
+            assert!(spatial_segment_length(&keys, 0) > 0.0);
+            assert!(spatial_segment_length(&keys, 2) > 0.0);
+            // The path still starts and ends on schedule.
+            assert_eq!(evaluate(&keys, s(1.0), true).unwrap(), Value::Vec2([100.0, 100.0]));
+            assert_eq!(evaluate(&keys, s(2.0), true).unwrap(), Value::Vec2([100.0, 100.0]));
+            assert_eq!(evaluate(&keys, s(3.0), true).unwrap(), Value::Vec2([200.0, 200.0]));
+        }
     }
 
     #[test]
