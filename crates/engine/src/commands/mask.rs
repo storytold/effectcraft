@@ -120,6 +120,17 @@ fn sync_keys(pr: &mut effectcraft_project::Property, lt: effectcraft_time::Tick,
 
 /// [`edit_path`] whose edit may change the vertex count (`f` says how).
 fn edit_path_counted<T>(s: &mut Session, p: &Value, label: &str, f: impl FnOnce(&mut ShapePath) -> Result<(T, Option<CountOp>)>) -> Result<(Uid, T)> {
+    edit_path_group(s, p, label, f, |_| ())
+}
+
+/// [`edit_path_counted`] that then also edits the path's group (`g`) in the same undo step.
+fn edit_path_group<T>(
+    s: &mut Session,
+    p: &Value,
+    label: &str,
+    f: impl FnOnce(&mut ShapePath) -> Result<(T, Option<CountOp>)>,
+    g_edit: impl FnOnce(&mut PropGroup),
+) -> Result<(Uid, T)> {
     let (cid, lid) = layer_p(s, p, label)?;
     let key = p.get("mask").cloned().ok_or_else(|| bad(label, "missing `mask` (uid, index or name)"))?;
     let t = s.time();
@@ -143,6 +154,7 @@ fn edit_path_counted<T>(s: &mut Session, p: &Value, label: &str, f: impl FnOnce(
         if let Some(op) = op.filter(|_| preserve) {
             sync_keys(pr, lt, &op);
         }
+        g_edit(g);
         Ok((uid, r))
     })
 }
@@ -216,12 +228,28 @@ fn set_vertex(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(Value::Null)
 }
 
+/// Close or open a path; `mode` (masks only, ignored for shape paths) also sets the mask's mode
+/// in the same undo step (the Pen tool closes a mask as Subtract while S is held).
 fn set_closed(s: &mut Session, p: &Value) -> Result<Value> {
     let c = b_p(p, "closed").unwrap_or(true);
-    edit_path(s, p, "mask.setClosed", |sp| {
-        sp.closed = c;
-        Ok(())
-    })?;
+    let mode = match str_p(p, "mode") {
+        Some(m) => Some(MaskMode::from_name(m).ok_or_else(|| bad("mask.setClosed", format!("unknown mask mode `{m}`")))?),
+        None => None,
+    };
+    edit_path_group(
+        s,
+        p,
+        "mask.setClosed",
+        |sp| {
+            sp.closed = c;
+            Ok(((), None))
+        },
+        |g| {
+            if let (Some(mm), effectcraft_project::GroupKind::Mask { mode: m, .. }) = (mode, &mut g.kind) {
+                *m = mm;
+            }
+        },
+    )?;
     Ok(json!(c))
 }
 
@@ -644,7 +672,15 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("mask.new", "New Mask from Points", [], None, "{layer?, vertices: [[x,y]…], inTangents?, outTangents?, closed?, mode?}", has_layers, new_mask),
         cmd!("mask.addVertex", "Add Mask Vertex", [], None, "{layer?, mask, point: [x,y], in?, out?, index?}", has_layers, add_vertex),
         cmd!("mask.setVertex", "Set Mask Vertex", [], None, "{layer?, mask, index, point?, in?, out?, merge?}", has_layers, set_vertex),
-        cmd!("mask.setClosed", "Closed", ["Layer", "Mask and Shape Path"], None, "{layer?, mask, closed?}", has_layers, set_closed),
+        cmd!(
+            "mask.setClosed",
+            "Closed",
+            ["Layer", "Mask and Shape Path"],
+            None,
+            "{layer?, mask, closed?, mode?: None|Add|Subtract|Intersect|Lighten|Darken|Difference (masks only)}",
+            has_layers,
+            set_closed
+        ),
         cmd!("mask.selectVertices", "Select Mask Vertices", [], None, "{vertices: [{layer, mask, index}], add?, toggle?}", has_comp, select_vertices),
         cmd!("mask.moveVertices", "Move Mask Vertices", [], None, "{vertices?: [{layer, mask, index}], delta: [dx,dy], merge?}", has_vertices, move_vertices),
         cmd!("mask.deleteVertices", "Delete Mask Vertices", [], None, "{vertices?}", has_vertices, delete_vertices),
