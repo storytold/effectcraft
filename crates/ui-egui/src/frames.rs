@@ -1215,10 +1215,15 @@ impl Worker {
     /// `None` if that panicked too.
     fn render_guarded(&self, job: &Job) -> Option<FrameImage> {
         let attempt = |gpu: bool| std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.render_job(job, gpu))).ok();
-        attempt(true).or_else(|| {
+        let img = attempt(true).or_else(|| {
             log::error!("a frame render panicked (frame {})", job.key.frame);
             job.src.gpu.as_ref().and_then(|_| attempt(false))
-        })
+        });
+        // A preview frame is done: the GPU pool ages the sizes it did not ask for.
+        if let Some(g) = &job.src.gpu {
+            effectcraft_engine::render::Accelerator::frame_end(g);
+        }
+        img
     }
 
     /// A failed scoped attempt retries on CPU. Retired contexts cannot recover by reducing
@@ -1246,7 +1251,9 @@ impl Worker {
         r.cache = Some(&job.src.layer_cache);
         r.accel = Some(g as &dyn effectcraft_engine::render::Accelerator);
         r.active_accel()?;
-        match g.within_memory(|| g.render_display(&r, job.comp, job.t)) {
+        let f = g.within_memory(|| g.render_display(&r, job.comp, job.t));
+        effectcraft_engine::render::Accelerator::frame_end(g);
+        match f {
             Ok(f) => f.map(|f| FrameImage::Gpu(Arc::new(f))),
             Err(e) => {
                 self.gpu_attempt_failed(g, &e);
