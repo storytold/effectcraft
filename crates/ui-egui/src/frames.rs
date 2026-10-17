@@ -1,7 +1,8 @@
 //! Background frame rendering and the RAM preview cache.
 //!
 //! Frames render on a dedicated thread pool from immutable `Arc<Project>` snapshots, so the UI
-//! never waits for the compositor. Results land in a memory-budgeted cache keyed by the comp's
+//! never waits for the compositor (a playing preview's frames and idle caching on one thread
+//! each, so the frames started first are done first). Results land in a memory-budgeted cache keyed by the comp's
 //! *content* ([`comp_content`]: the comp and everything it uses), frame, scale, view and render
 //! options; the timeline draws the cached range as the green cache bar. An edit keeps the frames
 //! of every comp it doesn't touch, and undo finds the frames of the state it returns to.
@@ -437,6 +438,10 @@ pub struct Frames {
     #[cfg(not(target_arch = "wasm32"))]
     /// None if the OS refused the threads: jobs then go to rayon's global pool.
     pool: Option<rayon::ThreadPool>,
+    #[cfg(not(target_arch = "wasm32"))]
+    /// One thread each, for a playing preview's frames and idle caching (see [`Queue::idle_lanes`]). Empty if
+    /// the OS refused the threads: those frames then render on `pool` too.
+    lanes: Vec<rayon::ThreadPool>,
     ctx: Option<egui::Context>,
     /// Render time of the last viewer (urgent) frame in ms, for the Info panel / perf readout.
     pub last_ms: Arc<Mutex<f64>>,
@@ -461,10 +466,25 @@ impl Default for Frames {
     fn default() -> Self {
         #[cfg(not(target_arch = "wasm32"))]
         let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(2, 16);
+        #[cfg(not(target_arch = "wasm32"))]
+        let lanes: Vec<rayon::ThreadPool> = (0..threads)
+            .map_while(|i| {
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(1)
+                    .thread_name(move |_| format!("ec-preview-{i}"))
+                    .panic_handler(|_| log::error!("a frame render panicked; that frame was skipped"))
+                    .build()
+                    .ok()
+            })
+            .collect();
+        #[cfg(not(target_arch = "wasm32"))]
+        let queue = Queue { idle_lanes: (0..lanes.len()).collect(), lanes: lanes.len(), ..Default::default() };
+        #[cfg(target_arch = "wasm32")]
+        let queue = Queue::default();
         Frames {
             cache: Arc::new(Mutex::new(Cache { map: HashMap::new(), order: VecDeque::new(), bytes: 0, gpu_bytes: 0, budget: 3 << 30, gpu_budget: GPU_BUDGET, playhead: None })),
             inflight: Arc::new(Mutex::new(HashSet::new())),
-            queue: Arc::new(Mutex::new(Queue::default())),
+            queue: Arc::new(Mutex::new(queue)),
             #[cfg(not(target_arch = "wasm32"))]
             // A panicking job would abort the whole process (rayon's default for `spawn`): log it
             // and lose only that frame (the panic hook has logged the message).
@@ -474,6 +494,8 @@ impl Default for Frames {
                 .panic_handler(|_| log::error!("a frame render panicked; that frame was skipped"))
                 .build()
                 .ok(),
+            #[cfg(not(target_arch = "wasm32"))]
+            lanes,
             ctx: None,
             last_ms: Arc::new(Mutex::new(0.0)),
             content_keys: Arc::default(),
@@ -865,26 +887,77 @@ impl Frames {
             c.playhead = playhead;
         }
         let Ok(mut q) = self.queue.lock() else { return };
+        // A preview starting or stopping moves the queued prefetch frames between the lanes and
+        // the pool (see [`Queue::idle_lanes`]).
+        #[cfg(not(target_arch = "wasm32"))]
+        let moved = q.playhead.is_some() != playhead.is_some();
         q.playhead = playhead;
-        let Some(p) = playhead else { return };
-        let Ok(mut inf) = self.inflight.lock() else { return };
-        q.jobs.retain(|j| {
-            let gone = !j.urgent && j.key.same_series(&p.series) && p.ahead(&j.key).is_none();
-            if gone {
-                inf.remove(&j.key);
+        if let Some(p) = playhead
+            && let Ok(mut inf) = self.inflight.lock()
+        {
+            q.jobs.retain(|j| {
+                let gone = !j.urgent && j.key.same_series(&p.series) && p.ahead(&j.key).is_none();
+                if gone {
+                    inf.remove(&j.key);
+                }
+                !gone
+            });
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if moved {
+            self.start_lanes(&mut q, usize::MAX);
+            let pool_jobs = q.jobs.iter().filter(|j| !q.on_lane(j)).count().min(self.parallelism());
+            drop(q);
+            for _ in 0..pool_jobs {
+                self.start_pool();
             }
-            !gone
-        });
+        }
+    }
+
+    /// Start up to `n` idle lanes on the queued jobs (see [`Queue::idle_lanes`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn start_lanes(&self, q: &mut Queue, n: usize) {
+        if self.remote.is_some() {
+            return;
+        }
+        let jobs = q.jobs.iter().filter(|j| q.on_lane(j)).count();
+        for _ in 0..n.min(jobs) {
+            let Some(lane) = q.idle_lanes.pop() else { break };
+            let Some(pool) = self.lanes.get(lane) else { break };
+            let w = self.worker();
+            pool.spawn(move || w.drain(Some(lane)));
+        }
+    }
+
+    /// Have a pool thread render the queued jobs that are the pool's.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn start_pool(&self) {
+        if self.remote.is_some() {
+            return;
+        }
+        let w = self.worker();
+        let job = move || w.drain(None);
+        match &self.pool {
+            Some(pool) => pool.spawn(job),
+            None => rayon::spawn(job),
+        }
     }
 
     /// Queue a prefetch frame (no-op if cached or already queued/rendering).
     pub fn request(&self, src: &RenderSource, key: FrameKey, comp: ItemId, t: Tick, opts: RenderOpts) {
-        self.request_with(src, key, comp, t, opts, false);
+        self.request_with(src, key, comp, t, opts, Want::Prefetch);
+    }
+
+    /// Queue a frame nobody waits for (Cache Frames When Idle): as [`Frames::request`], but it
+    /// renders on a lane, one thread, and leaves the pool to the viewer's frame (see
+    /// [`Queue::idle_lanes`]).
+    pub fn request_background(&self, src: &RenderSource, key: FrameKey, comp: ItemId, t: Tick, opts: RenderOpts) {
+        self.request_with(src, key, comp, t, opts, Want::Background);
     }
 
     /// Queue the frame the viewer is showing: it jumps ahead of every prefetch job.
     pub fn request_urgent(&self, src: &RenderSource, key: FrameKey, comp: ItemId, t: Tick, opts: RenderOpts) {
-        self.request_with(src, key, comp, t, opts, true);
+        self.request_with(src, key, comp, t, opts, Want::Viewer);
     }
 
     /// An urgent (viewer) frame is queued or rendering.
@@ -892,7 +965,8 @@ impl Frames {
         self.queue.lock().map(|q| q.urgent_running > 0 || q.jobs.iter().any(|j| j.urgent)).unwrap_or(false)
     }
 
-    fn request_with(&self, src: &RenderSource, key: FrameKey, comp: ItemId, t: Tick, opts: RenderOpts, urgent: bool) {
+    fn request_with(&self, src: &RenderSource, key: FrameKey, comp: ItemId, t: Tick, opts: RenderOpts, want: Want) {
+        let urgent = want == Want::Viewer;
         if self.is_cached(&key) {
             return;
         }
@@ -932,22 +1006,32 @@ impl Frames {
             }
         }
         if !inf.insert(key) {
+            drop(inf);
+            drop(q);
+            // Queued for a lane and now the viewer's frame: it is the pool's.
+            #[cfg(not(target_arch = "wasm32"))]
+            if urgent {
+                self.start_pool();
+            }
             return;
         }
         q.seq += 1;
         let seq = q.seq;
-        q.jobs.push(Job { key, src: src.clone(), comp, t, opts, urgent, seq, cancel: Arc::default() });
+        let job = Job { key, src: src.clone(), comp, t, opts, urgent, background: want == Want::Background, seq, cancel: Arc::default() };
+        // A lane's frame: a busy lane takes the next job when it is done, an idle one starts now.
+        #[cfg(not(target_arch = "wasm32"))]
+        let on_lane = q.on_lane(&job);
+        q.jobs.push(job);
+        #[cfg(not(target_arch = "wasm32"))]
+        if on_lane {
+            self.start_lanes(&mut q, 1);
+        }
         drop(inf);
         drop(q);
+        // One spawn per job; each spawn renders whichever queued jobs matter most right now.
         #[cfg(not(target_arch = "wasm32"))]
-        if self.remote.is_none() {
-            let w = self.worker();
-            // One spawn per job; each spawn renders whichever queued jobs matter most right now.
-            let job = move || w.drain();
-            match &self.pool {
-                Some(pool) => pool.spawn(job),
-                None => rayon::spawn(job),
-            }
+        if !on_lane {
+            self.start_pool();
         }
         #[cfg(target_arch = "wasm32")]
         if let Some(ctx) = &self.ctx {
@@ -1076,7 +1160,7 @@ impl Frames {
         }
         let t0 = web_time::Instant::now();
         let w = self.worker();
-        while w.run_next() {
+        while w.run_next(None) {
             if t0.elapsed() >= budget {
                 break;
             }
@@ -1122,22 +1206,29 @@ impl Worker {
     /// every UI frame, so renders piled up on every thread until memory ran out (#647). A spawn
     /// that lands inside a render returns at once instead; the render below it takes the queued
     /// jobs when it is done, so each thread renders one frame at a time.
+    ///
+    /// `lane`: the lane this runs on (see [`Queue::idle_lanes`]), `None` on the pool.
     #[cfg(not(target_arch = "wasm32"))]
-    fn drain(&self) {
+    fn drain(&self, lane: Option<usize>) {
         if DRAINING.get() {
             return;
         }
         DRAINING.set(true);
         let _reset = Draining;
-        while self.run_next() {}
+        while self.run_next(lane) {}
     }
 
-    /// Render the queued job that matters most right now. `false` when the queue was empty.
-    fn run_next(&self) -> bool {
+    /// Render the queued job that matters most right now, on lane `lane` (`None`: on
+    /// the pool, or the UI thread). `false` when the queue had no job for it; the lane is then
+    /// idle again.
+    fn run_next(&self, lane: Option<usize>) -> bool {
         let Worker { queue, content_keys, .. } = self;
         let job = {
             let Ok(mut q) = queue.lock() else { return false };
-            let Some(i) = q.best() else { return false };
+            let Some(i) = q.next(lane.is_some()) else {
+                q.idle_lanes.extend(lane);
+                return false;
+            };
             let job = q.jobs.swap_remove(i);
             q.running.insert(job.key);
             if job.urgent {
@@ -1322,6 +1413,14 @@ impl Worker {
     }
 }
 
+/// Who asked for a frame (see [`Frames::request_with`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Want {
+    Viewer,
+    Prefetch,
+    Background,
+}
+
 struct Job {
     key: FrameKey,
     src: RenderSource,
@@ -1329,6 +1428,8 @@ struct Job {
     t: Tick,
     opts: RenderOpts,
     urgent: bool,
+    /// Nobody waits for it (see [`Frames::request_background`]).
+    background: bool,
     seq: u64,
     /// Set when the viewer no longer waits for this frame (see [`Frames::request_urgent`]).
     cancel: Arc<AtomicBool>,
@@ -1351,18 +1452,45 @@ struct Queue {
     seq: u64,
     /// The playing preview, if any: its prefetch renders nearest first.
     playhead: Option<Playhead>,
+    /// How many lanes there are, and the ones not rendering. A lane is one thread that renders
+    /// one frame at a time. The frames of a playing preview and the frames nobody waits for
+    /// (Cache Frames When Idle) render on the lanes; the pool keeps the viewer's frame and the
+    /// few frames prefetched around it while paused. On the pool a frame's parallel work is
+    /// shared: a thread that took a piece of one frame and waited inside it started rendering
+    /// the queued frames on top, and went back to its piece only once the queue was empty. The
+    /// frames a preview started first, the ones right ahead of the playhead, were done last:
+    /// the preview stood still on a gap while the frames further ahead turned green. Idle
+    /// caching left the same gaps, and held up the viewer's frame when it shared a piece.
+    lanes: usize,
+    idle_lanes: Vec<usize>,
 }
 
 impl Queue {
+    /// Whether `j` renders on a lane (else on the pool).
+    fn on_lane(&self, j: &Job) -> bool {
+        self.lanes > 0 && !j.urgent && (j.background || self.playhead.is_some())
+    }
+
+    /// The job a lane (`lane`) or the pool renders next: the [`Queue::best`] of its own.
+    fn next(&self, lane: bool) -> Option<usize> {
+        self.best_of(|j| self.on_lane(j) == lane)
+    }
+
     /// The job that matters most: urgent first (newest), then, while a preview plays, the
     /// prefetch frame it reaches first, then prefetch in request order. In request order alone,
     /// frames asked for again after an eviction (the ones right ahead of the playhead) waited
     /// behind every frame further ahead (#595).
     fn best(&self) -> Option<usize> {
+        self.best_of(|_| true)
+    }
+
+    /// [`Queue::best`] among the jobs `of` accepts.
+    fn best_of(&self, of: impl Fn(&Job) -> bool) -> Option<usize> {
         let p = self.playhead.as_ref();
         self.jobs
             .iter()
             .enumerate()
+            .filter(|(_, j)| of(j))
             .max_by_key(|(_, j)| {
                 let near = if j.urgent { None } else { p.and_then(|p| p.ahead(&j.key)) };
                 (j.urgent, near.is_some(), near.map_or(0, |d| -d), if j.urgent { j.seq as i64 } else { -(j.seq as i64) })
@@ -1719,7 +1847,9 @@ mod tests {
             gpu_display: false,
             disk: None,
         };
-        let request = |k: FrameKey, urgent: bool| f.request_with(&src, k, ItemId(k.comp), Tick::ZERO, RenderOpts::default(), urgent);
+        let request = |k: FrameKey, urgent: bool| {
+            f.request_with(&src, k, ItemId(k.comp), Tick::ZERO, RenderOpts::default(), if urgent { Want::Viewer } else { Want::Prefetch })
+        };
         let other = FrameKey { comp: 2, ..key(1, 0, 0) };
         request(other, true);
         request(key(1, 20, 0), false);
@@ -1832,6 +1962,132 @@ mod tests {
         }
         assert_eq!(order, [(1, 11), (1, 12), (1, 20), (1, 30), (1, 40), (2, 1)]);
         assert_eq!(f.inflight(), 6, "frame 5, behind the playhead, is no longer in flight");
+    }
+
+    /// A decoder that works in parallel, as the renderer does, in a comp that shows it.
+    #[derive(Default)]
+    struct ParallelClip {
+        started: std::sync::atomic::AtomicUsize,
+        /// Frames started by the time frame 1 was done.
+        started_at_first: std::sync::atomic::AtomicUsize,
+    }
+
+    impl FootageSource for ParallelClip {
+        fn frame(&self, _: ItemId, _: &effectcraft_engine::project::Footage, t: Tick) -> Option<Arc<effectcraft_engine::render::Image>> {
+            self.started.fetch_add(1, Ordering::SeqCst);
+            (0..16).into_par_iter().for_each(|_| (0..4).into_par_iter().for_each(|_| std::thread::sleep(std::time::Duration::from_millis(1))));
+            if effectcraft_engine::time::FrameRate::FPS_30.frame_at(t) == 1 {
+                self.started_at_first.store(self.started.load(Ordering::SeqCst), Ordering::SeqCst);
+            }
+            Some(Arc::new(effectcraft_engine::render::Image::new(4, 4)))
+        }
+    }
+
+    /// A 10 s comp of a [`ParallelClip`]: the frame cache, the clip, the render source, the comp
+    /// and the key of its frame 0.
+    fn parallel_clip() -> (Frames, Arc<ParallelClip>, RenderSource, ItemId, FrameKey) {
+        use effectcraft_engine::Session;
+        use effectcraft_engine::project::{Footage, FootageKind};
+        use effectcraft_engine::time::FrameRate;
+        use serde_json::json;
+        let mut s = Session::default();
+        let cid = ItemId(s.execute("comp.new", json!({"name": "A", "width": 8, "height": 8, "duration": 10})).unwrap()["comp"].as_u64().unwrap());
+        let clip = Footage {
+            kind: FootageKind::Video,
+            width: 4,
+            height: 4,
+            has_video: true,
+            frame_rate: FrameRate::FPS_30,
+            duration: Tick::from_seconds_f64(10.0),
+            ..Default::default()
+        };
+        let item = Arc::make_mut(&mut s.project).add_item("clip.mov", Default::default(), None, ItemKind::Footage(clip));
+        s.execute("layer.addItem", json!({"item": item.0})).unwrap();
+        let footage = Arc::new(ParallelClip::default());
+        let src = RenderSource {
+            project: s.project.clone(),
+            footage: footage.clone(),
+            expr: None,
+            layer_cache: Arc::default(),
+            gpu: None,
+            gpu_display: false,
+            disk: None,
+        };
+        let f = Frames::default();
+        let series =
+            FrameKey { revision: s.revision, content: f.content_of(&s.project, s.revision, cid), comp: cid.0, frame: 0, scale: 1000, view: 0, opts: 0 };
+        (f, footage, src, cid, series)
+    }
+
+    fn wait_for_renders(f: &Frames) {
+        for _ in 0..8000 {
+            if f.inflight() == 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(f.inflight(), 0, "every queued frame rendered");
+    }
+
+    /// A playing preview's frames render side by side, and each works in parallel: a render
+    /// waiting for its own parallel work took over pieces of the frames started after it, and
+    /// its frame was done only once theirs were. The frames right ahead of the playhead, started
+    /// first, came last: the preview stood still while the frames further ahead turned green.
+    /// Cache Frames When Idle left the same gaps.
+    #[test]
+    fn frames_started_first_are_done_first() {
+        use effectcraft_engine::time::FrameRate;
+        for playing in [true, false] {
+            let (f, footage, src, cid, series) = parallel_clip();
+            let frames = 60;
+            if playing {
+                f.set_playhead(Some(Playhead { series, cur: 0, start: 0, end: 299, step: 1, looping: false }));
+            }
+            for frame in 1..=frames {
+                let (key, t) = (FrameKey { frame, ..series }, FrameRate::FPS_30.tick_of(frame));
+                if playing {
+                    f.request(&src, key, cid, t, RenderOpts::default());
+                } else {
+                    f.request_background(&src, key, cid, t, RenderOpts::default());
+                }
+                if frame == 1 {
+                    // Its parallel work has started (and idle threads have taken pieces of it).
+                    std::thread::sleep(std::time::Duration::from_millis(3));
+                }
+            }
+            wait_for_renders(&f);
+            assert_eq!(f.cached_frames(&series).len(), frames as usize);
+            let before = footage.started_at_first.load(Ordering::SeqCst);
+            assert!(before <= 2 * f.parallelism(), "{before} frames were started before the first one was done (playing: {playing})");
+        }
+    }
+
+    /// Prefetch frames queued when a preview starts or stops, or that become the viewer's
+    /// frame, still render: they change hands between the lanes and the pool.
+    #[test]
+    fn queued_frames_render_when_a_preview_starts_or_stops() {
+        use effectcraft_engine::time::FrameRate;
+        let (f, _, src, cid, series) = parallel_clip();
+        let playhead = Playhead { series, cur: 0, start: 0, end: 299, step: 1, looping: false };
+        let request = |frames: std::ops::Range<i64>| {
+            for frame in frames {
+                f.request(&src, FrameKey { frame, ..series }, cid, FrameRate::FPS_30.tick_of(frame), RenderOpts::default());
+            }
+        };
+        // Queued for the pool, then a preview starts.
+        request(1..40);
+        f.set_playhead(Some(playhead));
+        // Queued for the lanes, then the preview stops.
+        request(40..80);
+        f.set_playhead(None);
+        wait_for_renders(&f);
+        // Queued for the lanes, then the viewer shows one of them.
+        for frame in 80..120 {
+            f.request_background(&src, FrameKey { frame, ..series }, cid, FrameRate::FPS_30.tick_of(frame), RenderOpts::default());
+        }
+        f.request_urgent(&src, FrameKey { frame: 119, ..series }, cid, FrameRate::FPS_30.tick_of(119), RenderOpts::default());
+        wait_for_renders(&f);
+        assert_eq!(f.cached_frames(&series).len(), 119);
     }
 
     #[test]
