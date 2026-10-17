@@ -570,3 +570,100 @@ fn type_tool_selected_text_preference_skips_ineligible_layers_and_falls_back_to_
         assert_eq!(edited(&h).0, topmost, "{exclusion} selected text must not override the eligible hit");
     }
 }
+
+/// The formatting shortcuts of the text being edited (the preset's Text Editing scope): they
+/// format the selected characters and never run the application's command on the same chord.
+#[test]
+fn formatting_shortcuts_act_on_the_text_being_edited() {
+    use effectcraft_engine::keyframe::{BaselineOption, Composer, Justify};
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).build_eframe(|_| app());
+    h.state_mut().show_panel(PanelKind::Composition);
+    h.run_steps(3);
+    h.state_mut().ui.tool = effectcraft_ui_egui::state::Tool::Type;
+    h.run_steps(1);
+    let comp = rect(&h, "viewer.comp");
+    click(&mut h, comp.center(), Modifiers::NONE);
+    type_text(&mut h, "Hello");
+    key(&mut h, Key::A, Modifiers::COMMAND);
+    let lid = LayerId(edited(&h).0);
+    let style = |h: &Harness<'_, EffectcraftApp>| layer_doc(&h.state().session, lid).unwrap().style_at(0);
+    let doc = |h: &Harness<'_, EffectcraftApp>| layer_doc(&h.state().session, lid).unwrap();
+    let (cmd, alt, shift) = (Modifiers::COMMAND, Modifiers::ALT, Modifiers::SHIFT);
+    let size = style(&h).size;
+
+    key(&mut h, Key::K, cmd | shift);
+    assert!(style(&h).all_caps);
+    key(&mut h, Key::K, cmd | shift);
+    assert!(!style(&h).all_caps);
+    key(&mut h, Key::K, cmd | alt | shift);
+    assert!(style(&h).small_caps);
+    key(&mut h, Key::Equals, cmd | shift);
+    assert_eq!(style(&h).baseline, BaselineOption::Superscript);
+    key(&mut h, Key::Equals, cmd | alt | shift);
+    assert_eq!(style(&h).baseline, BaselineOption::Subscript);
+
+    key(&mut h, Key::Period, cmd | shift);
+    assert_eq!(style(&h).size, size + 2.0);
+    key(&mut h, Key::Period, cmd | alt | shift);
+    assert_eq!(style(&h).size, size + 12.0);
+    key(&mut h, Key::Comma, cmd | alt | shift);
+    key(&mut h, Key::Comma, cmd | shift);
+    assert_eq!(style(&h).size, size);
+
+    // Leading from Auto (120% of the size), baseline shift, tracking.
+    key(&mut h, Key::ArrowDown, alt);
+    assert_eq!(style(&h).leading, Some(size * 1.2 + 2.0));
+    key(&mut h, Key::ArrowUp, cmd | alt);
+    assert_eq!(style(&h).leading, Some(size * 1.2 - 8.0));
+    key(&mut h, Key::A, cmd | alt | shift);
+    assert_eq!(style(&h).leading, None, "Auto Leading");
+    key(&mut h, Key::ArrowUp, alt | shift);
+    key(&mut h, Key::ArrowUp, cmd | alt | shift);
+    assert_eq!(style(&h).baseline_shift, 12.0);
+    key(&mut h, Key::ArrowRight, alt);
+    key(&mut h, Key::ArrowRight, cmd | alt);
+    assert_eq!(style(&h).tracking, 120.0);
+    key(&mut h, Key::Q, cmd | shift);
+    assert_eq!(style(&h).tracking, 0.0);
+
+    // Paragraph: alignment, justification, the composer.
+    key(&mut h, Key::C, cmd | shift);
+    assert_eq!(doc(&h).justify, Justify::Center);
+    key(&mut h, Key::R, cmd | shift);
+    assert_eq!(doc(&h).justify, Justify::Right);
+    key(&mut h, Key::F, cmd | shift);
+    assert_eq!(doc(&h).justify, Justify::JustifyAll);
+    key(&mut h, Key::L, cmd | shift);
+    assert_eq!(doc(&h).justify, Justify::Left);
+    let composer = doc(&h).composer;
+    key(&mut h, Key::T, cmd | alt | shift);
+    assert_eq!(doc(&h).composer, if composer == Composer::SingleLine { Composer::EveryLine } else { Composer::SingleLine });
+
+    // Still editing the one text layer: no precomp (Cmd+Shift+C), no second text layer
+    // (Cmd+Alt+Shift+T), nothing trimmed.
+    assert_eq!(edited(&h).1, "Hello");
+    assert_eq!(h.state().session.active_comp().unwrap().layers.len(), 1);
+    assert_eq!(h.state().session.project.items.len(), 1);
+}
+
+/// Outside a text edit the same chords are the application's commands.
+#[test]
+fn formatting_shortcuts_do_nothing_outside_a_text_edit() {
+    let mut a = app();
+    let lid = a.session.execute("layer.newText", json!({"text": "Hello", "size": 80})).unwrap()["layer"].as_u64().unwrap();
+    assert!(a.session.state.text_edit.is_none());
+    let ctx = egui::Context::default();
+    let raw = egui::RawInput {
+        events: vec![Event::Key {
+            key: Key::K,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::COMMAND | Modifiers::ALT | Modifiers::SHIFT,
+        }],
+        ..Default::default()
+    };
+    let mut out = ctx.run_ui(raw, |ui| effectcraft_ui_egui::menus::handle_shortcuts(&mut a, ui.ctx()));
+    out.textures_delta.clear();
+    assert!(!layer_doc(&a.session, LayerId(lid)).unwrap().style_at(0).small_caps);
+}

@@ -219,12 +219,16 @@ pub fn build(app: &EffectcraftApp) -> NativeMenu {
                         continue;
                     }
                     let shortcut = crate::menus::entry_shortcut(app, e);
+                    // A panel's or a context's shortcut stays with the window's dispatcher: as a
+                    // menu key equivalent it would take the chord from the other scopes too.
+                    let scope = effectcraft_engine::shortcuts::scope_of(&effectcraft_engine::shortcuts::binding_key(&e.command, &e.params));
+                    let global = scope == effectcraft_engine::shortcuts::APP_SCOPE;
                     out.push(NativeNode::Item(NativeItem {
                         id,
                         label: crate::menus::entry_label(app, e),
                         command: e.command.clone(),
                         params: e.params.clone(),
-                        accelerator: shortcut.as_deref().and_then(accelerator),
+                        accelerator: shortcut.as_deref().filter(|_| global).and_then(accelerator),
                         shortcut,
                         enabled: crate::menus::entry_enabled(app, e),
                         checked: crate::menus::entry_checked(app, e),
@@ -554,16 +558,23 @@ mod tests {
         assert_eq!(accelerator("Shift+="), None);
         assert_eq!(accelerator("Alt+["), None);
         assert_eq!(accelerator("Num*"), None);
-        // Every menu shortcut either converts or is a single-key/Alt/Shift shortcut.
+        // Every menu shortcut either converts, is a single-key/Alt/Shift shortcut or belongs to
+        // a panel or a context.
         let app = app();
         for i in build(&app).items() {
             if let Some(sc) = &i.shortcut {
                 let primary = sc.contains("Cmd") || sc.contains("Ctrl");
-                if primary {
+                let scope = effectcraft_engine::shortcuts::scope_of(&effectcraft_engine::shortcuts::binding_key(&i.command, &i.params));
+                if primary && scope == effectcraft_engine::shortcuts::APP_SCOPE {
                     assert!(i.accelerator.is_some(), "{} ({sc}) has no accelerator", i.label);
                 }
             }
         }
+        // Cmd+T stays the Type tools' key: Free Transform Points claims it only with a mask or
+        // path points selected, which the window's dispatcher decides.
+        let spec = build(&app);
+        let ft = spec.items().into_iter().find(|i| i.command == "path.freeTransform").expect("Free Transform Points");
+        assert_eq!((ft.shortcut.as_deref(), ft.accelerator.as_deref()), (Some("Cmd+T"), None));
     }
 
     /// Window menu entries are checked while their panel is on screen.

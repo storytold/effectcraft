@@ -4,7 +4,7 @@
 //! 3D views (Active Camera / Front / … / Custom View 3), camera tools (orbit, pan, dolly) and
 //! camera/light wireframes.
 
-use effectcraft_engine::commands::shape_tool::PaintKind;
+use effectcraft_engine::commands::shape_tool::{PaintKind, ShapeOptions};
 use effectcraft_engine::effects::puppet::PinKind;
 use effectcraft_engine::geom::{Mat3, vec2 as gv2};
 use effectcraft_engine::project::{Comp, Layer, LayerId, LayerSource};
@@ -1463,7 +1463,10 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             }),
             // From where the button went down: by the time the pointer has moved far enough to
             // count as a drag it has already left the press point, and the shape is drawn there.
-            t if t.is_shape() => Some(Gesture::Create { tool: t, start: map.to_comp(press) }),
+            t if t.is_shape() => {
+                super::shape_draft::begin(&ctx, shape_kind(t));
+                Some(Gesture::Create { tool: t, start: map.to_comp(press) })
+            }
             Tool::ObjectMatte => Some(Gesture::ObjectMatteBox { start: press }),
             t if t.puppet_kind().is_some() && super::puppet_tool::hit(&pin_hits, press).is_none() => {
                 // Off the pins: Alt or a press outside the art drags a marquee that selects pins.
@@ -1688,8 +1691,13 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     }
                 }
             }
-            Gesture::Create { tool, start } => {
-                if let Some(d) = shape_drag(app, tool, start, cpt, mods) {
+            Gesture::Create { tool, start: from } => {
+                // The keys change the shape while it is dragged out; Spacebar held moves it.
+                let (start, options) = super::shape_draft::frame(&ctx, from, cpt, mods);
+                if start != from {
+                    ui.data_mut(|dd| dd.insert_temp(gid, Gesture::Create { tool, start }));
+                }
+                if let Some(d) = shape_drag(app, tool, start, cpt, mods, options) {
                     draw_shape_ghost(&painter, &map, app, &d, &t);
                 }
             }
@@ -1832,7 +1840,8 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 Gesture::ObjectMatteBox { start } => super::object_matte_tool::apply(app, &ectx, &map, start, Some(pos), mods.shift),
                 Gesture::Create { tool, start } => {
                     let end = map.to_comp(pos);
-                    create_shape(app, tool, start, end, mods);
+                    let options = super::shape_draft::end(&ctx);
+                    create_shape(app, tool, start, end, mods, options);
                 }
                 Gesture::Overlay(ov::Drag::Roi { start, keep }) => {
                     let c = map.to_comp(pos);
@@ -1871,6 +1880,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 _ => {}
             }
         }
+        super::shape_draft::end(&ctx);
         ui.data_mut(|d| {
             d.remove::<Gesture>(gid);
             let n: u64 = d.get_temp(egui::Id::new("viewer-drag-n")).unwrap_or(0);
@@ -2378,6 +2388,8 @@ struct ShapeDrag {
     centre: [f64; 2],
     size: [f64; 2],
     target: ShapeTarget,
+    /// What the keys made of it while it was dragged out.
+    options: ShapeOptions,
     /// The selected layer's name and the index its next mask would take, for the ghost's caption
     /// and colour.
     layer_name: String,
@@ -2396,9 +2408,9 @@ fn shape_kind(tool: Tool) -> &'static str {
 }
 
 /// What a shape tool drag from `start` to `end` makes, or `None` while it is too small to make
-/// anything. Alt (Option) draws from the press point and Shift squares the box; the live ghost and
+/// anything. Cmd (Ctrl) draws from the press point and Shift squares the box; the live ghost and
 /// [`create_shape`] both go through this, so the drag always shows what it will commit.
-fn shape_drag(app: &EffectcraftApp, tool: Tool, start: [f64; 2], end: [f64; 2], mods: egui::Modifiers) -> Option<ShapeDrag> {
+fn shape_drag(app: &EffectcraftApp, tool: Tool, start: [f64; 2], end: [f64; 2], mods: egui::Modifiers, options: ShapeOptions) -> Option<ShapeDrag> {
     let comp = app.session.active_comp()?;
     let selected = app.session.state.selected_layers.first().copied();
     let sel = selected.and_then(|id| comp.layer(id));
@@ -2415,8 +2427,10 @@ fn shape_drag(app: &EffectcraftApp, tool: Tool, start: [f64; 2], end: [f64; 2], 
     let (target, layer) = target;
     let mask_index = if target == ShapeTarget::Mask { layer.and_then(|l| l.masks()).map_or(0, |m| m.groups().count()) } else { 0 };
     let (mut w, mut h) = ((end[0] - start[0]).abs(), (end[1] - start[1]).abs());
-    // Ctrl/Cmd draws from the press point as the centre, as in After Effects.
-    if mods.command {
+    // Ctrl/Cmd draws from the press point as the centre; on a star it changes the outer radius
+    // alone instead (`shape_draft`).
+    let centred = mods.command && tool != Tool::Star;
+    if centred {
         w *= 2.0;
         h *= 2.0;
     }
@@ -2430,9 +2444,10 @@ fn shape_drag(app: &EffectcraftApp, tool: Tool, start: [f64; 2], end: [f64; 2], 
     }
     Some(ShapeDrag {
         kind: shape_kind(tool),
-        centre: if mods.command { start } else { [start[0].min(end[0]) + w / 2.0, start[1].min(end[1]) + h / 2.0] },
+        centre: if centred { start } else { [start[0].min(end[0]) + w / 2.0, start[1].min(end[1]) + h / 2.0] },
         size: [w, h],
         target,
+        options,
         layer_name: layer.map_or_else(String::new, |l| l.name.clone()),
         mask_index,
     })
@@ -2448,7 +2463,7 @@ fn paint_rgb(c: [f32; 3], opacity: f64, alpha: f32) -> Color32 {
 /// outlined in its Stroke (or the mask colour, for a mask), captioned with where it goes.
 fn draw_shape_ghost(painter: &egui::Painter, map: &ViewerMap, app: &EffectcraftApp, d: &ShapeDrag, t: &Tokens) {
     // The engine's own geometry for the kind, so the ghost is the shape and not a stand-in for it.
-    let Some(sp) = effectcraft_engine::commands::shape_tool::mask_path(d.kind, d.centre, d.size) else { return };
+    let Some(sp) = effectcraft_engine::commands::shape_tool::mask_path(d.kind, d.centre, d.size, &d.options) else { return };
     let mut pts = ov::flatten(&sp, &Mat3::IDENTITY, map);
     if pts.first() == pts.last() {
         pts.pop();
@@ -2492,8 +2507,15 @@ fn bounds_of(pts: &[Pos2]) -> Option<Rect> {
     Some(r)
 }
 
-fn create_shape(app: &mut EffectcraftApp, tool: Tool, a: [f64; 2], b: [f64; 2], mods: egui::Modifiers) {
-    let Some(d) = shape_drag(app, tool, a, b, mods) else { return };
+fn create_shape(app: &mut EffectcraftApp, tool: Tool, a: [f64; 2], b: [f64; 2], mods: egui::Modifiers, options: ShapeOptions) {
+    let Some(d) = shape_drag(app, tool, a, b, mods, options) else { return };
+    // The shape's own parameters join the command's.
+    let with_options = |mut q: serde_json::Value| {
+        if let (Some(q), serde_json::Value::Object(o)) = (q.as_object_mut(), d.options.to_params()) {
+            q.extend(o);
+        }
+        q
+    };
     let (kind, (w, h), (cx, cy)) = (d.kind, (d.size[0], d.size[1]), (d.centre[0], d.centre[1]));
     // A mask on the selected layer, as the ghost showed.
     if d.target == ShapeTarget::Mask {
@@ -2514,7 +2536,7 @@ fn create_shape(app: &mut EffectcraftApp, tool: Tool, a: [f64; 2], b: [f64; 2], 
             let p0 = inv.apply(gv2(cx - w / 2.0, cy - h / 2.0));
             let p1 = inv.apply(gv2(cx + w / 2.0, cy + h / 2.0));
             let rect = [p0.x.min(p1.x), p0.y.min(p1.y), (p1.x - p0.x).abs(), (p1.y - p0.y).abs()];
-            if let Err(e) = app.session.execute("layer.addMask", json!({"layer": l.id.0, "shape": kind, "rect": rect})) {
+            if let Err(e) = app.session.execute("layer.addMask", with_options(json!({"layer": l.id.0, "shape": kind, "rect": rect}))) {
                 app.ui.status = e.to_string();
             }
         }
@@ -2522,7 +2544,7 @@ fn create_shape(app: &mut EffectcraftApp, tool: Tool, a: [f64; 2], b: [f64; 2], 
     }
     // Into the selected shape layer's Contents as a new group (as in After Effects), else a new
     // shape layer; painted with the Tools bar's Fill and Stroke.
-    if let Err(e) = app.session.execute("shape.newShape", json!({"kind": kind, "size": [w, h], "position": [cx, cy]})) {
+    if let Err(e) = app.session.execute("shape.newShape", with_options(json!({"kind": kind, "size": [w, h], "position": [cx, cy]}))) {
         app.ui.status = e.to_string();
     }
 }
