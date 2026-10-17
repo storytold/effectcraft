@@ -300,6 +300,17 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
     if id == "layer.newText" && no_params(&params) {
         return run_engine(app, ctx, id, json!({"text": "", "edit": true}));
     }
+    // A new folder (File ▸ New, its shortcut, the Project panel's button and context menu) opens
+    // with its name ready to type, as in After Effects (#1658). The command selects it.
+    // `engine.execute` keeps the headless default.
+    if id == "project.newFolder" && no_params(&params) {
+        let r = run_engine(app, ctx, id, params);
+        if r.is_ok() {
+            app.show_panel(PanelKind::Project);
+            crate::panels::project::begin_rename(app, ctx);
+        }
+        return r;
+    }
     if no_params(&params) && app.ui.focused == PanelKind::Project {
         match id {
             "edit.duplicate" => return run_engine(app, ctx, "project.duplicate", json!({})),
