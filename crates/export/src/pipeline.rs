@@ -168,7 +168,7 @@ impl<'a> Cx<'a> {
         // compositors differ slightly, so a per-frame choice made renders differ run to run.
         let backend = if self.project.settings.gpu_acceleration { Backend::Gpu } else { Backend::Cpu };
         let opts = RenderOpts {
-            scale: s.resolution.clamp(0.01, 4.0),
+            scale: self.comp().map(|c| s.effective_scale(c)).unwrap_or_else(|| s.resolution.clamp(0.01, 4.0)),
             motion_blur: s.motion_blur_override() != SwitchOverride::OffForAll,
             guides: s.guide_layers == CurrentOrOff::Current,
             draft: s.quality == RenderQuality::Draft,
@@ -255,7 +255,7 @@ impl<'a> Cx<'a> {
     /// Output Module ▸ Crop, then Resize.
     fn crop_resize(&self, img: Image) -> Image {
         let om = self.job.output;
-        let scale = self.job.settings.resolution.clamp(0.01, 4.0);
+        let scale = self.comp().map(|c| self.job.settings.effective_scale(c)).unwrap_or_else(|| self.job.settings.resolution.clamp(0.01, 4.0));
         let (t, l, b, r) = om.crop.edges(img.width, img.height, scale);
         let img = if (t, l, b, r) == (0, 0, 0, 0) { img } else { crop(&img, t, l, b, r) };
         if !om.resize.enabled {
