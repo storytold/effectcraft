@@ -24,6 +24,7 @@ pub mod i18n;
 pub mod icons;
 pub mod menu_keys;
 pub mod menus;
+pub use panels::unsaved::RestartState;
 pub mod native_menu;
 pub mod panels;
 mod pointer_wrap;
@@ -161,6 +162,7 @@ pub struct Hooks {
     /// Application actions the OS performs (`app.hide`, `app.hideOthers`, `app.showAll` on
     /// macOS). Returns false when the host doesn't handle the id.
     pub app_action: Option<Box<dyn Fn(&str) -> bool>>,
+    pub update_status: Option<Box<dyn Fn() -> serde_json::Value>>,
     /// Shows a command's file dialog without blocking the frame and calls `done` with the
     /// answer (the host then asks for a repaint). Used in place of the blocking pickers above for
     /// the commands' dialogs (File ▸ Import, Open, Save As…) where a modal dialog's nested event
@@ -364,6 +366,36 @@ struct SavedWorkspaces {
 }
 
 impl EffectcraftApp {
+    /// Prepare a restart using the normal Save / Don't Save / Cancel prompt, without closing.
+    pub fn prepare_restart(&mut self, ctx: &egui::Context) -> Result<(), String> {
+        self.dialog_state.unsaved.restart = RestartState::Prompting;
+        if self.session.render_job.is_some() || !self.session.tasks.is_empty() || !self.session.offloaded.is_empty() || self.dialog.is_some() {
+            self.dialog_state.unsaved.restart = RestartState::Canceled;
+            return Err("Finish the render or close the current dialog before updating.".into());
+        }
+        self.stop();
+        menus::invoke(self, ctx, "app.prepareRestart", serde_json::json!({})).map(|_| ())
+    }
+
+    pub fn restart_state(&self) -> RestartState {
+        self.dialog_state.unsaved.restart
+    }
+
+    pub fn cancel_restart(&mut self) {
+        self.dialog_state.unsaved.restart = RestartState::Idle;
+        self.dialog_state.unsaved.saving_restart = false;
+        if self.dialog_state.unsaved.command.as_ref().is_some_and(|(id, _)| id == "app.prepareRestart") {
+            self.dialog_state.unsaved.command = None;
+            if self.dialog == Some(Dialog::UnsavedChanges) {
+                self.dialog = None;
+            }
+        }
+    }
+
+    pub fn commit_restart(&mut self, ctx: &egui::Context) {
+        self.dialog_state.unsaved.quitting = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
     pub fn new(session: Session) -> Self {
         let mut ui = UiState::default();
         let workspace_store = workspace_state::WorkspaceStore::load(session.config.as_deref(), &mut ui);

@@ -76,3 +76,15 @@ and line instead of being discarded. `--fail-over PCT` requires the same run key
 successful latest runs, and at least one comparable resource metric per run. Failed latest runs,
 missing coverage, empty results and wall-time-only measurements cannot pass the gate. Omit
 `--fail-over` for an exploratory partial comparison; failed latest runs remain visible.
+
+## In-app updater checks
+
+Run the updater's parsing, integrity, coordination, replacement, restart, and headless UI tests with
+`cargo test -p effectcraft update::`. Run the save and cancel workflows with
+`cargo test -p effectcraft-ui-egui --lib panels::unsaved::tests`.
+
+On Windows, `powershell -NoProfile -File packaging/windows/test-updater.ps1` checks portable
+replacement, settings preservation, incomplete archives, and rollback when a file is locked.
+The updater workflow runs the focused Rust checks on Linux, Windows, and macOS. The macOS tests
+create a signed synthetic app and a DMG locally. No downloaded binaries or production install
+folders are used by the replacement tests.

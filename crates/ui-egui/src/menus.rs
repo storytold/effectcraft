@@ -291,7 +291,7 @@ fn only_comp(p: &Value) -> Option<effectcraft_engine::project::ItemId> {
 
 /// Execute a UI or engine command by id.
 pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: Value) -> Result<Value, String> {
-    if matches!(id, "effects.copyPresetsFolderPath" | "mediaBrowser.copySourcePath") {
+    if matches!(id, "effects.copyPresetsFolderPath" | "mediaBrowser.copySourcePath" | "app.updateStatus") {
         return frontend(app, ctx, id, params);
     }
     // Layer ▸ New ▸ Text (menu, shortcut, context menus) puts an insertion point in the centre of
@@ -956,6 +956,20 @@ pub fn frontend(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, p: Valu
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             Value::Null
         }
+        "app.prepareRestart" => {
+            if app.dialog_state.unsaved.restart != crate::RestartState::Prompting {
+                return Err("Restart preparation must be requested by the desktop updater.".into());
+            }
+            app.dialog_state.unsaved.restart = crate::RestartState::Ready;
+            Value::Null
+        }
+        "app.updateStatus" => app.hooks.update_status.as_ref().ok_or("Updates are available in the desktop application.")?(),
+        "help.checkForUpdates" | "app.downloadUpdate" | "app.installUpdate" | "app.cancelUpdate" => {
+            if !app.hooks.app_action.as_ref().is_some_and(|f| f(id)) {
+                return Err("In-app updates are available in the desktop application.".into());
+            }
+            Value::Null
+        }
         "app.commandPalette" => {
             app.dialog_state.palette_query = p.get("query").and_then(Value::as_str).unwrap_or_default().to_string();
             app.dialog_state.palette_sel = 0;
@@ -1440,8 +1454,18 @@ fn picked_value(key: &str, paths: Vec<String>) -> Option<Value> {
 /// A file dialog shown without blocking ([`crate::Hooks::file_dialog_async`]) answered: run its
 /// command with the picked path (nothing when it was cancelled).
 pub(crate) fn dialog_answered(app: &mut EffectcraftApp, answer: crate::DialogAnswer) {
-    let Some(v) = picked_value(answer.key, answer.paths) else { return };
-    if let Err(e) = run_with_picked(app, &answer.command, answer.key, &answer.params, v) {
+    let save = matches!(answer.command.as_str(), "file.save" | "file.saveAs");
+    let Some(v) = picked_value(answer.key, answer.paths) else {
+        if save {
+            crate::panels::unsaved::restart_save_answered(app, false);
+        }
+        return;
+    };
+    let result = run_with_picked(app, &answer.command, answer.key, &answer.params, v);
+    if save {
+        crate::panels::unsaved::restart_save_answered(app, result.is_ok());
+    }
+    if let Err(e) = result {
         app.ui.status = e;
     }
 }
@@ -1813,6 +1837,9 @@ fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only
                 app.session.prefs_changed();
             }
             if app.dialog == Some(crate::Dialog::UnsavedChanges) {
+                if app.dialog_state.unsaved.command.as_ref().is_some_and(|(id, _)| id == "app.prepareRestart") {
+                    app.dialog_state.unsaved.restart = crate::RestartState::Canceled;
+                }
                 app.dialog_state.unsaved.command = None;
             }
             app.dialog = None;

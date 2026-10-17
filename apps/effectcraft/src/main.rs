@@ -26,6 +26,7 @@ mod native_menu;
 // Built everywhere so it stays checked; only the macOS app uses it.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod sheet_dialogs;
+mod update;
 mod window;
 
 use effectcraft_ui_egui::EffectcraftApp;
@@ -66,6 +67,7 @@ fn wayland_drop_notice(wayland_display: Option<&std::ffi::OsStr>, backend: Optio
 struct Args {
     control_port: Option<u16>,
     files: Vec<String>,
+    reopen_project: Option<String>,
     /// Open the demo project when no project is given (`--demo`).
     demo: bool,
     /// Show or skip the Home screen (`--home`), else the Startup preference decides.
@@ -90,6 +92,7 @@ fn parse_args(args: impl IntoIterator<Item = String>, env_port: Result<String, s
             "--demo" => out.demo = true,
             "--empty" => out.demo = false,
             "--home" => out.home = Some(true),
+            "--reopen-project" => out.reopen_project = Some(args.next().ok_or("--reopen-project needs a saved project path")?),
             "--version" => return Ok(None),
             _ => match a.strip_prefix("--control=") {
                 Some(v) => out.control_port = Some(control_port("--control", Some(v))?),
@@ -128,7 +131,10 @@ fn main() -> eframe::Result {
     // feed the compatibility report.
     effectcraft_engine::logging::install();
     effectcraft_engine::logging::install_panic_hook();
-    let Args { control_port, files, demo, home } = match parse_args(std::env::args().skip(1), std::env::var("EFFECTCRAFT_CONTROL_PORT")) {
+    if update::run_helper_if_requested() {
+        return Ok(());
+    }
+    let Args { control_port, files, demo, home, reopen_project } = match parse_args(std::env::args().skip(1), std::env::var("EFFECTCRAFT_CONTROL_PORT")) {
         Ok(Some(args)) => args,
         Ok(None) => {
             println!("effectcraft {}", env!("CARGO_PKG_VERSION"));
@@ -149,6 +155,13 @@ fn main() -> eframe::Result {
             Err(e) => log::warn!("no log file: {e}"),
         }
     }
+    let update_registration = match update::Registration::new() {
+        Ok(registration) => registration,
+        Err(message) => {
+            rfd::MessageDialog::new().set_title("EffectCraft update in progress").set_description(message).show();
+            return Ok(());
+        }
+    };
     // The font menus list the installed fonts: read their names while the window opens.
     effectcraft_engine::text::fonts::scan_system_in_background();
     // Wayland shows the window's icon from its desktop entry: an AppImage brings its own.
@@ -228,7 +241,8 @@ fn main() -> eframe::Result {
             let saved_window = session.config.as_deref().and_then(window::load);
             let opened = cc.winit_window().map(|w| window::restore(w, saved_window));
             let recovery = if control_port.is_none() { session.begin_recovery() } else { None };
-            let project = files.iter().find(|f| is_project_file(f)).cloned();
+            let project = reopen_project.or_else(|| files.iter().find(|f| is_project_file(f)).cloned());
+            let empty_launch = project.is_none() && files.is_empty();
             if let Some(p) = project {
                 if let Err(e) = session.execute("file.open", json!({"path": p})) {
                     log::warn!("{p}: {e}");
@@ -242,7 +256,7 @@ fn main() -> eframe::Result {
             {
                 log::warn!("import: {e}");
             }
-            let show_home = home.unwrap_or(session.prefs.startup.show_home_on_launch && files.is_empty() && control_port.is_none());
+            let show_home = home.unwrap_or(session.prefs.startup.show_home_on_launch && empty_launch && control_port.is_none());
             // The ScriptUI panels open when the app last quit open again (a failing one is
             // reported in a toast and forgotten).
             let _ = session.execute("window.restoreScriptPanels", json!({}));
@@ -315,6 +329,7 @@ fn main() -> eframe::Result {
                 app = app.with_control(rx);
             }
             log::info!("app created; the window shows after its first frame");
+            let updater = update::Updater::new(&mut app, control_port, update_registration);
             Ok(Box::new(Desktop {
                 #[cfg(target_os = "macos")]
                 menu: native_menu::NativeBar::new(&cc.egui_ctx),
@@ -324,6 +339,7 @@ fn main() -> eframe::Result {
                 window: window::Tracker::new(opened, saved_window, control_port.is_none()),
                 launch,
                 drawn: false,
+                updater,
             }))
         }),
     );
@@ -394,6 +410,7 @@ fn startup_failed(e: &eframe::Error, gl_next: bool) {
 
 /// The desktop app: the egui app plus, on macOS, the system menu bar.
 struct Desktop {
+    updater: update::Updater,
     app: EffectcraftApp,
     #[cfg(target_os = "macos")]
     menu: native_menu::NativeBar,
@@ -409,13 +426,23 @@ struct Desktop {
 
 impl eframe::App for Desktop {
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.updater.tick(&mut self.app, ctx);
+        if self.updater.frozen(&self.app) {
+            self.app.logic(ctx, frame);
+            return;
+        }
         #[cfg(target_os = "macos")]
         self.menu.update(&mut self.app, ctx);
         self.app.logic(ctx, frame);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        self.app.ui(ui, frame);
+        if self.updater.frozen(&self.app) {
+            self.app.auto.begin_frame();
+        } else {
+            self.app.ui(ui, frame);
+        }
+        self.updater.ui(&mut self.app, ui);
         self.window.frame(ui.ctx(), self.app.session.config.as_deref());
         if !self.drawn {
             self.drawn = true;

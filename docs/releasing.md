@@ -48,6 +48,11 @@ any other branch (`gh workflow run release.yml --ref <branch>`), it is a dry run
 sign nothing (Linux, Flatpak, FreeBSD, web) build and check everything, the macOS and Windows
 jobs are refused by the environment's branch rule, and no draft release is made.
 
+## In-app updates
+
+Published stable releases are discovered by the [desktop updater](updating.md). Keep the existing
+artifact names and publish GitHub asset digests or `SHA256SUMS.txt`. No separate feed is needed.
+
 ## What gets built
 
 | Platform | Artifacts | Built on |

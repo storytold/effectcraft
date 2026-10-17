@@ -182,6 +182,9 @@ See [docs/agents.md](docs/agents.md) and [docs/control-protocol.md](docs/control
 
 ## Get started
 
+Desktop release builds support **Help > Check for Updates**, with separate download and restart steps.
+See [updating EffectCraft](docs/updating.md) for supported packages and save prompts.
+
 Installers for each version are on the [Releases](https://github.com/storytold/effectcraft/releases)
 page: a universal macOS app; Windows MSIs and portable zips for x64, x86 and ARM64; Linux
 AppImage, Flatpak, deb, rpm and tar.gz for x86_64 and aarch64, plus a riscv64 tar.gz; a FreeBSD x86_64 tarball; and the

@@ -203,3 +203,13 @@ layout unchanged. Pointer gestures dispatch through this same catalog command.
 EffectCraft also supports `SetStackOpen` and `ResizeStack`. Dynamic panel identities use
 `{"Viewer":42}` or `{"ScriptPanel":77}` in the action. Closing runs the existing viewer
 and ScriptUI lifecycle callbacks; opening uses the existing panel creation commands.
+
+## Desktop update commands
+
+Use `ui.menu.invoke` with `id` set to `help.checkForUpdates`, `app.updateStatus`,
+`app.downloadUpdate`, `app.installUpdate`, or `app.cancelUpdate`.
+`app.updateStatus` returns the phase, candidate version, downloaded byte count, whether preparation
+is pending, and whether the installation supports in-app replacement. Download and installation
+are separate commands. Installation uses the same save prompt as interactive updates.
+While a window has approved restart, document-changing control requests are refused. Status,
+screenshot, inspection, and cancel requests remain available.
