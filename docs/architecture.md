@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-10 · **Change:** minor (crate table checked against `crates/`: effect count 306, VP9 inter frames) · **Target:** Adobe After Effects 2026
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-13 · **Change:** minor (bounded CPU simulation checkpoints, #1238) · **Target:** Adobe After Effects 2026
 
 EffectCraft is a stack of small Rust crates. The engine knows nothing about the user interface;
 the egui frontend, the command-line tool and the MCP server all sit on top of the same `Session`
@@ -368,6 +368,15 @@ Playground cannons without interacting forces evolve every particle independentl
 backend (reached through `EffectHost::particles` when the GPU compositor is active) simulates one
 particle per invocation from the CPU's birth schedule and keeps per-key state checkpoints on the
 GPU, like `SimCache`; the CPU simulation stays the oracle (tests compare ids and positions).
+
+The CPU `SimCache` retains at most 256 checkpoints per key and at most 256 newly generated
+checkpoints per in-flight run. Both collections make room on insertion, preferring aligned
+checkpoints and thinning them when necessary; the latest exact target remains cached. This
+bounds snapshot counts during long seeks as well as afterward (#1238). State sizes and the
+number of concurrent simulations are not byte-budgeted, and large advances still run every
+simulation step synchronously. Synthetic tests count live state clones and check seek/eviction
+results against a fresh simulation without allocating large particle buffers.
+
 `effectcraft-cli bench --gpu` reports CPU vs GPU ms/frame, speed-up, Auto's ms/frame, pixel
 agreement and the steady-state upload / readback MB per frame for every comp plus an
 adjustment-layer comp.

@@ -527,6 +527,25 @@ struct SimEntry<S> {
 /// Checkpoint every this many steps.
 pub const SIM_CHECKPOINT: u64 = 15;
 
+const MAX_SIM_CHECKPOINTS: usize = 256;
+
+/// Make room before retaining another state, both during simulation and when publishing it.
+/// Prefer aligned checkpoints, then thin them; always keep the newly requested exact target.
+fn push_checkpoint<S>(checkpoints: &mut Vec<(u64, std::sync::Arc<S>)>, checkpoint: (u64, std::sync::Arc<S>)) {
+    if checkpoints.len() >= MAX_SIM_CHECKPOINTS {
+        checkpoints.retain(|(s, _)| s % SIM_CHECKPOINT == 0);
+        if checkpoints.len() >= MAX_SIM_CHECKPOINTS {
+            checkpoints.sort_by_key(|(s, _)| *s);
+            let mut keep = false;
+            checkpoints.retain(|_| {
+                keep = !keep;
+                keep
+            });
+        }
+    }
+    checkpoints.push(checkpoint);
+}
+
 impl<S: Clone> SimCache<S> {
     pub const fn new(cap: usize) -> SimCache<S> {
         SimCache { inner: std::sync::Mutex::new(Vec::new()), cap }
@@ -552,17 +571,17 @@ impl<S: Clone> SimCache<S> {
         };
         let mut fresh: Vec<(u64, Arc<S>)> = Vec::new();
         if !had_start {
-            fresh.push((0, Arc::new(st.clone())));
+            push_checkpoint(&mut fresh, (0, Arc::new(st.clone())));
         }
         while i < target {
             step(&mut st, i);
             i += 1;
             if i % SIM_CHECKPOINT == 0 && i != target {
-                fresh.push((i, Arc::new(st.clone())));
+                push_checkpoint(&mut fresh, (i, Arc::new(st.clone())));
             }
         }
         let out = Arc::new(st);
-        fresh.push((target, out.clone()));
+        push_checkpoint(&mut fresh, (target, out.clone()));
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let tick = g.iter().map(|e| e.used).max().unwrap_or(0) + 1;
         let idx = match g.iter().position(|e| e.key == key) {
@@ -580,18 +599,8 @@ impl<S: Clone> SimCache<S> {
         e.used = tick;
         for (s, st) in fresh {
             if !e.checkpoints.iter().any(|(c, _)| *c == s) {
-                e.checkpoints.push((s, st));
+                push_checkpoint(&mut e.checkpoints, (s, st));
             }
-        }
-        // Keep memory bounded: drop unaligned (exact-target) checkpoints first, then thin.
-        if e.checkpoints.len() > 256 {
-            e.checkpoints.retain(|(s, _)| s % SIM_CHECKPOINT == 0);
-            e.checkpoints.sort_by_key(|(s, _)| *s);
-            let mut k = 0;
-            e.checkpoints.retain(|_| {
-                k += 1;
-                k % 2 == 1
-            });
         }
         out
     }
@@ -752,6 +761,79 @@ pub fn poly_point_at(pts: &[[f64; 2]], closed: bool, s: f64) -> ([f64; 2], [f64;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sim_cache_bounds_live_checkpoints_during_long_seeks() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        #[derive(Default)]
+        struct Counts {
+            live: AtomicUsize,
+            peak: AtomicUsize,
+        }
+        struct State {
+            value: u64,
+            counts: Arc<Counts>,
+        }
+        impl State {
+            fn new(value: u64, counts: Arc<Counts>) -> Self {
+                let live = counts.live.fetch_add(1, Ordering::SeqCst) + 1;
+                counts.peak.fetch_max(live, Ordering::SeqCst);
+                Self { value, counts }
+            }
+        }
+        impl Clone for State {
+            fn clone(&self) -> Self {
+                Self::new(self.value, self.counts.clone())
+            }
+        }
+        impl Drop for State {
+            fn drop(&mut self) {
+                self.counts.live.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        let counts = Arc::new(Counts::default());
+        let cache = SimCache::new(1);
+        for target in [15_001, 30_002, 7_777, 45_003] {
+            let state = cache.run(1, target, || State::new(0, counts.clone()), |s, i| s.value += i);
+            assert_eq!(state.value, target * (target - 1) / 2);
+            assert!(cache.inner.lock().unwrap()[0].checkpoints.len() <= 256);
+            // At most 256 old and 256 new snapshots, plus mutable state / pending clone.
+            assert!(counts.peak.load(Ordering::SeqCst) <= 514);
+            let missed = std::cell::Cell::new(false);
+            let again = cache.run(
+                1,
+                target,
+                || {
+                    missed.set(true);
+                    State::new(0, counts.clone())
+                },
+                |_, _| missed.set(true),
+            );
+            assert!(!missed.get(), "repeating the target must not initialise or step again");
+            assert!(Arc::ptr_eq(&state, &again), "the latest exact target stays cached");
+        }
+        drop(cache);
+        assert_eq!(counts.live.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn sim_cache_long_seeks_and_key_eviction_match_fresh_simulation() {
+        let cache = SimCache::new(2);
+        let step = |s: &mut u64, i: u64| *s = s.wrapping_mul(6364136223846793005).wrapping_add(i);
+        for (key, target) in [(1, 20_003), (1, 30_007), (1, 7_777), (2, 18_001), (3, 19_999), (1, 21_111), (1, 0)] {
+            let mut expected = key;
+            for i in 0..target {
+                step(&mut expected, i);
+            }
+            assert_eq!(*cache.run(key, target, || key, step), expected);
+            let entries = cache.inner.lock().unwrap();
+            assert!(entries.len() <= 2);
+            assert!(entries.iter().all(|e| e.checkpoints.len() <= 256));
+        }
+    }
 
     #[test]
     fn sim_cache_is_seek_consistent() {
