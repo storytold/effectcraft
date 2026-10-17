@@ -679,6 +679,103 @@ fn fill_options_change_the_selected_shape_layer() {
     }
 }
 
+/// #1220: path tools hide the layer transform box, while path vertices remain editable.
+#[test]
+fn path_editing_hides_layer_bounds_and_keeps_corner_vertices_editable() {
+    for mask in [false, true] {
+        let mut h = harness();
+        let vertices = [[200.0, 100.0], [400.0, 100.0], [400.0, 260.0], [200.0, 260.0]];
+        let (layer, uid, kind) = if mask {
+            let layer = layer_id(&h, "Plate");
+            h.state_mut().session.execute("layer.select", json!({"layers": [layer]})).unwrap();
+            let r = h
+                .state_mut()
+                .session
+                .execute("mask.new", json!({"layer": layer, "vertices": vertices, "outTangents": [[40, 0], [0, 0], [0, 0], [0, 0]], "closed": true}))
+                .unwrap();
+            (layer, r["mask"].as_u64().unwrap(), "mask")
+        } else {
+            let r = h.state_mut().session.execute("shape.newPath", json!({"vertices": vertices, "outTangents": [[40, 0], [0, 0], [0, 0], [0, 0]], "closed": true, "fill": false, "stroke": "#ffffff", "strokeWidth": 4})).unwrap();
+            (r["layer"].as_u64().unwrap(), r["path"].as_u64().unwrap(), "shapePath")
+        };
+        h.state_mut().session.state.selected_vertices.clear();
+        h.run_steps(2);
+        let handle = format!("viewer.handle.{layer}.0");
+        assert!(h.state().auto.find(&handle).is_some(), "ordinary layer selection has transform handles (mask={mask})");
+        for tool in [Tool::Pen, Tool::PenAdd, Tool::PenDelete, Tool::PenConvert, Tool::MaskFeather] {
+            h.state_mut().ui.tool = tool;
+            h.run_steps(2);
+            assert!(h.state().auto.find(&handle).is_none(), "{tool:?}: hide the layer box");
+            assert!(h.state().auto.find(&format!("viewer.{kind}.{uid}.vertex.0")).is_some(), "{tool:?}: keep the path point");
+        }
+        h.state_mut().ui.tool = Tool::Selection;
+        h.run_steps(2);
+        let vertex = format!("viewer.{kind}.{uid}.vertex.0");
+        let from = rect(&h, &vertex).center();
+        click(&mut h, from);
+        h.run_steps(2); // The automation registry also keeps the preceding frame's elements.
+        assert!(h.state().auto.find(&handle).is_none(), "selecting a vertex starts path editing (mask={mask})");
+        let position = h.state().session.active_comp().unwrap().layer(LayerId(layer)).unwrap().props.prop("transform/position").unwrap().value.clone();
+        let path = |h: &Harness<'_, EffectcraftApp>| {
+            h.state()
+                .session
+                .active_comp()
+                .unwrap()
+                .layer(LayerId(layer))
+                .unwrap()
+                .props
+                .find_group(uid)
+                .unwrap()
+                .get("path")
+                .unwrap()
+                .value
+                .as_path()
+                .unwrap()
+                .clone()
+        };
+        let before = path(&h);
+        drag(&mut h, from, from + vec2(15.0, 12.0));
+        assert_ne!(path(&h).vertices[0], before.vertices[0], "the corner vertex can still be moved");
+        assert_eq!(path(&h).vertices[1..], before.vertices[1..]);
+        assert_eq!(h.state().session.active_comp().unwrap().layer(LayerId(layer)).unwrap().props.prop("transform/position").unwrap().value, position);
+        h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+        h.run_steps(2);
+        assert_eq!(path(&h), before, "moving the vertex undoes in one step");
+        let z = rect(&h, "viewer.comp").width() / 640.0;
+        let tangent = rect(&h, &vertex).center() + vec2(40.0 * z, 0.0);
+        drag(&mut h, tangent, tangent + vec2(0.0, 20.0));
+        assert_ne!(path(&h).out_tangents[0], before.out_tangents[0], "the Bézier handle is still editable");
+        assert_eq!(path(&h).vertices, before.vertices, "a tangent drag does not move the path points");
+        h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+        h.run_steps(2);
+        assert_eq!(path(&h), before, "the tangent drag undoes in one step");
+        h.state_mut().ui.tool = Tool::Rotate;
+        h.run_steps(2);
+        assert!(h.state().auto.find(&handle).is_some(), "a layer transform tool restores the box");
+        h.state_mut().ui.tool = Tool::Selection;
+        h.state_mut().session.state.selected_vertices.clear();
+        h.run_steps(2);
+        assert!(h.state().auto.find(&handle).is_some(), "ending vertex selection restores the box");
+    }
+}
+
+#[test]
+fn path_tools_keep_bounds_on_layers_without_visible_paths() {
+    let mut h = harness();
+    let layer = layer_id(&h, "Box");
+    h.state_mut().session.execute("layer.select", json!({"layers": [layer]})).unwrap();
+    h.state_mut().ui.tool = Tool::Pen;
+    h.run_steps(2);
+    let handle = format!("viewer.handle.{layer}.0");
+    assert!(h.state().auto.find(&handle).is_some(), "a layer without a path keeps its box");
+    h.state_mut().session.execute("mask.new", json!({"layer": layer, "vertices": [[0, 0], [80, 0], [80, 80]], "closed": true})).unwrap();
+    h.run_steps(2);
+    assert!(h.state().auto.find(&handle).is_none());
+    h.state_mut().ui.viewer.show_masks = false;
+    h.run_steps(2);
+    assert!(h.state().auto.find(&handle).is_some(), "hidden paths do not suppress the layer controls");
+}
+
 #[test]
 fn shape_pen_draws_a_closed_shape_layer() {
     let mut h = harness();

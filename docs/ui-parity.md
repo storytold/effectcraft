@@ -1,6 +1,6 @@
 # UI parity
 
-> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-12 · **Change:** minor (closed issue references re-audited against `upstream/main` 470ea7a3) · **Target:** Adobe After Effects 2026
+> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-13 · **Change:** minor (path-editing layer bounds, #1220; closed issue references re-audited against `upstream/main` 470ea7a3) · **Target:** Adobe After Effects 2026
 
 How closely EffectCraft's interaction matches After Effects: tools, handles, snapping, nudging,
 modifier keys, shortcuts, drag behaviour, numeric entry, panels, context menus and feel. Evidence
@@ -33,6 +33,12 @@ feel and platform differences, and the 26.x interface changes are not in yet.
 | Accessibility | AccessKit enabled; focus labels tested; Project panel keyboard navigation and accessible names (#776) | 20% | No screen-reader pass or keyboard-navigation audit of the other panels; no contrast check |
 | UI scale | Settings ▸ Appearance ▸ UI Scale 75–200% | beyond | After Effects follows the system's scaling (#284) |
 
+Path editing (#1220): the Composition viewer suppresses a selected layer’s transform box while
+using a Pen-family tool on a visible path, or while selecting its vertices with the Selection
+tool. Path points, Bézier handles and the path’s free-transform controls remain available.
+Layer transform tools and ordinary layer selection restore the box. Headless `ui_viewer` tests
+cover shape paths and masks, corner-vertex dragging and undo, and layers without visible paths.
+
 ## Estimate
 
 **≈ 60–120 h**: the open interaction issues above (25–45 h, about 0.2–0.5 h each with a scripted
@@ -44,6 +50,7 @@ Effects running; most of the rest parallelises.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-13 | patch | Layer bounds are suppressed during path-point editing (#1220); shape/mask interaction regressions |
 | 2026-10-12 | minor | Closed issues (#302, #320, #491, #511, #553 and others) marked as closed instead of open; panels in their own windows (#486) |
 | 2026-10-12 | minor | Percentage guides and effect colour labels (26.5) added; rows updated |
 | 2026-10-10 | major | First UI parity checklist |

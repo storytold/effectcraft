@@ -1,6 +1,6 @@
 # Where EffectCraft falls short
 
-> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-12 · **Change:** minor (issue, PR and catalog references gap 21: percentage guides and effect colour labels in; earlier change: re-audited against `upstream/main` 470ea7a3; ranked gap list from the 10 October re-measure otherwise unchanged) · **Target:** Adobe After Effects 2026 (26.5.0.89)
+> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-13 · **Change:** minor (path-editing layer bounds, #1220; issue, PR and catalog references gap 21: percentage guides and effect colour labels in; earlier change: re-audited against `upstream/main` 470ea7a3; ranked gap list from the 10 October re-measure otherwise unchanged) · **Target:** Adobe After Effects 2026 (26.5.0.89)
 
 An honest assessment of how far EffectCraft is from being a real replacement for After Effects,
 and the work that closes the gap. This document is meant for contributors and agents choosing
@@ -114,6 +114,9 @@ The most important missing piece: it turns every other estimate here into a meas
 - Run the headless snapshot and control-channel checks on Linux (X11 and Wayland) and Windows, not
   only macOS. Interactions that only fail with real input (docking drags, viewer pan, drag-and-drop
   import, inline rename) need scripted input tests.
+- Path editing (#1220): selected shape and mask paths suppress the layer transform box while
+  their points are edited. `ui_viewer` regressions cover Pen-family tools, Selection vertex
+  dragging and undo, restoration of layer controls, and layers without visible paths.
 - Regression evidence for [#66](https://github.com/storytold/effectcraft/issues/66): scripted
   pointer tests in `ui_viewer` and `ui_text_edit`, checked headlessly on Linux, cover viewer clicks,
   marquee selection and text picking when layers are hidden or excluded by solo. They also check
@@ -323,6 +326,7 @@ Issues #41–#47 (all from the Linux AppImage 0.1.1, 5 October): panning the vie
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-13 | patch | G2: layer bounds no longer compete with editable shape/mask path points (#1220) |
 | 2026-10-12 | minor | Audited against `upstream/main` 470ea7a3: open-issue count and crash list, closed issues removed from rows 1, 3, 5, 6, 8–12, 15–17, 22–24, G8 and G9 (#759 `#include`), localization catalogs recounted (≈ 12% to ≈ 18%); rows 7, 14 and 21 left to open PRs #1102, #792 and #1098 |
 | 2026-10-10 | minor | Alpha gate checked: no alpha blockers |
 | 2026-10-12 | minor | Gap 21: percentage guides and effect colour labels added (#1095) |

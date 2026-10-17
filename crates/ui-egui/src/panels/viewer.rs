@@ -1030,6 +1030,14 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     }
                 }
             }
+            // Path editing keeps vertices and tangents visible without the layer's transform
+            // box competing with them (#1220). The path's own free-transform box is separate.
+            let editing_path = paths.iter().any(|p| {
+                p.layer == l.id && (app.ui.tool.is_pen() || (app.ui.tool == Tool::Selection && sel_vertices.iter().any(|v| v.layer == l.id && v.mask == p.uid)))
+            });
+            if editing_path {
+                continue;
+            }
             let Some((m, q, _)) = layer_quad(&ectx, l) else {
                 // A 3D layer reaching past the camera: the part of its box in front of it.
                 let outline = layer_outline(&ectx, l);
