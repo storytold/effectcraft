@@ -1445,6 +1445,60 @@ fn keys_from_several_layers_paste_in_order_and_paste_reversed_respects_stretch()
     assert_eq!(vals, vec![10.0, 0.0], "reversed");
 }
 
+/// #1425: a mask path (its value, or a keyframe of it) pasted onto Position becomes a motion
+/// path, as in After Effects: a key per vertex with the path's tangents, over 2 s from the CTI,
+/// the inner keys roving; a closed path returns to its start. AE pastes the layer-space numbers
+/// as they are, so the source layer's and the target parent's transforms don't move them.
+#[test]
+fn a_copied_path_pastes_onto_position_as_a_motion_path() {
+    let mut s = comp();
+    let a = solid(&mut s, "#ff0000");
+    // A moved and scaled source: converting to comp space would give 2v + (200, 100).
+    s.execute("prop.set", json!({"layer": a, "path": "transform/position", "value": [400, 200]})).unwrap();
+    s.execute("prop.set", json!({"layer": a, "path": "transform/scale", "value": [200, 200]})).unwrap();
+    let rect = json!([[0, 0], [40, 0], [40, 40], [0, 40]]);
+    s.execute("mask.new", json!({"layer": a, "vertices": rect.clone(), "outTangents": [[10, 0]], "closed": true})).unwrap();
+    // B's parent would shift a converted Position by (0, −50).
+    let parent = solid(&mut s, "#0000ff");
+    s.execute("prop.set", json!({"layer": parent, "path": "transform/position", "value": [100, 100]})).unwrap();
+    let b = solid(&mut s, "#00ff00");
+    s.execute("layer.setParent", json!({"layers": [b], "parent": parent})).unwrap();
+    let motion = |s: &Session, id: u64| {
+        let l = layer(s, id);
+        let pr = l.props.prop("transform/position").unwrap().clone();
+        pr.keys.iter().map(|k| (l.comp_time(k.time).seconds(), k.value.as_vec3(), k.spatial_out, k.roving)).collect::<Vec<_>>()
+    };
+    let check = |keys: Vec<(f64, [f64; 3], [f64; 3], bool)>, t0: f64| {
+        let want = [[0.0, 0.0], [40.0, 0.0], [40.0, 40.0], [0.0, 40.0], [0.0, 0.0]];
+        assert_eq!(keys.len(), 5, "a key per vertex and the closing one: {keys:?}");
+        for (i, ((t, v, _, roving), w)) in keys.iter().zip(want).enumerate() {
+            assert!((v[0] - w[0]).abs() < 1e-6 && (v[1] - w[1]).abs() < 1e-6, "key {i}: {v:?}");
+            assert_eq!(*roving, i != 0 && i != 4, "key {i} roving");
+            assert!(*t > t0 - 1e-6 && *t < t0 + 2.0 + 1e-6, "key {i} at {t}");
+        }
+        assert!((keys[0].0 - t0).abs() < 1e-6 && (keys[4].0 - t0 - 2.0).abs() < 1e-6, "2 s from the CTI");
+        assert!(keys.windows(2).all(|w| w[0].0 < w[1].0));
+        assert_eq!(keys[0].2[..2], [10.0, 0.0], "the path's tangent");
+    };
+    // A Mask Path keyframe, pasted at 1 s.
+    s.execute("prop.toggleAnimation", json!({"layer": a, "path": "masks/#1/path"})).unwrap();
+    s.execute("prop.select", json!({"layer": a, "path": "masks/#1/path"})).unwrap();
+    s.execute("edit.copy", json!({})).unwrap();
+    s.execute("time.set", json!({"time": 1.0})).unwrap();
+    s.execute("prop.select", json!({"layer": b, "path": "transform/position"})).unwrap();
+    s.execute("edit.paste", json!({})).unwrap();
+    check(motion(&s, b), 1.0);
+    // The same path as an unanimated mask, pasted at 5 s onto an unparented layer.
+    s.execute("mask.new", json!({"layer": a, "vertices": rect, "outTangents": [[10, 0]], "closed": true})).unwrap();
+    s.execute("prop.select", json!({"layer": a, "path": "masks/#2/path"})).unwrap();
+    s.execute("edit.copy", json!({})).unwrap();
+    let c = solid(&mut s, "#ffffff");
+    s.execute("time.set", json!({"time": 5.0})).unwrap();
+    s.execute("prop.select", json!({"layer": c, "path": "transform/position"})).unwrap();
+    s.execute("edit.paste", json!({})).unwrap();
+    check(motion(&s, c), 5.0);
+}
+
 #[test]
 fn j_and_k_stop_at_keys_markers_and_the_work_area() {
     let mut s = comp();

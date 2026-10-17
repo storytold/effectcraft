@@ -496,6 +496,13 @@ fn paste(s: &mut Session, p: &Value) -> Result<Value> {
     if let Some(clip) = s.state.link_clipboard.clone() {
         return paste_links(s, clip);
     }
+    // A copied Mask Path / shape Path pasted onto Position becomes a motion path (#1425).
+    if let [(_, effectcraft_keyframe::Value::Path(path))] = s.state.value_clipboard.as_slice()
+        && let Some(target) = super::anim::path_target(s, p)?
+    {
+        let path = path.clone();
+        return super::anim::paste_path(s, p, target, &path);
+    }
     if !s.state.value_clipboard.is_empty() {
         return paste_properties(s, p);
     }
