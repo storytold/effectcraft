@@ -41,7 +41,7 @@ fn number(app: &mut EffectcraftApp, ui: &mut egui::Ui, at: egui::Pos2, auto: &st
 fn checkbox(app: &mut EffectcraftApp, ui: &mut egui::Ui, at: egui::Pos2, auto: &str, text: &str, on: bool) -> bool {
     let t = app.tokens;
     let r = Rect::from_min_size(at, vec2(16.0, 16.0));
-    let clicked = widgets::checkbox(ui, r, on, &t, egui::Id::new(("animtool-cb", auto))).clicked();
+    let clicked = widgets::checkbox(ui, r, on, &t, egui::Id::new(("animtool-cb", auto))).changed();
     ui.painter().text(pos2(r.max.x + 6.0, r.center().y), Align2::LEFT_CENTER, text, Tokens::ui(12.0), t.text);
     app.auto.add(auto, r, text);
     if clicked { !on } else { on }

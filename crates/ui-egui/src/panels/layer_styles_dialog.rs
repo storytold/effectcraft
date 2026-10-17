@@ -86,7 +86,7 @@ fn control(ui: &mut egui::Ui, p: &Property, v: &KV) -> Option<Value> {
     match (v, &p.ui) {
         (KV::Bool(b), _) => {
             let mut on = *b;
-            ui.checkbox(&mut on, "").changed().then(|| json!(on))
+            crate::widgets::labelled_checkbox(ui, &mut on, "").changed().then(|| json!(on))
         }
         (KV::Enum(i), ParamUi::Popup { options }) => {
             let mut sel = *i as usize;
@@ -170,7 +170,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                             if id != BLENDING {
                                 let g = styles.as_ref().and_then(|s| s.sub(id));
                                 let mut on = g.is_some_and(|g| g.enabled);
-                                if ui.checkbox(&mut on, "").changed() {
+                                if crate::widgets::labelled_checkbox(ui, &mut on, "").changed() {
                                     if g.is_none() {
                                         actions.push(("layer.style.add".into(), json!({"layers": [lid], "style": id})));
                                     } else {

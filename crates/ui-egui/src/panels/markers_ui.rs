@@ -155,7 +155,7 @@ pub fn dialog(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             ui.end_row();
         });
         ui.add_space(8.0);
-        let r = ui.checkbox(&mut d.cue, tr("Cue Point"));
+        let r = crate::widgets::labelled_checkbox(ui, &mut d.cue, tr("Cue Point"));
         app.auto.add("dialog.marker.cue", r.rect, "Cue Point");
         ui.add_enabled_ui(d.cue, |ui| {
             ui.horizontal(|ui| {
@@ -191,7 +191,7 @@ pub fn dialog(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
         });
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            let r = ui.checkbox(&mut d.protected, tr("Protected Region"));
+            let r = crate::widgets::labelled_checkbox(ui, &mut d.protected, tr("Protected Region"));
             app.auto.add("dialog.marker.protected", r.rect, "Protected Region");
             ui.add_space(20.0);
             ui.label(tr("Label:"));

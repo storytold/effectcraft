@@ -413,7 +413,7 @@ fn text_section(
     for (i, (key, label, on, c)) in [("fill", "Fill", doc.apply_fill, doc.fill), ("stroke", "Stroke", doc.apply_stroke, doc.stroke)].into_iter().enumerate() {
         let ry = y + i as f32 * 24.0;
         let cr = Rect::from_min_size(pos2(x0, ry + 2.0), vec2(14.0, 14.0));
-        if widgets::checkbox(ui, cr, on, &t, egui::Id::new(("props-apply", key))).clicked() {
+        if widgets::checkbox(ui, cr, on, &t, egui::Id::new(("props-apply", key))).changed() {
             let k = if key == "fill" { "applyFill" } else { "applyStroke" };
             set(actions, json!({k: !on}));
         }

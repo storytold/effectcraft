@@ -404,7 +404,7 @@ fn prop_row(
         }
         Value::Bool(b) => {
             let cr = Rect::from_min_size(pos2(vx, cy - 8.0), vec2(16.0, 16.0));
-            if widgets::checkbox(ui, cr, *b, &t, egui::Id::new(("ec-b", uid))).clicked() {
+            if widgets::checkbox(ui, cr, *b, &t, egui::Id::new(("ec-b", uid))).changed() {
                 set(actions, json!(!b));
             }
             p.text(pos2(cr.max.x + 6.0, cy), Align2::LEFT_CENTER, &prop.name, Tokens::ui(12.0), t.text_dim);

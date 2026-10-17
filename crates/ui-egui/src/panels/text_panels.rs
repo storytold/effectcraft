@@ -188,7 +188,7 @@ pub fn character(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     for (i, (key, label, on, c)) in [("fill", "Fill", doc.apply_fill, doc.fill), ("stroke", "Stroke", doc.apply_stroke, doc.stroke)].into_iter().enumerate() {
         let fx = x0 + i as f32 * (w / 2.0);
         let cr = Rect::from_min_size(pos2(fx, y + 3.0), vec2(14.0, 14.0));
-        if widgets::checkbox(ui, cr, on, &t, egui::Id::new(("char-apply", key))).clicked() && enabled {
+        if ui.add_enabled_ui(enabled, |ui| widgets::checkbox(ui, cr, on, &t, egui::Id::new(("char-apply", key)))).inner.changed() && enabled {
             actions.push(json!({if key == "fill" { "applyFill" } else { "applyStroke" }: !on}));
         }
         app.auto.add(&format!("character.{key}.enabled"), cr, label);
@@ -240,7 +240,7 @@ pub fn character(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     y += 32.0;
     // Ligatures.
     let lr = Rect::from_min_size(pos2(x0, y), vec2(14.0, 14.0));
-    if widgets::checkbox(ui, lr, doc.ligatures, &t, egui::Id::new("char-ligatures")).clicked() && enabled {
+    if ui.add_enabled_ui(enabled, |ui| widgets::checkbox(ui, lr, doc.ligatures, &t, egui::Id::new("char-ligatures"))).inner.changed() && enabled {
         actions.push(json!({"ligatures": !doc.ligatures}));
     }
     app.auto.add("character.ligatures", lr, "Ligatures");
@@ -264,7 +264,7 @@ pub fn character(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 .enumerate()
         {
             let cr = Rect::from_min_size(pos2(x0 + i as f32 * 120.0, y), vec2(14.0, 14.0));
-            if widgets::checkbox(ui, cr, on, &t, egui::Id::new(("char-vert", key))).clicked() && enabled {
+            if ui.add_enabled_ui(enabled, |ui| widgets::checkbox(ui, cr, on, &t, egui::Id::new(("char-vert", key)))).inner.changed() && enabled {
                 actions.push(json!({key: !on}));
             }
             app.auto.add(&format!("character.{key}"), cr, label);
@@ -544,7 +544,7 @@ pub fn paragraph(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
     y += 30.0;
     let hr = Rect::from_min_size(pos2(x0, y), vec2(14.0, 14.0));
-    if widgets::checkbox(ui, hr, doc.hanging_punctuation, &t, egui::Id::new("para-hanging")).clicked() && enabled {
+    if ui.add_enabled_ui(enabled, |ui| widgets::checkbox(ui, hr, doc.hanging_punctuation, &t, egui::Id::new("para-hanging"))).inner.changed() && enabled {
         actions.push(json!({"hangingPunctuation": !doc.hanging_punctuation}));
     }
     app.auto.add("paragraph.hangingPunctuation", hr, "Roman Hanging Punctuation");
@@ -629,17 +629,15 @@ pub(super) fn font_picker(app: &mut EffectcraftApp, ui: &mut egui::Ui, id: egui:
             ui.set_width(rect.width().max(180.0));
             // Filter row: a checkbox that keeps only the variable fonts.
             let filter_h = 22.0;
-            let row = ui.add_sized([ui.available_width(), filter_h], egui::Button::selectable(false, ""));
-            let box_rect = Rect::from_min_size(row.rect.min, vec2(18.0, filter_h));
-            let label_rect = Rect::from_min_max(pos2(box_rect.max.x + 2.0, row.rect.min.y), row.rect.max);
-            let boxed = widgets::checkbox(ui, box_rect, only_variable, &t, id.with("variable-check"));
-            ui.painter().text(label_rect.left_center(), Align2::LEFT_CENTER, tr("Variable fonts only"), Tokens::ui(11.5), t.text);
+            let row = ui.add_sized([ui.available_width(), filter_h], widgets::DragCheckbox::new(&mut only_variable, tr("Variable fonts only")));
             app.auto.add(&format!("{auto}.variable"), row.rect, "Variable fonts only");
-            let toggled = row.clicked() || boxed.clicked();
+            let toggled = row.changed();
             if toggled {
-                only_variable = !only_variable;
                 ui.data_mut(|d| d.insert_temp(variable_id, only_variable));
-                // Typing goes on into the search field.
+            }
+            // The native checkbox can take focus on release after changing on press.
+            // Typing goes on into the search field after either event.
+            if toggled || row.clicked() {
                 ui.memory_mut(|m| m.request_focus(search_id));
             }
             let query = state.query.trim().to_lowercase();

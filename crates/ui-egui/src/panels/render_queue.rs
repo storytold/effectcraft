@@ -463,7 +463,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     // Notify (sound + notification when the queue finishes).
     let notify = app.session.project.render_prefs.notify;
     let nb = Rect::from_min_size(pos2(render_b.min.x - 8.0 - 2.0 * bw - 8.0, render_b.min.y + 4.0), vec2(18.0, 18.0));
-    if widgets::checkbox(ui, nb, notify, &t, egui::Id::new("rq-notify")).clicked() {
+    if widgets::checkbox(ui, nb, notify, &t, egui::Id::new("rq-notify")).changed() {
         actions.push(("renderQueue.setNotify", json!({"notify": !notify})));
     }
     p.text(pos2(nb.max.x + 5.0, nb.center().y), Align2::LEFT_CENTER, tr("Notify"), Tokens::ui(11.5), t.text_dim);
@@ -589,7 +589,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         }
         app.auto.add(&aid("twirl"), tw, "Twirl");
         let cb = Rect::from_center_size(pos2(cx_render + 20.0, row.center().y), vec2(18.0, 18.0));
-        if widgets::checkbox(ui, cb, it.render, &t, egui::Id::new(("rq-cb", it.id))).clicked() && !rendering {
+        if ui.add_enabled_ui(!rendering, |ui| widgets::checkbox(ui, cb, it.render, &t, egui::Id::new(("rq-cb", it.id)))).inner.changed() && !rendering {
             actions.push(("renderQueue.setRender", json!({"item": it.id, "render": !it.render})));
         }
         app.auto.add(&aid("render"), cb, if it.render { "Render: on" } else { "Render: off" });
