@@ -1912,15 +1912,63 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             // Alt+wheel zooms around the pointer, out until the whole comp shows.
             set_zoom(&mut app.ui.timeline, &comp, tm.pps * (dy as f64 / 200.0).exp(), fit_pps, tm.t(at_x), (at_x - tm.x0) as f64);
         } else {
-            let over_outline = ui.input(|i| i.pointer.hover_pos()).is_some_and(|p| p.x < graph_x0);
+            let ptr = ui.input(|i| i.pointer.hover_pos());
+            let over_outline = ptr.is_some_and(|p| p.x < graph_x0);
+            let (over_expr_x, over_expr_y) = ptr
+                .and_then(|p| {
+                    if p.x < graph_x0 || !rows_rect.contains(p) {
+                        return None;
+                    }
+                    let mut yy = rows_rect.min.y - app.ui.timeline.scroll_y;
+                    for row in &rows {
+                        let hh = row_height(row, rh);
+                        if let RowKind::Expr { uid, lines } = row.kind
+                            && p.y >= yy
+                            && p.y < yy + hh
+                        {
+                            let bounds = ctx.data(|d| d.get_temp::<(bool, bool, bool, bool)>(egui::Id::new(("expr-edit", uid)).with("scroll_bounds")));
+                            let (cap_x, cap_y) = match bounds {
+                                Some((can_up, can_down, can_left, can_right)) => {
+                                    let cap_y = if dy < 0.0 {
+                                        can_down
+                                    } else if dy > 0.0 {
+                                        can_up
+                                    } else {
+                                        false
+                                    };
+                                    let cap_x = if dx < 0.0 {
+                                        can_right
+                                    } else if dx > 0.0 {
+                                        can_left
+                                    } else {
+                                        false
+                                    };
+                                    (cap_x, cap_y)
+                                }
+                                None => {
+                                    let has_more_lines = comp
+                                        .layer(row.layer)
+                                        .and_then(|l| l.props.find(uid))
+                                        .and_then(|p| p.expr.as_ref())
+                                        .is_some_and(|e| e.text.lines().count() > lines);
+                                    (false, has_more_lines && dy < 0.0)
+                                }
+                            };
+                            return Some((cap_x, cap_y));
+                        }
+                        yy += hh;
+                    }
+                    None
+                })
+                .unwrap_or((false, false));
             let shift = ui.input(|i| i.modifiers.shift);
             if over_outline && overflow > 0.0 && (dx.abs() > 0.0 || (shift && dy.abs() > 0.0)) {
                 let d = if dx.abs() > 0.0 { dx } else { dy };
                 app.ui.timeline.outline_scroll = (app.ui.timeline.outline_scroll - d).clamp(0.0, overflow);
-            } else {
+            } else if !over_expr_y {
                 app.ui.timeline.scroll_y = (app.ui.timeline.scroll_y - dy).clamp(0.0, max_scroll);
             }
-            if dx.abs() > 0.0 && app.ui.timeline.pps.is_some() && !over_outline {
+            if dx.abs() > 0.0 && app.ui.timeline.pps.is_some() && !over_outline && !over_expr_x {
                 app.ui.timeline.start = (app.ui.timeline.start - dx as f64 / pps).max(0.0);
             }
         }
@@ -2733,10 +2781,26 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     }
                     app.auto.add(&format!("timeline.prop.{uid}.addKey"), mid, "Add or remove keyframe");
                 }
+                // Twirl arrow for expression when the property has one (AE parity).
+                if prop.has_expression() {
+                    let tw = Rect::from_center_size(pos2(indent, cy), vec2(13.0, 13.0));
+                    let is_open = !app.ui.timeline.expr_closed.contains(uid);
+                    if widgets::twirl(ui, tw, is_open, egui::Id::new(("ptw", uid)), &t).clicked() {
+                        if is_open {
+                            app.ui.timeline.expr_closed.insert(*uid);
+                        } else {
+                            app.ui.timeline.expr_closed.remove(uid);
+                        }
+                    }
+                    let prop_path = layer.props.match_path_of(*uid).unwrap_or_else(|| prop.name.clone());
+                    let label = format!("Twirl expression: {prop_path}");
+                    app.auto.add(&format!("timeline.prop.{uid}.exprTwirl"), tw, &label);
+                }
                 // Stopwatch: Alt+click adds an expression; a press toggles the animation, and
                 // dragging on over other stopwatches gives them the same state (#284).
                 if !prop.static_only {
-                    let swr = Rect::from_center_size(pos2(indent, cy), vec2(15.0, 15.0));
+                    let sw_x = if prop.has_expression() { indent + 16.0 } else { indent };
+                    let swr = Rect::from_center_size(pos2(sw_x, cy), vec2(15.0, 15.0));
                     let resp = ui.interact(swr, egui::Id::new(("stopwatch", uid)), Sense::click_and_drag());
                     let col = if prop.is_animated() {
                         t.hot_text
@@ -2758,7 +2822,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                         actions.push(("prop.toggleAnimation".into(), json!({"layer": layer.id.0, "prop": uid})));
                     }
                 }
-                let name_x = indent + 12.0;
+                let name_x = if prop.has_expression() { indent + 28.0 } else { indent + 12.0 };
                 // 3D layers show Rotation as "Z Rotation" next to X/Y Rotation.
                 let is_tr_rot = layer.transform().and_then(|t| t.get("rotation")).is_some_and(|r| r.uid == prop.uid);
                 let base = if is_tr_rot && prop.name == "Rotation" && layer.is_3d() { "Z Rotation".to_string() } else { prop.name.clone() };
@@ -2803,13 +2867,43 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 ui.set_clip_rect(right_clip);
                 // Expression text row hint.
                 if let Some(e) = prop.expr.as_ref().filter(|e| e.enabled && app.ui.timeline.expr_closed.contains(uid)) {
-                    gp.text(
-                        pos2(graph_x0 + 8.0, cy),
-                        Align2::LEFT_CENTER,
-                        format!("= {}", e.text.lines().next().unwrap_or("")),
-                        Tokens::mono(11.0),
-                        t.expr_text,
-                    );
+                    let first_key_x = if graph_on {
+                        None
+                    } else {
+                        prop.keys.iter().map(|k| tm.x(layer.comp_time(k.time).seconds())).filter(|&x| x >= graph_x0 - 8.0).reduce(f32::min)
+                    };
+                    let max_hint_x = match first_key_x {
+                        Some(kx) => (kx - 12.0).min(rect.max.x - 14.0),
+                        None => rect.max.x - 14.0,
+                    };
+                    if max_hint_x > graph_x0 + 20.0 {
+                        let hint_rect = Rect::from_min_max(pos2(graph_x0 + 4.0, r.min.y + 1.0), pos2(max_hint_x, r.max.y - 1.0));
+                        let hresp = ui.interact(hint_rect, egui::Id::new(("expr-hint", uid)), Sense::click());
+                        let hcol = if hresp.hovered() { t.text } else { t.expr_text };
+                        let font = Tokens::mono(11.0);
+                        let full_text = format!("= {}", e.text.lines().next().unwrap_or(""));
+                        let room = (hint_rect.width() - 8.0).max(0.0);
+                        let char_w = gp.layout_no_wrap("x".into(), font.clone(), hcol).size().x;
+                        let text = if gp.layout_no_wrap(full_text.clone(), font.clone(), hcol).size().x <= room {
+                            full_text
+                        } else if char_w > 0.0 {
+                            let max_chars = (room / char_w).floor() as usize;
+                            if max_chars > 2 {
+                                let count = max_chars.saturating_sub(1);
+                                let s: String = full_text.chars().take(count).collect();
+                                format!("{s}…")
+                            } else {
+                                String::new()
+                            }
+                        } else {
+                            String::new()
+                        };
+                        gp.with_clip_rect(hint_rect).text(pos2(graph_x0 + 8.0, cy), Align2::LEFT_CENTER, text, font, hcol);
+                        app.auto.add(&format!("timeline.prop.{uid}.exprHint"), hint_rect, "Expression hint");
+                        if hresp.clicked() {
+                            app.ui.timeline.expr_closed.remove(uid);
+                        }
+                    }
                 }
                 // Keyframes.
                 if !graph_on {
