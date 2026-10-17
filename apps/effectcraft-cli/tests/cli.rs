@@ -593,3 +593,33 @@ solid.property("ADBE Transform Group").property("ADBE Opacity").addToMotionGraph
     assert_eq!(reply["error"], "command `renderQueue.add` is not available right now: select or open a composition", "{reply}");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// `WGPU_ADAPTER_NAME` that matches nothing is a clean `--gpu` error listing the adapters
+/// found (wgpu's own helper panics). Read once per process, hence a subprocess.
+#[test]
+fn gpu_adapter_name_mismatch_is_a_clean_error() {
+    let out = bin()
+        .args(["render-frame", "--gpu", "--max-side", "64", "--out", tmp("nomatch.png").to_str().unwrap(), "--json"])
+        .env("WGPU_ADAPTER_NAME", "NoSuchAdapter-xyz")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "stdout: {stdout}\nstderr: {}", String::from_utf8_lossy(&out.stderr));
+    let v: Value = serde_json::from_str(stdout.trim()).unwrap();
+    let e = v["error"].as_str().unwrap();
+    assert!(e.contains("WGPU_ADAPTER_NAME=\"NoSuchAdapter-xyz\""), "{e}");
+    assert!(e.contains("available: [") || e.contains("no adapters on the enabled backends"), "{e}");
+}
+
+/// An exported-but-empty `WGPU_ADAPTER_NAME` behaves like unset: it never produces the
+/// adapter-name error (whether a GPU exists on this machine is not asserted).
+#[test]
+fn gpu_adapter_name_empty_is_unset() {
+    let out = bin()
+        .args(["render-frame", "--gpu", "--max-side", "64", "--out", tmp("emptyname.png").to_str().unwrap(), "--json"])
+        .env("WGPU_ADAPTER_NAME", "  ")
+        .output()
+        .unwrap();
+    let all = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(!all.contains("WGPU_ADAPTER_NAME"), "{all}");
+}
