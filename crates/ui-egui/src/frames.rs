@@ -31,7 +31,7 @@ use effectcraft_engine::project::{Comp, ItemId, ItemKind, LayerSource, Node, Pro
 use effectcraft_engine::render::disk_cache::{self, DiskCache};
 use effectcraft_engine::render::{CancellableFootage, ExprHost, FootageSource, LayerCache, RenderOpts, Renderer};
 use effectcraft_engine::time::Tick;
-use effectcraft_gpu::{DisplayFrame, Gpu};
+use effectcraft_gpu::{DisplayFrame, FrameError, Gpu};
 use rayon::prelude::*;
 
 /// Comp identities (and the project snapshots behind them) the RAM preview keeps frames of.
@@ -1223,9 +1223,14 @@ impl Worker {
 
     /// A failed scoped attempt retries on CPU. Retired contexts cannot recover by reducing
     /// their budget; only a healthy device's allocation failure uses the upstream backoff.
-    fn gpu_attempt_failed(&self, gpu: &Gpu, e: &str) {
+    fn gpu_attempt_failed(&self, gpu: &Gpu, e: &FrameError) {
         if gpu.context().check_health().is_err() {
             log::warn!("the GPU context is retired ({e}); the frame renders on the CPU");
+            return;
+        }
+        // Not memory pressure: keeping fewer GPU frames wouldn't help (#1319).
+        if let FrameError::Validation(_) = e {
+            log::warn!("the GPU rejected the frame ({e}); it renders on the CPU, the next frame tries the GPU again");
             return;
         }
         log::warn!("the GPU ran out of memory ({e}); the frame renders on the CPU and fewer GPU frames are kept");

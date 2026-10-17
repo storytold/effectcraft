@@ -345,7 +345,10 @@ as NaNs (a kernel that skips pixels fails the oracle) and validation errors pani
 (`ui-egui::frames`); headless renders, the CLI (unless `--gpu`) and CI use the CPU. Outside
 tests, device errors are logged rather than fatal. A viewer frame that runs out of video memory
 (`Gpu::within_memory`) renders on the CPU, the uploaded layers and pooled textures are freed, and
-the RAM preview keeps half as many GPU frames from then on. A frame whose render panics is
+the RAM preview keeps half as many GPU frames from then on. The same guard catches a frame's
+validation errors (an invalid texture, often left by a failed allocation): that frame renders on
+the CPU and the kept textures are freed, but the compositor stays on and, with no allocation
+failure before it, the RAM preview keeps its GPU frames (#1319). A frame whose render panics is
 rendered again on the CPU or released, never left in progress. Native readbacks and timing waits
 share a finite deadline; failure retires pending readbacks exactly once, and late results are
 discarded. The desktop executable and browser page own their shared device's error/loss handlers and forward
