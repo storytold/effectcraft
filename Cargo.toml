@@ -140,6 +140,8 @@ opt-level = 2
 
 [profile.dev]
 opt-level = 1
+# Line tables only: keeps backtraces readable, but shrinks the many test binaries by ~5–10×.
+debug = "line-tables-only"
 
 # Pixel hot loops: keep debug builds interactive.
 [profile.dev.package.effectcraft-raster]
