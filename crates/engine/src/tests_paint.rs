@@ -308,6 +308,45 @@ fn puppet_select_all_takes_the_pin_kind_and_several_pins_record_together() {
     assert!(s.execute("puppet.recordPin", json!({"layer": id, "pin": a, "pins": [st], "samples": samples})).is_err());
 }
 
+/// Editing a parameter of one of several selected pins edits the same parameter of the others,
+/// in one undo step; unselected pins keep theirs (#1751).
+#[test]
+fn editing_one_selected_pin_edits_the_other_selected_pins() {
+    let (mut s, id) = setup();
+    let pin = |s: &mut Session, x: i64| s.execute("puppet.addPin", json!({"layer": id, "position": [x, 30]})).unwrap()["pin"].as_u64().unwrap();
+    let (a, b, c) = (pin(&mut s, 10), pin(&mut s, 50), pin(&mut s, 90));
+    let position = |s: &Session, pin: u64| layer(s, id).props.find_group(pin).unwrap().get("position").unwrap().clone();
+    let (pa, pb) = (position(&s, a).uid, position(&s, b).uid);
+    let at = |s: &Session, pin: u64| position(s, pin).value_at(Tick::ZERO).components();
+    s.execute("prop.select", json!({"layer": id, "prop": a, "selectKeys": false})).unwrap();
+    s.execute("prop.select", json!({"layer": id, "prop": b, "selectKeys": false, "add": true})).unwrap();
+
+    // A typed value lands on both selected pins, and one Undo takes it back.
+    let steps = s.history.undo.len();
+    s.execute("prop.set", json!({"layer": id, "prop": pa, "value": [20, 40], "selected": true})).unwrap();
+    assert_eq!((at(&s, a), at(&s, b), at(&s, c)), (vec![20.0, 40.0], vec![20.0, 40.0], vec![90.0, 30.0]));
+    assert_eq!(s.history.undo.len(), steps + 1, "one undo step");
+    s.undo();
+    assert_eq!((at(&s, a), at(&s, b)), (vec![10.0, 30.0], vec![50.0, 30.0]));
+
+    // A scrub moves each selected pin by the same change from its own value.
+    s.execute("prop.set", json!({"layer": id, "prop": pb, "value": [55, 25], "selected": true, "offset": true})).unwrap();
+    assert_eq!((at(&s, a), at(&s, b), at(&s, c)), (vec![15.0, 25.0], vec![55.0, 25.0], vec![90.0, 30.0]));
+
+    // The stopwatch follows on both (a new pin starts keyed, so the toggle turns it off).
+    let animated = |s: &Session| [a, b, c].map(|p| position(s, p).is_animated());
+    assert_eq!(animated(&s), [true; 3]);
+    s.execute("prop.toggleAnimation", json!({"layer": id, "prop": pa, "selected": true})).unwrap();
+    assert_eq!(animated(&s), [false, false, true]);
+
+    // Without `selected`, or with only one pin selected, the edit stays on its own pin.
+    s.execute("prop.set", json!({"layer": id, "prop": pa, "value": [0, 0]})).unwrap();
+    assert_eq!(at(&s, b), vec![55.0, 25.0]);
+    s.execute("prop.select", json!({"layer": id, "prop": a, "selectKeys": false})).unwrap();
+    s.execute("prop.set", json!({"layer": id, "prop": pa, "value": [5, 5], "selected": true})).unwrap();
+    assert_eq!(at(&s, b), vec![55.0, 25.0]);
+}
+
 fn expr_of(s: &Session, layer: u64, uid: u64) -> String {
     let l = layer_of(s, layer);
     l.props.find(uid).and_then(|p| p.expr.as_ref()).map(|e| e.text.clone()).unwrap_or_default()
