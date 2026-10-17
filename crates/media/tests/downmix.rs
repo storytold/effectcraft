@@ -94,8 +94,18 @@ fn cases() -> Vec<Case> {
     let (n71, g71) = seven_one();
     let k5 = 1.0 / (1.0 + 2.0 * K);
     let kq = 1.0 / (1.0 + K);
+    let k61 = 1.0 / (1.5 + 2.0 * K);
     vec![
         Case { file: "dm51.m4a", layout: "5.1", names: n51, codec: &["-c:a", "aac", "-b:a", "384k"], gains: g51.clone(), tol: 0.15 },
+        Case {
+            file: "dm61.m4a",
+            layout: "6.1",
+            names: &["FL", "FR", "FC", "LFE", "BC", "SL", "SR"],
+            codec: &["-c:a", "aac", "-b:a", "448k"],
+            gains: vec![[k61, 0.0], [0.0, k61], [k61 * K, k61 * K], [0.0, 0.0], [k61 / 2.0, k61 / 2.0], [k61 * K, 0.0], [0.0, k61 * K]],
+            tol: 0.15,
+        },
+        Case { file: "dm71.m4a", layout: "7.1", names: n71, codec: &["-c:a", "aac", "-b:a", "512k"], gains: g71.clone(), tol: 0.15 },
         Case { file: "dm51.ac3.mp4", layout: "5.1", names: n51, codec: &["-c:a", "ac3", "-b:a", "640k"], gains: g51.clone(), tol: 0.15 },
         Case { file: "dm51.wav", layout: "5.1", names: n51, codec: &["-c:a", "pcm_s16le"], gains: g51.clone(), tol: 0.02 },
         Case { file: "dm51.flac", layout: "5.1", names: n51, codec: &["-c:a", "flac"], gains: g51, tol: 0.02 },
