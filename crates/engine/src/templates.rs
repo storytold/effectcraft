@@ -866,8 +866,10 @@ fn save_as(s: &mut Session, p: &Value) -> Result<Value> {
         manifest["linkedFootage"] = json!(e.skipped);
     }
     let t = s.time_of(cid);
-    let mut entries: Vec<(String, Vec<u8>)> =
-        vec![("manifest.json".into(), serde_json::to_vec_pretty(&manifest).unwrap_or_default()), ("project.ecproj".into(), proj.to_json().into_bytes())];
+    let mut entries: Vec<(String, Vec<u8>)> = vec![
+        ("manifest.json".into(), serde_json::to_vec_pretty(&manifest).unwrap_or_default()),
+        ("project.ecproj".into(), proj.to_json_compact().into_bytes()),
+    ];
     entries.extend(media_entries);
     if let Ok((w, h, rgba)) = s.render_rgba8(cid, t, 320) {
         if let Ok(png) = crate::commands::comp_more::encode_png(&rgba, w, h) {

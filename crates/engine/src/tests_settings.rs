@@ -353,6 +353,23 @@ fn new_project_template_and_default_renderer() {
     let _ = std::fs::remove_dir_all(d);
 }
 
+#[test]
+fn project_files_are_compact_unless_formatting_is_on() {
+    let d = tmp("format-project-files");
+    let path = d.join("p.ecproj");
+    let mut s = session_with_comp();
+    s.execute("file.saveAs", json!({"path": path.to_string_lossy()})).unwrap();
+    let compact = std::fs::read_to_string(&path).unwrap();
+    assert!(!compact.contains('\n'), "compact by default");
+    s.execute("prefs.set", json!({"key": "project.formatProjectFiles", "value": true})).unwrap();
+    s.execute("file.saveAs", json!({"path": path.to_string_lossy()})).unwrap();
+    let pretty = std::fs::read_to_string(&path).unwrap();
+    assert!(pretty.starts_with("{\n  \"savedBy\""), "indented when Format Project Files for Reading is on");
+    let open = |text: &str| effectcraft_project::Project::from_json(text).unwrap();
+    assert_eq!(open(&pretty), open(&compact), "both read back as the same project");
+    let _ = std::fs::remove_dir_all(d);
+}
+
 // ---------------------------------------------------------------- shortcuts
 
 #[test]

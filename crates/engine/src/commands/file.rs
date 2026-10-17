@@ -98,7 +98,8 @@ fn resolve_relative_footage(p: &mut Project, project_path: &str, services: &dyn 
 /// project opened from an XML copy saves as XML again). Fails, writing nothing, when the project
 /// wouldn't read back.
 pub(crate) fn file_text(s: &Session, path: &str) -> Result<String> {
-    let json = s.project.to_file_json_with_view(&s.saved_view())?;
+    let pretty = s.prefs.project.format_project_files && !crate::xml_project::is_xml_path(path);
+    let json = s.project.to_file_json_with_view(&s.saved_view(), pretty)?;
     if crate::xml_project::is_xml_path(path) { crate::xml_project::to_xml(&json).map_err(EngineError::Other) } else { Ok(json) }
 }
 

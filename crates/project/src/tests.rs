@@ -159,7 +159,7 @@ fn project_files_name_their_version_and_always_read_back() {
     let (mut p, cid) = project_with_layer();
     let text = p.to_file_json().unwrap();
     assert_eq!(crate::saved_by(&text).as_deref(), Some(crate::APP_VERSION));
-    assert!(text.trim_start().starts_with("{\n  \"savedBy\""), "the version comes first");
+    assert!(text.trim_start().starts_with("{\"savedBy\""), "the version comes first");
     assert_eq!(Project::from_json(&text).unwrap(), p);
     assert_eq!(crate::saved_by(&p.to_json()), None, "plain JSON (worker hand-offs) has none");
     // JSON can't hold NaN: saving refuses instead of writing a file that can't be opened.
@@ -174,12 +174,12 @@ fn project_files_name_their_version_and_always_read_back() {
 fn project_files_remember_the_open_comps() {
     let (p, cid) = project_with_layer();
     let view = crate::SavedView { active_comp: Some(cid), open_comps: vec![cid] };
-    let text = p.to_file_json_with_view(&view).unwrap();
+    let text = p.to_file_json_with_view(&view, false).unwrap();
     assert_eq!(crate::saved_view(&text), view);
     assert_eq!(Project::from_json(&text).unwrap(), p, "the view is not part of the project");
     // Files from before #748 have no view; a garbled one is ignored, not an error.
     assert_eq!(crate::saved_view(&p.to_file_json().unwrap()), crate::SavedView::default());
-    let odd = text.replacen(&format!("\"activeComp\": {}", cid.0), "\"activeComp\": \"Main\"", 1);
+    let odd = text.replacen(&format!("\"activeComp\":{}", cid.0), "\"activeComp\":\"Main\"", 1);
     assert_eq!(crate::saved_view(&odd), crate::SavedView { active_comp: None, open_comps: vec![cid] });
 }
 

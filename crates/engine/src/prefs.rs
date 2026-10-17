@@ -131,6 +131,9 @@ page!(ProjectPrefs {
     /// Open a template project for File ▸ New ▸ New Project.
     use_template: bool = false,
     template_path: String = String::new(),
+    /// Write `.ecproj` files indented, one value per line (easier to read and diff; larger and
+    /// slower to save and open). Off: compact JSON on one line.
+    format_project_files: bool = false,
 });
 
 page!(AutoSave {
@@ -1179,6 +1182,11 @@ pub fn pages() -> Vec<Page> {
                 Section("New Project"),
                 s("project.useTemplate", "New Project Loads Template", B, true),
                 s("project.templatePath", "Template Project", Kind::Path, true),
+                Section("Project Files"),
+                s("project.formatProjectFiles", "Format Project Files for Reading", B, true),
+                Note(
+                    "Saves .ecproj files as indented JSON, one value per line, so they are easy to read and diff in version control. Indented files are larger and slower to save and open.",
+                ),
                 Section("Auto-Save"),
                 s("autoSave.enabled", "Automatically Save Projects", B, true),
                 s("autoSave.intervalMinutes", "Save Every", Kind::Int(1, 240, "Minutes"), true),

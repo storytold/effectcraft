@@ -1506,14 +1506,15 @@ impl Project {
             && self.render_templates == other.render_templates
             && self.render_prefs == other.render_prefs
     }
-    /// The project file's text: the project with the version that wrote it (`savedBy`), checked
-    /// to read back, so a save never writes a file that can't be opened (JSON has no NaN or
-    /// infinity: such a value would be written as `null`).
+    /// The project file's text, compact: the project with the version that wrote it (`savedBy`),
+    /// checked to read back, so a save never writes a file that can't be opened (JSON has no NaN
+    /// or infinity: such a value would be written as `null`).
     pub fn to_file_json(&self) -> Result<String, ProjectError> {
-        self.to_file_json_with_view(&SavedView::default())
+        self.to_file_json_with_view(&SavedView::default(), false)
     }
-    /// [`Project::to_file_json`] that also records the open compositions ([`SavedView`]).
-    pub fn to_file_json_with_view(&self, view: &SavedView) -> Result<String, ProjectError> {
+    /// [`Project::to_file_json`] that also records the open compositions ([`SavedView`]),
+    /// indented when `pretty` (Settings ▸ Project ▸ Format Project Files for Reading).
+    pub fn to_file_json_with_view(&self, view: &SavedView, pretty: bool) -> Result<String, ProjectError> {
         #[derive(Serialize)]
         struct File<'a> {
             #[serde(rename = "savedBy")]
@@ -1523,7 +1524,8 @@ impl Project {
             #[serde(flatten)]
             project: &'a Project,
         }
-        let text = serde_json::to_string_pretty(&File { saved_by: APP_VERSION, view, project: self })
+        let file = File { saved_by: APP_VERSION, view, project: self };
+        let text = if pretty { serde_json::to_string_pretty(&file) } else { serde_json::to_string(&file) }
             .map_err(|e| ProjectError::Invalid(format!("the project can't be saved: {e}")))?;
         Project::from_json(&text)
             .map_err(|e| ProjectError::Invalid(format!("the project can't be saved: it holds a value a project file can't store ({e})")))?;
