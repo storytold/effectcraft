@@ -24,9 +24,9 @@ interface; Arabic and Hebrew text *in layers* is supported through its Middle Ea
 - **Panels, dialogs, buttons, tooltips:** `crates/ui-egui/src/i18n/ui.rs`, keyed by the English
   source string, with English fallback. Catalogs exist for Japanese (410 rows), Simplified and
   Traditional Chinese (506 each), Ukrainian (505), Brazilian Portuguese (400) and Czech (501);
-  counted at 470ea7a3.
+  counted at 470ea7a3. Swedish (added later) also has one.
 - **Effect names:** `crates/ui-egui/src/i18n/effects.rs`, keyed by **effect id**, in Simplified
-  Chinese (306 rows, one per effect in the registry, plus its 21 categories). The registry's
+  Chinese and Swedish (306 rows each, one per effect in the registry, plus its 21 categories). The registry's
   English name stays the effect's identity: `effect.list`, `effect.apply {"effect": …}`, scripts
   and expressions match on it, and the property tree stores it as the effect group's name. Only
   the drawing — the Effect menu, Effect Controls, the Timeline and Effects & Presets — goes
@@ -76,13 +76,14 @@ the true percentages are slightly lower.
 | Korean | `ko` | 0 | — | Hangul fallback probe added (#599, closed); not checked on macOS here | no | none | 9–13 h + review |
 | Vietnamese | `vi` | 0 | — | Latin with stacked diacritics; untested | no | none (After Effects: none) | 8–12 h + review |
 
-Other languages EffectCraft ships (3):
+Other languages EffectCraft ships (4):
 
 | Language | Code | UI strings translated | Status | To `full` |
 |---|---|---|---|---|
 | Traditional Chinese | `zh-hant` | 1,130 (≈ 29%): menus 624 rows, panels 506 | partial | 6–9 h + review |
 | Ukrainian | `uk` | 1,129 (≈ 29%): menus 624 rows, panels 505 | partial | 6–9 h + review |
 | Czech | `cs` | 1,125 (≈ 29%): menus 624 rows, panels 501 | Existing catalog entries covered; unwrapped UI, effects and engine text still in English; AI-assisted, not yet native-speaker proofread | Remaining strings + independent native review |
+| Swedish | `sv` | menus 624 rows, the panel catalog, effect names 306 and categories 21; added after the measurement above | Settings, Edit menu and Match System (`sv-*` locales) offer it; parameter and engine text still in English; not yet native-speaker reviewed | Remaining strings + native review |
 
 Russian (`ru`) has a menu catalog (624 rows, ≈ 16%); After Effects also ships Italian, which EffectCraft does not (8–12 h).
 

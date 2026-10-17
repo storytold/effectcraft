@@ -97,7 +97,7 @@ UI strings translated out of ≈ 3,900 (detail: [localization-parity.md](docs/lo
 | Korean | none | 0% |
 | Vietnamese | none | 0% |
 
-Also shipped: Traditional Chinese (partial, 29%), Ukrainian (partial, 29%), Czech (partial, 29%) and Russian (menus only, 16%). No language has had
+Also shipped: Traditional Chinese (partial, 29%), Ukrainian (partial, 29%), Czech (partial, 29%), Swedish (menus, panels and effect names; not yet measured) and Russian (menus only, 16%). No language has had
 native-speaker review.
 
 ## Upcoming

@@ -1036,6 +1036,17 @@ fn interface_language_is_validated_persisted_and_backward_compatible() {
     cs.load_settings();
     assert_eq!(cs.prefs.general.language, "cs");
     assert_eq!(Prefs::from_json(r#"{"general":{"language":"cs"}}"#).general.language, "cs");
+    // Swedish too, stored as `sv` rather than a locale tag.
+    assert!(crate::prefs::LANGUAGES.contains(&("Svenska", "sv")));
+    for value in ["sv-SE", "sv_SE", "SV"] {
+        assert!(s.execute("prefs.set", json!({"key": "general.language", "value": value})).is_err(), "{value}");
+    }
+    s.execute("prefs.set", json!({"key": "general.language", "value": "sv"})).unwrap();
+    assert_eq!(s.execute("prefs.get", json!({"key": "general.language"})).unwrap(), json!("sv"));
+    let mut sv = Session { config: Some(store.clone()), ..Default::default() };
+    sv.load_settings();
+    assert_eq!(sv.prefs.general.language, "sv");
+    assert_eq!(Prefs::from_json(r#"{"general":{"language":"sv"}}"#).general.language, "sv");
     s.execute("prefs.set", json!({"key": "general.language", "value": "ja"})).unwrap();
     let mut reloaded = Session { config: Some(store), ..Default::default() };
     reloaded.load_settings();

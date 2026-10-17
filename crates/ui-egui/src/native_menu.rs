@@ -206,6 +206,8 @@ pub fn build(app: &EffectcraftApp) -> NativeMenu {
                                     "Serviços"
                                 } else if crate::i18n::czech(app) {
                                     "Služby"
+                                } else if crate::i18n::swedish(app) {
+                                    "Tjänster"
                                 } else {
                                     "Services"
                                 }
@@ -467,6 +469,27 @@ mod tests {
         let mut translated = vec![];
         labels(&build(&app).menus, &mut translated);
         assert_eq!(translated, ["Служби", "Приховати EffectCraft", "Приховати решту", "Показати все"]);
+    }
+
+    #[test]
+    fn swedish_translates_macos_predefined_items() {
+        if !cfg!(target_os = "macos") {
+            return;
+        }
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.session.execute("prefs.set", json!({"key": "general.language", "value": "sv"})).unwrap();
+        fn labels(nodes: &[NativeNode], out: &mut Vec<String>) {
+            for node in nodes {
+                match node {
+                    NativeNode::Predefined { label, .. } => out.push(label.clone()),
+                    NativeNode::Submenu { children, .. } => labels(children, out),
+                    _ => {}
+                }
+            }
+        }
+        let mut translated = vec![];
+        labels(&build(&app).menus, &mut translated);
+        assert_eq!(translated, ["Tjänster", "Dölj EffectCraft", "Göm övriga", "Visa alla"]);
     }
 
     #[test]
