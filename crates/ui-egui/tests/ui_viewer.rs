@@ -422,6 +422,17 @@ fn tool_creates_mask_draws_a_mask_on_the_selected_shape_layer() {
 
 // ---- the shape tools' drag ghost
 
+/// Keep independent screenshot devices from overlapping on Windows: concurrent WARP
+/// snapshots can cause a native access violation, outside Rust's panic handling.
+/// Hold this before creating a harness and until after it is dropped; serializing
+/// only `render()` would still overlap device creation and destruction. UI-only
+/// tests keep their normal parallelism, and no backend or assertions are changed.
+#[cfg(target_os = "windows")]
+fn snapshot_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Run frames until the viewer's background frame has landed, so the comp is painted (and not
 /// still black) before the drag begins: the ghost is then the only thing that changes.
 fn settle_viewer(h: &mut Harness<'_, EffectcraftApp>) {
@@ -479,6 +490,8 @@ fn fill_rgb(h: &Harness<'_, EffectcraftApp>) -> [u8; 3] {
 /// invisible, and in the tool's own form — only the Rectangle fills the corner of the box.
 #[test]
 fn shape_drag_ghost_shows_the_tools_own_shape_while_dragging() {
+    #[cfg(target_os = "windows")]
+    let _snapshot_guard = snapshot_guard();
     let (from, to) = ([140.0, 100.0], [400.0, 300.0]);
     let centre = [270.0, 200.0];
     // 6 comp px inside the box's top-left corner: inside a rectangle, outside every other kind.
@@ -511,6 +524,8 @@ fn shape_drag_ghost_shows_the_tools_own_shape_while_dragging() {
 /// lie: Shift squares the box and Ctrl/Cmd draws it from the press point (as in After Effects), both live.
 #[test]
 fn shape_drag_ghost_normalises_the_same_way_as_the_release() {
+    #[cfg(target_os = "windows")]
+    let _snapshot_guard = snapshot_guard();
     let from = [140.0f64, 100.0];
     let to = [400.0f64, 260.0];
     // (mods, centre, size): Shift squares the box from its top-left, Ctrl/Cmd centres it on the press.
@@ -549,6 +564,8 @@ fn shape_drag_ghost_normalises_the_same_way_as_the_release() {
 /// and not painted with the Fill, where a shape drawn into the selected shape layer is.
 #[test]
 fn shape_drag_ghost_shows_where_the_shape_will_land() {
+    #[cfg(target_os = "windows")]
+    let _snapshot_guard = snapshot_guard();
     let (from, to) = ([140.0, 100.0], [400.0, 300.0]);
     let centre = [270.0, 200.0];
 
@@ -583,6 +600,8 @@ fn shape_drag_ghost_shows_where_the_shape_will_land() {
 /// for it would freeze the viewer on the last completed frame for the whole drag.
 #[test]
 fn a_layer_drag_moves_the_picture_while_the_button_is_down() {
+    #[cfg(target_os = "windows")]
+    let _snapshot_guard = snapshot_guard();
     let mut h = harness();
     let box_ = h.state().session.active_comp().unwrap().layers.iter().find(|l| l.name == "Box").unwrap().id;
     h.state_mut().session.execute("layer.select", json!({"layers": [box_.0]})).unwrap();

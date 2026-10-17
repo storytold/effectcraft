@@ -15,6 +15,147 @@ const ROT: &str = "transform/rotation";
 const POS: &str = "transform/position";
 const OPA: &str = "transform/opacity";
 
+#[derive(Default)]
+struct CountMotion(std::sync::atomic::AtomicUsize);
+
+impl effectcraft_render::ExprHost for CountMotion {
+    fn motion_hold_start(&self, ctx: &EvalCtx) -> Option<Tick> {
+        Expressions.motion_hold_start(ctx)
+    }
+    fn eval(&self, ctx: &EvalCtx, layer: &Layer, prop: &effectcraft_project::Property, value: &Value) -> Result<Value, String> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Expressions.eval(ctx, layer, prop, value)
+    }
+    fn motion_cache_key(&self, ctx: &EvalCtx, layer: &Layer) -> Option<u64> {
+        Expressions.motion_cache_key(ctx, layer)
+    }
+    fn motion_cache_generation(&self) -> u64 {
+        Expressions.motion_cache_generation()
+    }
+    fn motion_error_generation(&self) -> u64 {
+        Expressions.motion_error_generation()
+    }
+}
+
+#[test]
+fn auto_orient_transform_history_is_reused_but_invalidated_by_dependency_edits() {
+    use effectcraft_geom::vec3;
+    let mut f = fx();
+    let a = f.p.comp_mut(f.cid).unwrap().layer_mut(f.a).unwrap();
+    a.auto_orient = effectcraft_project::AutoOrient::AlongPath;
+    a.props.prop_mut(ROT).unwrap().keys.clear();
+    a.props.prop_mut(POS).unwrap().expr = Some(Expression { text: "thisComp.layer('B').toComp([0,0])".into(), enabled: true });
+    f.p.comp_mut(f.cid).unwrap().layer_mut(f.b).unwrap().props.prop_mut(POS).unwrap().keys =
+        vec![Keyframe::new(secs(0.0), Value::Vec3([100.0, 0.0, 0.0])), Keyframe::new(secs(1.0), Value::Vec3([100.0, 100.0, 0.0]))];
+    let host = CountMotion::default();
+    let axis = |f: &Fx, t| {
+        let c = f.p.comp(f.cid).unwrap();
+        let ctx = EvalCtx { expr: Some(&host), ..EvalCtx::new(&f.p, f.cid, c, secs(t)) };
+        ctx.world_matrix(c.layer(f.a).unwrap()).apply_vec(vec3(1.0, 0.0, 0.0))
+    };
+    assert!((axis(&f, 9.0) - vec3(0.0, 1.0, 0.0)).length() < 1e-6);
+    assert!(host.0.load(std::sync::atomic::Ordering::Relaxed) < 40, "the proven keyed tail must skip the cold stationary interval");
+    host.0.store(0, std::sync::atomic::Ordering::Relaxed);
+    assert!((axis(&f, 9.0) - vec3(0.0, 1.0, 0.0)).length() < 1e-6);
+    assert!(host.0.load(std::sync::atomic::Ordering::Relaxed) < 10, "a warm Xform must not rescan the hold");
+    f.p.comp_mut(f.cid).unwrap().layer_mut(f.b).unwrap().props.prop_mut(POS).unwrap().keys[1].value = Value::Vec3([0.0, 0.0, 0.0]);
+    assert!((axis(&f, 9.0) - vec3(-1.0, 0.0, 0.0)).length() < 1e-6);
+    // An external read inside the transform dependency still forbids cached history.
+    f.p.comp_mut(f.cid).unwrap().layer_mut(f.b).unwrap().props.prop_mut(POS).unwrap().expr =
+        Some(Expression { text: "var c=thisComp.layer('Shape').sampleImage([0,0]); [c[0],0,0]".into(), enabled: true });
+    let generation = crate::runtime::MOTION_GENERATION.get();
+    let _ = axis(&f, 9.0);
+    assert_ne!(crate::runtime::MOTION_GENERATION.get(), generation);
+}
+
+#[test]
+fn auto_orient_stops_history_on_an_expression_error() {
+    let mut f = fx();
+    let c = f.p.comp_mut(f.cid).unwrap();
+    c.duration = secs(1800.0);
+    let a = c.layer_mut(f.a).unwrap();
+    a.auto_orient = effectcraft_project::AutoOrient::AlongPath;
+    a.out_point = secs(1800.0);
+    a.props.prop_mut(POS).unwrap().expr = Some(Expression { text: "missingFunction(time)".into(), enabled: true });
+    let host = CountMotion::default();
+    let c = f.p.comp(f.cid).unwrap();
+    let ctx = EvalCtx { expr: Some(&host), ..EvalCtx::new(&f.p, f.cid, c, secs(900.0)) };
+    let _ = ctx.world_matrix(c.layer(f.a).unwrap());
+    assert!(host.0.load(std::sync::atomic::Ordering::Relaxed) <= 4, "failed evaluation must not be repeated across 54,000 history frames");
+}
+
+#[test]
+fn motion_history_observes_external_reads_and_expression_errors() {
+    use effectcraft_render::ExprHost;
+    let mut f = fx();
+    let before = Expressions.motion_cache_generation();
+    f.ev(f.a, POS, "thisComp.layer('B').sampleImage([0,0],[1,1])", 0.0).unwrap();
+    assert_ne!(Expressions.motion_cache_generation(), before);
+    f.p.comp_mut(f.cid).unwrap().layer_mut(f.a).unwrap().props.prop_mut(POS).unwrap().expr =
+        Some(Expression { text: "throw new Error('broken')".into(), enabled: true });
+    let c = f.p.comp(f.cid).unwrap();
+    let layer = c.layer(f.a).unwrap();
+    let prop = layer.props.prop(POS).unwrap();
+    let before = Expressions.motion_cache_generation();
+    assert!(Expressions.eval(&EvalCtx::new(&f.p, f.cid, c, Tick::ZERO), layer, prop, &prop.value).is_err());
+    assert_ne!(Expressions.motion_cache_generation(), before);
+}
+
+#[test]
+fn auto_orient_motion_cache_follows_expression_and_dependency_edits() {
+    use effectcraft_geom::vec3;
+    use effectcraft_project::AutoOrient;
+    let mut f = fx();
+    let layer = f.p.comp_mut(f.cid).unwrap().layer_mut(f.a).unwrap();
+    layer.auto_orient = AutoOrient::AlongPath;
+    layer.props.prop_mut(ROT).unwrap().keys.clear();
+    layer.props.prop_mut(POS).unwrap().expr = Some(Expression { text: "[100 - 100*Math.min(time,1),0,0]".into(), enabled: true });
+    let axis = |f: &Fx, t| {
+        let c = f.p.comp(f.cid).unwrap();
+        let ctx = EvalCtx { expr: Some(&Expressions), ..EvalCtx::new(&f.p, f.cid, c, secs(t)) };
+        ctx.world_matrix(c.layer(f.a).unwrap()).apply_vec(vec3(1.0, 0.0, 0.0))
+    };
+    assert!((axis(&f, 9.0) - vec3(-1.0, 0.0, 0.0)).length() < 1e-6);
+    assert!((axis(&f, 9.0 + 1.0 / 30.0) - vec3(-1.0, 0.0, 0.0)).length() < 1e-6);
+    f.p.comp_mut(f.cid).unwrap().layer_mut(f.a).unwrap().props.prop_mut(POS).unwrap().expr.as_mut().unwrap().text = "[0,100 - 100*Math.min(time,1),0]".into();
+    assert!((axis(&f, 9.0) - vec3(0.0, -1.0, 0.0)).length() < 1e-6);
+    f.p.comp_mut(f.cid).unwrap().layer_mut(f.a).unwrap().props.prop_mut(POS).unwrap().expr.as_mut().unwrap().text = "thisComp.layer('B').position".into();
+    f.p.comp_mut(f.cid).unwrap().layer_mut(f.b).unwrap().props.prop_mut(POS).unwrap().keys =
+        vec![Keyframe::new(secs(0.0), Value::Vec3([100.0, 0.0, 0.0])), Keyframe::new(secs(1.0), Value::Vec3([0.0, 0.0, 0.0]))];
+    assert!((axis(&f, 9.0) - vec3(-1.0, 0.0, 0.0)).length() < 1e-6);
+    f.p.comp_mut(f.cid).unwrap().layer_mut(f.b).unwrap().props.prop_mut(POS).unwrap().keys[1].value = Value::Vec3([100.0, 100.0, 0.0]);
+    assert!((axis(&f, 9.0) - vec3(0.0, 1.0, 0.0)).length() < 1e-6);
+}
+
+#[test]
+fn auto_orient_expression_preserves_keyed_fallback_beyond_sampling_horizon() {
+    use effectcraft_geom::vec3;
+    use effectcraft_project::AutoOrient;
+    let mut f = fx();
+    let comp = f.p.comp_mut(f.cid).unwrap();
+    comp.duration = secs(3600.0);
+    let layer = comp.layer_mut(f.a).unwrap();
+    layer.out_point = secs(3600.0);
+    layer.auto_orient = AutoOrient::AlongPath;
+    layer.props.prop_mut(ROT).unwrap().keys.clear();
+    let position = layer.props.prop_mut(POS).unwrap();
+    position.expr = Some(Expression { text: "value".into(), enabled: true });
+    position.keys = vec![Keyframe::new(secs(0.0), Value::Vec3([100.0, 0.0, 0.0])), Keyframe::new(secs(1.0), Value::Vec3([0.0, 0.0, 0.0]))];
+    for text in ["value", "value + [7,0,0]", "[value[0] * 2, value[1], 0]"] {
+        f.p.comp_mut(f.cid).unwrap().layer_mut(f.a).unwrap().props.prop_mut(POS).unwrap().expr.as_mut().unwrap().text = text.into();
+        let c = f.p.comp(f.cid).unwrap();
+        let ctx = EvalCtx { expr: Some(&Expressions), ..EvalCtx::new(&f.p, f.cid, c, secs(3599.0)) };
+        let axis = ctx.world_matrix(c.layer(f.a).unwrap()).apply_vec(vec3(1.0, 0.0, 0.0));
+        assert!((axis - vec3(-1.0, 0.0, 0.0)).length() < 1e-6, "{text}: {axis:?}");
+    }
+    // A clamp adds a hold inside a key interval, so it must NOT take the algebraic fast path.
+    f.p.comp_mut(f.cid).unwrap().layer_mut(f.a).unwrap().props.prop_mut(POS).unwrap().expr.as_mut().unwrap().text = "[Math.min(value[0], 50),0,0]".into();
+    let c = f.p.comp(f.cid).unwrap();
+    let ctx = EvalCtx { expr: Some(&Expressions), ..EvalCtx::new(&f.p, f.cid, c, secs(0.25)) };
+    let axis = ctx.world_matrix(c.layer(f.a).unwrap()).apply_vec(vec3(1.0, 0.0, 0.0));
+    assert!((axis - vec3(-1.0, 0.0, 0.0)).length() < 1e-6, "clamped value: {axis:?}");
+}
+
 /// A 200×100, 30 fps, 10 s comp named "Main" with:
 /// 1. "A": 20×20 red solid at (50, 40), slider effect = 42, rotation keyed 0→90 over 0–1 s
 /// 2. "B": 40×40 blue solid at (100, 50)

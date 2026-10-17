@@ -289,6 +289,190 @@ fn tokenize(src: &str) -> (Vec<Tok>, String) {
     (out, ws)
 }
 
+/// Closed algebraic expressions of the current keyed value retain keyframe motion timing.
+/// No time/host reads, functions, loops, conditionals, assignments or rounding operations:
+/// those can introduce a hold or a new motion boundary unrelated to Position's keys.
+pub(crate) fn keyframe_only(src: &str) -> bool {
+    if src.len() > 16_384 {
+        return false;
+    }
+    let (tokens, _) = tokenize(src);
+    !tokens.is_empty()
+        && tokens.iter().all(|t| match t.kind {
+            Kind::Num => true,
+            Kind::Ident => t.text == "value",
+            Kind::Punct => ["+", "-", "*", "/", "**", "[", "]", "(", ")", ",", ";"].contains(&t.text.as_str()),
+            _ => false,
+        })
+}
+
+/// A small, closed language for the generated trace-path expressions. It can read only current
+/// properties/transforms in this comp. Unknown globals, methods, dynamic member names, explicit
+/// times and code execution stay on the general history search. This is intentionally narrower
+/// than JavaScript: equal samples or absence of the word `time` alone would not prove a hold.
+pub(crate) fn current_comp_only(src: &str) -> bool {
+    if src.len() > 16_384 {
+        return false;
+    }
+    let (tokens, _) = tokenize(src);
+    let mut locals = std::collections::HashSet::new();
+    let mut pending = None;
+    const NAMES: &[&str] = &[
+        "thisComp",
+        "thisLayer",
+        "value",
+        "layer",
+        "transform",
+        "position",
+        "anchorPoint",
+        "scale",
+        "rotation",
+        "effect",
+        "content",
+        "path",
+        "pointOnPath",
+        "toComp",
+        "toWorld",
+    ];
+    // These names exist only as object members, not as reset per-evaluation globals.
+    // Accepting a bare `path` could read a variable left by an earlier script.
+    const MEMBERS_ONLY: &[&str] = &["layer", "path", "pointOnPath"];
+    for (i, t) in tokens.iter().enumerate() {
+        let previous = i.checked_sub(1).and_then(|j| tokens.get(j));
+        match t.kind {
+            Kind::Num => {}
+            Kind::Str
+                if previous.is_some_and(|p| p.is("("))
+                    && i.checked_sub(2).and_then(|j| tokens.get(j)).is_some_and(|p| ["layer", "effect", "content", ")"].contains(&p.text.as_str())) => {}
+            Kind::Ident => {
+                if MEMBERS_ONLY.contains(&t.text.as_str()) && !previous.is_some_and(|p| p.is(".")) {
+                    return false;
+                }
+                if previous.is_some_and(|p| p.is_kw(&["var", "let", "const"])) {
+                    if pending.is_some()
+                        || locals.contains(t.text.as_str())
+                        || NAMES.contains(&t.text.as_str())
+                        || !tokens.get(i + 1).is_some_and(|p| p.is("="))
+                    {
+                        return false;
+                    }
+                    // `var x=x` can read a global left by a previous script. A local becomes
+                    // usable only after its initializer's statement has completed.
+                    pending = Some(t.text.as_str());
+                } else if !NAMES.contains(&t.text.as_str()) && !locals.contains(t.text.as_str()) && !t.is_kw(&["var", "let", "const"]) {
+                    return false;
+                }
+                // A local name after '.' must not open arbitrary object members.
+                if previous.is_some_and(|p| p.is(".")) && !NAMES.contains(&t.text.as_str()) {
+                    return false;
+                }
+            }
+            Kind::Punct if ["+", "-", "*", "/", "[", "]", "(", ")", ",", ";", "=", "."].contains(&t.text.as_str()) => {
+                if t.is(";")
+                    && let Some(name) = pending.take()
+                {
+                    locals.insert(name);
+                }
+                // Only numeric component subscripts, never computed object member names.
+                if t.is("[")
+                    && previous.is_some_and(|p| p.kind == Kind::Ident || p.is(")") || p.is("]"))
+                    && !(tokens.get(i + 1).is_some_and(|p| p.kind == Kind::Num) && tokens.get(i + 2).is_some_and(|p| p.is("]")))
+                {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+    !tokens.is_empty()
+}
+
+/// A deliberately small closed numerical language. This is a proof for the constant-motion
+/// fast path, not a heuristic such as `!text.contains("time")`: unknown syntax stays dynamic.
+pub(crate) fn constant_math(src: &str) -> bool {
+    if src.len() > 16_384 {
+        return false;
+    }
+    let (tokens, _) = tokenize(src);
+    let mut locals = std::collections::HashSet::new();
+    let mut braces = 0usize;
+    let mut loop_seen = false;
+    const MATH: &[&str] = &[
+        "abs", "acos", "acosh", "asin", "asinh", "atan", "atanh", "atan2", "ceil", "cos", "cosh", "exp", "expm1", "floor", "hypot", "log", "log1p", "log2",
+        "log10", "max", "min", "pow", "round", "sign", "sin", "sinh", "sqrt", "tan", "tanh", "trunc", "PI", "E", "LN2", "LN10", "LOG2E", "LOG10E", "SQRT1_2",
+        "SQRT2",
+    ];
+    for (i, token) in tokens.iter().enumerate() {
+        match token.kind {
+            Kind::Str | Kind::Template | Kind::Regex => return false,
+            Kind::Num => {}
+            Kind::Punct => {
+                if token.is("{") {
+                    braces += 1;
+                }
+                if token.is("}") {
+                    braces = braces.saturating_sub(1);
+                }
+                if token.is(".") && i.checked_sub(1).and_then(|j| tokens.get(j)).is_none_or(|t| t.text != "Math") {
+                    return false;
+                }
+                if ![
+                    ".", "[", "]", "(", ")", "{", "}", ";", ",", ":", "?", "+", "-", "*", "/", "%", "**", "=", "+=", "-=", "*=", "/=", "++", "--", "<", ">",
+                    "<=", ">=", "==", "===", "!=", "!==", "!", "&&", "||",
+                ]
+                .contains(&token.text.as_str())
+                {
+                    return false;
+                }
+            }
+            Kind::Ident => {
+                let previous = i.checked_sub(1).and_then(|j| tokens.get(j));
+                if previous.is_some_and(|t| t.is_kw(&["var", "let", "const"])) {
+                    let loop_initializer = i.checked_sub(3).and_then(|j| tokens.get(j)).is_some_and(|t| t.is_kw(&["for"]))
+                        && i.checked_sub(2).and_then(|j| tokens.get(j)).is_some_and(|t| t.is("("));
+                    if braces > 0 || (loop_seen && !loop_initializer) {
+                        return false;
+                    }
+                    // Require numeric initialization: a global `var x = x` could otherwise read
+                    // a value left by an earlier script. Shadowing built-ins is not supported.
+                    if token.text == "Math" || !tokens.get(i + 1).is_some_and(|t| t.is("=")) || !tokens.get(i + 2).is_some_and(|t| t.kind == Kind::Num) {
+                        return false;
+                    }
+                    if tokens.get(i + 3).is_some_and(|t| !t.is(";") && !t.is(",") && !t.is(")")) {
+                        return false;
+                    }
+                    locals.insert(token.text.as_str());
+                } else if token.text == "Math" {
+                    if !tokens.get(i + 1).is_some_and(|t| t.is(".")) || !tokens.get(i + 2).is_some_and(|t| MATH.contains(&t.text.as_str())) {
+                        return false;
+                    }
+                } else if previous.is_some_and(|t| t.is(".")) {
+                    if !MATH.contains(&token.text.as_str()) {
+                        return false;
+                    }
+                    // Never allow changing Math's methods/constants or taking a callable alias.
+                    let next = tokens.get(i + 1);
+                    let constant = token.text.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+                    if constant || !next.is_some_and(|t| t.is("(")) {
+                        return false;
+                    }
+                    if next.is_some_and(|t| matches!(t.text.as_str(), "=" | "+=" | "-=" | "*=" | "/=" | "++" | "--")) {
+                        return false;
+                    }
+                } else if token.text == "for" {
+                    if loop_seen || braces > 0 {
+                        return false;
+                    }
+                    loop_seen = true;
+                } else if !locals.contains(token.text.as_str()) && !token.is_kw(&["var", "let", "const", "true", "false"]) {
+                    return false;
+                }
+            }
+        }
+    }
+    !tokens.is_empty()
+}
+
 fn closer(open: &str) -> &'static str {
     match open {
         "(" => ")",
@@ -784,6 +968,67 @@ fn throw_too_deep() -> String {
 #[cfg(test)]
 mod tests {
     use super::{MAX_NESTING, check_nesting, rewrite};
+
+    #[test]
+    fn keyed_tail_proof_accepts_trace_paths_but_rejects_hidden_time_reads() {
+        for text in [
+            "thisComp.layer('Trace').transform.position",
+            "var src=thisComp.layer('Path'); var p=src.toComp(thisComp.layer('Path').content('Shape 1').content('Path 1').path.pointOnPath(effect('Progress')('Slider')/100)); [p[0],p[1]]",
+        ] {
+            assert!(super::current_comp_only(text), "{text}");
+        }
+        for text in [
+            "[time,0,0]",
+            "thisComp.time",
+            "thisComp['time']",
+            "var p=('time'); thisComp[p]",
+            "thisComp[effect('Name')('Text')]",
+            "var p='time'; thisComp[p]",
+            "comp('Other').layer(1).position",
+            "thisComp.layer(1).sampleImage([0,0])",
+            "thisLayer.sourceRectAtTime()",
+            "wiggle(1,1)",
+            "Math.random()",
+            "valueAtTime(1)",
+            "thisComp.layer(1).position.velocityAtTime(1)",
+            "thisComp.layer.constructor('return time')()",
+            "`time ${time}`",
+            "eval('time')",
+            "var x=x; [x,0,0]",
+            "var x=x+1; [x,0,0]",
+            "[path,0,0]",
+            "layer('Other').position",
+            "pointOnPath(0.5)",
+        ] {
+            assert!(!super::current_comp_only(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn constant_motion_proof_rejects_time_host_reads_and_dynamic_javascript() {
+        for text in ["[300,200,0]", "var s=0; for(var i=0;i<100;i++){s+=Math.sin(i*0.37);} [300+s,200,0]"] {
+            assert!(super::constant_math(text), "{text}");
+        }
+        for text in [
+            "[time,0,0]",
+            "value",
+            "wiggle(1,10)",
+            "Math.random()",
+            "thisComp.layer(1).position",
+            "eval('time')",
+            "globalThis['time']",
+            "`time ${time}`",
+            "var x=0+x; [x,0,0]",
+            "if(false) var x=0; [x,0,0]",
+            "for(var i=0;i<0;i++) var x=0; [x,0,0]",
+            "Math.PI=1",
+            "++Math.PI",
+            "(Math.PI)=1",
+            "Math.sin.constructor('return time')()",
+        ] {
+            assert!(!super::constant_math(text), "{text}");
+        }
+    }
 
     /// Compare ignoring spaces (newlines are significant).
     fn n(s: &str) -> String {

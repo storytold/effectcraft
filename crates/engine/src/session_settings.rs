@@ -116,6 +116,10 @@ impl Session {
             self.layer_cache.set_disk(None);
             return;
         };
+        // Settings tests also replace the process-wide segmentation store. Keep them
+        // from redirecting writes while another test is checking matte persistence.
+        #[cfg(test)]
+        crate::tests_roto::hold_roto_cache_test_lock();
         let dc = match &self.disk_cache {
             Some(c) if c.folder() == folder.as_path() => {
                 c.set_max_bytes(max);

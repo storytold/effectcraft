@@ -30,6 +30,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 pub mod host;
+mod motion;
 mod noise;
 pub mod rewrite;
 mod runtime;
@@ -80,9 +81,40 @@ fn budget_left() -> Result<(), String> {
 pub struct Expressions;
 
 impl ExprHost for Expressions {
+    fn is_keyframe_only(&self, prop: &Property) -> bool {
+        prop.expr.as_ref().is_some_and(|e| rewrite::keyframe_only(&e.text))
+    }
+
+    fn is_constant(&self, prop: &Property) -> bool {
+        prop.expr.as_ref().is_some_and(|e| rewrite::constant_math(&e.text))
+    }
+
+    fn motion_cache_key(&self, ctx: &EvalCtx, layer: &Layer) -> Option<u64> {
+        motion::key(ctx, layer)
+    }
+
+    fn motion_cache_generation(&self) -> u64 {
+        runtime::MOTION_GENERATION.get()
+    }
+
+    fn motion_error_generation(&self) -> u64 {
+        runtime::MOTION_ERRORS.get()
+    }
+
+    fn motion_hold_start(&self, ctx: &EvalCtx) -> Option<Tick> {
+        motion::hold_start(ctx)
+    }
+
     fn eval(&self, ctx: &EvalCtx, layer: &Layer, prop: &Property, value: &Value) -> Result<Value, String> {
         match &prop.expr {
-            Some(e) => evaluate(self, ctx, layer, prop, value, &e.text),
+            Some(e) => {
+                let result = evaluate(self, ctx, layer, prop, value, &e.text);
+                if result.is_err() {
+                    runtime::MOTION_GENERATION.set(runtime::MOTION_GENERATION.get().wrapping_add(1));
+                    runtime::MOTION_ERRORS.set(runtime::MOTION_ERRORS.get().wrapping_add(1));
+                }
+                result
+            }
             None => Ok(value.clone()),
         }
     }

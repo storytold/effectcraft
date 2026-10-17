@@ -10,6 +10,7 @@ pub mod bokeh;
 pub mod camera;
 pub(crate) mod compose;
 pub mod light;
+mod motion;
 
 #[cfg(test)]
 mod tests;

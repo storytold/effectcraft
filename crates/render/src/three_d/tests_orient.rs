@@ -78,6 +78,130 @@ fn orient_along_path_keeps_the_last_heading_at_and_after_the_end() {
     }
 }
 
+/// A deterministic expression host keeps this compositor test independent of the JS engine.
+struct PositionExpression(fn(f64) -> [f64; 3]);
+
+#[test]
+fn orient_expression_closed_excursion_survives_a_long_hold() {
+    let host = PositionExpression(|t| {
+        let t = t - 60.0;
+        let y = if t < 0.0 {
+            0.0
+        } else if t < 0.1 {
+            1000.0 * t
+        } else if t < 0.2 {
+            200.0 - 1000.0 * t
+        } else {
+            0.0
+        };
+        [300.0, 200.0 + y, 0.0]
+    });
+    for three_d in [false, true] {
+        let (mut p, cid, mut comp) = setup();
+        comp.duration = Tick::from_seconds_f64(1800.0);
+        let mut l = solid(&mut p, &comp, three_d, [300.0, 200.0, 0.0]);
+        l.auto_orient = AutoOrient::AlongPath;
+        l.props.prop_mut("transform/position").unwrap().expr = Some(effectcraft_project::Expression { text: "closed excursion".into(), enabled: true });
+        comp.layers.push(l);
+        *p.comp_mut(cid).unwrap() = comp;
+        let c = p.comp(cid).unwrap();
+        // The first request is a cold, late seek. Reverse order and subframe seeks agree.
+        for secs in [900.0, 60.2333333333, 1799.0, 900.017, 60.2] {
+            let ctx = EvalCtx { expr: Some(&host), ..EvalCtx::new(&p, cid, c, Tick::from_seconds_f64(secs)) };
+            let x = ctx.world_matrix(&c.layers[0]).apply_vec(vec3(1.0, 0.0, 0.0));
+            assert!((x - vec3(0.0, -1.0, 0.0)).length() < 1e-6, "3d={three_d} t={secs}: {x:?}");
+        }
+    }
+}
+
+impl crate::ExprHost for PositionExpression {
+    fn eval(&self, ctx: &EvalCtx, _layer: &Layer, _prop: &effectcraft_project::Property, _value: &Value) -> Result<Value, String> {
+        Ok(Value::Vec3((self.0)(ctx.time.seconds())))
+    }
+}
+
+/// #1650: Position driven only by an expression has no keys to recover the stopped heading from.
+#[test]
+fn orient_expression_keeps_heading_after_stop_and_before_start() {
+    let host = PositionExpression(|t| [150.0 - 100.0 * (t - 0.5).clamp(0.0, 0.5), 50.0, 0.0]);
+    for three_d in [false, true] {
+        let (mut p, cid, comp) = setup();
+        let mut l = solid(&mut p, &comp, three_d, [150.0, 50.0, 0.0]);
+        l.auto_orient = AutoOrient::AlongPath;
+        l.props.prop_mut("transform/position").unwrap().expr =
+            Some(effectcraft_project::Expression { text: "expression-driven position".into(), enabled: true });
+        p.comp_mut(cid).unwrap().layers.push(l);
+        let c = p.comp(cid).unwrap();
+        // Seek to the held frame first: orientation must not depend on playback history.
+        for secs in [1.9, 1.0 + 1.0 / 30.0, 1.0, 0.75, 0.0, 0.49] {
+            let ctx = EvalCtx { expr: Some(&host), ..EvalCtx::new(&p, cid, c, Tick::from_seconds_f64(secs)) };
+            let x_axis = ctx.world_matrix(&c.layers[0]).apply_vec(vec3(1.0, 0.0, 0.0));
+            assert!((x_axis - vec3(-1.0, 0.0, 0.0)).length() < 1e-6, "3d={three_d} t={secs}: {x_axis:?}");
+        }
+    }
+}
+
+#[test]
+fn orient_constant_expression_does_not_invent_a_heading() {
+    let host = PositionExpression(|_| [50.0, 50.0, 0.0]);
+    let (mut p, cid, comp) = setup();
+    let mut l = solid(&mut p, &comp, false, [50.0, 50.0, 0.0]);
+    l.auto_orient = AutoOrient::AlongPath;
+    l.props.prop_mut("transform/position").unwrap().expr = Some(effectcraft_project::Expression { text: "[50, 50, 0]".into(), enabled: true });
+    p.comp_mut(cid).unwrap().layers.push(l);
+    let c = p.comp(cid).unwrap();
+    let ctx = EvalCtx { expr: Some(&host), ..EvalCtx::new(&p, cid, c, Tick::from_seconds_f64(1.5)) };
+    let x_axis = ctx.world_matrix(&c.layers[0]).apply_vec(vec3(1.0, 0.0, 0.0));
+    assert!((x_axis - vec3(1.0, 0.0, 0.0)).length() < 1e-6, "{x_axis:?}");
+}
+
+#[test]
+fn orient_expression_hold_uses_the_previous_leg_not_the_next_one() {
+    // Travel left, pause, then travel down. During the pause the heading must remain left.
+    let host = PositionExpression(|t| [150.0 - 100.0 * t.clamp(0.0, 0.5), 50.0 + 100.0 * (t - 1.0).clamp(0.0, 0.5), 0.0]);
+    for three_d in [false, true] {
+        let (mut p, cid, comp) = setup();
+        let mut l = solid(&mut p, &comp, three_d, [150.0, 50.0, 0.0]);
+        l.auto_orient = AutoOrient::AlongPath;
+        let prop = l.props.prop_mut("transform/position").unwrap();
+        prop.expr = Some(effectcraft_project::Expression { text: "expression overrides these keys".into(), enabled: true });
+        // Unrelated underlying keys must not dictate the expression's heading.
+        prop.keys = vec![Keyframe::new(Tick::ZERO, Value::Vec3([0.0; 3])), Keyframe::new(Tick::from_seconds_f64(0.7), Value::Vec3([100.0, 0.0, 0.0]))];
+        p.comp_mut(cid).unwrap().layers.push(l);
+        let c = p.comp(cid).unwrap();
+        for (secs, expected) in [(1.9, vec3(0.0, 1.0, 0.0)), (0.8, vec3(-1.0, 0.0, 0.0)), (1.25, vec3(0.0, 1.0, 0.0))] {
+            let ctx = EvalCtx { expr: Some(&host), ..EvalCtx::new(&p, cid, c, Tick::from_seconds_f64(secs)) };
+            let x_axis = ctx.world_matrix(&c.layers[0]).apply_vec(vec3(1.0, 0.0, 0.0));
+            assert!((x_axis - expected).length() < 1e-6, "3d={three_d} t={secs}: {x_axis:?}");
+        }
+    }
+}
+
+#[test]
+fn orient_expression_curved_path_keeps_its_terminal_tangent() {
+    let host = PositionExpression(|t| {
+        let angle = std::f64::consts::PI * ((t - 0.2) / 0.6).clamp(0.0, 1.0);
+        [100.0 + 50.0 * angle.cos(), 50.0 + 50.0 * angle.sin(), 0.0]
+    });
+    for three_d in [false, true] {
+        let (mut p, cid, comp) = setup();
+        let mut l = solid(&mut p, &comp, three_d, [150.0, 50.0, 0.0]);
+        l.auto_orient = AutoOrient::AlongPath;
+        l.props.prop_mut("transform/position").unwrap().expr = Some(effectcraft_project::Expression { text: "curved expression path".into(), enabled: true });
+        p.comp_mut(cid).unwrap().layers.push(l);
+        let c = p.comp(cid).unwrap();
+        let heading = |t| {
+            let ctx = EvalCtx { expr: Some(&host), ..EvalCtx::new(&p, cid, c, Tick::from_seconds_f64(t)) };
+            ctx.world_matrix(&c.layers[0]).apply_vec(vec3(1.0, 0.0, 0.0))
+        };
+        let terminal = heading(0.8);
+        for secs in [1.9, 1.901] {
+            let held = heading(secs);
+            assert!((held - terminal).length() < 1e-5, "3d={three_d} t={secs}: {held:?} vs {terminal:?}");
+        }
+    }
+}
+
 #[test]
 fn layers_parented_to_a_camera_follow_its_rotation() {
     let (mut p, cid, comp) = setup();
