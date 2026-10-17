@@ -409,7 +409,15 @@ fn install_script_fallbacks(family_fonts: &mut FontDefinitions, language: &str) 
         let mut names = Vec::new();
         let mut seen = Vec::new();
         for &(probe, name) in cjk.iter().chain(SCRIPT_PROBES).chain(std::iter::once(&HANGUL)) {
-            let id = fonts::fallback_for(probe, base);
+            // The interface asks for the platform's UI face first; the order a composed frame
+            // renders with is `fonts::fallback_for`'s and is not touched here.
+            let id = interface_fallback_candidates(name, cjk_locale(language))
+                .iter()
+                .find_map(|family| {
+                    let r = fonts::resolve(family, "Regular");
+                    (!r.missing && fonts::face(r.face).has_char(probe)).then_some(r.face)
+                })
+                .unwrap_or_else(|| fonts::fallback_for(probe, base));
             if seen.contains(&id) {
                 continue;
             }
@@ -429,6 +437,31 @@ fn install_script_fallbacks(family_fonts: &mut FontDefinitions, language: &str) 
             names.push(name.to_string());
         }
         names
+    }
+}
+
+/// The faces the interface asks for before it settles on the one a composed frame renders with.
+///
+/// Windows ships a UI variant of its Japanese and Chinese families - `Meiryo`/`Meiryo UI`, `Yu
+/// Gothic`/`Yu Gothic UI`, `MS Gothic`/`MS UI Gothic`, `Microsoft YaHei`/`Microsoft YaHei UI`,
+/// `Microsoft JhengHei`/`Microsoft JhengHei UI` - and its own link table for `Segoe UI`
+/// (`FontLink\SystemLink`) picks the UI one for what it draws on screen. `PMingLiU` is the one face
+/// here that is not a sibling: it is `MingLiU`'s proportional relative, and proportional spacing is
+/// what makes the chrome read better in it.
+///
+/// Only the interface takes this order. `fonts::fallback_for` keeps the order a document renders
+/// with, so an existing project's output does not move when the chrome changes.
+#[cfg(not(target_arch = "wasm32"))]
+fn interface_fallback_candidates(name: &str, language: &str) -> &'static [&'static str] {
+    match (name, cjk_locale(language)) {
+        // Kana, and the Han ideographs of a Japanese interface: the language asks for the Japanese
+        // face, so its UI sibling is the one the platform would draw chrome with.
+        ("japanese-system", _) | ("chinese-system", "ja") => &["Meiryo UI", "Yu Gothic UI", "MS UI Gothic"],
+        ("chinese-system", "zh-hant") => &["Microsoft JhengHei UI", "PMingLiU"],
+        ("chinese-system", "zh-hans") => &["Microsoft YaHei UI"],
+        // The other scripts have no UI variant, and their shared order already picks the face made
+        // for the script - the one that draws it correctly at all.
+        _ => &[],
     }
 }
 
@@ -530,6 +563,7 @@ pub fn apply_visuals(ctx: &egui::Context, t: &Tokens) {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod script_font_tests {
+    use super::{SCRIPT_PROBES, interface_fallback_candidates};
     use effectcraft_text::fonts;
 
     /// Whether an installed face covers `probe` (else the glyph check is skipped).
@@ -581,6 +615,21 @@ mod script_font_tests {
     /// #394: Arabic, Hebrew, Indic and Thai names are drawn by an installed face in an English
     /// interface: the UI fonts were Inter and the CJK fallbacks only, so a layer named in Arabic
     /// showed as missing-glyph boxes.
+    #[test]
+    fn the_interface_asks_for_the_platforms_ui_faces() {
+        // The face a window draws its own chrome with, which is not the one a composed frame
+        // renders with: the two orders are deliberately separate.
+        let ja = &["Meiryo UI", "Yu Gothic UI", "MS UI Gothic"][..];
+        assert_eq!(interface_fallback_candidates("japanese-system", "ja"), ja);
+        assert_eq!(interface_fallback_candidates("chinese-system", "ja"), ja);
+        assert_eq!(interface_fallback_candidates("chinese-system", "zh-hans"), &["Microsoft YaHei UI"][..]);
+        assert_eq!(interface_fallback_candidates("chinese-system", "zh-hant"), &["Microsoft JhengHei UI", "PMingLiU"][..]);
+        // Every other script the install probes has no UI variant, so it keeps the shared order.
+        for &(_, name) in SCRIPT_PROBES.iter() {
+            assert!(interface_fallback_candidates(name, "en").is_empty(), "{name} asked for a UI face");
+        }
+    }
+
     #[test]
     fn installed_script_fallbacks_draw_arabic_hebrew_indic_and_thai_names() {
         // Letters only: a vowel sign or virama on its own is drawn on a dotted circle.

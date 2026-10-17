@@ -1145,6 +1145,27 @@ mod tests {
     }
 
     #[test]
+    fn the_rendered_order_keeps_the_print_face_first() {
+        // A composed frame renders with these lists, so they keep the platform's print order: the
+        // interface prefers the platform's UI faces on its own (see `install_script_fallbacks` in
+        // the ui crate), and an existing project must not render differently because a window's
+        // chrome changed.
+        let pos = |list: &[&str], name: &str| list.iter().position(|f| *f == name).unwrap_or_else(|| panic!("{name} is not in the list: {list:?}"));
+        assert!(pos(JAPANESE_FAMILIES, "Yu Gothic") < pos(JAPANESE_FAMILIES, "Yu Gothic UI"));
+        for name in ["Meiryo UI", "MS UI Gothic"] {
+            assert!(!JAPANESE_FAMILIES.contains(&name), "{name} belongs to the interface order, not this list");
+        }
+        assert_eq!(SIMPLIFIED_CHINESE_FAMILIES[0], "Microsoft YaHei");
+        assert_eq!(TRADITIONAL_CHINESE_FAMILIES[0], "Microsoft JhengHei");
+        for name in ["Microsoft YaHei UI", "Microsoft JhengHei UI", "PMingLiU"] {
+            assert!(
+                !SIMPLIFIED_CHINESE_FAMILIES.contains(&name) && !TRADITIONAL_CHINESE_FAMILIES.contains(&name),
+                "{name} belongs to the interface order, not these lists"
+            );
+        }
+    }
+
+    #[test]
     fn bundled_ui_fonts_cover_the_ukrainian_alphabet() {
         const ALPHABET: &str = "АБВГҐДЕЄЖЗИІЇЙКЛМНОПРСТУФХЦЧШЩЬЮЯабвгґдеєжзиіїйклмнопрстуфхцчшщьюя’«»";
         for (name, bytes) in
