@@ -900,29 +900,19 @@ fn fxs_texturize(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 // ---------------------------------------------------------------- Glow (misc::glow) extras
 
-// Bright pass with the Arbitrary Map: as `glow_bright` (same f[0] / u[0] layout, see
-// kernels.wgsl) with the red, green and blue curves at data offsets f[1].xyz (−1 = identity).
+// The Arbitrary Map over the blurred glow's own strength, as `glow_colorize` (same f[0] / u[0]
+// layout, see kernels.wgsl) with the red, green and blue curves at data offsets f[1].xyz
+// (−1 = identity). src = the blurred glow, written by `glow_bright`.
 @compute @workgroup_size(16, 16)
 fn fxs_glow_map(@builtin(global_invocation_id) gid: vec3<u32>) {
     let p = vec2<i32>(gid.xy);
     if (!fxs_inside(p)) {
         return;
     }
-    let px = textureLoad(src, p, 0);
-    let a = px.w;
-    if (a <= 0.0) {
-        textureStore(out, p, vec4<f32>(0.0));
-        return;
-    }
-    let thr = P.f[0].x;
-    var l = luminance(px.xyz / a);
-    if (P.u[0].y != 0u) {
-        l = a;
-    }
-    let k = clamp((l - thr) / max(1.0 - thr, 1e-3), 0.0, 1.0);
-    let t = glow_ab_t(l);
+    let m = textureLoad(src, p, 0).w;
+    let t = glow_ab_t(m);
     let c = vec3<f32>(curve_eval(P.f[1].x, t), curve_eval(P.f[1].y, t), curve_eval(P.f[1].z, t));
-    textureStore(out, p, vec4<f32>(c * k * a, k * a));
+    textureStore(out, p, vec4<f32>(c * m, m));
 }
 
 // On Top with another Glow Operation: blend_pixel(mode, original, glow · intensity, 0).

@@ -326,6 +326,14 @@ fn glow(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
     e.pixels("glow_bright", &p, &b.img, None, &bright, None);
     let s = (radius / 2.0).max(0.5);
     let blurred = gaussian_blur(e, &bright, s * kx, s * ky, false);
+    // A & B Colors walk the gradient over the blurred glow's own strength (misc::glow).
+    let blurred = if use_colors {
+        let coloured = e.image(b.img.width, b.img.height);
+        e.pixels("glow_colorize", &p, &blurred, None, &coloured, None);
+        coloured
+    } else {
+        blurred
+    };
     let mut p = Params::default();
     p.u[0][0] = ctx.params.e("operation").min(2);
     p.f[0][0] = intensity;

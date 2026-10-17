@@ -27,7 +27,8 @@ const ENTRIES: &[&str] = &[
 /// Effect entry points in `kernels.wgsl`. Like the `fx_*` kernels, one that fails to build
 /// (a driver's shader compiler rejecting it, #613) leaves its effects to the CPU instead of
 /// turning the whole compositor off.
-const EFFECT_ENTRIES: &[&str] = &["box_h", "box_v", "directional", "glow_bright", "glow_combine", "shadow_make", "shadow_combine", "pointwise"];
+const EFFECT_ENTRIES: &[&str] =
+    &["box_h", "box_v", "directional", "glow_bright", "glow_colorize", "glow_combine", "shadow_make", "shadow_combine", "pointwise"];
 
 /// Entry points that also bind group 1 (four read-only storage buffers; see
 /// [`Enc::dispatch_ext`]).

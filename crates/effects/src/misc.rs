@@ -100,9 +100,10 @@ fn unsharp(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
-/// Position (0 = Color A, 1 = Color B) in Glow's A & B gradient for brightness `l`: `loops`
-/// cycles starting at `phase` (revolutions), shaped by Color Looping (0 Sawtooth A>B,
-/// 1 Sawtooth B>A, 2 Triangle A>B>A, 3 Triangle B>A>B) and biased so `mid` maps to the middle.
+/// Position (0 = Color A, 1 = Color B) in Glow's A & B gradient for glow strength `l` (the
+/// blurred glow's own falloff, so the loops ring the glow): `loops` cycles starting at `phase`
+/// (revolutions), shaped by Color Looping (0 Sawtooth A>B, 1 Sawtooth B>A, 2 Triangle A>B>A,
+/// 3 Triangle B>A>B) and biased so `mid` maps to the middle.
 pub fn glow_ab_t(l: f32, looping: u32, loops: f32, phase: f32, mid: f32) -> f32 {
     let u = l.clamp(0.0, 1.0) * loops.max(0.0) + phase;
     let mut t = u - u.floor();
@@ -172,7 +173,11 @@ fn glow(ctx: &EffectCtx, mut b: Buf) -> Buf {
     if !ctx.adjustment {
         b.pad((radius * 1.5).ceil() as u32 + 2);
     }
-    // Bright pass.
+    // Bright pass. A & B Colors and the Arbitrary Map colour the glow across its own falloff, so
+    // the bright pass keeps the glow's strength alone and the gradient is applied after the blur
+    // (#941): on a subject of uniform brightness every pixel shares one brightness, so a gradient
+    // taken from the source here would be one flat colour that no setting could vary.
+    let gradient = use_colors || arbitrary.is_some();
     let mut bright = b.img.clone();
     bright.data.par_iter_mut().for_each(|px| {
         let a = px[3];
@@ -183,20 +188,30 @@ fn glow(ctx: &EffectCtx, mut b: Buf) -> Buf {
         // Glow Based On: brightness from the colours, or from the alpha channel.
         let l = if alpha_based { a } else { luminance(px[0] / a, px[1] / a, px[2] / a) };
         let k = ((l - thr) / (1.0 - thr).max(1e-3)).clamp(0.0, 1.0);
-        if let Some(map) = &arbitrary {
-            let t = glow_ab_t(l, looping, loops, phase, mid);
-            let c = map.iter().map(|cv| cv.as_ref().map_or(t, |cv| cv.eval(t))).collect::<Vec<f32>>();
-            *px = [c[0] * k * a, c[1] * k * a, c[2] * k * a, k * a];
-        } else if use_colors {
-            let t = glow_ab_t(l, looping, loops, phase, mid);
-            let c = [ca[0] + (cb[0] - ca[0]) * t, ca[1] + (cb[1] - ca[1]) * t, ca[2] + (cb[2] - ca[2]) * t];
-            *px = [c[0] * k * a, c[1] * k * a, c[2] * k * a, k * a];
+        if gradient {
+            let m = k * a;
+            *px = [m, m, m, m];
         } else {
             *px = px.map(|v| v * k);
         }
     });
     let s = (radius / 2.0).max(0.5);
-    let blurred = gaussian_blur(&bright, s * kx, s * ky, false);
+    let mut blurred = gaussian_blur(&bright, s * kx, s * ky, false);
+    if gradient {
+        // The blurred glow's strength walks the gradient, so Color Loops rings the glow.
+        blurred.data.par_iter_mut().for_each(|px| {
+            let m = px[3];
+            let t = glow_ab_t(m, looping, loops, phase, mid);
+            let c = match &arbitrary {
+                Some(map) => {
+                    let ch = |i: usize| map.get(i).and_then(Option::as_ref).map_or(t, |cv| cv.eval(t));
+                    [ch(0), ch(1), ch(2)]
+                }
+                None => [ca[0] + (cb[0] - ca[0]) * t, ca[1] + (cb[1] - ca[1]) * t, ca[2] + (cb[2] - ca[2]) * t],
+            };
+            *px = [c[0] * m, c[1] * m, c[2] * m, m];
+        });
+    }
     let mode = ctx.params.e("operation");
     b.img.data.par_iter_mut().zip(blurred.data.par_iter()).for_each(|(o, g)| {
         let g = g.map(|v| v * intensity);
@@ -779,5 +794,36 @@ mod tests {
         let red = run(&[("colors", Value::Enum(2)), ("arbitraryMap", Value::Str("0,1 1,1|0,0 1,0|0,0 1,0".into())), ("operation", Value::Enum(2))]);
         let p = red.get(6, 12);
         assert!(p[0] > 0.05 && p[1] < 1e-4 && p[2] < 1e-4, "{p:?}");
+    }
+
+    /// A & B Midpoint moves the balance of the two colours on a subject of one brightness, where
+    /// the gradient used to collapse to a single colour that no setting could change (#941).
+    /// Adobe documents lower percentages as using less of Color A.
+    #[test]
+    fn glow_ab_midpoint_balances_the_colours_on_a_flat_subject() {
+        let run = |mid: f64| {
+            let b = run_fx(
+                "ec.stylize.glow",
+                &[
+                    // A & B Colors, Sawtooth A>B so the walk over the glow is monotonic.
+                    ("colors", Value::Enum(1)),
+                    ("colorLooping", Value::Enum(0)),
+                    ("colorA", col(1.0, 0.0, 0.0)),
+                    ("colorB", col(0.0, 0.0, 1.0)),
+                    ("operation", Value::Enum(2)),
+                    ("abMidpoint", num(mid)),
+                ],
+                scene(),
+                0.0,
+                EffectEnv::default(),
+            );
+            b.img.get(6 + b.offset[0] as i64, 12 + b.offset[1] as i64)
+        };
+        let (low, high) = (run(10.0), run(90.0));
+        // The slider does something at all: it used to leave the glow bit-identical.
+        assert!(low != high, "midpoint changed nothing: {low:?} {high:?}");
+        // Less of Color A (red) low, more of it high; Color B (blue) the other way.
+        assert!(high[0] > low[0], "red should grow with the midpoint: {low:?} {high:?}");
+        assert!(low[2] > high[2], "blue should shrink with the midpoint: {low:?} {high:?}");
     }
 }

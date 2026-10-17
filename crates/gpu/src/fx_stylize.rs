@@ -915,10 +915,13 @@ pub(crate) fn glow(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
     if !ctx.adjustment {
         b.pad(e, (radius * 1.5).ceil() as u32 + 2)?;
     }
+    // A & B Colors and the Arbitrary Map keep only the glow's strength here; the gradient goes
+    // over the blurred strength below (misc::glow).
+    let gradient = colors == 1 || colors == 2;
     let mut p = Params::default();
-    p.u[0] = [(colors == 1) as u32, (ctx.params.e("based") == 0) as u32, ctx.params.e("colorLooping"), 0];
+    p.u[0] = [gradient as u32, (ctx.params.e("based") == 0) as u32, ctx.params.e("colorLooping"), 0];
     p.f[0] = [thr, ctx.params.f("colorLoops") as f32, (ctx.params.f("colorPhase") / 360.0) as f32, ctx.params.f("abMidpoint") as f32 / 100.0];
-    let bright = e.image(b.img.width, b.img.height);
+    let mut curve_data = None;
     if colors == 2 {
         // Arbitrary Map: Curves tables per channel (see effects::curves).
         let mut parts = ctx.params.s("arbitraryMap").split('|');
@@ -936,15 +939,23 @@ pub(crate) fn glow(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
             data.extend_from_slice(lut);
         }
         p.f[1] = [offs[0], offs[1], offs[2], 0.0];
-        let buf = e.data(&data);
-        e.pixels("fxs_glow_map", &p, &b.img, None, &bright, Some(&buf));
+        curve_data = Some(e.data(&data));
     } else {
         p.f[1] = ctx.params.color("colorA");
         p.f[2] = ctx.params.color("colorB");
-        e.pixels("glow_bright", &p, &b.img, None, &bright, None);
     }
+    let bright = e.image(b.img.width, b.img.height);
+    e.pixels("glow_bright", &p, &b.img, None, &bright, None);
     let s = (radius / 2.0).max(0.5);
     let blurred = gaussian_blur(e, &bright, s * kx, s * ky, false);
+    let blurred = if gradient {
+        let coloured = e.image(b.img.width, b.img.height);
+        let entry = if colors == 2 { "fxs_glow_map" } else { "glow_colorize" };
+        e.pixels(entry, &p, &blurred, None, &coloured, curve_data.as_ref());
+        coloured
+    } else {
+        blurred
+    };
     let operation = ctx.params.e("operation");
     let glow_op = effectcraft_effects::glow_operation(ctx);
     let mut p = Params::default();
