@@ -22,13 +22,13 @@ const OPA: &str = "transform/opacity";
 /// 4. "Shape": shape layer with "Rectangle 1" (60×30 rect path, red fill)
 ///
 /// plus an "Other" comp with one layer "Inner".
-struct Fx {
-    p: Project,
-    cid: ItemId,
-    a: LayerId,
-    b: LayerId,
-    title: LayerId,
-    shape: LayerId,
+pub(crate) struct Fx {
+    pub(crate) p: Project,
+    pub(crate) cid: ItemId,
+    pub(crate) a: LayerId,
+    pub(crate) b: LayerId,
+    pub(crate) title: LayerId,
+    pub(crate) shape: LayerId,
 }
 
 fn solid(p: &mut Project, comp: &Comp, name: &str, color: [f32; 3], w: u32, h: u32) -> Layer {
@@ -43,7 +43,7 @@ fn group_push(p: &mut Project, f: impl FnOnce(&mut Ids) -> PropGroup) -> PropGro
     g
 }
 
-fn fx() -> Fx {
+pub(crate) fn fx() -> Fx {
     let mut p = Project::default();
     let comp = Comp::new(200, 100, FrameRate::FPS_30, Tick::from_seconds_f64(10.0));
     let cid = p.add_item("Main", Label::Sandstone, None, ItemKind::Comp(comp.clone().into()));
@@ -87,12 +87,12 @@ fn fx() -> Fx {
     Fx { p, cid, a: ids.0, b: ids.1, title: ids.2, shape: ids.3 }
 }
 
-fn secs(s: f64) -> Tick {
+pub(crate) fn secs(s: f64) -> Tick {
     Tick::from_seconds_f64(s)
 }
 
 impl Fx {
-    fn ev(&self, layer: LayerId, path: &str, text: &str, t: f64) -> Result<Value, String> {
+    pub(crate) fn ev(&self, layer: LayerId, path: &str, text: &str, t: f64) -> Result<Value, String> {
         eval_standalone(&self.p, self.cid, layer, path, text, t)
     }
     /// Scalar result on layer A's rotation.
@@ -109,7 +109,7 @@ impl Fx {
             Err(e) => panic!("{text}: {e}"),
         }
     }
-    fn text(&self, text: &str, t: f64) -> String {
+    pub(crate) fn text(&self, text: &str, t: f64) -> String {
         match self.ev(self.title, "text/sourceText", text, t) {
             Ok(Value::Text(d)) => d.text,
             Ok(v) => panic!("{text}: not text: {v:?}"),
@@ -126,7 +126,7 @@ impl Fx {
         let l = self.p.comp_mut(self.cid).unwrap().layer_mut(layer).unwrap();
         l.props.prop_mut(path).unwrap().expr = Some(Expression { text: text.into(), enabled: true });
     }
-    fn layer_mut(&mut self, layer: LayerId) -> &mut Layer {
+    pub(crate) fn layer_mut(&mut self, layer: LayerId) -> &mut Layer {
         self.p.comp_mut(self.cid).unwrap().layer_mut(layer).unwrap()
     }
 }
@@ -408,9 +408,12 @@ fn an_expression_needing_its_own_value_fails_fast() {
 #[test]
 fn fanning_out_reads_stop_at_a_budget() {
     // Two layers reading each other twice at other times: no cycle (the times differ), but
-    // 2^16 evaluations at `MAX_DEPTH`; the evaluation stops after `MAX_RUNS` script runs.
+    // 2^16 evaluations at `MAX_DEPTH`; the evaluation stops after `MAX_RUNS` script runs. The two
+    // reads shift and scale time differently, so no two paths meet at the same time and the
+    // shared result memo can't fold the tree (with `t + a` / `t + b` it collapses to a few
+    // hundred distinct evaluations and finishes, exactly).
     let mut f = fx();
-    let text = |other: &str| format!("var r = thisComp.layer('{other}').transform.rotation; r.valueAtTime(time + 0.001) + r.valueAtTime(time + 0.002)");
+    let text = |other: &str| format!("var r = thisComp.layer('{other}').transform.rotation; r.valueAtTime(time + 0.001) + r.valueAtTime(time * 1.001 + 0.002)");
     f.set_expr(f.a, ROT, &text("B"));
     f.set_expr(f.b, ROT, &text("A"));
     // Take the clock out of the race: on a loaded machine the time budget could otherwise stop
