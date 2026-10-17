@@ -82,6 +82,15 @@ fn mime(name: &str) -> &'static str {
     }
 }
 
+/// Hand a written file to the user: to the page embedding EffectCraft when there is one
+/// ([`crate::host`]), else as a download named after `path`'s last component.
+fn deliver(path: &str, data: &[u8]) -> Result<(), JsValue> {
+    if crate::host::active() {
+        return crate::host::post_save(path, data).map_err(|e| JsValue::from_str(&e));
+    }
+    download(file_name(path), data)
+}
+
 /// Offer `data` as a download named `name`.
 pub fn download(name: &str, data: &[u8]) -> Result<(), JsValue> {
     let doc = web_sys::window().and_then(|w| w.document()).ok_or("no document")?;
@@ -128,7 +137,7 @@ impl Services for WebServices {
         if quiet || crate::is_worker() {
             return Ok(());
         }
-        download(file_name(path), data).map_err(|e| std::io::Error::other(format!("download failed: {e:?}")))
+        deliver(path, data).map_err(|e| std::io::Error::other(format!("download failed: {e:?}")))
     }
     fn store_file(&self, path: &str, data: &[u8]) -> std::io::Result<()> {
         put(path, data.into());
@@ -190,13 +199,13 @@ pub fn flush_downloads() {
     out.dedup_by(|a, b| a.0 == b.0);
     let r = match out.len() {
         0 => return,
-        1 => download(&out[0].0, &out[0].1),
+        1 => deliver(&out[0].0, &out[0].1),
         n => {
             let first = &out[0].0;
             let stem = first.rsplit_once('.').map_or(first.as_str(), |(s, _)| s).trim_end_matches(|c: char| c.is_ascii_digit() || c == '_');
             let stem = if stem.is_empty() { "render" } else { stem };
             log::info!("render: {n} files → {stem}.zip");
-            download(&format!("{stem}.zip"), &zip_store(&out))
+            deliver(&format!("{stem}.zip"), &zip_store(&out))
         }
     };
     if let Err(e) = r {
