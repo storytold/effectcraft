@@ -27,6 +27,7 @@ pub mod key_dialogs;
 pub mod layer_panel;
 pub mod layer_styles_dialog;
 pub mod learn;
+pub mod live_preview;
 pub mod markers_ui;
 pub mod media_panels;
 pub mod misc;

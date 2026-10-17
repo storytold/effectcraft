@@ -197,7 +197,8 @@ fn stop_edits_ok_sets_the_gradient_in_one_undo_step() {
     let from = center(&h, "dialog.gradient.opacityStop.1");
     let to = along(&h, "dialog.gradient.opacityStop.1", 0.5);
     drag(&mut h, from, to);
-    assert_eq!(undo_len(&h), undo, "nothing is set while editing");
+    assert_eq!(undo_len(&h), undo + 1, "the live preview is one merged undo step while editing");
+    assert_eq!(gradient(&colors_prop(&h, l, colors).value).colors.len(), 3, "the property shows the edit before OK");
     click(&mut h, "dialog.gradient.ok");
     assert_eq!(h.state().dialog, None);
     let g = gradient(&colors_prop(&h, l, colors).value);
@@ -403,11 +404,13 @@ fn location_moves_past_a_neighbour_and_the_fields_follow_the_stop() {
     assert!(!shown.iter().any(|v| (v - 70.0).abs() < 1.0), "{shown:?}");
 }
 
-/// A layer deleted while the editor is open: OK reports it, without a crash.
+/// A layer deleted while the editor is open, Preview off: OK reports the failed set, without a
+/// crash.
 #[test]
 fn a_layer_deleted_while_editing_is_reported() {
     let (mut h, l, colors) = setup(&[]);
     open_editor(&mut h, colors);
+    click(&mut h, "dialog.gradient.preview");
     let p = along(&h, "dialog.gradient.addColor", 0.5);
     click_at(&mut h, p);
     h.state_mut().session.execute("edit.clear", json!({"layers": [l]})).unwrap();
@@ -415,6 +418,83 @@ fn a_layer_deleted_while_editing_is_reported() {
     click(&mut h, "dialog.gradient.ok");
     assert_eq!(h.state().dialog, None);
     assert!(!h.state().ui.status.is_empty(), "the failed set is reported");
+}
+
+/// The same with Preview on: the preview's set fails at the next edit and says so, and OK closes
+/// the editor without a crash.
+#[test]
+fn a_layer_deleted_during_the_preview_is_reported_at_the_next_edit() {
+    let (mut h, l, colors) = setup(&[]);
+    open_editor(&mut h, colors);
+    h.state_mut().session.execute("edit.clear", json!({"layers": [l]})).unwrap();
+    h.run_steps(2);
+    let p = along(&h, "dialog.gradient.addColor", 0.5);
+    click_at(&mut h, p);
+    assert!(!h.state().ui.status.is_empty(), "the failed preview set is reported");
+    click(&mut h, "dialog.gradient.ok");
+    assert_eq!(h.state().dialog, None);
+}
+
+/// Preview (on by default, as in After Effects): edits reach the property as they are made, in one
+/// undo step, and Cancel and Escape roll them back to how the editor opened.
+#[test]
+fn the_preview_applies_edits_live_and_cancel_rolls_them_back() {
+    let (mut h, l, colors) = setup(&[]);
+    let before = colors_prop(&h, l, colors).value.clone();
+    let undo = undo_len(&h);
+    open_editor(&mut h, colors);
+    assert!(h.state().gradient_draft().preview, "Preview starts on");
+    let p = along(&h, "dialog.gradient.addColor", 0.25);
+    click_at(&mut h, p);
+    assert_eq!(gradient(&colors_prop(&h, l, colors).value).colors.len(), 3, "the new stop shows at once");
+    let p = along(&h, "dialog.gradient.addColor", 0.75);
+    click_at(&mut h, p);
+    assert_eq!(gradient(&colors_prop(&h, l, colors).value).colors.len(), 4);
+    assert_eq!(undo_len(&h), undo + 1, "both edits are one undo step");
+    click(&mut h, "dialog.gradient.cancel");
+    assert_eq!(h.state().dialog, None);
+    assert_eq!(colors_prop(&h, l, colors).value, before, "Cancel puts the gradient back");
+    assert_eq!(undo_len(&h), undo, "and leaves no undo step");
+    // Escape does the same.
+    open_editor(&mut h, colors);
+    let p = along(&h, "dialog.gradient.addColor", 0.5);
+    click_at(&mut h, p);
+    assert_eq!(gradient(&colors_prop(&h, l, colors).value).colors.len(), 3);
+    key(&mut h, Key::Escape);
+    assert_eq!(h.state().dialog, None);
+    assert_eq!(colors_prop(&h, l, colors).value, before);
+    assert_eq!(undo_len(&h), undo);
+}
+
+/// With Preview off nothing is set until OK, and switching it off takes back what it applied.
+#[test]
+fn with_preview_off_nothing_is_set_until_ok() {
+    let (mut h, l, colors) = setup(&[]);
+    let before = colors_prop(&h, l, colors).value.clone();
+    let undo = undo_len(&h);
+    open_editor(&mut h, colors);
+    let p = along(&h, "dialog.gradient.addColor", 0.25);
+    click_at(&mut h, p);
+    assert_eq!(gradient(&colors_prop(&h, l, colors).value).colors.len(), 3, "previewed");
+    click(&mut h, "dialog.gradient.preview");
+    assert!(!h.state().gradient_draft().preview);
+    assert_eq!(colors_prop(&h, l, colors).value, before, "switching Preview off takes the preview back");
+    assert_eq!(undo_len(&h), undo);
+    let p = along(&h, "dialog.gradient.addColor", 0.75);
+    click_at(&mut h, p);
+    assert_eq!(colors_prop(&h, l, colors).value, before, "nothing is set while editing");
+    click(&mut h, "dialog.gradient.ok");
+    assert_eq!(gradient(&colors_prop(&h, l, colors).value).colors.len(), 4, "OK sets the draft");
+    assert_eq!(undo_len(&h), undo + 1, "in one undo step");
+}
+
+/// The editor opens at the lower right of the window, so the canvas it edits stays in view.
+#[test]
+fn the_editor_opens_at_the_lower_right() {
+    let (mut h, _, colors) = setup(&[]);
+    open_editor(&mut h, colors);
+    let ok = center(&h, "dialog.gradient.ok");
+    assert!(ok.x > 800.0 && ok.y > 500.0, "the editor's OK button is in the lower right of the 1600 × 1000 window: {ok:?}");
 }
 
 /// `prop.editGradient` by id (agents, MCP, the control channel) is an error for a target that

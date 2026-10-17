@@ -570,6 +570,18 @@ impl EffectcraftApp {
         &mut self.dialog_state.gradient
     }
 
+    /// The open settings dialog's draft and Preview state (`panels::dialogs`): Solid, Camera,
+    /// Light and Composition Settings keep what OK would apply here.
+    pub fn dialog_state(&self) -> &panels::dialogs::DialogState {
+        &self.dialog_state
+    }
+
+    /// The open settings dialog's draft, to edit (tests and automation; the dialog's own fields
+    /// do the same).
+    pub fn dialog_state_mut(&mut self) -> &mut panels::dialogs::DialogState {
+        &mut self.dialog_state
+    }
+
     /// Feed this frame's share of the queued synthetic input (control channel `ui.click`,
     /// `ui.drag`…) into `raw_input`. Pointer events go one per frame so egui sees press → moves
     /// → release as a real gesture.
@@ -1682,6 +1694,11 @@ impl EffectcraftApp {
         let full = ui.max_rect();
         if self.dialog.is_some() {
             ui.disable();
+            // A dialog that edits what is behind it live (Preview) leaves the window at full
+            // brightness: clicks still don't reach it, but the canvas is not greyed out.
+            if self.dialog == Some(Dialog::GradientEditor) || panels::live_preview::active(self) {
+                ui.set_opacity(1.0);
+            }
         }
         ui.painter().rect_filled(full, 0.0, t.app_bg);
         let mut top = full.min.y;
