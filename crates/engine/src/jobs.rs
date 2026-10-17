@@ -205,6 +205,22 @@ impl Session {
         any
     }
 
+    /// Bring every background job up to date, as a frontend's frame does: write finished (and,
+    /// for the trackers, partial) results into the project, apply finished tasks and drop
+    /// finished jobs. Never starts queued re-analyses. Headless hosts (MCP) call this while they
+    /// wait for a job.
+    pub fn poll_background(&mut self) -> bool {
+        let mut any = self.poll_render();
+        any |= self.poll_track();
+        any |= self.poll_mask_track();
+        any |= self.poll_jobs();
+        any |= self.poll_offload();
+        any |= self.poll_warp(false);
+        any |= self.poll_roto(false);
+        any |= self.poll_camera(false);
+        any
+    }
+
     /// Wait for every running task (CLI, tests).
     pub fn wait_jobs(&mut self) {
         while !self.tasks.is_empty() {

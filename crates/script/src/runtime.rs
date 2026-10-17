@@ -8,7 +8,7 @@ use std::sync::Arc;
 use boa_engine::{Context, JsNativeError, JsResult, JsString, JsValue, NativeFunction, Source, js_string};
 use effectcraft_engine::history::History;
 use effectcraft_engine::project::Project;
-use effectcraft_engine::{ScriptRequest, Session};
+use effectcraft_engine::{ScriptInterrupt, ScriptRequest, Session};
 use serde_json::{Value as J, json};
 
 const PRELUDE: &str = include_str!("prelude.js");
@@ -76,11 +76,68 @@ pub(crate) struct Active {
     pub(crate) link: Option<crate::ui::Link>,
     /// The files `$.evalFile` is evaluating, outermost first.
     pub(crate) loading: Vec<std::path::PathBuf>,
+    /// The project when the run began (to tell whether a stopped script changed it).
+    pub(crate) start: Arc<Project>,
+    /// Why the host stopped the run ([`ScriptInterrupt`]: cancelled, out of time). Once set,
+    /// every object-model call fails and the run ends.
+    pub(crate) stopped: Option<String>,
 }
 
 impl Active {
     pub(crate) fn new(session: Session, name: &str, host: u32) -> Active {
-        Active { session, output: vec![], groups: vec![], name: name.to_string(), host, link: None, loading: vec![] }
+        let start = session.project.clone();
+        Active { session, output: vec![], groups: vec![], name: name.to_string(), host, link: None, loading: vec![], start, stopped: None }
+    }
+}
+
+/// How many bytecode "cycles" run between two checks of the run's [`ScriptInterrupt`].
+const INTERRUPT_BUDGET: u32 = 100_000;
+
+/// An error JavaScript can't catch (boa's runtime-limit errors are uncatchable): ends the run.
+fn uncatchable() -> boa_engine::JsError {
+    boa_engine::error::RuntimeLimitError::LoopIteration.into()
+}
+
+/// Why the host stopped this run, if it did (recorded where the stop took effect, so a script
+/// that finished just before its deadline is not reported as stopped).
+pub(crate) fn stopped() -> Option<String> {
+    ACTIVE.with(|a| a.try_borrow().ok().and_then(|g| g.as_ref().and_then(|act| act.stopped.clone())))
+}
+
+/// Object-model calls check the interrupt first: a stopped script fails uncatchably here.
+fn check_stop() -> JsResult<()> {
+    let stop = ACTIVE.with(|a| {
+        let mut g = a.try_borrow_mut().ok()?;
+        let act = g.as_mut()?;
+        if act.stopped.is_none() {
+            act.stopped = act.session.script_interrupt.as_ref().and_then(ScriptInterrupt::stopped);
+        }
+        act.stopped.clone()
+    });
+    match stop {
+        Some(_) => Err(uncatchable()),
+        None => Ok(()),
+    }
+}
+
+/// Evaluate `script`, checking `it` every [`INTERRUPT_BUDGET`] cycles: boa yields from its
+/// async evaluation, and dropping the future there stops the script (the context is not used
+/// for JavaScript again; the callers discard it).
+fn evaluate_interruptible(script: &boa_engine::Script, ctx: &mut Context, it: &ScriptInterrupt) -> JsResult<JsValue> {
+    use std::future::Future;
+    let mut fut = std::pin::pin!(script.evaluate_async_with_budget(ctx, INTERRUPT_BUDGET));
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    loop {
+        if let std::task::Poll::Ready(r) = fut.as_mut().poll(&mut cx) {
+            return r;
+        }
+        if let Some(why) = it.stopped() {
+            let _ = with_active(|a| {
+                a.stopped.get_or_insert(why);
+                Ok(())
+            });
+            return Err(uncatchable());
+        }
     }
 }
 
@@ -124,6 +181,7 @@ pub(crate) fn js_str(s: &str) -> JsValue {
 /// `__exec(commandId, paramsJson)` → result JSON. Runs an engine command (undoable) with the
 /// target comp made active for its duration.
 fn native_exec(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    check_stop()?;
     let id = arg_string(args, 0, ctx)?;
     let mut params = arg_json(args, 1, ctx)?;
     if id == "script.run" || id == "file.runScript" {
@@ -215,6 +273,7 @@ fn exec_on_keys(s: &mut Session, id: &str, params: J, targets: &J) -> Result<J, 
 
 /// `__query(kind, json)` → JSON.
 fn native_query(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    check_stop()?;
     let kind = arg_string(args, 0, ctx)?;
     let a = arg_json(args, 1, ctx)?;
     let r = with_active(|act| match kind.as_str() {
@@ -235,6 +294,7 @@ fn native_query(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<Js
 
 /// `__print(text)`: `writeLn`, `$.writeln`, `alert`.
 fn native_print(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    check_stop()?;
     let text = arg_string(args, 0, ctx)?;
     let _ = with_active(|a| {
         a.output.extend(text.split('\n').map(str::to_string));
@@ -297,6 +357,7 @@ pub(crate) fn collapse(s: &mut Session, name: &str, snap: &Arc<Project>, prior: 
 /// `__task("schedule", code, delayMs, repeat)` → id; `__task("cancel", id)` (see
 /// [`crate::tasks`]).
 fn native_task(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    check_stop()?;
     let op = arg_string(args, 0, ctx)?;
     if op == "cancel" {
         let id = args.get(1).cloned().unwrap_or_default().to_number(ctx)?;
@@ -389,6 +450,7 @@ fn binary_bytes(data: &str) -> Result<Vec<u8>, String> {
 /// `__file(op, path, data)`: text and one-byte-per-character BINARY reads/writes,
 /// byte-for-byte copy, plus file and folder operations.
 fn native_file(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    check_stop()?;
     let op = arg_string(args, 0, ctx)?;
     let path = arg_string(args, 1, ctx)?;
     let data = if args.len() > 2 { arg_string(args, 2, ctx)? } else { String::new() };
@@ -630,7 +692,15 @@ fn first_use(name: &str, code: &str, start_line: u32) -> Option<(u32, u32)> {
 pub(crate) fn eval_in(ctx: &mut Context, code: &str, file: &str) -> Result<J, ScriptError> {
     let src = Source::from_bytes(code.as_bytes()).with_path(std::path::Path::new(file));
     let script = boa_engine::Script::parse(src, None, ctx).map_err(|e| script_error(&e, ctx, file, code))?;
-    let v = script.evaluate(ctx).map_err(|e| script_error(&e, ctx, file, code))?;
+    let interrupt = with_active(|a| Ok(a.session.script_interrupt.clone())).ok().flatten();
+    let r = match &interrupt {
+        Some(it) => evaluate_interruptible(&script, ctx, it),
+        None => script.evaluate(ctx),
+    };
+    if let Some(why) = stopped() {
+        return Err(ScriptError { message: format!("Stopped: {why}"), file: file.to_string(), ..Default::default() });
+    }
+    let v = r.map_err(|e| script_error(&e, ctx, file, code))?;
     Ok(result_json(&v, ctx))
 }
 
@@ -665,11 +735,23 @@ impl Drop for Restore<'_> {
 
 /// End of a script step: close undo groups left open, drop selections that no longer exist,
 /// and take the output so far.
+///
+/// A run the host stopped ([`ScriptInterrupt`]) rolls back an undo group it left open (the step
+/// stays redoable); edits made outside undo groups are kept, and the output says which.
 pub(crate) fn settle() -> Vec<String> {
     with_active(|a| {
         if let Some((name, snap, prior, saved)) = a.groups.first().cloned() {
             collapse(&mut a.session, &name, &snap, &prior, &saved);
             a.groups.clear();
+            if a.stopped.is_some()
+                && a.session.history.undo.last().is_some_and(|(_, p)| Arc::ptr_eq(p, &snap))
+                && a.session.execute("edit.undo", json!({})).is_ok()
+            {
+                a.output.push(format!("Stopped: rolled back the edits of undo group \"{name}\" (Edit ▸ Redo restores them)"));
+            }
+        }
+        if a.stopped.is_some() && !Arc::ptr_eq(&a.start, &a.session.project) {
+            a.output.push("Stopped: edits made outside an undo group before the stop are kept (Edit ▸ Undo)".into());
         }
         a.session.sanitize_state();
         Ok(std::mem::take(&mut a.output))
@@ -681,6 +763,9 @@ pub(crate) fn settle() -> Vec<String> {
 /// repeating ones run later, see [`crate::tasks`]).
 pub(crate) fn eval_with_tasks(ctx: &mut Context, code: &str, file: &str, host: u32) -> Result<J, ScriptError> {
     let mut r = eval_in(ctx, code, file);
+    if stopped().is_some() {
+        return r;
+    }
     for code in crate::tasks::take_one_shots(host) {
         if let Err(e) = eval_in(ctx, &code, "scheduled task")
             && r.is_ok()
@@ -813,12 +898,22 @@ pub(crate) fn run_inline(session: &mut Session, req: &ScriptRequest) -> Outcome 
                 return (Err(ScriptError { message: "the console context is unavailable".into(), file: file.into(), ..Default::default() }), vec![]);
             };
             let r = eval_in(ctx, req.code, file);
+            if stopped().is_some() {
+                // A stopped run leaves the context mid-evaluation: start the console afresh.
+                *c = None;
+                return (r, vec![]);
+            }
             (r, crate::ui::snapshot(ctx))
         })
     } else {
         match new_context() {
             Ok(mut ctx) => {
                 let r = eval_with_tasks(&mut ctx, req.code, file, host);
+                if stopped().is_some() {
+                    let output = settle();
+                    drop(guard);
+                    return outcome(output, r);
+                }
                 let windows = crate::ui::snapshot(&mut ctx);
                 if windows.iter().any(|w| w.visible) || crate::tasks::has(host) {
                     // Palettes, panels and repeating tasks outlive the run: keep their context

@@ -538,7 +538,16 @@ fn script_run(s: &mut Session, p: &Value) -> Result<Value> {
     if is_jsxbin(&name) || code.trim_start_matches('\u{feff}').trim_start().starts_with("@JSXBIN@") {
         return Err(bad("script.run", JSXBIN));
     }
-    run_js(s, &code, &name, super::b_p(p, "console").unwrap_or(false))
+    // A time limit (on top of any cancel flag the host installed for this run).
+    let limit = f_p(p, "timeout");
+    let host = s.script_interrupt.take();
+    if limit.is_some() || host.is_some() {
+        let it = host.clone().unwrap_or_default();
+        s.script_interrupt = Some(if limit.is_some() { it.with_limit(limit) } else { it });
+    }
+    let r = run_js(s, &code, &name, super::b_p(p, "console").unwrap_or(false));
+    s.script_interrupt = host;
+    r
 }
 
 // ---------------------------------------------------------------- footage
@@ -1026,7 +1035,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Run Script",
             [],
             None,
-            "{code (JavaScript: app, app.project, CompItem, Layer, Property… like After Effects scripting), name?, console? (Script Console context)} → {ok, result, output, error: {message, line, column} | null}",
+            "{code (JavaScript: app, app.project, CompItem, Layer, Property… like After Effects scripting), name?, console? (Script Console context), timeout? (s: stop the script after this long)} → {ok, result, output, error: {message, line, column} | null}",
             always,
             script_run
         ),

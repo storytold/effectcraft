@@ -21,6 +21,9 @@ pub mod base64;
 pub mod bridge;
 pub mod confine;
 mod long_job;
+mod notify;
+mod prompts;
+pub mod resources;
 pub mod server;
 pub mod tools;
 

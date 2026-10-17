@@ -1,5 +1,6 @@
 //! MCP server: JSON-RPC 2.0, one message per line (the MCP stdio transport). Implements
-//! tools and JSON resources. The stdio loop handles progress and cancellation for long renders.
+//! tools, resources (with templates and subscriptions), prompts and logging. The stdio loop
+//! handles progress and cancellation for long renders and writes queued notifications.
 
 use std::io::{BufRead, Write};
 use std::path::Path;
@@ -7,13 +8,16 @@ use std::path::Path;
 use serde_json::{Value, json};
 
 use crate::autosave::AutoSave;
+use crate::notify::Notifier;
+use crate::prompts;
+use crate::resources::{self, Target, UriError};
 use crate::tools::{self, Reply};
 use crate::{Backend, Error, base64};
 
 /// Protocol revisions we speak, newest first. We answer with the client's if we know it.
 pub const PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 
-const INSTRUCTIONS: &str = "EffectCraft is an After Effects-class motion graphics compositor. Everything is an engine command: command_list discovers ids and params, command_run {id, params} runs them (undoable; command_batch runs several in order). Typical flow: command_run comp.new -> command_run layer.newText / layer.newSolid (returns the layer id) -> set_property / add_keyframe -> command_run effect.apply -> render_preview to look at the result. Inspect with doc_inspect, get_project, get_comp and get_layer (every property node carries its `path`, e.g. `transform/position`, `effects/#1/blurriness`). Times are seconds. In bridge mode (app started with `--control <port>`) screenshot and the ui_* tools show and operate the live window.";
+const INSTRUCTIONS: &str = "EffectCraft is an After Effects-class motion graphics compositor. Everything is an engine command: command_list discovers ids and params (describe_command shows one in full), command_run {id, params} runs them (undoable; command_batch runs several in order, batch as one undo step). Typical flow: command_run comp.new -> command_run layer.newText / layer.newSolid (returns the layer id) -> set_property / add_keyframe / add_effect -> render_preview to look at the result. Inspect with doc_inspect, get_comp and get_layer (every property node carries its `path`, e.g. `transform/position`, `effects/#1/blurriness`). Times are seconds: keyframe times (add_keyframe, set_property with `time`) are layer time, render_preview and get_property use comp time. Resources and resource templates (effectcraft://document, comp/{comp}, layer/{comp}/{layer}, frame/{comp}/{time}, command/{id}) and workflow prompts are available too. In bridge mode (app started with `--control <port>`) screenshot and the ui_* tools show and operate the live window.";
 
 // JSON-RPC error codes.
 const PARSE_ERROR: i64 = -32700;
@@ -23,14 +27,55 @@ const INVALID_PARAMS: i64 = -32602;
 const INTERNAL_ERROR: i64 = -32603;
 const RESOURCE_NOT_FOUND: i64 = -32002;
 
+/// The first revision with `structuredContent`, `outputSchema` and `title`.
+const STRUCTURED_SINCE: &str = "2025-06-18";
+
 pub struct McpServer {
     backend: Backend,
     autosave: Option<AutoSave>,
+    /// The protocol revision `initialize` negotiated (`None` before it).
+    version: Option<&'static str>,
+    notify: Notifier,
+    /// List the hidden aliases too (`mcp --all-tools`).
+    all_tools: bool,
 }
 
 impl McpServer {
-    pub fn new(backend: Backend) -> Self {
-        Self { backend, autosave: None }
+    pub fn new(mut backend: Backend) -> Self {
+        let notify = Notifier::new(&mut backend);
+        Self { backend, autosave: None, version: None, notify, all_tools: false }
+    }
+
+    /// Also list the older tool names (`list_commands`, `execute_command`, `get_project`,
+    /// `render_frame`) in `tools/list`. They are callable either way.
+    pub fn with_all_tools(mut self, all: bool) -> Self {
+        self.all_tools = all;
+        self
+    }
+
+    /// Server-initiated notifications queued since the last call (resource updates, log
+    /// entries), oldest first. [`McpServer::serve`] writes them after each reply.
+    pub fn take_notifications(&mut self) -> Vec<Value> {
+        self.notify.take()
+    }
+
+    /// Write the queued notifications, one per line.
+    pub(crate) fn flush_notifications(&mut self, out: &mut impl Write) -> std::io::Result<()> {
+        let queued = self.notify.take();
+        for n in &queued {
+            out.write_all(n.to_string().as_bytes())?;
+            out.write_all(b"\n")?;
+        }
+        if !queued.is_empty() {
+            out.flush()?;
+        }
+        Ok(())
+    }
+
+    /// Whether replies to this request may use 2025-06-18 fields (`structuredContent`,
+    /// `outputSchema`, `title`): the session negotiated it, or the request declares a modern revision.
+    pub(crate) fn structured(&self, params: &Value) -> bool {
+        is_modern(params) || self.version.is_some_and(|v| v >= STRUCTURED_SINCE)
     }
 
     /// Opt in to durable headless checkpoints in a separate folder per server.
@@ -79,7 +124,11 @@ impl McpServer {
             return None; // notification (notifications/initialized, notifications/cancelled, ...)
         };
         let params = msg.get("params").cloned().unwrap_or(json!({}));
-        Some(match self.request(method, &params) {
+        let result = self.request(method, &params);
+        if method != "tools/call" {
+            self.notify.after_request(&mut self.backend);
+        }
+        Some(match result {
             Ok(mut result) => {
                 modern_result_fields(method, &params, &mut result);
                 json!({"jsonrpc": "2.0", "id": id, "result": result})
@@ -101,10 +150,10 @@ impl McpServer {
         Some(reply.to_string())
     }
 
-    /// Serve until EOF on `input`. Input is read on its own thread so a long render can report
-    /// progress, be cancelled and let other requests through while it runs (`long_job`). The
-    /// reader thread is detached: when writing a reply fails, the server returns at once instead
-    /// of waiting for a read that may never complete.
+    /// Serve until EOF on `input`. Input is read on its own thread so a long call (a render, an
+    /// analysis, a script) can report progress, be cancelled and let other requests through
+    /// while it runs (`long_job`). The reader thread is detached: when writing a reply fails, the
+    /// server returns at once instead of waiting for a read that may never complete.
     pub fn serve(&mut self, input: impl BufRead + Send + 'static, mut output: impl Write) -> std::io::Result<()> {
         let (tx, inbox) = std::sync::mpsc::channel::<Option<String>>();
         // A read error ends the input like EOF and is returned once the queued requests are answered.
@@ -126,12 +175,12 @@ impl McpServer {
             let _ = tx.send(None);
         })?;
         let served = (|| {
-            while let Ok(Some(line)) = inbox.recv() {
-                let long = serde_json::from_str::<Value>(line.trim()).ok().and_then(|m| crate::long_job::long_call(self, &m));
+            let mut inbox = crate::long_job::Inbox::new(inbox);
+            while let Some(line) = inbox.next() {
+                let bridge = self.backend.is_bridge();
+                let long = serde_json::from_str::<Value>(line.trim()).ok().and_then(|m| crate::long_job::long_call(bridge, &m));
                 if let Some(call) = long {
-                    if !self.run_long(call, &inbox, &mut output)? {
-                        break;
-                    }
+                    self.run_long(call, &mut inbox, &mut output)?;
                     continue;
                 }
                 if let Some(reply) = self.handle_line(&line) {
@@ -139,6 +188,7 @@ impl McpServer {
                     output.write_all(b"\n")?;
                     output.flush()?;
                 }
+                self.flush_notifications(&mut output)?;
             }
             match read_error.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() {
                 Some(e) => Err(e),
@@ -161,7 +211,9 @@ impl McpServer {
         match method {
             "initialize" => {
                 let asked = params.get("protocolVersion").and_then(Value::as_str).unwrap_or("");
-                let version = PROTOCOL_VERSIONS.iter().find(|v| **v == asked).copied().unwrap_or(PROTOCOL_VERSIONS.first().copied().unwrap_or("2025-06-18"));
+                let version =
+                    PROTOCOL_VERSIONS.iter().find(|v| **v == asked).copied().unwrap_or(PROTOCOL_VERSIONS.first().copied().unwrap_or(STRUCTURED_SINCE));
+                self.version = Some(version);
                 let mode = if self.backend.is_bridge() { "bridge" } else { "headless" };
                 let instructions = if self.autosave.is_some() {
                     format!("{INSTRUCTIONS} Headless auto-save and recovery: {}", self.autosave_info())
@@ -170,7 +222,7 @@ impl McpServer {
                 };
                 Ok(json!({
                     "protocolVersion": version,
-                    "capabilities": {"tools": {"listChanged": false}, "resources": {"listChanged": false, "subscribe": false}},
+                    "capabilities": {"tools": {"listChanged": false}, "resources": {"listChanged": false, "subscribe": true}, "prompts": {"listChanged": false}, "logging": {}},
                     "serverInfo": {"name": "effectcraft", "title": format!("EffectCraft ({mode})"), "version": env!("CARGO_PKG_VERSION")},
                     "instructions": instructions,
                     "_meta": {"effectcraftAutoSave": self.autosave_info()},
@@ -178,7 +230,24 @@ impl McpServer {
             }
             "ping" => Ok(json!({})),
             "tools/list" => {
-                let tools: Vec<Value> = tools::available(self.backend.is_bridge()).map(|t| t.descriptor()).collect();
+                let structured = self.structured(params);
+                let tools: Vec<Value> = tools::available(self.backend.is_bridge())
+                    .filter(|t| self.all_tools || tools::alias_of(t.name).is_none())
+                    .map(|t| {
+                        let mut d = t.descriptor();
+                        if let Some(canonical) = tools::alias_of(t.name)
+                            && let Some(o) = d.as_object_mut()
+                        {
+                            o.insert("description".into(), json!(format!("Alias of {canonical} (kept for older workflows). {}", t.description)));
+                        }
+                        if let Some(schema) = tools::output_schema(t.name).filter(|_| structured)
+                            && let Some(o) = d.as_object_mut()
+                        {
+                            o.insert("outputSchema".into(), schema);
+                        }
+                        d
+                    })
+                    .collect();
                 Ok(json!({"tools": tools}))
             }
             "tools/call" => {
@@ -191,55 +260,44 @@ impl McpServer {
                 if let Some(m) = tools::find(name).and_then(|t| t.unknown_arg(&args)) {
                     return Err((INVALID_PARAMS, m));
                 }
-                let mut result = call_result(self.guarded(name, &args));
-                // Also checkpoint a partially successful tool that returned an error. The
-                // project is durable before the client receives its reply (even if it kills
-                // the process immediately afterwards).
-                if let Err(e) = self.checkpoint(false) {
-                    let _ = writeln!(std::io::stderr(), "{e}");
-                    if let Some(content) = result.get_mut("content").and_then(Value::as_array_mut) {
-                        content.push(json!({"type": "text", "text": format!("Warning: {e}. Use save_project with a writable path before disconnecting.")}));
-                    }
-                }
-                if self.autosave.is_some()
-                    && let Some(obj) = result.as_object_mut()
-                {
-                    let meta = obj.entry("_meta").or_insert_with(|| json!({}));
-                    if let Some(meta) = meta.as_object_mut() {
-                        meta.insert("effectcraftAutoSave".into(), self.autosave_info());
-                    }
-                }
-                if self.autosave.is_some()
-                    && name == "get_project"
-                    && result["isError"] == false
-                    && let Some(text) = result.get_mut("content").and_then(Value::as_array_mut).and_then(|c| c.first_mut()).and_then(|c| c.get_mut("text"))
-                    && let Some(summary) = text.as_str().and_then(|t| serde_json::from_str::<Value>(t).ok())
-                {
-                    let mut summary = summary;
-                    summary["autosave"] = self.autosave_info();
-                    *text = Value::String(summary.to_string());
-                }
-                Ok(result)
+                let r = self.guarded(name, &args);
+                Ok(self.finish_call(name, r, self.structured(params)))
             }
-            "resources/list" => Ok(json!({"resources": [
-                {"uri": DOCUMENT_URI, "name": "document", "title": "Project", "description": "The project overview and the active composition (same as doc_inspect).", "mimeType": "application/json"},
-                {"uri": COMMANDS_URI, "name": "commands", "title": "Command catalog", "description": "Every engine command with id, label, menu, shortcut and params (same as command_list).", "mimeType": "application/json"},
-            ]})),
-            "resources/templates/list" => Ok(json!({"resourceTemplates": []})),
+            "resources/subscribe" => {
+                let uri = params.get("uri").and_then(Value::as_str).ok_or((INVALID_PARAMS, "missing `uri`".to_string()))?;
+                self.notify.subscribe(&mut self.backend, uri).map_err(uri_error)?;
+                Ok(json!({}))
+            }
+            "resources/unsubscribe" => {
+                let uri = params.get("uri").and_then(Value::as_str).ok_or((INVALID_PARAMS, "missing `uri`".to_string()))?;
+                self.notify.unsubscribe(uri);
+                Ok(json!({}))
+            }
+            "logging/setLevel" => {
+                let level = params.get("level").and_then(Value::as_str).ok_or((INVALID_PARAMS, "missing `level`".to_string()))?;
+                self.notify.set_level(level).map_err(|m| (INVALID_PARAMS, m))?;
+                Ok(json!({}))
+            }
+            "resources/list" => Ok(json!({"resources": resources::list()})),
+            "resources/templates/list" => Ok(json!({"resourceTemplates": resources::templates(self.structured(params))})),
             "resources/read" => {
                 let uri = params.get("uri").and_then(Value::as_str).ok_or((INVALID_PARAMS, "missing `uri`".to_string()))?;
-                let tool = match uri {
-                    DOCUMENT_URI => "doc_inspect",
-                    COMMANDS_URI => "command_list",
-                    _ => return Err((RESOURCE_NOT_FOUND, format!("resource not found: {uri}"))),
-                };
-                match self.guarded(tool, &json!({})) {
+                let target = resources::parse(uri).map_err(uri_error)?;
+                let (tool, args) = target.tool();
+                match self.guarded(tool, &args) {
                     Ok(Reply::Json(v)) => Ok(json!({"contents": [{"uri": uri, "mimeType": "application/json", "text": v.to_string()}]})),
-                    Ok(Reply::Image { .. }) => Err((INTERNAL_ERROR, "unexpected image".into())),
+                    Ok(Reply::Image { png, .. }) => Ok(json!({"contents": [{"uri": uri, "mimeType": "image/png", "blob": base64::encode(&png)}]})),
+                    // A templated comp, layer or command that doesn't exist is "not found".
+                    Err(Error::BadArgs(e) | Error::App(e)) if !matches!(target, Target::Document | Target::Commands) => Err((RESOURCE_NOT_FOUND, e)),
+                    Err(Error::Engine(e)) if !matches!(target, Target::Document | Target::Commands) => Err((RESOURCE_NOT_FOUND, e.to_string())),
                     Err(e) => Err((INTERNAL_ERROR, e.to_string())),
                 }
             }
-            "prompts/list" => Ok(json!({"prompts": []})),
+            "prompts/list" => Ok(prompts::list(self.structured(params))),
+            "prompts/get" => {
+                let name = params.get("name").and_then(Value::as_str).ok_or((INVALID_PARAMS, "missing prompt `name`".to_string()))?;
+                prompts::get(name, params.get("arguments")).map_err(|m| (INVALID_PARAMS, m))
+            }
             m => Err((METHOD_NOT_FOUND, format!("method not found: {m}"))),
         }
     }
@@ -247,36 +305,101 @@ impl McpServer {
 
 /// A `tools/call` result: tool failures are reported in-band (`isError`) so the model can react.
 pub fn call_result(r: Result<Reply, Error>) -> Value {
-    match r {
+    call_result_with(r, false)
+}
+
+/// [`call_result`]; `structured` (MCP 2025-06-18+) also returns the JSON as `structuredContent`
+/// (an image's metadata for image replies), keeping the text content for older clients.
+pub fn call_result_with(r: Result<Reply, Error>, structured: bool) -> Value {
+    let (mut result, data) = match r {
         Ok(Reply::Json(v)) => {
-            json!({"content": [{"type": "text", "text": v.to_string()}], "isError": v.get("failed").and_then(Value::as_u64).is_some_and(|n| n > 0)})
+            let failed = v.get("failed").and_then(Value::as_u64).is_some_and(|n| n > 0);
+            (json!({"content": [{"type": "text", "text": v.to_string()}], "isError": failed}), Some(v))
         }
-        Ok(Reply::Image { png, info }) => json!({
-            "content": [
-                {"type": "image", "data": base64::encode(&png), "mimeType": "image/png"},
-                {"type": "text", "text": info.to_string()},
-            ],
-            "isError": false,
-        }),
-        Err(e) => json!({"content": [{"type": "text", "text": e.to_string()}], "isError": true}),
+        Ok(Reply::Image { png, info }) => (
+            json!({
+                "content": [
+                    {"type": "image", "data": base64::encode(&png), "mimeType": "image/png"},
+                    {"type": "text", "text": info.to_string()},
+                ],
+                "isError": false,
+            }),
+            Some(info),
+        ),
+        Err(e) => (json!({"content": [{"type": "text", "text": e.to_string()}], "isError": true}), None),
+    };
+    if let Some(v) = data.filter(|_| structured)
+        && let Some(o) = result.as_object_mut()
+    {
+        o.insert("structuredContent".into(), tools::structured(v));
     }
+    result
 }
 
 impl McpServer {
     /// Run a tool with panics caught: a panic becomes an error result and the session keeps
     /// serving (docs/mcp.md).
     pub(crate) fn guarded(&mut self, name: &str, args: &Value) -> Result<Reply, Error> {
-        let backend = &mut self.backend;
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tools::run(backend, name, args))).unwrap_or_else(|p| {
-            let msg = p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_else(|| "panic".into());
-            Err(Error::Other(format!("internal error: {msg}")))
-        })
+        guarded_run(&mut self.backend, name, args)
+    }
+
+    /// A tool call's MCP result, after an auto-save checkpoint (`--autosave`).
+    pub(crate) fn finish_call(&mut self, name: &str, mut r: Result<Reply, Error>, structured: bool) -> Value {
+        // Also checkpoint a partially successful tool that returned an error. The project is
+        // durable before the client receives its reply (even if it kills the process
+        // immediately afterwards).
+        let saved = self.checkpoint(false);
+        if self.autosave.is_some()
+            && let Ok(Reply::Json(v)) = &mut r
+        {
+            let info = self.autosave_info();
+            let target = match name {
+                "get_project" => v.as_object_mut(),
+                "doc_inspect" => v.get_mut("project").and_then(Value::as_object_mut),
+                _ => None,
+            };
+            if let Some(o) = target {
+                o.insert("autosave".into(), info);
+            }
+        }
+        let mut result = call_result_with(r, structured);
+        if let Err(e) = saved {
+            let _ = writeln!(std::io::stderr(), "{e}");
+            let text = format!("Warning: {e}. Use save_project with a writable path before disconnecting.");
+            if let Some(content) = result.get_mut("content").and_then(Value::as_array_mut) {
+                content.push(json!({"type": "text", "text": text}));
+            }
+            self.notify.log("error", json!({"message": text}));
+        }
+        let ok = result.get("isError") == Some(&Value::Bool(false));
+        self.notify.after_tool(&mut self.backend, name, ok);
+        if self.autosave.is_some()
+            && let Some(obj) = result.as_object_mut()
+        {
+            let meta = obj.entry("_meta").or_insert_with(|| json!({}));
+            if let Some(meta) = meta.as_object_mut() {
+                meta.insert("effectcraftAutoSave".into(), self.autosave_info());
+            }
+        }
+        result
     }
 }
 
-/// The craft catalog resources (docs/mcp.md).
-const DOCUMENT_URI: &str = "effectcraft://document";
-const COMMANDS_URI: &str = "effectcraft://commands";
+/// Run a tool with panics caught (see [`McpServer::guarded`]).
+pub(crate) fn guarded_run(backend: &mut Backend, name: &str, args: &Value) -> Result<Reply, Error> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tools::run(backend, name, args))).unwrap_or_else(|p| {
+        let msg = p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_else(|| "panic".into());
+        Err(Error::Other(format!("internal error: {msg}")))
+    })
+}
+
+/// A resource URI that can't be read, as a JSON-RPC error.
+fn uri_error(e: UriError) -> (i64, String) {
+    match e {
+        UriError::NotFound(m) => (RESOURCE_NOT_FOUND, m),
+        UriError::Invalid(m) => (INVALID_PARAMS, m),
+    }
+}
 
 /// Whether a request declares MCP 2026-07-28 or later in its `_meta` (a "modern" client, which
 /// negotiates per request instead of through `initialize`).

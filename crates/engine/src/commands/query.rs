@@ -59,6 +59,9 @@ fn summary(s: &mut Session, _: &Value) -> Result<Value> {
     Ok(json!({
         "path": s.path,
         "dirty": s.is_dirty(),
+        // Changes with every project edit (also undo/redo), never for queries: a cheap "has
+        // anything changed" check for agents (MCP resource subscriptions).
+        "revision": s.revision,
         "bitDepth": s.project.settings.bit_depth.label(),
         "renderer": super::file::backend_status(s),
         "items": items,

@@ -5,7 +5,7 @@
 use serde_json::{Map, Value, json};
 
 use crate::backend::NEED_BRIDGE;
-use crate::{Backend, Error, Result, recompress_png};
+use crate::{Backend, Error, Result, encode_png, recompress_png};
 
 /// A tool's output.
 pub enum Reply {
@@ -68,7 +68,6 @@ const READ_ONLY: &[&str] = &[
     "list_commands",
     "describe_command",
     "doc_inspect",
-    "render_preview",
     "get_project",
     "get_comp",
     "get_layer",
@@ -78,9 +77,26 @@ const READ_ONLY: &[&str] = &[
     "get_state",
     "ui_inspect",
     "ui_elements",
+    "get_layout",
 ];
 /// Tools that write files without changing the project.
-const WRITES_FILES: &[&str] = &["save_project", "render_frame", "screenshot"];
+const WRITES_FILES: &[&str] = &["save_project", "render_frame", "render_preview", "screenshot", "analyze_audio"];
+
+/// Older tool names kept callable but left out of `tools/list` (`mcp --all-tools` lists them):
+/// (alias, canonical tool). The canonical one takes every argument the alias does, except
+/// `execute_command`'s `command` key (`command_run` takes `id`).
+pub const HIDDEN_ALIASES: &[(&str, &str)] =
+    &[("list_commands", "command_list"), ("execute_command", "command_run"), ("get_project", "doc_inspect"), ("render_frame", "render_preview")];
+
+/// The canonical tool a hidden alias stands for.
+pub fn alias_of(name: &str) -> Option<&'static str> {
+    HIDDEN_ALIASES.iter().find(|(alias, _)| *alias == name).map(|(_, canonical)| *canonical)
+}
+
+/// Whether a tool can change the project (anything but queries and file writers).
+pub fn may_edit(name: &str) -> bool {
+    !READ_ONLY.contains(&name) && !WRITES_FILES.contains(&name)
+}
 
 /// `get_project` → "Get project".
 fn title_of(name: &str) -> String {
@@ -106,6 +122,51 @@ pub fn available(bridge: bool) -> impl Iterator<Item = &'static ToolDef> {
 /// Tools refused while file access is confined: they drive the live app like a person (menus,
 /// shortcuts, Open Recent…) or call control-channel methods directly, past the command checks.
 const UNCONFINED_ONLY: &[&str] = &["control", "ui_click", "ui_drag", "ui_key", "ui_type", "ui_set", "script_ui"];
+
+/// The JSON Schema of a tool's `structuredContent` (MCP 2025-06-18 `outputSchema`), for tools
+/// whose result shape is stable. Clients that negotiated 2025-06-18+ get every JSON result as
+/// `structuredContent` too ([`structured`]); only these declare its shape.
+pub fn output_schema(name: &str) -> Option<Value> {
+    let object = |props: Value, required: &[&str]| json!({"type": "object", "properties": props, "required": required});
+    let int = json!({"type": "integer"});
+    Some(match name {
+        "get_state" => object(json!({"state": {"type": "object"}, "app": {"type": "object"}}), &["state", "app"]),
+        "doc_inspect" => object(json!({"project": {"type": "object"}, "activeComp": {"type": ["object", "null"]}}), &["project", "activeComp"]),
+        "render_preview" | "render_frame" => object(
+            json!({
+                "comp": {"type": ["integer", "string", "null"], "description": "Composition id."},
+                "time": {"type": "number", "description": "Comp time in seconds."},
+                "width": int, "height": int,
+                "path": {"type": "string", "description": "Where the PNG was written (with `path`)."}
+            }),
+            &["comp", "time", "width", "height"],
+        ),
+        "undo" | "redo" => object(json!({"steps": int, "undoStack": {"type": "array", "items": {"type": "string"}}}), &["steps", "undoStack"]),
+        "history" => {
+            object(json!({"states": {"type": "array", "items": {"type": "object"}}, "current": {"type": ["integer", "null"]}, "branches": int}), &["states"])
+        }
+        "command_batch" => object(
+            json!({
+                "completed": int, "failed": int,
+                "results": {"type": "array", "items": object(json!({"ok": {"type": "boolean"}, "result": {}, "error": {"type": "string"}}), &["ok"])}
+            }),
+            &["completed", "failed", "results"],
+        ),
+        "batch" => object(json!({"steps": int, "results": {"type": "array"}}), &["steps", "results"]),
+        "save_project" => object(json!({"path": {"type": ["string", "null"]}, "dirty": {"type": "boolean"}}), &["path", "dirty"]),
+        _ => return None,
+    })
+}
+
+/// A JSON result as MCP `structuredContent`, which must be an object: arrays become
+/// `{"items": [...]}`, other values `{"value": v}`.
+pub fn structured(v: Value) -> Value {
+    match v {
+        Value::Object(_) => v,
+        Value::Array(_) => json!({"items": v}),
+        other => json!({"value": other}),
+    }
+}
 
 /// Run a tool by name.
 pub fn run(b: &mut Backend, name: &str, args: &Value) -> Result<Reply> {
@@ -264,8 +325,13 @@ fn run_script(b: &mut Backend, a: &Value) -> Result<Reply> {
     if let Some(n) = get(a, "name") {
         p["name"] = n.clone();
     }
+    // A time limit by default, so a runaway loop can't hold the session forever; 0 = none.
+    p["timeout"] = get(a, "timeout").cloned().unwrap_or(json!(SCRIPT_TIMEOUT));
     json_reply(b.exec("script.run", p)?)
 }
+
+/// The default `run_script` time limit, in seconds.
+pub const SCRIPT_TIMEOUT: f64 = 300.0;
 
 fn get_project(b: &mut Backend, _: &Value) -> Result<Reply> {
     json_reply(b.exec("project.summary", json!({}))?)
@@ -487,6 +553,57 @@ fn batch_tool(b: &mut Backend, a: &Value) -> Result<Reply> {
     json_reply(b.exec("engine.batch", obj(&[("steps", Some(&steps)), ("label", get(a, "label")), ("atomic", get(a, "atomic"))]))?)
 }
 
+// ------------------------------------------------------------------ analysis tools
+
+fn get_layout(b: &mut Backend, a: &Value) -> Result<Reply> {
+    let layers = match get(a, "layers") {
+        Some(Value::Array(v)) => Some(json!(v)),
+        Some(v) => Some(json!([v])),
+        None => None,
+    };
+    let p =
+        obj(&[("comp", get(a, "comp")), ("time", get(a, "time")), ("layers", layers.as_ref()), ("pixels", get(a, "pixels")), ("overlaps", get(a, "overlaps"))]);
+    json_reply(b.exec("layer.bounds", p)?)
+}
+
+fn analyze_audio(b: &mut Backend, a: &Value) -> Result<Reply> {
+    let waveform = get(a, "waveform").and_then(Value::as_bool).unwrap_or(false);
+    let on = json!(true);
+    let p = obj(&[
+        ("comp", get(a, "comp")),
+        ("start", get(a, "start")),
+        ("end", get(a, "end")),
+        ("layer", get(a, "layer")),
+        ("silenceDb", get(a, "silence_db")),
+        ("minSilence", get(a, "min_silence")),
+        ("truePeak", get(a, "true_peak")),
+        ("waveform", waveform.then_some(&on)),
+        ("width", get(a, "width")),
+        ("height", get(a, "height")),
+        ("path", get(a, "path")),
+    ]);
+    let mut info = b.exec("audio.analyze", p)?;
+    let Some(w) = info.get_mut("waveform").and_then(Value::as_object_mut) else { return json_reply(info) };
+    // Draw the waveform here from its columns (headless or bridged alike) and drop them.
+    let cols: Vec<[f32; 4]> = w
+        .remove("columns")
+        .and_then(|c| c.as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .map(|c| {
+            let f = |i: usize| c.get(i).and_then(Value::as_f64).unwrap_or(0.0) as f32;
+            [f(0), f(1), f(2), f(3)]
+        })
+        .collect();
+    let height = w.get("height").and_then(Value::as_u64).unwrap_or(160) as u32;
+    if !waveform || cols.is_empty() {
+        return json_reply(info);
+    }
+    let (pw, ph, rgba) = effectcraft_engine::audio_analysis::waveform_rgba(&cols, height);
+    let png = encode_png(pw, ph, rgba, 0)?;
+    Ok(Reply::Image { png, info })
+}
+
 // ------------------------------------------------------------------ bridge-only tools
 
 fn screenshot(b: &mut Backend, a: &Value) -> Result<Reply> {
@@ -542,7 +659,7 @@ fn control(b: &mut Backend, a: &Value) -> Result<Reply> {
 static TOOLS: &[ToolDef] = &[
     ToolDef {
         name: "list_commands",
-        description: "List engine commands: id, label, menu path, shortcut, `params` doc (e.g. `{name?, width?, height?, frameRate?, duration? (s)}`) and whether it can run now (`why` if not). Every menu item, shortcut and panel gesture maps to one of these ids; run them with execute_command. Narrow with `filter` (e.g. `layer.new`, `keys`, `effect`).",
+        description: "List engine commands: id, label, menu path, shortcut, `params` doc (e.g. `{name?, width?, height?, frameRate?, duration? (s)}`) and whether it can run now (`why` if not). Every menu item, shortcut and panel gesture maps to one of these ids; run them with command_run. Narrow with `filter` (e.g. `layer.new`, `keys`, `effect`).",
         bridge_only: false,
         schema: || {
             schema(
@@ -558,7 +675,7 @@ static TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "describe_command",
-        description: "One command in full: id, label, menu path, shortcut, the `params` doc, a JSON Schema of its parameters (`schema`: properties, required, additionalProperties) and whether it can run now (`why` if not). Use before execute_command when unsure of the parameters; execute_command rejects unknown keys.",
+        description: "One command in full: id, label, menu path, shortcut, the `params` doc, a JSON Schema of its parameters (`schema`: properties, required, additionalProperties) and whether it can run now (`why` if not). Use before command_run when unsure of the parameters; command_run rejects unknown keys.",
         bridge_only: false,
         schema: || {
             schema(
@@ -575,9 +692,9 @@ static TOOLS: &[ToolDef] = &[
         schema: || {
             schema(
                 json!({
-                    "command": {"type": "string", "description": "Command id, e.g. `comp.new`, `layer.newText`, `effect.apply` (see list_commands)."},
+                    "command": {"type": "string", "description": "Command id, e.g. `comp.new`, `layer.newText`, `effect.apply` (see command_list)."},
                     "id": {"type": "string", "description": "Alias of `command`."},
-                    "params": {"type": "object", "description": "Command parameters as documented by list_commands.", "additionalProperties": true}
+                    "params": {"type": "object", "description": "Command parameters as documented by command_list.", "additionalProperties": true}
                 }),
                 &[],
             )
@@ -586,13 +703,14 @@ static TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "run_script",
-        description: "Run JavaScript with an After Effects-style scripting object model (app, app.project, items.addComp, comp.layers.addSolid/addText/addShape/addNull/addCamera/addLight, layer.property(\"ADBE Transform Group\").property(\"ADBE Position\").setValueAtTime(t, v), Effects.addProperty(\"ADBE Gaussian Blur 2\"), expressions, markers, renderQueue…). Every edit is an undoable engine command; app.beginUndoGroup/endUndoGroup make one undo step. Returns {ok, result (last expression value), output (writeLn/$.writeln/alert text), error: {message, line, column} | null}. File access is limited to the project folder unless the user allows scripts to write files.",
+        description: "Run JavaScript with an After Effects-style scripting object model (app, app.project, items.addComp, comp.layers.addSolid/addText/addShape/addNull/addCamera/addLight, layer.property(\"ADBE Transform Group\").property(\"ADBE Position\").setValueAtTime(t, v), Effects.addProperty(\"ADBE Gaussian Blur 2\"), expressions, markers, renderQueue…). Every edit is an undoable engine command; app.beginUndoGroup/endUndoGroup make one undo step. Returns {ok, result (last expression value), output (writeLn/$.writeln/alert text), error: {message, line, column} | null}. Stops after `timeout` seconds (default 300, 0 = no limit) or on MCP notifications/cancelled (an open undo group is rolled back; other edits are kept). File access is limited to the project folder unless the user allows scripts to write files.",
         bridge_only: false,
         schema: || {
             schema(
                 json!({
                     "code": {"type": "string", "description": "JavaScript source, e.g. `var c = app.project.items.addComp(\"Main\", 1920, 1080, 1, 5, 30); c.layers.addText(\"Hi\"); c.numLayers`."},
-                    "name": {"type": "string", "description": "Script name used in error messages (default `script`)."}
+                    "name": {"type": "string", "description": "Script name used in error messages (default `script`)."},
+                    "timeout": {"type": "number", "minimum": 0, "description": "Stop the script after this many seconds (default 300; 0 = no limit)."}
                 }),
                 &["code"],
             )
@@ -742,6 +860,48 @@ static TOOLS: &[ToolDef] = &[
             )
         },
         run: render_frame,
+    },
+    ToolDef {
+        name: "get_layout",
+        description: "Where layers are on screen at a comp time (layer.bounds), without rendering: per layer whether it is drawn (`visible`; `why` not: in/out, Video switch, opacity 0, solo, guide...), its comp-space axis-aligned `bounds` [x,y,w,h] after transform, parenting and (3D) the active camera, the four `corners` (rotated layers), `center`, `anchorInComp`, the raw `position`/`anchor`, `onScreen` (0-1 share inside the comp frame) and the layer-space `source` rect (sourceRectAtTime). `pixels: true` also measures the drawn pixels (`pixelBounds`: masks, effects, styles); `overlaps: true` lists pairwise overlaps of the visible layers. Use it to check a title is centred, on screen or clear of other layers.",
+        bridge_only: false,
+        schema: || {
+            schema(
+                json!({
+                    "comp": comp_s(),
+                    "time": {"type": "number", "description": "Comp time in seconds (default: current time)."},
+                    "layers": {"type": "array", "items": layer_s(), "description": "Layers to measure (default every layer)."},
+                    "pixels": {"type": "boolean", "description": "Also measure the drawn pixels incl. effects (renders each layer)."},
+                    "overlaps": {"type": "boolean", "description": "Also return pairwise overlaps {layers, area, fraction} of the visible layers."}
+                }),
+                &[],
+            )
+        },
+        run: get_layout,
+    },
+    ToolDef {
+        name: "analyze_audio",
+        description: "Measure the comp's audio mix (what preview and export play) over [start, end) seconds (audio.analyze): peakDbfs, truePeakDbtp (4x oversampled), rmsDbfs, integratedLufs (ITU-R BS.1770, gated), momentary / short-term max LUFS, clippedSamples, silent ranges (below silence_db for at least min_silence s) and per-channel stats; null levels mean silence. `layer` measures one layer alone. `waveform: true` returns a waveform image (left channel on top, red where it clips). A comp without audio returns hasAudio: false.",
+        bridge_only: false,
+        schema: || {
+            schema(
+                json!({
+                    "comp": comp_s(),
+                    "start": {"type": "number", "description": "Start, comp seconds (default 0)."},
+                    "end": {"type": "number", "description": "End, comp seconds (default the comp's duration)."},
+                    "layer": layer_s(),
+                    "silence_db": {"type": "number", "description": "Silence threshold in dBFS (default -60)."},
+                    "min_silence": {"type": "number", "description": "Shortest silence reported, seconds (default 0.25)."},
+                    "true_peak": {"type": "boolean", "description": "Estimate the true peak (default true)."},
+                    "waveform": {"type": "boolean", "description": "Return a waveform image."},
+                    "width": {"type": "integer", "description": "Waveform width in pixels (default 800)."},
+                    "height": {"type": "integer", "description": "Waveform height in pixels (default 160)."},
+                    "path": {"type": "string", "description": "Also write the waveform PNG here."}
+                }),
+                &[],
+            )
+        },
+        run: analyze_audio,
     },
     ToolDef {
         name: "open_project",
@@ -911,7 +1071,7 @@ static TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "command_list",
-        description: "List engine commands: id, label, menu path, shortcut, `params` doc (e.g. `{name?, width?, height?, frameRate?, duration? (s)}`) and whether it can run now (`why` if not). Every menu item, shortcut and panel gesture maps to one of these ids; run them with execute_command. Narrow with `filter` (e.g. `layer.new`, `keys`, `effect`).",
+        description: "List engine commands: id, label, menu path, shortcut, `params` doc (e.g. `{name?, width?, height?, frameRate?, duration? (s)}`) and whether it can run now (`why` if not). Every menu item, shortcut and panel gesture maps to one of these ids; run them with command_run. Narrow with `filter` (e.g. `layer.new`, `keys`, `effect`).",
         bridge_only: false,
         schema: || {
             schema(
@@ -932,8 +1092,8 @@ static TOOLS: &[ToolDef] = &[
         schema: || {
             schema(
                 json!({
-                    "id": {"type": "string", "description": "Command id, e.g. `comp.new`, `layer.newText`, `effect.apply` (see list_commands)."},
-                    "params": {"type": "object", "description": "Command parameters as documented by list_commands.", "additionalProperties": true}
+                    "id": {"type": "string", "description": "Command id, e.g. `comp.new`, `layer.newText`, `effect.apply` (see command_list)."},
+                    "params": {"type": "object", "description": "Command parameters as documented by command_list.", "additionalProperties": true}
                 }),
                 &["id"],
             )
@@ -942,7 +1102,7 @@ static TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "render_preview",
-        description: "Render a composition frame (default: the active comp at the current time) and return it as a PNG image, longest side `max_side` (default 960, 0 = full size). Use it to check your work.",
+        description: "Render a composition frame (default: the active comp at the current time, in comp seconds) and return it as a PNG image, longest side `max_side` (default 960, 0 = full size). `path` also writes the PNG to disk; `inline: false` returns only the metadata. Use it to check your work.",
         bridge_only: false,
         schema: || {
             schema(
@@ -950,6 +1110,8 @@ static TOOLS: &[ToolDef] = &[
                     "comp": comp_s(),
                     "time": {"type": "number", "description": "Comp time in seconds (default: current time)."},
                     "max_side": {"type": "integer", "description": "Longest side in pixels (default 960; 0 = full comp size)."},
+                    "path": {"type": "string", "description": "Also write the PNG here."},
+                    "inline": {"type": "boolean", "description": "Include the image in the reply (default true)."},
                     "transparent": {"type": "boolean", "description": "Keep the frame's alpha (RGBA PNG, as an RGB + Alpha render writes it) instead of compositing over the comp's background colour."}
                 }),
                 &[],

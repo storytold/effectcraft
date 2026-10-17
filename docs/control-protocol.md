@@ -48,7 +48,10 @@ Useful query commands for `engine.execute` (they aren't journaled or undoable): 
 `prop.get {layer, path, comp?, time?}`, `editor.state`, `command.list {filter?, enabledOnly?, schemas?}`,
 `command.describe {command}` (params doc and JSON Schema), `app.capabilities` (version, counts,
 export formats, parity summary), `jobs.list` (Progress panel jobs, e.g. the background
-`footage.check` after File ▸ Open).
+`footage.check` after File ▸ Open), and analysis queries (see [mcp.md](mcp.md#analysis-tools)):
+`layer.bounds {comp?, time?, layers?, pixels?, overlaps?}` (layer geometry in comp space) and
+`audio.analyze {comp?, start?, end?, layer?, waveform?, path?}` (peak, RMS, LUFS, clipping and
+silences of the mix).
 
 Every engine command is reachable through `engine.execute`, and every interactive widget of every
 panel registers an element id; both are enforced by `crates/ui-egui/tests/ui_agent_audit.rs`.

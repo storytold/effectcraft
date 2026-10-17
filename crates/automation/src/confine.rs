@@ -84,6 +84,8 @@ const WRITES: &[(&str, &[&str])] = &[
     ("essential.exportTemplate", &["path"]),
     ("shortcuts.export", &["path"]),
     ("renderQueue.add", &["output", "path"]),
+    ("file.exportTimeline", &["path"]),
+    ("audio.analyze", &["path"]),
 ];
 
 /// Commands that write where they are not told: the project's file, the Render Queue's outputs.
@@ -270,7 +272,37 @@ fn resolve(p: &Path) -> Option<PathBuf> {
         if let Ok(real) = at.canonicalize() {
             return Some(rest.iter().rev().fold(real, |acc: PathBuf, c| acc.join(c)));
         }
+        // Failed canonicalization does not make a dangling link a new regular file.
+        match at.symlink_metadata() {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            _ => return None,
+        }
         rest.push(at.file_name()?.to_os_string());
         at = at.parent()?;
+    }
+}
+
+#[cfg(all(test, unix))]
+mod symlink_tests {
+    use super::*;
+
+    #[test]
+    fn dangling_links_cannot_escape_write_roots() {
+        let base = std::env::temp_dir().join(format!("ec-confine-dangling-{}", std::process::id()));
+        let inside = base.join("inside");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&inside).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let confinement = Confinement::new(&[], std::slice::from_ref(&inside)).unwrap();
+        let check = |p: &Path| confinement.check(&p.to_string_lossy(), Access::Write);
+        assert!(check(&inside.join("new.png")).is_ok());
+        std::os::unix::fs::symlink(outside.join("missing.png"), inside.join("link.png")).unwrap();
+        assert!(check(&inside.join("link.png")).is_err());
+        std::os::unix::fs::symlink(outside.join("missing-directory"), inside.join("directory")).unwrap();
+        assert!(check(&inside.join("directory/new.png")).is_err());
+        std::fs::write(inside.join("target.png"), b"safe").unwrap();
+        std::os::unix::fs::symlink(inside.join("target.png"), inside.join("safe-link.png")).unwrap();
+        assert!(check(&inside.join("safe-link.png")).is_ok());
+        std::fs::remove_dir_all(base).unwrap();
     }
 }

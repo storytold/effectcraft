@@ -234,6 +234,40 @@ fn mcp_over_stdio() {
     assert_eq!(replies[3]["result"]["content"][0]["type"], "image");
 }
 
+/// The older tool names are hidden from tools/list unless `--all-tools`, and callable either way.
+#[test]
+fn mcp_all_tools_lists_hidden_aliases() {
+    for (all, listed) in [(false, false), (true, true)] {
+        let mut cmd = bin();
+        cmd.arg("mcp");
+        if all {
+            cmd.arg("--all-tools");
+        }
+        let mut child = cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
+        {
+            let mut stdin = child.stdin.take().unwrap();
+            writeln!(stdin, "{}", json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})).unwrap();
+            writeln!(
+                stdin,
+                "{}",
+                json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "list_commands", "arguments": {"filter": "comp.new"}}})
+            )
+            .unwrap();
+        }
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success());
+        let replies: Vec<Value> = String::from_utf8(out.stdout).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        let names: Vec<&str> = replies[0]["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"command_list") && names.contains(&"render_preview"));
+        for alias in ["list_commands", "execute_command", "get_project", "render_frame"] {
+            assert_eq!(names.contains(&alias), listed, "{alias} with --all-tools={all}");
+        }
+        assert_eq!(replies[1]["result"]["isError"], false, "{}", replies[1]);
+    }
+    let out = bin().args(["info", "--all-tools"]).output().unwrap();
+    assert!(!out.status.success(), "--all-tools is for mcp only");
+}
+
 #[test]
 fn script_file_and_eval() {
     let proj = tmp("scripted.ecproj");
