@@ -539,3 +539,95 @@ fn arrow_keys_move_the_caret_in_rename_fields() {
     let layer_name = h.state().session.active_comp().unwrap().layer(effectcraft_engine::project::LayerId(layer)).unwrap().name.clone();
     assert_eq!(layer_name, "Pla-te");
 }
+
+/// A solid named `name` with its Transform group open in the Timeline; returns the layer, its
+/// Opacity uid and its Rotation uid.
+fn open_transform(h: &mut Harness<'_, EffectcraftApp>, name: &str) -> (u64, u64, u64) {
+    let (layer, opacity, rotation, transform) = {
+        let s = &mut h.state_mut().session;
+        let l = s.execute("layer.newSolid", json!({"name": name, "color": "#406080"})).unwrap()["layer"].as_u64().unwrap();
+        let tr = s.active_comp().unwrap().layer(effectcraft_engine::project::LayerId(l)).unwrap().props.sub("transform").unwrap().clone();
+        (l, tr.get("opacity").unwrap().uid, tr.get("rotation").unwrap().uid, tr.uid)
+    };
+    h.state_mut().ui.timeline.open_layers.insert(layer);
+    h.state_mut().ui.timeline.open_groups.insert(transform);
+    h.run_steps(3);
+    (layer, opacity, rotation)
+}
+
+fn expression(h: &Harness<'_, EffectcraftApp>, layer: u64, prop: u64) -> Option<String> {
+    let comp = h.state().session.active_comp().unwrap();
+    comp.layer(effectcraft_engine::project::LayerId(layer)).unwrap().props.find(prop).unwrap().expr.as_ref().map(|e| e.text.clone())
+}
+
+fn commit_expression(h: &mut Harness<'_, EffectcraftApp>) {
+    h.input_mut().events.push(Event::ModifiersChanged(Modifiers::COMMAND));
+    h.input_mut().events.push(Event::Key { key: Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::COMMAND });
+    h.step();
+    h.input_mut().events.push(Event::ModifiersChanged(Modifiers::NONE));
+    h.run_steps(3);
+}
+
+/// #1072: Alt-clicking a stopwatch adds an expression and its editor takes the keyboard at once,
+/// the new expression selected, so typing replaces it (it took another click). That happens
+/// once: a field clicked next keeps the keyboard, and removing the expression with another
+/// Alt-click leaves nothing to take it.
+#[test]
+fn alt_clicking_a_stopwatch_focuses_the_new_expression() {
+    let (mut h, _) = harness();
+    let (layer, opacity, rotation) = open_transform(&mut h, "Plate");
+    let alt = Modifiers { alt: true, ..Modifiers::NONE };
+    let stopwatch = |h: &Harness<'_, EffectcraftApp>, prop: u64| center(h, &format!("timeline.prop.{prop}.stopwatch"));
+    let at = stopwatch(&h, opacity);
+    click_with(&mut h, at, alt);
+    assert!(expression(&h, layer, opacity).is_some(), "an expression was added");
+    type_text(&mut h, "50");
+    commit_expression(&mut h);
+    assert_eq!(expression(&h, layer, opacity).as_deref(), Some("50"), "typing replaced the new expression");
+    // A field clicked right after an Alt-click keeps the keyboard.
+    let at = stopwatch(&h, rotation);
+    click_with(&mut h, at, alt);
+    let added = expression(&h, layer, rotation).expect("an expression on Rotation");
+    let p = center(&h, "timeline.timecode");
+    click(&mut h, p, 2);
+    type_text(&mut h, "0:00:01:00");
+    key(&mut h, Key::Enter);
+    let frame = h.state().session.active_comp().unwrap().frame_rate.frame_at(h.state().session.time());
+    assert_eq!((frame, expression(&h, layer, rotation)), (24, Some(added)), "the time took the typing, not the expression");
+    // Alt-click again removes the expression; nothing takes the keyboard after it.
+    let at = stopwatch(&h, opacity);
+    click_with(&mut h, at, alt);
+    h.run_steps(5);
+    assert_eq!(expression(&h, layer, opacity), None);
+    assert!(!h.ctx.egui_wants_keyboard_input(), "nothing has the keyboard");
+}
+
+/// #1072: an expression added at the bottom of the Timeline brings its editor into view to take
+/// the keyboard (its row is added below the last one shown).
+#[test]
+fn an_expression_added_at_the_bottom_of_the_timeline_comes_into_view() {
+    let (mut h, _) = harness();
+    let (layer, opacity, _) = open_transform(&mut h, "Bottom");
+    for i in 0..40 {
+        h.state_mut().session.execute("layer.newSolid", json!({"name": format!("Layer {i}"), "color": "#406080"})).unwrap();
+    }
+    h.run_steps(3);
+    // Scroll to the end (the layer is at the bottom of the stack), then until Opacity is the
+    // last row shown.
+    h.state_mut().ui.timeline.scroll_y = 1.0e6;
+    h.run_steps(3);
+    let rows = h.state().auto.find("timeline.scroll").unwrap().rect;
+    let bottom = rows[1] + rows[3];
+    let row = h.state().auto.find(&format!("timeline.prop.{opacity}.row")).unwrap().rect;
+    h.state_mut().ui.timeline.scroll_y += row[1] + row[3] - bottom;
+    h.run_steps(3);
+    let row = h.state().auto.find(&format!("timeline.prop.{opacity}.row")).unwrap().rect;
+    assert!((row[1] + row[3] - bottom).abs() < 1.0, "Opacity is at the bottom: {row:?}");
+    let at = center(&h, &format!("timeline.prop.{opacity}.stopwatch"));
+    click_with(&mut h, at, Modifiers { alt: true, ..Modifiers::NONE });
+    let editor = h.state().auto.find(&format!("timeline.prop.{opacity}.expression")).expect("the editor is drawn").rect;
+    assert!(editor[1] >= rows[1] - 0.5 && editor[1] + editor[3] <= bottom + 0.5, "the editor is in view: {editor:?} in {rows:?}");
+    type_text(&mut h, "25");
+    commit_expression(&mut h);
+    assert_eq!(expression(&h, layer, opacity).as_deref(), Some("25"));
+}

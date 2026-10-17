@@ -265,10 +265,25 @@ fn whip_into_id(prop: u64) -> egui::Id {
     egui::Id::new(("tl-pickwhip-into", prop))
 }
 
-/// After a pick whip into the expression being edited: its editor takes the focus back, the
-/// cursor this many characters before the end (just after the reference).
-fn expr_refocus_id(prop: u64) -> egui::Id {
-    egui::Id::new(("tl-expr-refocus", prop))
+/// An expression editor to take the keyboard when it is next drawn: its property, the text to
+/// select as counts of characters before the end (so it fits the expression as it will be then)
+/// and the pass it was asked for in. After a pick whip into the expression being edited, the
+/// cursor goes just after the reference; after an Alt-click on a stopwatch adds an expression,
+/// its whole text is selected, so typing replaces it.
+#[derive(Clone, Copy, Debug)]
+struct ExprFocus {
+    prop: u64,
+    select: [usize; 2],
+    pass: u64,
+}
+
+fn expr_focus_id() -> egui::Id {
+    egui::Id::new("tl-expr-focus")
+}
+
+fn focus_expression(ctx: &egui::Context, prop: u64, select: [usize; 2]) {
+    let pass = ctx.cumulative_pass_nr();
+    ctx.data_mut(|d| d.insert_temp(expr_focus_id(), ExprFocus { prop, select, pass }));
 }
 
 #[derive(Clone, Debug)]
@@ -1888,6 +1903,19 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let rh = t.row_h;
     let total_h: f32 = rows.iter().map(|r| row_height(r, rh)).sum();
     let max_scroll = (total_h - rows_rect.height() + rh).max(0.0);
+    // An expression editor asked to take the keyboard comes into view; a request whose
+    // expression didn't appear, or that wasn't taken within a few passes, is dropped (it never
+    // takes the keyboard later).
+    if let Some(f) = ctx.data(|d| d.get_temp::<ExprFocus>(expr_focus_id())) {
+        match rows.iter().position(|r| matches!(r.kind, RowKind::Expr { uid, .. } if uid == f.prop)) {
+            Some(i) if ctx.cumulative_pass_nr() <= f.pass.saturating_add(8) => {
+                let top: f32 = rows.iter().take(i).map(|r| row_height(r, rh)).sum();
+                let fits = (top + rows.get(i).map_or(rh, |r| row_height(r, rh)) - rows_rect.height()).max(0.0).min(top);
+                app.ui.timeline.scroll_y = app.ui.timeline.scroll_y.min(top).max(fits);
+            }
+            _ => ctx.data_mut(|d| d.remove::<ExprFocus>(expr_focus_id())),
+        }
+    }
     if scroll_to == Some(crate::state::ScrollTo::Layer) {
         // The topmost selected layer, in stack order.
         let sel = &app.session.state.selected_layers;
@@ -2647,12 +2675,15 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 gp.rect_filled(Rect::from_min_max(pos2(graph_x0, r.min.y), r.max), 0.0, t.expr_bg);
                 let er = Rect::from_min_max(pos2(graph_x0 + 8.0, r.min.y + 3.0), pos2(rect.max.x - 14.0, r.max.y - 3.0));
                 let mut buf: String = ctx.data(|d| d.get_temp(buf_id)).unwrap_or_else(|| ex.text.clone());
-                if let Some(after) = ctx.data_mut(|d| d.remove_temp::<usize>(expr_refocus_id(*uid))) {
-                    // A pick whip just put a reference in: editing goes on in the new text,
-                    // the cursor after the reference.
+                if let Some(f) = ctx.data(|d| d.get_temp::<ExprFocus>(expr_focus_id())).filter(|f| f.prop == *uid) {
+                    // Asked for once (a pick whip put a reference in, or an Alt-click added the
+                    // expression): editing starts in the expression as it is now.
+                    ctx.data_mut(|d| d.remove::<ExprFocus>(expr_focus_id()));
                     buf = ex.text.clone();
+                    let n = buf.chars().count();
+                    let [a, b] = f.select.map(|before_end| egui::text::CCursor::new(n.saturating_sub(before_end)));
                     let mut st = egui::text_edit::TextEditState::load(&ctx, edit_id).unwrap_or_default();
-                    st.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(buf.chars().count().saturating_sub(after)))));
+                    st.cursor.set_char_range(Some(egui::text::CCursorRange::two(a, b)));
                     st.store(&ctx, edit_id);
                     ctx.memory_mut(|m| m.request_focus(edit_id));
                 }
@@ -2750,6 +2781,15 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     if ui.input(|i| i.modifiers.alt) {
                         if resp.clicked() {
                             actions.push(("prop.setExpression".into(), json!({"layer": layer.id.0, "prop": uid})));
+                            if prop.expr.is_none() {
+                                // Adding one: its editor opens, comes into view and takes the
+                                // keyboard with the new expression selected (#1072).
+                                app.ui.timeline.expr_closed.remove(uid);
+                                focus_expression(&ctx, *uid, [usize::MAX, 0]);
+                            } else if ctx.data(|d| d.get_temp::<ExprFocus>(expr_focus_id())).is_some_and(|f| f.prop == *uid) {
+                                // Removing it: nothing is left to take the keyboard.
+                                ctx.data_mut(|d| d.remove::<ExprFocus>(expr_focus_id()));
+                            }
                         }
                     } else if let Some((value, merge)) = switch_gesture(ui, &resp, r, "stopwatch", prop.is_animated()) {
                         actions.push(("prop.toggleAnimation".into(), json!({"layer": layer.id.0, "prop": uid, "value": value, "merge": merge})));
@@ -3074,7 +3114,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                         params["expression"] = json!(text);
                         params["range"] = json!([a, b]);
                         let after = text.chars().count().saturating_sub(b);
-                        ctx.data_mut(|d| d.insert_temp(expr_refocus_id(src_prop), after));
+                        focus_expression(&ctx, src_prop, [after, after]);
                     }
                     actions.push(("prop.pickWhip".into(), params));
                 }
