@@ -12,7 +12,7 @@ use effectcraft_svg::{
 };
 use kurbo::{Point, Shape as _};
 
-use crate::build::Builder;
+use crate::build::{Builder, MAX_PATH};
 use crate::color::{Cs, Func, color_space, text_string};
 use crate::font::Font;
 use crate::object::{Dict, File, Lexer, Obj, decode_stream};
@@ -281,7 +281,12 @@ impl<'a> Interp<'a> {
                         self.ext_gstate(&g, res, depth);
                     }
                 }
-                // Path construction.
+                // Path construction. Each operator adds at most five elements (`re`), so when fewer
+                // than five more fit within `MAX_PATH`, the operator stops the stream.
+                "m" | "l" | "c" | "v" | "y" | "h" | "re" if self.path.elements().len() > MAX_PATH - 5 => {
+                    self.b.skip("content (path limit)");
+                    return;
+                }
                 "m" => {
                     let p = Point::new(n(0), n(1));
                     self.path.move_to(p);
