@@ -415,6 +415,13 @@ fn prepare_import(s: &mut Session, p: &Value) -> Result<PendingImport> {
             }
         }
         paths = rest;
+        // Composition imports already made their sources, so they bypass add_footage's
+        // probed-footage refresh. Refresh them before any background probe job starts (#1070).
+        for id in &items {
+            if let Some(ItemKind::Footage(f)) = s.project.item(ItemId(*id)).map(|it| &it.kind) {
+                s.forget_decoded(f);
+            }
+        }
     }
     // Numbered stills as image sequences (the Import dialog's "<format> Sequence" and Force
     // Alphabetical Order), at `frameRate` or Settings ▸ Import ▸ Sequence Footage.
