@@ -251,6 +251,18 @@ fn ids_and_cryptomatte() {
     case("ec.3d.cryptomatte", &[("selection", Value::Str("alpha".into())), ("matteOnly", on())]);
 }
 
+/// The GPU skips the ID colours for displays that do not read them
+/// ([`effectcraft_effects::CryptoAux::for_display`]): every display × Matte Only must still match
+/// the CPU effect, so a shader that starts reading RGB in another mode fails here.
+#[test]
+fn cryptomatte_every_display_matches_the_cpu() {
+    for display in 0..3 {
+        for matte_only in [false, true] {
+            case("ec.3d.cryptomatte", &[("selection", Value::Str("beta, delta".into())), ("display", e(display)), ("matteOnly", Value::Bool(matte_only))]);
+        }
+    }
+}
+
 #[test]
 fn extractor() {
     case("ec.3d.extractor", &[("red", Value::Str("Z".into())), ("green", Value::Str("UV.U".into())), ("whitePoint", n(1000.0))]);

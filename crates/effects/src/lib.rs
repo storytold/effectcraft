@@ -110,7 +110,7 @@ pub use time_fx::{PixelMotion, TimewarpPlan, TwStep, pmb_plan, posterized_time, 
 // effectcraft-gpu fx_tone.
 pub use ocio::color_stabilizer_maps;
 // GPU effects, part B (3D Channel, Immersive Video, colour management, simulation render passes).
-pub use channel3d::{CRYPTO_LAYERS, crypto_aux_image, id_color, selection_hashes};
+pub use channel3d::{CRYPTO_LAYERS, CryptoAux, crypto_aux_image, crypto_aux_image_with, id_color, selection_hashes};
 pub use ocio::{ColorOp, Straight, Tf, color_program};
 pub use sim::{Acc, Blob, Bubble, Post, Shape, Sprite, SpritePlan, Tint, bubble_list, drizzle_drops, mercury_blobs, sprite_plan};
 pub use sim2::{
