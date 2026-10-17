@@ -2000,6 +2000,37 @@ fn arrow_keys_nudge_the_selected_layer_at_the_viewer_magnification() {
     assert_eq!(pos(&h), [100.5, 109.5, 0.0], "sub-pixel steps when zoomed in");
 }
 
+/// #1288: with mask points selected the arrow keys move the points, not the layer: 1 pixel at the
+/// viewer's magnification in comp space (half a layer pixel on a layer scaled to 200 %), 10 with
+/// Shift, one undo step each.
+#[test]
+fn arrow_keys_nudge_the_selected_mask_points() {
+    let mut h = harness();
+    let plate = layer_id(&h, "Plate");
+    let corners = [[100.0, 60.0], [500.0, 60.0], [500.0, 300.0], [100.0, 300.0]];
+    let s = &mut h.state_mut().session;
+    s.execute("layer.select", json!({"layers": [plate]})).unwrap();
+    s.execute("prop.set", json!({"layer": plate, "path": "transform/scale", "value": [200, 200, 100]})).unwrap();
+    s.execute("mask.new", json!({"layer": plate, "vertices": corners, "closed": true})).unwrap();
+    let mask = s.active_comp().unwrap().layer(LayerId(plate)).unwrap().masks().unwrap().groups().next().unwrap().uid;
+    s.execute("mask.selectVertices", json!({"vertices": [{"layer": plate, "mask": mask, "index": 1}, {"layer": plate, "mask": mask, "index": 2}]})).unwrap();
+    let ppp = h.ctx.pixels_per_point();
+    h.state_mut().ui.viewer.zoom = Some(1.0 / ppp);
+    h.run_steps(2);
+    let pos = |h: &Harness<'_, EffectcraftApp>| {
+        h.state().session.active_comp().unwrap().layer(LayerId(plate)).unwrap().props.prop("transform/position").unwrap().value.as_vec3()
+    };
+    let (pos0, undo) = (pos(&h), h.state().session.history.undo.len());
+    key(&mut h, egui::Key::ArrowRight, egui::Modifiers::NONE);
+    key(&mut h, egui::Key::ArrowDown, egui::Modifiers::SHIFT);
+    let path = mask_path(&h, "Plate");
+    let near = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).abs() < 1e-6 && (a[1] - b[1]).abs() < 1e-6;
+    assert!(near(path.vertices[1], [500.5, 65.0]) && near(path.vertices[2], [500.5, 305.0]), "{:?}", path.vertices);
+    assert_eq!(path.vertices[0], corners[0], "unselected points stay");
+    assert_eq!(pos(&h), pos0, "the layer stays");
+    assert_eq!(h.state().session.history.undo.len(), undo + 2, "one undo step per press");
+}
+
 /// A comp wider than the GPU's texture limit at Full resolution shows its frame (averaged down
 /// into a texture the renderer accepts) instead of failing the upload (#201: 11000×2200).
 #[test]

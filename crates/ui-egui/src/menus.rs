@@ -255,7 +255,7 @@ fn reveal_targets(app: &EffectcraftApp) -> Vec<u64> {
 /// `down`, `left`, `right`), 10 with Shift (`up10`…), as After Effects does, so zoomed in
 /// they move by fractions of a comp pixel. From any panel except Project (which owns the
 /// arrow keys for its own keyboard navigation, #961); not while typing, with a dialog or
-/// menu open, or with mask points selected.
+/// menu open. With mask points selected the arrows move the points instead (#1288).
 fn nudge(app: &mut EffectcraftApp, ctx: &egui::Context, dir: &str) -> Result<Value, String> {
     let (side, n) = match dir.strip_suffix("10") {
         Some(side) => (side, 10.0),
@@ -269,13 +269,32 @@ fn nudge(app: &mut EffectcraftApp, ctx: &egui::Context, dir: &str) -> Result<Val
         _ => return Err(format!("unknown nudge `{dir}`")),
     };
     let st = &app.session.state;
-    if app.ui.focused == PanelKind::Project || st.selected_layers.is_empty() || st.text_edit.is_some() || !st.selected_vertices.is_empty() {
+    if app.ui.focused == PanelKind::Project || (st.selected_layers.is_empty() && st.selected_vertices.is_empty()) || st.text_edit.is_some() {
         return Ok(Value::Null);
     }
     // Screen pixels per comp pixel.
     let zoom = (app.ui.viewer.zoom.unwrap_or_else(|| crate::panels::viewer::last_fit(ctx)) * ctx.pixels_per_point()) as f64;
     let k = if zoom.is_finite() && zoom > 1e-6 { 1.0 / zoom } else { 1.0 };
+    if let Some(layer) = st.selected_vertices.first().map(|v| v.layer) {
+        let d = vertex_delta(app, layer, [x * k, y * k]);
+        return run_engine(app, ctx, "mask.moveVertices", json!({"delta": d}));
+    }
     run_engine(app, ctx, "layer.nudge", json!({"x": x * k, "y": y * k}))
+}
+
+/// A comp-space step `d` in the layer space of `layer`, where mask points live. Like a drag of
+/// the points in the viewer, every selected point takes the first one's layer space.
+fn vertex_delta(app: &EffectcraftApp, layer: effectcraft_engine::project::LayerId, d: [f64; 2]) -> [f64; 2] {
+    use effectcraft_engine::geom::vec2;
+    let s = &app.session;
+    let (Some(cid), Some(comp)) = (s.active_comp_id(), s.active_comp()) else { return d };
+    let Some(l) = comp.layer(layer) else { return d };
+    let ectx = effectcraft_engine::render::EvalCtx { project: &s.project, comp_id: cid, comp, time: s.time(), expr: s.expr.as_deref(), footage: None };
+    let (l2c, _) = crate::panels::viewer::l2c(&ectx, l);
+    l2c.inverse().map_or(d, |inv| {
+        let v = inv.apply_vec(vec2(d[0], d[1]));
+        [v.x, v.y]
+    })
 }
 
 fn no_params(p: &Value) -> bool {
