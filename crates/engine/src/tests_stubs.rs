@@ -476,3 +476,110 @@ fn implemented_stubs_are_enabled_and_workspaces_are_frontend() {
         assert!(!s.is_enabled(id), "{id}");
     }
 }
+
+/// The first path item in a shape layer's Contents, at any depth: (uid, match_id). A new shape
+/// layer nests it in a group ("Rectangle 1" ▸ "Rectangle Path 1"), as After Effects does.
+fn first_shape(s: &Session, l: u64) -> (u64, String) {
+    fn walk(g: &effectcraft_project::PropGroup) -> Option<(u64, String)> {
+        if ["rect", "ellipse", "star", "path"].contains(&g.match_id.as_str()) {
+            return Some((g.uid, g.match_id.clone()));
+        }
+        g.groups().find_map(walk)
+    }
+    walk(layer(s, l).props.sub("contents").unwrap()).unwrap()
+}
+
+fn shape_path_of(s: &Session, l: u64, uid: u64) -> effectcraft_keyframe::ShapePath {
+    let ly = layer(s, l);
+    let g = ly.props.sub("contents").unwrap().find_group(uid).unwrap();
+    let _ = &g;
+    g.get("path").unwrap().value.as_path().unwrap().clone()
+}
+
+/// Convert To Bezier Path on a shape layer's parametric path gives an editable Path 1 with the
+/// same geometry, as After Effects does (#932). The command only turned RotoBezier off for masks,
+/// so a Rectangle, Ellipse or Polystar path could not be converted at all.
+#[test]
+fn convert_to_bezier_turns_a_parametric_shape_into_an_editable_path() {
+    let convert = |args: serde_json::Value| {
+        let mut s = comp();
+        let l = s.execute("layer.newShape", args).unwrap()["layer"].as_u64().unwrap();
+        let (uid, was) = first_shape(&s, l);
+        assert_ne!(was, "path", "it starts out parametric");
+        s.state.selected_props = vec![(LayerId(l), uid)];
+        let out = s.execute("path.convertToBezier", json!({})).unwrap();
+        assert_eq!(out["paths"].as_u64(), Some(1));
+        let (new_uid, now) = first_shape(&s, l);
+        assert_eq!(now, "path", "it is a bezier path now");
+        // The new path is selected, so its vertices can be edited straight away.
+        assert_eq!(s.state.selected_props, vec![(LayerId(l), new_uid)]);
+        let path = shape_path_of(&s, l, new_uid);
+        assert!(path.closed, "a closed shape stays closed");
+        (s, l, was, path)
+    };
+    let radius = |v: [f64; 2]| v[0].hypot(v[1]);
+
+    // A 120 x 80 rectangle is its four corners, joined by straight edges.
+    let (mut s, l, was, rect) = convert(json!({"kind": "rect", "size": [120, 80]}));
+    assert_eq!(rect.vertices, vec![[-60.0, -40.0], [60.0, -40.0], [60.0, 40.0], [-60.0, 40.0]]);
+    assert!(rect.in_tangents.iter().chain(&rect.out_tangents).all(|t| *t == [0.0, 0.0]), "straight edges: {rect:?}");
+    // Undo brings the parametric shape back.
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(first_shape(&s, l).1, was, "undo restores the parametric shape");
+
+    // An ellipse is four cubic arcs: a vertex on each axis, with tangents of 0.5523 x the radius
+    // (the usual circle approximation). Straight lines here would be a diamond.
+    let (_, _, _, ell) = convert(json!({"kind": "ellipse", "size": [120, 80]}));
+    assert_eq!(ell.vertices, vec![[0.0, -40.0], [60.0, 0.0], [0.0, 40.0], [-60.0, 0.0]]);
+    let kappa = 4.0 / 3.0 * (std::f64::consts::SQRT_2 - 1.0);
+    for (i, want) in [60.0 * kappa, 40.0 * kappa, 60.0 * kappa, 40.0 * kappa].into_iter().enumerate() {
+        let t = ell.in_tangents[i];
+        assert!((radius(t) - want).abs() < 1e-6, "vertex {i}: tangent {t:?} should be {want}");
+    }
+
+    // A five-point star alternates the outer and inner radius, so ten vertices.
+    let (_, _, _, star) = convert(json!({"kind": "star", "size": [120, 120]}));
+    assert_eq!(star.vertices.len(), 10);
+    for (i, v) in star.vertices.iter().enumerate() {
+        let want = if i % 2 == 0 { 60.0 } else { 30.0 };
+        assert!((radius(*v) - want).abs() < 1e-6, "vertex {i} at {v:?} should be {want} from the centre");
+    }
+
+    // A polygon has one vertex per point, all at the outer radius.
+    let (_, _, _, poly) = convert(json!({"kind": "polygon", "size": [120, 120]}));
+    assert!(poly.vertices.len() >= 3);
+    assert!(poly.vertices.iter().all(|v| (radius(*v) - 60.0).abs() < 1e-6), "{:?}", poly.vertices);
+    assert_ne!(poly.vertices.len(), star.vertices.len(), "a polygon is not a star");
+}
+
+/// The shape's own values are read, not defaults: Roundness rounds the corners and Position moves
+/// the path, both at the time the conversion is made.
+#[test]
+fn convert_to_bezier_reads_the_shape_as_it_is_set() {
+    let mut s = comp();
+    let l = s.execute("layer.newShape", json!({"kind": "rect", "size": [120, 80]})).unwrap()["layer"].as_u64().unwrap();
+    let (uid, _) = first_shape(&s, l);
+    // Properties are addressed by their own uid.
+    let pr_uid = |s: &Session, id: &str| {
+        let ly = layer(s, l);
+        ly.props.sub("contents").unwrap().find_group(uid).unwrap().get(id).unwrap().uid
+    };
+    let (round, pos) = (pr_uid(&s, "roundness"), pr_uid(&s, "position"));
+    s.execute("prop.set", json!({"layer": l, "path": format!("@{round}"), "value": 20.0})).unwrap();
+    s.execute("prop.set", json!({"layer": l, "path": format!("@{pos}"), "value": [10.0, 5.0]})).unwrap();
+
+    s.state.selected_props = vec![(LayerId(l), uid)];
+    s.execute("path.convertToBezier", json!({})).unwrap();
+    let (new_uid, now) = first_shape(&s, l);
+    assert_eq!(now, "path");
+    let path = shape_path_of(&s, l, new_uid);
+
+    // Rounded corners need more than four vertices, and curves between them.
+    assert!(path.vertices.len() > 4, "roundness rounds the corners: {} vertices", path.vertices.len());
+    assert!(path.in_tangents.iter().chain(&path.out_tangents).any(|t| *t != [0.0, 0.0]), "with curves");
+    // Position moves the path: the bounds are centred on it, not on the origin.
+    let xs: Vec<f64> = path.vertices.iter().map(|v| v[0]).collect();
+    let ys: Vec<f64> = path.vertices.iter().map(|v| v[1]).collect();
+    let mid = |v: &[f64]| (v.iter().copied().fold(f64::MAX, f64::min) + v.iter().copied().fold(f64::MIN, f64::max)) / 2.0;
+    assert!((mid(&xs) - 10.0).abs() < 1e-6 && (mid(&ys) - 5.0).abs() < 1e-6, "centred on the position: {:?} {:?}", mid(&xs), mid(&ys));
+}
