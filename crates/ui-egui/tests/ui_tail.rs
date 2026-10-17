@@ -207,6 +207,38 @@ fn layer_style_controls_stay_reachable_in_a_small_window() {
     }
 }
 
+/// #1389: on a layer with no styles, Blending Options shows its controls instead of an empty
+/// page. Opening the dialog adds nothing; the first change creates the Layer Styles group, and
+/// the group and the whole drag are one undo step.
+#[test]
+fn layer_style_blending_options_edit_a_layer_without_styles() {
+    let mut h = harness(1400.0);
+    let lid = h.state().session.active_comp().unwrap().layers[0].id.0;
+    h.state_mut().session.execute("layer.select", json!({"layers": [lid]})).unwrap();
+    let ctx = h.ctx.clone();
+    effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "layer.style.options", json!({})).unwrap();
+    h.run_steps(5);
+    let has_group = |h: &Harness<'_, EffectcraftApp>| h.state().session.active_comp().unwrap().layers[0].layer_styles().is_some();
+    let undo = h.state().session.history.undo.len();
+    assert_eq!(h.state().auto.find("dialog.layerStyle.page").unwrap().label, "blendingOptions");
+    let fill = "dialog.layerStyle.value.blendingOptions/advancedBlending/fillOpacity";
+    assert!(h.state().auto.find("dialog.layerStyle.value.blendingOptions/globalLightAngle").is_some(), "Global Light is shown");
+    let at = in_view(&h, fill);
+    assert!(!has_group(&h), "opening the page adds nothing");
+    drag(&mut h, at, at - vec2(40.0, 0.0));
+    let v =
+        h.state_mut().session.execute("prop.get", json!({"layer": lid, "path": "layerStyles/blendingOptions/advancedBlending/fillOpacity"})).unwrap()["value"]
+            .as_f64()
+            .unwrap();
+    assert!(v < 100.0, "Fill Opacity was dragged: {v}");
+    assert!(styles(&mut h).is_empty(), "no style was added");
+    assert_eq!(h.state().session.history.undo.len(), undo + 1, "the group and the drag are one undo step");
+    assert_eq!(h.state().dialog, Some(effectcraft_ui_egui::Dialog::LayerStyles));
+    effectcraft_ui_egui::panels::layer_styles_dialog::finish(h.state_mut(), true);
+    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+    assert!(!has_group(&h), "one undo removes the group");
+}
+
 #[test]
 fn layer_style_dialog_moves_by_its_title() {
     let mut h = harness(1400.0);
