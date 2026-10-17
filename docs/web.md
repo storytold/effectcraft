@@ -433,6 +433,12 @@ a fake DOM: a picked file that can't be read is reported while the others are ad
 device-lost notice saves, flushes before reloading and reports a failed flush
 (`node apps/effectcraft-web/tests/page.mjs`).
 
+`apps/effectcraft-web/tests/storage.mjs` checks the IndexedDB storage backend of `js/host.js`
+with a fake IndexedDB: a put or delete resolves only once its transaction has committed, and one
+whose transaction aborts after its request succeeded (or whose request fails or throws) rejects
+and leaves the stored entry as it was, so the flush keeps it for a retry (#1242)
+(`node apps/effectcraft-web/tests/storage.mjs`).
+
 It also checks the M13.10 paths: viewer frames rendered in frame workers while scrubbing with the
 CPU renderer (project synced as diffs, event-loop gaps under 400 ms), a `wait: true` render that
 replies when done while the page keeps running, and the Media Browser over browser storage; and
