@@ -488,6 +488,105 @@ fn tint_swap_rejects_invalid_targets_without_editing() {
 }
 
 #[test]
+fn gradient_ramp_swaps_only_its_colors_in_one_undo_step() {
+    let (mut s, a, b) = comp_with_two_solids();
+    let first = apply(&mut s, a, "Gradient Ramp");
+    let target = apply(&mut s, a, "Gradient Ramp");
+    let other = apply(&mut s, b, "Gradient Ramp");
+    for (path, value) in [("startColor", json!([1.0, 0.0, 0.0, 1.0])), ("endColor", json!([0.0, 0.25, 1.0, 1.0])), ("blend", json!(45.0))] {
+        s.execute("prop.set", json!({"layer": a, "path": format!("effects/#2/{path}"), "value": value})).unwrap();
+    }
+    let before_a = layer(&s, a);
+    let before_b = layer(&s, b);
+    let n = s.history.undo.len();
+    s.execute("effect.swapGradientRampColors", json!({"layer": a, "effect": target})).unwrap();
+    let swapped = layer(&s, a);
+    let g = swapped.props.find_group(target).unwrap();
+    assert_eq!(g.prop("startColor").unwrap().value, KV::Color([0.0, 0.25, 1.0, 1.0]));
+    assert_eq!(g.prop("endColor").unwrap().value, KV::Color([1.0, 0.0, 0.0, 1.0]));
+    assert_eq!(g.prop("blend").unwrap().value, KV::Scalar(45.0));
+    assert_eq!(swapped.props.find_group(first), before_a.props.find_group(first));
+    assert_eq!(layer(&s, b).props.find_group(other), before_b.props.find_group(other));
+    let mut expected = before_a.props.clone();
+    let expected_fx = expected.find_group_mut(target).unwrap();
+    expected_fx.prop_mut("startColor").unwrap().value = KV::Color([0.0, 0.25, 1.0, 1.0]);
+    expected_fx.prop_mut("endColor").unwrap().value = KV::Color([1.0, 0.0, 0.0, 1.0]);
+    assert_eq!(swapped.props, expected, "only the two color values change");
+    assert_eq!(s.history.undo.len(), n + 1);
+    assert!(s.undo());
+    assert_eq!(layer(&s, a).props, before_a.props);
+    assert!(s.redo());
+    assert_eq!(layer(&s, a).props, swapped.props);
+}
+
+#[test]
+fn gradient_ramp_swap_keys_animated_colors_at_layer_time() {
+    let (mut s, a, _) = comp_with_two_solids();
+    let target = apply(&mut s, a, "Gradient Ramp");
+    s.execute("prop.set", json!({"layer": a, "path": "effects/#1/startColor", "value": [1.0, 0.0, 0.0, 1.0]})).unwrap();
+    s.execute("prop.set", json!({"layer": a, "path": "effects/#1/endColor", "value": [0.0, 0.0, 1.0, 1.0]})).unwrap();
+    s.execute("prop.toggleAnimation", json!({"layer": a, "path": "effects/#1/startColor"})).unwrap();
+    s.execute("time.set", json!({"time": 2.0})).unwrap();
+    s.execute("prop.set", json!({"layer": a, "path": "effects/#1/startColor", "value": [0.0, 1.0, 0.0, 1.0]})).unwrap();
+    s.execute("layer.timeStretch", json!({"layers": [a], "percent": 200.0})).unwrap();
+    // At comp time 2s the stretched layer is at 1s, between its unchanged 0s and 2s keys.
+    let before = layer(&s, a);
+    let g = before.props.find_group(target).unwrap();
+    let lt = before.layer_time(s.time());
+    let expected = g.prop("startColor").unwrap().value_at(lt);
+    let keys = g.prop("startColor").unwrap().keys.clone();
+    select_effect(&mut s, a, target);
+    s.execute("effect.swapGradientRampColors", json!({})).unwrap();
+    let after = layer(&s, a);
+    let g = after.props.find_group(target).unwrap();
+    let start_color = g.prop("startColor").unwrap();
+    assert_eq!(start_color.keys.len(), 3);
+    assert_eq!(start_color.keys[0], keys[0]);
+    assert_eq!(start_color.keys[2], keys[1]);
+    assert_eq!(start_color.keys[1].time, lt);
+    assert_eq!(start_color.keys[1].value, KV::Color([0.0, 0.0, 1.0, 1.0]));
+    assert_eq!(g.prop("endColor").unwrap().value, expected);
+    assert!(g.prop("endColor").unwrap().keys.is_empty());
+    assert!(s.undo());
+    assert_eq!(layer(&s, a).props, before.props);
+}
+
+#[test]
+fn gradient_ramp_swap_rejects_invalid_targets_without_editing() {
+    let mut empty = Session::default();
+    assert!(empty.execute("effect.swapGradientRampColors", json!({})).is_err());
+    let (mut s, a, _) = comp_with_two_solids();
+    let blur = apply(&mut s, a, "Gaussian Blur");
+    let ramp = apply(&mut s, a, "Gradient Ramp");
+    for params in [
+        json!({"layer": a, "effect": blur}),
+        json!({"layer": a, "effect": "missing"}),
+        json!({"layer": a, "effect": []}),
+        json!({"layer": a, "effect": 1.5}),
+        json!({"layer": a, "effect": 0}),
+        json!(false),
+    ] {
+        let before = layer(&s, a);
+        let n = s.history.undo.len();
+        assert!(s.execute("effect.swapGradientRampColors", params).is_err());
+        assert_eq!(layer(&s, a).props, before.props);
+        assert_eq!(s.history.undo.len(), n);
+    }
+    // A damaged project's colour parameter must also fail atomically.
+    let cid = s.active_comp_id().unwrap();
+    s.edit("Break Gradient Ramp", None, |p, _| {
+        p.comp_mut(cid).unwrap().layer_mut(LayerId(a)).unwrap().props.find_group_mut(ramp).unwrap().prop_mut("endColor").unwrap().value = KV::Scalar(1.0);
+        Ok(())
+    })
+    .unwrap();
+    let before = layer(&s, a);
+    let n = s.history.undo.len();
+    assert!(s.execute("effect.swapGradientRampColors", json!({"layer": a, "effect": ramp})).is_err());
+    assert_eq!(layer(&s, a).props, before.props);
+    assert_eq!(s.history.undo.len(), n);
+}
+
+#[test]
 fn copy_layers_clears_effect_clipboard() {
     let (mut s, a, b) = comp_with_two_solids();
     let blur = apply(&mut s, a, "Gaussian Blur");
