@@ -384,12 +384,17 @@ const SCRIPT_PROBES: &[(char, &str)] = &[
 /// the Chinese catalogs. Both scripts are registered, so file, layer and template names in the
 /// other one still render; then [`SCRIPT_PROBES`], then Hangul, since the Japanese and Chinese faces
 /// may lack it (Hiragino Sans on macOS has none). The web build has no system fonts
-/// and installs nothing.
+/// and installs the bundled Droid Sans Fallback face instead.
 fn install_script_fallbacks(family_fonts: &mut FontDefinitions, language: &str) -> Vec<String> {
     #[cfg(target_arch = "wasm32")]
     {
-        let _ = (family_fonts, language);
-        Vec::new()
+        let _ = language;
+        let name = "chinese-bundled".to_string();
+        family_fonts.font_data.insert(name.clone(), Arc::new(FontData::from_static(effectcraft_text::fonts::WEB_CJK_FALLBACK)));
+        for family in family_fonts.families.values_mut() {
+            family.push(name.clone());
+        }
+        vec![name]
     }
     #[cfg(not(target_arch = "wasm32"))]
     {

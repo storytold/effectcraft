@@ -403,11 +403,16 @@ export function frameWorkerStart(base, onMessage, gpu) {
 // (a temporary file moved into place, so a reader never sees a partial entry; every entry also
 // ends in a checksum) and read the layer buffers they prefetch; the page lists, reads and
 // deletes.
+// Set at build time by `cargo xtask web --no-persistent-frame-cache`. This shared
+// page/worker boundary keeps frame, layer and matte buffers out of OPFS even if
+// preferences are reset. Project storage uses a separate backend.
+const PERSISTENT_FRAME_CACHE_DISABLED = false;
 const CACHE_ROOT = "effectcraft-cache";
 const CACHE_KINDS = ["frames", "layers", "mattes"];
 const cacheDirHandles = {};
 
 async function cacheDir(kind = "frames") {
+  if (PERSISTENT_FRAME_CACHE_DISABLED) throw new Error("Persistent frame cache is disabled by the embedding host");
   if (cacheDirHandles[kind]) return cacheDirHandles[kind];
   if (!navigator.storage || !navigator.storage.getDirectory) throw new Error("no Origin Private File System");
   let d = await navigator.storage.getDirectory();

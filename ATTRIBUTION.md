@@ -9,6 +9,7 @@ iconography, images or other Adobe assets; open licences only; every asset attri
 
 | Asset | Author | Source | Licence |
 |---|---|---|---|
+| `assets/fonts/DroidSansFallback.ttf` | Google Corporation / The Android Open Source Project | [AOSP android-4.4_r1](https://android.googlesource.com/platform/frameworks/base/+/android-4.4_r1/data/fonts/) | Apache-2.0 (`LICENSE-APACHE`; `NOTICE`) |
 | `assets/fonts/Inter-Regular.ttf` | The Inter Project Authors | https://github.com/rsms/inter | OFL-1.1 (`assets/fonts/OFL-Inter.txt`) |
 | `assets/fonts/Inter-Medium.ttf` | The Inter Project Authors | https://github.com/rsms/inter | OFL-1.1 (`assets/fonts/OFL-Inter.txt`) |
 | `assets/fonts/Inter-SemiBold.ttf` | The Inter Project Authors | https://github.com/rsms/inter | OFL-1.1 (`assets/fonts/OFL-Inter.txt`) |

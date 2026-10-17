@@ -26,6 +26,10 @@ pub static INTER_ITALIC: &[u8] = include_bytes!("../../../assets/fonts/Inter-Ita
 pub static JETBRAINS_MONO_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/JetBrainsMono-Regular.ttf");
 pub static NOTO_SERIF_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/NotoSerif-Regular.ttf");
 
+/// Open CJK fallback for the browser, which cannot scan system font folders.
+#[cfg(target_arch = "wasm32")]
+pub static WEB_CJK_FALLBACK: &[u8] = include_bytes!("../../../assets/fonts/DroidSansFallback.ttf");
+
 /// The default family for new text.
 pub const DEFAULT_FAMILY: &str = "Inter";
 
@@ -301,6 +305,10 @@ fn db() -> &'static RwLock<Db> {
             for n in read_faces_bytes(b) {
                 push(&mut db, info_from(n, FaceData::Static(b), "bundled"));
             }
+        }
+        #[cfg(target_arch = "wasm32")]
+        for n in read_faces_bytes(WEB_CJK_FALLBACK) {
+            push(&mut db, info_from(n, FaceData::Static(WEB_CJK_FALLBACK), "bundled"));
         }
         RwLock::new(db)
     })
