@@ -333,10 +333,36 @@ pub(crate) fn shown_region(ctx: &egui::Context, comp: [f32; 2]) -> [f64; 4] {
     texture_roi(ctx).unwrap_or([0.0, 0.0, comp[0] as f64, comp[1] as f64])
 }
 
-/// Show Snapshot: the stored snapshot is on screen (button or F5 held).
+/// The snapshot slot (0–3) whose Show Snapshot key (F5–F8 by default) is held.
+fn held_snapshot_slot(app: &EffectcraftApp, ctx: &egui::Context) -> Option<usize> {
+    if ctx.egui_wants_keyboard_input() {
+        return None;
+    }
+    let table = app.session.shortcuts();
+    ["view.showSnapshot", "view.showSnapshot2", "view.showSnapshot3", "view.showSnapshot4"].iter().position(|id| {
+        table
+            .keys
+            .get(*id)
+            .into_iter()
+            .flatten()
+            .filter_map(|sc| crate::menus::parse_shortcut(sc))
+            .any(|(m, k)| ctx.input(|i| i.key_down(k) && crate::menus::mods_match(m, i.modifiers)))
+    })
+}
+
+/// The snapshot on screen: the slot whose key is held, else the one Show Snapshot shows.
+pub(crate) fn shown_snapshot(app: &EffectcraftApp, ctx: &egui::Context) -> Option<effectcraft_engine::viewer::Snapshot> {
+    if let Some(i) = held_snapshot_slot(app, ctx) {
+        // (Slot 1's key also shows a snapshot taken before the slots existed.)
+        let slot = app.session.snapshot_slots.get(i).cloned().flatten();
+        return slot.or_else(|| app.session.snapshot.clone().filter(|_| i == 0));
+    }
+    app.session.snapshot.clone().filter(|_| app.session.state.viewer.show_snapshot)
+}
+
+/// Show Snapshot: a stored snapshot is on screen (button, or its key held).
 pub(crate) fn showing_snapshot(app: &EffectcraftApp, ctx: &egui::Context) -> bool {
-    let f5 = ctx.input(|i| i.key_down(egui::Key::F5)) && !ctx.egui_wants_keyboard_input();
-    app.session.snapshot.is_some() && (app.session.state.viewer.show_snapshot || f5)
+    shown_snapshot(app, ctx).is_some()
 }
 
 /// Show Channel and exposure, then the display colour conversion (View ▸ Use Display Color
@@ -391,7 +417,7 @@ pub(crate) fn draw_frame(app: &mut EffectcraftApp, ctx: &egui::Context, painter:
     let plain = opts.channel == Channel::Rgb && opts.exposure == 0.0 && dc.is_none();
     let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
     if snap {
-        let Some(s) = app.session.snapshot.clone() else { return };
+        let Some(s) = shown_snapshot(app, ctx) else { return };
         let key = {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();

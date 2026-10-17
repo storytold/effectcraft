@@ -240,6 +240,19 @@ fn set_preset(o: &mut PaintOptions, i: usize, cmd: &str) -> Result<()> {
     Ok(())
 }
 
+/// 1 / 2 with a paint tool: the current time moves by the frames a stroke lasts (the Custom
+/// duration; one frame for the other durations), to paint the next frames.
+fn step_duration(s: &mut Session, dir: i64) -> Result<Value> {
+    let o = &s.state.paint;
+    let frames = if o.duration == 3 { o.custom_frames.max(1) as i64 } else { 1 };
+    let cid = s.active_comp_id().ok_or(EngineError::NoComp)?;
+    let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
+    let fd = comp.frame_duration();
+    let last = (comp.duration - fd).max(Tick::ZERO);
+    let t = Tick(s.time_of(cid).0.saturating_add(fd.0.saturating_mul(frames.saturating_mul(dir)))).clamp(Tick::ZERO, last);
+    s.execute("time.set", json!({"time": t.seconds()}))
+}
+
 fn options(s: &mut Session, p: &Value) -> Result<Value> {
     let mut o = s.state.paint.clone();
     apply_options(&mut o, p, "paint.options")?;
@@ -475,6 +488,39 @@ pub fn specs() -> Vec<CommandSpec> {
             always,
             options
         ),
+        // The paint tools' keys (the shortcut preset's Paint scope).
+        cmd!("paint.swapColors", "Swap Paint Foreground and Background Colors", [], Some("X"), "{}", always, |s, _| {
+            let o = &mut s.state.paint;
+            std::mem::swap(&mut o.color, &mut o.background);
+            Ok(json!({"color": o.color, "background": o.background}))
+        }),
+        cmd!("paint.defaultColors", "Set Paint Colors to Black and White", [], Some("D"), "{}", always, |s, _| {
+            let o = &mut s.state.paint;
+            (o.color, o.background) = ([0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0, 1.0]);
+            Ok(json!({"color": o.color, "background": o.background}))
+        }),
+        cmd!("paint.clonePreset1", "Clone Stamp Preset 1", [], Some("3"), "{}", always, |s, _| {
+            s.state.paint.clone_preset = 1;
+            Ok(json!(1))
+        }),
+        cmd!("paint.clonePreset2", "Clone Stamp Preset 2", [], Some("4"), "{}", always, |s, _| {
+            s.state.paint.clone_preset = 2;
+            Ok(json!(2))
+        }),
+        cmd!("paint.clonePreset3", "Clone Stamp Preset 3", [], Some("5"), "{}", always, |s, _| {
+            s.state.paint.clone_preset = 3;
+            Ok(json!(3))
+        }),
+        cmd!("paint.clonePreset4", "Clone Stamp Preset 4", [], Some("6"), "{}", always, |s, _| {
+            s.state.paint.clone_preset = 4;
+            Ok(json!(4))
+        }),
+        cmd!("paint.clonePreset5", "Clone Stamp Preset 5", [], Some("7"), "{}", always, |s, _| {
+            s.state.paint.clone_preset = 5;
+            Ok(json!(5))
+        }),
+        cmd!("paint.stepEarlier", "Move Earlier by the Stroke Duration", [], ["1", "Cmd+PageUp"], "{}", has_comp, |s, _| step_duration(s, -1)),
+        cmd!("paint.stepLater", "Move Later by the Stroke Duration", [], ["2", "Cmd+PageDown"], "{}", has_comp, |s, _| step_duration(s, 1)),
         cmd!("paint.brushPreset", "Brush Preset", [], None, "{preset?: index | name}", always, preset),
         cmd!("paint.setCloneSource", "Set Clone Source", [], None, "{layer?, point: [x,y]}", has_comp, set_clone_source),
         cmd!("paint.removeStroke", "Delete Paint Stroke", [], None, "{layer?, stroke: uid | name}", has_comp, remove_stroke),
