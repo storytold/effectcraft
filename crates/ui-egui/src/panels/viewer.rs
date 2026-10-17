@@ -1276,7 +1276,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     caps
                 },
             );
-            super::timeline::layer_menu(ui, &context_layers, caps, &mut context_actions);
+            super::timeline::layer_menu(ui, &context_layers, caps, (&mut app.auto, "viewer.layerMenu"), &mut context_actions);
         }
         ui.separator();
         if ui.button(copy_frame).clicked() {

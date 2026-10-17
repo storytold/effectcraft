@@ -263,6 +263,7 @@ const JAPANESE: &[(&str, &str)] = &[
     ("Grab bag", "いろいろ"),
     ("Gradient Editor", "グラデーションエディター"),
     ("Grid", "グリッド"),
+    ("Guide Layer", "ガイドレイヤー"),
     ("Guide Layers: {}", "ガイドレイヤー：{}"),
     ("Guides", "ガイド"),
     ("Height:", "高さ:"),
@@ -809,6 +810,7 @@ const SIMPLIFIED_CHINESE: &[(&str, &str)] = &[
     ("Grab bag", "列表"),
     ("Gradient Editor", "渐变编辑器"),
     ("Grid", "网格"),
+    ("Guide Layer", "参考线图层"),
     ("Guide Layers: {}", "参考图层：{}"),
     ("Guides", "参考线"),
     ("Height:", "高度："),
@@ -1543,6 +1545,7 @@ const TRADITIONAL_CHINESE: &[(&str, &str)] = &[
     ("Grab bag", "清單"),
     ("Gradient Editor", "漸變編輯器"),
     ("Grid", "格點"),
+    ("Guide Layer", "參考圖層"),
     ("Guide Layers: {}", "參考圖層：{}"),
     ("Guides", "參考線"),
     ("Height:", "高度："),
@@ -2280,6 +2283,7 @@ const UKRAINIAN: &[(&str, &str)] = &[
     ("Grab bag", "Список"),
     ("Gradient Editor", "Редактор градієнта"),
     ("Grid", "Сітка"),
+    ("Guide Layer", "Допоміжний шар"),
     ("Guide Layers: {}", "Допоміжні шари: {}"),
     ("Guides", "Напрямні"),
     ("Height:", "Висота:"),
@@ -2832,6 +2836,7 @@ const PORTUGUESE: &[(&str, &str)] = &[
     ("Frame Target:", "Destino do quadro:"),
     ("Grab bag", "Lista"),
     ("Grid", "Grade"),
+    ("Guide Layer", "Camada de guia"),
     ("Guide Layers: {}", "Camadas de guia: {}"),
     ("Guides", "Guias"),
     ("Height:", "Altura:"),
@@ -3285,6 +3290,7 @@ const CZECH: &[(&str, &str)] = &[
     ("Freeze", "Zmrazit"),
     ("Grab bag", "Mozaika"),
     ("Grid", "Mřížka"),
+    ("Guide Layer", "Pomocná vrstva"),
     ("Guide Layers: {}", "Pomocné vrstvy: {}"),
     ("Guides", "Vodítka"),
     ("Height:", "Výška:"),
@@ -4324,6 +4330,7 @@ mod tests {
         set_current("cs");
         assert_eq!(tr("Composition Name:"), "Název kompozice:");
         assert_eq!(tr("Cancel"), "Zrušit");
+        assert_eq!(tr("Guide Layer"), "Pomocná vrstva", "the layer context menus' item, as Layer ▸ Guide Layer");
         assert_eq!(tr("my layer.mp4"), "my layer.mp4");
         assert_eq!(tr_args("Proxy Use: {}", &[&"Best"]), "Použití zástupných souborů: Best");
         assert_eq!(tr_args("Step {} of {}: {}", &[&1, &3, &"Colour"]), "Krok 1 z 3: Colour");

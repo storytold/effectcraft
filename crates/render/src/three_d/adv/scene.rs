@@ -879,7 +879,7 @@ fn collapsed_layer<'a>(r: &Renderer<'a>, ctx: &EvalCtx<'a>, layer: &Layer, item:
             || l.is_light()
             || matches!(l.source, LayerSource::Camera)
             || (any_solo && !l.switches.solo)
-            || (!r.opts.guides && l.switches.guide)
+            || (!sub.opts.guides && l.switches.guide)
         {
             continue;
         }

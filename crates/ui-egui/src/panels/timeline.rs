@@ -2049,7 +2049,16 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 }
                 app.auto.add(&format!("timeline.layer.{}.twirl", layer.id.0), tw, "twirl");
                 icons::paint(&lp, Rect::from_center_size(pos2(cw.name + 24.0, cy), vec2(13.0, 13.0)), layer_icon(layer, &app.session.project), t.text_dim);
-                let name_rect = Rect::from_min_max(pos2(cw.name + 34.0, r.min.y), pos2(cw.name_end - 4.0, r.max.y));
+                // A guide layer carries a guide mark before its name (After Effects).
+                let name_x = if layer.switches.guide {
+                    let mark = Rect::from_center_size(pos2(cw.name + 40.0, cy), vec2(11.0, 11.0));
+                    icons::paint(&lp, mark, Icon::Grid, t.text_dim);
+                    app.auto.add(&format!("timeline.layer.{}.guide", layer.id.0), mark, "Guide Layer");
+                    cw.name + 50.0
+                } else {
+                    cw.name + 34.0
+                };
+                let name_rect = Rect::from_min_max(pos2(name_x, r.min.y), pos2(cw.name_end - 4.0, r.max.y));
                 let rename_id = egui::Id::new("tl-rename");
                 let renaming: Option<(u64, String)> = ctx.data(|d| d.get_temp(rename_id));
                 if let Some((rl, mut buf)) = renaming.filter(|(rl, _)| *rl == layer.id.0) {
@@ -2110,7 +2119,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                         None => start_rename(&ctx, layer.id.0, &layer.name),
                     }
                 }
-                layer_context_menu(&row_resp, &comp, layer, &selected, LayerMenuCaps::of(&app.session.project, layer), &mut actions);
+                layer_context_menu(&row_resp, &comp, layer, &selected, LayerMenuCaps::of(&app.session.project, layer), &mut app.auto, &mut actions);
                 // Switches.
                 let sws: [(Icon, bool, &str, bool); 8] = [
                     (Icon::Shy, sw.shy, "shy", true),
@@ -2331,7 +2340,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                             set_anchor(&ctx, cid, layer.id);
                         }
                     }
-                    layer_context_menu(&body, &comp, layer, &selected, LayerMenuCaps::of(&app.session.project, layer), &mut actions);
+                    layer_context_menu(&body, &comp, layer, &selected, LayerMenuCaps::of(&app.session.project, layer), &mut app.auto, &mut actions);
                     let drag_key = format!("bar-{}", layer.id.0);
                     // Ctrl/Cmd+Alt dragging a selected bar: Quick Offset (#1012), chosen as the
                     // drag starts and followed below the rows until the button is released.
@@ -3884,12 +3893,14 @@ impl LayerMenuCaps {
 /// A layer row's or bar's context menu. As in After Effects, right-clicking a layer that is part
 /// of the selection keeps the selection and the menu acts on all of it; right-clicking an
 /// unselected layer selects only that layer.
+#[allow(clippy::too_many_arguments)]
 fn layer_context_menu(
     resp: &egui::Response,
     comp: &Comp,
     layer: &Layer,
     selected: &[LayerId],
     caps: LayerMenuCaps,
+    auto: &mut crate::automation::Registry,
     actions: &mut Vec<(String, serde_json::Value)>,
 ) {
     let in_selection = selected.contains(&layer.id);
@@ -3897,12 +3908,24 @@ fn layer_context_menu(
         actions.push(("layer.select".into(), json!({"layers": [layer.id.0]})));
     }
     let targets: Vec<u64> = if in_selection { comp.layers.iter().filter(|l| selected.contains(&l.id)).map(|l| l.id.0).collect() } else { vec![layer.id.0] };
-    crate::widgets::context_menu(resp, |ui| layer_menu(ui, &targets, caps, actions));
+    crate::widgets::context_menu(resp, |ui| layer_menu(ui, &targets, caps, (auto, "timeline.layerMenu"), actions));
 }
 
-/// Shared layer actions for Timeline rows and Composition context menus.
-pub(crate) fn layer_menu(ui: &mut egui::Ui, layers: &[u64], caps: LayerMenuCaps, actions: &mut Vec<(String, serde_json::Value)>) {
+/// The layer switches the layer context menus toggle (After Effects lists them after Time):
+/// `layer.setSwitch` name and label.
+const MENU_SWITCHES: [(&str, &str); 1] = [("guide", "Guide Layer")];
+
+/// Shared layer actions for Timeline rows and Composition context menus. `auto` is the automation
+/// registry and the id prefix of the menu's items.
+pub(crate) fn layer_menu(
+    ui: &mut egui::Ui,
+    layers: &[u64],
+    caps: LayerMenuCaps,
+    auto: (&mut crate::automation::Registry, &str),
+    actions: &mut Vec<(String, serde_json::Value)>,
+) {
     let Some(&id) = layers.first() else { return };
+    let (auto, prefix) = auto;
     let mut item = |ui: &mut egui::Ui, label: &str, cmd: &str, params: serde_json::Value| {
         if ui.button(label).clicked() {
             actions.push(("layer.select".into(), json!({"layers": layers})));
@@ -3948,6 +3971,18 @@ pub(crate) fn layer_menu(ui: &mut egui::Ui, layers: &[u64], caps: LayerMenuCaps,
     ui.menu_button(crate::i18n::tr("Markers"), |ui| {
         item(ui, "Add Marker", "layer.addMarker", json!({"layers": layers}));
     });
+    // A click toggles the switch on the target layers, as Layer ▸ Guide Layer does.
+    // (Pushed after the other items: `item` holds `actions` until its last use.)
+    let mut switch_actions: Vec<(String, serde_json::Value)> = Vec::new();
+    for (switch, label) in MENU_SWITCHES {
+        let response = ui.button(crate::i18n::tr(label));
+        auto.add(&format!("{prefix}.switch.{switch}"), response.rect, label);
+        if response.clicked() {
+            switch_actions.push(("layer.select".into(), json!({"layers": layers})));
+            switch_actions.push(("layer.setSwitch".into(), json!({"layers": layers, "switch": switch})));
+            ui.close();
+        }
+    }
     ui.menu_button(crate::i18n::tr("Blending Mode"), |ui| {
         widgets::menu_scroll(ui, |ui| {
             for m in BlendMode::ALL {
@@ -3971,6 +4006,7 @@ pub(crate) fn layer_menu(ui: &mut egui::Ui, layers: &[u64], caps: LayerMenuCaps,
     item(ui, "Duplicate", "edit.duplicate", json!({"layers": layers}));
     item(ui, "Split Layer", "edit.splitLayer", json!({"layers": layers}));
     item(ui, "Delete", "edit.clear", json!({"layers": layers}));
+    actions.extend(switch_actions);
 }
 
 /// The layer context menu's Layer Styles submenu, matching the Layer ▸ Layer Styles application menu.
