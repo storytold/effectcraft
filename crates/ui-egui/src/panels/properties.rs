@@ -246,6 +246,7 @@ fn transform_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter,
     let vx = r.min.x + (r.width() * 0.5).max(130.0);
     let label = Rect::from_min_max(pos2(r.min.x + 42.0, r.min.y), pos2(vx - 20.0, r.max.y));
     let resp = ui.interact(label, egui::Id::new(("props-label", uid)), Sense::click());
+    crate::a11y::role_name(&resp, egui::accesskit::Role::Button, &pr.name);
     app.auto.add(&format!("{base}.label"), label, &pr.name);
     if resp.double_clicked() {
         app.ui.timeline.search.clear();

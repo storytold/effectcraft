@@ -205,7 +205,7 @@ pub(crate) fn modal_fit(ctx: &egui::Context, title: &str, size: egui::Vec2, t: &
             // The id stays keyed on the untranslated source, so switching language cannot move it.
             let head = ui.label(egui::RichText::new(tr(title)).font(Tokens::semibold(15.0)).color(t.tab_text_active));
             let row = Rect::from_x_y_ranges(ui.max_rect().x_range(), head.rect.y_range());
-            let grip = ui.interact(row, id.with("grip"), Sense::drag()).on_hover_cursor(egui::CursorIcon::Grab);
+            let grip = ui.interact(row, id.with("grip"), Sense::DRAG).on_hover_cursor(egui::CursorIcon::Grab);
             if grip.dragged() {
                 let moved = (offset + grip.drag_delta()).clamp(-room, room);
                 ui.ctx().data_mut(|d| d.insert_temp(offset_id, moved));
