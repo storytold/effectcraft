@@ -899,6 +899,52 @@ fn layer_dependencies_remain_cacheable_and_invalidate_only_related_edits() {
     assert!(crate::cache::layer_key(&ctx, &comp.layers[0], 1.0, false, false).is_none(), "cycles decline caching without recursion");
 }
 
+/// #687: an adjustment layer's footprint (its source through its masks) must not be keyed by
+/// its effect stack: Noise on a finishing adjustment changes every frame, and letting that
+/// reach the key re-rendered and re-uploaded a full-frame buffer every frame. A moving mask
+/// must still re-key it, and the cached buffer must match a fresh render.
+#[test]
+fn adjustment_footprint_key_ignores_the_effect_stack() {
+    let (mut p, cid, comp) = setup();
+    let mut adj = solid(&mut p, &comp, [1.0, 1.0, 1.0], 200, 100);
+    adj.switches.adjustment = true;
+    add_effect_200(&mut p, &mut adj, "ec.noise.noise", &[("amount", Value::Scalar(50.0))]);
+    let mut next = p.next_id;
+    let mut m = build::mask(&mut Ids(&mut next), "Mask 1", ShapePath::rect([50.0, 50.0], 40.0, 40.0), MaskMode::Add, [255, 255, 0]);
+    p.next_id = next;
+    m.prop_mut("path").unwrap().keys = vec![
+        Keyframe::new(Tick::ZERO, Value::Path(ShapePath::rect([50.0, 50.0], 40.0, 40.0))),
+        Keyframe::new(Tick::from_seconds_f64(1.0), Value::Path(ShapePath::rect([150.0, 50.0], 40.0, 40.0))),
+    ];
+    adj.props.sub_mut("masks").unwrap().children.push(m.into());
+    p.comp_mut(cid).unwrap().layers.push(adj);
+    let key = |p: &Project, t: f64| {
+        let c = p.comp(cid).unwrap();
+        crate::cache::footprint_key(&crate::EvalCtx::new(p, cid, c, Tick::from_seconds_f64(t)), &c.layers[0], 1.0, false, false).unwrap()
+    };
+    let foot = |p: &Project, t: f64| {
+        let c = p.comp(cid).unwrap();
+        let mut r = crate::Renderer::new(p, &crate::NoFootage, crate::RenderOpts::default());
+        let cache = crate::LayerCache::default();
+        r.cache = Some(&cache);
+        let layer = c.layers[0].clone();
+        let b = r.adjustment_footprint(&crate::EvalCtx::new(p, cid, c, Tick::from_seconds_f64(t)), &layer).unwrap();
+        b.img.get(50, 50)
+    };
+    // A moving mask re-keys (and repaints) the footprint; the clock alone must not.
+    assert_ne!(key(&p, 0.0), key(&p, 0.5), "an animated mask path must re-key the footprint");
+    assert_ne!(key(&p, 0.0), key(&p, 1.0));
+    assert_ne!(foot(&p, 0.0), foot(&p, 1.0), "the moved mask must reach the cached footprint");
+    // Past the mask's last keyframe every frame is identical — the Noise on the layer must not
+    // re-key it frame after frame.
+    assert_eq!(key(&p, 1.0), key(&p, 1.5), "a per-frame effect on the adjustment re-keyed its footprint");
+    assert_eq!(key(&p, 1.0), key(&p, 3.5), "the footprint key followed the clock past the mask");
+    assert_eq!(foot(&p, 1.0), foot(&p, 3.5));
+    let before = key(&p, 0.0);
+    p.comp_mut(cid).unwrap().layers[0].props.prop_mut("effects/#1/amount").unwrap().value = Value::Scalar(90.0);
+    assert_eq!(before, key(&p, 0.0), "editing an effect parameter must not re-key the footprint");
+}
+
 #[test]
 fn precomp_dependencies_hash_nested_sources_and_evaluated_animation() {
     let (mut p, cid, comp) = setup();
