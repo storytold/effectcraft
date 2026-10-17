@@ -127,6 +127,65 @@ fn fill_parameters_use_documented_match_names() {
 }
 
 #[test]
+fn stroke_parameters_use_after_effects_match_names() {
+    // #1405: `ADBE Stroke-0002` is Stroke's Color in After Effects, not All Masks.
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"var c = app.project.items.addComp("S", 100, 100, 1, 1, 12); var l = c.layers.addSolid([1,1,1], "S", 100, 100, 1);
+           var fx = l.property("ADBE Effect Parade").addProperty("ADBE Stroke"), out = [];
+           for (var i = 1; i <= 11; i++) out.push(fx.property("ADBE Stroke-" + ("000" + i).slice(-4)).name);
+           out.push(fx.property("Color").matchName); out"#,
+    );
+    assert_eq!(
+        o.result,
+        json!([
+            "Path",
+            "Color",
+            "Brush Size",
+            "Brush Hardness",
+            "Opacity",
+            "Spacing",
+            "Paint Style",
+            "Start",
+            "End",
+            "All Masks",
+            "Stroke Sequentially",
+            "ADBE Stroke-0002"
+        ])
+    );
+}
+
+#[test]
+fn hue_saturation_parameters_use_after_effects_match_names() {
+    // #1405: `ADBE HUE SATURATION-0004` is Master Hue in After Effects. The per-channel controls,
+    // which After Effects doesn't expose, are numbered after its parameters so none takes an AE number.
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"var c = app.project.items.addComp("H", 100, 100, 1, 1, 12); var l = c.layers.addSolid([1,1,1], "S", 100, 100, 1);
+           var fx = l.property("ADBE Effect Parade").addProperty("ADBE HUE SATURATION"), out = [];
+           var n = [2, 4, 5, 6, 7, 8, 9, 10];
+           for (var i = 0; i < n.length; i++) out.push(fx.property("ADBE HUE SATURATION-" + ("000" + n[i]).slice(-4)).name);
+           out.push(fx.property("Red Hue").matchName); out"#,
+    );
+    assert_eq!(
+        o.result,
+        json!([
+            "Channel Control",
+            "Master Hue",
+            "Master Saturation",
+            "Master Lightness",
+            "Colorize",
+            "Colorize Hue",
+            "Colorize Saturation",
+            "Colorize Lightness",
+            "ADBE HUE SATURATION-0011"
+        ])
+    );
+}
+
+#[test]
 fn undo_steps_without_a_group() {
     let mut s = session();
     ok(&mut s, r#"var c = app.project.items.addComp("A", 100, 100, 1, 1, 24); c.layers.addNull(); c.layers.addNull();"#);
