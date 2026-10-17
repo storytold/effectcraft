@@ -955,6 +955,26 @@ pub fn layout_rich_uncached(text: &str, runs: &[(Range<usize>, TextStyle)], para
     let para_at = |i: usize| paras.get(i).or(paras.last()).unwrap_or(&default_para);
     let width = para_at(0).width;
     let primaries: Vec<Resolved> = runs.iter().map(|(_, s)| fonts::resolve(&s.family, &s.style)).collect();
+    // A named instance of a variable font (`Figtree` `Black`, or `Figtree-Black`) sets the base
+    // axis values; axes set explicitly in the style keep theirs.
+    let instanced: Vec<(Range<usize>, TextStyle)>;
+    let runs = if primaries.iter().any(|p| p.instance.is_some()) {
+        instanced = runs
+            .iter()
+            .zip(&primaries)
+            .map(|((r, s), p)| {
+                let base = fonts::instance_variations(p);
+                let mut s = s.clone();
+                if !base.is_empty() {
+                    s.variations = fonts::merge_variations(&base, &s.variations);
+                }
+                (r.clone(), s)
+            })
+            .collect();
+        &instanced[..]
+    } else {
+        runs
+    };
     let mut lay = Layout { missing_font: primaries.iter().any(|p| p.missing), text_len: text.len(), ..Default::default() };
     let mut plines: Vec<(usize, ParaLine)> = Vec::new();
     for (pi, span) in paragraph_ranges(text).enumerate() {
@@ -1405,5 +1425,29 @@ mod tests {
         // Hit testing returns the logical position nearest the point.
         assert_eq!(l.hit(xs[1] + 0.5, 0.0), 2);
         assert_eq!(l.hit(xs[0] + 50.0, 0.0), 0);
+    }
+
+    /// #1563: text set in a named instance (`Black`) is laid out at the instance's axis values,
+    /// as if they had been set as variations; axes set on the text itself keep their values.
+    #[test]
+    fn named_instance_sets_the_base_variations() {
+        const FAMILY: &str = "EffectCraft Layout Instance Test";
+        fonts::add_font_data(crate::sfnt::test_font::variable(FAMILY, &[("Light", 300.0, None), ("Black", 900.0, None)], true));
+        let st = |style: &str, variations: Vec<(String, f32)>| TextStyle {
+            family: FAMILY.into(),
+            style: style.into(),
+            size: 50.0,
+            variations,
+            ..Default::default()
+        };
+        let coords = |l: &Layout| l.glyphs.iter().map(|g| crate::variable::coords(g.variations).to_vec()).collect::<Vec<_>>();
+        let black = layout_uncached("Hi", &st("Black", vec![]), &ParagraphStyle::default());
+        assert!(!black.glyphs.is_empty());
+        assert!(coords(&black).iter().all(|c| c == &[("wght".to_string(), 900.0)]), "{:?}", coords(&black));
+        let set = layout_uncached("Hi", &st("Black", vec![("wght".into(), 500.0)]), &ParagraphStyle::default());
+        assert!(coords(&set).iter().all(|c| c == &[("wght".to_string(), 500.0)]), "{:?}", coords(&set));
+        // A static family keeps no variations.
+        let inter = layout_uncached("Hi", &TextStyle::default(), &ParagraphStyle::default());
+        assert!(inter.glyphs.iter().all(|g| g.variations == 0));
     }
 }

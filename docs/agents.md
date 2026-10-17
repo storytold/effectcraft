@@ -540,8 +540,10 @@ Fonts: `text.fonts` (MCP `list_fonts`) lists every family a text layer can use, 
 styles, origin (`bundled`, `system`, `user`), `variable` (it has variation axes) and own-language name
 (`{"query":"gothic"}` filters by name, `{"variable":true}` keeps only variable fonts, like the font
 menu's Variable Fonts filter; `{"rescan":true}` first picks up fonts installed since launch). Pass a listed `family` and
-one of its `styles` to `layer.setText {"font", "style"}`; `text.fontFeatures` says which OpenType
-options a font draws with its own glyphs.
+one of its `styles` to `layer.setText {"font", "style"}`. A variable font's named instances (`Light` …
+`Black`) are styles of its family; a style or an instance's PostScript name (`"font": "Figtree-Black"`)
+sets the instance's axis values, and `variations` set on the text override them axis by axis.
+`text.fontFeatures` says which OpenType options a font draws with its own glyphs.
 A tool with its own font library can hand it over without installing it: folders listed in
 `EFFECTCRAFT_FONT_DIRS` (a path list, `:`-separated, `;` on Windows) are scanned like the system font folders.
 On Linux and the BSDs the system font folders are `/usr/share/fonts`, `/usr/local/share/fonts`,
