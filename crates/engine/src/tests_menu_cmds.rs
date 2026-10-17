@@ -1541,6 +1541,21 @@ fn shape_contents_copy_cut_and_paste_between_shape_layers() {
     assert!(s.execute("edit.paste", json!({})).is_err());
 }
 
+/// Pasting Trim Paths into another shape layer with nothing selected puts it below the shapes,
+/// where it acts on them (it acts on the items above it); on top it would trim nothing (#1681, #1629).
+#[test]
+fn pasted_path_operator_goes_below_the_shapes_it_acts_on() {
+    let mut s = comp();
+    let a = s.execute("layer.newShape", json!({"kind": "rect"})).unwrap()["layer"].as_u64().unwrap();
+    let trim = s.execute("layer.addShapeItem", json!({"layer": a, "kind": "trim"})).unwrap()["uid"].as_u64().unwrap();
+    let b = s.execute("layer.newShape", json!({"kind": "star", "name": "B"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("prop.select", json!({"layer": a, "prop": trim})).unwrap();
+    s.execute("edit.copy", json!({})).unwrap();
+    s.execute("layer.select", json!({"layers": [b]})).unwrap();
+    s.execute("edit.paste", json!({})).unwrap();
+    assert_eq!(contents_names(&s, b), ["Polystar 1", "Trim Paths 1"]);
+}
+
 /// Edit ▸ Duplicate with shape items selected duplicates them in their layer, above the
 /// original and named "Rectangle 2", not the layer (#227).
 #[test]
