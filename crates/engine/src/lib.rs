@@ -472,6 +472,9 @@ pub struct Session {
     /// Loads WebAssembly effect plug-ins (set by the host that links `effectcraft-plugin` with
     /// its runtime): `effect.plugins.load`.
     pub plugin_loader: Option<PluginLoader>,
+    /// External effect helpers (native hosts link `effectcraft-helper-host`):
+    /// `effect.helpers.list`, `effect.helpers.scan`, `effect.helpers.load`.
+    pub helpers: Option<HelperHooks>,
     /// ScriptUI windows and panels opened by scripts (see [`scriptui`]).
     pub script_ui: scriptui::ScriptUi,
     /// The last physical-memory reading (Settings ▸ Memory & CPU budgets); `None` = unknown
@@ -544,6 +547,18 @@ pub type ScriptRunner = fn(&mut Session, &ScriptRequest) -> Value;
 /// describes it (`{id, name, category, version, api, params}`).
 pub type PluginLoader = fn(&[u8], &str) -> std::result::Result<Value, String>;
 
+/// What a host that runs external effect helpers provides (`docs/external-helpers.md`).
+#[derive(Clone, Copy)]
+pub struct HelperHooks {
+    /// Start the helpers installed in the host's search paths and register their effects
+    /// (`retry` forgets the block list first) → `{paths, helpers, loaded, errors}`.
+    pub scan: fn(bool) -> Value,
+    /// Load a file or folder through the helpers that accept it → `{loaded, errors}`.
+    pub load: fn(&str) -> std::result::Result<Value, String>,
+    /// The helpers and their state → `{helpers, blocked}`.
+    pub list: fn() -> Value,
+}
+
 impl Default for Session {
     fn default() -> Self {
         let project = Arc::new(Project::default());
@@ -592,6 +607,7 @@ impl Default for Session {
             snapshot: None,
             script: None,
             plugin_loader: None,
+            helpers: None,
             script_ui: scriptui::ScriptUi::default(),
             sys_memory: None,
             key_move: None,

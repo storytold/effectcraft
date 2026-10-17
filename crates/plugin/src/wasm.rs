@@ -4,8 +4,11 @@ use std::sync::Mutex;
 
 use wasmi::{Config, Engine, Instance, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder, TypedFunc, WasmParams, WasmResults};
 
-use crate::{EffectPlugin, PLUGIN_API_VERSION, PluginFrame, PluginManifest, PluginParams};
+use crate::{EffectPlugin, PluginFrame, PluginManifest, PluginParams};
 
+/// The WebAssembly ABI version (`ec_api_version`); manifests may say API 1 or 2, but a module
+/// can only use the API 1 parameter types.
+const WASM_API_VERSION: i32 = 1;
 /// Instruction budget per frame: a fixed allowance plus some per pixel. Generous for per-pixel
 /// work, but a runaway loop stops instead of hanging the render.
 const FUEL_BASE: u64 = 50_000_000;
@@ -74,8 +77,8 @@ impl WasmPlugin {
         let mut inst = instantiate(&engine, &module)?;
         let version = inst.func::<(), i32>("ec_api_version")?;
         let v = version.call(&mut inst.store, ()).map_err(err)?;
-        if v != PLUGIN_API_VERSION as i32 {
-            return Err(format!("the module implements plug-in API {v}, this build implements API {PLUGIN_API_VERSION}"));
+        if v != WASM_API_VERSION {
+            return Err(format!("the module implements plug-in API {v}, this build implements API {WASM_API_VERSION} for WebAssembly"));
         }
         let ptr = inst.func::<(), i32>("ec_manifest_ptr")?.call(&mut inst.store, ()).map_err(err)?;
         let len = inst.func::<(), i32>("ec_manifest_len")?.call(&mut inst.store, ()).map_err(err)?;
@@ -86,6 +89,9 @@ impl WasmPlugin {
         inst.memory.read(&inst.store, ptr as u32 as usize, &mut text).map_err(|e| format!("manifest out of bounds: {e}"))?;
         let manifest: PluginManifest = serde_json::from_slice(&text).map_err(|e| format!("bad manifest JSON: {e}"))?;
         manifest.validate()?;
+        if let Some(p) = manifest.params.iter().find(|p| p.kind.needs_v2()) {
+            return Err(format!("parameter `{}`: WebAssembly plug-ins use plug-in API 1 parameter types (no point3, layer, text or hidden)", p.id));
+        }
         Ok(WasmPlugin { manifest, source: source.to_string(), engine, module, pool: Mutex::new(vec![inst]) })
     }
 

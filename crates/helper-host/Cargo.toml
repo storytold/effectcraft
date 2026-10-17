@@ -1,0 +1,23 @@
+[package]
+name = "effectcraft-helper-host"
+description = "External effect helpers: finds helper programs, talks to them over a versioned pipe + shared-file protocol and registers their effects (plug-in API 2). Safe Rust; a crashing helper is an error, not a crash"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+effectcraft-effects = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+log = { workspace = true }
+bytemuck = { workspace = true }
+
+# The whole protocol against a fake helper: this test binary is also the helper (started with
+# `--effectcraft-helper`), so `cargo test` covers it on every platform with nothing to install.
+[[test]]
+name = "fake_helper"
+harness = false

@@ -221,6 +221,20 @@ fn main() -> eframe::Result {
                 if plugins.is_dir() {
                     let _ = session.execute("effect.plugins.load", json!({"folder": plugins.to_string_lossy()}));
                 }
+                // External effect helpers are native programs, so they start at launch only when
+                // the user opts in with EFFECTCRAFT_HELPERS=1 (outside the settings folder, so
+                // writing there alone can't run code at launch). Otherwise Effect ▸ Scan for
+                // Effect Helpers starts them.
+                if session.helpers.is_some() && std::env::var_os("EFFECTCRAFT_HELPERS").is_some_and(|v| v == "1") {
+                    match session.execute("effect.helpers.scan", json!({})) {
+                        Ok(r) => {
+                            for e in r["errors"].as_array().into_iter().flatten() {
+                                log::warn!("effect helpers: {}", e.as_str().unwrap_or("error"));
+                            }
+                        }
+                        Err(e) => log::warn!("effect helpers: {e}"),
+                    }
+                }
                 session.config = Some(std::sync::Arc::new(effectcraft_engine::config::DirConfig::new(dir)));
             }
             session.load_settings();
@@ -432,6 +446,7 @@ impl eframe::App for Desktop {
         self.launch.exited();
         self.window.save(self.app.session.config.as_deref());
         self.app.on_exit();
+        effectcraft_host::stop_helpers();
     }
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {

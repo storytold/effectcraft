@@ -971,6 +971,8 @@ Effect
   ---
   Manage Effects... | effect.manage
   Load Effect Plug-in... | effect.plugins.load
+  Load Plug-ins Through Helper... | effect.helpers.load
+  Scan for Effect Helpers | effect.helpers.scan
   ---
   @effects
 Animation
