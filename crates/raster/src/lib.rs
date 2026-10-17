@@ -7,20 +7,92 @@
 
 pub mod blur;
 pub mod channels3d;
+pub mod compare;
 pub mod cuts;
 pub mod flow;
 pub mod inpaint;
+pub mod pool;
 pub mod scopes;
+pub mod sparse;
 pub mod warp;
 
-use effectcraft_color::{BlendMode, blend_pixel};
+use effectcraft_color::BlendMode;
 use rayon::prelude::*;
 
-pub use blur::{box_blur, directional_blur, gaussian_blur, radial_blur};
+pub use blur::{box_blur, box_blur_plane, directional_blur, gaussian_blur, gaussian_blur_plane, gaussian_support, radial_blur};
 pub use channels3d::AuxChannels;
-pub use warp::{Sampling, WarpOpts, accumulate_warp, composite_warp, composite_warp_reference, resample};
+pub use sparse::{Sparse, gaussian_blur_sparse, resample_sparse};
+pub use warp::{
+    MipChain, Sampling, WarpOpts, accumulate_warp, accumulate_warp_at, accumulate_warp_mips, composite_warp, composite_warp_at, composite_warp_mips,
+    composite_warp_reference, resample, warp_bounds,
+};
 
 pub type Px = [f32; 4];
+
+/// Run `$body` with `$blend` bound to a `Fn(dst, src, noise) -> Px` for `$mode`: the common
+/// modes get their own instance of the body with the mode folded into [`effectcraft_color::blend_pixel`] (no
+/// per-pixel match on the mode), the rest share one. Same function, so the same pixels.
+macro_rules! with_blend_mode {
+    ($mode:expr, $blend:ident, $body:expr) => {{
+        use ::effectcraft_color::BlendMode as M;
+        match $mode {
+            M::Normal => {
+                let $blend = |d: $crate::Px, s: $crate::Px, n: f32| ::effectcraft_color::blend_pixel(M::Normal, d, s, n);
+                $body
+            }
+            M::Add => {
+                let $blend = |d: $crate::Px, s: $crate::Px, n: f32| ::effectcraft_color::blend_pixel(M::Add, d, s, n);
+                $body
+            }
+            M::Multiply => {
+                let $blend = |d: $crate::Px, s: $crate::Px, n: f32| ::effectcraft_color::blend_pixel(M::Multiply, d, s, n);
+                $body
+            }
+            M::Screen => {
+                let $blend = |d: $crate::Px, s: $crate::Px, n: f32| ::effectcraft_color::blend_pixel(M::Screen, d, s, n);
+                $body
+            }
+            M::Overlay => {
+                let $blend = |d: $crate::Px, s: $crate::Px, n: f32| ::effectcraft_color::blend_pixel(M::Overlay, d, s, n);
+                $body
+            }
+            M::SoftLight => {
+                let $blend = |d: $crate::Px, s: $crate::Px, n: f32| ::effectcraft_color::blend_pixel(M::SoftLight, d, s, n);
+                $body
+            }
+            M::HardLight => {
+                let $blend = |d: $crate::Px, s: $crate::Px, n: f32| ::effectcraft_color::blend_pixel(M::HardLight, d, s, n);
+                $body
+            }
+            M::Darken => {
+                let $blend = |d: $crate::Px, s: $crate::Px, n: f32| ::effectcraft_color::blend_pixel(M::Darken, d, s, n);
+                $body
+            }
+            M::Lighten => {
+                let $blend = |d: $crate::Px, s: $crate::Px, n: f32| ::effectcraft_color::blend_pixel(M::Lighten, d, s, n);
+                $body
+            }
+            M::Difference => {
+                let $blend = |d: $crate::Px, s: $crate::Px, n: f32| ::effectcraft_color::blend_pixel(M::Difference, d, s, n);
+                $body
+            }
+            M::LinearDodge => {
+                let $blend = |d: $crate::Px, s: $crate::Px, n: f32| ::effectcraft_color::blend_pixel(M::LinearDodge, d, s, n);
+                $body
+            }
+            M::ColorDodge => {
+                let $blend = |d: $crate::Px, s: $crate::Px, n: f32| ::effectcraft_color::blend_pixel(M::ColorDodge, d, s, n);
+                $body
+            }
+            m => {
+                let $blend = move |d: $crate::Px, s: $crate::Px, n: f32| ::effectcraft_color::blend_pixel(m, d, s, n);
+                $body
+            }
+        }
+    }};
+}
+
+pub(crate) use with_blend_mode;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Image {
@@ -249,19 +321,36 @@ impl Image {
     }
     /// Blend `src` (same size) onto self with a mode and opacity.
     pub fn blend_from(&mut self, src: &Image, mode: BlendMode, opacity: f32, seed: u32) {
-        let w = self.width as usize;
-        self.data.par_chunks_mut(w.max(1)).zip(src.data.par_chunks(w.max(1))).enumerate().for_each(|(y, (d, s))| {
-            for x in 0..d.len() {
-                let mut sp = s[x];
-                if sp[3] <= 0.0 && !mode.is_stencil() {
-                    continue;
+        self.blend_from_at([0, 0], src, [0, 0], mode, opacity, seed);
+    }
+    /// [`Self::blend_from`] between windows of one canvas: self covers the canvas from `origin`,
+    /// `src` from `at` (canvas pixels; the overlap is blended). Pixels `src` doesn't cover are
+    /// left as a transparent source leaves them (non-stencil modes), and Dissolve's noise is the
+    /// canvas's.
+    pub fn blend_from_at(&mut self, origin: [u32; 2], src: &Image, at: [u32; 2], mode: BlendMode, opacity: f32, seed: u32) {
+        let (w, sw) = (self.width as usize, src.width as usize);
+        // src (sx, sy) lands on self (sx + dx, sy + dy).
+        let (dx, dy) = (at[0] as i64 - origin[0] as i64, at[1] as i64 - origin[1] as i64);
+        let (skip_x, skip_y) = ((-dx).max(0) as usize, (-dy).max(0) as usize);
+        let (ax, ay) = (dx.max(0) as usize, dy.max(0) as usize);
+        let rows = self.data.par_chunks_mut(w.max(1)).enumerate().skip(ay).zip(src.data.par_chunks(sw.max(1)).skip(skip_y));
+        let (stencil, dissolve) = (mode.is_stencil(), matches!(mode, BlendMode::Dissolve | BlendMode::DancingDissolve));
+        // The row loop is instantiated per common mode (`blend` has the mode folded in).
+        with_blend_mode!(mode, blend, {
+            rows.for_each(|((y, d), s)| {
+                let (Some(d), Some(s)) = (d.get_mut(ax..), s.get(skip_x..)) else { return };
+                for (x, (d, &sp)) in d.iter_mut().zip(s).enumerate() {
+                    let mut sp = sp;
+                    if sp[3] <= 0.0 && !stencil {
+                        continue;
+                    }
+                    for c in sp.iter_mut() {
+                        *c *= opacity;
+                    }
+                    let n = if dissolve { hash_noise((origin[0] as usize + ax + x) as u32, (origin[1] as usize + y) as u32, seed) } else { 0.5 };
+                    *d = blend(*d, sp, n);
                 }
-                for c in sp.iter_mut() {
-                    *c *= opacity;
-                }
-                let n = if matches!(mode, BlendMode::Dissolve | BlendMode::DancingDissolve) { hash_noise(x as u32, y as u32, seed) } else { 0.5 };
-                d[x] = blend_pixel(mode, d[x], sp, n);
-            }
+            })
         });
     }
     /// Bounding box of non-transparent pixels (x0, y0, x1, y1), None if empty.
@@ -315,6 +404,44 @@ impl Mask {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use effectcraft_color::blend_pixel;
+
+    /// Blending through the per-mode row loops equals `blend_pixel` per pixel, for every mode.
+    #[test]
+    fn blend_from_matches_blend_pixel_for_every_mode() {
+        let px = |x: u32, y: u32, s: u32| {
+            let a = if (x + y).is_multiple_of(5) { 0.0 } else { hash_noise(x, y, s) };
+            [hash_noise(x, y, s + 1) * a, hash_noise(x, y, s + 2) * a * 1.3, hash_noise(x, y, s + 3) * a, a]
+        };
+        let (w, h) = (23u32, 17u32);
+        let mut dst = Image::new(w, h);
+        let mut src = Image::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                dst.set(x, y, px(x, y, 10));
+                src.set(x, y, px(x, y, 20));
+            }
+        }
+        for mode in BlendMode::ALL {
+            let mut out = dst.clone();
+            out.blend_from(&src, mode, 0.7, 3);
+            for y in 0..h {
+                for x in 0..w {
+                    let mut s = src.get(x as i64, y as i64);
+                    let d = dst.get(x as i64, y as i64);
+                    let want = if s[3] <= 0.0 && !mode.is_stencil() {
+                        d
+                    } else {
+                        s = s.map(|v| v * 0.7);
+                        let n = if matches!(mode, BlendMode::Dissolve | BlendMode::DancingDissolve) { hash_noise(x, y, 3) } else { 0.5 };
+                        blend_pixel(mode, d, s, n)
+                    };
+                    let got = out.get(x as i64, y as i64);
+                    assert!(got.iter().zip(&want).all(|(a, b)| a.to_bits() == b.to_bits()), "{mode:?} ({x}, {y}): {got:?} vs {want:?}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn rgba8_roundtrip() {
