@@ -34,6 +34,16 @@ pub const SNAPSHOT: &str = "session.ecproj";
 /// Its metadata ([`SnapshotMeta`]).
 pub const SNAPSHOT_META: &str = "session.json";
 
+/// FNV-1a 64 of `data` (durable content identity for disk-cache keys, #1253).
+pub fn content_hash(data: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in data {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
 /// One stored blob.
 #[derive(Clone, Debug)]
 pub struct Entry {
@@ -45,6 +55,8 @@ pub struct Entry {
     /// Which write this is: new with every write of the key, so a file replaced by another of
     /// the same size still reads as changed (workers are sent it again, #218).
     pub version: u64,
+    /// [`content_hash`] of `data`, stored so disk-cache stamps do not re-hash the file.
+    pub hash: u64,
 }
 
 /// A queued write for the browser storage: `data` = `None` deletes the key.
@@ -69,13 +81,15 @@ impl Mirror {
     /// An entry read from the browser's storage at startup (nothing to flush).
     pub fn load(&mut self, key: &str, data: Arc<[u8]>, modified: f64) {
         let version = self.next_version();
-        self.entries.insert(key.to_string(), Entry { data, modified, persist: true, version });
+        let hash = content_hash(&data);
+        self.entries.insert(key.to_string(), Entry { data, modified, persist: true, version, hash });
     }
 
     pub fn put(&mut self, key: &str, data: Arc<[u8]>, modified: f64, persist: bool) {
         let was_persisted = self.entries.get(key).is_some_and(|e| e.persist);
         let version = self.next_version();
-        self.entries.insert(key.to_string(), Entry { data, modified, persist, version });
+        let hash = content_hash(&data);
+        self.entries.insert(key.to_string(), Entry { data, modified, persist, version, hash });
         if persist || was_persisted {
             self.touch(key);
         }
@@ -192,6 +206,11 @@ impl Store {
     /// The file under `path` with its [`Entry::version`].
     pub fn file_versioned(&self, path: &str) -> Option<(Arc<[u8]>, u64)> {
         self.lock().get(&file_key(path)).map(|e| (e.data.clone(), e.version))
+    }
+
+    /// Size and content hash of the file under `path` (disk-cache stamps, #1253).
+    pub fn file_identity(&self, path: &str) -> Option<(u64, u64)> {
+        self.lock().get(&file_key(path)).map(|e| (e.data.len() as u64, e.hash))
     }
 
     pub fn remove_file(&self, path: &str) -> bool {
@@ -446,6 +465,10 @@ mod tests {
         assert_ne!(a, b);
         assert_eq!(&data[..], b"blue");
         assert_eq!(s.file_versioned("/collision.png").map(|f| f.1), Some(b), "reading doesn't change it");
+        let ha = content_hash(b"red!");
+        let hb = s.file_identity("/collision.png").unwrap();
+        assert_eq!(hb, (4, content_hash(b"blue")));
+        assert_ne!(ha, hb.1);
     }
 
     /// A write that failed is flushed again with the key's latest state (#215).

@@ -258,8 +258,10 @@ pub struct RenderSource {
 /// ([`Frames::identity`]).
 type Identity = (u64, Option<Arc<Project>>);
 
-/// Content keys of (project revision, comp), computed once per revision.
-type ContentKeys = Arc<Mutex<HashMap<(u64, u64), u128>>>;
+/// Content keys of (project revision, comp), computed once per revision while the footage
+/// identity ([`disk_cache::footage_salt`]) is unchanged. A virtual-file replacement that does
+/// not bump the project revision still gets a new key (#1253).
+type ContentKeys = Arc<Mutex<HashMap<(u64, u64), (u64, u128)>>>;
 
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Default)]
@@ -269,7 +271,11 @@ struct ContentKeyJobs {
 }
 
 fn content_key(keys: &ContentKeys, project: &Project, revision: u64, comp: u64) -> u128 {
-    if let Some(k) = keys.lock().ok().and_then(|m| m.get(&(revision, comp)).copied()) {
+    let salt = disk_cache::footage_salt(project);
+    if let Ok(m) = keys.lock()
+        && let Some(&(s, k)) = m.get(&(revision, comp))
+        && s == salt
+    {
         return k;
     }
     let k = disk_cache::comp_content_key(project, ItemId(comp));
@@ -277,7 +283,7 @@ fn content_key(keys: &ContentKeys, project: &Project, revision: u64, comp: u64) 
         if m.len() > 256 {
             m.clear();
         }
-        m.insert((revision, comp), k);
+        m.insert((revision, comp), (salt, k));
     }
     k
 }
@@ -770,8 +776,9 @@ impl Frames {
         }
         #[cfg(not(target_arch = "wasm32"))]
         let content = {
+            let salt = disk_cache::footage_salt(&src.project);
             let known = self.content_keys.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&(base.revision, base.comp)).copied();
-            let Some(content) = known else {
+            let Some(content) = known.and_then(|(s, k)| (s == salt).then_some(k)) else {
                 self.request_content_key(src.project.clone(), base.revision, base.comp);
                 return vec![];
             };

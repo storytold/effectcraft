@@ -15,8 +15,16 @@ use wasm_bindgen::prelude::*;
 
 use crate::store::Store;
 
+fn stamp_virtual_file(path: &str, h: &mut effectcraft_engine::render::disk_cache::Hash128) {
+    if let Some((len, hash)) = STORE.file_identity(path) {
+        h.write_u64(len);
+        h.write_u64(hash);
+    }
+}
+
 /// The page's store (each worker has its own, unpersisted).
 pub static STORE: LazyLock<Arc<Store>> = LazyLock::new(|| {
+    effectcraft_engine::render::disk_cache::set_virtual_file_stamp(Some(stamp_virtual_file));
     let s = Arc::new(Store::default());
     let _ = s.clock.set(js_sys::Date::now);
     s
