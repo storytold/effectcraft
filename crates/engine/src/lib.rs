@@ -344,6 +344,11 @@ fn one_view() -> u8 {
     1
 }
 
+/// `t` as a current time of `comp`: a frame within its duration.
+fn comp_frame_at(comp: &Comp, t: Tick) -> Tick {
+    comp.frame_rate.snap_nearest(t.min(comp.duration - comp.frame_duration()).max(Tick::ZERO))
+}
+
 /// What Copy with Property Links / Copy Expression Only put on the clipboard.
 #[derive(Clone, Debug, PartialEq)]
 pub enum LinkClip {
@@ -860,11 +865,7 @@ impl Session {
 
     pub fn set_time(&mut self, t: Tick) {
         if let Some(c) = self.state.active_comp {
-            let comp = self.project.comp(c);
-            let t = match comp {
-                Some(comp) => comp.frame_rate.snap_nearest(t.clamp(Tick::ZERO, comp.duration - comp.frame_duration())),
-                None => t,
-            };
+            let t = self.project.comp(c).map_or(t, |comp| comp_frame_at(comp, t));
             self.state.times.insert(c, t);
             if self.prefs.general.sync_time_related_items {
                 self.sync_related_times(c, t);
@@ -983,15 +984,24 @@ impl Session {
         self.events.push(Event::OpenComp(id));
     }
 
-    /// The open compositions, as a project file records them ([`effectcraft_project::SavedView`]).
+    /// The open compositions and their current times, as a project file records them
+    /// ([`effectcraft_project::SavedView`]).
     pub fn saved_view(&self) -> effectcraft_project::SavedView {
-        effectcraft_project::SavedView { active_comp: self.state.active_comp, open_comps: self.state.open_comps.clone() }
+        let comp_times = self.state.times.iter().filter(|(id, _)| self.project.comp(**id).is_some()).map(|(id, t)| (*id, *t)).collect();
+        effectcraft_project::SavedView { active_comp: self.state.active_comp, open_comps: self.state.open_comps.clone(), comp_times }
     }
 
-    /// Reopen the compositions a project file was saved with (#748). Ids that no longer name a
-    /// comp are skipped; with none left the project stays on the comp [`Session::replace_project`]
-    /// opened (its first), as files from before the view was saved do.
+    /// Reopen the compositions a project file was saved with (#748), each at its saved current
+    /// time (#1714). Ids that no longer name a comp are skipped; with none left the project stays
+    /// on the comp [`Session::replace_project`] opened (its first), as files from before the view
+    /// was saved do.
     pub fn restore_view(&mut self, view: &effectcraft_project::SavedView) {
+        for (id, t) in &view.comp_times {
+            if let Some(comp) = self.project.comp(*id) {
+                let t = comp_frame_at(comp, *t);
+                self.state.times.insert(*id, t);
+            }
+        }
         let mut open: Vec<ItemId> = Vec::new();
         for id in view.open_comps.iter().copied().filter(|id| self.project.comp(*id).is_some()) {
             if !open.contains(&id) {
