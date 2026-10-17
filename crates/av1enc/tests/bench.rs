@@ -40,11 +40,19 @@ fn lavfi(src: &str, w: usize, h: usize, frames: usize) -> Option<Vec<Pic>> {
 }
 
 fn run(name: &str, pics: &[Pic], rate: RateControl, keyint: u32) {
+    run_with(name, pics, rate, keyint, None);
+}
+
+/// `tiles`: a forced (cols_log2, rows_log2) instead of the layout chosen from the frame size.
+fn run_with(name: &str, pics: &[Pic], rate: RateControl, keyint: u32, tiles: Option<(usize, usize)>) {
     let (w, h) = (pics[0].w, pics[0].h);
     let mut cfg = EncoderConfig::new(w as u32, h as u32, 30, 1);
     cfg.rate = rate;
     cfg.keyint = keyint;
-    let mut enc = Encoder::new(cfg).unwrap();
+    let mut enc = match tiles {
+        Some((c, r)) => Encoder::with_tiles(cfg, c, r).unwrap(),
+        None => Encoder::new(cfg).unwrap(),
+    };
     let mut bytes = 0;
     let mut psnr_sum = 0.0;
     let mut t_key = 0.0;
@@ -133,4 +141,15 @@ fn bench_rate_control() {
     for kbps in [300, 3000] {
         run("testsrc2", &pics, RateControl::Bitrate { kbps }, 60);
     }
+}
+
+/// 2160p: one tile (forced) against the two tile columns chosen for the size.
+#[test]
+#[ignore]
+fn bench_2160p_tiles() {
+    let Some(pics) = lavfi("testsrc2", 3840, 2160, 3) else {
+        return;
+    };
+    run_with("testsrc2 1 tile", &pics, RateControl::ConstantQ(100), 30, Some((0, 0)));
+    run("testsrc2 2 tiles", &pics, RateControl::ConstantQ(100), 30);
 }

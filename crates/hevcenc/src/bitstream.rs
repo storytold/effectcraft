@@ -104,6 +104,20 @@ pub fn nal_unit(nal_type: u8, rbsp: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Size of `data` with emulation prevention bytes inserted, starting after a non-zero byte (WPP
+/// substreams and the slice header each end in one: the alignment bit is 1).
+pub fn escaped_len(data: &[u8]) -> usize {
+    let (mut n, mut zeros) = (data.len(), 0);
+    for &b in data {
+        if zeros >= 2 && b <= 3 {
+            n += 1;
+            zeros = 0;
+        }
+        zeros = if b == 0 { zeros + 1 } else { 0 };
+    }
+    n
+}
+
 pub const NAL_TRAIL_R: u8 = 1;
 pub const NAL_IDR_N_LP: u8 = 20;
 pub const NAL_VPS: u8 = 32;
@@ -129,7 +143,9 @@ mod tests {
 
     #[test]
     fn emulation_prevention() {
-        let n = nal_unit(1, &[0, 0, 1, 0, 0, 0, 0, 0, 4]);
+        let raw = [0, 0, 1, 0, 0, 0, 0, 0, 4];
+        let n = nal_unit(1, &raw);
         assert_eq!(&n[2..], &[0, 0, 3, 1, 0, 0, 3, 0, 0, 3, 0, 4]);
+        assert_eq!(escaped_len(&raw), n.len() - 2);
     }
 }

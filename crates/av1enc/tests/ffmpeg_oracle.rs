@@ -47,8 +47,13 @@ fn ivf(w: usize, h: usize, packets: &[Packet]) -> Vec<u8> {
 /// decoded frame with the encoder's reconstruction.
 /// Returns the loop filter levels used.
 fn check(name: &str, cfg: EncoderConfig, pics: &[Pic]) -> Vec<u32> {
-    let (w, h, bd) = (cfg.width as usize, cfg.height as usize, cfg.bit_depth);
-    let mut enc = Encoder::new(cfg).expect("config");
+    check_with(name, Encoder::new(cfg).expect("config"), pics)
+}
+
+/// `check` with a given encoder (e.g. one with a forced tile layout).
+fn check_with(name: &str, mut enc: Encoder, pics: &[Pic]) -> Vec<u32> {
+    let c = enc.config();
+    let (w, h, bd) = (c.width as usize, c.height as usize, c.bit_depth);
     let mut packets = Vec::new();
     let mut recons = Vec::new();
     let mut levels = Vec::new();
@@ -144,6 +149,34 @@ fn libdav1d_decodes_1080p() {
     }
     let pics: Vec<Pic> = (0..3).map(|t| noisy(1920, 1080, t)).collect();
     check("1080p", cfg(1920, 1080, 8, RateControl::ConstantQ(120), 30), &pics);
+}
+
+/// Several tiles: columns and rows with partial last ones, and a frame wider than
+/// MAX_TILE_WIDTH whose tile columns come from its size.
+#[test]
+fn libdav1d_decodes_tiles() {
+    if !have_libdav1d() {
+        return;
+    }
+    let pics: Vec<Pic> = (0..4).map(|t| noisy(320, 200, t)).collect();
+    let levels = check_with("tiles-3x2", Encoder::with_tiles(cfg(320, 200, 8, RateControl::ConstantQ(160), 30), 2, 1).expect("config"), &pics);
+    assert!(levels.iter().any(|&l| l > 0), "the deblocking filter crosses tile borders");
+    let pics: Vec<Pic> = (0..3).map(|t| synth(250, 150, 10, t)).collect();
+    check_with("tiles-4x3-10", Encoder::with_tiles(cfg(250, 150, 10, RateControl::ConstantQ(110), 30), 3, 2).expect("config"), &pics);
+    let pics = vec![noise(200, 72, 8, 5)];
+    check_with("tiles-noise", Encoder::with_tiles(cfg(200, 72, 8, RateControl::ConstantQ(10), 1), 2, 0).expect("config"), &pics);
+    let pics: Vec<Pic> = (0..3).map(|t| noisy(4200, 72, t)).collect();
+    check("wide-4200", cfg(4200, 72, 8, RateControl::ConstantQ(120), 30), &pics);
+}
+
+/// 30x77 superblocks exceed MAX_TILE_AREA in one tile: the size alone asks for two tile rows.
+#[test]
+fn libdav1d_decodes_tile_rows() {
+    if !have_libdav1d() {
+        return;
+    }
+    let pics: Vec<Pic> = (0..2).map(|t| synth(1920, 4928, 8, t)).collect();
+    check("rows-1920x4928", cfg(1920, 4928, 8, RateControl::ConstantQ(160), 30), &pics);
 }
 
 fn noisy(w: usize, h: usize, t: usize) -> Pic {

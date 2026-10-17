@@ -204,7 +204,7 @@ pub fn pps() -> Vec<u8> {
     w.put(0, 1); // weighted_bipred_flag
     w.put(0, 1); // transquant_bypass_enabled_flag
     w.put(0, 1); // tiles_enabled_flag
-    w.put(0, 1); // entropy_coding_sync_enabled_flag
+    w.put(1, 1); // entropy_coding_sync_enabled_flag (WPP: CTU rows code in parallel)
     w.put(0, 1); // pps_loop_filter_across_slices_enabled_flag
     w.put(1, 1); // deblocking_filter_control_present_flag
     w.put(0, 1); // deblocking_filter_override_enabled_flag

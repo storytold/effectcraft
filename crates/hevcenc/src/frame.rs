@@ -1,14 +1,23 @@
 //! Picture coding: CTU loop, rate-distortion mode decisions (with a CABAC bit estimator) and the
 //! slice_segment_data() syntax (7.3.8): coding quadtree, coding unit, prediction unit, transform tree
 //! and residual coding. Reconstruction mirrors the decoding process exactly (no in-loop filters).
+//!
+//! CTU rows are coded in parallel as wavefronts (WPP, `entropy_coding_sync_enabled_flag`): row `r`
+//! codes CTU `c` once row `r - 1` has finished CTU `c + 1`, starts from the CABAC contexts row
+//! `r - 1` had after its second CTU, and is its own substream. Each worker keeps only a band of the
+//! picture (its CTU row plus the line above, copied from the row above as it completes).
 
-use crate::cabac::{BIT, CabacEncoder, Estimator, Sink};
+use crate::bitstream::BitWriter;
+use crate::cabac::{BIT, CabacEncoder, Contexts, Estimator, Sink};
 use crate::inter::{self, PlaneRef};
 use crate::intra::{self, Refs};
 use crate::me::MeRef;
 use crate::params::{LOG2_CTB, LOG2_MAX_TB, LOG2_MIN_CB, MAX_MERGE_CAND};
 use crate::tables::*;
 use crate::transform;
+use rayon::prelude::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 
 pub const F_INTRA: u8 = 1;
 pub const F_SKIP: u8 = 2;
@@ -59,12 +68,117 @@ struct Tb {
 }
 
 /// Saved samples and block state of a square region.
+#[derive(Default)]
 struct Snap {
     x: usize,
     y: usize,
     n: usize,
     planes: [Vec<u16>; 3],
     blk: Vec<Blk>,
+}
+
+/// A coded picture: the slice data as one substream per CTU row (WPP), the reconstruction before
+/// deblocking and the 4x4 block state.
+pub struct Picture {
+    pub substreams: Vec<Vec<u8>>,
+    pub rec: [Vec<u16>; 3],
+    pub blk: Vec<Blk>,
+}
+
+/// What a CTU row has published for the row below.
+struct EdgeState {
+    /// CTUs finished.
+    done: usize,
+    /// The row's bottom luma / Cb / Cr lines and bottom 4x4 block row (full picture width, filled
+    /// CTU by CTU).
+    lines: [Vec<u16>; 3],
+    blk: Vec<Blk>,
+    /// CABAC contexts after the row's second CTU.
+    ctx: Option<Contexts>,
+}
+
+/// One CTU row's progress, shared with the row below it.
+struct RowEdge {
+    st: Mutex<EdgeState>,
+    ready: Condvar,
+}
+
+impl RowEdge {
+    fn new(w: usize) -> RowEdge {
+        let st = EdgeState { done: 0, lines: [vec![0; w], vec![0; w / 2], vec![0; w / 2]], blk: vec![Blk::default(); w / 4], ctx: None };
+        RowEdge { st: Mutex::new(st), ready: Condvar::new() }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, EdgeState> {
+        self.st.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Block until the row has finished `n` CTUs.
+    fn wait_for(&self, n: usize) -> MutexGuard<'_, EdgeState> {
+        let mut g = self.lock();
+        while g.done < n {
+            g = self.ready.wait(g).unwrap_or_else(PoisonError::into_inner);
+        }
+        g
+    }
+}
+
+/// Marks a row finished when its worker is done with it, also when the worker unwinds, so the row
+/// below never waits forever.
+struct RowDone<'e>(&'e RowEdge);
+
+impl Drop for RowDone<'_> {
+    fn drop(&mut self) {
+        self.0.lock().done = usize::MAX;
+        self.0.ready.notify_all();
+    }
+}
+
+/// Code a picture (one slice, WPP): CTU rows in parallel as wavefronts. The bitstream doesn't
+/// depend on the number of threads (each CTU sees exactly the same neighbours and contexts).
+#[allow(clippy::too_many_arguments)]
+pub fn encode_picture(
+    bd: u32,
+    w: usize,
+    h: usize,
+    kind: SliceKind,
+    slice_qp: i32,
+    src: &[Vec<u16>; 3],
+    refp: Option<&[Vec<u16>; 3]>,
+    me: Option<&MeRef>,
+    init: Contexts,
+) -> Picture {
+    let ctb = 1usize << LOG2_CTB;
+    let hctb = h.div_ceil(ctb);
+    let edges: Vec<RowEdge> = (0..hctb).map(|_| RowEdge::new(w)).collect();
+    let pic = Mutex::new(Picture {
+        substreams: vec![Vec::new(); hctb],
+        rec: [vec![0; w * h], vec![0; w * h / 4], vec![0; w * h / 4]],
+        blk: vec![Blk::default(); (w / 4) * (h / 4)],
+    });
+    // Rows are handed out in order, so a row only ever waits on rows already being coded.
+    // Blocking on a `Condvar` inside a rayon job is safe only because a row's coding never calls
+    // into rayon: a worker that joined would let its thread steal another row, which could then
+    // wait on the row beneath it on the same stack. Keep `code_row` / `store_row` rayon-free
+    // (the motion search reference, the one parallel step, is built before this call).
+    let next = AtomicUsize::new(0);
+    let workers = hctb.min(rayon::current_num_threads()).max(1);
+    (0..workers).into_par_iter().for_each(|_| {
+        let mut fc = FrameCoder::new(bd, w, h, kind, slice_qp, src, refp, me);
+        loop {
+            let r = next.fetch_add(1, Ordering::Relaxed);
+            let Some(mine) = edges.get(r) else { break };
+            let _done = RowDone(mine);
+            let above = r.checked_sub(1).and_then(|a| edges.get(a));
+            let bytes = fc.code_row(r, &init, above, mine);
+            let mut p = pic.lock().unwrap_or_else(PoisonError::into_inner);
+            fc.store_row(r * ctb, &mut p);
+            if let Some(s) = p.substreams.get_mut(r) {
+                *s = bytes;
+            }
+        }
+    });
+    pic.into_inner().unwrap_or_else(PoisonError::into_inner)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -84,20 +198,26 @@ pub struct FrameCoder<'a> {
     hctb: usize,
     pub kind: SliceKind,
     /// QP' (with QpBdOffset) for luma and chroma.
-    slice_qp: i32,
     qp_y: i32,
     qp_c: i32,
     lambda: f64,
     lambda_sad: f64,
     src: &'a [Vec<u16>; 3],
-    pub rec: [Vec<u16>; 3],
+    /// Reconstruction of the band being coded: luma rows `oy..oy + CTB + 1`, chroma rows from
+    /// `oy / 2` (the CTU row and the line above it), at the picture strides.
+    rec: [Vec<u16>; 3],
     refp: Option<&'a [Vec<u16>; 3]>,
     me: Option<&'a MeRef>,
+    /// 4x4 block state of the band: block rows from `oy / 4`.
     blk: Vec<Blk>,
+    /// First luma row of the band (the row above the CTU row; 0 for the first row).
+    oy: usize,
     tbs: Vec<Tb>,
     coefs: Vec<i32>,
     pred: Vec<i16>,
     scratch: [Vec<i32>; 2],
+    /// Spent snapshots, reused so mode decisions don't allocate.
+    snaps: Vec<Snap>,
 }
 
 #[inline]
@@ -141,20 +261,21 @@ impl<'a> FrameCoder<'a> {
             wctb: w.div_ceil(ctb),
             hctb: h.div_ceil(ctb),
             kind,
-            slice_qp,
             qp_y: slice_qp + off,
             qp_c,
             lambda,
             lambda_sad: lambda.sqrt(),
             src,
-            rec: [vec![0; w * h], vec![0; w * h / 4], vec![0; w * h / 4]],
+            rec: [vec![0; w * (ctb + 1)], vec![0; (w / 2) * (ctb / 2 + 1)], vec![0; (w / 2) * (ctb / 2 + 1)]],
             refp,
             me,
-            blk: vec![Blk::default(); (w / 4) * (h / 4)],
+            blk: vec![Blk::default(); (w / 4) * (ctb / 4 + 1)],
+            oy: 0,
             tbs: Vec::with_capacity(16),
             coefs: Vec::with_capacity(64 * 64 * 2),
             pred: vec![0; 64 * 64],
             scratch: [vec![0; 32 * 32], vec![0; 32 * 32]],
+            snaps: Vec::new(),
         }
     }
 
@@ -178,14 +299,27 @@ impl<'a> FrameCoder<'a> {
         }
     }
 
+    /// Index in `rec[c]` of the component sample (x, y) (picture coordinates inside the band).
+    #[inline]
+    fn ri(&self, c: usize, x: usize, y: usize) -> usize {
+        if c == 0 { (y - self.oy) * self.w + x } else { (y - self.oy / 2) * self.cw + x }
+    }
+
+    /// Index in `blk` of the 4x4 block (bx, by).
+    #[inline]
+    fn bi(&self, bx: usize, by: usize) -> usize {
+        (by - self.oy / 4) * self.w4 + bx
+    }
+
     #[inline]
     fn blk_at(&self, x: i32, y: i32) -> &Blk {
-        &self.blk[(y as usize >> 2) * self.w4 + (x as usize >> 2)]
+        &self.blk[self.bi(x as usize >> 2, y as usize >> 2)]
     }
 
     fn fill(&mut self, x: usize, y: usize, n: usize, f: impl Fn(&mut Blk)) {
         for by in (y >> 2)..((y + n) >> 2) {
-            for b in &mut self.blk[by * self.w4 + (x >> 2)..by * self.w4 + ((x + n) >> 2)] {
+            let i = self.bi(x >> 2, by);
+            for b in &mut self.blk[i..i + (n >> 2)] {
                 f(b);
             }
         }
@@ -199,59 +333,85 @@ impl<'a> FrameCoder<'a> {
         for ty in (y..y + n).step_by(t) {
             for tx in (x..x + n).step_by(t) {
                 for by in ty / 4..(ty + t) / 4 {
-                    self.blk[by * self.w4 + tx / 4].flags |= E_EDGE_V;
+                    let i = self.bi(tx / 4, by);
+                    self.blk[i].flags |= E_EDGE_V;
                 }
-                for b in &mut self.blk[(ty / 4) * self.w4 + tx / 4..(ty / 4) * self.w4 + (tx + t) / 4] {
+                let i = self.bi(tx / 4, ty / 4);
+                for b in &mut self.blk[i..i + t / 4] {
                     b.flags |= E_EDGE_H;
                 }
             }
         }
     }
 
-    /// In-loop deblocking of the finished picture.
-    pub fn deblock(&mut self) {
-        crate::deblock::deblock(&mut self.rec, &self.blk, self.w, self.h, self.slice_qp, self.bd);
-    }
-
-    fn snap(&self, x: usize, y: usize, n: usize) -> Snap {
-        let mut planes: [Vec<u16>; 3] = Default::default();
-        for (c, p) in planes.iter_mut().enumerate() {
-            let (px, py, pn, stride) = if c == 0 { (x, y, n, self.w) } else { (x / 2, y / 2, n / 2, self.cw) };
+    /// Snapshot of the region (in a recycled snapshot's buffers when there is one).
+    fn snap(&mut self, x: usize, y: usize, n: usize) -> Snap {
+        let mut s = self.snaps.pop().unwrap_or_default();
+        for (c, p) in s.planes.iter_mut().enumerate() {
+            let (px, py, pn) = if c == 0 { (x, y, n) } else { (x / 2, y / 2, n / 2) };
+            p.clear();
             p.reserve(pn * pn);
             for r in 0..pn {
-                p.extend_from_slice(&self.rec[c][(py + r) * stride + px..][..pn]);
+                p.extend_from_slice(&self.rec[c][self.ri(c, px, py + r)..][..pn]);
             }
         }
-        let mut blk = Vec::with_capacity((n / 4) * (n / 4));
+        s.blk.clear();
+        s.blk.reserve((n / 4) * (n / 4));
         for by in (y >> 2)..((y + n) >> 2) {
-            blk.extend_from_slice(&self.blk[by * self.w4 + (x >> 2)..by * self.w4 + ((x + n) >> 2)]);
+            let i = self.bi(x >> 2, by);
+            s.blk.extend_from_slice(&self.blk[i..i + (n >> 2)]);
         }
-        Snap { x, y, n, planes, blk }
+        (s.x, s.y, s.n) = (x, y, n);
+        s
     }
 
     fn restore(&mut self, s: &Snap) {
         let (x, y, n) = (s.x, s.y, s.n);
         for c in 0..3 {
-            let (px, py, pn, stride) = if c == 0 { (x, y, n, self.w) } else { (x / 2, y / 2, n / 2, self.cw) };
+            let (px, py, pn) = if c == 0 { (x, y, n) } else { (x / 2, y / 2, n / 2) };
             for r in 0..pn {
-                self.rec[c][(py + r) * stride + px..][..pn].copy_from_slice(&s.planes[c][r * pn..r * pn + pn]);
+                let o = self.ri(c, px, py + r);
+                self.rec[c][o..o + pn].copy_from_slice(&s.planes[c][r * pn..r * pn + pn]);
             }
         }
         let bw = n / 4;
         for (i, by) in ((y >> 2)..((y + n) >> 2)).enumerate() {
-            self.blk[by * self.w4 + (x >> 2)..by * self.w4 + (x >> 2) + bw].copy_from_slice(&s.blk[i * bw..i * bw + bw]);
+            let o = self.bi(x >> 2, by);
+            self.blk[o..o + bw].copy_from_slice(&s.blk[i * bw..i * bw + bw]);
         }
     }
 
     // ---------------------------------------------------------------------------------------
     // picture loop
 
-    /// Code all CTUs of the picture into `enc` (one slice); the caller flushes the encoder.
-    pub fn encode(&mut self, enc: &mut CabacEncoder) {
+    /// Code CTU row `r` as one WPP substream (byte aligned, ending with `end_of_subset_one_bit` or,
+    /// in the last row, `end_of_slice_segment_flag`). `init`: the slice's initial contexts;
+    /// `above`: the row above (waited on CTU by CTU); `mine`: where this row publishes its progress.
+    fn code_row(&mut self, r: usize, init: &Contexts, above: Option<&RowEdge>, mine: &RowEdge) -> Vec<u8> {
         let ctb = 1usize << LOG2_CTB;
-        let total = self.wctb * self.hctb;
-        for i in 0..total {
-            let (x, y) = ((i % self.wctb) * ctb, (i / self.wctb) * ctb);
+        let y = r * ctb;
+        self.oy = y.saturating_sub(1);
+        let mut enc: Option<CabacEncoder> = None;
+        for c in 0..self.wctb {
+            let x = c * ctb;
+            // Wait for the row above to finish CTU c + 1 (the above-right neighbour), then copy its
+            // bottom line over the band's first row.
+            let mut ctx = *init;
+            if let Some(a) = above {
+                let e = a.wait_for((c + 2).min(self.wctb));
+                let (x0, x1) = (x, (x + 2 * ctb).min(self.w));
+                self.rec[0][x0..x1].copy_from_slice(&e.lines[0][x0..x1]);
+                for k in 1..3 {
+                    self.rec[k][x0 / 2..x1 / 2].copy_from_slice(&e.lines[k][x0 / 2..x1 / 2]);
+                }
+                self.blk[x0 / 4..x1 / 4].copy_from_slice(&e.blk[x0 / 4..x1 / 4]);
+                // Context synchronisation (9.3.2.4): from the row above after its second CTU when
+                // that CTU exists, else a fresh initialisation.
+                if let Some(saved) = e.ctx {
+                    ctx = saved;
+                }
+            }
+            let enc = enc.get_or_insert_with(|| CabacEncoder::new(BitWriter::new(), ctx));
             let mut est = Estimator::new(enc.ctx);
             let mut decs = Vec::with_capacity(64);
             self.decide(x, y, LOG2_CTB, 0, &mut est, &mut decs);
@@ -259,8 +419,61 @@ impl<'a> FrameCoder<'a> {
             self.write_cq(enc, x, y, LOG2_CTB, 0, &decs, &mut idx);
             debug_assert_eq!(idx, decs.len());
             debug_assert_eq!(est.ctx, enc.ctx);
-            enc.terminate((i + 1 == total) as u32); // end_of_slice_segment_flag
+            // Storage for the row below (9.3.2.3) after the second CTU.
+            let saved = (c == 1).then_some(enc.ctx);
+            let last_row = r + 1 == self.hctb;
+            if c + 1 == self.wctb {
+                enc.terminate(last_row as u32); // end_of_slice_segment_flag
+                if !last_row {
+                    enc.terminate(1); // end_of_subset_one_bit (then byte_alignment by the flush)
+                }
+            } else {
+                enc.terminate(0);
+            }
+            self.publish(mine, c, y, saved);
         }
+        enc.map(|e| e.finish().into_bytes()).unwrap_or_default()
+    }
+
+    /// Hand the bottom line and 4x4 block row of CTU `c` of the row at luma row `y` (just coded)
+    /// to the row below.
+    fn publish(&self, mine: &RowEdge, c: usize, y: usize, ctx: Option<Contexts>) {
+        let ctb = 1usize << LOG2_CTB;
+        let (x0, x1) = (c * ctb, ((c + 1) * ctb).min(self.w));
+        // A row below exists only under a complete CTU row, so the bottom line is inside the
+        // picture whenever it is read.
+        let y = y + ctb - 1;
+        let mut e = mine.lock();
+        if y < self.h {
+            let o = self.ri(0, x0, y);
+            e.lines[0][x0..x1].copy_from_slice(&self.rec[0][o..o + (x1 - x0)]);
+            for k in 1..3 {
+                let o = self.ri(k, x0 / 2, y / 2);
+                e.lines[k][x0 / 2..x1 / 2].copy_from_slice(&self.rec[k][o..o + (x1 - x0) / 2]);
+            }
+            let o = self.bi(x0 / 4, y / 4);
+            e.blk[x0 / 4..x1 / 4].copy_from_slice(&self.blk[o..o + (x1 - x0) / 4]);
+        }
+        if ctx.is_some() {
+            e.ctx = ctx;
+        }
+        e.done = c + 1;
+        drop(e);
+        mine.ready.notify_all();
+    }
+
+    /// Copy the band's CTU row (luma rows `y..y + CTB` and the matching chroma and block rows) into
+    /// the picture.
+    fn store_row(&self, y: usize, pic: &mut Picture) {
+        let ctb = 1usize << LOG2_CTB;
+        let y1 = (y + ctb).min(self.h);
+        for c in 0..3 {
+            let (stride, ya, yb) = if c == 0 { (self.w, y, y1) } else { (self.cw, y / 2, y1 / 2) };
+            let o = self.ri(c, 0, ya);
+            pic.rec[c][ya * stride..yb * stride].copy_from_slice(&self.rec[c][o..o + (yb - ya) * stride]);
+        }
+        let o = self.bi(0, y / 4);
+        pic.blk[(y / 4) * self.w4..(y1 / 4) * self.w4].copy_from_slice(&self.blk[o..o + (y1 / 4 - y / 4) * self.w4]);
     }
 
     fn write_split<S: Sink>(&self, s: &mut S, x: usize, y: usize, depth: u32, split: bool) {
@@ -328,7 +541,10 @@ impl<'a> FrameCoder<'a> {
                 let (eff, dist) = me.encode_cu(&mut e, x, y, log2, depth, mode);
                 let cost = me.cost(dist, e.bits - base);
                 if best.as_ref().is_none_or(|b| cost < b.0) {
-                    *best = Some((cost, e, me.snap(x, y, n), eff));
+                    let snap = me.snap(x, y, n);
+                    if let Some(old) = best.replace((cost, e, snap, eff)) {
+                        me.snaps.push(old.2);
+                    }
                 }
             };
             let mut inter_satd = u64::MAX;
@@ -377,6 +593,9 @@ impl<'a> FrameCoder<'a> {
             if cost < limit {
                 *est = e;
                 decs.extend(d2);
+                if let Some(b) = best {
+                    self.snaps.push(b.2);
+                }
                 return cost;
             }
         }
@@ -384,6 +603,7 @@ impl<'a> FrameCoder<'a> {
         // slices); without one, report an infinite cost.
         let Some((cost, e, snap, mode)) = best else { return f64::INFINITY };
         self.restore(&snap);
+        self.snaps.push(snap);
         *est = e;
         decs.push(CuDec { x: x as u32, y: y as u32, log2, mode });
         cost
@@ -535,7 +755,8 @@ impl<'a> FrameCoder<'a> {
             for r in 0..pn {
                 let o = (py + r) * stride + px;
                 let a = &self.src[c][o..o + pn];
-                let b = &self.rec[c][o..o + pn];
+                let ro = self.ri(c, px, py + r);
+                let b = &self.rec[c][ro..ro + pn];
                 d += a.iter().zip(b).map(|(&p, &q)| (p as i64 - q as i64).pow(2) as u64).sum::<u64>();
             }
         }
@@ -550,14 +771,16 @@ impl<'a> FrameCoder<'a> {
         if let Some(m) = intra_mode {
             let refs = self.build_refs(c, x, y, log2);
             let bd = self.bd;
-            predict_from_refs(&refs, c, m, n, bd, &mut self.rec[c][y * stride + x..], stride);
+            let o = self.ri(c, x, y);
+            predict_from_refs(&refs, c, m, n, bd, &mut self.rec[c][o..], stride);
         }
         let mut scr = std::mem::take(&mut self.scratch);
         let [r, coef] = &mut scr;
         for yy in 0..n {
             let o = (y + yy) * stride + x;
+            let ro = self.ri(c, x, y + yy);
             for xx in 0..n {
-                r[yy * n + xx] = self.src[c][o + xx] as i32 - self.rec[c][o + xx] as i32;
+                r[yy * n + xx] = self.src[c][o + xx] as i32 - self.rec[c][ro + xx] as i32;
             }
         }
         let intra = intra_mode.is_some();
@@ -581,7 +804,7 @@ impl<'a> FrameCoder<'a> {
             transform::inverse(d, n, dst, self.bd);
             let max = (1i32 << self.bd) - 1;
             for yy in 0..n {
-                let o = (y + yy) * stride + x;
+                let o = self.ri(c, x, y + yy);
                 for xx in 0..n {
                     let v = &mut self.rec[c][o + xx];
                     *v = (*v as i32 + d[yy * n + xx]).clamp(0, max) as u16;
@@ -602,7 +825,6 @@ impl<'a> FrameCoder<'a> {
         let (x0, y0) = (x0 as i32, y0 as i32);
         let (xl, yl) = (x0 * sc, y0 * sc);
         let unit = 4 / sc as usize;
-        let stride = if c == 0 { self.w } else { self.cw };
         let mut al = [false; 129];
         let mut at = [false; 129];
         let plane = &self.rec[c];
@@ -610,7 +832,7 @@ impl<'a> FrameCoder<'a> {
         if self.zavail(xl, yl, xl - 1, yl - 1) {
             al[0] = true;
             at[0] = true;
-            let v = plane[(y0 - 1) as usize * stride + (x0 - 1) as usize];
+            let v = plane[self.ri(c, (x0 - 1) as usize, (y0 - 1) as usize)];
             r.left[0] = v;
             r.top[0] = v;
         }
@@ -620,12 +842,12 @@ impl<'a> FrameCoder<'a> {
             if self.zavail(xl, yl, xl - 1, yn * sc) {
                 for i in 0..unit {
                     al[1 + k + i] = true;
-                    r.left[1 + k + i] = plane[(yn as usize + i) * stride + (x0 - 1) as usize];
+                    r.left[1 + k + i] = plane[self.ri(c, (x0 - 1) as usize, yn as usize + i)];
                 }
             }
             let xn = x0 + k as i32;
             if self.zavail(xl, yl, xn * sc, yl - 1) {
-                let o = (y0 - 1) as usize * stride + xn as usize;
+                let o = self.ri(c, xn as usize, (y0 - 1) as usize);
                 for i in 0..unit {
                     at[1 + k + i] = true;
                     r.top[1 + k + i] = plane[o + i];
@@ -878,7 +1100,8 @@ impl<'a> FrameCoder<'a> {
             } else {
                 inter::mc_chroma(pr, self.bd, px as i32, py as i32, mv, pn, pn, &mut self.pred);
             }
-            inter::put_uni(&self.pred, pn, pn, self.bd, &mut self.rec[c][py * pw + px..], pw);
+            let o = self.ri(c, px, py);
+            inter::put_uni(&self.pred, pn, pn, self.bd, &mut self.rec[c][o..], pw);
         }
     }
 

@@ -2,6 +2,8 @@
 //! references equal a decoder's. Segmentation and loop filter deltas are off and the sharpness
 //! is 0 in the frames this encoder writes.
 
+use rayon::prelude::*;
+
 use crate::pred::Plane;
 use crate::tables::*;
 
@@ -20,35 +22,77 @@ pub(crate) struct LfInfo<'a> {
 
 /// Applies the loop filter with `loop_filter_level[ 0..4 ]` to `planes`. For level search
 /// (`luma_only`), only plane 0 and only every `sb_row_step`-th superblock row are filtered.
+///
+/// The vertical edges of a row of 4x4 units only change that row's samples, and the horizontal
+/// edges of a column of 4x4 units only that column's, so the first pass runs on superblock rows
+/// and the second on superblock columns (filtered in copies) in parallel, with exactly the
+/// result of the raster order.
 pub(crate) fn loop_filter(planes: &mut [Plane; 3], info: &LfInfo, level: [u32; 4], bit_depth: u32, luma_only: bool, sb_row_step: usize) {
     if level[0] == 0 && level[1] == 0 {
         return;
     }
     let nplanes = if luma_only { 1 } else { 3 };
+    let sb_row_step = sb_row_step.max(1);
     for (plane, pl) in planes.iter_mut().enumerate().take(nplanes) {
         if plane > 0 && level[1 + plane] == 0 {
             continue;
         }
-        for pass in 0..2 {
-            let step = if plane == 0 { 1 } else { 2 };
-            let mut row = 0;
-            while row < info.mi_rows {
-                if !(row >> 4).is_multiple_of(sb_row_step) {
-                    row += step;
-                    continue;
+        let s = (plane > 0) as usize;
+        let step = 1 << s;
+        let sb = 64 >> s;
+        let stride = pl.stride;
+        // pass 0: vertical edges, one superblock row each
+        pl.data.par_chunks_mut((sb * stride).max(1)).enumerate().filter(|(sbr, _)| sbr.is_multiple_of(sb_row_step)).for_each(|(sbr, chunk)| {
+            let mut v = View { data: chunk, stride, x0: 0, y0: sbr * sb };
+            for row in (sbr * 16..((sbr + 1) * 16).min(info.mi_rows)).step_by(step) {
+                for col in (0..info.mi_cols).step_by(step) {
+                    edge(&mut v, info, level, bit_depth, plane, 0, row, col);
                 }
-                let mut col = 0;
-                while col < info.mi_cols {
-                    edge(pl, info, level, bit_depth, plane, pass, row, col);
-                    col += step;
+            }
+        });
+        // pass 1: horizontal edges, one superblock column each
+        let rows = pl.data.len() / stride.max(1);
+        let stripes: Vec<(usize, Vec<u16>)> = (0..stride.div_ceil(sb))
+            .into_par_iter()
+            .map(|sbc| {
+                let (x0, x1) = (sbc * sb, ((sbc + 1) * sb).min(stride));
+                let w = x1 - x0;
+                let mut buf = Vec::with_capacity(w * rows);
+                for y in 0..rows {
+                    buf.extend_from_slice(pl.data.get(y * stride + x0..y * stride + x1).unwrap_or_default());
                 }
-                row += step;
+                let mut v = View { data: &mut buf, stride: w, x0, y0: 0 };
+                for row in (0..info.mi_rows).step_by(step) {
+                    if !(row >> 4).is_multiple_of(sb_row_step) {
+                        continue;
+                    }
+                    for col in (sbc * 16..((sbc + 1) * 16).min(info.mi_cols)).step_by(step) {
+                        edge(&mut v, info, level, bit_depth, plane, 1, row, col);
+                    }
+                }
+                (x0, buf)
+            })
+            .collect();
+        for (x0, buf) in stripes {
+            let w = buf.len() / rows.max(1);
+            for (y, src) in buf.chunks_exact(w.max(1)).enumerate() {
+                if let Some(d) = pl.data.get_mut(y * stride + x0..y * stride + x0 + w) {
+                    d.copy_from_slice(src);
+                }
             }
         }
     }
 }
 
-fn edge(pl: &mut Plane, info: &LfInfo, level: [u32; 4], bd: u32, plane: usize, pass: usize, row: usize, col: usize) {
+/// Samples of a plane from (x0, y0) on: a band of whole rows or a copied stripe of columns.
+struct View<'a> {
+    data: &'a mut [u16],
+    stride: usize,
+    x0: usize,
+    y0: usize,
+}
+
+fn edge(pl: &mut View, info: &LfInfo, level: [u32; 4], bd: u32, plane: usize, pass: usize, row: usize, col: usize) {
     let s = (plane > 0) as usize;
     let (dx, dy) = if pass == 0 { (1usize, 0usize) } else { (0, 1) };
     let x = col * 4;
@@ -94,10 +138,10 @@ fn edge(pl: &mut Plane, info: &LfInfo, level: [u32; 4], bd: u32, plane: usize, p
 }
 
 #[inline]
-fn sample_filter(pl: &mut Plane, x: usize, y: usize, plane: usize, limit: i32, blimit: i32, thresh: i32, dx: isize, dy: isize, filter_size: usize, bd: u32) {
+fn sample_filter(pl: &mut View, x: usize, y: usize, plane: usize, limit: i32, blimit: i32, thresh: i32, dx: isize, dy: isize, filter_size: usize, bd: u32) {
     let stride = pl.stride as isize;
     let step = dy * stride + dx;
-    let base = y as isize * stride + x as isize;
+    let base = (y - pl.y0) as isize * stride + (x - pl.x0) as isize;
     let reach: isize = if filter_size >= 16 { 7 } else { 4 };
     let mut v = [0i32; 16];
     for k in -reach..reach {

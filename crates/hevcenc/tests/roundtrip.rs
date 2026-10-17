@@ -132,12 +132,19 @@ fn ffmpeg_available() -> bool {
     Command::new("ffmpeg").arg("-version").output().map(|o| o.status.success()).unwrap_or(false)
 }
 
-/// Decode the Annex-B stream with ffmpeg and require bit-exact equality and an empty stderr.
+/// Decode the Annex-B stream with ffmpeg and require bit-exact equality and an empty stderr: once
+/// sequentially and once with slice threads, which decode the WPP substreams in parallel from
+/// the slice header's entry points.
 fn check_ffmpeg(run: &Run, w: usize, h: usize, bd: u32, tag: &str) {
     if !ffmpeg_available() {
         eprintln!("ffmpeg not found; skipping the ffmpeg oracle");
         return;
     }
+    check_ffmpeg_with(run, w, h, bd, tag, &[]);
+    check_ffmpeg_with(run, w, h, bd, &format!("{tag}-wpp"), &["-threads", "4", "-thread_type", "slice"]);
+}
+
+fn check_ffmpeg_with(run: &Run, w: usize, h: usize, bd: u32, tag: &str, decoder_args: &[&str]) {
     let dir = std::env::temp_dir();
     let uniq = format!("{}-{}-{}", tag, std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
     let inp = dir.join(format!("hevcenc-{uniq}.hevc"));
@@ -145,7 +152,9 @@ fn check_ffmpeg(run: &Run, w: usize, h: usize, bd: u32, tag: &str) {
     std::fs::write(&inp, annexb(run)).unwrap();
     let pix = if bd == 8 { "yuv420p" } else { "yuv420p10le" };
     let o = Command::new("ffmpeg")
-        .args(["-v", "error", "-xerror", "-y", "-f", "hevc", "-i"])
+        .args(["-v", "error", "-xerror", "-y"])
+        .args(decoder_args)
+        .args(["-f", "hevc", "-i"])
         .arg(&inp)
         .args(["-f", "rawvideo", "-pix_fmt", pix])
         .arg(&out)
@@ -155,7 +164,7 @@ fn check_ffmpeg(run: &Run, w: usize, h: usize, bd: u32, tag: &str) {
     let data = std::fs::read(&out).unwrap_or_default();
     let _ = std::fs::remove_file(&inp);
     let _ = std::fs::remove_file(&out);
-    assert!(o.status.success() && stderr.trim().is_empty(), "ffmpeg failed: {stderr}");
+    assert!(o.status.success() && stderr.trim().is_empty(), "ffmpeg {decoder_args:?} failed: {stderr}");
     let bps = if bd == 8 { 1 } else { 2 };
     let frame_bytes = (w * h + 2 * (w / 2) * (h / 2)) * bps;
     assert_eq!(data.len(), frame_bytes * run.packets.len(), "ffmpeg output size");
@@ -165,7 +174,7 @@ fn check_ffmpeg(run: &Run, w: usize, h: usize, bd: u32, tag: &str) {
             let pw = if c == 0 { w } else { w / 2 };
             for (k, &want) in plane.iter().enumerate() {
                 let got = if bd == 8 { data[off] as u16 } else { u16::from_le_bytes([data[off], data[off + 1]]) };
-                assert_eq!(got, want, "ffmpeg: picture {i} plane {c} at ({}, {})", k % pw, k / pw);
+                assert_eq!(got, want, "ffmpeg {decoder_args:?}: picture {i} plane {c} at ({}, {})", k % pw, k / pw);
                 off += bps;
             }
         }
@@ -241,6 +250,30 @@ fn inter_8bit_moving_pattern() {
     assert!(run.psnr_y.iter().all(|&p| p > 33.0));
     check_filmcraft(&run, w, h);
     check_ffmpeg(&run, w, h, 8, "inter8");
+}
+
+/// Several CTU rows and columns code as parallel wavefronts (WPP); the stream doesn't depend on
+/// the number of threads, and both decoders (ffmpeg also through the entry points) reproduce it.
+#[test]
+fn wavefronts_decode_and_ignore_the_thread_count() {
+    let (w, h) = (328, 200); // 6 x 4 CTUs, partial last column and row
+    let pics: Vec<Pic> = (0..4).map(|i| synth(w, h, 8, 5 * i, 2 * i)).collect();
+    let in_pool = |threads: usize| {
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+        pool.install(|| encode(cfg(w as u32, h as u32, 26, 3, Profile::Main), &pics))
+    };
+    let run = in_pool(4);
+    assert!(run.packets == in_pool(1).packets, "1 thread and 4 threads give different streams");
+    assert!(run.packets == in_pool(3).packets, "3 threads and 4 threads give different streams");
+    assert!(run.psnr_y.iter().all(|&p| p > 35.0), "{:?}", run.psnr_y);
+    check_filmcraft(&run, w, h);
+    check_ffmpeg(&run, w, h, 8, "wpp");
+    // One CTU column: every row starts from fresh contexts.
+    let (w, h) = (40, 200);
+    let pics: Vec<Pic> = (0..2).map(|i| synth(w, h, 8, i, i)).collect();
+    let run = encode(cfg(w as u32, h as u32, 30, 0, Profile::Main), &pics);
+    check_filmcraft(&run, w, h);
+    check_ffmpeg(&run, w, h, 8, "wpp-narrow");
 }
 
 #[test]

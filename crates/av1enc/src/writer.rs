@@ -5,15 +5,18 @@
 //! depend on them.
 
 use crate::cdf::Cdfs;
-use crate::decide::{FrameGeom, Leaf, Node, intra_uv_tx_type, scan_for, tx_in_set, tx_set, tx_size_for};
+use crate::decide::{FrameGeom, Leaf, Node, TileRect, intra_uv_tx_type, scan_for, tx_in_set, tx_set, tx_size_for};
 use crate::loopfilter::LfInfo;
 use crate::symbol::SymbolWriter;
 use crate::tables::*;
 
 type MvP = [i32; 2];
 
-/// Mode info per 4x4 (MiSizes, YModes, RefFrames, Mvs, ...).
+/// Mode info per 4x4 (MiSizes, YModes, RefFrames, Mvs, ...) of one tile, indexed by frame
+/// position: (r0, c0) is the tile's top-left 4x4.
 struct Mi {
+    r0: usize,
+    c0: usize,
     cols: usize,
     mi_size: Vec<u8>,
     y_mode: Vec<u8>,
@@ -28,7 +31,7 @@ struct Mi {
 impl Mi {
     #[inline(always)]
     fn idx(&self, r: usize, c: usize) -> usize {
-        r * self.cols + c
+        (r - self.r0) * self.cols + (c - self.c0)
     }
 }
 
@@ -48,8 +51,12 @@ struct MvStack {
     drl_ctx_stack: [usize; MAX_REF_MV_STACK_SIZE + 1],
 }
 
+/// Writes one tile. Tiles are independent: each starts from the frame's initial CDFs with
+/// cleared above context, and neighbours (AvailU / AvailL, motion vector candidates) stop at
+/// the tile's borders, so tiles are coded in parallel.
 pub(crate) struct TileWriter<'a> {
     g: &'a FrameGeom,
+    tile: TileRect,
     intra_only: bool,
     qidx: u8,
     sw: SymbolWriter,
@@ -60,8 +67,9 @@ pub(crate) struct TileWriter<'a> {
     above_dc: [Vec<u8>; 3],
     left_level: [Vec<u8>; 3],
     left_dc: [Vec<u8>; 3],
-    /// LoopfilterTxSizes per plane (row stride mi_cols + 32).
+    /// LoopfilterTxSizes per plane, relative to the tile's top-left (row stride `lf_stride`).
     lf_tx: [Vec<u8>; 3],
+    lf_stride: usize,
     // current block
     r: usize,
     c: usize,
@@ -82,10 +90,12 @@ fn is_directional(mode: usize) -> bool {
 impl<'a> TileWriter<'a> {
     /// `init`: the CDFs saved by the primary reference frame (load_cdfs), or None for the
     /// defaults (init_non_coeff_cdfs / init_coeff_cdfs).
-    pub fn new(g: &'a FrameGeom, intra_only: bool, qidx: u8, init: Option<&Cdfs>) -> Self {
-        let n = g.mi_cols * g.mi_rows;
+    pub fn new(g: &'a FrameGeom, tile: TileRect, intra_only: bool, qidx: u8, init: Option<&Cdfs>) -> Self {
+        let (rows, cols) = (tile.r1.saturating_sub(tile.r0), tile.c1.saturating_sub(tile.c0));
+        let n = rows * cols;
         TileWriter {
             g,
+            tile,
             intra_only,
             qidx,
             sw: SymbolWriter::new(false),
@@ -99,7 +109,9 @@ impl<'a> TileWriter<'a> {
             },
             kf_y_mode: DEFAULT_INTRA_FRAME_Y_MODE_CDF,
             mi: Mi {
-                cols: g.mi_cols,
+                r0: tile.r0,
+                c0: tile.c0,
+                cols,
                 mi_size: vec![0; n],
                 y_mode: vec![0; n],
                 ref_frame: vec![[0, -1]; n],
@@ -113,7 +125,8 @@ impl<'a> TileWriter<'a> {
             above_dc: std::array::from_fn(|_| vec![0; g.mi_cols + 64]),
             left_level: std::array::from_fn(|_| vec![0; g.mi_rows + 64]),
             left_dc: std::array::from_fn(|_| vec![0; g.mi_rows + 64]),
-            lf_tx: std::array::from_fn(|_| vec![0; (g.mi_cols + 32) * (g.mi_rows + 32)]),
+            lf_tx: std::array::from_fn(|_| vec![0; (cols + 32) * (rows + 32)]),
+            lf_stride: cols + 32,
             r: 0,
             c: 0,
             bsize: 0,
@@ -128,29 +141,28 @@ impl<'a> TileWriter<'a> {
         (self.sw.finish(), self.cdf)
     }
 
-    /// The mode info the loop filter needs.
-    pub fn lf_info(&self) -> LfInfo<'_> {
-        LfInfo {
-            mi_cols: self.g.mi_cols,
-            mi_rows: self.g.mi_rows,
-            width: self.g.width,
-            height: self.g.height,
-            mi_size: &self.mi.mi_size,
-            skip: &self.mi.skip,
-            is_inter: &self.mi.is_inter,
-            tx: [&self.lf_tx[0], &self.lf_tx[1], &self.lf_tx[2]],
+    /// Writes the tile's superblocks (`nodes`: the frame's superblock trees in raster order).
+    pub fn write_tile(&mut self, nodes: &[Node]) {
+        let t = self.tile;
+        for r in (t.r0..t.r1).step_by(16) {
+            self.start_sb_row();
+            for c in (t.c0..t.c1).step_by(16) {
+                if let Some(node) = nodes.get((r / 16) * self.g.sb_cols + c / 16) {
+                    self.superblock(r, c, node);
+                }
+            }
         }
     }
 
     /// Start of a superblock row (clear_left_context).
-    pub fn start_sb_row(&mut self) {
+    fn start_sb_row(&mut self) {
         for p in 0..3 {
             self.left_level[p].iter_mut().for_each(|v| *v = 0);
             self.left_dc[p].iter_mut().for_each(|v| *v = 0);
         }
     }
 
-    pub fn superblock(&mut self, r: usize, c: usize, node: &Node) {
+    fn superblock(&mut self, r: usize, c: usize, node: &Node) {
         self.partition(r, c, BLOCK_64X64, node);
     }
 
@@ -159,8 +171,8 @@ impl<'a> TileWriter<'a> {
         if r >= mi_rows || c >= mi_cols {
             return;
         }
-        let avail_u = r > 0;
-        let avail_l = c > 0;
+        let avail_u = r > self.tile.r0;
+        let avail_l = c > self.tile.c0;
         let n4 = NUM_4X4_BLOCKS_WIDE[bsize] as usize;
         let half = n4 >> 1;
         let has_rows = r + half < mi_rows;
@@ -220,8 +232,8 @@ impl<'a> TileWriter<'a> {
         self.r = r;
         self.c = c;
         self.bsize = b.bsize;
-        self.avail_u = r > 0;
-        self.avail_l = c > 0;
+        self.avail_u = r > self.tile.r0;
+        self.avail_l = c > self.tile.c0;
         let bsize = b.bsize;
         let n4 = NUM_4X4_BLOCKS_WIDE[bsize] as usize;
         // skip
@@ -308,11 +320,11 @@ impl<'a> TileWriter<'a> {
         }
         // LoopfilterTxSizes: one transform block per plane
         let log2 = (n4 * 4).trailing_zeros();
-        let stride = self.g.mi_cols + 32;
+        let stride = self.lf_stride;
         for plane in 0..3 {
             let s = (plane > 0) as usize;
             let tx = tx_size_for(log2 - s as u32) as u8;
-            let (r0, c0, m) = (r >> s, c >> s, n4 >> s);
+            let (r0, c0, m) = ((r - self.tile.r0) >> s, (c - self.tile.c0) >> s, n4 >> s);
             for y in r0..r0 + m {
                 self.lf_tx[plane][y * stride + c0..y * stride + c0 + m].iter_mut().for_each(|v| *v = tx);
             }
@@ -693,8 +705,10 @@ impl<'a> TileWriter<'a> {
 
     // ---- motion vector prediction (7.10.2), single reference LAST_FRAME --------------------
 
+    /// is_inside( ): within the tile.
     fn inside(&self, r: isize, c: isize) -> bool {
-        c >= 0 && c < self.g.mi_cols as isize && r >= 0 && r < self.g.mi_rows as isize
+        let t = &self.tile;
+        c >= t.c0 as isize && c < t.c1 as isize && r >= t.r0 as isize && r < t.r1 as isize
     }
 
     fn find_mv_stack(&mut self) {
@@ -955,6 +969,60 @@ impl<'a> TileWriter<'a> {
             self.mvs.new_mv_context = 5 - num_new.min(1);
             self.mvs.ref_mv_context = 5;
         }
+    }
+}
+
+/// The frame's mode info for the loop filter, gathered from its tiles.
+pub(crate) struct LfFrame {
+    mi_size: Vec<u8>,
+    skip: Vec<bool>,
+    is_inter: Vec<bool>,
+    tx: [Vec<u8>; 3],
+}
+
+impl LfFrame {
+    pub fn new(g: &FrameGeom, tiles: &[TileWriter]) -> LfFrame {
+        let n = g.mi_cols * g.mi_rows;
+        let tx_stride = g.mi_cols + 32;
+        let mut f =
+            LfFrame { mi_size: vec![0; n], skip: vec![false; n], is_inter: vec![false; n], tx: std::array::from_fn(|_| vec![0; tx_stride * (g.mi_rows + 32)]) };
+        for tw in tiles {
+            let t = tw.tile;
+            let w = t.c1.saturating_sub(t.c0);
+            for r in t.r0..t.r1 {
+                let (src, dst) = ((r - t.r0) * w, r * g.mi_cols + t.c0);
+                copy_row(&mut f.mi_size, dst, &tw.mi.mi_size, src, w);
+                copy_row(&mut f.skip, dst, &tw.mi.skip, src, w);
+                copy_row(&mut f.is_inter, dst, &tw.mi.is_inter, src, w);
+            }
+            for p in 0..3 {
+                let s = (p > 0) as usize;
+                let w = w >> s;
+                for y in 0..(t.r1.saturating_sub(t.r0) >> s) {
+                    copy_row(&mut f.tx[p], ((t.r0 >> s) + y) * tx_stride + (t.c0 >> s), &tw.lf_tx[p], y * tw.lf_stride, w);
+                }
+            }
+        }
+        f
+    }
+
+    pub fn info<'a>(&'a self, g: &FrameGeom) -> LfInfo<'a> {
+        LfInfo {
+            mi_cols: g.mi_cols,
+            mi_rows: g.mi_rows,
+            width: g.width,
+            height: g.height,
+            mi_size: &self.mi_size,
+            skip: &self.skip,
+            is_inter: &self.is_inter,
+            tx: [&self.tx[0], &self.tx[1], &self.tx[2]],
+        }
+    }
+}
+
+fn copy_row<T: Copy>(dst: &mut [T], d: usize, src: &[T], s: usize, n: usize) {
+    if let (Some(dst), Some(src)) = (dst.get_mut(d..d + n), src.get(s..s + n)) {
+        dst.copy_from_slice(src);
     }
 }
 

@@ -3,6 +3,7 @@
 //! reference samples clamped to the reference frame's visible area.
 
 use crate::tables::SUBPEL_REGULAR;
+use rayon::prelude::*;
 
 /// A motion vector in 1/8 luma samples.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -108,50 +109,54 @@ impl PhasePlanes {
         let rh = ph + 2 * M;
         let off = (border + M) as i32;
         let mut raw = vec![0u8; rs * rh];
-        for y in 0..rh {
+        // Every pass runs over rows in parallel (each sample is a pure function of its inputs).
+        raw.par_chunks_mut(rs).enumerate().for_each(|(y, row)| {
             let sy = (y as i32 - off).clamp(0, r.h as i32 - 1) as usize;
             let src = &r.data[sy * r.stride..sy * r.stride + r.w];
-            for x in 0..rs {
-                raw[y * rs + x] = src[(x as i32 - off).clamp(0, r.w as i32 - 1) as usize];
+            for (x, d) in row.iter_mut().enumerate() {
+                *d = src[(x as i32 - off).clamp(0, r.w as i32 - 1) as usize];
             }
-        }
+        });
         // Horizontal phases over every raw row (inner columns).
         let hpass = |fx: usize| -> Vec<u8> {
             let f = &SUBPEL_REGULAR[fx];
             let mut out = vec![0u8; pw * rh];
-            for y in 0..rh {
+            out.par_chunks_mut(pw).enumerate().for_each(|(y, o)| {
                 let row = &raw[y * rs..y * rs + rs];
-                for x in 0..pw {
+                for (x, d) in o.iter_mut().enumerate() {
                     let s = &row[x + M - 3..x + M + 5];
                     let acc: i32 = 64 + (0..8).map(|t| f[t] * s[t] as i32).sum::<i32>();
-                    out[y * pw + x] = (acc >> 7).clamp(0, 255) as u8;
+                    *d = (acc >> 7).clamp(0, 255) as u8;
                 }
-            }
+            });
             out
         };
-        let unfiltered: Vec<u8> = (0..rh).flat_map(|y| raw[y * rs + M..y * rs + M + pw].iter().copied()).collect();
-        let h: Vec<Vec<u8>> = (0..4).map(|k| if k == 0 { unfiltered.clone() } else { hpass(k * 4) }).collect();
-        let mut planes = Vec::with_capacity(16);
-        for fy in 0..4 {
-            for hp in &h {
+        let h: Vec<Vec<u8>> = (0..4)
+            .into_par_iter()
+            .map(|k| if k == 0 { (0..rh).flat_map(|y| raw[y * rs + M..y * rs + M + pw].iter().copied()).collect() } else { hpass(k * 4) })
+            .collect();
+        // Phase (fy, fx) at index fy * 4 + fx.
+        let planes = (0..16)
+            .into_par_iter()
+            .map(|i| {
+                let (fy, hp) = (i / 4, &h[i % 4]);
                 if fy == 0 {
-                    planes.push(hp[M * pw..(M + ph) * pw].to_vec());
-                    continue;
+                    return hp[M * pw..(M + ph) * pw].to_vec();
                 }
                 let f = &SUBPEL_REGULAR[fy * 4];
                 let mut out = vec![0u8; pw * ph];
-                for y in 0..ph {
-                    for x in 0..pw {
+                out.par_chunks_mut(pw).enumerate().for_each(|(y, o)| {
+                    for (x, d) in o.iter_mut().enumerate() {
                         let mut acc = 64;
                         for t in 0..8 {
                             acc += f[t] * hp[(y + M + t - 3) * pw + x] as i32;
                         }
-                        out[y * pw + x] = (acc >> 7).clamp(0, 255) as u8;
+                        *d = (acc >> 7).clamp(0, 255) as u8;
                     }
-                }
-                planes.push(out);
-            }
-        }
+                });
+                out
+            })
+            .collect();
         PhasePlanes { border, stride: pw, rows: ph, planes }
     }
 

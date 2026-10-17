@@ -4,7 +4,8 @@
 //! Key frames and single-reference inter frames (LAST_FRAME = the previous frame), 64x64
 //! superblocks split down to 8x8 by rate-distortion decisions, intra modes DC / V / H / Paeth /
 //! smooth, full-sample motion search with the spec's motion vector prediction, DCT / ADST
-//! transforms up to 32x32, one tile per frame, in-loop filters off. See the crate README.
+//! transforms up to 32x32, uniform tiles chosen from the frame size, in-loop filters other than
+//! deblocking off. See the crate README.
 //!
 //! The public API below is the contract `crates/export` codes against; keep it stable.
 
@@ -21,10 +22,11 @@ mod transform;
 mod writer;
 
 use bitw::{BitWriter, obu};
-use decide::{Decider, FrameGeom, RefFrame};
+use decide::{FrameGeom, RefFrame, decide_frame};
 use loopfilter::{LfInfo, loop_filter};
 use pred::Plane;
-use writer::TileWriter;
+use rayon::prelude::*;
+use writer::{LfFrame, TileWriter};
 
 /// Rate control.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,6 +97,13 @@ impl std::error::Error for Error {}
 const OBU_SEQUENCE_HEADER: u8 = 1;
 const OBU_FRAME: u8 = 6;
 
+/// Largest frame side and area (Annex A level 6: MaxHSize, MaxPicSize).
+const MAX_SIDE: u32 = 16384;
+const MAX_PIC_SIZE: u64 = 35_651_584;
+
+/// The tile whose final CDFs are saved for the next frame (context_update_tile_id).
+const CONTEXT_UPDATE_TILE_ID: usize = 0;
+
 /// Annex A level limits: (seq_level_idx, MaxPicSize, MaxHSize, MaxVSize, MaxDisplayRate,
 /// MaxBitrate (Main tier, Mbit/s)).
 const LEVELS: [(u8, u64, u32, u32, u64, u64); 14] = [
@@ -153,11 +162,26 @@ pub struct Encoder {
 
 impl Encoder {
     pub fn new(cfg: EncoderConfig) -> Result<Encoder, Error> {
+        Encoder::build(cfg, None)
+    }
+
+    /// An encoder with at least `1 << cols_log2` tile columns and `1 << rows_log2` tile rows
+    /// (within what the frame size allows) instead of the layout chosen from the frame size.
+    /// For tests.
+    #[doc(hidden)]
+    pub fn with_tiles(cfg: EncoderConfig, cols_log2: usize, rows_log2: usize) -> Result<Encoder, Error> {
+        Encoder::build(cfg, Some((cols_log2, rows_log2)))
+    }
+
+    fn build(cfg: EncoderConfig, tiles: Option<(usize, usize)>) -> Result<Encoder, Error> {
         if cfg.width == 0 || cfg.height == 0 {
             return Err(Error::InvalidConfig("empty frame".into()));
         }
-        if cfg.width > 4096 || cfg.height > 4096 {
-            return Err(Error::InvalidConfig(format!("{}x{} exceeds the single-tile limit (4096 samples per side)", cfg.width, cfg.height)));
+        if cfg.width > MAX_SIDE || cfg.height > MAX_SIDE || cfg.width as u64 * cfg.height as u64 > MAX_PIC_SIZE {
+            return Err(Error::InvalidConfig(format!(
+                "{}x{} exceeds the level 6 limits ({MAX_SIDE} samples per side, {MAX_PIC_SIZE} in all)",
+                cfg.width, cfg.height
+            )));
         }
         if cfg.bit_depth != 8 && cfg.bit_depth != 10 {
             return Err(Error::InvalidConfig(format!("bit depth {} (8 or 10 supported)", cfg.bit_depth)));
@@ -165,10 +189,11 @@ impl Encoder {
         if cfg.fps_num == 0 || cfg.fps_den == 0 {
             return Err(Error::InvalidConfig("frame rate".into()));
         }
-        let geom = FrameGeom::new(cfg.width as usize, cfg.height as usize);
-        if geom.sb_cols * geom.sb_rows > 2304 {
-            return Err(Error::InvalidConfig(format!("{}x{} exceeds the single-tile area limit (MAX_TILE_AREA)", cfg.width, cfg.height)));
-        }
+        let (w, h) = (cfg.width as usize, cfg.height as usize);
+        let geom = match tiles {
+            Some((cols_log2, rows_log2)) => FrameGeom::with_tiles(w, h, cols_log2, rows_log2),
+            None => FrameGeom::new(w, h),
+        };
         if let RateControl::Bitrate { kbps } = cfg.rate
             && kbps == 0
         {
@@ -267,7 +292,8 @@ impl Encoder {
     }
 
     /// uncompressed_header( ) (5.9) for a shown KEY_FRAME or an INTER_FRAME referencing slot 0.
-    fn frame_header(&self, w: &mut BitWriter, key: bool, qidx: u8, lf_level: u32) {
+    /// `tile_size_bytes`: TileSizeBytes (only written with several tiles).
+    fn frame_header(&self, w: &mut BitWriter, key: bool, qidx: u8, lf_level: u32, tile_size_bytes: u32) {
         w.f(1, 0); // show_existing_frame
         w.f(2, if key { 0 } else { 1 }); // frame_type
         w.f(1, 1); // show_frame
@@ -291,21 +317,24 @@ impl Encoder {
             w.f(1, 0); // render_and_frame_size_different
         }
         w.f(1, 0); // disable_frame_end_update_cdf
-        // tile_info( ): uniform spacing, one tile
-        let g = &self.geom;
-        let tile_log2 = |blk: usize, target: usize| {
-            let mut k = 0;
-            while (blk << k) < target {
-                k += 1;
-            }
-            k
-        };
+        // tile_info( ): uniform spacing
+        let t = &self.geom.tiles;
         w.f(1, 1); // uniform_tile_spacing_flag
-        if tile_log2(1, g.sb_cols.min(64)) > 0 {
-            w.f(1, 0); // increment_tile_cols_log2
+        for k in t.min_cols_log2..t.max_cols_log2 {
+            w.f(1, (k < t.cols_log2) as u32); // increment_tile_cols_log2
+            if k >= t.cols_log2 {
+                break;
+            }
         }
-        if tile_log2(1, g.sb_rows.min(64)) > 0 {
-            w.f(1, 0); // increment_tile_rows_log2
+        for k in t.min_rows_log2..t.max_rows_log2 {
+            w.f(1, (k < t.rows_log2) as u32); // increment_tile_rows_log2
+            if k >= t.rows_log2 {
+                break;
+            }
+        }
+        if t.cols_log2 > 0 || t.rows_log2 > 0 {
+            w.f((t.cols_log2 + t.rows_log2) as u32, CONTEXT_UPDATE_TILE_ID as u32); // context_update_tile_id
+            w.f(2, tile_size_bytes.saturating_sub(1)); // tile_size_bytes_minus_1
         }
         // quantization_params( )
         w.f(8, qidx as u32);
@@ -365,27 +394,56 @@ impl Encoder {
     fn encode_frame(&self, src: &[Plane; 3], key: bool, qidx: u8) -> (Vec<u8>, RefFrame) {
         let g = &self.geom;
         let refr = if key { None } else { self.refr.as_ref() };
-        let mut dec = Decider::new(g, self.cfg.bit_depth as u32, qidx, key, src, refr);
-        let mut tw = TileWriter::new(g, key, qidx, refr.map(|r| &*r.cdfs));
-        for sbr in 0..g.sb_rows {
-            tw.start_sb_row();
-            for sbc in 0..g.sb_cols {
-                let node = dec.superblock(sbr * 16, sbc * 16);
-                tw.superblock(sbr * 16, sbc * 16, &node);
+        // decisions (superblock rows in parallel), then the syntax of each tile
+        let (nodes, mut rec, mvs) = decide_frame(g, self.cfg.bit_depth as u32, qidx, key, src, refr);
+        // the tiles' syntax, in parallel
+        let init = refr.map(|r| &*r.cdfs);
+        let tiles: Vec<TileWriter> = (0..g.tiles.count())
+            .into_par_iter()
+            .map(|n| {
+                let mut tw = TileWriter::new(g, g.tile(n), key, qidx, init);
+                tw.write_tile(&nodes);
+                tw
+            })
+            .collect();
+        let lf = LfFrame::new(g, &tiles);
+        let lf_level = self.pick_filter_level(&rec, &lf.info(g), src, qidx);
+        loop_filter(&mut rec, &lf.info(g), [lf_level; 4], self.cfg.bit_depth as u32, false, 1);
+        let mut cdfs = None;
+        let mut data: Vec<Vec<u8>> = Vec::with_capacity(tiles.len());
+        for (n, tw) in tiles.into_iter().enumerate() {
+            let (bytes, c) = tw.finish();
+            if n == CONTEXT_UPDATE_TILE_ID {
+                cdfs = Some(c);
             }
+            data.push(bytes);
         }
-        let lf_level = self.pick_filter_level(&dec.rec, &tw.lf_info(), src, qidx);
-        loop_filter(&mut dec.rec, &tw.lf_info(), [lf_level; 4], self.cfg.bit_depth as u32, false, 1);
-        let (tile, cdfs) = tw.finish();
+        // There is always a tile 0; the defaults only keep this total.
+        let cdfs = cdfs.unwrap_or_else(|| crate::cdf::Cdfs::new(qidx as u32));
+        // TileSizeBytes: enough for every tile but the last
+        let largest = data.iter().rev().skip(1).map(|d| d.len().saturating_sub(1)).max().unwrap_or(0);
+        let tile_size_bytes = (1..4).find(|&b| largest < 1usize << (8 * b)).unwrap_or(4);
         let mut w = BitWriter::new();
-        self.frame_header(&mut w, key, qidx, lf_level);
+        self.frame_header(&mut w, key, qidx, lf_level, tile_size_bytes as u32);
         w.byte_align();
-        // tile_group_obu( ): a single tile, no tile_start_and_end_present_flag
+        // tile_group_obu( ): all tiles, no tile_start_and_end_present_flag
+        if data.len() > 1 {
+            w.f(1, 0); // tile_start_and_end_present_flag
+            w.byte_align();
+        }
         let mut payload = w.into_bytes();
-        payload.extend_from_slice(&tile);
+        let n = data.len();
+        for (i, tile) in data.iter().enumerate() {
+            if i + 1 < n {
+                // tile_size_minus_1, le(TileSizeBytes)
+                let v = tile.len().saturating_sub(1);
+                payload.extend((0..tile_size_bytes).map(|b| (v >> (8 * b)) as u8));
+            }
+            payload.extend_from_slice(tile);
+        }
         let mut out = Vec::with_capacity(payload.len() + 8);
         obu(OBU_FRAME, &payload, &mut out);
-        let rf = RefFrame { planes: dec.rec, mvs: dec.mvs, lf_level, cdfs };
+        let rf = RefFrame { planes: rec, mvs, lf_level, cdfs };
         (out, rf)
     }
 
@@ -395,17 +453,11 @@ impl Encoder {
         let (w, h) = (self.geom.width, self.geom.height);
         let sb_row_step = if self.geom.sb_rows >= 9 { 3 } else { 1 };
         let sse = |pl: &Plane| -> u64 {
-            let mut s = 0u64;
-            for y in 0..h {
-                if !(y >> 6).is_multiple_of(sb_row_step) {
-                    continue;
-                }
-                for (a, b) in pl.row(y)[..w].iter().zip(&src[0].row(y)[..w]) {
-                    let d = *a as i64 - *b as i64;
-                    s += (d * d) as u64;
-                }
-            }
-            s
+            (0..h)
+                .into_par_iter()
+                .filter(|y| (y >> 6).is_multiple_of(sb_row_step))
+                .map(|y| pl.row(y)[..w].iter().zip(&src[0].row(y)[..w]).map(|(a, b)| (*a as i64 - *b as i64).pow(2) as u64).sum::<u64>())
+                .sum()
         };
         let bd = self.cfg.bit_depth as u32;
         let mut cache: Vec<(u32, u64)> = vec![(0, sse(&rec[0]))];

@@ -2,7 +2,9 @@
 //! transforms, 8×8 / 16×16 blocks, no segmentation and no reference/mode deltas: superblocks in
 //! raster order, for each plane the vertical edges (pass 0) then the horizontal edges (pass 1).
 //! Transform edges inside a skipped inter block are left alone; every 4×4 edge uses the 4-tap
-//! filter except edges on a 32-sample boundary, which get the 8-tap (flat) filter.
+//! filter except edges on a 32-sample boundary, which get the 8-tap (flat) filter. Planes only
+//! read and write themselves, so each filters on its own (the decoder's interleaved order gives
+//! the same samples).
 
 use crate::{BLOCK_16X16, Mi, Plane};
 
@@ -13,9 +15,14 @@ struct Limits {
     thresh: i32,
 }
 
-/// Filter the reconstructed planes (Y, U, V, or a prefix of them) in place at `level` (0 = off;
-/// sharpness 0).
-pub fn filter_frame(planes: &mut [Plane], mi: &[Mi], mi_rows: usize, mi_cols: usize, level: u8) {
+/// Filter plane `plane` (0 = Y, 1 = U, 2 = V) of the reconstruction in place at `level` (0 = off;
+/// sharpness 0). The planes don't interact, so they filter independently (in parallel).
+pub fn filter_plane(p: &mut Plane, plane: usize, mi: &[Mi], mi_rows: usize, mi_cols: usize, level: u8) {
+    filter_rec(&mut p.rec, p.w, plane, mi, mi_rows, mi_cols, level);
+}
+
+/// [`filter_plane`] on a reconstruction at `stride`.
+pub fn filter_rec(rec: &mut [u8], stride: usize, plane: usize, mi: &[Mi], mi_rows: usize, mi_cols: usize, level: u8) {
     if level == 0 {
         return;
     }
@@ -24,20 +31,17 @@ pub fn filter_frame(planes: &mut [Plane], mi: &[Mi], mi_rows: usize, mi_cols: us
     let lim = Limits { limit, blimit: 2 * (l + 2) + limit, thresh: l >> 4 };
     for sbr in 0..mi_rows.div_ceil(8) {
         for sbc in 0..mi_cols.div_ceil(8) {
-            for (plane, p) in planes.iter_mut().enumerate() {
-                for pass in 0..2 {
-                    sb_plane(p, mi, mi_rows, mi_cols, plane, pass, sbr * 8, sbc * 8, lim);
-                }
+            for pass in 0..2 {
+                sb_plane(rec, stride, mi, mi_rows, mi_cols, plane, pass, sbr * 8, sbc * 8, lim);
             }
         }
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn sb_plane(p: &mut Plane, mi: &[Mi], mi_rows: usize, mi_cols: usize, plane: usize, pass: usize, row: usize, col: usize, lim: Limits) {
+fn sb_plane(rec: &mut [u8], stride: usize, mi: &[Mi], mi_rows: usize, mi_cols: usize, plane: usize, pass: usize, row: usize, col: usize, lim: Limits) {
     let (sx, sy) = if plane > 0 { (1, 1) } else { (0, 0) };
     let (sub, edge_len) = if pass == 0 { (sx, 64 >> sy) } else { (sy, 64 >> sx) };
-    let stride = p.w;
     for edge in 0..(16usize >> sub) {
         let mut i = 0;
         while i < edge_len {
@@ -68,7 +72,7 @@ fn sb_plane(p: &mut Plane, mi: &[Mi], mi_rows: usize, mi_cols: usize, plane: usi
                     continue;
                 }
                 let (pos, step) = if pass == 0 { ((py + l) * stride + px, 1) } else { (py * stride + px + l, stride) };
-                filter_lane(&mut p.rec, pos, step, wide, lim);
+                filter_lane(rec, pos, step, wide, lim);
             }
             i += 8;
         }

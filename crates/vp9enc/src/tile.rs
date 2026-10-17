@@ -104,22 +104,21 @@ fn levels_cost(levels: &[i32; 16], eob: usize) -> u32 {
 }
 
 /// Intra prediction (8.5.1) of a square block for DC / V / H / TM.
-fn predict_intra(p: &Plane, x: usize, y: usize, log2: usize, mode: u8, have_left: bool, have_above: bool) -> [i32; 64] {
+fn predict_intra(p: &TilePlane, x: usize, y: usize, log2: usize, mode: u8, have_left: bool, have_above: bool) -> [i32; 64] {
     let size = 1usize << log2;
     let base = 128i32;
     let buf = &p.rec;
-    let w = p.w;
     let mut above = [0i32; 8];
     let mut left = [0i32; 8];
     if have_above {
         for i in 0..size {
-            above[i] = buf[(y - 1) * w + (x + i).min(p.max_x)] as i32;
+            above[i] = buf[p.ri((x + i).min(p.max_x), y - 1)] as i32;
         }
     } else {
         above[..size].fill(base - 1);
     }
     let top_left = if have_above && have_left {
-        buf[(y - 1) * w + (x - 1).min(p.max_x)] as i32
+        buf[p.ri((x - 1).min(p.max_x), y - 1)] as i32
     } else if have_above {
         base + 1
     } else {
@@ -127,7 +126,7 @@ fn predict_intra(p: &Plane, x: usize, y: usize, log2: usize, mode: u8, have_left
     };
     if have_left {
         for i in 0..size {
-            left[i] = buf[(y + i).min(p.max_y) * w + x - 1] as i32;
+            left[i] = buf[p.ri(x - 1, (y + i).min(p.max_y))] as i32;
         }
     } else {
         left[..size].fill(base + 1);
@@ -230,11 +229,53 @@ pub struct FrameParams<'a> {
     pub lambda_sse: f64,
 }
 
+/// One plane as a tile sees it: the frame's source (shared by all tiles) and a reconstruction of
+/// the tile's own columns (`x0..x0 + sw`, every row). Coordinates stay frame coordinates.
+pub struct TilePlane<'a> {
+    /// The source at stride `w`.
+    pub src: &'a [u8],
+    pub w: usize,
+    /// Last valid column / row for intra prediction edges.
+    pub max_x: usize,
+    pub max_y: usize,
+    pub x0: usize,
+    pub sw: usize,
+    pub rec: Vec<u8>,
+}
+
+impl<'a> TilePlane<'a> {
+    /// The columns `x0..x1` of `p` (`x1` clamped to its stride).
+    fn new(p: &'a Plane, x0: usize, x1: usize) -> TilePlane<'a> {
+        let x1 = x1.min(p.w);
+        let x0 = x0.min(x1);
+        let rows = p.src.len() / p.w.max(1);
+        TilePlane { src: &p.src, w: p.w, max_x: p.max_x, max_y: p.max_y, x0, sw: x1 - x0, rec: vec![0; (x1 - x0) * rows] }
+    }
+
+    /// Index of the frame position (`x`, `y`) in `rec` (`x` inside the tile).
+    #[inline]
+    fn ri(&self, x: usize, y: usize) -> usize {
+        y * self.sw + x - self.x0
+    }
+}
+
+/// What a coded tile hands back: its symbols, the reconstruction of its columns and its mode info
+/// (columns `col_start..col_end`, every row).
+pub struct TileOut {
+    pub w: Writer,
+    pub col_start: usize,
+    pub col_end: usize,
+    /// Per plane: the first column and the columns' reconstruction (`width` = len / rows).
+    pub rec: [(usize, usize, Vec<u8>); 3],
+    pub mi: Vec<Mi>,
+}
+
 pub struct Tile<'a> {
     pub f: &'a FrameParams<'a>,
     pub w: Writer,
-    pub planes: &'a mut [Plane; 3],
-    pub mi: &'a mut [Mi],
+    pub planes: [TilePlane<'a>; 3],
+    /// Mode info of the tile's columns (stride `col_end - col_start`).
+    pub mi: Vec<Mi>,
     pub col_start: usize,
     pub col_end: usize,
     above_nz: [Vec<u8>; 3],
@@ -246,13 +287,22 @@ pub struct Tile<'a> {
 }
 
 impl<'a> Tile<'a> {
-    pub fn new(f: &'a FrameParams<'a>, planes: &'a mut [Plane; 3], mi: &'a mut [Mi], col_start: usize, col_end: usize) -> Tile<'a> {
+    /// The tile of MI columns `col_start..col_end` (on 64-sample boundaries except at the frame's
+    /// right edge). It reads only `planes`' source and keeps its reconstruction and mode info to
+    /// itself, so tiles code in parallel; [`Tile::code`] hands them back.
+    pub fn new(f: &'a FrameParams<'a>, planes: &'a [Plane; 3], col_start: usize, col_end: usize) -> Tile<'a> {
         let n = f.mi_cols * 2 + 16;
+        // The tile's samples: its superblocks' columns.
+        let (x0, x1) = (col_start * 8, col_end.div_ceil(8) * 64);
+        let planes = std::array::from_fn(|i| {
+            let ss = (i > 0) as usize;
+            TilePlane::new(&planes[i], x0 >> ss, x1 >> ss)
+        });
         Tile {
             f,
             w: Writer::default(),
             planes,
-            mi,
+            mi: vec![Mi::default(); (col_end.saturating_sub(col_start)) * f.mi_rows],
             col_start,
             col_end,
             above_nz: [vec![0; n], vec![0; n], vec![0; n]],
@@ -264,7 +314,7 @@ impl<'a> Tile<'a> {
     }
 
     /// Code the tile's superblocks.
-    pub fn code(&mut self) {
+    pub fn code(mut self) -> TileOut {
         for r in (0..self.f.mi_rows).step_by(8) {
             for p in 0..3 {
                 self.left_nz[p].fill(0);
@@ -274,17 +324,23 @@ impl<'a> Tile<'a> {
                 self.partition(r, c, 12);
             }
         }
+        let rec = self.planes.map(|p| (p.x0, p.sw, p.rec));
+        TileOut { w: self.w, col_start: self.col_start, col_end: self.col_end, rec, mi: self.mi }
     }
 
+    /// Mode info at (`r`, `c`); only positions inside the tile are ever read (`is_inside`,
+    /// `avail_l`).
     fn mi_at(&self, r: usize, c: usize) -> Mi {
-        self.mi[r * self.f.mi_cols + c]
+        let tw = self.col_end - self.col_start;
+        self.mi.get(r * tw + c.wrapping_sub(self.col_start)).copied().unwrap_or_default()
     }
 
     fn set_mi(&mut self, r: usize, c: usize, n8: usize, m: Mi) {
+        let tw = self.col_end - self.col_start;
         for dr in 0..n8 {
             for dc in 0..n8 {
-                if r + dr < self.f.mi_rows && c + dc < self.f.mi_cols {
-                    self.mi[(r + dr) * self.f.mi_cols + c + dc] = m;
+                if r + dr < self.f.mi_rows && c + dc >= self.col_start && c + dc < self.col_end {
+                    self.mi[(r + dr) * tw + c + dc - self.col_start] = m;
                 }
             }
         }
@@ -440,7 +496,8 @@ impl<'a> Tile<'a> {
         let p = &mut self.planes[plane];
         for i in 0..4 {
             for j in 0..4 {
-                p.rec[(y + i) * p.w + x + j] = (pred[i * 4 + j] + resid[i * 4 + j]).clamp(0, 255) as u8;
+                let k = p.ri(x + j, y + i);
+                p.rec[k] = (pred[i * 4 + j] + resid[i * 4 + j]).clamp(0, 255) as u8;
             }
         }
         let nz = (eob > 0) as u8;
@@ -750,7 +807,8 @@ impl<'a> Tile<'a> {
             predict(&refs[plane], ((bx as i32) << 4) + col16, ((by as i32) << 4) + row16, bn, bn, &mut pred);
             let p = &mut self.planes[plane];
             for i in 0..bn {
-                p.rec[(by + i) * p.w + bx..][..bn].copy_from_slice(&pred[i * bn..i * bn + bn]);
+                let k = p.ri(bx, by + i);
+                p.rec[k..][..bn].copy_from_slice(&pred[i * bn..i * bn + bn]);
             }
         }
         // Residual: quantise every 4×4, dropping blocks whose coefficients don't pay for themselves.
@@ -772,8 +830,7 @@ impl<'a> Tile<'a> {
                     let mut res = [0i32; 16];
                     for i in 0..4 {
                         for j in 0..4 {
-                            let k = (y + i) * p.w + x + j;
-                            res[i * 4 + j] = p.src[k] as i32 - p.rec[k] as i32;
+                            res[i * 4 + j] = p.src[(y + i) * p.w + x + j] as i32 - p.rec[p.ri(x + j, y + i)] as i32;
                         }
                     }
                     let mut levels = q.levels(&res, tx);
@@ -850,7 +907,7 @@ impl<'a> Tile<'a> {
                     let p = &mut self.planes[plane];
                     for i in 0..4 {
                         for j in 0..4 {
-                            let k = (y + i) * p.w + x + j;
+                            let k = p.ri(x + j, y + i);
                             p.rec[k] = (p.rec[k] as i32 + resid[i * 4 + j]).clamp(0, 255) as u8;
                         }
                     }

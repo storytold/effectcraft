@@ -31,7 +31,7 @@ mod tables;
 mod transform;
 
 use bitstream::{BitWriter, NAL_IDR_N_LP, NAL_TRAIL_R, nal_unit};
-use frame::{FrameCoder, SliceKind};
+use frame::SliceKind;
 use params::{LOG2_MAX_POC_LSB, LOG2_MIN_CB, MAX_MERGE_CAND, SeqParams};
 
 /// Profile written in the parameter sets.
@@ -311,7 +311,9 @@ impl Encoder {
         let kind = if idr { SliceKind::I } else { SliceKind::P };
         let me = if idr { None } else { self.reference.as_ref().map(|r| me::MeRef::new(&r[0], w, h, bd)) };
         let refp = if idr { None } else { self.reference.as_ref() };
-        let mut fc = FrameCoder::new(bd, w, h, kind, qp, &src, refp, me.as_ref());
+        let ctx = cabac::init_contexts(qp, if idr { 0 } else { 1 });
+        let mut pic = frame::encode_picture(bd, w, h, kind, qp, &src, refp, me.as_ref(), ctx);
+        crate::deblock::deblock(&mut pic.rec, &pic.blk, w, h, qp, bd);
 
         // slice_segment_header() (7.3.6.1)
         let mut bw = BitWriter::new();
@@ -328,15 +330,25 @@ impl Encoder {
             bw.ue(5 - MAX_MERGE_CAND as u32); // five_minus_max_num_merge_cand
         }
         bw.se(qp - 26); // slice_qp_delta (init_qp = 26)
+        // Entry points of the WPP substreams after the first: their sizes in the NAL unit
+        // (emulation prevention bytes included).
+        let n = pic.substreams.len();
+        let offsets: Vec<u32> = pic.substreams.iter().take(n.saturating_sub(1)).map(|s| bitstream::escaped_len(s).max(1) as u32).collect();
+        bw.ue(offsets.len() as u32); // num_entry_point_offsets
+        if let Some(&max) = offsets.iter().max() {
+            let len = (32 - (max - 1).leading_zeros()).max(1);
+            bw.ue(len - 1); // offset_len_minus1
+            for &o in &offsets {
+                bw.put(o - 1, len); // entry_point_offset_minus1
+            }
+        }
         // byte_alignment()
         bw.put(1, 1);
         bw.align_zero();
-
-        let ctx = cabac::init_contexts(qp, if idr { 0 } else { 1 });
-        let mut enc = cabac::CabacEncoder::new(bw, ctx);
-        fc.encode(&mut enc);
-        fc.deblock();
-        let rbsp = enc.finish().into_bytes();
+        let mut rbsp = bw.into_bytes();
+        for s in &pic.substreams {
+            rbsp.extend_from_slice(s);
+        }
         let nal = nal_unit(if idr { NAL_IDR_N_LP } else { NAL_TRAIL_R }, &rbsp);
         let mut data = Vec::with_capacity(nal.len() + 4);
         data.extend_from_slice(&(nal.len() as u32).to_be_bytes());
@@ -346,7 +358,7 @@ impl Encoder {
             rc.update(idr, qp, data.len() as f64 * 8.0);
         }
         // output picture: cropped reconstruction
-        let rec = std::mem::take(&mut fc.rec);
+        let rec = pic.rec;
         let (ow, oh) = (self.seq.width as usize, self.seq.height as usize);
         let crop = |p: &[u16], stride: usize, w: usize, h: usize| -> Vec<u16> { (0..h).flat_map(|y| p[y * stride..y * stride + w].iter().copied()).collect() };
         self.recon = Some([crop(&rec[0], w, ow, oh), crop(&rec[1], w / 2, ow / 2, oh / 2), crop(&rec[2], w / 2, ow / 2, oh / 2)]);
