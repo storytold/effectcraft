@@ -989,13 +989,67 @@ fn timing(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 /// `p` with `key` set.
-fn with(p: &Value, key: &str, v: Value) -> Value {
+pub(super) fn with(p: &Value, key: &str, v: Value) -> Value {
     let mut p = if p.is_object() { p.clone() } else { json!({}) };
     p[key] = v;
     p
 }
 
 /// Move the layers `frames` frames in time (Alt+Page Up / Page Down, with Shift ten frames).
+/// Cmd+Alt+/: the selected layers show the item selected in the Project panel (`item`) instead
+/// of their source; everything on the layers stays. Footage, composition and solid layers only.
+fn replace_source(s: &mut Session, p: &Value) -> Result<Value> {
+    let c = "layer.replaceSource";
+    let (cid, ids) = layers_p(s, p)?;
+    let item = match p.get("item").and_then(Value::as_u64) {
+        Some(i) => ItemId(i),
+        None => *s.state.project_selection.first().ok_or_else(|| bad(c, "select the new source in the Project panel"))?,
+    };
+    if item == cid {
+        return Err(bad(c, "a composition can't contain itself"));
+    }
+    let src = match s.project.item(item).map(|i| &i.kind) {
+        Some(ItemKind::Comp(_)) => LayerSource::Comp { item },
+        Some(ItemKind::Footage(_)) => LayerSource::Footage { item },
+        Some(ItemKind::Solid(_)) => LayerSource::Solid { item },
+        Some(ItemKind::Folder) => return Err(bad(c, "a folder can't be a layer's source")),
+        None => return Err(bad(c, "no such item")),
+    };
+    let n = s.edit("Replace Layer Source", None, |proj, _| {
+        let comp = proj.comp_mut(cid).ok_or(EngineError::NoComp)?;
+        let mut n = 0;
+        for l in comp.layers.iter_mut().filter(|l| ids.contains(&l.id)) {
+            if matches!(l.source, LayerSource::Footage { .. } | LayerSource::Comp { .. } | LayerSource::Solid { .. }) {
+                l.source = src.clone();
+                n += 1;
+            }
+        }
+        Ok(n)
+    })?;
+    Ok(json!({"layers": n, "item": item.0}))
+}
+
+/// The file behind the frame the first selected footage layer shows at the current time: the
+/// footage's file, or the numbered file of an image sequence.
+fn frame_file(s: &mut Session, p: &Value) -> Result<Value> {
+    let c = "layer.frameFile";
+    let (cid, ids) = layers_p(s, p)?;
+    let t = s.time_of(cid);
+    let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
+    let found = comp.layers.iter().filter(|l| ids.contains(&l.id)).find_map(|l| match l.source {
+        LayerSource::Footage { item } => match s.project.item(item).map(|i| &i.kind) {
+            Some(ItemKind::Footage(f)) => Some((l, f)),
+            _ => None,
+        },
+        _ => None,
+    });
+    let (l, f) = found.ok_or_else(|| bad(c, "select a footage layer"))?;
+    let frame = f.frame_rate.frame_at(l.layer_time(t)).max(0);
+    let path = f.sequence_file(frame).unwrap_or(&f.path);
+    let file = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.to_string());
+    Ok(json!({"file": file, "path": path, "frame": frame, "layer": l.id.0}))
+}
+
 fn move_frames(s: &mut Session, p: &Value, frames: i64) -> Result<Value> {
     let (cid, _) = layers_p(s, p)?;
     let delta = s.project.comp(cid).ok_or(EngineError::NoComp)?.frame_rate.tick_of(frames).seconds();
@@ -1680,6 +1734,8 @@ pub fn specs() -> Vec<CommandSpec> {
             s,
             &with(p, "op", json!("moveOutToEnd"))
         )),
+        cmd!("layer.replaceSource", "Replace Layer Source with the Project Selection", [], Some("Cmd+Alt+/"), "{layers?, item?}", has_layers, replace_source),
+        cmd!("layer.frameFile", "File of the Frame at the Current Time", [], None, "{layers?} → {file, path, frame, layer}", has_layers, frame_file),
         cmd!("layer.moveEarlier", "Move Layers 1 Frame Earlier", [], Some("Alt+PageUp"), "{layers?}", has_layers, |s, p| move_frames(s, p, -1)),
         cmd!("layer.moveLater", "Move Layers 1 Frame Later", [], Some("Alt+PageDown"), "{layers?}", has_layers, |s, p| move_frames(s, p, 1)),
         cmd!("layer.moveEarlier10", "Move Layers 10 Frames Earlier", [], Some("Alt+Shift+PageUp"), "{layers?}", has_layers, |s, p| move_frames(s, p, -10)),

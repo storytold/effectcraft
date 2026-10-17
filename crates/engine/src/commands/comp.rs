@@ -262,6 +262,36 @@ fn add_marker(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"time": t.seconds()}))
 }
 
+/// Shift+1–9: the composition marker numbered `n` (its comment is the number) at the current
+/// time; there is one of each number, so an existing one moves.
+fn numbered_marker(s: &mut Session, p: &Value, n: u8) -> Result<Value> {
+    let cid = comp_id(s, p)?;
+    let t = time_p(s, p, s.project.comp(cid));
+    let comment = n.to_string();
+    s.edit("Add Marker", None, |proj, _| {
+        let c = proj.comp_mut(cid).ok_or(EngineError::NoComp)?;
+        c.markers.retain(|m| m.comment != comment || m.protected);
+        c.markers.push(Marker { time: t, comment, ..Default::default() });
+        c.markers.sort_by_key(|m| m.time);
+        Ok(())
+    })?;
+    Ok(json!({"time": t.seconds(), "marker": n}))
+}
+
+/// 1–9: the current time goes to the composition marker numbered `n`.
+fn go_to_marker(s: &mut Session, p: &Value, n: u8) -> Result<Value> {
+    let cid = comp_id(s, p)?;
+    let comment = n.to_string();
+    let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
+    let t = comp
+        .markers
+        .iter()
+        .find(|m| m.comment == comment)
+        .map(|m| m.time)
+        .ok_or_else(|| bad("time.marker", format!("no composition marker {n} (Shift+{n} sets it)")))?;
+    s.execute("time.set", json!({"time": t.seconds()}))
+}
+
 fn poster(s: &mut Session, p: &Value) -> Result<Value> {
     let cid = comp_id(s, p)?;
     let t = s.time();
@@ -298,6 +328,25 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("comp.close", "Close Composition", [], None, "{comp?}", has_comp, close),
         cmd!("comp.workArea", "Set Work Area", [], None, "{start?, end?, set?: begin|end (at CTI)}", has_comp, work_area),
         cmd!("comp.setSwitch", "Composition Switch", [], None, "{switch: hideShy|motionBlur|frameBlending|draft3d, value?}", has_comp, comp_switch),
-        cmd!("comp.addMarker", "Add Marker", [], Some("Num*"), "{time?, comment?}", has_comp, add_marker),
+        // (Ctrl+8: the main-keyboard key on macOS, for keyboards without a numeric keypad.)
+        cmd!("comp.numberedMarker1", "Set Composition Marker 1", [], Some("Shift+1"), "{comp?, time?}", has_comp, |s, p| numbered_marker(s, p, 1)),
+        cmd!("time.marker1", "Go to Composition Marker 1", [], Some("1"), "{comp?}", has_comp, |s, p| go_to_marker(s, p, 1)),
+        cmd!("comp.numberedMarker2", "Set Composition Marker 2", [], Some("Shift+2"), "{comp?, time?}", has_comp, |s, p| numbered_marker(s, p, 2)),
+        cmd!("time.marker2", "Go to Composition Marker 2", [], Some("2"), "{comp?}", has_comp, |s, p| go_to_marker(s, p, 2)),
+        cmd!("comp.numberedMarker3", "Set Composition Marker 3", [], Some("Shift+3"), "{comp?, time?}", has_comp, |s, p| numbered_marker(s, p, 3)),
+        cmd!("time.marker3", "Go to Composition Marker 3", [], Some("3"), "{comp?}", has_comp, |s, p| go_to_marker(s, p, 3)),
+        cmd!("comp.numberedMarker4", "Set Composition Marker 4", [], Some("Shift+4"), "{comp?, time?}", has_comp, |s, p| numbered_marker(s, p, 4)),
+        cmd!("time.marker4", "Go to Composition Marker 4", [], Some("4"), "{comp?}", has_comp, |s, p| go_to_marker(s, p, 4)),
+        cmd!("comp.numberedMarker5", "Set Composition Marker 5", [], Some("Shift+5"), "{comp?, time?}", has_comp, |s, p| numbered_marker(s, p, 5)),
+        cmd!("time.marker5", "Go to Composition Marker 5", [], Some("5"), "{comp?}", has_comp, |s, p| go_to_marker(s, p, 5)),
+        cmd!("comp.numberedMarker6", "Set Composition Marker 6", [], Some("Shift+6"), "{comp?, time?}", has_comp, |s, p| numbered_marker(s, p, 6)),
+        cmd!("time.marker6", "Go to Composition Marker 6", [], Some("6"), "{comp?}", has_comp, |s, p| go_to_marker(s, p, 6)),
+        cmd!("comp.numberedMarker7", "Set Composition Marker 7", [], Some("Shift+7"), "{comp?, time?}", has_comp, |s, p| numbered_marker(s, p, 7)),
+        cmd!("time.marker7", "Go to Composition Marker 7", [], Some("7"), "{comp?}", has_comp, |s, p| go_to_marker(s, p, 7)),
+        cmd!("comp.numberedMarker8", "Set Composition Marker 8", [], Some("Shift+8"), "{comp?, time?}", has_comp, |s, p| numbered_marker(s, p, 8)),
+        cmd!("time.marker8", "Go to Composition Marker 8", [], Some("8"), "{comp?}", has_comp, |s, p| go_to_marker(s, p, 8)),
+        cmd!("comp.numberedMarker9", "Set Composition Marker 9", [], Some("Shift+9"), "{comp?, time?}", has_comp, |s, p| numbered_marker(s, p, 9)),
+        cmd!("time.marker9", "Go to Composition Marker 9", [], Some("9"), "{comp?}", has_comp, |s, p| go_to_marker(s, p, 9)),
+        cmd!("comp.addMarker", "Add Marker", [], ["Num*", "Ctrl+8"], "{time?, comment?}", has_comp, add_marker),
     ]
 }
