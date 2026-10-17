@@ -1253,7 +1253,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let hits = ui.data(|d| d.get_temp::<Vec<(u64, String)>>(menu_hits_id)).unwrap_or_default();
         if !hits.is_empty() {
             ui.menu_button(crate::i18n::tr("Select"), |ui| {
-                crate::widgets::menu_scroll(ui, |ui| {
+                crate::widgets::menu_scroll(ui, false, |ui| {
                     for (id, name) in &hits {
                         if ui.button(name).clicked() {
                             context_actions.push(("layer.select".to_owned(), serde_json::json!({"layers":[id]})));

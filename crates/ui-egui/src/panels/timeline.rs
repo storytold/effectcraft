@@ -2618,7 +2618,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 egui::Popup::menu(&lang).style(crate::widgets::menu_style).show(|ui| {
                     for (cat, items) in effectcraft_engine::commands::expr_tools::language_menu() {
                         ui.menu_button(cat, |ui| {
-                            widgets::menu_scroll(ui, |ui| {
+                            widgets::menu_scroll(ui, false, |ui| {
                                 for (label, text) in items {
                                     if ui.button(label).clicked() {
                                         picked = Some(text);
@@ -3949,7 +3949,7 @@ pub(crate) fn layer_menu(ui: &mut egui::Ui, layers: &[u64], caps: LayerMenuCaps,
         item(ui, "Add Marker", "layer.addMarker", json!({"layers": layers}));
     });
     ui.menu_button(crate::i18n::tr("Blending Mode"), |ui| {
-        widgets::menu_scroll(ui, |ui| {
+        widgets::menu_scroll(ui, false, |ui| {
             for m in BlendMode::ALL {
                 item(ui, m.label(), "layer.setBlendMode", json!({"layers": layers, "mode": m.label()}));
                 if m.ends_group() {
@@ -4009,11 +4009,11 @@ fn effects_submenu(ui: &mut egui::Ui, layers: &[u64], item: &mut dyn FnMut(&mut 
         }
     }
     cats.sort_by_key(|(c, _)| c.to_ascii_lowercase());
-    widgets::menu_scroll(ui, |ui| {
+    widgets::menu_scroll(ui, false, |ui| {
         for (cat, mut fx) in cats {
             fx.sort_by_key(|e| e.name.to_ascii_lowercase());
             ui.menu_button(cat, |ui| {
-                widgets::menu_scroll(ui, |ui| {
+                widgets::menu_scroll(ui, false, |ui| {
                     for e in fx {
                         item(ui, e.name, "effect.apply", json!({"effect": e.id, "layers": layers}));
                     }

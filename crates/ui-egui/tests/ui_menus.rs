@@ -29,6 +29,25 @@ fn click_at(h: &mut Harness<'_, EffectcraftApp>, p: Pos2) {
     h.run_steps(2);
 }
 
+/// Press the primary button at `p` and keep it down.
+fn press(h: &mut Harness<'_, EffectcraftApp>, p: Pos2) {
+    h.input_mut().events.push(Event::PointerMoved(p));
+    h.input_mut().events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.run_steps(2);
+}
+
+/// Move the pointer to `p` (press or no press, whichever is held).
+fn move_to(h: &mut Harness<'_, EffectcraftApp>, p: Pos2) {
+    h.input_mut().events.push(Event::PointerMoved(p));
+    h.run_steps(2);
+}
+
+/// Release the primary button at `p`.
+fn release(h: &mut Harness<'_, EffectcraftApp>, p: Pos2) {
+    h.input_mut().events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    h.run_steps(2);
+}
+
 /// Press and release `key` (one frame each), then let the UI settle.
 fn key(h: &mut Harness<'_, EffectcraftApp>, key: Key) {
     h.input_mut().events.push(Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
@@ -243,4 +262,113 @@ fn space_previews_after_opening_the_demo_from_home() {
     assert!(!h.state().ui.start_screen, "the start screen closed");
     key(&mut h, Key::Space);
     assert!(h.state().playback.playing, "Space previews the demo (#1059)");
+}
+
+/// The titles open on the press, not the release, so the menus can be browsed with the button
+/// still held down: moving onto an entry and releasing there chooses it (as in After Effects).
+#[test]
+fn a_menu_opens_on_press_and_browsing_releases_choose_an_entry() {
+    let mut h = harness();
+    let edit = rect(&h, "menu.Edit");
+    press(&mut h, edit.center());
+    assert!(shown(&h, "Keyboard Shortcuts"), "the Edit menu opens on the press, before any release");
+    let item = h.query_by_label_contains("Keyboard Shortcuts").expect("the Edit menu is open").rect();
+    move_to(&mut h, item.center());
+    release(&mut h, item.center());
+    assert_eq!(h.state().dialog, Some(effectcraft_ui_egui::Dialog::Shortcuts), "the release over the entry chose it");
+    assert!(!shown(&h, "Quick Apply"), "and closed the menu");
+}
+
+/// While a menu is open, hovering another title switches to that menu (native menu bars).
+#[test]
+fn hovering_another_title_while_a_menu_is_open_switches_to_it() {
+    let mut h = harness();
+    let edit = rect(&h, "menu.Edit");
+    click_at(&mut h, edit.center());
+    assert!(shown(&h, "Keyboard Shortcuts"), "the Edit menu is open");
+    let file = rect(&h, "menu.File");
+    move_to(&mut h, file.center());
+    assert!(shown(&h, "Open Project"), "hovering File opened the File menu");
+    assert!(!shown(&h, "Keyboard Shortcuts"), "and closed Edit");
+}
+
+/// The press on the title of the open menu closes it again, and the click's release — a plain
+/// click on the title — leaves it closed.
+#[test]
+fn pressing_the_open_title_again_closes_its_menu() {
+    let mut h = harness();
+    let file = rect(&h, "menu.File");
+    click_at(&mut h, file.center());
+    assert!(shown(&h, "Open Project"), "the File menu is open");
+    click_at(&mut h, file.center());
+    assert!(!shown(&h, "Open Project"), "the second press closed it");
+}
+
+/// Press-and-hold browse (AE's gesture) reaches into a submenu: while the button is still held,
+/// moving onto the submenu row opens it, and the release inside the submenu picks the entry.
+#[test]
+fn hold_browse_opens_a_submenu_and_the_release_inside_picks_an_entry() {
+    let mut h = harness();
+    // Applying an effect needs a selected layer, as in the app after clicking one in the timeline.
+    let first = {
+        let cid = h.state().session.active_comp_id().expect("the demo opens a comp");
+        let comp = h.state().session.project.comp(cid).expect("the demo comp exists");
+        comp.layers.iter().find(|l| l.effects().is_some()).expect("the demo comp has a layer that takes effects").id
+    };
+    h.state_mut().session.state.selected_layers = vec![first];
+    let effect = rect(&h, "menu.Effect");
+    press(&mut h, effect.center());
+    assert!(shown(&h, "Effect Controls"), "the Effect menu opens on the press");
+    // The categories come from the effect registry; the first alphabetically is "3D Channel".
+    let cat = h.query_by_label_contains("3D Channel").expect("the category row is shown").rect();
+    move_to(&mut h, cat.center());
+    assert!(shown(&h, "Cryptomatte"), "moving onto a category while still holding opened its submenu");
+    let entry = h.query_by_label_contains("Cryptomatte").expect("the submenu is open").rect();
+    move_to(&mut h, entry.center());
+    release(&mut h, entry.center());
+    assert!(!shown(&h, "Effect Controls"), "the release closed the menus");
+    assert!(h.state().session.state.last_effect.is_some(), "and the release chose the entry: it applied its effect");
+}
+
+/// The open menus close on a press outside them and when the window loses focus. The pointer
+/// leaving the window — onto the OS title bar, whose clicks are never forwarded to egui — closes
+/// nothing, however long it stays away: there is no click to close on, and a graze or a stay
+/// must not drop the menu. The closing press itself is not swallowed: it reaches the widget under
+/// it, as a click does in After Effects.
+#[test]
+fn outside_presses_and_focus_loss_close_the_menus() {
+    let mut h = harness();
+    let file = rect(&h, "menu.File");
+    click_at(&mut h, file.center());
+    assert!(shown(&h, "Open Project"));
+    // A press in the empty part of the bar, outside every title and menu.
+    click_at(&mut h, pos2(1100.0, 12.0));
+    assert!(!shown(&h, "Open Project"), "a press outside the menus closes them");
+    // The press reaches the header's workspace tab behind the open menu: the menu closes and the
+    // tab still acts (the menus don't swallow input).
+    click_at(&mut h, file.center());
+    assert!(shown(&h, "Open Project"));
+    let tab = rect(&h, "header.workspace.Review");
+    click_at(&mut h, tab.center());
+    assert_eq!(h.state().ui.workspace, "Review", "the press reached the tab behind the open menu");
+    assert!(!shown(&h, "Open Project"), "and closed the menu");
+    // Moving onto the OS title bar fires the cursor-left event — its clicks are never forwarded
+    // to egui — which egui reports as `PointerGone`. It must not close the menus, however long
+    // the pointer stays away.
+    click_at(&mut h, file.center());
+    assert!(shown(&h, "Open Project"));
+    h.input_mut().events.push(Event::PointerGone);
+    h.run_steps(1);
+    assert!(shown(&h, "Open Project"), "leaving the window alone doesn't drop the menus at once");
+    let now = h.ctx.input(|i| i.time);
+    h.input_mut().time = Some(now + 60.0);
+    h.run_steps(2);
+    assert!(shown(&h, "Open Project"), "staying away doesn't close them either");
+    h.input_mut().events.push(Event::PointerMoved(file.center()));
+    h.run_steps(2);
+    assert!(shown(&h, "Open Project"), "the pointer coming back keeps them open too");
+    // Losing focus (alt-tabbing away, or clicking another window).
+    h.input_mut().events.push(Event::WindowFocused(false));
+    h.run_steps(2);
+    assert!(!shown(&h, "Open Project"), "losing focus closes the menus");
 }

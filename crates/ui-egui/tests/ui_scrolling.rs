@@ -40,6 +40,33 @@ fn wheel(h: &mut Harness<'_, EffectcraftApp>, at: Pos2, dy: f32) {
     h.run_steps(20);
 }
 
+/// Press the primary button at `p` and keep it down (press-and-browse, as on a menu title).
+fn hold(h: &mut Harness<'_, EffectcraftApp>, p: Pos2) {
+    h.input_mut().events.push(Event::PointerMoved(p));
+    h.input_mut().events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.run_steps(2);
+}
+
+/// Move the pointer to `p`, keeping whatever button is held.
+fn move_to(h: &mut Harness<'_, EffectcraftApp>, p: Pos2) {
+    h.input_mut().events.push(Event::PointerMoved(p));
+    h.run_steps(2);
+}
+
+/// The open menu popup's rect (frame included), from egui's area memory: the only tall area up.
+fn open_popup(h: &Harness<'_, EffectcraftApp>) -> Rect {
+    h.ctx
+        .memory(|m| {
+            m.areas()
+                .visible_layer_ids()
+                .into_iter()
+                .filter(|l| l.order != egui::Order::Background)
+                .filter_map(|l| m.area_rect(l.id))
+                .find(|r| r.height() > 100.0)
+        })
+        .unwrap_or_else(|| panic!("no menu popup is open"))
+}
+
 /// Edit is taller than a short window: it scrolls (with the wheel, and a scroll bar that always
 /// shows) so its last entries can be reached and clicked, instead of running off the bottom of
 /// the window (#269).
@@ -57,6 +84,52 @@ fn a_menu_taller_than_the_window_scrolls() {
     assert!(last.min.y >= 0.0 && last.max.y <= 520.0, "scrolled into the window ({last:?})");
     click_at(&mut h, last.center());
     assert_eq!(h.state().dialog, Some(effectcraft_ui_egui::Dialog::Shortcuts), "the entry takes the click");
+}
+
+/// With the title still held down (press-and-browse), resting the pointer against the bottom
+/// edge of a menu too tall for the window scrolls it from there — a crawl, then a run, as native
+/// menus do — so the long list can be walked with no wheel.
+#[test]
+fn holding_the_title_scrolls_the_menu_from_its_bottom_edge() {
+    let mut h = harness(1200.0, 520.0);
+    let edit = rect(&h, "menu.Edit");
+    hold(&mut h, edit.center());
+    let before = h.query_by_label_contains("Keyboard Shortcuts").expect("the Edit menu opens on the press").rect();
+    assert!(before.max.y > 520.0, "Edit is taller than the window ({before:?})");
+    let menu = open_popup(&h);
+    // Creeping down the edge: the 18 pt band above the menu's inner bottom lies at one of these
+    // positions, whatever the frame's margin (they are 6 pt apart).
+    let mut walked = false;
+    for step in 0..5 {
+        move_to(&mut h, pos2(menu.center().x, menu.max.y - 6.0 - 6.0 * step as f32));
+        h.run_steps(8);
+        let now = h.query_by_label_contains("Keyboard Shortcuts").expect("still open").rect();
+        if now.min.y < before.min.y {
+            walked = true;
+            break;
+        }
+    }
+    assert!(walked, "resting on the bottom edge of the held-down menu scrolled its entries up");
+}
+
+/// Without the title held down — the menu opened by a plain click — the same edge rest scrolls
+/// nothing: the wheel (above) is how a click-opened menu scrolls, the pointer alone must not
+/// move it (a hover may align the row under it by a few points; a crawl there would be a bug).
+#[test]
+fn without_the_hold_the_edge_does_not_scroll_the_menu() {
+    let mut h = harness(1200.0, 520.0);
+    let edit = rect(&h, "menu.Edit");
+    click_at(&mut h, edit.center());
+    let before = h.query_by_label_contains("Keyboard Shortcuts").expect("the Edit menu is open").rect();
+    assert!(before.max.y > 520.0, "Edit is taller than the window ({before:?})");
+    let menu = open_popup(&h);
+    for step in 0..5 {
+        move_to(&mut h, pos2(menu.center().x, menu.max.y - 6.0 - 6.0 * step as f32));
+        h.run_steps(8);
+        let now = h.query_by_label_contains("Keyboard Shortcuts").expect("still open").rect();
+        let crawled = before.min.y - now.min.y;
+        assert!(crawled < 60.0, "step {step}: the edge scrolled the menu with no title held down ({before:?} -> {now:?})");
+    }
 }
 
 fn drag(h: &mut Harness<'_, EffectcraftApp>, from: Pos2, to: Pos2) {

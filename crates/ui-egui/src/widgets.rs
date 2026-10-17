@@ -607,9 +607,78 @@ pub fn any_menu_open(ctx: &egui::Context) -> bool {
 /// whole: egui sizes a new menu from a default 400 pt area, so without a minimum a longer one
 /// (Window ▸ Workspace) got stuck at that height with its last entries scrolled out of view
 /// (#191).
-pub fn menu_scroll<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+///
+/// While the bar is mid press-and-browse (`browsing`), resting the pointer against the menu's
+/// bottom or top edge scrolls it from there — a crawl at first, then a run, as native menus do —
+/// so a long list can be walked with no wheel. Without the hold the edges do nothing: the wheel
+/// and the scroll bar are how a normally opened menu scrolls.
+pub fn menu_scroll<R>(ui: &mut Ui, browsing: bool, add: impl FnOnce(&mut Ui) -> R) -> R {
     let max_h = ui.ctx().content_rect().height() - 40.0;
-    egui::ScrollArea::vertical().max_height(max_h).min_scrolled_height(max_h).show(ui, add).inner
+    let out = egui::ScrollArea::vertical().max_height(max_h).min_scrolled_height(max_h).show(ui, add);
+    edge_scroll(ui, &out, browsing);
+    out.inner
+}
+
+/// The edge scroll [`menu_scroll`] adds while browsing: with the pointer resting in the bottom
+/// (top) band of an overflowing menu, its content crawls up (down) after a short pause, ramps to
+/// a run and stops at the end — and stops at once when the pointer leaves the band or the hold.
+///
+/// This runs after `ScrollArea::show`, which laid the menu out for the offset it had, so the new
+/// offset goes into the area's state and shows on the next frame: a frame of lag, invisible at
+/// these speeds. egui's own scrolling (wheel, drag, scroll bar) is untouched.
+fn edge_scroll<R>(ui: &Ui, out: &egui::containers::scroll_area::ScrollAreaOutput<R>, browsing: bool) {
+    /// How far from the top / bottom edge the pointer starts the crawl (points).
+    const BAND: f32 = 18.0;
+    /// The pause before the crawl starts: a pointer merely grazing the edge must not jump.
+    const DELAY: f32 = 0.12;
+    /// Points per second: a crawl at first, reaching the run about three quarters of a second in.
+    const CRAWL: f32 = 45.0;
+    const RAMP: f32 = 700.0;
+    const RUN: f32 = 560.0;
+
+    let ctx = ui.ctx();
+    let over = out.content_size.y - out.inner_rect.height();
+    let dir = match (browsing, over > 0.0, ctx.input(|i| i.pointer.latest_pos())) {
+        (true, true, Some(p)) if out.inner_rect.contains(p) => {
+            if p.y >= out.inner_rect.max.y - BAND {
+                1
+            } else if p.y <= out.inner_rect.min.y + BAND {
+                -1
+            } else {
+                0
+            }
+        }
+        _ => 0,
+    };
+    // The clock the pause counts from, kept per menu: entering or leaving an edge band restarts
+    // it, so a later stay there crawls off again instead of jumping straight to the run.
+    let now = ctx.input(|i| i.time);
+    let key = out.id.with("menu-edge-scroll");
+    let (since, prev) = ctx.data(|d| d.get_temp::<(f64, i32)>(key)).unwrap_or((now, 0));
+    let since = if dir == prev {
+        since
+    } else {
+        ctx.data_mut(|d| d.insert_temp(key, (now, dir)));
+        now
+    };
+    if dir == 0 {
+        return;
+    }
+    if now - since < f64::from(DELAY) {
+        // A pointer resting still fires no events: keep the frames coming until the crawl runs.
+        ctx.request_repaint();
+        return;
+    }
+    let speed = (CRAWL + RAMP * ((now - since) as f32 - DELAY)).min(RUN);
+    let crawl = ctx.input(|i| i.unstable_dt).min(0.05) * speed * dir as f32;
+    let new = (out.state.offset.y + crawl).clamp(0.0, over);
+    if new != out.state.offset.y {
+        let mut state = out.state;
+        state.offset.y = new;
+        state.store(ctx, out.id);
+        // At the end of the list the crawl stands still and asks for no more frames.
+        ctx.request_repaint();
+    }
 }
 
 /// egui's menu style with no gap between the rows: the gap the app's item spacing left between
