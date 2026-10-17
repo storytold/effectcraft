@@ -147,6 +147,46 @@ fn about_button(app: &mut EffectcraftApp, ui: &mut egui::Ui, bp: &egui::Painter,
     }
 }
 
+/// Tint's and Gradient Ramp's Swap Colors button below the effect's rows, `row` being the line it
+/// sits on. Returns the height it took: none for other effects.
+fn swap_colors_button(app: &mut EffectcraftApp, ui: &mut egui::Ui, t: &Tokens, g: &PropGroup, layer_id: u64, row: Rect, actions: &mut Actions) -> f32 {
+    let GroupKind::Effect { effect } = &g.kind else { return 0.0 };
+    let command = match effect.as_str() {
+        "ec.color.tint" => "effect.swapTintColors",
+        "ec.generate.gradientramp" => "effect.swapGradientRampColors",
+        _ => return 0.0,
+    };
+    let label = crate::i18n::tr("Swap Colors");
+    let id = egui::Id::unique(("ec-color-swap", g.uid));
+    let resp = if command == "effect.swapGradientRampColors" {
+        // Align the action with the parameter values and use the same quiet field styling.
+        let vx = (row.min.x + row.width() * 0.48).max(row.min.x + PARAM_NAME_X + 124.0);
+        let width = ui.painter().layout_no_wrap(label.to_owned(), Tokens::ui(12.0), t.text).size().x + 20.0;
+        let r = Rect::from_min_size(pos2(vx, row.min.y + 2.0), vec2(width.min((row.max.x - vx - 8.0).max(0.0)), ROW - 2.0));
+        let resp = ui.interact(r, id, Sense::click());
+        let bg = if resp.is_pointer_button_down_on() {
+            t.pressed
+        } else if resp.hovered() {
+            t.hover
+        } else {
+            t.field_bg
+        };
+        ui.painter().rect_filled(r, 2.0, bg);
+        ui.painter().rect_stroke(r, 2.0, Stroke::new(1.0, t.field_border), egui::StrokeKind::Inside);
+        ui.painter().with_clip_rect(r.intersect(ui.clip_rect())).text(r.center(), Align2::CENTER_CENTER, label, Tokens::ui(12.0), t.text);
+        resp.on_hover_text(crate::i18n::tr("Swap Start and End Colors"))
+    } else {
+        let r = Rect::from_min_size(pos2(row.min.x + PARAM_NAME_X, row.min.y + 2.0), vec2(120.0, ROW));
+        widgets::text_button(ui, r, label, false, t, id)
+    };
+    app.auto.add_response(&format!("effectControls.effect.{}.swapColors", g.uid), &resp, label);
+    if resp.clicked() {
+        actions.push(("prop.select".into(), json!({"layer": layer_id, "prop": g.uid})));
+        actions.push((command.into(), json!({"layer": layer_id, "effect": g.uid})));
+    }
+    ROW + 4.0
+}
+
 /// The Effect Controls panel for the selected layer: a header with the comp and layer names, then
 /// one header per effect (Fx toggle, twirl, rename, Reset, About, label bar, reorder drag and its
 /// right-click menu) followed by that effect's custom editor and its property rows. Dragging
@@ -343,17 +383,8 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             }
             let scope = FxScope { effect: effect.as_str(), root: g, path: String::new() };
             group_rows(app, ui, &bp, &layer, g, &ectx, body, &mut y, 0, &scope, &mut actions);
-            if effect == "ec.color.tint" {
-                let r = Rect::from_min_size(pos2(body.min.x + PARAM_NAME_X, y + 2.0), vec2(120.0, ROW));
-                let label = crate::i18n::tr("Swap Colors");
-                let resp = widgets::text_button(ui, r, label, false, &t, egui::Id::unique(("ec-tint-swap", g.uid)));
-                app.auto.add_response(&format!("effectControls.effect.{}.swapColors", g.uid), &resp, label);
-                if resp.clicked() {
-                    actions.push(("prop.select".into(), json!({"layer": layer.id.0, "prop": g.uid})));
-                    actions.push(("effect.swapTintColors".into(), json!({"layer": layer.id.0, "effect": g.uid})));
-                }
-                y += ROW + 4.0;
-            }
+            let row = Rect::from_min_size(pos2(body.min.x, y), vec2(body.width(), ROW));
+            y += swap_colors_button(app, ui, &t, g, layer.id.0, row, &mut actions);
         }
         y += 4.0;
     }

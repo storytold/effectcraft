@@ -948,29 +948,36 @@ fn reset(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(Value::Null)
 }
 
-/// Tint's Swap Colors button edits both swatches at the CTI in one undo step. Like Reset,
-/// it keys animated parameters without moving their existing keys or replacing expressions.
 fn swap_tint_colors(s: &mut Session, p: &Value) -> Result<Value> {
-    let cmd = "effect.swapTintColors";
+    swap_colors(s, p, "effect.swapTintColors", "ec.color.tint", ["black", "white"], "Tint")
+}
+
+fn swap_gradient_ramp_colors(s: &mut Session, p: &Value) -> Result<Value> {
+    swap_colors(s, p, "effect.swapGradientRampColors", "ec.generate.gradientramp", ["startColor", "endColor"], "Gradient Ramp")
+}
+
+/// Swap both swatches at the CTI in one undo step. Like Reset, this keys animated
+/// parameters without moving their existing keys or replacing expressions.
+fn swap_colors(s: &mut Session, p: &Value, cmd: &str, effect: &str, colors: [&str; 2], name: &str) -> Result<Value> {
     if !p.is_object() || p.get("effect").is_some_and(|v| !v.is_string() && v.as_u64().is_none_or(|n| n == 0)) {
         return Err(bad(cmd, "effect must be a positive index, uid or name"));
     }
     let (cid, lid, uid) = find_fx(s, p, cmd)?;
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
     let layer = comp.layer(lid).ok_or(EngineError::NoComp)?;
-    let g = layer.props.find_group(uid).filter(|g| g.match_id == "ec.color.tint").ok_or_else(|| bad(cmd, "not a Tint effect"))?;
+    let g = layer.props.find_group(uid).filter(|g| g.match_id == effect).ok_or_else(|| bad(cmd, format!("not a {name} effect")))?;
     let lt = layer.layer_time(s.time_of(cid));
     let color = |id| {
         g.prop(id)
             .map(|pr| pr.value_at(lt))
             .filter(|v| matches!(v, effectcraft_keyframe::Value::Color(_)))
-            .ok_or_else(|| bad(cmd, "Tint is missing a colour parameter"))
+            .ok_or_else(|| bad(cmd, format!("{name} is missing a colour parameter")))
     };
-    let (black, white) = (color("black")?, color("white")?);
-    s.edit("Swap Tint Colors", None, |proj, _| {
+    let (first, second) = (color(colors[0])?, color(colors[1])?);
+    s.edit(&format!("Swap {name} Colors"), None, |proj, _| {
         let g = layer_mut(proj, cid, lid)?.props.find_group_mut(uid).ok_or_else(|| bad(cmd, "effect gone"))?;
-        for (id, value) in [("black", white), ("white", black)] {
-            g.prop_mut(id).ok_or_else(|| bad(cmd, "Tint is missing a colour parameter"))?.set_value_at(lt, value);
+        for (id, value) in [(colors[0], second), (colors[1], first)] {
+            g.prop_mut(id).ok_or_else(|| bad(cmd, format!("{name} is missing a colour parameter")))?.set_value_at(lt, value);
         }
         Ok(())
     })?;
@@ -1091,6 +1098,15 @@ pub fn specs() -> Vec<CommandSpec> {
             "{comp?, layer?, effect?: index|uid|name} — swaps Tint's Map Black To and Map White To at the current layer time in one undo step",
             has_layers,
             swap_tint_colors
+        ),
+        cmd!(
+            "effect.swapGradientRampColors",
+            "Swap Gradient Ramp Colors",
+            [],
+            None,
+            "{comp?, layer?, effect?: index|uid|name} — swaps Gradient Ramp's Start Color and End Color at the current layer time in one undo step",
+            has_layers,
+            swap_gradient_ramp_colors
         ),
         crate::query!(
             "effect.list",

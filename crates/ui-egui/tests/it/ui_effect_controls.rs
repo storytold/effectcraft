@@ -170,6 +170,40 @@ fn tint_swap_button_targets_its_instance_and_undoes_both_colors() {
 }
 
 #[test]
+fn gradient_ramp_swap_button_targets_its_instance_and_undoes_both_colors() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"width": 640, "height": 360, "frameRate": 30, "duration": 5})).unwrap();
+    let lid = s.execute("layer.newSolid", json!({"color": "#000000"})).unwrap()["layer"].as_u64().unwrap();
+    let first = s.execute("effect.apply", json!({"effect": "Gradient Ramp"})).unwrap()["effects"][0].as_u64().unwrap();
+    let target = s.execute("effect.apply", json!({"effect": "Gradient Ramp"})).unwrap()["effects"][0].as_u64().unwrap();
+    let blur = s.execute("effect.apply", json!({"effect": "Gaussian Blur"})).unwrap()["effects"][0].as_u64().unwrap();
+    let mut app = EffectcraftApp::new(s);
+    app.show_panel(PanelKind::EffectControls);
+    let mut h = Harness::builder().with_size(egui::vec2(1700.0, 1600.0)).build_eframe(|_| app);
+    h.run_steps(4);
+    let id = format!("effectControls.effect.{target}.swapColors");
+    let rect = h.state().auto.find(&id).unwrap().rect;
+    assert!(ids(&h).contains(&format!("effectControls.effect.{first}.swapColors")));
+    assert!(!ids(&h).contains(&format!("effectControls.effect.{blur}.swapColors")));
+    let n = h.state().session.history.undo.len();
+    click(&mut h, egui::pos2(rect[0] + rect[2] / 2.0, rect[1] + rect[3] / 2.0));
+    let l = layer(&h.state().session, lid);
+    let g = l.props.find_group(target).unwrap();
+    assert_eq!(g.prop("startColor").unwrap().value, KV::Color([1.0; 4]));
+    assert_eq!(g.prop("endColor").unwrap().value, KV::Color([0.0, 0.0, 0.0, 1.0]));
+    assert_eq!(l.props.find_group(first).unwrap().prop("startColor").unwrap().value, KV::Color([0.0, 0.0, 0.0, 1.0]));
+    assert_eq!(h.state().session.history.undo.len(), n + 1);
+    assert_eq!(h.state().session.state.selected_props, vec![(LayerId(lid), target)]);
+    assert!(h.state_mut().session.undo());
+    let l = layer(&h.state().session, lid);
+    assert_eq!(l.props.find_group(target).unwrap().prop("startColor").unwrap().value, KV::Color([0.0, 0.0, 0.0, 1.0]));
+    assert_eq!(l.props.find_group(target).unwrap().prop("endColor").unwrap().value, KV::Color([1.0; 4]));
+    h.state_mut().ui.fx_closed.insert(target);
+    h.run_steps(2);
+    assert!(!h.state().auto.elements.iter().any(|e| e.id == id));
+}
+
+#[test]
 fn crosshair_and_eyedropper_pick_from_the_viewer() {
     let (app, x) = app();
     let mut h = Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).build_eframe(|_| app);
