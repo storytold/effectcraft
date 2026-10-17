@@ -492,3 +492,76 @@ fn stl_hostile_input_is_an_error() {
     let m = stl::parse(&binary_stl(b"", &[([1.0, 0.0, 0.0], [[0.0; 3]; 3], 0)])).unwrap();
     assert_eq!(m.meshes[0].primitives[0].normals[0], [1.0, 0.0, 0.0]);
 }
+
+/// A 2×2 PNG, made in code.
+fn png_2x2() -> Vec<u8> {
+    let img = image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 0, 0, 255]));
+    let mut out = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+    out.into_inner()
+}
+
+const QUAD_OBJ: &str = "mtllib quad.mtl\nv 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\nusemtl Mat\nf 1/1 2/2 3/3\nf 1/1 3/3 4/4\n";
+
+/// Load `obj` from a folder holding `files` (names relative to it, as the media pool's
+/// `dir.join(name)` resolver sees them: an absolute name never matches a file here).
+fn load_in_folder(obj: &str, files: &[(&str, Vec<u8>)]) -> Model {
+    let files: HashMap<String, Vec<u8>> = files.iter().map(|(n, b)| (n.to_string(), b.clone())).collect();
+    load("quad.obj", obj.as_bytes(), &|n: &str| files.get(n).cloned()).unwrap()
+}
+
+fn quad_with_map(map_kd: &str, tex_name: &str) -> Model {
+    let mtl = format!("newmtl Mat\nKd 0.64 0.64 0.64\nmap_Kd {map_kd}\n");
+    load_in_folder(QUAD_OBJ, &[("quad.mtl", mtl.into_bytes()), (tex_name, png_2x2())])
+}
+
+#[test]
+fn obj_map_kd_relative_path_loads() {
+    let m = quad_with_map("checker.png", "checker.png");
+    assert!(m.materials[0].base_color_tex.is_some());
+}
+
+#[test]
+fn obj_map_kd_absolute_windows_path_falls_back_to_model_folder() {
+    // #1274: a texture path from another PC.
+    let m = quad_with_map(r"C:\Users\someone\Desktop\textures\checker.png", "checker.png");
+    assert!(m.materials[0].base_color_tex.is_some());
+}
+
+#[test]
+fn obj_map_kd_absolute_posix_path_falls_back_to_model_folder() {
+    let m = quad_with_map("/home/someone/textures/checker.png", "checker.png");
+    assert!(m.materials[0].base_color_tex.is_some());
+}
+
+#[test]
+fn obj_map_kd_relative_backslash_path_loads() {
+    let m = quad_with_map(r"textures\checker.png", "textures/checker.png");
+    assert!(m.materials[0].base_color_tex.is_some());
+}
+
+#[test]
+fn obj_map_kd_filename_with_spaces_and_options() {
+    let m = quad_with_map("-bm 1 -o 0.5 0.5 my checker.png", "my checker.png");
+    assert!(m.materials[0].base_color_tex.is_some());
+    let m = quad_with_map("my checker.png", "my checker.png");
+    assert!(m.materials[0].base_color_tex.is_some());
+}
+
+#[test]
+fn obj_map_kd_missing_texture_keeps_kd() {
+    let m = quad_with_map("nowhere.png", "checker.png");
+    assert!(m.materials[0].base_color_tex.is_none());
+    assert!((m.materials[0].base_color[0] - srgb_to_linear_test(0.64)).abs() < 1e-6);
+}
+
+fn srgb_to_linear_test(c: f32) -> f32 {
+    obj::srgb_to_linear(c)
+}
+
+#[test]
+fn obj_absolute_mtllib_falls_back_to_model_folder() {
+    let obj = QUAD_OBJ.replace("mtllib quad.mtl", r"mtllib D:\exports\quad.mtl");
+    let m = load_in_folder(&obj, &[("quad.mtl", b"newmtl Mat\nKd 1 0 0\n".to_vec())]);
+    assert_eq!(m.materials[0].base_color, [1.0, 0.0, 0.0, 1.0]);
+}

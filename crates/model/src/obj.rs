@@ -18,12 +18,20 @@ use crate::{AlphaMode, Material, Mesh, Model, Primitive, Result, TexRef, Texture
 pub fn parse_mtl(text: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>, textures: &mut Vec<Arc<Texture>>) -> Vec<Material> {
     let mut out: Vec<Material> = vec![];
     let mut loaded: HashMap<String, Option<usize>> = HashMap::new();
-    let mut tex = |name: &str, textures: &mut Vec<Arc<Texture>>| -> Option<TexRef> {
-        // Options (`-bm 1 file.png`): the file name is the last token.
-        let file = name.split_whitespace().last()?.to_string();
+    let mut tex = |args: &str, textures: &mut Vec<Arc<Texture>>| -> Option<TexRef> {
+        let file = map_file(args)?.to_string();
         let t = *loaded.entry(file.clone()).or_insert_with(|| {
-            let b = resolve(&file)?;
-            let t = Texture::decode(&b).ok()?;
+            let Some(b) = resolve_ref(resolve, &file) else {
+                log::warn!("model: texture `{file}` not found");
+                return None;
+            };
+            let t = match Texture::decode(&b) {
+                Ok(t) => t,
+                Err(e) => {
+                    log::warn!("model: cannot decode texture `{file}`: {e}");
+                    return None;
+                }
+            };
             textures.push(Arc::new(t));
             Some(textures.len() - 1)
         });
@@ -90,6 +98,58 @@ pub fn parse_mtl(text: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>, textures
     out
 }
 
+/// The file name of a texture map statement's arguments (`-bm 1 -o 0.5 0.5 my file.png`):
+/// options are skipped by their argument counts, so a file name may contain spaces.
+fn map_file(args: &str) -> Option<&str> {
+    let mut rest = args.trim();
+    loop {
+        let (tok, after) = rest.split_once(char::is_whitespace).map_or((rest, ""), |(a, b)| (a, b.trim_start()));
+        if after.is_empty() {
+            break;
+        }
+        // (count, optional): `-o`, `-s`, `-t` take one to three numbers.
+        let (count, optional_from) = match tok {
+            "-blendu" | "-blendv" | "-bm" | "-boost" | "-cc" | "-clamp" | "-imfchan" | "-texres" | "-type" => (1, 1),
+            "-mm" => (2, 2),
+            "-o" | "-s" | "-t" => (3, 1),
+            // An option this parser doesn't know: the file name is the last token.
+            t if t.starts_with('-') && t.len() > 1 && t[1..].starts_with(|c: char| c.is_ascii_alphabetic()) => return args.split_whitespace().last(),
+            _ => break,
+        };
+        rest = after;
+        for i in 0..count {
+            let (arg, after) = rest.split_once(char::is_whitespace).map_or((rest, ""), |(a, b)| (a, b.trim_start()));
+            // The last token is always the file name.
+            if after.is_empty() || (i >= optional_from && arg.parse::<f32>().is_err()) {
+                break;
+            }
+            rest = after;
+        }
+    }
+    let f = rest.trim_end();
+    (!f.is_empty()).then_some(f)
+}
+
+/// Names to try for a file an OBJ or MTL refers to: as written, with `\` read as a separator,
+/// then the file name alone (a path from the machine that wrote the file: the file next to the
+/// model).
+fn candidates(name: &str) -> Vec<String> {
+    let mut v = vec![name.to_string()];
+    let slashed = name.replace('\\', "/");
+    if slashed != name {
+        v.push(slashed.clone());
+    }
+    if let Some(base) = slashed.rsplit('/').next().filter(|b| !b.is_empty() && *b != slashed) {
+        v.push(base.to_string());
+    }
+    v
+}
+
+/// The bytes of a file an OBJ or MTL refers to (see [`candidates`]).
+fn resolve_ref(resolve: &dyn Fn(&str) -> Option<Vec<u8>>, name: &str) -> Option<Vec<u8>> {
+    candidates(name).iter().find_map(|n| resolve(n))
+}
+
 fn finish(m: &mut Material, _ns: bool, _pr: bool) {
     if m.base_color[3] < 0.999 {
         m.alpha_mode = AlphaMode::Blend;
@@ -147,12 +207,12 @@ pub fn parse(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<
             }
             "mtllib" => {
                 let name = line["mtllib".len()..].trim();
-                for file in std::iter::once(name).chain(name.split_whitespace()) {
-                    if let Some(b) = resolve(file) {
-                        let mut ms = parse_mtl(&String::from_utf8_lossy(&b), resolve, &mut textures);
-                        materials.append(&mut ms);
-                        break;
-                    }
+                let found = std::iter::once(name).chain(name.split_whitespace()).find_map(|file| resolve_ref(resolve, file));
+                if let Some(b) = found {
+                    let mut ms = parse_mtl(&String::from_utf8_lossy(&b), resolve, &mut textures);
+                    materials.append(&mut ms);
+                } else if !name.is_empty() {
+                    log::warn!("model: material library `{name}` not found");
                 }
             }
             "usemtl" => {
