@@ -298,6 +298,7 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("comp.close", "Close Composition", [], None, "{comp?}", has_comp, close),
         cmd!("comp.workArea", "Set Work Area", [], None, "{start?, end?, set?: begin|end (at CTI)}", has_comp, work_area),
         cmd!("comp.setSwitch", "Composition Switch", [], None, "{switch: hideShy|motionBlur|frameBlending|draft3d, value?}", has_comp, comp_switch),
-        cmd!("comp.addMarker", "Add Marker", [], Some("Num*"), "{time?, comment?}", has_comp, add_marker),
+        // (Ctrl+8: the main-keyboard key on macOS, for keyboards without a numeric keypad.)
+        cmd!("comp.addMarker", "Add Marker", [], ["Num*", "Ctrl+8"], "{time?, comment?}", has_comp, add_marker),
     ]
 }
