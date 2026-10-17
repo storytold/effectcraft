@@ -82,6 +82,15 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         {
             app.ui.status = e;
         }
+        // Double-click a shape tool: a shape layer filling the composition, centred, for
+        // backgrounds, mattes and overlays (as After Effects does).
+        if cur.is_shape()
+            && resp.double_clicked()
+            && let Some((w, h)) = app.session.active_comp().map(|c| (c.width, c.height))
+            && let Err(e) = crate::menus::invoke(app, ui.ctx(), "layer.newShape", json!({"kind": crate::panels::viewer::shape_kind(cur), "size": [w, h]}))
+        {
+            app.ui.status = e;
+        }
         if slot.len() > 1 {
             let held_for = resp.is_pointer_button_down_on().then(|| ui.input(|i| i.pointer.press_start_time().map(|s| i.time - s))).flatten();
             if let Some(seconds) = held_for

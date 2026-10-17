@@ -246,6 +246,18 @@ fn text_shape_mask_matte_parent() {
     assert_eq!(info["layers"].as_array().unwrap().len(), 2);
 }
 
+/// A shape layer the size of the comp and placed at its default position covers the frame: the
+/// Shape Tool's double-click (#1284) makes one this way, for backgrounds, mattes and overlays.
+#[test]
+fn a_comp_sized_shape_layer_sits_on_the_comp_centre() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"width": 400, "height": 300, "duration": 2})).unwrap();
+    let sh = s.execute("layer.newShape", json!({"kind": "rect", "size": [400, 300], "fill": "#ff0000"})).unwrap()["layer"].as_u64().unwrap();
+    let l = s.active_comp().unwrap().layer(effectcraft_project::LayerId(sh)).unwrap().clone();
+    let pos = l.props.prop("transform/position").unwrap().value.clone();
+    assert!(matches!(pos, effectcraft_keyframe::Value::Vec3(p) if (p[0] - 200.0).abs() < 1e-9 && (p[1] - 150.0).abs() < 1e-9), "{pos:?}");
+}
+
 /// The toolbar's Fill / Stroke change a selected shape layer's paint (#205): a shape drawn
 /// without a stroke gets one, later edits change it, and the Contents "Add:" items (#206) include
 /// an empty Path and a Gradient Stroke that render.
