@@ -382,9 +382,11 @@ pub fn text_button(ui: &mut Ui, rect: Rect, text: &str, primary: bool, t: &Token
     resp
 }
 
-/// Checkbox in the AE look (small square).
-pub fn checkbox(ui: &mut Ui, rect: Rect, on: bool, t: &Tokens, id: egui::Id) -> Response {
-    let resp = ui.interact(rect, id, Sense::click());
+/// Checkbox in the AE look (small square). Clicking toggles it; pressing one and dragging
+/// toggles it and gives every other checkbox the pointer passes over the same new state,
+/// until the button is released (#1190, as the eye and lock columns of the Layers panel).
+pub fn checkbox(ui: &mut Ui, rect: Rect, on: bool, t: &Tokens, id: egui::Id) -> CheckResponse {
+    let resp = ui.interact(rect, id, Sense::click_and_drag());
     let b = Rect::from_center_size(rect.center(), vec2(12.0, 12.0));
     ui.painter().rect_filled(b, 2.0, if on { t.accent } else { t.field_bg });
     ui.painter().rect_stroke(b, 2.0, Stroke::new(1.0, if on { t.accent } else { t.field_border }), StrokeKind::Inside);
@@ -392,7 +394,50 @@ pub fn checkbox(ui: &mut Ui, rect: Rect, on: bool, t: &Tokens, id: egui::Id) -> 
         let p = |x: f32, y: f32| pos2(b.min.x + x * b.width(), b.min.y + y * b.height());
         ui.painter().line(vec![p(0.2, 0.52), p(0.42, 0.74), p(0.8, 0.28)], Stroke::new(1.6, Color32::WHITE));
     }
-    resp
+    CheckResponse { toggled: resp.clicked() || drag_toggle(ui, &resp, on), resp }
+}
+
+/// The result of [`checkbox`]: the row's [`Response`], except that `clicked()` is also true
+/// when a drag started on another checkbox paints this one into its opposite state (#1190).
+pub struct CheckResponse {
+    resp: Response,
+    toggled: bool,
+}
+
+impl std::ops::Deref for CheckResponse {
+    type Target = Response;
+    fn deref(&self) -> &Response {
+        &self.resp
+    }
+}
+
+impl CheckResponse {
+    /// Whether this box should switch to `!on` this frame.
+    pub fn clicked(&self) -> bool {
+        self.toggled
+    }
+}
+
+/// The state a drag across checkboxes paints onto the ones it passes, while the primary
+/// button is down (#1190).
+fn drag_toggle_id() -> egui::Id {
+    egui::Id::new("checkbox-drag-toggle")
+}
+
+/// The drag half of [`checkbox`]: starting a drag on a box sets the painted state and
+/// toggles it; while the button is down, every other box the pointer moves over takes the
+/// painted state. A plain click never reaches here (`Response::clicked` covers it).
+fn drag_toggle(ui: &Ui, resp: &Response, on: bool) -> bool {
+    let ctx = ui.ctx();
+    if !ctx.input(|i| i.pointer.primary_down()) {
+        ctx.data_mut(|d| d.remove::<bool>(drag_toggle_id()));
+    }
+    if resp.drag_started_by(egui::PointerButton::Primary) {
+        ctx.data_mut(|d| d.insert_temp(drag_toggle_id(), !on));
+        return true;
+    }
+    let Some(target) = ctx.data(|d| d.get_temp::<bool>(drag_toggle_id())) else { return false };
+    ctx.input(|i| i.pointer.latest_pos()).is_some_and(|p| resp.rect.contains(p)) && on != target
 }
 
 /// A scroll bar along `track` (vertical when it is taller than wide) for content scrolled
@@ -724,5 +769,46 @@ mod tests {
             let r = got.expect("the field was drawn");
             assert!((r.center().y - field.center().y).abs() < 0.5 && r.height() >= h - 2.5, "{h}: {r:?} in {field:?}");
         }
+    }
+
+    /// #1190: press a checkbox and drag down the column: the first toggles and every box the
+    /// pointer passes takes the same new state until release; a plain click still toggles one.
+    #[test]
+    fn dragging_across_checkboxes_paints_the_state() {
+        let ctx = egui::Context::default();
+        let t = Tokens::for_kind(Default::default());
+        let mut state = [false, true, false, true];
+        let row = |i: usize| Rect::from_min_size(pos2(10.0, 10.0 + 24.0 * i as f32), vec2(60.0, 20.0));
+        let frame = |state: &mut [bool; 4], events: Vec<egui::Event>| {
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(300.0, 300.0))), events, ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| {
+                for (i, v) in state.iter_mut().enumerate() {
+                    if checkbox(ui, row(i), *v, &t, egui::Id::new(("cb", i))).clicked() {
+                        *v = !*v;
+                    }
+                }
+            });
+            out.textures_delta.clear();
+        };
+        let press = |at: egui::Pos2, down: bool| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed: down,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(&mut state, vec![]);
+        frame(&mut state, vec![press(row(0).center(), true)]);
+        // Drag from row 0 down to row 2, past the drag threshold.
+        let (a, b) = (row(0).center(), row(2).center());
+        for i in 1..=6 {
+            frame(&mut state, vec![egui::Event::PointerMoved(a + (b - a) * (i as f32 / 6.0))]);
+        }
+        frame(&mut state, vec![press(b, false)]);
+        assert_eq!(state, [true, true, true, true], "the drag sets every box it passed over to the first one's new state");
+        // A plain click toggles exactly one.
+        let c = row(3).center();
+        frame(&mut state, vec![press(c, true)]);
+        frame(&mut state, vec![press(c, false)]);
+        assert_eq!(state, [true, true, true, false]);
     }
 }

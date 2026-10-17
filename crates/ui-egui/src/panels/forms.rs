@@ -767,7 +767,7 @@ pub fn open_form(app: &mut EffectcraftApp, id: &str, p: &Value) -> bool {
 }
 
 /// The label and control rows of a form: the part of [`show_form`] that scrolls.
-fn form_grid(ui: &mut egui::Ui, f: &mut Form, regs: &mut Vec<(String, egui::Rect, String)>, browse: &mut Option<usize>, focused: &mut bool) {
+fn form_grid(ui: &mut egui::Ui, f: &mut Form, regs: &mut Vec<(String, egui::Rect, String)>, browse: &mut Option<usize>, focused: &mut bool, t: &Tokens) {
     egui::Grid::new("form-grid").num_columns(2).spacing([14.0, 10.0]).show(ui, |ui| {
         for (i, fl) in f.fields.iter_mut().enumerate() {
             ui.label(tr(&fl.label));
@@ -823,7 +823,16 @@ fn form_grid(ui: &mut egui::Ui, f: &mut Form, regs: &mut Vec<(String, egui::Rect
                     .inner
                     .rect
                 }
-                FieldKind::Bool(b) => ui.checkbox(b, "").rect,
+                FieldKind::Bool(b) => {
+                    // #1190: the shared checkbox, so a press and drag down the column paints
+                    // every box it passes over, as in the panels.
+                    let box_r = egui::Rect::from_min_size(ui.cursor().min, vec2(14.0, 14.0));
+                    if crate::widgets::checkbox(ui, box_r, *b, t, egui::Id::new(("form-bool", fl.key.clone()))).clicked() {
+                        *b = !*b;
+                    }
+                    ui.advance_cursor_after_rect(box_r);
+                    box_r
+                }
                 FieldKind::Choice { options, sel } => {
                     let cur = options.get(*sel).map(|o| o.0.clone()).unwrap_or_default();
                     // The column keeps its width: a long choice (a GPU adapter's name) ends in an
@@ -869,7 +878,7 @@ pub fn show_form(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
         let footer = 14.0 + ui.spacing().interact_size.y + 2.0 * ui.spacing().item_spacing.y;
         let max_height = (super::dialogs::modal_space(ctx).y - 84.0 - footer).max(40.0);
         egui::ScrollArea::vertical().max_height(max_height).auto_shrink([false, true]).show(ui, |ui| {
-            form_grid(ui, &mut f, &mut regs, &mut browse, &mut focused);
+            form_grid(ui, &mut f, &mut regs, &mut browse, &mut focused, t);
         });
         ui.add_space(14.0);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
