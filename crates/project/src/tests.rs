@@ -206,3 +206,39 @@ fn item_users_count_layers_in_every_comp() {
     assert!(p.item_users(unused).is_empty());
     assert!(p.item_users(main).is_empty());
 }
+
+#[test]
+fn offset_ids_refuses_ids_that_would_collapse_instead_of_merging_them() {
+    use crate::essential::{OffsetError, offset_ids};
+    use crate::{Item, ItemId};
+    let folder = |id: u64, name: &str| Item {
+        id: ItemId(id),
+        name: name.into(),
+        label: effectcraft_color::Label::None,
+        comment: String::new(),
+        parent: None,
+        kind: ItemKind::Folder,
+        proxy: None,
+    };
+    // Two distinct ids near the top: both would saturate to u64::MAX and one would replace the
+    // other (#1229).
+    let mut p = Project::default();
+    for (id, name) in [(u64::MAX - 3, "A"), (u64::MAX - 2, "B")] {
+        p.items.insert(ItemId(id), folder(id, name));
+    }
+    assert_eq!(offset_ids(&mut p, 10), Err(OffsetError::OutOfRange));
+    // Two items whose map keys differ but whose ids agree land on the same id.
+    let mut p = Project::default();
+    p.items.insert(ItemId(1), folder(5, "A"));
+    p.items.insert(ItemId(2), folder(5, "B"));
+    p.next_id = 6;
+    assert_eq!(offset_ids(&mut p, 10), Err(OffsetError::DuplicateItem(ItemId(15))));
+    // An ordinary project shifts with every reference intact.
+    let (mut p, cid) = project_with_layer();
+    let before: Vec<u64> = p.comp(cid).unwrap().layers.iter().map(|l| l.id.0).collect();
+    let next = p.next_id;
+    offset_ids(&mut p, 1000).unwrap();
+    let after: Vec<u64> = p.comp(ItemId(cid.0 + 1000)).unwrap().layers.iter().map(|l| l.id.0).collect();
+    assert_eq!(after, before.iter().map(|i| i + 1000).collect::<Vec<_>>());
+    assert_eq!(p.next_id, next + 1000);
+}

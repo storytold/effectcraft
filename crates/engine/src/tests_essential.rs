@@ -274,6 +274,65 @@ fn template_export_import_round_trip_with_overrides() {
     assert!(t.execute("essential.importTemplate", json!({"path": dir.join("bad.ectemplate").to_string_lossy()})).is_err());
 }
 
+/// `path` rewritten: `edit` changes the template's manifest and project JSON, and a media file is
+/// added, so a refused import can be seen not to extract it.
+fn tampered_template(path: &str, out: &std::path::Path, edit: impl Fn(&mut Value, &mut Value)) {
+    let mut entries = effectcraft_lottie::zip::read_stored(&std::fs::read(path).unwrap());
+    let mut manifest: Value = serde_json::from_slice(&entries.iter().find(|(n, _)| n == "manifest.json").unwrap().1).unwrap();
+    let mut project: Value = serde_json::from_slice(&entries.iter().find(|(n, _)| n == "project.ecproj").unwrap().1).unwrap();
+    edit(&mut manifest, &mut project);
+    for (n, v) in &mut entries {
+        match n.as_str() {
+            "manifest.json" => *v = serde_json::to_vec(&manifest).unwrap(),
+            "project.ecproj" => *v = serde_json::to_vec(&project).unwrap(),
+            _ => {}
+        }
+    }
+    entries.push(("media/1/clip.png".into(), b"not really a png".to_vec()));
+    std::fs::write(out, effectcraft_lottie::zip::store(&entries)).unwrap();
+}
+
+#[test]
+fn a_template_whose_ids_would_collide_or_whose_comp_is_missing_is_refused_before_anything_changes() {
+    let dir = out_dir("ectemplate-bad-ids");
+    let (mut s, card, _, _) = card();
+    let good = dir.join("Card.ectemplate").to_string_lossy().to_string();
+    s.execute("essential.exportTemplate", json!({"comp": card.0, "path": good})).unwrap();
+    let folder = |id: u64| json!({"id": id, "name": format!("F{id}"), "label": "None", "kind": {"type": "Folder"}});
+    let cases: [(&str, Box<dyn Fn(&mut Value, &mut Value)>); 3] = [
+        // Two folders near the top of the range: shifted past the project's ids, they used to
+        // saturate to the same id and one replaced the other (#1229).
+        (
+            "near-limit",
+            Box::new(move |_, p| {
+                for id in [u64::MAX - 3, u64::MAX - 2] {
+                    p["items"][id.to_string()] = folder(id);
+                }
+            }),
+        ),
+        // The manifest names a comp the template doesn't have.
+        ("missing-comp", Box::new(|m, _| m["comp"] = json!(999_999))),
+        // …or one whose id overflows once shifted (an unchecked add on main).
+        ("huge-comp", Box::new(|m, _| m["comp"] = json!(u64::MAX))),
+    ];
+    let mut t = Session::default();
+    t.execute("comp.new", json!({"name": "Show", "width": 64, "height": 64, "frameRate": 30, "duration": 2})).unwrap();
+    let show = t.active_comp_id().unwrap();
+    for (name, edit) in &cases {
+        let bad = dir.join(format!("{name}.ectemplate"));
+        tampered_template(&good, &bad, |m, p| edit(m, p));
+        let (items, next, layers) = (t.project.items.len(), t.project.next_id, t.project.comp(show).unwrap().layers.len());
+        let e = t.execute("essential.importTemplate", json!({"path": bad.to_string_lossy()})).expect_err(name);
+        let e = e.to_string();
+        assert!(e.contains("ids") || e.contains("isn't a composition"), "{name}: {e}");
+        assert_eq!((t.project.items.len(), t.project.next_id), (items, next), "{name}: the project is untouched");
+        assert_eq!(t.project.comp(show).unwrap().layers.len(), layers, "{name}: no instance was added");
+        assert!(!dir.join(format!("{name} Media")).exists(), "{name}: no media was extracted");
+    }
+    // The untouched template still imports.
+    t.execute("essential.importTemplate", json!({"path": good})).unwrap();
+}
+
 #[test]
 fn template_import_writes_media_only_into_its_media_folder() {
     let root = out_dir("ectemplate-names");
