@@ -568,6 +568,17 @@ struct FontSearch {
     selected: usize,
 }
 
+/// Finish a font rescan started from the font menu and report how many faces it added.
+/// While the scan is still walking font folders, ask for another frame so the menu updates.
+pub(crate) fn poll_font_rescan(app: &mut EffectcraftApp, ctx: &egui::Context) {
+    if effectcraft_engine::text::fonts::rescan_busy() {
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+    }
+    if let Some(n) = effectcraft_engine::text::fonts::poll_rescan() {
+        app.ui.status = format!("{} +{n}", tr("Rescan Fonts"));
+    }
+}
+
 /// Shared font menu for Character and Properties: search, recent fonts and previews.
 pub(super) fn font_picker(app: &mut EffectcraftApp, ui: &mut egui::Ui, id: egui::Id, rect: Rect, current: &str, auto: &str, enabled: bool) -> Option<String> {
     let state_id = id.with("search-state");
@@ -642,6 +653,15 @@ pub(super) fn font_picker(app: &mut EffectcraftApp, ui: &mut egui::Ui, id: egui:
                 // Typing goes on into the search field.
                 ui.memory_mut(|m| m.request_focus(search_id));
             }
+            // #1089: fonts installed after launch appear without restarting. The button is its own
+            // row: the popup is only 180 px wide, so a control pinned to the filter row covers
+            // "Variable fonts only". The scan itself runs off the UI thread (`poll_font_rescan`).
+            let rescan_h = 22.0;
+            let (resc, _) = ui.allocate_exact_size(vec2(ui.available_width(), rescan_h), egui::Sense::hover());
+            if widgets::text_button(ui, resc, tr("Rescan Fonts"), false, &t, id.with("rescan")).clicked() && effectcraft_engine::text::fonts::start_rescan() {
+                app.ui.status = format!("{}…", tr("Rescan Fonts"));
+            }
+            app.auto.add(&format!("{auto}.rescan"), resc, "Rescan Fonts");
             let query = state.query.trim().to_lowercase();
             let mut seen = std::collections::HashSet::new();
             let filtered: Vec<_> = rows
@@ -672,7 +692,7 @@ pub(super) fn font_picker(app: &mut EffectcraftApp, ui: &mut egui::Ui, id: egui:
             }
             // Give the result list its actual height even when the previous query had
             // only one row. A cached tiny Area must not collapse a reopened long list.
-            let filter_room = filter_h + ui.spacing().item_spacing.y;
+            let filter_room = filter_h + rescan_h + ui.spacing().item_spacing.y * 2.0;
             let height = (filtered.len() as f32 * (24.0 + ui.spacing().item_spacing.y) + 16.0).clamp(28.0, (max_height - filter_room).max(28.0));
             // A minimum, from below the filter row (a maximum would move the cursor back up).
             ui.set_min_height(height);

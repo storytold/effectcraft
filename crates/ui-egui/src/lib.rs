@@ -1871,6 +1871,7 @@ impl eframe::App for EffectcraftApp {
         // Settings ▸ General ▸ Language instead of only the first frame.
         let language = crate::i18n::language(self);
         crate::i18n::set_current(language);
+        crate::panels::text_panels::poll_font_rescan(self, ctx);
         if !self.styled || self.styled_language != language {
             theme::install(ctx, &self.tokens, language);
             self.styled_language = language;
