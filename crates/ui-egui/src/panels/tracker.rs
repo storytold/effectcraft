@@ -736,8 +736,11 @@ pub fn draw_overlay(app: &mut EffectcraftApp, painter: &egui::Painter, map: &Vie
         let fq = rect_q(c, v.spec.feature_size);
         let sc = [c[0] + v.spec.search_offset[0], c[1] + v.spec.search_offset[1]];
         let sq = rect_q(sc, v.spec.search_size);
-        painter.add(egui::Shape::closed_line(sq.to_vec(), Stroke::new(1.0, TRACK_COL.gamma_multiply(0.7))));
-        painter.add(egui::Shape::closed_line(fq.to_vec(), Stroke::new(1.0, TRACK_COL)));
+        // The point the arrow keys move has heavier regions.
+        let keyed = app.ui.viewer.track_point == Some((tracker, i + 1));
+        let w = if keyed { 2.0 } else { 1.0 };
+        painter.add(egui::Shape::closed_line(sq.to_vec(), Stroke::new(w, TRACK_COL.gamma_multiply(if keyed { 1.0 } else { 0.7 }))));
+        painter.add(egui::Shape::closed_line(fq.to_vec(), Stroke::new(w, TRACK_COL)));
         painter.circle_filled(scr(c), 2.0, TRACK_COL);
         let a = scr(attach);
         for d in [vec2(7.0, 0.0), vec2(0.0, 7.0)] {
@@ -773,6 +776,9 @@ pub fn draw_overlay(app: &mut EffectcraftApp, painter: &egui::Painter, map: &Vie
             app.auto.add(&format!("viewer.track.{n}.search.{k}"), r, "Search region corner");
         }
         let sr = Rect::from_points(&sq);
+        if keyed {
+            app.auto.add(&format!("viewer.track.{n}.keyboard"), sr, "Track point the arrow keys move");
+        }
         app.auto.add(&format!("viewer.track.{n}.feature"), fr, "Feature region");
         app.auto.add(&format!("viewer.track.{n}.search"), sr, "Search region");
         inside.push(Hit { point: n, part: Part::Point, rect: fr, quad: Some(fq) });
@@ -838,4 +844,64 @@ pub fn drag_params(d: &Drag, cpt: [f64; 2]) -> serde_json::Value {
 /// The tracked layer and tracker the viewer shows widgets for.
 pub fn viewer_track(app: &EffectcraftApp) -> Option<(LayerId, Uid)> {
     current(app)
+}
+
+/// The track point the arrow keys move (layer, tracker, 1-based number): the one last pressed in
+/// the viewer, while its tracker is still the one shown there on a selected layer.
+pub fn keyboard_point(app: &EffectcraftApp) -> Option<(LayerId, Uid, usize)> {
+    let (tracker, n) = app.ui.viewer.track_point?;
+    let (lid, uid) = current(app).filter(|(_, uid)| *uid == tracker)?;
+    let layer = app.session.active_comp()?.layer(lid)?;
+    let shown = app.session.state.selected_layers.contains(&lid) && app.layer_controls_visible();
+    let exists = layer.tracker(uid).is_some_and(|(g, _)| n >= 1 && g.track_points().count() >= n);
+    (shown && exists).then_some((lid, uid, n))
+}
+
+/// Give the keyboard to track point `point` (1-based) of the tracker the viewer shows, or to
+/// none (`track.selectPoint`).
+pub fn select_point(app: &mut EffectcraftApp, point: Option<usize>) -> Result<serde_json::Value, String> {
+    let Some(n) = point else {
+        app.ui.viewer.track_point = None;
+        return Ok(json!({"point": null}));
+    };
+    let (lid, uid) = current(app).ok_or("no current track: pick one in the Tracker panel")?;
+    let count = app.session.active_comp().and_then(|c| c.layer(lid)).and_then(|l| l.tracker(uid)).map_or(0, |(g, _)| g.track_points().count());
+    if n < 1 || n > count {
+        return Err(format!("no track point {n}: the current track has {count}"));
+    }
+    app.ui.viewer.track_point = Some((uid, n));
+    Ok(json!({"layer": lid.0, "tracker": uid, "point": n}))
+}
+
+/// Move the keyboard's track point by `step` screen pixels at the viewer's magnification
+/// (`zoom`: screen pixels per comp pixel) towards `side` (`up`, `down`, `left`, `right`): its
+/// feature region, search region and attach point, or with `regions_only` the two regions while
+/// the attach point stays where it is.
+pub fn nudge(app: &mut EffectcraftApp, side: &str, step: f64, zoom: f64, regions_only: bool) -> Result<serde_json::Value, String> {
+    let (x, y) = match side {
+        "up" => (0.0, -step),
+        "down" => (0.0, step),
+        "left" => (-step, 0.0),
+        "right" => (step, 0.0),
+        _ => return Err(format!("unknown direction `{side}`")),
+    };
+    let Some((lid, uid, n)) = keyboard_point(app) else { return Ok(serde_json::Value::Null) };
+    let k = if zoom.is_finite() && zoom > 1e-6 { 1.0 / zoom } else { 1.0 };
+    // Comp pixels → the tracked layer's.
+    let d = {
+        let s = &app.session;
+        let (Some(comp), Some(cid)) = (s.active_comp_arc(), s.active_comp_id()) else { return Ok(serde_json::Value::Null) };
+        let Some(layer) = comp.layer(lid) else { return Ok(serde_json::Value::Null) };
+        let ectx = effectcraft_engine::render::EvalCtx { project: &s.project, comp_id: cid, comp: &comp, time: s.time(), expr: None, footage: None };
+        let inv = super::viewer::l2c(&ectx, layer).0.inverse().ok_or("the layer is scaled to nothing")?;
+        let v = inv.apply_vec(gv2(x * k, y * k));
+        let off = layer.tracker(uid).and_then(|(g, _)| g.track_points().nth(n - 1)).map(|tp| point_values(tp, layer.layer_time(s.time())).attach_offset);
+        ([v.x, v.y], off.unwrap_or([0.0; 2]))
+    };
+    let (d, off) = d;
+    let mut q = json!({"layer": lid.0, "tracker": uid, "point": n, "move": d});
+    if regions_only {
+        q["attachOffset"] = json!([off[0] - d[0], off[1] - d[1]]);
+    }
+    app.session.execute("track.setPoint", q).map_err(|e| e.to_string())
 }

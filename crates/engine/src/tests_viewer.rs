@@ -366,6 +366,49 @@ fn shape_tools_draw_into_the_selected_shape_layer() {
     assert!(s.execute("shape.newShape", json!({"kind": "blob"})).is_err());
 }
 
+/// What the keys change on a shape being dragged out is what `shape.newShape` and
+/// `layer.addMask` take: points, a rounded rectangle's roundness, a star's inner radius, Outer
+/// and Inner Roundness. Out of range is clamped; not a number is an error.
+#[test]
+fn shape_tools_take_points_roundness_and_radius() {
+    let mut s = comp();
+    let item = |s: &Session, r: &serde_json::Value| {
+        let l = layer(s, r["layer"].as_u64().unwrap());
+        l.props.find_group(r["group"].as_u64().unwrap()).unwrap().sub("contents").unwrap().groups().next().unwrap().clone()
+    };
+    let num = |g: &effectcraft_project::PropGroup, id: &str| g.get(id).unwrap().value.components()[0];
+    let star = json!({"kind": "star", "size": [200, 200], "points": 8, "innerRadius": 25, "outerRoundness": 40, "innerRoundness": -30});
+    let r = s.execute("shape.newShape", star).unwrap();
+    let g = item(&s, &r);
+    assert_eq!(["points", "outerRadius", "innerRadius", "outerRoundness", "innerRoundness"].map(|id| num(&g, id)), [8.0, 100.0, 25.0, 40.0, -30.0]);
+    s.execute("edit.deselectAll", json!({})).unwrap();
+    let r = s.execute("shape.newShape", json!({"kind": "polygon", "size": [200, 200], "points": 2, "outerRoundness": 1e9})).unwrap();
+    let g = item(&s, &r);
+    assert_eq!((num(&g, "points"), num(&g, "outerRoundness")), (3.0, 1000.0), "kept in range");
+    assert!(g.get("innerRadius").is_none());
+    s.execute("edit.deselectAll", json!({})).unwrap();
+    for (roundness, px) in [(json!(null), 15.0), (json!(0), 0.0), (json!(100), 50.0), (json!(250), 50.0)] {
+        let r = s.execute("shape.newShape", json!({"kind": "rounded", "size": [200, 100], "roundness": roundness})).unwrap();
+        assert_eq!(num(&item(&s, &r), "roundness"), px, "{roundness}");
+        s.execute("edit.deselectAll", json!({})).unwrap();
+    }
+    assert!(s.execute("shape.newShape", json!({"kind": "star", "points": "many"})).is_err());
+
+    // Masks: a star of 7 points has 14 vertices; rounding its points makes them curves.
+    let sol = s.execute("layer.newSolid", json!({"color": "#ffffff"})).unwrap()["layer"].as_u64().unwrap();
+    let path = |s: &Session, r: &serde_json::Value| {
+        let l = layer(s, sol);
+        l.props.find_group(r["mask"].as_u64().unwrap()).unwrap().get("path").unwrap().value.as_path().unwrap().clone()
+    };
+    let r = s.execute("layer.addMask", json!({"layer": sol, "shape": "star", "rect": [0, 0, 200, 200], "points": 7})).unwrap();
+    let sharp = path(&s, &r);
+    assert_eq!(sharp.vertices.len(), 14);
+    assert!(sharp.out_tangents.iter().all(|t| *t == [0.0, 0.0]));
+    let r = s.execute("layer.addMask", json!({"layer": sol, "shape": "star", "rect": [0, 0, 200, 200], "points": 7, "outerRoundness": 50})).unwrap();
+    assert!(path(&s, &r).out_tangents.iter().any(|t| *t != [0.0, 0.0]));
+    assert!(s.execute("layer.addMask", json!({"layer": sol, "shape": "rounded", "roundness": []})).is_err());
+}
+
 /// The Tools bar's Fill / Stroke Options (None, Solid Color, Linear and Radial Gradient, blend
 /// mode, opacity) and Stroke Width paint new shapes and Pen paths; a command's own paint
 /// parameters win (#227).
