@@ -485,10 +485,35 @@ pub fn resolve(family: &str, style: &str) -> Resolved {
             return r;
         }
     }
+    if let Some(r) = resolve_alias(family, style) {
+        return r;
+    }
     // Inter is bundled; face 0 (the first bundled face) is the last resort.
     let mut r = resolve_in(DEFAULT_FAMILY, style).unwrap_or(Resolved { face: 0, synth_bold: false, synth_italic: false, missing: true });
     r.missing = !family.is_empty() && !family.eq_ignore_ascii_case(DEFAULT_FAMILY);
     r
+}
+
+/// Metric-compatible substitutes for common proprietary families, in order of preference (the
+/// same pairs fontconfig's `30-metric-aliases.conf` uses). Text keeps its widths and line breaks.
+const METRIC_ALIASES: &[(&str, &[&str])] = &[
+    ("Calibri", &["Carlito"]),
+    ("Cambria", &["Caladea"]),
+    ("Arial", &["Liberation Sans", "Arimo"]),
+    ("Helvetica", &["Liberation Sans", "Arimo"]),
+    ("Arial Narrow", &["Liberation Sans Narrow"]),
+    ("Times New Roman", &["Liberation Serif", "Tinos"]),
+    ("Times", &["Liberation Serif", "Tinos"]),
+    ("Courier New", &["Liberation Mono", "Cousine"]),
+    ("Courier", &["Liberation Mono", "Cousine"]),
+];
+
+/// An installed metric-compatible substitute for a missing family. The result stays `missing`,
+/// so Find Missing Fonts still lists the requested name.
+fn resolve_alias(family: &str, style: &str) -> Option<Resolved> {
+    let family = family.trim();
+    let (_, subs) = METRIC_ALIASES.iter().find(|(name, _)| name.eq_ignore_ascii_case(family))?;
+    subs.iter().find_map(|s| resolve_in(s, style)).map(|r| Resolved { missing: true, ..r })
 }
 
 fn resolve_in(family: &str, style: &str) -> Option<Resolved> {
@@ -1034,6 +1059,11 @@ mod tests {
     /// A minimal TrueType font built in code (no font file in the repo): U+0020 and U+E000 map to
     /// an empty glyph, U+E001 to a triangle.
     fn blank_glyph_font() -> Vec<u8> {
+        test_font("Blank Glyph Test")
+    }
+
+    /// The blank-glyph test font under another family name.
+    fn test_font(family: &str) -> Vec<u8> {
         fn u16s(v: &[u16]) -> Vec<u8> {
             v.iter().flat_map(|x| x.to_be_bytes()).collect()
         }
@@ -1061,7 +1091,7 @@ mod tests {
         hhea.extend(u16s(&[0, 3]));
         let hmtx = u16s(&[600, 0, 600, 0, 600, 0]);
         let maxp = u16s(&[1, 0, 3, 3, 1, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0]);
-        let strings: Vec<Vec<u8>> = ["Blank Glyph Test", "Regular"].iter().map(|s| s.encode_utf16().flat_map(|u| u.to_be_bytes()).collect()).collect();
+        let strings: Vec<Vec<u8>> = [family, "Regular"].iter().map(|s| s.encode_utf16().flat_map(|u| u.to_be_bytes()).collect()).collect();
         let mut name = u16s(&[0, 2, 30]);
         let mut off = 0;
         for (id, st) in strings.iter().enumerate() {
@@ -1103,6 +1133,23 @@ mod tests {
         let inter = resolve("Inter", "Regular").face;
         assert_ne!(fallback_for('\u{e000}', inter), id, "fallback never picks the empty glyph");
         assert_eq!(fallback_for('\u{e001}', inter), id, "fallback finds the drawn one");
+    }
+
+    /// A Microsoft family that isn't installed renders in its installed metric-compatible
+    /// substitute instead of Inter, and still reports itself missing (#1677).
+    #[test]
+    fn microsoft_families_resolve_to_metric_compatible_substitutes() {
+        add_font_data(test_font("Carlito"));
+        add_font_data(test_font("Caladea"));
+        let calibri = resolve("Calibri", "Regular");
+        assert_eq!(face(calibri.face).info.family, "Carlito");
+        assert!(calibri.missing, "the original name stays missing for Find Missing Fonts");
+        let cambria = resolve("Cambria", "Bold");
+        assert_eq!(face(cambria.face).info.family, "Caladea");
+        assert!(cambria.missing);
+        let unknown = resolve("No Such Family 1677", "Regular");
+        assert_eq!(face(unknown.face).info.family, DEFAULT_FAMILY);
+        assert!(unknown.missing);
     }
 
     #[test]
