@@ -162,6 +162,7 @@ const SIMPLIFIED_CHINESE: &[Row] = &[
     ("ec.channel.blend", "Blend", "混合"),
     ("ec.channel.calculations", "Calculations", "计算"),
     ("ec.channel.cccomposite", "CC Composite", "CC 合成"),
+    ("ec.channel.channelsoffset", "Channels Offset", "通道偏移"),
     ("ec.channel.combiner", "Channel Combiner", "通道合成器"),
     ("ec.channel.compoundarithmetic", "Compound Arithmetic", "复合运算"),
     ("ec.channel.invert", "Invert", "反转"),

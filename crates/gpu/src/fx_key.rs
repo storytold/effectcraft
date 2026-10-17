@@ -41,6 +41,7 @@ pub(crate) const IDS: &[&str] = &[
     "ec.channel.setmatte",
     "ec.channel.setchannels",
     "ec.channel.shiftchannels",
+    "ec.channel.channelsoffset",
     "ec.channel.removecolormatting",
     "ec.channel.arithmetic",
     "ec.channel.solidcomposite",
@@ -529,6 +530,15 @@ fn point(e: &mut Enc, id: &str, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
         "ec.channel.shiftchannels" => {
             let s = ["takeRedFrom", "takeGreenFrom", "takeBlueFrom", "takeAlphaFrom"].map(|id| src_index(SHIFT_ORDER[(pr.e(id) as usize).min(10)]));
             return route(e, b, s);
+        }
+        "ec.channel.channelsoffset" => {
+            let (dx, dy) = (pr.f("offsetX"), pr.f("offsetY"));
+            if !dx.is_finite() || !dy.is_finite() || !b.scale.is_finite() || b.scale <= 0.0 || (dx == 0.0 && dy == 0.0) {
+                return Some(b);
+            }
+            let limit = b.img.width.max(b.img.height) as f64 + 2.0;
+            p.u[0][0] = 36;
+            p.f[0] = [(dx * b.scale).clamp(-limit, limit) as f32, (dy * b.scale).clamp(-limit, limit) as f32, 0.0, 0.0];
         }
         "ec.channel.removecolormatting" => {
             p.u[0] = [12, pr.b("clipHdr") as u32, 0, 0];

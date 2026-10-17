@@ -59,6 +59,28 @@ fn shift_channels(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
+/// Split RGB spatially in one pass: red moves with the offset, green stays put and blue moves
+/// against it. The union of their alpha keeps coloured fringes outside transparent artwork.
+fn channels_offset(ctx: &EffectCtx, mut b: Buf) -> Buf {
+    let (dx, dy) = (ctx.params.f("offsetX"), ctx.params.f("offsetY"));
+    if !dx.is_finite() || !dy.is_finite() || !b.scale.is_finite() || b.scale <= 0.0 || (dx == 0.0 && dy == 0.0) {
+        return b;
+    }
+    let limit = b.img.width.max(b.img.height) as f64 + 2.0;
+    let (dx, dy) = ((dx * b.scale).clamp(-limit, limit), (dy * b.scale).clamp(-limit, limit));
+    let src = b.img.clone();
+    b.img.rows_mut().for_each(|(y, row)| {
+        for (x, px) in row.iter_mut().enumerate() {
+            let (cx, cy) = (x as f64 + 0.5, y as f64 + 0.5);
+            let red = src.sample_bilinear(cx - dx, cy - dy);
+            let green = src.get(x as i64, y as i64);
+            let blue = src.sample_bilinear(cx + dx, cy + dy);
+            *px = [red[0], green[1], blue[2], red[3].max(green[3]).max(blue[3]).max(0.0)];
+        }
+    });
+    b
+}
+
 fn rgb_to_yuv(c: [f32; 3]) -> [f32; 3] {
     let y = 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
     [y, 0.492 * (c[2] - y) + 0.5, 0.877 * (c[0] - y) + 0.5]
@@ -420,6 +442,12 @@ pub fn specs() -> Vec<EffectSpec> {
             shift_channels,
         ),
         spec(
+            "ec.channel.channelsoffset",
+            "Channels Offset",
+            vec![p("offsetX", "Offset X", num(0.0), ParamUi::Pixels), p("offsetY", "Offset Y", num(0.0), ParamUi::Pixels)],
+            channels_offset,
+        ),
+        spec(
             "ec.channel.combiner",
             "Channel Combiner",
             vec![
@@ -546,6 +574,61 @@ mod tests {
     fn shift_channels_takes_red_from_green() {
         let out = run("ec.channel.shiftchannels", &[("takeRedFrom", Value::Enum(2))], sample());
         assert!(close(out.get(7, 0), [0.25, 0.25, 0.45, 0.5]));
+    }
+
+    #[test]
+    fn channels_offset_zero_is_exact_identity() {
+        let img = sample();
+        assert_eq!(run("ec.channel.channelsoffset", &[], img.clone()), img);
+    }
+
+    #[test]
+    fn channels_offset_splits_rgb_symmetrically() {
+        let mut img = Image::new(5, 3);
+        for y in 0..3 {
+            for x in 0..5 {
+                let a = if y == 1 { 0.5 } else { 1.0 };
+                img.set(x, y, [(x as f32 + 1.0) * 0.1 * a, (x as f32 + 1.0) * 0.08 * a, (x as f32 + 1.0) * 0.06 * a, a]);
+            }
+        }
+        let out = run("ec.channel.channelsoffset", &[("offsetX", num(1.0))], img);
+        assert!(close(out.get(2, 1), [0.1, 0.12, 0.12, 0.5]));
+        assert!(close(out.get(0, 1), [0.0, 0.04, 0.06, 0.5]));
+
+        let mut vertical = Image::new(3, 3);
+        for y in 0..3 {
+            let n = y as f32 + 1.0;
+            for x in 0..3 {
+                vertical.set(x, y, [n * 0.1, n * 0.2, n * 0.3, 1.0]);
+            }
+        }
+        let out = run("ec.channel.channelsoffset", &[("offsetY", num(1.0))], vertical);
+        assert!(close(out.get(1, 1), [0.1, 0.4, 0.9, 1.0]));
+    }
+
+    #[test]
+    fn channels_offset_alpha_covers_shifted_transparent_artwork() {
+        let mut img = Image::new(5, 1);
+        img.set(2, 0, [1.0, 1.0, 1.0, 1.0]);
+        let out = run("ec.channel.channelsoffset", &[("offsetX", num(1.0))], img);
+        assert!(close(out.get(1, 0), [0.0, 0.0, 1.0, 1.0]));
+        assert!(close(out.get(2, 0), [0.0, 1.0, 0.0, 1.0]));
+        assert!(close(out.get(3, 0), [1.0, 0.0, 0.0, 1.0]));
+    }
+
+    #[test]
+    fn channels_offset_fractional_sampling_is_deterministic() {
+        let img = sample();
+        let values = [("offsetX", num(2.25)), ("offsetY", num(-1.5))];
+        assert_eq!(run("ec.channel.channelsoffset", &values, img.clone()), run("ec.channel.channelsoffset", &values, img));
+    }
+
+    #[test]
+    fn channels_offset_non_finite_values_fail_safe_to_identity() {
+        let img = sample();
+        assert_eq!(run("ec.channel.channelsoffset", &[("offsetX", num(f64::NAN))], img.clone()), img);
+        let img = sample();
+        assert_eq!(run("ec.channel.channelsoffset", &[("offsetY", num(f64::INFINITY))], img.clone()), img);
     }
 
     #[test]

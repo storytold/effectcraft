@@ -1,19 +1,19 @@
 # Hardware parity
 
-> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-12 · **Change:** minor (closed issue references re-audited against `upstream/main` 470ea7a3) · **Target:** Adobe After Effects 2026
+> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-14 · **Change:** minor (GPU effect count refreshed for Channels Offset) · **Target:** Adobe After Effects 2026
 
 Each piece of hardware After Effects uses, per platform, against EffectCraft. Ours comes from the
 code at `origin/main` 1446e27 (`crates/gpu`, `crates/render`, `crates/ui-egui`) and the issue
 tracker; After Effects' from its documentation (Mercury GPU Acceleration, Multi-Frame Rendering,
 hardware-accelerated decode and encode, Mercury Transmit) and its bundle.
 
-**Overall ≈ 40%** (estimated). The GPU compositor and 280 GPU effects are a real strength and run
+**Overall ≈ 40%** (estimated). The GPU compositor and 281 GPU effects are a real strength and run
 in the browser too; hardware video decode and encode, video-out devices, tablets and multiple
 monitors are missing, and two GPU start-up failures are open.
 
 | Feature | After Effects 2026 | EffectCraft macOS | Windows | Linux | Web | Notes / evidence |
 |---|---|---|---|---|---|---|
-| GPU compositing and effects | Mercury GPU (Metal; CUDA / OpenCL / DirectX on Windows) | yes, Metal via wgpu | Vulkan yes; **Direct3D 12 fails** (FXC can't compile the `pointwise` kernel, #613) | Vulkan | WebGPU, in frame workers | 280 of 306 effects on the GPU, checked against the CPU renderer; Fractal and the analysis/tool effects stay on the CPU ([effects-parity.md](effects-parity.md)) |
+| GPU compositing and effects | Mercury GPU (Metal; CUDA / OpenCL / DirectX on Windows) | yes, Metal via wgpu | Vulkan yes; **Direct3D 12 fails** (FXC can't compile the `pointwise` kernel, #613) | Vulkan | WebGPU, in frame workers | 281 of 308 effects on the GPU, checked against the CPU renderer; Fractal and the analysis/tool effects stay on the CPU ([effects-parity.md](effects-parity.md)) |
 | CPU fallback and device-loss recovery | yes | yes | yes; Windows ARM64 Adreno panic after device loss (#591, closed) | yes | yes (#225 fixed) | Out of video memory falls back to the CPU (#106) |
 | GPU detection and choice | GPU info, renderer choice | Backend Auto per comp | "GPU isn't being detected" (#596, closed); Intel HD 5500 fix unverified (#198) | yes | yes | No settings page listing adapters yet |
 | Multi-core rendering | Multi-Frame Rendering | rayon pools; preview scheduler sized to the render pool | same | same | Web Workers, one engine per worker | No benchmark against Multi-Frame Rendering |

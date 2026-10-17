@@ -1,6 +1,6 @@
 # Parity with After Effects
 
-> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-12 · **Change:** minor (issue, catalog and export-format references re-audited against `upstream/main` 470ea7a3; the 10 October re-measure is otherwise unchanged) · **Target:** Adobe After Effects 2026 (26.5.0.89)
+> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-14 · **Change:** minor (effect and GPU counts refreshed for Channels Offset) · **Target:** Adobe After Effects 2026 (26.5.0.89)
 
 The authoritative assessment of how close EffectCraft is to After Effects, and how much work is
 left. [gaps.md](gaps.md) lists every known shortfall one at a time; the
@@ -70,7 +70,7 @@ corpus in both apps yet.
   effect colour labels, a rebuilt Effect Controls panel, ACES 2.0 through OpenColorIO 2.5.1).
 - **From this repository at `origin/main` 1446e27 (10 October 2026):** 587 menu entries in the
   After Effects-shaped menu tree (`crates/engine/src/menus.rs`), 411 registered engine commands,
-  306 registered effects (280 on the GPU, [effects.md](effects.md)), 13 export formats
+  308 registered effects (281 on the GPU, [effects.md](effects.md)), 13 export formats
   (`OutputFormat::ALL`, with uncompressed QuickTime since #778), the import extension lists (`crates/media/src/lib.rs`), 2,704 tests, ≈ 329,000
   lines of Rust, 6 UI language catalogs, and the 134 open / 179 closed GitHub issues. On 12 October (`upstream/main` 470ea7a3) the counts were 216 open / 328 closed issues, 401 merged PRs, ≈ 361,000 lines of Rust and 10 menu catalogs (6 panel catalogs).
 - **Presence is not parity.** A feature counts toward *breadth* when it exists and works in the
@@ -120,7 +120,7 @@ compositing and effects dominate; audio is light). Hours are to full parity for 
 | Expressions and scripting | 7% | 93% | 65% | 20–40 | `.jsxbin`, Startup/Shutdown folders, script shortcuts (`#include` landed, #759); external editor (#364); see [scripting-parity.md](scripting-parity.md) |
 | Shapes, masks and roto | 9% | 93% | 45% | 30–50 | Open mask and shape issues (#1004, #999, #1042, #932); #510, #513, #527, #509 and #303 are closed; paste SVG/AI as shape layers (26.3; SVG markup pastes since #738) |
 | Text and typography | 7% | 94% | 50% | 20–35 | CJK text in comps renders wrongly (#453); paragraph alignment inverted (#316); soft text at Fit (#417, mostly fixed by #444); toolbar font options (#550); #483 and #583 are closed; variable-font filter landed (#741) |
-| Effects and animation presets | 14% | 85% | 40% | 70–130 | All 306 effects exist, but rendered output is unmeasured against After Effects; 54 built-in presets (text, Transitions, Backgrounds) against After Effects' 621 ([effects-parity.md](effects-parity.md)); open effect bugs (#580 crash, #463, #369, #473, #474; #514 and #526 are closed); effect colour labels (26.5); see [effects-parity.md](effects-parity.md) |
+| Effects and animation presets | 14% | 85% | 40% | 70–130 | All 308 registered effects exist, but rendered output is unmeasured against After Effects; 54 built-in presets (text, Transitions, Backgrounds) against After Effects' 621 ([effects-parity.md](effects-parity.md)); open effect bugs (#580 crash, #463, #369, #473, #474; #514 and #526 are closed); effect colour labels (26.5); see [effects-parity.md](effects-parity.md) |
 | 3D (Classic and Advanced) | 6% | 82% | 35% | 35–65 | No FBX/USD/STL models, no Substance materials, mesh displacement unverified; no 3D transform gizmos (#392, #347); reflections (#261); camera aperture (#260); #489 and #315 are closed |
 | Tracking and AI-assisted tools | 5% | 80% | 35% | 35–70 | Object Matte (26.2) has the effect, the viewer tool (click / box), background tracking, Freeze and the 26.5 disk cache, not yet compared with After Effects; Roto Brush (MobileSAM) and face tracking (MediaPipe) unmeasured against After Effects; camera-tracker view (#505) |
 | Preview and cache | 7% | 92% | 40% | 25–50 | Playback stutters on cached frames (#595, #304); late audio (#504, #335); #329 and #554 are closed; no benchmark against After Effects |
@@ -282,7 +282,7 @@ landed when.
 | Unweighted | ≈ 98.4% (half-credit) / 99.6% (fractions) |
 | P0 / P1 / P2 | 100% / 98% / 90% (half-credit); 100% / 99.7% / 97.5% (fractions) |
 | Features done / partial / missing | 89 / 3 / 0 of 92 |
-| **Effects** | **306** effects, every one implemented in full ([effects.md](effects.md)); 280 run on the GPU |
+| **Effects** | **308** effects, every one implemented in full ([effects.md](effects.md)); 281 run on the GPU |
 | Disabled menu entries left | 1, on purpose: Import ▸ Vanishing Point (.vpe), whose format has no public specification |
 | Remaining work | ≈ 8.5 agent-hours at the pace measured so far (≈ 26 on the conservative audit scale); ≈ 3.5 without the learned-model items |
 | **Wall-clock estimate** | **≈ 2–3 hours** with five agents in parallel; ≈ 1 hour without the learned-model items |

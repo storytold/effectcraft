@@ -945,6 +945,7 @@ pub const GPU_EFFECTS: &[&str] = &[
     "ec.channel.setmatte",
     "ec.channel.setchannels",
     "ec.channel.shiftchannels",
+    "ec.channel.channelsoffset",
     "ec.channel.removecolormatting",
     "ec.channel.arithmetic",
     "ec.channel.solidcomposite",

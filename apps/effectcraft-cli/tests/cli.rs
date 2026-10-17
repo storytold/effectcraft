@@ -1,7 +1,7 @@
 //! End-to-end tests of the agent CLI: JSON output, project round-trips, rendering and MCP over stdio.
 
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use serde_json::{Value, json};
@@ -38,6 +38,10 @@ fn tmp(name: &str) -> PathBuf {
     // macOS's `/var` is a symlink to `/private/var`: a child process resolves its working
     // directory through `current_dir()`, which is canonical, so compare canonical paths.
     canonical(&d).unwrap_or(d).join(name)
+}
+
+fn assert_same_path(actual: &Path, expected: &Path) {
+    assert_eq!(actual.canonicalize().unwrap(), expected.canonicalize().unwrap());
 }
 
 #[test]
@@ -309,17 +313,17 @@ fn render_out_is_relative_to_the_working_directory() {
     };
     // A path that already names the project folder is not doubled.
     let done = render(&root, "proj/x.ecproj", "proj/out/d.gif");
-    assert_eq!(done, root.join("proj/out/d.gif"));
+    assert_same_path(&done, &root.join("proj/out/d.gif"));
     assert!(done.exists() && !proj.join("proj").exists());
     // Another working directory: the file lands there, not beside the project.
     let done = render(&elsewhere, project.to_str().unwrap(), "out/card.gif");
-    assert_eq!(done, elsewhere.join("out/card.gif"));
+    assert_same_path(&done, &elsewhere.join("out/card.gif"));
     assert!(done.exists() && !proj.join("out/card.gif").exists());
     // `./f.gif` too.
-    assert_eq!(render(&elsewhere, project.to_str().unwrap(), "./f.gif"), elsewhere.join("./f.gif"));
+    assert_same_path(&render(&elsewhere, project.to_str().unwrap(), "./f.gif"), &elsewhere.join("./f.gif"));
     // An absolute path is unchanged.
     let abs = root.join("abs.gif");
-    assert_eq!(render(&elsewhere, project.to_str().unwrap(), abs.to_str().unwrap()), abs);
+    assert_same_path(&render(&elsewhere, project.to_str().unwrap(), abs.to_str().unwrap()), &abs);
     assert!(abs.exists());
     let _ = std::fs::remove_dir_all(&root);
 }
