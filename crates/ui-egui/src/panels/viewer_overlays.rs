@@ -402,6 +402,32 @@ pub(crate) fn begin_free_transform(ctx: &egui::Context, layer: LayerId, uid: u64
     ctx.data_mut(|d| d.insert_temp(ft_id(), (layer, uid)));
 }
 
+/// Free Transform Points from the menu or its key: the box around the path whose points are
+/// selected, else around the selected mask. Fewer than two points selected: all of the path's
+/// are, so the box and the edit cover the same points. False when there's no such path.
+pub(crate) fn enter_free_transform(app: &mut EffectcraftApp, ctx: &egui::Context) -> bool {
+    let s = &app.session;
+    let Some((layer, uid)) = s.state.selected_vertices.first().map(|v| (v.layer, v.mask)).or_else(|| s.selected_mask()) else {
+        return false;
+    };
+    let Some(l) = s.active_comp().and_then(|c| c.layer(layer)) else { return false };
+    let path = l.props.find_group(uid).and_then(|g| g.get("path")).map(|pr| pr.value_at(l.layer_time(s.time())));
+    let Some(n) = path.as_ref().and_then(|v| v.as_path()).map(|sp| sp.vertices.len()).filter(|n| *n > 0) else {
+        return false;
+    };
+    if s.state.selected_vertices.iter().filter(|v| v.layer == layer && v.mask == uid).count() < 2 {
+        let all: Vec<serde_json::Value> = (0..n).map(|index| json!({"layer": layer.0, "mask": uid, "index": index})).collect();
+        if let Err(e) = app.session.execute("mask.selectVertices", json!({"vertices": all})) {
+            app.ui.status = e.to_string();
+            return false;
+        }
+    }
+    // The box is the Selection tool's.
+    app.ui.tool = crate::state::Tool::Selection;
+    begin_free_transform(ctx, layer, uid);
+    true
+}
+
 pub(crate) fn end_free_transform(ctx: &egui::Context) {
     ctx.data_mut(|d| d.remove::<(LayerId, u64)>(ft_id()));
 }

@@ -216,3 +216,109 @@ fn casts_shadows_toggles_on_3d_layers_only() {
     assert_ne!(before["castsShadows"], after["castsShadows"]);
     assert_eq!(s.execute("layer.castsShadows", json!({"value": true})).unwrap()["castsShadows"], json!(true));
 }
+
+#[test]
+fn paste_at_time_starts_the_copied_layers_at_the_current_time() {
+    let (mut s, ids) = session([(1.0, 3.0), (2.0, 6.0), (0.0, 10.0)]);
+    s.execute("layer.select", json!({"layers": [ids[0], ids[1]]})).unwrap();
+    s.execute("edit.copy", json!({})).unwrap();
+    s.execute("time.set", json!({"time": 4.0})).unwrap();
+    let undo = s.history.undo.len();
+    let new: Vec<u64> = s.execute("edit.pasteAtTime", json!({})).unwrap().as_array().unwrap().iter().filter_map(|v| v.as_u64()).collect();
+    assert_eq!(new.len(), 2);
+    // The earliest one's In point is on the current time; the other keeps its offset.
+    let mut spans: Vec<(f64, f64)> = new.iter().map(|id| span(&s, *id)).collect();
+    spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+    assert_eq!(spans, [(4.0, 6.0), (5.0, 9.0)]);
+    assert_eq!(s.history.undo.len(), undo + 1, "one undo step");
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(s.active_comp().unwrap().layers.len(), 3);
+}
+
+#[test]
+fn four_snapshot_slots_take_show_and_purge() {
+    let (mut s, _) = session([(0.0, 10.0), (0.0, 10.0), (0.0, 10.0)]);
+    assert!(s.execute("view.showSnapshot3", json!({})).is_err(), "an empty slot");
+    assert_eq!(s.execute("view.takeSnapshot", json!({"scale": 0.5})).unwrap()["slot"], json!(1));
+    assert_eq!(s.execute("view.takeSnapshot3", json!({"scale": 0.25})).unwrap()["slot"], json!(3));
+    let widths: Vec<Option<u32>> = s.snapshot_slots.iter().map(|x| x.as_ref().map(|x| x.image.width)).collect();
+    assert_eq!(widths, [Some(50), None, Some(25), None]);
+    // Showing a slot makes it the snapshot shown.
+    s.execute("view.showSnapshot", json!({"slot": 1, "value": true})).unwrap();
+    assert_eq!(s.snapshot.as_ref().map(|x| x.image.width), Some(50));
+    s.execute("view.showSnapshot3", json!({"value": true})).unwrap();
+    assert_eq!(s.snapshot.as_ref().map(|x| x.image.width), Some(25));
+    s.execute("view.purgeSnapshot3", json!({})).unwrap();
+    assert!(s.snapshot_slots[2].is_none() && s.snapshot_slots[0].is_some());
+    s.execute("edit.purge", json!({"what": "snapshot"})).unwrap();
+    assert!(s.snapshot_slots.iter().all(Option::is_none) && s.snapshot.is_none());
+    assert!(s.execute("view.takeSnapshot", json!({"slot": 5})).is_err());
+}
+
+#[test]
+fn roto_view_keys_turn_a_view_on_and_off() {
+    let mut s = Session::default();
+    s.execute("roto.options", json!({"view": "alpha"})).unwrap();
+    s.execute("roto.showAlphaOverlay", json!({})).unwrap();
+    assert_eq!(s.state.roto.view, "alphaOverlay");
+    s.execute("roto.showAlphaBoundary", json!({})).unwrap();
+    assert_eq!(s.state.roto.view, "alphaBoundary");
+    s.execute("roto.showAlphaBoundary", json!({})).unwrap();
+    assert_eq!(s.state.roto.view, "none");
+}
+
+#[test]
+fn numbered_composition_markers_are_set_moved_and_gone_to() {
+    let (mut s, _) = session([(0.0, 10.0), (0.0, 10.0), (0.0, 10.0)]);
+    assert!(s.execute("time.marker3", json!({})).is_err(), "no marker 3 yet");
+    s.execute("time.set", json!({"time": 2.0})).unwrap();
+    s.execute("comp.numberedMarker3", json!({})).unwrap();
+    s.execute("time.set", json!({"time": 5.0})).unwrap();
+    s.execute("comp.numberedMarker7", json!({})).unwrap();
+    s.execute("time.marker3", json!({})).unwrap();
+    assert_eq!(secs(&s), 2.0);
+    s.execute("time.marker7", json!({})).unwrap();
+    assert_eq!(secs(&s), 5.0);
+    // There is one marker 3: setting it again moves it.
+    s.execute("time.set", json!({"time": 8.0})).unwrap();
+    s.execute("comp.numberedMarker3", json!({})).unwrap();
+    let marks: Vec<(f64, String)> = s.active_comp().unwrap().markers.iter().map(|m| (m.time.seconds(), m.comment.clone())).collect();
+    assert_eq!(marks, [(5.0, "7".to_string()), (8.0, "3".to_string())]);
+}
+
+#[test]
+fn replace_source_swaps_the_selected_layers_source() {
+    use effectcraft_project::{ItemKind, LayerSource};
+    let (mut s, ids) = session([(0.0, 10.0), (0.0, 10.0), (0.0, 10.0)]);
+    let inner = s.execute("comp.new", json!({"name": "Inner", "width": 50, "height": 50, "duration": 2})).unwrap()["comp"].as_u64().unwrap();
+    let main = s.project.items.values().find(|i| matches!(&i.kind, ItemKind::Comp(_)) && i.name == "Main").unwrap().id;
+    s.execute("comp.open", json!({"comp": main.0})).unwrap();
+    s.execute("layer.select", json!({"layers": [ids[0], ids[2]]})).unwrap();
+    s.execute("project.select", json!({"items": [inner]})).unwrap();
+    assert_eq!(s.execute("layer.replaceSource", json!({})).unwrap()["layers"], json!(2));
+    let comp = s.active_comp().unwrap();
+    let is_inner = |id: u64| matches!(comp.layers.iter().find(|l| l.id.0 == id).unwrap().source, LayerSource::Comp { item } if item.0 == inner);
+    assert!(is_inner(ids[0]) && !is_inner(ids[1]) && is_inner(ids[2]));
+    // A comp can't become its own layer, and a folder is no source.
+    assert!(s.execute("layer.replaceSource", json!({"item": main.0})).is_err());
+    let folder = s.execute("project.newFolder", json!({"name": "F"})).unwrap()["item"].as_u64().unwrap();
+    assert!(s.execute("layer.replaceSource", json!({"item": folder})).is_err());
+    // Only footage layers have a file behind their frame.
+    assert!(s.execute("layer.frameFile", json!({})).is_err());
+}
+
+#[test]
+fn paint_steps_the_time_by_the_stroke_duration() {
+    let (mut s, _) = session([(0.0, 10.0), (0.0, 10.0), (0.0, 10.0)]);
+    let frame = 1.0 / 30.0;
+    s.execute("time.set", json!({"time": 1.0})).unwrap();
+    s.execute("paint.stepLater", json!({})).unwrap();
+    assert!((secs(&s) - (1.0 + frame)).abs() < 1e-9);
+    s.execute("paint.options", json!({"durationMode": "custom", "customFrames": 5})).unwrap();
+    s.execute("paint.stepEarlier", json!({})).unwrap();
+    assert!((secs(&s) - (1.0 - 4.0 * frame)).abs() < 1e-9, "{}", secs(&s));
+    // Not before the start.
+    s.execute("time.set", json!({"time": 0.0})).unwrap();
+    s.execute("paint.stepEarlier", json!({})).unwrap();
+    assert_eq!(secs(&s), 0.0);
+}
