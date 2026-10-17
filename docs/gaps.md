@@ -146,6 +146,15 @@ The most important missing piece: it turns every other estimate here into a meas
   tests, checked headlessly on Windows, drag a selected Gradient Fill's start and end points in
   the Composition viewer: one undo step, the layer stays, a point inside a moved and scaled group
   converts to the group's space, and the handles show only for a selected gradient.
+- Regression evidence for [#1011](https://github.com/storytold/effectcraft/issues/1011): the
+  `ui_text_range_handles` input tests, checked headlessly on macOS, drag a text Range Selector's
+  End bar in the Composition viewer: one undo step, Start and the layer stay, and on an animated
+  End a keyframe at the current time. The bars show only for a selected selector or a selected
+  animator (or a property in it), with the Selection tool and layer controls on. Unit tests in
+  `text` place the bars on unit boundaries (words and Characters Excluding Spaces skip spaces,
+  inside a ligature, on the second line, right to left) and invert them; `render` covers the
+  value a drag writes (less the Offset, whole units in Index). Not done: dragging Offset, bars on
+  vertical text and on text on a path.
 - Regression evidence for the toolbar's gradient swatches (#612, reported on Discord): the
   `ui_toolbar_gradient` input tests, checked headlessly on Windows, click a Linear Fill swatch and
   a Radial Stroke swatch on a selected shape layer and get the Gradient Editor on its Gradient Fill

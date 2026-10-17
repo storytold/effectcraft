@@ -2020,6 +2020,8 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     crate::panels::effect_controls::viewer_hook(app, ui, &painter, &map, &ectx, &|c, l| l2c(c, l).0);
     // Selected shape gradients' start and end points (#612).
     crate::panels::gradient_handles::viewer_hook(app, ui, &painter, &map, &ectx, &|c, l| l2c(c, l).0);
+    // Selected text Range Selectors' Start and End bars (#1011).
+    crate::panels::text_range_handles::viewer_hook(app, ui, &painter, &map, &ectx, &|c, l| l2c(c, l).0);
 
     // Status chips (render time / caching).
     if app.playback.playing && app.playback.waiting {
