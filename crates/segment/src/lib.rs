@@ -45,6 +45,77 @@ pub trait MaskModel: Send + Sync {
     fn info(&self) -> &'static ModelInfo;
     /// Foreground probability (0–1) of each pixel of a frame (straight RGB 0–1, row-major `w×h`).
     fn segment(&self, rgb: &[[f32; 3]], w: usize, h: usize, prompt: &Prompt) -> Result<Vec<f32>>;
+    /// A video tracker built on the same weights, if the model has one.
+    fn tracker(&self) -> Option<&dyn ObjectTracker> {
+        None
+    }
+    /// The most memory (bytes) the last tracking run held for its memory banks and cached frames (`None`: not tracked).
+    fn peak_state_bytes(&self) -> Option<u64> {
+        None
+    }
+    /// What runs the model: the GPU's name or "CPU" (`None`: it does not say).
+    fn device_name(&self) -> Option<String> {
+        None
+    }
+    /// Seconds since the model was last used (`None`: it does not track use, so it is never unloaded
+    /// for being idle). Large models free their memory after a quiet spell and load again on use.
+    fn idle_secs(&self) -> Option<f64> {
+        None
+    }
+}
+
+/// One decoded frame handed to a tracker (straight RGB 0–1, row-major `w×h`).
+#[derive(Clone, Debug, Default)]
+pub struct ClipFrame {
+    pub rgb: Vec<[f32; 3]>,
+    pub w: usize,
+    pub h: usize,
+}
+
+/// What to track: the clip's frames `first..first + count` (the host's frame numbers) and, for
+/// each object, its prompts on their frames. Objects are tracked in one pass, so the cost of
+/// encoding each frame is shared.
+#[derive(Clone, Debug)]
+pub struct TrackRequest {
+    pub first: i64,
+    pub count: usize,
+    /// One entry per object: its prompts, each on its frame.
+    pub objects: Vec<Vec<(i64, Prompt)>>,
+}
+
+impl TrackRequest {
+    /// A request for a single object.
+    pub fn single(first: i64, count: usize, prompts: Vec<(i64, Prompt)>) -> TrackRequest {
+        TrackRequest { first, count, objects: vec![prompts] }
+    }
+}
+
+/// A tracker's answer for one frame.
+#[derive(Clone, Debug, Default)]
+pub struct TrackedFrame {
+    /// Foreground probability of every pixel (`w×h`); all zero when the object is absent.
+    pub prob: Vec<f32>,
+    pub w: usize,
+    pub h: usize,
+    /// How sure the tracker is (0–1), for the timeline.
+    pub confidence: f32,
+    /// The object is not in this frame (occluded or out of view).
+    pub occluded: bool,
+}
+
+/// A video tracker with memory (SAM 2): given prompts on some frames, it follows the object
+/// through the clip in both directions. Optional: a [`MaskModel`] may offer one.
+pub trait ObjectTracker: Send + Sync {
+    /// Track the objects. `frames(i)` supplies frame `i` (`None`: unavailable); `cancel()` is polled
+    /// between frames; `out(object, i, result)` is called as soon as each object's frame is finished
+    /// (`object` indexes `req.objects`).
+    fn track(
+        &self,
+        req: &TrackRequest,
+        frames: &mut dyn FnMut(i64) -> Option<Arc<ClipFrame>>,
+        cancel: &dyn Fn() -> bool,
+        out: &mut dyn FnMut(usize, i64, TrackedFrame),
+    ) -> Result<()>;
 }
 
 /// What a model is for.
@@ -96,6 +167,72 @@ pub const MOBILE_SAM: ModelInfo = ModelInfo {
     sha256: "6dbb90523a35330fedd7f1d3dfc66f995213d81b29a5ca8108dbcdd4e37d6c2f",
 };
 
+/// SAM 2.1 Tiny (Meta AI, Apache-2.0): a video object tracker with streaming memory. The weights are
+/// the Hugging Face `transformers` checkpoint, pinned to a commit so the SHA-256 stays valid; they
+/// are loaded by `effectcraft-sam2` (native only), not by [`load`].
+pub const SAM2_TINY: ModelInfo = ModelInfo {
+    id: "sam2.1-hiera-tiny",
+    task: Task::Mask,
+    name: "SAM 2.1 Tiny",
+    description: "Meta's Segment Anything Model 2 (Hiera-Tiny, 39M parameters). Follows the object through the clip with a streaming memory: it keeps tracking through occlusion and when the object leaves and re-enters the frame. Slower than MobileSAM on a CPU.",
+    authors: "Meta AI (Nikhila Ravi et al., SAM 2), Hugging Face transformers checkpoint",
+    licence: "Apache-2.0",
+    licence_url: "https://github.com/facebookresearch/sam2/blob/main/LICENSE",
+    homepage: "https://github.com/facebookresearch/sam2",
+    url: "https://huggingface.co/facebook/sam2.1-hiera-tiny/resolve/de431c4043854a71d8101e17995dfe596bf101a5/model.safetensors",
+    file_name: "sam2.1-hiera-tiny.safetensors",
+    size: 155_908_064,
+    sha256: "48c14467e5cf9e51870511feb72c89688e82dd74523142c0538b663e193ac2a7",
+};
+
+/// SAM 2.1 Small: the Small checkpoint, pinned to a commit like [`SAM2_TINY`].
+pub const SAM2_SMALL: ModelInfo = ModelInfo {
+    id: "sam2.1-hiera-small",
+    task: Task::Mask,
+    name: "SAM 2.1 Small",
+    description: "Meta's Segment Anything Model 2 (Hiera-Small, 46M parameters). The same streaming-memory tracker as SAM 2.1 Tiny with a larger backbone: a little more accurate on thin parts and busy backgrounds, a little slower.",
+    authors: "Meta AI (Nikhila Ravi et al., SAM 2), Hugging Face transformers checkpoint",
+    licence: "Apache-2.0",
+    licence_url: "https://github.com/facebookresearch/sam2/blob/main/LICENSE",
+    homepage: "https://github.com/facebookresearch/sam2",
+    url: "https://huggingface.co/facebook/sam2.1-hiera-small/resolve/ee5bba1d82bb8749febdf90f45e84b687142ba03/model.safetensors",
+    file_name: "sam2.1-hiera-small.safetensors",
+    size: 184_305_280,
+    sha256: "0a4067b11ce1e23d5229203f11c718a823060d15a4b23fa2372a7d4b77cbbc60",
+};
+
+/// SAM 2.1 Base+: the Base+ checkpoint, pinned to a commit like [`SAM2_TINY`].
+pub const SAM2_BASE_PLUS: ModelInfo = ModelInfo {
+    id: "sam2.1-hiera-base-plus",
+    task: Task::Mask,
+    name: "SAM 2.1 Base+",
+    description: "Meta's Segment Anything Model 2 (Hiera-Base+, 81M parameters). The same streaming-memory tracker as SAM 2.1 Tiny with a larger backbone: better on difficult footage; wants a GPU for comfortable speed.",
+    authors: "Meta AI (Nikhila Ravi et al., SAM 2), Hugging Face transformers checkpoint",
+    licence: "Apache-2.0",
+    licence_url: "https://github.com/facebookresearch/sam2/blob/main/LICENSE",
+    homepage: "https://github.com/facebookresearch/sam2",
+    url: "https://huggingface.co/facebook/sam2.1-hiera-base-plus/resolve/b7320756a13354e7530a63935656d35b2f91a290/model.safetensors",
+    file_name: "sam2.1-hiera-base-plus.safetensors",
+    size: 323_476_296,
+    sha256: "2012733a0de5d03efd1bba550a2847c4551be9ef2e0d497c83074df66189f780",
+};
+
+/// SAM 2.1 Large: the Large checkpoint, pinned to a commit like [`SAM2_TINY`].
+pub const SAM2_LARGE: ModelInfo = ModelInfo {
+    id: "sam2.1-hiera-large",
+    task: Task::Mask,
+    name: "SAM 2.1 Large",
+    description: "Meta's Segment Anything Model 2 (Hiera-Large, 224M parameters). The same streaming-memory tracker as SAM 2.1 Tiny with a larger backbone: the most accurate; about 900 MB and meant for a GPU.",
+    authors: "Meta AI (Nikhila Ravi et al., SAM 2), Hugging Face transformers checkpoint",
+    licence: "Apache-2.0",
+    licence_url: "https://github.com/facebookresearch/sam2/blob/main/LICENSE",
+    homepage: "https://github.com/facebookresearch/sam2",
+    url: "https://huggingface.co/facebook/sam2.1-hiera-large/resolve/665f8e2ad61cf5f53d65644ff27c8ee525124610/model.safetensors",
+    file_name: "sam2.1-hiera-large.safetensors",
+    size: 897_897_416,
+    sha256: "dc407dce21301fd94abb395c5099b4f2c455fdc8a8f261ac3d0ea6d4cd197230",
+};
+
 pub const FACE_LANDMARKER: ModelInfo = ModelInfo {
     id: "mediapipe-face",
     task: Task::Face,
@@ -112,7 +249,7 @@ pub const FACE_LANDMARKER: ModelInfo = ModelInfo {
 };
 
 /// The trained models, besides the built-in classical engines.
-pub const MODELS: &[ModelInfo] = &[MOBILE_SAM, FACE_LANDMARKER];
+pub const MODELS: &[ModelInfo] = &[MOBILE_SAM, SAM2_TINY, SAM2_SMALL, SAM2_BASE_PLUS, SAM2_LARGE, FACE_LANDMARKER];
 
 /// The id of the built-in classical engines (graph cut segmenter, shape-model face tracker): no
 /// weights, always available.
@@ -150,6 +287,7 @@ pub fn load(id: &str, bytes: &[u8]) -> Result<Loaded> {
             Ok(Loaded::Mask(Arc::new(Sam { net: mobilesam::MobileSam::from_weights(&w)? })))
         }
         "mediapipe-face" => Ok(Loaded::Face(Arc::new(mediapipe::FaceLandmarker::from_task(bytes)?))),
+        "sam2.1-hiera-tiny" => Err(format!("{} is loaded by the desktop application (effectcraft-sam2)", info.name)),
         _ => Err(format!("no loader for `{id}`")),
     }
 }
@@ -263,6 +401,11 @@ mod tests {
             assert!(m.url.starts_with("https://") && m.licence_url.starts_with("https://") && m.homepage.starts_with("https://"));
             assert!(!m.authors.is_empty() && notice(m).contains(m.authors));
         }
+        assert_eq!(
+            models(Task::Mask).map(|m| m.id).collect::<Vec<_>>(),
+            ["mobilesam", "sam2.1-hiera-tiny", "sam2.1-hiera-small", "sam2.1-hiera-base-plus", "sam2.1-hiera-large"]
+        );
+        assert!(SAM2_TINY.url.contains("/resolve/") && SAM2_TINY.file_name.ends_with(".safetensors"), "pinned to a commit, not a branch");
         assert_eq!(models(Task::Face).map(|m| m.id).collect::<Vec<_>>(), ["mediapipe-face"]);
         assert!(load("mediapipe-face", b"nope").err().is_some_and(|e| e.contains("does not match")));
         // A file that isn't the published one is refused before anything is parsed.

@@ -540,6 +540,47 @@ fn render_bitrate_applies_to_vp9_webm() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// `bench --roto --clip FRAMES --truth MASKS` runs the trackers on the user's own image sequences: here a bright disc
+/// drifting over a dark textured frame, with its true masks. Mismatched sequences are refused with a message.
+#[test]
+fn bench_roto_runs_on_a_users_clip() {
+    let (frames, masks) = (tmp("clip-frames"), tmp("clip-masks"));
+    for d in [&frames, &masks] {
+        let _ = std::fs::remove_dir_all(d);
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let (w, h) = (96u32, 72u32);
+    for f in 0..6u32 {
+        let (cx, cy) = (30.0 + 4.0 * f as f32, 36.0f32);
+        let (mut img, mut mask) = (image::RgbImage::new(w, h), image::GrayImage::new(w, h));
+        for y in 0..h {
+            for x in 0..w {
+                let inside = ((x as f32 - cx).powi(2) + (y as f32 - cy).powi(2)).sqrt() < 14.0;
+                let tex = 40 + ((x * 7 + y * 13) % 30) as u8;
+                img.put_pixel(x, y, if inside { image::Rgb([230, 120, 40 + (x % 20) as u8]) } else { image::Rgb([tex / 2, tex, tex + 20]) });
+                mask.put_pixel(x, y, image::Luma([if inside { 255 } else { 0 }]));
+            }
+        }
+        img.save(frames.join(format!("f{f:03}.png"))).unwrap();
+        mask.save(masks.join(format!("f{f:03}.png"))).unwrap();
+    }
+    let (f, m) = (frames.to_str().unwrap(), masks.to_str().unwrap());
+    let out = bin().args(["bench", "--roto", "--clip", f, "--truth", m, "--frames", "6"]).output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.status.success(), "{text}\n{}", String::from_utf8_lossy(&out.stderr));
+    let row = text.lines().find(|l| l.contains("classical")).unwrap_or_else(|| panic!("no classical row: {text}"));
+    let mean: f64 = row.split_whitespace().nth(2).unwrap().parse().unwrap();
+    assert!(mean > 0.8, "classical mean IoU on the user's clip: {mean}\n{text}");
+    // one mask short: refused
+    std::fs::remove_file(masks.join("f005.png")).unwrap();
+    let out = bin().args(["bench", "--roto", "--clip", f, "--truth", m]).output().unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("must match"), "{}", String::from_utf8_lossy(&out.stderr));
+    // --clip without --truth
+    let out = bin().args(["bench", "--roto", "--clip", f]).output().unwrap();
+    assert!(!out.status.success());
+}
+
 /// Render uses the same empty/project/demo selection as the other CLI commands.
 #[test]
 fn render_empty_does_not_load_the_demo() {

@@ -36,6 +36,7 @@ kernels at run time). No ML framework, no unsafe code.
 | id | Task | Model | Authors | Licence | File | Size |
 |---|---|---|---|---|---|---|
 | `mobilesam` | Roto Brush | [MobileSAM](https://github.com/ChaoningZhang/MobileSAM): Segment Anything with a 5M-parameter TinyViT encoder | Chaoning Zhang et al., building on Meta AI's Segment Anything and Microsoft's TinyViT | Apache-2.0 | `mobile_sam.pt` from the official repository | 40.7 MB |
+| `sam2.1-hiera-tiny` | Roto Brush | [SAM 2.1 Tiny](https://github.com/facebookresearch/sam2): Hiera-Tiny video object tracker with streaming memory | Meta AI (Nikhila Ravi et al.) | Apache-2.0 | `model.safetensors` of `facebook/sam2.1-hiera-tiny` (Hugging Face, pinned to a commit); loaded by `effectcraft-sam2` | 155.9 MB |
 | `mediapipe-face` | Face tracking | [MediaPipe Face Landmarker](https://developers.google.com/edge/mediapipe/solutions/vision/face_landmarker): BlazeFace detector and Face Mesh V2 | Google LLC | Apache-2.0 ([model card](https://storage.googleapis.com/mediapipe-assets/Model%20Card%20MediaPipe%20Face%20Mesh%20V2.pdf)) | `face_landmarker.task` (float16, version 1) from Google's model storage | 3.8 MB |
 
 How they were checked:

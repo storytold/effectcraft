@@ -451,6 +451,9 @@ fn models_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, t: &Tokens, acts: &mut
                 ui.label(RichText::new(state).color(if active { t.accent } else { t.text_dim }));
             });
             ui.label(RichText::new(m["description"].as_str().unwrap_or_default()).color(t.text_dim));
+            if let Some(hint) = m["hint"].as_str() {
+                ui.label(RichText::new(hint).color(if m["recommended"].as_bool().unwrap_or(false) { t.accent } else { t.text_dim }));
+            }
             if let Some(by) = m["authors"].as_str() {
                 ui.label(RichText::new(format!("By {by}")).color(t.text_dim));
             }

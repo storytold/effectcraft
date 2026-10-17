@@ -14,10 +14,12 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use effectcraft_segment::face::FaceModel;
 use effectcraft_segment::{self as seg, Loaded, ModelInfo, Task};
 use serde_json::{Value, json};
+use web_time::Instant;
 
 use crate::commands::{CommandSpec, always, b_p, bad, str_p};
 use crate::{EngineError, Result, Session, cmd, query};
@@ -61,7 +63,7 @@ impl Models {
         self.face_model.lock().ok().and_then(|m| m.clone())
     }
 
-    fn set_active(&self, task: Task, model: Option<Loaded>) {
+    pub(crate) fn set_active(&self, task: Task, model: Option<Loaded>) {
         activate(self.lane(task), &self.face_model, task, model);
     }
 }
@@ -126,6 +128,13 @@ fn kind(task: Task) -> &'static Kind {
     }
 }
 
+/// How long a Roto Brush model may sit unused before its memory is freed.
+const ROTO_MODEL_IDLE: Duration = Duration::from_secs(600);
+
+/// How long a job that needs the Roto Brush model waits for it to load (or download) before it
+/// gives up. A worker that never reports back must not hang the command.
+const ROTO_MODEL_WAIT: Duration = Duration::from_secs(600);
+
 impl Session {
     /// The folder installed models live in: the host's, else `models` next to the settings.
     pub fn models_dir(&self) -> Option<PathBuf> {
@@ -188,8 +197,131 @@ impl Session {
         });
     }
 
+    /// The Roto Brush model in use (`None`: the classic engine).
+    pub fn models_roto_active(&self) -> Option<String> {
+        self.models.status(Task::Mask).active
+    }
+
+    /// The Roto Brush model Settings chose, when it is one (not the classic engine).
+    fn roto_model_info(&self) -> Option<&'static ModelInfo> {
+        seg::info(self.chosen_model(Task::Mask)).filter(|m| m.task == Task::Mask)
+    }
+
+    /// Whether the chosen Roto Brush model is still loading or downloading.
+    pub fn roto_model_loading(&self) -> bool {
+        self.models.status(Task::Mask).busy.is_some() && self.chosen_model(Task::Mask) != seg::CLASSICAL
+    }
+
+    /// The Roto Brush model Settings chose and its state (`roto.status`).
+    pub fn roto_model(&self) -> Value {
+        let st = self.models.status(Task::Mask);
+        json!({
+            "selected": self.chosen_model(Task::Mask),
+            "installed": self.roto_model_info().is_none_or(|m| self.model_path(m).is_some()),
+            "active": st.active,
+            "loading": st.busy.is_some(),
+            "error": st.error,
+        })
+    }
+
+    /// What `roto.status` says when the chosen model is not the one in use for this layer (`None`:
+    /// nothing to say). `uses_model`: the layer segments with a model at all (Roto Brush 1.0 does not).
+    pub fn roto_model_notice(&self, uses_model: bool) -> Option<String> {
+        let info = self.roto_model_info()?;
+        if !uses_model {
+            return Some(format!("{} is selected, but this layer is Roto Brush 1.0: it segments with the classic engine", info.name));
+        }
+        let st = self.models.status(Task::Mask);
+        if st.active.as_deref() == Some(info.id) {
+            None
+        } else if self.model_path(info).is_none() {
+            Some(format!("{} is selected but not installed: propagate refuses until it is installed or Classic is chosen", info.name))
+        } else if let Some(e) = st.error {
+            Some(format!("{} is selected but failed to load ({e}): propagate refuses until it is selected again", info.name))
+        } else {
+            Some(format!("{} is selected but not loaded yet: propagate loads it first with wait: true, and refuses without it", info.name))
+        }
+    }
+
+    /// What `roto.status` says when the saved tracking applies but Settings choose another model (`None`:
+    /// they agree, or nothing is saved).
+    pub fn saved_tracking_notice(&self, saved: Option<&str>) -> Option<String> {
+        let saved = saved?;
+        let chosen = self.chosen_model(Task::Mask);
+        if saved == chosen {
+            return None;
+        }
+        let name = |id: &str| seg::info(id).map_or(ROTO.classic_name, |m| m.name);
+        Some(format!("The saved tracking was made with {}; {} is chosen: Propagate again to replace it", name(saved), name(chosen)))
+    }
+
+    /// Make sure the Roto Brush model Settings chose is in use before a job that segments with it
+    /// starts, so the job never runs on the classic engine without saying so. With `wait`, a load
+    /// under way is waited for and one not started is loaded here; without it, a model that is not
+    /// ready is refused (and starts loading). A model that is not installed, or failed to load, is
+    /// refused either way. The classic engine needs nothing.
+    pub fn ensure_roto_model(&mut self, wait: bool) -> std::result::Result<(), String> {
+        let Some(info) = self.roto_model_info() else { return Ok(()) };
+        // A download or load under way (from Settings, or `select` without `wait`) finishes first.
+        // Nothing is in flight in the browser build, so this never sleeps there.
+        if wait && self.models.status(Task::Mask).busy.is_some() {
+            let started = Instant::now();
+            while self.models.status(Task::Mask).busy.is_some() {
+                if started.elapsed() >= ROTO_MODEL_WAIT {
+                    return Err(format!("{} is still loading after {} minutes", info.name, ROTO_MODEL_WAIT.as_secs() / 60));
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        if self.model_path(info).is_none() {
+            if self.models.status(Task::Mask).busy.is_some() {
+                return Err(format!("{} is still downloading: try again when it is ready, or pass wait: true", info.name));
+            }
+            return Err(format!("{} is selected for Roto Brush but not installed: install or download it, or choose {}", info.name, ROTO.classic_name));
+        }
+        let st = self.models.status(Task::Mask);
+        if st.active.as_deref() != Some(info.id) && st.busy.is_none() && st.error.is_none() {
+            self.apply_model(Task::Mask, wait);
+        }
+        let st = self.models.status(Task::Mask);
+        if let Some(e) = st.error {
+            return Err(format!("{} failed to load: {e}", info.name));
+        }
+        if st.active.as_deref() == Some(info.id) {
+            return Ok(());
+        }
+        Err(format!("{} is still loading: try again when it is ready, or pass wait: true", info.name))
+    }
+
+    /// Free a Roto Brush model that has been idle for [`ROTO_MODEL_IDLE`] (and is not under a job). The
+    /// choice stays: it loads again when a job or a stroke needs it.
+    fn unload_idle_roto_model(&mut self) {
+        if self.is_roto_running() || self.models.status(Task::Mask).busy.is_some() {
+            return;
+        }
+        let Some(m) = crate::effects::roto::installed_model() else { return };
+        if m.idle_secs().is_some_and(|s| s >= ROTO_MODEL_IDLE.as_secs_f64()) {
+            let name = m.info().name;
+            drop(m);
+            self.models.set_active(Task::Mask, None);
+            self.events.push(crate::Event::Toast {
+                message: format!("{name} unloaded after {} minutes idle; it loads again when it is used", ROTO_MODEL_IDLE.as_secs() / 60),
+                error: false,
+            });
+        }
+    }
+
+    /// Load the chosen Roto Brush model again if it was unloaded for being idle (before a stroke uses it).
+    pub fn reload_roto_model(&mut self) {
+        let chosen = self.chosen_model(Task::Mask).to_string();
+        if chosen != seg::CLASSICAL && self.models.status(Task::Mask).active.is_none() && self.models.status(Task::Mask).busy.is_none() {
+            self.apply_model(Task::Mask, true);
+        }
+    }
+
     /// Finish what the model workers did: a toast, and loading a model that just arrived.
     pub fn poll_models(&mut self) {
+        self.unload_idle_roto_model();
         for task in [Task::Mask, Task::Face] {
             let done = self.models.lane(task).lock().ok().and_then(|mut s| s.done.take());
             if let Some((message, error)) = done {
@@ -202,6 +334,11 @@ impl Session {
 
 fn load_file(path: &Path, id: &str) -> std::result::Result<Loaded, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    // SAM 2 runs on candle and is native only; every other model loads through the registry.
+    #[cfg(not(target_arch = "wasm32"))]
+    if effectcraft_sam2::mask::SIZES.iter().any(|m| m.id == id) {
+        return effectcraft_sam2::mask::load(&bytes).map(|m| Loaded::Mask(m));
+    }
     seg::load(id, &bytes)
 }
 
@@ -283,7 +420,13 @@ fn list(s: &mut Session, task: Task) -> Result<Value> {
         "active": st.active.is_none(),
     })];
     for m in seg::models(task) {
+        #[cfg(not(target_arch = "wasm32"))]
+        let (recommended, hint) = (effectcraft_sam2::mask::recommended().id == m.id, effectcraft_sam2::mask::hint(m.id));
+        #[cfg(target_arch = "wasm32")]
+        let (recommended, hint) = (false, None::<String>);
         v.push(json!({
+            "recommended": recommended,
+            "hint": hint,
             "id": m.id,
             "name": m.name,
             "description": m.description,
@@ -407,7 +550,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Use Roto Brush Model",
             [],
             None,
-            "{id: classical|mobilesam, wait?} (Roto Brush 2.0 / 3.0 use it; wait: loaded before returning)",
+            "{id: classical|mobilesam|sam2.1-hiera-tiny|sam2.1-hiera-small|sam2.1-hiera-base-plus|sam2.1-hiera-large, wait?} (Roto Brush 2.0 / 3.0 use it; wait: loaded before returning)",
             always,
             |s, p| select(s, p, Task::Mask)
         ),

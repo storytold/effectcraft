@@ -23,6 +23,8 @@
 //!     (--gpu: CPU vs GPU ms/frame for every comp at Full and Half)
 //! effectcraft-cli bench --ops [--small] [--layers N] [--comps N] [--footage N]   everyday-operation timings
 //!     on a large generated project (open, save, auto-save, undo/redo, timeline, Project panel)
+//! effectcraft-cli bench --roto [--frames N] [--sam2 model.safetensors] [--mobilesam mobile_sam.pt] [--fixes] [--clip FRAMES --truth MASKS] [--json]   Roto Brush trackers on synthetic clips with known mattes
+//!     (classical engine, MobileSAM and SAM 2.1 (any installed size) when installed; IoU, flicker, re-appearance, seconds per frame)
 //! effectcraft-cli script FILE.jsx [F.ecproj] | --eval CODE    run an After Effects-style script
 //! effectcraft-cli mcp [--autosave | --bridge PORT]            MCP server on stdio
 //!
@@ -113,6 +115,9 @@ const USAGE: &str = "usage: effectcraft-cli <info|commands|exec|run|props|get|se
   bench --ops [--small] [--layers N] [--comps N] [--footage N]
                                            everyday operations on a large generated project: startup, open,
                                            save, auto-save, edits + undo/redo, timeline, Project panel
+  bench --roto [--frames N] [--sam2 FILE] [--mobilesam FILE] [--fixes] [--clip FRAMES_DIR --truth MASKS_DIR] [--json]
+                                           Roto Brush trackers on synthetic clips with known mattes: movement,
+                                           lighting change, occlusion, leaving and re-entering the frame
   script FILE.jsx [F.ecproj] | --eval CODE run JavaScript with the After Effects-style object model
                                            (app.project, comps, layers, properties…); prints writeLn
                                            output and the result; errors exit 1 with file:line:col
@@ -126,6 +131,11 @@ options: --project F.ecproj | --demo | --empty   --save | --save-as F   --bridge
 /// Options that take a value.
 const VALUED: &[&str] = &[
     "--n",
+    "--clip",
+    "--truth",
+    "--frames",
+    "--sam2",
+    "--mobilesam",
     "--play",
     "--layers",
     "--comps",
@@ -174,6 +184,7 @@ const VALUED: &[&str] = &[
 /// Options without a value. Any other `--option` is a usage error.
 const FLAGS: &[&str] = &[
     "--json",
+    "--fixes",
     "--save",
     "--demo",
     "--empty",
@@ -186,6 +197,7 @@ const FLAGS: &[&str] = &[
     "--work-area",
     "--queue",
     "--ops",
+    "--roto",
     "--small",
     "--adv3d",
     "--autosave",
@@ -842,6 +854,9 @@ fn bench_cmd(args: &Args) -> Result<(), Failure> {
     if args.flag("--ops") {
         return bench_ops(args);
     }
+    if args.flag("--roto") {
+        return bench_roto(args);
+    }
     let mut s = effectcraft_host::session();
     match &args.project {
         Some(p) => s.execute("file.open", json!({"path": p})),
@@ -862,6 +877,91 @@ fn bench_cmd(args: &Args) -> Result<(), Failure> {
         bench_play(&s, cid, t, opts, n.max(1.0) as usize);
     }
     Ok(())
+}
+
+/// `bench --roto`: the Roto Brush's trackers on synthetic clips whose true mattes are known.
+fn bench_roto(args: &Args) -> Result<(), Failure> {
+    use effectcraft_segment::{Loaded, MOBILE_SAM, MaskModel};
+    use effectcraft_track::roto::bench;
+    let frames = args.num("--frames")?.unwrap_or(24.0).clamp(12.0, 240.0) as usize;
+    let session = effectcraft_host::session();
+    // `--mobilesam FILE` uses the weights at FILE; otherwise the installed ones.
+    let mobilesam_file = args.opt("--mobilesam").map(std::path::PathBuf::from).or_else(|| session.model_path(&MOBILE_SAM));
+    let mobilesam: Option<std::sync::Arc<dyn MaskModel>> =
+        mobilesam_file.and_then(|p| std::fs::read(p).ok()).and_then(|bytes| effectcraft_segment::load(MOBILE_SAM.id, &bytes).ok()).and_then(|m| match m {
+            Loaded::Mask(m) => Some(m),
+            _ => None,
+        });
+    if mobilesam.is_none() {
+        note!("bench --roto: MobileSAM is not installed; comparing the classical engine only");
+    }
+    // `--sam2 FILE` uses the weights at FILE; otherwise the installed ones.
+    let sam2_file = args.opt("--sam2").map(std::path::PathBuf::from).or_else(|| effectcraft_sam2::mask::SIZES.iter().find_map(|m| session.model_path(m)));
+    let sam2: Option<std::sync::Arc<dyn MaskModel>> =
+        sam2_file.and_then(|p| std::fs::read(p).ok()).and_then(|bytes| effectcraft_sam2::mask::load(&bytes).ok()).map(|m| m as std::sync::Arc<dyn MaskModel>);
+    if sam2.is_none() {
+        note!("bench --roto: no SAM 2.1 size is installed; no SAM 2 column");
+    }
+    // `--fixes`: also count the correction strokes each needs before every frame reaches IoU 0.9 (up to 6).
+    let fixes = args.flag("--fixes");
+    let measure = |sc: &bench::Scenario, run: &dyn Fn(&bench::Scenario) -> Option<bench::Run>| if fixes { bench::with_fixes(sc, 0.9, 6, run) } else { run(sc) };
+    let mut runs = vec![];
+    let mut scenarios = bench::scenarios(frames);
+    // `--clip FRAMES_DIR --truth MASKS_DIR`: the user's own clip (image sequences, same file order) with its true mattes.
+    if let Some(dir) = args.opt("--clip") {
+        let truth = args.opt("--truth").ok_or_else(|| Failure::Error("--clip needs --truth MASKS_DIR".into()))?;
+        let name = std::path::Path::new(dir).file_name().map_or_else(|| "clip".to_string(), |n| n.to_string_lossy().chars().take(10).collect());
+        scenarios = vec![load_bench_clip(&name, dir, truth, frames).map_err(Failure::Error)?];
+    }
+    for sc in scenarios {
+        runs.extend(measure(&sc, &|s| Some(bench::run_flow(s, "classical", None))));
+        if let Some(m) = &mobilesam {
+            runs.extend(measure(&sc, &|s| Some(bench::run_flow(s, "mobilesam", Some(m.as_ref())))));
+        }
+        if let Some(m) = &sam2 {
+            let label = m.info().id.replacen("sam2.1-hiera-", "sam2-", 1);
+            runs.extend(measure(&sc, &|s| bench::run_tracker(s, &label, m.as_ref())));
+        }
+    }
+    if args.flag("--json") {
+        say!("{}", serde_json::to_string_pretty(&runs).map_err(|e| Failure::Error(e.to_string()))?);
+    } else {
+        say!("{}", bench::table(&runs));
+    }
+    Ok(())
+}
+
+/// The image files of `dir` (png, jpg, jpeg), in file-name order.
+fn image_files(dir: &str) -> Result<Vec<std::path::PathBuf>, String> {
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .map_err(|e| format!("cannot read {dir}: {e}"))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().and_then(|e| e.to_str()).is_some_and(|e| ["png", "jpg", "jpeg"].contains(&e.to_ascii_lowercase().as_str())))
+        .collect();
+    files.sort();
+    Ok(files)
+}
+
+/// A benchmark scenario from the user's frames and truth masks (at most `limit` frames, frames at most 480 px
+/// wide; a mask pixel above 127 is the object). Nothing is copied or kept.
+fn load_bench_clip(name: &str, frames_dir: &str, truth_dir: &str, limit: usize) -> Result<effectcraft_track::roto::bench::Scenario, String> {
+    let (frames, masks) = (image_files(frames_dir)?, image_files(truth_dir)?);
+    if frames.is_empty() || frames.len() != masks.len() {
+        return Err(format!("{} frames in {frames_dir} but {} masks in {truth_dir}: they must match one to one", frames.len(), masks.len()));
+    }
+    let n = frames.len().min(limit.clamp(1, 240));
+    let (mut imgs, mut truth) = (vec![], vec![]);
+    for (f, m) in frames.iter().zip(&masks).take(n) {
+        let rgba = image::open(f).map_err(|e| format!("{}: {e}", f.display()))?.to_rgba8();
+        let scale = (480.0 / f64::from(rgba.width().max(1))).min(1.0);
+        let (w, h) = (((f64::from(rgba.width()) * scale).round() as u32).max(1), ((f64::from(rgba.height()) * scale).round() as u32).max(1));
+        let rgba = if (w, h) == rgba.dimensions() { rgba } else { image::imageops::resize(&rgba, w, h, image::imageops::FilterType::Triangle) };
+        let mask = image::open(m).map_err(|e| format!("{}: {e}", m.display()))?.to_luma8();
+        let mask = image::imageops::resize(&mask, w, h, image::imageops::FilterType::Nearest);
+        imgs.push(effectcraft_render::Image::from_rgba8(w, h, rgba.as_raw()));
+        truth.push(mask.as_raw().iter().map(|v| u8::from(*v > 127)).collect());
+    }
+    effectcraft_track::roto::bench::scenario_from(name, imgs, truth)
 }
 
 /// `bench --ops`: everyday operations on a large generated project (200 comps, 5,000 layers in

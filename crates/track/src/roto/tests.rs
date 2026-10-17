@@ -65,7 +65,13 @@ pub(crate) fn frame_at(c: [f64; 2]) -> (Image, Vec<u8>) {
 }
 
 fn line(kind: StrokeKind, frame: i64, a: [f64; 2], b: [f64; 2], radius: f64) -> Stroke {
-    Stroke { kind, frame, radius, points: (0..=10).map(|k| [a[0] + (b[0] - a[0]) * k as f64 / 10.0, a[1] + (b[1] - a[1]) * k as f64 / 10.0]).collect() }
+    Stroke {
+        kind,
+        frame,
+        radius,
+        points: (0..=10).map(|k| [a[0] + (b[0] - a[0]) * k as f64 / 10.0, a[1] + (b[1] - a[1]) * k as f64 / 10.0]).collect(),
+        object: 0,
+    }
 }
 
 /// The strokes an artist would paint on frame `f`: one through the disk, one around it.
@@ -194,6 +200,7 @@ fn ring(frame: i64, c: [f64; 2], r: f64, radius: f64) -> Stroke {
         frame,
         radius,
         points: (0..=48).map(|k| k as f64 / 48.0 * std::f64::consts::TAU).map(|a| [c[0] + r * a.cos(), c[1] + r * a.sin()]).collect(),
+        object: 0,
     }
 }
 
@@ -327,7 +334,7 @@ fn roto_perf_1080p() {
     let mut seg2 = next.clone();
     let c = center(1);
     let ring: Vec<[f64; 2]> = (0..=64).map(|k| k as f64 / 64.0 * std::f64::consts::TAU).map(|t| [(c[0] + R * t.cos()) * s, (c[1] + R * t.sin()) * s]).collect();
-    let st = [Stroke { kind: StrokeKind::Refine, frame: 1, radius: 20.0, points: ring }];
+    let st = [Stroke { kind: StrokeKind::Refine, frame: 1, radius: 20.0, points: ring, object: 0 }];
     let r = rasterize(&st.iter().collect::<Vec<_>>(), &[StrokeKind::Refine], 1.0, 1920, 1080);
     seg2.refine = r.iter().map(|v| *v as u8).collect();
     let rgb = rgb_of(&b);
@@ -433,8 +440,8 @@ fn mobilesam_segments_and_propagates_the_disk() {
 /// ignores it; a prior's box does not replace it.
 #[test]
 fn box_stroke_is_the_model_box_prompt() {
-    let fg = Stroke { kind: StrokeKind::Fg, frame: 0, radius: 2.0, points: vec![[50.0, 40.0]] };
-    let bx = Stroke { kind: StrokeKind::Box, frame: 0, radius: 0.0, points: vec![[80.0, 60.0], [20.0, 10.0]] };
+    let fg = Stroke { kind: StrokeKind::Fg, frame: 0, radius: 2.0, points: vec![[50.0, 40.0]], object: 0 };
+    let bx = Stroke { kind: StrokeKind::Box, frame: 0, radius: 0.0, points: vec![[80.0, 60.0], [20.0, 10.0]], object: 0 };
     let p = stroke_prompt(&[&fg, &bx], 0.5);
     assert_eq!(p.bbox, Some([10.0, 5.0, 40.0, 30.0]));
     assert_eq!(p.points, vec![([25.0, 20.0], true)]);
@@ -449,4 +456,107 @@ fn box_stroke_is_the_model_box_prompt() {
     let soft: Vec<f32> = (0..100 * 80).map(|i| ((i % 100) < 10) as u8 as f32).collect();
     assert!(add_prior_prompt(&mut q, &soft, 100, 80));
     assert_eq!(q.bbox, Some([20.0, 10.0, 80.0, 60.0]));
+}
+
+#[test]
+fn tracker_prompts_carry_a_handful_of_points() {
+    let st = base_strokes(0);
+    let refs: Vec<&Stroke> = st.iter().collect();
+    let p = tracker_prompt(&refs, 1.0);
+    let (fg, bg) = (p.points.iter().filter(|(_, f)| *f).count(), p.points.iter().filter(|(_, f)| !*f).count());
+    assert!((1..=TRACKER_FG_POINTS).contains(&fg) && (1..=TRACKER_BG_POINTS).contains(&bg), "{fg} fg, {bg} bg");
+    // a long, finely sampled stroke still gives at most the limit, and an empty one gives none
+    let long = Stroke { kind: StrokeKind::Fg, frame: 0, radius: 2.0, points: (0..400).map(|i| [i as f64 * 0.4, 50.0]).collect(), object: 0 };
+    assert!(tracker_prompt(&[&long], 1.0).points.len() <= TRACKER_FG_POINTS);
+    assert!(tracker_prompt(&[], 1.0).points.is_empty());
+}
+
+#[test]
+fn tracked_segmentation_handles_absent_objects_and_bad_maps() {
+    let (img, gt) = frame_at(center(0));
+    let st = base_strokes(0);
+    let refs: Vec<&Stroke> = st.iter().collect();
+    let opts = SegOpts::default();
+    let n = (W * H) as usize;
+    // a good map (the true disk) reproduces it, with the strokes as constraints
+    let soft: Vec<f32> = gt.iter().map(|v| f32::from(*v)).collect();
+    let seg = segment_tracked(&img, &refs, soft, false, &opts, 0.0);
+    assert!(iou(&seg.matte, &gt) > 0.95);
+    // an absent object (no strokes on the frame) is an empty matte, whatever the map says
+    let none = segment_tracked(&img, &[], vec![1.0; n], true, &opts, 0.0);
+    assert_eq!(none.area(), 0);
+    assert_eq!(segment_tracked(&img, &[], vec![0.0; n], false, &opts, 0.0).area(), 0);
+    // a map of the wrong size is ignored: the strokes alone segment the frame
+    let wrong = segment_tracked(&img, &refs, vec![1.0; 3], false, &opts, 0.0);
+    assert!(iou(&wrong.matte, &gt) > 0.95);
+}
+
+#[test]
+fn tracker_prompts_carry_the_box_of_the_classic_matte() {
+    let (img, gt) = frame_at(center(0));
+    let st = base_strokes(0);
+    let refs: Vec<&Stroke> = st.iter().collect();
+    let classic = segment(&img, &refs, None, &SegOpts::default(), 0.0);
+    let p = tracker_prompt_boxed(&refs, 1.0, &classic);
+    let b = p.bbox.expect("a box");
+    let c = center(0);
+    // the box reaches the disk's edges, with a margin
+    assert!(b[0] <= (c[0] - R) as f32 && b[0] > (c[0] - R) as f32 - 12.0, "{b:?}");
+    assert!(b[2] >= (c[0] + R) as f32 && b[2] < (c[0] + R) as f32 + 12.0, "{b:?}");
+    assert!(b[1] <= (c[1] - R) as f32 && b[3] >= (c[1] + R) as f32, "{b:?}");
+    assert!(iou(&classic.matte, &gt) > 0.95);
+    // no matte, no box; a box the user drew wins
+    let none = tracker_prompt_boxed(&refs, 1.0, &FrameSeg::empty(W as usize, H as usize));
+    assert_eq!(none.bbox, None);
+    let bx = Stroke { kind: StrokeKind::Box, frame: 0, radius: 0.0, points: vec![[10.0, 10.0], [50.0, 60.0]], object: 0 };
+    let mut with_box: Vec<&Stroke> = refs.clone();
+    with_box.push(&bx);
+    assert_eq!(tracker_prompt_boxed(&with_box, 1.0, &classic).bbox, Some([10.0, 10.0, 50.0, 60.0]));
+}
+
+#[test]
+fn strokes_carry_an_object_and_old_data_is_object_zero() {
+    // saved before objects existed: no field, and the field is not written for object 0
+    let old = r#"{"base":0,"span":[0,4],"strokes":[{"kind":"fg","frame":0,"radius":3.0,"points":[[1.0,2.0]]}]}"#;
+    let d = RotoData::from_json(old);
+    assert_eq!(d.strokes.first().map(|s| s.object), Some(0));
+    assert!(!d.to_json().contains("object"), "{}", d.to_json());
+    // the keys of existing projects do not change
+    let same = RotoData::from_json(&d.to_json());
+    assert_eq!(d.chain_keys(1), same.chain_keys(1));
+
+    let mut d = d;
+    d.add(Stroke { kind: StrokeKind::Fg, frame: 0, radius: 3.0, points: vec![[9.0, 9.0]], object: 2 }, 4, [0, 10]);
+    d.add(Stroke { kind: StrokeKind::Bg, frame: 0, radius: 3.0, points: vec![[0.0, 0.0]], object: 2 }, 4, [0, 10]);
+    d.add(Stroke { kind: StrokeKind::Refine, frame: 0, radius: 3.0, points: vec![[5.0, 5.0]], object: 0 }, 4, [0, 10]);
+    assert_eq!(d.objects(), vec![0, 2]);
+    assert!(d.to_json().contains("\"object\":2"));
+    assert_eq!(RotoData::from_json(&d.to_json()), d);
+    // an object's own strokes, plus the Refine Edge strokes that belong to the whole matte
+    assert_eq!(d.strokes_of(0, 2).len(), 3);
+    assert_eq!(d.strokes_of(0, 0).len(), 2);
+    assert!(d.strokes_of(0, 1).len() == 1);
+    // moving a stroke to another object changes the frame keys (the tracked frames are stale)
+    let before = d.chain_keys(1);
+    if let Some(s) = d.strokes.first_mut() {
+        s.object = 1;
+    }
+    assert_ne!(before, d.chain_keys(1));
+}
+
+#[test]
+fn the_union_of_objects_is_their_largest_extent() {
+    let seg = |cells: &[usize]| {
+        let mut s = FrameSeg::empty(4, 1);
+        for c in cells {
+            s.matte[*c] = 255;
+        }
+        s
+    };
+    let u = FrameSeg::union(vec![seg(&[0]), seg(&[2, 3]), seg(&[3])]);
+    assert_eq!(u.matte, vec![255, 0, 255, 255]);
+    assert_eq!(FrameSeg::union(vec![]).w, 0);
+    // a part of another size is ignored
+    let odd = FrameSeg::empty(2, 2);
+    assert_eq!(FrameSeg::union(vec![seg(&[1]), odd]).matte, vec![0, 255, 0, 0]);
 }

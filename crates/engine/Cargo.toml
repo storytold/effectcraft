@@ -37,3 +37,7 @@ rayon = { workspace = true }
 image = { workspace = true }
 web-time = { workspace = true }
 exr = { workspace = true }
+
+# SAM 2 runs on candle: native only (the browser build keeps the built-in engines).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+effectcraft-sam2 = { workspace = true }
