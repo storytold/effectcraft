@@ -967,6 +967,7 @@ fn delete_keys(s: &mut Session, _: &Value) -> Result<Value> {
     let sel = s.state.selected_keys.clone();
     s.edit("Delete Keyframes", None, |proj, st| {
         let comp = proj.comp_mut(cid).ok_or(EngineError::NoComp)?;
+        let mut removed = 0usize;
         for k in &sel {
             if let Some(pr) = comp.layer_mut(k.layer).and_then(|l| l.props.find_mut(k.prop))
                 && let Some(i) = key_at(&pr.keys, k.time)
@@ -975,10 +976,13 @@ fn delete_keys(s: &mut Session, _: &Value) -> Result<Value> {
                     pr.value = pr.keys[0].value.clone();
                 }
                 pr.keys.remove(i);
+                removed += 1;
             }
         }
         st.selected_keys.clear();
-        Ok(json!(sel.len()))
+        // The keys actually removed: a selected key that is gone (or listed twice) isn't counted,
+        // so a caller can tell that a delete changed nothing.
+        Ok(json!(removed))
     })
 }
 

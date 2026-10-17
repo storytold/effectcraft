@@ -1232,6 +1232,8 @@ mod tests_codec_options;
 #[cfg(test)]
 mod tests_color_view;
 #[cfg(test)]
+mod tests_delete_keys;
+#[cfg(test)]
 mod tests_disk_cache;
 #[cfg(test)]
 mod tests_effects;
