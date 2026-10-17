@@ -1381,9 +1381,11 @@ fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) -> Option<Res
         "mp4", "mov", "m4v", "mkv", "webm", "mxf", "png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "bmp", "exr", "dpx", "cin", "wav", "aif", "aiff", "mp3",
         "flac", "ogg", "opus", "svg", "pdf", "ai", "eps", "psd", "psb", "tga", "hdr", "gltf", "glb", "obj", "stl", "fbx", "json", "csv", "tsv",
     ];
-    // A host whose modal dialogs would run a nested event loop inside this frame (macOS: a
-    // drag over the window then re-entered winit's event handler and aborted, #511) shows the
-    // dialog without blocking; the command continues when the answer arrives.
+    // A host whose blocking dialogs are unsafe inside this frame shows the dialog without
+    // blocking — macOS: the nested event loop re-entered winit's handler on a drag over the
+    // window and aborted the app (#511); Linux: the desktop portal's answer never gets pumped,
+    // so the compositor marks the window as not responding (#1275) — and the command continues
+    // when the answer arrives.
     if let Some(spawn) = app.hooks.file_dialog_async.as_ref() {
         let request = match ask {
             Ask::Folder => crate::FileDialog::Folder,
