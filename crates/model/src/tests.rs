@@ -120,6 +120,54 @@ fn obj_without_normals_gets_them() {
 }
 
 #[test]
+fn obj_textures_from_another_machine_find_the_file_next_to_the_model() {
+    // No committed media: the material file and its textures are written by the test itself.
+    let d = std::env::temp_dir().join(format!("ec-obj-sibling-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    let png = {
+        let img = image::RgbaImage::from_fn(2, 2, |x, y| {
+            if (x + y) % 2 == 0 { image::Rgba([255, 0, 0, 255]) } else { image::Rgba([0, 0, 255, 255]) }
+        });
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+        out.into_inner()
+    };
+    std::fs::write(d.join("checker.png"), &png).unwrap();
+    std::fs::write(d.join("Diffuse Map.png"), &png).unwrap();
+    let mtl = "newmtl Mat\nKd 0.640000 0.640000 0.640000\nmap_Kd C:\\Users\\somebody\\Desktop\\textures\\checker.png\n\
+               newmtl Spaced\nKd 1.000000 1.000000 1.000000\nmap_Kd Diffuse Map.png\n\
+               newmtl Missing\nKd 0.500000 0.500000 0.500000\nmap_Kd nowhere.png\n";
+    let obj = "mtllib quad.mtl\nv -1 -1 0\nv 1 -1 0\nv 1 1 0\nv -1 1 0\nvt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\n\
+               usemtl Mat\nf 1/1 2/2 3/3\nf 1/1 3/3 4/4\n";
+    // Like the media layer's resolver: a relative name joins the model's folder; an absolute
+    // path is only looked up where it points (here: nowhere else).
+    let resolve = |uri: &str| -> Option<Vec<u8>> {
+        let p = std::path::Path::new(uri);
+        if p.is_absolute() { return None; }
+        std::fs::read(d.join(p)).ok()
+    };
+    let resolver = |uri: &str| -> Option<Vec<u8>> {
+        if uri == "quad.mtl" { Some(mtl.as_bytes().to_vec()) } else { resolve(uri) }
+    };
+    let m = obj::parse(obj.as_bytes(), &resolver).unwrap();
+    assert_eq!(m.materials.len(), 3);
+    let mat = &m.materials[0];
+    let t = mat.base_color_tex.expect("the absolute map_Kd path finds checker.png next to the .obj");
+    let tex = &m.textures[t.texture];
+    assert_eq!((tex.width, tex.height), (2, 2));
+    assert_eq!(tex.data[0], [1.0, 0.0, 0.0, 1.0]);
+    assert!((mat.base_color[0] - obj::srgb_to_linear(0.64)).abs() < 1e-6, "Kd still tints the texture");
+    assert!(m.materials[1].base_color_tex.is_some(), "a texture name containing spaces is one name");
+    assert!(m.materials[2].base_color_tex.is_none(), "a genuinely missing texture keeps the Kd colour");
+    assert!((m.materials[2].base_color[0] - obj::srgb_to_linear(0.5)).abs() < 1e-6);
+    // The same fallback applies to the material library itself.
+    let here = obj.replace("mtllib quad.mtl", "mtllib C:\\build\\quad.mtl");
+    assert_eq!(obj::parse(here.as_bytes(), &resolver).unwrap().materials.len(), 3);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
 fn channel_interpolation_modes() {
     let mut c = Channel { node: 0, path: ChannelPath::Translation, interp: Interp::Step, times: vec![0.0, 1.0], values: vec![0.0, 0.0, 0.0, 10.0, 0.0, 0.0] };
     assert_eq!(c.sample(0.7).unwrap()[0], 0.0);
