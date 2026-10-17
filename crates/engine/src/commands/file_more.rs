@@ -383,32 +383,46 @@ fn collect_files(s: &mut Session, p: &Value) -> Result<Value> {
     let mut copied = 0;
     let mut errors = vec![];
     let mut used_names = BTreeSet::new();
-    for it in proj.items.values_mut() {
-        let ItemKind::Footage(f) = &mut it.kind else { continue };
-        if f.path.is_empty() {
-            continue;
-        }
-        let files: Vec<String> = if f.sequence.is_empty() { vec![f.path.clone()] } else { f.sequence.clone() };
-        let mut new_paths = vec![];
-        for src in &files {
-            let mut name = std::path::Path::new(src).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "footage".into());
-            let mut k = 2;
-            while !used_names.insert(name.clone()) {
-                name = format!("{k}_{name}");
-                k += 1;
+    let occupied = |path: &str| s.services.exists(path) || s.services.read_file(path).is_ok();
+    // Collect original footage first so attached proxies do not change its allocated filenames.
+    for collect_proxies in [false, true] {
+        for it in proj.items.values_mut() {
+            let f = if collect_proxies {
+                let Some(proxy) = it.proxy.as_mut() else { continue };
+                &mut proxy.footage
+            } else {
+                let ItemKind::Footage(f) = &mut it.kind else { continue };
+                f
+            };
+            if f.path.is_empty() {
+                continue;
             }
-            let dst = format!("{folder}/(Footage)/{name}");
-            match s.services.read_file(src).and_then(|bytes| s.services.write_file(&dst, &bytes)) {
-                Ok(()) => copied += 1,
-                Err(e) => errors.push(format!("{src}: {e}")),
+            let files: Vec<String> = if f.sequence.is_empty() { vec![f.path.clone()] } else { f.sequence.clone() };
+            let mut new_paths = vec![];
+            for src in &files {
+                let mut name = std::path::Path::new(src).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "footage".into());
+                let mut k = 2;
+                let dst = loop {
+                    let dst = format!("{folder}/(Footage)/{name}");
+                    // Skip existing destinations; the atomic writer creates its own exclusive temporary file.
+                    if used_names.insert(name.clone()) && !occupied(&dst) {
+                        break dst;
+                    }
+                    name = format!("{k}_{name}");
+                    k += 1;
+                };
+                match s.services.read_file(src).and_then(|bytes| s.services.write_file(&dst, &bytes)) {
+                    Ok(()) => copied += 1,
+                    Err(e) => errors.push(format!("{src}: {e}")),
+                }
+                new_paths.push(dst);
             }
-            new_paths.push(dst);
-        }
-        if f.sequence.is_empty() {
-            f.path = new_paths.remove(0);
-        } else {
-            f.path = new_paths.first().cloned().unwrap_or_default();
-            f.sequence = new_paths;
+            if f.sequence.is_empty() {
+                f.path = new_paths.remove(0);
+            } else {
+                f.path = new_paths.first().cloned().unwrap_or_default();
+                f.sequence = new_paths;
+            }
         }
     }
     let stem = s
