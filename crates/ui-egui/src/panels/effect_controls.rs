@@ -219,6 +219,8 @@ fn prop_row(
     actions: &mut Actions,
 ) -> Vec<Rect> {
     let t = app.tokens;
+    // The values themselves: red while an expression drives the parameter (#1306).
+    let vt = t.for_value(prop.has_expression());
     let mut dims = vec![];
     let cy = r.center().y;
     let uid = prop.uid;
@@ -312,7 +314,7 @@ fn prop_row(
             }
         }
         Value::Scalar(v) if matches!(prop.ui, ParamUi::Angle) => {
-            let (rr, dr, nv) = fw::angle_field(ui, pos2(vx, cy - 9.0), egui::Id::new(("ec-v", uid)), *v, 1, &t);
+            let (rr, dr, nv) = fw::angle_field(ui, pos2(vx, cy - 9.0), egui::Id::new(("ec-v", uid)), *v, 1, &vt);
             app.auto.add(&format!("effectControls.prop.{uid}.value"), rr.union(dr), &fw::format_angle(*v, 1));
             app.auto.add(&format!("effectControls.prop.{uid}.revolutions"), rr, &prop.name);
             if let Some(nv) = nv {
@@ -342,7 +344,7 @@ fn prop_row(
                 (min, max),
                 dec.max(if dec == 0 { 0 } else { 1 }),
                 suffix,
-                &t,
+                &vt,
             );
             app.auto.add(&format!("effectControls.prop.{uid}.value"), vr, &prop.name);
             if let Some(nv) = nv {
@@ -370,7 +372,7 @@ fn prop_row(
                 x += 22.0;
             }
             for d in 0..n.min(c.len()) {
-                let (vr, nv, _) = widgets::hot_number_at(ui, pos2(x, cy - 9.0), egui::Id::new(("ec-v", uid, d)), c[d], 1.0, (-1e9, 1e9), 1, "", &t);
+                let (vr, nv, _) = widgets::hot_number_at(ui, pos2(x, cy - 9.0), egui::Id::new(("ec-v", uid, d)), c[d], 1.0, (-1e9, 1e9), 1, "", &vt);
                 app.auto.add(&format!("effectControls.prop.{uid}.value.{d}"), vr, &prop.name);
                 dims.push(vr);
                 if let Some(nv) = nv {
