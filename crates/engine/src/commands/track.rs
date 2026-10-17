@@ -410,7 +410,11 @@ fn set_point(s: &mut Session, p: &V) -> Result<V> {
         set(tp, "featureCenter", center);
         for (k, m) in [("featureSize", "featureSize"), ("searchOffset", "searchOffset"), ("searchSize", "searchSize"), ("attachOffset", "attachPointOffset")] {
             if let Some(v) = vec2_p(p, k) {
-                let v = if k.ends_with("Size") { [v[0].max(4.0), v[1].max(4.0)] } else { v };
+                let v = match k {
+                    "featureSize" => v.map(|x| if x.is_nan() { 4.0 } else { x.clamp(4.0, effectcraft_track::MAX_FEATURE_SIZE) }),
+                    "searchSize" => v.map(|x| if x.is_nan() { 4.0 } else { x.clamp(4.0, effectcraft_track::MAX_SEARCH_SIZE) }),
+                    _ => v,
+                };
                 set(tp, m, v);
             }
         }

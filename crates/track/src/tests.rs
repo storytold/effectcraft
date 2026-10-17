@@ -258,3 +258,57 @@ fn featureless_regions_stay_put() {
         }
     }
 }
+
+#[test]
+fn huge_and_non_finite_region_sizes_are_bounded() {
+    // Sizes from a command or a loaded project are untrusted: they must not overflow the radius
+    // arithmetic or size the crop and the search by themselves (#1239).
+    let img = Image::filled(16, 16, [0.3, 0.3, 0.3, 1.0]);
+    let opts = TrackOptions::default();
+    let t0 = std::time::Instant::now();
+    for (feature, search) in [
+        ([1e12, 1e12], [f64::MAX, f64::INFINITY]),
+        ([f64::NAN, f64::INFINITY], [f64::NAN, -f64::INFINITY]),
+        ([4.0, 4.0], [1e15, 1e15]),
+        ([f64::MAX, 4.0], [4.0, f64::MAX]),
+    ] {
+        let s = PointSpec { center: [8.0, 8.0], feature_size: feature, search_offset: [0.0; 2], search_size: search };
+        let mut tr = Tracker::new(opts.clone(), &[s], &Frame::new(&img));
+        let r = tr.step(&Frame::new(&img))[0];
+        assert!(r.center.iter().all(|v| v.is_finite()), "{feature:?} {search:?}: {r:?}");
+    }
+    assert!(t0.elapsed() < std::time::Duration::from_secs(60), "{:?}", t0.elapsed());
+}
+
+#[test]
+fn point_specs_are_bounded_before_tracking() {
+    let b = PointSpec { center: [f64::NAN, 1e300], feature_size: [1e12, f64::NAN], search_offset: [0.0; 2], search_size: [f64::INFINITY, 2.0] }.bounded();
+    assert_eq!(b.center, [0.0, 1e9]);
+    assert_eq!(b.feature_size, [MAX_FEATURE_SIZE, 4.0]);
+    assert_eq!(b.search_size, [MAX_SEARCH_SIZE, 2.0]);
+}
+
+#[test]
+fn huge_and_non_finite_centres_do_not_overflow_the_crop() {
+    let img = Image::filled(16, 16, [0.3, 0.3, 0.3, 1.0]);
+    for (center, offset) in [([1e300, -1e300], [0.0; 2]), ([f64::NAN, f64::INFINITY], [f64::NEG_INFINITY, 1e300]), ([9.2e18, 9.2e18], [9.2e18, 0.0])] {
+        let s = PointSpec { center, feature_size: [8.0; 2], search_offset: offset, search_size: [24.0; 2] };
+        let mut tr = Tracker::new(TrackOptions::default(), &[s], &Frame::new(&img));
+        let mut f = Frame::new(&img);
+        f.offset = [1e300, f64::NAN];
+        tr.step(&f);
+        tr.step(&Frame::new(&img));
+    }
+}
+
+#[test]
+fn a_tiny_feature_in_the_largest_search_region_still_tracks() {
+    // The exhaustive coarse search keeps only its best candidates: the match must still be found.
+    let pose = |f: u32| Pose { c: [100.0 + 7.0 * f as f64, 90.0 - 3.0 * f as f64], rot: 0.0, scale: 1.0 };
+    let frames: Vec<Image> = (0..3).map(|f| frame(220, 180, pose(f), 18.0, 0.0, f, None)).collect();
+    let mut tr = Tracker::new(TrackOptions::default(), &[spec(pose(0).c, 9.0, 1e9)], &Frame::new(&frames[0]));
+    for (f, img) in frames.iter().enumerate().skip(1) {
+        let r = tr.step(&Frame::new(img))[0];
+        assert!(dist(r.center, pose(f as u32).c) < 0.5, "frame {f}: {:?}", r.center);
+    }
+}
