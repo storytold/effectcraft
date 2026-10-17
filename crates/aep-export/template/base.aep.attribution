@@ -1,0 +1,7 @@
+asset:        base.aep
+title:        After Effects project template for the exporter: one composition, one red solid layer
+author:       vangel76 (contributor)
+source:       original work
+license:      MIT OR Apache-2.0
+added:        2026-10-14 by vangel76
+notes:        The contributor's own generated base project (the fixture 000-base of effectcraft-aep, made with Adobe After Effects 2026 from scratch) without the XMP packet after the container; synthetic project structure only, no third-party footage, presets, templates or personal data. No Adobe sample project or asset was used.

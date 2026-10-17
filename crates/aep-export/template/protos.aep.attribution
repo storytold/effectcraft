@@ -1,0 +1,7 @@
+asset:        protos.aep
+title:        After Effects property and layer prototypes for the exporter
+author:       vangel76 (contributor)
+source:       original work
+license:      MIT OR Apache-2.0
+added:        2026-10-14 by vangel76
+notes:        Chunks (Transform property records with static values and with keys, a null layer and its hidden solid) extracted by crates/aep-export/examples/mkprotos from a project the contributor generated with Adobe After Effects 2026 (one composition, a solid layer with static Transform values, a solid layer with two keys on every Transform property, a null layer); synthetic structure only, no third-party content or personal data. No Adobe sample project or asset was used.

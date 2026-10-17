@@ -541,6 +541,7 @@ File
     EffectCraft Project... | file.importProject
     Placeholder... | file.importPlaceholder
     Solid... | file.importSolid
+    After Effects Project... | file.importAep
     Lottie... | file.importLottie
     Vanishing Point (.vpe)... | file.importVanishingPoint
     Essential Graphics Template... | essential.importTemplate
@@ -551,6 +552,7 @@ File
   Export
     Add to Render Queue | renderQueue.add
     Adobe Premiere Pro Project... | file.exportTimeline
+    After Effects Project... | file.exportAep
     Lottie JSON... | file.exportLottie
     Essential Graphics Template... | essential.exportTemplate
   ---
