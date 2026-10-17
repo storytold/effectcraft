@@ -54,6 +54,7 @@ pub mod roto;
 mod sim;
 mod sim2;
 mod sim3;
+pub mod stack;
 mod stylize2;
 mod stylize3;
 mod textfx;
@@ -286,11 +287,136 @@ impl Buf {
         self.offset[0] += origin[0] * self.scale;
         self.offset[1] += origin[1] * self.scale;
     }
+    /// Grow by `left` and `top` transparent pixels on those sides only.
+    pub fn grow_left_top(&mut self, left: u32, top: u32) {
+        if left == 0 && top == 0 {
+            return;
+        }
+        let src = std::mem::replace(&mut self.img, Image::new(0, 0));
+        let (w, h) = (src.width + left, src.height + top);
+        let mut out = Image::new(w, h);
+        let sw = src.width as usize;
+        for y in 0..src.height as usize {
+            let d = (y + top as usize) * w as usize + left as usize;
+            out.data[d..d + sw].copy_from_slice(&src.data[y * sw..(y + 1) * sw]);
+        }
+        self.img = out;
+        self.offset[0] += left as f64;
+        self.offset[1] += top as f64;
+    }
+    /// Give the buffer the pixel-grid phase (modulo [`GRID_ALIGN`]) that [`Buf::cover`] of
+    /// `size` would, by growing left/top only ([`align_plan`]). A downscaled layer is resampled
+    /// through a pyramid whose 2x2 blocks follow the buffer's grid, so a buffer that starts at
+    /// its content's corner instead of the cover's resamples to different pixels (#1205).
+    ///
+    /// Records how many rows the cover would have added on top beyond these
+    /// ([`stack::row_phase`]), so CPU blurs round as on the covered buffer.
+    pub fn align(&mut self, size: [f64; 2]) {
+        let (w0, h0) = (self.img.width as i64, self.img.height as i64);
+        let (dx, dy, cw, ch) = cover_plan(self.offset, self.scale, size, self.img.width, self.img.height)
+            .map_or((0, 0, w0, h0), |p| (p.0 as i64, p.1 as i64, p.2 as i64, p.3 as i64));
+        let (l, t) = match align_plan(self.offset, self.scale, size, self.img.width, self.img.height) {
+            Some((l, t)) => {
+                self.grow_left_top(l, t);
+                (l as i64, t as i64)
+            }
+            None => (0, 0),
+        };
+        stack::set_row_phase(dy - t);
+        stack::set_main_rect(Some([l - dx, t - dy, cw, ch]));
+    }
+    /// Grow by the given transparent pixels on each side (left, top, right, bottom).
+    pub fn grow_sides(&mut self, l: u32, t: u32, r: u32, b: u32) {
+        if l == 0 && t == 0 && r == 0 && b == 0 {
+            return;
+        }
+        let src = std::mem::replace(&mut self.img, Image::new(0, 0));
+        let (w, h) = (src.width + l + r, src.height + t + b);
+        let mut out = Image::new(w, h);
+        let sw = src.width as usize;
+        for y in 0..src.height as usize {
+            let d = (y + t as usize) * w as usize + l as usize;
+            out.data[d..d + sw].copy_from_slice(&src.data[y * sw..(y + 1) * sw]);
+        }
+        self.img = out;
+        self.offset[0] += l as f64;
+        self.offset[1] += t as f64;
+    }
+    /// Repeat Edge Pixels on an aligned buffer, cheap case: when every pixel of the covered
+    /// buffer ([`stack::main_rect`]) within `spread` (the blur's whole reach, all passes) of its
+    /// edges is transparent, its edge pixels stay transparent through every pass, so repeating
+    /// them equals extending with transparent pixels. The blur then runs without Repeat Edge on
+    /// this buffer grown by only `spread`, clamped to the covered buffer: same sums, same pixels.
+    /// The covered buffer holds nothing outside this one. A transparent edge alone is not enough:
+    /// after the first pass the edge holds blurred content, which later passes repeat. False (use
+    /// [`Buf::grow_to_main`]) when content is that close to the edge, nothing is tracked, or a
+    /// later effect follows in the stack ([`stack::followed`]): the cropped buffer drops the
+    /// covered buffer's rounding residue, which a later blur or displacement would read.
+    ///
+    /// Running sums leave rounding residue to the right of and below the content all the way to
+    /// the covered buffer's edge, and each pass reads `r + 1` ahead into it, so the right and
+    /// bottom sides get a second `spread` of margin; the returned `(right, bottom)` extra is
+    /// cropped off after the blur ([`Buf::crop_far`]), keeping every pixel within `spread` exact.
+    pub fn repeat_as_transparent(&mut self, spread: u32) -> Option<(u32, u32)> {
+        if stack::followed() {
+            return None;
+        }
+        let [x, y, w, h] = stack::main_rect()?;
+        let (bw, bh) = (self.img.width as i64, self.img.height as i64);
+        if bw == 0 || bh == 0 || x > 0 || y > 0 || x + w < bw || y + h < bh {
+            return None;
+        }
+        let s = spread as i64;
+        let iw = bw as usize;
+        let d = &self.img.data;
+        let clear = |p: &[f32; 4]| p.iter().all(|v| *v == 0.0);
+        // Bands of this buffer within `spread` of each covered-buffer edge must be transparent.
+        let (xl, xr) = ((x + s).clamp(0, bw) as usize, (x + w - s).clamp(0, bw) as usize);
+        let (yt, yb) = ((y + s).clamp(0, bh) as usize, (y + h - s).clamp(0, bh) as usize);
+        let rows_clear = |r0: usize, r1: usize| d[r0 * iw..r1 * iw].iter().all(clear);
+        let cols_clear = |c0: usize, c1: usize| c0 >= c1 || (0..bh as usize).all(|r| d[r * iw + c0..r * iw + c1].iter().all(clear));
+        if !rows_clear(0, yt) || !rows_clear(yb.max(yt), bh as usize) || !cols_clear(0, xl) || !cols_clear(xr.max(xl), iw) {
+            return None;
+        }
+        let s = spread as i64;
+        let (l, t) = (s.min(-x), s.min(-y));
+        let (r, b) = ((2 * s).min(x + w - bw), (2 * s).min(y + h - bh));
+        self.grow_sides(l as u32, t as u32, r as u32, b as u32);
+        stack::shift_row_phase(t);
+        stack::set_main_rect(Some([x + l, y + t, w, h]));
+        Some(((r - s.min(r)) as u32, (b - s.min(b)) as u32))
+    }
+    /// Drop `right` columns and `bottom` rows (the read-ahead margin of
+    /// [`Buf::repeat_as_transparent`]).
+    pub fn crop_far(&mut self, (right, bottom): (u32, u32)) {
+        if right == 0 && bottom == 0 {
+            return;
+        }
+        let (w, h) = (self.img.width as usize, self.img.height as usize);
+        let (nw, nh) = (w - right as usize, h - bottom as usize);
+        let mut out = Image::new(nw as u32, nh as u32);
+        for (y, row) in out.data.chunks_mut(nw.max(1)).enumerate().take(nh) {
+            row.copy_from_slice(&self.img.data[y * w..y * w + nw]);
+        }
+        self.img = out;
+    }
+    /// Repeat Edge Pixels on an aligned buffer: grow to the covered buffer ([`stack::main_rect`])
+    /// so the repeated edge pixels are the same; false when it is not tracked.
+    pub fn grow_to_main(&mut self) -> bool {
+        let Some([x, y, w, h]) = stack::main_rect() else { return false };
+        let (bw, bh) = (self.img.width as i64, self.img.height as i64);
+        let (l, t, r, b) = ((-x).max(0), (-y).max(0), (x + w - bw).max(0), (y + h - bh).max(0));
+        self.grow_sides(l as u32, t as u32, r as u32, b as u32);
+        stack::set_row_phase(0);
+        stack::set_main_rect(Some([0, 0, self.img.width as i64, self.img.height as i64]));
+        true
+    }
     /// Grow by `pad` transparent pixels on every side.
     pub fn pad(&mut self, pad: u32) {
         if pad == 0 {
             return;
         }
+        stack::main_rect_padded(pad);
         self.img = self.img.padded(pad);
         self.offset[0] += pad as f64;
         self.offset[1] += pad as f64;
@@ -301,6 +427,33 @@ impl Buf {
 /// `width` × `height` so it spans the `size`-layer-pixel region that starts at its offset — the
 /// whole layer rectangle, which a sized source's buffer already is. `None` when the buffer
 /// already covers that region unchanged (footage, solids, the comp below an adjustment).
+/// Effects that grow their own buffer by what they need (blur and glow margins, Repeat Edge
+/// Pixels through [`Buf::cover`], displacement through [`cover_pad`]): a stack of only these
+/// skips the renderer's cover of the whole layer rectangle (#1205).
+pub const SKIPS_COVER: &[&str] = &["ec.blur.gaussian", "ec.blur.fastbox", "ec.stylize.glow", "ec.distort.turbulentdisplace"];
+
+/// The grid phase [`Buf::align`] keeps and the step [`cover_pad`] grows in: covers the levels
+/// of the resampling pyramid used for downscaled layers.
+pub const GRID_ALIGN: u32 = 64;
+
+/// Left/top growth giving a buffer [`cover_plan`]'s grid phase modulo [`GRID_ALIGN`]; `None`
+/// when there is nothing to add.
+pub fn align_plan(offset: [f64; 2], scale: f64, size: [f64; 2], width: u32, height: u32) -> Option<(u32, u32)> {
+    let (dx, dy, _, _) = cover_plan(offset, scale, size, width, height)?;
+    let (l, t) = (dx % GRID_ALIGN, dy % GRID_ALIGN);
+    (l != 0 || t != 0).then_some((l, t))
+}
+
+/// Padding for an effect that moves pixels up to `want` past the content (not an adjustment
+/// layer): `want`, capped at what reaches the layer rectangle, in whole [`GRID_ALIGN`] steps so
+/// the grid phase stays. 0 once the buffer covers the layer.
+pub fn cover_pad(ctx: &EffectCtx, size: [u32; 2], offset: [f64; 2], scale: f64, want: u32) -> u32 {
+    if ctx.adjustment {
+        return 0;
+    }
+    want.min(util::layer_cover_pad(ctx, size, offset, scale)).div_ceil(GRID_ALIGN) * GRID_ALIGN
+}
+
 pub fn cover_plan(offset: [f64; 2], scale: f64, size: [f64; 2], width: u32, height: u32) -> Option<(u32, u32, u32, u32)> {
     if scale <= 0.0 || !scale.is_finite() || !offset[0].is_finite() || !offset[1].is_finite() || !size[0].is_finite() || !size[1].is_finite() {
         return None;
@@ -459,6 +612,15 @@ pub struct EffectSpec {
     pub gpu: bool,
     /// Supports 32 bpc float (badge).
     pub float: bool,
+}
+
+impl EffectSpec {
+    /// True when this effect grows its own buffer (blur/glow margins, Repeat Edge
+    /// [`Buf::cover`], displacement [`cover_pad`]) so a stack of only these can skip the
+    /// renderer's full-layer cover and keep the pyramid grid phase (#1205).
+    pub fn skips_cover(&self) -> bool {
+        SKIPS_COVER.contains(&self.id)
+    }
 }
 
 pub(crate) fn p(id: &'static str, name: &'static str, default: Value, ui: ParamUi) -> ParamSpec {
@@ -1450,5 +1612,25 @@ mod tests {
         let g = instantiate(find("ec.noise.matchgrain").unwrap(), &mut Ids(&mut next), "Match Grain", [10.0, 10.0]);
         assert_eq!(g.get("noiseSourceLayerSource").map(|p| p.value.clone()), Some(Value::Enum(0)));
         assert_eq!(g.props().filter(|p| p.match_id == "noiseSourceLayerSource").count(), 1);
+    }
+
+    #[test]
+    fn align_plan_is_cover_shift_mod_grid() {
+        // Content inset from the layer origin: pixel 0 maps to layer (50, 30).
+        let offset = [-50.0, -30.0];
+        let scale = 1.0;
+        let size = [1920.0, 1080.0];
+        let (dx, dy, _, _) = cover_plan(offset, scale, size, 80, 40).unwrap();
+        assert_eq!((dx, dy), (50, 30));
+        assert_eq!(align_plan(offset, scale, size, 80, 40), Some((50, 30)));
+        assert_eq!(align_plan([-64.0, -128.0], 1.0, size, 80, 40), None);
+    }
+
+    #[test]
+    fn known_margin_effects_skip_cover_and_twirl_does_not() {
+        for id in SKIPS_COVER {
+            assert!(find(id).expect(id).skips_cover(), "{id}");
+        }
+        assert!(!find("ec.distort.twirl").unwrap().skips_cover());
     }
 }
