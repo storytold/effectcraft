@@ -1,0 +1,22 @@
+[package]
+name = "effectcraft-aep-import"
+description = "After Effects project (.aep) importer: maps the typed view of effectcraft-aep (items, compositions, layers, transform properties, keyframes, expressions) into an EffectCraft project and reports everything it does not import"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+effectcraft-aep = { workspace = true }
+effectcraft-time = { workspace = true }
+effectcraft-color = { workspace = true }
+effectcraft-keyframe = { workspace = true }
+effectcraft-project = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

@@ -22,7 +22,7 @@ trips and renders, checked by tests, not against After Effects), **partial** (na
 
 | Format | After Effects | EffectCraft read | Write | Fidelity / notes | Tested by |
 |---|---|---|---|---|---|
-| Project `.aep` | R/W (native) | none | none | Main file format; needs an owner decision on clean-room scope (#190; #248, closed as its duplicate: py-aep as an external converter; open PRs #251 and #860). Blocks beta | — |
+| Project `.aep` | R/W (native) | container only | container only | Main file format; project import still needs an owner decision on clean-room scope (#190; #248, closed as its duplicate: py-aep as an external converter; open PRs #251 and #860). `crates/aep` reads and writes the RIFX container losslessly (byte-identical round trip) with a small typed view (items, comps, layers, properties, keyframes), from our own generated files only ([aep-format.md](aep-format.md)). A first narrow import exists, File ▸ Import ▸ After Effects Project… (`file.importAep`, `crates/aep-import`): folders, compositions, solid/null/adjustment/footage/precomp layers, Transform values and keyframes, expressions as text; everything else (effects, masks, text, shapes, cameras, lights, markers…) is refused or reported ([aep-import.md](aep-import.md)). Real-project fidelity is not measured yet. Blocks beta | `crates/aep` and `crates/aep-import` tests |
 | XML project `.aepx` | R/W | none | none | Same decision as `.aep` | — |
 | Templates `.aet` / `.aetx` | R/W | none | none | Own `.ectemplate` (Home ▸ Templates, Save as Template) | `templates.rs` tests |
 | Motion Graphics template `.mogrt` | W (and R in Premiere) | none | none | Own `.ectemplate` Essential Graphics templates; FilmCraft rejects our `.fcgt` export (#611) | `essential.rs` tests |

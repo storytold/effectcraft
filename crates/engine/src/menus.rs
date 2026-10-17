@@ -541,6 +541,7 @@ File
     EffectCraft Project... | file.importProject
     Placeholder... | file.importPlaceholder
     Solid... | file.importSolid
+    After Effects Project... | file.importAep
     Lottie... | file.importLottie
     Vanishing Point (.vpe)... | file.importVanishingPoint
     Essential Graphics Template... | essential.importTemplate
