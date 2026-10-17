@@ -377,6 +377,11 @@ fn prop_row(
                     let mut nc = c.clone();
                     nc[d] = nv;
                     set(actions, json!(nc));
+                    // Typed into this component only: other selected layers keep the rest of
+                    // their own value (#1434).
+                    if let Some((_, a)) = actions.last_mut() {
+                        a["dims"] = json!([d]);
+                    }
                 }
                 x = vr.max.x + 8.0;
             }

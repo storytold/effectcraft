@@ -4117,6 +4117,11 @@ fn value_editor(
                         }
                     }
                     set(actions, json!(nc));
+                    // Typed into these components only: other selected layers keep the rest of
+                    // their own value (#1434).
+                    if let Some((_, a)) = actions.last_mut() {
+                        a["dims"] = json!((from..from + shown).collect::<Vec<_>>());
+                    }
                 }
                 x = r.max.x + if d + 1 < n { 2.0 } else { 0.0 };
                 if d + 1 < n {

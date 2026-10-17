@@ -317,6 +317,11 @@ fn transform_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter,
                         }
                     }
                     set(actions, json!(nc));
+                    // Typed into these components only: other selected layers keep the rest of
+                    // their own value (#1434).
+                    if let Some((_, a)) = actions.last_mut() {
+                        a["dims"] = json!((from..from + shown).collect::<Vec<_>>());
+                    }
                 }
                 x = vr.max.x + 10.0;
             }

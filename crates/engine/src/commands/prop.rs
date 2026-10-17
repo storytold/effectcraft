@@ -241,7 +241,9 @@ pub(crate) fn proportional_share(index: usize, count: usize) -> f64 {
 }
 
 /// `prop.set`; with `selected`, also on the other selected layers: the same value, or with
-/// `offset` (a scrub) the same change from each layer's own value. With `offset` and
+/// `offset` (a scrub) the same change from each layer's own value. A typed value with `dims`
+/// (the components edited, e.g. `[2]` for Z) sets only those components on the other layers,
+/// which keep the rest of their own value (#1434). With `offset` and
 /// `proportional` (Proportional Scrubbing) each layer takes [`proportional_share`] of the change
 /// by its place in the selection order, the scrubbed layer too. One undo step (with `merge`,
 /// one that a continuing scrub keeps folding into).
@@ -261,6 +263,23 @@ fn set_selected(s: &mut Session, p: &Value) -> Result<Value> {
         .then(|| s.state.selected_layers.iter().copied().filter(|o| *o == lid || twins.iter().any(|(t, _)| t == o)).collect());
     let share = |l: LayerId| order.as_ref().map_or(1.0, |o| o.iter().position(|x| *x == l).map_or(1.0, |i| proportional_share(i, o.len())));
     let scalar = p.get("value").is_some_and(Value::is_number);
+    // Typed into some components only: the others stay each layer's own.
+    let dims: Option<Vec<usize>> = match (&delta, p.get("dims").and_then(Value::as_array), &new) {
+        (None, Some(a), Some(_)) if !scalar => Some(a.iter().filter_map(Value::as_u64).filter_map(|d| usize::try_from(d).ok()).collect()),
+        _ => None,
+    };
+    let typed = |s: &Session, q: &mut Value, olid: LayerId, ouid: Uid| {
+        if let (Some(dims), Some(n)) = (&dims, &new)
+            && let Some(mut c) = current_components(s, cid, olid, ouid)
+        {
+            for &d in dims {
+                if let (Some(slot), Some(v)) = (c.get_mut(d), n.get(d)) {
+                    *slot = *v;
+                }
+            }
+            q["value"] = json!(c);
+        }
+    };
     // `p` aimed at (layer, prop) with its value moved by `k` × the change.
     let shifted = |s: &Session, q: &mut Value, olid: LayerId, ouid: Uid, k: f64| {
         if let Some(d) = &delta
@@ -291,6 +310,7 @@ fn set_selected(s: &mut Session, p: &Value) -> Result<Value> {
             }
             let mut q = twin_params(p, olid, ouid);
             shifted(s, &mut q, olid, ouid, k);
+            typed(s, &mut q, olid, ouid);
             // (a layer that can't take it, e.g. a clamped or static property, keeps its value)
             let _ = set(s, &q);
         }
@@ -1229,7 +1249,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Set Property Value",
             [],
             None,
-            "{layer?, path|prop, value, time? (layer s by default), timeBase?: layer|comp, merge?, selected? (also the other selected layers), offset? (them by the same change), proportional? (with offset: Proportional Scrubbing, each layer by its share in selection order, the first none, the last all)}",
+            "{layer?, path|prop, value, time? (layer s by default), timeBase?: layer|comp, merge?, selected? (also the other selected layers), offset? (them by the same change), proportional? (with offset: Proportional Scrubbing, each layer by its share in selection order, the first none, the last all), dims? (with selected, a typed value: the components edited, e.g. [2] for Z; the other layers keep the rest of their own value)}",
             has_layers,
             set_selected
         ),
