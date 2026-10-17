@@ -156,6 +156,18 @@ fn gpu_matches_cpu_unlit_and_full_frames() {
 }
 
 #[test]
+fn gpu_matches_cpu_shadow_catcher() {
+    // #1691: the floor plane as a shadow catcher ("Accepts Shadows: Only").
+    let Some(g) = gpu() else { return };
+    let (mut p, cid) = scene_project();
+    let floor = p.comp_mut(cid).unwrap().layers.last_mut().unwrap();
+    set(floor, "materialOptions/acceptsShadows", Value::Enum(2));
+    let s = scene(&p, cid);
+    assert!(s.materials.iter().any(|m| m.shadows_only) && !s.shadows.is_empty());
+    compare(&s, &g);
+}
+
+#[test]
 fn gpu_raster_perf_smoke() {
     let Some(g) = gpu() else { return };
     let (p, cid) = scene_project();
