@@ -815,7 +815,7 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("layer.quality", "Quality", [], None, "{layers?, quality: best|draft|wireframe}", has_layers, quality),
         cmd!("layer.sampling", "Sampling", [], None, "{layers?, sampling: bilinear|bicubic, toggle?}", has_layers, sampling),
         cmd!("layer.frameBlending", "Frame Blending", [], None, "{layers?, mode: off|frameMix|pixelMotion}", has_layers, frame_blending),
-        cmd!("layer.hideOtherVideo", "Hide Other Video", ["Layer", "Switches"], Some("Cmd+Alt+Shift+V"), "{layers?}", has_layers, hide_other_video),
+        cmd!("layer.hideOtherVideo", "Hide Other Video", ["Layer", "Switches"], None, "{layers?}", has_layers, hide_other_video),
         cmd!("layer.showAllVideo", "Show All Video", ["Layer", "Switches"], None, "{comp?}", has_comp, show_all_video),
         cmd!("layer.unlockAll", "Unlock All Layers", ["Layer", "Switches"], Some("Cmd+Shift+L"), "{comp?}", has_comp, unlock_all),
         cmd!("layer.expressions", "Enable/Disable Expressions", [], None, "{layers?, enabled: bool}", has_layers, expressions),
