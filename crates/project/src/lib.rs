@@ -1476,7 +1476,8 @@ impl Project {
     pub fn fix_next_id(&mut self) {
         let mut m = self.next_id;
         for (id, it) in &self.items {
-            // Saturating: a damaged file's ids must not overflow (the import then refuses it).
+            // Saturating: a damaged file's ids must not overflow (loading then refuses it,
+            // see `limits::MAX_NEXT_ID`).
             m = m.max(id.0.saturating_add(1));
             if let ItemKind::Comp(c) = &it.kind {
                 for l in &c.layers {
@@ -1548,6 +1549,13 @@ impl Project {
             return Err(ProjectError::Invalid(format!("project schema {} is newer than this version supports ({SCHEMA_VERSION})", p.schema)));
         }
         p.fix_next_id();
+        if p.next_id > limits::MAX_NEXT_ID {
+            return Err(ProjectError::Invalid(format!(
+                "project ids reach {}, past the largest this version can allocate safely ({})",
+                p.next_id,
+                limits::MAX_NEXT_ID
+            )));
+        }
         let mut notes = vec![];
         for item in p.items.values_mut() {
             limits::repair_item(item, &mut notes);
