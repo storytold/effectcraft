@@ -410,12 +410,12 @@ fn parenting_static_orientation_is_exact_just_off_gimbal_lock() {
 fn parenting_animated_orientation_and_nonuniform_parent_keep_authored_pose_boundary() {
     for animated in [true, false] {
         let (mut s, p, c) = fixture(true, true);
+        // A non-uniform parent has no uniform pose to re-express, animated or not.
+        set(&mut s, p, "transform/scale", json!([120.0, 100.0, 80.0]));
         if animated {
             for (time, value) in [(0.0, json!([-8.0, 12.0, -13.0])), (1.0, json!([5.0, 18.0, 14.0]))] {
                 command(&mut s, "prop.addKey", json!({"layer":c,"path":"transform/orientation","time":time,"value":value}));
             }
-        } else {
-            set(&mut s, p, "transform/scale", json!([120.0, 100.0, 80.0]));
         }
         let layer = s.active_comp().unwrap().layer(LayerId(c)).unwrap();
         let orientation = layer.props.prop("transform/orientation").unwrap().clone();
@@ -427,6 +427,27 @@ fn parenting_animated_orientation_and_nonuniform_parent_keep_authored_pose_bound
         assert_eq!(layer.props.prop("transform/scale").unwrap(), &scale, "unsupported animated Euler/shear receives no blind Scale rewrite");
         assert!(anchor_motion(before, world(&s, c, Tick::ZERO)) < 1e-8, "boundary retains already-proved Position behavior");
         assert!(cpu(&s, Tick::ZERO).data.iter().flatten().all(|v| v.is_finite()));
+    }
+}
+
+/// Keyed Orientation under a uniform parent is re-expressed at every key, so the child's world pose
+/// and pixels stay put at every time (the parent is Z-only, so the paths between keys stay exact too).
+#[test]
+fn parenting_uniform_parent_re_expresses_keyed_orientation() {
+    for factor in [120.0, -120.0] {
+        let (mut s, p, c) = fixture(true, false);
+        set(&mut s, p, "transform/rotation", json!(42.0));
+        set(&mut s, p, "transform/scale", json!([factor, factor, factor]));
+        for (time, value) in [(0.0, json!([-8.0, 12.0, -13.0])), (1.0, json!([5.0, 18.0, 14.0]))] {
+            command(&mut s, "prop.addKey", json!({"layer":c,"path":"transform/orientation","time":time,"value":value}));
+        }
+        let times = [0.0, 0.25, 0.5, 0.75, 1.0].map(Tick::from_seconds_f64);
+        let before = times.map(|t| world(&s, c, t));
+        let images = times.map(|t| cpu(&s, t));
+        parent(&mut s, c, Some(p), true);
+        let error = times.into_iter().zip(before).map(|(t, b)| displacement(b, world(&s, c, t))).fold(0.0, f64::max);
+        let pixels = times.into_iter().zip(&images).map(|(t, i)| diff(i, &cpu(&s, t))).fold(0.0, f32::max);
+        assert!(error < 1e-8 && pixels < 2e-5, "keyed Orientation under a uniform parent (factor {factor}): corners {error}, pixels {pixels}");
     }
 }
 
