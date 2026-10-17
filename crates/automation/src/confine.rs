@@ -64,7 +64,25 @@ const READS: &[(&str, &[&str])] = &[
     ("effect.plugins.load", &["path", "folder"]),
     ("mediaBrowser.go", &["path"]),
     ("mediaBrowser.addFavorite", &["path"]),
+    // #1243: these read the files they are given but were missing, so a relative path went
+    // unchecked.
+    ("essential.templateInfo", &["path"]),
+    ("file.importProject", &["path"]),
+    ("file.watchFolder.poll", &["folder"]),
+    ("footage.relink", &["path"]),
+    ("layer.newModel", &["path"]),
+    ("mediaBrowser.fileInfo", &["path"]),
+    ("mediaBrowser.list", &["path"]),
+    ("mediaBrowser.import", &["paths"]),
+    ("mediaBrowser.removeFavorite", &["path"]),
+    ("face.model.install", &["path"]),
+    ("roto.model.install", &["path"]),
+    // Reads the template at `path`; what it writes is in `MIXED_WRITES`.
+    ("templates.create", &["path"]),
 ];
+
+/// Commands that read some parameters (listed in [`READS`]) and write others.
+const MIXED_WRITES: &[(&str, &[&str])] = &[("templates.create", &["projectPath", "footageDir"])];
 
 /// Commands that write files named by these parameters.
 const WRITES: &[(&str, &[&str])] = &[
@@ -84,6 +102,9 @@ const WRITES: &[(&str, &[&str])] = &[
     ("essential.exportTemplate", &["path"]),
     ("shortcuts.export", &["path"]),
     ("renderQueue.add", &["output", "path"]),
+    ("file.exportTimeline", &["path"]),
+    // `path` / `output` may also be a file-name template, as for render.preRender.
+    ("file.createProxy", &["path", "output"]),
 ];
 
 /// Commands that write where they are not told: the project's file, the Render Queue's outputs.
@@ -143,8 +164,9 @@ impl Confinement {
                 let Some(inner) = step.get("command").or_else(|| step.get("id")).and_then(Value::as_str) else { continue };
                 let inner_params = step.get("params").cloned().unwrap_or(Value::Null);
                 let named = keys_of(READS, inner).or_else(|| keys_of(WRITES, inner)).unwrap_or(&[]);
+                let mixed = keys_of(MIXED_WRITES, inner).unwrap_or(&[]);
                 // A step's `$N` reference is resolved only as the batch runs: never for a file.
-                if named.iter().filter_map(|k| inner_params.get(*k)).any(has_reference) {
+                if named.iter().chain(mixed).filter_map(|k| inner_params.get(*k)).any(has_reference) {
                     return Err(Error::BadArgs(format!("`{inner}` in a batch: file paths can't be `$N` references while file access is confined")));
                 }
                 if self.check_command(inner, &inner_params)?.is_some() {
@@ -170,7 +192,7 @@ impl Confinement {
             for p in paths {
                 // A Render Queue output may name a template instead of a file.
                 match p.as_str() {
-                    Some(s) if id == "render.preRender" && !looks_like_path(s) => {}
+                    Some(s) if matches!(id, "render.preRender" | "file.createProxy") && !looks_like_path(s) => {}
                     Some(s) => {
                         self.check(s, access)?;
                     }
@@ -178,9 +200,18 @@ impl Confinement {
                 }
             }
         }
+        // Parameters of a reading command that it writes to.
+        let mixed = keys_of(MIXED_WRITES, id).unwrap_or(&[]);
+        for key in mixed {
+            if let Some(p) = params.get(*key).filter(|v| !v.is_null()) {
+                let p = p.as_str().ok_or_else(|| Error::BadArgs(format!("`{id}`: `{key}` must be a path")))?;
+                self.check(p, Access::Write)?;
+            }
+        }
         // Any other absolute path the command is given.
+        let named: Vec<&str> = named.iter().chain(mixed).copied().collect();
         let mut other = vec![];
-        absolute_strings(params, named, &mut other);
+        absolute_strings(params, &named, &mut other);
         for s in other {
             self.check(&s, access)?;
         }
@@ -272,5 +303,116 @@ fn resolve(p: &Path) -> Option<PathBuf> {
         }
         rest.push(at.file_name()?.to_os_string());
         at = at.parent()?;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Commands whose parameters are named like files but aren't: property paths
+    /// (`path|prop`), project folders, layers to track or target.
+    const NOT_FILES: &[&str] = &[
+        "camera.createFromSolve",
+        "edit.label",
+        "edit.pasteReversedKeyframes",
+        "effect.editDropdown",
+        "essential.addProperty",
+        "essential.canAdd",
+        "essential.linkProperty",
+        "essential.unlinkProperty",
+        "keys.paste",
+        "keys.set",
+        "keys.setEase",
+        "keys.setSpatialTangents",
+        "paths.nullsFollowPoints",
+        "paths.pointsFollowNulls",
+        "paths.tracePath",
+        "project.move",
+        "prop.addKey",
+        "prop.convertExpressionToKeyframes",
+        "prop.deselect",
+        "prop.editGradient",
+        "prop.get",
+        "prop.pickWhip",
+        "prop.reset",
+        "prop.select",
+        "prop.set",
+        "prop.setExpression",
+        "prop.toggleAnimation",
+        "prop.toggleKey",
+        "track.new",
+        "track.property",
+        "track.setTarget",
+    ];
+
+    /// Every engine command with a parameter named like a file is classified, so a new one
+    /// can't silently skip confinement (#1243): it reads or writes the files it is given, is
+    /// refused, writes where it isn't told (checked by a lookup), sets Render Queue outputs
+    /// (checked when the queue renders), or is listed in `NOT_FILES`.
+    #[test]
+    fn every_command_with_file_parameters_is_classified() {
+        const FILE_KEYS: &[&str] =
+            &["path", "paths", "folder", "file", "files", "dir", "directory", "output", "outputs", "source", "target", "projectPath", "footageDir"];
+        let mut missing = vec![];
+        for spec in effectcraft_engine::command_specs() {
+            let Some(params) = effectcraft_engine::commands::accepted_params(spec.params) else { continue };
+            let id = spec.id;
+            let classified = keys_of(READS, id).is_some()
+                || keys_of(WRITES, id).is_some()
+                || REFUSED.contains(&id)
+                || IMPLICIT_WRITES.contains(&id)
+                || id.starts_with("renderQueue.")
+                || id == "render.addOutputModule"
+                || NOT_FILES.contains(&id);
+            if params.iter().any(|p| FILE_KEYS.contains(&p.as_str())) && !classified {
+                missing.push(format!("{id} {}", spec.params));
+            }
+        }
+        assert!(missing.is_empty(), "add these to READS / WRITES / REFUSED or NOT_FILES:\n{}", missing.join("\n"));
+        // And every listed command exists.
+        for id in READS.iter().chain(WRITES).chain(MIXED_WRITES).map(|(c, _)| *c).chain(NOT_FILES.iter().copied()) {
+            assert!(effectcraft_engine::command_specs().iter().any(|s| s.id == id), "{id} is not a command");
+        }
+    }
+
+    #[test]
+    fn relative_and_outside_paths_of_newly_listed_commands_are_refused() {
+        let base = std::env::temp_dir().join(format!("ec-confine-1243-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (read, write, outside) = (base.join("in"), base.join("out"), base.join("elsewhere"));
+        for d in [&read, &write, &outside] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let c = Confinement::new(std::slice::from_ref(&read), std::slice::from_ref(&write)).unwrap();
+        let p = |d: &std::path::Path, f: &str| d.join(f).to_string_lossy().into_owned();
+        let up = format!("{}/../elsewhere/t.ectemplate", read.display());
+        for (id, key) in [
+            ("essential.templateInfo", "path"),
+            ("file.importProject", "path"),
+            ("footage.relink", "path"),
+            ("layer.newModel", "path"),
+            ("mediaBrowser.fileInfo", "path"),
+            ("mediaBrowser.list", "path"),
+            ("face.model.install", "path"),
+            ("templates.create", "path"),
+        ] {
+            for bad in ["t.ectemplate".to_string(), "../elsewhere/t.ectemplate".to_string(), up.clone(), p(&outside, "t.ectemplate")] {
+                assert!(c.check_command(id, &serde_json::json!({key: bad})).is_err(), "{id} {key}={bad}");
+            }
+            assert!(c.check_command(id, &serde_json::json!({key: p(&read, "t.ectemplate")})).is_ok(), "{id} in a read root");
+        }
+        // Batched too.
+        let steps = serde_json::json!({"steps": [{"command": "essential.templateInfo", "params": {"path": "t.ectemplate"}}]});
+        assert!(c.check_command("engine.batch", &steps).is_err());
+        // Writes: into a write root only.
+        assert!(c.check_command("file.exportTimeline", &serde_json::json!({"path": p(&read, "cut.xml")})).is_err());
+        assert!(c.check_command("file.exportTimeline", &serde_json::json!({"path": p(&write, "cut.xml")})).is_ok());
+        let create = |project: String| serde_json::json!({"path": p(&read, "t.ectemplate"), "projectPath": project});
+        assert!(c.check_command("templates.create", &create(p(&read, "new.ecproj"))).is_err(), "templates.create writes projectPath");
+        assert!(c.check_command("templates.create", &create(p(&write, "new.ecproj"))).is_ok());
+        assert!(c.check_command("file.createProxy", &serde_json::json!({"output": "[compName]_proxy"})).is_ok(), "a template name");
+        assert!(c.check_command("file.createProxy", &serde_json::json!({"output": p(&outside, "proxy.mov")})).is_err());
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
