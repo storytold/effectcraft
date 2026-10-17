@@ -226,6 +226,10 @@ page!(Import {
     unlabeled_alpha: String = "ask".into(),
     /// Default drag import as: `footage`, `comp`, `compLayerSizes`.
     drag_import_as: String = "footage".into(),
+    /// Enable Hardware Accelerated Decoding: H.264 / HEVC footage decodes on the GPU's video
+    /// decoder where the desktop app found one (VideoToolbox, Media Foundation, NVDEC, VA-API);
+    /// everything else, and everything while off, decodes in software.
+    hardware_decoding: bool = true,
 });
 
 page!(Export {
@@ -1307,6 +1311,8 @@ pub fn pages() -> Vec<Page> {
                     Kind::Choice(&[("Footage", "footage"), ("Composition", "comp"), ("Composition - Retain Layer Sizes", "compLayerSizes")]),
                     true,
                 ),
+                Section("Video Footage"),
+                s("import.hardwareDecoding", "Enable Hardware Accelerated Decoding", B, true),
             ],
         },
         Page {

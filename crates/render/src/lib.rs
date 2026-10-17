@@ -111,6 +111,16 @@ pub trait FootageSource: Send + Sync {
     fn vector_frame(&self, _item: ItemId, _footage: &Footage, _scale: f64) -> Option<Arc<Image>> {
         None
     }
+    /// Settings ▸ Import ▸ Enable Hardware Accelerated Decoding: whether video decoders opened from
+    /// now on may be the operating system's hardware decoders (when the app registered any). A
+    /// change closes the open decoders, so the next reads use it; decoded frames stay valid.
+    /// Sources without video decoders ignore it.
+    fn set_hardware_decoding(&self, _on: bool) {}
+    /// Hardware video decoding as this source uses it (GPU Information, System Compatibility
+    /// Report); `None` for sources without video decoders.
+    fn hardware_decoding(&self) -> Option<HardwareDecoding> {
+        None
+    }
     /// Run `f`, which reads frames from this source, as work that can be called off: once
     /// `cancel` is set, long decodes it starts (a movie seeking back to a keyframe and decoding
     /// forward) stop early and their frames come back `None`. Sources that can't stop a decode
@@ -129,6 +139,44 @@ pub trait FootageSource: Send + Sync {
     /// decodes, and for sources that don't track failures. Stays set until the file is forgotten.
     fn problem(&self, _footage: &Footage) -> Option<String> {
         None
+    }
+}
+
+/// Hardware video decoding in this process ([`FootageSource::hardware_decoding`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct HardwareDecoding {
+    /// Settings ▸ Import ▸ Enable Hardware Accelerated Decoding.
+    pub enabled: bool,
+    /// The operating system decoder the app registered ("NVDEC", "VA-API", "VideoToolbox",
+    /// "Media Foundation"); `None`: none on this system or in this build, everything decodes in
+    /// software.
+    pub backend: Option<String>,
+    /// Pictures the hardware decoded so far.
+    pub frames: u64,
+    /// Hardware decoders created.
+    pub sessions: u64,
+    /// Streams the hardware declined (decoded in software from the start).
+    pub declined: u64,
+    /// Hardware decoders that switched to software mid-stream.
+    pub fallbacks: u64,
+}
+
+impl HardwareDecoding {
+    /// One line for the reports: "VA-API (on; 1200 frames decoded in hardware)", "software
+    /// (hardware decoding off; NVDEC available)".
+    pub fn summary(&self) -> String {
+        match (&self.backend, self.enabled) {
+            (None, _) => "software (no hardware decoder on this system)".into(),
+            (Some(b), false) => format!("software (hardware decoding off; {b} available)"),
+            (Some(b), true) => {
+                let mut s = format!("{b} (on; {} frames decoded in hardware", self.frames);
+                if self.fallbacks > 0 {
+                    s.push_str(&format!(", {} switched to software", self.fallbacks));
+                }
+                s.push(')');
+                s
+            }
+        }
     }
 }
 
@@ -191,6 +239,12 @@ impl FootageSource for CancellableFootage<'_> {
     }
     fn called_off(&self) -> bool {
         self.cancel.load(Ordering::Relaxed) || self.inner.called_off()
+    }
+    fn set_hardware_decoding(&self, on: bool) {
+        self.inner.set_hardware_decoding(on)
+    }
+    fn hardware_decoding(&self) -> Option<HardwareDecoding> {
+        self.inner.hardware_decoding()
     }
     fn problem(&self, footage: &Footage) -> Option<String> {
         self.inner.problem(footage)

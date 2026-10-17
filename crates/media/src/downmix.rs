@@ -64,11 +64,30 @@ pub fn stereo_gains(count: usize, aac: bool) -> Vec<Pair> {
     out
 }
 
+/// The gains for AAC as FilmCraft's decoder hands it over: channel configurations 3 to 6 (3 to 6
+/// channels) are already in WAV/SMPTE order (L R C [Cs] / [LFE] Ls Rs), everything else (mono,
+/// stereo, 7 and 8 channels, program-config layouts) in AAC's element order.
+pub fn decoded_aac_gains(count: usize) -> Vec<Pair> {
+    match count {
+        // C L R Cs, reordered to L R C Cs: the same gains, permuted.
+        4 => {
+            let g = stereo_gains(4, true);
+            [1, 2, 0, 3].iter().filter_map(|&i| g.get(i).copied()).collect()
+        }
+        3 | 5 | 6 => stereo_gains(count, false),
+        _ => stereo_gains(count, true),
+    }
+}
+
 /// Downmix planar `channels` to interleaved stereo in `out` (`out.len() / 2` frames); frames a
 /// channel is too short for count as silence, extra frames in `out` stay as they are.
 pub fn downmix_into(channels: &[Vec<f32>], aac: bool, out: &mut [f32]) {
-    let gains = stereo_gains(channels.len(), aac);
-    for (ch, g) in channels.iter().zip(&gains) {
+    let gains = if aac { decoded_aac_gains(channels.len()) } else { stereo_gains(channels.len(), false) };
+    mix(channels, &gains, out);
+}
+
+fn mix(channels: &[Vec<f32>], gains: &[Pair], out: &mut [f32]) {
+    for (ch, g) in channels.iter().zip(gains) {
         if g[0] == 0.0 && g[1] == 0.0 {
             continue;
         }
@@ -95,6 +114,22 @@ mod tests {
                     assert!(l > 0.0 && r > 0.0);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn decoded_aac_is_in_wav_order_for_three_to_six_channels() {
+        // FilmCraft hands AAC 3.0 to 5.1 over as L R C [LFE] Ls Rs, the order of the plain layouts.
+        for n in [3, 5, 6] {
+            assert_eq!(decoded_aac_gains(n), stereo_gains(n, false), "{n} channels");
+        }
+        let g = decoded_aac_gains(4);
+        assert_eq!(g.len(), 4);
+        assert!(g[0][0] > 0.0 && g[0][1] == 0.0 && g[1][1] > 0.0 && g[1][0] == 0.0, "L R first");
+        assert!(g[2][0] > 0.0 && g[2][0] == g[2][1], "the centre is third and feeds both sides");
+        assert!(g[3][0] > 0.0 && g[3][0] < g[2][0], "the rear centre is last, below the centre");
+        for n in [1, 2, 7, 8, 9] {
+            assert_eq!(decoded_aac_gains(n), stereo_gains(n, true), "{n} channels");
         }
     }
 

@@ -20,6 +20,7 @@ mod appimage;
 mod apple_events;
 mod audio_out;
 mod control_server;
+mod hw_decode;
 mod launch_guard;
 #[cfg(target_os = "macos")]
 mod native_menu;
@@ -151,6 +152,9 @@ fn main() -> eframe::Result {
     }
     // The font menus list the installed fonts: read their names while the window opens.
     effectcraft_engine::text::fonts::scan_system_in_background();
+    // The operating system's H.264 / HEVC decoders, in front of the software ones (Settings ▸
+    // Import ▸ Enable Hardware Accelerated Decoding).
+    hw_decode::register_in_background();
     // Wayland shows the window's icon from its desktop entry: an AppImage brings its own.
     #[cfg(target_os = "linux")]
     appimage::integrate_from_env(ICON_PNG);

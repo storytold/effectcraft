@@ -30,6 +30,9 @@ impl Session {
         self.apply_cache_budgets();
         self.configure_disk_cache();
         self.footage.set_conform_folder(self.conformed_audio_folder());
+        // Settings ▸ Import ▸ Enable Hardware Accelerated Decoding (closes open decoders when it
+        // changes, so footage already open follows it).
+        self.footage.set_hardware_decoding(self.prefs.import.hardware_decoding);
         // Switches Affect Nested Comps changes what precomp layers render: drop cached pixels.
         let nested = self.prefs.general.switches_affect_nested_comps;
         if self.applied_nested_switches.replace(nested).is_some_and(|was| was != nested) {

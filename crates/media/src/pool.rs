@@ -331,6 +331,12 @@ impl MediaPool {
         lock(&self.inner.problems).clear();
     }
 
+    /// Close every open decoder (decoded frames stay cached): the next reads open new ones, under
+    /// the current Hardware Accelerated Decoding setting.
+    pub fn close_decoders(&self) {
+        lock(&self.inner.sources).clear();
+    }
+
     /// Forget a file (after it changed on disk, or to retry a file that failed to open).
     pub fn forget(&self, path: &str) {
         lock(&self.inner.sources).remove(path);
@@ -509,7 +515,7 @@ impl MediaPool {
         let path: Arc<str> = footage.path.as_str().into();
         let src = self.inner.source(&path).ok_or("the file can't be opened")?;
         let s0 = start.to_units_floor(rate as i64);
-        let native = src.info().audio.as_ref().map_or(rate, |a| a.sample_rate);
+        let native = src.info().audio().map_or(rate, |a| a.sample_rate);
         if native == 0 || rate == 0 || native == rate {
             return read_stereo(&src, s0, frames, rate);
         }
@@ -700,9 +706,12 @@ impl Inner {
                 let rate = footage.frame_rate;
                 let n = Self::frame_count(rate, footage.duration);
                 let i = Self::frame_index(rate, t, n, footage.loop_count);
-                // Middle of the frame in the file's own timing (robust to timestamp rounding).
+                // A quarter into the frame in the file's own timing: FilmCraft rounds a request to
+                // the track's nearest timestamp unit (halves up), so the middle of a frame would
+                // land on the next one when the timescale is the frame rate; a quarter still
+                // tolerates timestamps rounded either way.
                 let native = footage.native_rate.unwrap_or(rate);
-                let mt = native.tick_of(i) + Tick(native.frame_duration().0 / 2);
+                let mt = native.tick_of(i) + Tick(native.frame_duration().0 / 4);
                 Loc { key: key(&footage.path, i), media_t: Some(mt), float }
             }
         }
@@ -850,6 +859,14 @@ impl FootageSource for MediaPool {
     fn forget(&self, path: &str) {
         MediaPool::forget(self, path);
     }
+    fn set_hardware_decoding(&self, on: bool) {
+        if crate::hw::set_hardware_decoding(on) {
+            self.close_decoders();
+        }
+    }
+    fn hardware_decoding(&self) -> Option<effectcraft_render::HardwareDecoding> {
+        Some(crate::hw::hardware_decoding())
+    }
     fn cache_budget(&self) -> Option<usize> {
         Some(self.budget())
     }
@@ -915,7 +932,7 @@ fn read_stereo(src: &SharedSource, s0: i64, frames: usize, rate: u32) -> std::re
     }
     let buf = src.audio(s0.max(0), frames - skip, rate).map_err(|e| e.to_string())?;
     let Some(dst) = skip.checked_mul(2).and_then(|i| out.get_mut(i..)) else { return Ok(out) };
-    let aac = src.info().audio.as_ref().is_some_and(|a| a.codec.starts_with("AAC"));
+    let aac = src.info().audio().is_some_and(|a| a.codec.starts_with("AAC"));
     crate::downmix::downmix_into(&buf.channels, aac, dst);
     Ok(out)
 }
