@@ -18,7 +18,7 @@ var selectorValue = [100, 100, 100];
 
 // Request ops (must match runtime.rs).
 var __COMP = 0, __COMPNAME = 1, __LAYER = 2, __LINFO = 3, __CHILD = 4, __PINFO = 5, __VALUE = 6, __XFORM = 7, __RECT = 8, __MARKERS = 9, __DOC = 10;
-var __FOOT = 11, __FDATA = 12, __SAMPLE = 13, __PROJ = 14, __SOURCE = 15;
+var __FOOT = 11, __FDATA = 12, __SAMPLE = 13, __PROJ = 14, __SOURCE = 15, __ANCESTOR = 16;
 
 function __begin(t, v, c, l, path, uid, idx, fd, ti, tt, sv) {
   time = t;
@@ -427,6 +427,18 @@ function __child(c, l, group, key) {
   return info[1] ? __mkGroup(c, l, info) : __mkProp(c, l, info[0]);
 }
 
+// `propertyGroup(countUp)` of the property or group at `path`: the group `countUp` levels above
+// it (default 1), the layer at the top (#1619).
+function __ancestor(c, l, path, countUp) {
+  var n = countUp === undefined ? 1 : __v(countUp);
+  if (typeof n !== 'number' || !(n >= 1) || !isFinite(n)) __err('propertyGroup(' + countUp + '): the count must be a number of 1 or more');
+  n = Math.floor(n);
+  var info = __h(__ANCESTOR, c, l, path, n);
+  if (info === 'layer') return new Layer(c, l);
+  if (info === null) __err('propertyGroup(' + n + ') goes above the layer');
+  return __mkGroup(c, l, info);
+}
+
 // Comp ------------------------------------------------------------------------------------------
 
 function Comp(c) { this.__c = c; this.__i = null; }
@@ -645,6 +657,8 @@ var __GroupProto = {
   get name() { return this.__info[2]; },
   get matchName() { return this.__info[3]; },
   get numProperties() { return this.__info[4]; },
+  get propertyIndex() { return this.__info[5]; },
+  propertyGroup: function (n) { return __ancestor(this.__c, this.__l, this.__p, n); },
   get active() { return true; },
   toString: function () { return '[object PropertyGroup]'; },
 };
@@ -730,6 +744,7 @@ Prop.prototype = {
   get numKeys() { return this.__info[4].length; },
   get propertyIndex() { return this.__info[7]; },
   get matchName() { return this.__info[8]; },
+  propertyGroup: function (n) { return __ancestor(this.__c, this.__l, this.__p, n); },
   __wrap: function (v) {
     var kind = this.__info[2];
     if (kind === 'layer') return v === null ? null : new Layer(this.__c, v);
