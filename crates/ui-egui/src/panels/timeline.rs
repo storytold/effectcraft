@@ -14,10 +14,10 @@ use effectcraft_engine::time::Tick;
 use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use serde_json::json;
 
+use crate::dock::PanelKind;
 use crate::i18n::tr;
 use crate::icons::{self, Icon};
 use crate::theme::Tokens;
-use crate::dock::PanelKind;
 use crate::{EffectcraftApp, widgets};
 
 #[derive(Clone, Debug)]
@@ -1238,7 +1238,6 @@ struct KeyDrag {
     anchor: f64,
     applied: i64,
     quick: Option<usize>,
-    button: egui::PointerButton,
 }
 
 fn key_drag_id() -> egui::Id {
@@ -1901,12 +1900,10 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
 
     // Middle-click drag scrolling for testing
-    let middle_pressed = ctx.input(|i| {
-        i.events.iter().any(|e| matches!(e, egui::Event::PointerButton { button: egui::PointerButton::Middle, pressed: true, .. }))
-    });
-    let middle_released = ctx.input(|i| {
-        i.events.iter().any(|e| matches!(e, egui::Event::PointerButton { button: egui::PointerButton::Middle, pressed: false, .. }))
-    });
+    let middle_pressed =
+        ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::PointerButton { button: egui::PointerButton::Middle, pressed: true, .. })));
+    let middle_released =
+        ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::PointerButton { button: egui::PointerButton::Middle, pressed: false, .. })));
 
     if middle_pressed && app.ui.timeline.middle_drag_panel.is_none() && ui.rect_contains_pointer(rows_rect) {
         // Start middle-click drag
@@ -1921,14 +1918,12 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         app.ui.timeline.middle_drag_start_pos = None;
     }
 
-    if app.ui.timeline.middle_drag_panel == Some(PanelKind::Timeline) {
-        // Handle middle-click drag scrolling
-        if let Some(start_pos) = app.ui.timeline.middle_drag_start_pos {
-            if let Some(current_pos) = ui.input(|i| i.pointer.latest_pos()) {
-                let delta = (start_pos.y - current_pos.y) as f64;
-                app.ui.timeline.scroll_y = (app.ui.timeline.middle_drag_start_scroll_y + delta as f32).clamp(0.0, max_scroll);
-            }
-        }
+    if app.ui.timeline.middle_drag_panel == Some(PanelKind::Timeline)
+        && let Some(start_pos) = app.ui.timeline.middle_drag_start_pos
+        && let Some(current_pos) = ui.input(|i| i.pointer.latest_pos())
+    {
+        let delta = (start_pos.y - current_pos.y) as f64;
+        app.ui.timeline.scroll_y = (app.ui.timeline.middle_drag_start_scroll_y + delta as f32).clamp(0.0, max_scroll);
     }
 
     if ui.rect_contains_pointer(rows_rect) {
@@ -1977,7 +1972,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     app.ui.timeline.scroll_y = app.ui.timeline.scroll_y.clamp(0.0, max_scroll);
     // Force pointer state reset after MMB scroll - clear any stuck pointer state
     if middle_released {
-        ctx.memory_mut(|m| {
+        ctx.memory_mut(|_m| {
             // Clear pointer state to allow normal interactions
         });
     }
@@ -2224,7 +2219,12 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                         && let Some(n) = quick_offset_layers(&comp, selected.iter().copied())
                         && let Some(p) = ctx.input(|i| i.pointer.press_origin())
                     {
-                        ctx.data_mut(|d| d.insert_temp(quick_bar_id(), QuickBar { layer: layer.id, origin_x: p.x, layers: n, applied: 0, button: egui::PointerButton::Primary }));
+                        ctx.data_mut(|d| {
+                            d.insert_temp(
+                                quick_bar_id(),
+                                QuickBar { layer: layer.id, origin_x: p.x, layers: n, applied: 0, button: egui::PointerButton::Primary },
+                            )
+                        });
                     }
 
                     let quick = ctx.data(|d| d.get_temp::<QuickBar>(quick_bar_id())).is_some_and(|q| q.layer == layer.id);
@@ -2510,7 +2510,12 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                         && let Some(n) = quick_offset_layers(&comp, selected.iter().copied())
                         && let Some(p) = ctx.input(|i| i.pointer.press_origin())
                     {
-                        ctx.data_mut(|d| d.insert_temp(quick_bar_id(), QuickBar { layer: layer.id, origin_x: p.x, layers: n, applied: 0, button: egui::PointerButton::Primary }));
+                        ctx.data_mut(|d| {
+                            d.insert_temp(
+                                quick_bar_id(),
+                                QuickBar { layer: layer.id, origin_x: p.x, layers: n, applied: 0, button: egui::PointerButton::Primary },
+                            )
+                        });
                     }
 
                     let quick = ctx.data(|d| d.get_temp::<QuickBar>(quick_bar_id())).is_some_and(|q| q.layer == layer.id);
@@ -2524,11 +2529,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                                 q.button
                             } else {
                                 // Normal drag without Quick Offset - check current button
-                                if ui.input(|i| i.pointer.primary_pressed()) {
-                                    egui::PointerButton::Primary
-                                } else {
-                                    egui::PointerButton::Secondary
-                                }
+                                if ui.input(|i| i.pointer.primary_pressed()) { egui::PointerButton::Primary } else { egui::PointerButton::Secondary }
                             };
                             if button != egui::PointerButton::Primary {
                                 continue;
@@ -3129,7 +3130,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                         {
                             // Ctrl/Cmd+Alt: Quick Offset of the selected keys' layers (#1012).
                             let quick = (mods.command && mods.alt && ks).then(|| quick_offset_layers(&comp, sel_keys.iter().map(|k| k.layer))).flatten();
-                            ctx.data_mut(|d| d.insert_temp(key_drag_id(), KeyDrag { origin_x: p.x, anchor: ct.seconds(), applied: 0, quick, button: egui::PointerButton::Primary }));
+                            ctx.data_mut(|d| d.insert_temp(key_drag_id(), KeyDrag { origin_x: p.x, anchor: ct.seconds(), applied: 0, quick }));
                         }
                     }
                 }
@@ -3272,9 +3273,11 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     if empty.clicked() && !ui.input(|i| i.modifiers.shift || i.modifiers.command) {
         actions.push(("layer.select".into(), json!({"layers": []})));
     }
-    if let (true, Some(origin), Some(cur)) =
-        (empty.dragged_by(egui::PointerButton::Primary), empty.interact_pointer_pos().and_then(|_| ctx.input(|i| i.pointer.press_origin())), empty.interact_pointer_pos())
-    {
+    if let (true, Some(origin), Some(cur)) = (
+        empty.dragged_by(egui::PointerButton::Primary),
+        empty.interact_pointer_pos().and_then(|_| ctx.input(|i| i.pointer.press_origin())),
+        empty.interact_pointer_pos(),
+    ) {
         let br = Rect::from_two_pos(origin, cur);
         gp.rect_filled(br, 0.0, t.accent.gamma_multiply(0.12));
         gp.rect_stroke(br, 0.0, Stroke::new(1.0, t.accent), StrokeKind::Middle);
