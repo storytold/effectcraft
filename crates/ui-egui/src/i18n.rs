@@ -7,13 +7,14 @@ use crate::EffectcraftApp;
 
 /// Effect names, keyed by effect id (#821).
 pub(crate) mod effects;
+mod finnish;
 /// Translations for the panels, tooltips and dialogs below the menu bar (see the module docs).
 mod ui;
 use effectcraft_engine::menus::{MenuEntry, MenuNode};
 pub(crate) use ui::{set_current, tr, tr_args};
 
 /// Every language with a catalog, in the order Settings ▸ General ▸ Language lists them.
-const CATALOG_CODES: [&str; 10] = ["ja", "zh-hans", "zh-hant", "uk", "es", "pt-br", "ru", "fr", "de", "cs"];
+const CATALOG_CODES: [&str; 11] = ["ja", "zh-hans", "zh-hant", "uk", "es", "pt-br", "ru", "fr", "de", "cs", "fi"];
 
 /// The active interface language: the stored preference when it names a catalog, otherwise `en`
 /// (English is the source of every label and needs no lookup).
@@ -90,6 +91,7 @@ fn supported(locale: Option<&str>) -> &'static str {
         "uk" => "uk",
         "es" => "es",
         "cs" => "cs",
+        "fi" => "fi",
         // The only Portuguese catalog: Brazil's, also for Portugal rather than English.
         "pt" => "pt-br",
         "zh" => {
@@ -118,6 +120,13 @@ pub(crate) fn label<'a>(app: &EffectcraftApp, command: &str, source: &'a str) ->
             _ => {}
         }
     }
+    if language == "fi" && matches!(command, "file.revealInFinder" | "layer.revealInFinder") {
+        match source {
+            "Reveal in Explorer" => return "Näytä Resurssienhallinnassa",
+            "Reveal in File Manager" => return "Näytä tiedostonhallinnassa",
+            _ => {}
+        }
+    }
     if language == "cs" && matches!(command, "file.revealInFinder" | "layer.revealInFinder") {
         match source {
             "Reveal in Explorer" => return "Zobrazit v Průzkumníku",
@@ -136,6 +145,7 @@ pub(crate) fn label<'a>(app: &EffectcraftApp, command: &str, source: &'a str) ->
         "fr" => lookup(FRENCH, command, source),
         "de" => lookup(GERMAN, command, source),
         "cs" => lookup(CZECH, command, source),
+        "fi" => lookup(finnish::MENU, command, source),
         _ => source,
     }
 }
@@ -144,6 +154,17 @@ pub(crate) fn label<'a>(app: &EffectcraftApp, command: &str, source: &'a str) ->
 /// absent, so computed labels and user names stay verbatim.
 fn lookup<'a>(catalog: &[(&str, &str, &'a str)], command: &str, source: &'a str) -> &'a str {
     catalog.iter().find(|(id, en, _)| *id == command && *en == source).map(|(_, _, translated)| *translated).unwrap_or(source)
+}
+
+/// Settings page names use the same context as their menu entries. In particular "Type" is
+/// typography here, while the panel catalog also uses "Type" for a camera's type.
+pub(crate) fn settings_title<'a>(app: &EffectcraftApp, source: &'a str) -> &'a str {
+    match source {
+        "Type" => label(app, "app.settings", "Type...").trim_end_matches("..."),
+        "Import" => label(app, "app.settings", "Import...").trim_end_matches("..."),
+        "Export" => label(app, "app.settings", "Export...").trim_end_matches("..."),
+        _ => ui::tr(source),
+    }
 }
 
 pub(crate) fn entry(app: &EffectcraftApp, e: &MenuEntry, shown: String) -> String {
@@ -165,6 +186,7 @@ pub(crate) fn entry(app: &EffectcraftApp, e: &MenuEntry, shown: String) -> Strin
         "uk" => ("Скасувати", "Немає дій для скасування", "Повторити", "Немає дій для повторення"),
         "es" => ("Deshacer", "No se puede deshacer", "Rehacer", "No se puede rehacer"),
         "pt-br" => ("Desfazer", "Não há nada para desfazer", "Refazer", "Não há nada para refazer"),
+        "fi" => ("Kumoa", "Ei kumottavaa", "Tee uudelleen", "Ei uudelleen tehtävää"),
         "cs" => ("Zpět", "Není co vrátit", "Znovu", "Není co zopakovat"),
         _ => return shown,
     };
@@ -198,6 +220,17 @@ pub(crate) fn effect_category(children: &[MenuNode], source: &str) -> Option<Str
 
 pub(crate) fn submenu(app: &EffectcraftApp, source: &str, shown: String) -> String {
     match language(app) {
+        "fi" => {
+            if source == "Assign Shortcut to Workspace" {
+                if let Some(name) = shown.strip_prefix("Assign Shortcut to “").and_then(|s| s.strip_suffix("” Workspace")) {
+                    return format!("Määritä pikanäppäin työtilalle ”{name}”");
+                }
+            } else if source == "Assign Shortcut to 3D View"
+                && let Some(name) = shown.strip_prefix("Assign Shortcut to “").and_then(|s| s.strip_suffix('”'))
+            {
+                return format!("Määritä pikanäppäin 3D-näkymälle ”{name}”");
+            }
+        }
         "cs" => {
             if source == "Assign Shortcut to Workspace" {
                 if let Some(name) = shown.strip_prefix("Assign Shortcut to “").and_then(|s| s.strip_suffix("” Workspace")) {
@@ -6789,6 +6822,7 @@ mod tests {
         let mut french_keys = BTreeSet::new();
         let mut german_keys = BTreeSet::new();
         let mut czech_keys = BTreeSet::new();
+        let mut finnish_keys = BTreeSet::new();
         for (catalog, unique) in [
             (JAPANESE, &mut japanese_keys),
             (SIMPLIFIED_CHINESE, &mut chinese_keys),
@@ -6800,6 +6834,7 @@ mod tests {
             (FRENCH, &mut french_keys),
             (GERMAN, &mut german_keys),
             (CZECH, &mut czech_keys),
+            (finnish::MENU, &mut finnish_keys),
         ] {
             for (command, en, translated) in catalog {
                 let key = (command.to_string(), en.to_string());
@@ -6830,6 +6865,7 @@ mod tests {
         assert_eq!(russian_keys, french_keys, "the languages must translate the same entries");
         assert_eq!(french_keys, german_keys, "the languages must translate the same entries");
         assert_eq!(japanese_keys, czech_keys, "the languages must translate the same entries");
+        assert_eq!(japanese_keys, finnish_keys, "Finnish covers the fixed menu tree");
     }
 
     /// Exercise each engine spelling on every host: a macOS-only run must still catch a
@@ -6916,6 +6952,9 @@ mod tests {
             (Some("cs-CZ"), "cs"),
             (Some("cs_CZ.UTF-8"), "cs"),
             (Some("CS_cz.UTF-8"), "cs"),
+            (Some("fi"), "fi"),
+            (Some("fi-FI"), "fi"),
+            (Some("FI_fi.UTF-8"), "fi"),
             (Some("en-US"), "en"),
             (Some("jv-ID"), "en"),
             (Some("de-DE"), "en"),

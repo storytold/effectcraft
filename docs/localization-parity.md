@@ -1,6 +1,6 @@
 # Localization parity
 
-> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-12 · **Change:** minor (catalogs recounted at `upstream/main` 470ea7a3: menus in 10 languages, panels in 6, Hangul probe (#599)) · **Target:** Adobe After Effects 2026
+> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-18 · **Change:** minor (Finnish draft catalog; previous assessment: catalogs recounted at `upstream/main` 470ea7a3: menus in 10 languages, panels in 6, Hangul probe (#599)) · **Target:** Adobe After Effects 2026
 
 How much of EffectCraft's interface is translated, language by language, compared with After
 Effects. [gaps.md](gaps.md) gap 16 and workstream G9 hold the work;
@@ -99,10 +99,27 @@ Effects' 10 non-English languages: **≈ 60–110 h**; the four extra languages 
 complex shaping in the interface. Every language needs native-speaker review, which only a human
 can give; none has had it.
 
+## Finnish draft (2026-10-18)
+
+`fi` (Suomi) uses the existing preference, system-locale resolution and native-menu/panel/effect
+lookups. Its original catalog lives in `crates/ui-egui/src/i18n/finnish.rs`: 628 fixed menu rows,
+689 panel/settings rows (the current source-key superset), 307 effect rows and 21 category rows.
+The CC and OCIO series and named third-party effects retain their registered names. No font or
+other media asset is added. Integer count phrasing uses Finnish singular/partitive forms where
+the source distinguishes counts; count-neutral labels preserve values where it does not.
+
+This is an AI-assisted draft, **not human/native-speaker reviewed**. Catalog parity is not full-app
+coverage: engine messages, undo operation names, effect parameter names and other unwrapped strings
+still have the shared limitations above. The browser's system-language limitation is unchanged.
+The existing menu/panel checks include Finnish; additional tests cover live effect/category parity,
+locale matching, preference persistence, platform Reveal labels, filenames, interpolation and native
+menu bindings. Run `cargo test -p effectcraft-ui-egui --lib i18n` and `cargo xtask ci` to validate.
+
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-18 | minor | Added original Finnish draft: counted menus, panel/settings keys, effects and categories; no human review and no whole-app percentage claim |
 | 2026-10-12 | minor | Recounted: Russian, French, German and Czech menus (#873, #987), Brazilian Portuguese and Czech panels (#830, #987), Hangul probe (#599); overall ≈ 12% to ≈ 18%; Korean and Italian still absent |
 | 2026-10-10 | major | First localization parity document: catalog rows counted for all six languages, the twelve-language table, After Effects' 11 shipped languages from its bundle |
 | 2026-10-11 | minor | Ukrainian panel catalog brought level with the Chinese ones (495 of 496 rows, counted at this commit); its share rises to ≈ 29%. The other languages' panel counts are the 10 October measurement |
