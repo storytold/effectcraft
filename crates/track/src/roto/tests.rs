@@ -405,9 +405,8 @@ impl effectcraft_segment::MaskModel for FakeModel {
 }
 
 /// A grey bar on a two-tone background whose halves match the bar's halves: colour alone can't
-/// find its edge, a model can.
-#[test]
-fn a_model_prior_shapes_the_cut_and_bad_models_are_ignored() {
+/// find its edge, a model can. The frame, its truth and the bar's rectangle.
+fn bar_frame() -> (Image, Vec<u8>, [usize; 4]) {
     let (w, h) = (160usize, 100usize);
     let rect = [40, 30, 120, 70];
     let mut img = Image::new(w as u32, h as u32);
@@ -422,6 +421,12 @@ fn a_model_prior_shapes_the_cut_and_bad_models_are_ignored() {
             gt[y * w + x] = inside as u8;
         }
     }
+    (img, gt, rect)
+}
+
+#[test]
+fn a_model_prior_shapes_the_cut_and_bad_models_are_ignored() {
+    let (img, gt, rect) = bar_frame();
     let st = [line(StrokeKind::Fg, 0, [50.0, 50.0], [110.0, 50.0], 4.0)];
     let refs: Vec<&Stroke> = st.iter().collect();
     let opts = SegOpts::default();
@@ -482,17 +487,17 @@ fn mobilesam_segments_and_propagates_the_disk() {
 fn box_stroke_is_the_model_box_prompt() {
     let fg = Stroke { kind: StrokeKind::Fg, frame: 0, radius: 2.0, points: vec![[50.0, 40.0]] };
     let bx = Stroke { kind: StrokeKind::Box, frame: 0, radius: 0.0, points: vec![[80.0, 60.0], [20.0, 10.0]] };
-    let p = stroke_prompt(&[&fg, &bx], 0.5);
+    let p = stroke_prompt(&[&fg, &bx], &[], 0.5, 0, 0);
     assert_eq!(p.bbox, Some([10.0, 5.0, 40.0, 30.0]));
     assert_eq!(p.points, vec![([25.0, 20.0], true)]);
     // Degenerate or non-finite boxes are no prompt.
     for pts in [vec![[20.0, 10.0]], vec![[20.0, 10.0], [20.0, 50.0]], vec![[f64::NAN, 10.0], [80.0, 60.0]]] {
         let b = Stroke { points: pts, ..bx.clone() };
-        assert_eq!(stroke_prompt(&[&fg, &b], 1.0).bbox, None);
+        assert_eq!(stroke_prompt(&[&fg, &b], &[], 1.0, 0, 0).bbox, None);
     }
     assert!(!StrokeKind::Box.is_segmentation());
     assert!(rasterize(&[&bx], &[StrokeKind::Fg, StrokeKind::Bg], 1.0, 100, 80).iter().all(|v| !v));
-    let mut q = stroke_prompt(&[&fg, &bx], 1.0);
+    let mut q = stroke_prompt(&[&fg, &bx], &[], 1.0, 0, 0);
     let soft: Vec<f32> = (0..100 * 80).map(|i| ((i % 100) < 10) as u8 as f32).collect();
     assert!(add_prior_prompt(&mut q, &soft, &[], 100, 80));
     assert_eq!(q.bbox, Some([20.0, 10.0, 80.0, 60.0]));
@@ -505,16 +510,57 @@ fn box_stroke_is_the_model_box_prompt() {
 fn model_prompts_follow_the_latest_stroke() {
     let green = Stroke { kind: StrokeKind::Fg, frame: 0, radius: 4.0, points: vec![[50.0, 40.0]] };
     let red = Stroke { kind: StrokeKind::Bg, ..green.clone() };
-    assert_eq!(stroke_prompt(&[&green, &red], 1.0).points, vec![([50.0, 40.0], false)]);
-    assert_eq!(stroke_prompt(&[&green, &red, &green], 1.0).points, vec![([50.0, 40.0], true); 2]);
     let (w, h) = (100, 80);
+    let prompt = |st: &[&Stroke]| stroke_prompt(st, &resolve(st, StrokeKind::Fg, StrokeKind::Bg, 1.0, w, h), 1.0, w, h).points;
+    assert_eq!(prompt(&[&green, &red]), vec![([50.0, 40.0], false)]);
+    assert_eq!(prompt(&[&green, &red, &green]), vec![([50.0, 40.0], true); 2]);
     let soft: Vec<f32> = (0..w * h).map(|i| ((i % w) < 50) as u8 as f32).collect();
     let erase = Stroke { kind: StrokeKind::Bg, frame: 0, radius: 15.0, points: vec![[25.0, 40.0]] };
     let hard = resolve(&[&erase], StrokeKind::Fg, StrokeKind::Bg, 1.0, w, h);
     let mut q = Prompt::default();
     assert!(add_prior_prompt(&mut q, &soft, &hard, w, h));
     assert!(!q.points.is_empty());
-    assert!(q.points.iter().all(|(p, fg)| *fg && !covers(&erase, 1.0, [p[0] as f64, p[1] as f64])), "{:?}", q.points);
+    assert!(q.points.iter().all(|(p, fg)| *fg && owner(&hard, w, h, *p) != Some(HARD_BG)), "{:?}", q.points);
     let mask = q.mask.unwrap();
     assert!(hard.iter().zip(&mask).all(|(hd, m)| *hd != HARD_BG || *m == 0.0));
+}
+
+/// A stand-in model that counts its calls; its foreground is a fixed rectangle.
+struct CountingModel([usize; 4], std::sync::atomic::AtomicUsize);
+
+impl effectcraft_segment::MaskModel for CountingModel {
+    fn info(&self) -> &'static effectcraft_segment::ModelInfo {
+        &effectcraft_segment::MOBILE_SAM
+    }
+    fn segment(&self, _: &[[f32; 3]], w: usize, h: usize, _: &Prompt) -> Result<Vec<f32>, String> {
+        self.1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let [x0, y0, x1, y1] = self.0;
+        Ok((0..w * h).map(|i| ((i % w) >= x0 && (i % w) < x1 && (i / w) >= y0 && (i / w) < y1) as u8 as f32 * 0.98 + 0.01).collect())
+    }
+}
+
+/// A small background correction in the middle of a large foreground dot removes the only point
+/// sampled along the dot, but most of the dot is still foreground: the model is still prompted
+/// with it, from a point inside what is left. A dot painted over completely prompts nothing.
+#[test]
+fn a_correction_keeps_the_model_prompted_with_what_is_left() {
+    let (img, gt, rect) = bar_frame();
+    let (w, h) = (img.width as usize, img.height as usize);
+    let dot = Stroke { kind: StrokeKind::Fg, frame: 0, radius: 15.0, points: vec![[80.0, 50.0]] };
+    let tap = Stroke { kind: StrokeKind::Bg, radius: 2.0, ..dot.clone() };
+    let refs = [&dot, &tap];
+    let model = CountingModel(rect, Default::default());
+    let seg = segment_with(&img, &refs, None, &SegOpts::default(), 0.0, Some(&model));
+    assert_eq!(model.1.load(std::sync::atomic::Ordering::Relaxed), 1, "the model was prompted");
+    assert!(iou(&seg.matte, &gt) > 0.95, "IoU {}", iou(&seg.matte, &gt));
+    let hard = resolve(&refs, StrokeKind::Fg, StrokeKind::Bg, 1.0, w, h);
+    let fg: Vec<[f32; 2]> = stroke_prompt(&refs, &hard, 1.0, w, h).points.into_iter().filter(|p| p.1).map(|p| p.0).collect();
+    let [q] = fg.as_slice() else { panic!("one foreground point, got {fg:?}") };
+    let r = (q[0] - 80.0).hypot(q[1] - 50.0);
+    assert!(r > 5.0 && r < 13.0, "{q:?} sits inside what is left of the dot");
+    assert_eq!(hard[q[1] as usize * w + q[0] as usize], HARD_FG);
+    let cover = Stroke { radius: 16.0, ..tap };
+    let refs = [&dot, &cover];
+    let hard = resolve(&refs, StrokeKind::Fg, StrokeKind::Bg, 1.0, w, h);
+    assert!(stroke_prompt(&refs, &hard, 1.0, w, h).points.iter().all(|p| !p.1));
 }
