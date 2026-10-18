@@ -47,6 +47,7 @@ fn catalog(language: &str) -> Option<&'static Index> {
     static PT_BR: OnceLock<Index> = OnceLock::new();
     static CS: OnceLock<Index> = OnceLock::new();
     static ES: OnceLock<Index> = OnceLock::new();
+    static FI: OnceLock<Index> = OnceLock::new();
     let (index, rows) = match language {
         "ja" => (&JA, JAPANESE),
         "zh-hans" => (&HANS, SIMPLIFIED_CHINESE),
@@ -55,6 +56,7 @@ fn catalog(language: &str) -> Option<&'static Index> {
         "pt-br" => (&PT_BR, PORTUGUESE),
         "cs" => (&CS, CZECH),
         "es" => (&ES, SPANISH),
+        "fi" => (&FI, super::finnish::UI),
         _ => return None,
     };
     Some(index.get_or_init(|| rows.iter().copied().collect()))
@@ -4315,8 +4317,18 @@ mod tests {
             .chain(UKRAINIAN.iter().copied())
             .chain(PORTUGUESE.iter().copied())
             .chain(CZECH.iter().copied())
+            .chain(super::super::finnish::UI.iter().copied())
             .chain(SPANISH.iter().copied())
             .collect()
+    }
+
+    #[test]
+    fn finnish_covers_the_panel_source_set_without_duplicate_keys() {
+        use std::collections::BTreeSet;
+        let source: BTreeSet<_> = SIMPLIFIED_CHINESE.iter().map(|(key, _)| *key).collect();
+        let fi: BTreeSet<_> = super::super::finnish::UI.iter().map(|(key, _)| *key).collect();
+        assert_eq!(fi.len(), super::super::finnish::UI.len(), "duplicate Finnish panel key");
+        assert_eq!(source, fi, "Finnish must cover the current panel and settings source set");
     }
 
     #[test]
@@ -4346,7 +4358,14 @@ mod tests {
         let hant: Vec<&str> = TRADITIONAL_CHINESE.iter().map(|(en, _)| *en).collect();
         assert_eq!(hans, hant, "the two Chinese catalogs list different source strings");
         // Japanese, Ukrainian and Czech may lag the Chinese catalogs: a missing row falls back to English.
-        for (name, cat) in [("Japanese", JAPANESE), ("Ukrainian", UKRAINIAN), ("Brazilian Portuguese", PORTUGUESE), ("Czech", CZECH), ("Spanish", SPANISH)] {
+        for (name, cat) in [
+            ("Japanese", JAPANESE),
+            ("Ukrainian", UKRAINIAN),
+            ("Brazilian Portuguese", PORTUGUESE),
+            ("Czech", CZECH),
+            ("Spanish", SPANISH),
+            ("Finnish", super::super::finnish::UI),
+        ] {
             let extra: Vec<&str> = cat.iter().map(|(en, _)| *en).filter(|en| !hans.contains(en)).collect();
             assert!(extra.is_empty(), "the {name} catalog lists source strings the Chinese ones don't: {extra:?}");
         }

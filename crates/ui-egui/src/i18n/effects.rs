@@ -70,7 +70,9 @@ fn catalog(language: &str) -> Option<&'static Catalog> {
     static SIMPLIFIED: Catalog = Catalog { rows: SIMPLIFIED_CHINESE, categories: SIMPLIFIED_CHINESE_CATEGORIES, index: OnceLock::new() };
     static TRADITIONAL: Catalog = Catalog { rows: TRADITIONAL_CHINESE, categories: TRADITIONAL_CHINESE_CATEGORIES, index: OnceLock::new() };
     static JAPANESE: Catalog = Catalog { rows: JAPANESE_EFFECTS, categories: JAPANESE_CATEGORIES, index: OnceLock::new() };
+    static FINNISH: Catalog = Catalog { rows: super::finnish::EFFECTS, categories: super::finnish::CATEGORIES, index: OnceLock::new() };
     match language {
+        "fi" => Some(&FINNISH),
         "zh-hans" => Some(&SIMPLIFIED),
         "zh-hant" => Some(&TRADITIONAL),
         // Japanese: the slot the Japanese data point on #821 asked for, so both languages share
