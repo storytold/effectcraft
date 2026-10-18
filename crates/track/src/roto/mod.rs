@@ -770,8 +770,7 @@ fn core_of(soft: &[f32], w: usize, h: usize, r: f64) -> Vec<bool> {
 fn finish(_img: &Image, rgb: &[[f32; 3]], labels: Vec<u8>, strokes: &[&Stroke], warped_refine: Option<&[u8]>, opts: &SegOpts, refine_radius: f64) -> FrameSeg {
     let (w, h) = (_img.width as usize, _img.height as usize);
     let (fg, bg) = fit_models(rgb, &labels);
-    let add = rasterize(strokes, &[StrokeKind::Refine], opts.scale, w, h);
-    let erase = rasterize(strokes, &[StrokeKind::RefineErase], opts.scale, w, h);
+    let painted = resolve(strokes, StrokeKind::Refine, StrokeKind::RefineErase, opts.scale, w, h);
     let near: Option<Vec<f32>> = warped_refine.filter(|r| r.iter().any(|v| *v != 0)).map(|_| matting::signed_distance(&labels, w, h));
     let rr = (refine_radius * opts.scale + 2.0) as f32;
     let refine: Vec<u8> = (0..w * h)
@@ -780,7 +779,7 @@ fn finish(_img: &Image, rgb: &[[f32; 3]], labels: Vec<u8>, strokes: &[&Stroke], 
                 (Some(r), Some(sd)) => r[i] != 0 && sd[i].abs() <= rr,
                 _ => false,
             };
-            ((carried || add[i]) && !erase[i]) as u8
+            ((carried && painted[i] != OFF) || painted[i] == ON) as u8
         })
         .collect();
     FrameSeg { w, h, matte: labels, refine, fg, bg }

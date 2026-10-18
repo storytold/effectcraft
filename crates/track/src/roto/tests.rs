@@ -272,6 +272,31 @@ fn refine_edge_recovers_a_soft_edge_and_decontaminates() {
     assert!(a2.iter().zip(&seg.matte).all(|(x, y)| (*x - *y as f32).abs() < 1e-6));
 }
 
+/// Refine Edge strokes correct each other the same way: refine over an earlier erase restores
+/// the band there.
+#[test]
+fn later_refine_strokes_override_earlier_erases() {
+    let c = [100.0, 75.0];
+    let (img, _) = soft_frame(c, 10.0, [0.9, 0.25, 0.1], [0.1, 0.3, 0.9]);
+    let spot = [c[0] + R, c[1]];
+    let i = spot[1] as usize * W as usize + spot[0] as usize;
+    let erase = Stroke { kind: StrokeKind::RefineErase, frame: 0, radius: 6.0, points: vec![spot] };
+    let refine = Stroke { kind: StrokeKind::Refine, ..erase.clone() };
+    let band = |st: &[Stroke]| segment(&img, &st.iter().collect::<Vec<_>>(), None, &SegOpts::default(), 9.0).refine[i];
+    let mut st = vec![
+        line(StrokeKind::Fg, 0, [c[0] - 15.0, c[1]], [c[0] + 15.0, c[1]], 5.0),
+        line(StrokeKind::Bg, 0, [c[0] - 60.0, c[1] - 55.0], [c[0] + 60.0, c[1] - 55.0], 5.0),
+        ring(0, c, R, 9.0),
+    ];
+    assert_eq!(band(&st), 1);
+    st.push(erase.clone());
+    assert_eq!(band(&st), 0, "erase removes the band");
+    st.push(refine);
+    assert_eq!(band(&st), 1, "refine over the erase restores it");
+    st.push(erase);
+    assert_eq!(band(&st), 0, "erase again removes it again");
+}
+
 #[test]
 fn reduce_chatter_and_motion_blur_use_the_neighbours() {
     let (w, h) = (40usize, 20usize);
