@@ -303,38 +303,76 @@ pub fn rgb_of(img: &Image) -> Vec<[f32; 3]> {
     img.data.par_iter().map(|p| if p[3] > 1e-6 { [p[0] / p[3], p[1] / p[3], p[2] / p[3]] } else { [0.0; 3] }).collect()
 }
 
-/// Pixels covered by `strokes` (of the given kinds) at `scale`.
-pub fn rasterize(strokes: &[&Stroke], kinds: &[StrokeKind], scale: f64, w: usize, h: usize) -> Vec<bool> {
-    let mut m = vec![false; w * h];
-    for s in strokes.iter().filter(|s| kinds.contains(&s.kind)) {
-        let r = (s.radius * scale).max(0.5);
-        let pts: Vec<[f64; 2]> = s.points.iter().map(|p| [p[0] * scale, p[1] * scale]).collect();
-        let segs: Vec<([f64; 2], [f64; 2])> = if pts.len() == 1 { vec![(pts[0], pts[0])] } else { pts.windows(2).map(|w| (w[0], w[1])).collect() };
-        for (a, b) in segs {
-            let x0 = (a[0].min(b[0]) - r).floor().max(0.0) as usize;
-            let x1 = ((a[0].max(b[0]) + r).ceil().max(0.0) as usize).min(w);
-            let y0 = (a[1].min(b[1]) - r).floor().max(0.0) as usize;
-            let y1 = ((a[1].max(b[1]) + r).ceil().max(0.0) as usize).min(h);
-            let d = [b[0] - a[0], b[1] - a[1]];
-            let l2 = d[0] * d[0] + d[1] * d[1];
-            for y in y0..y1 {
-                for x in x0..x1 {
-                    let p = [x as f64 + 0.5, y as f64 + 0.5];
-                    let t = if l2 > 0.0 { (((p[0] - a[0]) * d[0] + (p[1] - a[1]) * d[1]) / l2).clamp(0.0, 1.0) } else { 0.0 };
-                    let q = [a[0] + d[0] * t, a[1] + d[1] * t];
-                    if (p[0] - q[0]).hypot(p[1] - q[1]) <= r {
-                        m[y * w + x] = true;
-                    }
+/// A stroke's radius and segments at `scale`.
+fn segments(s: &Stroke, scale: f64) -> (f64, Vec<([f64; 2], [f64; 2])>) {
+    let pts: Vec<[f64; 2]> = s.points.iter().map(|p| [p[0] * scale, p[1] * scale]).collect();
+    let segs = match pts.as_slice() {
+        [p] => vec![(*p, *p)],
+        _ => pts.windows(2).map(|w| (w[0], w[1])).collect(),
+    };
+    ((s.radius * scale).max(0.5), segs)
+}
+
+/// Distance from `p` to the segment `a`–`b`.
+fn segment_distance(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
+    let d = [b[0] - a[0], b[1] - a[1]];
+    let l2 = d[0] * d[0] + d[1] * d[1];
+    let t = if l2 > 0.0 { (((p[0] - a[0]) * d[0] + (p[1] - a[1]) * d[1]) / l2).clamp(0.0, 1.0) } else { 0.0 };
+    (p[0] - a[0] - d[0] * t).hypot(p[1] - a[1] - d[1] * t)
+}
+
+/// Call `paint` with every pixel `s` covers at `scale`.
+fn sweep(s: &Stroke, scale: f64, w: usize, h: usize, mut paint: impl FnMut(usize)) {
+    let (r, segs) = segments(s, scale);
+    for (a, b) in segs {
+        let x0 = (a[0].min(b[0]) - r).floor().max(0.0) as usize;
+        let x1 = ((a[0].max(b[0]) + r).ceil().max(0.0) as usize).min(w);
+        let y0 = (a[1].min(b[1]) - r).floor().max(0.0) as usize;
+        let y1 = ((a[1].max(b[1]) + r).ceil().max(0.0) as usize).min(h);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                if segment_distance([x as f64 + 0.5, y as f64 + 0.5], a, b) <= r {
+                    paint(y * w + x);
                 }
             }
         }
     }
+}
+
+/// Pixels covered by `strokes` (of the given kinds) at `scale`.
+pub fn rasterize(strokes: &[&Stroke], kinds: &[StrokeKind], scale: f64, w: usize, h: usize) -> Vec<bool> {
+    let mut m = vec![false; w * h];
+    for s in strokes.iter().filter(|s| kinds.contains(&s.kind)) {
+        sweep(s, scale, w, h, |i| m[i] = true);
+    }
     m
 }
 
-/// Hard constraints: 1 = foreground, 2 = background, 0 = free.
-const HARD_FG: u8 = 1;
-const HARD_BG: u8 = 2;
+/// What a pair of opposing strokes (add / remove) leaves on each pixel.
+const ON: u8 = 1;
+const OFF: u8 = 2;
+
+/// [`ON`] where an `on` stroke covers a pixel, [`OFF`] where an `off` stroke does, 0 elsewhere.
+/// Strokes apply in drawing order, so where they overlap the last one painted wins: a stroke
+/// corrects the ones before it.
+pub fn resolve(strokes: &[&Stroke], on: StrokeKind, off: StrokeKind, scale: f64, w: usize, h: usize) -> Vec<u8> {
+    let mut m = vec![0; w * h];
+    for s in strokes {
+        let v = if s.kind == on {
+            ON
+        } else if s.kind == off {
+            OFF
+        } else {
+            continue;
+        };
+        sweep(s, scale, w, h, |i| m[i] = v);
+    }
+    m
+}
+
+/// Hard constraints: foreground, background, else free.
+const HARD_FG: u8 = ON;
+const HARD_BG: u8 = OFF;
 
 /// Graph-cut energy weights.
 const GAMMA: f64 = 50.0;
@@ -594,21 +632,9 @@ pub fn segment(img: &Image, strokes: &[&Stroke], prior: Option<&Prior>, opts: &S
         return FrameSeg::empty(w, h);
     }
     let rgb = rgb_of(img);
-    let fgs = rasterize(strokes, &[StrokeKind::Fg], opts.scale, w, h);
-    let bgs = rasterize(strokes, &[StrokeKind::Bg], opts.scale, w, h);
-    let hard: Vec<u8> = fgs
-        .iter()
-        .zip(&bgs)
-        .map(|(f, b)| {
-            if *b {
-                HARD_BG
-            } else if *f {
-                HARD_FG
-            } else {
-                0
-            }
-        })
-        .collect();
+    let hard = resolve(strokes, StrokeKind::Fg, StrokeKind::Bg, opts.scale, w, h);
+    let fgs: Vec<bool> = hard.iter().map(|v| *v == HARD_FG).collect();
+    let bgs: Vec<bool> = hard.iter().map(|v| *v == HARD_BG).collect();
     // A warped matte is uncertain by about the search radius: blur it. A model's matte is not.
     let soft_prior: Option<Vec<f32>> =
         prior.map(|p| if p.weight > PRIOR { p.soft.clone() } else { matting::gauss(&p.soft, w, h, (opts.search_radius * opts.scale / 4.0).max(1.0)) });

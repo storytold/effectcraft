@@ -167,6 +167,28 @@ fn a_correction_stroke_fixes_a_bad_frame() {
     assert!(iou(&next.matte, &gt2) > 0.93);
 }
 
+/// A stroke corrects the ones painted before it: foreground over an earlier background stroke
+/// restores the area, and background over that removes it again.
+#[test]
+fn later_strokes_override_earlier_ones() {
+    let c = center(0);
+    let (img, gt) = frame_at(c);
+    let spot = [c[0], c[1] + 20.0];
+    let i = spot[1] as usize * W as usize + spot[0] as usize;
+    let red = line(StrokeKind::Bg, 0, [spot[0] - 6.0, spot[1]], [spot[0] + 6.0, spot[1]], 6.0);
+    let green = Stroke { kind: StrokeKind::Fg, ..red.clone() };
+    let seg = |st: &[Stroke]| segment(&img, &st.iter().collect::<Vec<_>>(), None, &SegOpts::default(), 0.0);
+    let mut st = base_strokes(0);
+    st.push(red.clone());
+    assert_eq!(seg(&st).matte[i], 0, "background over the disk removes it");
+    st.push(green);
+    let restored = seg(&st);
+    assert_eq!(restored.matte[i], 1, "foreground over the background stroke restores it");
+    assert!(iou(&restored.matte, &gt) > 0.95, "IoU {}", iou(&restored.matte, &gt));
+    st.push(red);
+    assert_eq!(seg(&st).matte[i], 0, "background again removes it again");
+}
+
 /// A soft-edged disk (alpha ramp over `width` pixels) over a background.
 fn soft_frame(c: [f64; 2], width: f64, fg: [f32; 3], bg: [f32; 3]) -> (Image, Vec<f32>) {
     let mut img = Image::new(W, H);
