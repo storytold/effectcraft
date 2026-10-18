@@ -535,8 +535,8 @@ fn shortcut_presets_duplicate_rename_delete_export_import() {
 fn frontend_commands_are_bindable_with_panel_scope() {
     let mut s = Session::default();
     s.set_ui_commands(vec![
-        crate::shortcuts::UiCommand { id: "timeline.zoomIn".into(), label: "Zoom In Time".into(), shortcut: Some("=".into()) },
-        crate::shortcuts::UiCommand { id: "tool.hand".into(), label: "Hand Tool".into(), shortcut: Some("H".into()) },
+        crate::shortcuts::UiCommand { id: "timeline.zoomIn".into(), label: "Zoom In Time".into(), shortcut: Some("=".into()), scope: None },
+        crate::shortcuts::UiCommand { id: "tool.hand".into(), label: "Hand Tool".into(), shortcut: Some("H".into()), scope: None },
     ]);
     let b = s.shortcuts().find("timeline.zoomIn").unwrap().clone();
     assert_eq!(b.scope, "Timeline");
@@ -1111,4 +1111,93 @@ fn gpu_summary_names_the_adapter_or_says_why_there_is_none() {
     let on = gpu_summary(&s);
     assert!(on.starts_with("Compositing: GPU, NVIDIA GeForce RTX 4070 (Vulkan)."), "{on}");
     assert!(!on.contains("compositing is off"), "{on}");
+}
+
+#[test]
+fn default_keys_shared_between_a_panel_and_the_application() {
+    let s = Session::default();
+    let t = s.shortcuts();
+    let keys = |k: &str| t.keys.get(k).cloned().unwrap_or_default();
+    let has = |k: &str, chord: &str| keys(k).iter().any(|c| c == chord);
+    assert_eq!(keys("file.newCompFromSelection"), ["Alt+\\"]);
+    // The stacking order: the bracket keys (shown in the menus) and the arrows.
+    assert_eq!(keys(r#"layer.arrange {"to":"forward"}"#), ["Cmd+]", "Cmd+Alt+ArrowUp"]);
+    assert_eq!(keys(r#"layer.arrange {"to":"backward"}"#), ["Cmd+[", "Cmd+Alt+ArrowDown"]);
+    assert_eq!(keys(r#"layer.arrange {"to":"front"}"#), ["Cmd+Shift+]", "Cmd+Alt+Shift+ArrowUp"]);
+    assert_eq!(keys(r#"layer.arrange {"to":"back"}"#), ["Cmd+Shift+[", "Cmd+Alt+Shift+ArrowDown"]);
+    // The Video switch of the selected layers; Hide Other Video has no key of its own.
+    assert!(has(r#"layer.setSwitch {"switch":"video"}"#, "Cmd+Alt+Shift+V"));
+    assert!(keys("layer.hideOtherVideo").is_empty());
+    assert!(has("project.deleteWithoutConfirmation", "Cmd+Backspace") && has("project.deleteWithoutConfirmation", "Shift+Delete"));
+    // One chord, two scopes.
+    for (panel, app, chord) in [
+        ("file.rememberInterpretation", "edit.copyWithPropertyLinks", "Cmd+Alt+C"),
+        ("renderQueue.duplicate", "edit.splitLayer", "Cmd+Shift+D"),
+        ("view.newViewer", "project.newFolder", "Cmd+Alt+Shift+N"),
+    ] {
+        assert!(has(panel, chord) && has(app, chord), "{chord}");
+        assert_ne!(t.find(panel).unwrap().scope, t.find(app).unwrap().scope, "{chord}");
+    }
+    assert!(t.all_conflicts().is_empty(), "{:?}", t.all_conflicts());
+}
+
+#[test]
+fn numeric_keypad_shortcuts_have_main_keyboard_keys_on_macos() {
+    let mut s = Session::default();
+    s.set_ui_commands(vec![crate::shortcuts::UiCommand {
+        id: "playback.preview.altNumpad0".into(),
+        label: "Preview (Alt+Numpad 0)".into(),
+        shortcut: Some("Alt+Num0, Ctrl+Alt+0".into()),
+        scope: None,
+    }]);
+    let t = s.shortcuts();
+    // `Ctrl` is its own key on macOS only; elsewhere the alternates aren't defaults.
+    let (marker, preview): (&[&str], &[&str]) =
+        if cfg!(target_os = "macos") { (&["Num*", "Ctrl+8"], &["Alt+Num0", "Ctrl+Alt+0"]) } else { (&["Num*"], &["Alt+Num0"]) };
+    assert_eq!(t.keys["comp.addMarker"], marker);
+    assert_eq!(t.keys["playback.preview.altNumpad0"], preview);
+    assert!(t.all_conflicts().is_empty(), "{:?}", t.all_conflicts());
+}
+
+#[test]
+fn mask_and_paint_keys_live_in_their_contexts() {
+    let mut s = Session::default();
+    let t = s.shortcuts();
+    for (mode, key) in [("None", "N"), ("Add", "A"), ("Subtract", "S"), ("Intersect", "I"), ("Darken", "D"), ("Difference", "F")] {
+        let b = t.find(&format!(r#"layer.mask.mode {{"mode":"{mode}"}}"#)).unwrap();
+        assert_eq!((b.scope.as_str(), t.keys[&b.key].as_slice()), ("Mask", &[key.to_string()][..]), "{mode}");
+    }
+    for (id, key) in [("paint.swapColors", "X"), ("paint.defaultColors", "D"), ("paint.clonePreset1", "3"), ("paint.clonePreset5", "7")] {
+        let b = t.find(id).unwrap();
+        assert_eq!((b.scope.as_str(), t.keys[id].as_slice()), ("Paint", &[key.to_string()][..]), "{id}");
+    }
+    assert!(t.all_conflicts().is_empty(), "{:?}", t.all_conflicts());
+
+    s.execute("paint.options", json!({"color": [1, 0, 0, 1], "background": [0, 0, 1, 1]})).unwrap();
+    s.execute("paint.swapColors", json!({})).unwrap();
+    assert_eq!((s.state.paint.color, s.state.paint.background), ([0.0, 0.0, 1.0, 1.0], [1.0, 0.0, 0.0, 1.0]));
+    s.execute("paint.defaultColors", json!({})).unwrap();
+    assert_eq!((s.state.paint.color, s.state.paint.background), ([0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0, 1.0]));
+    s.execute("paint.clonePreset4", json!({})).unwrap();
+    assert_eq!(s.state.paint.clone_preset, 4);
+}
+
+#[test]
+fn a_double_press_is_the_chord_twice() {
+    use crate::shortcuts::{double_of, normalize};
+    assert_eq!(normalize("a a").as_deref(), Some("A A"));
+    assert_eq!(normalize("AA").as_deref(), Some("A A"));
+    assert_eq!(normalize("shift+f7  Shift+F7").as_deref(), Some("Shift+F7 Shift+F7"));
+    assert_eq!(double_of("A A"), Some("A"));
+    assert_eq!(double_of("Cmd+A"), None);
+    // Not doubles: two different chords, a function key.
+    assert_eq!(normalize("A B"), None);
+    assert_eq!(normalize("F11").as_deref(), Some("F11"));
+    // Bindable like any chord, with its own conflicts.
+    let mut s = Session::default();
+    let r = s.execute_checked("shortcuts.set", json!({"command": "layer.newNull", "keys": "F7 F7"})).unwrap();
+    assert_eq!(r["keys"], json!(["F7 F7"]));
+    assert!(r["conflicts"].as_array().unwrap().is_empty(), "{r}");
+    let r = s.execute_checked("shortcuts.set", json!({"command": "layer.newSolid", "keys": "F7F7"}));
+    assert!(r.is_err() || r.unwrap()["keys"] != json!(["F7 F7"]), "only letters and digits double without a space");
 }

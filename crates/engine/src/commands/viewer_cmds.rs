@@ -154,7 +154,13 @@ fn reset_exposure(s: &mut Session, _: &Value) -> Result<Value> {
     Ok(json!(0.0))
 }
 
+/// A snapshot slot (1–4) as an index.
+fn slot_index(cmd: &str, slot: u64) -> Result<usize> {
+    (1..=4).contains(&slot).then_some(slot as usize - 1).ok_or_else(|| bad(cmd, "slot: 1–4"))
+}
+
 fn take_snapshot(s: &mut Session, p: &Value) -> Result<Value> {
+    let slot = slot_index("view.takeSnapshot", p.get("slot").and_then(Value::as_u64).unwrap_or(1))?;
     let cid = comp_id(s, p)?;
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
     let t = s.time_of(cid);
@@ -162,8 +168,11 @@ fn take_snapshot(s: &mut Session, p: &Value) -> Result<Value> {
     let img = s.render(cid, t, RenderOpts { scale, guides: true, view: s.view_camera(cid).filter(|_| comp.has_3d()), ..Default::default() });
     let (w, h) = (img.width, img.height);
     s.snapshot = Some(Snapshot { comp: cid, time: t, scale, image: std::sync::Arc::new(img) });
+    if let Some(sl) = s.snapshot_slots.get_mut(slot) {
+        *sl = s.snapshot.clone();
+    }
     s.events.push(crate::Event::ProjectChanged { revision: s.revision });
-    Ok(json!({"width": w, "height": h, "time": t.seconds()}))
+    Ok(json!({"width": w, "height": h, "time": t.seconds(), "slot": slot + 1}))
 }
 
 fn has_snapshot(s: &Session) -> std::result::Result<(), String> {
@@ -171,6 +180,17 @@ fn has_snapshot(s: &Session) -> std::result::Result<(), String> {
 }
 
 fn show_snapshot(s: &mut Session, p: &Value) -> Result<Value> {
+    // A slot: that snapshot becomes the one shown.
+    if let Some(n) = p.get("slot").and_then(Value::as_u64) {
+        let i = slot_index("view.showSnapshot", n)?;
+        let snap = s
+            .snapshot_slots
+            .get(i)
+            .cloned()
+            .flatten()
+            .ok_or_else(|| bad("view.showSnapshot", format!("snapshot {n} is empty: take it first (Shift+F{})", 4 + n)))?;
+        s.snapshot = Some(snap);
+    }
     s.state.viewer.show_snapshot = b_p(p, "value").unwrap_or(!s.state.viewer.show_snapshot);
     Ok(json!(s.state.viewer.show_snapshot))
 }
@@ -296,6 +316,14 @@ fn new_path(s: &mut Session, p: &Value) -> Result<Value> {
         Ok((lid, group, path_uid))
     })?;
     Ok(json!({"layer": lid.0, "group": group, "path": path_uid}))
+}
+
+fn purge_snapshot(s: &mut Session, n: u64) -> Result<Value> {
+    let i = slot_index("view.purgeSnapshot", n)?;
+    if let Some(sl) = s.snapshot_slots.get_mut(i) {
+        *sl = None;
+    }
+    Ok(Value::Null)
 }
 
 /// Snapshot image as straight 8-bit RGBA rows (for frontends / `--out`).
@@ -522,7 +550,26 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("view.exposure", "Adjust Exposure", [], None, "{stops? | delta?}", always, exposure),
         cmd!("view.resetExposure", "Reset Exposure", [], None, "{}", always, reset_exposure),
         cmd!("view.takeSnapshot", "Take Snapshot", [], Some("Shift+F5"), "{comp?, scale?: 0.05..1}", has_comp, take_snapshot),
-        cmd!("view.showSnapshot", "Show Snapshot", [], None, "{value?}", has_snapshot, show_snapshot),
+        // (F5–F8 show a snapshot while held: the frontend watches the keys bound to these.)
+        cmd!("view.showSnapshot", "Show Snapshot", [], Some("F5"), "{value?, slot?: 1–4}", has_snapshot, show_snapshot),
+        cmd!("view.takeSnapshot2", "Take Snapshot 2", [], Some("Shift+F6"), "{comp?, scale?}", has_comp, |s, p| take_snapshot(
+            s,
+            &super::layer::with(p, "slot", json!(2))
+        )),
+        cmd!("view.takeSnapshot3", "Take Snapshot 3", [], Some("Shift+F7"), "{comp?, scale?}", has_comp, |s, p| take_snapshot(
+            s,
+            &super::layer::with(p, "slot", json!(3))
+        )),
+        cmd!("view.takeSnapshot4", "Take Snapshot 4", [], Some("Shift+F8"), "{comp?, scale?}", has_comp, |s, p| take_snapshot(
+            s,
+            &super::layer::with(p, "slot", json!(4))
+        )),
+        cmd!("view.showSnapshot2", "Show Snapshot 2", [], Some("F6"), "{value?}", always, |s, p| show_snapshot(s, &super::layer::with(p, "slot", json!(2)))),
+        cmd!("view.showSnapshot3", "Show Snapshot 3", [], Some("F7"), "{value?}", always, |s, p| show_snapshot(s, &super::layer::with(p, "slot", json!(3)))),
+        cmd!("view.showSnapshot4", "Show Snapshot 4", [], Some("F8"), "{value?}", always, |s, p| show_snapshot(s, &super::layer::with(p, "slot", json!(4)))),
+        cmd!("view.purgeSnapshot2", "Purge Snapshot 2", [], Some("Cmd+Shift+F6"), "{}", always, |s, _| purge_snapshot(s, 2)),
+        cmd!("view.purgeSnapshot3", "Purge Snapshot 3", [], Some("Cmd+Shift+F7"), "{}", always, |s, _| purge_snapshot(s, 3)),
+        cmd!("view.purgeSnapshot4", "Purge Snapshot 4", [], Some("Cmd+Shift+F8"), "{}", always, |s, _| purge_snapshot(s, 4)),
         cmd!("view.fastPreviewMode", "Fast Previews", [], None, "{mode: off|adaptive|draft|fastDraft|wireframe}", always, fast_previews),
         fast!("view.fastPreviews.off", "Fast Previews: Off (Final Quality)", "Cmd+Alt+1", "off"),
         fast!("view.fastPreviews.adaptive", "Fast Previews: Adaptive Resolution", "Cmd+Alt+2", "adaptive"),
