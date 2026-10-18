@@ -1380,4 +1380,19 @@ fn layers_are_callable_property_groups() {
     assert!(f.err("thisLayer(\"nope\")").contains("no property"), "{}", f.err("thisLayer(\"nope\")"));
 }
 
+/// A layer is kept from one evaluation to the next (it is dear to make) but reads the project
+/// afresh in each, and an expression's own fields on it don't reach the next one.
+#[test]
+fn a_kept_layer_reads_the_project_again() {
+    let mut f = fx();
+    let first = "thisComp.layer(\"B\").index * 10 + thisComp.layer(2).name.length";
+    assert_close!(f.num(first, 0.0), 21.0);
+    f.layer_mut(f.b).name = "Bee".into();
+    f.p.comp_mut(f.cid).unwrap().layers.swap(0, 1);
+    assert_close!(f.num("thisComp.layer(\"Bee\").index * 10 + thisComp.layer(2).name.length", 0.0), 11.0);
+    assert_close!(f.num("thisLayer.index", 0.0), 2.0);
+    let _ = f.ev(f.a, ROT, "thisLayer.mine = 5; 0", 0.0);
+    assert_close!(f.num("thisLayer.mine === undefined ? 1 : 0", 0.0), 1.0);
+}
+
 mod property_group;
