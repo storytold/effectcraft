@@ -165,3 +165,96 @@ fn zoomed_out_track_point_can_be_grabbed() {
         assert_eq!(rect(&h, "viewer.track.1.attach").width(), 12.0, "{mag}×");
     }
 }
+
+fn click(h: &mut Harness<'_, EffectcraftApp>, at: egui::Pos2) {
+    h.input_mut().events.push(egui::Event::PointerMoved(at));
+    h.step();
+    h.input_mut().events.push(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.step();
+    h.input_mut().events.push(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    h.run_steps(2);
+}
+
+/// Track point 1 of the current track: its centre and its attach point (layer pixels).
+fn point(h: &mut Harness<'_, EffectcraftApp>) -> ([f64; 2], [f64; 2]) {
+    let st = h.state_mut().session.execute("track.status", json!({})).unwrap();
+    let p = &st["tracker"]["points"][0];
+    let v = |k: &str| [p[k][0].as_f64().unwrap(), p[k][1].as_f64().unwrap()];
+    let (c, off) = (v("center"), v("attachOffset"));
+    (c, [c[0] + off[0], c[1] + off[1]])
+}
+
+fn plate_position(h: &Harness<'_, EffectcraftApp>) -> Vec<f64> {
+    let c = h.state().session.active_comp().unwrap();
+    c.layers.iter().find(|l| l.name == "Plate").unwrap().props.prop("transform/position").unwrap().value.components()
+}
+
+/// A press on a track point in the viewer gives it the arrow keys: they move its feature region,
+/// search region and attach point by 1 screen pixel (Shift: 10), and with Alt the two regions
+/// while the attach point stays. A click away gives the arrows back to the layers.
+#[test]
+fn arrow_keys_move_the_track_point_pressed_in_the_viewer() {
+    use egui::{Key, Modifiers};
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| app());
+    let s = &mut h.state_mut().session;
+    s.execute("track.motion", json!({})).unwrap();
+    s.execute("track.setPoint", json!({"point": 1, "featureSize": [60, 60], "searchSize": [120, 120]})).unwrap();
+    h.run_steps(3);
+    let px = 640.0 / rect(&h, "viewer.comp").width() as f64;
+    let near = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).abs() < 1e-6 && (a[1] - b[1]).abs() < 1e-6;
+
+    // No point pressed yet: the arrows nudge the selected layer.
+    let (home, p0) = (plate_position(&h), point(&mut h));
+    assert!(h.state().auto.find("viewer.track.1.keyboard").is_none());
+    h.key_press(Key::ArrowRight);
+    h.run_steps(2);
+    assert!((plate_position(&h)[0] - home[0] - px).abs() < 1e-6, "{:?}", plate_position(&h));
+    assert_eq!(point(&mut h), p0);
+    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+    h.run_steps(2);
+
+    // Press inside the feature region, off the attach point's crosshair.
+    let at = rect(&h, "viewer.track.1.feature").center() + egui::vec2(15.0, 0.0);
+    click(&mut h, at);
+    assert!(h.state().auto.find("viewer.track.1.keyboard").is_some(), "the point has the keyboard");
+    let (c0, a0) = point(&mut h);
+    h.key_press(Key::ArrowRight);
+    h.run_steps(2);
+    let (c, a) = point(&mut h);
+    assert!(near(c, [c0[0] + px, c0[1]]) && near(a, [a0[0] + px, a0[1]]), "{c:?} {a:?} from {c0:?} {a0:?} ({px} px)");
+    h.key_press_modifiers(Modifiers::SHIFT, Key::ArrowUp);
+    h.run_steps(2);
+    let (c, a) = point(&mut h);
+    assert!(near(c, [c0[0] + px, c0[1] - 10.0 * px]) && near(a, [a0[0] + px, a0[1] - 10.0 * px]), "{c:?} {a:?}");
+    // Alt: the regions move, the attach point stays.
+    let (c1, a1) = (c, a);
+    h.key_press_modifiers(Modifiers::ALT, Key::ArrowLeft);
+    h.run_steps(2);
+    h.key_press_modifiers(Modifiers::ALT | Modifiers::SHIFT, Key::ArrowDown);
+    h.run_steps(2);
+    let (c, a) = point(&mut h);
+    assert!(near(c, [c1[0] - px, c1[1] + 10.0 * px]) && near(a, a1), "{c:?} {a:?} from {c1:?} {a1:?}");
+    assert_eq!(plate_position(&h), home, "the layer stayed");
+
+    // A click away from the point: the arrows are the layers' again.
+    let away = rect(&h, "viewer.track.1.search").right_bottom() + egui::vec2(40.0, 40.0);
+    click(&mut h, away);
+    // (One more frame: the widgets are listed before the press is read.)
+    h.step();
+    assert!(h.state().auto.find("viewer.track.1.keyboard").is_none());
+    let before = point(&mut h);
+    h.key_press(Key::ArrowRight);
+    h.run_steps(2);
+    assert_eq!(point(&mut h), before);
+    assert!((plate_position(&h)[0] - home[0] - px).abs() < 1e-6);
+
+    // Agents: `track.selectPoint`.
+    let ctx = h.ctx.clone();
+    let r = effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "track.selectPoint", json!({"point": 1})).unwrap();
+    assert_eq!(r["point"], 1);
+    assert!(effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "track.selectPoint", json!({"point": 9})).is_err());
+    effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "track.nudgeRegions.up10", json!({})).unwrap();
+    assert!(near(point(&mut h).0, [before.0[0], before.0[1] - 10.0 * px]));
+    effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "track.selectPoint", json!({})).unwrap();
+    assert_eq!(h.state().ui.viewer.track_point, None);
+}

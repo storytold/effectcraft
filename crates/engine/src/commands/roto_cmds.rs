@@ -45,6 +45,9 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("roto.unfreeze", "Unfreeze", [], None, "{layer?, effect?}", has_comp, unfreeze),
         cmd!("roto.clearStrokes", "Remove Roto Brush Strokes", [], None, "{layer?, effect?, frame? (only this layer frame), kind?}", has_comp, clear_strokes),
         cmd!("roto.cancel", "Stop Roto Brush", [], None, "{}", is_running, |s, _| Ok(json!({"stopped": s.stop_roto()}))),
+        // The Layer panel's view keys: the view on, or back to none.
+        cmd!("roto.showAlphaBoundary", "Show Alpha Boundary", [], Some("Alt+5"), "{}", always, |s, _| toggle_view(s, "alphaBoundary")),
+        cmd!("roto.showAlphaOverlay", "Show Alpha Overlay", [], Some("Alt+6"), "{}", always, |s, _| toggle_view(s, "alphaOverlay")),
         cmd!(
             "roto.options",
             "Roto Brush Options",
@@ -380,6 +383,11 @@ fn clear_strokes(s: &mut Session, p: &Value) -> Result<Value> {
         write_data(s, "Remove Roto Brush Strokes", cid, lid, uid, &d)?;
     }
     Ok(json!({"layer": lid.0, "effect": uid, "removed": removed, "strokes": d.strokes.len(), "base": d.base}))
+}
+
+fn toggle_view(s: &mut Session, view: &str) -> Result<Value> {
+    let next = if s.state.roto.view == view { "none" } else { view };
+    options(s, &json!({"view": next}))
 }
 
 fn options(s: &mut Session, p: &Value) -> Result<Value> {

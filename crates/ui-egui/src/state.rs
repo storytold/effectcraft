@@ -261,6 +261,9 @@ pub struct ViewerState {
     pub ruler_origin: [f64; 2],
     /// Region of Interest button armed: the next drag in the viewer draws the region.
     pub roi_draw: bool,
+    /// The track point the arrow keys move: its tracker and its number (1-based), set by a
+    /// press on the point in the viewer.
+    pub track_point: Option<(u64, usize)>,
     /// The pointer is dragging in the viewer this frame (Adaptive Resolution).
     #[serde(skip)]
     pub interacting: bool,
@@ -296,6 +299,7 @@ impl Default for ViewerState {
             proportional_grid: false,
             ruler_origin: [0.0, 0.0],
             roi_draw: false,
+            track_point: None,
             interacting: false,
             property_interacting: false,
             extended: None,

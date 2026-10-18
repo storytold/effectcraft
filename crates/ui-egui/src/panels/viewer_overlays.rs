@@ -402,6 +402,54 @@ pub(crate) fn begin_free_transform(ctx: &egui::Context, layer: LayerId, uid: u64
     ctx.data_mut(|d| d.insert_temp(ft_id(), (layer, uid)));
 }
 
+/// The path Free Transform Points works on: the one whose points are selected, else the selected
+/// mask, else the shape layer Path selected in the Timeline (the Path item or its Path property).
+pub(crate) fn free_transform_path(app: &EffectcraftApp) -> Option<(LayerId, u64)> {
+    let s = &app.session;
+    if let Some(v) = s.state.selected_vertices.first() {
+        return Some((v.layer, v.mask));
+    }
+    if let Some(m) = s.selected_mask() {
+        return Some(m);
+    }
+    let comp = s.active_comp()?;
+    s.state.selected_props.iter().find_map(|(lid, uid)| {
+        // (A walk with its own stack: shape groups nest as deep as people make them.)
+        let mut stack = vec![&comp.layer(*lid)?.props];
+        while let Some(g) = stack.pop() {
+            if g.match_id == "path" && g.get("path").is_some_and(|pr| pr.value.as_path().is_some() && (g.uid == *uid || pr.uid == *uid)) {
+                return Some((*lid, g.uid));
+            }
+            stack.extend(g.groups());
+        }
+        None
+    })
+}
+
+/// Free Transform Points from the menu or its key: the box around [`free_transform_path`].
+/// Fewer than two points selected: all of the path's are, so the box and the edit cover the same
+/// points. False when there's no such path.
+pub(crate) fn enter_free_transform(app: &mut EffectcraftApp, ctx: &egui::Context) -> bool {
+    let Some((layer, uid)) = free_transform_path(app) else { return false };
+    let s = &app.session;
+    let Some(l) = s.active_comp().and_then(|c| c.layer(layer)) else { return false };
+    let path = l.props.find_group(uid).and_then(|g| g.get("path")).map(|pr| pr.value_at(l.layer_time(s.time())));
+    let Some(n) = path.as_ref().and_then(|v| v.as_path()).map(|sp| sp.vertices.len()).filter(|n| *n > 0) else {
+        return false;
+    };
+    if s.state.selected_vertices.iter().filter(|v| v.layer == layer && v.mask == uid).count() < 2 {
+        let all: Vec<serde_json::Value> = (0..n).map(|index| json!({"layer": layer.0, "mask": uid, "index": index})).collect();
+        if let Err(e) = app.session.execute("mask.selectVertices", json!({"vertices": all})) {
+            app.ui.status = e.to_string();
+            return false;
+        }
+    }
+    // The box is the Selection tool's.
+    app.ui.tool = crate::state::Tool::Selection;
+    begin_free_transform(ctx, layer, uid);
+    true
+}
+
 pub(crate) fn end_free_transform(ctx: &egui::Context) {
     ctx.data_mut(|d| d.remove::<(LayerId, u64)>(ft_id()));
 }

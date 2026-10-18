@@ -45,6 +45,7 @@ pub mod scopes_panel;
 pub mod script_console;
 pub mod scriptui_view;
 pub mod settings;
+pub(crate) mod shape_draft;
 pub mod shortcut_editor;
 pub mod templates;
 pub mod text_panels;

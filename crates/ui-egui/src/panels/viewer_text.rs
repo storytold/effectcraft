@@ -16,7 +16,7 @@
 
 use effectcraft_engine::commands::text_edit::layer_doc;
 use effectcraft_engine::geom::{Mat3, vec2 as gv2};
-use effectcraft_engine::keyframe::{Kerning, TextDoc};
+use effectcraft_engine::keyframe::TextDoc;
 use effectcraft_engine::project::{Layer, LayerId, LayerSource};
 use effectcraft_engine::render::EvalCtx;
 use effectcraft_engine::text::kurbo::Point;
@@ -395,7 +395,9 @@ fn keyboard(app: &mut EffectcraftApp, ui: &mut egui::Ui, viewer: Rect) {
     let events = ui.input(|i| i.events.clone());
     let ctx = ui.ctx().clone();
     for ev in events {
-        let Some(sel) = app.session.state.text_edit.clone() else { return };
+        if app.session.state.text_edit.is_none() {
+            return;
+        }
         match ev {
             egui::Event::PointerButton { pos, pressed: true, .. } if !viewer.contains(pos) => return,
             egui::Event::Text(t) if !t.chars().any(char::is_control) => {
@@ -432,32 +434,19 @@ fn keyboard(app: &mut EffectcraftApp, ui: &mut egui::Ui, viewer: Rect) {
             egui::Event::Key { key, pressed: true, modifiers: m, .. } => {
                 use egui::Key;
                 let cmd = m.command;
+                // The formatting shortcuts of the text being edited (the keyboard shortcut
+                // preset's Text Editing scope) come before the caret keys.
+                if let Some(id) = crate::menus::context_binding(app, "TextEditing", key, m) {
+                    if let Err(e) = crate::menus::invoke(app, &ctx, &id, json!({})) {
+                        app.ui.status = e;
+                    }
+                    typing_key(ui, true);
+                    continue;
+                }
                 let mv = |app: &mut EffectcraftApp, to: &str| {
                     exec(app, "text.moveCaret", json!({"to": to, "extend": m.shift}));
                 };
                 match key {
-                    Key::ArrowLeft | Key::ArrowRight if m.alt => {
-                        // Kerning at the caret, tracking over a selection.
-                        let step = if cmd { 100.0 } else { 20.0 } * if key == Key::ArrowLeft { -1.0 } else { 1.0 };
-                        let doc = layer_doc(&app.session, sel.layer).unwrap_or_default();
-                        if sel.is_empty() {
-                            if sel.caret < doc.char_len() {
-                                let cur = match doc.style_at(sel.caret).kerning {
-                                    Kerning::Manual(v) => v,
-                                    _ => 0.0,
-                                };
-                                exec(
-                                    app,
-                                    "layer.setText",
-                                    json!({"layer": sel.layer.0, "range": [sel.caret, sel.caret + 1], "kerning": cur + step, "merge": format!("text-kern-{}", sel.caret)}),
-                                );
-                            }
-                        } else {
-                            let r = sel.range();
-                            let cur = doc.style_at(r.start).tracking;
-                            exec(app, "layer.setText", json!({"layer": sel.layer.0, "range": [r.start, r.end], "tracking": cur + step, "merge": "text-track"}));
-                        }
-                    }
                     Key::ArrowLeft => mv(app, if cmd { "wordLeft" } else { "left" }),
                     Key::ArrowRight => mv(app, if cmd { "wordRight" } else { "right" }),
                     Key::ArrowUp => mv(app, if cmd { "paraUp" } else { "up" }),
@@ -491,13 +480,6 @@ fn keyboard(app: &mut EffectcraftApp, ui: &mut egui::Ui, viewer: Rect) {
                     }
                     Key::Z if cmd => {
                         let _ = crate::menus::invoke(app, &ctx, if m.shift { "edit.redo" } else { "edit.undo" }, json!({}));
-                    }
-                    Key::Comma | Key::Period if cmd && m.shift => {
-                        let doc = layer_doc(&app.session, sel.layer).unwrap_or_default();
-                        let r = sel.range();
-                        let size = sel.pending.as_ref().map_or_else(|| doc.style_at(r.start).size, |p| p.size);
-                        let ns = (size + if key == Key::Period { 2.0 } else { -2.0 }).max(1.0);
-                        exec(app, "layer.setText", json!({"layer": sel.layer.0, "range": [r.start, r.end], "size": ns}));
                     }
                     _ => {}
                 }

@@ -337,6 +337,10 @@ pass `"wait": true` to block until it finishes, which is what the CLI and headle
    tracker (Motion Target: the layer above). Use `track.stabilize` for Stabilize, or `track.new` with
    `kind` `transform|stabilize|affine|perspective|raw` and `rotation`/`scale`.
 2. `execute_command {"command":"track.setPoint","params":{"point":1,"center":[812,440],"featureSize":[40,40],"searchSize":[96,96]}}`
+   (`move: [dx, dy]` moves the point from where it is; with `attachOffset` lowered by the same
+   amount the attach point stays put. In the app, `track.selectPoint {"point": 1}` gives a point
+   the arrow keys, `track.nudge.<up|down|left|right>[10]` and `track.nudgeRegions.…` are those
+   keys.)
 3. `execute_command {"command":"track.analyze","params":{"direction":"forward","wait":true}}` keys Feature
    Center, Confidence and Attach Point on every frame from the current time to the layer's end.
 4. `execute_command {"command":"track.apply","params":{"dimensions":"xy"}}` keys the target's Position

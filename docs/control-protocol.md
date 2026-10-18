@@ -160,10 +160,13 @@ step; `ui.set {viewer: {res}}` sets the active comp's, and `ui.inspect` reports 
 `ui.viewer.res`), `view.setRegionOfInterest {rect}`, `view.addGuide {percent?}`,
 `view.addPercentGuide`, `view.convertGuides {to: percent|pixels, index?}`,
 `view.moveGuide` (comp pixels, whatever the guide's unit), `view.removeGuide`, `effect.setLabel {layer?, effect, label}`; editing: `shape.newPath` (Pen on shape layers),
-`shape.newShape` (the shape tools: a new group in the selected shape layer, else a new shape layer),
+`shape.newShape` (the shape tools: a new group in the selected shape layer, else a new shape layer;
+`points`, `roundness`, `innerRadius`, `outerRoundness` and `innerRoundness` shape a polygon, star or
+rounded rectangle, and `layer.addMask` takes them too),
 `shape.toolOptions` (the Tools bar's Tool Creates Shape / Mask and Fill and Stroke Options),
 `mask.insertVertex`, `mask.convertVertex`, `mask.deleteVertices`, `path.freeTransform` (masks and
-shape paths by uid), `keys.setSpatialTangents` (motion-path handles) and `keys.transform` (Graph
+shape paths by uid; in the app, without numbers and with a mask or path points selected, it puts
+the free-transform box around them in the viewer), `keys.setSpatialTangents` (motion-path handles) and `keys.transform` (Graph
 Editor transform box, timeline Alt-drag scaling).
 
 The MCP server's bridge mode (`effectcraft-cli mcp --bridge 9877`) is a thin client of this protocol;
