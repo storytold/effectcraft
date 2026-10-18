@@ -539,3 +539,333 @@ fn arrow_keys_move_the_caret_in_rename_fields() {
     let layer_name = h.state().session.active_comp().unwrap().layer(effectcraft_engine::project::LayerId(layer)).unwrap().name.clone();
     assert_eq!(layer_name, "Pla-te");
 }
+
+#[test]
+fn the_expression_twirl_collapses_and_expands_the_expression_row() {
+    let (mut h, _) = harness();
+    let (layer, opacity, transform) = {
+        let s = &mut h.state_mut().session;
+        let l = s.execute("layer.newSolid", json!({"name": "Plate", "color": "#406080"})).unwrap()["layer"].as_u64().unwrap();
+        s.execute("prop.setExpression", json!({"layer": l, "path": "transform/opacity", "expression": "time * 10"})).unwrap();
+        let tr = s.active_comp().unwrap().layer(effectcraft_engine::project::LayerId(l)).unwrap().props.sub("transform").unwrap().clone();
+        (l, tr.get("opacity").unwrap().uid, tr.uid)
+    };
+    h.state_mut().ui.timeline.open_layers.insert(layer);
+    h.state_mut().ui.timeline.open_groups.insert(transform);
+    h.run_steps(3);
+
+    let expr_id = format!("timeline.prop.{opacity}.expression");
+    let twirl_id = format!("timeline.prop.{opacity}.exprTwirl");
+
+    // Initially expanded: expression editor row is present.
+    assert!(h.state().auto.find(&expr_id).is_some());
+    assert!(!h.state().ui.timeline.expr_closed.contains(&opacity));
+    assert_eq!(h.state().auto.find(&twirl_id).unwrap().label, "Twirl expression: transform/opacity");
+
+    // Clicking the twirl collapses the expression row.
+    let twirl_pos = center(&h, &twirl_id);
+    click(&mut h, twirl_pos, 1);
+    h.run_steps(2);
+
+    assert!(h.state().ui.timeline.expr_closed.contains(&opacity));
+    assert!(h.state().auto.find(&expr_id).is_none());
+
+    // Clicking again expands it back.
+    click(&mut h, twirl_pos, 1);
+    h.run_steps(2);
+
+    assert!(!h.state().ui.timeline.expr_closed.contains(&opacity));
+    assert!(h.state().auto.find(&expr_id).is_some());
+}
+
+#[test]
+fn collapsed_expression_hint_does_not_overlap_keyframes() {
+    let (mut h, _) = harness();
+    let (layer, opacity, transform) = {
+        let s = &mut h.state_mut().session;
+        let l = s.execute("layer.newSolid", json!({"name": "Solid", "color": "#406080"})).unwrap()["layer"].as_u64().unwrap();
+        // Add a long expression.
+        let expr = "n = 0; // ".to_string() + &"a".repeat(300);
+        s.execute("prop.setExpression", json!({"layer": l, "path": "transform/opacity", "expression": expr})).unwrap();
+        // Add keyframes at 1.0s and 2.0s.
+        s.execute("prop.addKey", json!({"layer": l, "path": "transform/opacity", "time": 1.0, "value": 50.0})).unwrap();
+        s.execute("prop.addKey", json!({"layer": l, "path": "transform/opacity", "time": 2.0, "value": 100.0})).unwrap();
+        let tr = s.active_comp().unwrap().layer(effectcraft_engine::project::LayerId(l)).unwrap().props.sub("transform").unwrap().clone();
+        (l, tr.get("opacity").unwrap().uid, tr.uid)
+    };
+    h.state_mut().ui.timeline.open_layers.insert(layer);
+    h.state_mut().ui.timeline.open_groups.insert(transform);
+    // Collapse the expression row.
+    h.state_mut().ui.timeline.expr_closed.insert(opacity);
+    h.run_steps(3);
+
+    let hint_id = format!("timeline.prop.{opacity}.exprHint");
+    let hint_entry = h.state().auto.find(&hint_id).expect("exprHint should exist before first keyframe");
+    let hint_rect = hint_entry.rect;
+
+    // Find the first keyframe.
+    let keys: Vec<_> = h.state().auto.query(&format!("timeline.key.{opacity}."));
+    assert!(!keys.is_empty(), "keyframes should be present");
+    let first_key_x = keys.iter().map(|k| k.rect[0]).fold(f32::INFINITY, f32::min);
+
+    // The expression hint must end before the first keyframe.
+    assert!(hint_rect[0] + hint_rect[2] <= first_key_x, "hint right edge {} must not exceed first keyframe x {}", hint_rect[0] + hint_rect[2], first_key_x);
+}
+
+#[test]
+fn long_expressions_do_not_overflow_layer_rows_and_are_bounded() {
+    let (mut h, _) = harness();
+    let (layer1, opacity, transform) = {
+        let s = &mut h.state_mut().session;
+        let l = s.execute("layer.newSolid", json!({"name": "Solid 1", "color": "#406080"})).unwrap()["layer"].as_u64().unwrap();
+        // A 25-line expression.
+        let expr = (1..=25).map(|i| format!("// line {i}")).collect::<Vec<_>>().join("\n");
+        s.execute("prop.setExpression", json!({"layer": l, "path": "transform/opacity", "expression": expr})).unwrap();
+        let tr = s.active_comp().unwrap().layer(effectcraft_engine::project::LayerId(l)).unwrap().props.sub("transform").unwrap().clone();
+        (l, tr.get("opacity").unwrap().uid, tr.uid)
+    };
+    let layer2 = h.state_mut().session.execute("layer.newSolid", json!({"name": "Solid 2", "color": "#804060"})).unwrap()["layer"].as_u64().unwrap();
+    h.state_mut().ui.timeline.open_layers.insert(layer1);
+    h.state_mut().ui.timeline.open_groups.insert(transform);
+    h.run_steps(3);
+    let expr_id = format!("timeline.prop.{opacity}.expression");
+    let expr_rect = h.state().auto.find(&expr_id).unwrap().rect;
+    let line_h = h.state().tokens.row_h;
+    // The expression row should be capped at EXPR_AUTO_LINES (8 lines), not 25 lines tall!
+    assert!(expr_rect[3] <= line_h * 9.0, "expression height {} exceeds auto limit", expr_rect[3]);
+    let layer2_rect = h.state().auto.find(&format!("timeline.layer.{layer2}.row")).unwrap().rect;
+    // Layer 2 must sit right below the bounded expression row, NOT pushed 25 lines down!
+    assert!(layer2_rect[1] < expr_rect[1] + expr_rect[3] + line_h * 2.0);
+}
+
+#[test]
+fn scrolling_inside_expression_editor_does_not_scroll_timeline_layers() {
+    let (mut h, _) = harness();
+    let (layer, opacity, transform) = {
+        let s = &mut h.state_mut().session;
+        let l = s.execute("layer.newSolid", json!({"name": "Plate", "color": "#406080"})).unwrap()["layer"].as_u64().unwrap();
+        let expr = (1..=20).map(|i| format!("// line {i}")).collect::<Vec<_>>().join("\n");
+        s.execute("prop.setExpression", json!({"layer": l, "path": "transform/opacity", "expression": expr})).unwrap();
+        let tr = s.active_comp().unwrap().layer(effectcraft_engine::project::LayerId(l)).unwrap().props.sub("transform").unwrap().clone();
+        (l, tr.get("opacity").unwrap().uid, tr.uid)
+    };
+    h.state_mut().ui.timeline.open_layers.insert(layer);
+    h.state_mut().ui.timeline.open_groups.insert(transform);
+    h.run_steps(3);
+    let expr_id = format!("timeline.prop.{opacity}.expression");
+    let expr_pos = center(&h, &expr_id);
+    let initial_scroll = h.state().ui.timeline.scroll_y;
+
+    // Move pointer over expression editor and scroll wheel.
+    h.input_mut().events.push(Event::PointerMoved(expr_pos));
+    h.input_mut().events.push(Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, -50.0),
+        modifiers: Modifiers::NONE,
+        phase: egui::TouchPhase::Move,
+    });
+    h.run_steps(2);
+
+    // Timeline layers scroll position should NOT change.
+    assert_eq!(h.state().ui.timeline.scroll_y, initial_scroll);
+}
+
+#[test]
+fn scrolling_over_short_expression_editor_scrolls_timeline_layers() {
+    let (mut h, _) = harness();
+    let (layer, opacity, transform) = {
+        let s = &mut h.state_mut().session;
+        // Add background layers so the timeline layers area can scroll.
+        for i in 1..=15 {
+            s.execute("layer.newSolid", json!({"name": format!("BG {i}"), "color": "#202020"})).unwrap();
+        }
+        let l = s.execute("layer.newSolid", json!({"name": "Plate", "color": "#406080"})).unwrap()["layer"].as_u64().unwrap();
+        s.execute("prop.setExpression", json!({"layer": l, "path": "transform/opacity", "expression": "50 + 50"})).unwrap();
+        let tr = s.active_comp().unwrap().layer(effectcraft_engine::project::LayerId(l)).unwrap().props.sub("transform").unwrap().clone();
+        (l, tr.get("opacity").unwrap().uid, tr.uid)
+    };
+    h.state_mut().ui.timeline.open_layers.insert(layer);
+    h.state_mut().ui.timeline.open_groups.insert(transform);
+    h.run_steps(3);
+    let expr_id = format!("timeline.prop.{opacity}.expression");
+    let expr_pos = center(&h, &expr_id);
+    let initial_scroll = h.state().ui.timeline.scroll_y;
+
+    // Move pointer over short expression editor and scroll wheel.
+    h.input_mut().events.push(Event::PointerMoved(expr_pos));
+    h.input_mut().events.push(Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, -50.0),
+        modifiers: Modifiers::NONE,
+        phase: egui::TouchPhase::Move,
+    });
+    h.run_steps(2);
+
+    // Because the short expression has no overflow, the mouse wheel must scroll the Timeline!
+    assert!(
+        h.state().ui.timeline.scroll_y > initial_scroll,
+        "timeline scroll_y {} should have scrolled past initial {}",
+        h.state().ui.timeline.scroll_y,
+        initial_scroll
+    );
+}
+
+#[test]
+fn expression_editor_horizontal_navigation_and_bounds() {
+    let (mut h, _) = harness();
+    let (layer, opacity, transform) = {
+        let s = &mut h.state_mut().session;
+        let l = s.execute("layer.newSolid", json!({"name": "Solid", "color": "#406080"})).unwrap()["layer"].as_u64().unwrap();
+        // A single very long line.
+        let expr = "n = 0; // ".to_string() + &"x".repeat(300);
+        s.execute("prop.setExpression", json!({"layer": l, "path": "transform/opacity", "expression": expr})).unwrap();
+        let tr = s.active_comp().unwrap().layer(effectcraft_engine::project::LayerId(l)).unwrap().props.sub("transform").unwrap().clone();
+        (l, tr.get("opacity").unwrap().uid, tr.uid)
+    };
+    h.state_mut().ui.timeline.open_layers.insert(layer);
+    h.state_mut().ui.timeline.open_groups.insert(transform);
+    h.run_steps(3);
+
+    let expr_id = format!("timeline.prop.{opacity}.expression");
+    let expr_rect = h.state().auto.find(&expr_id).expect("expression editor should be open").rect;
+
+    // Focus editor and press End key to navigate to the end of the long line.
+    let p = center(&h, &expr_id);
+    click(&mut h, p, 1);
+    key(&mut h, Key::End);
+    h.run_steps(2);
+
+    // Verify editor has focus and keyboard.
+    assert!(h.ctx.egui_wants_keyboard_input(), "expression editor retains focus after navigating to end of line");
+
+    // The editor's auto rect must stay bounded inside the timeline row area.
+    assert!(expr_rect[2] > 100.0, "editor has visible width");
+}
+
+#[test]
+fn drag_selecting_outside_expression_editor_scrolls_and_expands_selection() {
+    let (mut h, _) = harness();
+    let (layer, opacity, transform) = {
+        let s = &mut h.state_mut().session;
+        let l = s.execute("layer.newSolid", json!({"name": "Solid", "color": "#406080"})).unwrap()["layer"].as_u64().unwrap();
+        // A 20-line expression.
+        let expr = (1..=20).map(|i| format!("line_{i}_code = {i};")).collect::<Vec<_>>().join("\n");
+        s.execute("prop.setExpression", json!({"layer": l, "path": "transform/opacity", "expression": expr})).unwrap();
+        let tr = s.active_comp().unwrap().layer(effectcraft_engine::project::LayerId(l)).unwrap().props.sub("transform").unwrap().clone();
+        (l, tr.get("opacity").unwrap().uid, tr.uid)
+    };
+    h.state_mut().ui.timeline.open_layers.insert(layer);
+    h.state_mut().ui.timeline.open_groups.insert(transform);
+    h.run_steps(3);
+
+    let expr_id = format!("timeline.prop.{opacity}.expression");
+    let expr_rect = h.state().auto.find(&expr_id).expect("expression editor should be open").rect;
+    let from = pos2(expr_rect[0] + 30.0, expr_rect[1] + 5.0);
+    // Drag downwards well below the bottom of the editor.
+    let to = pos2(expr_rect[0] + 30.0, expr_rect[1] + expr_rect[3] + 40.0);
+
+    drag(&mut h, from, to);
+    h.run_steps(3);
+
+    // Verify that selection range expanded significantly into the expression text.
+    let edit_id = egui::Id::new(("expr-edit", opacity));
+    let st = egui::text_edit::TextEditState::load(&h.ctx, edit_id).expect("editor state exists");
+    let range = st.cursor.char_range().expect("text selection range exists");
+    assert!(range.primary.index.0 > 80, "selection primary index {} should have scrolled past initial lines", range.primary.index.0);
+}
+
+#[test]
+fn scrolled_expression_editor_is_clipped_to_rows_rect() {
+    let (mut h, _) = harness();
+    let (layer, _opacity, transform) = {
+        let s = &mut h.state_mut().session;
+        for i in 1..=15 {
+            s.execute("layer.newSolid", json!({"name": format!("BG {i}"), "color": "#202020"})).unwrap();
+        }
+        let l = s.execute("layer.newSolid", json!({"name": "Solid", "color": "#406080"})).unwrap()["layer"].as_u64().unwrap();
+        let expr = (1..=20).map(|i| format!("// line {i}")).collect::<Vec<_>>().join("\n");
+        s.execute("prop.setExpression", json!({"layer": l, "path": "transform/opacity", "expression": expr})).unwrap();
+        let tr = s.active_comp().unwrap().layer(effectcraft_engine::project::LayerId(l)).unwrap().props.sub("transform").unwrap().clone();
+        (l, tr.get("opacity").unwrap().uid, tr.uid)
+    };
+    h.state_mut().ui.timeline.open_layers.insert(layer);
+    h.state_mut().ui.timeline.open_groups.insert(transform);
+    h.run_steps(3);
+
+    let ruler_rect = h.state().auto.find("timeline.ruler").expect("ruler exists").rect;
+    let ruler_bottom = ruler_rect[1] + ruler_rect[3];
+
+    // Scroll timeline down so that the expression editor row partially scrolls up past the top of the rows rect.
+    h.state_mut().ui.timeline.scroll_y = 170.0;
+    h.run_steps(3);
+
+    // Any shapes rendering expression editor text must NOT have a clip_rect extending above the rows rect / ruler bottom.
+    let expr_shapes: Vec<_> = h
+        .output()
+        .shapes
+        .iter()
+        .filter(|s| match &s.shape {
+            egui::Shape::Text(t) => t.galley.text().contains("line 1"),
+            _ => false,
+        })
+        .collect();
+    assert!(!expr_shapes.is_empty(), "expression text should be rendered");
+    for s in expr_shapes {
+        assert!(s.clip_rect.min.y >= ruler_bottom - 2.0, "expression text clip_rect.min.y {} overlaps ruler bottom {}", s.clip_rect.min.y, ruler_bottom);
+    }
+}
+
+#[test]
+fn scrolling_at_bottom_of_expression_editor_bubbles_to_timeline_layers() {
+    let (mut h, _) = harness();
+    let (layer, opacity, transform) = {
+        let s = &mut h.state_mut().session;
+        for i in 1..=15 {
+            s.execute("layer.newSolid", json!({"name": format!("BG {i}"), "color": "#202020"})).unwrap();
+        }
+        let l = s.execute("layer.newSolid", json!({"name": "Plate", "color": "#406080"})).unwrap()["layer"].as_u64().unwrap();
+        let expr = (1..=20).map(|i| format!("// line {i}")).collect::<Vec<_>>().join("\n");
+        s.execute("prop.setExpression", json!({"layer": l, "path": "transform/opacity", "expression": expr})).unwrap();
+        let tr = s.active_comp().unwrap().layer(effectcraft_engine::project::LayerId(l)).unwrap().props.sub("transform").unwrap().clone();
+        (l, tr.get("opacity").unwrap().uid, tr.uid)
+    };
+    h.state_mut().ui.timeline.open_layers.insert(layer);
+    h.state_mut().ui.timeline.open_groups.insert(transform);
+    h.run_steps(3);
+
+    let expr_id = format!("timeline.prop.{opacity}.expression");
+    let expr_pos = center(&h, &expr_id);
+    let initial_scroll = h.state().ui.timeline.scroll_y;
+
+    // Scroll a small step downwards: editor still has lines below, so timeline must NOT scroll.
+    h.input_mut().events.push(Event::PointerMoved(expr_pos));
+    h.input_mut().events.push(Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, -30.0),
+        modifiers: Modifiers::NONE,
+        phase: egui::TouchPhase::Move,
+    });
+    h.run_steps(2);
+    assert_eq!(h.state().ui.timeline.scroll_y, initial_scroll, "timeline layers should not scroll while editor has lines below");
+
+    // Scroll several large steps to reach the bottom of the expression code.
+    for _ in 0..6 {
+        h.input_mut().events.push(Event::PointerMoved(expr_pos));
+        h.input_mut().events.push(Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -100.0),
+            modifiers: Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+        });
+        h.step();
+    }
+    h.run_steps(2);
+
+    // Timeline layers scroll position must have advanced because the editor ran out of lines below!
+    assert!(
+        h.state().ui.timeline.scroll_y > initial_scroll,
+        "timeline scroll_y {} should have scrolled past initial {}",
+        h.state().ui.timeline.scroll_y,
+        initial_scroll
+    );
+}
