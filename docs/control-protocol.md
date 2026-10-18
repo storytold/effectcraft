@@ -163,7 +163,8 @@ step; `ui.set {viewer: {res}}` sets the active comp's, and `ui.inspect` reports 
 `shape.newShape` (the shape tools: a new group in the selected shape layer, else a new shape layer),
 `shape.toolOptions` (the Tools bar's Tool Creates Shape / Mask and Fill and Stroke Options),
 `mask.insertVertex`, `mask.convertVertex`, `mask.deleteVertices`, `path.freeTransform` (masks and
-shape paths by uid), `keys.setSpatialTangents` (motion-path handles) and `keys.transform` (Graph
+shape paths by uid; in the app, without numbers and with a mask or path points selected, it puts
+the free-transform box around them in the viewer), `keys.setSpatialTangents` (motion-path handles) and `keys.transform` (Graph
 Editor transform box, timeline Alt-drag scaling).
 
 The MCP server's bridge mode (`effectcraft-cli mcp --bridge 9877`) is a thin client of this protocol;

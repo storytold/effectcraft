@@ -882,6 +882,74 @@ fn clicking_off_a_mask_deselects_its_points() {
     assert_eq!(h.state().session.state.selected_layers, vec![LayerId(plate)], "the layer stays selected");
 }
 
+/// Cmd+T with a mask point selected puts the free-transform box around the whole mask, and a
+/// drag inside it moves the mask; with two or more points selected the box is theirs. Esc ends
+/// it. With nothing of a mask selected Cmd+T is the Type tool.
+#[test]
+fn cmd_t_puts_the_free_transform_box_around_the_selected_mask() {
+    let mut h = harness();
+    let plate = layer_id(&h, "Plate");
+    let corners = [[100.0, 60.0], [500.0, 60.0], [500.0, 300.0], [100.0, 300.0]];
+    let s = &mut h.state_mut().session;
+    s.execute("layer.select", json!({"layers": [plate]})).unwrap();
+    s.execute("view.snapping", json!({"value": false})).unwrap();
+    s.execute("mask.new", json!({"layer": plate, "vertices": corners, "closed": true})).unwrap();
+    s.execute("mask.selectVertices", json!({"vertices": []})).unwrap();
+    s.state.selected_props.clear();
+    h.state_mut().ui.tool = Tool::Pen;
+    h.run_steps(2);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::T);
+    h.run_steps(2);
+    assert_eq!(h.state().ui.tool, Tool::Type, "no mask selected: the Type tool");
+    assert!(h.state().auto.find("viewer.freeTransform.handle.0").is_none());
+
+    h.state_mut().ui.tool = Tool::Selection;
+    h.run_steps(2);
+    let at = screen(&h, [500.0, 60.0]);
+    click(&mut h, at);
+    assert_eq!(h.state().session.state.selected_vertices.len(), 1);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::T);
+    h.run_steps(2);
+    assert_eq!(h.state().ui.tool, Tool::Selection);
+    assert_eq!(h.state().session.state.selected_vertices.len(), 4, "one point selected: the whole mask");
+    assert!(h.state().auto.find("viewer.freeTransform.handle.0").is_some(), "the free-transform box is up");
+    let (from, to) = (screen(&h, [300.0, 180.0]), screen(&h, [310.0, 190.0]));
+    drag(&mut h, from, to);
+    let moved = mask_path(&h, "Plate");
+    let near = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).abs() < 1.0 && (a[1] - b[1]).abs() < 1.0;
+    assert!(moved.vertices.iter().zip(&corners).all(|(v, c)| near(*v, [c[0] + 10.0, c[1] + 10.0])), "{moved:?}");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    assert!(h.state().auto.find("viewer.freeTransform.handle.0").is_none(), "Esc ends the box");
+
+    // Two points selected: the box is around those two, and dragging in it moves only them.
+    let two = json!([{"layer": plate, "mask": mask_uid(&h, "Plate"), "index": 0}, {"layer": plate, "mask": mask_uid(&h, "Plate"), "index": 1}]);
+    h.state_mut().session.execute("mask.selectVertices", json!({"vertices": two})).unwrap();
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::T);
+    h.run_steps(2);
+    assert_eq!(h.state().session.state.selected_vertices.len(), 2);
+    let top = rect(&h, "viewer.freeTransform.handle.0").center();
+    let bottom = rect(&h, "viewer.freeTransform.handle.3").center();
+    assert!((bottom.y - top.y).abs() < 2.0, "a box as flat as the two points: {top:?} {bottom:?}");
+
+    // The mask selected in the Timeline (no points): the box is around all of it.
+    let s = &mut h.state_mut().session;
+    s.execute("mask.selectVertices", json!({"vertices": []})).unwrap();
+    s.execute("layer.mask.selectNext", json!({})).unwrap();
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::T);
+    h.run_steps(2);
+    assert_eq!(h.state().session.state.selected_vertices.len(), 4);
+    assert!(h.state().auto.find("viewer.freeTransform.handle.0").is_some());
+}
+
+/// The uid of the first mask of layer `name`.
+fn mask_uid(h: &Harness<'_, EffectcraftApp>, name: &str) -> u64 {
+    let c = h.state().session.active_comp().unwrap();
+    c.layers.iter().find(|l| l.name == name).unwrap().masks().unwrap().groups().next().unwrap().uid
+}
+
 /// A straight two-key motion path shows Bezier handles at both keys, and dragging one pulls the
 /// path into a curve (#290).
 #[test]

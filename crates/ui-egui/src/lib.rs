@@ -447,7 +447,12 @@ impl EffectcraftApp {
     fn with_ui_commands(mut self) -> Self {
         let cmds = menus::UI_COMMANDS
             .iter()
-            .map(|c| effectcraft_engine::shortcuts::UiCommand { id: c.id.into(), label: c.label.into(), shortcut: c.shortcut.map(str::to_string) })
+            .map(|c| effectcraft_engine::shortcuts::UiCommand {
+                id: c.id.into(),
+                label: c.label.into(),
+                shortcut: c.shortcut.map(str::to_string),
+                scope: c.scope.map(str::to_string),
+            })
             .collect();
         self.session.set_ui_commands(cmds);
         self
@@ -985,8 +990,28 @@ impl EffectcraftApp {
     /// Start the preview of a Preview panel shortcut (its range, play-from, rate, skip,
     /// resolution, loop, caching, full screen and include options).
     pub fn play_with(&mut self, now: f64, sc: effectcraft_engine::preview::PreviewShortcut) {
-        let Some(c) = self.session.active_comp_arc() else { return };
         let preset = self.session.prefs.preview.get(sc).clone();
+        self.play_preset(now, sc, preset);
+    }
+
+    /// Preview only the audio from the current time (`work_area`: of the work area, from its
+    /// start); again stops it. The other options are the Spacebar preview's.
+    pub fn toggle_audio_preview(&mut self, now: f64, work_area: bool) {
+        use effectcraft_engine::preview::{PlayFrom, PreviewRange, PreviewShortcut};
+        if self.playback.playing {
+            self.stop();
+            return;
+        }
+        let mut preset = self.session.prefs.preview.get(PreviewShortcut::Spacebar).clone();
+        (preset.include_video, preset.include_audio, preset.full_screen) = (false, true, false);
+        (preset.range, preset.play_from) =
+            if work_area { (PreviewRange::WorkArea, PlayFrom::RangeStart) } else { (PreviewRange::EntireDuration, PlayFrom::CurrentTime) };
+        self.play_preset(now, PreviewShortcut::Spacebar, preset);
+    }
+
+    /// Start a preview with `preset` (the options of `sc`, or a variation of them).
+    fn play_preset(&mut self, now: f64, sc: effectcraft_engine::preview::PreviewShortcut, preset: effectcraft_engine::preview::PreviewPreset) {
+        let Some(c) = self.session.active_comp_arc() else { return };
         let plan = effectcraft_engine::preview::plan(&preset, &c, self.session.time());
         let fr = c.frame_rate;
         if plan.video {
