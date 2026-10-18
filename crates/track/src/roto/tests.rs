@@ -494,6 +494,27 @@ fn box_stroke_is_the_model_box_prompt() {
     assert!(rasterize(&[&bx], &[StrokeKind::Fg, StrokeKind::Bg], 1.0, 100, 80).iter().all(|v| !v));
     let mut q = stroke_prompt(&[&fg, &bx], 1.0);
     let soft: Vec<f32> = (0..100 * 80).map(|i| ((i % 100) < 10) as u8 as f32).collect();
-    assert!(add_prior_prompt(&mut q, &soft, 100, 80));
+    assert!(add_prior_prompt(&mut q, &soft, &[], 100, 80));
     assert_eq!(q.bbox, Some([20.0, 10.0, 80.0, 60.0]));
+}
+
+/// A model is never prompted against the latest correction: stroke points that a later stroke
+/// of the other kind painted over are dropped, and the propagated matte's points and mask leave
+/// out what this frame's background strokes removed.
+#[test]
+fn model_prompts_follow_the_latest_stroke() {
+    let green = Stroke { kind: StrokeKind::Fg, frame: 0, radius: 4.0, points: vec![[50.0, 40.0]] };
+    let red = Stroke { kind: StrokeKind::Bg, ..green.clone() };
+    assert_eq!(stroke_prompt(&[&green, &red], 1.0).points, vec![([50.0, 40.0], false)]);
+    assert_eq!(stroke_prompt(&[&green, &red, &green], 1.0).points, vec![([50.0, 40.0], true); 2]);
+    let (w, h) = (100, 80);
+    let soft: Vec<f32> = (0..w * h).map(|i| ((i % w) < 50) as u8 as f32).collect();
+    let erase = Stroke { kind: StrokeKind::Bg, frame: 0, radius: 15.0, points: vec![[25.0, 40.0]] };
+    let hard = resolve(&[&erase], StrokeKind::Fg, StrokeKind::Bg, 1.0, w, h);
+    let mut q = Prompt::default();
+    assert!(add_prior_prompt(&mut q, &soft, &hard, w, h));
+    assert!(!q.points.is_empty());
+    assert!(q.points.iter().all(|(p, fg)| *fg && !covers(&erase, 1.0, [p[0] as f64, p[1] as f64])), "{:?}", q.points);
+    let mask = q.mask.unwrap();
+    assert!(hard.iter().zip(&mask).all(|(hd, m)| *hd != HARD_BG || *m == 0.0));
 }
