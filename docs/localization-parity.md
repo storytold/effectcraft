@@ -23,7 +23,7 @@ interface; Arabic and Hebrew text *in layers* is supported through its Middle Ea
   and category submenus take their labels from the effect catalog below.
 - **Panels, dialogs, buttons, tooltips:** `crates/ui-egui/src/i18n/ui.rs`, keyed by the English
   source string, with English fallback. Catalogs exist for Japanese (410 rows), Simplified and
-  Traditional Chinese (506 each), Ukrainian (505), Brazilian Portuguese (400) and Czech (501);
+  Traditional Chinese (506 each), Ukrainian (505), Brazilian Portuguese (695) and Czech (501);
   counted at 470ea7a3.
 - **Effect names:** `crates/ui-egui/src/i18n/effects.rs`, keyed by **effect id**, in Simplified
   Chinese (306 rows, one per effect in the registry, plus its 21 categories). The registry's
@@ -69,7 +69,7 @@ the true percentages are slightly lower.
 | Hindi | `hi` | 0 | — | UI: Devanagari fallback font but no shaping; text layers shape Devanagari | no | none (After Effects: none) | 9–13 h + shaping in the UI |
 | Arabic | `ar` | 0 | — | UI: Arabic fallback font but no shaping and no RTL layout; text layers: bidi + shaping | no | none (After Effects: none) | 9–13 h + 15–25 h RTL UI |
 | French | `fr` | 624 (≈ 16%) | Menus only | Latin, fine | no | menus only | 7–10 h + review |
-| Portuguese (Brazil) | `pt-br` | 1,024 (≈ 26%): menus 624 rows, panels 400 | Panels and dialogs partly | Latin, fine | no | partial | 6–9 h + review |
+| Portuguese (Brazil) | `pt-br` | 1,319 (≈ 34%): menus 624 rows, panels 695 | Panels and dialogs at the Chinese catalogs' source list; the six keys main added after that count are translated too; AI-assisted, not yet native-speaker proofread | Latin, fine | no | partial | independent native review |
 | Indonesian | `id` | 0 | — | Latin, fine | no | none (After Effects: none) | 8–12 h + review |
 | Japanese | `ja` | 1,034 (≈ 27%): menus 624 rows, panels 410 | Panels and dialogs partly | Japanese system fallback; vertical text and Tate-Chu-Yoko in text layers; IME | no | partial | 6–9 h + review |
 | German | `de` | 624 (≈ 16%) | Menus only (open PR #666 adds interface translations) | Latin, fine | no | menus only | 7–10 h + review |
@@ -87,7 +87,7 @@ Other languages EffectCraft ships (3):
 Russian (`ru`) has a menu catalog (624 rows, ≈ 16%); After Effects also ships Italian, which EffectCraft does not (8–12 h).
 
 **Overall: ≈ 18%**, the average coverage of After Effects' 10 non-English languages
-(Simplified and Traditional Chinese 29%, Japanese 27%, Brazilian Portuguese 26%, Spanish, French,
+(Simplified and Traditional Chinese 29%, Japanese 27%, Brazilian Portuguese 34%, Spanish, French,
 German and Russian 16%, Korean and Italian 0%; 175 / 10, was ≈ 12% on 10 October). This is the localization row in
 [target-app-parity.md](target-app-parity.md#by-dimension).
 
@@ -103,6 +103,7 @@ can give; none has had it.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-18 | minor | Brazilian Portuguese completes its panel catalog (278 new rows, 417 → 695, the Chinese catalogs' source list); the doc recount closes a 17-row drift from the batch merges; AI-assisted, not yet native-speaker proofread |
 | 2026-10-12 | minor | Recounted: Russian, French, German and Czech menus (#873, #987), Brazilian Portuguese and Czech panels (#830, #987), Hangul probe (#599); overall ≈ 12% to ≈ 18%; Korean and Italian still absent |
 | 2026-10-10 | major | First localization parity document: catalog rows counted for all six languages, the twelve-language table, After Effects' 11 shipped languages from its bundle |
 | 2026-10-11 | minor | Ukrainian panel catalog brought level with the Chinese ones (495 of 496 rows, counted at this commit); its share rises to ≈ 29%. The other languages' panel counts are the 10 October measurement |
