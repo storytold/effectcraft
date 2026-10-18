@@ -74,8 +74,9 @@ then to go further in a few places where it matters to us:
 
 - **Lottie import and export built in**, so animations can go straight to the web and apps
   without a plugin.
-- **A project file you can read.** Projects are versioned JSON (`.ecproj`), so they diff cleanly
-  in version control.
+- **A project file you can read.** Projects are versioned JSON (`.ecproj`). Turn on Settings ▸
+  Project ▸ Format Project Files for Reading to save them indented, so they diff cleanly in version
+  control.
 - **Everything is scriptable.** Every menu item, timeline drag and property edit goes through one
   command registry, so the same actions are reachable from a command line, a JSON control
   channel and an MCP server for agents.

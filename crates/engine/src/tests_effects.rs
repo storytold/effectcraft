@@ -656,8 +656,8 @@ fn opening_a_schema_1_project_moves_shape_layer_effect_points_into_effect_space(
     set(&mut s, adjust, on_adjust, "center", [40.0, 30.0]);
     assert_eq!(point(&s, shape, bulge, "center"), KV::Vec2([100.0, 50.0]), "Bulge's default centre");
 
-    let old = s.project.to_file_json().unwrap().replacen("\"schema\": 2", "\"schema\": 1", 1);
-    assert!(old.contains("\"schema\": 1"));
+    let old = s.project.to_file_json().unwrap().replacen("\"schema\":2", "\"schema\":1", 1);
+    assert!(old.contains("\"schema\":1"));
     let dir = std::env::temp_dir().join(format!("ec-effect-space-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("old.ecproj").to_string_lossy().to_string();
