@@ -739,7 +739,7 @@ impl ParentFix {
 }
 
 /// A uniform factor commutes with authored axis Rotation and Scale; prepend its orthogonal
-/// rotation to static Orientation using the existing Rz * Ry * Rx order.
+/// rotation to static Orientation (in [`effectcraft_geom::Mat4::orientation`] order).
 fn uniform_parent_pose(m: effectcraft_geom::Mat4, orientation: [f64; 3]) -> Option<([f64; 3], f64)> {
     use effectcraft_geom::{Mat4, Vec3, vec3};
     if !orientation.iter().all(|v| v.is_finite()) {
@@ -766,12 +766,8 @@ fn uniform_parent_pose(m: effectcraft_geom::Mat4, orientation: [f64; 3]) -> Opti
     if (0..3).all(|row| (0..3).all(|col| (rotation.0[row][col] - if row == col { 1.0 } else { 0.0 }).abs() < 1e-12)) {
         return Some((orientation, factor));
     }
-    let r = (rotation * Mat4::orientation(Vec3::from(orientation))).0;
-    // atan2 rather than asin: near ±90 degrees asin loses precision, while cos(y) stays exact.
-    let cy = r[0][0].hypot(r[1][0]);
-    let y = (-r[2][0]).atan2(cy);
-    let (x, z) = if cy > 1e-9 { (r[2][1].atan2(r[2][2]), r[1][0].atan2(r[0][0])) } else { ((-r[1][2]).atan2(r[1][1]), 0.0) };
-    Some(([x.to_degrees(), y.to_degrees(), z.to_degrees()], factor))
+    let o = (rotation * Mat4::orientation(Vec3::from(orientation))).orientation_angles();
+    Some(([o.x, o.y, o.z], factor))
 }
 
 /// A parent change retains 2D transforms and the world-space anchor of 3D layers (Position,

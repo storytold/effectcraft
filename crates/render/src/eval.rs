@@ -179,13 +179,7 @@ impl<'a> EvalCtx<'a> {
         // Auto-orient (along path / towards camera) replaces Orientation.
         let orient = crate::three_d::camera::auto_orient_3d(self, layer, p)
             .unwrap_or_else(|| Mat4::orientation(Vec3::from(self.v3(layer, tr, "orientation", [0.0; 3]))));
-        Mat4::translate(p)
-            * orient
-            * Mat4::rotate_z(rz)
-            * Mat4::rotate_y(ry)
-            * Mat4::rotate_x(rx)
-            * Mat4::scale(Vec3::from(scale) / 100.0)
-            * Mat4::translate(-Vec3::from(anchor))
+        Mat4::translate(p) * orient * Mat4::rotation_xyz(rx, ry, rz) * Mat4::scale(Vec3::from(scale) / 100.0) * Mat4::translate(-Vec3::from(anchor))
     }
 
     /// Layer space → comp (world) space, including parents.

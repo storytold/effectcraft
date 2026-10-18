@@ -276,6 +276,12 @@ fn angles_and_look_at() {
     assert_close!(f.num("degreesToRadians(90)", 0.0), std::f64::consts::FRAC_PI_2);
     let o = f.ev(f.a, "transform/orientation", "lookAt([0, 0, 0], [100, 0, 100])", 0.0).unwrap().as_vec3();
     assert!(close(o[1], 45.0) && close(o[0], 0.0), "{o:?}");
+    // After Effects 2026 read-backs of lookAt(position, …) on a layer at [960, 540, 0].
+    for (at, want) in [([1500.0, 200.0, 300.0], [48.5763, 49.9802, 319.0442]), ([500.0, 900.0, -400.0], [221.9872, 319.4766, 210.3184])] {
+        let e = format!("lookAt([960, 540, 0], [{}, {}, {}])", at[0], at[1], at[2]);
+        let o = f.ev(f.a, "transform/orientation", &e, 0.0).unwrap().as_vec3();
+        assert!((0..3).all(|i| (o[i] - want[i]).abs() < 1e-3), "{e}: {o:?}");
+    }
 }
 
 // ---- interpolation ----------------------------------------------------------------------------

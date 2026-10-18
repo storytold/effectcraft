@@ -79,12 +79,10 @@ fn norm(a: f64) -> f64 {
     (r * 1e6).round() / 1e6
 }
 
-/// Orientation angles (X, Y, Z degrees, applied X then Y then Z) of a rotation matrix.
+/// Orientation angles (X, Y, Z degrees, [`Mat4::orientation`] order) of a rotation matrix.
 pub fn euler(m: Mat4) -> [f64; 3] {
-    let m = m.0;
-    let y = (-m[2][0]).clamp(-1.0, 1.0).asin();
-    let (x, z) = if y.cos().abs() > 1e-6 { (m[2][1].atan2(m[2][2]), m[1][0].atan2(m[0][0])) } else { ((-m[1][2]).atan2(m[1][1]), 0.0) };
-    [norm(x.to_degrees()), norm(y.to_degrees()), norm(z.to_degrees())]
+    let o = m.orientation_angles();
+    [norm(o.x), norm(o.y), norm(o.z)]
 }
 
 /// The current view orientation of an environment (from its Front camera).

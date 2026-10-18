@@ -127,6 +127,10 @@ impl Property {
         if self.keys.is_empty() {
             return self.value.clone();
         }
+        // 3D Orientation turns along the shortest arc between its keys, as in After Effects.
+        if self.match_id == "orientation" && matches!(self.value, Value::Vec3(_)) {
+            return effectcraft_keyframe::evaluate_orientation(&self.keys, t).unwrap_or_else(|| self.value.clone());
+        }
         effectcraft_keyframe::evaluate(&self.keys, t, self.spatial).unwrap_or_else(|| self.value.clone())
     }
     /// Set the value at `t`: adds/replaces a key when animated, else sets the static value.

@@ -516,6 +516,61 @@ pub fn evaluate(keys: &[Keyframe], t: Tick, spatial: bool) -> Option<Value> {
     Some(segment_value(keys, i, t, spatial))
 }
 
+/// Evaluate keyed 3D Orientation at `t` as After Effects does: the temporal ease gives the
+/// progress through each segment, and the rotation moves along the shortest arc between the two
+/// keys ([`effectcraft_geom::orientation_slerp`]) instead of blending each angle. Speeds are
+/// degrees per second along that arc. Values other than 3D vectors evaluate as [`evaluate`].
+pub fn evaluate_orientation(keys: &[Keyframe], t: Tick) -> Option<Value> {
+    let first = keys.first()?;
+    if keys.len() == 1 || t <= first.time {
+        return Some(first.value.clone());
+    }
+    let last = keys.last()?;
+    if t >= last.time {
+        return Some(last.value.clone());
+    }
+    let i = keys.partition_point(|k| k.time <= t).checked_sub(1)?;
+    let (a, b) = (keys.get(i)?, keys.get(i + 1)?);
+    let (Value::Vec3(va), Value::Vec3(vb)) = (&a.value, &b.value) else { return Some(segment_value(keys, i, t, false)) };
+    if a.out_interp == Interp::Hold {
+        return Some(a.value.clone());
+    }
+    let (t0, t1) = (secs(a.time), secs(b.time));
+    let dur = (t1 - t0).max(1e-12);
+    let x = ((secs(t) - t0) / dur).clamp(0.0, 1.0);
+    // On a key: its own value, as stored.
+    if x <= 0.0 {
+        return Some(a.value.clone());
+    }
+    let arc = effectcraft_geom::orientation_arc_deg((*va).into(), (*vb).into());
+    let lin_out = a.out_interp == Interp::Linear;
+    let lin_in = b.in_interp != Interp::Bezier;
+    let f = if lin_out && lin_in || arc <= 1e-9 {
+        x
+    } else {
+        // Auto-Bezier keys take the arc speed between their neighbours.
+        let side = |j: usize, out: bool| -> Ease {
+            let Some(k) = keys.get(j) else { return Ease { speed: arc / dur, influence: 1.0 / 3.0 } };
+            let linear = if out { lin_out } else { lin_in };
+            if linear {
+                return Ease { speed: arc / dur, influence: 1.0 / 3.0 };
+            }
+            if k.auto_bezier && j > 0 && j + 1 < keys.len() {
+                let span = (secs(keys[j + 1].time) - secs(keys[j - 1].time)).max(1e-12);
+                let (Value::Vec3(p), Value::Vec3(n)) = (&keys[j - 1].value, &keys[j + 1].value) else { return Ease { speed: arc / dur, influence: 1.0 / 6.0 } };
+                return Ease { speed: effectcraft_geom::orientation_arc_deg((*p).into(), (*n).into()) / span, influence: 1.0 / 6.0 };
+            }
+            let list = if out { &k.out_ease } else { &k.in_ease };
+            list.first().copied().unwrap_or_default()
+        };
+        let (eo, ei) = (side(i, true), side(i + 1, false));
+        ease_progress(eo.speed * dur / arc, eo.influence, ei.speed * dur / arc, ei.influence, x)
+    };
+    let f = if f.is_finite() { f } else { x };
+    let o = effectcraft_geom::orientation_slerp((*va).into(), (*vb).into(), f);
+    Some(Value::Vec3([o.x, o.y, o.z]))
+}
+
 /// Value inside segment `i` → `i+1` at time `t`.
 pub fn segment_value(keys: &[Keyframe], i: usize, t: Tick, spatial: bool) -> Value {
     let a = &keys[i];
@@ -735,6 +790,44 @@ mod tests {
             let actual = ease_progress(0.0, 1.0, 0.0, 1.0, time);
             assert!((actual - expected).abs() < 1e-10, "{time}: {actual} != {expected}");
         }
+    }
+
+    /// Keyed Orientation moves along the shortest arc, eased in time, as After Effects 2026 reads
+    /// it back (cases 802 and 803: keys [0,0,0] at 0 s and [60,80,40] at 2 s).
+    #[test]
+    fn keyed_orientation_matches_after_effects() {
+        let close = |v: Value, e: [f64; 3]| {
+            let v = v.as_vec3();
+            assert!((0..3).all(|i| (v[i] - e[i]).abs() < 2e-3), "{v:?} vs {e:?}");
+        };
+        let lin = vec![Keyframe::new(s(0.0), Value::Vec3([0.0; 3])), Keyframe::new(s(2.0), Value::Vec3([60.0, 80.0, 40.0]))];
+        close(evaluate_orientation(&lin, s(0.5)).unwrap(), [16.9201, 16.0688, 16.0629]);
+        close(evaluate_orientation(&lin, s(1.0)).unwrap(), [30.6186, 35.7617, 28.4317]);
+        close(evaluate_orientation(&lin, s(2.0)).unwrap(), [60.0, 80.0, 40.0]);
+        // A middle key reads back as stored (not as another angle triple of the same rotation).
+        let three = vec![
+            Keyframe::new(s(0.0), Value::Vec3([0.0; 3])),
+            Keyframe::new(s(1.0), Value::Vec3([0.0, 120.0, 0.0])),
+            Keyframe::new(s(2.0), Value::Vec3([0.0; 3])),
+        ];
+        assert_eq!(evaluate_orientation(&three, s(1.0)), Some(Value::Vec3([0.0, 120.0, 0.0])));
+        // Easy ease (AE's preset: speed 0, influence 33 %) on both keys.
+        let ease = |k: Keyframe| {
+            let mut k = k.eased();
+            k.in_ease = vec![Ease { speed: 0.0, influence: 0.33 }];
+            k.out_ease = vec![Ease { speed: 0.0, influence: 0.33 }];
+            k
+        };
+        let eased: Vec<Keyframe> = lin.into_iter().map(ease).collect();
+        close(evaluate_orientation(&eased, s(0.5)).unwrap(), [11.0974, 9.5750, 10.5916]);
+        close(evaluate_orientation(&eased, s(1.0)).unwrap(), [30.6186, 35.7617, 28.4317]);
+        close(evaluate_orientation(&eased, s(1.5)).unwrap(), [47.6915, 65.7590, 40.3338]);
+        // Hold keys and other value types.
+        let held = vec![Keyframe::new(s(0.0), Value::Vec3([1.0, 2.0, 3.0])).hold(), Keyframe::new(s(1.0), Value::Vec3([0.0; 3]))];
+        close(evaluate_orientation(&held, s(0.5)).unwrap(), [1.0, 2.0, 3.0]);
+        let scalar = vec![Keyframe::new(s(0.0), Value::Scalar(0.0)), Keyframe::new(s(1.0), Value::Scalar(10.0))];
+        assert_eq!(evaluate_orientation(&scalar, s(0.5)), Some(Value::Scalar(5.0)));
+        assert_eq!(evaluate_orientation(&[], s(0.5)), None);
     }
 
     /// M13.15: agents set gradients as plain JSON, not only the tagged form `get` returns.

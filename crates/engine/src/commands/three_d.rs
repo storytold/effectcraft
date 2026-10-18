@@ -480,7 +480,7 @@ fn camera_tool(s: &mut Session, p: &Value, op: ToolOp, cmd: &str, label: &str) -
         let poi = if two {
             Vec3::from(get_at(l, "transform/poi", t).map(|v| v.as_vec3()).unwrap_or([w / 2.0, h / 2.0, 0.0]))
         } else {
-            let fwd = (Mat4::orientation(Vec3::from(o)) * Mat4::rotate_y(ry) * Mat4::rotate_x(rx)).apply_vec(vec3(0.0, 0.0, 1.0));
+            let fwd = (Mat4::orientation(Vec3::from(o)) * Mat4::rotation_xyz(rx, ry, 0.0)).apply_vec(vec3(0.0, 0.0, 1.0));
             pos + fwd * zoom
         };
         let mut rig = Rig { eye: pos, poi, zoom, ortho: false };
