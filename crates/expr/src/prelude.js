@@ -26,7 +26,7 @@ function __begin(t, v, c, l, path, uid, idx, fd, ti, tt, sv) {
   textIndex = ti;
   textTotal = tt;
   selectorValue = sv;
-  __S = { c: c, l: l, path: path, uid: uid, idx: idx, fd: fd, comp: null, layer: null, prop: null, vars: {}, layers: {} };
+  __S = { c: c, l: l, path: path, uid: uid, idx: idx, fd: fd, comp: null, layer: null, prop: null, vars: {} };
   __rc = 0;
   __seed = 0;
   __timeless = false;
@@ -550,17 +550,19 @@ function Layer(c, l) {
   delete f.name;
   delete f.length;
   Object.setPrototypeOf(f, Layer.prototype);
-  f.__c = c; f.__l = l; f.__i = null;
+  f.__c = c; f.__l = l; f.__i = null; f.__s = null;
+  // Kept across evaluations (`__layer`), so an expression can't leave its own fields on one.
+  Object.preventExtensions(f);
   return f;
 }
 
-// Layer `l` of comp `c`, made once per evaluation: a Layer is a callable function with its own
-// prototype, dearer to make than a plain object, and expressions often name the same layer many
-// times (`thisComp.layer("A")` in a loop, `.parent`).
+// Layer `l` of comp `c`, made once per runtime: a callable Layer is dearer to make than a plain
+// object, so it is kept, and its info (`__info`) is read again in each evaluation.
+var __layers = {};
 function __layer(c, l) {
-  if (__S === null) return new Layer(c, l);
-  var k = c + ':' + l;
-  return __S.layers[k] || (__S.layers[k] = new Layer(c, l));
+  // By comp, then layer: a `c + ':' + l` key costs more to build than the lookup saves.
+  var m = __layers[c] || (__layers[c] = {});
+  return m[l] || (m[l] = new Layer(c, l));
 }
 
 function __m3(m, p) {
@@ -585,7 +587,10 @@ function __m4(m, p, vec) {
 
 Layer.prototype = {
   __isLayer: true,
-  get __info() { return this.__i || (this.__i = __h(__LINFO, this.__c, this.__l)); },
+  get __info() {
+    if (this.__s !== __S) { this.__i = __h(__LINFO, this.__c, this.__l); this.__s = __S; }
+    return this.__i;
+  },
   get name() { return this.__info[0]; },
   get index() { return this.__info[1]; },
   get inPoint() { return this.__info[2]; },
