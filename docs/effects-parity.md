@@ -44,7 +44,7 @@ corpus compares renders, each effect is assumed to differ somewhere, and users k
 | Simulation | 18 | 18 | Particle Playground lacks Particle Exploder, text particles, ephemeral mapper; CC Particle World camera fixed (#397) |
 | Stylize | 25 | 25 | Motion Tile output size (#369) |
 | Text | 2 | 2 | — |
-| Time | 8 | 8 | #535 (Pixel Motion Blur, Vector Detail) is closed |
+| Time | 8 | 8 | Timewarp retimes the layer's source and masks without the effects above it, as After Effects 2026; #535 (Pixel Motion Blur, Vector Detail) is closed |
 | Transition | 17 | 17 | — |
 | Utility | 9 | 7 | — |
 
@@ -64,6 +64,7 @@ the GPU is performance, not parity.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-19 | minor | Timewarp ignores the effects above it (source and masks only), measured against After Effects 2026 |
 | 2026-10-12 | minor | Parameters 3,014 to 3,017 (effects.md); #303, #514, #526, #533–#536 marked closed instead of pending |
 | 2026-10-12 | minor | Effect colour labels (26.5) added in Effect Controls |
 | 2026-10-12 | minor | Tint's Swap Colors button and agent-drivable command (#963); undo/redo, instance targeting, animated layer-time edits and invalid-input tests |
