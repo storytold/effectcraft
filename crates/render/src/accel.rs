@@ -76,6 +76,16 @@ pub trait Accelerator: Send + Sync {
     fn particles(&self) -> Option<&dyn effectcraft_effects::psim::ParticleSim> {
         None
     }
+    /// A hardware backend for Content-Aware Fill's stages (the GPU compositor's kernels), with
+    /// the CPU fill's semantics. `None` = the fill runs on the CPU.
+    ///
+    /// The fill's input frames are read back to the CPU before it runs (analyses render on the
+    /// CPU by design, see `effectcraft_engine::background::offload::job_accel`), so a backend
+    /// here is about the fill's own work — PatchMatch today, one stage at a time as each pays
+    /// (`effectcraft_gpu::inpaint`) — not about compositing.
+    fn inpaint(&self) -> Option<&dyn effectcraft_raster::inpaint::FillBackend> {
+        None
+    }
     /// Timing history [`Backend::Auto`] uses to send each comp's top-level frames to the
     /// faster compositor. `None` = Auto always tries the accelerator first.
     fn auto_pick(&self) -> Option<&AutoPick> {

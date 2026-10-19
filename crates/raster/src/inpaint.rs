@@ -660,8 +660,48 @@ fn trace(context: &TraceContext<'_>, start: TraceStart) -> Option<([f32; 4], usi
     None
 }
 
-/// Fill a range of frames. `progress(done, total)` returns `false` to cancel (→ `None`).
+/// A hardware backend for the fill's stages (the GPU compositor implements it; see
+/// [`Accelerator::inpaint`](effectcraft_render::Accelerator::inpaint)). Every method has the CPU
+/// implementation as its default, so a backend that cannot take a stage returns the CPU's work
+/// and the fill stays correct — only slower.
+///
+/// The orchestration ([`fill_sequence_with`]) stays on the CPU: the sequence's frame-to-frame
+/// coupling is sequential, and only the per-frame and per-pair work is worth offloading.
+pub trait FillBackend: Send + Sync {
+    /// [`membrane_fill`]: the `hole` pixels take the harmonic interpolation of their border.
+    fn membrane(&self, img: &Image, hole: &[bool]) -> Image {
+        membrane_fill(img, hole)
+    }
+    /// [`membrane_core`]: harmonic interpolation of `data`'s unknown pixels in place (`known` is
+    /// true where the pixel is known).
+    fn membrane_known(&self, data: &mut [[f32; 4]], known: &[bool], w: usize, h: usize) {
+        membrane_core(data, known, w, h)
+    }
+    /// [`completed_flow`]: block flow `a` → `b` with the tiles touching either hole replaced by
+    /// the membrane interpolation of the surrounding motion.
+    fn flow(&self, a: &Image, b: &Image, hole_a: &[bool], hole_b: &[bool]) -> Flow {
+        completed_flow(a, b, hole_a, hole_b)
+    }
+    /// [`patch_fill`]: PatchMatch synthesis of `img`'s `hole` (`init`: a starting guess, e.g. the
+    /// previous frame's fill warped here).
+    fn patch(&self, img: &Image, hole: &[bool], init: Option<&Image>, patch: usize, seed: u32) -> Image {
+        patch_fill(img, hole, init, patch, seed)
+    }
+}
+
+/// The CPU backend: every stage is the reference implementation.
+pub struct CpuFill;
+
+impl FillBackend for CpuFill {}
+
+/// Fill a range of frames on the CPU. `progress(done, total)` returns `false` to cancel
+/// (→ `None`).
 pub fn fill_sequence(input: &FillInput, o: &FillOpts, progress: &mut dyn FnMut(usize, usize) -> bool) -> Option<Vec<Image>> {
+    fill_sequence_with(input, o, &CpuFill, progress)
+}
+
+/// [`fill_sequence`] with a hardware backend for the stages it can take (see [`FillBackend`]).
+pub fn fill_sequence_with(input: &FillInput, o: &FillOpts, backend: &dyn FillBackend, progress: &mut dyn FnMut(usize, usize) -> bool) -> Option<Vec<Image>> {
     let n = input.frames.len();
     if n == 0 {
         return Some(vec![]);
@@ -672,7 +712,7 @@ pub fn fill_sequence(input: &FillInput, o: &FillOpts, progress: &mut dyn FnMut(u
     if o.method == FillMethod::EdgeBlend {
         let mut out = Vec::with_capacity(n);
         for (i, (f, hl)) in input.frames.iter().zip(&input.holes).enumerate() {
-            out.push(opaque_fill(membrane_fill(f, hl), hl));
+            out.push(opaque_fill(backend.membrane(f, hl), hl));
             if !progress(i + 1, n) {
                 return None;
             }
@@ -691,10 +731,10 @@ pub fn fill_sequence(input: &FillInput, o: &FillOpts, progress: &mut dyn FnMut(u
         }
     }
     // 1. Flows between membrane-filled neighbours, completed inside the holes.
-    let pre: Vec<Image> = frames.par_iter().zip(&holes).map(|(f, hl)| membrane_fill(f, hl)).collect();
+    let pre: Vec<Image> = frames.par_iter().zip(&holes).map(|(f, hl)| backend.membrane(f, hl)).collect();
     let pairs: Vec<(Flow, Flow)> = (0..n.saturating_sub(1))
         .into_par_iter()
-        .map(|i| (completed_flow(&pre[i], &pre[i + 1], &holes[i], &holes[i + 1]), completed_flow(&pre[i + 1], &pre[i], &holes[i + 1], &holes[i])))
+        .map(|i| (backend.flow(&pre[i], &pre[i + 1], &holes[i], &holes[i + 1]), backend.flow(&pre[i + 1], &pre[i], &holes[i + 1], &holes[i])))
         .collect();
     let (fwd, bwd): (Vec<Flow>, Vec<Flow>) = pairs.into_iter().unzip();
     if !progress(1, total) {
@@ -746,7 +786,7 @@ pub fn fill_sequence(input: &FillInput, o: &FillOpts, progress: &mut dyn FnMut(u
                         diff[i] = std::array::from_fn(|c| if c < 3 { a[c] - v[c] } else { 0.0 });
                     }
                 }
-                membrane_core(&mut diff, &dk, w, h);
+                backend.membrane_known(&mut diff, &dk, w, h);
                 for (i, _) in &filled {
                     for c in 0..3 {
                         img.data[*i][c] += o.lighting * diff[*i][c];
@@ -770,7 +810,7 @@ pub fn fill_sequence(input: &FillInput, o: &FillOpts, progress: &mut dyn FnMut(u
         *slot = Some(propagated[t].0.clone());
     }
     let mut done = 2;
-    out[t0] = Some(patch_fill(&propagated[t0].0, &propagated[t0].1, None, o.patch, o.seed));
+    out[t0] = Some(backend.patch(&propagated[t0].0, &propagated[t0].1, None, o.patch, o.seed));
     done += 1;
     if !progress(done, total) {
         return None;
@@ -783,7 +823,7 @@ pub fn fill_sequence(input: &FillInput, o: &FillOpts, progress: &mut dyn FnMut(u
             // Warp the previous result here along the backward flow (t → t − 1).
             // Frames after `t0` are filled in order, so the previous one is set.
             let Some(prev) = out[t - 1].as_ref() else {
-                out[t] = Some(patch_fill(img, left, None, o.patch, o.seed));
+                out[t] = Some(backend.patch(img, left, None, o.patch, o.seed));
                 continue;
             };
             let mut warped = img.clone();
@@ -796,7 +836,7 @@ pub fn fill_sequence(input: &FillInput, o: &FillOpts, progress: &mut dyn FnMut(u
             }
             out[t] = Some(match o.method {
                 FillMethod::Surface => warped,
-                _ => patch_fill(img, left, Some(&warped), o.patch, o.seed),
+                _ => backend.patch(img, left, Some(&warped), o.patch, o.seed),
             });
         }
         done += 1;

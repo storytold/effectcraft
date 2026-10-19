@@ -79,6 +79,7 @@ mod fx_tone;
 mod fx_transition;
 mod fx_vr;
 mod fx_warp;
+mod inpaint;
 mod ops;
 mod particles;
 mod readback;
@@ -413,6 +414,11 @@ impl Accelerator for Gpu {
     fn particles(&self) -> Option<&dyn effectcraft_effects::psim::ParticleSim> {
         self.ctx.check_health().ok()?;
         self.ctx.can_readback().then_some(self as &dyn effectcraft_effects::psim::ParticleSim)
+    }
+
+    fn inpaint(&self) -> Option<&dyn effectcraft_raster::inpaint::FillBackend> {
+        self.ctx.check_health().ok()?;
+        self.ctx.can_wait().then_some(self as &dyn effectcraft_raster::inpaint::FillBackend)
     }
 
     fn auto_pick(&self) -> Option<&effectcraft_render::AutoPick> {
