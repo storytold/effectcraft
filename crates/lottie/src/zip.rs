@@ -70,8 +70,16 @@ pub fn store(entries: &[(String, Vec<u8>)]) -> Vec<u8> {
     out
 }
 
+/// Whether an entry name is a relative path inside the archive: not absolute (`/…`, `\…`), no
+/// drive (`C:…`) and no `..` component.
+fn is_relative_name(name: &str) -> bool {
+    let drive = name.as_bytes().get(1) == Some(&b':');
+    !name.starts_with(['/', '\\']) && !drive && !name.split(['/', '\\']).any(|c| c == "..")
+}
+
 /// Read the stored (uncompressed) entries of a ZIP archive written by [`store`] or any other
-/// writer that did not compress. Compressed entries are skipped.
+/// writer that did not compress. Compressed entries and entries whose names are not relative
+/// paths inside the archive are skipped.
 pub fn read_stored(data: &[u8]) -> Vec<(String, Vec<u8>)> {
     let mut out = vec![];
     let mut i = 0usize;
@@ -82,8 +90,9 @@ pub fn read_stored(data: &[u8]) -> Vec<(String, Vec<u8>)> {
         let name_start = i + 30;
         let body = name_start + nlen + xlen;
         let (Some(name), Some(bytes)) = (data.get(name_start..name_start + nlen), data.get(body..body + size)) else { break };
-        if method == 0 {
-            out.push((String::from_utf8_lossy(name).to_string(), bytes.to_vec()));
+        let name = String::from_utf8_lossy(name).to_string();
+        if method == 0 && is_relative_name(&name) {
+            out.push((name, bytes.to_vec()));
         }
         i = body + size;
     }
@@ -100,5 +109,13 @@ mod tests {
         assert_eq!(back.len(), 2);
         assert_eq!(back[1].0, "b/c.txt");
         assert_eq!(back[1].1, b"hello");
+    }
+
+    #[test]
+    fn entries_outside_the_archive_root_are_skipped() {
+        let names = ["../up.txt", "a/../../up.txt", "/abs/x", "\\abs\\x", "C:\\x", "c:x", "a\\..\\x", "ok/x.txt", "ok/..x"];
+        let z = super::store(&names.iter().map(|n| (n.to_string(), b"x".to_vec())).collect::<Vec<_>>());
+        let back: Vec<String> = super::read_stored(&z).into_iter().map(|(n, _)| n).collect();
+        assert_eq!(back, ["ok/x.txt", "ok/..x"]);
     }
 }

@@ -381,9 +381,11 @@ pub fn format_time(t: Tick, rate: FrameRate, drop_frame: bool, display: TimeDisp
             format!("{}{}+{:02}", if neg { "-" } else { "" }, a / per_ft, a % per_ft)
         }
         TimeDisplay::AudioSamples => {
-            let secs = t.0.div_euclid(TICKS_PER_SECOND);
-            let rem = Tick(t.0.rem_euclid(TICKS_PER_SECOND)).to_units_floor(sample_rate);
-            format!("{:02}:{:02}:{:02}:{rem:05}", secs / 3600, (secs / 60) % 60, secs % 60)
+            let sign = if t.0 < 0 { "-" } else { "" };
+            let abs = t.0.saturating_abs();
+            let secs = abs.div_euclid(TICKS_PER_SECOND);
+            let rem = Tick(abs.rem_euclid(TICKS_PER_SECOND)).to_units_floor(sample_rate);
+            format!("{sign}{:02}:{:02}:{:02}:{rem:05}", secs / 3600, (secs / 60) % 60, secs % 60)
         }
         TimeDisplay::Seconds => format!("{:.3}", t.seconds()),
     }
@@ -699,6 +701,14 @@ mod tests {
         assert_eq!(format_time(t, r, false, TimeDisplay::Feet16, 48000), "1+00");
         assert_eq!(format_time(t, r, false, TimeDisplay::Frames, 48000), "40");
         assert_eq!(format_time(Tick::from_units(48_001, 48_000), r, false, TimeDisplay::AudioSamples, 48000), "00:00:01:00001");
+    }
+
+    #[test]
+    fn neg_samples() {
+        let r = FrameRate::FPS_30;
+        let fmt = |s: f64| format_time(Tick::from_seconds_f64(s), r, false, TimeDisplay::AudioSamples, 48000);
+        assert_eq!(fmt(-0.5), "-00:00:00:24000");
+        assert_eq!(fmt(-3700.0), "-01:01:40:00000");
     }
 
     #[test]

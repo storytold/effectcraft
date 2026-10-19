@@ -1,8 +1,8 @@
 //! Keyframe clipboard, selection, nudging, direct key/ease edits (Graph Editor handles) and key
 //! inspection for the Keyframe Velocity / Keyframe Interpolation dialogs.
 
-use effectcraft_keyframe::{Ease, Interp, Keyframe, key_at, retime_roving, side_ease};
-use effectcraft_project::{LayerId, Property, Uid};
+use effectcraft_keyframe::{Ease, Interp, Keyframe, ShapePath, Value as KValue, key_at, retime_roving, side_ease};
+use effectcraft_project::{ItemId, LayerId, Property, Uid};
 use effectcraft_time::Tick;
 use serde_json::{Value, json};
 
@@ -60,6 +60,13 @@ fn paste(s: &mut Session, p: &Value) -> Result<Value> {
     let clip = s.state.key_clipboard.clone();
     if clip.is_empty() {
         return Err(bad("keys.paste", "no keyframes have been copied"));
+    }
+    // A copied Mask Path / shape Path key pasted onto Position becomes a motion path (#1425).
+    if let [c] = clip.as_slice()
+        && let Some(KValue::Path(path)) = c.keys.first().map(|k| &k.value)
+        && let Some(target) = path_target(s, p)?
+    {
+        return paste_path(s, p, target, path);
     }
     let cid = comp_id(s, p)?;
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
@@ -130,6 +137,86 @@ fn paste(s: &mut Session, p: &Value) -> Result<Value> {
             retime_roving(&mut pr.keys, pr.spatial);
         }
         st.selected_keys = sel;
+        Ok(json!(st.selected_keys.len()))
+    })
+}
+
+/// The spatial property (Position, Anchor Point…) a copied path pastes onto as a motion path:
+/// the `prop` / `path` given, else a selected one of the target layers. `None` when there's none.
+pub(super) fn path_target(s: &Session, p: &Value) -> Result<Option<(ItemId, LayerId, Uid)>> {
+    let (cid, targets) = layers_p(s, p)?;
+    let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
+    let motion = |pr: &Property| pr.spatial && !pr.static_only && matches!(pr.value, KValue::Vec2(_) | KValue::Vec3(_));
+    let explicit = targets.first().and_then(|lid| {
+        let l = comp.layer(*lid)?;
+        let pr = match p.get("prop").and_then(Value::as_u64) {
+            Some(u) => l.props.find(u),
+            None => l.props.prop(str_p(p, "path")?),
+        }?;
+        Some((*lid, pr))
+    });
+    if p.get("prop").is_some() || p.get("path").is_some() {
+        return Ok(explicit.filter(|(_, pr)| motion(pr)).map(|(lid, pr)| (cid, lid, pr.uid)));
+    }
+    let selected = s
+        .state
+        .selected_props
+        .iter()
+        .filter(|(lid, _)| targets.contains(lid))
+        .find(|(lid, uid)| comp.layer(*lid).and_then(|l| l.props.find(*uid)).is_some_and(motion));
+    Ok(selected.map(|(lid, uid)| (cid, *lid, *uid)))
+}
+
+/// Paste a mask or shape path onto a spatial property as After Effects does: a keyframe per
+/// vertex with the path's tangents, from the CTI over 2 s (a closed path ends back on its first
+/// vertex), the inner keys roving so the layer moves at one speed. Like After Effects, the
+/// vertices are pasted as they are (layer-space numbers, not converted to the target's space).
+pub(super) fn paste_path(s: &mut Session, p: &Value, (cid, lid, uid): (ItemId, LayerId, Uid), path: &ShapePath) -> Result<Value> {
+    let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
+    let t = time_p(s, p, Some(comp));
+    let target = comp.layer(lid).ok_or(EngineError::NoComp)?;
+    let mut order: Vec<usize> = (0..path.vertices.len()).collect();
+    if path.closed && !order.is_empty() {
+        order.push(0);
+    }
+    if order.is_empty() {
+        return Err(bad("keys.paste", "the copied path has no points"));
+    }
+    let span = Tick::from_seconds_f64(2.0).0 / i64::try_from(order.len().saturating_sub(1).max(1)).unwrap_or(i64::MAX);
+    let at = |xy: Option<&[f64; 2]>| {
+        let [x, y] = xy.copied().unwrap_or_default();
+        [x, y, 0.0]
+    };
+    let last = order.len() - 1;
+    let keys: Vec<(Tick, KValue, [f64; 3], [f64; 3], bool)> = order
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| {
+            let [x, y, z] = at(path.vertices.get(v));
+            let value = match target.props.find(uid).map(|pr| &pr.value) {
+                Some(KValue::Vec2(_)) => KValue::Vec2([x, y]),
+                _ => KValue::Vec3([x, y, z]),
+            };
+            let time = target.layer_time(t + Tick(span.saturating_mul(i64::try_from(i).unwrap_or(i64::MAX))));
+            (time, value, at(path.in_tangents.get(v)), at(path.out_tangents.get(v)), i != 0 && i != last)
+        })
+        .collect();
+    s.edit("Paste Keyframes", merge_p(p), |proj, st| {
+        let l = super::layer_mut(proj, cid, lid)?;
+        let pr = l.props.find_mut(uid).ok_or_else(|| bad("keys.paste", "no property"))?;
+        let mut sel = vec![];
+        for (time, value, spatial_in, spatial_out, roving) in keys {
+            let k = Keyframe { spatial_in, spatial_out, spatial_auto: false, roving, ..Keyframe::new(time, value) };
+            match pr.keys.binary_search_by(|x| x.time.cmp(&time)) {
+                Ok(i) => pr.keys[i] = k,
+                Err(i) => pr.keys.insert(i, k),
+            }
+            sel.push(time);
+        }
+        // Re-timing keeps the keys' order, so the pasted keys are found again by index.
+        let pasted: Vec<usize> = pr.keys.iter().enumerate().filter(|(_, k)| sel.contains(&k.time)).map(|(i, _)| i).collect();
+        retime_roving(&mut pr.keys, pr.spatial);
+        st.selected_keys = pasted.iter().filter_map(|&i| pr.keys.get(i)).map(|k| KeyRef { layer: lid, prop: uid, time: k.time }).collect();
         Ok(json!(st.selected_keys.len()))
     })
 }

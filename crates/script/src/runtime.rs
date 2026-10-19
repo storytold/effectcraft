@@ -157,11 +157,16 @@ pub(crate) fn exec(s: &mut Session, id: &str, params: J) -> Result<J, String> {
         s.state.selected_layers.clear();
     }
     let r = s.execute_for_script(id, params);
-    if let Some(c) = target
-        && prev != Some(c)
-        && s.state.active_comp == Some(c)
-        && id != "comp.open"
-    {
+    if let Some(c) = target {
+        leave_comp(s, id, c, prev);
+    }
+    r.map_err(|e| e.to_string())
+}
+
+/// After a script's command on comp `c`, make `prev` (the comp active before it) active again,
+/// unless the command opened `c` on purpose; with no comp to go back to, `c` stays open.
+fn leave_comp(s: &mut Session, id: &str, c: effectcraft_engine::project::ItemId, prev: Option<effectcraft_engine::project::ItemId>) {
+    if prev != Some(c) && s.state.active_comp == Some(c) && id != "comp.open" {
         match prev {
             Some(p) if s.project.comp(p).is_some() => s.activate_comp(p),
             _ => {
@@ -171,7 +176,6 @@ pub(crate) fn exec(s: &mut Session, id: &str, params: J) -> Result<J, String> {
             }
         }
     }
-    r.map_err(|e| e.to_string())
 }
 
 /// Run a keyframe command that acts on the selected keys (`keys.velocity`, `keys.interpolation`,
@@ -195,11 +199,17 @@ fn exec_on_keys(s: &mut Session, id: &str, params: J, targets: &J) -> Result<J, 
         let key = l.props.find(prop).and_then(|pr| pr.keys.get(usize::try_from(index).ok()?)).ok_or("the keyframe no longer exists")?;
         keys.push(KeyRef { layer: LayerId(layer), prop, time: key.time });
     }
+    // Make the keys' comp active before selecting them: activating a comp brings back the key
+    // selection it had, which would replace these keys and leave the command nothing to act on
+    // when the comp isn't the active one (#1531).
+    let prev = s.state.active_comp;
+    s.activate_comp(cid);
     let saved = std::mem::replace(&mut s.state.selected_keys, keys);
     let r = exec(s, id, params);
     let comp = s.active_comp();
     let exists = |k: &KeyRef| comp.and_then(|c| c.layer(k.layer)).and_then(|l| l.props.find(k.prop)).is_some_and(|pr| pr.keys.iter().any(|x| x.time == k.time));
     s.state.selected_keys = saved.into_iter().filter(exists).collect();
+    leave_comp(s, id, cid, prev);
     r
 }
 
@@ -336,7 +346,17 @@ pub(crate) fn normalize(p: &str) -> std::path::PathBuf {
     // Resolve symlinks where the file (or its folder) exists, so links can't escape the project.
     std::fs::canonicalize(&out)
         .or_else(|_| out.parent().map(std::fs::canonicalize).unwrap_or(Ok(out.clone())).map(|d| d.join(out.file_name().unwrap_or_default())))
+        .map(without_verbatim_prefix)
         .unwrap_or(out)
+}
+
+/// A canonical Windows drive path without its `\\?\` prefix, so it compares with a lexical one
+/// (a path whose folder doesn't exist on disk stays lexical).
+fn without_verbatim_prefix(p: std::path::PathBuf) -> std::path::PathBuf {
+    match p.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+        Some(plain) if plain.as_bytes().get(1) == Some(&b':') => plain.into(),
+        _ => p,
+    }
 }
 
 pub(crate) const GATE: &str = "Preferences ▸ Scripting & Expressions ▸ Allow Scripts to Write Files and Access Network";
@@ -380,11 +400,14 @@ fn native_file(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsV
         }
         let s = &a.session;
         match op.as_str() {
-            "access" => Ok(json!(check_access(s, &path, false)?.exists())),
+            // Through the session's services, like the reads: hosts without a file system (the
+            // browser's file table) answer for their own files.
+            "access" => Ok(json!(s.services.exists(&check_access(s, &path, false)?.to_string_lossy()))),
             "exists" | "isDir" => {
                 // Unreadable locations report "missing" instead of failing.
                 let Ok(p) = check_access(s, &path, false) else { return Ok(json!(false)) };
-                Ok(json!(if op == "exists" { p.exists() } else { p.is_dir() }))
+                let p = p.to_string_lossy();
+                Ok(json!(if op == "exists" { s.services.exists(&p) } else { s.services.is_dir(&p) }))
             }
             "read" | "readBinary" => {
                 let p = check_access(s, &path, false)?;
@@ -563,27 +586,32 @@ fn position(msg: &str, file: &str, code: &str) -> (Option<u32>, Option<u32>) {
         let mut it = l[i..].split([':', ')']);
         Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?))
     };
+    // The innermost frame in the user's script, or the error's own position.
+    let frames: Vec<&str> = msg.lines().skip(1).collect();
+    let frame = frames.iter().find_map(|l| pick(l)).or_else(|| msg.lines().next().and_then(pick));
     // `ReferenceError: name is not defined`: boa places it at the start of the function that reads
-    // the name, so the first use of the name in the code is the better position (#1063).
+    // the name, so the name's first use from that frame's line on is the better position (#1063).
+    // With no frame to start from, the first use anywhere in the code is (#1161).
     let first = msg.lines().next().unwrap_or("");
     let undefined = first.split("ReferenceError: ").nth(1).and_then(|r| r.split(" is not defined").next());
-    if let Some(at) = undefined.and_then(|name| first_use(name, code)) {
+    let start_line = frame.map_or(1, |(line, _)| line);
+    if let Some(at) = undefined.and_then(|name| first_use(name, code, start_line)) {
         return (Some(at.0), Some(at.1));
     }
-    let frames: Vec<&str> = msg.lines().skip(1).collect();
-    if let Some((a, b)) = frames.iter().find_map(|l| pick(l)).or_else(|| msg.lines().next().and_then(pick)) {
+    if let Some((a, b)) = frame {
         return (Some(a), Some(b));
     }
     (None, None)
 }
 
-/// The first use of `name` as a whole identifier in `code`, as a 1-based line and column.
-fn first_use(name: &str, code: &str) -> Option<(u32, u32)> {
+/// The first use of `name` as a whole identifier in `code` on or after `start_line` (1-based), as a
+/// 1-based line and column.
+fn first_use(name: &str, code: &str, start_line: u32) -> Option<(u32, u32)> {
     if name.is_empty() {
         return None;
     }
     let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'$';
-    for (n, line) in code.lines().enumerate() {
+    for (n, line) in code.lines().enumerate().skip(start_line.saturating_sub(1) as usize) {
         let b = line.as_bytes();
         let mut from = 0;
         while let Some(i) = line.get(from..).and_then(|rest| rest.find(name)).map(|i| i + from) {
@@ -828,5 +856,15 @@ mod nesting_tests {
         assert!(out.error.is_none(), "{:?}", out.error);
         assert_eq!(out.result, serde_json::json!(2));
         assert!(check_nesting(&("(".repeat(MAX_NESTING) + &")".repeat(MAX_NESTING))).is_ok());
+    }
+
+    /// A canonical drive path and a lexical one compare once the `\\?\` prefix is gone; a UNC
+    /// share and a Unix path are left as they are.
+    #[test]
+    fn only_a_verbatim_drive_prefix_is_dropped() {
+        use std::path::PathBuf;
+        assert_eq!(without_verbatim_prefix(r"\\?\C:\proj\a.txt".into()), PathBuf::from(r"C:\proj\a.txt"));
+        assert_eq!(without_verbatim_prefix(r"\\?\UNC\server\share\a.txt".into()), PathBuf::from(r"\\?\UNC\server\share\a.txt"));
+        assert_eq!(without_verbatim_prefix("/proj/a.txt".into()), PathBuf::from("/proj/a.txt"));
     }
 }

@@ -127,6 +127,102 @@ fn click_with(h: &mut Harness<'_, EffectcraftApp>, p: Pos2, modifiers: egui::Mod
 }
 
 #[test]
+fn copy_and_paste_key_subsets_across_position_rotation_and_scale() {
+    for graph in [false, true] {
+        let (mut h, id, _) = harness();
+        let paths = ["transform/position", "transform/rotation", "transform/scale"];
+        for (path, times, values) in [
+            (paths[0], [0.5, 1.0], [json!([100, 200, 0]), json!([300, 400, 0])]),
+            (paths[1], [0.5, 1.5], [json!(500), json!(900)]),
+            (paths[2], [0.0, 1.0], [json!([1500, 1600, 100]), json!([1700, 1800, 100])]),
+        ] {
+            for (time, value) in times.into_iter().zip(values) {
+                h.state_mut().session.execute("prop.addKey", json!({"layer": id.0, "path": path, "time": time, "value": value})).unwrap();
+            }
+        }
+        let uids: Vec<u64> = paths.iter().map(|path| h.state().session.active_comp().unwrap().layer(id).unwrap().props.prop(path).unwrap().uid).collect();
+        let ctx = h.ctx.clone();
+        for command in ["timeline.reveal.position", "timeline.revealAdd.rotation", "timeline.revealAdd.scale"] {
+            effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, command, json!({})).unwrap();
+        }
+        if graph {
+            h.state_mut().session.execute("edit.deselectAll", json!({})).unwrap();
+            for uid in &uids {
+                h.state_mut().session.execute("prop.select", json!({"layer": id.0, "prop": uid, "add": true, "selectKeys": false})).unwrap();
+            }
+            h.state_mut().ui.timeline.graph_editor = true;
+            h.state_mut().ui.timeline.graph_mode = "value".into();
+        }
+        h.run_steps(4);
+        let key_positions = |h: &Harness<'_, EffectcraftApp>, uid: u64| {
+            if !graph {
+                return keys(h, uid);
+            }
+            let mut positions: Vec<Pos2> = h
+                .state()
+                .auto
+                .query(&format!("timeline.graph.key.{uid}.0."))
+                .iter()
+                .map(|e| pos2(e.rect[0] + e.rect[2] / 2.0, e.rect[1] + e.rect[3] / 2.0))
+                .collect();
+            positions.sort_by(|a, b| a.x.total_cmp(&b.x));
+            positions
+        };
+        let shift = egui::Modifiers { shift: true, ..Default::default() };
+        for include_scale in [true, false] {
+            h.state_mut().session.execute("keys.select", json!({"keys": []})).unwrap();
+            h.run_steps(2);
+            let original: Vec<_> =
+                paths.iter().map(|path| h.state().session.active_comp().unwrap().layer(id).unwrap().props.prop(path).unwrap().keys.clone()).collect();
+            let positions = key_positions(&h, uids[0]);
+            let rotations = key_positions(&h, uids[1]);
+            let scales = key_positions(&h, uids[2]);
+            click_with(&mut h, scales[0], Default::default());
+            click_with(&mut h, positions[0], shift);
+            click_with(&mut h, rotations[1], shift);
+            if !include_scale {
+                click_with(&mut h, scales[1], shift);
+                click_with(&mut h, scales[0], shift);
+                click_with(&mut h, scales[1], shift);
+            }
+            let count = if include_scale { 3 } else { 2 };
+            assert_eq!(h.state().session.state.selected_keys.len(), count);
+            assert_eq!(h.state().session.state.selected_props.len(), 3);
+            h.input_mut().events.push(Event::Copy);
+            h.step();
+            let note = format!("EffectCraft: {count} keyframes");
+            assert!(h.output().platform_output.commands.iter().any(|command| matches!(command, egui::OutputCommand::CopyText(text) if text == &note)));
+            h.state_mut().session.set_time(effectcraft_engine::time::Tick::from_seconds_f64(2.0));
+            let undo_steps = h.state().session.history.undo.len();
+            h.input_mut().events.push(Event::Paste(note));
+            h.run_steps(2);
+            assert_eq!(h.state().session.history.undo.len(), undo_steps + 1);
+            for (path, time, value) in
+                [(paths[0], if include_scale { 2.5 } else { 2.0 }, json!([100.0, 200.0, 0.0])), (paths[1], if include_scale { 3.5 } else { 3.0 }, json!(900.0))]
+            {
+                let p = h.state().session.active_comp().unwrap().layer(id).unwrap().props.prop(path).unwrap();
+                assert_eq!(p.keys.len(), 3);
+                assert_eq!(p.keys[2].time.seconds(), time);
+                assert_eq!(p.keys[2].value.to_json(), value);
+            }
+            let scale = h.state().session.active_comp().unwrap().layer(id).unwrap().props.prop(paths[2]).unwrap();
+            if include_scale {
+                assert_eq!(scale.keys.len(), 3);
+                assert_eq!(scale.keys[2].time.seconds(), 2.0);
+                assert_eq!(scale.keys[2].value.to_json(), json!([1500.0, 1600.0, 100.0]));
+            } else {
+                assert_eq!(scale.keys, original[2]);
+            }
+            h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+            for (path, expected) in paths.iter().zip(&original) {
+                assert_eq!(&h.state().session.active_comp().unwrap().layer(id).unwrap().props.prop(path).unwrap().keys, expected);
+            }
+            h.run_steps(2);
+        }
+    }
+}
+
+#[test]
 fn shift_click_toggles_and_ctrl_click_switches_interpolation() {
     let (mut h, id, uid) = harness();
     let ks = keys(&h, uid);
@@ -465,4 +561,40 @@ fn speed_graph_handle_drags_upward_past_the_top() {
     let long = out_speed(&h);
     // The speed per pixel depends on the graph's fitted scale; only the proportion matters.
     assert!(short > 0.0 && long > 9.0 * short, "40 px up gave {short}, 400 px up gave {long}");
+}
+
+/// #1617: with Easy Ease both keys sit at speed 0 in the speed graph, so fitting the selection to
+/// its keys and handles framed -1..1 while the curve between them peaks far above. Opening the
+/// Graph Editor on selected keys and Fit Selection both frame the curve's peak, and a lone
+/// selected key frames its neighbouring segments.
+#[test]
+fn speed_graph_fit_selection_frames_the_curve_between_the_keys() {
+    let (mut h, id, uid) = harness();
+    let s = &mut h.state_mut().session;
+    s.execute("prop.select", json!({"layer": id.0, "prop": uid})).unwrap();
+    s.execute("keys.selectAll", json!({})).unwrap();
+    s.execute("keys.easyEase", json!({})).unwrap();
+    let keys = h.state().session.active_comp().unwrap().layer(id).unwrap().props.prop("transform/opacity").unwrap().keys.clone();
+    let peak = (0..=100)
+        .map(|i| effectcraft_engine::keyframe::velocity(&keys, effectcraft_engine::time::Tick::from_seconds_f64(i as f64 / 100.0), false)[0].abs())
+        .fold(0.0, f64::max);
+    assert!(peak > 100.0, "the eased curve peaks above its average speed: {peak}");
+    h.state_mut().ui.timeline.graph_mode = "speed".into();
+    h.state_mut().ui.timeline.graph_editor = true;
+    h.run_steps(4);
+    let frames_peak = |h: &Harness<'_, EffectcraftApp>, what: &str| {
+        let (lo, hi) = h.state().ui.timeline.graph_range.expect("a fitted range");
+        assert!(lo <= 0.0 && hi > peak * 0.9, "{what}: range {lo}..{hi}, the curve peaks at {peak}");
+    };
+    frames_peak(&h, "on open");
+    h.state_mut().ui.timeline.graph_range = Some((-1.0, 1.0));
+    let fit = h.state().auto.find("timeline.graph.fitSelection").expect("the Fit Selection button").rect;
+    click_with(&mut h, pos2(fit[0] + fit[2] / 2.0, fit[1] + fit[3] / 2.0), Default::default());
+    frames_peak(&h, "Fit Selection");
+    let last = keys[1].time.seconds();
+    h.state_mut().session.execute("keys.select", json!({"keys": [{"layer": id.0, "prop": uid, "time": last}]})).unwrap();
+    assert_eq!(h.state().session.state.selected_keys.len(), 1);
+    h.state_mut().ui.timeline.graph_range = Some((-1.0, 1.0));
+    click_with(&mut h, pos2(fit[0] + fit[2] / 2.0, fit[1] + fit[3] / 2.0), Default::default());
+    frames_peak(&h, "lone key");
 }

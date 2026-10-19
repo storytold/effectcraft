@@ -363,7 +363,9 @@ fn wire_removal(ctx: &EffectCtx, mut b: Buf) -> Buf {
             let (qx, qy) = (x as f64 + 0.5 - ax, y as f64 + 0.5 - ay);
             let d = qx * nx + qy * ny;
             let ad = d.abs();
-            if ad > half + soft_w {
+            // The wire is the segment A to B, not an endless line.
+            let along = qx * tx + qy * ty;
+            if !(0.0..=len).contains(&along) || ad > half + soft_w {
                 continue;
             }
             // Positions just outside the wire on both sides.
@@ -578,6 +580,24 @@ mod tests {
             assert!((out.img.get(10, 10)[0] - 0.5).abs() < 0.05, "style {style}: {:?}", out.img.get(10, 10));
             assert_eq!(out.img.get(2, 10), img.get(2, 10));
         }
+    }
+
+    #[test]
+    fn wire_removal_stays_between_a_and_b() {
+        let mut img = Image::filled(20, 20, [0.5, 0.5, 0.5, 1.0]);
+        for y in 0..20 {
+            img.set(10, y, [0.0, 0.0, 0.0, 1.0]);
+        }
+        let out = run_fx(
+            "ec.key.ccsimplewireremoval",
+            &[("pointA", Value::Vec2([10.5, 5.0])), ("pointB", Value::Vec2([10.5, 15.0])), ("removalStyle", Value::Enum(0)), ("thickness", num(3.0))],
+            img.clone(),
+            0.0,
+            EffectEnv::default(),
+        );
+        assert!((out.img.get(10, 10)[0] - 0.5).abs() < 0.05, "inside the segment");
+        assert_eq!(out.img.get(10, 2), img.get(10, 2), "before A");
+        assert_eq!(out.img.get(10, 18), img.get(10, 18), "after B");
     }
 
     #[test]

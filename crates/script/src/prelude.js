@@ -1978,6 +1978,7 @@ var app = {
     savePrefAsBool: function () {},
     savePrefAsFloat: function () {},
     reload: function () {},
+    saveToDisk: function () {},
   },
   newProject: function () { __call("file.newProject", {}); return new Project(); },
   open: function (file) {

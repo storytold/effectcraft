@@ -260,23 +260,25 @@ fn pdf_and_ai_footage_layers_and_shapes_from_vector_layer() {
     // Import As: Composition — one layer per file layer, top first, together like the page.
     let path = tmp("layers.ai");
     std::fs::write(&path, &bytes).unwrap();
-    let mut s = effectcraft_host::session();
-    let r = s.execute_checked("file.import", json!({"paths": [path], "importAs": "composition"})).unwrap();
-    let cid = ItemId(r["comps"][0].as_u64().unwrap());
-    let comp = s.project.comp(cid).unwrap();
-    let names: Vec<&str> = comp.layers.iter().map(|l| l.name.as_str()).collect();
-    assert_eq!(names, vec!["Art", "Sky"]);
-    assert_eq!((comp.width, comp.height), (120, 80));
-    let art = comp.layers[0].id.0;
-    let img = s.render(cid, effectcraft_time::Tick::ZERO, RenderOpts::default());
-    let d = mean_diff(&img, &direct);
-    assert!(d < 1.0 / 255.0, "layered comp vs page {d}");
-    // Each layer's footage shows only its layer.
-    s.execute("layer.setSwitch", json!({"layers": [art], "switch": "video", "value": false})).unwrap();
-    let sky = s.render(cid, effectcraft_time::Tick::ZERO, RenderOpts::default());
-    assert_eq!(sky.get(5, 5), img.get(5, 5));
-    let p = sky.get(60, 30);
-    assert!(p[2] > p[0], "only sky under the art {p:?}");
+    for import_as in ["composition", "compositionLayerSizes"] {
+        let mut s = effectcraft_host::session();
+        let r = s.execute_checked("file.import", json!({"paths": [path], "importAs": import_as})).unwrap();
+        let cid = ItemId(r["comps"][0].as_u64().unwrap());
+        let comp = s.project.comp(cid).unwrap();
+        let names: Vec<&str> = comp.layers.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, vec!["Art", "Sky"]);
+        assert_eq!((comp.width, comp.height), (120, 80));
+        let art = comp.layers[0].id.0;
+        let img = s.render(cid, effectcraft_time::Tick::ZERO, RenderOpts::default());
+        let d = mean_diff(&img, &direct);
+        assert!(d < 1.0 / 255.0, "layered comp vs page {d}");
+        // Each layer's footage shows only its layer.
+        s.execute("layer.setSwitch", json!({"layers": [art], "switch": "video", "value": false})).unwrap();
+        let sky = s.render(cid, effectcraft_time::Tick::ZERO, RenderOpts::default());
+        assert_eq!(sky.get(5, 5), img.get(5, 5));
+        let p = sky.get(60, 30);
+        assert!(p[2] > p[0], "only sky under the art {p:?}");
+    }
 }
 
 #[test]
@@ -520,5 +522,77 @@ fn shapes_from_vector_layer_keeps_images_as_footage_layers() {
     for (x, y) in [(25, 17), (55, 17), (25, 32), (55, 32), (95, 60), (95, 40), (105, 40), (30, 65)] {
         let (a, b) = (shapes.get(x, y), direct.get(x, y));
         assert!((0..3).all(|k| (a[k] - b[k]).abs() < 0.05), "({x}, {y}): {a:?} vs {b:?}");
+    }
+}
+
+fn retain_pdf(width: u32) -> Vec<u8> {
+    effectcraft_pdf::write::pdf(
+        &[
+            (1, "<< /Type /Catalog /Pages 2 0 R >>".into(), None),
+            (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(), None),
+            (3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 120 80] /Resources << /Properties << /L0 5 0 R /L1 6 0 R >> >> /Contents 4 0 R >>".into(), None),
+            (
+                4,
+                "<< >>".into(),
+                Some(
+                    format!("/OC /L0 BDC q 20 15 {width} 20 re W n 1 0 0 rg 0 0 120 80 re f Q EMC /OC /L1 BDC 0 0 1 RG 4 w 70 40 m 100 40 l S EMC")
+                        .into_bytes(),
+                ),
+            ),
+            (5, "<< /Type /OCG /Name (Box) >>".into(), None),
+            (6, "<< /Type /OCG /Name (Line) >>".into(), None),
+        ],
+        1,
+    )
+}
+
+#[test]
+fn ai_composition_retains_layer_sizes_and_positions() {
+    use effectcraft_project::{ItemKind, LayerSource, Project};
+    use effectcraft_time::Tick;
+
+    for name in ["retain.ai", "retain.pdf"] {
+        let path = tmp(name);
+        let bytes = retain_pdf(30);
+        std::fs::write(&path, &bytes).unwrap();
+        let mut s = effectcraft_host::session();
+        let r = s.execute_checked("file.import", json!({"paths": [path], "importAs": "compositionLayerSizes"})).unwrap();
+        assert_eq!(r["errors"], json!([]), "{r}");
+        let cid = ItemId(r["comps"][0].as_u64().unwrap());
+        let comp = s.project.comp(cid).unwrap();
+        assert_eq!((comp.width, comp.height), (120, 80));
+        assert_eq!(comp.layers.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), ["Line", "Box"]);
+        let mut ids = vec![];
+        for (name, size, anchor, position) in [("Box", (30, 20), [15.0, 10.0], [35.0, 55.0]), ("Line", (30, 4), [15.0, 2.0], [85.0, 40.0])] {
+            let l = comp.layer_by_name(name).unwrap();
+            let LayerSource::Footage { item } = l.source else { panic!("footage") };
+            let ItemKind::Footage(f) = &s.project.item(item).unwrap().kind else { panic!("footage") };
+            assert_eq!((f.width, f.height), size, "{name} uses its artwork bounds");
+            assert!(f.layer.as_ref().unwrap().layer_size);
+            assert_eq!(l.props.prop("transform/anchor").unwrap().value.as_vec2(), anchor);
+            assert_eq!(l.props.prop("transform/position").unwrap().value.as_vec2(), position);
+            let frame = s.footage.frame(item, f, Tick::ZERO).unwrap();
+            assert_eq!((frame.width, frame.height), size);
+            let sharp = s.footage.vector_frame(item, f, 2.0).unwrap();
+            assert_eq!((sharp.width, sharp.height), (size.0 * 2, size.1 * 2));
+            assert!(sharp.get(1, 1)[3] > 0.99);
+            ids.push(item);
+        }
+        let direct = effectcraft_svg::rasterize(&effectcraft_pdf::parse(&bytes).unwrap(), 120, 80, 1.0);
+        assert!(mean_diff(&s.render(cid, Tick::ZERO, RenderOpts::default()), &direct) < 0.001);
+        let saved = s.project.to_json();
+        s.project = std::sync::Arc::new(Project::from_json(&saved).unwrap());
+        assert!(mean_diff(&s.render(cid, Tick::ZERO, RenderOpts::default()), &direct) < 0.001, "reopened project");
+        let box_id = s.active_comp().unwrap().layer_by_name("Box").unwrap().id.0;
+        s.execute_checked("layer.create", json!({"op": "shapesFromVector", "layers": [box_id]})).unwrap();
+        assert!(mean_diff(&s.render(cid, Tick::ZERO, RenderOpts::default()), &direct) < 0.001, "shape conversion preserves placement");
+        s.execute_checked("edit.undo", json!({})).unwrap();
+        std::fs::write(&path, retain_pdf(40)).unwrap();
+        s.execute_checked("file.reloadFootage", json!({"items": ids})).unwrap();
+        let ItemKind::Footage(f) = &s.project.item(ids[0]).unwrap().kind else { panic!("footage") };
+        assert_eq!((f.width, f.height), (40, 20), "reload refreshes the layer's own dimensions");
+        let frame = s.footage.frame(ids[0], f, Tick::ZERO).unwrap();
+        assert_eq!((frame.width, frame.height), (40, 20));
+        assert!(frame.get(39, 10)[0] > 0.99, "reload invalidates cached pixels");
     }
 }
