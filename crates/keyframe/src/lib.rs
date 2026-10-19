@@ -556,10 +556,12 @@ pub fn evaluate_orientation(keys: &[Keyframe], t: Tick) -> Option<Value> {
     } else {
         // Auto-Bezier keys take the arc speed between their neighbours.
         let side = |j: usize, out: bool| -> Ease {
-            let Some(k) = keys.get(j) else { return Ease { speed: arc / dur, influence: 1.0 / 3.0 } };
+            // A linear side keeps the segment's average speed at the same influence as in
+            // `segment_value` (and a missing key, unreachable here, is treated as one).
+            let Some(k) = keys.get(j) else { return Ease { speed: arc / dur, influence: LINEAR_SIDE_INFLUENCE } };
             let linear = if out { lin_out } else { lin_in };
             if linear {
-                return Ease { speed: arc / dur, influence: 1.0 / 3.0 };
+                return Ease { speed: arc / dur, influence: LINEAR_SIDE_INFLUENCE };
             }
             if k.auto_bezier && j > 0 && j + 1 < keys.len() {
                 let span = (secs(keys[j + 1].time) - secs(keys[j - 1].time)).max(1e-12);
@@ -956,6 +958,36 @@ mod tests {
         let v = evaluate(&mirror, s(3.5), false).unwrap().as_f64();
         assert!((v - (4.0 - 3.290)).abs() < 2.0 / 455.0, "{v}");
         assert_eq!(side_ease(&keys, 1, 0, false, false).map(|e| e.influence), Some(LINEAR_SIDE_INFLUENCE));
+    }
+
+    /// Keyed Orientation shapes a linear side next to an eased one as a scalar property does
+    /// (`LINEAR_SIDE_INFLUENCE`): about one axis the shortest arc is the angle itself, so the
+    /// orientation follows the same curve as a scalar with the same keys (CodeRabbit on #1876).
+    #[test]
+    fn orientation_linear_side_next_to_an_eased_side_matches_a_scalar() {
+        let ease = vec![Ease { speed: 0.0, influence: 0.5 }];
+        let (mut a, mut sa) = (Keyframe::new(s(2.0), Value::Vec3([0.0, 0.0, 0.0])), Keyframe::new(s(2.0), Value::Scalar(0.0)));
+        for k in [&mut a, &mut sa] {
+            k.out_interp = Interp::Bezier;
+            k.out_ease = ease.clone();
+        }
+        let orient = vec![a, Keyframe::new(s(4.0), Value::Vec3([0.0, 0.0, 90.0]))];
+        let scalar = vec![sa, Keyframe::new(s(4.0), Value::Scalar(90.0))];
+        // The mirror: a linear out into an eased in.
+        let (mut b, mut sb) = (Keyframe::new(s(4.0), Value::Vec3([0.0, 0.0, 90.0])), Keyframe::new(s(4.0), Value::Scalar(90.0)));
+        for k in [&mut b, &mut sb] {
+            k.in_interp = Interp::Bezier;
+            k.in_ease = ease.clone();
+        }
+        let orient_m = vec![Keyframe::new(s(2.0), Value::Vec3([0.0, 0.0, 0.0])), b];
+        let scalar_m = vec![Keyframe::new(s(2.0), Value::Scalar(0.0)), sb];
+        for (o, sc) in [(&orient, &scalar), (&orient_m, &scalar_m)] {
+            for t in [2.25, 2.5, 3.0, 3.5, 3.75] {
+                let Some(Value::Vec3(v)) = evaluate_orientation(o, s(t)) else { panic!("orientation at {t}") };
+                let want = evaluate(sc, s(t), false).unwrap().as_f64();
+                assert!((v[2] - want).abs() < 1e-6 && v[0].abs() < 1e-9 && v[1].abs() < 1e-9, "{t}: {v:?} vs {want}");
+            }
+        }
     }
 
     #[test]

@@ -128,6 +128,9 @@ impl Property {
             return self.value.clone();
         }
         // 3D Orientation turns along the shortest arc between its keys, as in After Effects.
+        // Routed by `match_id`: "orientation" is only used by the Orientation property of 3D
+        // layers, cameras and lights (`build.rs`), always a `Vec3` of degrees. A future property
+        // must not reuse that id unless it is a rotation that should slerp the same way.
         if self.match_id == "orientation" && matches!(self.value, Value::Vec3(_)) {
             return effectcraft_keyframe::evaluate_orientation(&self.keys, t).unwrap_or_else(|| self.value.clone());
         }

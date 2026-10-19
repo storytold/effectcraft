@@ -622,7 +622,8 @@ mod tests {
         let whole = Mat4::orientation(orientation_slerp(a, vec3(0.0, 0.0, 360.0), 0.5)).apply_vec(vec3(1.0, 0.0, 0.0));
         assert!((whole - vec3(1.0, 0.0, 0.0)).length() < 1e-9 && orientation_arc_deg(a, vec3(0.0, 0.0, 360.0)) < 1e-6);
         let nan = orientation_slerp(vec3(f64::NAN, 0.0, 0.0), b, 0.5);
-        assert!(nan.x.is_nan() || nan.x.is_finite());
+        // A non-finite key comes back as given (the first key), not as a blended rotation.
+        assert!(nan.x.is_nan() && nan.y == 0.0 && nan.z == 0.0, "{nan:?}");
         assert!(orientation_slerp(a, b, f64::INFINITY).x.is_finite());
         assert!((orientation_arc_deg(a, vec3(0.0, 0.0, 90.0)) - 90.0).abs() < 1e-9);
         assert!((orientation_arc_deg(a, vec3(0.0, 0.0, 270.0)) - 90.0).abs() < 1e-9);
