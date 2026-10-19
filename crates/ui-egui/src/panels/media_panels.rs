@@ -15,6 +15,7 @@ use effectcraft_engine::media_browser as mb;
 use effectcraft_engine::project::ItemId;
 use egui::{Align2, Color32, Rect, Sense, Stroke, pos2, vec2};
 use serde_json::{Value, json};
+use std::sync::Arc;
 
 use super::DragPayload;
 use super::panel_kit as kit;
@@ -24,6 +25,7 @@ use crate::{EffectcraftApp, widgets};
 // ---------------------------------------------------------------- Media Browser
 
 type Thumb = Option<(egui::TextureHandle, [u32; 2])>;
+type Listing = (f64, Arc<Result<Vec<mb::Entry>, String>>);
 
 /// Thumbnail of a file (cached per path; `None` while not decoded or not decodable).
 fn thumbnail(app: &EffectcraftApp, ctx: &egui::Context, path: &str, budget: &mut u32) -> Thumb {
@@ -76,11 +78,11 @@ pub fn media_browser(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     // Listing cached per folder for a second.
     let lid = egui::Id::new(("mb-list", dir.clone(), st.importable_only));
     let now = ctx.input(|i| i.time);
-    let listing: Option<(f64, Result<Vec<mb::Entry>, String>)> = ctx.data(|d| d.get_temp(lid));
+    let listing: Option<Listing> = ctx.data(|d| d.get_temp(lid));
     let entries = match listing {
         Some((at, l)) if now - at < 1.0 => l,
         _ => {
-            let l = b.list(&dir, st.importable_only);
+            let l = Arc::new(b.list(&dir, st.importable_only));
             ctx.data_mut(|d| d.insert_temp(lid, (now, l.clone())));
             l
         }
@@ -115,7 +117,7 @@ pub fn media_browser(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         }
         if kit::button(app, ui, Rect::from_min_size(pos2(ax, y), vec2(w, 20.0)), &format!("mediaBrowser.action.{id}"), label, false) {
             kit::exec(app, "mediaBrowser.action", json!({"action": id}));
-            ctx.data_mut(|d| d.remove::<(f64, Result<Vec<mb::Entry>, String>)>(lid));
+            ctx.data_mut(|d| d.remove::<Listing>(lid));
         }
         ax -= 6.0;
     }
@@ -150,7 +152,7 @@ pub fn media_browser(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
     // Files.
     let list = Rect::from_min_max(pos2(side.max.x + 1.0, side.min.y), rect.max);
-    let entries = match entries {
+    let entries = match entries.as_ref() {
         Ok(e) => e,
         Err(e) => {
             p.text(list.center(), Align2::CENTER_CENTER, e, Tokens::ui(12.0), t.danger);
@@ -209,6 +211,14 @@ pub fn media_browser(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             egui::DragAndDrop::set_payload(&ctx, DragPayload::Files(vec![e.path.clone()]));
         }
         crate::widgets::context_menu(&resp, |ui| {
+            let copy = ui.button(tr("Copy Source Path"));
+            app.auto.add(&format!("mediaBrowser.entry.{}.copySourcePath", e.name), copy.rect, "Copy Source Path");
+            if copy.clicked() {
+                if let Err(e) = crate::menus::invoke(app, &ctx, "mediaBrowser.copySourcePath", json!({"path": e.path})) {
+                    app.ui.status = e;
+                }
+                ui.close();
+            }
             if !e.is_dir && ui.button(tr("Import")).clicked() {
                 actions.push(("mediaBrowser.import", json!({"paths": [e.path]})));
                 ui.close();
@@ -408,4 +418,53 @@ pub fn import_card(app: &mut EffectcraftApp, ui: &mut egui::Ui, full: Rect) -> f
         bottom = r.min.y - 8.0;
     }
     full.max.y - 16.0 - bottom
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "Media Browser warm listing cache benchmark"]
+    fn listing_cache_benchmark() {
+        let ctx = egui::Context::default();
+        let entries: Vec<_> = (0..1000)
+            .map(|i| mb::Entry {
+                name: format!("Clip {i:04}.mov"),
+                path: format!("/Shoot/作品 Clip {i:04}.mov"),
+                is_dir: false,
+                size: 1,
+                modified: None,
+                kind: Some("video"),
+            })
+            .collect();
+        let old_id = egui::Id::new("old-list");
+        let new_id = egui::Id::new("new-list");
+        ctx.data_mut(|d| {
+            d.insert_temp(old_id, (0.0, Ok::<_, String>(entries.clone())));
+            d.insert_temp(new_id, (0.0, Arc::new(Ok::<_, String>(entries))));
+        });
+        let (_, original) = ctx.data(|d| d.get_temp::<Listing>(new_id)).unwrap();
+        assert_eq!(original.as_ref().as_ref().unwrap()[0].name, "Clip 0000.mov");
+        let mut before = Vec::new();
+        let mut after = Vec::new();
+        for _ in 0..5 {
+            let start = std::time::Instant::now();
+            for _ in 0..1000 {
+                let _ = std::hint::black_box(ctx.data(|d| d.get_temp::<(f64, Result<Vec<mb::Entry>, String>)>(old_id)).unwrap());
+            }
+            before.push(start.elapsed());
+            let start = std::time::Instant::now();
+            for _ in 0..1000 {
+                std::hint::black_box(ctx.data(|d| d.get_temp::<Listing>(new_id)).unwrap());
+            }
+            after.push(start.elapsed());
+        }
+        let (_, cached) = ctx.data(|d| d.get_temp::<Listing>(new_id)).unwrap();
+        assert!(Arc::ptr_eq(&original, &cached));
+        assert_eq!(cached.as_ref().as_ref().unwrap().last().unwrap().name, "Clip 0999.mov");
+        before.sort();
+        after.sort();
+        println!("1,000 Media Browser entries, median per warm cache lookup: {:?} -> {:?}", before[2] / 1000, after[2] / 1000);
+    }
 }

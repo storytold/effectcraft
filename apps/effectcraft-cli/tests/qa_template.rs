@@ -247,7 +247,7 @@ fn template_output_alias_fixture(case: &str) -> PathBuf {
     dir
 }
 
-fn assert_template_output_preserves_inputs(dir: &PathBuf, out: &str) {
+fn assert_template_output_preserves_inputs(dir: &PathBuf, out: &str) -> Value {
     let template_before = std::fs::read(dir.join("lt.ectemplate")).unwrap();
     let values_before = std::fs::read(dir.join("values.json")).unwrap();
     // Read the inputs before interpreting the subprocess status or error text.
@@ -272,7 +272,8 @@ fn assert_template_output_preserves_inputs(dir: &PathBuf, out: &str) {
     );
     assert!(template_preserved, "template rendering must preserve its template input when --out aliases that file");
     assert!(values_preserved, "template rendering must preserve its values input when --out aliases that file");
-    assert!(!result.status.success(), "an output alias must fail before rendering overwrites an input");
+    assert_eq!(result.status.code(), Some(1), "an output alias must fail before rendering overwrites an input");
+    serde_json::from_slice(&result.stdout).unwrap()
 }
 
 #[test]
@@ -650,5 +651,119 @@ fn template_missing_output_does_not_replace_extracted_media() {
     assert!(!dir.join("frame.png").exists(), "a missing render output must not create a default frame");
     eprintln!("MISSING_OUTPUT_REQUIRED_OUT: valid ordinary render/extraction and actual required-output usage failure verified");
     assert!(media_preserved, "missing --out must fail before overwriting previously extracted media");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn template_frame_output_cannot_alias_its_template_through_a_hard_link() {
+    use std::os::unix::fs::MetadataExt;
+
+    let dir = template_output_alias_fixture("hard-linked-template");
+    let input = dir.join("lt.ectemplate");
+    let output = dir.join("hard-linked-template.png");
+    std::fs::hard_link(&input, &output).unwrap();
+    let input_metadata = std::fs::metadata(&input).unwrap();
+    let output_metadata = std::fs::metadata(&output).unwrap();
+    assert_eq!((input_metadata.dev(), input_metadata.ino()), (output_metadata.dev(), output_metadata.ino()), "actual hard-link file identity");
+    assert_ne!(input.canonicalize().unwrap(), output.canonicalize().unwrap(), "the hard link has a distinct canonical path");
+    let reply = assert_template_output_preserves_inputs(&dir, "hard-linked-template.png");
+    assert_eq!(reply["error"], "--out hard-linked-template.png would overwrite --template lt.ectemplate", "{reply}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn template_frame_output_cannot_alias_its_values_through_a_hard_link() {
+    use std::os::unix::fs::MetadataExt;
+
+    let dir = template_output_alias_fixture("hard-linked-values");
+    let input = dir.join("values.json");
+    let output = dir.join("hard-linked-values.png");
+    std::fs::hard_link(&input, &output).unwrap();
+    let input_metadata = std::fs::metadata(&input).unwrap();
+    let output_metadata = std::fs::metadata(&output).unwrap();
+    assert_eq!((input_metadata.dev(), input_metadata.ino()), (output_metadata.dev(), output_metadata.ino()), "actual hard-link file identity");
+    assert_ne!(input.canonicalize().unwrap(), output.canonicalize().unwrap(), "the hard link has a distinct canonical path");
+    let reply = assert_template_output_preserves_inputs(&dir, "hard-linked-values.png");
+    assert_eq!(reply["error"], "--out hard-linked-values.png would overwrite --values values.json", "{reply}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A template whose `Clip` control is a Media Replacement showing `source.png` (blue), with
+/// `other.png` (red) beside it to replace it with, exported as `lt.ectemplate` in a fresh `dir`.
+fn media_template(case: &str) -> PathBuf {
+    let temp_root = std::env::temp_dir().canonicalize().unwrap();
+    let dir = temp_root.join(format!("ec-qa-template-{case}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("build.jsx"), BUILD).unwrap();
+    ok(&dir, &["script", "build.jsx", "--save-as", "t.ecproj"]);
+    image::RgbaImage::from_pixel(2, 2, image::Rgba([30, 60, 90, 255])).save(dir.join("source.png")).unwrap();
+    image::RgbaImage::from_pixel(2, 2, image::Rgba([200, 20, 40, 255])).save(dir.join("other.png")).unwrap();
+    let imported = ok(&dir, &["exec", "file.import", r#"{"paths":["source.png"]}"#, "t.ecproj", "--save"]);
+    let item = imported["result"]["items"][0].as_u64().unwrap();
+    let params = serde_json::json!({"comp": "Lower Third", "item": item, "position": [8, 8], "time": 0}).to_string();
+    let added = ok(&dir, &["exec", "layer.addItem", &params, "t.ecproj", "--save"]);
+    let layer = added["result"]["layer"].as_u64().unwrap();
+    let params = serde_json::json!({"comp": "Lower Third", "layer": layer, "name": "Clip"}).to_string();
+    ok(&dir, &["exec", "essential.addMedia", &params, "t.ecproj", "--save"]);
+    ok(&dir, &["exec", "essential.exportTemplate", r#"{"comp":"Lower Third","path":"lt.ectemplate"}"#, "t.ecproj"]);
+    dir
+}
+
+/// Renders the template's frame with `values` and checks that the control shows `other.png`.
+fn assert_renders_the_replacement(dir: &PathBuf, values: &str) {
+    std::fs::write(dir.join("values.json"), values).unwrap();
+    ok(dir, &["render-frame", "--template", "lt.ectemplate", "--values", "values.json", "--time", "1", "--out", "out.png"]);
+    let px = image::open(dir.join("out.png")).unwrap().to_rgba8().get_pixel(8, 8).0;
+    assert!(
+        (px[0] as i32 - 200).abs() <= 2 && (px[1] as i32 - 20).abs() <= 2 && (px[2] as i32 - 40).abs() <= 2,
+        "{values}: replacement media rendered: {px:?}"
+    );
+}
+
+#[test]
+fn template_values_fill_a_media_replacement_control_with_a_file_path() {
+    let dir = media_template("media-control");
+    assert_renders_the_replacement(&dir, r#"{"Clip":"other.png"}"#);
+
+    // A control that is not given a path is rejected with a clear message.
+    std::fs::write(dir.join("bad.json"), r#"{"Clip":5}"#).unwrap();
+    let (code, reply) = cli(&dir, &["render-frame", "--template", "lt.ectemplate", "--values", "bad.json", "--time", "1", "--out", "bad.png"]);
+    assert_eq!(code, 1, "{reply}");
+    assert!(reply["error"].as_str().unwrap().contains("media control"), "{reply}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The object forms `{"path"|"file"|"media": …}` take a file path too, and the control is found
+/// by name the way `essential.set` finds it: exactly, then ignoring case (#1787).
+#[test]
+fn template_media_control_takes_a_path_object_and_a_name_in_any_case() {
+    let dir = media_template("media-forms");
+    for values in [
+        r#"{"Clip":{"path":"other.png"}}"#,
+        r#"{"Clip":{"file":"other.png"}}"#,
+        r#"{"Clip":{"media":"other.png"}}"#,
+        r#"{"clip":"other.png"}"#,
+        r#"{"CLIP":{"path":"other.png"}}"#,
+    ] {
+        let _ = std::fs::remove_file(dir.join("out.png"));
+        assert_renders_the_replacement(&dir, values);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A media path that cannot be imported fails the render with an error naming the control and
+/// the path, and writes no frame (#1787).
+#[test]
+fn template_media_control_reports_a_path_that_cannot_be_imported() {
+    let dir = media_template("media-missing");
+    std::fs::write(dir.join("missing.json"), r#"{"Clip":"missing.png"}"#).unwrap();
+    let (code, reply) = cli(&dir, &["render-frame", "--template", "lt.ectemplate", "--values", "missing.json", "--time", "1", "--out", "missing-out.png"]);
+    assert_eq!(code, 1, "{reply}");
+    let error = reply["error"].as_str().unwrap();
+    assert!(error.contains("control `Clip`: cannot import missing.png"), "{reply}");
+    assert!(!dir.join("missing-out.png").exists(), "{reply}");
     let _ = std::fs::remove_dir_all(&dir);
 }

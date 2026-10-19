@@ -32,7 +32,7 @@ fn gradient_paints<'a>(g: &'a PropGroup, depth: usize, out: &mut Vec<&'a PropGro
 }
 
 /// `g` or something inside it is selected on `layer`.
-fn selected_in(g: &PropGroup, layer: LayerId, selected: &[(LayerId, u64)]) -> bool {
+pub(crate) fn selected_in(g: &PropGroup, layer: LayerId, selected: &[(LayerId, u64)]) -> bool {
     fn contains(g: &PropGroup, uid: u64, depth: usize) -> bool {
         g.uid == uid || (depth < 16 && g.children.iter().any(|n| n.uid() == uid || matches!(n, Node::Group(c) if contains(c, uid, depth + 1))))
     }

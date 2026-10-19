@@ -154,8 +154,9 @@ fn fxc_point(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let i = u32(max(floor(hp), 0.0)) % 6u;
                 let f = hp - floor(hp);
                 let wt = w[i] + (w[(i + 1u) % 6u] - w[i]) * f;
-                let base = luminance(c);
-                let gray = max(base + (wt - 0.5) * hsl.y * 0.6, 0.0);
+                let mx = max(max(c.x, c.y), c.z);
+                let mn = min(min(c.x, c.y), c.z);
+                let gray = max(mn + (mx - mn) * wt, 0.0);
                 var o = vec3<f32>(gray);
                 if (P.u[0].y != 0u) {
                     o = hsl_to_rgb(P.f[2].x, P.f[2].y, min(gray, 1.0));

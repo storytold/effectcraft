@@ -108,13 +108,89 @@ fn roto_bezier(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"rotoBezier": on}))
 }
 
+/// The parametric shape paths that Convert To Bezier Path replaces with an editable path.
+const PARAMETRIC: [&str; 3] = ["rect", "ellipse", "star"];
+
+/// The path a parametric shape group draws, in the group's own space, read at `lt`. This is the
+/// geometry the renderer builds from the same values (`render::shapes::collect`), so the converted
+/// path is the shape that was on screen rather than an approximation of it; the defaults match
+/// that code for a property a group doesn't carry (a polygon has no inner radius or roundness).
+fn parametric_path(g: &PropGroup, lt: effectcraft_time::Tick) -> Option<ShapePath> {
+    let f = |id: &str, d: f64| g.prop(id).map_or(d, |pr| pr.value_at(lt).as_f64());
+    let v2 = |id: &str, d: [f64; 2]| g.prop(id).map_or(d, |pr| pr.value_at(lt).as_vec2());
+    let path = match g.match_id.as_str() {
+        "rect" => effectcraft_path::rect(v2("size", [100.0; 2]), v2("position", [0.0; 2]), f("roundness", 0.0)),
+        "ellipse" => effectcraft_path::ellipse(v2("size", [100.0; 2]), v2("position", [0.0; 2])),
+        "star" => effectcraft_path::polystar(
+            g.prop("type").map_or(0, |pr| pr.value_at(lt).as_enum()) == 0,
+            f("points", 5.0),
+            v2("position", [0.0; 2]),
+            f("rotation", 0.0),
+            f("innerRadius", 50.0),
+            f("outerRadius", 100.0),
+            f("innerRoundness", 0.0),
+            f("outerRoundness", 0.0),
+        ),
+        _ => return None,
+    };
+    // A closed parametric shape is one subpath; anything else would not be this shape.
+    effectcraft_path::from_kurbo(&path).into_iter().next()
+}
+
 fn convert_to_bezier(s: &mut Session, p: &Value) -> Result<Value> {
-    edit_mask_groups(s, p, "Convert To Bezier Path", |g| {
-        if let GroupKind::Mask { roto_bezier, .. } = &mut g.kind {
-            *roto_bezier = false;
+    // On a shape layer this replaces a Rectangle, Ellipse or Polystar path with an editable
+    // Path 1 of the same geometry, as After Effects does (#932). The parametric properties are
+    // read at the current time and the path that comes out is static: a size or roundness
+    // animation cannot survive the conversion, in After Effects either.
+    let (cid, items) = selected_shape_items(s, p)?;
+    let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
+    let shapes: Vec<(LayerId, Uid)> = items
+        .into_iter()
+        .filter(|(l, u)| {
+            comp.layer(*l).and_then(|l| l.props.sub("contents")).and_then(|c| c.find_group(*u)).is_some_and(|g| PARAMETRIC.contains(&g.match_id.as_str()))
+        })
+        .collect();
+    if shapes.is_empty() {
+        return edit_mask_groups(s, p, "Convert To Bezier Path", |g| {
+            if let GroupKind::Mask { roto_bezier, .. } = &mut g.kind {
+                *roto_bezier = false;
+            }
+            Ok(())
+        });
+    }
+    let t = s.time();
+    let n = shapes.len();
+    let made = s.edit("Convert To Bezier Path", None, |proj, st| {
+        let mut next = proj.next_id;
+        let mut made = Vec::new();
+        for (lid, uid) in &shapes {
+            let l = layer_mut(proj, cid, *lid)?;
+            let lt = l.layer_time(t);
+            let contents = l.props.sub_mut("contents").ok_or_else(|| bad("path.convertToBezier", "not a shape layer"))?;
+            let Some(old) = contents.find_group(*uid) else { continue };
+            let Some(path) = parametric_path(old, lt) else { continue };
+            // Path Direction is the shape's own, not a default: reversing is a separate command.
+            let direction = old.prop("direction").map_or(0, |pr| pr.value_at(lt).as_enum());
+            let enabled = old.enabled;
+            let mut g = build::shape_path(&mut Ids(&mut next), path);
+            if let Some(pr) = g.prop_mut("direction") {
+                pr.value = KV::Enum(direction);
+            }
+            g.enabled = enabled;
+            let new_uid = g.uid;
+            let parent = contents.parent_of_mut(*uid).ok_or_else(|| bad("path.convertToBezier", "no such shape item"))?;
+            let Some(at) = parent.children.iter().position(|c| c.uid() == *uid) else { continue };
+            parent.children[at] = Node::Group(g);
+            made.push((*lid, new_uid));
         }
-        Ok(())
-    })
+        proj.next_id = next;
+        // The new paths are what is selected, so the vertices can be edited straight away.
+        if !made.is_empty() {
+            st.selected_props = made.clone();
+        }
+        Ok(made)
+    })?;
+    Ok(json!({"paths": made.len(), "of": n}))
 }
 
 // ---------------------------------------------------------------- mask options

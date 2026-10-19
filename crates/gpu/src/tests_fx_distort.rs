@@ -28,6 +28,11 @@ fn twirl_bulge_ripple_wave_warp() {
     effect_case("ec.distort.wavewarp", &[("waveType", e(2)), ("pinning", e(1)), ("phase", n(400.0)), ("speed", n(-2.0))]);
     effect_case("ec.distort.wavewarp", &[("waveType", e(8)), ("pinning", e(2)), ("height", n(-5.0)), ("direction", n(200.0))]);
     effect_case("ec.distort.wavewarp", &[("waveType", e(4)), ("pinning", e(7)), ("width", n(33.0))]);
+    // #1181: the single-edge pinning paths, with the default vertical displacement direction.
+    effect_case("ec.distort.wavewarp", &[("direction", n(90.0)), ("height", n(7.0)), ("width", n(25.0)), ("pinning", e(4))]);
+    effect_case("ec.distort.wavewarp", &[("direction", n(90.0)), ("height", n(7.0)), ("width", n(19.0)), ("pinning", e(6)), ("waveType", e(1))]);
+    effect_case("ec.distort.wavewarp", &[("direction", n(45.0)), ("height", n(-6.0)), ("pinning", e(4)), ("speed", n(2.0))]);
+    effect_case("ec.distort.wavewarp", &[("direction", n(45.0)), ("height", n(-6.0)), ("pinning", e(6)), ("speed", n(2.0))]);
 }
 
 #[test]
@@ -79,6 +84,9 @@ fn shape_case(id: &str, vals: &[(&str, Value)]) {
 fn edge_pinning_on_a_shape_layer() {
     shape_case("ec.distort.turbulentdisplace", &[("size", n(30.0)), ("amount", n(20.0))]);
     shape_case("ec.distort.wavewarp", &[("pinning", e(1)), ("height", n(6.0)), ("width", n(25.0))]);
+    // #1181: single-edge pinning over the layer rect, not just All Edges.
+    shape_case("ec.distort.wavewarp", &[("pinning", e(4)), ("direction", n(90.0)), ("height", n(6.0)), ("width", n(25.0))]);
+    shape_case("ec.distort.wavewarp", &[("pinning", e(6)), ("direction", n(90.0)), ("height", n(6.0)), ("width", n(25.0))]);
     shape_case(
         "ec.distort.bulge",
         &[("pinAllEdges", on()), ("height", n(2.0)), ("hradius", n(40.0)), ("vradius", n(30.0)), ("center", Value::Vec2([28.5, 20.5]))],
