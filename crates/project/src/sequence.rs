@@ -107,6 +107,18 @@ impl Footage {
         self.sequence.get(k).filter(|p| frame_number(p) == Some(n)).map(String::as_str)
     }
 
+    /// The file an image sequence shows at its frame `i`, holding the last existing file across a
+    /// gap in the numbering (After Effects 2026: files 1, 2, 4, 5 show frame 2 at frame 3).
+    /// `None` only when no file precedes the frame (or there are no files).
+    pub fn sequence_file_held(&self, i: i64) -> Option<&str> {
+        if let Some(p) = self.sequence_file(i) {
+            return Some(p);
+        }
+        let first = self.numbered()?;
+        let k = self.first_file_from(first.saturating_add(i));
+        self.sequence.get(k.checked_sub(1)?).map(String::as_str)
+    }
+
     /// Set an image sequence's duration to its frames at its frame rate (after its files or
     /// frame rate changed).
     pub fn sync_sequence_duration(&mut self) {

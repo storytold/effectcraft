@@ -275,8 +275,8 @@ build real projects through these interfaces; they are worked examples of everyt
   numbered run as one item (several picked frames: that range; a folder: each run in it;
   `"sequence": false`: one still; dropped files, `"drag": true`, import as stills unless
   `"sequence": true`, as in After Effects; `"alphabetical": true`: Force Alphabetical Order, the files
-  play one after another) at `frameRate` or 30 fps (Settings ▸ Import). Missing frames show
-  colour bars, as in After Effects. `file.interpretFootage {"items":[id], "frameRate":12,
+  play one after another) at `frameRate` or 30 fps (Settings ▸ Import). A gap in the numbering
+  holds the previous frame, as in After Effects. `file.interpretFootage {"items":[id], "frameRate":12,
   "startTimecode":1001}` conforms them and sets Override Start (the item and layers that ran to its end get the new
   length). See [footage.md](footage.md).
 * **Colour of footage**: `file.interpretFootage {"items":[id], "preserveRgb":true}` is Interpret

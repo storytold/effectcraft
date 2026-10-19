@@ -682,9 +682,9 @@ impl Inner {
         match footage.kind {
             FootageKind::Sequence if !footage.sequence.is_empty() => {
                 let i = Self::frame_index(footage.frame_rate, t, footage.sequence_frames(), footage.loop_count);
-                match footage.sequence_file(i) {
+                match footage.sequence_file_held(i) {
                     Some(path) => Loc { key: key(path, 0), media_t: None, float },
-                    // A gap in the numbering: colour bars, as in After Effects.
+                    // No file at or before the frame: colour bars.
                     None => Loc { key: key(PLACEHOLDER, ((footage.width as i64) << 32) | footage.height as i64), media_t: None, float },
                 }
             }

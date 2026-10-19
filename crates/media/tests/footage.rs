@@ -546,10 +546,11 @@ fn png_sequence_import() {
     assert_eq!(*img, load_png(&first.with_file_name("seq_0004.png")));
 }
 
-/// A gap in a sequence's numbering shows colour bars, as in After Effects; in Force
-/// Alphabetical Order the files play back to back (#297).
+/// A gap in a sequence's numbering holds the previous frame, as After Effects 2026 does (files
+/// 1, 2, 4, 5 show frame 2 at frame 3); in Force Alphabetical Order the files play back to back
+/// (#297).
 #[test]
-fn sequence_gaps_show_placeholders() {
+fn sequence_gaps_hold_the_previous_frame() {
     let dir = fixtures().join(format!("gap-seq-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("mkdir");
     // Frames 1, 2 and 4: frame 3 is missing. Each frame is a flat grey of its number.
@@ -567,11 +568,8 @@ fn sequence_gaps_show_placeholders() {
     let at = |f: &Footage, n: i64| pool.frame_at(f, t_of(f.frame_rate, n)).expect("frame");
     let level = |img: &Image| (img.get(0, 0)[0] * 255.0).round() as u32;
     assert_eq!(level(&at(&f, 1)), 100);
-    // The placeholder: colour bars across the frame, starting with 75 % white.
-    let bars = at(&f, 2);
-    assert_eq!((bars.width, bars.height), (8, 4));
-    assert_eq!(bars.get(0, 0), [0.75, 0.75, 0.75, 1.0]);
-    assert_eq!(bars.get(7, 3), [0.0, 0.0, 0.75, 1.0], "blue on the right");
+    // The gap holds frame 2.
+    assert_eq!(level(&at(&f, 2)), 100);
     assert_eq!(level(&at(&f, 3)), 200);
     f.alphabetical = true;
     f.sync_sequence_duration();
