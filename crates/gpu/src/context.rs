@@ -1403,7 +1403,7 @@ impl<'g> Enc<'g> {
         data.resize(layout.len / 16, [0.0; 4]);
         let mut out = Image { width: img.width, height: img.height, data };
         let dst: &mut [u8] = bytemuck::cast_slice_mut(&mut out.data);
-        self.read_texture_into(&img.texture, 0, 0, img.width, img.height, 16, dst)?;
+        self.read_texture_into(&img.texture, [0, 0, img.width, img.height], 16, dst)?;
         Some(out)
     }
 
@@ -1420,12 +1420,14 @@ impl<'g> Enc<'g> {
         let mut out = Vec::new();
         out.try_reserve_exact(layout.len).map_err(|e| log::error!("gpu readback allocation: {e}")).ok()?;
         out.resize(layout.len, 0);
-        self.read_texture_into(texture, x, y, w, h, bpp, &mut out)?;
+        self.read_texture_into(texture, [x, y, w, h], bpp, &mut out)?;
         Some(out)
     }
 
     /// [`Enc::read_rect`] into `out` (`w × bpp × h` bytes), through a reused staging buffer.
-    fn read_texture_into(&mut self, texture: &wgpu::Texture, x: u32, y: u32, w: u32, h: u32, bpp: u32, out: &mut [u8]) -> Option<()> {
+    /// `rect` is `[x, y, w, h]`.
+    fn read_texture_into(&mut self, texture: &wgpu::Texture, rect: [u32; 4], bpp: u32, out: &mut [u8]) -> Option<()> {
+        let [x, y, w, h] = rect;
         if !self.g.can_wait() {
             return None;
         }

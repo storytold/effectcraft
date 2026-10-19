@@ -81,8 +81,8 @@ pub trait Accelerator: Send + Sync {
     ///
     /// The fill's input frames are read back to the CPU before it runs (analyses render on the
     /// CPU by design, see `effectcraft_engine::background::offload::job_accel`), so a backend
-    /// here is about the fill's own work — PatchMatch today, one stage at a time as each pays
-    /// (`effectcraft_gpu::inpaint`) — not about compositing.
+    /// here is about the fill's own work — PatchMatch and the flow's block matching today, one
+    /// stage at a time as each pays (`effectcraft_gpu::inpaint`) — not about compositing.
     fn inpaint(&self) -> Option<&dyn effectcraft_raster::inpaint::FillBackend> {
         None
     }

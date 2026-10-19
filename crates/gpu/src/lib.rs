@@ -418,7 +418,13 @@ impl Accelerator for Gpu {
 
     fn inpaint(&self) -> Option<&dyn effectcraft_raster::inpaint::FillBackend> {
         self.ctx.check_health().ok()?;
-        self.ctx.can_wait().then_some(self as &dyn effectcraft_raster::inpaint::FillBackend)
+        // Readback is synchronous-only, and a kernel that failed to build would make every stage
+        // fall back to the CPU *after* paying the upload and a failed dispatch (and the fill
+        // would still report the GPU path). Neither is a backend at all.
+        if !self.ctx.can_wait() || self.ctx.unavailable_kernels().iter().any(|(e, _)| crate::inpaint::KERNELS.contains(e)) {
+            return None;
+        }
+        Some(self as &dyn effectcraft_raster::inpaint::FillBackend)
     }
 
     fn auto_pick(&self) -> Option<&effectcraft_render::AutoPick> {

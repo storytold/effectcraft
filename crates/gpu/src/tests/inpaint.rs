@@ -86,10 +86,13 @@ fn patchmatch_agrees_with_the_cpu() {
     let src = cut(&gt, &hole);
     let (cpu, gpu_pm) = (patch_fill(&src, &hole, None, 7, 1), g.patch(&src, &hole, None, 7, 1));
     // Both are syntheses of the same hole: neither is the other's ground truth, so they are
-    // compared as two reconstructions of the same thing.
-    let (cpu_db, gpu_db) = (psnr(&cpu, &gt, Some(&hole)), psnr(&gpu_pm, &gt, Some(&hole)));
-    assert!(gpu_db > cpu_db - 3.0, "GPU {gpu_db:.1} dB vs CPU {cpu_db:.1} dB");
-    assert!(psnr(&gpu_pm, &cpu, Some(&hole)) > 20.0, "the two syntheses disagree");
+    // compared as two reconstructions of the same thing. On this periodic background both are
+    // near-exact, so a relative dB check at machine precision says nothing; the device must be a
+    // good reconstruction *and* agree with the CPU (a wrong fill that still looks plausible would
+    // pass the first and fail the second).
+    let gpu_db = psnr(&gpu_pm, &gt, Some(&hole));
+    assert!(gpu_db > 25.0, "GPU {gpu_db:.1} dB");
+    assert!(psnr(&gpu_pm, &cpu, Some(&hole)) > 30.0, "the two syntheses disagree");
 }
 
 /// The `init` path (a frame refined from the previous frame's warped fill) is the finest level
@@ -186,4 +189,92 @@ fn the_target_band_is_the_dilated_hole() {
     let near = effectcraft_raster::inpaint::dilate(&hole, w as usize, h as usize, 3);
     assert!(near.iter().filter(|b| **b).count() > hole.iter().filter(|b| **b).count());
     assert!(near.iter().zip(&hole).all(|(n, h)| !*h || *n));
+}
+
+/// The flow's block matching runs on the device and finds the same motion the CPU does: the two
+/// frames are the membrane-filled neighbours the sequence driver builds, with a hole in each.
+#[test]
+fn flow_agrees_with_the_cpu() {
+    let Some(g) = gpu() else { return };
+    let (w, h) = (192u32, 128u32);
+    let a_gt = background(w, h, 0.0);
+    let b_gt = background(w, h, 5.0);
+    let hole_a = rect_hole(w, h, 30, 40, 40);
+    let mut hole_b = vec![false; (w * h) as usize];
+    for y in 50..90 {
+        for x in 120..160 {
+            hole_b[(y * w + x) as usize] = true;
+        }
+    }
+    let a = membrane_fill(&cut(&a_gt, &hole_a), &hole_a);
+    let b = membrane_fill(&cut(&b_gt, &hole_b), &hole_b);
+    assert!(crate::inpaint::flow_image(&g.ctx, &a, &b).is_some(), "the flow fell back to the CPU");
+    let cpu = effectcraft_raster::inpaint::CpuFill.flow(&a, &b, &hole_a, &hole_b);
+    let dev = g.flow(&a, &b, &hole_a, &hole_b);
+    assert_eq!((dev.cols, dev.rows, dev.block), (cpu.cols, cpu.rows, cpu.block));
+    // The field is the CPU's to a float rounding: the luma is the CPU's (`luma_pair`), the
+    // pyramid is exact additions, and the search enumerates candidates in the CPU's order.
+    let diff = cpu.v.iter().zip(&dev.v).map(|(c, d)| (c[0] - d[0]).abs().max((c[1] - d[1]).abs())).fold(0.0f32, f32::max);
+    assert!(diff <= 1e-6, "the flow fields differ by {diff}");
+    // The motion is real: the panning background's 5 px shift survives the completion. `b`'s
+    // content sits 5 px left of `a`'s (`background` adds `dx` inside the sample), so a → b is −5.
+    let m = dev.at(96.0, 64.0);
+    assert!((m[0] + 5.0).abs() < 0.5 && m[1].abs() < 0.5, "flow at centre: {m:?}");
+}
+
+/// The vote's σ² comes from a histogram that must count *every* target: the old per-thread
+/// strided pass kept only the pixels whose bin selected that thread (a biased ~1/256 subsample),
+/// which left small holes with a `total < 1` fallback and near-uniform vote weights.
+#[test]
+fn the_distance_histogram_counts_every_target() {
+    let Some(g) = gpu() else { return };
+    let (w, h) = (48u32, 32u32);
+    let (mut field, near) = (Image::new(w, h), vec![true; (w * h) as usize]);
+    for px in field.data.iter_mut() {
+        // Every target has the same distance (0.5 → bin 128): the histogram is one spike.
+        *px = [0.0, 0.0, 0.5, 1.0];
+    }
+    let (sigma2, total) = crate::inpaint::distance_histogram(&g.ctx, &field, &near, w, h).expect("histogram");
+    assert_eq!(total as usize, (w * h) as usize, "the histogram kept {total} of {} samples", w * h);
+    assert!((sigma2 - 128.5 / 256.0).abs() < 1e-3, "sigma2 {sigma2}");
+}
+
+/// A frame too small for one block is the CPU's zero field, on the device path too.
+#[test]
+fn small_frames_get_a_zero_flow() {
+    let Some(g) = gpu() else { return };
+    let (w, h) = (6u32, 6u32);
+    let a = background(w, h, 0.0);
+    let b = background(w, h, 2.0);
+    let none = vec![false; (w * h) as usize];
+    let f = g.flow(&a, &b, &none, &none);
+    assert_eq!((f.cols, f.rows), (1, 1));
+    assert_eq!(f.v, vec![[0.0, 0.0]]);
+}
+
+/// The flow the sequence driver uses (through the `Gpu` backend) keeps the fill stable: the same
+/// frames filled with the CPU backend and the device backend agree, so the propagation sees the
+/// same motion.
+#[test]
+fn sequence_fill_with_the_device_flow_matches_the_cpu() {
+    let Some(g) = gpu() else { return };
+    let (w, h) = (96u32, 64u32);
+    let cpu = effectcraft_raster::inpaint::CpuFill;
+    for pan in [0.0f32, 2.0] {
+        let mut frames = vec![];
+        let mut holes = vec![];
+        for t in 0..6u32 {
+            let gt = background(w, h, t as f32 * pan);
+            let hole = rect_hole(w, h, 12 + 6 * t, 22, 18);
+            frames.push(cut(&gt, &hole));
+            holes.push(hole);
+        }
+        let input = FillInput { frames, holes, references: vec![] };
+        let dev = fill_sequence_with(&input, &FillOpts::default(), g, &mut |_, _| true).expect("gpu fill");
+        let ref_cpu = fill_sequence_with(&input, &FillOpts::default(), &cpu, &mut |_, _| true).expect("cpu fill");
+        for t in 0..dev.len() {
+            let db = psnr(&dev[t], &ref_cpu[t], Some(&input.holes[t]));
+            assert!(db > 40.0, "frame {t} pan {pan}: device vs CPU {db:.1} dB");
+        }
+    }
 }

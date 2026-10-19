@@ -1,6 +1,6 @@
 // GPU Content-Aware Fill: the membrane (harmonic) fill and PatchMatch synthesis of
 // effectcraft_raster::inpaint, operation for operation (the CPU reference is the oracle; see
-// crates/gpu/tests_inpaint.rs).
+// crates/gpu/src/tests/inpaint.rs).
 //
 // Bindings are the shared ones (common.wgsl): `src` / `aux` are the input textures (an image, a
 // coarser level, or the nearest-neighbour field), `out` is the storage texture and `data` is a
@@ -42,7 +42,7 @@ fn imp_valid_source(x: i32, y: i32, w: i32, h: i32, r: i32) -> bool {
 // PatchMatch's hashing rnd (raster::inpaint::rnd), bit for bit: the CPU's random stream is a
 // contract of the algorithm, not an implementation detail.
 fn imp_rnd(seed: u32, a: u32, b: u32) -> u32 {
-    var h = seed * 0x9E3779B9u ^ a * 0x85EBCA6Bu ^ b * 0xC2B2AE35u;
+    var h = (seed * 0x9E3779B9u) ^ (a * 0x85EBCA6Bu) ^ (b * 0xC2B2AE35u);
     h = h ^ (h >> 16u);
     h = h * 0x7FEB352Du;
     h = h ^ (h >> 15u);
@@ -362,7 +362,8 @@ fn imp_pm_prop(@builtin(global_invocation_id) gid: vec3<u32>) {
             best = c;
         }
     }
-    textureStore(out, vec2<i32>(x, y), vec4<f32>(f32(best.x), f32(best.y), bd, 1.0));
+    // alpha = the entry is set: `bd` stays INF only if no match was found.
+    textureStore(out, vec2<i32>(x, y), vec4<f32>(f32(best.x), f32(best.y), bd, select(0.0, 1.0, bd < IMP_INF)));
 }
 
 // The random search (halving radius) and one random source anywhere, after propagation.
@@ -413,7 +414,7 @@ fn imp_pm_rand(@builtin(global_invocation_id) gid: vec3<u32>) {
             best = any;
         }
     }
-    textureStore(out, vec2<i32>(x, y), vec4<f32>(f32(best.x), f32(best.y), bd, 1.0));
+    textureStore(out, vec2<i32>(x, y), vec4<f32>(f32(best.x), f32(best.y), bd, select(0.0, 1.0, bd < IMP_INF)));
 }
 
 // Carry a round's field back into the nearest-neighbour field (only targets, as on the CPU).
@@ -482,8 +483,13 @@ fn imp_pm_vote(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 }
 
+// The workgroup's 1024 distance bins (`imp_hist`); the name is unique across the concatenated
+// shader sources because `var<workgroup>` is module scope.
+var<workgroup> imp_hist_bins: array<atomic<u32>, 1024>;
+
 // One workgroup's histogram of the targets' match distances, for the vote's sigma² (the CPU takes
-// the 75th percentile of the finite distances). 256 threads own 1024 bins, 4 each, so no atomics.
+// the 75th percentile of the finite distances). The single workgroup accumulates the whole
+// population through the shared atomic bins above.
 @compute @workgroup_size(256, 1, 1)
 fn imp_hist(@builtin(global_invocation_id) gid: vec3<u32>) {
     let w = i32(P.u[0].x);
@@ -493,7 +499,13 @@ fn imp_hist(@builtin(global_invocation_id) gid: vec3<u32>) {
     let bw = i32(P.u[1].z);
     let bh = i32(P.u[1].w);
     let t = gid.x;
-    var mine = array<u32, 4>(0u, 0u, 0u, 0u);
+    // One workgroup, so the whole population is counted through shared atomics: a per-thread
+    // strided pass would keep only the pixels whose bin selected that thread (a biased ~1/256
+    // subsample, correlated with the pixel index).
+    for (var i = t; i < 1024u; i = i + 256u) {
+        atomicStore(&imp_hist_bins[i], 0u);
+    }
+    workgroupBarrier();
     let total = u32(max(bw, 0) * max(bh, 0));
     for (var idx = t; idx < total; idx = idx + 256u) {
         let x = x0 + i32(idx) % bw;
@@ -506,12 +518,254 @@ fn imp_hist(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (f.a <= 0.5 || f.b >= IMP_INF) {
             continue;
         }
-        let b = clamp(i32(f.b * 256.0), 0, 1023);
-        if (b >= i32(t) * 4 && b < i32(t) * 4 + 4) {
-            mine[b - i32(t) * 4] = mine[b - i32(t) * 4] + 1u;
+        let b = u32(clamp(i32(f.b * 256.0), 0, 1023));
+        atomicAdd(&imp_hist_bins[b], 1u);
+    }
+    workgroupBarrier();
+    // 256 threads × 4 bins cover the histogram.
+    for (var j = 0u; j < 4u; j = j + 1u) {
+        let bin = t * 4u + j;
+        textureStore(out, vec2<i32>(i32(bin), 0), vec4<f32>(f32(atomicLoad(&imp_hist_bins[bin])), 0.0, 0.0, 0.0));
+    }
+}
+
+// ---------------------------------------------------------------- block flow (flow completion)
+
+// The block matcher of effectcraft_raster::flow::block_flow(a, b, 8, 6), which the fill uses to
+// compute the motion between neighbouring membrane-filled frames before completing it inside the
+// holes (`FillBackend::flow`). `src` packs the two frames' luma planes at the current level:
+// .x is frame A's, .y is frame B's (`effectcraft_raster::flow::Plane::luma`). The kernels mirror
+// the CPU operation for operation, so the field matches the CPU's (crates/gpu/src/tests/inpaint.rs).
+
+// Plane::half of the packed pair: the clamped 2×2 average of each channel.
+@compute @workgroup_size(16, 16)
+fn imp_fl_half(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let cx = i32(gid.x);
+    let cy = i32(gid.y);
+    if (cx >= i32(P.u[0].z) || cy >= i32(P.u[0].w)) {
+        return;
+    }
+    let w = i32(P.u[0].x);
+    let h = i32(P.u[0].y);
+    var sx = 0.0;
+    var sy = 0.0;
+    for (var dy = 0; dy < 2; dy = dy + 1) {
+        for (var dx = 0; dx < 2; dx = dx + 1) {
+            let v = textureLoad(src, vec2<i32>(min(2 * cx + dx, w - 1), min(2 * cy + dy, h - 1)), 0);
+            sx = sx + v.x;
+            sy = sy + v.y;
         }
     }
-    for (var j = 0; j < 4; j = j + 1) {
-        textureStore(out, vec2<i32>(i32(t) * 4 + j, 0), vec4<f32>(f32(mine[j]), 0.0, 0.0, 0.0));
+    textureStore(out, vec2<i32>(cx, cy), vec4<f32>(sx * 0.25, sy * 0.25, 0.0, 0.0));
+}
+
+// Plane::get: the packed luma at (x, y), clamped to the plane.
+fn imp_fl_tex(x: i32, y: i32, w: i32, h: i32) -> vec2<f32> {
+    let v = textureLoad(src, clamp(vec2<i32>(x, y), vec2<i32>(0, 0), vec2<i32>(w - 1, h - 1)), 0);
+    return vec2<f32>(v.x, v.y);
+}
+
+// The block match's SAD with A's block already loaded (`la`, row-major): B's luma is the packed
+// .y. The sub-pixel kernel's five fits share the window's block, so it is read once; the search
+// hoists its own 4×4/8×8 block the same way. The loops' bounds are literals so the backend can
+// unroll them and keep the loads in flight — a runtime-bound loop runs an order of magnitude
+// slower.
+fn imp_fl_sad8h(bx: i32, by: i32, dx: i32, dy: i32, w: i32, h: i32, la: array<f32, 64>) -> f32 {
+    var s = 0.0;
+    for (var yy = 0; yy < 8; yy = yy + 1) {
+        for (var xx = 0; xx < 8; xx = xx + 1) {
+            s = s + abs(la[yy * 8 + xx] - imp_fl_tex(bx + xx + dx, by + yy + dy, w, h).y);
+        }
     }
+    return s;
+}
+
+// block_flow_window's coarse-to-fine search at one level: one integer vector per tile, seeded by
+// the previous (coarser) level's vector at the tile and its four neighbours. `aux` is that field
+// (`P.u[2].x` = 0 at the coarsest level, where the only seed is the zero vector).
+@compute @workgroup_size(16, 16)
+fn imp_fl_search(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let cols = i32(P.u[0].z);
+    let rows = i32(P.u[0].w);
+    let c = i32(gid.x);
+    let r = i32(gid.y);
+    if (c >= cols || r >= rows) {
+        return;
+    }
+    let w = i32(P.u[0].x);
+    let h = i32(P.u[0].y);
+    let bs = i32(P.u[1].x);
+    let k = i32(P.u[1].z);
+    let rad = i32(P.u[1].w);
+    let lbs = max(i32(P.u[1].y) / k, 4);
+    let bx = c * bs / k;
+    let by = r * bs / k;
+    // The zero vector plus up to five neighbour seeds (the tile and its four neighbours).
+    var seeds: array<vec2<i32>, 6>;
+    var ns = 0;
+    seeds[ns] = vec2<i32>(0, 0);
+    ns = ns + 1;
+    if (P.u[2].x != 0u) {
+        var nbr = array<vec2<i32>, 5>(vec2<i32>(0, 0), vec2<i32>(-1, 0), vec2<i32>(1, 0), vec2<i32>(0, -1), vec2<i32>(0, 1));
+        for (var j = 0; j < 5; j = j + 1) {
+            let nc = c + nbr[j].x;
+            let nr = r + nbr[j].y;
+            if (nc >= 0 && nr >= 0 && nc < cols && nr < rows) {
+                let pv = textureLoad(aux, vec2<i32>(nc, nr), 0);
+                seeds[ns] = vec2<i32>(i32(round(pv.x)) * 2, i32(round(pv.y)) * 2);
+                ns = ns + 1;
+            }
+        }
+    }
+    // sort_unstable + dedup: distinct seeds in lexicographic (x, then y) order.
+    for (var i = 1; i < ns; i = i + 1) {
+        let key = seeds[i];
+        var j = i - 1;
+        while (j >= 0 && (seeds[j].x > key.x || (seeds[j].x == key.x && seeds[j].y > key.y))) {
+            seeds[j + 1] = seeds[j];
+            j = j - 1;
+        }
+        seeds[j + 1] = key;
+    }
+    var m = 0;
+    for (var i = 0; i < ns; i = i + 1) {
+        if (m == 0 || seeds[i].x != seeds[m - 1].x || seeds[i].y != seeds[m - 1].y) {
+            seeds[m] = seeds[i];
+            m = m + 1;
+        }
+    }
+    ns = m;
+    // A's block is the same for every candidate, so load it once (the unrolled loops keep it in
+    // registers) and the search only reads B's shifted block.
+    var la4: array<f32, 16>;
+    var la8: array<f32, 64>;
+    if (lbs >= 8) {
+        for (var yy = 0; yy < 8; yy = yy + 1) {
+            for (var xx = 0; xx < 8; xx = xx + 1) {
+                la8[yy * 8 + xx] = imp_fl_tex(bx + xx, by + yy, w, h).x;
+            }
+        }
+    } else {
+        for (var yy = 0; yy < 4; yy = yy + 1) {
+            for (var xx = 0; xx < 4; xx = xx + 1) {
+                la4[yy * 4 + xx] = imp_fl_tex(bx + xx, by + yy, w, h).x;
+            }
+        }
+    }
+    var best = vec2<i32>(0, 0);
+    var best_e = 1e30;
+    for (var si = 0; si < ns; si = si + 1) {
+        let s = seeds[si];
+        for (var dy = -rad; dy <= rad; dy = dy + 1) {
+            for (var dx = -rad; dx <= rad; dx = dx + 1) {
+                let d0 = s.x + dx;
+                let d1 = s.y + dy;
+                var acc = 0.0;
+                if (lbs >= 8) {
+                    for (var yy = 0; yy < 8; yy = yy + 1) {
+                        for (var xx = 0; xx < 8; xx = xx + 1) {
+                            acc = acc + abs(la8[yy * 8 + xx] - imp_fl_tex(bx + xx + d0, by + yy + d1, w, h).y);
+                        }
+                    }
+                } else {
+                    for (var yy = 0; yy < 4; yy = yy + 1) {
+                        for (var xx = 0; xx < 4; xx = xx + 1) {
+                            acc = acc + abs(la4[yy * 4 + xx] - imp_fl_tex(bx + xx + d0, by + yy + d1, w, h).y);
+                        }
+                    }
+                }
+                let e = acc + 1e-4 * f32(abs(d0) + abs(d1));
+                if (e < best_e) {
+                    best_e = e;
+                    best = vec2<i32>(d0, d1);
+                }
+            }
+        }
+    }
+    textureStore(out, vec2<i32>(c, r), vec4<f32>(f32(best.x), f32(best.y), 0.0, 0.0));
+}
+
+// The parabola fit of the SAD around the best vector (block_flow_window's sub-pixel step).
+fn imp_fl_fit(em: f32, ep: f32, e0: f32) -> f32 {
+    let den = em - 2.0 * e0 + ep;
+    if (den > 1e-6) {
+        return clamp(0.5 * (em - ep) / den, -0.5, 0.5);
+    }
+    return 0.0;
+}
+
+// Sub-pixel refinement at full resolution: `aux` is the integer field of level 0, `src` the
+// level-0 packed luma (`P.u[1]` = (tile, window, 0, 0)).
+@compute @workgroup_size(16, 16)
+fn imp_fl_subpix(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let cols = i32(P.u[0].z);
+    let rows = i32(P.u[0].w);
+    let c = i32(gid.x);
+    let r = i32(gid.y);
+    if (c >= cols || r >= rows) {
+        return;
+    }
+    let w = i32(P.u[0].x);
+    let h = i32(P.u[0].y);
+    let bs = i32(P.u[1].x);
+    let win = i32(P.u[1].y);
+    let bx = c * bs;
+    let by = r * bs;
+    let f = textureLoad(aux, vec2<i32>(c, r), 0);
+    let d = vec2<i32>(i32(round(f.x)), i32(round(f.y)));
+    // The window's A block is the same for the five SADs: load it once (the loop is unrolled).
+    var la: array<f32, 64>;
+    for (var yy = 0; yy < 8; yy = yy + 1) {
+        for (var xx = 0; xx < 8; xx = xx + 1) {
+            la[yy * 8 + xx] = imp_fl_tex(bx + xx, by + yy, w, h).x;
+        }
+    }
+    let e0 = imp_fl_sad8h(bx, by, d.x, d.y, w, h, la);
+    let sx = imp_fl_fit(imp_fl_sad8h(bx, by, d.x - 1, d.y, w, h, la), imp_fl_sad8h(bx, by, d.x + 1, d.y, w, h, la), e0);
+    let sy = imp_fl_fit(imp_fl_sad8h(bx, by, d.x, d.y - 1, w, h, la), imp_fl_sad8h(bx, by, d.x, d.y + 1, w, h, la), e0);
+    textureStore(out, vec2<i32>(c, r), vec4<f32>(f32(d.x) + sx, f32(d.y) + sy, 0.0, 0.0));
+}
+
+// The 3×3 component-wise vector median against outliers (each component sorted on its own).
+@compute @workgroup_size(16, 16)
+fn imp_fl_median(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let cols = i32(P.u[0].z);
+    let rows = i32(P.u[0].w);
+    let c = i32(gid.x);
+    let r = i32(gid.y);
+    if (c >= cols || r >= rows) {
+        return;
+    }
+    var xs: array<f32, 9>;
+    var ys: array<f32, 9>;
+    var n = 0;
+    for (var dr = -1; dr <= 1; dr = dr + 1) {
+        for (var dc = -1; dc <= 1; dc = dc + 1) {
+            let nc = c + dc;
+            let nr = r + dr;
+            if (nc >= 0 && nr >= 0 && nc < cols && nr < rows) {
+                let v = textureLoad(src, vec2<i32>(nc, nr), 0);
+                xs[n] = v.x;
+                ys[n] = v.y;
+                n = n + 1;
+            }
+        }
+    }
+    for (var i = 1; i < n; i = i + 1) {
+        let kx = xs[i];
+        var j = i - 1;
+        while (j >= 0 && xs[j] > kx) {
+            xs[j + 1] = xs[j];
+            j = j - 1;
+        }
+        xs[j + 1] = kx;
+        let ky = ys[i];
+        j = i - 1;
+        while (j >= 0 && ys[j] > ky) {
+            ys[j + 1] = ys[j];
+            j = j - 1;
+        }
+        ys[j + 1] = ky;
+    }
+    textureStore(out, vec2<i32>(c, r), vec4<f32>(xs[n / 2], ys[n / 2], 0.0, 0.0));
 }

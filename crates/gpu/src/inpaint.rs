@@ -1,11 +1,12 @@
-//! Content-Aware Fill's PatchMatch synthesis on the GPU: the multi-scale EM loop, the
-//! propagation, the random search and the vote of `effectcraft_raster::inpaint`, as compute
-//! kernels following the CPU's steps (`shaders/inpaint.wgsl`).
+//! Content-Aware Fill's per-frame synthesis and flow on the GPU: PatchMatch's multi-scale EM
+//! loop, propagation, random search and vote of `effectcraft_raster::inpaint`, and the block
+//! matching of `effectcraft_raster::flow::block_flow`, as compute kernels following the CPU's
+//! steps (`shaders/inpaint.wgsl`).
 //!
 //! The fill's input frames are composited on the CPU by design (analyses do not use the job
-//! worker's GPU: `effectcraft_engine::offload::job_accel`), so this module is about the fill
+//! worker's GPU: `effectcraft_engine::background::offload::job_accel`), so this module is about the fill
 //! itself — the part that runs for minutes on a large mask, and whose parallel search is what a
-//! device wins on. The membrane (harmonic) solve, the orchestration
+//! device wins on. The membrane (harmonic) solve, the flow's hole completion, the orchestration
 //! ([`effectcraft_raster::inpaint::fill_sequence_with`]), the flow-guided propagation and the
 //! per-frame flow control stay on the CPU: the membrane is bandwidth-bound (see
 //! [`FillBackend::patch`]), and the propagation's coupling is sequential, needing every frame of
@@ -13,10 +14,11 @@
 //!
 //! Parity with the CPU reference is a quality contract, not bit-exactness: the CPU's
 //! scan-order propagation becomes a two-pass checkerboard, and its in-place relaxation becomes
-//! Jacobi reads. Both solve the same problem to the same quality (`tests_inpaint.rs`).
+//! Jacobi reads. Both solve the same problem to the same quality (`tests/inpaint.rs`).
 
 use effectcraft_raster::Image;
-use effectcraft_raster::inpaint::{FillBackend, dilate};
+use effectcraft_raster::flow::{Flow, block_flow};
+use effectcraft_raster::inpaint::{FillBackend, complete_flow, dilate};
 
 use crate::Gpu;
 use crate::context::{Enc, GpuContext, GpuImage, KernelImages, Params};
@@ -35,6 +37,10 @@ pub(crate) const KERNELS: &[&str] = &[
     "imp_nnf_store",
     "imp_pm_vote",
     "imp_hist",
+    "imp_fl_half",
+    "imp_fl_search",
+    "imp_fl_subpix",
+    "imp_fl_median",
 ];
 
 /// Distance histogram bins (`imp_hist`), over distances in 0…4.
@@ -50,9 +56,14 @@ fn with_off(p: Params, off: u32) -> Params {
     Params { u: [p.u[0], p.u[1], p.u[2], [off, 0, 0, 0]], f: p.f }
 }
 
-/// A relaxation sweep count of `membrane_core`. The coarsest levels need the most sweeps
-/// (`membrane_core` uses 200), but they are tiny and a dispatch costs the same whatever it
-/// covers: their coarse-to-fine start is already close, so 64 is enough.
+/// A relaxation sweep count of `membrane_core`. The CPU uses 200 for the small levels and 40 for
+/// the large ones; this uses 64 and 40. The small levels are where the difference lies: Jacobi
+/// needs O(n²) sweeps to converge on an n-wide grid, so at the levels the coarse-to-fine schedule
+/// actually reaches (n ≤ 16, where n² ≤ 256) 64 sweeps is already converged, and finer levels
+/// start from a good guess. Matching the CPU's 200 measured ≈ 6% slower on the whole fill with no
+/// change in the result to two decimals (67.0 dB either way), so the schedule is deliberately
+/// not the CPU's — Jacobi and Gauss–Seidel do not converge alike, and the parity contract is
+/// quality, not bit-exactness.
 fn sweep_count(w: usize, h: usize) -> usize {
     if w * h <= 4096 { 64 } else { 40 }
 }
@@ -100,11 +111,15 @@ fn unknown_bbox(known: &[f32], w: usize, h: usize) -> Option<[u32; 4]> {
     if x0 == usize::MAX { None } else { Some([x0 as u32, y0 as u32, x1 as u32, y1 as u32]) }
 }
 
-/// Dispatch a kernel over `bb` (its origin rides in `P.u[1]`).
+/// Dispatch a kernel over `bb`. The box's origin is written into `P.u[1].xy` (the kernels place
+/// their other `u[1]` fields in `.zw`): deriving it from the box the dispatch is sized from keeps
+/// a dispatch's covered region and the origin its shader reads from drifting apart, which is the
+/// subtle way an edge of the region goes unwritten.
 #[allow(clippy::too_many_arguments)]
 fn over(e: &mut Enc, entry: &str, p: &Params, src: &GpuImage, aux: Option<&GpuImage>, out: &GpuImage, data: Option<&wgpu::Buffer>, bb: [u32; 4]) {
+    let p = Params { u: [p.u[0], [bb[0], bb[1], p.u[1][2], p.u[1][3]], p.u[2], p.u[3]], f: p.f };
     let groups = ((bb[2] - bb[0]).div_ceil(16), (bb[3] - bb[1]).div_ceil(16));
-    e.dispatch(entry, p, KernelImages { src, aux, out }, data, groups);
+    e.dispatch(entry, &p, KernelImages { src, aux, out }, data, groups);
 }
 
 // ------------------------------------------------------------------ membrane
@@ -197,7 +212,7 @@ fn membrane_tex(e: &mut Enc, fine: &GpuImage, spare: &GpuImage, hole: &[bool], w
             over(
                 e,
                 "imp_up",
-                &with_off(params([cw as u32, ch as u32, pw as u32, ph as u32], [bb[0], bb[1], 0, 0], [0; 4], [0.0; 4]), moff(k)),
+                &with_off(params([cw as u32, ch as u32, pw as u32, ph as u32], [0; 4], [0; 4], [0.0; 4]), moff(k)),
                 coarse,
                 None,
                 fb,
@@ -215,7 +230,7 @@ fn membrane_tex(e: &mut Enc, fine: &GpuImage, spare: &GpuImage, hole: &[bool], w
         over(
             e,
             "imp_up",
-            &with_off(params([w, h, dims[1].0 as u32, dims[1].1 as u32], [bb[0], bb[1], 0, 0], [0; 4], [0.0; 4]), moff(0)),
+            &with_off(params([w, h, dims[1].0 as u32, dims[1].1 as u32], [0; 4], [0; 4], [0.0; 4]), moff(0)),
             coarse,
             None,
             spare,
@@ -231,9 +246,10 @@ fn membrane_tex(e: &mut Enc, fine: &GpuImage, spare: &GpuImage, hole: &[bool], w
 
 /// Jacobi relaxation sweeps of a texture pair, over the unknown pixels' bounds `bb` (the state
 /// starts in `a`); returns whether the result is in `a`.
+#[allow(clippy::too_many_arguments)]
 fn sweeps(e: &mut Enc, data: &wgpu::Buffer, off: u32, a: &GpuImage, b: &GpuImage, w: u32, h: u32, bb: Option<[u32; 4]>) -> bool {
     let Some(bb) = bb else { return true };
-    let p = with_off(params([w, h, 0, 0], [bb[0], bb[1], 0, 0], [0; 4], [0.0; 4]), off);
+    let p = with_off(params([w, h, 0, 0], [0; 4], [0; 4], [0.0; 4]), off);
     let mut in_a = true;
     for _ in 0..sweep_count(w as usize, h as usize) {
         let (src, out) = if in_a { (a, b) } else { (b, a) };
@@ -288,6 +304,121 @@ impl FillBackend for Gpu {
         }
         effectcraft_raster::inpaint::patch_fill(img, hole, init, patch, seed)
     }
+
+    /// The block matching that the sequence's flow-guided propagation starts from, which is the
+    /// flow's dominant cost. The field is a small `cols × rows` grid (8 px tiles, so 240 × 135 at
+    /// 1080p), and the search is texture-load-bound: at 1920×1080 the CPU's `block_flow` is
+    /// ≈ 65–70 ms against ≈ 55 ms here, most of it the coarsest level's window (`radius 6` over
+    /// up to six seeds) and the finest level's 8×8 blocks. That is a smaller margin than
+    /// [`patch`](Self::patch), but the flow runs twice per frame pair, so on a four-frame 1080p
+    /// sequence it is worth ≈ 0.15× of the fill's total (1.42× against 1.27× with the CPU flow).
+    ///
+    /// The field is exhaustive, not heuristic: it matches the CPU's to a float rounding, so the
+    /// propagation sees the same motion. Both A's block per candidate (hoisted into registers)
+    /// and the CPU's `Plane::luma` (computed here by [`effectcraft_raster::flow::luma_pair`] and
+    /// uploaded, because a device may contract `a·b + c` into a multiply-add and round the luma
+    /// differently) are why it is that close.
+    ///
+    /// The completion — marking the tiles that touch either hole and interpolating the surrounding
+    /// motion over them — stays on the CPU ([`complete_flow`]). It is a membrane solve over that
+    /// same tiny grid whose cost is the mask, not the solve, so there is little for the device to
+    /// take; keeping it here also keeps the completed field the CPU's to within the search's
+    /// rounding.
+    fn flow(&self, a: &Image, b: &Image, hole_a: &[bool], hole_b: &[bool]) -> Flow {
+        if self.ctx.can_wait()
+            && self.ctx.check_health().is_ok()
+            && let Some(f) = flow_image(&self.ctx, a, b)
+        {
+            return complete_flow(f, hole_a, hole_b, a.width as usize, a.height as usize);
+        }
+        complete_flow(block_flow(a, b, 8, 6), hole_a, hole_b, a.width as usize, a.height as usize)
+    }
+}
+
+// ------------------------------------------------------------------ block flow
+
+/// `effectcraft_raster::flow::block_flow(a, b, 8, 6)` on the device: the two frames' luma
+/// pyramids, the coarse-to-fine search, the sub-pixel fit and the 3×3 median, returning the raw
+/// field ([`complete_flow`] does the hole completion). `None` where the device cannot run it and
+/// the caller falls back to the CPU.
+pub(crate) fn flow_image(g: &GpuContext, a: &Image, b: &Image) -> Option<Flow> {
+    let (w, h) = (a.width, a.height);
+    if w == 0 || h == 0 || w != b.width || h != b.height || !g.fits(w, h) {
+        return None;
+    }
+    let (tile, win, radius) = (8u32, 8u32, 6u32);
+    let cols = (w as usize).div_ceil(tile as usize).max(1);
+    let rows = (h as usize).div_ceil(tile as usize).max(1);
+    // block_flow_window's early out: a frame too small to hold one block and window.
+    if w < tile || h < tile || w < win || h < win {
+        return Some(Flow { width: w, height: h, block: tile, cols, rows, v: vec![[0.0; 2]; cols * rows] });
+    }
+    let mut e = Enc::new(g);
+    // The luma pyramid: `Plane::luma` (packed .x/.y), halved while both sides stay worth matching
+    // (`Plane::half`), at most four levels.
+    let mut dims = vec![(w, h)];
+    while dims.len() < 4 {
+        let (cw, ch) = *dims.last()?;
+        if cw / 2 < 16 || ch / 2 < 16 {
+            break;
+        }
+        dims.push(((cw / 2).max(1), (ch / 2).max(1)));
+    }
+    // The luma is the CPU's (`luma_pair`), so the field matches `block_flow`'s bit for bit; the
+    // halves below are exact additions and a multiply by a power of two.
+    let pair = g.upload_image(&effectcraft_raster::flow::luma_pair(a, b))?;
+    let mut luma: Vec<GpuImage> = Vec::with_capacity(dims.len());
+    luma.push(pair);
+    for k in 1..dims.len() {
+        let (pw, ph) = dims[k - 1];
+        let (cw, ch) = dims[k];
+        let dst = e.scratch(cw, ch);
+        e.pixels("imp_fl_half", &params([pw, ph, cw, ch], [0; 4], [0; 4], [0.0; 4]), luma.get(k - 1)?, None, &dst, None);
+        luma.push(dst);
+    }
+    // The coarse-to-fine search: the coarsest level from the zero vector, each finer level from
+    // the doubled vectors of its tile and its four neighbours.
+    let top = dims.len() - 1;
+    let groups = (cols.div_ceil(16) as u32, rows.div_ceil(16) as u32);
+    let mut field: Vec<GpuImage> = Vec::with_capacity(dims.len());
+    for _ in 0..dims.len() {
+        field.push(e.scratch(cols as u32, rows as u32));
+    }
+    for k in (0..dims.len()).rev() {
+        let (pw, ph) = dims[k];
+        let coarser = (k != top).then(|| field.get(k + 1)).flatten();
+        let p = params([pw, ph, cols as u32, rows as u32], [tile, win, 1u32 << k, if k == top { radius } else { 1 }], [u32::from(k != top), 0, 0, 0], [0.0; 4]);
+        e.dispatch("imp_fl_search", &p, KernelImages { src: luma.get(k)?, aux: coarser, out: field.get(k)? }, None, groups);
+    }
+    // The full-resolution sub-pixel fit, then the vector median.
+    let fine = e.scratch(cols as u32, rows as u32);
+    e.dispatch(
+        "imp_fl_subpix",
+        &params([w, h, cols as u32, rows as u32], [tile, win, 0, 0], [0; 4], [0.0; 4]),
+        KernelImages { src: luma.first()?, aux: Some(field.first()?), out: &fine },
+        None,
+        groups,
+    );
+    let out = e.scratch(cols as u32, rows as u32);
+    e.dispatch(
+        "imp_fl_median",
+        &params([w, h, cols as u32, rows as u32], [0; 4], [0; 4], [0.0; 4]),
+        KernelImages { src: &fine, aux: None, out: &out },
+        None,
+        groups,
+    );
+    if e.take_missing() {
+        return None;
+    }
+    // Only the field crosses back to the CPU: `cols × rows` entries.
+    let rect = e.read_rect(&out.texture, 0, 0, cols as u32, rows as u32, 16)?;
+    let mut v = Vec::with_capacity(cols * rows);
+    for i in 0..cols * rows {
+        let b = rect.get(i * 16..i * 16 + 16)?;
+        let f = |o: usize| b.get(o).copied().unwrap_or(0);
+        v.push([f32::from_le_bytes([f(0), f(1), f(2), f(3)]), f32::from_le_bytes([f(4), f(5), f(6), f(7)])]);
+    }
+    Some(Flow { width: w, height: h, block: tile, cols, rows, v })
 }
 
 // ------------------------------------------------------------------ PatchMatch
@@ -457,21 +588,16 @@ fn pm_level(e: &mut Enc, lv: &Lv, seed: u32, em: usize, iters: usize, img: &GpuI
     let hist = e.scratch(BINS as u32, 1);
     let (img_a, img_b) = (img.clone(), img_spare.clone());
     let (mut field_nnf, mut nnf_spare) = (nnf.clone(), e.scratch(w, h));
+    // The propagation and random search write the targets and the one-pixel ring around them, so
+    // every neighbour they read has a defined alpha (`grow(near, 1)`). The dispatch origin must
+    // be the ring's, not the targets': `over` sizes the dispatch from the box it is given.
+    let ring = grow(lv.near, 1, w, h);
     let mut in_a = true;
     for round in 0..em {
         // The round's initial field: the inherited source where it is still valid, else random.
         // Every pixel of the field's bounds is written, so the previous round's field is free.
         let img = if in_a { &img_a } else { &img_b };
-        over(
-            e,
-            "imp_pm_init",
-            &params([w, h, r, 0], [lv.field[0], lv.field[1], 0, 0], [seed, 0, 0, round as u32], [0.0; 4]),
-            &field_nnf,
-            Some(img),
-            &field_a,
-            Some(&lv.flags),
-            lv.field,
-        );
+        over(e, "imp_pm_init", &params([w, h, r, 0], [0; 4], [seed, 0, 0, round as u32], [0.0; 4]), &field_nnf, Some(img), &field_a, Some(&lv.flags), lv.field);
         let mut f_in_a = true;
         for it in 0..iters {
             for parity in 0..2u32 {
@@ -479,26 +605,17 @@ fn pm_level(e: &mut Enc, lv: &Lv, seed: u32, em: usize, iters: usize, img: &GpuI
                 over(
                     e,
                     "imp_pm_prop",
-                    &params([w, h, r, parity], [lv.near[0], lv.near[1], 0, 0], [seed, it as u32, 0, round as u32], [0.0; 4]),
+                    &params([w, h, r, parity], [0; 4], [seed, it as u32, 0, round as u32], [0.0; 4]),
                     s,
                     Some(img),
                     o,
                     Some(&lv.flags),
-                    grow(lv.near, 1, w, h),
+                    ring,
                 );
                 f_in_a = !f_in_a;
             }
             let (s, o) = if f_in_a { (&field_a, &field_b) } else { (&field_b, &field_a) };
-            over(
-                e,
-                "imp_pm_rand",
-                &params([w, h, r, 0], [lv.near[0], lv.near[1], 0, 0], [seed, it as u32, 0, round as u32], [0.0; 4]),
-                s,
-                Some(img),
-                o,
-                Some(&lv.flags),
-                grow(lv.near, 1, w, h),
-            );
+            over(e, "imp_pm_rand", &params([w, h, r, 0], [0; 4], [seed, it as u32, 0, round as u32], [0.0; 4]), s, Some(img), o, Some(&lv.flags), ring);
             f_in_a = !f_in_a;
         }
         let field = if f_in_a { &field_a } else { &field_b };
@@ -506,16 +623,7 @@ fn pm_level(e: &mut Enc, lv: &Lv, seed: u32, em: usize, iters: usize, img: &GpuI
         let sigma2 = sigma2(e, field, lv, &hist)?;
         let next_img = if in_a { &img_b } else { &img_a };
         e.copy_into(img, next_img, 0, 0);
-        over(
-            e,
-            "imp_pm_vote",
-            &params([w, h, r, 0], [lv.holes[0], lv.holes[1], 0, 0], [0; 4], [sigma2, 0.0, 0.0, 0.0]),
-            field,
-            Some(img),
-            next_img,
-            Some(&lv.flags),
-            lv.holes,
-        );
+        over(e, "imp_pm_vote", &params([w, h, r, 0], [0; 4], [0; 4], [sigma2, 0.0, 0.0, 0.0]), field, Some(img), next_img, Some(&lv.flags), lv.holes);
         // Carry the round's sources into the nearest-neighbour field (targets only).
         e.pixels("imp_nnf_store", &params([w, h, 0, 0], [0; 4], [0; 4], [0.0; 4]), field, Some(&field_nnf), &nnf_spare, Some(&lv.flags));
         std::mem::swap(&mut field_nnf, &mut nnf_spare);
@@ -524,33 +632,60 @@ fn pm_level(e: &mut Enc, lv: &Lv, seed: u32, em: usize, iters: usize, img: &GpuI
     Some((if in_a { img_a } else { img_b }, field_nnf))
 }
 
-/// The vote's sigma²: a 1024-bin histogram of the targets' distances (`imp_hist`), read back
-/// and taken at the 75th percentile.
+/// The 75th percentile of a 1024-bin distance histogram (`imp_hist`'s readback), and the
+/// histogram's total. The bin's centre is the estimate: within half a bin (4/1024) of the CPU's
+/// exact percentile.
+fn percentile(bytes: &[u8]) -> (f32, f64) {
+    let bin = |i: usize| -> f64 {
+        match bytes.get(i * 16..i * 16 + 4) {
+            Some(b) => f32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f64,
+            None => 0.0,
+        }
+    };
+    let total: f64 = (0..BINS).map(bin).sum();
+    if total < 1.0 {
+        return (1.0, total);
+    }
+    let rank = total * 3.0 / 4.0;
+    let mut cum = 0.0f64;
+    let mut at = BINS - 1;
+    for i in 0..BINS {
+        cum += bin(i);
+        if cum > rank {
+            at = i;
+            break;
+        }
+    }
+    ((((at as f32) + 0.5) / (BINS as f32 / 4.0)).max(1e-5), total)
+}
+
+/// The vote's sigma² at a level (`pm_level`): the 75th percentile of the targets' distances. One
+/// 16 KB readback per EM round (≈ 28 per 1080p patch): a few percent of the stage, and the
+/// obvious next thing to remove if the patch has to be faster (a device-side percentile would
+/// need a reduction instead).
 fn sigma2(e: &mut Enc, field: &GpuImage, lv: &Lv, hist: &GpuImage) -> Option<f32> {
     let (bw, bh) = (lv.near[2] - lv.near[0], lv.near[3] - lv.near[1]);
     let p = params([lv.w, lv.h, 0, 0], [lv.near[0], lv.near[1], bw, bh], [0; 4], [0.0; 4]);
     e.dispatch("imp_hist", &p, KernelImages { src: field, aux: None, out: hist }, Some(&lv.flags), (1, 1));
     let bytes = e.read_texture(&hist.texture, BINS as u32, 1, 16)?;
-    let bin = |i: usize| -> f32 {
-        match bytes.get(i * 16..i * 16 + 4) {
-            Some(b) => f32::from_le_bytes([b[0], b[1], b[2], b[3]]),
-            None => 0.0,
-        }
-    };
-    let total: f32 = (0..BINS).map(bin).sum();
-    if total < 1.0 {
-        return Some(1.0);
+    Some(percentile(&bytes).0)
+}
+
+/// [`imp_hist`] on its own: `field`'s match distance (`.b`, `.a` > 0.5 where set) over the
+/// pixels `near` marks, returning the 75th percentile and the sample count. Used by the test that
+/// checks the histogram counts the whole target population.
+#[cfg(test)]
+pub(crate) fn distance_histogram(g: &GpuContext, field: &Image, near: &[bool], w: u32, h: u32) -> Option<(f32, f64)> {
+    let flags: Vec<f32> = near.iter().map(|b| if *b { 2.0 } else { 0.0 }).collect();
+    let mut e = Enc::new(g);
+    let data = e.data(&flags);
+    let img = g.upload_image(field)?;
+    let hist = e.scratch(BINS as u32, 1);
+    let p = params([w, h, 0, 0], [0, 0, w, h], [0; 4], [0.0; 4]);
+    e.dispatch("imp_hist", &p, KernelImages { src: &img, aux: None, out: &hist }, Some(&data), (1, 1));
+    if e.take_missing() {
+        return None;
     }
-    let rank = (total * 3.0 / 4.0) as u32;
-    let mut cum = 0.0f32;
-    let mut at = BINS - 1;
-    for i in 0..BINS {
-        cum += bin(i);
-        if cum > rank as f32 {
-            at = i;
-            break;
-        }
-    }
-    // The bin's centre: within half a bin (4/1024) of the CPU's exact percentile.
-    Some((((at as f32) + 0.5) / (BINS as f32 / 4.0)).max(1e-5))
+    let bytes = e.read_texture(&hist.texture, BINS as u32, 1, 16)?;
+    Some(percentile(&bytes))
 }
