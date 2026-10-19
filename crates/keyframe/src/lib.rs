@@ -56,6 +56,12 @@ impl Ease {
     pub const EASY: Ease = Ease { speed: 0.0, influence: 1.0 / 3.0 };
 }
 
+/// Influence of a linear key side in a segment whose other side is eased: the side keeps the
+/// segment's average speed with a 16.67 % influence, as After Effects shows it in the Keyframe
+/// Velocity dialog and evaluates it (time-remap read-backs: a bezier-out (speed 0, 50 %) into a
+/// linear-in from 3.5 to 0.5 over 2 s gives 3.290 at a quarter and 2.657 at half of the segment).
+pub const LINEAR_SIDE_INFLUENCE: f64 = 1.0 / 6.0;
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Keyframe {
     pub time: Tick,
@@ -389,7 +395,7 @@ fn effective_ease(keys: &[Keyframe], i: usize, d: usize, spatial: bool, out: boo
 
 /// The ease a key side presents in the Graph Editor and the Keyframe Velocity dialog: stored
 /// Bezier eases, auto-Bezier slopes, or the equivalent of a linear side (speed of the straight
-/// segment, 33.3 % influence). `None` for hold sides and sides without a neighbour.
+/// segment, [`LINEAR_SIDE_INFLUENCE`]). `None` for hold sides and sides without a neighbour.
 pub fn side_ease(keys: &[Keyframe], i: usize, d: usize, spatial: bool, out: bool) -> Option<Ease> {
     let k = keys.get(i)?;
     let j = if out { i + 1 } else { i.checked_sub(1)? };
@@ -410,7 +416,7 @@ pub fn side_ease(keys: &[Keyframe], i: usize, d: usize, spatial: bool, out: bool
             let dv = b.get(d).unwrap_or(&0.0) - a.get(d).unwrap_or(&0.0);
             if out { dv } else { -dv }
         };
-        return Some(Ease { speed: dv / dur, influence: 1.0 / 3.0 });
+        return Some(Ease { speed: dv / dur, influence: LINEAR_SIDE_INFLUENCE });
     }
     Some(effective_ease(keys, i, if is_spatial { 0 } else { d }, is_spatial, out))
 }
@@ -596,8 +602,8 @@ pub fn segment_value(keys: &[Keyframe], i: usize, t: Tick, spatial: bool) -> Val
         let f = if lin_out && lin_in || len <= 1e-12 {
             x
         } else {
-            let eo = if lin_out { Ease { speed: len / dur, influence: 1.0 / 3.0 } } else { effective_ease(keys, i, 0, true, true) };
-            let ei = if lin_in { Ease { speed: len / dur, influence: 1.0 / 3.0 } } else { effective_ease(keys, i + 1, 0, true, false) };
+            let eo = if lin_out { Ease { speed: len / dur, influence: LINEAR_SIDE_INFLUENCE } } else { effective_ease(keys, i, 0, true, true) };
+            let ei = if lin_in { Ease { speed: len / dur, influence: LINEAR_SIDE_INFLUENCE } } else { effective_ease(keys, i + 1, 0, true, false) };
             ease_progress(eo.speed * dur / len, eo.influence, ei.speed * dur / len, ei.influence, x)
         };
         // A straight path (both handles on the chord, as auto-Bezier keys on a line have) is the
@@ -616,16 +622,16 @@ pub fn segment_value(keys: &[Keyframe], i: usize, t: Tick, spatial: bool) -> Val
     let cb = b.value.components();
     if ca.is_empty() || ca.len() != cb.len() {
         // Paths, gradients: ease on dimension 0 as overall progress.
-        let eo = if lin_out { Ease { speed: 1.0 / dur, influence: 1.0 / 3.0 } } else { effective_ease(keys, i, 0, false, true) };
-        let ei = if lin_in { Ease { speed: 1.0 / dur, influence: 1.0 / 3.0 } } else { effective_ease(keys, i + 1, 0, false, false) };
+        let eo = if lin_out { Ease { speed: 1.0 / dur, influence: LINEAR_SIDE_INFLUENCE } } else { effective_ease(keys, i, 0, false, true) };
+        let ei = if lin_in { Ease { speed: 1.0 / dur, influence: LINEAR_SIDE_INFLUENCE } } else { effective_ease(keys, i + 1, 0, false, false) };
         let f = ease_progress(eo.speed * dur, eo.influence, ei.speed * dur, ei.influence, x);
         return a.value.lerp(&b.value, f);
     }
     let mut out = Vec::with_capacity(ca.len());
     for d in 0..ca.len() {
         let dv = cb[d] - ca[d];
-        let eo = if lin_out { Ease { speed: dv / dur, influence: 1.0 / 3.0 } } else { effective_ease(keys, i, d, false, true) };
-        let ei = if lin_in { Ease { speed: dv / dur, influence: 1.0 / 3.0 } } else { effective_ease(keys, i + 1, d, false, false) };
+        let eo = if lin_out { Ease { speed: dv / dur, influence: LINEAR_SIDE_INFLUENCE } } else { effective_ease(keys, i, d, false, true) };
+        let ei = if lin_in { Ease { speed: dv / dur, influence: LINEAR_SIDE_INFLUENCE } } else { effective_ease(keys, i + 1, d, false, false) };
         // Bezier in (time, value) space directly: P1 = (i0, v0 + s0*i0*dur), P2 = (1-i1, v1 - s1*i1*dur).
         let (i0, i1) = (eo.influence.clamp(0.0, 1.0), ei.influence.clamp(0.0, 1.0));
         let u = solve_u(0.0, i0, 1.0 - i1, 1.0, x);
@@ -925,6 +931,31 @@ mod tests {
             let v = evaluate(&keys, s(t), false).unwrap().as_f64();
             assert!((v - 50.0 * t).abs() < 1e-6, "{t} {v}");
         }
+    }
+
+    /// A linear side next to an eased one keeps the segment's average speed at 16.67 %
+    /// influence. After Effects time-remap read-backs (a square at x = 50 + 455 * remap): out of
+    /// a key at 2 s (3.5, speed 0, influence 50 %) into a linear key at 4 s (0.5) the remap is
+    /// 3.290 at 2.5 s and 2.657 at 3 s (33.3 % gave 3.308 and 2.629).
+    #[test]
+    fn a_linear_side_next_to_an_eased_side_matches_after_effects() {
+        let mut a = Keyframe::new(s(2.0), Value::Scalar(3.5));
+        a.out_interp = Interp::Bezier;
+        a.out_ease = vec![Ease { speed: 0.0, influence: 0.5 }];
+        let keys = vec![a, Keyframe::new(s(4.0), Value::Scalar(0.5))];
+        for (t, ae) in [(2.5, 3.290), (3.0, 2.657)] {
+            let v = evaluate(&keys, s(t), false).unwrap().as_f64();
+            // AE's square edge is read to the pixel: 1 px = 1 / 455 of remap.
+            assert!((v - ae).abs() < 2.0 / 455.0, "{t}: {v} vs {ae}");
+        }
+        // The mirror case: a linear out into an eased in.
+        let mut b = Keyframe::new(s(4.0), Value::Scalar(0.5));
+        b.in_interp = Interp::Bezier;
+        b.in_ease = vec![Ease { speed: 0.0, influence: 0.5 }];
+        let mirror = vec![Keyframe::new(s(2.0), Value::Scalar(3.5)), b];
+        let v = evaluate(&mirror, s(3.5), false).unwrap().as_f64();
+        assert!((v - (4.0 - 3.290)).abs() < 2.0 / 455.0, "{v}");
+        assert_eq!(side_ease(&keys, 1, 0, false, false).map(|e| e.influence), Some(LINEAR_SIDE_INFLUENCE));
     }
 
     #[test]

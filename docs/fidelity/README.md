@@ -71,6 +71,18 @@ After the fix, all ten tangents equal AE's to the printed 0.001 px, and the two 
 test `spatial_auto_bezier_tangents_follow_after_effects` checks the rule on other original keys,
 including a timing change. AE's output stays local; only the script and these scores are tracked.
 
+## Linear side next to an eased side
+
+Measured on 19 October 2026 with After Effects 2026 (26.2) through a time-remapped precomposition
+(a square moving at 455 px per second of source time, read off rendered frames to the pixel): a
+segment from a Bezier out side (speed 0, influence 50 %) at 2 s, value 3.5, into a linear key at
+4 s, value 0.5, plays 3.290 at 2.5 s and 2.657 at 3 s. EffectCraft gave the linear side the
+segment's average speed at 33.3 % influence (3.308 and 2.629, 8 and 13 px off); AE uses the average
+speed at 16.67 %, the influence its Keyframe Velocity dialog shows for linear keys. Now the same
+square positions to the pixel. `LINEAR_SIDE_INFLUENCE` holds the value for evaluation, the Graph
+Editor / velocity dialog sides and the Lottie export; segments that are linear on both sides stay
+straight. Regression test: `a_linear_side_next_to_an_eased_side_matches_after_effects`.
+
 ## Still unmeasured
 
 Rendered frame comparisons now have a deterministic `effectcraft_effects::fidelity::compare_frames`

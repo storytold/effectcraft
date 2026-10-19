@@ -139,11 +139,15 @@ fn segment_ease(keys: &[Keyframe], i: usize, spatial: bool) -> (Vec<f64>, Vec<f6
             let side = |k: &Keyframe, out: bool| {
                 let interp = if out { k.out_interp } else { k.in_interp };
                 let list = if out { &k.out_ease } else { &k.in_ease };
-                if interp == Interp::Bezier { list.first().copied().unwrap_or_default() } else { Ease { speed: 1.0 / dur, influence: 1.0 / 3.0 } }
+                if interp == Interp::Bezier {
+                    list.first().copied().unwrap_or_default()
+                } else {
+                    Ease { speed: 1.0 / dur, influence: kf::LINEAR_SIDE_INFLUENCE }
+                }
             };
             (1.0, Some(side(a, true)), Some(side(b, false)))
         };
-        let lin = Ease { speed: dv / dur, influence: 1.0 / 3.0 };
+        let lin = Ease { speed: dv / dur, influence: kf::LINEAR_SIDE_INFLUENCE };
         let (eo, ei) = (eo.unwrap_or(lin), ei.unwrap_or(lin));
         // Crossing time handles must retain the independently specified influences.
         let (i0, i1) = (eo.influence.clamp(0.0, 1.0), ei.influence.clamp(0.0, 1.0));
