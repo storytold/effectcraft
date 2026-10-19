@@ -179,7 +179,10 @@ impl CloudApp for EffectcraftApp {
 
     fn encode(&mut self, _uid: u64, into: Destination<'_>) -> Result<Vec<u8>, String> {
         let ext = into.extension();
-        if !ext.is_empty() && ext != "ecproj" && ext != "ecprojx" {
+        let is_json = into.mime.is_some_and(|mime| {
+            mime.split(';').next().unwrap_or("").trim().eq_ignore_ascii_case("application/json")
+        });
+        if !ext.is_empty() && ext != "ecproj" && ext != "ecprojx" && !is_json {
             return Err(format!("EffectCraft can only save projects as .ecproj or .ecprojx (got .{ext})"));
         }
         let result = self
