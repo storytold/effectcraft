@@ -180,6 +180,9 @@ fn audit(h: &Harness<'_, EffectcraftApp>, scenario: &str, scope: Rect, since: Op
         if a.is_hidden() {
             continue;
         }
+        if since.is_some_and(|s| s.contains(&format!("{:?}", a.id()))) {
+            continue;
+        }
         let Some(b) = a.bounding_box() else {
             // No bounds: assistive technology cannot place it. Only a control is a finding (and
             // it is one wherever it is: there is no position to scope it by).
@@ -189,9 +192,6 @@ fn audit(h: &Harness<'_, EffectcraftApp>, scenario: &str, scope: Rect, since: Op
             continue;
         };
         if !scope.contains(pos2(((b.x0 + b.x1) / 2.0) as f32, ((b.y0 + b.y1) / 2.0) as f32)) {
-            continue;
-        }
-        if since.is_some_and(|s| s.contains(&format!("{:?}", a.id()))) {
             continue;
         }
         let role = a.role();
