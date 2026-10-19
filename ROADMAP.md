@@ -117,6 +117,10 @@ Come tell us what matters most to you on [Discord](https://discord.gg/artcraft).
 
 ## Progress log
 
+- 2026-10-16: Convert To Bezier Path turns a shape layer's Rectangle, Ellipse or Polystar
+  path into an editable Path 1 with the same geometry, as After Effects does; it used to
+  apply to mask RotoBezier only, so a parametric shape path could not be converted at all
+  and its vertices could not be edited or animated (#932).
 - 2026-10-12: Roto Brush span edits report strokes outside a trimmed layer without panicking;
   strokes and undo history are preserved so restoring the timing allows the span edit again.
 - 2026-10-11: Ukrainian panels caught up with the Chinese catalogs. The 95 rows the panel

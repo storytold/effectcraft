@@ -509,6 +509,12 @@ struct Parser<'a, 'i> {
     vw: f64,
     vh: f64,
     skipped: Vec<String>,
+    /// Elements converted so far, `<use>` copies included, and how many may be (#1236).
+    work: usize,
+    budget: usize,
+    /// The `<use>` targets being expanded, outermost first: a reference back into one is a
+    /// cycle and is skipped.
+    using: Vec<roxmltree::NodeId>,
 }
 
 fn is_svg_ns(n: &roxmltree::Node) -> bool {
@@ -771,9 +777,12 @@ impl<'a, 'i> Parser<'a, 'i> {
 
     /// Convert an element (and its subtree) into nodes appended to `out`.
     fn node(&mut self, n: roxmltree::Node<'a, 'i>, parent: &Style, out: &mut Vec<Node>, depth: usize) {
-        if depth > 64 || !is_svg_ns(&n) {
+        if depth > 64 || !is_svg_ns(&n) || self.work > self.budget {
             return;
         }
+        // Every element converted counts, each `<use>` copy again: a few references to groups
+        // that reference each other several times can multiply into billions (#1236).
+        self.work += 1;
         let tag = n.tag_name().name();
         match tag {
             "defs" | "title" | "desc" | "metadata" | "style" | "linearGradient" | "radialGradient" | "symbol" | "clipPath" | "mask" | "pattern" | "marker"
@@ -839,9 +848,10 @@ impl<'a, 'i> Parser<'a, 'i> {
             }
             "use" => {
                 let Some(target) = self.href(n) else { return };
-                if target == n || n.ancestors().any(|a| a == target) {
+                if target == n || n.ancestors().any(|a| a == target) || self.using.contains(&target.id()) {
                     return;
                 }
+                self.using.push(target.id());
                 let x = self.attr_len(n, "x", 'x', &st);
                 let y = self.attr_len(n, "y", 'y', &st);
                 transform *= Affine::translate((x, y));
@@ -870,6 +880,7 @@ impl<'a, 'i> Parser<'a, 'i> {
                 } else {
                     self.node(target, &st, &mut children, depth + 1);
                 }
+                self.using.pop();
                 out.push(Node::Group(Group {
                     name: Self::element_name(n),
                     transform,
@@ -1071,6 +1082,9 @@ pub fn parse_transform(s: &str) -> Affine {
 /// 2 MiB thread's stack (aborting the app) at a few thousand levels; real documents stay far
 /// below this.
 const MAX_XML_DEPTH: usize = 256;
+/// The most elements an import converts, `<use>` copies included, unless the file itself has
+/// more than half as many (#1236).
+const MAX_EXPANDED_ELEMENTS: usize = 500_000;
 
 /// The deepest element nesting of `text` (a quick scan that skips comments, CDATA, processing
 /// instructions, declarations and quoted attribute values).
@@ -1144,7 +1158,9 @@ pub fn parse(bytes: &[u8]) -> Result<Doc, Error> {
         }
     }
     let vb = viewbox(root);
-    let mut p = Parser { ids, rules, vw: vb.map_or(300.0, |v| v.1), vh: vb.map_or(150.0, |v| v.2), skipped: vec![] };
+    // Room for generous reuse, and always for every element of the file itself.
+    let budget = MAX_EXPANDED_ELEMENTS.max(root.descendants().filter(|n| n.is_element()).count().saturating_mul(2));
+    let mut p = Parser { ids, rules, vw: vb.map_or(300.0, |v| v.1), vh: vb.map_or(150.0, |v| v.2), skipped: vec![], work: 0, budget, using: vec![] };
     let st = Style::default();
     let pct_or = |name: &str, axis: char, def: f64| -> f64 {
         match root.attribute(name) {
@@ -1179,6 +1195,10 @@ pub fn parse(bytes: &[u8]) -> Result<Doc, Error> {
     let mut children = vec![];
     for c in root.children() {
         p.node(c, &rst, &mut children, 1);
+    }
+    if p.work > p.budget {
+        // Never a silently partial drawing.
+        return Err(Error::Xml(format!("its <use> references expand to more than {} elements", p.budget)));
     }
     let transform = viewbox_transform(root, dw, dh);
     Ok(Doc {

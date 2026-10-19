@@ -679,6 +679,103 @@ fn fill_options_change_the_selected_shape_layer() {
     }
 }
 
+/// #1220: path tools hide the layer transform box, while path vertices remain editable.
+#[test]
+fn path_editing_hides_layer_bounds_and_keeps_corner_vertices_editable() {
+    for mask in [false, true] {
+        let mut h = harness();
+        let vertices = [[200.0, 100.0], [400.0, 100.0], [400.0, 260.0], [200.0, 260.0]];
+        let (layer, uid, kind) = if mask {
+            let layer = layer_id(&h, "Plate");
+            h.state_mut().session.execute("layer.select", json!({"layers": [layer]})).unwrap();
+            let r = h
+                .state_mut()
+                .session
+                .execute("mask.new", json!({"layer": layer, "vertices": vertices, "outTangents": [[40, 0], [0, 0], [0, 0], [0, 0]], "closed": true}))
+                .unwrap();
+            (layer, r["mask"].as_u64().unwrap(), "mask")
+        } else {
+            let r = h.state_mut().session.execute("shape.newPath", json!({"vertices": vertices, "outTangents": [[40, 0], [0, 0], [0, 0], [0, 0]], "closed": true, "fill": false, "stroke": "#ffffff", "strokeWidth": 4})).unwrap();
+            (r["layer"].as_u64().unwrap(), r["path"].as_u64().unwrap(), "shapePath")
+        };
+        h.state_mut().session.state.selected_vertices.clear();
+        h.run_steps(2);
+        let handle = format!("viewer.handle.{layer}.0");
+        assert!(h.state().auto.find(&handle).is_some(), "ordinary layer selection has transform handles (mask={mask})");
+        for tool in [Tool::Pen, Tool::PenAdd, Tool::PenDelete, Tool::PenConvert, Tool::MaskFeather] {
+            h.state_mut().ui.tool = tool;
+            h.run_steps(2);
+            assert!(h.state().auto.find(&handle).is_none(), "{tool:?}: hide the layer box");
+            assert!(h.state().auto.find(&format!("viewer.{kind}.{uid}.vertex.0")).is_some(), "{tool:?}: keep the path point");
+        }
+        h.state_mut().ui.tool = Tool::Selection;
+        h.run_steps(2);
+        let vertex = format!("viewer.{kind}.{uid}.vertex.0");
+        let from = rect(&h, &vertex).center();
+        click(&mut h, from);
+        h.run_steps(2); // The automation registry also keeps the preceding frame's elements.
+        assert!(h.state().auto.find(&handle).is_none(), "selecting a vertex starts path editing (mask={mask})");
+        let position = h.state().session.active_comp().unwrap().layer(LayerId(layer)).unwrap().props.prop("transform/position").unwrap().value.clone();
+        let path = |h: &Harness<'_, EffectcraftApp>| {
+            h.state()
+                .session
+                .active_comp()
+                .unwrap()
+                .layer(LayerId(layer))
+                .unwrap()
+                .props
+                .find_group(uid)
+                .unwrap()
+                .get("path")
+                .unwrap()
+                .value
+                .as_path()
+                .unwrap()
+                .clone()
+        };
+        let before = path(&h);
+        drag(&mut h, from, from + vec2(15.0, 12.0));
+        assert_ne!(path(&h).vertices[0], before.vertices[0], "the corner vertex can still be moved");
+        assert_eq!(path(&h).vertices[1..], before.vertices[1..]);
+        assert_eq!(h.state().session.active_comp().unwrap().layer(LayerId(layer)).unwrap().props.prop("transform/position").unwrap().value, position);
+        h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+        h.run_steps(2);
+        assert_eq!(path(&h), before, "moving the vertex undoes in one step");
+        let z = rect(&h, "viewer.comp").width() / 640.0;
+        let tangent = rect(&h, &vertex).center() + vec2(40.0 * z, 0.0);
+        drag(&mut h, tangent, tangent + vec2(0.0, 20.0));
+        assert_ne!(path(&h).out_tangents[0], before.out_tangents[0], "the Bézier handle is still editable");
+        assert_eq!(path(&h).vertices, before.vertices, "a tangent drag does not move the path points");
+        h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+        h.run_steps(2);
+        assert_eq!(path(&h), before, "the tangent drag undoes in one step");
+        h.state_mut().ui.tool = Tool::Rotate;
+        h.run_steps(2);
+        assert!(h.state().auto.find(&handle).is_some(), "a layer transform tool restores the box");
+        h.state_mut().ui.tool = Tool::Selection;
+        h.state_mut().session.state.selected_vertices.clear();
+        h.run_steps(2);
+        assert!(h.state().auto.find(&handle).is_some(), "ending vertex selection restores the box");
+    }
+}
+
+#[test]
+fn path_tools_keep_bounds_on_layers_without_visible_paths() {
+    let mut h = harness();
+    let layer = layer_id(&h, "Box");
+    h.state_mut().session.execute("layer.select", json!({"layers": [layer]})).unwrap();
+    h.state_mut().ui.tool = Tool::Pen;
+    h.run_steps(2);
+    let handle = format!("viewer.handle.{layer}.0");
+    assert!(h.state().auto.find(&handle).is_some(), "a layer without a path keeps its box");
+    h.state_mut().session.execute("mask.new", json!({"layer": layer, "vertices": [[0, 0], [80, 0], [80, 80]], "closed": true})).unwrap();
+    h.run_steps(2);
+    assert!(h.state().auto.find(&handle).is_none());
+    h.state_mut().ui.viewer.show_masks = false;
+    h.run_steps(2);
+    assert!(h.state().auto.find(&handle).is_some(), "hidden paths do not suppress the layer controls");
+}
+
 #[test]
 fn shape_pen_draws_a_closed_shape_layer() {
     let mut h = harness();
@@ -2000,6 +2097,37 @@ fn arrow_keys_nudge_the_selected_layer_at_the_viewer_magnification() {
     assert_eq!(pos(&h), [100.5, 109.5, 0.0], "sub-pixel steps when zoomed in");
 }
 
+/// #1288: with mask points selected the arrow keys move the points, not the layer: 1 pixel at the
+/// viewer's magnification in comp space (half a layer pixel on a layer scaled to 200 %), 10 with
+/// Shift, one undo step each.
+#[test]
+fn arrow_keys_nudge_the_selected_mask_points() {
+    let mut h = harness();
+    let plate = layer_id(&h, "Plate");
+    let corners = [[100.0, 60.0], [500.0, 60.0], [500.0, 300.0], [100.0, 300.0]];
+    let s = &mut h.state_mut().session;
+    s.execute("layer.select", json!({"layers": [plate]})).unwrap();
+    s.execute("prop.set", json!({"layer": plate, "path": "transform/scale", "value": [200, 200, 100]})).unwrap();
+    s.execute("mask.new", json!({"layer": plate, "vertices": corners, "closed": true})).unwrap();
+    let mask = s.active_comp().unwrap().layer(LayerId(plate)).unwrap().masks().unwrap().groups().next().unwrap().uid;
+    s.execute("mask.selectVertices", json!({"vertices": [{"layer": plate, "mask": mask, "index": 1}, {"layer": plate, "mask": mask, "index": 2}]})).unwrap();
+    let ppp = h.ctx.pixels_per_point();
+    h.state_mut().ui.viewer.zoom = Some(1.0 / ppp);
+    h.run_steps(2);
+    let pos = |h: &Harness<'_, EffectcraftApp>| {
+        h.state().session.active_comp().unwrap().layer(LayerId(plate)).unwrap().props.prop("transform/position").unwrap().value.as_vec3()
+    };
+    let (pos0, undo) = (pos(&h), h.state().session.history.undo.len());
+    key(&mut h, egui::Key::ArrowRight, egui::Modifiers::NONE);
+    key(&mut h, egui::Key::ArrowDown, egui::Modifiers::SHIFT);
+    let path = mask_path(&h, "Plate");
+    let near = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).abs() < 1e-6 && (a[1] - b[1]).abs() < 1e-6;
+    assert!(near(path.vertices[1], [500.5, 65.0]) && near(path.vertices[2], [500.5, 305.0]), "{:?}", path.vertices);
+    assert_eq!(path.vertices[0], corners[0], "unselected points stay");
+    assert_eq!(pos(&h), pos0, "the layer stays");
+    assert_eq!(h.state().session.history.undo.len(), undo + 2, "one undo step per press");
+}
+
 /// A comp wider than the GPU's texture limit at Full resolution shows its frame (averaged down
 /// into a texture the renderer accepts) instead of failing the upload (#201: 11000×2200).
 #[test]
@@ -2343,4 +2471,57 @@ fn null_eye_hides_it_in_the_viewer() {
     assert_eq!(h.state().session.state.selected_layers, vec![LayerId(n)]);
     h.run_steps(2);
     assert!(h.state().auto.find(&handle).is_some(), "handles back with the eye on");
+}
+
+/// #1642: a null stays visible after deselection, without selection handles.
+#[test]
+fn unselected_null_keeps_its_outline() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Nulls", "width": 640, "height": 360, "duration": 4})).unwrap();
+    let n = s.execute("layer.newNull", json!({})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.select", json!({"layers": [n]})).unwrap();
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(move |_| EffectcraftApp::new(s));
+    h.run_steps(3);
+    // Use the selected box's actual geometry, so transformed nulls use the same outline.
+    let corners: Vec<Pos2> = (0..4).map(|i| rect(&h, &format!("viewer.handle.{n}.{i}")).center()).collect();
+    fn count(shape: &egui::Shape, corners: &[Pos2]) -> usize {
+        match shape {
+            egui::Shape::Path(p) => usize::from(p.closed && p.points == corners),
+            egui::Shape::Vec(v) => v.iter().map(|s| count(s, corners)).sum(),
+            _ => 0,
+        }
+    }
+    let outlines = |h: &Harness<'_, EffectcraftApp>| h.output().shapes.iter().map(|s| count(&s.shape, &corners)).sum::<usize>();
+    assert_eq!(outlines(&h), 1, "one selected outline");
+    h.state_mut().session.execute("edit.deselectAll", json!({})).unwrap();
+    h.run_steps(3);
+    assert_eq!(outlines(&h), 1, "deselection keeps the null visible");
+    assert!(h.state().auto.find(&format!("viewer.handle.{n}.0")).is_none());
+    assert!(h.state().auto.find(&format!("viewer.anchor.{n}")).is_none());
+    h.state_mut().ui.viewer.show_layer_controls = false;
+    h.run_steps(2);
+    assert_eq!(outlines(&h), 0, "Show Layer Controls hides the outline");
+    h.state_mut().ui.viewer.show_layer_controls = true;
+    h.state_mut().session.execute("layer.setSwitch", json!({"layers": [n], "switch": "video", "value": false})).unwrap();
+    h.run_steps(2);
+    assert_eq!(outlines(&h), 0, "the Video switch hides an unselected null too");
+    h.state_mut().session.execute("layer.setSwitch", json!({"layers": [n], "switch": "video", "value": true})).unwrap();
+    h.run_steps(2);
+    assert_eq!(outlines(&h), 1, "the Video switch restores the outline");
+    // Solo scope matches picking: a soloed AV layer hides unsoloed nulls, even outside its range.
+    let solid = h.state_mut().session.execute("layer.newSolid", json!({"name": "Solo", "color": "#406080", "width": 40, "height": 40})).unwrap()["layer"]
+        .as_u64()
+        .unwrap();
+    h.state_mut().session.execute("layer.setSwitch", json!({"layers": [solid], "switch": "solo", "value": true})).unwrap();
+    h.state_mut().session.execute("edit.deselectAll", json!({})).unwrap();
+    h.run_steps(3);
+    assert_eq!(outlines(&h), 0, "an unsoloed null follows solo scope");
+    let cid = h.state().session.active_comp_id().unwrap();
+    std::sync::Arc::make_mut(&mut h.state_mut().session.project).comp_mut(cid).unwrap().layer_mut(LayerId(solid)).unwrap().out_point =
+        effectcraft_engine::time::Tick::ZERO;
+    h.run_steps(2);
+    assert_eq!(outlines(&h), 0, "an inactive soloed layer still sets solo scope");
+    h.state_mut().session.execute("layer.setSwitch", json!({"layers": [n], "switch": "solo", "value": true})).unwrap();
+    h.run_steps(2);
+    assert_eq!(outlines(&h), 1, "a soloed null keeps its outline");
 }

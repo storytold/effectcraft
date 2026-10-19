@@ -68,6 +68,15 @@ instructions retired; `/usr/bin/time -v` on Linux gives max RSS and CPU; elsewhe
 It prints a table and appends one JSON line per run to `target/bench/results.jsonl` (git rev,
 date, load average, scenario, settings, metrics); `--compare OLD.jsonl` prints the % change against
 the latest matching runs there, `--compare OLD --with NEW` compares two files without rendering.
+`--repeat N` runs every scenario N times; with N > 1, one `"kind": "summary"` line per key follows
+the runs. Its `metrics` are the medians of the successful runs (byte and instruction counts
+rounded), `summary` holds `runs`, `failed` and median/p90/min/max per metric (p90 is the nearest
+rank, so it equals the max for N < 10), and its other fields (`date`, `load`, ...) are those of the
+key's last run; scripts that average runs should skip `kind: summary` lines. One failed run marks
+the summary failed. Comparisons use the latest line per key, so a key is a median only if its
+summary is the latest line (a later single run, or a batch that aborted before its summaries,
+leaves a raw run latest). The table labels each side `median of N` or `1 run` and warns when they
+differ; `--fail-over` refuses such keys.
 The table notes the 1-minute load average: on a busy machine wall time is noise, so compare
 peak memory and instructions retired, and rerun when the load differs a lot.
 

@@ -190,7 +190,7 @@ fn the_star_is_a_named_button_on_the_cursor_row_and_enter_toggles_it() {
     assert_eq!(role, Role::Button);
     assert_eq!(name, format!("Add to favorites: {effect}"));
     key(&mut h, Key::Enter, Modifiers::NONE);
-    assert_eq!(h.state().ui.effects_favorites.len(), 1, "Enter on the star adds the favourite");
+    assert_eq!(h.state().session.prefs.effects_favorites.len(), 1, "Enter on the star adds the favourite");
     let (_, name) = focused(&h).expect("the star keeps the focus");
     assert_eq!(name, format!("Remove from favorites: {effect}"));
 }
@@ -228,7 +228,7 @@ fn layer_position(h: &Harness<'_, EffectcraftApp>) -> String {
 fn rows_and_controls_have_names_roles_and_states() {
     let mut h = harness();
     h.state_mut().ui.effects_open.insert("Blur & Sharpen".into());
-    h.state_mut().ui.effects_favorites.insert("ec.blur.gaussian".into());
+    h.state_mut().session.prefs.toggle_effect_favorite("ec.blur.gaussian");
     h.run_steps(4);
     assert_eq!(h.get_by_label("Search effects and presets").accesskit_node().role(), Role::TextInput);
     let menu = h.get_by_label("Effects & Presets options");

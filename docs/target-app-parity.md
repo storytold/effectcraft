@@ -746,6 +746,9 @@ them: scripts, ScriptUI panels, effect plug-ins, with a guide to writing a panel
   way and move them however slowly they are dragged; the same Shift / Ctrl / Ctrl+Alt clicks.
 - **Paste** (M5.13): keys copied from several layers paste onto as many layers in order; Paste
   Reversed Keyframes follows Paste's rules (stretch, target property, Hold-only properties).
+  A Mask Path or shape Path (its value or a key) pasted onto Position becomes a motion path: a
+  key per vertex with the path's tangents, over 2 s from the CTI, the inner keys roving, the
+  vertices pasted as they are (layer space, as in After Effects) (#1425).
 - **J / K and Info** (M5.14): J / K also stop at the work area; the Info panel shows a selected
   key's property, time and value.
 

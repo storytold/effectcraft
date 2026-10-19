@@ -303,7 +303,9 @@ build real projects through these interfaces; they are worked examples of everyt
   The CLI also renders an exported template directly:
   `effectcraft-cli render --template lt.ectemplate --values values.json --out 'title_[#####].png'`.
   `values.json` is an object such as `{"Title":"John Smith","Bar Color":"#00c080","Bar Opacity":50}`;
-  names follow `essential.set`, including its case-insensitive matching. Values override one
+  names follow `essential.set`, including its case-insensitive matching. A Media Replacement
+  control takes a footage file path (`{"Clip":"/in/clipB.mp4"}`, or `{"path": …}`), which is
+  imported and set as the control's `item`. Values override one
   imported instance; the template file and its source controls keep their defaults. Omit
   `--values` to render those defaults, or use the same options with `render-frame` for a PNG.
   Values must fit in 1 MiB. Invalid JSON, unknown controls and invalid values fail before rendering.
@@ -540,8 +542,10 @@ Fonts: `text.fonts` (MCP `list_fonts`) lists every family a text layer can use, 
 styles, origin (`bundled`, `system`, `user`), `variable` (it has variation axes) and own-language name
 (`{"query":"gothic"}` filters by name, `{"variable":true}` keeps only variable fonts, like the font
 menu's Variable Fonts filter; `{"rescan":true}` first picks up fonts installed since launch). Pass a listed `family` and
-one of its `styles` to `layer.setText {"font", "style"}`; `text.fontFeatures` says which OpenType
-options a font draws with its own glyphs.
+one of its `styles` to `layer.setText {"font", "style"}`. A variable font's named instances (`Light` …
+`Black`) are styles of its family; a style or an instance's PostScript name (`"font": "Figtree-Black"`)
+sets the instance's axis values, and `variations` set on the text override them axis by axis.
+`text.fontFeatures` says which OpenType options a font draws with its own glyphs.
 A tool with its own font library can hand it over without installing it: folders listed in
 `EFFECTCRAFT_FONT_DIRS` (a path list, `:`-separated, `;` on Windows) are scanned like the system font folders.
 On Linux and the BSDs the system font folders are `/usr/share/fonts`, `/usr/local/share/fonts`,
@@ -663,6 +667,7 @@ effectcraft-cli render-frame main.ecproj --time 1 --max-side 640 --out f.png --j
 effectcraft-cli exec layer.newNull --bridge 9877                 # same commands, against the live app
 effectcraft-cli exec file.exportLottie '{"comp":"Main","path":"main.json","includeExpressions":true}' main.ecproj --json
 effectcraft-cli exec file.importLottie '{"path":"anim.json"}' main.ecproj --save
+effectcraft-cli render main.ecproj --comp Main --out main.mov --format prores --progress   # progress lines on stderr for a program that reads them
 ```
 
 Scripts written against After Effects' documented scripting API run with `script`:

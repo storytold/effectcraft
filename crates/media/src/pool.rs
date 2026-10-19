@@ -557,9 +557,9 @@ impl Inner {
             return m.clone();
         }
         let loaded = self.read(path).map_err(|e| e.to_string()).and_then(|bytes| {
-            let dir = std::path::Path::new(path).parent().map(|d| d.to_path_buf()).unwrap_or_default();
+            // Files the model names are read only when local or on the model's own network share.
             let resolve = |uri: &str| -> Option<Vec<u8>> {
-                let p = dir.join(uri);
+                let p = craft_docpath::resolve(uri, Some(std::path::Path::new(path))).ok().filter(|p| p.is_absolute())?;
                 self.read(&p.to_string_lossy()).ok().map(|b| b.to_vec())
             };
             effectcraft_model::load(path, &bytes, &resolve).map_err(|e| e.to_string())
@@ -1139,5 +1139,28 @@ mod tests {
         // Each curve is cached apart: asking again returns the same pixels.
         assert_eq!(px(&f, FloatCurve::Srgb), srgb);
         assert_eq!(px(&f, FloatCurve::Gamma24), g24);
+    }
+
+    /// A model's material library is read beside it; one named by a path to another computer
+    /// is not read.
+    #[test]
+    fn model_files_on_other_computers_are_not_read() {
+        let dir = std::env::temp_dir().join(format!("ec-model-files-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("red.mtl"), "newmtl red\nKd 1 0 0\n").unwrap();
+        let pool = MediaPool::new();
+        let red = |name: &str, mtl: &str| {
+            let path = dir.join(name);
+            std::fs::write(&path, format!("mtllib {mtl}\nv 0 0 0\nv 1 0 0\nv 0 1 0\nusemtl red\nf 1 2 3\n")).unwrap();
+            let model = pool.inner.model(&path.to_string_lossy()).unwrap();
+            model.materials.iter().any(|m| m.base_color[..3] == [1.0, 0.0, 0.0])
+        };
+        assert!(red("beside.obj", "red.mtl"));
+        assert!(!red("unc.obj", r"\\192.0.2.1\share\red.mtl"));
+        assert!(!red("url.obj", "file://192.0.2.1/s/red.mtl"));
+        // Linux reads `//dir/red.mtl` as the local file.
+        #[cfg(unix)]
+        assert!(!red("slashes.obj", &format!("/{}", dir.join("red.mtl").display())));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

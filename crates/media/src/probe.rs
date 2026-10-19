@@ -19,8 +19,10 @@ pub fn probe(path: impl AsRef<Path>) -> Result<Footage> {
     // A movie is read in place (its index), not loaded whole.
     if let Some(src) = crate::stream::probe_source(path) {
         let mut f = footage_from_info(&path.to_string_lossy(), src?.info());
-        let turn = crate::stream::movie_header(path).map_or(Orientation::NoTransforms, |h| video_turn(&h));
+        let header = crate::stream::movie_header(path);
+        let turn = header.as_deref().map_or(Orientation::NoTransforms, video_turn);
         turn_footage(&mut f, turn);
+        correct_rate(&mut f, header.as_deref().and_then(video_rate));
         return Ok(f);
     }
     let bytes = std::fs::read(path).map_err(|e| MediaError::Io(format!("{}: {e}", path.display())))?;
@@ -95,10 +97,22 @@ pub fn probe_bytes(path: &str, bytes: Arc<[u8]>) -> Result<Footage> {
     }
     let name = Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.to_string());
     let turn = video_turn(&bytes);
+    let rate = video_rate(&bytes);
     let src = filmcraft_codecs::open_bytes(&name, bytes)?;
     let mut f = footage_from_info(path, src.info());
     turn_footage(&mut f, turn);
+    correct_rate(&mut f, rate);
     Ok(f)
+}
+
+/// A movie's frame rate as its frame durations average to ([`video_rate`]), where the reader's
+/// own estimate misreads it.
+fn correct_rate(f: &mut Footage, rate: Option<FrameRate>) {
+    if f.kind == FootageKind::Video
+        && let Some(rate) = rate
+    {
+        f.frame_rate = rate;
+    }
 }
 
 /// The size as displayed: a movie shot with the camera on its side trades width and height.
@@ -252,5 +266,88 @@ pub(crate) fn video_turn(bytes: &[u8]) -> Orientation {
         (true, false, _) => Orientation::Rotate180,
         (false, _, true) => Orientation::Rotate90,
         (false, _, false) => Orientation::Rotate270,
+    }
+}
+
+/// The frame rate of an MP4/MOV movie's video track when the reader's own estimate, the median
+/// frame duration, misreads it. Phones and messaging apps store frame times rounded to whole
+/// milliseconds: a 30 fps clip's frames last 33 or 34 ms and a 60 fps clip's 16 or 17 ms, whose
+/// median reads as 30.303 or 58.824 fps. `None` for other containers and for movies the median
+/// reads right.
+fn video_rate(bytes: &[u8]) -> Option<FrameRate> {
+    let file = filmcraft_isobmff::open(bytes).ok()?;
+    let t = file.tracks.iter().find(|t| t.kind == filmcraft_isobmff::TrackKind::Video && !t.samples.is_empty())?;
+    averaged_rate(t.timescale, t.samples.iter().take(240).map(|s| s.duration))
+}
+
+/// The standard rate ([`FrameRate::COMMON`]) within 0.5 % of what the frame durations near their
+/// median average to (`durations` in `1 / timescale` s); `None` when the median duration is a
+/// standard rate already, or when the average is no standard rate (variable or unusual rates keep
+/// the reader's estimate).
+fn averaged_rate(timescale: u32, durations: impl Iterator<Item = u32>) -> Option<FrameRate> {
+    let ts = i128::from(timescale);
+    let mut durs: Vec<u64> = durations.filter(|&d| d > 0).map(u64::from).collect();
+    durs.sort_unstable();
+    let median = *durs.get(durs.len() / 2)?;
+    if FrameRate::COMMON.iter().any(|r| ts * i128::from(r.den) == i128::from(median) * i128::from(r.num)) {
+        return None;
+    }
+    // Durations within a quarter of the median (widened, so extreme durations can't overflow).
+    let (n, sum) = durs.iter().filter(|&&d| d.abs_diff(median).saturating_mul(4) <= median).fold((0u64, 0u64), |(n, s), &d| (n + 1, s.saturating_add(d)));
+    if sum == 0 {
+        return None;
+    }
+    let fps = timescale as f64 * n as f64 / sum as f64;
+    FrameRate::COMMON
+        .into_iter()
+        .map(|r| (r, (fps / r.as_f64() - 1.0).abs()))
+        .filter(|&(_, off)| off <= 0.005)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(r, _)| r)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Durations (in 1/`timescale` s) of `n` frames at `rate` whose times are rounded to the timescale.
+    fn rounded(rate: FrameRate, timescale: i64, n: i64) -> Vec<u32> {
+        let at = |k: i64| (2 * k * timescale * rate.den + rate.num) / (2 * rate.num);
+        (0..n).map(|k| (at(k + 1) - at(k)) as u32).collect()
+    }
+
+    #[test]
+    fn millisecond_rounded_frame_times_average_to_their_rate() {
+        assert_eq!(rounded(FrameRate::FPS_30, 1000, 6), [33, 34, 33, 33, 34, 33]);
+        assert_eq!(averaged_rate(1000, rounded(FrameRate::FPS_30, 1000, 120).into_iter()), Some(FrameRate::FPS_30));
+        assert_eq!(averaged_rate(1000, rounded(FrameRate::FPS_60, 1000, 240).into_iter()), Some(FrameRate::FPS_60));
+        // NTSC rates stay NTSC, not the round rate next to them.
+        for r in [FrameRate::FPS_23_976, FrameRate::FPS_29_97, FrameRate::FPS_59_94] {
+            assert_eq!(averaged_rate(1000, rounded(r, 1000, 240).into_iter()), Some(r), "{r:?}");
+        }
+        // A short clip: its few frames average to the rate as well.
+        assert_eq!(averaged_rate(1000, [33, 34, 33].into_iter()), Some(FrameRate::FPS_30));
+    }
+
+    #[test]
+    fn exact_and_variable_rates_keep_the_readers_estimate() {
+        // A median that is a standard rate already reads right.
+        assert_eq!(averaged_rate(30000, rounded(FrameRate::FPS_29_97, 30000, 240).into_iter()), None);
+        assert_eq!(averaged_rate(90000, [3000; 10].into_iter()), None);
+        assert_eq!(averaged_rate(600, [20, 20, 19, 21, 20].into_iter()), None);
+        // Durations averaging to no standard rate (22.2 fps).
+        assert_eq!(averaged_rate(1000, [40, 45, 50].repeat(20).into_iter()), None);
+        // A truly 30.3 fps clip is not pulled to 30 (1 % off).
+        assert_eq!(averaged_rate(1000, [33; 30].into_iter()), None);
+    }
+
+    #[test]
+    fn degenerate_durations_have_no_rate() {
+        assert_eq!(averaged_rate(1000, std::iter::empty()), None);
+        assert_eq!(averaged_rate(1000, [0, 0, 0].into_iter()), None);
+        assert_eq!(averaged_rate(0, [33, 34, 33].into_iter()), None);
+        assert_eq!(averaged_rate(u32::MAX, [u32::MAX, u32::MAX - 1, 1, 0].into_iter()), None);
+        assert_eq!(averaged_rate(u32::MAX, [u32::MAX; 300].into_iter()), None);
+        assert_eq!(video_rate(b"not a movie"), None);
     }
 }

@@ -806,3 +806,26 @@ fn extreme_enum_numbers_do_not_overflow() {
     let mut q = Project::default();
     import(&mut q, doc.to_string().as_bytes(), "x", "", &mut |_| None).unwrap();
 }
+
+/// External image assets are taken from the Lottie file's folder; one on another computer is not
+/// imported.
+#[test]
+fn external_images_are_local_or_skipped() {
+    let base = std::env::temp_dir().join("ec-lottie-anim");
+    let mut assets = vec![
+        serde_json::json!({"id": "near", "u": "images/", "p": "a.png", "w": 1, "h": 1}),
+        serde_json::json!({"id": "unc", "u": "", "p": r"\\192.0.2.1\share\x.png", "w": 1, "h": 1}),
+        serde_json::json!({"id": "url", "u": "file://192.0.2.1/s/", "p": "x.png", "w": 1, "h": 1}),
+    ];
+    // `u` + `p` is `//tmp/…/a.png`, which Linux reads as a local file.
+    if cfg!(unix) {
+        assets.push(serde_json::json!({"id": "slashes", "u": "/", "p": base.join("a.png").to_string_lossy(), "w": 1, "h": 1}));
+    }
+    let doc = serde_json::json!({"w": 10, "h": 10, "fr": 30, "ip": 0, "op": 30, "assets": assets, "layers": []});
+    let mut q = Project::default();
+    let r = import(&mut q, doc.to_string().as_bytes(), "x", &base.to_string_lossy(), &mut |_| None).unwrap();
+    let paths: Vec<String> = q.items.values().filter_map(|i| if let ItemKind::Footage(f) = &i.kind { Some(f.path.clone()) } else { None }).collect();
+    assert_eq!(paths.len(), 1, "{paths:?}");
+    assert_eq!(std::path::Path::new(&paths[0]), base.join("images").join("a.png"));
+    assert_eq!(r.warnings.iter().filter(|w| w.contains("is not imported")).count(), assets.len() - 1, "{:?}", r.warnings);
+}

@@ -2049,7 +2049,16 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 }
                 app.auto.add(&format!("timeline.layer.{}.twirl", layer.id.0), tw, "twirl");
                 icons::paint(&lp, Rect::from_center_size(pos2(cw.name + 24.0, cy), vec2(13.0, 13.0)), layer_icon(layer, &app.session.project), t.text_dim);
-                let name_rect = Rect::from_min_max(pos2(cw.name + 34.0, r.min.y), pos2(cw.name_end - 4.0, r.max.y));
+                // A guide layer carries a guide mark before its name (After Effects).
+                let name_x = if layer.switches.guide {
+                    let mark = Rect::from_center_size(pos2(cw.name + 40.0, cy), vec2(11.0, 11.0));
+                    icons::paint(&lp, mark, Icon::Grid, t.text_dim);
+                    app.auto.add(&format!("timeline.layer.{}.guide", layer.id.0), mark, "Guide Layer");
+                    cw.name + 50.0
+                } else {
+                    cw.name + 34.0
+                };
+                let name_rect = Rect::from_min_max(pos2(name_x, r.min.y), pos2(cw.name_end - 4.0, r.max.y));
                 let rename_id = egui::Id::new("tl-rename");
                 let renaming: Option<(u64, String)> = ctx.data(|d| d.get_temp(rename_id));
                 if let Some((rl, mut buf)) = renaming.filter(|(rl, _)| *rl == layer.id.0) {
@@ -2110,7 +2119,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                         None => start_rename(&ctx, layer.id.0, &layer.name),
                     }
                 }
-                layer_context_menu(&row_resp, &comp, layer, &selected, LayerMenuCaps::of(&app.session.project, layer), &mut actions);
+                layer_context_menu(&row_resp, &comp, layer, &selected, LayerMenuCaps::of(&app.session.project, layer), &mut app.auto, &mut actions);
                 // Switches.
                 let sws: [(Icon, bool, &str, bool); 8] = [
                     (Icon::Shy, sw.shy, "shy", true),
@@ -2331,7 +2340,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                             set_anchor(&ctx, cid, layer.id);
                         }
                     }
-                    layer_context_menu(&body, &comp, layer, &selected, LayerMenuCaps::of(&app.session.project, layer), &mut actions);
+                    layer_context_menu(&body, &comp, layer, &selected, LayerMenuCaps::of(&app.session.project, layer), &mut app.auto, &mut actions);
                     let drag_key = format!("bar-{}", layer.id.0);
                     // Ctrl/Cmd+Alt dragging a selected bar: Quick Offset (#1012), chosen as the
                     // drag starts and followed below the rows until the button is released.
@@ -2977,7 +2986,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     ("shape", "Shape Layer", "layer.newShape", json!({"kind": "none"})),
                     ("adjustment", "Adjustment Layer", "layer.newAdjustment", json!({})),
                 ] {
-                    let response = ui.button(label);
+                    let response = ui.button(crate::i18n::context_item(command, &params, label));
                     app.auto.add(&format!("timeline.context.{area}.{key}"), response.rect, label);
                     if response.clicked() {
                         actions.push((command.into(), params));
@@ -3337,7 +3346,8 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         }
     }
 
-    // Drop targets: effects from Effects & Presets go on the layer under the pointer. Footage and
+    // Drop targets: effects and animation presets from Effects & Presets go on the layer under the
+    // pointer. Footage and
     // comps from the Project panel and files from the Media Browser go where they are dropped: a
     // line shows the place in the stack, and over the time graph a marker shows the In point too
     // (Shift: at the current time).
@@ -3346,7 +3356,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         && let Some(ptr) = ctx.input(|i| i.pointer.hover_pos()).filter(|_| ui.rect_contains_pointer(rows_rect))
     {
         let released = ctx.input(|i| i.pointer.any_released());
-        if let crate::panels::DragPayload::Effect(e) = payload.as_ref() {
+        if matches!(payload.as_ref(), crate::panels::DragPayload::Effect(_) | crate::panels::DragPayload::Preset { .. }) {
             let target = hit_rows.iter().find(|(r, _)| ptr.y >= r.min.y && ptr.y < r.max.y).map(|(_, row)| row.layer);
             // The layer the effect would land on (its row and its open properties) is the one
             // that lights up, not the whole timeline.
@@ -3360,7 +3370,14 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 app.auto.add("timeline.dropTarget", lit, "Drop target layer");
             }
             if released && let Some(l) = target {
-                actions.push(("effect.apply".into(), json!({"effect": e, "layers": [l.0]})));
+                match payload.as_ref() {
+                    crate::panels::DragPayload::Effect(e) => actions.push(("effect.apply".into(), json!({"effect": e, "layers": [l.0]}))),
+                    crate::panels::DragPayload::Preset { preset, .. } => {
+                        let (id, params) = preset.apply_to(l.0);
+                        actions.push((id.into(), params));
+                    }
+                    _ => {}
+                }
             }
         } else {
             let layer_rows: Vec<(Rect, LayerId)> = hit_rows.iter().filter(|(_, r)| matches!(r.kind, RowKind::Layer)).map(|(rr, r)| (*rr, r.layer)).collect();
@@ -3396,7 +3413,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     crate::panels::DragPayload::Files(paths) => {
                         actions.push(("mediaBrowser.import".into(), json!({"paths": paths, "addToComp": true, "index": index, "time": time})))
                     }
-                    crate::panels::DragPayload::Effect(_) | crate::panels::DragPayload::Property { .. } => {}
+                    crate::panels::DragPayload::Effect(_) | crate::panels::DragPayload::Preset { .. } | crate::panels::DragPayload::Property { .. } => {}
                 }
             }
         }
@@ -3823,7 +3840,7 @@ fn prop_menu(
 ) {
     let (l, uid) = (layer.id.0, prop.uid);
     let mut item = |ui: &mut egui::Ui, key: &str, label: &str, selected: bool, cmd: &str, params: serde_json::Value| {
-        let resp = ui.add(egui::Button::new(label).selected(selected));
+        let resp = ui.add(egui::Button::new(crate::i18n::context_item(cmd, &params, label)).selected(selected));
         auto.add(&format!("timeline.prop.{uid}.menu.{key}"), resp.rect, label);
         if resp.clicked() {
             actions.push((cmd.into(), params));
@@ -3884,12 +3901,14 @@ impl LayerMenuCaps {
 /// A layer row's or bar's context menu. As in After Effects, right-clicking a layer that is part
 /// of the selection keeps the selection and the menu acts on all of it; right-clicking an
 /// unselected layer selects only that layer.
+#[allow(clippy::too_many_arguments)]
 fn layer_context_menu(
     resp: &egui::Response,
     comp: &Comp,
     layer: &Layer,
     selected: &[LayerId],
     caps: LayerMenuCaps,
+    auto: &mut crate::automation::Registry,
     actions: &mut Vec<(String, serde_json::Value)>,
 ) {
     let in_selection = selected.contains(&layer.id);
@@ -3897,14 +3916,26 @@ fn layer_context_menu(
         actions.push(("layer.select".into(), json!({"layers": [layer.id.0]})));
     }
     let targets: Vec<u64> = if in_selection { comp.layers.iter().filter(|l| selected.contains(&l.id)).map(|l| l.id.0).collect() } else { vec![layer.id.0] };
-    crate::widgets::context_menu(resp, |ui| layer_menu(ui, &targets, caps, actions));
+    crate::widgets::context_menu(resp, |ui| layer_menu(ui, &targets, caps, (auto, "timeline.layerMenu"), actions));
 }
 
-/// Shared layer actions for Timeline rows and Composition context menus.
-pub(crate) fn layer_menu(ui: &mut egui::Ui, layers: &[u64], caps: LayerMenuCaps, actions: &mut Vec<(String, serde_json::Value)>) {
+/// The layer switches the layer context menus toggle (After Effects lists them after Time):
+/// `layer.setSwitch` name and label.
+const MENU_SWITCHES: [(&str, &str); 1] = [("guide", "Guide Layer")];
+
+/// Shared layer actions for Timeline rows and Composition context menus. `auto` is the automation
+/// registry and the id prefix of the menu's items.
+pub(crate) fn layer_menu(
+    ui: &mut egui::Ui,
+    layers: &[u64],
+    caps: LayerMenuCaps,
+    auto: (&mut crate::automation::Registry, &str),
+    actions: &mut Vec<(String, serde_json::Value)>,
+) {
     let Some(&id) = layers.first() else { return };
+    let (auto, prefix) = auto;
     let mut item = |ui: &mut egui::Ui, label: &str, cmd: &str, params: serde_json::Value| {
-        if ui.button(label).clicked() {
+        if ui.button(crate::i18n::context_item(cmd, &params, label)).clicked() {
             actions.push(("layer.select".into(), json!({"layers": layers})));
             actions.push((cmd.into(), params));
             ui.close();
@@ -3912,7 +3943,7 @@ pub(crate) fn layer_menu(ui: &mut egui::Ui, layers: &[u64], caps: LayerMenuCaps,
     };
     ui.menu_button(crate::i18n::tr("New"), |ui| {
         item(ui, "Text", "layer.newText", json!({}));
-        item(ui, "Solid…", "app.solidSettings", json!({}));
+        item(ui, "Solid…", "layer.newSolid", json!({}));
         item(ui, "Light…", "layer.newLight", json!({}));
         item(ui, "Camera…", "layer.newCamera", json!({}));
         item(ui, "Null Object", "layer.newNull", json!({}));
@@ -3943,11 +3974,23 @@ pub(crate) fn layer_menu(ui: &mut egui::Ui, layers: &[u64], caps: LayerMenuCaps,
         item(ui, "Time-Reverse Layer", "layer.timeReverse", json!({"layers": layers}));
         item(ui, "Time Stretch…", "layer.timeStretch", json!({}));
         item(ui, "Freeze Frame", "layer.freezeFrame", json!({"layers": layers}));
-        item(ui, "Freeze on Last Frame", "layer.freezeOnLastFrame", json!({"layers": layers}));
+        item(ui, "Freeze On Last Frame", "layer.freezeOnLastFrame", json!({"layers": layers}));
     });
     ui.menu_button(crate::i18n::tr("Markers"), |ui| {
         item(ui, "Add Marker", "layer.addMarker", json!({"layers": layers}));
     });
+    // A click toggles the switch on the target layers, as Layer ▸ Guide Layer does.
+    // (Pushed after the other items: `item` holds `actions` until its last use.)
+    let mut switch_actions: Vec<(String, serde_json::Value)> = Vec::new();
+    for (switch, label) in MENU_SWITCHES {
+        let response = ui.button(crate::i18n::tr(label));
+        auto.add(&format!("{prefix}.switch.{switch}"), response.rect, label);
+        if response.clicked() {
+            switch_actions.push(("layer.select".into(), json!({"layers": layers})));
+            switch_actions.push(("layer.setSwitch".into(), json!({"layers": layers, "switch": switch})));
+            ui.close();
+        }
+    }
     ui.menu_button(crate::i18n::tr("Blending Mode"), |ui| {
         widgets::menu_scroll(ui, |ui| {
             for m in BlendMode::ALL {
@@ -3971,6 +4014,7 @@ pub(crate) fn layer_menu(ui: &mut egui::Ui, layers: &[u64], caps: LayerMenuCaps,
     item(ui, "Duplicate", "edit.duplicate", json!({"layers": layers}));
     item(ui, "Split Layer", "edit.splitLayer", json!({"layers": layers}));
     item(ui, "Delete", "edit.clear", json!({"layers": layers}));
+    actions.extend(switch_actions);
 }
 
 /// The layer context menu's Layer Styles submenu, matching the Layer ▸ Layer Styles application menu.
@@ -4012,7 +4056,7 @@ fn effects_submenu(ui: &mut egui::Ui, layers: &[u64], item: &mut dyn FnMut(&mut 
     widgets::menu_scroll(ui, |ui| {
         for (cat, mut fx) in cats {
             fx.sort_by_key(|e| e.name.to_ascii_lowercase());
-            ui.menu_button(cat, |ui| {
+            ui.menu_button(crate::i18n::effects::category(cat), |ui| {
                 widgets::menu_scroll(ui, |ui| {
                     for e in fx {
                         item(ui, e.name, "effect.apply", json!({"effect": e.id, "layers": layers}));
@@ -4117,6 +4161,11 @@ fn value_editor(
                         }
                     }
                     set(actions, json!(nc));
+                    // Typed into these components only: other selected layers keep the rest of
+                    // their own value (#1434).
+                    if let Some((_, a)) = actions.last_mut() {
+                        a["dims"] = json!((from..from + shown).collect::<Vec<_>>());
+                    }
                 }
                 x = r.max.x + if d + 1 < n { 2.0 } else { 0.0 };
                 if d + 1 < n {
@@ -4582,6 +4631,81 @@ mod tests {
         let comp = app.session.active_comp().unwrap().clone();
         let c = snap_candidates(&comp, &build_rows(&app, &comp));
         assert!(c.contains(&comp.duration.seconds()) && c.contains(&0.0));
+    }
+
+    /// Every string drawn by one frame of `draw`.
+    fn drawn_text(mut draw: impl FnMut(&mut egui::Ui)) -> Vec<String> {
+        fn collect(shape: &egui::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(t) => out.push(t.galley.text().to_string()),
+                egui::Shape::Vec(v) => v.iter().for_each(|s| collect(s, out)),
+                _ => {}
+            }
+        }
+        let ctx = egui::Context::default();
+        ctx.run_ui(Default::default(), |ui| draw(ui)).textures_delta.clear();
+        let mut frame = ctx.run_ui(Default::default(), |ui| draw(ui));
+        frame.textures_delta.clear();
+        let mut out = Vec::new();
+        frame.shapes.iter().for_each(|c| collect(&c.shape, &mut out));
+        out
+    }
+
+    /// #1308: the layer context menu draws its items in the interface language, from the menu
+    /// bar's rows for the same commands (whose ellipsis is `...`), and its Effects submenu draws
+    /// the categories the Effect menu does; the actions it records stay the same.
+    #[test]
+    fn the_layer_context_menu_draws_in_the_interface_language() {
+        let caps = LayerMenuCaps { vector: true, text: false };
+        let (mut auto, mut actions) = (crate::automation::Registry::default(), Vec::new());
+        crate::i18n::set_current("zh-hans");
+        let menu = drawn_text(|ui| layer_menu(ui, &[7], caps, (&mut auto, "t"), &mut actions));
+        let effects = drawn_text(|ui| effects_submenu(ui, &[7], &mut |_: &mut egui::Ui, _: &str, _: &str, _: serde_json::Value| {}));
+        crate::i18n::set_current("en");
+        let english = drawn_text(|ui| layer_menu(ui, &[7], caps, (&mut auto, "t"), &mut actions));
+        for label in ["新建", "图层设置...", "从矢量图层创建形状", "预合成...", "重复", "拆分图层", "删除"] {
+            assert!(menu.iter().any(|t| t == label), "{label} missing from {menu:?}");
+        }
+        assert!(!menu.iter().any(|t| t.is_ascii()), "English left in {menu:?}");
+        assert!(effects.iter().any(|t| t == "模糊和锐化"), "{effects:?}");
+        assert!(!effects.iter().any(|t| t == "Blur & Sharpen"), "{effects:?}");
+        for label in ["Layer Settings…", "Duplicate", "Delete"] {
+            assert!(english.iter().any(|t| t == label), "{label} missing from {english:?}");
+        }
+        assert!(actions.is_empty());
+    }
+
+    /// The property context menu draws its items in the interface language too: the commands the
+    /// menu bar has from its rows, Reset, Edit Value… and Remove Expression from the panel catalog.
+    /// The automation labels stay English.
+    #[test]
+    fn the_property_context_menu_draws_in_the_interface_language() {
+        let mut s = effectcraft_engine::Session::default();
+        s.execute("comp.new", json!({"name": "Main", "width": 64, "height": 64, "duration": 4})).unwrap();
+        let l = s.execute("layer.newSolid", json!({"name": "Plate", "color": "#406080"})).unwrap()["layer"].as_u64().unwrap();
+        let opacity = s.active_comp().unwrap().layer(LayerId(l)).unwrap().props.prop("transform/opacity").unwrap().uid;
+        s.execute("prop.setExpression", json!({"layer": l, "prop": opacity})).unwrap();
+        let comp = s.active_comp_id().unwrap();
+        let layer = s.active_comp().unwrap().layer(LayerId(l)).unwrap().clone();
+        let (position, opacity) = (layer.props.prop("transform/position").unwrap(), layer.props.prop("transform/opacity").unwrap());
+        let (mut auto, mut actions) = (crate::automation::Registry::default(), Vec::new());
+        let mut menu = |language| {
+            crate::i18n::set_current(language);
+            let mut drawn = drawn_text(|ui| prop_menu(ui, &mut auto, comp, &layer, position, &mut actions));
+            drawn.extend(drawn_text(|ui| prop_menu(ui, &mut auto, comp, &layer, opacity, &mut actions)));
+            drawn
+        };
+        let chinese = menu("zh-hans");
+        let english = menu("en");
+        for label in ["重置", "编辑值…", "单独尺寸", "添加表达式", "移除表达式", "向基本图形添加属性"] {
+            assert!(chinese.iter().any(|t| t == label), "{label} missing from {chinese:?}");
+        }
+        assert!(!chinese.iter().any(|t| t.is_ascii()), "English left in {chinese:?}");
+        for label in ["Reset", "Edit Value…", "Separate Dimensions", "Remove Expression", "Add Property to Essential Graphics"] {
+            assert!(english.iter().any(|t| t == label), "{label} missing from {english:?}");
+        }
+        assert!(auto.elements.iter().any(|e| e.label == "Remove Expression"), "the automation label stays English");
+        assert!(actions.is_empty());
     }
 
     /// UI fidelity (M13.5): compact After Effects-like rows and muted label-coloured bars.

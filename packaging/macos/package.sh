@@ -131,7 +131,13 @@ ditto "$APP" "$STAGE/EffectCraft.app"
 ln -s /Applications "$STAGE/Applications"
 # Finder window layout: background, icon size and positions (packaging/macos/dmg/README.md).
 # The background is rendered from its SVG (1x + 2x in one HiDPI TIFF), so no bitmap is committed.
-command -v resvg >/dev/null || { echo "resvg not found (cargo install resvg --locked --version 0.48.1)" >&2; exit 1; }
+# CI (the shared release workflow doesn't install resvg; a warm cargo cache may hold it): install
+# the pinned version. Locally, say which version to install.
+RESVG_VERSION=0.48.1
+if [ -n "${CI:-}" ] && ! command -v resvg >/dev/null; then
+  cargo install resvg --locked --version "$RESVG_VERSION"
+fi
+command -v resvg >/dev/null || { echo "resvg not found (cargo install resvg --locked --version $RESVG_VERSION)" >&2; exit 1; }
 mkdir -p "$STAGE/.background"
 resvg --skip-system-fonts -w 660 "$HERE/dmg/background.svg" "$WORK/background.png"
 resvg --skip-system-fonts -w 1320 "$HERE/dmg/background.svg" "$WORK/background@2x.png"

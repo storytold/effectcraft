@@ -182,7 +182,7 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
     let video = match p.get("videoStart").filter(|v| v.as_str() != Some("")) {
         Some(v) => parse_stamp(v, fps).ok_or_else(|| bad(c, "videoStart: ISO 8601 date-time, hh:mm:ss, timecode or seconds"))?,
         None => {
-            let (created, _, _) = crate::media_browser::file_dates(&footage.path);
+            let (created, _, _) = if footage.missing { (None, None, None) } else { crate::media_browser::file_dates(&footage.path) };
             Stamp { secs: created.ok_or_else(|| bad(c, "the footage has no recording time; pass `videoStart`"))? as f64, dated: true }
         }
     };

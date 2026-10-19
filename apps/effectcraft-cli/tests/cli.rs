@@ -593,3 +593,77 @@ solid.property("ADBE Transform Group").property("ADBE Opacity").addToMotionGraph
     assert_eq!(reply["error"], "command `renderQueue.add` is not available right now: select or open a composition", "{reply}");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// `WGPU_ADAPTER_NAME` that matches nothing is a clean `--gpu` error listing the adapters
+/// found (wgpu's own helper panics). Read once per process, hence a subprocess.
+#[test]
+fn gpu_adapter_name_mismatch_is_a_clean_error() {
+    let out = bin()
+        .args(["render-frame", "--gpu", "--max-side", "64", "--out", tmp("nomatch.png").to_str().unwrap(), "--json"])
+        .env("WGPU_ADAPTER_NAME", "NoSuchAdapter-xyz")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "stdout: {stdout}\nstderr: {}", String::from_utf8_lossy(&out.stderr));
+    let v: Value = serde_json::from_str(stdout.trim()).unwrap();
+    let e = v["error"].as_str().unwrap();
+    assert!(e.contains("WGPU_ADAPTER_NAME=\"NoSuchAdapter-xyz\""), "{e}");
+    assert!(e.contains("available: [") || e.contains("no adapters on the enabled backends"), "{e}");
+}
+
+/// An exported-but-empty `WGPU_ADAPTER_NAME` behaves like unset: it never produces the
+/// adapter-name error (whether a GPU exists on this machine is not asserted).
+#[test]
+fn gpu_adapter_name_empty_is_unset() {
+    let out = bin()
+        .args(["render-frame", "--gpu", "--max-side", "64", "--out", tmp("emptyname.png").to_str().unwrap(), "--json"])
+        .env("WGPU_ADAPTER_NAME", "  ")
+        .output()
+        .unwrap();
+    let all = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(!all.contains("WGPU_ADAPTER_NAME"), "{all}");
+}
+
+/// Renders two seconds of the demo at quarter resolution (long enough for several progress
+/// updates) and returns stderr, which `output()` reads through a pipe: not a terminal.
+fn render_demo_stderr(name: &str, extra: &[&str]) -> String {
+    let out = tmp(name);
+    let mut args = vec!["render", "--demo", "--format", "gif", "--start", "0", "--end", "2", "--resolution", "quarter", "--out", out.to_str().unwrap()];
+    args.extend_from_slice(extra);
+    let o = bin().args(&args).output().unwrap();
+    let stderr = String::from_utf8_lossy(&o.stderr).to_string();
+    assert!(o.status.success(), "{args:?}: {stderr}");
+    let _ = std::fs::remove_file(out);
+    stderr
+}
+
+/// `render --progress` with a piped stderr reports the render's frames as
+/// `progress <frames done> <frames total> <seconds elapsed> <seconds left|->` lines, one per
+/// change (#1778).
+#[test]
+fn render_progress_reports_frames_on_a_piped_stderr() {
+    let stderr = render_demo_stderr("progress.gif", &["--progress"]);
+    let mut last_done = None;
+    let mut totals = vec![];
+    for line in stderr.lines().filter(|l| l.starts_with("progress")) {
+        let fields: Vec<&str> = line.split(' ').collect();
+        assert_eq!(fields.len(), 5, "{line}");
+        let done: u64 = fields[1].parse().unwrap_or_else(|e| panic!("{line}: frames done: {e}"));
+        let total: u64 = fields[2].parse().unwrap_or_else(|e| panic!("{line}: frames total: {e}"));
+        let elapsed: f64 = fields[3].parse().unwrap_or_else(|e| panic!("{line}: seconds elapsed: {e}"));
+        assert!(fields[4] == "-" || fields[4].parse::<f64>().is_ok_and(|left| left >= 0.0), "{line}: seconds left");
+        assert!(done <= total && total > 0 && elapsed >= 0.0, "{line}");
+        assert!(last_done.is_none_or(|last| done > last), "one line per change, and frames only go up: {stderr}");
+        last_done = Some(done);
+        totals.push(total);
+    }
+    assert!(!totals.is_empty(), "no progress line on a piped stderr: {stderr}");
+    assert!(totals.iter().all(|&t| t == totals[0]), "one render, one total: {stderr}");
+}
+
+/// Without `--progress`, the same render writes no progress lines to a piped stderr (#1778).
+#[test]
+fn render_without_progress_writes_no_progress_lines() {
+    let stderr = render_demo_stderr("no-progress.gif", &[]);
+    assert!(!stderr.lines().any(|l| l.starts_with("progress")), "{stderr}");
+}

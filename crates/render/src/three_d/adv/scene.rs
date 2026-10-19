@@ -62,6 +62,8 @@ pub struct Material {
     pub unlit: bool,
     pub accepts_lights: bool,
     pub receives_shadows: bool,
+    /// "Accepts Shadows: Only": draws just the shadows it receives, as black × their amount.
+    pub shadows_only: bool,
     pub casts_shadows: bool,
     /// Drawn (false for "Casts Shadows: Only").
     pub visible: bool,
@@ -92,6 +94,7 @@ impl Default for Material {
             unlit: false,
             accepts_lights: true,
             receives_shadows: true,
+            shadows_only: false,
             casts_shadows: false,
             visible: true,
             diffuse_k: 1.0,
@@ -104,7 +107,7 @@ impl Default for Material {
 impl Material {
     /// Drawn in the transparent (sorted, blended) pass.
     pub fn transparent(&self) -> bool {
-        self.alpha_mode == 2 || self.opacity < 0.999
+        self.alpha_mode == 2 || self.opacity < 0.999 || self.shadows_only
     }
 }
 
@@ -360,6 +363,7 @@ fn card_material(ctx: &EvalCtx, layer: &Layer) -> Material {
         double_sided: true,
         accepts_lights: c.accepts_lights,
         receives_shadows: c.accepts_shadows != 0,
+        shadows_only: c.accepts_shadows == 2,
         casts_shadows: c.casts_shadows != 0,
         visible: c.casts_shadows != 2,
         diffuse_k: c.diffuse,
@@ -375,9 +379,11 @@ fn model_options(ctx: &EvalCtx, layer: &Layer, lin: bool) -> (Material, Option<m
     let e = |m: &str, d: u32| g.and_then(|g| g.get(m)).map_or(d, |p| ctx.value(layer, p).as_enum());
     let b = |m: &str| g.and_then(|g| g.get(m)).is_none_or(|p| ctx.value(layer, p).as_bool());
     let casts = e("castsShadows", 0);
+    let accepts = e("acceptsShadows", 1);
     let opts = Material {
         accepts_lights: b("acceptsLights"),
-        receives_shadows: e("acceptsShadows", 1) != 0,
+        receives_shadows: accepts != 0,
+        shadows_only: accepts == 2,
         casts_shadows: casts != 0,
         visible: casts != 2,
         ..Material::default()
@@ -879,7 +885,7 @@ fn collapsed_layer<'a>(r: &Renderer<'a>, ctx: &EvalCtx<'a>, layer: &Layer, item:
             || l.is_light()
             || matches!(l.source, LayerSource::Camera)
             || (any_solo && !l.switches.solo)
-            || (!r.opts.guides && l.switches.guide)
+            || (!sub.opts.guides && l.switches.guide)
         {
             continue;
         }

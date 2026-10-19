@@ -57,10 +57,10 @@ pub fn fmt_size(bytes: u64) -> String {
     }
 }
 
-/// Footage file size on disk (comps, solids and folders have none).
+/// Footage file size on disk (comps, solids, folders and missing footage have none).
 fn file_size(it: &Item) -> Option<u64> {
     match &it.kind {
-        ItemKind::Footage(f) => std::fs::metadata(&f.path).ok().map(|m| m.len()),
+        ItemKind::Footage(f) if !f.missing => std::fs::metadata(&f.path).ok().map(|m| m.len()),
         _ => None,
     }
 }

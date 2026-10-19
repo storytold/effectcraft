@@ -503,7 +503,7 @@ fn collapsed_items<'a>(
         .layers
         .iter()
         .rev()
-        .filter(|l| l.is_active_at(t) && l.has_video() && !l.switches.adjustment && (!any_solo || l.switches.solo) && (r.opts.guides || !l.switches.guide))
+        .filter(|l| l.is_active_at(t) && l.has_video() && !l.switches.adjustment && (!any_solo || l.switches.solo) && (sub.opts.guides || !l.switches.guide))
         .collect();
     let mut items = Vec::new();
     for (k, l) in nested.into_iter().enumerate() {

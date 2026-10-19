@@ -4,7 +4,7 @@ use std::io::Read;
 
 use effectcraft_engine::{
     EngineError, Session,
-    project::{ItemId, LayerId},
+    project::{ItemId, LayerId, essential::EgKind},
 };
 use serde_json::{Map, Value, json};
 
@@ -92,7 +92,7 @@ fn preflight(s: &Session, path: &str, values: &Map<String, Value>) -> Result<(),
         project.fix_next_id();
         let mut check = Session::new();
         check.project = project.into();
-        Ok(instantiate(&mut check, source, values))
+        Ok(instantiate(&mut check, source, values, false))
     })
     .map_err(|e| Failure::Error(e.to_string()))?
 }
@@ -105,10 +105,27 @@ pub(super) fn prepare(s: &mut Session, args: &Args) -> Result<(), Failure> {
     }
     let imported = execute(s, "essential.importTemplate", json!({"path": path, "addToComp": false}))?;
     let source = imported.get("comp").and_then(Value::as_u64).ok_or_else(|| Failure::Error("template import did not return a composition".into()))?;
-    instantiate(s, source, &values)
+    instantiate(s, source, &values, true)
 }
 
-fn instantiate(s: &mut Session, source: u64, values: &Map<String, Value>) -> Result<(), Failure> {
+/// The file a Media Replacement control is given: a path, or `{path|file|media: path}`.
+fn media_path(value: &Value) -> Option<&str> {
+    match value {
+        Value::String(path) => Some(path.as_str()),
+        Value::Object(m) => ["path", "file", "media"].iter().find_map(|k| m.get(*k)).and_then(Value::as_str),
+        _ => None,
+    }
+}
+
+/// Whether the template's control of that name (looked up as `essential.set` does) is a Media Replacement.
+fn is_media_control(s: &Session, source: u64, name: &str) -> bool {
+    let Some(eg) = s.project.comp(ItemId(source)).and_then(|c| c.essential.as_ref()) else { return false };
+    let all = eg.flat();
+    let control = all.iter().find(|c| c.name == name).or_else(|| all.iter().find(|c| c.name.eq_ignore_ascii_case(name)));
+    control.is_some_and(|c| matches!(c.kind, EgKind::Media { .. }))
+}
+
+fn instantiate(s: &mut Session, source: u64, values: &Map<String, Value>, import_media: bool) -> Result<(), Failure> {
     // Duplicate and empty the source with commands: this preserves exact rational frame rate,
     // Tick duration, background, work area and renderer settings without round-tripping floats.
     let duplicate = execute(s, "project.duplicate", json!({"items": [source]}))?;
@@ -145,6 +162,25 @@ fn instantiate(s: &mut Session, source: u64, values: &Map<String, Value>) -> Res
     // Let the wrapper carry the source composition's authored motion blur.
     execute(s, "layer.setSwitch", json!({"comp": parent, "layers": [instance], "switch": "motionBlur", "value": true}))?;
     for (control, value) in values {
+        if is_media_control(s, source, control) {
+            let path = media_path(value).ok_or_else(|| Failure::Error(format!("control `{control}` is a media control: give it a file path")))?;
+            // The preflight session cannot import files; the real run reports a bad path.
+            if !import_media {
+                continue;
+            }
+            let imported = execute(s, "file.import", json!({"paths": [path]}))?;
+            if let Some(err) = imported.get("errors").and_then(Value::as_array).and_then(|e| e.first()) {
+                return Err(Failure::Error(format!("control `{control}`: cannot import {path}: {err}")));
+            }
+            let item = imported
+                .get("items")
+                .and_then(Value::as_array)
+                .and_then(|items| items.first())
+                .and_then(Value::as_u64)
+                .ok_or_else(|| Failure::Error(format!("control `{control}`: {path} did not import as footage")))?;
+            execute(s, "essential.set", json!({"comp": parent, "layer": instance, "control": control, "item": item}))?;
+            continue;
+        }
         execute(s, "essential.set", json!({"comp": parent, "layer": instance, "control": control, "value": value}))?;
     }
     Ok(())

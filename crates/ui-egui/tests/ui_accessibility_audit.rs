@@ -284,7 +284,7 @@ fn collect() -> Report {
     r.add("EffectsPresets:default", audit(&h, "EffectsPresets:default", rect, None));
     {
         let s = h.state_mut();
-        s.ui.effects_favorites.insert("ec.blur.gaussian".into());
+        s.session.prefs.toggle_effect_favorite("ec.blur.gaussian");
         s.ui.effects_open.insert("favorites".into());
         s.ui.effects_open.insert("presets".into());
         s.ui.effects_open.insert("presets/Text".into());

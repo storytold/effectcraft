@@ -4,7 +4,8 @@
 //! commands, no committed media), renders each at Full and Half plus one single frame, and measures
 //! every run with `/usr/bin/time` (macOS `-l`: peak memory footprint, max RSS, instructions
 //! retired; Linux `-v`: max RSS; elsewhere wall time only). Prints a table and appends one JSON
-//! line per run to `target/bench/results.jsonl`; `--compare OLD.jsonl` prints the % change.
+//! line per run to `target/bench/results.jsonl`; with `--repeat N` (N > 1) one `"kind": "summary"`
+//! line per key follows, whose metrics are the medians. `--compare OLD.jsonl` prints the % change.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -28,7 +29,14 @@ Run it under `nice -n 10` on a busy machine; the table notes the load average of
   --quick               fewer frames, for a fast check
   --format F            render format (default png: a numbered sequence, deleted after each run)
   --regen               regenerate the footage media (otherwise reused when present)
-  --compare OLD.jsonl   print the % change of this run against the latest matching runs in OLD
+  --repeat N            run every scenario N times (default 1). Every run is appended as before,
+                        followed by one `kind: summary` row per key whose metrics are the
+                        medians (`summary` holds median, p90, min and max; p90 is the nearest
+                        rank, so it equals max for N < 10). Not allowed with --with
+  --compare OLD.jsonl   print the % change of this run against the latest matching runs in OLD.
+                        The latest row per key is compared, so a side is a median only when its
+                        summary is the latest row; each side is labelled `median of N` or `1 run`
+                        and mixing them is warned about (refused with --fail-over)
   --with NEW.jsonl      with --compare: compare two result files, without rendering
   --fail-over PCT       with --compare: exit 1 when a matched run got more than PCT % worse in
                         CPU time, peak memory, max RSS or instructions retired (wall time is
@@ -57,10 +65,11 @@ struct Opts {
     compare: Option<PathBuf>,
     with: Option<PathBuf>,
     fail_over: Option<f64>,
+    repeat: u32,
 }
 
 fn parse_opts(args: &[String]) -> Result<Opts, String> {
-    let mut o = Opts { format: "png".into(), ..Default::default() };
+    let mut o = Opts { format: "png".into(), repeat: 1, ..Default::default() };
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut val = |name: &str| it.next().cloned().ok_or_else(|| format!("{name} needs a value"));
@@ -74,6 +83,7 @@ fn parse_opts(args: &[String]) -> Result<Opts, String> {
             "--quick" => o.quick = true,
             "--format" => o.format = val("--format")?,
             "--regen" => o.regen = true,
+            "--repeat" => o.repeat = val("--repeat")?.parse().ok().filter(|n| *n >= 1).ok_or("--repeat: a number of at least 1 expected")?,
             "--compare" => o.compare = Some(PathBuf::from(val("--compare")?)),
             "--with" => o.with = Some(PathBuf::from(val("--with")?)),
             "--fail-over" => {
@@ -87,6 +97,9 @@ fn parse_opts(args: &[String]) -> Result<Opts, String> {
     }
     if o.with.is_some() && o.compare.is_none() {
         return Err("--with needs --compare OLD.jsonl".into());
+    }
+    if o.with.is_some() && args.iter().any(|a| a == "--repeat") {
+        return Err("--repeat has no effect with --with (nothing is rendered)".into());
     }
     if o.fail_over.is_some() && o.compare.is_none() {
         return Err("--fail-over needs --compare OLD.jsonl".into());
@@ -134,17 +147,30 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     let ctx = RunContext::new(root, &bin, &o);
     let results_path = dir.join("results.jsonl");
     let mut rows = Vec::new();
-    for sc in &scenarios {
-        for kind in RUNS {
-            eprintln!("bench: {} {kind}", sc.name);
-            let row = measure(&bin, &dir, sc, kind, frames, &o.format, timer, &ctx)?;
-            append_line(&results_path, &row)?;
-            rows.push(row);
+    for i in 1..=o.repeat {
+        for sc in &scenarios {
+            for kind in RUNS {
+                if o.repeat > 1 {
+                    eprintln!("bench: {} {kind} ({i}/{})", sc.name, o.repeat);
+                } else {
+                    eprintln!("bench: {} {kind}", sc.name);
+                }
+                let row = measure(&bin, &dir, sc, kind, frames, &o.format, timer, &ctx)?;
+                append_line(&results_path, &row)?;
+                rows.push(row);
+            }
         }
     }
     print!("{}", table(&rows, timer));
-    println!("appended {} runs to {}", rows.len(), results_path.display());
+    let summaries = if o.repeat > 1 { summarize(&rows) } else { vec![] };
+    for row in &summaries {
+        append_line(&results_path, row)?;
+    }
+    print!("{}", summary_table(&summaries));
+    println!("appended {} runs and {} summary rows to {}", rows.len(), summaries.len(), results_path.display());
     if let Some(old) = &o.compare {
+        // Summaries come after their runs, so the latest row per key is the median when present.
+        rows.extend(summaries);
         let (old, new) = (latest_per_key(&read_jsonl(old)?), latest_per_key(&rows));
         print!("{}", compare_table(&old, &new));
         return check_regressions(&old, &new, o.fail_over);
@@ -842,6 +868,88 @@ fn table(rows: &[Value], timer: TimeTool) -> String {
     s
 }
 
+/// Median, p90 (nearest rank), min and max of `v`; `None` when empty.
+fn stats(v: &[f64]) -> Option<[f64; 4]> {
+    let mut v: Vec<f64> = v.iter().copied().filter(|x| x.is_finite()).collect();
+    if v.is_empty() {
+        return None;
+    }
+    v.sort_by(f64::total_cmp);
+    let n = v.len();
+    let median = if n % 2 == 1 { v[n / 2] } else { (v[n / 2 - 1] + v[n / 2]) / 2.0 };
+    let p90 = v[(n * 9).div_ceil(10).max(1) - 1];
+    Some([median, p90, v[0], v[n - 1]])
+}
+
+const STATS: [&str; 4] = ["median", "p90", "min", "max"];
+
+/// One `"kind": "summary"` row per key over repeated runs: the key fields (and `date`, `load`,
+/// ...) of its latest run, `metrics` set to the medians of the successful runs (byte and
+/// instruction counts rounded), `summary` with every statistic, and `ok` only when every
+/// run succeeded (so `--fail-over` still refuses a key where a run failed).
+fn summarize(rows: &[Value]) -> Vec<Value> {
+    let mut groups: BTreeMap<String, Vec<&Value>> = BTreeMap::new();
+    for r in rows {
+        groups.entry(key_of(r)).or_default().push(r);
+    }
+    let mut out = vec![];
+    for runs in groups.values() {
+        let Some(last) = runs.last() else { continue };
+        let good: Vec<&Value> = runs.iter().copied().filter(|r| r["ok"] == true).collect();
+        let failed = runs.len() - good.len();
+        let mut row = (*last).clone();
+        let mut metrics = serde_json::Map::new();
+        let mut summary = serde_json::Map::new();
+        for field in COMPARED.iter().map(|(f, _)| *f).chain(["user_s", "sys_s"]) {
+            let values: Vec<f64> = good.iter().filter_map(|r| r["metrics"][field].as_f64()).collect();
+            let st = stats(&values);
+            let integer = field.ends_with("_bytes") || field == "instructions";
+            let median = |s: [f64; 4]| if integer { serde_json::json!(s[0].round() as u64) } else { serde_json::json!(s[0]) };
+            metrics.insert(field.to_string(), st.map_or(Value::Null, median));
+            summary.insert(field.to_string(), st.map_or(Value::Null, |s| STATS.iter().zip(s).map(|(k, v)| (k.to_string(), serde_json::json!(v))).collect()));
+        }
+        if metrics["wall_s"].is_null() {
+            metrics.insert("wall_s".into(), serde_json::json!(0.0));
+        }
+        row["kind"] = Value::String("summary".into());
+        row["metrics"] = Value::Object(metrics);
+        row["summary"] = serde_json::json!({"runs": runs.len(), "failed": failed, "stats": summary});
+        row["ok"] = Value::Bool(failed == 0);
+        if failed > 0 {
+            row["error"] = Value::String(format!("{failed} of {} runs failed", runs.len()));
+        }
+        out.push(row);
+    }
+    out
+}
+
+fn summary_table(summaries: &[Value]) -> String {
+    let Some(first) = summaries.first() else { return String::new() };
+    let mut s = format!("\nsummary over {} runs per key\n", first["summary"]["runs"]);
+    s.push_str(&format!("{:<22} {:<6} {:<6} {:>8} {:>8} {:>9} {:>9} {:>8}\n", "scenario", "run", "stat", "wall s", "cpu s", "peak MB", "maxRSS MB", "Ginstr"));
+    for r in summaries {
+        let st = &r["summary"]["stats"];
+        for stat in STATS {
+            let ginstr = st["instructions"][stat].as_f64().map(|i| format!("{:.1}", i / 1e9)).unwrap_or_else(|| "-".into());
+            s.push_str(&format!(
+                "{:<22} {:<6} {:<6} {:>8} {:>8} {:>9} {:>9} {:>8}\n",
+                clip(r["scenario"].as_str().unwrap_or(""), 22),
+                r["run"].as_str().unwrap_or(""),
+                stat,
+                num(&st["wall_s"][stat], 2),
+                num(&st["cpu_s"][stat], 2),
+                mb(&st["peak_footprint_bytes"][stat]),
+                mb(&st["max_rss_bytes"][stat]),
+                ginstr,
+            ));
+        }
+        if r["ok"] != true {
+            s.push_str(&format!("  ({})\n", r["error"].as_str().unwrap_or("")));
+        }
+    }
+    s
+}
+
 fn clip(s: &str, n: usize) -> String {
     if s.chars().count() <= n { s.to_string() } else { s.chars().take(n.saturating_sub(1)).chain(['…']).collect() }
 }
@@ -913,6 +1021,9 @@ fn check_regressions(old: &BTreeMap<String, Value>, new: &BTreeMap<String, Value
                         missing.push(format!("failed latest {label} run: {key}"));
                     }
                 }
+                if is_summary(baseline) != is_summary(candidate) {
+                    missing.push(format!("median compared against a single run ({} vs {}): {key}", sample(baseline), sample(candidate)));
+                }
                 if !GATED.iter().any(|field| pct(baseline["metrics"][*field].as_f64(), candidate["metrics"][*field].as_f64()).is_some()) {
                     missing.push(format!("no comparable resource measurements: {key}"));
                 }
@@ -934,14 +1045,24 @@ fn check_regressions(old: &BTreeMap<String, Value>, new: &BTreeMap<String, Value
     }
 }
 
+fn is_summary(row: &Value) -> bool {
+    row["kind"] == "summary"
+}
+
+/// `median of N` for a summary row, `1 run` otherwise.
+fn sample(row: &Value) -> String {
+    if is_summary(row) { format!("median of {}", row["summary"]["runs"]) } else { "1 run".into() }
+}
+
 fn compare_table(old: &BTreeMap<String, Value>, new: &BTreeMap<String, Value>) -> String {
     let mut s = String::from("\n% change against the earlier run (negative = better; instructions retired are the least load-sensitive)\n");
     s.push_str(&format!("{:<22} {:<6} {:>6}", "scenario", "run", "frames"));
     for (_, label) in COMPARED {
         s.push_str(&format!(" {label:>8}"));
     }
-    s.push_str(&format!(" {:>11}\n", "load1 o→n"));
+    s.push_str(&format!(" {:>11}  {}\n", "load1 o→n", "sample o→n"));
     let mut matched = 0;
+    let mut mixed = 0;
     for (k, n) in new {
         let Some(o) = old.get(k) else { continue };
         matched += 1;
@@ -958,7 +1079,11 @@ fn compare_table(old: &BTreeMap<String, Value>, new: &BTreeMap<String, Value>) -
         for (field, _) in COMPARED {
             s.push_str(&format!(" {:>8}", fmt_pct(pct(o["metrics"][field].as_f64(), n["metrics"][field].as_f64()))));
         }
-        s.push_str(&format!(" {:>11}\n", format!("{}→{}", num(&o["load"][0], 0), num(&n["load"][0], 0))));
+        mixed += usize::from(is_summary(o) != is_summary(n));
+        s.push_str(&format!(" {:>11}  {}→{}\n", format!("{}→{}", num(&o["load"][0], 0), num(&n["load"][0], 0)), sample(o), sample(n)));
+    }
+    if mixed > 0 {
+        s.push_str(&format!("warning: {mixed} keys compare a median against a single run\n"));
     }
     if matched == 0 {
         s.push_str("(no matching runs: compare the same scenarios, frames and format)\n");
@@ -1023,6 +1148,98 @@ mod tests {
         json!({"scenario": scenario, "run": run, "ok": ok, "load": [10.0, 0, 0],
                "settings": {"resolution": "full", "frames": 60, "format": "png"},
                "metrics": {"wall_s": wall, "cpu_s": wall * 2.0, "peak_footprint_bytes": peak, "max_rss_bytes": 0, "instructions": null}})
+    }
+
+    fn five_runs() -> Vec<Value> {
+        [10.0, 30.0, 11.0, 12.0, 9.0].map(|w| row("demo", "full", w, Some(w as u64 * 100 + 1), true)).to_vec()
+    }
+
+    #[test]
+    fn stats_median_p90() {
+        assert_eq!(stats(&[]), None);
+        assert_eq!(stats(&[3.0]), Some([3.0, 3.0, 3.0, 3.0]));
+        assert_eq!(stats(&[4.0, 1.0, 3.0, 2.0]), Some([2.5, 4.0, 1.0, 4.0]));
+        let ten: Vec<f64> = (1..=10).map(f64::from).collect();
+        assert_eq!(stats(&ten), Some([5.5, 9.0, 1.0, 10.0]));
+    }
+
+    #[test]
+    fn stats_small_n_p90_is_max() {
+        // N = 2: the median is the mean, so one outlier moves it by half; p90 is the max.
+        assert_eq!(stats(&[1.0, 9.0]), Some([5.0, 9.0, 1.0, 9.0]));
+        // N = 3: the median ignores the outlier; p90 is still the max.
+        assert_eq!(stats(&[1.0, 9.0, 1.1]), Some([1.1, 9.0, 1.0, 9.0]));
+    }
+
+    #[test]
+    fn summary_row_is_valid_and_median() {
+        let mut rows = five_runs();
+        rows.push(row("demo", "half", 5.0, None, true));
+        let sums = summarize(&rows);
+        assert_eq!(sums.len(), 2);
+        let full = sums.iter().find(|r| r["run"] == "full").unwrap();
+        assert_eq!(full["kind"], "summary");
+        assert_eq!(full["metrics"]["wall_s"], 11.0, "median, not the 30 s outlier");
+        assert_eq!(full["summary"]["stats"]["wall_s"]["p90"], 30.0);
+        assert_eq!(full["summary"]["stats"]["wall_s"]["min"], 9.0);
+        assert_eq!(full["summary"]["runs"], 5);
+        assert_eq!(full["ok"], true);
+        assert!(validate_row(full).is_ok());
+        assert!(summary_table(&sums).contains("median"));
+    }
+
+    #[test]
+    fn summary_keeps_user_sys_and_rounds_integers() {
+        let mut runs = five_runs()[..2].to_vec(); // peaks 1001 and 3001: even N
+        for (r, (u, sy)) in runs.iter_mut().zip([(1.0, 0.5), (3.0, 1.5)]) {
+            r["metrics"]["user_s"] = json!(u);
+            r["metrics"]["sys_s"] = json!(sy);
+        }
+        let m = &summarize(&runs)[0]["metrics"];
+        assert_eq!((m["user_s"].clone(), m["sys_s"].clone()), (json!(2.0), json!(1.0)));
+        assert_eq!(m["peak_footprint_bytes"], json!(2001));
+        assert!(m["peak_footprint_bytes"].is_u64());
+    }
+
+    #[test]
+    fn failed_run_fails_summary() {
+        let mut bad = five_runs();
+        bad[1]["ok"] = json!(false);
+        let s = summarize(&bad);
+        assert_eq!((s[0]["ok"].clone(), s[0]["metrics"]["wall_s"].clone()), (json!(false), json!(10.5)));
+    }
+
+    #[test]
+    fn repeat_parse() {
+        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(parse_opts(&[]).unwrap().repeat, 1);
+        assert_eq!(parse_opts(&a(&["--repeat", "5"])).unwrap().repeat, 5);
+        assert!(parse_opts(&a(&["--repeat", "0"])).is_err());
+        assert!(parse_opts(&a(&["--repeat", "3", "--compare", "a", "--with", "b"])).is_err());
+        assert!(parse_opts(&a(&["--repeat", "3", "--compare", "a"])).is_ok());
+    }
+
+    #[test]
+    fn compare_prefers_summary() {
+        // The summary is appended after its runs, so it is the latest row: median 11 vs 10 → +10 %.
+        let old = latest_per_key(&[row("demo", "full", 10.0, Some(1001), true)]);
+        let mut rows = five_runs();
+        rows.extend(summarize(&rows));
+        let new = latest_per_key(&rows);
+        assert_eq!(new["demo full full 60 png"]["metrics"]["wall_s"], 11.0);
+        assert!(regressions(&old, &new, 5.0).iter().any(|r| r.contains("cpu_s +10.0%")));
+    }
+
+    #[test]
+    fn median_against_single_run_is_labelled_and_refused_by_gate() {
+        let old = latest_per_key(&[row("demo", "full", 10.0, Some(1001), true)]);
+        let new = latest_per_key(&summarize(&five_runs()));
+        let table = compare_table(&old, &new);
+        assert!(table.contains("1 run→median of 5"), "{table}");
+        assert!(table.contains("warning: 1 keys compare a median against a single run"), "{table}");
+        let e = check_regressions(&old, &new, Some(50.0)).unwrap_err();
+        assert!(e.contains("median compared against a single run"), "{e}");
+        assert!(check_regressions(&old, &new, None).is_ok(), "exploratory compare still allowed");
     }
 
     #[test]

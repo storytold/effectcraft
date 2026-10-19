@@ -103,17 +103,24 @@ name in your Scripts folders takes their place.
 
 ### Ease Presets (`extensions/scriptui-panels/Ease Presets.jsx`)
 
-Window ▸ Ease Presets.jsx: easing curves kept by name and applied to pairs of neighbouring
-selected keyframes (#254; it was a core panel in v0.6.0). A curve is the out side of a segment's
+Window ▸ Ease Presets.jsx: easing curves kept by name and applied to the sides of selected
+keyframes (#254; it was a core panel in v0.6.0). A curve is the out side of a segment's
 first key and the in side of its second, in the Keyframe Velocity dialog's terms: influence in
 percent, and speed relative to the segment's average speed (1 = as fast as a straight line, 0 = at
 rest), so one curve fits any duration and change of value.
 
-* Click a preset to apply it to every pair of neighbouring selected keyframes of each selected
-  property, in one undo step (per dimension, and along the motion path for spatial properties;
-  the keys' other sides keep playing as they did). The keys stay selected, so you can try another.
+* Click a preset to apply it to the selected keyframes of each selected property, in one undo
+  step. **Ease** chooses the sides (#1329): **In** eases each key's incoming side with the curve's
+  in side, **Out** its outgoing side with the curve's out side, **In-Out** (the default) both. A
+  side is eased when it has a neighbouring keyframe, selected or not (the neighbour doesn't
+  change), with its speeds scaled to the segment on that side: per dimension, and along the
+  motion path for spatial properties. So a single keyframe works, a selected pair gets the whole
+  curve, and the first and last keys ease the side that has a segment. The side not eased keeps
+  playing as it did (a Hold stays a Hold). Roving keyframes are skipped, and the status says how
+  many: they pass speed straight through, so an ease on one wouldn't play (turn off Roving to
+  ease it). The keys stay selected, so you can try another.
 * The drawing shows the working curve; type its numbers (Out % and Speed, In % and Speed) and
-  click Apply, or click From Keys to read the curve between the first selected pair.
+  click Apply, or click From Keys to read the curve between the first selected pair of neighbouring keys.
 * Save keeps the working curve under the typed name (replacing a preset of that name); Rename
   and Delete act on the selected preset of your own. The twelve built-in presets can't change.
 * User presets are kept with `app.settings` (section `Ease Presets`, key `userPresets`, in

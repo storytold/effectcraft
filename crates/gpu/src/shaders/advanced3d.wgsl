@@ -288,6 +288,53 @@ struct FOut {
     @location(1) depth: u32,
 };
 
+// shade::to_light: unit direction to the light (xyz) and its distance (w).
+fn to_light(kind: u32, lpos: vec3<f32>, ldir: vec3<f32>, pos: vec3<f32>) -> vec4<f32> {
+    if (kind == 0u) {
+        return vec4<f32>(-ldir, 1e30);
+    }
+    let d = lpos - pos;
+    let len = sqrt(dot(d, d));
+    if (len < 1e-6) {
+        return vec4<f32>(0.0, 0.0, -1.0, 0.0);
+    }
+    return vec4<f32>(d / len, len);
+}
+
+// shade::shadow_only: the strongest shadow any light casts on the fragment.
+fn shadow_only_amount(unlit: bool, normal: vec3<f32>, front: bool, pos: vec3<f32>) -> f32 {
+    var amount = 0.0;
+    if (unlit) {
+        return amount;
+    }
+    var n = norm3(normal);
+    if (!front) {
+        n = -n;
+    }
+    let nl_count = u32(g.fwd.w);
+    for (var li = 0u; li < nl_count; li = li + 1u) {
+        let lb = li * LIGHT_STRIDE;
+        let l0 = lights[lb];
+        let l1 = lights[lb + 1u];
+        let l2 = lights[lb + 2u];
+        let l3 = lights[lb + 3u];
+        let l4 = lights[lb + 4u];
+        let kind = u32(l0.w);
+        let tl = to_light(kind, l0.xyz, l1.xyz, pos);
+        let to_l = tl.xyz;
+        let dist = tl.w;
+        if (attenuation(kind, u32(l3.x), l3.y, l3.z, l2.w, l1.w, l1.xyz, to_l, dist) <= 0.0) {
+            continue;
+        }
+        let n_l = dot(n, to_l);
+        if (n_l <= 0.0) {
+            continue;
+        }
+        amount = max(amount, 1.0 - light_shadow(li, kind, l0.xyz, i32(l3.w), l4.x, pos, n_l));
+    }
+    return amount;
+}
+
 @fragment
 fn fs(i: VOut, @builtin(front_facing) front: bool) -> FOut {
     let mb = i.material * MAT_STRIDE;
@@ -302,6 +349,7 @@ fn fs(i: VOut, @builtin(front_facing) front: bool) -> FOut {
     let unlit = (flags & 2u) != 0u;
     let accepts_lights = (flags & 4u) != 0u;
     let receives_shadows = (flags & 8u) != 0u;
+    let shadows_only = (flags & 16u) != 0u;
     let alpha_mode = (flags >> 8u) & 3u;
     if (!front && !double_sided) {
         discard;
@@ -330,6 +378,10 @@ fn fs(i: VOut, @builtin(front_facing) front: bool) -> FOut {
     }
     var out: FOut;
     out.depth = bitcast<u32>(dot(g.view_z.xyz, i.pos) + g.view_z.w);
+    if (shadows_only) {
+        out.color = vec4<f32>(0.0, 0.0, 0.0, alpha * shadow_only_amount(unlit || !accepts_lights, i.normal, front, i.pos));
+        return out;
+    }
     if (unlit || !accepts_lights || g.env2.y < 0.5) {
         let c = rgb + emissive;
         out.color = vec4<f32>(c * alpha, alpha);
@@ -381,22 +433,9 @@ fn fs(i: VOut, @builtin(front_facing) front: bool) -> FOut {
         let l3 = lights[lb + 3u];
         let l4 = lights[lb + 4u];
         let kind = u32(l0.w);
-        var to_l: vec3<f32>;
-        var dist: f32;
-        if (kind == 0u) {
-            to_l = -l1.xyz;
-            dist = 1e30;
-        } else {
-            let d = l0.xyz - i.pos;
-            let len = sqrt(dot(d, d));
-            if (len < 1e-6) {
-                to_l = vec3<f32>(0.0, 0.0, -1.0);
-                dist = 0.0;
-            } else {
-                to_l = d / len;
-                dist = len;
-            }
-        }
+        let tl = to_light(kind, l0.xyz, l1.xyz, i.pos);
+        let to_l = tl.xyz;
+        let dist = tl.w;
         let k = attenuation(kind, u32(l3.x), l3.y, l3.z, l2.w, l1.w, l1.xyz, to_l, dist);
         if (k <= 0.0) {
             continue;

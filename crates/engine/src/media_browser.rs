@@ -306,7 +306,7 @@ fn kind_name(k: FootageKind) -> &'static str {
 
 /// Metadata of footage (the fields the Metadata panel lists).
 pub fn footage_metadata(f: &Footage) -> Value {
-    let (created, modified, size) = file_dates(f.sequence.first().map(String::as_str).unwrap_or(&f.path));
+    let (created, modified, size) = if f.missing { (None, None, None) } else { file_dates(f.sequence.first().map(String::as_str).unwrap_or(&f.path)) };
     json!({
         "path": f.path,
         "kind": kind_name(f.kind),

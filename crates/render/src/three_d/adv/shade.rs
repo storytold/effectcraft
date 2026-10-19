@@ -262,6 +262,16 @@ pub fn light_shadow(s: &Scene, l: &Light, p: [f32; 3], n_l: f32) -> f32 {
     1.0 - l.shadow_darkness * (1.0 - f)
 }
 
+/// Unit direction from `p` to light `l`, and the distance (infinite for a parallel light).
+fn to_light(l: &Light, p: [f32; 3]) -> ([f32; 3], f32) {
+    if l.kind == 0 {
+        return (scale(l.dir, -1.0), f32::INFINITY);
+    }
+    let d = sub(l.pos, p);
+    let len = dot(d, d).sqrt();
+    if len < 1e-6 { ([0.0, 0.0, -1.0], 0.0) } else { (scale(d, 1.0 / len), len) }
+}
+
 /// Distance attenuation × spot cone of a light at `p` (AE falloff modes).
 pub fn attenuation(l: &Light, p: [f32; 3], to_l: [f32; 3], dist: f32) -> f32 {
     let mut k = match l.falloff {
@@ -341,6 +351,9 @@ pub fn shade(s: &Scene, f: &Frag) -> Option<[f32; 4]> {
     if let Some(t) = tex(m.tex_emissive) {
         emissive = [emissive[0] * t[0], emissive[1] * t[1], emissive[2] * t[2]];
     }
+    if m.shadows_only {
+        return Some(shadow_only(s, m, f, alpha));
+    }
     if m.unlit || !m.accepts_lights || (s.lights.is_empty() && s.env.is_none() && s.ambient == [0.0; 3]) {
         let c = add(rgb, emissive);
         return Some([c[0] * alpha, c[1] * alpha, c[2] * alpha, alpha]);
@@ -370,13 +383,7 @@ pub fn shade(s: &Scene, f: &Frag) -> Option<[f32; 4]> {
     let v = if s.ortho { scale(s.cam_fwd, -1.0) } else { norm(sub(s.eye, f.pos)) };
     let mut out = [0.0f32; 3];
     for l in &s.lights {
-        let (to_l, dist) = if l.kind == 0 {
-            (scale(l.dir, -1.0), f32::INFINITY)
-        } else {
-            let d = sub(l.pos, f.pos);
-            let len = dot(d, d).sqrt();
-            if len < 1e-6 { ([0.0, 0.0, -1.0], 0.0) } else { (scale(d, 1.0 / len), len) }
-        };
+        let (to_l, dist) = to_light(l, f.pos);
         let k = attenuation(l, f.pos, to_l, dist);
         if k <= 0.0 {
             continue;
@@ -407,4 +414,26 @@ pub fn shade(s: &Scene, f: &Frag) -> Option<[f32; 4]> {
     }
     let c = add(out, emissive);
     Some([c[0] * alpha, c[1] * alpha, c[2] * alpha, alpha])
+}
+
+/// "Accepts Shadows: Only" (classic `compose::shade_texel`): black at the strongest shadow any
+/// light casts on the fragment, nothing where it is unshadowed or takes no lights.
+fn shadow_only(s: &Scene, m: &Material, f: &Frag, alpha: f32) -> [f32; 4] {
+    if m.unlit || !m.accepts_lights {
+        return [0.0; 4];
+    }
+    let n = if f.front { norm(f.normal) } else { scale(norm(f.normal), -1.0) };
+    let mut amount = 0.0f32;
+    for l in &s.lights {
+        let (to_l, dist) = to_light(l, f.pos);
+        if attenuation(l, f.pos, to_l, dist) <= 0.0 {
+            continue;
+        }
+        let n_l = dot(n, to_l);
+        if n_l <= 0.0 {
+            continue;
+        }
+        amount = amount.max(1.0 - light_shadow(s, l, f.pos, n_l));
+    }
+    [0.0, 0.0, 0.0, alpha * amount]
 }

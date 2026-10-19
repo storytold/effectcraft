@@ -111,7 +111,10 @@ fn wave_warp(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
     let dir = ctx.params.f("direction").to_radians();
     let speed = ctx.params.f("speed");
     let phase = ctx.params.f("phase").to_radians() + ctx.time * speed * TAU;
-    let (dx, dy) = (dir.sin(), -dir.cos());
+    // Cardinal directions must not acquire a tiny perpendicular slope: at a square-wave
+    // boundary cos(90°)'s rounding residue can flip a whole column on CPU but not GPU.
+    let axis = |v: f64| if v.abs() < 4.0 * f64::EPSILON { 0.0 } else { v };
+    let (dx, dy) = (axis(dir.sin()), -axis(dir.cos()));
     if !ctx.adjustment {
         b.pad(e, h.abs().ceil() as u32 + 1)?;
     }

@@ -16,6 +16,8 @@
 //!     [--profile main|main10] [--level auto|4.1] [--rate-control bitrate|quality] [--video-quality 1-100]
 //!     [--keyint FRAMES] [--webm-codec vp9|av1] [--audio-bitrate KBPS] [--opus-app audio|voice]
 //!     (a relative --out is relative to the working directory; --queue outputs follow the project's own settings)
+//!     [--progress]  report progress on stderr when it is not a terminal, up to four lines a second:
+//!     `progress <frames done> <frames total> <seconds elapsed> <seconds left, or - when unknown>`
 //! effectcraft-cli render --template T.ectemplate [--values V.json] --out FILE
 //! effectcraft-cli render-frame --template T.ectemplate [--values V.json] [--time S] [--out F.png]
 //! effectcraft-cli render F.ecproj --queue                    render the project's Render Queue
@@ -106,6 +108,8 @@ const USAGE: &str = "usage: effectcraft-cli <info|commands|exec|run|props|get|se
                                            (formats h264|hevc|av1|prores|webm|png|jpeg|tiff|exr|gif|wav|aiff;
                                            --profile..--keyint: HEVC / AV1, --audio-bitrate/--opus-app: WebM Opus)
                                            a relative --out is relative to the working directory
+                                           --progress: progress lines on stderr when it is not a terminal
+                                           (progress <frames done> <total> <seconds elapsed> <seconds left|->)
   render/render-frame --template T.ectemplate [--values V.json]   render one template instance
   bench [--comp C] [--time S] [--scale K] [--n N] [--play N] [--gpu [--adv3d]]   per-layer/effect render timings;
                                            --play N renders N consecutive frames with/without the layer cache;
@@ -189,6 +193,7 @@ const FLAGS: &[&str] = &[
     "--small",
     "--adv3d",
     "--autosave",
+    "--progress",
 ];
 
 struct Args {
@@ -772,8 +777,21 @@ fn render(args: &Args, json_out: bool) -> Result<(), Failure> {
     }
     s.execute("renderQueue.render", json!({"wait": false})).map_err(err)?;
     let tty = std::io::IsTerminal::is_terminal(&std::io::stderr());
+    // `--progress`: one line per update for a program reading stderr (a terminal gets the live line).
+    let lines = args.flag("--progress") && !tty;
+    let (mut last_line, mut last_done) = (std::time::Instant::now(), u64::MAX);
     while s.is_rendering() {
         std::thread::sleep(std::time::Duration::from_millis(100));
+        if lines
+            && last_line.elapsed() >= std::time::Duration::from_millis(250)
+            && let Some(p) = s.render_progress()
+            && p.done != last_done
+        {
+            last_line = std::time::Instant::now();
+            last_done = p.done;
+            let left = p.remaining.map_or_else(|| "-".to_string(), |r| format!("{r:.1}"));
+            note!("progress {} {} {:.1} {left}", p.done, p.total, p.item_elapsed);
+        }
         if tty && let Some(p) = s.render_progress() {
             let left = p.remaining.map(|r| format!(", ~{r:.1}s left")).unwrap_or_default();
             let _ = write!(

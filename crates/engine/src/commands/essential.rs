@@ -891,6 +891,22 @@ pub fn read_template(bytes: &[u8]) -> std::result::Result<(Value, Project, Vec<(
     Ok((manifest, project, entries))
 }
 
+/// Where a template's `media/<item>/<file>` entry is written: `<media_dir>/<item>/<file>`.
+/// `None` unless `<item>` is all digits and `<file>` is a plain file name (not empty, `.` or
+/// `..`, no separators, and on Windows no drive, stream or device name), so every entry lands
+/// in an item folder directly inside `media_dir`.
+fn template_media_path(media_dir: &std::path::Path, entry: &str) -> Option<std::path::PathBuf> {
+    let (item, file) = entry.strip_prefix("media/")?.split_once('/')?;
+    if item.is_empty() || !item.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    if !super::scripts::is_bare_name(file) || (cfg!(windows) && super::scripts::windows_unsafe_name(file)) {
+        return None;
+    }
+    let out = media_dir.join(item).join(file);
+    (out.parent().and_then(std::path::Path::parent) == Some(media_dir) && out.file_name() == Some(std::ffi::OsStr::new(file))).then_some(out)
+}
+
 fn import_template(s: &mut Session, p: &Value) -> Result<Value> {
     const C: &str = "essential.importTemplate";
     let path = str_p(p, "path").ok_or_else(|| bad(C, "missing `path` (.ectemplate)"))?.to_string();
@@ -905,8 +921,7 @@ fn import_template(s: &mut Session, p: &Value) -> Result<Value> {
     let media_dir = dir.join(format!("{stem} Media"));
     let mut written = std::collections::HashMap::new();
     for (k, v) in entries.iter().filter(|(k, _)| k.starts_with("media/")) {
-        let rel = k.trim_start_matches("media/");
-        let out = media_dir.join(rel);
+        let Some(out) = template_media_path(&media_dir, k) else { continue };
         if let Some(parent) = out.parent() {
             let _ = std::fs::create_dir_all(parent);
         }

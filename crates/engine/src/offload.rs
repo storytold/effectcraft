@@ -310,13 +310,15 @@ pub fn next_id() -> u64 {
     NEXT_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-/// Footage files a project reads (paths, sequence frames).
+/// Footage files a project reads (paths, sequence frames; missing items read none).
 pub fn footage_files(p: &Project) -> Vec<String> {
     let mut v: Vec<String> = p
         .items
         .values()
         .filter_map(|i| match &i.kind {
-            ItemKind::Footage(f) if !f.path.is_empty() => Some(std::iter::once(f.path.clone()).chain(f.sequence.iter().cloned()).collect::<Vec<_>>()),
+            ItemKind::Footage(f) if !f.path.is_empty() && !f.missing => {
+                Some(std::iter::once(f.path.clone()).chain(f.sequence.iter().cloned()).collect::<Vec<_>>())
+            }
             _ => None,
         })
         .flatten()

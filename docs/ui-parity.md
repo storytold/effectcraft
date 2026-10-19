@@ -1,6 +1,6 @@
 # UI parity
 
-> **Last reviewed:** 2026-10-13 · **Last updated:** 2026-10-13 · **Change:** minor (accessibility row, second slice: Info, Flowchart, Script Console and the 3D Camera Tracker block named and keyboard-operable, #1335; earlier change: accessibility row: an AccessKit audit and a contrast test, three more panels named and keyboard-operable, #1335; earlier change: closed issue references re-audited against `upstream/main` 470ea7a3) · **Target:** Adobe After Effects 2026
+> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-13 · **Change:** minor (accessibility row, second slice: Info, Flowchart, Script Console and the 3D Camera Tracker block named and keyboard-operable, #1335; earlier change: accessibility row: an AccessKit audit and a contrast test, three more panels named and keyboard-operable, #1335; earlier change: path-editing layer bounds, #1220; closed issue references re-audited against `upstream/main` 470ea7a3) · **Target:** Adobe After Effects 2026
 
 How closely EffectCraft's interaction matches After Effects: tools, handles, snapping, nudging,
 modifier keys, shortcuts, drag behaviour, numeric entry, panels, context menus and feel. Evidence
@@ -33,6 +33,12 @@ feel and platform differences, and the 26.x interface changes are not in yet.
 | Accessibility | AccessKit enabled; `ui_accessibility_audit` counts unnamed or roleless controls per panel: Project (#776), Effects & Presets, Settings (all pages), Render Queue with Templates, Info, Flowchart, Script Console and the 3D Camera Tracker block are at zero, with names, roles, selected / open / checked state and arrow-key, Home / End, Enter, Space operation (#1335); painted-only text (Info, status lines) and the console output are read-outs and a log in the tree; `ui_contrast` checks theme tokens against WCAG 2 | 20% | No screen reader has been run on anything; the other panels are counted, not fixed (Timeline ≈ 55 unnamed controls; Scopes, Tracker, Layer and the Waveform have open PRs on their files and are untouched; their on-screen scopes and waveform have no text description yet); 13 of 48 token pairs are below WCAG 2 (primary button text, error text, control borders, Light theme warning colour); focus order across panels, colour-blindness and reduced motion are unchecked; app shortcuts pause while a widget has keyboard focus |
 | UI scale | Settings ▸ Appearance ▸ UI Scale 75–200% | beyond | After Effects follows the system's scaling (#284) |
 
+Path editing (#1220): the Composition viewer suppresses a selected layer’s transform box while
+using a Pen-family tool on a visible path, or while selecting its vertices with the Selection
+tool. Path points, Bézier handles and the path’s free-transform controls remain available.
+Layer transform tools and ordinary layer selection restore the box. Headless `ui_viewer` tests
+cover shape paths and masks, corner-vertex dragging and undo, and layers without visible paths.
+
 ## Estimate
 
 **≈ 60–120 h**: the open interaction issues above (25–45 h, about 0.2–0.5 h each with a scripted
@@ -46,6 +52,7 @@ Effects running; most of the rest parallelises.
 |---|---|---|
 | 2026-10-13 | minor | Accessibility row, second slice: Info, Flowchart, Script Console and the 3D Camera Tracker block named and keyboard-operable (#1335); no screen reader tested |
 | 2026-10-13 | minor | Accessibility row: AccessKit audit and contrast tests, Effects & Presets, Settings and Render Queue named and keyboard-operable (#1335); no screen reader tested |
+| 2026-10-13 | patch | Layer bounds are suppressed during path-point editing (#1220); shape/mask interaction regressions |
 | 2026-10-12 | minor | Closed issues (#302, #320, #491, #511, #553 and others) marked as closed instead of open; panels in their own windows (#486) |
 | 2026-10-12 | minor | Percentage guides and effect colour labels (26.5) added; rows updated |
 | 2026-10-10 | major | First UI parity checklist |

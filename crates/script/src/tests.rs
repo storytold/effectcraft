@@ -127,6 +127,65 @@ fn fill_parameters_use_documented_match_names() {
 }
 
 #[test]
+fn stroke_parameters_use_after_effects_match_names() {
+    // #1405: `ADBE Stroke-0002` is Stroke's Color in After Effects, not All Masks.
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"var c = app.project.items.addComp("S", 100, 100, 1, 1, 12); var l = c.layers.addSolid([1,1,1], "S", 100, 100, 1);
+           var fx = l.property("ADBE Effect Parade").addProperty("ADBE Stroke"), out = [];
+           for (var i = 1; i <= 11; i++) out.push(fx.property("ADBE Stroke-" + ("000" + i).slice(-4)).name);
+           out.push(fx.property("Color").matchName); out"#,
+    );
+    assert_eq!(
+        o.result,
+        json!([
+            "Path",
+            "Color",
+            "Brush Size",
+            "Brush Hardness",
+            "Opacity",
+            "Spacing",
+            "Paint Style",
+            "Start",
+            "End",
+            "All Masks",
+            "Stroke Sequentially",
+            "ADBE Stroke-0002"
+        ])
+    );
+}
+
+#[test]
+fn hue_saturation_parameters_use_after_effects_match_names() {
+    // #1405: `ADBE HUE SATURATION-0004` is Master Hue in After Effects. The per-channel controls,
+    // which After Effects doesn't expose, are numbered after its parameters so none takes an AE number.
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"var c = app.project.items.addComp("H", 100, 100, 1, 1, 12); var l = c.layers.addSolid([1,1,1], "S", 100, 100, 1);
+           var fx = l.property("ADBE Effect Parade").addProperty("ADBE HUE SATURATION"), out = [];
+           var n = [2, 4, 5, 6, 7, 8, 9, 10];
+           for (var i = 0; i < n.length; i++) out.push(fx.property("ADBE HUE SATURATION-" + ("000" + n[i]).slice(-4)).name);
+           out.push(fx.property("Red Hue").matchName); out"#,
+    );
+    assert_eq!(
+        o.result,
+        json!([
+            "Channel Control",
+            "Master Hue",
+            "Master Saturation",
+            "Master Lightness",
+            "Colorize",
+            "Colorize Hue",
+            "Colorize Saturation",
+            "Colorize Lightness",
+            "ADBE HUE SATURATION-0011"
+        ])
+    );
+}
+
+#[test]
 fn undo_steps_without_a_group() {
     let mut s = session();
     ok(&mut s, r#"var c = app.project.items.addComp("A", 100, 100, 1, 1, 24); c.layers.addNull(); c.layers.addNull();"#);
@@ -1324,6 +1383,50 @@ fn key_interpolation_and_ease_apply_outside_the_active_comp() {
     assert_eq!((&v[0], &v[1], &v[2]), (&json!(true), &json!(true), &json!(60)), "{v}");
     // Eased, not the linear -44.5.
     assert!(v[3].as_f64().is_some_and(|x| (x - -44.5).abs() > 1.0), "{v}");
+}
+
+/// #1531: a key the user selected in the property's comp stays selected, and only the named key
+/// changes (on the old code the change went to the selected key instead).
+/// The active comp's own key selection is untouched.
+#[test]
+fn a_per_key_method_in_another_comp_changes_only_its_key_and_keeps_both_selections() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"
+        var C = app.project.items.addComp('C', 100, 100, 1, 10, 20);
+        var p = C.layers.addNull().transform.rotation;
+        p.setValuesAtTimes([0, 1, 2], [0, 90, 180]);
+        var A = app.project.items.addComp('A', 100, 100, 1, 10, 20);
+        A.openInViewer();
+        var q = A.layers.addNull().transform.opacity;
+        q.setValuesAtTimes([0, 1], [0, 100]);
+        app.run('edit.deselectAll', {});
+        q.setSelectedAtKey(2, true);
+        // the user selected key 3 of C earlier: C remembers it while A is active
+        p.setSelectedAtKey(3, true);
+        p.setInterpolationTypeAtKey(1, KeyframeInterpolationType.HOLD);
+        p.setTemporalEaseAtKey(2, [new KeyframeEase(0, 80)]);
+        var hold = KeyframeInterpolationType.HOLD;
+        var out = [p.keyOutInterpolationType(1) == hold, p.keyOutInterpolationType(3) == hold, p.keyInInterpolationType(3) == hold,
+          p.keyInTemporalEase(2)[0].influence, p.keyInTemporalEase(3)[0].influence,
+          q.keySelected(1), q.keySelected(2)];
+        p.removeKey(1);
+        out.push(p.numKeys, p.keyTime(1), p.keyValue(1), q.keySelected(2), app.project.activeItem.name);
+        // C's remembered selection is live again once C is active: still the user's key (now 2)
+        C.openInViewer();
+        out.push(p.keySelected(1), p.keySelected(2));
+        out;
+        "#,
+    );
+    let v = o.result.as_array().unwrap();
+    let ease = |i: usize| v[i].as_f64().unwrap();
+    assert_eq!(&v[..3], &[json!(true), json!(false), json!(false)], "only key 1 holds: {v:?}");
+    assert!((ease(3) - 80.0).abs() < 1e-6, "key 2 eased: {v:?}");
+    assert!((ease(4) - 80.0).abs() > 1e-6, "key 3 untouched: {v:?}");
+    assert_eq!(&v[5..7], &[json!(false), json!(true)], "A's key selection kept: {v:?}");
+    assert_eq!(&v[7..12], &[json!(2), json!(1), json!(90), json!(true), json!("A")], "key 1 removed, A still active: {v:?}");
+    assert_eq!(&v[12..], &[json!(false), json!(true)], "C's key selection kept, the target key not added: {v:?}");
 }
 
 /// #808: sourcePointToComp and compPointToSource follow the layer's transform.

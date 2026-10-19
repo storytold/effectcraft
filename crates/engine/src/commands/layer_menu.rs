@@ -677,6 +677,54 @@ pub(crate) fn folder_url(path: &str) -> String {
     file_url(&dir)
 }
 
+/// Extensions of folders that macOS opens as an app, plug-in or other bundle rather than showing
+/// their contents.
+const BUNDLE_EXTENSIONS: &[&str] = &[
+    "app",
+    "appex",
+    "bundle",
+    "component",
+    "dext",
+    "driver",
+    "framework",
+    "kext",
+    "mdimporter",
+    "mpkg",
+    "osax",
+    "pkg",
+    "plugin",
+    "prefpane",
+    "qlgenerator",
+    "saver",
+    "service",
+    "systemextension",
+    "vst",
+    "vst3",
+    "wdgt",
+    "workflow",
+    "xpc",
+];
+
+/// Whether the system file manager would open folder `dir` as something other than a folder: a
+/// bundle (`Tool.app`), or a Windows folder with a `{CLSID}` extension.
+fn opens_as_bundle(dir: &std::path::Path) -> bool {
+    let ext = dir.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+    ext.starts_with('{') || BUNDLE_EXTENSIONS.contains(&ext.as_str())
+}
+
+/// The folder of the footage file `stored` (a path stored in the project) as a `file://` URL for
+/// Reveal in Finder. A path that is not followed ([`crate::doc_path`]), or a folder that is not a
+/// plain folder after following links, is refused.
+pub(crate) fn reveal_url(s: &Session, stored: &str) -> std::result::Result<String, String> {
+    let path = s.stored_path(stored).map_err(|why| crate::doc_path::refusal(stored, why))?;
+    let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).ok_or_else(|| format!("{stored} is not in a folder"))?;
+    let real = std::fs::canonicalize(dir).map_err(|e| format!("cannot show the folder of {stored}: {e}"))?;
+    if !real.is_dir() || opens_as_bundle(dir) || opens_as_bundle(&real) {
+        return Err(format!("the folder of {stored} is not a plain folder"));
+    }
+    Ok(file_url(&dir.to_string_lossy()))
+}
+
 /// `path` as a `file://` URL: backslashes become `/`, a Windows drive path gets the third slash
 /// (`file:///C:/…`), and every byte that isn't a plain path character is percent-encoded (spaces,
 /// `#`, `%`, `?`, non-ASCII as UTF-8), so the URL names exactly this file.
@@ -700,7 +748,7 @@ fn reveal_in_finder(s: &mut Session, p: &Value) -> Result<Value> {
         Some(effectcraft_project::ItemKind::Footage(f)) if !f.path.is_empty() => f.path.clone(),
         _ => return Err(bad("layer.revealInFinder", "the layer's source is not a file")),
     };
-    let url = folder_url(&path);
+    let url = reveal_url(s, &path).map_err(|e| bad("layer.revealInFinder", e))?;
     s.events.push(crate::Event::OpenUrl(url.clone()));
     Ok(json!({"url": url}))
 }
@@ -891,5 +939,28 @@ mod tests {
     #[test]
     fn folder_url_names_the_containing_folder() {
         assert_eq!(folder_url("/media/My Clips/a.mov"), "file:///media/My%20Clips");
+    }
+
+    /// Reveal in Finder shows plain folders only: a bundle the system would open as an app, or a
+    /// link to one, is refused.
+    #[test]
+    fn reveal_refuses_folders_that_open_as_apps() {
+        let d = std::env::temp_dir().join(format!("ec-reveal-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        for f in ["Clips", "Tool.app", "Shell.{20D04FE0-3AEA-1069-A2D8-08002B30309D}"] {
+            std::fs::create_dir_all(d.join(f)).unwrap();
+        }
+        let s = crate::Session::default();
+        let reveal = |folder: &str| super::reveal_url(&s, &d.join(folder).join("a.mov").to_string_lossy());
+        assert_eq!(reveal("Clips"), Ok(super::file_url(&d.join("Clips").to_string_lossy())));
+        assert!(reveal("Tool.app").is_err());
+        assert!(reveal("Shell.{20D04FE0-3AEA-1069-A2D8-08002B30309D}").is_err());
+        assert!(reveal("Gone").is_err());
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(d.join("Tool.app"), d.join("Footage")).unwrap();
+            assert!(reveal("Footage").is_err(), "a link to a bundle");
+        }
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

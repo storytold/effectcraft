@@ -1343,3 +1343,45 @@ fn relative_trim_moves_every_selected_layer_by_the_same_delta() {
     s.execute("layer.timing", json!({"layers": [a], "inDelta": 0.1})).unwrap();
     assert!(near(io(&s, a).0, -0.9), "{:?}", io(&s, a));
 }
+
+/// #1434: with several 3D layers selected, typing a value into one component (Z Position) sets
+/// that component on each of them; their other components stay their own. Before, every
+/// selected layer took the edited layer's whole value and they piled up on top of it.
+#[test]
+fn a_typed_component_applies_only_that_component_to_the_selected_layers() {
+    let (mut s, a) = setup();
+    let b = s.execute("layer.newSolid", json!({"color": "#ff0000", "width": 50, "height": 50})).unwrap()["layer"].as_u64().unwrap();
+    let c = s.execute("layer.newSolid", json!({"color": "#00ff00", "width": 50, "height": 50})).unwrap()["layer"].as_u64().unwrap();
+    for (l, xy) in [(a, [10.0, 20.0]), (b, [110.0, 120.0]), (c, [210.0, 220.0])] {
+        s.execute("layer.setSwitch", json!({"layers": [l], "switch": "threeD", "value": true})).unwrap();
+        s.execute("prop.set", json!({"layer": l, "path": "transform/position", "value": [xy[0], xy[1], 5.0]})).unwrap();
+    }
+    s.execute("layer.select", json!({"layers": [a, b, c]})).unwrap();
+    let pos = |s: &Session, l: u64| prop(s, l, "transform/position").value.components();
+    let uid = prop(&s, a, "transform/position").uid;
+    // The panels send the edited layer's value with the typed component, and which one it was.
+    let undo = s.history.undo.len();
+    s.execute_checked("prop.set", json!({"layer": a, "prop": uid, "value": [10.0, 20.0, -300.0], "selected": true, "offset": false, "dims": [2]})).unwrap();
+    assert_eq!(pos(&s, a), vec![10.0, 20.0, -300.0]);
+    assert_eq!(pos(&s, b), vec![110.0, 120.0, -300.0], "B keeps its X and Y");
+    assert_eq!(pos(&s, c), vec![210.0, 220.0, -300.0], "C keeps its X and Y");
+    assert_eq!(s.history.undo.len(), undo + 1, "one undo step");
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(pos(&s, b), vec![110.0, 120.0, 5.0]);
+
+    // Linked Scale: both edited components go to every layer, Z stays each layer's own.
+    s.execute("prop.set", json!({"layer": c, "path": "transform/scale", "value": [50.0, 50.0, 30.0]})).unwrap();
+    let scale_uid = prop(&s, a, "transform/scale").uid;
+    s.execute("prop.set", json!({"layer": a, "prop": scale_uid, "value": [200.0, 200.0, 100.0], "selected": true, "dims": [0, 1]})).unwrap();
+    assert_eq!(prop(&s, c, "transform/scale").value.components(), vec![200.0, 200.0, 30.0]);
+
+    // Position with Separate Dimensions on one of the other layers.
+    s.execute("prop.separateDimensions", json!({"layer": b, "value": true})).unwrap();
+    s.execute("prop.set", json!({"layer": a, "prop": uid, "value": [10.0, 20.0, 40.0], "selected": true, "dims": [2]})).unwrap();
+    let axis = |m: &str| prop(&s, b, &format!("transform/{m}")).value.as_f64();
+    assert_eq!((axis("positionX"), axis("positionY"), axis("positionZ")), (110.0, 120.0, 40.0));
+
+    // Without `dims` (agents setting a whole value) every selected layer takes the value as is.
+    s.execute("prop.set", json!({"layer": a, "prop": uid, "value": [1.0, 2.0, 3.0], "selected": true})).unwrap();
+    assert_eq!(pos(&s, c), vec![1.0, 2.0, 3.0]);
+}
