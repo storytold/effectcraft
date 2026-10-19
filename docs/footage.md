@@ -107,6 +107,9 @@ vectors, positions and IDs are never the picture. EXtractoR reads every other la
 
 ## Replacing and reloading
 
+Importing a layered file as a composition refreshes the decoded sources used by its layers,
+including files overwritten at the same path and byte size.
+
 - **File ▸ Replace Footage ▸ File…** (Ctrl+H) points the item at another file. Pick a numbered
   file to replace it with that file's whole sequence (`file.replaceFootage {"path": …,
   "sequence": false}` for one frame).

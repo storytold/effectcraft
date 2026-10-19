@@ -31,10 +31,6 @@ enum Found {
     Moved(Box<Footage>),
 }
 
-fn exists(s: &dyn crate::Services, path: &str) -> bool {
-    !path.is_empty() && s.exists(path)
-}
-
 /// Start the check (all footage, or `items`). `wait` runs it to completion first (always on
 /// wasm32); the result is then `{checked, missing, probed}`.
 pub fn start(s: &mut Session, items: Option<Vec<ItemId>>, wait: bool) -> crate::Result<Value> {
@@ -54,6 +50,7 @@ pub fn start(s: &mut Session, items: Option<Vec<ItemId>>, wait: bool) -> crate::
     let services = s.services.clone();
     let importer = s.importer.clone();
     let rate = s.sequence_rate();
+    let stored = s.stored_paths.clone();
     let project_dir = s.path.as_deref().and_then(crate::commands::relink_moved::project_dir);
     let n = jobs.len();
     s.spawn_task("footageCheck", format!("Checking footage ({n} items)"), wait, move |ctl| {
@@ -64,13 +61,17 @@ pub fn start(s: &mut Session, items: Option<Vec<ItemId>>, wait: bool) -> crate::
                 return Err(crate::render_queue::CANCELLED.into());
             }
             let f = &j.footage;
-            let present = if f.sequence.is_empty() {
-                exists(services.as_ref(), &f.path)
-            } else {
-                // A sequence is there while any of its frames is (missing frames render as
-                // placeholders, as in After Effects).
-                exists(services.as_ref(), &f.path) || f.sequence.iter().any(|p| exists(services.as_ref(), p))
-            };
+            // A path that is not followed is never looked for (the item stays missing).
+            let followed = stored.check(f).is_ok();
+            let exists = |p: &str| stored.exists(services.as_ref(), p);
+            let present = followed
+                && if f.sequence.is_empty() {
+                    exists(&f.path)
+                } else {
+                    // A sequence is there while any of its frames is (missing frames render as
+                    // placeholders, as in After Effects).
+                    exists(&f.path) || f.sequence.iter().any(|p| exists(p))
+                };
             // Moved with the project: the same place under the project's folder.
             if !present
                 && let Some(dir) = &project_dir
@@ -233,9 +234,11 @@ mod tests {
         let mut paths: Vec<String> =
             o.project.items.values().filter_map(|i| if let ItemKind::Footage(f) = &i.kind { Some(f.path.clone()) } else { None }).collect();
         paths.sort();
-        // Windows joins the stored "media/..." onto the project's folder and leaves a path with mixed
-        // separators; `Path` equality compares components, so both spellings are the same file.
-        let expected = ["/nonexistent/ec/abs.png", clip.to_str().unwrap(), "media/ec-relative-gone.png"];
+        // `Path` equality compares components, so `/` and `\` spell the same file on Windows.
+        let abs = crate::doc_path::resolve("/nonexistent/ec/abs.png", path.to_str()).unwrap();
+        let gone = dir.join("media").join("ec-relative-gone.png");
+        let mut expected = [abs.to_str().unwrap(), clip.to_str().unwrap(), gone.to_str().unwrap()];
+        expected.sort();
         assert_eq!(paths.len(), expected.len(), "{paths:?}");
         for (got, want) in paths.iter().zip(expected) {
             assert_eq!(std::path::Path::new(got), std::path::Path::new(want), "{paths:?}");
@@ -254,7 +257,7 @@ mod tests {
         std::fs::write(d.join("Job/shots/a.png"), b"x").unwrap();
         // Saved on another machine: the footage sat next to the project in /Users/x/Job.
         let mut s = session_with(&["/Users/x/Job/shots/a.png", "/Users/x/elsewhere/b.png"]);
-        let path = d.join("Job/p.ecproj");
+        let path = d.join("Job").join("p.ecproj");
         s.execute("file.saveAs", json!({"path": path.to_string_lossy()})).unwrap();
         let mut o = Session::default();
         o.execute("file.open", json!({"path": path.to_string_lossy()})).unwrap();
@@ -269,7 +272,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert!(paths.contains(&d.join("Job/shots/a.png").to_string_lossy().to_string()), "{paths:?}");
+        assert!(paths.contains(&d.join("Job").join("shots").join("a.png").to_string_lossy().to_string()), "{paths:?}");
         assert!(!o.is_dirty(), "finding the files is not an edit");
         let _ = std::fs::remove_dir_all(d);
     }

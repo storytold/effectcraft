@@ -25,6 +25,7 @@ use effectcraft_keyframe::{BaselineOption, CharStyle, Composer, Direction, Justi
 pub use fonts::{FaceId, Resolved, families, resolve};
 use kurbo::{Affine, BezPath, Point};
 pub use layout::{Align, Caps, Glyph, Layout, Line, ParagraphStyle, Script, TextStyle, layout as layout_text, layout_rich, measure};
+use selectors::BasedOn;
 use skrifa::instance::{LocationRef, Size};
 use skrifa::outline::{DrawSettings, OutlinePen};
 use skrifa::{GlyphId, MetadataProvider};
@@ -134,6 +135,8 @@ pub struct TextLayout {
     pub to_layer: Affine,
     /// Byte offset of every character, plus the text length.
     pub byte_of_char: Vec<usize>,
+    /// Whether each character is white space (for the selectors' Based On).
+    pub space_of_char: Vec<bool>,
     pub vertical: bool,
 }
 
@@ -262,6 +265,7 @@ pub fn layout_doc(doc: &TextDoc) -> TextLayout {
         }
         in_word = !space;
         word_of_char.push(words.saturating_sub(1));
+        out.space_of_char.push(space);
         nospace_of_char.push(nospace);
         if !space {
             nospace += 1;
@@ -414,6 +418,99 @@ impl TextLayout {
             Some(l) => (self.char_of_byte(l.range.start), self.char_of_byte(self.layout.line_end(l))),
             None => (0, self.chars),
         }
+    }
+    /// The number of selector units for Based On `based`.
+    pub fn units(&self, based: BasedOn) -> usize {
+        match based {
+            BasedOn::Characters => self.chars,
+            BasedOn::CharactersExcludingSpaces => self.chars_no_space,
+            BasedOn::Words => self.words,
+            BasedOn::Lines => self.lines,
+        }
+    }
+    /// Characters `a..b` of every selector unit, in order; words and Characters Excluding Spaces
+    /// leave the spaces out.
+    fn unit_spans(&self, based: BasedOn) -> Vec<(usize, usize)> {
+        let sp = |ci: usize| self.space_of_char.get(ci).copied().unwrap_or(false);
+        match based {
+            BasedOn::Characters => (0..self.chars).map(|ci| (ci, ci + 1)).collect(),
+            BasedOn::CharactersExcludingSpaces => (0..self.chars).filter(|&ci| !sp(ci)).map(|ci| (ci, ci + 1)).collect(),
+            BasedOn::Words => {
+                let (mut out, mut start) = (vec![], None);
+                for ci in 0..self.chars {
+                    match (sp(ci), start) {
+                        (false, None) => start = Some(ci),
+                        (true, Some(a)) => {
+                            out.push((a, ci));
+                            start = None;
+                        }
+                        _ => {}
+                    }
+                }
+                out.extend(start.map(|a| (a, self.chars)));
+                out
+            }
+            BasedOn::Lines => self.layout.lines.iter().map(|l| (self.char_of_byte(l.range.start), self.char_of_byte(self.layout.line_end(l)))).collect(),
+        }
+    }
+    /// The carets at the leading and trailing edges of the unit made of characters `a..b`: before
+    /// its first character, and after its last one when that is on the same line, else the line's
+    /// end. Carets rather than glyphs, so the edges also fall inside ligatures and follow
+    /// right-to-left runs.
+    fn unit_edges(&self, (a, b): (usize, usize)) -> Option<(usize, usize)> {
+        let li = self.line_of_char(a);
+        let trail = if self.line_of_char(b) == li { b } else { self.char_of_byte(self.layout.line_end(self.layout.lines.get(li)?)) };
+        Some((a, trail))
+    }
+    /// The caret at `ci` as (top, baseline, bottom) in layer space.
+    fn caret_points(&self, ci: usize) -> [Point; 3] {
+        let (top, bottom) = self.caret(ci);
+        let (x, base, _) = self.layout.caret(self.byte(ci));
+        [top, self.to_layer * Point::new(x as f64, base as f64), bottom]
+    }
+    /// A Range Selector bar at fraction `f` of the units (#1011): a caret-like segment as (top,
+    /// baseline, bottom) in layer space, between unit boundaries in proportion. None for empty or
+    /// vertical text.
+    pub fn range_bar(&self, based: BasedOn, f: f64) -> Option<[Point; 3]> {
+        let n = self.units(based);
+        if self.vertical || n == 0 || !f.is_finite() {
+            return None;
+        }
+        let x = f.clamp(0.0, 1.0) * n as f64;
+        let u = (x.floor() as usize).min(n - 1);
+        let t = x - u as f64;
+        let (a, z) = self.unit_edges(*self.unit_spans(based).get(u)?)?;
+        let (lead, trail) = (self.caret_points(a), self.caret_points(z));
+        Some([0, 1, 2].map(|k| lead[k].lerp(trail[k], t)))
+    }
+    /// The fraction of the units under a layer-space point, the inverse of [`Self::range_bar`]:
+    /// on the line whose baseline is nearest, the nearest place between unit edges.
+    pub fn range_fraction_at(&self, based: BasedOn, p: Point) -> Option<f64> {
+        let n = self.units(based);
+        if self.vertical || n == 0 {
+            return None;
+        }
+        let q = self.to_layer.inverse() * p;
+        let line = self.layout.lines.iter().enumerate().min_by(|a, b| (a.1.baseline as f64 - q.y).abs().total_cmp(&(b.1.baseline as f64 - q.y).abs()))?.0;
+        let spans = self.unit_spans(based);
+        let nearest = |on_line: bool| {
+            let mut best: Option<(f64, f64)> = None;
+            for (u, span) in spans.iter().enumerate() {
+                if on_line && self.line_of_char(span.0) != line {
+                    continue;
+                }
+                let Some((a, z)) = self.unit_edges(*span) else { continue };
+                let (x0, x1) = (self.caret(a).1.x, self.caret(z).1.x);
+                let t = if (x1 - x0).abs() > 1e-9 { ((p.x - x0) / (x1 - x0)).clamp(0.0, 1.0) } else { 0.0 };
+                let d = (x0 + (x1 - x0) * t - p.x).abs();
+                if best.is_none_or(|b| d < b.0) {
+                    best = Some((d, (u as f64 + t) / n as f64));
+                }
+            }
+            best.map(|b| b.1)
+        };
+        // (a line without units, such as an empty one, takes the nearest unit anywhere)
+        nearest(true).or_else(|| nearest(false))
     }
     /// Selection highlight quads (layer space) for characters `a..b`.
     pub fn selection_quads(&self, a: usize, b: usize) -> Vec<[Point; 4]> {
@@ -633,5 +730,74 @@ mod tests {
         let l = layout_doc(&doc);
         assert!(l.bounds[0] < -100.0 && l.bounds[2] > 100.0, "{:?}", l.bounds);
         assert!((l.bounds[0] + l.bounds[2]).abs() < 20.0);
+    }
+
+    // #1011: a Range Selector's bars in the Composition viewer.
+    fn bar_x(l: &TextLayout, based: selectors::BasedOn, f: f64) -> f64 {
+        l.range_bar(based, f).unwrap()[2].x
+    }
+
+    fn doc(text: &str) -> TextLayout {
+        layout_doc(&TextDoc { text: text.into(), size: 40.0, ..Default::default() })
+    }
+
+    #[test]
+    fn range_bars_sit_on_unit_boundaries() {
+        use selectors::BasedOn::*;
+        let l = doc("abcd");
+        for (f, ci) in [(0.0, 0), (0.5, 2), (1.0, 4)] {
+            assert!((bar_x(&l, Characters, f) - l.caret(ci).1.x).abs() < 1e-6, "{f} at caret {ci}");
+        }
+        let mid = (l.caret(0).1.x + l.caret(1).1.x) / 2.0;
+        assert!((bar_x(&l, Characters, 0.125) - mid).abs() < 1e-6, "half way through the first character");
+        // Words and Characters Excluding Spaces skip the space.
+        let l = doc("ab cd");
+        assert!((bar_x(&l, Words, 0.5) - l.caret(3).1.x).abs() < 1e-6, "the second word starts at c");
+        assert!((bar_x(&l, Words, 0.25) - (l.caret(0).1.x + l.caret(2).1.x) / 2.0).abs() < 1e-6, "half of ab, no space");
+        assert!((bar_x(&l, CharactersExcludingSpaces, 0.5) - l.caret(3).1.x).abs() < 1e-6, "c is the third of four");
+        assert!(doc("").range_bar(Characters, 0.0).is_none());
+        let v = layout_doc(&TextDoc { text: "ab".into(), vertical: true, ..Default::default() });
+        assert!(v.range_bar(Characters, 0.0).is_none(), "vertical text has no bars");
+    }
+
+    #[test]
+    fn range_bars_on_the_right_line_ligatures_and_rtl() {
+        use selectors::BasedOn::*;
+        let l = doc("ab\rcd");
+        // 5 characters (the CR counts): 80% is the start of d, on the second line.
+        let [top, base, bottom] = l.range_bar(Characters, 0.8).unwrap();
+        assert_eq!((top, bottom), l.caret(4));
+        assert!(top.y < base.y && base.y < bottom.y && (base.y - bottom.y + l.layout.lines[1].descent as f64).abs() < 1e-6, "the baseline");
+        assert!(bottom.y > l.caret(0).1.y + 10.0, "below the first line");
+        let [top, _, bottom] = l.range_bar(Lines, 0.5).unwrap();
+        assert_eq!((top, bottom), l.caret(3), "the second line starts at c");
+        // Inside a ligature ("ffl") the bars still move character by character.
+        let l = doc("Offline");
+        let xs: Vec<f64> = [1.0, 2.0, 3.0, 4.0].iter().map(|k| bar_x(&l, Characters, k / 7.0)).collect();
+        assert!(xs.windows(2).all(|w| w[1] > w[0]), "{xs:?}");
+        // Right to left: Start is on the right of the first character.
+        let mut r = TextDoc { text: "\u{0645}\u{0631}\u{062D}\u{0628}\u{0627}".into(), size: 40.0, ..Default::default() };
+        r.direction = effectcraft_keyframe::text_doc::Direction::Rtl;
+        let r = layout_doc(&r);
+        assert!(bar_x(&r, Characters, 0.0) > bar_x(&r, Characters, 0.2) && bar_x(&r, Characters, 0.2) > bar_x(&r, Characters, 1.0));
+    }
+
+    #[test]
+    fn range_fraction_at_inverts_range_bar() {
+        use selectors::BasedOn::*;
+        // (Fractions off the CR, a unit with no width whose bar is the line's end.)
+        for (text, based) in [("ab\rcd", Characters), ("one two\rthree", Words), ("Offline", Characters)] {
+            let l = doc(text);
+            for f in [0.1, 0.3, 0.9] {
+                let [top, _, bottom] = l.range_bar(based, f).unwrap();
+                let p = Point::new(bottom.x, (top.y + bottom.y) / 2.0);
+                let back = l.range_fraction_at(based, p).unwrap();
+                assert!((back - f).abs() < 1e-6, "{text}: {f} → {back}");
+            }
+        }
+        // The nearest line by its baseline: far left of the second line is the start of c.
+        let l = doc("ab\rcd");
+        let base = l.caret(3).1.y - l.layout.lines[1].descent as f64;
+        assert!((l.range_fraction_at(Characters, Point::new(-500.0, base)).unwrap() - 0.6).abs() < 1e-6);
     }
 }

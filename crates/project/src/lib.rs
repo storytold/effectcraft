@@ -49,8 +49,9 @@ pub fn saved_by(text: &str) -> Option<String> {
     serde_json::from_str::<Meta>(text).ok()?.saved_by
 }
 
-/// The compositions that were open when a project file was saved (`activeComp` and `openComps`
-/// next to `savedBy`), so it reopens where it was left (#748). Editor state rather than project
+/// The compositions that were open when a project file was saved and their current times
+/// (`activeComp`, `openComps` and `compTimes` next to `savedBy`), so it reopens where it was left
+/// (#748, #1714). Editor state rather than project
 /// content: opening a comp doesn't make the project unsaved, and it isn't part of
 /// [`Project`]. Older files have none; older versions ignore it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
@@ -62,6 +63,10 @@ pub struct SavedView {
     /// The open comps (Timeline tabs), in tab order.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub open_comps: Vec<ItemId>,
+    /// Each comp's current time, so a project reopens on the frame it was saved at rather than
+    /// at 0, where its layers may not have started yet (#1714).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub comp_times: BTreeMap<ItemId, Tick>,
 }
 
 /// The view a project file was saved with ([`SavedView`]); empty for older files. Values that
@@ -73,6 +78,8 @@ pub fn saved_view(text: &str) -> SavedView {
         active_comp: Option<serde_json::Value>,
         #[serde(rename = "openComps", default)]
         open_comps: Option<serde_json::Value>,
+        #[serde(rename = "compTimes", default)]
+        comp_times: Option<serde_json::Value>,
     }
     let Ok(m) = serde_json::from_str::<Meta>(text) else { return SavedView::default() };
     SavedView {
@@ -82,6 +89,11 @@ pub fn saved_view(text: &str) -> SavedView {
             .as_ref()
             .and_then(serde_json::Value::as_array)
             .map_or_else(Vec::new, |a| a.iter().filter_map(serde_json::Value::as_u64).map(ItemId).collect()),
+        comp_times: m
+            .comp_times
+            .as_ref()
+            .and_then(serde_json::Value::as_object)
+            .map_or_else(BTreeMap::new, |o| o.iter().filter_map(|(k, v)| Some((ItemId(k.parse().ok()?), Tick(v.as_i64()?)))).collect()),
     }
 }
 

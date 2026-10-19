@@ -117,6 +117,10 @@ Come tell us what matters most to you on [Discord](https://discord.gg/artcraft).
 
 ## Progress log
 
+- 2026-10-16: Convert To Bezier Path turns a shape layer's Rectangle, Ellipse or Polystar
+  path into an editable Path 1 with the same geometry, as After Effects does; it used to
+  apply to mask RotoBezier only, so a parametric shape path could not be converted at all
+  and its vertices could not be edited or animated (#932).
 - 2026-10-12: Roto Brush span edits report strokes outside a trimmed layer without panicking;
   strokes and undo history are preserved so restoring the timing allows the span edit again.
 - 2026-10-11: Ukrainian panels caught up with the Chinese catalogs. The 95 rows the panel
@@ -154,6 +158,7 @@ Come tell us what matters most to you on [Discord](https://discord.gg/artcraft).
 | 2026-10-12 | patch | Roto Brush span validation after trimming; command regressions for both layer edges |
 | 2026-10-10 | minor | Hours to ≈ 95% for each audience |
 | 2026-10-10 | minor | Headline adds mainstream practitioner (≈ 47%) and essentials user (≈ 52%) |
+| 2026-10-12 | minor | Shared PDF object/xref parsing with bounded app-owned conversion and preserved stream budgets; drawing, EPS and image/font policy remain unchanged |
 | 2026-10-10 | minor | Stage checked against the new core-workflow gate (all six pass; still alpha) |
 | 2026-10-10 | major | Rewritten to the shared progress-docs standard: stage, two numbers, dimensions, features, languages, upcoming, progress log; milestones moved to docs/roadmap.md |
 | 2026-10-05 | major | Two numbers (breadth vs real use) and workstreams G1–G9 |

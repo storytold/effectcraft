@@ -15,7 +15,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 use skrifa::instance::{LocationRef, Size};
 use skrifa::{FontRef, MetadataProvider};
 
-use crate::sfnt::{FaceNames, read_faces, read_faces_bytes};
+use crate::sfnt::{FaceNames, NamedInstance, read_faces, read_faces_bytes};
 
 /// Bundled fonts (SIL OFL 1.1; see `assets/fonts/*.attribution` and ATTRIBUTION.md).
 pub static INTER_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/Inter-Regular.ttf");
@@ -60,6 +60,8 @@ pub struct FaceInfo {
     pub postscript: Option<String>,
     /// The face has variation axes (an `fvar` table), read from the table directory at scan time.
     pub variable: bool,
+    /// A variable face's named instances (`Light` … `Black`), read from `fvar` at scan time.
+    pub instances: Vec<NamedInstance>,
 }
 
 /// Something that can list fonts (system folders, a web font picker, a project's font folder…).
@@ -152,6 +154,7 @@ fn info_from(n: FaceNames, data: FaceData, origin: &'static str) -> FaceInfo {
         full_name: n.full_name,
         postscript: n.postscript,
         variable: n.variable,
+        instances: n.instances,
     }
 }
 
@@ -425,8 +428,14 @@ pub fn families() -> Vec<(String, Vec<String>)> {
     let mut m: std::collections::BTreeMap<String, Vec<(bool, u16, String)>> = Default::default();
     for f in all_faces() {
         let v = m.entry(f.info.family.clone()).or_default();
-        if !v.iter().any(|(_, _, s)| s == &f.info.style) {
-            v.push((f.info.italic, f.info.weight, f.info.style.clone()));
+        // A variable face lists its named instances (`Light` … `Black`) as styles, as After
+        // Effects' font menu does; its own style name is usually one of them.
+        let styles = std::iter::once((f.info.italic, f.info.weight, f.info.style.clone()))
+            .chain(f.info.instances.iter().map(|i| (i.italic(f.info.italic), i.weight(f.info.weight), i.style.clone())));
+        for (italic, weight, style) in styles {
+            if !v.iter().any(|(_, _, s)| s.eq_ignore_ascii_case(&style)) {
+                v.push((italic, weight, style));
+            }
         }
     }
     m.into_iter()
@@ -446,6 +455,26 @@ pub struct Resolved {
     pub synth_italic: bool,
     /// The requested family was not found (shown as missing in the UI).
     pub missing: bool,
+    /// The named instance of a variable face the request asked for (an index into the face's
+    /// [`FaceInfo::instances`]); its axis values are the text's base variations (see
+    /// [`instance_variations`]).
+    pub instance: Option<u16>,
+}
+
+/// The axis values a resolved request implies: the named instance's coordinates (sorted by tag),
+/// or none for a static face or the face's own default.
+pub fn instance_variations(r: &Resolved) -> Vec<(String, f32)> {
+    let Some(i) = r.instance else { return Vec::new() };
+    face(r.face).info.instances.get(i as usize).map(|n| n.coords.clone()).unwrap_or_default()
+}
+
+/// `explicit` axis values over the instance's `base` ones: a tag set explicitly wins, the others
+/// keep the instance's value. Sorted by tag, as `TextDoc` keeps them.
+pub fn merge_variations(base: &[(String, f32)], explicit: &[(String, f32)]) -> Vec<(String, f32)> {
+    let mut out: Vec<(String, f32)> = base.iter().filter(|(t, _)| !explicit.iter().any(|(e, _)| e.trim_end() == t.trim_end())).cloned().collect();
+    out.extend(explicit.iter().cloned());
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
 }
 
 fn style_wants(style: &str) -> (u16, bool) {
@@ -485,10 +514,35 @@ pub fn resolve(family: &str, style: &str) -> Resolved {
             return r;
         }
     }
+    if let Some(r) = resolve_alias(family, style) {
+        return r;
+    }
     // Inter is bundled; face 0 (the first bundled face) is the last resort.
-    let mut r = resolve_in(DEFAULT_FAMILY, style).unwrap_or(Resolved { face: 0, synth_bold: false, synth_italic: false, missing: true });
+    let mut r = resolve_in(DEFAULT_FAMILY, style).unwrap_or(Resolved { face: 0, synth_bold: false, synth_italic: false, missing: true, instance: None });
     r.missing = !family.is_empty() && !family.eq_ignore_ascii_case(DEFAULT_FAMILY);
     r
+}
+
+/// Metric-compatible substitutes for common proprietary families, in order of preference (the
+/// same pairs fontconfig's `30-metric-aliases.conf` uses). Text keeps its widths and line breaks.
+const METRIC_ALIASES: &[(&str, &[&str])] = &[
+    ("Calibri", &["Carlito"]),
+    ("Cambria", &["Caladea"]),
+    ("Arial", &["Liberation Sans", "Arimo"]),
+    ("Helvetica", &["Liberation Sans", "Arimo"]),
+    ("Arial Narrow", &["Liberation Sans Narrow"]),
+    ("Times New Roman", &["Liberation Serif", "Tinos"]),
+    ("Times", &["Liberation Serif", "Tinos"]),
+    ("Courier New", &["Liberation Mono", "Cousine"]),
+    ("Courier", &["Liberation Mono", "Cousine"]),
+];
+
+/// An installed metric-compatible substitute for a missing family. The result stays `missing`,
+/// so Find Missing Fonts still lists the requested name.
+fn resolve_alias(family: &str, style: &str) -> Option<Resolved> {
+    let family = family.trim();
+    let (_, subs) = METRIC_ALIASES.iter().find(|(name, _)| name.eq_ignore_ascii_case(family))?;
+    subs.iter().find_map(|s| resolve_in(s, style)).map(|r| Resolved { missing: true, ..r })
 }
 
 fn resolve_in(family: &str, style: &str) -> Option<Resolved> {
@@ -497,15 +551,32 @@ fn resolve_in(family: &str, style: &str) -> Option<Resolved> {
     if fam.is_empty() {
         return None;
     }
+    let instance_named = |f: &Face, name: &str| f.info.instances.iter().position(|i| i.style.eq_ignore_ascii_case(name)).and_then(|i| u16::try_from(i).ok());
+    // A face's own style (a variable face's is its default instance) needs no axis values.
     if let Some(f) = fam.iter().find(|f| f.info.style.eq_ignore_ascii_case(style)) {
-        return Some(Resolved { face: f.id, synth_bold: false, synth_italic: false, missing: false });
+        return Some(Resolved { face: f.id, synth_bold: false, synth_italic: false, missing: false, instance: None });
     }
+    // A named instance of a variable face (`Figtree` `Black`): that face at the instance's axis
+    // values, not the nearest static weight made bold synthetically.
+    if let Some((f, i)) = fam.iter().find_map(|f| Some((f, instance_named(f, style)?))) {
+        return Some(Resolved { face: f.id, synth_bold: false, synth_italic: false, missing: false, instance: Some(i) });
+    }
+    // The nearest weight among the faces and the named instances.
     let (w, it) = style_wants(style);
-    let best = fam.iter().min_by_key(|f| {
-        let italic_pen = if f.info.italic == it { 0 } else { 1000 };
-        italic_pen + (f.info.weight as i32 - w as i32).unsigned_abs()
+    let candidates = fam.iter().flat_map(|f| {
+        std::iter::once((f, None, f.info.weight, f.info.italic)).chain(
+            f.info
+                .instances
+                .iter()
+                .enumerate()
+                .filter_map(move |(i, n)| Some((f, Some(u16::try_from(i).ok()?), n.weight(f.info.weight), n.italic(f.info.italic)))),
+        )
+    });
+    let (best, instance, weight, italic) = candidates.min_by_key(|(_, _, weight, italic)| {
+        let italic_pen = if *italic == it { 0 } else { 1000 };
+        italic_pen + (*weight as i32 - w as i32).unsigned_abs()
     })?;
-    Some(Resolved { face: best.id, synth_bold: w >= 600 && best.info.weight <= 500, synth_italic: it && !best.info.italic, missing: false })
+    Some(Resolved { face: best.id, synth_bold: w >= 600 && weight <= 500, synth_italic: it && !italic, missing: false, instance })
 }
 
 /// A face whose full name or PostScript name is `name` (case-insensitive), the way After Effects
@@ -516,11 +587,31 @@ fn resolve_by_name(name: &str) -> Option<Resolved> {
         return None;
     }
     let faces = all_faces();
-    let f = faces
+    let found = |f: &Arc<Face>, instance: Option<usize>| Resolved {
+        face: f.id,
+        synth_bold: false,
+        synth_italic: false,
+        missing: false,
+        instance: instance.and_then(|i| u16::try_from(i).ok()),
+    };
+    if let Some(f) = faces
         .iter()
         .find(|f| f.info.postscript.as_deref().is_some_and(|p| p.eq_ignore_ascii_case(name)))
-        .or_else(|| faces.iter().find(|f| f.info.full_name.eq_ignore_ascii_case(name)))?;
-    Some(Resolved { face: f.id, synth_bold: false, synth_italic: false, missing: false })
+        .or_else(|| faces.iter().find(|f| f.info.full_name.eq_ignore_ascii_case(name)))
+    {
+        // A variable face's own name is its default instance's (`Figtree-Light`).
+        return Some(found(f, None));
+    }
+    // A named instance of a variable face, by its PostScript name (`Figtree-Black`, what After
+    // Effects scripts use) or its full name (`Figtree Black`).
+    faces.iter().find_map(|f| {
+        let i = f
+            .info
+            .instances
+            .iter()
+            .position(|i| i.postscript.eq_ignore_ascii_case(name) || format!("{} {}", f.info.family, i.style).eq_ignore_ascii_case(name))?;
+        Some(found(f, Some(i)))
+    })
 }
 
 /// The writing systems that need a dedicated fallback family: the bundled fonts cover none of
@@ -965,6 +1056,56 @@ mod tests {
         assert_eq!(face(resolve("Inter", "Bold").face).info.style, "Bold");
     }
 
+    /// #1563: a variable font's named instances are styles of its family. `fontStyle = "Black"`,
+    /// the instance's PostScript name (`font = "Figtree-Black"`) and its full name select the
+    /// instance's axis values instead of the default instance made bold synthetically, and the
+    /// font menus list every instance.
+    #[test]
+    fn variable_named_instances_resolve_and_list() {
+        const FAMILY: &str = "EffectCraft Instance Test";
+        let instances = [
+            ("Light", 300.0, Some("EffectCraftInstanceTest-Light")),
+            ("Regular", 400.0, Some("EffectCraftInstanceTest-Regular")),
+            ("Black", 900.0, Some("EffectCraftInstanceTest-Black")),
+            ("Extra Bold", 800.0, None),
+        ];
+        assert_eq!(add_font_data(crate::sfnt::test_font::variable(FAMILY, &instances, true)).len(), 1);
+        let wght = |r: &Resolved| instance_variations(r);
+        // By style name.
+        let black = resolve(FAMILY, "Black");
+        assert!(!black.missing && !black.synth_bold && !black.synth_italic, "{black:?}");
+        assert_eq!(wght(&black), vec![("wght".to_string(), 900.0)]);
+        assert_eq!(wght(&resolve(FAMILY, "regular")), vec![("wght".to_string(), 400.0)]);
+        // The face's own style is its default instance: no axis values to set.
+        let light = resolve(FAMILY, "Light");
+        assert_eq!((light.face, light.instance), (black.face, None));
+        // A style the family lacks takes the nearest instance's weight, no synthetic bold.
+        let bold = resolve(FAMILY, "Bold");
+        assert!(!bold.synth_bold, "{bold:?}");
+        assert_eq!(wght(&bold), vec![("wght".to_string(), 800.0)]);
+        // By PostScript name, the font's own and the derived one, and by full name.
+        let ps = resolve("EffectCraftInstanceTest-Black", "Regular");
+        assert!(!ps.missing && ps.face == black.face, "{ps:?}");
+        assert_eq!(wght(&ps), vec![("wght".to_string(), 900.0)]);
+        assert_eq!(wght(&resolve("EffectCraftInstanceTest-ExtraBold", "")), vec![("wght".to_string(), 800.0)]);
+        assert_eq!(wght(&resolve("effectcraft instance test extra bold", "")), vec![("wght".to_string(), 800.0)]);
+        // The font menu lists every instance, in weight order.
+        let fams = families();
+        let styles = &fams.iter().find(|(f, _)| f == FAMILY).unwrap().1;
+        assert_eq!(styles, &["Light", "Regular", "Extra Bold", "Black"]);
+        // Static fonts are untouched.
+        assert_eq!(resolve("Inter", "Bold").instance, None);
+    }
+
+    /// Axis values set on the text win over the instance's; the others keep the instance's.
+    #[test]
+    fn explicit_variations_override_the_instance() {
+        let base = vec![("wdth".to_string(), 75.0), ("wght".to_string(), 900.0)];
+        assert_eq!(merge_variations(&base, &[("wght".to_string(), 450.0)]), vec![("wdth".to_string(), 75.0), ("wght".to_string(), 450.0)]);
+        assert_eq!(merge_variations(&base, &[]), base);
+        assert_eq!(merge_variations(&[], &[("opsz".to_string(), 12.0)]), vec![("opsz".to_string(), 12.0)]);
+    }
+
     #[test]
     fn scripts_are_classified() {
         assert_eq!(script_of('あ'), FallbackScript::Japanese);
@@ -1034,6 +1175,11 @@ mod tests {
     /// A minimal TrueType font built in code (no font file in the repo): U+0020 and U+E000 map to
     /// an empty glyph, U+E001 to a triangle.
     fn blank_glyph_font() -> Vec<u8> {
+        test_font("Blank Glyph Test")
+    }
+
+    /// The blank-glyph test font under another family name.
+    fn test_font(family: &str) -> Vec<u8> {
         fn u16s(v: &[u16]) -> Vec<u8> {
             v.iter().flat_map(|x| x.to_be_bytes()).collect()
         }
@@ -1061,7 +1207,7 @@ mod tests {
         hhea.extend(u16s(&[0, 3]));
         let hmtx = u16s(&[600, 0, 600, 0, 600, 0]);
         let maxp = u16s(&[1, 0, 3, 3, 1, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0]);
-        let strings: Vec<Vec<u8>> = ["Blank Glyph Test", "Regular"].iter().map(|s| s.encode_utf16().flat_map(|u| u.to_be_bytes()).collect()).collect();
+        let strings: Vec<Vec<u8>> = [family, "Regular"].iter().map(|s| s.encode_utf16().flat_map(|u| u.to_be_bytes()).collect()).collect();
         let mut name = u16s(&[0, 2, 30]);
         let mut off = 0;
         for (id, st) in strings.iter().enumerate() {
@@ -1103,6 +1249,23 @@ mod tests {
         let inter = resolve("Inter", "Regular").face;
         assert_ne!(fallback_for('\u{e000}', inter), id, "fallback never picks the empty glyph");
         assert_eq!(fallback_for('\u{e001}', inter), id, "fallback finds the drawn one");
+    }
+
+    /// A Microsoft family that isn't installed renders in its installed metric-compatible
+    /// substitute instead of Inter, and still reports itself missing (#1677).
+    #[test]
+    fn microsoft_families_resolve_to_metric_compatible_substitutes() {
+        add_font_data(test_font("Carlito"));
+        add_font_data(test_font("Caladea"));
+        let calibri = resolve("Calibri", "Regular");
+        assert_eq!(face(calibri.face).info.family, "Carlito");
+        assert!(calibri.missing, "the original name stays missing for Find Missing Fonts");
+        let cambria = resolve("Cambria", "Bold");
+        assert_eq!(face(cambria.face).info.family, "Caladea");
+        assert!(cambria.missing);
+        let unknown = resolve("No Such Family 1677", "Regular");
+        assert_eq!(face(unknown.face).info.family, DEFAULT_FAMILY);
+        assert!(unknown.missing);
     }
 
     #[test]

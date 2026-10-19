@@ -493,7 +493,7 @@ fn wire_removal(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
     let mut p = Params::default();
     p.u[0][0] = ctx.params.e("removalStyle");
     p.f[0] = [a.0 as f32, a.1 as f32, -ty as f32, tx as f32];
-    p.f[1] = [half as f32, (half * slope as f64) as f32, mirror, 0.0];
+    p.f[1] = [half as f32, (half * slope as f64) as f32, mirror, len as f32];
     run(e, "fp2_wire", &p, b, None, None)
 }
 

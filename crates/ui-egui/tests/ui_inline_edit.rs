@@ -539,3 +539,48 @@ fn arrow_keys_move_the_caret_in_rename_fields() {
     let layer_name = h.state().session.active_comp().unwrap().layer(effectcraft_engine::project::LayerId(layer)).unwrap().name.clone();
     assert_eq!(layer_name, "Pla-te");
 }
+
+/// #1434: with several 3D layers selected, typing a Z Position sets Z on each of them; their X
+/// and Y stay their own. Every selected layer used to take the typed layer's whole Position, so
+/// they stacked on top of it and seemed to disappear.
+#[test]
+fn typing_one_component_with_several_layers_selected_keeps_their_other_components() {
+    let (mut h, _) = harness();
+    let (a, b, transform) = {
+        let s = &mut h.state_mut().session;
+        let mut ids = vec![];
+        for (name, xy) in [("A", [40.0, 50.0]), ("B", [200.0, 120.0])] {
+            let l = s.execute("layer.newSolid", json!({"name": name, "color": "#406080", "width": 40, "height": 40})).unwrap()["layer"].as_u64().unwrap();
+            s.execute("layer.setSwitch", json!({"layers": [l], "switch": "threeD", "value": true})).unwrap();
+            s.execute("prop.set", json!({"layer": l, "path": "transform/position", "value": [xy[0], xy[1], 0.0]})).unwrap();
+            ids.push(l);
+        }
+        s.execute("layer.select", json!({"layers": ids})).unwrap();
+        let tr = s.active_comp().unwrap().layer(effectcraft_engine::project::LayerId(ids[0])).unwrap().props.sub("transform").unwrap().uid;
+        (ids[0], ids[1], tr)
+    };
+    h.state_mut().ui.timeline.open_layers.insert(a);
+    h.state_mut().ui.timeline.open_groups.insert(transform);
+    h.run_steps(3);
+    let pos = |h: &Harness<'_, EffectcraftApp>, l: u64| {
+        h.state()
+            .session
+            .active_comp()
+            .unwrap()
+            .layer(effectcraft_engine::project::LayerId(l))
+            .unwrap()
+            .props
+            .prop("transform/position")
+            .unwrap()
+            .value
+            .components()
+    };
+    let position =
+        h.state().session.active_comp().unwrap().layer(effectcraft_engine::project::LayerId(a)).unwrap().props.prop("transform/position").unwrap().uid;
+    let p = center(&h, &format!("timeline.prop.{position}.value.2"));
+    click(&mut h, p, 1);
+    type_text(&mut h, "-300");
+    key(&mut h, Key::Enter);
+    assert_eq!(pos(&h, a), [40.0, 50.0, -300.0]);
+    assert_eq!(pos(&h, b), [200.0, 120.0, -300.0], "B keeps its own X and Y");
+}
