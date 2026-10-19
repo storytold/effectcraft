@@ -309,10 +309,12 @@ fn open_invite(app: &mut EffectcraftApp, invitation: craft_cloud_client::invite:
         Ok(Some(_)) => {
             let mode = if invitation.read_only() { " (view only)" } else { "" };
             let who = if invitation.recipient.is_empty() { String::new() } else { format!(" (shared with {})", invitation.recipient) };
-            app.ui.status = format!("Opened \"{name}\"{mode}{who}");
+            let mut status = format!("Opened \"{name}\"{mode}{who}");
             if let Err(e) = invitation.join() {
                 log::warn!("invite relay join failed: {e}");
+                status.push_str(&format!(" (live sharing did not start: {e})"));
             }
+            app.ui.status = status;
         }
         Ok(None) => {
             app.ui.status = format!("Shared \"{name}\" needs a choice before it opens");

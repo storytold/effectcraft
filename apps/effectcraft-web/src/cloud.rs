@@ -47,9 +47,6 @@ impl Service {
                     capabilities: me.capabilities,
                     provider_linked: me.provider_linked,
                 });
-                if matches!(&answer, Err(Fault::Unauthenticated)) {
-                    offer_login();
-                }
                 send(Event::Account(answer));
             }
             Job::LinkStart => match self.client.link_start().await.map_err(to_fault) {
@@ -60,10 +57,12 @@ impl Service {
                 let answer = self.client.link_poll(&handle).await.map_err(to_fault);
                 send(Event::Linked(answer));
             }
-            Job::SignOut => {
-                let _ = fetch_logout().await;
-                let _ = web_sys::window().and_then(|w| w.location().reload().ok());
-            }
+            Job::SignOut => match fetch_logout().await {
+                Ok(()) => {
+                    let _ = web_sys::window().and_then(|w| w.location().reload().ok());
+                }
+                Err(e) => send(Event::Account(Err(Fault::Refused(format!("Sign out failed: {e}"))))),
+            },
             Job::Conversation(id) => {
                 let answer = self.client.conversation(&id).await.map_err(to_fault);
                 send(Event::Conversation(answer));
@@ -116,16 +115,6 @@ fn to_fault(e: Error) -> Fault {
 /// `/auth/logout`.
 const LOGOUT_PATH: &str = "/auth/logout";
 
-/// Redirect to the CollabCraft sign-in page when not already on an auth page.
-fn offer_login() {
-    let Some(window) = web_sys::window() else { return };
-    let Ok(path) = window.location().pathname() else { return };
-    if path.starts_with("/auth/") {
-        return;
-    }
-    let _ = window.location().set_href("/auth/login");
-}
-
 async fn fetch_logout() -> Result<(), String> {
     use wasm_bindgen::JsCast as _;
     let global = js_sys::global();
@@ -139,7 +128,11 @@ async fn fetch_logout() -> Result<(), String> {
     let req = web_sys::Request::new_with_str_and_init(LOGOUT_PATH, &init).map_err(|e| format!("{e:?}"))?;
     let promised = fetch.call1(global.as_ref(), req.as_ref()).map_err(|e| format!("{e:?}"))?;
     let promised: js_sys::Promise = promised.dyn_into().map_err(|_| "not a promise".to_owned())?;
-    wasm_bindgen_futures::JsFuture::from(promised).await.map_err(|e| format!("{e:?}"))?;
+    let resp_val = wasm_bindgen_futures::JsFuture::from(promised).await.map_err(|e| format!("{e:?}"))?;
+    let resp: web_sys::Response = resp_val.dyn_into().map_err(|_| "logout response was not an HTTP response".to_owned())?;
+    if !resp.ok() {
+        return Err(format!("logout failed (HTTP {})", resp.status()));
+    }
     Ok(())
 }
 

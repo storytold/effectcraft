@@ -314,6 +314,9 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
         if !crate::cloud::available(app) {
             return Err(crate::cloud::UNAVAILABLE.into());
         }
+        if crate::panels::unsaved::guard(app, id, &params) {
+            return Ok(json!({"dialog": "unsavedChanges"}));
+        }
         app.cloud_page = Some(crate::cloud::CloudPage::Open);
         return Ok(json!({"page": "open"}));
     }
@@ -895,8 +898,11 @@ pub(crate) fn run_engine(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str
     let mut r = app.session.execute(id, params).map_err(|e| e.to_string());
     if let Err(e) = &r {
         app.ui.status = e.clone();
-    } else if COPY_COMMANDS.contains(&id) && app.session.state.text_edit.is_none() {
-        ctx.copy_text(clipboard_note(&app.session));
+    } else {
+        crate::cloud::clear_origin_after_replace(app, id);
+        if COPY_COMMANDS.contains(&id) && app.session.state.text_edit.is_none() {
+            ctx.copy_text(clipboard_note(&app.session));
+        }
     }
     let events = app.session.drain_events();
     for (index, ev) in events.into_iter().enumerate() {

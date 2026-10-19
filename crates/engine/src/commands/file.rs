@@ -45,12 +45,14 @@ pub(crate) fn open(s: &mut Session, p: &Value) -> Result<Value> {
     // `text`: pre-loaded project text, for opening from cloud storage where no on-disk path
     // exists. When present the file system is not read, so this works on any platform including
     // wasm32 without writing a temporary file.
-    let text = if let Some(text) = str_p(p, "text") {
+    let preloaded = str_p(p, "text");
+    let text = if let Some(text) = preloaded {
         text.to_owned()
     } else {
         let bytes = s.services.read_file(path).map_err(|e| EngineError::Other(format!("cannot read {path}: {e}")))?;
         String::from_utf8(bytes).map_err(|_| EngineError::Other("not a text project file".into()))?
     };
+    let disk = preloaded.is_none().then_some(path);
     // XML copies (File ▸ Save a Copy As XML…) open like the JSON project.
     let text = if crate::xml_project::is_xml(&text) { crate::xml_project::from_xml(&text).map_err(EngineError::Other)? } else { text };
     let (mut proj, repaired) =
@@ -58,11 +60,13 @@ pub(crate) fn open(s: &mut Session, p: &Value) -> Result<Value> {
     // Footage saved with a relative path (imported by the CLI or an agent as `clip.mp4`, or
     // written by hand) is found next to the project file, as After Effects looks for footage
     // relative to the project (#652).
-    let refused = crate::doc_path::resolve_footage(&mut proj, Some(path));
-    s.replace_project(proj, Some(path.to_string()));
-    s.stored_paths.add(&s.project, Some(path));
+    let refused = crate::doc_path::resolve_footage(&mut proj, disk);
+    s.replace_project(proj, disk.map(str::to_string));
+    s.stored_paths.add(&s.project, disk);
     s.restore_view(&effectcraft_project::saved_view(&text));
-    s.note_project_path(path);
+    if let Some(path) = disk {
+        s.note_project_path(path);
+    }
     // Values past the limits (a corrupt or hostile file) were brought within them (#788).
     if !repaired.is_empty() {
         let more = repaired.len().saturating_sub(3);
@@ -102,8 +106,9 @@ pub(crate) fn file_text(s: &Session, path: &str) -> Result<String> {
 ///
 /// Used by cloud Save to encode the project for upload. The caller receives
 /// `{"text": "..."}` where `text` is the same JSON a `file.save` would write.
-fn to_json_cmd(s: &mut Session, _: &Value) -> Result<Value> {
-    let text = file_text(s, "project.ecproj")?;
+fn to_json_cmd(s: &mut Session, p: &Value) -> Result<Value> {
+    let path = if p.get("xml").and_then(Value::as_bool).unwrap_or(false) { "project.ecprojx" } else { "project.ecproj" };
+    let text = file_text(s, path)?;
     Ok(json!({"text": text}))
 }
 

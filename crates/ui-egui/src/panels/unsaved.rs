@@ -16,7 +16,16 @@ use crate::theme::Tokens;
 use crate::{Dialog, EffectcraftApp};
 
 /// Commands that replace or close the open project (Quit is asked when the window closes).
-const CLOSING: &[&str] = &["file.newProject", "file.open", "file.openRecent", "file.closeProject", "file.revert", "file.openDemoProject", "templates.create"];
+const CLOSING: &[&str] = &[
+    "file.newProject",
+    "file.open",
+    "file.openRecent",
+    "file.closeProject",
+    "file.revert",
+    "file.openDemoProject",
+    "file.cloudOpen",
+    "templates.create",
+];
 
 /// The command waiting on the prompt, and whether the user already answered it.
 #[derive(Clone, Debug, Default)]

@@ -92,6 +92,17 @@ pub fn opens(entry: &Entry) -> bool {
     craft_ui::cloud::opens(entry, PROJECT)
 }
 
+/// Drop the cloud save target after a local command replaces the open project.
+pub fn clear_origin_after_replace(app: &mut EffectcraftApp, command: &str) {
+    const REPLACES: &[&str] = &["file.newProject", "file.open", "file.openRecent", "file.openDemoProject", "file.revert"];
+    if !REPLACES.contains(&command) {
+        return;
+    }
+    if let Some(uid) = CloudApp::active(app) {
+        app.cloud_mut().origins.remove(&uid);
+    }
+}
+
 /// A typed name as a project file name. Any folder separators are dropped and
 /// a missing extension becomes `.ecproj`.
 pub fn project_name(typed: &str) -> String {
@@ -168,10 +179,13 @@ impl CloudApp for EffectcraftApp {
 
     fn encode(&mut self, _uid: u64, into: Destination<'_>) -> Result<Vec<u8>, String> {
         let ext = into.extension();
-        if !ext.is_empty() && ext != "ecproj" {
-            return Err(format!("EffectCraft can only save projects as .ecproj (got .{ext})"));
+        if !ext.is_empty() && ext != "ecproj" && ext != "ecprojx" {
+            return Err(format!("EffectCraft can only save projects as .ecproj or .ecprojx (got .{ext})"));
         }
-        let result = self.session.execute("file.toJson", json!({})).map_err(|e| e.to_string())?;
+        let result = self
+            .session
+            .execute("file.toJson", json!({"xml": ext == "ecprojx"}))
+            .map_err(|e| e.to_string())?;
         let text = result["text"].as_str().ok_or("file.toJson returned no text")?;
         Ok(text.as_bytes().to_vec())
     }
@@ -214,10 +228,9 @@ impl CloudApp for EffectcraftApp {
     fn open_url(&self, url: &str) {
         if let Some(open) = &self.hooks.open_url {
             open(url);
+        } else if let Some(ctx) = self.frames.context() {
+            ctx.open_url(egui::OpenUrl::new_tab(url));
         }
-        // The fallback (no hook set) is handled in the cloud pump: device-flow
-        // URLs are returned as events and the desktop app opens them via the
-        // native shell.
     }
 
     fn say(&mut self, text: String) {
