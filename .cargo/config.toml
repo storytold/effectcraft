@@ -1,2 +1,8 @@
 [alias]
 xtask = "run --quiet --package xtask --"
+
+# Use Rust's bundled linker and runtime libraries rather than an unrelated
+# MinGW installation on PATH (for example, the one shipped with CodeBlocks).
+[target.x86_64-pc-windows-gnu]
+linker = "rust-lld"
+rustflags = ["-C", "link-self-contained=yes"]

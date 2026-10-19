@@ -1,0 +1,58 @@
+# Check Windows GNU support alongside the existing MSVC build path.
+# This builds and smoke-tests binaries; release packaging stays in release.yml.
+name: Windows build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Windows ${{ matrix.abi }}
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - abi: GNU
+            target: x86_64-pc-windows-gnu
+          - abi: MSVC
+            target: x86_64-pc-windows-msvc
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CARGO_TERM_COLOR: always
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      # Install the full host toolchain, not just a cross-compilation target:
+      # the GNU workaround also needs build.rs to run with a GNU HOST.
+      - name: Install native Rust toolchain
+        run: rustup toolchain install stable-${{ matrix.target }} --profile minimal
+
+      - name: Show compiler version
+        run: rustc +stable-${{ matrix.target }} --version --verbose
+
+      - name: Build desktop and CLI
+        run: cargo +stable-${{ matrix.target }} build --locked --target ${{ matrix.target }} -p effectcraft -p effectcraft-cli
+
+      - name: Smoke-test desktop and CLI
+        run: |
+          & "./target/${{ matrix.target }}/debug/effectcraft.exe" --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "./target/${{ matrix.target }}/debug/effectcraft-cli.exe" --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
