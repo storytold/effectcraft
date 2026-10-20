@@ -1399,4 +1399,30 @@ fn a_kept_layer_reads_the_project_again() {
     assert_close!(f.num("thisLayer.index * 10 + thisLayer.name.length", 0.0), 21.0);
 }
 
+/// The prelude is kept from one evaluation to the next, so an expression can't change its object
+/// model or internals for the ones after it.
+#[test]
+fn an_expression_cant_change_the_prelude_for_the_next() {
+    let f = fx();
+    let read = "[thisComp.layer(1).index, thisLayer.index, thisLayer('transform').property('rotation').value,                 thisLayer.transform.opacity.value, thisProject.bitsPerChannel, comp(thisComp.name).numLayers]";
+    let before = f.ev(f.a, ROT, read, 0.5).unwrap();
+    let attacks = [
+        "Comp.prototype.layer = function () { return 0; }",
+        "Object.getPrototypeOf(thisLayer).index = 0",
+        "Object.getPrototypeOf(thisLayer('transform')).property = function () { return 0; }",
+        "Object.getPrototypeOf(thisLayer.transform.opacity).value = 0",
+        "Comp = function () {}",
+        "Prop = function () {}",
+        "thisProject = null",
+        "__h = function () { return null; }",
+        "__layer = function () { return null; }",
+        "__child = function () {}",
+        "delete __mkProp",
+    ];
+    for a in attacks {
+        let _ = f.ev(f.a, ROT, &format!("try {{ {a} }} catch (e) {{}} 0"), 0.0);
+        assert_eq!(f.ev(f.a, ROT, read, 0.5).unwrap(), before, "after `{a}`");
+    }
+}
+
 mod property_group;
