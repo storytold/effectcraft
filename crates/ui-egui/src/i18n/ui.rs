@@ -19,7 +19,7 @@ use std::fmt::Display;
 use std::sync::OnceLock;
 
 thread_local! {
-    /// The resolved interface language ("en", "ja", "zh-hans", "zh-hant", "uk", "pt-br", "cs", "es"); "en" until the first
+    /// The resolved interface language ("en", "ja", "zh-hans", "zh-hant", "uk", "pt-br", "cs", "es", "ru"); "en" until the first
     /// frame sets it.
     static CURRENT: Cell<&'static str> = const { Cell::new("en") };
 }
@@ -4879,20 +4879,24 @@ mod tests {
         let listed = sorted.len();
         sorted.dedup();
         assert_eq!(listed, sorted.len(), "a source string is listed twice");
+        let mut russian_keys: Vec<&str> = RUSSIAN.iter().map(|(en, _)| *en).collect();
+        russian_keys.sort_unstable();
+        let russian_listed = russian_keys.len();
+        russian_keys.dedup();
+        assert_eq!(
+            russian_listed,
+            russian_keys.len(),
+            "the Russian catalog lists a source string twice"
+        );
         for (en, translated) in catalogs() {
             assert!(!en.is_empty() && !translated.is_empty(), "empty row for {en:?}");
             assert!(en.contains("{}") || !en.contains('{'), "{en:?} has a placeholder but no `{{}}`");
-            assert_eq!(en.matches("{}").count(), translated.matches("{}").count(), "{en:?} and {translated:?} carry a different number of values");
-            let mut russian_keys: Vec<&str> = RUSSIAN.iter().map(|(en, _)| *en).collect();
-            russian_keys.sort_unstable();
-            let russian_listed = russian_keys.len();
-            russian_keys.dedup();
             assert_eq!(
-                russian_listed,
-                russian_keys.len(),
-                "the Russian catalog lists a source string twice"
+                en.matches("{}").count(),
+                translated.matches("{}").count(),
+                "{en:?} and {translated:?} carry a different number of values"
             );
-        }
+        }        
     }
 
     /// English, a language without rows yet, and anything the catalog does not know stay verbatim:
@@ -4924,6 +4928,22 @@ mod tests {
         assert_eq!(tr("Composition Name:"), "Composition Name:");
     }
 
+    /// Russian panels translate, fill values in order and keep project content.
+    #[test]
+    fn russian_panels_translate_and_keep_project_content() {
+        set_current("ru");
+        assert_eq!(tr("Composition Name:"), "Композиция");
+        assert_eq!(tr("Cancel"), "Отмена");
+        assert_eq!(tr("my layer.mp4"), "my layer.mp4");
+        assert_eq!(tr_args("Layer: {}", &[&"Name"]), "Слой: Name");
+        assert_eq!(
+            tr_args("Template: {}\n{}", &[&"Title", &"My description"]),
+            "Шаблон: Title\nMy description"
+        );
+        set_current("en");
+        assert_eq!(tr("Cancel"), "Cancel");
+    }    
+
     /// Brazilian Portuguese panels translate, fill values in order and keep project content.
     #[test]
     fn brazilian_portuguese_panels_translate_and_keep_project_content() {
@@ -4948,7 +4968,7 @@ mod tests {
         set_current("en");
         assert_eq!(tr("Cancel"), "Cancel");
     }
-
+    
     /// Values fill the placeholders in order, and a missing value is dropped instead of panicking.
     #[test]
     fn tr_args_fills_values_in_order() {
