@@ -272,9 +272,6 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
                 if let Some(invitation) = invite.take() {
                     open_invite(&mut app, invitation);
                 }
-                // Bootstrap account and root folder: this first Account job is what makes
-                // the cloud controls reflect the signed-in user rather than staying blank.
-                effectcraft_ui_egui::cloud::start(&mut app);
                 // Viewer frames render in frame workers (`?frameworkers=N`, 0 or `?noworkers`:
                 // on the page's thread), each on its own WebGPU device where the browser has
                 // WebGPU in workers (`?nogpuworkers`: their CPU).
