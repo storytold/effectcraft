@@ -1393,6 +1393,8 @@ fn a_kept_layer_reads_the_project_again() {
     assert_close!(f.num("thisLayer.index", 0.0), 2.0);
     let _ = f.ev(f.a, ROT, "thisLayer.mine = 5; 0", 0.0);
     assert_close!(f.num("thisLayer.mine === undefined ? 1 : 0", 0.0), 1.0);
+    let _ = f.ev(f.a, ROT, "var L = thisLayer; L.__c = 'x'; L.__l = 99; L.__i = ['Z', 7]; L.__s = __S; 0", 0.0);
+    assert_close!(f.num("thisLayer.index * 10 + thisLayer.name.length", 0.0), 21.0);
 }
 
 mod property_group;
