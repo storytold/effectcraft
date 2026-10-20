@@ -550,12 +550,13 @@ function Layer(c, l) {
   delete f.name;
   delete f.length;
   Object.setPrototypeOf(f, Layer.prototype);
-  // Kept across evaluations (`__layer`), so an expression can't change which layer it is or leave
-  // its own fields on it. `__i` and `__s` stay writable: `__info` reads them again in an evaluation
-  // whose `__S` isn't `__s`, and every evaluation has a new `__S`.
+  // Kept across evaluations (`__layer`), so an expression can't change which layer it is, delete
+  // a field or leave its own on it. `__i` and `__s` stay writable: `__info` reads them again in an
+  // evaluation whose `__S` isn't `__s`, and every evaluation has a new `__S`.
   Object.defineProperty(f, '__c', { value: c });
   Object.defineProperty(f, '__l', { value: l });
-  f.__i = null; f.__s = null;
+  Object.defineProperty(f, '__i', { value: null, writable: true });
+  Object.defineProperty(f, '__s', { value: null, writable: true });
   Object.preventExtensions(f);
   return f;
 }
