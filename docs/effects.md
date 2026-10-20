@@ -149,7 +149,7 @@ Effects are addressed by id (`ec.<category>.<name>`) or display name in commands
 | Corner Pin | `ec.distort.cornerpin` | 4 | GPU | 32 | Implemented |
 | Detail-preserving Upscale | `ec.distort.upscale` | 4 |  | 32 | Implemented |
 | Displacement Map | `ec.distort.displacementmap` | 8 | GPU | 32 | Implemented |
-| Liquify | `ec.distort.liquify` | 12 | GPU | 32 | Implemented |
+| Liquify | `ec.distort.liquify` | 13 | GPU | 32 | Implemented |
 | Magnify | `ec.distort.magnify` | 10 | GPU | 32 | Implemented |
 | Mesh Warp | `ec.distort.meshwarp` | 3 | GPU | 32 | Implemented |
 | Mirror | `ec.distort.mirror` | 2 | GPU | 32 | Implemented |

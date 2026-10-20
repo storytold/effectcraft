@@ -85,6 +85,41 @@ fn the_generated_effect_menu_is_translated() {
     assert_eq!(menu_label(&en, "Effect", "Blur & Sharpen", BLUR).as_deref(), Some(BLUR_EN), "the English menu is unchanged");
 }
 
+/// Right-click the Effect Controls header of effect `fx`.
+fn open_effect_menu(h: &mut Harness<'_, EffectcraftApp>, fx: u64) {
+    let e = h.state().auto.find(&format!("effectControls.effect.{fx}")).expect("the effect's header").rect;
+    let pos = egui::pos2(e[0] + e[2] / 2.0, e[1] + e[3] / 2.0);
+    h.event(egui::Event::PointerMoved(pos));
+    h.step();
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Secondary, pressed, modifiers: Default::default() });
+        h.step();
+    }
+    h.run_steps(2);
+}
+
+/// The effect header's context menu draws its items in the interface language, like the layer
+/// menu (#1308): it used to draw Copy, Paste, Duplicate, Reset, Remove, Move Up and Move Down in
+/// English whatever the language.
+#[test]
+fn the_effect_context_menu_follows_the_interface_language() {
+    const ENGLISH: [&str; 7] = ["Copy", "Paste", "Duplicate", "Reset", "Remove", "Move Up", "Move Down"];
+    let (mut h, fx) = harness("zh-hans");
+    open_effect_menu(&mut h, fx);
+    for label in ["复制", "粘贴", "重复", "重命名", "重置", "移除", "上移", "下移"] {
+        assert!(h.query_by_label(label).is_some(), "{label} missing from the effect menu");
+    }
+    for label in ENGLISH {
+        assert!(h.query_by_label(label).is_none(), "{label} drawn in English");
+    }
+
+    let (mut en, fx) = harness("en");
+    open_effect_menu(&mut en, fx);
+    for label in ENGLISH {
+        assert!(en.query_by_label(label).is_some(), "{label} missing from the English menu");
+    }
+}
+
 /// Everything an agent or a script addresses stays English: the automation label, the property
 /// tree's group name and `effect.list`.
 #[test]

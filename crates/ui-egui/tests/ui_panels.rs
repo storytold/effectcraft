@@ -67,6 +67,26 @@ fn window_menu_opens_the_new_panels() {
     }
 }
 
+/// #1630: choosing a checked panel in the Window menu closes it, as in After Effects (it only
+/// brought the panel to the front, so the check mark never went away); choosing it again opens it.
+#[test]
+fn window_menu_closes_a_checked_panel() {
+    let mut h = harness();
+    let shown = |h: &Harness<'_, EffectcraftApp>| {
+        h.state().ui.dock.contains(PanelKind::Align) || h.state().ui.floating.iter().any(|f| f.panels.contains(&PanelKind::Align))
+    };
+    open(&mut h, "align");
+    assert!(shown(&h));
+    click(&mut h, "menu.Window");
+    let at = h.query_by_label("✔ Align").expect("Window ▸ Align, checked").rect().center();
+    click_at(&mut h, at);
+    assert!(!shown(&h), "Align closed");
+    click(&mut h, "menu.Window");
+    let at = h.query_by_label(" Align").expect("Window ▸ Align, unchecked").rect().center();
+    click_at(&mut h, at);
+    assert!(shown(&h), "Align open again");
+}
+
 #[test]
 fn scopes_switch_kind() {
     let mut h = harness();
@@ -123,6 +143,15 @@ fn click_at(h: &mut Harness<'_, EffectcraftApp>, p: Pos2) {
     h.step();
     h.input_mut().events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
     h.run_steps(2);
+}
+
+fn double_click_at(h: &mut Harness<'_, EffectcraftApp>, pos: Pos2) {
+    h.input_mut().events.push(Event::PointerMoved(pos));
+    h.step();
+    for pressed in [true, false, true, false] {
+        h.input_mut().events.push(Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() });
+    }
+    h.run_steps(3);
 }
 
 fn hover(h: &mut Harness<'_, EffectcraftApp>, p: Pos2) {
@@ -504,6 +533,83 @@ fn properties_scale_link_shares_the_timeline_state() {
     // Re-linking clears it again.
     click(&mut h, &link);
     assert!(!h.state().ui.timeline.unlinked.contains(&uid), "re-linking clears the shared state");
+}
+
+#[test]
+fn properties_label_double_click_reveals_without_editing() {
+    let mut h = harness();
+    let layer = h.state().session.active_comp().unwrap().layers[0].id;
+    let other = h.state_mut().session.execute("layer.newSolid", json!({"name": "Other", "color": "#204060"})).unwrap()["layer"].as_u64().unwrap();
+    h.state_mut().session.execute("prop.addKey", json!({"layer": layer.0, "path": "transform/opacity", "time": 1.0, "value": 50.0})).unwrap();
+    h.state_mut().session.execute("layer.select", json!({"layers": [layer.0]})).unwrap();
+    let comp = h.state().session.active_comp().unwrap();
+    let opacity = comp.layer(layer).unwrap().props.prop("transform/opacity").unwrap().uid;
+    let other_scale = comp.layers.iter().find(|l| l.id.0 == other).unwrap().props.prop("transform/scale").unwrap().uid;
+    let ctx = h.ctx.clone();
+    effectcraft_ui_egui::menus::frontend(h.state_mut(), &ctx, "timeline.revealProps", json!({"props": [{"layer": other, "prop": other_scale}]})).unwrap();
+    open(&mut h, "properties");
+    open(&mut h, "renderQueue");
+    h.state_mut().ui.timeline.search = "no matching property".into();
+    h.run_steps(3);
+    let value = h.state().auto.find(&format!("properties.prop.{opacity}.value")).unwrap().rect;
+    let label = pos2(value[0] - 60.0, value[1] + value[3] / 2.0);
+    let row = format!("timeline.prop.{opacity}.row");
+    click_at(&mut h, label);
+    assert_eq!(h.state().ui.timeline.search, "no matching property");
+    assert!(h.state().auto.find(&row).is_none());
+    h.run_steps(30);
+    let before = serde_json::to_value(h.state().session.project.as_ref()).unwrap();
+    let undo = h.state().session.history.undo.len();
+    let selected = h.state().session.state.selected_layers.clone();
+    for _ in 0..2 {
+        double_click_at(&mut h, label);
+        assert!(h.state().auto.find(&row).is_some(), "Opacity is visible for keyframing");
+        assert!(h.state().auto.find(&format!("timeline.prop.{other_scale}.row")).is_some(), "the other layer keeps its reveal");
+        assert_eq!(h.state().ui.timeline.search, "");
+        h.run_steps(30);
+    }
+    assert_eq!(serde_json::to_value(h.state().session.project.as_ref()).unwrap(), before, "revealing preserves values and keyframes");
+    assert_eq!(h.state().session.history.undo.len(), undo);
+    assert_eq!(h.state().session.state.selected_layers, selected);
+}
+
+#[test]
+fn properties_reveal_scrolls_to_the_displayed_layer_in_a_multiple_selection() {
+    let mut h = harness();
+    let layer = h.state().session.active_comp().unwrap().layers[0].id;
+    for _ in 0..40 {
+        h.state_mut().session.execute("layer.newSolid", json!({"name": "Spacer", "color": "#204060"})).unwrap();
+    }
+    let top = h.state().session.active_comp().unwrap().layers[0].id;
+    h.state_mut().session.execute("layer.select", json!({"layers": [layer.0, top.0]})).unwrap();
+    let uid = h.state().session.active_comp().unwrap().layer(layer).unwrap().props.prop("transform/opacity").unwrap().uid;
+    open(&mut h, "properties");
+    h.state_mut().toggle_maximize(PanelKind::Properties);
+    h.run_steps(3);
+    let r = h.state().auto.find(&format!("properties.prop.{uid}.label")).unwrap().rect;
+    double_click_at(&mut h, pos2(r[0] + r[2] / 2.0, r[1] + r[3] / 2.0));
+    assert!(h.state().auto.find(&format!("timeline.prop.{uid}.row")).is_some(), "the displayed layer's property is in view");
+    assert_eq!(h.state().session.state.selected_layers, [layer, top]);
+}
+
+#[test]
+fn properties_transform_labels_reveal_the_corresponding_property() {
+    let mut h = harness();
+    let layer = h.state().session.active_comp().unwrap().layers[0].id;
+    h.state_mut().session.execute("layer.select", json!({"layers": [layer.0]})).unwrap();
+    let props: Vec<u64> =
+        h.state().session.active_comp().unwrap().layer(layer).unwrap().transform().unwrap().props().filter(|p| !p.three_d_only).map(|p| p.uid).collect();
+    open(&mut h, "properties");
+    for uid in &props {
+        h.state_mut().ui.timeline.open_layers.remove(&layer.0);
+        h.run_steps(30);
+        assert!(h.state().auto.find(&format!("timeline.prop.{uid}.row")).is_none());
+        let r = h.state().auto.find(&format!("properties.prop.{uid}.label")).unwrap().rect;
+        double_click_at(&mut h, pos2(r[0] + r[2] / 2.0, r[1] + r[3] / 2.0));
+        for candidate in &props {
+            assert_eq!(h.state().auto.find(&format!("timeline.prop.{candidate}.row")).is_some(), candidate == uid);
+        }
+    }
 }
 
 /// Gap 7: the Backgrounds category is listed under * Animation Presets and a preset applies on double-click.

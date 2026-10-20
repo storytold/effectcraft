@@ -204,6 +204,28 @@ fn echo_and_posterize_time() {
 }
 
 #[test]
+fn echo_after_star_burst_preserves_the_stars() {
+    for depth in [BitDepth::Bpc8, BitDepth::Bpc32] {
+        for operator in 0..7 {
+            for posterize in [false, true] {
+                let mut s = Scene::new(depth);
+                let mut l = s.solid([1.0; 3], 97, 61);
+                s.effect(&mut l, "ec.sim.ccstarburst", &[("gridSpacing", n(8.0)), ("size", n(40.0))]);
+                s.effect(&mut l, "ec.time.echo", &[("numberOfEchoes", n(2.0)), ("echoTime", n(-0.1)), ("decay", n(0.6)), ("echoOperator", e(operator))]);
+                if posterize {
+                    s.effect(&mut l, "ec.time.posterizetime", &[("frameRate", n(4.0))]);
+                }
+                s.push(l);
+                let t = Tick::from_seconds_f64(0.6);
+                let label = format!("Star Burst + Echo {operator} posterize={posterize} {depth:?}");
+                check(&label, compare_at(&s, opts(), t), 0.0);
+                check(&format!("{label} half"), compare_at(&s, RenderOpts { scale: 0.5, ..opts() }, t), 0.0);
+            }
+        }
+    }
+}
+
+#[test]
 fn median_levels_match_cpu_division() {
     let Some(g) = crate::tests::gpu() else { return };
     let mut image = effectcraft_raster::Image::new(512, 1);

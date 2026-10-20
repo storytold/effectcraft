@@ -49,18 +49,29 @@ pub(crate) fn hold_gpu_lock() {
 
 /// The shared test device (the calling test holds [`hold_gpu_lock`]).
 pub(crate) fn gpu() -> Option<&'static Gpu> {
-    static G: OnceLock<Option<Gpu>> = OnceLock::new();
+    static G: OnceLock<Result<Gpu, String>> = OnceLock::new();
     hold_gpu_lock();
-    G.get_or_init(|| {
-        let g = Gpu::headless();
-        if g.is_none() {
-            eprintln!("effectcraft-gpu tests: no GPU adapter, skipping GPU comparisons");
-        } else if let Some(g) = &g {
-            eprintln!("effectcraft-gpu tests: adapter {}", g.ctx.name);
+    let g = G.get_or_init(|| {
+        let g = Gpu::try_headless();
+        match &g {
+            Ok(g) => eprintln!("effectcraft-gpu tests: adapter {}", g.ctx.name),
+            Err(e) => eprintln!("effectcraft-gpu tests: no GPU ({e}), skipping GPU comparisons"),
         }
         g
-    })
-    .as_ref()
+    });
+    require_gpu("effectcraft-gpu tests", g.as_ref())
+}
+
+/// `g`, or `None` (the GPU tests skip) when there is no GPU, unless `EFFECTCRAFT_REQUIRE_GPU=1`
+/// (as in `tests_init`): then a GPU that didn't start fails the test, with why.
+pub(crate) fn require_gpu<G>(tests: &str, g: Result<G, &String>) -> Option<G> {
+    match g {
+        Ok(g) => Some(g),
+        Err(e) if std::env::var("EFFECTCRAFT_REQUIRE_GPU").is_ok_and(|v| v == "1") => {
+            panic!("{tests}: EFFECTCRAFT_REQUIRE_GPU=1 but GPU initialization failed: {e}")
+        }
+        Err(_) => None,
+    }
 }
 
 /// The test device is on wgpu's OpenGL backend (Mesa's llvmpipe on the FreeBSD CI job).
@@ -1043,4 +1054,20 @@ fn static_effect_layers_draw_from_the_cache() {
     }
     assert!(frames[1] == frames[2]);
     check("static effect layer vs CPU", compare_at(&s, opts(), t(2)), 0.0);
+}
+
+/// The layer upload cache drops the textures of freed buffers when it inserts, not only once
+/// it is over budget (an animated layer makes a new buffer every frame).
+#[test]
+fn upload_cache_drops_textures_of_freed_buffers() {
+    let Some(g) = gpu() else { return };
+    let img = effectcraft_raster::Image::new(256, 256);
+    let before = g.ctx.upload_entries();
+    for _ in 0..6 {
+        let buf = std::sync::Arc::new(effectcraft_effects::Buf { img: img.clone(), offset: [0.0; 2], scale: 1.0 });
+        let up = g.ctx.upload_buf(&buf).expect("upload");
+        drop((up, buf));
+    }
+    let kept = g.ctx.upload_entries();
+    assert!(kept <= before + 1, "the upload cache kept {kept} textures of freed buffers (had {before})");
 }

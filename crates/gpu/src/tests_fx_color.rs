@@ -29,6 +29,7 @@ fn color_balance_vibrance_tritone_mixer() {
 fn black_white_colorama_selective_color() {
     effect_case("ec.color.blackwhite", &[]);
     effect_case("ec.color.blackwhite", &[("reds", n(120.0)), ("blues", n(-50.0)), ("cyans", n(200.0)), ("tint", on())]);
+    effect_case("ec.color.blackwhite", &[("yellows", n(300.0)), ("greens", n(-200.0)), ("magentas", n(0.0))]);
     effect_case("ec.color.colorama", &[]);
     effect_case("ec.color.colorama", &[("inputPhase/mode", e(4)), ("inputPhase/phaseShift", n(75.0)), ("outputCycle/cycles", n(2.5)), ("blend", n(40.0))]);
     effect_case("ec.color.colorama", &[("inputPhase/mode", e(8)), ("outputCycle/cycles", n(1.3))]);
