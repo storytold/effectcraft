@@ -356,13 +356,12 @@ fn find_missing(s: &mut Session, p: &Value) -> Result<Value> {
             Ok(json!({"effects": found}))
         }
         "fonts" => {
-            let families = crate::text_families();
             let mut found = vec![];
             for (cid, c) in s.project.comps() {
                 for l in &c.layers {
                     if let Some(pr) = l.props.prop("text/sourceText")
                         && let Some(doc) = pr.value.as_text()
-                        && !families.iter().any(|f| f.eq_ignore_ascii_case(&doc.font))
+                        && effectcraft_text::resolve(&doc.font, &doc.style).missing
                     {
                         found.push(json!({"comp": cid.0, "layer": l.id.0, "font": doc.font}));
                     }
@@ -856,12 +855,15 @@ fn replace_footage(s: &mut Session, p: &Value) -> Result<Value> {
     // Replacing a missing file relinks the other missing files that moved with it (as After Effects
     // does when you locate one).
     let moved = match s.project.item(item).map(|it| &it.kind) {
-        Some(ItemKind::Footage(previous)) if previous.missing || !s.services.exists(&previous.path) => {
+        Some(ItemKind::Footage(previous)) if previous.missing || !s.stored_paths.exists(s.services.as_ref(), &previous.path) => {
             super::relink_moved::moved_with(s, item, &previous.path, &path)
         }
         _ => vec![],
     };
     let relinked: Vec<u64> = moved.iter().map(|(id, _)| id.0).collect();
+    for nf in std::iter::once(&f).chain(moved.iter().map(|(_, nf)| nf)) {
+        s.stored_paths.allow(nf);
+    }
     s.edit("Replace Footage", None, |proj, _| {
         let it = proj.item_mut(item).ok_or_else(|| bad("file.replaceFootage", "no such item"))?;
         it.name = name;
@@ -947,7 +949,7 @@ fn reveal_in_finder(s: &mut Session, p: &Value) -> Result<Value> {
         Some(ItemKind::Footage(f)) if !f.path.is_empty() => f.path.clone(),
         _ => return Err(bad("file.revealInFinder", "the item is not a file")),
     };
-    let url = super::layer_menu::folder_url(&path);
+    let url = super::layer_menu::reveal_url(s, &path).map_err(|e| bad("file.revealInFinder", e))?;
     s.events.push(crate::Event::OpenUrl(url.clone()));
     Ok(json!({"url": url}))
 }

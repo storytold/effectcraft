@@ -111,6 +111,38 @@ fn set_switch_others() {
     assert!(s.execute("layer.setSwitch", json!({"layers": [c], "switch": "nope", "others": true})).is_err());
 }
 
+/// A null's Video switch (the eye) works like any layer's, as in After Effects: it toggles,
+/// Alt-click and Hide Other Video take nulls along, and its children still follow it while it is
+/// hidden (parenting ignores the eye).
+#[test]
+fn null_video_switch() {
+    let mut s = comp();
+    let a = solid(&mut s, "#ff0000");
+    let n = s.execute("layer.newNull", json!({})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.setSwitch", json!({"layers": [n], "switch": "video"})).unwrap();
+    assert!(!layer(&s, n).switches.video);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert!(layer(&s, n).switches.video);
+    // Alt-click on the solid's eye hides the null too; on the null's, the solid.
+    s.execute("layer.setSwitch", json!({"layers": [a], "switch": "video", "others": true})).unwrap();
+    assert!(layer(&s, a).switches.video && !layer(&s, n).switches.video);
+    s.execute("layer.setSwitch", json!({"layers": [n], "switch": "video", "others": true})).unwrap();
+    assert!(!layer(&s, a).switches.video && layer(&s, n).switches.video);
+    s.execute("layer.showAllVideo", json!({})).unwrap();
+    s.execute("layer.hideOtherVideo", json!({"layers": [a]})).unwrap();
+    assert!(layer(&s, a).switches.video && !layer(&s, n).switches.video);
+    // The hidden null still carries its child.
+    s.execute("layer.setParent", json!({"layers": [a], "parent": n})).unwrap();
+    s.execute("prop.set", json!({"layer": n, "path": "transform/position", "value": [420, 180, 0]})).unwrap();
+    let cid = s.active_comp_id().unwrap();
+    let c = s.project.comp(cid).unwrap().clone();
+    let ctx = effectcraft_render::EvalCtx::new(&s.project, cid, &c, Tick::ZERO);
+    let child = c.layer(effectcraft_project::LayerId(a)).unwrap();
+    let (m, _) = ctx.layer_to_comp(child);
+    let centre = m.apply(effectcraft_geom::vec2(100.0, 50.0));
+    assert!((centre.x - 420.0).abs() < 1e-6 && (centre.y - 180.0).abs() < 1e-6, "{centre:?}");
+}
+
 #[test]
 fn layer_switches_menu() {
     let mut s = comp();
@@ -433,8 +465,10 @@ fn copy_a_selected_property_pastes_onto_the_same_property() {
     s.execute("prop.toggleAnimation", json!({"layer": a, "path": "transform/opacity"})).unwrap();
     s.execute("time.set", json!({"time": 1.0})).unwrap();
     s.execute("prop.set", json!({"layer": a, "path": "transform/opacity", "value": 0})).unwrap();
+    s.execute("prop.select", json!({"layer": a, "path": "transform/opacity"})).unwrap();
+    assert_eq!(s.state.selected_keys.len(), 2);
     let transform = layer(&s, a).props.sub("transform").unwrap().uid;
-    s.execute("prop.select", json!({"layer": a, "prop": transform})).unwrap();
+    s.execute("prop.select", json!({"layer": a, "prop": transform, "selectKeys": false})).unwrap();
     s.execute("edit.copy", json!({})).unwrap();
     s.execute("layer.select", json!({"layers": [b]})).unwrap();
     s.execute("time.set", json!({"time": 2.0})).unwrap();
@@ -704,6 +738,21 @@ fn sequence_layers() {
     assert!((layer(&s, b).in_point.seconds() - 1.5).abs() < 1e-6);
     assert!((layer(&s, c).in_point.seconds() - 4.0).abs() < 1e-6);
     assert_eq!(layer(&s, c).props.prop("transform/opacity").unwrap().keys.len(), 2);
+}
+
+/// File ▸ Dependencies ▸ Find Missing Fonts lists a text layer only when no face matches its
+/// font by family, PostScript or full name.
+#[test]
+fn fonts_named_by_their_postscript_or_full_name_are_not_missing() {
+    let mut s = comp();
+    // The first three name bundled faces by family, PostScript and full name; no face has the fourth.
+    let fonts = ["Noto Serif", "Inter-Bold", "Inter SemiBold", "No Such Font Family 123"];
+    let ids: Vec<u64> = fonts.iter().map(|f| s.execute("layer.newText", json!({"text": "Aa", "font": f})).unwrap()["layer"].as_u64().unwrap()).collect();
+    let r = s.execute("file.findMissing", json!({"what": "fonts"})).unwrap();
+    let listed: Vec<(u64, &str)> = r["fonts"].as_array().unwrap().iter().map(|f| (f["layer"].as_u64().unwrap(), f["font"].as_str().unwrap())).collect();
+    assert_eq!(listed, [(ids[3], fonts[3])], "{r}");
+    let f = s.execute("text.fontFeatures", json!({"layer": ids[1]})).unwrap();
+    assert_eq!((&f["family"], &f["style"], &f["missing"]), (&json!("Inter"), &json!("Bold"), &json!(false)), "{f}");
 }
 
 #[test]
@@ -1396,6 +1445,60 @@ fn keys_from_several_layers_paste_in_order_and_paste_reversed_respects_stretch()
     assert_eq!(vals, vec![10.0, 0.0], "reversed");
 }
 
+/// #1425: a mask path (its value, or a keyframe of it) pasted onto Position becomes a motion
+/// path, as in After Effects: a key per vertex with the path's tangents, over 2 s from the CTI,
+/// the inner keys roving; a closed path returns to its start. AE pastes the layer-space numbers
+/// as they are, so the source layer's and the target parent's transforms don't move them.
+#[test]
+fn a_copied_path_pastes_onto_position_as_a_motion_path() {
+    let mut s = comp();
+    let a = solid(&mut s, "#ff0000");
+    // A moved and scaled source: converting to comp space would give 2v + (200, 100).
+    s.execute("prop.set", json!({"layer": a, "path": "transform/position", "value": [400, 200]})).unwrap();
+    s.execute("prop.set", json!({"layer": a, "path": "transform/scale", "value": [200, 200]})).unwrap();
+    let rect = json!([[0, 0], [40, 0], [40, 40], [0, 40]]);
+    s.execute("mask.new", json!({"layer": a, "vertices": rect.clone(), "outTangents": [[10, 0]], "closed": true})).unwrap();
+    // B's parent would shift a converted Position by (0, −50).
+    let parent = solid(&mut s, "#0000ff");
+    s.execute("prop.set", json!({"layer": parent, "path": "transform/position", "value": [100, 100]})).unwrap();
+    let b = solid(&mut s, "#00ff00");
+    s.execute("layer.setParent", json!({"layers": [b], "parent": parent})).unwrap();
+    let motion = |s: &Session, id: u64| {
+        let l = layer(s, id);
+        let pr = l.props.prop("transform/position").unwrap().clone();
+        pr.keys.iter().map(|k| (l.comp_time(k.time).seconds(), k.value.as_vec3(), k.spatial_out, k.roving)).collect::<Vec<_>>()
+    };
+    let check = |keys: Vec<(f64, [f64; 3], [f64; 3], bool)>, t0: f64| {
+        let want = [[0.0, 0.0], [40.0, 0.0], [40.0, 40.0], [0.0, 40.0], [0.0, 0.0]];
+        assert_eq!(keys.len(), 5, "a key per vertex and the closing one: {keys:?}");
+        for (i, ((t, v, _, roving), w)) in keys.iter().zip(want).enumerate() {
+            assert!((v[0] - w[0]).abs() < 1e-6 && (v[1] - w[1]).abs() < 1e-6, "key {i}: {v:?}");
+            assert_eq!(*roving, i != 0 && i != 4, "key {i} roving");
+            assert!(*t > t0 - 1e-6 && *t < t0 + 2.0 + 1e-6, "key {i} at {t}");
+        }
+        assert!((keys[0].0 - t0).abs() < 1e-6 && (keys[4].0 - t0 - 2.0).abs() < 1e-6, "2 s from the CTI");
+        assert!(keys.windows(2).all(|w| w[0].0 < w[1].0));
+        assert_eq!(keys[0].2[..2], [10.0, 0.0], "the path's tangent");
+    };
+    // A Mask Path keyframe, pasted at 1 s.
+    s.execute("prop.toggleAnimation", json!({"layer": a, "path": "masks/#1/path"})).unwrap();
+    s.execute("prop.select", json!({"layer": a, "path": "masks/#1/path"})).unwrap();
+    s.execute("edit.copy", json!({})).unwrap();
+    s.execute("time.set", json!({"time": 1.0})).unwrap();
+    s.execute("prop.select", json!({"layer": b, "path": "transform/position"})).unwrap();
+    s.execute("edit.paste", json!({})).unwrap();
+    check(motion(&s, b), 1.0);
+    // The same path as an unanimated mask, pasted at 5 s onto an unparented layer.
+    s.execute("mask.new", json!({"layer": a, "vertices": rect, "outTangents": [[10, 0]], "closed": true})).unwrap();
+    s.execute("prop.select", json!({"layer": a, "path": "masks/#2/path"})).unwrap();
+    s.execute("edit.copy", json!({})).unwrap();
+    let c = solid(&mut s, "#ffffff");
+    s.execute("time.set", json!({"time": 5.0})).unwrap();
+    s.execute("prop.select", json!({"layer": c, "path": "transform/position"})).unwrap();
+    s.execute("edit.paste", json!({})).unwrap();
+    check(motion(&s, c), 5.0);
+}
+
 #[test]
 fn j_and_k_stop_at_keys_markers_and_the_work_area() {
     let mut s = comp();
@@ -1492,6 +1595,40 @@ fn shape_contents_copy_cut_and_paste_between_shape_layers() {
     assert!(s.execute("edit.paste", json!({})).is_err());
 }
 
+/// Pasting Trim Paths into another shape layer with nothing selected puts it below the shapes,
+/// where it acts on them (it acts on the items above it); on top it would trim nothing (#1681, #1629).
+#[test]
+fn pasted_path_operator_goes_below_the_shapes_it_acts_on() {
+    let mut s = comp();
+    let a = s.execute("layer.newShape", json!({"kind": "rect"})).unwrap()["layer"].as_u64().unwrap();
+    let trim = s.execute("layer.addShapeItem", json!({"layer": a, "kind": "trim"})).unwrap()["uid"].as_u64().unwrap();
+    let b = s.execute("layer.newShape", json!({"kind": "star", "name": "B"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("prop.select", json!({"layer": a, "prop": trim})).unwrap();
+    s.execute("edit.copy", json!({})).unwrap();
+    s.execute("layer.select", json!({"layers": [b]})).unwrap();
+    s.execute("edit.paste", json!({})).unwrap();
+    assert_eq!(contents_names(&s, b), ["Polystar 1", "Trim Paths 1"]);
+}
+
+/// Pasting Merge Paths onto a painted layer with nothing selected keeps the paint: the renderer
+/// drops the draws above a Merge Paths, so it goes between the path and the paints (#1681).
+#[test]
+fn pasted_merge_paths_keeps_the_targets_paint() {
+    let mut s = comp();
+    let a = s.execute("layer.newShape", json!({"kind": "none", "name": "A"})).unwrap()["layer"].as_u64().unwrap();
+    let merge = s.execute("layer.addShapeItem", json!({"layer": a, "kind": "merge"})).unwrap()["uid"].as_u64().unwrap();
+    let b = s.execute("layer.newShape", json!({"kind": "none", "name": "B"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.addShapeItem", json!({"layer": b, "kind": "rect"})).unwrap();
+    s.execute("layer.addShapeItem", json!({"layer": b, "kind": "fill"})).unwrap();
+    let before = opaque_centroid(&s).2;
+    s.execute("prop.select", json!({"layer": a, "prop": merge})).unwrap();
+    s.execute("edit.copy", json!({})).unwrap();
+    s.execute("layer.select", json!({"layers": [b]})).unwrap();
+    s.execute("edit.paste", json!({})).unwrap();
+    assert_eq!(contents_names(&s, b), ["Rectangle Path 1", "Merge Paths 1", "Fill 1"]);
+    assert_eq!(opaque_centroid(&s).2, before);
+}
+
 /// Edit ▸ Duplicate with shape items selected duplicates them in their layer, above the
 /// original and named "Rectangle 2", not the layer (#227).
 #[test]
@@ -1554,6 +1691,31 @@ fn interpret_footage_loop_extends_video_layers() {
     assert_eq!(out(&s, after), 6.0, "a new layer plays every loop");
     assert_eq!(out(&s, before), 6.0, "a layer that ran to the clip's end still does");
     assert_eq!(s.project.item(effectcraft_project::ItemId(p)).unwrap().duration(), Some(Tick::from_seconds_f64(6.0)));
+}
+
+/// #1068: the same for an interpreted PNG sequence — the loop count survives interpretation and
+/// a freshly dragged layer plays every cycle.
+#[test]
+fn interpret_footage_loop_extends_sequence_layers() {
+    let mut s = comp();
+    let p = s.execute("file.importPlaceholder", json!({"name": "Seq", "width": 320, "height": 240, "duration": 0.4})).unwrap()["item"].as_u64().unwrap();
+    let id = effectcraft_project::ItemId(p);
+    // Make it a sequence like the importer's grouped PNGs.
+    s.edit("Seq", None, |proj, _| {
+        if let Some(ItemKind::Footage(f)) = proj.item_mut(id).map(|i| &mut i.kind) {
+            f.kind = effectcraft_project::FootageKind::Sequence;
+            f.sequence = (0..12).map(|n| format!("/tmp/seq_{n:04}.png")).collect();
+            f.sync_sequence_duration();
+        }
+        Ok(())
+    })
+    .unwrap();
+    s.state.project_selection = vec![id];
+    s.execute("file.interpretFootage", json!({"loop": 15.0})).unwrap();
+    let l = s.execute("layer.addItem", json!({"item": p})).unwrap()["layer"].as_u64().unwrap();
+    let layer = s.active_comp().unwrap().layer(effectcraft_project::LayerId(l)).unwrap();
+    let dur = (layer.out_point - layer.in_point).seconds();
+    assert!((dur - 6.0).abs() < 0.05, "15 loops of a 0.4 s sequence: {dur}");
 }
 
 #[test]

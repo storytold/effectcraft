@@ -589,7 +589,7 @@ pub fn specs() -> Vec<EffectSpec> {
                 p("meshColor", "Mesh Color", col(0.5, 0.5, 0.5), ParamUi::Color),
                 // The strokes (see `LiquifyStroke`); written by the `liquify.stroke` command.
                 p("distortionMesh", "Distortion Mesh", Value::Str(String::new()), ParamUi::Hidden),
-                p("distortionMeshOffset", "Distortion Mesh Offset", Value::Vec2([0.0, 0.0]), ParamUi::Hidden),
+                p("distortionMeshOffset", "Distortion Mesh Offset", Value::Vec2([0.0, 0.0]), ParamUi::Point),
                 p("distortionPercentage", "Distortion Percentage", num(100.0), slider(0.0, 200.0, 0.0, 200.0, 1)),
                 p("distortionDisplayQuality", "Distortion Display Quality", Value::Enum(1), popup(&["Draft", "Smooth"])),
             ],
@@ -672,6 +672,35 @@ mod tests {
         assert_eq!(zero.img.data, img.data);
         let again = run_fx("ec.distort.liquify", &[("distortionMesh", Value::Str(s.to_line()))], img.clone(), 0.0, EffectEnv::default());
         assert_eq!(out.img.data, again.img.data);
+        // #1194: Distortion Mesh Offset is an exposed, editable control (AE's Distortion ▸
+        // Offset) and it moves the mesh: the pattern rendered at x renders at x + offset.
+        let spec = crate::find("ec.distort.liquify").unwrap();
+        assert!(
+            spec.params.iter().any(|ps| ps.id == "distortionMeshOffset" && ps.ui == effectcraft_project::ParamUi::Point),
+            "offset is shown in Effect Controls"
+        );
+        let shifted = run_fx(
+            "ec.distort.liquify",
+            &[("distortionMesh", Value::Str(s.to_line())), ("distortionMeshOffset", Value::Vec2([20.0, 0.0]))],
+            img.clone(),
+            0.0,
+            EffectEnv::default(),
+        );
+        assert_ne!(shifted.img.data, out.img.data, "the offset changes the render");
+        // The displaced region's centroid moves right by the offset (the mesh is sampled at
+        // layer minus offset), and the row far left of the shifted mesh is back to untouched.
+        let centroid = |o: &Image| -> f32 {
+            let (mut wsum, mut msum) = (0.0f32, 0.0f32);
+            for (i, (p, q)) in o.data.iter().zip(img.data.iter()).enumerate() {
+                let d: f32 = (0..4).map(|k| (p[k] - q[k]).abs()).sum();
+                wsum += d;
+                msum += d * (i % 64) as f32;
+            }
+            if wsum > 1e-6 { msum / wsum } else { 0.0 }
+        };
+        let (co, cs) = (centroid(&out.img), centroid(&shifted.img));
+        assert!((cs - co - 20.0).abs() < 5.0, "centroids {co} -> {cs}");
+        assert_eq!(shifted.img.get(5, 32), img.get(5, 32), "left of the shifted mesh: untouched");
         // Reconstruction undoes the warp; freeze protects.
         let mut rec = s.clone();
         rec.tool = 9;

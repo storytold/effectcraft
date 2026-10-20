@@ -173,7 +173,7 @@ impl VirtualTree {
                 })
             })
             .collect();
-        out.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+        sort_entries(&mut out);
         Ok(out)
     }
 }
@@ -191,6 +191,10 @@ pub struct Entry {
     /// Footage kind guessed from the extension (`video`, `image`, `audio`, `data`, `model`,
     /// `project`), `None` for other files and folders.
     pub kind: Option<&'static str>,
+}
+
+fn sort_entries(entries: &mut [Entry]) {
+    entries.sort_by_cached_key(|e| (!e.is_dir, e.name.to_lowercase()));
 }
 
 const VIDEO: &[&str] = &["mp4", "m4v", "mov", "webm", "mkv", "avi", "mxf", "gif"];
@@ -251,7 +255,7 @@ pub fn list(dir: &str, importable_only: bool) -> Result<Vec<Entry>, String> {
             Some(Entry { name, path, is_dir: md.is_dir(), size: if md.is_dir() { 0 } else { md.len() }, modified: unix(md.modified()), kind })
         })
         .collect();
-    out.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+    sort_entries(&mut out);
     Ok(out)
 }
 
@@ -302,7 +306,7 @@ fn kind_name(k: FootageKind) -> &'static str {
 
 /// Metadata of footage (the fields the Metadata panel lists).
 pub fn footage_metadata(f: &Footage) -> Value {
-    let (created, modified, size) = file_dates(f.sequence.first().map(String::as_str).unwrap_or(&f.path));
+    let (created, modified, size) = if f.missing { (None, None, None) } else { file_dates(f.sequence.first().map(String::as_str).unwrap_or(&f.path)) };
     json!({
         "path": f.path,
         "kind": kind_name(f.kind),
@@ -312,7 +316,9 @@ pub fn footage_metadata(f: &Footage) -> Value {
         "pixelAspect": f.pixel_aspect,
         "frameRate": f.frame_rate.as_f64(),
         "duration": f.duration.seconds(),
-        "frames": if f.has_video && f.kind != FootageKind::Still { Some(f.frame_rate.frame_at(f.duration)) } else { None },
+        // Rounded like the media pool's frame count: Matroska stores the duration in whole
+        // milliseconds, a hair short of the last frame at 30 fps (#1429).
+        "frames": if f.has_video && f.kind != FootageKind::Still { Some(f.frame_rate.frame_at(f.frame_rate.snap_nearest(f.duration))) } else { None },
         "hasVideo": f.has_video,
         "hasAudio": f.has_audio,
         "alpha": format!("{:?}", f.alpha),
@@ -407,6 +413,10 @@ mod tests {
         assert_eq!(media.len(), 3);
         assert_eq!(parent(&dir.join("Shots").to_string_lossy()).as_deref(), Some(d.as_str()));
         assert!(list(&dir.join("nope").to_string_lossy(), false).is_err());
+        std::fs::write(dir.join("Ω.csv"), b"x").unwrap();
+        std::fs::write(dir.join("作品.csv"), b"x").unwrap();
+        let all = list(&d, false).unwrap();
+        assert_eq!(all.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["Shots", "A.mov", "b.png", "notes.txt", "Ω.csv", "作品.csv"]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -434,6 +444,61 @@ mod tests {
         assert_eq!(names(&t, "/Folders", false), ["Empty"]);
         assert_eq!(vparent("/a"), Some("/"));
         assert_eq!(vparent("/"), None);
+    }
+
+    #[test]
+    fn listings_keep_folders_first_and_stable_unicode_order() {
+        let mut tree = VirtualTree::default();
+        for name in ["作品.csv", "ä.csv", "Ä.csv", "İ.csv", "B.csv", "a.csv", "A.csv"] {
+            tree.add_file(&format!("/Shoot/{name}"), &format!("/files/{name}"), 1, None);
+        }
+        for name in ["zFolder", "Alpha"] {
+            tree.add_dir(&format!("/Shoot/{name}"));
+        }
+        let entries = tree.list("/Shoot", true).unwrap();
+        assert_eq!(
+            entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+            ["Alpha", "zFolder", "A.csv", "a.csv", "B.csv", "İ.csv", "Ä.csv", "ä.csv", "作品.csv"]
+        );
+        assert_eq!(entries[2].path, "/files/A.csv");
+        let mut reversed = entries.iter().rev().cloned().collect::<Vec<_>>();
+        sort_entries(&mut reversed);
+        assert_eq!(
+            reversed.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+            ["Alpha", "zFolder", "a.csv", "A.csv", "B.csv", "İ.csv", "ä.csv", "Ä.csv", "作品.csv"]
+        );
+    }
+
+    #[test]
+    #[ignore = "Media Browser filename sorting benchmark"]
+    fn directory_sort_benchmark() {
+        let entries: Vec<_> = (0..1000)
+            .map(|i| Entry {
+                name: format!("作品 {} {:04}.mov", if i % 2 == 0 { "Clip" } else { "clip" }, i * 7919 % 1000),
+                path: format!("/Shoot/{i}.mov"),
+                is_dir: i % 7 == 0,
+                size: 1,
+                modified: None,
+                kind: Some("video"),
+            })
+            .collect();
+        let mut before = Vec::new();
+        let mut after = Vec::new();
+        for _ in 0..5 {
+            let mut old = entries.clone();
+            let start = std::time::Instant::now();
+            old.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+            before.push(start.elapsed());
+            let mut new = entries.clone();
+            let start = std::time::Instant::now();
+            sort_entries(&mut new);
+            after.push(start.elapsed());
+            assert_eq!(old, new);
+            std::hint::black_box(new);
+        }
+        before.sort();
+        after.sort();
+        println!("1,000 filename sort, median: {:?} -> {:?}", before[2], after[2]);
     }
 
     #[test]

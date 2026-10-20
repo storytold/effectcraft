@@ -686,3 +686,50 @@ fn reopening_a_project_restores_its_active_comp() {
         o.insert("openComps".into(), open);
     }
 }
+
+/// Layer times are saved as exact ticks and read back unchanged, and each comp reopens at the
+/// current time it was saved at, not at 0, where a layer starting later shows nothing (#1714).
+#[test]
+fn reopening_a_project_restores_layer_times_and_current_time() {
+    use effectcraft_project::ItemId;
+    use effectcraft_time::{FrameRate, Tick};
+    let dir = std::env::temp_dir().join(format!("ec-test-1714-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("times.ecproj").to_string_lossy().to_string();
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "C", "width": 108, "height": 192, "duration": 60})).unwrap();
+    s.execute("layer.newSolid", json!({"name": "crown"})).unwrap();
+    let cid = s.active_comp_id().unwrap();
+    let comp = std::sync::Arc::make_mut(&mut s.project).comp_mut(cid).unwrap();
+    comp.frame_rate = FrameRate::FPS_59_94;
+    // The layer from the issue: 34f, 315f and 3033f at 59.94 fps.
+    let l = comp.layers.first_mut().unwrap();
+    (l.start_time, l.in_point, l.out_point) = (Tick(144_086_342_400), Tick(1_334_917_584_000), Tick(12_853_349_308_800));
+    s.execute("time.set", json!({"time": 6.0})).unwrap();
+    let t = s.time();
+    // A second comp keeps its own time.
+    let b = ItemId(s.execute("comp.new", json!({"name": "B"})).unwrap()["comp"].as_u64().unwrap());
+    s.execute("time.set", json!({"time": 2.0})).unwrap();
+    let tb = s.time();
+    s.execute("comp.open", json!({"comp": "C"})).unwrap();
+    s.execute("file.saveAs", json!({"path": path})).unwrap();
+
+    let mut s2 = Session::default();
+    s2.execute("file.open", json!({"path": path})).unwrap();
+    let l = s2.project.comp(cid).unwrap().layers.first().unwrap();
+    assert_eq!((l.start_time, l.in_point, l.out_point), (Tick(144_086_342_400), Tick(1_334_917_584_000), Tick(12_853_349_308_800)));
+    assert_eq!((s2.time(), s2.state.times.get(&b).copied()), (t, Some(tb)));
+    assert!(l.in_point <= s2.time() && s2.time() < l.out_point, "the layer shows at the reopened time");
+    assert!(!s2.is_dirty());
+
+    // Hand-edited times past the end or before the start land on the last or first frame.
+    let mut file: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    file["compTimes"] = json!({cid.0.to_string(): i64::MAX, b.0.to_string(): -5});
+    std::fs::write(&path, file.to_string()).unwrap();
+    let mut s3 = Session::default();
+    s3.execute("file.open", json!({"path": path})).unwrap();
+    let c = s3.project.comp(cid).unwrap();
+    assert_eq!(s3.time(), c.frame_rate.snap_nearest(c.duration - c.frame_duration()));
+    assert_eq!(s3.time(), c.frame_rate.snap_nearest(c.duration - c.frame_duration()));
+    assert_eq!(s3.state.times.get(&b).copied(), Some(Tick::ZERO));
+}

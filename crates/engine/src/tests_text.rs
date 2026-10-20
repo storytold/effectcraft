@@ -2,7 +2,7 @@
 //! undo/redo and serde round-trips).
 
 use effectcraft_keyframe::Value as KV;
-use effectcraft_project::{Node, Project, PropGroup};
+use effectcraft_project::{LayerId, Node, Project, PropGroup};
 use serde_json::json;
 
 use crate::Session;
@@ -165,6 +165,64 @@ fn presets_apply_render_and_round_trip() {
 }
 
 #[test]
+fn cached_text_presets_keep_the_catalog_and_application_independent() {
+    let expected = [
+        ("typewriter", "Typewriter"),
+        ("fadeUpCharacters", "Fade Up Characters"),
+        ("bounceInWords", "Bounce In Words"),
+        ("trackingIn", "Tracking In"),
+        ("scramble", "Scramble"),
+        ("blurIn", "Blur In"),
+        ("jitter", "Jitter"),
+        ("dropInLines", "Drop In Lines"),
+    ];
+    let (mut s, layer) = session();
+    let catalog = s.execute("text.presets", json!({})).unwrap();
+    let mut returned = catalog.clone();
+    returned[0]["name"] = json!("Edited copy");
+    let project = s.project.clone();
+    for _ in 0..2 {
+        let names = crate::text_presets();
+        assert_eq!(names.iter().map(|(id, name)| (id.as_str(), name.as_str())).collect::<Vec<_>>(), expected);
+        for (id, _) in expected {
+            let result = s.execute("layer.applyTextPreset", json!({"layer": layer, "preset": id})).unwrap();
+            assert!(!result["animators"].as_array().unwrap().is_empty(), "{id}");
+            s.execute("edit.undo", json!({})).unwrap();
+            assert_eq!(s.project, project, "{id}: undo restores the document");
+        }
+        assert_eq!(s.execute("text.presets", json!({})).unwrap(), catalog);
+    }
+}
+
+#[test]
+#[ignore = "warm text-preset listing benchmark"]
+fn text_preset_listing_benchmark() {
+    let old = || {
+        let v: serde_json::Value = serde_json::from_str(include_str!("../presets/text_animators.json")).unwrap();
+        let presets = v["presets"].as_array().unwrap().clone();
+        presets.iter().map(|p| (p["id"].as_str().unwrap().to_string(), p["name"].as_str().unwrap().to_string())).collect::<Vec<_>>()
+    };
+    assert_eq!(old(), crate::text_presets());
+    let mut before = Vec::new();
+    let mut after = Vec::new();
+    for _ in 0..5 {
+        let start = std::time::Instant::now();
+        for _ in 0..1000 {
+            std::hint::black_box(old());
+        }
+        before.push(start.elapsed());
+        let start = std::time::Instant::now();
+        for _ in 0..1000 {
+            std::hint::black_box(crate::text_presets());
+        }
+        after.push(start.elapsed());
+    }
+    before.sort();
+    after.sort();
+    println!("Text preset names, median per warm lookup: {:?} -> {:?}", before[2] / 1000, after[2] / 1000);
+}
+
+#[test]
 fn menus_have_text_animation_entries() {
     let (s, _) = session();
     let spec = crate::commands::find("layer.enablePerChar3D").unwrap();
@@ -185,4 +243,28 @@ fn menus_have_text_animation_entries() {
     }
     assert!(s.is_enabled("layer.enablePerChar3D"));
     assert!(!s.is_enabled("layer.addTextSelector"), "needs an animator");
+}
+
+/// Duplicate with a Range Selector selected under a text animator copies the selector, not the
+/// whole text layer (#1665); a selected animator is copied the same way.
+#[test]
+fn duplicate_copies_selected_text_selector_not_the_layer() {
+    let (mut s, t) = session();
+    s.execute("layer.addTextAnimator", json!({"layer": t, "properties": ["tracking"]})).unwrap();
+    let anims = |s: &Session| s.active_comp().unwrap().layer(LayerId(t)).unwrap().props.group("text/animators").unwrap().clone();
+    let selectors = |s: &Session| -> Vec<u64> { anims(s).groups().next().unwrap().sub("selectors").unwrap().groups().map(|g| g.uid).collect() };
+    let sel = selectors(&s)[0];
+
+    s.execute("prop.select", json!({"layer": t, "prop": sel, "selectKeys": false})).unwrap();
+    s.execute("edit.duplicate", json!({})).unwrap();
+    assert_eq!(s.active_comp().unwrap().layers.len(), 1, "no second text layer");
+    assert_eq!(selectors(&s).len(), 2, "the selector is copied");
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(selectors(&s), vec![sel]);
+
+    let anim = anims(&s).groups().next().unwrap().uid;
+    s.execute("prop.select", json!({"layer": t, "prop": anim, "selectKeys": false})).unwrap();
+    s.execute("edit.duplicate", json!({})).unwrap();
+    assert_eq!(s.active_comp().unwrap().layers.len(), 1);
+    assert_eq!(anims(&s).groups().count(), 2, "the animator is copied");
 }

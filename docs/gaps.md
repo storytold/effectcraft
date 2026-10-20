@@ -1,6 +1,6 @@
 # Where EffectCraft falls short
 
-> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-12 · **Change:** minor (issue, PR and catalog references gap 21: percentage guides and effect colour labels in; earlier change: re-audited against `upstream/main` 470ea7a3; ranked gap list from the 10 October re-measure otherwise unchanged) · **Target:** Adobe After Effects 2026 (26.5.0.89)
+> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-13 · **Change:** minor (path-editing layer bounds, #1220; issue, PR and catalog references gap 21: percentage guides and effect colour labels in; earlier change: re-audited against `upstream/main` 470ea7a3; ranked gap list from the 10 October re-measure otherwise unchanged) · **Target:** Adobe After Effects 2026 (26.5.0.89)
 
 An honest assessment of how far EffectCraft is from being a real replacement for After Effects,
 and the work that closes the gap. This document is meant for contributors and agents choosing
@@ -64,7 +64,7 @@ are grouped by area; the issue tracker has the rest.
 | 5 | **Playback and scrubbing feel** | #595 stutter on cached frames (partly addressed: nearest-first RAM preview prefetch, cache bars at 1/3 resolution), #304, #504 / #335 audio late or crackling, #586 puppet lag (maintainers asked for details); #329 slow scrubbing (#784) and #554 closed | Preview is where motion designers spend their day | 25–50 h | G5 · [hardware-parity.md](hardware-parity.md) |
 | 6 | **Linux and Windows interaction bugs** | Open: #488 rename arrows (hardening landed, reporter asked for details), #492 anchor drag, #268 file drops on Wayland (winit), #613 Direct3D 12 compositor. Now closed: #491, #493, #467, #320, #302, #596 | Many reports come from Linux; some Windows GPUs fail to start the compositor | 25–45 h | G2 · [ui-parity.md](ui-parity.md) |
 | 7 | **Animation presets: 54 against 621** | After Effects ships 621 `.ffx` presets (Behaviors, Backgrounds, Shapes, Synthetics, Text, Transitions…); we ship 54 original presets (8 text-animator; 23 Transitions: wipes, clock and fan reveals, blinds, dissolves, card flips, CC wipes, fades, #757; 23 Backgrounds: drifting gradients, fog, cloud and smoke, plasma and magma, cells, hexagons, scrolling grids and checks, pulse rings, bokeh, light sweep, #1096, driven by expressions so they keep moving, not seamless loops) and read only our `.ecpreset`. Missing: Behaviors, Shapes, Synthetics, Image and more Text | Presets are how many designers start; tutorials assume them | 15–35 h (original presets; `.ffx` reading is out of clean-room scope) | G8 · [effects-parity.md](effects-parity.md) |
-| 8 | **Mask and shape bugs** | Open: #1004 mask vertex multi-select, #999 auto-pan, #1042 / #1033 vertex nodes under the bounding box, #932 Convert to Bezier Path, #959 / #960 shape group toggles and operators. Now closed: #510, #513, #527, #509, #303, #553 | Masks are core compositing | 10–20 h | G2 · [target-app-parity.md](target-app-parity.md) |
+| 8 | **Mask and shape bugs** | Open: #1004 mask vertex multi-select, #999 auto-pan, #1042 / #1033 vertex nodes under the bounding box, #959 / #960 shape group toggles and operators. Now closed: #510, #513, #527, #509, #303, #553, #932 (Convert To Bezier Path on a shape layer's parametric path) | Masks are core compositing | 10–20 h | G2 · [target-app-parity.md](target-app-parity.md) |
 | 9 | **Effect behaviour bugs** | #580, #463 Curl Noise, #369 Motion Tile output size, #943 Turbulent Displace Evolution, #473 Cryptomatte selection (quoted names with commas fixed, 3b7f1ace; UI and GPU time open), #474 multi-layer EXR (decode shared, faffad3a; f16 storage and cache sizing open). Closed: #526, #514, #533–#536 | Each one breaks a look someone built | 10–20 h | G1/G2 · [effects-parity.md](effects-parity.md) |
 | 10 | **Colour pipeline differences** | #340 ProRes 4444 tagged bt709 but sRGB-encoded (open); ACES 2.0 / OCIO 2.5 configs (26.5) missing; now closed: #494 32-bpc blend modes, #495 and #750 Working Gamma 2.4, #546 / #547 viewer colour | Wrong colour in delivery is a client-visible failure | 15–30 h | G1 · [file-format-parity.md](file-format-parity.md) |
 | 11 | **Text rendering and layout** | Open: #453 CJK text in comps, #316 paragraph alignment inverted (maintainers' tests show Left/Right correct; asked for a project), #417 soft at Fit (mostly fixed by #444), #550 toolbar font options. Closed: #483, #583 | Text is in almost every motion graphic | 10–20 h | G2 · [ui-parity.md](ui-parity.md) |
@@ -77,7 +77,7 @@ are grouped by area; the issue tracker has the rest.
 | 18 | **Relative paths and relinking** | Projects store absolute footage paths; no relink when a project moves | Moving or sharing a project breaks it | 6–12 h | G4 · [file-format-parity.md](file-format-parity.md) |
 | 19 | **Plug-in ecosystem** | No After Effects SDK hosting (#600, #327 OpenFX, #334, #376 plug-in manager); our WebAssembly API has no third-party plug-ins | Many pro projects depend on Trapcode, Element, Saber… | 40–80 h for API growth; SDK hosting needs an owner decision | G8 · [scripting-parity.md](scripting-parity.md) |
 | 20 | **Multi-monitor and video output** | #486: any panel can move into a native window of its own (panel menu ▸ Move Panel to New Window, `window.panelWindow`) and so onto another screen, restored with the workspace; still missing: dragging tabs between those windows, app shortcuts while one has the focus, named workspaces remembering them, Mercury Transmit to video hardware (we have a second preview window only) | Two-screen setups are standard for professionals | 10–20 h | G2 · [hardware-parity.md](hardware-parity.md) |
-| 21 | **Small 26.x features** | Proportional Scrubbing (26.2), pasting Illustrator's own clipboard data as shapes (26.3; SVG markup on the clipboard pastes as a shape layer, #738), variable-font filter (26.3), the rebuilt Effect Controls (26.5). Percentage guides (View ▸ Add Percentage Guide, Convert Guides to Percentage / Pixels) and effect colour labels (Effect Controls header bar and right-click Label menu, `effect.setLabel`) are in (#1095), built from the release notes' one-line descriptions and never compared with After Effects: the Timeline shows no effect label, and the labels' exact UI there is unknown | Users of the current version expect them | 10–20 h left | — · [ui-parity.md](ui-parity.md) |
+| 21 | **Small 26.x features** | Proportional Scrubbing (26.2), pasting Illustrator's own clipboard data as shapes (26.3; SVG markup on the clipboard pastes as a shape layer, #738), variable-font filter (26.3), the rebuilt Effect Controls (26.5). Percentage guides (View ▸ Add Percentage Guide, Convert Guides to Percentage / Pixels) and effect colour labels (Effect Controls header bar and right-click Label menu, `effect.setLabel`) are in (#1095), built from the release notes' one-line descriptions and never compared with After Effects: the Timeline's effect rows wear the label as a colour bar on the left edge (#1509), but After Effects' exact UI there is unknown | Users of the current version expect them | 10–20 h left | — · [ui-parity.md](ui-parity.md) |
 | 22 | **Encoder efficiency** | HEVC / AV1 have no B-frames, multi-reference or SAO / CDEF; Opus no FEC / DTX; single-file intermediates are 8-bit uncompressed QuickTime only (#372 closed by #778: no 16-bpc, AVI or lossless-compressed codec); #325 render over existing file | Larger files than After Effects + Media Encoder | 20–40 h | G6 · [file-format-parity.md](file-format-parity.md) |
 | 23 | **Essential Graphics interchange** | Templates are `.ectemplate`, not `.mogrt`; #338 and #611 closed | Premiere editors can't use our templates | 15–30 h | — · [file-format-parity.md](file-format-parity.md) |
 | 24 | **Timeline depth requests** | #601 expand precomps in place, #602 reorderable render stack, #604 guide-only effects, #425 keyframe confusion (#355 and #428 closed) | Power-user speed | 15–30 h | G2 · [ui-parity.md](ui-parity.md) |
@@ -114,10 +114,14 @@ The most important missing piece: it turns every other estimate here into a meas
 - Run the headless snapshot and control-channel checks on Linux (X11 and Wayland) and Windows, not
   only macOS. Interactions that only fail with real input (docking drags, viewer pan, drag-and-drop
   import, inline rename) need scripted input tests.
+- Path editing (#1220): selected shape and mask paths suppress the layer transform box while
+  their points are edited. `ui_viewer` regressions cover Pen-family tools, Selection vertex
+  dragging and undo, restoration of layer controls, and layers without visible paths.
 - Regression evidence for [#66](https://github.com/storytold/effectcraft/issues/66): scripted
   pointer tests in `ui_viewer` and `ui_text_edit`, checked headlessly on Linux, cover viewer clicks,
   marquee selection and text picking when layers are hidden or excluded by solo. They also check
-  hidden/locked solo layers and solo layers outside their active time range.
+  hidden/locked solo layers, and that solo still excludes the other layers while the soloed
+  layer is outside its active time range (as in After Effects, so nothing is picked there).
 - Regression evidence for [#67](https://github.com/storytold/effectcraft/issues/67): scripted
   input tests in `ui_project_delete`, checked headlessly on Linux, cover Delete/Backspace on
   Project items, multiple selection and undo. They check that an unrelated Timeline layer stays,
@@ -145,6 +149,15 @@ The most important missing piece: it turns every other estimate here into a meas
   tests, checked headlessly on Windows, drag a selected Gradient Fill's start and end points in
   the Composition viewer: one undo step, the layer stays, a point inside a moved and scaled group
   converts to the group's space, and the handles show only for a selected gradient.
+- Regression evidence for [#1011](https://github.com/storytold/effectcraft/issues/1011): the
+  `ui_text_range_handles` input tests, checked headlessly on macOS, drag a text Range Selector's
+  End bar in the Composition viewer: one undo step, Start and the layer stay, and on an animated
+  End a keyframe at the current time. The bars show only for a selected selector or a selected
+  animator (or a property in it), with the Selection tool and layer controls on. Unit tests in
+  `text` place the bars on unit boundaries (words and Characters Excluding Spaces skip spaces,
+  inside a ligature, on the second line, right to left) and invert them; `render` covers the
+  value a drag writes (less the Offset, whole units in Index). Not done: dragging Offset, bars on
+  vertical text and on text on a path.
 - Regression evidence for the toolbar's gradient swatches (#612, reported on Discord): the
   `ui_toolbar_gradient` input tests, checked headlessly on Windows, click a Linear Fill swatch and
   a Radial Stroke swatch on a selected shape layer and get the Gradient Editor on its Gradient Fill
@@ -322,6 +335,8 @@ Issues #41–#47 (all from the Linux AppImage 0.1.1, 5 October): panning the vie
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-16 | minor | Gap 8: #932 closed (Convert To Bezier Path converts a shape layer's parametric path, not only mask RotoBezier) |
+| 2026-10-13 | patch | G2: layer bounds no longer compete with editable shape/mask path points (#1220) |
 | 2026-10-12 | minor | Audited against `upstream/main` 470ea7a3: open-issue count and crash list, closed issues removed from rows 1, 3, 5, 6, 8–12, 15–17, 22–24, G8 and G9 (#759 `#include`), localization catalogs recounted (≈ 12% to ≈ 18%); rows 7, 14 and 21 left to open PRs #1102, #792 and #1098 |
 | 2026-10-10 | minor | Alpha gate checked: no alpha blockers |
 | 2026-10-12 | minor | Gap 21: percentage guides and effect colour labels added (#1095) |

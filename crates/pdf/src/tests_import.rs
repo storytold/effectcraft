@@ -264,6 +264,43 @@ fn hostile_structures_return_errors_or_draw_nothing() {
 }
 
 #[test]
+fn inline_image_with_absurd_dimensions_falls_back_to_ei_scan() {
+    // `/W 5000000000000000000` overflows the row math (`* bpc` alone exceeds usize::MAX):
+    // `inline_len` must return `None` (scan for `EI`) instead of overflowing; the oversized
+    // image itself is then refused by size.
+    let bytes = page_pdf("q 10 0 0 10 0 0 cm BI /W 5000000000000000000 /H 100 /CS /G /BPC 8 ID \0 EI Q", "", vec![]);
+    let doc = parse(&bytes).unwrap();
+    let _ = render(&doc);
+    assert!(!doc.skipped.is_empty());
+    // A length just under `usize::MAX` passes the row math; past byte 4096 of the content the
+    // caller's `start + len` would then overflow.
+    let content = format!("{}q 10 0 0 10 0 0 cm BI /W 2305843009213693440 /H 8 /CS /G /BPC 8 ID \0 EI Q", " ".repeat(5000));
+    let doc = parse(&page_pdf(&content, "", vec![])).unwrap();
+    let _ = render(&doc);
+}
+
+#[test]
+fn smask_with_absurd_bpc_is_ignored_not_fatal() {
+    // `/BitsPerComponent 32` in a soft mask: `1u32 << bpc` must neither panic (debug)
+    // nor mistranslate samples into alpha (release); the mask is treated as absent.
+    let bytes = page_pdf(
+        "q 2 0 0 2 0 0 cm /Im Do Q",
+        "/XObject << /Im 10 0 R >>",
+        vec![
+            (
+                10,
+                "<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceGray /BitsPerComponent 8 /SMask 11 0 R >>".into(),
+                Some(vec![0x80; 4]),
+            ),
+            (11, "<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceGray /BitsPerComponent 32 >>".into(), Some(vec![0xFF; 16])),
+        ],
+    );
+    let doc = parse(&bytes).unwrap();
+    let img = render(&doc);
+    assert!(coverage(&img, 0, 0, 200, 100) > 0.0, "image still draws, opaque");
+}
+
+#[test]
 fn truncated_and_corrupt_eps_never_panic() {
     let eps = b"%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 100 100\n\
 /sq { newpath 0 0 moveto 10 0 lineto 10 10 lineto closepath } bind def\n\
@@ -359,6 +396,100 @@ fn arcs_with_huge_angles_end_at_their_second_angle() {
     assert!(img.get(50, 50)[3] > 0.99, "{:?}", img.get(50, 50));
 }
 
+/// Parses `body` after a square through [`eps_soon`]: the square stays, and the program stops at
+/// the operation limit.
+fn runs_out_of_budget(body: &str) {
+    let doc = eps_soon(&format!("0 0 10 10 rectfill {body}"));
+    assert_eq!(doc.flatten().len(), 1, "{body}: {:?}", doc.skipped);
+    assert_eq!(doc.skipped, ["PostScript (operation limit)"], "{body}");
+}
+
+#[test]
+fn paths_made_in_a_loop_run_out_of_the_budget() {
+    // Each curve, rectangle element and glyph outline element an operator makes counts against the
+    // operation budget: `arc` at a radius of 2.2 × 10^18 makes about 6,800 curves a call,
+    // `rectclip` with an array of 2,000 rectangles makes 10,000 elements, and `charpath` makes the
+    // outlines of 1,000 H's.
+    for body in [
+        "{ newpath 0 0 2200000000000000000 0 1440 arc } loop",
+        "/a 8000 array def 0 1 7999 { a exch 0 put } for { gsave a rectclip grestore } loop",
+        "/Helvetica findfont 10 scalefont setfont /s 1000 string def 0 1 999 { s exch 72 put } for \
+         { newpath 0 0 moveto s false charpath } loop",
+    ] {
+        runs_out_of_budget(body);
+    }
+}
+
+#[test]
+fn paths_read_or_copied_in_a_loop_run_out_of_the_budget() {
+    // `pathbbox` reads each element of the current path, and `gsave`, `save` and `clip` copy it:
+    // each element counts against the operation budget. The path has 100,001 elements.
+    let path = "newpath 0 0 moveto 0 1 99999 { pop 1 0 rlineto } for";
+    for body in ["{ pathbbox pop pop pop pop } loop", "{ gsave grestore } loop", "{ save restore } loop", "{ gsave clip grestore } loop"] {
+        runs_out_of_budget(&format!("{path} {body}"));
+    }
+}
+
+#[test]
+fn nested_loops_run_out_of_the_budget() {
+    // Each pass of `loop`, `repeat`, `for` and `forall` counts against the operation budget, and
+    // so does each item of a procedure that is not a name. `clear` empties the operand stack that
+    // the passes fill.
+    let literals = format!("{{ {} clear }} loop", "0 ".repeat(100_000));
+    for body in [
+        "{ {} loop } loop",
+        "{ 1000000 {} repeat } loop",
+        "{ 0 1 999999 {} for clear } loop",
+        "/s 1000000 string def { s {} forall clear } loop",
+        "/a 1000000 array def { a {} forall clear } loop",
+        "/d 1 dict def 0 1 99999 { d exch 0 put } for { d {} forall clear } loop",
+        literals.as_str(),
+    ] {
+        runs_out_of_budget(body);
+    }
+}
+
+#[test]
+fn paths_stop_at_the_path_limit() {
+    // A path holds at most 1,048,576 elements. An operator that would add more stops the program:
+    // the square drawn before it stays, and the square after it is left out.
+    for body in [
+        "newpath 0 0 moveto 1100 { 1000 { 1 0 rlineto } repeat } repeat",
+        "newpath 0 0 moveto 0 0 0 0 0 0 1100 { 1000 { 6 copy rcurveto } repeat } repeat",
+        "newpath 0 0 moveto 1100 { 1000 { closepath } repeat } repeat",
+        // 1,024 turns at a radius of 2 × 10^17: about 1,171,000 curves.
+        "newpath 0 0 200000000000000000 0 368640 arc",
+        // At a radius of 10^300, kurbo divides the arc into more curves than a usize can count.
+        "newpath 0 0 10 300 exp 0 90 arc",
+        // The outlines of 100,000 H's, 13 elements each.
+        "/Helvetica findfont 10 scalefont setfont /s 100000 string def 0 1 99999 { s exch 72 put } for \
+         0 0 moveto s false charpath",
+        // 210,000 rectangles of five elements each.
+        "/a 840000 array def 0 1 839999 { a exch 0 put } for a rectfill",
+    ] {
+        let doc = eps_soon(&format!("0 0 10 10 rectfill {body} 20 20 10 10 rectfill"));
+        assert_eq!(doc.flatten().len(), 1, "{body}: {:?}", doc.skipped);
+        assert_eq!(doc.skipped, ["PostScript (path limit)"], "{body}");
+    }
+    // A `moveto` replaces a `moveto` just before it (PostScript Language Reference §8.2, `moveto`),
+    // and so does the current point that `show` sets, so 550,000 pieces of text placed with
+    // `moveto` and `show` leave a path of one element.
+    let doc = eps_soon("/Helvetica findfont 10 scalefont setfont 550 { 1000 { 0 0 moveto ( ) show } repeat } repeat 0 0 10 10 rectfill");
+    assert!(doc.skipped.is_empty(), "{:?}", doc.skipped);
+    assert_eq!(doc.flatten().len(), 1);
+}
+
+#[test]
+fn pdf_paths_stop_at_the_path_limit() {
+    // A content stream's current path holds at most 1,048,576 elements: `re` (five elements each)
+    // and `h` stop the stream at the limit, and the square painted before it stays.
+    for (op, n) in [("0 0 1 1 re ", 210_000), ("h ", 1_100_000)] {
+        let doc = parse(&page_pdf(&format!("0 0 10 10 re f 0 0 m {} f 20 20 10 10 re f", op.repeat(n)), "", vec![])).unwrap();
+        assert_eq!(doc.flatten().len(), 1, "{op}: {:?}", doc.skipped);
+        assert_eq!(doc.skipped, ["content (path limit)"], "{op}");
+    }
+}
+
 #[test]
 fn closing_an_empty_path_is_a_no_op() {
     // "s", "b" and "b*" closed the path without a current point (kurbo asserts on that).
@@ -374,5 +505,33 @@ fn postscript_radix_numbers_outside_2_to_36_are_not_numbers() {
     for n in ["0#7", "1#1", "37#1", "99999999999#1", "16#FF"] {
         let src = format!("%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 100 100\n{n} pop 0 0 moveto 10 10 lineto stroke\n");
         let _ = parse(src.as_bytes());
+    }
+}
+
+#[test]
+fn extreme_page_indices_have_a_printable_error() {
+    let text = Error::PageOutOfRange(usize::MAX).to_string();
+    assert!(text.starts_with("the PDF has no page "));
+}
+
+#[test]
+fn postscript_idiv_and_mod_of_i64_min_by_minus_one_give_zero() {
+    // `i64::MIN / -1` and `i64::MIN % -1` overflow, and `/` and `%` panic on them in debug and
+    // release builds. `as i64` turns any dividend at or below -2^63 into `i64::MIN` and turns
+    // a divisor of -1.5 into -1.
+    for (prog, want) in [
+        ("-9223372036854775808 -1 idiv", 0),
+        ("-9223372036854775808 -1 mod", 0),
+        ("-99999999999999999999 -1.5 idiv", 0),
+        ("2 63 exp neg -1 mod", 0),
+        // The result is 0 for a divisor that truncates to 0. Other quotients are truncated
+        // toward zero, and a remainder has the sign of the dividend.
+        ("7 0 idiv", 0),
+        ("7 0.5 mod", 0),
+        ("-7 2 idiv", -3),
+        ("-7 2 mod", -1),
+    ] {
+        let doc = eps(format!("{prog} {want} eq {{ 0 0 10 10 rectfill }} if\n").as_bytes());
+        assert_eq!(shape_names(&doc).len(), 1, "{prog}");
     }
 }

@@ -1,9 +1,6 @@
-//! PDF objects (ISO 32000-1 §7.2–7.5): the lexer, the object model, stream filters and the
-//! indirect-object table.
-//!
-//! The table is built by scanning the file for `n g obj` headers (later definitions win, as
-//! incremental updates do) and by unpacking object streams, so damaged or rewritten
-//! cross-reference sections do not matter.
+//! Local object model, content-stream lexer and stream filters. Document objects are read
+//! through the shared parser in `read`; the local lexer remains for content operators and
+//! PostScript-related data.
 
 use std::collections::HashMap;
 
@@ -191,7 +188,7 @@ impl<'a> Lexer<'a> {
     }
 
     /// `n g R` after a number inside arrays and dictionaries.
-    fn maybe_ref(&mut self, v: Obj) -> Obj {
+    pub(super) fn maybe_ref(&mut self, v: Obj) -> Obj {
         let Obj::Num(n) = v else { return v };
         if n.fract() != 0.0 || n < 0.0 {
             return v;
@@ -312,11 +309,10 @@ pub fn parse_num(w: &[u8]) -> Option<f64> {
 /// growing buffer can reserve about twice the limit.
 const MAX_INFLATED: usize = if cfg!(target_pointer_width = "32") { 256 << 20 } else { 1 << 30 };
 
-/// The tighter bound for object streams, which [`File::parse`] decodes eagerly (all of them,
-/// before any page is chosen). They hold only other objects' dictionaries, arrays, numbers and
-/// strings, so real ones are far smaller; PdfCraft uses 256 MiB for the object and
-/// cross-reference streams it decodes while loading. A quarter on 32-bit targets, as above.
-const MAX_OBJECT_STREAM: usize = if cfg!(target_pointer_width = "32") { 64 << 20 } else { 256 << 20 };
+/// The bound for ordinary object/xref streams and malformed object-stream recovery.
+/// The shared parser receives this immutable limit when the document is opened;
+/// 32-bit targets retain the app's quarter-sized limit.
+pub(crate) const MAX_OBJECT_STREAM: usize = if cfg!(target_pointer_width = "32") { 64 << 20 } else { 256 << 20 };
 
 /// Decode a stream's data through its `/Filter` chain. Unknown filters (images: DCT, JPX, CCITT,
 /// JBIG2) give `None`.
@@ -624,151 +620,14 @@ fn predict(data: &[u8], p: &Dict, max: usize) -> Option<Vec<u8>> {
 
 /// Every indirect object of a PDF file, plus the trailer dictionaries found.
 pub struct File {
-    pub objects: HashMap<u32, Obj>,
+    pub objects: HashMap<(u32, u16), Obj>,
     pub trailers: Vec<Dict>,
-}
-
-fn find(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
-    if from >= hay.len() || needle.is_empty() {
-        return None;
-    }
-    hay[from..].windows(needle.len()).position(|w| w == needle).map(|p| p + from)
+    pub repairs: Vec<String>,
 }
 
 impl File {
-    pub fn parse(data: &[u8]) -> File {
-        let mut f = File { objects: HashMap::new(), trailers: vec![] };
-        let mut i = 0;
-        while let Some(p) = find(data, b"obj", i) {
-            i = p + 3;
-            if p >= 3 && &data[p - 3..p] == b"end" {
-                continue;
-            }
-            if data.get(p + 3).is_some_and(|c| !is_white(*c) && !is_delim(*c)) {
-                continue;
-            }
-            // Walk back over "num gen ".
-            let mut q = p;
-            let back_ws = |q: &mut usize| {
-                let s = *q;
-                while *q > 0 && is_white(data[*q - 1]) {
-                    *q -= 1;
-                }
-                *q < s
-            };
-            let back_digits = |q: &mut usize| {
-                let e = *q;
-                while *q > 0 && data[*q - 1].is_ascii_digit() {
-                    *q -= 1;
-                }
-                (*q < e).then(|| std::str::from_utf8(&data[*q..e]).ok()?.parse::<u32>().ok()).flatten()
-            };
-            if !back_ws(&mut q) {
-                continue;
-            }
-            let Some(_gen) = back_digits(&mut q) else { continue };
-            if !back_ws(&mut q) {
-                continue;
-            }
-            let Some(num) = back_digits(&mut q) else { continue };
-            if q > 0 && !is_white(data[q - 1]) && !is_delim(data[q - 1]) {
-                continue;
-            }
-            let mut lx = Lexer::new(data, p + 3);
-            let Some(obj) = lx.next() else { continue };
-            let obj = lx.maybe_ref(obj);
-            let obj = match obj {
-                Obj::Dict(d) => {
-                    let save = lx.pos;
-                    lx.skip_ws();
-                    if data.get(lx.pos..).is_some_and(|d| d.starts_with(b"stream")) {
-                        let mut s = lx.pos + 6;
-                        if data.get(s) == Some(&b'\r') {
-                            s += 1;
-                        }
-                        if data.get(s) == Some(&b'\n') {
-                            s += 1;
-                        }
-                        let declared = d.get("Length").and_then(Obj::num).map(|l| l as usize);
-                        let s = s.min(data.len());
-                        let end = match declared.filter(|l| {
-                            s.checked_add(*l).is_some_and(|e| e <= data.len()) && {
-                                let mut k = s + l;
-                                while k < data.len() && is_white(data[k]) {
-                                    k += 1;
-                                }
-                                data[k..].starts_with(b"endstream")
-                            }
-                        }) {
-                            Some(l) => s + l,
-                            None => {
-                                let mut e = find(data, b"endstream", s).unwrap_or(data.len());
-                                if e > s && data[e - 1] == b'\n' {
-                                    e -= 1;
-                                }
-                                if e > s && data[e - 1] == b'\r' {
-                                    e -= 1;
-                                }
-                                e
-                            }
-                        };
-                        let end = end.max(s);
-                        i = end;
-                        Obj::Stream(d, data[s..end].to_vec())
-                    } else {
-                        lx.pos = save;
-                        Obj::Dict(d)
-                    }
-                }
-                o => o,
-            };
-            if let Obj::Stream(d, _) = &obj
-                && d.get("Type").and_then(Obj::name) == Some("XRef")
-            {
-                f.trailers.push(d.clone());
-            }
-            f.objects.insert(num, obj);
-        }
-        // Trailer dictionaries of classic cross-reference sections.
-        let mut i = 0;
-        while let Some(p) = find(data, b"trailer", i) {
-            i = p + 7;
-            let mut lx = Lexer::new(data, i);
-            if let Some(Obj::Dict(d)) = lx.next() {
-                f.trailers.push(d);
-            }
-        }
-        // Object streams.
-        let streams: Vec<(Dict, Vec<u8>)> = f
-            .objects
-            .values()
-            .filter_map(|o| match o {
-                Obj::Stream(d, raw) if d.get("Type").and_then(Obj::name) == Some("ObjStm") => Some((d.clone(), raw.clone())),
-                _ => None,
-            })
-            .collect();
-        for (d, raw) in streams {
-            let Some(dec) = decode_stream_within(&f, &d, &raw, MAX_OBJECT_STREAM) else { continue };
-            let n = d.get("N").and_then(Obj::num).unwrap_or(0.0) as usize;
-            let first = d.get("First").and_then(Obj::num).unwrap_or(0.0) as usize;
-            let mut lx = Lexer::new(&dec, 0);
-            let mut heads = vec![];
-            for _ in 0..n.min(100_000) {
-                let (Some(Obj::Num(num)), Some(Obj::Num(off))) = (lx.next(), lx.next()) else { break };
-                heads.push((num as u32, off as usize));
-            }
-            for (num, off) in heads {
-                if f.objects.contains_key(&num) || first + off >= dec.len() {
-                    continue;
-                }
-                let mut lx = Lexer::new(&dec, first + off);
-                if let Some(o) = lx.next() {
-                    let o = lx.maybe_ref(o);
-                    f.objects.insert(num, o);
-                }
-            }
-        }
-        f
+    pub fn parse(data: &[u8]) -> Result<File, crate::Error> {
+        crate::read::open(data)
     }
 
     /// Follow references (bounded).
@@ -776,7 +635,7 @@ impl File {
         let mut o = o;
         for _ in 0..32 {
             match o {
-                Obj::Ref(n, _) => match self.objects.get(n) {
+                Obj::Ref(n, g) => match self.objects.get(&(*n, *g)) {
                     Some(x) => o = x,
                     None => return &Obj::Null,
                 },
@@ -810,13 +669,9 @@ impl File {
                 return Some(d);
             }
         }
-        let mut cats: Vec<(&u32, &Obj)> =
+        let mut cats: Vec<(&(u32, u16), &Obj)> =
             self.objects.iter().filter(|(_, o)| matches!(o, Obj::Dict(d) if d.get("Type").and_then(Obj::name) == Some("Catalog"))).collect();
         cats.sort_by_key(|(n, _)| **n);
         cats.last().and_then(|(_, o)| o.dict())
-    }
-
-    pub fn encrypted(&self) -> bool {
-        self.trailers.iter().any(|t| t.contains_key("Encrypt"))
     }
 }

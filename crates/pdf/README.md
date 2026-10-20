@@ -4,7 +4,9 @@ Vector footage from PDF files, PDF-compatible Adobe Illustrator files (`.ai`, wh
 documents) and Encapsulated PostScript (`.eps`). Files parse into the same render tree as SVG
 (`effectcraft_svg::Doc`), so they rasterise at any scale (Continuously Rasterize), convert to shape
 layers (Layer ▸ Create ▸ Create Shapes from Vector Layer) and import as compositions with one
-layer per file layer (File ▸ Import ▸ Composition).
+layer per file layer (File ▸ Import ▸ Composition). Composition - Retain Layer Sizes uses each
+layer's artwork bounds and keeps its placement on the page. Images keep their rectangular bounds;
+clipping paths constrain the bounds, while soft masks do not change them.
 
 Specifications used: **ISO 32000-1:2008** (PDF 1.7; the public Adobe edition) for the file
 structure, filters, content streams, graphics state, colour spaces, functions, shadings, text,
@@ -14,20 +16,23 @@ Charstring Format) for CFF font programs; **Adobe Type 1 Font Format** (version 
 font programs; the **PostScript Language Reference, third edition** and the **Encapsulated
 PostScript File Format Specification 3.0** for EPS; **ITU-T T.4** (07/2003) and **ITU-T T.6**
 (11/1988) for CCITT fax images. TrueType font programs are read through skrifa and JPEG (DCT)
-images through zune-jpeg (both permissively licensed, pure Rust). No third-party
-PDF/PostScript/font/codec code was read; test files (including the CFF and Type 1 fonts and the
-CCITT data) are generated in code ([`write`](src/write.rs) and the tests). One CCITT fixture was
+images through zune-jpeg (both permissively licensed, pure Rust). PDF document/object loading uses the shared `craft-pdf` parser described below. The retained
+drawing, PostScript, font and filter implementations were developed from the public
+specifications without copying third-party implementations. Test files (including the CFF
+and Type 1 fonts and the CCITT data) are generated in code ([`write`](src/write.rs) and the tests). One CCITT fixture was
 produced once by libtiff's `tiffcp` (an external encoder used only as a fixture generator, like
 ffmpeg elsewhere) to check the code tables against an independent implementation.
 
 ## What is read
 
-- **Structure:** indirect objects found by scanning (damaged or incremental cross-reference
-  sections do not matter), object streams, the page tree with inherited resources, MediaBox /
-  CropBox and `/Rotate`. Filters: Flate (with PNG predictors), LZW, ASCIIHex, ASCII85,
-  RunLength, CCITTFax (Group 3 one- and two-dimensional, Group 4; `K`, `Columns`, `Rows`,
-  `EndOfLine`, `EncodedByteAlign`, `EndOfBlock`, `BlackIs1`; damaged data keeps the rows
-  decoded before the damage). Encrypted files are refused.
+- **Structure:** `craft-pdf` resolves cross-reference tables/streams and indirect objects into
+  the app's existing object model. References retain object and generation numbers. A bounded
+  compatibility repair recovers referenced objects from object streams when damaged xrefs omit
+  them; every recovery or unresolved reference is reported in `Doc::skipped` (up to 64 messages).
+  The existing page tree preserves inherited resources, MediaBox / CropBox and `/Rotate`.
+  Content/image filters remain app-owned: Flate (with PNG predictors), LZW, ASCIIHex, ASCII85,
+  RunLength and CCITTFax. Encrypted files remain refused; `page_count` returns zero when the
+  reader refuses a document.
 - **Content:** `q`/`Q`, `cm`, line width / cap / join / miter / dash, ExtGState (`CA`, `ca`, `LW`,
   `LC`, `LJ`, `ML`, `D`), all path construction and painting operators (non-zero and even-odd),
   clipping (`W`, `W*`) as clipping groups, colour in DeviceGray / RGB / CMYK, ICCBased (by
@@ -129,3 +134,33 @@ ffmpeg elsewhere) to check the code tables against an independent implementation
   layer; the shapes drawn between images go to shape layers of their own (`<name> Outlines
   <n>`), so the layer stack keeps the document's paint order. Soft masks, and the clips and
   masks of images, are not converted (the command's `skipped` list says so).
+
+## Shared parser setup and bounds
+
+The workspace pins `craft-pdf` to `craft-libs` Git revision
+`ca50d63b773c99f96e75c77ce5a1d21e7c9cda0d`, with `default-features = false` and only the explicit `read`
+feature. This excludes the backend's bundled fonts and Adobe CMaps and preserves EffectCraft's
+font and asset policies. The shared parser does not change the supported drawing operators,
+image codecs, continuously rasterized SVG tree, editable shapes, or EPS interpreter.
+This revision removes an unchecked lazy-array read and preserves later values and pages after
+sign-only numeric entries; the app exercises those inputs through its object adapter, public
+page parser and rasterizer on native and WASM targets.
+
+The root Cargo patch pins Hayro-syntax to the same `storytold/craft-libs` revision. `cargo xtask pdf-deps` checks this graph and refuses
+an enabled Hayro interpreter, rasterizer or CMap dependency. The shared revision must be
+published before a fresh app checkout can resolve it; no sibling checkout is required.
+
+Input is limited to 512 MiB. The object adapter admits at most 100,000 document/referenced
+objects, 1,000,000 converted values and 64 inline nesting levels, with a 512 MiB retained
+object-data budget. References are queued once rather than recursively expanded. Native
+unwinding panics during shared loading or lazy object conversion become an error and discard
+partial state. These limits are not an overall process-memory or execution-time guarantee;
+WASM aborts and process-wide allocation failures cannot be caught. Missing or repaired objects
+are reported rather than silently presented as a complete import.
+
+The shared parser receives EffectCraft's existing ordinary object/xref stream limit at open:
+256 MiB on 64-bit targets and 64 MiB on 32-bit targets, including WASM. Immutable document
+limits apply during normal parsing, initial xrefs, fallback and repair. Malformed object-stream
+compatibility recovery also obeys that limit and the adapter's remaining retained-data budget.
+Content/image filter decoding still uses EffectCraft's existing bounded filter chain; the
+retained-data cap is not a bound on every parser cache or temporary allocation.

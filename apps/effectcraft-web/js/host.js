@@ -57,6 +57,26 @@ function req(r) {
   return new Promise((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
 }
 
+// Run `op` on `store` in a readwrite transaction of its own; resolves once the transaction has
+// committed. A request's success doesn't mean the write is stored: the transaction can still
+// abort afterwards (quota at commit, the browser closing), rolling it back, and a write
+// reported as saved then is never retried (#1242). A failed request aborts the transaction
+// with its error; an explicit abort leaves no error, hence the AbortError.
+function write(db, store, op) {
+  return new Promise((res, rej) => {
+    let tx = null;
+    try {
+      tx = db.transaction(store, "readwrite");
+      tx.oncomplete = () => res();
+      tx.onabort = () => rej(tx.error ?? new DOMException("the storage transaction was aborted", "AbortError"));
+      op(tx.objectStore(store));
+    } catch (e) {
+      try { tx?.abort(); } catch {}
+      rej(e);
+    }
+  });
+}
+
 async function idb() {
   if (!self.indexedDB) throw new Error("no IndexedDB");
   const open = indexedDB.open(DB, 1);
@@ -70,10 +90,10 @@ async function idb() {
       return all.map((r) => ({ key: r.key, data: new Uint8Array(r.data), modified: r.modified }));
     },
     async put(key, data, modified) {
-      await req(tx("readwrite").put({ key, data: data.slice().buffer, modified }));
+      await write(db, STORE, (s) => s.put({ key, data: data.slice().buffer, modified }));
     },
     async del(key) {
-      await req(tx("readwrite").delete(key));
+      await write(db, STORE, (s) => s.delete(key));
     },
   };
 }
@@ -315,7 +335,15 @@ function spawn(base) {
 /// path, bytes)` receives "reply" (json), "file" (path, bytes: a rendered file to download),
 /// "store" (path, bytes: a file to keep in browser storage) and "error" (json = message).
 export function workerRun(id, json, files, base, onMessage) {
-  const w = idle.pop() ?? spawn(base);
+  let w;
+  try {
+    w = idle.pop() ?? spawn(base);
+  } catch (e) {
+    // `new Worker` throws at once when the page's origin is opaque (a sandboxed iframe): the job
+    // fails like one whose worker didn't start.
+    setTimeout(() => onMessage("error", String((e && e.message) || e), null, null));
+    return;
+  }
   running.set(id, w);
   w.ready.then(() => {
     w.worker.onmessage = (e) => {
@@ -380,7 +408,17 @@ const frameWorkers = [];
 /// GPU effects on it.
 export function frameWorkerStart(base, onMessage, gpu) {
   const index = frameWorkers.length;
-  const worker = new Worker(new URL("worker.js", base), { type: "module", name: `effectcraft-frames-${index}` });
+  let worker;
+  try {
+    worker = new Worker(new URL("worker.js", base), { type: "module", name: `effectcraft-frames-${index}` });
+  } catch (e) {
+    // The constructor throws at once when the page's origin is opaque (a sandboxed iframe). The
+    // slot stays, and the failure is reported like a worker that died, after the caller has
+    // recorded the index: frames then render on the page's thread (as with `?noworkers`).
+    frameWorkers.push(null);
+    setTimeout(() => onMessage(index, undefined, undefined, String((e && e.message) || e || "frame worker failed")));
+    return index;
+  }
   worker.onmessage = (e) => {
     const m = e.data;
     if (m && m.type === "frameReply") onMessage(index, m.json, m.bytes ? new Uint8Array(m.bytes) : null, undefined);
@@ -550,7 +588,7 @@ async function openFolder(handle, remember) {
   if (remember) {
     try {
       const db = await handlesDb();
-      await req(db.transaction("folders", "readwrite").objectStore("folders").put({ name, handle }));
+      await write(db, "folders", (s) => s.put({ name, handle }));
     } catch (e) { console.info("media browser: cannot remember the folder", e); }
   }
   return { name, entries };
@@ -602,7 +640,7 @@ export async function browseForget(name) {
   folders.delete(name);
   try {
     const db = await handlesDb();
-    await req(db.transaction("folders", "readwrite").objectStore("folders").delete(name));
+    await write(db, "folders", (s) => s.delete(name));
   } catch {}
 }
 

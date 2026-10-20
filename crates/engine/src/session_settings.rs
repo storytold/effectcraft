@@ -225,36 +225,50 @@ impl Session {
         let prefs = self.autosave_prefs();
         let fail = |e: std::io::Error| EngineError::Other(format!("auto-save failed: {e}"));
         let plan = autosave::plan_in(self.file_ops(), &prefs, self.path.as_deref(), root.as_deref(), self.autosave.last_slot).map_err(fail)?;
+        let path = plan.path.to_string_lossy().into_owned();
         if self.autosave.background && !cfg!(target_arch = "wasm32") {
             let project = self.project.clone();
             let config = self.config.clone();
             let job = plan.clone();
-            let pending = autosave::PendingWrite::spawn(plan.path.clone(), move || {
-                let json = project.to_json_compact();
-                match &config {
-                    Some(c) => job.write(c.files(), json.as_bytes()),
-                    None => job.write(&crate::config::StdFiles, json.as_bytes()),
-                }
-            })
-            .map_err(fail)?;
+            let pending =
+                autosave::PendingWrite::spawn(plan.path.clone(), plan.slot, self.revision, self.path.clone(), self.script_ui.project_epoch, move || {
+                    let json = project.to_json_compact();
+                    match &config {
+                        Some(c) => job.write(c.files(), json.as_bytes()),
+                        None => job.write(&crate::config::StdFiles, json.as_bytes()),
+                    }
+                })
+                .map_err(fail)?;
             self.autosave.pending = Some(pending);
         } else {
             let json = self.project.to_json_compact();
             plan.write(self.file_ops(), json.as_bytes()).map_err(fail)?;
+            self.commit_autosave(path.clone(), plan.slot, self.revision);
         }
-        let (path, slot) = (plan.path, plan.slot);
-        let p = path.to_string_lossy().to_string();
+        Ok(path)
+    }
+
+    /// Advance recovery bookkeeping only for a successfully written snapshot.
+    fn commit_autosave(&mut self, path: String, slot: u32, revision: u64) {
         self.autosave.last_slot = Some(slot);
-        self.autosave.saved_revision = Some(self.revision);
-        self.autosave.last_path = Some(p.clone());
+        self.autosave.saved_revision = Some(revision);
+        self.autosave.last_path = Some(path);
         self.update_sentinel();
-        Ok(p)
     }
 
     /// Wait for a background auto-save ([`autosave::AutoSaveState::background`]) to land.
     pub fn autosave_wait(&mut self) -> Result<()> {
         match self.autosave.pending.take() {
-            Some(w) => w.join().map_err(|e| EngineError::Other(format!("auto-save failed: {e}"))),
+            Some(w) => {
+                w.join().map_err(|e| EngineError::Other(format!("auto-save failed: {e}")))?;
+                // Open/New can replace the project before note_project_path collects this
+                // write. Save As changes only its path. Never publish the old snapshot as the
+                // new project's recovery record, even when that record's final reset fails.
+                if w.project_path == self.path && w.project_epoch == self.script_ui.project_epoch {
+                    self.commit_autosave(w.path.to_string_lossy().into_owned(), w.slot, w.revision);
+                }
+                Ok(())
+            }
             None => Ok(()),
         }
     }
@@ -278,7 +292,7 @@ impl Session {
             return None;
         }
         self.autosave.last = Some(now);
-        if !self.is_dirty() || self.autosave.saved_revision == Some(self.revision) || self.render_job.is_some() {
+        if !self.is_dirty() || self.autosave.pending.is_some() || self.autosave.saved_revision == Some(self.revision) || self.render_job.is_some() {
             return None;
         }
         if self.path.is_none() && self.prefs.auto_save.location != "custom" && self.default_autosave_root().is_none() && self.autosave_folder_override.is_none()

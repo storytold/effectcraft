@@ -255,7 +255,7 @@ fn reveal_targets(app: &EffectcraftApp) -> Vec<u64> {
 /// `down`, `left`, `right`), 10 with Shift (`up10`…), as After Effects does, so zoomed in
 /// they move by fractions of a comp pixel. From any panel except Project (which owns the
 /// arrow keys for its own keyboard navigation, #961); not while typing, with a dialog or
-/// menu open, or with mask points selected.
+/// menu open. With mask points selected the arrows move the points instead (#1288).
 fn nudge(app: &mut EffectcraftApp, ctx: &egui::Context, dir: &str) -> Result<Value, String> {
     let (side, n) = match dir.strip_suffix("10") {
         Some(side) => (side, 10.0),
@@ -269,13 +269,32 @@ fn nudge(app: &mut EffectcraftApp, ctx: &egui::Context, dir: &str) -> Result<Val
         _ => return Err(format!("unknown nudge `{dir}`")),
     };
     let st = &app.session.state;
-    if app.ui.focused == PanelKind::Project || st.selected_layers.is_empty() || st.text_edit.is_some() || !st.selected_vertices.is_empty() {
+    if app.ui.focused == PanelKind::Project || (st.selected_layers.is_empty() && st.selected_vertices.is_empty()) || st.text_edit.is_some() {
         return Ok(Value::Null);
     }
     // Screen pixels per comp pixel.
     let zoom = (app.ui.viewer.zoom.unwrap_or_else(|| crate::panels::viewer::last_fit(ctx)) * ctx.pixels_per_point()) as f64;
     let k = if zoom.is_finite() && zoom > 1e-6 { 1.0 / zoom } else { 1.0 };
+    if let Some(layer) = st.selected_vertices.first().map(|v| v.layer) {
+        let d = vertex_delta(app, layer, [x * k, y * k]);
+        return run_engine(app, ctx, "mask.moveVertices", json!({"delta": d}));
+    }
     run_engine(app, ctx, "layer.nudge", json!({"x": x * k, "y": y * k}))
+}
+
+/// A comp-space step `d` in the layer space of `layer`, where mask points live. Like a drag of
+/// the points in the viewer, every selected point takes the first one's layer space.
+fn vertex_delta(app: &EffectcraftApp, layer: effectcraft_engine::project::LayerId, d: [f64; 2]) -> [f64; 2] {
+    use effectcraft_engine::geom::vec2;
+    let s = &app.session;
+    let (Some(cid), Some(comp)) = (s.active_comp_id(), s.active_comp()) else { return d };
+    let Some(l) = comp.layer(layer) else { return d };
+    let ectx = effectcraft_engine::render::EvalCtx { project: &s.project, comp_id: cid, comp, time: s.time(), expr: s.expr.as_deref(), footage: None };
+    let (l2c, _) = crate::panels::viewer::l2c(&ectx, l);
+    l2c.inverse().map_or(d, |inv| {
+        let v = inv.apply_vec(vec2(d[0], d[1]));
+        [v.x, v.y]
+    })
 }
 
 fn no_params(p: &Value) -> bool {
@@ -291,7 +310,7 @@ fn only_comp(p: &Value) -> Option<effectcraft_engine::project::ItemId> {
 
 /// Execute a UI or engine command by id.
 pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: Value) -> Result<Value, String> {
-    if id == "effects.copyPresetsFolderPath" {
+    if matches!(id, "effects.copyPresetsFolderPath" | "mediaBrowser.copySourcePath") {
         return frontend(app, ctx, id, params);
     }
     // Layer ▸ New ▸ Text (menu, shortcut, context menus) puts an insertion point in the centre of
@@ -299,6 +318,17 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
     // shortcuts (#866). `engine.execute` keeps the headless default.
     if id == "layer.newText" && no_params(&params) {
         return run_engine(app, ctx, id, json!({"text": "", "edit": true}));
+    }
+    // A new folder (File ▸ New, its shortcut, the Project panel's button and context menu) opens
+    // with its name ready to type, as in After Effects (#1658). The command selects it.
+    // `engine.execute` keeps the headless default.
+    if id == "project.newFolder" && no_params(&params) {
+        let r = run_engine(app, ctx, id, params);
+        if r.is_ok() {
+            app.show_panel(PanelKind::Project);
+            crate::panels::project::begin_rename(app, ctx);
+        }
+        return r;
     }
     if no_params(&params) && app.ui.focused == PanelKind::Project {
         match id {
@@ -880,6 +910,11 @@ pub fn frontend(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, p: Valu
     let now = ctx.input(|i| i.time);
     let v = &mut app.ui.viewer;
     Ok(match id {
+        "mediaBrowser.copySourcePath" => {
+            let path = p.get("path").and_then(Value::as_str).filter(|path| !path.is_empty()).ok_or("A source path is required")?;
+            ctx.copy_text(path.to_string());
+            json!({"path": path})
+        }
         "effects.copyPresetsFolderPath" => {
             if cfg!(target_arch = "wasm32") {
                 return Err("The web app has no local presets folder".into());
@@ -1361,7 +1396,9 @@ fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) -> Option<Res
         "keys.rpfCameraImport" => ("path", Ask::Open(&["json", "csv", "txt"])),
         "essential.exportTemplate" => ("path", Ask::Save("Template.ectemplate")),
         "essential.importTemplate" => ("path", Ask::Open(&["ectemplate"])),
-        "file.setProxy" => ("path", Ask::Open(&["mp4", "mov", "m4v", "mkv", "webm", "mxf", "png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "bmp", "exr"])),
+        "file.setProxy" => {
+            ("path", Ask::Open(&["mp4", "mov", "m4v", "mkv", "webm", "mxf", "png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "bmp", "tga", "exr"]))
+        }
         _ => return None,
     };
     if params.get(key).is_some()
@@ -1376,9 +1413,11 @@ fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) -> Option<Res
         "mp4", "mov", "m4v", "mkv", "webm", "mxf", "png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "bmp", "exr", "dpx", "cin", "wav", "aif", "aiff", "mp3",
         "flac", "ogg", "opus", "svg", "pdf", "ai", "eps", "psd", "psb", "tga", "hdr", "gltf", "glb", "obj", "stl", "fbx", "json", "csv", "tsv",
     ];
-    // A host whose modal dialogs would run a nested event loop inside this frame (macOS: a
-    // drag over the window then re-entered winit's event handler and aborted, #511) shows the
-    // dialog without blocking; the command continues when the answer arrives.
+    // A host whose blocking dialogs are unsafe inside this frame shows the dialog without
+    // blocking — macOS: the nested event loop re-entered winit's handler on a drag over the
+    // window and aborted the app (#511); Linux: the desktop portal's answer never gets pumped,
+    // so the compositor marks the window as not responding (#1275) — and the command continues
+    // when the answer arrives.
     if let Some(spawn) = app.hooks.file_dialog_async.as_ref() {
         let request = match ask {
             Ask::Folder => crate::FileDialog::Folder,
@@ -1519,6 +1558,19 @@ pub(crate) fn panel_shown(app: &EffectcraftApp, p: PanelKind) -> bool {
         Some(m) => m == p,
         None => app.ui.dock.is_visible(p),
     }
+}
+
+/// The command a menu entry runs when chosen from a menu: Window ▸ <panel> closes a panel whose
+/// entry is checked, as in After Effects (#1630). Shortcuts and agents calling `window.panel`
+/// still only show the panel.
+pub(crate) fn menu_choice(app: &EffectcraftApp, id: String, params: Value) -> (String, Value) {
+    if id == "window.panel"
+        && let Some(p) = params.get("panel").and_then(Value::as_str).and_then(PanelKind::from_name)
+        && panel_shown(app, p)
+    {
+        return ("window.closePanel".into(), params);
+    }
+    (id, params)
 }
 
 /// Check-mark state of frontend toggles (engine state is answered by the engine).
@@ -1990,7 +2042,7 @@ pub fn menu_bar(app: &mut EffectcraftApp, ui: &mut egui::Ui) {
         });
     });
     crate::menu_keys::handle(&ctx, &nav);
-    if let Some((id, params)) = clicked
+    if let Some((id, params)) = clicked.map(|(id, params)| menu_choice(app, id, params))
         && let Err(e) = invoke(app, &ctx, &id, if params.is_null() { json!({}) } else { params })
     {
         app.ui.status = e;
@@ -2492,6 +2544,21 @@ mod tests {
         app.run_dialog_answers();
         assert!(!dir.join("Frame.png").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tga_is_available_in_import_replace_and_proxy_dialogs() {
+        use std::sync::{Arc, Mutex};
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        let ctx = egui::Context::default();
+        let pending = Arc::new(Mutex::new(Vec::new()));
+        let queue = pending.clone();
+        app.hooks.file_dialog_async = Some(Box::new(move |dialog, _done| queue.lock().unwrap().push(dialog)));
+        for command in ["file.import", "file.importMultiple", "file.replaceFootage", "file.setProxy"] {
+            assert_eq!(invoke(&mut app, &ctx, command, json!({})).unwrap(), json!({"dialog": command}));
+            let crate::FileDialog::Open { exts, .. } = pending.lock().unwrap().pop().unwrap() else { panic!("not an open dialog") };
+            assert!(exts.iter().any(|ext| ext == "tga"), "{command}: {exts:?}");
+        }
     }
 
     #[test]

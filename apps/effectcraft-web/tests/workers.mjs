@@ -7,6 +7,8 @@
 //   (#218), and not when it is unchanged.
 // - A worker whose start fails fails its job and is terminated, instead of the job waiting for
 //   "ready" forever (#216): host.js on the worker's error, worker.js re-raising the failed start.
+// - A `new Worker` that throws (a sandboxed iframe's opaque origin, #1586) fails the job, and a
+//   frame worker is reported dead, instead of the exception escaping into startup.
 // Exits non-zero on failure.
 import assert from "node:assert/strict";
 import { copyFileSync, mkdtempSync, writeFileSync } from "node:fs";
@@ -66,6 +68,35 @@ await slow;
 assert.equal(failed.kind, "error");
 assert.ok(workers[1].terminated, "the failed worker is terminated");
 assert.equal(host.workerStats().running, 0);
+
+// A `new Worker` that throws (a sandboxed iframe's opaque origin): the job fails, and a frame
+// worker is reported dead, instead of the exception escaping into startup.
+failStart = false;
+const RealWorker = globalThis.Worker;
+globalThis.Worker = class {
+  constructor() {
+    throw new Error("SecurityError: cannot be accessed from origin 'null'");
+  }
+};
+// (Take the idle workers out of play first, so that a new one has to be built.)
+for (let n = host.workerStats().idle, id = 100; n > 0; n--, id++) {
+  host.workerRun(id, "{}", [], "http://localhost/", () => {});
+  host.workerCancel(id);
+}
+assert.equal(host.workerStats().idle, 0);
+const threw = await run(6, []);
+assert.equal(threw.kind, "error");
+assert.match(threw.json, /SecurityError/);
+assert.equal(host.workerStats().running, 0);
+let frameCall = null;
+const frameDone = new Promise((resolve) => {
+  frameCall = host.frameWorkerStart("http://localhost/", (index, json, bytes, error) => resolve({ index, error }), false);
+});
+const dead = await frameDone;
+assert.equal(dead.index, frameCall, "the dead worker keeps its index");
+assert.match(dead.error, /SecurityError/);
+host.frameWorkerPost(frameCall, { type: "frame" }); // no worker behind it: ignored
+globalThis.Worker = RealWorker;
 
 // #216, worker side: a rejected start is re-raised where the page's `onerror` sees it.
 const dir = mkdtempSync(join(tmpdir(), "ec-worker-"));
