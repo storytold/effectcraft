@@ -2234,8 +2234,12 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                         }
                     }
                     if let Some(i) = widgets::popup_menu(ui, pop, pr_rect.left_bottom(), &popts, None) {
-                        let par = if i == 0 { serde_json::Value::Null } else { json!(cands[i - 2].id.0) };
-                        actions.push(("layer.setParent".into(), json!({"layers": [layer.id.0], "parent": par})));
+                        let parent = if i == 0 { None } else { cands.get(i.saturating_sub(2)).map(|l| l.id) };
+                        let targets = parent_targets(&comp, &selected, layer.id, parent);
+                        actions.push((
+                            "layer.setParent".into(),
+                            json!({"layers": targets, "parent":parent.map(|id|id.0),"compensate":!ui.input(|i|i.modifiers.alt)}),
+                        ));
                     }
                 }
                 // Layer bar.
@@ -3069,7 +3073,8 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             };
             match (kind, target, prop_target) {
                 (WHIP_PARENT, Some((_, row)), _) if row.layer.0 != src_layer => {
-                    actions.push(("layer.setParent".into(), json!({"layers": [src_layer], "parent": row.layer.0})));
+                    let targets = parent_targets(&comp, &selected, LayerId(src_layer), Some(row.layer));
+                    actions.push(("layer.setParent".into(), json!({"layers": targets, "parent": row.layer.0,"compensate":!ctx.input(|i|i.modifiers.alt)})));
                 }
                 // The property pick whip replaces the expression with the reference (or adds one),
                 // as the expression pick whip does when its expression isn't being edited.
@@ -3898,6 +3903,12 @@ impl LayerMenuCaps {
     }
 }
 
+/// Parent/drop actions apply to the selection when operated from one of its members.
+fn parent_targets(comp: &Comp, selected: &[LayerId], source: LayerId, parent: Option<LayerId>) -> Vec<u64> {
+    let ids = if selected.contains(&source) { selected.to_vec() } else { vec![source] };
+    ids.into_iter().filter(|id| Some(*id) != parent && comp.layer(*id).is_some_and(|l| !l.switches.locked)).map(|id| id.0).collect()
+}
+
 /// A layer row's or bar's context menu. As in After Effects, right-clicking a layer that is part
 /// of the selection keeps the selection and the menu acts on all of it; right-clicking an
 /// unselected layer selects only that layer.
@@ -4391,6 +4402,17 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    #[test]
+    fn parenting_a_selected_member_targets_all_selected_children() {
+        let mut app = app();
+        let comp = app.session.active_comp().unwrap();
+        let ids: Vec<_> = comp.layers.iter().map(|l| l.id).collect();
+        assert_eq!(parent_targets(comp, &ids, ids[0], None), ids.iter().map(|id| id.0).collect::<Vec<_>>());
+        assert_eq!(parent_targets(comp, &ids, ids[0], Some(ids[1])), vec![ids[0].0]);
+        app.session.execute("layer.setSwitch", json!({"layers":[ids[1].0],"switch":"locked","value":true})).unwrap();
+        assert_eq!(parent_targets(app.session.active_comp().unwrap(), &ids, ids[0], None), vec![ids[0].0]);
     }
 
     #[test]
