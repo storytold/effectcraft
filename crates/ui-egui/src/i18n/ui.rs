@@ -4932,7 +4932,7 @@ mod tests {
     #[test]
     fn russian_panels_translate_and_keep_project_content() {
         set_current("ru");
-        assert_eq!(tr("Composition Name:"), "Композиция");
+        assert_eq!(tr("Composition Name:"), "Название композиции:");
         assert_eq!(tr("Cancel"), "Отмена");
         assert_eq!(tr("my layer.mp4"), "my layer.mp4");
         assert_eq!(tr_args("Layer: {}", &[&"Name"]), "Слой: Name");
