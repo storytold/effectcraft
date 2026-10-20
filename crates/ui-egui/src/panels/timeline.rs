@@ -3906,7 +3906,10 @@ impl LayerMenuCaps {
 /// Parent/drop actions apply to the selection when operated from one of its members.
 fn parent_targets(comp: &Comp, selected: &[LayerId], source: LayerId, parent: Option<LayerId>) -> Vec<u64> {
     let ids = if selected.contains(&source) { selected.to_vec() } else { vec![source] };
-    ids.into_iter().filter(|id| Some(*id) != parent && comp.layer(*id).is_some_and(|l| !l.switches.locked)).map(|id| id.0).collect()
+    let candidates: Vec<_> = ids.into_iter().filter(|id| Some(*id) != parent).collect();
+    let unlocked: Vec<_> = candidates.iter().copied().filter(|id| comp.layer(*id).is_some_and(|l| !l.switches.locked)).map(|id| id.0).collect();
+    // Preserve the engine's explicit rejection when every remaining child is locked.
+    if unlocked.is_empty() { candidates.into_iter().map(|id| id.0).collect() } else { unlocked }
 }
 
 /// A layer row's or bar's context menu. As in After Effects, right-clicking a layer that is part
@@ -4402,6 +4405,20 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    #[test]
+    fn parenting_locked_children_reports_rejection_instead_of_an_empty_batch() {
+        let mut app = app();
+        let ids: Vec<_> = app.session.active_comp().unwrap().layers.iter().map(|l| l.id).collect();
+        app.session.execute("layer.setSwitch", json!({"layers":[ids[0].0],"switch":"locked","value":true})).unwrap();
+        let comp = app.session.active_comp().unwrap();
+        let targets = parent_targets(comp, &ids, ids[0], Some(ids[1]));
+        assert_eq!(targets, vec![ids[0].0]);
+        assert!(parent_targets(comp, &[ids[1]], ids[1], Some(ids[1])).is_empty());
+        let error = app.session.execute("layer.setParent", json!({"layers":targets,"parent":ids[1].0})).unwrap_err();
+        assert!(error.to_string().contains("locked"), "{error}");
+        assert!(app.session.active_comp().unwrap().layers.iter().all(|l| l.parent.is_none()));
     }
 
     #[test]
