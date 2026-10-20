@@ -60,6 +60,16 @@ fn coverage(ctx: &EvalCtx, layer: &Layer, g: &effectcraft_project::PropGroup, bu
     coverage_at(ctx, layer, g, buf)
 }
 
+/// Fill the bounded work buffer before paying another tile's repeated feather padding.
+fn coverage_tile_span(frame: [u32; 2], pad: [u32; 2], scale: f64) -> usize {
+    let room = 2048u32.saturating_sub(pad[0].max(pad[1]).saturating_mul(2)).saturating_sub(1).max(1);
+    let dimension = frame[0].max(frame[1]).max(1);
+    if !scale.is_finite() || scale <= 0.0 {
+        return 1;
+    }
+    (f64::from(room) / scale).floor().clamp(1.0, f64::from(dimension)) as usize
+}
+
 fn coverage_at(ctx: &EvalCtx, layer: &Layer, g: &effectcraft_project::PropGroup, buf: &Buf) -> Option<Mask> {
     let Value::Path(sp) = ctx.group_value(layer, g, "path")? else { return None };
     let path = effectcraft_path::to_kurbo(&sp);
@@ -99,12 +109,12 @@ fn coverage_at(ctx: &EvalCtx, layer: &Layer, g: &effectcraft_project::PropGroup,
     let full_pad = padding(sigma);
     let full_size = full_pad[0].checked_mul(2).and_then(|p| w.checked_add(p)).zip(full_pad[1].checked_mul(2).and_then(|p| h.checked_add(p)));
     let fits = full_size.is_some_and(|(w, h)| w <= 2048 && h <= 2048);
-    let tile = if fits { w.max(h) as usize } else { 256 };
     // Bound temporary work to at most 2048² pixels. Large frames use exact full-resolution
     // tiles; exceptionally broad feather uses a lower-resolution coverage within each tile.
     let work_scale = if fits { 1.0 } else { (128.0 / sigma[0].max(sigma[1])).min(1.0) };
     let work_sigma = sigma.map(|s| s * work_scale);
     let pad = padding(work_sigma);
+    let tile = if fits { w.max(h) as usize } else { coverage_tile_span([w, h], pad, work_scale) };
     let mut out = Mask::new(w, h, 0.0);
     for y0 in (0..h).step_by(tile) {
         for x0 in (0..w).step_by(tile) {
@@ -218,6 +228,19 @@ mod tests {
     use effectcraft_time::{FrameRate, Tick};
 
     #[test]
+    fn feather_tiles_amortize_padding_within_the_work_buffer_limit() {
+        for (pad, scale) in [([303, 303], 1.0), ([387, 303], 1.0), ([387, 0], 0.25), ([0, 387], 0.01)] {
+            let tile = coverage_tile_span([4000, 2160], pad, scale);
+            assert!(4000usize.div_ceil(tile) <= 4, "broad padding should not be repeated for sixteen tiny tiles");
+            for p in pad {
+                assert!((tile as f64 * scale).ceil() as u32 + 2 * p <= 2048);
+            }
+            assert!((1..=4000).contains(&tile));
+        }
+        assert_eq!(coverage_tile_span([8, 4], [387, 387], 0.25), 8);
+    }
+
+    #[test]
     fn feather_tiles_match_shifted_canvas_and_bound_extreme_parameters() {
         let mut project = Project::default();
         let comp = Comp::new(2100, 20, FrameRate::FPS_30, Tick::from_seconds_f64(1.0));
@@ -227,13 +250,16 @@ mod tests {
         let ctx = EvalCtx::new(&project, ItemId(0), &comp, Tick::ZERO);
         let buf = Buf { img: Image::new(2100, 20), offset: [0.0; 2], scale: 1.0 };
         let reference = Buf { img: Image::new(2300, 220), offset: [100.0; 2], scale: 1.0 };
-        let a = coverage_at(&ctx, &layer, &mask, &buf).unwrap();
-        let b = coverage_at(&ctx, &layer, &mask, &reference).unwrap();
-        for y in [0, 10, 19] {
-            for x in [0, 255, 256, 257, 1023, 1024, 1100, 1119, 1120, 2047, 2048, 2099] {
-                let ai = y * 2100 + x;
-                let bi = (y + 100) * 2300 + x + 100;
-                assert!((a.data[ai] - b.data[bi]).abs() < 1e-5, "tile seam at {x},{y}");
+        for feather in [[24.0, 12.0], [200.0, 256.0], [256.0, 200.0]] {
+            mask.get_mut("feather").unwrap().value = Value::Vec2(feather);
+            let a = coverage_at(&ctx, &layer, &mask, &buf).unwrap();
+            let b = coverage_at(&ctx, &layer, &mask, &reference).unwrap();
+            for y in [0, 10, 19] {
+                for x in [0, 255, 256, 257, 1023, 1024, 1100, 1119, 1120, 1272, 1273, 1274, 1968, 1969, 1970, 2047, 2048, 2099] {
+                    let ai = y * 2100 + x;
+                    let bi = (y + 100) * 2300 + x + 100;
+                    assert!((a.data[ai] - b.data[bi]).abs() < 1e-5, "tile seam at {x},{y}");
+                }
             }
         }
         for value in [f64::MAX, f64::NAN, f64::INFINITY] {
