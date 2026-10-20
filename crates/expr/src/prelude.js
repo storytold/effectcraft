@@ -563,12 +563,15 @@ function Layer(c, l) {
 
 // Layer `l` of comp `c`, made once per runtime: a callable Layer is dearer to make than a plain
 // object, so it is kept, and its info (`__info`) is read again in each evaluation.
-var __layers = {};
-function __layer(c, l) {
-  // By comp, then layer: a `c + ':' + l` key costs more to build than the lookup saves.
-  var m = __layers[c] || (__layers[c] = {});
-  return m[l] || (m[l] = new Layer(c, l));
-}
+// The kept layers are out of an expression's reach.
+var __layer = (function () {
+  var layers = {};
+  return function (c, l) {
+    // By comp, then layer: a `c + ':' + l` key costs more to build than the lookup saves.
+    var m = layers[c] || (layers[c] = {});
+    return m[l] || (m[l] = new Layer(c, l));
+  };
+})();
 
 function __m3(m, p) {
   var x = p[0] || 0, y = p[1] || 0;
@@ -1099,3 +1102,23 @@ function velocityAtTime(t) { return thisProperty.velocityAtTime(t); }
 function speedAtTime(t) { return thisProperty.speedAtTime(t); }
 function key(n) { return thisProperty.key(n); }
 function nearestKey(t) { return thisProperty.nearestKey(t); }
+
+// ---------------------------------------------------------------------------------------------
+// The runtime runs this file once and keeps it for the thread's later evaluations, so an
+// expression can't change the object model or the internals: the prototypes are frozen, and the
+// `__` globals, the constructors and `thisProject` can't be reassigned. The `__` state below is
+// set again by `__begin` in each evaluation.
+
+[Comp, Footage, Layer, Prop, Markers, __Path, __TextStyle].forEach(function (f) {
+  Object.freeze(f.prototype);
+  Object.freeze(f);
+});
+[__GroupProto, __groupHandler, __propHandler, thisProject].forEach(Object.freeze);
+(function () {
+  var perEvaluation = { __S: true, __rc: true, __seed: true, __timeless: true, __projectInfo: true };
+  var model = { Comp: true, Footage: true, Layer: true, Prop: true, Markers: true, thisProject: true };
+  Object.getOwnPropertyNames(globalThis).forEach(function (k) {
+    if (!(k.slice(0, 2) === '__' && !perEvaluation[k]) && !model[k]) return;
+    if ('value' in Object.getOwnPropertyDescriptor(globalThis, k)) Object.defineProperty(globalThis, k, { writable: false, configurable: false });
+  });
+})();
