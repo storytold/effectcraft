@@ -19,6 +19,8 @@ pub mod content_fill;
 mod create;
 mod edit;
 mod effect;
+#[cfg(test)]
+pub(crate) use effect::crypto_cov_reference;
 pub use effect::{CryptoCoverage, CryptoProbeJob, PLUGINS_DIR};
 pub(crate) use effect::{CryptoProbeSlot, crypto_coverage, crypto_probe_job, crypto_probe_ready, keep_crypto_probe, kept_crypto_probe};
 pub mod essential;
