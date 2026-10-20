@@ -80,3 +80,58 @@ fn expanded_rect_add_mask_has_round_corners() {
     // The square's bounding corner (280,70) is 42 px from the corner: a miter would cover it.
     assert!(img.get(277, 73)[3] < 0.01);
 }
+
+/// A mask extending beyond a source must have the same feather coverage as the same mask
+/// rasterized on a larger source and cropped. Source boundaries aren't mask boundaries.
+#[test]
+fn feather_is_independent_of_source_canvas_edges() {
+    use effectcraft_project::{FeatherFalloff, GroupKind};
+    for scale in [1.0, 0.5] {
+        for variable in [false, true] {
+            for falloff in [FeatherFalloff::Smooth, FeatherFalloff::Linear] {
+                for (x, mode, inverted, expansion) in [
+                    (-60.0, MaskMode::Add, false, 0.0),
+                    (-3.0, MaskMode::Add, false, 5.0),
+                    (4.0, MaskMode::Subtract, false, -2.0),
+                    (-3.0, MaskMode::Add, true, 0.0),
+                ] {
+                    let mut shape = ShapePath::polygon(&[[x, -60.0], [480.0, -60.0], [480.0, 380.0], [x, 380.0]], true);
+                    if variable {
+                        shape.feather.push(effectcraft_keyframe::FeatherPoint { segment: 0, t: 0.5, radius: 8.0, tension: 0.0 });
+                    }
+                    let (mut p, cid) = project(shape, mode, expansion);
+                    p.settings.bit_depth = effectcraft_project::BitDepth::Bpc32;
+                    let l = p.comp_mut(cid).unwrap().layers.first_mut().unwrap();
+                    let g = l.props.sub_mut("masks").unwrap().children.first_mut().unwrap().as_group_mut().unwrap();
+                    g.get_mut("feather").unwrap().value = Value::Vec2([24.0, 12.0]);
+                    if let GroupKind::Mask { feather_falloff, inverted: i, .. } = &mut g.kind {
+                        *feather_falloff = falloff;
+                        *i = inverted;
+                    }
+                    let img = Renderer::new(&p, &NoFootage, RenderOpts { scale, ..Default::default() }).comp_frame(cid, Tick::ZERO);
+                    let mut larger = p.clone();
+                    let source = larger.comp(cid).unwrap().layers[0].source.item().unwrap();
+                    if let ItemKind::Solid(s) = &mut larger.item_mut(source).unwrap().kind {
+                        s.width = 600;
+                        s.height = 500;
+                    }
+                    let l = larger.comp_mut(cid).unwrap().layers.first_mut().unwrap();
+                    l.props.prop_mut("transform/anchor").unwrap().value = Value::Vec3([300.0, 250.0, 0.0]);
+                    let g = l.props.sub_mut("masks").unwrap().children.first_mut().unwrap().as_group_mut().unwrap();
+                    if let Value::Path(path) = &mut g.get_mut("path").unwrap().value {
+                        for v in &mut path.vertices {
+                            v[0] += 100.0;
+                            v[1] += 100.0;
+                        }
+                    }
+                    let reference = Renderer::new(&larger, &NoFootage, RenderOpts { scale, ..Default::default() }).comp_frame(cid, Tick::ZERO);
+                    for (px, py) in [(0, 0), (1, 150), (10, 150), (200, 0), (200, 299), (399, 150), (399, 299)] {
+                        let (px, py) = ((px as f64 * scale) as i64, (py as f64 * scale) as i64);
+                        let (a, b) = (img.get(px, py)[3], reference.get(px, py)[3]);
+                        assert!((a - b).abs() < 0.002, "{falloff:?} x={x}, {mode:?}, inverse={inverted}, at {px},{py}: clipped={a}, extended={b}");
+                    }
+                }
+            }
+        }
+    }
+}
