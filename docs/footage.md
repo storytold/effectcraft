@@ -122,7 +122,8 @@ vectors, positions and IDs are never the picture. EXtractoR reads every other la
 
 The Cryptomatte effect keys objects by their Cryptomatte ID passes, with the names from the
 file's manifest. Pick them with the eyedropper next to its Selection, then click in the
-Composition viewer (Shift adds, Alt or Ctrl removes).
+Composition viewer (Shift adds, Alt or Ctrl removes); agents list and pick them by name (see
+[agents.md](agents.md#cryptomatte)).
 
 ## Replacing and reloading
 

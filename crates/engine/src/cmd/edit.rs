@@ -854,6 +854,8 @@ fn purge_caches(s: &mut Session, p: &Value) -> Result<Value> {
     if memory {
         s.layer_cache.clear();
         s.footage.purge();
+        // The Cryptomatte pick's probe holds the layer's aux channels.
+        s.drop_crypto_probe();
     }
     let mut disk_entries = 0;
     if disk && let Some(dc) = &s.disk_cache {
