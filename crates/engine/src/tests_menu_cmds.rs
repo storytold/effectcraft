@@ -195,6 +195,132 @@ fn transform_dialog_values_and_center_anchor() {
     assert_eq!(layer(&s, a).auto_orient, effectcraft_project::AutoOrient::AlongPath);
 }
 
+#[test]
+fn replace_layer_source_preserves_content_properties_and_undo() {
+    let mut s = comp();
+    let a = solid(&mut s, "#ff0000");
+    let b = solid(&mut s, "#00ff00");
+    let source = match layer(&s, b).source {
+        effectcraft_project::LayerSource::Solid { item } => item,
+        _ => panic!("solid"),
+    };
+    s.execute("layer.addMask", json!({"layer":a})).unwrap();
+    let before = layer(&s, a);
+    let count = s.active_comp().unwrap().layers.len();
+    s.execute("layer.replaceSource", json!({"layers":[a],"item":source.0})).unwrap();
+    let after = layer(&s, a);
+    assert_eq!(after.props, before.props);
+    assert_eq!(after.source, layer(&s, b).source);
+    assert_eq!(s.active_comp().unwrap().layers.len(), count);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(layer(&s, a).source, before.source);
+    let cid = s.active_comp_id().unwrap();
+    assert!(s.execute("layer.replaceSource", json!({"layers":[a],"item":cid.0})).is_err());
+}
+
+#[test]
+fn replace_source_remaps_animated_pixel_geometry_like_ae() {
+    use effectcraft_keyframe::{Ease, Keyframe, ShapePath};
+    use effectcraft_project::{LayerId, Node};
+    for (width, height) in [(400, 200), (400, 300), (100, 50)] {
+        let mut s = comp();
+        let a = solid(&mut s, "#ff0000"); // 200 x 100
+        let b = s.execute("layer.newSolid", json!({"width":width,"height":height})).unwrap()["layer"].as_u64().unwrap();
+        let source = layer(&s, b).source;
+        let item = match source {
+            effectcraft_project::LayerSource::Solid { item } => item,
+            _ => panic!("solid"),
+        };
+        let uid = s.execute("layer.addMask", json!({"layer":a})).unwrap()["mask"].as_u64().unwrap();
+        let cid = s.active_comp_id().unwrap();
+        s.edit("Test animation", None, |project, _| {
+            let l = project.comp_mut(cid).unwrap().layer_mut(LayerId(a)).unwrap();
+            let anchor = l.props.prop_mut("transform/anchor").unwrap();
+            anchor.value = KV::Vec3([40.0, 15.0, 7.0]);
+            let mut key = Keyframe::new(Tick::ZERO, anchor.value.clone()).eased();
+            key.spatial_auto = false;
+            key.spatial_in = [2.0, 3.0, 4.0];
+            key.spatial_out = [4.0, 5.0, 6.0];
+            key.out_ease = vec![Ease { speed: 30.0, influence: 0.5 }];
+            anchor.keys = vec![key, Keyframe::new(Tick::from_seconds_f64(2.0), KV::Vec3([75.0, 40.0, 9.0]))];
+            let path = l.props.find_group_mut(uid).unwrap().get_mut("path").unwrap();
+            let mut shape = ShapePath::polygon(&[[20.0, 10.0], [160.0, 15.0], [150.0, 80.0], [25.0, 85.0]], true);
+            shape.in_tangents[0] = [-5.0, -3.0];
+            shape.out_tangents[1] = [4.0, 8.0];
+            path.value = KV::Path(shape.clone());
+            path.keys = vec![Keyframe::new(Tick::ZERO, KV::Path(shape.clone())).eased()];
+            shape.vertices[0] = [30.0, 12.5];
+            path.keys.push(Keyframe::new(Tick::from_seconds_f64(2.0), KV::Path(shape)));
+            let position = l.props.prop_mut("transform/position").unwrap();
+            position.keys =
+                vec![Keyframe::new(Tick::ZERO, KV::Vec3([300.0, 200.0, 0.0])), Keyframe::new(Tick::from_seconds_f64(2.0), KV::Vec3([400.0, 300.0, 0.0]))];
+            Ok(())
+        })
+        .unwrap();
+        let before = layer(&s, a);
+        s.execute("layer.replaceSource", json!({"layers":[a],"item":item.0})).unwrap();
+        let after = layer(&s, a);
+        let (sx, sy) = (f64::from(width) / 200.0, f64::from(height) / 100.0);
+        assert_eq!(after.source, source);
+        let anchor = after.props.prop("transform/anchor").unwrap();
+        assert_eq!(anchor.value, KV::Vec3([40.0 * sx, 15.0 * sy, 7.0]));
+        assert_eq!(anchor.keys[0].value, anchor.value);
+        assert_eq!(anchor.keys[1].value, KV::Vec3([75.0 * sx, 40.0 * sy, 9.0]));
+        assert_eq!(anchor.keys[0].spatial_in, [2.0 * sx, 3.0 * sy, 4.0]);
+        assert_eq!(anchor.keys[0].spatial_out, [4.0 * sx, 5.0 * sy, 6.0]);
+        assert_eq!(anchor.keys[0].out_ease, vec![Ease { speed: 30.0 * sy, influence: 0.5 }]);
+        let original = before.props.find_group(uid).unwrap().get("path").unwrap();
+        let path = after.props.find_group(uid).unwrap().get("path").unwrap();
+        for (old, new) in std::iter::once(&original.value)
+            .chain(original.keys.iter().map(|k| &k.value))
+            .zip(std::iter::once(&path.value).chain(path.keys.iter().map(|k| &k.value)))
+        {
+            let (KV::Path(old), KV::Path(new)) = (old, new) else { panic!("path") };
+            for (p, q) in
+                old.vertices.iter().chain(&old.in_tangents).chain(&old.out_tangents).zip(new.vertices.iter().chain(&new.in_tangents).chain(&new.out_tangents))
+            {
+                assert_eq!(*q, [p[0] * sx, p[1] * sy]);
+            }
+        }
+        // Compare all unrelated properties, key metadata, IDs and layer settings unchanged.
+        let mut restored = after.clone();
+        restored.source = before.source.clone();
+        *restored.props.prop_mut("transform/anchor").unwrap() = before.props.prop("transform/anchor").unwrap().clone();
+        let mask = restored.props.find_group_mut(uid).unwrap();
+        let i = mask.children.iter().position(|n| n.match_id() == "path").unwrap();
+        mask.children[i] = Node::Prop(original.clone());
+        assert_eq!(restored, before);
+        s.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(layer(&s, a), before);
+        s.execute("edit.redo", json!({})).unwrap();
+        assert_eq!(layer(&s, a), after);
+    }
+}
+
+#[test]
+fn replace_source_uses_each_layers_dimensions_and_rejects_overflow_atomically() {
+    use effectcraft_project::{LayerId, LayerSource};
+    let mut s = comp();
+    let a = solid(&mut s, "#ff0000");
+    let b = s.execute("layer.newSolid", json!({"width":400,"height":300})).unwrap()["layer"].as_u64().unwrap();
+    let c = s.execute("layer.newSolid", json!({"width":800,"height":600})).unwrap()["layer"].as_u64().unwrap();
+    let LayerSource::Solid { item } = layer(&s, c).source else { panic!("solid") };
+    s.execute("layer.replaceSource", json!({"layers":[a,b],"item":item.0})).unwrap();
+    for id in [a, b] {
+        assert_eq!(layer(&s, id).props.prop("transform/anchor").unwrap().value, KV::Vec3([400.0, 300.0, 0.0]));
+    }
+    s.execute("edit.undo", json!({})).unwrap();
+    let cid = s.active_comp_id().unwrap();
+    s.edit("Overflow fixture", None, |project, _| {
+        project.comp_mut(cid).unwrap().layer_mut(LayerId(b)).unwrap().props.prop_mut("transform/anchor").unwrap().value = KV::Vec3([f64::MAX, 0.0, 0.0]);
+        Ok(())
+    })
+    .unwrap();
+    let before = s.project.clone();
+    assert!(s.execute("layer.replaceSource", json!({"layers":[a,b],"item":item.0})).is_err());
+    assert_eq!(*s.project, *before);
+}
+
 /// Inclusive bounds of samples whose alpha is above one half, plus the frame size and the count.
 fn opaque_bounds(s: &Session, t: Tick) -> (u32, u32, i64, i64, i64, i64, u32) {
     let img = s.render(s.active_comp_id().unwrap(), t, Default::default());

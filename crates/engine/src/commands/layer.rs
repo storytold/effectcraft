@@ -1662,6 +1662,15 @@ pub fn specs() -> Vec<CommandSpec> {
             has_layers,
             track_matte
         ),
+        cmd!(
+            "layer.replaceSource",
+            "Replace Layer Source",
+            [],
+            Some("Cmd+Alt+/"),
+            "{comp?, layers?, item?: id|name, fixExpressions?: false}",
+            super::layer_source::enabled,
+            super::layer_source::replace_source
+        ),
         cmd!("layer.setParent", "Parent", [], None, "{layers?, parent: layer|null, compensate?: bool}", has_layers, set_parent),
         cmd!(
             "layer.timing",

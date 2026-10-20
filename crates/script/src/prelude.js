@@ -1301,7 +1301,12 @@ AVLayer.prototype.constructor = AVLayer;
   }
   P.sourcePointToComp = function (p) { return pointIn(this, p, true); };
   P.compPointToSource = function (p) { return pointIn(this, p, false); };
-  P.replaceSource = function () { throw __err("replaceSource is not supported yet"); };
+  // Adapted from ki2pixel's PR #1929 (8d887fd6); geometry and Audio use the engine command.
+  P.replaceSource = function (newSource, fixExpressions) {
+    if (!(newSource instanceof AVItem) || newSource.__id === undefined) throw __err("replaceSource needs a footage item, composition or solid");
+    __call("layer.replaceSource", { comp: this.__comp, layers: [this.__id], item: newSource.__id, fixExpressions: !!fixExpressions });
+    return null;
+  };
   P.openInViewer = function () { __call("layer.openLayer", this.__p1()); return null; };
 })();
 

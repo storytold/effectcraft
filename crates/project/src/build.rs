@@ -752,6 +752,13 @@ pub fn audio(ids: &mut Ids) -> PropGroup {
     ids.group("audio", "Audio").with(ids.prop("levels", "Audio Levels", Value::Vec2([0.0, 0.0])))
 }
 
+/// Whether a source exposes the standard Audio controls. Precomps keep them even when
+/// currently silent, because their contents can gain audio without replacing the source.
+pub fn source_has_audio_controls(project: &Project, source: &LayerSource) -> bool {
+    matches!(source, LayerSource::Footage { item } if matches!(project.item(*item).map(|i| &i.kind), Some(crate::ItemKind::Footage(f)) if f.has_audio))
+        || matches!(source, LayerSource::Comp { .. })
+}
+
 // ---------------------------------------------------------------- layers
 
 /// Label colour for a new layer: its Project item's label when it has one (later changes to the
@@ -854,9 +861,7 @@ pub fn layer(project: &mut Project, comp: &Comp, name: &str, source: LayerSource
             _ => {}
         }
     }
-    let has_audio = matches!(&source, LayerSource::Footage { item } if matches!(project.item(*item).map(|i| &i.kind), Some(crate::ItemKind::Footage(f)) if f.has_audio))
-        || matches!(source, LayerSource::Comp { .. });
-    if has_audio {
+    if source_has_audio_controls(project, &source) {
         let mut ids = Ids(&mut project.next_id);
         root.children.push(audio(&mut ids).into());
     }

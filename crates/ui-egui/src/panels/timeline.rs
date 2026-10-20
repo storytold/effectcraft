@@ -3379,6 +3379,25 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     _ => {}
                 }
             }
+        } else if ctx.input(|i| i.modifiers.alt) && matches!(payload.as_ref(), crate::panels::DragPayload::Item(_)) {
+            if let crate::panels::DragPayload::Item(item) = payload.as_ref() {
+                let targets = selected.to_vec();
+                if effectcraft_engine::commands::can_replace_source(&app.session.project, cid, ItemId(*item), &targets) {
+                    for (index, target) in targets.iter().filter(|id| comp.layer(**id).is_some_and(|l| !l.switches.locked)).enumerate() {
+                        if let Some(span) = hit_rows.iter().filter(|(_, row)| row.layer == *target).map(|(r, _)| *r).reduce(|a, b| a.union(b)) {
+                            let lit = span.intersect(rows_rect);
+                            let rp = p.with_clip_rect(rows_rect);
+                            rp.rect_filled(lit, 0.0, t.accent.gamma_multiply(0.18));
+                            rp.rect_stroke(lit, 0.0, Stroke::new(2.0, t.accent), StrokeKind::Inside);
+                            let id = if index == 0 { "timeline.replaceSourceTarget".to_string() } else { format!("timeline.replaceSourceTarget.{}", target.0) };
+                            app.auto.add(&id, lit, "Replace selected layer sources");
+                        }
+                    }
+                    if released {
+                        actions.push(("layer.replaceSource".into(), json!({"layers":targets,"item":item})));
+                    }
+                }
+            }
         } else {
             let layer_rows: Vec<(Rect, LayerId)> = hit_rows.iter().filter(|(_, r)| matches!(r.kind, RowKind::Layer)).map(|(rr, r)| (*rr, r.layer)).collect();
             let (at, line_y) = insertion(&layer_rows, ptr.y, rows_rect.min.y);
