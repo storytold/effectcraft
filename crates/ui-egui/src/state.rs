@@ -264,6 +264,7 @@ pub struct ViewerState {
     /// The pointer is dragging in the viewer this frame (Adaptive Resolution).
     #[serde(skip)]
     pub interacting: bool,
+    /// A property scrub (Effect Controls, Timeline) or a Timeline drag of the playhead, keys or layer bars is in progress (Adaptive Resolution); cleared once the primary button is up.
     #[serde(skip)]
     pub property_interacting: bool,
     /// Extended Viewer: the comp-space region the viewer renders this frame (comp frame plus

@@ -1468,6 +1468,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     p.line_segment([pos2(graph_x0 - 1.0, top), pos2(graph_x0 - 1.0, rect.max.y)], Stroke::new(1.0, t.app_bg));
 
     let mut actions: Vec<(String, serde_json::Value)> = Vec::new();
+    let mut dragging = false; // A drag that moves the frame on screen (Fast Previews).
     if !ui.input(|i| i.pointer.primary_down()) {
         ctx.data_mut(|d| d.remove::<SwitchDrag>(switch_drag_id()));
     }
@@ -1495,6 +1496,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     app.auto.add("timeline.timecode", tc_rect, &tc);
     super::toggle_time_display(app, &tc_resp);
     if tc_resp.dragged() {
+        dragging = true;
         let d = tc_resp.drag_delta().x as f64;
         let f = fr.frame_at(time) + (d * 0.5).round() as i64;
         let _ = app.session.execute("time.set", json!({"frame": f.max(0)}));
@@ -1730,6 +1732,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     if ((rresp.is_pointer_button_down_on() && ui.input(|i| i.pointer.primary_down())) || rresp.clicked())
         && let Some(pt) = rresp.interact_pointer_pos()
     {
+        dragging |= rresp.dragged();
         let mut x = pt.x;
         // Zoomed in, a scrub held past either end of the ruler scrolls the timeline that way
         // (faster the further), with the CTI at the edge (After Effects).
@@ -2360,6 +2363,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                             continue;
                         }
                         if resp.dragged() {
+                            dragging = true;
                             let acc_id = egui::Id::new(("bar-acc", layer.id.0, kind));
                             let mut acc: f32 = ctx.data(|d| d.get_temp(acc_id).unwrap_or(0.0));
                             acc += resp.drag_delta().x;
@@ -3149,6 +3153,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let (down, ptr) = ctx.input(|i| (i.pointer.primary_down(), i.pointer.latest_pos()));
         match ptr.filter(|_| down) {
             Some(ptr) => {
+                dragging = true;
                 let frames = (((ptr.x - q.origin_x) as f64 / pps) / fd).round() as i64;
                 if frames != q.applied {
                     q.applied = frames;
@@ -3171,6 +3176,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let (down, ptr, shift) = ctx.input(|i| (i.pointer.primary_down(), i.pointer.latest_pos(), i.modifiers.shift));
         match ptr.filter(|_| down) {
             Some(ptr) => {
+                dragging = true;
                 let mut target = kd.anchor + (ptr.x - kd.origin_x) as f64 / pps;
                 if shift {
                     // The current time and whatever it snaps to (keys, layer ends, markers), but
@@ -3474,7 +3480,8 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             }
         }
     }
-    if ui.input(|i| i.pointer.primary_down()) && actions.iter().any(|(id, _)| id == "prop.set") {
+    dragging |= super::graph_tools::alt_scale_active(&ctx);
+    if ui.input(|i| i.pointer.primary_down()) && (dragging || actions.iter().any(|(id, _)| id == "prop.set")) {
         app.ui.viewer.property_interacting = true;
         ctx.request_repaint();
     }
