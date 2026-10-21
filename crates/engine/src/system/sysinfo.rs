@@ -3,10 +3,11 @@
 //! System Compatibility Report.
 //!
 //! Pure Rust and dependency-free: the values come from the operating system's own reporting
-//! (`/proc/meminfo` on Linux, `sysctl`/`vm_stat` on macOS, `df` on Unix, `wmic`/PowerShell on
-//! Windows). Every query may fail (sandboxes, the web): callers treat `None` as "unknown" and
-//! keep their configured budgets. The periodic readings behind the cache budgets run on a
-//! background thread ([`Watch`]): on Windows they start PowerShell, which takes about a second.
+//! (`/proc/meminfo` and the cgroup v2 memory limit on Linux, `sysctl`/`vm_stat` on macOS,
+//! `df` on Unix, `wmic`/PowerShell on Windows). Every query may fail (sandboxes, the web):
+//! callers treat `None` as "unknown" and keep their configured budgets. The periodic readings
+//! behind the cache budgets run on a background thread ([`Watch`]): on Windows they start
+//! PowerShell, which takes about a second.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -139,11 +140,60 @@ pub fn parse_freebsd_sysctl(text: &str) -> Option<SysMemory> {
     Some(SysMemory { total, available: free.saturating_mul(page).min(total) })
 }
 
+/// The deepest cgroup path, in components, [`parse_cgroup_memory`] follows.
+pub const MAX_CGROUP_DEPTH: usize = 32;
+
+/// One cgroup v2 limit file (`memory.max`, `memory.high`): bytes, or `None` for `max`, 0, or garbage.
+pub fn parse_cgroup_limit(text: &str) -> Option<u64> {
+    text.trim().parse::<u64>().ok().filter(|&v| v > 0)
+}
+
+/// The tightest cgroup v2 memory limit over the process's cgroup and its ancestors.
+///
+/// `self_cgroup` is `/proc/self/cgroup`; `read(path)` reads a file under the cgroup mount, with
+/// `path` relative to it (`""` is the mount root). `None` when no level sets a limit (not v2, no
+/// limit, files absent).
+pub fn parse_cgroup_memory(self_cgroup: &str, read: impl Fn(&str) -> Option<String>) -> Option<SysMemory> {
+    let path = self_cgroup.lines().find_map(|l| l.strip_prefix("0::"))?.trim();
+    let components: Vec<&str> = path.split('/').filter(|c| !c.is_empty()).collect();
+    if components.len() > MAX_CGROUP_DEPTH || components.iter().any(|c| *c == "." || *c == "..") {
+        return None;
+    }
+    let (mut total, mut available, mut limited) = (u64::MAX, u64::MAX, false);
+    for depth in 0..=components.len() {
+        let dir = components.get(..depth).map(|c| c.join("/")).unwrap_or_default();
+        let file = |n: &str| if dir.is_empty() { n.to_string() } else { format!("{dir}/{n}") };
+        let max = read(&file("memory.max")).and_then(|t| parse_cgroup_limit(&t));
+        let high = read(&file("memory.high")).and_then(|t| parse_cgroup_limit(&t));
+        let Some(limit) = max.into_iter().chain(high).min() else { continue };
+        let current = read(&file("memory.current")).and_then(|t| t.trim().parse::<u64>().ok()).unwrap_or(0);
+        let inactive = read(&file("memory.stat"))
+            .and_then(|t| t.lines().find(|l| l.starts_with("inactive_file ")).and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse::<u64>().ok()))
+            .unwrap_or(0);
+        let headroom = limit.saturating_sub(current.saturating_sub(inactive));
+        limited = true;
+        total = total.min(limit);
+        available = available.min(headroom);
+    }
+    limited.then(|| SysMemory { total, available: available.min(total) })
+}
+
+/// The host's memory narrowed to a cgroup's limit and headroom.
+pub fn apply_cgroup(host: SysMemory, cg: Option<SysMemory>) -> SysMemory {
+    let Some(cg) = cg else { return host };
+    let total = host.total.min(cg.total);
+    SysMemory { total, available: host.available.min(cg.available).min(total) }
+}
+
 /// Total and available physical memory, when the system reports them.
 pub fn memory() -> Option<SysMemory> {
     #[cfg(target_os = "linux")]
     {
-        return parse_meminfo(&std::fs::read_to_string("/proc/meminfo").ok()?);
+        let host = parse_meminfo(&std::fs::read_to_string("/proc/meminfo").ok()?)?;
+        let cg = std::fs::read_to_string("/proc/self/cgroup")
+            .ok()
+            .and_then(|t| parse_cgroup_memory(&t, |p| std::fs::read_to_string(std::path::Path::new("/sys/fs/cgroup").join(p)).ok()));
+        return Some(apply_cgroup(host, cg));
     }
     #[cfg(target_os = "macos")]
     {
@@ -338,5 +388,68 @@ mod tests {
         let m = parse_vm_stat(vm, 8 << 30).unwrap();
         assert_eq!(m.available, 4100 * 16384);
         assert!(m.is_low());
+    }
+
+    fn cgroup(map: &std::collections::HashMap<&str, &str>, self_cgroup: &str) -> Option<SysMemory> {
+        parse_cgroup_memory(self_cgroup, |p| map.get(p).map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn cgroup_v2_limit_and_working_set() {
+        let map = std::collections::HashMap::from([
+            ("user.slice/app.scope/memory.max", "4294967296\n"),
+            ("user.slice/app.scope/memory.current", "3221225472\n"),
+            ("user.slice/app.scope/memory.stat", "anon 1\ninactive_file 1073741824\n"),
+        ]);
+        assert_eq!(cgroup(&map, "0::/user.slice/app.scope\n"), Some(SysMemory { total: 4 << 30, available: 2 << 30 }));
+    }
+
+    #[test]
+    fn cgroup_unlimited_and_missing_files() {
+        let unlimited =
+            std::collections::HashMap::from([("memory.max", "max\n"), ("user.slice/memory.max", "max\n"), ("user.slice/app.scope/memory.max", "max\n")]);
+        assert_eq!(cgroup(&unlimited, "0::/user.slice/app.scope\n"), None);
+        assert_eq!(cgroup(&std::collections::HashMap::new(), "0::/user.slice/app.scope\n"), None);
+        assert_eq!(cgroup(&std::collections::HashMap::from([("memory.max", "garbage")]), "0::/\n"), None);
+        // A host that only reports cgroup v1 has no `0::` line.
+        assert_eq!(cgroup(&std::collections::HashMap::from([("memory.max", "1024")]), "1:name=systemd:/x\n"), None);
+        assert_eq!(cgroup(&std::collections::HashMap::from([("user.slice/memory.max", "1024")]), "0::/user.slice/../x\n"), None);
+    }
+
+    #[test]
+    fn cgroup_tightest_level_wins() {
+        let leaf_under_parent = std::collections::HashMap::from([
+            ("user.slice/memory.max", "2147483648\n"),
+            ("user.slice/memory.current", "1610612736\n"),
+            ("user.slice/app.scope/memory.max", "4294967296\n"),
+            ("user.slice/app.scope/memory.current", "0\n"),
+        ]);
+        assert_eq!(cgroup(&leaf_under_parent, "0::/user.slice/app.scope\n"), Some(SysMemory { total: 2 << 30, available: 512 << 20 }));
+        let leaf_high = std::collections::HashMap::from([
+            ("user.slice/memory.max", "2147483648\n"),
+            ("user.slice/memory.current", "1610612736\n"),
+            ("user.slice/app.scope/memory.max", "4294967296\n"),
+            ("user.slice/app.scope/memory.high", "1073741824\n"),
+            ("user.slice/app.scope/memory.current", "0\n"),
+        ]);
+        assert_eq!(cgroup(&leaf_high, "0::/user.slice/app.scope\n"), Some(SysMemory { total: 1 << 30, available: 512 << 20 }));
+    }
+
+    #[test]
+    fn cgroup_root_limit_in_namespace() {
+        let map = std::collections::HashMap::from([("memory.max", "1073741824\n"), ("memory.current", "2147483648\n")]);
+        let m = cgroup(&map, "0::/\n").expect("the root sets a limit");
+        assert_eq!(m, SysMemory { total: 1 << 30, available: 0 });
+        assert!(m.is_low());
+    }
+
+    #[test]
+    fn apply_cgroup_narrows_host() {
+        let host = SysMemory { total: 16 << 30, available: 8 << 30 };
+        assert_eq!(apply_cgroup(host, None), host);
+        let cg = SysMemory { total: 4 << 30, available: 3 << 30 };
+        assert_eq!(apply_cgroup(host, Some(cg)), cg);
+        let roomy = SysMemory { total: 32 << 30, available: 32 << 30 };
+        assert_eq!(apply_cgroup(host, Some(roomy)), host);
     }
 }
