@@ -265,6 +265,8 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
                 install_hooks(&mut app);
                 // Cloud: wire the CollabCraft backend for same-origin cookie auth, and the
                 // share dialog. Both are always available when served from CollabCraft.
+                // Do not call cloud::start here: the Account probe must not redirect to login
+                // before the workbook renders (same as VectorCraft #2011).
                 app.cloud.connect(crate::cloud::Service::new(cc.egui_ctx.clone()));
                 if let Some(share) = collabcraft_share::CollabCraft::from_env() {
                     app.share.connect(share.for_app("effectcraft"));
@@ -284,7 +286,7 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
                 app = app.with_control(rx);
                 let backend = cc.wgpu_render_state.as_ref().map(|rs| format!("{:?}", rs.adapter.get_info().backend));
                 api::set_info("backend", json!(backend));
-                Ok(Box::new(WebApp { app, persist: !empty }))
+                Ok(Box::new(WebApp { app, persist: !empty && !invited }))
             }),
         )
         .await?;
@@ -304,6 +306,7 @@ fn open_invite(app: &mut EffectcraftApp, invitation: craft_cloud_client::invite:
     let name = invitation.name.clone();
     match effectcraft_ui_egui::cloud::CloudApp::open_bytes(app, &name, invitation.document.clone()) {
         Ok(Some(_)) => {
+            app.cloud.as_guest(invitation.recipient.clone(), invitation.read_only());
             let mode = if invitation.read_only() { " (view only)" } else { "" };
             let who = if invitation.recipient.is_empty() { String::new() } else { format!(" (shared with {})", invitation.recipient) };
             let mut status = format!("Opened \"{name}\"{mode}{who}");
