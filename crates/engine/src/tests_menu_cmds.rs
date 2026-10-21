@@ -1767,3 +1767,61 @@ fn old_guides_load_as_pixel_guides_and_percent_round_trips() {
     // A zero-sized comp never divides by zero.
     assert!(g.px(0, 0).is_finite());
 }
+
+#[test]
+fn replacing_project_releases_old_footage() {
+    // A footage source that records the paths it is told to forget.
+    struct Recording(std::sync::Mutex<Vec<String>>);
+    impl crate::render::FootageSource for Recording {
+        fn frame(
+            &self,
+            _: effectcraft_project::ItemId,
+            _: &effectcraft_project::Footage,
+            _: effectcraft_time::Tick,
+        ) -> Option<std::sync::Arc<crate::render::Image>> {
+            None
+        }
+        fn forget(&self, path: &str) {
+            self.0.lock().unwrap().push(path.to_string());
+        }
+    }
+    let mut s = comp();
+    let src = std::sync::Arc::new(Recording(Default::default()));
+    s.footage = src.clone();
+    let recorded = || src.0.lock().unwrap().clone();
+    let with_old = |s: &Session| {
+        let mut p = (*s.project).clone();
+        p.add_item("old", Default::default(), None, ItemKind::Footage(effectcraft_project::Footage { path: "/old.mp4".into(), ..Default::default() }));
+        p
+    };
+    let old = with_old(&s);
+    s.replace_project(old, None);
+    s.drain_events();
+    src.0.lock().unwrap().clear();
+
+    // Close Project lets go of the closed project's footage and clears the RAM preview.
+    s.execute("file.closeProject", json!({})).unwrap();
+    assert!(recorded().contains(&"/old.mp4".to_string()), "{:?}", recorded());
+    assert!(s.drain_events().contains(&Event::PurgeCaches));
+
+    // Opening a project forgets the old project's files and the new project's.
+    let old = with_old(&s);
+    s.replace_project(old, None);
+    s.drain_events();
+    src.0.lock().unwrap().clear();
+    let mut new = effectcraft_project::Project::default();
+    new.add_item("new", Default::default(), None, ItemKind::Footage(effectcraft_project::Footage { path: "/new.mp4".into(), ..Default::default() }));
+    s.replace_project(new, None);
+    let paths = recorded();
+    assert!(paths.contains(&"/old.mp4".to_string()) && paths.contains(&"/new.mp4".to_string()), "{paths:?}");
+    assert!(s.drain_events().contains(&Event::PurgeCaches));
+
+    // New Project does the same.
+    let old = with_old(&s);
+    s.replace_project(old, None);
+    s.drain_events();
+    src.0.lock().unwrap().clear();
+    s.execute("file.newProject", json!({})).unwrap();
+    assert!(recorded().contains(&"/old.mp4".to_string()), "{:?}", recorded());
+    assert!(s.drain_events().contains(&Event::PurgeCaches));
+}

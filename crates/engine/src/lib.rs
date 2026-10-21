@@ -1160,9 +1160,10 @@ impl Session {
         self.script_ui.project_epoch = self.script_ui.project_epoch.wrapping_add(1);
         p.fix_next_id();
         upgrade_effects(&mut p);
-        // The media layer keys decoded frames by path: files of the new project may have changed
-        // since an earlier project decoded them (#1070).
-        for it in p.items.values() {
+        // Let go of what the closed project decoded (frames, decoders, models), and of what the
+        // new project's files decoded under an earlier project: the media layer keys them by
+        // path, and the files may have changed since (#1070).
+        for it in self.project.items.values().chain(p.items.values()) {
             if let effectcraft_project::ItemKind::Footage(f) = &it.kind {
                 self.forget_decoded(f);
             }
@@ -1174,6 +1175,9 @@ impl Session {
         self.path = path;
         self.bump();
         self.mark_saved();
+        // The viewers' RAM preview shows the closed project's frames, whose comp ids can collide
+        // with the new project's.
+        self.events.push(Event::PurgeCaches);
         let first = self.project.comps().next().map(|(id, _)| *id);
         if let Some(c) = first {
             self.open_comp(c);
