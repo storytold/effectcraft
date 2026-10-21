@@ -235,3 +235,105 @@ fn create_masks_from_text() {
     assert!(s.execute_checked("layer.create", json!({"op": "shapesFromVector", "layers": [lid]})).is_err());
     assert!(s.execute_checked("layer.create", json!({"op": "nullTracing", "layers": [lid]})).is_err());
 }
+
+/// Edit ▸ Paste of SVG markup (After Effects 26.3): a shape layer with the SVG's shapes, its
+/// canvas centred in the comp, above the selected layer, one undo step.
+#[test]
+fn paste_svg_markup_as_a_shape_layer() {
+    let (mut s, lid) = text_session();
+    let cid = s.active_comp_id().unwrap();
+    s.execute("layer.select", json!({"layers": [lid]})).unwrap();
+    let svg = r##"<?xml version="1.0"?>
+<!-- copied from a design tool -->
+<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20" viewBox="0 0 40 20">
+  <rect x="0" y="0" width="20" height="20" fill="#ff0000"/>
+  <rect x="20" y="0" width="20" height="20" fill="#0000ff"/>
+</svg>"##;
+    let r = s.execute_checked("edit.pasteSvg", json!({"svg": svg})).unwrap();
+    let sid = r["layer"].as_u64().unwrap();
+    let c = s.active_comp().unwrap();
+    assert_eq!(c.layers.len(), 2);
+    assert_eq!(c.layers[0].id.0, sid, "above the selected layer");
+    assert!(matches!(c.layers[0].source, LayerSource::Shape));
+    assert_eq!(c.layers[0].name, "Shape Layer 1");
+    assert_eq!(s.state.selected_layers, [effectcraft_project::LayerId(sid)]);
+    assert_eq!(c.layers[0].props.sub("contents").unwrap().groups().count(), 2);
+    // Hide the text so only the pasted shapes draw: the 40×20 canvas is centred in the
+    // 320×120 comp (x 140–180, y 50–70), red on the left, blue on the right.
+    s.execute("layer.setSwitch", json!({"layers": [lid], "switch": "video", "value": false})).unwrap();
+    let img = s.render(cid, s.time(), RenderOpts::default());
+    let px = |x: usize, y: usize| img.data[y * img.width as usize + x];
+    let red = px(150, 60);
+    assert!(red[3] > 0.99 && red[0] > 0.99 && red[2] < 0.01, "{red:?}");
+    let blue = px(170, 60);
+    assert!(blue[3] > 0.99 && blue[2] > 0.99 && blue[0] < 0.01, "{blue:?}");
+    assert!(px(130, 60)[3] < 0.01 && px(160, 45)[3] < 0.01, "nothing outside the canvas");
+    // One undo step removes it.
+    s.execute("edit.undo", json!({})).unwrap();
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(s.active_comp().unwrap().layers.len(), 1);
+}
+
+#[test]
+fn paste_svg_rejects_text_that_is_not_usable_svg() {
+    let (mut s, _) = text_session();
+    for bad in ["hello", "<svg", "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\"></svg>", "<html><svg></html>"] {
+        assert!(s.execute_checked("edit.pasteSvg", json!({"svg": bad})).is_err(), "{bad}");
+    }
+    assert!(s.execute_checked("edit.pasteSvg", json!({})).is_err());
+    assert_eq!(s.active_comp().unwrap().layers.len(), 1, "nothing pasted");
+}
+
+#[test]
+fn psd_with_thousands_of_nested_groups_imports_on_a_small_stack() {
+    let mut d = WDoc::new(8, 8);
+    let n = 5000;
+    d.layers = (0..n).map(|_| WLayer::group_end()).collect();
+    for i in 0..n {
+        d.layers.push(WLayer::solid(&format!("L{i}"), Rect::new(0, 0, 2, 2), [1.0; 4]));
+        d.layers.push(WLayer::group(&format!("G{i}"), true, *b"norm"));
+    }
+    let path = tmp("nested.psd");
+    std::fs::write(&path, effectcraft_psd::write::write(&d)).unwrap();
+    let h = std::thread::Builder::new()
+        .stack_size(2 << 20)
+        .spawn(move || {
+            let mut s = Session::default();
+            let r = s.execute_checked("file.import", json!({"paths": [path], "importAs": "composition"})).unwrap();
+            let warned = r["errors"].as_array().is_some_and(|e| e.len() == 1 && e[0].as_str().is_some_and(|m| m.contains("flattened")));
+            // 64 nested group comps plus the root comp.
+            let comps = s.project.items.values().filter(|i| matches!(i.kind, ItemKind::Comp(_))).count();
+            (warned, comps)
+        })
+        .unwrap();
+    let (warned, comps) = h.join().unwrap();
+    assert_eq!(comps, 65);
+    assert!(warned);
+}
+
+#[test]
+fn psd_with_damaged_layer_section_imports_the_flattened_image() {
+    let mut d = WDoc::new(30, 20);
+    d.layers = vec![
+        WLayer::solid("Back", Rect::new(0, 0, 30, 20), [0.0, 0.0, 1.0, 1.0]),
+        WLayer::solid("Box", Rect::new(2, 2, 8, 8), [1.0, 0.0, 0.0, 1.0]).with_blend(b"mul "),
+    ];
+    let mut bytes = write(&d);
+    let at = bytes.windows(8).position(|w| w == b"8BIMmul ").unwrap();
+    bytes[at] = b'X';
+    let path = tmp("damaged.psd");
+    std::fs::write(&path, bytes).unwrap();
+    let mut s = Session::default();
+    let r = s.execute_checked("file.import", json!({"paths": [path], "importAs": "composition"})).unwrap();
+    // Photoshop import warnings are reported with the import's `errors` (as for adjustment layers).
+    let warnings = r["errors"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1, "{r}");
+    assert!(warnings[0].as_str().unwrap().contains("Layers could not be read"), "{r}");
+    let cid = effectcraft_project::ItemId(r["comps"][0].as_u64().unwrap());
+    let c = s.project.comp(cid).unwrap().clone();
+    assert_eq!((c.width, c.height), (30, 20));
+    assert_eq!(c.layers.len(), 1);
+    let LayerSource::Footage { item } = c.layers[0].source else { panic!("footage") };
+    let ItemKind::Footage(f) = &s.project.item(item).unwrap().kind else { panic!() };
+    assert!(f.layer.is_none(), "the merged image, not a Photoshop layer");
+}

@@ -74,7 +74,8 @@ pub fn audible(project: &Project, l: &Layer) -> bool {
             })
 }
 
-fn db_to_gain(db: f64) -> f32 {
+/// Linear gain of an Audio Levels value in dB; -96 dB and below is silence.
+pub fn db_to_gain(db: f64) -> f32 {
     if db <= -96.0 { 0.0 } else { 10f64.powf(db / 20.0) as f32 }
 }
 
@@ -157,12 +158,17 @@ impl MixEnv<'_> {
         };
         let same = (speed - 1.0).abs() < 1e-9;
         for i in 0..m {
-            let j = if same { i } else { ((i as f64 * speed) as usize).min(src_n - 1) };
+            // The source sample at fractional index `x`, blended linearly with the next one unless the
+            // layer plays at its own speed (then the samples are copied as they are).
+            let x = i as f64 * speed;
+            let j = if same { i } else { (x as usize).min(src_n - 1) };
             if j * 2 + 1 >= buf.len() {
                 break;
             }
-            out[(a + i) * 2] = buf[j * 2];
-            out[(a + i) * 2 + 1] = buf[j * 2 + 1];
+            let k = if same || (j + 1) * 2 + 1 >= buf.len() { j } else { j + 1 };
+            let f = if same { 0.0 } else { ((x - j as f64) as f32).clamp(0.0, 1.0) };
+            out[(a + i) * 2] = buf[j * 2] + (buf[k * 2] - buf[j * 2]) * f;
+            out[(a + i) * 2 + 1] = buf[j * 2 + 1] + (buf[k * 2 + 1] - buf[j * 2 + 1]) * f;
         }
         out
     }
@@ -355,5 +361,99 @@ mod tests {
         // second half (≥ 1 s): a + b
         let i = 700 * 2;
         assert!((m[i] - 0.375).abs() < 1e-3 && (m[i + 1] + 0.25).abs() < 1e-3, "{} {}", m[i], m[i + 1]);
+    }
+
+    /// A 440 Hz tone, so a change in the mix shows in the samples.
+    struct Tone;
+    impl FootageSource for Tone {
+        fn frame(&self, _: ItemId, _: &Footage, _: Tick) -> Option<Arc<Image>> {
+            None
+        }
+        fn audio(&self, _: ItemId, _: &Footage, start: Tick, frames: usize, rate: u32) -> Option<Vec<f32>> {
+            let t0 = start.seconds();
+            Some(
+                (0..frames)
+                    .flat_map(|k| {
+                        let v = (std::f64::consts::TAU * 440.0 * (t0 + k as f64 / rate as f64)).sin() as f32 * 0.5;
+                        [v, v]
+                    })
+                    .collect(),
+            )
+        }
+    }
+
+    #[test]
+    fn a_plain_precomp_mixes_the_same_audio_as_its_layers() {
+        let mut p = Project::default();
+        let f = Footage {
+            path: "tone.wav".into(),
+            kind: FootageKind::Audio,
+            has_audio: true,
+            frame_rate: FrameRate::new(25, 1),
+            duration: Tick::from_seconds_f64(10.0),
+            ..Default::default()
+        };
+        let fid = p.add_item("tone.wav", effectcraft_color::Label::SeaFoam, None, ItemKind::Footage(f));
+        let base = Comp::new(64, 64, FrameRate::new(25, 1), Tick::from_seconds_f64(2.0));
+        let tone = build::layer(&mut p, &base, "tone", LayerSource::Footage { item: fid }, (0, 0), None);
+        let mut inner = base.clone();
+        inner.layers = vec![tone];
+        let inner_id = p.add_item("Inner", effectcraft_color::Label::Sandstone, None, ItemKind::Comp(inner.into()));
+        let pre = build::layer(&mut p, &base, "pre", LayerSource::Comp { item: inner_id }, (64, 64), None);
+        let mut outer = base.clone();
+        outer.layers = vec![pre];
+        let outer_id = p.add_item("Outer", effectcraft_color::Label::Sandstone, None, ItemKind::Comp(outer.into()));
+        let rate = 8000;
+        let t = Tick::from_seconds_f64(0.5);
+        let direct = mix_comp(&p, &Tone, None, inner_id, t, 4000, rate);
+        let nested = mix_comp(&p, &Tone, None, outer_id, t, 4000, rate);
+        assert_eq!(direct.len(), nested.len());
+        let worst = direct.iter().zip(&nested).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        assert!(worst < 1e-6, "a plain precomp changes its audio by {worst}");
+    }
+
+    /// The error of a tone mixed at `stretch` percent against the exact tone, at `rate` Hz.
+    fn stretch_error(stretch: f64, rate: u32) -> (f64, f64) {
+        let mut p = Project::default();
+        let f = Footage {
+            path: "tone.wav".into(),
+            kind: FootageKind::Audio,
+            has_audio: true,
+            frame_rate: FrameRate::new(25, 1),
+            duration: Tick::from_seconds_f64(10.0),
+            ..Default::default()
+        };
+        let fid = p.add_item("tone.wav", effectcraft_color::Label::SeaFoam, None, ItemKind::Footage(f));
+        let base = Comp::new(64, 64, FrameRate::new(25, 1), Tick::from_seconds_f64(2.0));
+        let mut tone = build::layer(&mut p, &base, "tone", LayerSource::Footage { item: fid }, (0, 0), None);
+        tone.stretch = stretch;
+        let mut comp = base.clone();
+        comp.layers = vec![tone];
+        let cid = p.add_item("C", effectcraft_color::Label::Sandstone, None, ItemKind::Comp(comp.into()));
+        let n = 2000usize;
+        let t = Tick::from_seconds_f64(0.5);
+        let m = mix_comp(&p, &Tone, None, cid, t, n, rate);
+        let speed = 100.0 / stretch;
+        let (mut worst, mut sq) = (0.0f64, 0.0f64);
+        for i in 0..n {
+            // The source plays `speed` times as fast as the comp: source time = speed * comp time.
+            let ideal = (std::f64::consts::TAU * 440.0 * speed * (t.seconds() + i as f64 / rate as f64)).sin() * 0.5;
+            let e = (m[i * 2] as f64 - ideal).abs();
+            worst = worst.max(e);
+            sq += e * e;
+        }
+        (worst, (sq / n as f64).sqrt())
+    }
+
+    #[test]
+    fn stretched_layers_resample_a_tone_with_small_error() {
+        // Blending the two samples around each time: about 0.0002 at 48 kHz and 0.007 at 8 kHz. Copying
+        // the nearest sample gave 0.025 and 0.15.
+        for stretch in [70.0, 33.0] {
+            let (worst, _) = stretch_error(stretch, 48_000);
+            assert!(worst < 1e-3, "stretch {stretch}%: error {worst} at 48 kHz");
+            let (worst, _) = stretch_error(stretch, 8_000);
+            assert!(worst < 1e-2, "stretch {stretch}%: error {worst} at 8 kHz");
+        }
     }
 }

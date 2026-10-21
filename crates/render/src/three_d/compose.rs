@@ -497,13 +497,13 @@ fn collapsed_items<'a>(
     let op = ctx.opacity(layer) as f32 * r.opacity_mul();
     let Some((sub, nctx)) = r.collapse_into(ctx, layer, item, op) else { return vec![] };
     let t = nctx.time;
-    let any_solo = nctx.comp.layers.iter().any(|l| l.switches.solo && l.source.is_av() && l.is_active_at(t));
+    let any_solo = nctx.comp.layers.iter().any(|l| l.switches.solo && l.source.is_av());
     let nested: Vec<&'a Layer> = nctx
         .comp
         .layers
         .iter()
         .rev()
-        .filter(|l| l.is_active_at(t) && l.has_video() && !l.switches.adjustment && (!any_solo || l.switches.solo) && (r.opts.guides || !l.switches.guide))
+        .filter(|l| l.is_active_at(t) && l.has_video() && !l.switches.adjustment && (!any_solo || l.switches.solo) && (sub.opts.guides || !l.switches.guide))
         .collect();
     let mut items = Vec::new();
     for (k, l) in nested.into_iter().enumerate() {

@@ -224,3 +224,50 @@ fn on_draw_concave_fills_and_images_render() {
     h.state_mut().session.execute("scriptui.close", json!({})).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// ScriptUI mouse events (#766): the pointer over a script window reaches the script's
+/// `addEventListener` listeners (element-relative position, button, click count), and a
+/// pointer click on a checkbox with a click listener toggles it once.
+#[test]
+fn script_windows_send_mouse_events_to_listeners() {
+    let mut h = harness();
+    let code = r#"
+      var w = new Window("palette", "Pad");
+      var pad = w.add("group", undefined, undefined, { name: "pad" });
+      pad.preferredSize = [120, 80];
+      var log = w.add("statictext", undefined, "", { name: "log" });
+      log.preferredSize = [400, 20];
+      var snap = w.add("checkbox", undefined, "Snap", { name: "snap" });
+      var seen = [];
+      var rec = function (e) { seen.push(e.type + " " + Math.round(e.clientX) + "," + Math.round(e.clientY) + " b" + e.button + " d" + e.detail); log.text = seen.join("|"); };
+      pad.addEventListener("mouseover", rec);
+      pad.addEventListener("mousedown", rec);
+      pad.addEventListener("mouseup", rec);
+      pad.addEventListener("click", rec);
+      snap.addEventListener("click", function (e) { log.text = "snap " + snap.value + " d" + e.detail; });
+      w.show();
+    "#;
+    let r = h.state_mut().session.execute("script.run", json!({"code": code, "name": "pad.jsx"})).unwrap();
+    assert_eq!(r["ok"], true, "{r}");
+    h.run_steps(3);
+    let win = h.state().session.script_ui.windows[0].id;
+    let text = |h: &Harness<'_, EffectcraftApp>, name: &str| h.state().session.script_ui.windows[0].root.lookup(&json!(name)).cloned().unwrap();
+    let pad = rect(&h, &format!("scriptui.{win}.pad"));
+    let at = pad.min + vec2(10.0, 20.0);
+    click_at(&mut h, at);
+    assert_eq!(text(&h, "log").text, "mouseover 10,20 b0 d0|mousedown 10,20 b0 d1|mouseup 10,20 b0 d1|click 10,20 b0 d1");
+    click(&mut h, &format!("scriptui.{win}.snap"));
+    let (snap, log) = (text(&h, "snap"), text(&h, "log"));
+    assert!(snap.checked, "toggled once");
+    assert_eq!(log.text, "snap true d1");
+    h.state_mut().session.execute("scriptui.close", json!({})).unwrap();
+}
+
+fn click_at(h: &mut Harness<'_, EffectcraftApp>, c: egui::Pos2) {
+    h.input_mut().events.push(Event::PointerMoved(c));
+    h.run_steps(1);
+    for pressed in [true, false] {
+        h.input_mut().events.push(Event::PointerButton { pos: c, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() });
+    }
+    h.run_steps(3);
+}

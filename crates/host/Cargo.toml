@@ -12,6 +12,7 @@ workspace = true
 [dependencies]
 effectcraft-engine = { workspace = true }
 effectcraft-project = { workspace = true }
+log = { workspace = true }
 effectcraft-media = { workspace = true }
 effectcraft-expr = { workspace = true }
 effectcraft-script = { workspace = true }

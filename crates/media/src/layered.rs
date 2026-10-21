@@ -28,7 +28,7 @@ pub fn vector_doc(
     Some(
         effectcraft_pdf::parse_page(bytes, page as usize)
             .map(|d| match layer {
-                Some(l) => effectcraft_pdf::layer_doc(&d, l.index as usize),
+                Some(l) => effectcraft_pdf::layer_doc_with_sizes(&d, l.index as usize, l.layer_size).0,
                 None => d,
             })
             .map_err(|e| format!("{path}: {e}")),
@@ -38,6 +38,12 @@ pub fn vector_doc(
 fn is_pdf_like(path: &str, bytes: &[u8]) -> bool {
     let ext = std::path::Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
     effectcraft_pdf::sniff(bytes).is_some() && (effectcraft_pdf::EXTENSIONS.contains(&ext.as_str()) || bytes.starts_with(b"%PDF"))
+}
+
+/// Whether `bytes` (the first 64 KiB suffice) are a Photoshop or vector file [`probe`] handles.
+#[cfg_attr(not(any(unix, windows)), allow(dead_code))]
+pub(crate) fn sniff(path: &str, bytes: &[u8]) -> bool {
+    effectcraft_psd::is_psd(bytes) || is_svg(path, bytes) || is_pdf_like(path, bytes)
 }
 
 /// Footage for a Photoshop or vector file (`None` for other formats).
@@ -81,7 +87,7 @@ pub(crate) fn decode(path: &str, bytes: &[u8], footage: &Footage, op: AlphaOp) -
                 let inner = effectcraft_psd::Psd::parse(data.to_vec()).map_err(|e| MediaError::Decode(format!("{path} (smart object): {e}")))?;
                 inner.composite().map_err(|e| MediaError::Decode(format!("{path} (smart object): {e}")))?
             } else {
-                let img = image::load_from_memory(data).map_err(|e| MediaError::Decode(format!("{path} (smart object): {e}")))?;
+                let img = crate::probe::load_oriented(data, None).map_err(|e| MediaError::Decode(format!("{path} (smart object): {e}")))?;
                 let rgba = img.to_rgba32f();
                 effectcraft_psd::Pixels { width: rgba.width(), height: rgba.height(), data: rgba.pixels().map(|p| p.0).collect() }
             };

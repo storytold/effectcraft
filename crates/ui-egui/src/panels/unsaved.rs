@@ -5,7 +5,8 @@
 //! Revert only asks to discard. Agents running commands with `engine.execute` are never asked.
 //!
 //! Automation ids: `dialog.unsaved.save`, `dialog.unsaved.dontSave` (Revert: `dialog.unsaved.revert`),
-//! `dialog.unsaved.cancel`.
+//! `dialog.unsaved.cancel`. Enter answers Save, Cmd+Backspace (Ctrl elsewhere) Don't Save and, in
+//! the Revert prompt, Cmd+R Revert.
 
 use crate::i18n::tr;
 use egui::{Color32, vec2};
@@ -73,6 +74,11 @@ pub fn window_title(app: &EffectcraftApp) -> String {
     format!("EffectCraft - {doc}{}", if app.session.is_dirty() { " *" } else { "" })
 }
 
+/// Whether the prompt is Revert Project (Revert / Cancel) instead of Unsaved Changes.
+pub(crate) fn is_revert(app: &EffectcraftApp) -> bool {
+    app.dialog_state.unsaved.command.as_ref().is_some_and(|(id, _)| id == "file.revert")
+}
+
 enum Answer {
     Save,
     Discard,
@@ -80,11 +86,11 @@ enum Answer {
 }
 
 pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
-    let Some((id, _)) = app.dialog_state.unsaved.command.clone() else {
+    if app.dialog_state.unsaved.command.is_none() {
         app.dialog = None;
         return;
-    };
-    let revert = id == "file.revert";
+    }
+    let revert = is_revert(app);
     let name = project_name(app);
     let mut answer = None;
     let title = if revert { "Revert Project" } else { "Unsaved Changes" };
@@ -102,7 +108,8 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
         ui.add_space(18.0);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let (label, key) = if revert { ("  Revert  ", "dialog.unsaved.revert") } else { ("   Save   ", "dialog.unsaved.save") };
-            let r = ui.add(egui::Button::new(egui::RichText::new(label).color(Color32::WHITE)).fill(t.accent));
+            // Revert discards work: red, like Delete.
+            let r = ui.add(egui::Button::new(egui::RichText::new(label).color(Color32::WHITE)).fill(if revert { t.danger } else { t.accent }));
             app.auto.add(key, r.rect, label.trim());
             if r.clicked() {
                 answer = Some(if revert { Answer::Discard } else { Answer::Save });
@@ -125,6 +132,15 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     });
     if answer.is_none() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
         answer = Some(Answer::Cancel);
+    }
+    // Enter is Save, the default button; Cmd+Backspace (Ctrl elsewhere) is Don't Save, as in
+    // macOS save prompts. Revert discards work, so it takes neither: Cmd+R.
+    if answer.is_none() && !revert && super::dialogs::ui_enter(ctx) {
+        answer = Some(Answer::Save);
+    }
+    let discard = if revert { egui::Key::R } else { egui::Key::Backspace };
+    if answer.is_none() && super::dialogs::ui_command_key(ctx, discard) {
+        answer = Some(Answer::Discard);
     }
     if let Some(a) = answer {
         answer_with(app, ctx, a);
@@ -225,6 +241,59 @@ mod tests {
         modified(&mut app);
         app.session.execute("file.closeProject", json!({})).unwrap();
         assert!(app.dialog.is_none() && app.session.project.comps().count() == 0);
+    }
+
+    #[test]
+    fn cmd_backspace_is_dont_save_but_not_revert() {
+        let press = |app: &mut EffectcraftApp, ctx: &egui::Context| crate::panels::dialogs::press_key(app, ctx, egui::Key::Backspace, egui::Modifiers::COMMAND);
+        let (mut app, ctx) = app();
+        modified(&mut app);
+        crate::menus::invoke(&mut app, &ctx, "file.newProject", json!({})).unwrap();
+        assert_eq!(app.dialog, Some(Dialog::UnsavedChanges));
+        press(&mut app, &ctx);
+        assert!(app.dialog.is_none() && !app.session.is_dirty());
+        assert_eq!(app.session.project.comps().count(), 0, "closed without saving");
+        // The Revert prompt has no Don't Save.
+        let dir = std::env::temp_dir().join(format!("ec-unsaved-key-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        modified(&mut app);
+        app.session.execute("file.saveAs", json!({"path": dir.join("Kept.ecproj").to_string_lossy()})).unwrap();
+        app.session.execute("layer.newNull", json!({})).unwrap();
+        crate::menus::invoke(&mut app, &ctx, "file.revert", json!({})).unwrap();
+        press(&mut app, &ctx);
+        assert_eq!(app.dialog, Some(Dialog::UnsavedChanges));
+        assert_eq!(app.session.active_comp().unwrap().layers.len(), 1, "not reverted");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn enter_is_save_and_cmd_r_is_revert() {
+        let press = |app: &mut EffectcraftApp, ctx: &egui::Context| crate::panels::dialogs::press_key(app, ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        let (mut app, ctx) = app();
+        let dir = std::env::temp_dir().join(format!("ec-unsaved-enter-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Kept.ecproj");
+        modified(&mut app);
+        app.session.execute("file.saveAs", json!({"path": path.to_string_lossy()})).unwrap();
+        // The Revert prompt discards work: Enter leaves it open.
+        app.session.execute("layer.newNull", json!({})).unwrap();
+        crate::menus::invoke(&mut app, &ctx, "file.revert", json!({})).unwrap();
+        press(&mut app, &ctx);
+        assert_eq!(app.dialog, Some(Dialog::UnsavedChanges));
+        assert_eq!(app.session.active_comp().unwrap().layers.len(), 1, "not reverted");
+        // Cmd+R is Revert.
+        crate::panels::dialogs::press_key(&mut app, &ctx, egui::Key::R, egui::Modifiers::COMMAND);
+        assert!(app.dialog.is_none());
+        assert_eq!(app.session.active_comp().unwrap().layers.len(), 0, "reverted");
+        app.session.execute("layer.newNull", json!({})).unwrap();
+        // Save: the change is written, then the project closes.
+        crate::menus::invoke(&mut app, &ctx, "file.closeProject", json!({})).unwrap();
+        press(&mut app, &ctx);
+        assert!(app.dialog.is_none());
+        assert_eq!(app.session.project.comps().count(), 0, "closed");
+        app.session.execute("file.open", json!({"path": path.to_string_lossy()})).unwrap();
+        assert_eq!(app.session.active_comp().unwrap().layers.len(), 1, "the null was saved");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

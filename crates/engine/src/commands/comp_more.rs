@@ -1,12 +1,13 @@
 //! Composition menu, part two: crop to region of interest / layer bounds, Save Frame As ▸ File,
-//! Responsive Design — Time.
+//! Copy Frame to Clipboard, Responsive Design — Time.
 
 use effectcraft_project::Marker;
 use effectcraft_time::Tick;
 use serde_json::{Value, json};
 
-use super::{CommandSpec, bad, comp_id, f_p, has_comp, has_layers, layers_p, str_p};
-use crate::{EngineError, Result, Session, cmd};
+use super::{CommandSpec, always, bad, comp_id, f_p, has_comp, has_layers, layers_p, str_p};
+use crate::prefs::CompPreset;
+use crate::{EngineError, Result, Session, cmd, query};
 
 fn has_roi(s: &Session) -> std::result::Result<(), String> {
     has_comp(s)?;
@@ -17,9 +18,11 @@ fn has_roi(s: &Session) -> std::result::Result<(), String> {
 /// (all position keys too) so nothing moves on screen.
 fn crop(s: &mut Session, cid: effectcraft_project::ItemId, r: [f64; 4], label: &str) -> Result<Value> {
     let (x, y) = (r[0].round(), r[1].round());
-    let (w, h) = (r[2].round().max(1.0) as u32, r[3].round().max(1.0) as u32);
+    // At most 30,000 px a side, like any composition (#788).
+    let (w, h) = (effectcraft_project::limits::size_f64(r[2]), effectcraft_project::limits::size_f64(r[3]));
     s.edit(label, None, |proj, st| {
         let c = proj.comp_mut(cid).ok_or(EngineError::NoComp)?;
+        let (old_w, old_h) = (c.width, c.height);
         c.width = w;
         c.height = h;
         for l in c.layers.iter_mut().filter(|l| l.parent.is_none()) {
@@ -28,7 +31,8 @@ fn crop(s: &mut Session, cid: effectcraft_project::ItemId, r: [f64; 4], label: &
             }
         }
         for g in &mut c.guides {
-            g.position -= if g.vertical { x } else { y };
+            let px = g.px(old_w, old_h) - if g.vertical { x } else { y };
+            g.set_px(px, w, h);
         }
         st.region_of_interest = None;
         Ok(())
@@ -120,6 +124,26 @@ fn save_frame(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"path": path, "width": img.width, "height": img.height, "time": t.seconds()}))
 }
 
+/// Composition ▸ Copy Frame to Clipboard (After Effects 26.3): render the frame as Save Frame As
+/// ▸ File does and hand it to the frontend, which puts it on the system clipboard.
+fn copy_frame(s: &mut Session, p: &Value) -> Result<Value> {
+    let cid = comp_id(s, p)?;
+    let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
+    let t = f_p(p, "time").map(Tick::from_seconds_f64).unwrap_or(s.time());
+    let scale = f_p(p, "scale").unwrap_or(1.0).clamp(0.01, 4.0);
+    let bg = comp.background;
+    let img = s.render(cid, t, effectcraft_render::RenderOpts { scale, backend: effectcraft_render::Backend::Auto, ..Default::default() });
+    let (width, height) = (img.width, img.height);
+    let rgba = img.to_rgba8_over(bg);
+    let expected = (width as usize).checked_mul(height as usize).and_then(|n| n.checked_mul(4));
+    if width == 0 || height == 0 || expected != Some(rgba.len()) {
+        return Err(EngineError::Other(format!("cannot copy an empty or malformed {width}×{height} frame")));
+    }
+    s.events.push(crate::Event::CopyImage { width, height, rgba });
+    s.toast("Copied frame to the clipboard");
+    Ok(json!({"width": width, "height": height, "time": t.seconds()}))
+}
+
 /// Responsive Design — Time: protected comp markers for an intro, an outro or the work area.
 fn responsive_time(s: &mut Session, p: &Value) -> Result<Value> {
     let cid = comp_id(s, p)?;
@@ -143,6 +167,65 @@ fn responsive_time(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"start": start.seconds(), "end": end.seconds()}))
 }
 
+// ---------------------------------------------------------------- composition presets
+
+/// `comp.savePreset`: remember a frame size, pixel aspect and frame rate under a name in the
+/// settings (shown in Composition Settings ▸ Preset). A preset with the same name is replaced.
+fn save_preset(s: &mut Session, p: &Value) -> Result<Value> {
+    const C: &str = "comp.savePreset";
+    let name = str_p(p, "name").map(str::trim).filter(|n| !n.is_empty()).ok_or_else(|| bad(C, "missing `name`"))?;
+    let num = |k: &str| f_p(p, k).ok_or_else(|| bad(C, format!("missing `{k}`")));
+    let dim = |k: &str| {
+        num(k).and_then(|v| {
+            if v.fract() == 0.0 && (0.0..=f64::from(u32::MAX)).contains(&v) { Ok(v as u32) } else { Err(bad(C, format!("`{k}` must be a whole number"))) }
+        })
+    };
+    let preset =
+        CompPreset { name: name.to_string(), width: dim("width")?, height: dim("height")?, pixel_aspect: num("pixelAspect")?, frame_rate: num("frameRate")? };
+    if !preset.is_valid() {
+        return Err(bad(
+            C,
+            format!(
+                "not a valid preset: width and height 4–30000 px, pixel aspect 0.01–100, frame rate 1–999, a name of at most {} characters",
+                CompPreset::MAX_NAME
+            ),
+        ));
+    }
+    let presets = &mut s.prefs.comp_presets;
+    let replaced = match presets.iter_mut().find(|q| q.name == preset.name) {
+        Some(q) => {
+            *q = preset;
+            true
+        }
+        None => {
+            presets.push(preset);
+            false
+        }
+    };
+    s.save_prefs();
+    s.prefs_revision += 1;
+    Ok(json!({"name": name, "replaced": replaced}))
+}
+
+/// `comp.deletePreset`: forget a saved composition preset.
+fn delete_preset(s: &mut Session, p: &Value) -> Result<Value> {
+    const C: &str = "comp.deletePreset";
+    let name = str_p(p, "name").ok_or_else(|| bad(C, "missing `name`"))?;
+    let before = s.prefs.comp_presets.len();
+    s.prefs.comp_presets.retain(|q| q.name != name);
+    if s.prefs.comp_presets.len() == before {
+        return Err(bad(C, format!("no saved preset named `{name}`")));
+    }
+    s.save_prefs();
+    s.prefs_revision += 1;
+    Ok(Value::Null)
+}
+
+/// `comp.presets`: the saved composition presets.
+fn list_presets(s: &mut Session, _: &Value) -> Result<Value> {
+    serde_json::to_value(&s.prefs.comp_presets).map_err(|e| bad("comp.presets", e.to_string()))
+}
+
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         cmd!("comp.cropToRegionOfInterest", "Crop Comp to Region of Interest", ["Composition"], None, "{comp?}", has_roi, crop_to_roi),
@@ -156,6 +239,18 @@ pub fn specs() -> Vec<CommandSpec> {
             has_comp,
             save_frame
         ),
+        cmd!("comp.copyFrame", "Copy Frame to Clipboard", ["Composition"], None, "{comp?, time?, scale?}", has_comp, copy_frame),
+        cmd!(
+            "comp.savePreset",
+            "Save Composition Preset",
+            [],
+            None,
+            "{name, width, height, pixelAspect, frameRate} (replaces a saved preset with the same name)",
+            always,
+            save_preset
+        ),
+        cmd!("comp.deletePreset", "Delete Composition Preset", [], None, "{name}", always, delete_preset),
+        query!("comp.presets", "Composition Presets", "{}", list_presets),
         cmd!("comp.responsiveTime", "Responsive Design — Time", [], None, "{op: intro|outro|workArea}", has_comp, responsive_time),
     ]
 }

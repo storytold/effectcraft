@@ -2,8 +2,10 @@
 //! registers its automation ids; the Footage panel's buttons edit into the comp; the Progress
 //! panel lists and cancels a job; Lumetri Scopes switch scope through their dropdown.
 
-use effectcraft_engine::Session;
 use effectcraft_ui_egui::Dialog;
+use std::sync::Arc;
+
+use effectcraft_engine::{Session, config::MemoryConfig};
 use effectcraft_ui_egui::EffectcraftApp;
 use effectcraft_ui_egui::dock::PanelKind;
 use egui::{Event, Pos2, pos2};
@@ -68,7 +70,7 @@ fn window_menu_opens_the_new_panels() {
 }
 
 /// The AI Chat panel's Settings button opens Settings ▸ AI Chat — one click from the panel —
-/// where the Agent Model dropdown offers Claude Opus.
+/// where Agent Model accepts a configurable model identifier.
 #[test]
 fn ai_chat_settings_button_opens_its_page() {
     let mut h = harness();
@@ -77,7 +79,7 @@ fn ai_chat_settings_button_opens_its_page() {
     h.run_steps(2);
     assert_eq!(h.state().dialog, Some(Dialog::Settings));
     assert!(h.state().auto.find("settings.aiChat.bridgeUrl").is_some(), "the AI Chat page is showing");
-    assert!(h.state().auto.find("settings.aiChat.agentModel").is_some(), "the Agent Model dropdown is on the page");
+    assert!(h.state().auto.find("settings.aiChat.agentModel").is_some(), "the Agent Model field is on the page");
 }
 
 /// Picking an agent in the panel's picker writes the `aiChat.agent` pref — the same key the
@@ -92,6 +94,26 @@ fn ai_chat_picker_persists_the_agent_pref() {
     h.get_by_label("Ollama (direct)").click();
     h.run_steps(2);
     assert_eq!(h.state().session.prefs.ai_chat.agent, "ollama");
+}
+
+/// #1630: choosing a checked panel in the Window menu closes it, as in After Effects (it only
+/// brought the panel to the front, so the check mark never went away); choosing it again opens it.
+#[test]
+fn window_menu_closes_a_checked_panel() {
+    let mut h = harness();
+    let shown = |h: &Harness<'_, EffectcraftApp>| {
+        h.state().ui.dock.contains(PanelKind::Align) || h.state().ui.floating.iter().any(|f| f.panels.contains(&PanelKind::Align))
+    };
+    open(&mut h, "align");
+    assert!(shown(&h));
+    click(&mut h, "menu.Window");
+    let at = h.query_by_label("✔ Align").expect("Window ▸ Align, checked").rect().center();
+    click_at(&mut h, at);
+    assert!(!shown(&h), "Align closed");
+    click(&mut h, "menu.Window");
+    let at = h.query_by_label(" Align").expect("Window ▸ Align, unchecked").rect().center();
+    click_at(&mut h, at);
+    assert!(shown(&h), "Align open again");
 }
 
 #[test]
@@ -152,6 +174,15 @@ fn click_at(h: &mut Harness<'_, EffectcraftApp>, p: Pos2) {
     h.run_steps(2);
 }
 
+fn double_click_at(h: &mut Harness<'_, EffectcraftApp>, pos: Pos2) {
+    h.input_mut().events.push(Event::PointerMoved(pos));
+    h.step();
+    for pressed in [true, false, true, false] {
+        h.input_mut().events.push(Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() });
+    }
+    h.run_steps(3);
+}
+
 fn hover(h: &mut Harness<'_, EffectcraftApp>, p: Pos2) {
     h.input_mut().events.push(Event::PointerMoved(p));
     h.run_steps(3);
@@ -199,6 +230,8 @@ fn saved_workspaces_persist_across_sessions() {
 #[test]
 fn saved_workspace_is_listed_in_the_workspace_menu() {
     let mut h = harness();
+    // Saving needs a settings folder.
+    h.state_mut().session.config = Some(Arc::new(MemoryConfig::default()));
     let ctx = h.ctx.clone();
     effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "window.workspace", json!({"name": "Minimal"})).unwrap();
     effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "window.saveWorkspaceAs", json!({"name": "My Layout"})).unwrap();
@@ -266,46 +299,147 @@ fn leaving_the_learn_workspace_closes_its_tutorials() {
     }
 }
 
-/// #284: Settings ▸ Appearance ▸ UI Scale sizes the whole interface as soon as it is chosen,
-/// Cancel puts it back, OK keeps it; Ctrl+0 (Window ▸ Project) doesn't reset it.
+fn open_settings(h: &mut Harness<'_, EffectcraftApp>) {
+    let ctx = h.ctx.clone();
+    effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "app.settings", json!({"page": "appearance"})).unwrap();
+    h.run_steps(3);
+}
+
+fn key(h: &mut Harness<'_, EffectcraftApp>, key: egui::Key, modifiers: egui::Modifiers) {
+    for pressed in [true, false] {
+        h.input_mut().events.push(Event::Key { key, physical_key: None, pressed, repeat: false, modifiers });
+        h.step();
+    }
+}
+
+/// The UI Scale setting and the zoom it gives.
+fn scale(h: &Harness<'_, EffectcraftApp>) -> (u32, f32) {
+    (h.state().session.prefs.appearance.ui_scale, h.ctx.zoom_factor())
+}
+
+/// Types `text` into Settings' UI Scale a key at a time: nothing applies (and the field keeps
+/// the keyboard) until Enter.
+fn type_scale(h: &mut Harness<'_, EffectcraftApp>, text: &str) {
+    let before = scale(h);
+    click(h, "settings.appearance.uiScale");
+    for c in text.chars() {
+        h.input_mut().events.push(Event::Text(c.to_string()));
+        h.run_steps(2);
+        assert_eq!(scale(h), before, "{text}: not while typing");
+        assert!(h.ctx.memory(|m| m.focused().is_some()), "{text}: the field keeps the keyboard");
+    }
+    key(h, egui::Key::Enter, egui::Modifiers::NONE);
+    // (Settings re-centres a frame after the zoom changes.)
+    h.run_steps(4);
+}
+
+/// #284, #682: Settings ▸ Appearance ▸ UI Scale takes any typed percentage from 75 to 200 and
+/// sizes the whole interface once it is entered, Cancel puts it back, OK keeps it and later
+/// sessions start with it; Ctrl+0 (Window ▸ Project) doesn't reset it.
 #[test]
 fn ui_scale_setting_sizes_the_interface() {
     let mut h = harness();
     let ctx = h.ctx.clone();
-    let choose = |h: &mut Harness<'_, EffectcraftApp>, label: &str| {
-        let ctx = h.ctx.clone();
-        effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "app.settings", json!({"page": "appearance"})).unwrap();
-        h.run_steps(3);
-        click(h, "settings.appearance.uiScale");
-        let option = h.query_by_label(label).unwrap_or_else(|| panic!("the {label} choice")).rect().center();
-        click_at(h, option);
-        h.run_steps(2);
-    };
     assert_eq!(ctx.zoom_factor(), 1.0);
-    choose(&mut h, "150%");
-    assert_eq!(h.state().session.prefs.appearance.ui_scale, 150);
-    assert_eq!(ctx.zoom_factor(), 1.5, "live");
+    open_settings(&mut h);
+    type_scale(&mut h, "85");
+    assert_eq!(scale(&h), (85, 0.85), "live");
     click(&mut h, "settings.cancel");
     h.run_steps(2);
-    assert_eq!((h.state().session.prefs.appearance.ui_scale, ctx.zoom_factor()), (100, 1.0), "Cancel put it back");
-    choose(&mut h, "125%");
+    assert_eq!(scale(&h), (100, 1.0), "Cancel put it back");
+    open_settings(&mut h);
+    type_scale(&mut h, "300");
+    assert_eq!(scale(&h), (200, 2.0), "at most 200");
+    click(&mut h, "settings.cancel");
+    h.run_steps(2);
+    assert_eq!(scale(&h), (100, 1.0), "Cancel put it back from 200 %");
+    open_settings(&mut h);
+    type_scale(&mut h, "50");
+    assert_eq!(scale(&h), (75, 0.75), "at least 75");
+    type_scale(&mut h, "90");
     click(&mut h, "settings.ok");
     h.run_steps(2);
     assert_eq!(h.state().dialog, None);
-    assert_eq!((h.state().session.prefs.appearance.ui_scale, ctx.zoom_factor()), (125, 1.25), "OK kept it");
+    assert_eq!(scale(&h), (90, 0.9), "OK kept it");
     // Ctrl+0 opens the Project panel; egui's own Ctrl+0 zoom reset stays out of it.
-    for pressed in [true, false] {
-        h.input_mut().events.push(Event::Key { key: egui::Key::Num0, physical_key: None, pressed, repeat: false, modifiers: egui::Modifiers::COMMAND });
-        h.step();
-    }
+    key(&mut h, egui::Key::Num0, egui::Modifiers::COMMAND);
     h.run_steps(2);
-    assert_eq!(ctx.zoom_factor(), 1.25);
+    assert_eq!(ctx.zoom_factor(), 0.9);
     // A saved scale applies from the first frame.
-    let mut s = Session::default();
-    s.prefs.set("appearance.uiScale", json!(175)).unwrap();
+    let s = Session { prefs: effectcraft_engine::prefs::Prefs::from_json(&h.state().session.prefs.to_json()), ..Default::default() };
     let mut h2 = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
     h2.run_steps(3);
-    assert_eq!(h2.ctx.zoom_factor(), 1.75);
+    assert_eq!(h2.ctx.zoom_factor(), 0.9);
+}
+
+/// Settings' Previous / Next / Cancel / OK stay whole and in view at 200 % in a 1600×1000
+/// window (they scrolled out of the dialog with its pages): the page scrolls under them, Cancel
+/// restores the settings and OK saves them.
+#[test]
+fn settings_buttons_stay_in_view_at_200_percent() {
+    let store = Arc::new(MemoryConfig::default());
+    let saved = || {
+        let mut s = Session { config: Some(store.clone()), ..Default::default() };
+        s.prefs.disk.disk_cache_enabled = false;
+        s.load_settings();
+        s.prefs.appearance.ui_scale
+    };
+    let mut s = Session { config: Some(store.clone()), ..Default::default() };
+    s.prefs.disk.disk_cache_enabled = false;
+    s.prefs.set("appearance.uiScale", json!(200)).unwrap();
+    s.save_prefs();
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    h.run_steps(3);
+    assert_eq!(scale(&h), (200, 2.0));
+    let rect = |h: &Harness<'_, EffectcraftApp>, id: &str| {
+        let e = h.state().auto.find(id).unwrap_or_else(|| panic!("no {id}"));
+        egui::Rect::from_min_size(pos2(e.rect[0], e.rect[1]), egui::vec2(e.rect[2], e.rect[3]))
+    };
+    // Whole: inside the window, and painted with none of them clipped away.
+    let buttons = |h: &Harness<'_, EffectcraftApp>| {
+        ["previous", "next", "cancel", "ok"].map(|b| {
+            let r = rect(h, &format!("settings.{b}"));
+            let clip = h
+                .output()
+                .shapes
+                .iter()
+                .find(|c| matches!(&c.shape, egui::Shape::Rect(s) if (s.rect.center() - r.center()).length() < 0.5))
+                .map(|c| c.clip_rect);
+            assert!(h.ctx.content_rect().contains_rect(r) && clip.is_some_and(|c| c.contains_rect(r)), "{b} is cut off: {r:?} in {clip:?}");
+            r
+        })
+    };
+    let scroll_page = |h: &mut Harness<'_, EffectcraftApp>| {
+        let at = rect(h, "settings.appearance.appearanceMode").center();
+        h.input_mut().events.push(Event::PointerMoved(at));
+        h.input_mut().events.push(Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -1000.0),
+            modifiers: Default::default(),
+            phase: egui::TouchPhase::Move,
+        });
+        h.run_steps(5);
+    };
+    open_settings(&mut h);
+    let footer = buttons(&h);
+    let field = rect(&h, "settings.appearance.uiScale");
+    scroll_page(&mut h);
+    assert_eq!(buttons(&h), footer, "the buttons don't scroll with the page");
+    let scrolled = rect(&h, "settings.appearance.uiScale");
+    assert!(scrolled.top() < field.top() && scrolled.bottom() < footer[2].top(), "the page scrolled to UI Scale: {field:?} -> {scrolled:?}");
+    for (button, kept) in [("settings.cancel", 200), ("settings.ok", 150)] {
+        if h.state().dialog.is_none() {
+            open_settings(&mut h);
+            scroll_page(&mut h);
+        }
+        type_scale(&mut h, "150");
+        assert_eq!(scale(&h), (150, 1.5));
+        buttons(&h);
+        click(&mut h, button);
+        h.run_steps(2);
+        assert_eq!(h.state().dialog, None, "{button} closed Settings");
+        assert_eq!((scale(&h), saved()), ((kept, kept as f32 / 100.0), kept), "{button}");
+    }
 }
 
 /// Headless look at the panels (wgpu offscreen; needs a GPU adapter). Run with
@@ -390,4 +524,172 @@ fn essential_graphics_scale_keeps_constrain_proportions() {
     drag_x(&mut h, &format!("{value}.0"), 40.0);
     let unlinked = scale(&h);
     assert!(unlinked[0] > linked[0] && unlinked[1] == linked[1], "unlinked, X moves alone: {unlinked:?}");
+}
+
+/// #956: the Properties panel's Scale chain link shares the Timeline's Constrain Proportions
+/// state: unlinking in Properties unlinks the Timeline row too, and X/Y scale together only
+/// while linked.
+#[test]
+fn properties_scale_link_shares_the_timeline_state() {
+    let mut h = harness();
+    let layer = h.state().session.active_comp().unwrap().layers[0].id.0;
+    h.state_mut().session.execute("layer.select", json!({"layers": [layer]})).unwrap();
+    h.state_mut().session.execute("prop.set", json!({"layer": layer, "path": "transform/scale", "value": [100.0, 50.0]})).unwrap();
+    open(&mut h, "properties");
+    let uid = {
+        let comp = h.state().session.active_comp().unwrap();
+        let l = comp.layers.iter().find(|l| l.id.0 == layer).unwrap();
+        l.props.prop("transform/scale").unwrap().uid
+    };
+    let link = format!("properties.prop.{uid}.constrain");
+    assert!(h.state().auto.find(&link).is_some(), "the chain link is drawn");
+    let scale = |h: &Harness<'_, EffectcraftApp>| {
+        let comp = h.state().session.active_comp().unwrap();
+        let l = comp.layers.iter().find(|l| l.id.0 == layer).unwrap();
+        l.props.prop("transform/scale").unwrap().value.components()
+    };
+    // Linked: dragging X scales Y with it.
+    drag_x(&mut h, &format!("properties.prop.{uid}.value.0"), 40.0);
+    let linked = scale(&h);
+    assert!(linked[0] > 100.0, "{linked:?}");
+    assert!((linked[1] / linked[0] - 0.5).abs() < 1e-6, "Y follows X in proportion: {linked:?}");
+    // Unlinking in Properties writes the shared state, so the Timeline row unlinks too.
+    click(&mut h, &link);
+    assert!(h.state().ui.timeline.unlinked.contains(&uid), "unlinking writes the shared state");
+    drag_x(&mut h, &format!("properties.prop.{uid}.value.0"), 40.0);
+    let unlinked = scale(&h);
+    assert!(unlinked[0] > linked[0] && unlinked[1] == linked[1], "unlinked, X moves alone: {unlinked:?}");
+    // Re-linking clears it again.
+    click(&mut h, &link);
+    assert!(!h.state().ui.timeline.unlinked.contains(&uid), "re-linking clears the shared state");
+}
+
+#[test]
+fn properties_label_double_click_reveals_without_editing() {
+    let mut h = harness();
+    let layer = h.state().session.active_comp().unwrap().layers[0].id;
+    let other = h.state_mut().session.execute("layer.newSolid", json!({"name": "Other", "color": "#204060"})).unwrap()["layer"].as_u64().unwrap();
+    h.state_mut().session.execute("prop.addKey", json!({"layer": layer.0, "path": "transform/opacity", "time": 1.0, "value": 50.0})).unwrap();
+    h.state_mut().session.execute("layer.select", json!({"layers": [layer.0]})).unwrap();
+    let comp = h.state().session.active_comp().unwrap();
+    let opacity = comp.layer(layer).unwrap().props.prop("transform/opacity").unwrap().uid;
+    let other_scale = comp.layers.iter().find(|l| l.id.0 == other).unwrap().props.prop("transform/scale").unwrap().uid;
+    let ctx = h.ctx.clone();
+    effectcraft_ui_egui::menus::frontend(h.state_mut(), &ctx, "timeline.revealProps", json!({"props": [{"layer": other, "prop": other_scale}]})).unwrap();
+    open(&mut h, "properties");
+    open(&mut h, "renderQueue");
+    h.state_mut().ui.timeline.search = "no matching property".into();
+    h.run_steps(3);
+    let value = h.state().auto.find(&format!("properties.prop.{opacity}.value")).unwrap().rect;
+    let label = pos2(value[0] - 60.0, value[1] + value[3] / 2.0);
+    let row = format!("timeline.prop.{opacity}.row");
+    click_at(&mut h, label);
+    assert_eq!(h.state().ui.timeline.search, "no matching property");
+    assert!(h.state().auto.find(&row).is_none());
+    h.run_steps(30);
+    let before = serde_json::to_value(h.state().session.project.as_ref()).unwrap();
+    let undo = h.state().session.history.undo.len();
+    let selected = h.state().session.state.selected_layers.clone();
+    for _ in 0..2 {
+        double_click_at(&mut h, label);
+        assert!(h.state().auto.find(&row).is_some(), "Opacity is visible for keyframing");
+        assert!(h.state().auto.find(&format!("timeline.prop.{other_scale}.row")).is_some(), "the other layer keeps its reveal");
+        assert_eq!(h.state().ui.timeline.search, "");
+        h.run_steps(30);
+    }
+    assert_eq!(serde_json::to_value(h.state().session.project.as_ref()).unwrap(), before, "revealing preserves values and keyframes");
+    assert_eq!(h.state().session.history.undo.len(), undo);
+    assert_eq!(h.state().session.state.selected_layers, selected);
+}
+
+#[test]
+fn properties_reveal_scrolls_to_the_displayed_layer_in_a_multiple_selection() {
+    let mut h = harness();
+    let layer = h.state().session.active_comp().unwrap().layers[0].id;
+    for _ in 0..40 {
+        h.state_mut().session.execute("layer.newSolid", json!({"name": "Spacer", "color": "#204060"})).unwrap();
+    }
+    let top = h.state().session.active_comp().unwrap().layers[0].id;
+    h.state_mut().session.execute("layer.select", json!({"layers": [layer.0, top.0]})).unwrap();
+    let uid = h.state().session.active_comp().unwrap().layer(layer).unwrap().props.prop("transform/opacity").unwrap().uid;
+    open(&mut h, "properties");
+    h.state_mut().toggle_maximize(PanelKind::Properties);
+    h.run_steps(3);
+    let r = h.state().auto.find(&format!("properties.prop.{uid}.label")).unwrap().rect;
+    double_click_at(&mut h, pos2(r[0] + r[2] / 2.0, r[1] + r[3] / 2.0));
+    assert!(h.state().auto.find(&format!("timeline.prop.{uid}.row")).is_some(), "the displayed layer's property is in view");
+    assert_eq!(h.state().session.state.selected_layers, [layer, top]);
+}
+
+#[test]
+fn properties_transform_labels_reveal_the_corresponding_property() {
+    let mut h = harness();
+    let layer = h.state().session.active_comp().unwrap().layers[0].id;
+    h.state_mut().session.execute("layer.select", json!({"layers": [layer.0]})).unwrap();
+    let props: Vec<u64> =
+        h.state().session.active_comp().unwrap().layer(layer).unwrap().transform().unwrap().props().filter(|p| !p.three_d_only).map(|p| p.uid).collect();
+    open(&mut h, "properties");
+    for uid in &props {
+        h.state_mut().ui.timeline.open_layers.remove(&layer.0);
+        h.run_steps(30);
+        assert!(h.state().auto.find(&format!("timeline.prop.{uid}.row")).is_none());
+        let r = h.state().auto.find(&format!("properties.prop.{uid}.label")).unwrap().rect;
+        double_click_at(&mut h, pos2(r[0] + r[2] / 2.0, r[1] + r[3] / 2.0));
+        for candidate in &props {
+            assert_eq!(h.state().auto.find(&format!("timeline.prop.{candidate}.row")).is_some(), candidate == uid);
+        }
+    }
+}
+
+/// Gap 7: the Backgrounds category is listed under * Animation Presets and a preset applies on double-click.
+#[test]
+fn background_presets_are_listed_and_apply() {
+    let mut h = harness();
+    let layer = h.state().session.active_comp().unwrap().layers[0].id.0;
+    h.state_mut().session.execute("layer.select", json!({"layers": [layer]})).unwrap();
+    open(&mut h, "effectsPresets");
+    h.state_mut().ui.effects_search = "slow fog".into();
+    h.run_steps(3);
+    assert!(h.state().auto.find("effects.category.presets/Backgrounds").is_some(), "the Backgrounds folder is listed");
+    let e = h.state().auto.find("effects.preset.builtin.slowFog").expect("Slow Fog is listed").clone();
+    let p: Pos2 = pos2(e.rect[0] + e.rect[2] / 2.0, e.rect[1] + e.rect[3] / 2.0);
+    h.input_mut().events.push(Event::PointerMoved(p));
+    h.step();
+    for _ in 0..2 {
+        for pressed in [true, false] {
+            h.input_mut().events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() });
+        }
+    }
+    h.run_steps(3);
+    let comp = h.state().session.active_comp().unwrap();
+    let names: Vec<String> = comp.layers[0].effects().unwrap().groups().map(|g| g.name.clone()).collect();
+    assert_eq!(names, ["Fractal Noise", "Tint"]);
+}
+
+/// #757: Effects & Presets lists the built-in Transitions presets under * Animation Presets;
+/// double-clicking one applies it to the selected layer (effect plus keyframes).
+#[test]
+fn transition_presets_apply_from_effects_and_presets() {
+    let mut h = harness();
+    let layer = h.state().session.active_comp().unwrap().layers[0].id.0;
+    h.state_mut().session.execute("layer.select", json!({"layers": [layer]})).unwrap();
+    open(&mut h, "effectsPresets");
+    h.state_mut().ui.effects_search = "clock reveal".into();
+    h.run_steps(3);
+    assert!(h.state().auto.find("effects.category.presets/Transitions").is_some(), "the Transitions folder is listed");
+    let e = h.state().auto.find("effects.preset.builtin.clockReveal").expect("Clock Reveal is listed").clone();
+    let p: Pos2 = pos2(e.rect[0] + e.rect[2] / 2.0, e.rect[1] + e.rect[3] / 2.0);
+    h.input_mut().events.push(Event::PointerMoved(p));
+    h.step();
+    // Both clicks in one frame: the harness' frame time is longer than a double-click's.
+    for _ in 0..2 {
+        for pressed in [true, false] {
+            h.input_mut().events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() });
+        }
+    }
+    h.run_steps(3);
+    let comp = h.state().session.active_comp().unwrap();
+    let fx = comp.layers[0].effects().unwrap().groups().next().expect("an effect was added").clone();
+    assert_eq!(fx.name, "Radial Wipe");
+    assert_eq!(fx.prop("completion").unwrap().keys.len(), 2);
 }

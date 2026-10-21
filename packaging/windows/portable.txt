@@ -1,0 +1,12 @@
+EffectCraft portable mode
+
+While this file sits next to effectcraft.exe, EffectCraft keeps its settings, keyboard shortcuts,
+crash-recovery files, logs and plug-ins in the EffectCraftData folder beside it instead of
+%APPDATA%\EffectCraft. Copy the whole folder to move EffectCraft with its settings.
+
+The disk cache, media cache and conformed audio still go to %LOCALAPPDATA%\EffectCraft unless
+you choose other folders in Edit > Preferences > Disk.
+
+Delete this file to use the normal per-user settings folder (%APPDATA%\EffectCraft) instead.
+If EffectCraftData can't be written (for example on a read-only drive), EffectCraft logs a
+warning and uses %APPDATA%\EffectCraft instead.

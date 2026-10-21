@@ -111,3 +111,16 @@ fn attribute_edit_deduplicates_legacy_refs_and_drops_stale_refs_without_snapping
     let opacity = s.active_comp().unwrap().layer(LayerId(layer)).unwrap().props.find(prop).unwrap();
     assert!(opacity.keys.iter().all(|k| k.out_interp == Interp::Linear));
 }
+
+#[test]
+fn moving_keys_keeps_the_selection_order() {
+    let (mut s, first) = setup();
+    let second = s.execute_checked("layer.newSolid", json!({"name": "Other", "color": "#fff"})).unwrap()["layer"].as_u64().unwrap();
+    for layer in [first, second] {
+        add(&mut s, layer, "transform/opacity", 0, json!(0));
+    }
+    let (a, b) = (uid(&s, first, "transform/opacity"), uid(&s, second, "transform/opacity"));
+    s.execute_checked("keys.select", json!({"keys": [{"layer": second, "prop": b, "time": 0}, {"layer": first, "prop": a, "time": 0}]})).unwrap();
+    s.execute_checked("keys.move", json!({"delta": 2.0 / 30.0})).unwrap();
+    assert_eq!(s.state.selected_keys, vec![key(second, b, 2), key(first, a, 2)], "not sorted by layer");
+}

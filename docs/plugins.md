@@ -14,7 +14,7 @@ Guide):
 | Effect plug-ins (C/C++ SDK, `.aex` / `.plugin`) | [Effect plug-ins](#effect-plug-ins): WebAssembly modules (plug-in API v1) or Rust; the `Plug-ins` folder next to the settings loads at start-up | Different ABI: After Effects SDK plug-ins can't run (G8) |
 | Scripts folder: its scripts are listed in File ▸ Scripts | `Scripts/` in the settings folder (File ▸ Scripts ▸ Install Script File… copies a script there), listed in File ▸ Scripts with the bundled samples | Same |
 | File ▸ Scripts ▸ Run Script File… (`.jsx`, `.jsxbin`) | `.jsx` / `.js` | Gap: `.jsxbin` (an undocumented binary encoding) |
-| ExtendScript preprocessor directives (`#include`, `#target`, `#targetengine`) | Not understood: a script that starts with one doesn't parse | Gap |
+| ExtendScript preprocessor directives (`#include`, `#target`, `#targetengine`) | `#include` / `//@include` / `#includepath` inline files relative to the script (once each, depth-limited, file gate applies); `#target`, `#targetengine`, `#strict` are ignored | Same |
 | `Scripts/Startup` and `Scripts/Shutdown`: run in alphabetical order when the app starts and quits | Not run | Gap |
 | `Scripts/ScriptUI Panels`: listed at the bottom of the Window menu, dockable like the app's own panels, `this` is the panel | `Scripts/ScriptUI Panels/` in the settings folder (File ▸ Scripts ▸ Install ScriptUI Panel… copies one there), listed at the bottom of the Window menu, docked like any panel, `this` is the panel; the panels open when the app quits open again at the next launch | Same. Where a panel was docked isn't kept: workspace layouts aren't saved between launches |
 | Keyboard shortcuts for scripts (the Keyboard Shortcuts editor lists the scripts of the Scripts folder) | Shortcuts bind to commands and menu entries; the File ▸ Scripts and Window menu entries of scripts aren't offered | Gap |
@@ -84,9 +84,12 @@ Supported controls: `panel`, `group`, `button`, `iconbutton`, `statictext`, `edi
 `tabbedpanel` / `tab` and `image`, with ScriptUI's automatic layout (`orientation`,
 `alignChildren`, `alignment`, `margins`, `spacing`, `preferredSize`), resource strings, event
 handlers (`onClick`, `onChange`, `onChanging`, `onClose`, `addEventListener`) and `onDraw` with
-ScriptUIGraphics. Mouse events (`mousedown`, `mousemove`…) aren't sent to scripts yet. Agents use
-a panel like a user: `scriptui.list`, `scriptui.get` (its controls), `scriptui.click`,
-`scriptui.set` and `scriptui.close`; every control has the automation id
+ScriptUIGraphics. Mouse events (`addEventListener("mousedown" | "mouseup" | "mousemove" |
+"mouseover" | "mouseout" | "click", handler, capture?)`) reach the control under the pointer and
+its containers (capture, target, bubble; `stopPropagation()`), with a MouseEvent carrying
+`clientX`/`clientY` relative to the target, `button`, `detail` (click count) and the modifier
+keys. Agents use a panel like a user: `scriptui.list`, `scriptui.get` (its controls),
+`scriptui.click`, `scriptui.set`, `scriptui.mouse` and `scriptui.close`; every control has the automation id
 `scriptui.<window>.<control id or name>`. The bundled sample `Layer Tools.jsx`
 (`crates/engine/scripts/ScriptUI Panels/`) and the Ease Presets extension below are longer
 examples.
@@ -100,17 +103,24 @@ name in your Scripts folders takes their place.
 
 ### Ease Presets (`extensions/scriptui-panels/Ease Presets.jsx`)
 
-Window ▸ Ease Presets.jsx: easing curves kept by name and applied to pairs of neighbouring
-selected keyframes (#254; it was a core panel in v0.6.0). A curve is the out side of a segment's
+Window ▸ Ease Presets.jsx: easing curves kept by name and applied to the sides of selected
+keyframes (#254; it was a core panel in v0.6.0). A curve is the out side of a segment's
 first key and the in side of its second, in the Keyframe Velocity dialog's terms: influence in
 percent, and speed relative to the segment's average speed (1 = as fast as a straight line, 0 = at
 rest), so one curve fits any duration and change of value.
 
-* Click a preset to apply it to every pair of neighbouring selected keyframes of each selected
-  property, in one undo step (per dimension, and along the motion path for spatial properties;
-  the keys' other sides keep playing as they did). The keys stay selected, so you can try another.
+* Click a preset to apply it to the selected keyframes of each selected property, in one undo
+  step. **Ease** chooses the sides (#1329): **In** eases each key's incoming side with the curve's
+  in side, **Out** its outgoing side with the curve's out side, **In-Out** (the default) both. A
+  side is eased when it has a neighbouring keyframe, selected or not (the neighbour doesn't
+  change), with its speeds scaled to the segment on that side: per dimension, and along the
+  motion path for spatial properties. So a single keyframe works, a selected pair gets the whole
+  curve, and the first and last keys ease the side that has a segment. The side not eased keeps
+  playing as it did (a Hold stays a Hold). Roving keyframes are skipped, and the status says how
+  many: they pass speed straight through, so an ease on one wouldn't play (turn off Roving to
+  ease it). The keys stay selected, so you can try another.
 * The drawing shows the working curve; type its numbers (Out % and Speed, In % and Speed) and
-  click Apply, or click From Keys to read the curve between the first selected pair.
+  click Apply, or click From Keys to read the curve between the first selected pair of neighbouring keys.
 * Save keeps the working curve under the typed name (replacing a preset of that name); Rename
   and Delete act on the selected preset of your own. The twelve built-in presets can't change.
 * User presets are kept with `app.settings` (section `Ease Presets`, key `userPresets`, in

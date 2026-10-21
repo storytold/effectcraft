@@ -1,0 +1,255 @@
+{
+  "format": "effectcraft.animationPresets/1",
+  "notes": "Original EffectCraft transition presets (MIT OR Apache-2.0), written from scratch on EffectCraft's own Transition effects. Key times are seconds from the current time (layer time); effect paths are the effect's parameter ids; layer paths are property paths such as transform/opacity.",
+  "presets": [
+    {
+      "id": "fadeIn",
+      "name": "Fade In",
+      "category": "Transitions",
+      "direction": "in",
+      "description": "The layer fades up from transparent over half a second.",
+      "layer": { "keys": { "transform/opacity": [[0, 0], [0.5, 100]] }, "ease": true }
+    },
+    {
+      "id": "fadeOut",
+      "name": "Fade Out",
+      "category": "Transitions",
+      "direction": "out",
+      "description": "The layer fades down to transparent over half a second.",
+      "layer": { "keys": { "transform/opacity": [[0, 100], [0.5, 0]] }, "ease": true }
+    },
+    {
+      "id": "wipeInFromLeft",
+      "name": "Wipe In from Left",
+      "category": "Transitions",
+      "direction": "in",
+      "description": "A soft edge sweeps across from the left and reveals the layer.",
+      "effects": [
+        { "effect": "ec.transition.linearwipe", "set": { "angle": 270, "feather": 40 }, "keys": { "completion": [[0, 100], [1, 0]] }, "ease": true }
+      ]
+    },
+    {
+      "id": "wipeInFromRight",
+      "name": "Wipe In from Right",
+      "category": "Transitions",
+      "direction": "in",
+      "description": "A soft edge sweeps across from the right and reveals the layer.",
+      "effects": [
+        { "effect": "ec.transition.linearwipe", "set": { "angle": 90, "feather": 40 }, "keys": { "completion": [[0, 100], [1, 0]] }, "ease": true }
+      ]
+    },
+    {
+      "id": "wipeInFromTop",
+      "name": "Wipe In from Top",
+      "category": "Transitions",
+      "direction": "in",
+      "description": "The layer is revealed from the top edge downwards.",
+      "effects": [
+        { "effect": "ec.transition.linearwipe", "set": { "angle": 0, "feather": 30 }, "keys": { "completion": [[0, 100], [0.9, 0]] }, "ease": true }
+      ]
+    },
+    {
+      "id": "wipeInFromBottom",
+      "name": "Wipe In from Bottom",
+      "category": "Transitions",
+      "direction": "in",
+      "description": "The layer is revealed from the bottom edge upwards.",
+      "effects": [
+        { "effect": "ec.transition.linearwipe", "set": { "angle": 180, "feather": 30 }, "keys": { "completion": [[0, 100], [0.9, 0]] }, "ease": true }
+      ]
+    },
+    {
+      "id": "diagonalSweepIn",
+      "name": "Diagonal Sweep In",
+      "category": "Transitions",
+      "direction": "in",
+      "description": "A wide, very soft edge sweeps in from the bottom-left corner.",
+      "effects": [
+        { "effect": "ec.transition.linearwipe", "set": { "angle": 45, "feather": 160 }, "keys": { "completion": [[0, 100], [1.2, 0]] }, "ease": true }
+      ]
+    },
+    {
+      "id": "wipeOutToRight",
+      "name": "Wipe Out to Right",
+      "category": "Transitions",
+      "direction": "out",
+      "description": "A soft edge travels left to right and takes the layer away.",
+      "effects": [
+        { "effect": "ec.transition.linearwipe", "set": { "angle": 90, "feather": 40 }, "keys": { "completion": [[0, 0], [1, 100]] }, "ease": true }
+      ]
+    },
+    {
+      "id": "clockReveal",
+      "name": "Clock Reveal",
+      "category": "Transitions",
+      "direction": "in",
+      "description": "A clock hand sweeps once around the centre and reveals the layer.",
+      "effects": [
+        { "effect": "ec.transition.radialwipe", "set": { "wipe": 1, "feather": 6 }, "keys": { "completion": [[0, 100], [1.2, 0]] }, "ease": true }
+      ]
+    },
+    {
+      "id": "fanOpen",
+      "name": "Fan Open",
+      "category": "Transitions",
+      "direction": "in",
+      "description": "The layer opens like a fan, from the top down both sides.",
+      "effects": [
+        { "effect": "ec.transition.radialwipe", "set": { "wipe": 2, "startAngle": 180, "feather": 10 }, "keys": { "completion": [[0, 100], [1, 0]] }, "ease": true }
+      ]
+    },
+    {
+      "id": "clockWipeOut",
+      "name": "Clock Wipe Out",
+      "category": "Transitions",
+      "direction": "out",
+      "description": "A clock hand sweeps once around the centre and removes the layer.",
+      "effects": [
+        { "effect": "ec.transition.radialwipe", "set": { "feather": 6 }, "keys": { "completion": [[0, 0], [1.2, 100]] }, "ease": true }
+      ]
+    },
+    {
+      "id": "blindsOpen",
+      "name": "Blinds Open",
+      "category": "Transitions",
+      "direction": "in",
+      "description": "Vertical slats widen until the layer is whole.",
+      "effects": [
+        { "effect": "ec.transition.venetian", "set": { "direction": 0, "width": 60, "feather": 4 }, "keys": { "completion": [[0, 100], [0.9, 0]] }, "ease": true }
+      ]
+    },
+    {
+      "id": "slatsDown",
+      "name": "Slats Down",
+      "category": "Transitions",
+      "direction": "in",
+      "description": "Horizontal slats thicken until the layer is whole.",
+      "effects": [
+        { "effect": "ec.transition.venetian", "set": { "direction": 90, "width": 36, "feather": 3 }, "keys": { "completion": [[0, 100], [0.8, 0]] } }
+      ]
+    },
+    {
+      "id": "blindsClose",
+      "name": "Blinds Close",
+      "category": "Transitions",
+      "direction": "out",
+      "description": "Vertical slats narrow until the layer is gone.",
+      "effects": [
+        { "effect": "ec.transition.venetian", "set": { "direction": 0, "width": 60, "feather": 4 }, "keys": { "completion": [[0, 0], [0.9, 100]] }, "ease": true }
+      ]
+    },
+    {
+      "id": "pixelDissolveIn",
+      "name": "Pixel Dissolve In",
+      "category": "Transitions",
+      "direction": "in",
+      "description": "Small hard-edged blocks pop in at random until the layer is whole.",
+      "effects": [
+        {
+          "effect": "ec.transition.blockdissolve",
+          "set": { "blockWidth": 6, "blockHeight": 6, "softEdges": false },
+          "keys": { "completion": [[0, 100], [1.2, 0]] }
+        }
+      ]
+    },
+    {
+      "id": "mosaicFadeIn",
+      "name": "Mosaic Fade In",
+      "category": "Transitions",
+      "direction": "in",
+      "description": "Large soft tiles fade in at random.",
+      "effects": [
+        {
+          "effect": "ec.transition.blockdissolve",
+          "set": { "blockWidth": 48, "blockHeight": 48, "feather": 16 },
+          "keys": { "completion": [[0, 100], [1.2, 0]] },
+          "ease": true
+        }
+      ]
+    },
+    {
+      "id": "pixelDissolveOut",
+      "name": "Pixel Dissolve Out",
+      "category": "Transitions",
+      "direction": "out",
+      "description": "Small hard-edged blocks drop out at random until the layer is gone.",
+      "effects": [
+        {
+          "effect": "ec.transition.blockdissolve",
+          "set": { "blockWidth": 6, "blockHeight": 6, "softEdges": false },
+          "keys": { "completion": [[0, 0], [1.2, 100]] }
+        }
+      ]
+    },
+    {
+      "id": "cardFlipIn",
+      "name": "Card Flip In",
+      "category": "Transitions",
+      "direction": "in",
+      "description": "A grid of cards turns over, left to right, to show the layer.",
+      "effects": [
+        {
+          "effect": "ec.transition.cardwipe",
+          "set": { "rows": 4, "columns": 8, "flipAxis": 1, "flipOrder": 1, "transitionWidth": 70 },
+          "keys": { "completion": [[0, 100], [1.4, 0]] },
+          "ease": true
+        }
+      ]
+    },
+    {
+      "id": "cardFlipOut",
+      "name": "Card Flip Out",
+      "category": "Transitions",
+      "direction": "out",
+      "description": "A grid of cards turns over, left to right, and the layer is gone.",
+      "effects": [
+        {
+          "effect": "ec.transition.cardwipe",
+          "set": { "rows": 4, "columns": 8, "flipAxis": 1, "transitionWidth": 70 },
+          "keys": { "completion": [[0, 0], [1.4, 100]] },
+          "ease": true
+        }
+      ]
+    },
+    {
+      "id": "gridDoorsIn",
+      "name": "Grid Doors In",
+      "category": "Transitions",
+      "direction": "in",
+      "description": "Tiles open like small doors from the centre outwards.",
+      "effects": [
+        { "effect": "ec.transition.ccgridwipe", "set": { "shape": 0, "tiles": 12, "reverse": true }, "keys": { "completion": [[0, 100], [1, 0]] }, "ease": true }
+      ]
+    },
+    {
+      "id": "lensPopIn",
+      "name": "Lens Pop In",
+      "category": "Transitions",
+      "direction": "in",
+      "description": "The layer grows out of a circle that stretches the picture outwards.",
+      "effects": [
+        { "effect": "ec.transition.ccradialscalewipe", "set": { "reverse": true }, "keys": { "completion": [[0, 100], [1, 0]] }, "ease": true }
+      ]
+    },
+    {
+      "id": "lineSweepIn",
+      "name": "Line Sweep In",
+      "category": "Transitions",
+      "direction": "in",
+      "description": "A stepped, slanted edge sweeps in from the lower left.",
+      "effects": [
+        { "effect": "ec.transition.cclinesweep", "set": { "direction": 90, "thickness": 30, "slant": 30 }, "keys": { "completion": [[0, 100], [1, 0]] } }
+      ]
+    },
+    {
+      "id": "jawsCloseIn",
+      "name": "Jaws Close In",
+      "category": "Transitions",
+      "direction": "in",
+      "description": "Toothed edges close in from the top and bottom until the layer is whole.",
+      "effects": [
+        { "effect": "ec.transition.ccjaws", "set": { "shape": 2, "height": 30, "width": 40 }, "keys": { "completion": [[0, 100], [1, 0]] }, "ease": true }
+      ]
+    }
+  ]
+}

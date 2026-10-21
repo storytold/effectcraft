@@ -4,7 +4,9 @@
 //! `scriptui.close` commands, which run the script's handlers. Every control registers an
 //! automation id `scriptui.<window>.<control>` (and `scriptui.<window>.<name>` when the script
 //! named it). Controls with an `onDraw` handler are painted from their draw list; edit texts and
-//! sliders send live `changing` updates (onChanging) while typing / dragging.
+//! sliders send live `changing` updates (onChanging) while typing / dragging. Mouse events
+//! (`mousedown`, `mouseup`, `mousemove`, `mouseover`, `mouseout`, `click`) on a control go to the
+//! script through `scriptui.mouse` when a listener wants them (`Widget::mouse`).
 
 use crate::i18n::tr;
 use effectcraft_engine::Services;
@@ -22,6 +24,8 @@ enum Act {
     /// A live update (each keystroke / slider step): fires onChanging.
     Changing(u32, u32, Value),
     Close(u32),
+    /// A mouse event (`scriptui.mouse` parameters without window and widget).
+    Mouse(u32, u32, Value),
 }
 
 fn rect_of(origin: egui::Pos2, b: [f64; 4]) -> Rect {
@@ -335,6 +339,132 @@ fn paint_image(ui: &egui::Ui, r: Rect, img: &ImageRef, services: &dyn Services) 
     true
 }
 
+/// Where the pointer was and what it did over one script window (for mouseover / mouseout and
+/// click counts).
+#[derive(Clone, Default)]
+struct MouseTrack {
+    hover: Option<u32>,
+    at: Option<egui::Pos2>,
+    /// The last press: control, time, position (a quick second press there counts as a double
+    /// click).
+    last_down: Option<(u32, f64, egui::Pos2)>,
+    clicks: u32,
+    /// The control and button pressed (a release on the same control is a click).
+    down: Option<(u32, u8)>,
+}
+
+/// The deepest visible control of `w` at `p` (`w` itself when no child is there): later
+/// siblings are on top; a tabbed panel shows its active tab only.
+fn hit_test(w: &Widget, origin: egui::Pos2, p: egui::Pos2, depth: usize) -> Option<&Widget> {
+    if !w.visible || !rect_of(origin, w.bounds).contains(p) {
+        return None;
+    }
+    // Widget trees come from scripts: the depth is bounded.
+    if depth < 64 {
+        if w.kind == WidgetKind::TabbedPanel {
+            if let Some(hit) = w.children.get(w.active_tab).and_then(|t| hit_test(t, origin, p, depth + 1)) {
+                return Some(hit);
+            }
+        } else if let Some(hit) = w.children.iter().rev().find_map(|c| hit_test(c, origin, p, depth + 1)) {
+            return Some(hit);
+        }
+    }
+    Some(w)
+}
+
+fn wants_mouse(w: &Widget, depth: usize) -> bool {
+    !w.mouse.is_empty() || (depth < 64 && w.children.iter().any(|c| wants_mouse(c, depth + 1)))
+}
+
+/// Mouse events over a script window's controls (drawn at `origin`, visible in `area`) for the
+/// script's listeners: mouseover / mouseout when the control under the pointer changes,
+/// mousemove, mousedown / mouseup, and click (a press and release of the left button on the
+/// same control; it replaces the plain click the control reported, so a checkbox toggles once).
+/// Only events a listener wants are sent; none while `active` is false (a modal dialog is up).
+fn mouse_events(ui: &egui::Ui, origin: egui::Pos2, area: Rect, win: u32, root: &Widget, active: bool, acts: &mut Vec<Act>) {
+    let id = egui::Id::new(("sui-mouse", win));
+    if !wants_mouse(root, 0) {
+        ui.data_mut(|d| d.remove::<MouseTrack>(id));
+        return;
+    }
+    let mut st: MouseTrack = ui.data(|d| d.get_temp(id)).unwrap_or_default();
+    let (latest, events, mods, time) = ui.input(|i| (i.pointer.latest_pos(), i.events.clone(), i.modifiers, i.time));
+    let ctx = ui.ctx();
+    let layer = ui.layer_id();
+    let target = |p: egui::Pos2| -> Option<&Widget> {
+        if !active || !area.contains(p) || ctx.layer_id_at(p).is_some_and(|l| l != layer) {
+            return None;
+        }
+        hit_test(root, origin, p, 0)
+    };
+    let send = |w: &Widget, ty: &str, p: egui::Pos2, button: u8, detail: u32, acts: &mut Vec<Act>| {
+        if !w.enabled || !w.mouse.iter().any(|m| m == ty) {
+            return;
+        }
+        let at = rect_of(origin, w.bounds).min;
+        acts.push(Act::Mouse(
+            win,
+            w.id,
+            json!({
+                "type": ty, "x": p.x - at.x, "y": p.y - at.y, "screenX": p.x, "screenY": p.y,
+                "button": button, "detail": detail,
+                "altKey": mods.alt, "ctrlKey": mods.ctrl, "shiftKey": mods.shift, "metaKey": mods.mac_cmd,
+            }),
+        ));
+    };
+    // The pointer moved: out of the old control, over the new one, along it.
+    let now = latest.and_then(|p| target(p).map(|w| (w, p)));
+    let now_id = now.map(|(w, _)| w.id);
+    if now_id != st.hover {
+        if let Some(old) = st.hover.and_then(|h| root.find(h)) {
+            send(old, "mouseout", latest.unwrap_or(origin), 0, 0, acts);
+        }
+        if let Some((w, p)) = now {
+            send(w, "mouseover", p, 0, 0, acts);
+        }
+        st.hover = now_id;
+    }
+    if let Some((w, p)) = now
+        && st.at != Some(p)
+    {
+        send(w, "mousemove", p, 0, 0, acts);
+    }
+    st.at = latest;
+    // Presses and releases.
+    for e in &events {
+        let egui::Event::PointerButton { pos, button, pressed, .. } = e else { continue };
+        let b = match button {
+            egui::PointerButton::Primary => 0,
+            egui::PointerButton::Middle => 1,
+            egui::PointerButton::Secondary => 2,
+            _ => continue,
+        };
+        let Some(w) = target(*pos) else {
+            if !pressed {
+                st.down = None;
+            }
+            continue;
+        };
+        if *pressed {
+            let again = st.last_down.is_some_and(|(c, t, at)| c == w.id && time - t < 0.5 && at.distance(*pos) < 6.0);
+            st.clicks = if again { st.clicks.saturating_add(1) } else { 1 };
+            st.last_down = Some((w.id, time, *pos));
+            st.down = Some((w.id, b));
+            send(w, "mousedown", *pos, b, st.clicks, acts);
+        } else {
+            send(w, "mouseup", *pos, b, st.clicks, acts);
+            if st.down == Some((w.id, b)) && b == 0 && w.enabled && w.mouse.iter().any(|m| m == "click") {
+                // The click with the pointer's details, after mousedown / mouseup, in place of
+                // the plain click the control reported.
+                acts.retain(|a| !matches!(a, Act::Click(aw, ac) if *aw == win && *ac == w.id));
+                send(w, "click", *pos, b, st.clicks, acts);
+            }
+            st.down = None;
+        }
+    }
+    ui.data_mut(|d| d.insert_temp(id, st));
+}
+
 /// Checkboxes and radio buttons sit at the left of their (possibly filled) bounds.
 fn snug(r: Rect, text: &str) -> Rect {
     let w = (text.chars().count() as f32 * 7.0 + 26.0).min(r.width());
@@ -348,6 +478,13 @@ fn perform(app: &mut EffectcraftApp, ctx: &egui::Context, acts: Vec<Act>) {
             Act::Set(w, id, v) => ("scriptui.set", json!({"window": w, "widget": id, "value": v})),
             Act::Changing(w, id, v) => ("scriptui.set", json!({"window": w, "widget": id, "value": v, "changing": true})),
             Act::Close(w) => ("scriptui.close", json!({"window": w})),
+            Act::Mouse(w, id, mut v) => {
+                if let Some(o) = v.as_object_mut() {
+                    o.insert("window".into(), json!(w));
+                    o.insert("widget".into(), json!(id));
+                }
+                ("scriptui.mouse", v)
+            }
         };
         match crate::menus::invoke(app, ctx, cmd, p) {
             Ok(r) => {
@@ -372,7 +509,8 @@ pub fn show_windows(app: &mut EffectcraftApp, ctx: &egui::Context) {
     let t = app.tokens;
     let mut acts = vec![];
     let screen = ctx.content_rect();
-    if windows.iter().any(|w| w.modal) {
+    let blocked = windows.iter().any(|w| w.modal);
+    if blocked {
         // A modal dialog blocks the app behind it, as in After Effects.
         let r = egui::Area::new(egui::Id::new("scriptui-modal-block")).order(egui::Order::Middle).fixed_pos(screen.min).show(ctx, |ui| {
             ui.allocate_exact_size(screen.size(), Sense::click_and_drag());
@@ -395,6 +533,7 @@ pub fn show_windows(app: &mut EffectcraftApp, ctx: &egui::Context) {
             .show(ctx, |ui| {
                 let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
                 draw_children(app, ui, rect.min, w.id, &w.root, &mut acts);
+                mouse_events(ui, rect.min, rect, w.id, &w.root, w.modal || !blocked, &mut acts);
                 rect
             });
         if let Some(r) = resp {
@@ -418,11 +557,14 @@ pub fn panel(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect, id: u32) {
     let (pw, ph) = (rect.width() as f64, rect.height() as f64);
     w.root.fixed_bounds = Some([0.0, 0.0, pw.max(w.root.bounds[2]), ph.max(w.root.bounds[3])]);
     layout(&mut w);
+    // A modal script dialog blocks the panels too.
+    let modal = app.session.script_ui.windows.iter().any(|w| w.modal);
     let mut acts = vec![];
     let content = rect;
     egui::ScrollArea::both().id_salt(("scriptui-panel", id)).max_width(content.width()).max_height(content.height()).show(ui, |ui| {
         let (r, _) = ui.allocate_exact_size(vec2(w.root.bounds[2] as f32, w.root.bounds[3] as f32), Sense::hover());
         draw_children(app, ui, r.min, id, &w.root, &mut acts);
+        mouse_events(ui, r.min, r.intersect(ui.clip_rect()), id, &w.root, !modal, &mut acts);
     });
     app.auto.add(&format!("scriptui.{id}"), rect, &w.title);
     let ctx = ui.ctx().clone();

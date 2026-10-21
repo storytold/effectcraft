@@ -167,6 +167,18 @@ fn nested_comp_markers_show_on_the_precomp_bar() {
     assert!((h.state().session.time().seconds() - 1.0).abs() < 0.034, "{}", h.state().session.time().seconds());
 }
 
+/// #637: double-clicking a precomp layer's bar opens its comp, as double-clicking its name does.
+#[test]
+fn double_clicking_a_precomp_bar_opens_its_comp() {
+    let (mut h, pre, main) = harness();
+    h.state_mut().session.execute("comp.open", json!({"comp": main})).unwrap();
+    h.run_steps(4);
+    let l = h.state().session.project.comp(ItemId(main)).unwrap().layers[0].id.0;
+    let bar = rect(&h, &format!("timeline.layer.{l}.bar"));
+    click_n(&mut h, bar.center(), 2);
+    assert_eq!(h.state().session.active_comp_id(), Some(ItemId(pre)));
+}
+
 /// Issue #46: a panel dragged by its panel-menu (hamburger) button onto the left edge of another
 /// group docks there as its own group; dragging the gap between panels resizes them.
 #[test]

@@ -506,7 +506,9 @@ pub fn fonts(_s: &mut Session, p: &Value) -> Result<Value> {
     use effectcraft_text::fonts;
     let added = if p.get("rescan").and_then(Value::as_bool).unwrap_or(false) { fonts::rescan_system() } else { 0 };
     let query = p.get("query").and_then(Value::as_str).map(str::to_lowercase).unwrap_or_default();
+    let only_variable = p.get("variable").and_then(Value::as_bool).unwrap_or(false);
     let native = fonts::native_families();
+    let variable = fonts::variable_families();
     let mut origin: std::collections::BTreeMap<String, &'static str> = Default::default();
     for f in fonts::all_faces() {
         origin.entry(f.info.family.clone()).or_insert(f.info.origin);
@@ -514,8 +516,9 @@ pub fn fonts(_s: &mut Session, p: &Value) -> Result<Value> {
     let list: Vec<Value> = effectcraft_text::families()
         .into_iter()
         .filter(|(f, _)| query.is_empty() || f.to_lowercase().contains(&query) || native.get(f).is_some_and(|n| n.to_lowercase().contains(&query)))
+        .filter(|(f, _)| !only_variable || variable.contains(f))
         .map(|(f, styles)| {
-            let mut v = json!({"family": f, "styles": styles, "origin": origin.get(&f).copied().unwrap_or("system")});
+            let mut v = json!({"family": f, "styles": styles, "origin": origin.get(&f).copied().unwrap_or("system"), "variable": variable.contains(&f)});
             if let Some(n) = native.get(&f) {
                 v["nativeName"] = json!(n);
             }
@@ -559,7 +562,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "List Fonts",
             [],
             None,
-            "{query?, rescan?} → {count, families: [{family, styles, origin: bundled|system|user, nativeName?}], added} (rescan picks up fonts installed since launch)",
+            "{query?, variable?, rescan?} → {count, families: [{family, styles, origin: bundled|system|user, variable, nativeName?}], added} (variable: only variable fonts; rescan picks up fonts installed since launch)",
             always_ok,
             fonts
         ),

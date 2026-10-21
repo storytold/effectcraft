@@ -3,11 +3,12 @@
 //! A GIF gives every frame its own delay, in hundredths of a second. The footage gets the frame
 //! rate that every delay is a whole number of frames at (100 / the greatest common divisor of the
 //! delays), so uneven timing is kept exactly; [`Anim::frame_at`] looks the frame up by time.
+//! Animated WebP ([`crate::webp_anim`]) shares [`Anim`] and this decode path.
 
 use std::io::Cursor;
 
 use effectcraft_project::{AlphaMode, Footage, FootageKind};
-use effectcraft_time::{FrameRate, TICKS_PER_SECOND, Tick};
+use effectcraft_time::{FrameRate, Tick};
 use image::{AnimationDecoder, DynamicImage, codecs::gif::GifDecoder};
 
 use crate::{MediaError, Result};
@@ -15,19 +16,20 @@ use crate::{MediaError, Result};
 /// The `Footage::codec` of an animated GIF.
 pub(crate) const CODEC: &str = "GIF";
 
-/// Decoded frames of one GIF are kept as 8-bit RGBA, up to this many bytes (less in a browser tab,
-/// whose wasm32 heap is 4 GiB at most and shared with everything else).
+/// Decoded frames of one GIF or animated WebP are kept as 8-bit RGBA, up to this many bytes (less
+/// in a browser tab, whose wasm32 heap is 4 GiB at most and shared with everything else).
 #[cfg(not(target_arch = "wasm32"))]
-const MAX_BYTES: usize = 1 << 30;
+pub(crate) const MAX_BYTES: usize = 1 << 30;
 #[cfg(target_arch = "wasm32")]
-const MAX_BYTES: usize = 256 << 20;
+pub(crate) const MAX_BYTES: usize = 256 << 20;
 
-/// Frames read from a GIF's headers when probing.
-const MAX_FRAMES: usize = 100_000;
+/// Frames read from a GIF's or animated WebP's headers when probing.
+pub(crate) const MAX_FRAMES: usize = 100_000;
 
-/// Whether `f` is an animated GIF imported by [`probe`].
-pub(crate) fn is_gif(f: &Footage) -> bool {
-    f.kind == FootageKind::Video && f.codec == CODEC
+/// Whether `f` is an animated GIF or WebP imported by [`probe`] or [`crate::webp_anim::probe`]:
+/// its frames come from an [`Anim`].
+pub(crate) fn is_animated(f: &Footage) -> bool {
+    f.kind == FootageKind::Video && (f.codec == CODEC || f.codec == crate::webp_anim::CODEC)
 }
 
 /// The delay of a frame in hundredths of a second. Browsers show the 0 and 1 that many encoders
@@ -36,7 +38,7 @@ fn delay_cs(raw: u32) -> u32 {
     if raw < 2 { 10 } else { raw }
 }
 
-fn gcd(a: u32, b: u32) -> u32 {
+pub(crate) fn gcd(a: u32, b: u32) -> u32 {
     if b == 0 { a } else { gcd(b, a % b) }
 }
 
@@ -73,19 +75,27 @@ pub(crate) fn probe(path: &str, bytes: &[u8]) -> Option<Footage> {
     })
 }
 
-/// Every frame of a GIF, composited onto the full canvas.
+/// Every frame of a GIF or animated WebP, composited onto the full canvas.
 pub(crate) struct Anim {
     frames: Vec<DynamicImage>,
-    /// When each frame starts, in hundredths of a second.
-    starts: Vec<u64>,
+    /// When each frame starts (ascending, one per frame).
+    starts: Vec<Tick>,
 }
 
 impl Anim {
-    /// Decode all frames. A damaged tail keeps the frames before it.
+    /// Frames and the times they start at (one each, ascending); `None` when there are none.
+    pub(crate) fn new(frames: Vec<DynamicImage>, starts: Vec<Tick>) -> Option<Anim> {
+        (!frames.is_empty() && frames.len() == starts.len()).then_some(Anim { frames, starts })
+    }
+
+    /// Decode all frames of a GIF or animated WebP. A damaged tail keeps the frames before it.
     pub(crate) fn load(bytes: &[u8]) -> Result<Anim> {
+        if crate::webp_anim::is_webp(bytes) {
+            return crate::webp_anim::load(bytes);
+        }
         let dec = GifDecoder::new(Cursor::new(bytes)).map_err(|e| MediaError::Decode(format!("GIF: {e}")))?;
         let (mut frames, mut starts) = (Vec::new(), Vec::new());
-        let (mut at, mut size) = (0u64, 0usize);
+        let (mut at, mut size) = (0i64, 0usize);
         for frame in dec.into_frames() {
             let frame = match frame {
                 Ok(f) => f,
@@ -102,21 +112,17 @@ impl Anim {
             if size > MAX_BYTES {
                 return Err(MediaError::Unsupported("GIF is too large to hold in memory".into()));
             }
-            starts.push(at);
-            at = at.saturating_add(u64::from(cs));
+            starts.push(Tick::from_units(at, 100));
+            at = at.saturating_add(i64::from(cs));
             frames.push(DynamicImage::ImageRgba8(buf));
         }
-        if frames.is_empty() {
-            return Err(MediaError::Decode("GIF: no frames".into()));
-        }
-        Ok(Anim { frames, starts })
+        Anim::new(frames, starts).ok_or_else(|| MediaError::Decode("GIF: no frames".into()))
     }
 
-    /// The frame shown at source time `t` (the last one past the end).
+    /// The frame shown at source time `t` (the first one before the start, the last one past the
+    /// end).
     pub(crate) fn frame_at(&self, t: Tick) -> Option<&DynamicImage> {
-        let cs = i128::from(t.0).max(0).saturating_mul(100) / TICKS_PER_SECOND as i128;
-        let cs = u64::try_from(cs).unwrap_or(u64::MAX);
-        let i = self.starts.partition_point(|&s| s <= cs).saturating_sub(1);
+        let i = self.starts.partition_point(|&s| s <= t).saturating_sub(1);
         self.frames.get(i).or(self.frames.last())
     }
 }

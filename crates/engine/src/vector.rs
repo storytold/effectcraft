@@ -250,6 +250,12 @@ pub fn vector_clip_masks(doc: &Doc) -> (Vec<BezPath>, Doc) {
     (masks, out)
 }
 
+/// Whether text (the system clipboard's, say) is SVG markup: Edit ▸ Paste makes it a shape
+/// layer (`edit.pasteSvg`).
+pub fn is_svg_text(text: &str) -> bool {
+    effectcraft_svg::looks_like_svg(text.as_bytes())
+}
+
 /// Whether footage is a vector file (SVG / PDF / AI / EPS).
 pub fn is_vector(f: &effectcraft_project::Footage) -> bool {
     effectcraft_render::is_vector_footage(f) || f.path.to_ascii_lowercase().ends_with(".svg")
@@ -265,7 +271,7 @@ pub fn vector_doc(path: &str, bytes: &[u8], layer: Option<&effectcraft_project::
     Some(
         effectcraft_pdf::parse_page(bytes, page as usize)
             .map(|d| match layer {
-                Some(l) => effectcraft_pdf::layer_doc(&d, l.index as usize),
+                Some(l) => effectcraft_pdf::layer_doc_with_sizes(&d, l.index as usize, l.layer_size).0,
                 None => d,
             })
             .map_err(|e| format!("{path}: {e}")),
@@ -273,7 +279,7 @@ pub fn vector_doc(path: &str, bytes: &[u8], layer: Option<&effectcraft_project::
 }
 
 /// Import page `page` of a PDF / Illustrator / EPS document as a composition the size of the
-/// page: one footage item per file layer (each showing only that layer, continuously
+/// page: one footage item per file layer (optionally cropped to its artwork, continuously
 /// rasterisable), top layer first. Returns (comp, folder, items).
 pub fn import_vector_comp(
     proj: &mut Project,
@@ -281,11 +287,12 @@ pub fn import_vector_comp(
     bytes: &[u8],
     name: &str,
     page: u32,
-    rate: effectcraft_time::FrameRate,
-    duration: effectcraft_time::Tick,
+    retain: bool,
+    timing: (effectcraft_time::FrameRate, effectcraft_time::Tick),
 ) -> Result<(ItemId, ItemId, Vec<ItemId>), String> {
     use effectcraft_color::Label;
     use effectcraft_project::{AlphaMode, Footage, FootageKind, ItemKind, SourceLayer};
+    let (rate, duration) = timing;
     let doc = effectcraft_pdf::parse_page(bytes, page as usize).map_err(|e| format!("{path}: {e}"))?;
     let codec = effectcraft_pdf::codec(path, bytes).unwrap_or("PDF");
     let (w, h) = doc.pixel_size();
@@ -295,24 +302,33 @@ pub fn import_vector_comp(
     let mut items = vec![];
     let names = effectcraft_pdf::layer_names(&doc);
     for (i, lname) in names.iter().enumerate() {
+        let (size, offset) = if retain {
+            let (layer, offset) = effectcraft_pdf::layer_doc_with_sizes(&doc, i, true);
+            (layer.pixel_size(), offset)
+        } else {
+            ((w, h), [0.0, 0.0])
+        };
         let f = Footage {
             path: path.to_string(),
             kind: FootageKind::Still,
-            width: w,
-            height: h,
+            width: size.0,
+            height: size.1,
             pixel_aspect: 1.0,
             frame_rate: rate,
             has_video: true,
             alpha: AlphaMode::Straight,
             loop_count: 1,
             codec: codec.into(),
-            layer: Some(SourceLayer { index: i as u32, name: lname.clone(), layer_size: false, ..Default::default() }),
+            layer: Some(SourceLayer { index: i as u32, name: lname.clone(), layer_size: retain, ..Default::default() }),
             page,
             ..Default::default()
         };
         let id = proj.add_item(&format!("{lname}/{file}"), Label::Lavender, Some(folder), ItemKind::Footage(f));
         items.push(id);
-        let mut l = build::layer(proj, &comp, lname, LayerSource::Footage { item: id }, (w, h), None);
+        let mut l = build::layer(proj, &comp, lname, LayerSource::Footage { item: id }, size, None);
+        if retain && let Some(position) = l.props.prop_mut("transform/position") {
+            position.value = Value::Vec3([offset[0] + f64::from(size.0) / 2.0, offset[1] + f64::from(size.1) / 2.0, 0.0]);
+        }
         l.name = comp.unique_layer_name(lname);
         comp.layers.insert(0, l);
     }
@@ -471,6 +487,32 @@ pub fn image_layer(proj: &mut Project, comp: &Comp, item: ItemId, img: &VectorIm
 /// are kept with Merge Paths (see [`svg_contents`]).
 pub fn shapes_from_vector(proj: &mut Project, comp: &Comp, src: &Layer, doc: &Doc) -> Layer {
     let mut l = build::layer(proj, comp, &format!("{} Outlines", src.name), LayerSource::Shape, (0, 0), None);
+    add_doc_shapes(proj, &mut l, doc);
+    copy_transform(proj, src, &mut l);
+    like_source(&mut l, src);
+    l.name = comp.unique_layer_name(&format!("{} Outlines", src.name));
+    l
+}
+
+/// Edit ▸ Paste of SVG markup (After Effects 26.3 pastes copied vector artwork as shape layers):
+/// a shape layer named `name` with the document's shapes, its Anchor Point at the centre of the
+/// SVG canvas and its Position at the comp centre, so the canvas lands centred in the comp.
+pub fn shapes_from_svg(proj: &mut Project, comp: &Comp, doc: &Doc, name: &str) -> Layer {
+    let mut l = build::layer(proj, comp, name, LayerSource::Shape, (0, 0), None);
+    add_doc_shapes(proj, &mut l, doc);
+    let (w, h) = (doc.width, doc.height);
+    if w.is_finite()
+        && h.is_finite()
+        && let Some(a) = l.props.sub_mut("transform").and_then(|t| t.get_mut("anchor"))
+    {
+        a.value = Value::Vec3([w / 2.0, h / 2.0, 0.0]);
+    }
+    l
+}
+
+/// The shapes of `doc` into shape layer `l`'s Contents; clips enclosing the whole document
+/// become its masks (Add, then Intersect).
+fn add_doc_shapes(proj: &mut Project, l: &mut Layer, doc: &Doc) {
     let (clips, doc) = vector_clip_masks(doc);
     let mut ids = Ids(&mut proj.next_id);
     let items = svg_contents(&mut ids, &doc);
@@ -488,10 +530,6 @@ pub fn shapes_from_vector(proj: &mut Project, comp: &Comp, src: &Layer, doc: &Do
             }
         }
     }
-    copy_transform(proj, src, &mut l);
-    like_source(&mut l, src);
-    l.name = comp.unique_layer_name(&format!("{} Outlines", src.name));
-    l
 }
 
 /// Layer ▸ Create ▸ Create Shapes from Text: one group per character with its outline, fill and

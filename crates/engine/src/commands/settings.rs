@@ -283,7 +283,7 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("shortcuts.export", "Export Keyboard Shortcuts", [], None, "{preset?, path?}", always, sc_export),
         cmd!("shortcuts.import", "Import Keyboard Shortcuts", [], None, "{path? | preset?: exported document, name?}", always, sc_import),
         query!("shortcuts.conflicts", "Keyboard Shortcut Conflicts", "{}", sc_conflicts),
-        cmd!("file.openRecent", "Open Recent", [], None, "{index? | path?}", has_recent, open_recent),
+        cmd!("file.openRecent", "Open Recent", [], Some("Cmd+Alt+Shift+P"), "{index? | path?}", has_recent, open_recent),
         cmd!("file.clearRecent", "Clear Recent Projects", ["File", "Open Recent"], None, "{}", has_recent, clear_recent),
         cmd!("file.autoSave", "Auto-Save Now", [], None, "{}", always, auto_save),
         query!("file.recoveryInfo", "Auto-Save Status", "{}", recovery_info),

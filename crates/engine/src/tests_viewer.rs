@@ -574,3 +574,126 @@ fn graph_transform_box_scales_key_times_and_values() {
     assert_eq!(p.keys[1].value.as_f64(), 50.0);
     assert!(s.execute("keys.transform", json!({"timeScale": 0})).is_err());
 }
+
+// ---------------------------------------------------------------- resolution
+
+#[test]
+fn each_comp_keeps_its_resolution_outside_the_undo_history_and_in_the_file() {
+    use effectcraft_project::Resolution;
+    let mut s = comp();
+    let a = s.active_comp_id().unwrap();
+    s.execute("layer.newSolid", json!({"name": "S", "color": "#ff0000", "width": 10, "height": 10})).unwrap();
+    let path = std::env::temp_dir().join(format!("ec-resolution-{}.ecproj", std::process::id()));
+    s.execute("file.saveAs", json!({"path": path.to_string_lossy()})).unwrap();
+    assert_eq!(s.active_comp().unwrap().resolution, Resolution::Auto);
+    let (steps, pixels) = (s.history.undo.len(), s.active_comp_arc().unwrap());
+    let r = s.execute_checked("view.res.half", json!({})).unwrap();
+    assert_eq!((r["resolution"].clone(), r["factor"].clone()), (json!("Half"), json!(2)));
+    // No undo step, but the project is modified (it's saved with it).
+    assert_eq!(s.history.undo.len(), steps);
+    assert!(s.is_dirty());
+    assert!(s.active_comp().unwrap().same_pixels(&pixels));
+    // Another comp has its own; switching back shows comp A's again.
+    s.execute("comp.new", json!({"name": "B", "width": 320, "height": 180, "frameRate": 30, "duration": 5})).unwrap();
+    let b = s.active_comp_id().unwrap();
+    assert_ne!(a, b);
+    assert_eq!(s.active_comp().unwrap().resolution, Resolution::Auto);
+    s.execute_checked("view.res.custom", json!({"factor": 6})).unwrap();
+    s.open_comp(a);
+    assert_eq!(s.active_comp().unwrap().resolution, Resolution::Half);
+    assert_eq!(s.execute("comp.info", json!({})).unwrap()["resolution"], json!("Half"));
+    assert_eq!(crate::menus::checked(&s, "view.res.half", &json!({})), Some(true));
+    assert_eq!(crate::menus::checked(&s, "view.res.full", &json!({})), Some(false));
+    // Undo and redo restore the comps, not their resolutions.
+    s.execute("edit.undo", json!({})).unwrap();
+    assert!(s.project.comp(b).is_none(), "undid New Composition");
+    assert_eq!(s.project.comp(a).unwrap().resolution, Resolution::Half);
+    s.execute("edit.redo", json!({})).unwrap();
+    assert_eq!(s.project.comp(b).unwrap().resolution, Resolution::Custom(6));
+    s.execute("edit.undo", json!({})).unwrap();
+    s.execute("edit.undo", json!({})).unwrap();
+    assert!(s.active_comp().unwrap().layers.is_empty(), "undid the solid");
+    assert_eq!(s.project.comp(a).unwrap().resolution, Resolution::Half);
+    s.execute("edit.redo", json!({})).unwrap();
+    s.execute("edit.redo", json!({})).unwrap();
+    // The comp's explicit `comp` parameter; the same value again changes nothing.
+    s.execute_checked("view.res.quarter", json!({"comp": b.0})).unwrap();
+    let rev = s.revision;
+    s.execute_checked("view.res.quarter", json!({"comp": b.0})).unwrap();
+    assert_eq!(s.revision, rev);
+    // Saved with the project and read back.
+    s.execute("file.save", json!({})).unwrap();
+    assert!(!s.is_dirty());
+    let mut o = Session::default();
+    o.execute("file.open", json!({"path": path.to_string_lossy()})).unwrap();
+    assert_eq!(o.project.comp(a).unwrap().resolution, Resolution::Half);
+    assert_eq!(o.project.comp(b).unwrap().resolution, Resolution::Quarter);
+    let _ = std::fs::remove_file(path);
+    // Custom without a factor asks the frontend (the Custom Resolution dialog).
+    s.drain_events();
+    s.execute_checked("view.res.custom", json!({})).unwrap();
+    assert!(s.drain_events().iter().any(|e| matches!(e, crate::Event::Frontend { command, .. } if command == "view.res.custom")));
+    assert!(s.execute_checked("view.res.custom", json!({"factor": "big"})).is_err());
+    s.execute_checked("view.res.auto", json!({})).unwrap();
+    assert_eq!(s.active_comp().unwrap().resolution, Resolution::Auto);
+}
+
+/// #1685: changing Type updates the property tree in the same undo step, including when
+/// addressed by uid (as in the UI) rather than by path (scripts/control channel).
+#[test]
+fn polystar_type_switch_updates_inner_controls_and_undoes() {
+    let mut s = comp();
+    let lid = s.execute("layer.newShape", json!({"kind": "polygon"})).unwrap()["layer"].as_u64().unwrap();
+    let group = |s: &Session| layer(s, lid).props.group("contents/group/contents/star").unwrap().clone();
+    let polygon = group(&s);
+    let type_uid = polygon.get("type").unwrap().uid;
+    assert!(polygon.get("innerRadius").is_none());
+    s.execute("prop.set", json!({"layer": lid, "prop": type_uid, "value": 0})).unwrap();
+    let star = group(&s);
+    assert_eq!(star.get("innerRadius").unwrap().value, KV::Scalar(50.0));
+    assert_eq!(star.get("innerRoundness").unwrap().value, KV::Scalar(0.0));
+    assert_eq!(star.get("innerRadius").unwrap().ui, effectcraft_project::ParamUi::Pixels);
+    assert_eq!(star.get("innerRoundness").unwrap().ui, effectcraft_project::ParamUi::Percent);
+    let names: Vec<_> = star.children.iter().filter_map(|n| n.as_prop()).map(|p| p.match_id.as_str()).collect();
+    assert_eq!(names, ["direction", "type", "points", "position", "rotation", "innerRadius", "outerRadius", "innerRoundness", "outerRoundness"]);
+    assert_eq!(star.get("outerRadius"), polygon.get("outerRadius"));
+    assert!(s.undo());
+    assert_eq!(group(&s), polygon);
+    assert!(s.redo());
+    assert_eq!(group(&s), star);
+    // Reapplying the same Type must not reset custom inner values or allocate new ids.
+    s.execute("prop.set", json!({"layer": lid, "path": "contents/group/contents/star/innerRadius", "value": 37})).unwrap();
+    let before = group(&s);
+    let next = s.project.next_id;
+    s.execute("prop.set", json!({"layer": lid, "path": "contents/group/contents/star/type", "value": 0})).unwrap();
+    assert_eq!(group(&s), before);
+    assert_eq!(s.project.next_id, next);
+    let inner_uid = before.get("innerRadius").unwrap().uid;
+    s.state.selected_props = vec![(LayerId(lid), inner_uid)];
+    s.state.selected_keys = vec![crate::KeyRef { layer: LayerId(lid), prop: inner_uid, time: Tick::ZERO }];
+    s.execute("prop.set", json!({"layer": lid, "path": "contents/group/contents/star/type", "value": 1})).unwrap();
+    assert_eq!(group(&s).get("type").unwrap().value, KV::Enum(1));
+    assert!(group(&s).get("innerRadius").is_none());
+    assert!(group(&s).get("innerRoundness").is_none());
+    assert!(s.state.selected_props.is_empty());
+    assert!(s.state.selected_keys.is_empty());
+    assert!(s.undo());
+    assert_eq!(group(&s), before, "undo restores the original inner values and ids");
+    assert!(s.redo());
+    assert!(group(&s).get("innerRadius").is_none());
+    s.execute("prop.set", json!({"layer": lid, "prop": type_uid, "value": 0})).unwrap();
+    assert_eq!(group(&s).get("innerRadius").unwrap().value, KV::Scalar(50.0));
+}
+
+#[test]
+fn polystar_animated_type_keeps_the_inner_controls_needed_by_other_frames() {
+    let mut s = comp();
+    let lid = s.execute("layer.newShape", json!({"kind": "star"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("prop.set", json!({"layer": lid, "path": "contents/group/contents/star/innerRadius", "value": 27})).unwrap();
+    s.execute("prop.toggleAnimation", json!({"layer": lid, "path": "contents/group/contents/star/type", "value": true})).unwrap();
+    s.execute("prop.set", json!({"layer": lid, "path": "contents/group/contents/star/type", "time": 1, "value": 1})).unwrap();
+    let star = layer(&s, lid).props.group("contents/group/contents/star").unwrap().clone();
+    assert_eq!(star.get("type").unwrap().value_at(Tick::ZERO), KV::Enum(0));
+    assert_eq!(star.get("type").unwrap().value_at(Tick::from_seconds_f64(1.0)), KV::Enum(1));
+    assert_eq!(star.get("innerRadius").unwrap().value, KV::Scalar(27.0));
+}

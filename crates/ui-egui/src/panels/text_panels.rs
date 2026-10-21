@@ -8,6 +8,7 @@ use effectcraft_engine::render::EvalCtx;
 use egui::{Align2, Rect, Sense, pos2, vec2};
 use serde_json::json;
 
+use crate::state::TextColorPick;
 use crate::theme::Tokens;
 use crate::{EffectcraftApp, widgets};
 
@@ -201,7 +202,21 @@ pub fn character(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         if crate::widgets::color_popup(ui, pop, fs.left_bottom(), &mut rgb) {
             actions.push(json!({key: [rgb[0], rgb[1], rgb[2]], "merge": format!("char-{key}")}));
         }
-        p.text(pos2(fs.max.x + 6.0, y + 10.0), Align2::LEFT_CENTER, label, Tokens::ui(11.5), t.text_dim);
+        let er = Rect::from_min_size(pos2(fs.max.x + 4.0, y + 1.0), vec2(18.0, 18.0));
+        let active = app.ui.text_color_pick.as_ref().is_some_and(|pick| pick.layer == target.as_ref().map_or(0, |tt| tt.layer) && pick.field == key);
+        let eye = super::fx_widgets::eyedropper_button(ui, er, active, egui::Id::new(("char-eye", key)), &t);
+        app.auto.add(&format!("character.{key}.eyedropper"), er, &format!("{label} eyedropper"));
+        if eye.clicked() {
+            if active {
+                app.ui.text_color_pick = None;
+                app.ui.status.clear();
+            } else if let Some(tt) = &target {
+                app.ui.fx_pick = None;
+                app.ui.text_color_pick = Some(TextColorPick { layer: tt.layer, field: key.into(), range: tt.range });
+                app.ui.status = crate::i18n::tr_args("Click in the Composition panel to sample text {}", &[&label]);
+            }
+        }
+        p.text(pos2(er.max.x + 6.0, y + 10.0), Align2::LEFT_CENTER, label, Tokens::ui(11.5), t.text_dim);
     }
     y += 32.0;
     // Style toggles: Faux Bold, Faux Italic, All Caps, Small Caps, Superscript, Subscript.
@@ -257,8 +272,11 @@ pub fn character(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         }
     }
     // Variable Font Axes: one value per axis of a variable font (`character.axis.<tag>`).
-    let face = effectcraft_engine::text::resolve(&doc.font, &doc.style).face;
+    let resolved = effectcraft_engine::text::resolve(&doc.font, &doc.style);
+    let face = resolved.face;
     let axes = effectcraft_engine::text::variable::font_axes(face);
+    // A named instance (`Black`) sets the axes the text doesn't set itself.
+    let instance = effectcraft_engine::text::fonts::instance_variations(&resolved);
     if !axes.is_empty() {
         y += 26.0;
         p.text(pos2(x0, y + 7.0), Align2::LEFT_CENTER, tr("Variable Font Axes"), Tokens::semibold(11.0), t.text_dim);
@@ -267,7 +285,7 @@ pub fn character(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             let fx = x0 + col as f32 * (w / 2.0);
             let fy = y + 20.0 + row as f32 * 24.0;
             let tag = a.tag.trim_end().to_string();
-            let v = doc.variations.iter().find(|(t2, _)| t2.trim_end() == tag).map(|(_, v)| *v).unwrap_or(a.default);
+            let v = doc.variations.iter().chain(&instance).find(|(t2, _)| t2.trim_end() == tag).map(|(_, v)| *v).unwrap_or(a.default);
             p.text(pos2(fx, fy + 9.0), Align2::LEFT_CENTER, &tag, Tokens::semibold(10.5), t.text_dim);
             let (r, nv, _) =
                 widgets::hot_number_at(ui, pos2(fx + 34.0, fy), egui::Id::new(("char-axis", &tag)), v as f64, 1.0, (a.min as f64, a.max as f64), 0, "", &t);
@@ -579,6 +597,10 @@ pub(super) fn font_picker(app: &mut EffectcraftApp, ui: &mut egui::Ui, id: egui:
     });
     let preview = app.session.prefs.type_.font_preview;
     let t = app.tokens;
+    // The Variable Fonts filter (After Effects 26.3) stays as set while the app runs, like the
+    // menu's other settings; the search query resets on every open.
+    let variable_id = id.with("variable-only");
+    let mut only_variable = ui.data(|d| d.get_temp::<bool>(variable_id)).unwrap_or(false);
     // The font field itself becomes editable. The popup contains only results.
     let arrow = Rect::from_min_max(pos2(rect.max.x - 22.0, rect.min.y), rect.max);
     let edit_rect = Rect::from_min_max(rect.min, pos2(arrow.min.x, rect.max.y));
@@ -608,12 +630,28 @@ pub(super) fn font_picker(app: &mut EffectcraftApp, ui: &mut egui::Ui, id: egui:
     let area = egui::Area::new(id.with("area")).order(egui::Order::Foreground).pivot(pivot).fixed_pos(anchor).show(ui.ctx(), |ui| {
         egui::Frame::popup(ui.style()).show(ui, |ui| {
             ui.set_width(rect.width().max(180.0));
+            // Filter row: a checkbox that keeps only the variable fonts.
+            let filter_h = 22.0;
+            let row = ui.add_sized([ui.available_width(), filter_h], egui::Button::selectable(false, ""));
+            let box_rect = Rect::from_min_size(row.rect.min, vec2(18.0, filter_h));
+            let label_rect = Rect::from_min_max(pos2(box_rect.max.x + 2.0, row.rect.min.y), row.rect.max);
+            let boxed = widgets::checkbox(ui, box_rect, only_variable, &t, id.with("variable-check"));
+            ui.painter().text(label_rect.left_center(), Align2::LEFT_CENTER, tr("Variable fonts only"), Tokens::ui(11.5), t.text);
+            app.auto.add(&format!("{auto}.variable"), row.rect, "Variable fonts only");
+            let toggled = row.clicked() || boxed.clicked();
+            if toggled {
+                only_variable = !only_variable;
+                ui.data_mut(|d| d.insert_temp(variable_id, only_variable));
+                // Typing goes on into the search field.
+                ui.memory_mut(|m| m.request_focus(search_id));
+            }
             let query = state.query.trim().to_lowercase();
             let mut seen = std::collections::HashSet::new();
             let filtered: Vec<_> = rows
                 .iter()
                 .filter(|r| {
                     !r.family.is_empty()
+                        && (!only_variable || r.variable)
                         && (query.is_empty()
                             || ((r.family.to_lowercase().contains(&query) || r.display.to_lowercase().contains(&query)) && seen.insert(&r.family)))
                 })
@@ -621,7 +659,7 @@ pub(super) fn font_picker(app: &mut EffectcraftApp, ui: &mut egui::Ui, id: egui:
             if fresh {
                 state.selected = filtered.iter().position(|r| r.family == current).unwrap_or(0);
             }
-            if search.changed() {
+            if search.changed() || toggled {
                 state.selected = 0;
             }
             let last = filtered.len().saturating_sub(1);
@@ -637,10 +675,12 @@ pub(super) fn font_picker(app: &mut EffectcraftApp, ui: &mut egui::Ui, id: egui:
             }
             // Give the result list its actual height even when the previous query had
             // only one row. A cached tiny Area must not collapse a reopened long list.
-            let height = (filtered.len() as f32 * (24.0 + ui.spacing().item_spacing.y) + 16.0).clamp(28.0, max_height);
-            ui.set_height(height);
+            let filter_room = filter_h + ui.spacing().item_spacing.y;
+            let height = (filtered.len() as f32 * (24.0 + ui.spacing().item_spacing.y) + 16.0).clamp(28.0, (max_height - filter_room).max(28.0));
+            // A minimum, from below the filter row (a maximum would move the cursor back up).
+            ui.set_min_height(height);
             let mut scroll = egui::ScrollArea::vertical().id_salt(id.with("results")).max_height(height).min_scrolled_height(height);
-            if search.changed() {
+            if search.changed() || toggled {
                 scroll = scroll.vertical_scroll_offset(0.0);
             }
             scroll.show(ui, |ui| {

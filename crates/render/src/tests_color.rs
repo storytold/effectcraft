@@ -7,7 +7,7 @@ use effectcraft_project::build;
 use effectcraft_project::{AlphaMode, BitDepth, Comp, Footage, FootageKind, ItemId, ItemKind, LayerSource, Project, Solid};
 use effectcraft_time::{FrameRate, Tick};
 
-use crate::{FootageSource, Image, LayerCache, RenderOpts, Renderer, render_frame};
+use crate::{FloatCurve, FootageSource, Image, LayerCache, RenderOpts, Renderer, render_frame};
 
 fn setup(depth: BitDepth) -> (Project, ItemId, Comp) {
     let mut p = Project::default();
@@ -293,4 +293,49 @@ fn working_gamma_24_encodes_linear_footage_with_a_power_curve() {
         s.working_gamma = 2.4;
         crate::color::Pipe::of(&s).key()
     });
+}
+
+/// Float footage (an OpenEXR) the way `effectcraft-media` decodes it: linear values handed over
+/// as the renderer asks ([`FloatCurve`]).
+struct FloatFile([f32; 3]);
+impl FootageSource for FloatFile {
+    fn frame(&self, item: ItemId, f: &Footage, t: Tick) -> Option<Arc<Image>> {
+        self.frame_with(item, f, t, None, FloatCurve::Srgb)
+    }
+    fn frame_with(&self, _: ItemId, f: &Footage, _: Tick, _: Option<(u32, u32)>, float: FloatCurve) -> Option<Arc<Image>> {
+        let c = self.0.map(|v| match float {
+            FloatCurve::Srgb => ColorSpace::Srgb.encode(v),
+            FloatCurve::Gamma24 => v.powf(1.0 / 2.4),
+            FloatCurve::Linear => v,
+        });
+        Some(Arc::new(Image::filled(f.width, f.height, [c[0], c[1], c[2], 1.0])))
+    }
+}
+
+/// #750: with no working space, float footage is encoded with the Working Gamma's curve (as
+/// After Effects converts a linear EXR), and Interpret As Linear Light encodes it once, not on
+/// top of the decode's own encoding. A working space ignores Working Gamma.
+#[test]
+fn float_footage_is_encoded_once_with_the_working_gamma() {
+    let render = |gamma: f64, ws: Option<ColorSpace>, linear_light: bool| {
+        let (mut p, cid, comp) = setup(BitDepth::Bpc32);
+        p.settings.working_gamma = gamma;
+        p.settings.working_space = ws;
+        let f = Footage { path: "x.exr".into(), linear_light, ..footage(None) };
+        let fid = p.add_item("F", Label::Aqua, None, ItemKind::Footage(f));
+        let l = build::layer(&mut p, &comp, "F", LayerSource::Footage { item: fid }, (40, 20), None);
+        p.comp_mut(cid).unwrap().layers.push(l);
+        let src = FloatFile([0.051, 0.18, 0.5]);
+        Renderer::new(&p, &src, RenderOpts::default()).comp_frame(cid, Tick::ZERO).get(5, 5)
+    };
+    let near = |o: [f32; 4], want: [f32; 3]| (0..3).all(|i| (o[i] - want[i]).abs() < 2e-3);
+    for linear_light in [false, true] {
+        let o = render(2.4, None, linear_light);
+        assert!(near(o, [0.290, 0.490, 0.749]), "2.4, linear light {linear_light}: {o:?}");
+        let o = render(2.2, None, linear_light);
+        assert!(near(o, [0.250, 0.461, 0.735]), "2.2, linear light {linear_light}: {o:?}");
+        let srgb = render(2.2, Some(ColorSpace::Srgb), linear_light);
+        assert!(near(srgb, [0.250, 0.461, 0.735]), "sRGB working space, linear light {linear_light}: {srgb:?}");
+        assert_eq!(render(2.4, Some(ColorSpace::Srgb), linear_light), srgb);
+    }
 }

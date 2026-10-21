@@ -260,6 +260,123 @@ fn fonts_lists_bundled_and_installed_families() {
     assert_eq!(crate::font_styles("No Such Family").len(), 5);
 }
 
+/// A font file of just `name` (the family, Regular) and an `fvar` table with one axis pinned at
+/// 400 (so the helpers that look for an installed font with a real axis range never pick it).
+fn pinned_variable_font(family: &str) -> Vec<u8> {
+    let u16s = |v: &[u16]| -> Vec<u8> { v.iter().flat_map(|x| x.to_be_bytes()).collect() };
+    let strings: Vec<Vec<u8>> = [family, "Regular"].iter().map(|s| s.encode_utf16().flat_map(|u| u.to_be_bytes()).collect()).collect();
+    let mut name = u16s(&[0, 2, 30]);
+    let mut off = 0;
+    for (id, st) in strings.iter().enumerate() {
+        name.extend(u16s(&[3, 1, 0x409, id as u16 + 1, st.len() as u16, off]));
+        off += st.len() as u16;
+    }
+    strings.iter().for_each(|st| name.extend(st));
+    let mut fvar = u16s(&[1, 0, 16, 2, 1, 20, 0, 8]);
+    fvar.extend(b"wght".iter().copied().chain(u16s(&[0x190, 0, 0x190, 0, 0x190, 0, 0, 256])));
+    let mut out = u16s(&[1, 0, 2, 0, 0, 0]);
+    let mut body: Vec<u8> = vec![];
+    for (tag, data) in [(b"fvar", fvar), (b"name", name)] {
+        out.extend(tag);
+        out.extend([0u8; 4]);
+        out.extend(((12 + 32 + body.len()) as u32).to_be_bytes());
+        out.extend((data.len() as u32).to_be_bytes());
+        body.extend(data);
+    }
+    out.extend(body);
+    out
+}
+
+/// The font menu's Variable Fonts filter (After Effects 26.3): `text.fonts {variable: true}`
+/// lists only families with variation axes, every listing says which families are variable, and
+/// the font menu's rows carry the flag the filter uses.
+#[test]
+fn fonts_filter_variable_families() {
+    const FAMILY: &str = "EffectCraft Variable Filter Test";
+    assert_eq!(effectcraft_text::fonts::add_font_data(pinned_variable_font(FAMILY)).len(), 1);
+    let mut s = Session::default();
+    let all = s.execute("text.fonts", json!({})).unwrap();
+    let fams = all["families"].as_array().unwrap();
+    let flag = |name: &str| fams.iter().find(|f| f["family"] == name).map(|f| f["variable"].clone());
+    assert_eq!(flag("Inter"), Some(json!(false)), "the bundled fonts are static");
+    assert_eq!(flag(FAMILY), Some(json!(true)));
+    let var = s.execute("text.fonts", json!({"variable": true})).unwrap();
+    let listed = var["families"].as_array().unwrap();
+    assert_eq!(var["count"].as_u64(), Some(listed.len() as u64));
+    assert!(listed.iter().all(|f| f["variable"] == true), "{var}");
+    assert!(listed.iter().any(|f| f["family"] == FAMILY), "{var}");
+    assert!(listed.len() < fams.len(), "the filter drops the static families");
+    // Combined with the name query.
+    let both = s.execute("text.fonts", json!({"variable": true, "query": "variable filter"})).unwrap();
+    assert_eq!(both["families"].as_array().map(Vec::len), Some(1), "{both}");
+    let none = s.execute("text.fonts", json!({"variable": true, "query": "jetbrains mono"})).unwrap();
+    assert!(!none["families"].as_array().unwrap().iter().any(|f| f["family"] == "JetBrains Mono"), "{none}");
+    // The font menu's rows.
+    let menu = crate::font_menu(&s.prefs);
+    assert!(menu.iter().any(|r| r.family == FAMILY && r.variable));
+    assert!(menu.iter().any(|r| r.family == "Inter" && !r.variable));
+}
+
+/// A variable font of `name` and `fvar` only: one `wght` axis 100..900 (default 300, style
+/// `Light`) and the named `instances` (style, `wght`), each with a PostScript name
+/// `<family without spaces>-<style without spaces>`.
+fn instanced_variable_font(family: &str, instances: &[(&str, f32)]) -> Vec<u8> {
+    let u16s = |v: &[u16]| -> Vec<u8> { v.iter().flat_map(|x| x.to_be_bytes()).collect() };
+    let squash = |s: &str| s.chars().filter(char::is_ascii_alphanumeric).collect::<String>();
+    let mut strings: Vec<(u16, String)> = vec![(1, family.into()), (2, "Light".into())];
+    let mut fvar = u16s(&[1, 0, 16, 2, 1, 20, instances.len() as u16, 10]);
+    fvar.extend(b"wght".iter().copied().chain(u16s(&[100, 0, 300, 0, 900, 0, 0, 256])));
+    for (i, (style, w)) in instances.iter().enumerate() {
+        let id = 256 + 2 * i as u16;
+        strings.push((id, (*style).into()));
+        strings.push((id + 1, format!("{}-{}", squash(family), squash(style))));
+        fvar.extend(u16s(&[id, 0]));
+        fvar.extend(((w * 65536.0) as i32).to_be_bytes());
+        fvar.extend(u16s(&[id + 1]));
+    }
+    let enc: Vec<(u16, Vec<u8>)> = strings.iter().map(|(id, s)| (*id, s.encode_utf16().flat_map(|u| u.to_be_bytes()).collect())).collect();
+    let mut name = u16s(&[0, enc.len() as u16, 6 + 12 * enc.len() as u16]);
+    let mut off = 0;
+    for (id, st) in &enc {
+        name.extend(u16s(&[3, 1, 0x409, *id, st.len() as u16, off]));
+        off += st.len() as u16;
+    }
+    enc.iter().for_each(|(_, st)| name.extend(st));
+    let mut out = u16s(&[1, 0, 2, 0, 0, 0]);
+    let mut body: Vec<u8> = vec![];
+    for (tag, data) in [(b"fvar", fvar), (b"name", name)] {
+        out.extend(tag);
+        out.extend([0u8; 4]);
+        out.extend(((12 + 32 + body.len()) as u32).to_be_bytes());
+        out.extend((data.len() as u32).to_be_bytes());
+        body.extend(data);
+    }
+    out.extend(body);
+    out
+}
+
+/// #1563: a variable font's named instances are styles of its family in `text.fonts`, and a
+/// text layer set in one (by style, or by the instance's PostScript name as After Effects scripts
+/// do) is laid out at the instance's axis values; an axis set on the text still wins.
+#[test]
+fn variable_font_named_instances_are_styles() {
+    const FAMILY: &str = "EffectCraft Named Instance Test";
+    assert_eq!(effectcraft_text::fonts::add_font_data(instanced_variable_font(FAMILY, &[("Light", 300.0), ("Regular", 400.0), ("Black", 900.0)])).len(), 1);
+    let (mut s, t) = session("Hi");
+    let fonts = s.execute("text.fonts", json!({"query": FAMILY})).unwrap();
+    assert_eq!(fonts["families"][0]["styles"], json!(["Light", "Regular", "Black"]), "{fonts}");
+    let wght = |s: &Session| -> Vec<Vec<(String, f32)>> { effectcraft_text::layout_doc(&doc(s, t)).glyphs.iter().map(|g| g.variations.clone()).collect() };
+    let black = vec![("wght".to_string(), 900.0)];
+    s.execute("layer.setText", json!({"layer": t, "font": FAMILY, "style": "Black"})).unwrap();
+    let by_style = wght(&s);
+    assert!(!by_style.is_empty() && by_style.iter().all(|v| v == &black), "{by_style:?}");
+    s.execute("layer.setText", json!({"layer": t, "font": "EffectCraftNamedInstanceTest-Black", "style": "Regular"})).unwrap();
+    let by_ps = wght(&s);
+    assert!(!by_ps.is_empty() && by_ps.iter().all(|v| v == &black), "{by_ps:?}");
+    s.execute("layer.setText", json!({"layer": t, "variations": {"wght": 650}})).unwrap();
+    assert!(wght(&s).iter().all(|v| v == &[("wght".to_string(), 650.0)]), "{:?}", wght(&s));
+}
+
 /// `layer.setText`'s schema lists every OpenType key as optional, so checked execution (control
 /// channel, MCP) accepts them and requires none (#520).
 #[test]

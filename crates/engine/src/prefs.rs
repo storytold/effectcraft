@@ -32,10 +32,11 @@ pub const LANGUAGES: &[(&str, &str)] = &[
     ("Українська", "uk"),
     ("Español", "es"),
     ("Português (Brasil)", "pt-br"),
+    ("Русский", "ru"),
+    ("Français", "fr"),
+    ("Deutsch", "de"),
+    ("Čeština", "cs"),
 ];
-
-/// Settings ▸ Appearance ▸ UI Scale: (label, `appearance.uiScale` percent).
-pub const UI_SCALES: &[(&str, &str)] = &[("75%", "75"), ("100%", "100"), ("125%", "125"), ("150%", "150"), ("175%", "175"), ("200%", "200")];
 
 /// Settings ▸ Startup & Repair ▸ Window Graphics: (label, `startup.windowGraphics` value).
 pub const WINDOW_GRAPHICS: &[(&str, &str)] = &[("Automatic", "auto"), ("OpenGL (compatibility)", "gl")];
@@ -175,6 +176,8 @@ page!(Appearance {
     dark_theme: String = "dark".into(),
     /// The theme used in light appearance: `light`.
     light_theme: String = "light".into(),
+    /// Theme shortcuts in the appearance context menu.
+    favorite_themes: Vec<String> = Vec::new(),
     /// User interface brightness, -1 (darker) … 1 (lighter).
     brightness: f64 = 0.0,
     /// The size of the whole interface in percent (75–200), on top of the display's own scale.
@@ -312,17 +315,15 @@ page!(Scripting {
 page!(
     /// Window ▸ AI Chat: the panel's connections and prompt.
     AiChatPrefs {
-        /// The local bridge (`bridge/agent-bridge.py` in the `effectcraft-ai-chat` repository):
-        /// hosts Codex, Devin over ACP, OpenCode and any CLI behind one local address.
+        /// A user-configured local endpoint implementing the AI Chat bridge protocol.
         bridge_url: String = "127.0.0.1:8765".into(),
         /// A local Ollama server, for the direct connection.
         ollama_url: String = "127.0.0.1:11434".into(),
         /// The model the direct Ollama connection asks for (`aiChat.agent` = `ollama`).
-        model: String = "llama3.2:3b".into(),
+        model: String = "".into(),
         /// The agent the panel talks to; `ollama` (or empty) = the local model directly.
         agent: String = "ollama".into(),
-        /// The model asked of a bridge agent; empty = the agent's own default. ACP agents
-        /// match it against the models they offer (`opus` → the first Claude Opus).
+        /// A model identifier passed unchanged to the bridge; empty = its default.
         agent_model: String = "".into(),
         /// Sent as the first message of every conversation.
         system_prompt: String = "You are the AI Chat panel inside EffectCraft, an open-source After Effects-style motion graphics app. Keep replies short, concrete and friendly. You cannot see the project yet; if asked to change it, say what you would do.".into(),
@@ -353,6 +354,42 @@ impl Scripting {
 pub struct LabelPref {
     pub name: String,
     pub color: String,
+}
+
+/// A Composition Settings preset the user saved (Composition Settings ▸ Preset ▸ Save): the
+/// frame size, pixel aspect and frame rate, as in After Effects' own presets.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompPreset {
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    pub pixel_aspect: f64,
+    pub frame_rate: f64,
+}
+
+impl CompPreset {
+    /// Longest preset name kept.
+    pub const MAX_NAME: usize = 128;
+
+    /// Values a composition accepts (a hand-edited settings file can hold anything).
+    pub fn is_valid(&self) -> bool {
+        let size = 4..=30000;
+        !self.name.trim().is_empty()
+            && self.name.chars().count() <= Self::MAX_NAME
+            && size.contains(&self.width)
+            && size.contains(&self.height)
+            && self.pixel_aspect.is_finite()
+            && (0.01..=100.0).contains(&self.pixel_aspect)
+            && self.frame_rate.is_finite()
+            && (1.0..=999.0).contains(&self.frame_rate)
+    }
+}
+
+/// Saved composition presets, skipping entries that don't parse instead of losing the list.
+fn lenient_comp_presets<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<CompPreset>, D::Error> {
+    let v = Vec::<Value>::deserialize(d)?;
+    Ok(v.into_iter().filter_map(|x| serde_json::from_value(x).ok()).collect())
 }
 
 fn default_labels() -> Vec<LabelPref> {
@@ -410,10 +447,15 @@ pub struct Prefs {
     pub recent_presets: Vec<String>,
     /// Character panel: recently used font families, newest first.
     pub recent_fonts: Vec<String>,
+    /// Effects & Presets: the starred effects' ids, in the order starred.
+    pub effects_favorites: Vec<String>,
     /// Preview panel: every shortcut's options.
     pub preview: crate::preview::PreviewSettings,
     /// View ▸ Simulate Output ▸ My Custom RGB.
     pub custom_rgb: crate::viewer::CustomRgb,
+    /// Composition Settings presets the user saved, in the order saved.
+    #[serde(deserialize_with = "lenient_comp_presets")]
+    pub comp_presets: Vec<CompPreset>,
     /// Top-level keys this version doesn't know (kept for newer versions).
     #[serde(flatten)]
     pub extra: Extra,
@@ -448,8 +490,10 @@ impl Default for Prefs {
             recent_footage: vec![],
             recent_presets: vec![],
             recent_fonts: vec![],
+            effects_favorites: vec![],
             preview: crate::preview::PreviewSettings::default(),
             custom_rgb: crate::viewer::CustomRgb::default(),
+            comp_presets: vec![],
             extra: Extra::new(),
         }
     }
@@ -575,6 +619,10 @@ impl Prefs {
     /// Clamp values into their valid ranges and fill missing labels.
     pub fn normalize(&mut self) {
         self.version = PREFS_VERSION;
+        self.comp_presets.retain(CompPreset::is_valid);
+        let mut seen = std::collections::HashSet::new();
+        self.effects_favorites.retain(|id| !id.is_empty() && seen.insert(id.clone()));
+        self.effects_favorites.truncate(MAX_EFFECTS_FAVORITES);
         if !is_choice(WINDOW_GRAPHICS, &self.startup.window_graphics) {
             self.startup.window_graphics = Startup::default().window_graphics;
         }
@@ -589,6 +637,8 @@ impl Prefs {
         a.interval_minutes = a.interval_minutes.clamp(1, 240);
         a.max_versions = a.max_versions.clamp(1, 99);
         let ap = &mut self.appearance;
+        let mut seen = std::collections::BTreeSet::new();
+        ap.favorite_themes.retain(|id| is_choice(THEMES, id) && seen.insert(id.clone()));
         if !is_choice(APPEARANCE_MODES, &ap.appearance_mode) {
             ap.appearance_mode = Appearance::default().appearance_mode;
         }
@@ -645,6 +695,23 @@ impl Prefs {
             let all: Vec<&str> = c.iter().map(|(_, v)| *v).collect();
             return Err(format!("`{key}` expects one of {}", all.join(", ")));
         }
+        let favorites = if key == "appearance.favoriteThemes" {
+            Some(&value)
+        } else if key == "appearance" {
+            value.get("favoriteThemes")
+        } else {
+            None
+        };
+        if let Some(favorites) = favorites {
+            let values = favorites.as_array().ok_or("favorite themes must be a list")?;
+            let mut seen = std::collections::BTreeSet::new();
+            for value in values {
+                let id = value.as_str().ok_or("favorite theme must be a string")?;
+                if !is_choice(THEMES, id) || !seen.insert(id) {
+                    return Err("unknown or duplicate favorite theme".into());
+                }
+            }
+        }
         // Older clients set the single theme (by key, or inside the page object): it still picks
         // a visible theme, fixing the mode to its family.
         let legacy_theme = key == "appearance.theme" || (key == "appearance" && value.get("theme").is_some() && value.get("appearanceMode").is_none());
@@ -664,8 +731,8 @@ impl Prefs {
         Ok(())
     }
 
-    /// Reset one page (`general`, `labels`, `autoSave`…) or everything (`None`). Open Recent is
-    /// kept.
+    /// Reset one page (`general`, `labels`, `autoSave`…) or everything (`None`). Open Recent and
+    /// the saved composition presets are kept.
     pub fn reset(&mut self, page: Option<&str>) -> Result<(), String> {
         let d = Prefs::default();
         let Some(page) = page else {
@@ -674,7 +741,9 @@ impl Prefs {
                 recent_footage: std::mem::take(&mut self.recent_footage),
                 recent_presets: std::mem::take(&mut self.recent_presets),
                 recent_fonts: std::mem::take(&mut self.recent_fonts),
+                effects_favorites: std::mem::take(&mut self.effects_favorites),
                 preview: std::mem::take(&mut self.preview),
+                comp_presets: std::mem::take(&mut self.comp_presets),
                 ..d
             };
             return Ok(());
@@ -874,6 +943,23 @@ impl Prefs {
         push_mru(&mut self.recent_fonts, family, 30);
     }
 
+    /// Is effect `id` starred in Effects & Presets?
+    pub fn is_effect_favorite(&self, id: &str) -> bool {
+        self.effects_favorites.iter().any(|f| f == id)
+    }
+
+    /// Star effect `id` in Effects & Presets, or un-star it; true when it is starred now.
+    pub fn toggle_effect_favorite(&mut self, id: &str) -> bool {
+        if self.is_effect_favorite(id) {
+            self.effects_favorites.retain(|f| f != id);
+            false
+        } else {
+            self.effects_favorites.push(id.to_string());
+            self.effects_favorites.truncate(MAX_EFFECTS_FAVORITES);
+            self.is_effect_favorite(id)
+        }
+    }
+
     /// The recent fonts the Character panel shows (at most Number of Recent Fonts to Display).
     pub fn recent_fonts_shown(&self) -> &[String] {
         let n = (self.type_.recent_fonts as usize).min(self.recent_fonts.len());
@@ -890,6 +976,9 @@ impl Prefs {
         push_mru(&mut self.recent_presets, path, self.general.recent_items as usize);
     }
 }
+
+/// Most effects Effects & Presets keeps starred (a hand-edited settings file can hold more).
+const MAX_EFFECTS_FAVORITES: usize = 1000;
 
 fn push_mru(list: &mut Vec<String>, v: &str, max: usize) {
     list.retain(|x| x != v);
@@ -1194,7 +1283,7 @@ pub fn pages() -> Vec<Page> {
                 s("appearance.lightTheme", "Light Theme", Kind::Choice(LIGHT_THEMES), true),
                 s("appearance.darkTheme", "Dark Theme", Kind::Choice(DARK_THEMES), true),
                 s("appearance.brightness", "Brightness", Kind::Slider(-1.0, 1.0), true),
-                s("appearance.uiScale", "UI Scale", Kind::Choice(UI_SCALES), true),
+                s("appearance.uiScale", "UI Scale", Kind::Int(75, 200, "%"), true),
                 Section("Labels and Colors"),
                 s("appearance.useLabelColorForHandles", "Use Label Color for Layer Handles and Paths", B, true),
                 s("appearance.useLabelColorForTabs", "Use Label Color for Related Tabs", B, true),
@@ -1366,19 +1455,7 @@ pub fn pages() -> Vec<Page> {
             items: vec![
                 Section("Agent"),
                 s("aiChat.agent", "Agent", Kind::Text, true),
-                s(
-                    "aiChat.agentModel",
-                    "Agent Model",
-                    Kind::Choice(&[
-                        ("Agent Default", ""),
-                        ("Claude Opus", "opus"),
-                        ("Claude Sonnet", "sonnet"),
-                        ("Claude Haiku", "haiku"),
-                        ("GPT", "gpt"),
-                        ("Gemini", "gemini"),
-                    ]),
-                    true,
-                ),
+                s("aiChat.agentModel", "Agent Model", Kind::Text, true),
                 Section("Connection"),
                 s("aiChat.bridgeUrl", "Bridge URL", Kind::Text, true),
                 s("aiChat.ollamaUrl", "Ollama URL", Kind::Text, true),
@@ -1386,7 +1463,7 @@ pub fn pages() -> Vec<Page> {
                 Section("Prompt"),
                 s("aiChat.systemPrompt", "System Prompt", Kind::Text, true),
                 Note(
-                    "The AI Chat panel (Window menu) talks to local servers only: Ollama directly, or the bridge (bridge/agent-bridge.py) for Codex, Devin over ACP, OpenCode and any CLI. Agent Model names the model a bridge agent is asked for; Agent Default keeps the agent's own. Requests run on a worker thread.",
+                    "AI Chat accepts only loopback HTTP endpoints; HTTPS is rejected. Configure an installed Ollama Model or a bridge implementing the documented protocol. Agent Model is passed unchanged; empty uses the bridge default. Chat is session-only and excluded from serialized UI state.",
                 ),
             ],
         },

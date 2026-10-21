@@ -4,10 +4,11 @@
 //! Automation ids: `viewer.exprErrors`, `viewer.exprErrors.prev`, `viewer.exprErrors.next`.
 
 use crate::i18n::tr;
-use effectcraft_engine::commands::expr_tools::{self, ExprError};
+use effectcraft_engine::commands::expr_tools::ExprError;
 use effectcraft_engine::project::ItemId;
 use egui::{Align2, Color32, Rect, Sense, pos2, vec2};
 use serde_json::json;
+use std::sync::Arc;
 
 use crate::EffectcraftApp;
 use crate::theme::Tokens;
@@ -17,35 +18,32 @@ pub const HEIGHT: f32 = 22.0;
 
 #[derive(Clone, Default)]
 struct Cache {
-    key: (u64, u64, i64),
-    errors: Vec<ExprError>,
+    errors: Arc<[ExprError]>,
     /// Shown error (index).
     current: usize,
 }
 
-fn cache_id() -> egui::Id {
-    egui::Id::new("expr-error-bar")
+fn cache_id(cid: ItemId) -> egui::Id {
+    egui::Id::new(("expr-error-bar", cid.0))
 }
 
-/// The comp's failing expressions (recomputed when the project or the time changes; kept while
-/// playing).
-fn errors(app: &EffectcraftApp, ctx: &egui::Context, cid: ItemId) -> Cache {
-    let t = app.session.time_of(cid);
-    let key = (app.session.revision, cid.0, t.0);
-    let mut c: Cache = ctx.data(|d| d.get_temp(cache_id())).unwrap_or_default();
-    let stale = c.key != key && !(app.playback.playing && c.key.1 == cid.0);
-    if stale {
-        c.errors = expr_tools::errors(&app.session, cid, t);
-        c.key = key;
-        c.current = c.current.min(c.errors.len().saturating_sub(1));
-        ctx.data_mut(|d| d.insert_temp(cache_id(), c.clone()));
+/// Both layout and painting read the same completed diagnostics; neither evaluates expressions.
+fn errors(app: &mut EffectcraftApp, ctx: &egui::Context, cid: ItemId) -> Cache {
+    let mut c: Cache = ctx.data(|d| d.get_temp(cache_id(cid))).unwrap_or_default();
+    let interacting = app.playback.playing || ctx.input(|i| i.pointer.any_down()) || app.ui.viewer.interacting || app.ui.viewer.property_interacting;
+    c.errors = app.expression_diagnostics.errors(&app.session, ctx, cid, interacting);
+    if let Some(error) = app.expression_diagnostics.take_failure() {
+        log::warn!("{error}");
+        app.ui.status = error;
     }
+    c.current = c.current.min(c.errors.len().saturating_sub(1));
+    ctx.data_mut(|d| d.insert_temp(cache_id(cid), c.clone()));
     c
 }
 
 /// Height the bar needs for `cid` (0 when every expression evaluates).
-pub fn height(app: &EffectcraftApp, ctx: &egui::Context, cid: ItemId) -> f32 {
-    if app.session.expr.is_none() || errors(app, ctx, cid).errors.is_empty() { 0.0 } else { HEIGHT }
+pub fn height(app: &mut EffectcraftApp, ctx: &egui::Context, cid: ItemId) -> f32 {
+    if errors(app, ctx, cid).errors.is_empty() { 0.0 } else { HEIGHT }
 }
 
 pub fn draw(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect, cid: ItemId) {
@@ -71,12 +69,12 @@ pub fn draw(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect, cid: ItemId
         app.auto.add(auto, r, label);
         if resp.clicked() {
             c.current = (i + d) % n;
-            ctx.data_mut(|dd| dd.insert_temp(cache_id(), c.clone()));
+            ctx.data_mut(|dd| dd.insert_temp(cache_id(cid), c.clone()));
         }
     }
     p.text(count.center(), Align2::CENTER_CENTER, format!("{}/{n}", i + 1), Tokens::ui(11.0), t.text);
     let comp_name = app.session.project.item(cid).map(|it| it.name.clone()).unwrap_or_default();
-    let e = c.errors[i].clone();
+    let Some(e) = c.errors.get(i).cloned() else { return };
     let msg_rect = Rect::from_min_max(pos2(rect.min.x + 26.0, rect.min.y), pos2(prev.min.x - 6.0, rect.max.y));
     let resp = ui.interact(msg_rect, egui::Id::new("expr-bar-msg"), Sense::click()).on_hover_text(tr("Click to reveal the expression in the timeline"));
     p.with_clip_rect(msg_rect).text(
@@ -87,6 +85,8 @@ pub fn draw(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect, cid: ItemId
         if resp.hovered() { Color32::WHITE } else { t.text },
     );
     app.auto.add("viewer.exprErrors", msg_rect, &e.describe(&comp_name));
+    // Keep the former banner automation id as an alias for the unified error strip.
+    app.auto.add("viewer.expressionErrorBanner", msg_rect, &e.describe(&comp_name));
     if resp.clicked() {
         let _ = app.session.execute("layer.select", json!({"comp": cid.0, "layers": [e.layer]}));
         let _ = app.session.execute("prop.select", json!({"comp": cid.0, "layer": e.layer, "prop": e.prop, "selectKeys": false}));

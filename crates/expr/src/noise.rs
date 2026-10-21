@@ -38,7 +38,7 @@ pub fn noise1(seed: u64, x: f64) -> f64 {
     let i = x.floor();
     let u = fade(x - i);
     let i = i as i64;
-    let (a, b) = (lattice(seed, i), lattice(seed, i + 1));
+    let (a, b) = (lattice(seed, i), lattice(seed, i.wrapping_add(1)));
     a + (b - a) * u
 }
 
@@ -50,7 +50,7 @@ pub fn noise3(x: f64, y: f64, z: f64) -> f64 {
     let (fx, fy, fz) = (x.floor(), y.floor(), z.floor());
     let (u, v, w) = (fade(x - fx), fade(y - fy), fade(z - fz));
     let (ix, iy, iz) = (fx as i64, fy as i64, fz as i64);
-    let g = |dx: i64, dy: i64, dz: i64| unit(mix(&[(ix + dx) as u64, (iy + dy) as u64, (iz + dz) as u64])) * 2.0 - 1.0;
+    let g = |dx: i64, dy: i64, dz: i64| unit(mix(&[ix.wrapping_add(dx) as u64, iy.wrapping_add(dy) as u64, iz.wrapping_add(dz) as u64])) * 2.0 - 1.0;
     let l = |a: f64, b: f64, t: f64| a + (b - a) * t;
     let x00 = l(g(0, 0, 0), g(1, 0, 0), u);
     let x10 = l(g(0, 1, 0), g(1, 1, 0), u);
@@ -97,6 +97,18 @@ mod tests {
         assert_eq!(noise1(3, 1.25), noise1(3, 1.25));
         assert_ne!(noise1(3, 1.25), noise1(4, 1.25));
         assert!((-1.0..=1.0).contains(&noise3(0.3, 4.2, -7.5)));
+    }
+
+    #[test]
+    fn huge_inputs_do_not_overflow() {
+        // Found by the expression fuzzer (#786): `wiggle(9007199254740993, 30)` at a late time
+        // put the lattice index at `i64::MAX`, and its neighbour overflowed.
+        let w = wiggle(1, 2, 9_007_199_254_740_993.0, 30.0, 1.0, 0.5, 1e6);
+        assert!(w.iter().all(|v| v.is_finite() && v.abs() <= 30.0));
+        for x in [1e300, -1e300, 9.3e18, -9.3e18] {
+            assert!(noise1(5, x).is_finite());
+            assert!(noise3(x, -x, x).is_finite());
+        }
     }
 
     #[test]

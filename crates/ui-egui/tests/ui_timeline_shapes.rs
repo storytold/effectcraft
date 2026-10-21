@@ -1,7 +1,7 @@
 //! Timeline rows for shape layers, masks and keyframing: the Contents "Add:" menu and the Classic
 //! 3D "Change Renderer…" row (#206), Alt+Shift+P revealing the key it adds and clicks below the
 //! layers deselecting them (#205), Mask Feather's linked values (#203), and copying shape items
-//! between shape layers (#227).
+//! between shape layers (#227), and Ctrl+V of SVG markup making a shape layer (#738).
 
 use effectcraft_engine::Session;
 use effectcraft_engine::project::LayerId;
@@ -26,6 +26,18 @@ fn session() -> Session {
 fn center(h: &Harness<'_, EffectcraftApp>, id: &str) -> Pos2 {
     let e = h.state().auto.find(id).unwrap_or_else(|| panic!("no {id}"));
     pos2(e.rect[0] + e.rect[2] / 2.0, e.rect[1] + e.rect[3] / 2.0)
+}
+
+/// Step until the viewer's frame has rendered (frames render on background threads).
+fn settle(h: &mut Harness<'_, EffectcraftApp>) {
+    for _ in 0..600 {
+        h.step();
+        if h.state().frames.inflight() == 0 && h.state().frames.last_ms.lock().map(|v| *v > 0.0).unwrap_or(false) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    h.run_steps(2);
 }
 
 fn click_at(h: &mut Harness<'_, EffectcraftApp>, p: Pos2) {
@@ -224,7 +236,7 @@ fn timeline_colour_eyedropper_samples_the_comp() {
     let mut h = harness(s);
     h.state_mut().ui.timeline.open_groups.extend(open);
     open_layer(&mut h, l);
-    h.run_steps(2);
+    settle(&mut h);
     click(&mut h, &format!("timeline.prop.{fill}.eyedropper"));
     assert_eq!(h.state().ui.fx_pick.as_ref().map(|p| (p.prop, p.kind.as_str())), Some((fill, "color")), "the eyedropper waits for a viewer click");
     let pos = effectcraft_ui_egui::panels::viewer::comp_to_screen(&h.ctx, [6.0, 6.0]).unwrap();
@@ -242,4 +254,32 @@ fn timeline_colour_eyedropper_samples_the_comp() {
     for k in 0..3 {
         assert!((c[k] - want[k]).abs() < 0.02, "{c:?} vs {want:?}");
     }
+}
+
+/// Ctrl+V with SVG markup on the system clipboard pastes it as a shape layer (After Effects
+/// 26.3), even with layers on the app's clipboard: copying in the app replaces the system
+/// clipboard, so the SVG was copied later (#738).
+#[test]
+fn ctrl_v_pastes_svg_markup_as_a_shape_layer() {
+    let (mut h, a, b, _) = two_shape_layers();
+    click(&mut h, &format!("timeline.layer.{b}.row"));
+    h.input_mut().events.push(Event::Copy);
+    h.step();
+    assert_eq!(h.state().session.state.clipboard.len(), 1, "a layer on the app's clipboard");
+    let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><circle cx="10" cy="10" r="8" fill="#00ff00"/><rect x="20" width="20" height="20"/></svg>"##;
+    h.input_mut().events.push(Event::Paste(svg.into()));
+    h.run_steps(3);
+    let c = h.state().session.active_comp().unwrap().clone();
+    assert_eq!(c.layers.len(), 3, "{:?}", h.state().ui.status);
+    let top = &c.layers[0];
+    assert!(top.id != LayerId(a) && top.id != LayerId(b));
+    assert_eq!(top.name, "Shape Layer 3");
+    assert_eq!(top.props.sub("contents").unwrap().groups().count(), 2);
+    assert_eq!(h.state().session.state.selected_layers, vec![top.id]);
+    // The app's own clipboard note pastes the copied layer as before.
+    h.input_mut().events.push(Event::Paste("EffectCraft: 1 layer".into()));
+    h.run_steps(3);
+    let c = h.state().session.active_comp().unwrap();
+    assert_eq!(c.layers.len(), 4);
+    assert_eq!(c.layers[0].name, "Oval 2");
 }

@@ -3,7 +3,7 @@
 //! additional-information blocks (helpers below build text, effects, fill and adjustment
 //! blocks). Used to generate test fixtures; not a full exporter.
 
-use crate::descriptor::{self, DValue, Descriptor};
+use crate::descriptor::{self, DValue, Descriptor, put_u16, put_u32, put_utf16};
 use crate::{ColorMode, Rect, Section, engine_data, pack_bits};
 
 /// A layer mask for [`WLayer`].
@@ -114,13 +114,6 @@ impl WDoc {
     }
 }
 
-fn u16b(out: &mut Vec<u8>, v: u16) {
-    out.extend_from_slice(&v.to_be_bytes());
-}
-fn u32b(out: &mut Vec<u8>, v: u32) {
-    out.extend_from_slice(&v.to_be_bytes());
-}
-
 /// Colour channels for a straight RGB pixel in the document mode.
 fn mode_channels(mode: ColorMode, p: [f32; 4]) -> Vec<f32> {
     match mode {
@@ -139,7 +132,7 @@ fn encode_samples(v: &[f32], depth: u16) -> Vec<u8> {
     for &x in v {
         let x = x.clamp(0.0, 1.0);
         if depth == 16 {
-            u16b(&mut out, (x * 65535.0).round() as u16);
+            put_u16(&mut out, (x * 65535.0).round() as u16);
         } else {
             out.push((x * 255.0).round() as u8);
         }
@@ -153,14 +146,14 @@ fn channel_data(v: &[f32], w: usize, h: usize, depth: u16, rle: bool) -> Vec<u8>
     let mut out = vec![];
     let rowb = raw.len() / h.max(1);
     if !rle || w == 0 || h == 0 {
-        u16b(&mut out, 0);
+        put_u16(&mut out, 0);
         out.extend_from_slice(&raw);
         return out;
     }
-    u16b(&mut out, 1);
+    put_u16(&mut out, 1);
     let rows: Vec<Vec<u8>> = raw.chunks(rowb.max(1)).map(pack_bits).collect();
     for r in &rows {
-        u16b(&mut out, r.len() as u16);
+        put_u16(&mut out, r.len() as u16);
     }
     for r in rows {
         out.extend_from_slice(&r);
@@ -180,7 +173,7 @@ fn block(out: &mut Vec<u8>, key: &[u8; 4], data: &[u8]) {
     out.extend_from_slice(b"8BIM");
     out.extend_from_slice(key);
     let padded = data.len().div_ceil(2) * 2;
-    u32b(out, padded as u32);
+    put_u32(out, padded as u32);
     out.extend_from_slice(data);
     out.resize(out.len() + padded - data.len(), 0);
 }
@@ -208,10 +201,10 @@ fn layer_info(doc: &WDoc) -> Vec<u8> {
         for v in [l.rect.top, l.rect.left, l.rect.bottom, l.rect.right] {
             out.extend_from_slice(&v.to_be_bytes());
         }
-        u16b(&mut out, chans.len() as u16);
+        put_u16(&mut out, chans.len() as u16);
         for (id, d) in &chans {
             out.extend_from_slice(&id.to_be_bytes());
-            u32b(&mut out, d.len() as u32);
+            put_u32(&mut out, d.len() as u32);
         }
         out.extend_from_slice(b"8BIM");
         out.extend_from_slice(&l.blend);
@@ -226,7 +219,7 @@ fn layer_info(doc: &WDoc) -> Vec<u8> {
         let mut extra = vec![];
         match &l.mask {
             Some(m) => {
-                u32b(&mut extra, 20);
+                put_u32(&mut extra, 20);
                 for v in [m.rect.top, m.rect.left, m.rect.bottom, m.rect.right] {
                     extra.extend_from_slice(&v.to_be_bytes());
                 }
@@ -234,9 +227,9 @@ fn layer_info(doc: &WDoc) -> Vec<u8> {
                 extra.push(if m.disabled { 2 } else { 0 });
                 extra.extend_from_slice(&[0, 0]);
             }
-            None => u32b(&mut extra, 0),
+            None => put_u32(&mut extra, 0),
         }
-        u32b(&mut extra, 0); // blending ranges
+        put_u32(&mut extra, 0); // blending ranges
         pascal4(&mut extra, &l.name);
         let luni = unicode_plain(&l.name);
         block(&mut extra, b"luni", &luni);
@@ -244,7 +237,7 @@ fn layer_info(doc: &WDoc) -> Vec<u8> {
             Section::Layer => {}
             s => {
                 let mut d = vec![];
-                u32b(
+                put_u32(
                     &mut d,
                     match s {
                         Section::OpenFolder => 1,
@@ -260,7 +253,7 @@ fn layer_info(doc: &WDoc) -> Vec<u8> {
         for (k, d) in &l.blocks {
             block(&mut extra, k, d);
         }
-        u32b(&mut out, extra.len() as u32);
+        put_u32(&mut out, extra.len() as u32);
         out.extend_from_slice(&extra);
         chan_data.push(chans);
     }
@@ -275,13 +268,10 @@ fn layer_info(doc: &WDoc) -> Vec<u8> {
     out
 }
 
+/// A Unicode string without the terminating NUL (the layer-name `luni` form).
 fn unicode_plain(s: &str) -> Vec<u8> {
-    let v: Vec<u16> = s.encode_utf16().collect();
     let mut out = vec![];
-    u32b(&mut out, v.len() as u32);
-    for c in v {
-        u16b(&mut out, c);
-    }
+    put_utf16(&mut out, s, false);
     out
 }
 
@@ -313,58 +303,58 @@ pub fn write(doc: &WDoc) -> Vec<u8> {
     let cc = doc.mode.color_channels();
     let mut out = vec![];
     out.extend_from_slice(b"8BPS");
-    u16b(&mut out, 1);
+    put_u16(&mut out, 1);
     out.extend_from_slice(&[0; 6]);
-    u16b(&mut out, (cc + 1) as u16);
-    u32b(&mut out, doc.height);
-    u32b(&mut out, doc.width);
-    u16b(&mut out, doc.depth);
-    u16b(&mut out, doc.mode.to_u16());
-    u32b(&mut out, 0); // colour mode data
-    u32b(&mut out, 0); // image resources
+    put_u16(&mut out, (cc + 1) as u16);
+    put_u32(&mut out, doc.height);
+    put_u32(&mut out, doc.width);
+    put_u16(&mut out, doc.depth);
+    put_u16(&mut out, doc.mode.to_u16());
+    put_u32(&mut out, 0); // colour mode data
+    put_u32(&mut out, 0); // image resources
     // Layer and mask information.
     let mut lm = vec![];
     if !doc.layers.is_empty() {
         let li = layer_info(doc);
         if doc.depth == 16 {
-            u32b(&mut lm, 0);
-            u32b(&mut lm, 0); // global layer mask info
+            put_u32(&mut lm, 0);
+            put_u32(&mut lm, 0); // global layer mask info
             let mut padded = li;
             while !padded.len().is_multiple_of(4) {
                 padded.push(0);
             }
             lm.extend_from_slice(b"8BIM");
             lm.extend_from_slice(b"Lr16");
-            u32b(&mut lm, padded.len() as u32);
+            put_u32(&mut lm, padded.len() as u32);
             lm.extend_from_slice(&padded);
         } else {
-            u32b(&mut lm, li.len() as u32);
+            put_u32(&mut lm, li.len() as u32);
             lm.extend_from_slice(&li);
-            u32b(&mut lm, 0);
+            put_u32(&mut lm, 0);
         }
         if !doc.linked.is_empty() {
             let d = linked_block(&doc.linked);
             lm.extend_from_slice(b"8BIM");
             lm.extend_from_slice(b"lnk2");
-            u32b(&mut lm, d.len() as u32);
+            put_u32(&mut lm, d.len() as u32);
             lm.extend_from_slice(&d);
         }
     }
-    u32b(&mut out, lm.len() as u32);
+    put_u32(&mut out, lm.len() as u32);
     out.extend_from_slice(&lm);
     // Merged image.
     let comp = doc.composite.clone().unwrap_or_else(|| flatten(doc));
-    let (w, h) = (doc.width as usize, doc.height as usize);
+    let w = doc.width as usize;
     let planes: Vec<Vec<f32>> = comp.iter().map(|p| mode_channels(doc.mode, *p)).collect();
     let mut chans: Vec<Vec<f32>> = (0..cc).map(|c| planes.iter().map(|v| v[c]).collect()).collect();
     chans.push(comp.iter().map(|p| p[3]).collect());
     if doc.rle {
-        u16b(&mut out, 1);
+        put_u16(&mut out, 1);
         let rows: Vec<Vec<Vec<u8>>> =
             chans.iter().map(|c| encode_samples(c, doc.depth).chunks((w * if doc.depth == 16 { 2 } else { 1 }).max(1)).map(pack_bits).collect()).collect();
         for c in &rows {
             for r in c {
-                u16b(&mut out, r.len() as u16);
+                put_u16(&mut out, r.len() as u16);
             }
         }
         for c in rows {
@@ -373,12 +363,11 @@ pub fn write(doc: &WDoc) -> Vec<u8> {
             }
         }
     } else {
-        u16b(&mut out, 0);
+        put_u16(&mut out, 0);
         for c in &chans {
             out.extend_from_slice(&encode_samples(c, doc.depth));
         }
     }
-    let _ = h;
     out
 }
 
@@ -388,7 +377,7 @@ fn linked_block(files: &[(String, String, [u8; 4], Vec<u8>)]) -> Vec<u8> {
     for (uuid, name, ty, data) in files {
         let mut rec = vec![];
         rec.extend_from_slice(b"liFD");
-        u32b(&mut rec, 7);
+        put_u32(&mut rec, 7);
         rec.push(uuid.len() as u8);
         rec.extend_from_slice(uuid.as_bytes());
         rec.extend_from_slice(&unicode_plain(name));
@@ -397,7 +386,7 @@ fn linked_block(files: &[(String, String, [u8; 4], Vec<u8>)]) -> Vec<u8> {
         rec.extend_from_slice(&(data.len() as u64).to_be_bytes());
         rec.push(0); // no file-open descriptor
         rec.extend_from_slice(data);
-        u32b(&mut rec, 0); // child document id (empty unicode string)
+        put_u32(&mut rec, 0); // child document id (empty unicode string)
         rec.extend_from_slice(&0f64.to_be_bytes()); // asset modification time
         rec.push(0); // asset locked state
         out.extend_from_slice(&(rec.len() as u64).to_be_bytes());
@@ -462,8 +451,8 @@ pub fn smart_object_block_warped(uuid: &str, quad: [[f64; 2]; 4], size: [f64; 2]
         d = d.with("warp", DValue::Descriptor(w));
     }
     let mut out = b"soLD".to_vec();
-    u32b(&mut out, 4);
-    u32b(&mut out, 16);
+    put_u32(&mut out, 4);
+    put_u32(&mut out, 16);
     descriptor::write_descriptor(&mut out, &d);
     (*b"SoLd", out)
 }
@@ -471,12 +460,12 @@ pub fn smart_object_block_warped(uuid: &str, quad: [[f64; 2]; 4], size: [f64; 2]
 /// `TySh`: a type layer with one style run; the text origin sits at `origin`.
 pub fn text_block(text: &str, origin: [f64; 2], font: &str, size: f64, color: [f64; 3], justification: u8) -> ([u8; 4], Vec<u8>) {
     let mut d = vec![];
-    u16b(&mut d, 1);
+    put_u16(&mut d, 1);
     for v in [1.0, 0.0, 0.0, 1.0, origin[0], origin[1]] {
         d.extend_from_slice(&f64::to_be_bytes(v));
     }
-    u16b(&mut d, 50);
-    u32b(&mut d, 16);
+    put_u16(&mut d, 50);
+    put_u32(&mut d, 16);
     let desc = Descriptor::new("TxLr")
         .with("Txt ", DValue::Text(text.replace('\n', "\r")))
         .with("textGridding", DValue::Enum("textGridding".into(), "None".into()))
@@ -484,11 +473,11 @@ pub fn text_block(text: &str, origin: [f64; 2], font: &str, size: f64, color: [f
         .with("EngineData", DValue::Raw(engine_data::minimal(text, font, size, color, justification)));
     descriptor::write_descriptor(&mut d, &desc);
     // Warp: version, descriptor version, an empty warp descriptor.
-    u16b(&mut d, 1);
-    u32b(&mut d, 16);
+    put_u16(&mut d, 1);
+    put_u32(&mut d, 16);
     descriptor::write_descriptor(&mut d, &Descriptor::new("warp").with("warpStyle", DValue::Enum("warpStyle".into(), "warpNone".into())));
     for _ in 0..4 {
-        u32b(&mut d, 0);
+        put_u32(&mut d, 0);
     }
     (*b"TySh", d)
 }
@@ -496,8 +485,8 @@ pub fn text_block(text: &str, origin: [f64; 2], font: &str, size: f64, color: [f
 /// `lfx2`: layer effects from an effects descriptor (`null` class with `DrSh`, `FrFX`…).
 pub fn effects_block(desc: &Descriptor) -> ([u8; 4], Vec<u8>) {
     let mut d = vec![];
-    u32b(&mut d, 0);
-    u32b(&mut d, 16);
+    put_u32(&mut d, 0);
+    put_u32(&mut d, 16);
     descriptor::write_descriptor(&mut d, desc);
     (*b"lfx2", d)
 }
@@ -505,7 +494,7 @@ pub fn effects_block(desc: &Descriptor) -> ([u8; 4], Vec<u8>) {
 /// `SoCo`: solid colour fill.
 pub fn solid_color_block(rgb: [f64; 3]) -> ([u8; 4], Vec<u8>) {
     let mut d = vec![];
-    u32b(&mut d, 16);
+    put_u32(&mut d, 16);
     descriptor::write_descriptor(&mut d, &Descriptor::new("null").with("Clr ", DValue::Descriptor(Descriptor::rgb(rgb))));
     (*b"SoCo", d)
 }
@@ -513,7 +502,7 @@ pub fn solid_color_block(rgb: [f64; 3]) -> ([u8; 4], Vec<u8>) {
 /// `hue2`: Hue/Saturation (master).
 pub fn hue_sat_block(hue: i16, sat: i16, light: i16) -> ([u8; 4], Vec<u8>) {
     let mut d = vec![];
-    u16b(&mut d, 2);
+    put_u16(&mut d, 2);
     d.extend_from_slice(&[0, 0]);
     for v in [0i16, 0, 0, hue, sat, light] {
         d.extend_from_slice(&v.to_be_bytes());
@@ -526,7 +515,7 @@ pub fn hue_sat_block(hue: i16, sat: i16, light: i16) -> ([u8; 4], Vec<u8>) {
 /// `levl`: Levels (composite record).
 pub fn levels_block(in_black: i16, in_white: i16, out_black: i16, out_white: i16, gamma: f64) -> ([u8; 4], Vec<u8>) {
     let mut d = vec![];
-    u16b(&mut d, 2);
+    put_u16(&mut d, 2);
     for v in [in_black, in_white, out_black, out_white, (gamma * 100.0).round() as i16] {
         d.extend_from_slice(&v.to_be_bytes());
     }
@@ -553,7 +542,7 @@ pub fn brightness_block(brightness: i16, contrast: i16) -> ([u8; 4], Vec<u8>) {
 
 pub fn exposure_block(exposure: f32, offset: f32, gamma: f32) -> ([u8; 4], Vec<u8>) {
     let mut d = vec![];
-    u16b(&mut d, 1);
+    put_u16(&mut d, 1);
     for v in [exposure, offset, gamma] {
         d.extend_from_slice(&v.to_be_bytes());
     }
@@ -563,18 +552,18 @@ pub fn exposure_block(exposure: f32, offset: f32, gamma: f32) -> ([u8; 4], Vec<u
 /// `vmsk`: a vector mask from closed polygons/curves given as (in, anchor, out) knots in pixels.
 pub fn vector_mask_block(subpaths: &[Vec<[[f64; 2]; 3]>], width: u32, height: u32, inverted: bool) -> ([u8; 4], Vec<u8>) {
     let mut d = vec![];
-    u32b(&mut d, 3);
-    u32b(&mut d, inverted as u32);
+    put_u32(&mut d, 3);
+    put_u32(&mut d, inverted as u32);
     // Path fill rule record.
-    u16b(&mut d, 6);
+    put_u16(&mut d, 6);
     d.resize(d.len() + 24, 0);
     let fx = |v: f64| ((v * (1 << 24) as f64).round() as i32).to_be_bytes();
     for sp in subpaths {
-        u16b(&mut d, 0);
-        u16b(&mut d, sp.len() as u16);
+        put_u16(&mut d, 0);
+        put_u16(&mut d, sp.len() as u16);
         d.resize(d.len() + 22, 0);
         for k in sp {
-            u16b(&mut d, 1);
+            put_u16(&mut d, 1);
             for p in k {
                 d.extend_from_slice(&fx(p[1] / height as f64));
                 d.extend_from_slice(&fx(p[0] / width as f64));

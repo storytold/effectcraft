@@ -1,10 +1,12 @@
-//! Frontend-only commands: viewer zoom/resolution/overlays, panels, workspaces, dialogs and app
+//! Frontend-only commands: viewer zoom/overlays, panels, workspaces, dialogs and app
 //! chrome. They live in the registry so every menu entry is a command (menus, shortcuts, the
 //! control channel and MCP all see them); running one emits [`crate::Event::Frontend`] and the UI
 //! performs it. Headless sessions accept and ignore them.
 
-use super::{CommandSpec, always, frontend, has_comp, has_layers};
-use crate::cmd;
+use serde_json::{Value, json};
+
+use super::{CommandSpec, always, bad, frontend, has_comp, has_layers};
+use crate::{Result, Session, cmd};
 
 macro_rules! fe {
     ($id:literal, $label:literal, [$($m:literal),*], $sc:expr, $params:literal, $en:expr) => {
@@ -35,6 +37,7 @@ pub fn specs() -> Vec<CommandSpec> {
         fe!("app.keyboardShortcuts", "Keyboard Shortcuts", ["Edit"], Some("Cmd+Alt+'"), "{}", always),
         fe!("app.templates", "Templates", [], None, "{kind: renderSettings|outputModule}", always),
         fe!("app.find", "Find", ["File"], Some("Cmd+F"), "{query?}", always),
+        fe!("effects.copyPresetsFolderPath", "Copy Presets Folder Path", [], None, "{}", always),
         // Preview.
         fe!(
             "playback.toggle",
@@ -57,11 +60,6 @@ pub fn specs() -> Vec<CommandSpec> {
         // Viewer.
         fe!("view.zoomIn", "Zoom In", ["View"], Some("."), "{}", has_comp),
         fe!("view.zoomOut", "Zoom Out", ["View"], Some(","), "{}", has_comp),
-        fe!("view.res.full", "Full", ["View", "Resolution"], Some("Cmd+J"), "{}", has_comp),
-        fe!("view.res.half", "Half", ["View", "Resolution"], Some("Cmd+Shift+J"), "{}", has_comp),
-        fe!("view.res.third", "Third", ["View", "Resolution"], None, "{}", has_comp),
-        fe!("view.res.quarter", "Quarter", ["View", "Resolution"], Some("Cmd+Alt+Shift+J"), "{}", has_comp),
-        fe!("view.res.custom", "Custom...", ["View", "Resolution"], None, "{factor?: 1..40 (render every n-th pixel)}", has_comp),
         fe!("view.rulers", "Show Rulers", ["View"], Some("Cmd+R"), "{value?}", always),
         fe!("view.panelBackground", "Panel Background Color", [], None, "{color?: black|darkGray|mediumGray|lightGray|white|custom|#hex, pick?: true}", always),
         fe!("view.guides", "Show Guides", ["View"], Some("Cmd+;"), "{value?}", always),
@@ -71,7 +69,9 @@ pub fn specs() -> Vec<CommandSpec> {
         fe!("view.snapToGrid", "Snap to Grid", ["View"], Some("Cmd+Shift+'"), "{value?}", always),
         fe!("view.options", "View Options...", ["View"], Some("Cmd+Alt+U"), "{}", has_comp),
         fe!("view.layerControls", "Show Layer Controls", ["View"], Some("Cmd+Shift+H"), "{value?}", always),
-        fe!("view.fullScreen", "Enter Full Screen", ["View"], Some("Ctrl+Cmd+F"), "{}", always),
+        // macOS uses Control+Command+F for native full screen. On Windows and Linux,
+        // Cmd maps to Ctrl; the After Effects-style Ctrl+\ is window.maximizeApp.
+        fe!("view.fullScreen", "Enter Full Screen", ["View"], cfg!(target_os = "macos").then_some("Ctrl+Cmd+F"), "{}", always),
         fe!(
             "view.newViewer",
             "New Viewer",
@@ -116,5 +116,28 @@ pub fn specs() -> Vec<CommandSpec> {
             "{} — the Project panel's selection, with the layers that use it; one undo step",
             always
         ),
+        // A gradient property's "Edit Gradient…" (the Timeline's Colors value): opens the
+        // Gradient Editor on it at the current time. OK sets it with prop.set (one undo step).
+        cmd!(
+            "prop.editGradient",
+            "Edit Gradient...",
+            [],
+            None,
+            "{layer?, path|prop, comp?} — a gradient property; opens the Gradient Editor at the current time",
+            has_layers,
+            edit_gradient
+        ),
     ]
+}
+
+/// `prop.editGradient`: check the target is a gradient property before the UI opens the editor,
+/// so agents get an error (not success) for a wrong one, and hand the UI the resolved ids.
+fn edit_gradient(s: &mut Session, p: &Value) -> Result<Value> {
+    let c = "prop.editGradient";
+    let (cid, lid, uid) = super::prop::prop_ref(s, p, c)?;
+    let pr = s.project.comp(cid).and_then(|comp| comp.layer(lid)).and_then(|l| l.props.find(uid)).ok_or_else(|| bad(c, format!("no property @{uid}")))?;
+    if !matches!(pr.value, effectcraft_keyframe::Value::Gradient(_)) {
+        return Err(bad(c, format!("{} is not a gradient property", pr.name)));
+    }
+    frontend(s, c, &json!({"comp": cid.0, "layer": lid.0, "prop": uid}))
 }

@@ -6,7 +6,7 @@ use effectcraft_project::{FrameBlend, GroupKind, ItemId, LayerId, LayerSource, M
 use effectcraft_time::Tick;
 use serde_json::{Value, json};
 
-use super::{CommandSpec, b_p, bad, comp_id, f_p, frontend, has_comp, has_layers, layer_mut, layer_p, layers_p, merge_p, str_p};
+use super::{CommandSpec, b_p, bad, comp_id, f_p, frontend, has_comp, has_layers, layer_mut, layer_p, layers_p, merge_p, str_p, time_p};
 use crate::{EngineError, Result, Session, cmd};
 
 // ---------------------------------------------------------------- enablement
@@ -76,6 +76,13 @@ fn sampling(s: &mut Session, p: &Value) -> Result<Value> {
         "bicubic" => Sampling::Bicubic,
         q => return Err(bad("layer.sampling", format!("sampling must be bilinear|bicubic, not `{q}`"))),
     };
+    // `toggle`: layers that all have it already get the other one.
+    let all = s.project.comp(cid).is_some_and(|c| c.layers.iter().filter(|l| ids.contains(&l.id)).all(|l| l.switches.sampling == q));
+    let q = match q {
+        Sampling::Bilinear if all && b_p(p, "toggle").unwrap_or(false) => Sampling::Bicubic,
+        Sampling::Bicubic if all && b_p(p, "toggle").unwrap_or(false) => Sampling::Bilinear,
+        q => q,
+    };
     s.edit("Layer Sampling", None, |proj, _| {
         for l in proj.comp_mut(cid).ok_or(EngineError::NoComp)?.layers.iter_mut().filter(|l| ids.contains(&l.id)) {
             l.switches.sampling = q;
@@ -108,7 +115,7 @@ fn hide_other_video(s: &mut Session, p: &Value) -> Result<Value> {
     let (cid, ids) = layers_p(s, p)?;
     s.edit("Hide Other Video", None, |proj, _| {
         for l in proj.comp_mut(cid).ok_or(EngineError::NoComp)?.layers.iter_mut() {
-            if !ids.contains(&l.id) && l.source.is_av() {
+            if !ids.contains(&l.id) && (l.source.is_av() || matches!(l.source, LayerSource::Null)) {
                 l.switches.video = false;
             }
         }
@@ -545,11 +552,17 @@ fn mask_lock_others(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn add_marker(s: &mut Session, p: &Value) -> Result<Value> {
     let (cid, ids) = layers_p(s, p)?;
-    if ids.is_empty() {
-        return Err(bad("layer.addMarker", "no layer"));
-    }
-    let t = f_p(p, "time").map(Tick::from_seconds_f64).unwrap_or(s.time());
+    let t = time_p(s, p, s.project.comp(cid));
     let comment = str_p(p, "comment").unwrap_or_default().to_string();
+    if ids.is_empty() {
+        s.edit("Add Marker", None, |proj, _| {
+            let c = proj.comp_mut(cid).ok_or(EngineError::NoComp)?;
+            c.markers.push(Marker { time: t, comment, ..Default::default() });
+            c.markers.sort_by_key(|m| m.time);
+            Ok(())
+        })?;
+        return Ok(json!({"time": t.seconds()}));
+    }
     s.edit("Add Marker", None, |proj, _| {
         for lid in &ids {
             let l = layer_mut(proj, cid, *lid)?;
@@ -661,7 +674,72 @@ fn open_source(s: &mut Session, p: &Value) -> Result<Value> {
 /// Folder containing a file as a `file://` URL.
 pub(crate) fn folder_url(path: &str) -> String {
     let dir = std::path::Path::new(path).parent().map(|d| d.to_string_lossy().to_string()).unwrap_or_default();
-    format!("file://{dir}")
+    file_url(&dir)
+}
+
+/// Extensions of folders that macOS opens as an app, plug-in or other bundle rather than showing
+/// their contents.
+const BUNDLE_EXTENSIONS: &[&str] = &[
+    "app",
+    "appex",
+    "bundle",
+    "component",
+    "dext",
+    "driver",
+    "framework",
+    "kext",
+    "mdimporter",
+    "mpkg",
+    "osax",
+    "pkg",
+    "plugin",
+    "prefpane",
+    "qlgenerator",
+    "saver",
+    "service",
+    "systemextension",
+    "vst",
+    "vst3",
+    "wdgt",
+    "workflow",
+    "xpc",
+];
+
+/// Whether the system file manager would open folder `dir` as something other than a folder: a
+/// bundle (`Tool.app`), or a Windows folder with a `{CLSID}` extension.
+fn opens_as_bundle(dir: &std::path::Path) -> bool {
+    let ext = dir.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+    ext.starts_with('{') || BUNDLE_EXTENSIONS.contains(&ext.as_str())
+}
+
+/// The folder of the footage file `stored` (a path stored in the project) as a `file://` URL for
+/// Reveal in Finder. A path that is not followed ([`crate::doc_path`]), or a folder that is not a
+/// plain folder after following links, is refused.
+pub(crate) fn reveal_url(s: &Session, stored: &str) -> std::result::Result<String, String> {
+    let path = s.stored_path(stored).map_err(|why| crate::doc_path::refusal(stored, why))?;
+    let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).ok_or_else(|| format!("{stored} is not in a folder"))?;
+    let real = std::fs::canonicalize(dir).map_err(|e| format!("cannot show the folder of {stored}: {e}"))?;
+    if !real.is_dir() || opens_as_bundle(dir) || opens_as_bundle(&real) {
+        return Err(format!("the folder of {stored} is not a plain folder"));
+    }
+    Ok(file_url(&dir.to_string_lossy()))
+}
+
+/// `path` as a `file://` URL: backslashes become `/`, a Windows drive path gets the third slash
+/// (`file:///C:/…`), and every byte that isn't a plain path character is percent-encoded (spaces,
+/// `#`, `%`, `?`, non-ASCII as UTF-8), so the URL names exactly this file.
+pub(crate) fn file_url(path: &str) -> String {
+    use std::fmt::Write as _;
+    let path = path.replace('\\', "/");
+    let mut url = String::from(if path.starts_with('/') { "file://" } else { "file:///" });
+    for b in path.bytes() {
+        if b.is_ascii_alphanumeric() || b"/-._~:@!$&'()*+,;=".contains(&b) {
+            url.push(char::from(b));
+        } else {
+            let _ = write!(url, "%{b:02X}");
+        }
+    }
+    url
 }
 
 fn reveal_in_finder(s: &mut Session, p: &Value) -> Result<Value> {
@@ -670,7 +748,7 @@ fn reveal_in_finder(s: &mut Session, p: &Value) -> Result<Value> {
         Some(effectcraft_project::ItemKind::Footage(f)) if !f.path.is_empty() => f.path.clone(),
         _ => return Err(bad("layer.revealInFinder", "the layer's source is not a file")),
     };
-    let url = folder_url(&path);
+    let url = reveal_url(s, &path).map_err(|e| bad("layer.revealInFinder", e))?;
     s.events.push(crate::Event::OpenUrl(url.clone()));
     Ok(json!({"url": url}))
 }
@@ -783,7 +861,7 @@ fn sequence(s: &mut Session, p: &Value) -> Result<Value> {
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         cmd!("layer.quality", "Quality", [], None, "{layers?, quality: best|draft|wireframe}", has_layers, quality),
-        cmd!("layer.sampling", "Sampling", [], None, "{layers?, sampling: bilinear|bicubic}", has_layers, sampling),
+        cmd!("layer.sampling", "Sampling", [], None, "{layers?, sampling: bilinear|bicubic, toggle?}", has_layers, sampling),
         cmd!("layer.frameBlending", "Frame Blending", [], None, "{layers?, mode: off|frameMix|pixelMotion}", has_layers, frame_blending),
         cmd!("layer.hideOtherVideo", "Hide Other Video", ["Layer", "Switches"], Some("Cmd+Alt+Shift+V"), "{layers?}", has_layers, hide_other_video),
         cmd!("layer.showAllVideo", "Show All Video", ["Layer", "Switches"], None, "{comp?}", has_comp, show_all_video),
@@ -825,7 +903,7 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("layer.mask.lock", "Locked", ["Layer", "Mask"], None, "{layer?, mask?, value?}", has_masks, mask_lock),
         cmd!("layer.mask.unlockAll", "Unlock All Masks", ["Layer", "Mask"], None, "{layers?}", has_masks, mask_unlock_all),
         cmd!("layer.mask.lockOthers", "Lock Other Masks", ["Layer", "Mask"], None, "{layer?, mask?}", has_masks, mask_lock_others),
-        cmd!("layer.addMarker", "Add Marker", ["Layer", "Markers"], None, "{layers?, time?, comment?}", has_layers, add_marker),
+        cmd!("layer.addMarker", "Add Marker", ["Layer", "Markers"], None, "{layers?, time?, comment?}", has_comp, add_marker),
         cmd!("layer.markersLock", "Lock Markers", ["Layer", "Markers"], None, "{layers?, value?}", has_layers, markers_lock),
         cmd!("layer.deleteAllMarkers", "Delete All Markers", ["Layer", "Markers"], None, "{layers?}", has_markers, delete_all_markers),
         cmd!("layer.trackMatte", "Track Matte", [], None, "{layers?, op: none|alpha|alphaInverted|luma|lumaInverted|above|below}", has_layers, track_matte_op),
@@ -844,4 +922,45 @@ pub fn specs() -> Vec<CommandSpec> {
             sequence
         ),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{file_url, folder_url};
+
+    #[test]
+    fn file_urls_are_well_formed() {
+        assert_eq!(file_url("C:\\Users\\Ann\\Footage\\clip 1.mov"), "file:///C:/Users/Ann/Footage/clip%201.mov");
+        assert_eq!(file_url("/home/ann/a#b%c?d.mov"), "file:///home/ann/a%23b%25c%3Fd.mov");
+        assert_eq!(file_url("/Users/ann/Café/x.mov"), "file:///Users/ann/Caf%C3%A9/x.mov");
+        assert_eq!(file_url("/plain/path-1_2.~(x).mov"), "file:///plain/path-1_2.~(x).mov", "plain characters stay");
+    }
+
+    #[test]
+    fn folder_url_names_the_containing_folder() {
+        assert_eq!(folder_url("/media/My Clips/a.mov"), "file:///media/My%20Clips");
+    }
+
+    /// Reveal in Finder shows plain folders only: a bundle the system would open as an app, or a
+    /// link to one, is refused.
+    #[test]
+    fn reveal_refuses_folders_that_open_as_apps() {
+        let d = std::env::temp_dir().join(format!("ec-reveal-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        for f in ["Clips", "Tool.app", "Shell.{20D04FE0-3AEA-1069-A2D8-08002B30309D}"] {
+            std::fs::create_dir_all(d.join(f)).unwrap();
+        }
+        let s = crate::Session::default();
+        let reveal = |folder: &str| super::reveal_url(&s, &d.join(folder).join("a.mov").to_string_lossy());
+        assert_eq!(reveal("Clips"), Ok(super::file_url(&d.join("Clips").to_string_lossy())));
+        assert!(reveal("Tool.app").is_err());
+        assert!(reveal("Shell.{20D04FE0-3AEA-1069-A2D8-08002B30309D}").is_err());
+        assert!(reveal("Gone").is_err());
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(d.join("Tool.app"), d.join("Footage")).unwrap();
+            assert!(reveal("Footage").is_err(), "a link to a bundle");
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }

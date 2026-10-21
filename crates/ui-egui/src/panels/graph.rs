@@ -82,11 +82,19 @@ fn speed_graph(app: &EffectcraftApp, comp: &Comp) -> bool {
 fn shown_props(app: &EffectcraftApp, comp: &Comp) -> Vec<(LayerId, u64)> {
     let st = &app.session.state;
     let numeric = |pr: &Property| !pr.value.components().is_empty() && pr.value.interpolates();
-    if app.ui.timeline.graph_show_selected && !st.selected_props.is_empty() {
-        return st.selected_props.iter().filter(|(l, u)| comp.layer(*l).and_then(|l| l.props.find(*u)).is_some_and(numeric)).copied().collect();
+    // A selected keyframe counts as selecting its property and layer (as clicking a key does in
+    // After Effects), so selecting a key in the Timeline shows its graph.
+    let mut picked: Vec<(LayerId, u64)> = st.selected_props.clone();
+    for k in &st.selected_keys {
+        if !picked.contains(&(k.layer, k.prop)) {
+            picked.push((k.layer, k.prop));
+        }
+    }
+    if app.ui.timeline.graph_show_selected && !picked.is_empty() {
+        return picked.into_iter().filter(|(l, u)| comp.layer(*l).and_then(|l| l.props.find(*u)).is_some_and(numeric)).collect();
     }
     let mut v = vec![];
-    for l in comp.layers.iter().filter(|l| st.selected_layers.contains(&l.id)) {
+    for l in comp.layers.iter().filter(|l| st.selected_layers.contains(&l.id) || picked.iter().any(|(pl, _)| *pl == l.id)) {
         l.props.walk("", &mut |_, pr| {
             if (pr.is_animated() || pr.has_expression()) && numeric(pr) {
                 v.push((l.id, pr.uid));
@@ -99,6 +107,15 @@ fn shown_props(app: &EffectcraftApp, comp: &Comp) -> Vec<(LayerId, u64)> {
 fn shown_dims(l: &Layer, pr: &Property) -> usize {
     let n = pr.value.components().len();
     if pr.shown_dims > 0 && !l.is_3d() { (pr.shown_dims as usize).min(n) } else { n.min(4) }
+}
+
+/// The speed graph's value of dimension `d` at layer time `lt` (one curve for a spatial property).
+fn speed_at(pr: &Property, spatial: bool, d: usize, lt: Tick) -> f64 {
+    if spatial {
+        effectcraft_engine::keyframe::speed(&pr.keys, lt, true)
+    } else {
+        effectcraft_engine::keyframe::velocity(&pr.keys, lt, false).get(d).copied().unwrap_or(0.0).abs()
+    }
 }
 
 /// Build the curves for the visible time span.
@@ -118,16 +135,7 @@ fn curves<'a>(app: &EffectcraftApp, comp: &'a Comp, ectx: &EvalCtx, tm: TMap, pl
                 let x = plot.min.x + plot.width() * i as f32 / (n - 1) as f32;
                 let ct = tm.t(x);
                 let tt = Tick::from_seconds_f64(ct);
-                let v = if speed {
-                    let lt = l.layer_time(tt);
-                    if spatial {
-                        effectcraft_engine::keyframe::speed(&pr.keys, lt, true)
-                    } else {
-                        effectcraft_engine::keyframe::velocity(&pr.keys, lt, false).get(d).copied().unwrap_or(0.0).abs()
-                    }
-                } else {
-                    ectx.at(tt).value(l, pr).components().get(d).copied().unwrap_or(0.0)
-                };
+                let v = if speed { speed_at(pr, spatial, d, l.layer_time(tt)) } else { ectx.at(tt).value(l, pr).components().get(d).copied().unwrap_or(0.0) };
                 pts.push((ct, v));
             }
             let mut keys = vec![];
@@ -275,6 +283,18 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
     app.auto.add("timeline.graph", plot, &app.ui.timeline.graph_mode.clone());
     let speed = speed_graph(app, comp);
     let cs = curves(app, comp, ectx, tm, plot, speed);
+    // Just opened, or the graph type changed (value and speed have different units): frame the
+    // graphs (Fit Selection to View, else Fit All Graphs to View).
+    let was_speed_id = egui::Id::new("graph-was-speed");
+    let type_changed = ctx.data(|d| d.get_temp::<bool>(was_speed_id)).is_some_and(|was| was != speed);
+    ctx.data_mut(|d| d.insert_temp(was_speed_id, speed));
+    if ctx.data_mut(|d| d.remove_temp::<bool>(fit_pending_id())).unwrap_or(false) || type_changed {
+        if cs.iter().any(|c| c.keys.iter().any(|k| k.sel)) {
+            fit_selection(app, &cs, tm, plot, speed);
+        } else {
+            fit_all(app);
+        }
+    }
 
     // Vertical range: auto-zoom to the curves + handles, or the stored manual range.
     let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
@@ -376,7 +396,10 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
         let (lid, uid, d) = (c.layer.id, c.prop.uid, c.dim);
         for k in &c.keys {
             let kp = pos2(tm.x(k.t), ymap(k.v));
-            if !plot.expand(6.0).contains(kp) {
+            // In the speed graph an end key rises with the handle being dragged; skipping it once it
+            // leaves the plot would drop the handle's widget and end the drag at the top edge.
+            let handle_dragged = || ["in", "out"].iter().any(|side| ctx.is_being_dragged(egui::Id::new(("ghandle", uid, d, k.idx, *side))));
+            if !plot.expand(6.0).contains(kp) && !handle_dragged() {
                 continue;
             }
             let kjson = json!({"layer": lid.0, "prop": uid, "time": k.time.seconds()});
@@ -419,7 +442,10 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
                     && let Some((press, grabs)) = ctx.data(|dd| dd.get_temp::<HandleDrag>(handle_drag_id()))
                 {
                     ctx.data_mut(|dd| dd.insert_temp(drag_id, true));
-                    let (dt, dv) = (tm.t(pt.x) - tm.t(press.x), vmap(pt.y) - vmap(press.y));
+                    // Shift keeps the handle on the time or the value axis, whichever moved more (as for keys).
+                    let (time_ok, value_ok) = shift_axes(ui.input(|i| i.modifiers.shift), pt.x - press.x, pt.y - press.y);
+                    let dt = if time_ok { tm.t(pt.x) - tm.t(press.x) } else { 0.0 };
+                    let dv = if value_ok { vmap(pt.y) - vmap(press.y) } else { 0.0 };
                     let merge = format!("ghandle-{uid}-{}", k.idx);
                     for g in &grabs {
                         actions.push(("keys.setEase".into(), g.ease(g.end.0 + dt, g.end.1 + dv, speed, &merge)));
@@ -470,7 +496,7 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
             {
                 ctx.data_mut(|dd| dd.insert_temp(drag_id, true));
                 let (dx, dy) = (pt.x - g.press.x, pt.y - g.press.y);
-                let (time_ok, value_ok) = if mods.shift { (dx.abs() >= dy.abs(), dy.abs() > dx.abs()) } else { (true, true) };
+                let (time_ok, value_ok) = shift_axes(mods.shift, dx, dy);
                 // Graph Editor ▸ Snap: to the current time and other keys.
                 let others: Vec<f64> = all_key_times.iter().filter(|(u, i, _)| !(*u == uid && *i == k.idx)).map(|x| x.2).collect();
                 let t = if time_ok { super::graph_tools::snap_time(app, tm, (g.t + (tm.t(pt.x) - tm.t(g.press.x))).max(0.0), &others) } else { g.t };
@@ -555,11 +581,10 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
         app.ui.timeline.graph_auto_zoom = !auto_on;
     }
     if text_button(app, ui, p, &mut buttons, y, "Fit", false, "fit", "Fit all graphs to view") {
-        app.ui.timeline.graph_auto_zoom = true;
-        app.ui.timeline.pps = None;
+        fit_all(app);
     }
     if text_button(app, ui, p, &mut buttons, y, "Fit Selection", false, "fitSelection", "Fit selection to view") {
-        fit_selection(app, &cs, tm, plot);
+        fit_selection(app, &cs, tm, plot, speed);
     }
     buttons.x += 6.0;
     let (snap, reference, tbox) = (app.ui.timeline.graph_snap, app.ui.timeline.graph_reference, app.ui.timeline.graph_transform_box);
@@ -596,8 +621,32 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
     buttons.more(app, ui, p, bar);
 }
 
+/// Fit All Graphs to View: the whole comp in time, auto-zoomed values.
+fn fit_all(app: &mut EffectcraftApp) {
+    app.ui.timeline.graph_auto_zoom = true;
+    app.ui.timeline.pps = None;
+}
+
+fn fit_pending_id() -> egui::Id {
+    egui::Id::new("graph-fit-pending")
+}
+
+/// Called every Timeline frame with whether the Graph Editor is on: switching it on (header
+/// button, menu, Shift+F3 or the control channel) frames the graphs on its first frame, when the
+/// plot rect is known, as After Effects does.
+pub(crate) fn track_open(ctx: &egui::Context, on: bool) {
+    let was_id = egui::Id::new("graph-editor-was-on");
+    let was = ctx.data(|d| d.get_temp::<bool>(was_id)).unwrap_or(false);
+    ctx.data_mut(|d| {
+        d.insert_temp(was_id, on);
+        if on && !was {
+            d.insert_temp(fit_pending_id(), true);
+        }
+    });
+}
+
 /// Zoom time and value to the selected keys (and their handles).
-fn fit_selection(app: &mut EffectcraftApp, cs: &[Curve], tm: TMap, plot: Rect) {
+fn fit_selection(app: &mut EffectcraftApp, cs: &[Curve], tm: TMap, plot: Rect, speed: bool) {
     let mut t0 = f64::INFINITY;
     let mut t1 = f64::NEG_INFINITY;
     let mut v0 = f64::INFINITY;
@@ -615,10 +664,47 @@ fn fit_selection(app: &mut EffectcraftApp, cs: &[Curve], tm: TMap, plot: Rect) {
     if !t0.is_finite() {
         return;
     }
+    // A lone selected key (one point) also frames its neighbouring keys, so its curve shows
+    // instead of a flat sliver a fraction of a frame wide.
+    if t1 - t0 < 1e-6 {
+        for c in cs {
+            for (i, k) in c.keys.iter().enumerate().filter(|(_, k)| k.sel) {
+                for n in [i.checked_sub(1).and_then(|j| c.keys.get(j)), c.keys.get(i + 1), Some(k)].into_iter().flatten() {
+                    t0 = t0.min(n.t);
+                    t1 = t1.max(n.t);
+                    v0 = v0.min(n.v);
+                    v1 = v1.max(n.v);
+                }
+            }
+        }
+    }
+    // In the speed graph eased keys sit at speed 0 and the curve peaks between them (#1617):
+    // frame the curve from the first to the last selected key. A lone key has its handles on
+    // the speed graph, so the check above misses it: it frames its neighbouring segments here.
+    if speed {
+        for c in cs {
+            let (Some(first), Some(last)) = (c.keys.iter().position(|k| k.sel), c.keys.iter().rposition(|k| k.sel)) else { continue };
+            let (a, b) = if first == last { (first.saturating_sub(1), last + 1) } else { (first, last) };
+            let (Some(ka), Some(kb)) = (c.keys.get(a), c.keys.get(b.min(c.keys.len().saturating_sub(1)))) else { continue };
+            t0 = t0.min(ka.t);
+            t1 = t1.max(kb.t);
+            let (s0, s1) = (ka.time.seconds(), kb.time.seconds());
+            const SAMPLES: usize = 128;
+            for i in 0..=SAMPLES {
+                let lt = Tick::from_seconds_f64(s0 + (s1 - s0) * i as f64 / SAMPLES as f64);
+                let v = speed_at(c.prop, !c.editable, c.dim, lt);
+                v0 = v0.min(v);
+                v1 = v1.max(v);
+            }
+        }
+    }
     let span = (t1 - t0).max(0.2);
-    let pps = (plot.width() as f64 * 0.8 / span).clamp(5.0, 4000.0);
-    app.ui.timeline.pps = Some(pps);
-    app.ui.timeline.start = (t0 - span * 0.1).max(0.0);
+    let pps = plot.width() as f64 * 0.8 / span;
+    // Through the timeline's zoom, so the fit never zooms out past the whole comp.
+    if let Some(comp) = app.session.active_comp_arc() {
+        let fit = super::timeline::fit_pps(plot.width(), &comp);
+        super::timeline::set_zoom(&mut app.ui.timeline, &comp, pps, fit, (t0 - span * 0.1).max(0.0), 0.0);
+    }
     let pad = ((v1 - v0) * 0.15).max(1.0);
     app.ui.timeline.graph_auto_zoom = false;
     app.ui.timeline.graph_range = Some((v0 - pad, v1 + pad));
@@ -702,4 +788,22 @@ type HandleDrag = (Pos2, Vec<HandleGrab>);
 
 fn handle_drag_id() -> egui::Id {
     egui::Id::new("graph-handle-drag")
+}
+
+/// Which axes a drag may move on (time, value): both, or with Shift only the one the pointer moved more along.
+fn shift_axes(shift: bool, dx: f32, dy: f32) -> (bool, bool) {
+    if shift { (dx.abs() >= dy.abs(), dy.abs() > dx.abs()) } else { (true, true) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shift_axes;
+
+    #[test]
+    fn shift_locks_drag_to_dominant_axis() {
+        assert_eq!(shift_axes(false, 10.0, 3.0), (true, true));
+        assert_eq!(shift_axes(true, 10.0, -3.0), (true, false));
+        assert_eq!(shift_axes(true, 2.0, -9.0), (false, true));
+        assert_eq!(shift_axes(true, 5.0, 5.0), (true, false));
+    }
 }

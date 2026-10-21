@@ -12,6 +12,8 @@ use effectcraft_engine::{ExportJob, ExportResult, Exporter, Importer, Session};
 use effectcraft_project::Footage;
 pub use effectcraft_script as script;
 
+pub mod app_dirs;
+
 struct MediaImporter;
 
 impl Importer for MediaImporter {
@@ -97,20 +99,10 @@ pub fn session() -> Session {
 
 /// The platform config directory for EffectCraft (`EFFECTCRAFT_CONFIG_DIR` overrides):
 /// `~/Library/Application Support/EffectCraft` (macOS), `%APPDATA%\EffectCraft` (Windows),
-/// `$XDG_CONFIG_HOME/effectcraft` or `~/.config/effectcraft` (Linux and others).
+/// `$XDG_CONFIG_HOME/effectcraft` or `~/.config/effectcraft` (Linux and others). A `portable.txt`
+/// beside the executable puts it in `EffectCraftData` there instead ([`app_dirs`]).
 pub fn config_dir() -> Option<std::path::PathBuf> {
-    use std::path::PathBuf;
-    if let Some(d) = std::env::var_os("EFFECTCRAFT_CONFIG_DIR") {
-        return Some(PathBuf::from(d));
-    }
-    let home = || std::env::var_os("HOME").map(PathBuf::from);
-    if cfg!(target_os = "macos") {
-        return home().map(|h| h.join("Library/Application Support/EffectCraft"));
-    }
-    if cfg!(target_os = "windows") {
-        return std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("EffectCraft"));
-    }
-    std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| home().map(|h| h.join(".config"))).map(|c| c.join("effectcraft"))
+    app_dirs::current().dir.clone()
 }
 
 #[cfg(test)]
@@ -298,7 +290,8 @@ mod tests {
         let mut s = super::session();
         s.exporter = Some(Arc::new(super::FileExporter { sink: Some(Arc::new(move |p: &str, d: Vec<u8>| g.lock().unwrap().push((p.to_string(), d)))) }));
         s.execute("file.openDemoProject", json!({})).unwrap();
-        let dir = "/no-such-dir-effectcraft-sink-test";
+        // Rooted without a drive letter is not absolute on Windows, where the engine joins it to the home drive.
+        let dir = if cfg!(windows) { "C:/no-such-dir-effectcraft-sink-test" } else { "/no-such-dir-effectcraft-sink-test" };
         s.execute(
             "renderQueue.add",
             json!({"format": "gif", "output": format!("{dir}/a.gif"), "resolution": 0.0625, "timeSpan": "custom", "start": 0.0, "end": 0.2}),

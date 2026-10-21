@@ -195,3 +195,15 @@ fn replace_footage_and_reload_keep_sequences() {
     assert_eq!((f.sequence.len(), f.frame_rate, f.start_timecode), (5, FrameRate::from_f64(12.0), Some(2)));
     assert_eq!(f.duration, FrameRate::from_f64(12.0).tick_of(5));
 }
+
+/// #756: numbered DPX and Cineon scans import as sequences, as in After Effects (`.cin` was not
+/// an image to the Media Browser, so its runs came in one file at a time).
+#[test]
+fn dpx_and_cineon_runs_import_as_sequences() {
+    let dir = folder(&["plate.0001.dpx", "plate.0002.dpx", "plate.0003.dpx", "scan_01.cin", "scan_02.cin"]);
+    let mut s = session();
+    let r = s.execute("file.import", json!({"paths": [at(&dir, "plate.0002.dpx"), at(&dir, "scan_01.cin")], "sequence": true})).unwrap();
+    let mut got: Vec<(String, usize)> = r["items"].as_array().unwrap().iter().map(|i| footage(&s, i)).map(|(n, f)| (n, f.sequence.len())).collect();
+    got.sort();
+    assert_eq!(got, [("plate.[0001-0003].dpx".to_string(), 3), ("scan_[01-02].cin".to_string(), 2)], "{r}");
+}

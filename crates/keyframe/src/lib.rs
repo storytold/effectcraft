@@ -287,7 +287,9 @@ impl SpatialSeg {
     /// along curved paths instead of piecewise linear per cell (#456).
     fn at_length(&self, s: f64) -> [f64; 3] {
         let len = self.length();
-        if len <= 0.0 {
+        // A path whose length overflowed (huge coordinates) or is NaN has no arc-length table to
+        // walk: `clamp` would panic on a NaN bound.
+        if !(len > 0.0 && len.is_finite()) {
             return self.p[0];
         }
         let s = s.clamp(0.0, len);
@@ -751,6 +753,38 @@ mod tests {
         assert_eq!(g.coerce_json(&serde_json::json!(5)), None);
     }
 
+    /// #612: the gradient editor samples a new stop from its own track only. `sample` multiplies
+    /// in the opacity stops, so feeding its alpha into a colour stop would apply 50% twice (25%).
+    #[test]
+    fn gradient_tracks_sample_separately() {
+        let g = Gradient { colors: vec![(0.0, [1.0, 0.0, 0.0, 0.8]), (1.0, [0.0, 0.0, 1.0, 0.4])], opacities: vec![(0.0, 0.5), (1.0, 0.5)] };
+        let c = g.color_at(0.5);
+        assert!((c[0] - 0.5).abs() < 1e-6 && (c[2] - 0.5).abs() < 1e-6, "{c:?}");
+        assert!((c[3] - 0.6).abs() < 1e-6, "the colour track's own alpha, without opacity: {c:?}");
+        assert!((g.opacity_at(0.5) - 0.5).abs() < 1e-6);
+        assert!((g.sample(0.5)[3] - 0.3).abs() < 1e-6, "sample still applies opacity once");
+        // A stop added at 50% from the opacity track keeps 50%: sampled again, it is still 50%.
+        let mut with_stop = g.clone();
+        with_stop.opacities.insert(1, (0.5, g.opacity_at(0.5)));
+        assert!((with_stop.opacity_at(0.5) - 0.5).abs() < 1e-6);
+        assert!((with_stop.sample(0.5)[3] - 0.3).abs() < 1e-6, "adding a stop doesn't change the look");
+        // Outside the stops, and with none: the ends hold, and an empty track is opaque white.
+        assert_eq!(g.color_at(-1.0), [1.0, 0.0, 0.0, 0.8]);
+        assert_eq!(g.color_at(2.0), [0.0, 0.0, 1.0, 0.4]);
+        let empty = Gradient { colors: vec![], opacities: vec![] };
+        assert_eq!((empty.color_at(0.3), empty.opacity_at(0.3)), ([1.0; 4], 1.0));
+    }
+
+    /// #612: the editor saves the typed form, so one colour stop (which the plain JSON parser
+    /// rejects) and each stop's RGBA come back exactly.
+    #[test]
+    fn typed_gradient_round_trips_one_stop_and_rgba() {
+        let one = Value::Gradient(Gradient { colors: vec![(0.25, [0.1, 0.2, 0.3, 0.7])], opacities: vec![(0.0, 1.0), (0.6, 0.35)] });
+        let cur = Value::Gradient(Gradient::default());
+        assert_eq!(cur.coerce_json(&one.to_json()), Some(one.clone()));
+        assert_eq!(cur.coerce_json(&serde_json::json!({"colors": [[0.25, [0.1, 0.2, 0.3, 0.7]]]})), None, "plain JSON needs two colours");
+    }
+
     #[test]
     fn linear_and_hold() {
         let keys = vec![Keyframe::new(s(0.0), Value::Scalar(0.0)), Keyframe::new(s(2.0), Value::Scalar(100.0))];
@@ -844,6 +878,30 @@ mod tests {
         // Auto-Bezier ends now have handles along the line; the chord is still hit exactly.
         let keys = vec![Keyframe::new(s(0.0), Value::Vec2([40.0, 50.0])), Keyframe::new(s(2.0), Value::Vec2([120.0, 50.0]))];
         assert_eq!(segment_value(&keys, 0, s(1.0), true), Value::Vec2([80.0, 50.0]));
+    }
+
+    /// #880: a motion path whose arc length overflows (huge coordinates, as the Position field
+    /// accepts) or is NaN evaluates without panicking: scrubbing over it crashed the app.
+    #[test]
+    fn overflowing_or_nan_motion_paths_evaluate() {
+        let paths = [
+            [[-1.7e308, 0.0], [1.7e308, 0.0], [-1.7e308, 5.0]],
+            [[0.0, 0.0], [f64::NAN, 10.0], [20.0, 0.0]],
+            [[f64::INFINITY, 0.0], [0.0, f64::NEG_INFINITY], [20.0, 0.0]],
+        ];
+        for path in paths {
+            let mut keys: Vec<Keyframe> = path.iter().enumerate().map(|(i, &v)| Keyframe::new(s(i as f64 * 2.0), Value::Vec2(v))).collect();
+            for eased in [false, true] {
+                if eased {
+                    keys = keys.into_iter().map(Keyframe::eased).collect();
+                }
+                for f in 0..=40 {
+                    let t = s(f as f64 * 0.1);
+                    assert!(evaluate(&keys, t, true).is_some());
+                    let _ = speed(&keys, t, true);
+                }
+            }
+        }
     }
 
     #[test]

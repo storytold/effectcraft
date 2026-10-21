@@ -3,13 +3,14 @@
 //! commands here set several of them in one undo step and add the groups to strokes saved before
 //! they existed. Also the toolbar's Fill / Stroke options on selected shape layers.
 
-use effectcraft_keyframe::Value as KV;
+use effectcraft_keyframe::{Gradient, Value as KV};
 use effectcraft_project::build::{self, EXTRA_DASHES, Ids};
 use effectcraft_project::{ItemId, Layer, LayerId, LayerSource, Node, PropGroup, Uid};
 use effectcraft_time::Tick;
 use serde_json::{Value, json};
 
 use super::layer::color_p;
+use super::shape_tool::{self, PaintKind};
 use super::{CommandSpec, bad, f_p, has_layers, layer_mut, layer_p, layers_p, merge_p};
 use crate::{EngineError, Result, Session, cmd};
 
@@ -224,15 +225,157 @@ pub fn first_paint(layer: &Layer, lt: Tick) -> (Option<[f64; 4]>, Option<[f64; 4
     (fill, stroke, width)
 }
 
-/// Paint one contents group and its sub-groups: Fills take `fill`, Strokes `stroke`, Strokes and
-/// Gradient Strokes `width`. With `add_stroke`, a group with a path and no stroke gets one (before
-/// its fills, as new shapes have it).
-#[allow(clippy::too_many_arguments)]
-fn paint(c: &mut PropGroup, ids: &mut Ids, lt: Tick, fill: Option<[f64; 4]>, stroke: Option<[f64; 4]>, width: Option<f64>, add_stroke: bool, depth: usize) {
+/// What the toolbar's Fill and Stroke set on the selected shape layers.
+#[derive(Clone, Copy, Debug, Default)]
+struct PaintEdit {
+    fill: Option<[f64; 4]>,
+    stroke: Option<[f64; 4]>,
+    width: Option<f64>,
+    /// A group with a path and no stroke gets one.
+    add_stroke: bool,
+    fill_kind: Option<PaintKind>,
+    stroke_kind: Option<PaintKind>,
+}
+
+/// The kind of the first Fill and the first Stroke in `layer`'s contents at layer time `lt`: a
+/// switched-off or missing one is None (what the toolbar shows for a selected shape layer).
+pub fn first_paint_kinds(layer: &Layer, lt: Tick) -> (PaintKind, PaintKind) {
+    let (mut fill, mut stroke) = (None, None);
+    let kind = |g: &PropGroup| match g.match_id.as_str() {
+        _ if !g.enabled => PaintKind::None,
+        "fill" | "stroke" => PaintKind::Solid,
+        _ if g.get("type").is_some_and(|p| p.value_at(lt).as_enum() == 1) => PaintKind::Radial,
+        _ => PaintKind::Linear,
+    };
+    if let Some(c) = layer.props.sub("contents") {
+        walk_groups(c, &mut |g| match g.match_id.as_str() {
+            "fill" | "gfill" if fill.is_none() => fill = Some(kind(g)),
+            "stroke" | "gstroke" if stroke.is_none() => stroke = Some(kind(g)),
+            _ => {}
+        });
+    }
+    (fill.unwrap_or(PaintKind::None), stroke.unwrap_or(PaintKind::None))
+}
+
+/// The bounds (`[x, y, w, h]`) of the path items of one contents level at layer time `lt`, where
+/// a new gradient's Start and End Points go; a 100 px square at the origin without paths.
+fn path_bounds(c: &PropGroup, lt: Tick) -> [f64; 4] {
+    let mut acc: Option<[f64; 4]> = None;
+    for g in c.groups() {
+        let at = |id: &str| g.get(id).map(|p| p.value_at(lt));
+        let b = match g.match_id.as_str() {
+            "rect" | "ellipse" => {
+                let [w, h] = at("size").map(|v| v.as_vec2()).unwrap_or([100.0; 2]);
+                let [x, y] = at("position").map(|v| v.as_vec2()).unwrap_or([0.0; 2]);
+                Some([x - w.abs() / 2.0, y - h.abs() / 2.0, x + w.abs() / 2.0, y + h.abs() / 2.0])
+            }
+            "star" => {
+                let r = at("outerRadius").map(|v| v.as_f64().abs()).unwrap_or(100.0);
+                let [x, y] = at("position").map(|v| v.as_vec2()).unwrap_or([0.0; 2]);
+                Some([x - r, y - r, x + r, y + r])
+            }
+            "path" => {
+                let v = at("path");
+                let bez = v.as_ref().and_then(|v| v.as_path()).map(effectcraft_path::to_kurbo);
+                bez.and_then(|b| effectcraft_path::bounds(&[b])).map(|r| [r.x0, r.y0, r.x1, r.y1])
+            }
+            _ => None,
+        };
+        let Some(b) = b.filter(|b| b.iter().all(|v| v.is_finite())) else { continue };
+        acc = Some(match acc {
+            None => b,
+            Some(a) => [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])],
+        });
+    }
+    acc.map(|[x0, y0, x1, y1]| [x0, y0, x1 - x0, y1 - y0]).unwrap_or([-50.0, -50.0, 100.0, 100.0])
+}
+
+/// Fill Options / Stroke Options on one contents level (as in After Effects, with shape layers
+/// selected they change the layers' paint): None switches its Fills and Gradient Fills (or
+/// Strokes and Gradient Strokes) off; another kind switches them on, turns them into that kind
+/// (keeping the properties both kinds have: blend mode, opacity, width, dashes…) and gives a
+/// level with paths and no such item one.
+fn set_kind(c: &mut PropGroup, ids: &mut Ids, lt: Tick, stroke: bool, kind: PaintKind, e: &PaintEdit) {
+    let (solid, grad) = if stroke { ("stroke", "gstroke") } else { ("fill", "gfill") };
+    let is_item = |g: &PropGroup| g.match_id == solid || g.match_id == grad;
+    if kind == PaintKind::None {
+        for n in &mut c.children {
+            if let Node::Group(g) = n
+                && is_item(g)
+            {
+                g.enabled = false;
+            }
+        }
+        return;
+    }
+    let radial = kind == PaintKind::Radial;
+    let color = (if stroke { e.stroke } else { e.fill }).unwrap_or([1.0; 4]);
+    let width = e.width.filter(|w| *w > 0.0).unwrap_or(2.0);
+    let (start, end) = shape_tool::gradient_ends(radial, path_bounds(c, lt));
+    let fresh = |ids: &mut Ids| match (kind, stroke) {
+        (PaintKind::Solid, false) => build::shape_fill(ids, color),
+        (PaintKind::Solid, true) => build::shape_stroke(ids, color, width),
+        (_, false) => build::shape_gradient_fill(ids, radial, start, end, Gradient::default()),
+        (_, true) => build::shape_gradient_stroke(ids, radial, start, end, Gradient::default(), width),
+    };
+    let want = if kind == PaintKind::Solid { solid } else { grad };
+    let mut found = false;
+    for i in 0..c.children.len() {
+        let Some(Node::Group(g)) = c.children.get(i) else { continue };
+        if !is_item(g) {
+            continue;
+        }
+        found = true;
+        let replacement = (g.match_id != want).then(|| {
+            let mut new = fresh(ids);
+            new.uid = g.uid;
+            new.name = super::effect::unique_name(c, &new.name);
+            for n in &mut new.children {
+                if let Some(old) = g.children.iter().find(|o| o.match_id() == n.match_id()) {
+                    *n = old.clone();
+                }
+            }
+            new
+        });
+        let Some(Node::Group(g)) = c.children.get_mut(i) else { continue };
+        match replacement {
+            Some(new) => *g = new,
+            None => {
+                g.enabled = true;
+                if let Some(t) = g.get_mut("type").filter(|_| want == grad) {
+                    t.set_value_at(lt, KV::Enum(radial as u32));
+                }
+            }
+        }
+    }
+    if !found && c.groups().any(|g| PATHS.contains(&g.match_id.as_str())) {
+        let mut new = fresh(ids);
+        new.name = super::effect::unique_name(c, &new.name);
+        // Paths, strokes, then fills, as new shapes have them.
+        let at = if stroke {
+            c.children.iter().position(|n| matches!(n.match_id(), "fill" | "gfill")).unwrap_or(c.children.len())
+        } else {
+            c.children.iter().rposition(|n| PATHS.contains(&n.match_id()) || matches!(n.match_id(), "stroke" | "gstroke")).map_or(c.children.len(), |i| i + 1)
+        };
+        c.children.insert(at, new.into());
+    }
+}
+
+/// Paint one contents group and its sub-groups: the kinds first, then Fills take `fill`, Strokes
+/// `stroke`, Strokes and Gradient Strokes `width`. With `add_stroke`, a group with a path and no
+/// stroke gets one (before its fills, as new shapes have it).
+fn paint(c: &mut PropGroup, ids: &mut Ids, lt: Tick, e: &PaintEdit, depth: usize) {
     if depth > MAX_DEPTH {
         return;
     }
-    if add_stroke && c.groups().any(|g| PATHS.contains(&g.match_id.as_str())) && !c.groups().any(is_stroke) {
+    if let Some(k) = e.stroke_kind {
+        set_kind(c, ids, lt, true, k, e);
+    }
+    if let Some(k) = e.fill_kind {
+        set_kind(c, ids, lt, false, k, e);
+    }
+    let (fill, stroke, width) = (e.fill, e.stroke, e.width);
+    if e.add_stroke && c.groups().any(|g| PATHS.contains(&g.match_id.as_str())) && !c.groups().any(is_stroke) {
         let at = c.children.iter().position(|n| matches!(n, Node::Group(g) if matches!(g.match_id.as_str(), "fill" | "gfill"))).unwrap_or(c.children.len());
         c.children.insert(at, build::shape_stroke(ids, stroke.unwrap_or([1.0; 4]), width.unwrap_or(2.0)).into());
     }
@@ -252,7 +395,7 @@ fn paint(c: &mut PropGroup, ids: &mut Ids, lt: Tick, fill: Option<[f64; 4]>, str
             "gstroke" => set(g, "width", width.map(KV::Scalar)),
             "group" => {
                 if let Some(sub) = g.sub_mut("contents") {
-                    paint(sub, ids, lt, fill, stroke, width, add_stroke, depth + 1);
+                    paint(sub, ids, lt, e, depth + 1);
                 }
             }
             _ => {}
@@ -260,10 +403,20 @@ fn paint(c: &mut PropGroup, ids: &mut Ids, lt: Tick, fill: Option<[f64; 4]>, str
     }
 }
 
+/// `p`'s `fillType` / `strokeType` (none|solid|linear|radial).
+fn kind_p(p: &Value, key: &str, c: &str) -> Result<Option<PaintKind>> {
+    match p.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => v.as_str().and_then(PaintKind::from_name).map(Some).ok_or_else(|| bad(c, format!("`{key}`: none|solid|linear|radial"))),
+    }
+}
+
 /// The toolbar's Fill and Stroke options with shape layers selected (as in After Effects, they
-/// change the layers' fills and strokes): `fill` sets every Fill's colour, `stroke` every Stroke's,
-/// `strokeWidth` every stroke's width. A stroke colour or a width above 0 gives the paths that
-/// have no stroke one. Without values, reports the first layer's paint.
+/// change the layers' fills and strokes): `fillType` / `strokeType` switch every Fill / Stroke
+/// off (none) or turn them into Solid Color, Linear or Radial Gradient ones (adding one where a
+/// path has none), `fill` sets every Fill's colour, `stroke` every Stroke's, `strokeWidth` every
+/// stroke's width. A stroke colour or a width above 0 gives the paths that have no stroke one.
+/// Without values, reports the first layer's paint.
 fn fill_stroke(s: &mut Session, p: &Value) -> Result<Value> {
     let c = "shape.fillStroke";
     let (cid, lids) = layers_p(s, p)?;
@@ -275,8 +428,10 @@ fn fill_stroke(s: &mut Session, p: &Value) -> Result<Value> {
     let rgba = |k: &str| color_p(p, k).map(|c| [c[0] as f64, c[1] as f64, c[2] as f64, 1.0]);
     let (fill, stroke) = (rgba("fill"), rgba("stroke"));
     let width = f_p(p, "strokeWidth").filter(|w| w.is_finite()).map(|w| w.max(0.0));
-    if fill.is_some() || stroke.is_some() || width.is_some() {
-        let add_stroke = width.map_or(stroke.is_some(), |w| w > 0.0);
+    let (fill_kind, stroke_kind) = (kind_p(p, "fillType", c)?, kind_p(p, "strokeType", c)?);
+    let add_stroke = stroke_kind != Some(PaintKind::None) && width.map_or(stroke.is_some(), |w| w > 0.0);
+    let e = PaintEdit { fill, stroke, width, add_stroke, fill_kind, stroke_kind };
+    if fill.is_some() || stroke.is_some() || width.is_some() || fill_kind.is_some() || stroke_kind.is_some() {
         let t = s.time();
         s.edit("Fill and Stroke", merge_p(p), |proj, _| {
             let mut next = proj.next_id;
@@ -284,7 +439,7 @@ fn fill_stroke(s: &mut Session, p: &Value) -> Result<Value> {
                 let l = layer_mut(proj, cid, *lid)?;
                 let lt = l.layer_time(t);
                 if let Some(contents) = l.props.sub_mut("contents") {
-                    paint(contents, &mut Ids(&mut next), lt, fill, stroke, width, add_stroke, 0);
+                    paint(contents, &mut Ids(&mut next), lt, &e, 0);
                 }
             }
             proj.next_id = next;
@@ -292,8 +447,10 @@ fn fill_stroke(s: &mut Session, p: &Value) -> Result<Value> {
         })?;
     }
     let l = shapes.first().and_then(|id| s.project.comp(cid)?.layer(*id)).ok_or(EngineError::NoComp)?;
-    let (fill, stroke, width) = first_paint(l, l.layer_time(s.time()));
-    Ok(json!({"fill": fill, "stroke": stroke, "strokeWidth": width}))
+    let lt = l.layer_time(s.time());
+    let (fill, stroke, width) = first_paint(l, lt);
+    let (fill_kind, stroke_kind) = first_paint_kinds(l, lt);
+    Ok(json!({"fill": fill, "stroke": stroke, "strokeWidth": width, "fillType": fill_kind.id(), "strokeType": stroke_kind.id()}))
 }
 
 pub fn specs() -> Vec<CommandSpec> {
@@ -303,7 +460,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Fill and Stroke",
             [],
             None,
-            "{layers?, fill?: color, stroke?: color, strokeWidth?, merge?} → {fill, stroke, strokeWidth} (first layer)",
+            "{layers?, fillType?: none|solid|linear|radial, strokeType?, fill?: color, stroke?: color, strokeWidth?, merge?} → {fill, stroke, strokeWidth, fillType, strokeType} (first layer)",
             has_layers,
             fill_stroke
         ),

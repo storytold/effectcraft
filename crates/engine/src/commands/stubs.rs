@@ -10,10 +10,10 @@ use super::{CommandSpec, not_yet, not_yet_run};
 #[allow(unused_macros)]
 macro_rules! stub {
     ($id:literal, $label:literal, [$($m:literal),*], $params:literal) => {
-        CommandSpec { id: $id, label: $label, menu: &[$($m),*], shortcut: None, params: $params, enabled: not_yet, run: not_yet_run, journal: true }
+        CommandSpec { id: $id, label: $label, menu: &[$($m),*], shortcut: None, alt_shortcuts: &[], params: $params, enabled: not_yet, run: not_yet_run, journal: true }
     };
     ($id:literal, $label:literal, [$($m:literal),*], $sc:literal, $params:literal) => {
-        CommandSpec { id: $id, label: $label, menu: &[$($m),*], shortcut: Some($sc), params: $params, enabled: not_yet, run: not_yet_run, journal: true }
+        CommandSpec { id: $id, label: $label, menu: &[$($m),*], shortcut: Some($sc), alt_shortcuts: &[], params: $params, enabled: not_yet, run: not_yet_run, journal: true }
     };
 }
 

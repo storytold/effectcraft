@@ -8,10 +8,14 @@ use egui_kittest::Harness;
 use serde_json::json;
 
 fn harness(w: f32) -> Harness<'static, EffectcraftApp> {
+    harness_at(vec2(w, 900.0))
+}
+
+fn harness_at(size: egui::Vec2) -> Harness<'static, EffectcraftApp> {
     let mut s = Session::default();
     s.execute("comp.new", json!({"name": "Tail", "width": 640, "height": 360, "duration": 4})).unwrap();
     s.execute("layer.newSolid", json!({"name": "Plate", "color": "#406080", "width": 640, "height": 360})).unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(w, 900.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder().with_size(size).build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
     h
 }
@@ -60,6 +64,16 @@ fn timeline_outline_columns_scroll_horizontally() {
     assert!(h.state().auto.find("timeline.outlineScroll").is_none());
 }
 
+fn click(h: &mut Harness<'_, EffectcraftApp>, at: Pos2) {
+    for pressed in [true, false] {
+        h.input_mut().events.push(Event::PointerMoved(at));
+        h.step();
+        h.input_mut().events.push(Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() });
+        h.step();
+    }
+    h.run_steps(2);
+}
+
 fn styles(h: &mut Harness<'_, EffectcraftApp>) -> Vec<String> {
     let v = h.state_mut().session.execute("layer.style.list", json!({})).unwrap();
     v["styles"].as_array().unwrap().iter().map(|s| s["style"].as_str().unwrap().to_string()).collect()
@@ -101,6 +115,114 @@ fn layer_style_dialog_adds_previews_and_cancels() {
     effectcraft_ui_egui::panels::layer_styles_dialog::finish(h.state_mut(), true);
     assert!(h.state().dialog.is_none());
     assert_eq!(styles(&mut h), ["stroke"]);
+}
+
+/// The Layer Style dialog on the solid, opened from Layer ▸ Layer Styles ▸ Drop Shadow (which
+/// adds the style) at `scale` % UI Scale. Returns the layer.
+fn open_drop_shadow(h: &mut Harness<'_, EffectcraftApp>, scale: u32) -> u64 {
+    let lid = h.state().session.active_comp().unwrap().layers[0].id.0;
+    h.state_mut().session.execute("layer.select", json!({"layers": [lid]})).unwrap();
+    h.state_mut().set_pref("appearance.uiScale", json!(scale)).unwrap();
+    h.run_steps(3);
+    let ctx = h.ctx.clone();
+    effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "layer.style.dropShadow", json!({})).unwrap();
+    // (Its layout settles a few frames after it opens.)
+    h.run_steps(5);
+    lid
+}
+
+/// `id` whole: inside the window, and painted with none of it clipped away.
+fn in_view(h: &Harness<'_, EffectcraftApp>, id: &str) -> Pos2 {
+    let r = rect(h, id);
+    // (A shape it paints: the topmost lying inside it, not the panels behind the dialog.)
+    let clip = h.output().shapes.iter().rev().find(|c| matches!(&c.shape, egui::Shape::Rect(s) if r.expand(1.0).contains_rect(s.rect))).map(|c| c.clip_rect);
+    assert!(h.ctx.content_rect().contains_rect(r) && clip.is_some_and(|c| c.contains_rect(r)), "{id} is cut off: {r:?} in {clip:?}");
+    r.center()
+}
+
+fn style_value(h: &mut Harness<'_, EffectcraftApp>, lid: u64, path: &str) -> f64 {
+    h.state_mut().session.execute("prop.get", json!({"layer": lid, "path": format!("layerStyles/dropShadow/{path}")})).unwrap()["value"].as_f64().unwrap()
+}
+
+/// #1062: the Layer Style dialog's OK and Cancel stay in view below the list and the style's
+/// controls, at 100 % and 200 % UI Scale (they were laid out past its bottom edge, under the fold
+/// of its scroll area, so a click on them did nothing until the dialog was scrolled). OK keeps an
+/// edit; Cancel puts the project and its undo history back as they were before the dialog.
+#[test]
+fn layer_style_buttons_stay_in_view() {
+    for scale in [100, 200] {
+        for ok in [true, false] {
+            let mut h = harness(1400.0);
+            let before = (h.state().session.project.clone(), h.state().session.history.undo.len());
+            let lid = open_drop_shadow(&mut h, scale);
+            let buttons = [in_view(&h, "dialog.layerStyle.ok"), in_view(&h, "dialog.layerStyle.cancel")];
+            // An edit, as the dialog's controls make them.
+            h.state_mut()
+                .session
+                .execute("prop.set", json!({"layer": lid, "path": "layerStyles/dropShadow/distance", "value": 40, "merge": "layer-style-dialog"}))
+                .unwrap();
+            h.run_steps(2);
+            click(&mut h, buttons[if ok { 0 } else { 1 }]);
+            let case = format!("{scale} %, {}", if ok { "OK" } else { "Cancel" });
+            assert_eq!(h.state().dialog, None, "{case} closed the dialog");
+            if ok {
+                assert_eq!(style_value(&mut h, lid, "distance"), 40.0, "{case} kept the edit");
+            } else {
+                let after = (&h.state().session.project, h.state().session.history.undo.len());
+                assert!(after.0.same_content(&before.0) && after.1 == before.1, "{case} put back the project and its history");
+            }
+        }
+    }
+}
+
+/// #1062: with the buttons kept at the bottom, the style's controls still scroll both ways, so
+/// every one of them can be reached in the smallest window (960×600) at 200 % UI Scale, and in a
+/// dialog opened in a large window that then narrows: here Noise, near the end of Drop Shadow,
+/// is scrolled to, seen whole and dragged.
+#[test]
+fn layer_style_controls_stay_reachable_in_a_small_window() {
+    for narrowed in [false, true] {
+        let mut h = harness_at(if narrowed { vec2(1600.0, 1000.0) } else { vec2(960.0, 600.0) });
+        let lid = open_drop_shadow(&mut h, if narrowed { 100 } else { 200 });
+        if narrowed {
+            h.set_size(vec2(960.0, 600.0));
+            h.state_mut().set_pref("appearance.uiScale", json!(200)).unwrap();
+            h.run_steps(5);
+        }
+        // Scroll the controls (under their heading) to their far end, both ways.
+        let over = rect(&h, "dialog.layerStyle.page").left_bottom() + vec2(10.0, 16.0);
+        h.input_mut().events.push(Event::PointerMoved(over));
+        h.input_mut().events.push(Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: vec2(-2000.0, -2000.0),
+            modifiers: Default::default(),
+            phase: egui::TouchPhase::Move,
+        });
+        h.run_steps(5);
+        let at = in_view(&h, "dialog.layerStyle.value.dropShadow/noise");
+        let slider = rect(&h, "dialog.layerStyle.value.dropShadow/noise").left_center();
+        drag(&mut h, slider + vec2(8.0, 0.0), slider + vec2(60.0, 0.0));
+        assert!(style_value(&mut h, lid, "noise") > 0.0, "narrowed {narrowed}: Noise was dragged (at {at:?})");
+        assert_eq!(h.state().dialog, Some(effectcraft_ui_egui::Dialog::LayerStyles));
+    }
+}
+
+#[test]
+fn layer_style_dialog_moves_by_its_title() {
+    let mut h = harness(1400.0);
+    let lid = h.state().session.active_comp().unwrap().layers[0].id.0;
+    h.state_mut().session.execute("layer.select", json!({"layers": [lid]})).unwrap();
+    let ctx = h.ctx.clone();
+    effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "layer.style.dropShadow", json!({})).unwrap();
+    h.run_steps(3);
+    let list0 = rect(&h, "dialog.layerStyle.list.blendingOptions");
+    // The title row sits just above the style list.
+    let grab = pos2(list0.center().x, list0.min.y - 20.0);
+    drag(&mut h, grab, grab + vec2(-150.0, 60.0));
+    h.run_steps(2);
+    let list1 = rect(&h, "dialog.layerStyle.list.blendingOptions");
+    assert!((list1.min - list0.min - vec2(-150.0, 60.0)).length() < 2.0, "the dialog followed the drag: {:?} → {:?}", list0.min, list1.min);
+    assert_eq!(h.state().dialog, Some(effectcraft_ui_egui::Dialog::LayerStyles), "dragging does not close it");
 }
 
 #[test]

@@ -1,10 +1,8 @@
-//! Window ▸ AI Chat: chat with a local model (Ollama) or with anything the local bridge
-//! exposes — Codex on a ChatGPT plan, Devin over ACP, OpenCode, OpenAI-compatible APIs, any
-//! CLI. The bridge is `bridge/agent-bridge.py` in the `effectcraft-ai-chat` repository.
+//! Window ▸ AI Chat: chat with a local model or agents exposed by a local bridge.
 //!
-//! Both the scripting Socket API and this panel reach `127.0.0.1` only; the bridge is what
-//! reaches cloud APIs and CLIs, and it keeps API keys out of the app. Requests run on a worker
-//! thread and are polled every frame, so the interface keeps drawing while a model thinks.
+//! This panel connects only to loopback addresses over plain HTTP. A separately configured
+//! bridge can reach remote services while keeping their credentials out of the app.
+//! Requests run on a worker thread and are polled every frame so the interface stays responsive.
 
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::Duration;
@@ -46,7 +44,7 @@ pub struct Agent {
     pub note: String,
 }
 
-/// AI Chat state (serde, so agents can read it).
+/// In-memory AI Chat state, excluded from the parent UI state's serialization.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AiChat {
@@ -83,9 +81,48 @@ pub struct Runtime {
     fetched: bool,
 }
 
-/// `http://127.0.0.1:8765/` → `127.0.0.1:8765`.
-pub fn host_of(url: &str) -> &str {
-    url.trim().trim_start_matches("http://").trim_start_matches("https://").trim_end_matches('/')
+/// Validate an HTTP endpoint and return its authority, including its required port.
+/// Address resolution and loopback enforcement happen at the connection boundary.
+pub fn host_of(url: &str) -> Result<&str, String> {
+    if url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err("endpoint must not contain whitespace or control characters".into());
+    }
+    let authority = if let Some((scheme, rest)) = url.split_once("://") {
+        if !scheme.eq_ignore_ascii_case("http") {
+            return Err("unsupported endpoint scheme: only plain HTTP is supported (no HTTPS)".into());
+        }
+        rest
+    } else {
+        url
+    };
+    let authority = authority.strip_suffix('/').unwrap_or(authority);
+    if authority.is_empty() || authority.contains(['@', '/', '\\', '?', '#', '%']) {
+        return Err("endpoint must be a host and port, without userinfo, path, query or fragment".into());
+    }
+    let port = if let Some(rest) = authority.strip_prefix('[') {
+        let (ip, port) = rest.split_once("]:").ok_or("IPv6 endpoints require [address]:port")?;
+        ip.parse::<std::net::Ipv6Addr>().map_err(|_| "invalid IPv6 endpoint address")?;
+        port
+    } else {
+        let (host, port) = authority.rsplit_once(':').ok_or("endpoint requires an explicit port")?;
+        if host.is_empty()
+            || host.len() > 253
+            || !host.split('.').all(|label| {
+                !label.is_empty()
+                    && label.len() <= 63
+                    && !label.starts_with('-')
+                    && !label.ends_with('-')
+                    && label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            })
+        {
+            return Err("invalid endpoint hostname or IPv4 address".into());
+        }
+        port
+    };
+    if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) || port.parse::<u16>().ok().filter(|p| *p != 0).is_none() {
+        return Err("endpoint port must be between 1 and 65535".into());
+    }
+    Ok(authority)
 }
 
 /// The picker label for an agent id.
@@ -99,16 +136,39 @@ fn label_of(selected: &str, agents: &[Agent]) -> String {
 #[cfg(not(target_arch = "wasm32"))]
 mod http {
     //! One HTTP/1.1 request to a local server, over `std::net` — the app has no HTTP client
-    //! dependency, and the panel reaches `127.0.0.1` only. Plain HTTP, like the bridge and
-    //! Ollama speak; TLS belongs to the bridge.
+    //! dependency. Only loopback destinations are allowed; TLS belongs to the bridge.
 
     use std::io::{Read, Write};
-    use std::net::{TcpStream, ToSocketAddrs};
+    use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
     use std::time::Duration;
 
-    pub fn json(host: &str, method: &str, path: &str, body: Option<&str>, timeout: Duration) -> Result<serde_json::Value, String> {
-        let addr = host.to_socket_addrs().map_err(|e| format!("bad address `{host}`: {e}"))?.next().ok_or_else(|| format!("bad address `{host}`"))?;
-        let mut s = TcpStream::connect_timeout(&addr, timeout).map_err(|e| format!("cannot reach {host} ({e})"))?;
+    pub(super) fn validate_addresses(addresses: &[SocketAddr]) -> Result<(), String> {
+        if addresses.is_empty() {
+            return Err("endpoint resolved to no addresses".into());
+        }
+        if addresses.iter().any(|addr| !addr.ip().is_loopback()) {
+            return Err("endpoint must resolve only to loopback addresses".into());
+        }
+        Ok(())
+    }
+
+    pub fn json(endpoint: &str, method: &str, path: &str, body: Option<&str>, timeout: Duration) -> Result<serde_json::Value, String> {
+        let host = super::host_of(endpoint)?;
+        if !matches!(method, "GET" | "POST") || !matches!(path, "/chat" | "/api/chat" | "/agents") {
+            return Err("unsupported local API request".into());
+        }
+        let addresses: Vec<SocketAddr> = host.to_socket_addrs().map_err(|e| format!("bad address `{host}`: {e}"))?.collect();
+        validate_addresses(&addresses)?;
+        // Validate the entire resolution before connecting, and never resolve again when connecting.
+        // Try both families so localhost works when the server listens on only IPv4 or IPv6.
+        let mut connection = Err("no reachable loopback address".to_string());
+        for addr in addresses {
+            connection = TcpStream::connect_timeout(&addr, timeout).map_err(|e| format!("cannot reach {host} ({e})"));
+            if connection.is_ok() {
+                break;
+            }
+        }
+        let mut s = connection?;
         let _ = s.set_read_timeout(Some(timeout));
         let _ = s.set_write_timeout(Some(timeout));
         let body = body.unwrap_or("");
@@ -151,8 +211,11 @@ mod http {
 fn request(agent: &str, messages: &[Message], prefs: &effectcraft_engine::prefs::AiChatPrefs) -> Result<(String, Option<String>), String> {
     let msgs: Vec<Value> = messages.iter().map(|m| json!({"role": m.role, "content": m.content})).collect();
     if agent == "ollama" || agent.is_empty() {
+        if prefs.model.trim().is_empty() {
+            return Err("Configure an installed model in Settings ▸ AI Chat ▸ Ollama Model before sending.".into());
+        }
         let body = json!({"model": prefs.model, "stream": false, "messages": msgs}).to_string();
-        let v = http::json(host_of(&prefs.ollama_url), "POST", "/api/chat", Some(&body), Duration::from_secs(300))?;
+        let v = http::json(&prefs.ollama_url, "POST", "/api/chat", Some(&body), Duration::from_secs(300))?;
         let reply = v.get("message").and_then(|m| m.get("content")).and_then(Value::as_str).unwrap_or_default();
         Ok((if reply.is_empty() { "(empty reply)".into() } else { reply.to_string() }, Some(prefs.model.clone())))
     } else {
@@ -160,7 +223,7 @@ fn request(agent: &str, messages: &[Message], prefs: &effectcraft_engine::prefs:
         if !prefs.agent_model.is_empty() {
             body["model"] = json!(prefs.agent_model);
         }
-        let v = http::json(host_of(&prefs.bridge_url), "POST", "/chat", Some(&body.to_string()), Duration::from_secs(600))?;
+        let v = http::json(&prefs.bridge_url, "POST", "/chat", Some(&body.to_string()), Duration::from_secs(600))?;
         if let Some(e) = v.get("error").and_then(Value::as_str) {
             return Err(e.to_string());
         }
@@ -225,7 +288,7 @@ pub fn fetch_agents(app: &mut EffectcraftApp, ctx: &egui::Context) {
         app.ai_chat.agents = Some(rx);
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let r = http::json(host_of(&url), "GET", "/agents", None, Duration::from_secs(3))
+            let r = http::json(&url, "GET", "/agents", None, Duration::from_secs(3))
                 .map(|v| v.get("agents").and_then(Value::as_array).cloned().unwrap_or_default())
                 .map(|list| list.iter().filter_map(|a| serde_json::from_value::<Agent>(a.clone()).ok()).collect::<Vec<_>>());
             let _ = tx.send(r);
@@ -277,7 +340,7 @@ pub fn poll(app: &mut EffectcraftApp, ctx: &egui::Context) {
             }
             Ok(Err(e)) => {
                 app.ai_chat.agents = None;
-                app.ui.ai_chat.status = format!("{} ({e})", tr("bridge off — run bridge/agent-bridge.py"));
+                app.ui.ai_chat.status = format!("{} ({e})", tr("bridge unavailable — check your local bridge"));
             }
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => app.ai_chat.agents = None,
@@ -346,7 +409,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         egui::ScrollArea::vertical().id_salt("ai-chat-log").auto_shrink([false, false]).stick_to_bottom(true).show(&mut child, |ui| {
             if app.ui.ai_chat.lines.is_empty() {
                 ui.add_space(6.0);
-                ui.weak(tr("Ask a local model about your project. Start bridge/agent-bridge.py to reach Codex, Devin, OpenCode and more."));
+                ui.weak(tr("Ask a local model about your project. Configure a local bridge to reach additional agents."));
             }
             for l in &app.ui.ai_chat.lines {
                 let color = match l.kind.as_str() {
@@ -433,9 +496,102 @@ mod tests {
     use super::*;
 
     #[test]
-    fn host_of_strips_scheme_and_slash() {
-        assert_eq!(host_of("http://127.0.0.1:8765/"), "127.0.0.1:8765");
-        assert_eq!(host_of(" 127.0.0.1:11434 "), "127.0.0.1:11434");
+    fn host_of_validates_authority() {
+        for (url, host) in [("http://127.0.0.1:8765/", "127.0.0.1:8765"), ("localhost:11434", "localhost:11434"), ("http://[::1]:8765/", "[::1]:8765")] {
+            assert_eq!(host_of(url).unwrap(), host);
+        }
+        for url in [
+            "https://127.0.0.1:8765",
+            "ftp://localhost:8765",
+            "file:///tmp/socket",
+            "http://user@localhost:8765",
+            "http://user:password@localhost:8765",
+            "http://localhost:8765/chat",
+            "http://localhost:8765//",
+            "http://localhost:8765?x=1",
+            "http://localhost:8765/#fragment",
+            "localhost:8765\r\nX-Injected: yes",
+            "localhost:8765\0",
+            " localhost:8765",
+            "localhost:8765 ",
+            "local\thost:8765",
+            "localhost:8765\\evil",
+            "localhost%0d%0a:8765",
+            "http://",
+            "localhost",
+            "localhost:",
+            "localhost:0",
+            "localhost:65536",
+            "localhost:+80",
+            ":8765",
+            "::1:8765",
+            "[::1]",
+            "[bad]:8765",
+            "http://http://localhost:8765",
+            "-localhost:8765",
+            "local..host:8765",
+        ] {
+            assert!(host_of(url).is_err(), "accepted {url:?}");
+        }
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn rejects_non_loopback_addresses_before_connecting() {
+        for ip in ["8.8.8.8", "10.0.0.1", "172.16.0.1", "192.168.1.1", "0.0.0.0", "::", "2001:4860:4860::8888", "fc00::1", "fe80::1", "::ffff:127.0.0.1"] {
+            let addr = std::net::SocketAddr::new(ip.parse().unwrap(), 8765);
+            let err = http::json(&addr.to_string(), "GET", "/agents", None, Duration::from_millis(50)).unwrap_err();
+            assert!(err.contains("loopback"), "{ip}: {err}");
+        }
+        let local = "127.0.0.1:8765".parse().unwrap();
+        let public = "8.8.8.8:8765".parse().unwrap();
+        assert!(http::validate_addresses(&[local, public]).is_err());
+        assert!(http::validate_addresses(&[public, local]).is_err());
+        assert!(http::validate_addresses(&[]).is_err());
+        assert!(http::validate_addresses(&[local, "[::1]:8765".parse().unwrap()]).is_ok());
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn https_and_injected_requests_never_connect() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        for scheme in ["https", "HTTPS", "ftp"] {
+            let err = http::json(&format!("{scheme}://{addr}"), "GET", "/agents", None, Duration::from_secs(1)).unwrap_err();
+            assert!(err.contains("scheme"), "{err}");
+        }
+        for (method, path) in [("GET\r\nInjected: yes", "/agents"), ("GET", "/agents\r\nInjected: yes")] {
+            assert!(http::json(&addr.to_string(), method, path, None, Duration::from_secs(1)).is_err());
+        }
+        assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn localhost_and_ipv6_round_trip() {
+        let (addr, server) = serve_once("HTTP/1.1 200 OK", r#"{"reply":"local"}"#);
+        let endpoint = format!("http://localhost:{}/", addr.port());
+        assert_eq!(http::json(&endpoint, "GET", "/agents", None, Duration::from_secs(2)).unwrap()["reply"], "local");
+        assert!(server.join().unwrap().contains(&format!("Host: localhost:{}\r\n", addr.port())));
+
+        let listener = std::net::TcpListener::bind("[::1]:0").unwrap();
+        let (addr, server) = serve_listener(listener, "HTTP/1.1 200 OK", r#"{"reply":"ipv6"}"#);
+        assert_eq!(http::json(&format!("http://{addr}/"), "GET", "/agents", None, Duration::from_secs(2)).unwrap()["reply"], "ipv6");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn ui_snapshots_omit_chat_and_ignore_legacy_conversations() {
+        let mut ui = crate::state::UiState::default();
+        ui.ai_chat.input = "private draft".into();
+        ui.ai_chat.push("you", "private transcript");
+        ui.ai_chat.history.push(Message { role: "user".into(), content: "private history".into() });
+        let mut snapshot = serde_json::to_value(&ui).unwrap();
+        assert!(snapshot.get("ai_chat").is_none());
+        snapshot["ai_chat"] = serde_json::to_value(&ui.ai_chat).unwrap();
+        let restored: crate::state::UiState = serde_json::from_value(snapshot).unwrap();
+        assert_eq!(restored.ai_chat, AiChat::default());
     }
 
     #[test]
@@ -471,12 +627,28 @@ mod tests {
     /// returns the raw request it received.
     #[cfg(not(target_arch = "wasm32"))]
     fn serve_once(status_line: &str, body: &str) -> (std::net::SocketAddr, std::thread::JoinHandle<String>) {
+        serve_listener(std::net::TcpListener::bind("127.0.0.1:0").unwrap(), status_line, body)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn serve_listener(listener: std::net::TcpListener, status_line: &str, body: &str) -> (std::net::SocketAddr, std::thread::JoinHandle<String>) {
         use std::io::{Read, Write};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let response = format!("{status_line}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
         let handle = std::thread::spawn(move || {
-            let (mut s, _) = listener.accept().unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            let mut s = loop {
+                match listener.accept() {
+                    Ok((s, _)) => break s,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && std::time::Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(e) => panic!("test server did not accept a connection: {e}"),
+                }
+            };
+            s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            s.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
             let mut req = Vec::new();
             let mut buf = [0u8; 1024];
             loop {
@@ -503,15 +675,51 @@ mod tests {
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn request_sends_the_chosen_agent_model_to_the_bridge() {
-        let (addr, server) = serve_once("HTTP/1.1 200 OK", r#"{"reply":"opus ok","model":"claude-opus-5-5-medium"}"#);
-        let prefs =
-            effectcraft_engine::prefs::AiChatPrefs { bridge_url: addr.to_string(), agent: "devin".into(), agent_model: "opus".into(), ..Default::default() };
-        let (reply, model) = request("devin", &[Message { role: "user".into(), content: "hi".into() }], &prefs).unwrap();
-        assert_eq!(reply, "opus ok");
-        assert_eq!(model.as_deref(), Some("claude-opus-5-5-medium"));
+        let (addr, server) = serve_once("HTTP/1.1 200 OK", r#"{"reply":"model ok","model":"example-model-resolved"}"#);
+        let prefs = effectcraft_engine::prefs::AiChatPrefs {
+            bridge_url: addr.to_string(),
+            agent: "example-agent".into(),
+            agent_model: "custom/model-v2:fast".into(),
+            ..Default::default()
+        };
+        let (reply, model) = request("example-agent", &[Message { role: "user".into(), content: "hi".into() }], &prefs).unwrap();
+        assert_eq!(reply, "model ok");
+        assert_eq!(model.as_deref(), Some("example-model-resolved"));
         let req = server.join().unwrap();
-        assert!(req.contains(r#""agent":"devin""#), "{req}");
-        assert!(req.contains(r#""model":"opus""#), "{req}");
+        assert!(req.contains(r#""agent":"example-agent""#), "{req}");
+        assert!(req.contains(r#""model":"custom/model-v2:fast""#), "{req}");
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn multi_turn_send_and_poll_preserve_history_over_tcp() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        let ctx = egui::Context::default();
+        app.session.prefs.ai_chat.agent = "example-agent".into();
+        app.session.prefs.ai_chat.system_prompt = "Be helpful.".into();
+        let mut expected = vec![json!({"role": "system", "content": "Be helpful."})];
+        for (input, answer) in [("first question", "first answer"), ("follow-up question", "follow-up answer")] {
+            let body = json!({"reply": answer}).to_string();
+            let (addr, server) = serve_once("HTTP/1.1 200 OK", &body);
+            app.session.prefs.ai_chat.bridge_url = format!("http://{addr}");
+            app.ui.ai_chat.input = input.into();
+            send(&mut app, &ctx);
+            assert!(app.ai_chat.busy);
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while app.ai_chat.busy && std::time::Instant::now() < deadline {
+                poll(&mut app, &ctx);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(!app.ai_chat.busy, "chat worker did not finish");
+            let raw = server.join().unwrap();
+            let (_, body) = raw.split_once("\r\n\r\n").unwrap();
+            let sent: Value = serde_json::from_str(body).unwrap();
+            expected.push(json!({"role": "user", "content": input}));
+            assert_eq!(sent["messages"], json!(expected));
+            expected.push(json!({"role": "assistant", "content": answer}));
+            assert_eq!(serde_json::to_value(&app.ui.ai_chat.history).unwrap(), json!(&expected[1..]));
+            assert_eq!(app.ui.ai_chat.lines.last().unwrap().text, answer);
+        }
     }
 
     /// At Agent Default the request carries no `model`, so the agent keeps its own.
@@ -519,8 +727,13 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     fn request_omits_the_model_at_agent_default() {
         let (addr, server) = serve_once("HTTP/1.1 200 OK", r#"{"reply":"hi"}"#);
-        let prefs = effectcraft_engine::prefs::AiChatPrefs { bridge_url: addr.to_string(), agent: "devin".into(), ..Default::default() };
-        let (reply, model) = request("devin", &[Message { role: "user".into(), content: "hi".into() }], &prefs).unwrap();
+        let prefs = effectcraft_engine::prefs::AiChatPrefs {
+            bridge_url: addr.to_string(),
+            agent: "example-agent".into(),
+            agent_model: String::new(),
+            ..Default::default()
+        };
+        let (reply, model) = request("example-agent", &[Message { role: "user".into(), content: "hi".into() }], &prefs).unwrap();
         assert_eq!(reply, "hi");
         assert_eq!(model, None);
         let req = server.join().unwrap();

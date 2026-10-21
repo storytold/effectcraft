@@ -204,3 +204,43 @@ fn relink_restores_decoded_pixels_and_invalidates_viewer_content() {
     assert_eq!(s.render(cid, Tick::ZERO, RenderOpts::default()).data, expected.data);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// #767: File ▸ Import ▸ File… offers MXF footage (OP1a / OP-Atom from broadcast cameras and
+/// Avid), which the Media Browser lists and the importer reads.
+#[test]
+fn import_dialog_offers_mxf() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let mut app = EffectcraftApp::new(Session::default());
+    let offered = Rc::new(RefCell::new(Vec::<String>::new()));
+    let seen = offered.clone();
+    app.hooks.pick_files = Some(Box::new(move |exts: &[&str]| {
+        *seen.borrow_mut() = exts.iter().map(|e| e.to_string()).collect();
+        Vec::new()
+    }));
+    let result = effectcraft_ui_egui::menus::invoke(&mut app, &egui::Context::default(), "file.import", json!({})).unwrap();
+    assert!(result.is_null(), "cancelled: nothing imported");
+    let offered = offered.borrow();
+    assert!(offered.iter().any(|e| e == "mxf"), "offered {offered:?}");
+    assert!(offered.iter().any(|e| e == "mov"));
+}
+
+/// #1059: opening the demo from the start screen and immediately pressing Spacebar previews
+/// the demo — the start screen's keyboard focus must not outlive it.
+#[test]
+fn space_previews_after_opening_the_demo_from_home() {
+    let mut h = {
+        let s = Session::default();
+        let mut app = EffectcraftApp::new(s);
+        app.ui.start_screen = true;
+        Harness::builder().with_size(vec2(1400.0, 900.0)).build_eframe(|_| app)
+    };
+    h.run_steps(3);
+    let demo = rect(&h, "home.file.openDemoProject");
+    click_at(&mut h, demo.center());
+    assert!(h.state().session.active_comp().is_some(), "the demo comp is open");
+    assert!(!h.state().ui.start_screen, "the start screen closed");
+    key(&mut h, Key::Space);
+    assert!(h.state().playback.playing, "Space previews the demo (#1059)");
+}

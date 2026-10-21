@@ -19,7 +19,12 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let p = ui.painter().with_clip_rect(rect);
     p.rect_filled(rect, 0.0, t.pasteboard);
     let Some(view) = app.session.state.footage_panel.clone() else {
-        p.text(rect.center(), Align2::CENTER_CENTER, tr("Double-click footage in the Project panel to open it here"), Tokens::ui(12.0), t.text_faint);
+        // Wrapped to the panel, so a narrow panel breaks the hint into lines instead of clipping it.
+        let hint = tr("Double-click footage in the Project panel to open it here");
+        let mut job = egui::text::LayoutJob::simple(hint.to_owned(), Tokens::ui(12.0), t.text_faint, (rect.width() - 20.0).max(40.0));
+        job.halign = egui::Align::Center;
+        let galley = p.layout_job(job);
+        p.galley(pos2(rect.center().x, rect.center().y - galley.size().y * 0.5), galley, t.text_faint);
         app.auto.add("footage.empty", rect, "Footage panel (empty)");
         return;
     };

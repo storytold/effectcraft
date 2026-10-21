@@ -85,7 +85,11 @@ fn unreadable_native_workspace_is_preserved_after_later_layout_changes() {
         assert!(effectcraft_ui_egui::control::inspect(&app, &ctx)["workspaceStorageError"].is_string());
         app.set_workspace("Minimal");
         app.ui.focused = PanelKind::Project;
-        effectcraft_ui_egui::menus::invoke(&mut app, &ctx, "window.saveWorkspaceAs", json!({"name":"Must not overwrite"})).unwrap();
+        let error = effectcraft_ui_egui::menus::invoke(&mut app, &ctx, "window.saveWorkspaceAs", json!({"name":"Must not overwrite"})).unwrap_err();
+        assert!(error.contains("may be lost after a restart") && error.contains("workspaces.json"), "{error}");
+        assert_eq!(app.ui.status, error, "the failure is in the status bar");
+        assert_eq!(app.ui.workspace, "Must not overwrite", "the layout stays usable for this session");
+        assert!(app.ui.saved_workspaces.contains_key("Must not overwrite"));
         eframe::App::on_exit(&mut app);
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
         assert!(effectcraft_ui_egui::control::inspect(&app, &ctx)["workspaceStorageError"].is_string());
@@ -329,4 +333,161 @@ fn unowned_tab_keeps_the_timeline_mini_flowchart_shortcut() {
     });
     output.textures_delta.clear();
     assert!(app.ui.mini_flowchart.is_some(), "an unowned Tab still invokes the application binding");
+}
+
+/// Deleting the current workspace writes the file straight away (it used to be rejected for
+/// having no definition until the next frame retried).
+#[test]
+fn deleting_the_current_workspace_saves_immediately() {
+    let store = Arc::new(MemoryConfig::default());
+    let mut app = EffectcraftApp::new(Session { config: Some(store.clone()), ..Default::default() });
+    let ctx = egui::Context::default();
+    effectcraft_ui_egui::menus::invoke(&mut app, &ctx, "window.saveWorkspaceAs", json!({"name": "Gone"})).unwrap();
+    effectcraft_ui_egui::menus::invoke(&mut app, &ctx, "window.editWorkspaces", json!({"name": "Gone", "delete": true})).unwrap();
+    assert_eq!(app.ui.workspace, "Default");
+    assert!(effectcraft_ui_egui::control::inspect(&app, &ctx)["workspaceStorageError"].is_null());
+    let text = store.read("workspaces.json").unwrap();
+    assert!(!text.contains("Gone"), "the deleted workspace must be gone from the file: {text}");
+}
+
+/// A settings store whose writes fail while `full` is set (a full or read-only disk).
+#[derive(Default)]
+struct FullDisk {
+    inner: MemoryConfig,
+    full: std::sync::atomic::AtomicBool,
+}
+
+impl ConfigStore for FullDisk {
+    fn read(&self, name: &str) -> Option<String> {
+        self.inner.read(name)
+    }
+    fn write(&self, name: &str, data: &str) -> std::io::Result<()> {
+        if self.full.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(std::io::Error::other("synthetic full disk"));
+        }
+        self.inner.write(name, data)
+    }
+    fn remove(&self, name: &str) -> std::io::Result<()> {
+        self.inner.remove(name)
+    }
+}
+
+/// Issue #696: Save as New Workspace said nothing when the file couldn't be written, so the
+/// workspace was gone after a restart. The command fails, the layout stays usable, and saving
+/// again once the disk is writable keeps it.
+#[test]
+fn failed_workspace_save_is_reported_and_retryable() {
+    let store = Arc::new(FullDisk::default());
+    store.full.store(true, std::sync::atomic::Ordering::Relaxed);
+    let mut app = EffectcraftApp::new(Session { config: Some(store.clone()), ..Default::default() });
+    let ctx = egui::Context::default();
+    let invoke = |app: &mut EffectcraftApp, id: &str, params| effectcraft_ui_egui::menus::invoke(app, &ctx, id, params);
+    let error = invoke(&mut app, "window.saveWorkspaceAs", json!({"name": "caption craft"})).unwrap_err();
+    assert!(error.contains("synthetic full disk") && error.contains("may be lost after a restart"), "{error}");
+    assert_eq!(app.ui.status, error);
+    let storage_error = effectcraft_ui_egui::control::inspect(&app, &ctx)["workspaceStorageError"].clone();
+    assert!(storage_error.as_str().is_some_and(|e| e.contains("synthetic full disk")), "{storage_error}");
+    assert_eq!(app.ui.workspace, "caption craft");
+    assert_eq!(app.saved_workspace_names(), ["caption craft"]);
+    assert!(store.read("workspaces.json").is_none());
+    // Rename and Delete report the same way.
+    assert!(invoke(&mut app, "window.editWorkspaces", json!({"name": "caption craft", "rename": "Captions"})).is_err());
+    assert_eq!(app.saved_workspace_names(), ["Captions"]);
+    invoke(&mut app, "window.saveWorkspaceAs", json!({"name": "Scratch"})).unwrap_err();
+    assert!(invoke(&mut app, "window.editWorkspaces", json!({"name": "Scratch", "delete": true})).is_err());
+    assert_eq!(app.saved_workspace_names(), ["Captions"]);
+    // Writable again: an explicit Save keeps it.
+    store.full.store(false, std::sync::atomic::Ordering::Relaxed);
+    invoke(&mut app, "window.workspace", json!({"name": "Captions"})).unwrap();
+    invoke(&mut app, "window.saveWorkspace", json!({})).unwrap();
+    assert!(effectcraft_ui_egui::control::inspect(&app, &ctx)["workspaceStorageError"].is_null());
+    let restarted = EffectcraftApp::new(Session { config: Some(store), ..Default::default() });
+    assert_eq!(restarted.saved_workspace_names(), ["Captions"]);
+}
+
+/// Without a settings folder there is nowhere to keep a workspace: saving says so.
+#[test]
+fn workspace_save_without_a_settings_folder_is_reported() {
+    let mut app = EffectcraftApp::new(Session::default());
+    let ctx = egui::Context::default();
+    let error = effectcraft_ui_egui::menus::invoke(&mut app, &ctx, "window.saveWorkspaceAs", json!({"name": "Mine"})).unwrap_err();
+    assert!(error.contains("no settings folder"), "{error}");
+    assert_eq!(app.saved_workspace_names(), ["Mine"]);
+}
+
+/// Save as New Workspace, Rename and Delete reach the real settings folder straight away (no
+/// exit needed) and come back from it.
+#[test]
+fn saved_workspaces_reach_the_settings_folder_and_reload() {
+    let dir = scratch_dir("disk");
+    let launch = || EffectcraftApp::new(Session { config: Some(Arc::new(DirConfig::new(&dir))), ..Default::default() });
+    let mut app = launch();
+    let ctx = egui::Context::default();
+    let invoke = |app: &mut EffectcraftApp, id: &str, params| effectcraft_ui_egui::menus::invoke(app, &ctx, id, params).unwrap();
+    invoke(&mut app, "window.workspace", json!({"name": "Minimal"}));
+    invoke(&mut app, "window.saveWorkspaceAs", json!({"name": "caption craft"}));
+    let saved = app.ui.dock.clone();
+    assert!(std::fs::read_to_string(dir.join("workspaces.json")).unwrap().contains("caption craft"));
+    invoke(&mut app, "window.saveWorkspaceAs", json!({"name": "Scratch"}));
+    invoke(&mut app, "window.editWorkspaces", json!({"name": "caption craft", "rename": "Captions"}));
+    invoke(&mut app, "window.editWorkspaces", json!({"name": "Scratch", "delete": true}));
+    drop(app);
+    let mut app = launch();
+    assert_eq!(app.saved_workspace_names(), ["Captions"]);
+    invoke(&mut app, "window.workspace", json!({"name": "Captions"}));
+    assert_eq!(app.ui.dock, saved);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A frontend event left queued by an earlier invocation (`engine.execute` defers them) only
+/// sets the status: its failure is not the result of a later command with the same id.
+#[test]
+fn an_earlier_queued_frontend_failure_is_not_a_later_commands_result() {
+    let store = Arc::new(MemoryConfig::default());
+    let mut app = EffectcraftApp::new(Session { config: Some(store.clone()), ..Default::default() });
+    let ctx = egui::Context::default();
+    let invoke = |app: &mut EffectcraftApp, id: &str, params| effectcraft_ui_egui::menus::invoke(app, &ctx, id, params);
+    // An earlier failure, then a success.
+    app.session.execute("window.workspace", json!({"name": "missing-old"})).unwrap();
+    invoke(&mut app, "window.workspace", json!({"name": "Minimal"})).unwrap();
+    assert_eq!(app.ui.workspace, "Minimal");
+    // An earlier failing delete, then a rename that reaches the store.
+    invoke(&mut app, "window.saveWorkspaceAs", json!({"name": "Original"})).unwrap();
+    app.session.execute("window.editWorkspaces", json!({"name": "missing-old", "delete": true})).unwrap();
+    invoke(&mut app, "window.editWorkspaces", json!({"name": "Original", "rename": "Renamed"})).unwrap();
+    assert!(store.read("workspaces.json").unwrap().contains("Renamed"));
+    // Both fail: the result is the current invocation's own failure.
+    app.session.execute("window.workspace", json!({"name": "missing-old"})).unwrap();
+    let error = invoke(&mut app, "window.workspace", json!({"name": "missing-new"})).unwrap_err();
+    assert!(error.contains("missing-new") && !error.contains("missing-old"), "{error}");
+    // An earlier failure of another command.
+    app.session.execute("window.workspace", json!({"name": "missing-old"})).unwrap();
+    invoke(&mut app, "window.saveWorkspaceAs", json!({"name": "Fine"})).unwrap();
+    // Its own failure with nothing queued is still the result.
+    assert!(invoke(&mut app, "window.workspace", json!({"name": "missing"})).is_err());
+}
+
+/// A failed Save Workspace or Delete of a workspace already on disk leaves the file as it was:
+/// after a restart the earlier layout, and the workspace that wasn't deleted, come back.
+#[test]
+fn failed_save_or_delete_of_a_saved_workspace_keeps_the_file() {
+    let store = Arc::new(FullDisk::default());
+    let mut app = EffectcraftApp::new(Session { config: Some(store.clone()), ..Default::default() });
+    let ctx = egui::Context::default();
+    let invoke = |app: &mut EffectcraftApp, id: &str, params| effectcraft_ui_egui::menus::invoke(app, &ctx, id, params);
+    invoke(&mut app, "window.workspace", json!({"name": "Minimal"})).unwrap();
+    invoke(&mut app, "window.saveWorkspaceAs", json!({"name": "Kept"})).unwrap();
+    let saved = app.ui.dock.clone();
+    let before = store.read("workspaces.json").unwrap();
+    store.full.store(true, std::sync::atomic::Ordering::Relaxed);
+    app.ui.dock.close(PanelKind::Timeline);
+    let error = invoke(&mut app, "window.saveWorkspace", json!({})).unwrap_err();
+    assert!(error.contains("synthetic full disk") && error.contains("may be lost after a restart"), "{error}");
+    assert!(invoke(&mut app, "window.editWorkspaces", json!({"name": "Kept", "delete": true})).is_err());
+    assert!(app.saved_workspace_names().is_empty(), "the delete applies for this session");
+    assert_eq!(store.read("workspaces.json").unwrap(), before);
+    let mut restarted = EffectcraftApp::new(Session { config: Some(store), ..Default::default() });
+    assert_eq!(restarted.saved_workspace_names(), ["Kept"]);
+    restarted.set_workspace("Kept");
+    assert_eq!(restarted.ui.dock, saved);
 }

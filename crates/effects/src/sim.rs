@@ -238,9 +238,22 @@ impl SpritePlan {
     }
 
     /// Rasterise (after [`SpritePlan::resolve`]) and meet the original layer `b`.
-    pub fn finish(&self, mut b: Buf) -> Buf {
+    pub fn finish(&self, b: Buf) -> Buf {
         let fx = splat(b.img.width, b.img.height, &self.sprites, self.acc);
-        b.img = match self.post {
+        self.finish_with(b, fx)
+    }
+
+    /// [`finish`](Self::finish) with a prepared sprite image (the motion-blurred average of
+    /// several frames, #1195).
+    pub fn finish_with(&self, b: Buf, fx: Image) -> Buf {
+        self.post.apply(b, fx)
+    }
+}
+
+impl Post {
+    /// Meet the sprite image `fx` with the original layer `b` (see [`SpritePlan::finish`]).
+    fn apply(self, mut b: Buf, fx: Image) -> Buf {
+        b.img = match self {
             Post::Combine(m) => combine(&b.img, &fx, m),
             Post::Replace => fx,
             Post::Lerp(t) => {
@@ -1069,6 +1082,29 @@ fn pw_phys(ctx: &EffectCtx) -> Phys {
 }
 
 fn particle_world(ctx: &EffectCtx, b: Buf) -> Buf {
+    // #1195: with the comp's motion-blur shutter open, particles draw as motion trails: the
+    // sprite fields of samples across the shutter are averaged, as Transform averages its
+    // matrix samples. (The GPU compositor runs this case on the CPU: catalog::gpu_supported.)
+    if let Some((angle, phase, n)) = ctx.env.shutter.filter(|(a, _, _)| *a > 0.0) {
+        let n = (n.clamp(2, 64) as usize).max(2);
+        let fd = 1.0 / ctx.fps().max(0.001);
+        let mut acc = Image::new(b.img.width, b.img.height);
+        let mut post: Option<Post> = None;
+        for k in 0..n {
+            let t = ctx.time + (phase + angle * k as f64 / (n - 1) as f64) / 360.0 * fd;
+            let sub = EffectCtx { params: ctx.params, time: t, layer_size: ctx.layer_size, seed: ctx.seed, adjustment: ctx.adjustment, env: ctx.env };
+            if let Some(plan) = particle_world_plan(&sub, &b) {
+                let fx = splat(b.img.width, b.img.height, &plan.sprites, plan.acc);
+                acc.data.iter_mut().zip(&fx.data).for_each(|(a, o)| (0..4).for_each(|c| a[c] += o[c]));
+                post.get_or_insert(plan.post);
+            }
+        }
+        acc.data.iter_mut().for_each(|p| p.iter_mut().for_each(|v| *v /= n as f32));
+        return match post {
+            Some(p) => p.apply(b, acc),
+            None => b,
+        };
+    }
     match particle_world_plan(ctx, &b) {
         Some(plan) => plan.finish(b),
         None => b,
@@ -1196,18 +1232,9 @@ fn particle_world_plan(ctx: &EffectCtx, b: &Buf) -> Option<SpritePlan> {
 /// The CC particle systems' sprites with their Transfer Mode (Composite, Screen, Add, Black
 /// Background).
 fn particle_sprites(sprites: Vec<Sprite>, mode: u32) -> SpritePlan {
-    SpritePlan {
-        sprites,
-        tints: vec![],
-        acc: if mode == 2 { Acc::Add } else { Acc::Over },
-        post: Post::Combine(match mode {
-            0 => 0,
-            1 => 1,
-            2 => 2,
-            3 => 5,
-            _ => 0,
-        }),
-    }
+    // The particles replace the layer (After Effects shows no trace of the source in any
+    // Transfer Mode, which sets how the particles meet each other).
+    SpritePlan { sprites, tints: vec![], acc: if mode == 2 { Acc::Add } else { Acc::Over }, post: Post::Replace }
 }
 
 // ------------------------------------------------------------------ CC Particle Systems II
@@ -1724,6 +1751,31 @@ mod tests {
         ]
     }
 
+    /// #1195: with the comp's shutter open, the particles smear across it: the average of the
+    /// sampled sprite fields differs from the sharp frame, touches more pixels and keeps the
+    /// alpha energy.
+    #[test]
+    fn particle_world_motion_blur_trails() {
+        let v = pw_vals(21.0);
+        let blank = Image::new(40, 40);
+        let sharp = run("ec.sim.ccparticleworld", &v, blank.clone(), 2.0);
+        let blurred = crate::run_fx(
+            "ec.sim.ccparticleworld",
+            &v,
+            blank.clone(),
+            2.0,
+            EffectEnv { frame_rate: 10.0, shutter: Some((360.0, -180.0, 8)), ..Default::default() },
+        )
+        .img;
+        assert!(sharp.data.iter().any(|p| p[3] > 0.0), "sharp frame has particles");
+        assert_ne!(sharp.data, blurred.data, "the shutter smears the particles");
+        let lit = |img: &Image| img.data.iter().filter(|p| p[3] > 0.005).count();
+        let sum = |img: &Image| img.data.iter().map(|p| p[3]).sum::<f32>();
+        assert!(lit(&blurred) > lit(&sharp), "trails light more pixels: {} vs {}", lit(&blurred), lit(&sharp));
+        let (sa, ba) = (sum(&sharp), sum(&blurred));
+        assert!((ba - sa).abs() < sa * 0.6 + 1.0, "alpha energy roughly kept: {ba} vs {sa}");
+    }
+
     #[test]
     fn particle_world_seek_consistent() {
         let v = pw_vals(11.0);
@@ -1920,8 +1972,35 @@ mod tests {
         let blank = Image::new(48, 48);
         let y = mass_y(&a, &blank);
         assert!((0.0..24.0).contains(&y), "{y}");
+        // The particles replace the layer: with none born it is empty.
         let none = run("ec.sim.ccparticlesystems2", &[("birthRate", num(0.0))], grey(20, 20), 1.0);
-        assert_eq!(none, grey(20, 20));
+        assert_eq!(none, Image::new(20, 20));
+    }
+
+    /// CC Particle World and CC Particle Systems II replace their layer with the particles, in
+    /// every Transfer Mode (which only sets how particles meet each other). SceneYard frames from
+    /// After Effects 2026 show no trace of the source solid: "Task Preparation UI" (black solids
+    /// under fireworks hid a white page), "Burnout matchstick" (a red rectangle around the
+    /// flame), "Documentary Man Falling" (a black block over the light).
+    #[test]
+    fn cc_particles_replace_their_layer() {
+        let red = || {
+            let mut img = Image::new(48, 48);
+            img.data.iter_mut().for_each(|p| *p = [0.7, 0.1, 0.1, 1.0]);
+            img
+        };
+        for id in ["ec.sim.ccparticlesystems2", "ec.sim.ccparticleworld"] {
+            for mode in 0..4 {
+                let v = vec![("birthRate", num(3.0)), ("particle/transferMode", Value::Enum(mode))];
+                let _ = run(id, &v, red(), 0.5);
+                let out = run(id, &v, red(), 1.0);
+                // No source left: the corners, far from the producer, are clear.
+                for (x, y) in [(0, 0), (47, 0), (0, 47), (47, 47)] {
+                    assert!(out.get(x, y)[3] < 1e-6, "{id} mode {mode} ({x},{y}): {:?}", out.get(x, y));
+                }
+                assert!(out.data.iter().any(|p| p[3] > 0.05), "{id} mode {mode}: particles drawn");
+            }
+        }
     }
 
     #[test]

@@ -265,6 +265,11 @@ pub const TEXT_ANIMATOR_KINDS: &[(&str, &str)] = &[
     ("strokeOpacity", "Stroke Color: Opacity"),
     ("strokeWidth", "Stroke Width"),
     ("tracking", "Tracking"),
+    ("-", "-"),
+    ("frontColor", "Front: Color"),
+    ("bevelColor", "Bevel: Color"),
+    ("sideColor", "Side: Color"),
+    ("backColor", "Back: Color"),
 ];
 
 fn vec3_prop(ids: &mut Ids, m: &str, name: &str, v: [f64; 3], ui: ParamUi, three_d: bool) -> Property {
@@ -318,6 +323,11 @@ pub fn text_anim_props(ids: &mut Ids, kind: &str, three_d: bool) -> Vec<Property
         "strokeBrightness" => vec![pct_slider(ids, "strokeBrightness", "Stroke Brightness", 0.0, -100.0)],
         "strokeOpacity" => vec![pct_slider(ids, "strokeOpacity", "Stroke Opacity", 100.0, 0.0)],
         "strokeWidth" => vec![ids.prop("strokeWidth", "Stroke Width", Value::Scalar(0.0)).with_ui(ParamUi::Pixels)],
+        // Colours of the extruded characters' surfaces (Advanced 3D).
+        "frontColor" => vec![ids.prop("frontColor", "Front Color", Value::Color([1.0, 0.0, 0.0, 1.0])).with_ui(ParamUi::Color)],
+        "bevelColor" => vec![ids.prop("bevelColor", "Bevel Color", Value::Color([1.0, 0.0, 0.0, 1.0])).with_ui(ParamUi::Color)],
+        "sideColor" => vec![ids.prop("sideColor", "Side Color", Value::Color([1.0, 0.0, 0.0, 1.0])).with_ui(ParamUi::Color)],
+        "backColor" => vec![ids.prop("backColor", "Back Color", Value::Color([1.0, 0.0, 0.0, 1.0])).with_ui(ParamUi::Color)],
         "tracking" => {
             let tt = fixed(ids.prop("trackingType", "Tracking Type", Value::Enum(0)).with_ui(popup(&["Before & After", "Before", "After"])));
             vec![tt, ids.prop("tracking", "Tracking Amount", Value::Scalar(0.0))]
@@ -528,6 +538,35 @@ pub fn shape_repeater(ids: &mut Ids, copies: f64, offset_pos: [f64; 2]) -> PropG
         .with(ids.prop("offset", "Offset", Value::Scalar(0.0)))
         .with(ids.prop("composite", "Composite", Value::Enum(0)).with_ui(popup(&["Below", "Above"])))
         .with(tr)
+}
+
+/// Shape contents items that colour the surfaces of an extruded shape (Advanced 3D): (match
+/// id, name), in Front, Bevel, Side, Back order. Each applies to every paint of its group and
+/// the groups nested in it.
+pub const SHAPE_SURFACES: [(&str, &str); 4] = [("front", "Front"), ("bevel", "Bevel"), ("side", "Side"), ("back", "Back")];
+
+/// The `layer.addShapeItem` kind of a surface property (`sideColor`): (surface match id,
+/// property match id).
+pub fn shape_surface_kind(kind: &str) -> Option<(&'static str, &'static str)> {
+    let (surface, prop) = SHAPE_SURFACES.iter().find_map(|(m, _)| kind.strip_prefix(m).map(|rest| (*m, rest)))?;
+    match prop {
+        "Color" => Some((surface, "color")),
+        _ => None,
+    }
+}
+
+/// A surface property of a shape surface item (see [`SHAPE_SURFACES`]).
+pub fn shape_surface_prop(ids: &mut Ids, prop: &str) -> Option<Property> {
+    match prop {
+        "color" => Some(ids.prop("color", "Color", Value::Color([1.0, 0.0, 0.0, 1.0])).with_ui(ParamUi::Color)),
+        _ => None,
+    }
+}
+
+/// An empty shape surface item (`front`, `bevel`, `side` or `back`).
+pub fn shape_surface(ids: &mut Ids, surface: &str) -> Option<PropGroup> {
+    let (m, name) = SHAPE_SURFACES.iter().find(|(m, _)| *m == surface)?;
+    Some(ids.group(m, name))
 }
 
 pub fn shape_simple_op(ids: &mut Ids, kind: &str) -> Option<PropGroup> {

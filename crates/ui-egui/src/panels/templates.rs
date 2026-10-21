@@ -4,7 +4,10 @@
 //! are rendered by our own renderer, one per frame, the first time the gallery shows them.
 //!
 //! Automation ids: `home.templates.<id>` (card), `home.templates.<id>.open`,
-//! `home.templates.<id>.delete` (user templates), `home.templates.saveCurrent`.
+//! `home.templates.<id>.delete` (user templates), `home.templates.saveCurrent`. Deleting a user
+//! template removes its file and can't be undone, so the card's delete button asks first
+//! (`dialog.deleteTemplate.delete`, `dialog.deleteTemplate.cancel`); agents running
+//! `templates.delete` with `engine.execute` are never asked.
 
 use egui::{Align2, Color32, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use serde_json::json;
@@ -13,7 +16,7 @@ use effectcraft_engine::templates::{self, THUMB_H, THUMB_W, TemplateInfo};
 
 use crate::icons::{self, Icon};
 use crate::theme::Tokens;
-use crate::{EffectcraftApp, widgets};
+use crate::{Dialog, EffectcraftApp, widgets};
 
 /// The gallery's entries (re-listed when the user template files change).
 pub fn entries(app: &mut EffectcraftApp) -> Vec<TemplateInfo> {
@@ -87,7 +90,7 @@ pub fn home_tab(app: &mut EffectcraftApp, ui: &mut egui::Ui, area: Rect) {
     let card_h = thumb_h + 62.0;
     let view = Rect::from_min_max(pos2(x, top), area.max);
     let mut open: Option<String> = None;
-    let mut delete: Option<String> = None;
+    let mut delete: Option<(String, String)> = None;
     let mut budget = true;
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(view).layout(egui::Layout::top_down(egui::Align::Min)));
     egui::ScrollArea::vertical().id_salt("home-templates-scroll").auto_shrink([false, false]).show(&mut child, |ui| {
@@ -142,7 +145,7 @@ pub fn home_tab(app: &mut EffectcraftApp, ui: &mut egui::Ui, area: Rect) {
                 app.auto.add(&format!("{base}.delete"), dr, "Delete Template");
                 if dresp.clicked() {
                     del_hit = true;
-                    delete = Some(tpl.id.clone());
+                    delete = Some((tpl.id.clone(), tpl.name.clone()));
                 }
             }
             if resp.clicked() && !del_hit {
@@ -150,13 +153,9 @@ pub fn home_tab(app: &mut EffectcraftApp, ui: &mut egui::Ui, area: Rect) {
             }
         }
     });
-    if let Some(id) = delete {
-        match app.session.execute("templates.delete", json!({"id": id})) {
-            Ok(_) => {
-                app.template_thumbs.remove(&id);
-            }
-            Err(e) => app.ui.status = e.to_string(),
-        }
+    if let Some(pending) = delete {
+        app.dialog_state.delete_template = Some(pending);
+        app.dialog = Some(Dialog::DeleteTemplate);
     } else if let Some(id) = open {
         // A modified project asks to save first (the template opens once answered).
         if super::unsaved::guard(app, "templates.create", &json!({"id": id})) {
@@ -164,6 +163,52 @@ pub fn home_tab(app: &mut EffectcraftApp, ui: &mut egui::Ui, area: Rect) {
         }
         match app.session.execute("templates.create", json!({"id": id})) {
             Ok(_) => app.ui.start_screen = false,
+            Err(e) => app.ui.status = e.to_string(),
+        }
+    }
+}
+
+/// Delete Template: the user template waiting on the prompt (`dialog_state.delete_template`, its
+/// id and name).
+pub fn show_delete(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
+    let Some((id, name)) = app.dialog_state.delete_template.clone() else {
+        app.dialog = None;
+        return;
+    };
+    let mut answer: Option<bool> = None;
+    super::dialogs::modal(ctx, "Delete Template", vec2(460.0, 150.0), t, |ui| {
+        ui.label(egui::RichText::new(format!("Delete the template “{name}”?")).color(t.tab_text_active));
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new(crate::i18n::tr("You can't undo this.")).color(t.text_dim).size(11.0));
+        ui.add_space(18.0);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let r = ui.add(egui::Button::new(egui::RichText::new(crate::i18n::tr("  Delete  ")).color(Color32::WHITE)).fill(t.danger));
+            app.auto.add("dialog.deleteTemplate.delete", r.rect, "Delete");
+            if r.clicked() {
+                answer = Some(true);
+            }
+            let r = ui.button(crate::i18n::tr("Cancel"));
+            app.auto.add("dialog.deleteTemplate.cancel", r.rect, "Cancel");
+            if r.clicked() {
+                answer = Some(false);
+            }
+        });
+    });
+    if answer.is_none() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        answer = Some(false);
+    }
+    // Cmd+D (Ctrl elsewhere) is Delete.
+    if answer.is_none() && super::dialogs::ui_command_key(ctx, egui::Key::D) {
+        answer = Some(true);
+    }
+    let Some(delete) = answer else { return };
+    app.dialog = None;
+    app.dialog_state.delete_template = None;
+    if delete {
+        match app.session.execute("templates.delete", json!({"id": id})) {
+            Ok(_) => {
+                app.template_thumbs.remove(&id);
+            }
             Err(e) => app.ui.status = e.to_string(),
         }
     }
@@ -183,6 +228,27 @@ mod tests {
         })
         .textures_delta
         .clear();
+    }
+
+    /// Click the widget registered as `id`, then draw the frame that follows.
+    fn click(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str) {
+        let [x, y, w, h] = app.auto.find(id).unwrap_or_else(|| panic!("{id} is not on screen")).rect;
+        let pos = pos2(x + w / 2.0, y + h / 2.0);
+        let button = |pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+        for event in [egui::Event::PointerMoved(pos), button(true), button(false)] {
+            ctx.run_ui(egui::RawInput { events: vec![event], ..Default::default() }, |ui| {
+                app.auto.begin_frame();
+                if app.ui.start_screen {
+                    crate::panels::home::show(app, ui, Rect::from_min_size(pos2(0.0, 0.0), vec2(1280.0, 860.0)));
+                }
+                crate::panels::dialogs::show(app, ui.ctx());
+            })
+            .textures_delta
+            .clear();
+        }
+        // Two more: a new dialog is laid out, and the automation ids of the clicked frame age out.
+        frame(app, ctx);
+        frame(app, ctx);
     }
 
     fn app_with_store() -> EffectcraftApp {
@@ -240,10 +306,23 @@ mod tests {
         app.session.execute("templates.create", json!({"id": mine})).unwrap();
         assert!(app.session.path.is_none());
         assert!(app.session.active_comp().is_some_and(|c| c.layers.iter().any(|l| l.name == "BRAND NAME")));
-        app.session.execute("templates.delete", json!({"id": mine})).unwrap();
+        // The card's delete button asks first: the file can't be brought back.
+        app.ui.start_screen = true;
         frame(&mut app, &ctx);
+        click(&mut app, &ctx, &format!("home.templates.{mine}.delete"));
+        assert_eq!(app.dialog, Some(Dialog::DeleteTemplate));
+        assert!(app.session.path.is_none() && entries(&mut app).iter().any(|t| t.id == mine), "nothing deleted or opened yet");
+        click(&mut app, &ctx, "dialog.deleteTemplate.cancel");
+        assert!(app.dialog.is_none() && entries(&mut app).iter().any(|t| t.id == mine), "Cancel keeps the template");
+        // Enter is not Delete; Cmd+D is.
+        click(&mut app, &ctx, &format!("home.templates.{mine}.delete"));
+        crate::panels::dialogs::press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert_eq!(app.dialog, Some(Dialog::DeleteTemplate));
+        crate::panels::dialogs::press_key(&mut app, &ctx, egui::Key::D, egui::Modifiers::COMMAND);
+        assert!(app.dialog.is_none() && app.dialog_state.delete_template.is_none());
         frame(&mut app, &ctx);
         assert!(app.auto.find(&format!("home.templates.{mine}")).is_none());
+        assert!(!entries(&mut app).iter().any(|t| t.id == mine));
     }
 
     #[test]

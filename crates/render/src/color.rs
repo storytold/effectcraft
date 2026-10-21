@@ -15,7 +15,9 @@
 //!   are linearised just before they are transformed and blended, the comp accumulates in linear
 //!   and is encoded back to the working space when the comp is done (so precomps hand encoded
 //!   pixels to their parent). Without a working space the Working Gamma's curve is used (sRGB
-//!   at 2.2, a pure 2.4 power curve at 2.4); so is it for Interpret As Linear Light footage.
+//!   at 2.2, a pure 2.4 power curve at 2.4); so is it for Interpret As Linear Light footage
+//!   and for float footage (OpenEXR, float TIFF), whose linear values are encoded once
+//!   ([`Pipe::float_curve`]).
 
 use effectcraft_color::{ColorSpace, Conversion};
 use effectcraft_project::{Footage, HdrMode, ProjectSettings};
@@ -66,6 +68,20 @@ impl Pipe {
     /// (managed; the working space converts from there) or the Working Gamma's curve (unmanaged).
     pub fn linear_footage_space(&self, f: &Footage) -> ColorSpace {
         f.color_profile.unwrap_or(if self.space.is_some() { ColorSpace::Srgb } else { self.curve() })
+    }
+
+    /// How float footage `f` (OpenEXR, float TIFF; linear light) is decoded: as stored when
+    /// Interpret As Linear Light encodes it afterwards (once, with
+    /// [`Pipe::linear_footage_space`]), else with the Working Gamma's curve when unmanaged and
+    /// the sRGB curve otherwise (the working space converts from there).
+    pub fn float_curve(&self, f: &Footage) -> crate::FloatCurve {
+        if f.linear_light_applies() { crate::FloatCurve::Linear } else { self.float_encoding() }
+    }
+
+    /// The curve float footage is encoded with when nothing interprets it afterwards: the
+    /// Working Gamma's when unmanaged (sRGB at 2.2, a pure 2.4 power curve at 2.4), else sRGB.
+    pub fn float_encoding(&self) -> crate::FloatCurve {
+        if self.space.is_none() && self.gamma24 { crate::FloatCurve::Gamma24 } else { crate::FloatCurve::Srgb }
     }
 
     /// Footage `f` from its colour profile (`None` = sRGB) → working space; nothing for

@@ -124,6 +124,10 @@ fn text_field(ui: &mut egui::Ui, app: &mut EffectcraftApp, id: &str, v: &mut Str
 pub fn dialog(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     let mut d = app.dialog_state.marker.clone();
     let (mut ok, mut cancel, mut delete) = (false, false, false);
+    // Cmd+Backspace (Ctrl elsewhere) is Delete, in a text field too.
+    let delete_key = super::dialogs::ui_command_key(ctx, egui::Key::Backspace);
+    // Cmd+Enter (Ctrl elsewhere) is OK, also in Comment, where Enter types a new line.
+    let ok_key = super::dialogs::ui_command_key(ctx, egui::Key::Enter);
     let title = d.title.clone();
     super::dialogs::modal(ctx, &title, vec2(520.0, 560.0), t, |ui| {
         egui::Grid::new("marker-grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
@@ -137,6 +141,7 @@ pub fn dialog(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             ui.end_row();
             ui.label(tr("Comment:"));
             let r = ui.add(egui::TextEdit::multiline(&mut d.comment).desired_rows(3).desired_width(320.0));
+            crate::widgets::focus_on_open(ui.ctx(), &r, &d.comment);
             app.auto.add("dialog.marker.comment", r.rect, "Comment");
             ui.end_row();
             ui.label(tr("Chapter:"));
@@ -217,7 +222,9 @@ pub fn dialog(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
         });
     });
     app.dialog_state.marker = d.clone();
-    if ok {
+    delete |= delete_key && !ok && !cancel;
+    // Enter is OK, unless a text field has it.
+    if ok || (!cancel && !delete && (ok_key || super::dialogs::ui_enter(ctx))) {
         if let Err(e) = app.session.execute("markers.set", draft_params(&d)) {
             app.ui.status = e.to_string();
         }
@@ -337,7 +344,7 @@ fn marker(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, comp: 
         ctx.data_mut(|d| d.remove::<(Option<u64>, usize, bool)>(drag_state_id()));
         app.session.history.merge_key = None;
     }
-    resp.context_menu(|ui| {
+    crate::widgets::context_menu(&resp, |ui| {
         let run = |ui: &mut egui::Ui, label: &str, cmd: &str, params: Value, app: &mut EffectcraftApp| {
             if ui.button(label).clicked() {
                 if cmd == "dialog" {
@@ -496,5 +503,46 @@ mod tests {
         assert_eq!(m["label"], "Blue");
         app.session.undo();
         assert_eq!(app.session.execute("markers.list", json!({})).unwrap()[0]["chapter"], "");
+        // Enter is OK and Cmd+Backspace is Delete.
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx, &app.tokens, crate::i18n::language(&app));
+        // The dialog opens with Comment focused (#922), a multi-line field where Enter types a
+        // new line; with the focus elsewhere, Enter is OK.
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.auto.begin_frame();
+            crate::panels::dialogs::show(&mut app, ui.ctx());
+        });
+        out.textures_delta.clear();
+        ctx.memory_mut(|m| m.stop_text_input());
+        app.dialog_state.marker.chapter = "Entered".into();
+        crate::panels::dialogs::press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert!(app.dialog.is_none());
+        assert_eq!(app.session.execute("markers.list", json!({})).unwrap()[0]["chapter"], "Entered");
+        open_dialog(&mut app, MarkerRef { layer: None, index: 0 }).unwrap();
+        // Also from a focused text field: Tab to one, then press the key.
+        for _ in 0..40 {
+            if ctx.egui_wants_keyboard_input() {
+                break;
+            }
+            crate::panels::dialogs::press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::NONE);
+        }
+        assert!(ctx.egui_wants_keyboard_input(), "a text field has focus");
+        // Cmd+Enter is OK from a focused text field, without typing a new line into it.
+        app.dialog_state.marker.chapter = "Cmd".into();
+        crate::panels::dialogs::press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::COMMAND);
+        assert!(app.dialog.is_none());
+        let m = &app.session.execute("markers.list", json!({})).unwrap()[0];
+        assert_eq!((m["chapter"].as_str(), m["comment"].as_str()), (Some("Cmd"), Some("hello")));
+        open_dialog(&mut app, MarkerRef { layer: None, index: 0 }).unwrap();
+        for _ in 0..40 {
+            if ctx.egui_wants_keyboard_input() {
+                break;
+            }
+            crate::panels::dialogs::press_key(&mut app, &ctx, egui::Key::Tab, egui::Modifiers::NONE);
+        }
+        assert!(ctx.egui_wants_keyboard_input(), "a text field has focus");
+        crate::panels::dialogs::press_key(&mut app, &ctx, egui::Key::Backspace, egui::Modifiers::COMMAND);
+        assert!(app.dialog.is_none());
+        assert_eq!(app.session.execute("markers.list", json!({})).unwrap().as_array().map(Vec::len), Some(0), "deleted");
     }
 }

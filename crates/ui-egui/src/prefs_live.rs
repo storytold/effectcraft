@@ -91,14 +91,19 @@ pub fn dropped_files(app: &mut EffectcraftApp, ui: &egui::Ui, bounds: Rect) {
         // Dropped files import as stills and folders' numbered stills as sequences; Alt-drag
         // imports a folder's files one by one (After Effects).
         let alt = ctx.input(|i| i.modifiers.alt);
+        // A dropped Photoshop file asks how to import it (the Import Photoshop File dialog, its
+        // Import Kind starting at Default Drag Import As), as File ▸ Import ▸ File… does (#678).
+        let layered = rest.iter().any(|p| p.rsplit('.').next().is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "psd" | "psb")));
         let mut params = json!({
             "paths": rest,
             "drag": true,
-            "importAs": app.session.prefs.drag_import_as(),
             "addToComp": at.is_some(),
             "position": at,
             "background": true
         });
+        if !layered {
+            params["importAs"] = json!(app.session.prefs.drag_import_as());
+        }
         if alt {
             params["sequence"] = json!(false);
         }

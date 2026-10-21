@@ -88,7 +88,10 @@ pub fn bindables(ui: &[UiCommand]) -> Vec<Bindable> {
     let entries = crate::menus::entries();
     for (path, e) in &entries {
         let key = binding_key(&e.command, &e.params);
-        let defaults = e.shortcut.iter().filter_map(|s| normalize(s)).collect();
+        // A plain entry also gets its command's further default keys.
+        let alt = if e.params.is_null() { crate::commands::find(&e.command).map_or(&[][..], |c| c.alt_shortcuts) } else { &[] };
+        let defaults =
+            e.shortcut.as_deref().into_iter().chain(e.alt_shortcuts.iter().map(String::as_str)).chain(alt.iter().copied()).filter_map(normalize).collect();
         push(
             Bindable {
                 key,
@@ -106,7 +109,7 @@ pub fn bindables(ui: &[UiCommand]) -> Vec<Bindable> {
         if !c.journal || entries.iter().any(|(_, e)| e.command == c.id) {
             continue;
         }
-        let defaults = c.shortcut.and_then(normalize).into_iter().collect();
+        let defaults = c.shortcut.into_iter().chain(c.alt_shortcuts.iter().copied()).filter_map(normalize).collect();
         push(
             Bindable {
                 key: c.id.to_string(),
@@ -148,6 +151,7 @@ pub fn normalize(s: &str) -> Option<String> {
     }
     let (mut ctrl, mut cmd, mut alt, mut shift) = (false, false, false, false);
     let mut key: Option<String> = None;
+    let mut physical = false;
     // `Cmd++` / `+` name the plus key.
     let (head, plus) = match s.strip_suffix("++") {
         Some(h) => (h, true),
@@ -174,6 +178,7 @@ pub fn normalize(s: &str) -> Option<String> {
     }
     for p in parts {
         match p.to_ascii_lowercase().as_str() {
+            "physical" => physical = true,
             "cmd" | "command" | "meta" | "super" | "win" => cmd = true,
             "ctrl" | "control" => ctrl = true,
             "alt" | "opt" | "option" => alt = true,
@@ -185,7 +190,7 @@ pub fn normalize(s: &str) -> Option<String> {
         key = Some("+".into());
     }
     let key = key?;
-    let mut out = String::new();
+    let mut out = if physical { "Physical+".to_string() } else { String::new() };
     for (on, m) in [(ctrl, "Ctrl+"), (cmd, "Cmd+"), (alt, "Alt+"), (shift, "Shift+")] {
         if on {
             out.push_str(m);

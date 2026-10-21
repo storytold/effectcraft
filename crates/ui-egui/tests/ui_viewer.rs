@@ -121,8 +121,10 @@ fn viewer_click_does_not_pick_through_hidden_or_locked_solo_layers() {
     }
 }
 
+/// Solo is not time-dependent (as in After Effects): outside the soloed layer's in-out range the
+/// viewer shows nothing, so neither the soloed layer nor the others can be picked.
 #[test]
-fn viewer_click_ignores_inactive_solo_layers() {
+fn viewer_click_picks_nothing_while_the_solo_layer_is_inactive() {
     let mut h = selection_harness();
     let comp = h.state().session.active_comp().unwrap();
     let (front, back) = (comp.layers[0].id, comp.layers[1].id);
@@ -133,7 +135,7 @@ fn viewer_click_ignores_inactive_solo_layers() {
     h.run_steps(3);
     let at = screen(&h, [320.0, 180.0]);
     click(&mut h, at);
-    assert_eq!(h.state().session.state.selected_layers, vec![back]);
+    assert!(h.state().session.state.selected_layers.is_empty(), "{back:?} stays excluded by solo");
 }
 
 /// A selected layer under the pointer takes the press before the layers in front of it, as in
@@ -160,6 +162,56 @@ fn viewer_press_prefers_a_selected_layer_under_the_pointer() {
     let at = screen(&h, [300.0, 180.0]);
     click(&mut h, at);
     assert_eq!(h.state().session.state.selected_layers, vec![front], "nothing selected: the topmost layer");
+}
+
+/// Each composition keeps its Resolution, saved with the project as in After Effects: chosen for
+/// comp A in the viewer's popup, it is still A's after showing comp B, costs no undo step, keeps
+/// A's cached frames and is read back from the saved file (#417).
+#[test]
+fn each_comp_keeps_its_viewer_resolution() {
+    use effectcraft_ui_egui::state::Resolution;
+    let mut h = harness();
+    let a = h.state().session.active_comp_id().unwrap();
+    let content = |h: &Harness<'_, EffectcraftApp>, c| {
+        let s = h.state();
+        s.frames.content_of(&s.session.project, s.session.revision, c)
+    };
+    let (before, steps) = (content(&h, a), h.state().session.history.undo.len());
+    for id in ["viewer.resolution", "viewer.resolutionItem.1"] {
+        let at = rect(&h, id).center();
+        click(&mut h, at);
+    }
+    assert_eq!(h.state().viewer_res(), Resolution::Half);
+    assert_eq!(h.state().session.project.comp(a).unwrap().resolution, Resolution::Half);
+    assert_eq!(h.state().session.history.undo.len(), steps, "no undo step");
+    assert_eq!(content(&h, a), before, "the comp's cached frames stay valid");
+    // Comp B starts at Auto and gets its own (here through the control channel's `ui.set`).
+    h.state_mut().session.execute("comp.new", json!({"name": "Other", "width": 320, "height": 180, "duration": 2})).unwrap();
+    h.run_steps(3);
+    let b = h.state().session.active_comp_id().unwrap();
+    assert_ne!(a, b);
+    assert_eq!(h.state().viewer_res(), Resolution::Auto);
+    let (req, _reply) = effectcraft_ui_egui::control::ControlRequest::new("ui.set", json!({"viewer": {"res": "quarter"}}));
+    let ctx = h.ctx.clone();
+    let _ = effectcraft_ui_egui::control::handle(h.state_mut(), &ctx, &req);
+    assert_eq!(h.state().viewer_res(), Resolution::Quarter);
+    let ctx = h.ctx.clone();
+    assert_eq!(effectcraft_ui_egui::control::inspect(h.state(), &ctx)["ui"]["viewer"]["res"], json!("Quarter"));
+    // Back to comp A: its resolution again.
+    h.state_mut().session.open_comp(a);
+    h.run_steps(3);
+    assert_eq!(h.state().viewer_res(), Resolution::Half);
+    assert!(h.state().viewer_scale(1.0, 1.0) == 0.5);
+    // Saved and opened again.
+    let path = std::env::temp_dir().join(format!("ec-viewer-res-{}.ecproj", std::process::id()));
+    h.state_mut().session.execute("file.saveAs", json!({"path": path.to_string_lossy()})).unwrap();
+    let mut s = Session::default();
+    s.execute("file.open", json!({"path": path.to_string_lossy()})).unwrap();
+    let _ = std::fs::remove_file(&path);
+    s.open_comp(b);
+    let app = EffectcraftApp::new(s);
+    assert_eq!(app.viewer_res(), Resolution::Quarter);
+    assert_eq!(app.session.project.comp(a).unwrap().resolution, Resolution::Half);
 }
 
 #[test]
@@ -601,6 +653,129 @@ fn fill_options_paint_the_next_shape() {
     assert_eq!(gfill.get("opacity").unwrap().value.as_f64(), 40.0);
 }
 
+/// With a shape layer selected, Fill Options' None switches its fill off and Solid Color turns
+/// it back on, and the Fill swatch shows the layer's kind (#732).
+#[test]
+fn fill_options_change_the_selected_shape_layer() {
+    let mut h = harness();
+    let l = h.state_mut().session.execute("layer.newShape", json!({"kind": "rect", "size": [100, 100], "position": [320, 180]})).unwrap()["layer"]
+        .as_u64()
+        .unwrap();
+    h.run_steps(2);
+    let fill_on = |h: &Harness<'_, EffectcraftApp>| {
+        let layer = h.state().session.active_comp().unwrap().layer(LayerId(l)).unwrap().clone();
+        layer.props.group("contents/group/contents/fill").unwrap().enabled
+    };
+    assert!(fill_on(&h));
+    for (kind, on) in [("none", false), ("solid", true)] {
+        let at = rect(&h, "header.fillOptions").center();
+        click(&mut h, at);
+        let at = rect(&h, &format!("header.fillOptions.{kind}")).center();
+        click(&mut h, at);
+        h.input_mut().events.push(Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() });
+        h.run_steps(3);
+        assert_eq!(fill_on(&h), on, "{kind}");
+        assert_eq!(h.state().session.state.shape_tool.fill.kind.id(), kind);
+    }
+}
+
+/// #1220: path tools hide the layer transform box, while path vertices remain editable.
+#[test]
+fn path_editing_hides_layer_bounds_and_keeps_corner_vertices_editable() {
+    for mask in [false, true] {
+        let mut h = harness();
+        let vertices = [[200.0, 100.0], [400.0, 100.0], [400.0, 260.0], [200.0, 260.0]];
+        let (layer, uid, kind) = if mask {
+            let layer = layer_id(&h, "Plate");
+            h.state_mut().session.execute("layer.select", json!({"layers": [layer]})).unwrap();
+            let r = h
+                .state_mut()
+                .session
+                .execute("mask.new", json!({"layer": layer, "vertices": vertices, "outTangents": [[40, 0], [0, 0], [0, 0], [0, 0]], "closed": true}))
+                .unwrap();
+            (layer, r["mask"].as_u64().unwrap(), "mask")
+        } else {
+            let r = h.state_mut().session.execute("shape.newPath", json!({"vertices": vertices, "outTangents": [[40, 0], [0, 0], [0, 0], [0, 0]], "closed": true, "fill": false, "stroke": "#ffffff", "strokeWidth": 4})).unwrap();
+            (r["layer"].as_u64().unwrap(), r["path"].as_u64().unwrap(), "shapePath")
+        };
+        h.state_mut().session.state.selected_vertices.clear();
+        h.run_steps(2);
+        let handle = format!("viewer.handle.{layer}.0");
+        assert!(h.state().auto.find(&handle).is_some(), "ordinary layer selection has transform handles (mask={mask})");
+        for tool in [Tool::Pen, Tool::PenAdd, Tool::PenDelete, Tool::PenConvert, Tool::MaskFeather] {
+            h.state_mut().ui.tool = tool;
+            h.run_steps(2);
+            assert!(h.state().auto.find(&handle).is_none(), "{tool:?}: hide the layer box");
+            assert!(h.state().auto.find(&format!("viewer.{kind}.{uid}.vertex.0")).is_some(), "{tool:?}: keep the path point");
+        }
+        h.state_mut().ui.tool = Tool::Selection;
+        h.run_steps(2);
+        let vertex = format!("viewer.{kind}.{uid}.vertex.0");
+        let from = rect(&h, &vertex).center();
+        click(&mut h, from);
+        h.run_steps(2); // The automation registry also keeps the preceding frame's elements.
+        assert!(h.state().auto.find(&handle).is_none(), "selecting a vertex starts path editing (mask={mask})");
+        let position = h.state().session.active_comp().unwrap().layer(LayerId(layer)).unwrap().props.prop("transform/position").unwrap().value.clone();
+        let path = |h: &Harness<'_, EffectcraftApp>| {
+            h.state()
+                .session
+                .active_comp()
+                .unwrap()
+                .layer(LayerId(layer))
+                .unwrap()
+                .props
+                .find_group(uid)
+                .unwrap()
+                .get("path")
+                .unwrap()
+                .value
+                .as_path()
+                .unwrap()
+                .clone()
+        };
+        let before = path(&h);
+        drag(&mut h, from, from + vec2(15.0, 12.0));
+        assert_ne!(path(&h).vertices[0], before.vertices[0], "the corner vertex can still be moved");
+        assert_eq!(path(&h).vertices[1..], before.vertices[1..]);
+        assert_eq!(h.state().session.active_comp().unwrap().layer(LayerId(layer)).unwrap().props.prop("transform/position").unwrap().value, position);
+        h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+        h.run_steps(2);
+        assert_eq!(path(&h), before, "moving the vertex undoes in one step");
+        let z = rect(&h, "viewer.comp").width() / 640.0;
+        let tangent = rect(&h, &vertex).center() + vec2(40.0 * z, 0.0);
+        drag(&mut h, tangent, tangent + vec2(0.0, 20.0));
+        assert_ne!(path(&h).out_tangents[0], before.out_tangents[0], "the Bézier handle is still editable");
+        assert_eq!(path(&h).vertices, before.vertices, "a tangent drag does not move the path points");
+        h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+        h.run_steps(2);
+        assert_eq!(path(&h), before, "the tangent drag undoes in one step");
+        h.state_mut().ui.tool = Tool::Rotate;
+        h.run_steps(2);
+        assert!(h.state().auto.find(&handle).is_some(), "a layer transform tool restores the box");
+        h.state_mut().ui.tool = Tool::Selection;
+        h.state_mut().session.state.selected_vertices.clear();
+        h.run_steps(2);
+        assert!(h.state().auto.find(&handle).is_some(), "ending vertex selection restores the box");
+    }
+}
+
+#[test]
+fn path_tools_keep_bounds_on_layers_without_visible_paths() {
+    let mut h = harness();
+    let layer = layer_id(&h, "Box");
+    h.state_mut().session.execute("layer.select", json!({"layers": [layer]})).unwrap();
+    h.state_mut().ui.tool = Tool::Pen;
+    h.run_steps(2);
+    let handle = format!("viewer.handle.{layer}.0");
+    assert!(h.state().auto.find(&handle).is_some(), "a layer without a path keeps its box");
+    h.state_mut().session.execute("mask.new", json!({"layer": layer, "vertices": [[0, 0], [80, 0], [80, 80]], "closed": true})).unwrap();
+    h.run_steps(2);
+    assert!(h.state().auto.find(&handle).is_none());
+    h.state_mut().ui.viewer.show_masks = false;
+    h.run_steps(2);
+    assert!(h.state().auto.find(&handle).is_some(), "hidden paths do not suppress the layer controls");
+}
+
 #[test]
 fn shape_pen_draws_a_closed_shape_layer() {
     let mut h = harness();
@@ -683,6 +858,40 @@ fn motion_path_key_drag_edits_that_key() {
 fn mask_path(h: &Harness<'_, EffectcraftApp>, name: &str) -> effectcraft_engine::keyframe::ShapePath {
     let l = h.state().session.active_comp().unwrap().layers.iter().find(|l| l.name == name).unwrap().clone();
     l.masks().unwrap().groups().next().unwrap().get("path").unwrap().value.as_path().unwrap().clone()
+}
+
+/// #1544: a Shift-click with the Pen puts the next point straight below, beside or diagonal to the
+/// one before it; without Shift it goes where it was clicked.
+#[test]
+fn pen_shift_click_draws_a_straight_segment() {
+    let mut h = harness();
+    let plate = layer_id(&h, "Plate");
+    h.state_mut().session.execute("layer.select", json!({"layers": [plate]})).unwrap();
+    h.state_mut().session.execute("view.snapping", json!({"value": false})).unwrap();
+    h.state_mut().ui.tool = Tool::Pen;
+    h.run_steps(2);
+    let first = screen(&h, [100.0, 60.0]);
+    click(&mut h, first);
+    let shift_click = |h: &mut Harness<'_, EffectcraftApp>, p: Pos2| {
+        let shift = egui::Modifiers::SHIFT;
+        h.input_mut().events.push(Event::ModifiersChanged(shift));
+        h.input_mut().events.push(Event::PointerMoved(p));
+        h.step();
+        h.input_mut().events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: shift });
+        h.step();
+        h.input_mut().events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: shift });
+        h.input_mut().events.push(Event::ModifiersChanged(egui::Modifiers::NONE));
+        h.run_steps(2);
+    };
+    let down = screen(&h, [112.0, 250.0]);
+    shift_click(&mut h, down);
+    let free = screen(&h, [300.0, 290.0]);
+    click(&mut h, free);
+    let drawn = mask_path(&h, "Plate");
+    let near = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).abs() < 1.0 && (a[1] - b[1]).abs() < 1.0;
+    assert_eq!(drawn.vertices.len(), 3, "{drawn:?}");
+    assert!(near(drawn.vertices[1], [100.0, 250.0]), "straight down: {drawn:?}");
+    assert!(near(drawn.vertices[2], [300.0, 290.0]), "no Shift, no constraint: {drawn:?}");
 }
 
 /// Drawing a mask with the Pen, moving a point and undoing take one action back per undo; a
@@ -1495,6 +1704,52 @@ fn timeline_twirl_arrows_open_layers_and_groups() {
 }
 
 #[test]
+fn command_clicking_a_group_twirl_opens_its_whole_tree() {
+    // Cmd-click (or Alt-click) the arrow of Effects, Contents, Masks…: every group under it
+    // twirls open with it, and closed again with it.
+    let mut h = harness();
+    let id = layer_id(&h, "Box");
+    h.state_mut().session.execute("effect.apply", json!({"effect": "Lumetri Color", "layers": [id]})).unwrap();
+    fn walk(g: &effectcraft_engine::project::PropGroup, out: &mut Vec<u64>) {
+        for sg in g.groups() {
+            out.push(sg.uid);
+            walk(sg, out);
+        }
+    }
+    let (effects, inner, transform) = {
+        let comp = h.state().session.active_comp().unwrap().clone();
+        let props = &comp.layer(LayerId(id)).unwrap().props;
+        let fx = props.sub("effects").unwrap();
+        let mut inner = vec![];
+        walk(fx, &mut inner);
+        (fx.uid, inner, props.sub("transform").unwrap().uid)
+    };
+    assert!(inner.len() > 1, "the effect has twirl-down groups of its own");
+    let at = rect(&h, &format!("timeline.layer.{id}.twirl")).center();
+    click(&mut h, at);
+    let at = rect(&h, &format!("timeline.group.{effects}.twirl")).center();
+    let cmd_click = |h: &mut Harness<'_, EffectcraftApp>| {
+        h.input_mut().events.push(Event::ModifiersChanged(egui::Modifiers::COMMAND));
+        h.input_mut().events.push(Event::PointerMoved(at));
+        h.step();
+        for pressed in [true, false] {
+            h.input_mut().events.push(Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::COMMAND });
+            h.step();
+        }
+        h.input_mut().events.push(Event::ModifiersChanged(Default::default()));
+        h.step();
+    };
+    cmd_click(&mut h);
+    let open = h.state().ui.timeline.open_groups.clone();
+    assert!(open.contains(&effects), "Effects twirls open");
+    assert!(inner.iter().all(|u| open.contains(u)), "and so does everything under it");
+    assert!(!open.contains(&transform), "other groups stay as they were");
+    cmd_click(&mut h);
+    let open = h.state().ui.timeline.open_groups.clone();
+    assert!(!open.contains(&effects) && !inner.iter().any(|u| open.contains(u)), "Cmd-click again closes the tree");
+}
+
+#[test]
 fn timeline_rename_commits_on_enter_and_on_click_away() {
     // The rename field (double-click a name, or Enter on a selected layer) used to grab the
     // keyboard every frame: clicking away or Enter could never leave it. (The harness can't
@@ -1842,6 +2097,37 @@ fn arrow_keys_nudge_the_selected_layer_at_the_viewer_magnification() {
     assert_eq!(pos(&h), [100.5, 109.5, 0.0], "sub-pixel steps when zoomed in");
 }
 
+/// #1288: with mask points selected the arrow keys move the points, not the layer: 1 pixel at the
+/// viewer's magnification in comp space (half a layer pixel on a layer scaled to 200 %), 10 with
+/// Shift, one undo step each.
+#[test]
+fn arrow_keys_nudge_the_selected_mask_points() {
+    let mut h = harness();
+    let plate = layer_id(&h, "Plate");
+    let corners = [[100.0, 60.0], [500.0, 60.0], [500.0, 300.0], [100.0, 300.0]];
+    let s = &mut h.state_mut().session;
+    s.execute("layer.select", json!({"layers": [plate]})).unwrap();
+    s.execute("prop.set", json!({"layer": plate, "path": "transform/scale", "value": [200, 200, 100]})).unwrap();
+    s.execute("mask.new", json!({"layer": plate, "vertices": corners, "closed": true})).unwrap();
+    let mask = s.active_comp().unwrap().layer(LayerId(plate)).unwrap().masks().unwrap().groups().next().unwrap().uid;
+    s.execute("mask.selectVertices", json!({"vertices": [{"layer": plate, "mask": mask, "index": 1}, {"layer": plate, "mask": mask, "index": 2}]})).unwrap();
+    let ppp = h.ctx.pixels_per_point();
+    h.state_mut().ui.viewer.zoom = Some(1.0 / ppp);
+    h.run_steps(2);
+    let pos = |h: &Harness<'_, EffectcraftApp>| {
+        h.state().session.active_comp().unwrap().layer(LayerId(plate)).unwrap().props.prop("transform/position").unwrap().value.as_vec3()
+    };
+    let (pos0, undo) = (pos(&h), h.state().session.history.undo.len());
+    key(&mut h, egui::Key::ArrowRight, egui::Modifiers::NONE);
+    key(&mut h, egui::Key::ArrowDown, egui::Modifiers::SHIFT);
+    let path = mask_path(&h, "Plate");
+    let near = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).abs() < 1e-6 && (a[1] - b[1]).abs() < 1e-6;
+    assert!(near(path.vertices[1], [500.5, 65.0]) && near(path.vertices[2], [500.5, 305.0]), "{:?}", path.vertices);
+    assert_eq!(path.vertices[0], corners[0], "unselected points stay");
+    assert_eq!(pos(&h), pos0, "the layer stays");
+    assert_eq!(h.state().session.history.undo.len(), undo + 2, "one undo step per press");
+}
+
 /// A comp wider than the GPU's texture limit at Full resolution shows its frame (averaged down
 /// into a texture the renderer accepts) instead of failing the upload (#201: 11000×2200).
 #[test]
@@ -1852,7 +2138,7 @@ fn full_resolution_frames_wider_than_the_texture_limit_fit() {
     let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
     // (egui's font atlas needs 1024.)
     h.input_mut().max_texture_side = Some(1024);
-    h.state_mut().ui.viewer.res = effectcraft_ui_egui::state::Resolution::Full;
+    h.state_mut().session.execute("view.res.full", json!({})).unwrap();
     let full = |h: &mut Harness<'_, EffectcraftApp>| h.state_mut().viewer_pixels().is_some_and(|px| px.size == [2400, 400]);
     for _ in 0..400 {
         h.step();
@@ -1861,7 +2147,7 @@ fn full_resolution_frames_wider_than_the_texture_limit_fit() {
         }
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
-    assert!(full(&mut h), "the full-size frame is shown (and stays readable): {:?}", h.state().ui.viewer.res);
+    assert!(full(&mut h), "the full-size frame is shown (and stays readable): {:?}", h.state().viewer_res());
     assert_eq!(h.state().viewer_texture_size(), Some([800, 134]), "2400×400 averaged by 3");
 }
 
@@ -1947,4 +2233,295 @@ fn vertex_tools_edit_motion_path_keyframes() {
     let quarter = screen(&h, [200.0, 100.0]);
     click(&mut h, quarter);
     assert_eq!(keys(&h).len(), 3);
+}
+
+/// #882: at 100 % (and 200 %) on a scaled display the frame's corner sits on a physical pixel, so
+/// every comp pixel covers whole screen pixels instead of being blended with its neighbour.
+#[test]
+fn frame_sits_on_the_physical_pixel_grid() {
+    for ppp in [1.0f32, 1.25, 1.5] {
+        let mut s = Session::default();
+        s.execute("comp.new", json!({"name": "Grid", "width": 301, "height": 201, "duration": 1})).unwrap();
+        let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_pixels_per_point(ppp).build_eframe(move |_| EffectcraftApp::new(s));
+        h.run_steps(3);
+        for (mag, pan) in [(1.0f32, [0.3f32, 0.37]), (2.0, [-0.45, 0.2])] {
+            h.state_mut().ui.viewer.zoom = Some(mag / ppp);
+            h.state_mut().ui.viewer.pan = pan;
+            h.run_steps(2);
+            let c = rect(&h, "viewer.comp");
+            for v in [c.min.x * ppp, c.min.y * ppp] {
+                assert!((v - v.round()).abs() < 1e-3, "ppp {ppp}, {mag}×: corner at {v} physical px");
+            }
+            assert!((c.width() * ppp - 301.0 * mag).abs() < 1e-2, "ppp {ppp}, {mag}×: {} physical px wide", c.width() * ppp);
+        }
+    }
+}
+
+/// Magnification ▸ Fit up to 100% keeps fitting as the panel changes size (Maximize Panel), like
+/// Fit, and never magnifies past 100%.
+#[test]
+fn fit_up_to_100_follows_the_maximized_panel() {
+    use effectcraft_ui_egui::dock::PanelKind;
+    let pick = |h: &mut Harness<'_, EffectcraftApp>| {
+        let at = rect(h, "viewer.magnification").center();
+        click(h, at);
+        let at = rect(h, "viewer.magnification.1").center();
+        click(h, at);
+        assert_eq!(h.state().ui.viewer.zoom, None, "a fit mode, not a fixed magnification");
+        assert!(h.state().ui.viewer.fit_up_to_100);
+        h.run_steps(2);
+    };
+    // A comp larger than the panel: it fills the docked panel, then the maximized one.
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| {
+        let mut s = Session::default();
+        s.execute("comp.new", json!({"name": "Big", "width": 3840, "height": 2160, "duration": 4})).unwrap();
+        EffectcraftApp::new(s)
+    });
+    h.run_steps(3);
+    pick(&mut h);
+    let docked = rect(&h, "viewer.comp").width();
+    h.state_mut().toggle_maximize(PanelKind::Composition);
+    h.run_steps(3);
+    let area = rect(&h, "viewer.area");
+    let maximized = rect(&h, "viewer.comp");
+    assert!(maximized.width() > docked + 100.0, "{docked} -> {}", maximized.width());
+    assert!(area.contains_rect(maximized), "{maximized:?} in {area:?}");
+    h.state_mut().toggle_maximize(PanelKind::Composition);
+    h.run_steps(3);
+    assert_eq!(rect(&h, "viewer.comp").width(), docked, "and back when the panel is restored");
+    // A comp smaller than the panel stops at 100%.
+    let mut h = harness();
+    pick(&mut h);
+    let ppp = h.ctx.pixels_per_point();
+    assert!(rect(&h, "viewer.comp").width() <= 640.0 / ppp + 0.01);
+    h.state_mut().toggle_maximize(PanelKind::Composition);
+    h.run_steps(3);
+    assert!((rect(&h, "viewer.comp").width() - 640.0 / ppp).abs() < 0.01);
+}
+
+/// The Rotation tool keeps counting past a full turn, as in After Effects: going round the anchor
+/// 1.5 turns clockwise gives 540° (1x +180.0°), going back 2 turns gives −180°, with no jump a
+/// revolution back where the pointer crosses the left of the anchor. One drag is one undo step.
+#[test]
+fn rotate_tool_counts_revolutions_both_ways() {
+    let mut h = harness();
+    let box_id = h.state().session.active_comp().unwrap().layers[0].id;
+    h.state_mut().session.execute("layer.select", json!({"layers": [box_id.0]})).unwrap();
+    h.state_mut().ui.tool = Tool::Rotate;
+    h.run_steps(2);
+    let rotation = |h: &Harness<'_, EffectcraftApp>| {
+        h.state().session.active_comp().unwrap().layer(box_id).unwrap().props.prop("transform/rotation").unwrap().value.as_f64()
+    };
+    let center = screen(&h, [320.0, 180.0]);
+    // Inside the 80 px box, so the drag starts on it (not on the Plate behind).
+    let r = (screen(&h, [350.0, 180.0]) - center).x;
+    let at = |deg: f64| center + vec2((deg.to_radians().cos() as f32) * r, (deg.to_radians().sin() as f32) * r);
+    let undo_before = h.state().session.history.undo.len();
+    // Press on the box, right of its anchor; then go round in 10° steps.
+    let press = center + vec2(r * 0.3, 0.0);
+    h.input_mut().events.push(Event::PointerMoved(press));
+    h.input_mut().events.push(Event::PointerButton { pos: press, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.step();
+    let mut seen = vec![];
+    let mut walk = |h: &mut Harness<'_, EffectcraftApp>, degs: Vec<f64>| {
+        for d in degs {
+            h.input_mut().events.push(Event::PointerMoved(at(d)));
+            h.step();
+            seen.push(rotation(h));
+        }
+    };
+    walk(&mut h, (0..=54).map(|i| i as f64 * 10.0).collect());
+    // The gesture applies the previous frame's pointer: hold a frame.
+    h.step();
+    let cw = rotation(&h);
+    assert!((cw - 540.0).abs() < 1.0, "1.5 turns clockwise: {cw}");
+    walk(&mut h, (1..=72).map(|i| 540.0 - i as f64 * 10.0).collect());
+    let end = at(-180.0);
+    h.input_mut().events.push(Event::PointerButton { pos: end, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    h.run_steps(2);
+    let ccw = rotation(&h);
+    assert!((ccw + 180.0).abs() < 1.0, "back two turns: {ccw}");
+    assert!(seen.windows(2).all(|w| (w[1] - w[0]).abs() <= 20.0), "no jump: {seen:?}");
+    assert_eq!(h.state().session.history.undo.len(), undo_before + 1, "one drag, one undo step");
+}
+
+/// Mask vertices multi-select with the Selection tool: Shift-click adds a vertex to the
+/// selection and Shift-clicking it again removes it; a plain click collapses to one (#1004).
+#[test]
+fn mask_shift_click_toggles_vertices() {
+    use egui::Modifiers;
+    let mut h = harness();
+    let plate = layer_id(&h, "Plate");
+    h.state_mut().session.execute("layer.select", json!({"layers": [plate]})).unwrap();
+    h.state_mut()
+        .session
+        .execute("mask.new", json!({"layer": plate, "vertices": [[100.0, 60.0], [500.0, 60.0], [500.0, 300.0], [100.0, 300.0]], "closed": true}))
+        .unwrap();
+    h.state_mut().ui.tool = Tool::Selection;
+    h.run_steps(2);
+    let (p0, p1) = (screen(&h, [100.0, 60.0]), screen(&h, [500.0, 60.0]));
+    let shift_click = |h: &mut Harness<'_, EffectcraftApp>, p: Pos2| {
+        h.input_mut().events.push(Event::ModifiersChanged(Modifiers::SHIFT));
+        h.step();
+        h.input_mut().events.push(Event::PointerMoved(p));
+        h.input_mut().events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::SHIFT });
+        h.step();
+        h.input_mut().events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::SHIFT });
+        h.step();
+        h.input_mut().events.push(Event::ModifiersChanged(Modifiers::NONE));
+        h.run_steps(2);
+    };
+    click(&mut h, p0);
+    assert_eq!(h.state().session.state.selected_vertices.len(), 1, "plain click selects one vertex");
+    shift_click(&mut h, p1);
+    assert_eq!(h.state().session.state.selected_vertices.len(), 2, "shift-click adds a second vertex");
+    shift_click(&mut h, p1);
+    assert_eq!(h.state().session.state.selected_vertices.len(), 1, "shift-click again removes it");
+}
+
+/// Dragging a marquee from empty viewer area selects the mask vertices inside it, additive
+/// with Shift, without moving the layer (#1004).
+#[test]
+fn mask_marquee_selects_vertices() {
+    let mut h = harness();
+    let plate = layer_id(&h, "Plate");
+    let bx = layer_id(&h, "Box");
+    // A full-frame layer behind leaves no empty area to start a marquee from: remove it.
+    h.state_mut().session.execute("layer.select", json!({"layers": [plate]})).unwrap();
+    h.state_mut().session.execute("edit.clear", json!({"layers": [plate]})).unwrap();
+    assert_eq!(h.state().session.active_comp().unwrap().layers.len(), 1);
+    h.state_mut().session.execute("layer.select", json!({"layers": [bx]})).unwrap();
+    h.state_mut()
+        .session
+        .execute("mask.new", json!({"layer": bx, "vertices": [[10.0, 10.0], [70.0, 10.0], [70.0, 70.0], [10.0, 70.0]], "closed": true}))
+        .unwrap();
+    h.state_mut().ui.tool = Tool::Selection;
+    h.state_mut().session.execute("mask.selectVertices", json!({"vertices": []})).unwrap();
+    h.run_steps(2);
+    // Mask vertices are layer-local; map vertex 0 to comp space (no rotation, uniform scale).
+    let (pp, aa) = {
+        let l = h.state().session.active_comp().unwrap().layer(LayerId(bx)).unwrap().clone();
+        (l.props.prop("transform/position").unwrap().value.as_vec3(), l.props.prop("transform/anchor").unwrap().value.as_vec3())
+    };
+    let v0 = [10.0 - aa[0] + pp[0], 10.0 - aa[1] + pp[1]];
+    let pos = |h: &Harness<'_, EffectcraftApp>| {
+        h.state().session.active_comp().unwrap().layer(LayerId(bx)).unwrap().props.prop("transform/position").unwrap().value.as_vec3()
+    };
+    let before = pos(&h);
+    // Drag a box around the top-left vertex only, starting/ending on empty area.
+    let (from, to) = (screen(&h, [(v0[0] - 90.0) as f32, (v0[1] - 50.0) as f32]), screen(&h, [(v0[0] + 10.0) as f32, (v0[1] + 10.0) as f32]));
+    drag(&mut h, from, to);
+    let sel = &h.state().session.state.selected_vertices;
+    assert_eq!(sel.len(), 1, "marquee selects the enclosed vertex: {sel:?}");
+    assert_eq!(sel[0].index, 0);
+    assert_eq!(pos(&h), before, "the layer does not move under a vertex marquee");
+    // Shift-marquee adds the vertices it encloses.
+    let v1 = [70.0 - aa[0] + pp[0], 10.0 - aa[1] + pp[1]];
+    let (from, to) = (screen(&h, [(v1[0] - 10.0) as f32, (v1[1] - 50.0) as f32]), screen(&h, [(v1[0] + 60.0) as f32, (v1[1] + 50.0) as f32]));
+    h.input_mut().events.push(Event::ModifiersChanged(egui::Modifiers::SHIFT));
+    h.step();
+    h.input_mut().events.push(Event::PointerMoved(from));
+    h.input_mut().events.push(Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::SHIFT });
+    h.step();
+    for i in 1..=8 {
+        h.input_mut().events.push(Event::PointerMoved(from + (to - from) * (i as f32 / 8.0)));
+        h.step();
+    }
+    h.input_mut().events.push(Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::SHIFT });
+    h.step();
+    h.input_mut().events.push(Event::ModifiersChanged(egui::Modifiers::NONE));
+    h.run_steps(2);
+    let sel = &h.state().session.state.selected_vertices;
+    assert_eq!(sel.len(), 2, "shift-marquee adds: {sel:?}");
+}
+
+/// A null's eye in the Timeline hides it in the Composition viewer, as in After Effects: its box
+/// and handles go even while it is selected and a click on its box doesn't pick it; the eye back
+/// on brings them back.
+#[test]
+fn null_eye_hides_it_in_the_viewer() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Nulls", "width": 640, "height": 360, "duration": 4})).unwrap();
+    let n = s.execute("layer.newNull", json!({})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.select", json!({"layers": [n]})).unwrap();
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(move |_| EffectcraftApp::new(s));
+    h.run_steps(3);
+    let handle = format!("viewer.handle.{n}.0");
+    let eye = format!("timeline.layer.{n}.video");
+    assert!(h.state().auto.find(&handle).is_some(), "a shown null has handles");
+    // The eye is there for a null and turns its video off.
+    let at = rect(&h, &eye).center();
+    click(&mut h, at);
+    assert!(!h.state().session.active_comp().unwrap().layer(LayerId(n)).unwrap().switches.video);
+    h.run_steps(2);
+    assert!(h.state().auto.find(&handle).is_none(), "a hidden null has no handles");
+    // A click on its box doesn't pick it.
+    h.state_mut().session.execute("edit.deselectAll", json!({})).unwrap();
+    h.run_steps(40); // A new click, not a double-click.
+    let centre = screen(&h, [320.0, 180.0]);
+    click(&mut h, centre);
+    assert!(h.state().session.state.selected_layers.is_empty());
+    // The eye back on: selectable again, with its handles.
+    h.run_steps(40);
+    let at = rect(&h, &eye).center();
+    click(&mut h, at);
+    assert!(h.state().session.active_comp().unwrap().layer(LayerId(n)).unwrap().switches.video);
+    h.run_steps(40);
+    click(&mut h, centre);
+    assert_eq!(h.state().session.state.selected_layers, vec![LayerId(n)]);
+    h.run_steps(2);
+    assert!(h.state().auto.find(&handle).is_some(), "handles back with the eye on");
+}
+
+/// #1642: a null stays visible after deselection, without selection handles.
+#[test]
+fn unselected_null_keeps_its_outline() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Nulls", "width": 640, "height": 360, "duration": 4})).unwrap();
+    let n = s.execute("layer.newNull", json!({})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.select", json!({"layers": [n]})).unwrap();
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(move |_| EffectcraftApp::new(s));
+    h.run_steps(3);
+    // Use the selected box's actual geometry, so transformed nulls use the same outline.
+    let corners: Vec<Pos2> = (0..4).map(|i| rect(&h, &format!("viewer.handle.{n}.{i}")).center()).collect();
+    fn count(shape: &egui::Shape, corners: &[Pos2]) -> usize {
+        match shape {
+            egui::Shape::Path(p) => usize::from(p.closed && p.points == corners),
+            egui::Shape::Vec(v) => v.iter().map(|s| count(s, corners)).sum(),
+            _ => 0,
+        }
+    }
+    let outlines = |h: &Harness<'_, EffectcraftApp>| h.output().shapes.iter().map(|s| count(&s.shape, &corners)).sum::<usize>();
+    assert_eq!(outlines(&h), 1, "one selected outline");
+    h.state_mut().session.execute("edit.deselectAll", json!({})).unwrap();
+    h.run_steps(3);
+    assert_eq!(outlines(&h), 1, "deselection keeps the null visible");
+    assert!(h.state().auto.find(&format!("viewer.handle.{n}.0")).is_none());
+    assert!(h.state().auto.find(&format!("viewer.anchor.{n}")).is_none());
+    h.state_mut().ui.viewer.show_layer_controls = false;
+    h.run_steps(2);
+    assert_eq!(outlines(&h), 0, "Show Layer Controls hides the outline");
+    h.state_mut().ui.viewer.show_layer_controls = true;
+    h.state_mut().session.execute("layer.setSwitch", json!({"layers": [n], "switch": "video", "value": false})).unwrap();
+    h.run_steps(2);
+    assert_eq!(outlines(&h), 0, "the Video switch hides an unselected null too");
+    h.state_mut().session.execute("layer.setSwitch", json!({"layers": [n], "switch": "video", "value": true})).unwrap();
+    h.run_steps(2);
+    assert_eq!(outlines(&h), 1, "the Video switch restores the outline");
+    // Solo scope matches picking: a soloed AV layer hides unsoloed nulls, even outside its range.
+    let solid = h.state_mut().session.execute("layer.newSolid", json!({"name": "Solo", "color": "#406080", "width": 40, "height": 40})).unwrap()["layer"]
+        .as_u64()
+        .unwrap();
+    h.state_mut().session.execute("layer.setSwitch", json!({"layers": [solid], "switch": "solo", "value": true})).unwrap();
+    h.state_mut().session.execute("edit.deselectAll", json!({})).unwrap();
+    h.run_steps(3);
+    assert_eq!(outlines(&h), 0, "an unsoloed null follows solo scope");
+    let cid = h.state().session.active_comp_id().unwrap();
+    std::sync::Arc::make_mut(&mut h.state_mut().session.project).comp_mut(cid).unwrap().layer_mut(LayerId(solid)).unwrap().out_point =
+        effectcraft_engine::time::Tick::ZERO;
+    h.run_steps(2);
+    assert_eq!(outlines(&h), 0, "an inactive soloed layer still sets solo scope");
+    h.state_mut().session.execute("layer.setSwitch", json!({"layers": [n], "switch": "solo", "value": true})).unwrap();
+    h.run_steps(2);
+    assert_eq!(outlines(&h), 1, "a soloed null keeps its outline");
 }

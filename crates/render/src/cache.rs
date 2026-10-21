@@ -423,8 +423,10 @@ fn hash_debug(h: &mut KeyHasher, v: &impl std::fmt::Debug) {
 
 /// Time-based layer content: does any part of the source/effects read the clock directly
 /// (rather than through property values)?
-fn time_dependent(layer: &Layer) -> bool {
-    if layer.switches.effects
+/// `effects: false` ignores the effects (a key of the source and masks only).
+fn time_dependent(layer: &Layer, effects: bool) -> bool {
+    if effects
+        && layer.switches.effects
         && let Some(fx) = layer.effects()
     {
         for g in fx.groups() {
@@ -522,7 +524,10 @@ fn has_expression(g: &PropGroup) -> bool {
 /// Cache key for an adjustment layer's footprint (its source through its masks, see
 /// `Renderer::adjustment_footprint`): the GPU compositor then uploads it once, not every frame.
 pub fn footprint_key(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool) -> Option<u64> {
-    Some(derive(key_any(ctx, layer, scale, draft, blur, false, None)?, 0xf007_9417))
+    // The footprint is the source through the masks, without the effects: a time-dependent
+    // effect (Noise on a finishing adjustment layer) must not re-key it every frame (on the GPU,
+    // a full-frame re-upload per frame).
+    Some(derive(key_any(ctx, layer, scale, draft, blur, false, Some(0))?, 0xf007_9417))
 }
 
 fn key_with(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool, footage: bool) -> Option<u64> {
@@ -620,7 +625,7 @@ fn key_any(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool, fo
             effectcraft_effects::paint::cache_key(g, lt).0.hash(&mut h);
         }
     }
-    if time_dependent(layer) {
+    if time_dependent(layer, effects != Some(0)) {
         layer.layer_time(ctx.time).0.hash(&mut h);
         // Effects also see the layer's time mapping.
         layer.start_time.0.hash(&mut h);

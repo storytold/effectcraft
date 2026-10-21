@@ -115,6 +115,7 @@ pub fn dialog(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
         ui.horizontal(|ui| {
             ui.label(tr("New composition name:"));
             let r = ui.add(egui::TextEdit::singleline(&mut d.name).desired_width(260.0));
+            crate::widgets::focus_on_open(ui.ctx(), &r, &d.name);
             app.auto.add("dialog.precompose.name", r.rect, "New composition name");
         });
         ui.add_space(10.0);

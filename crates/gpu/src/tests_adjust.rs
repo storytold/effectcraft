@@ -3,7 +3,7 @@
 
 use effectcraft_keyframe::{ShapePath, Value};
 use effectcraft_project::build::{self, Ids};
-use effectcraft_project::{BitDepth, ColorSpace, MaskMode};
+use effectcraft_project::{BitDepth, ColorSpace, MaskMode, MatteKind, TrackMatte};
 use effectcraft_render::{Backend, FxStep, FxTarget, RenderOpts, Renderer};
 use effectcraft_time::Tick;
 
@@ -69,6 +69,24 @@ fn mixed_adjustment_chains_fall_back_per_effect() {
         s.p.settings.working_space = Some(ColorSpace::Rec709);
         s.p.settings.blend_linear = true;
         check(&format!("colour-managed adjustment {depth:?}"), compare_at(&s, opts(), Tick::ZERO), 0.0);
+    }
+}
+
+/// A track matte limits where the adjustment shows, as on the CPU (#1201).
+#[test]
+fn track_mattes_limit_gpu_adjustments_like_the_cpu() {
+    for depth in [BitDepth::Bpc8, BitDepth::Bpc32] {
+        for kind in [MatteKind::Alpha, MatteKind::AlphaInverted, MatteKind::Luma, MatteKind::LumaInverted] {
+            let mut s = adjustment_scene(depth, &gpu_stack(), false);
+            let mut matte = s.footage(50, 30);
+            matte.switches.video = false;
+            set(&mut matte, "transform/rotation", Value::Scalar(10.0));
+            let mid = s.push(matte);
+            let c = s.p.comp_mut(s.cid).unwrap();
+            let adj = c.layers.iter_mut().find(|l| l.switches.adjustment).unwrap();
+            adj.track_matte = Some(TrackMatte { layer: mid, kind });
+            check(&format!("matted adjustment {kind:?} {depth:?}"), compare_at(&s, opts(), Tick::ZERO), 0.0);
+        }
     }
 }
 

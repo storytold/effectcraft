@@ -43,6 +43,11 @@ Desktop, Cursor and the like) take the same `command` and `args`.
 - **Bridge** (`["mcp", "--bridge", "9877"]`): drives a running `effectcraft --control 9877`, so you
   see every change live. Bridge mode adds `screenshot` and the `ui_*` tools.
 
+After a broken connection, the bridge retries explicitly read-only control queries once.
+Engine commands, UI edits and unknown methods whose transmission or reply fails report an
+unknown outcome: the app may already have applied them. Inspect the app before explicitly
+retrying. A later call reconnects; timeouts and malformed replies are never automatically resent.
+
 ### From an installed release
 
 The release packages ship `effectcraft-cli` alongside the desktop app, so no build is needed:
@@ -107,7 +112,7 @@ See [MCP conventions](mcp.md) for core tools, resources, strict arguments, and r
 | `set_property {layer, path, value?, time?, timeBase?, expression?, comp?}` | Sets a static value. With `time` it sets a keyframe (`timeBase: "comp"` for comp seconds); with `expression` it sets an expression. |
 | `add_keyframe {layer, path, time+value \| keys:[...], timeBase?, interpolation?, comp?}` | Adds keys (layer seconds, or comp seconds with `timeBase: "comp"`), then optionally applies linear/bezier/hold/easyEase. |
 | `list_effects {filter?}` | Effect ids, names, categories, GPU / 32-bpc support and parameters. |
-| `list_fonts {query?, rescan?}` | Font families text layers can use, bundled and installed, with their styles, origin and own-language name; `rescan` picks up fonts installed since launch. |
+| `list_fonts {query?, variable?, rescan?}` | Font families text layers can use, bundled and installed, with their styles, origin, whether each is a variable font and own-language name; `variable` lists only variable fonts; `rescan` picks up fonts installed since launch. |
 | `add_effect {layer, effect, values?, comp?}` | Apply an effect and set its parameters in one call and one undo step (a failing value leaves nothing applied); returns the instance path (`effects/#n`) and its parameter paths. |
 | `render_frame {comp?, time?, max_side?, path?, inline?, transparent?}` | Returns a PNG image of a frame; `transparent: true` keeps the alpha (as an RGB + Alpha render writes it) instead of compositing over the comp background. |
 | `open_project {path \| demo \| new}` / `save_project {path?}` | Open and save files. |
@@ -123,7 +128,8 @@ See [MCP conventions](mcp.md) for core tools, resources, strict arguments, and r
 | `render_preview` | Render a PNG without writing a file (`comp`, `time`, `max_side`, `transparent`). |
 
 Layers are referenced by id (from `get_comp`), `"#n"` (1-based index from the top) or name. Comps are
-referenced by id or name, and default to the active comp. Property paths come from `get_layer`, for
+referenced by id or name, and default to the active comp. An id may also be sent as a string (`"98"`):
+an all-digit string that matches no name is taken as the id. Property paths come from `get_layer`, for
 example `transform/position`, `transform/opacity`, `effects/#1/blurriness` or `@57` (by uid). Times
 are in seconds. Keyframe times are layer time, which equals comp time unless the layer is offset or
 stretched.
@@ -144,7 +150,7 @@ carries outside-range warnings; the existing objects from `keys.set` and `prop.g
 also report both bases and warnings. `prop.get.time` is comp seconds. Separated Position
 `prop.set` retains per-axis replies; for these commands, `path` or `prop` identifies a property, not a group.
 
-Set offsets with `layer.timing {layer, start: 10.5}`; `in`, `out` and `delta` also use comp seconds.
+Set offsets with `layer.timing {layer, start: 10.5}`; `in`, `out` and `delta` also use comp seconds; `inDelta` / `outDelta` trim each layer from its own in/out point.
 For an unstretched layer starting at 10.5 s in a 30 fps comp,
 `prop.addKey {layer: "A", path: "transform/opacity", time: 15.3,
 timeBase: "comp", value: 0}` writes a key at comp 15.3 s (layer 4.8 s), matching
@@ -219,9 +225,16 @@ build real projects through these interfaces; they are worked examples of everyt
 * **Nested comps**: `comp.settings {preserveFrameRate, preserveResolution}` (Composition Settings ▸
   Advanced); `comp.info` / `get_comp` report both. A precomp layer shows nothing outside its
   nested comp's span.
+* **Viewer Resolution** belongs to each comp and is saved with the project, as in After Effects:
+  `view.res.full|half|third|quarter|auto {comp?}` or `view.res.custom {factor: 1..40, comp?}`
+  (headless too; no undo step, the project becomes modified). `comp.info` reports `resolution`
+  and `resolutionFactor` (`null` for Auto).
 * **Several footage items at once**: `file.newCompFromSelection {single, dimensionsFrom, duration,
   sequence, overlap, overlapDuration, transition, addToRenderQueue}` is one undo step (select the
   items first: `project.select`).
+* **Where an item is used**: `project.usedIn {item?}` → `{item, count, comps: [{id, name, layers}]}`
+  counts the layers, in every comp, whose source the item is (direct uses only, as the Project
+  panel's "Name ▾, used 3 times" header; its ▾ lists the comps and opens the one picked).
 * **Locked layers** are left alone: `edit.clear`, `layer.arrange`, `layer.transform` and
   `layer.centerAnchor` skip them and fail when every target is locked ("… is locked"); Select
   All and `layer.selectNext` / `selectPrevious` step over them. Unlock with
@@ -243,8 +256,15 @@ build real projects through these interfaces; they are worked examples of everyt
   / `selectPrevious` / `selectFollowing`, `keys.move {delta, merge}` (steps sharing a merge key are
   one drag: each applies to the keys as they were before it, so a key passed over survives) and
   `keys.transform {…, merge, fromStart: true}` (values are the whole transform since the drag
-  started). Keys of locked layers can't be selected. Copy / paste: `keys.copy`, then `keys.paste`
+  started). **Quick Offset** (Ctrl/Cmd+Alt drag in the Timeline): `layer.quickOffset {delta,
+  layers?}` and `keys.quickOffset {delta}` stagger the selected layers, or each layer's selected
+  keys together, in selection order: the first stays, the last moves by `delta` (comp seconds) and
+  the ones between by equal steps, onto subframes; `merge` + `fromStart: true` make `delta` the whole
+  drag. Keys of locked layers can't be selected. Copy / paste: `keys.copy`, then `keys.paste`
   at the current time (keys copied from several layers go to as many selected layers in order).
+  Whole effects: `effect.copy`, then `effect.paste {layers}` places the earliest copied effect
+  key at the destination comp's current time, preserving the offsets between all copied
+  effects and parameters, including on offset or time-stretched layers.
   `time.nextKey` / `time.previousKey` / `keys.selectAll` take `visible: [{layer, prop}]` to act
   only on those properties (the Timeline passes its revealed ones, as J / K and Ctrl+Alt+A do).
 * **Easing with Keyframe Velocity**: select keys by path, `keys.select {"keys":[{"layer":"Ring","path":"contents/trim/end","time":0}]}`,
@@ -283,7 +303,9 @@ build real projects through these interfaces; they are worked examples of everyt
   The CLI also renders an exported template directly:
   `effectcraft-cli render --template lt.ectemplate --values values.json --out 'title_[#####].png'`.
   `values.json` is an object such as `{"Title":"John Smith","Bar Color":"#00c080","Bar Opacity":50}`;
-  names follow `essential.set`, including its case-insensitive matching. Values override one
+  names follow `essential.set`, including its case-insensitive matching. A Media Replacement
+  control takes a footage file path (`{"Clip":"/in/clipB.mp4"}`, or `{"path": …}`), which is
+  imported and set as the control's `item`. Values override one
   imported instance; the template file and its source controls keep their defaults. Omit
   `--values` to render those defaults, or use the same options with `render-frame` for a PNG.
   Values must fit in 1 MiB. Invalid JSON, unknown controls and invalid values fail before rendering.
@@ -443,7 +465,10 @@ direction?: forward|backward|both, to?, wait?}` segments the span (in the backgr
 `wait`); strokes on any other frame correct it and propagation restarts from there.
 `roto.span {start?, end?}`, `roto.freeze {wait?}` / `roto.unfreeze`, `roto.clearStrokes {frame?,
 kind?}`, `roto.cancel` and `roto.options {diameter?, refineDiameter?, view?: alphaBoundary|alpha|
-alphaOverlay|none}` complete the set; every edit is one undo step. `roto.status {layer, frame?,
+alphaOverlay|none}` complete the set; every edit is one undo step. If trimming the layer or
+shortening the comp leaves strokes outside the layer, `roto.span` returns an error without
+changing the strokes: restore the timing or remove those strokes with `roto.clearStrokes` first.
+`roto.status {layer, frame?,
 matte?, compute?, compareTo?}` reports the base frame, span, computed and stroked frames, frozen
 state, job progress and, for a frame, the matte's area, centroid, RLE matte and IoU against a
 reference. Matte settings are ordinary properties (`effects/#1/rotoBrushMatte/searchRadius`,
@@ -471,10 +496,33 @@ effectcraft-cli run clip.ecproj roto.stroke '{"layer":"#1","points":[[300,200],[
   roto.propagate '{"layer":"#1","wait":true}' roto.freeze '{"layer":"#1","wait":true}' --save
 ```
 
+### Object Matte
+
+The Object Matte tool (third in the Alt+W slot) works in the Composition viewer: click an object,
+or drag a box around it; Shift adds another Object Matte instead of re-prompting the layer's.
+Agents use `objectMatte.apply {layer, point: [x, y], box?: [x0, y0, x1, y1], frame?, track?,
+before?, after?, effect?}` (layer pixels, layer frames; `effect` re-prompts that instance), one
+undo step each. With a trained model installed (Settings ▸ Roto Brush) the box is the model's box
+prompt. `objectMatte.propagate {layer, effect?, direction?, wait?}` tracks the matte over the
+frames around the reference frame in the background (`roto.cancel` stops it; edits to the prompt
+or the layer's frames queue it again), `objectMatte.freeze {wait?}` / `objectMatte.unfreeze`
+store or drop the final mattes, and `objectMatte.status {layer, effect?}` reports the job's
+progress, the frozen state, the tracked frames and which are computed. With the disk cache on (Settings ▸
+Media & Disk Cache), computed Object Matte and Roto Brush segmentations are also kept there, keyed
+by what they are made of, so reopening a project reuses them.
+
+```sh
+effectcraft-cli run clip.ecproj objectMatte.apply '{"layer":"#1","point":[320,200],"box":[250,120,400,300]}' \
+  objectMatte.propagate '{"layer":"#1","wait":true}' objectMatte.freeze '{"layer":"#1","wait":true}' --save
+```
+
 ### Text: styles and editing
 
-Source Text holds character style runs and per-paragraph settings. `layer.setText` changes the
-whole layer, or only characters `range: [start, end]` (character indices): character attributes
+Source Text holds character style runs and per-paragraph settings. CR (`\r`), LF (`\n`) and
+CRLF (`\r\n`) each make a paragraph break; the original string and character indices are
+preserved. This also applies to scripted `TextDocument` values and `sourceRectAtTime()` bounds.
+`layer.setText` changes the whole layer, or only characters `range: [start, end]` (character
+indices): character attributes
 (`font`, `size`, `fill`, `tracking`, `kerning: metrics|optical|<1/1000 em>`, `tsume`,
 `baseline: superscript|subscript`, `allCaps`…) split the text into runs; paragraph attributes
 (`justify`, `indentLeft`, `indentFirst`, `spaceBefore`, `direction`, `composer`,
@@ -491,12 +539,21 @@ whole layer, or only characters `range: [start, end]` (character indices): chara
    work on the selected text; `text.endEdit` commits (an empty Type-tool layer is removed).
 
 Fonts: `text.fonts` (MCP `list_fonts`) lists every family a text layer can use, bundled and installed, with its
-styles, origin (`bundled`, `system`, `user`) and own-language name (`{"query":"gothic"}` filters
-by name; `{"rescan":true}` first picks up fonts installed since launch). Pass a listed `family` and
-one of its `styles` to `layer.setText {"font", "style"}`; `text.fontFeatures` says which OpenType
-options a font draws with its own glyphs.
+styles, origin (`bundled`, `system`, `user`), `variable` (it has variation axes) and own-language name
+(`{"query":"gothic"}` filters by name, `{"variable":true}` keeps only variable fonts, like the font
+menu's Variable Fonts filter; `{"rescan":true}` first picks up fonts installed since launch). Pass a listed `family` and
+one of its `styles` to `layer.setText {"font", "style"}`. A variable font's named instances (`Light` …
+`Black`) are styles of its family; a style or an instance's PostScript name (`"font": "Figtree-Black"`)
+sets the instance's axis values, and `variations` set on the text override them axis by axis.
+`text.fontFeatures` says which OpenType options a font draws with its own glyphs.
 A tool with its own font library can hand it over without installing it: folders listed in
 `EFFECTCRAFT_FONT_DIRS` (a path list, `:`-separated, `;` on Windows) are scanned like the system font folders.
+On Linux and the BSDs the system font folders are `/usr/share/fonts`, `/usr/local/share/fonts`,
+`~/.local/share/fonts`, `~/.fonts`, `$XDG_DATA_HOME/fonts`, `fonts` in each `$XDG_DATA_DIRS` folder,
+every `<dir>` the fontconfig configuration names (`/etc/fonts/fonts.conf` with its includes,
+`~/.config/fontconfig/fonts.conf`) and, in the Flatpak, the host's fonts under `/run/host`. The
+Flatpak can't see other folders; grant one with
+`flatpak override --user --filesystem=<dir>:ro --env=EFFECTCRAFT_FONT_DIRS=<dir> ai.storyteller.effectcraft`.
 
 In expressions, `text.sourceText.style` / `getStyleAt(i, t)` read styles and the setters
 (`setFontSize(v, start?, count?)`, `setFillColor`, `setText`, `setJustification`…) return a
@@ -512,7 +569,10 @@ Scripts that build ScriptUI windows publish them to the session; agents drive th
 3. `scriptui.click {"widget": "ok"}` presses a button / toggles a checkbox / picks a radio button or
    tab; `scriptui.set {"widget": "#4", "value": "Shot_"}` types into edit text, moves a slider or
    picks a list item (index or text); `scriptui.close {"result": 2}` closes. Controls are addressed
-   by id, `#id`, `properties.name` or text; `window` can be omitted when one window is open. Each
+   by id, `#id`, `properties.name` or text; `window` can be omitted when one window is open.
+   `scriptui.mouse {"widget": "pad", "type": "mousedown", "x": 10, "y": 20}` sends a mouse event
+   (`mousedown`, `mouseup`, `mousemove`, `mouseover`, `mouseout`, `click`; `x`/`y` relative to the
+   control, `button`, `detail`, `shiftKey`…) to the script's `addEventListener` listeners. Each
    returns the handler run's `{ok, output, error}`.
 
 A dialog's `show()` waits for the user: the `script.run` / `file.runScript` reply carries
@@ -551,8 +611,9 @@ Extension points and the bundled extensions: [plugins.md](plugins.md).
   (`effectControls.prop.<uid>.value[.<d>]`), it runs `prop.pickWhip`: the reference replaces the
   property's expression, or is added as one, and the expression is enabled.
 * A property's menu (right-click its name; entries `timeline.prop.<uid>.menu.<entry>`): Reset
-  (`prop.reset`: no keyframes or expression, and the property's default value, an effect
-  parameter's or a Transform property's), Edit Value… (`prop.set {layer, prop}` without `value`
+  (`prop.reset`: no expression, and the property's default value, an effect parameter's or a
+  Transform property's; an animated property keeps its keyframes and gets the default as a
+  keyframe at the current time), Edit Value… (`prop.set {layer, prop}` without `value`
   opens the value dialog), Separate Dimensions (Position: `prop.separateDimensions {layer,
   value}`), Add / Remove Expression (`prop.setExpression {layer, prop}`) and Add Property to
   Essential Graphics (`essential.addProperty`).
@@ -606,6 +667,7 @@ effectcraft-cli render-frame main.ecproj --time 1 --max-side 640 --out f.png --j
 effectcraft-cli exec layer.newNull --bridge 9877                 # same commands, against the live app
 effectcraft-cli exec file.exportLottie '{"comp":"Main","path":"main.json","includeExpressions":true}' main.ecproj --json
 effectcraft-cli exec file.importLottie '{"path":"anim.json"}' main.ecproj --save
+effectcraft-cli render main.ecproj --comp Main --out main.mov --format prores --progress   # progress lines on stderr for a program that reads them
 ```
 
 Scripts written against After Effects' documented scripting API run with `script`:
@@ -653,3 +715,12 @@ open the demo project; without it the app starts with an empty project) and use 
 mode or the raw control channel. A good loop is: `ui_elements` to find an id, `ui_click` or `ui_drag`
 to act, then `screenshot {"panel":"Timeline"}` to check the result. `render_frame` shows the
 composition itself at any zoom.
+
+### Effects & Presets
+
+The native Effects & Presets panel's options menu includes **Copy Presets Folder Path**. It copies
+the folder the panel scans: `EC_PRESETS_DIR` when set, otherwise `~/Documents/EffectCraft/Presets`
+using `HOME` or `USERPROFILE`. Relative paths are resolved to an absolute path. The folder may
+not exist yet; this action does not create it.
+Over the live UI control channel, `ui.menu.invoke {"id":"effects.copyPresetsFolderPath"}` copies
+the same path and returns `{path}`. The web app reports that it has no local presets folder.

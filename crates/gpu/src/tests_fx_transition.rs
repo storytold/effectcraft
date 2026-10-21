@@ -89,6 +89,11 @@ fn perspective() {
     effect_case("ec.perspective.cccylinder", &[("position", pt(35.0, 22.0)), ("rotation", n(30.0))]);
     effect_case("ec.perspective.cccylinder", &[("radius", n(60.0)), ("render", e(1)), ("lightDirection", n(70.0)), ("roughness", n(0.2))]);
     effect_case("ec.perspective.cccylinder", &[("render", e(2)), ("lightHeight", n(20.0)), ("specular", n(60.0))]);
+    // All three axes: independently and combined, against the CPU reference.
+    effect_case("ec.perspective.cccylinder", &[("rotationX", n(35.0)), ("render", e(1))]);
+    effect_case("ec.perspective.cccylinder", &[("rotationY", n(65.0)), ("rotation", n(15.0))]);
+    effect_case("ec.perspective.cccylinder", &[("rotationZ", n(-25.0)), ("render", e(2))]);
+    effect_case("ec.perspective.cccylinder", &[("rotationX", n(30.0)), ("rotationY", n(20.0)), ("rotationZ", n(15.0))]);
     effect_case("ec.perspective.ccsphere", &[("offset", pt(35.0, 22.0)), ("radius", n(18.0)), ("rotationX", n(20.0)), ("rotationY", n(35.0))]);
     effect_case("ec.perspective.ccsphere", &[("radius", n(20.0)), ("rotationZ", n(50.0)), ("render", e(2))]);
     effect_case("ec.perspective.ccspotlight", &[("from", pt(15.0, 8.0)), ("to", pt(35.0, 22.0))]);

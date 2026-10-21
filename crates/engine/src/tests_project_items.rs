@@ -167,3 +167,47 @@ fn delete_removes_selected_groups_not_their_layer() {
     delete(&mut s);
     assert!(s.active_comp().unwrap().layer(LayerId(t)).is_none(), "a fixed group selected: the layer goes");
 }
+
+/// #1061: text animators, masks and shape groups rename like effects, with undo; fixed groups and
+/// empty names are refused.
+#[test]
+fn text_animators_masks_and_shape_groups_rename() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "C", "width": 64, "height": 64, "duration": 1})).unwrap();
+    let t = s.execute("layer.newText", json!({"text": "ABCD"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.addTextAnimator", json!({"layer": t, "properties": ["tracking"]})).unwrap();
+    let sh = s.execute("layer.newShape", json!({"kind": "star"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.addMask", json!({"layer": sh, "shape": "ellipse"})).unwrap();
+    let uid = |s: &Session, l: u64, path: &str| s.active_comp().unwrap().layer(LayerId(l)).unwrap().props.group(path).unwrap().groups().next().unwrap().uid;
+    let name = |s: &Session, l: u64, u: u64| s.active_comp().unwrap().layer(LayerId(l)).unwrap().props.find_group(u).unwrap().name.clone();
+    for (l, path, new) in [(t, "text/animators", "Wiggle In"), (sh, "masks", "Reveal"), (sh, "contents", "Star Body")] {
+        let u = uid(&s, l, path);
+        let old = name(&s, l, u);
+        s.execute("prop.renameGroup", json!({"layer": l, "prop": u, "name": new})).unwrap();
+        assert_eq!(name(&s, l, u), new, "{path}");
+        s.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(name(&s, l, u), old, "{path} undone");
+        assert!(s.execute("prop.renameGroup", json!({"layer": l, "prop": u, "name": "  "})).is_err());
+    }
+}
+
+/// `project.usedIn`: the Project panel's "used N times" and its ▾ list of comps, by name.
+#[test]
+fn used_in_counts_layers_across_comps() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Inner", "width": 64, "height": 64, "duration": 1})).unwrap();
+    let inner = s.active_comp_id().unwrap();
+    s.execute("comp.new", json!({"name": "Outer", "width": 64, "height": 64, "duration": 1})).unwrap();
+    let outer = s.active_comp_id().unwrap();
+    s.execute("layer.addItem", json!({"item": inner.0})).unwrap();
+    s.execute("layer.addItem", json!({"item": inner.0})).unwrap();
+    let r = s.execute("project.usedIn", json!({"item": "Inner"})).unwrap();
+    assert_eq!(r["count"], 2);
+    assert_eq!(r["comps"], json!([{"id": outer.0, "name": "Outer", "layers": 2}]));
+    // Default: the selected item; an unused one is used 0 times.
+    s.execute("project.select", json!({"items": [outer.0]})).unwrap();
+    let r = s.execute("project.usedIn", json!({})).unwrap();
+    assert_eq!((r["item"].as_u64(), r["count"].as_u64()), (Some(outer.0), Some(0)));
+    assert_eq!(r["comps"], json!([]));
+    assert!(s.execute("project.usedIn", json!({"item": "Nope"})).is_err());
+}

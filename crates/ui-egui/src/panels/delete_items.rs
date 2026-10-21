@@ -74,6 +74,10 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     if answer.is_none() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
         answer = Some(false);
     }
+    // Cmd+D (Ctrl elsewhere) is Delete.
+    if answer.is_none() && super::dialogs::ui_command_key(ctx, egui::Key::D) {
+        answer = Some(true);
+    }
     let Some(delete) = answer else { return };
     app.dialog = None;
     app.dialog_state.delete_items.command = None;
@@ -88,4 +92,23 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
 /// request, so it can't carry over to a later deletion.
 pub fn delete_confirmed(app: &mut EffectcraftApp, ctx: &egui::Context, params: Value) -> Result<Value, String> {
     crate::menus::run_engine(app, ctx, "project.delete", params)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn cmd_d_is_delete_and_enter_is_not() {
+        let ctx = egui::Context::default();
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        crate::theme::install(&ctx, &app.tokens, crate::i18n::language(&app));
+        app.dialog_state.delete_items.command = Some((json!({"items": []}), json!({"items": 1, "layers": 1, "comps": 1})));
+        app.dialog = Some(Dialog::DeleteItems);
+        crate::panels::dialogs::press_key(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+        assert_eq!(app.dialog, Some(Dialog::DeleteItems));
+        crate::panels::dialogs::press_key(&mut app, &ctx, egui::Key::D, egui::Modifiers::COMMAND);
+        assert!(app.dialog.is_none() && app.dialog_state.delete_items.command.is_none(), "Cmd+D answered Delete");
+    }
 }

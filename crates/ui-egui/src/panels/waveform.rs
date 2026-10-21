@@ -7,7 +7,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use effectcraft_engine::project::{ItemId, ItemKind, Layer, LayerSource, Project};
+use effectcraft_engine::project::{ItemId, ItemKind, Layer, LayerSource, Project, Property};
+use effectcraft_engine::render::audio::db_to_gain;
 use effectcraft_engine::time::Tick;
 use egui::{Color32, Painter, Rect, Stroke, pos2};
 
@@ -53,7 +54,7 @@ pub fn summary(app: &EffectcraftApp, ctx: &egui::Context, item: ItemId) -> Optio
         .name("ec-waveform".into())
         .spawn(move || {
             use effectcraft_engine::media_cache;
-            let file = cache.and_then(|d| media_cache::peaks_path(&d, &f.path, BINS_PER_SEC));
+            let file = cache.filter(|_| !f.missing).and_then(|d| media_cache::peaks_path(&d, &f.path, BINS_PER_SEC));
             let peaks = match file.as_deref().and_then(media_cache::load_peaks) {
                 Some(p) => p,
                 None => {
@@ -75,6 +76,17 @@ pub fn summary(app: &EffectcraftApp, ctx: &egui::Context, item: ItemId) -> Optio
     None
 }
 
+/// Left/right gain of the layer's Audio Levels (dB) at comp time `t`; unity without the property.
+fn level_gains(levels: Option<&Property>, t: Tick) -> [f32; 2] {
+    match levels {
+        Some(p) => {
+            let [l, r] = p.value_at(t).as_vec2();
+            [db_to_gain(l), db_to_gain(r)]
+        }
+        None => [1.0, 1.0],
+    }
+}
+
 /// Draw `layer`'s waveform in `rect` (left channel above right), columns mapped through the
 /// timeline's time map and the layer's time mapping, limited to its [in, out) span.
 pub(crate) fn draw(p: &Painter, rect: Rect, tm: &TMap, layer: &Layer, s: &Summary, color: Color32) {
@@ -83,6 +95,7 @@ pub(crate) fn draw(p: &Painter, rect: Rect, tm: &TMap, layer: &Layer, s: &Summar
     let x0 = tm.x(layer.in_point.seconds()).max(rect.min.x).floor() as i32;
     let x1 = tm.x(layer.out_point.seconds()).min(rect.max.x).ceil() as i32;
     let n = s.peaks.len() as i64;
+    let levels = layer.props.sub("audio").and_then(|g| g.get("levels"));
     for c in 0..2 {
         p.line_segment([pos2(x0 as f32, mid[c]), pos2(x1 as f32, mid[c])], Stroke::new(1.0, color.gamma_multiply(0.5)));
     }
@@ -101,10 +114,26 @@ pub(crate) fn draw(p: &Painter, rect: Rect, tm: &TMap, layer: &Layer, s: &Summar
             agg[2] = agg[2].min(b[2]);
             agg[3] = agg[3].max(b[3]);
         }
+        let gain = level_gains(levels, Tick::from_seconds_f64((ta + tb) * 0.5));
         for c in 0..2 {
-            let (lo, hi) = (agg[c * 2].clamp(-1.0, 1.0), agg[c * 2 + 1].clamp(-1.0, 1.0));
+            let (lo, hi) = ((agg[c * 2] * gain[c]).clamp(-1.0, 1.0), (agg[c * 2 + 1] * gain[c]).clamp(-1.0, 1.0));
             let (ya, yb) = (mid[c] - hi * half, mid[c] - lo * half);
             p.line_segment([pos2(x as f32 + 0.5, ya), pos2(x as f32 + 0.5, yb.max(ya + 1.0))], Stroke::new(1.0, color));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use effectcraft_engine::project::Value;
+
+    #[test]
+    fn waveform_follows_audio_levels() {
+        let p = Property::new(1, "levels", "Audio Levels", Value::Vec2([-6.0206, -96.0]));
+        let g = level_gains(Some(&p), Tick::ZERO);
+        assert!((g[0] - 0.5).abs() < 1e-3, "{}", g[0]);
+        assert_eq!(g[1], 0.0);
+        assert_eq!(level_gains(None, Tick::ZERO), [1.0, 1.0]);
     }
 }

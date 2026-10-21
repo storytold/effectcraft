@@ -61,7 +61,39 @@ const TEXT: &[(&str, &str)] = &[
     ("animators", "ADBE Text Animators"),
 ];
 
+// Match names of the six properties below Text ▸ Path Options, as named by
+// After Effects' scripting API (rather than EffectCraft's internal ids).
+const TEXT_PATH_OPTIONS: &[(&str, &str)] = &[
+    ("path", "ADBE Text Path"),
+    ("reversePath", "ADBE Text Reverse Path"),
+    ("perpendicular", "ADBE Text Perpendicular To Path"),
+    ("forceAlignment", "ADBE Text Force Align Path"),
+    ("firstMargin", "ADBE Text First Margin"),
+    ("lastMargin", "ADBE Text Last Margin"),
+];
+
+// A stroke's Dashes, as After Effects' scripting API names them (#815).
+const STROKE_DASHES: &[(&str, &str)] = &[
+    ("dash", "ADBE Vector Stroke Dash 1"),
+    ("gap", "ADBE Vector Stroke Gap 1"),
+    ("dash2", "ADBE Vector Stroke Dash 2"),
+    ("gap2", "ADBE Vector Stroke Gap 2"),
+    ("dash3", "ADBE Vector Stroke Dash 3"),
+    ("gap3", "ADBE Vector Stroke Gap 3"),
+    ("offset", "ADBE Vector Stroke Offset"),
+];
+
+/// The Dashes child id (`dash`, `gap2`, `offset`…) for an After Effects match name.
+pub fn stroke_dash(name: &str) -> Option<&'static str> {
+    STROKE_DASHES.iter().find(|(_, m)| *m == name).map(|(id, _)| *id)
+}
+
 const TEXT_ANIMATOR: &[(&str, &str)] = &[("selectors", "ADBE Text Selectors"), ("properties", "ADBE Text Animator Properties")];
+
+const TEXT_SELECTORS: &[(&str, &str)] =
+    &[("rangeSelector", "ADBE Text Selector"), ("wigglySelector", "ADBE Text Wiggly Selector"), ("expressionSelector", "ADBE Text Expressible Selector")];
+
+const TEXT_RANGE_SELECTOR: &[(&str, &str)] = &[("start", "ADBE Text Percent Start"), ("end", "ADBE Text Percent End"), ("offset", "ADBE Text Percent Offset")];
 
 const CAMERA: &[(&str, &str)] = &[
     ("zoom", "ADBE Camera Zoom"),
@@ -367,7 +399,8 @@ pub fn shape_kind(name: &str) -> Option<&'static str> {
 }
 
 /// Effects whose documented parameter match names are not numbered in display order:
-/// (effect id, param match id, number). Fill lists All Masks second but it is `-0007`.
+/// (effect id, param match id, number). Fill lists All Masks second but it is `-0007`. Params of
+/// these effects that After Effects doesn't have are numbered after the listed ones (#1405).
 const PARAM_NUMBERS: &[(&str, &str, usize)] = &[
     ("ec.generate.fill", "fillMask", 1),
     ("ec.generate.fill", "color", 2),
@@ -376,7 +409,41 @@ const PARAM_NUMBERS: &[(&str, &str, usize)] = &[
     ("ec.generate.fill", "opacity", 5),
     ("ec.generate.fill", "invert", 6),
     ("ec.generate.fill", "allMasks", 7),
+    ("ec.generate.stroke", "path", 1),
+    ("ec.generate.stroke", "color", 2),
+    ("ec.generate.stroke", "brushSize", 3),
+    ("ec.generate.stroke", "brushHardness", 4),
+    ("ec.generate.stroke", "opacity", 5),
+    ("ec.generate.stroke", "spacing", 6),
+    ("ec.generate.stroke", "paintStyle", 7),
+    ("ec.generate.stroke", "start", 8),
+    ("ec.generate.stroke", "end", 9),
+    ("ec.generate.stroke", "allMasks", 10),
+    ("ec.generate.stroke", "strokeSequentially", 11),
+    // -0001 is a hidden parameter and -0003 Channel Range, which we don't have; the per-channel
+    // controls are ours (After Effects edits the selected channel with the Master ones).
+    ("ec.color.huesaturation", "channelControl", 2),
+    ("ec.color.huesaturation", "hue", 4),
+    ("ec.color.huesaturation", "saturation", 5),
+    ("ec.color.huesaturation", "lightness", 6),
+    ("ec.color.huesaturation", "colorize", 7),
+    ("ec.color.huesaturation", "colorizeHue", 8),
+    ("ec.color.huesaturation", "colorizeSaturation", 9),
+    ("ec.color.huesaturation", "colorizeLightness", 10),
 ];
+
+/// The `-NNNN` number of the param `id` at 0-based `pos` among `fx`'s `params`.
+fn param_number(fx: &str, params: &[Node], id: &str, pos: usize) -> usize {
+    let listed = |p: &str| PARAM_NUMBERS.iter().find(|(f, q, _)| *f == fx && *q == p).map(|(_, _, n)| *n);
+    if let Some(n) = listed(id) {
+        return n;
+    }
+    let Some(last) = PARAM_NUMBERS.iter().filter(|(f, _, _)| *f == fx).map(|(_, _, n)| *n).max() else {
+        return pos + 1;
+    };
+    let unlisted_before = params.iter().take(pos).filter(|c| listed(c.match_id()).is_none()).count();
+    last + unlisted_before + 1
+}
 
 /// Match name of the node at the end of `chain` (layer root's children → … → node). `effect`
 /// params are numbered `<effect match name>-0001…` in parameter order, like After Effects.
@@ -400,18 +467,18 @@ pub fn node(chain: &[&Node]) -> String {
             let fx = parent.and_then(Node::as_group);
             match fx {
                 Some(g) => {
-                    let i = PARAM_NUMBERS
-                        .iter()
-                        .find(|(fx, p, _)| *fx == g.match_id && *p == id)
-                        .map(|(_, _, n)| *n)
-                        .unwrap_or_else(|| g.children.iter().position(|c| c.uid() == last.uid()).unwrap_or(0) + 1);
+                    let pos = g.children.iter().position(|c| c.uid() == last.uid()).unwrap_or(0);
+                    let i = param_number(&g.match_id, &g.children, id, pos);
                     format!("{}-{i:04}", effect(&g.match_id))
                 }
                 None => own(),
             }
         }
         "text" if chain.len() == 2 => find(TEXT, id).map(str::to_string).unwrap_or_else(own),
+        "text" if pid == "pathOptions" => find(TEXT_PATH_OPTIONS, id).map(str::to_string).unwrap_or_else(own),
         "text" if pid == "animators" => "ADBE Text Animator".into(),
+        "text" if pid == "selectors" => find(TEXT_SELECTORS, id).map(str::to_string).unwrap_or_else(own),
+        "text" if pid == "rangeSelector" => find(TEXT_RANGE_SELECTOR, id).map(str::to_string).unwrap_or_else(own),
         "text" if grand.map(|g| g.match_id()) == Some("animators") => find(TEXT_ANIMATOR, id).map(str::to_string).unwrap_or_else(own),
         "cameraOptions" => find(CAMERA, id).map(str::to_string).unwrap_or_else(own),
         "lightOptions" => find(LIGHT, id).map(str::to_string).unwrap_or_else(own),
@@ -427,6 +494,9 @@ pub fn node(chain: &[&Node]) -> String {
             }
             if let Some((_, _, m)) = SHAPE_PROPS.iter().find(|(item, prop, _)| *item == pid && *prop == id) {
                 return m.to_string();
+            }
+            if pid == "dashes" {
+                return find(STROKE_DASHES, id).map(str::to_string).unwrap_or_else(own);
             }
             own()
         }
@@ -457,5 +527,16 @@ mod tests {
         assert_eq!(shape_kind("Trim Paths"), Some("trim"));
         assert_eq!(shape_kind("ADBE Vector Graphic - Fill"), Some("fill"));
         assert_eq!(shape_kind("nope"), None);
+    }
+
+    #[test]
+    fn text_range_selector_names() {
+        let n = |m: &str| Node::from(effectcraft_project::PropGroup::new(1, m, m));
+        let (text, animators, animator, selectors, range, start, end, offset) =
+            (n("text"), n("animators"), n("animator"), n("selectors"), n("rangeSelector"), n("start"), n("end"), n("offset"));
+        assert_eq!(node(&[&text, &animators, &animator, &selectors, &range]), "ADBE Text Selector");
+        assert_eq!(node(&[&text, &animators, &animator, &selectors, &range, &start]), "ADBE Text Percent Start");
+        assert_eq!(node(&[&text, &animators, &animator, &selectors, &range, &end]), "ADBE Text Percent End");
+        assert_eq!(node(&[&text, &animators, &animator, &selectors, &range, &offset]), "ADBE Text Percent Offset");
     }
 }

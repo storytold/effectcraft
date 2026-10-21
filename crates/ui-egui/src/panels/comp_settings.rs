@@ -3,6 +3,8 @@
 //! (`dialog.comp.<field>`).
 
 use crate::i18n::{tr, tr_args};
+use crate::icons::Icon;
+use effectcraft_engine::prefs::CompPreset;
 use effectcraft_engine::time::{FrameRate, format_timecode_frames, parse_timecode};
 use egui::{Color32, vec2};
 use serde_json::json;
@@ -96,6 +98,8 @@ pub struct CompDraft {
     /// Timecode text being edited (start, duration).
     pub start_tc: Option<String>,
     pub dur_tc: Option<String>,
+    /// The name being typed for Save Preset (the name row shows while `Some`).
+    pub preset_name: Option<String>,
 }
 
 impl Default for CompDraft {
@@ -121,6 +125,7 @@ impl Default for CompDraft {
             tab: Tab::Basic,
             start_tc: None,
             dur_tc: None,
+            preset_name: None,
         }
     }
 }
@@ -171,12 +176,84 @@ fn timecode_field(ui: &mut egui::Ui, buf: &mut Option<String>, secs: &mut f64, r
     r
 }
 
-/// Draw the dialog. Returns `Some(params)` when OK is pressed, `Some(Null)` on Cancel.
-pub fn show(ui: &mut egui::Ui, d: &mut CompDraft, t: &Tokens, auto: &mut Registry) -> Option<serde_json::Value> {
+fn name_focus_id() -> egui::Id {
+    egui::Id::new("comp-preset-name-focus")
+}
+
+/// Save Preset's Choose Name prompt (drawn in its own modal over the dialog while
+/// `d.preset_name` is `Some`): OK or Enter saves the draft's frame size, pixel aspect and frame
+/// rate under the name, replacing a saved preset with that name; Cancel or Escape closes it.
+pub fn choose_name(
+    ui: &mut egui::Ui,
+    d: &mut CompDraft,
+    t: &Tokens,
+    auto: &mut Registry,
+    custom: &[CompPreset],
+    cmds: &mut Vec<(&'static str, serde_json::Value)>,
+) {
+    let Some(mut name) = d.preset_name.take() else { return };
+    let mut keep = true;
+    let r = ui.add(egui::TextEdit::singleline(&mut name).desired_width(ui.available_width()));
+    auto.add("dialog.comp.presetName", r.rect, "Preset Name");
+    if ui.data_mut(|m| m.remove_temp::<bool>(name_focus_id())).unwrap_or(false) {
+        r.request_focus();
+    }
+    let trimmed = name.trim();
+    let builtin = PRESETS.iter().any(|p| p.0 == trimmed);
+    let exists = custom.iter().any(|q| q.name == trimmed);
+    let ok = !trimmed.is_empty() && !builtin && trimmed.chars().count() <= CompPreset::MAX_NAME;
+    let note = if builtin {
+        tr("A built-in preset has this name")
+    } else if exists {
+        tr("Replaces your preset with this name")
+    } else {
+        ""
+    };
+    ui.add_space(4.0);
+    ui.label(egui::RichText::new(note).color(Color32::GRAY));
+    ui.add_space(8.0);
+    let mut save = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+    let mut cancel = ui.input(|i| i.key_pressed(egui::Key::Escape));
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        let b = ui.add_enabled(ok, egui::Button::new(egui::RichText::new(tr("   OK   ")).color(Color32::WHITE)).fill(t.accent));
+        auto.add("dialog.comp.presetNameSave", b.rect, "OK");
+        save |= b.clicked();
+        let c = ui.button(tr("Cancel"));
+        auto.add("dialog.comp.presetNameCancel", c.rect, "Cancel");
+        cancel |= c.clicked();
+    });
+    if ok && save {
+        cmds.push(("comp.savePreset", json!({"name": trimmed, "width": d.width, "height": d.height, "pixelAspect": d.pixel_aspect, "frameRate": d.fps})));
+        keep = false;
+    }
+    if cancel {
+        keep = false;
+    }
+    if keep {
+        d.preset_name = Some(name);
+    }
+}
+
+/// Whether the draft's frame size, pixel aspect and frame rate are those of a preset.
+fn matches(d: &CompDraft, w: u32, h: u32, par: f64, fps: f64) -> bool {
+    w == d.width && h == d.height && (par - d.pixel_aspect).abs() < 1e-3 && (fps - d.fps).abs() < 1e-3
+}
+
+/// Draw the dialog. Returns `Some(params)` when OK is pressed, `Some(Null)` on Cancel. `custom`
+/// are the presets the user saved; saving or deleting one pushes its engine command to `cmds`.
+pub fn show(
+    ui: &mut egui::Ui,
+    d: &mut CompDraft,
+    t: &Tokens,
+    auto: &mut Registry,
+    custom: &[CompPreset],
+    cmds: &mut Vec<(&'static str, serde_json::Value)>,
+) -> Option<serde_json::Value> {
     let mut out = None;
     ui.horizontal(|ui| {
         ui.label(tr("Composition Name:"));
         let r = ui.add(egui::TextEdit::singleline(&mut d.name).desired_width(300.0));
+        crate::widgets::focus_on_open(ui.ctx(), &r, &d.name);
         auto.add("dialog.comp.name", r.rect, "Composition Name");
     });
     ui.add_space(8.0);
@@ -195,19 +272,48 @@ pub fn show(ui: &mut egui::Ui, d: &mut CompDraft, t: &Tokens, auto: &mut Registr
         Tab::Basic => {
             egui::Grid::new("comp-basic").num_columns(2).spacing([12.0, 9.0]).show(ui, |ui| {
                 ui.label(tr("Preset:"));
-                let current = PRESETS
-                    .iter()
-                    .find(|(_, w, h, par, f)| *w == d.width && *h == d.height && (par - d.pixel_aspect).abs() < 1e-3 && (f - d.fps).abs() < 1e-3)
-                    .map(|p| p.0)
+                // The user's own presets win over a built-in one with the same values.
+                let own = custom.iter().find(|q| matches(d, q.width, q.height, q.pixel_aspect, q.frame_rate));
+                let current = own
+                    .map(|q| q.name.as_str())
+                    .or_else(|| PRESETS.iter().find(|(_, w, h, par, f)| matches(d, *w, *h, *par, *f)).map(|p| p.0))
                     .unwrap_or("Custom");
-                let r = egui::ComboBox::from_id_salt("comp-preset").width(300.0).selected_text(current).show_ui(ui, |ui| {
-                    for (name, w, h, par, f) in PRESETS {
-                        if ui.selectable_label(*name == current, *name).clicked() {
-                            (d.width, d.height, d.pixel_aspect, d.fps) = (*w, *h, *par, *f);
+                ui.horizontal(|ui| {
+                    let r = egui::ComboBox::from_id_salt("comp-preset").width(300.0).selected_text(current).show_ui(ui, |ui| {
+                        // Your own presets first, then the built-in ones.
+                        for q in custom {
+                            if ui.selectable_label(q.name == current, &q.name).clicked() {
+                                (d.width, d.height, d.pixel_aspect, d.fps) = (q.width, q.height, q.pixel_aspect, q.frame_rate);
+                            }
+                        }
+                        if !custom.is_empty() {
+                            ui.separator();
+                        }
+                        for (name, w, h, par, f) in PRESETS {
+                            if ui.selectable_label(*name == current, *name).clicked() {
+                                (d.width, d.height, d.pixel_aspect, d.fps) = (*w, *h, *par, *f);
+                            }
+                        }
+                    });
+                    auto.add("dialog.comp.preset", r.response.rect, "Preset");
+                    let (save_r, _) = ui.allocate_exact_size(vec2(20.0, 20.0), egui::Sense::hover());
+                    let save = crate::widgets::icon_button(ui, save_r, Icon::Plus, d.preset_name.is_some(), t, egui::Id::new("comp-preset-save"))
+                        .on_hover_text(tr("Save Preset…"));
+                    auto.add("dialog.comp.presetSave", save_r, "Save Preset");
+                    if save.clicked() {
+                        d.preset_name = Some(own.map(|q| q.name.clone()).unwrap_or_default());
+                        ui.data_mut(|m| m.insert_temp(name_focus_id(), true));
+                    }
+                    if let Some(q) = own {
+                        let (del_r, _) = ui.allocate_exact_size(vec2(20.0, 20.0), egui::Sense::hover());
+                        let del = crate::widgets::icon_button(ui, del_r, Icon::Trash, false, t, egui::Id::new("comp-preset-delete"))
+                            .on_hover_text(tr("Delete Preset"));
+                        auto.add("dialog.comp.presetDelete", del_r, "Delete Preset");
+                        if del.clicked() {
+                            cmds.push(("comp.deletePreset", json!({"name": q.name})));
                         }
                     }
                 });
-                auto.add("dialog.comp.preset", r.response.rect, "Preset");
                 ui.end_row();
                 ui.label(tr("Width:"));
                 ui.horizontal(|ui| {

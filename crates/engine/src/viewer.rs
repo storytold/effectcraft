@@ -3,13 +3,15 @@
 //!
 //! Nothing here touches the project; edits go through commands.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use effectcraft_color::{ColorSpace, space};
 use effectcraft_geom::{Mat3, vec2};
-use effectcraft_project::{Layer, LayerId};
+use effectcraft_keyframe::Value;
+use effectcraft_project::{Layer, LayerId, Property};
 use effectcraft_raster::Image;
-use effectcraft_render::EvalCtx;
+use effectcraft_render::{EvalCtx, ExprHost};
 use effectcraft_time::Tick;
 use serde::{Deserialize, Serialize};
 
@@ -274,10 +276,45 @@ pub struct SnapOptions {
     pub grid_spacing: f64,
 }
 
+type SnapValues = HashMap<(u64, u64, u64, i64), Result<Value, String>>;
+
+/// Bounds, vertices and transforms can ask for the same expression repeatedly. Share its
+/// value only within this immutable snap query; a new pointer update starts a fresh cache.
+struct SnapExpressions<'a> {
+    inner: &'a dyn ExprHost,
+    values: Mutex<SnapValues>,
+}
+
+impl ExprHost for SnapExpressions<'_> {
+    fn eval(&self, ctx: &EvalCtx, layer: &Layer, prop: &Property, value: &Value) -> Result<Value, String> {
+        let key = (ctx.comp_id.0, layer.id.0, prop.uid, ctx.time.0);
+        if let Some(value) = self.values.lock().unwrap_or_else(PoisonError::into_inner).get(&key).cloned() {
+            return value;
+        }
+        // Never hold the lock while evaluating: expressions may query other properties.
+        let result = self.inner.eval(ctx, layer, prop, value);
+        let mut values = self.values.lock().unwrap_or_else(PoisonError::into_inner);
+        if values.len() < 8192 {
+            values.insert(key, result.clone());
+        }
+        result
+    }
+
+    fn eval_text_selector(&self, ctx: &EvalCtx, layer: &Layer, prop: &Property, index: usize, total: usize, selector: [f64; 3]) -> Result<[f64; 3], String> {
+        self.inner.eval_text_selector(ctx, layer, prop, index, total, selector)
+    }
+}
+
 /// Snap targets of a comp at the context time: other visible layers' features and vertices and
 /// the comp's edges and centre (with `layers`, as the Snapping options allow), and guides and
 /// grid lines (when on). Layers in `exclude` (the dragged ones) are skipped.
 pub fn targets(ctx: &EvalCtx, exclude: &[LayerId], opts: SnapOptions) -> Vec<SnapTarget> {
+    let memo = ctx.expr.map(|inner| SnapExpressions { inner, values: Mutex::default() });
+    let ctx = EvalCtx { expr: memo.as_ref().map(|h| h as &dyn ExprHost), ..*ctx };
+    targets_in(&ctx, exclude, opts)
+}
+
+fn targets_in(ctx: &EvalCtx, exclude: &[LayerId], opts: SnapOptions) -> Vec<SnapTarget> {
     let comp = ctx.comp;
     let (w, h) = (comp.width as f64, comp.height as f64);
     let f = opts.features;
@@ -298,11 +335,8 @@ pub fn targets(ctx: &EvalCtx, exclude: &[LayerId], opts: SnapOptions) -> Vec<Sna
     }
     if opts.guides {
         for g in &comp.guides {
-            out.push(if g.vertical {
-                SnapTarget::vline(g.position, PRI_GUIDE, SnapSource::Guide)
-            } else {
-                SnapTarget::hline(g.position, PRI_GUIDE, SnapSource::Guide)
-            });
+            let pos = g.px(comp.width, comp.height);
+            out.push(if g.vertical { SnapTarget::vline(pos, PRI_GUIDE, SnapSource::Guide) } else { SnapTarget::hline(pos, PRI_GUIDE, SnapSource::Guide) });
         }
     }
     if opts.grid && opts.grid_spacing >= 1.0 {
@@ -328,7 +362,7 @@ const MAX_COLLAPSED_DEPTH: usize = 8;
 fn visible_layers<'a>(ctx: &EvalCtx<'a>, exclude: &'a [LayerId]) -> impl Iterator<Item = &'a Layer> {
     let comp = ctx.comp;
     let time = ctx.time;
-    let any_solo = comp.layers.iter().any(|l| l.switches.solo && l.source.is_av() && l.is_active_at(time));
+    let any_solo = comp.layers.iter().any(|l| l.switches.solo && l.source.is_av());
     comp.layers.iter().filter(move |l| l.is_active_at(time) && l.switches.video && (!any_solo || l.switches.solo) && !exclude.contains(&l.id))
 }
 
@@ -1062,4 +1096,46 @@ pub struct Snapshot {
     /// Render scale the image was taken at.
     pub scale: f64,
     pub image: Arc<Image>,
+}
+
+#[cfg(test)]
+mod snap_expression_tests {
+    use super::*;
+    use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct PositionHost(AtomicUsize);
+    impl ExprHost for PositionHost {
+        fn eval(&self, ctx: &EvalCtx, _: &Layer, _: &Property, value: &Value) -> Result<Value, String> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            let v = value.components();
+            Ok(Value::Vec3([v[0] + 10. * ctx.time.seconds(), v[1], 0.]))
+        }
+    }
+
+    #[test]
+    fn snapping_reuses_expressions_within_one_query_but_refreshes_time_and_edits() {
+        let mut s = crate::Session::default();
+        s.execute("comp.new", json!({"width":320,"height":180,"duration":5})).unwrap();
+        let lid = s.execute("layer.newSolid", json!({"width":40,"height":20})).unwrap()["layer"].as_u64().unwrap();
+        s.execute("prop.setExpression", json!({"layer":lid,"path":"transform/position","expression":"value"})).unwrap();
+        let cid = s.active_comp_id().unwrap();
+        let host = PositionHost(AtomicUsize::new(0));
+        let opts = SnapOptions { layers: true, ..Default::default() };
+        let query = |s: &crate::Session, time, cached| {
+            let ctx = EvalCtx { expr: Some(&host), ..EvalCtx::new(&s.project, cid, s.project.comp(cid).unwrap(), time) };
+            if cached { targets(&ctx, &[], opts) } else { targets_in(&ctx, &[], opts) }
+        };
+        let expected = query(&s, Tick::ZERO, false);
+        assert!(host.0.swap(0, Ordering::Relaxed) > 1, "fixture must visit the same expression for multiple geometry features");
+        assert_eq!(query(&s, Tick::ZERO, true), expected);
+        assert_eq!(host.0.swap(0, Ordering::Relaxed), 1);
+        let moved = query(&s, Tick::from_seconds_f64(1.), true);
+        assert_ne!(moved, expected, "a new time must not reuse stale targets");
+        assert_eq!(host.0.swap(0, Ordering::Relaxed), 1);
+        s.execute("prop.set", json!({"layer":lid,"path":"transform/position","value":[200,100,0]})).unwrap();
+        let edited = query(&s, Tick::ZERO, true);
+        assert_ne!(edited, expected, "a new project revision must not reuse stale targets");
+        assert_eq!(host.0.swap(0, Ordering::Relaxed), 1);
+    }
 }

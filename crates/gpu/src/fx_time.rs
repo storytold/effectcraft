@@ -45,13 +45,18 @@ pub(crate) fn apply(e: &mut Enc, id: &str, ctx: &EffectCtx, b: GBuf) -> Option<G
             let fd = 1.0 / ctx.fps();
             mean_of(e, ctx, b, &(-back..=fwd).map(|k| ctx.time + k as f64 * fd).collect::<Vec<_>>())
         }
-        "ec.time.pixelmotionblur" => {
-            let angle = if ctx.params.e("shutterControl") == 1 { ctx.params.f("shutterAngle") } else { 180.0 };
-            let n = ctx.params.f("shutterSamples").round().clamp(1.0, 64.0) as usize;
-            let span = angle.clamp(0.0, 720.0) / 360.0 / ctx.fps();
-            let times: Vec<f64> = (0..n).map(|i| ctx.time - span * 0.5 + if n > 1 { span * i as f64 / (n - 1) as f64 } else { span * 0.5 }).collect();
-            mean_of(e, ctx, b, &times)
-        }
+        // Pixel Motion Blur synthesizes along measured motion vectors (#535); without a plan (no
+        // host to read neighbouring frames) it averages the shutter's frames, as the CPU effect does.
+        "ec.time.pixelmotionblur" => match effectcraft_effects::pmb_plan(ctx) {
+            Some(plan) => render_plan(e, &plan),
+            None => {
+                let angle = if ctx.params.e("shutterControl") == 1 { ctx.params.f("shutterAngle") } else { 180.0 };
+                let n = ctx.params.f("shutterSamples").round().clamp(1.0, 64.0) as usize;
+                let span = angle.clamp(0.0, 720.0) / 360.0 / ctx.fps();
+                let times: Vec<f64> = (0..n).map(|i| ctx.time - span * 0.5 + if n > 1 { span * i as f64 / (n - 1) as f64 } else { span * 0.5 }).collect();
+                mean_of(e, ctx, b, &times)
+            }
+        },
         "ec.time.timewarp" => timewarp(e, ctx, b),
         _ => None,
     }
@@ -179,6 +184,12 @@ fn timewarp(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
         return Some(b);
     }
     let Some(plan) = effectcraft_effects::timewarp_plan(ctx) else { return Some(b) };
+    render_plan(e, &plan)
+}
+
+/// Render a prepared Timewarp plan (also Pixel Motion Blur's, `effectcraft_effects::pmb_plan`):
+/// every step to an image on the GPU, then the weighted average.
+fn render_plan(e: &mut Enc, plan: &effectcraft_effects::TimewarpPlan) -> Option<GBuf> {
     // Pixel Motion's in-between frame of frames a, b along motion field `flow`.
     let motion = |e: &mut Enc, a: usize, bi: usize, w: f32, flow: usize| -> Option<GpuImage> {
         let pa = e.g.upload_image(&effectcraft_effects::timewarp_crop(&plan.frames[a], &plan.pm))?;

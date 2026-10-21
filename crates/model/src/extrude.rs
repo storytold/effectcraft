@@ -203,9 +203,44 @@ fn rings(style: BevelStyle, bevel: f64, depth: f64) -> Vec<(f64, f64)> {
     out
 }
 
+/// A surface of an extruded mesh, which After Effects colours and shades separately (the
+/// Front / Bevel / Side / Back material groups).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Surface {
+    /// The front cap (facing the camera, on the layer plane).
+    Front,
+    /// The bevelled rings between the caps and the walls (front and back).
+    Bevel,
+    /// The straight walls.
+    Side,
+    /// The back cap.
+    Back,
+}
+
+impl Surface {
+    pub const ALL: [Surface; 4] = [Surface::Front, Surface::Bevel, Surface::Side, Surface::Back];
+    /// Index into [`Surface::ALL`] (and into the primitives of [`extrude_surfaces`]).
+    pub fn index(self) -> usize {
+        self as usize
+    }
+}
+
 /// Build the extruded mesh of outlines (one primitive, material 0).
 pub fn extrude(outlines: &[Outline], p: &ExtrudeParams) -> Primitive {
-    let mut prim = Primitive { material: Some(0), ..Default::default() };
+    build(outlines, p, false).into_iter().next().unwrap_or_default()
+}
+
+/// [`extrude`] split by surface: one primitive (material 0) per [`Surface`], in
+/// [`Surface::ALL`] order. Together they hold the same triangles as [`extrude`].
+pub fn extrude_surfaces(outlines: &[Outline], p: &ExtrudeParams) -> [Primitive; 4] {
+    let mut v = build(outlines, p, true).into_iter();
+    std::array::from_fn(|_| v.next().unwrap_or_default())
+}
+
+/// The extruded mesh in one primitive (`split` false) or one per [`Surface`].
+fn build(outlines: &[Outline], p: &ExtrudeParams, split: bool) -> Vec<Primitive> {
+    let mut prims = vec![Primitive { material: Some(0), ..Default::default() }; if split { 4 } else { 1 }];
+    let slot = |s: Surface| if split { s.index() } else { 0 };
     let depth = p.depth.max(1e-3);
     let push = |prim: &mut Primitive, pos: [f64; 3], n: [f64; 3]| -> u32 {
         prim.positions.push([pos[0] as f32, pos[1] as f32, pos[2] as f32]);
@@ -271,10 +306,11 @@ pub fn extrude(outlines: &[Outline], p: &ExtrudeParams) -> Primitive {
                     };
                     let (ni, nj) = (vn(i), vn(j));
                     let nrm = |xy: P, pr: (f64, f64)| [xy[0] * pr.0, xy[1] * pr.0, pr.1];
-                    let ai = push(&mut prim, ring_pos[ci][k][i], nrm(ni, pa));
-                    let aj = push(&mut prim, ring_pos[ci][k][j], nrm(nj, pa));
-                    let bj = push(&mut prim, ring_pos[ci][k + 1][j], nrm(nj, pb));
-                    let bi = push(&mut prim, ring_pos[ci][k + 1][i], nrm(ni, pb));
+                    let Some(prim) = prims.get_mut(slot(if is_wall { Surface::Side } else { Surface::Bevel })) else { continue };
+                    let ai = push(prim, ring_pos[ci][k][i], nrm(ni, pa));
+                    let aj = push(prim, ring_pos[ci][k][j], nrm(nj, pa));
+                    let bj = push(prim, ring_pos[ci][k + 1][j], nrm(nj, pb));
+                    let bi = push(prim, ring_pos[ci][k + 1][i], nrm(ni, pb));
                     prim.indices.extend([ai, aj, bj, ai, bj, bi]);
                 }
             }
@@ -286,10 +322,11 @@ pub fn extrude(outlines: &[Outline], p: &ExtrudeParams) -> Primitive {
         let tris = triangulate(&outer2, &holes2);
         let flat: Vec<(usize, usize)> = (0..cs.len()).flat_map(|ci| (0..cs[ci].pts.len()).map(move |i| (ci, i))).collect();
         for (front, nz) in [(true, -1.0), (false, 1.0)] {
+            let Some(prim) = prims.get_mut(slot(if front { Surface::Front } else { Surface::Back })) else { continue };
             let base = prim.positions.len() as u32;
             for &(ci, i) in &flat {
                 let r = if front { 0 } else { ring_pos[ci].len() - 1 };
-                push(&mut prim, ring_pos[ci][r][i], [0.0, 0.0, nz]);
+                push(prim, ring_pos[ci][r][i], [0.0, 0.0, nz]);
             }
             for t in &tris {
                 let (a, b, c) = (base + t[0] as u32, base + t[1] as u32, base + t[2] as u32);
@@ -297,7 +334,7 @@ pub fn extrude(outlines: &[Outline], p: &ExtrudeParams) -> Primitive {
             }
         }
     }
-    prim
+    prims
 }
 
 /// Gap (pixels) between stacked extrusions of one layer: paint drawn later (a stroke over its
@@ -309,9 +346,22 @@ pub const STACK_GAP: f64 = 0.02;
 /// `level × STACK_GAP` towards the camera (−z).
 pub fn extrude_stacked(outlines: &[Outline], p: &ExtrudeParams, level: usize) -> Primitive {
     let mut prim = extrude(outlines, p);
+    stack(&mut prim, level);
+    prim
+}
+
+/// [`extrude_surfaces`] at stacking level `level` (see [`extrude_stacked`]).
+pub fn extrude_surfaces_stacked(outlines: &[Outline], p: &ExtrudeParams, level: usize) -> [Primitive; 4] {
+    let mut prims = extrude_surfaces(outlines, p);
+    for prim in &mut prims {
+        stack(prim, level);
+    }
+    prims
+}
+
+fn stack(prim: &mut Primitive, level: usize) {
     let dz = (level as f64 * STACK_GAP) as f32;
     for v in &mut prim.positions {
         v[2] -= dz;
     }
-    prim
 }

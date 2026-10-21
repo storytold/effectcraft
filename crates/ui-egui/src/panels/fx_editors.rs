@@ -11,7 +11,9 @@
 //! - Reshape: correspondence point list buttons here, and on the Composition viewer the source
 //!   and destination mask outlines with draggable correspondence handles ([`reshape_overlay`]);
 //! - EXtractoR: a Layer popup of the footage's OpenEXR layers, and Red / Green / Blue / Alpha
-//!   popups of its channels ([`channel_popup`]).
+//!   popups of its channels ([`channel_popup`]);
+//! - Mesh Warp: on the Composition viewer, the distortion mesh's grid over the layer with a
+//!   draggable handle on every vertex ([`mesh_warp_overlay`], #303).
 //!
 //! Every edit is a `prop.set` engine command (undoable; one drag = one undo step) and every
 //! handle registers an automation id.
@@ -37,6 +39,7 @@ pub const COLORAMA: &str = "ec.color.colorama";
 pub const GLOW: &str = "ec.stylize.glow";
 pub const RESHAPE: &str = "ec.distort.reshape";
 pub const EXTRACTOR: &str = "ec.3d.extractor";
+pub const MESH_WARP: &str = "ec.distort.meshwarp";
 
 fn str_value(layer: &Layer, ectx: &EvalCtx, g: &PropGroup, id: &str) -> String {
     match g.get(id).map(|p| ectx.value(layer, p)) {
@@ -1018,9 +1021,108 @@ pub fn reshape_overlay(
     }
 }
 
+/// Mesh Warp's grid: (rows, columns, vertex offsets in layer pixels, row-major). A stored mesh
+/// that doesn't match the grid (Rows or Columns changed since) reads as undistorted, as it
+/// renders.
+fn mesh_grid(layer: &Layer, ectx: &EvalCtx, g: &PropGroup) -> (usize, usize, Vec<(f64, f64)>) {
+    let n = |id: &str| {
+        let v = g.get(id).map(|p| ectx.value(layer, p).as_f64()).unwrap_or(7.0);
+        if v.is_finite() { v.round().clamp(1.0, 31.0) as usize } else { 7 }
+    };
+    let (rows, cols) = (n("rows"), n("columns"));
+    let count = (rows + 1) * (cols + 1);
+    let mut offs = effectcraft_engine::effects::parse_mesh(&str_value(layer, ectx, g, "mesh"));
+    if offs.len() != count {
+        offs = vec![(0.0, 0.0); count];
+    }
+    (rows, cols, offs)
+}
+
+/// The `mesh` parameter's text for these offsets (the inverse of `parse_mesh`).
+fn format_mesh(offs: &[(f64, f64)]) -> String {
+    let r = |v: f64| if v.is_finite() { (v * 1000.0).round() / 1000.0 + 0.0 } else { 0.0 };
+    offs.iter().map(|o| format!("{},{}", r(o.0), r(o.1))).collect::<Vec<_>>().join(" ")
+}
+
+/// Mesh Warp on the Composition viewer (#303): the distortion mesh's grid over the layer, with
+/// a handle on every vertex. Dragging a vertex moves it (its offset in the hidden `mesh`
+/// parameter; the first drag of an undistorted mesh writes the whole grid). `fm` maps effect
+/// space to comp.
+#[allow(clippy::too_many_arguments)]
+pub fn mesh_warp_overlay(
+    app: &mut EffectcraftApp,
+    ui: &mut egui::Ui,
+    painter: &egui::Painter,
+    map: &super::viewer::ViewerMap,
+    ectx: &EvalCtx,
+    layer: &Layer,
+    g: &PropGroup,
+    fm: &Mat3,
+    actions: &mut Actions,
+) {
+    let (rows, cols, offs) = mesh_grid(layer, ectx, g);
+    let [lw, lh] = ectx.effect_bounds(layer).0;
+    let rest = |k: usize| [(k % (cols + 1)) as f64 / cols as f64 * lw, (k / (cols + 1)) as f64 / rows as f64 * lh];
+    let screen: Vec<Pos2> = offs
+        .iter()
+        .enumerate()
+        .map(|(k, o)| {
+            let r = rest(k);
+            map.to_screen(fw::layer_to_comp(fm, [r[0] + o.0, r[1] + o.1]))
+        })
+        .collect();
+    let line = Stroke::new(1.0, Color32::from_white_alpha(150));
+    for (k, s) in screen.iter().enumerate() {
+        if k % (cols + 1) < cols
+            && let Some(e) = screen.get(k + 1)
+        {
+            painter.line_segment([*s, *e], line);
+        }
+        if let Some(e) = screen.get(k + cols + 1) {
+            painter.line_segment([*s, *e], line);
+        }
+    }
+    let ctx = ui.ctx().clone();
+    let accent = app.tokens.accent;
+    for (k, s) in screen.iter().enumerate() {
+        let hr = Rect::from_center_size(*s, vec2(10.0, 10.0));
+        let id = egui::Id::new(("mesh-warp-vertex", g.uid, k));
+        let resp = ui.interact(hr, id, Sense::drag());
+        let hot = resp.hovered() || resp.dragged();
+        let dot = Rect::from_center_size(*s, vec2(5.0, 5.0));
+        painter.rect_filled(dot, 0.0, if hot { accent } else { Color32::WHITE });
+        painter.rect_stroke(dot, 0.0, Stroke::new(1.0, Color32::BLACK), StrokeKind::Outside);
+        let (row, col) = (k / (cols + 1), k % (cols + 1));
+        app.auto.add(&format!("viewer.meshWarp.{}.{row}.{col}", g.uid), hr, &format!("Mesh vertex (row {row}, column {col})"));
+        if hot {
+            ctx.set_cursor_icon(egui::CursorIcon::Move);
+        }
+        if resp.dragged()
+            && let Some(pos) = resp.interact_pointer_pos()
+            && let Some(lp) = fw::comp_to_layer(fm, map.to_comp(pos))
+        {
+            let mut v = offs.clone();
+            let r = rest(k);
+            if let Some(o) = v.get_mut(k) {
+                *o = (lp[0] - r[0], lp[1] - r[1]);
+            }
+            let key = gesture_key(ui, id, resp.drag_started());
+            set_str(actions, layer, g, "mesh", format_mesh(&v), Some(key));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mesh_text_round_trips() {
+        let offs = vec![(0.0, 0.0), (12.5, -3.25), (1.0 / 3.0, f64::NAN)];
+        let s = format_mesh(&offs);
+        assert_eq!(s, "0,0 12.5,-3.25 0.333,0");
+        assert_eq!(effectcraft_engine::effects::parse_mesh(&s), vec![(0.0, 0.0), (12.5, -3.25), (0.333, 0.0)]);
+    }
 
     #[test]
     fn offset_points_and_palettes_round_trip() {

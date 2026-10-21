@@ -3,6 +3,7 @@
 //! --test ui_3d -- --ignored`); the other test only runs the UI logic.
 
 use effectcraft_engine::Session;
+use effectcraft_engine::render::three_d::View3D;
 use effectcraft_ui_egui::EffectcraftApp;
 use egui_kittest::Harness;
 use serde_json::json;
@@ -194,4 +195,157 @@ fn extended_viewer_renders_past_the_comp_frame() {
     h.step();
     h.step();
     assert!(h.state().ui.viewer.extended.is_none());
+}
+
+/// #875: the Top / Front / Right views of a 4-view layout draw the camera wireframe (they drew
+/// none, so moving the camera showed nothing there), and it follows the camera's Position.
+#[test]
+fn layout_views_draw_the_camera_and_follow_its_position() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "C", "width": 640, "height": 360, "duration": 2})).unwrap();
+    let solid = s.execute("layer.newSolid", json!({"color": "#ff0000", "width": 200, "height": 200})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.setSwitch", json!({"layer": solid, "switch": "threeD", "value": true})).unwrap();
+    let cam = s.execute("layer.newCamera", json!({"position": [320, 180, -300], "poi": [320, 180, 0]})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("view.layout", json!({"views": 4})).unwrap();
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    settle(&mut h);
+    let centre = |h: &Harness<'_, EffectcraftApp>, view: &str| {
+        let id = format!("viewer.view.{view}.camera.{cam}");
+        let [x, y, w, hh] = h.state().auto.find(&id).unwrap_or_else(|| panic!("{id} is registered")).rect;
+        (x + w / 2.0, y + hh / 2.0)
+    };
+    for v in ["top", "front", "right"] {
+        centre(&h, v);
+    }
+    let before = centre(&h, "top");
+    h.state_mut().session.execute("prop.set", json!({"layer": cam, "path": "transform/position", "value": [480, 180, -300]})).unwrap();
+    settle(&mut h);
+    let after = centre(&h, "top");
+    assert!(after.0 - before.0 > 10.0, "the camera moves right in the Top view: {before:?} -> {after:?}");
+    assert!((after.1 - before.1).abs() < 1.0, "{before:?} -> {after:?}");
+}
+
+/// A 4-view layout over a comp with a 3D solid and a camera.
+fn four_views() -> Harness<'static, EffectcraftApp> {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "C", "width": 640, "height": 360, "duration": 2})).unwrap();
+    let solid = s.execute("layer.newSolid", json!({"color": "#ff0000", "width": 200, "height": 200})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.setSwitch", json!({"layer": solid, "switch": "threeD", "value": true})).unwrap();
+    s.execute("layer.newCamera", json!({"position": [320, 180, -300], "poi": [320, 180, 0]})).unwrap();
+    s.execute("view.layout", json!({"views": 4})).unwrap();
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    settle(&mut h);
+    h
+}
+
+/// #670: every pane of a multi-view layout has its own view selector; choosing a view changes
+/// that pane (its camera and its wireframes) and no other, and it is remembered for the comp.
+#[test]
+fn each_layout_pane_chooses_its_own_view() {
+    let mut h = four_views();
+    let present = |h: &Harness<'_, EffectcraftApp>, view: &str| h.state().auto.find(&format!("viewer.view.{view}")).is_some();
+    let has_camera = |h: &Harness<'_, EffectcraftApp>, view: &str| h.state().auto.query(&format!("viewer.view.{view}.camera.")).len() == 1;
+    for p in 1..=3 {
+        assert!(h.state().auto.find(&format!("viewer.view.{p}.type")).is_some(), "pane {p} has a selector");
+    }
+    assert!(present(&h, "front") && has_camera(&h, "front"));
+    // Pane 2 (the Front view) becomes the Left view.
+    let left = View3D::ALL.iter().position(|v| *v == View3D::Left).unwrap();
+    click_id(&mut h, "viewer.view.2.type");
+    click_id(&mut h, &format!("viewer.view.2.typeItem.{left}"));
+    settle(&mut h);
+    assert_eq!(h.state().auto.find("viewer.view.2.type").unwrap().label, "View of pane");
+    assert!(present(&h, "left") && has_camera(&h, "left"), "pane 2 shows the Left view with its wireframe");
+    assert!(!present(&h, "front"), "pane 2 no longer shows Front");
+    assert!(present(&h, "top") && present(&h, "right"), "the other panes keep their views");
+    let cid = h.state().session.active_comp_id().unwrap();
+    assert_eq!(h.state().session.state.views3d[&cid].pane(1), View3D::Left);
+    // The Active Camera view of a pane does not draw the camera it looks through.
+    h.state_mut().session.execute("view.setPaneView", json!({"pane": 1, "view": "activeCamera"})).unwrap();
+    settle(&mut h);
+    assert!(present(&h, "activeCamera") && !has_camera(&h, "activeCamera"));
+}
+
+fn drag(h: &mut Harness<'_, EffectcraftApp>, from: egui::Pos2, to: egui::Pos2) {
+    h.event(egui::Event::PointerMoved(from));
+    h.step();
+    h.event(egui::Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+    h.step();
+    for k in 1..=8 {
+        h.event(egui::Event::PointerMoved(from + (to - from) * (k as f32 / 8.0)));
+        h.step();
+    }
+    h.event(egui::Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+    h.run_steps(3);
+}
+
+/// A selected 3D solid (`w` x `h`) in an empty 640x360 comp seen by the default camera.
+fn gizmo_harness(w: u32, h: u32) -> (Harness<'static, EffectcraftApp>, u64) {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "C", "width": 640, "height": 360, "duration": 2})).unwrap();
+    let solid = s.execute("layer.newSolid", json!({"color": "#ff0000", "width": w, "height": h})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.setSwitch", json!({"layer": solid, "switch": "threeD", "value": true})).unwrap();
+    s.execute("layer.select", json!({"layers": [solid]})).unwrap();
+    let mut harness = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    settle(&mut harness);
+    (harness, solid)
+}
+
+fn transform(h: &mut Harness<'_, EffectcraftApp>, layer: u64, prop: &str) -> Vec<f64> {
+    let v = h.state_mut().session.execute("prop.get", json!({"layer": layer, "path": format!("transform/{prop}")})).unwrap()["value"].clone();
+    serde_json::from_value(v).unwrap()
+}
+
+/// The centre of the automation element `id`.
+fn centre(h: &Harness<'_, EffectcraftApp>, id: &str) -> egui::Pos2 {
+    let [x, y, w, hh] = h.state().auto.find(id).unwrap_or_else(|| panic!("{id} is registered")).rect;
+    egui::pos2(x + w / 2.0, y + hh / 2.0)
+}
+
+/// #1618: the gizmo's arrows drag a 3D layer along one axis. Z, which points at the default
+/// camera, still has a grabbable arrow and pushes the layer in depth, as one undo step.
+#[test]
+fn gizmo_arrows_move_a_3d_layer_along_one_axis() {
+    let (mut h, solid) = gizmo_harness(200, 200);
+    let p0 = transform(&mut h, solid, "position");
+
+    let z = centre(&h, &format!("viewer.gizmo.{solid}.z"));
+    drag(&mut h, z, z + egui::vec2(30.0, -30.0));
+    let p1 = transform(&mut h, solid, "position");
+    assert_eq!(&p1[..2], &p0[..2], "x and y stay put");
+    assert!(p1[2] > p0[2] + 10.0, "pushed back in depth: {p0:?} -> {p1:?}");
+
+    settle(&mut h);
+    let x = centre(&h, &format!("viewer.gizmo.{solid}.x"));
+    drag(&mut h, x, x + egui::vec2(40.0, 25.0));
+    let p2 = transform(&mut h, solid, "position");
+    assert!(p2[0] > p1[0] + 10.0, "moved along x: {p1:?} -> {p2:?}");
+    assert_eq!(&p2[1..], &p1[1..], "only x changes");
+
+    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(transform(&mut h, solid, "position"), p1, "the x drag is one undo step");
+    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(transform(&mut h, solid, "position"), p0, "the z drag is one undo step");
+}
+
+/// #1627 review: an arrow drawn over a box handle is what the pointer grabs (it scaled the
+/// layer). At 100% a 120 px wide layer has its right-edge handle under the X arrow's tip.
+#[test]
+fn a_gizmo_arrow_wins_over_the_box_handle_under_it() {
+    let (mut h, solid) = gizmo_harness(120, 200);
+    h.state_mut().ui.viewer.zoom = Some(1.0);
+    settle(&mut h);
+    let x = centre(&h, &format!("viewer.gizmo.{solid}.x"));
+    assert!(x.distance(centre(&h, &format!("viewer.handle.{solid}.5"))) < 2.0, "the right-edge handle is under the X tip");
+
+    h.event(egui::Event::PointerMoved(x));
+    h.run_steps(2);
+    assert_eq!(h.output().platform_output.cursor_icon, egui::CursorIcon::Move, "hover shows the move cursor, not resize");
+
+    let p0 = transform(&mut h, solid, "position");
+    drag(&mut h, x, x + egui::vec2(30.0, 0.0));
+    let p1 = transform(&mut h, solid, "position");
+    assert_eq!(transform(&mut h, solid, "scale"), vec![100.0, 100.0, 100.0], "not scaled");
+    assert!((p1[0] - p0[0] - 30.0).abs() < 1e-6, "moved 30 px along x: {p0:?} -> {p1:?}");
+    assert_eq!(&p1[1..], &p0[1..]);
 }

@@ -181,3 +181,16 @@ fn nested_comp_markers_follow_the_precomp_layers_timing() {
     let solid = s.execute("layer.newSolid", json!({"color": "#ffffff"})).unwrap()["layer"].as_u64().unwrap();
     assert!(s.execute("markers.nested", json!({"layer": solid})).is_err());
 }
+
+#[test]
+fn layer_add_marker_without_selection_adds_comp_marker() {
+    let (mut s, _) = setup();
+    s.execute("time.set", json!({"time": 1.5})).unwrap();
+    s.execute("edit.deselectAll", json!({})).unwrap();
+    assert!(s.state.selected_layers.is_empty());
+    s.execute("layer.addMarker", json!({"comment": "timeline marker"})).unwrap();
+    let comp = s.active_comp().unwrap();
+    assert_eq!(comp.markers.len(), 1);
+    assert!((comp.markers[0].time.seconds() - 1.5).abs() < 1e-9);
+    assert_eq!(comp.markers[0].comment, "timeline marker");
+}

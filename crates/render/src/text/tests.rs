@@ -100,6 +100,30 @@ fn range_based_on_words_and_lines() {
 }
 
 #[test]
+fn range_start_end_and_offset_are_capped() {
+    let (mut p, cid, comp) = setup(400, 200);
+    let mut l = text_layer(&mut p, &comp, doc("ABCD", 30.0));
+    let a = animator(&mut p, &mut l, &["opacity"], &["range"]);
+    set(&mut l, "text/animators/#1/selectors/#1/advanced/smoothness", Value::Scalar(0.0));
+    // End 300% is capped at 100% (Offset -150% at -100%): the range is -100%..0% and selects nothing.
+    // Uncapped it would be -150%..150% and select everything.
+    set(&mut l, "text/animators/#1/selectors/#1/end", Value::Scalar(300.0));
+    set(&mut l, "text/animators/#1/selectors/#1/offset", Value::Scalar(-150.0));
+    p.comp_mut(cid).unwrap().layers.push(l);
+    assert_eq!(selection(&p, cid, 0.0, a), vec![0.0; 4]);
+    // Start -200% is capped at 0%: with Offset 100% the range is 100%..150% and selects nothing.
+    // Uncapped it would be -100%..150% and select everything.
+    let l = &mut p.comp_mut(cid).unwrap().layers[0];
+    set(l, "text/animators/#1/selectors/#1/start", Value::Scalar(-200.0));
+    set(l, "text/animators/#1/selectors/#1/end", Value::Scalar(50.0));
+    set(l, "text/animators/#1/selectors/#1/offset", Value::Scalar(100.0));
+    assert_eq!(selection(&p, cid, 0.0, a), vec![0.0; 4]);
+    let l = &mut p.comp_mut(cid).unwrap().layers[0];
+    set(l, "text/animators/#1/selectors/#1/offset", Value::Scalar(0.0));
+    assert_eq!(selection(&p, cid, 0.0, a), vec![1.0, 1.0, 0.0, 0.0]);
+}
+
+#[test]
 fn selector_modes_and_randomize() {
     let (mut p, cid, comp) = setup(400, 200);
     let mut l = text_layer(&mut p, &comp, doc("ABCDEFGH", 30.0));
@@ -525,4 +549,18 @@ fn touching_glyphs_join_without_a_seam() {
     assert!((two[3] - 0.75).abs() < 0.02, "{two:?}");
     let multiply = draw(vec![glyph(4.0, 10.5, white, false), glyph(10.5, 17.0, white, false)], BlendMode::Multiply).get(10, 10);
     assert!(multiply[3] < 0.9, "{multiply:?}");
+}
+
+/// #1011: what dragging a Range Selector bar to fraction `f` of the text writes.
+#[test]
+fn range_bar_drag_values() {
+    // Percentage: the bar's place less the Offset, within 0..100.
+    assert!((range_value_of(0.5, 0.0, false, 7) - 50.0).abs() < 1e-9);
+    assert!((range_value_of(0.5, 0.25, false, 7) - 25.0).abs() < 1e-9, "Offset 25%: the bar at 50% is Start 25%");
+    assert_eq!(range_value_of(0.1, 0.25, false, 7), 0.0, "never below 0");
+    assert_eq!(range_value_of(1.0, -0.5, false, 7), 100.0, "nor above 100");
+    // Index: whole units, the nearest boundary (3.4 of 7 characters → 3, 3.6 → 4).
+    assert_eq!(range_value_of(3.4 / 7.0, 0.0, true, 7), 3.0);
+    assert_eq!(range_value_of(3.6 / 7.0, 0.0, true, 7), 4.0);
+    assert_eq!(range_value_of(3.6 / 7.0, 2.0 / 7.0, true, 7), 2.0, "less a 2-character Offset");
 }

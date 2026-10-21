@@ -13,7 +13,8 @@ The model is `effectcraft_engine::prefs::Prefs`: serde, versioned (`version`), a
 keys (`general.undoLevels`, `autoSave.intervalMinutes`, `labels.3.name`). It is stored as
 `prefs.json` through the session's `ConfigStore` (the desktop app uses the platform config
 directory: `~/Library/Application Support/EffectCraft` on macOS, `%APPDATA%\EffectCraft` on
-Windows, `$XDG_CONFIG_HOME/effectcraft` on Linux; the web app keeps it in browser storage: the
+Windows, `$XDG_CONFIG_HOME/effectcraft` on Linux, or `EffectCraftData` beside the executable when a
+`portable.txt` sits there, as in the Windows portable zip; the web app keeps it in browser storage: the
 Origin Private File System, or IndexedDB where OPFS can't write, see [web.md](web.md)). Loading migrates older layouts, keeps unknown keys (from newer versions) and
 falls back to defaults for values that don't parse.
 
@@ -57,10 +58,12 @@ Commands (CLI, MCP, control channel):
 - `appearance.appearanceMode`: Appearance Mode (`auto` / `dark` / `light`). `auto` (Sync with System) follows the operating system's light or dark appearance while the app runs: on Linux the desktop app reads the XDG desktop portal (`org.freedesktop.appearance` `color-scheme`) once and then listens for its `SettingChanged` signal on a worker thread, repainting only when the value changes (nothing polls); `gsettings` runs at most once at start-up, by absolute path, when the portal gives no answer. Elsewhere it uses what the window system reports. With no answer it shows the dark theme. New installs stay `dark`; Sync with System is opt-in. The Tools bar's appearance button (a monitor, sun or moon) cycles Sync with System, Light and Dark (`view.theme.toggle`, Next Appearance Mode).
 - `appearance.darkTheme`: Dark Theme (`dark` / `darker`), shown in dark appearance
 - `appearance.lightTheme`: Light Theme (`light`), shown in light appearance. Settings ▸ Appearance shows the mode above a light and a dark theme card, each with a preview of the EffectCraft window in that theme.
+- `appearance.favoriteThemes`: a list of unique theme ids (`dark`, `darker`, `light`), empty by default. Hover a theme row to star it; saved favorites keep an accent-colored star. Right-click the appearance button for Appearance Settings and favorites grouped light first, then dark. Selecting a favorite fixes its appearance family and preserves the opposite family choice; left-click still cycles modes. Settings OK saves favorites and Cancel restores them. Unknown or duplicate ids are rejected by `prefs.set` and removed when loading old settings.
 - `appearance.theme`: the single theme from before appearance modes, kept for older settings files and automation. A saved file with only `theme` loads as a fixed Dark or Light mode showing it; setting it (`prefs.set`, `ui.set {"theme": …}`, `view.theme.dark|darker|light`) selects that theme and fixes the mode to its family. While the mode is Dark or Light it mirrors the theme in use.
 - `appearance.brightness`: Brightness
-- `appearance.uiScale`: UI Scale, the size of the whole interface (75–200 %, on top of the
-  display's own scaling), applied as soon as it is chosen
+- `appearance.uiScale`: UI Scale, the size of the whole interface (any whole percentage from
+  75 to 200, on top of the display's own scaling), dragged or typed; it applies as soon as it is
+  dragged or entered
 - `appearance.useLabelColorForHandles`: Use Label Color for Layer Handles and Paths
 - `grids.gridColor`: Color
 - `grids.gridSpacing`: Gridline Every
@@ -94,7 +97,9 @@ Commands (CLI, MCP, control channel):
   how much of a position motion path the viewer draws (all, none, N seconds or N keyframes
   around the current time)
 - `previews.showInternalWireframes`: outlines of the layers inside a selected collapsed precomp
-- `previews.zoomQuality`: Faster = nearest-neighbour viewer scaling, More Accurate = bilinear
+- `previews.zoomQuality`: Faster = nearest-neighbour viewer scaling, More Accurate = averaged
+  (bilinear, mipmapped) when the frame is shown below 100 %; magnified frames show their pixels as
+  blocks in both modes, and the frame sits on the physical pixel grid, so 100 % is exact
 - `previews.displayProfile`: the monitor's colour space for View ▸ Use Display Color Management
 - `appearance.useLabelColorForTabs`: Composition / Timeline tabs show the comp's label colour,
   Effect Controls / Properties the layer's
@@ -226,18 +231,49 @@ Commands: `file.autoSave` (now), `file.recoveryInfo`, `file.openRecent {index? |
 
 ## AI Chat
 
-Window ▸ AI Chat (Settings ▸ AI Chat) chats with a local model or with anything the local bridge
-exposes. The panel reaches `127.0.0.1` only: Ollama directly, or `bridge/agent-bridge.py` (the
-`effectcraft-ai-chat` repository) for Codex on a ChatGPT plan, Devin over ACP, OpenCode,
-OpenAI-compatible APIs and any CLI. Requests run on a worker thread, so the interface keeps
-drawing while a model thinks. The transcript, the conversation and the agent list live in the UI
-state, so agents can read them like any other panel.
+Window ▸ AI Chat (Settings ▸ AI Chat) chats with a user-configured Ollama server or a local
+endpoint implementing the bridge protocol below. Requests run on a worker thread.
+Endpoints accept `host:port` or `http://host:port/`, including bracketed IPv6. Every resolved
+address must be loopback (`127.0.0.0/8` or `::1`); the connection uses those validated addresses.
+HTTPS is rejected, never downgraded. Credentials, paths other than `/`, queries and fragments
+are not supported. This restriction applies even when preferences are set through MCP or the
+control channel. A local bridge may itself contact remote services; its privacy and credential
+handling are the user's responsibility. No bridge implementation is bundled or endorsed.
+
+Input, transcript, conversation, agent list and status are session-only. They are omitted from
+serialized UI state (including control-channel snapshots), and legacy saved chat state is ignored
+on load. Clear removes the visible conversation. Connection preferences and the configured system
+prompt remain persistent preferences; do not put secrets in them.
 
 | Key | What |
 |---|---|
 | `aiChat.agent` | the agent the panel talks to (`ollama`, or empty, = the local model directly) |
-| `aiChat.agentModel` | the model a bridge agent is asked for; empty = the agent's own default (ACP agents match it against the models they offer, `opus` → the first Claude Opus) |
+| `aiChat.agentModel` | model identifier passed unchanged to the bridge; empty = the bridge's default |
 | `aiChat.bridgeUrl` | the bridge to talk to (`127.0.0.1:8765`) |
 | `aiChat.ollamaUrl` | the Ollama server for the direct connection (`127.0.0.1:11434`) |
-| `aiChat.model` | the model the direct Ollama connection asks for |
+| `aiChat.model` | installed model identifier for direct Ollama; must be configured (no vendor default) |
 | `aiChat.systemPrompt` | the first message of every conversation |
+
+### Local bridge protocol
+
+- `GET /agents` returns `{"agents":[{"id":"local-agent","label":"Local agent","ready":true,"note":""}]}`.
+- `POST /chat` receives `{"agent":"local-agent","messages":[{"role":"system","content":"…"},{"role":"user","content":"…"}],"model":"custom-model"}`.
+  `model` is omitted when `aiChat.agentModel` is empty. Messages include prior turns.
+- A successful HTTP 200 response is `{"reply":"…","model":"custom-model"}` (`model` optional).
+  Failures may return `{"error":"description"}`.
+- Responses must be UTF-8 JSON, not streaming or chunked, and close the connection after the body.
+  Responses larger than 8 MiB are rejected. Direct Ollama uses `POST /api/chat` with `stream: false`.
+
+## Logs
+
+The desktop app writes its log records to standard error and to `Logs/effectcraft.log` in the
+config directory. Each launch moves the previous log to `effectcraft.1.log` (and that one to
+`effectcraft.2.log`), so the log of a run that crashed survives the next start; a log stops
+growing at 16 MiB. A launch from the Dock, the Start menu or a launcher has no terminal, so
+attach these files to a bug report. Help ▸ Reveal Logging File shows this run's log (or Help ▸
+Enable Logging's `EffectCraft Log.txt` while that is on, which keeps every EffectCraft record
+across launches).
+
+By default the log has `info` records from EffectCraft and warnings and errors from everything
+else. `RUST_LOG` replaces that with env_logger-style directives: `debug`,
+`warn,effectcraft_render=trace`, `wgpu_core=info`. The control-channel token is never logged.

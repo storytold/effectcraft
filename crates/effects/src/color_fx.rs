@@ -43,16 +43,27 @@ fn tritone(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
-/// Brightness & Contrast without Use Legacy: tone curves that keep black and white fixed (no
-/// clipping). Brightness bends the curve with a power (`b` in -1.5..1.5), contrast is an S
-/// curve around mid grey (`c` in -1..1). Values above 1 pass through. The GPU kernel mirrors it.
+/// Brightness & Contrast without Use Legacy: pin black and white, then a mild S-curve.
+///
+/// Fitted to After Effects non-legacy grey ramps (#681, kasper9n oracles). Brightness is a
+/// power toward white (`1-(1-v)^e`) or black (`v^e`); contrast uses `g = 1 + 0.53 c` instead of
+/// the old `2^(2c)` (that crushed 0.25 to ~8/255 at Contrast 100; AE is ~40/255). Values above 1
+/// pass through. The GPU kernel mirrors it.
 pub fn bc_modern(v: f32, b: f32, c: f32) -> f32 {
     if v >= 1.0 {
         return v;
     }
-    let v = v.max(0.0).powf(2f32.powf(-b));
-    let g = 2f32.powf(2.0 * c);
-    if v < 0.5 { 0.5 * (2.0 * v).powf(g) } else { 1.0 - 0.5 * (2.0 - 2.0 * v).max(0.0).powf(g) }
+    let mut v = v.max(0.0);
+    if b > 0.0 {
+        v = 1.0 - (1.0 - v).powf(2f32.powf(1.24 * b));
+    } else if b < 0.0 {
+        v = v.powf(2f32.powf(-1.32 * b));
+    }
+    if c != 0.0 {
+        let g = (1.0 + 0.53 * c).max(0.05);
+        v = if v < 0.5 { 0.5 * (2.0 * v).powf(g) } else { 1.0 - 0.5 * (2.0 - 2.0 * v).max(0.0).powf(g) };
+    }
+    v
 }
 
 fn brightness_contrast(ctx: &EffectCtx, mut b: Buf) -> Buf {
@@ -315,20 +326,27 @@ pub fn mirror_pow(v: f32, p: f32) -> f32 {
     v.abs().powf(p).copysign(v)
 }
 
+/// Black & White: a pixel's gray is its smallest channel plus its chroma (largest − smallest
+/// channel) times the colour sliders' weight for its hue. A neutral pixel keeps its value, a pure
+/// hue becomes its slider's percentage (Reds 40 % turns pure red into 40 % gray), and the gray
+/// never moves further from the smallest channel than the pixel's own chroma times the weight.
+/// It used to offset the luminance by the HSL saturation, which is near 1 for any tinted
+/// near-black pixel: the faint colour noise of compressed footage's shadows came out as bright
+/// and black blocks (#1463), and 32-bpc overbrights divided by zero.
 fn black_white(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let w = [ctx.params.f("reds"), ctx.params.f("yellows"), ctx.params.f("greens"), ctx.params.f("cyans"), ctx.params.f("blues"), ctx.params.f("magentas")]
         .map(|v| v as f32 / 100.0);
     let tint_on = ctx.params.b("tint");
     let tc = ctx.params.color("tintColor");
     b.img.map_straight(|c| {
-        let (h, s, _) = rgb_to_hsl(c[0], c[1], c[2]);
+        let (h, _, _) = rgb_to_hsl(c[0], c[1], c[2]);
         // Interpolate the six hue weights around the colour wheel.
         let hp = h * 6.0;
         let i = hp.floor() as usize % 6;
         let f = hp - hp.floor();
         let wt = w[i] + (w[(i + 1) % 6] - w[i]) * f;
-        let base = luminance(c[0], c[1], c[2]);
-        let gray = (base + (wt - 0.5) * s * 0.6).max(0.0);
+        let (max, min) = (c[0].max(c[1]).max(c[2]), c[0].min(c[1]).min(c[2]));
+        let gray = (min + (max - min) * wt).max(0.0);
         if tint_on {
             let (th, ts, _) = rgb_to_hsl(tc[0], tc[1], tc[2]);
             let (r, g, bl) = hsl_to_rgb(th, ts, gray.min(1.0));
@@ -1179,6 +1197,94 @@ mod tests {
         let legacy = [("brightness", num(50.0)), ("useLegacy", Value::Bool(true))];
         assert!((bc(&legacy, 0.2) - 0.7).abs() < 1e-5);
         assert!((bc(&legacy, 0.0) - 0.5).abs() < 1e-5);
+    }
+
+    /// After Effects non-legacy ramps (kasper9n, #681). B0 C-100 matched B0 C-50 and is omitted.
+    #[test]
+    fn brightness_contrast_modern_matches_ae_ramp_samples() {
+        let u8 = |v: f32| (v * 255.0).round() as i32;
+        let go = |b: f64, c: f64, x: u8| {
+            u8(px("ec.color.brightnesscontrast", &[("brightness", num(b)), ("contrast", num(c))], [x as f32 / 255.0, x as f32 / 255.0, x as f32 / 255.0, 1.0])
+                [0])
+        };
+        // (brightness, contrast, input, AE 8-bit)
+        let samples: &[(f64, f64, u8, u8)] = &[
+            (0.0, 100.0, 64, 40),
+            (0.0, 100.0, 128, 129),
+            (0.0, 100.0, 192, 217),
+            (0.0, 50.0, 64, 53),
+            (0.0, 50.0, 192, 205),
+            (0.0, -50.0, 64, 77),
+            (100.0, 0.0, 128, 209),
+            (50.0, 0.0, 128, 171),
+            (106.0, -18.0, 128, 214),
+        ];
+        for &(b, c, x, ae) in samples {
+            let got = go(b, c, x);
+            assert!((got - ae as i32).abs() <= 10, "B{b} C{c} in {x}: got {got} AE {ae}");
+        }
+        // Old g=4 S-curve put Contrast 100 at ~8/255 here.
+        assert!(go(0.0, 100.0, 64) >= 30);
+    }
+
+    /// #1463: Black & White's sliders set the gray of each pure hue and blend between
+    /// neighbouring hues; neutral pixels keep their value, overbright ones too, and an overbright
+    /// colour stays finite (it used to divide by zero).
+    #[test]
+    fn black_white_sliders_set_the_gray_of_each_hue() {
+        let bw = |vals: &[(&str, Value)], c: [f32; 3]| px("ec.color.blackwhite", vals, [c[0], c[1], c[2], 1.0]);
+        let gray = |v: f32| [v, v, v, 1.0];
+        // The defaults: Reds 40, Yellows 60, Greens 40, Cyans 60, Blues 20, Magentas 80 (%).
+        let hues = [
+            ([1.0, 0.0, 0.0], 0.4),
+            ([1.0, 1.0, 0.0], 0.6),
+            ([0.0, 1.0, 0.0], 0.4),
+            ([0.0, 1.0, 1.0], 0.6),
+            ([0.0, 0.0, 1.0], 0.2),
+            ([1.0, 0.0, 1.0], 0.8),
+            // Half as bright, half the gray; orange is halfway from Reds to Yellows.
+            ([0.5, 0.0, 0.0], 0.2),
+            ([1.0, 0.5, 0.0], 0.5),
+            // Neutral pixels keep their value.
+            ([0.3, 0.3, 0.3], 0.3),
+            ([4.0, 4.0, 4.0], 4.0),
+            // An overbright red: its smallest channel plus its chroma at Reds' 40 %.
+            ([1.5, 0.5, 0.5], 0.9),
+        ];
+        for (c, want) in hues {
+            let o = bw(&[], c);
+            assert!(close(o, gray(want), 1e-5), "{c:?}: {o:?}, want {want}");
+        }
+        assert!(close(bw(&[("reds", num(120.0))], [1.0, 0.0, 0.0]), gray(1.2), 1e-5));
+        assert!(close(bw(&[("reds", num(-200.0))], [1.0, 0.0, 0.0]), gray(0.0), 1e-5));
+        assert!(close(bw(&[("blues", num(300.0))], [0.1, 0.1, 0.3]), gray(0.7), 1e-5));
+    }
+
+    /// #1463: faint colour noise stays faint. The shadows of compressed footage carry a code or
+    /// two of colour noise, which Black & White turned into bright and black blocks (the HSL
+    /// saturation it scaled is near 1 for any tinted near-black pixel). At 8, 16 and 32 bpc the
+    /// gray of a dark ramp with ±2 steps of colour noise stays within 2 steps of the clean ramp's.
+    #[test]
+    fn black_white_keeps_faint_colour_noise_faint() {
+        // A step of 8 bpc, of 16 bpc (After Effects' 0..32768), and a small 32-bpc float one.
+        for step in [1.0 / 255.0, 1.0 / 32768.0, 1e-3_f32] {
+            let (w, h) = (64u32, 4u32);
+            let (mut clean, mut noisy) = (Image::new(w, h), Image::new(w, h));
+            for y in 0..h {
+                for x in 0..w {
+                    // A dark ramp up to a quarter gray, in whole steps...
+                    let v = (x as f32 / w as f32 * 0.25 / step).round() * step;
+                    // ...and up to ±2 steps of noise per channel, mixed differently in each pixel.
+                    let n = |k: u32| (((x * 7 + y * 13 + k * 2) % 5) as f32 - 2.0) * step;
+                    clean.set(x, y, [v, v, v, 1.0]);
+                    noisy.set(x, y, [(v + n(0)).max(0.0), (v + n(1)).max(0.0), (v + n(2)).max(0.0), 1.0]);
+                }
+            }
+            let bw = |img| run_fx("ec.color.blackwhite", &[], img, 0.0, EffectEnv::default()).img;
+            let (a, b) = (bw(clean), bw(noisy));
+            let worst = a.data.iter().zip(&b.data).map(|(p, q)| (p[0] - q[0]).abs()).fold(0.0, f32::max);
+            assert!(worst <= 2.0 * step + 1e-6, "step {step}: the noise moved the gray by {} steps", worst / step);
+        }
     }
 
     #[test]

@@ -190,6 +190,25 @@ pub fn cpu_cores() -> usize {
     std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
 }
 
+/// The graphics lines of Settings ▸ GPU Information and Help ▸ System Report: whether the GPU
+/// compositor runs (and on which adapter), else why compositing is on the CPU, and the adapter
+/// the window itself got. Without this a card the compositor couldn't use looked undetected (#596).
+pub fn gpu_summary(s: &crate::Session) -> String {
+    let mut text = match s.accel.as_ref().map(|a| a.name()) {
+        Some(name) => format!("Compositing: GPU, {name}.\n"),
+        None => {
+            let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+            let why = s.accel_note.as_deref().unwrap_or("no reason was recorded");
+            format!("Compositing: CPU, {threads} threads (pure Rust, rayon).\nGPU compositing is off: {why}\n")
+        }
+    };
+    match &s.window_adapter {
+        Some(adapter) => text.push_str(&format!("Window graphics: {adapter}\n")),
+        None => text.push_str("Window graphics: not known yet (the window has not drawn its first frame).\n"),
+    }
+    text
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

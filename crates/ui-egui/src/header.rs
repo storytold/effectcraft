@@ -12,7 +12,7 @@ use crate::widgets;
 use crate::{Dialog, EffectcraftApp};
 use effectcraft_color::BlendMode;
 use effectcraft_engine::commands::shape_tool::{PaintKind, ToolPaint};
-use effectcraft_engine::project::{LayerId, LayerSource};
+use effectcraft_engine::project::{LayerId, LayerSource, PropGroup};
 use effectcraft_engine::viewer as vw;
 
 pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
@@ -101,7 +101,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 None
             };
             let close_behavior = if held && resp.clicked() { egui::PopupCloseBehavior::IgnoreClicks } else { egui::PopupCloseBehavior::CloseOnClickOutside };
-            egui::Popup::menu(&resp).open_memory(command).close_behavior(close_behavior).show(|ui| {
+            egui::Popup::menu(&resp).style(crate::widgets::menu_style).open_memory(command).close_behavior(close_behavior).show(|ui| {
                 for tool in slot.iter() {
                     let row = ui.selectable_label(app.ui.tool == *tool, tool.label());
                     app.auto.add(&format!("tools.select.{tool:?}"), row.rect, tool.label());
@@ -133,13 +133,15 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             app.session.state.selected_layers.iter().filter(|id| c.layer(**id).is_some_and(|l| matches!(l.source, LayerSource::Shape))).map(|id| id.0).collect()
         })
         .unwrap_or_default();
-    let layer_paint = shape_layers
-        .first()
-        .and_then(|id| app.session.active_comp()?.layer(LayerId(*id)))
-        .map(|l| effectcraft_engine::commands::shape_stroke::first_paint(l, l.layer_time(app.session.time())));
-    if let Some((fill, stroke, width)) = layer_paint {
+    let layer_paint = shape_layers.first().and_then(|id| app.session.active_comp()?.layer(LayerId(*id))).map(|l| {
+        let lt = l.layer_time(app.session.time());
+        (effectcraft_engine::commands::shape_stroke::first_paint(l, lt), effectcraft_engine::commands::shape_stroke::first_paint_kinds(l, lt))
+    });
+    if let Some(((fill, stroke, width), (fill_kind, stroke_kind))) = layer_paint {
         let rgb = |c: [f64; 4]| [c[0] as f32, c[1] as f32, c[2] as f32];
         let tool = &mut app.session.state.shape_tool;
+        tool.fill.kind = fill_kind;
+        tool.stroke.kind = stroke_kind;
         if let Some(c) = fill {
             tool.fill.color = rgb(c);
         }
@@ -214,9 +216,35 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     };
     let tip = tr_args("Appearance Mode: {}", &[&mode]);
     let r = Rect::from_min_max(pos2(rx - 26.0, cy - 13.0), pos2(rx, cy + 13.0));
-    if widgets::icon_button(ui, r, icon, false, &t, egui::Id::new("hdr-appearance")).on_hover_text(&tip).clicked() {
+    let response = widgets::icon_button(ui, r, icon, false, &t, egui::Id::new("hdr-appearance")).on_hover_text(&tip);
+    if response.clicked() {
         app.cycle_appearance(ui.ctx());
     }
+    response.context_menu(|ui| {
+        let settings = ui.button(tr("Appearance Settings…"));
+        app.auto.add("header.appearanceSettings", settings.rect, "Appearance Settings…");
+        if settings.clicked() {
+            crate::panels::settings::open(app, "appearance");
+            ui.close();
+        }
+        let favorites = app.session.prefs.appearance.favorite_themes.clone();
+        for options in [effectcraft_engine::prefs::LIGHT_THEMES, effectcraft_engine::prefs::DARK_THEMES] {
+            let group: Vec<_> = options.iter().filter(|(_, id)| favorites.iter().any(|saved| saved == id)).collect();
+            if !group.is_empty() {
+                ui.separator();
+            }
+            for (label, id) in group {
+                let r = ui.selectable_label(app.ui.theme.name() == *id, tr(label));
+                app.auto.add(&format!("header.favoriteTheme.{id}"), r.rect, label);
+                if r.clicked() {
+                    if let Some(kind) = crate::theme::ThemeKind::from_name(id) {
+                        app.set_theme(ui.ctx(), kind);
+                    }
+                    ui.close();
+                }
+            }
+        }
+    });
     app.auto.add("header.appearance", r, &tip);
     rx = r.min.x - 4.0;
     rx -= 10.0;
@@ -227,7 +255,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let mresp = ui.interact(more, egui::Id::new("ws-more"), Sense::click());
     p.text(more.center(), Align2::CENTER_CENTER, "»", Tokens::ui(15.0), if mresp.hovered() { t.text } else { t.text_dim });
     app.auto.add("header.workspaces", more, "Workspaces");
-    mresp.context_menu(|ui| ws_menu(app, ui));
+    crate::widgets::context_menu(&mresp, |ui| ws_menu(app, ui));
     if mresp.clicked() {
         widgets::open_popup(ui, egui::Id::new("ws-pop"));
     }
@@ -301,6 +329,24 @@ fn tool_options(app: &mut EffectcraftApp, v: serde_json::Value) {
     }
 }
 
+/// The Colors property of the first Gradient Fill (`gfill`) or Gradient Stroke (`gstroke`) on the
+/// shape `layers`, in contents order through nested groups: (layer, property uid). The toolbar's
+/// gradient swatch edits it in the Gradient Editor.
+fn gradient_colors(app: &EffectcraftApp, layers: &[u64], paint: &str) -> Option<(u64, u64)> {
+    fn find(g: &PropGroup, paint: &str, depth: usize) -> Option<u64> {
+        if depth >= 16 {
+            return None;
+        }
+        g.groups().filter(|c| c.enabled).find_map(|c| match c.match_id.as_str() {
+            m if m == paint => c.get("colors").map(|p| p.uid),
+            "group" | "contents" => find(c, paint, depth + 1),
+            _ => None,
+        })
+    }
+    let comp = app.session.active_comp()?;
+    layers.iter().find_map(|&l| comp.layer(LayerId(l)).and_then(|layer| layer.props.sub("contents")).and_then(|c| find(c, paint, 0)).map(|u| (l, u)))
+}
+
 /// The colour picker of the Fill or Stroke swatch.
 fn picker_id(key: &str) -> egui::Id {
     egui::Id::new(("tool-pick", key))
@@ -353,8 +399,9 @@ fn fill_stroke_options(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Pa
         if wresp.clicked() {
             widgets::open_popup(ui, opts);
         }
-        // The swatch picks a Solid Color's colour and opens the options for the other kinds;
-        // Alt-click steps through the kinds (as in After Effects).
+        // The swatch picks a Solid Color's colour, edits a Linear or Radial Gradient's colours in
+        // the Gradient Editor (the selected shape layer's Gradient Fill / Gradient Stroke), and
+        // opens the options otherwise; Alt-click steps through the kinds (as in After Effects).
         let sr = Rect::from_min_size(pos2(wr.max.x + 6.0, cy - 8.0), vec2(20.0, 16.0));
         let sresp = ui.interact(sr, egui::Id::new(("tool-paint-swatch", key)), Sense::click()).on_hover_text(format!("{title}: {}", tp.kind.label()));
         paint_swatch(p, sr, &tp, sresp.hovered(), &t);
@@ -363,11 +410,19 @@ fn fill_stroke_options(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Pa
             if ui.input(|i| i.modifiers.alt) {
                 let at = PaintKind::ALL.iter().position(|k| *k == tp.kind).unwrap_or(0);
                 let next = PaintKind::ALL.get((at + 1) % PaintKind::ALL.len()).copied().unwrap_or_default();
-                let k = format!("{key}Type");
-                tool_options(app, json!({k: next.id()}));
+                paint_kind(app, shape_layers, key, next);
             } else if tp.kind == PaintKind::Solid {
                 widgets::open_popup(ui, picker_id(key));
+            } else if let Some((layer, prop)) = matches!(tp.kind, PaintKind::Linear | PaintKind::Radial)
+                .then(|| gradient_colors(app, shape_layers, if key == "fill" { "gfill" } else { "gstroke" }))
+                .flatten()
+            {
+                let ctx = ui.ctx().clone();
+                if let Err(e) = crate::menus::invoke(app, &ctx, "prop.editGradient", json!({"layer": layer, "prop": prop})) {
+                    app.ui.status = e;
+                }
             } else {
+                // No selected shape layer with that gradient: its options (new shapes' kind).
                 widgets::open_popup(ui, opts);
             }
         }
@@ -376,7 +431,7 @@ fn fill_stroke_options(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Pa
             tool_options(app, json!({key: c}));
             paint(app, key, json!(c));
         }
-        paint_options_popup(app, ui, key, &options, wr.left_bottom());
+        paint_options_popup(app, ui, shape_layers, key, &options, wr.left_bottom());
         x = sr.max.x + 12.0;
     }
     let width = app.session.state.shape_tool.stroke_width;
@@ -389,9 +444,28 @@ fn fill_stroke_options(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Pa
     r.max.x + 14.0
 }
 
+/// A Fill or Stroke kind: for new shapes, and (as in After Effects) for the selected shape
+/// layers' fills or strokes, which None switches off (#732).
+fn paint_kind(app: &mut EffectcraftApp, shape_layers: &[u64], key: &str, kind: PaintKind) {
+    let k_type = format!("{key}Type");
+    tool_options(app, json!({&k_type: kind.id()}));
+    if shape_layers.is_empty() {
+        return;
+    }
+    let mut v = json!({"layers": shape_layers, k_type: kind.id()});
+    // A Solid Color takes the swatch's colour.
+    let color = if key == "fill" { app.session.state.shape_tool.fill.color } else { app.session.state.shape_tool.stroke.color };
+    if let (PaintKind::Solid, Some(o)) = (kind, v.as_object_mut()) {
+        o.insert(key.to_string(), json!(color));
+    }
+    if let Err(e) = app.session.execute("shape.fillStroke", v) {
+        app.ui.status = e.to_string();
+    }
+}
+
 /// Fill Options / Stroke Options: None, Solid Color, Linear Gradient or Radial Gradient, and the
 /// blend mode and opacity new shapes get (After Effects' dialogs, applied as they change).
-fn paint_options_popup(app: &mut EffectcraftApp, ui: &mut egui::Ui, key: &str, title: &str, pos: egui::Pos2) {
+fn paint_options_popup(app: &mut EffectcraftApp, ui: &mut egui::Ui, shape_layers: &[u64], key: &str, title: &str, pos: egui::Pos2) {
     let id = egui::Id::new(("tool-paint-options", key));
     if !widgets::popup_is_open(ui, id) {
         return;
@@ -400,6 +474,7 @@ fn paint_options_popup(app: &mut EffectcraftApp, ui: &mut egui::Ui, key: &str, t
     let tp = if key == "fill" { &app.session.state.shape_tool.fill } else { &app.session.state.shape_tool.stroke }.clone();
     let blend_pop = id.with("blend");
     let mut set = None;
+    let mut kind = None;
     let mut blend_rect = Rect::NOTHING;
     let area = egui::Area::new(id.with("area")).order(egui::Order::Foreground).fixed_pos(pos + vec2(0.0, 4.0)).show(ui.ctx(), |ui| {
         egui::Frame::popup(ui.style()).show(ui, |ui| {
@@ -416,8 +491,7 @@ fn paint_options_popup(app: &mut EffectcraftApp, ui: &mut egui::Ui, key: &str, t
                 paint_swatch(&p, r.shrink(3.0), &ToolPaint { kind: k, ..tp.clone() }, resp.hovered(), &t);
                 app.auto.add(&format!("header.{key}Options.{}", k.id()), r, k.label());
                 if resp.clicked() {
-                    let k_type = format!("{key}Type");
-                    set = Some(json!({k_type: k.id()}));
+                    kind = Some(k);
                 }
             }
             p.text(row(33.0) + vec2(134.0, 0.0), Align2::LEFT_CENTER, tp.kind.label(), Tokens::ui(11.5), t.text_dim);
@@ -450,6 +524,9 @@ fn paint_options_popup(app: &mut EffectcraftApp, ui: &mut egui::Ui, key: &str, t
     }
     if let Some(v) = set {
         tool_options(app, v);
+    }
+    if let Some(k) = kind {
+        paint_kind(app, shape_layers, key, k);
     }
 }
 

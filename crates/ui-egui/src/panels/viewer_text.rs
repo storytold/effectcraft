@@ -26,6 +26,7 @@ use serde_json::{Value, json};
 
 use super::viewer::ViewerMap;
 use crate::EffectcraftApp;
+use crate::dock::PanelKind;
 use crate::state::Tool;
 
 /// Pointer interaction owned by text editing (kept across frames while the button is down).
@@ -117,12 +118,23 @@ fn edited(app: &EffectcraftApp, ectx: &EvalCtx, lid: LayerId) -> Option<Edited> 
     Some(Edited { layer, doc, lay, m, inv, carets })
 }
 
-/// The topmost text layer whose text is under screen point `s`.
-fn text_layer_at(app: &EffectcraftApp, ectx: &EvalCtx, map: &ViewerMap, s: Pos2) -> Option<Edited> {
-    super::viewer::selectable_layers(ectx.comp, ectx.time)
+/// Type-tool clicks prefer a selected text layer, as viewer dragging does (#230).
+/// Double-clicks retain topmost picking. Both use the same visibility/lock/time/solo filter.
+fn text_layer_at(app: &EffectcraftApp, ectx: &EvalCtx, map: &ViewerMap, s: Pos2, prefer_selected: bool) -> Option<Edited> {
+    let mut topmost = None;
+    for e in super::viewer::selectable_layers(ectx.comp, ectx.time)
         .filter(|l| matches!(l.source, LayerSource::Text))
         .filter_map(|l| edited(app, ectx, l.id))
-        .find(|e| e.contains(map, s))
+        .filter(|e| e.contains(map, s))
+    {
+        if !prefer_selected || app.session.state.selected_layers.contains(&e.layer.id) {
+            return Some(e);
+        }
+        if topmost.is_none() {
+            topmost = Some(e);
+        }
+    }
+    topmost
 }
 
 fn exec(app: &mut EffectcraftApp, id: &str, p: Value) -> Option<Value> {
@@ -132,6 +144,21 @@ fn exec(app: &mut EffectcraftApp, id: &str, p: Value) -> Option<Value> {
             app.ui.status = e.to_string();
             None
         }
+    }
+}
+
+/// The panels a text edit stays open across: the viewers, and Character, Paragraph and
+/// Properties, which format the selected characters.
+fn keeps_text_edit(p: PanelKind) -> bool {
+    super::viewers::id_of(p).is_some() || matches!(p, PanelKind::Character | PanelKind::Paragraph | PanelKind::Properties)
+}
+
+/// A click in panel `p`. Any other panel (the Timeline, the Project panel, …) ends the edit, as a
+/// click outside the text does, and gives the keyboard back to the app (#831).
+pub fn panel_clicked(app: &mut EffectcraftApp, ctx: &egui::Context, p: PanelKind) {
+    if app.session.state.text_edit.is_some() && !keeps_text_edit(p) {
+        exec(app, "text.endEdit", json!({}));
+        ctx.memory_mut(|m| m.surrender_focus(focus_id()));
     }
 }
 
@@ -207,7 +234,7 @@ pub fn hook(
             }
         }
         if !handled && type_tool {
-            if let Some(e) = text_layer_at(app, ectx, map, pos) {
+            if let Some(e) = text_layer_at(app, ectx, map, pos, true) {
                 let ci = e.hit(map, pos);
                 exec(app, "text.edit", json!({"layer": e.layer.id.0, "caret": ci}));
                 drag = Some(Drag::Select { layer: e.layer.id });
@@ -309,7 +336,7 @@ pub fn hook(
                 owns = true;
             }
             _ if !matches!(tool, Tool::Hand | Tool::Zoom) && !tool.is_pen() && !type_tool => {
-                if let Some(e) = text_layer_at(app, ectx, map, p) {
+                if let Some(e) = text_layer_at(app, ectx, map, p, false) {
                     exec(app, "text.edit", json!({"layer": e.layer.id.0}));
                     ui.memory_mut(|m| m.request_focus(focus_id()));
                     owns = true;
@@ -332,16 +359,18 @@ pub fn hook(
         ui.memory_mut(|m| {
             m.set_focus_lock_filter(focus_id(), egui::EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: true });
         });
-        // A session started elsewhere (menu, agent, Properties) takes the keyboard once.
+        // A session started elsewhere (menu, agent, Properties) takes the keyboard once…
         let seen = egui::Id::new("viewer-text-seen");
         let key = app.session.state.text_edit.as_ref().map(|e| e.layer.0);
-        // …and gets it back whenever nothing else holds it (after a panel click, say).
-        if ui.data(|d| d.get_temp::<Option<u64>>(seen)).flatten() != key || ui.memory(|m| m.focused().is_none()) {
+        // …and gets it back when a click in the viewer or a formatting panel left nothing holding
+        // it; not merely because nothing has the focus (#831).
+        let regain = ui.memory(|m| m.focused().is_none()) && keeps_text_edit(app.ui.focused);
+        if ui.data(|d| d.get_temp::<Option<u64>>(seen)).flatten() != key || regain {
             ui.data_mut(|d| d.insert_temp(seen, key));
             ui.memory_mut(|m| m.request_focus(focus_id()));
         }
         if ui.memory(|m| m.has_focus(focus_id())) {
-            keyboard(app, ui);
+            keyboard(app, ui, resp.rect);
         }
     } else {
         ui.data_mut(|d| d.insert_temp::<Option<u64>>(egui::Id::new("viewer-text-seen"), None));
@@ -359,12 +388,16 @@ pub fn hook(
     owns
 }
 
-fn keyboard(app: &mut EffectcraftApp, ui: &mut egui::Ui) {
+/// This frame's keys, in order, into the edited text, up to a press outside the `viewer`: the
+/// panel it lands in decides (after this frame's panels) whether the edit ends, so the keys after
+/// it in this frame are neither typed nor run as shortcuts (#831).
+fn keyboard(app: &mut EffectcraftApp, ui: &mut egui::Ui, viewer: Rect) {
     let events = ui.input(|i| i.events.clone());
     let ctx = ui.ctx().clone();
     for ev in events {
         let Some(sel) = app.session.state.text_edit.clone() else { return };
         match ev {
+            egui::Event::PointerButton { pos, pressed: true, .. } if !viewer.contains(pos) => return,
             egui::Event::Text(t) if !t.chars().any(char::is_control) => {
                 let k = typing_key(ui, false);
                 exec(app, "text.insert", json!({"text": t, "merge": k}));

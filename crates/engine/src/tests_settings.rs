@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use serde_json::json;
 
-use crate::config::{ConfigStore, DirConfig, MemoryConfig, atomic_write, atomic_write_with, temp_path};
+use crate::config::{ConfigStore, DirConfig, MemoryConfig, atomic_write, atomic_write_with};
 use crate::prefs::{PREFS_FILE, Prefs};
 use crate::shortcuts::{DEFAULT_PRESET, Keymaps, normalize};
 use crate::{Session, autosave};
@@ -88,7 +88,7 @@ fn prefs_set_validates_keys_types_and_ranges() {
 }
 
 /// Settings ▸ Appearance ▸ UI Scale (#284): a percentage, 100 by default, kept within 75–200;
-/// the dialog's choices set it as a number.
+/// the dialog types or drags any whole percentage in that range (#682).
 #[test]
 fn ui_scale_is_a_percentage_from_75_to_200() {
     let mut p = Prefs::default();
@@ -101,10 +101,8 @@ fn ui_scale_is_a_percentage_from_75_to_200() {
     p.set("appearance.uiScale", json!(10)).unwrap();
     assert_eq!(p.appearance.ui_scale, 75);
     let page = crate::prefs::pages().into_iter().find(|pg| pg.id == "appearance").unwrap();
-    let listed = page.items.iter().any(|i| {
-        matches!(i, crate::prefs::Item::Setting { key: "appearance.uiScale", kind: crate::prefs::Kind::Choice(c), live: true, .. } if c.contains(&("200%", "200")))
-    });
-    assert!(listed, "Settings ▸ Appearance offers it");
+    let field = crate::prefs::Item::Setting { key: "appearance.uiScale", label: "UI Scale", kind: crate::prefs::Kind::Int(75, 200, "%"), live: true };
+    assert!(page.items.contains(&field), "Settings ▸ Appearance offers it");
     // Older settings files without it get the default.
     assert_eq!(Prefs::from_json(r#"{"version": 2, "appearance": {"theme": "light"}}"#).appearance.ui_scale, 100);
 }
@@ -214,6 +212,78 @@ fn prefs_commands_get_set_reset_and_persist() {
     );
 }
 
+/// Effects & Presets' starred effects live in the settings (#1692): they come back in the next
+/// session, un-starring sticks too, Reset All keeps them, and a hand-edited list loses its
+/// repeats and empty ids on load.
+#[test]
+fn effects_favorites_persist_across_sessions() {
+    let store = Arc::new(MemoryConfig::default());
+    let mut s = Session { config: Some(store.clone()), ..Default::default() };
+    assert!(s.prefs.toggle_effect_favorite("ADBE Gaussian Blur 2"));
+    assert!(s.prefs.toggle_effect_favorite("ADBE Glo2"));
+    s.save_prefs();
+    let reopen = |store: &Arc<MemoryConfig>| {
+        let mut s = Session { config: Some(store.clone()), ..Default::default() };
+        s.load_settings();
+        s
+    };
+    let mut s2 = reopen(&store);
+    assert_eq!(s2.prefs.effects_favorites, ["ADBE Gaussian Blur 2", "ADBE Glo2"]);
+    assert!(!s2.prefs.toggle_effect_favorite("ADBE Glo2"), "un-starred");
+    s2.save_prefs();
+    let mut s3 = reopen(&store);
+    assert_eq!(s3.prefs.effects_favorites, ["ADBE Gaussian Blur 2"]);
+    s3.execute("prefs.reset", json!({})).unwrap();
+    assert!(s3.prefs.is_effect_favorite("ADBE Gaussian Blur 2"), "Reset All keeps the stars");
+    let edited = store.read(PREFS_FILE).unwrap().replace("\"effectsFavorites\": [", "\"effectsFavorites\": [\"\", \"ADBE Glo2\", \"ADBE Glo2\", ");
+    store.write(PREFS_FILE, &edited).unwrap();
+    assert_eq!(reopen(&store).prefs.effects_favorites, ["ADBE Glo2", "ADBE Gaussian Blur 2"]);
+}
+
+/// Composition Settings presets the user saves live in the settings: they persist, a save with
+/// an existing name replaces it, they survive Reset All, and invalid ones (from a hand-edited
+/// settings file) are dropped on load.
+#[test]
+fn composition_presets_save_replace_delete_and_persist() {
+    let store = Arc::new(MemoryConfig::default());
+    let mut s = Session { config: Some(store.clone()), ..Default::default() };
+    let p = |name: &str, w: u32, fps: f64| json!({"name": name, "width": w, "height": 1440, "pixelAspect": 1.0, "frameRate": fps});
+    assert_eq!(s.execute_checked("comp.savePreset", p("  Edit 1440p 60  ", 2560, 60.0)).unwrap(), json!({"name": "Edit 1440p 60", "replaced": false}));
+    s.execute_checked("comp.savePreset", p("Vertical", 1440, 30.0)).unwrap();
+    assert_eq!(s.execute("comp.savePreset", p("Vertical", 1080, 30.0)).unwrap()["replaced"], json!(true));
+    let list = s.execute("comp.presets", json!({})).unwrap();
+    assert_eq!(list.as_array().unwrap().len(), 2);
+    assert_eq!(list[0]["name"], "Edit 1440p 60");
+    assert_eq!((list[0]["width"].clone(), list[0]["frameRate"].clone()), (json!(2560), json!(60.0)));
+    assert_eq!(list[1]["width"], json!(1080), "replaced in place");
+    for bad in [
+        p("", 1920, 30.0),
+        p("Tiny", 2, 30.0),
+        p("Fast", 1920, 5000.0),
+        json!({"name": "x", "width": 1920.5, "height": 1080, "pixelAspect": 1.0, "frameRate": 30}),
+        json!({"name": "x"}),
+    ] {
+        assert!(s.execute("comp.savePreset", bad.clone()).is_err(), "{bad}");
+    }
+    // Persisted, and kept by Reset All.
+    let mut s2 = Session { config: Some(store.clone()), ..Default::default() };
+    s2.load_settings();
+    assert_eq!(s2.prefs.comp_presets, s.prefs.comp_presets);
+    s2.execute("prefs.reset", json!({})).unwrap();
+    assert_eq!(s2.prefs.comp_presets.len(), 2);
+    s2.execute_checked("comp.deletePreset", json!({"name": "Vertical"})).unwrap();
+    assert!(s2.execute("comp.deletePreset", json!({"name": "Vertical"})).is_err(), "already gone");
+    let mut s3 = Session { config: Some(store.clone()), ..Default::default() };
+    s3.load_settings();
+    assert_eq!(s3.prefs.comp_presets.iter().map(|q| q.name.as_str()).collect::<Vec<_>>(), ["Edit 1440p 60"]);
+    // A hand-edited settings file: the broken preset is dropped, the good one kept.
+    let mut v: serde_json::Value = serde_json::from_str(&store.read(PREFS_FILE).unwrap()).unwrap();
+    v["compPresets"].as_array_mut().unwrap().push(json!({"name": "Broken", "width": 0, "height": 1080, "pixelAspect": 1.0, "frameRate": f64::NAN}));
+    v["compPresets"].as_array_mut().unwrap().push(json!({"name": 7}));
+    let back = Prefs::from_json(&v.to_string());
+    assert_eq!(back.comp_presets.iter().map(|q| q.name.as_str()).collect::<Vec<_>>(), ["Edit 1440p 60"]);
+}
+
 #[test]
 fn ai_chat_settings_default_and_reset() {
     let store = Arc::new(MemoryConfig::default());
@@ -227,22 +297,17 @@ fn ai_chat_settings_default_and_reset() {
     assert!(s.execute("prefs.open", json!({"page": "AI Chat"})).is_ok());
 }
 
-/// The Agent Model dropdown lives on the AI Chat page as a Choice; `prefs.set` accepts its
-/// values, including "" (Agent Default).
+/// Model identifiers are user-configurable, including an empty bridge default.
 #[test]
-fn ai_chat_agent_model_is_a_choice_on_the_page() {
+fn ai_chat_agent_model_is_free_text_on_the_page() {
     let page = crate::prefs::pages().into_iter().find(|p| p.id == "aiChat").expect("aiChat page");
     let item = page.items.iter().find(|i| matches!(i, crate::prefs::Item::Setting { key: "aiChat.agentModel", .. }));
-    let Some(crate::prefs::Item::Setting { kind: crate::prefs::Kind::Choice(options), .. }) = item else {
-        panic!("aiChat.agentModel is not a Choice on the page");
-    };
-    assert!(options.contains(&("Claude Opus", "opus")), "{options:?}");
-    assert!(options.contains(&("Agent Default", "")), "{options:?}");
+    assert!(matches!(item, Some(crate::prefs::Item::Setting { kind: crate::prefs::Kind::Text, .. })));
 
     let store = Arc::new(MemoryConfig::default());
     let mut s = Session { config: Some(store), ..Default::default() };
-    s.execute("prefs.set", json!({"key": "aiChat.agentModel", "value": "opus"})).unwrap();
-    assert_eq!(s.prefs.ai_chat.agent_model, "opus");
+    s.execute("prefs.set", json!({"key": "aiChat.agentModel", "value": "custom-model-v2"})).unwrap();
+    assert_eq!(s.prefs.ai_chat.agent_model, "custom-model-v2");
     s.execute("prefs.set", json!({"key": "aiChat.agentModel", "value": ""})).unwrap();
     assert_eq!(s.prefs.ai_chat.agent_model, "");
 }
@@ -366,6 +431,107 @@ fn defaults_have_no_conflicts_and_match_the_menus() {
     assert!(t.bindables.len() > 500);
 }
 
+/// Each Fast Previews and Show Channel mode is a command with a default key.
+#[test]
+fn fast_previews_and_show_channel_modes_have_default_keys() {
+    let s = Session::default();
+    let t = s.shortcuts();
+    for (id, key) in [
+        ("view.fastPreviews.off", "Cmd+Alt+1"),
+        ("view.fastPreviews.adaptive", "Cmd+Alt+2"),
+        ("view.fastPreviews.draft", "Cmd+Alt+3"),
+        ("view.fastPreviews.fastDraft", "Cmd+Alt+4"),
+        ("view.fastPreviews.wireframe", "Cmd+Alt+5"),
+        ("view.channel.red", "Alt+1"),
+        ("view.channel.green", "Alt+2"),
+        ("view.channel.blue", "Alt+3"),
+        ("view.channel.alpha", "Alt+4"),
+        ("view.channel.redColorized", "Alt+Shift+1"),
+        ("view.channel.greenColorized", "Alt+Shift+2"),
+        ("view.channel.blueColorized", "Alt+Shift+3"),
+        ("view.channel.rgbStraight", "Alt+Shift+4"),
+    ] {
+        assert_eq!(t.shortcut_of(id, &json!(null)), Some(key), "{id}");
+    }
+    assert!(t.all_conflicts().is_empty(), "{:?}", t.all_conflicts());
+    // The commands set their mode; a channel's key again is RGB.
+    let mut s = Session::default();
+    s.execute("view.fastPreviews.fastDraft", json!({})).unwrap();
+    assert_eq!(s.state.viewer.fast_previews.id(), "fastDraft");
+    s.execute("view.channel.redColorized", json!({})).unwrap();
+    assert_eq!((s.state.viewer.channel.id(), s.state.viewer.colorized), ("red", true));
+    s.execute("view.channel.green", json!({})).unwrap();
+    assert_eq!((s.state.viewer.channel.id(), s.state.viewer.colorized), ("green", false));
+    s.execute("view.channel.green", json!({})).unwrap();
+    assert_eq!(s.state.viewer.channel.id(), "rgb");
+    // Grayscale and colorized of one channel replace each other; the same again is RGB.
+    s.execute("view.channel.redColorized", json!({})).unwrap();
+    s.execute("view.channel.red", json!({})).unwrap();
+    assert_eq!((s.state.viewer.channel.id(), s.state.viewer.colorized), ("red", false));
+    s.execute("view.channel.redColorized", json!({})).unwrap();
+    assert_eq!((s.state.viewer.channel.id(), s.state.viewer.colorized), ("red", true));
+    s.execute("view.channel.redColorized", json!({})).unwrap();
+    assert_eq!(s.state.viewer.channel.id(), "rgb");
+}
+
+/// Default keys for commands and menu entries that had none.
+#[test]
+fn default_keys_for_commands_that_had_none() {
+    let s = Session::default();
+    let t = s.shortcuts();
+    for (id, params, key) in [
+        ("edit.pasteReversedKeyframes", json!(null), "Cmd+Shift+V"),
+        ("edit.purge", json!({"what": "snapshot"}), "Cmd+Shift+F5"),
+        ("layer.sampling", json!({"sampling": "bilinear", "toggle": true}), "Alt+B"),
+        ("layer.sampling", json!({"sampling": "bicubic", "toggle": true}), "Alt+Shift+B"),
+        ("view.res.custom", json!(null), "Cmd+Alt+J"),
+        ("file.setProxy", json!(null), "Cmd+Alt+P"),
+        ("file.openRecent", json!(null), "Cmd+Alt+Shift+P"),
+        ("anim.applyRecentPreset", json!(null), "Cmd+Alt+Shift+F"),
+    ] {
+        assert_eq!(t.shortcut_of(id, &params), Some(key), "{id} {params}");
+    }
+    assert!(t.all_conflicts().is_empty(), "{:?}", t.all_conflicts());
+}
+
+/// Second default keys: on the command, or after a comma in a menu line with bound parameters.
+#[test]
+fn second_default_keys() {
+    let s = Session::default();
+    let t = s.shortcuts();
+    for (key, want) in [
+        ("edit.deselectAll", ["Cmd+Shift+A", "F2"]),
+        ("time.start", ["Home", "Cmd+Alt+ArrowLeft"]),
+        ("time.end", ["End", "Cmd+Alt+ArrowRight"]),
+        ("renderQueue.add", ["Cmd+M", "Cmd+Shift+/"]),
+        (r#"window.panel {"panel":"effectControls"}"#, ["F3", "Cmd+Shift+T"]),
+    ] {
+        assert_eq!(t.keys.get(key).map(Vec::as_slice), Some(want.map(String::from).as_slice()), "{key}");
+    }
+    // The menus keep showing the first key.
+    assert_eq!(t.shortcut_of("window.panel", &json!({"panel": "effectControls"})), Some("F3"));
+    assert_eq!(t.shortcut_of("edit.deselectAll", &json!(null)), Some("Cmd+Shift+A"));
+    assert!(t.all_conflicts().is_empty(), "{:?}", t.all_conflicts());
+}
+
+/// Cmd+Left / Cmd+Right Arrow step a frame like Page Up / Page Down (Shift: 10 frames).
+#[test]
+fn cmd_arrows_step_frames_like_page_keys() {
+    let s = Session::default();
+    let t = s.shortcuts();
+    for (id, keys) in [
+        ("time.nextFrame", ["PageDown", "Cmd+ArrowRight"]),
+        ("time.previousFrame", ["PageUp", "Cmd+ArrowLeft"]),
+        ("time.forward10", ["Shift+PageDown", "Cmd+Shift+ArrowRight"]),
+        ("time.back10", ["Shift+PageUp", "Cmd+Shift+ArrowLeft"]),
+    ] {
+        assert_eq!(t.keys.get(id).map(Vec::as_slice), Some(keys.map(String::from).as_slice()), "{id}");
+        // The menus and tooltips keep showing the Page key.
+        assert_eq!(t.shortcut_of(id, &json!(null)), Some(keys[0]));
+    }
+    assert!(t.all_conflicts().is_empty(), "{:?}", t.all_conflicts());
+}
+
 #[test]
 fn shortcut_edits_detect_conflicts_and_create_a_custom_preset() {
     let store = Arc::new(MemoryConfig::default());
@@ -438,6 +604,276 @@ fn frontend_commands_are_bindable_with_panel_scope() {
 
 // ---------------------------------------------------------------- auto-save / recovery
 
+/// The names in `d`, sorted.
+fn names(d: &std::path::Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(d).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    v.sort();
+    v
+}
+
+#[cfg(unix)]
+#[test]
+fn atomic_write_overwrites_a_long_valid_filename() {
+    let d = tmp("atomic-long-name");
+    // The old `<name>.tmp` fits a 255-byte component limit for this 251-byte project name.
+    // Including the full name plus a process id and counter made an otherwise valid save fail.
+    let name = format!("{}.ecproj", "x".repeat(244));
+    assert_eq!(name.len(), 251);
+    let f = d.join(&name);
+    std::fs::write(&f, b"original project").unwrap();
+    let replacement = b"replacement project\0bytes\xff";
+    atomic_write(&f, replacement).unwrap();
+    assert_eq!(std::fs::read(&f).unwrap(), replacement);
+    assert_eq!(names(&d), [name], "no temporary file is left after overwriting the project");
+    let _ = std::fs::remove_dir_all(d);
+}
+
+#[test]
+fn concurrent_atomic_writes_each_publish_a_whole_file() {
+    // Writers of the same file used to share one `.tmp`: they truncated each other's data and
+    // the later rename failed once the first had moved it away (#1233).
+    let d = tmp("atomic-concurrent");
+    let f = d.join("shared.ecproj");
+    for round in 0..10 {
+        let contents: Vec<Vec<u8>> = (0..8u8).map(|w| vec![b'a' + w; 256 * 1024 + usize::from(w) * 1000]).collect();
+        std::thread::scope(|sc| {
+            for c in &contents {
+                let f = &f;
+                sc.spawn(move || atomic_write(f, c).expect("every writer succeeds"));
+            }
+        });
+        let got = std::fs::read(&f).unwrap();
+        assert!(contents.contains(&got), "round {round}: the file is one writer's whole data ({} bytes)", got.len());
+        assert_eq!(names(&d), ["shared.ecproj"], "round {round}: no temporary file is left");
+    }
+    let _ = std::fs::remove_dir_all(d);
+}
+
+#[cfg(unix)]
+#[test]
+fn atomic_write_does_not_follow_a_link_at_the_old_temp_name() {
+    let d = tmp("atomic-link");
+    let f = d.join("p.ecproj");
+    let victim = d.join("victim.txt");
+    std::fs::write(&victim, b"keep").unwrap();
+    // The temporary name used to be `<name>.tmp`, opened with File::create (following links).
+    std::os::unix::fs::symlink(&victim, d.join("p.ecproj.tmp")).unwrap();
+    atomic_write(&f, b"new project").unwrap();
+    assert_eq!(std::fs::read(&victim).unwrap(), b"keep", "the link's target is untouched");
+    assert_eq!(std::fs::read(&f).unwrap(), b"new project");
+    let _ = std::fs::remove_dir_all(d);
+}
+
+struct AutosaveTestStore {
+    config: DirConfig,
+    fail_next: std::sync::atomic::AtomicBool,
+    gate: std::sync::Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
+    release_on_prefs: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    fail_reset_for: std::sync::Mutex<Option<String>>,
+    failed_resets: std::sync::atomic::AtomicUsize,
+}
+
+impl ConfigStore for AutosaveTestStore {
+    fn read(&self, name: &str) -> Option<String> {
+        self.config.read(name)
+    }
+    fn write(&self, name: &str, data: &str) -> std::io::Result<()> {
+        // note_project_path saves preferences after the project/path switch, before joining
+        // the pending autosave. Release that writer at this exact transition, without sleeps.
+        if name == PREFS_FILE
+            && let Some(release) = self.release_on_prefs.lock().unwrap().take()
+        {
+            release.send(()).unwrap();
+        }
+        if name == autosave::SENTINEL
+            && let Some(path) = self.fail_reset_for.lock().unwrap().as_ref()
+        {
+            let record: autosave::Sentinel = serde_json::from_str(data).unwrap();
+            if record.project.as_ref() == Some(path) && record.autosave.is_none() {
+                self.failed_resets.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                return Err(std::io::Error::other("injected final recovery reset failure"));
+            }
+        }
+        self.config.write(name, data)
+    }
+    fn remove(&self, name: &str) -> std::io::Result<()> {
+        self.config.remove(name)
+    }
+    fn dir(&self) -> Option<PathBuf> {
+        self.config.dir()
+    }
+    fn files(&self) -> &dyn crate::config::FileOps {
+        self
+    }
+}
+
+impl crate::config::FileOps for AutosaveTestStore {
+    fn list(&self, dir: &std::path::Path) -> Vec<(String, std::time::SystemTime)> {
+        crate::config::StdFiles.list(dir)
+    }
+    fn write(&self, path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+        if let Some((started, release)) = self.gate.lock().unwrap().take() {
+            started.send(()).unwrap();
+            release.recv().unwrap();
+        }
+        if self.fail_next.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return Err(std::io::Error::other("injected autosave write failure"));
+        }
+        crate::config::StdFiles.write(path, data)
+    }
+    fn remove(&self, path: &std::path::Path) -> std::io::Result<()> {
+        crate::config::StdFiles.remove(path)
+    }
+    fn is_file(&self, path: &std::path::Path) -> bool {
+        crate::config::StdFiles.is_file(path)
+    }
+}
+
+fn background_autosave_session(dir: &std::path::Path) -> (Session, Arc<AutosaveTestStore>) {
+    let store = Arc::new(AutosaveTestStore {
+        config: DirConfig::new(dir.join("config")),
+        fail_next: Default::default(),
+        gate: Default::default(),
+        release_on_prefs: Default::default(),
+        fail_reset_for: Default::default(),
+        failed_resets: Default::default(),
+    });
+    let mut s = session_with_comp();
+    s.config = Some(store.clone());
+    s.prefs.auto_save.enabled = true;
+    s.prefs.auto_save.interval_minutes = 1;
+    s.prefs.auto_save.location = "custom".into();
+    s.prefs.auto_save.folder = dir.join("saves").to_string_lossy().into_owned();
+    s.autosave.background = true;
+    s.begin_recovery();
+    (s, store)
+}
+
+#[test]
+fn background_autosave_failure_retries_the_same_revision_and_retains_recovery() {
+    let dir = tmp("autosave-retry");
+    let (mut s, store) = background_autosave_session(&dir);
+    let first = s.autosave_now().unwrap();
+    s.autosave_wait().unwrap();
+    let committed = s.autosave.saved_revision;
+    s.execute("layer.newNull", json!({"name": "work to recover"})).unwrap();
+    let revision = s.revision;
+    store.fail_next.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(s.autosave_tick(1000.0).is_none());
+    let failed_path = s.autosave_tick(1061.0).unwrap().unwrap();
+    assert!(s.autosave_wait().unwrap_err().to_string().contains("injected autosave write failure"));
+    assert_eq!(s.autosave.saved_revision, committed);
+    assert_eq!(s.autosave.last_slot, Some(1));
+    assert_eq!(s.autosave.last_path.as_deref(), Some(first.as_str()));
+    let sentinel: autosave::Sentinel = serde_json::from_str(&store.read(autosave::SENTINEL).unwrap()).unwrap();
+    assert_eq!(sentinel.autosave.as_deref(), Some(first.as_str()));
+    assert!(!std::path::Path::new(&failed_path).is_file());
+    let retried = s.autosave_tick(1122.0).expect("retry without another edit").unwrap();
+    assert_eq!(retried, failed_path, "failed writes do not rotate the slot");
+    s.autosave_wait().unwrap();
+    assert_eq!(s.revision, revision);
+    assert_eq!(s.autosave.saved_revision, Some(revision));
+    assert_eq!(s.autosave.last_slot, Some(2));
+    assert!(std::fs::read_to_string(&retried).unwrap().contains("work to recover"));
+    let sentinel: autosave::Sentinel = serde_json::from_str(&store.read(autosave::SENTINEL).unwrap()).unwrap();
+    assert_eq!(sentinel.autosave.as_deref(), Some(retried.as_str()));
+    assert!(s.autosave_tick(1183.0).is_none(), "committed revision needs no duplicate write");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn background_autosave_commits_only_the_snapshot_that_finished() {
+    let dir = tmp("autosave-pending");
+    let (mut s, store) = background_autosave_session(&dir);
+    let (started, started_rx) = std::sync::mpsc::channel();
+    let (release, release_rx) = std::sync::mpsc::channel();
+    *store.gate.lock().unwrap() = Some((started, release_rx));
+    let revision = s.revision;
+    let path = s.autosave_now().unwrap();
+    started_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+    assert!(s.autosave_tick(1000.0).is_none());
+    let saved = s.autosave.saved_revision;
+    let last_path = s.autosave.last_path.clone();
+    let sentinel: autosave::Sentinel = serde_json::from_str(&store.read(autosave::SENTINEL).unwrap()).unwrap();
+    s.execute("layer.newNull", json!({"name": "edited during save"})).unwrap();
+    assert!(s.autosave_tick(1061.0).is_none(), "a pending write must not block the next tick or launch a duplicate");
+    release.send(()).unwrap();
+    s.autosave_wait().unwrap();
+    assert_eq!(saved, None, "an in-flight save is not committed");
+    assert_eq!(last_path, None);
+    assert_eq!(sentinel.autosave, None);
+    assert_eq!(s.autosave.saved_revision, Some(revision), "completion must not mark newer edits as saved");
+    assert_eq!(s.autosave.last_path.as_deref(), Some(path.as_str()));
+    assert!(!std::fs::read_to_string(&path).unwrap().contains("edited during save"));
+    let newer = s.autosave_tick(1122.0).unwrap().unwrap();
+    s.autosave_wait().unwrap();
+    assert_eq!(s.autosave.saved_revision, Some(s.revision));
+    assert!(std::fs::read_to_string(newer).unwrap().contains("edited during save"));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+fn autosave_project_transition_with_failed_reset(command: &str, reopen: bool) {
+    let dir = tmp("autosave-project-transition");
+    let a = dir.join("A.ecproj").to_string_lossy().into_owned();
+    let b = if reopen { a.clone() } else { dir.join("B.ecproj").to_string_lossy().into_owned() };
+    let (mut s, store) = background_autosave_session(&dir);
+    s.execute("file.saveAs", json!({"path": a})).unwrap();
+    if !reopen {
+        let mut other = session_with_comp();
+        other.execute("layer.newNull", json!({"name": "project B"})).unwrap();
+        other.execute("file.saveAs", json!({"path": b})).unwrap();
+    }
+    let b_bytes = std::fs::read(&b).unwrap();
+    s.execute("layer.newNull", json!({"name": "unsaved project A"})).unwrap();
+    s.update_sentinel();
+    let (started, started_rx) = std::sync::mpsc::channel();
+    let (release, release_rx) = std::sync::mpsc::channel();
+    *store.gate.lock().unwrap() = Some((started, release_rx));
+    let snapshot = s.autosave_now().unwrap();
+    started_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+    assert!(!s.autosave.pending.as_ref().unwrap().is_finished());
+    let previous_record = store.read(autosave::SENTINEL).unwrap();
+    *store.fail_reset_for.lock().unwrap() = Some(b.clone());
+    *store.release_on_prefs.lock().unwrap() = Some(release);
+    s.execute(command, json!({"path": b})).unwrap();
+    assert_eq!(s.path.as_deref(), Some(b.as_str()));
+    assert_eq!(store.failed_resets.load(std::sync::atomic::Ordering::SeqCst), 1, "the final recovery reset really failed");
+    assert_eq!(
+        store.read(autosave::SENTINEL).as_deref(),
+        Some(previous_record.as_str()),
+        "completion must not publish A's snapshot under the switched project"
+    );
+    assert_eq!(s.autosave.last_path, None);
+    assert_eq!(s.autosave.saved_revision, None);
+    if command == "file.open" {
+        assert_eq!(std::fs::read(&b).unwrap(), b_bytes, "opening B must not alter its file bytes");
+    }
+    let prefs = s.prefs.clone();
+    drop(s); // Simulate an unclean exit, leaving the failed-reset sentinel in place.
+    let mut restart = Session { config: Some(store), prefs, ..Default::default() };
+    let recovery = restart.begin_recovery().expect("previous project remains recoverable");
+    assert_eq!(recovery.project.as_deref(), Some(a.as_str()));
+    assert_eq!(recovery.autosave.as_deref(), Some(snapshot.as_str()));
+    assert!(recovery.dirty);
+    assert!(std::fs::read_to_string(snapshot).unwrap().contains("unsaved project A"));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn opening_another_project_during_autosave_keeps_recovery_consistent_if_the_reset_fails() {
+    autosave_project_transition_with_failed_reset("file.open", false);
+}
+
+#[test]
+fn reopening_the_same_path_during_autosave_keeps_recovery_consistent_if_the_reset_fails() {
+    autosave_project_transition_with_failed_reset("file.open", true);
+}
+
+#[test]
+fn save_as_during_autosave_keeps_recovery_consistent_if_the_reset_fails() {
+    autosave_project_transition_with_failed_reset("file.saveAs", false);
+}
+
 #[test]
 fn atomic_write_survives_a_crash_mid_write() {
     let d = tmp("atomic");
@@ -445,12 +881,12 @@ fn atomic_write_survives_a_crash_mid_write() {
     atomic_write(&f, b"version 1").unwrap();
     // The writer dies halfway through the temporary file.
     let r = atomic_write_with(&f, b"version 2 is much longer", |tmp, data| {
-        std::fs::write(tmp, &data[..5])?;
+        std::io::Write::write_all(tmp, &data[..5])?;
         Err(std::io::Error::other("power cut"))
     });
     assert!(r.is_err());
     assert_eq!(std::fs::read(&f).unwrap(), b"version 1");
-    assert!(!temp_path(&f).exists(), "the partial temp file is cleaned up");
+    assert_eq!(names(&d), ["p.ecproj"], "the partial temp file is cleaned up");
     // A temp file left by a hard kill doesn't count as an auto-save.
     std::fs::write(d.join("p auto-save 1.ecproj.tmp"), b"junk").unwrap();
     assert!(autosave::existing(&d, "p").is_empty());
@@ -622,7 +1058,7 @@ fn interface_language_is_validated_persisted_and_backward_compatible() {
     assert_eq!(s.execute("prefs.get", json!({"key": "general.language"})).unwrap(), json!("pt-br"));
     s.execute("prefs.set", json!({"key": "general.language", "value": "ja"})).unwrap();
     let saved = store.read(PREFS_FILE).unwrap();
-    for bad in [json!("fr"), json!(""), json!(17), json!(null)] {
+    for bad in [json!("xx"), json!(""), json!(17), json!(null)] {
         assert!(s.execute("prefs.set", json!({"key": "general.language", "value": bad})).is_err());
         assert_eq!(s.prefs.general.language, "ja");
         assert_eq!(store.read(PREFS_FILE).unwrap(), saved);
@@ -648,6 +1084,14 @@ fn interface_language_is_validated_persisted_and_backward_compatible() {
     let mut es = Session { config: Some(store.clone()), ..Default::default() };
     es.load_settings();
     assert_eq!(es.prefs.general.language, "es");
+    // Czech uses the same validation, persistence and JSON round-trip as every catalog.
+    assert!(crate::prefs::LANGUAGES.contains(&("Čeština", "cs")));
+    s.execute("prefs.set", json!({"key": "general.language", "value": "cs"})).unwrap();
+    assert_eq!(s.execute("prefs.get", json!({"key": "general.language"})).unwrap(), json!("cs"));
+    let mut cs = Session { config: Some(store.clone()), ..Default::default() };
+    cs.load_settings();
+    assert_eq!(cs.prefs.general.language, "cs");
+    assert_eq!(Prefs::from_json(r#"{"general":{"language":"cs"}}"#).general.language, "cs");
     s.execute("prefs.set", json!({"key": "general.language", "value": "ja"})).unwrap();
     let mut reloaded = Session { config: Some(store), ..Default::default() };
     reloaded.load_settings();
@@ -682,4 +1126,45 @@ fn render_backend_says_why_it_renders_on_the_cpu() {
     s.accel_note = Some("headless: renders on the CPU unless started with --gpu".into());
     assert_eq!(why(&mut s), json!("headless: renders on the CPU unless started with --gpu"));
     assert_eq!(s.execute("render.backend", json!({"backend": "cpu"})).unwrap()["why"], json!("the project's renderer is Mercury Software Only"));
+}
+
+/// Settings ▸ GPU Information names what the GPU compositor runs on, or why it is off, and the
+/// adapter the window got, so a card the compositor couldn't use doesn't look undetected (#596).
+#[test]
+fn gpu_summary_names_the_adapter_or_says_why_there_is_none() {
+    use crate::sysinfo::gpu_summary;
+    use effectcraft_render::{Accelerator, FxStep, Renderer};
+
+    struct Named;
+    impl Accelerator for Named {
+        fn name(&self) -> String {
+            "NVIDIA GeForce RTX 4070 (Vulkan)".into()
+        }
+        fn comp_frame(&self, _: &Renderer, _: crate::project::ItemId, _: effectcraft_time::Tick) -> Option<effectcraft_raster::Image> {
+            None
+        }
+        fn supports_effect(&self, _: &str) -> bool {
+            false
+        }
+        fn effects(&self, _: &[FxStep], _: &effectcraft_effects::Buf, _: Option<f32>) -> Option<effectcraft_effects::Buf> {
+            None
+        }
+    }
+
+    let mut s = Session::default();
+    let off = gpu_summary(&s);
+    assert!(off.contains("Compositing: CPU"), "{off}");
+    assert!(off.contains("GPU compositing is off: no reason was recorded"), "{off}");
+    assert!(off.contains("Window graphics: not known yet"), "{off}");
+
+    s.accel_note = Some("GPU compositor unavailable: no compute shaders".into());
+    s.window_adapter = Some("NVIDIA GeForce RTX 4070 (Dx12, DiscreteGpu)".into());
+    let declined = gpu_summary(&s);
+    assert!(declined.contains("GPU compositing is off: GPU compositor unavailable: no compute shaders"), "{declined}");
+    assert!(declined.contains("Window graphics: NVIDIA GeForce RTX 4070 (Dx12, DiscreteGpu)"), "the card the window got is listed: {declined}");
+
+    s.accel = Some(std::sync::Arc::new(Named));
+    let on = gpu_summary(&s);
+    assert!(on.starts_with("Compositing: GPU, NVIDIA GeForce RTX 4070 (Vulkan)."), "{on}");
+    assert!(!on.contains("compositing is off"), "{on}");
 }

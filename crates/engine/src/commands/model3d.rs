@@ -1,4 +1,4 @@
-//! Advanced 3D: model layers (File ▸ Import of glTF/OBJ, Layer ▸ New ▸ 3D primitives), the
+//! Advanced 3D: model layers (File ▸ Import of glTF/OBJ/STL/FBX, Layer ▸ New ▸ 3D primitives), the
 //! comp renderer switch, Layer ▸ Environment Layer, Geometry Options for extruded text and
 //! shapes, and Layer ▸ Material commands.
 
@@ -376,7 +376,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "3D Model Layer",
             [],
             None,
-            "{item?: id or name of a 3D model footage item, path?: a .gltf, .glb or .obj file to import, name?, time? (s), index? (1-based stack position), position? ([x, y] comp px)}; switches a Classic 3D comp to Advanced 3D",
+            "{item?: id or name of a 3D model footage item, path?: a .gltf, .glb, .obj, .stl or .fbx file to import, name?, time? (s), index? (1-based stack position), position? ([x, y] comp px)}; switches a Classic 3D comp to Advanced 3D",
             has_comp,
             new_model
         ),

@@ -1,0 +1,7 @@
+asset:        transitions.json
+title:        EffectCraft Transitions animation presets (Fade In/Out, Wipe In from Left/Right/Top/Bottom, Diagonal Sweep In, Wipe Out to Right, Clock Reveal, Fan Open, Clock Wipe Out, Blinds Open/Close, Slats Down, Pixel Dissolve In/Out, Mosaic Fade In, Card Flip In/Out, Grid Doors In, Lens Pop In, Line Sweep In, Jaws Close In)
+author:       EffectCraft contributors
+source:       original work
+license:      MIT OR Apache-2.0
+added:        2026-10-11 by vangel76 (Claude Code agent, #757)
+notes:        Effect choices, values and key timings written from scratch for EffectCraft on its own Transition effects; not derived from any Adobe preset (.ffx) or its values.

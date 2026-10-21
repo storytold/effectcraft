@@ -5,6 +5,9 @@
 //!   metallic-roughness, normal, occlusion and emissive maps), the node hierarchy, skins and
 //!   animations.
 //! - [`obj`]: Wavefront OBJ geometry with MTL materials (mapped onto the metallic-roughness model).
+//! - [`stl`]: STL meshes (binary and ASCII, with the binary per-facet and part colours).
+//! - [`fbx`]: FBX 7.x scenes, binary and ASCII: meshes, the Model hierarchy, Lambert/Phong
+//!   materials and their textures.
 //! - [`prim`]: parametric primitives (cube, sphere, plane, torus, cone, cylinder).
 //! - [`extrude`]: extruded, bevelled meshes from 2D outlines (text and shape layers), with
 //!   [`triangulate`] for the caps.
@@ -15,9 +18,11 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 pub mod extrude;
+pub mod fbx;
 pub mod gltf;
 pub mod obj;
 pub mod prim;
+pub mod stl;
 pub mod triangulate;
 
 use std::sync::Arc;
@@ -720,13 +725,15 @@ pub fn skin_point(inst: &Instance, p: &Primitive, k: usize, v: [f32; 3]) -> [f64
     [q.x, q.y, q.z]
 }
 
-/// Which loader handles a file name (`gltf`, `glb`, `obj`), by extension.
+/// Which loader handles a file name (`gltf`, `glb`, `obj`, `stl`, `fbx`), by extension.
 pub fn format_of(path: &str) -> Option<&'static str> {
     let ext = path.rsplit('.').next()?.to_ascii_lowercase();
     match ext.as_str() {
         "gltf" => Some("gltf"),
         "glb" => Some("glb"),
         "obj" => Some("obj"),
+        "stl" => Some("stl"),
+        "fbx" => Some("fbx"),
         _ => None,
     }
 }
@@ -736,9 +743,12 @@ pub fn format_of(path: &str) -> Option<&'static str> {
 pub fn load(path: &str, bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<Model> {
     match format_of(path) {
         Some("obj") => obj::parse(bytes, resolve),
+        Some("stl") => stl::parse(bytes),
+        Some("fbx") => fbx::parse(bytes, resolve),
         Some(_) => gltf::parse(bytes, resolve),
         None if bytes.starts_with(b"glTF") => gltf::parse(bytes, resolve),
-        None => Err(ModelError::Unsupported(format!("{path}: not a glTF or OBJ file"))),
+        None if bytes.starts_with(fbx::BINARY_MAGIC) => fbx::parse(bytes, resolve),
+        None => Err(ModelError::Unsupported(format!("{path}: not a glTF, OBJ, STL or FBX file"))),
     }
 }
 

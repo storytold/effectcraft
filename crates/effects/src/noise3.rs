@@ -429,7 +429,8 @@ pub fn overflow(v: f32, mode: u32) -> f32 {
 }
 
 /// Composite grey noise `val` over the original pixel by Blending Mode, Opacity and (ours) Blend
-/// With Original.
+/// With Original. The noise stays inside the layer's alpha, so a masked solid shows it only within
+/// its masks (#939).
 pub(crate) fn composite(orig: [f32; 4], val: f32, opacity: f32, mode: u32, blend_orig: f32) -> [f32; 4] {
     let src = [val * opacity, val * opacity, val * opacity, opacity];
     let out = match mode {
@@ -440,7 +441,7 @@ pub(crate) fn composite(orig: [f32; 4], val: f32, opacity: f32, mode: u32, blend
         }
     };
     let k = 1.0 - blend_orig;
-    [0, 1, 2, 3].map(|c| orig[c] * blend_orig + out[c] * k)
+    [0, 1, 2, 3].map(|c| orig[c] * blend_orig + out[c] * orig[3] * k)
 }
 
 fn render(ctx: &EffectCtx, mut b: Buf, turbulent: bool) -> Buf {
@@ -572,6 +573,28 @@ mod tests {
         assert!(none.data.iter().all(|p| (p[0] - p[2]).abs() < 1e-6));
         assert!(mul.data.iter().all(|p| p[2] >= p[0]));
         assert!(mul.data.iter().any(|p| p[2] > p[0] + 0.01));
+    }
+
+    #[test]
+    fn noise_stays_inside_the_layer_alpha() {
+        // #939: a masked solid (transparent outside the mask, a soft edge) filled the whole layer.
+        let mut img = Image::filled(40, 24, [0.2, 0.4, 0.6, 1.0]);
+        for (i, p) in img.data.iter_mut().enumerate() {
+            let a = match i % 40 {
+                0..10 => 0.0,
+                10..20 => 0.5,
+                _ => 1.0,
+            };
+            *p = p.map(|c| c * a);
+        }
+        for mode in [BLEND_NONE, BLEND_NORMAL, 3] {
+            let out = run_fx("ec.noise.fractal", &[("blendingMode", Value::Enum(mode))], img.clone(), 0.0, EffectEnv::default()).img;
+            for (o, p) in img.data.iter().zip(&out.data) {
+                assert!((o[3] - p[3]).abs() < 1e-6, "mode {mode}: alpha {} became {}", o[3], p[3]);
+                assert!(p[..3].iter().all(|&c| c <= p[3] + 1e-6), "mode {mode}: premultiplied colour above alpha");
+            }
+            assert!(out.data.iter().any(|p| p[3] == 1.0 && (p[0] - 0.2).abs() > 0.01), "mode {mode}: noise drawn inside the mask");
+        }
     }
 
     #[test]

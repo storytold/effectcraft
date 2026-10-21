@@ -250,6 +250,36 @@ fn reshape_correspondence_points_on_the_viewer() {
     assert_eq!(h.state().session.history.undo.len(), undo_len + 1);
 }
 
+/// #303: with Mesh Warp selected, the viewer shows its grid; dragging a vertex warps the mesh
+/// (one undo step), and the other vertices stay put.
+#[test]
+fn mesh_warp_vertices_drag_on_the_viewer() {
+    let (mut s0, l, fx) = with_effect("Mesh Warp");
+    let g = s0.active_comp().unwrap().layer(LayerId(l)).unwrap().props.find_group(fx).unwrap().clone();
+    s0.execute("prop.set", json!({"layer": l, "prop": g.get("rows").unwrap().uid, "value": 2})).unwrap();
+    s0.execute("prop.set", json!({"layer": l, "prop": g.get("columns").unwrap().uid, "value": 2})).unwrap();
+    let mut h = harness(s0);
+    h.state_mut().toggle_maximize(PanelKind::EffectControls);
+    h.state_mut().session.state.selected_props = vec![(LayerId(l), fx)];
+    for _ in 0..6 {
+        h.step();
+    }
+    let v = |r: usize, c: usize| format!("viewer.meshWarp.{fx}.{r}.{c}");
+    let (tl, mid, br) = (rect(&h, &v(0, 0)).center(), rect(&h, &v(1, 1)).center(), rect(&h, &v(2, 2)).center());
+    assert!(((tl.x + br.x) / 2.0 - mid.x).abs() < 1.0 && ((tl.y + br.y) / 2.0 - mid.y).abs() < 1.0, "{tl:?} {mid:?} {br:?}");
+    assert!(br.x - tl.x > 100.0, "the grid spans the layer: {tl:?} {br:?}");
+    assert_eq!(s(value(&h, l, fx, "mesh")), "");
+    let undo_len = h.state().session.history.undo.len();
+    drag(&mut h, mid, mid + egui::vec2(40.0, 0.0));
+    let mesh = effectcraft_engine::effects::parse_mesh(&s(value(&h, l, fx, "mesh")));
+    assert_eq!(mesh.len(), 9, "{mesh:?}");
+    assert!(mesh[4].0 > 10.0 && mesh[4].1.abs() < 1.0, "the centre vertex moved right: {mesh:?}");
+    assert!(mesh.iter().enumerate().all(|(i, o)| i == 4 || *o == (0.0, 0.0)), "{mesh:?}");
+    assert_eq!(h.state().session.history.undo.len(), undo_len + 1);
+    let moved = rect(&h, &v(1, 1)).center();
+    assert!((moved.x - mid.x - 40.0).abs() < 2.0, "the handle follows the vertex: {mid:?} → {moved:?}");
+}
+
 /// UI fixes of M13.10: the Composition / Timeline tabs' close button, swatch and lock; the
 /// Preview panel scrolls in the default workspace (where it shows just the transport).
 #[test]

@@ -1,7 +1,7 @@
 //! Composition menu.
 
 use effectcraft_color::Label;
-use effectcraft_project::{Comp, ItemId, ItemKind, Marker};
+use effectcraft_project::{Comp, ItemId, ItemKind, Marker, limits};
 use effectcraft_time::{FrameRate, Tick};
 use serde_json::{Value, json};
 
@@ -15,7 +15,7 @@ pub(crate) fn rate_p(p: &Value) -> Option<FrameRate> {
 /// A zero, negative or tiny rate would make a zero-length frame (and divide by zero later).
 fn check_rate(p: &Value, cmd: &str) -> Result<()> {
     match f_p(p, "frameRate").or(f_p(p, "fps")) {
-        Some(f) if !(0.001..=1000.0).contains(&f) => Err(bad(cmd, "frameRate: fps from 0.001 to 1000")),
+        Some(f) if !(limits::MIN_FPS..=limits::MAX_FPS).contains(&f) => Err(bad(cmd, "frameRate: fps from 0.001 to 1000")),
         _ => Ok(()),
     }
 }
@@ -23,10 +23,10 @@ fn check_rate(p: &Value, cmd: &str) -> Result<()> {
 fn apply_settings(c: &mut Comp, p: &Value) {
     let (ow, oh) = (c.width, c.height);
     if let Some(w) = p.get("width").and_then(Value::as_u64) {
-        c.width = (w as u32).clamp(4, 30000);
+        c.width = limits::size(w).max(4);
     }
     if let Some(h) = p.get("height").and_then(Value::as_u64) {
-        c.height = (h as u32).clamp(4, 30000);
+        c.height = limits::size(h).max(4);
     }
     // Advanced › Anchor: where the old frame sits in the resized one (0 = top left … 4 = center …
     // 8 = bottom right). Unparented layers (and all their position keys) move by that offset.
@@ -69,7 +69,7 @@ fn apply_settings(c: &mut Comp, p: &Value) {
         keep_work_area_ordered(c);
     }
     if let Some(pa) = f_p(p, "pixelAspect") {
-        c.pixel_aspect = pa.max(0.1);
+        c.pixel_aspect = limits::pixel_aspect(pa.max(limits::MIN_PIXEL_ASPECT));
     }
     if let Some(Value::Array(bg)) = p.get("background") {
         let g = |i: usize| bg.get(i).and_then(Value::as_f64).unwrap_or(0.0) as f32;
@@ -84,10 +84,10 @@ fn apply_settings(c: &mut Comp, p: &Value) {
         c.shutter_phase = a.clamp(-360.0, 360.0);
     }
     if let Some(n) = p.get("motionBlurSamples").and_then(Value::as_u64) {
-        c.motion_blur_samples = (n as u32).clamp(2, 64);
+        c.motion_blur_samples = n.clamp(limits::MOTION_BLUR_SAMPLES.0.into(), limits::MOTION_BLUR_SAMPLES.1.into()) as u32;
     }
     if let Some(n) = p.get("adaptiveSampleLimit").and_then(Value::as_u64) {
-        c.motion_blur_adaptive_limit = (n as u32).clamp(16, 256);
+        c.motion_blur_adaptive_limit = n.clamp(limits::ADAPTIVE_SAMPLE_LIMIT.0.into(), limits::ADAPTIVE_SAMPLE_LIMIT.1.into()) as u32;
     }
     if let Some(b) = p.get("preserveFrameRate").and_then(Value::as_bool) {
         c.preserve_frame_rate = b;
@@ -108,12 +108,7 @@ fn new_comp(s: &mut Session, p: &Value) -> Result<Value> {
     }
     apply_settings(&mut c, p);
     let id = s.edit("New Composition", None, |proj, st| {
-        let mut name = name.clone();
-        let mut k = 2;
-        while proj.items.values().any(|i| i.name == name) {
-            name = format!("{} {k}", name.trim_end_matches(|ch: char| ch.is_ascii_digit()).trim_end());
-            k += 1;
-        }
+        let name = proj.unique_item_name(&name, |_| false);
         let id = proj.add_item(&name, Label::Sandstone, None, ItemKind::Comp(c.into()));
         st.project_selection = vec![id];
         Ok(id)
@@ -159,10 +154,11 @@ fn close(s: &mut Session, p: &Value) -> Result<Value> {
     let id = comp_id(s, p)?;
     s.state.open_comps.retain(|c| *c != id);
     if s.state.active_comp == Some(id) {
-        s.state.active_comp = s.state.open_comps.last().copied();
-        s.state.selected_layers.clear();
-        s.state.selected_keys.clear();
-        s.state.selected_props.clear();
+        if let Some(next) = s.state.open_comps.last().copied() {
+            s.activate_comp(next);
+        } else {
+            s.activate_comp_none();
+        }
     }
     Ok(Value::Null)
 }

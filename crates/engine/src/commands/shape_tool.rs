@@ -139,12 +139,18 @@ fn blended(mut g: PropGroup, paint: &ToolPaint) -> PropGroup {
     g
 }
 
+/// A gradient's Start and End Points across `bounds` (`[x, y, w, h]`): left to right, or out
+/// from the centre.
+pub(crate) fn gradient_ends(radial: bool, bounds: [f64; 4]) -> ([f64; 2], [f64; 2]) {
+    let [x, y, w, h] = bounds;
+    let mid = [x + w / 2.0, y + h / 2.0];
+    if radial { (mid, [mid[0] + w.max(h).max(2.0) / 2.0, mid[1]]) } else { ([x, mid[1]], [x + w.max(1.0), mid[1]]) }
+}
+
 /// The Stroke and Fill a new shape gets from `paint`; gradients run across `bounds` (`[x, y, w,
 /// h]` in the group's space): left to right, or out from the centre.
 pub(crate) fn paint_items(ids: &mut Ids, paint: &ShapeTool, bounds: [f64; 4]) -> Vec<PropGroup> {
-    let [x, y, w, h] = bounds;
-    let mid = [x + w / 2.0, y + h / 2.0];
-    let ends = |radial: bool| if radial { (mid, [mid[0] + w.max(h).max(2.0) / 2.0, mid[1]]) } else { ([x, mid[1]], [x + w.max(1.0), mid[1]]) };
+    let ends = |radial: bool| gradient_ends(radial, bounds);
     let mut items = vec![];
     let (s, width) = (&paint.stroke, paint.stroke_width);
     let stroke = match s.kind {

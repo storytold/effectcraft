@@ -136,8 +136,11 @@ fn cached_frames_are_counted_at_one_third_resolution() {
         let mut s = Session::default();
         let c = s.execute("comp.new", json!({"name": "Third", "width": 64, "height": 36, "duration": 1})).unwrap()["comp"].as_u64().unwrap();
         s.execute("layer.newSolid", json!({"color": "#3080ff"})).unwrap();
+        // Each composition keeps its own Resolution (#417).
+        if let Some(comp) = std::sync::Arc::make_mut(&mut s.project).comp_mut(ItemId(c)) {
+            comp.resolution = res;
+        }
         let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(|_| EffectcraftApp::new(s));
-        h.state_mut().ui.viewer.res = res;
         settle(&mut h);
         let series = h.state().shown_series(ItemId(c));
         assert_eq!(series.scale, (res.scale(1.0, 1.0) * 1000.0).round() as u32, "{res:?}");

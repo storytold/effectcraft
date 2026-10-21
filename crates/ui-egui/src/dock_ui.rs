@@ -2,11 +2,13 @@
 //! and body, floating (undocked) panel groups over it, and tab drag-and-drop: drag a tab onto a
 //! group to tab it there (center) or split it off to a side (After Effects' drop zones, with a
 //! highlight of where it will land); hold Cmd/Ctrl when releasing, or drop outside every group,
-//! to float it. `` ` `` maximizes the panel under the pointer.
+//! to float it. `` ` `` maximizes the panel under the pointer. A floating group can also move
+//! out of the main window into its own native window ([`EffectcraftApp::set_panel_window`]),
+//! which can sit on another monitor.
 
 use egui::{Color32, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 
-use crate::dock::{self, DockAction, DockNode, Group, Layout, PanelKind};
+use crate::dock::{self, DockAction, DockNode, Group, Layout, PanelKind, PanelWindow};
 use crate::{EffectcraftApp, panels};
 use craft_ui::docking::{Action, DropTarget, resolve_drop};
 
@@ -245,7 +247,15 @@ impl EffectcraftApp {
                 })
                 .unwrap_or(usize::MAX)
         });
+        // A native window is kept only for a panel that still floats.
+        let ui_state = &mut self.ui;
+        ui_state.panel_windows.retain(|w| ui_state.floating.iter().any(|group| group.panels.contains(&w.panel)));
         for i in floating_order {
+            // Groups in their own native window take no tab drops from the main window.
+            if let Some(window) = self.ui.floating.get(i).and_then(|group| self.panel_window_of(&group.panels)) {
+                self.panel_window(&ctx, i, window, &info, &mut actions);
+                continue;
+            }
             if let Some((g, tabs)) = self.floating_window(&ctx, i, &info, &mut actions) {
                 tab_rects.push((g.path.clone(), tabs));
                 float_groups.push(g);
@@ -264,6 +274,7 @@ impl EffectcraftApp {
                 }
                 DockAction::Focus(p) => {
                     self.ui.focused = p;
+                    panels::viewer_text::panel_clicked(self, &ctx, p);
                     // A click in (or on the tab of) another Composition viewer makes it active.
                     if let Some(id) = panels::viewers::id_of(p) {
                         panels::viewers::activate(self, &ctx, id);
@@ -319,12 +330,15 @@ impl EffectcraftApp {
         ));
         let id = egui::Id::new(("floating-panel", f.panels.first().map(|p| p.id()).unwrap_or_default()));
         let mut group = None;
-        egui::Area::new(id).order(egui::Order::Middle).fixed_pos(rect.min).interactable(true).show(ctx, |ui| {
+        // Not constrained to the window: the group is drawn where its rect says (the clamp above
+        // keeps its strip reachable), so it follows the pointer past the window's edges.
+        egui::Area::new(id).order(egui::Order::Middle).fixed_pos(rect.min).constrain(false).interactable(true).show(ctx, |ui| {
             let (r, _) = ui.allocate_exact_size(rect.size(), Sense::hover());
             ui.painter().rect_filled(r.expand(1.0), t.radius, Color32::from_black_alpha(90));
             let strip = Rect::from_min_size(r.min, vec2(r.width(), t.tab_h));
             // Move by the strip (tabs, registered later, take precedence over it).
-            let mv = ui.interact(strip, id.with("move"), Sense::drag());
+            // (`id.with("move")` is the id of the `Area`'s own background widget.)
+            let mv = ui.interact(strip, id.with("strip"), Sense::drag());
             self.auto.add(&format!("panel.float.{i}.move"), strip, "Move floating panel");
             let mut nr = r;
             if mv.dragged() {
@@ -374,6 +388,135 @@ impl EffectcraftApp {
             group = Some((g, c.tabs));
         });
         group
+    }
+
+    /// The native window a floating group (its `panels`) shows in, if any.
+    pub(crate) fn panel_window_of(&self, panels: &[PanelKind]) -> Option<PanelWindow> {
+        self.ui.panel_windows.iter().find(|w| panels.contains(&w.panel)).copied()
+    }
+
+    /// Whether panel `p` shows in its own native window.
+    pub fn in_panel_window(&self, p: PanelKind) -> bool {
+        self.ui.floating.iter().any(|group| group.panels.contains(&p) && self.panel_window_of(&group.panels).is_some())
+    }
+
+    /// The viewport panel `p` is drawn in: its native window's, or the main window's (also when
+    /// the platform embeds viewports, as the browser build does).
+    pub(crate) fn panel_viewport(&self, ctx: &egui::Context, p: PanelKind) -> egui::ViewportId {
+        if ctx.embed_viewports() {
+            return egui::ViewportId::ROOT;
+        }
+        self.ui
+            .floating
+            .iter()
+            .find(|group| group.panels.contains(&p))
+            .and_then(|group| self.panel_window_of(&group.panels))
+            .map_or(egui::ViewportId::ROOT, |w| panel_window_id(w.panel))
+    }
+
+    /// Move panel `p` (and the floating group it is in) into its own native window, which can be
+    /// placed on another monitor, or back into the main window (`window` false; it floats there
+    /// where it was before). `None` toggles. A docked panel is undocked first. The window opens
+    /// over the place the panel had in the main window. Returns whether `p` is now in a window.
+    pub fn set_panel_window(&mut self, ctx: &egui::Context, p: PanelKind, window: Option<bool>) -> Result<bool, String> {
+        let group_of = |app: &Self| app.ui.floating.iter().find(|group| group.panels.contains(&p)).map(|group| (group.panels.clone(), group.rect));
+        let current = self.in_panel_window(p);
+        let window = window.unwrap_or(!current);
+        if window == current {
+            return Ok(current);
+        }
+        if !window {
+            if let Some((panels, _)) = group_of(self) {
+                self.ui.panel_windows.retain(|w| !panels.contains(&w.panel));
+            }
+            return Ok(false);
+        }
+        if group_of(self).is_none() {
+            if !self.ui.dock.contains(p) {
+                return Err(format!("{} is not open", p.title()));
+            }
+            let rect = default_float_rect(ctx.input_for(egui::ViewportId::ROOT, |i| i.content_rect()));
+            if !self.edit_layout(|layout| layout.float(p, rect)) {
+                return Err(format!("can't undock {}", p.title()));
+            }
+        }
+        let Some((_, [x, y, w, h])) = group_of(self) else { return Err(format!("can't undock {}", p.title())) };
+        // Over the panel's place in the main window (its content's position on the desktop).
+        let origin = ctx.input_for(egui::ViewportId::ROOT, |i| i.viewport().inner_rect.map(|r| r.min)).unwrap_or(pos2(0.0, 0.0));
+        let rect = PanelWindow::sanitized([origin.x + x, origin.y + y, w, h]);
+        ctx.data_mut(|d| d.remove::<[f32; 4]>(panel_window_spawn_id(p)));
+        self.ui.panel_windows.push(PanelWindow { panel: p, rect });
+        if self.ui.maximized == Some(p) {
+            self.ui.maximized = None;
+        }
+        Ok(true)
+    }
+
+    /// One floating group in its own native window: the group's tab strip and active panel fill
+    /// the window. Closing the window brings the group back into the main window.
+    fn panel_window(&mut self, ctx: &egui::Context, i: usize, window: PanelWindow, info: &dock::TabInfo, actions: &mut Vec<DockAction>) {
+        let t = self.tokens;
+        let Some(f) = self.ui.floating.get(i).cloned() else { return };
+        let active = f.active.min(f.panels.len().saturating_sub(1));
+        let Some(shown) = f.panels.get(active).copied() else { return };
+        // The window opens at its saved place; after that the window system owns its position and
+        // size (handing them back every frame would fight the user dragging it).
+        let spawn_id = panel_window_spawn_id(window.panel);
+        let spawn = ctx.data_mut(|d| *d.get_temp_mut_or_insert_with(spawn_id, || PanelWindow::sanitized(window.rect)));
+        let builder = egui::ViewportBuilder::default()
+            .with_title((info.title)(shown))
+            .with_position([spawn[0], spawn[1]])
+            .with_inner_size([spawn[2], spawn[3]])
+            .with_min_inner_size(dock::PANEL_WINDOW_MIN);
+        let mut closed = false;
+        let mut placed = None;
+        ctx.show_viewport_immediate(panel_window_id(window.panel), builder, |ui, class| {
+            let native = matches!(class, egui::ViewportClass::Immediate | egui::ViewportClass::Deferred);
+            egui::CentralPanel::default().frame(egui::Frame::NONE.fill(t.panel_bg)).show(ui, |ui| {
+                let r = ui.max_rect();
+                let g = Group {
+                    path: format!("w{i}"),
+                    rect: r,
+                    content: Rect::from_min_max(pos2(r.min.x, (r.min.y + t.tab_h).min(r.max.y)), r.max),
+                    panels: f.panels.clone(),
+                    active,
+                    stacked: None,
+                };
+                let c = dock::draw_group_chrome(ui, &g, &t, &mut self.auto, info);
+                // Tabs can't be dragged between native windows yet.
+                actions.extend(c.actions.into_iter().filter(|a| !matches!(a, DockAction::BeginDrag(_))));
+                self.panel_body(ui, shown, g.content);
+                if shown == self.ui.focused {
+                    ui.painter().rect_stroke(r, 0.0, Stroke::new(1.0, t.focus), StrokeKind::Inside);
+                }
+                if native {
+                    panels::panel_menu_popup(self, ui);
+                }
+            });
+            // An embedded window (no native windows on this platform) reads the main window's
+            // input: its close request and place aren't this window's.
+            if native {
+                closed = ui.input(|i| i.viewport().close_requested());
+                placed = ui.input(|i| {
+                    let v = i.viewport();
+                    let inner = v.inner_rect?;
+                    let min = v.outer_rect.map_or(pos2(window.rect[0], window.rect[1]), |outer| outer.min);
+                    Some([min.x, min.y, inner.width(), inner.height()])
+                });
+            }
+        });
+        if closed {
+            self.ui.panel_windows.retain(|w| !f.panels.contains(&w.panel));
+            ctx.data_mut(|d| d.remove::<[f32; 4]>(spawn_id));
+            return;
+        }
+        // Remember where the window is, so the workspace reopens it there.
+        if let Some(rect) = placed.map(PanelWindow::sanitized)
+            && rect != window.rect
+            && let Some(w) = self.ui.panel_windows.iter_mut().find(|w| w.panel == window.panel)
+        {
+            w.rect = rect;
+        }
     }
 
     /// A tab being dragged. Over a tab strip (or the middle of a group) it shows where the tab
@@ -458,6 +601,16 @@ fn insertion_mark(painter: &egui::Painter, x: f32, strip: Rect, col: Color32) {
     for (y, d) in [(y0, 1.0), (y1, -1.0)] {
         painter.add(egui::Shape::convex_polygon(vec![pos2(x - 4.5, y), pos2(x + 4.5, y), pos2(x, y + 5.0 * d)], col, Stroke::NONE));
     }
+}
+
+/// The native window of the floating group whose window entry names `panel`.
+pub fn panel_window_id(panel: PanelKind) -> egui::ViewportId {
+    egui::ViewportId::from_hash_of(("effectcraft-panel-window", panel.id()))
+}
+
+/// Where a native panel window was told to open (kept for as long as it stays open).
+fn panel_window_spawn_id(panel: PanelKind) -> egui::Id {
+    egui::Id::new(("panel-window-spawn", panel.id()))
 }
 
 /// A new floating group's default rect near the centre of `screen`.

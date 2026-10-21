@@ -145,6 +145,21 @@ impl effectcraft_render::FxTarget for GpuFx<'_, '_> {
         let out = f(Buf { img, offset: b.offset, scale: b.scale });
         self.b = self.e.g.upload_image(&out.img).map(|img| GBuf { img, offset: out.offset, scale: out.scale });
     }
+
+    /// GBuf::cover, like `pad`: a bigger texture with the old one copied into place, no
+    /// readback. A region the device can't allocate leaves the buffer as it is.
+    fn cover(&mut self, size: [f64; 2]) {
+        let Some(b) = self.b.take() else { return };
+        let out = match effectcraft_effects::cover_plan(b.offset, b.scale, size, b.img.width, b.img.height) {
+            Some((dx, dy, w, h)) if self.e.g.fits(w, h) => {
+                let img = self.e.image(w, h);
+                self.e.copy_into(&b.img, &img, dx, dy);
+                GBuf { img, offset: [b.offset[0] + dx as f64, b.offset[1] + dy as f64], scale: b.scale }
+            }
+            _ => b,
+        };
+        self.b = Some(out);
+    }
 }
 
 fn apply(e: &mut Enc, id: &str, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {

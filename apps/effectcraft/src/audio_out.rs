@@ -117,7 +117,7 @@ fn run<T: SizedSample + FromSample<f32>>(
             let dev_lat = ts.playback.duration_since(&ts.callback).map(|d| d.as_secs_f64()).unwrap_or(0.0);
             latency.store((dev_lat * rate) as u64 + frames as u64, Ordering::Relaxed);
         },
-        |e| eprintln!("effectcraft: audio output: {e}"),
+        |e| log::warn!("audio output: {e}"),
         None,
     )
     .map_err(|e| e.to_string())
@@ -187,7 +187,7 @@ impl AudioDevice for CpalOut {
                     return;
                 }
                 if let Err(e) = stream.play() {
-                    eprintln!("effectcraft: audio output: {e}");
+                    log::warn!("audio output: {e}");
                     return;
                 }
                 let _ = stop_rx.recv();

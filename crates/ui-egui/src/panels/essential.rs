@@ -129,7 +129,7 @@ fn body(app: &mut EffectcraftApp, ui: &mut egui::Ui) -> (Actions, Actions) {
 
     // ---- Bottom buttons.
     ui.horizontal_wrapped(|ui| {
-        let r = ui.menu_button(tr("Add Formatting"), |ui| {
+        let r = crate::widgets::menu_button(ui, tr("Add Formatting"), |ui| {
             if ui.button(tr("Add Group")).clicked() {
                 actions.push(("essential.addGroup".into(), json!({"comp": cid.0})));
                 ui.close();
@@ -143,7 +143,7 @@ fn body(app: &mut EffectcraftApp, ui: &mut egui::Ui) -> (Actions, Actions) {
         // The selected property as a Font control (Source Text) or a uniform Scale slider.
         let has_sel = !app.session.state.selected_props.is_empty();
         let r = ui.add_enabled_ui(has_sel, |ui| {
-            ui.menu_button(tr("Add Selected As"), |ui| {
+            crate::widgets::menu_button(ui, tr("Add Selected As"), |ui| {
                 for (label, as_type) in [("Font Control", "font"), ("Uniform Scale", "scale")] {
                     if ui.button(label).clicked() {
                         actions.push(("essential.addProperty".into(), json!({"as": as_type})));
@@ -270,7 +270,7 @@ fn link_menu(app: &mut EffectcraftApp, ui: &mut egui::Ui, cid: ItemId, c: &EgCon
         _ => vec![],
     };
     let has_sel = !app.session.state.selected_props.is_empty();
-    let r = ui.menu_button(RichText::new("⋯").size(10.0), |ui| {
+    let r = crate::widgets::menu_button(ui, RichText::new("⋯").size(10.0), |ui| {
         if ui.button(tr("Add Mirror")).clicked() {
             actions.push(("essential.addMirror".into(), json!({"comp": cid.0, "control": c.id, "group": group})));
             ui.close();

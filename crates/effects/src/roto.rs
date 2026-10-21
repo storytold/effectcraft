@@ -7,7 +7,8 @@
 //! out to the frame), so it lives in a process-wide content-keyed cache ([`cached`]) that the
 //! engine's propagation job fills at full resolution and rendering fills on demand (reading
 //! neighbouring frames with [`crate::EffectHost::self_at`]). Undo, redo and reopening a project
-//! therefore never see stale mattes. **Freeze** stores the final mattes in the hidden **Frozen**
+//! therefore never see stale mattes. Behind the memory cache an optional [`SegStore`] (the
+//! persistent disk cache, set by the engine) keeps computed segmentations across restarts. **Freeze** stores the final mattes in the hidden **Frozen**
 //! parameter ([`FrozenCache`]); they are used while their key still matches.
 //!
 //! Rendering: binary segmentation → Roto Brush Matte (Shift Edge, Reduce Chatter, Feather,
@@ -23,21 +24,21 @@
 //! higher working resolution with more iterations.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 
 use effectcraft_keyframe::Value;
 use effectcraft_project::ParamUi;
 use effectcraft_raster::Image;
 use effectcraft_segment::MaskModel;
 use effectcraft_track::roto::refine::{self, MatteParams};
-use effectcraft_track::roto::{self as rb, FrameSeg, RotoData, SegOpts, rle};
+use effectcraft_track::roto::{self as rb, RotoData, SegOpts, rle};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::warp_stab::param;
 use crate::{Buf, EffectCtx, EffectSpec, Params, num, p, popup, slider};
 
-pub use effectcraft_track::roto::{Stroke, StrokeKind};
+pub use effectcraft_track::roto::{FrameSeg, Stroke, StrokeKind};
 
 /// The effect's id.
 pub const ID: &str = "ec.matte.rotobrush";
@@ -195,6 +196,12 @@ pub fn model_for(params: &Params) -> Option<Arc<dyn MaskModel>> {
     if e(params, "version") == 0 {
         return None;
     }
+    installed_model()
+}
+
+/// The trained model chosen in Settings ▸ Roto Brush, if one is installed (Roto Brush 2.0 / 3.0
+/// and Object Matte segment with it).
+pub fn installed_model() -> Option<Arc<dyn MaskModel>> {
     model_slot().read().ok().and_then(|m| m.clone())
 }
 
@@ -260,6 +267,37 @@ pub fn store(key: u64, scale: f64, seg: Arc<FrameSeg>) {
     }
 }
 
+/// A second-level store for segmentations, keyed like the memory cache (chain key, scale): the
+/// persistent disk cache, so computed mattes survive the memory cache and restarts.
+pub trait SegStore: Send + Sync {
+    fn get_seg(&self, key: u64, scale: f64) -> Option<FrameSeg>;
+    fn put_seg(&self, key: u64, scale: f64, seg: &FrameSeg);
+}
+
+fn seg_store_slot() -> &'static RwLock<Option<Weak<dyn SegStore>>> {
+    static S: OnceLock<RwLock<Option<Weak<dyn SegStore>>>> = OnceLock::new();
+    S.get_or_init(|| RwLock::new(None))
+}
+
+/// Use `store` behind the memory cache (held weakly: once its owner drops it, e.g. the disk
+/// cache is switched off, it is no longer used). `None` turns it off.
+pub fn set_seg_store(store: Option<Weak<dyn SegStore>>) {
+    if let Ok(mut s) = seg_store_slot().write() {
+        *s = store;
+    }
+}
+
+fn seg_store() -> Option<Arc<dyn SegStore>> {
+    seg_store_slot().read().ok()?.as_ref()?.upgrade()
+}
+
+/// A segmentation from the second-level store, put into the memory cache.
+fn from_store(key: u64, scale: f64) -> Option<Arc<FrameSeg>> {
+    let seg = Arc::new(seg_store()?.get_seg(key, scale)?);
+    store(key, scale, seg.clone());
+    Some(seg)
+}
+
 /// Drop the cached segmentations of these chain keys (every scale).
 pub fn forget(keys: impl IntoIterator<Item = u64>) {
     let keys: std::collections::HashSet<u64> = keys.into_iter().collect();
@@ -319,11 +357,11 @@ impl Chain {
         let sc = self.opts.scale;
         let lookup = |g: i64| -> Option<Arc<FrameSeg>> {
             let k = *self.keys.get(&g)?;
-            if let Some(s) = cached(k, sc) {
+            if let Some(s) = cached(k, sc).or_else(|| from_store(k, sc)) {
                 return Some(s);
             }
             if sc != 1.0 {
-                let full = cached(k, 1.0)?;
+                let full = cached(k, 1.0).or_else(|| from_store(k, 1.0))?;
                 let s = Arc::new(downscale(&full, sc));
                 store(k, sc, s.clone());
                 return Some(s);
@@ -373,7 +411,11 @@ impl Chain {
                 }
             };
             let seg = Arc::new(seg);
-            store(*self.keys.get(&g)?, sc, seg.clone());
+            let k = *self.keys.get(&g)?;
+            store(k, sc, seg.clone());
+            if let Some(st) = seg_store() {
+                st.put_seg(k, sc, &seg);
+            }
             cur = Some(seg);
             prev_img = Some(img);
         }
@@ -392,7 +434,7 @@ pub fn downscale(s: &FrameSeg, scale: f64) -> FrameSeg {
     resample(s, w, h)
 }
 
-fn resample(s: &FrameSeg, w: usize, h: usize) -> FrameSeg {
+pub(crate) fn resample(s: &FrameSeg, w: usize, h: usize) -> FrameSeg {
     if s.w == w && s.h == h {
         return s.clone();
     }

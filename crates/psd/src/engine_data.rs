@@ -2,6 +2,9 @@
 //! tree of dictionaries (`<< /Key value >>`), arrays (`[ ]`), numbers, names, booleans and
 //! strings (`(þÿ` + UTF-16BE with backslash escapes `)`). Read best-effort.
 
+/// Bytes that end a bare token or a `/Name` (besides whitespace).
+const DELIMITERS: &[u8] = b"[]<>/(";
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum EValue {
     Dict(Vec<(String, EValue)>),
@@ -121,7 +124,7 @@ impl P<'_> {
             b'(' => Some(EValue::Str(self.string())),
             _ => {
                 let start = self.i;
-                while self.i < self.b.len() && !self.b[self.i].is_ascii_whitespace() && !b"[]<>/(".contains(&self.b[self.i]) {
+                while self.i < self.b.len() && !self.b[self.i].is_ascii_whitespace() && !DELIMITERS.contains(&self.b[self.i]) {
                     self.i += 1;
                 }
                 let tok = std::str::from_utf8(&self.b[start..self.i]).unwrap_or("");
@@ -132,7 +135,11 @@ impl P<'_> {
                 Some(match tok {
                     "true" => EValue::Bool(true),
                     "false" => EValue::Bool(false),
-                    t => t.parse::<f64>().map(EValue::Num).unwrap_or_else(|_| EValue::Name(t.to_string())),
+                    // "nan", "inf" and overflowing literals parse as f64 but are not numbers here.
+                    t => match t.parse::<f64>() {
+                        Ok(n) if n.is_finite() => EValue::Num(n),
+                        _ => EValue::Name(t.to_string()),
+                    },
                 })
             }
         }
@@ -140,7 +147,7 @@ impl P<'_> {
     fn name(&mut self) -> String {
         self.i += 1; // '/'
         let start = self.i;
-        while self.i < self.b.len() && !self.b[self.i].is_ascii_whitespace() && !b"[]<>/(".contains(&self.b[self.i]) {
+        while self.i < self.b.len() && !self.b[self.i].is_ascii_whitespace() && !DELIMITERS.contains(&self.b[self.i]) {
             self.i += 1;
         }
         String::from_utf8_lossy(&self.b[start..self.i]).into_owned()
@@ -213,6 +220,11 @@ pub struct TextStyle {
     pub box_text: bool,
 }
 
+/// Sane upper bound for a font size in points (Photoshop's own limit is 1296 pt).
+const MAX_FONT_SIZE: f64 = 10_000.0;
+/// Sane bound for tracking (1/1000 em) and leading (points).
+const MAX_SPACING: f64 = 100_000.0;
+
 pub fn text_style(ed: &EValue) -> TextStyle {
     let engine = ed.get("EngineDict").unwrap_or(ed);
     let resources = ed.get("ResourceDict").or_else(|| ed.get("DocumentResources"));
@@ -233,11 +245,11 @@ pub fn text_style(ed: &EValue) -> TextStyle {
     let box_text = engine.path("Rendered/Shapes/Children/0/ShapeType").and_then(EValue::num) == Some(1.0);
     TextStyle {
         font,
-        size: attr("FontSize").and_then(EValue::num),
+        size: attr("FontSize").and_then(EValue::num).filter(|s| *s > 0.0).map(|s| s.min(MAX_FONT_SIZE)),
         color,
         justification,
-        tracking: attr("Tracking").and_then(EValue::num),
-        leading: if auto_leading { None } else { attr("Leading").and_then(EValue::num) },
+        tracking: attr("Tracking").and_then(EValue::num).map(|t| t.clamp(-MAX_SPACING, MAX_SPACING)),
+        leading: if auto_leading { None } else { attr("Leading").and_then(EValue::num).map(|l| l.clamp(-MAX_SPACING, MAX_SPACING)) },
         faux_bold: attr("FauxBold") == Some(&EValue::Bool(true)),
         faux_italic: attr("FauxItalic") == Some(&EValue::Bool(true)),
         box_text,
@@ -284,5 +296,21 @@ mod tests {
         let _ = parse(b"<< /A [ 1 2 << /B (unterminated");
         let _ = parse(b"]]]>>>> /x");
         let _ = parse(&[0xFF; 64]);
+    }
+
+    #[test]
+    fn non_finite_and_out_of_range_numbers_are_not_numbers() {
+        let b = b"<< /FontSize nan /Tracking inf /Leading -inf /Other 1e999 >>";
+        let v = parse(b);
+        assert_eq!(v.get("FontSize").and_then(EValue::num), None);
+        assert_eq!(v.get("Other").and_then(EValue::num), None);
+        let ed = parse(b"<< /EngineDict << /StyleRun << /RunArray [ << /StyleSheet << /StyleSheetData << /FontSize nan /Tracking inf /Leading -inf /AutoLeading false >> >> >> ] >> >> >>");
+        let st = text_style(&ed);
+        assert_eq!((st.size, st.tracking, st.leading), (None, None, None));
+        let ed = parse(b"<< /EngineDict << /StyleRun << /RunArray [ << /StyleSheet << /StyleSheetData << /FontSize 1e300 /Tracking -1e300 /AutoLeading false /Leading 1e300 >> >> >> ] >> >> >>");
+        let st = text_style(&ed);
+        assert_eq!(st.size, Some(MAX_FONT_SIZE));
+        assert_eq!(st.tracking, Some(-MAX_SPACING));
+        assert_eq!(st.leading, Some(MAX_SPACING));
     }
 }

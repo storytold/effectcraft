@@ -151,6 +151,44 @@ fn renderer_switch_adds_geometry_options() {
     assert_eq!(layer(&s, t).props.prop("geometryOptions/extrusionDepth").unwrap().value.as_f64(), 40.0);
 }
 
+/// Contents ▸ Add ▸ Front / Bevel / Side / Back ▸ Color (#315): one surface item per group,
+/// reused by later adds, one undo step each; text gets the same as animator properties.
+#[test]
+fn surface_colors_for_extruded_shapes_and_text() {
+    let mut s = session();
+    s.execute("comp.renderer", json!({"renderer": "advanced3d"})).unwrap();
+    let sh = s.execute("layer.newShape", json!({})).unwrap()["layer"].as_u64().unwrap();
+    let r = s.execute("layer.addShapeItem", json!({"layer": sh, "kind": "sideColor"})).unwrap();
+    assert_eq!(r["path"], "contents/side");
+    let side = r["uid"].as_u64().unwrap();
+    s.execute("prop.set", json!({"layer": sh, "path": "contents/side/color", "value": [0.0, 1.0, 0.0, 1.0]})).unwrap();
+    // Adding Side ▸ Color again reuses the item (and keeps its colour).
+    assert_eq!(s.execute("layer.addShapeItem", json!({"layer": sh, "kind": "sideColor"})).unwrap()["uid"].as_u64(), Some(side));
+    let l = layer(&s, sh);
+    let contents = l.props.sub("contents").unwrap();
+    assert_eq!(contents.groups().filter(|g| g.match_id == "side").count(), 1);
+    assert_eq!(l.props.prop("contents/side/color").unwrap().value, KV::Color([0.0, 1.0, 0.0, 1.0]));
+    // Into a shape group.
+    s.execute("layer.addShapeItem", json!({"layer": sh, "kind": "group"})).unwrap();
+    let r = s.execute("layer.addShapeItem", json!({"layer": sh, "kind": "frontColor", "group": "contents/group"})).unwrap();
+    assert_eq!(r["path"], "contents/group/contents/front");
+    assert!(s.execute("layer.addShapeItem", json!({"layer": sh, "kind": "sideShininess"})).is_err());
+    s.undo();
+    assert!(layer(&s, sh).props.group("contents/group/contents/front").is_none());
+    let cid = s.active_comp_id().unwrap();
+    s.execute("prop.set", json!({"layer": sh, "path": "geometryOptions/extrusionDepth", "value": 40})).unwrap();
+    let _ = s.render(cid, s.time(), Default::default());
+    // Text: Animate ▸ Front / Bevel / Side / Back ▸ Color.
+    let t = s.execute("layer.newText", json!({"text": "Hi"})).unwrap()["layer"].as_u64().unwrap();
+    for k in ["frontColor", "bevelColor", "sideColor", "backColor"] {
+        s.execute("layer.addTextAnimator", json!({"layer": t, "property": k})).unwrap();
+    }
+    let l = layer(&s, t);
+    assert!(l.props.prop("text/animators/#3/properties/sideColor").is_some());
+    s.execute("prop.set", json!({"layer": t, "path": "geometryOptions/extrusionDepth", "value": 20})).unwrap();
+    let _ = s.render(cid, s.time(), Default::default());
+}
+
 #[test]
 fn environment_layer_toggle() {
     let mut s = session();

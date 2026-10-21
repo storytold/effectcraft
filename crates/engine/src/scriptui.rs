@@ -110,6 +110,10 @@ pub struct Widget {
     pub read_only: bool,
     /// Event handlers the script attached (`onClick`, `onChange`, `onChanging`…).
     pub handlers: Vec<String>,
+    /// The mouse events ([`MOUSE_EVENTS`]) a script listener receives when they happen on this
+    /// control: its own `addEventListener` listeners and its containers' (events bubble).
+    /// Frontends send only these.
+    pub mouse: Vec<String>,
     /// The active tab of a tabbed panel (child index).
     pub active_tab: usize,
     /// What the control's `onDraw` handler painted (ScriptUIGraphics), in control coordinates.
@@ -364,15 +368,25 @@ pub struct ScriptWindow {
 pub struct ScriptUiEvent {
     pub window: u32,
     pub widget: u32,
-    /// `click`, `change`, `changing` or `close`.
+    /// `click`, `change`, `changing`, `close`, or a mouse event ([`MOUSE_EVENTS`]).
     pub kind: String,
-    /// The new value: text, number, bool, or selected index(es); for `close`, the result.
+    /// The new value: text, number, bool, or selected index(es); for `close`, the result; for
+    /// mouse events (and a mouse `click`), the pointer: `{x, y, button, detail, screenX, screenY,
+    /// altKey, ctrlKey, metaKey, shiftKey}` with `x`/`y` relative to the control.
     pub value: Value,
 }
+
+/// The ScriptUI mouse events scripts can listen for (`addEventListener`).
+pub const MOUSE_EVENTS: [&str; 6] = ["mousedown", "mouseup", "mousemove", "mouseover", "mouseout", "click"];
 
 /// Hands an event to the script that owns the window; returns what the handler reported
 /// (`{ok, output, error}`) and updates [`Session::script_ui`].
 pub type ScriptUiDispatch = fn(&mut Session, &ScriptUiEvent) -> std::result::Result<Value, String>;
+
+/// Runs the scripts' `app.scheduleTask` tasks that are due; returns
+/// `{ran, output, errors: [{message, line, file}], next (ms until the next task is due, or null)}`
+/// and updates [`Session::script_ui`]. Frontends call it every frame (see [`ScriptUi::run_tasks`]).
+pub type ScriptTaskRunner = fn(&mut Session) -> Value;
 
 /// The open script windows.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -384,11 +398,32 @@ pub struct ScriptUi {
     /// The scripting engine's event hand-off (set with [`Session::script`]).
     #[serde(skip)]
     pub dispatch: Option<ScriptUiDispatch>,
+    /// The scripting engine's scheduled-task runner (set with [`Session::script`]).
+    #[serde(skip)]
+    pub tasks: Option<ScriptTaskRunner>,
+    /// Bumped whenever the project is closed or replaced (New / Open / Close Project): repeating
+    /// tasks of scripts without an open window stop then.
+    #[serde(skip)]
+    pub project_epoch: u64,
+    /// The script contexts of this session with scheduled tasks (kept by the scripting engine).
+    #[serde(skip)]
+    pub task_hosts: Vec<u32>,
 }
 
 impl ScriptUi {
     pub fn window(&self, id: u32) -> Option<&ScriptWindow> {
         self.windows.iter().find(|w| w.id == id)
+    }
+
+    /// Run the scripts' due `app.scheduleTask` tasks ([`ScriptTaskRunner`]); `None` without a
+    /// scripting engine.
+    pub fn run_tasks(s: &mut Session) -> Option<Value> {
+        let f = s.script_ui.tasks?;
+        // A task may close its ScriptUI panel: forget it then.
+        let open = crate::commands::scripts::open_panel_names(s);
+        let r = f(s);
+        crate::commands::scripts::forget_closed_panels(s, &open);
+        Some(r)
     }
 
     /// Replace the windows a script host published (laying them out).
@@ -685,6 +720,48 @@ pub(crate) fn set(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let kind = if p.get("changing").and_then(Value::as_bool) == Some(true) { "changing" } else { "change" };
     dispatch(s, ScriptUiEvent { window, widget, kind: kind.into(), value })
+}
+
+/// `script.runTasks`: run the scripts' `app.scheduleTask` tasks that are due now (frontends do
+/// it every frame; headless hosts and agents call this).
+pub(crate) fn run_tasks(s: &mut Session, _: &Value) -> Result<Value> {
+    ScriptUi::run_tasks(s).ok_or_else(|| EngineError::Other("scripting is not available in this build".into()))
+}
+
+/// `scriptui.mouse`: a mouse event on a control, as the pointer would make it: the script's
+/// `addEventListener` listeners on the control and its containers receive a MouseEvent
+/// (`clientX`/`clientY` relative to the control, `button`, `detail` = click count, modifier
+/// keys). A `click` also does what clicking the control does (toggle a checkbox, press a button).
+pub(crate) fn mouse(s: &mut Session, p: &Value) -> Result<Value> {
+    let c = "scriptui.mouse";
+    let window = window_p(s, p, c)?;
+    let widget = widget_p(s, window, p, c)?;
+    let ty = p.get("type").and_then(Value::as_str).unwrap_or("click").to_ascii_lowercase();
+    let Some(ty) = MOUSE_EVENTS.iter().find(|t| **t == ty) else {
+        return Err(crate::commands::bad(c, format!("unknown mouse event `{ty}` (one of {})", MOUSE_EVENTS.join(", "))));
+    };
+    let w = s.script_ui.window(window).and_then(|w| w.root.find(widget)).cloned().unwrap_or_default();
+    if !w.enabled {
+        return Err(crate::commands::bad(c, format!("control {widget} is disabled")));
+    }
+    // Hostile input stays finite and bounded.
+    const FAR: f64 = 1.0e6;
+    let num = |k: &str, lo: f64, hi: f64, d: f64| p.get(k).and_then(Value::as_f64).filter(|v| v.is_finite()).map_or(d, |v| v.clamp(lo, hi));
+    let flag = |k: &str| p.get(k).and_then(Value::as_bool).unwrap_or(false);
+    let clicks = if matches!(*ty, "mousemove" | "mouseover" | "mouseout") { 0.0 } else { 1.0 };
+    let value = json!({
+        "x": num("x", -FAR, FAR, w.bounds[2] / 2.0),
+        "y": num("y", -FAR, FAR, w.bounds[3] / 2.0),
+        "screenX": num("screenX", -FAR, FAR, 0.0),
+        "screenY": num("screenY", -FAR, FAR, 0.0),
+        "button": num("button", 0.0, 2.0, 0.0).round(),
+        "detail": num("detail", 0.0, 1000.0, clicks).round(),
+        "altKey": flag("altKey"),
+        "ctrlKey": flag("ctrlKey"),
+        "metaKey": flag("metaKey"),
+        "shiftKey": flag("shiftKey"),
+    });
+    dispatch(s, ScriptUiEvent { window, widget, kind: (*ty).to_string(), value })
 }
 
 /// `scriptui.close`: close a window (a dialog's `show()` returns `result`, default 2 = Cancel).

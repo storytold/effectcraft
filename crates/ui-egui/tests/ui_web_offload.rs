@@ -219,3 +219,45 @@ fn waiting_commands_reply_when_their_offloaded_job_ends() {
     let v = reply.try_recv().expect("immediate reply");
     assert_eq!(v["result"]["rendering"], true, "{v}");
 }
+
+/// Completion errors belong to the waiting command's jobs, including when several
+/// different analyses complete in the same UI frame.
+#[test]
+fn waiting_commands_report_only_their_own_completion_errors() {
+    use effectcraft_engine::offload::JobKind;
+    use effectcraft_ui_egui::control::JobWaiter;
+
+    for (kind, job_id) in [
+        (JobKind::Render, "render"),
+        (JobKind::Warp, "warp"),
+        (JobKind::WarpPlan, "warpPlan"),
+        (JobKind::Camera, "camera"),
+        (JobKind::RotoFreeze, "roto"),
+        (JobKind::RotoPropagate, "roto"),
+        (JobKind::Track, "track"),
+        (JobKind::MaskTrack, "maskTrack"),
+        (JobKind::ContentFill, "contentFill"),
+    ] {
+        let other = if kind == JobKind::Track { JobKind::Warp } else { JobKind::Track };
+        let mut app = EffectcraftApp::new(Session::default());
+        app.session.offload_log = vec![(kind, Some("old error".into())), (other, Some("unrelated failure".into())), (kind, None)];
+        let waiter = || JobWaiter { command: "analysis".into(), params: json!({}), result: json!({"running": true}), jobs: vec![job_id.into()], log_cursor: 1 };
+        let result = waiter().finish(&mut app);
+        assert_eq!(result, json!({"ok": true, "result": {"running": false}}), "{kind:?}");
+        app.session.offload_log.push((kind, Some("nothing was applied".into())));
+        let result = waiter().finish(&mut app);
+        assert_eq!(result, json!({"ok": false, "error": "nothing was applied"}), "{kind:?}");
+    }
+}
+
+#[test]
+fn waiting_command_sees_its_error_after_the_completion_log_rolls_over() {
+    use effectcraft_engine::offload::JobKind;
+    use effectcraft_ui_egui::control::JobWaiter;
+    let mut app = EffectcraftApp::new(Session::default());
+    app.session.offload_log = vec![(JobKind::Warp, None); 31];
+    app.session.offload_log.push((JobKind::Track, Some("nothing was applied".into())));
+    app.session.offload_log_start = 1;
+    let waiter = JobWaiter { command: "track.analyze".into(), params: json!({}), result: json!({}), jobs: vec!["track".into()], log_cursor: 32 };
+    assert_eq!(waiter.finish(&mut app), json!({"ok": false, "error": "nothing was applied"}));
+}

@@ -621,18 +621,25 @@ fn pointwise(@builtin(global_invocation_id) gid: vec3<u32>) {
                 if (P.u[0].y == 1u) {
                     px = vec4<f32>(max((c + br - 0.5) * k + 0.5, vec3<f32>(0.0)) * a, a);
                 } else if (P.u[0].y == 2u) {
-                    // Brightness & Contrast tone curves (effects crate bc_modern).
+                    // Brightness & Contrast tone curves (effects crate bc_modern, AE-fitted #681).
                     var o = c;
-                    let pb = exp2(-br);
-                    let g = exp2(2.0 * ct);
+                    let g = max(1.0 + 0.53 * ct, 0.05);
                     for (var i = 0; i < 3; i++) {
                         if (c[i] < 1.0) {
-                            let v = powz(max(c[i], 0.0), pb);
-                            if (v < 0.5) {
-                                o[i] = 0.5 * powz(2.0 * v, g);
-                            } else {
-                                o[i] = 1.0 - 0.5 * powz(max(2.0 - 2.0 * v, 0.0), g);
+                            var v = max(c[i], 0.0);
+                            if (br > 0.0) {
+                                v = 1.0 - powz(1.0 - v, exp2(1.24 * br));
+                            } else if (br < 0.0) {
+                                v = powz(v, exp2(-1.32 * br));
                             }
+                            if (ct != 0.0) {
+                                if (v < 0.5) {
+                                    v = 0.5 * powz(2.0 * v, g);
+                                } else {
+                                    v = 1.0 - 0.5 * powz(max(2.0 - 2.0 * v, 0.0), g);
+                                }
+                            }
+                            o[i] = v;
                         }
                     }
                     px = vec4<f32>(o * a, a);
@@ -799,7 +806,8 @@ fn pointwise(@builtin(global_invocation_id) gid: vec3<u32>) {
             t = clamp(t, 0.0, 1.0);
             let c0 = P.f[1].xyz;
             let c1 = P.f[2].xyz;
-            px = put(px, c0 + (c1 - c0) * t, 1.0, P.f[3].z);
+            // Keep the source alpha, as the CPU path does (#1063): the ramp fills only the shape.
+            px = put(px, c0 + (c1 - c0) * t, px.w, P.f[3].z);
         }
         case 10u: {
             let contrast = P.f[0].x;
@@ -858,13 +866,13 @@ fn pointwise(@builtin(global_invocation_id) gid: vec3<u32>) {
                 val = 1.0 - val;
             }
             let op = P.f[2].z;
+            var fx = vec4<f32>(vec3<f32>(val) * op, op);
             if (P.u[1].z == 1u) {
-                // Normal: the noise over the layer at Opacity, then Blend With Original.
-                let over = vec4<f32>(vec3<f32>(val) * op, op) + px * (1.0 - op);
-                px = px * P.f[2].y + over * (1.0 - P.f[2].y);
-            } else {
-                px = put(px, vec3<f32>(val), op, P.f[2].y);
+                // Normal: the noise over the layer at Opacity.
+                fx = fx + px * (1.0 - op);
             }
+            // Inside the layer's alpha (its masks), then Blend With Original.
+            px = px * P.f[2].y + fx * px.w * (1.0 - P.f[2].y);
         }
         default: {}
     }

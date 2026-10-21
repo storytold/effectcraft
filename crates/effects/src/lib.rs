@@ -40,6 +40,7 @@ pub mod mocha_shape;
 mod noise;
 mod noise2;
 mod noise3;
+pub mod object_matte;
 mod obsolete;
 mod ocio;
 pub mod ocio_config;
@@ -105,11 +106,11 @@ pub use noise::remove_grain_level;
 pub use noise3::{FractalGpu, fractal_gpu};
 pub use stylize3::{BumpLight, bump_layer_id};
 pub use textfx::{TextLayer, text_layer};
-pub use time_fx::{PixelMotion, TimewarpPlan, TwStep, posterized_time, time_frames, timewarp_crop, timewarp_plan};
+pub use time_fx::{PixelMotion, TimewarpPlan, TwStep, pmb_plan, posterized_time, time_frames, timewarp_crop, timewarp_plan};
 // effectcraft-gpu fx_tone.
 pub use ocio::color_stabilizer_maps;
 // GPU effects, part B (3D Channel, Immersive Video, colour management, simulation render passes).
-pub use channel3d::{CRYPTO_LAYERS, id_color, selection_hashes};
+pub use channel3d::{CRYPTO_LAYERS, crypto_aux_image, id_color, selection_hashes};
 pub use ocio::{ColorOp, Straight, Tf, color_program};
 pub use sim::{Acc, Blob, Bubble, Post, Shape, Sprite, SpritePlan, Tint, bubble_list, drizzle_drops, mercury_blobs, sprite_plan};
 pub use sim2::{
@@ -264,6 +265,21 @@ impl Buf {
     pub fn to_px(&self, p: [f64; 2]) -> (f64, f64) {
         (p[0] * self.scale + self.offset[0], p[1] * self.scale + self.offset[1])
     }
+    /// Grow the buffer so it covers a `size`-layer-pixel region starting at its offset (see
+    /// [`cover_plan`]): the whole layer rectangle a sized source's buffer already is. Content
+    /// keeps its place; the new area is transparent. No-op when the buffer already covers it.
+    pub fn cover(&mut self, size: [f64; 2]) {
+        let Some((dx, dy, w, h)) = cover_plan(self.offset, self.scale, size, self.img.width, self.img.height) else { return };
+        let src = std::mem::replace(&mut self.img, Image::new(w, h));
+        let (sw, sh) = (src.width as usize, src.height as usize);
+        for y in 0..sh {
+            let s = y * sw;
+            let d = (y + dy as usize) * w as usize + dx as usize;
+            self.img.data[d..d + sw].copy_from_slice(&src.data[s..s + sw]);
+        }
+        self.offset[0] += dx as f64;
+        self.offset[1] += dy as f64;
+    }
     /// Measure from `origin` (in the current coordinates): a point `p` becomes `p − origin`.
     /// Moves between layer space and effect space (the renderer's `effect_bounds`).
     pub fn rebase(&mut self, origin: [f64; 2]) {
@@ -279,6 +295,27 @@ impl Buf {
         self.offset[0] += pad as f64;
         self.offset[1] += pad as f64;
     }
+}
+
+/// Where [`Buf::cover`] would take a buffer: shift its pixels by `(dx, dy)` and resize it to
+/// `width` × `height` so it spans the `size`-layer-pixel region that starts at its offset — the
+/// whole layer rectangle, which a sized source's buffer already is. `None` when the buffer
+/// already covers that region unchanged (footage, solids, the comp below an adjustment).
+pub fn cover_plan(offset: [f64; 2], scale: f64, size: [f64; 2], width: u32, height: u32) -> Option<(u32, u32, u32, u32)> {
+    if scale <= 0.0 || !scale.is_finite() || !offset[0].is_finite() || !offset[1].is_finite() || !size[0].is_finite() || !size[1].is_finite() {
+        return None;
+    }
+    // Region and content, both as pixel ranges in the buffer's own coordinates.
+    let (rw, rh) = (offset[0] + (size[0] * scale).ceil(), offset[1] + (size[1] * scale).ceil());
+    let (lo_x, lo_y) = (offset[0].min(0.0).floor(), offset[1].min(0.0).floor());
+    let (hi_x, hi_y) = (rw.max(width as f64).ceil(), rh.max(height as f64).ceil());
+    let (nw_f, nh_f) = (hi_x - lo_x, hi_y - lo_y);
+    if !(nw_f <= 16384.0 && nh_f <= 16384.0) {
+        return None;
+    }
+    let (dx, dy) = ((-lo_x) as u32, (-lo_y) as u32);
+    let (nw, nh) = (nw_f.round().max(1.0) as u32, nh_f.round().max(1.0) as u32);
+    (dx != 0 || dy != 0 || nw != width || nh != height).then_some((dx, dy, nw, nh))
 }
 
 /// A layer mask at the current time, flattened to a polyline in layer coordinates.
@@ -318,8 +355,8 @@ pub trait EffectHost: Sync {
         self.layer(id, false)
     }
     /// The effect's own layer at another **layer time** `layer_time` (seconds): its source with
-    /// masks applied, followed by the first `effects` effects of its stack (0 = none, which is
-    /// what After Effects' Time effects see). `None` when unavailable (no host, recursion
+    /// masks applied, followed by the first `effects` effects of its stack (0 = none; the host
+    /// never goes past the effect being rendered). `None` when unavailable (no host, recursion
     /// limit, adjustment layers). Time effects use this to read neighbouring frames.
     fn self_at(&self, _layer_time: f64, _effects: usize) -> Option<Buf> {
         None
@@ -497,6 +534,7 @@ pub fn registry() -> &'static [EffectSpec] {
         v.extend(camera_tracker::specs());
         v.extend(face_track::specs());
         v.extend(roto::specs());
+        v.extend(object_matte::specs());
         v.sort_by(|a, b| a.category.cmp(b.category).then(a.name.cmp(b.name)));
         for s in v.iter_mut() {
             if GPU_EFFECTS.contains(&s.id) {
@@ -805,7 +843,15 @@ pub const PARAM_GROUPS: &[(&str, &str)] = &[
 
 /// Display names of nested parameter groups by match id.
 fn group_name(m: &str) -> &str {
-    warp_stab::GROUPS.iter().chain(roto::GROUPS).chain(keylight::GROUPS).chain(PARAM_GROUPS).find(|(id, _)| *id == m).map(|(_, n)| *n).unwrap_or(m)
+    warp_stab::GROUPS
+        .iter()
+        .chain(roto::GROUPS)
+        .chain(object_matte::GROUPS)
+        .chain(keylight::GROUPS)
+        .chain(PARAM_GROUPS)
+        .find(|(id, _)| *id == m)
+        .map(|(_, n)| *n)
+        .unwrap_or(m)
 }
 
 /// The nested group at `path` (`borders/autoScale`) under `g`, created on first use.
@@ -1180,6 +1226,7 @@ pub const TIME_DEPENDENT: &[&str] = &[
     camera_tracker::ID,
     // Each frame has its own segmentation.
     roto::ID,
+    object_matte::ID,
 ];
 
 /// See [`TIME_DEPENDENT`].

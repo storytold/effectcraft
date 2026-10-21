@@ -1,10 +1,11 @@
 //! Time effects (Effect > Time): Echo, Posterize Time, Time Difference, Time Displacement,
 //! Timewarp, CC Force Motion Blur, CC Wide Time and Pixel Motion Blur.
 //!
-//! These read the layer at *other* layer times through [`EffectHost::self_at`] with zero
-//! preceding effects: like After Effects' Time effects they see the layer's source with its
-//! masks and ignore effects applied before them (precompose to include those). Without a host
-//! (tests, thumbnails) they pass their input through.
+//! These read the layer at *other* layer times through [`EffectHost::self_at`]: its source with
+//! its masks and the effects applied before them, as After Effects renders them (SceneYard:
+//! Echo after CC Particle Systems II echoes the fireworks, not the black solid under them;
+//! Posterize Time after Turbulent Displace steps the displacement). Without a host (tests,
+//! thumbnails) they pass their input through.
 //!
 //! Timewarp's Pixel Motion estimates block-matching optical flow between neighbouring frames
 //! ([`effectcraft_raster::flow`]); Pixel Motion Blur averages sub-frame samples.
@@ -169,7 +170,8 @@ fn fetch(ctx: &EffectCtx, times: &[f64]) -> Option<Frames> {
     let mut uniq: Vec<i64> = times.iter().map(|t| (t * 1e6).round() as i64).collect();
     uniq.sort_unstable();
     uniq.dedup();
-    let bufs: Vec<(i64, Option<Buf>)> = uniq.iter().map(|&k| (k, host.self_at(k as f64 / 1e6, 0))).collect();
+    // Every effect before this one (the host bounds the count to them).
+    let bufs: Vec<(i64, Option<Buf>)> = uniq.iter().map(|&k| (k, host.self_at(k as f64 / 1e6, usize::MAX))).collect();
     let first = bufs.iter().find_map(|(_, b)| b.as_ref())?;
     let scale = first.scale;
     // Union of every frame's extent in layer pixels (offset = where layer (0,0) sits).
@@ -583,6 +585,13 @@ fn smooth_flow(flow: &mut Flow, pm: &PixelMotion) {
 
 /// The motion field from frame `a` to frame `b` (or from the warp layer's frames).
 pub fn timewarp_flow(a: &Image, b: &Image, pm: &PixelMotion) -> Flow {
+    timewarp_flow_search(a, b, pm, 4)
+}
+
+/// [`timewarp_flow`] with an explicit coarse search radius: Timewarp's own resampling needs
+/// little (motion between adjacent source frames at near-100% speed), but Pixel Motion Blur
+/// must find fast full-frame displacements (#535).
+fn timewarp_flow_search(a: &Image, b: &Image, pm: &PixelMotion, radius: i32) -> Flow {
     let ga = motion_grey(&crop_edges(a, pm.crops), pm.weights, 1.0);
     let gain = if pm.correct_luminance {
         let (ma, mb) = (mean_grey(&ga), mean_grey(&motion_grey(b, pm.weights, 1.0)));
@@ -591,7 +600,7 @@ pub fn timewarp_flow(a: &Image, b: &Image, pm: &PixelMotion) -> Flow {
         1.0
     };
     let gb = motion_grey(&crop_edges(b, pm.crops), pm.weights, gain);
-    let mut flow = effectcraft_raster::flow::block_flow_window(&ga, &gb, pm.tile, pm.window, 4);
+    let mut flow = effectcraft_raster::flow::block_flow_window(&ga, &gb, pm.tile, pm.window, radius);
     smooth_flow(&mut flow, pm);
     flow
 }
@@ -923,12 +932,71 @@ fn wide_time(ctx: &EffectCtx, b: Buf) -> Buf {
     mean_of(ctx, b, &times)
 }
 
-fn pixel_motion_blur(ctx: &EffectCtx, b: Buf) -> Buf {
+fn shutter_times(ctx: &EffectCtx) -> Vec<f64> {
     let angle = if ctx.params.e("shutterControl") == 1 { ctx.params.f("shutterAngle") } else { 180.0 };
     let n = ctx.params.f("shutterSamples").round().clamp(1.0, 64.0) as usize;
     let span = angle.clamp(0.0, 720.0) / 360.0 / ctx.fps();
-    let times: Vec<f64> = (0..n).map(|i| ctx.time - span * 0.5 + if n > 1 { span * i as f64 / (n - 1) as f64 } else { span * 0.5 }).collect();
-    mean_of(ctx, b, &times)
+    (0..n).map(|i| ctx.time - span * 0.5 + if n > 1 { span * i as f64 / (n - 1) as f64 } else { span * 0.5 }).collect()
+}
+
+fn pixel_motion_blur(ctx: &EffectCtx, b: Buf) -> Buf {
+    match pmb_plan(ctx).as_ref().map(TimewarpPlan::render_cpu) {
+        Some(blur) => blur,
+        None => mean_of(ctx, b, &shutter_times(ctx)),
+    }
+}
+
+/// Pixel Motion Blur as a [`TimewarpPlan`]: each shutter instant is decoded between the two
+/// source frames it falls between along a measured motion field (the same synthesis Timewarp
+/// uses), and the instants average into the blur. Vector Detail sets the spacing of the motion
+/// vectors, so a coarse grid follows one big motion and a fine grid separates neighbouring
+/// ones (#535). `None` without a host — the caller then falls back. Shared by the CPU effect
+/// and the GPU compositor (`fx_time`), which renders the plan like Timewarp's.
+pub fn pmb_plan(ctx: &EffectCtx) -> Option<TimewarpPlan> {
+    ctx.env.host?;
+    let fps = ctx.fps();
+    let samples = shutter_times(ctx);
+    let n = samples.len();
+    let mut times = Vec::new();
+    for &s in &samples {
+        let (f0, _) = tw_split(s, fps);
+        times.push(f0 / fps);
+        times.push((f0 + 1.0) / fps);
+    }
+    let fr = fetch(ctx, &times)?;
+    let idx = |t: f64| times.iter().position(|q| (q - t).abs() < 1e-9).unwrap_or(0);
+    let mut pm = PixelMotion::from(ctx, fr.grid.scale);
+    // PMB's own Vector Detail: 0 → one vector per 32 px, 100 → one per 2 px.
+    let detail = (ctx.params.f("vectorDetail") / 100.0).clamp(0.0, 1.0);
+    pm.tile = (32.0 * (1.0f64 / 16.0).powf(detail) * fr.grid.scale).round().max(2.0) as u32;
+    let mut flows: Vec<FlowEntry> = vec![];
+    let mut steps = vec![];
+    let w = 1.0 / n as f32;
+    for &s in &samples {
+        let (f0, frac) = tw_split(s, fps);
+        let (i0, i1) = (idx(f0 / fps), idx((f0 + 1.0) / fps));
+        let step = if frac < 1e-4 {
+            TwStep::Whole(i0)
+        } else {
+            let flow = match flows.iter().position(|fl| fl.key == f0 as i64) {
+                Some(p) => p,
+                None => {
+                    let reach = (fr.grid.img.width.max(fr.grid.img.height) / 4).clamp(8, 64);
+                    flows.push(FlowEntry { key: f0 as i64, flow: timewarp_flow_search(&fr.imgs[i0], &fr.imgs[i1], &pm, reach as i32) });
+                    flows.len() - 1
+                }
+            };
+            TwStep::Motion { a: i0, b: i1, w: frac, flow }
+        };
+        steps.push((step, w));
+    }
+    Some(TimewarpPlan { grid: fr.grid, frames: fr.imgs, steps, flows: flows.into_iter().map(|f| f.flow).collect(), pm })
+}
+
+/// A measured flow with the source frame pair it came from (plans cache one per pair).
+struct FlowEntry {
+    key: i64,
+    flow: Flow,
 }
 
 #[cfg(test)]
@@ -948,7 +1016,8 @@ mod tests {
             None
         }
         fn self_at(&self, t: f64, effects: usize) -> Option<Buf> {
-            assert_eq!(effects, 0);
+            // Time effects see every effect before them.
+            assert_eq!(effects, usize::MAX);
             let v = if self.static_layer { 0.4 } else { t as f32 };
             Some(Buf { img: Image::filled(6, 4, [v, v, v, 1.0]), offset: [0.0; 2], scale: 1.0 })
         }

@@ -47,11 +47,15 @@ fn check_info_transaction(via_escape: bool) {
     let edited_brightness = h.state().session.prefs.appearance.brightness;
     assert!((edited_brightness - original_brightness).abs() > 0.01, "real brightness slider changed");
     assert_eq!(saved(&store).prefs.appearance.brightness, original_brightness, "unconfirmed edit is not saved");
-    // Use the upstream percent-valued Scale choice; keyboard zoom is deliberately disabled.
+    // Type a UI Scale; keyboard zoom is deliberately disabled.
     let at = rect(&h, "settings.appearance.uiScale").center();
     click(&mut h, at);
-    let at = h.get_by_label("125%").rect().center();
-    click(&mut h, at);
+    h.event(Event::Text("125".into()));
+    for pressed in [true, false] {
+        h.event(Event::Key { key: Key::Enter, physical_key: Some(Key::Enter), pressed, repeat: false, modifiers: Modifiers::NONE });
+        h.step();
+    }
+    h.run_steps(2);
     assert_eq!(h.state().session.prefs.appearance.ui_scale, 125);
     assert_eq!(saved(&store).prefs.appearance.ui_scale, 100, "unconfirmed scale edit is not saved");
     // Let UI Scale settle the centered dialog before reading its next hit target.
@@ -110,4 +114,74 @@ fn gpu_information_ok_returns_to_settings_and_cancel_restores_preferences() {
 #[test]
 fn gpu_information_escape_returns_to_settings_and_ok_saves_preferences() {
     check_info_transaction(true);
+}
+
+/// GPU Information names the adapter the window got and says why the compositor is off, so a
+/// card that the compositor could not use does not look undetected (#596).
+#[test]
+fn gpu_information_names_the_adapter_and_why_the_gpu_is_off() {
+    let session = Session {
+        accel_note: Some("GPU compositor unavailable: no compute shaders".into()),
+        window_adapter: Some("NVIDIA GeForce RTX 4070 (Dx12, DiscreteGpu)".into()),
+        ..Default::default()
+    };
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(session));
+    h.run_steps(4);
+    let ctx = h.ctx.clone();
+    menus::invoke(h.state_mut(), &ctx, "app.gpuInfo", json!({})).unwrap();
+    h.run_steps(3);
+    assert_eq!(h.state().dialog, Some(Dialog::Info));
+    assert!(h.query_by_label_contains("Window graphics: NVIDIA GeForce RTX 4070").is_some(), "the window's adapter is shown");
+    assert!(h.query_by_label_contains("GPU compositing is off: GPU compositor unavailable").is_some(), "the reason is shown");
+}
+
+#[test]
+fn gpu_information_dialog_stays_in_place() {
+    let mut session = Session::default();
+    session.prefs.appearance.ui_scale = 125;
+    session.execute("comp.new", json!({"width":32,"height":32,"duration":2})).unwrap();
+    let mut h = Harness::builder().with_size(vec2(1280.0, 720.0)).build_eframe(|_| EffectcraftApp::new(session));
+    h.run_steps(4);
+    let ctx = h.ctx.clone();
+    menus::invoke(h.state_mut(), &ctx, "app.settings", json!({"page":"previews"})).unwrap();
+    h.run_steps(3);
+    let button = rect(&h, "settings.button.GPU Information").center();
+    click(&mut h, button);
+    let start = h.get_by_label("GPU Information").rect();
+    for _ in 0..20 {
+        h.step();
+        let current = h.get_by_label("GPU Information").rect();
+        assert!((current.min - start.min).length() < 1.0, "GPU Information dialog moved");
+    }
+}
+
+/// Enter presses OK, the dialog's default button: back to Settings when it was opened from
+/// there, closed otherwise.
+#[test]
+fn gpu_information_enter_presses_ok() {
+    let mut session = Session::default();
+    session.execute("comp.new", json!({"width":32,"height":32,"duration":2})).unwrap();
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(session));
+    h.run_steps(4);
+    let enter = |h: &mut Harness<'_, EffectcraftApp>| {
+        for pressed in [true, false] {
+            h.event(Event::Key { key: Key::Enter, physical_key: Some(Key::Enter), pressed, repeat: false, modifiers: Modifiers::NONE });
+            h.step();
+        }
+        h.run_steps(3);
+    };
+    let ctx = h.ctx.clone();
+    menus::invoke(h.state_mut(), &ctx, "app.gpuInfo", json!({})).unwrap();
+    h.run_steps(3);
+    assert_eq!(h.state().dialog, Some(Dialog::Info));
+    enter(&mut h);
+    assert!(h.state().dialog.is_none(), "Enter closed GPU Information");
+
+    menus::invoke(h.state_mut(), &ctx, "app.settings", json!({"page":"previews"})).unwrap();
+    h.run_steps(3);
+    let at = rect(&h, "settings.button.GPU Information").center();
+    click(&mut h, at);
+    assert_eq!(h.state().dialog, Some(Dialog::Info));
+    enter(&mut h);
+    assert_eq!(h.state().dialog, Some(Dialog::Settings), "Enter returned to the pending Settings transaction");
 }

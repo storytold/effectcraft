@@ -296,7 +296,7 @@ pub fn viewer_hook(
         ui.data_mut(|d| d.insert_temp(cid, pts));
     }
     let base = json!({"layer": a.layer.0, "effect": a.uid});
-    resp.context_menu(|ui| {
+    crate::widgets::context_menu(&resp, |ui| {
         let pts: Vec<u32> = ui.data(|d| d.get_temp(cid)).unwrap_or_default();
         let with = |kind: Option<&str>, multiple: bool| {
             let mut q = base.clone();

@@ -54,3 +54,44 @@ sync_github_name = false
 real_name = "Vikram Bhaskaran"
 display_name = "Vikram Bhaskaran"
 sync_github_name = false
+
+[people.vangel76]
+real_name = "Valentin Klein"
+display_name = "Valentin Klein"
+
+[people.Losminek]
+sync_github_name = true
+
+[people.webdevtodayjason]
+display_name = "Jason Brashear"
+
+[people.nanox333]
+display_name = "nnaannoo"
+
+[people.Nael-Nathanael]
+sync_github_name = true
+
+[people.dotCooCoo]
+real_name = "Robert Lee"
+sync_github_name = true
+
+[people.onlymoein]
+real_name = "Moein Saharkhiz"
+display_name = "onlymoein"
+
+[people.arnav-hiwarkar]
+display_name = "arnav-hiwarkar"
+sync_github_name = false
+
+[people.marcoarnulfo]
+real_name = "Marco Arnulfo"
+display_name = "Marco Arnulfo"
+sync_github_name = false
+
+[people.krinry]
+display_name = "krinry"
+sync_github_name = true
+
+[people.Silvertree2010]
+display_name = "Netter"
+sync_github_name = false

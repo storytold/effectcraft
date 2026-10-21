@@ -43,8 +43,18 @@ impl ExprError {
 pub fn errors(s: &Session, cid: ItemId, t: Tick) -> Vec<ExprError> {
     let Some(comp) = s.project.comp(cid) else { return vec![] };
     let ctx = EvalCtx { footage: Some(s.footage.as_ref()), expr: s.expr.as_deref(), ..EvalCtx::new(&s.project, cid, comp, t) };
+    errors_in(&ctx, s.expr_check, || true).unwrap_or_default()
+}
+
+/// Evaluate diagnostics against an immutable snapshot. Background callers can cancel between
+/// properties; cancelled scans return no partial result. Includes hidden/non-solo layers and
+/// syntax errors on disabled expressions, just like the explicit `expr.errors` query.
+pub fn errors_in(ctx: &EvalCtx, check: Option<fn(&str) -> std::result::Result<(), String>>, mut keep_going: impl FnMut() -> bool) -> Option<Vec<ExprError>> {
     let mut out = vec![];
-    for (i, l) in comp.layers.iter().enumerate() {
+    for (i, l) in ctx.comp.layers.iter().enumerate() {
+        if !keep_going() {
+            return None;
+        }
         let mut props: Vec<(&Property, &Expression)> = vec![];
         l.props.walk("", &mut |_, p| {
             if let Some(e) = p.expr.as_ref().filter(|e| !e.text.trim().is_empty()) {
@@ -52,20 +62,23 @@ pub fn errors(s: &Session, cid: ItemId, t: Tick) -> Vec<ExprError> {
             }
         });
         for (p, e) in props {
+            if !keep_going() {
+                return None;
+            }
             let msg = if e.enabled {
                 match &ctx.expr {
-                    Some(h) => h.eval(&ctx, l, p, &p.value_at(l.layer_time(t))).err(),
+                    Some(h) => h.eval(ctx, l, p, &p.value_at(l.layer_time(ctx.time))).err(),
                     None => None,
                 }
             } else {
-                s.expr_check.and_then(|check| check(&e.text).err())
+                check.and_then(|check| check(&e.text).err())
             };
             if let Some(message) = msg {
-                out.push(error_of(cid, i, l, p, message, !e.enabled));
+                out.push(error_of(ctx.comp_id, i, l, p, message, !e.enabled));
             }
         }
     }
-    out
+    keep_going().then_some(out)
 }
 
 fn error_of(cid: ItemId, i: usize, l: &Layer, p: &Property, message: String, disabled: bool) -> ExprError {

@@ -170,7 +170,15 @@ fn gpu_worker_renders_effect_frames_and_the_disk_cache_survives_a_reload() {
     let mut frames2 = Frames::default();
     frames2.set_remote(Some(worker2.clone()));
     assert!(frames2.remote_disk());
-    let bar = frames2.disk_frames(&source(&s, None), &key(fx), 30, &opts);
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let bar = loop {
+        let bar = frames2.disk_frames(&source(&s, None), &key(fx), 30, &opts);
+        if !bar.is_empty() {
+            break bar;
+        }
+        assert!(std::time::Instant::now() < until, "disk-cache indicator did not finish hashing");
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    };
     assert_eq!(bar, vec![0], "the blue cache bar shows the stored frame");
     frames2.request_urgent(&source(&s, Some(page_gpu)), key(fx), fx, t, opts);
     frames2.dispatch_remote();

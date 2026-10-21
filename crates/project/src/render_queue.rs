@@ -522,14 +522,18 @@ pub enum OutputFormat {
     /// AV1 video (+ AAC audio) in MP4 (`av01`). WebM with AV1: [`OutputFormat::WebM`] with
     /// [`WebmVideoCodec::Av1`].
     Av1,
+    /// Uncompressed 8-bit RGB / ARGB (`raw `) in QuickTime (+ PCM audio), for handing to an
+    /// external encoder.
+    Uncompressed,
 }
 
 impl OutputFormat {
-    pub const ALL: [OutputFormat; 12] = [
+    pub const ALL: [OutputFormat; 13] = [
         OutputFormat::H264,
         OutputFormat::Hevc,
         OutputFormat::Av1,
         OutputFormat::ProRes,
+        OutputFormat::Uncompressed,
         OutputFormat::WebM,
         OutputFormat::PngSequence,
         OutputFormat::JpegSequence,
@@ -554,12 +558,13 @@ impl OutputFormat {
             OutputFormat::Aiff => "AIFF",
             OutputFormat::Hevc => "HEVC (H.265)",
             OutputFormat::Av1 => "AV1",
+            OutputFormat::Uncompressed => "QuickTime (Uncompressed)",
         }
     }
     pub fn extension(self) -> &'static str {
         match self {
             OutputFormat::H264 => "mp4",
-            OutputFormat::ProRes => "mov",
+            OutputFormat::ProRes | OutputFormat::Uncompressed => "mov",
             OutputFormat::PngSequence => "png",
             OutputFormat::JpegSequence => "jpg",
             OutputFormat::TiffSequence => "tif",
@@ -575,7 +580,7 @@ impl OutputFormat {
         matches!(self, OutputFormat::PngSequence | OutputFormat::JpegSequence | OutputFormat::TiffSequence | OutputFormat::ExrSequence)
     }
     pub fn is_movie(self) -> bool {
-        matches!(self, OutputFormat::H264 | OutputFormat::ProRes | OutputFormat::WebM | OutputFormat::Hevc | OutputFormat::Av1)
+        matches!(self, OutputFormat::H264 | OutputFormat::ProRes | OutputFormat::Uncompressed | OutputFormat::WebM | OutputFormat::Hevc | OutputFormat::Av1)
     }
     /// Formats whose video codec options live in [`OutputModule::codec`] (HEVC, AV1).
     pub fn has_codec_options(self) -> bool {
@@ -597,8 +602,8 @@ impl OutputFormat {
         let even = |v: u32| if v < 2 { 2 } else { v & !1 };
         if matches!(self, OutputFormat::H264 | OutputFormat::Hevc) { (even(w), even(h)) } else { (w, h) }
     }
-    /// Parse a format name: `h264`, `mp4`, `prores`, `mov`, `png`, `jpeg`/`jpg`, `tiff`/`tif`,
-    /// `exr`, `gif`, or a label.
+    /// Parse a format name: `h264`, `mp4`, `prores`, `mov`, `uncompressed`, `png`, `jpeg`/`jpg`,
+    /// `tiff`/`tif`, `exr`, `gif`, or a label.
     pub fn from_name(s: &str) -> Option<OutputFormat> {
         let n = s.trim().to_ascii_lowercase().replace([' ', '.', '-', '_'], "");
         Some(match n.as_str() {
@@ -606,6 +611,7 @@ impl OutputFormat {
             "hevc" | "h265" | "hevch265" | "hvc1" | "x265" => OutputFormat::Hevc,
             "av1" | "av01" | "mp4av1" => OutputFormat::Av1,
             "prores" | "mov" | "quicktime" | "quicktimeprores" => OutputFormat::ProRes,
+            "uncompressed" | "quicktimeuncompressed" | "rawvideo" => OutputFormat::Uncompressed,
             "png" | "pngsequence" => OutputFormat::PngSequence,
             "jpg" | "jpeg" | "jpegsequence" => OutputFormat::JpegSequence,
             "tif" | "tiff" | "tiffsequence" => OutputFormat::TiffSequence,
@@ -763,10 +769,14 @@ impl Crop {
         if self.use_roi
             && let Some([x, y, rw, rh]) = self.roi
         {
-            let l = (x * scale).round() as i32;
-            let t = (y * scale).round() as i32;
-            let r = w as i32 - ((x + rw) * scale).round() as i32;
-            let b = h as i32 - ((y + rh) * scale).round() as i32;
+            // The quad arrives unvalidated (control channel or a hand-edited project):
+            // clamp like the sibling edge fields (plus/minus 20 000) and subtract
+            // without overflow.
+            let conv = |v: f64| v.round().clamp(-20_000.0, 20_000.0) as i32;
+            let l = conv(x * scale);
+            let t = conv(y * scale);
+            let r = (w as i32).saturating_sub(conv((x + rw) * scale));
+            let b = (h as i32).saturating_sub(conv((y + rh) * scale));
             return (t, l, b, r);
         }
         (self.top, self.left, self.bottom, self.right)
@@ -1088,8 +1098,8 @@ impl OutputModule {
     /// scale `scale`: after Crop and Resize (before codec rounding).
     pub fn frame_size(&self, w: u32, h: u32, scale: f64) -> (u32, u32) {
         let (t, l, b, r) = self.crop.edges(w, h, scale);
-        let cw = (w as i32 - l - r).max(1) as u32;
-        let ch = (h as i32 - t - b).max(1) as u32;
+        let cw = (w as i32).saturating_sub(l).saturating_sub(r).max(1) as u32;
+        let ch = (h as i32).saturating_sub(t).saturating_sub(b).max(1) as u32;
         if !self.resize.enabled {
             return (cw, ch);
         }
@@ -1635,6 +1645,41 @@ mod tests {
         assert_eq!(s.frame_count(&c), 30);
         assert_eq!(s.first_frame(&c), 30);
         assert!(s.frame_time(&c, 0) >= Tick::from_seconds_f64(1.0));
+    }
+
+    #[test]
+    fn hostile_roi_cannot_overflow_crop_math() {
+        // `-1e12` saturates to `i32::MIN` on conversion: `w as i32 - l` must saturate,
+        // not overflow, and still yield a usable (degenerate) frame size.
+        let c = Comp::new(1920, 1080, FrameRate::new(30, 1), Tick::from_seconds_f64(1.0));
+        let rs = RenderSettings::default();
+        let mut m = OutputModule::for_format(OutputFormat::PngSequence);
+        m.crop = Crop { enabled: true, use_roi: true, roi: Some([-1e12, -1e12, 200.0, 200.0]), ..Default::default() };
+        let (w, h) = m.output_size(&c, &rs);
+        assert!((w, h) == (1, 1), "degenerate but valid: {w}x{h}");
+        // Sane ROIs are unaffected (existing behavior).
+        m.crop = Crop { enabled: true, use_roi: true, roi: Some([100.0, 50.0, 800.0, 400.0]), ..Default::default() };
+        let half = RenderSettings { resolution: 0.5, ..Default::default() };
+        assert_eq!(m.output_size(&c, &half), (400, 200));
+    }
+
+    #[test]
+    fn uncompressed_quicktime_format() {
+        let f = OutputFormat::from_name("uncompressed").unwrap();
+        assert_eq!(f, OutputFormat::Uncompressed);
+        assert_eq!(OutputFormat::from_name(&format!("{f:?}")), Some(f));
+        assert!(OutputFormat::ALL.contains(&f));
+        assert!(f.is_movie() && f.supports_alpha() && f.supports_audio());
+        assert_eq!(f.coded_size(3, 5), (3, 5));
+        // `.mov` still guesses ProRes; switching keeps the name.
+        assert_eq!(OutputFormat::from_path("a.mov"), Some(OutputFormat::ProRes));
+        let mut m = OutputModule::for_format(OutputFormat::ProRes);
+        m.output = "/out/Comp 1.mov".into();
+        m.channels = Channels::Rgba;
+        m.set_format(f);
+        assert_eq!((m.output.as_str(), m.channels), ("/out/Comp 1.mov", Channels::Rgba));
+        let json = serde_json::to_string(&m).unwrap();
+        assert_eq!(serde_json::from_str::<OutputModule>(&json).unwrap().format, f);
     }
 
     #[test]

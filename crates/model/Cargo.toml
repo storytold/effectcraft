@@ -1,6 +1,6 @@
 [package]
 name = "effectcraft-model"
-description = "3D models: glTF 2.0 (.gltf/.glb) and Wavefront OBJ/MTL import, PBR metallic-roughness materials, node hierarchy, skinning and animation, parametric primitives, and extruded/bevelled outline meshes"
+description = "3D models: glTF 2.0 (.gltf/.glb), Wavefront OBJ/MTL, STL and FBX 7.x (binary and ASCII) import, PBR metallic-roughness materials, node hierarchy, skinning and animation, parametric primitives, and extruded/bevelled outline meshes"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -15,3 +15,4 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 image = { workspace = true }
+miniz_oxide = "0.8"

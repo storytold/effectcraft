@@ -10,12 +10,18 @@
 //! edit, keeps each instance's hidden Input Key equal to a signature of what its frames are made
 //! of (the layer's source and timing, its masks and the effects above it) and drops frozen
 //! mattes made from other frames.
+//!
+//! Object Matte instances run through the same jobs (`objectMatte.propagate` / `.freeze`): the
+//! frames are [`om::job_frames`] around the reference frame, each segmented through
+//! [`om::ensure`]; Freeze stores [`om::frame_matte`]'s mattes under [`om::frozen_key`]. An edit
+//! to an instance's frames or prompt queues it for background tracking like a Roto Brush.
 
 use crate::offload::JobKind;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use effectcraft_effects::object_matte as om;
 use effectcraft_effects::roto::{self as fx, FROZEN, FrozenCache, INPUT_KEY};
 use effectcraft_effects::{Params, flatten_params};
 use effectcraft_keyframe::Value;
@@ -104,14 +110,18 @@ pub struct RotoProgress {
     pub finished: bool,
     pub cancelled: bool,
     pub error: Option<String>,
+    /// The job works on an Object Matte (else a Roto Brush & Refine Edge).
+    pub object_matte: bool,
 }
 
 impl RotoProgress {
     pub fn banner(&self) -> String {
         let pc = (100 * self.done).checked_div(self.total).unwrap_or(0);
-        match self.task {
-            Some(RotoTask::Freeze) => format!("Freezing Roto Brush & Refine Edge: {pc}%"),
-            _ => format!("Propagating Roto Brush: {pc}%"),
+        match (self.task, self.object_matte) {
+            (Some(RotoTask::Freeze), false) => format!("Freezing Roto Brush & Refine Edge: {pc}%"),
+            (Some(RotoTask::Freeze), true) => format!("Freezing Object Matte: {pc}%"),
+            (_, false) => format!("Propagating Roto Brush: {pc}%"),
+            (_, true) => format!("Tracking Object Matte: {pc}%"),
         }
     }
 }
@@ -130,8 +140,11 @@ pub struct RotoJob {
     pub layer: LayerId,
     pub effect: Uid,
     pub task: RotoTask,
-    /// The strokes the job was started with (a Freeze result is dropped when they changed).
+    /// What the job was started from: the strokes (Roto Brush) or the prompt (Object Matte); a
+    /// Freeze result is dropped when it changed.
     strokes: String,
+    /// The job works on an Object Matte.
+    pub object_matte: bool,
 }
 
 impl RotoJob {
@@ -145,6 +158,26 @@ impl RotoJob {
 
 pub(crate) fn is_roto(g: &PropGroup) -> bool {
     matches!(&g.kind, GroupKind::Effect { effect } if effect == fx::ID)
+}
+
+/// An Object Matte instance (its Input Key is kept current like Roto Brush's; it segments on
+/// demand while rendering).
+pub(crate) fn is_object_matte(g: &PropGroup) -> bool {
+    matches!(&g.kind, GroupKind::Effect { effect } if effect == effectcraft_effects::object_matte::ID)
+}
+
+/// What an Object Matte's segmentation is made from besides its frames: the prompt and tracking
+/// parameters (static values), for queueing it after edits and guarding a Freeze.
+pub(crate) fn om_prompt(g: &PropGroup) -> String {
+    let ps = params_static(g);
+    let mut keys: Vec<&String> = ps.values.keys().filter(|k| ["objectPoint", "useBox", "box", "objectTracking/"].iter().any(|p| k.starts_with(p))).collect();
+    keys.sort();
+    keys.iter().map(|k| format!("{k}={:?};", ps.values.get(*k))).collect()
+}
+
+/// The job-relevant guard of an instance: its strokes (Roto Brush) or prompt (Object Matte).
+fn guard_of(g: &PropGroup) -> String {
+    if is_object_matte(g) { om_prompt(g) } else { str_of(g, fx::STROKES) }
 }
 
 fn str_of(g: &PropGroup, m: &str) -> String {
@@ -188,8 +221,9 @@ pub fn input_key(p: &Project, comp: ItemId, layer: &Layer, uid: Uid) -> String {
     format!("{:016x}", fnv(&s))
 }
 
-/// After an edit: refresh Input Keys; frozen mattes made from other frames are dropped.
-/// Returns the instances whose segmentation changed (to propagate again).
+/// After an edit: refresh Input Keys (Roto Brush and Object Matte); frozen mattes made from
+/// other frames are dropped. Returns the instances whose segmentation changed (to propagate
+/// again): new frames, strokes (Roto Brush) or prompt (Object Matte).
 pub(crate) fn sync(before: &Project, after: &mut Project) -> Vec<(ItemId, LayerId, Uid)> {
     let mut todo = vec![];
     let mut set = vec![];
@@ -197,13 +231,13 @@ pub(crate) fn sync(before: &Project, after: &mut Project) -> Vec<(ItemId, LayerI
         let ItemKind::Comp(c) = &it.kind else { continue };
         for l in &c.layers {
             let Some(fxg) = l.effects() else { continue };
-            for g in fxg.groups().filter(|g| is_roto(g)) {
+            for g in fxg.groups().filter(|g| is_roto(g) || is_object_matte(g)) {
                 let key = input_key(after, *cid, l, g.uid);
                 let old = before.comp(*cid).and_then(|bc| bc.layer(l.id)).and_then(|ol| ol.props.find_group(g.uid));
                 if str_of(g, INPUT_KEY) != key {
                     set.push((*cid, l.id, g.uid, key));
                     todo.push((*cid, l.id, g.uid));
-                } else if old.is_none_or(|o| str_of(o, fx::STROKES) != str_of(g, fx::STROKES)) {
+                } else if old.is_none_or(|o| guard_of(o) != guard_of(g)) {
                     todo.push((*cid, l.id, g.uid));
                 }
             }
@@ -219,7 +253,11 @@ pub(crate) fn sync(before: &Project, after: &mut Project) -> Vec<(ItemId, LayerI
         }
     }
     todo.retain(|(c, l, u)| {
-        after.comp(*c).and_then(|c| c.layer(*l)).and_then(|l| l.props.find_group(*u)).is_some_and(|g| !fx::data(&params_static(g)).is_empty())
+        after
+            .comp(*c)
+            .and_then(|c| c.layer(*l))
+            .and_then(|l| l.props.find_group(*u))
+            .is_some_and(|g| is_object_matte(g) || !fx::data(&params_static(g)).is_empty())
     });
     todo
 }
@@ -274,6 +312,7 @@ struct Work {
     fps: f64,
     frames: Vec<i64>,
     task: RotoTask,
+    object_matte: bool,
 }
 
 /// Renders the effect's input frames for a worker, keeping the last few. With a browser job
@@ -390,10 +429,13 @@ async fn run_work(w: Work, shared: &RotoShared) {
         let mut s = lock(&shared.state);
         s.task = Some(w.task);
         s.total = w.frames.len() as u64;
+        s.object_matte = w.object_matte;
     }
     let cancel = || shared.cancel.load(Ordering::Relaxed);
     let chain = fx::Chain::new(&w.params, w.size, w.fps, 1.0);
-    let mut frozen = FrozenCache { key: fx::frozen_key(&w.params, w.size, w.fps), ..Default::default() };
+    let model = fx::installed_model();
+    let key = if w.object_matte { om::frozen_key(&w.params, w.size, w.fps, model.as_deref()) } else { fx::frozen_key(&w.params, w.size, w.fps) };
+    let mut frozen = FrozenCache { key, ..Default::default() };
     for (k, f) in w.frames.iter().enumerate() {
         if cancel() {
             let mut s = lock(&shared.state);
@@ -404,9 +446,21 @@ async fn run_work(w: Work, shared: &RotoShared) {
         // The frame and its neighbours (what a step reads), on the GPU.
         src.prefetch(&[*f, f - 1, f + 1]).await;
         let mut get = |g: i64| src.get(g);
-        let ok = match w.task {
-            RotoTask::Propagate => chain.ensure(*f, &mut get, &cancel).is_some(),
-            RotoTask::Freeze => match fx::frame_matte(&w.params, w.size, w.fps, *f, &mut get, &cancel) {
+        let ok = match (w.task, w.object_matte) {
+            (RotoTask::Propagate, true) => om::ensure(&w.params, w.size, w.fps, *f, model.clone(), &mut get, &cancel).is_some(),
+            (RotoTask::Freeze, true) => {
+                let img = get(*f);
+                match img.map(|img| (om::frame_matte(&w.params, w.size, w.fps, *f, 1.0, &img, model.clone(), &mut get, &cancel), img)) {
+                    Some((om::FrameMatte::Alpha(a), img)) => {
+                        frozen.size = [img.width as usize, img.height as usize];
+                        frozen.frames.insert(*f, fx::freeze_frame(&a, &[]));
+                        true
+                    }
+                    _ => false,
+                }
+            }
+            (RotoTask::Propagate, false) => chain.ensure(*f, &mut get, &cancel).is_some(),
+            (RotoTask::Freeze, false) => match fx::frame_matte(&w.params, w.size, w.fps, *f, &mut get, &cancel) {
                 Some((a, b)) => {
                     if let Some(img) = src.get(*f) {
                         frozen.size = [img.width as usize, img.height as usize];
@@ -461,12 +515,15 @@ impl Session {
         self.roto_job.as_ref().map(|j| j.progress()).or_else(|| {
             self.offloaded_roto().map(|(j, task)| {
                 let p = &j.progress;
+                let object_matte =
+                    self.project.comp(j.comp).and_then(|c| c.layer(j.layer)).and_then(|l| l.props.find_group(j.uid)).is_some_and(is_object_matte);
                 RotoProgress {
                     task: Some(task),
                     done: p.done,
                     total: p.total,
                     elapsed: p.elapsed,
                     fps: crate::offload::rate(p.done, p.elapsed),
+                    object_matte,
                     ..Default::default()
                 }
             })
@@ -478,7 +535,8 @@ impl Session {
         self.roto_job.as_ref().map(|j| (j.comp, j.layer, j.effect, j.task)).or_else(|| self.offloaded_roto().map(|(j, task)| (j.comp, j.layer, j.uid, task)))
     }
 
-    /// The segmentation chain a propagation of `effect` computes (its frames' cache keys).
+    /// The segmentation chain a propagation of Roto Brush `effect` computes (its frames' cache
+    /// keys).
     pub fn roto_chain(&self, comp: ItemId, layer: LayerId, effect: Uid) -> Option<fx::Chain> {
         let c = self.project.comp(comp)?;
         let l = c.layer(layer)?;
@@ -487,6 +545,27 @@ impl Session {
         let t = comp_time_of(c, l, d.base?);
         let params = params_at(&self.project, comp, l, g, t, self.expr.as_deref());
         Some(fx::Chain::new(&params, layer_size(&self.project, c, l), c.frame_rate.as_f64(), 1.0))
+    }
+
+    /// The cache keys of the segmentations a propagation of `effect` (Roto Brush or Object
+    /// Matte) computes, by layer frame.
+    pub fn roto_keys(&self, comp: ItemId, layer: LayerId, effect: Uid) -> Option<Vec<(i64, u64)>> {
+        if let Some(ch) = self.roto_chain(comp, layer, effect) {
+            return Some(ch.keys.into_iter().collect());
+        }
+        let c = self.project.comp(comp)?;
+        let l = c.layer(layer)?;
+        let g = l.effects()?.groups().find(|g| g.uid == effect && is_object_matte(g))?;
+        let params = self.om_params(comp, l, g)?;
+        let frames = om::job_frames(&params, frame_limits(c, l));
+        Some(om::frame_keys(&params, layer_size(&self.project, c, l), c.frame_rate.as_f64(), &frames, fx::installed_model()))
+    }
+
+    /// An Object Matte's parameters at its reference frame (what its jobs segment with).
+    fn om_params(&self, comp: ItemId, l: &Layer, g: &PropGroup) -> Option<Params> {
+        let c = self.project.comp(comp)?;
+        let t = comp_time_of(c, l, om::reference_frame(&params_static(g)));
+        Some(params_at(&self.project, comp, l, g, t, self.expr.as_deref()))
     }
 
     pub fn stop_roto(&mut self) -> bool {
@@ -522,17 +601,36 @@ impl Session {
         let l = c.layer(layer).ok_or("no layer")?;
         let fxg = l.effects().ok_or("the layer has no effects")?;
         let index = fxg.groups().position(|g| g.uid == effect).ok_or("no such effect")?;
-        let g = fxg.groups().nth(index).filter(|g| is_roto(g)).ok_or("not a Roto Brush & Refine Edge effect")?;
+        let g = fxg.groups().nth(index).filter(|g| is_roto(g) || is_object_matte(g)).ok_or("not a Roto Brush & Refine Edge or Object Matte effect")?;
+        let object_matte = is_object_matte(g);
         let size = layer_size(&self.project, c, l);
         let fps = c.frame_rate.as_f64();
-        let pstat = params_static(g);
-        let d = fx::data(&pstat);
-        if d.is_empty() {
-            return Err("draw a foreground stroke with the Roto Brush tool first".into());
-        }
-        let t = comp_time_of(c, l, d.base.unwrap_or(0));
-        let params = params_at(&self.project, comp, l, g, t, self.expr.as_deref());
-        let frames = job_frames(&d, if task == RotoTask::Freeze { Direction::Both } else { dir });
+        let (params, frames) = if object_matte {
+            let params = self.om_params(comp, l, g).ok_or("no composition")?;
+            let base = om::reference_frame(&params);
+            if om::roto_data(&params, size, base, fx::installed_model().is_some()).is_none() {
+                return Err("set the object first: click it with the Object Matte tool (its point is off the layer or outside its box)".into());
+            }
+            let all = om::job_frames(&params, frame_limits(c, l));
+            if all.is_empty() {
+                return Err(format!("the reference frame {base} is outside the layer"));
+            }
+            // Forward / backward from the reference frame, as for a Roto Brush.
+            let frames = all
+                .into_iter()
+                .filter(|f| task == RotoTask::Freeze || dir == Direction::Both || *f == base || (*f > base) == (dir == Direction::Forward))
+                .collect();
+            (params, frames)
+        } else {
+            let pstat = params_static(g);
+            let d = fx::data(&pstat);
+            if d.is_empty() {
+                return Err("draw a foreground stroke with the Roto Brush tool first".into());
+            }
+            let t = comp_time_of(c, l, d.base.unwrap_or(0));
+            let params = params_at(&self.project, comp, l, g, t, self.expr.as_deref());
+            (params, job_frames(&d, if task == RotoTask::Freeze { Direction::Both } else { dir }))
+        };
         let n = frames.len();
         let work = Work {
             project: self.project.clone(),
@@ -547,8 +645,9 @@ impl Session {
             fps,
             frames,
             task,
+            object_matte,
         };
-        let strokes = str_of(g, fx::STROKES);
+        let strokes = guard_of(g);
         if !wait && self.offloads() {
             drop(work);
             self.offload_analysis(match task {
@@ -559,6 +658,13 @@ impl Session {
         }
         let wait = wait || cfg!(target_arch = "wasm32");
         let shared = Arc::new(RotoShared::default());
+        {
+            // Known before the worker starts (the progress shows at once).
+            let mut st = lock(&shared.state);
+            st.task = Some(task);
+            st.total = n as u64;
+            st.object_matte = object_matte;
+        }
         let thread = if wait {
             crate::offload::run_or_queue({
                 let sh = shared.clone();
@@ -574,7 +680,7 @@ impl Session {
                     .map_err(|e| e.to_string())?,
             )
         };
-        self.roto_job = Some(RotoJob { shared, thread, comp, layer, effect, task, strokes });
+        self.roto_job = Some(RotoJob { shared, thread, comp, layer, effect, task, strokes, object_matte });
         self.events.push(Event::ProjectChanged { revision: self.revision });
         self.poll_roto_job();
         Ok(n)
@@ -591,40 +697,43 @@ impl Session {
             let _ = t.join();
         }
         let st = job.progress();
+        let name = if job.object_matte { "Object Matte" } else { "Roto Brush" };
         if let Some(e) = &st.error {
-            self.events.push(Event::Toast { message: format!("Roto Brush: {e}"), error: true });
+            self.events.push(Event::Toast { message: format!("{name}: {e}"), error: true });
             self.bump();
             return true;
         }
         if st.cancelled {
-            self.events.push(Event::Toast { message: "Roto Brush: stopped".into(), error: false });
+            self.events.push(Event::Toast { message: format!("{name}: stopped"), error: false });
             self.bump();
             return true;
         }
         match job.task {
             RotoTask::Propagate => {
-                self.events.push(Event::Toast { message: format!("Roto Brush: propagated {} frame(s) in {:.1} s", st.done, st.elapsed), error: false });
+                let verb = if job.object_matte { "tracked" } else { "propagated" };
+                self.events.push(Event::Toast { message: format!("{name}: {verb} {} frame(s) in {:.1} s", st.done, st.elapsed), error: false });
                 // Rendered frames depend on the cache: redraw.
                 self.bump();
             }
             RotoTask::Freeze => {
                 let Some(fc) = lock(&job.shared.frozen).take() else { return true };
                 let (cid, lid, uid, strokes) = (job.comp, job.layer, job.effect, job.strokes.clone());
+                let what = if job.object_matte { "prompt" } else { "strokes" };
                 let r = self.edit("Freeze", None, |p, _| {
                     let g = p
                         .comp_mut(cid)
                         .and_then(|c| c.layer_mut(lid))
                         .and_then(|l| l.props.find_group_mut(uid))
-                        .ok_or_else(|| crate::EngineError::Other("the Roto Brush effect was removed".into()))?;
-                    if str_of(g, fx::STROKES) != strokes {
-                        return Err(crate::EngineError::Other("the strokes changed while freezing".into()));
+                        .ok_or_else(|| crate::EngineError::Other(format!("the {name} effect was removed")))?;
+                    if guard_of(g) != strokes {
+                        return Err(crate::EngineError::Other(format!("the {what} changed while freezing")));
                     }
                     set_str(g, FROZEN, fc.to_json());
                     Ok(())
                 });
                 let msg = match r {
-                    Ok(()) => format!("Roto Brush: froze {} frame(s) in {:.1} s", fc.frames.len(), st.elapsed),
-                    Err(e) => format!("Roto Brush: {e}"),
+                    Ok(()) => format!("{name}: froze {} frame(s) in {:.1} s", fc.frames.len(), st.elapsed),
+                    Err(e) => format!("{name}: {e}"),
                 };
                 self.events.push(Event::Toast { message: msg, error: false });
             }
@@ -654,6 +763,12 @@ impl Session {
         let Some(c) = self.project.comp(comp) else { return out };
         let Some(l) = c.layer(layer) else { return out };
         let Some(g) = l.props.find_group(effect) else { return out };
+        if is_object_matte(g) {
+            for (f, k) in self.roto_keys(comp, layer, effect).unwrap_or_default() {
+                out.insert(f, fx::cached(k, 1.0).is_some());
+            }
+            return out;
+        }
         let ps = params_static(g);
         let ch = fx::Chain::new(&ps, layer_size(&self.project, c, l), c.frame_rate.as_f64(), 1.0);
         for f in ch.keys.keys() {

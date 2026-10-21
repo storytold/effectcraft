@@ -448,6 +448,13 @@ fn cylinder(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
     p.u[0][0] = pr.e("render");
     p.f[0] = f4([c.0, c.1, r, h]);
     p.f[2][0] = pr.f("rotation").to_radians() as f32;
+    let (rx, ry, rz) = (pr.f("rotationX"), pr.f("rotationY"), pr.f("rotationZ"));
+    p.u[0][1] = (rx != 0.0 || ry != 0.0 || rz != 0.0) as u32;
+    let m = rot_xyz(rx, ry, rz);
+    // Matrix rows, as for CC Sphere; the kernel uses Rᵀ for mapping.
+    for (i, row) in m.iter().enumerate() {
+        p.f[7 + i] = f4([row[0], row[1], row[2], 0.0]);
+    }
     run(e, "ftr_cylinder", &p, b, None, None)
 }
 

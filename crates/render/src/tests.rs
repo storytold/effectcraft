@@ -135,6 +135,58 @@ fn track_matte_alpha() {
     assert!(img.get(150, 50)[3] < 0.01);
 }
 
+/// Every matte kind with an opaque white 50×50 matte at the left of a 200×100 comp: the plain
+/// kinds keep the fill only inside the matte, the inverted kinds only outside it (#864).
+#[test]
+fn track_matte_kinds_keep_and_invert() {
+    for (kind, inside) in [(MatteKind::Alpha, true), (MatteKind::AlphaInverted, false), (MatteKind::Luma, true), (MatteKind::LumaInverted, false)] {
+        let (mut p, cid, comp) = setup();
+        let mut matte = solid(&mut p, &comp, [1.0, 1.0, 1.0], 50, 50);
+        matte.props.prop_mut("transform/position").unwrap().value = Value::Vec3([50.0, 50.0, 0.0]);
+        matte.switches.video = false;
+        let mut fill = solid(&mut p, &comp, [0.0, 0.0, 1.0], 200, 100);
+        fill.track_matte = Some(TrackMatte { layer: matte.id, kind });
+        let c = p.comp_mut(cid).unwrap();
+        c.layers.push(matte);
+        c.layers.push(fill);
+        let img = render_frame(&p, cid, Tick::ZERO, 1.0);
+        let (a_in, a_out) = (img.get(50, 50)[3], img.get(150, 50)[3]);
+        if inside {
+            assert!(a_in > 0.99 && a_out < 0.01, "{kind:?}: {a_in} inside, {a_out} outside");
+            assert!(img.get(50, 50)[2] > 0.99, "{kind:?} keeps the fill's colour");
+        } else {
+            assert!(a_in < 0.01 && a_out > 0.99, "{kind:?}: {a_in} inside, {a_out} outside");
+            assert!(img.get(150, 50)[2] > 0.99, "{kind:?} keeps the fill's colour");
+        }
+    }
+}
+
+/// An adjustment layer with a track matte applies its effects only where the matte allows: an
+/// Invert over a 0.25 grey with an opaque white 50×50 matte at the left of the comp (#1201).
+#[test]
+fn track_matte_limits_an_adjustment_layer() {
+    for (kind, inside) in [(MatteKind::Alpha, true), (MatteKind::AlphaInverted, false), (MatteKind::Luma, true), (MatteKind::LumaInverted, false)] {
+        let (mut p, cid, comp) = setup();
+        let mut matte = solid(&mut p, &comp, [1.0, 1.0, 1.0], 50, 50);
+        matte.props.prop_mut("transform/position").unwrap().value = Value::Vec3([50.0, 50.0, 0.0]);
+        matte.switches.video = false;
+        let mut adj = solid(&mut p, &comp, [1.0, 1.0, 1.0], 200, 100);
+        adj.switches.adjustment = true;
+        add_effect_200(&mut p, &mut adj, "ec.channel.invert", &[]);
+        adj.track_matte = Some(TrackMatte { layer: matte.id, kind });
+        let bg = solid(&mut p, &comp, [0.25, 0.25, 0.25], 200, 100);
+        let c = p.comp_mut(cid).unwrap();
+        c.layers.push(matte);
+        c.layers.push(adj);
+        c.layers.push(bg);
+        let img = render_frame(&p, cid, Tick::ZERO, 1.0);
+        let (g_in, g_out) = (img.get(50, 50)[0], img.get(150, 50)[0]);
+        let (want_in, want_out) = if inside { (0.75, 0.25) } else { (0.25, 0.75) };
+        assert!((g_in - want_in).abs() < 1e-4 && (g_out - want_out).abs() < 1e-4, "{kind:?}: {g_in} inside, {g_out} outside");
+        assert_eq!(img.get(150, 50)[3], 1.0, "{kind:?} keeps the comp opaque");
+    }
+}
+
 #[test]
 fn shape_layer_draws_fill_and_stroke() {
     let (mut p, cid, comp) = setup();
@@ -266,6 +318,23 @@ fn render_cached(p: &Project, cid: ItemId, t: Tick, cache: Option<&crate::LayerC
     let mut r = crate::Renderer::new(p, &crate::NoFootage, crate::RenderOpts::default());
     r.cache = cache;
     r.comp_frame(cid, t)
+}
+
+/// #329: a render whose footage reads were called off keeps nothing in the layer cache: a layer
+/// made from a frame that came back empty (an effect's layer parameter) would be reused by the
+/// next render of that time.
+#[test]
+fn a_called_off_render_keeps_nothing_in_the_layer_cache() {
+    let (p, cid) = cache_scene();
+    let t = Tick::from_seconds_f64(0.5);
+    let cache = crate::LayerCache::default();
+    let off = crate::CancellableFootage { inner: &crate::NoFootage, cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)) };
+    let mut r = crate::Renderer::new(&p, &off, crate::RenderOpts::default());
+    r.cache = Some(&cache);
+    r.comp_frame(cid, t);
+    assert_eq!(cache.stats().entries, 0, "a called-off render kept layers");
+    render_cached(&p, cid, t, Some(&cache));
+    assert!(cache.stats().entries > 0, "a render that runs to the end keeps its layers");
 }
 
 /// [`add_effect`] for a 200×100 layer.
@@ -597,6 +666,59 @@ fn default_effect_points_sit_at_the_centre_of_a_shape_layer() {
     }
 }
 
+/// #659: a tiling effect on a text layer tiles across the layer's whole region. The glyphs
+/// were cut off at their own bounding box: the effect computed over the comp-sized layer rect
+/// but wrote into the painted (glyph-bounds) buffer alone. Tiling shrinks each copy, so the
+/// probe is the x-span of the painted pixels, not their count.
+#[test]
+fn effects_on_text_reach_past_the_text_bounds() {
+    let (mut p, cid, comp) = setup();
+    let mut l = build::layer(&mut p, &comp, "Text", LayerSource::Text, (200, 100), None);
+    l.props.prop_mut("text/sourceText").unwrap().value = Value::Text(Box::new(TextDoc { text: "HI".into(), size: 24.0, ..Default::default() }));
+    l.props.prop_mut("transform/position").unwrap().value = Value::Vec3([50.0, 60.0, 0.0]);
+    p.comp_mut(cid).unwrap().layers.push(l.clone());
+    let plain = render_frame(&p, cid, Tick::ZERO, 1.0);
+    let painted = plain.data.iter().filter(|px| px[3] > 0.5).count();
+    add_effect_200(&mut p, &mut l, "ec.distort.cctiler", &[("scale", Value::Scalar(25.0))]);
+    p.comp_mut(cid).unwrap().layers = vec![l];
+    let tiled = render_frame(&p, cid, Tick::ZERO, 1.0);
+    let (mut lo, mut hi) = (u32::MAX, 0u32);
+    for y in 0..100 {
+        for x in 0..200 {
+            if tiled.get(x as i64, y as i64)[3] > 0.5 {
+                lo = lo.min(x);
+                hi = hi.max(x);
+            }
+        }
+    }
+    assert!(
+        painted > 50 && hi.saturating_sub(lo) > 100,
+        "CC Tiler tiles the glyphs across the layer region, not just its text bounds: {painted} painted, x-span {lo}..{hi}"
+    );
+}
+
+/// #658: CC Smear drags text glyphs beyond the text layer's own bounds. Pixels smeared past
+/// the painted rectangle used to fall off its edge, so the liquid trail never appeared.
+#[test]
+fn cc_smear_trails_text_past_its_bounds() {
+    let (mut p, cid, comp) = setup();
+    let mut l = build::layer(&mut p, &comp, "Text", LayerSource::Text, (200, 100), None);
+    l.props.prop_mut("text/sourceText").unwrap().value = Value::Text(Box::new(TextDoc { text: "HI".into(), size: 24.0, ..Default::default() }));
+    l.props.prop_mut("transform/position").unwrap().value = Value::Vec3([60.0, 60.0, 0.0]);
+    p.comp_mut(cid).unwrap().layers.push(l.clone());
+    let right = |img: &effectcraft_raster::Image| (0..100).map(|y| (0..200).filter(|x| img.get(*x, y)[3] > 0.5).max().unwrap_or(0)).max().unwrap_or(0);
+    let plain = right(&render_frame(&p, cid, Tick::ZERO, 1.0));
+    add_effect_200(
+        &mut p,
+        &mut l,
+        "ec.distort.ccsmear",
+        &[("from", Value::Vec2([110.0, 45.0])), ("to", Value::Vec2([185.0, 45.0])), ("reach", Value::Scalar(100.0)), ("radius", Value::Scalar(40.0))],
+    );
+    p.comp_mut(cid).unwrap().layers = vec![l];
+    let smeared = right(&render_frame(&p, cid, Tick::ZERO, 1.0));
+    assert!(plain > 40 && smeared > plain + 25, "CC Smear trails the glyphs past the text bounds: right edge {plain} → {smeared}");
+}
+
 /// A layer parameter pointing at a shape layer sees all of it (in its effect space), and the
 /// effect's own masks are in effect space too: Set Matte with a centred shape layer as the
 /// matte keeps the centre of a full-comp solid (#227).
@@ -830,4 +952,61 @@ fn shape_content_bounds_are_the_visual_edges() {
         let b = crate::content_bounds(&ctx, &l).unwrap();
         assert!(b.iter().zip([-half, -half, half, half]).all(|(a, e)| (a - e).abs() < 1e-6), "{stroke:?}: {b:?}");
     }
+}
+
+/// Solo is not time-dependent (as in After Effects): while any layer is soloed, the others stay
+/// excluded even when the playhead is outside the soloed layer's in-out range.
+#[test]
+fn solo_excludes_other_layers_outside_the_soloed_layers_range() {
+    let (mut p, cid, comp) = setup();
+    let a = solid(&mut p, &comp, [1.0, 0.0, 0.0], 200, 100);
+    let mut b = solid(&mut p, &comp, [0.0, 0.0, 1.0], 200, 100);
+    b.in_point = Tick::from_seconds_f64(1.0);
+    b.switches.solo = true;
+    let c = p.comp_mut(cid).unwrap();
+    c.layers.push(b);
+    c.layers.push(a);
+    let first = render_frame(&p, cid, Tick::from_seconds_f64(0.5), 1.0);
+    assert_eq!(first.get(100, 50), [0.0, 0.0, 0.0, 0.0], "neither A nor B before B's in point");
+    let second = render_frame(&p, cid, Tick::from_seconds_f64(1.5), 1.0);
+    assert_eq!(second.get(100, 50), [0.0, 0.0, 1.0, 1.0], "only B inside its range");
+}
+
+/// #1252: a layer blended with a CC Particle World layer, under a camera panned by `pan` px.
+fn scene_reader_dependency(pan: f64) -> (Project, ItemId) {
+    let (mut p, cid, comp) = setup();
+    let mut source = solid(&mut p, &comp, [0.0, 0.0, 0.0], 200, 100);
+    let vals = [("birthRate", Value::Scalar(2.0)), ("particle/particleType", Value::Enum(2)), ("particle/birthSize", Value::Scalar(0.1))];
+    add_effect(&mut p, &mut source, "ec.sim.ccparticleworld", [200.0, 100.0], &vals);
+    source.switches.video = false;
+    let mut owner = solid(&mut p, &comp, [0.0, 0.0, 0.0], 200, 100);
+    add_effect_200(&mut p, &mut owner, "ec.channel.blend", &[("blendWithLayer", Value::Layer(Some(source.id.0))), ("blendWithOriginal", Value::Scalar(0.0))]);
+    let mut cam = build::layer(&mut p, &comp, "Camera", LayerSource::Camera, (200, 100), None);
+    for path in ["transform/position", "transform/poi"] {
+        let pr = cam.props.prop_mut(path).unwrap();
+        let Value::Vec3(v) = pr.value else { panic!("{path}: {:?}", pr.value) };
+        pr.value = Value::Vec3([v[0] + pan, v[1], v[2]]);
+    }
+    p.comp_mut(cid).unwrap().layers = vec![cam, owner, source];
+    (p, cid)
+}
+
+/// #1252: the owner's cache key covers the comp camera and lights that a layer it selects reads,
+/// though the owner itself runs no scene-reading effect.
+#[test]
+fn a_selected_layer_reading_the_comp_scene_invalidates_its_owner() {
+    let t = Tick::from_seconds_f64(1.0);
+    let (p, cid) = scene_reader_dependency(0.0);
+    let (q, _) = scene_reader_dependency(40.0);
+    let key = |p: &Project| {
+        let c = p.comp(cid).unwrap();
+        crate::cache::layer_key(&crate::EvalCtx::new(p, cid, c, t), &c.layers[1], 1.0, false, false).unwrap()
+    };
+    assert_ne!(key(&p), key(&q), "moving the camera changes the owner's key");
+    let cache = crate::LayerCache::default();
+    let here = render_cached(&p, cid, t, Some(&cache));
+    let panned = render_cached(&q, cid, t, Some(&cache));
+    assert_same(&panned, &render_cached(&q, cid, t, None), "cached render after the camera moved");
+    let (a, b) = (particles_x(&here), particles_x(&panned));
+    assert!(b < a - 20.0, "the blended particles follow the camera: {a} -> {b}");
 }

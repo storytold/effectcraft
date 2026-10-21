@@ -37,8 +37,12 @@ pub enum Req {
     LayerLookup { comp: u64, key: Key },
     /// `[name, index, inPoint, outPoint, startTime, width, height, parentId|null, hasVideo, is3D, source, enabled]`.
     LayerInfo { comp: u64, layer: u64 },
-    /// `[path, isGroup, name, matchName, numChildren]` or null.
+    /// `[path, isGroup, name, matchName, numChildren, propertyIndex]` or null.
     Child { comp: u64, layer: u64, group: String, key: Key },
+    /// `propertyGroup(up)` of the property or group at `path`: the group `up` levels above it as
+    /// `[path, isGroup, name, matchName, numChildren, propertyIndex]`, `"layer"` when that is the
+    /// layer itself, or null above the layer.
+    Ancestor { comp: u64, layer: u64, path: String, up: i64 },
     /// `[name, uid, kind, dims, keyTimes, keyValues, hasExpression, propertyIndex, matchName]`.
     PropInfo { comp: u64, layer: u64, path: String },
     /// Value at comp time `t`; `pre` = keyframes only (no expression).
@@ -63,6 +67,10 @@ pub enum Req {
     Sample { comp: u64, layer: u64, x: Secs, y: Secs, rx: Secs, ry: Secs, post: bool, t: Secs },
     /// `thisProject`: `[bitsPerChannel, linearBlending, workingSpace]`.
     Project,
+    /// A layer's source item (AE's `Layer.source`): `[kind, id, name, width, height, duration,
+    /// frameDuration, pixelAspect]`, kind `"comp"` (id = the precomp's composition) or `"footage"`
+    /// (footage, solids and models), or null for layers without an item (text, shape, null…).
+    SourceInfo { comp: u64, layer: u64 },
 }
 
 /// Parse CSV/TSV text (RFC 4180 quoting) into rows of cells.
@@ -252,6 +260,18 @@ fn alias(key: &str) -> &str {
     }
 }
 
+/// A child node as expression data (see [`Req::Child`]); `index` is 1-based among its siblings.
+fn node_resp(path: String, n: &Node, index: usize) -> Resp {
+    Resp::List(vec![
+        Resp::Str(path),
+        Resp::Bool(n.as_group().is_some()),
+        Resp::Str(n.name().into()),
+        Resp::Str(n.match_id().into()),
+        Resp::Num(n.as_group().map_or(0, |g| g.children.len()) as f64),
+        Resp::Num(index as f64),
+    ])
+}
+
 fn find_child<'g>(g: &'g PropGroup, key: &Key) -> Option<&'g Node> {
     match key {
         Key::Index(i) => usize::try_from(*i).ok().filter(|i| *i >= 1).and_then(|i| g.children.get(i - 1)),
@@ -349,15 +369,33 @@ impl<'a> Resolver<'a> {
                 let l = self.layer(*comp, *layer)?;
                 let g = if group.is_empty() { &l.props } else { l.props.group(group)? };
                 let n = find_child(g, key)?;
+                let index = g.children.iter().position(|c| c.uid() == n.uid()).unwrap_or(0) + 1;
                 let path = if group.is_empty() { format!("@{}", n.uid()) } else { format!("{group}/@{}", n.uid()) };
-                let count = n.as_group().map_or(0, |g| g.children.len());
-                Resp::List(vec![
-                    Resp::Str(path),
-                    Resp::Bool(n.as_group().is_some()),
-                    Resp::Str(n.name().into()),
-                    Resp::Str(n.match_id().into()),
-                    Resp::Num(count as f64),
-                ])
+                node_resp(path, n, index)
+            }
+            Req::Ancestor { comp, layer, path, up } => {
+                let l = self.layer(*comp, *layer)?;
+                // The node's full `@uid/@uid/…` path from the layer: its ancestors are its prefixes.
+                let uid = match self.prop(*comp, *layer, path) {
+                    Some((_, p)) => p.uid,
+                    None => l.props.node(path)?.uid(),
+                };
+                let full = l.props.path_of(uid)?;
+                let segs: Vec<&str> = full.split('/').collect();
+                let up = usize::try_from(*up).ok().filter(|u| *u >= 1 && *u <= segs.len())?;
+                if up == segs.len() {
+                    return Some(Resp::Str("layer".into()));
+                }
+                let keep = segs.len() - up;
+                let group_path = segs.get(..keep)?.join("/");
+                let parent = match keep {
+                    1 => &l.props,
+                    _ => l.props.group(&segs.get(..keep - 1)?.join("/"))?,
+                };
+                let uid = segs.get(keep - 1)?.strip_prefix('@')?.parse::<u64>().ok()?;
+                let index = parent.children.iter().position(|c| c.uid() == uid)?;
+                let n = parent.children.get(index)?;
+                node_resp(group_path, n, index + 1)
             }
             Req::PropInfo { comp, layer, path } => {
                 let (l, p) = self.prop(*comp, *layer, path)?;
@@ -457,6 +495,28 @@ impl<'a> Resolver<'a> {
                 Resp::Bool(project.settings.blend_linear || project.settings.linearize),
                 Resp::Str(project.settings.working_space.map(|w| format!("{w:?}")).unwrap_or_default()),
             ]),
+            Req::SourceInfo { comp, layer } => {
+                let c = self.comp(*comp)?;
+                let l = self.layer(*comp, *layer)?;
+                let it = project.item(l.source.item()?)?;
+                let (kind, aspect, frame, duration) = match &it.kind {
+                    ItemKind::Comp(nc) => ("comp", nc.pixel_aspect, nc.frame_duration().seconds(), nc.duration.seconds()),
+                    ItemKind::Footage(f) => ("footage", f.pixel_aspect, f.frame_rate.frame_duration().seconds(), f.duration.seconds()),
+                    ItemKind::Solid(s) => ("footage", s.pixel_aspect, c.frame_duration().seconds(), c.duration.seconds()),
+                    ItemKind::Folder => return None,
+                };
+                let (w, h) = it.dimensions().unwrap_or((0, 0));
+                Resp::List(vec![
+                    Resp::Str(kind.into()),
+                    Resp::Num(it.id.0 as f64),
+                    Resp::Str(it.name.clone()),
+                    Resp::Num(w as f64),
+                    Resp::Num(h as f64),
+                    Resp::Num(duration),
+                    Resp::Num(frame),
+                    Resp::Num(aspect),
+                ])
+            }
             Req::Sample { comp, layer, x, y, rx, ry, post, t } => {
                 let l = self.layer(*comp, *layer)?;
                 let f = |b: &Secs| f64::from_bits(*b);

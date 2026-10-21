@@ -666,7 +666,24 @@ fn ftr_faces(mode: u32, front: vec4<f32>, back: vec4<f32>) -> vec4<f32> {
     return ftr_over(front, back);
 }
 
-// Cylinder: u[0].x = render; f[0] = (cx, cy, radius, layer height); f[2].x = rotation.
+// Cylinder: u[0].x = render, u[0].y = axis rotation enabled;
+// f[0] = (cx, cy, radius, layer height); f[2].x = legacy texture spin;
+// f[7..10] = rows of the local-to-view rotation matrix.
+fn ftr_cylinder_face(d: vec2<f32>, z: f32, back: bool) -> vec4<f32> {
+    let m0 = P.f[7].xyz;
+    let m1 = P.f[8].xyz;
+    let m2 = P.f[9].xyz;
+    let q = vec3<f32>(d, z);
+    let local = vec3<f32>(m0.x * q.x + m1.x * q.y + m2.x * q.z,
+                          m0.y * q.x + m1.y * q.y + m2.y * q.z,
+                          m0.z * q.x + m1.z * q.y + m2.z * q.z);
+    let u = (atan2(local.x, local.z) + P.f[2].x) / 6.283185307179586 + 0.5;
+    let v = local.y / P.f[0].w + 0.5;
+    let flip = select(1.0, -1.0, back);
+    let n = vec3<f32>(local.x / P.f[0].z * flip, 0.0, local.z / P.f[0].z * flip);
+    return ftr_shade(ftr_texel(u, v), vec3<f32>(dot(m0, n), dot(m1, n), dot(m2, n)));
+}
+
 @compute @workgroup_size(16, 16)
 fn ftr_cylinder(@builtin(global_invocation_id) gid: vec3<u32>) {
     let p = vec2<i32>(gid.xy);
@@ -674,18 +691,35 @@ fn ftr_cylinder(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let d = ftr_centre(p) - P.f[0].xy;
-    let v = d.y / P.f[0].w + 0.5;
-    let s = d.x / P.f[0].z;
-    if (abs(s) >= 1.0) {
+    if (P.u[0].y == 0u) {
+        // Original path is unchanged for old projects and default parameters.
+        let v = d.y / P.f[0].w + 0.5;
+        let s = d.x / P.f[0].z;
+        if (abs(s) >= 1.0) {
+            textureStore(out, p, vec4<f32>(0.0));
+            return;
+        }
+        let tau = 6.283185307179586;
+        let th = asin_p(s);
+        let cz = cos(th);
+        let spin = P.f[2].x;
+        let front = ftr_shade(ftr_texel((th + spin) / tau + 0.5, v), vec3<f32>(s, 0.0, cz));
+        let back = ftr_shade(ftr_texel((3.141592653589793 - th + spin) / tau + 0.5, v), vec3<f32>(-s, 0.0, cz));
+        textureStore(out, p, ftr_faces(P.u[0].x, front, back));
+        return;
+    }
+    let axis = vec3<f32>(P.f[7].y, P.f[8].y, P.f[9].y);
+    let a = 1.0 - axis.z * axis.z;
+    let da = dot(d, axis.xy);
+    let bq = -da * axis.z;
+    let disc = bq * bq - a * (dot(d, d) - da * da - P.f[0].z * P.f[0].z);
+    if (a <= 1e-10 || !(disc > 0.0)) {
         textureStore(out, p, vec4<f32>(0.0));
         return;
     }
-    let tau = 6.283185307179586;
-    let th = asin_p(s);
-    let cz = cos(th);
-    let spin = P.f[2].x;
-    let front = ftr_shade(ftr_texel((th + spin) / tau + 0.5, v), vec3<f32>(s, 0.0, cz));
-    let back = ftr_shade(ftr_texel((3.141592653589793 - th + spin) / tau + 0.5, v), vec3<f32>(-s, 0.0, cz));
+    let root = sqrt(disc);
+    let front = ftr_cylinder_face(d, (-bq + root) / a, false);
+    let back = ftr_cylinder_face(d, (-bq - root) / a, true);
     textureStore(out, p, ftr_faces(P.u[0].x, front, back));
 }
 

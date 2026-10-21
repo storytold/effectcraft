@@ -46,6 +46,13 @@ fn summary(s: &mut Session, _: &Value) -> Result<Value> {
                 o["layers"] = json!(c.layers.len());
                 o["frameRate"] = json!(c.frame_rate.as_f64());
             }
+            // Footage that shows no picture although its file is there (a codec or profile the
+            // decoders lack): why, so an agent can tell the user.
+            if let ItemKind::Footage(f) = &i.kind
+                && let Some(why) = s.footage.problem(f)
+            {
+                o["problem"] = json!(why);
+            }
             o
         })
         .collect();
@@ -80,6 +87,7 @@ fn comp_info(s: &mut Session, p: &Value) -> Result<Value> {
         "id": cid.0, "name": name, "width": c.width, "height": c.height, "frameRate": c.frame_rate.as_f64(), "duration": c.duration.seconds(),
         "workArea": [c.work_area.0.seconds(), c.work_area.1.seconds()], "background": c.background,
         "preserveFrameRate": c.preserve_frame_rate, "preserveResolution": c.preserve_resolution,
+        "resolution": c.resolution.label(), "resolutionFactor": c.resolution.factor(),
         "layers": c.layers.iter().enumerate().map(|(i, l)| layer_json(l, i + 1)).collect::<Vec<_>>(),
     }))
 }
@@ -191,7 +199,7 @@ fn capabilities(s: &mut Session, _: &Value) -> Result<Value> {
 }
 
 /// The headline of `docs/target-app-parity.md` (kept in sync by hand at each re-measure).
-const PARITY: &str = "≈91% feature breadth and ≈45% ready for real work (estimated parity with After Effects 2026 26.5, stage alpha); all After Effects effects present (306 registered)";
+const PARITY: &str = "≈91% feature breadth and ≈45% ready for real work (estimated parity with After Effects 2026 26.5, stage alpha); all After Effects effects present (307 registered)";
 
 fn state(s: &mut Session, _: &Value) -> Result<Value> {
     Ok(serde_json::to_value(&s.state).unwrap_or_default())

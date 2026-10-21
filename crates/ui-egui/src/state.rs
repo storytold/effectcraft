@@ -35,6 +35,8 @@ pub enum Tool {
     Eraser,
     RotoBrush,
     RefineEdge,
+    /// Object Matte: click an object (or drag a box around it) in the Composition viewer.
+    ObjectMatte,
     Puppet,
     PuppetStarch,
     PuppetBend,
@@ -59,10 +61,10 @@ impl Tool {
         &[Tool::Brush],
         &[Tool::Clone],
         &[Tool::Eraser],
-        &[Tool::RotoBrush, Tool::RefineEdge],
+        &[Tool::RotoBrush, Tool::RefineEdge, Tool::ObjectMatte],
         &[Tool::Puppet, Tool::PuppetStarch, Tool::PuppetBend, Tool::PuppetAdvanced, Tool::PuppetOverlap],
     ];
-    pub const ALL: [Tool; 30] = [
+    pub const ALL: [Tool; 31] = [
         Tool::Selection,
         Tool::Hand,
         Tool::Zoom,
@@ -88,6 +90,7 @@ impl Tool {
         Tool::Eraser,
         Tool::RotoBrush,
         Tool::RefineEdge,
+        Tool::ObjectMatte,
         Tool::Puppet,
         Tool::PuppetStarch,
         Tool::PuppetBend,
@@ -121,6 +124,7 @@ impl Tool {
             Tool::Eraser => "Eraser Tool",
             Tool::RotoBrush => "Roto Brush Tool",
             Tool::RefineEdge => "Refine Edge Tool",
+            Tool::ObjectMatte => "Object Matte Tool",
             Tool::Puppet => "Puppet Position Pin Tool",
             Tool::PuppetStarch => "Puppet Starch Pin Tool",
             Tool::PuppetBend => "Puppet Bend Pin Tool",
@@ -142,7 +146,7 @@ impl Tool {
             Tool::Pen | Tool::PenAdd | Tool::PenDelete | Tool::PenConvert | Tool::MaskFeather => Some("G"),
             Tool::Type | Tool::TypeVertical => Some("Cmd+T"),
             Tool::Brush | Tool::Clone | Tool::Eraser => Some("Cmd+B"),
-            Tool::RotoBrush | Tool::RefineEdge => Some("Alt+W"),
+            Tool::RotoBrush | Tool::RefineEdge | Tool::ObjectMatte => Some("Alt+W"),
             Tool::Puppet | Tool::PuppetStarch | Tool::PuppetBend | Tool::PuppetAdvanced | Tool::PuppetOverlap => Some("Cmd+P"),
         }
     }
@@ -173,6 +177,7 @@ impl Tool {
             Tool::Eraser => Icon::Eraser,
             Tool::RotoBrush => Icon::RotoBrush,
             Tool::RefineEdge => Icon::RefineEdge,
+            Tool::ObjectMatte => Icon::ObjectMatte,
             Tool::Puppet => Icon::Puppet,
             Tool::PuppetStarch => Icon::PuppetStarch,
             Tool::PuppetBend => Icon::PuppetBend,
@@ -224,58 +229,19 @@ impl Tool {
     }
 }
 
-/// Viewer resolution (Auto follows the magnification).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Resolution {
-    #[default]
-    Auto,
-    Full,
-    Half,
-    Third,
-    Quarter,
-    /// View ▸ Resolution ▸ Custom: render every n-th pixel (2..=40).
-    Custom(u8),
-}
-
-impl Resolution {
-    pub const ALL: [Resolution; 5] = [Resolution::Auto, Resolution::Full, Resolution::Half, Resolution::Third, Resolution::Quarter];
-    pub fn label(self) -> &'static str {
-        match self {
-            Resolution::Auto => "Auto",
-            Resolution::Full => "Full",
-            Resolution::Half => "Half",
-            Resolution::Third => "Third",
-            Resolution::Quarter => "Quarter",
-            Resolution::Custom(_) => "Custom",
-        }
-    }
-    /// Render scale for a viewer magnification (and display pixel density).
-    pub fn scale(self, zoom: f32, ppp: f32) -> f64 {
-        match self {
-            // As in After Effects, Auto renders the pixels the magnification needs: the coarsest
-            // whole factor that still gives every screen pixel a rendered one (Full above 50 %,
-            // Half down to 33.3 %, Third down to 25 %, Quarter below), never fewer (#417).
-            Resolution::Auto => {
-                let n = (1.0 / (zoom * ppp) as f64 + 1e-3).floor();
-                if n >= 1.0 { 1.0 / n.min(4.0) } else { 1.0 }
-            }
-            Resolution::Full => 1.0,
-            Resolution::Half => 0.5,
-            Resolution::Third => 1.0 / 3.0,
-            Resolution::Quarter => 0.25,
-            Resolution::Custom(n) => 1.0 / n.max(1) as f64,
-        }
-    }
-}
+/// The viewer's Resolution: each composition keeps its own in the project
+/// ([`effectcraft_engine::project::Comp::resolution`], `EffectcraftApp::viewer_res`).
+pub use effectcraft_engine::project::Resolution;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ViewerState {
     /// Magnification (1 = 100%); None = fit.
     pub zoom: Option<f32>,
+    /// Fit up to 100%: while fitting (`zoom` is None), the comp is never magnified past 100%.
+    pub fit_up_to_100: bool,
     /// Pan offset in points from the centred position.
     pub pan: [f32; 2],
-    pub res: Resolution,
     pub transparency_grid: bool,
     pub show_masks: bool,
     pub safe_margins: bool,
@@ -313,8 +279,8 @@ impl Default for ViewerState {
     fn default() -> Self {
         ViewerState {
             zoom: None,
+            fit_up_to_100: false,
             pan: [0.0, 0.0],
-            res: Resolution::Auto,
             transparency_grid: false,
             show_masks: true,
             safe_margins: false,
@@ -344,6 +310,7 @@ impl TimelineState {
     /// reveal. Other layers keep theirs.
     pub fn apply_reveal(&mut self, layers: &[u64], kinds: Vec<String>) {
         for id in layers {
+            self.full_groups.remove(id);
             if kinds.is_empty() {
                 self.open_layers.remove(id);
                 self.layer_reveal.remove(id);
@@ -354,6 +321,29 @@ impl TimelineState {
         }
         self.reveal = kinds;
     }
+
+    /// Twirl group `uid` of `layer` by hand. Opened under a reveal, it shows all its properties
+    /// (collapse and expand an effect that shows only its revealed parameters to see them all).
+    pub fn toggle_group(&mut self, layer: u64, uid: u64) {
+        if self.open_groups.remove(&uid) {
+            return;
+        }
+        self.open_groups.insert(uid);
+        if self.layer_reveal.contains_key(&layer) {
+            self.full_groups.entry(layer).or_default().insert(uid);
+        }
+    }
+}
+
+/// Where the Timeline scrolls to.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ScrollTo {
+    /// D: the current time, centred in the time graph.
+    Time,
+    /// X: the topmost selected layer, at the top of the layers.
+    Layer,
+    /// A revealed property, at the top of the rows.
+    Property(u64),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -361,6 +351,9 @@ pub struct TimelineState {
     /// Visible span start (seconds) and pixels per second; None = fit comp.
     pub start: f64,
     pub pps: Option<f64>,
+    /// The span (`start`, `pps`) Zoom to Fit Comp left, which it goes back to when pressed again.
+    #[serde(skip)]
+    pub before_fit: Option<(f64, f64)>,
     pub scroll_y: f32,
     /// Left column area width.
     pub columns_w: f32,
@@ -383,6 +376,10 @@ pub struct TimelineState {
     /// Properties / groups (uids) shown by the `props` reveal (Animation ▸ Reveal Properties…).
     #[serde(default)]
     pub reveal_props: BTreeSet<u64>,
+    /// Groups of a revealed layer (by layer id) twirled open by hand since the reveal: they show
+    /// their whole contents, not just the revealed properties.
+    #[serde(default)]
+    pub full_groups: BTreeMap<u64, BTreeSet<u64>>,
     /// Graph Editor: `auto` (Auto-Select Graph Type, the default: the speed graph when every
     /// property shown is spatial, else the value graph), `value` or `speed`.
     #[serde(default = "auto_graph")]
@@ -424,6 +421,9 @@ pub struct TimelineState {
     /// The name column shows Source Name instead of Layer Name (click its header).
     #[serde(default)]
     pub source_name: bool,
+    /// A pending scroll, applied when the Timeline is next drawn.
+    #[serde(skip)]
+    pub scroll_to: Option<ScrollTo>,
 }
 
 pub fn default_tl_columns() -> BTreeSet<String> {
@@ -442,6 +442,7 @@ impl Default for TimelineState {
         TimelineState {
             start: 0.0,
             pps: None,
+            before_fit: None,
             scroll_y: 0.0,
             columns_w: 560.0,
             outline_scroll: 0.0,
@@ -453,6 +454,7 @@ impl Default for TimelineState {
             reveal: vec![],
             layer_reveal: BTreeMap::new(),
             reveal_props: BTreeSet::new(),
+            full_groups: BTreeMap::new(),
             graph_mode: auto_graph(),
             graph_show_selected: true,
             graph_auto_zoom: true,
@@ -465,6 +467,7 @@ impl Default for TimelineState {
             unlinked: BTreeSet::new(),
             columns: default_tl_columns(),
             source_name: false,
+            scroll_to: None,
         }
     }
 }
@@ -486,6 +489,15 @@ pub struct FxPick {
     pub prop: u64,
     /// Parameter name (for the viewer hint).
     pub name: String,
+}
+
+/// A Character panel Fill or Stroke eyedropper waiting for a Composition viewer click.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TextColorPick {
+    pub layer: u64,
+    pub field: String,
+    /// Preserve the edited character range when focus moves from the panel to the viewer.
+    pub range: Option<[usize; 2]>,
 }
 
 /// Effects & Presets contents-menu options.
@@ -553,8 +565,8 @@ pub struct UiState {
     /// Window ▸ Script Console input, output and history.
     #[serde(default)]
     pub script_console: crate::panels::script_console::ScriptConsole,
-    /// Window ▸ AI Chat input, transcript and connections.
-    #[serde(default)]
+    /// Session-only chat; omit prompts, replies and endpoint metadata from UI snapshots.
+    #[serde(skip)]
     pub ai_chat: crate::panels::ai_chat::AiChat,
     /// Tool shown in each toolbar slot.
     pub slot_tools: Vec<Tool>,
@@ -569,6 +581,10 @@ pub struct UiState {
     /// Floating panels of the saved workspaces.
     #[serde(default)]
     pub saved_floating: std::collections::BTreeMap<String, Vec<crate::dock::Floating>>,
+    /// Floating groups shown in their own native window instead of over the dock (Move Panel
+    /// to New Window), so they can be placed on another monitor.
+    #[serde(default)]
+    pub panel_windows: Vec<crate::dock::PanelWindow>,
     /// The panel maximized to fill the dock area (`~`), if any.
     #[serde(default)]
     pub maximized: Option<PanelKind>,
@@ -618,6 +634,9 @@ pub struct UiState {
     /// Effect Controls: a point crosshair or colour eyedropper waiting for a viewer click.
     #[serde(default)]
     pub fx_pick: Option<FxPick>,
+    /// Character panel colour eyedropper waiting for a viewer click.
+    #[serde(default)]
+    pub text_color_pick: Option<TextColorPick>,
     /// Curves editor: shown channel (index into RGB/Red/Green/Blue/Alpha) per effect uid.
     #[serde(default)]
     pub fx_curve_channel: BTreeMap<u64, usize>,
@@ -627,9 +646,6 @@ pub struct UiState {
     /// Levels (Individual Controls) editor: shown channel per effect uid.
     #[serde(default)]
     pub fx_levels_channel: BTreeMap<u64, usize>,
-    /// Effects & Presets: favourite effect ids (starred).
-    #[serde(default)]
-    pub effects_favorites: BTreeSet<String>,
     /// Effects & Presets: recently applied effect ids, most recent first.
     #[serde(default)]
     pub effects_recent: Vec<String>,
@@ -658,6 +674,14 @@ pub struct UiState {
     /// Layer panel View: number of effects rendered (None = through the last Paint effect).
     #[serde(default)]
     pub layer_view: Option<usize>,
+    /// Layer panel magnification in points per layer pixel (None = fit), set by its
+    /// magnification menu, View ▸ Zoom In / Zoom Out while it is focused, the mouse wheel and the
+    /// Zoom tool.
+    #[serde(default)]
+    pub layer_zoom: Option<f32>,
+    /// Layer panel pan offset in points from the centred position (Hand tool, Space-drag).
+    #[serde(default)]
+    pub layer_pan: [f32; 2],
     /// Wiggler / Smoother / Motion Sketch settings.
     #[serde(default)]
     pub anim_tools: AnimToolsState,
@@ -684,6 +708,7 @@ impl Default for UiState {
             saved_workspaces: Default::default(),
             floating: vec![],
             saved_floating: Default::default(),
+            panel_windows: vec![],
             maximized: None,
             locked_tabs: BTreeSet::new(),
             viewers: Default::default(),
@@ -706,10 +731,10 @@ impl Default for UiState {
             fx_closed: BTreeSet::new(),
             fx_slider_open: BTreeSet::new(),
             fx_pick: None,
+            text_color_pick: None,
             fx_curve_channel: BTreeMap::new(),
             fx_curve_pencil: BTreeSet::new(),
             fx_levels_channel: BTreeMap::new(),
-            effects_favorites: BTreeSet::new(),
             effects_recent: Vec::new(),
             effects_view: EffectsView::default(),
             snapping: true,
@@ -721,6 +746,8 @@ impl Default for UiState {
             tracker_source: None,
             layer_panel: None,
             layer_view: None,
+            layer_zoom: None,
+            layer_pan: [0.0, 0.0],
             anim_tools: AnimToolsState::default(),
             mini_flowchart: None,
             flowchart: Default::default(),

@@ -121,7 +121,7 @@ pub fn hot_number_at(
         let mult = ui.input(|i| {
             if i.modifiers.shift {
                 10.0
-            } else if i.modifiers.command {
+            } else if i.modifiers.command && !proportional_scrub(i.modifiers) {
                 0.1
             } else {
                 1.0
@@ -136,6 +136,13 @@ pub fn hot_number_at(
         ui.data_mut(|d| d.insert_temp(editing_id, format!("{value:.decimals$}")));
     }
     (rect, out, resp.drag_stopped())
+}
+
+/// Ctrl+Alt (Cmd+Opt on macOS) held while scrubbing hot text: After Effects' Proportional
+/// Scrubbing, which spreads the change over the selected layers by selection order. Ctrl alone
+/// still scrubs finely and Shift by tens.
+pub fn proportional_scrub(m: egui::Modifiers) -> bool {
+    m.command && m.alt
 }
 
 /// [`hot_number_at`] for a whole number (an angle's revolutions): a drag steps it once every
@@ -183,6 +190,24 @@ pub fn keep_focus(ctx: &egui::Context, field: &Response, text: &str) {
         if opening {
             select_all(ctx, field.id, text);
         }
+        field.request_focus();
+    }
+}
+
+/// Put the keyboard on a dialog's first text field the frame the dialog opens, with its whole
+/// `text` selected, so typing replaces the value without a click. Unlike [`keep_focus`] the
+/// focus is the user's afterwards.
+pub fn focus_on_open(ctx: &egui::Context, field: &Response, text: &str) {
+    // The dialog is open in consecutive passes; a gap means it was closed and opened again.
+    let shown = field.id.with("focus-on-open-pass");
+    let pass = ctx.cumulative_pass_nr();
+    let previous = ctx.data_mut(|d| {
+        let previous = d.get_temp::<u64>(shown);
+        d.insert_temp(shown, pass);
+        previous
+    });
+    if previous.is_none_or(|p| p.saturating_add(1) < pass) {
+        select_all(ctx, field.id, text);
         field.request_focus();
     }
 }
@@ -307,6 +332,11 @@ fn field(ui: &mut Ui, rect: Rect, text: &mut String, hint: &str, t: &Tokens, sea
 
 /// Dropdown-looking control ("Full ▾").
 pub fn dropdown(ui: &mut Ui, rect: Rect, text: &str, t: &Tokens, id: egui::Id) -> Response {
+    dropdown_tip(ui, rect, text, None, t, id)
+}
+
+/// [`dropdown`] with a tooltip `tip` (shown always; it replaces the elided text's tooltip).
+pub fn dropdown_tip(ui: &mut Ui, rect: Rect, text: &str, tip: Option<&str>, t: &Tokens, id: egui::Id) -> Response {
     let resp = ui.interact(rect, id, Sense::click());
     ui.painter().rect_filled(rect, 3.0, if resp.hovered() { t.hover } else { t.field_bg });
     ui.painter().rect_stroke(rect, 3.0, Stroke::new(1.0, t.field_border), StrokeKind::Inside);
@@ -328,6 +358,9 @@ pub fn dropdown(ui: &mut Ui, rect: Rect, text: &str, t: &Tokens, id: egui::Id) -
     };
     ui.painter().text(pos2(rect.min.x + 7.0, rect.center().y), Align2::LEFT_CENTER, shown, Tokens::ui(11.5), t.text);
     icons::paint(ui.painter(), Rect::from_center_size(pos2(rect.max.x - 9.0, rect.center().y), vec2(8.0, 8.0)), Icon::ChevronDown, t.text_dim);
+    if let Some(tip) = tip {
+        return resp.on_hover_text(tip.to_string());
+    }
     if text.chars().count() > 0 && !fits(text) {
         return resp.on_hover_text(text.to_string());
     }
@@ -577,6 +610,27 @@ pub fn any_menu_open(ctx: &egui::Context) -> bool {
 pub fn menu_scroll<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
     let max_h = ui.ctx().content_rect().height() - 40.0;
     egui::ScrollArea::vertical().max_height(max_h).min_scrolled_height(max_h).show(ui, add).inner
+}
+
+/// egui's menu style with no gap between the rows: the gap the app's item spacing left between
+/// two entries highlighted neither and swallowed a click there. The rows grow by that gap, so a
+/// menu keeps its size.
+pub fn menu_style(style: &mut egui::Style) {
+    egui::containers::menu::menu_style(style);
+    style.spacing.interact_size.y += style.spacing.item_spacing.y;
+    style.spacing.item_spacing.y = 0.0;
+}
+
+/// `resp`'s context menu in the app's [`menu_style`] (its submenus inherit it).
+pub fn context_menu(resp: &Response, add_contents: impl FnOnce(&mut Ui)) -> Option<egui::InnerResponse<()>> {
+    egui::Popup::context_menu(resp).style(menu_style).show(add_contents)
+}
+
+/// A button opening a menu in the app's [`menu_style`], for one outside the menu bar.
+pub fn menu_button<'a, R>(ui: &mut Ui, atoms: impl egui::IntoAtoms<'a>, add_contents: impl FnOnce(&mut Ui) -> R) -> egui::InnerResponse<Option<R>> {
+    let config = egui::containers::menu::MenuConfig::new().style(menu_style);
+    let (response, inner) = egui::containers::menu::MenuButton::new(atoms).config(config).ui(ui, add_contents);
+    egui::InnerResponse::new(inner.map(|i| i.inner), response)
 }
 
 /// Whether a [`popup_menu`] is open (build its options only then: they can be long).

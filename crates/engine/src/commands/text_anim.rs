@@ -6,6 +6,7 @@ use effectcraft_project::build::{self, Ids};
 use effectcraft_project::{Layer, LayerSource, Node, PropGroup};
 use effectcraft_time::Tick;
 use serde_json::{Value, json};
+use std::sync::OnceLock;
 
 use super::{CommandSpec, b_p, bad, has_comp, layer_mut, layer_p, str_p};
 use crate::{Result, Session, cmd, query};
@@ -13,8 +14,10 @@ use crate::{Result, Session, cmd, query};
 /// The original text animator presets (`presets/text_animators.json`).
 pub const PRESETS_JSON: &str = include_str!("../../presets/text_animators.json");
 
-fn presets() -> Vec<Value> {
-    serde_json::from_str::<Value>(PRESETS_JSON).ok().and_then(|v| v.get("presets").and_then(Value::as_array).cloned()).unwrap_or_default()
+fn presets() -> &'static [Value] {
+    static PRESETS: OnceLock<Vec<Value>> = OnceLock::new();
+    PRESETS
+        .get_or_init(|| serde_json::from_str::<Value>(PRESETS_JSON).ok().and_then(|v| v.get("presets").and_then(Value::as_array).cloned()).unwrap_or_default())
 }
 
 /// (id, name) of every preset.
@@ -114,6 +117,13 @@ fn add_animator(s: &mut Session, p: &Value) -> Result<Value> {
         // `properties: []` adds an empty animator (scripting's addProperty("ADBE Text Animator")).
         if added == 0 && !kinds.is_empty() {
             return Err(bad(C, "unknown animator property"));
+        }
+        // Like After Effects, a scripted animator has no selectors until the script adds one
+        // (addProperty("ADBE Text Selector")); a default 0-100% one would select every character.
+        if kinds.is_empty()
+            && let Some(sels) = g.sub_mut("selectors")
+        {
+            sels.children.clear();
         }
         let uid = g.uid;
         anims.children.push(g.into());
@@ -246,7 +256,7 @@ fn enable_per_char(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 /// JSON → property value shaped like `like`.
-fn json_value(v: &Value, like: &KV) -> Option<KV> {
+pub(super) fn json_value(v: &Value, like: &KV) -> Option<KV> {
     Some(match v {
         Value::Bool(b) => match like {
             KV::Bool(_) => KV::Bool(*b),
@@ -296,7 +306,7 @@ fn apply_preset(s: &mut Session, p: &Value) -> Result<Value> {
     let (cid, lid) = layer_p(s, p, C)?;
     let want = str_p(p, "preset").ok_or_else(|| bad(C, "`preset` id or name required"))?.to_string();
     let preset = presets()
-        .into_iter()
+        .iter()
         .find(|x| x.get("id").and_then(Value::as_str) == Some(&want) || x.get("name").and_then(Value::as_str).is_some_and(|n| n.eq_ignore_ascii_case(&want)))
         .ok_or_else(|| bad(C, format!("no preset {want}")))?;
     let name = preset.get("name").and_then(Value::as_str).unwrap_or("Preset").to_string();
@@ -431,7 +441,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Animate Text",
             [],
             None,
-            "{layer?, properties: [anchor|position|scale|skew|rotation|opacity|transformAll|lineAnchor|lineSpacing|characterOffset|characterValue|blur|fillColor|fillHue|fillSaturation|fillBrightness|fillOpacity|strokeColor|strokeHue|strokeSaturation|strokeBrightness|strokeOpacity|strokeWidth|tracking|perChar3d], name?}",
+            "{layer?, properties: [anchor|position|scale|skew|rotation|opacity|transformAll|lineAnchor|lineSpacing|characterOffset|characterValue|blur|fillColor|fillHue|fillSaturation|fillBrightness|fillOpacity|strokeColor|strokeHue|strokeSaturation|strokeBrightness|strokeOpacity|strokeWidth|tracking|frontColor|bevelColor|sideColor|backColor|perChar3d], name?}",
             has_text_layer,
             add_animator
         ),

@@ -109,6 +109,7 @@ pub fn specs() -> Vec<CommandSpec> {
         label: "Run Commands (Batch)",
         menu: &[],
         shortcut: None,
+        alt_shortcuts: &[],
         params: "{steps: [{command, params?}], label? (undo step name, default Batch), atomic?: bool (default true: a failing step rolls the whole batch back)} → {steps, results: [each step's result]}; a string param \"$N\" or \"$N.key.0\" is step N's result (1-based), e.g. {\"layer\": \"$1.layer\"}",
         enabled: always,
         run: batch,

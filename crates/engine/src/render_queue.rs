@@ -203,6 +203,11 @@ pub fn bytes_per_frame(om: &OutputModule, w: u32, h: u32, fps: f64) -> f64 {
             };
             mbps(rate) * px / 29.97
         }
+        // 24-bit RGB rows padded to even bytes, or 32-bit ARGB.
+        OutputFormat::Uncompressed => {
+            let bpp = if om.channels == effectcraft_project::render_queue::Channels::Rgba { 4 } else { 3 };
+            ((w as u64 * bpp).next_multiple_of(2) * h as u64) as f64
+        }
         OutputFormat::WebM => mbps(8.0) * px / fps,
         OutputFormat::Gif => w as f64 * h as f64 * 0.5,
         OutputFormat::Wav | OutputFormat::Aiff => om.audio_sample_rate as f64 * 4.0 / fps,
@@ -357,8 +362,15 @@ impl Session {
         // Settings ▸ Export ▸ Default Output Folder, else the project's folder.
         let folder = self.prefs.export.default_output_folder.trim();
         let base = (!folder.is_empty()).then(|| std::path::PathBuf::from(folder));
-        let base =
-            base.or_else(|| self.path.as_deref().and_then(|s| std::path::Path::new(s).parent().map(|d| d.to_path_buf())).filter(|d| !d.as_os_str().is_empty()));
+        // A project saved under a bare filename has the empty path as its parent. It sits in the
+        // working directory, so resolve against that rather than falling through to the
+        // unsaved-project default below (#1427).
+        let base = base.or_else(|| {
+            self.path
+                .as_deref()
+                .and_then(|s| std::path::Path::new(s).parent())
+                .map(|d| if d.as_os_str().is_empty() { std::path::PathBuf::from(".") } else { d.to_path_buf() })
+        });
         // Unsaved project: ~/Movies, else the home folder (as FilmCraft's exports do). The working directory
         // is `/` for an app started from the macOS Finder, where nothing can be written (#446).
         let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(std::path::PathBuf::from);
@@ -605,10 +617,17 @@ impl Session {
                 let _ = t.join();
             }
             let st = job.shared.snapshot();
-            let failed = updates.iter().filter(|u| matches!(u, ItemUpdate::Finished { status: RenderStatus::Failed(_), .. })).count();
+            let failures: Vec<&str> = updates
+                .iter()
+                .filter_map(|u| if let ItemUpdate::Finished { status: RenderStatus::Failed(e), .. } = u { Some(e.as_str()) } else { None })
+                .collect();
+            let failed = failures.len();
             let stopped = updates.iter().any(|u| matches!(u, ItemUpdate::Finished { status: RenderStatus::UserStopped, .. }));
-            let msg = if failed > 0 {
-                format!("Render finished with {failed} failed item(s)")
+            // The reason is otherwise only in the Status column's tooltip (#568).
+            let msg = if let [only] = failures.as_slice() {
+                format!("Render finished with 1 failed item(s): {only}")
+            } else if let Some(first) = failures.first() {
+                format!("Render finished with {failed} failed item(s), first: {first}")
             } else if stopped {
                 "Render stopped".to_string()
             } else {

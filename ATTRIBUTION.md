@@ -58,13 +58,17 @@ Screenshots of EffectCraft itself, rendered headlessly, showing only procedurall
 
 ## Code-drawn assets (original work, MIT OR Apache-2.0)
 
-- UI icons drawn in code: `crates/ui-egui/src/icons.rs`.
+- UI icons drawn in code: `crates/ui-egui/src/icons.rs`, including the original filled favorite star (2026-10-11, EffectCraft contributors).
 - Procedural demo content (solids, shapes, gradients, text animations): `crates/engine/src/demo.rs`.
 - Built-in project templates (Lower Third, Title Card, Logo Reveal, Kinetic Type, Social Square, Vertical Story,
   Slideshow, 3D Text Orbit) built from engine commands, and their thumbnails rendered by our own renderer:
   `crates/engine/src/templates.rs`.
 - Text animator presets (Typewriter, Fade Up Characters, Bounce In Words, Tracking In, Scramble, Blur In, Jitter,
   Drop In Lines): `crates/engine/presets/text_animators.json` (sidecar `.attribution`).
+- Transition animation presets (23: wipes, clock and fan reveals, blinds, dissolves, card flips, CC wipes, fades):
+  `crates/engine/presets/transitions.json` (sidecar `.attribution`).
+- Backgrounds animation presets (23: drifting gradients, fog, cloud and smoke, plasma and magma, cells and crystals, scrolling grids
+  and checks, pulse rings, bokeh, light sweep): `crates/engine/presets/backgrounds.json` (sidecar `.attribution`).
 - Sample scripts (File ▸ Scripts) and ScriptUI panel: `crates/engine/scripts/Rename Layers.jsx`,
   `crates/engine/scripts/Sort Layers by In Point.jsx`, `crates/engine/scripts/Create Null at Selected Layers.jsx`,
   `crates/engine/scripts/Render Queue Batch.jsx`, `crates/engine/scripts/ScriptUI Panels/Layer Tools.jsx`

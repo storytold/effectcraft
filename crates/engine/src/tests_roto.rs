@@ -27,6 +27,35 @@ pub(crate) fn hold_roto_cache_test_lock() {
 }
 const R: f64 = 40.0;
 
+fn span_after_trimming_strokes(trim: Value, span: Value, expected: [i64; 2]) {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"width": 64, "height": 64, "frameRate": 25, "duration": 1})).unwrap();
+    let layer = s.execute("layer.newSolid", json!({"width": 64, "height": 64})).unwrap()["layer"].as_u64().unwrap();
+    for frame in [0, 20] {
+        s.execute("roto.stroke", json!({"layer": layer, "frame": frame, "points": [[32, 32]], "radius": 4})).unwrap();
+    }
+    s.execute("layer.timing", trim).unwrap();
+    let before = s.project.to_json();
+    let error = s.execute("roto.span", span.clone()).unwrap_err().to_string();
+    assert!(error.contains("strokes outside the layer"), "{error}");
+    assert_eq!(s.project.to_json(), before, "refusing the span must preserve strokes and project state");
+    assert!(s.undo(), "the failed command must not add an undo step");
+    let result = s.execute("roto.span", span).unwrap();
+    assert_eq!(result["span"], json!(expected));
+    let status = s.execute("roto.status", json!({"layer": layer})).unwrap();
+    assert_eq!(status["strokeFrames"], json!([0, 20]));
+}
+
+#[test]
+fn roto_span_rejects_strokes_before_trimmed_in_point() {
+    span_after_trimming_strokes(json!({"in": 0.2}), json!({"start": 0}), [0, 20]);
+}
+
+#[test]
+fn roto_span_rejects_strokes_after_trimmed_out_point() {
+    span_after_trimming_strokes(json!({"out": 0.5}), json!({"end": 24}), [0, 24]);
+}
+
 fn noise(x: f64, y: f64, seed: u32) -> f64 {
     fn h(i: i64, j: i64, s: u32) -> f64 {
         let mut v = (i.wrapping_mul(73856093) ^ j.wrapping_mul(19349663) ^ (s as i64).wrapping_mul(83492791)) as u64;
@@ -350,4 +379,265 @@ fn offloaded_propagation_streams_segmentations_back() {
     // `wait` still runs here.
     s.execute("roto.propagate", json!({"layer": clip.0, "wait": true})).unwrap();
     assert!(s.offloaded.is_empty());
+}
+
+/// Object Matte: one click on the disk on frame 0 isolates it there and on the frames it is
+/// followed to; the Input Key follows the layer's frames; bad prompts are refused.
+#[test]
+fn object_matte_from_a_click() {
+    hold_roto_cache_test_lock();
+    let (mut s, clip, solid) = setup(|f| draw(center(f)));
+    let cid = s.active_comp_id().unwrap();
+    s.edit("remove solid", None, |p, _| {
+        p.comp_mut(cid).unwrap().layers.retain(|l| l.id != solid);
+        for it in p.items.values_mut() {
+            if let effectcraft_project::ItemKind::Footage(f) = &mut it.kind {
+                f.path = "object-matte.mov".into();
+            }
+        }
+        Ok(())
+    })
+    .unwrap();
+    s.execute("time.set", json!({"time": 0})).unwrap();
+    let c = center(0);
+    let r = s.execute_checked("objectMatte.apply", json!({"layer": clip.0, "point": c, "after": 6})).unwrap();
+    assert_eq!(r["frame"], 0);
+    assert_eq!(r["span"], json!([-30, 6]));
+    let uid = r["effect"].as_u64().unwrap();
+    let key = |s: &Session| {
+        let g = s.active_comp().unwrap().layer(clip).unwrap().props.find_group(uid).unwrap().clone();
+        crate::roto::params_static(&g).get(effectcraft_effects::roto::INPUT_KEY).cloned()
+    };
+    let k0 = key(&s);
+    assert!(matches!(&k0, Some(effectcraft_keyframe::Value::Str(k)) if !k.is_empty()), "{k0:?}");
+    let wrong = |s: &Session, f: u32| {
+        let c = center(f);
+        alpha_at(s, f)
+            .iter()
+            .enumerate()
+            .filter(|(i, v)| {
+                let d = (((*i as u32 % W) as f64 + 0.5 - c[0]).hypot((*i as u32 / W) as f64 + 0.5 - c[1])) - R;
+                (d < -3.0 && **v < 0.5) || (d > 3.0 && **v > 0.5)
+            })
+            .count()
+    };
+    let w0 = wrong(&s, 0);
+    assert!(w0 < 40, "{w0} wrong pixels on the reference frame");
+    let w4 = wrong(&s, 4);
+    assert!(w4 < 60, "{w4} wrong pixels on frame 4");
+    // Past Frames After: transparent.
+    assert!(alpha_at(&s, 8).iter().all(|v| *v == 0.0));
+    // Other frames under the effect: a new Input Key (the mattes are recomputed).
+    s.edit("swap clip", None, |p, _| {
+        for it in p.items.values_mut() {
+            if let effectcraft_project::ItemKind::Footage(f) = &mut it.kind {
+                f.path = "object-matte-2.mov".into();
+            }
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert_ne!(key(&s), k0);
+    // Bad prompts are refused.
+    for bad in [
+        json!({"layer": clip.0}),
+        json!({"layer": clip.0, "point": [-10, 5]}),
+        json!({"layer": clip.0, "point": [10, "x"]}),
+        json!({"layer": clip.0, "point": c, "box": [0, 0, 10, 10]}),
+        json!({"layer": clip.0, "point": c, "frame": 999}),
+    ] {
+        assert!(s.execute_checked("objectMatte.apply", bad.clone()).is_err(), "{bad}");
+    }
+    // A box and a static prompt are accepted; the second instance is numbered.
+    let r = s
+        .execute_checked("objectMatte.apply", json!({"layer": clip.0, "point": c, "box": [c[0] + 50.0, c[1] + 50.0, c[0] - 50.0, c[1] - 50.0], "track": false}))
+        .unwrap();
+    let g = s.active_comp().unwrap().layer(clip).unwrap().props.find_group(r["effect"].as_u64().unwrap()).unwrap().clone();
+    assert_eq!(g.name, "Object Matte 2");
+}
+
+/// `objectMatte.apply` with `effect` re-prompts that instance in one undo step: the new point and
+/// box, the box dropped when none is given, the reach kept unless given.
+#[test]
+fn object_matte_reprompt_updates_the_instance() {
+    let (mut s, clip, solid) = setup(|f| draw(center(f)));
+    let cid = s.active_comp_id().unwrap();
+    s.edit("remove solid", None, |p, _| {
+        p.comp_mut(cid).unwrap().layers.retain(|l| l.id != solid);
+        Ok(())
+    })
+    .unwrap();
+    let c = center(0);
+    let r = s
+        .execute_checked(
+            "objectMatte.apply",
+            json!({"layer": clip.0, "point": c, "box": [c[0] - 50.0, c[1] - 50.0, c[0] + 50.0, c[1] + 50.0], "after": 6, "frame": 0}),
+        )
+        .unwrap();
+    let uid = r["effect"].as_u64().unwrap();
+    let count = |s: &Session| s.active_comp().unwrap().layer(clip).unwrap().effects().unwrap().groups().count();
+    let ps = |s: &Session| crate::roto::params_static(s.active_comp().unwrap().layer(clip).unwrap().props.find_group(uid).unwrap());
+    let undo0 = s.history.undo.len();
+    let r = s.execute_checked("objectMatte.apply", json!({"layer": clip.0, "effect": uid, "point": [c[0] + 4.0, c[1]], "frame": 2})).unwrap();
+    assert_eq!((r["effect"].as_u64(), r["updated"].as_bool()), (Some(uid), Some(true)));
+    assert_eq!(r["span"], json!([-28, 8]));
+    assert_eq!(count(&s), 1);
+    assert_eq!(s.history.undo.len(), undo0 + 1);
+    let p = ps(&s);
+    assert_eq!(p.get("objectPoint"), Some(&effectcraft_keyframe::Value::Vec2([c[0] + 4.0, c[1]])));
+    assert_eq!(p.get("useBox"), Some(&effectcraft_keyframe::Value::Bool(false)));
+    assert_eq!(effectcraft_effects::object_matte::reference_frame(&p), 2);
+    assert_eq!(effectcraft_effects::object_matte::reach(&p), [30, 6]);
+    // Undo restores the first prompt.
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(ps(&s).get("useBox"), Some(&effectcraft_keyframe::Value::Bool(true)));
+    // An unknown or non-Object Matte effect is refused.
+    assert!(s.execute_checked("objectMatte.apply", json!({"layer": clip.0, "effect": 999_999, "point": c})).is_err());
+}
+
+/// Object Matte runs in the background like Roto Brush propagation: queued by the edit, a job
+/// that returns at once and reports progress, stops when cancelled (keeping what it computed),
+/// computes the tracked frames when left to run, and Freeze stores mattes that renders then use
+/// without segmenting again.
+#[test]
+fn object_matte_background_job_cancel_and_freeze() {
+    hold_roto_cache_test_lock();
+    let (mut s, clip, solid) = setup(|f| draw(center(f)));
+    let cid = s.active_comp_id().unwrap();
+    s.edit("remove solid", None, |p, _| {
+        p.comp_mut(cid).unwrap().layers.retain(|l| l.id != solid);
+        for it in p.items.values_mut() {
+            if let effectcraft_project::ItemKind::Footage(f) = &mut it.kind {
+                f.path = "object-matte-job.mov".into();
+            }
+        }
+        Ok(())
+    })
+    .unwrap();
+    let c = center(0);
+    let r = s.execute_checked("objectMatte.apply", json!({"layer": clip.0, "point": c, "before": 0, "after": 24, "frame": 0})).unwrap();
+    let uid = r["effect"].as_u64().unwrap();
+    assert!(s.roto_pending.contains(&(cid, clip, uid)), "the new prompt is queued for tracking");
+    let wait_done = |s: &mut Session| {
+        let t = std::time::Instant::now();
+        while s.is_roto_running() {
+            assert!(t.elapsed().as_secs() < 120, "the job never finished");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            s.poll_roto(false);
+        }
+        s.poll_roto(false);
+    };
+    let toast = |s: &Session, m: &str| s.events.iter().any(|e| matches!(e, crate::Event::Toast { message, .. } if message.starts_with(m)));
+    let status = |s: &mut Session| s.execute("objectMatte.status", json!({"layer": clip.0, "effect": uid})).unwrap();
+
+    // Cancelled at once: it stops early, and says so.
+    let r = s.execute_checked("objectMatte.propagate", json!({"layer": clip.0, "effect": uid})).unwrap();
+    assert_eq!(r["frames"], 25);
+    assert!(!s.roto_pending.contains(&(cid, clip, uid)));
+    let _ = s.execute("roto.cancel", json!({}));
+    wait_done(&mut s);
+    assert!(toast(&s, "Object Matte: stopped"), "{:?}", s.events);
+    let st = status(&mut s);
+    assert_eq!(st["frames"].as_array().unwrap().len(), 25, "{st}");
+    let early = st["computed"].as_array().unwrap().len();
+    assert!(early < 25, "{st}");
+
+    // Left to run: the call returns while the job works (progress visible), then every tracked
+    // frame is computed.
+    let r = s.execute_checked("objectMatte.propagate", json!({"layer": clip.0, "effect": uid})).unwrap();
+    assert_eq!(r["running"], true, "{r}");
+    let pr = s.roto_progress().unwrap();
+    assert!(pr.object_matte && pr.banner().starts_with("Tracking Object Matte"), "{pr:?}");
+    // One job at a time.
+    assert!(s.execute_checked("objectMatte.propagate", json!({"layer": clip.0, "effect": uid})).is_err());
+    wait_done(&mut s);
+    assert!(toast(&s, "Object Matte: tracked"), "{:?}", s.events);
+    assert_eq!(status(&mut s)["computed"].as_array().unwrap().len(), 25);
+    let before = alpha_at(&s, 4);
+
+    // Freeze, then drop the segmentations: renders use the frozen mattes and compute nothing.
+    let r = s.execute_checked("objectMatte.freeze", json!({"layer": clip.0, "effect": uid, "wait": true})).unwrap();
+    assert_eq!(r["frozen"], true, "{r}");
+    let keys: Vec<u64> = s.roto_keys(cid, clip, uid).unwrap().into_iter().map(|(_, k)| k).collect();
+    assert_eq!(keys.len(), 25);
+    effectcraft_effects::roto::forget(keys.iter().copied());
+    let frozen = alpha_at(&s, 4);
+    let diff = before.iter().zip(&frozen).filter(|(a, b)| (**a - **b).abs() > 0.02).count();
+    assert!(diff < 30, "{diff} pixels differ from the computed matte");
+    assert!(status(&mut s)["computed"].as_array().unwrap().is_empty(), "a frozen frame was segmented again");
+    assert_eq!(status(&mut s)["frozen"], true);
+    // A frozen prompt is refused; Unfreeze computes again.
+    assert!(s.execute_checked("objectMatte.apply", json!({"layer": clip.0, "effect": uid, "point": c})).is_err());
+    s.execute_checked("objectMatte.unfreeze", json!({"layer": clip.0, "effect": uid})).unwrap();
+    let _ = alpha_at(&s, 4);
+    assert!(status(&mut s)["computed"].as_array().unwrap().iter().any(|f| f == 4));
+    // Undo brings the frozen mattes back.
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(status(&mut s)["frozen"], true);
+}
+
+/// Computed Object Matte segmentations go to the persistent disk cache: a second session on the
+/// same folder and project gets them back without segmenting (its frames cannot even be read
+/// here), and another prompt (other keys) finds nothing.
+#[test]
+fn object_matte_mattes_persist_in_the_disk_cache() {
+    use effectcraft_effects::object_matte as om;
+    use effectcraft_render::disk_cache::Kind;
+    hold_roto_cache_test_lock();
+    let dir = std::env::temp_dir().join(format!("effectcraft-om-disk-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let enable = |s: &mut Session| {
+        s.execute_checked("prefs.set", json!({"values": {"disk.diskCacheFolder": dir.to_string_lossy(), "disk.diskCacheEnabled": true}})).unwrap();
+    };
+    let (mut s, clip, solid) = setup(|f| draw(center(f)));
+    enable(&mut s);
+    let cid = s.active_comp_id().unwrap();
+    s.edit("remove solid", None, |p, _| {
+        p.comp_mut(cid).unwrap().layers.retain(|l| l.id != solid);
+        for it in p.items.values_mut() {
+            if let effectcraft_project::ItemKind::Footage(f) = &mut it.kind {
+                f.path = "object-matte-disk.mov".into();
+            }
+        }
+        Ok(())
+    })
+    .unwrap();
+    let c = center(0);
+    let r = s.execute_checked("objectMatte.apply", json!({"layer": clip.0, "point": c, "before": 0, "after": 5, "frame": 0})).unwrap();
+    let uid = r["effect"].as_u64().unwrap();
+    s.execute_checked("objectMatte.propagate", json!({"layer": clip.0, "effect": uid, "wait": true})).unwrap();
+    let keys = s.roto_keys(cid, clip, uid).unwrap();
+    assert_eq!(keys.len(), 6);
+    let dc = s.disk_cache.clone().unwrap();
+    dc.flush();
+    assert!(dc.keys(Kind::Matte).len() >= 6, "{:?}", dc.stats());
+    let before = alpha_at(&s, 3);
+    let saved = s.project.clone();
+    drop(dc);
+    drop(s);
+    effectcraft_effects::roto::forget(keys.iter().map(|(_, k)| *k));
+
+    // "Reopen": a new session on the same folder and project.
+    let (mut s2, _, _) = setup(|f| draw(center(f)));
+    enable(&mut s2);
+    s2.project = saved;
+    s2.bump();
+    s2.open_comp(cid);
+    assert_eq!(s2.roto_keys(cid, clip, uid).unwrap(), keys, "the same input key, so the same keys");
+    let comp = s2.active_comp().unwrap().clone();
+    let l = comp.layer(clip).unwrap();
+    let ps = crate::roto::params_static(l.props.find_group(uid).unwrap());
+    let size = crate::roto::layer_size(&s2.project, &comp, l);
+    // No frames to segment from: whatever comes back was read from disk.
+    for (f, _) in &keys {
+        assert!(om::ensure(&ps, size, 25.0, *f, None, &mut |_| None, &|| false).is_some(), "frame {f} not reused from disk");
+    }
+    assert!(s2.disk_cache.as_ref().unwrap().stats().hits >= 6);
+    let again = alpha_at(&s2, 3);
+    assert_eq!(again, before, "the disk-cached matte renders the same");
+    // Another prompt: other keys, nothing on disk.
+    let mut moved = ps.clone();
+    moved.values.insert("objectPoint".into(), effectcraft_keyframe::Value::Vec2([c[0] + 3.0, c[1]]));
+    assert!(om::ensure(&moved, size, 25.0, 0, None, &mut |_| None, &|| false).is_none());
+    let _ = std::fs::remove_dir_all(&dir);
 }

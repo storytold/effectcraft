@@ -238,6 +238,73 @@ fn shadows_darken_the_receiver() {
 }
 
 #[test]
+fn accepts_shadows_only_draws_just_the_shadow() {
+    // #1691: a shadow catcher (card or plane primitive, "Accepts Shadows: Only") in front of a
+    // red backdrop card, an invisible sphere casting onto it, a point light behind the camera.
+    let (mut p, cid) = project(200, 150);
+    let red = p.add_item(
+        "R",
+        Default::default(),
+        None,
+        ItemKind::Solid(effectcraft_project::Solid { color: [1.0, 0.0, 0.0], width: 400, height: 400, pixel_aspect: 1.0 }),
+    );
+    add(&mut p, cid, LayerSource::Solid { item: red }, |l| {
+        l.switches.three_d = true;
+        set(l, "transform/position", Value::Vec3([100.0, 75.0, 300.0]));
+        set(l, "materialOptions/acceptsShadows", Value::Enum(0));
+    });
+    let white = p.add_item(
+        "W",
+        Default::default(),
+        None,
+        ItemKind::Solid(effectcraft_project::Solid { color: [1.0, 1.0, 1.0], width: 400, height: 400, pixel_aspect: 1.0 }),
+    );
+    add(&mut p, cid, LayerSource::Solid { item: white }, |l| {
+        l.switches.three_d = true;
+        set(l, "transform/position", Value::Vec3([100.0, 75.0, 200.0]));
+        set(l, "materialOptions/acceptsShadows", Value::Enum(2));
+    });
+    add(&mut p, cid, LayerSource::Primitive { kind: PrimitiveKind::Sphere }, |l| {
+        set(l, "geometryOptions/radius", Value::Scalar(30.0));
+        set(l, "transform/position", Value::Vec3([100.0, 75.0, 50.0]));
+        set(l, "materialOptions/castsShadows", Value::Enum(2));
+    });
+    add(&mut p, cid, LayerSource::Light { kind: LightKind::Point }, |l| {
+        set(l, "transform/position", Value::Vec3([100.0, 75.0, -300.0]));
+        set(l, "lightOptions/castsShadows", Value::Bool(true));
+    });
+    let check = |img: &crate::Image, what: &str| {
+        let (mid, side) = (img.data[75 * 200 + 100], img.data[75 * 200 + 60]);
+        // Unshadowed: the catcher is see-through, the lit red card behind it shows.
+        assert!(side[0] > 0.5 && side[1] < side[0] * 0.25 && side[3] > 0.99, "{what}: side {side:?}");
+        // Shadowed: black over the red card.
+        assert!(mid[0] < 0.02 && mid[3] > 0.99, "{what}: shadow {mid:?} vs side {side:?}");
+    };
+    check(&render(&p, cid), "card");
+    // Nothing behind the catcher: only the shadow is opaque.
+    let solo = |p: &Project| {
+        let mut q = p.clone();
+        q.comp_mut(cid).unwrap().layers.pop();
+        let img = render(&q, cid);
+        let (mid, side) = (img.data[75 * 200 + 100], img.data[75 * 200 + 60]);
+        assert!(side[3] < 1e-3, "unshadowed catcher is transparent: {side:?}");
+        assert!(mid[3] > 0.5 && mid[0] < 1e-3, "shadow is black: {mid:?}");
+    };
+    solo(&p);
+    // The same with a plane primitive as the catcher.
+    let layers = &mut p.comp_mut(cid).unwrap().layers;
+    layers.remove(2);
+    add(&mut p, cid, LayerSource::Primitive { kind: PrimitiveKind::Plane }, |l| {
+        set(l, "geometryOptions/width", Value::Scalar(400.0));
+        set(l, "geometryOptions/height", Value::Scalar(400.0));
+        set(l, "transform/position", Value::Vec3([100.0, 75.0, 200.0]));
+        set(l, "materialOptions/acceptsShadows", Value::Enum(2));
+    });
+    check(&render(&p, cid), "plane");
+    solo(&p);
+}
+
+#[test]
 fn cards_and_environment_light() {
     let (mut p, cid) = project(120, 90);
     let sid = p.add_item(
@@ -311,6 +378,85 @@ fn extruded_text_renders_as_a_mesh() {
     assert!(meshes.iter().all(|(m, _, _)| m.positions.iter().any(|q| (q[2] - 30.0).abs() < 1e-3)));
     let img = render(&p, cid);
     assert!(img.data.iter().filter(|q| q[3] > 0.5).count() > 200);
+}
+
+#[test]
+fn shape_surface_items_colour_the_extruded_surfaces() {
+    let (mut p, cid) = project(200, 200);
+    add(&mut p, cid, LayerSource::Shape, |l| {
+        l.switches.three_d = true;
+        let mut next = 10_000u64;
+        let ids = &mut build::Ids(&mut next);
+        let surface = |ids: &mut build::Ids, m: &str, c: [f64; 4]| {
+            let mut g = build::shape_surface(ids, m).unwrap();
+            g.children.push(build::shape_surface_prop(ids, "color").unwrap().into());
+            if let Some(effectcraft_project::Node::Prop(pr)) = g.children.last_mut() {
+                pr.value = Value::Color(c);
+            }
+            g
+        };
+        // A white square whose group colours its sides green; the layer's Contents colour every
+        // front blue and every side red, but the group's own Side wins.
+        let rect = build::shape_rect(ids, [80.0, 80.0], [0.0, 0.0], 0.0);
+        let fill = build::shape_fill(ids, [1.0, 1.0, 1.0, 1.0]);
+        let side = surface(ids, "side", [0.0, 1.0, 0.0, 1.0]);
+        let group = build::shape_group(ids, "Group 1", vec![rect, fill, side]);
+        let front = surface(ids, "front", [0.0, 0.0, 1.0, 1.0]);
+        let outer_side = surface(ids, "side", [1.0, 0.0, 0.0, 1.0]);
+        let contents = l.props.sub_mut("contents").unwrap();
+        contents.children.extend([group.into(), front.into(), outer_side.into()]);
+        l.props.children.push(build::extrusion_geometry_options(ids).into());
+        set(l, "geometryOptions/extrusionDepth", Value::Scalar(40.0));
+        set(l, "transform/position", Value::Vec3([100.0, 100.0, 0.0]));
+    });
+    let ctx = crate::EvalCtx { project: &p, comp_id: cid, comp: p.comp(cid).unwrap(), time: Tick::ZERO, expr: None, footage: None };
+    let l = &ctx.comp.layers[0];
+    let params = scene::extrusion_params(&ctx, l).unwrap();
+    let meshes = scene::extruded_meshes(&ctx, l, &params);
+    // No bevel: Front, Side and Back (the Back keeps the fill's white).
+    let colours: Vec<[f32; 4]> = meshes.iter().map(|m| m.1).collect();
+    assert_eq!(colours, [[0.0, 0.0, 1.0, 1.0], [0.0, 1.0, 0.0, 1.0], [1.0, 1.0, 1.0, 1.0]]);
+    assert!(meshes[0].0.normals.iter().all(|n| n[2] < -0.99), "front cap");
+    assert!(meshes[1].0.normals.iter().all(|n| n[2].abs() < 1e-6), "walls");
+    // Rendered (unlit: base colours) at an angle: the blue face and the green side both show.
+    p.comp_mut(cid).unwrap().layers[0].props.prop_mut("transform/rotationY").unwrap().value = Value::Scalar(50.0);
+    let img = render(&p, cid);
+    let blue = img.data.iter().filter(|q| q[3] > 0.99 && q[2] > 0.9 && q[0] < 0.1 && q[1] < 0.1).count();
+    let green = img.data.iter().filter(|q| q[3] > 0.99 && q[1] > 0.9 && q[0] < 0.1 && q[2] < 0.1).count();
+    assert!(blue > 200 && green > 50, "blue {blue}, green {green}");
+}
+
+#[test]
+fn text_animators_colour_the_extruded_surfaces() {
+    let (mut p, cid) = project(200, 100);
+    add(&mut p, cid, LayerSource::Text, |l| {
+        l.switches.three_d = true;
+        let doc = effectcraft_keyframe::TextDoc { text: "IO".into(), size: 60.0, fill: [1.0, 1.0, 1.0, 1.0], apply_fill: true, ..Default::default() };
+        set(l, "text/sourceText", Value::Text(Box::new(doc)));
+        let mut next = 10_000u64;
+        let ids = &mut build::Ids(&mut next);
+        let props = ["sideColor", "bevelColor"].iter().flat_map(|k| build::text_anim_props(ids, k, false)).collect();
+        let anim = build::text_animator(ids, "Animator 1", props);
+        l.props.group_mut("text/animators").unwrap().children.push(anim.into());
+        set(l, "text/animators/#1/properties/sideColor", Value::Color([0.0, 1.0, 0.0, 1.0]));
+        // Half the selection: the bevel colour blends half way over the fill.
+        set(l, "text/animators/#1/selectors/#1/advanced/amount", Value::Scalar(50.0));
+        l.props.children.push(build::extrusion_geometry_options(ids).into());
+        set(l, "geometryOptions/extrusionDepth", Value::Scalar(30.0));
+        set(l, "geometryOptions/bevelStyle", Value::Enum(1));
+    });
+    let ctx = crate::EvalCtx { project: &p, comp_id: cid, comp: p.comp(cid).unwrap(), time: Tick::ZERO, expr: None, footage: None };
+    let l = &ctx.comp.layers[0];
+    let params = scene::extrusion_params(&ctx, l).unwrap();
+    let meshes = scene::extruded_meshes(&ctx, l, &params);
+    // Two characters × (Front, Bevel, Side, Back).
+    assert_eq!(meshes.len(), 8);
+    for m in meshes.chunks(4) {
+        assert_eq!(m[0].1, [1.0, 1.0, 1.0, 1.0], "front keeps the fill");
+        assert_eq!(m[1].1, [1.0, 0.5, 0.5, 1.0], "bevel: red half way over white");
+        assert_eq!(m[2].1, [0.5, 1.0, 0.5, 1.0], "side: green half way over white");
+        assert_eq!(m[3].1, [1.0, 1.0, 1.0, 1.0], "back keeps the fill");
+    }
 }
 
 // ---------------------------------------------------------------- motion blur, blend modes, mattes

@@ -4,8 +4,8 @@
 //! style of the first character and the settings of the first paragraph), which is all a
 //! single-style document needs and what older projects contain. Mixed formatting is stored in
 //! [`TextDoc::runs`] (character style runs covering the text, by character count) and
-//! [`TextDoc::paragraphs`] (one entry per `\n`-separated paragraph). Both lists are empty while the
-//! document is uniform, so single-style documents serialize exactly as before.
+//! [`TextDoc::paragraphs`] (one entry per CR, LF or CRLF-separated paragraph). Both lists are
+//! empty while the document is uniform, so single-style documents serialize exactly as before.
 //!
 //! Positions are **character** indices (Unicode scalar values), as in After Effects' expression
 //! and scripting APIs.
@@ -14,6 +14,46 @@ use std::ops::Range;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value as J;
+
+/// A paragraph's original byte and character ranges, excluding its line break.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParagraphRange {
+    pub bytes: Range<usize>,
+    pub chars: Range<usize>,
+}
+
+/// Paragraphs separated by CR, LF or CRLF (one break), including empty/trailing paragraphs.
+/// The source is never normalized, so formatting and caret indices keep their original offsets.
+pub fn paragraph_ranges(text: &str) -> impl Iterator<Item = ParagraphRange> + '_ {
+    let mut chars = text.char_indices().enumerate().peekable();
+    let (mut byte_start, mut char_start, mut char_end) = (0, 0, 0);
+    let mut done = false;
+    std::iter::from_fn(move || {
+        if done {
+            return None;
+        }
+        while let Some((ci, (bi, ch))) = chars.next() {
+            char_end = ci.saturating_add(1);
+            if !matches!(ch, '\r' | '\n') {
+                continue;
+            }
+            let range = ParagraphRange { bytes: byte_start..bi, chars: char_start..ci };
+            byte_start = bi.saturating_add(1);
+            char_start = char_end;
+            if ch == '\r'
+                && matches!(chars.peek(), Some((_, (_, '\n'))))
+                && let Some((ci, (bi, _))) = chars.next()
+            {
+                byte_start = bi.saturating_add(1);
+                char_end = ci.saturating_add(1);
+                char_start = char_end;
+            }
+            return Some(range);
+        }
+        done = true;
+        Some(ParagraphRange { bytes: byte_start..text.len(), chars: char_start..char_end })
+    })
+}
 
 /// Horizontal paragraph alignment (AE's seven Paragraph panel buttons).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -690,30 +730,26 @@ impl TextDoc {
         self.apply_style(0..n.max(1), f);
     }
 
-    /// Number of paragraphs (`\n`-separated).
+    /// Number of paragraphs (CR, LF or CRLF-separated).
     pub fn para_count(&self) -> usize {
-        self.text.matches('\n').count() + 1
+        paragraph_ranges(&self.text).count()
     }
 
     /// Character ranges of the paragraphs (without their newline).
     pub fn para_ranges(&self) -> Vec<Range<usize>> {
-        let mut out = Vec::new();
-        let mut start = 0;
-        let mut i = 0;
-        for c in self.text.chars() {
-            if c == '\n' {
-                out.push(start..i);
-                start = i + 1;
-            }
-            i += 1;
-        }
-        out.push(start..i);
-        out
+        paragraph_ranges(&self.text).map(|p| p.chars).collect()
     }
 
     /// Paragraph index of character / caret position `ci`.
     pub fn para_of(&self, ci: usize) -> usize {
-        self.text.chars().take(ci).filter(|c| *c == '\n').count()
+        let (mut para, mut cr) = (0usize, false);
+        for ch in self.text.chars().take(ci) {
+            if ch == '\r' || (ch == '\n' && !cr) {
+                para = para.saturating_add(1);
+            }
+            cr = ch == '\r';
+        }
+        para
     }
 
     /// Paragraph settings, one per paragraph.
@@ -775,15 +811,35 @@ impl TextDoc {
         let j = split_at(&mut runs, b);
         let ins = s.chars().count();
         runs.splice(i..j, std::iter::once(StyleRun { len: ins, style: st }));
-        // Paragraphs: the joined paragraph keeps the first one's settings; new paragraphs copy it.
-        let mut paras = self.paras();
-        let pa = self.para_of(a);
-        let pb = self.para_of(b);
-        let added = s.matches('\n').count();
-        let keep = paras[pa].clone();
-        paras.splice(pa..=pb.min(paras.len() - 1), std::iter::repeat_n(keep, added + 1));
+        // Map paragraph starts back to the old text; inserted paragraphs inherit the edited
+        // paragraph. Counting breaks in `s` alone loses styles when CR/LF join or split at an
+        // edit boundary (including deleting just one half of a CRLF).
+        let old_paras = self.paras();
+        let starts: Vec<usize> =
+            std::iter::once(0).chain(self.para_ranges().into_iter().take(old_paras.len().saturating_sub(1)).map(|r| r.end.saturating_add(1))).collect();
+        let base = self.base_para();
+        let old_para = |ci| {
+            let i = starts.partition_point(|start| *start <= ci).saturating_sub(1);
+            old_paras.get(i).cloned().unwrap_or_else(|| base.clone())
+        };
+        let keep = old_para(a);
         let (ba, bb) = (self.byte_of(a), self.byte_of(b));
         self.text.replace_range(ba..bb, s);
+        let end = a.saturating_add(ins);
+        let ends_with_break = s.ends_with('\r') || s.ends_with('\n');
+        let paras = self
+            .para_ranges()
+            .into_iter()
+            .map(|r| {
+                if r.start <= a {
+                    old_para(r.start)
+                } else if r.start < end || (r.start == end && ends_with_break) {
+                    keep.clone()
+                } else {
+                    old_para(r.start.saturating_sub(ins).saturating_add(b.saturating_sub(a)))
+                }
+            })
+            .collect();
         self.set_runs(runs);
         self.set_paras(paras);
     }
@@ -1209,7 +1265,7 @@ pub fn word_at(text: &str, ci: usize) -> Range<usize> {
     let class = |c: char| {
         if c.is_alphanumeric() {
             0
-        } else if c == '\n' {
+        } else if matches!(c, '\r' | '\n') {
             2
         } else if c.is_whitespace() {
             1
@@ -1231,6 +1287,58 @@ pub fn word_at(text: &str, ci: usize) -> Range<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mixed_line_breaks_keep_original_byte_and_character_ranges() {
+        let text = "é\r\nβ\rx\n\n";
+        let spans: Vec<_> = paragraph_ranges(text).collect();
+        assert_eq!(spans.iter().map(|p| p.bytes.clone()).collect::<Vec<_>>(), vec![0..2, 4..6, 7..8, 9..9, 10..10]);
+        assert_eq!(spans.iter().map(|p| &text[p.bytes.clone()]).collect::<Vec<_>>(), vec!["é", "β", "x", "", ""]);
+        let doc = TextDoc::plain(text);
+        assert_eq!(doc.para_count(), 5);
+        assert_eq!(doc.para_ranges(), vec![0..1, 3..4, 5..6, 7..7, 8..8]);
+        assert_eq!((0..=8).map(|ci| doc.para_of(ci)).collect::<Vec<_>>(), vec![0, 0, 1, 1, 1, 2, 2, 3, 4]);
+        let restored: TextDoc = serde_json::from_value(serde_json::to_value(&doc).unwrap()).unwrap();
+        assert_eq!(restored.text, text, "line endings survive a project round trip");
+        assert_eq!(paragraph_ranges("").count(), 1);
+        assert_eq!(paragraph_ranges("\r\n").count(), 2);
+    }
+
+    #[test]
+    fn paragraph_formatting_follows_cr_lf_and_crlf_edits() {
+        for separator in ["\r", "\n", "\r\n"] {
+            let mut doc = TextDoc::plain(&format!("one{separator}two{separator}three"));
+            let start = doc.para_ranges()[1].start;
+            doc.apply_para(start..start + 1, |p| p.indent_left = 30.0);
+            doc.replace_range(start + 1..start + 1, separator, None);
+            assert_eq!(doc.text, format!("one{separator}t{separator}wo{separator}three"));
+            assert_eq!(doc.paras().iter().map(|p| p.indent_left).collect::<Vec<_>>(), vec![0.0, 30.0, 30.0, 0.0]);
+            let ranges = doc.para_ranges();
+            doc.replace_range(ranges[0].end..ranges[1].start, "", None);
+            assert_eq!(doc.text, format!("onet{separator}wo{separator}three"));
+            assert_eq!(doc.paras().iter().map(|p| p.indent_left).collect::<Vec<_>>(), vec![0.0, 30.0, 0.0]);
+        }
+    }
+
+    #[test]
+    fn editing_crlf_boundaries_preserves_untouched_paragraph_styles() {
+        for (text, range, inserted, expected, indents) in [
+            ("a\r\nb", 1..2, "", "a\nb", vec![1.0, 2.0]),
+            ("a\r\nb", 2..3, "", "a\rb", vec![1.0, 2.0]),
+            ("a\rb", 2..2, "\n", "a\r\nb", vec![1.0, 2.0]),
+            ("a\nb", 1..1, "\r", "a\r\nb", vec![1.0, 2.0]),
+            ("a\rX\nb", 2..3, "", "a\r\nb", vec![1.0, 3.0]),
+            ("a\r\nb", 2..2, "X", "a\rX\nb", vec![1.0, 2.0, 2.0]),
+        ] {
+            let mut doc = TextDoc::plain(text);
+            for (i, p) in doc.para_ranges().into_iter().enumerate() {
+                doc.apply_para(p, |p| p.indent_left = (i + 1) as f64);
+            }
+            doc.replace_range(range, inserted, None);
+            assert_eq!(doc.text, expected);
+            assert_eq!(doc.paras().iter().map(|p| p.indent_left).collect::<Vec<_>>(), indents, "{text:?} → {expected:?}");
+        }
+    }
 
     fn sizes(d: &TextDoc) -> Vec<(usize, f64)> {
         d.runs().iter().map(|r| (r.len, r.style.size)).collect()

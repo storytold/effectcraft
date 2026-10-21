@@ -39,7 +39,10 @@ pub fn parse_display_time(s: &Session, comp: &Comp, text: &str, current: i64) ->
             effectcraft_time::parse_feet_frames(text, pf, current + start).map(|f| f - start).map_err(|e| e.0)
         }
         None => {
-            let parsed = effectcraft_time::parse_timecode(text, fr, fr.supports_drop_frame(), current).map_err(|e| e.0)?;
+            // The Timeline shows non-drop timecode (`:`), so typed `:`/`.` text is read as non-drop
+            // too; only explicit `;` fields mean drop-frame (#890).
+            let drop_frame = fr.supports_drop_frame() && text.contains(';');
+            let parsed = effectcraft_time::parse_timecode(text, fr, drop_frame, current).map_err(|e| e.0)?;
             let relative = text.trim().starts_with('+') || text.trim().starts_with('-');
             if relative {
                 Ok(parsed)
@@ -61,8 +64,9 @@ pub fn parse_display_time(s: &Session, comp: &Comp, text: &str, current: i64) ->
 
 fn set(s: &mut Session, p: &Value) -> Result<Value> {
     let comp = s.active_comp().ok_or(EngineError::NoComp)?;
-    let t = if let Some(f) = p.get("frame").and_then(Value::as_i64) {
-        comp.frame_rate.tick_of(f)
+    // Dialog number fields send floats (`5.0`), so a frame is any JSON number, rounded.
+    let t = if let Some(f) = f_p(p, "frame") {
+        comp.frame_rate.tick_of(f.round() as i64)
     } else if let Some(tc) = str_p(p, "timecode") {
         let cur = comp.frame_rate.frame_at(s.time());
         let f = parse_display_time(s, comp, tc, cur).map_err(|e| super::bad("time.set", e))?;
@@ -96,6 +100,14 @@ fn go(s: &mut Session, p: &Value) -> Result<Value> {
         "workEnd" => comp.work_area.1 - comp.frame_duration(),
         "layerIn" => sel_layer.map(|l| l.in_point).unwrap_or(t),
         "layerOut" => sel_layer.map(|l| l.out_point - comp.frame_duration()).unwrap_or(t),
+        "nextInOut" | "prevInOut" => {
+            // In and Out points (its last frame) of the selected layers, of every layer with none
+            // selected.
+            let sel = &s.state.selected_layers;
+            let times =
+                comp.layers.iter().filter(|l| sel.is_empty() || sel.contains(&l.id)).flat_map(|l| [l.in_point, l.out_point - comp.frame_duration()]).collect();
+            step_to(times, t, comp.frame_duration(), to == "nextInOut")
+        }
         "nextKey" | "prevKey" if visible.is_some() => {
             // What the Timeline shows: keys of its revealed properties, layer and comp markers
             // and the work area (After Effects' "visible items").
@@ -144,7 +156,7 @@ fn go(s: &mut Session, p: &Value) -> Result<Value> {
             }
             step_to(times, t, comp.frame_duration(), to == "nextKey")
         }
-        _ => return Err(super::bad("time.go", "to: start|end|workStart|workEnd|layerIn|layerOut|nextKey|prevKey")),
+        _ => return Err(super::bad("time.go", "to: start|end|workStart|workEnd|layerIn|layerOut|nextInOut|prevInOut|nextKey|prevKey")),
     };
     s.set_time(target);
     Ok(report(s))
@@ -169,13 +181,20 @@ fn with_to(p: &Value, to: &str) -> Value {
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         cmd!("time.set", "Go to Time...", ["View"], Some("Alt+Shift+J"), "{time? (s) | frame? | timecode?}", has_comp, set),
-        cmd!("time.nextFrame", "Next Frame", [], Some("PageDown"), "{}", has_comp, |s, _| step(s, &json!({"frames": 1}))),
-        cmd!("time.previousFrame", "Previous Frame", [], Some("PageUp"), "{}", has_comp, |s, _| step(s, &json!({"frames": -1}))),
-        cmd!("time.forward10", "Forward 10 Frames", [], Some("Shift+PageDown"), "{}", has_comp, |s, _| step(s, &json!({"frames": 10}))),
-        cmd!("time.back10", "Back 10 Frames", [], Some("Shift+PageUp"), "{}", has_comp, |s, _| step(s, &json!({"frames": -10}))),
+        cmd!("time.nextFrame", "Next Frame", [], ["PageDown", "Cmd+ArrowRight"], "{}", has_comp, |s, _| step(s, &json!({"frames": 1}))),
+        cmd!("time.previousFrame", "Previous Frame", [], ["PageUp", "Cmd+ArrowLeft"], "{}", has_comp, |s, _| step(s, &json!({"frames": -1}))),
+        cmd!("time.forward10", "Forward 10 Frames", [], ["Shift+PageDown", "Cmd+Shift+ArrowRight"], "{}", has_comp, |s, _| step(s, &json!({"frames": 10}))),
+        cmd!("time.back10", "Back 10 Frames", [], ["Shift+PageUp", "Cmd+Shift+ArrowLeft"], "{}", has_comp, |s, _| step(s, &json!({"frames": -10}))),
         cmd!("time.step", "Step Frames", [], None, "{frames}", has_comp, step),
-        cmd!("time.start", "Go to Start", [], Some("Home"), "{}", has_comp, |s, _| go(s, &json!({"to": "start"}))),
-        cmd!("time.end", "Go to End", [], Some("End"), "{}", has_comp, |s, _| go(s, &json!({"to": "end"}))),
+        cmd!("time.start", "Go to Start", [], ["Home", "Cmd+Alt+ArrowLeft"], "{}", has_comp, |s, _| go(s, &json!({"to": "start"}))),
+        cmd!("time.end", "Go to End", [], ["End", "Cmd+Alt+ArrowRight"], "{}", has_comp, |s, _| go(s, &json!({"to": "end"}))),
+        cmd!("time.workAreaStart", "Go to Work Area Start", [], Some("Shift+Home"), "{}", has_comp, |s, _| go(s, &json!({"to": "workStart"}))),
+        cmd!("time.workAreaEnd", "Go to Work Area End", [], Some("Shift+End"), "{}", has_comp, |s, _| go(s, &json!({"to": "workEnd"}))),
+        cmd!("time.previousInOut", "Go to Previous In or Out Point", [], Some("Cmd+Alt+Shift+ArrowLeft"), "{}", has_comp, |s, _| go(
+            s,
+            &json!({"to": "prevInOut"})
+        )),
+        cmd!("time.nextInOut", "Go to Next In or Out Point", [], Some("Cmd+Alt+Shift+ArrowRight"), "{}", has_comp, |s, _| go(s, &json!({"to": "nextInOut"}))),
         cmd!("time.layerIn", "Go to Layer In Point", [], Some("I"), "{}", has_comp, |s, _| go(s, &json!({"to": "layerIn"}))),
         cmd!("time.layerOut", "Go to Layer Out Point", [], Some("O"), "{}", has_comp, |s, _| go(s, &json!({"to": "layerOut"}))),
         cmd!(
@@ -196,7 +215,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Go To",
             [],
             None,
-            "{to: start|end|workStart|workEnd|layerIn|layerOut|nextKey|prevKey, prop?: uid, visible?: [{layer, prop}]}",
+            "{to: start|end|workStart|workEnd|layerIn|layerOut|nextInOut|prevInOut|nextKey|prevKey, prop?: uid, visible?: [{layer, prop}]}",
             has_comp,
             go
         ),

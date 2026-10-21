@@ -15,6 +15,7 @@ use effectcraft_ui_egui::dock::PanelKind;
 use effectcraft_ui_egui::panels::viewer::{comp_to_screen, last_fit};
 use egui::{Event, Modifiers, Pos2, Rect, pos2, vec2};
 use egui_kittest::Harness;
+use egui_kittest::kittest::Queryable;
 use serde_json::json;
 
 /// Comp "Main" (4 s at 30 fps, current time 1 s) with solids Top, Middle and Bottom, and comp
@@ -252,6 +253,48 @@ fn multiple_selected_footage_dropped_on_empty_timeline_asks_how_to_create_comps(
     assert!(h.state().session.active_comp().is_none(), "no composition until the user chooses");
 }
 
+/// #684: dropping imported footage onto the empty Composition viewer creates
+/// a composition that matches the source, with that source as its first layer.
+#[test]
+fn project_footage_dropped_on_empty_viewer_creates_first_comp() {
+    let mut s = Session::default();
+    let footage =
+        s.execute("file.importPlaceholder", json!({"name": "Landscape.png", "width": 640, "height": 360, "frameRate": 24, "duration": 5})).unwrap()["item"]
+            .as_u64()
+            .unwrap();
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    h.run_steps(3);
+    assert!(h.state().session.active_comp().is_none());
+    let from = rect(&h, &format!("project.item.{footage}.name")).center();
+    let viewer = rect(&h, "panel.Composition");
+    drag(&mut h, from, pos2(viewer.min.x + 40.0, viewer.min.y + 70.0), Modifiers::NONE);
+    let comp = h.state().session.active_comp().expect("created a composition");
+    assert_eq!((comp.width, comp.height), (640, 360));
+    assert_eq!(comp.frame_rate, effectcraft_engine::time::FrameRate::from_f64(24.0));
+    assert_eq!(comp.duration.seconds(), 5.0);
+    assert_eq!(comp.layers.len(), 1);
+    assert_eq!(comp.layers[0].name, "Landscape.png");
+    assert!(h.state().dialog.is_none());
+}
+
+/// Several dragged sources must ask whether to create one or multiple comps,
+/// rather than silently discarding the other selected items.
+#[test]
+fn multiple_selected_footage_dropped_on_empty_viewer_asks_how_to_create_comps() {
+    let mut s = Session::default();
+    let first = s.execute("file.importPlaceholder", json!({"name": "First.png", "width": 160, "height": 90})).unwrap()["item"].as_u64().unwrap();
+    let second = s.execute("file.importPlaceholder", json!({"name": "Second.png", "width": 300, "height": 200})).unwrap()["item"].as_u64().unwrap();
+    s.state.project_selection = vec![effectcraft_engine::project::ItemId(first), effectcraft_engine::project::ItemId(second)];
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    h.run_steps(3);
+    let from = rect(&h, &format!("project.item.{first}.name")).center();
+    let viewer = rect(&h, "panel.Composition");
+    drag(&mut h, from, pos2(viewer.min.x + 40.0, viewer.min.y + 70.0), Modifiers::NONE);
+    assert_eq!(h.state().dialog, Some(effectcraft_ui_egui::Dialog::Form));
+    assert!(h.state().auto.find("form.field.single").is_some());
+    assert!(h.state().session.active_comp().is_none(), "no composition until the user chooses");
+}
+
 /// A file dropped on the window (egui hands it over as a dropped file).
 #[derive(Debug)]
 struct Dropped(std::path::PathBuf);
@@ -377,6 +420,35 @@ fn dropped_file_on_viewer_imports_and_adds_layer_at_pointer() {
     let Some(KV::Vec3(p)) = layer.props.prop("transform/position").map(|p| p.value.clone()) else { panic!("no position") };
     let tol = 1.0 / last_fit(&h.ctx) as f64 + 1e-6;
     assert!((p[0] - 80.0).abs() <= tol && (p[1] - 45.0).abs() <= tol, "{p:?}");
+}
+
+/// #678: a dropped Photoshop file asks how to import it, as File ▸ Import ▸ File… does; the
+/// Import Kind starts at Settings ▸ Import ▸ Default Drag Import As, and OK imports the drop.
+#[test]
+fn dropped_photoshop_file_shows_the_import_photoshop_file_dialog() {
+    let (mut h, _) = harness();
+    h.state_mut().session.importer = Some(Arc::new(Gated { started: AtomicUsize::new(0), allow: Arc::new(AtomicUsize::new(usize::MAX)) }));
+    h.state_mut().session.prefs.import.drag_import_as = "compLayerSizes".into();
+    h.event(Event::PointerMoved(rect(&h, "panel.Project").center()));
+    h.step();
+    h.input_mut().dropped_files.push(Arc::new(Dropped(std::env::temp_dir().join("Layers.PSD"))));
+    h.run_steps(2);
+    assert_eq!(h.state().dialog, Some(effectcraft_ui_egui::Dialog::Form), "the drop asks first");
+    h.run_steps(2);
+    assert!(h.query_by_label("Import Photoshop File").is_some());
+    assert!(h.query_by_value("Composition - Retain Layer Sizes").is_some(), "Import Kind starts at Default Drag Import As");
+    assert!(!h.state().session.project.items.values().any(|i| i.name == "Layers.PSD"), "nothing imported before OK");
+    click_id(&mut h, "form.cancel");
+    assert_eq!(h.state().dialog, None);
+
+    // With Default Drag Import As at Footage, OK imports the file as one item.
+    h.state_mut().session.prefs.import.drag_import_as = "footage".into();
+    h.input_mut().dropped_files.push(Arc::new(Dropped(std::env::temp_dir().join("Layers.PSD"))));
+    h.run_steps(4);
+    assert_eq!(h.state().dialog, Some(effectcraft_ui_egui::Dialog::Form));
+    assert!(h.query_by_value("Footage").is_some());
+    click_id(&mut h, "form.ok");
+    step_until(&mut h, |h| h.state().session.project.items.values().any(|i| i.name == "Layers.PSD"));
 }
 
 #[test]
@@ -511,4 +583,29 @@ fn a_dropped_folder_imports_as_one_sequence_with_sequence_interpretation() {
     }
     assert!(h.state().auto.find("form.field.missingFrames").is_none());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn illustrator_import_offers_and_applies_retain_layer_sizes() {
+    let path = std::env::temp_dir().join(format!("effectcraft-retain-ui-{}.ai", std::process::id()));
+    std::fs::write(&path, b"%PDF-1.4\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 120 80] /Contents 4 0 R >> endobj\n4 0 obj << >> stream\n1 0 0 rg 20 15 30 20 re f\nendstream endobj\n%%EOF").unwrap();
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(effectcraft_host::session()));
+    h.run_steps(3);
+    let ctx = h.ctx.clone();
+    effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "file.import", json!({"paths": [path]})).unwrap();
+    h.run_steps(3);
+    assert!(h.query_by_label("Import PDF / Illustrator File").is_some());
+    click_id(&mut h, "form.field.importAs");
+    h.get_by_label("Composition - Retain Layer Sizes").click();
+    h.run_steps(2);
+    click_id(&mut h, "form.ok");
+    step_until(&mut h, |h| h.state().session.active_comp().is_some());
+    let s = &h.state().session;
+    let comp = s.active_comp().unwrap();
+    assert_eq!((comp.width, comp.height), (120, 80));
+    assert_eq!(comp.layers.len(), 1);
+    let effectcraft_engine::project::LayerSource::Footage { item } = comp.layers[0].source else { panic!("footage") };
+    let effectcraft_engine::project::ItemKind::Footage(f) = &s.project.item(item).unwrap().kind else { panic!("footage") };
+    assert_eq!((f.width, f.height), (30, 20));
+    assert!(f.layer.as_ref().unwrap().layer_size);
 }

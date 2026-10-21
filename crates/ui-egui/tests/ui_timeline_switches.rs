@@ -100,6 +100,37 @@ fn dragging_over_layer_switches_sets_them_all() {
     assert_eq!(states(&h, &ids, video), [false, true, false, true], "other switches untouched");
 }
 
+/// Alt-click on an A/V feature sets the layer apart (the other layers hidden / locked), and the
+/// next Alt-click brings the others back; the Switches column is not affected by Alt.
+#[test]
+fn alt_click_on_av_feature_switches_the_other_layers() {
+    let (mut h, ids) = harness();
+    let alt_click = |h: &mut Harness<'_, EffectcraftApp>, id: String| {
+        let p = rect(h, &id).center();
+        let modifiers = Modifiers::ALT;
+        h.event(Event::PointerMoved(p));
+        h.event(Event::ModifiersChanged(modifiers));
+        h.step();
+        h.event(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers });
+        h.step();
+        h.event(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers });
+        h.event(Event::ModifiersChanged(Modifiers::NONE));
+        h.run_steps(3);
+    };
+    let steps = h.state().session.history.undo.len();
+    alt_click(&mut h, format!("timeline.layer.{}.video", ids[1]));
+    assert_eq!(states(&h, &ids, video), [false, true, false, false]);
+    assert_eq!(h.state().session.history.undo.len(), steps + 1, "one undo step");
+    alt_click(&mut h, format!("timeline.layer.{}.video", ids[1]));
+    assert_eq!(states(&h, &ids, video), [true; 4]);
+    alt_click(&mut h, format!("timeline.layer.{}.lock", ids[2]));
+    assert_eq!(states(&h, &ids, |l| l.switches.locked), [true, true, false, true]);
+    alt_click(&mut h, format!("timeline.layer.{}.solo", ids[0]));
+    assert_eq!(states(&h, &ids, |l| l.switches.solo), [true, false, false, false]);
+    alt_click(&mut h, format!("timeline.layer.{}.switch.motionBlur", ids[0]));
+    assert_eq!(states(&h, &ids, motion_blur), [true, false, false, false]);
+}
+
 /// #284: pressing a stopwatch and dragging over the stopwatches below gives every property the
 /// state the first one got (animated or not), in one undo step; Alt+click still adds an
 /// expression and a click toggles one property.

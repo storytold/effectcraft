@@ -3,7 +3,7 @@
 use effectcraft_effects::Buf;
 use effectcraft_geom::{Mat3, vec2};
 use effectcraft_keyframe::Value;
-use effectcraft_path::{FillRule, StrokeStyle};
+use effectcraft_path::{FillRule, Join};
 use effectcraft_project::{FeatherFalloff, GroupKind, Layer, MaskMode, MaskMotionBlur};
 use effectcraft_raster::{Mask, box_blur, gaussian_blur};
 use rayon::prelude::*;
@@ -72,21 +72,15 @@ fn coverage_at(ctx: &EvalCtx, layer: &Layer, g: &effectcraft_project::PropGroup,
     let variable = !sp.feather.is_empty();
     let mut cov = if variable {
         effectcraft_path::feather::variable_feather_coverage(&sp, &m, w, h, exp, linear)
+    } else if exp.abs() > 0.01 {
+        // Expansion offsets the outline itself (round joins). Offset Paths' geometry stays right
+        // when the expansion exceeds a curvature radius, where a fill + stroke blend leaves a
+        // ring around an uncovered middle (growing) or islands (shrinking).
+        let grown = effectcraft_path::offset::offset_path(&path, exp, Join::Round, 4.0);
+        effectcraft_path::fill_coverage(std::slice::from_ref(&grown), &m, w, h, FillRule::NonZero)
     } else {
         effectcraft_path::fill_coverage(std::slice::from_ref(&path), &m, w, h, FillRule::NonZero)
     };
-    if exp.abs() > 0.01 && !variable {
-        let ring = effectcraft_path::stroke_coverage(
-            std::slice::from_ref(&path),
-            &StrokeStyle { width: exp.abs() * 2.0, join: effectcraft_path::Join::Round, ..Default::default() },
-            &m,
-            w,
-            h,
-        );
-        cov.data.par_iter_mut().zip(ring.data.par_iter()).for_each(|(c, r)| {
-            *c = if exp > 0.0 { (*c + r - *c * r).min(1.0) } else { (*c * (1.0 - r)).max(0.0) };
-        });
-    }
     let feather = ctx.v2(layer, g, "feather", [0.0; 2]);
     if feather[0] > 0.0 || feather[1] > 0.0 {
         let img = cov.to_image();

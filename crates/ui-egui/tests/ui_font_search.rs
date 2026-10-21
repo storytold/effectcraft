@@ -105,3 +105,74 @@ fn font_search_preserves_edited_text_and_applies_only_to_selected_characters() {
     assert_eq!(doc.style_at(0).font, "Noto Serif");
     assert_eq!(doc.style_at(8).font, "Inter");
 }
+
+/// A font file of just `name` (the family, Regular) and an `fvar` table with one axis pinned at
+/// 400: a variable font as far as the font menu's filter is concerned.
+fn pinned_variable_font(family: &str) -> Vec<u8> {
+    let u16s = |v: &[u16]| -> Vec<u8> { v.iter().flat_map(|x| x.to_be_bytes()).collect() };
+    let strings: Vec<Vec<u8>> = [family, "Regular"].iter().map(|s| s.encode_utf16().flat_map(|u| u.to_be_bytes()).collect()).collect();
+    let mut name = u16s(&[0, 2, 30]);
+    let mut off = 0;
+    for (id, st) in strings.iter().enumerate() {
+        name.extend(u16s(&[3, 1, 0x409, id as u16 + 1, st.len() as u16, off]));
+        off += st.len() as u16;
+    }
+    strings.iter().for_each(|st| name.extend(st));
+    let mut fvar = u16s(&[1, 0, 16, 2, 1, 20, 0, 8]);
+    fvar.extend(b"wght".iter().copied().chain(u16s(&[0x190, 0, 0x190, 0, 0x190, 0, 0, 256])));
+    let mut out = u16s(&[1, 0, 2, 0, 0, 0]);
+    let mut body: Vec<u8> = vec![];
+    for (tag, data) in [(b"fvar", fvar), (b"name", name)] {
+        out.extend(tag);
+        out.extend([0u8; 4]);
+        out.extend(((12 + 32 + body.len()) as u32).to_be_bytes());
+        out.extend((data.len() as u32).to_be_bytes());
+        body.extend(data);
+    }
+    out.extend(body);
+    out
+}
+
+/// The font menu's Variable Fonts filter (After Effects 26.3): the checkbox keeps only variable
+/// families, works with the typed search (which keeps the keyboard), and stays on when the menu
+/// is reopened until it is turned off.
+#[test]
+fn font_menu_filters_variable_fonts() {
+    const FAMILY: &str = "Inter Variable Menu Test";
+    assert_eq!(effectcraft_engine::text::fonts::add_font_data(pinned_variable_font(FAMILY)).len(), 1);
+    let variable = effectcraft_engine::text::fonts::variable_families();
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"width": 320, "height": 180})).unwrap();
+    let lid = s.execute("layer.newText", json!({"text": "Var", "font": "Inter"})).unwrap()["layer"].as_u64().unwrap();
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(move |_| EffectcraftApp::new(s));
+    h.state_mut().show_panel(PanelKind::Character);
+    h.run_steps(3);
+    let families = |h: &Harness<'_, EffectcraftApp>| -> Vec<String> {
+        h.state().auto.query("character.font.option.").iter().map(|e| e.id.trim_start_matches("character.font.option.").to_string()).collect()
+    };
+    click(&mut h, "character.font");
+    type_text(&mut h, "inter");
+    let shown = families(&h);
+    assert!(shown.iter().any(|f| f == "Inter") && shown.iter().any(|f| f == FAMILY), "unfiltered at first: {shown:?}");
+    click(&mut h, "character.font.variable");
+    let shown = families(&h);
+    assert!(shown.iter().any(|f| f == FAMILY), "{shown:?}");
+    assert!(shown.iter().all(|f| variable.contains(f)), "only variable families: {shown:?}");
+    // The search field keeps the keyboard and narrows the filtered list further.
+    type_text(&mut h, " variable menu");
+    assert_eq!(families(&h), vec![FAMILY.to_string()]);
+    type_text(&mut h, "x");
+    assert!(families(&h).is_empty());
+    assert!(h.state().auto.find("character.font.empty").is_some());
+    key(&mut h, Key::Escape);
+    // Reopened: still filtered; turning it off lists the static families again.
+    click(&mut h, "character.font");
+    h.run_steps(2);
+    let shown = families(&h);
+    assert!(!shown.is_empty() && shown.iter().all(|f| variable.contains(f)), "the filter stays on: {shown:?}");
+    click(&mut h, "character.font.variable");
+    type_text(&mut h, "inter");
+    assert!(families(&h).iter().any(|f| f == "Inter"), "{:?}", families(&h));
+    key(&mut h, Key::Escape);
+    assert_eq!(layer_doc(&h.state().session, LayerId(lid)).unwrap().font, "Inter", "filtering changes nothing");
+}

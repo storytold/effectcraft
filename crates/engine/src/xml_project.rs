@@ -18,6 +18,11 @@ use serde_json::{Map, Value};
 
 const ROOT: &str = "EffectCraftProject";
 
+/// How deep `arr`/`obj` elements may nest: the JSON reader's own limit (`serde_json` stops at
+/// 128), so every project the JSON form can hold reads from XML too. Without a limit a deeply
+/// nested file overflowed the stack and aborted the app instead of failing to open (#779).
+const MAX_DEPTH: usize = 128;
+
 /// Whether `text` looks like an XML project.
 pub fn is_xml(text: &str) -> bool {
     let t = text.trim_start_matches('\u{feff}').trim_start();
@@ -158,7 +163,10 @@ impl<'a> P<'a> {
         self.i += end;
         t
     }
-    fn value(&mut self) -> Result<Value, String> {
+    fn value(&mut self, depth: usize) -> Result<Value, String> {
+        if depth > MAX_DEPTH {
+            return self.err(&format!("elements nested deeper than {MAX_DEPTH} levels"));
+        }
         let (name, _, closed) = self.open()?;
         let v = match (name.as_str(), closed) {
             ("null", _) => Value::Null,
@@ -175,7 +183,7 @@ impl<'a> P<'a> {
                     if self.rest().starts_with("</") {
                         break;
                     }
-                    a.push(self.value()?);
+                    a.push(self.value(depth + 1)?);
                 }
                 Value::Array(a)
             }
@@ -190,7 +198,7 @@ impl<'a> P<'a> {
                     if tag != "m" {
                         return self.err("expected <m n=\"…\">");
                     }
-                    let v = self.value()?;
+                    let v = self.value(depth + 1)?;
                     self.close("m")?;
                     m.insert(key.unwrap_or_default(), v);
                 }
@@ -243,7 +251,7 @@ pub fn from_xml(text: &str) -> Result<String, String> {
     if root != ROOT {
         return Err(format!("not an EffectCraft XML project (root <{root}>)"));
     }
-    let v = p.value()?;
+    let v = p.value(0)?;
     p.close(ROOT)?;
     serde_json::to_string(&v).map_err(|e| e.to_string())
 }
@@ -261,5 +269,19 @@ mod tests {
         let back: Value = serde_json::from_str(&from_xml(&xml).unwrap()).unwrap();
         assert_eq!(back, j);
         assert!(from_xml("<Other/>").is_err());
+    }
+
+    /// #779 (found by the project-file fuzzer): a file of deeply nested elements overflowed the
+    /// stack, which aborts the app; it is now refused. Nesting the JSON reader takes still reads.
+    #[test]
+    fn deep_nesting_is_refused_not_a_stack_overflow() {
+        let nested = |n: usize| format!("<{ROOT}>{}<null/>{}</{ROOT}>", "<arr>".repeat(n), "</arr>".repeat(n));
+        let e = from_xml(&nested(1_000_000)).unwrap_err();
+        assert!(e.contains("nested deeper"), "{e}");
+        let ok = from_xml(&nested(100)).unwrap();
+        assert!(serde_json::from_str::<Value>(&ok).is_ok());
+        let json = format!("{}null{}", "[".repeat(MAX_DEPTH - 1), "]".repeat(MAX_DEPTH - 1));
+        let v: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&from_xml(&to_xml(&json).unwrap()).unwrap()).unwrap(), v);
     }
 }

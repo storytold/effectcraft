@@ -132,7 +132,7 @@ fn is_script_name(name: &str) -> bool {
 }
 
 /// One path component on every platform: not empty, `.` or `..`, and without `/`, `\` or NUL.
-fn is_bare_name(name: &str) -> bool {
+pub(crate) fn is_bare_name(name: &str) -> bool {
     !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\', '\0'])
 }
 
@@ -140,7 +140,7 @@ fn is_bare_name(name: &str) -> bool {
 /// stream), ending in `.` or a space (Windows drops them), or a device name, which names a device
 /// in any folder and with any extension (`con.jsx`): `CON`, `PRN`, `AUX`, `NUL`, `CONIN$`,
 /// `CONOUT$`, `COM0`–`COM9` and `LPT0`–`LPT9` (also with `¹²³`).
-fn windows_unsafe_name(name: &str) -> bool {
+pub(crate) fn windows_unsafe_name(name: &str) -> bool {
     let stem = name.split('.').next().unwrap_or_default().trim_end_matches(' ').to_ascii_uppercase();
     let port = |p: &str| {
         let mut n = stem.strip_prefix(p).unwrap_or_default().chars();
@@ -384,6 +384,15 @@ pub fn specs() -> Vec<CommandSpec> {
             always,
             settings_save
         ),
+        cmd!(
+            "script.runTasks",
+            "Run Scheduled Script Tasks",
+            [],
+            None,
+            "{} → runs the app.scheduleTask tasks that are due (frontends do it every frame) → {ran, output, errors, next (ms until the next task, or null)}",
+            always,
+            scriptui::run_tasks
+        ),
         crate::query!("scriptui.list", "List Script Windows", "{} → [{window, title, kind: dialog|palette|window|panel, script, modal, size}]", scriptui::list),
         crate::query!(
             "scriptui.get",
@@ -408,6 +417,15 @@ pub fn specs() -> Vec<CommandSpec> {
             "{window?, widget, value: text | number | bool | item index | item text, changing?: bool (a live update: each keystroke / slider step; fires onChanging only)} (edit text, sliders, checkboxes, lists) → fires onChanging / onChange",
             always,
             scriptui::set
+        ),
+        cmd!(
+            "scriptui.mouse",
+            "Mouse Event on Script Window Control",
+            [],
+            None,
+            "{window?, widget, type: mousedown | mouseup | mousemove | mouseover | mouseout | click (default), x?, y? (relative to the control; default its centre), button? (0 left, 1 middle, 2 right), detail? (click count), screenX?, screenY?, altKey?, ctrlKey?, metaKey?, shiftKey?} → the script's addEventListener listeners on the control and its containers receive a MouseEvent",
+            always,
+            scriptui::mouse
         ),
         cmd!(
             "scriptui.close",

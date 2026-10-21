@@ -171,6 +171,20 @@ pub enum JobKind {
 }
 
 impl JobKind {
+    /// The corresponding `jobs.list` id, also used by waiting control commands.
+    pub fn job_id(self) -> &'static str {
+        match self {
+            JobKind::Render => "render",
+            JobKind::Warp => "warp",
+            JobKind::WarpPlan => "warpPlan",
+            JobKind::Camera => "camera",
+            JobKind::RotoFreeze | JobKind::RotoPropagate => "roto",
+            JobKind::Track => "track",
+            JobKind::MaskTrack => "maskTrack",
+            JobKind::ContentFill => "contentFill",
+        }
+    }
+
     /// The undo step an analysis result becomes.
     pub fn label(self) -> &'static str {
         match self {
@@ -296,13 +310,15 @@ pub fn next_id() -> u64 {
     NEXT_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-/// Footage files a project reads (paths, sequence frames).
+/// Footage files a project reads (paths, sequence frames; missing items read none).
 pub fn footage_files(p: &Project) -> Vec<String> {
     let mut v: Vec<String> = p
         .items
         .values()
         .filter_map(|i| match &i.kind {
-            ItemKind::Footage(f) if !f.path.is_empty() => Some(std::iter::once(f.path.clone()).chain(f.sequence.iter().cloned()).collect::<Vec<_>>()),
+            ItemKind::Footage(f) if !f.path.is_empty() && !f.missing => {
+                Some(std::iter::once(f.path.clone()).chain(f.sequence.iter().cloned()).collect::<Vec<_>>())
+            }
             _ => None,
         })
         .flatten()
@@ -561,7 +577,8 @@ async fn fill(s: &mut Session, plan: crate::commands::content_fill::FillPlan, po
 /// Roto Brush propagation in a worker: the segmentations stream back (at most every 250 ms)
 /// as they are computed, so stopping the job keeps what was propagated.
 async fn propagate(s: &mut Session, comp: ItemId, layer: LayerId, effect: Uid, dir: crate::roto::Direction, post: Post) -> Result<(), String> {
-    let keys: Vec<u64> = s.roto_chain(comp, layer, effect).map(|c| c.keys.values().copied().collect()).ok_or("no Roto Brush strokes")?;
+    let keys: Vec<u64> =
+        s.roto_keys(comp, layer, effect).map(|k| k.into_iter().map(|(_, k)| k).collect()).ok_or("no Roto Brush strokes or Object Matte prompt")?;
     let sent = Rc::new(RefCell::new(std::collections::HashSet::new()));
     let (p, k2, s2) = (post.clone(), keys.clone(), sent.clone());
     let mut last = None::<web_time::Instant>;
@@ -698,6 +715,9 @@ pub struct OffloadedJob {
     /// Segmentations received (Roto Brush propagation).
     pub segs: u64,
     started: web_time::Instant,
+    /// The analysed group as the job started: its result is merged with what changed since
+    /// ([`merge_group`]).
+    base: Option<Box<PropGroup>>,
 }
 
 /// A Render Queue job running in a worker (see [`crate::render_queue::RenderJob`]).
@@ -729,6 +749,7 @@ impl Session {
         }
         let id = next_id();
         let inbox = Arc::new(Inbox::default());
+        let base = self.project.comp(comp).and_then(|c| c.layer(layer)).and_then(|l| l.props.find_group(uid)).cloned().map(Box::new);
         let req = WorkerRequest { id, project: self.project.to_json(), files: footage_files(&self.project), job };
         off.start(req, inbox.clone())?;
         self.offloaded.push(OffloadedJob {
@@ -741,6 +762,7 @@ impl Session {
             progress: OffloadProgress::default(),
             segs: 0,
             started: web_time::Instant::now(),
+            base,
         });
         self.events.push(Event::ProjectChanged { revision: self.revision });
         Ok(())
@@ -778,7 +800,7 @@ impl Session {
                         j.progress.done = done;
                         j.progress.total = total;
                     }
-                    WorkerReply::Group { comp, layer, group, message } => results.push((j.kind, comp, layer, group, message)),
+                    WorkerReply::Group { comp, layer, group, message } => results.push((j.id, j.kind, comp, layer, group, message, j.base.clone())),
                     WorkerReply::Fill { plan, files } => fills.push((plan, files)),
                     WorkerReply::WarpPlan { key, summary } => effectcraft_effects::warp_stab::store_summary(key, *summary),
                     WorkerReply::Segs { segs } => {
@@ -801,7 +823,7 @@ impl Session {
                 Err(e) => self.events.push(Event::Toast { message: format!("Content-Aware Fill: {e}"), error: true }),
             }
         }
-        for (kind, comp, layer, group, message) in results {
+        for (id, kind, comp, layer, group, message, base) in results {
             let uid = group.uid;
             let r = self.edit(kind.label(), None, |p, _| {
                 let g = p
@@ -809,12 +831,31 @@ impl Session {
                     .and_then(|c| c.layer_mut(layer))
                     .and_then(|l| l.props.find_group_mut(uid))
                     .ok_or_else(|| crate::EngineError::Other("the analysed property was removed during the analysis".into()))?;
-                *g = *group;
+                // Edits made while the job ran stay (#1249): only what the analysis changed is
+                // taken from its result.
+                *g = match base {
+                    Some(base) => merge_group(&base, g, &group).ok_or_else(|| {
+                        crate::EngineError::Other(format!(
+                            "“{}” was changed during the analysis where its result changes it too, so nothing was applied: analyse again",
+                            g.name
+                        ))
+                    })?,
+                    None => *group,
+                };
                 Ok(())
             });
             match r {
                 Ok(()) => self.events.push(Event::Toast { message, error: false }),
-                Err(e) => self.events.push(Event::Toast { message: format!("{}: {e}", kind.label()), error: true }),
+                Err(e) => {
+                    // Completion consumers read the job's error, not its toasts. Keep an apply
+                    // rejection on the originating job; Done logs and reports it just like a
+                    // WorkerReply::Failed, without failing another concurrent analysis.
+                    if let Some(job) = self.offloaded.iter_mut().find(|j| j.id == id) {
+                        job.progress.error = Some(e.to_string());
+                    } else {
+                        self.events.push(Event::Toast { message: format!("{}: {e}", kind.label()), error: true });
+                    }
+                }
             }
         }
         let mut done = vec![];
@@ -829,6 +870,7 @@ impl Session {
             self.offload_log.push((kind, p.error.clone().or_else(|| p.cancelled.then(|| "stopped".to_string()))));
             if self.offload_log.len() > 32 {
                 self.offload_log.remove(0);
+                self.offload_log_start = self.offload_log_start.saturating_add(1);
             }
             if let Some(e) = p.error {
                 self.events.push(Event::Toast { message: format!("{}: {e}", kind.label()), error: true });
@@ -879,6 +921,76 @@ impl Session {
     }
 }
 
+/// `live` if only it changed since `base`, `result` if only that did (or both the same way);
+/// `None` when both changed it differently.
+fn pick<T: PartialEq + Clone>(base: &T, live: &T, result: &T) -> Option<T> {
+    if live == base {
+        Some(result.clone())
+    } else if result == base || result == live {
+        Some(live.clone())
+    } else {
+        None
+    }
+}
+
+fn node_uid(n: &effectcraft_project::Node) -> Uid {
+    match n {
+        effectcraft_project::Node::Prop(p) => p.uid,
+        effectcraft_project::Node::Group(g) => g.uid,
+    }
+}
+
+/// Merge an analysis `result` into the `live` group (#1249). `base` is the group as the job
+/// started. The group's own fields and each property are taken from whichever side changed
+/// them, groups are merged child by child (matched by uid), and a child added or removed by one
+/// side is added or removed. `None` when both sides changed the same field or property
+/// differently, one side removed a child the other changed, or both reordered or added and
+/// removed children differently: a conflict.
+pub(crate) fn merge_group(base: &PropGroup, live: &PropGroup, result: &PropGroup) -> Option<PropGroup> {
+    use effectcraft_project::Node;
+    if live == base {
+        return Some(result.clone());
+    }
+    if result == base || result == live {
+        return Some(live.clone());
+    }
+    let header = |g: &PropGroup| PropGroup { children: vec![], ..g.clone() };
+    let mut out = pick(&header(base), &header(live), &header(result))?;
+    let ids = |g: &PropGroup| g.children.iter().map(node_uid).collect::<Vec<_>>();
+    let (bi, li, ri) = (ids(base), ids(live), ids(result));
+    // The children's order and set: from the side that changed them.
+    let order = if li == bi {
+        ri
+    } else if ri == bi || ri == li {
+        li
+    } else {
+        return None;
+    };
+    fn find(g: &PropGroup, u: Uid) -> Option<&effectcraft_project::Node> {
+        g.children.iter().find(|n| node_uid(n) == u)
+    }
+    // A child one side removed must be unchanged on the other, or that side's edit would be lost.
+    for u in bi.iter().filter(|u| !order.contains(u)) {
+        let b = find(base, *u);
+        if [find(live, *u), find(result, *u)].into_iter().flatten().any(|n| Some(n) != b) {
+            return None;
+        }
+    }
+    for u in order {
+        let node = match (find(base, u), find(live, u), find(result, u)) {
+            (Some(Node::Group(b)), Some(Node::Group(l)), Some(Node::Group(r))) => Node::Group(merge_group(b, l, r)?),
+            (Some(b), Some(l), Some(r)) => pick(b, l, r)?,
+            // Added by one side, or by both alike.
+            (None, Some(l), None) => l.clone(),
+            (None, None, Some(r)) => r.clone(),
+            (None, Some(l), Some(r)) if l == r => l.clone(),
+            _ => return None,
+        };
+        out.children.push(node);
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -889,6 +1001,69 @@ mod tests {
         let b = serde_json::to_string(&back).unwrap();
         assert_eq!(a, b);
         a
+    }
+
+    /// A group with properties `a` (uid 2) and `b` (uid 3) and a sub-group (uid 4) holding `c`
+    /// (uid 5).
+    fn group() -> PropGroup {
+        use effectcraft_keyframe::Value as KV;
+        use effectcraft_project::{Node, Property};
+        let mut sub = PropGroup::new(4, "sub", "Sub");
+        sub.children.push(Node::Prop(Property::new(5, "c", "C", KV::Scalar(0.0))));
+        let mut g = PropGroup::new(1, "fx", "Effect");
+        g.children.push(Node::Prop(Property::new(2, "a", "A", KV::Scalar(0.0))));
+        g.children.push(Node::Prop(Property::new(3, "b", "B", KV::Scalar(0.0))));
+        g.children.push(Node::Group(sub));
+        g
+    }
+
+    fn set(g: &mut PropGroup, uid: Uid, v: f64) {
+        g.find_mut(uid).unwrap().value = effectcraft_keyframe::Value::Scalar(v);
+    }
+
+    fn get(g: &PropGroup, uid: Uid) -> f64 {
+        match g.find(uid).unwrap().value {
+            effectcraft_keyframe::Value::Scalar(v) => v,
+            ref v => panic!("{v:?}"),
+        }
+    }
+
+    #[test]
+    fn analysis_results_merge_with_edits_made_meanwhile() {
+        use effectcraft_project::Node;
+        let base = group();
+        // The user changes `a` and switches the effect off; the analysis writes `b` and `c`.
+        let mut live = base.clone();
+        set(&mut live, 2, 1.0);
+        live.enabled = false;
+        let mut result = base.clone();
+        set(&mut result, 3, 2.0);
+        set(&mut result, 5, 3.0);
+        let m = merge_group(&base, &live, &result).unwrap();
+        assert_eq!((get(&m, 2), get(&m, 3), get(&m, 5), m.enabled), (1.0, 2.0, 3.0, false));
+        // Unchanged on either side: the other side wins whole.
+        assert_eq!(merge_group(&base, &base, &result).unwrap(), result);
+        assert_eq!(merge_group(&base, &live, &base).unwrap(), live);
+        // Both changed `b`, differently: a conflict (nothing is applied). The same way: fine.
+        let mut both = live.clone();
+        set(&mut both, 3, 9.0);
+        assert!(merge_group(&base, &both, &result).is_none());
+        set(&mut both, 3, 2.0);
+        assert_eq!(get(&merge_group(&base, &both, &result).unwrap(), 3), 2.0);
+        // The analysis adds a child (a result group) while the user edits `a`: both kept.
+        let mut added = result.clone();
+        added.children.push(Node::Group(PropGroup::new(6, "out", "Output")));
+        let m = merge_group(&base, &live, &added).unwrap();
+        assert!(m.find_group(6).is_some() && get(&m, 2) == 1.0);
+        // The analysis drops the sub-group the user didn't touch: dropped.
+        let mut dropped = result.clone();
+        dropped.children.retain(|n| !matches!(n, Node::Group(g) if g.uid == 4));
+        let m = merge_group(&base, &live, &dropped).unwrap();
+        assert!(m.find_group(4).is_none() && get(&m, 2) == 1.0);
+        // …but if the user changed something in it, that's a conflict.
+        let mut touched = live.clone();
+        set(&mut touched, 5, 7.0);
+        assert!(merge_group(&base, &touched, &dropped).is_none());
     }
 
     #[test]

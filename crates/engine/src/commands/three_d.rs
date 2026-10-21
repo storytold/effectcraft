@@ -320,6 +320,21 @@ fn set_3d_view(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(switch_view(s, cid, v))
 }
 
+/// The view of one pane of the View Layout: pane 0 is the main view (the same as Switch 3D View),
+/// panes 1 to 3 are the extra views of a 2- or 4-view layout. UI state, not part of the project.
+fn set_pane_view(s: &mut Session, p: &Value) -> Result<Value> {
+    let cid = comp_id(s, p)?;
+    let v = view_p(p, "view.setPaneView")?;
+    let pane = p.get("pane").and_then(Value::as_u64).filter(|n| *n <= 3).ok_or_else(|| bad("view.setPaneView", "pane: 0 (main view) to 3"))? as usize;
+    if pane == 0 {
+        switch_view(s, cid, v);
+    } else {
+        views(s, cid).set_pane(pane - 1, v);
+    }
+    let vs = views(s, cid);
+    Ok(json!({"pane": pane, "view": v.id(), "views": [vs.current.id(), vs.pane(0).id(), vs.pane(1).id(), vs.pane(2).id()]}))
+}
+
 macro_rules! view_cmd {
     ($f:ident, $v:expr) => {
         fn $f(s: &mut Session, p: &Value) -> Result<Value> {
@@ -705,6 +720,15 @@ pub fn specs() -> Vec<CommandSpec> {
             "{view: activeCamera|default|front|left|top|back|right|bottom|custom1|custom2|custom3, comp?}",
             has_comp,
             set_3d_view
+        ),
+        cmd!(
+            "view.setPaneView",
+            "Set View of Pane",
+            [],
+            None,
+            "{pane: 0 (main) | 1 | 2 | 3, view: activeCamera|default|front|left|top|back|right|bottom|custom1|custom2|custom3, comp?}",
+            has_comp,
+            set_pane_view
         ),
         cmd!("view.3d.activeCamera", "Active Camera", ["View", "Switch 3D View"], Some("F12"), "{comp?}", has_comp, view_active),
         cmd!("view.3d.default", "Default", ["View", "Switch 3D View"], None, "{comp?}", has_comp, view_default),

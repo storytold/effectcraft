@@ -105,19 +105,23 @@ pub fn init() {
     });
 }
 
-/// An entry's name in `js/host.js`'s cache folders (`layers/` for layer buffers).
+/// An entry's name in `js/host.js`'s cache folders (`layers/` for layer buffers, `mattes/` for segmentations).
 pub(crate) fn name_of(kind: Kind, key: u128) -> String {
     match kind {
         Kind::Frame => disk_cache::entry_name(key),
         Kind::Layer => format!("layers/{}", disk_cache::entry_name(key)),
+        Kind::Matte => format!("mattes/{}", disk_cache::entry_name(key)),
     }
 }
 
 fn parse_name(name: &str) -> Option<(Kind, u128)> {
-    match name.strip_prefix("layers/") {
-        Some(n) => Some((Kind::Layer, disk_cache::parse_entry_name(n)?)),
-        None => Some((Kind::Frame, disk_cache::parse_entry_name(name)?)),
+    if let Some(n) = name.strip_prefix("layers/") {
+        return Some((Kind::Layer, disk_cache::parse_entry_name(n)?));
     }
+    if let Some(n) = name.strip_prefix("mattes/") {
+        return Some((Kind::Matte, disk_cache::parse_entry_name(n)?));
+    }
+    Some((Kind::Frame, disk_cache::parse_entry_name(name)?))
 }
 
 /// Layer entries (32 hex digits) a frame worker should read before its next frame: recent

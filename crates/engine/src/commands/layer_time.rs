@@ -24,6 +24,11 @@ fn time_stretch(s: &mut Session, p: &Value) -> Result<Value> {
     let pct = f_p(p, "percent");
     let dur = f_p(p, "duration");
     let hold = str_p(p, "hold").unwrap_or("in").to_string();
+    // `to`: stretch so the In (or Out) point lands on the current time, the other point held.
+    let to = str_p(p, "to").map(str::to_string);
+    if to.as_deref().is_some_and(|t| t != "in" && t != "out") {
+        return Err(bad("layer.timeStretch", "to: in|out"));
+    }
     let cti = s.time();
     let comp_rate = s.project.comp(cid).ok_or(EngineError::NoComp)?.frame_rate;
     let fd = comp_rate.frame_duration();
@@ -39,6 +44,16 @@ fn time_stretch(s: &mut Session, p: &Value) -> Result<Value> {
                 continue;
             }
             let span = (l.out_point - l.in_point).seconds();
+            let (dur, hold) = match to.as_deref() {
+                Some("in") => (Some((l.out_point - cti).seconds()), "out"),
+                Some(_) => (Some((cti - l.in_point).seconds()), "in"),
+                None => (dur, hold.as_str()),
+            };
+            // The current time is on the wrong side of the held point: nothing to stretch to.
+            if to.is_some() && dur.is_some_and(|d| d < fd.seconds()) {
+                continue;
+            }
+            let pct = if to.is_some() { None } else { pct };
             let new = match (pct, dur) {
                 (Some(v), _) => v,
                 (None, Some(d)) if span > 0.0 => old * d / span,
@@ -48,7 +63,7 @@ fn time_stretch(s: &mut Session, p: &Value) -> Result<Value> {
                 return Err(bad("layer.timeStretch", "the stretch factor must be at least 1 %"));
             }
             // The hold point keeps showing the same layer time.
-            let h = match hold.as_str() {
+            let h = match hold {
                 "current" => cti,
                 "out" => l.out_point,
                 _ => l.in_point,
@@ -220,6 +235,16 @@ pub fn specs() -> Vec<CommandSpec> {
             has_layers,
             time_stretch
         ),
+        cmd!("layer.stretchInToTime", "Stretch Layer In Point to Current Time", [], Some("Cmd+Shift+,"), "{layers?}", has_layers, |s, p| {
+            let mut p = if p.is_object() { p.clone() } else { json!({}) };
+            p["to"] = json!("in");
+            time_stretch(s, &p)
+        }),
+        cmd!("layer.stretchOutToTime", "Stretch Layer Out Point to Current Time", [], Some("Cmd+Alt+,"), "{layers?}", has_layers, |s, p| {
+            let mut p = if p.is_object() { p.clone() } else { json!({}) };
+            p["to"] = json!("out");
+            time_stretch(s, &p)
+        }),
         cmd!("layer.timeReverse", "Time-Reverse Layer", ["Layer", "Time"], Some("Cmd+Alt+R"), "{layers?}", has_layers, |s, p| {
             let mut p = p.clone();
             p["op"] = json!("reverse");

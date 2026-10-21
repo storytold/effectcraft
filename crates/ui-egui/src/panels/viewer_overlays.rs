@@ -32,6 +32,28 @@ pub(crate) struct VertexHit {
     pub l2c: Mat3,
 }
 
+/// A vertex marker to draw. Markers are drawn after the layer bounding boxes so a box handle
+/// never covers a path point (#1042).
+#[derive(Clone, Copy)]
+pub(crate) struct VertexMark {
+    pub pos: Pos2,
+    pub color: Color32,
+    pub selected: bool,
+}
+
+/// Draw the vertex markers collected by [`draw_paths`], `size` points wide.
+pub(crate) fn draw_vertex_marks(painter: &egui::Painter, marks: &[VertexMark], size: f32) {
+    for m in marks {
+        let r = Rect::from_center_size(m.pos, vec2(size, size));
+        if m.selected {
+            painter.rect_filled(r, 0.0, m.color);
+        } else {
+            painter.rect_filled(r, 0.0, Color32::from_black_alpha(160));
+            painter.rect_stroke(r, 0.0, Stroke::new(1.0, m.color), StrokeKind::Inside);
+        }
+    }
+}
+
 /// A path drawn this frame (for segment hits and the free-transform box).
 #[derive(Clone)]
 pub(crate) struct PathInfo {
@@ -87,6 +109,15 @@ pub(crate) fn segment_at(paths: &[PathInfo], map: &ViewerMap, pos: Pos2, tol: f3
     best.map(|b| b.1)
 }
 
+/// The open path whose last vertex lies within `tol` points of `pos`: the Pen resumes it there.
+pub(crate) fn open_end_at(paths: &[PathInfo], map: &ViewerMap, pos: Pos2, tol: f32) -> Option<(LayerId, u64)> {
+    paths.iter().find_map(|p| {
+        let v = p.sp.vertices.last().filter(|_| !p.sp.closed)?;
+        let q = p.m.apply(gv2(v[0], v[1]));
+        (map.to_screen([q.x, q.y]).distance(pos) < tol).then_some((p.layer, p.uid))
+    })
+}
+
 /// A mask or shape path of a layer by group uid, evaluated at the context time.
 pub(crate) fn path_of(ectx: &EvalCtx, layer: LayerId, uid: u64) -> Option<PathInfo> {
     let l = ectx.comp.layer(layer)?;
@@ -130,9 +161,9 @@ pub(crate) fn draw_paths(
     pen: Option<(LayerId, u64)>,
     hover: Option<Pos2>,
     hits: &mut Vec<VertexHit>,
+    marks: &mut Vec<VertexMark>,
     paths: &mut Vec<PathInfo>,
 ) {
-    let vs = app.session.prefs.general.path_point_size as f32 + 1.0;
     let (m, _) = super::viewer::l2c(ectx, l);
     let mut list: Vec<(u64, String, ShapePath, Mat3, Color32, bool)> = vec![];
     if let Some(masks) = l.masks() {
@@ -167,11 +198,8 @@ pub(crate) fn draw_paths(
                     painter.circle_filled(h, 3.0, mc);
                     hits.push(VertexHit { layer: l.id, mask: uid, index: i, pos: h, tangent: Some(out), vertex: *v, l2c: pm });
                 }
-                painter.rect_filled(Rect::from_center_size(s, vec2(vs, vs)), 0.0, mc);
-            } else {
-                painter.rect_filled(Rect::from_center_size(s, vec2(vs, vs)), 0.0, Color32::from_black_alpha(160));
-                painter.rect_stroke(Rect::from_center_size(s, vec2(vs, vs)), 0.0, Stroke::new(1.0, mc), StrokeKind::Inside);
             }
+            marks.push(VertexMark { pos: s, color: mc, selected });
             let kind = if is_mask { "mask" } else { "shapePath" };
             app.auto.add(&format!("viewer.{kind}.{uid}.vertex.{i}"), Rect::from_center_size(s, vec2(8.0, 8.0)), &name);
             hits.push(VertexHit { layer: l.id, mask: uid, index: i, pos: s, tangent: None, vertex: *v, l2c: pm });
@@ -638,5 +666,28 @@ pub(crate) fn update(
             None
         }
         Drag::Roi { .. } => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn info(vertices: Vec<[f64; 2]>, closed: bool) -> PathInfo {
+        let n = vertices.len();
+        let sp = ShapePath { vertices, in_tangents: vec![[0.0; 2]; n], out_tangents: vec![[0.0; 2]; n], closed, feather: Vec::new() };
+        PathInfo { layer: LayerId(3), uid: 7, m: Mat3::IDENTITY, sp, is_mask: true, feather: Vec::new() }
+    }
+
+    /// #912: clicking the last vertex of an open path with the Pen resumes that path.
+    #[test]
+    fn pen_resumes_an_open_path_at_its_last_vertex() {
+        let map = ViewerMap { origin: Pos2::ZERO, zoom: 1.0, comp: [100.0, 100.0], area: Rect::EVERYTHING };
+        let open = info(vec![[10.0, 10.0], [50.0, 10.0], [50.0, 50.0]], false);
+        assert_eq!(open_end_at(std::slice::from_ref(&open), &map, egui::pos2(52.0, 49.0), 8.0), Some((LayerId(3), 7)));
+        assert_eq!(open_end_at(std::slice::from_ref(&open), &map, egui::pos2(10.0, 10.0), 8.0), None, "first vertex");
+        assert_eq!(open_end_at(std::slice::from_ref(&open), &map, egui::pos2(80.0, 80.0), 8.0), None, "far away");
+        let closed = info(vec![[10.0, 10.0], [50.0, 10.0], [50.0, 50.0]], true);
+        assert_eq!(open_end_at(&[closed], &map, egui::pos2(50.0, 50.0), 8.0), None, "closed path");
     }
 }

@@ -594,13 +594,21 @@ function __uiProto() {
       if (e.indexOf("on") !== 0) e = "on" + e.charAt(0).toUpperCase() + e.slice(1);
       this.__fire(e);
     },
-    addEventListener: function (name, fn) {
+    // `capture`: the listener runs in the capture phase of mouse events (on the way down from
+    // the window to the target) instead of the bubble phase.
+    addEventListener: function (name, fn, capture) {
       var k = String(name).toLowerCase();
+      if (capture) {
+        if (!this.__capture) this.__capture = Object.create(null);
+        (this.__capture[k] = this.__capture[k] || []).push(fn);
+        return;
+      }
       (this.__listeners[k] = this.__listeners[k] || []).push(fn);
     },
-    removeEventListener: function (name, fn) {
+    removeEventListener: function (name, fn, capture) {
       var k = String(name).toLowerCase();
-      if (this.__listeners[k]) this.__listeners[k] = this.__listeners[k].filter(function (f) { return f !== fn; });
+      var m = capture ? this.__capture : this.__listeners;
+      if (m && m[k]) m[k] = m[k].filter(function (f) { return f !== fn; });
     },
     dispatchEvent: function (e) { this.__fire("on" + String(e.type || e).charAt(0).toUpperCase() + String(e.type || e).slice(1)); },
     __fire: function (name) {
@@ -715,7 +723,91 @@ function __uiSize(d) {
   return [w > 0 ? w : 0, h > 0 ? h : 0];
 }
 
-function __uiJson(c) {
+// ScriptUI mouse events: delivered to `addEventListener` listeners of the control under the
+// pointer and its containers (capture, target, bubble), as the JavaScript Tools Guide documents.
+var __uiMouseKinds = ["mousedown", "mouseup", "mousemove", "mouseover", "mouseout", "click"];
+
+function __uiMouseListeners(c, type, capture) {
+  var m = capture ? c.__capture : c.__listeners;
+  if (!m || !Object.prototype.hasOwnProperty.call(m, type)) return [];
+  var l = m[type];
+  return l instanceof Array ? l.slice() : [];
+}
+
+// The mouse events that reach a listener at `c`: its own, and its containers' (`inherited`).
+function __uiMouseWanted(c, inherited) {
+  var out = inherited.slice();
+  for (var i = 0; i < __uiMouseKinds.length; i++) {
+    var t = __uiMouseKinds[i];
+    if (out.indexOf(t) < 0 && (__uiMouseListeners(c, t, false).length || __uiMouseListeners(c, t, true).length)) out.push(t);
+  }
+  return out;
+}
+
+// A ScriptUI MouseEvent. `v`: {x, y (relative to the target control), button (0 left, 1 middle,
+// 2 right), detail (click count), screenX, screenY, altKey, ctrlKey, metaKey, shiftKey}.
+function __uiMouseEvent(type, target, v) {
+  var num = function (x, d) {
+    x = Number(x);
+    return isFinite(x) ? x : d;
+  };
+  var keys = { alt: !!v.altKey, control: !!v.ctrlKey, ctrl: !!v.ctrlKey, meta: !!v.metaKey, shift: !!v.shiftKey };
+  return {
+    type: type,
+    target: target,
+    currentTarget: target,
+    eventPhase: "none",
+    bubbles: true,
+    cancelable: true,
+    captures: true,
+    view: target.window,
+    relatedTarget: undefined,
+    timeStamp: new Date(),
+    detail: num(v.detail, type === "mousemove" || type === "mouseover" || type === "mouseout" ? 0 : 1),
+    button: num(v.button, 0),
+    clientX: num(v.x, 0),
+    clientY: num(v.y, 0),
+    screenX: num(v.screenX, 0),
+    screenY: num(v.screenY, 0),
+    altKey: keys.alt,
+    ctrlKey: keys.ctrl,
+    metaKey: keys.meta,
+    shiftKey: keys.shift,
+    defaultPrevented: false,
+    __stopped: false,
+    stopPropagation: function () { this.__stopped = true; },
+    preventDefault: function () { this.defaultPrevented = true; },
+    getModifierState: function (k) { return !!keys[String(k).toLowerCase()]; },
+    toString: function () { return "[object MouseEvent]"; }
+  };
+}
+
+// Deliver a mouse event to `target`: capture listeners from the window down, the target's own
+// listeners, then bubble listeners back up. stopPropagation() ends it after the current control.
+function __uiMouseFire(target, type, v) {
+  var path = [];
+  // A tree built by add() is shallow; the bound keeps a script's own `parent` cycle harmless.
+  for (var p = target; p && path.length < 256; p = p.parent) path.unshift(p);
+  var e = __uiMouseEvent(type, target, v);
+  var run = function (c, phase, capture) {
+    var l = __uiMouseListeners(c, type, capture);
+    e.currentTarget = c;
+    e.eventPhase = phase;
+    for (var i = 0; i < l.length; i++) if (typeof l[i] === "function") l[i].call(c, e);
+  };
+  var n = path.length - 1;
+  for (var i = 0; i < n; i++) {
+    run(path[i], "capture", true);
+    if (e.__stopped) return e;
+  }
+  run(target, "target", true);
+  run(target, "target", false);
+  for (var j = n - 1; j >= 0 && !e.__stopped; j--) run(path[j], "bubble", false);
+  return e;
+}
+
+function __uiJson(c, inherited) {
+  var mouse = __uiMouseWanted(c, inherited || []);
   var ps = __uiSize(c.preferredSize);
   if (c.type === "edittext" && c.characters > 0) ps = [c.characters * 7 + 12, ps ? ps[1] : 0];
   var o = {
@@ -730,6 +822,7 @@ function __uiJson(c) {
     children: []
   };
   if (ps) o.preferredSize = ps;
+  if (mouse.length) o.mouse = mouse;
   if (c.__ub && !c.__root) o.fixedBounds = c.__ub;
   if (c.__root && c.__ub) o.fixedBounds = [0, 0, c.__ub[2] - c.__ub[0], c.__ub[3] - c.__ub[1]];
   if (__uiContainers[c.type]) {
@@ -739,7 +832,7 @@ function __uiJson(c) {
     if (m) o.margins = m;
     if (typeof c.spacing === "number") o.spacing = c.spacing;
     var kids = c.children;
-    for (var i = 0; i < kids.length; i++) o.children.push(__uiJson(kids[i]));
+    for (var i = 0; i < kids.length; i++) o.children.push(__uiJson(kids[i], mouse));
   }
   if (c.alignment !== null && c.alignment !== undefined) o.alignment = __uiAlign(c.alignment);
   if (c.type === "checkbox" || c.type === "radiobutton") o.checked = !!c.value;
@@ -824,16 +917,26 @@ function __uiDispatch(winId, id, kind, valueJson) {
     for (var i = 0; i < sib.length; i++) if (sib[i] !== c && sib[i].type === "radiobutton") sib[i].value = false;
     c.value = true;
   };
+  // A mouse click carries the pointer's details ({x, y, button, detail, …keys}).
+  var mouse = v !== null && typeof v === "object" && !(v instanceof Array) ? v : null;
+  if (kind !== "click" && __uiMouseKinds.indexOf(kind) >= 0) {
+    __uiMouseFire(c, kind, mouse || {});
+    return;
+  }
   if (kind === "click") {
     if (c.type === "checkbox") c.value = !c.value;
     else if (c.type === "radiobutton") radio();
     else if (c.type === "tab" && c.parent) {
       c.parent.selection = c;
       c.parent.__fire("onChange");
+      if (mouse) __uiMouseFire(c, "click", mouse);
       return;
     }
     var handled = c.__handlers().indexOf("onClick") >= 0;
-    c.__fire("onClick");
+    if (mouse) {
+      if (typeof c.onClick === "function") c.onClick.call(c);
+      __uiMouseFire(c, "click", mouse);
+    } else c.__fire("onClick");
     // Dialog buttons without handlers: OK closes with 1, Cancel with 2.
     if (!handled && c.type === "button" && w.__kind === "dialog") {
       var n = String(c.name || c.properties.name || c.text).toLowerCase();

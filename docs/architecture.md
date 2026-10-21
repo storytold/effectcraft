@@ -72,7 +72,9 @@ All time is an integer `Tick`, 254 016 000 000 per second, the least common mult
 broadcast frame rate (×1001) and audio sample rate, so frame and sample positions are exact.
 Keyframe times are in **layer time**; `layer_time = (comp_time - start_time) / stretch`, and a
 Time Remap property overrides the source time. Commands snap layer times, keyframe times and
-comp durations to whole frames, as After Effects does. Timecode is only a display.
+comp durations to whole frames, as After Effects does, except Quick Offset (`layer.quickOffset`,
+`keys.quickOffset`), which staggers layers and keys onto subframes, as After Effects 25.4 does.
+Timecode is only a display.
 
 ## 3. Document model
 
@@ -95,7 +97,10 @@ XML). Saving goes through `Project::to_file_json`, which checks that the text re
 anything is written (JSON can't hold NaN or infinity), and files are written atomically. Opening
 a file that a newer EffectCraft saved shows a warning: fields this version doesn't know are
 dropped if it saves the project. Save, Save As, Save a Copy and Increment and Save keep the
-file's format (`.ecprojx` stays XML).
+file's format (`.ecprojx` stays XML). Next to `savedBy` the file records the active comp and the
+open comp tabs (`activeComp`, `openComps`), which opening restores; they are editor state, not
+part of `Project`, so older files (and ids that no longer name a comp) open on the first comp and
+older versions ignore them.
 
 `schema` changes when a saved value changes meaning; a project from an older schema is converted
 when it is opened (`effectcraft_engine::upgrade_effects`, which also refreshes effect instances
@@ -191,7 +196,10 @@ are dropped; running jobs finish into the cache. When the budget (Settings ▸ M
 full the least recently shown frames go first. The timeline's green bar counts cached frames
 of the current content and viewer settings.
 Resolution Auto renders the pixels the magnification needs, as in After Effects (Full above
-50 %, Half down to 33.3 %, Third down to 25 %, then Quarter). Below 100 % the viewer averages
+50 %, Half down to 33.3 %, Third down to 25 %, then Quarter). The Resolution is the comp's
+(`Comp::resolution`, saved with the project): setting it is no undo step (undo, redo and history
+jumps carry the current values over) and, like the Shy switches, it is outside
+`Comp::same_pixels`, so cached frames stay valid. Below 100 % the viewer averages
 instead of skipping pixels (Viewer Zoom Quality More Accurate): GPU frames carry a mip chain
 sampled trilinearly, CPU frames go up averaged down by the whole factor that leaves about one
 texel per screen pixel.
@@ -388,6 +396,9 @@ their on-screen scale, as text is vector in After Effects; on shape layers and v
 switch is Continuously Rasterize and does the same. Quality: Draft samples
 nearest-neighbour, Wireframe draws the layer bounds. Slip edit (`layer.slip`, Alt+PageUp/Down,
 dragging the source bar in the timeline) moves the source under fixed in/out points.
+Dragging a layer bar's in or out edge with several layers selected trims every selected layer by
+the same amount from its own in/out point (`layer.timing {inDelta | outDelta}`), clamped to the
+comp and to one frame of layer, as one undo step.
 
 **Nested comps** show nothing before they start or after they end (`Comp::covers`), even when
 the precomp layer is trimmed or remapped past them. A comp with **Preserve frame rate when nested
@@ -540,9 +551,23 @@ text, disables the expression and shows a warning, like After Effects. `sampleIm
 sampled layer through the evaluating renderer's footage source (`EvalCtx::footage`), cached per
 thread and frame; `footage(name)` reads data footage (JSON, CSV, TSV imported with File ▸ Import,
 text kept in the project) through `sourceData`, `sourceText` and `dataValue`. `expr.errors`
-lists failing expressions for the viewer's error bar. Each thread keeps one boa context; boa
+lists failing expressions on demand. The viewer's error bar uses the same checks against an
+immutable project snapshot, after 150 ms without editing, pointer interaction or playback.
+Native builds run these automatic checks on one persistent worker; layout and paint only read
+completed results. Requests are coalesced per comp, cancelled between properties when obsolete,
+and bounded to eight comp entries. Results must match the current project, revision and time.
+Disabling Show Expression Error Banner cancels automatic checks. Non-solo layers still receive
+diagnostics, including disabled expressions with syntax errors. The single-threaded web build
+shares the cache and debounce but evaluates one scan on the UI thread after interaction stops.
+Each thread keeps one boa context; boa
 leaves values on its stack whenever an exception unwinds through call frames (every pending
 host request does), so a run that hits the stack limit gets a fresh context and is retried once.
+
+Snapping memoizes expression values while collecting one immutable set of targets. Bounds,
+vertices and transforms share those values; the cache is discarded before the next query, so
+time changes and edits always use current geometry. Native timeline disk-cache indicators also
+request missing content hashes in the background, coalescing edits per comp. Their blue bars
+appear after the key is ready instead of serializing composition content during painting.
 
 ## 5a. Scripting
 
@@ -696,3 +721,5 @@ JSON parsing is now the bulk of open), and rendering 5,000-layer comps faster.
 | Date | Change | Summary |
 |---|---|---|
 | 2026-10-10 | minor | Status line added; crate table checked against `crates/` (every crate listed); effect count and VP9 encoder description corrected |
+
+PDF document structure uses the `craft-pdf` read feature through an app-owned bounded object adapter. EffectCraft retains its drawing tree, fonts, content/image filters and EPS interpreter; ordinary object/xref limits remain 256 MiB on 64-bit and 64 MiB on 32-bit/WASM, including repair.

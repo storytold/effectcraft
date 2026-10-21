@@ -7,21 +7,25 @@
 //!   memory-budgeted LRU frame cache, one decoder per source, and the decoder kept positioned for
 //!   sequential playback. Also audio ([`MediaPool::audio_samples`]) and thumbnails.
 //!
-//! Video containers (MP4/MOV, Matroska/WebM) and codecs (H.264, HEVC, VP9, AV1, ProRes, DNxHD,
-//! MJPEG; AAC, Opus, PCM, MP3/FLAC/Vorbis) come from FilmCraft's pure-Rust crates (git dependency,
+//! Video containers (MP4/MOV, Matroska/WebM, MXF OP1a / OP-Atom) and codecs (H.264, HEVC, VP9,
+//! AV1, ProRes, DNxHD, MPEG-2, MJPEG; AAC, Opus, PCM, MP3/FLAC/Vorbis) come from FilmCraft's pure-Rust crates (git dependency,
 //! pinned; `plan/adr/0001`). FilmCraft types never leave this crate. Stills use the `image` crate
-//! (PNG, JPEG, GIF, WebP, TIFF, BMP, OpenEXR); Photoshop documents (merged image or one layer) come
+//! (PNG, JPEG, GIF, WebP, TIFF, BMP, OpenEXR, Targa, Radiance HDR); Photoshop documents (merged image or one layer) come
 //! from `effectcraft-psd` and SVG from `effectcraft-svg` (rasterised at any scale).
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 mod convert;
+pub mod downmix;
+mod dpx;
 pub mod exr_channels;
 mod gif_anim;
 mod layered;
 pub use layered::vector_doc;
 mod pool;
 mod probe;
+mod stream;
+mod webp_anim;
 
 pub use pool::{DEFAULT_BUDGET, MediaPool, PoolStats};
 pub use probe::{DEFAULT_SEQUENCE_RATE, probe, probe_bytes, probe_model};
@@ -35,6 +39,9 @@ pub enum MediaError {
     Unsupported(String),
     #[error("decode error: {0}")]
     Decode(String),
+    /// The read was called off before it finished (see [`effectcraft_render::FootageSource::cancellable`]).
+    #[error("cancelled")]
+    Cancelled,
 }
 
 pub type Result<T> = std::result::Result<T, MediaError>;
@@ -45,20 +52,22 @@ impl From<filmcraft_media::MediaError> for MediaError {
         match e {
             F::Unsupported(s) => MediaError::Unsupported(s),
             F::Io(s) | F::Offline(s) => MediaError::Io(s),
+            F::Cancelled => MediaError::Cancelled,
             other => MediaError::Decode(other.to_string()),
         }
     }
 }
 
 /// File extensions recognised as stills.
-pub const STILL_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "bmp", "exr", "psd", "psb", "svg", "pdf", "ai", "eps"];
+pub const STILL_EXTENSIONS: &[&str] =
+    &["png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "bmp", "exr", "tga", "hdr", "psd", "psb", "svg", "pdf", "ai", "eps"];
 /// File extensions recognised as audio-only files.
 pub const AUDIO_EXTENSIONS: &[&str] = filmcraft_media::AUDIO_EXTENSIONS;
 /// File extensions recognised as movies.
-pub const VIDEO_EXTENSIONS: &[&str] = &["mp4", "m4v", "mov", "mkv", "webm"];
+pub const VIDEO_EXTENSIONS: &[&str] = &["mp4", "m4v", "mov", "mkv", "webm", "mxf"];
 
 /// File extensions recognised as 3D models (Advanced 3D model layers).
-pub const MODEL_EXTENSIONS: &[&str] = &["gltf", "glb", "obj"];
+pub const MODEL_EXTENSIONS: &[&str] = &["gltf", "glb", "obj", "stl", "fbx"];
 
 /// Whether `path` has an extension we can import.
 pub fn is_importable(path: &std::path::Path) -> bool {
@@ -67,10 +76,24 @@ pub fn is_importable(path: &std::path::Path) -> bool {
         || STILL_EXTENSIONS.contains(&ext.as_str())
         || AUDIO_EXTENSIONS.contains(&ext.as_str())
         || VIDEO_EXTENSIONS.contains(&ext.as_str())
+        || dpx::EXTENSIONS.contains(&ext.as_str())
 }
 
 pub(crate) fn ext_of(path: &std::path::Path) -> String {
     path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase()
+}
+
+/// The `image` crate format of a still: from its signature, else from its extension (Targa has
+/// no signature; a `.hdr` without the Radiance one then fails with the decoder's own error).
+pub(crate) fn still_format(path: &str, bytes: &[u8]) -> Option<image::ImageFormat> {
+    if let Ok(fmt) = image::guess_format(bytes) {
+        return Some(fmt);
+    }
+    match ext_of(std::path::Path::new(path)).as_str() {
+        "tga" => Some(image::ImageFormat::Tga),
+        "hdr" => Some(image::ImageFormat::Hdr),
+        _ => None,
+    }
 }
 
 pub(crate) fn rate_from_fc(r: filmcraft_time::FrameRate) -> effectcraft_time::FrameRate {

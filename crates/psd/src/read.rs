@@ -58,6 +58,11 @@ impl<'a> Reader<'a> {
     pub fn f64(&mut self) -> Result<f64> {
         Ok(f64::from_bits(self.u64()?))
     }
+    /// A big-endian double where NaN and ±infinity read as 0 (they are never meaningful in a file).
+    pub fn f64_finite(&mut self) -> Result<f64> {
+        let v = self.f64()?;
+        Ok(if v.is_finite() { v } else { 0.0 })
+    }
     pub fn tag(&mut self) -> Result<[u8; 4]> {
         let b = self.bytes(4)?;
         Ok([b[0], b[1], b[2], b[3]])

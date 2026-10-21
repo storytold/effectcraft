@@ -6,6 +6,7 @@ use std::mem::ManuallyDrop;
 use std::sync::Arc;
 
 use boa_engine::{Context, JsNativeError, JsResult, JsString, JsValue, NativeFunction, Source, js_string};
+use effectcraft_engine::history::History;
 use effectcraft_engine::project::Project;
 use effectcraft_engine::{ScriptRequest, Session};
 use serde_json::{Value as J, json};
@@ -63,20 +64,23 @@ impl Outcome {
 pub(crate) struct Active {
     pub(crate) session: Session,
     pub(crate) output: Vec<String>,
-    /// Open undo groups: (name, project snapshot when the outermost group began).
-    pub(crate) groups: Vec<(String, Arc<Project>)>,
-    /// `app.scheduleTask` queue: (id, code, repeat).
-    pub(crate) tasks: Vec<(u32, String, bool)>,
-    pub(crate) next_task: u32,
+    /// Open groups: name, project snapshot, original bounded history and saved-project
+    /// identity. The history snapshot preserves earlier steps if long groups hit the limit.
+    pub(crate) groups: Vec<(String, Arc<Project>, History, Arc<Project>)>,
     pub(crate) name: String,
+    /// The script context running (its `app.scheduleTask` tasks are kept under this id, see
+    /// [`crate::tasks`]).
+    pub(crate) host: u32,
     /// Running on a script-host thread: modal dialogs hand the session back to the caller
     /// through this link while they wait.
     pub(crate) link: Option<crate::ui::Link>,
+    /// The files `$.evalFile` is evaluating, outermost first.
+    pub(crate) loading: Vec<std::path::PathBuf>,
 }
 
 impl Active {
-    pub(crate) fn new(session: Session, name: &str) -> Active {
-        Active { session, output: vec![], groups: vec![], tasks: vec![], next_task: 0, name: name.to_string(), link: None }
+    pub(crate) fn new(session: Session, name: &str, host: u32) -> Active {
+        Active { session, output: vec![], groups: vec![], name: name.to_string(), host, link: None, loading: vec![] }
     }
 }
 
@@ -147,19 +151,24 @@ pub(crate) fn exec(s: &mut Session, id: &str, params: J) -> Result<J, String> {
     if let Some(c) = target
         && prev != Some(c)
     {
-        s.state.active_comp = Some(c);
+        s.activate_comp(c);
     }
     if CREATES_LAYER.contains(&id) {
         s.state.selected_layers.clear();
     }
     let r = s.execute_for_script(id, params);
-    if let Some(c) = target
-        && prev != Some(c)
-        && s.state.active_comp == Some(c)
-        && id != "comp.open"
-    {
+    if let Some(c) = target {
+        leave_comp(s, id, c, prev);
+    }
+    r.map_err(|e| e.to_string())
+}
+
+/// After a script's command on comp `c`, make `prev` (the comp active before it) active again,
+/// unless the command opened `c` on purpose; with no comp to go back to, `c` stays open.
+fn leave_comp(s: &mut Session, id: &str, c: effectcraft_engine::project::ItemId, prev: Option<effectcraft_engine::project::ItemId>) {
+    if prev != Some(c) && s.state.active_comp == Some(c) && id != "comp.open" {
         match prev {
-            Some(p) if s.project.comp(p).is_some() => s.state.active_comp = Some(p),
+            Some(p) if s.project.comp(p).is_some() => s.activate_comp(p),
             _ => {
                 if !s.state.open_comps.contains(&c) {
                     s.state.open_comps.push(c);
@@ -167,7 +176,6 @@ pub(crate) fn exec(s: &mut Session, id: &str, params: J) -> Result<J, String> {
             }
         }
     }
-    r.map_err(|e| e.to_string())
 }
 
 /// Run a keyframe command that acts on the selected keys (`keys.velocity`, `keys.interpolation`,
@@ -191,11 +199,17 @@ fn exec_on_keys(s: &mut Session, id: &str, params: J, targets: &J) -> Result<J, 
         let key = l.props.find(prop).and_then(|pr| pr.keys.get(usize::try_from(index).ok()?)).ok_or("the keyframe no longer exists")?;
         keys.push(KeyRef { layer: LayerId(layer), prop, time: key.time });
     }
+    // Make the keys' comp active before selecting them: activating a comp brings back the key
+    // selection it had, which would replace these keys and leave the command nothing to act on
+    // when the comp isn't the active one (#1531).
+    let prev = s.state.active_comp;
+    s.activate_comp(cid);
     let saved = std::mem::replace(&mut s.state.selected_keys, keys);
     let r = exec(s, id, params);
     let comp = s.active_comp();
     let exists = |k: &KeyRef| comp.and_then(|c| c.layer(k.layer)).and_then(|l| l.props.find(k.prop)).is_some_and(|pr| pr.keys.iter().any(|x| x.time == k.time));
     s.state.selected_keys = saved.into_iter().filter(exists).collect();
+    leave_comp(s, id, cid, prev);
     r
 }
 
@@ -238,12 +252,18 @@ fn native_undo(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsV
         match op.as_str() {
             "begin" => {
                 let snap = a.session.project.clone();
-                a.groups.push((if name.is_empty() || name == "undefined" { "Script".into() } else { name }, snap));
+                a.groups.push((
+                    if name.is_empty() || name == "undefined" { "Script".into() } else { name },
+                    snap,
+                    a.session.history.clone(),
+                    a.session.saved_project.clone(),
+                ));
             }
             _ => {
                 if a.groups.len() == 1 {
-                    let (name, snap) = a.groups.pop().unwrap_or_default();
-                    collapse(&mut a.session, &name, &snap);
+                    if let Some((name, snap, prior, saved)) = a.groups.pop() {
+                        collapse(&mut a.session, &name, &snap, &prior, &saved);
+                    }
                 } else {
                     a.groups.pop();
                 }
@@ -255,49 +275,61 @@ fn native_undo(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsV
     Ok(JsValue::undefined())
 }
 
-/// Fold the undo steps recorded since the project was `snap` into one step called `name`.
-pub(crate) fn collapse(s: &mut Session, name: &str, snap: &Arc<Project>) {
+/// Fold every command in a group into a single bounded-history entry, even if the
+/// oldest intermediate undo state was trimmed before the group ended.
+pub(crate) fn collapse(s: &mut Session, name: &str, snap: &Arc<Project>, prior: &History, saved: &Arc<Project>) {
     let h = &mut s.history;
-    let Some(start) = h.undo.iter().rposition(|(_, p)| Arc::ptr_eq(p, snap)) else {
-        // Nothing was recorded (or history was reset by New / Open Project).
-        return;
-    };
-    let first = h.undo[start].1.clone();
-    h.undo.truncate(start);
-    h.undo.push((name.to_string(), first));
-    h.merge_key = None;
+    if let Some(start) = h.undo.iter().rposition(|(_, p)| Arc::ptr_eq(p, snap)) {
+        // The group is short enough that its opening snapshot is still in history.
+        let first = h.undo[start].1.clone();
+        h.undo.truncate(start);
+        h.undo.push((name.to_string(), first));
+        h.merge_key = None;
+    } else if !Arc::ptr_eq(&s.project, snap) && Arc::ptr_eq(&s.saved_project, saved) && !h.undo.is_empty() {
+        // The group exceeded Levels of Undo. Restore the pre-group history (including
+        // older steps and redo branches) and record one step for the *whole* group.
+        // A New / Open Project changes saved_project; never resurrect the old history.
+        *h = prior.clone();
+        h.record(name, snap.clone(), s.prefs.general.undo_levels.max(1) as usize);
+    }
 }
 
-/// `__task("schedule", code, repeat)` → id; `__task("cancel", id)`.
+/// `__task("schedule", code, delayMs, repeat)` → id; `__task("cancel", id)` (see
+/// [`crate::tasks`]).
 fn native_task(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let op = arg_string(args, 0, ctx)?;
     if op == "cancel" {
-        let id = args.get(1).cloned().unwrap_or_default().to_number(ctx)? as u32;
-        let _ = with_active(|a| {
-            a.tasks.retain(|t| t.0 != id);
-            Ok(())
-        });
+        let id = args.get(1).cloned().unwrap_or_default().to_number(ctx)?;
+        if id.is_finite() && id >= 0.0 && id <= f64::from(u32::MAX) {
+            let _ = with_active(|a| {
+                crate::tasks::cancel(a.host, id as u32);
+                Ok(())
+            });
+        }
         return Ok(JsValue::undefined());
     }
     let code = arg_string(args, 1, ctx)?;
-    let repeat = args.get(2).cloned().unwrap_or_default().to_boolean();
+    let delay = args.get(2).cloned().unwrap_or_default().to_number(ctx)?;
+    let repeat = args.get(3).cloned().unwrap_or_default().to_boolean();
+    let now = web_time::Instant::now();
     let id = with_active(|a| {
-        a.next_task += 1;
-        let id = a.next_task;
-        a.tasks.push((id, code, repeat));
+        let id = crate::tasks::schedule(a.host, &a.name, a.session.script_ui.project_epoch, code, delay, repeat, now)?;
+        if !a.session.script_ui.task_hosts.contains(&a.host) {
+            a.session.script_ui.task_hosts.push(a.host);
+        }
         Ok(id)
     })
     .map_err(throw)?;
     Ok(JsValue::from(id))
 }
 
-fn project_dir(s: &Session) -> Option<String> {
+pub(crate) fn project_dir(s: &Session) -> Option<String> {
     let p = s.path.as_deref()?;
     std::path::Path::new(p).parent().map(|d| d.to_string_lossy().to_string())
 }
 
 /// Lexically normalized absolute path (`a/./b/../c` → `a/c`).
-fn normalize(p: &str) -> std::path::PathBuf {
+pub(crate) fn normalize(p: &str) -> std::path::PathBuf {
     use std::path::{Component, Path, PathBuf};
     let path = Path::new(p);
     let abs = if path.is_absolute() { path.to_path_buf() } else { std::env::current_dir().unwrap_or_default().join(path) };
@@ -314,7 +346,17 @@ fn normalize(p: &str) -> std::path::PathBuf {
     // Resolve symlinks where the file (or its folder) exists, so links can't escape the project.
     std::fs::canonicalize(&out)
         .or_else(|_| out.parent().map(std::fs::canonicalize).unwrap_or(Ok(out.clone())).map(|d| d.join(out.file_name().unwrap_or_default())))
+        .map(without_verbatim_prefix)
         .unwrap_or(out)
+}
+
+/// A canonical Windows drive path without its `\\?\` prefix, so it compares with a lexical one
+/// (a path whose folder doesn't exist on disk stays lexical).
+fn without_verbatim_prefix(p: std::path::PathBuf) -> std::path::PathBuf {
+    match p.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+        Some(plain) if plain.as_bytes().get(1) == Some(&b':') => plain.into(),
+        _ => p,
+    }
 }
 
 pub(crate) const GATE: &str = "Preferences ▸ Scripting & Expressions ▸ Allow Scripts to Write Files and Access Network";
@@ -338,8 +380,14 @@ fn check_access(s: &Session, path: &str, write: bool) -> Result<std::path::PathB
     Err(format!("Unable to access {path}: scripts can only read files in the project's folder unless {GATE} is on"))
 }
 
-/// `__file(op, path, data)`: `read` → text, `write`/`append` → bytes, `exists` → bool, `list` →
-/// names, `mkdir`, `remove`, `isDir`.
+/// Encode a binary script string as bytes, without silently corrupting code points outside
+/// the one-byte range supported by ExtendScript's BINARY encoding.
+fn binary_bytes(data: &str) -> Result<Vec<u8>, String> {
+    data.chars().map(|c| u8::try_from(c as u32).map_err(|_| format!("BINARY encoding cannot represent U+{:04X}", c as u32))).collect()
+}
+
+/// `__file(op, path, data)`: text and one-byte-per-character BINARY reads/writes,
+/// byte-for-byte copy, plus file and folder operations.
 fn native_file(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let op = arg_string(args, 0, ctx)?;
     let path = arg_string(args, 1, ctx)?;
@@ -352,24 +400,44 @@ fn native_file(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsV
         }
         let s = &a.session;
         match op.as_str() {
-            "access" => Ok(json!(check_access(s, &path, false)?.exists())),
+            // Through the session's services, like the reads: hosts without a file system (the
+            // browser's file table) answer for their own files.
+            "access" => Ok(json!(s.services.exists(&check_access(s, &path, false)?.to_string_lossy()))),
             "exists" | "isDir" => {
                 // Unreadable locations report "missing" instead of failing.
                 let Ok(p) = check_access(s, &path, false) else { return Ok(json!(false)) };
-                Ok(json!(if op == "exists" { p.exists() } else { p.is_dir() }))
+                let p = p.to_string_lossy();
+                Ok(json!(if op == "exists" { s.services.exists(&p) } else { s.services.is_dir(&p) }))
             }
-            "read" => {
+            "read" | "readBinary" => {
                 let p = check_access(s, &path, false)?;
                 let bytes = s.services.read_file(&p.to_string_lossy()).map_err(|e| format!("Unable to read {path}: {e}"))?;
-                Ok(json!(String::from_utf8_lossy(&bytes)))
+                if op == "readBinary" {
+                    // Each byte becomes a single JS character (U+0000..U+00FF).
+                    Ok(json!(bytes.into_iter().map(char::from).collect::<String>()))
+                } else {
+                    Ok(json!(String::from_utf8_lossy(&bytes)))
+                }
             }
-            "write" | "append" => {
+            "write" | "writeBinary" | "append" => {
                 let p = check_access(s, &path, true)?;
                 let ps = p.to_string_lossy().to_string();
                 let mut bytes = if op == "append" { s.services.read_file(&ps).unwrap_or_default() } else { vec![] };
-                bytes.extend_from_slice(data.as_bytes());
+                if op == "writeBinary" {
+                    bytes.extend(binary_bytes(&data)?);
+                } else {
+                    bytes.extend_from_slice(data.as_bytes());
+                }
                 s.services.write_file(&ps, &bytes).map_err(|e| format!("Unable to write {path}: {e}"))?;
                 Ok(json!(bytes.len()))
+            }
+            "copy" => {
+                let src = check_access(s, &path, false)?;
+                let dst = check_access(s, &data, true)?;
+                // Copy the original bytes, not UTF-8-decoded script text.
+                let bytes = s.services.read_file(&src.to_string_lossy()).map_err(|e| format!("Unable to read {path}: {e}"))?;
+                s.services.write_file(&dst.to_string_lossy(), &bytes).map_err(|e| format!("Unable to write {data}: {e}"))?;
+                Ok(json!(true))
             }
             "list" => {
                 let p = check_access(s, &path, false)?;
@@ -405,18 +473,58 @@ fn native_file(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsV
     }
 }
 
+/// `__evalFile(path)`: ExtendScript's `$.evalFile`. Evaluates a script file in the global scope
+/// and returns its last value. Relative paths resolve against the folder of the file being
+/// evaluated (the running script's for the outermost call, else the project's); reads follow the
+/// file gate `#include` uses ([`crate::scriptfile`]) and calls nest at most
+/// [`MAX_DEPTH`](crate::scriptfile::MAX_DEPTH) deep.
+fn native_eval_file(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    use crate::scriptfile::{self, MAX_DEPTH};
+    let name = arg_string(args, 0, ctx)?;
+    if name.is_empty() || name == "undefined" {
+        return Err(throw("$.evalFile needs a file"));
+    }
+    let (path, text) = with_active(|a| {
+        if a.loading.len() >= MAX_DEPTH {
+            return Err(format!("$.evalFile(\"{name}\"): files are nested too deeply (at most {MAX_DEPTH})"));
+        }
+        let s = &a.session;
+        let root = scriptfile::script_dir(s, &a.name);
+        let dir = a
+            .loading
+            .last()
+            .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+            .or_else(|| root.clone())
+            .or_else(|| project_dir(s).map(|d| normalize(&d)));
+        let path = scriptfile::resolve(s, &name, dir.as_deref(), &[]).map_err(|e| format!("$.evalFile {e}"))?;
+        scriptfile::check_read(s, &path, root.as_deref())?;
+        let text = scriptfile::read(s, &path)?;
+        check_nesting(&text)?;
+        a.loading.push(path.clone());
+        Ok((path, text))
+    })
+    .map_err(throw)?;
+    let r = ctx.eval(Source::from_bytes(text.as_bytes()).with_path(&path));
+    let _ = with_active(|a| {
+        a.loading.pop();
+        Ok(())
+    });
+    r
+}
+
 pub(crate) fn new_context() -> Result<Context, String> {
     let mut ctx = Context::default();
     let limits = ctx.runtime_limits_mut();
     limits.set_loop_iteration_limit(200_000_000);
     limits.set_recursion_limit(2000);
-    let natives: [(JsString, usize, fn(&JsValue, &[JsValue], &mut Context) -> JsResult<JsValue>); 10] = [
+    let natives: [(JsString, usize, fn(&JsValue, &[JsValue], &mut Context) -> JsResult<JsValue>); 11] = [
         (js_string!("__exec"), 2, native_exec),
         (js_string!("__query"), 2, native_query),
         (js_string!("__print"), 1, native_print),
         (js_string!("__undo"), 2, native_undo),
-        (js_string!("__task"), 3, native_task),
+        (js_string!("__task"), 4, native_task),
         (js_string!("__file"), 3, native_file),
+        (js_string!("__evalFile"), 2, native_eval_file),
         (js_string!("__sock"), 3, crate::socket::native_sock),
         (js_string!("__uiNewId"), 0, crate::ui::native_new_id),
         (js_string!("__uiModal"), 1, crate::ui::native_modal),
@@ -462,9 +570,9 @@ pub(crate) fn script_error(e: &boa_engine::JsError, ctx: &mut Context, file: &st
     ScriptError { message, line, column, file: file.to_string() }
 }
 
-/// Line and column of an error: `at line N, col M` (syntax errors), else the innermost backtrace
-/// frame in the user's script (`file:line:col`), else (names boa can't place) the first use of
-/// the undefined name in `code`.
+/// Line and column of an error: `at line N, col M` (syntax errors), else the first use of an
+/// undefined name in `code` (boa places those at a function's start), else the innermost backtrace
+/// frame in the user's script (`file:line:col`).
 fn position(msg: &str, file: &str, code: &str) -> (Option<u32>, Option<u32>) {
     if let Some(i) = msg.find("at line ") {
         let rest = &msg[i + 8..];
@@ -478,28 +586,44 @@ fn position(msg: &str, file: &str, code: &str) -> (Option<u32>, Option<u32>) {
         let mut it = l[i..].split([':', ')']);
         Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?))
     };
+    // The innermost frame in the user's script, or the error's own position.
     let frames: Vec<&str> = msg.lines().skip(1).collect();
-    if let Some((a, b)) = frames.iter().find_map(|l| pick(l)).or_else(|| msg.lines().next().and_then(pick)) {
+    let frame = frames.iter().find_map(|l| pick(l)).or_else(|| msg.lines().next().and_then(pick));
+    // `ReferenceError: name is not defined`: boa places it at the start of the function that reads
+    // the name, so the name's first use from that frame's line on is the better position (#1063).
+    // With no frame to start from, the first use anywhere in the code is (#1161).
+    let first = msg.lines().next().unwrap_or("");
+    let undefined = first.split("ReferenceError: ").nth(1).and_then(|r| r.split(" is not defined").next());
+    let start_line = frame.map_or(1, |(line, _)| line);
+    if let Some(at) = undefined.and_then(|name| first_use(name, code, start_line)) {
+        return (Some(at.0), Some(at.1));
+    }
+    if let Some((a, b)) = frame {
         return (Some(a), Some(b));
     }
-    // `ReferenceError: name is not defined` without a position.
-    let first = msg.lines().next().unwrap_or("");
-    if let Some(name) = first.split("ReferenceError: ").nth(1).and_then(|r| r.split(" is not defined").next()) {
-        for (n, line) in code.lines().enumerate() {
-            let b = line.as_bytes();
-            let mut from = 0;
-            while let Some(i) = line[from..].find(name).map(|i| i + from) {
-                let before = i.checked_sub(1).map(|j| b[j]);
-                let after = b.get(i + name.len()).copied();
-                let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'$';
-                if !before.is_some_and(|c| ident(c) || c == b'.') && !after.is_some_and(ident) {
-                    return (Some(n as u32 + 1), Some(i as u32 + 1));
-                }
-                from = i + name.len();
+    (None, None)
+}
+
+/// The first use of `name` as a whole identifier in `code` on or after `start_line` (1-based), as a
+/// 1-based line and column.
+fn first_use(name: &str, code: &str, start_line: u32) -> Option<(u32, u32)> {
+    if name.is_empty() {
+        return None;
+    }
+    let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'$';
+    for (n, line) in code.lines().enumerate().skip(start_line.saturating_sub(1) as usize) {
+        let b = line.as_bytes();
+        let mut from = 0;
+        while let Some(i) = line.get(from..).and_then(|rest| rest.find(name)).map(|i| i + from) {
+            let before = i.checked_sub(1).and_then(|j| b.get(j).copied());
+            let after = b.get(i + name.len()).copied();
+            if !before.is_some_and(|c| ident(c) || c == b'.') && !after.is_some_and(ident) {
+                return Some((n as u32 + 1, i as u32 + 1));
             }
+            from = i + name.len();
         }
     }
-    (None, None)
+    None
 }
 
 /// Evaluate `code` in `ctx` and convert the result.
@@ -543,8 +667,8 @@ impl Drop for Restore<'_> {
 /// and take the output so far.
 pub(crate) fn settle() -> Vec<String> {
     with_active(|a| {
-        if let Some((name, snap)) = a.groups.first().cloned() {
-            collapse(&mut a.session, &name, &snap);
+        if let Some((name, snap, prior, saved)) = a.groups.first().cloned() {
+            collapse(&mut a.session, &name, &snap, &prior, &saved);
             a.groups.clear();
         }
         a.session.sanitize_state();
@@ -553,14 +677,11 @@ pub(crate) fn settle() -> Vec<String> {
     .unwrap_or_default()
 }
 
-/// Evaluate a script file's code, then the one-shot tasks it scheduled (`app.scheduleTask`).
-pub(crate) fn eval_with_tasks(ctx: &mut Context, code: &str, file: &str) -> Result<J, ScriptError> {
+/// Evaluate a script file's code, then the one-shot tasks it scheduled (`app.scheduleTask`;
+/// repeating ones run later, see [`crate::tasks`]).
+pub(crate) fn eval_with_tasks(ctx: &mut Context, code: &str, file: &str, host: u32) -> Result<J, ScriptError> {
     let mut r = eval_in(ctx, code, file);
-    let tasks = with_active(|a| Ok(std::mem::take(&mut a.tasks))).unwrap_or_default();
-    for (_, code, repeat) in tasks {
-        if repeat {
-            continue;
-        }
+    for code in crate::tasks::take_one_shots(host) {
         if let Err(e) = eval_in(ctx, &code, "scheduled task")
             && r.is_ok()
         {
@@ -587,7 +708,23 @@ pub(crate) fn outcome(output: Vec<String>, result: Result<J, ScriptError>) -> Ou
 /// events reach the host through [`crate::dispatch_ui`]); palettes and panels keep their host
 /// alive for their handlers. The Script Console (and the web build) run inline, where dialogs
 /// don't block.
+///
+/// ExtendScript's `#include` / `#includepath` are inlined first, and errors point at the file
+/// and line they came from ([`crate::include`]).
 pub fn run(session: &mut Session, req: &ScriptRequest) -> Outcome {
+    let expanded = match crate::include::expand(session, req.code, req.name) {
+        Ok(x) => x,
+        Err(e) => return Outcome { error: Some(e), ..Default::default() },
+    };
+    let Some(x) = expanded else { return run_expanded(session, req) };
+    let mut out = run_expanded(session, &ScriptRequest { code: &x.code, name: req.name, console: req.console });
+    if let Some(e) = out.error.as_mut() {
+        x.locate(e);
+    }
+    out
+}
+
+fn run_expanded(session: &mut Session, req: &ScriptRequest) -> Outcome {
     if let Err(message) = check_nesting(req.code) {
         return Outcome { error: Some(ScriptError { message, file: req.name.into(), ..Default::default() }), ..Default::default() };
     }
@@ -660,7 +797,7 @@ pub fn check_nesting(code: &str) -> Result<(), String> {
 pub(crate) fn run_inline(session: &mut Session, req: &ScriptRequest) -> Outcome {
     let host = if req.console { crate::ui::CONSOLE_HOST } else { crate::ui::new_host_id() };
     let s = std::mem::take(session);
-    ACTIVE.with(|a| *a.borrow_mut() = Some(Active::new(s, req.name)));
+    ACTIVE.with(|a| *a.borrow_mut() = Some(Active::new(s, req.name, host)));
     let guard = Restore { target: session };
     let file = if req.name.is_empty() { "script" } else { req.name };
     let (result, windows) = if req.console {
@@ -681,10 +818,11 @@ pub(crate) fn run_inline(session: &mut Session, req: &ScriptRequest) -> Outcome 
     } else {
         match new_context() {
             Ok(mut ctx) => {
-                let r = eval_with_tasks(&mut ctx, req.code, file);
+                let r = eval_with_tasks(&mut ctx, req.code, file, host);
                 let windows = crate::ui::snapshot(&mut ctx);
-                if windows.iter().any(|w| w.visible) {
-                    // Palettes and panels outlive the run: keep their context for the handlers.
+                if windows.iter().any(|w| w.visible) || crate::tasks::has(host) {
+                    // Palettes, panels and repeating tasks outlive the run: keep their context
+                    // for the handlers and tasks.
                     crate::ui::keep_inline(host, ctx);
                 }
                 (r, windows)
@@ -694,6 +832,7 @@ pub(crate) fn run_inline(session: &mut Session, req: &ScriptRequest) -> Outcome 
     };
     let output = settle();
     drop(guard);
+    crate::tasks::set_epoch(host, session.script_ui.project_epoch);
     crate::ui::publish(session, host, req.name, windows);
     outcome(output, result)
 }
@@ -717,5 +856,15 @@ mod nesting_tests {
         assert!(out.error.is_none(), "{:?}", out.error);
         assert_eq!(out.result, serde_json::json!(2));
         assert!(check_nesting(&("(".repeat(MAX_NESTING) + &")".repeat(MAX_NESTING))).is_ok());
+    }
+
+    /// A canonical drive path and a lexical one compare once the `\\?\` prefix is gone; a UNC
+    /// share and a Unix path are left as they are.
+    #[test]
+    fn only_a_verbatim_drive_prefix_is_dropped() {
+        use std::path::PathBuf;
+        assert_eq!(without_verbatim_prefix(r"\\?\C:\proj\a.txt".into()), PathBuf::from(r"C:\proj\a.txt"));
+        assert_eq!(without_verbatim_prefix(r"\\?\UNC\server\share\a.txt".into()), PathBuf::from(r"\\?\UNC\server\share\a.txt"));
+        assert_eq!(without_verbatim_prefix("/proj/a.txt".into()), PathBuf::from("/proj/a.txt"));
     }
 }

@@ -173,7 +173,8 @@ pub fn camera(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             });
             ui.end_row();
             ui.label(tr("Name"));
-            ui.add(egui::TextEdit::singleline(&mut d.name).desired_width(240.0));
+            let r = ui.add(egui::TextEdit::singleline(&mut d.name).desired_width(240.0));
+            crate::widgets::focus_on_open(ui.ctx(), &r, &d.name);
             ui.end_row();
             ui.label(tr("Preset"));
             let focal = focal_for_zoom(w, d.zoom);
@@ -258,7 +259,8 @@ pub fn light(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     super::dialogs::modal(ctx, "Light Settings", vec2(480.0, 470.0), t, |ui| {
         egui::Grid::new("light-grid").num_columns(2).spacing([14.0, 9.0]).show(ui, |ui| {
             ui.label(tr("Name"));
-            ui.add(egui::TextEdit::singleline(&mut d.name).desired_width(220.0));
+            let r = ui.add(egui::TextEdit::singleline(&mut d.name).desired_width(220.0));
+            crate::widgets::focus_on_open(ui.ctx(), &r, &d.name);
             ui.end_row();
             ui.label(tr("Light Type"));
             egui::ComboBox::from_id_salt("light-type").selected_text(KINDS[d.kind.min(3)].label()).show_ui(ui, |ui| {

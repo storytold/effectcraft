@@ -219,28 +219,63 @@ fn cylinder(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let (_, _, w, h) = rect;
     let r = (ctx.params.f("radius") / 100.0 * w / std::f64::consts::TAU).max(0.5);
     let c = b.to_px(ctx.params.v2("position"));
+    // Keep the pre-existing Rotation control as an additional texture spin.
     let spin = ctx.params.f("rotation").to_radians();
+    let (rx, ry, rz) = (ctx.params.f("rotationX"), ctx.params.f("rotationY"), ctx.params.f("rotationZ"));
+    let tilted = rx != 0.0 || ry != 0.0 || rz != 0.0;
+    let m = rot_xyz(rx, ry, rz);
+    // The cylinder's local Y axis after rotation, in viewer coordinates.
+    let axis = [m[0][1], m[1][1], m[2][1]];
+    let a = 1.0 - axis[2] * axis[2];
     let mode = ctx.params.e("render");
     let sh = Shading::from(ctx);
     let src = b.img.clone();
     b.img.rows_mut().for_each(|(y, row)| {
-        let v = (y as f64 + 0.5 - c.1) / h + 0.5;
+        let dy = y as f64 + 0.5 - c.1;
         for (x, px) in row.iter_mut().enumerate() {
-            let s = (x as f64 + 0.5 - c.0) / r;
-            if s.abs() >= 1.0 {
+            let dx = x as f64 + 0.5 - c.0;
+            if !tilted {
+                // Preserve exactly the mapping of projects saved before axis rotations.
+                let v = dy / h + 0.5;
+                let s = dx / r;
+                if s.abs() >= 1.0 {
+                    *px = [0.0; 4];
+                    continue;
+                }
+                let th = s.asin();
+                let cz = th.cos();
+                let front = || sh.shade(texel(&src, rect, (th + spin) / std::f64::consts::TAU + 0.5, v), [s, 0.0, cz]);
+                let back = || sh.shade(texel(&src, rect, (std::f64::consts::PI - th + spin) / std::f64::consts::TAU + 0.5, v), [-s, 0.0, cz]);
+                *px = match mode {
+                    1 => front(),
+                    2 => back(),
+                    _ => over(front(), back()),
+                };
+                continue;
+            }
+            // Intersect the viewing ray (dx,dy,z) with the rotated cylindrical
+            // side wall: |q - dot(q,axis)*axis|^2 = radius^2.
+            let da = dx * axis[0] + dy * axis[1];
+            let bq = -da * axis[2];
+            let discriminant = bq * bq - a * (dx * dx + dy * dy - da * da - r * r);
+            if a <= 1e-10 || !discriminant.is_finite() || discriminant <= 0.0 {
                 *px = [0.0; 4];
                 continue;
             }
-            let th = s.asin();
-            let cz = th.cos();
-            let front = || {
-                let u = (th + spin) / std::f64::consts::TAU + 0.5;
-                sh.shade(texel(&src, rect, u, v), [s, 0.0, cz])
+            let root = discriminant.sqrt();
+            let face = |z: f64, back: bool| {
+                // Rᵀ turns the intersection into cylinder-local coordinates.
+                let local = [m[0][0] * dx + m[1][0] * dy + m[2][0] * z, m[0][1] * dx + m[1][1] * dy + m[2][1] * z, m[0][2] * dx + m[1][2] * dy + m[2][2] * z];
+                let u = (local[0].atan2(local[2]) + spin) / std::f64::consts::TAU + 0.5;
+                let v = local[1] / h + 0.5;
+                let sign = if back { -1.0 } else { 1.0 };
+                let nx = local[0] / r * sign;
+                let nz = local[2] / r * sign;
+                let normal = [m[0][0] * nx + m[0][2] * nz, m[1][0] * nx + m[1][2] * nz, m[2][0] * nx + m[2][2] * nz];
+                sh.shade(texel(&src, rect, u, v), normal)
             };
-            let back = || {
-                let u = (std::f64::consts::PI - th + spin) / std::f64::consts::TAU + 0.5;
-                sh.shade(texel(&src, rect, u, v), [-s, 0.0, cz])
-            };
+            let front = || face((-bq + root) / a, false);
+            let back = || face((-bq - root) / a, true);
             *px = match mode {
                 1 => front(),
                 2 => back(),
@@ -362,6 +397,9 @@ pub fn specs() -> Vec<EffectSpec> {
         p("radius", "Radius", num(100.0), slider(0.0, 400.0, 0.0, 200.0, 1)),
         p("position", "Position", pt(0.5, 0.5), ParamUi::Point),
         p("rotation", "Rotation", num(0.0), ParamUi::Angle),
+        p("rotationX", "Rotation X", num(0.0), ParamUi::Angle),
+        p("rotationY", "Rotation Y", num(0.0), ParamUi::Angle),
+        p("rotationZ", "Rotation Z", num(0.0), ParamUi::Angle),
         p("render", "Render", Value::Enum(0), render()),
     ];
     cyl.extend(shading());
@@ -525,6 +563,31 @@ mod tests {
         assert!(out.get(50, 10)[3] > 0.99);
         assert!(out.get(50 + 14, 10)[3] > 0.99);
         assert_eq!(out.get(50 + 18, 10)[3], 0.0);
+    }
+
+    #[test]
+    fn cylinder_axis_rotations_affect_geometry_and_texture() {
+        let img = Image::filled(100, 100, [0.5, 0.5, 0.5, 1.0]);
+        let default = run("ec.perspective.cccylinder", &img, &[]).img;
+        let x_tilt = run("ec.perspective.cccylinder", &img, &[("rotationX", num(70.0))]).img;
+        // Tilting the finite cylinder shortens its vertical projection.
+        assert!(default.get(50, 10)[3] > 0.99);
+        assert_eq!(x_tilt.get(50, 10)[3], 0.0);
+        assert!(x_tilt.get(50, 50)[3] > 0.99);
+        let z_roll = run("ec.perspective.cccylinder", &img, &[("rotationZ", num(90.0))]).img;
+        // A quarter turn moves the side wall from vertical to horizontal.
+        assert_eq!(default.get(5, 50)[3], 0.0);
+        assert!(z_roll.get(5, 50)[3] > 0.99);
+
+        let mut striped = Image::filled(100, 100, [0.0, 0.0, 0.0, 1.0]);
+        for y in 0..100 {
+            for x in 0..100 {
+                striped.set(x, y, [x as f32 / 100.0, 0.2, 0.3, 1.0]);
+            }
+        }
+        let baseline = run("ec.perspective.cccylinder", &striped, &[]).img;
+        let spun = run("ec.perspective.cccylinder", &striped, &[("rotationY", num(90.0))]).img;
+        assert!((baseline.get(50, 50)[0] - spun.get(50, 50)[0]).abs() > 0.05);
     }
 
     #[test]

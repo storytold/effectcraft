@@ -44,7 +44,9 @@ fn gradient_ramp(ctx: &EffectCtx, mut b: Buf) -> Buf {
             }
             let t = t.clamp(0.0, 1.0);
             let c = [c0[0] + (c1[0] - c0[0]) * t, c0[1] + (c1[1] - c0[1]) * t, c0[2] + (c1[2] - c0[2]) * t];
-            put(px, c, 1.0, blend);
+            // The ramp fills only where the layer has alpha (#1063), so it keeps the source alpha.
+            let a = px[3];
+            put(px, c, a, blend);
         }
     });
     b
@@ -136,7 +138,10 @@ fn four_color(ctx: &EffectCtx, mut b: Buf) -> Buf {
                 let n = (effectcraft_raster::hash_noise(x as u32, y as u32, seed) - 0.5) * jitter * (8.0 / 255.0);
                 c = c.map(|v| v + n);
             }
-            *px = gen_blend(*px, [c[0] * op, c[1] * op, c[2] * op, op], mode);
+            // None keeps the layer's alpha (#1381), as the Gradient Ramp does: the gradient fills
+            // a shape or text, not its bounding box.
+            let a = if gen_mode(mode).is_none() { op * px[3] } else { op };
+            *px = gen_blend(*px, [c[0] * a, c[1] * a, c[2] * a, a], mode);
         }
     });
     b
@@ -398,6 +403,43 @@ mod generator_tests {
 
     fn red() -> Image {
         Image::filled(32, 32, [1.0, 0.0, 0.0, 1.0])
+    }
+
+    #[test]
+    fn gradient_ramp_stays_inside_the_layer_alpha() {
+        // #1063: a shape's transparent pixels stay transparent; the ramp fills only the shape.
+        let mut img = Image::filled(40, 24, [1.0, 0.0, 0.0, 1.0]);
+        for (i, p) in img.data.iter_mut().enumerate() {
+            let a = if i % 40 < 10 { 0.0 } else { 1.0 };
+            *p = p.map(|c| c * a);
+        }
+        for blend in [0.0, 50.0] {
+            let o = run_fx("ec.generate.gradientramp", &[("blend", num(blend))], img.clone(), 0.0, EffectEnv::default());
+            for (src, out) in img.data.iter().zip(&o.img.data) {
+                assert!((src[3] - out[3]).abs() < 1e-6, "blend {blend}: alpha {} became {}", src[3], out[3]);
+                assert!(out[..3].iter().all(|&c| c <= out[3] + 1e-6), "blend {blend}: premultiplied colour above alpha");
+            }
+            assert!(o.img.data.iter().any(|p| p[3] > 0.99), "blend {blend}: the ramp is drawn inside the shape");
+        }
+    }
+
+    #[test]
+    fn four_color_none_stays_inside_the_layer_alpha() {
+        // #1381: like the Gradient Ramp, the gradient fills a shape or text, not its bounding box.
+        let mut img = Image::filled(40, 24, [1.0, 0.0, 0.0, 1.0]);
+        for (i, p) in img.data.iter_mut().enumerate() {
+            let a = [0.0, 0.5, 1.0][i % 40 / 14];
+            *p = p.map(|c| c * a);
+        }
+        for op in [100.0, 50.0] {
+            let o = run_fx("ec.generate.fourcolor", &[("opacity", num(op))], img.clone(), 0.0, EffectEnv::default());
+            let k = op as f32 / 100.0;
+            for (src, out) in img.data.iter().zip(&o.img.data) {
+                assert!((src[3] * k - out[3]).abs() < 1e-6, "opacity {op}: alpha {} became {}", src[3], out[3]);
+                assert!(out[..3].iter().all(|&c| c <= out[3] + 1e-6), "opacity {op}: premultiplied colour above alpha");
+            }
+            assert!(o.img.data.iter().any(|p| p[1] > 0.1), "opacity {op}: the gradient replaces the layer's colour");
+        }
     }
 
     #[test]

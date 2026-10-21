@@ -44,6 +44,7 @@ pub fn query(s: &mut Session, kind: &str, a: &J) -> R {
         "textdoc" => textdoc(s, a),
         "markers" => markers(s, a),
         "sourceRect" => source_rect(s, a),
+        "pointConvert" => point_convert(s, a),
         "resolveAdd" => resolve_add(s, a),
         "menuCommandId" => Ok(menu_command_id(a.get("name").and_then(J::as_str).unwrap_or(""))),
         "commandAt" => {
@@ -93,6 +94,27 @@ fn label_index(l: Label) -> usize {
     Label::ALL.iter().position(|x| *x == l).unwrap_or(0)
 }
 
+/// Layer ids selected in `comp`, including a comp that is not the active one (#1001).
+fn selected_layer_ids(s: &Session, comp: effectcraft_project::ItemId) -> Vec<u64> {
+    let layers = if s.active_comp_id() == Some(comp) {
+        &s.state.selected_layers
+    } else {
+        match s.state.comp_selections.get(&comp) {
+            Some(sel) => &sel.layers,
+            None => return Vec::new(),
+        }
+    };
+    let Some(c) = s.project.comp(comp) else { return Vec::new() };
+    layers.iter().filter(|l| c.layer(**l).is_some()).map(|l| l.0).collect()
+}
+
+fn layer_selected(s: &Session, comp: effectcraft_project::ItemId, layer: effectcraft_project::LayerId) -> bool {
+    if s.active_comp_id() == Some(comp) {
+        return s.state.selected_layers.contains(&layer);
+    }
+    s.state.comp_selections.get(&comp).is_some_and(|sel| sel.layers.contains(&layer))
+}
+
 /// A comp's selected properties as `[layer, uid]`: the selected ones, then those with selected
 /// keyframes (selecting a keyframe selects its property in After Effects, so scripts find
 /// selected keys through `selectedProperties`).
@@ -121,6 +143,11 @@ fn item(s: &Session, a: &J) -> R {
     });
     let used_in: Vec<u64> = s.project.comps().filter(|(_, c)| c.layers.iter().any(|l| l.source.item() == Some(id))).map(|(cid, _)| cid.0).collect();
     o["usedIn"] = json!(used_in);
+    // The item's proxy (footage and comps): its file and whether Use Proxy is on (#813).
+    o["proxy"] = match &it.proxy {
+        Some(p) => json!({"file": p.footage.path, "isStill": p.footage.kind == effectcraft_project::FootageKind::Still, "enabled": p.enabled}),
+        None => J::Null,
+    };
     match &it.kind {
         ItemKind::Folder => {
             o["kind"] = json!("folder");
@@ -129,7 +156,7 @@ fn item(s: &Session, a: &J) -> R {
         ItemKind::Comp(c) => {
             let cid = id;
             o["kind"] = json!("comp");
-            let sel: Vec<u64> = s.state.selected_layers.iter().filter(|l| c.layer(**l).is_some()).map(|l| l.0).collect();
+            let sel = selected_layer_ids(s, cid);
             let fps = c.frame_rate.as_f64();
             if let Some(m) = o.as_object_mut() {
                 m.extend(
@@ -171,6 +198,9 @@ fn item(s: &Session, a: &J) -> R {
             o["footageMissing"] = json!(fo.missing);
             o["isStill"] = json!(fo.kind == effectcraft_project::FootageKind::Still);
             o["loop"] = json!(fo.loop_count);
+            // Interpret Footage ▸ Conform to frame rate: 0 when the file's own rate is used (#813).
+            o["conformFrameRate"] = json!(if fo.native_rate.is_some() { fo.frame_rate.as_f64() } else { 0.0 });
+            o["nativeFrameRate"] = json!(fo.native_rate.unwrap_or(fo.frame_rate).as_f64());
         }
         ItemKind::Solid(so) => {
             o["kind"] = json!("solid");
@@ -237,7 +267,7 @@ fn layer(s: &Session, a: &J) -> R {
         "isTrackMatte": c.layers.iter().any(|x| x.track_matte.is_some_and(|m| m.layer == l.id)),
         "label": label_index(l.label),
         "comment": l.comment,
-        "selected": s.state.selected_layers.contains(&l.id),
+        "selected": layer_selected(s, cid, l.id),
         "autoOrient": format!("{:?}", l.auto_orient),
         "width": w, "height": h,
         "hasVideo": l.source.is_av(),
@@ -393,6 +423,8 @@ fn alias(k: &str) -> Option<&'static str> {
         "content" | "contents" => "contents",
         "maskshape" | "maskpath" => "path",
         "maskfeather" => "feather",
+        // A light's options name it "ADBE Casts Shadows" in After Effects (#1063).
+        "adbecastsshadows" => "castsShadows",
         "maskopacity" => "opacity",
         "maskexpansion" | "maskoffset" => "expansion",
         "sourcetext" => "sourceText",
@@ -402,6 +434,38 @@ fn alias(k: &str) -> Option<&'static str> {
     })
 }
 
+/// How many groups below a property group a string key may search (#1063: Pro Levels2's Alpha
+/// controls sit one group down, under Alpha).
+const NESTED_CHILD_DEPTH: u8 = 3;
+
+/// The child of `g` that a string key names. The direct children are searched first, then the
+/// groups nested below them, up to `depth` levels.
+fn find_child<'a>(l: &'a Layer, g: &'a PropGroup, k: &str, depth: u8) -> Option<&'a Node> {
+    let chain_of = |n: &Node| -> String {
+        let mut ch = if g.uid == l.props.uid { vec![] } else { chain(l, g.uid).unwrap_or_default() };
+        ch.push(n);
+        matchnames::node(&ch)
+    };
+    let lk = loose(k);
+    g.children
+        .iter()
+        .find(|n| chain_of(n) == k)
+        .or_else(|| g.children.iter().find(|n| n.name() == k))
+        .or_else(|| g.children.iter().find(|n| n.match_id() == k))
+        .or_else(|| g.children.iter().find(|n| n.name().eq_ignore_ascii_case(k)))
+        .or_else(|| g.children.iter().find(|n| loose(n.name()) == lk || loose(n.match_id()) == lk))
+        .or_else(|| alias(&lk).and_then(|m| g.children.iter().find(|n| n.match_id() == m)))
+        .or_else(|| {
+            if depth == 0 {
+                return None;
+            }
+            g.children.iter().find_map(|n| match n {
+                Node::Group(sub) => find_child(l, sub, k, depth - 1),
+                Node::Prop(_) => None,
+            })
+        })
+}
+
 fn child(s: &Session, a: &J) -> R {
     let (_, c, l) = layer_of(s, a)?;
     let uid = u(a, "uid").unwrap_or(0);
@@ -409,22 +473,7 @@ fn child(s: &Session, a: &J) -> R {
     let key = a.get("key").cloned().unwrap_or(J::Null);
     let found = match &key {
         J::Number(n) => n.as_u64().and_then(|i| g.children.get((i as usize).checked_sub(1)?)),
-        J::String(k) => {
-            let chain_of = |n: &Node| -> String {
-                let mut ch = if uid == 0 || uid == l.props.uid { vec![] } else { chain(l, uid).unwrap_or_default() };
-                ch.push(n);
-                matchnames::node(&ch)
-            };
-            let lk = loose(k);
-            g.children
-                .iter()
-                .find(|n| chain_of(n) == *k)
-                .or_else(|| g.children.iter().find(|n| n.name() == k))
-                .or_else(|| g.children.iter().find(|n| n.match_id() == k))
-                .or_else(|| g.children.iter().find(|n| n.name().eq_ignore_ascii_case(k)))
-                .or_else(|| g.children.iter().find(|n| loose(n.name()) == lk || loose(n.match_id()) == lk))
-                .or_else(|| alias(&lk).and_then(|m| g.children.iter().find(|n| n.match_id() == m)))
-        }
+        J::String(k) => find_child(l, g, k, NESTED_CHILD_DEPTH),
         _ => None,
     };
     match found {
@@ -468,6 +517,9 @@ fn value(s: &Session, a: &J) -> R {
     } else {
         let mut ctx = EvalCtx::new(&s.project, cid, c, t);
         ctx.expr = s.expr.as_deref();
+        // Sample expressions (`sampleImage`) read footage through the session's source; without
+        // it footage layers sample as transparent (#1000).
+        ctx.footage = Some(s.footage.as_ref());
         ctx.value(l, p)
     };
     Ok(js_value(c, &v))
@@ -502,27 +554,28 @@ fn keys(s: &Session, a: &J) -> R {
             .collect();
         J::Array(v)
     };
-    let out: Vec<J> = p
-        .keys
-        .iter()
-        .enumerate()
-        .map(|(i, k)| {
-            // Spatial tangents as the motion path plays (auto-Bezier and continuous keys too).
-            let (spatial_in, spatial_out) = if p.spatial { effectcraft_keyframe::spatial_tangents(&p.keys, i) } else { (k.spatial_in, k.spatial_out) };
-            json!({
-                "time": l.comp_time(k.time).seconds(),
-                "layerTime": k.time.seconds(),
-                "value": js_value(c, &k.value),
-                "inInterp": interp(k.in_interp), "outInterp": interp(k.out_interp),
-                "inEase": ease(i, false), "outEase": ease(i, true),
-                "continuous": k.continuous, "autoBezier": k.auto_bezier, "roving": k.roving,
-                "spatialIn": spatial_in, "spatialOut": spatial_out,
-                "spatialContinuous": k.spatial_continuous, "spatialAutoBezier": k.spatial_auto,
-                "selected": sel.contains(&k.time),
-            })
+    let key = |i: usize, k: &effectcraft_keyframe::Keyframe| -> J {
+        // Spatial tangents as the motion path plays (auto-Bezier and continuous keys too).
+        let (spatial_in, spatial_out) = if p.spatial { effectcraft_keyframe::spatial_tangents(&p.keys, i) } else { (k.spatial_in, k.spatial_out) };
+        json!({
+            "time": l.comp_time(k.time).seconds(),
+            "layerTime": k.time.seconds(),
+            "value": js_value(c, &k.value),
+            "inInterp": interp(k.in_interp), "outInterp": interp(k.out_interp),
+            "inEase": ease(i, false), "outEase": ease(i, true),
+            "continuous": k.continuous, "autoBezier": k.auto_bezier, "roving": k.roving,
+            "spatialIn": spatial_in, "spatialOut": spatial_out,
+            "spatialContinuous": k.spatial_continuous, "spatialAutoBezier": k.spatial_auto,
+            "selected": sel.contains(&k.time),
         })
-        .collect();
-    Ok(J::Array(out))
+    };
+    // `index` (zero-based): only that key, as `{count, key}` (`key` null when out of range), so
+    // looking keys up one at a time doesn't serialise the whole list each time (#814).
+    if let Some(i) = u(a, "index") {
+        let k = usize::try_from(i).ok().and_then(|i| p.keys.get(i).map(|k| key(i, k)));
+        return Ok(json!({"count": p.keys.len(), "key": k}));
+    }
+    Ok(J::Array(p.keys.iter().enumerate().map(|(i, k)| key(i, k)).collect()))
 }
 
 /// Apply `layer.setText` attribute keys to the Source Text document at `time` and return the new
@@ -577,6 +630,29 @@ fn markers(s: &Session, a: &J) -> R {
     Ok(J::Array(out))
 }
 
+/// A layer's source point in comp space (`toComp`) or the reverse, through the layer's transform
+/// and its parents' at comp time (#808: `sourcePointToComp`, `compPointToSource`).
+fn point_convert(s: &Session, a: &J) -> R {
+    let (cid, c, l) = layer_of(s, a)?;
+    let t = f(a, "time").map(Tick::from_seconds_f64).unwrap_or_else(|| s.time_of(cid));
+    let p = a.get("point").and_then(J::as_array).ok_or("missing point")?;
+    let x = p.first().and_then(J::as_f64).unwrap_or(0.0);
+    let y = p.get(1).and_then(J::as_f64).unwrap_or(0.0);
+    let mut ctx = EvalCtx::new(&s.project, cid, c, t);
+    ctx.expr = s.expr.as_deref();
+    let (layer_space, _) = ctx.layer_to_comp(l);
+    let m = if a.get("toComp").and_then(J::as_bool).unwrap_or(true) {
+        layer_space
+    } else {
+        layer_space.inverse().ok_or("the layer's transform can't be inverted")?
+    };
+    let k = m.0;
+    let w = k[2][0] * x + k[2][1] * y + k[2][2];
+    let (ox, oy) = (k[0][0] * x + k[0][1] * y + k[0][2], k[1][0] * x + k[1][1] * y + k[1][2]);
+    let (ox, oy) = if w != 0.0 && w.is_finite() { (ox / w, oy / w) } else { (ox, oy) };
+    Ok(json!([ox, oy]))
+}
+
 fn source_rect(s: &Session, a: &J) -> R {
     let (cid, c, l) = layer_of(s, a)?;
     let t = f(a, "time").map(Tick::from_seconds_f64).unwrap_or_else(|| s.time_of(cid));
@@ -626,6 +702,15 @@ fn resolve_add(s: &Session, a: &J) -> R {
             }
         }
         "animators" => json!({"kind": "animator"}),
+        // A stroke always holds Dash 1, Gap 1 and Offset (Dash 0 draws no dashes); adding one of
+        // them returns it, Dash/Gap 2 and 3 are added as a pair (`shape.dashes.add`) (#815).
+        "dashes" if in_group => match matchnames::stroke_dash(name) {
+            Some(id) => match g.children.iter().find(|n| n.match_id() == id) {
+                Some(n) => json!({"kind": "existing", "uid": n.uid()}),
+                None => json!({"kind": "dash", "id": id, "stroke": l.props.parent_of(g.uid).map(|p| p.uid)}),
+            },
+            None => json!({"error": format!("Can not add \"{name}\" to Dashes")}),
+        },
         _ if in_contents && in_group => match matchnames::shape_kind(name) {
             Some(k) => {
                 json!({"kind": "shape", "shape": k, "group": if l.props.sub("contents").is_some_and(|c| c.uid == g.uid) { J::Null } else { json!(g.uid) }})

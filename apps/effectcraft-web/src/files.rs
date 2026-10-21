@@ -144,6 +144,10 @@ impl Services for WebServices {
         let dir = dir.trim_end_matches('/');
         list().into_iter().map(|(p, _)| p).filter(|p| p.rsplit_once('/').is_some_and(|(d, _)| d == dir)).collect()
     }
+    /// The table's files (the default asks `std::fs`, which has no files on wasm32).
+    fn exists(&self, path: &str) -> bool {
+        get(path).is_some()
+    }
     fn is_dir(&self, _path: &str) -> bool {
         false
     }

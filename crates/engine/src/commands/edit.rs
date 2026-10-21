@@ -115,6 +115,11 @@ fn duplicate(s: &mut Session, p: &Value) -> Result<Value> {
         if !items.is_empty() {
             return super::prop_groups::duplicate_contents(s, &items);
         }
+        // Text animators or their selectors selected → duplicate them inside their text layers.
+        let items = super::prop_groups::selected_animator_items(s);
+        if !items.is_empty() {
+            return super::prop_groups::duplicate_contents(s, &items);
+        }
     }
     let (cid, ids) = layers_p(s, p)?;
     let new = s.edit("Duplicate", None, |proj, st| {
@@ -228,9 +233,7 @@ fn copy(s: &mut Session, p: &Value) -> Result<Value> {
     }
     // Keyframes selected → copy keys (pasted at the CTI).
     if !s.state.selected_keys.is_empty() && p.get("layers").is_none() {
-        s.state.link_clipboard = None;
-        s.state.effect_clipboard.clear();
-        s.state.contents_clipboard.clear();
+        clear_clipboards(s);
         return s.execute("keys.copy", json!({}));
     }
     // Effects selected (Effect Controls / timeline) → copy the effects.
@@ -256,12 +259,14 @@ fn copy(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 /// Edit ▸ Copy with properties selected (Position, or the Transform group), as in After
-/// Effects: an animated property copies its keyframes (the selected ones, else all of them) and
-/// an unanimated one its value, for Paste onto the same properties of other layers (#493).
+/// Effects: an animated property copies its keyframes and an unanimated one its value, for Paste
+/// onto the same properties of other layers (#493). With keyframes selected only those are copied,
+/// even across several highlighted properties (#1552); a selected Transform group copies them all.
 /// `None` when no property (or Transform group) is selected.
 fn copy_properties(s: &mut Session) -> Result<Option<Value>> {
     let Some(comp) = s.active_comp() else { return Ok(None) };
     let mut leaves = vec![];
+    let mut copy_all_keys = s.state.selected_keys.is_empty();
     for (lid, uid) in &s.state.selected_props {
         let Some(l) = comp.layer(*lid) else { continue };
         if l.props.find(*uid).is_some() {
@@ -269,6 +274,7 @@ fn copy_properties(s: &mut Session) -> Result<Option<Value>> {
         } else if let Some(g) = l.props.find_group(*uid)
             && l.props.match_path_of(*uid).as_deref() == Some("transform")
         {
+            copy_all_keys = true;
             g.walk("", &mut |_, pr| leaves.push((*lid, pr.uid)));
         }
     }
@@ -286,7 +292,7 @@ fn copy_properties(s: &mut Session) -> Result<Option<Value>> {
             {
                 values.push((path, pr.value.clone()));
             }
-        } else if !keys.iter().any(|k| k.layer == *lid && k.prop == *uid) {
+        } else if copy_all_keys && !keys.iter().any(|k| k.layer == *lid && k.prop == *uid) {
             keys.extend(pr.keys.iter().map(|k| KeyRef { layer: *lid, prop: *uid, time: k.time }));
         }
     }
@@ -327,7 +333,8 @@ fn paste_properties(s: &mut Session, p: &Value) -> Result<Value> {
             }
             let lt = l.layer_time(t);
             for (path, v) in &values {
-                if let Some(pr) = l.props.prop_mut(path)
+                let path = super::resolve_effect_path(l, path);
+                if let Some(pr) = l.props.prop_mut(&path)
                     && let Some(v) = pr.value.coerce_json(&v.to_json())
                 {
                     pr.set_value_at(lt, v);
@@ -457,7 +464,8 @@ fn paste_links(s: &mut Session, clip: LinkClip) -> Result<Value> {
         for lid in &ids {
             let l = super::layer_mut(proj, cid, *lid)?;
             for (path, e) in &pairs {
-                if let Some(pr) = l.props.prop_mut(path) {
+                let path = super::resolve_effect_path(l, path);
+                if let Some(pr) = l.props.prop_mut(&path) {
                     pr.expr = Some(e.clone());
                     n += 1;
                 }
@@ -495,6 +503,13 @@ fn paste(s: &mut Session, p: &Value) -> Result<Value> {
     if let Some(clip) = s.state.link_clipboard.clone() {
         return paste_links(s, clip);
     }
+    // A copied Mask Path / shape Path pasted onto Position becomes a motion path (#1425).
+    if let [(_, effectcraft_keyframe::Value::Path(path))] = s.state.value_clipboard.as_slice()
+        && let Some(target) = super::anim::path_target(s, p)?
+    {
+        let path = path.clone();
+        return super::anim::paste_path(s, p, target, &path);
+    }
     if !s.state.value_clipboard.is_empty() {
         return paste_properties(s, p);
     }
@@ -529,6 +544,42 @@ fn paste(s: &mut Session, p: &Value) -> Result<Value> {
         Ok(created)
     })?;
     Ok(json!(new.iter().map(|l| l.0).collect::<Vec<_>>()))
+}
+
+/// Largest SVG text `edit.pasteSvg` reads (a clipboard can hold anything).
+const MAX_SVG_PASTE: usize = 64 << 20;
+
+/// `edit.pasteSvg`: SVG markup (the system clipboard's, copied from a browser, Illustrator or a
+/// design tool) as a new shape layer above the selected layer, its canvas centred in the comp:
+/// After Effects 26.3 pastes copied vector artwork as shape layers. Edit ▸ Paste runs it when
+/// the system clipboard holds SVG copied after anything copied in the app.
+fn paste_svg(s: &mut Session, p: &Value) -> Result<Value> {
+    let c = "edit.pasteSvg";
+    let text = str_p(p, "svg").ok_or_else(|| super::bad(c, "missing `svg` (SVG markup)"))?;
+    if text.len() > MAX_SVG_PASTE {
+        return Err(super::bad(c, format!("the SVG is larger than {} MB", MAX_SVG_PASTE >> 20)));
+    }
+    if !crate::vector::is_svg_text(text) {
+        return Err(super::bad(c, "the text is not SVG markup"));
+    }
+    let doc = effectcraft_svg::parse(text.as_bytes()).map_err(|e| super::bad(c, format!("cannot read the SVG: {e}")))?;
+    if doc.flatten().is_empty() {
+        return Err(super::bad(c, "the SVG has no shapes"));
+    }
+    let cid = super::comp_id(s, p)?;
+    let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?.clone();
+    let name = match str_p(p, "name") {
+        Some(n) => n.to_string(),
+        None => {
+            let count = comp.layers.iter().filter(|l| matches!(l.source, LayerSource::Shape)).count();
+            comp.unique_layer_name(&format!("Shape Layer {}", count.saturating_add(1)))
+        }
+    };
+    let id = s.edit("Paste", None, |proj, st| {
+        let l = crate::vector::shapes_from_svg(proj, &comp, &doc, &name);
+        super::layer::insert_layer(proj, st, cid, l)
+    })?;
+    Ok(json!({"layer": id.0, "skipped": doc.skipped}))
 }
 
 fn split(s: &mut Session, p: &Value) -> Result<Value> {
@@ -771,9 +822,31 @@ fn original_path(s: &Session) -> Option<String> {
     }
 }
 
+/// Whether Edit Original may hand `path` to the system's default app: a regular file (after
+/// following links) whose name, and the name it links to, have a media extension the footage
+/// importer takes. Anything else (a folder or app bundle, a script, a shortcut) is refused.
+pub(crate) fn openable_original(path: &str) -> std::result::Result<(), String> {
+    let media = |p: &std::path::Path| {
+        let ext = p.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
+        crate::media_browser::kind_of(&p.to_string_lossy()).is_some_and(|k| k != "project") || matches!(ext.as_str(), "pdf" | "ai" | "eps")
+    };
+    let name = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.to_string());
+    let real = std::fs::canonicalize(path).map_err(|e| format!("cannot open “{name}”: {e}"))?;
+    if !real.is_file() {
+        return Err(format!("“{name}” is not a file"));
+    }
+    if !media(std::path::Path::new(path)) || !media(&real) {
+        return Err(format!("Edit Original opens media files only; “{name}” is not one"));
+    }
+    Ok(())
+}
+
 fn edit_original(s: &mut Session, _: &Value) -> Result<Value> {
-    let path = original_path(s).ok_or_else(|| super::bad("edit.editOriginal", "select a footage item or layer"))?;
-    let url = format!("file://{path}");
+    let stored = original_path(s).ok_or_else(|| super::bad("edit.editOriginal", "select a footage item or layer"))?;
+    let path = s.stored_path(&stored).map_err(|why| super::bad("edit.editOriginal", crate::doc_path::refusal(&stored, why)))?;
+    let path = path.to_string_lossy();
+    openable_original(&path).map_err(|e| super::bad("edit.editOriginal", e))?;
+    let url = super::layer_menu::file_url(&path);
     s.events.push(crate::Event::OpenUrl(url.clone()));
     Ok(json!({"url": url}))
 }
@@ -818,14 +891,31 @@ pub fn specs() -> Vec<CommandSpec> {
             has_clip,
             paste
         ),
-        cmd!("edit.pasteReversedKeyframes", "Paste Reversed Keyframes", ["Edit"], None, "{layers?, prop?|path?, time?}", has_key_clip, paste_reversed),
+        cmd!(
+            "edit.pasteSvg",
+            "Paste SVG as Shapes",
+            [],
+            None,
+            "{svg: SVG markup, name?, comp?} → {layer, skipped} (Edit ▸ Paste runs it for SVG on the system clipboard)",
+            has_comp,
+            paste_svg
+        ),
+        cmd!(
+            "edit.pasteReversedKeyframes",
+            "Paste Reversed Keyframes",
+            ["Edit"],
+            Some("Cmd+Shift+V"),
+            "{layers?, prop?|path?, time?}",
+            has_key_clip,
+            paste_reversed
+        ),
         cmd!("edit.clear", "Clear", ["Edit"], Some("Delete"), "{layers?}", layers_or_keys, delete),
         cmd!("edit.duplicate", "Duplicate", ["Edit"], Some("Cmd+D"), "{layers?} (effects or shape items when they are selected)", has_layers, duplicate),
         cmd!("edit.splitLayer", "Split Layer", ["Edit"], Some("Cmd+Shift+D"), "{layers?}", has_layers, split),
         cmd!("edit.liftWorkArea", "Lift Work Area", ["Edit"], None, "{layers?}", has_comp, lift),
         cmd!("edit.extractWorkArea", "Extract Work Area", ["Edit"], None, "{layers?}", has_comp, extract),
         cmd!("edit.selectAll", "Select All", ["Edit"], Some("Cmd+A"), "{}", has_comp, select_all),
-        cmd!("edit.deselectAll", "Deselect All", ["Edit"], Some("Cmd+Shift+A"), "{}", always_ok, deselect_all),
+        cmd!("edit.deselectAll", "Deselect All", ["Edit"], ["Cmd+Shift+A", "F2"], "{}", always_ok, deselect_all),
         cmd!("edit.label", "Label", ["Edit", "Label"], None, "{label: Red|Yellow|Aqua|…, layers?, keys?, target?: layers}", always_ok, label),
         cmd!("edit.selectLabelGroup", "Select Label Group", ["Edit", "Label"], None, "{}", has_props_or_layers_or_items, select_label_group),
         cmd!("edit.purgeUndo", "Undo", ["Edit", "Purge"], None, "{}", always_ok, purge),
@@ -892,4 +982,73 @@ fn layers_or_keys(s: &Session) -> std::result::Result<(), String> {
 
 fn always_ok(_: &Session) -> std::result::Result<(), String> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    fn tmp(name: &str) -> std::path::PathBuf {
+        let d = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-out").join(name);
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// Edit Original opens the footage as a well-formed `file://` URL, whatever its name contains.
+    #[test]
+    fn edit_original_opens_an_encoded_file_url() {
+        let clip = tmp("edit-original-url").join("take #1.mov");
+        std::fs::write(&clip, b"").unwrap();
+        let clip = clip.to_string_lossy().into_owned();
+        let url = super::super::layer_menu::file_url(&clip);
+        assert!(url.ends_with("/take%20%231.mov"), "{url}");
+        let mut s = crate::Session::default();
+        let id = s
+            .edit("add", None, |p, _| {
+                let f = effectcraft_project::Footage { path: clip.clone(), ..Default::default() };
+                Ok(p.add_item("take", effectcraft_color::Label::Lavender, None, effectcraft_project::ItemKind::Footage(f)))
+            })
+            .unwrap();
+        s.state.project_selection = vec![id];
+        s.drain_events();
+        let r = s.execute("edit.editOriginal", json!({})).unwrap();
+        assert_eq!(r["url"], url.as_str());
+        assert!(s.drain_events().iter().any(|e| matches!(e, crate::Event::OpenUrl(u) if *u == url)));
+    }
+
+    /// Only regular media files reach the system opener.
+    #[test]
+    fn edit_original_opens_media_files_only() {
+        let d = tmp("edit-original-kinds");
+        for f in ["clip.mov", "Still.PNG", "run.bat", "app.desktop", "clip.mov.lnk"] {
+            std::fs::write(d.join(f), b"").unwrap();
+        }
+        for f in ["Tool.app", "folder.mov"] {
+            std::fs::create_dir_all(d.join(f)).unwrap();
+        }
+        let ok = |f: &str| super::openable_original(&d.join(f).to_string_lossy()).is_ok();
+        assert!(ok("clip.mov") && ok("Still.PNG"));
+        for f in ["run.bat", "app.desktop", "clip.mov.lnk", "Tool.app", "folder.mov", "missing.mov", ""] {
+            assert!(!ok(f), "{f}");
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(d.join("app.desktop"), d.join("link.png")).unwrap();
+            assert!(!ok("link.png"), "a media name linking to another kind of file");
+        }
+        // The command refuses without opening anything.
+        let mut s = crate::Session::default();
+        let path = d.join("run.bat").to_string_lossy().into_owned();
+        let id = s
+            .edit("add", None, |p, _| {
+                let f = effectcraft_project::Footage { path, ..Default::default() };
+                Ok(p.add_item("bat", effectcraft_color::Label::Lavender, None, effectcraft_project::ItemKind::Footage(f)))
+            })
+            .unwrap();
+        s.state.project_selection = vec![id];
+        s.drain_events();
+        assert!(s.execute("edit.editOriginal", json!({})).is_err());
+        assert!(!s.drain_events().iter().any(|e| matches!(e, crate::Event::OpenUrl(_))));
+    }
 }
