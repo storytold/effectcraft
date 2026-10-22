@@ -1789,15 +1789,14 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             }
             Gesture::Vertices { start, src, applied, layer } => {
                 let want = ov::constrain_move([cpt[0] - start[0], cpt[1] - start[1]], mods.shift);
-                let correction = vt::snap(app, &ctx, &ectx, &map, &[layer], &[[src[0] + want[0], src[1] + want[1]]], mods);
-                let mut total = [want[0] + correction[0], want[1] + correction[1]];
-                if mods.shift {
-                    if want[0].abs() >= want[1].abs() {
-                        total[1] = 0.0;
-                    } else {
-                        total[0] = 0.0;
-                    }
-                }
+                let source = [src[0] + want[0], src[1] + want[1]];
+                let correction = if mods.shift {
+                    let axis = if want[0].abs() >= want[1].abs() { vt::SnapAxis::Horizontal } else { vt::SnapAxis::Vertical };
+                    vt::snap_along_axis(app, &ctx, &ectx, &map, &[layer], source, mods, axis)
+                } else {
+                    vt::snap(app, &ctx, &ectx, &map, &[layer], &[source], mods)
+                };
+                let total = [want[0] + correction[0], want[1] + correction[1]];
                 let delta = [total[0] - applied[0], total[1] - applied[1]];
                 let mut completed = applied;
                 if delta != [0.0; 2] {

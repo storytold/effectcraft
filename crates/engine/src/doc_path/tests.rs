@@ -34,9 +34,11 @@ impl Services for Recording {
     }
 }
 
-/// Probes every file as a still.
+/// Probes every file as a still for the Unix network-path test.
+#[cfg(unix)]
 struct Stills;
 
+#[cfg(unix)]
 impl crate::Importer for Stills {
     fn probe(&self, path: &str) -> Result<Footage, String> {
         if !std::path::Path::new(path).is_file() {

@@ -2878,3 +2878,190 @@ fn review_failed_vertex_drag_finishes_and_keeps_the_next_undo_separate() {
     h.run_steps(2);
     assert_eq!(h.state().session.project, partial, "Undo preserves the successful part of the previous gesture");
 }
+
+/// A path point at (200,103), a nearer point off its constrained axis, and a reachable guide.
+/// Rotate the existing Box so its center/anchor remain point targets without axis-aligned edges.
+fn vertex_snap_competition_harness(mask: bool, horizontal: bool) -> (Harness<'static, EffectcraftApp>, u64, u64, String) {
+    let mut h = harness();
+    let vertices = [[200.0, 103.0], [400.0, 103.0], [400.0, 263.0], [200.0, 263.0]];
+    let (layer, uid, kind) = if mask {
+        let layer = layer_id(&h, "Plate");
+        h.state_mut().session.execute("layer.select", json!({"layers": [layer]})).unwrap();
+        let r = h.state_mut().session.execute("mask.new", json!({"layer": layer, "vertices": vertices, "closed": true})).unwrap();
+        (layer, r["mask"].as_u64().unwrap(), "mask")
+    } else {
+        let r = h
+            .state_mut()
+            .session
+            .execute("shape.newPath", json!({"vertices": vertices, "closed": true, "fill": false, "stroke": "#ffffff", "strokeWidth": 4}))
+            .unwrap();
+        (r["layer"].as_u64().unwrap(), r["path"].as_u64().unwrap(), "shapePath")
+    };
+    let target = layer_id(&h, "Box");
+    let center = if horizontal { [238.0, 104.0, 0.0] } else { [201.0, 141.0, 0.0] };
+    h.state_mut().session.execute("prop.set", json!({"layer": target, "path": "transform/position", "value": center})).unwrap();
+    h.state_mut().session.execute("prop.set", json!({"layer": target, "path": "transform/rotation", "value": 45})).unwrap();
+    h.state_mut()
+        .session
+        .execute("view.addGuide", json!({"orientation": if horizontal { "vertical" } else { "horizontal" }, "position": if horizontal { 241 } else { 144 }}))
+        .unwrap();
+    h.state_mut().session.execute("view.snapping", json!({"value": true})).unwrap();
+    h.state_mut().session.execute("layer.select", json!({"layers": [layer]})).unwrap();
+    h.state_mut().session.execute("mask.selectVertices", json!({"vertices": [{"layer": layer, "mask": uid, "index": 0}]})).unwrap();
+    h.state_mut().ui.tool = Tool::Selection;
+    h.state_mut().ui.viewer.zoom = Some(1.0);
+    h.state_mut().ui.viewer.guides = true;
+    h.state_mut().ui.viewer.snap_guides = true;
+    h.state_mut().ui.viewer.lock_guides = true;
+    h.state_mut().ui.viewer.snap_grid = false;
+    h.run_steps(3);
+    (h, layer, uid, format!("viewer.{kind}.{uid}.vertex.0"))
+}
+
+fn vertex_snap_path(h: &Harness<'_, EffectcraftApp>, layer: u64, uid: u64) -> effectcraft_engine::keyframe::ShapePath {
+    h.state().session.active_comp().unwrap().layer(LayerId(layer)).unwrap().props.find_group(uid).unwrap().get("path").unwrap().value.as_path().unwrap().clone()
+}
+
+fn assert_vertex_snap_delta(h: &Harness<'_, EffectcraftApp>, vertex: &str, from: Pos2, expected: [f32; 2], case: &str) {
+    let zoom = rect(h, "viewer.comp").width() / 640.0;
+    let actual = (rect(h, vertex).center() - from) / zoom;
+    assert!(
+        (actual.x - expected[0]).abs() < 0.02 && (actual.y - expected[1]).abs() < 0.02,
+        "{case}: vertex moved {actual:?} comp pixels, expected {expected:?}"
+    );
+}
+
+/// Leave the button down so the last frame still contains the snap feedback.
+fn begin_vertex_snap_drag(h: &mut Harness<'_, EffectcraftApp>, from: Pos2, to: Pos2, modifiers: egui::Modifiers) {
+    h.input_mut().events.push(Event::ModifiersChanged(modifiers));
+    h.input_mut().events.push(Event::PointerMoved(from));
+    h.input_mut().events.push(Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers });
+    h.step();
+    for i in 1..=10 {
+        h.input_mut().events.push(Event::PointerMoved(from + (to - from) * (i.min(8) as f32 / 8.0)));
+        h.step();
+    }
+}
+
+fn finish_vertex_snap_drag(h: &mut Harness<'_, EffectcraftApp>, to: Pos2, modifiers: egui::Modifiers) {
+    h.input_mut().events.push(Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers });
+    h.run_steps(2);
+    h.input_mut().events.push(Event::ModifiersChanged(egui::Modifiers::NONE));
+    h.step();
+}
+
+fn vertex_snap_cross_centers(h: &Harness<'_, EffectcraftApp>) -> Vec<Pos2> {
+    fn walk(shape: &egui::Shape, centers: &mut Vec<Pos2>) {
+        match shape {
+            egui::Shape::LineSegment { points, stroke } if stroke.color == egui::Color32::from_rgb(0xff, 0xd2, 0x3c) && (stroke.width - 1.5).abs() < 0.001 => {
+                let d = points[1] - points[0];
+                if ((d.x.abs() - 16.0).abs() < 0.01 && d.y.abs() < 0.01) || ((d.y.abs() - 16.0).abs() < 0.01 && d.x.abs() < 0.01) {
+                    centers.push(points[0] + d * 0.5);
+                }
+            }
+            egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, centers)),
+            _ => {}
+        }
+    }
+    let mut centers = vec![];
+    for clipped in &h.output().shapes {
+        walk(&clipped.shape, &mut centers);
+    }
+    centers
+}
+
+/// A point sqrt(2) px away is unreachable with Shift, so the guide 4 px away must win.
+/// Without Shift the same actual point remains a valid target.
+#[test]
+fn shift_vertex_snapping_uses_reachable_line_over_nearer_point() {
+    for mask in [false, true] {
+        for horizontal in [true, false] {
+            for shift in [false, true] {
+                let (mut h, layer, uid, vertex) = vertex_snap_competition_harness(mask, horizontal);
+                let before = vertex_snap_path(&h, layer, uid);
+                let from = rect(&h, &vertex).center();
+                let zoom = rect(&h, "viewer.comp").width() / 640.0;
+                let pointer = if horizontal { vec2(37.0, 1.0) } else { vec2(1.0, 37.0) };
+                let expected = match (horizontal, shift) {
+                    (true, true) => [41.0, 0.0],
+                    (false, true) => [0.0, 41.0],
+                    (true, false) => [38.0, 1.0],
+                    (false, false) => [1.0, 38.0],
+                };
+                let modifiers = egui::Modifiers { shift, ..Default::default() };
+                hold_drag(&mut h, from, from + pointer * zoom, modifiers);
+                assert_vertex_snap_delta(&h, &vertex, from, expected, &format!("mask={mask}, horizontal={horizontal}, shift={shift}"));
+                assert_eq!(vertex_snap_path(&h, layer, uid).vertices[1..], before.vertices[1..]);
+                h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+                h.run_steps(2);
+                assert_eq!(vertex_snap_path(&h, layer, uid), before, "one Undo restores the entire path");
+            }
+        }
+    }
+}
+
+/// Check painted feedback independently of the expected target position: clamping a correction
+/// after snapping must not leave the cross at a point the vertex never actually reached.
+#[test]
+fn shift_vertex_snap_feedback_marks_the_actual_vertex() {
+    for mask in [false, true] {
+        for horizontal in [true, false] {
+            let (mut h, _, _, vertex) = vertex_snap_competition_harness(mask, horizontal);
+            let from = rect(&h, &vertex).center();
+            let zoom = rect(&h, "viewer.comp").width() / 640.0;
+            let pointer = if horizontal { vec2(37.0, 1.0) } else { vec2(1.0, 37.0) };
+            let to = from + pointer * zoom;
+            begin_vertex_snap_drag(&mut h, from, to, egui::Modifiers::SHIFT);
+            let actual = rect(&h, &vertex).center();
+            let centers = vertex_snap_cross_centers(&h);
+            assert_eq!(centers.len(), 2, "the active snap draws both arms of its cross");
+            assert!(
+                centers.iter().all(|c| c.distance(actual) < 0.1),
+                "mask={mask}, horizontal={horizontal}: feedback centers {centers:?} disagree with actual vertex {actual:?}"
+            );
+            finish_vertex_snap_drag(&mut h, to, egui::Modifiers::SHIFT);
+        }
+    }
+}
+
+/// Modifier-only updates must replace the prior snapped displacement, without a new pointer event.
+#[test]
+fn vertex_snapping_updates_when_shift_changes_without_pointer_motion() {
+    for horizontal in [true, false] {
+        let (mut h, layer, uid, vertex) = vertex_snap_competition_harness(true, horizontal);
+        let before = vertex_snap_path(&h, layer, uid);
+        let from = rect(&h, &vertex).center();
+        let zoom = rect(&h, "viewer.comp").width() / 640.0;
+        let pointer = if horizontal { vec2(37.0, 1.0) } else { vec2(1.0, 37.0) };
+        let to = from + pointer * zoom;
+        begin_vertex_snap_drag(&mut h, from, to, egui::Modifiers::NONE);
+        for shift in [false, true, false, true] {
+            let modifiers = egui::Modifiers { shift, ..Default::default() };
+            h.input_mut().events.push(Event::ModifiersChanged(modifiers));
+            h.run_steps(3);
+            let expected = match (horizontal, shift) {
+                (true, true) => [41.0, 0.0],
+                (false, true) => [0.0, 41.0],
+                (true, false) => [38.0, 1.0],
+                (false, false) => [1.0, 38.0],
+            };
+            assert_vertex_snap_delta(&h, &vertex, from, expected, &format!("horizontal={horizontal}, shift={shift}"));
+        }
+        // Keep PR #1978's existing equal-axis rule: a tie chooses horizontal.
+        let tie = from + vec2(20.0, 20.0) * zoom;
+        h.input_mut().events.push(Event::PointerMoved(tie));
+        h.run_steps(3);
+        assert_vertex_snap_delta(&h, &vertex, from, [20.0, 0.0], "equal displacement remains horizontal");
+        h.input_mut().events.push(Event::PointerMoved(from));
+        h.run_steps(3);
+        assert_vertex_snap_delta(&h, &vertex, from, [0.0, 0.0], "return to the original point");
+        h.input_mut().events.push(Event::PointerMoved(to));
+        h.run_steps(3);
+        let expected = if horizontal { [41.0, 0.0] } else { [0.0, 41.0] };
+        assert_vertex_snap_delta(&h, &vertex, from, expected, "final snapped move before Undo");
+        finish_vertex_snap_drag(&mut h, to, egui::Modifiers::SHIFT);
+        h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+        h.run_steps(2);
+        assert_eq!(vertex_snap_path(&h, layer, uid), before, "modifier changes remain one Undo");
+    }
+}
