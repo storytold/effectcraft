@@ -1585,3 +1585,21 @@ fn layer_property_resolves_transform_and_source_text_shortcuts() {
     let (_, c) = comp_named(&s, "x");
     assert_eq!(layer(c, "s").props.prop("transform/opacity").unwrap().value, KV::Scalar(25.0));
 }
+
+/// #1799: setValueAtTime and addKey keep the exact (sub-frame) time the script passes.
+#[test]
+fn script_set_value_at_time_keeps_subframe_key_time() {
+    let mut s = session();
+    let out = ok(
+        &mut s,
+        r#"
+        var c = app.project.items.addComp("repro", 400, 400, 1, 5, 25);
+        var r = c.layers.addNull().property("ADBE Transform Group").property("ADBE Rotate Z");
+        r.setValueAtTime(1.5, 0); r.setValueAtTime(2.5, 90);
+        var o = c.layers.addNull().property("ADBE Transform Group").property("ADBE Opacity");
+        o.addKey(1.51);
+        r.keyTime(1) + " / " + r.keyTime(2) + ", value at 2.0 = " + r.valueAtTime(2.0, false).toFixed(2) + ", addKey " + o.keyTime(1);
+        "#,
+    );
+    assert_eq!(out.result, json!("1.5 / 2.5, value at 2.0 = 45.00, addKey 1.51"));
+}

@@ -204,7 +204,8 @@ fn snapped_key_time(s: &Session, cid: ItemId, lid: LayerId, p: &Value, cmd: &str
     let base = KeyTimeBase::from_params(p, cmd)?;
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
     let layer = comp.layer(lid).ok_or(EngineError::NoComp)?;
-    key_time(layer, comp.frame_rate, p, "time", base, cmd, true)
+    // `snap: false` keeps the exact time (scripts' setValueAtTime/addKey do, as After Effects).
+    key_time(layer, comp.frame_rate, p, "time", base, cmd, b_p(p, "snap") != Some(false))
 }
 
 fn property_reply(p: &Value, layer: &Layer, pr: &Property, time: Tick, value: Value) -> Value {
@@ -1310,7 +1311,15 @@ pub fn specs() -> Vec<CommandSpec> {
             set_selected
         ),
         cmd!("prop.toggleAnimation", "Toggle Stopwatch", [], None, "{layer?, path|prop, value?, merge?, selected?}", has_layers, toggle_anim_selected),
-        cmd!("prop.addKey", "Add Keyframe", [], None, "{layer?, path|prop, time? (layer s by default), timeBase?: layer|comp, value?}", has_layers, add_key),
+        cmd!(
+            "prop.addKey",
+            "Add Keyframe",
+            [],
+            None,
+            "{layer?, path|prop, time? (layer s by default), timeBase?: layer|comp, snap?: bool (false keeps a sub-frame time; default snaps to the nearest frame), value?}",
+            has_layers,
+            add_key
+        ),
         cmd!("prop.toggleKey", "Add or Remove Keyframe at Current Time", [], None, "{layer?, path|prop, selected?}", has_layers, toggle_key_selected),
         cmd!(
             "keys.toggleTransform",

@@ -903,7 +903,7 @@ Property.prototype.property = function () { return null; };
   P.setValueAtTime = function (t, v) {
     var info = this.__info();
     t = __num(t, "time");
-    __call("prop.addKey", this.__ref({ time: this.__layer.__layerTime(t), value: this.__toEngine(v, info, t) }));
+    __call("prop.addKey", this.__ref({ time: this.__layer.__layerTime(t), snap: false, value: this.__toEngine(v, info, t) }));
   };
   P.setValuesAtTimes = function (ts, vs) {
     if (!(ts instanceof Array) || !(vs instanceof Array) || ts.length !== vs.length) throw __err("setValuesAtTimes: times and values must be arrays of the same length");
@@ -915,7 +915,7 @@ Property.prototype.property = function () { return null; };
   };
   P.addKey = function (t) {
     t = __num(t, "time");
-    __call("prop.addKey", this.__ref({ time: this.__layer.__layerTime(t) }));
+    __call("prop.addKey", this.__ref({ time: this.__layer.__layerTime(t), snap: false }));
     return this.nearestKeyIndex(t);
   };
   P.nearestKeyIndex = function (t) {
