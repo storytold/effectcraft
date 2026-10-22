@@ -143,7 +143,8 @@ pub fn ellipse(size: [f64; 2], pos: [f64; 2]) -> BezPath {
 
 /// Polystar: a star (`inner` radius used) or polygon, rotation in degrees, roundness in percent.
 pub fn polystar(star: bool, points: f64, pos: [f64; 2], rotation: f64, inner: f64, outer: f64, inner_round: f64, outer_round: f64) -> BezPath {
-    let n = points.max(3.0).round() as usize;
+    const MAX_POINTS: f64 = 100_000.0;
+    let n = (if points.is_nan() { 3.0 } else { points }).clamp(3.0, MAX_POINTS).round() as usize;
     let verts = if star { n * 2 } else { n };
     let mut path = BezPath::new();
     let step = std::f64::consts::TAU / verts as f64;
@@ -353,6 +354,14 @@ pub fn transform(paths: &[BezPath], m: &Mat3) -> Vec<BezPath> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn polystar_huge_points_is_bounded() {
+        for star in [true, false] {
+            let p = polystar(star, 1e30, [0.0, 0.0], 0.0, 10.0, 20.0, 0.0, 0.0);
+            assert!(p.elements().len() <= 2 * 100_000 + 2);
+        }
+    }
 
     #[test]
     fn roundtrip_vertex_model() {
