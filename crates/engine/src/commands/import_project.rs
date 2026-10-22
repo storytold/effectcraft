@@ -70,7 +70,7 @@ fn import_project(s: &mut Session, p: &Value) -> Result<Value> {
     if sub.next_id.checked_add(base).is_none() {
         return Err(bad(C, format!("{path} has ids out of range")));
     }
-    essential::offset_ids(&mut sub, base);
+    essential::offset_ids(&mut sub, base).map_err(|e| bad(C, format!("{path}: {e}")))?;
     let roots: Vec<ItemId> = root_comps(&sub);
     let folder_name = file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "Imported Project".into());
     let (folder, items) = s.edit("Import Project", None, |proj, st| {

@@ -708,71 +708,117 @@ pub fn with_overrides(project: &Project, comp: ItemId, overrides: &[Override]) -
 
 // ------------------------------------------------------------------------------ id remapping
 
+/// Why [`offset_ids`] refused a project.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OffsetError {
+    /// An id plus the offset doesn't fit in a `u64`.
+    OutOfRange,
+    /// Two items carry the same id, so one would replace the other.
+    DuplicateItem(ItemId),
+}
+
+impl std::fmt::Display for OffsetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OffsetError::OutOfRange => f.write_str("ids out of range: they don't fit after the ids already in the project"),
+            OffsetError::DuplicateItem(id) => write!(f, "two items share id {}", id.0),
+        }
+    }
+}
+
+impl std::error::Error for OffsetError {}
+
+/// Adds the offset to every id it is given, remembering whether one didn't fit.
+struct Shift {
+    o: u64,
+    overflow: bool,
+}
+
+impl Shift {
+    fn id(&mut self, v: u64) -> u64 {
+        v.checked_add(self.o).unwrap_or_else(|| {
+            self.overflow = true;
+            v
+        })
+    }
+    fn layer(&mut self, l: LayerId) -> LayerId {
+        LayerId(self.id(l.0))
+    }
+    fn item(&mut self, i: ItemId) -> ItemId {
+        ItemId(self.id(i.0))
+    }
+}
+
 /// Shift every id (items, layers, property uids, Essential Graphics controls) of `p` by
 /// `offset`, keeping all references consistent: used when merging a template or another project
-/// into a project. Ids from a damaged file saturate instead of overflowing.
-pub fn offset_ids(p: &mut Project, offset: u64) {
+/// into a project. Every shifted id must fit and items must keep distinct ids, so distinct
+/// objects stay distinct (#1229); otherwise this returns an error and `p` is left part-way
+/// shifted, to be discarded.
+pub fn offset_ids(p: &mut Project, offset: u64) -> Result<(), OffsetError> {
+    let mut sh = Shift { o: offset, overflow: false };
     let items = std::mem::take(&mut p.items);
     for (_, mut it) in items {
-        it.id = ItemId(it.id.0.saturating_add(offset));
-        it.parent = it.parent.map(|f| ItemId(f.0.saturating_add(offset)));
+        it.id = sh.item(it.id);
+        it.parent = it.parent.map(|f| sh.item(f));
         if let ItemKind::Comp(c) = &mut it.kind {
             let c = std::sync::Arc::make_mut(c);
             for l in &mut c.layers {
-                offset_layer(l, offset);
+                offset_layer(l, &mut sh);
             }
             if let Some(eg) = &mut c.essential {
-                fn go(v: &mut [EgControl], o: u64) {
+                fn go(v: &mut [EgControl], sh: &mut Shift) {
                     for c in v {
-                        c.id = c.id.saturating_add(o);
+                        c.id = sh.id(c.id);
                         match &mut c.kind {
                             EgKind::Property { layer, prop, links } => {
-                                *layer = LayerId(layer.0.saturating_add(o));
-                                *prop = prop.saturating_add(o);
+                                *layer = sh.layer(*layer);
+                                *prop = sh.id(*prop);
                                 for k in links {
-                                    k.layer = LayerId(k.layer.0.saturating_add(o));
-                                    k.prop = k.prop.saturating_add(o);
+                                    k.layer = sh.layer(k.layer);
+                                    k.prop = sh.id(k.prop);
                                 }
                             }
-                            EgKind::Mirror { of } => *of = of.saturating_add(o),
-                            EgKind::Media { layer } => *layer = LayerId(layer.0.saturating_add(o)),
-                            EgKind::Group { children } => go(children, o),
+                            EgKind::Mirror { of } => *of = sh.id(*of),
+                            EgKind::Media { layer } => *layer = sh.layer(*layer),
+                            EgKind::Group { children } => go(children, sh),
                             EgKind::Comment { .. } => {}
                         }
                     }
                 }
-                go(&mut eg.controls, offset);
+                go(&mut eg.controls, &mut sh);
             }
         }
-        p.items.insert(it.id, it);
+        let id = it.id;
+        if p.items.insert(id, it).is_some() {
+            return Err(OffsetError::DuplicateItem(id));
+        }
     }
     p.render_queue.clear();
-    p.next_id = p.next_id.saturating_add(offset);
+    p.next_id = sh.id(p.next_id);
+    if sh.overflow { Err(OffsetError::OutOfRange) } else { Ok(()) }
 }
 
-fn offset_layer(l: &mut Layer, o: u64) {
-    l.id = LayerId(l.id.0.saturating_add(o));
-    l.parent = l.parent.map(|x| LayerId(x.0.saturating_add(o)));
+fn offset_layer(l: &mut Layer, sh: &mut Shift) {
+    l.id = sh.layer(l.id);
+    l.parent = l.parent.map(|x| sh.layer(x));
     if let Some(tm) = &mut l.track_matte {
-        tm.layer = LayerId(tm.layer.0.saturating_add(o));
+        tm.layer = sh.layer(tm.layer);
     }
     match &mut l.source {
-        LayerSource::Footage { item } | LayerSource::Comp { item } | LayerSource::Solid { item } | LayerSource::Model { item } => {
-            *item = ItemId(item.0.saturating_add(o))
-        }
+        LayerSource::Footage { item } | LayerSource::Comp { item } | LayerSource::Solid { item } | LayerSource::Model { item } => *item = sh.item(*item),
         _ => {}
     }
-    fn group(g: &mut PropGroup, o: u64, essential_parent: bool) {
-        g.uid = g.uid.saturating_add(o);
+    fn group(g: &mut PropGroup, sh: &mut Shift, essential_parent: bool) {
+        g.uid = sh.id(g.uid);
         match &mut g.kind {
             GroupKind::Essential { overridden } => {
                 for u in overridden.iter_mut() {
-                    *u = u.saturating_add(o);
+                    *u = sh.id(*u);
                 }
             }
             // A tracker's Motion Target is a layer of the same comp.
             GroupKind::Tracker { settings } => {
-                settings.target = settings.target.map(|t| LayerId(t.0.saturating_add(o)));
+                settings.target = settings.target.map(|t| sh.layer(t));
             }
             _ => {}
         }
@@ -780,10 +826,10 @@ fn offset_layer(l: &mut Layer, o: u64) {
         for c in &mut g.children {
             match c {
                 Node::Prop(p) => {
-                    p.uid = p.uid.saturating_add(o);
-                    let fix = |v: &mut Value| {
+                    p.uid = sh.id(p.uid);
+                    let mut fix = |v: &mut Value| {
                         if let Value::Layer(Some(id)) = v {
-                            *id = id.saturating_add(o);
+                            *id = sh.id(*id);
                         }
                     };
                     fix(&mut p.value);
@@ -791,25 +837,25 @@ fn offset_layer(l: &mut Layer, o: u64) {
                         fix(&mut k.value);
                     }
                     if is_essential && control_of(&p.match_id).is_some() {
-                        p.match_id = match_id(control_of(&p.match_id).unwrap_or(0).saturating_add(o));
+                        p.match_id = match_id(sh.id(control_of(&p.match_id).unwrap_or(0)));
                         // Media replacement values are item ids.
                         if matches!(p.ui, ParamUi::Hidden)
                             && let Value::Scalar(x) = &mut p.value
                         {
-                            *x += o as f64;
+                            *x += sh.o as f64;
                         }
                     }
                 }
                 Node::Group(sub) => {
                     if is_essential && let Some(id) = control_of(&sub.match_id) {
-                        sub.match_id = match_id(id.saturating_add(o));
+                        sub.match_id = match_id(sh.id(id));
                     }
-                    group(sub, o, is_essential);
+                    group(sub, sh, is_essential);
                 }
             }
         }
     }
-    group(&mut l.props, o, false);
+    group(&mut l.props, sh, false);
 }
 
 /// The items `comp` needs (itself, nested comps, footage, solids), transitively.

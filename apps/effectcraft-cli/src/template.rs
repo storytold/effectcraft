@@ -88,7 +88,7 @@ fn preflight(s: &Session, path: &str, values: &Map<String, Value>) -> Result<(),
         let source = manifest.get("comp").and_then(Value::as_u64).ok_or_else(|| bad("manifest has no `comp`".into()))?;
         let base = s.project.next_id;
         let source = source.checked_add(base).ok_or_else(|| bad("template composition ID overflows the import offset".into()))?;
-        effectcraft_engine::project::essential::offset_ids(&mut project, base);
+        effectcraft_engine::project::essential::offset_ids(&mut project, base).map_err(|e| bad(e.to_string()))?;
         project.fix_next_id();
         let mut check = Session::new();
         check.project = project.into();
