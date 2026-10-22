@@ -348,6 +348,25 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
             _ => {}
         }
     }
+    if no_params(&params) && (app.ui.focused == PanelKind::EffectControls || app.panel_at(ctx.pointer_latest_pos()) == PanelKind::EffectControls) {
+        match id {
+            "edit.selectAll" => {
+                app.ui.focused = PanelKind::EffectControls;
+                if app.session.state.selected_layers.is_empty() {
+                    return Ok(Value::Null);
+                }
+                return run_engine(app, ctx, "effect.selectAll", json!({}));
+            }
+            "edit.deselectAll" => {
+                app.ui.focused = PanelKind::EffectControls;
+                if app.session.state.selected_layers.is_empty() {
+                    return Ok(Value::Null);
+                }
+                return run_engine(app, ctx, "effect.deselectAll", json!({}));
+            }
+            _ => {}
+        }
+    }
     // Edit ▸ Paste with SVG markup on the system clipboard pastes it as a shape layer (After
     // Effects 26.3). Copying in the app replaces the system clipboard with a note naming what
     // was copied, so SVG there was copied after anything copied in the app.
@@ -1616,6 +1635,24 @@ pub(crate) fn entry_enabled(app: &EffectcraftApp, e: &MenuEntry) -> bool {
             "edit.deselectAll" => return !app.session.state.project_selection.is_empty(),
             "edit.cut" | "edit.copy" | "edit.paste" | "edit.copyWithPropertyLinks" | "edit.copyWithRelativePropertyLinks" | "edit.copyExpressionOnly" => {
                 return false;
+            }
+            _ => {}
+        }
+    }
+    if app.ui.focused == PanelKind::EffectControls {
+        match e.command.as_str() {
+            "edit.selectAll" => {
+                let comp = app.session.active_comp();
+                let layer = app.session.state.selected_layers.first().and_then(|id| comp.as_ref()?.layer(*id));
+                return layer.and_then(|l| l.effects()).is_some_and(|fx| fx.groups().next().is_some());
+            }
+            "edit.deselectAll" => {
+                let comp = app.session.active_comp();
+                let layer = app.session.state.selected_layers.first().and_then(|id| comp.as_ref()?.layer(*id));
+                return layer.is_some_and(|l| {
+                    let fx = l.effects();
+                    app.session.state.selected_props.iter().any(|(sl, u)| *sl == l.id && fx.is_some_and(|f| f.find(*u).is_some() || f.find_group(*u).is_some()))
+                });
             }
             _ => {}
         }
