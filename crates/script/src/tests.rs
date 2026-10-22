@@ -1585,3 +1585,53 @@ fn layer_property_resolves_transform_and_source_text_shortcuts() {
     let (_, c) = comp_named(&s, "x");
     assert_eq!(layer(c, "s").props.prop("transform/opacity").unwrap().value, KV::Scalar(25.0));
 }
+
+/// PR #1929's scripting adapter must also retain our source-relative geometry behavior.
+#[test]
+fn av_layer_replace_source_remaps_geometry_across_inactive_comps() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"
+        var main = app.project.items.addComp("Replace main", 640, 360, 1, 3, 30);
+        var layer = main.layers.addSolid([1,0,0], "Hero", 200, 100, 1);
+        layer.transform.position.setValue([123,234]);
+        var mask = layer.property("ADBE Mask Parade").addProperty("ADBE Mask Atom");
+        var shape = new Shape(); shape.vertices=[[10,10],[90,10],[50,80]];
+        shape.inTangents=[[0,0],[0,-5],[0,0]];shape.outTangents=[[0,0],[0,5],[0,0]];shape.closed=true;
+        mask.property("ADBE Mask Shape").setValue(shape);
+        var nested = app.project.items.addComp("Replacement", 400, 300, 1, 3, 30);
+        nested.openInViewer();app.run("edit.deselectAll",{});
+        layer.replaceSource(nested,false);
+        [layer.source.name,layer.name,layer.transform.anchorPoint.value,layer.transform.position.value,
+         mask.property("ADBE Mask Shape").value.vertices,main.numLayers]
+    "#,
+    );
+    assert_eq!(o.result, json!(["Replacement", "Hero", [200, 150, 0], [123, 234, 0], [[20, 30], [180, 30], [100, 240]], 1]));
+    let (cid, c) = comp_named(&s, "Replace main");
+    assert!(layer(c, "Hero").props.sub("audio").is_some());
+    s.execute("edit.undo", json!({})).unwrap();
+    let hero = layer(s.project.comp(cid).unwrap(), "Hero");
+    assert_eq!(hero.props.prop("transform/anchor").unwrap().value, KV::Vec3([100.0, 50.0, 0.0]));
+    assert!(hero.props.sub("audio").is_none());
+}
+
+#[test]
+fn av_layer_replace_source_rejects_non_items_and_unimplemented_expression_fixing() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"
+        var c=app.project.items.addComp("Validation",100,100,1,3,30);
+        var l=c.layers.addSolid([1,0,0],"Old",100,100,1);
+        var n=app.project.items.addComp("New",200,200,1,3,30);
+        var errors=[];
+        try {l.replaceSource({__id:n.__id},false);} catch(e) {errors.push(String(e));}
+        try {l.replaceSource(new AVItem(),false);} catch(e) {errors.push(String(e));}
+        try {l.replaceSource(app.project.items.addFolder("Folder"),false);} catch(e) {errors.push(String(e));}
+        try {l.replaceSource(n,true);} catch(e) {errors.push(String(e));}
+        [errors.length,errors[3].indexOf("not supported")>=0,l.source.name]
+    "#,
+    );
+    assert_eq!(o.result, json!([4, true, "Old"]));
+}

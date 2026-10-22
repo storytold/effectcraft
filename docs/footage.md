@@ -149,3 +149,21 @@ relinking is unavailable.
 Agents: `file.relinkFootage {"folder": "/moved/shots", "dryRun": true, "wait": true}` returns
 a report without edits. Omit `dryRun` to apply unique high-confidence matches. Without `wait`,
 the command returns a cancellable job; `jobs.wait` / `jobs.list` expose its report.
+
+## Replace layer source
+
+Option/Alt-drag a supported Project source onto a Timeline layer, or use Cmd/Ctrl+Alt+/ with
+Project and layer selections. Option-dropping into the Timeline replaces the selected unlocked AV layers together, regardless
+of the row under the pointer. With no layer selection it does nothing. The selected layers are
+highlighted across their expanded rows only for a valid replacement.
+Folders, data/model items, composition cycles and non-AV targets are rejected.
+
+`layer.replaceSource {item: id_or_name, layers?: [ids], comp?: id}` accepts an exact Project
+item name or numeric ID. It preserves layer identity, timing, Position/Scale, effects and Audio
+settings. Anchor Point and mask path coordinates (including keys and relative handles) remap
+to changed source pixel dimensions. Missing Audio controls are created using the normal layer
+builder. The entire change is one undo step.
+
+Scripts use `AVLayer.replaceSource(newSource, false)` and get the same behavior, including for
+a layer in an inactive composition. Automatic expression rewriting (`fixExpressions=true`) is
+not yet supported and reports an error without changing the layer.

@@ -1266,6 +1266,8 @@ mod tests_key_metadata_order;
 #[cfg(test)]
 mod tests_keylight;
 #[cfg(test)]
+mod tests_layer_source;
+#[cfg(test)]
 mod tests_limits;
 #[cfg(test)]
 mod tests_lottie;

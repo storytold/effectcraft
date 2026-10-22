@@ -203,3 +203,33 @@ layout unchanged. Pointer gestures dispatch through this same catalog command.
 EffectCraft also supports `SetStackOpen` and `ResizeStack`. Dynamic panel identities use
 `{"Viewer":42}` or `{"ScriptPanel":77}` in the action. Closing runs the existing viewer
 and ScriptUI lifecycle callbacks; opening uses the existing panel creation commands.
+### Layer source replacement
+
+`layer.replaceSource {layers?: [layerId, ...], item?: itemId|name}` uses the selected layers and first
+selected Project item when omitted. It replaces supported AV sources in one undo step, rejects
+composition cycles and skips locked layers. When pixel dimensions change, Anchor Point X/Y and
+all mask path vertices and relative tangents (static values and every key) scale by the new/old
+width and height ratios. Anchor spatial tangents scale likewise; Z is retained. Source pixel aspect
+ratio does not enter this coordinate remapping. Position, Scale, mask feather/expansion, other
+properties and key times remain unchanged. Sources with a zero dimension have no remapping on
+that axis. Expressions are retained without rewriting their source text. The return value is
+`{layers: count, item: itemId}`. Option-dropping a Project item onto a selected Timeline layer
+and Cmd/Ctrl+Alt+/ dispatch this command.
+
+Replacement adds the standard Audio group when the new footage has audio or the source is a
+precomp, using the same capability rule and group builder as new layers. Existing Audio group
+UIDs, Levels keys/expressions and the audio switch are preserved, including through silent
+replacements; missing controls alone are added. Audio controls and source changes share the
+same undo step. Allocation failure rolls back all selected layers.
+
+The source may also be named by its exact Project item name. Invalid explicit item types are
+rejected rather than falling back to the Project selection. The shortcut is enabled only for
+a valid source/target selection. Timeline hover uses the engine's same bounded eligibility
+check and highlights the entire expanded target layer. Option-drop replaces only the selected unlocked AV layers, regardless of which row is under
+the pointer; an empty selection does nothing. A non-AV selection rejects the batch atomically.
+
+Scripts can call `AVLayer.replaceSource(newSource, false)`; this dispatches the same command
+with explicit composition/layer IDs, including when that composition is not active or no UI
+layer is selected. Geometry remapping and Audio preservation apply equally. `newSource` must
+be an AVItem. `fixExpressions=true` returns an explicit unsupported error without changing
+the project; automatic expression rewriting has not been implemented.

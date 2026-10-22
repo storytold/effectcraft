@@ -609,3 +609,111 @@ fn illustrator_import_offers_and_applies_retain_layer_sizes() {
     assert_eq!((f.width, f.height), (30, 20));
     assert!(f.layer.as_ref().unwrap().layer_size);
 }
+
+/// Selected layers keep our batch replacement; the PR's shortcut and source validation are shared.
+#[test]
+fn replace_source_alt_drag_and_shortcut_preserve_geometry_and_undo() {
+    use effectcraft_engine::project::{ItemId, LayerId, LayerSource};
+    let (mut h, clip) = harness();
+    let top = layer_id(&h, "Top");
+    let middle = layer_id(&h, "Middle");
+    h.state_mut().session.execute("layer.select", json!({"layers":[top,middle]})).unwrap();
+    h.run_steps(3);
+    let before = h.state().session.project.clone();
+    let item = rect(&h, &format!("project.item.{clip}.name")).center();
+    let row = rect(&h, &format!("timeline.layer.{top}.row"));
+    drag(&mut h, item, row.center(), Modifiers::ALT);
+    for id in [top, middle] {
+        let layer = h.state().session.active_comp().unwrap().layer(LayerId(id)).unwrap();
+        assert_eq!(layer.source, LayerSource::Comp { item: ItemId(clip) });
+        assert_eq!(layer.props.prop("transform/anchor").unwrap().value, KV::Vec3([80.0, 45.0, 0.0]));
+        assert!(layer.props.sub("audio").is_some());
+    }
+    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(*h.state().session.project, *before);
+    h.state_mut().session.state.project_selection = vec![ItemId(clip)];
+    h.run_steps(3);
+    let modifiers = Modifiers { command: true, alt: true, ..Default::default() };
+    for pressed in [true, false] {
+        h.event(Event::Key { key: egui::Key::Slash, physical_key: Some(egui::Key::Slash), pressed, repeat: false, modifiers });
+    }
+    h.run_steps(3);
+    assert_eq!(stack(&h), ["Top", "Middle", "Bottom"]);
+    for id in [top, middle] {
+        assert_eq!(h.state().session.active_comp().unwrap().layer(LayerId(id)).unwrap().source, LayerSource::Comp { item: ItemId(clip) });
+    }
+}
+
+#[test]
+fn replace_source_alt_drag_rejects_locked_layers_without_inserting() {
+    let (mut h, clip) = harness();
+    let top = layer_id(&h, "Top");
+    h.state_mut().session.execute("layer.setSwitch", json!({"layers":[top],"switch":"locked","value":true})).unwrap();
+    h.run_steps(3);
+    let before = h.state().session.project.clone();
+    let item = rect(&h, &format!("project.item.{clip}.name")).center();
+    let row = rect(&h, &format!("timeline.layer.{top}.row"));
+    drag(&mut h, item, row.center(), Modifiers::ALT);
+    assert_eq!(*h.state().session.project, *before);
+    assert!(h.state().auto.find("timeline.replaceSourceTarget").is_none());
+}
+
+#[test]
+fn replace_source_preview_covers_expanded_layer_rows_and_accepts_drop_on_group() {
+    let (mut h, clip) = harness();
+    let top = layer_id(&h, "Top");
+    let uid = h.state().session.active_comp().unwrap().layers.iter().find(|l| l.id.0 == top).unwrap().transform().unwrap().uid;
+    let twirl = rect(&h, &format!("timeline.layer.{top}.twirl")).center();
+    h.event(Event::PointerMoved(twirl));
+    for pressed in [true, false] {
+        h.event(Event::PointerButton { pos: twirl, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE });
+        h.step();
+    }
+    h.run_steps(3);
+    let group = rect(&h, &format!("timeline.group.{uid}.name"));
+    let row = rect(&h, &format!("timeline.layer.{top}.row"));
+    let from = rect(&h, &format!("project.item.{clip}.name")).center();
+    let to = group.center();
+    h.event(Event::PointerMoved(from));
+    h.step();
+    h.event(Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    h.step();
+    h.event(Event::ModifiersChanged(Modifiers::ALT));
+    for i in 1..=8 {
+        h.event(Event::PointerMoved(from + (to - from) * (i as f32 / 8.0)));
+        h.step();
+    }
+    h.run_steps(2);
+    let preview = rect(&h, "timeline.replaceSourceTarget");
+    assert!(preview.min.y <= row.min.y && preview.max.y >= group.max.y);
+    h.event(Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::ALT });
+    h.run_steps(3);
+    assert_eq!(stack(&h), ["Top", "Middle", "Bottom"]);
+    assert_eq!(h.state().session.active_comp().unwrap().layers[0].source.item().unwrap().0, clip);
+}
+
+#[test]
+fn option_replace_uses_selection_even_over_an_unselected_layer() {
+    use effectcraft_engine::project::{ItemId, LayerId, LayerSource};
+    let (mut h, clip) = harness();
+    let top = layer_id(&h, "Top");
+    let middle = layer_id(&h, "Middle");
+    let bottom = layer_id(&h, "Bottom");
+    h.state_mut().session.execute("layer.select", json!({"layers":[top,middle]})).unwrap();
+    h.run_steps(3);
+    let original = h.state().session.active_comp().unwrap().layer(LayerId(bottom)).unwrap().clone();
+    let from = rect(&h, &format!("project.item.{clip}.name")).center();
+    let to = rect(&h, &format!("timeline.layer.{bottom}.row")).center();
+    drag(&mut h, from, to, Modifiers::ALT);
+    for id in [top, middle] {
+        assert_eq!(h.state().session.active_comp().unwrap().layer(LayerId(id)).unwrap().source, LayerSource::Comp { item: ItemId(clip) });
+    }
+    assert_eq!(h.state().session.active_comp().unwrap().layer(LayerId(bottom)), Some(&original));
+    h.state_mut().session.execute("edit.deselectAll", json!({})).unwrap();
+    h.run_steps(3);
+    let before = h.state().session.project.clone();
+    let from = rect(&h, &format!("project.item.{clip}.name")).center();
+    let to = rect(&h, &format!("timeline.layer.{bottom}.row")).center();
+    drag(&mut h, from, to, Modifiers::ALT);
+    assert_eq!(*h.state().session.project, *before);
+}

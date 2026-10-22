@@ -32,6 +32,8 @@ mod key_transform;
 mod keys_more;
 mod layer;
 mod layer_menu;
+mod layer_source;
+pub use layer_source::can_replace_source;
 mod layer_time;
 pub(crate) mod link;
 mod liquify;
