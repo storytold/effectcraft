@@ -24,8 +24,8 @@ fn have_ffmpeg() -> bool {
     *HAVE.get_or_init(|| Command::new("ffmpeg").arg("-version").output().is_ok_and(|o| o.status.success()))
 }
 
-/// Run ffmpeg to produce `name` (once; written to a temp name and renamed so concurrent test
-/// processes never see a partial file). `None` when ffmpeg is unavailable.
+/// Run ffmpeg to produce `name` (once; written to a temp name and renamed so concurrent tests
+/// never see a partial file). `None` when ffmpeg is unavailable.
 fn ffmpeg_fixture(name: &str, args: &[&str]) -> Option<PathBuf> {
     if !have_ffmpeg() {
         eprintln!("ffmpeg not found: skipping");
@@ -40,7 +40,11 @@ fn ffmpeg_fixture(name: &str, args: &[&str]) -> Option<PathBuf> {
     let tmp = out.with_file_name(format!("tmp-{}-{:?}.{ext}", std::process::id(), std::thread::current().id()).replace(['(', ')'], ""));
     let st = Command::new("ffmpeg").args(["-hide_banner", "-loglevel", "error", "-y"]).args(args).arg(&tmp).status().expect("run ffmpeg");
     assert!(st.success(), "ffmpeg failed for {name}");
-    std::fs::rename(&tmp, &out).expect("rename");
+    if let Err(e) = std::fs::rename(&tmp, &out) {
+        // Another test made the same fixture meanwhile; Windows can't replace it while it's open.
+        let _ = std::fs::remove_file(&tmp);
+        assert!(out.exists(), "rename {} to {name}: {e}", tmp.display());
+    }
     Some(out)
 }
 

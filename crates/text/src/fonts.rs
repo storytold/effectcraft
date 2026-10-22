@@ -505,6 +505,11 @@ fn style_wants(style: &str) -> (u16, bool) {
 /// Resolve a family + style name. Family matching is case-insensitive; a style that the family
 /// lacks picks the nearest weight and synthesises bold (≥ 600 requested, ≤ 500 found) or italic.
 pub fn resolve(family: &str, style: &str) -> Resolved {
+    resolve_with(family, style, METRIC_ALIASES)
+}
+
+/// [`resolve`] with its table of metric-compatible substitutes.
+fn resolve_with(family: &str, style: &str, aliases: &[(&str, &[&str])]) -> Resolved {
     if let Some(r) = resolve_in(family, style).or_else(|| resolve_by_name(family)) {
         return r;
     }
@@ -514,7 +519,7 @@ pub fn resolve(family: &str, style: &str) -> Resolved {
             return r;
         }
     }
-    if let Some(r) = resolve_alias(family, style) {
+    if let Some(r) = resolve_alias(family, style, aliases) {
         return r;
     }
     // Inter is bundled; face 0 (the first bundled face) is the last resort.
@@ -539,9 +544,9 @@ const METRIC_ALIASES: &[(&str, &[&str])] = &[
 
 /// An installed metric-compatible substitute for a missing family. The result stays `missing`,
 /// so Find Missing Fonts still lists the requested name.
-fn resolve_alias(family: &str, style: &str) -> Option<Resolved> {
+fn resolve_alias(family: &str, style: &str, aliases: &[(&str, &[&str])]) -> Option<Resolved> {
     let family = family.trim();
-    let (_, subs) = METRIC_ALIASES.iter().find(|(name, _)| name.eq_ignore_ascii_case(family))?;
+    let (_, subs) = aliases.iter().find(|(name, _)| name.eq_ignore_ascii_case(family))?;
     subs.iter().find_map(|s| resolve_in(s, style)).map(|r| Resolved { missing: true, ..r })
 }
 
@@ -1252,18 +1257,23 @@ mod tests {
     }
 
     /// A Microsoft family that isn't installed renders in its installed metric-compatible
-    /// substitute instead of Inter, and still reports itself missing (#1677).
+    /// substitute instead of Inter, and still reports itself missing (#1677). The real families
+    /// may well be installed (Windows has Calibri and Cambria), so made-up names stand in for
+    /// them, with the same substitutes.
     #[test]
     fn microsoft_families_resolve_to_metric_compatible_substitutes() {
+        assert!(METRIC_ALIASES.iter().any(|&(name, subs)| name == "Calibri" && subs == ["Carlito"]));
+        assert!(METRIC_ALIASES.iter().any(|&(name, subs)| name == "Cambria" && subs == ["Caladea"]));
+        let aliases: &[(&str, &[&str])] = &[("Calibri 1677", &["Carlito"]), ("Cambria 1677", &["Caladea"])];
         add_font_data(test_font("Carlito"));
         add_font_data(test_font("Caladea"));
-        let calibri = resolve("Calibri", "Regular");
+        let calibri = resolve_with("Calibri 1677", "Regular", aliases);
         assert_eq!(face(calibri.face).info.family, "Carlito");
         assert!(calibri.missing, "the original name stays missing for Find Missing Fonts");
-        let cambria = resolve("Cambria", "Bold");
+        let cambria = resolve_with("Cambria 1677", "Bold", aliases);
         assert_eq!(face(cambria.face).info.family, "Caladea");
         assert!(cambria.missing);
-        let unknown = resolve("No Such Family 1677", "Regular");
+        let unknown = resolve_with("No Such Family 1677", "Regular", aliases);
         assert_eq!(face(unknown.face).info.family, DEFAULT_FAMILY);
         assert!(unknown.missing);
     }
