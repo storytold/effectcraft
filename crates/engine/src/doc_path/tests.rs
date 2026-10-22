@@ -35,9 +35,12 @@ impl Services for Recording {
 }
 
 /// Probes every file as a still.
+#[cfg(unix)]
 struct Stills;
 
+#[cfg(unix)]
 impl crate::Importer for Stills {
+    /// Report an existing test file as a small still image, rejecting missing paths.
     fn probe(&self, path: &str) -> Result<Footage, String> {
         if !std::path::Path::new(path).is_file() {
             return Err(format!("{path}: no such file"));

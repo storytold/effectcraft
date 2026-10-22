@@ -24,6 +24,7 @@ fn footage_paths(s: &effectcraft_engine::Session) -> Vec<(u64, String, bool)> {
     v
 }
 
+/// Replacing one missing item locates its moved siblings, and undo restores the original paths.
 #[test]
 fn replacing_a_missing_file_relinks_the_others_that_moved_with_it() {
     let root: PathBuf = std::env::temp_dir().join(format!("ec-host-relink-{}", std::process::id()));
@@ -48,7 +49,11 @@ fn replacing_a_missing_file_relinks_the_others_that_moved_with_it() {
     let r = s.execute("file.replaceFootage", json!({"item": a, "path": new.join("stills").join("a.png").to_string_lossy()})).unwrap();
     assert_eq!(r["relinked"].as_array().map(Vec::len), Some(1), "{r}");
     let after = footage_paths(&s);
-    assert!(after.iter().all(|(_, p, missing)| p.starts_with(&*new.to_string_lossy()) && !missing), "{after:?}");
+    let moved_root = new.canonicalize().unwrap();
+    assert!(
+        after.iter().all(|(_, p, missing)| std::path::Path::new(p).canonicalize().is_ok_and(|actual| actual.starts_with(&moved_root)) && !missing),
+        "{after:?}"
+    );
     // One undo step puts both back.
     s.execute("edit.undo", json!({})).unwrap();
     assert_eq!(footage_paths(&s).iter().map(|(_, p, _)| p.clone()).collect::<Vec<_>>(), before.iter().map(|(_, p, _)| p.clone()).collect::<Vec<_>>());

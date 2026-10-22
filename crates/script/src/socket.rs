@@ -51,6 +51,7 @@ mod imp {
     use std::collections::BTreeMap;
     use std::io::{ErrorKind, Read, Write};
     use std::net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
@@ -65,6 +66,7 @@ mod imp {
     /// socket blocked on a slow peer doesn't hold up the others (#1248).
     struct Entry {
         sock: Mutex<Sock>,
+        closed: AtomicBool,
         /// A second handle on a stream, so `close` can shut it down while another call is
         /// blocked reading or writing it.
         wake: Option<TcpStream>,
@@ -80,12 +82,13 @@ mod imp {
         &T
     }
 
+    /// Register a socket with its own lock and, for streams, a separate shutdown handle.
     fn add(s: Sock) -> u32 {
         let wake = match &s {
             Sock::Stream { s, .. } => s.try_clone().ok(),
             Sock::Listener(_) => None,
         };
-        let entry = Arc::new(Entry { sock: Mutex::new(s), wake });
+        let entry = Arc::new(Entry { sock: Mutex::new(s), closed: AtomicBool::new(false), wake });
         let mut t = table().lock().unwrap_or_else(|e| e.into_inner());
         let id = t.next;
         t.next += 1;
@@ -98,9 +101,21 @@ mod imp {
         table().lock().unwrap_or_else(|e| e.into_inner()).socks.get(&id).cloned()
     }
 
+    /// Make backpressure deterministic in the socket tests, including Windows loopback.
+    #[cfg(test)]
+    pub(super) fn limit_test_send_buffer(id: u32) {
+        let entry = get(id).unwrap();
+        let sock = entry.sock.lock().unwrap();
+        let Sock::Stream { s, .. } = &*sock else { panic!("expected a test stream") };
+        socket2::SockRef::from(s).set_send_buffer_size(16 * 1024).unwrap();
+    }
+
     /// Forget socket `id`; a call blocked on it fails at once.
     fn close(id: u32) {
         let entry = table().lock().unwrap_or_else(|e| e.into_inner()).socks.remove(&id);
+        if let Some(entry) = &entry {
+            entry.closed.store(true, Ordering::Release);
+        }
         if let Some(w) = entry.as_ref().and_then(|e| e.wake.as_ref()) {
             let _ = w.shutdown(Shutdown::Both);
         }
@@ -123,6 +138,42 @@ mod imp {
     }
     fn decode(b: &[u8], utf8: bool) -> String {
         if utf8 { String::from_utf8_lossy(b).into_owned() } else { b.iter().map(|&c| c as char).collect() }
+    }
+
+    /// Windows shutdown need not interrupt an in-flight blocking send. Use nonblocking writes
+    /// so closure and one deadline for the whole write remain observable on every platform.
+    fn write(s: &mut TcpStream, data: &[u8], limit: Duration, closed: &AtomicBool) -> std::io::Result<()> {
+        s.set_nonblocking(true)?;
+        let result = write_nonblocking(s, data, limit, closed);
+        let restored = s.set_nonblocking(false);
+        result.and(restored)
+    }
+
+    /// Send bounded chunks until complete, closed or past one shared deadline, waiting briefly
+    /// only when the nonblocking socket reports backpressure.
+    fn write_nonblocking(s: &mut TcpStream, data: &[u8], limit: Duration, closed: &AtomicBool) -> std::io::Result<()> {
+        let end = Instant::now() + limit;
+        let mut remaining = data;
+        while !remaining.is_empty() {
+            if closed.load(Ordering::Acquire) {
+                return Err(std::io::Error::new(ErrorKind::NotConnected, "the socket was closed during the write"));
+            }
+            let left = end.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(std::io::Error::new(ErrorKind::TimedOut, "socket write deadline reached"));
+            }
+            let chunk = remaining.get(..remaining.len().min(64 * 1024)).ok_or_else(|| std::io::Error::new(ErrorKind::InvalidInput, "invalid write length"))?;
+            match s.write(chunk) {
+                Ok(0) => return Err(std::io::Error::new(ErrorKind::WriteZero, "the socket stopped accepting data")),
+                Ok(n) => {
+                    remaining = remaining.get(n..).ok_or_else(|| std::io::Error::new(ErrorKind::InvalidData, "invalid socket write count"))?;
+                }
+                Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                Err(e) if e.kind() == ErrorKind::WouldBlock => std::thread::sleep(left.min(Duration::from_millis(5))),
+                Err(e) => return Err(e),
+            }
+        }
+        s.flush()
     }
 
     /// Fill a stream's buffer until `done(buf)` or the timeout / end of stream. Fails only when
@@ -150,6 +201,7 @@ mod imp {
         Ok(())
     }
 
+    /// Dispatch a native socket operation, returning JSON errors for invalid handles or I/O failures.
     pub(super) fn run(op: &str, id: u32, p: &J) -> J {
         let utf8 = p.get("encoding").and_then(J::as_str).is_some_and(|e| e.eq_ignore_ascii_case("utf-8") || e.eq_ignore_ascii_case("utf8"));
         match op {
@@ -265,11 +317,8 @@ mod imp {
                         // A peer that stops reading fills the buffers: give up after `timeout`
                         // instead of blocking the script for good (#1248).
                         let limit = timeout(p).max(Duration::from_millis(1));
-                        if let Err(e) = s.set_write_timeout(Some(limit)) {
-                            return err(format!("cannot set the write timeout: {e}"));
-                        }
                         let data = p.get("data").and_then(J::as_str).unwrap_or("");
-                        match s.write_all(&encode(data, utf8)).and_then(|_| s.flush()) {
+                        match write(s, &encode(data, utf8), limit, &entry.closed) {
                             Ok(()) => json!({"ok": true}),
                             Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => err(format!(
                                 "write timed out after {} s: the other side isn't reading (some of the data may have been sent)",
@@ -301,6 +350,7 @@ mod tests {
     /// `host:port` and the accepted stream's keeper (drop it to let the connection go).
     fn stalled_peer() -> (String, mpsc::Sender<()>) {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        socket2::SockRef::from(&l).set_recv_buffer_size(16 * 1024).unwrap();
         let host = l.local_addr().unwrap().to_string();
         let (stop, wait) = mpsc::channel::<()>();
         std::thread::spawn(move || {
@@ -310,9 +360,12 @@ mod tests {
         (host, stop)
     }
 
+    /// Open a test connection with a small send buffer so a stalled peer exerts backpressure.
     fn open(host: &str) -> u32 {
         let r = run("open", 0, &json!({"host": host, "timeout": 5}));
-        r["id"].as_u64().unwrap_or_else(|| panic!("open {host}: {r}")) as u32
+        let id = r["id"].as_u64().unwrap_or_else(|| panic!("open {host}: {r}")) as u32;
+        super::imp::limit_test_send_buffer(id);
+        id
     }
 
     /// More than the loopback buffers hold, so a peer that doesn't read stops the write.
