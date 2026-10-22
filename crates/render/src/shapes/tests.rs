@@ -479,3 +479,33 @@ fn miter_corner_still_fits_its_buffer() {
     let b = shape_buf(&p, cid);
     assert!(b.img.height as f64 >= 50.0 + 20.0 * 4.0 * 0.5, "{}", b.img.height);
 }
+
+#[test]
+fn rect_per_corner_roundness_rounds_the_named_corners() {
+    let render = |per_corner: bool, radii: [f64; 4], roundness: f64| {
+        let (p, cid) = shape_comp_sized(200, 100, move |ids| {
+            let mut g = build::shape_rect(ids, [100.0, 100.0], [0.0, 0.0], roundness);
+            g.prop_mut("perCorner").unwrap().value = Value::Bool(per_corner);
+            for (m, v) in
+                [("topLeftRoundness", radii[0]), ("topRightRoundness", radii[1]), ("bottomRightRoundness", radii[2]), ("bottomLeftRoundness", radii[3])]
+            {
+                g.prop_mut(m).unwrap().value = Value::Scalar(v);
+            }
+            vec![g, build::shape_fill(ids, RED)]
+        });
+        frame(&p, cid)
+    };
+    // Only the top-left corner rounds: its corner pixels fade, the other three stay filled.
+    let img = render(true, [30.0, 0.0, 0.0, 0.0], 0.0);
+    assert!(alpha(&img, 52, 2) < 0.1, "top-left rounds: {}", alpha(&img, 52, 2));
+    for (x, y) in [(148, 2), (148, 98), (52, 98)] {
+        assert!(alpha(&img, x, y) > 0.9, "({x},{y}) stays square: {}", alpha(&img, x, y));
+    }
+    // The checkbox off ignores the four values (the single Roundness still rules).
+    let off = render(false, [30.0; 4], 0.0);
+    assert!((coverage(&off) - 100.0 * 100.0).abs() < 20.0, "{}", coverage(&off));
+    // Four equal per-corner radii render like the same Roundness.
+    let per = render(true, [25.0; 4], 0.0);
+    let uni = render(false, [0.0; 4], 25.0);
+    assert!((coverage(&per) - coverage(&uni)).abs() < 5.0, "{} vs {}", coverage(&per), coverage(&uni));
+}

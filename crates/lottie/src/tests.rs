@@ -829,3 +829,39 @@ fn external_images_are_local_or_skipped() {
     assert_eq!(std::path::Path::new(&paths[0]), base.join("images").join("a.png"));
     assert_eq!(r.warnings.iter().filter(|w| w.contains("is not imported")).count(), assets.len() - 1, "{:?}", r.warnings);
 }
+
+#[test]
+fn per_corner_roundness_exports_equal_radii_and_warns_when_mixed() {
+    let shape = |radii: [f64; 4], roundness: f64, per_corner: bool| {
+        let (mut p, cid) = setup();
+        let l = shape_layer(&mut p, cid, move |ids| {
+            let mut g = build::shape_rect(ids, [100.0, 50.0], [0.0, 0.0], roundness);
+            g.prop_mut("perCorner").unwrap().value = Value::Bool(per_corner);
+            for (m, v) in
+                [("topLeftRoundness", radii[0]), ("topRightRoundness", radii[1]), ("bottomRightRoundness", radii[2]), ("bottomLeftRoundness", radii[3])]
+            {
+                g.prop_mut(m).unwrap().value = Value::Scalar(v);
+            }
+            let fill = build::shape_fill(ids, [1.0, 0.0, 0.0, 1.0]);
+            vec![build::shape_group(ids, "Rectangle 1", vec![g, fill])]
+        });
+        push(&mut p, cid, l);
+        (p, cid)
+    };
+    let rc = |json: &Json| -> Json { json["layers"][0]["shapes"][0]["it"].as_array().unwrap().iter().find(|i| i["ty"] == "rc").cloned().unwrap() };
+    // Four equal static radii: `rc.r` carries the value, no warning.
+    let (p, cid) = shape([12.0; 4], 5.0, true);
+    let (_, _, warnings, json) = roundtrip(&p, cid, &ExportOptions::default());
+    assert_eq!(rc(&json)["r"], json!({"a": 0, "k": 12.0}));
+    assert!(!warnings.iter().any(|w| w.contains("per-corner")), "{warnings:?}");
+    // Mixed radii: not representable, roundness 0 exported with a warning.
+    let (p, cid) = shape([10.0, 20.0, 10.0, 20.0], 5.0, true);
+    let (_, _, warnings, json) = roundtrip(&p, cid, &ExportOptions::default());
+    assert_eq!(rc(&json)["r"], json!({"a": 0, "k": 0}));
+    assert!(warnings.iter().any(|w| w.contains("per-corner roundness")), "{warnings:?}");
+    // The checkbox off exports the single Roundness and ignores the four values.
+    let (p, cid) = shape([10.0, 20.0, 10.0, 20.0], 5.0, false);
+    let (_, _, warnings, json) = roundtrip(&p, cid, &ExportOptions::default());
+    assert_eq!(rc(&json)["r"]["k"], json!(5.0));
+    assert!(!warnings.iter().any(|w| w.contains("per-corner")), "{warnings:?}");
+}

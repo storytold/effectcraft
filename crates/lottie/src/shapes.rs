@@ -113,6 +113,9 @@ impl Out<'_, '_> {
     fn f(&self, m: &str) -> f64 {
         self.g.get(m).map(|p| p.value.as_f64()).unwrap_or(0.0)
     }
+    fn flag(&self, m: &str) -> bool {
+        self.g.get(m).map(|p| p.value.as_bool()).unwrap_or(false)
+    }
     fn animated(&self, m: &str) -> bool {
         self.g.get(m).is_some_and(|p| p.is_animated() || p.has_expression())
     }
@@ -232,7 +235,20 @@ pub(crate) fn export_items(ex: &mut Ex, contents: &PropGroup, label: &str) -> Ve
                 dir(&mut o);
                 o.put("s", "size", &anim::arr2);
                 o.put("p", "position", &anim::arr2);
-                o.put("r", "roundness", &anim::num);
+                if o.flag("perCorner") {
+                    let names = ["topLeftRoundness", "topRightRoundness", "bottomRightRoundness", "bottomLeftRoundness"];
+                    let radii = names.map(|m| o.f(m));
+                    // Lottie `rc` has one `r`: four equal static radii export as that value.
+                    // `r` is a property (`{a, k}`) like the uniform branch writes, not a bare number.
+                    if radii.iter().all(|v| (v - radii[0]).abs() < 1e-6) && !names.iter().any(|m| o.animated(m)) && radii[0] >= 0.0 {
+                        o.raw("r", json!({"a": 0, "k": r(radii[0])}));
+                    } else {
+                        o.ex.warn(format!("{}: per-corner roundness has no Lottie rectangle equivalent (roundness 0 exported)", o.label));
+                        o.raw("r", json!({"a": 0, "k": 0}));
+                    }
+                } else {
+                    o.put("r", "roundness", &anim::num);
+                }
             }
             "el" => {
                 dir(&mut o);
@@ -432,6 +448,11 @@ pub(crate) fn import_items(im: &mut Im, ids: &mut Ids, items: &[Json]) -> Vec<Pr
                 set(im, &mut g, "size", j.get("s"), &anim::to_vec2);
                 set(im, &mut g, "position", j.get("p"), &anim::to_vec2);
                 set(im, &mut g, "roundness", j.get("r"), &anim::to_scalar);
+                // Lottie has one roundness: keep the per-corner values in step so ticking the box
+                // on an imported rectangle keeps the shape.
+                for m in ["topLeftRoundness", "topRightRoundness", "bottomRightRoundness", "bottomLeftRoundness"] {
+                    set(im, &mut g, m, j.get("r"), &anim::to_scalar);
+                }
                 g
             }
             "el" => {

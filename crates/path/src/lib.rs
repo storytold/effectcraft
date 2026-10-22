@@ -130,11 +130,52 @@ pub fn from_kurbo(path: &BezPath) -> Vec<ShapePath> {
     out
 }
 
-/// Rectangle path centred at `pos` with corner `roundness` (AE draws clockwise from the top-right).
+/// Rectangle path centred at `pos` with corner `roundness` (clockwise in screen coordinates).
 pub fn rect(size: [f64; 2], pos: [f64; 2], roundness: f64) -> BezPath {
-    let r = kurbo::Rect::from_center_size(Point::new(pos[0], pos[1]), (size[0].abs(), size[1].abs()));
-    let rad = roundness.clamp(0.0, size[0].abs().min(size[1].abs()) / 2.0);
-    if rad > 0.0 { r.to_rounded_rect(rad).to_path(0.1) } else { r.to_path(0.1) }
+    rect_radii(size, pos, [roundness; 4])
+}
+
+/// Rectangle path centred at `pos` with independent corner radii `[top-left, top-right,
+/// bottom-right, bottom-left]`, in screen coordinates, clockwise from the top-left. Negative and
+/// non-finite radii are 0; radii that would overlap are scaled down as CSS `border-radius` does.
+pub fn rect_radii(size: [f64; 2], pos: [f64; 2], radii: [f64; 4]) -> BezPath {
+    let w = if size[0].is_finite() { size[0].abs() } else { 0.0 };
+    let h = if size[1].is_finite() { size[1].abs() } else { 0.0 };
+    let (x0, y0) = (pos[0] - w / 2.0, pos[1] - h / 2.0);
+    let (x1, y1) = (pos[0] + w / 2.0, pos[1] + h / 2.0);
+    let mut r = radii.map(|v| if v.is_finite() { v.max(0.0) } else { 0.0 });
+    // CSS border-radius: when two radii on an edge overlap, scale every radius by the smallest
+    // edge ratio (a uniform radius then clamps to half the shorter side, as before).
+    let ratio = |a: f64, b: f64, edge: f64| if a + b > edge && a + b > 0.0 { (edge / (a + b)).min(1.0) } else { 1.0 };
+    let f = ratio(r[0], r[1], w).min(ratio(r[3], r[2], w)).min(ratio(r[0], r[3], h)).min(ratio(r[1], r[2], h));
+    if f < 1.0 {
+        for v in &mut r {
+            *v *= f;
+        }
+    }
+    let [tl, tr, br, bl] = r;
+    // Quarter-circle Bezier control distance.
+    const K: f64 = 0.552_284_749_830_793_6;
+    let mut p = BezPath::new();
+    p.move_to(Point::new(x0, y0 + tl));
+    if tl > 0.0 {
+        p.curve_to(Point::new(x0, y0 + tl - K * tl), Point::new(x0 + tl - K * tl, y0), Point::new(x0 + tl, y0));
+    }
+    p.line_to(Point::new(x1 - tr, y0));
+    if tr > 0.0 {
+        p.curve_to(Point::new(x1 - tr + K * tr, y0), Point::new(x1, y0 + tr - K * tr), Point::new(x1, y0 + tr));
+    }
+    p.line_to(Point::new(x1, y1 - br));
+    if br > 0.0 {
+        p.curve_to(Point::new(x1, y1 - br + K * br), Point::new(x1 - br + K * br, y1), Point::new(x1 - br, y1));
+    }
+    p.line_to(Point::new(x0 + bl, y1));
+    if bl > 0.0 {
+        p.curve_to(Point::new(x0 + bl - K * bl, y1), Point::new(x0, y1 - bl + K * bl), Point::new(x0, y1 - bl));
+    }
+    p.line_to(Point::new(x0, y0 + tl));
+    p.close_path();
+    p
 }
 
 pub fn ellipse(size: [f64; 2], pos: [f64; 2]) -> BezPath {
@@ -378,6 +419,32 @@ mod tests {
         let m = fill_coverage(&[r], &Mat3::IDENTITY, 100, 100, FillRule::NonZero);
         let area: f32 = m.data.iter().sum();
         assert!((area - 200.0).abs() < 1.0, "{area}");
+    }
+
+    #[test]
+    fn rect_radii_uniform_matches_a_rounded_rect() {
+        for r in [0.0, 5.0, 25.0, 100.0] {
+            let p = rect_radii([100.0, 50.0], [10.0, 20.0], [r; 4]);
+            let clamped = r.min(25.0);
+            let expect = 100.0 * 50.0 - (4.0 - std::f64::consts::PI) * clamped * clamped;
+            assert!((p.area().abs() - expect).abs() < 1.0, "{r}: {} != {expect}", p.area());
+            assert!((p.area() - rect([100.0, 50.0], [10.0, 20.0], r).area()).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn rect_radii_mixes_corners_and_scales_overlaps() {
+        // Only the top-left and bottom-right corners round.
+        let p = rect_radii([100.0, 50.0], [0.0, 0.0], [10.0, 0.0, 20.0, 0.0]);
+        let expect = 100.0 * 50.0 - (1.0 - std::f64::consts::PI / 4.0) * (10.0 * 10.0 + 20.0 * 20.0);
+        assert!((p.area().abs() - expect).abs() < 1.0, "{}", p.area());
+        // Radii wider than the top edge scale down together, like CSS border-radius.
+        let p = rect_radii([50.0, 100.0], [0.0, 0.0], [40.0, 40.0, 0.0, 0.0]);
+        let scaled = rect_radii([50.0, 100.0], [0.0, 0.0], [25.0, 25.0, 0.0, 0.0]);
+        assert!((p.area() - scaled.area()).abs() < 1e-9);
+        // Negative and non-finite radii are square corners.
+        let p = rect_radii([50.0, 50.0], [0.0, 0.0], [-5.0, f64::NAN, f64::INFINITY, 0.0]);
+        assert!((p.area().abs() - 2500.0).abs() < 1e-9);
     }
 
     #[test]

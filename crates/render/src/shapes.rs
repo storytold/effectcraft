@@ -201,7 +201,20 @@ fn collect(ctx: &EvalCtx, layer: &Layer, contents: &PropGroup, arena: &mut Vec<B
             "rect" => {
                 let size = ctx.v2(layer, g, "size", [100.0; 2]);
                 let pos = ctx.v2(layer, g, "position", [0.0; 2]);
-                let p = effectcraft_path::rect(size, pos, ctx.f(layer, g, "roundness", 0.0));
+                let p = if ctx.b(layer, g, "perCorner") {
+                    effectcraft_path::rect_radii(
+                        size,
+                        pos,
+                        [
+                            ctx.f(layer, g, "topLeftRoundness", 0.0),
+                            ctx.f(layer, g, "topRightRoundness", 0.0),
+                            ctx.f(layer, g, "bottomRightRoundness", 0.0),
+                            ctx.f(layer, g, "bottomLeftRoundness", 0.0),
+                        ],
+                    )
+                } else {
+                    effectcraft_path::rect(size, pos, ctx.f(layer, g, "roundness", 0.0))
+                };
                 push_shape(ctx, layer, g, p, arena, &mut live);
             }
             "ellipse" => {

@@ -385,11 +385,18 @@ pub fn shape_group(ids: &mut Ids, name: &str, items: Vec<PropGroup>) -> PropGrou
 }
 
 pub fn shape_rect(ids: &mut Ids, size: [f64; 2], position: [f64; 2], roundness: f64) -> PropGroup {
+    // Per-corner radii start from the uniform Roundness, so ticking the box keeps the shape.
+    let r = if roundness.is_finite() { roundness.max(0.0) } else { 0.0 };
     indexed(ids.group("rect", "Rectangle Path 1"))
         .with(ids.prop("direction", "Path Direction", Value::Enum(0)).with_ui(ParamUi::Hidden))
         .with(ids.prop("size", "Size", Value::Vec2(size)).with_ui(ParamUi::Pixels))
         .with(ids.prop("position", "Position", Value::Vec2(position)).with_ui(ParamUi::Point))
         .with(ids.prop("roundness", "Roundness", Value::Scalar(roundness)).with_ui(ParamUi::Pixels))
+        .with(ids.prop("perCorner", "Per-Corner Roundness", Value::Bool(false)).with_ui(ParamUi::Checkbox))
+        .with(ids.prop("topLeftRoundness", "Top Left Roundness", Value::Scalar(r)).with_ui(ParamUi::Pixels))
+        .with(ids.prop("topRightRoundness", "Top Right Roundness", Value::Scalar(r)).with_ui(ParamUi::Pixels))
+        .with(ids.prop("bottomRightRoundness", "Bottom Right Roundness", Value::Scalar(r)).with_ui(ParamUi::Pixels))
+        .with(ids.prop("bottomLeftRoundness", "Bottom Left Roundness", Value::Scalar(r)).with_ui(ParamUi::Pixels))
 }
 
 pub fn shape_ellipse(ids: &mut Ids, size: [f64; 2], position: [f64; 2]) -> PropGroup {
