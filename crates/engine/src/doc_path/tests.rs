@@ -34,7 +34,7 @@ impl Services for Recording {
     }
 }
 
-/// Probes every file as a still for the Unix network-path test.
+/// Probes every file as a still. Only the Unix part of the test below imports files.
 #[cfg(unix)]
 struct Stills;
 
