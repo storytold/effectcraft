@@ -127,6 +127,24 @@ fn distort() {
         &[("property", e(4)), ("softness", n(3.0)), ("cutAway", n(30.0)), ("lightType", e(1)), ("lightPosition", pt(20.0, 10.0))],
     );
     effect_case("ec.distort.ccblobbylize", &[("property", e(5)), ("metal", n(30.0)), ("roughness", n(0.2))]);
+    effect_case("ec.distort.ccblobbylize", &[("property", e(6)), ("softness", n(20.0)), ("cutAway", n(25.0))]);
+}
+
+#[test]
+fn ccblobbylize_gpu_keeps_a_thin_stroke_opaque() {
+    let Some(g) = crate::tests::gpu() else { return };
+    let size = [24.0, 24.0];
+    let spec = effectcraft_effects::find("ec.distort.ccblobbylize").unwrap();
+    let mut params =
+        effectcraft_effects::Params { values: spec.params.iter().map(|p| (p.id.to_string(), effectcraft_effects::default_value(p, size))).collect() };
+    params.values.insert("softness".into(), n(20.0));
+    params.values.insert("cutAway".into(), n(25.0));
+    let img = effectcraft_effects::util::gen_image(24, 24, |_, y| if (11..13).contains(&y) { [1.0; 4] } else { [0.0; 4] });
+    let buf = effectcraft_effects::Buf { img, offset: [0.0, 0.0], scale: 1.0 };
+    let ctx = effectcraft_effects::EffectCtx { params: &params, time: 0.0, layer_size: size, seed: 1, adjustment: false, env: Default::default() };
+    let out = effectcraft_render::Accelerator::effects(g, &[effectcraft_render::FxStep { spec, ctx }], &buf, None).expect("the GPU runs the effect");
+    assert!(out.img.get(12, 12)[3] > 0.95, "the GPU cut the stroke away: {}", out.img.get(12, 12)[3]);
+    assert!(out.img.get(12, 2)[3] < 0.05, "the GPU blur leaked too far outside the stroke");
 }
 
 /// Effects reading another layer (gradient, reveal, backside, environment, stereo views).

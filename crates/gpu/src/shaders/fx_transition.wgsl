@@ -164,6 +164,20 @@ fn ftr_mul(@builtin(global_invocation_id) gid: vec3<u32>) {
     textureStore(out, p, textureLoad(src, p, 0) * textureLoad(aux, p, 0).x);
 }
 
+// CC Blobbylize height: x = the blurred height (smooth slopes and displacement), y = the
+// peak-preserving matte (the raw height keeps narrow strokes opaque). `src` is the blurred
+// plane, `aux` the raw one (#1708).
+@compute @workgroup_size(16, 16)
+fn ftr_blob_height(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let p = vec2<i32>(gid.xy);
+    if (!ftr_inside(p)) {
+        return;
+    }
+    let h = textureLoad(src, p, 0).x;
+    let matte = max(h, textureLoad(aux, p, 0).x);
+    textureStore(out, p, vec4<f32>(h, matte, 0.0, 1.0));
+}
+
 // aux + src × (1 − aux.a): src composited under aux.
 @compute @workgroup_size(16, 16)
 fn ftr_under(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -581,14 +595,14 @@ fn ftr_blob(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let depth = P.f[0].x;
     let cut = P.f[0].y;
-    let hv = textureLoad(aux, p, 0).x;
+    let h = textureLoad(aux, p, 0);
+    let matte = h.y;
     let g = ftr_grad(p);
     let f = ftr_centre(p);
     let s = sample_bilinear(src, f.x - g.x * depth * 2.0, f.y - g.y * depth * 2.0);
     let c = ftr_unpremul(s);
-    let a = max(s.w, 0.0);
-    let m = clamp((hv - cut) / max((1.0 - cut) * 0.5, 1e-3), 0.0, 1.0);
-    let alpha = max(a, s.w) * m;
+    let m = clamp((matte - cut) / max((1.0 - cut) * 0.5, 1e-3), 0.0, 1.0);
+    let alpha = m * textureLoad(src, p, 0).w;
     if (alpha <= 0.0) {
         textureStore(out, p, vec4<f32>(0.0));
         return;

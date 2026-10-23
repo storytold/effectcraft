@@ -122,7 +122,12 @@ fn cc_blobbylize(ctx: &EffectCtx, mut b: Buf) -> Buf {
         let (c, a) = unpremul(px);
         pick(prop, c, a) * if matches!(prop, crate::util::Src::Alpha) { 1.0 } else { a }
     });
+    // Softness rounds the blob's outline but must not eat the surface. The blurred height gives
+    // the smooth slopes used by the light and the displacement; the raw height keeps the middle
+    // of narrow glyph strokes opaque for Cut Away. A plain blurred matte drops the peak on those
+    // strokes and leaves a translucent mask instead of a lit surface (#1708).
     let h = gauss_plane(&raw, soft, soft);
+    let matte = raw.zip_map(&h, |a, b| a.max(b));
     let intensity = ctx.params.f("lightIntensity") / 100.0;
     let lc = ctx.params.color("lightColor");
     let point = ctx.params.e("lightType") == 1;
@@ -142,16 +147,18 @@ fn cc_blobbylize(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b.img.rows_mut().for_each(|(y, row)| {
         for (x, px) in row.iter_mut().enumerate() {
             let (xi, yi) = (x as i64, y as i64);
-            let hv = h.get(x, y);
             let gx = (h.get_clamped(xi + 1, yi) - h.get_clamped(xi - 1, yi)) as f64 * 0.5;
             let gy = (h.get_clamped(xi, yi + 1) - h.get_clamped(xi, yi - 1)) as f64 * 0.5;
             // Refraction-like displacement down the slope, then the blobby matte.
             let sx = x as f64 + 0.5 - gx * depth * 2.0;
             let sy = y as f64 + 0.5 - gy * depth * 2.0;
             let s = src.sample_bilinear(sx, sy);
-            let (c, a) = unpremul(s);
-            let m = ((hv - cut) / ((1.0 - cut) * 0.5).max(1e-3)).clamp(0.0, 1.0);
-            let alpha = a.max(s[3]) * m;
+            let (c, _) = unpremul(s);
+            let m = ((matte.get(x, y) - cut) / ((1.0 - cut) * 0.5).max(1e-3)).clamp(0.0, 1.0);
+            // The blob matte, not the displaced source sample, owns the silhouette. Sampling the
+            // source at the warped position made Cut Away punch holes through the glyphs when a
+            // slope pushed the sample outside them (#1708).
+            let alpha = m * src.get(x as i64, y as i64)[3];
             if alpha <= 0.0 {
                 *px = [0.0; 4];
                 continue;
@@ -886,7 +893,7 @@ pub fn specs() -> Vec<EffectSpec> {
                 p("lightIntensity", "Light Intensity", num(100.0), slider(0.0, 400.0, 0.0, 200.0, 1)),
                 p("lightColor", "Light Color", col(1.0, 1.0, 1.0), ParamUi::Color),
                 p("lightType", "Light Type", Value::Enum(0), popup(&["Distant Light", "Point Light"])),
-                p("lightHeight", "Light Height", num(50.0), slider(0.0, 100.0, 0.0, 100.0, 1)),
+                p("lightHeight", "Light Height", num(65.0), slider(0.0, 100.0, 0.0, 100.0, 1)),
                 p("lightPosition", "Light Position", pt(0.25, 0.25), ParamUi::Point),
                 p("lightDirection", "Light Direction", num(-45.0), ParamUi::Angle),
                 p("ambient", "Ambient", num(20.0), slider(0.0, 200.0, 0.0, 100.0, 1)),
@@ -1146,6 +1153,16 @@ mod tests {
     fn alpha_at(b: &Buf, p: [f64; 2]) -> f32 {
         let (x, y) = b.to_px(p);
         b.img.get(x.floor() as i64, y.floor() as i64)[3]
+    }
+
+    #[test]
+    fn blobbylize_softness_keeps_a_thin_stroke_opaque() {
+        // A two-pixel stroke: a plain blurred height drops well below Cut Away, which used to
+        // punch the middle out of glyphs and leave only a translucent rim (#1708).
+        let im = crate::util::gen_image(24, 24, |_, y| if (11..13).contains(&y) { [1.0; 4] } else { [0.0; 4] });
+        let o = run("ec.distort.ccblobbylize", &[("softness", num(20.0)), ("cutAway", num(25.0))], im, &[]);
+        assert!(alpha_at(&o, [12.0, 12.0]) > 0.95, "the stroke centre was cut away: {}", alpha_at(&o, [12.0, 12.0]));
+        assert!(alpha_at(&o, [12.0, 2.0]) < 0.05, "the blur leaked too far outside the stroke");
     }
 
     /// #659: CC Smear and CC Tiler on a text layer reach past the text's box to the layer bounds

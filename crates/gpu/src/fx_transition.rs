@@ -22,6 +22,7 @@ use crate::effects::{GBuf, gaussian_blur};
 pub(crate) const KERNELS: &[&str] = &[
     "ftr_plane",
     "ftr_mul",
+    "ftr_blob_height",
     "ftr_under",
     "ftr_blocks",
     "ftr_grid",
@@ -586,7 +587,9 @@ fn blobbylize(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
     let soft = pr.f("softness").max(0.0) * b.scale;
     let blob = layer_or_self(e, ctx, &b, "blobLayer")?;
     let raw = plane(e, &blob, pr.e("property").min(10));
-    let h = gaussian_blur(e, &raw, soft, soft, true);
+    let blurred = gaussian_blur(e, &raw, soft, soft, true);
+    // `distort3::cc_blobbylize`: x = smooth height for the slopes, y = peak-preserving matte.
+    let h = kernel(e, "ftr_blob_height", &Params::default(), &blurred, Some(&raw), None);
     let lpos = b.to_px(pr.v2("lightPosition"));
     let lheight = pr.f("lightHeight");
     let (d, el) = (pr.f("lightDirection").to_radians(), (lheight / 100.0).clamp(0.0, 1.0) * std::f64::consts::FRAC_PI_2);
