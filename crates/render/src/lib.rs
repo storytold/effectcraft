@@ -428,6 +428,14 @@ pub trait Accelerator: Send + Sync {
     /// Render a top-level comp frame (what [`Renderer::comp_frame`] returns). `None` = not
     /// handled (the CPU renders it).
     fn comp_frame(&self, r: &Renderer, comp: ItemId, t: Tick) -> Option<Image>;
+    /// Render a top-level comp frame like [`Self::comp_frame`], composite it over `bg` and
+    /// convert it to the H.264 export's 8-bit BT.709 limited-range 4:2:0 (Y plane, then U and V
+    /// at half size; see `effectcraft_raster::yuv`). Every byte is within one level of the CPU
+    /// conversion of the same frame (a driver's arithmetic may move a value near a rounding
+    /// boundary). `None` = not handled (the caller renders and converts on the CPU).
+    fn comp_frame_yuv420(&self, _r: &Renderer, _comp: ItemId, _t: Tick, _bg: [f32; 3]) -> Option<Vec<u8>> {
+        None
+    }
     /// The accelerator implements effect `id` with the CPU effect's semantics.
     fn supports_effect(&self, id: &str) -> bool;
     /// Run a chain of supported effects on `buf`, clamping and quantising to `levels` after
