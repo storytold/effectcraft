@@ -3,14 +3,18 @@
 //! Opacity stops sit above the preview bar and colour stops below it. Click above or below the
 //! bar to add a stop (it takes that track's value there), drag a stop to move it, edit the
 //! selected stop's location, opacity or colour, and Delete removes it (never the last stop of a
-//! track). The editor works on a draft: OK sets the property once with `prop.set` at the time it
-//! opened (one undo step, nothing at all when nothing changed); Cancel and Escape leave it as it
-//! was.
+//! track). The editor works on a draft. With **Preview** on (the default, as in After Effects) each
+//! edit is applied to the property at once, with `prop.set` at the time the editor opened and one
+//! merged undo step, so the canvas shows the gradient as it is edited; OK keeps it, Cancel and
+//! Escape roll it back to the checkpoint taken when the editor opened. With Preview off, OK sets
+//! the property once (one undo step, nothing at all when nothing changed). The dialog opens at
+//! the lower right of the window and does not dim it, so the canvas stays in view.
 //!
 //! Automation ids: `dialog.gradient.bar`, `dialog.gradient.addOpacity`, `dialog.gradient.addColor`,
 //! `dialog.gradient.opacityStop.<i>`, `dialog.gradient.colorStop.<i>` (in order along the bar),
 //! `dialog.gradient.location`, `dialog.gradient.opacity`, `dialog.gradient.color`,
-//! `dialog.gradient.delete`, `dialog.gradient.ok`, `dialog.gradient.cancel`.
+//! `dialog.gradient.delete`, `dialog.gradient.preview`, `dialog.gradient.ok`,
+//! `dialog.gradient.cancel`.
 
 use effectcraft_engine::keyframe::{Gradient, Value};
 use effectcraft_engine::project::{ItemId, LayerId};
@@ -18,6 +22,7 @@ use egui::{Color32, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use serde_json::{Value as Json, json};
 
 use crate::i18n::tr;
+use crate::panels::layer_styles_dialog::{Checkpoint, checkpoint, restore};
 use crate::theme::Tokens;
 use crate::{Dialog, EffectcraftApp};
 
@@ -58,6 +63,12 @@ pub struct Draft {
     pub baseline: Gradient,
     /// Stop counts (colour, opacity) of the keyframes just before and after the edit time.
     pub neighbors: Vec<(usize, usize)>,
+    /// Preview: edits are applied to the property as they are made.
+    pub preview: bool,
+    /// The gradient the property was last given by the preview, if it has been.
+    pub applied: Option<Gradient>,
+    /// The project and undo history as the editor opened, for Cancel.
+    checkpoint: Option<Checkpoint>,
     next_id: u64,
 }
 
@@ -220,7 +231,10 @@ pub fn open(app: &mut EffectcraftApp, p: &Json) -> Result<Json, String> {
     let before = prop.keys.iter().rev().find(|k| k.time < lt).and_then(|k| counts(&k.value));
     let after = prop.keys.iter().find(|k| k.time > lt).and_then(|k| counts(&k.value));
     let target = Target { comp: cid.0, layer: lid, prop: uid, time: ct.seconds() };
-    app.dialog_state.gradient = Draft::new(&g, Some(target), before.into_iter().chain(after).collect());
+    let mut draft = Draft::new(&g, Some(target), before.into_iter().chain(after).collect());
+    draft.preview = true;
+    draft.checkpoint = Some(checkpoint(app));
+    app.dialog_state.gradient = draft;
     app.dialog = Some(Dialog::GradientEditor);
     Ok(json!({"dialog": "gradientEditor"}))
 }
@@ -230,6 +244,11 @@ pub fn open(app: &mut EffectcraftApp, p: &Json) -> Result<Json, String> {
 fn commit(app: &mut EffectcraftApp, ctx: &egui::Context) {
     app.dialog = None;
     let d = std::mem::take(&mut app.dialog_state.gradient);
+    // The preview already set the property, in one merged undo step: OK keeps it.
+    if d.applied.is_some() {
+        app.session.history.merge_key = None;
+        return;
+    }
     let g = d.gradient();
     let Some(tg) = d.target else { return };
     if g == d.baseline {
@@ -238,6 +257,49 @@ fn commit(app: &mut EffectcraftApp, ctx: &egui::Context) {
     let params = json!({"comp": tg.comp, "layer": tg.layer, "prop": tg.prop, "time": tg.time, "timeBase": "comp", "value": Value::Gradient(g).to_json()});
     if let Err(e) = crate::menus::invoke(app, ctx, "prop.set", params) {
         app.ui.status = e;
+    }
+}
+
+/// Close the editor without keeping the preview: the project and undo history go back to how they
+/// were when it opened (nothing happens when the preview never changed the property).
+pub fn finish(app: &mut EffectcraftApp, ok: bool, ctx: &egui::Context) {
+    if ok {
+        commit(app, ctx);
+        return;
+    }
+    let d = std::mem::take(&mut app.dialog_state.gradient);
+    if d.applied.is_some()
+        && let Some(cp) = d.checkpoint
+    {
+        restore(app, cp);
+    }
+    app.session.history.merge_key = None;
+    app.dialog = None;
+}
+
+/// Keep the property in step with the draft while Preview is on: apply a changed draft with one
+/// merged undo step, and roll back to the checkpoint when Preview goes off or the draft is back to
+/// how it opened.
+fn sync_preview(app: &mut EffectcraftApp, ctx: &egui::Context) {
+    let d = &app.dialog_state.gradient;
+    let Some(tg) = d.target.clone() else { return };
+    let g = d.gradient();
+    let want = d.preview && g != d.baseline;
+    if want && d.applied.as_ref() != Some(&g) {
+        let params = json!({
+            "comp": tg.comp, "layer": tg.layer, "prop": tg.prop, "time": tg.time, "timeBase": "comp",
+            "value": Value::Gradient(g.clone()).to_json(), "merge": format!("gradient-editor-{}", tg.prop),
+        });
+        match crate::menus::invoke(app, ctx, "prop.set", params) {
+            Ok(_) => app.dialog_state.gradient.applied = Some(g),
+            Err(e) => app.ui.status = e,
+        }
+    } else if !want
+        && d.applied.is_some()
+        && let Some(cp) = d.checkpoint.clone()
+    {
+        restore(app, cp);
+        app.dialog_state.gradient.applied = None;
     }
 }
 
@@ -252,7 +314,8 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
         return;
     }
     let mut answer: Option<bool> = None;
-    super::dialogs::modal(ctx, tr("Gradient Editor"), vec2(520.0, 270.0), t, |ui| {
+    // At the lower right, undimmed: the canvas it edits stays in view (After Effects).
+    super::dialogs::modal_placed(ctx, tr("Gradient Editor"), vec2(520.0, 270.0), t, super::live_preview::PLACE, |ui| {
         let w = ui.available_width().max(200.0);
         let (area, _) = ui.allocate_exact_size(vec2(w, 72.0), Sense::hover());
         let bar = Rect::from_min_max(pos2(area.min.x + 8.0, area.min.y + 22.0), pos2(area.max.x - 8.0, area.min.y + 48.0));
@@ -410,6 +473,10 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             if r.clicked() {
                 answer = Some(true);
             }
+            let mut preview = app.dialog_state.gradient.preview;
+            let r = ui.checkbox(&mut preview, tr("Preview"));
+            app.auto.add("dialog.gradient.preview", r.rect, "Preview");
+            app.dialog_state.gradient.preview = preview;
         });
     });
     // Delete / Backspace remove the selected stop, but not while typing in a field.
@@ -421,12 +488,8 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
         app.dialog_state.gradient.remove(track, id);
     }
     match answer {
-        Some(true) => commit(app, ctx),
-        Some(false) => {
-            app.dialog = None;
-            app.dialog_state.gradient = Draft::default();
-        }
-        None => {}
+        Some(ok) => finish(app, ok, ctx),
+        None => sync_preview(app, ctx),
     }
 }
 

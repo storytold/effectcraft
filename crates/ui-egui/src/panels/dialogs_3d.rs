@@ -87,8 +87,14 @@ pub fn open_camera(app: &mut EffectcraftApp, layer: Option<u64>) -> Result<(), S
             }
         }
     };
+    let editing = d.layer.is_some();
     app.dialog_state.camera = d;
     app.dialog = Some(Dialog::CameraSettings);
+    if editing {
+        super::live_preview::begin(app, Dialog::CameraSettings);
+    } else {
+        app.dialog_state.live = Default::default();
+    }
     Ok(())
 }
 
@@ -137,13 +143,19 @@ pub fn open_light(app: &mut EffectcraftApp, layer: Option<u64>) -> Result<(), St
             }
         }
     };
+    let editing = d.layer.is_some();
     app.dialog_state.light = d;
     app.dialog = Some(Dialog::LightSettings);
+    if editing {
+        super::live_preview::begin(app, Dialog::LightSettings);
+    } else {
+        app.dialog_state.live = Default::default();
+    }
     Ok(())
 }
 
-fn buttons(ui: &mut egui::Ui, t: &Tokens, ok: &mut bool, close: &mut bool) -> (egui::Rect, egui::Rect) {
-    let mut r = (egui::Rect::NOTHING, egui::Rect::NOTHING);
+fn buttons(ui: &mut egui::Ui, t: &Tokens, ok: &mut bool, close: &mut bool, preview: Option<&mut bool>) -> (egui::Rect, egui::Rect, egui::Rect) {
+    let mut r = (egui::Rect::NOTHING, egui::Rect::NOTHING, egui::Rect::NOTHING);
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         let b = ui.add(egui::Button::new(egui::RichText::new(tr("   OK   ")).color(Color32::WHITE)).fill(t.accent));
         r.0 = b.rect;
@@ -155,6 +167,9 @@ fn buttons(ui: &mut egui::Ui, t: &Tokens, ok: &mut bool, close: &mut bool) -> (e
         if c.clicked() {
             *close = true;
         }
+        if let Some(on) = preview {
+            r.2 = ui.checkbox(on, tr("Preview")).rect;
+        }
     });
     r
 }
@@ -163,8 +178,11 @@ pub fn camera(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     let w = comp_w(app);
     let mut d = app.dialog_state.camera.clone();
     let (mut ok, mut close) = (false, false);
-    let mut rects = (egui::Rect::NOTHING, egui::Rect::NOTHING);
-    super::dialogs::modal(ctx, "Camera Settings", vec2(520.0, 420.0), t, |ui| {
+    let mut rects = (egui::Rect::NOTHING, egui::Rect::NOTHING, egui::Rect::NOTHING);
+    let live = super::live_preview::active(app);
+    let place = super::live_preview::place(app);
+    let mut preview = app.dialog_state.live.on;
+    super::dialogs::modal_placed(ctx, "Camera Settings", vec2(520.0, 420.0), t, place, |ui| {
         egui::Grid::new("cam-grid").num_columns(2).spacing([14.0, 9.0]).show(ui, |ui| {
             ui.label(tr("Type"));
             egui::ComboBox::from_id_salt("cam-type").selected_text(if d.two_node { "Two-Node Camera" } else { "One-Node Camera" }).show_ui(ui, |ui| {
@@ -217,46 +235,66 @@ pub fn camera(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             ui.end_row();
         });
         ui.add_space(14.0);
-        rects = buttons(ui, t, &mut ok, &mut close);
+        rects = buttons(ui, t, &mut ok, &mut close, live.then_some(&mut preview));
     });
+    app.dialog_state.live.on = preview;
     if d.lock_to_zoom {
         d.focus = d.zoom;
     }
     app.auto.add("dialog.camera.ok", rects.0, "OK");
     app.auto.add("dialog.camera.cancel", rects.1, "Cancel");
+    if live {
+        app.auto.add("dialog.camera.preview", rects.2, "Preview");
+    }
     app.dialog_state.camera = d.clone();
+    let (id, p) = camera_command(&d);
     if ok || super::dialogs::ui_enter(ctx) {
-        let mut p = json!({
-            "name": d.name,
-            "type": if d.two_node { "twoNode" } else { "oneNode" },
-            "zoom": d.zoom,
-            "dof": d.dof,
-            "focusDistance": d.focus,
-            "aperture": d.aperture,
-            "blurLevel": d.blur,
-        });
-        let id = match d.layer {
-            Some(l) => {
-                p["layer"] = json!(l);
-                "layer.cameraSettings"
-            }
-            None => "layer.newCamera",
-        };
-        if let Err(e) = app.session.execute(id, p) {
+        // A preview already made the edit (one undo step): OK keeps it.
+        if !super::live_preview::keep(app)
+            && let Err(e) = app.session.execute(id, p)
+        {
             app.ui.status = e.to_string();
         }
         close = true;
+    } else if close {
+        super::live_preview::cancel(app);
+    } else {
+        super::live_preview::sync(app, id, p);
     }
     if close {
         app.dialog = None;
     }
 }
 
+/// The command Camera Settings' OK runs, and its parameters.
+fn camera_command(d: &CameraDraft) -> (&'static str, Value) {
+    let mut p = json!({
+        "name": d.name,
+        "type": if d.two_node { "twoNode" } else { "oneNode" },
+        "zoom": d.zoom,
+        "dof": d.dof,
+        "focusDistance": d.focus,
+        "aperture": d.aperture,
+        "blurLevel": d.blur,
+    });
+    let id = match d.layer {
+        Some(l) => {
+            p["layer"] = json!(l);
+            "layer.cameraSettings"
+        }
+        None => "layer.newCamera",
+    };
+    (id, p)
+}
+
 pub fn light(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     let mut d = app.dialog_state.light.clone();
     let (mut ok, mut close) = (false, false);
-    let mut rects = (egui::Rect::NOTHING, egui::Rect::NOTHING);
-    super::dialogs::modal(ctx, "Light Settings", vec2(480.0, 470.0), t, |ui| {
+    let mut rects = (egui::Rect::NOTHING, egui::Rect::NOTHING, egui::Rect::NOTHING);
+    let live = super::live_preview::active(app);
+    let place = super::live_preview::place(app);
+    let mut preview = app.dialog_state.live.on;
+    super::dialogs::modal_placed(ctx, "Light Settings", vec2(480.0, 470.0), t, place, |ui| {
         egui::Grid::new("light-grid").num_columns(2).spacing([14.0, 9.0]).show(ui, |ui| {
             ui.label(tr("Name"));
             let r = ui.add(egui::TextEdit::singleline(&mut d.name).desired_width(220.0));
@@ -314,46 +352,63 @@ pub fn light(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
         ui.add_space(14.0);
         ui.label(egui::RichText::new(tr("Note: Shadows are only cast from layers with Cast Shadows enabled.")).font(Tokens::ui(11.0)).color(t.text_dim));
         ui.add_space(8.0);
-        rects = buttons(ui, t, &mut ok, &mut close);
+        rects = buttons(ui, t, &mut ok, &mut close, live.then_some(&mut preview));
     });
+    app.dialog_state.live.on = preview;
     app.auto.add("dialog.light.ok", rects.0, "OK");
     app.auto.add("dialog.light.cancel", rects.1, "Cancel");
+    if live {
+        app.auto.add("dialog.light.preview", rects.2, "Preview");
+    }
     app.dialog_state.light = d.clone();
+    let (id, p) = light_command(&d);
     if ok || super::dialogs::ui_enter(ctx) {
-        let kind = KINDS[d.kind.min(3)];
-        let mut p = json!({
-            "name": d.name,
-            "kind": kind.label(),
-            "color": [d.color[0], d.color[1], d.color[2]],
-            "intensity": d.intensity,
-        });
-        if kind == LightKind::Spot {
-            p["coneAngle"] = json!(d.cone_angle);
-            p["coneFeather"] = json!(d.cone_feather);
-        }
-        if kind != LightKind::Ambient {
-            p["falloff"] = json!(d.falloff);
-            p["radius"] = json!(d.radius);
-            p["falloffDistance"] = json!(d.falloff_distance);
-            p["castsShadows"] = json!(d.casts_shadows);
-            p["shadowDarkness"] = json!(d.shadow_darkness);
-            p["shadowDiffusion"] = json!(d.shadow_diffusion);
-        }
-        let id = match d.layer {
-            Some(l) => {
-                p["layer"] = json!(l);
-                "layer.lightSettings"
-            }
-            None => "layer.newLight",
-        };
-        if let Err(e) = app.session.execute(id, p) {
+        // A preview already made the edit (one undo step): OK keeps it.
+        if !super::live_preview::keep(app)
+            && let Err(e) = app.session.execute(id, p)
+        {
             app.ui.status = e.to_string();
         }
         close = true;
+    } else if close {
+        super::live_preview::cancel(app);
+    } else {
+        super::live_preview::sync(app, id, p);
     }
     if close {
         app.dialog = None;
     }
+}
+
+/// The command Light Settings' OK runs, and its parameters.
+fn light_command(d: &LightDraft) -> (&'static str, Value) {
+    let kind = KINDS[d.kind.min(3)];
+    let mut p = json!({
+        "name": d.name,
+        "kind": kind.label(),
+        "color": [d.color[0], d.color[1], d.color[2]],
+        "intensity": d.intensity,
+    });
+    if kind == LightKind::Spot {
+        p["coneAngle"] = json!(d.cone_angle);
+        p["coneFeather"] = json!(d.cone_feather);
+    }
+    if kind != LightKind::Ambient {
+        p["falloff"] = json!(d.falloff);
+        p["radius"] = json!(d.radius);
+        p["falloffDistance"] = json!(d.falloff_distance);
+        p["castsShadows"] = json!(d.casts_shadows);
+        p["shadowDarkness"] = json!(d.shadow_darkness);
+        p["shadowDiffusion"] = json!(d.shadow_diffusion);
+    }
+    let id = match d.layer {
+        Some(l) => {
+            p["layer"] = json!(l);
+            "layer.lightSettings"
+        }
+        None => "layer.newLight",
+    };
+    (id, p)
 }
 
 /// Menu/shortcut routing: commands that open a 3D settings dialog when invoked without params.

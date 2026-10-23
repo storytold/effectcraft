@@ -248,6 +248,7 @@ pub fn show(
     auto: &mut Registry,
     custom: &[CompPreset],
     cmds: &mut Vec<(&'static str, serde_json::Value)>,
+    preview: Option<&mut bool>,
 ) -> Option<serde_json::Value> {
     let mut out = None;
     ui.horizontal(|ui| {
@@ -469,6 +470,9 @@ pub fn show(
             auto.add("dialog.comp.cancel", r.rect, "Cancel");
             if r.clicked() {
                 out = Some(serde_json::Value::Null);
+            }
+            if let Some(on) = preview {
+                super::live_preview::checkbox(ui, auto, on, "dialog.comp.preview");
             }
         });
     });

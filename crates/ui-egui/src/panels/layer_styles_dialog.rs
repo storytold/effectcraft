@@ -23,8 +23,9 @@ pub struct LayerStyleState {
     checkpoint: Option<Checkpoint>,
 }
 
+/// The project and undo history as a dialog found them, for a Cancel that rolls its live edits back.
 #[derive(Clone)]
-struct Checkpoint {
+pub(crate) struct Checkpoint {
     project: std::sync::Arc<effectcraft_engine::project::Project>,
     history: effectcraft_engine::history::History,
 }
@@ -35,7 +36,7 @@ impl std::fmt::Debug for Checkpoint {
     }
 }
 
-fn checkpoint(app: &mut EffectcraftApp) -> Checkpoint {
+pub(crate) fn checkpoint(app: &mut EffectcraftApp) -> Checkpoint {
     app.session.history.merge_key = None;
     Checkpoint { project: app.session.project.clone(), history: app.session.history.clone() }
 }
@@ -257,14 +258,21 @@ pub fn finish(app: &mut EffectcraftApp, ok: bool) {
     if let Some(checkpoint) = app.dialog_state.layer_style.checkpoint.take()
         && !ok
     {
-        let changed = !std::sync::Arc::ptr_eq(&app.session.project, &checkpoint.project);
-        app.session.project = checkpoint.project;
-        app.session.history = checkpoint.history;
-        app.session.sanitize_state();
-        if changed {
-            app.session.bump();
-        }
+        restore(app, checkpoint);
     }
     app.session.history.merge_key = None;
     app.dialog = None;
+}
+
+/// Put the project and undo history back as `checkpoint` has them (nothing happens when nothing
+/// changed since).
+pub(crate) fn restore(app: &mut EffectcraftApp, checkpoint: Checkpoint) {
+    let changed = !std::sync::Arc::ptr_eq(&app.session.project, &checkpoint.project);
+    app.session.project = checkpoint.project;
+    app.session.history = checkpoint.history;
+    app.session.sanitize_state();
+    if changed {
+        app.session.bump();
+    }
+    app.session.history.merge_key = None;
 }
