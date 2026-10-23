@@ -2005,13 +2005,13 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             }
             // The Roto Brush paints in the Layer panel only: select as usual and say so.
             rt if rt.roto_kind(false).is_some() => {
-                if pick(app, &ectx, cpt, mods.shift).is_none() {
+                if click_pick(app, &ectx, cpt, mods.shift).is_none() {
                     let _ = app.session.execute("edit.deselectAll", json!({}));
                 }
                 app.ui.status = crate::i18n::tr(ROTO_HINT).to_string();
             }
             _ => {
-                if pick(app, &ectx, cpt, mods.shift).is_none() {
+                if click_pick(app, &ectx, cpt, mods.shift).is_none() {
                     let _ = app.session.execute("edit.deselectAll", json!({}));
                 } else if !mods.shift && !app.session.state.selected_vertices.is_empty() && ov::segment_at(&paths, &map, pos, 6.0).is_none() {
                     // A click away from the paths, even on their layer, deselects the mask
@@ -2402,8 +2402,20 @@ pub(crate) fn layer_at<'a>(ectx: &EvalCtx<'a>, cpt: [f64; 2]) -> Option<&'a Laye
 
 /// The layer a press at a comp point acts on, selected (Shift toggles the topmost layer). As in
 /// After Effects, a selected layer under the point comes before the layers in front of it, so it
-/// can be dragged where they cover it; otherwise the topmost layer (#230).
+/// can be dragged where they cover it; otherwise the topmost layer (#230). Plain clicks use
+/// [`click_pick`].
 pub(crate) fn pick(app: &mut EffectcraftApp, ectx: &EvalCtx, cpt: [f64; 2], toggle: bool) -> Option<LayerId> {
+    pick_layer(app, ectx, cpt, toggle, true)
+}
+
+/// The layer a click (press and release without a drag) at a comp point selects: always the
+/// topmost one, so a selected layer behind does not capture clicks on the layers in front of it
+/// (#1535). Clicking a selected layer keeps the selection.
+fn click_pick(app: &mut EffectcraftApp, ectx: &EvalCtx, cpt: [f64; 2], toggle: bool) -> Option<LayerId> {
+    pick_layer(app, ectx, cpt, toggle, false)
+}
+
+fn pick_layer(app: &mut EffectcraftApp, ectx: &EvalCtx, cpt: [f64; 2], toggle: bool, prefer_selected: bool) -> Option<LayerId> {
     if toggle {
         let hit = layer_at(ectx, cpt)?.id;
         let _ = app.session.execute("layer.select", json!({"layers": [hit.0], "toggle": true}));
@@ -2411,7 +2423,7 @@ pub(crate) fn pick(app: &mut EffectcraftApp, ectx: &EvalCtx, cpt: [f64; 2], togg
     }
     let selected = &app.session.state.selected_layers;
     let hits: Vec<LayerId> = layers_at(ectx, cpt).map(|l| l.id).collect();
-    let hit = *hits.iter().find(|id| selected.contains(id)).or(hits.first())?;
+    let hit = *hits.iter().find(|id| prefer_selected && selected.contains(id)).or(hits.first())?;
     if !selected.contains(&hit) {
         let _ = app.session.execute("layer.select", json!({"layers": [hit.0]}));
     }

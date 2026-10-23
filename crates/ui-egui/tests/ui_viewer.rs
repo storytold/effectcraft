@@ -138,9 +138,9 @@ fn viewer_click_picks_nothing_while_the_solo_layer_is_inactive() {
     assert!(h.state().session.state.selected_layers.is_empty(), "{back:?} stays excluded by solo");
 }
 
-/// A selected layer under the pointer takes the press before the layers in front of it, as in
-/// After Effects: it stays selected and a drag moves it. With none selected there, the topmost
-/// layer does (#230).
+/// A selected layer under the pointer takes a drag before the layers in front of it, as in
+/// After Effects: it stays selected and moves (#230). A plain click picks the topmost layer, so a
+/// large selected layer behind does not swallow clicks on the layers in front of it (#1535).
 #[test]
 fn viewer_press_prefers_a_selected_layer_under_the_pointer() {
     let mut h = selection_harness();
@@ -150,7 +150,8 @@ fn viewer_press_prefers_a_selected_layer_under_the_pointer() {
     h.run_steps(3);
     let at = screen(&h, [320.0, 180.0]);
     click(&mut h, at);
-    assert_eq!(h.state().session.state.selected_layers, vec![back], "a click keeps the selected layer behind");
+    assert_eq!(h.state().session.state.selected_layers, vec![front], "a click selects the layer in front");
+    h.state_mut().session.execute("layer.select", json!({"layers": [back.0]})).unwrap();
     h.run_steps(40);
     let (front0, back0) = (position_and_anchor(&h, front).0, position_and_anchor(&h, back).0);
     drag(&mut h, at, at + vec2(60.0, 0.0));
