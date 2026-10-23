@@ -113,6 +113,27 @@ impl Project {
         self.comps().any(|(_, c)| c.layers.iter().any(|l| any_expr(&l.props)))
     }
 
+    /// Layers of `comp` that can't change its pixels: footage layers of files without video
+    /// (music, voice-over) and layers with the Video switch off, unless another layer reads them
+    /// (a hidden track matte, the Audio Spectrum's Audio Layer). Cameras, lights, nulls and
+    /// environment layers are never silent. Expressions, which can read any layer, are the caller's concern.
+    pub fn silent_layers(&self, comp: &Comp) -> std::collections::BTreeSet<LayerId> {
+        let read: std::collections::BTreeSet<LayerId> =
+            comp.layers.iter().flat_map(|l| l.referenced_layers().into_iter().filter(move |r| *r != l.id)).collect();
+        comp.layers
+            .iter()
+            .filter(|l| {
+                let no_picture = match &l.source {
+                    LayerSource::Footage { item } => matches!(self.item(*item).map(|i| &i.kind), Some(ItemKind::Footage(f)) if !f.has_video),
+                    _ => false,
+                };
+                // (environment layers light Advanced 3D scenes without being drawn)
+                (no_picture || l.source.is_av() && !l.switches.video) && !l.environment && !l.environment_background && !read.contains(&l.id)
+            })
+            .map(|l| l.id)
+            .collect()
+    }
+
     /// Allocate an id (items, layers and property uids share one counter).
     pub fn alloc(&mut self) -> u64 {
         let id = self.next_id;

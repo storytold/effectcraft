@@ -318,11 +318,19 @@ pub fn comp_content(project: &Project, comp: ItemId) -> u64 {
     comp_content_with(project, comp, project, |_, c| c)
 }
 
-/// Frame ranges (inclusive) of `new` that may draw differently than `old` ([`Comp::changed_spans`]),
-/// a frame wider either side for rounding.
-fn dirty_frames(old: &Comp, new: &Comp) -> Option<Vec<(i64, i64)>> {
-    let fr = new.frame_rate;
-    Some(new.changed_spans(old, false)?.into_iter().map(|(s, e)| (fr.frame_at(s).saturating_sub(1), fr.frame_at(e).saturating_add(1))).collect())
+/// Frame ranges (inclusive) of `comp` in `new` that may draw differently than in `old`
+/// ([`Comp::changed_spans`]), a frame wider either side for rounding. Layers that can't change the
+/// picture ([`Project::silent_layers`]: music, hidden layers nothing reads) don't count.
+fn dirty_frames(old: &Project, new: &Project, comp: ItemId) -> Option<Vec<(i64, i64)>> {
+    let picture = |p: &Project| {
+        let mut c = p.comp(comp)?.clone();
+        let quiet = p.silent_layers(&c);
+        c.layers.retain(|l| !quiet.contains(&l.id));
+        Some(c)
+    };
+    let (a, b) = (picture(old)?, picture(new)?);
+    let fr = b.frame_rate;
+    Some(b.changed_spans(&a, false)?.into_iter().map(|(s, e)| (fr.frame_at(s).saturating_sub(1), fr.frame_at(e).saturating_add(1))).collect())
 }
 
 /// [`comp_content`] with each comp's version selected for both its sources and its address.
@@ -793,12 +801,11 @@ impl Frames {
         // only the frames it touched (#1641). An expression anywhere can read any layer at any time.
         if !markers
             && let Some((base_id, base)) = bases.get(&comp.0)
-            && let (Some(old), Some(new)) = (base.comp(comp), project.comp(comp))
             && comp_content_with(project, comp, base, |id, c| match base.item(id).map(|i| &i.kind) {
                 Some(ItemKind::Comp(b)) if id == comp || Arc::ptr_eq(b, c) || b.same_pixels_with(c, markers) => b,
                 _ => c,
             }) == *base_id
-            && let Some(dirty) = dirty_frames(old, new)
+            && let Some(dirty) = dirty_frames(base, project, comp)
             && let Ok(mut cache) = self.cache.lock()
         {
             cache.carry(*base_id, plain, |f| !dirty.iter().any(|(lo, hi)| (*lo..=*hi).contains(&f)));

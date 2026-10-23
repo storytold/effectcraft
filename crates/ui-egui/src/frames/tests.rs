@@ -1130,6 +1130,15 @@ fn kept_frames_render_the_same() {
     // Clip a on frames 0–20, clip b on 20–40 of a 45-frame comp.
     type Step = fn(&mut Session, ItemId, &mut Vec<u64>);
     let none: Step = |_, _, _| {};
+    /// An audio-only file (music) and a layer of it over the whole comp.
+    fn music(s: &mut Session, cid: ItemId) -> u64 {
+        use effectcraft_engine::project::{Footage, FootageKind};
+        let song = Footage { kind: FootageKind::Audio, has_video: false, has_audio: true, ..Default::default() };
+        let song = Arc::make_mut(&mut s.project).add_item("song.wav", Default::default(), None, ItemKind::Footage(song));
+        let l = run(s, "layer.addItem", json!({"item": song.0}))["layer"].as_u64().unwrap();
+        timing(s, cid, l, 0, 0, 45);
+        l
+    }
     /// What an edit keeps: every frame, some, or none.
     #[derive(Debug, PartialEq)]
     enum Keep {
@@ -1151,6 +1160,25 @@ fn kept_frames_render_the_same() {
             |s, c, l| l.push(adjustment(s, c, "Invert")),
             |s, _, l| _ = run(s, "layer.setSwitch", json!({"layers": [l[2]], "switch": "fx", "value": false})),
             Keep::Part,
+        ),
+        // Music changes no picture; neither does it when imported with the same action.
+        ("add music", none, |s, c, _| _ = music(s, c), Keep::All),
+        ("trim music", |s, c, l| l.push(music(s, c)), |s, c, l| timing(s, c, l[2], 0, 0, 20), Keep::All),
+        ("move music", |s, c, l| l.push(music(s, c)), |s, c, l| timing(s, c, l[2], 5, 5, 45), Keep::All),
+        ("delete music", |s, c, l| l.push(music(s, c)), |s, _, l| _ = run(s, "edit.clear", json!({"layers": [l[2]]})), Keep::All),
+        ("hide a clip", none, |s, _, l| _ = run(s, "layer.setSwitch", json!({"layers": [l[1]], "switch": "video", "value": false})), Keep::Part),
+        // Music another layer reads isn't silent: like any layer another one reads, editing
+        // it re-renders everything.
+        (
+            "trim music an audio spectrum reads",
+            |s, c, l| {
+                let m = music(s, c);
+                run(s, "effect.apply", json!({"layers": [l[0]], "effect": "Audio Spectrum"}));
+                run(s, "prop.set", json!({"layer": l[0], "path": "effects/#1/audioLayer", "value": m}));
+                l.push(m);
+            },
+            |s, c, l| timing(s, c, l[2], 0, 0, 20),
+            Keep::Nothing,
         ),
         (
             "noise split",
@@ -1225,7 +1253,7 @@ fn kept_frames_render_the_same() {
         let p1 = s.project.clone();
         let fr = p1.comp(cid).unwrap().frame_rate;
         let frames = fr.frame_at(p1.comp(cid).unwrap().duration);
-        let dirty = dirty_frames(p0.comp(cid).unwrap(), p1.comp(cid).unwrap());
+        let dirty = dirty_frames(&p0, &p1, cid);
         let kept: Vec<i64> = match &dirty {
             Some(d) => (0..frames).filter(|f| !d.iter().any(|(lo, hi)| (*lo..=*hi).contains(f))).collect(),
             None => vec![],
