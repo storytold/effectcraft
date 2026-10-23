@@ -1304,3 +1304,82 @@ fn an_edit_keeps_the_frames_it_cant_reach() {
         }
     }
 }
+
+/// A saved and reopened project finds its frames on disk: the content key is the same.
+#[test]
+fn disk_keys_survive_save_and_reopen() {
+    use serde_json::json;
+    let dir = std::env::temp_dir().join(format!("ec-disk-keys-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let png = dir.join("still.png");
+    image::RgbaImage::from_pixel(4, 4, image::Rgba([200, 100, 50, 255])).save(&png).unwrap();
+    let mut s = effectcraft_host::session();
+    let cid = ItemId(s.execute("comp.new", json!({"name": "Keys", "width": 16, "height": 16, "duration": 1})).unwrap()["comp"].as_u64().unwrap());
+    let item = s.execute("file.import", json!({"paths": [png.to_string_lossy()]})).unwrap()["items"][0].clone();
+    s.execute("layer.addItem", json!({"item": item})).unwrap();
+    s.execute("layer.newSolid", json!({"color": "#00ff00", "width": 8, "height": 8})).unwrap();
+    let adj = s.execute("layer.newAdjustment", json!({})).unwrap()["layer"].clone();
+    s.execute("effect.apply", json!({"layers": [adj], "effect": "Gaussian Blur"})).unwrap();
+    let before = disk_cache::comp_content_key(&s.project, cid);
+    let path = dir.join("keys.ecproj");
+    s.execute("file.saveAs", json!({"path": path.to_string_lossy()})).unwrap();
+    let mut again = effectcraft_host::session();
+    again.execute("file.open", json!({"path": path.to_string_lossy()})).unwrap();
+    assert_eq!(disk_cache::comp_content_key(&again.project, cid), before);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Frames in RAM that the disk lacks (an edit kept them; a write was dropped) are written
+/// when idle, so the reopened project shows them all as the blue bar.
+#[test]
+fn ram_frames_missing_on_disk_are_written() {
+    use effectcraft_engine::Session;
+    use serde_json::json;
+    let dir = std::env::temp_dir().join(format!("ec-persist-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let disk = DiskCache::open(&dir, 1 << 30).unwrap();
+    let mut s = Session::default();
+    let cid = ItemId(s.execute("comp.new", json!({"name": "A", "width": 8, "height": 8, "duration": 1})).unwrap()["comp"].as_u64().unwrap());
+    s.execute("layer.newSolid", json!({})).unwrap();
+    let src = RenderSource {
+        project: s.project.clone(),
+        footage: Arc::new(effectcraft_engine::render::NoFootage),
+        expr: None,
+        layer_cache: Arc::default(),
+        gpu: None,
+        gpu_display: false,
+        disk: Some(disk.clone()),
+    };
+    let f = Frames::default();
+    let series = FrameKey { revision: 1, content: f.content_of(&src.project, 1, cid), comp: cid.0, opts: opts_hash(&RenderOpts::default()), ..key(0, 0, 0) };
+    for fr in 0..10 {
+        insert(&f, FrameKey { frame: fr, ..series });
+    }
+    // The content key is computed on the frame pool first.
+    for _ in 0..1000 {
+        f.persist_missing(&src, &series);
+        disk.flush();
+        if (0..10).all(|fr| {
+            disk.contains(
+                disk_cache::Kind::Frame,
+                frame_disk_key(&f.content_keys, &src.project, &FrameKey { frame: fr, ..series }, series.opts, f.virtual_epoch.load(Ordering::Relaxed), None),
+            )
+        }) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    // Reopened: a new preview cache over the same disk shows every frame in blue.
+    let reopened = Frames::default();
+    let series = FrameKey { content: reopened.content_of(&src.project, 1, cid), ..series };
+    let mut blue = vec![];
+    for _ in 0..1000 {
+        blue = reopened.disk_frames(&src, &series, 0..10, &RenderOpts::default());
+        if blue.len() == 10 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(blue, (0..10).collect::<Vec<_>>());
+    let _ = std::fs::remove_dir_all(&dir);
+}

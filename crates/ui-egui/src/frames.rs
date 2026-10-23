@@ -490,6 +490,9 @@ pub struct Frames {
     /// Where frames render instead of the UI thread (wasm32), and how many it is rendering.
     remote: Option<Arc<dyn RemoteFrames>>,
     remote_busy: Arc<Mutex<usize>>,
+    /// Disk keys [`Frames::persist_missing`] queued.
+    #[cfg(not(target_arch = "wasm32"))]
+    persisted: Mutex<HashSet<u128>>,
 }
 
 impl Default for Frames {
@@ -539,6 +542,8 @@ impl Default for Frames {
             keepers: Mutex::default(),
             remote: None,
             remote_busy: Arc::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            persisted: Mutex::default(),
         }
     }
 }
@@ -855,6 +860,48 @@ impl Frames {
         let ram: HashSet<i64> = self.cached_frames(base).into_iter().collect();
         let oh = opts_hash(opts);
         (start..end).filter(|f| !ram.contains(f)).filter(|f| contains(disk_cache::frame_key(content, *f, base.scale, base.view ^ oh))).collect()
+    }
+
+    /// Write the RAM frames of `base`'s series that the disk cache lacks: frames an edit kept
+    /// (written under the comp's previous content key) and writes the disk cache dropped. They
+    /// are converted on the frame pool, each queued once.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn persist_missing(&self, src: &RenderSource, base: &FrameKey) {
+        let Some(dc) = src.disk.clone() else { return };
+        let epoch = self.virtual_epoch.load(Ordering::Relaxed);
+        let known = self.content_keys.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&(base.revision, base.comp, epoch)).copied();
+        let Some(content) = known else {
+            self.request_content_key(src.project.clone(), base.revision, base.comp);
+            return;
+        };
+        let missing: Vec<(u128, Arc<egui::ColorImage>)> = {
+            let (Ok(c), Ok(mut queued)) = (self.cache.lock(), self.persisted.lock()) else { return };
+            if queued.len() > 100_000 {
+                queued.clear();
+            }
+            c.map
+                .iter()
+                .filter(|(k, _)| k.same_series(base))
+                .filter_map(|(k, img)| {
+                    let FrameImage::Cpu(img) = img else { return None };
+                    let dk = disk_cache::frame_key(content, k.frame, k.scale, k.view ^ k.opts);
+                    (!dc.contains(disk_cache::Kind::Frame, dk) && queued.insert(dk)).then(|| (dk, img.clone()))
+                })
+                .collect()
+        };
+        if missing.is_empty() {
+            return;
+        }
+        let work = move || {
+            for (dk, img) in missing {
+                let rgba: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
+                dc.put_frame(dk, img.size[0] as u32, img.size[1] as u32, &rgba);
+            }
+        };
+        match &self.pool {
+            Some(pool) => pool.spawn(work),
+            None => rayon::spawn(work),
+        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
