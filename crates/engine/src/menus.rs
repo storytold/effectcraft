@@ -756,13 +756,13 @@ Layer
     Remove All Masks | layer.mask.removeAll
     Track Mask | track.mask
     Mode
-      None | layer.mask.mode {"mode":"None"}
-      Add | layer.mask.mode {"mode":"Add"}
-      Subtract | layer.mask.mode {"mode":"Subtract"}
-      Intersect | layer.mask.mode {"mode":"Intersect"}
+      None | layer.mask.mode {"mode":"None"} | N
+      Add | layer.mask.mode {"mode":"Add"} | A
+      Subtract | layer.mask.mode {"mode":"Subtract"} | S
+      Intersect | layer.mask.mode {"mode":"Intersect"} | I
       Lighten | layer.mask.mode {"mode":"Lighten"}
-      Darken | layer.mask.mode {"mode":"Darken"}
-      Difference | layer.mask.mode {"mode":"Difference"}
+      Darken | layer.mask.mode {"mode":"Darken"} | D
+      Difference | layer.mask.mode {"mode":"Difference"} | F
     Inverted | layer.mask.invert
     Locked | layer.mask.lock
     Motion Blur
@@ -798,7 +798,7 @@ Layer
     Shy | layer.setSwitch {"switch":"shy"}
     Lock | layer.setSwitch {"switch":"lock"} | Cmd+L
     Audio | layer.setSwitch {"switch":"audio"}
-    Video | layer.setSwitch {"switch":"video"}
+    Video | layer.setSwitch {"switch":"video"} | Cmd+Alt+Shift+V
     Solo | layer.setSwitch {"switch":"solo"}
     Effect | layer.setSwitch {"switch":"fx"}
     Collapse | layer.setSwitch {"switch":"collapse"}
@@ -920,10 +920,10 @@ Layer
   Ungroup Shapes | path.ungroupShapes
   ---
   Arrange
-    Bring Layer to Front | layer.arrange {"to":"front"} | Cmd+Shift+]
-    Bring Layer Forward | layer.arrange {"to":"forward"} | Cmd+]
-    Send Layer Backward | layer.arrange {"to":"backward"} | Cmd+[
-    Send Layer to Back | layer.arrange {"to":"back"} | Cmd+Shift+[
+    Bring Layer to Front | layer.arrange {"to":"front"} | Cmd+Shift+], Cmd+Alt+Shift+ArrowUp
+    Bring Layer Forward | layer.arrange {"to":"forward"} | Cmd+], Cmd+Alt+ArrowUp
+    Send Layer Backward | layer.arrange {"to":"backward"} | Cmd+[, Cmd+Alt+ArrowDown
+    Send Layer to Back | layer.arrange {"to":"back"} | Cmd+Shift+[, Cmd+Alt+Shift+ArrowDown
   ---
   Reveal
     Reveal in Finder | layer.revealInFinder
