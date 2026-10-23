@@ -3078,6 +3078,10 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     if let Some(d) = d {
                         params["target"]["dimension"] = json!(d);
                     }
+                    // Alt held as it drops: an effect's properties by their index (#1072).
+                    if ctx.input(|i| i.modifiers.alt) {
+                        params["byIndex"] = json!(true);
+                    }
                     if let Some((text, [a, b])) = into {
                         // Into the expression being edited, which goes on being edited.
                         params["expression"] = json!(text);

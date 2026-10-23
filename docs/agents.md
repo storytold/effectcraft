@@ -604,7 +604,9 @@ Extension points and the bundled extensions: [plugins.md](plugins.md).
   Display Style between Timecode and Frames: `file.projectSettings {"timeDisplay": "frames"}`.
 * `prop.pickWhip {layer, prop, target: {layer, prop, dimension?}}` links a property as its
   expression pick whip does; `dimension` picks one of the target's values (`position[0]`), as a
-  drop on that value field does.
+  drop on that value field does. `byIndex: true` (an Alt pick whip: Alt held as it drops) refers
+  to an effect's properties by their index, `effect("Color Control")(1)`: it still reads a
+  renamed property, but another one if properties are reordered.
 * Every property row has a property pick whip in the Parent & Link column
   (`timeline.prop.<uid>.propertyPickWhip`; the expression row's is `timeline.prop.<uid>.pickWhip`).
   Dragged onto another property's name or value, in the Timeline or Effect Controls
