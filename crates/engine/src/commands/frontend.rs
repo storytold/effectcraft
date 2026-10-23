@@ -34,6 +34,14 @@ pub fn specs() -> Vec<CommandSpec> {
         fe!("app.showAll", "Show All", [], None, "{}", always),
         fe!("app.quit", "Quit EffectCraft", [], Some("Cmd+Q"), "{}", always),
         fe!("app.commandPalette", "Quick Apply...", ["Edit"], Some("Cmd+Shift+Space"), "{query?}", always),
+        fe!(
+            "app.fxConsole",
+            "Effect Console...",
+            ["Edit"],
+            Some("Ctrl+Space"),
+            "{query?} — a search bar at the pointer that applies effects and animation presets to the selected layers",
+            always
+        ),
         fe!("app.keyboardShortcuts", "Keyboard Shortcuts", ["Edit"], Some("Cmd+Alt+'"), "{}", always),
         fe!("app.templates", "Templates", [], None, "{kind: renderSettings|outputModule}", always),
         fe!("app.find", "Find", ["File"], Some("Cmd+F"), "{query?}", always),
