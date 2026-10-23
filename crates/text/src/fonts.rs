@@ -328,8 +328,12 @@ pub fn add_source(src: &dyn FontSource) -> usize {
             n += 1;
         }
     }
-    // A new face can belong to one of a script's usual families.
+    // Cache hits may read the database while holding a fallback-cache read lock.
+    // Release the database before invalidating either cache to avoid the reverse lock order.
+    drop(d);
+    // A new face can belong to one of a script's usual families or cover a cached missing glyph.
     family_faces_cache().write().unwrap_or_else(|e| e.into_inner()).clear();
+    fallback_cache().write().unwrap_or_else(|e| e.into_inner()).clear();
     n
 }
 
@@ -339,7 +343,10 @@ pub fn add_font_data(data: Vec<u8>) -> Vec<FaceId> {
     let names = read_faces_bytes(&data);
     let mut d = db().write().unwrap_or_else(|e| e.into_inner());
     let ids = names.into_iter().map(|n| push(&mut d, info_from(n, FaceData::Shared(data.clone()), "user"))).collect();
+    // Match add_source's database-before-cache lock release order.
+    drop(d);
     family_faces_cache().write().unwrap_or_else(|e| e.into_inner()).clear();
+    fallback_cache().write().unwrap_or_else(|e| e.into_inner()).clear();
     ids
 }
 
@@ -403,6 +410,12 @@ pub fn face(id: FaceId) -> Arc<Face> {
 /// All faces (bundled first).
 pub fn all_faces() -> Vec<Arc<Face>> {
     db().read().unwrap_or_else(|e| e.into_inner()).faces.clone()
+}
+
+/// Faces are only appended, so their count identifies the available font set without cloning it.
+/// Cached layouts must be resolved again when registration or discovery adds a face.
+pub(crate) fn database_revision() -> usize {
+    db().read().unwrap_or_else(|e| e.into_inner()).faces.len()
 }
 
 /// Family names in the fonts' own languages: English family → native family (only families
@@ -505,20 +518,27 @@ fn style_wants(style: &str) -> (u16, bool) {
 /// Resolve a family + style name. Family matching is case-insensitive; a style that the family
 /// lacks picks the nearest weight and synthesises bold (≥ 600 requested, ≤ 500 found) or italic.
 pub fn resolve(family: &str, style: &str) -> Resolved {
-    if let Some(r) = resolve_in(family, style).or_else(|| resolve_by_name(family)) {
+    if let Some(r) = resolve_in(family, style).or_else(|| resolve_by_name(&all_faces(), family)) {
         return r;
     }
     if !system_scanned() && !family.is_empty() && !family.eq_ignore_ascii_case(DEFAULT_FAMILY) {
         scan_system();
-        if let Some(r) = resolve_in(family, style).or_else(|| resolve_by_name(family)) {
-            return r;
-        }
     }
-    if let Some(r) = resolve_alias(family, style) {
+    resolve_available(&all_faces(), family, style)
+}
+
+/// Resolve against a fixed font list after discovery, including aliases and the bundled fallback.
+/// Keeping discovery outside this step also lets tests model installed and missing families.
+fn resolve_available(faces: &[Arc<Face>], family: &str, style: &str) -> Resolved {
+    if let Some(r) = resolve_in_faces(faces, family, style).or_else(|| resolve_by_name(faces, family)) {
+        return r;
+    }
+    if let Some(r) = resolve_alias(faces, family, style) {
         return r;
     }
     // Inter is bundled; face 0 (the first bundled face) is the last resort.
-    let mut r = resolve_in(DEFAULT_FAMILY, style).unwrap_or(Resolved { face: 0, synth_bold: false, synth_italic: false, missing: true, instance: None });
+    let mut r =
+        resolve_in_faces(faces, DEFAULT_FAMILY, style).unwrap_or(Resolved { face: 0, synth_bold: false, synth_italic: false, missing: true, instance: None });
     r.missing = !family.is_empty() && !family.eq_ignore_ascii_case(DEFAULT_FAMILY);
     r
 }
@@ -539,14 +559,18 @@ const METRIC_ALIASES: &[(&str, &[&str])] = &[
 
 /// An installed metric-compatible substitute for a missing family. The result stays `missing`,
 /// so Find Missing Fonts still lists the requested name.
-fn resolve_alias(family: &str, style: &str) -> Option<Resolved> {
+fn resolve_alias(faces: &[Arc<Face>], family: &str, style: &str) -> Option<Resolved> {
     let family = family.trim();
     let (_, subs) = METRIC_ALIASES.iter().find(|(name, _)| name.eq_ignore_ascii_case(family))?;
-    subs.iter().find_map(|s| resolve_in(s, style)).map(|r| Resolved { missing: true, ..r })
+    subs.iter().find_map(|s| resolve_in_faces(faces, s, style)).map(|r| Resolved { missing: true, ..r })
 }
 
 fn resolve_in(family: &str, style: &str) -> Option<Resolved> {
-    let faces = all_faces();
+    resolve_in_faces(&all_faces(), family, style)
+}
+
+/// Find the requested family and nearest style within a fixed font list.
+fn resolve_in_faces(faces: &[Arc<Face>], family: &str, style: &str) -> Option<Resolved> {
     let fam: Vec<&Arc<Face>> = faces.iter().filter(|f| f.info.family.eq_ignore_ascii_case(family)).collect();
     if fam.is_empty() {
         return None;
@@ -581,12 +605,11 @@ fn resolve_in(family: &str, style: &str) -> Option<Resolved> {
 
 /// A face whose full name or PostScript name is `name` (case-insensitive), the way After Effects
 /// scripts (`textDocument.font = "YuGothic-Bold"`) and `.aep`-derived data refer to fonts.
-fn resolve_by_name(name: &str) -> Option<Resolved> {
+fn resolve_by_name(faces: &[Arc<Face>], name: &str) -> Option<Resolved> {
     let name = name.trim();
     if name.is_empty() {
         return None;
     }
-    let faces = all_faces();
     let found = |f: &Arc<Face>, instance: Option<usize>| Resolved {
         face: f.id,
         synth_bold: false,
@@ -873,17 +896,18 @@ fn glyph_draws(font: &FontRef, gid: skrifa::GlyphId) -> bool {
 }
 
 /// Results of the search over every installed font in [`fallback_for`], per 256-character block and
-/// preferred face (so bold text gets the bold cut of the fallback family). `None` records that
+/// preferred face (so bold text gets the bold cut of the fallback family) and database revision.
+/// A search finishing after registration cannot cache a miss for the new revision. `None` records that
 /// nothing installed covers the block, so the search over every font runs once per block, not once
 /// per character.
-fn fallback_cache() -> &'static RwLock<std::collections::HashMap<(u32, FaceId), Option<FaceId>>> {
-    static CACHE: OnceLock<RwLock<std::collections::HashMap<(u32, FaceId), Option<FaceId>>>> = OnceLock::new();
+fn fallback_cache() -> &'static RwLock<std::collections::HashMap<(u32, FaceId, usize), Option<FaceId>>> {
+    static CACHE: OnceLock<RwLock<std::collections::HashMap<(u32, FaceId, usize), Option<FaceId>>>> = OnceLock::new();
     CACHE.get_or_init(Default::default)
 }
 
-/// The results of [`family_faces`], per script and preferred face.
-fn family_faces_cache() -> &'static RwLock<std::collections::HashMap<(FallbackScript, FaceId), Arc<Vec<FaceId>>>> {
-    static CACHE: OnceLock<RwLock<std::collections::HashMap<(FallbackScript, FaceId), Arc<Vec<FaceId>>>>> = OnceLock::new();
+/// The results of [`family_faces`], per script, preferred face and database revision.
+fn family_faces_cache() -> &'static RwLock<std::collections::HashMap<(FallbackScript, FaceId, usize), Arc<Vec<FaceId>>>> {
+    static CACHE: OnceLock<RwLock<std::collections::HashMap<(FallbackScript, FaceId, usize), Arc<Vec<FaceId>>>>> = OnceLock::new();
     CACHE.get_or_init(Default::default)
 }
 
@@ -923,7 +947,7 @@ pub fn fallback_for(c: char, prefer: FaceId) -> FaceId {
             return f.id;
         }
     }
-    let key = (c as u32 >> 8, prefer);
+    let key = (c as u32 >> 8, prefer, database_revision());
     if let Some(cached) = fallback_cache().read().unwrap_or_else(|e| e.into_inner()).get(&key).copied() {
         match cached {
             Some(id) if face(id).has_char(c) => return id,
@@ -943,7 +967,9 @@ pub fn fallback_for(c: char, prefer: FaceId) -> FaceId {
 /// for `script`, in the order they are tried, each in the style of `prefer`. For CJK, the other CJK
 /// languages' families follow in the locale's order.
 fn family_faces(script: FallbackScript, prefer: &Face) -> Arc<Vec<FaceId>> {
-    if let Some(faces) = family_faces_cache().read().unwrap_or_else(|e| e.into_inner()).get(&(script, prefer.id)) {
+    // Capture before any face snapshots; a late insertion must keep its original revision.
+    let key = (script, prefer.id, database_revision());
+    if let Some(faces) = family_faces_cache().read().unwrap_or_else(|e| e.into_inner()).get(&key) {
         return faces.clone();
     }
     let order: Vec<FallbackScript> = match script {
@@ -958,7 +984,13 @@ fn family_faces(script: FallbackScript, prefer: &Face) -> Arc<Vec<FaceId>> {
     };
     let style = &prefer.info.style;
     let faces: Arc<Vec<FaceId>> = Arc::new(order.into_iter().flat_map(families_for).filter_map(|fam| resolve_in(fam, style)).map(|r| r.face).collect());
-    family_faces_cache().write().unwrap_or_else(|e| e.into_inner()).insert((script, prefer.id), faces.clone());
+    #[cfg(test)]
+    BEFORE_FAMILY_CACHE_INSERT.with_borrow_mut(|hook| {
+        if let Some(hook) = hook.take() {
+            hook();
+        }
+    });
+    family_faces_cache().write().unwrap_or_else(|e| e.into_inner()).insert(key, faces.clone());
     faces
 }
 
@@ -969,6 +1001,12 @@ fn system_fallback(c: char, style: &str) -> Option<FaceId> {
     let first = faces.iter().find(|f| f.info.origin != "bundled" && file_covers(f, c))?;
     let r = resolve_in(&first.info.family, style)?;
     Some(if face(r.face).has_char(c) { r.face } else { first.id })
+}
+
+#[cfg(test)]
+thread_local! {
+    // Pause one test thread after resolution, with no database/cache lock held.
+    static BEFORE_FAMILY_CACHE_INSERT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -1251,21 +1289,275 @@ mod tests {
         assert_eq!(fallback_for('\u{e001}', inter), id, "fallback finds the drawn one");
     }
 
+    /// A family-order search paused before publication must not poison later fallbacks when
+    /// registration clears the cache while that search is in flight.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn registration_during_family_search_preserves_preferred_fallback() {
+        const CHILD: &str = "EFFECTCRAFT_TEST_FAMILY_SEARCH_REGISTRATION";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "fonts::tests::registration_during_family_search_preserves_preferred_fallback", "--nocapture"])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            eprintln!("{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            assert!(output.status.success());
+            return;
+        }
+        db().write().unwrap().scanned = true;
+        assert!(all_faces().iter().all(|f| f.info.origin == "bundled"));
+        let c = 'あ';
+        let triangle = |family| {
+            let mut data = test_font(family);
+            let table = data[12..12 + 8 * 16].as_chunks::<16>().0.iter().find(|t| &t[..4] == b"cmap").unwrap();
+            let cmap = u32::from_be_bytes(table[8..12].try_into().unwrap()) as usize + 12;
+            for (offset, value) in [(16, c as u16), (24, c as u16), (30, 2u16.wrapping_sub(c as u16))] {
+                data[cmap + offset..cmap + offset + 2].copy_from_slice(&value.to_be_bytes());
+            }
+            data
+        };
+        let unrelated = add_font_data(triangle("Unrelated Loaded Fallback"))[0];
+        assert!(face(unrelated).has_char(c), "load the lower-priority covering face first");
+        let primary = resolve(DEFAULT_FAMILY, "Regular").face;
+        let script = script_of(c);
+        assert_eq!(script, FallbackScript::Japanese);
+        let (ready, built) = std::sync::mpsc::sync_channel(0);
+        let (resume, paused) = std::sync::mpsc::sync_channel(0);
+        let worker = std::thread::spawn(move || {
+            BEFORE_FAMILY_CACHE_INSERT.with_borrow_mut(|hook| {
+                *hook = Some(Box::new(move || {
+                    ready.send(()).unwrap();
+                    paused.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+                }));
+            });
+            family_faces(script, &face(primary))
+        });
+        built.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        let preferred = add_font_data(triangle("Yu Gothic"))[0];
+        assert!(face(preferred).bytes.get().is_none(), "do not preload the preferred face");
+        assert!(family_faces_cache().read().unwrap().is_empty(), "registration cleared the cache");
+        resume.send(()).unwrap();
+        assert!(worker.join().unwrap().is_empty(), "the paused search predates Yu Gothic");
+        assert_eq!(family_faces_cache().read().unwrap().len(), 1, "the old search actually published its empty list after registration");
+        assert_eq!(fallback_for(c, primary), preferred, "the late empty list must not send new requests to the unrelated loaded face");
+        let layout = crate::layout_text(&c.to_string(), &crate::TextStyle::default(), &Default::default());
+        assert!(!layout.glyphs.is_empty());
+        assert!(layout.glyphs.iter().all(|g| g.id != 0 && g.face == preferred));
+    }
+
+    /// A cached missing glyph must be retried when either registration API adds an unloaded
+    /// covering face. Each child uses only bundled/synthetic fonts and its own fallback cache.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn font_registration_refreshes_cached_fallback_misses() {
+        const CHILD: &str = "EFFECTCRAFT_TEST_REGISTERED_FALLBACK";
+        let Ok(mode) = std::env::var(CHILD) else {
+            let mut failures = Vec::new();
+            for mode in ["data", "source"] {
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "fonts::tests::font_registration_refreshes_cached_fallback_misses", "--nocapture"])
+                    .env(CHILD, mode)
+                    .output()
+                    .unwrap();
+                eprintln!("{mode}:\n{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+                if !output.status.success() {
+                    failures.push(mode);
+                }
+            }
+            assert!(failures.is_empty(), "registration modes failed: {failures:?}");
+            return;
+        };
+        db().write().unwrap().scanned = true;
+        assert!(all_faces().iter().all(|f| f.info.origin == "bundled"));
+        let c = '\u{e001}';
+        assert_eq!(script_of(c), FallbackScript::Other);
+        let style = crate::TextStyle::default();
+        let primary = resolve(&style.family, &style.style).face;
+        let missing = crate::layout_text(&c.to_string(), &style, &Default::default());
+        assert!(!missing.glyphs.is_empty());
+        assert!(missing.glyphs.iter().all(|g| g.id == 0));
+        let key = (c as u32 >> 8, primary, database_revision());
+        assert_eq!(fallback_cache().read().unwrap().get(&key), Some(&None));
+        let previous_revision = database_revision();
+        let data = test_font("Registered Fallback Test");
+        let id = if mode == "data" {
+            add_font_data(data)[0]
+        } else {
+            assert_eq!(mode, "source");
+            struct Source(FaceInfo);
+            impl FontSource for Source {
+                fn faces(&self) -> Vec<FaceInfo> {
+                    vec![self.0.clone()]
+                }
+            }
+            let data = Arc::new(data);
+            let names = read_faces_bytes(&data).into_iter().next().unwrap();
+            assert_eq!(add_source(&Source(info_from(names, FaceData::Shared(data), "test"))), 1);
+            all_faces().last().unwrap().id
+        };
+        assert!(database_revision() > previous_revision);
+        assert!(fallback_cache().read().unwrap().get(&key).is_none(), "registration must clear cached searches");
+        // Model a pre-registration search that completes after the cache was cleared.
+        // Its old-revision miss must not poison the next layout's fallback search.
+        fallback_cache().write().unwrap().insert(key, None);
+        // Do not call has_char or font here: loading the face would bypass the stale miss.
+        assert!(face(id).bytes.get().is_none());
+        let refreshed = crate::layout_text(&c.to_string(), &style, &Default::default());
+        assert!(!Arc::ptr_eq(&missing, &refreshed), "the layout revision must change");
+        assert!(!refreshed.glyphs.is_empty());
+        assert!(
+            refreshed.glyphs.iter().all(|g| g.id != 0 && g.face == id),
+            "{mode}: refreshed layout must use the registered fallback, got {:?}",
+            refreshed.glyphs
+        );
+        assert_eq!(fallback_for(c, primary), id);
+    }
+
     /// A Microsoft family that isn't installed renders in its installed metric-compatible
     /// substitute instead of Inter, and still reports itself missing (#1677).
     #[test]
     fn microsoft_families_resolve_to_metric_compatible_substitutes() {
-        add_font_data(test_font("Carlito"));
-        add_font_data(test_font("Caladea"));
-        let calibri = resolve("Calibri", "Regular");
-        assert_eq!(face(calibri.face).info.family, "Carlito");
-        assert!(calibri.missing, "the original name stays missing for Find Missing Fonts");
-        let cambria = resolve("Cambria", "Bold");
-        assert_eq!(face(cambria.face).info.family, "Caladea");
-        assert!(cambria.missing);
-        let unknown = resolve("No Such Family 1677", "Regular");
-        assert_eq!(face(unknown.face).info.family, DEFAULT_FAMILY);
+        // No system scan or shared database: another test may discover real Microsoft fonts.
+        let mut fonts = Db { faces: Vec::new(), scanned: true };
+        let mut add = |family: &str| {
+            let data = Arc::new(test_font(family));
+            for names in read_faces_bytes(&data) {
+                push(&mut fonts, info_from(names, FaceData::Shared(data.clone()), "test"));
+            }
+        };
+        for family in [DEFAULT_FAMILY, "Carlito", "Caladea"] {
+            add(family);
+        }
+        // Without a substitute, a missing Microsoft family still uses the bundled default.
+        let missing = resolve_available(&fonts.faces[..1], "Calibri", "Regular");
+        assert_eq!(fonts.faces[missing.face].info.family, DEFAULT_FAMILY);
+        assert!(missing.missing);
+        for (requested, substitute, style, bold) in [("Calibri", "Carlito", "Regular", false), ("Cambria", "Caladea", "Bold", true)] {
+            let r = resolve_available(&fonts.faces, requested, style);
+            assert_eq!(fonts.faces[r.face].info.family, substitute);
+            assert!(r.missing, "the original name stays missing for Find Missing Fonts");
+            assert_eq!(r.synth_bold, bold);
+        }
+        let unknown = resolve_available(&fonts.faces, "No Such Family 1677", "Regular");
+        assert_eq!(fonts.faces[unknown.face].info.family, DEFAULT_FAMILY);
         assert!(unknown.missing);
+
+        // An installed original must win over its substitute and must not be marked missing.
+        for family in ["Calibri", "Cambria"] {
+            let data = Arc::new(test_font(family));
+            for names in read_faces_bytes(&data) {
+                push(&mut fonts, info_from(names, FaceData::Shared(data.clone()), "test"));
+            }
+            let r = resolve_available(&fonts.faces, family, "Regular");
+            assert_eq!(fonts.faces[r.face].info.family, family);
+            assert!(!r.missing);
+        }
+    }
+
+    /// Exercise the public resolver with a known database, including glyph layout. A child keeps
+    /// these deliberately installed original families out of other tests' font database.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn public_resolution_preserves_alias_style_and_original_precedence() {
+        const CHILD: &str = "EFFECTCRAFT_TEST_ISOLATED_METRIC_FONTS";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "fonts::tests::public_resolution_preserves_alias_style_and_original_precedence", "--nocapture"])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        // Model discovery having completed without any installed fonts. Do not consult the host.
+        db().write().unwrap().scanned = true;
+        assert!(all_faces().iter().all(|f| f.info.origin == "bundled"));
+        for request in ["Calibri", "No Such Metric Font"] {
+            let r = resolve(request, "Bold Italic");
+            assert_eq!(face(r.face).info.family, DEFAULT_FAMILY);
+            assert!(r.missing && r.synth_bold && !r.synth_italic, "{r:?}");
+        }
+        for request in ["", "inter", "Inter-Bold", " inter bold "] {
+            let r = resolve(request, "Regular");
+            assert_eq!(face(r.face).info.family, DEFAULT_FAMILY);
+            assert!(!r.missing, "{request}: {r:?}");
+        }
+        for &(original, substitutes) in METRIC_ALIASES {
+            // Try the second choice before the first. Some aliases share the same substitutes.
+            for substitute in substitutes.iter().rev() {
+                add_font_data(test_font(substitute));
+                let r = resolve(original, "Regular");
+                let expected = substitutes.iter().find(|s| all_faces().iter().any(|f| f.info.family == **s)).unwrap();
+                assert_eq!(face(r.face).info.family, *expected, "{original}");
+                assert!(r.missing && !r.synth_bold && !r.synth_italic, "{r:?}");
+            }
+            for (style, bold, italic) in [("Regular", false, false), ("Bold", true, false), ("Italic", false, true), ("Bold Italic", true, true)] {
+                let r = resolve(&original.to_ascii_lowercase(), style);
+                assert_eq!(face(r.face).info.family, substitutes[0], "{original}: {style}");
+                assert_eq!((r.missing, r.synth_bold, r.synth_italic, r.instance), (true, bold, italic, None), "{original}: {style}");
+            }
+            let layout = crate::layout_text("\u{e001}", &crate::TextStyle { family: original.into(), size: 30.0, ..Default::default() }, &Default::default());
+            assert!(layout.missing_font && !layout.glyphs.is_empty(), "{original}");
+            assert!(layout.glyphs.iter().all(|g| g.id != 0 && face(g.face).info.family == substitutes[0]), "{original}");
+            add_font_data(test_font(original));
+            let r = resolve(original, "Bold Italic");
+            assert_eq!(face(r.face).info.family, original);
+            assert_eq!((r.missing, r.synth_bold, r.synth_italic), (false, true, true));
+            let layout = crate::layout_text("\u{e001}", &crate::TextStyle { family: original.into(), size: 30.0, ..Default::default() }, &Default::default());
+            assert!(!layout.missing_font && !layout.glyphs.is_empty(), "{original}");
+            assert!(layout.glyphs.iter().all(|g| g.id != 0 && face(g.face).info.family == original), "{original}");
+        }
+        // Named variable instances must keep their index through the public name lookup.
+        add_font_data(crate::sfnt::test_font::variable("Carlito", &[("Black", 900.0, Some("MetricTest-Black"))], true));
+        let black = resolve("MetricTest-Black", "Regular");
+        assert_eq!((black.instance, black.missing, black.synth_bold), (Some(0), false, false));
+        assert_eq!(instance_variations(&black), vec![("wght".into(), 900.0)]);
+        eprintln!("public matrix: {} aliases; absent/substitute/original, 4 styles, glyph layout and named instance passed", METRIC_ALIASES.len());
+    }
+
+    /// A fixed list must not consult or mutate the process database, even for name/instance
+    /// lookup. Subsets deliberately retain sparse face ids, as production snapshots do.
+    #[test]
+    fn fixed_face_lists_keep_names_instances_and_missing_fonts_isolated() {
+        let mut fonts = Db { faces: Vec::new(), scanned: true };
+        let data = Arc::new(crate::sfnt::test_font::variable("Carlito", &[("Black", 900.0, Some("IsolatedMetric-Black"))], true));
+        for names in read_faces_bytes(INTER_REGULAR) {
+            push(&mut fonts, info_from(names, FaceData::Static(INTER_REGULAR), "test"));
+        }
+        for family in ["Unused Gap", "Calibri"] {
+            let data = Arc::new(test_font(family));
+            for names in read_faces_bytes(&data) {
+                push(&mut fonts, info_from(names, FaceData::Shared(data.clone()), "test"));
+            }
+        }
+        for names in read_faces_bytes(&data) {
+            push(&mut fonts, info_from(names, FaceData::Shared(data.clone()), "test"));
+        }
+        let substitute: Vec<_> = fonts.faces.iter().filter(|f| f.info.family != "Calibri" && f.info.family != "Unused Gap").cloned().collect();
+        let original: Vec<_> = fonts.faces.iter().filter(|f| f.info.family == "Inter" || f.info.family == "Calibri").cloned().collect();
+        let absent = &fonts.faces[..1];
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    for _ in 0..32 {
+                        for request in ["Carlito", "IsolatedMetric-Black", "Carlito Black", "Calibri"] {
+                            let r = resolve_available(&substitute, request, "Black");
+                            assert_eq!(r.face, 3, "{request}");
+                            assert_eq!((r.instance, r.missing, r.synth_bold, r.synth_italic), (Some(0), request == "Calibri", false, false));
+                        }
+                        let r = resolve_available(&original, "Calibri", "Regular");
+                        assert_eq!((r.face, r.missing, r.instance), (2, false, None));
+                        for request in ["Calibri", "IsolatedMetric-Black"] {
+                            let r = resolve_available(absent, request, "Regular");
+                            assert_eq!((r.face, r.missing, r.instance), (0, true, None));
+                        }
+                    }
+                });
+            }
+        });
+        assert_eq!(fonts.faces.len(), 4);
+        assert!(fonts.scanned);
     }
 
     #[test]

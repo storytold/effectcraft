@@ -1112,6 +1112,7 @@ pub fn layout_rich(text: &str, runs: &[(Range<usize>, TextStyle)], paras: &[Para
     text.hash(&mut h);
     runs.hash(&mut h);
     paras.hash(&mut h);
+    fonts::database_revision().hash(&mut h);
     let key = h.finish();
     static CLOCK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let now = CLOCK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
