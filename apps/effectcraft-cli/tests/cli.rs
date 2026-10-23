@@ -324,6 +324,79 @@ fn render_out_is_relative_to_the_working_directory() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// #1743: a render does not replace a file that is there unless `--overwrite` says so, and never
+/// replaces footage, whatever it says.
+#[test]
+fn render_replaces_a_file_only_with_overwrite_and_never_footage() {
+    let root = tmp("render-overwrite");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let out = root.join("clip.mp4");
+    let o = out.to_str().unwrap();
+    let render = |extra: &[&str]| {
+        let mut args = vec!["render", "--format", "h264", "--start", "0", "--end", "0.2", "--resolution", "quarter", "--out", o];
+        args.extend_from_slice(extra);
+        run_json(&args)
+    };
+    let (code, v) = render(&[]);
+    assert_eq!(code, 0, "{v}");
+    let first = std::fs::read(&out).unwrap();
+    assert!(first.len() > 100);
+
+    // Again: refused, the file is as it was, and the message names the flag this command has.
+    let (code, v) = render(&[]);
+    assert_eq!(code, 1, "{v}");
+    let error = v["error"].as_str().unwrap();
+    assert!(error.contains("clip.mp4") && error.contains("already exists") && error.contains("--overwrite"), "{v}");
+    assert_eq!(std::fs::read(&out).unwrap(), first);
+    let (code, v) = render(&["--overwrite"]);
+    assert_eq!(code, 0, "{v}");
+
+    // Imported as footage, the file can't be an output any more.
+    let project = root.join("p.ecproj");
+    let p = project.to_str().unwrap();
+    let imported = json!({"paths": [o]}).to_string();
+    ok_json(&["run", "file.import", &imported, "comp.new", r#"{"name":"T","width":64,"height":36,"duration":1}"#, "--empty", "--save-as", p]);
+    let before = std::fs::read(&out).unwrap();
+    for extra in [&[][..], &["--overwrite"][..]] {
+        let (code, v) = render(&[&["--project", p][..], extra].concat());
+        assert_eq!(code, 1, "{extra:?}: {v}");
+        let error = v["error"].as_str().unwrap();
+        assert!(error.contains("clip.mp4") && error.contains("footage"), "{extra:?}: {v}");
+        assert_eq!(std::fs::read(&out).unwrap(), before, "{extra:?}: the footage is as it was");
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// #1743: `render-frame --out` writes a PNG to the path it is given, and never over footage or
+/// the project file.
+#[test]
+fn render_frame_never_writes_over_footage_or_the_project() {
+    let root = tmp("render-frame-overwrite");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let (clip, project) = (root.join("clip.png"), root.join("p.ecproj"));
+    let (c, p) = (clip.to_str().unwrap(), project.to_str().unwrap());
+    // A real PNG to import: a frame of the demo project.
+    ok_json(&["render-frame", "--max-side", "64", "--out", c]);
+    let imported = json!({"paths": [c]}).to_string();
+    ok_json(&["run", "file.import", &imported, "comp.new", r#"{"name":"T","width":64,"height":36,"duration":1}"#, "--empty", "--save-as", p]);
+    let (footage, saved) = (std::fs::read(&clip).unwrap(), std::fs::read(&project).unwrap());
+    for (out, what) in [(c, "footage"), (p, "project")] {
+        let (code, v) = run_json(&["render-frame", "--project", p, "--out", out]);
+        assert_eq!(code, 1, "{what}: {v}");
+        let error = v["error"].as_str().unwrap();
+        assert!(error.contains(out) && error.contains(what), "{what}: {v}");
+    }
+    assert_eq!(std::fs::read(&clip).unwrap(), footage, "the footage is as it was");
+    assert_eq!(std::fs::read(&project).unwrap(), saved, "the project file is as it was");
+    // Anywhere else it writes.
+    let free = root.join("frame.png");
+    ok_json(&["render-frame", "--project", p, "--out", free.to_str().unwrap()]);
+    assert_eq!(&std::fs::read(&free).unwrap()[..8], b"\x89PNG\r\n\x1a\n");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// A real stdio client: each edit's reply is read before disconnecting or killing the server.
 struct McpChild {
     child: std::process::Child,

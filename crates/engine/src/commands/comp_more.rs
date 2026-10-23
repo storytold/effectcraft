@@ -93,8 +93,11 @@ fn queue_frame(s: &mut Session, p: &Value) -> Result<Value> {
     it.output = s.project.render_templates.default_output_module(TemplateSlot::Still);
     if let Some(path) = str_p(p, "path") {
         it.output.output = path.to_string();
-    } else if !it.output.format.is_sequence() {
-        it.output.output = "[compName]_frame.[fileExtension]".into();
+    } else {
+        if !it.output.format.is_sequence() {
+            it.output.output = "[compName]_frame.[fileExtension]".into();
+        }
+        s.avoid_sources(&mut it);
     }
     let id = s.edit("Save Frame As", None, |proj, _| {
         it.id = proj.render_queue.iter().map(|i| i.id).max().unwrap_or(0) + 1;
@@ -111,6 +114,7 @@ fn save_frame(s: &mut Session, p: &Value) -> Result<Value> {
         return queue_frame(s, p);
     }
     let path = str_p(p, "path").ok_or_else(|| bad("comp.saveFrameAs", "missing `path` (.png)"))?.to_string();
+    s.refuse_export(&path)?;
     let cid = comp_id(s, p)?;
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
     let t = f_p(p, "time").map(Tick::from_seconds_f64).unwrap_or(s.time());
@@ -119,7 +123,7 @@ fn save_frame(s: &mut Session, p: &Value) -> Result<Value> {
     let img = s.render(cid, t, effectcraft_render::RenderOpts { scale, backend: effectcraft_render::Backend::Auto, ..Default::default() });
     let rgba = img.to_rgba8_over(bg);
     let png = encode_png(&rgba, img.width, img.height).map_err(|e| EngineError::Other(format!("PNG encoding failed: {e}")))?;
-    s.services.write_file(&path, &png).map_err(|e| EngineError::Other(format!("cannot write {path}: {e}")))?;
+    s.write_output(&path, &png)?;
     s.toast(format!("Saved frame to {path}"));
     Ok(json!({"path": path, "width": img.width, "height": img.height, "time": t.seconds()}))
 }

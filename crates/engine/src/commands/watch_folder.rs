@@ -71,7 +71,9 @@ fn render_project(host: &Session, path: &Path) -> Value {
         if queued == 0 {
             return Ok(json!({"state": "done", "items": [], "note": "nothing queued"}));
         }
-        s.start_render(true)?;
+        // Unattended, as set up: a project rendered again (its status file deleted) replaces its
+        // earlier outputs. Footage is never replaced.
+        s.start_render_with(true, true)?;
         let items: Vec<Value> = s
             .project
             .render_queue

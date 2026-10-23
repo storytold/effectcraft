@@ -466,6 +466,12 @@ pub fn handle(app: &mut EffectcraftApp, ctx: &egui::Context, req: &ControlReques
             )
         }
         "ui.screenshot" => {
+            // A file the project reads is never the output.
+            if let Some(path) = s("path")
+                && let Err(e) = app.session.refuse_export(path)
+            {
+                return err(e);
+            }
             let crop = s("panel").and_then(PanelKind::from_name).and_then(|pk| app.auto.find(&format!("panel.{}", pk.id())).map(|e| e.rect));
             let crop = crop.or_else(|| s("id").and_then(|id| app.auto.find(id).map(|e| e.rect)));
             // Bring the window on screen so a frame is presented, without taking keyboard focus.
@@ -501,6 +507,12 @@ pub fn handle(app: &mut EffectcraftApp, ctx: &egui::Context, req: &ControlReques
 /// temp file) or inline as base64 when `base64: true`.
 fn render_frame(app: &EffectcraftApp, p: &Value) -> Outcome {
     let s = &app.session;
+    // A file the project reads is never the output (checked before rendering).
+    if let Some(path) = p.get("path").and_then(Value::as_str)
+        && let Err(e) = s.refuse_export(path)
+    {
+        return err(e);
+    }
     let cid = match s.resolve_comp(p.get("comp")) {
         Ok(c) => c,
         Err(e) => return err(e),

@@ -1838,7 +1838,9 @@ RenderQueue.prototype = {
     if (v === undefined) throw __err("render queue index " + i + " is out of range");
     return v;
   },
-  render: function () { __call("renderQueue.render", { wait: true }); },
+  // `render(true)` (an EffectCraft extension): replace output files that already exist. Without
+  // it such a render is refused; footage and the project file are never replaced.
+  render: function (overwrite) { __call("renderQueue.render", { wait: true, overwrite: overwrite === true }); },
   stopRendering: function () { __call("renderQueue.stop", {}); },
   pauseRendering: function () {},
   showWindow: function () {},

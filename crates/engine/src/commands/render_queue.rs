@@ -532,6 +532,9 @@ fn add(s: &mut Session, p: &Value) -> Result<Value> {
         object.remove("template");
     }
     apply_output(&mut it.output, &templates, s.state.region_of_interest, &output_params, "renderQueue.add")?;
+    if str_p(p, "output").or(str_p(p, "path")).is_none() {
+        s.avoid_sources(&mut it);
+    }
     if let Some(l) = enum_p(p, "log", "renderQueue.add", RenderLog::parse, "errorsOnly|plusSettings|plusPerFrameInfo")? {
         it.log = l;
     }
@@ -678,9 +681,24 @@ fn render(s: &mut Session, p: &Value) -> Result<Value> {
     {
         log::warn!("{e}");
     }
-    let ids = s.start_render(wait).map_err(EngineError::Other)?;
-    let items: Vec<Value> = s.project.render_queue.iter().enumerate().filter(|(_, i)| ids.contains(&i.id)).map(|(k, i)| item_json(s, i, k)).collect();
-    Ok(json!({"rendering": s.is_rendering(), "items": items}))
+    // Files that exist are replaced only when the caller says so; footage never is.
+    let overwrite = b_p(p, "overwrite").unwrap_or(false);
+    let start = s.start_render_with(wait, overwrite).map_err(EngineError::Other)?;
+    // The items it started, and those it refused (they show their reason as their status).
+    let shown = |id: u64| start.started.contains(&id) || start.refused.iter().any(|r| r.item == id);
+    let items: Vec<Value> = s.project.render_queue.iter().enumerate().filter(|(_, i)| shown(i.id)).map(|(k, i)| item_json(s, i, k)).collect();
+    let mut reply = json!({"rendering": s.is_rendering(), "items": items});
+    if !start.refused.is_empty() {
+        let refused: Vec<Value> = start.refused.iter().map(|r| json!({"item": r.item, "path": r.path, "reason": r.reason})).collect();
+        reply["refused"] = json!(refused);
+    }
+    Ok(reply)
+}
+
+/// What the next Render would do to the files on disk: `existing` outputs it would replace (it
+/// asks first) and `blocked` ones that are files the project reads (it never replaces those).
+fn check_outputs(s: &mut Session, _: &Value) -> Result<Value> {
+    Ok(s.output_check().to_json())
 }
 
 fn stop(s: &mut Session, _: &Value) -> Result<Value> {
@@ -770,6 +788,9 @@ fn pre_render(s: &mut Session, p: &Value) -> Result<Value> {
     it.output = templates.default_output_module(TemplateSlot::PreRender);
     it.output.output = "[compName]_prerender.[fileExtension]".into();
     apply_output(&mut it.output, &templates, s.state.region_of_interest, p, "render.preRender")?;
+    if str_p(p, "output").or(str_p(p, "path")).is_none() {
+        s.avoid_sources(&mut it);
+    }
     it.post_render = PostRenderAction::ImportAndReplace;
     let id = s.edit("Pre-render", None, |proj, _| {
         it.id = proj.render_queue.iter().map(|i| i.id).max().unwrap_or(0) + 1;
@@ -786,6 +807,7 @@ fn pre_render(s: &mut Session, p: &Value) -> Result<Value> {
 /// Composition ▸ Save Current Preview…: render the work area of the comp straight to a movie file.
 fn save_current_preview(s: &mut Session, p: &Value) -> Result<Value> {
     let path = str_p(p, "path").ok_or_else(|| bad("render.saveCurrentPreview", "missing `path`"))?.to_string();
+    s.refuse_source(&path).map_err(EngineError::Other)?;
     let cid = comp_id(s, p)?;
     let format = OutputFormat::from_path(&path).unwrap_or(OutputFormat::H264);
     let exporter = s.exporter.clone().ok_or_else(|| EngineError::Other("export is not available in this build".into()))?;
@@ -1045,7 +1067,16 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("render.saveCurrentPreview", "Save Current Preview...", ["Composition"], None, "{comp?, path}", has_comp, save_current_preview),
         cmd!("renderQueue.move", "Move in Render Queue", [], None, "{item?|index?, to: n (1-based)}", has_items, move_item),
         cmd!("renderQueue.duplicate", "Duplicate Render Item", [], None, "{item?|index?}", has_items, duplicate),
-        cmd!("renderQueue.render", "Render", [], None, "{wait?: bool (default true; the UI renders in the background)}", has_queued, render),
+        cmd!(
+            "renderQueue.render",
+            "Render",
+            [],
+            None,
+            "{wait?: bool (default true; the UI renders in the background), overwrite?: bool (replace output files that already exist; without it a render over an existing file is refused, and one over footage or the project file always is)}",
+            has_queued,
+            render
+        ),
+        query!("renderQueue.checkOutputs", "Check Render Outputs", "{}", check_outputs),
         cmd!("renderQueue.stop", "Stop Rendering", [], None, "{}", rendering, stop),
         query!("renderQueue.list", "Render Queue Items", "{}", list),
         query!("renderQueue.templates", "Render Templates", "{}", templates),

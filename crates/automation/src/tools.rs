@@ -393,12 +393,17 @@ fn add_keyframe(b: &mut Backend, a: &Value) -> Result<Reply> {
 fn render_frame(b: &mut Backend, a: &Value) -> Result<Reply> {
     let max_side = get(a, "max_side").and_then(Value::as_u64).unwrap_or(960) as u32;
     let transparent = get(a, "transparent").and_then(Value::as_bool).unwrap_or(false);
-    let f = b.render_with(get(a, "comp"), get(a, "time").and_then(Value::as_f64), max_side, transparent)?;
-    let mut info = json!({"comp": f.comp, "time": f.time, "width": f.width, "height": f.height});
-    if let Some(p) = get(a, "path").and_then(Value::as_str) {
+    let path = get(a, "path").and_then(Value::as_str);
+    if let Some(p) = path {
         if let Some(c) = b.confinement() {
             c.check(p, crate::confine::Access::Write)?;
         }
+        // Before the frame is rendered: never over footage, a proxy or the project file.
+        b.check_output(p)?;
+    }
+    let f = b.render_with(get(a, "comp"), get(a, "time").and_then(Value::as_f64), max_side, transparent)?;
+    let mut info = json!({"comp": f.comp, "time": f.time, "width": f.width, "height": f.height});
+    if let Some(p) = path {
         std::fs::write(p, &f.png).map_err(|e| Error::Other(format!("cannot write {p}: {e}")))?;
         info["path"] = json!(p);
     }

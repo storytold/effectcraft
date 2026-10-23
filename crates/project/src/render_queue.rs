@@ -1455,20 +1455,54 @@ pub fn expand_template(template: &str, format: OutputFormat, v: &TemplateVars) -
 /// Replace the first run of `#` (optionally in brackets, `[####]`) with the zero-padded frame
 /// number. Paths without a run get `_NNNNN` before the extension.
 pub fn sequence_path(path: &str, frame: i64) -> String {
+    let (before, width, after) = sequence_parts(path);
+    format!("{before}{frame:0width$}{after}")
+}
+
+/// A sequence output path around its frame number: what comes before it, how many digits it is
+/// padded to and what comes after (`out/a_[#####].png` → `out/a_`, 5, `.png`).
+pub fn sequence_parts(path: &str) -> (String, usize, String) {
     if let Some(start) = path.find('#') {
         let len = path[start..].chars().take_while(|c| *c == '#').count();
         let (mut a, mut b) = (start, start + len);
-        if a > 0 && path.as_bytes()[a - 1] == b'[' && path.as_bytes().get(b) == Some(&b']') {
+        if a > 0 && path.as_bytes().get(a - 1) == Some(&b'[') && path.as_bytes().get(b) == Some(&b']') {
             a -= 1;
             b += 1;
         }
-        return format!("{}{:0width$}{}", &path[..a], frame, &path[b..], width = len);
+        return (path[..a].to_string(), len, path[b..].to_string());
     }
     let p = std::path::Path::new(path);
     match p.extension() {
-        Some(ext) => format!("{}_{frame:05}.{}", p.with_extension("").to_string_lossy(), ext.to_string_lossy()),
-        None => format!("{path}_{frame:05}"),
+        Some(ext) => (format!("{}_", p.with_extension("").to_string_lossy()), 5, format!(".{}", ext.to_string_lossy())),
+        None => (format!("{path}_"), 5, String::new()),
     }
+}
+
+/// The frame number `candidate` is the file of, when `path` (a sequence output path) writes it:
+/// the inverse of [`sequence_path`].
+pub fn sequence_frame(path: &str, candidate: &str) -> Option<i64> {
+    let (before, width, after) = sequence_parts(path);
+    let digits = candidate.strip_prefix(before.as_str())?.strip_suffix(after.as_str())?;
+    let frame: i64 = digits.parse().ok()?;
+    (format!("{frame:0width$}") == digits).then_some(frame)
+}
+
+/// `template` with `_n` added to the name: before the frame-number run of a sequence, else before
+/// the extension (`[compName].[fileExtension]` → `[compName]_1.[fileExtension]`,
+/// `[compName]_[#####].[fileExtension]` → `[compName]_1_[#####].[fileExtension]`).
+pub fn numbered_template(template: &str, n: u32) -> String {
+    let at = match template.find('#') {
+        Some(hash) => {
+            // The run's `[`, then the separator that sets it off from the name.
+            let run = if template[..hash].ends_with('[') { hash - 1 } else { hash };
+            if template[..run].ends_with(['_', '-', '.', ' ']) { run - 1 } else { run }
+        }
+        None => {
+            let name = template.rfind(['/', '\\']).map_or(0, |i| i + 1);
+            template[name..].rfind('.').map_or(template.len(), |i| name + i)
+        }
+    };
+    format!("{}_{n}{}", &template[..at], &template[at..])
 }
 
 /// Make a name safe as a file name component.
@@ -1488,6 +1522,44 @@ mod tests {
         assert_eq!(sequence_path("out/a_[#####].png", 42), "out/a_00042.png");
         assert_eq!(sequence_path("a###.tif", 7), "a007.tif");
         assert_eq!(sequence_path("a.png", 3), "a_00003.png");
+    }
+
+    /// `sequence_frame` reads back what `sequence_path` writes, and nothing else.
+    #[test]
+    fn sequence_frames_read_back() {
+        for path in ["out/a_[#####].png", "a###.tif", "a.png", "/x/[compName]/shot_[##].exr", "noext", "dir.v2/clip"] {
+            for frame in [0, 7, 42, 99_999, 123_456, -3] {
+                assert_eq!(sequence_frame(path, &sequence_path(path, frame)), Some(frame), "{path} {frame}");
+            }
+        }
+        let (before, width, after) = sequence_parts("out/a_[#####].png");
+        assert_eq!((before.as_str(), width, after.as_str()), ("out/a_", 5, ".png"));
+        let (before, width, after) = sequence_parts("a.png");
+        assert_eq!((before.as_str(), width, after.as_str()), ("a_", 5, ".png"));
+        // Other numbers, other widths, other names are not frames of the sequence.
+        assert_eq!(sequence_frame("a_[#####].png", "a_0042.png"), None, "padded to four");
+        assert_eq!(sequence_frame("a_[####].png", "a_+042.png"), None, "a sign is not padding");
+        assert_eq!(sequence_frame("a_[#####].png", "a_00042.jpg"), None);
+        assert_eq!(sequence_frame("a_[#####].png", "b_00042.png"), None);
+        assert_eq!(sequence_frame("a_[#####].png", "a_00x42.png"), None);
+        assert_eq!(sequence_frame("a_[#####].png", "a_.png"), None);
+        assert_eq!(sequence_frame("a_[#####].png", "a_99999999999999999999.png"), None, "too big for a frame number");
+    }
+
+    #[test]
+    fn numbered_templates() {
+        assert_eq!(numbered_template(DEFAULT_TEMPLATE, 1), "[compName]_1.[fileExtension]");
+        assert_eq!(numbered_template(DEFAULT_SEQUENCE_TEMPLATE, 2), "[compName]_2_[#####].[fileExtension]");
+        assert_eq!(numbered_template("[compName]_frame.[fileExtension]", 3), "[compName]_frame_3.[fileExtension]");
+        assert_eq!(numbered_template("out/[compName]###.png", 1), "out/[compName]_1###.png");
+        assert_eq!(numbered_template("my.dir/clip", 4), "my.dir/clip_4", "a dot in a folder is not an extension");
+        assert_eq!(numbered_template("clip.v2.mov", 1), "clip.v2_1.mov");
+        assert_eq!(numbered_template("", 1), "_1");
+        assert_eq!(numbered_template("#", 1), "_1#");
+        assert_eq!(numbered_template("[#]", 1), "_1[#]");
+        // A numbered default is still a default: it expands to the numbered name.
+        let v = TemplateVars { comp_name: "footage", project_name: "P", width: 64, height: 36, frame_rate: 30.0, start_frame: 0, end_frame: 29 };
+        assert_eq!(expand_template(&numbered_template(DEFAULT_TEMPLATE, 1), OutputFormat::H264, &v), "footage_1.mp4");
     }
 
     #[test]

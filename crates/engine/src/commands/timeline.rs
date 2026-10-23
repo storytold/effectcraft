@@ -139,6 +139,7 @@ fn export_timeline(s: &mut Session, p: &Value) -> Result<Value> {
         }
         path = format!("{path}.{}", format.extension());
     }
+    s.refuse_export(&path)?;
     let cid = comp_id(s, p)?;
     let prerender_mode = match str_p(p, "prerender") {
         None => match p.get("prerender").and_then(Value::as_bool) {
@@ -165,6 +166,11 @@ fn export_timeline(s: &mut Session, p: &Value) -> Result<Value> {
         let comp_name = s.project.item(c).map(|i| i.name.clone()).unwrap_or_default();
         let layer_name = s.project.comp(c).and_then(|cc| cc.layer(l)).map(|x| x.name.clone()).unwrap_or_default();
         let file = dir.join(format!("{stem}_{}_{}_{}.mov", safe(&comp_name), safe(&layer_name), l.0)).to_string_lossy().to_string();
+        // The movies are outputs too: never over footage, a proxy or the project file.
+        if let Err(why) = s.refuse_export(&file) {
+            errors.push(format!("{comp_name} ▸ {layer_name}: {why}"));
+            continue;
+        }
         match prerender(s, c, l, &file) {
             Ok(r) => {
                 rendered.push(r.path.clone());
@@ -174,7 +180,7 @@ fn export_timeline(s: &mut Session, p: &Value) -> Result<Value> {
         }
     }
     let out = effectcraft_interchange::export(&s.project, cid, &opts, &pre).map_err(|e| EngineError::Other(e.to_string()))?;
-    s.services.write_file(&path, &out.bytes).map_err(|e| EngineError::Other(format!("cannot write {path}: {e}")))?;
+    s.write_output(&path, &out.bytes)?;
     let mut warnings = out.warnings.clone();
     warnings.extend(errors.iter().map(|e| format!("pre-render failed: {e}")));
     s.toast(match format {

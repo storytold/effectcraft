@@ -95,6 +95,8 @@ pub enum Dialog {
     UnsavedChanges,
     /// Delete Project items that compositions use? (`panels::delete_items`).
     DeleteItems,
+    /// Render over files that already exist? (`panels::overwrite`).
+    Overwrite,
     /// A gradient property's Gradient Editor (`panels::gradient_editor`, `prop.editGradient`).
     GradientEditor,
     /// Delete a user template from Home? (`panels::templates`).

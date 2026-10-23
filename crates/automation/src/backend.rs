@@ -86,6 +86,19 @@ impl Backend {
         }
     }
 
+    /// Refuse `path`, a file this caller is about to write itself (a frame, a screenshot), when
+    /// the open project reads it: footage, a proxy or the project file. The project is the
+    /// session's or the app's, so both are asked through `file.checkOutput`; a relative path is
+    /// made absolute here, against this process's folder, because the app has its own.
+    pub fn check_output(&mut self, path: &str) -> Result<()> {
+        let absolute = std::path::absolute(path).map_err(|e| Error::BadArgs(format!("cannot resolve {path}: {e}")))?;
+        let found = self.exec("file.checkOutput", json!({"path": absolute.to_string_lossy()}))?;
+        match found.get("blocked").and_then(Value::as_bool) {
+            Some(false) => Ok(()),
+            _ => Err(Error::BadArgs(found.get("reason").and_then(Value::as_str).unwrap_or("this file is one the project reads").to_string())),
+        }
+    }
+
     /// Call a raw control-channel method (bridge only).
     pub fn control(&mut self, method: &str, params: Value) -> Result<Value> {
         match &mut self.target {
