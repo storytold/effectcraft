@@ -65,9 +65,11 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             ));
         }
         app.auto.add_response(&format!("tools.{cur:?}"), &resp, cur.label());
+        // The drawn tooltip asks the catalog; the automation label above keeps the English name.
+        let label = crate::i18n::tr(cur.label());
         let tip = match cur.shortcut() {
-            Some(s) => format!("{} ({})", cur.label(), crate::menus::shortcut_text(s)),
-            None => cur.label().to_string(),
+            Some(s) => format!("{} ({})", label, crate::menus::shortcut_text(s)),
+            None => label.to_string(),
         };
         let resp = resp.on_hover_text(tip);
         let held = ui.data(|d| d.get_temp::<egui::Id>(held_id)) == Some(id);
@@ -103,7 +105,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             let close_behavior = if held && resp.clicked() { egui::PopupCloseBehavior::IgnoreClicks } else { egui::PopupCloseBehavior::CloseOnClickOutside };
             egui::Popup::menu(&resp).style(crate::widgets::menu_style).open_memory(command).close_behavior(close_behavior).show(|ui| {
                 for tool in slot.iter() {
-                    let row = ui.selectable_label(app.ui.tool == *tool, tool.label());
+                    let row = ui.selectable_label(app.ui.tool == *tool, crate::i18n::tr(tool.label()));
                     app.auto.add(&format!("tools.select.{tool:?}"), row.rect, tool.label());
                     if row.clicked() {
                         app.ui.tool = *tool;
