@@ -310,6 +310,27 @@ fn only_comp(p: &Value) -> Option<effectcraft_engine::project::ItemId> {
 
 /// Execute a UI or engine command by id.
 pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: Value) -> Result<Value, String> {
+    if id == "file.cloudOpen" {
+        if !crate::cloud::available(app) {
+            return Err(crate::cloud::UNAVAILABLE.into());
+        }
+        if crate::panels::unsaved::guard(app, id, &params) {
+            return Ok(json!({"dialog": "unsavedChanges"}));
+        }
+        app.cloud_page = Some(crate::cloud::CloudPage::Open);
+        return Ok(json!({"page": "open"}));
+    }
+    if id == "file.cloudSaveAs" {
+        if !crate::cloud::available(app) {
+            return Err(crate::cloud::UNAVAILABLE.into());
+        }
+        app.cloud_page = Some(crate::cloud::CloudPage::SaveAs);
+        return Ok(json!({"page": "saveAs"}));
+    }
+    // Cloud: Save routes back when the project came from CollabCraft.
+    if id == "file.save" && no_params(&params) && crate::cloud::has_target(app) {
+        return crate::cloud::save(app);
+    }
     if matches!(id, "effects.copyPresetsFolderPath" | "mediaBrowser.copySourcePath") {
         return frontend(app, ctx, id, params);
     }
@@ -877,8 +898,11 @@ pub(crate) fn run_engine(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str
     let mut r = app.session.execute(id, params).map_err(|e| e.to_string());
     if let Err(e) = &r {
         app.ui.status = e.clone();
-    } else if COPY_COMMANDS.contains(&id) && app.session.state.text_edit.is_none() {
-        ctx.copy_text(clipboard_note(&app.session));
+    } else {
+        crate::cloud::clear_origin_after_replace(app, id);
+        if COPY_COMMANDS.contains(&id) && app.session.state.text_edit.is_none() {
+            ctx.copy_text(clipboard_note(&app.session));
+        }
     }
     let events = app.session.drain_events();
     for (index, ev) in events.into_iter().enumerate() {
@@ -1634,7 +1658,7 @@ pub(crate) fn entry_enabled(app: &EffectcraftApp, e: &MenuEntry) -> bool {
 
 /// Every menu entry, flattened with its submenu path.
 pub fn menu_items(app: &EffectcraftApp) -> Vec<MenuItem> {
-    effectcraft_engine::menus::entries()
+    let mut items: Vec<MenuItem> = effectcraft_engine::menus::entries()
         .into_iter()
         .map(|(path, e)| MenuItem {
             id: e.command.clone(),
@@ -1645,7 +1669,41 @@ pub fn menu_items(app: &EffectcraftApp) -> Vec<MenuItem> {
             checked: entry_checked(app, e),
             params: e.params.clone(),
         })
-        .collect()
+        .collect();
+    cloud_menu(&mut items, app);
+    items
+}
+
+/// File ▸ Open from cloud… / Save as to cloud… when CollabCraft is connected.
+fn cloud_menu(items: &mut Vec<MenuItem>, app: &EffectcraftApp) {
+    if !crate::cloud::available(app) {
+        return;
+    }
+    let Some(open_at) = items.iter().position(|it| it.id == "file.open") else { return };
+    let path = vec!["File".into()];
+    items.splice(
+        open_at + 1..open_at + 1,
+        [
+            MenuItem {
+                id: "file.cloudOpen".into(),
+                label: "Open from cloud…".into(),
+                path: path.clone(),
+                shortcut: None,
+                enabled: true,
+                checked: None,
+                params: json!({}),
+            },
+            MenuItem {
+                id: "file.cloudSaveAs".into(),
+                label: "Save as to cloud…".into(),
+                path,
+                shortcut: None,
+                enabled: true,
+                checked: None,
+                params: json!({}),
+            },
+        ],
+    );
 }
 
 /// Shortcut text in this OS's notation (`⇧⌘K` on macOS, `Ctrl+Shift+K` elsewhere).
@@ -2127,6 +2185,18 @@ fn menu_nodes(
                 if r.clicked() {
                     *clicked = Some((e.command.clone(), e.params.clone()));
                     ui.close();
+                }
+                // CollabCraft cloud Open/Save sit under File, after Open Project.
+                if e.command == "file.open" && crate::cloud::available(app) {
+                    for (id, label) in [("file.cloudOpen", "Open from cloud…"), ("file.cloudSaveAs", "Save as to cloud…")] {
+                        let r = ui.add_enabled(true, egui::Button::new((gutter(false), label)));
+                        app.auto.add(&format!("menu.{id}"), r.rect, label);
+                        nav.entry(ui, depth, &r, false);
+                        if r.clicked() {
+                            *clicked = Some((id.into(), json!({})));
+                            ui.close();
+                        }
+                    }
                 }
             }
         }

@@ -10,6 +10,7 @@
 pub mod audio;
 pub mod automation;
 pub mod bench;
+pub mod cloud;
 pub mod color_picker;
 pub mod control;
 pub mod credits;
@@ -171,6 +172,9 @@ pub struct Hooks {
     /// Tells the user the graphics device was lost and the window is closing, once. `saved` is
     /// the auto-save of unsaved changes (`None`: nothing was unsaved), its path or why it failed.
     pub device_lost: Option<Box<dyn Fn(Option<Result<String, String>>)>>,
+    /// Opens a URL in the system browser (device-flow sign-in, help links). Falls back to
+    /// egui's viewport command when `None`.
+    pub open_url: Option<Box<dyn Fn(&str)>>,
 }
 
 impl Hooks {
@@ -323,6 +327,12 @@ pub struct EffectcraftApp {
     pub(crate) pointer_comp: Option<[f32; 2]>,
     pub(crate) dialog_state: panels::dialogs::DialogState,
     pub integrated_titlebar: bool,
+    /// Cloud storage, sharing and presence state for the CollabCraft integration.
+    pub cloud: craft_ui::cloud::CloudFiles,
+    pub share: craft_ui::share::ShareDialog,
+    pub presence: craft_ui::presence::PresenceBar,
+    /// Cloud Open / Save As page from the File menu, if any.
+    pub cloud_page: Option<cloud::CloudPage>,
     /// Audio preview while playing (audio clock drives playback).
     pub audio: Option<audio::AudioPlayback>,
     /// Audio scrubbing's open output (Ctrl/Cmd-drag the current time, `playback.scrubAudio`).
@@ -366,6 +376,12 @@ struct SavedWorkspaces {
 }
 
 impl EffectcraftApp {
+    /// The egui time of the last rendered frame (seconds since startup). Used by cloud
+    /// integration and any other code that needs a monotonic clock without a `ctx` reference.
+    pub(crate) fn frame_time(&self) -> f64 {
+        self.last_time
+    }
+
     pub fn new(session: Session) -> Self {
         let mut ui = UiState::default();
         let workspace_store = workspace_state::WorkspaceStore::load(session.config.as_deref(), &mut ui);
@@ -413,6 +429,10 @@ impl EffectcraftApp {
             pointer_comp: None,
             dialog_state: Default::default(),
             integrated_titlebar: false,
+            cloud: craft_ui::cloud::CloudFiles::new(),
+            share: craft_ui::share::ShareDialog::new(),
+            presence: craft_ui::presence::PresenceBar::new().badges_only(),
+            cloud_page: None,
             audio: None,
             scrub: None,
             meter: Default::default(),
@@ -1658,6 +1678,10 @@ impl EffectcraftApp {
         }
         self.run_script_tasks(&ctx);
         self.apply_prefs(&ctx);
+        // Drive cloud Open/Save/Share jobs and deliver their answers.
+        craft_ui::cloud::pump(self, &ctx);
+        crate::cloud::conflict_modal(self, &ctx);
+        crate::cloud::modal(self, &ctx);
         self.handle_events(&ctx);
         panels::unsaved::on_close_requested(self, &ctx);
         let title = panels::unsaved::window_title(self);

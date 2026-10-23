@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 craft-ui = { workspace = true }
+craft-cloud = { workspace = true }
 effectcraft-time = { workspace = true }
 effectcraft-geom = { workspace = true }
 effectcraft-color = { workspace = true }

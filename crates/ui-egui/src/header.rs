@@ -250,6 +250,19 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     rx -= 10.0;
     p.line_segment([pos2(rx, cy - 10.0), pos2(rx, cy + 10.0)], Stroke::new(1.0, t.separator));
     rx -= 10.0;
+    // Cloud account badge and presence. Only drawn when a service is configured so a build
+    // without CollabCraft shows nothing cloud-shaped at all. Width is responsive: if the toolbar
+    // is too narrow (many tool-option controls on the left) the badge shrinks rather than
+    // overlapping the tools.
+    if crate::cloud::available(app) {
+        let cloud_width = (rx - x - 60.0).clamp(0.0, 180.0);
+        if cloud_width > 32.0 {
+            let cloud_rect = Rect::from_min_max(pos2(rx - cloud_width, cy - 13.0), pos2(rx, cy + 13.0));
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(cloud_rect).layout(egui::Layout::right_to_left(egui::Align::Center)));
+            crate::cloud::who(app, &mut child);
+            rx -= cloud_width + 4.0;
+        }
+    }
     // Workspace tabs (right to left), with a » menu of all.
     let more = Rect::from_min_max(pos2(rx - 20.0, cy - 11.0), pos2(rx, cy + 11.0));
     let mresp = ui.interact(more, egui::Id::new("ws-more"), Sense::click());

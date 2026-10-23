@@ -184,6 +184,17 @@ fn install_hooks(app: &mut EffectcraftApp) {
 #[wasm_bindgen]
 pub async fn start(canvas_id: String) -> Result<(), JsValue> {
     eframe::WebLogger::init(log::LevelFilter::Info).ok();
+    // Keyed invite: CollabCraft redeemed the link, set a guest cookie, and sent us here with
+    // `?invite`. Ask once before the canvas starts so a dead link is a page the recipient can
+    // read, not an empty EffectCraft with no reason for it.
+    let mut invite = match craft_cloud_client::invite::arrive().await {
+        craft_cloud_client::invite::Arrival::Ordinary => None,
+        craft_cloud_client::invite::Arrival::Refused(reason) => {
+            craft_cloud_client::invite::refuse(&reason);
+            return Ok(());
+        }
+        craft_cloud_client::invite::Arrival::Invited(invitation) => Some(invitation),
+    };
     let doc = web_sys::window().and_then(|w| w.document()).ok_or("no document")?;
     let canvas: web_sys::HtmlCanvasElement = doc.get_element_by_id(&canvas_id).ok_or("no canvas")?.dyn_into()?;
     let empty = query_flag("empty");
@@ -235,9 +246,11 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
                 session.load_settings();
                 let recovery = session.begin_recovery();
                 // `?empty`: a blank project; `?demo`: the demo project; otherwise the last visit's
-                // project (the demo on a first visit).
-                let restored = !empty && !query_flag("demo") && persist::restore(&mut session);
-                if !restored && !empty {
+                // project (the demo on a first visit). A keyed invite replaces all of that: the
+                // shared project is the document, not the last local session.
+                let invited = invite.is_some();
+                let restored = !invited && !empty && !query_flag("demo") && persist::restore(&mut session);
+                if !invited && !restored && !empty {
                     let _ = session.execute("file.openDemoProject", json!({}));
                 }
                 api::set_info("restored", json!(restored));
@@ -246,10 +259,21 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
                 let mut app = EffectcraftApp::new(session);
                 app.set_gpu_failure_bridge(gpu_failures);
                 app.ui.start_screen = home;
-                if let Some(r) = recovery.filter(|r| !restored && r.autosave.is_some()) {
+                if let Some(r) = recovery.filter(|r| !invited && !restored && r.autosave.is_some()) {
                     app.offer_recovery(r);
                 }
                 install_hooks(&mut app);
+                // Cloud: wire the CollabCraft backend for same-origin cookie auth, and the
+                // share dialog. Both are always available when served from CollabCraft.
+                // Do not call cloud::start here: the Account probe must not redirect to login
+                // before the workbook renders (same as VectorCraft #2011).
+                app.cloud.connect(crate::cloud::Service::new(cc.egui_ctx.clone()));
+                if let Some(share) = collabcraft_share::CollabCraft::from_env() {
+                    app.share.connect(share.for_app("effectcraft"));
+                }
+                if let Some(invitation) = invite.take() {
+                    open_invite(&mut app, invitation);
+                }
                 // Viewer frames render in frame workers (`?frameworkers=N`, 0 or `?noworkers`:
                 // on the page's thread), each on its own WebGPU device where the browser has
                 // WebGPU in workers (`?nogpuworkers`: their CPU).
@@ -262,7 +286,7 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
                 app = app.with_control(rx);
                 let backend = cc.wgpu_render_state.as_ref().map(|rs| format!("{:?}", rs.adapter.get_info().backend));
                 api::set_info("backend", json!(backend));
-                Ok(Box::new(WebApp { app, persist: !empty }))
+                Ok(Box::new(WebApp { app, persist: !empty && !invited }))
             }),
         )
         .await?;
@@ -271,4 +295,33 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
         el.remove();
     }
     Ok(())
+}
+
+/// Open the project a keyed invite handed this page.
+///
+/// The bytes, name and permission come from CollabCraft's invite routes. Without
+/// this step the handoff lands on `/effectcraft/?invite` and the recipient only
+/// ever sees the demo or a blank project.
+fn open_invite(app: &mut EffectcraftApp, invitation: craft_cloud_client::invite::Invitation) {
+    let name = invitation.name.clone();
+    match effectcraft_ui_egui::cloud::CloudApp::open_bytes(app, &name, invitation.document.clone()) {
+        Ok(Some(_)) => {
+            app.cloud.as_guest(invitation.recipient.clone(), invitation.read_only());
+            let mode = if invitation.read_only() { " (view only)" } else { "" };
+            let who = if invitation.recipient.is_empty() { String::new() } else { format!(" (shared with {})", invitation.recipient) };
+            let mut status = format!("Opened \"{name}\"{mode}{who}");
+            if let Err(e) = invitation.join() {
+                log::warn!("invite relay join failed: {e}");
+                status.push_str(&format!(" (live sharing did not start: {e})"));
+            }
+            app.ui.status = status;
+        }
+        Ok(None) => {
+            app.ui.status = format!("Shared \"{name}\" needs a choice before it opens");
+        }
+        Err(e) => {
+            log::error!("invite open failed: {e}");
+            craft_cloud_client::invite::refuse(&format!("The shared project could not be opened. {e}"));
+        }
+    }
 }
