@@ -345,7 +345,7 @@ fn content_aware_fill_of_a_long_range_is_filled_in_windows() {
     assert_eq!(fill_window(96, 64, 1), 2, "never fewer than two frames");
     assert!(fill_window(1920, 1080, 0) < 30, "the default memory doesn't hold a second of 1080p at once");
     let lf = crate::commands::scene_detect::LayerFrames::new(&s, cid, clip);
-    let (mut done, mut messages) = (vec![], 0);
+    let (mut done, mut messages) = (vec![], Vec::<String>::new());
     let files = effectcraft_render::passes::block_on(run_plan(
         &plan,
         &lf.project,
@@ -358,9 +358,11 @@ fn content_aware_fill_of_a_long_range_is_filled_in_windows() {
             done.push((d, t));
             true
         },
-        &mut |_| messages += 1,
+        &mut |m| messages.push(m.to_string()),
     ))
     .unwrap();
+    // Windows starting at frames 0, 2, 4, 6, 8 and 10.
+    assert_eq!(messages.iter().filter(|m| *m == "Filling").count(), 6, "{messages:?}");
     assert_eq!(files.len(), 12, "every frame once");
     for (k, f) in files.iter().enumerate() {
         assert!(f.ends_with(&format!("fill_{k:05}.png")), "{f}");
@@ -369,6 +371,27 @@ fn content_aware_fill_of_a_long_range_is_filled_in_windows() {
     assert_eq!(done.last(), Some(&(36, 36)));
     assert_clean_fill(&files);
     apply_plan(&mut s, &plan, files).unwrap();
+    // A plan without frames is an error, not an empty fill (adding its layer read the first
+    // frame's time and file).
+    let empty = crate::commands::content_fill::FillPlan { times: vec![], ..plan };
+    let r = effectcraft_render::passes::block_on(run_plan(
+        &empty,
+        &lf.project,
+        lf.footage.as_ref(),
+        lf.expr.as_deref(),
+        &lf.cache,
+        s.services.as_ref(),
+        None,
+        &mut |_, _| true,
+        &mut |_| {},
+    ));
+    assert!(r.is_err(), "{r:?}");
+    // So is a work area inside one frame: from 60 % into frame 0 (the nearest frame start is
+    // frame 1) to 90 %.
+    let frame = FrameRate::new(FPS as i64, 1).frame_duration().0;
+    Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().work_area = (Tick(frame * 6 / 10), Tick(frame * 9 / 10));
+    let e = make_plan(&mut s, &json!({"layer": clip.0})).unwrap_err().to_string();
+    assert!(e.contains("no whole frame"), "{e}");
     std::fs::remove_dir_all(&out).unwrap();
 }
 

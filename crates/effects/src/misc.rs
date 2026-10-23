@@ -774,9 +774,13 @@ mod tests {
             img.set(w / 2, w / 2, [1.0; 4]);
             img
         };
-        let vals = [("radius", num(3000.0)), ("iterations", num(50.0))];
+        // Many passes grow the layer by r √(3 it) (Radius 20 and 50 Iterations: 245 px, not
+        // 1000) and keep nearly all the light.
+        let vals = [("radius", num(20.0)), ("iterations", num(50.0))];
         let out = run_fx("ec.blur.fastbox", &vals, dot(8), 0.0, EffectEnv::default());
-        assert_eq!((out.img.width, out.img.height), (8 + 2 * 4097, 8 + 2 * 4097));
+        assert_eq!((out.img.width, out.img.height), (8 + 2 * 246, 8 + 2 * 246));
+        let total: f32 = out.img.data.iter().map(|p| p[3]).sum();
+        assert!((total - 1.0).abs() < 1e-2, "{total}");
         // A moderate blur keeps all its light.
         let vals = [("radius", num(4.0)), ("iterations", num(10.0))];
         let out = run_fx("ec.blur.fastbox", &vals, dot(9), 0.0, EffectEnv::default());

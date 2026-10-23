@@ -223,6 +223,9 @@ pub(crate) async fn run_plan(
     let ctx0 = EvalCtx { expr, ..EvalCtx::new(project, cid, comp, Tick::ZERO) };
     let times = &plan.times;
     let count = times.len();
+    if count == 0 {
+        return Err("the range holds no whole frame to fill".into());
+    }
     let n = count as u64;
     // The reference frame (a complete picture of one frame), at the filled frame nearest it.
     let mut reference = None;
@@ -344,6 +347,9 @@ pub(crate) fn make_plan(s: &mut Session, p: &Value) -> Result<FillPlan> {
     }
     let (fa, fb) = (fr.frame_at(fr.snap_nearest(a)), fr.frame_at(b - Tick(1)));
     let times: Vec<Tick> = (fa..=fb).map(|f| fr.tick_of(f)).collect();
+    if times.is_empty() {
+        return Err(bad(c, "the range holds no whole frame to fill"));
+    }
     let opts = FillOpts {
         method: FillMethod::from_name(&st.method).unwrap_or_default(),
         lighting: lighting(&st.lighting_correction).unwrap_or(0.0),
