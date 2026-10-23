@@ -429,6 +429,36 @@ fn plan_prerenders_rendered_only_layers() {
     assert!(plan_prerender(&p, cid, &ExportOptions { prerender: PrerenderMode::None, ..Default::default() }).is_empty());
 }
 
+/// A Layer Styles group that doesn't change the picture (Blending Options at their defaults, or
+/// every style switched off) keeps a clip a clip; Fill Opacity or a style that is on pre-renders it.
+#[test]
+fn only_layer_styles_that_change_pixels_prerender() {
+    use effectcraft_project::styles::{self as st, GROUP};
+    let opts = ExportOptions::default();
+    let reason = |edit: &dyn Fn(&mut Project, &mut Layer)| {
+        let (mut p, cid) = ae_project();
+        let c = p.comp(cid).unwrap();
+        let gl = c.global_light.clone();
+        let mut l = c.layers.iter().find(|l| l.name == "clip a").unwrap().clone();
+        st::add_blending_options(&mut l, &mut effectcraft_project::build::Ids(&mut p.next_id), &gl).unwrap();
+        edit(&mut p, &mut l);
+        let lid = l.id;
+        *p.comp_mut(cid).unwrap().layers.iter_mut().find(|x| x.id == lid).unwrap() = l;
+        prerender_reason(&p, cid, lid, &opts)
+    };
+    let fill = |l: &mut Layer, v: f64| l.props.prop_mut(&format!("{GROUP}/blendingOptions/advancedBlending/fillOpacity")).unwrap().value = Value::Scalar(v);
+    assert_eq!(reason(&|_, _| {}), None, "Blending Options at their defaults");
+    assert_eq!(reason(&|_, l| fill(l, 40.0)).as_deref(), Some("layer styles"));
+    let style = |on: bool| {
+        move |p: &mut Project, l: &mut Layer| {
+            let gl = effectcraft_project::styles::GlobalLight::default();
+            st::add_style(l, &mut effectcraft_project::build::Ids(&mut p.next_id), "dropShadow", &gl, on).unwrap();
+        }
+    };
+    assert_eq!(reason(&style(false)), None, "a style switched off");
+    assert_eq!(reason(&style(true)).as_deref(), Some("layer styles"));
+}
+
 #[test]
 fn export_then_reimport_keeps_the_timeline() {
     let (p, cid) = ae_project();

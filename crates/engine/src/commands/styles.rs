@@ -25,13 +25,23 @@ fn add_styles(s: &mut Session, p: &Value, cmd: &str, styles: &[&str], enabled: b
     if ids.is_empty() {
         return Err(bad(cmd, "no layer that takes layer styles (footage, solid, precomp, text or shape layer)"));
     }
-    let uids = s.edit(label, None, |proj, state| {
+    let uids = s.edit(label, super::merge_p(p), |proj, state| {
         let gl = proj.comp(cid).ok_or(EngineError::NoComp)?.global_light.clone();
         let mut out = vec![];
         let mut sel = vec![];
         for lid in &ids {
             let mut next = proj.next_id;
             let l = layer_mut(proj, cid, *lid)?;
+            // No style: Blending Options alone (the Layer Style dialog's first change on a layer
+            // without styles).
+            if styles.is_empty() {
+                let uid = st::add_blending_options(l, &mut Ids(&mut next), &gl).ok_or_else(|| bad(cmd, "no Blending Options"))?;
+                if let Some(g) = l.props.sub_mut(GROUP) {
+                    g.enabled = true;
+                }
+                out.push(json!({"layer": lid.0, "style": st::BLENDING, "uid": uid}));
+                sel.push((*lid, uid));
+            }
             for id in styles {
                 let had = l.layer_styles().and_then(|g| g.sub(id)).is_some();
                 let uid = st::add_style(l, &mut Ids(&mut next), id, &gl, enabled).ok_or_else(|| bad(cmd, format!("unknown style `{id}`")))?;
@@ -58,6 +68,9 @@ fn add_styles(s: &mut Session, p: &Value, cmd: &str, styles: &[&str], enabled: b
 
 fn add(s: &mut Session, p: &Value) -> Result<Value> {
     let name = str_p(p, "style").ok_or_else(|| bad("layer.style.add", "missing `style` (e.g. dropShadow or \"Drop Shadow\")"))?;
+    if name.eq_ignore_ascii_case(st::BLENDING) || name.eq_ignore_ascii_case("Blending Options") {
+        return add_styles(s, p, "layer.style.add", &[], true, "Blending Options");
+    }
     let id = st::style_id(name)
         .ok_or_else(|| bad("layer.style.add", format!("unknown style `{name}`; one of {}", STYLES.iter().map(|s| s.0).collect::<Vec<_>>().join(", "))))?;
     let label = STYLES.iter().find(|s| s.0 == id).map(|s| s.1).unwrap_or(id);
@@ -139,8 +152,9 @@ fn remove(s: &mut Session, p: &Value) -> Result<Value> {
                 return Err(bad("layer.style.remove", "Blending Options can't be removed"));
             }
             g.children.retain(|c| c.uid() != uid);
-            // The last style gone removes the Layer Styles group, as in AE.
-            if g.children.iter().all(|c| c.match_id() == st::BLENDING) {
+            // The last style gone removes the Layer Styles group, as in AE, unless its Blending
+            // Options were changed (they can be edited with no style since #1389).
+            if g.children.iter().all(|c| c.match_id() == st::BLENDING) && g.sub(st::BLENDING).is_none_or(st::blending_is_default) {
                 l.props.children.retain(|c| c.match_id() != GROUP);
             }
         }
@@ -224,7 +238,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Add Layer Style",
             [],
             None,
-            "{style: dropShadow|innerShadow|outerGlow|innerGlow|bevelEmboss|satin|colorOverlay|gradientOverlay|stroke (or display name), layers?}",
+            "{style: dropShadow|innerShadow|outerGlow|innerGlow|bevelEmboss|satin|colorOverlay|gradientOverlay|stroke (or display name), or blendingOptions (the Layer Styles group with Blending Options only), layers?, merge?}",
             has_layers,
             add
         ),
