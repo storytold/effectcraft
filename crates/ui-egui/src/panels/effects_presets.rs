@@ -276,7 +276,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
     let sr = Rect::from_min_size(rect.min + vec2(8.0, 8.0), vec2(rect.width() - 44.0, 24.0));
     let mut q = app.ui.effects_search.clone();
-    widgets::search_field(ui, sr, &mut q, "Search effects and presets", &t);
+    widgets::search_field(ui, sr, &mut q, crate::i18n::tr("Search effects and presets"), &t);
     app.ui.effects_search = q.clone();
     app.auto.add("effects.search", sr, "Search");
     // Contents menu.

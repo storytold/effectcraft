@@ -69,7 +69,7 @@ pub fn home_tab(app: &mut EffectcraftApp, ui: &mut egui::Ui, area: Rect) {
     // Save the open project as a user template.
     let can_save = app.session.project.comps().next().is_some();
     let sr = Rect::from_min_size(pos2(area.max.x - 210.0, y - 4.0), vec2(210.0, 28.0));
-    let save = widgets::text_button(ui, sr, "Save Current as Template…", false, &t, egui::Id::new("home-templates-save")).clicked();
+    let save = widgets::text_button(ui, sr, crate::i18n::tr("Save Current as Template…"), false, &t, egui::Id::new("home-templates-save")).clicked();
     app.auto.add("home.templates.saveCurrent", sr, "Save Current as Template…");
     if save {
         if can_save {

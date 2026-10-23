@@ -278,7 +278,7 @@ pub fn panel_menu_popup(app: &mut EffectcraftApp, ui: &mut egui::Ui) {
                     }
                 }
                 _ => {
-                    ui.label(egui::RichText::new(panel.title()).weak());
+                    ui.label(egui::RichText::new(crate::i18n::label(app, "window.panel", panel.title())).weak());
                 }
             }
         });
