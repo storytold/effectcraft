@@ -40,7 +40,11 @@ fn ffmpeg_fixture(name: &str, args: &[&str]) -> Option<PathBuf> {
     let tmp = out.with_file_name(format!("tmp-{}-{:?}.{ext}", std::process::id(), std::thread::current().id()).replace(['(', ')'], ""));
     let st = Command::new("ffmpeg").args(["-hide_banner", "-loglevel", "error", "-y"]).args(args).arg(&tmp).status().expect("run ffmpeg");
     assert!(st.success(), "ffmpeg failed for {name}");
-    std::fs::rename(&tmp, &out).expect("rename");
+    if std::fs::rename(&tmp, &out).is_err() {
+        // Another test made it first; on Windows the rename fails while that test has it open.
+        let _ = std::fs::remove_file(&tmp);
+        assert!(out.exists(), "rename {} to {name} failed", tmp.display());
+    }
     Some(out)
 }
 

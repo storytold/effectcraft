@@ -212,3 +212,58 @@ fn item_users_count_layers_in_every_comp() {
     assert!(p.item_users(unused).is_empty());
     assert!(p.item_users(main).is_empty());
 }
+
+/// A project of `n` empty comps; `links` adds a precomp layer of comp `b` inside comp `a`
+/// (indexes into the returned ids).
+fn comp_graph(n: usize, links: &[(usize, usize)]) -> (Project, Vec<crate::ItemId>) {
+    let mut p = Project::default();
+    let ids: Vec<crate::ItemId> = (0..n)
+        .map(|i| {
+            p.add_item(
+                &format!("C{i}"),
+                effectcraft_color::Label::None,
+                None,
+                ItemKind::Comp(Comp::new(8, 8, FrameRate::FPS_25, Tick::from_seconds_f64(1.0)).into()),
+            )
+        })
+        .collect();
+    for &(a, b) in links {
+        let outer = p.comp(ids[a]).unwrap().clone();
+        let l = build::layer(&mut p, &outer, "pre", LayerSource::Comp { item: ids[b] }, (8, 8), None);
+        let ItemKind::Comp(c) = &mut p.item_mut(ids[a]).unwrap().kind else { panic!("comp") };
+        std::sync::Arc::make_mut(c).layers.push(l);
+    }
+    (p, ids)
+}
+
+#[test]
+fn comp_contains_ends_on_cycles_long_chains_and_shared_precomps() {
+    // A ⇄ B cycle, C unrelated: the walk used to recurse until the stack ran out (#1237).
+    let (p, c) = comp_graph(3, &[(0, 1), (1, 0)]);
+    assert!(!p.comp_contains(c[0], c[2]));
+    assert!(p.comp_contains(c[0], c[1]) && p.comp_contains(c[1], c[0]));
+    // A comp nesting itself.
+    let (p, c) = comp_graph(2, &[(0, 0)]);
+    assert!(!p.comp_contains(c[0], c[1]));
+    assert!(p.comp_contains(c[0], c[0]));
+    // A target reached through a cycle.
+    let (p, c) = comp_graph(3, &[(0, 1), (1, 0), (1, 2)]);
+    assert!(p.comp_contains(c[0], c[2]));
+    assert!(!p.comp_contains(c[2], c[0]));
+    // 40 levels of diamonds: 2^40 paths, each comp visited once.
+    let mut links = vec![];
+    for i in 0..40 {
+        let (top, l, r, bottom) = (i * 3, i * 3 + 1, i * 3 + 2, i * 3 + 3);
+        links.extend([(top, l), (top, r), (l, bottom), (r, bottom)]);
+    }
+    let (p, c) = comp_graph(121, &links);
+    let t0 = std::time::Instant::now();
+    assert!(p.comp_contains(c[0], c[120]));
+    assert!(!p.comp_contains(c[120], c[0]));
+    assert!(t0.elapsed() < std::time::Duration::from_secs(1), "{:?}", t0.elapsed());
+    // A chain 20 000 comps deep (a deep recursion's stack frames).
+    let n = 20_000;
+    let (p, c) = comp_graph(n, &(0..n - 1).map(|i| (i, i + 1)).collect::<Vec<_>>());
+    assert!(p.comp_contains(c[0], c[n - 1]));
+    assert!(!p.comp_contains(c[n - 1], c[0]));
+}

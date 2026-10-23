@@ -1478,11 +1478,32 @@ impl Project {
     }
     /// Whether comp `inner` is (transitively) nested inside comp `outer` (to prevent cycles).
     pub fn comp_contains(&self, outer: ItemId, inner: ItemId) -> bool {
+        // A walk with a stack and a visited set rather than recursion (#1237): a damaged project
+        // may hold a precomp cycle that doesn't pass `inner` (recursion never ended), a long
+        // chain must not use up the call stack, and comps shared by many paths are visited once
+        // (recursion re-walked them for every path).
         if outer == inner {
             return true;
         }
-        let Some(c) = self.comp(outer) else { return false };
-        c.layers.iter().any(|l| matches!(l.source, LayerSource::Comp { item } if self.comp_contains(item, inner)))
+        let mut seen = std::collections::HashSet::new();
+        let mut stack = vec![outer];
+        while let Some(id) = stack.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            let Some(c) = self.comp(id) else { continue };
+            for l in &c.layers {
+                if let LayerSource::Comp { item } = l.source {
+                    if item == inner {
+                        return true;
+                    }
+                    if !seen.contains(&item) {
+                        stack.push(item);
+                    }
+                }
+            }
+        }
+        false
     }
     /// Make sure `next_id` exceeds every id in the project (after loading or merging).
     pub fn fix_next_id(&mut self) {

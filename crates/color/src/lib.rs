@@ -141,7 +141,11 @@ pub fn rgb_to_hsv(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
 }
 
 pub fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (f32, f32, f32) {
-    let h6 = h.rem_euclid(1.0) * 6.0;
+    let mut h6 = h.rem_euclid(1.0) * 6.0;
+    // In f32, a tiny negative hue wraps to exactly 1.0; treat it as 0.
+    if h6 >= 6.0 {
+        h6 = 0.0;
+    }
     let i = h6.floor();
     let f = h6 - i;
     let p = v * (1.0 - s);
@@ -251,6 +255,12 @@ impl Label {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hsv_to_rgb_tiny_negative_hue_is_red() {
+        let (r, g, b) = hsv_to_rgb(-1e-9, 1.0, 1.0);
+        assert!(r > 0.99 && g < 0.01 && b < 0.01, "{r} {g} {b}");
+    }
 
     #[test]
     fn srgb_roundtrip() {

@@ -1585,3 +1585,41 @@ fn layer_property_resolves_transform_and_source_text_shortcuts() {
     let (_, c) = comp_named(&s, "x");
     assert_eq!(layer(c, "s").props.prop("transform/opacity").unwrap().value, KV::Scalar(25.0));
 }
+
+/// #1936: an array whose length doesn't match the property's dimension is an error in After
+/// Effects, not a value to truncate or broadcast. Two values for a 3-D property stay legal.
+#[test]
+fn set_value_rejects_an_array_of_the_wrong_dimension() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"
+        var c = app.project.items.addComp("Dims", 640, 360, 1, 2, 30);
+        var l = c.layers.addSolid([1, 0, 0], "s", 640, 360, 1);
+        var ramp = l.property("ADBE Effect Parade").addProperty("ADBE Ramp").property("ADBE Ramp-0001");
+        function attempt(f) { try { f(); return "no error"; } catch (e) { return e.message; } }
+        var before = "" + ramp.value;
+        var tooMany = attempt(function () { ramp.setValue([1, 2, 3]); });
+        var tooFew = attempt(function () { ramp.setValue([1]); });
+        var untouched = "" + ramp.value;
+        ramp.setValue([7, 8]);
+        var keyed = attempt(function () { ramp.setValueAtTime(0, [1, 2, 3, 4]); });
+        // A 3-D property still takes two values, as it does in After Effects: z stays 0.
+        l.property("Position").setValue([120, 34]);
+        [tooMany, tooFew, untouched === before, "" + ramp.value, keyed, "" + l.property("Position").value]
+        "#,
+    );
+    assert_eq!(
+        o.result,
+        json!([
+            "Array is not of the correct dimension",
+            "Array is not of the correct dimension",
+            true,
+            "7,8",
+            "Array is not of the correct dimension",
+            "120,34,0"
+        ])
+    );
+    let (_, c) = comp_named(&s, "Dims");
+    assert_eq!(layer(c, "s").props.prop("transform/position").unwrap().value, KV::Vec3([120.0, 34.0, 0.0]));
+}

@@ -840,7 +840,7 @@ function __uiJson(c, inherited) {
     o.value = Number(c.value) || 0;
     o.min = Number(c.minvalue) || 0;
     o.max = Number(c.maxvalue);
-    if (!(o.max === o.max)) o.max = 100;
+    if (Number.isNaN(o.max)) o.max = 100;
   }
   if (c.items) {
     o.items = c.items.map(function (it) { return String(it.text); });

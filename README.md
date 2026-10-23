@@ -8,6 +8,10 @@
 </p>
 
 
+<p align="center">
+  <img src="assets/app-icon/hicolor/256x256/apps/ai.storyteller.effectcraft.png" width="128" height="128" alt="EffectCraft icon: an engraved unicorn on a pink tile">
+</p>
+
 <h1 align="center">EffectCraft</h1>
 
 <p align="center">

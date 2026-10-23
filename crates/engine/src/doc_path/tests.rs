@@ -34,9 +34,11 @@ impl Services for Recording {
     }
 }
 
-/// Probes every file as a still.
+/// Probes every file as a still. Only the Unix part of the test below imports files.
+#[cfg(unix)]
 struct Stills;
 
+#[cfg(unix)]
 impl crate::Importer for Stills {
     fn probe(&self, path: &str) -> Result<Footage, String> {
         if !std::path::Path::new(path).is_file() {

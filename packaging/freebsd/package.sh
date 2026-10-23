@@ -46,6 +46,14 @@ echo "==> EffectCraft $VERSION for FreeBSD $ARCH"
 
 # The release VM has 12 GB; full parallelism on the biggest crates runs it out of memory.
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}"
+# The aarch64 release VM is emulated (no rustup toolchain for this tier-3 target, so it builds
+# natively under QEMU). With one codegen unit and thin LTO the largest crates each optimize on a
+# single emulated core and the job runs past its 5-hour limit, so trade a little runtime speed for
+# parallel codegen there. x86_64 keeps the workspace's release profile.
+if [ "$ARCH" = aarch64 ]; then
+  export CARGO_PROFILE_RELEASE_CODEGEN_UNITS="${CARGO_PROFILE_RELEASE_CODEGEN_UNITS:-16}"
+  export CARGO_PROFILE_RELEASE_LTO="${CARGO_PROFILE_RELEASE_LTO:-off}"
+fi
 if [ "$SKIP_BUILD" = 0 ]; then
   (cd "$ROOT" && cargo build --release --locked -p effectcraft -p effectcraft-cli)
 fi
