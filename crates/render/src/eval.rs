@@ -60,7 +60,13 @@ impl<'a> EvalCtx<'a> {
             let y = tr.get("positionY").map(|p| self.value(layer, p).as_f64()).unwrap_or(0.0);
             return Value::Vec3([self.value(layer, px).as_f64(), y, z]);
         }
-        let lt = layer.layer_time(self.time);
+        self.value_at_layer_time(layer, prop, layer.layer_time(self.time))
+    }
+    /// [`Self::value`] with the keyframes read at layer time `lt` exactly, rather than at the
+    /// context time mapped through the layer's start and stretch (which rounds under a
+    /// fractional stretch: a Hold key at `lt` could read its previous value). An expression
+    /// still runs at the context time.
+    pub fn value_at_layer_time(&self, layer: &Layer, prop: &Property, lt: Tick) -> Value {
         let v = prop.value_at(lt);
         if prop.has_expression()
             && let Some(h) = self.expr
