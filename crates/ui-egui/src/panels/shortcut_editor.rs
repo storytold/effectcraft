@@ -6,18 +6,24 @@
 //! that combination: purple for application-wide commands, green for panel-specific ones, both
 //! when a key has each. Clicking a key lists everything bound to it. Bottom: every bindable
 //! command with its shortcuts; select one, then record keys (press them in the shortcut field)
-//! or assign the key selected on the keyboard. Conflicts are shown before assigning.
+//! or assign the key selected on the keyboard. Conflicts are shown before assigning; clicking one
+//! selects the command it is with. A command dragged onto a key of the keyboard, or a key dragged
+//! onto a command, assigns that key (with the toggled modifiers). Undo takes back the editor's
+//! last change and Clear removes the selected command's shortcuts. Double presses (`AA`, `UU`:
+//! a chord twice in quick succession) are shortcuts like any other: listed, shown on their key,
+//! and recorded by pressing the chord twice.
 //!
 //! All changes go through the `shortcuts.*` engine commands, so agents can do the same.
 //! Automation ids: `shortcuts.preset`, `shortcuts.search`, `shortcuts.mod.<ctrl|cmd|alt|shift>`,
 //! `shortcuts.key.<Key>`, `shortcuts.row.<n>`, `shortcuts.record`, `shortcuts.assign`,
-//! `shortcuts.removeKey.<n>`, `shortcuts.resetCommand`, `shortcuts.duplicate`,
+//! `shortcuts.removeKey.<n>`, `shortcuts.resetCommand`, `shortcuts.conflict.<n>`,
+//! `shortcuts.undo`, `shortcuts.clear`, `shortcuts.duplicate`,
 //! `shortcuts.rename`, `shortcuts.delete` (asks first: `dialog.deletePreset.delete`,
 //! `dialog.deletePreset.cancel`), `shortcuts.import`, `shortcuts.export`,
 //! `shortcuts.resetPreset`, `shortcuts.close`.
 
 use crate::i18n::{tr, tr_args};
-use effectcraft_engine::shortcuts::{APP_SCOPE, Bindable, DEFAULT_PRESET, normalize};
+use effectcraft_engine::shortcuts::{APP_SCOPE, Bindable, DEFAULT_PRESET, normalize, scope_label};
 use egui::{Align2, Color32, Rect, RichText, Sense, Stroke, StrokeKind, pos2, vec2};
 use serde_json::{Value, json};
 
@@ -42,6 +48,20 @@ pub struct EditorState {
     pub rename: Option<String>,
     /// The preset the Delete Preset prompt asks about.
     pub confirm_delete: Option<String>,
+    /// The editor's changes, newest last, for Undo: (command, params, its keys before).
+    pub undo: Vec<(String, Value, Vec<String>)>,
+    /// A command or a keyboard key being dragged onto the other to assign a shortcut.
+    pub drag: Option<Drag>,
+    /// The chord just recorded and until when pressing it again records its double press.
+    pub double_until: Option<(String, f64)>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Drag {
+    /// A command of the list, by binding key.
+    Command(String),
+    /// A key of the on-screen keyboard with the modifiers toggled when the drag began.
+    Key(String),
 }
 
 const APP_COLOR: Color32 = Color32::from_rgb(0x8e, 0x6c, 0xe8);
@@ -108,6 +128,8 @@ pub fn combo_text(m: egui::Modifiers, k: egui::Key) -> Option<String> {
 
 /// Split normalized shortcut text into (ctrl, cmd, alt, shift) and the key.
 fn split(sc: &str) -> ([bool; 4], String) {
+    // A double press sits on the key of its chord.
+    let sc = effectcraft_engine::shortcuts::double_of(sc).unwrap_or(sc);
     let (head, key) = match sc.strip_suffix("++") {
         Some(h) => (h.to_string(), "+".to_string()),
         None if sc == "+" => (String::new(), "+".into()),
@@ -204,6 +226,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     let mut st = std::mem::take(&mut app.dialog_state.shortcuts);
     let mut run: Vec<(String, Value)> = vec![];
     let mut close = false;
+    let mut undo = false;
     // Record keys while the shortcut field listens.
     if st.recording {
         let got = ctx.input(|i| {
@@ -219,8 +242,27 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             if k != egui::Key::Escape
                 && let Some(txt) = combo_text(m, k)
             {
+                st.double_until = Some((txt.clone(), ctx.input(|i| i.time) + crate::menus::DOUBLE_PRESS));
                 st.pending = txt;
             }
+        }
+    }
+    // The recorded chord pressed again straight away records its double press (`AA`).
+    if !st.recording
+        && let Some((chord, until)) = st.double_until.clone()
+    {
+        let pressed = ctx.input(|i| {
+            i.events.iter().find_map(|e| match e {
+                egui::Event::Key { key, pressed: true, modifiers, .. } => Some(combo_text(*modifiers, *key)),
+                _ => None,
+            })
+        });
+        if ctx.input(|i| i.time) > until || pressed.is_some() {
+            st.double_until = None;
+        }
+        if pressed == Some(Some(chord.clone())) && st.pending == chord {
+            ctx.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Text(_) | egui::Event::Key { .. })));
+            st.pending = format!("{chord} {chord}");
         }
     }
     // Enter is OK, unless it belongs to the rename field, an open preset menu or the delete
@@ -311,6 +353,10 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             {
                 run.push(("shortcuts.export".into(), json!({"preset": active, "path": p})));
             }
+            // Undo: the editor's last change.
+            let r = ui.add_enabled(!st.undo.is_empty(), egui::Button::new(tr("Undo")));
+            app.auto.add("shortcuts.undo", r.rect, "Undo");
+            undo |= r.clicked();
         });
         ui.add_space(6.0);
         // ---- modifiers + legend
@@ -338,6 +384,9 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
         // ---- keyboard
         let unit = 40.0;
         let gap = 3.0;
+        // Where the keys and the listed commands are, for a drag from one onto the other.
+        let key_rects: std::cell::RefCell<Vec<(Rect, String)>> = Default::default();
+        let mut row_rects: Vec<(Rect, String)> = vec![];
         let (area, _) = ui.allocate_exact_size(vec2(ui.available_width(), unit * 6.0 + gap * 6.0 + 4.0), Sense::hover());
         let p = ui.painter_at(area);
         let draw_key = |app: &mut EffectcraftApp, r: Rect, label: &str, name: &str, st: &mut EditorState| {
@@ -377,7 +426,13 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             }
             let id = format!("shortcuts.key.{}", name.trim_start_matches('#'));
             app.auto.add(&id, r, label);
-            let resp = ui.interact(r, egui::Id::new(("sc-key", name, r.min.x as i32)), Sense::click());
+            let resp = ui.interact(r, egui::Id::new(("sc-key", name, r.min.x as i32)), Sense::click_and_drag());
+            if mod_idx.is_none() {
+                key_rects.borrow_mut().push((r, name.to_string()));
+                if resp.drag_started() {
+                    st.drag = Some(Drag::Key(format!("{}{}", mods_text(mods), name)));
+                }
+            }
             if resp.clicked() {
                 if let Some(i) = mod_idx {
                     st.mods[i] = !st.mods[i];
@@ -471,7 +526,11 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                         for i in range {
                             let b = rows[i];
                             let keys = table.keys.get(&b.key).cloned().unwrap_or_default();
-                            let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::click());
+                            let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::click_and_drag());
+                            row_rects.push((r, b.key.clone()));
+                            if resp.drag_started() {
+                                st.drag = Some(Drag::Command(b.key.clone()));
+                            }
                             let sel = st.selected.as_deref() == Some(b.key.as_str());
                             if sel {
                                 ui.painter().rect_filled(r, 0.0, t.row_selected);
@@ -509,7 +568,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                     return;
                 };
                 ui.label(RichText::new(&b.label).font(Tokens::semibold(13.0)).color(t.tab_text_active));
-                ui.label(RichText::new(format!("{} • {}", b.command, b.scope)).color(t.text_faint));
+                ui.label(RichText::new(format!("{} • {}", b.command, scope_label(&b.scope))).color(t.text_faint));
                 ui.add_space(6.0);
                 let keys = table.keys.get(&b.key).cloned().unwrap_or_default();
                 if keys.is_empty() {
@@ -556,17 +615,32 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                     if !conflicts.is_empty() {
                         ui.add_space(4.0);
                         ui.label(RichText::new(tr_args("⚠ {} is used by:", &[&(crate::menus::shortcut_text(&k))])).color(t.warning));
-                        for c in conflicts.iter().take(4) {
-                            ui.label(RichText::new(format!("   {} ({})", c.label, c.scope)).color(t.warning));
+                        // Clicking a conflict selects the command it is with.
+                        for (n, c) in conflicts.iter().take(4).enumerate() {
+                            let text = RichText::new(format!("   {} ({})", c.label, scope_label(&c.scope))).color(t.accent);
+                            let r = ui.add(egui::Label::new(text).sense(Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand);
+                            app.auto.add(&format!("shortcuts.conflict.{n}"), r.rect, &c.label);
+                            if r.clicked() {
+                                st.selected = Some(c.key.clone());
+                                st.pending.clear();
+                            }
                         }
                     }
                 }
                 ui.add_space(6.0);
-                let r = ui.add_enabled(keys != b.defaults, egui::Button::new(tr("Reset to Default")));
-                app.auto.add("shortcuts.resetCommand", r.rect, "Reset to Default");
-                if r.clicked() {
-                    run.push(("shortcuts.reset".into(), json!({"command": b.command, "params": b.params})));
-                }
+                // Clear: this command loses its shortcuts.
+                ui.horizontal(|ui| {
+                    let r = ui.add_enabled(!keys.is_empty(), egui::Button::new(tr("Clear")));
+                    app.auto.add("shortcuts.clear", r.rect, "Clear");
+                    if r.clicked() {
+                        run.push(("shortcuts.set".into(), json!({"command": b.command, "params": b.params, "keys": []})));
+                    }
+                    let r = ui.add_enabled(keys != b.defaults, egui::Button::new(tr("Reset to Default")));
+                    app.auto.add("shortcuts.resetCommand", r.rect, "Reset to Default");
+                    if r.clicked() {
+                        run.push(("shortcuts.reset".into(), json!({"command": b.command, "params": b.params})));
+                    }
+                });
                 if !b.defaults.is_empty() {
                     let d: Vec<String> = b.defaults.iter().map(|k| crate::menus::shortcut_text(k)).collect();
                     ui.label(RichText::new(tr_args("Default: {}", &[&(d.join(", "))])).color(t.text_faint));
@@ -577,6 +651,39 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                 }
             });
         });
+        // A drag from a command onto a key, or from a key onto a command, assigns the key.
+        if let Some(d) = st.drag.clone() {
+            let pos = ctx.pointer_interact_pos();
+            let label = match &d {
+                Drag::Command(k) => table.find(k).map(|b| b.label.clone()).unwrap_or_default(),
+                Drag::Key(k) => crate::menus::shortcut_text(k),
+            };
+            if let Some(pos) = pos {
+                let layer = egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("sc-drag"));
+                ctx.layer_painter(layer).text(pos + vec2(12.0, 10.0), Align2::LEFT_TOP, label, Tokens::ui(11.5), t.tab_text_active);
+                ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+            }
+            if !ctx.input(|i| i.pointer.any_down()) {
+                st.drag = None;
+                let hit = |rects: &[(Rect, String)]| pos.and_then(|p| rects.iter().find(|(r, _)| r.contains(p)).map(|(_, n)| n.clone()));
+                let assign = match d {
+                    Drag::Command(k) => hit(&key_rects.borrow()).map(|name| (k, format!("{}{}", mods_text(mods), name))),
+                    Drag::Key(chord) => hit(&row_rects).map(|k| (k, chord)),
+                };
+                if let Some((k, chord)) = assign
+                    && let Some(b) = table.find(&k)
+                    && let Some(chord) = normalize(&chord)
+                {
+                    let mut all = table.keys.get(&b.key).cloned().unwrap_or_default();
+                    if !all.contains(&chord) {
+                        all.push(chord);
+                        run.push(("shortcuts.set".into(), json!({"command": b.command, "params": b.params, "keys": all})));
+                    }
+                    st.selected = Some(b.key.clone());
+                    st.pending.clear();
+                }
+            }
+        }
         ui.add_space(6.0);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let r = ui.add(egui::Button::new(RichText::new(tr("   OK   ")).color(Color32::WHITE)).fill(t.accent));
@@ -619,12 +726,25 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             }
         }
     }
-    app.dialog_state.shortcuts = st;
-    for (cmd, params) in run {
-        if let Err(e) = app.session.execute(&cmd, params) {
+    // Undo: the last changed command gets the keys it had.
+    if undo && let Some((command, params, keys)) = st.undo.pop() {
+        if let Err(e) = app.session.execute("shortcuts.set", json!({"command": command, "params": params, "keys": keys})) {
             app.ui.status = e.to_string();
         }
     }
+    for (cmd, params) in run {
+        // What a change of one command's keys replaces, for Undo.
+        let before = (matches!(cmd.as_str(), "shortcuts.set" | "shortcuts.reset")).then(|| params.get("command").and_then(Value::as_str)).flatten().map(|c| {
+            let p = params.get("params").cloned().unwrap_or(Value::Null);
+            let keys = app.session.shortcuts().keys.get(&effectcraft_engine::shortcuts::binding_key(c, &p)).cloned().unwrap_or_default();
+            (c.to_string(), p, keys)
+        });
+        match app.session.execute(&cmd, params) {
+            Ok(_) => st.undo.extend(before),
+            Err(e) => app.ui.status = e.to_string(),
+        }
+    }
+    app.dialog_state.shortcuts = st;
     if close {
         app.dialog = None;
     }
@@ -770,5 +890,123 @@ mod tests {
         frame(&mut app, &ctx, vec![key, egui::Event::Text("r".into())]);
         frame(&mut app, &ctx, vec![]);
         assert_eq!(app.dialog_state.shortcuts.pending, "Alt+R");
+        // The same chord again straight away records its double press, typing nothing either.
+        let key = egui::Event::Key { key: egui::Key::R, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::ALT };
+        frame(&mut app, &ctx, vec![key, egui::Event::Text("r".into())]);
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.dialog_state.shortcuts.pending, "Alt+R Alt+R");
+        assert_eq!(normalize(&app.dialog_state.shortcuts.pending).as_deref(), Some("Alt+R Alt+R"));
+    }
+
+    #[test]
+    fn double_presses_are_listed_and_sit_on_their_key() {
+        let app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        let t = app.session.shortcuts();
+        for (key, chord) in [
+            ("timeline.reveal.material", "A A"),
+            ("timeline.reveal.expressions", "E E"),
+            ("timeline.reveal.missingEffects", "F F"),
+            ("timeline.reveal.waveform", "L L"),
+            ("timeline.reveal.maskGroups", "M M"),
+            ("timeline.reveal.paint", "P P"),
+            ("timeline.reveal.timeRemap", "R R"),
+            ("timeline.reveal.selected", "S S"),
+            ("timeline.reveal.maskOpacity", "T T"),
+            (r#"anim.reveal {"kind":"modified"}"#, "U U"),
+        ] {
+            assert_eq!(t.keys.get(key).map(Vec::as_slice), Some(&[chord.to_string()][..]), "{key}");
+        }
+        assert_eq!(crate::menus::shortcut_text("A A"), "AA");
+        assert_eq!(split("A A"), ([false; 4], "A".to_string()));
+        assert!(t.all_conflicts().is_empty(), "{:?}", t.all_conflicts());
+    }
+
+    fn opened() -> (EffectcraftApp, egui::Context) {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx, &app.tokens, crate::i18n::language(&app));
+        open(&mut app);
+        for _ in 0..3 {
+            frame(&mut app, &ctx, vec![]);
+        }
+        (app, ctx)
+    }
+
+    fn center(app: &EffectcraftApp, id: &str) -> egui::Pos2 {
+        let [x, y, w, h] = app.auto.find(id).unwrap_or_else(|| panic!("{id} is not on screen")).rect;
+        pos2(x + w / 2.0, y + h / 2.0)
+    }
+
+    fn button(pos: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() }
+    }
+
+    fn click_id(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str) {
+        let pos = center(app, id);
+        for event in [egui::Event::PointerMoved(pos), button(pos, true), button(pos, false)] {
+            frame(app, ctx, vec![event]);
+        }
+        frame(app, ctx, vec![]);
+        frame(app, ctx, vec![]);
+    }
+
+    fn drag_ids(app: &mut EffectcraftApp, ctx: &egui::Context, from: &str, to: &str) {
+        let (a, b) = (center(app, from), center(app, to));
+        frame(app, ctx, vec![egui::Event::PointerMoved(a)]);
+        frame(app, ctx, vec![button(a, true)]);
+        for i in 1..=6 {
+            frame(app, ctx, vec![egui::Event::PointerMoved(a + (b - a) * (i as f32 / 6.0))]);
+        }
+        frame(app, ctx, vec![button(b, false)]);
+        frame(app, ctx, vec![]);
+        frame(app, ctx, vec![]);
+    }
+
+    fn keys(app: &EffectcraftApp, key: &str) -> Vec<String> {
+        app.session.shortcuts().keys.get(key).cloned().unwrap_or_default()
+    }
+
+    #[test]
+    fn clear_removes_the_shortcuts_and_undo_brings_them_back() {
+        let (mut app, ctx) = opened();
+        app.dialog_state.shortcuts.selected = Some("layer.newNull".into());
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![]);
+        click_id(&mut app, &ctx, "shortcuts.clear");
+        assert!(keys(&app, "layer.newNull").is_empty());
+        click_id(&mut app, &ctx, "shortcuts.undo");
+        assert_eq!(keys(&app, "layer.newNull"), ["Cmd+Alt+Shift+Y"]);
+        assert!(app.dialog_state.shortcuts.undo.is_empty(), "an undo isn't itself a change to undo");
+    }
+
+    #[test]
+    fn clicking_a_conflict_selects_the_command_it_is_with() {
+        let (mut app, ctx) = opened();
+        app.dialog_state.shortcuts.selected = Some("layer.newNull".into());
+        app.dialog_state.shortcuts.pending = "Cmd+S".into();
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![]);
+        click_id(&mut app, &ctx, "shortcuts.conflict.0");
+        assert_eq!(app.dialog_state.shortcuts.selected.as_deref(), Some("file.save"));
+    }
+
+    #[test]
+    fn dragging_a_command_onto_a_key_or_a_key_onto_a_command_assigns_the_key() {
+        let (mut app, ctx) = opened();
+        // The one listed command: the row to drag, and to drop a key on.
+        app.dialog_state.shortcuts.query = "layer.newNull".into();
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![]);
+        drag_ids(&mut app, &ctx, "shortcuts.row.0", "shortcuts.key.F7");
+        assert_eq!(keys(&app, "layer.newNull"), ["Cmd+Alt+Shift+Y", "F7"]);
+        assert!(app.dialog_state.shortcuts.drag.is_none());
+        // With Shift toggled, the key carries it.
+        app.dialog_state.shortcuts.mods = [false, false, false, true];
+        frame(&mut app, &ctx, vec![]);
+        drag_ids(&mut app, &ctx, "shortcuts.key.F8", "shortcuts.row.0");
+        assert_eq!(keys(&app, "layer.newNull"), ["Cmd+Alt+Shift+Y", "F7", "Shift+F8"]);
+        // A drag that ends nowhere assigns nothing.
+        drag_ids(&mut app, &ctx, "shortcuts.key.F6", "shortcuts.search");
+        assert_eq!(keys(&app, "layer.newNull").len(), 3);
     }
 }
