@@ -33,9 +33,14 @@ use effectcraft_raster::Image;
 /// File format version (part of the folder layout).
 const VERSION: &str = "v1";
 const MAGIC: &[u8; 4] = b"ECDC";
-/// Pending writes before new ones are dropped.
+/// Pending layer and matte writes before new ones are dropped.
 #[cfg(not(target_arch = "wasm32"))]
 const QUEUE_LIMIT: usize = 64;
+/// Pending frame bytes before new frames are dropped. Frames have their own lane, written
+/// before layer buffers: a burst of large layer writes used to fill the shared queue and drop
+/// frames, so a fully cached comp came back with gaps in its blue bar.
+#[cfg(not(target_arch = "wasm32"))]
+const FRAME_QUEUE_BYTES: usize = 1 << 30;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Kind {
@@ -225,8 +230,28 @@ enum Job {
 }
 
 struct Queue {
+    /// Frame writes (taken first) and their payload bytes.
+    frames: std::collections::VecDeque<Job>,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    frame_bytes: usize,
+    /// Layer and matte writes.
     jobs: std::collections::VecDeque<Job>,
     busy: bool,
+}
+
+impl Queue {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn pop(&mut self) -> Option<Job> {
+        if let Some(j) = self.frames.pop_front() {
+            let Job::Write(_, _, p) = &j;
+            self.frame_bytes = self.frame_bytes.saturating_sub(p.len());
+            return Some(j);
+        }
+        self.jobs.pop_front()
+    }
+    fn is_empty(&self) -> bool {
+        self.frames.is_empty() && self.jobs.is_empty()
+    }
 }
 
 pub struct DiskCache {
@@ -320,7 +345,10 @@ impl DiskCache {
             dropped: AtomicU64::new(0),
             failed: AtomicU64::new(0),
             tmp_counter: AtomicU64::new(0),
-            queue: Arc::new((Mutex::new(Queue { jobs: Default::default(), busy: cfg!(not(target_arch = "wasm32")) }), Condvar::new())),
+            queue: Arc::new((
+                Mutex::new(Queue { frames: Default::default(), frame_bytes: 0, jobs: Default::default(), busy: cfg!(not(target_arch = "wasm32")) }),
+                Condvar::new(),
+            )),
             min_layer_ms: AtomicU64::new(30),
         });
         dc.rescan();
@@ -467,8 +495,9 @@ impl DiskCache {
         #[cfg(target_arch = "wasm32")]
         {
             q.jobs.clear();
+            q.frames.clear();
         }
-        while !q.jobs.is_empty() || q.busy {
+        while !q.is_empty() || q.busy {
             q = match cv.wait(q) {
                 Ok(q) => q,
                 Err(_) => return,
@@ -524,11 +553,20 @@ impl DiskCache {
         {
             let (m, cv) = &*self.queue;
             let Ok(mut q) = m.lock() else { return };
-            if q.jobs.len() >= QUEUE_LIMIT {
+            let full = match kind {
+                Kind::Frame => q.frame_bytes.saturating_add(payload.len()) > FRAME_QUEUE_BYTES,
+                _ => q.jobs.len() >= QUEUE_LIMIT,
+            };
+            if full {
                 self.dropped.fetch_add(1, Ordering::Relaxed);
                 return;
             }
-            q.jobs.push_back(Job::Write(kind, key, payload));
+            if kind == Kind::Frame {
+                q.frame_bytes = q.frame_bytes.saturating_add(payload.len());
+                q.frames.push_back(Job::Write(kind, key, payload));
+            } else {
+                q.jobs.push_back(Job::Write(kind, key, payload));
+            }
             cv.notify_all();
         }
     }
@@ -659,7 +697,7 @@ fn writer(dc: std::sync::Weak<DiskCache>, q: Arc<(Mutex<Queue>, Condvar)>) {
         let job = {
             let Ok(mut g) = m.lock() else { return };
             loop {
-                if let Some(j) = g.jobs.pop_front() {
+                if let Some(j) = g.pop() {
                     g.busy = true;
                     break j;
                 }
@@ -1080,6 +1118,23 @@ mod tests {
         assert_eq!((st.entries, st.hits, st.misses, st.writes), (2, 2, 1, 2));
         // Wrong kind is a miss.
         assert!(dc.get_frame(42).is_none());
+    }
+
+    /// A burst of layer writes never crowds out frames: every frame of a fully cached comp is
+    /// on disk afterwards (the blue bar came back with gaps).
+    #[test]
+    fn frames_are_kept_when_layer_writes_fill_the_queue() {
+        let dir = tmpdir("burst");
+        let dc = DiskCache::open(&dir, 1 << 30).unwrap();
+        for k in 0..300 {
+            dc.put_layer(10_000 + k, &buf(1, 64, 64));
+        }
+        let rgba = vec![7u8; 32 * 32 * 4];
+        for k in 0..300 {
+            dc.put_frame(k, 32, 32, &rgba);
+        }
+        dc.flush();
+        assert!((0..300).all(|k| dc.contains(Kind::Frame, k)), "every frame written");
     }
 
     #[test]
