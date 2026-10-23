@@ -53,12 +53,12 @@ fn ps_norm3(v: vec3<f32>) -> vec3<f32> {
 fn ps_rand_dir(i: u32, k: u32, flat: bool) -> vec3<f32> {
     if (flat) {
         let a = ps_h(i, k) * PS_TAU;
-        return vec3<f32>(cos(a), sin(a), 0.0);
+        return vec3<f32>(cos_p(a), sin_p(a), 0.0);
     }
     let z = ps_hs(i, k);
     let a = ps_h(i, k + 1u) * PS_TAU;
     let r = sqrt(max(1.0 - z * z, 0.0));
-    return vec3<f32>(r * cos(a), r * sin(a), z);
+    return vec3<f32>(r * cos_p(a), r * sin_p(a), z);
 }
 
 struct Part {
@@ -189,7 +189,7 @@ fn ps_spawn_cannon(id: u32) -> Part {
     let vel = S.f[1].y;
     let vel_spread = S.f[1].z;
     let a = radians(angle + ps_hs(id, 1u) * spread * 0.5);
-    let d = vec2<f32>(sin(a), -cos(a));
+    let d = vec2<f32>(sin_p(a), -cos_p(a));
     let speed = max(vel + ps_hs(id, 3u) * vel_spread, 0.0);
     var off: vec2<f32>;
     if (r >= 0.0) {
@@ -197,7 +197,7 @@ fn ps_spawn_cannon(id: u32) -> Part {
     } else {
         let aa = ps_h(id, 5u) * PS_TAU;
         let rr = sqrt(ps_h(id, 6u)) * -r;
-        off = vec2<f32>(cos(aa) * rr, sin(aa) * rr);
+        off = vec2<f32>(cos_p(aa) * rr, sin_p(aa) * rr);
     }
     let v = d * speed;
     let dt = S.f[2].z;

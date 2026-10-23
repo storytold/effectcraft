@@ -122,16 +122,17 @@ fn fxt_knee(v: f32, start: f32, limit: f32) -> f32 {
     return start + r * (1.0 - exp(-(v - start) / r));
 }
 
-// PS Arbitrary Map lookup (map in data, n entries; f[0].x = phase offset in entries).
+// PS Arbitrary Map: CPU-rounded interval starts, values and slopes in data.
 fn fxt_lookup(v: f32, n: u32) -> f32 {
-    let nf = f32(n);
-    var x = clamp(v, 0.0, 1.0) * (nf - 1.0) + P.f[0].x;
-    x = x - nf * floor(x / nf);
-    let fl = floor(x);
-    let i0 = u32(fl) % n;
-    let i1 = select(i0, i0 + 1u, i0 + 1u < n);
-    let t = x - fl;
-    return data[i0] + (data[i1] - data[i0]) * t;
+    let x = clamp(v, 0.0, 1.0);
+    var lo = 0u;
+    var hi = n;
+    while (lo + 1u < hi) {
+        let mid = lo + (hi - lo) / 2u;
+        if (x < data[mid * 3u]) { hi = mid; } else { lo = mid; }
+    }
+    let i = lo * 3u;
+    return data[i + 1u] + (x - data[i]) * data[i + 2u];
 }
 
 fn fxt_eq_look(table: u32, n: u32, v: f32) -> f32 {
@@ -440,7 +441,11 @@ fn fxt_point(@builtin(global_invocation_id) gid: vec3<u32>) {
         case 12u: {
             let n = u0.z;
             let aa = max(a, 0.0);
-            let r = vec3<f32>(fxt_lookup(c.x, n), fxt_lookup(c.y, n), fxt_lookup(c.z, n));
+            var straight = vec3<f32>(0.0);
+            if (a > 1e-6) {
+                straight = vec3<f32>(unit_div(px.x, a), unit_div(px.y, a), unit_div(px.z, a));
+            }
+            let r = vec3<f32>(fxt_lookup(straight.x, n), fxt_lookup(straight.y, n), fxt_lookup(straight.z, n));
             var na = aa;
             if (u0.y != 0u) {
                 na = fxt_lookup(aa, n);

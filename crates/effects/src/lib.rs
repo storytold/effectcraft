@@ -99,12 +99,12 @@ pub use generate3::{
 };
 pub use noise::GrainLook;
 pub use textfx::{BoltPlan, TextLook, TextPass, bolt_plan, text_passes};
-pub use transition::place_layer;
+pub use transition::{GridWipe, place_layer};
 // effectcraft-gpu fx_noise.
 pub use keying2::{InnerOuterPlan, inner_outer_plan};
 pub use noise::remove_grain_level;
 pub use noise3::{FractalGpu, fractal_gpu};
-pub use stylize3::{BumpLight, bump_layer_id};
+pub use stylize3::{BumpLight, HexTile, bump_layer_id};
 pub use textfx::{TextLayer, text_layer};
 pub use time_fx::{PixelMotion, TimewarpPlan, TwStep, pmb_plan, posterized_time, time_frames, timewarp_crop, timewarp_plan};
 // effectcraft-gpu fx_tone.

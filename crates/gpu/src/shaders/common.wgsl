@@ -50,6 +50,91 @@ fn acos_p(x: f32) -> f32 {
     return 1.5707963267948966 - asin_p(x);
 }
 
+// Some hardware's native trig instructions saturate cos near a full turn and
+// have errors large enough to move particles and sphere samples visibly. Reduce
+// to [-pi/4, pi/4] with a split pi/2, then evaluate the Taylor polynomials with
+// explicit fused operations. The effect angles use this bounded range; retain
+// the builtins for non-finite or very large arguments rather than cast them.
+fn sincos_p(x: f32) -> vec2<f32> {
+    if (!(abs(x) <= 8192.0)) {
+        return vec2<f32>(sin(x), cos(x));
+    }
+    let k = round(x * 0.6366197723675814);
+    // Keep the coarse reduction in integers. Some drivers reassociate even
+    // explicit fma chains into x - k*pi/2, losing low bits for large angles.
+    // 3216/2048 is exact; the bounded scaled input and product fit in i32.
+    let scaled = x * 2048.0;
+    let whole = floor(scaled);
+    var r = f32(i32(whole) - i32(k) * 3216) / 2048.0;
+    r += (scaled - whole) / 2048.0;
+    r = fma(-k, 0.0004838267893064022, r);
+    r = fma(-k, 5.564431554416771e-12, r);
+    let z = r * r;
+    var sp = fma(z, -1.0 / 39916800.0, 1.0 / 362880.0);
+    sp = fma(z, sp, -1.0 / 5040.0);
+    sp = fma(z, sp, 1.0 / 120.0);
+    sp = fma(z, sp, -1.0 / 6.0);
+    let sn = fma(r * z, sp, r);
+    var cp = fma(z, -1.0 / 3628800.0, 1.0 / 40320.0);
+    cp = fma(z, cp, -1.0 / 720.0);
+    cp = fma(z, cp, 1.0 / 24.0);
+    cp = fma(z, cp, -0.5);
+    let cs = fma(z, cp, 1.0);
+    switch imod(i32(k), 4) {
+        case 1: { return vec2<f32>(cs, -sn); }
+        case 2: { return vec2<f32>(-sn, -cs); }
+        case 3: { return vec2<f32>(-cs, sn); }
+        default: { return vec2<f32>(sn, cs); }
+    }
+}
+
+fn sin_p(x: f32) -> f32 { return sincos_p(x).x; }
+fn cos_p(x: f32) -> f32 { return sincos_p(x).y; }
+
+// Correctly-rounded positive x/a, clamped to [0,1]. Native division and fma
+// need not have IEEE precision on every shader backend. Discontinuous colour
+// effects need the exact CPU f32 value, not just an approximation within an ulp.
+// Long division uses only bounded 24-bit significands (at most 24 iterations).
+fn unit_div(x: f32, a: f32) -> f32 {
+    if (x <= 0.0 || a <= 0.0) { return 0.0; }
+    if (x >= a) { return 1.0; }
+    if (a == 1.0) { return x; }
+    let xb = bitcast<u32>(x);
+    let ab = bitcast<u32>(a);
+    var nx = xb & 0x7fffffu;
+    var na = ab & 0x7fffffu;
+    var ex = i32((xb >> 23u) & 255u) - 127;
+    var ea = i32((ab >> 23u) & 255u) - 127;
+    if (ex == -127) {
+        let shift = 23u - firstLeadingBit(nx);
+        nx <<= shift;
+        ex = -126 - i32(shift);
+    } else { nx |= 0x800000u; }
+    if (ea == -127) {
+        let shift = 23u - firstLeadingBit(na);
+        na <<= shift;
+        ea = -126 - i32(shift);
+    } else { na |= 0x800000u; }
+    var exponent = ex - ea;
+    if (nx < na) { nx <<= 1u; exponent -= 1; }
+    var rem = nx - na;
+    if (exponent < -150) { return 0.0; }
+    if (exponent == -150) { return bitcast<f32>(select(0u, 1u, rem != 0u)); }
+    let fraction = u32(min(23, exponent + 149));
+    var q = 1u;
+    for (var i = 0u; i <= fraction; i++) {
+        rem <<= 1u;
+        q <<= 1u;
+        if (rem >= na) { rem -= na; q |= 1u; }
+    }
+    let guard = q & 1u;
+    q >>= 1u;
+    if (guard != 0u && (rem != 0u || (q & 1u) != 0u)) { q += 1u; }
+    if (exponent < -126) { return bitcast<f32>(q); }
+    if (q == 0x1000000u) { q >>= 1u; exponent += 1; }
+    return bitcast<f32>((u32(exponent + 127) << 23u) | (q & 0x7fffffu));
+}
+
 // ---------------------------------------------------------------- sampling (raster::Image)
 
 fn tex_get(t: texture_2d<f32>, x: i32, y: i32) -> vec4<f32> {

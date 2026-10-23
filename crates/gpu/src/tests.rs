@@ -26,6 +26,103 @@ use effectcraft_time::{FrameRate, Tick};
 
 use crate::Gpu;
 
+pub(crate) const MATH_PROBE_SHADER: &str = r#"
+@compute @workgroup_size(16, 16)
+fn math_probe(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let p = vec2<i32>(gid.xy);
+    if (p.x >= out_dims().x || p.y >= out_dims().y) { return; }
+    let v = textureLoad(src, p, 0).x;
+    if (P.u[0].x == 1u) {
+        let a = textureLoad(src, p, 0).w;
+        let q = unit_div(v, a);
+        textureStore(out, p, vec4<f32>(q, fxs_posterize_bin(q, P.u[0].y), 0.0, 1.0));
+        return;
+    }
+    textureStore(out, p, vec4<f32>(sin_p(v), cos_p(v), 0.0, 1.0));
+}
+"#;
+
+/// Direction errors accumulate into visible particle offsets and spherical
+/// remapping errors. Check the numerical primitive before rendering a scene.
+#[test]
+fn angular_math_preserves_particle_and_vr_directions() {
+    let Some(g) = gpu() else { return };
+    for extent in [std::f32::consts::TAU, 100.0, 8192.0] {
+        let mut img = Image::new(4097, 1);
+        for (i, px) in img.data.iter_mut().enumerate() {
+            px[0] = (i as f32 - 2048.0) * extent / 2048.0;
+        }
+        let input = g.ctx.upload_image(&img).unwrap();
+        let mut e = crate::context::Enc::new(&g.ctx);
+        let out = e.scratch(img.width, img.height);
+        e.pixels("math_probe", &Default::default(), &input, None, &out, None);
+        let result = e.download(&out).unwrap();
+        for (i, (v, got)) in img.data.iter().zip(result.data).enumerate() {
+            let want = [(v[0] as f64).sin() as f32, (v[0] as f64).cos() as f32];
+            for c in 0..2 {
+                assert!((want[c] - got[c]).abs() <= 2e-7, "sample {i}, angle {}: CPU {want:?}, GPU {got:?}", v[0]);
+            }
+        }
+    }
+}
+
+#[test]
+fn alpha_division_and_posterization_match_f32_rounding() {
+    let Some(g) = gpu() else { return };
+    let mut values = vec![];
+    for levels in [1u32, 3, 8, 254] {
+        values.clear();
+        for a in [1.0f32, 0.1, 0.3, 1.0 / 255.0, 6.0 / 255.0] {
+            for i in 0..levels {
+                let half = (i as f32 + 0.5) / levels as f32;
+                for v in [0.0, 1e-6, half.next_down(), half, half.next_up(), 1.0] {
+                    values.push([v * a, 0.0, 0.0, a]);
+                }
+            }
+        }
+        let img = Image { width: values.len() as u32, height: 1, data: values.clone() };
+        let input = g.ctx.upload_image(&img).unwrap();
+        let mut e = crate::context::Enc::new(&g.ctx);
+        let out = e.scratch(img.width, 1);
+        let mut params = crate::context::Params::default();
+        params.u[0] = [1, levels, 0, 0];
+        e.pixels("math_probe", &params, &input, None, &out, None);
+        let result = e.download(&out).unwrap();
+        for (i, (v, got)) in values.iter().zip(result.data).enumerate() {
+            let q = (v[0] / v[3]).clamp(0.0, 1.0);
+            assert_eq!(q.to_bits(), got[0].to_bits(), "levels {levels}, pixel {i}, input {v:?}");
+            assert_eq!((q * levels as f32).round(), got[1], "levels {levels}, pixel {i}, input {v:?}");
+        }
+    }
+}
+
+/// Prove that the numerical fixes run on the device, without per-effect image
+/// downloads or CPU fallback. Compiler-limited DX12 devices retain their tested
+/// fallback contract; these kernels must compile on the Vulkan test adapters.
+#[test]
+fn numerical_effects_remain_resident_on_vulkan() {
+    let Some(g) = gpu() else { return };
+    if !g.ctx.name.ends_with("(Vulkan)") {
+        return;
+    }
+    for entry in ["fxs_point", "fxt_point", "ftr_grid", "fp2_hextile"] {
+        assert!(!g.ctx.unavailable_kernels().iter().any(|(name, _)| *name == entry), "{entry}: {:?}", g.ctx.unavailable_kernels());
+    }
+    for (id, vals) in [
+        ("ec.stylize.posterize", vec![("level", n(4.0))]),
+        ("ec.color.psarbitrarymap", vec![("phase", n(40.0))]),
+        ("ec.transition.ccgridwipe", vec![("completion", n(40.0))]),
+        ("ec.stylize.cchextile", vec![("radius", n(9.3))]),
+    ] {
+        let before = g.ctx.transfer_stats();
+        effect_direct(id, &vals, false);
+        let after = g.ctx.transfer_stats();
+        // Full- and half-resolution runs each upload once and download once.
+        assert_eq!(after.uploads - before.uploads, 2, "{id}: uploads");
+        assert_eq!(after.readbacks - before.readbacks, 2, "{id}: readbacks");
+    }
+}
+
 /// One GPU test at a time in this process: the calling test thread holds a process-wide lock
 /// until it exits (libtest runs every test on a thread of its own). wgpu's OpenGL backend (Mesa
 /// llvmpipe on FreeBSD, Linux without Vulkan) has one context lock per adapter and panics when a

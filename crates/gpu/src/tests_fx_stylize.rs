@@ -45,6 +45,66 @@ fn posterize_thresholds_strobe_vignette() {
     effect_case("ec.stylize.ccvignette", &[("amount", n(-60.0)), ("pinHighlights", n(50.0)), ("angleOfView", n(120.0)), ("center", pt(20.0, 15.0))]);
 }
 
+/// Premultiplied, quantized footage often lands exactly on a posterization
+/// threshold after division by alpha. Exercise that input before any placement
+/// or compositing can hide a wrong bin behind the normal image tolerance.
+#[test]
+fn posterize_quantized_premultiplied_boundaries() {
+    let Some(g) = crate::tests::gpu() else { return };
+    let spec = effectcraft_effects::find("ec.stylize.posterize").unwrap();
+    for level in [4.0, 9.0] {
+        let params = effectcraft_effects::Params { values: [("level".into(), n(level))].into() };
+        let ctx =
+            || effectcraft_effects::EffectCtx { params: &params, time: 0.0, layer_size: [70.0, 44.0], seed: 11, adjustment: false, env: Default::default() };
+        for seed in 1..=7 {
+            let mut img = crate::tests::pattern(seed, 70, 44);
+            effectcraft_render::color::quantize(&mut img, 255.0);
+            let input = effectcraft_effects::Buf { img, offset: [0.0; 2], scale: 1.0 };
+            let cpu = (spec.render)(&ctx(), input.clone());
+            let gpu = effectcraft_render::Accelerator::effects(g, &[effectcraft_render::FxStep { spec, ctx: ctx() }], &input, None).unwrap();
+            for (i, (want, got)) in cpu.img.data.iter().zip(&gpu.img.data).enumerate() {
+                for c in 0..4 {
+                    assert!((want[c] - got[c]).abs() <= 1e-6, "level {level} seed {seed} pixel {i}: input {:?}, CPU {want:?}, GPU {got:?}", input.img.data[i]);
+                }
+            }
+        }
+    }
+}
+
+/// Wrapped ramps have a large discontinuity at their end. Check signed and
+/// fractional phases, including a wrap a few double-precision ulps above zero.
+#[test]
+fn arbitrary_map_signed_fractional_and_near_zero_wraps() {
+    let Some(g) = crate::tests::gpu() else { return };
+    let spec = effectcraft_effects::find("ec.color.psarbitrarymap").unwrap();
+    for phase in [-1000.0, -20.5, 0.0, 40.0, 1000.0, 255.99999999999997] {
+        let params = effectcraft_effects::Params {
+            values: [
+                ("map".into(), Value::Str((0..256).map(|n| n.to_string()).collect::<Vec<_>>().join(","))),
+                ("phase".into(), n(phase)),
+                ("applyPhaseMapToAlpha".into(), on()),
+            ]
+            .into(),
+        };
+        let ctx =
+            || effectcraft_effects::EffectCtx { params: &params, time: 0.0, layer_size: [1024.0, 1.0], seed: 7, adjustment: false, env: Default::default() };
+        let mut img = effectcraft_raster::Image::new(1024, 1);
+        for (i, px) in img.data.iter_mut().enumerate() {
+            let v = if i < 512 { i as f32 * 1e-18 } else { (i - 512) as f32 / 511.0 };
+            let a = [1.0f32, 0.1, 0.3, 6.0 / 255.0][i % 4];
+            *px = [v * a, v * a, v * a, a];
+        }
+        let input = effectcraft_effects::Buf { img, offset: [0.0; 2], scale: 1.0 };
+        let cpu = (spec.render)(&ctx(), input.clone());
+        let gpu = effectcraft_render::Accelerator::effects(g, &[effectcraft_render::FxStep { spec, ctx: ctx() }], &input, None).unwrap();
+        for (i, (want, got)) in cpu.img.data.iter().zip(&gpu.img.data).enumerate() {
+            for c in 0..4 {
+                assert!((want[c] - got[c]).abs() <= 1e-6, "phase {phase}, pixel {i}: CPU {want:?}, GPU {got:?}");
+            }
+        }
+    }
+}
+
 #[test]
 fn scatter_brush_strokes() {
     effect_case("ec.stylize.scatter", &[("amount", n(5.0))]);
