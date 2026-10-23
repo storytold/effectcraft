@@ -229,3 +229,125 @@ fn locked_resize_uses_height_for_height_only_output_module_updates() {
     let comp = s.project.comp(item.comp).unwrap();
     assert_eq!(item.output.output_size(comp, &item.settings), (32, 32), "explicit width retains precedence");
 }
+
+/// The engine holds backend authorization privately; callers only receive a one-shot review id.
+#[test]
+fn overwrite_review_is_explicit_bound_and_consumed() {
+    use crate::render_queue::{ExportPreflight, LocalFuture};
+    struct Reviewed {
+        calls: Mutex<Vec<serde_json::Value>>,
+        collisions: Vec<String>,
+    }
+    impl Exporter for Reviewed {
+        fn formats(&self) -> Vec<OutputFormat> {
+            vec![OutputFormat::Gif]
+        }
+        fn preflight(&self, job: &ExportJob) -> Result<ExportPreflight, String> {
+            Ok(ExportPreflight { collisions: self.collisions.clone(), destinations: vec![job.path.to_string()], authorization: json!({"snapshot": job.path}) })
+        }
+        fn export(&self, _: &ExportJob, _: &mut dyn FnMut(u64, u64) -> bool) -> Result<ExportResult, String> {
+            Err("unreviewed export must not run".into())
+        }
+        fn export_authorized_async<'a>(
+            &'a self,
+            job: &'a ExportJob<'a>,
+            token: &'a serde_json::Value,
+            _: &'a mut dyn FnMut(u64, u64) -> bool,
+        ) -> LocalFuture<'a, Result<ExportResult, String>> {
+            Box::pin(async move {
+                assert_eq!(token["snapshot"], job.path);
+                self.calls.lock().unwrap().push(token.clone());
+                Ok(ExportResult { path: job.path.into(), ..Default::default() })
+            })
+        }
+    }
+    for existing in [false, true] {
+        let ex = Arc::new(Reviewed { calls: Mutex::default(), collisions: if existing { vec!["old.gif".into()] } else { vec![] } });
+        let mut s = Session { exporter: Some(ex.clone()), ..Default::default() };
+        s.execute("comp.new", json!({"width": 4, "height": 4, "duration": 0.2})).unwrap();
+        s.execute("renderQueue.add", json!({"format": "gif", "output": crate::tests_stubs::tmp_out("review.gif")})).unwrap();
+        if existing {
+            assert!(s.start_render(true).unwrap_err().contains("already exists"));
+            assert!(s.execute_checked("renderQueue.render", json!({"overwrite": true})).is_err());
+            assert!(ex.calls.lock().unwrap().is_empty());
+        }
+        let review = s.execute_checked("renderQueue.preflight", json!({})).unwrap();
+        assert_eq!(review["collisions"].as_array().unwrap().len(), usize::from(existing));
+        assert!(review.get("authorization").is_none());
+        s.execute_checked("renderQueue.cancelPreflight", json!({"confirmation": review["confirmation"]})).unwrap();
+        assert!(s.execute("renderQueue.render", json!({"confirmation": review["confirmation"], "overwrite": true})).is_err());
+        assert!(ex.calls.lock().unwrap().is_empty(), "Cancel never calls the exporter");
+        let review = s.execute("renderQueue.preflight", json!({})).unwrap();
+        s.execute("renderQueue.setOutput", json!({"path": crate::tests_stubs::tmp_out("changed.gif")})).unwrap();
+        assert!(
+            s.execute("renderQueue.render", json!({"confirmation": review["confirmation"], "overwrite": true})).unwrap_err().to_string().contains("changed")
+        );
+        assert!(ex.calls.lock().unwrap().is_empty());
+        let review = s.execute_checked("renderQueue.preflight", json!({})).unwrap();
+        s.execute_checked("renderQueue.render", json!({"confirmation": review["confirmation"], "overwrite": existing})).unwrap();
+        assert_eq!(ex.calls.lock().unwrap().len(), 1);
+        s.execute("renderQueue.setRender", json!({"render": true})).unwrap();
+        assert!(s.execute("renderQueue.render", json!({"confirmation": review["confirmation"], "overwrite": true})).is_err());
+        assert_eq!(ex.calls.lock().unwrap().len(), 1, "consent cannot carry over to a stored queue rerender");
+        s.execute("renderQueue.duplicate", json!({})).unwrap();
+        assert!(s.execute("renderQueue.preflight", json!({})).unwrap_err().to_string().contains("same output destination"));
+        assert_eq!(ex.calls.lock().unwrap().len(), 1, "overlapping queue outputs are rejected before rendering");
+    }
+}
+
+#[test]
+fn overwrite_preflight_bounds_segments_before_materializing_them() {
+    let mut s = Session::default();
+    let ex = Arc::new(MockExporter { log: Mutex::default() });
+    s.exporter = Some(ex.clone());
+    s.execute("comp.new", json!({"width": 4, "height": 4, "frameRate": 60, "duration": 86400})).unwrap();
+    s.execute("renderQueue.add", json!({"format": "png", "output": "long_[#####].png"})).unwrap();
+    s.prefs.export.segment_sequences = true;
+    s.prefs.export.segment_sequence_files = 1;
+    let error = s.preflight_render().unwrap_err();
+    assert!(error.contains("100000 output segments"), "{error}");
+    assert!(s.render_review.is_none());
+    assert!(ex.log.lock().unwrap().is_empty());
+}
+
+#[test]
+fn overwrite_preflight_bounds_repeated_path_bytes_before_segment_expansion() {
+    let mut s = Session::default();
+    let ex = Arc::new(MockExporter { log: Mutex::default() });
+    s.exporter = Some(ex.clone());
+    s.execute("comp.new", json!({"width": 4, "height": 4, "frameRate": 10, "duration": 10})).unwrap();
+    let path = format!("{}_[#####].png", "x".repeat(1_000_000));
+    s.execute("renderQueue.add", json!({"format": "png", "output": path})).unwrap();
+    s.prefs.export.segment_sequences = true;
+    s.prefs.export.segment_sequence_files = 1;
+    let error = s.preflight_render().unwrap_err();
+    assert!(error.contains("output plan exceeds 64 MiB"), "{error}");
+    assert!(s.render_review.is_none());
+    assert!(ex.log.lock().unwrap().is_empty());
+}
+
+#[test]
+fn fresh_preflight_accepts_more_than_100000_destinations() {
+    use crate::render_queue::ExportPreflight;
+    struct LongSequence;
+    impl Exporter for LongSequence {
+        fn formats(&self) -> Vec<OutputFormat> {
+            vec![OutputFormat::PngSequence]
+        }
+        fn preflight(&self, _: &ExportJob) -> Result<ExportPreflight, String> {
+            Ok(ExportPreflight {
+                collisions: vec![],
+                destinations: (0..100_001).map(|frame| format!("/fresh/f_{frame}.png")).collect(),
+                authorization: json!({"bounded": true}),
+            })
+        }
+        fn export(&self, _: &ExportJob, _: &mut dyn FnMut(u64, u64) -> bool) -> Result<ExportResult, String> {
+            Err("preflight must not render".into())
+        }
+    }
+    let mut session = Session { exporter: Some(Arc::new(LongSequence)), ..Default::default() };
+    session.execute("comp.new", json!({"width":4, "height":4, "duration":1})).unwrap();
+    session.execute("renderQueue.add", json!({"format":"png", "output": crate::tests_stubs::tmp_out("long_[#####].png")})).unwrap();
+    let review = session.preflight_render().unwrap();
+    assert!(review["collisions"].as_array().unwrap().is_empty());
+}

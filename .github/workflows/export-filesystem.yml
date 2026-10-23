@@ -1,0 +1,49 @@
+name: Export filesystem
+
+on:
+  push:
+    paths: ["crates/export/**", "Cargo.lock", ".github/workflows/export-filesystem.yml"]
+  pull_request:
+    paths: ["crates/export/**", "Cargo.lock", ".github/workflows/export-filesystem.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: export-filesystem-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  filesystem:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_RELEASE_LTO: "false"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Record exact source and toolchain
+        shell: bash
+        run: |
+          git rev-parse HEAD 'HEAD^{tree}'
+          rustc -Vv
+          cargo -V
+      - name: Ordinary export unit and filesystem contracts
+        # Run the complete library suite so a retired module/filter cannot match zero tests.
+        run: cargo test --locked --release -p effectcraft-export --lib
+      - name: Export integration
+        run: cargo test --locked --release -p effectcraft-export --test render_settings
+      - name: Ensure tests did not change tracked sources or lockfile
+        if: always()
+        run: git diff --exit-code HEAD

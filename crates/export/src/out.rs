@@ -23,9 +23,36 @@ pub(crate) fn create<'a>(sink: Option<&'a Sink>, path: &str) -> Result<Out<'a>> 
             if let Some(dir) = std::path::Path::new(path).parent().filter(|d| !d.as_os_str().is_empty()) {
                 std::fs::create_dir_all(dir).map_err(io)?;
             }
-            Ok(Out::File(BufWriter::new(std::fs::File::create(path).map_err(io)?)))
+            Ok(Out::File(BufWriter::new(std::fs::OpenOptions::new().write(true).create_new(true).open(path).map_err(io)?)))
         }
     }
+}
+
+/// Logs never replace a prior pathname. In particular, an existing log symlink or
+/// hard link is not permission to modify its unrelated target. Sink delivery keeps
+/// the requested callback name; native collisions receive a uniquely created sibling.
+pub(crate) fn create_log<'a>(sink: Option<&'a Sink>, path: &str) -> Result<(Out<'a>, String)> {
+    if sink.is_some() {
+        return Ok((create(sink, path)?, path.to_string()));
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let requested = std::path::Path::new(path);
+        let parent = requested.parent().filter(|path| !path.as_os_str().is_empty()).unwrap_or_else(|| std::path::Path::new("."));
+        std::fs::create_dir_all(parent).map_err(io)?;
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(requested) {
+            Ok(file) => return Ok((Out::File(BufWriter::new(file)), path.to_string())),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists || std::fs::symlink_metadata(requested).is_ok() => {}
+            Err(error) => return Err(io(error)),
+        }
+        let stem = requested.file_stem().and_then(|name| name.to_str()).unwrap_or("RenderLog");
+        let log = tempfile::Builder::new().prefix(&format!("{stem}-")).suffix(".txt").tempfile_in(parent).map_err(io)?;
+        let (file, actual) = log.keep().map_err(io)?;
+        let actual = actual.to_str().ok_or_else(|| io("non-Unicode render log path"))?.to_string();
+        Ok((Out::File(BufWriter::new(file)), actual))
+    }
+    #[cfg(target_arch = "wasm32")]
+    Err(ExportError::Unsupported("web render logs require an output sink".into()))
 }
 
 /// Whether `path` already exists (never for a sink: it has no memory of earlier jobs).
@@ -73,5 +100,77 @@ impl Seek for Out<'_> {
             Out::File(w) => w.seek(pos),
             Out::Mem { cur, .. } => cur.seek(pos),
         }
+    }
+}
+
+#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn log_creation_preserves_existing_files_directories_and_link_targets() {
+        let kinds = if cfg!(unix) { vec!["file", "hardlink", "directory", "symlink", "dangling"] } else { vec!["file", "hardlink", "directory"] };
+        for kind in kinds {
+            let dir = tempfile::tempdir().unwrap();
+            let requested = dir.path().join("Movie_RenderLog.txt");
+            let unrelated = dir.path().join("unrelated.ecproj");
+            let missing = dir.path().join("missing.ecproj");
+            fs::write(&unrelated, b"unrelated project").unwrap();
+            match kind {
+                "file" => fs::write(&requested, b"previous log").unwrap(),
+                "hardlink" => fs::hard_link(&unrelated, &requested).unwrap(),
+                "directory" => fs::create_dir(&requested).unwrap(),
+                #[cfg(unix)]
+                "symlink" => std::os::unix::fs::symlink(&unrelated, &requested).unwrap(),
+                #[cfg(unix)]
+                "dangling" => std::os::unix::fs::symlink(&missing, &requested).unwrap(),
+                _ => panic!("unknown test fixture"),
+            }
+            let original = fs::read(&requested).ok();
+            let (mut log, actual) = create_log(None, requested.to_str().unwrap()).unwrap();
+            log.write_all(b"new complete log").unwrap();
+            log.finish().unwrap();
+            assert_ne!(std::path::Path::new(&actual), requested);
+            assert_eq!(fs::read(actual).unwrap(), b"new complete log");
+            assert_eq!(fs::read(&requested).ok(), original);
+            assert_eq!(fs::read(unrelated).unwrap(), b"unrelated project");
+            assert!(!missing.exists());
+            #[cfg(unix)]
+            if kind == "symlink" || kind == "dangling" {
+                assert!(fs::symlink_metadata(&requested).unwrap().file_type().is_symlink());
+            }
+        }
+    }
+
+    #[test]
+    fn simultaneous_logs_get_distinct_paths_and_keep_their_own_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let requested = dir.path().join("Movie_RenderLog.txt");
+        let barrier = std::sync::Barrier::new(8);
+        let logs = std::thread::scope(|scope| {
+            let threads: Vec<_> = (0..8)
+                .map(|job| {
+                    let requested = &requested;
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        barrier.wait();
+                        let (mut log, actual) = create_log(None, requested.to_str().unwrap()).unwrap();
+                        let bytes = format!("complete log from job {job}").into_bytes();
+                        log.write_all(&bytes).unwrap();
+                        log.finish().unwrap();
+                        (actual, bytes)
+                    })
+                })
+                .collect();
+            threads.into_iter().map(|thread| thread.join().unwrap()).collect::<Vec<_>>()
+        });
+        let mut paths = std::collections::HashSet::new();
+        for (path, bytes) in logs {
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+            assert!(paths.insert(path));
+        }
+        assert_eq!(paths.len(), 8);
     }
 }

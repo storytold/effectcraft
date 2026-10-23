@@ -68,6 +68,8 @@ pub enum WorkerJob {
     /// output module.
     Render {
         items: Vec<Vec<(RenderQueueItem, String)>>,
+        #[serde(default)]
+        authorizations: Vec<Vec<serde_json::Value>>,
     },
     Warp {
         comp: ItemId,
@@ -472,7 +474,7 @@ async fn run_job(s: &mut Session, job: WorkerJob, post: Post) -> Result<(), Stri
     let kind = job.kind();
     let target = job.target();
     match job {
-        WorkerJob::Render { items } => {
+        WorkerJob::Render { items, authorizations } => {
             let exporter = s.exporter.clone().ok_or("export is not available in this build")?;
             let shared = JobShared::default();
             // Item updates and progress go out as they happen (progress at most every 100 ms).
@@ -487,7 +489,7 @@ async fn run_job(s: &mut Session, job: WorkerJob, post: Post) -> Result<(), Stri
                     post(WorkerReply::Render { state: sh.snapshot() });
                 }
             };
-            crate::render_queue::run_items(s, exporter, items, &shared, &mut |sh| notify(sh, false)).await;
+            crate::render_queue::run_items(s, exporter, items, authorizations, &shared, &mut |sh| notify(sh, false)).await;
             notify(&shared, true);
             Ok(())
         }
@@ -1074,7 +1076,7 @@ mod tests {
         s.execute("renderQueue.add", serde_json::json!({})).unwrap();
         let item = s.project.render_queue[0].clone();
         let reqs = [
-            WorkerJob::Render { items: vec![vec![(item.clone(), "/out.gif".into())]] },
+            WorkerJob::Render { items: vec![vec![(item.clone(), "/out.gif".into())]], authorizations: vec![] },
             WorkerJob::Warp { comp, layer: LayerId(3), effect: 9 },
             WorkerJob::WarpPlan { comp, layer: LayerId(3), effect: 9, time: Tick::from_seconds_f64(0.5) },
             WorkerJob::RotoFreeze { comp, layer: LayerId(3), effect: 9 },
@@ -1166,6 +1168,39 @@ mod tests {
             let t = round(&r);
             assert!(t.starts_with("{\"type\":"), "{t}");
         }
+    }
+
+    #[test]
+    fn legacy_worker_render_uses_the_exporters_safe_default() {
+        struct Legacy(Arc<Mutex<usize>>);
+        impl crate::Exporter for Legacy {
+            fn formats(&self) -> Vec<effectcraft_project::render_queue::OutputFormat> {
+                vec![effectcraft_project::render_queue::OutputFormat::Gif]
+            }
+            fn export(&self, _: &crate::ExportJob, _: &mut dyn FnMut(u64, u64) -> bool) -> Result<crate::ExportResult, String> {
+                *self.0.lock().unwrap() += 1;
+                Ok(crate::ExportResult::default())
+            }
+            fn export_authorized_async<'a>(
+                &'a self,
+                _: &'a crate::ExportJob<'a>,
+                _: &'a serde_json::Value,
+                _: &'a mut dyn FnMut(u64, u64) -> bool,
+            ) -> crate::render_queue::LocalFuture<'a, Result<crate::ExportResult, String>> {
+                Box::pin(async { Err("a legacy request has no authorization".into()) })
+            }
+        }
+        let calls = Arc::new(Mutex::new(0));
+        let mut s = Session { exporter: Some(Arc::new(Legacy(calls.clone()))), ..Default::default() };
+        s.execute("comp.new", serde_json::json!({"width": 4, "height": 4, "duration": 0.2})).unwrap();
+        s.execute("renderQueue.add", serde_json::json!({"format": "gif", "output": "legacy.gif"})).unwrap();
+        let item = s.project.render_queue[0].clone();
+        // The old wire format has no authorizations field.
+        let job: WorkerJob = serde_json::from_value(serde_json::json!({"kind": "render", "items": [[[item, "legacy.gif"]]]})).unwrap();
+        let req = WorkerRequest { id: 1, project: s.project.to_json(), files: vec![], job };
+        let post: Post = Rc::new(|_| {});
+        run_request(&mut s, req, &post);
+        assert_eq!(*calls.lock().unwrap(), 1);
     }
 
     /// An [`Offload`] that runs the job right away in a second session, through JSON (what a

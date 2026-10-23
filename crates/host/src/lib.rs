@@ -29,39 +29,42 @@ pub struct FileExporter {
     pub sink: Option<Arc<effectcraft_export::Sink>>,
 }
 
-impl Exporter for FileExporter {
-    fn formats(&self) -> Vec<OutputFormat> {
-        effectcraft_export::available_formats()
-    }
-    fn export(&self, job: &ExportJob, progress: &mut dyn FnMut(u64, u64) -> bool) -> Result<ExportResult, String> {
-        effectcraft_engine::render::passes::block_on(self.export_async(job, progress))
+impl FileExporter {
+    fn job<'a>(&'a self, job: &'a ExportJob<'a>) -> effectcraft_export::Job<'a> {
+        effectcraft_export::Job {
+            project: job.project,
+            footage: job.footage,
+            expr: job.expr,
+            accel: job.accel,
+            comp: job.item.comp,
+            settings: &job.item.settings,
+            output: &job.item.output,
+            path: job.path,
+            sink: self.sink.as_deref(),
+            options: effectcraft_export::JobOptions {
+                log: job.item.log,
+                label: job.label.clone(),
+                storage: job.storage,
+                overflow: job.project.render_prefs.overflow_folders.clone(),
+            },
+            nested_switches: job.nested_switches,
+        }
     }
 
-    fn export_async<'a>(
+    fn run<'a>(
         &'a self,
         job: &'a ExportJob<'a>,
+        authorization: Option<&'a serde_json::Value>,
         progress: &'a mut dyn FnMut(u64, u64) -> bool,
     ) -> effectcraft_engine::render_queue::LocalFuture<'a, Result<ExportResult, String>> {
         Box::pin(async move {
-            let j = effectcraft_export::Job {
-                project: job.project,
-                footage: job.footage,
-                expr: job.expr,
-                accel: job.accel,
-                comp: job.item.comp,
-                settings: &job.item.settings,
-                output: &job.item.output,
-                path: job.path,
-                sink: self.sink.as_deref(),
-                options: effectcraft_export::JobOptions {
-                    log: job.item.log,
-                    label: job.label.clone(),
-                    storage: job.storage,
-                    overflow: job.project.render_prefs.overflow_folders.clone(),
-                },
-                nested_switches: job.nested_switches,
+            let j = self.job(job);
+            let mut report = |p: &effectcraft_export::Progress| progress(p.done, p.total);
+            let result = match authorization {
+                Some(token) => effectcraft_export::export_authorized_async(&j, token, &mut report).await,
+                None => effectcraft_export::export_async(&j, &mut report).await,
             };
-            match effectcraft_export::export_async(&j, &mut |p| progress(p.done, p.total)).await {
+            match result {
                 Ok(r) => Ok(ExportResult {
                     path: r.path,
                     frames: r.frames,
@@ -77,6 +80,46 @@ impl Exporter for FileExporter {
                 Err(e) => Err(e.to_string()),
             }
         })
+    }
+}
+
+impl Exporter for FileExporter {
+    fn formats(&self) -> Vec<OutputFormat> {
+        effectcraft_export::available_formats()
+    }
+    fn preflight(&self, job: &ExportJob) -> Result<effectcraft_engine::render_queue::ExportPreflight, String> {
+        let review = effectcraft_export::preflight(&self.job(job)).map_err(|e| e.to_string())?;
+        Ok(effectcraft_engine::render_queue::ExportPreflight {
+            collisions: review.collisions,
+            destinations: review.destinations,
+            authorization: review.authorization,
+        })
+    }
+    fn export(&self, job: &ExportJob, progress: &mut dyn FnMut(u64, u64) -> bool) -> Result<ExportResult, String> {
+        effectcraft_engine::render::passes::block_on(self.run(job, None, progress))
+    }
+    fn export_async<'a>(
+        &'a self,
+        job: &'a ExportJob<'a>,
+        progress: &'a mut dyn FnMut(u64, u64) -> bool,
+    ) -> effectcraft_engine::render_queue::LocalFuture<'a, Result<ExportResult, String>> {
+        self.run(job, None, progress)
+    }
+    fn export_authorized(
+        &self,
+        job: &ExportJob,
+        authorization: &serde_json::Value,
+        progress: &mut dyn FnMut(u64, u64) -> bool,
+    ) -> Result<ExportResult, String> {
+        effectcraft_engine::render::passes::block_on(self.run(job, Some(authorization), progress))
+    }
+    fn export_authorized_async<'a>(
+        &'a self,
+        job: &'a ExportJob<'a>,
+        authorization: &'a serde_json::Value,
+        progress: &'a mut dyn FnMut(u64, u64) -> bool,
+    ) -> effectcraft_engine::render_queue::LocalFuture<'a, Result<ExportResult, String>> {
+        self.run(job, Some(authorization), progress)
     }
 }
 

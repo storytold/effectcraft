@@ -13,6 +13,7 @@ workspace = true
 effectcraft-engine = { workspace = true }
 effectcraft-project = { workspace = true }
 log = { workspace = true }
+serde_json = { workspace = true }
 effectcraft-media = { workspace = true }
 effectcraft-expr = { workspace = true }
 effectcraft-script = { workspace = true }
@@ -24,7 +25,6 @@ effectcraft-plugin = { workspace = true }
 effectcraft-plugin = { workspace = true, features = ["wasm"] }
 
 [dev-dependencies]
-serde_json = { workspace = true }
 effectcraft-psd = { workspace = true }
 effectcraft-svg = { workspace = true }
 effectcraft-pdf = { workspace = true }

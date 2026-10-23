@@ -104,7 +104,8 @@ pub(crate) struct Cx<'a> {
     pub frame_times: Option<Mutex<Vec<(u64, f64)>>>,
     /// Files written to an overflow folder.
     pub overflowed: Mutex<Vec<String>>,
-    written: Mutex<Vec<String>>,
+    pub pending: crate::pending::Pending,
+    pub authorization: Option<&'a serde_json::Value>,
 }
 
 impl<'a> std::ops::Deref for Cx<'a> {
@@ -152,7 +153,7 @@ impl<'a> Cx<'a> {
         let cache = LayerCache::default();
         // With deferred readbacks, buffers computed from a missed pass's placeholders are not kept.
         cache.set_gate(job.accel.and_then(|a| a.miss_gate()));
-        Cx { job, project, cache, frame_times, overflowed: Mutex::new(vec![]), written: Mutex::new(vec![]) }
+        Cx { job, project, cache, frame_times, overflowed: Mutex::new(vec![]), pending: crate::pending::Pending::default(), authorization: None }
     }
 
     pub fn comp(&self) -> Option<&Comp> {
@@ -292,28 +293,9 @@ impl<'a> Cx<'a> {
         crate::fit(px, img.width, img.height, w, h)
     }
 
-    /// Open a file and remember ownership for cancellation cleanup (including overflow paths).
+    /// Stage media under this job's ownership; final paths remain unchanged until publication.
     pub fn create(&self, path: &str) -> crate::Result<out::Out<'_>> {
-        let file = out::create(self.sink, path)?;
-        if self.sink.is_none() {
-            self.written.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(path.to_owned());
-        }
-        Ok(file)
-    }
-
-    pub fn remove_cancelled_outputs(&self) -> crate::Result<()> {
-        let mut failure = None;
-        for path in self.written.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter() {
-            if let Err(e) = std::fs::remove_file(path)
-                && e.kind() != std::io::ErrorKind::NotFound
-            {
-                failure.get_or_insert_with(|| crate::ExportError::Io(format!("cannot remove cancelled output {path}: {e}")));
-            }
-        }
-        match failure {
-            Some(error) => Err(error),
-            None => Ok(()),
-        }
+        self.pending.create_authorized(self.sink, path, self.authorization)
     }
 
     /// Where a file goes: `path`, or (Use Storage Overflow) the first overflow folder with room
@@ -375,7 +357,7 @@ impl<'a> Cx<'a> {
                 s.push_str(&format!("  Frame {} ({:.3} s): rendered in {:.1} ms\n", f0 + i as i64, t.seconds(), secs * 1000.0));
             }
         }
-        let mut f = self.create(&path).ok()?;
+        let (mut f, path) = out::create_log(self.sink, &path).ok()?;
         std::io::Write::write_all(&mut f, s.as_bytes()).ok()?;
         f.finish().ok()?;
         Some(path)

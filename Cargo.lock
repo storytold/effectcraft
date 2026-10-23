@@ -1317,8 +1317,11 @@ dependencies = [
  "image",
  "log",
  "rayon",
+ "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
  "web-time",
+ "winapi-util",
 ]
 
 [[package]]

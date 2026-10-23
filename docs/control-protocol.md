@@ -53,6 +53,31 @@ export formats, parity summary), `jobs.list` (Progress panel jobs, e.g. the back
 Every engine command is reachable through `engine.execute`, and every interactive widget of every
 panel registers an element id; both are enforced by `crates/ui-egui/tests/ui_agent_audit.rs`.
 
+### Existing render outputs
+
+`engine.execute` stays headless: rendering a fresh destination needs no extra params. Existing
+outputs require an explicit review and acceptance in the same session:
+
+1. Run `renderQueue.preflight {}`. It returns `{confirmation, collisions: [path]}` with the exact
+   existing movie/audio files or sequence frame paths (including configured overflow alternatives).
+   It creates no files and starts no render.
+2. Review those paths, then run `renderQueue.render {confirmation: <id>, overwrite: true}`.
+   Or decline with `renderQueue.cancelPreflight {confirmation: <id>}`.
+
+A review is consumed once. Project/queue/output changes invalidate it; destination files that
+appear or change after review are refused by the exporter. The engine holds the authorization
+snapshot privately. Supplying `overwrite: true` alone is an error. A preflight with no collisions
+can be rendered with its confirmation id and no overwrite flag.
+
+`ui.menu.invoke {id: "renderQueue.render"}` and the Render panel show one **Replace and Render /
+Cancel** dialog for existing destinations. Escape cancels; Enter does not accept replacement.
+Automation ids: `dialog.overwriteRender.replace`, `dialog.overwriteRender.cancel`.
+Duplicate resolved destination names in the queue are rejected before rendering; the exporter's
+destination validation also protects files that appear or change after the review.
+Other files and sequence frames beyond the exported range are kept. The headless CLI accepts
+`render --overwrite` (also with `--queue`); this explicitly reviews and accepts this invocation's
+current destinations. Without it, existing outputs produce an actionable error.
+
 ## UI state
 
 | Method | Params | Result |

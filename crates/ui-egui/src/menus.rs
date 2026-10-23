@@ -772,16 +772,8 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
         "keys.interpolation" if no_params(&params) => crate::panels::key_dialogs::open_interpolation(app)?,
         "layer.timeStretch" if no_params(&params) => crate::panels::key_dialogs::open_time_stretch(app)?,
         _ => {
-            if id == "renderQueue.render" && params.get("wait").is_none() {
-                // The UI renders in the background; the panel shows progress.
-                let mut p = params.clone();
-                if let Some(m) = p.as_object_mut() {
-                    m.insert("wait".into(), json!(false));
-                } else {
-                    p = json!({"wait": false});
-                }
-                app.show_panel(PanelKind::RenderQueue);
-                return app.session.execute(id, p).map_err(|e| e.to_string());
+            if id == "renderQueue.render" {
+                return crate::panels::overwrite_render::request(app, ctx, params);
             }
             if id == "renderQueue.add" {
                 let r = app.session.execute(id, params).map_err(|e| e.to_string());
@@ -800,17 +792,6 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
             }
             if crate::panels::dialogs::open_form(app, id, &params) {
                 return Ok(json!({"dialog": id}));
-            }
-            if id == "renderQueue.render" && params.get("wait").is_none() {
-                // The UI renders in the background; the panel shows progress.
-                let mut p = params.clone();
-                if let Some(m) = p.as_object_mut() {
-                    m.insert("wait".into(), json!(false));
-                } else {
-                    p = json!({"wait": false});
-                }
-                app.show_panel(PanelKind::RenderQueue);
-                return app.session.execute(id, p).map_err(|e| e.to_string());
             }
             if id == "renderQueue.add" {
                 let r = app.session.execute(id, params).map_err(|e| e.to_string());

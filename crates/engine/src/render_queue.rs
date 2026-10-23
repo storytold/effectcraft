@@ -53,12 +53,27 @@ pub struct ExportResult {
     pub overflow: Vec<String>,
 }
 
+/// The export layer resolves all frame names and captures the existing destinations here.
+/// `authorization` is opaque to the engine and must be revalidated by the exporter before writing.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ExportPreflight {
+    pub collisions: Vec<String>,
+    /// Canonical possible write targets, excluding skipped frames. Used to reject queue conflicts.
+    #[serde(default)]
+    pub destinations: Vec<String>,
+    pub authorization: serde_json::Value,
+}
+
 /// Encodes render queue items (implemented by the export layer).
 pub trait Exporter: Send + Sync {
     /// Formats this build can write.
     fn formats(&self) -> Vec<OutputFormat>;
+    /// Inspect this output without writing. Exporters without filesystem outputs need no review.
+    fn preflight(&self, _job: &ExportJob) -> Result<ExportPreflight, String> {
+        Ok(ExportPreflight::default())
+    }
     /// Render and write one item (blocking). `progress(done, total)` returns `false` to cancel;
-    /// a cancelled export removes the files it opened for that output and returns `Err("cancelled")`.
+    /// A cancelled export removes its job-owned staging, preserves existing destinations, and returns `Err("cancelled")`.
     /// Completed earlier queue items and unrelated files must be preserved.
     fn export(&self, job: &ExportJob, progress: &mut dyn FnMut(u64, u64) -> bool) -> Result<ExportResult, String>;
     /// [`Exporter::export`] as a future: renders whose GPU readbacks are deferred (a browser
@@ -67,6 +82,40 @@ pub trait Exporter: Send + Sync {
     fn export_async<'a>(&'a self, job: &'a ExportJob<'a>, progress: &'a mut dyn FnMut(u64, u64) -> bool) -> LocalFuture<'a, Result<ExportResult, String>> {
         Box::pin(async move { self.export(job, progress) })
     }
+    /// Export with the exact destination snapshot accepted by the caller. Implementations must
+    /// reject newly appeared or changed destinations rather than treating this as blanket consent.
+    fn export_authorized(
+        &self,
+        job: &ExportJob,
+        _authorization: &serde_json::Value,
+        progress: &mut dyn FnMut(u64, u64) -> bool,
+    ) -> Result<ExportResult, String> {
+        self.export(job, progress)
+    }
+    /// Authorized counterpart to `export_async`. The default preserves existing async exporters;
+    /// filesystem exporters that implement authorization override this as well.
+    fn export_authorized_async<'a>(
+        &'a self,
+        job: &'a ExportJob<'a>,
+        _authorization: &'a serde_json::Value,
+        progress: &'a mut dyn FnMut(u64, u64) -> bool,
+    ) -> LocalFuture<'a, Result<ExportResult, String>> {
+        self.export_async(job, progress)
+    }
+}
+
+type RenderItems = Vec<Vec<(RenderQueueItem, String)>>;
+
+/// A single session-local review. It is consumed on render or cancellation, never persisted.
+#[doc(hidden)]
+pub struct RenderReview {
+    id: u64,
+    project: Arc<Project>,
+    exporter: Arc<dyn Exporter>,
+    items: RenderItems,
+    authorizations: Vec<Vec<serde_json::Value>>,
+    collisions: Vec<String>,
+    nested_switches: bool,
 }
 
 /// A boxed future that stays on its thread.
@@ -153,6 +202,7 @@ struct Work {
     /// Per queue item: one (item with that output module, resolved path) per output module
     /// (and per segment, see [`Session::segments`]).
     items: Vec<Vec<(RenderQueueItem, String)>>,
+    authorizations: Vec<Vec<serde_json::Value>>,
     /// Settings ▸ General ▸ Switches Affect Nested Comps.
     nested_switches: bool,
 }
@@ -226,6 +276,7 @@ pub(crate) async fn run_items(
     s: &Session,
     exporter: Arc<dyn Exporter>,
     items: Vec<Vec<(RenderQueueItem, String)>>,
+    authorizations: Vec<Vec<serde_json::Value>>,
     shared: &JobShared,
     notify: &mut dyn FnMut(&JobShared),
 ) {
@@ -237,6 +288,7 @@ pub(crate) async fn run_items(
         exporter,
         storage: s.storage_quota.clone(),
         items,
+        authorizations,
         nested_switches: s.prefs.general.switches_affect_nested_comps,
     };
     run_work(work, shared, notify).await;
@@ -282,21 +334,23 @@ async fn run_work(w: Work, shared: &JobShared, notify: &mut dyn FnMut(&JobShared
                 label: format!("#{index} {name} (output module {})", mi + 1),
                 nested_switches: w.nested_switches,
             };
-            let rr = w
-                .exporter
-                .export_async(&job, &mut |done, total| {
-                    {
-                        let mut s = lock(&shared.state);
-                        s.done = done;
-                        s.total = total;
-                        s.elapsed = t0.elapsed().as_secs_f64();
-                        s.item_elapsed = t1.elapsed().as_secs_f64();
-                        s.remaining = (done > 0).then(|| s.item_elapsed / done as f64 * total.saturating_sub(done) as f64);
-                    }
-                    notify(shared);
-                    !shared.cancel.load(Ordering::Relaxed)
-                })
-                .await;
+            let mut progress = |done, total: u64| {
+                {
+                    let mut s = lock(&shared.state);
+                    s.done = done;
+                    s.total = total;
+                    s.elapsed = t0.elapsed().as_secs_f64();
+                    s.item_elapsed = t1.elapsed().as_secs_f64();
+                    s.remaining = (done > 0).then(|| s.item_elapsed / done as f64 * total.saturating_sub(done) as f64);
+                }
+                notify(shared);
+                !shared.cancel.load(Ordering::Relaxed)
+            };
+            let rr = match w.authorizations.get(k).and_then(|m| m.get(mi)) {
+                Some(token) => w.exporter.export_authorized_async(&job, token, &mut progress).await,
+                // Older worker requests have no review: retain the exporter's safe default.
+                None => w.exporter.export_async(&job, &mut progress).await,
+            };
             match rr {
                 Ok(res) if mi == 0 => r = Ok(res),
                 Ok(_) => {}
@@ -387,10 +441,7 @@ impl Session {
     pub fn segments(&self, item: &RenderQueueItem, path: &str) -> Vec<(RenderQueueItem, String)> {
         let Some(comp) = self.project.comp(item.comp) else { return vec![(item.clone(), path.to_string())] };
         let fmt = item.output.format;
-        let frames = item.settings.frame_count(comp);
-        let (w, h) = item.settings.output_size(comp);
-        let bpf = bytes_per_frame(&item.output, w, h, item.settings.rate(comp).as_f64());
-        let Some(per) = self.prefs.segment_frames(frames, fmt.is_sequence(), bpf) else { return vec![(item.clone(), path.to_string())] };
+        let Some((frames, per)) = self.segment_span(item, &item.output) else { return vec![(item.clone(), path.to_string())] };
         let p = std::path::Path::new(path);
         let dir = p.parent().map(|d| d.to_path_buf()).unwrap_or_default();
         let stem = p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
@@ -422,6 +473,14 @@ impl Session {
         out
     }
 
+    fn segment_span(&self, item: &RenderQueueItem, output: &OutputModule) -> Option<(u64, u64)> {
+        let comp = self.project.comp(item.comp)?;
+        let frames = item.settings.frame_count(comp);
+        let (w, h) = item.settings.output_size(comp);
+        let bpf = bytes_per_frame(output, w, h, item.settings.rate(comp).as_f64());
+        self.prefs.segment_frames(frames, output.format.is_sequence(), bpf).map(|per| (frames, per))
+    }
+
     /// Whether a render job is running.
     pub fn is_rendering(&self) -> bool {
         self.render_job.as_ref().is_some_and(|j| !j.is_finished())
@@ -432,26 +491,27 @@ impl Session {
         self.render_job.as_ref().map(|j| j.shared.snapshot())
     }
 
-    /// Start rendering every queued item. `wait`: block until done (otherwise a background thread
-    /// renders, or the [`Session::offload`] worker; call [`Session::poll_render`] regularly).
-    /// Returns the ids being rendered. Without threads or an offload (wasm32) the render always
-    /// runs to completion before this returns.
-    pub fn start_render(&mut self, wait: bool) -> Result<Vec<u64>, String> {
-        let offload = self.offload.clone().filter(|_| !wait);
-        let wait = wait || (cfg!(target_arch = "wasm32") && offload.is_none());
-        if self.is_rendering() {
-            return Err("a render is already in progress".into());
-        }
-        self.poll_render();
-        let exporter = self.exporter.clone().ok_or("export is not available in this build")?;
-        let formats = exporter.formats();
+    fn render_items(&self, formats: &[OutputFormat]) -> Result<(RenderItems, Vec<(u64, RenderStatus)>), String> {
         let mut items = Vec::new();
         let mut needs_output = Vec::new();
+        let mut planned = 0_u64;
+        let mut plan_bytes = 0_usize;
         for it in self.project.render_queue.iter().filter(|i| i.is_queued()) {
+            if it.extra_outputs.len().saturating_add(1) > 100_000 {
+                return Err("render review exceeds 100000 output modules; render fewer queue items at once".into());
+            }
+            // Every work entry exports one module. Avoid cloning all other modules per segment.
+            let mut single = it.clone();
+            single.extra_outputs.clear();
             let mut modules = vec![];
             let mut problem = None;
             for om in it.output_modules() {
-                let mut m = it.clone();
+                let count = self.segment_span(it, om).map_or(1, |(frames, per)| frames.div_ceil(per.max(1)));
+                planned = planned
+                    .checked_add(count)
+                    .filter(|n| *n <= 100_000)
+                    .ok_or("render review exceeds 100000 output segments; render fewer queue items at once")?;
+                let mut m = single.clone();
                 m.output = om.clone();
                 match self.resolve_output(&m) {
                     Some(p) if formats.contains(&om.format) => {
@@ -459,6 +519,19 @@ impl Session {
                         // Movie Files.
                         let bits = output_bits(om.format, self.project.settings.bit_depth);
                         let p = self.prefs.output_name(&p, bits);
+                        // Count alone does not bound cloned strings: a long output template or
+                        // module name repeated over many segments can exhaust memory first.
+                        let item_bytes = serde_json::to_vec(&m).map_err(|e| e.to_string())?.len();
+                        let count = usize::try_from(count).map_err(|_| "render segment count is too large")?;
+                        let bytes = item_bytes
+                            .checked_add(p.len())
+                            .and_then(|n| n.checked_add(std::mem::size_of::<RenderQueueItem>() + 64))
+                            .and_then(|n| n.checked_mul(count))
+                            .ok_or("render review output plan is too large")?;
+                        plan_bytes = plan_bytes
+                            .checked_add(bytes)
+                            .filter(|n| *n <= 64 * 1024 * 1024)
+                            .ok_or("render review output plan exceeds 64 MiB; render fewer frames or queue items at once")?;
                         modules.extend(self.segments(&m, &p));
                     }
                     Some(_) => problem = Some(RenderStatus::Failed(format!("{} export is not available", om.format.label()))),
@@ -474,15 +547,139 @@ impl Session {
                 None => items.push(modules),
             }
         }
-        if !needs_output.is_empty() {
-            let p = Arc::make_mut(&mut self.project);
-            for (id, st) in needs_output {
-                if let Some(i) = p.render_queue.iter_mut().find(|i| i.id == id) {
-                    i.status = st;
-                }
-            }
-            self.bump();
+        Ok((items, needs_output))
+    }
+
+    /// Review exact destinations once for this queue. No files are created and no item starts.
+    pub fn preflight_render(&mut self) -> Result<serde_json::Value, String> {
+        self.render_review = None;
+        if self.is_rendering() {
+            return Err("a render is already in progress".into());
         }
+        self.poll_render();
+        let exporter = self.exporter.clone().ok_or("export is not available in this build")?;
+        let (items, _) = self.render_items(&exporter.formats())?;
+        if items.is_empty() {
+            return Err("nothing is queued: add a composition and tick Render".into());
+        }
+        let mut authorizations = Vec::new();
+        let mut collisions = Vec::new();
+        let mut review_bytes = 0_usize;
+        let mut destinations = std::collections::HashSet::new();
+        for modules in &items {
+            let mut tokens = Vec::new();
+            for (item, path) in modules {
+                let job = ExportJob {
+                    project: &self.project,
+                    footage: self.footage.as_ref(),
+                    expr: self.expr.as_deref(),
+                    accel: self.accel.as_deref(),
+                    item,
+                    path,
+                    storage: self.storage_quota.as_deref(),
+                    label: "Render preflight".into(),
+                    nested_switches: self.prefs.general.switches_affect_nested_comps,
+                };
+                let review = exporter.preflight(&job).map_err(|error| {
+                    let name = self.project.item(item.comp).map(|i| i.name.as_str()).unwrap_or("Render output");
+                    format!("{name}: {error}")
+                })?;
+                for destination in review.destinations {
+                    if destinations.contains(&destination) {
+                        return Err(format!("queued outputs use the same output destination: {destination}; choose separate output paths"));
+                    }
+                    destinations.insert(destination);
+                }
+                let bytes = serde_json::to_vec(&review.authorization).map_err(|e| e.to_string())?.len();
+                review_bytes = review_bytes
+                    .checked_add(bytes)
+                    .filter(|n| *n <= 64 * 1024 * 1024)
+                    .ok_or("render review exceeds 64 MiB; render fewer queue items at once")?;
+                if collisions.len().saturating_add(review.collisions.len()) > 100_000 {
+                    return Err("render review exceeds 100000 existing outputs; render fewer queue items at once".into());
+                }
+                collisions.extend(review.collisions);
+                tokens.push(review.authorization);
+            }
+            authorizations.push(tokens);
+        }
+        collisions.sort();
+        collisions.dedup();
+        let id = crate::offload::next_id();
+        let result = serde_json::json!({"confirmation": id, "collisions": collisions});
+        self.render_review = Some(RenderReview {
+            id,
+            project: self.project.clone(),
+            exporter,
+            items,
+            authorizations,
+            collisions,
+            nested_switches: self.prefs.general.switches_affect_nested_comps,
+        });
+        Ok(result)
+    }
+
+    /// Discard a declined review, so its consent cannot be reused later.
+    pub fn cancel_render_preflight(&mut self, confirmation: u64) -> bool {
+        if self.render_review.as_ref().is_some_and(|r| r.id == confirmation) {
+            self.render_review = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Start rendering every queued item. `wait`: block until done (otherwise a background thread
+    /// renders, or the [`Session::offload`] worker; call [`Session::poll_render`] regularly).
+    /// Returns the ids being rendered. Without threads or an offload (wasm32) the render always
+    /// runs to completion before this returns.
+    pub fn start_render(&mut self, wait: bool) -> Result<Vec<u64>, String> {
+        self.start_render_reviewed(wait, None, false)
+    }
+
+    /// Start with an optional one-shot destination review. Replacement requires both the review
+    /// id and explicit intent; changing the project, queue or resolved paths invalidates it.
+    pub fn start_render_reviewed(&mut self, wait: bool, confirmation: Option<u64>, overwrite: bool) -> Result<Vec<u64>, String> {
+        if confirmation.is_none() {
+            if overwrite {
+                return Err("overwrite requires renderQueue.preflight and its confirmation id".into());
+            }
+            if self.is_rendering() {
+                return Err("a render is already in progress".into());
+            }
+            self.poll_render();
+            let exporter = self.exporter.clone().ok_or("export is not available in this build")?;
+            let (_, problems) = self.render_items(&exporter.formats())?;
+            self.set_render_problems(problems);
+            self.preflight_render()?;
+        }
+        let review = self.render_review.take().ok_or("render confirmation expired; run renderQueue.preflight again")?;
+        if confirmation.is_some_and(|id| id != review.id) {
+            return Err("render confirmation expired; run renderQueue.preflight again".into());
+        }
+        let exporter = self.exporter.clone().ok_or("export is not available in this build")?;
+        let (items, needs_output) = self.render_items(&exporter.formats())?;
+        if !Arc::ptr_eq(&self.project, &review.project)
+            || !Arc::ptr_eq(&exporter, &review.exporter)
+            || items != review.items
+            || self.prefs.general.switches_affect_nested_comps != review.nested_switches
+        {
+            return Err("render destinations or project changed; run renderQueue.preflight again".into());
+        }
+        if !review.collisions.is_empty() && !overwrite {
+            return Err(
+                "render output already exists; run renderQueue.preflight, review collisions, then render with overwrite:true and its confirmation id".into()
+            );
+        }
+        let authorizations = review.authorizations;
+        let offload = self.offload.clone().filter(|_| !wait);
+        let wait = wait || (cfg!(target_arch = "wasm32") && offload.is_none());
+        if self.is_rendering() {
+            return Err("a render is already in progress".into());
+        }
+        self.poll_render();
+        let exporter = self.exporter.clone().ok_or("export is not available in this build")?;
+        self.set_render_problems(needs_output);
         if items.is_empty() {
             return Err("nothing is queued: add a composition (Composition ▸ Add to Render Queue) and tick Render".into());
         }
@@ -494,7 +691,7 @@ impl Session {
                 id,
                 project: self.project.to_json(),
                 files: crate::offload::footage_files(&self.project),
-                job: crate::offload::WorkerJob::Render { items },
+                job: crate::offload::WorkerJob::Render { items, authorizations },
             };
             off.start(req, inbox.clone())?;
             let shared = Arc::new(JobShared::default());
@@ -511,6 +708,7 @@ impl Session {
             exporter,
             storage: self.storage_quota.clone(),
             items,
+            authorizations,
             nested_switches: self.prefs.general.switches_affect_nested_comps,
         };
         let shared = Arc::new(JobShared::default());
@@ -542,6 +740,19 @@ impl Session {
         }
         self.poll_render();
         Ok(ids)
+    }
+
+    fn set_render_problems(&mut self, problems: Vec<(u64, RenderStatus)>) {
+        if problems.is_empty() {
+            return;
+        }
+        let p = Arc::make_mut(&mut self.project);
+        for (id, status) in problems {
+            if let Some(item) = p.render_queue.iter_mut().find(|i| i.id == id) {
+                item.status = status;
+            }
+        }
+        self.bump();
     }
 
     /// Stop the running render (the current item becomes "User Stopped").

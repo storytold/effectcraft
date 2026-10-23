@@ -28,6 +28,7 @@ rayon = { workspace = true }
 web-time = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 effectcraft-media = { workspace = true }
@@ -36,3 +37,9 @@ effectcraft-color = { workspace = true }
 filmcraft-opus = { workspace = true }
 filmcraft-vp9 = { workspace = true }
 effectcraft-keyframe = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tempfile = "3.27"
+
+[target.'cfg(windows)'.dependencies]
+winapi-util = "0.1.11"

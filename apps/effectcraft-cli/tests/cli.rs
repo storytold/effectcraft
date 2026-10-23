@@ -510,6 +510,34 @@ fn a_failed_render_under_run_and_exec_exits_1() {
     assert!(v["error"].as_str().is_some_and(|e| e.starts_with("T: ")), "{v}");
 }
 
+#[test]
+fn render_overwrite_flag_is_explicit_for_saved_queues() {
+    let root = tmp("overwrite-confirmation");
+    std::fs::create_dir_all(&root).unwrap();
+    let project = root.join("queue.ecproj");
+    let output = root.join("out.gif");
+    let add = json!({"format": "gif", "output": output}).to_string();
+    ok_json(&[
+        "run",
+        "--empty",
+        "comp.new",
+        r#"{"name":"T","width":4,"height":4,"frameRate":10,"duration":0.2}"#,
+        "renderQueue.add",
+        &add,
+        "--save-as",
+        project.to_str().unwrap(),
+    ]);
+    std::fs::write(&output, b"old output").unwrap();
+    let args = ["render", "--project", project.to_str().unwrap(), "--queue"];
+    let (code, result) = run_json(&args);
+    assert_eq!(code, 1, "{result}");
+    assert!(result["error"].as_str().unwrap().contains("preflight"));
+    assert_eq!(std::fs::read(&output).unwrap(), b"old output");
+    ok_json(&[args.as_slice(), &["--overwrite"]].concat());
+    assert!(std::fs::read(&output).unwrap().starts_with(b"GIF89a"));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 /// `render --bitrate` (#440) targets the bitrate in VP9 WebM.
 #[test]
 fn render_bitrate_applies_to_vp9_webm() {

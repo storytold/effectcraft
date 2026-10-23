@@ -422,6 +422,9 @@ pub struct Session {
     pub storage_quota: Option<Arc<dyn effectcraft_project::render_queue::StorageQuota>>,
     /// The running (or finished, not yet polled) render.
     pub render_job: Option<render_queue::RenderJob>,
+    /// Pending one-shot output review (managed by the render queue).
+    #[doc(hidden)]
+    pub render_review: Option<render_queue::RenderReview>,
     /// The running (or finished, not yet polled) track analysis.
     pub track_job: Option<tracking::TrackJob>,
     /// The running (or finished, not yet polled) mask track.
@@ -574,6 +577,7 @@ impl Default for Session {
             exporter: None,
             storage_quota: None,
             render_job: None,
+            render_review: None,
             track_job: None,
             mask_job: None,
             warp_job: None,

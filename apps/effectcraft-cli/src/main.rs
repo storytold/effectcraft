@@ -16,6 +16,7 @@
 //!     [--profile main|main10] [--level auto|4.1] [--rate-control bitrate|quality] [--video-quality 1-100]
 //!     [--keyint FRAMES] [--webm-codec vp9|av1] [--audio-bitrate KBPS] [--opus-app audio|voice]
 //!     (a relative --out is relative to the working directory; --queue outputs follow the project's own settings)
+//!     [--overwrite] replace existing outputs (only the reviewed frame range, no trailing-frame deletion)
 //!     [--progress]  report progress on stderr when it is not a terminal, up to four lines a second:
 //!     `progress <frames done> <frames total> <seconds elapsed> <seconds left, or - when unknown>`
 //! effectcraft-cli render --template T.ectemplate [--values V.json] --out FILE
@@ -108,6 +109,7 @@ const USAGE: &str = "usage: effectcraft-cli <info|commands|exec|run|props|get|se
                                            (formats h264|hevc|av1|prores|webm|png|jpeg|tiff|exr|gif|wav|aiff;
                                            --profile..--keyint: HEVC / AV1, --audio-bitrate/--opus-app: WebM Opus)
                                            a relative --out is relative to the working directory
+                                           --overwrite: replace existing outputs; other files and later frames stay
                                            --progress: progress lines on stderr when it is not a terminal
                                            (progress <frames done> <total> <seconds elapsed> <seconds left|->)
   render/render-frame --template T.ectemplate [--values V.json]   render one template instance
@@ -194,6 +196,7 @@ const FLAGS: &[&str] = &[
     "--adv3d",
     "--autosave",
     "--progress",
+    "--overwrite",
 ];
 
 struct Args {
@@ -448,6 +451,9 @@ fn emit(v: &Value, json_out: bool) {
 }
 
 fn run(cmd: &str, args: &Args, json_out: bool) -> Result<(), Failure> {
+    if args.flag("--overwrite") && cmd != "render" {
+        return usage_err("--overwrite is only supported by render; engine commands require a preflight confirmation id");
+    }
     if args.flag("--autosave") && cmd != "mcp" {
         return usage_err("--autosave is only supported by mcp");
     }
@@ -775,7 +781,14 @@ fn render(args: &Args, json_out: bool) -> Result<(), Failure> {
             r["outputModuleSummary"].as_str().unwrap_or("")
         );
     }
-    s.execute("renderQueue.render", json!({"wait": false})).map_err(err)?;
+    let mut render_params = json!({"wait": false});
+    if args.flag("--overwrite") {
+        // The explicit flag authorizes only the destinations observed in this invocation.
+        let review = s.execute("renderQueue.preflight", json!({})).map_err(err)?;
+        render_params["confirmation"] = review["confirmation"].clone();
+        render_params["overwrite"] = json!(true);
+    }
+    s.execute("renderQueue.render", render_params).map_err(err)?;
     let tty = std::io::IsTerminal::is_terminal(&std::io::stderr());
     // `--progress`: one line per update for a program reading stderr (a terminal gets the live line).
     let lines = args.flag("--progress") && !tty;

@@ -1364,6 +1364,9 @@ fn automation_roots_confine_file_access() {
     assert!(queue["items"][0]["outputPath"].as_str().is_some_and(|o| o.starts_with(&*read.to_string_lossy())), "{queue}");
     let msg = denied(&mut s, "execute_command", json!({"command": "renderQueue.render"}));
     assert!(msg.contains("cannot write"), "{msg}");
+    // Reviewing destination metadata must obey the same root check before inspecting it.
+    let msg = denied(&mut s, "execute_command", json!({"command": "renderQueue.preflight"}));
+    assert!(msg.contains("cannot write"), "{msg}");
     call_json(&mut s, "open_project", json!({"path": p(&write, "saved.ecproj")}));
     call_json(&mut s, "save_project", json!({}));
     // Through a symbolic link out of a root.

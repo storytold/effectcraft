@@ -35,7 +35,9 @@
 mod encode;
 mod hevc_av1;
 mod out;
+mod pending;
 mod pipeline;
+mod preflight;
 mod uncompressed;
 mod webm;
 mod webm_av1;
@@ -51,6 +53,7 @@ pub use effectcraft_project::render_queue;
 pub use effectcraft_project::render_queue::StorageQuota;
 pub use out::Sink;
 pub(crate) use pipeline::Cx;
+pub use preflight::{OutputPreflight, preflight};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ExportError {
@@ -167,16 +170,43 @@ pub fn export(job: &Job, progress: &mut dyn FnMut(&Progress) -> bool) -> Result<
     effectcraft_render::passes::block_on(export_async(job, progress))
 }
 
+/// Export only the destination versions reviewed by [`preflight`]. The host keeps the
+/// returned authorization until the user accepts the grouped overwrite confirmation.
+pub fn export_authorized(job: &Job, authorization: &serde_json::Value, progress: &mut dyn FnMut(&Progress) -> bool) -> Result<Report> {
+    effectcraft_render::passes::block_on(export_authorized_async(job, authorization, progress))
+}
+
 /// [`export`] as a future: with an accelerator whose readbacks are deferred (WebGPU in a
 /// browser worker) every frame renders in passes, awaiting the device in between
 /// ([`effectcraft_render::passes`]); otherwise it never waits and frames render in parallel
 /// batches as in [`export`].
 pub async fn export_async(job: &Job<'_>, progress: &mut dyn FnMut(&Progress) -> bool) -> Result<Report> {
+    export_inner(job, None, progress).await
+}
+
+/// Asynchronous version of [`export_authorized`]. A boolean overwrite flag alone is
+/// insufficient: the authorization must contain the destinations captured by preflight.
+pub async fn export_authorized_async(job: &Job<'_>, authorization: &serde_json::Value, progress: &mut dyn FnMut(&Progress) -> bool) -> Result<Report> {
+    export_inner(job, Some(authorization), progress).await
+}
+
+async fn export_inner(job: &Job<'_>, authorization: Option<&serde_json::Value>, progress: &mut dyn FnMut(&Progress) -> bool) -> Result<Report> {
+    preflight::validate(job, authorization)?;
     let t0 = Instant::now();
-    let cx = Cx::new(job);
+    let mut cx = Cx::new(job);
+    cx.authorization = authorization;
     let mut r = export_with(&cx, progress, t0).await;
+    if r.is_ok()
+        && let Err(error) = cx.pending.publish()
+    {
+        r = Err(error);
+    }
+    if let Err(original) = &r
+        && let Err(cleanup) = cx.pending.discard()
+    {
+        return Err(io(format!("{original}; cleanup also failed: {cleanup}")));
+    }
     if matches!(r, Err(ExportError::Cancelled)) {
-        cx.remove_cancelled_outputs()?;
         return r;
     }
     let log = cx.write_log(&r, t0.elapsed().as_secs_f64());

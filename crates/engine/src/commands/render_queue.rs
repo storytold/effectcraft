@@ -670,6 +670,14 @@ fn duplicate(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn render(s: &mut Session, p: &Value) -> Result<Value> {
     let wait = b_p(p, "wait").unwrap_or(true);
+    let confirmation = match p.get("confirmation") {
+        None => None,
+        Some(v) => Some(v.as_u64().ok_or_else(|| bad("renderQueue.render", "confirmation must be a preflight id"))?),
+    };
+    let overwrite = match p.get("overwrite") {
+        None => false,
+        Some(v) => v.as_bool().ok_or_else(|| bad("renderQueue.render", "overwrite must be a boolean"))?,
+    };
     // Settings ▸ Project ▸ Auto-Save ▸ Save When Starting Render Queue.
     if s.prefs.auto_save.enabled
         && s.prefs.auto_save.save_on_render_start
@@ -678,9 +686,18 @@ fn render(s: &mut Session, p: &Value) -> Result<Value> {
     {
         log::warn!("{e}");
     }
-    let ids = s.start_render(wait).map_err(EngineError::Other)?;
+    let ids = s.start_render_reviewed(wait, confirmation, overwrite).map_err(EngineError::Other)?;
     let items: Vec<Value> = s.project.render_queue.iter().enumerate().filter(|(_, i)| ids.contains(&i.id)).map(|(k, i)| item_json(s, i, k)).collect();
     Ok(json!({"rendering": s.is_rendering(), "items": items}))
+}
+
+fn preflight(s: &mut Session, _: &Value) -> Result<Value> {
+    s.preflight_render().map_err(EngineError::Other)
+}
+
+fn cancel_preflight(s: &mut Session, p: &Value) -> Result<Value> {
+    let id = p.get("confirmation").and_then(Value::as_u64).ok_or_else(|| bad("renderQueue.cancelPreflight", "confirmation must be a preflight id"))?;
+    Ok(json!({"cancelled": s.cancel_render_preflight(id)}))
 }
 
 fn stop(s: &mut Session, _: &Value) -> Result<Value> {
@@ -1045,7 +1062,17 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("render.saveCurrentPreview", "Save Current Preview...", ["Composition"], None, "{comp?, path}", has_comp, save_current_preview),
         cmd!("renderQueue.move", "Move in Render Queue", [], None, "{item?|index?, to: n (1-based)}", has_items, move_item),
         cmd!("renderQueue.duplicate", "Duplicate Render Item", [], None, "{item?|index?}", has_items, duplicate),
-        cmd!("renderQueue.render", "Render", [], None, "{wait?: bool (default true; the UI renders in the background)}", has_queued, render),
+        query!("renderQueue.preflight", "Review Render Outputs", "{} → {confirmation, collisions: [path]}", preflight),
+        query!("renderQueue.cancelPreflight", "Cancel Render Review", "{confirmation}", cancel_preflight),
+        cmd!(
+            "renderQueue.render",
+            "Render",
+            [],
+            None,
+            "{wait?: bool (default true), confirmation?: preflight id, overwrite?: bool (default false; requires the reviewed confirmation)}",
+            has_queued,
+            render
+        ),
         cmd!("renderQueue.stop", "Stop Rendering", [], None, "{}", rendering, stop),
         query!("renderQueue.list", "Render Queue Items", "{}", list),
         query!("renderQueue.templates", "Render Templates", "{}", templates),
