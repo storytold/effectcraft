@@ -359,6 +359,46 @@ fn time_reverse_keyframes() {
 }
 
 #[test]
+fn pen_tool_closes_a_mask_with_a_held_mode_in_one_undo_step() {
+    use effectcraft_project::{GroupKind, MaskMode};
+    let (mut s, l) = setup();
+    let mode = |s: &Session, m: u64| match &s.active_comp().unwrap().layer(effectcraft_project::LayerId(l)).unwrap().props.find_group(m).unwrap().kind {
+        GroupKind::Mask { mode, .. } => *mode,
+        k => panic!("not a mask: {k:?}"),
+    };
+    let m = s.execute("mask.new", json!({"layer": l, "vertices": [[10, 10]]})).unwrap()["mask"].as_u64().unwrap();
+    s.execute("mask.addVertex", json!({"layer": l, "mask": m, "point": [90, 10]})).unwrap();
+    s.execute("mask.addVertex", json!({"layer": l, "mask": m, "point": [90, 90]})).unwrap();
+    assert_eq!(mode(&s, m), MaskMode::Add);
+    // S held on the first vertex: closed and Subtract together.
+    s.execute("mask.setClosed", json!({"layer": l, "mask": m, "closed": true, "mode": "Subtract"})).unwrap();
+    assert!(prop(&s, l, "masks/#1/path").value.as_path().unwrap().closed);
+    assert_eq!(mode(&s, m), MaskMode::Subtract);
+    // One undo reverts both.
+    s.execute("edit.undo", json!({})).unwrap();
+    assert!(!prop(&s, l, "masks/#1/path").value.as_path().unwrap().closed);
+    assert_eq!(mode(&s, m), MaskMode::Add);
+    s.execute("edit.redo", json!({})).unwrap();
+    assert_eq!(mode(&s, m), MaskMode::Subtract);
+    // A bad mode is an error and changes nothing.
+    s.execute("edit.undo", json!({})).unwrap();
+    assert!(s.execute("mask.setClosed", json!({"layer": l, "mask": m, "mode": "Sideways"})).is_err());
+    assert!(!prop(&s, l, "masks/#1/path").value.as_path().unwrap().closed);
+    // Shape layer paths have no mode: `mode` is ignored and the path still closes.
+    let r = s.execute("shape.newPath", json!({"vertices": [[0, 0], [100, 0], [100, 100]], "space": "layer"})).unwrap();
+    let (sl, sp) = (r["layer"].as_u64().unwrap(), r["path"].as_u64().unwrap());
+    s.execute("mask.setClosed", json!({"layer": sl, "mask": sp, "closed": true, "mode": "Subtract"})).unwrap();
+    let g = s.active_comp().unwrap().layer(effectcraft_project::LayerId(sl)).unwrap().props.find_group(sp).unwrap();
+    assert!(g.get("path").unwrap().value.as_path().unwrap().closed);
+    // Every held key's mode (S, I, L, D).
+    for (name, want) in [("Intersect", MaskMode::Intersect), ("Lighten", MaskMode::Lighten), ("Darken", MaskMode::Darken), ("Subtract", MaskMode::Subtract)] {
+        let pm = s.execute("mask.new", json!({"layer": l, "vertices": [[0, 0], [50, 0], [50, 50]]})).unwrap()["mask"].as_u64().unwrap();
+        s.execute("mask.setClosed", json!({"layer": l, "mask": pm, "mode": name})).unwrap();
+        assert_eq!(mode(&s, pm), want, "{name}");
+    }
+}
+
+#[test]
 fn pen_tool_draws_edits_and_closes_a_mask() {
     let (mut s, l) = setup();
     // Click (corner), click, drag (Bezier), click on the first vertex (close).

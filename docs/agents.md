@@ -292,7 +292,9 @@ build real projects through these interfaces; they are worked examples of everyt
   EXtractoR shows them when its `red` / `green` / `blue` / `alpha` are set to those names
   (`prop.set {"path":"effects/#1/red","value":"depth.Z"}`). Effect Controls offers them as popups.
 * **Masks**: `layer.addMask {layer, shape: rect|ellipse, rect}` first, then `layer.mask.set
-  {field: feather|expansion|opacity, value}`.
+  {field: feather|expansion|opacity, value}`. In the viewer, holding S / I / L / D while the Pen
+  closes a mask on its first vertex makes it Subtract / Intersect / Lighten / Darken; agents pass
+  `mode` to `mask.setClosed` (close + mode in one undo step) or `layer.addMask`.
 * **Renders**: `renderQueue.add {comp, format: h264|prores|webm|png…, channels: rgba,
   proresProfile: 4444, output}` then `renderQueue.render {"wait": true}`. Check a render by
   importing it (`file.import`, `file.newCompFromSelection`) and `render_frame {transparent: true}`

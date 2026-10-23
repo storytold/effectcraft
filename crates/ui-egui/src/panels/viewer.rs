@@ -210,6 +210,16 @@ fn pen_id() -> egui::Id {
     egui::Id::new("viewer-pen")
 }
 
+/// Keys that, held while the Pen closes a mask on its first vertex, give the mask this mode
+/// instead of Add.
+pub(crate) const MASK_MODE_KEYS: [(egui::Key, &str); 4] =
+    [(egui::Key::S, "Subtract"), (egui::Key::I, "Intersect"), (egui::Key::L, "Lighten"), (egui::Key::D, "Darken")];
+
+/// The mode of the first [`MASK_MODE_KEYS`] key held, if any.
+fn held_mask_mode(ctx: &egui::Context) -> Option<&'static str> {
+    ctx.input(|i| MASK_MODE_KEYS.iter().find(|(k, _)| i.key_down(*k)).map(|(_, m)| *m))
+}
+
 use super::viewer_overlays::{self as ov, VertexHit};
 use super::viewer_tools as vt;
 
@@ -2292,7 +2302,12 @@ fn pen_press(
             map.to_screen([q.x, q.y])
         });
         if n >= 2 && first.is_some_and(|f| f.distance(pos) < 8.0) {
-            let _ = app.session.execute("mask.setClosed", json!({"layer": lid.0, "mask": uid, "closed": true}));
+            // Holding S / I / L / D while closing sets the mask's mode (shape paths ignore it).
+            let mut q = json!({"layer": lid.0, "mask": uid, "closed": true});
+            if let Some(mode) = held_mask_mode(ui.ctx()) {
+                q["mode"] = json!(mode);
+            }
+            let _ = app.session.execute("mask.setClosed", q);
             ui.data_mut(|d| {
                 d.remove::<(LayerId, u64)>(pen_id());
                 d.remove::<Gesture>(gid);

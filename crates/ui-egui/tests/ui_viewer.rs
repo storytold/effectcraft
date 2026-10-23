@@ -959,6 +959,45 @@ fn pen_mask_undoes_step_by_step_and_double_click_moves_the_whole_mask() {
     assert!(back.vertices.iter().zip(&moved.vertices).all(|(v, c)| near(*v, *c)), "{back:?}");
 }
 
+/// Holding I (or S / L / D) while the Pen closes a mask on its first vertex sets its mode
+/// (Intersect). As in After Effects, the key's own shortcut (Go to Layer In Point) still runs.
+#[test]
+fn pen_closes_a_mask_with_the_held_keys_mode() {
+    use effectcraft_engine::project::{GroupKind, MaskMode};
+    let mut h = harness();
+    let plate = layer_id(&h, "Plate");
+    h.state_mut().session.execute("layer.select", json!({"layers": [plate]})).unwrap();
+    h.state_mut().session.execute("view.snapping", json!({"value": false})).unwrap();
+    h.state_mut().session.execute("time.set", json!({"time": 1.0})).unwrap();
+    h.state_mut().ui.tool = Tool::Pen;
+    h.run_steps(2);
+    let corners = [[100.0, 60.0], [500.0, 60.0], [500.0, 300.0]];
+    for p in &corners {
+        let at = screen(&h, [p[0], p[1]]);
+        click(&mut h, at);
+    }
+    let key = |h: &mut Harness<'_, EffectcraftApp>, pressed: bool| {
+        h.input_mut().events.push(Event::Key { key: egui::Key::I, physical_key: None, pressed, repeat: false, modifiers: Default::default() });
+    };
+    // The time snaps to a frame; the layer's In point (0) is elsewhere.
+    let t0 = h.state().session.time();
+    assert!(t0.seconds() > 0.5);
+    key(&mut h, true);
+    h.step();
+    let at = screen(&h, [100.0, 60.0]);
+    click(&mut h, at);
+    key(&mut h, false);
+    h.run_steps(2);
+    assert!(mask_path(&h, "Plate").closed);
+    let l = h.state().session.active_comp().unwrap().layers.iter().find(|l| l.name == "Plate").unwrap().clone();
+    let mode = match &l.masks().unwrap().groups().next().unwrap().kind {
+        GroupKind::Mask { mode, .. } => *mode,
+        k => panic!("not a mask: {k:?}"),
+    };
+    assert_eq!(mode, MaskMode::Intersect);
+    assert_ne!(h.state().session.time(), t0, "I still goes to the layer's In point, as in After Effects");
+}
+
 /// #513: clicking away from a mask's path, even on its own layer, deselects the mask's points;
 /// the layer stays selected.
 #[test]
