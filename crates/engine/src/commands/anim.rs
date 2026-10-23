@@ -45,6 +45,7 @@ fn copy(s: &mut Session, _: &Value) -> Result<Value> {
         clip.push(KeyClip { layer: lid, path, keys });
     }
     let n: usize = clip.iter().map(|c| c.keys.len()).sum();
+    s.state.keyframe_text = crate::keyframe_text::text(&s.project, comp, &s.state.selected_keys, &[]);
     s.state.key_clipboard = clip;
     s.state.clip_is_keys = true;
     Ok(json!(n))

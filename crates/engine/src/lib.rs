@@ -21,6 +21,8 @@ pub mod footage_reload;
 pub mod guard;
 pub mod history;
 pub mod jobs;
+mod keyframe_text;
+mod keyframe_text_effects;
 pub mod learn;
 pub mod links;
 pub mod logging;
@@ -244,6 +246,10 @@ pub struct EditorState {
     /// Paste sets the same properties of the selected layers.
     #[serde(skip)]
     pub value_clipboard: Vec<(String, effectcraft_keyframe::Value)>,
+    /// The copied keyframes and values as After Effects keyframe text (one layer's Transform
+    /// properties), for the system clipboard.
+    #[serde(skip)]
+    pub keyframe_text: Option<String>,
     /// Copied effect instances, with comp-time key offsets from the earliest copied key.
     /// Paste adds them to the selected layers at the destination comp's CTI.
     #[serde(skip)]
@@ -1263,6 +1269,8 @@ mod tests_fuzz_open;
 mod tests_import_project;
 #[cfg(test)]
 mod tests_key_metadata_order;
+#[cfg(test)]
+mod tests_keyframe_text;
 #[cfg(test)]
 mod tests_keylight;
 #[cfg(test)]
