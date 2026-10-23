@@ -12,6 +12,14 @@ use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use serde_json::json;
 
+/// Keep Windows screenshot harness lifetimes separate: concurrent headless WARP devices have
+/// crashed in d3d10warp.dll. Hold the guard until after the harness drops; UI-only tests stay parallel.
+#[cfg(windows)]
+fn screenshot_guard() -> std::sync::MutexGuard<'static, ()> {
+    static SCREENSHOTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    SCREENSHOTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn app() -> EffectcraftApp {
     let mut s = Session::default();
     s.execute("comp.new", json!({"name": "View", "width": 640, "height": 360, "duration": 4})).unwrap();
@@ -21,8 +29,12 @@ fn app() -> EffectcraftApp {
     EffectcraftApp::new(s)
 }
 
+/// Default LazyRenderer defers GPU device creation until render(); UI-only callers stay parallel.
 fn harness() -> Harness<'static, EffectcraftApp> {
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| app());
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|cc| {
+        assert!(cc.wgpu_render_state.is_none(), "UI-only harness construction must stay GPU-free");
+        app()
+    });
     h.run_steps(3);
     h
 }
@@ -60,6 +72,7 @@ fn screen(h: &Harness<'_, EffectcraftApp>, p: [f32; 2]) -> Pos2 {
     c.min + vec2(p[0] * z, p[1] * z)
 }
 
+/// Selection interactions use the same lazy, GPU-free construction as the general UI harness.
 fn selection_harness() -> Harness<'static, EffectcraftApp> {
     let mut s = Session::default();
     s.execute("comp.new", json!({"name": "Selection", "width": 640, "height": 360, "duration": 4})).unwrap();
@@ -67,7 +80,10 @@ fn selection_harness() -> Harness<'static, EffectcraftApp> {
         s.execute("layer.newSolid", json!({"name": name, "color": "#406080", "width": 80, "height": 80})).unwrap();
     }
     s.execute("edit.deselectAll", json!({})).unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(move |_| EffectcraftApp::new(s));
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(move |cc| {
+        assert!(cc.wgpu_render_state.is_none(), "UI-only harness construction must stay GPU-free");
+        EffectcraftApp::new(s)
+    });
     h.run_steps(3);
     h
 }
@@ -479,6 +495,8 @@ fn fill_rgb(h: &Harness<'_, EffectcraftApp>) -> [u8; 3] {
 /// invisible, and in the tool's own form — only the Rectangle fills the corner of the box.
 #[test]
 fn shape_drag_ghost_shows_the_tools_own_shape_while_dragging() {
+    #[cfg(windows)]
+    let _screenshots = screenshot_guard();
     let (from, to) = ([140.0, 100.0], [400.0, 300.0]);
     let centre = [270.0, 200.0];
     // 6 comp px inside the box's top-left corner: inside a rectangle, outside every other kind.
@@ -504,6 +522,11 @@ fn shape_drag_ghost_shows_the_tools_own_shape_while_dragging() {
         assert_eq!(delta(was_c, now_c) > 30, fills_corner, "{tool:?}: the ghost is not drawn in its own shape");
 
         release(&mut h, b, egui::Modifiers::default());
+        let comp = h.state().session.active_comp().unwrap();
+        assert_eq!(comp.layers.len(), 3, "{tool:?}: the drag commits one new layer");
+        let layer = &comp.layers[0];
+        assert!(matches!(layer.source, effectcraft_engine::project::LayerSource::Shape));
+        assert_eq!(layer.props.sub("contents").unwrap().groups().count(), 1);
     }
 }
 
@@ -511,6 +534,8 @@ fn shape_drag_ghost_shows_the_tools_own_shape_while_dragging() {
 /// lie: Shift squares the box and Ctrl/Cmd draws it from the press point (as in After Effects), both live.
 #[test]
 fn shape_drag_ghost_normalises_the_same_way_as_the_release() {
+    #[cfg(windows)]
+    let _screenshots = screenshot_guard();
     let from = [140.0f64, 100.0];
     let to = [400.0f64, 260.0];
     // (mods, centre, size): Shift squares the box from its top-left, Ctrl/Cmd centres it on the press.
@@ -549,6 +574,8 @@ fn shape_drag_ghost_normalises_the_same_way_as_the_release() {
 /// and not painted with the Fill, where a shape drawn into the selected shape layer is.
 #[test]
 fn shape_drag_ghost_shows_where_the_shape_will_land() {
+    #[cfg(windows)]
+    let _screenshots = screenshot_guard();
     let (from, to) = ([140.0, 100.0], [400.0, 300.0]);
     let centre = [270.0, 200.0];
 
@@ -562,6 +589,11 @@ fn shape_drag_ghost_shows_where_the_shape_will_land() {
     let fill = fill_rgb(&h);
     assert!(delta(shape_px, fill) < delta(shape_px, [0xff, 0xc0, 0x00]), "a shape ghost is painted with the Fill, not the mask colour");
     release(&mut h, b, egui::Modifiers::default());
+
+    let comp = h.state().session.active_comp().unwrap();
+    assert_eq!(comp.layers.len(), 3, "the drag commits one new shape layer");
+    assert!(matches!(comp.layers[0].source, effectcraft_engine::project::LayerSource::Shape));
+    drop(h); // Release this GPU device before the next screenshot harness is constructed.
 
     // A solid selected: the same drag is a mask on it, in the mask colour.
     let mut h = harness();
@@ -583,6 +615,8 @@ fn shape_drag_ghost_shows_where_the_shape_will_land() {
 /// for it would freeze the viewer on the last completed frame for the whole drag.
 #[test]
 fn a_layer_drag_moves_the_picture_while_the_button_is_down() {
+    #[cfg(windows)]
+    let _screenshots = screenshot_guard();
     let mut h = harness();
     let box_ = h.state().session.active_comp().unwrap().layers.iter().find(|l| l.name == "Box").unwrap().id;
     h.state_mut().session.execute("layer.select", json!({"layers": [box_.0]})).unwrap();
@@ -611,8 +645,13 @@ fn a_layer_drag_moves_the_picture_while_the_button_is_down() {
         }
     }
     assert!(moved, "the layer's pixels did not follow the pointer while the button was down");
+    h.input_mut().events.push(Event::PointerMoved(to));
+    h.step();
     h.input_mut().events.push(Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
     h.run_steps(2);
+    let comp = h.state().session.active_comp().unwrap();
+    let position = comp.layer(box_).unwrap().transform().unwrap().get("position").unwrap().value.components();
+    assert!((position[0] - 520.0).abs() < 1.0 && (position[1] - 180.0).abs() < 1.0, "final drag position: {position:?}");
 }
 
 /// Clicking the word "Fill" opens Fill Options: a radial gradient in Multiply at 40% paints the
@@ -2135,7 +2174,11 @@ fn full_resolution_frames_wider_than_the_texture_limit_fit() {
     let mut s = Session::default();
     s.execute("comp.new", json!({"name": "Wide", "width": 2400, "height": 400, "duration": 1})).unwrap();
     s.execute("layer.newSolid", json!({"name": "Plate", "color": "#406080"})).unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|cc| {
+        // No render() call follows: viewer_pixels reads CPU output, without a WARP device.
+        assert!(cc.wgpu_render_state.is_none());
+        EffectcraftApp::new(s)
+    });
     // (egui's font atlas needs 1024.)
     h.input_mut().max_texture_side = Some(1024);
     h.state_mut().session.execute("view.res.full", json!({})).unwrap();
