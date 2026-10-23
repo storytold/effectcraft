@@ -44,6 +44,7 @@ fn tmp(name: &str) -> PathBuf {
 fn info_and_commands() {
     let v = ok_json(&["info"]);
     assert_eq!(v["mode"], "headless");
+    assert_eq!(v["commit"], effectcraft_engine::BUILD_COMMIT, "info names the build's commit");
     assert!(v["commands"].as_u64().unwrap() > 50);
     assert!(v["activeComp"]["layers"].as_array().unwrap().len() > 1, "demo project by default");
 

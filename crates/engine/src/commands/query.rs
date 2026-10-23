@@ -183,6 +183,7 @@ fn capabilities(s: &mut Session, _: &Value) -> Result<Value> {
     let formats: Vec<Value> = s.exporter.as_ref().map(|e| e.formats().iter().map(|f| json!(format!("{f:?}"))).collect()).unwrap_or_default();
     Ok(json!({
         "version": env!("CARGO_PKG_VERSION"),
+        "commit": crate::BUILD_COMMIT,
         "commands": super::command_specs().len(),
         "effects": {"total": fx.len(), "gpu": fx.iter().filter(|e| e.gpu).count(), "float": fx.iter().filter(|e| e.float).count()},
         "export": formats,
@@ -209,7 +210,7 @@ pub fn specs() -> Vec<CommandSpec> {
     vec![
         query!("command.list", "List Commands", "{filter?, enabledOnly?, schemas? (add each command's params JSON Schema)}", list),
         query!("command.describe", "Describe Command", "{command} → id, label, menu, shortcut, params doc, JSON `schema`, enabled", describe),
-        query!("app.capabilities", "App Capabilities", "{} → version, command/effect counts, export formats, parity summary", capabilities),
+        query!("app.capabilities", "App Capabilities", "{} → version, build commit, command/effect counts, export formats, parity summary", capabilities),
         query!("project.summary", "Project Summary", "{}", summary),
         query!("comp.info", "Composition Info", "{comp?}", comp_info),
         query!("layer.tree", "Layer Property Tree", "{layer?, comp?, depth?, time? (comp s)} → nodes with `path`", layer_tree),

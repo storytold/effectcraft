@@ -461,6 +461,7 @@ fn run(cmd: &str, args: &Args, json_out: bool) -> Result<(), Failure> {
             let comp = tool(&mut b, "get_comp", json!({})).ok();
             let info = json!({
                 "version": env!("CARGO_PKG_VERSION"),
+                "commit": effectcraft_engine::BUILD_COMMIT,
                 "mode": if b.is_bridge() { "bridge" } else { "headless" },
                 "commands": effectcraft_engine::command_specs().len(),
                 "effects": effectcraft_engine::effects::registry().len(),
@@ -471,8 +472,9 @@ fn run(cmd: &str, args: &Args, json_out: bool) -> Result<(), Failure> {
                 emit(&info, true);
             } else {
                 say!(
-                    "EffectCraft {} ({}), {} commands, {} effects",
+                    "EffectCraft {} ({}, {}), {} commands, {} effects",
                     info["version"].as_str().unwrap_or(""),
+                    effectcraft_engine::BUILD_COMMIT.get(..12).unwrap_or(effectcraft_engine::BUILD_COMMIT),
                     info["mode"].as_str().unwrap_or(""),
                     info["commands"],
                     info["effects"]

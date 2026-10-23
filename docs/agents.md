@@ -104,7 +104,7 @@ See [MCP conventions](mcp.md) for core tools, resources, strict arguments, and r
 | `list_commands {filter?, enabled_only?, schemas?}` | Discover command ids, their param docs (and, with `schemas`, a JSON Schema each), and whether each can run now. |
 | `describe_command {command \| id}` | One command in full: label, menu, shortcut, params doc, JSON `schema`, enabled / `why`. |
 | `execute_command {command \| id, params?}` | Run any command (undoable). Unknown parameter keys are rejected with the accepted list. |
-| `get_state` | Editor state (active comp, time, selections, tool) plus `app`: version, command and effect counts, export formats, parity summary. |
+| `get_state` | Editor state (active comp, time, selections, tool) plus `app`: version, build commit, command and effect counts, export formats, parity summary. |
 | `run_script {code, name?}` | Run JavaScript with the After Effects-style scripting object model (`app.project`, `comp.layers.addText(…)`, `layer.property("ADBE Transform Group").property("ADBE Position").setValueAtTime(…)`…). Returns `{ok, result, output, error: {message, line, column}}`; edits are undoable. |
 | `get_project` / `get_comp {comp?}` | Project items, comp settings and layers. |
 | `get_layer {layer, comp?, time?, depth?, flat?}` | A layer's property tree (`depth` limits how many group levels expand). Every node has a `path`. |
@@ -653,7 +653,7 @@ on stdout. Errors print `{"error": ...}` and exit with status 1; usage errors, s
 option, exit with status 2 before anything runs.
 
 ```sh
-effectcraft-cli info --json
+effectcraft-cli info --json                                      # version, build commit, mode, counts, project
 effectcraft-cli commands --filter keys
 effectcraft-cli exec --list --schemas --json                     # every command with its params JSON Schema
 effectcraft-cli exec comp.new --params '{"name":"Main","width":1280,"height":720}' --empty --save-as main.ecproj

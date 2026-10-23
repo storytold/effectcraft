@@ -60,6 +60,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub use commands::{CommandSpec, command_specs, find as find_command};
+
+/// The git commit this build was made from (full hex), or `unknown`; see `build.rs`.
+pub const BUILD_COMMIT: &str = env!("EFFECTCRAFT_BUILD_COMMIT");
 pub use effectcraft_color as color;
 pub use effectcraft_effects as effects;
 pub use effectcraft_geom as geom;
