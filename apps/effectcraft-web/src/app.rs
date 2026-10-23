@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use effectcraft_engine::Session;
 
-use crate::{api, audio, browse, diskcache, files, frames, persist, storage, worker};
+use crate::{api, audio, browse, diskcache, files, frames, host, persist, storage, worker};
 use effectcraft_ui_egui::EffectcraftApp;
 use serde_json::json;
 use wasm_bindgen::prelude::*;
@@ -101,6 +101,7 @@ impl eframe::App for WebApp {
             files::read_files(dropped, |paths| post(move |app| open_or_import(app, paths)));
         }
         self.app.logic(ctx, frame);
+        host::dirty(self.app.session.is_dirty());
         api::poll_replies();
         // Render Queue outputs written this frame (here or by a worker) → downloads.
         files::flush_downloads();
@@ -186,8 +187,11 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
     eframe::WebLogger::init(log::LevelFilter::Info).ok();
     let doc = web_sys::window().and_then(|w| w.document()).ok_or("no document")?;
     let canvas: web_sys::HtmlCanvasElement = doc.get_element_by_id(&canvas_id).ok_or("no canvas")?.dyn_into()?;
-    let empty = query_flag("empty");
-    let home = query_flag("home");
+    // `?host=parent`: framed by a same-origin page that opens and saves the files ([`host`]); it
+    // starts on a blank project and keeps no session of its own.
+    let hosted = query_value("host").as_deref() == Some("parent") && host::connect();
+    let empty = hosted || query_flag("empty");
+    let home = !hosted && query_flag("home");
     // Browser storage: settings, recent projects, imported media, saved projects, auto-saves and
     // the last session come back.
     let t0 = js_sys::Date::now();
@@ -204,7 +208,7 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
     diskcache::init();
     storage::refresh();
     let runner = eframe::WebRunner::new();
-    runner
+    let started = runner
         .start(
             canvas,
             eframe::WebOptions::default(),
@@ -246,7 +250,7 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
                 let mut app = EffectcraftApp::new(session);
                 app.set_gpu_failure_bridge(gpu_failures);
                 app.ui.start_screen = home;
-                if let Some(r) = recovery.filter(|r| !restored && r.autosave.is_some()) {
+                if let Some(r) = recovery.filter(|r| !hosted && !restored && r.autosave.is_some()) {
                     app.offer_recovery(r);
                 }
                 install_hooks(&mut app);
@@ -265,7 +269,12 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
                 Ok(Box::new(WebApp { app, persist: !empty }))
             }),
         )
-        .await?;
+        .await;
+    if let Err(e) = started {
+        host::failed(&e.as_string().unwrap_or_else(|| format!("{e:?}")));
+        return Err(e);
+    }
+    host::ready();
     // Hide the loading message once the app runs.
     if let Some(el) = doc.get_element_by_id("loading") {
         el.remove();
