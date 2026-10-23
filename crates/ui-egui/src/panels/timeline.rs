@@ -4138,11 +4138,10 @@ fn value_editor(
             if linkable {
                 let lr = Rect::from_center_size(pos2(x + 7.0, at.y), vec2(14.0, 14.0));
                 let resp = ui.interact(lr, egui::Id::new(("tl-link", uid)), Sense::click()).on_hover_text(crate::i18n::tr("Constrain Proportions"));
-                icons::paint(p, lr, Icon::Link, if linked { t.accent } else { t.text_faint });
+                // Toggle first, so the chain is painted in its new state in the same frame.
+                let now_linked = widgets::toggle_link(&mut app.ui.timeline.unlinked, uid, resp.clicked());
+                icons::paint(p, lr, Icon::Link, if now_linked { t.accent } else { t.text_faint });
                 app.auto.add(&format!("timeline.prop.{uid}.link"), lr, "Constrain Proportions");
-                if resp.clicked() && !app.ui.timeline.unlinked.remove(&uid) {
-                    app.ui.timeline.unlinked.insert(uid);
-                }
                 x += 18.0;
             }
             for d in 0..n.min(c.len()) {

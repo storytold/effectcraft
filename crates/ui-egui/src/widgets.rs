@@ -662,9 +662,31 @@ pub(crate) fn constrained(c: &[f64], d: usize, v: f64) -> Vec<f64> {
         .collect()
 }
 
+/// Applies a click on a Constrain Proportions chain to the shared unlinked set and returns whether
+/// the property is linked afterwards, so the icon can be painted in its new state in the same frame.
+pub(crate) fn toggle_link(unlinked: &mut std::collections::BTreeSet<u64>, uid: u64, clicked: bool) -> bool {
+    if clicked && !unlinked.remove(&uid) {
+        unlinked.insert(uid);
+    }
+    !unlinked.contains(&uid)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #2243: a click on a Constrain Proportions chain flips its state and the returned state is
+    /// the new one, so the icon is painted right away instead of after the next hover.
+    #[test]
+    fn toggle_link_returns_the_state_after_the_click() {
+        let mut unlinked = std::collections::BTreeSet::new();
+        assert!(toggle_link(&mut unlinked, 7, false), "linked by default");
+        assert!(!toggle_link(&mut unlinked, 7, true), "a click unlinks, and the result already says so");
+        assert!(unlinked.contains(&7));
+        assert!(!toggle_link(&mut unlinked, 7, false), "stays unlinked without a click");
+        assert!(toggle_link(&mut unlinked, 7, true), "a click links again");
+        assert!(unlinked.is_empty());
+    }
 
     /// #488: an inline editor selects its whole text only as it opens. Should it be without the
     /// keyboard for a frame later (an input method, another handler), it takes the keyboard back
