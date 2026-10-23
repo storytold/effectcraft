@@ -391,7 +391,10 @@ hierarchical block-matching optical flow and a bidirectional warp (Pixel Motion,
 its nested layers straight into the parent with concatenated transforms (one resample), so
 nested blend modes and adjustment layers act on the parent's layers; nested 3D layers use the
 parent's camera and lights and, when the precomp layer is 3D, are depth-sorted with the parent's
-3D run. Masks, effects or styles force a flattened render. Text layers are always rasterised at
+3D run. Essential Properties overrides (properties, Font and Media Replacement) travel with the
+collapsed context and are applied while the nested layers are evaluated, so they do not force a
+flattened render or clip at the precomp's frame. Masks, effects or styles force a flattened
+render. Text layers are always rasterised at
 their on-screen scale, as text is vector in After Effects; on shape layers and vector footage the
 switch is Continuously Rasterize and does the same. Quality: Draft samples
 nearest-neighbour, Wireframe draws the layer bounds. Slip edit (`layer.slip`, Alt+PageUp/Down,
@@ -458,8 +461,10 @@ effects crate, hence the `effects → track` edge.
 `essential` field lists its exposed controls (properties, Media Replacement, groups, comments).
 Every precomp layer of such a comp gets an Essential Properties group (`GroupKind::Essential`,
 children `eg<control id>`), kept in step by `Session::edit`; editing a child overrides it for
-that instance. The renderer draws an instance with overrides from a copy of the project with the
-overridden source properties set (`essential::with_overrides`). Templates are `.ectemplate`
+that instance. A collapsed instance carries its property, Font and Media Replacement overrides
+into the nested render context (`Collapsed`, `EvalCtx::{property_overrides, media_overrides}`);
+other instances are drawn from a copy of the project with the overridden source properties set
+(`essential::with_overrides`). Templates are `.ectemplate`
 ZIPs: `manifest.json` (controls), `project.ecproj` (the comp and its dependencies), `media/…` and
 `poster.png`; importing offsets every id past the project's (`essential::offset_ids`).
 **Responsive Design — Time**: a time-stretched precomp maps time piecewise so its protected

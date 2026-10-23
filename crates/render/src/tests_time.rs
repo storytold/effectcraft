@@ -134,7 +134,16 @@ fn input_keys_ignore_later_effects() {
     }
     let key = |p: &Project| {
         let comp = p.comp(cid).unwrap();
-        let ctx = crate::EvalCtx { project: p, comp_id: cid, comp, time: Tick::from_seconds_f64(0.5), expr: None, footage: None };
+        let ctx = crate::EvalCtx {
+            project: p,
+            comp_id: cid,
+            comp,
+            time: Tick::from_seconds_f64(0.5),
+            expr: None,
+            footage: None,
+            property_overrides: &[],
+            media_overrides: &[],
+        };
         let l = &comp.layers[0];
         (crate::cache::input_key(&ctx, l, 1.0, false, false, 1), crate::cache::input_key(&ctx, l, 1.0, false, false, 2))
     };

@@ -553,7 +553,8 @@ fn key_any(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool, fo
         }
         LayerSource::Text | LayerSource::Shape => {}
         LayerSource::Footage { item } if footage => {
-            let it = ctx.project.item(*item)?;
+            let item = ctx.media_item(layer, *item);
+            let it = ctx.project.item(item)?;
             let ItemKind::Footage(f) = &it.kind else { return None };
             hash_debug(&mut h, f);
             // A proxy (and its Use Proxy switch) changes the pixels.
@@ -573,6 +574,17 @@ fn key_any(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool, fo
     scale.to_bits().hash(&mut h);
     draft.hash(&mut h);
     layer.id.hash(&mut h);
+    // Collapsed-instance overrides replace values without editing the nested layer, so mix them
+    // into the key: a Font override, effect parameter or any other source-affecting override
+    // must not reuse another instance's processed buffer.
+    for o in ctx.property_overrides.iter().filter(|o| o.layer == layer.id) {
+        o.prop.hash(&mut h);
+        o.font.hash(&mut h);
+        hash_debug(&mut h, &o.value);
+    }
+    for m in ctx.media_overrides.iter().filter(|m| m.layer == layer.id) {
+        m.item.hash(&mut h);
+    }
     hash_debug(&mut h, &layer.source);
     // (Audio, Lock and Shy don't change pixels.)
     hash_debug(&mut h, &layer.switches.pixels());

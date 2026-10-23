@@ -592,7 +592,16 @@ fn aux_views(
     // layout shows them), evaluated on a snapshot of the project.
     let snap_project = app.session.project.clone();
     let snap_expr = app.session.expr.clone();
-    let ectx = EvalCtx { project: &snap_project, comp_id: cid, comp, time: t, expr: snap_expr.as_deref(), footage: None };
+    let ectx = EvalCtx {
+        project: &snap_project,
+        comp_id: cid,
+        comp,
+        time: t,
+        expr: snap_expr.as_deref(),
+        footage: None,
+        property_overrides: &[],
+        media_overrides: &[],
+    };
     let selected = app.session.state.selected_layers.clone();
     let mut picked: Option<(usize, View3D)> = None;
     for (i, (r, v)) in aux.into_iter().enumerate() {
@@ -884,7 +893,16 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
     let snap_project = app.session.project.clone();
     let snap_expr = app.session.expr.clone();
-    let ectx = EvalCtx { project: &snap_project, comp_id: cid, comp: &comp, time, expr: snap_expr.as_deref(), footage: None };
+    let ectx = EvalCtx {
+        project: &snap_project,
+        comp_id: cid,
+        comp: &comp,
+        time,
+        expr: snap_expr.as_deref(),
+        footage: None,
+        property_overrides: &[],
+        media_overrides: &[],
+    };
     // The frame (or snapshot) through Show Channel and exposure; ROI frames cover the region.
     vt::draw_frame(app, &ctx, &painter, comp_rect, cid, &ectx);
     if app.ui.viewer.extended.is_some() {
@@ -2578,6 +2596,8 @@ fn create_shape(app: &mut EffectcraftApp, tool: Tool, a: [f64; 2], b: [f64; 2], 
                 time: app.session.time(),
                 expr: None,
                 footage: None,
+                property_overrides: &[],
+                media_overrides: &[],
             };
             let inv = l2c(&ectx, &l).0.inverse().unwrap_or(Mat3::IDENTITY);
             let p0 = inv.apply(gv2(cx - w / 2.0, cy - h / 2.0));

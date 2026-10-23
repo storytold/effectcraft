@@ -360,8 +360,16 @@ mod tests {
         let cid = s.active_comp_id().unwrap();
         let comp = s.project.comp(cid).unwrap();
         let layer = comp.layer(effectcraft_engine::project::LayerId(l)).unwrap();
-        let ctx =
-            effectcraft_engine::render::EvalCtx { project: &s.project, comp_id: cid, comp, time: Default::default(), expr: s.expr.as_deref(), footage: None };
+        let ctx = effectcraft_engine::render::EvalCtx {
+            project: &s.project,
+            comp_id: cid,
+            comp,
+            time: Default::default(),
+            expr: s.expr.as_deref(),
+            footage: None,
+            property_overrides: &[],
+            media_overrides: &[],
+        };
         ctx.value(layer, layer.props.prop(path).unwrap())
     }
 
@@ -622,6 +630,8 @@ mod tests {
                 time: Default::default(),
                 expr: s.expr.as_deref(),
                 footage: None,
+                property_overrides: &[],
+                media_overrides: &[],
             };
             ctx.value(layer, layer.props.prop(path).unwrap()).as_vec3()
         };

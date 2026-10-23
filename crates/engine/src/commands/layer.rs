@@ -780,8 +780,16 @@ fn uniform_parent_pose(m: effectcraft_geom::Mat4, orientation: [f64; 3]) -> Opti
 /// time.
 pub(crate) fn parent_fixes(s: &Session, cid: ItemId, ids: &[LayerId], parent: Option<LayerId>) -> Vec<ParentFix> {
     let Some(comp) = s.project.comp(cid) else { return vec![] };
-    let ectx =
-        effectcraft_render::EvalCtx { project: &s.project, comp_id: cid, comp, time: s.time(), expr: s.expr.as_deref(), footage: Some(s.footage.as_ref()) };
+    let ectx = effectcraft_render::EvalCtx {
+        project: &s.project,
+        comp_id: cid,
+        comp,
+        time: s.time(),
+        expr: s.expr.as_deref(),
+        footage: Some(s.footage.as_ref()),
+        property_overrides: &[],
+        media_overrides: &[],
+    };
     let space = |id: Option<LayerId>| -> effectcraft_geom::Mat3 {
         id.and_then(|i| comp.layer(i)).filter(|l| !l.is_3d()).map(|l| ectx.layer_to_comp(l).0).unwrap_or(effectcraft_geom::Mat3::IDENTITY)
     };

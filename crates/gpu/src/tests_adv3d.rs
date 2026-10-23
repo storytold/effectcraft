@@ -96,7 +96,16 @@ pub(crate) fn scene_project() -> (Project, ItemId) {
 
 pub(crate) fn scene(p: &Project, cid: ItemId) -> Scene {
     let r = Renderer::new(p, &NoFootage, RenderOpts::default());
-    let ctx = EvalCtx { project: p, comp_id: cid, comp: p.comp(cid).unwrap(), time: Tick::ZERO, expr: None, footage: None };
+    let ctx = EvalCtx {
+        project: p,
+        comp_id: cid,
+        comp: p.comp(cid).unwrap(),
+        time: Tick::ZERO,
+        expr: None,
+        footage: None,
+        property_overrides: &[],
+        media_overrides: &[],
+    };
     let run: Vec<&effectcraft_project::Layer> = ctx.comp.layers.iter().rev().filter(|l| l.is_3d() && l.has_video()).collect();
     adv::scene_of(&r, &ctx, &run, (ctx.comp.width, ctx.comp.height))
 }
@@ -239,7 +248,16 @@ pub(crate) fn off_share(a: &[[f32; 4]], b: &[[f32; 4]]) -> (f64, f32) {
 }
 
 pub(crate) fn run_of(p: &Project, cid: ItemId) -> (EvalCtx<'_>, Vec<&effectcraft_project::Layer>) {
-    let ctx = EvalCtx { project: p, comp_id: cid, comp: p.comp(cid).unwrap(), time: Tick::ZERO, expr: None, footage: None };
+    let ctx = EvalCtx {
+        project: p,
+        comp_id: cid,
+        comp: p.comp(cid).unwrap(),
+        time: Tick::ZERO,
+        expr: None,
+        footage: None,
+        property_overrides: &[],
+        media_overrides: &[],
+    };
     let run: Vec<&effectcraft_project::Layer> = ctx.comp.layers.iter().rev().filter(|l| l.is_3d() && l.has_video()).collect();
     (ctx, run)
 }

@@ -88,6 +88,10 @@ impl Dependencies<'_> {
         }
         match layer.source {
             LayerSource::Solid { item } | LayerSource::Footage { item } | LayerSource::Comp { item } => {
+                let item = match layer.source {
+                    LayerSource::Footage { .. } => ctx.media_item(layer, item),
+                    _ => item,
+                };
                 let source = ctx.project.item(item);
                 hash_debug(self.h, &source);
                 if let Some(source) = source {

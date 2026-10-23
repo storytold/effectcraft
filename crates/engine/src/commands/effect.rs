@@ -136,7 +136,16 @@ fn warning(s: &mut Session, p: &Value) -> Result<Value> {
     let layer = comp.layer(lid).ok_or(EngineError::NoComp)?;
     let g = layer.effects().and_then(|fx| fx.groups().find(|g| g.uid == uid)).ok_or_else(|| bad(cmd, "no such effect"))?;
     let t = super::time_p(s, p, Some(comp));
-    let ctx = effectcraft_render::EvalCtx { project: &s.project, comp_id: cid, comp, time: t, expr: s.expr.as_deref(), footage: None };
+    let ctx = effectcraft_render::EvalCtx {
+        project: &s.project,
+        comp_id: cid,
+        comp,
+        time: t,
+        expr: s.expr.as_deref(),
+        footage: None,
+        property_overrides: &[],
+        media_overrides: &[],
+    };
     Ok(json!({"effect": uid, "warning": effectcraft_effects::warning(g, &mut |pr| ctx.value(layer, pr))}))
 }
 
@@ -160,7 +169,16 @@ fn pick_color(s: &mut Session, p: &Value) -> Result<Value> {
     .filter(|pr| pr.ui == effectcraft_project::ParamUi::Color)
     .ok_or_else(|| bad(cmd, "not a colour parameter of this effect"))?;
     let t = super::time_p(s, p, Some(comp));
-    let ctx = effectcraft_render::EvalCtx { project: &s.project, comp_id: cid, comp, time: t, expr: s.expr.as_deref(), footage: None };
+    let ctx = effectcraft_render::EvalCtx {
+        project: &s.project,
+        comp_id: cid,
+        comp,
+        time: t,
+        expr: s.expr.as_deref(),
+        footage: None,
+        property_overrides: &[],
+        media_overrides: &[],
+    };
     let mut r = effectcraft_render::Renderer::new(&s.project, &*s.footage, effectcraft_render::RenderOpts::default());
     r.expr = s.expr.as_deref();
     r.cache = Some(&s.layer_cache);

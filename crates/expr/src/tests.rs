@@ -907,6 +907,49 @@ fn source_rect_at_time() {
     assert!((s[0] + 31.0).abs() < 2.0 && (s[1] + 16.0).abs() < 2.0 && (s[2] - 62.0).abs() < 3.0, "{s:?}");
 }
 
+#[test]
+fn source_dimensions_follow_media_replacement() {
+    let mut p = Project::default();
+    let comp = Comp::new(200, 100, FrameRate::FPS_30, Tick::from_seconds_f64(2.0));
+    let cid = p.add_item("Main", Label::Sandstone, None, ItemKind::Comp(comp.clone().into()));
+    let footage = |p: &mut Project, name: &str, width, height| {
+        p.add_item(
+            name,
+            Label::SeaFoam,
+            None,
+            ItemKind::Footage(effectcraft_project::Footage {
+                path: name.into(),
+                kind: effectcraft_project::FootageKind::Still,
+                width,
+                height,
+                has_video: true,
+                ..Default::default()
+            }),
+        )
+    };
+    let original = footage(&mut p, "original.png", 100, 80);
+    let replacement = footage(&mut p, "replacement.png", 30, 40);
+    let mut l = build::layer(&mut p, &comp, "Clip", LayerSource::Footage { item: original }, (100, 80), None);
+    l.props.prop_mut(ROT).unwrap().expr =
+        Some(Expression { text: "thisLayer.width + thisLayer.height + thisLayer.source.width + sourceRectAtTime().width".into(), enabled: true });
+    let lid = l.id;
+    p.comp_mut(cid).unwrap().layers.push(l);
+    let c = p.comp(cid).unwrap();
+    let l = c.layer(lid).unwrap();
+    let media = effectcraft_render::MediaOverride::new(lid, replacement);
+    let ctx = EvalCtx {
+        project: &p,
+        comp_id: cid,
+        comp: c,
+        time: Tick::ZERO,
+        expr: Some(&Expressions),
+        footage: None,
+        property_overrides: &[],
+        media_overrides: &[media],
+    };
+    assert_eq!(ctx.value(l, l.props.prop(ROT).unwrap()), Value::Scalar(130.0));
+}
+
 // ---- colour -----------------------------------------------------------------------------------
 
 #[test]
@@ -1114,7 +1157,16 @@ fn text_expression_selector_values() {
     let sel_of = |p: &Project| {
         let c = p.comp(cid).unwrap();
         let l = c.layer(lid).unwrap();
-        let ctx = EvalCtx { project: p, comp_id: cid, comp: c, time: Tick::ZERO, expr: Some(&Expressions), footage: None };
+        let ctx = EvalCtx {
+            project: p,
+            comp_id: cid,
+            comp: c,
+            time: Tick::ZERO,
+            expr: Some(&Expressions),
+            footage: None,
+            property_overrides: &[],
+            media_overrides: &[],
+        };
         let doc = effectcraft_render::text::source_text(&ctx, l).unwrap();
         let lay = effectcraft_text::layout_doc(&doc);
         let anim = l.props.group("text/animators/#1").unwrap();

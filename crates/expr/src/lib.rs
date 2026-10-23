@@ -158,7 +158,16 @@ fn evaluate_out(
         return Err("Error: expressions reference each other too deeply (circular reference?)".into());
     }
     budget_left()?;
-    let ctx = EvalCtx { project: ctx.project, comp_id: ctx.comp_id, comp: ctx.comp, time: ctx.time, expr: Some(host), footage: ctx.footage };
+    let ctx = EvalCtx {
+        project: ctx.project,
+        comp_id: ctx.comp_id,
+        comp: ctx.comp,
+        time: ctx.time,
+        expr: Some(host),
+        footage: ctx.footage,
+        property_overrides: ctx.property_overrides,
+        media_overrides: ctx.media_overrides,
+    };
     let comp = ctx.comp_id.0;
     let path = layer.props.path_of(prop.uid).unwrap_or_else(|| format!("@{}", prop.uid));
     let resolver = Resolver { ctx, own: Own { comp, layer, prop, path: path.clone() } };

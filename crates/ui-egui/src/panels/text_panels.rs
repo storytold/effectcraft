@@ -57,7 +57,16 @@ pub fn text_target(app: &EffectcraftApp) -> Option<TextTarget> {
         .iter()
         .filter_map(|id| comp.layer(*id))
         .find(|l| matches!(l.source, effectcraft_engine::project::LayerSource::Text))?;
-    let ectx = EvalCtx { project: &app.session.project, comp_id: cid, comp, time: app.session.time(), expr: app.session.expr.as_deref(), footage: None };
+    let ectx = EvalCtx {
+        project: &app.session.project,
+        comp_id: cid,
+        comp,
+        time: app.session.time(),
+        expr: app.session.expr.as_deref(),
+        footage: None,
+        property_overrides: &[],
+        media_overrides: &[],
+    };
     effectcraft_engine::render::text::source_text(&ectx, layer).map(|d| TextTarget { layer: layer.id.0, doc: d, range: None })
 }
 

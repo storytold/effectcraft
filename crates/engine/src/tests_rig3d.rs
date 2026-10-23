@@ -40,7 +40,7 @@ fn close3(a: [f64; 3], b: [f64; 3], tol: f64) -> bool {
 fn frame(s: &Session, id: u64) -> (Vec3, Vec3) {
     let c = cid(s);
     let comp = s.project.comp(c).unwrap();
-    let ctx = EvalCtx { project: &s.project, comp_id: c, comp, time: Tick::ZERO, expr: None, footage: None };
+    let ctx = EvalCtx { project: &s.project, comp_id: c, comp, time: Tick::ZERO, expr: None, footage: None, property_overrides: &[], media_overrides: &[] };
     let (e, f, _) = layer_frame(&ctx, comp.layer(LayerId(id)).unwrap());
     (e, f)
 }

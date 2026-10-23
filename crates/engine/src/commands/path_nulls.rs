@@ -78,7 +78,16 @@ fn info(s: &Session, cid: ItemId, lid: LayerId, uid: Uid, cmd: &str) -> Result<P
     let layer = comp.layer(lid).ok_or(EngineError::NoComp)?;
     let pr = layer.props.find(uid).ok_or_else(|| bad(cmd, "no such property"))?;
     let t = s.time();
-    let ctx = effectcraft_render::EvalCtx { project: &s.project, comp_id: cid, comp, time: t, expr: s.expr.as_deref(), footage: Some(s.footage.as_ref()) };
+    let ctx = effectcraft_render::EvalCtx {
+        project: &s.project,
+        comp_id: cid,
+        comp,
+        time: t,
+        expr: s.expr.as_deref(),
+        footage: Some(s.footage.as_ref()),
+        property_overrides: &[],
+        media_overrides: &[],
+    };
     let KV::Path(path) = ctx.value(layer, pr) else { return Err(bad(cmd, "that property is not a path")) };
     if path.vertices.is_empty() {
         return Err(bad(cmd, "the path has no vertices"));
@@ -147,8 +156,16 @@ fn pin_targets(s: &Session, p: &Value, cmd: &str) -> Result<Option<(ItemId, Vec<
     };
     let cid = pins.first().map(|x| x.0).ok_or_else(|| bad(cmd, "no puppet pins"))?;
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
-    let ctx =
-        effectcraft_render::EvalCtx { project: &s.project, comp_id: cid, comp, time: s.time(), expr: s.expr.as_deref(), footage: Some(s.footage.as_ref()) };
+    let ctx = effectcraft_render::EvalCtx {
+        project: &s.project,
+        comp_id: cid,
+        comp,
+        time: s.time(),
+        expr: s.expr.as_deref(),
+        footage: Some(s.footage.as_ref()),
+        property_overrides: &[],
+        media_overrides: &[],
+    };
     let mut out = vec![];
     for (_, lid, uid) in pins {
         let Some(layer) = comp.layer(lid) else { continue };

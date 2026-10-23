@@ -289,7 +289,16 @@ fn vertex_delta(app: &EffectcraftApp, layer: effectcraft_engine::project::LayerI
     let s = &app.session;
     let (Some(cid), Some(comp)) = (s.active_comp_id(), s.active_comp()) else { return d };
     let Some(l) = comp.layer(layer) else { return d };
-    let ectx = effectcraft_engine::render::EvalCtx { project: &s.project, comp_id: cid, comp, time: s.time(), expr: s.expr.as_deref(), footage: None };
+    let ectx = effectcraft_engine::render::EvalCtx {
+        project: &s.project,
+        comp_id: cid,
+        comp,
+        time: s.time(),
+        expr: s.expr.as_deref(),
+        footage: None,
+        property_overrides: &[],
+        media_overrides: &[],
+    };
     let (l2c, _) = crate::panels::viewer::l2c(&ectx, l);
     l2c.inverse().map_or(d, |inv| {
         let v = inv.apply_vec(vec2(d[0], d[1]));

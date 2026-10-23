@@ -370,7 +370,16 @@ fn extruded_text_renders_as_a_mesh() {
         set(l, "geometryOptions/bevelStyle", Value::Enum(1));
         set(l, "transform/rotationY", Value::Scalar(40.0));
     });
-    let ctx = crate::EvalCtx { project: &p, comp_id: cid, comp: p.comp(cid).unwrap(), time: Tick::ZERO, expr: None, footage: None };
+    let ctx = crate::EvalCtx {
+        project: &p,
+        comp_id: cid,
+        comp: p.comp(cid).unwrap(),
+        time: Tick::ZERO,
+        expr: None,
+        footage: None,
+        property_overrides: &[],
+        media_overrides: &[],
+    };
     let l = &ctx.comp.layers[0];
     let params = scene::extrusion_params(&ctx, l).unwrap();
     let meshes = scene::extruded_meshes(&ctx, l, &params);
@@ -409,7 +418,16 @@ fn shape_surface_items_colour_the_extruded_surfaces() {
         set(l, "geometryOptions/extrusionDepth", Value::Scalar(40.0));
         set(l, "transform/position", Value::Vec3([100.0, 100.0, 0.0]));
     });
-    let ctx = crate::EvalCtx { project: &p, comp_id: cid, comp: p.comp(cid).unwrap(), time: Tick::ZERO, expr: None, footage: None };
+    let ctx = crate::EvalCtx {
+        project: &p,
+        comp_id: cid,
+        comp: p.comp(cid).unwrap(),
+        time: Tick::ZERO,
+        expr: None,
+        footage: None,
+        property_overrides: &[],
+        media_overrides: &[],
+    };
     let l = &ctx.comp.layers[0];
     let params = scene::extrusion_params(&ctx, l).unwrap();
     let meshes = scene::extruded_meshes(&ctx, l, &params);
@@ -445,7 +463,16 @@ fn text_animators_colour_the_extruded_surfaces() {
         set(l, "geometryOptions/extrusionDepth", Value::Scalar(30.0));
         set(l, "geometryOptions/bevelStyle", Value::Enum(1));
     });
-    let ctx = crate::EvalCtx { project: &p, comp_id: cid, comp: p.comp(cid).unwrap(), time: Tick::ZERO, expr: None, footage: None };
+    let ctx = crate::EvalCtx {
+        project: &p,
+        comp_id: cid,
+        comp: p.comp(cid).unwrap(),
+        time: Tick::ZERO,
+        expr: None,
+        footage: None,
+        property_overrides: &[],
+        media_overrides: &[],
+    };
     let l = &ctx.comp.layers[0];
     let params = scene::extrusion_params(&ctx, l).unwrap();
     let meshes = scene::extruded_meshes(&ctx, l, &params);
@@ -643,7 +670,16 @@ fn extruded_strokes_render_as_bevelled_meshes() {
         set(l, "geometryOptions/extrusionDepth", Value::Scalar(20.0));
         set(l, "geometryOptions/bevelStyle", Value::Enum(1));
     });
-    let ctx = crate::EvalCtx { project: &p, comp_id: cid, comp: p.comp(cid).unwrap(), time: Tick::ZERO, expr: None, footage: None };
+    let ctx = crate::EvalCtx {
+        project: &p,
+        comp_id: cid,
+        comp: p.comp(cid).unwrap(),
+        time: Tick::ZERO,
+        expr: None,
+        footage: None,
+        property_overrides: &[],
+        media_overrides: &[],
+    };
     let l = &ctx.comp.layers[0];
     let params = scene::extrusion_params(&ctx, l).unwrap();
     let meshes = scene::extruded_meshes(&ctx, l, &params);

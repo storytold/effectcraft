@@ -30,7 +30,10 @@ pub use cache::{CacheStats, LayerCache, LayerStore, PrefetchStore};
 use effectcraft_color::BlendMode;
 use effectcraft_effects::{Buf, EffectCtx, EffectEnv, EffectHost, LayerPixels, Params};
 use effectcraft_geom::{Mat3, Mat4, vec2};
-use effectcraft_project::{Comp, Footage, FootageKind, FrameBlend, GroupKind, ItemId, ItemKind, Layer, LayerSource, MatteKind, Project, Quality, Sampling};
+use effectcraft_keyframe::Value;
+use effectcraft_project::{
+    Comp, Footage, FootageKind, FrameBlend, GroupKind, ItemId, ItemKind, Layer, LayerId, LayerSource, MatteKind, Project, Quality, Sampling,
+};
 pub use effectcraft_raster::Image;
 use effectcraft_raster::{WarpOpts, composite_warp};
 use effectcraft_time::{FrameRate, TICKS_PER_SECOND, Tick};
@@ -295,12 +298,13 @@ impl EffectHost for FxHost<'_, '_, '_> {
     fn audio(&self, id: u64, start: f64, frames: usize, rate: u32) -> Option<Vec<f32>> {
         let other = self.ctx.layer(effectcraft_project::LayerId(id))?;
         let LayerSource::Footage { item } = &other.source else { return None };
-        let ItemKind::Footage(f) = &self.r.project.item(*item)?.kind else { return None };
+        let item = self.ctx.media_item(other, *item);
+        let ItemKind::Footage(f) = &self.r.project.item(item)?.kind else { return None };
         if !f.has_audio {
             return None;
         }
         let st = other.layer_time(Tick::from_seconds_f64(start));
-        self.r.footage.audio(*item, f, st, frames, rate)
+        self.r.footage.audio(item, f, st, frames, rate)
     }
 
     fn self_at(&self, layer_time: f64, effects: usize) -> Option<Buf> {
@@ -316,8 +320,9 @@ impl EffectHost for FxHost<'_, '_, '_> {
     fn aux(&self) -> Option<Arc<effectcraft_raster::AuxChannels>> {
         match &self.layer.source {
             LayerSource::Footage { item } => {
-                let ItemKind::Footage(f) = &self.r.project.item(*item)?.kind else { return None };
-                let a = self.r.footage.aux(*item, f, self.ctx.source_time(self.layer))?;
+                let item = self.ctx.media_item(self.layer, *item);
+                let ItemKind::Footage(f) = &self.r.project.item(item)?.kind else { return None };
+                let a = self.r.footage.aux(item, f, self.ctx.source_time(self.layer))?;
                 // Aux pixels per layer pixel (the layer is the footage at its nominal size).
                 if f.width > 0 && a.width > 0 {
                     let mut a = (*a).clone();
@@ -378,6 +383,78 @@ pub fn essential_overrides(ctx: &EvalCtx, layer: &Layer) -> Vec<effectcraft_proj
         }
     });
     out
+}
+
+/// A property value an Essential Properties override gives a layer of a collapsed precomp.
+#[derive(Clone, Debug)]
+pub struct PropertyOverride {
+    pub(crate) layer: LayerId,
+    pub(crate) prop: u64,
+    pub(crate) value: Value,
+    /// A Font control changes only the font of the target text, not its text.
+    pub(crate) font: bool,
+}
+
+/// A Media Replacement an Essential Properties override gives a footage layer of a collapsed
+/// precomp.
+#[derive(Clone, Copy, Debug)]
+pub struct MediaOverride {
+    pub(crate) layer: LayerId,
+    pub(crate) item: ItemId,
+}
+
+impl MediaOverride {
+    /// A Media Replacement of `layer`'s footage by `item`.
+    pub fn new(layer: LayerId, item: ItemId) -> Self {
+        MediaOverride { layer, item }
+    }
+}
+
+/// A collapsed precomp layer: the nested comp and the instance overrides that apply to it.
+pub struct Collapsed {
+    pub item: ItemId,
+    pub(crate) property_overrides: Vec<PropertyOverride>,
+    pub(crate) media_overrides: Vec<MediaOverride>,
+}
+
+/// The property and media overrides of a collapsed precomp layer. `None` when its Essential
+/// Properties group or the source comp's definitions are missing (the flattened path then
+/// preserves the old behaviour).
+fn collapsed_instance(ctx: &EvalCtx, layer: &Layer, item: ItemId) -> Option<(Vec<PropertyOverride>, Vec<MediaOverride>)> {
+    use effectcraft_project::essential::{self, ControlType, EgKind};
+    let over = essential::overridden(layer);
+    if over.is_empty() {
+        return Some((vec![], vec![]));
+    }
+    let g = essential::group(layer)?;
+    let eg = ctx.project.comp(item)?.essential.as_ref()?;
+    let mut property = vec![];
+    let mut media = vec![];
+    g.walk("", &mut |_, p| {
+        if !over.contains(&p.uid) {
+            return;
+        }
+        let Some(control) = essential::control_of(&p.match_id) else { return };
+        let Some(ctl) = eg.resolve(control) else { return };
+        let value = ctx.value(layer, p);
+        match &ctl.kind {
+            EgKind::Property { .. } => {
+                let font = ctl.as_type == Some(ControlType::Font);
+                for (layer, prop) in ctl.kind.targets() {
+                    property.push(PropertyOverride { layer, prop, value: value.clone(), font });
+                }
+            }
+            EgKind::Media { layer: target } => {
+                let Value::Scalar(id) = value else { return };
+                let item = ItemId(id.max(0.0) as u64);
+                if matches!(ctx.project.item(item).map(|i| &i.kind), Some(ItemKind::Footage(_))) {
+                    media.push(MediaOverride { layer: *target, item });
+                }
+            }
+            _ => {}
+        }
+    });
+    Some((property, media))
 }
 
 /// No footage available (renders footage layers as transparent).
@@ -792,8 +869,10 @@ impl<'a> Renderer<'a> {
 
     /// The nested comp of a precomp layer whose transformations collapse into this comp: the
     /// Collapse Transformations switch is on and the layer has no masks, effects or layer
-    /// styles (those force a flattened render of the precomp, as in After Effects).
-    pub fn collapsed(&self, ctx: &EvalCtx, layer: &Layer) -> Option<ItemId> {
+    /// styles (those force a flattened render of the precomp, as in After Effects). Essential
+    /// Properties overrides travel with it and are applied as the nested layers are evaluated,
+    /// so the nested comp is not rasterised at its frame.
+    pub fn collapsed(&self, ctx: &EvalCtx, layer: &Layer) -> Option<Collapsed> {
         if !layer.switches.collapse || layer.switches.adjustment || self.depth > 12 {
             return None;
         }
@@ -810,24 +889,32 @@ impl<'a> Renderer<'a> {
         if styles::active(ctx, layer) {
             return None;
         }
-        // Instance overrides (Essential Properties) need the nested comp rendered on its own.
-        if !effectcraft_project::essential::overridden(layer).is_empty() {
-            return None;
-        }
-        Some(*item)
+        let (property_overrides, media_overrides) = collapsed_instance(ctx, layer, *item)?;
+        Some(Collapsed { item: *item, property_overrides, media_overrides })
     }
 
     /// A renderer and context that draw a collapsed precomp's layers straight into this comp:
     /// their transforms are concatenated with the precomp layer's (one resample, no
     /// rasterisation at the precomp's bounds), their opacity multiplied by `opacity`, and their
     /// 3D layers use this comp's camera and lights.
-    pub fn collapse_into(&self, ctx: &EvalCtx<'a>, layer: &'a Layer, item: ItemId, opacity: f32) -> Option<(Renderer<'a>, EvalCtx<'a>)> {
+    pub fn collapse_into<'p>(&self, ctx: &EvalCtx<'a>, layer: &'a Layer, collapsed: &'p Collapsed, opacity: f32) -> Option<(Renderer<'p>, EvalCtx<'p>)>
+    where
+        'a: 'p,
+    {
+        let item = collapsed.item;
         let nc = self.project.comp(item)?;
         let t = ctx.nested_time(layer);
         if !nc.covers(t) {
             return None;
         }
-        let nctx = EvalCtx { comp_id: item, comp: nc, time: t, ..*ctx };
+        let nctx = EvalCtx {
+            comp_id: item,
+            comp: nc,
+            time: t,
+            property_overrides: &collapsed.property_overrides,
+            media_overrides: &collapsed.media_overrides,
+            ..*ctx
+        };
         let (l2c, _) = ctx.layer_to_comp(layer);
         let outer = Some(self.outer.map_or(l2c, |o| o * l2c));
         let world = ctx.world_matrix(layer);
@@ -859,19 +946,19 @@ impl<'a> Renderer<'a> {
     /// that then takes the precomp layer's track matte, Preserve Transparency and blend mode.
     /// Returns the region left to re-quantise (nested layers drawn straight into `canvas`
     /// quantise their own footprints).
-    fn draw_collapsed(&self, ctx: &EvalCtx<'a>, layer: &Layer, item: ItemId, canvas: &mut Image, blank: bool) -> Region {
+    fn draw_collapsed(&self, ctx: &EvalCtx<'a>, layer: &'a Layer, collapsed: &Collapsed, canvas: &mut Image, blank: bool) -> Region {
         let opacity = ctx.opacity(layer) as f32 * self.opacity_mul;
         if opacity <= 0.0 {
             return Region::Empty;
         }
         let matte = layer.track_matte.is_some_and(|tm| tm.layer != layer.id && ctx.comp.layer(tm.layer).is_some());
         if layer.blend_mode == BlendMode::Normal && !matte && !layer.preserve_transparency {
-            if let Some((sub, nctx)) = self.collapse_into(ctx, layer, item, opacity) {
+            if let Some((sub, nctx)) = self.collapse_into(ctx, layer, collapsed, opacity) {
                 sub.draw_comp(&nctx, canvas, blank);
             }
             return Region::Empty;
         }
-        let Some((sub, nctx)) = self.collapse_into(ctx, layer, item, 1.0) else { return Region::Empty };
+        let Some((sub, nctx)) = self.collapse_into(ctx, layer, collapsed, 1.0) else { return Region::Empty };
         let mut iso = Image::new(canvas.width, canvas.height);
         sub.draw_comp(&nctx, &mut iso, true);
         self.composite_iso(ctx, layer, iso, canvas, opacity);
@@ -900,6 +987,7 @@ impl<'a> Renderer<'a> {
         let continuous = match layer.source {
             LayerSource::Text | LayerSource::Shape => true,
             LayerSource::Footage { item } => {
+                let item = ctx.media_item(layer, item);
                 layer.switches.collapse && matches!(self.project.item(item).map(|i| &i.kind), Some(ItemKind::Footage(f)) if is_vector_footage(f))
             }
             _ => false,
@@ -937,7 +1025,7 @@ impl<'a> Renderer<'a> {
     }
 
     fn ctx(&self, comp_id: ItemId, comp: &'a Comp, t: Tick) -> EvalCtx<'a> {
-        EvalCtx { project: self.project, comp_id, comp, time: t, expr: self.expr, footage: Some(self.footage) }
+        EvalCtx { project: self.project, comp_id, comp, time: t, expr: self.expr, footage: Some(self.footage), property_overrides: &[], media_overrides: &[] }
     }
 
     /// This renderer with another accelerator (or none): the passes of
@@ -1077,7 +1165,7 @@ impl<'a> Renderer<'a> {
                 blank = false;
             } else {
                 let changed = match self.collapsed(ctx, visible[i]) {
-                    Some(item) => self.draw_collapsed(ctx, visible[i], item, canvas, blank),
+                    Some(collapsed) => self.draw_collapsed(ctx, visible[i], &collapsed, canvas, blank),
                     None => self.draw_layer(ctx, visible[i], canvas, blank),
                 };
                 i += 1;
@@ -1317,7 +1405,8 @@ impl<'a> Renderer<'a> {
                 Some(Buf { img: sub.comp_frame(*item, lt), offset: [0.0; 2], scale: bs })
             }
             LayerSource::Footage { item } => {
-                let it = self.project.item(*item)?;
+                let item = ctx.media_item(layer, *item);
+                let it = self.project.item(item)?;
                 let ItemKind::Footage(f) = &it.kind else { return None };
                 if !f.has_video {
                     return None;
@@ -1325,7 +1414,7 @@ impl<'a> Renderer<'a> {
                 // Continuously rasterised vector footage: drawn at the on-screen scale.
                 if layer.switches.collapse && is_vector_footage(f) {
                     let k = self.raster_scale(ctx, layer);
-                    if let Some(img) = self.footage.vector_frame(*item, f, k) {
+                    if let Some(img) = self.footage.vector_frame(item, f, k) {
                         let mut buf = Buf { img: (*img).clone(), offset: [0.0; 2], scale: k };
                         if let Some(c) = self.pipe.media_in(f) {
                             color::convert(&mut buf.img, &c);
@@ -1335,10 +1424,10 @@ impl<'a> Renderer<'a> {
                 }
                 let lt = ctx.source_time(layer);
                 // The proxy is decoded instead, at its own size, and fills the footage's frame.
-                let proxy = self.proxy_for(*item);
+                let proxy = self.proxy_for(item);
                 let pf = proxy.unwrap_or(f);
                 let size = self.reduced_size(f.width, f.height).filter(|_| proxy.is_none());
-                let img = self.footage_frame(ctx, layer, *item, pf, lt, size)?;
+                let img = self.footage_frame(ctx, layer, item, pf, lt, size)?;
                 Some(self.footage_buf(&img, pf, f.width, f.height))
             }
             LayerSource::Text => Some(self.authored(text::render(ctx, layer, self.raster_scale(ctx, layer)))),
@@ -1575,7 +1664,7 @@ impl<'a> Renderer<'a> {
             }
         }
         let t0 = web_time::Instant::now();
-        let size = source_size(self.project, layer);
+        let size = ctx.source_size(layer);
         let layer_size = if size.0 == 0 { [ctx.comp.width as f64, ctx.comp.height as f64] } else { [size.0 as f64, size.1 as f64] };
         let st = styles::render(ctx, layer, &content, layer_size);
         if let Some(t) = timing {
@@ -2227,8 +2316,8 @@ impl<'a> Renderer<'a> {
     }
 
     /// Draw a collapsed precomp layer into `canvas` on the CPU.
-    pub fn draw_collapsed_cpu(&self, ctx: &EvalCtx<'a>, layer: &Layer, item: ItemId, canvas: &mut Image) {
-        self.draw_collapsed(ctx, layer, item, canvas, false);
+    pub fn draw_collapsed_cpu(&self, ctx: &EvalCtx<'a>, layer: &'a Layer, collapsed: &Collapsed, canvas: &mut Image) {
+        self.draw_collapsed(ctx, layer, collapsed, canvas, false);
     }
 
     /// The layer's finished buffers (styles included) in the blending space.
@@ -2391,7 +2480,7 @@ pub fn content_bounds(ctx: &EvalCtx, layer: &effectcraft_project::Layer) -> Opti
         LayerSource::Shape => layer.props.sub("contents").and_then(|c| shapes::content_bounds(ctx, layer, c)).map(|r| [r.x0, r.y0, r.x1, r.y1]),
         LayerSource::Camera | LayerSource::Light { .. } => None,
         _ => {
-            let (w, h) = source_size(ctx.project, layer);
+            let (w, h) = ctx.source_size(layer);
             (w > 0 && h > 0).then_some([0.0, 0.0, w as f64, h as f64])
         }
     }
