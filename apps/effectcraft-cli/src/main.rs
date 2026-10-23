@@ -124,7 +124,7 @@ const USAGE: &str = "usage: effectcraft-cli <info|commands|exec|run|props|get|se
       [--automation-read-root DIR] [--automation-write-root DIR]
                                            confine the agent's file access: reads under a read or write root,
                                            writes under a write root (each repeatable); scripts are refused
-options: --project F.ecproj | --demo | --empty   --save | --save-as F   --bridge PORT   --json   --gpu
+options: --project F.ecproj | --demo | --empty   --save | --save-as F   --bridge PORT   --json   --gpu   --exp-input-cache
 <comp>: id or name, '-' = active comp; <layer>: id, '#n' or name; <value>: JSON or bare string";
 
 /// Options that take a value.
@@ -182,6 +182,7 @@ const FLAGS: &[&str] = &[
     "--demo",
     "--empty",
     "--gpu",
+    "--exp-input-cache",
     "--list",
     "--schemas",
     "--enabled",
@@ -292,6 +293,11 @@ fn main() {
         Ok(a) => a,
         Err(e) => fail_usage(&e),
     };
+    if args.flag("--exp-input-cache")
+        || std::env::var("EFFECTCRAFT_EXP_INPUT_CACHE").is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes"))
+    {
+        effectcraft_render::cache::set_input_cache(true);
+    }
     let json_out = args.flag("--json");
     if args.pos.is_empty() {
         fail_usage("missing subcommand");
