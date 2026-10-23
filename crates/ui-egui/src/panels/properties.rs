@@ -193,6 +193,8 @@ fn triangle(p: &egui::Painter, c: egui::Pos2, left: bool, col: Color32) {
 #[allow(clippy::too_many_arguments)]
 fn transform_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, layer: &Layer, pr: &Property, ectx: &EvalCtx, r: Rect, actions: &mut Actions) {
     let t = app.tokens;
+    // The values themselves: red while an expression drives the property (#1306).
+    let vt = t.for_value(pr.has_expression());
     let cy = r.center().y;
     let uid = pr.uid;
     let lid = layer.id.0;
@@ -269,7 +271,7 @@ fn transform_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter,
     match &value {
         Value::Scalar(v) if pr.name == "Rotation" || pr.name.ends_with(" Rotation") => {
             let (_, deg) = super::fx_widgets::split_angle(*v);
-            let (rr, dr, nv) = super::fx_widgets::angle_field(ui, pos2(vx, cy - 9.0), egui::Id::new(("props-v", uid)), *v, decimals(deg), &t);
+            let (rr, dr, nv) = super::fx_widgets::angle_field(ui, pos2(vx, cy - 9.0), egui::Id::new(("props-v", uid)), *v, decimals(deg), &vt);
             app.auto.add(&format!("{base}.value"), dr, &pr.name);
             app.auto.add(&format!("{base}.revolutions"), rr, &pr.name);
             if let Some(nv) = nv {
@@ -278,7 +280,7 @@ fn transform_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter,
         }
         Value::Scalar(v) => {
             let range = if pr.name == "Opacity" { (0.0, 100.0) } else { (-1e9, 1e9) };
-            let (vr, nv, _) = widgets::hot_number_at(ui, pos2(vx, cy - 9.0), egui::Id::new(("props-v", uid)), *v, 0.5, range, decimals(*v), suffix, &t);
+            let (vr, nv, _) = widgets::hot_number_at(ui, pos2(vx, cy - 9.0), egui::Id::new(("props-v", uid)), *v, 0.5, range, decimals(*v), suffix, &vt);
             app.auto.add(&format!("{base}.value"), vr, &pr.name);
             if let Some(nv) = nv {
                 set(actions, json!(nv));
@@ -304,7 +306,7 @@ fn transform_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter,
             }
             for d in 0..n.min(c.len()) {
                 let (vr, nv, _) =
-                    widgets::hot_number_at(ui, pos2(x, cy - 9.0), egui::Id::new(("props-v", uid, d)), c[d], 1.0, (-1e9, 1e9), decimals(c[d]), suffix, &t);
+                    widgets::hot_number_at(ui, pos2(x, cy - 9.0), egui::Id::new(("props-v", uid, d)), c[d], 1.0, (-1e9, 1e9), decimals(c[d]), suffix, &vt);
                 app.auto.add(&format!("{base}.value.{d}"), vr, &pr.name);
                 if let Some(nv) = nv {
                     let mut nc = c.clone();

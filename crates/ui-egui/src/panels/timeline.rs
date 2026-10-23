@@ -4084,6 +4084,8 @@ fn value_editor(
     actions: &mut Vec<(String, serde_json::Value)>,
 ) -> Vec<Rect> {
     let t = app.tokens;
+    // The values themselves: red while an expression drives the property (#1306).
+    let vt = t.for_value(prop.has_expression());
     let uid = prop.uid;
     let mut dims = vec![];
     let merge = format!("scrub-{uid}");
@@ -4110,7 +4112,7 @@ fn value_editor(
                 _ => (-1e9, 1e9, 1, 1.0),
             };
             if matches!(prop.ui, ParamUi::Angle) {
-                let (rr, dr, nv) = super::fx_widgets::angle_field(ui, pos2(x, y), egui::Id::new(("v", uid, 0)), *v, 1, &t);
+                let (rr, dr, nv) = super::fx_widgets::angle_field(ui, pos2(x, y), egui::Id::new(("v", uid, 0)), *v, 1, &vt);
                 app.auto.add(&format!("timeline.prop.{uid}.value"), dr, &prop.name);
                 app.auto.add(&format!("timeline.prop.{uid}.revolutions"), rr, &prop.name);
                 if let Some(nv) = nv {
@@ -4118,7 +4120,7 @@ fn value_editor(
                 }
             } else {
                 let suffix = if matches!(prop.ui, ParamUi::Percent) || prop.match_id == "opacity" { "%" } else { "" };
-                let (r, nv, _) = widgets::hot_number_at(ui, pos2(x, y), egui::Id::new(("v", uid, 0)), *v, speed, (min, max), dec.max(1), suffix, &t);
+                let (r, nv, _) = widgets::hot_number_at(ui, pos2(x, y), egui::Id::new(("v", uid, 0)), *v, speed, (min, max), dec.max(1), suffix, &vt);
                 app.auto.add(&format!("timeline.prop.{uid}.value"), r, &prop.name);
                 if let Some(nv) = nv {
                     set(actions, json!(nv));
@@ -4147,7 +4149,7 @@ fn value_editor(
             }
             for d in 0..n.min(c.len()) {
                 let suffix = if pct && d + 1 == n { "%" } else { "" };
-                let (r, nv, _) = widgets::hot_number_at(ui, pos2(x, y), egui::Id::new(("v", uid, d)), c[d], if pct { 0.5 } else { 1.0 }, range, 1, suffix, &t);
+                let (r, nv, _) = widgets::hot_number_at(ui, pos2(x, y), egui::Id::new(("v", uid, d)), c[d], if pct { 0.5 } else { 1.0 }, range, 1, suffix, &vt);
                 app.auto.add(&format!("timeline.prop.{uid}.value.{d}"), r, &prop.name);
                 dims.push(r);
                 if let Some(nv) = nv {
@@ -4169,7 +4171,7 @@ fn value_editor(
                 }
                 x = r.max.x + if d + 1 < n { 2.0 } else { 0.0 };
                 if d + 1 < n {
-                    p.text(pos2(x, at.y), Align2::LEFT_CENTER, ",", Tokens::ui(12.0), t.hot_text);
+                    p.text(pos2(x, at.y), Align2::LEFT_CENTER, ",", Tokens::ui(12.0), vt.hot_text);
                     x += 6.0;
                 }
             }
@@ -4225,7 +4227,7 @@ fn value_editor(
                     set(actions, json!(ni));
                 }
             } else {
-                p.text(pos2(x, at.y), Align2::LEFT_CENTER, fmt_num(*i as f64, 0), Tokens::ui(12.0), t.hot_text);
+                p.text(pos2(x, at.y), Align2::LEFT_CENTER, fmt_num(*i as f64, 0), Tokens::ui(12.0), vt.hot_text);
             }
         }
         Value::Path(_) => {

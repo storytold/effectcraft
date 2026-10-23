@@ -163,6 +163,11 @@ The most important missing piece: it turns every other estimate here into a meas
   a Radial Stroke swatch on a selected shape layer and get the Gradient Editor on its Gradient Fill
   / Gradient Stroke Colors (OK saves); without such a gradient the swatch still opens the options,
   and the words, Solid swatches and Alt-click are unchanged.
+- Regression evidence for [#1306](https://github.com/storytold/effectcraft/issues/1306) (from
+  #1072): the `ui_expression_values` tests, checked headlessly on Windows, read the colour the
+  values are painted in. Expression-driven vectors, angles and scalars are red in the Timeline,
+  Effect Controls and Properties panel, in dark and light themes, hovered too; disabled, removed
+  and empty expressions show the ordinary colour.
 - Regression evidence for the reports of 6 October, checked headlessly on Windows: real pointer
   drags in `ui_drag_drop` (Project items into the Timeline between layers and at a time, and onto
   the viewer; an effect onto a layer in the viewer: #85, #88, #89), `ui_render_queue` (a template
