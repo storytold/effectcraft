@@ -215,9 +215,33 @@ fn deinterleave(buf: &[f32], channels: usize) -> Vec<Vec<f32>> {
 
 /// The comp's audio over `n` samples from `start`, interleaved with the module's channel count
 /// (mono = the average of left and right).
-pub(crate) fn mix(cx: &Cx, start: effectcraft_time::Tick, n: usize, sr: u32) -> Vec<f32> {
-    let st = effectcraft_render::audio::mix_comp(&cx.project, cx.footage, cx.expr, cx.comp, start, n, sr);
-    if cx.output.audio_channels == 1 { st.as_chunks::<2>().0.iter().map(|p| (p[0] + p[1]) * 0.5).collect() } else { st }
+pub(crate) fn mix(cx: &Cx, start: effectcraft_time::Tick, n: usize, sr: u32) -> Result<Vec<f32>> {
+    let control = effectcraft_render::audio::MixControl { cancel: cx.options.cancel.clone(), ..Default::default() };
+    // Video batches can span many seconds at low frame rates. Keep each mixer request bounded,
+    // retaining sample-aligned ticks even at rates that do not divide the tick clock (44.1 kHz).
+    const BLOCK: usize = 16_384;
+    let channels = if cx.output.audio_channels == 1 { 1 } else { 2 };
+    let len = n.checked_mul(channels).ok_or_else(|| enc("audio output is too large"))?;
+    let mut out = Vec::new();
+    out.try_reserve_exact(len).map_err(|_| enc("audio output allocation failed"))?;
+    for done in (0..n).step_by(BLOCK) {
+        let offset = i64::try_from(done).map_err(|_| enc("audio sample offset is too large"))?;
+        let sample = start.to_units_floor(i64::from(sr)).checked_add(offset).ok_or_else(|| enc("audio sample offset overflow"))?;
+        let tick = Tick::from_units(sample, i64::from(sr));
+        let tick = if tick.to_units_floor(i64::from(sr)) < sample { Tick(tick.0.saturating_add(1)) } else { tick };
+        let st = effectcraft_render::audio::mix_comp_with_control(&cx.project, cx.footage, cx.expr, cx.comp, tick, BLOCK.min(n - done), sr, &control).map_err(
+            |e| match e {
+                effectcraft_render::audio::AudioError::Cancelled => ExportError::Cancelled,
+                _ => ExportError::Encode(e.to_string()),
+            },
+        )?;
+        if channels == 1 {
+            out.extend(st.as_chunks::<2>().0.iter().map(|p| (p[0] + p[1]) * 0.5));
+        } else {
+            out.extend(st);
+        }
+    }
+    Ok(out)
 }
 
 /// PCM bytes of samples in `fmt` (little or big endian).
@@ -334,7 +358,7 @@ pub(crate) async fn movie(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut St
         let n = (end - *cursor) as usize;
         let start = Tick::from_units(*cursor, i64::from(sr));
         let start = if start.to_units_floor(i64::from(sr)) < *cursor { Tick(start.0.saturating_add(1)) } else { start };
-        let buf = mix(job, start, n, sr);
+        let buf = mix(job, start, n, sr)?;
         *cursor = end;
         match a {
             Audio::Aac(e) => {
@@ -383,6 +407,85 @@ pub(crate) async fn movie(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Chunked mixing preserves every sample at non-dividing rates, stereo/mono, and cancellation.
+    #[test]
+    fn large_audio_mix_preserves_samples_and_cancellation() {
+        use effectcraft_project::{Footage, ItemId, ItemKind, LayerSource, Project, build};
+        use effectcraft_render::{FootageSource, Image};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        };
+        struct Ramp {
+            reads: AtomicUsize,
+            cancel: Option<Arc<AtomicBool>>,
+        }
+        impl FootageSource for Ramp {
+            fn frame(&self, _: ItemId, _: &Footage, _: Tick) -> Option<Arc<Image>> {
+                None
+            }
+            fn audio(&self, _: ItemId, _: &Footage, start: Tick, frames: usize, rate: u32) -> Option<Vec<f32>> {
+                if self.reads.fetch_add(1, Ordering::Relaxed) == 1
+                    && let Some(c) = &self.cancel
+                {
+                    c.store(true, Ordering::Relaxed);
+                }
+                let first = start.to_units_floor(i64::from(rate));
+                Some(
+                    (0..frames)
+                        .flat_map(|i| {
+                            let x = ((first + i as i64).rem_euclid(4096) as f32) / 4096.0;
+                            [x, x * 0.5]
+                        })
+                        .collect(),
+                )
+            }
+        }
+        let mut p = Project::default();
+        let mut comp = Comp::new(16, 16, FrameRate::new(1, 1), Tick::from_seconds_f64(100.0));
+        let item = p.add_item("ramp", effectcraft_color::Label::SeaFoam, None, ItemKind::Footage(Footage { has_audio: true, ..Default::default() }));
+        comp.layers.push(build::layer(&mut p, &comp, "ramp", LayerSource::Footage { item }, (0, 0), None));
+        let cid = p.add_item("audio", effectcraft_color::Label::Sandstone, None, ItemKind::Comp(comp.into()));
+        for rate in [44100, 192000] {
+            for channels in [1, 2] {
+                let mut output = effectcraft_project::render_queue::OutputModule::for_format(OutputFormat::Wav);
+                output.audio_channels = channels;
+                let cancel = Arc::new(AtomicBool::new(false));
+                let source = Ramp { reads: AtomicUsize::new(0), cancel: None };
+                let job = crate::Job {
+                    project: &p,
+                    footage: &source,
+                    expr: None,
+                    accel: None,
+                    comp: cid,
+                    settings: &Default::default(),
+                    output: &output,
+                    path: "unused.wav",
+                    sink: None,
+                    options: crate::JobOptions { cancel: Some(cancel.clone()), ..Default::default() },
+                    nested_switches: true,
+                };
+                let cx = Cx::new(&job);
+                let start = Tick(Tick::from_units(73, rate as i64).0 + 1);
+                let count = 1_100_003;
+                let actual = mix(&cx, start, count, rate).unwrap();
+                assert_eq!(actual.len(), count * channels as usize);
+                for i in 0..count {
+                    let x = ((73 + i) % 4096) as f32 / 4096.0;
+                    if channels == 1 {
+                        assert_eq!(actual[i], (x + x * 0.5) * 0.5);
+                    } else {
+                        assert_eq!(&actual[i * 2..i * 2 + 2], &[x, x * 0.5]);
+                    }
+                }
+                let source = Ramp { reads: AtomicUsize::new(0), cancel: Some(cancel) };
+                let job = crate::Job { footage: &source, ..job };
+                assert!(matches!(mix(&Cx::new(&job), start, count, rate), Err(ExportError::Cancelled)));
+                assert_eq!(source.reads.load(Ordering::Relaxed), 2, "stop during the second block");
+            }
+        }
+    }
 
     #[test]
     fn yuv_of_primaries() {

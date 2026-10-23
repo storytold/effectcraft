@@ -1073,6 +1073,9 @@ impl EffectcraftApp {
         let mix = self.session.prefs.audio.preview_sample_rate;
         if let Some(s) = &mut self.scrub {
             s.play(&src, comp, t, mix, now);
+            if let Some(error) = s.feed.error() {
+                self.ui.status = error;
+            }
         }
     }
 
@@ -1296,6 +1299,11 @@ impl EffectcraftApp {
         }
         // Audio clock drives playback: show the frame under the audible sample.
         if let Some(a) = &self.audio {
+            if let Some(error) = a.feed.error() {
+                self.ui.status = error;
+                self.stop();
+                return;
+            }
             if a.finished() {
                 if video {
                     self.session.set_time(fr.tick_of(wb));

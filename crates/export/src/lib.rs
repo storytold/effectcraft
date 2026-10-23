@@ -97,6 +97,8 @@ pub struct Job<'a> {
 /// Job options beyond the Render Settings and Output Module.
 #[derive(Default)]
 pub struct JobOptions<'a> {
+    /// Interrupt audio mixing within a batch; callback cancellation still works between batches.
+    pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// The render log written next to the output.
     pub log: RenderLog,
     /// What the log calls the job (e.g. "#2 Main Comp").

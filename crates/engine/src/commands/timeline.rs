@@ -115,6 +115,7 @@ fn prerender(s: &Session, cid: ItemId, lid: LayerId, path: &str) -> std::result:
     item.output.audio = AudioOutput::Off;
     item.output.output = path.to_string();
     let job = crate::ExportJob {
+        cancel: None,
         project: &q,
         footage: s.footage.as_ref(),
         expr: s.expr.as_deref(),

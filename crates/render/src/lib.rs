@@ -34,7 +34,7 @@ use effectcraft_project::{Comp, Footage, FootageKind, FrameBlend, GroupKind, Ite
 pub use effectcraft_raster::Image;
 use effectcraft_raster::{WarpOpts, composite_warp};
 use effectcraft_time::{FrameRate, TICKS_PER_SECOND, Tick};
-pub use eval::{EvalCtx, ExprHost, effect_bounds, source_size};
+pub use eval::{AudioExpression, EvalCtx, ExprHost, effect_bounds, source_size};
 use rayon::prelude::*;
 
 /// How a [`FootageSource`] hands over float footage (OpenEXR, float TIFF), whose values are
@@ -160,7 +160,7 @@ impl FootageSource for CancellableFootage<'_> {
         self.read(|| self.inner.frame_at_size(item, footage, t, width, height))
     }
     fn audio(&self, item: ItemId, footage: &Footage, t: Tick, frames: usize, rate: u32) -> Option<Vec<f32>> {
-        self.inner.audio(item, footage, t, frames, rate)
+        self.read(|| self.inner.audio(item, footage, t, frames, rate))
     }
     fn aux(&self, item: ItemId, footage: &Footage, t: Tick) -> Option<Arc<effectcraft_raster::AuxChannels>> {
         self.inner.aux(item, footage, t)

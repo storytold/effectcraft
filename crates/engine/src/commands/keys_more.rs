@@ -80,7 +80,8 @@ fn audio_to_keys(s: &mut Session, p: &Value) -> Result<Value> {
     let mut rows = vec![];
     for f in f0..f1 {
         let t = fr.tick_of(f);
-        let buf = effectcraft_render::audio::mix_comp(&s.project, s.footage.as_ref(), s.expr.as_deref(), cid, t, per, RATE);
+        let buf = effectcraft_render::audio::mix_comp(&s.project, s.footage.as_ref(), s.expr.as_deref(), cid, t, per, RATE)
+            .map_err(|e| EngineError::Other(e.to_string()))?;
         rows.push((t, amplitudes(&buf)));
     }
     let spec = effectcraft_effects::lookup("ec.control.slider").ok_or_else(|| EngineError::Other("Slider Control is missing".into()))?;

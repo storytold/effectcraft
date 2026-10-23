@@ -29,6 +29,7 @@
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+mod audio;
 pub mod host;
 mod noise;
 pub mod rewrite;
@@ -67,6 +68,7 @@ fn budget_start() {
 /// An error once the outermost evaluation has used up its runs or its time.
 fn budget_left() -> Result<(), String> {
     if RUNS.with(|r| r.get()) >= MAX_RUNS {
+        runtime::fail_audio();
         return Err("Error: expression reads too many other expressions' values (circular or fanning-out references?)".into());
     }
     if runtime::out_of_time() {
@@ -80,6 +82,24 @@ fn budget_left() -> Result<(), String> {
 pub struct Expressions;
 
 impl ExprHost for Expressions {
+    /// Evaluate a remap, level or effect parameter under the mix's shared interruption controls.
+    fn eval_audio(
+        &self,
+        ctx: &EvalCtx,
+        layer: &Layer,
+        prop: &Property,
+        value: &Value,
+        control: &effectcraft_render::audio::AudioEvalControl,
+    ) -> Result<Value, String> {
+        let _guard = runtime::AudioControl::enter(control);
+        self.eval(ctx, layer, prop, value)
+    }
+
+    /// Prepare only the scalar syntax whose per-sample JavaScript semantics are exact.
+    fn prepare_audio(&self, text: &str) -> Option<Box<dyn effectcraft_render::AudioExpression>> {
+        audio::prepare(text)
+    }
+
     fn eval(&self, ctx: &EvalCtx, layer: &Layer, prop: &Property, value: &Value) -> Result<Value, String> {
         match &prop.expr {
             Some(e) => evaluate(self, ctx, layer, prop, value, &e.text),
@@ -198,6 +218,7 @@ fn evaluate_out(
             }
         }
     }
+    runtime::fail_audio();
     Err("Error: expression needs too many property reads".into())
 }
 

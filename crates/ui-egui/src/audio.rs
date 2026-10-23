@@ -39,6 +39,12 @@ pub trait AudioDevice: Send {
     fn latency_frames(&self) -> u64 {
         0
     }
+    /// Conservative output-drain allowance at natural completion, in sample frames.
+    /// Output processing can retain a tail beyond the latency used for the sync clock.
+    /// Explicit Stop does not wait for this allowance.
+    fn drain_frames(&self) -> u64 {
+        self.latency_frames()
+    }
     /// Called every UI frame while playing: devices without an audio thread of their own (Web
     /// Audio) move queued samples to the output here.
     fn pump(&mut self) {}
@@ -68,6 +74,7 @@ impl AudioOutput {
 #[derive(Default)]
 pub struct AudioFeed {
     queue: Mutex<VecDeque<f32>>,
+    error: Mutex<Option<String>>,
     /// Sample frames handed to the device (real audio only: underruns do not count).
     consumed: AtomicU64,
     /// Peak |sample| per channel since the last [`AudioFeed::take_peaks`] (f32 bits).
@@ -77,6 +84,16 @@ pub struct AudioFeed {
 }
 
 impl AudioFeed {
+    /// Most recent mix failure, distinct from reaching the end of the work area.
+    pub fn error(&self) -> Option<String> {
+        self.error.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    }
+    /// Stop feeding and preserve an actionable error for the UI.
+    fn fail(&self, error: String) {
+        *self.error.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error);
+        self.finished.store(true, Ordering::Relaxed);
+    }
+
     /// Fill `out` (interleaved stereo) from the queue; silence where the queue runs dry.
     pub fn pull(&self, out: &mut [f32]) {
         let mut real = 0usize;
@@ -177,6 +194,8 @@ const BLOCK: usize = 1024;
 pub struct AudioPlayback {
     pub feed: Arc<AudioFeed>,
     device: Box<dyn AudioDevice>,
+    /// Once the feed empties, keep the output open for its reported buffering latency.
+    drain: Mutex<Option<(web_time::Instant, std::time::Duration)>>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
     /// wasm32 (no threads): what the feeder thread would own, run by [`AudioPlayback::pump`].
@@ -213,7 +232,16 @@ impl AudioPlayback {
         let stop = Arc::new(AtomicBool::new(false));
         if cfg!(target_arch = "wasm32") {
             // The device takes samples only in `pump`, which fills the queue first.
-            let mut p = AudioPlayback { feed: feed.clone(), device, stop, thread: None, feeder: Some((src, comp, span.start, mix)), rate, span };
+            let mut p = AudioPlayback {
+                feed: feed.clone(),
+                device,
+                drain: Mutex::default(),
+                stop,
+                thread: None,
+                feeder: Some((src, comp, span.start, mix)),
+                rate,
+                span,
+            };
             p.device.start(feed)?;
             p.pump();
             return Ok(p);
@@ -231,7 +259,7 @@ impl AudioPlayback {
                     let target = queue_target(rate);
                     while !stop.load(Ordering::Relaxed) {
                         if feed.queued_frames() < target && !feed.finished.load(Ordering::Relaxed) {
-                            cursor = feed_block(&src, comp, &feed, &span, cursor, rate, mix);
+                            cursor = feed_block(&src, comp, &feed, &span, cursor, rate, mix, &stop);
                         } else {
                             std::thread::sleep(std::time::Duration::from_millis(4));
                         }
@@ -240,7 +268,7 @@ impl AudioPlayback {
                 .map_err(|e| e.to_string())?
         };
         device.start(feed.clone())?;
-        Ok(AudioPlayback { feed, device, stop, thread: Some(thread), feeder: None, rate, span })
+        Ok(AudioPlayback { feed, device, drain: Mutex::default(), stop, thread: Some(thread), feeder: None, rate, span })
     }
 
     /// Every UI frame while playing: on wasm32 mix ahead into the feed (what the feeder thread
@@ -249,7 +277,7 @@ impl AudioPlayback {
         if let Some((src, comp, cursor, mix)) = &mut self.feeder {
             let target = queue_target(self.rate);
             while self.feed.queued_frames() < target && !self.feed.finished.load(Ordering::Relaxed) {
-                *cursor = feed_block(src, *comp, &self.feed, &self.span, *cursor, self.rate, *mix);
+                *cursor = feed_block(src, *comp, &self.feed, &self.span, *cursor, self.rate, *mix, &self.stop);
             }
         }
         self.device.pump();
@@ -261,7 +289,24 @@ impl AudioPlayback {
     }
 
     pub fn finished(&self) -> bool {
-        self.feed.finished()
+        self.finished_at(web_time::Instant::now())
+    }
+
+    fn finished_at(&self, now: web_time::Instant) -> bool {
+        if !self.feed.finished() {
+            return false;
+        }
+        // Queue-empty means the last real samples were handed to the device. Closing
+        // it now discards the buffered tail. Take one conservative latency snapshot;
+        // explicit Stop still closes immediately, without waiting here or sleeping.
+        let latency = self.device.drain_frames();
+        let rate = u64::from(self.rate.max(1));
+        // The remainder is less than a u32 rate, so this product fits u64 and
+        // the nanosecond component is strictly less than one second.
+        let wait = std::time::Duration::new(latency / rate, ((latency % rate) * 1_000_000_000 / rate) as u32);
+        let mut drain = self.drain.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (started, wait) = drain.get_or_insert((now, wait));
+        now.saturating_duration_since(*started) >= *wait
     }
 
     pub fn stop(&mut self) {
@@ -281,7 +326,8 @@ impl Drop for AudioPlayback {
 
 /// Mix one block at `cursor` into the feed; returns the next cursor (wrapping or finishing at
 /// the work-area end).
-fn feed_block(src: &RenderSource, comp: ItemId, feed: &AudioFeed, span: &PlaySpan, cursor: i64, rate: u32, mix: u32) -> i64 {
+#[allow(clippy::too_many_arguments)]
+fn feed_block(src: &RenderSource, comp: ItemId, feed: &AudioFeed, span: &PlaySpan, cursor: i64, rate: u32, mix: u32, stop: &Arc<AtomicBool>) -> i64 {
     let mut cursor = cursor;
     if cursor >= span.wb {
         if !span.looping {
@@ -291,20 +337,42 @@ fn feed_block(src: &RenderSource, comp: ItemId, feed: &AudioFeed, span: &PlaySpa
         cursor = span.wa;
     }
     let n = ((span.wb - cursor) as usize).min(BLOCK);
-    feed.push(&mix_block(src, comp, sample_time(cursor, rate), n, rate, mix));
+    match mix_block(src, comp, sample_time(cursor, rate), n, rate, mix, Some(stop)) {
+        Ok(buf) => feed.push(&buf),
+        Err(e) => {
+            feed.fail(e.to_string());
+            return cursor;
+        }
+    }
     cursor + n as i64
 }
 
 /// `n` stereo frames of `comp`'s mix from comp time `t` at the device `rate`, mixed at `mix` Hz
 /// (resampled when they differ).
-fn mix_block(src: &RenderSource, comp: ItemId, t: Tick, n: usize, rate: u32, mix: u32) -> Vec<f32> {
-    let render =
-        |frames: usize, at: u32| effectcraft_engine::render::audio::mix_comp(&src.project, src.footage.as_ref(), src.expr.as_deref(), comp, t, frames, at);
+fn mix_block(
+    src: &RenderSource,
+    comp: ItemId,
+    t: Tick,
+    n: usize,
+    rate: u32,
+    mix: u32,
+    stop: Option<&Arc<AtomicBool>>,
+) -> Result<Vec<f32>, effectcraft_engine::render::audio::AudioError> {
+    // Scrubbing runs on the UI thread: one snippet must not multiply per-expression timeouts.
+    let control = effectcraft_engine::render::audio::MixControl {
+        cancel: stop.cloned(),
+        max_duration: stop.is_none().then_some(std::time::Duration::from_millis(50)),
+        max_expression_yields: stop.is_none().then_some(32),
+        ..Default::default()
+    };
+    let render = |frames: usize, at: u32| {
+        effectcraft_engine::render::audio::mix_comp_with_control(&src.project, src.footage.as_ref(), src.expr.as_deref(), comp, t, frames, at, &control)
+    };
     if mix == rate {
         return render(n, rate);
     }
     let m = (n as u64 * mix as u64).div_ceil(rate as u64) as usize + 1;
-    resample_stereo(&render(m, mix), mix, rate, n)
+    Ok(resample_stereo(&render(m, mix)?, mix, rate, n))
 }
 
 /// Audio scrubbing: an open output that plays a short, faded snippet of the comp's mix each time
@@ -341,7 +409,14 @@ impl AudioScrub {
         let rate = self.rate;
         let mix = if mix_rate == 0 { rate } else { mix_rate.clamp(8000, 192_000) };
         let n = (c.frame_duration().seconds().clamp(0.03, 0.1) * rate as f64) as usize;
-        let mut buf = mix_block(src, comp, c.frame_rate.tick_of(frame), n, rate, mix);
+        let mut buf = match mix_block(src, comp, c.frame_rate.tick_of(frame), n, rate, mix, None) {
+            Ok(buf) => buf,
+            Err(e) => {
+                self.feed.clear();
+                self.feed.fail(e.to_string());
+                return false;
+            }
+        };
         // 3 ms fades: no clicks where snippets meet.
         let fade = (rate as usize * 3 / 1000).clamp(1, n / 2 + 1);
         let frames = buf.len() / 2;
@@ -351,6 +426,7 @@ impl AudioScrub {
             buf[2 * i + 1] *= g;
         }
         self.feed.clear();
+        *self.feed.error.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         self.feed.push(&buf);
         true
     }
@@ -483,6 +559,49 @@ mod tests {
         assert_eq!(f.consumed(), 2);
         assert_eq!(f.take_peaks(), [0.5, 0.9]);
         assert_eq!(f.take_peaks(), [0.0, 0.0]);
+    }
+
+    /// Emptying the feed means handed to the device, not audible yet. Dropping the
+    /// output at that point cut the last ~40--60 ms from Windows loopback captures.
+    #[test]
+    fn natural_completion_waits_for_device_tail() {
+        struct Buffered;
+        impl AudioDevice for Buffered {
+            fn sample_rate(&self) -> u32 {
+                48000
+            }
+            fn start(&mut self, _: Arc<AudioFeed>) -> Result<(), String> {
+                Ok(())
+            }
+            fn stop(&mut self) {}
+            fn latency_frames(&self) -> u64 {
+                4800
+            }
+        }
+        let feed = Arc::new(AudioFeed::default());
+        feed.push(&[0.5; 960]);
+        feed.finished.store(true, Ordering::Relaxed);
+        let mut playback = AudioPlayback {
+            feed: feed.clone(),
+            device: Box::new(Buffered),
+            drain: Mutex::default(),
+            stop: Arc::new(AtomicBool::new(false)),
+            thread: None,
+            feeder: None,
+            rate: 48000,
+            span: PlaySpan { start: 0, wa: 0, wb: 480, looping: false },
+        };
+        assert!(!playback.finished(), "queued samples are not finished");
+        feed.pull(&mut [0.0; 960]);
+        assert!(feed.finished(), "the last samples were handed to the device");
+        let now = web_time::Instant::now();
+        assert!(!playback.finished_at(now), "keep the output open until those samples are audible");
+        assert!(!playback.finished_at(now + std::time::Duration::from_millis(99)));
+        assert!(playback.finished_at(now + std::time::Duration::from_millis(100)), "natural completion is bounded by the device latency");
+        // Explicit stop remains immediate; waiting for a natural tail never blocks it.
+        let start = std::time::Instant::now();
+        playback.stop();
+        assert!(start.elapsed() < std::time::Duration::from_millis(50));
     }
 
     /// #408: starting a preview with sound returns at once even when reading the footage takes

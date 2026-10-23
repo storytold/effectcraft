@@ -796,6 +796,7 @@ fn save_current_preview(s: &mut Session, p: &Value) -> Result<Value> {
     item.output = OutputModule::for_format(format);
     item.output.output = path.clone();
     let job = crate::ExportJob {
+        cancel: None,
         project: &s.project,
         footage: s.footage.as_ref(),
         expr: s.expr.as_deref(),

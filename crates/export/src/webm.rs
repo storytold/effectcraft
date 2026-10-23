@@ -229,13 +229,13 @@ pub(crate) async fn webm(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut Sta
     let mut cursor = span_start.to_units_floor(OPUS_RATE as i64);
     let mut pcm_left: Vec<f32> = vec![];
     let mut packets = 0u64;
-    let mut audio_until = |until: Tick, frames: &mut Vec<Frame>, finish: bool| {
-        let Some(enc) = opus.as_mut() else { return };
+    let mut audio_until = |until: Tick, frames: &mut Vec<Frame>, finish: bool| -> Result<()> {
+        let Some(enc) = opus.as_mut() else { return Ok(()) };
         let end = until.to_units_floor(OPUS_RATE as i64);
         if end > cursor {
             let n = (end - cursor) as usize;
             let start = Tick(((cursor as i128 * TICKS_PER_SECOND as i128) / OPUS_RATE as i128) as i64);
-            pcm_left.extend(mix(job, start, n, OPUS_RATE));
+            pcm_left.extend(mix(job, start, n, OPUS_RATE)?);
             cursor = end;
         }
         let fs = effectcraft_opusenc::OpusEncoder::FRAME_SIZE * opus_channels;
@@ -250,6 +250,7 @@ pub(crate) async fn webm(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut Sta
             frames.push(Frame { ms: packets as i64 * 20, track: 2, key: true, prev_ms: None, data: pkt, alpha: None });
             packets += 1;
         }
+        Ok(())
     };
 
     let batch = batch_size();
@@ -279,7 +280,7 @@ pub(crate) async fn webm(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut Sta
         }
         drop(pixels);
         let t_end = if end >= total { span_end } else { job.settings.frame_time(comp, end) };
-        audio_until(t_end, &mut frames, end >= total);
+        audio_until(t_end, &mut frames, end >= total)?;
         let c = cluster(&mut frames);
         file.write_all(&c).map_err(io)?;
         seg_len += c.len() as u64;
@@ -288,7 +289,7 @@ pub(crate) async fn webm(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut Sta
     }
     if total == 0 {
         let mut frames = vec![];
-        audio_until(span_end, &mut frames, true);
+        audio_until(span_end, &mut frames, true)?;
         if !frames.is_empty() {
             let c = cluster(&mut frames);
             file.write_all(&c).map_err(io)?;
@@ -347,7 +348,7 @@ pub(crate) fn audio_file(job: &Cx, comp: &Comp, aiff: bool, st: &mut State) -> R
         let sample = start + done as i64;
         let t = Tick::from_units(sample, i64::from(sr));
         let t = if t.to_units_floor(i64::from(sr)) < sample { Tick(t.0.saturating_add(1)) } else { t };
-        pcm.extend(pcm_bytes(&mix(job, t, k, sr), fmt, aiff));
+        pcm.extend(pcm_bytes(&mix(job, t, k, sr)?, fmt, aiff));
         done += k;
         let now = (done as u64 * total_frames / n.max(1) as u64).min(total_frames);
         if now > reported && st.total > 0 {

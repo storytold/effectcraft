@@ -110,13 +110,13 @@ pub(crate) async fn webm_av1(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut
     let mut cursor = span_start.to_units_floor(OPUS_RATE as i64);
     let mut pcm_left: Vec<f32> = vec![];
     let mut packets = 0u64;
-    let mut audio_until = |until: Tick, blocks: &mut Vec<Block>, finish: bool| {
-        let Some(enc) = opus.as_mut() else { return };
+    let mut audio_until = |until: Tick, blocks: &mut Vec<Block>, finish: bool| -> Result<()> {
+        let Some(enc) = opus.as_mut() else { return Ok(()) };
         let end = until.to_units_floor(OPUS_RATE as i64);
         if end > cursor {
             let n = (end - cursor) as usize;
             let start = Tick(((cursor as i128 * TICKS_PER_SECOND as i128) / OPUS_RATE as i128) as i64);
-            pcm_left.extend(mix(job, start, n, OPUS_RATE));
+            pcm_left.extend(mix(job, start, n, OPUS_RATE)?);
             cursor = end;
         }
         let fs = effectcraft_opusenc::OpusEncoder::FRAME_SIZE * opus_channels;
@@ -130,6 +130,7 @@ pub(crate) async fn webm_av1(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut
             blocks.push(Block { ms: packets as i64 * 20, track: 2, key: true, data: pkt });
             packets += 1;
         }
+        Ok(())
     };
 
     let batch = batch_size();
@@ -156,13 +157,13 @@ pub(crate) async fn webm_av1(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut
             }
         }
         let t_end = if end >= total { span_end } else { job.settings.frame_time(comp, end) };
-        audio_until(t_end, &mut blocks, end >= total);
+        audio_until(t_end, &mut blocks, end >= total)?;
         flush_blocks(&mut blocks, &mut file, &mut seg_len)?;
         st.advance(end - i)?;
         i = end;
     }
     if total == 0 {
-        audio_until(span_end, &mut blocks, true);
+        audio_until(span_end, &mut blocks, true)?;
         flush_blocks(&mut blocks, &mut file, &mut seg_len)?;
     }
     let mut size = [0u8; 8];

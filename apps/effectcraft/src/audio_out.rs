@@ -22,6 +22,14 @@ fn preferred_buffer_frames(rate: u32) -> u32 {
     (rate / 100).clamp(256, 2048)
 }
 
+/// The native output can retain samples beyond cpal's callback timestamp estimate
+/// (Windows loopback measured a truncated tail with a reported 20 ms latency).
+/// Allow at least 100 ms at natural completion; this does not delay explicit Stop
+/// or change the A/V sync clock. Larger reported latencies keep their full allowance.
+fn natural_tail_frames(rate: u32, latency: u64) -> u64 {
+    latency.max(u64::from(rate).div_ceil(10))
+}
+
 /// Wait until the feeder has mixed a block, or until preview is stopped. Starting the stream
 /// before that fills the device with silence, so the first real samples are heard late (#554).
 fn wait_to_play(feed: &AudioFeed, stop: &mpsc::Receiver<()>) -> bool {
@@ -211,6 +219,10 @@ impl AudioDevice for CpalOut {
     fn latency_frames(&self) -> u64 {
         self.latency.load(Ordering::Relaxed)
     }
+
+    fn drain_frames(&self) -> u64 {
+        natural_tail_frames(self.rate, self.latency_frames())
+    }
 }
 
 impl Drop for CpalOut {
@@ -228,6 +240,13 @@ mod tests {
         assert_eq!(preferred_buffer_frames(48_000), 480);
         assert_eq!(preferred_buffer_frames(8_000), 256);
         assert_eq!(preferred_buffer_frames(192_000), 1920);
+    }
+
+    #[test]
+    fn natural_drain_allows_output_processing_beyond_the_sync_clock() {
+        assert_eq!(natural_tail_frames(48_000, 960), 4800);
+        assert_eq!(natural_tail_frames(48_000, 9600), 9600);
+        assert_eq!(natural_tail_frames(44_100, 0), 4410);
     }
 
     #[test]

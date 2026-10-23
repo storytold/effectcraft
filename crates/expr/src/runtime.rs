@@ -44,6 +44,7 @@ pub struct Owner {
 }
 
 thread_local! {
+    static AUDIO_CONTROL: RefCell<Option<effectcraft_render::audio::AudioEvalControl>> = const { RefCell::new(None) };
     /// Never dropped: boa's own thread-local heap may be torn down first at thread exit, and
     /// dropping GC handles after that aborts the process. The OS reclaims it with the thread.
     static RUNTIME: RefCell<Option<ManuallyDrop<Result<Runtime, String>>>> = const { RefCell::new(None) };
@@ -57,6 +58,30 @@ thread_local! {
 thread_local! {
     /// When the outermost evaluation on this thread began.
     pub static STARTED: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// Restores the previous mix context even when nested expression evaluation fails.
+pub struct AudioControl(Option<effectcraft_render::audio::AudioEvalControl>);
+impl AudioControl {
+    /// Install shared cancellation, deadline and instruction allowance for one evaluation.
+    pub fn enter(control: &effectcraft_render::audio::AudioEvalControl) -> Self {
+        Self(AUDIO_CONTROL.with(|c| c.replace(Some(control.clone()))))
+    }
+}
+impl Drop for AudioControl {
+    /// Leave no cancellation token or exhausted allowance on the next unrelated evaluation.
+    fn drop(&mut self) {
+        AUDIO_CONTROL.with(|c| c.replace(self.0.take()));
+    }
+}
+
+/// A runtime resource failure must abort audio, not retry keyframed fallback for every sample.
+pub fn fail_audio() {
+    AUDIO_CONTROL.with(|c| {
+        if let Some(c) = c.borrow().as_ref() {
+            c.fail();
+        }
+    });
 }
 
 struct Runtime {
@@ -302,6 +327,9 @@ impl Runtime {
             // Abandoned mid-run: the context is unusable now (see `run`).
             None => return Run::Done(Err(TIMED_OUT.into())),
         };
+        if result.as_ref().is_err_and(|e| matches!(e.as_engine(), Some(boa_engine::error::EngineError::RuntimeLimit(_)))) {
+            fail_audio();
+        }
         let pending = FRAMES.with(|f| f.borrow().last().is_some_and(|fr| !fr.misses.is_empty()));
         if pending {
             return Run::Pending;
@@ -324,7 +352,7 @@ fn evaluate_in_time(script: &Script, ctx: &mut Context) -> Option<JsResult<JsVal
         if let std::task::Poll::Ready(r) = run.as_mut().poll(&mut cx) {
             return Some(r);
         }
-        if out_of_time() {
+        if AUDIO_CONTROL.with(|c| c.borrow().as_ref().is_some_and(|c| c.yielded())) || out_of_time() {
             return None;
         }
     }
@@ -351,6 +379,9 @@ fn max_time() -> std::time::Duration {
 
 /// Whether the outermost evaluation on this thread has used up [`crate::MAX_TIME`].
 pub fn out_of_time() -> bool {
+    if AUDIO_CONTROL.with(|c| c.borrow().as_ref().is_some_and(|c| c.interrupted())) {
+        return true;
+    }
     #[cfg(not(target_arch = "wasm32"))]
     {
         STARTED.with(|s| s.get()).is_some_and(|t| t.elapsed() > max_time())

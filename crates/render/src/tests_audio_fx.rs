@@ -84,11 +84,166 @@ fn comp_with(id: Option<&str>, vals: &[(&str, Value)], solid: bool) -> (Project,
 }
 
 fn mix(p: &Project, src: &dyn FootageSource, cid: ItemId, from: f64, frames: usize) -> Vec<f32> {
-    mix_comp(p, src, None, cid, Tick::from_seconds_f64(from), frames, SR)
+    mix_comp(p, src, None, cid, Tick::from_seconds_f64(from), frames, SR).unwrap()
 }
 
 fn ramp(t: f64) -> (f32, f32) {
     (t as f32, -(t as f32))
+}
+
+/// Keys map layer seconds to source seconds; the synthetic source has distinct L/R samples.
+fn remap(p: &mut Project, cid: ItemId, points: &[(f64, f64)]) {
+    let mut next = p.next_id;
+    let mut prop = Ids(&mut next).prop("timeRemap", "Time Remap", Value::Scalar(0.0));
+    prop.keys = points.iter().map(|&(t, v)| effectcraft_keyframe::Keyframe::new(Tick::from_seconds_f64(t), Value::Scalar(v))).collect();
+    p.next_id = next;
+    p.comp_mut(cid).unwrap().layers[0].props.children.push(prop.into());
+}
+
+#[test]
+fn audio_time_remap_follows_offset_and_speed_changes_across_blocks() {
+    let (mut p, cid) = comp_with(None, &[], false);
+    remap(&mut p, cid, &[(0.0, 0.5), (0.25, 0.75), (0.75, 1.0), (1.0, 1.25)]);
+    let whole = mix(&p, &Signal(ramp), cid, 0.0, SR as usize);
+    for i in 0..SR as usize {
+        let t = i as f64 / SR as f64;
+        let expected = if t < 0.25 {
+            0.5 + t
+        } else if t < 0.75 {
+            0.75 + (t - 0.25) * 0.5
+        } else {
+            1.0 + t - 0.75
+        };
+        assert!((whole[i * 2] as f64 - expected).abs() < 1e-5, "sample {i}: {} != {expected}", whole[i * 2]);
+        assert!((whole[i * 2 + 1] as f64 + expected).abs() < 1e-5);
+    }
+    let mut blocked = Vec::new();
+    for first in (0..SR as usize).step_by(137) {
+        blocked.extend(mix(&p, &Signal(ramp), cid, first as f64 / SR as f64, 137.min(SR as usize - first)));
+    }
+    assert_eq!(whole, blocked, "preview and export block sizes must not change the audio");
+}
+
+#[test]
+fn audio_time_remap_handles_reverse_source_motion_and_layer_bounds() {
+    let (mut p, cid) = comp_with(None, &[], false);
+    remap(&mut p, cid, &[(0.0, 1.5), (1.0, 0.5)]);
+    let samples = mix(&p, &Signal(ramp), cid, 0.5, SR as usize);
+    for i in 0..SR as usize {
+        let expected = if i < SR as usize / 2 { 1.0 - i as f64 / SR as f64 } else { 0.0 };
+        assert!((samples[i * 2] as f64 - expected).abs() < 1e-5);
+    }
+}
+
+#[test]
+fn audio_time_remap_evaluates_keys_in_stretched_layer_time() {
+    let (mut p, cid) = comp_with(None, &[], false);
+    remap(&mut p, cid, &[(0.0, 0.5), (1.0, 1.5)]);
+    let l = &mut p.comp_mut(cid).unwrap().layers[0];
+    l.start_time = Tick::from_seconds_f64(0.25);
+    l.in_point = l.start_time;
+    l.out_point = Tick::from_seconds_f64(2.0);
+    l.stretch = 200.0;
+    let samples = mix(&p, &Signal(ramp), cid, 0.75, 200);
+    for i in 0..200 {
+        let expected = 0.75 + i as f64 / SR as f64 * 0.5;
+        assert!((samples[i * 2] as f64 - expected).abs() < 1e-5);
+    }
+}
+
+#[test]
+fn audio_time_remap_of_precomp_uses_nested_source_audio() {
+    let (mut p, inner) = comp_with(None, &[], false);
+    let mut outer = Comp::new(64, 64, FrameRate::new(25, 1), Tick::from_seconds_f64(1.0));
+    outer.layers.push(build::layer(&mut p, &outer, "nested", LayerSource::Comp { item: inner }, (64, 64), None));
+    let cid = p.add_item("Outer", effectcraft_color::Label::Sandstone, None, ItemKind::Comp(outer.into()));
+    remap(&mut p, cid, &[(0.0, 0.25), (1.0, 0.75)]);
+    let samples = mix(&p, &Signal(ramp), cid, 0.0, SR as usize);
+    for i in 0..SR as usize {
+        let expected = 0.25 + i as f64 / SR as f64 * 0.5;
+        assert!((samples[i * 2] as f64 - expected).abs() < 1e-5);
+    }
+}
+
+#[test]
+fn audio_time_remap_hold_repeats_the_selected_sample() {
+    let (mut p, cid) = comp_with(None, &[], false);
+    remap(&mut p, cid, &[(0.0, 0.75), (0.5, 1.25)]);
+    p.comp_mut(cid).unwrap().layers[0].props.prop_mut("timeRemap").unwrap().keys[0].out_interp = effectcraft_keyframe::Interp::Hold;
+    // A held picture selects a fixed audio sample (DC), not an advancing excerpt.
+    let samples = mix(&p, &Signal(ramp), cid, 0.0, SR as usize);
+    for (i, pair) in samples.as_chunks::<2>().0.iter().enumerate() {
+        let expected = if i < SR as usize / 2 { 0.75 } else { 1.25 };
+        assert_eq!(*pair, [expected, -expected], "sample {i}");
+    }
+}
+
+#[test]
+fn audio_time_remap_large_jump_keeps_source_requests_bounded() {
+    use std::sync::Mutex;
+    struct Requests(Mutex<Vec<usize>>);
+    impl FootageSource for Requests {
+        fn frame(&self, _: ItemId, _: &Footage, _: Tick) -> Option<Arc<Image>> {
+            None
+        }
+        fn audio(&self, _: ItemId, _: &Footage, _: Tick, frames: usize, _: u32) -> Option<Vec<f32>> {
+            self.0.lock().unwrap().push(frames);
+            // Assert before allocating: a distant key must not request the intervening audio.
+            assert!(frames <= 4097, "unbounded source request: {frames}");
+            Some(vec![0.25; frames * 2])
+        }
+    }
+    let (mut p, cid) = comp_with(None, &[], false);
+    remap(&mut p, cid, &[(0.0, 0.0), (0.5, 1_000_000.0)]);
+    p.comp_mut(cid).unwrap().layers[0].props.prop_mut("timeRemap").unwrap().keys[0].out_interp = effectcraft_keyframe::Interp::Hold;
+    let src = Requests(Mutex::new(Vec::new()));
+    assert!(mix(&p, &src, cid, 0.0, SR as usize).iter().all(|v| *v == 0.25));
+    assert_eq!(src.0.lock().unwrap().len(), 2, "one fetch per held source page");
+}
+
+#[test]
+fn audio_time_remap_source_bounds_and_pages_at_44100_hz() {
+    let (mut p, cid) = comp_with(None, &[], false);
+    remap(&mut p, cid, &[(0.0, -0.25), (1.0, 2.75)]);
+    let rate = 44_100;
+    let src = Signal(|_| (0.5, -0.5));
+    let whole = mix_comp(&p, &src, None, cid, Tick::ZERO, rate as usize, rate).unwrap();
+    let mut blocked = Vec::new();
+    for first in (0..rate as usize).step_by(137) {
+        blocked.extend(mix_comp(&p, &src, None, cid, Tick::from_units(first as i64, rate as i64), 137.min(rate as usize - first), rate).unwrap());
+    }
+    assert_eq!(whole, blocked, "source page and caller boundaries must not affect samples");
+    // Stay away from the one-sample interpolation transition at each source edge.
+    for (i, pair) in whole.as_chunks::<2>().0.iter().enumerate() {
+        let source = -0.25 + 3.0 * i as f64 / rate as f64;
+        if source < -0.001 || source > 2.001 {
+            assert_eq!(*pair, [0.0, 0.0], "sample {i}");
+        } else if (0.001..1.999).contains(&source) {
+            assert_eq!(*pair, [0.5, -0.5], "sample {i}");
+        }
+    }
+}
+
+#[test]
+fn audio_time_remap_expression_and_error_fallback() {
+    struct Expr(bool);
+    impl crate::ExprHost for Expr {
+        fn eval(&self, ctx: &crate::EvalCtx, _: &effectcraft_project::Layer, _: &effectcraft_project::Property, _: &Value) -> Result<Value, String> {
+            if self.0 { Ok(Value::Scalar(0.5 + ctx.time.seconds() * 0.5)) } else { Err("synthetic expression error".into()) }
+        }
+    }
+    let (mut p, cid) = comp_with(None, &[], false);
+    remap(&mut p, cid, &[(0.0, 1.25)]);
+    p.comp_mut(cid).unwrap().layers[0].props.prop_mut("timeRemap").unwrap().expr =
+        Some(effectcraft_project::Expression { text: "time / 2 + 0.5".into(), enabled: true });
+    for enabled in [true, false] {
+        let samples = mix_comp(&p, &Signal(ramp), Some(&Expr(enabled)), cid, Tick::ZERO, SR as usize, SR).unwrap();
+        for (i, pair) in samples.as_chunks::<2>().0.iter().enumerate() {
+            let expected = if enabled { 0.5 + i as f64 / SR as f64 * 0.5 } else { 1.25 };
+            assert!((pair[0] as f64 - expected).abs() < 1e-5);
+            assert!((pair[1] as f64 + expected).abs() < 1e-5);
+        }
+    }
 }
 
 fn rms(m: &[f32]) -> f32 {
@@ -252,4 +407,95 @@ fn audio_spectrum_follows_time_through_the_layer_cache() {
     let fresh = render(0.8, None);
     assert!(lit(&fresh) > lit(&silent), "the tone draws more than the baseline: {} vs {}", lit(&fresh), lit(&silent));
     assert_eq!(cached.data, fresh.data, "cached {} px, uncached {} px", lit(&cached), lit(&fresh));
+}
+
+/// A normal export block can span more than the allocation cap at timelapse speeds.
+/// Check every interpolated sample, including source-page edges and nested compositions.
+#[test]
+fn strongly_stretched_audio_reads_bounded_chunks() {
+    struct Indexed(std::sync::atomic::AtomicUsize);
+    impl FootageSource for Indexed {
+        fn frame(&self, _: ItemId, _: &Footage, _: Tick) -> Option<Arc<Image>> {
+            None
+        }
+        fn audio(&self, _: ItemId, _: &Footage, start: Tick, frames: usize, rate: u32) -> Option<Vec<f32>> {
+            self.0.fetch_max(frames, std::sync::atomic::Ordering::Relaxed);
+            let first = start.to_units_floor(i64::from(rate));
+            Some(
+                (0..frames)
+                    .flat_map(|i| {
+                        let v = ((first + i as i64) % 257) as f32 / 257.0;
+                        [v, -v]
+                    })
+                    .collect(),
+            )
+        }
+    }
+    for rate in [44100, 48000] {
+        for speed in [65.0, 65.5355, 128.5] {
+            for nested in [false, true] {
+                let (mut p, inner) = comp_with(None, &[], false);
+                p.comp_mut(inner).unwrap().layers[0].out_point = Tick::from_seconds_f64(120.0);
+                let cid = if nested {
+                    let mut outer = Comp::new(64, 64, FrameRate::new(25, 1), Tick::from_seconds_f64(1.0));
+                    let layer = build::layer(&mut p, &outer, "nested", LayerSource::Comp { item: inner }, (64, 64), None);
+                    outer.layers.push(layer);
+                    p.add_item("outer", effectcraft_color::Label::Sandstone, None, ItemKind::Comp(outer.into()))
+                } else {
+                    inner
+                };
+                p.comp_mut(cid).unwrap().layers[0].stretch = 100.0 / speed;
+                let source = Indexed(std::sync::atomic::AtomicUsize::new(0));
+                let start = Tick::from_seconds_f64(0.1);
+                let first = p.comp(cid).unwrap().layers[0].layer_time(start).to_units_floor(i64::from(rate)) as usize;
+                let samples = mix_comp(&p, &source, None, cid, start, 16384, rate).unwrap();
+                for i in 0..16384 {
+                    let x = i as f64 * speed;
+                    let j = x as usize;
+                    let a = ((first + j) % 257) as f32 / 257.0;
+                    let b = ((first + j + 1) % 257) as f32 / 257.0;
+                    let expected = a + (b - a) * (x - j as f64) as f32;
+                    assert!((samples[i * 2] - expected).abs() < 1e-6, "rate={rate} speed={speed} nested={nested} sample={i}");
+                    assert_eq!(samples[i * 2], -samples[i * 2 + 1]);
+                }
+                assert!(source.0.load(std::sync::atomic::Ordering::Relaxed) <= 1_048_576);
+            }
+        }
+    }
+}
+
+/// Oversized stretched reads retain cumulative work limits and observe cancellation between pages.
+#[test]
+fn strongly_stretched_audio_retains_shared_limits() {
+    use crate::audio::{AudioError, MixControl, mix_comp_with_control};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    struct Stops {
+        cancel: Arc<AtomicBool>,
+        reads: AtomicUsize,
+        stop: bool,
+    }
+    impl FootageSource for Stops {
+        fn frame(&self, _: ItemId, _: &Footage, _: Tick) -> Option<Arc<Image>> {
+            None
+        }
+        fn audio(&self, _: ItemId, _: &Footage, _: Tick, frames: usize, _: u32) -> Option<Vec<f32>> {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            if self.stop {
+                self.cancel.store(true, Ordering::Relaxed);
+            }
+            Some(vec![0.25; frames * 2])
+        }
+    }
+    let (mut p, cid) = comp_with(None, &[], false);
+    p.comp_mut(cid).unwrap().layers[0].stretch = 1.0;
+    for stop in [false, true] {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let source = Stops { cancel: cancel.clone(), reads: AtomicUsize::new(0), stop };
+        let control = MixControl { cancel: Some(cancel), max_work: if stop { None } else { Some(1_638_400 + 32_768) }, ..Default::default() };
+        assert_eq!(
+            mix_comp_with_control(&p, &source, None, cid, Tick::ZERO, 16384, 48000, &control),
+            Err(if stop { AudioError::Cancelled } else { AudioError::WorkLimit })
+        );
+        assert_eq!(source.reads.load(Ordering::Relaxed), if stop { 1 } else { 24 }, "limits must stop source work early");
+    }
 }

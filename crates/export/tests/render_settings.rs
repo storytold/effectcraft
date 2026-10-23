@@ -40,10 +40,12 @@ fn project(rate: FrameRate, extra: impl FnOnce(&mut Project, &mut Comp)) -> (Pro
 
 type Files = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
 
+/// Select an exact export span without changing the project's timing.
 fn custom(start: f64, end: f64) -> RenderSettings {
     RenderSettings { time_span: TimeSpan::Custom { start: Tick::from_seconds_f64(start), end: Tick::from_seconds_f64(end) }, ..Default::default() }
 }
 
+/// Collect finished in-memory outputs alongside the export result.
 fn run_with(p: &Project, cid: ItemId, s: &RenderSettings, om: &OutputModule, path: &str, options: JobOptions, cancel: bool) -> (Result<Report, String>, Files) {
     run_on(p, cid, s, om, path, options, None, cancel)
 }
@@ -361,6 +363,7 @@ fn wav_and_aiff_channels_and_formats() {
     assert_eq!(u16::from_be_bytes([d[26], d[27]]), 24, "sample size");
 }
 
+/// Cancellation preserves unrelated and skipped files, including overflow destinations.
 #[test]
 fn cancelled_export_removes_only_files_it_opened() {
     use effectcraft_export::ExportError;
@@ -475,4 +478,41 @@ fn a_job_renders_on_one_compositor() {
     let c = render(&p, &cpu, "/g/c_[#####].png");
     assert_eq!(cpu.frames.load(Ordering::SeqCst), 0);
     assert_eq!(c[0].get_pixel(10, 44).0, [255, 0, 0, 255], "the CPU drew the red block");
+}
+
+/// Cancellation and excessive audio work propagate through the encoder instead of producing a report.
+#[test]
+fn audio_mix_failures_abort_export() {
+    let (p, cid) = project(FrameRate::new(25, 1), |_, _| {});
+    let om = OutputModule::for_format(OutputFormat::Wav);
+    let options = JobOptions { cancel: Some(Arc::new(std::sync::atomic::AtomicBool::new(true))), ..Default::default() };
+    let (result, _) = run_with(&p, cid, &custom(0.0, 0.5), &om, "/cancel.wav", options, false);
+    assert_eq!(result.unwrap_err(), "cancelled");
+    let (p, cid) = project(FrameRate::new(25, 1), |p, c| {
+        let f = effectcraft_project::Footage { has_audio: true, ..Default::default() };
+        let id = p.add_item("audio", Label::SeaFoam, None, ItemKind::Footage(f));
+        let mut layer = build::layer(p, c, "audio", LayerSource::Footage { item: id }, (0, 0), None);
+        layer.stretch = 0.000001;
+        c.layers.push(layer);
+    });
+    let (result, _) = run_with(&p, cid, &custom(0.0, 0.5), &om, "/limited.wav", JobOptions::default(), false);
+    assert!(result.unwrap_err().contains("audio mixing exceeded its work limit"));
+}
+
+/// Valid low-frame-rate movie exports must split large audio requests into bounded mixes.
+#[test]
+fn low_frame_rate_audio_exports_are_not_rejected_by_the_mix_limit() {
+    let (mut p, cid) = project(FrameRate::new(1, 30), |_, _| {});
+    p.comp_mut(cid).unwrap().duration = Tick::from_seconds_f64(30.0);
+    for (format, codec) in
+        [(OutputFormat::Uncompressed, WebmVideoCodec::Vp9), (OutputFormat::WebM, WebmVideoCodec::Vp9), (OutputFormat::WebM, WebmVideoCodec::Av1)]
+    {
+        let mut om = OutputModule::for_format(format);
+        om.webm_codec = codec;
+        om.audio = AudioOutput::On;
+        om.audio_sample_rate = 48000;
+        let (result, files) = run_with(&p, cid, &custom(0.0, 30.0), &om, "/slow.mov", JobOptions::default(), false);
+        assert!(result.is_ok(), "{format:?}/{codec:?}: {result:?}");
+        assert_eq!(files.lock().unwrap().len(), 1);
+    }
 }

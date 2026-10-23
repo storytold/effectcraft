@@ -12,6 +12,15 @@ use effectcraft_time::Tick;
 pub trait ExprHost: Send + Sync {
     /// Evaluate the expression of `prop` (on `layer`, comp time `t`), given the keyframed value.
     fn eval(&self, ctx: &EvalCtx, layer: &Layer, prop: &Property, value: &Value) -> Result<Value, String>;
+    /// Prepare an exact scalar audio evaluator, or decline and use normal per-sample evaluation.
+    /// Implementations must reject syntax whose semantics they cannot preserve; no interpolation.
+    fn prepare_audio(&self, _text: &str) -> Option<Box<dyn AudioExpression>> {
+        None
+    }
+    /// Evaluate an audio property (sample remap or block parameter) under shared interruption controls.
+    fn eval_audio(&self, ctx: &EvalCtx, layer: &Layer, prop: &Property, value: &Value, _control: &crate::audio::AudioEvalControl) -> Result<Value, String> {
+        self.eval(ctx, layer, prop, value)
+    }
     /// Evaluate a text Expression Selector's Amount expression (on `prop`) for one unit:
     /// `textIndex` (1-based), `textTotal` and `selectorValue` (percent, per dimension) are
     /// defined. Returns the amount in percent per dimension.
@@ -26,6 +35,12 @@ pub trait ExprHost: Send + Sync {
     ) -> Result<[f64; 3], String> {
         Err("no expression engine".into())
     }
+}
+
+/// A side-effect-free numeric expression evaluated at every audio sample, with JS number semantics.
+pub trait AudioExpression {
+    /// Comp seconds and the property's keyframed scalar value; `None` means expression error.
+    fn evaluate(&self, time: f64, value: f64) -> Option<f64>;
 }
 
 #[derive(Clone, Copy)]

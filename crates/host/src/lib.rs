@@ -54,6 +54,7 @@ impl Exporter for FileExporter {
                 path: job.path,
                 sink: self.sink.as_deref(),
                 options: effectcraft_export::JobOptions {
+                    cancel: job.cancel.clone(),
                     log: job.item.log,
                     label: job.label.clone(),
                     storage: job.storage,
