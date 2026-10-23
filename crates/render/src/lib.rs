@@ -1028,6 +1028,27 @@ impl<'a> Renderer<'a> {
             }
             return out;
         }
+        // Region of interest over an adjustment layer with effects: the stack reads the whole
+        // comp below (a Transform scaling it down, a blur, Auto Levels), not just the region.
+        // Render the frame with the region around it and crop: inside the frame that is the
+        // whole frame (on any backend), past it the region grown to hold the frame.
+        if self.depth == 0
+            && let Some(r) = self.opts.roi
+            && !roi_holds_frame(r, comp.width, comp.height)
+            && comp.layers.iter().any(adjusts_below)
+        {
+            let (cw, ch) = (comp.width as f64, comp.height as f64);
+            let (x0, y0) = (r[0].min(0.0), r[1].min(0.0));
+            let u = [x0, y0, (r[0] + r[2]).max(cw) - x0, (r[1] + r[3]).max(ch) - y0];
+            let frame = if roi_inside(r, comp.width, comp.height) {
+                Renderer { opts: RenderOpts { roi: None, ..self.opts }, ..*self }.comp_frame(comp_id, t)
+            } else {
+                Renderer { opts: RenderOpts { roi: Some(u), ..self.opts }, ..*self }.comp_frame_cpu(comp_id, t)
+            };
+            let px = |v: f64| (v * s).round();
+            let (rw, rh) = ((px(r[2]) as u32).max(1), (px(r[3]) as u32).max(1));
+            return frame.crop((px(r[0]) - px(x0)) as i64, (px(r[1]) - px(y0)) as i64, rw, rh);
+        }
         let (w, h) = match self.roi_offset() {
             Some((_, _, rw, rh)) => (rw, rh),
             None => (w, h),
@@ -2036,13 +2057,29 @@ impl<'a> Renderer<'a> {
         let mut matte = Image::new(canvas.width, canvas.height);
         self.place(ctx, layer, &foot, &mut matte, BlendMode::Normal, 1.0);
         self.apply_track_matte(ctx, layer, &mut matte, None);
-        let o = self.roi_offset().map(|(x, y, _, _)| [-x, -y]).unwrap_or([0.0; 2]);
-        let mut below = Buf { img: canvas.clone(), offset: o, scale: self.opts.scale };
+        let (x, y) = self.out_offset();
+        // A region holding the whole frame (the Extended Viewer): the stack gets the comp frame
+        // below and nothing past it, as in a render, so a Transform scaling it down doesn't pull
+        // in layers lying off the frame.
+        let s = self.opts.scale;
+        let frame = self.opts.roi.filter(|r| self.top && roi_holds_frame(*r, ctx.comp.width, ctx.comp.height));
+        let mut below = match frame {
+            Some(_) => {
+                let (w, h) = (((ctx.comp.width as f64 * s).round() as u32).max(1), ((ctx.comp.height as f64 * s).round() as u32).max(1));
+                Buf { img: canvas.crop(-x as i64, -y as i64, w, h), offset: [0.0; 2], scale: s }
+            }
+            None => Buf { img: canvas.clone(), offset: [-x, -y], scale: s },
+        };
         // Effects run in the working space, not the linear blending space.
         if let Some(c) = self.pipe.from_blend() {
             color::convert(&mut below.img, &c);
         }
         let mut adjusted = self.apply_effects(ctx, layer, below, true);
+        // Back onto the canvas: the result pixel at canvas pixel (0, 0).
+        let (dx, dy) = ((adjusted.offset[0] + x).round(), (adjusted.offset[1] + y).round());
+        if dx != 0.0 || dy != 0.0 || adjusted.img.width != canvas.width || adjusted.img.height != canvas.height {
+            adjusted.img = adjusted.img.crop(dx as i64, dy as i64, canvas.width, canvas.height);
+        }
         if let Some(c) = self.pipe.to_blend() {
             color::convert(&mut adjusted.img, &c);
         }
@@ -2342,6 +2379,16 @@ pub fn adaptive_samples(travel: f64, per_frame: u32, limit: u32) -> usize {
 /// A region of interest `[x, y, w, h]` lies within a `w`×`h` comp frame.
 pub fn roi_inside(r: [f64; 4], w: u32, h: u32) -> bool {
     r[0] >= 0.0 && r[1] >= 0.0 && r[0] + r[2] <= w as f64 + 1e-6 && r[1] + r[3] <= h as f64 + 1e-6
+}
+
+/// Whether region of interest `r` holds the whole `w` × `h` comp frame.
+fn roi_holds_frame(r: [f64; 4], w: u32, h: u32) -> bool {
+    r[0] <= 0.0 && r[1] <= 0.0 && r[0] + r[2] >= w as f64 - 1e-6 && r[1] + r[3] >= h as f64 - 1e-6
+}
+
+/// An adjustment layer with an enabled effect: its stack runs on the comp below.
+fn adjusts_below(l: &Layer) -> bool {
+    l.switches.adjustment && l.switches.effects && l.effects().is_some_and(|fx| fx.groups().any(|g| g.enabled && matches!(g.kind, GroupKind::Effect { .. })))
 }
 
 /// The Extended Viewer's region of interest: the comp frame grown by `margin` × its size on every
