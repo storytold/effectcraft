@@ -7,8 +7,8 @@
 
 use effectcraft_project::render_queue::{
     AlphaMode, AudioFormat, AudioOutput, Channels, ColorDepth, CurrentOrOff, DEFAULT_SEQUENCE_TEMPLATE, DEFAULT_TEMPLATE, EffectsMode, FieldRender,
-    OutputFormat, OutputModule, PostRenderAction, ProResProfile, Pulldown, RESIZE_PRESETS, RenderLog, RenderQuality, RenderQueueItem, RenderSettings,
-    RenderStatus, ResizeQuality, SwitchOverride, TimeSpan, post_render_parse, without_project_extension,
+    HardwareEncoding, OutputFormat, OutputModule, PostRenderAction, ProResProfile, Pulldown, RESIZE_PRESETS, RenderLog, RenderQuality, RenderQueueItem,
+    RenderSettings, RenderStatus, ResizeQuality, SwitchOverride, TimeSpan, post_render_parse, without_project_extension,
 };
 use effectcraft_project::render_templates::{RenderTemplates, TemplateKind, TemplateSlot};
 use effectcraft_time::{FrameRate, Tick};
@@ -78,6 +78,9 @@ fn apply_settings(rs: &mut RenderSettings, templates: &RenderTemplates, p: &Valu
         any = true;
     }
     let before = rs.clone();
+    if let Some(value) = enum_p(p, "hardwareEncoding", cmd, HardwareEncoding::parse, "auto|on|off")? {
+        rs.hardware_encoding = value;
+    }
     if let Some(q) = str_p(p, "quality") {
         rs.quality = match q.to_ascii_lowercase().as_str() {
             "best" => RenderQuality::Best,
@@ -1010,7 +1013,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Render Settings...",
             [],
             None,
-            "{item?|index?, template?: name, quality?: best|draft, resolution?: full|half|third|quarter|scale, proxyUse?: current|all|comp|none, effects?: current|allOn|allOff, solo?: current|allOff, guideLayers?: current|allOff, colorDepth?: current|8|16|32, frameBlending?: current|onForChecked|offForAll, fieldRender?: off|upper|lower, pulldown?: off|WSSWW|SSWWW|SWWWS|WWWSS|WWSSW, motionBlur?: bool|current|onForChecked|offForAll, timeSpan?: workArea|comp|custom, start?: s, end?: s, duration?: s, frameRate?: fps|null, skipExisting?: bool, storageOverflow?: bool}",
+            "{item?|index?, template?: name, quality?: best|draft, hardwareEncoding?: auto|on|off, resolution?: full|half|third|quarter|scale, proxyUse?: current|all|comp|none, effects?: current|allOn|allOff, solo?: current|allOff, guideLayers?: current|allOff, colorDepth?: current|8|16|32, frameBlending?: current|onForChecked|offForAll, fieldRender?: off|upper|lower, pulldown?: off|WSSWW|SSWWW|SWWWS|WWWSS|WWSSW, motionBlur?: bool|current|onForChecked|offForAll, timeSpan?: workArea|comp|custom, start?: s, end?: s, duration?: s, frameRate?: fps|null, skipExisting?: bool, storageOverflow?: bool}",
             has_items,
             set_render_settings
         ),

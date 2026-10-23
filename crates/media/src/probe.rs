@@ -133,7 +133,7 @@ pub(crate) fn footage_from_info(path: &str, info: &filmcraft_media::MediaInfo) -
         (_, None) => FootageKind::Audio,
     };
     let rate = v.map_or(FrameRate::FPS_30, |v| rate_from_fc(v.frame_rate));
-    let codec = match (v, info.audio.as_ref()) {
+    let codec = match (v, info.audio()) {
         (Some(v), _) => v.codec.clone(),
         (None, Some(a)) => a.codec.clone(),
         _ => String::new(),
@@ -148,7 +148,7 @@ pub(crate) fn footage_from_info(path: &str, info: &filmcraft_media::MediaInfo) -
         native_rate: None,
         duration: if kind == FootageKind::Still { Tick::ZERO } else { Tick(info.duration.0) },
         has_video: v.is_some(),
-        has_audio: info.audio.is_some(),
+        has_audio: info.audio().is_some(),
         alpha: if v.is_some_and(|v| v.has_alpha) { AlphaMode::Straight } else { AlphaMode::Ignore },
         premul_color: [0.0; 3],
         loop_count: 1,

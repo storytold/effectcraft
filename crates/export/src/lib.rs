@@ -33,6 +33,12 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 mod encode;
+#[cfg(target_os = "macos")]
+mod hardware_macos;
+#[cfg(target_os = "linux")]
+mod hardware_nvenc;
+#[cfg(target_os = "linux")]
+mod hardware_vaapi;
 mod hevc_av1;
 mod out;
 mod pipeline;
@@ -136,6 +142,10 @@ pub struct Report {
     pub seconds: f64,
     pub bytes: u64,
     pub audio: bool,
+    /// Selected movie encoder, if this output is a movie.
+    pub video_encoder: Option<&'static str>,
+    /// Why a requested hardware encoder was declined, if software was used instead.
+    pub hardware_fallback_reason: Option<String>,
     /// The render log, when one was written.
     pub log: Option<String>,
     /// Files that went to an overflow folder.
@@ -284,7 +294,19 @@ async fn sequence(cx: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut State<'_>) 
         st.advance(end - i)?;
         i = end;
     }
-    Ok(Report { path: sequence_path(cx.path, f0), frames: 0, width: w, height: h, seconds: 0.0, bytes, audio: false, log: None, overflow: vec![] })
+    Ok(Report {
+        path: sequence_path(cx.path, f0),
+        frames: 0,
+        width: w,
+        height: h,
+        seconds: 0.0,
+        bytes,
+        audio: false,
+        video_encoder: None,
+        hardware_fallback_reason: None,
+        log: None,
+        overflow: vec![],
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -394,7 +416,19 @@ async fn gif_export(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut State<'_
     }
     drop(enc);
     let bytes = file.finish()?;
-    Ok(Report { path, frames: 0, width: w, height: h, seconds: 0.0, bytes, audio: false, log: None, overflow: vec![] })
+    Ok(Report {
+        path,
+        frames: 0,
+        width: w,
+        height: h,
+        seconds: 0.0,
+        bytes,
+        audio: false,
+        video_encoder: None,
+        hardware_fallback_reason: None,
+        log: None,
+        overflow: vec![],
+    })
 }
 
 #[cfg(test)]

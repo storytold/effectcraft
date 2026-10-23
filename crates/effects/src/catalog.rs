@@ -89,6 +89,9 @@ const CPU_ONLY_CONTROLS: &[(&str, &[&str])] = &[
     ("ec.distort.ccpowerpin", &["unstretch"]),
     ("ec.matte.refinesoft", &["reduceChatter", "useMotionBlur", "invert"]),
     ("ec.matte.refinehard", &["reduceChatter", "useMotionBlur", "invert"]),
+    // Synthesize Edges reads neighbouring frames (not available on GPU); showTrackPoints draws overlays.
+    // borders/framing is only CPU-only when it is SynthesizeEdges (value 3); other framing modes run on the GPU.
+    ("ec.distort.warpstabilizer", &["advanced/showTrackPoints"]),
 ];
 
 /// Whether the GPU kernel of effect `id` covers the instance's current settings (see
@@ -96,6 +99,16 @@ const CPU_ONLY_CONTROLS: &[(&str, &[&str])] = &[
 /// pinning).
 pub fn gpu_supported(id: &str, ctx: &crate::EffectCtx) -> bool {
     match id {
+        "ec.distort.warpstabilizer" => {
+            // Synthesize Edges reads neighbouring frames; Show Track Points draws overlays. Both CPU-only.
+            if ctx.params.e("advanced/showTrackPoints") != 0 {
+                return false;
+            }
+            if ctx.params.e("borders/framing") == 3 {
+                return false;
+            }
+            return true;
+        }
         "ec.generate.cellpattern" if (6..=10).contains(&ctx.params.e("cellPattern")) => return false,
         "ec.distort.turbulentdisplace" if ctx.params.e("pinning") >= 8 => return false,
         // #1195: CC Particle World's motion trails (the averaged shutter samples) render on the

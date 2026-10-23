@@ -1,6 +1,8 @@
 //! M13.4: HEVC / AV1 output modules and the WebM codec / Opus options over the command API.
 
-use effectcraft_project::render_queue::{Channels, CodecProfile, OpusApplication, OutputFormat, RateControlMode, VideoCodecOptions, WebmVideoCodec};
+use effectcraft_project::render_queue::{
+    Channels, CodecProfile, HardwareEncoding, OpusApplication, OutputFormat, RateControlMode, VideoCodecOptions, WebmVideoCodec,
+};
 use serde_json::json;
 
 use crate::Session;
@@ -9,6 +11,24 @@ fn session() -> Session {
     let mut s = Session::default();
     s.execute("file.openDemoProject", json!({})).unwrap();
     s
+}
+
+#[test]
+fn hardware_encoding_setting_defaults_roundtrips_and_validates() {
+    let mut s = session();
+    let a = s.execute("renderQueue.add", json!({"format": "hevc"})).unwrap();
+    assert_eq!(s.project.render_queue[0].settings.hardware_encoding, HardwareEncoding::Auto);
+    let id = a["item"].clone();
+    for (value, expected) in [("on", HardwareEncoding::On), ("off", HardwareEncoding::Off), ("auto", HardwareEncoding::Auto)] {
+        s.execute("renderQueue.setRenderSettings", json!({"item": id, "hardwareEncoding": value})).unwrap();
+        let settings = &s.project.render_queue[0].settings;
+        assert_eq!(settings.hardware_encoding, expected);
+        let serialized = serde_json::to_value(settings).unwrap();
+        assert_eq!(serialized["hardwareEncoding"], value);
+        let restored: effectcraft_project::render_queue::RenderSettings = serde_json::from_value(serialized).unwrap();
+        assert_eq!(restored.hardware_encoding, expected);
+    }
+    assert!(s.execute("renderQueue.setRenderSettings", json!({"item": id, "hardwareEncoding": "invalid"})).is_err());
 }
 
 #[test]

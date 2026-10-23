@@ -348,7 +348,15 @@ impl<'a> Cx<'a> {
         s.push_str(&format!("Item: {}\n", if self.job.options.label.is_empty() { "(render)" } else { &self.job.options.label }));
         s.push_str(&format!("Output: {}\n", self.job.path));
         match result {
-            Ok(r) => s.push_str(&format!("Result: Done ({} frames, {}×{}, {} bytes) in {seconds:.2} s\n", r.frames, r.width, r.height, r.bytes)),
+            Ok(r) => {
+                s.push_str(&format!("Result: Done ({} frames, {}×{}, {} bytes) in {seconds:.2} s\n", r.frames, r.width, r.height, r.bytes));
+                if let Some(encoder) = r.video_encoder {
+                    s.push_str(&format!("Video encoder: {encoder}\n"));
+                }
+                if let Some(reason) = &r.hardware_fallback_reason {
+                    s.push_str(&format!("Hardware fallback: {reason}\n"));
+                }
+            }
             Err(e) => s.push_str(&format!("Result: Failed\nError: {e}\n")),
         }
         let over = self.overflowed.lock().unwrap_or_else(|e| e.into_inner());

@@ -18,6 +18,7 @@ effectcraft-raster = { workspace = true }
 effectcraft-effects = { workspace = true }
 effectcraft-render = { workspace = true }
 effectcraft-keyframe = { workspace = true }
+effectcraft-track = { workspace = true }
 wgpu = { workspace = true }
 bytemuck = { workspace = true }
 log = { workspace = true }

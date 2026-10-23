@@ -319,6 +319,27 @@ fn default_true() -> bool {
     true
 }
 
+/// Whether video exports may use a platform hardware encoder.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HardwareEncoding {
+    #[default]
+    Auto,
+    On,
+    Off,
+}
+
+impl HardwareEncoding {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "on" => Some(Self::On),
+            "off" => Some(Self::Off),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RenderSettings {
@@ -326,6 +347,9 @@ pub struct RenderSettings {
     #[serde(skip_serializing_if = "String::is_empty")]
     pub name: String,
     pub quality: RenderQuality,
+    /// Use a hardware encoder where available; older projects default to Auto.
+    #[serde(rename = "hardwareEncoding", alias = "hardware_encoding")]
+    pub hardware_encoding: HardwareEncoding,
     /// Output scale (1 = Full, 0.5 = Half, 1/3 = Third, 0.25 = Quarter).
     pub resolution: f64,
     pub time_span: TimeSpan,
@@ -364,6 +388,7 @@ impl Default for RenderSettings {
         RenderSettings {
             name: String::new(),
             quality: RenderQuality::Best,
+            hardware_encoding: HardwareEncoding::Auto,
             resolution: 1.0,
             time_span: TimeSpan::WorkArea,
             frame_rate: None,

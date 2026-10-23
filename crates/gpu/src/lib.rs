@@ -79,6 +79,7 @@ mod fx_tone;
 mod fx_transition;
 mod fx_vr;
 mod fx_warp;
+mod fx_warp_stab;
 mod ops;
 mod particles;
 mod readback;
@@ -457,6 +458,8 @@ mod tests_fx_transition;
 mod tests_fx_vr;
 #[cfg(test)]
 mod tests_fx_warp;
+#[cfg(test)]
+mod tests_fx_warp_stab;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests_init;
 #[cfg(test)]

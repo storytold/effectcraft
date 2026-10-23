@@ -32,11 +32,15 @@ fn out_dir(name: &str) -> PathBuf {
 }
 
 fn project(audio: Option<&Path>) -> (Project, ItemId) {
+    project_size(W, H, audio)
+}
+
+fn project_size(w: u32, h: u32, audio: Option<&Path>) -> (Project, ItemId) {
     let mut p = Project::default();
-    let mut comp = Comp::new(W, H, FrameRate::new(10, 1), Tick::from_seconds_f64(1.2));
+    let mut comp = Comp::new(w, h, FrameRate::new(10, 1), Tick::from_seconds_f64(1.2));
     comp.background = BG;
-    let sid = p.add_item("Red", Label::Red, None, ItemKind::Solid(Solid { color: [1.0, 0.0, 0.0], width: 32, height: H, pixel_aspect: 1.0 }));
-    let mut l = build::layer(&mut p, &comp, "Red", LayerSource::Solid { item: sid }, (32, H), None);
+    let sid = p.add_item("Red", Label::Red, None, ItemKind::Solid(Solid { color: [1.0, 0.0, 0.0], width: w / 2, height: h, pixel_aspect: 1.0 }));
+    let mut l = build::layer(&mut p, &comp, "Red", LayerSource::Solid { item: sid }, (w / 2, h), None);
     l.in_point = comp.frame_rate.tick_of(5);
     comp.layers.push(l);
     if let Some(path) = audio {
@@ -156,6 +160,139 @@ fn module(format: OutputFormat, keyint: u32) -> OutputModule {
     om
 }
 
+/// Exercise the EffectCraft adapter, not just FilmCraft's encoder, and compare every decoded
+/// picture with the uncompressed composition. Machines without a hardware session skip.
+#[cfg(target_os = "macos")]
+#[test]
+fn videotoolbox_h264_and_hevc_roundtrip_against_rendered_frames() {
+    use effectcraft_export::render_queue::HardwareEncoding;
+    use filmcraft_platform::videotoolbox_encode::{VtConfig, VtEncoder, VtProfile, VtRate};
+
+    let (p, cid) = project(None);
+    for (format, profile) in [(OutputFormat::H264, VtProfile::High), (OutputFormat::Hevc, VtProfile::HevcMain)] {
+        let cfg = VtConfig {
+            width: W,
+            height: H,
+            timescale: 10,
+            frame_duration: 1,
+            keyframe_interval: 4,
+            profile,
+            rate: VtRate::Vbr { target_kbps: 4_000, max_kbps: 6_000 },
+        };
+        let Ok(probe) = VtEncoder::new(cfg) else {
+            eprintln!("SKIPPED: no VideoToolbox {format:?} session at {W}x{H}");
+            continue;
+        };
+        if !probe.uses_hardware() {
+            eprintln!("SKIPPED: VideoToolbox did not create a hardware {format:?} session");
+            continue;
+        }
+        drop(probe);
+        let mut om = OutputModule::for_format(format);
+        om.keyframe_interval = 4;
+        om.bitrate_kbps = 4_000;
+        om.audio = AudioOutput::Off;
+        let settings = RenderSettings { time_span: TimeSpan::LengthOfComp, hardware_encoding: HardwareEncoding::On, ..Default::default() };
+        let dir = out_dir(&format!("vt-{format:?}"));
+        let path = dir.join("clip.mp4");
+        let path_string = path.to_string_lossy().to_string();
+        let job = Job {
+            project: &p,
+            footage: &NoFootage,
+            expr: None,
+            accel: None,
+            comp: cid,
+            settings: &settings,
+            output: &om,
+            path: &path_string,
+            sink: None,
+            nested_switches: true,
+            options: Default::default(),
+        };
+        let report = export(&job, &mut |_| true).expect("hardware export");
+        assert_eq!((report.frames, report.width, report.height), (FRAMES, W, H));
+        assert_eq!(report.video_encoder, Some("VideoToolbox"), "unexpected fallback: {:?}", report.hardware_fallback_reason);
+        let f = effectcraft_media::probe(&path).expect("probe hardware output");
+        assert_eq!((f.width, f.height), (W, H));
+        assert_eq!((f.frame_rate.frame_at(f.duration - Tick(1)) + 1) as u64, FRAMES);
+        let pool = MediaPool::new();
+        let hw_before = filmcraft_codecs::hw::hw_stats();
+        for k in 0..FRAMES {
+            let t = f.frame_rate.tick_of(k as i64);
+            let actual = pool.frame_at(&f, t).expect("decode hardware frame").to_rgba8();
+            // RGB export composites transparent pixels over the comp background before encoding.
+            let reference = effectcraft_render::render_frame(&p, cid, t, 1.0).to_rgba8_over(BG);
+            let mse = actual
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(reference.as_chunks::<4>().0.iter())
+                .flat_map(|(a, b)| (0..3).map(move |c| (f64::from(a[c]) - f64::from(b[c])).powi(2)))
+                .sum::<f64>()
+                / (W * H * 3) as f64;
+            let psnr = if mse == 0.0 { f64::INFINITY } else { 10.0 * (255.0 * 255.0 / mse).log10() };
+            eprintln!("{format:?} frame {k}: PSNR {psnr:.2} dB");
+            // The small, saturated red rectangle creates high-contrast 4:2:0 chroma edges.
+            assert!(psnr > 28.0, "{format:?} frame {k}: PSNR {psnr:.2} dB");
+        }
+        let hw_after = filmcraft_codecs::hw::hw_stats();
+        eprintln!(
+            "{format:?} hardware decode: {} frames, {} sessions, {} fallbacks",
+            hw_after.frames - hw_before.frames,
+            hw_after.sessions - hw_before.sessions,
+            hw_after.fallbacks - hw_before.fallbacks
+        );
+        assert!(hw_after.frames > hw_before.frames, "VideoToolbox did not decode {format:?} frames");
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_h264_and_hevc_hardware_decode_roundtrip() {
+    eprintln!("Linux hardware decoder probe: {:?}", filmcraft_platform::vaapi::va::probe());
+    let (p, cid) = project_size(640, 360, None);
+    for format in [OutputFormat::H264, OutputFormat::Hevc] {
+        let dir = out_dir(&format!("linux-decode-{format:?}"));
+        let path = dir.join("clip.mp4");
+        let mut om = module(format, 4);
+        if format == OutputFormat::Hevc {
+            // Exercise the Linux hardware path, which accepts target bitrate rather than CQ.
+            om.codec.rate_control = RateControlMode::Bitrate;
+            om.bitrate_kbps = 4_000;
+        }
+        let report = run(&p, cid, &NoFootage, &om, &path);
+        eprintln!("{format:?} encoder: {:?}, fallback: {:?}", report.video_encoder, report.hardware_fallback_reason);
+        if format == OutputFormat::Hevc && filmcraft_platform::nvenc::hevc_available() {
+            assert_eq!(report.video_encoder, Some("NVENC"), "HEVC did not use NVENC on a capable NVIDIA host");
+            assert_eq!(report.hardware_fallback_reason, None);
+        }
+        if std::env::var_os("EFFECTCRAFT_REQUIRE_VAAPI").is_some() {
+            assert_eq!(report.video_encoder, Some("VA-API"), "{format:?} did not use VA-API on the requested Radeon test host");
+            assert_eq!(report.hardware_fallback_reason, None);
+        }
+        let before = filmcraft_codecs::hw::hw_stats();
+        let f = effectcraft_media::probe(&path).expect("probe Linux output");
+        assert_eq!((f.width, f.height), (640, 360));
+        assert_eq!((f.frame_rate.frame_at(f.duration - Tick(1)) + 1) as u64, FRAMES);
+        let pool = MediaPool::new();
+        for k in 0..FRAMES {
+            let img = pool.frame_at(&f, f.frame_rate.tick_of(k as i64)).expect("decode Linux output");
+            check_frame(&img, k, 0.15);
+        }
+        let after = filmcraft_codecs::hw::hw_stats();
+        eprintln!(
+            "{format:?} hardware decode {:?}: {} frames, {} sessions, {} declined, {} fallbacks",
+            filmcraft_codecs::hw::hw_backend(),
+            after.frames - before.frames,
+            after.sessions - before.sessions,
+            after.declined - before.declined,
+            after.fallbacks - before.fallbacks
+        );
+        assert!(after.frames > before.frames, "hardware decoder did not decode {format:?} frames");
+        assert_eq!(after.fallbacks, before.fallbacks, "hardware decoder fell back on {format:?}");
+    }
+}
+
 /// Key-frame flags of the MP4 video samples (via ffprobe), or `None` without it.
 fn ffprobe_keyframes(path: &Path) -> Option<Vec<bool>> {
     if !have("ffprobe") {
@@ -177,6 +314,11 @@ fn hevc_mp4_roundtrip() {
     let path = d.join("comp.mp4");
     let r = run(&p, cid, &NoFootage, &om, &path);
     assert!(r.bytes > 100 && !r.audio);
+    #[cfg(target_os = "macos")]
+    {
+        assert_eq!(r.video_encoder, Some("software"));
+        assert!(r.hardware_fallback_reason.as_deref().is_some_and(|reason| reason.contains("constant-quality")));
+    }
     let bytes = std::fs::read(&path).unwrap();
     assert!(bytes.windows(4).any(|w| w == b"hvc1") && bytes.windows(4).any(|w| w == b"hvcC"));
     decode_movie(&path, 0.08);

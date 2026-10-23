@@ -1032,6 +1032,7 @@ pub const GPU_EFFECTS: &[&str] = &[
     "ec.distort.reshape",
     "ec.stylize.coloremboss",
     "ec.stylize.cartoon",
+    "ec.distort.warpstabilizer",
     // effectcraft-gpu fx_extra (shapes, bevels)
     "ec.generate.circle",
     "ec.generate.ellipse",

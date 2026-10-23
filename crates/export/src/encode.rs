@@ -5,7 +5,7 @@
 use std::io::Write;
 
 use effectcraft_project::Comp;
-use effectcraft_project::render_queue::{AudioFormat, Channels, OutputFormat, ProResProfile};
+use effectcraft_project::render_queue::{AudioFormat, Channels, HardwareEncoding, OutputFormat, ProResProfile};
 use effectcraft_time::{FrameRate, Tick};
 use filmcraft_isobmff::{Brand, FourCc, Mp4Writer, PcmConfig, SampleEntry, TrackConfig, WriteSample, WriterOptions};
 use rayon::prelude::*;
@@ -256,15 +256,69 @@ pub(crate) async fn movie(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut St
         Channels::Rgba if !matches!(fmt, OutputFormat::ProRes | OutputFormat::Uncompressed) => Channels::Rgb,
         c => c,
     };
-    let mut venc: Box<dyn VideoEncoder> = match fmt {
-        OutputFormat::H264 => Box::new(H264::new(w, h, rate, job.output.bitrate_kbps)?),
-        OutputFormat::Hevc => Box::new(crate::hevc_av1::Hevc::new(w, h, rate, job.output)?),
-        OutputFormat::Av1 => Box::new(crate::hevc_av1::Av1::new(w, h, rate, job.output)?),
-        OutputFormat::Uncompressed => Box::new(crate::uncompressed::Raw::new(w, h, channels == Channels::Rgba)?),
-        _ => Box::new(ProRes::new(w, h, job.output.prores_profile, if channels == Channels::Alpha { Channels::Rgb } else { channels })),
+    let hardware_requested = job.settings.hardware_encoding != HardwareEncoding::Off && matches!(fmt, OutputFormat::H264 | OutputFormat::Hevc);
+    #[cfg(target_os = "macos")]
+    let (hardware, hardware_name, hardware_fallback_reason) = if hardware_requested {
+        match crate::hardware_macos::open(fmt, w, h, rate, job.output) {
+            Ok(encoder) => {
+                eprintln!("EffectCraft: video encoder: VideoToolbox hardware");
+                (Some(encoder), Some("VideoToolbox"), None)
+            }
+            Err(reason) => {
+                eprintln!("EffectCraft: hardware encoder unavailable ({reason}); using software");
+                log::warn!("hardware encoder unavailable ({reason}); using software");
+                (None, None, Some(reason))
+            }
+        }
+    } else {
+        (None, None, None)
+    };
+    #[cfg(target_os = "linux")]
+    let (hardware, hardware_name, hardware_fallback_reason) = if hardware_requested {
+        match crate::hardware_nvenc::open(fmt, w, h, rate, job.output) {
+            Ok(encoder) => {
+                eprintln!("EffectCraft: video encoder: NVIDIA NVENC hardware");
+                (Some(encoder), Some("NVENC"), None)
+            }
+            Err(nvenc_reason) => match crate::hardware_vaapi::open(fmt, w, h, rate, job.output) {
+                Ok(encoder) => {
+                    eprintln!("EffectCraft: video encoder: VA-API hardware");
+                    (Some(encoder), Some("VA-API"), None)
+                }
+                Err(vaapi_reason) => {
+                    let reason = format!("NVENC: {nvenc_reason}; VA-API: {vaapi_reason}");
+                    eprintln!("EffectCraft: hardware encoder unavailable ({reason}); using software");
+                    log::warn!("hardware encoder unavailable ({reason}); using software");
+                    (None, None, Some(reason))
+                }
+            },
+        }
+    } else {
+        (None, None, None)
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let (hardware, hardware_name, hardware_fallback_reason): (Option<Box<dyn VideoEncoder>>, Option<&'static str>, Option<String>) = {
+        if hardware_requested {
+            #[cfg(not(target_arch = "wasm32"))]
+            eprintln!("EffectCraft: hardware video encoding is unavailable on this platform; using software");
+            log::warn!("hardware video encoding is unavailable on this platform; using software");
+        }
+        (None, None, hardware_requested.then(|| "hardware video encoding is unavailable on this platform".to_string()))
+    };
+    let mut venc: Box<dyn VideoEncoder> = match hardware {
+        Some(encoder) => encoder,
+        None => match fmt {
+            OutputFormat::H264 => Box::new(H264::new(w, h, rate, job.output.bitrate_kbps)?),
+            OutputFormat::Hevc => Box::new(crate::hevc_av1::Hevc::new(w, h, rate, job.output)?),
+            OutputFormat::Av1 => Box::new(crate::hevc_av1::Av1::new(w, h, rate, job.output)?),
+            OutputFormat::Uncompressed => Box::new(crate::uncompressed::Raw::new(w, h, channels == Channels::Rgba)?),
+            _ => Box::new(ProRes::new(w, h, job.output.prores_profile, if channels == Channels::Alpha { Channels::Rgb } else { channels })),
+        },
     };
     let brand = if matches!(fmt, OutputFormat::ProRes | OutputFormat::Uncompressed) { Brand::Mov } else { Brand::Mp4 };
-    let batch = batch_size();
+    // Hardware encoders can consume a small batch while the next one renders. Keep the
+    // prefetched 4K RGBA buffers bounded (four frames are about 127 MiB).
+    let batch = if hardware_name.is_some() && !job.deferred() { batch_size().min(4) } else { batch_size() };
     let render = |_: u64, img: effectcraft_raster::Image| -> Vec<u8> { job.pixels(&img, comp, channels, w, h) };
 
     // Encode the first batch before creating tracks: encoders finalise their config on frame 1.
@@ -355,17 +409,53 @@ pub(crate) async fn movie(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut St
     let frame_end_time = |k: u64| -> Tick { if k >= total { span_end } else { job.settings.frame_time(comp, k) } };
     write_video(&mut mux, pending)?;
     write_audio_until(&mut mux, frame_end_time(first_end), &mut cursor)?;
-    let mut i = first_end;
-    while i < total {
-        let end = (i + batch).min(total);
-        let frames: Vec<Vec<u8>> = job.frames(comp, (i..end).collect(), render).await;
-        for (k, px) in frames.iter().enumerate() {
-            let ps = venc.encode(px, i + k as u64)?;
-            write_video(&mut mux, ps)?;
+    if hardware_name.is_some() && !job.deferred() {
+        std::thread::scope(|scope| -> Result<()> {
+            // A capacity of one allows at most one complete batch to wait while the
+            // producer renders another. Dropping the receiver stops it on any error.
+            let (tx, rx) = std::sync::mpsc::sync_channel::<(u64, u64, Vec<Vec<u8>>)>(1);
+            let producer = scope.spawn(move || {
+                let mut i = first_end;
+                while i < total {
+                    let end = (i + batch).min(total);
+                    let frames = effectcraft_render::passes::block_on(job.frames(comp, (i..end).collect(), render));
+                    if tx.send((i, end, frames)).is_err() {
+                        break;
+                    }
+                    i = end;
+                }
+            });
+            let result = (|| -> Result<()> {
+                let mut i = first_end;
+                while i < total {
+                    let (start, end, frames) = rx.recv().map_err(|_| ExportError::Encode("frame producer stopped before completing export".into()))?;
+                    if start != i || end <= start || end > total || frames.len() != (end - start) as usize {
+                        return Err(ExportError::Encode("frame producer returned an invalid batch".into()));
+                    }
+                    for (k, px) in frames.iter().enumerate() {
+                        write_video(&mut mux, venc.encode(px, i + k as u64)?)?;
+                    }
+                    write_audio_until(&mut mux, frame_end_time(end), &mut cursor)?;
+                    st.advance(end - i)?;
+                    i = end;
+                }
+                Ok(())
+            })();
+            drop(rx);
+            if producer.join().is_err() { Err(ExportError::Encode("frame producer panicked".into())) } else { result }
+        })?;
+    } else {
+        let mut i = first_end;
+        while i < total {
+            let end = (i + batch).min(total);
+            let frames: Vec<Vec<u8>> = job.frames(comp, (i..end).collect(), render).await;
+            for (k, px) in frames.iter().enumerate() {
+                write_video(&mut mux, venc.encode(px, i + k as u64)?)?;
+            }
+            write_audio_until(&mut mux, frame_end_time(end), &mut cursor)?;
+            st.advance(end - i)?;
+            i = end;
         }
-        write_audio_until(&mut mux, frame_end_time(end), &mut cursor)?;
-        st.advance(end - i)?;
-        i = end;
     }
     write_video(&mut mux, venc.flush()?)?;
     write_audio_until(&mut mux, span_end, &mut cursor)?;
@@ -377,7 +467,19 @@ pub(crate) async fn movie(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut St
     let out = mux.finish().map_err(mux_err)?;
     out.flush().map_err(mux_err)?;
     let bytes = file.finish()?;
-    Ok(Report { path, frames: 0, width: w, height: h, seconds: 0.0, bytes, audio: with_audio, log: None, overflow: vec![] })
+    Ok(Report {
+        path,
+        frames: 0,
+        width: w,
+        height: h,
+        seconds: 0.0,
+        bytes,
+        audio: with_audio,
+        video_encoder: Some(hardware_name.unwrap_or("software")),
+        hardware_fallback_reason,
+        log: None,
+        overflow: vec![],
+    })
 }
 
 #[cfg(test)]

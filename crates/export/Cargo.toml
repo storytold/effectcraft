@@ -18,6 +18,8 @@ filmcraft-h264enc = { workspace = true }
 filmcraft-prores = { workspace = true }
 filmcraft-aac = { workspace = true }
 filmcraft-isobmff = { workspace = true }
+filmcraft-export = { workspace = true }
+filmcraft-time = { workspace = true }
 effectcraft-opusenc = { workspace = true }
 effectcraft-vp9enc = { workspace = true }
 effectcraft-hevcenc = { workspace = true }
@@ -29,10 +31,15 @@ web-time = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
 
+# FilmCraft's audited OS media FFI stays outside the EffectCraft workspace, which forbids unsafe.
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+filmcraft-platform = { git = "https://github.com/earlvanze/filmcraft", rev = "4284f6e49c5f6f9df3a691d8cb15b94003b2862e" }
+
 [dev-dependencies]
 effectcraft-media = { workspace = true }
 effectcraft-effects = { workspace = true }
 effectcraft-color = { workspace = true }
 filmcraft-opus = { workspace = true }
 filmcraft-vp9 = { workspace = true }
+filmcraft-codecs = { workspace = true }
 effectcraft-keyframe = { workspace = true }

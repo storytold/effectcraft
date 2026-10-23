@@ -34,3 +34,6 @@ rayon = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
+
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+filmcraft-platform = { git = "https://github.com/earlvanze/filmcraft", rev = "4284f6e49c5f6f9df3a691d8cb15b94003b2862e" }
