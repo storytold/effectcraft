@@ -133,6 +133,12 @@ The most important missing piece: it turns every other estimate here into a meas
   the prompt, with their layers, in one undo step, for single items, multiple selections and
   folder contents. Nothing happens with an empty selection, in other panels, while typing or with
   a dialog open, and the next Delete still asks.
+- Regression evidence for [#947](https://github.com/storytold/effectcraft/issues/947): the
+  preview startup tests in `ui_audio_scrub`, checked headlessly on Windows with a fake output
+  device, start an audible preview on an uncached comp. The playhead holds the first frame until
+  the frames ahead are cached, the sound starts at that frame (from 0 s and from 1 s, also for a
+  30 s work area), and a tone lasting only the first 100 ms reaches the output. Video off still
+  starts at once, no device plays the picture, and Stop while preparing leaves nothing playing.
 - Regression evidence for [#612](https://github.com/storytold/effectcraft/issues/612): the
   `ui_gradient_value` and `ui_gradient_editor` input tests, checked headlessly on Windows, open
   the Gradient Editor from the Timeline's "Edit Gradient…" on a shape layer's Gradient Fill. They

@@ -52,6 +52,29 @@ const SCREENSHOT_TIMEOUT_S: f64 = 4.0;
 /// [`EffectcraftApp::editing`]).
 const EDIT_QUIET: f64 = 0.3;
 
+/// Longest a preview with sound holds its first frame, once that frame is cached, waiting for the
+/// frames ahead (seconds, #947). A frame ahead that never gets cached mustn't hold it for ever:
+/// the sound starts from the first frame anyway, and the preview goes on as a stalled one does.
+const STARTUP_WAIT: f64 = 2.0;
+
+/// Longest a preview with sound holds its first frame in all (seconds, #947). The first frame
+/// itself can take a while (a heavy comp, a busy machine), and [`STARTUP_WAIT`] counts only from
+/// when it is cached; but one that never gets cached (larger than the RAM preview, which the size
+/// estimate can't always tell) mustn't hold it for ever. The preview then goes on as a stalled
+/// one does: its sound starts once the frames are cached.
+const STARTUP_LIMIT: f64 = 10.0;
+
+/// How many frames from the first a preview with sound waits for before it starts (#947): the
+/// prefetch's `ahead`, but no more than its `window` requests from the current frame (offsets
+/// `0..window`), and no more than fit in the RAM preview `budget` (90 %, as for the prefetch) at
+/// `frame_bytes`, the size frames really render at; at least the current frame, which the viewer
+/// always requests. Waiting for a frame that is never requested, or that can't stay cached with
+/// the others, would hold the first frame for ever.
+fn startup_frames(ahead: i64, window: i64, budget: usize, frame_bytes: usize) -> i64 {
+    let fit = (budget as f64 * 0.9 / frame_bytes.max(1) as f64) as i64;
+    ahead.min(window).min(fit).max(1)
+}
+
 /// Modal dialogs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Dialog {
@@ -221,6 +244,17 @@ pub struct Playback {
     /// fits in the RAM preview) is cached, so it never plays over skipped frames (#103), or
     /// sooner once the silent preview keeps real time with the frames ahead cached (#208).
     pub audio_held: bool,
+    /// Starting a preview with sound (#947): the playhead stays on the first frame while the
+    /// frames ahead render (the prefetch window, at most what fits in the RAM preview), then
+    /// sound and picture start together from it. Without this the picture played on silently
+    /// while they rendered and the sound started at the later frame, so the opening was lost.
+    /// A stall later on still falls back to [`Playback::audio_held`].
+    pub starting: bool,
+    /// When the preview started (seconds): [`Playback::starting`] gives up after [`STARTUP_LIMIT`].
+    pub starting_since: f64,
+    /// When the first frame was cached while [`Playback::starting`] (seconds): the wait for the
+    /// frames ahead gives up [`STARTUP_WAIT`] after it.
+    pub first_cached: Option<f64>,
     /// When the last frames were shown (seconds, the last second's worth): the achieved rate.
     pub shown_at: std::collections::VecDeque<f64>,
 }
@@ -1016,11 +1050,16 @@ impl EffectcraftApp {
             restore_max,
             audio_frame: (!plan.video).then_some(plan.first),
             audio_held: false,
+            starting: false,
+            starting_since: now,
+            first_cached: None,
             shown_at: Default::default(),
         };
         if !self.playback.caching {
             if plan.video {
-                self.playback.audio_held = self.audio_plays();
+                let audible = self.audio_plays();
+                self.playback.audio_held = audible;
+                self.playback.starting = audible;
             } else {
                 self.start_audio(fr.tick_of(plan.first));
             }
@@ -1080,6 +1119,7 @@ impl EffectcraftApp {
         let was = std::mem::replace(&mut self.playback.playing, false);
         self.audio = None;
         self.playback.caching = false;
+        self.playback.starting = false;
         if !was {
             return;
         }
@@ -1282,9 +1322,47 @@ impl EffectcraftApp {
             return;
         }
         let snap = |f: i64| wa + (f - wa).div_euclid(step) * step;
-        // Held sound starts once the frames ahead are cached (see `Playback::audio_held`): the
-        // prefetch window when the silent preview keeps real time, else the rest of the preview.
         let fit = self.frames_that_fit(&c, scale);
+        // Starting with sound: hold the first frame until the frames ahead are cached, then start
+        // the sound from that same frame (see `Playback::starting`). Without an output device the
+        // picture plays on its own clock from it. How many frames ahead: only ones the prefetch
+        // above requests and that fit in the RAM preview at the size they really render (an
+        // Extended Viewer frame is larger than the comp), so the wait always ends.
+        if self.playback.starting
+            && let Some(p) = plan
+        {
+            self.playback.start_wall = now;
+            self.playback.start_frame = cur;
+            let need = self.frames.get(&FrameKey { frame: cur, ..series }).map(|img| {
+                let [w, h] = img.size();
+                startup_frames(ahead, window, self.frames.budget(), w.saturating_mul(h).saturating_mul(4))
+            });
+            if need.is_some() && self.playback.first_cached.is_none() {
+                self.playback.first_cached = Some(now);
+            }
+            // Don't wait for frames the RAM preview can't hold (not even one frame fits), for the
+            // frames ahead longer than STARTUP_WAIT once the first is in, nor longer than
+            // STARTUP_LIMIT in all (a frame that never gets cached).
+            let give_up = (self.frames.budget() as f64) < self.frame_bytes(&c, scale)
+                || self.playback.first_cached.is_some_and(|t| now - t >= STARTUP_WAIT)
+                || now - self.playback.starting_since >= STARTUP_LIMIT;
+            if !give_up && !need.is_some_and(|n| self.cached_ahead(&p, &series, cur, n)) {
+                self.playback.waiting = true;
+                ctx.request_repaint();
+                return;
+            }
+            self.playback.starting = false;
+            self.playback.waiting = false;
+            // Not on a frame that isn't cached: the stall below would stop the sound at once. The
+            // preview goes on as a stalled one does, and the sound starts once frames are cached.
+            if need.is_some() {
+                self.playback.audio_held = false;
+                self.start_audio(fr.tick_of(cur));
+            }
+        }
+        // Held sound starts once the frames ahead are cached again after a stall (see
+        // `Playback::audio_held`): the prefetch window when the silent preview keeps real time,
+        // else the rest of the preview.
         if self.playback.audio_held
             && let Some(p) = plan
             && ((self.playback.keeps_up(now) && self.cached_ahead(&p, &series, cur, ahead.min(fit))) || self.cached_ahead(&p, &series, cur, fit))
@@ -1441,9 +1519,13 @@ impl EffectcraftApp {
     }
 
     fn frames_that_fit(&self, comp: &effectcraft_engine::project::Comp, scale: f64) -> i64 {
+        ((self.frames.budget() as f64 * 0.9 / self.frame_bytes(comp, scale)) as i64).max(1)
+    }
+
+    /// Bytes of one comp-sized viewer frame at `scale` (Extended Viewer frames are larger).
+    fn frame_bytes(&self, comp: &effectcraft_engine::project::Comp, scale: f64) -> f64 {
         let side = |n: u32| (n as f64 * scale).ceil().max(1.0);
-        let frame = side(comp.width) * side(comp.height) * 4.0;
-        ((self.frames.budget() as f64 * 0.9 / frame) as i64).max(1)
+        side(comp.width) * side(comp.height) * 4.0
     }
 
     fn frames_parallelism(&self) -> usize {
@@ -2170,5 +2252,30 @@ mod appearance_tests {
         assert_eq!(app.session.prefs.appearance.appearance_mode, "dark");
         assert_eq!(app.session.prefs.appearance.dark_theme, "darker");
         assert_eq!(app.ui.theme, ThemeKind::Darker);
+    }
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::startup_frames;
+
+    /// The frames a preview with sound waits for are always requested and fit together (#947).
+    #[test]
+    fn startup_waits_only_for_frames_it_requests_and_can_keep() {
+        // A 64×36 frame: 9216 bytes. A 46 080-byte budget fits 4 of them (90 %); the prefetch
+        // window then requests offsets 0..3, so the start needs those 3, not 4 it never asks for.
+        let frame = 64 * 36 * 4;
+        let fit = 4;
+        let window = (32i64 * 3).min(fit - 1);
+        assert_eq!(startup_frames(32, window, 46_080, frame), 3);
+        // A roomy budget: the prefetch's `ahead` frames.
+        assert_eq!(startup_frames(8, 24, 100_000_000, frame), 8);
+        // Extended Viewer: a 160×120 comp renders 320×248 frames. 952 320 bytes fit 11 comp-sized
+        // frames but only 2 real ones (90 %): wait for 2, not 4.
+        assert_eq!(startup_frames(4, 11, 952_320, 320 * 248 * 4), 2);
+        // Nothing fits, or no window: still the current frame, never 0.
+        assert_eq!(startup_frames(8, 0, 0, frame), 1);
+        // A zero frame size counts as 1 byte: no division by zero.
+        assert_eq!(startup_frames(8, 24, 10, 0), 8);
     }
 }
