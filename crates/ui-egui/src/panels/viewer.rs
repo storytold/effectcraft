@@ -1397,11 +1397,14 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             }
         };
         ctx.set_cursor_icon(cursor);
-        // Scroll wheel zooms around the pointer.
-        let scroll = ui.input(|i| i.smooth_scroll_delta.y + i.zoom_delta().ln() * 300.0);
-        if scroll.abs() > 0.1 && area.contains(hp) {
-            let k = (scroll / 300.0).exp();
-            let nz = (zoom * k).clamp(0.01, 32.0);
+        // The mouse wheel and a trackpad pinch zoom around the pointer; a two-finger trackpad
+        // scroll pans.
+        let scroll = super::viewer_scroll(&ctx);
+        if scroll.pan != egui::Vec2::ZERO && area.contains(hp) {
+            app.ui.viewer.pan = [app.ui.viewer.pan[0] + scroll.pan.x, app.ui.viewer.pan[1] + scroll.pan.y];
+        }
+        if (scroll.zoom - 1.0).abs() > 3e-4 && area.contains(hp) {
+            let nz = (zoom * scroll.zoom).clamp(0.01, 32.0);
             let before = map.to_comp(hp);
             let new_origin = hp - vec2(before[0] as f32 * nz, before[1] as f32 * nz);
             let new_center = new_origin + vec2(cw * nz / 2.0, ch * nz / 2.0);
