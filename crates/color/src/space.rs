@@ -108,10 +108,10 @@ impl Curve {
         let a = v.abs();
         let l = match self {
             Curve::Linear => a,
-            Curve::Srgb => crate::srgb_to_linear(a),
-            Curve::Gamma24 => a.powf(2.4),
-            Curve::Pq => (pq_decode(a as f64) * 10_000.0 / PQ_REFERENCE_WHITE) as f32,
-            Curve::Hlg => (hlg_decode(a as f64) / HLG_REFERENCE) as f32,
+            Curve::Srgb => srgb_decode_mag(a),
+            Curve::Gamma24 => gamma24_decode_mag(a),
+            Curve::Pq => pq_decode_mag(a),
+            Curve::Hlg => hlg_decode_mag(a),
         };
         l.copysign(v)
     }
@@ -121,13 +121,79 @@ impl Curve {
         let a = v.abs();
         let e = match self {
             Curve::Linear => a,
-            Curve::Srgb => crate::linear_to_srgb(a),
-            Curve::Gamma24 => a.powf(1.0 / 2.4),
-            Curve::Pq => pq_encode(a as f64 * PQ_REFERENCE_WHITE / 10_000.0) as f32,
-            Curve::Hlg => hlg_encode(a as f64 * HLG_REFERENCE) as f32,
+            Curve::Srgb => srgb_encode_mag(a),
+            Curve::Gamma24 => gamma24_encode_mag(a),
+            Curve::Pq => pq_encode_mag(a),
+            Curve::Hlg => hlg_encode_mag(a),
         };
         e.copysign(v)
     }
+
+    /// [`Curve::decode`] of three channels: the curve is matched once, not per channel.
+    #[inline]
+    pub fn decode3(self, c: [f32; 3]) -> [f32; 3] {
+        match self {
+            // |v| with v's sign is v, bit for bit (−0 and NaN included).
+            Curve::Linear => c,
+            Curve::Srgb => mirror3(c, srgb_decode_mag),
+            Curve::Gamma24 => mirror3(c, gamma24_decode_mag),
+            Curve::Pq => mirror3(c, pq_decode_mag),
+            Curve::Hlg => mirror3(c, hlg_decode_mag),
+        }
+    }
+
+    /// [`Curve::encode`] of three channels: the curve is matched once, not per channel.
+    #[inline]
+    pub fn encode3(self, c: [f32; 3]) -> [f32; 3] {
+        match self {
+            Curve::Linear => c,
+            Curve::Srgb => mirror3(c, srgb_encode_mag),
+            Curve::Gamma24 => mirror3(c, gamma24_encode_mag),
+            Curve::Pq => mirror3(c, pq_encode_mag),
+            Curve::Hlg => mirror3(c, hlg_encode_mag),
+        }
+    }
+}
+
+/// `f` of each channel's magnitude, mirrored around zero.
+#[inline(always)]
+fn mirror3(c: [f32; 3], f: impl Fn(f32) -> f32) -> [f32; 3] {
+    c.map(|v| f(v.abs()).copysign(v))
+}
+
+// Transfer curves on magnitudes (`a >= 0`, or NaN), exact as before the curve match was
+// hoisted out of the per-channel loop.
+#[inline(always)]
+fn srgb_decode_mag(a: f32) -> f32 {
+    crate::srgb_to_linear(a)
+}
+#[inline(always)]
+fn srgb_encode_mag(a: f32) -> f32 {
+    crate::linear_to_srgb(a)
+}
+#[inline(always)]
+fn gamma24_decode_mag(a: f32) -> f32 {
+    a.powf(2.4)
+}
+#[inline(always)]
+fn gamma24_encode_mag(a: f32) -> f32 {
+    a.powf(1.0 / 2.4)
+}
+#[inline(always)]
+fn pq_decode_mag(a: f32) -> f32 {
+    (pq_decode(a as f64) * 10_000.0 / PQ_REFERENCE_WHITE) as f32
+}
+#[inline(always)]
+fn pq_encode_mag(a: f32) -> f32 {
+    pq_encode(a as f64 * PQ_REFERENCE_WHITE / 10_000.0) as f32
+}
+#[inline(always)]
+fn hlg_decode_mag(a: f32) -> f32 {
+    (hlg_decode(a as f64) / HLG_REFERENCE) as f32
+}
+#[inline(always)]
+fn hlg_encode_mag(a: f32) -> f32 {
+    hlg_encode(a as f64 * HLG_REFERENCE) as f32
 }
 
 impl ColorSpace {
@@ -347,13 +413,13 @@ impl Conversion {
     pub fn apply(&self, c: [f32; 3]) -> [f32; 3] {
         let mut c = c;
         if let Some(s) = self.decode {
-            c = c.map(|v| s.decode(v));
+            c = s.curve().decode3(c);
         }
         if let Some(m) = &self.matrix {
             c = [0, 1, 2].map(|i| m[i][0] * c[0] + m[i][1] * c[1] + m[i][2] * c[2]);
         }
         if let Some(s) = self.encode {
-            c = c.map(|v| s.encode(v));
+            c = s.curve().encode3(c);
         }
         c
     }
@@ -465,6 +531,85 @@ mod tests {
         for cs in ColorSpace::ALL {
             assert_eq!(ColorSpace::parse(cs.id()), Some(cs));
             assert_eq!(ColorSpace::parse(cs.label()), Some(cs), "{}", cs.label());
+        }
+    }
+
+    /// [`Conversion::apply`] before the curve match was hoisted: per channel, through
+    /// [`ColorSpace::decode`] / [`ColorSpace::encode`].
+    fn apply_per_channel(c: &Conversion, mut v: [f32; 3]) -> [f32; 3] {
+        if let Some(s) = c.decode {
+            v = v.map(|x| s.decode(x));
+        }
+        if let Some(m) = &c.matrix {
+            v = [0, 1, 2].map(|i| m[i][0] * v[0] + m[i][1] * v[1] + m[i][2] * v[2]);
+        }
+        if let Some(s) = c.encode {
+            v = v.map(|x| s.encode(x));
+        }
+        v
+    }
+
+    /// Inputs covering the curve segments, over-range, negatives, ±0, NaN and infinities.
+    fn probe_values() -> Vec<f32> {
+        let mut v: Vec<f32> = (0..=2048).map(|i| i as f32 / 1024.0 - 0.5).collect();
+        v.extend([0.0, -0.0, 0.003_130_8, 0.040_45, 1e-6, 1e-30, 3.0, 50.0, -7.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY]);
+        v
+    }
+
+    #[test]
+    fn hoisted_curve_matches_per_channel_bit_for_bit() {
+        let vals = probe_values();
+        let bits = |c: [f32; 3]| c.map(f32::to_bits);
+        for a in ColorSpace::ALL {
+            for b in ColorSpace::ALL {
+                for (al, bl) in [(false, false), (true, false), (false, true), (true, true)] {
+                    let mut convs: Vec<Conversion> = Conversion::new(a, al, b, bl).into_iter().collect();
+                    convs.extend([Conversion::linearize(a), Conversion::delinearize(a)]);
+                    for conv in convs {
+                        for w in vals.chunks(3) {
+                            let c = [w[0], *w.get(1).unwrap_or(&0.25), *w.get(2).unwrap_or(&0.75)];
+                            assert_eq!(bits(conv.apply(c)), bits(apply_per_channel(&conv, c)), "{conv:?} {c:?}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Rough per-pixel timing of [`Conversion::apply`] against the old path (`cargo test -p
+    /// effectcraft-color --release --lib conversion_timing -- --ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn conversion_timing() {
+        let px: Vec<[f32; 3]> = (0..1_000_000).map(|i| [(i % 1000) as f32 / 999.0, (i % 777) as f32 / 776.0, (i % 333) as f32 / 332.0]).collect();
+        let cases = [
+            ("srgb->rec2020", Conversion::new(ColorSpace::Srgb, false, ColorSpace::Rec2020, false)),
+            ("srgb linearize", Some(Conversion::linearize(ColorSpace::Srgb))),
+            ("srgb delinearize", Some(Conversion::delinearize(ColorSpace::Srgb))),
+            ("rec709 linearize", Some(Conversion::linearize(ColorSpace::Rec709))),
+            ("pq linearize", Some(Conversion::linearize(ColorSpace::Rec2100Pq))),
+            ("pq delinearize", Some(Conversion::delinearize(ColorSpace::Rec2100Pq))),
+            ("hlg linearize", Some(Conversion::linearize(ColorSpace::Rec2100Hlg))),
+            ("hlg delinearize", Some(Conversion::delinearize(ColorSpace::Rec2100Hlg))),
+        ];
+        let time = |f: &dyn Fn([f32; 3]) -> [f32; 3]| {
+            let mut best = std::time::Duration::MAX;
+            let mut acc = 0.0f32;
+            for _ in 0..7 {
+                let t = std::time::Instant::now();
+                for c in &px {
+                    acc += f(*c)[1];
+                }
+                best = best.min(t.elapsed());
+            }
+            std::hint::black_box(acc);
+            best
+        };
+        for (name, conv) in cases {
+            let Some(conv) = conv else { continue };
+            let new = time(&|c| conv.apply(c));
+            let old = time(&|c| apply_per_channel(&conv, c));
+            println!("{name}: new {new:?}/Mpx old {old:?}/Mpx");
         }
     }
 }
