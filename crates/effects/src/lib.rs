@@ -383,6 +383,18 @@ pub trait EffectHost: Sync {
     fn params_at(&self, _layer_time: f64) -> Option<Params> {
         None
     }
+    /// Parameter `id` (a [`flatten_params`] id such as `birthRate`) of effect `effect_index` in
+    /// the layer's stack (the running effect's [`EffectEnv::effect_index`]) at another **layer
+    /// time**: CC Particle World samples its Birth Rate at every step it simulates (#1373).
+    /// `None` when unavailable.
+    fn param_at(&self, _effect_index: usize, _id: &str, _layer_time: f64) -> Option<Value> {
+        None
+    }
+    /// Parameter `id` of effect `effect_index` has one value at every time (no keyframes, no
+    /// expression), so sampling it over time can be skipped. `false` when unknown.
+    fn param_is_static(&self, _effect_index: usize, _id: &str) -> bool {
+        false
+    }
     /// A particle simulation backend (GPU particles; see [`psim`]). `None` = simulate on the
     /// CPU.
     fn particles(&self) -> Option<&dyn psim::ParticleSim> {
@@ -1234,6 +1246,13 @@ pub fn is_time_dependent(id: &str) -> bool {
     // Simulations replay from layer time 0, so every frame differs even when the defaults
     // happen to look static at the test's two sample times.
     id.starts_with("ec.sim.") || TIME_DEPENDENT.contains(&id)
+}
+
+/// Does effect `id` read its own parameters at earlier times (the stepped particle systems sample
+/// their Birth Rate at every step, #1373)? Caches keyed on the current values can't see what an
+/// expression returned then.
+pub fn reads_param_history(id: &str) -> bool {
+    matches!(id, "ec.sim.ccparticleworld" | "ec.sim.ccparticlesystems2" | "ec.sim.ccmrmercury")
 }
 
 /// Run an effect on a buffer.

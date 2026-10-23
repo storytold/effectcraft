@@ -534,14 +534,29 @@ impl<S: Clone> SimCache<S> {
 
     /// State after `target` steps. `init` builds step 0; `step(state, i)` advances from step
     /// `i` to `i + 1`.
-    pub fn run(&self, key: u64, target: u64, init: impl FnOnce() -> S, mut step: impl FnMut(&mut S, u64)) -> std::sync::Arc<S> {
+    pub fn run(&self, key: u64, target: u64, init: impl FnOnce() -> S, step: impl FnMut(&mut S, u64)) -> std::sync::Arc<S> {
+        self.run_where(key, target, init, step, |_, _| true)
+    }
+
+    /// [`SimCache::run`] for a simulation whose steps also depend on inputs outside `key` (a
+    /// parameter's values over time): a checkpoint after `s` steps is only resumed from when
+    /// `valid(s, state)` says it was reached with the same inputs. Fresh checkpoints replace
+    /// those at the same step.
+    pub fn run_where(
+        &self,
+        key: u64,
+        target: u64,
+        init: impl FnOnce() -> S,
+        mut step: impl FnMut(&mut S, u64),
+        valid: impl Fn(u64, &S) -> bool,
+    ) -> std::sync::Arc<S> {
         use std::sync::Arc;
         let start = {
             let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             let tick = g.iter().map(|e| e.used).max().unwrap_or(0) + 1;
             g.iter_mut().find(|e| e.key == key).and_then(|e| {
                 e.used = tick;
-                e.checkpoints.iter().filter(|(s, _)| *s <= target).max_by_key(|(s, _)| *s).map(|(s, st)| (*s, st.clone()))
+                e.checkpoints.iter().filter(|(s, st)| *s <= target && valid(*s, st)).max_by_key(|(s, _)| *s).map(|(s, st)| (*s, st.clone()))
             })
         };
         let had_start = start.is_some();
@@ -579,9 +594,8 @@ impl<S: Clone> SimCache<S> {
         let e = &mut g[idx];
         e.used = tick;
         for (s, st) in fresh {
-            if !e.checkpoints.iter().any(|(c, _)| *c == s) {
-                e.checkpoints.push((s, st));
-            }
+            e.checkpoints.retain(|(c, _)| *c != s);
+            e.checkpoints.push((s, st));
         }
         // Keep memory bounded: drop unaligned (exact-target) checkpoints first, then thin.
         if e.checkpoints.len() > 256 {
