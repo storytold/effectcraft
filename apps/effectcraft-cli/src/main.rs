@@ -12,7 +12,7 @@
 //! effectcraft-cli get <comp> <layer> <path> [--time S]        read a property
 //! effectcraft-cli set <comp> <layer> <path> <value> [--time S] [--expression E]
 //! effectcraft-cli render-frame [--comp C] [--time S|--frame N] [--max-side PX|--scale K] [--out F.png] [--transparent]
-//! effectcraft-cli render [--comp C] --out FILE [--format h264|hevc|av1|prores|webm|png|jpeg|tiff|exr|tga|gif|wav|aiff] [--start S] [--end S]
+//! effectcraft-cli render [--comp C] --out FILE [--format h264|hevc|av1|prores|webm|png|jpeg|tiff|exr|tga|gif|webp|wav|aiff] [--start S] [--end S]
 //!     [--work-area] [--fps N] [--resolution full|half|third|quarter|K] [--quality best|draft] [--channels rgb|rgba]
 //!     [--jpeg-quality N] [--bitrate KBPS] [--prores proxy|lt|standard|hq|4444|4444xq] [--audio auto|on|off]
 //!     [--profile main|main10] [--level auto|4.1] [--rate-control bitrate|quality] [--video-quality 1-100]
@@ -114,7 +114,7 @@ const USAGE: &str = "usage: effectcraft-cli <info|commands|exec|run|props|get|se
          [--jpeg-quality N] [--bitrate KBPS] [--prores PROFILE] [--audio auto|on|off]
          [--profile main|main10] [--level auto|4.1] [--rate-control bitrate|quality] [--video-quality N]
          [--keyint FRAMES] [--webm-codec vp9|av1] [--audio-bitrate KBPS] [--opus-app audio|voice] | --queue
-                                           (formats h264|hevc|av1|prores|webm|png|jpeg|tiff|exr|tga|gif|wav|aiff;
+                                           (formats h264|hevc|av1|prores|webm|png|jpeg|tiff|exr|tga|gif|webp|wav|aiff;
                                            --profile..--keyint: HEVC / AV1, --audio-bitrate/--opus-app: WebM Opus)
                                            a relative --out is relative to the working directory
                                            --progress: progress lines on stderr when it is not a terminal

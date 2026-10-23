@@ -186,6 +186,10 @@ pub fn builtin_output_modules() -> Vec<OutputModule> {
     exr.channels = Channels::Rgba;
     v.push(exr);
     v.push(om("Animated GIF", OutputFormat::Gif));
+    v.push(om("Animated WebP", OutputFormat::WebP));
+    let mut webp_alpha = om("Animated WebP with Alpha", OutputFormat::WebP);
+    webp_alpha.channels = Channels::Rgba;
+    v.push(webp_alpha);
     v.push(om("WebM (VP9 + Opus)", OutputFormat::WebM));
     let mut wa = om("WebM with Alpha", OutputFormat::WebM);
     wa.channels = Channels::Rgba;

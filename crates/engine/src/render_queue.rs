@@ -226,6 +226,8 @@ pub fn bytes_per_frame(om: &OutputModule, w: u32, h: u32, fps: f64) -> f64 {
         }
         OutputFormat::WebM => mbps(8.0) * px / fps,
         OutputFormat::Gif => w as f64 * h as f64 * 0.5,
+        // Lossless, and only the changed area of each frame: about a byte a pixel for motion.
+        OutputFormat::WebP => w as f64 * h as f64,
         OutputFormat::Wav | OutputFormat::Aiff => om.audio_sample_rate as f64 * 4.0 / fps,
         _ => w as f64 * h as f64 * 3.0,
     }

@@ -47,7 +47,7 @@ trips and renders, checked by tests, not against After Effects), **partial** (na
 | SVG | R | yes | — | good; SVG markup on the clipboard pastes as a shape layer (26.3, #738); Illustrator's own clipboard data (PDF/AI) doesn't |
 | GIF | R/W | yes | yes (animated) | good |
 | BMP | R | yes | — | good |
-| WebP | — | yes (still; animated WebP as footage with its frames, timing and alpha, #762) | — | beyond After Effects |
+| WebP | R/W | yes (still; animated WebP as footage with its frames, timing and alpha, #762) | yes (animated, lossless, with alpha) | beyond After Effects; no lossy (`VP8 `) output |
 | Targa `.tga` | R/W | yes (still and sequence; alpha interpreted on import) | yes (sequence; uncompressed 24-bit RGB or 32-bit RGB + Alpha, straight or premultiplied) | good: import (#745); output reads back through it unchanged; the alpha is not labelled in the file (no TGA 2.0 extension area), so it is interpreted on import |
 | DPX / Cineon `.dpx` `.cin` | R/W | yes (still and sequence; 8/10/12/16-bit luma, RGB, RGBA, both byte orders; log code values shown as stored, or converted by Interpret Footage ▸ Cineon Settings ▸ Logarithmic Conversion) | none | partial: import (#756) and Cineon Settings; no DPX output; common in film VFX |
 | Radiance `.hdr` | R/W | yes (still and sequence, 32-bit linear float like OpenEXR) | none | good for import (#745); no Radiance output |
@@ -96,10 +96,10 @@ trips and renders, checked by tests, not against After Effects), **partial** (na
 | Mocha shapes | R (Mocha AE) | own documented JSON | — | Mocha's format is not public |
 | Vanishing Point `.vpe` | R | none | — | no public specification; the menu entry explains why |
 
-## Render queue outputs (`OutputFormat::ALL`, 14)
+## Render queue outputs (`OutputFormat::ALL`, 15)
 
 H.264 MP4, HEVC MP4, AV1 MP4, ProRes MOV, uncompressed 8-bit RGB / RGB + Alpha MOV (`raw `, + PCM;
-#372), WebM (VP9 or AV1 + Opus), PNG / JPEG / TIFF / OpenEXR / Targa sequences, animated GIF, WAV, AIFF.
+#372), WebM (VP9 or AV1 + Opus), PNG / JPEG / TIFF / OpenEXR / Targa sequences, animated GIF, animated WebP (lossless, with alpha), WAV, AIFF.
 Missing against After Effects + Media Encoder: 16-bpc uncompressed, AVI and lossless-compressed
 single-file video (Animation / PNG codecs), DPX / Photoshop sequences, MXF, DNxHR, hardware
 encoders ([hardware-parity.md](hardware-parity.md)), and rendering safely over an existing file
