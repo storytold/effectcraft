@@ -268,7 +268,11 @@ pub(crate) async fn movie(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut St
     let render = |_: u64, img: effectcraft_raster::Image| -> Vec<u8> { job.pixels(&img, comp, channels, w, h) };
 
     // Encode the first batch before creating tracks: encoders finalise their config on frame 1.
-    let first_end = batch.min(st.total);
+    // CPU frames (no GPU accelerator, or a Software Only project): frame 0 renders alone first, so
+    // the layer cache is warm before frames run side by side; cold side-by-side frames each render
+    // the same static layers at once.
+    let cpu_only = job.job.accel.is_none() || !job.project.settings.gpu_acceleration;
+    let first_end = if cpu_only { 1 } else { batch }.min(st.total);
     let first: Vec<Vec<u8>> = job.frames(comp, (0..first_end).collect(), render).await;
     let mut pending = Vec::new();
     for (k, px) in first.iter().enumerate() {

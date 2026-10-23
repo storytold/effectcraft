@@ -25,17 +25,39 @@ fn dims_xy(dim: u32) -> (f64, f64) {
     }
 }
 
+/// Repeat Edge Pixels: the edge it repeats is the layer rectangle's ([`Buf::cover`]).
+/// On an aligned buffer it grows to the covered buffer instead, so the edge is the same pixels.
+fn cover_for_repeat(ctx: &EffectCtx, b: &mut Buf) {
+    if b.grow_to_main() {
+        return;
+    }
+    // Untracked (a covered stack, or an accelerator chain ran): the covered buffer is this one.
+    b.cover(ctx.layer_size);
+    crate::stack::set_row_phase(0);
+}
+
 fn gaussian(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let s = blur_sigma(ctx.params.f("blurriness")) * b.scale;
     if s <= 0.0 {
         return b;
     }
     let (kx, ky) = dims_xy(ctx.params.e("dimensions"));
-    let repeat = ctx.params.b("repeatEdge");
+    let mut repeat = ctx.params.b("repeatEdge");
+    let mut far = (0, 0);
     if !repeat && !ctx.adjustment {
         b.pad((s * 3.0).ceil() as u32);
+    } else if repeat && !ctx.adjustment {
+        // The edge it repeats is the layer's, not the painted content's (#1205).
+        match b.repeat_as_transparent((s * kx.max(ky) * 3.0).ceil() as u32 + 2) {
+            Some(m) => {
+                far = m;
+                repeat = false;
+            }
+            None => cover_for_repeat(ctx, &mut b),
+        }
     }
-    b.img = gaussian_blur(&b.img, s * kx, s * ky, repeat || ctx.adjustment);
+    b.img = effectcraft_raster::gaussian_blur_phased(&b.img, s * kx, s * ky, repeat || ctx.adjustment, crate::stack::row_phase());
+    b.crop_far(far);
     b
 }
 
@@ -46,11 +68,22 @@ fn box_blur(ctx: &EffectCtx, mut b: Buf) -> Buf {
     }
     let it = ctx.params.f("iterations").round().clamp(1.0, 50.0) as usize;
     let (kx, ky) = dims_xy(ctx.params.e("dimensions"));
-    let repeat = ctx.params.b("repeatEdge");
+    let mut repeat = ctx.params.b("repeatEdge");
+    let mut far = (0, 0);
     if !repeat && !ctx.adjustment {
         b.pad((r * it) as u32 + 1);
+    } else if repeat && !ctx.adjustment {
+        // The edge it repeats is the layer's, not the painted content's (#1205).
+        match b.repeat_as_transparent((r * it * (kx.max(ky) as usize)) as u32 + 1) {
+            Some(m) => {
+                far = m;
+                repeat = false;
+            }
+            None => cover_for_repeat(ctx, &mut b),
+        }
     }
-    b.img = effectcraft_raster::box_blur(&b.img, r * kx as usize, r * ky as usize, it, repeat || ctx.adjustment);
+    b.img = effectcraft_raster::box_blur_phased(&b.img, r * kx as usize, r * ky as usize, it, repeat || ctx.adjustment, crate::stack::row_phase());
+    b.crop_far(far);
     b
 }
 
@@ -196,7 +229,7 @@ fn glow(ctx: &EffectCtx, mut b: Buf) -> Buf {
         }
     });
     let s = (radius / 2.0).max(0.5);
-    let blurred = gaussian_blur(&bright, s * kx, s * ky, false);
+    let blurred = effectcraft_raster::gaussian_blur_phased(&bright, s * kx, s * ky, false, crate::stack::row_phase());
     let mode = ctx.params.e("operation");
     b.img.data.par_iter_mut().zip(blurred.data.par_iter()).for_each(|(o, g)| {
         let g = g.map(|v| v * intensity);
