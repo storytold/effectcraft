@@ -140,11 +140,15 @@ impl Image {
     }
     /// Copy with `pad` transparent pixels on every side.
     pub fn padded(&self, pad: u32) -> Image {
-        let mut out = Image::new(self.width + 2 * pad, self.height + 2 * pad);
+        self.padded_xy(pad, pad)
+    }
+    /// Copy with `px` transparent pixels on the left and right and `py` above and below.
+    pub fn padded_xy(&self, px: u32, py: u32) -> Image {
+        let mut out = Image::new(self.width + 2 * px, self.height + 2 * py);
         let ow = out.width as usize;
         for y in 0..self.height as usize {
             let src = &self.data[y * self.width as usize..(y + 1) * self.width as usize];
-            let o = (y + pad as usize) * ow + pad as usize;
+            let o = (y + py as usize) * ow + px as usize;
             out.data[o..o + self.width as usize].copy_from_slice(src);
         }
         out

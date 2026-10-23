@@ -288,12 +288,16 @@ impl Buf {
     }
     /// Grow by `pad` transparent pixels on every side.
     pub fn pad(&mut self, pad: u32) {
-        if pad == 0 {
+        self.pad_xy(pad, pad);
+    }
+    /// Grow by `px` transparent pixels on the left and right and `py` above and below.
+    pub fn pad_xy(&mut self, px: u32, py: u32) {
+        if px == 0 && py == 0 {
             return;
         }
-        self.img = self.img.padded(pad);
-        self.offset[0] += pad as f64;
-        self.offset[1] += pad as f64;
+        self.img = self.img.padded_xy(px, py);
+        self.offset[0] += px as f64;
+        self.offset[1] += py as f64;
     }
 }
 
