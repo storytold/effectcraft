@@ -369,6 +369,7 @@ fn session(args: &Args) -> Result<effectcraft_engine::Session, Failure> {
     }
     if args.flag("--gpu") {
         let g = effectcraft_gpu::Gpu::try_headless().map_err(|e| Failure::Error(format!("--gpu: no usable GPU adapter ({e})")))?;
+        g.set_handoff(handoff_env());
         s.accel = Some(std::sync::Arc::new(g));
     } else {
         s.accel_note = Some("headless: renders on the CPU unless started with --gpu".into());
@@ -1190,9 +1191,16 @@ fn adv3d_bench_comp(p: &mut effectcraft_engine::project::Project) -> Option<Item
 /// unchanged layers: compositing cost); "viewer" is the GPU display path without readback;
 /// "auto" is Backend::Auto (Mercury GPU Acceleration) choosing per comp from measured times,
 /// warm; "up/dn MB" are the GPU's uploads / readbacks per warm GPU frame.
+/// GPU effect-chain results stay on the device for the compositor unless
+/// `EFFECTCRAFT_NO_HANDOFF` is set (a comparison switch).
+fn handoff_env() -> bool {
+    std::env::var_os("EFFECTCRAFT_NO_HANDOFF").is_none()
+}
+
 fn bench_gpu(s: &Session, args: &Args) -> Result<(), Failure> {
     use effectcraft_render::Backend;
     let gpu = effectcraft_gpu::Gpu::try_headless().map_err(|e| Failure::Error(format!("--gpu: no usable GPU adapter ({e})")))?;
+    gpu.set_handoff(handoff_env());
     let n = args.num("--n")?.unwrap_or(10.0).max(1.0) as usize;
     // Every comp, plus an adjustment-layer comp built for the benchmark (the main comp under a
     // full-frame adjustment layer with a GPU effect stack) and an Advanced 3D comp (`--adv3d`:

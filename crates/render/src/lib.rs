@@ -468,6 +468,14 @@ pub trait Accelerator: Send + Sync {
     /// and renders the frame again, and the steps whose results arrived are served from them.
     /// The frame is done after a pass with no miss. `frame_begin` forgets the previous frame's
     /// results, `pass_begin` clears the miss. Synchronous accelerators never miss.
+    /// [`Accelerator::effects`], also returning the accelerator's device copy of the result
+    /// (for [`Accelerator::adopt`]). The caller owns the hold: the accelerator keeps nothing.
+    fn effects_held(&self, chain: &[FxStep], buf: &Buf, levels: Option<f32>) -> Option<(Buf, Option<ChainHold>)> {
+        self.effects(chain, buf, levels).map(|b| (b, None))
+    }
+    /// `buf` is, unchanged, the result `hold` was made for (the renderer checks
+    /// [`ChainHold::is_for`]): the accelerator may keep its device image for `buf`'s upload.
+    fn adopt(&self, _buf: &Arc<Buf>, _hold: ChainHold) {}
     fn frame_begin(&self) {}
     fn pass_begin(&self) {}
     fn pass_missed(&self) -> bool {
@@ -507,25 +515,56 @@ pub trait FxTarget {
     }
 }
 
+/// An accelerator's device-side copy of an effect chain's result ([`Accelerator::effects_held`]),
+/// tied to the pixels the result was read back into. Opaque to the renderer: the accelerator's
+/// device types live in crates that depend on this one, and an associated type would stop
+/// `dyn Accelerator`. Only the accelerator that made it can open it ([`ChainHold::into_inner`]).
+pub struct ChainHold {
+    pixels: usize,
+    len: usize,
+    image: Box<dyn std::any::Any + Send + Sync>,
+}
+
+impl ChainHold {
+    /// The device copy `image` of `out`, the buffer it was read back into.
+    pub fn new<T: std::any::Any + Send + Sync>(out: &Buf, image: T) -> ChainHold {
+        ChainHold { pixels: out.img.data.as_ptr() as usize, len: out.img.data.len(), image: Box::new(image) }
+    }
+    /// `buf` holds the very pixels this was made for (while `buf` lives its address cannot
+    /// be reused; a replaced or resized buffer has other pixels).
+    pub fn is_for(&self, buf: &Buf) -> bool {
+        self.pixels == buf.img.data.as_ptr() as usize && self.len == buf.img.data.len()
+    }
+    /// The device copy, when it is a `T`.
+    pub fn into_inner<T: std::any::Any>(self) -> Option<T> {
+        let image: Box<dyn std::any::Any> = self.image;
+        image.downcast::<T>().ok().map(|b| *b)
+    }
+}
+
 /// The CPU effect target (GPU chains go through [`Accelerator::effects`]: upload, readback).
 struct CpuFx<'a> {
     accel: Option<&'a dyn Accelerator>,
     levels: Option<f32>,
     buf: Option<Buf>,
+    /// The device copy of the buffer while it is, unchanged, the last GPU chain's result.
+    hold: Option<ChainHold>,
 }
 
 impl FxTarget for CpuFx<'_> {
     fn gpu(&mut self, steps: &[FxStep]) -> bool {
         let (Some(a), Some(b)) = (self.accel, &self.buf) else { return false };
-        match a.effects(steps, b, self.levels) {
-            Some(out) => {
+        match a.effects_held(steps, b, self.levels) {
+            Some((out, hold)) => {
                 self.buf = Some(out);
+                self.hold = hold;
                 true
             }
             None => false,
         }
     }
     fn cpu(&mut self, f: &mut dyn FnMut(Buf) -> Buf) {
+        self.hold = None;
         if let Some(b) = self.buf.take() {
             self.buf = Some(f(b));
         }
@@ -1101,13 +1140,27 @@ impl<'a> Renderer<'a> {
 
     /// Run the first `limit` effects of the layer's stack (by position; disabled ones count) on
     /// `buf` (layer space, or the comp below for an adjustment layer).
-    fn apply_effects_timed(&self, ctx: &EvalCtx, layer: &Layer, mut buf: Buf, adjustment: bool, limit: usize, timing: Option<&mut Vec<(String, f64)>>) -> Buf {
+    fn apply_effects_timed(&self, ctx: &EvalCtx, layer: &Layer, buf: Buf, adjustment: bool, limit: usize, timing: Option<&mut Vec<(String, f64)>>) -> Buf {
+        self.apply_effects_held(ctx, layer, buf, adjustment, limit, timing).0
+    }
+
+    /// [`Renderer::apply_effects_timed`], also returning the accelerator's device copy of the
+    /// result when the stack ended with a GPU chain that nothing changed afterwards.
+    fn apply_effects_held(
+        &self,
+        ctx: &EvalCtx,
+        layer: &Layer,
+        mut buf: Buf,
+        adjustment: bool,
+        limit: usize,
+        timing: Option<&mut Vec<(String, f64)>>,
+    ) -> (Buf, Option<ChainHold>) {
         // The comp below an adjustment layer is not in its layer space: it stays as it is.
         let origin = if adjustment { [0.0; 2] } else { ctx.effect_bounds(layer).1 };
         buf.rebase(origin);
-        let mut out = self.effect_space_stack(ctx, layer, buf, adjustment, limit, timing, origin);
+        let (mut out, hold) = self.effect_space_stack(ctx, layer, buf, adjustment, limit, timing, origin);
         out.rebase([-origin[0], -origin[1]]);
-        out
+        (out, hold)
     }
 
     /// [`Renderer::apply_effects_timed`] on a buffer already in effect space (measured from
@@ -1122,10 +1175,11 @@ impl<'a> Renderer<'a> {
         limit: usize,
         timing: Option<&mut Vec<(String, f64)>>,
         origin: [f64; 2],
-    ) -> Buf {
-        let mut t = CpuFx { accel: self.active_accel(), levels: self.pipe.levels, buf: Some(buf) };
+    ) -> (Buf, Option<ChainHold>) {
+        let mut t = CpuFx { accel: self.active_accel(), levels: self.pipe.levels, buf: Some(buf), hold: None };
         self.run_effect_stack(ctx, layer, adjustment, limit, timing, origin, &mut t);
-        t.buf.unwrap_or_else(|| Buf { img: Image::new(1, 1), offset: [0.0; 2], scale: self.opts.scale })
+        let hold = t.hold.take();
+        (t.buf.unwrap_or_else(|| Buf { img: Image::new(1, 1), offset: [0.0; 2], scale: self.opts.scale }), hold)
     }
 
     /// Run the layer's video effect stack on `target` (in effect space, measured from `origin`
@@ -1526,7 +1580,11 @@ impl<'a> Renderer<'a> {
             return Some((b, key));
         }
         let buf = self.masked_source(ctx, layer)?;
-        let buf = Arc::new(self.apply_effects_timed(ctx, layer, buf, false, usize::MAX, timing.map(|t| &mut t.effects)));
+        let (buf, hold) = self.apply_effects_held(ctx, layer, buf, false, usize::MAX, timing.map(|t| &mut t.effects));
+        let buf = Arc::new(buf);
+        if let (Some(h), Some(a)) = (hold.filter(|h| h.is_for(&buf)), self.active_accel()) {
+            a.adopt(&buf, h);
+        }
         if let (Some(c), Some(k)) = (self.cache_to_keep(), key) {
             c.insert(k, buf.clone());
         }
@@ -1549,7 +1607,7 @@ impl<'a> Renderer<'a> {
         let origin = ctx.effect_bounds(layer).1;
         buf.rebase(origin);
         if effects > 0 {
-            buf = self.effect_space_stack(ctx, layer, buf, false, effects, None, origin);
+            buf = self.effect_space_stack(ctx, layer, buf, false, effects, None, origin).0;
         }
         let buf = Arc::new(buf);
         if let (Some(c), Some(k)) = (self.cache_to_keep(), key) {
@@ -2425,3 +2483,24 @@ mod tests_nested;
 mod tests_paint;
 #[cfg(test)]
 mod tests_time;
+
+#[cfg(test)]
+mod chain_hold_tests {
+    use super::*;
+
+    /// A hold opens only for the buffer it was made for: a replaced or mutated-into-new buffer
+    /// (other pixels) is not adopted, and the wrong type does not open.
+    #[test]
+    fn chain_hold_matches_only_its_own_pixels() {
+        let out = Buf { img: Image::new(4, 4), offset: [0.0; 2], scale: 1.0 };
+        let h = ChainHold::new(&out, 7u32);
+        assert!(h.is_for(&out));
+        let copy = out.clone();
+        assert!(!h.is_for(&copy), "a copy has other pixels");
+        let mut grown = out.clone();
+        grown.img = Image::new(8, 8);
+        assert!(!h.is_for(&grown));
+        assert_eq!(ChainHold::new(&out, 7u32).into_inner::<u64>(), None);
+        assert_eq!(h.into_inner::<u32>(), Some(7));
+    }
+}

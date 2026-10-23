@@ -1071,3 +1071,110 @@ fn upload_cache_drops_textures_of_freed_buffers() {
     let kept = g.ctx.upload_entries();
     assert!(kept <= before + 1, "the upload cache kept {kept} textures of freed buffers (had {before})");
 }
+
+/// Restores the hand-off switch and the upload budget when a test ends, also when it panics
+/// (later tests share the device).
+struct Restore(&'static Gpu, bool, usize);
+
+impl Restore {
+    fn new(g: &'static Gpu) -> Restore {
+        Restore(g, g.ctx.handoff.load(std::sync::atomic::Ordering::Relaxed), g.ctx.upload_budget())
+    }
+}
+
+impl Drop for Restore {
+    fn drop(&mut self) {
+        self.0.ctx.handoff.store(self.1, std::sync::atomic::Ordering::Relaxed);
+        self.0.ctx.set_upload_budget(self.2);
+    }
+}
+
+/// A chain result handed to the upload cache ([`GpuContext::adopt_upload`]) may be read by
+/// another encoder (the frame's) that is not submitted yet: once its cache entry goes, the
+/// texture waits for that encoder, and the `Enc` that made it does not get it back at once.
+/// This is the check that fails without the fix on #1441 alone (the `Enc` that made the result
+/// is still alive here).
+///
+/// [`GpuContext::adopt_upload`]: crate::context::GpuContext::adopt_upload
+#[test]
+fn handed_off_texture_waits_for_open_encoders() {
+    let Some(g) = gpu() else { return };
+    let _restore = Restore::new(g);
+    let ctx = &g.ctx;
+    // One 300×300 entry fits (1.4 MB); a second one sweeps the first's dead entry.
+    ctx.set_upload_budget(2 << 20);
+    let mut owner = crate::context::Enc::new(ctx);
+    let img = owner.image(300, 300);
+    let handed = img.texture.clone();
+    let buf = Arc::new(effectcraft_effects::Buf { img: Image::new(300, 300), offset: [0.0; 2], scale: 1.0 });
+    ctx.adopt_upload(&buf, img);
+    // The frame's encoder records a read of the handed-off texture and stays open.
+    let mut frame = crate::context::Enc::new(ctx);
+    let seen = ctx.upload_buf(&buf).expect("uploads");
+    assert!(seen.texture == handed, "the adopted image was not used for the upload");
+    let _ = frame.encoder();
+    drop(seen);
+    drop(buf);
+    // Another layer's upload drops the dead entry (and with it the last hold on the texture).
+    let parked = ctx.escaped_parked();
+    let other = Arc::new(effectcraft_effects::Buf { img: Image::new(300, 300), offset: [0.0; 2], scale: 1.0 });
+    let _o = ctx.upload_buf(&other);
+    assert_eq!(ctx.escaped_parked(), parked + 1, "the handed-off texture was not released while the frame's encoder was open");
+    let again = owner.image(300, 300);
+    let elsewhere = crate::context::Enc::new(ctx).image(300, 300);
+    assert!(again.texture != handed, "the owner reused a handed-off texture while the frame's encoder may still read it");
+    assert!(elsewhere.texture != handed, "a handed-off texture left the pool before the frame's encoder submitted");
+    drop(frame);
+}
+
+/// The 4K hand-off bug: several layers with same-size blur + glow results whose layer buffers
+/// die mid-frame (a layer cache too small to keep them, an upload cache that sweeps dead
+/// entries). A handed-off result must not be overwritten by the next layer's chain before the
+/// frame's encoder reads it: the frame matches the CPU, and the render without the hand-off.
+///
+/// This covers the interaction with lent effect owners (#1523: every chain runs on the same
+/// owner, which would get the swept result back at once). With a fresh `Enc` per chain, as on
+/// #1441 alone, the owner is gone before the sweep and this passes even without the fix; there
+/// [`handed_off_texture_waits_for_open_encoders`] is the check.
+#[test]
+fn handoff_survives_layer_buffers_dying_mid_frame() {
+    let Some(g) = gpu() else { return };
+    let _restore = Restore::new(g);
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut s = Scene::new(BitDepth::Bpc8);
+    let colors = [[0.9, 0.2, 0.1], [0.1, 0.8, 0.2], [0.2, 0.3, 0.9], [0.9, 0.8, 0.1], [0.7, 0.1, 0.8]];
+    for (i, c) in colors.into_iter().enumerate() {
+        // Same size for every layer: each chain's result has the same padded size.
+        let mut l = s.solid(c, 200, 200);
+        set(&mut l, "transform/position", v3(10.0 + 18.0 * i as f64, 10.0 + 10.0 * i as f64));
+        set(&mut l, "transform/scale", Value::Vec3([20.0, 20.0, 100.0]));
+        s.effect(&mut l, "ec.blur.gaussian", &[("blurriness", n(6.0))]);
+        s.effect(&mut l, "ec.stylize.glow", &[("threshold", n(40.0)), ("radius", n(10.0)), ("intensity", n(1.5))]);
+        s.push(l);
+    }
+    let t = Tick::from_seconds_f64(0.5);
+    // Keeps nothing: every frame renders the layers again and their buffers die once placed.
+    let cache = effectcraft_render::cache::LayerCache::new(0);
+    let render = |handoff: bool| {
+        g.ctx.handoff.store(handoff, Relaxed);
+        let mut r = Renderer::new(&s.p, &Pattern, RenderOpts { backend: Backend::Gpu, ..opts() });
+        r.accel = Some(g);
+        r.cache = Some(&cache);
+        let img = g.render(&r, s.cid, t).expect("the GPU renders the frame");
+        g.ctx.clear_uploads();
+        img
+    };
+    // Holds one layer's result (252×252, 1 MB): each new one sweeps the dead entries of placed layers.
+    g.ctx.set_upload_budget(3 << 19);
+    let parked = g.ctx.escaped_parked();
+    let on = render(true);
+    // Not vacuous: handed-off results really died while the frame's encoder was open.
+    let swept = g.ctx.escaped_parked() - parked;
+    assert!(swept >= colors.len() as u64 - 1, "only {swept} handed-off results were released mid-frame");
+    let off = render(false);
+    let cpu = Renderer::new(&s.p, &Pattern, RenderOpts { backend: Backend::Cpu, ..opts() }).comp_frame_cpu(s.cid, t);
+    let mut d = diff(&cpu, &on, tolerance(BitDepth::Bpc8));
+    d.quantized = true;
+    check("hand-off with dying layer buffers vs CPU", Some(d), 0.0);
+    assert!(on.data == off.data, "the hand-off changed the frame (max diff {})", diff(&off, &on, 0.0).max * 255.0);
+}

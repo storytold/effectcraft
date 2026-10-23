@@ -48,6 +48,12 @@ impl GBuf {
 /// Run a chain of GPU effects (one upload, one readback), quantising after each when `levels`
 /// is set. `None` when anything cannot run here.
 pub(crate) fn run_chain(e: &mut Enc, chain: &[FxStep], buf: &Buf, levels: Option<f32>) -> Option<Buf> {
+    run_chain_held(e, chain, buf, levels).map(|(b, _)| b)
+}
+
+/// [`run_chain`], also returning the result's device image when the hand-off is on (the
+/// caller owns it; nothing is kept here).
+pub(crate) fn run_chain_held(e: &mut Enc, chain: &[FxStep], buf: &Buf, levels: Option<f32>) -> Option<(Buf, Option<GpuImage>)> {
     if !e.g.can_readback() || buf.img.is_empty() {
         return None;
     }
@@ -56,10 +62,10 @@ pub(crate) fn run_chain(e: &mut Enc, chain: &[FxStep], buf: &Buf, levels: Option
     let key = deferred.as_ref().map(|_| crate::deferred::chain_key(chain, buf, levels));
     if let (Some(d), Some(k)) = (&deferred, key) {
         match d.lookup(k) {
-            crate::deferred::Lookup::Ready(r) => return r.and_then(readback_buf),
+            crate::deferred::Lookup::Ready(r) => return r.and_then(readback_buf).map(|b| (b, None)),
             crate::deferred::Lookup::InFlight => {
                 d.miss();
-                return Some(buf.clone());
+                return Some((buf.clone(), None));
             }
             crate::deferred::Lookup::Absent => {}
         }
@@ -80,16 +86,17 @@ pub(crate) fn run_chain(e: &mut Enc, chain: &[FxStep], buf: &Buf, levels: Option
         // Data the kernels fetched through the effect host missed meanwhile: not genuine.
         if Some(d.misses()) != misses {
             d.miss();
-            return Some(buf.clone());
+            return Some((buf.clone(), None));
         }
         // The placeholder (the input) keeps this pass cheap; the next pass gets the result.
         return match e.read_keyed(&b.img, k, b.offset, b.scale) {
-            Some(r) => r.and_then(readback_buf),
-            None => Some(buf.clone()),
+            Some(r) => r.and_then(readback_buf).map(|b| (b, None)),
+            None => Some((buf.clone(), None)),
         };
     }
     let img = e.download(&b.img)?;
-    Some(Buf { img, offset: b.offset, scale: b.scale })
+    let held = e.g.handoff.load(std::sync::atomic::Ordering::Relaxed).then(|| b.img.clone());
+    Some((Buf { img, offset: b.offset, scale: b.scale }, held))
 }
 
 /// A layer buffer from deferred readback bytes (RGBA f32).
