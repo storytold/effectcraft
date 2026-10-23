@@ -859,11 +859,11 @@ dependencies = [
 [[package]]
 name = "collabcraft-share"
 version = "0.1.0"
-source = "git+https://github.com/wdunn001/collab-craft?rev=80bfaec#80bfaec3e581213bb5bcfedc42079525aec5a1af"
+source = "git+https://github.com/wdunn001/collab-craft?rev=3c77c3e#3c77c3e551e0597165f85d7921eeb68a4b4b289a"
 dependencies = [
- "craft-cloud",
+ "craft-cloud 0.1.0 (git+https://github.com/wdunn001/craft-libs?rev=6f0a6d2)",
  "craft-cloud-client",
- "craft-ui",
+ "craft-ui 0.1.0 (git+https://github.com/wdunn001/craft-libs?rev=6f0a6d2)",
  "wasm-bindgen-futures",
 ]
 
@@ -1032,11 +1032,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "craft-cloud"
+version = "0.1.0"
+source = "git+https://github.com/wdunn001/craft-libs?rev=6f0a6d2#6f0a6d2f4c24140d5ea988e5e40a85b2c6058401"
+dependencies = [
+ "serde",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "craft-cloud-client"
 version = "0.1.0"
-source = "git+https://github.com/wdunn001/collab-craft?rev=80bfaec#80bfaec3e581213bb5bcfedc42079525aec5a1af"
+source = "git+https://github.com/wdunn001/collab-craft?rev=3c77c3e#3c77c3e551e0597165f85d7921eeb68a4b4b289a"
 dependencies = [
- "craft-cloud",
+ "craft-cloud 0.1.0 (git+https://github.com/wdunn001/craft-libs?rev=6f0a6d2)",
  "craft-collab",
  "js-sys",
  "log",
@@ -1052,7 +1061,7 @@ dependencies = [
 [[package]]
 name = "craft-collab"
 version = "0.1.0"
-source = "git+https://github.com/wdunn001/collab-craft?rev=80bfaec#80bfaec3e581213bb5bcfedc42079525aec5a1af"
+source = "git+https://github.com/wdunn001/collab-craft?rev=3c77c3e#3c77c3e551e0597165f85d7921eeb68a4b4b289a"
 dependencies = [
  "js-sys",
  "log",
@@ -1081,10 +1090,19 @@ name = "craft-ui"
 version = "0.1.0"
 source = "git+https://github.com/wdunn001/craft-libs?rev=289d562#289d562cc6e8b567819aee51f759a78f41a65454"
 dependencies = [
- "craft-cloud",
+ "craft-cloud 0.1.0 (git+https://github.com/wdunn001/craft-libs?rev=289d562)",
  "egui",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "craft-ui"
+version = "0.1.0"
+source = "git+https://github.com/wdunn001/craft-libs?rev=6f0a6d2#6f0a6d2f4c24140d5ea988e5e40a85b2c6058401"
+dependencies = [
+ "craft-cloud 0.1.0 (git+https://github.com/wdunn001/craft-libs?rev=6f0a6d2)",
+ "egui",
 ]
 
 [[package]]
@@ -1750,8 +1768,8 @@ dependencies = [
 name = "effectcraft-ui-egui"
 version = "0.16.0"
 dependencies = [
- "craft-cloud",
- "craft-ui",
+ "craft-cloud 0.1.0 (git+https://github.com/wdunn001/craft-libs?rev=289d562)",
+ "craft-ui 0.1.0 (git+https://github.com/wdunn001/craft-libs?rev=289d562)",
  "effectcraft-color",
  "effectcraft-engine",
  "effectcraft-geom",
