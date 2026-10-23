@@ -481,8 +481,9 @@ fn fill_rgb(h: &Harness<'_, EffectcraftApp>) -> [u8; 3] {
 fn shape_drag_ghost_shows_the_tools_own_shape_while_dragging() {
     let (from, to) = ([140.0, 100.0], [400.0, 300.0]);
     let centre = [270.0, 200.0];
-    // 6 comp px inside the box's top-left corner: inside a rectangle, outside every other kind.
-    let corner = [146.0, 106.0];
+    // 4 comp px inside the box's top-left corner: inside a rectangle, outside every other kind
+    // (a rounded corner of 20 px arcs past this point).
+    let corner = [144.0, 104.0];
     for (tool, fills_corner) in [(Tool::Rectangle, true), (Tool::RoundedRect, false), (Tool::Ellipse, false), (Tool::Polygon, false), (Tool::Star, false)] {
         let mut h = harness();
         h.state_mut().ui.tool = tool;
