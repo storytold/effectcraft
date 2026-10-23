@@ -224,3 +224,33 @@ fn transform_motion_blur() {
         check(&format!("{label} half"), compare_at(&s, RenderOpts { scale: 0.5, ..opts() }, Tick::from_seconds_f64(0.3)), 0.0);
     }
 }
+
+/// #1605: Posterize matches the CPU exactly on every 8 bpc premultiplied colour and alpha. A
+/// straight value of 5/6 at level 4 rounds to exactly 2.5 on the CPU; drivers that fused the
+/// product into `round_away`'s subtraction (AMD) rounded it down a level.
+#[test]
+fn posterize_matches_the_cpu_on_every_8bpc_pair() {
+    let Some(g) = crate::tests::gpu() else { return };
+    let spec = effectcraft_effects::find("ec.stylize.posterize").unwrap();
+    let size = [256.0, 255.0];
+    let mut params =
+        effectcraft_effects::Params { values: spec.params.iter().map(|ps| (ps.id.to_string(), effectcraft_effects::default_value(ps, size))).collect() };
+    for level in [4.0, 7.0, 9.0] {
+        params.values.insert("level".into(), n(level));
+        // Pixel (x, a - 1): premultiplied colour min(x, a)/255 on alpha a/255.
+        let mut img = effectcraft_raster::Image::new(256, 255);
+        for a in 1..=255u32 {
+            for x in 0..256u32 {
+                let v = x.min(a) as f32 / 255.0;
+                img.data[((a - 1) * 256 + x) as usize] = [v, v, v, a as f32 / 255.0];
+            }
+        }
+        let buf = effectcraft_effects::Buf { img, offset: [0.0, 0.0], scale: 1.0 };
+        let ctx = || effectcraft_effects::EffectCtx { params: &params, time: 0.0, layer_size: size, seed: 1, adjustment: false, env: Default::default() };
+        let cpu = (spec.render)(&ctx(), buf.clone());
+        let out = effectcraft_render::Accelerator::effects(g, &[effectcraft_render::FxStep { spec, ctx: ctx() }], &buf, None).expect("the GPU runs the effect");
+        let bad: Vec<(usize, usize)> =
+            cpu.img.data.iter().zip(&out.img.data).enumerate().filter(|(_, (c, o))| c != o).map(|(i, _)| ((i % 256).min(i / 256 + 1), i / 256 + 1)).collect();
+        assert!(bad.is_empty(), "level {level}: {} (x, a) pairs differ from the CPU, first {:?}", bad.len(), &bad[..bad.len().min(8)]);
+    }
+}

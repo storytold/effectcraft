@@ -97,7 +97,7 @@ fn fxs_point(@builtin(global_invocation_id) gid: vec3<u32>) {
         case 1u: {
             let lv = P.f[0].x;
             let c = clamp(fxs_qdiv(px.xyz, a), vec3<f32>(0.0), vec3<f32>(1.0)) * lv;
-            let o = vec3<f32>(round_away(c.x), round_away(c.y), round_away(c.z)) / lv;
+            let o = vec3<f32>(div_rn(round_away(c.x), lv), div_rn(round_away(c.y), lv), div_rn(round_away(c.z), lv));
             textureStore(out, p, vec4<f32>(o * a, a));
         }
         case 2u: {

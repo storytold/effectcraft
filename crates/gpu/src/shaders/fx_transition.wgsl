@@ -229,7 +229,7 @@ fn ftr_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
     let co = P.f[0].w;
     let q = vec2<f32>(d.x * co + d.y * s, -d.x * s + d.y * co);
     let cs = P.f[1].x;
-    let cc = (floor(q / cs) + 0.5) * cs;
+    let cc = (floor(div_rn2(q, cs)) + 0.5) * cs;
     var o = clamp(ftr_metric(P.u[0].x, cc) / P.f[1].y, 0.0, 1.0);
     if (P.u[0].y != 0u) {
         o = 1.0 - o;

@@ -157,13 +157,30 @@ fn powz(x: f32, y: f32) -> f32 {
     return pow(x, y);
 }
 
-// Rust's f32::round (half away from zero; WGSL's round() is half to even).
+// `x / y` rounded like the CPU's (IEEE) division. WGSL's `/` may be off by 2.5 ULP (AMD and
+// Intel are; NVIDIA happens not to be), which moves a value sitting exactly on a step, such as
+// 7 / 3.5, to the wrong side of the following `floor` or rounding (#1605). One fma-corrected
+// step fixes the quotient (the remainder `x - q·y` is exact in an fma).
+fn div_rn(x: f32, y: f32) -> f32 {
+    let q = x / y;
+    let r = fma(-q, y, x);
+    return fma(r / y, 1.0, q);
+}
+
+fn div_rn2(x: vec2<f32>, y: f32) -> vec2<f32> {
+    return vec2<f32>(div_rn(x.x, y), div_rn(x.y, y));
+}
+
+// Rust's f32::round (half away from zero; WGSL's round() is half to even). Decided by comparing
+// `x` with `t ± 0.5` (exact for integer `t`) rather than subtracting: drivers may fuse a product
+// that feeds `x - t` into one fma (AMD does), skipping the product's rounding, so `5/6 · 3`,
+// which rounds to exactly 2.5 on the CPU, came out 0.49999994 above 2 and rounded down (#1605).
 fn round_away(x: f32) -> f32 {
     let t = trunc(x);
-    if (abs(x - t) >= 0.5) {
-        return t + sign(x);
+    if (x >= 0.0) {
+        return select(t, t + 1.0, x >= t + 0.5);
     }
-    return t;
+    return select(t, t - 1.0, x <= t - 0.5);
 }
 
 // f32::rem_euclid(1.0).
