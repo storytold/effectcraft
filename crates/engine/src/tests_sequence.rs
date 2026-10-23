@@ -179,14 +179,34 @@ fn interpret_footage_start_timecode_relabels_source_time() {
 }
 
 #[test]
-fn replace_footage_and_reload_keep_sequences() {
+fn replace_footage_keeps_a_still_a_still() {
     let dir = folder(&RUN);
     let mut s = session();
     let item = s.execute("file.import", json!({"paths": [at(&dir, "shot_0001.png")], "sequence": false})).unwrap()["items"][0].clone();
     s.state.project_selection = vec![ItemId(item.as_u64().unwrap())];
+    // Replacing with a numbered still does not silently turn the item into a sequence (#2073).
     s.execute("file.replaceFootage", json!({"path": at(&dir, "shot_0004.png")})).unwrap();
     let (name, f) = footage(&s, &item);
-    assert_eq!((name.as_str(), f.sequence.len()), ("shot_[0001-0005].png", 4));
+    assert_eq!((name.as_str(), f.kind), ("shot_0004.png", FootageKind::Still));
+    // JSON null is unspecified, not "on": the still stays a still.
+    s.execute("file.replaceFootage", json!({"path": at(&dir, "shot_0004.png"), "sequence": null})).unwrap();
+    let (name, f) = footage(&s, &item);
+    assert_eq!((name.as_str(), f.kind), ("shot_0004.png", FootageKind::Still));
+    // Asking for the run still brings it.
+    s.execute("file.replaceFootage", json!({"path": at(&dir, "shot_0004.png"), "sequence": true})).unwrap();
+    let (name, f) = footage(&s, &item);
+    assert_eq!((name.as_str(), f.kind, f.sequence.len()), ("shot_[0001-0005].png", FootageKind::Sequence, 4));
+}
+
+#[test]
+fn replace_footage_and_reload_keep_sequences() {
+    let dir = folder(&RUN);
+    let mut s = session();
+    let item = s.execute("file.import", json!({"paths": [at(&dir, "shot_0001.png")], "sequence": true})).unwrap()["items"][0].clone();
+    s.state.project_selection = vec![ItemId(item.as_u64().unwrap())];
+    s.execute("file.replaceFootage", json!({"path": at(&dir, "shot_0004.png")})).unwrap();
+    let (name, f) = footage(&s, &item);
+    assert_eq!((name.as_str(), f.kind, f.sequence.len()), ("shot_[0001-0005].png", FootageKind::Sequence, 4));
     // Reload finds a new frame and keeps the interpretation.
     s.execute("file.interpretFootage", json!({"items": [item], "frameRate": 12, "startTimecode": 2})).unwrap();
     std::fs::write(at(&dir, "shot_0003.png"), b"").unwrap();

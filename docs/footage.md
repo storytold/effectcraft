@@ -110,9 +110,10 @@ vectors, positions and IDs are never the picture. EXtractoR reads every other la
 Importing a layered file as a composition refreshes the decoded sources used by its layers,
 including files overwritten at the same path and byte size.
 
-- **File ▸ Replace Footage ▸ File…** (Ctrl+H) points the item at another file. Pick a numbered
-  file to replace it with that file's whole sequence (`file.replaceFootage {"path": …,
-  "sequence": false}` for one frame).
+- **File ▸ Replace Footage ▸ File…** (Ctrl+H) points the item at another file. A still stays a
+  still, and a sequence item keeps bringing the new numbered file's run; pass
+  `sequence: true` to bring a numbered still's whole run (`file.replaceFootage {"path": …,
+  "sequence": true}`), or `sequence: false` for one frame.
 - **Replace with Precomposition (used N times)**, right-clicking a footage item or solid in the
   Project panel, puts the item in a new composition of its size,
   pixel aspect and frame rate, in the same folder, and switches every layer in every composition
