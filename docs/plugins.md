@@ -161,7 +161,8 @@ author, source, params}]}`.
 * **Parameters** arrive flattened to `f64`s in the order they are declared: slider, angle,
   checkbox (0 / 1) and popup (0-based index) take one value, point two (already in **buffer
   pixels**), colour four (RGBA 0–1).
-* **Time** is layer time in seconds.
+* **Time** is layer time in seconds. A plug-in effect is rendered again at every frame, so its
+  output may depend on the time alone, without an animated parameter.
 * Rendering must be **deterministic** and may run on several threads at once (a WebAssembly
   plug-in gets one instance per thread).
 * A failed render (an error code, a trap, running out of fuel) leaves the frame unchanged.

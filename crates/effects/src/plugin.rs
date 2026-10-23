@@ -246,6 +246,11 @@ pub fn plugins() -> Vec<&'static EffectSpec> {
     plugin_specs().read().map(|v| v.clone()).unwrap_or_default()
 }
 
+/// Is `id` a registered plug-in effect?
+pub fn is_plugin(id: &str) -> bool {
+    plugin_specs().read().unwrap_or_else(std::sync::PoisonError::into_inner).iter().any(|s| s.id == id)
+}
+
 /// The plug-in behind a registered effect id.
 pub fn plugin(id: &str) -> Option<Arc<dyn EffectPlugin>> {
     SLOTS.iter().filter_map(|s| s.get()).find(|p| p.manifest().id == id).cloned()

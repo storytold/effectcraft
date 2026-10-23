@@ -1229,11 +1229,12 @@ pub const TIME_DEPENDENT: &[&str] = &[
     object_matte::ID,
 ];
 
-/// See [`TIME_DEPENDENT`].
+/// See [`TIME_DEPENDENT`]. Plug-in effects count as time-dependent: they get the layer time in
+/// `render` and nothing tells the renderer whether they read it.
 pub fn is_time_dependent(id: &str) -> bool {
     // Simulations replay from layer time 0, so every frame differs even when the defaults
     // happen to look static at the test's two sample times.
-    id.starts_with("ec.sim.") || TIME_DEPENDENT.contains(&id)
+    id.starts_with("ec.sim.") || TIME_DEPENDENT.contains(&id) || plugin::is_plugin(id)
 }
 
 /// Run an effect on a buffer.

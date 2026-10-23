@@ -66,6 +66,49 @@ fn rust_plugins_apply_by_id() {
     assert!(s.execute("effect.list", json!({"filter": "swap red"})).unwrap().as_array().unwrap().len() == 1);
 }
 
+/// Fills the frame with a grey that follows the layer time it is given.
+struct Clock {
+    m: PluginManifest,
+}
+
+impl EffectPlugin for Clock {
+    fn manifest(&self) -> &PluginManifest {
+        &self.m
+    }
+    fn render(&self, frame: &mut PluginFrame, _params: &PluginParams, time: f64) -> Result<(), String> {
+        let v = time.clamp(0.0, 1.0) as f32;
+        for p in frame.pixels.iter_mut() {
+            *p = [v, v, v, 1.0];
+        }
+        Ok(())
+    }
+}
+
+/// A plug-in gets the layer time in `render`, so the layer cache must not reuse one frame for
+/// every time when its parameters are static (#1977).
+#[test]
+fn time_dependent_plugins_render_each_frame() {
+    let m = PluginManifest {
+        api: 1,
+        id: "org.test.clock".into(),
+        name: "Clock Grey".into(),
+        category: "Test Plug-ins".into(),
+        version: "1".into(),
+        author: String::new(),
+        description: String::new(),
+        params: vec![],
+    };
+    register_plugin(Arc::new(Clock { m })).unwrap();
+    let (mut s, l) = setup();
+    s.execute("effect.apply", json!({"layer": l, "effect": "org.test.clock"})).unwrap();
+    let cid = s.active_comp_id().unwrap();
+    let at = |t: f64| s.render(cid, Tick::from_seconds_f64(t), Default::default()).get(20, 10);
+    let (a, b, c) = (at(0.0), at(0.5), at(0.0));
+    assert!(a[0] < 0.01, "{a:?}");
+    assert!((b[0] - 0.5).abs() < 0.02, "the frame at 0.5 s reused the frame at 0 s: {b:?}");
+    assert!(c[0] < 0.01, "{c:?}");
+}
+
 /// Build the example plug-in (skipped when the wasm32 target isn't installed).
 fn build_example() -> Option<std::path::PathBuf> {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/plugins/posterize-bands");
