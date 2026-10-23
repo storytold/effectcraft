@@ -119,3 +119,35 @@ fn dragging_bar_ends_trims_in_and_out() {
     let (i, o, s) = timing(&h, pre);
     assert!((i - 3.0).abs() < 1e-6 && (o - 8.0).abs() < 1.5 / 30.0 && s.abs() < 1e-6, "out extended to ~8 s, not slipped: in {i} out {o} start {s}");
 }
+
+/// Shift-dragging a bar end snaps it to another layer's In / Out point (#1828); without Shift it doesn't.
+#[test]
+fn shift_dragging_a_bar_end_snaps_to_other_layers() {
+    for shift in [false, true] {
+        let (mut h, solid, _) = harness();
+        let b = bar(&h, solid);
+        let pps = b.width() as f64 / 4.0;
+        let y = b.center().y;
+        let from = pos2(b.max.x - 2.0, y);
+        // The precomp ends at 7 s; end the drag 4 px short of that.
+        let to = from + vec2((pps - 4.0) as f32, 0.0);
+        let mods = if shift { Modifiers::SHIFT } else { Modifiers::NONE };
+        h.event(Event::ModifiersChanged(mods));
+        h.event(Event::PointerMoved(from));
+        h.step();
+        h.event(Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: mods });
+        h.step();
+        for k in 1..=10 {
+            h.event(Event::PointerMoved(from + (to - from) * (k as f32 / 10.0)));
+            h.step();
+        }
+        h.event(Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: mods });
+        h.run_steps(3);
+        let (_, o, _) = timing(&h, solid);
+        if shift {
+            assert!((o - 7.0).abs() < 1e-6, "shift-drag snaps the Out point to 7 s: out {o}");
+        } else {
+            assert!((o - 7.0).abs() > 1e-3, "no snap without Shift: out {o}");
+        }
+    }
+}

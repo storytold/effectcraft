@@ -2366,7 +2366,35 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                             let frames = ((acc as f64 / pps) / fd).trunc() as i64;
                             if frames != 0 {
                                 acc -= (frames as f64 * fd * pps) as f32;
-                                let d = frames as f64 * fd;
+                                let mut d = frames as f64 * fd;
+                                if shift {
+                                    // Shift snaps the moved edges to the current time, markers, keys and other layers' in / out points (#1828).
+                                    let (li, lo) = (layer.in_point.seconds(), layer.out_point.seconds());
+                                    let moving = match kind {
+                                        "move" => vec![li + d, lo + d],
+                                        "in" => vec![li + d],
+                                        _ => vec![lo + d],
+                                    };
+                                    let own: Vec<f64> = comp
+                                        .layers
+                                        .iter()
+                                        .filter(|l| l.id == layer.id || (is_sel && selected.contains(&l.id)))
+                                        .flat_map(|l| [l.in_point.seconds(), l.out_point.seconds()])
+                                        .collect();
+                                    let mut cands = snap_candidates(&comp, &rows);
+                                    cands.retain(|c| !own.iter().any(|o| (o - c).abs() < 1e-9));
+                                    cands.push(app.session.time().seconds());
+                                    let tol = 8.0 / pps.max(1e-6);
+                                    let corr = moving
+                                        .iter()
+                                        .map(|t| snap_time(&cands, *t, tol) - t)
+                                        .filter(|c| *c != 0.0)
+                                        .min_by(|x, y| x.abs().total_cmp(&y.abs()))
+                                        .unwrap_or(0.0);
+                                    if fd > 0.0 {
+                                        d += (corr / fd).round() * fd;
+                                    }
+                                }
                                 // Moving or trimming a selected layer acts on the whole
                                 // selection; each layer trims from its own in/out point.
                                 let targets = if is_sel { json!(selected.iter().map(|l| l.0).collect::<Vec<_>>()) } else { json!([layer.id.0]) };
