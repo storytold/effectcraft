@@ -1,6 +1,6 @@
 use super::item::{ItemId, LayerId};
 use super::settings::Marker;
-use super::{BlendMode, Deserialize, Label, ParamUi, PropGroup, Property, Serialize, Tick};
+use super::{BlendMode, Deserialize, GroupKind, Label, Node, ParamUi, PropGroup, Property, Serialize, Tick, Value};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LightKind {
@@ -326,6 +326,36 @@ pub struct Layer {
 }
 
 impl Layer {
+    /// The layers this layer reads: its parent, track matte, layer parameters (Displacement Map,
+    /// Audio Spectrum's Audio Layer…) and tracker targets.
+    pub fn referenced_layers(&self) -> Vec<LayerId> {
+        fn walk(g: &PropGroup, depth: usize, out: &mut Vec<LayerId>) {
+            if depth > 64 {
+                return;
+            }
+            if let GroupKind::Tracker { settings } = &g.kind
+                && let Some(t) = settings.target
+            {
+                out.push(t);
+            }
+            for c in &g.children {
+                match c {
+                    Node::Prop(p) => {
+                        for v in std::iter::once(&p.value).chain(p.keys.iter().map(|k| &k.value)) {
+                            if let Value::Layer(Some(id)) = v {
+                                out.push(LayerId(*id));
+                            }
+                        }
+                    }
+                    Node::Group(sub) => walk(sub, depth + 1, out),
+                }
+            }
+        }
+        let mut out: Vec<LayerId> = self.parent.iter().copied().chain(self.track_matte.iter().map(|m| m.layer)).collect();
+        walk(&self.props, 0, &mut out);
+        out
+    }
+
     pub fn is_active_at(&self, t: Tick) -> bool {
         t >= self.in_point && t < self.out_point
     }

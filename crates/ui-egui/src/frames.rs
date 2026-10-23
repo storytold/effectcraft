@@ -318,6 +318,13 @@ pub fn comp_content(project: &Project, comp: ItemId) -> u64 {
     comp_content_with(project, comp, project, |_, c| c)
 }
 
+/// Frame ranges (inclusive) of `new` that may draw differently than `old` ([`Comp::changed_spans`]),
+/// a frame wider either side for rounding.
+fn dirty_frames(old: &Comp, new: &Comp) -> Option<Vec<(i64, i64)>> {
+    let fr = new.frame_rate;
+    Some(new.changed_spans(old, false)?.into_iter().map(|(s, e)| (fr.frame_at(s).saturating_sub(1), fr.frame_at(e).saturating_add(1))).collect())
+}
+
 /// [`comp_content`] with each comp's version selected for both its sources and its address.
 /// Sources removed by undo are read from `base`.
 fn comp_content_with<'a>(project: &'a Project, comp: ItemId, base: &'a Project, version: impl Fn(ItemId, &'a Arc<Comp>) -> &'a Arc<Comp>) -> u64 {
@@ -776,20 +783,20 @@ impl Frames {
         {
             return (*base_id, Some(base.clone()));
         }
-        // Only layers of this comp changed: its frames outside their span (and a frame either
-        // side for rounding) keep drawing the same pixels, so a cut or trim recaches only the
-        // layers it touched (#1641).
-        if let Some((base_id, base)) = bases.get(&comp.0)
+        // Only layers of this comp changed: its frames outside the spans they reach (and a frame
+        // either side for rounding) keep drawing the same pixels, so a nudge, cut or trim recaches
+        // only the frames it touched (#1641). An expression anywhere can read any layer at any time.
+        if !markers
+            && let Some((base_id, base)) = bases.get(&comp.0)
             && let (Some(old), Some(new)) = (base.comp(comp), project.comp(comp))
             && comp_content_with(project, comp, base, |id, c| match base.item(id).map(|i| &i.kind) {
                 Some(ItemKind::Comp(b)) if id == comp || Arc::ptr_eq(b, c) || b.same_pixels_with(c, markers) => b,
                 _ => c,
             }) == *base_id
-            && let Some((s, e)) = new.changed_span(old)
+            && let Some(dirty) = dirty_frames(old, new)
             && let Ok(mut cache) = self.cache.lock()
         {
-            let (first, last) = (new.frame_rate.frame_at(s).saturating_sub(1), new.frame_rate.frame_at(e).saturating_add(1));
-            cache.carry(*base_id, plain, |f| f < first || f > last);
+            cache.carry(*base_id, plain, |f| !dirty.iter().any(|(lo, hi)| (*lo..=*hi).contains(&f)));
         }
         if bases.len() > MAX_KEEPERS {
             bases.clear();
