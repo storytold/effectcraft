@@ -252,6 +252,40 @@ pub fn warning(g: &PropGroup, eval: &mut dyn FnMut(&Property) -> Value) -> Optio
     ocio::warning(effect, &flatten_params(g, eval))
 }
 
+/// The widest and tallest an effect may grow a buffer to ([`Buf::pad_xy`]), in pixels.
+pub const MAX_PADDED_SIDE: u32 = 16384;
+
+/// The most pixels an effect may grow a buffer to ([`Buf::pad_xy`]): 64 Mpx, 1 GiB of RGBA float,
+/// so the effect's own copies and scratch buffers still fit in memory.
+pub const MAX_PADDED_PIXELS: u64 = 1 << 26;
+
+/// The growth ([`Buf::pad_xy`]) a `w` × `h` buffer asked to grow by `px` sideways and `py` up and
+/// down gets: both shrunk by the same factor until the result is at most [`MAX_PADDED_SIDE`] a
+/// side and [`MAX_PADDED_PIXELS`] in all. A buffer that is that large already doesn't grow.
+pub fn padding_within(w: u32, h: u32, px: u32, py: u32) -> (u32, u32) {
+    let room = |side: u32| MAX_PADDED_SIDE.saturating_sub(side) / 2;
+    let (px, py) = (px.min(room(w)), py.min(room(h)));
+    let area = |px: u32, py: u32| (u64::from(w) + 2 * u64::from(px)) * (u64::from(h) + 2 * u64::from(py));
+    if area(px, py) <= MAX_PADDED_PIXELS {
+        return (px, py);
+    }
+    let (wf, hf, xf, yf) = (f64::from(w), f64::from(h), f64::from(px), f64::from(py));
+    let rest = MAX_PADDED_PIXELS as f64 - wf * hf;
+    if rest <= 0.0 {
+        return (0, 0);
+    }
+    // The largest k with (w + 2k·px)(h + 2k·py) ≤ the budget: 4·px·py·k² + 2(w·py + h·px)·k = rest.
+    let (a, b) = (4.0 * xf * yf, 2.0 * (wf * yf + hf * xf));
+    let k = if a > 0.0 { (-b + (b * b + 4.0 * a * rest).sqrt()) / (2.0 * a) } else { rest / b };
+    let k = k.clamp(0.0, 1.0);
+    let (mut px, mut py) = ((xf * k).floor() as u32, (yf * k).floor() as u32);
+    // (rounding can land a pixel over)
+    while area(px, py) > MAX_PADDED_PIXELS && (px > 0 || py > 0) {
+        (px, py) = (px.saturating_sub(1), py.saturating_sub(1));
+    }
+    (px, py)
+}
+
 /// A layer image in flight: point `p` sits at pixel `p * scale + offset`. Points are in layer
 /// space, or in effect space while the layer's effects run (see [`Buf::rebase`]).
 #[derive(Clone, Debug, Default)]
@@ -288,12 +322,19 @@ impl Buf {
     }
     /// Grow by `pad` transparent pixels on every side.
     pub fn pad(&mut self, pad: u32) {
-        if pad == 0 {
+        self.pad_xy(pad, pad);
+    }
+    /// Grow by `px` transparent pixels on the left and right and `py` above and below, within
+    /// [`padding_within`]'s limits: an effect asked to grow further (a huge blur) is cut off there
+    /// rather than asking for more memory than there is, which aborts the app.
+    pub fn pad_xy(&mut self, px: u32, py: u32) {
+        let (px, py) = padding_within(self.img.width, self.img.height, px, py);
+        if px == 0 && py == 0 {
             return;
         }
-        self.img = self.img.padded(pad);
-        self.offset[0] += pad as f64;
-        self.offset[1] += pad as f64;
+        self.img = self.img.padded_xy(px, py);
+        self.offset[0] += px as f64;
+        self.offset[1] += py as f64;
     }
 }
 
@@ -1259,6 +1300,32 @@ pub(crate) fn run_fx(id: &str, vals: &[(&str, Value)], img: Image, time: f64, en
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// No effect grows a buffer past [`MAX_PADDED_SIDE`] a side or [`MAX_PADDED_PIXELS`] in all: a
+    /// huge growth asked for more memory than there is, and the failed allocation aborted the
+    /// app. The limits are checked without making such a buffer.
+    #[test]
+    fn padding_stops_at_the_largest_buffer() {
+        let mut b = Buf { img: Image::filled(100, 40, [1.0; 4]), offset: [0.0, 0.0], scale: 1.0 };
+        b.pad_xy(10, 3);
+        assert_eq!((b.img.width, b.img.height, b.offset), (120, 46, [10.0, 3.0]));
+        assert_eq!(b.img.get(10, 3), [1.0; 4]);
+        let grown = |w: u32, h: u32, (px, py): (u32, u32)| (u64::from(w) + 2 * u64::from(px), u64::from(h) + 2 * u64::from(py));
+        let ok = |(gw, gh): (u64, u64)| gw <= u64::from(MAX_PADDED_SIDE) && gh <= u64::from(MAX_PADDED_SIDE) && gw * gh <= MAX_PADDED_PIXELS;
+        for (w, h, px, py) in [(120, 46, u32::MAX, u32::MAX), (1920, 1080, 9001, 9001), (1920, 1080, 100_001, 1001), (8, 8, 4097, 4097), (1, 1, u32::MAX, 0)] {
+            let pad = padding_within(w, h, px, py);
+            let (gw, gh) = grown(w, h, pad);
+            assert!(ok((gw, gh)), "{w}×{h} + {px},{py} → {pad:?}: {gw}×{gh}");
+            // As large as the limits allow: a pixel more on each side would be over.
+            assert!(!ok(grown(w, h, (pad.0 + 1, pad.1 + 1))) || pad == (px, py), "{w}×{h} + {px},{py} → {pad:?}");
+        }
+        // Small growth is untouched; a wide one stops at the widest buffer.
+        assert_eq!(padding_within(1920, 1080, 300, 300), (300, 300));
+        assert_eq!(padding_within(1920, 1080, 100_001, 1001), (7232, 1001));
+        // Already as large as allowed: no growth.
+        assert_eq!(padding_within(16384, 2, 5, 0), (0, 0));
+        assert_eq!(padding_within(8192, 8192, 1, 1), (0, 0));
+    }
 
     #[test]
     fn run_fx_passthrough() {
