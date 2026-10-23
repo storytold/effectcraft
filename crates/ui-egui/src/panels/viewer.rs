@@ -1962,8 +1962,9 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     let _ = app.session.execute("mask.convertVertex", json!({"layer": h.layer.0, "mask": h.mask, "index": h.index}));
                 } else if let Some(k) = ov::motion_key_at(&key_hits, pos) {
                     // A key showing direction handles becomes Linear; one without, Auto Bezier.
+                    // Separated X / Y Position have no spatial interpolation to convert.
                     let curved = key_hits.iter().any(|h| h.tangent.is_some() && h.layer == k.layer && h.prop == k.prop && h.time == k.time);
-                    if select_motion_key(app, &k) {
+                    if k.axes.is_none() && select_motion_key(app, &k) {
                         let spatial = if curved { "linear" } else { "autoBezier" };
                         let _ = app.session.execute("keys.interpolation", json!({"spatial": spatial}));
                     }
@@ -2224,14 +2225,18 @@ fn draw_rigs(
 /// layer, or a new shape layer when nothing is selected. The placed point snaps.
 /// Add a Position keyframe at a motion path's frame, keeping the path where it is.
 fn add_motion_key(app: &mut EffectcraftApp, f: ov::PathFrame) {
-    if let Err(e) = app.session.execute("prop.addKey", json!({"layer": f.layer.0, "prop": f.prop, "time": f.time.seconds()})) {
-        app.ui.status = e.to_string();
+    // Separated dimensions: the key goes on X and Y Position.
+    for prop in f.axes.map_or_else(|| vec![f.prop], Vec::from) {
+        if let Err(e) = app.session.execute("prop.addKey", json!({"layer": f.layer.0, "prop": prop, "time": f.time.seconds()})) {
+            app.ui.status = e.to_string();
+        }
     }
 }
 
-/// Select only the motion path's keyframe `k` (what the vertex tools act on).
+/// Select only the motion path's keyframe `k` (what the vertex tools act on; with separated
+/// dimensions, the X and Y Position keys at its time).
 fn select_motion_key(app: &mut EffectcraftApp, k: &ov::KeyHit) -> bool {
-    app.session.execute("keys.select", json!({"keys": [{"layer": k.layer.0, "prop": k.prop, "time": k.time.seconds()}]})).is_ok()
+    app.session.execute("keys.select", json!({"keys": k.select_entries()})).is_ok()
 }
 
 /// The pointer for a Pen slot tool: the tool's own pen, the Pen showing Add Vertex's over a path
