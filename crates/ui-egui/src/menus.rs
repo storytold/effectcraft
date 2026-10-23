@@ -1440,9 +1440,11 @@ fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) -> Option<Res
         };
         let tx = app.dialog_answers.0.clone();
         let answer = crate::DialogAnswer { command: id.to_string(), key, params: params.clone(), paths: Vec::new() };
+        let open = OpenDialog::new(&app.native_dialogs);
         spawn(
             request,
             Box::new(move |paths| {
+                drop(open);
                 let _ = tx.send(crate::DialogAnswer { paths, ..answer });
             }),
         );
@@ -1472,6 +1474,23 @@ fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) -> Option<Res
     };
     let Some(v) = picked else { return Some(Ok(Value::Null)) };
     Some(run_with_picked(app, id, key, params, v))
+}
+
+/// A native file dialog on screen, counted in [`EffectcraftApp::native_dialogs`] until it is
+/// dropped (answered, cancelled or discarded unanswered).
+struct OpenDialog(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl OpenDialog {
+    fn new(count: &std::sync::Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        OpenDialog(count.clone())
+    }
+}
+
+impl Drop for OpenDialog {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 /// The dialog's answer as the command's `key` parameter (`None`: cancelled).
@@ -1618,6 +1637,12 @@ pub(crate) fn entry_checked(app: &EffectcraftApp, e: &MenuEntry) -> Option<bool>
 }
 
 pub(crate) fn entry_enabled(app: &EffectcraftApp, e: &MenuEntry) -> bool {
+    // A disabled macOS menu item lets its key through, so a native file dialog gets Cmd+A, C, V
+    // (and Z) instead of the Edit menu acting on the window behind it (#1986). Only macOS: the
+    // native menu bar owns the keys there, and Linux's portal dialog is a separate window.
+    if cfg!(target_os = "macos") && e.command.starts_with("edit.") && app.native_dialogs.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+        return false;
+    }
     if app.ui.focused == PanelKind::Project {
         match e.command.as_str() {
             "edit.duplicate" => {
@@ -2556,6 +2581,38 @@ mod tests {
         app.run_dialog_answers();
         assert!(!dir.join("Frame.png").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// While a native file dialog is up, the Edit menu is disabled on macOS so the OS hands Cmd+A
+    /// to the dialog instead of selecting in the Project panel behind it (#1986). Elsewhere the
+    /// menu stays as it was.
+    #[test]
+    fn edit_menu_is_disabled_while_a_file_dialog_is_open() {
+        use std::sync::{Arc, Mutex};
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.session.execute("file.openDemoProject", json!({})).unwrap();
+        app.ui.focused = PanelKind::Project;
+        let ctx = egui::Context::default();
+        let entries = effectcraft_engine::menus::entries();
+        let select_all = entries.iter().map(|(_, e)| e).find(|e| e.command == "edit.selectAll").expect("Select All is in the menu");
+        let import = entries.iter().map(|(_, e)| e).find(|e| e.command == "file.import").expect("Import is in the menu");
+        assert!(entry_enabled(&app, select_all));
+        let steps_aside = cfg!(target_os = "macos");
+        let pending: Arc<Mutex<Vec<crate::DialogDone>>> = Arc::default();
+        let queue = pending.clone();
+        app.hooks.file_dialog_async = Some(Box::new(move |_, done| queue.lock().unwrap().push(done)));
+        invoke(&mut app, &ctx, "file.importMultiple", json!({})).unwrap();
+        assert_eq!(!entry_enabled(&app, select_all), steps_aside, "Cmd+A must reach the dialog on macOS only");
+        assert!(entry_enabled(&app, import), "only the Edit menu steps aside");
+        // Cancelled: the menu is back.
+        let done = pending.lock().unwrap().pop().expect("a dialog was shown");
+        done(Vec::new());
+        assert!(entry_enabled(&app, select_all));
+        // Discarded unanswered: the menu is back too.
+        invoke(&mut app, &ctx, "file.importMultiple", json!({})).unwrap();
+        assert_eq!(!entry_enabled(&app, select_all), steps_aside);
+        drop(pending.lock().unwrap().pop());
+        assert!(entry_enabled(&app, select_all));
     }
 
     #[test]

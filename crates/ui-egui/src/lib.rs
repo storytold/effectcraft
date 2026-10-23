@@ -317,6 +317,9 @@ pub struct EffectcraftApp {
     device_lost_close: Option<bool>,
     /// Answers of file dialogs shown without blocking ([`Hooks::file_dialog_async`]).
     pub(crate) dialog_answers: (Sender<DialogAnswer>, Receiver<DialogAnswer>),
+    /// How many of those dialogs are on screen. While one is, the Edit menu is disabled so its
+    /// Cmd+A / Cmd+C / Cmd+V reach the dialog instead of the window behind it (#1986).
+    pub(crate) native_dialogs: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// Commands from the native menu bar.
     pub command_inbox: Option<Receiver<String>>,
     /// Pointer position in comp pixels (Info panel).
@@ -409,6 +412,7 @@ impl EffectcraftApp {
             gpu_failure_applied: None,
             device_lost_close: None,
             dialog_answers: std::sync::mpsc::channel(),
+            native_dialogs: Default::default(),
             command_inbox: None,
             pointer_comp: None,
             dialog_state: Default::default(),

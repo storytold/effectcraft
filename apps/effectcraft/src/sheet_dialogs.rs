@@ -18,8 +18,10 @@ use std::pin::Pin;
 type Answer = Pin<Box<dyn Future<Output = Vec<String>> + Send>>;
 
 /// Show `dialog` (on the main thread: the sheet opens here) and hand its paths to `done` once it
-/// closes, then wake the UI.
+/// closes, then wake the UI. The UI is also woken now: the dialog was counted after this frame
+/// updated the native menu, which must step aside before the next key (#1986).
 pub fn show(dialog: FileDialog, done: DialogDone, ctx: egui::Context) {
+    ctx.request_repaint();
     let answer = open(dialog);
     let spawned = std::thread::Builder::new().name("ec-file-dialog".into()).spawn(move || {
         done(pollster::block_on(answer));
