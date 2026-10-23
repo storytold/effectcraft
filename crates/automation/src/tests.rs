@@ -1376,6 +1376,9 @@ fn automation_roots_confine_file_access() {
     // Scripts can read and write anything: refused.
     denied(&mut s, "run_script", json!({"code": "1 + 1"}));
     denied(&mut s, "execute_command", json!({"command": "file.runScript", "params": {"path": p(&read, "x.jsx")}}));
+    // Effect helpers are native programs: starting them or loading through them is refused too.
+    denied(&mut s, "execute_command", json!({"command": "effect.helpers.scan"}));
+    denied(&mut s, "execute_command", json!({"command": "effect.helpers.load", "params": {"path": p(&read, "x.ofx")}}));
     // Writes to the files the agent named: none outside.
     assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 1, "only the unconfined save");
     let _ = std::fs::remove_dir_all(&base);

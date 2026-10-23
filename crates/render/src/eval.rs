@@ -324,6 +324,24 @@ pub fn effect_bounds(project: &Project, comp: &Comp, layer: &Layer) -> ([f64; 2]
     }
 }
 
+/// The layer's source time range in layer time seconds as (first, end) for
+/// [`effectcraft_effects::EffectEnv::layer_span`]: footage and nested comps last their item's
+/// duration from layer time 0. With Time Remap layer time is no longer source time, so the layer's
+/// visible span (in to out point, in layer time) is reported instead. `None` for sources without
+/// a duration (stills, solids, text, shapes...).
+pub fn layer_span(project: &Project, layer: &Layer) -> Option<(f64, f64)> {
+    let span = if layer.props.get("timeRemap").is_some() {
+        let (a, b) = (layer.layer_time(layer.in_point).seconds(), layer.layer_time(layer.out_point).seconds());
+        (a.min(b), a.max(b))
+    } else {
+        match &layer.source {
+            LayerSource::Footage { item } | LayerSource::Comp { item } => (0.0, project.item(*item)?.duration()?.seconds()),
+            _ => return None,
+        }
+    };
+    (span.0.is_finite() && span.1.is_finite() && span.1 > span.0).then_some(span)
+}
+
 /// Size of a layer's source in layer pixels.
 pub fn source_size(project: &Project, layer: &Layer) -> (u32, u32) {
     match &layer.source {

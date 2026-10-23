@@ -7,7 +7,7 @@
 //! the roots (symbolic links resolved, no `..`), any other absolute path in its parameters too,
 //! and commands that write to a file they are not given (Save, Increment and Save, rendering the
 //! Render Queue) are checked against where they would write. Commands that run code or open
-//! other applications (scripts, Execute File, Reveal in Finder…) are refused while confined.
+//! other applications (scripts, Execute File, effect helpers, Reveal in Finder…) are refused while confined.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -36,6 +36,8 @@ const REFUSED: &[&str] = &[
     "file.installScriptUIPanel",
     "file.uninstallScript",
     "file.executeFile",
+    "effect.helpers.scan",
+    "effect.helpers.load",
     "file.revealInFinder",
     "layer.openSource",
     "help.revealLogFile",
