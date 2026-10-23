@@ -118,6 +118,7 @@ impl eframe::App for WebApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.app.ui(ui, frame);
+        crate::host::report_dirty(self.app.session.is_dirty());
     }
 }
 
@@ -186,8 +187,10 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
     eframe::WebLogger::init(log::LevelFilter::Info).ok();
     let doc = web_sys::window().and_then(|w| w.document()).ok_or("no document")?;
     let canvas: web_sys::HtmlCanvasElement = doc.get_element_by_id(&canvas_id).ok_or("no canvas")?.dyn_into()?;
-    let empty = query_flag("empty");
-    let home = query_flag("home");
+    // Embedded (`host`), the page opens what the parent sends: no last session, no demo.
+    let embedded = crate::host::embedded();
+    let empty = query_flag("empty") || embedded;
+    let home = query_flag("home") && !embedded;
     // Browser storage: settings, recent projects, imported media, saved projects, auto-saves and
     // the last session come back.
     let t0 = js_sys::Date::now();
@@ -204,7 +207,7 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
     diskcache::init();
     storage::refresh();
     let runner = eframe::WebRunner::new();
-    runner
+    let started = runner
         .start(
             canvas,
             eframe::WebOptions::default(),
@@ -246,7 +249,7 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
                 let mut app = EffectcraftApp::new(session);
                 app.set_gpu_failure_bridge(gpu_failures);
                 app.ui.start_screen = home;
-                if let Some(r) = recovery.filter(|r| !restored && r.autosave.is_some()) {
+                if let Some(r) = recovery.filter(|r| !restored && !embedded && r.autosave.is_some()) {
                     app.offer_recovery(r);
                 }
                 install_hooks(&mut app);
@@ -262,10 +265,15 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
                 app = app.with_control(rx);
                 let backend = cc.wgpu_render_state.as_ref().map(|rs| format!("{:?}", rs.adapter.get_info().backend));
                 api::set_info("backend", json!(backend));
+                api::set_info("embedded", json!(embedded && crate::host::start(&mut app)));
                 Ok(Box::new(WebApp { app, persist: !empty }))
             }),
         )
-        .await?;
+        .await;
+    if let Err(e) = started {
+        crate::host::failed(&format!("{e:?}"));
+        return Err(e);
+    }
     // Hide the loading message once the app runs.
     if let Some(el) = doc.get_element_by_id("loading") {
         el.remove();
