@@ -1101,6 +1101,11 @@ impl FieldOrder {
     }
 }
 
+/// File extensions of the movie containers footage is imported from (FilmCraft reads them). The
+/// import and proxy file dialogs, the Media Browser and `effectcraft_media::is_importable` all go
+/// by this list.
+pub const VIDEO_EXTENSIONS: &[&str] = &["mp4", "m4v", "mov", "mkv", "webm", "mxf", "avi"];
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AlphaMode {
     #[default]

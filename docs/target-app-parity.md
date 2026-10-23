@@ -114,7 +114,7 @@ compositing and effects dominate; audio is light). Hours are to full parity for 
 
 | Area | Weight | Breadth | Ready | Hours | Biggest gaps (details in [gaps.md](gaps.md)) |
 |---|---:|---:|---:|---:|---|
-| Project, footage and import | 8% | 92% | 55% | 25–45 | No relative paths or relinking when a project moves; Media Browser lists AVI, which it can't import (TGA/HDR/DPX/MXF import since #745, #756, #767); #431, #324, #552 and #351 are closed |
+| Project, footage and import | 8% | 92% | 55% | 25–45 | No relative paths or relinking when a project moves; TGA/HDR/DPX/MXF/AVI import since #745, #756, #767, #1701 (no DV or MPEG-4 Part 2 AVI yet); #431, #324, #552 and #351 are closed |
 | Compositions, layers and compositing | 13% | 98% | 60% | 30–55 | 32-bpc blend modes differed from After Effects (#494, closed); expand precomps in place (#601); #527, #510, #513, #539 and #540 are closed |
 | Animation: keyframes, graph editor, motion paths, puppet | 15% | 97% | 55% | 35–60 | Only scalar ease is measured against After Effects (168 samples); puppet lag (#586); #456, #457, #355, #553 and #318 are closed; Proportional Scrubbing (26.2) |
 | Expressions and scripting | 7% | 93% | 65% | 20–40 | `.jsxbin`, Startup/Shutdown folders, script shortcuts (`#include` landed, #759); external editor (#364); see [scripting-parity.md](scripting-parity.md) |

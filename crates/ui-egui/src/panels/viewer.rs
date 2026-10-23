@@ -8,8 +8,8 @@ use effectcraft_engine::commands::shape_tool::PaintKind;
 use effectcraft_engine::effects::puppet::PinKind;
 use effectcraft_engine::geom::{Mat3, vec2 as gv2};
 use effectcraft_engine::project::{Comp, Layer, LayerId, LayerSource};
-use effectcraft_engine::render::EvalCtx;
 use effectcraft_engine::render::three_d::{self, CameraState, View3D};
+use effectcraft_engine::render::{EvalCtx, Renderer};
 use effectcraft_engine::time::Tick;
 use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use serde_json::json;
@@ -1193,16 +1193,22 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         app.auto.add("viewer.warpBanner", r, &text);
     }
 
-    // Footage that can't be decoded (no decoder for its codec / profile): say why on the layer
-    // instead of leaving a black picture.
-    let mut notices = 0;
-    for layer in comp.layers.iter().filter(|l| l.is_active_at(time) && l.switches.video) {
-        let effectcraft_engine::project::LayerSource::Footage { item } = &layer.source else { continue };
-        let Some(effectcraft_engine::project::ItemKind::Footage(f)) = app.session.project.item(*item).map(|i| &i.kind) else { continue };
-        let Some(why) = app.session.footage.problem(f) else { continue };
-        if notices >= 3 {
-            break;
-        }
+    // Footage (or the proxy in use for footage or a precomp) that can't be decoded (no decoder
+    // for its codec / profile): say why on the layer instead of leaving a black picture. A
+    // collapsed precomp draws its own layers, never the comp's proxy.
+    let problems: Vec<(&Layer, String)> = {
+        let r = Renderer::new(&snap_project, &*app.session.footage, Default::default());
+        comp.layers
+            .iter()
+            .filter(|l| l.is_active_at(time) && l.switches.video && r.collapsed(&ectx, l).is_none())
+            .filter_map(|layer| {
+                let (LayerSource::Footage { item } | LayerSource::Comp { item }) = &layer.source else { return None };
+                Some((layer, snap_project.item(*item).and_then(|i| app.session.footage.item_problem(i))?))
+            })
+            .take(3)
+            .collect()
+    };
+    for (notices, (layer, why)) in problems.into_iter().enumerate() {
         let (m, _) = l2c(&ectx, layer);
         let (w, h) = effectcraft_engine::render::source_size(&app.session.project, layer);
         let c = m.apply(effectcraft_engine::geom::vec2(w as f64 / 2.0, h as f64 / 2.0));
@@ -1214,7 +1220,6 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         painter.rect_stroke(r, 3.0, Stroke::new(1.0, t.warning), StrokeKind::Inside);
         painter.galley(pos2(r.min.x + 12.0, r.center().y - galley.size().y / 2.0), galley, Color32::WHITE);
         app.auto.add(&format!("viewer.footageProblem.{}", layer.id.0), r, &text);
-        notices += 1;
     }
 
     // Free transform box of a path (double-click a path with the Selection tool).

@@ -46,11 +46,9 @@ fn summary(s: &mut Session, _: &Value) -> Result<Value> {
                 o["layers"] = json!(c.layers.len());
                 o["frameRate"] = json!(c.frame_rate.as_f64());
             }
-            // Footage that shows no picture although its file is there (a codec or profile the
-            // decoders lack): why, so an agent can tell the user.
-            if let ItemKind::Footage(f) = &i.kind
-                && let Some(why) = s.footage.problem(f)
-            {
+            // Footage (or the proxy in use) that shows no picture although its file is there (a
+            // codec or profile the decoders lack): why, so an agent can tell the user.
+            if let Some(why) = s.footage.item_problem(i) {
                 o["problem"] = json!(why);
             }
             o

@@ -130,6 +130,18 @@ pub trait FootageSource: Send + Sync {
     fn problem(&self, _footage: &Footage) -> Option<String> {
         None
     }
+    /// [`Self::problem`] of what `item` shows: its proxy's while Use Proxy shows the proxy
+    /// instead (the reason then says it is the proxy's), else the footage item's own. A
+    /// composition has one only through its proxy.
+    fn item_problem(&self, item: &effectcraft_project::Item) -> Option<String> {
+        match item.proxy.as_deref().filter(|px| px.enabled && px.footage.has_video) {
+            Some(px) => self.problem(&px.footage).map(|why| format!("Proxy: {why}")),
+            None => match &item.kind {
+                ItemKind::Footage(f) => self.problem(f),
+                _ => None,
+            },
+        }
+    }
 }
 
 /// A render's view of a [`FootageSource`] whose frame reads can be called off with `cancel`

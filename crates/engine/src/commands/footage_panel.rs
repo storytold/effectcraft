@@ -207,10 +207,7 @@ fn info(s: &mut Session, _: &Value) -> Result<Value> {
     let item = s.project.item(v.item);
     let name = item.map(|i| i.name.clone()).unwrap_or_default();
     let frame = fr.frame_at(v.time);
-    let problem = match item.map(|i| &i.kind) {
-        Some(ItemKind::Footage(f)) => s.footage.problem(f),
-        _ => None,
-    };
+    let problem = item.and_then(|i| s.footage.item_problem(i));
     Ok(
         json!({"item": v.item.0, "name": name, "time": v.time.seconds(), "frame": frame, "timecode": timecode(item, fr, frame), "in": v.in_point.map(|t| t.seconds()), "out": v.out_point.map(|t| t.seconds()), "duration": dur.map(|d| d.seconds()), "frameRate": fr.as_f64(), "problem": problem}),
     )
