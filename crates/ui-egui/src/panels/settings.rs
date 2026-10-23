@@ -667,7 +667,10 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                 let name_font = Tokens::ui(12.5);
                 let widest =
                     all.iter().map(|p| ui.painter().layout_no_wrap(tr(p.title).to_string(), name_font.clone(), t.text).size().x).fold(0.0_f32, f32::max);
-                let side_w = (widest + 24.0).clamp(150.0, 280.0).min(ui.available_width() * 0.45);
+                // 180 is the old fixed width, so no language gets a narrower list than before;
+                // the cap is applied last so the floor still holds in a small window.
+                let cap = (ui.available_width() * 0.45).max(180.0);
+                let side_w = (widest + 24.0).clamp(180.0, 280.0).min(cap);
                 let row_w = (side_w - 4.0).max(60.0);
                 ui.set_width(side_w);
                 egui::ScrollArea::vertical().id_salt("settings-pages").max_height(body_h).auto_shrink([false, false]).show(ui, |ui| {
