@@ -66,16 +66,36 @@ pub(crate) fn czech(app: &EffectcraftApp) -> bool {
 
 /// Settings ▸ General ▸ Language ▸ Match System: the operating system's interface language
 /// where EffectCraft has it, else English (#229), as After Effects installs in the system's
-/// language. The browser build stays in English because it has no system-locale probe.
+/// language. In the browser, use its ordered language preferences (#1700).
 fn system_language() -> &'static str {
     #[cfg(not(target_arch = "wasm32"))]
     {
         static LANGUAGE: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
         LANGUAGE.get_or_init(|| supported(sys_locale::get_locale().as_deref()))
     }
-    // No system locale in the browser build: English.
     #[cfg(target_arch = "wasm32")]
-    supported(None)
+    {
+        static LANGUAGE: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+        LANGUAGE.get_or_init(|| {
+            let Some(window) = eframe::web_sys::window() else { return "en" };
+            let navigator = window.navigator();
+            let locales: Vec<String> = navigator.languages().iter().filter_map(|v| v.as_string()).collect();
+            browser_language(locales.iter().map(String::as_str), navigator.language().as_deref())
+        })
+    }
+}
+
+/// Pick the first supported browser preference, including an explicit English preference.
+/// Older browsers may only supply `language`; unknown or absent languages use English.
+#[cfg(any(target_arch = "wasm32", test))]
+fn browser_language<'a>(mut locales: impl Iterator<Item = &'a str>, fallback: Option<&str>) -> &'static str {
+    locales
+        .find_map(|locale| {
+            let language = supported(Some(locale));
+            let english = locale.split(['-', '_']).next().is_some_and(|primary| primary.eq_ignore_ascii_case("en"));
+            (language != "en" || english).then_some(language)
+        })
+        .unwrap_or_else(|| supported(fallback))
 }
 
 /// The language EffectCraft shows for a BCP 47 locale (`ja-JP` → `ja`, `zh-Hans-CN` → `zh-hans`,
@@ -90,6 +110,9 @@ fn supported(locale: Option<&str>) -> &'static str {
         "uk" => "uk",
         "es" => "es",
         "cs" => "cs",
+        "ru" => "ru",
+        "fr" => "fr",
+        "de" => "de",
         // The only Portuguese catalog: Brazil's, also for Portugal rather than English.
         "pt" => "pt-br",
         "zh" => {
@@ -6913,6 +6936,24 @@ mod tests {
         assert_eq!(label(&app, "", "Composition"), "Composition");
     }
     #[test]
+    fn browser_preferences_choose_a_supported_language_in_order() {
+        for (locales, fallback, expected) in [
+            (vec!["es-ES"], None, "es"),
+            (vec!["ja-JP", "es-ES"], None, "ja"),
+            (vec!["xx-XX", "es-MX"], None, "es"),
+            (vec!["en-US", "es-ES"], None, "en"),
+            (vec!["zh-TW"], None, "zh-hant"),
+            (vec!["de-DE", "es-ES"], None, "de"),
+            (vec![], Some("ja-JP"), "ja"),
+            (vec!["xx-XX"], Some("es-ES"), "es"),
+            (vec![], None, "en"),
+            (vec!["xx-XX"], Some("xx-XX"), "en"),
+        ] {
+            assert_eq!(browser_language(locales.into_iter(), fallback), expected);
+        }
+    }
+
+    #[test]
     fn match_system_uses_the_system_language_where_there_is_a_catalog() {
         for (locale, language) in [
             (Some("ja-JP"), "ja"),
@@ -6943,7 +6984,9 @@ mod tests {
             (Some("CS_cz.UTF-8"), "cs"),
             (Some("en-US"), "en"),
             (Some("jv-ID"), "en"),
-            (Some("de-DE"), "en"),
+            (Some("de-DE"), "de"),
+            (Some("fr-CA"), "fr"),
+            (Some("ru-RU"), "ru"),
             (None, "en"),
         ] {
             assert_eq!(supported(locale), language, "{locale:?}");
