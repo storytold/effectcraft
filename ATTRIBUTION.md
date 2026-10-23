@@ -124,3 +124,7 @@ under [`docs/brand/LICENSE-brand.txt`](docs/brand/LICENSE-brand.txt). Forks and 
 | `docs/brand/artcraft-mark.svg` | ArtCraft Team | Original work: first-party ArtCraft brand mark (ArtCraft symbol ("A" mark), blue) | ArtCraft brand terms, not open source (`docs/brand/LICENSE-brand.txt`) |
 
 - Appearance theme previews, drawn procedurally from original shapes: `crates/ui-egui/src/panels/settings.rs` (original work, MIT OR Apache-2.0).
+
+| `crates/ui-egui/src/i18n/ko.rs` | Contributor-supplied reviewed translations; integrated by Codex | ArtCraft Korean support contribution | MIT OR Apache-2.0 |
+
+The optional shared Korean font input is Nanum Gothic Regular/Bold from [craft-fonts at 4fcc4b2](https://github.com/storytold/craft-fonts/tree/4fcc4b2672a2a6765052c2f59fa3021485d32269/fonts/nanum-gothic), authored by NHN Corporation and Sandoll Communications under OFL-1.1. Font bytes and the original license stay in craft-fonts. The browser build includes Regular.

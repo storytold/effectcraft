@@ -41,6 +41,7 @@ type Index = HashMap<&'static str, &'static str>;
 /// hundreds of strings a frame); `None` for English and any language that has no rows yet.
 fn catalog(language: &str) -> Option<&'static Index> {
     static JA: OnceLock<Index> = OnceLock::new();
+    static KO: OnceLock<Index> = OnceLock::new();
     static HANS: OnceLock<Index> = OnceLock::new();
     static HANT: OnceLock<Index> = OnceLock::new();
     static UK: OnceLock<Index> = OnceLock::new();
@@ -48,6 +49,7 @@ fn catalog(language: &str) -> Option<&'static Index> {
     static CS: OnceLock<Index> = OnceLock::new();
     static ES: OnceLock<Index> = OnceLock::new();
     let (index, rows) = match language {
+        "ko" => (&KO, super::ko::UI),
         "ja" => (&JA, JAPANESE),
         "zh-hans" => (&HANS, SIMPLIFIED_CHINESE),
         "zh-hant" => (&HANT, TRADITIONAL_CHINESE),
@@ -62,7 +64,11 @@ fn catalog(language: &str) -> Option<&'static Index> {
 
 /// Translate one interface string: the current language's row for `text`, or `text` itself.
 pub(crate) fn tr(text: &str) -> &str {
-    catalog(current()).and_then(|c| c.get(text)).copied().unwrap_or(text)
+    tr_in(current(), text)
+}
+
+pub(super) fn tr_in<'a>(language: &str, text: &'a str) -> &'a str {
+    catalog(language).and_then(|c| c.get(text)).copied().unwrap_or(text)
 }
 
 /// Translate an interface string that carries values: each `{}` takes the next argument. A missing

@@ -347,9 +347,30 @@ pub fn install(ctx: &egui::Context, t: &Tokens, language: &str) {
             stack.push("jbmono".into());
         }
     }
+    if language == "ko" {
+        install_korean_fonts(&mut fonts);
+    }
     install_script_fallbacks(&mut fonts, language);
+    if language != "ko" {
+        install_korean_fonts(&mut fonts);
+    }
     ctx.set_fonts(fonts);
     apply_visuals(ctx, t);
+}
+
+include!(concat!(env!("OUT_DIR"), "/korean_ui_fonts.rs"));
+
+/// The shared Korean faces are UI-only; project font choices are unchanged.
+fn install_korean_fonts(fonts: &mut FontDefinitions) {
+    for (style, bytes) in KOREAN_UI_FONTS {
+        fonts.font_data.insert(format!("nanum-gothic-{style}"), Arc::new(FontData::from_static(bytes)));
+    }
+    for (family, stack) in &mut fonts.families {
+        let bold = *family == FontFamily::Name("semibold".into());
+        let mut faces: Vec<_> = KOREAN_UI_FONTS.iter().collect();
+        faces.sort_by_key(|(style, _)| *style != if bold { "Bold" } else { "Regular" });
+        stack.extend(faces.iter().map(|(style, _)| format!("nanum-gothic-{style}")));
+    }
 }
 
 /// Scripts the bundled fonts lack beyond CJK, each probed with one of its letters: names typed in
@@ -405,7 +426,7 @@ fn install_script_fallbacks(family_fonts: &mut FontDefinitions, language: &str) 
         fonts::set_cjk_locale(cjk_locale(language));
         let base = fonts::resolve("Inter", "Regular").face;
         let han = (han_probe(language), "chinese-system");
-        let cjk = if is_chinese(language) { [han, KANA] } else { [KANA, han] };
+        let cjk = if language == "ko" { vec![HANGUL, KANA, han] } else if is_chinese(language) { vec![han, KANA] } else { vec![KANA, han] };
         let mut names = Vec::new();
         let mut seen = Vec::new();
         for &(probe, name) in cjk.iter().chain(SCRIPT_PROBES).chain(std::iter::once(&HANGUL)) {
@@ -437,7 +458,7 @@ fn install_script_fallbacks(family_fonts: &mut FontDefinitions, language: &str) 
 #[cfg(not(target_arch = "wasm32"))]
 fn cjk_locale(language: &str) -> &str {
     match language {
-        "ja" | "zh-hans" | "zh-hant" => language,
+        "ja" | "zh-hans" | "zh-hant" | "ko" => language,
         _ => "",
     }
 }

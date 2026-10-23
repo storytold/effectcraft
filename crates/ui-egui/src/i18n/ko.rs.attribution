@@ -1,0 +1,8 @@
+asset: ko.rs
+title: Reviewed Korean interface catalogs
+author: Contributor-supplied reviewed translations; integrated by Codex
+source: ArtCraft Korean support contribution
+license: MIT OR Apache-2.0
+license-file: ../../../../LICENSE-MIT
+added: 2026-10-21 by arksky1
+notes: Menus, effects, categories and panels; four history labels reused from reviewed PdfCraft translations with matching meaning.

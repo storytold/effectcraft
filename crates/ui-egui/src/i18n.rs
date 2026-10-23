@@ -9,11 +9,12 @@ use crate::EffectcraftApp;
 pub(crate) mod effects;
 /// Translations for the panels, tooltips and dialogs below the menu bar (see the module docs).
 mod ui;
+mod ko;
 use effectcraft_engine::menus::{MenuEntry, MenuNode};
 pub(crate) use ui::{set_current, tr, tr_args};
 
 /// Every language with a catalog, in the order Settings ▸ General ▸ Language lists them.
-const CATALOG_CODES: [&str; 10] = ["ja", "zh-hans", "zh-hant", "uk", "es", "pt-br", "ru", "fr", "de", "cs"];
+const CATALOG_CODES: [&str; 11] = ["ja", "zh-hans", "zh-hant", "uk", "es", "pt-br", "ru", "fr", "de", "cs", "ko"];
 
 /// The active interface language: the stored preference when it names a catalog, otherwise `en`
 /// (English is the source of every label and needs no lookup).
@@ -86,6 +87,7 @@ fn supported(locale: Option<&str>) -> &'static str {
     let primary = parts.next().unwrap_or_default().to_ascii_lowercase();
     let rest: Vec<String> = parts.map(|p| p.to_ascii_lowercase()).collect();
     match primary.as_str() {
+        "ko" => "ko",
         "ja" => "ja",
         "uk" => "uk",
         "es" => "es",
@@ -102,6 +104,12 @@ fn supported(locale: Option<&str>) -> &'static str {
 
 pub(crate) fn label<'a>(app: &EffectcraftApp, command: &str, source: &'a str) -> &'a str {
     let language = language(app);
+    if language == "ko" && matches!(command, "file.revealInFinder" | "layer.revealInFinder") {
+        match source {
+            "Reveal in Explorer" | "Reveal in File Manager" => return ui::tr_in("ko", source),
+            _ => {}
+        }
+    }
     // The engine names the platform's file manager before the catalog sees the label. These
     // two commands keep their ids, but on Windows/Linux their source is no longer "Finder".
     if language == "uk" && matches!(command, "file.revealInFinder" | "layer.revealInFinder") {
@@ -131,6 +139,7 @@ pub(crate) fn label<'a>(app: &EffectcraftApp, command: &str, source: &'a str) ->
 /// The menu catalog for `language`; `None` for English.
 fn menu_catalog(language: &str) -> Option<&'static [(&'static str, &'static str, &'static str)]> {
     Some(match language {
+        "ko" => ko::MENU,
         "ja" => JAPANESE,
         "zh-hans" => SIMPLIFIED_CHINESE,
         "zh-hant" => TRADITIONAL_CHINESE,
@@ -172,6 +181,27 @@ pub(crate) fn context_item(command: &str, params: &serde_json::Value, source: &s
 }
 
 pub(crate) fn entry(app: &EffectcraftApp, e: &MenuEntry, shown: String) -> String {
+    if language(app) == "ko" {
+        return match e.command.as_str() {
+            "edit.undo" => app.session.history.undo.last()
+                .map(|action| ui::tr_in("ko", "Undo {action}").replace("{action}", &action.0))
+                .unwrap_or_else(|| ui::tr_in("ko", "Nothing to undo").into()),
+            "edit.redo" => app.session.history.redo.last()
+                .map(|action| ui::tr_in("ko", "Redo {action}").replace("{action}", &action.0))
+                .unwrap_or_else(|| ui::tr_in("ko", "Nothing to redo").into()),
+            "effect.apply" => e.params.get("effect").and_then(|v| v.as_str())
+                .map_or_else(|| shown.clone(), |id| effects::name(id, &e.label)),
+            "window.panel" => {
+                let prefix = format!("{}: ", e.label);
+                shown.strip_prefix(&prefix).map_or_else(
+                    || label(app, &e.command, &shown).into(),
+                    |name| format!("{}: {name}", label(app, &e.command, &e.label)),
+                )
+            }
+            _ if shown == e.label => label(app, &e.command, &e.label).into(),
+            _ => shown,
+        };
+    }
     // The generated Effect menu's entries label themselves with the effect's registry name; the
     // catalog replaces it with the interface language's (#821). The entry keeps its command and
     // its `{"effect": <id>}` params, so a script, an expression or the control channel is
@@ -223,6 +253,26 @@ pub(crate) fn effect_category(children: &[MenuNode], source: &str) -> Option<Str
 
 pub(crate) fn submenu(app: &EffectcraftApp, source: &str, shown: String) -> String {
     match language(app) {
+        "ko" => {
+            if source == "Assign Shortcut to Workspace" {
+                if let Some(name) = shown.strip_prefix("Assign Shortcut to “").and_then(|s| s.strip_suffix("” Workspace")) {
+                    // A saved name can be identical to a built-in caption. Preserve it.
+                    let name = if name == "Default" && app.ui.workspace == "Default" && !app.ui.saved_workspaces.contains_key(name) {
+                        label(app, "window.workspace", name)
+                    } else {
+                        name
+                    };
+                    return ui::tr_in("ko", "Assign Shortcut to “{}” Workspace").replacen("{}", name, 1);
+                }
+            } else if source == "Assign Shortcut to 3D View"
+                && let Some(name) = shown.strip_prefix("Assign Shortcut to “").and_then(|s| s.strip_suffix('”'))
+            {
+                let name = ko::MENU.iter()
+                    .find(|(command, english, _)| command.starts_with("view.3d.") && *english == name)
+                    .map_or(name, |(_, _, translated)| *translated);
+                return ui::tr_in("ko", "Assign Shortcut to “{name}”").replacen("{name}", name, 1);
+            }
+        }
         "cs" => {
             if source == "Assign Shortcut to Workspace" {
                 if let Some(name) = shown.strip_prefix("Assign Shortcut to “").and_then(|s| s.strip_suffix("” Workspace")) {
@@ -6814,6 +6864,7 @@ mod tests {
         let mut french_keys = BTreeSet::new();
         let mut german_keys = BTreeSet::new();
         let mut czech_keys = BTreeSet::new();
+        let mut korean_keys = BTreeSet::new();
         for (catalog, unique) in [
             (JAPANESE, &mut japanese_keys),
             (SIMPLIFIED_CHINESE, &mut chinese_keys),
@@ -6825,6 +6876,7 @@ mod tests {
             (FRENCH, &mut french_keys),
             (GERMAN, &mut german_keys),
             (CZECH, &mut czech_keys),
+            (ko::MENU, &mut korean_keys),
         ] {
             for (command, en, translated) in catalog {
                 let key = (command.to_string(), en.to_string());
@@ -6854,6 +6906,7 @@ mod tests {
         assert_eq!(ukrainian_keys, russian_keys, "the languages must translate the same entries");
         assert_eq!(russian_keys, french_keys, "the languages must translate the same entries");
         assert_eq!(french_keys, german_keys, "the languages must translate the same entries");
+        assert_eq!(japanese_keys, korean_keys, "Korean covers the same fixed menu entries");
         assert_eq!(japanese_keys, czech_keys, "the languages must translate the same entries");
     }
 
@@ -7233,5 +7286,68 @@ mod tests {
         // No renderer here: drop the frame's texture uploads (egui asserts on unhandled ones in debug).
         out.textures_delta.clear();
         assert!(app.auto.find("settings.general.language").is_some());
+    }
+}
+
+
+#[cfg(test)]
+mod korean_tests {
+    use super::*;
+
+    #[test]
+    fn korean_language_persists_and_native_menu_bindings_stay_the_same() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.session.execute("prefs.set", serde_json::json!({"key":"general.language","value":"en"})).unwrap();
+        let en = crate::native_menu::build(&app);
+        app.session.execute("prefs.set", serde_json::json!({"key":"general.language","value":"ko"})).unwrap();
+        let ko = crate::native_menu::build(&app);
+        let bindings = |menu: &crate::native_menu::NativeMenu| {
+            menu.items().into_iter().map(|item| (item.id.clone(), item.command.clone(), item.params.clone(), item.shortcut.clone())).collect::<Vec<_>>()
+        };
+        assert_eq!(bindings(&en), bindings(&ko));
+        assert_eq!(language(&app), "ko");
+        assert_eq!(supported(Some("ko-KR")), "ko");
+        let saved = serde_json::to_string(&app.session.prefs).unwrap();
+        let restored: effectcraft_engine::prefs::Prefs = serde_json::from_str(&saved).unwrap();
+        assert_eq!(restored.general.language, "ko");
+        assert_eq!(label(&app, "edit.undo", "Undo"), "실행 취소");
+        assert_eq!(label(&app, "unknown", "User File"), "User File");
+        set_current("ko");
+        assert_eq!(tr_args("Drop {} files to import", &[&2]), "파일 2개를 놓아 가져오기");
+        assert_eq!(effects::group("ec.blur.gaussian", "My blur"), "My blur");
+        set_current("en");
+    }
+}
+
+#[cfg(test)]
+mod korean_composite_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn generated_menu_captions_translate_without_renaming_user_values() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.session.execute("prefs.set", json!({"key": "general.language", "value": "ko"})).unwrap();
+        for command in ["file.revealInFinder", "layer.revealInFinder"] {
+            for (source, ko) in [("Reveal in Explorer", "파일 탐색기에서 보기"), ("Reveal in File Manager", "파일 관리자에서 보기")] {
+                let entry_value = MenuEntry { label: source.into(), command: command.into(), params: json!({"item": "Default {name}.mp4"}), shortcut: None, alt_shortcuts: vec![] };
+                assert_eq!(label(&app, command, source), ko);
+                assert_eq!(entry(&app, &entry_value, source.into()), ko);
+                assert_eq!(label(&app, "file.openRecent", source), source);
+                assert_eq!(entry_value.params["item"], "Default {name}.mp4");
+            }
+        }
+        assert_eq!(submenu(&app, "Assign Shortcut to Workspace", "Assign Shortcut to “Default” Workspace".into()), "“기본값” 작업 영역에 단축키 지정");
+        app.ui.saved_workspaces.insert("Default".into(), app.ui.dock.clone());
+        assert_eq!(submenu(&app, "Assign Shortcut to Workspace", "Assign Shortcut to “Default” Workspace".into()), "“Default” 작업 영역에 단축키 지정");
+        app.ui.workspace = "User {name}".into();
+        assert_eq!(submenu(&app, "Assign Shortcut to Workspace", "Assign Shortcut to “User {name}” Workspace".into()), "“User {name}” 작업 영역에 단축키 지정");
+        for (name, ko) in [("Top", "윗면"), ("Default", "기본값"), ("Custom View 1", "사용자 지정 보기 1")] {
+            assert_eq!(submenu(&app, "Assign Shortcut to 3D View", format!("Assign Shortcut to “{name}”")), format!("“{ko}”에 단축키 지정"));
+        }
+        app.session.execute("prefs.set", json!({"key": "general.language", "value": "en"})).unwrap();
+        assert_eq!(label(&app, "file.revealInFinder", "Reveal in Explorer"), "Reveal in Explorer");
+        let original = "Assign Shortcut to “User {name}” Workspace";
+        assert_eq!(submenu(&app, "Assign Shortcut to Workspace", original.into()), original);
     }
 }

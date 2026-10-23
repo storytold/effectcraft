@@ -26,6 +26,7 @@ pub const PREFS_FILE: &str = "prefs.json";
 pub const LANGUAGES: &[(&str, &str)] = &[
     ("Match System", "system"),
     ("English", "en"),
+    ("한국어", "ko"),
     ("日本語", "ja"),
     ("简体中文", "zh-hans"),
     ("繁體中文", "zh-hant"),

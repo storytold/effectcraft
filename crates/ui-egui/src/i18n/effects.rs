@@ -67,10 +67,12 @@ impl Catalog {
 /// with empty tables, so a translator fills rows in without touching this function, and until
 /// then those languages draw the registry's English name.
 fn catalog(language: &str) -> Option<&'static Catalog> {
+    static KOREAN: Catalog = Catalog { rows: super::ko::EFFECTS, categories: super::ko::CATEGORIES, index: OnceLock::new() };
     static SIMPLIFIED: Catalog = Catalog { rows: SIMPLIFIED_CHINESE, categories: SIMPLIFIED_CHINESE_CATEGORIES, index: OnceLock::new() };
     static TRADITIONAL: Catalog = Catalog { rows: TRADITIONAL_CHINESE, categories: TRADITIONAL_CHINESE_CATEGORIES, index: OnceLock::new() };
     static JAPANESE: Catalog = Catalog { rows: JAPANESE_EFFECTS, categories: JAPANESE_CATEGORIES, index: OnceLock::new() };
     match language {
+        "ko" => Some(&KOREAN),
         "zh-hans" => Some(&SIMPLIFIED),
         "zh-hant" => Some(&TRADITIONAL),
         // Japanese: the slot the Japanese data point on #821 asked for, so both languages share

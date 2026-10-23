@@ -13,6 +13,10 @@ use std::fmt::Write as _;
 use serde_json::Value;
 
 fn main() {
+    if let Err(error) = korean_ui_fonts() {
+        let level = if std::env::var_os("CRAFT_FONTS_REQUIRED").is_some() { "error" } else { "warning" };
+        println!("cargo::{level}=Korean UI fonts: {error}");
+    }
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contributors");
     let json = read(&dir.join("contributors.json"), "the About window shows no contributors", |t| serde_json::from_str::<Value>(t).map_err(|e| e.to_string()))
         .unwrap_or(Value::Null);
@@ -99,4 +103,34 @@ fn generate(json: &Value, people: &toml::Table) -> String {
     }
     let _ = writeln!(o, "];");
     o
+}
+
+/// Optional shared font input; font files remain in craft-fonts.
+fn korean_ui_fonts() -> Result<(), String> {
+    println!("cargo::rerun-if-env-changed=CRAFT_FONTS_DIR");
+    println!("cargo::rerun-if-env-changed=CRAFT_FONTS_REQUIRED");
+    let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap_or_default()).join("korean_ui_fonts.rs");
+    let empty = "static KOREAN_UI_FONTS: &[(&str, &[u8])] = &[];\n";
+    std::fs::write(&out, empty).map_err(|e| e.to_string())?;
+    let Some(dir) = std::env::var_os("CRAFT_FONTS_DIR").map(std::path::PathBuf::from) else { return Ok(()) };
+    let manifest = dir.join("fonts/manifest.txt");
+    println!("cargo::rerun-if-changed={}", manifest.display());
+    let text = std::fs::read_to_string(manifest).map_err(|e| e.to_string())?;
+    let wasm = std::env::var("CARGO_CFG_TARGET_ARCH").is_ok_and(|arch| arch == "wasm32");
+    let mut src = String::from("static KOREAN_UI_FONTS: &[(&str, &[u8])] = &[\n");
+    let mut regular = false;
+    for line in text.lines().map(str::trim).filter(|line| !line.is_empty() && !line.starts_with('#')) {
+        let fields: Vec<_> = line.split(" | ").map(str::trim).collect();
+        let [family, style, file, scripts, ..] = fields.as_slice() else { return Err(format!("malformed manifest row: {line}")) };
+        if *family != "Nanum Gothic" || !scripts.split(',').any(|script| script.trim() == "Kore") || (wasm && *style != "Regular") {
+            continue;
+        }
+        let path = dir.join(file).canonicalize().map_err(|e| format!("{file}: {e}"))?;
+        println!("cargo::rerun-if-changed={}", path.display());
+        regular |= *style == "Regular";
+        let _ = writeln!(src, "    ({style:?}, include_bytes!({:?})),", path.display().to_string());
+    }
+    if !regular { return Err("shared font input has no Nanum Gothic Regular Korean face".into()) }
+    src.push_str("];\n");
+    std::fs::write(out, src).map_err(|e| e.to_string())
 }

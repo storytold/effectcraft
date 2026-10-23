@@ -24,6 +24,7 @@ jobs:
     with:
       app-name: effectcraft
       app-title: EffectCraft
+      craft-fonts-ref: 4fcc4b2672a2a6765052c2f59fa3021485d32269
       version: ${{ inputs.version }}
     secrets:
       APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
