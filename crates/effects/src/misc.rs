@@ -62,7 +62,7 @@ fn directional(ctx: &EffectCtx, mut b: Buf) -> Buf {
     if !ctx.adjustment {
         b.pad(len.ceil() as u32 + 1);
     }
-    b.img = effectcraft_raster::directional_blur(&b.img, ctx.params.f("direction"), len);
+    b.img = effectcraft_raster::directional_blur(&b.img, ctx.params.f("direction"), len, ctx.adjustment);
     b
 }
 
