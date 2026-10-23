@@ -133,7 +133,7 @@ pub(crate) fn footage_from_info(path: &str, info: &filmcraft_media::MediaInfo) -
         (_, None) => FootageKind::Audio,
     };
     let rate = v.map_or(FrameRate::FPS_30, |v| rate_from_fc(v.frame_rate));
-    let codec = match (v, info.audio.as_ref()) {
+    let codec = match (v, info.audio()) {
         (Some(v), _) => v.codec.clone(),
         (None, Some(a)) => a.codec.clone(),
         _ => String::new(),
@@ -148,7 +148,7 @@ pub(crate) fn footage_from_info(path: &str, info: &filmcraft_media::MediaInfo) -
         native_rate: None,
         duration: if kind == FootageKind::Still { Tick::ZERO } else { Tick(info.duration.0) },
         has_video: v.is_some(),
-        has_audio: info.audio.is_some(),
+        has_audio: info.has_audio(),
         alpha: if v.is_some_and(|v| v.has_alpha) { AlphaMode::Straight } else { AlphaMode::Ignore },
         premul_color: [0.0; 3],
         loop_count: 1,
@@ -253,12 +253,19 @@ pub(crate) fn load_oriented(bytes: &[u8], fmt: Option<image::ImageFormat>) -> im
 /// The rotation an MP4/MOV movie is shown with (a phone held upright records sideways frames and
 /// says so in its video track's header): the quarter turn nearest the track's rotation. Only the
 /// rotation counts; any mirroring, scaling or offset in the header is ignored, and other
-/// containers have none.
+/// containers have none. FilmCraft turns the frames of a pure 0/90/180/270° header itself, so this
+/// is only the quarter turn nearest to a header it does not turn.
 pub(crate) fn video_turn(bytes: &[u8]) -> Orientation {
     let Ok(file) = filmcraft_isobmff::open(bytes) else { return Orientation::NoTransforms };
-    let Some(m) = file.tracks.iter().find(|t| t.kind == filmcraft_isobmff::TrackKind::Video).map(|t| t.matrix) else {
+    let Some(track) = file.tracks.iter().find(|t| t.kind == filmcraft_isobmff::TrackKind::Video) else {
         return Orientation::NoTransforms;
     };
+    // A pure rotation is already applied by FilmCraft's decoder (frames and size come out
+    // upright); only the headers it leaves as stored (mirrored, scaled, sheared) are turned here.
+    if track.display_rotation().is_some() {
+        return Orientation::NoTransforms;
+    }
+    let m = track.matrix;
     // [a b u; c d v; x y w]: (a, b) is where the picture's x axis points.
     let (a, b) = (m[0] as i64, m[1] as i64);
     match (a.abs() >= b.abs(), a >= 0, b >= 0) {

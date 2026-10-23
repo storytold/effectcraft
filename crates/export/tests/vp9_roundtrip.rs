@@ -41,7 +41,7 @@ fn source(w: usize, h: usize, kind: u32) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
 }
 
 fn decode(frame: &[u8]) -> filmcraft_vp9::Picture {
-    let mut d = Decoder::new();
+    let mut d = Decoder::with_threads(1);
     let mut pics = d.decode(frame, 0).expect("decode");
     assert_eq!(pics.len(), 1);
     pics.remove(0)
@@ -189,7 +189,7 @@ fn planes_of(p: &filmcraft_vp9::Picture, w: usize, h: usize) -> [Vec<u8>; 3] {
 fn run_sequence(cfg: EncoderConfig, n: usize, kind: u32) -> (usize, f64) {
     let (w, h) = (cfg.width as usize, cfg.height as usize);
     let mut e = Vp9Encoder::new(cfg);
-    let mut d = Decoder::new();
+    let mut d = Decoder::with_threads(1);
     let (mut bytes, mut db) = (0usize, 0.0);
     for t in 0..n {
         let (y, u, v) = moving(w, h, t, kind);
@@ -344,7 +344,7 @@ fn frames_never_end_in_a_superframe_marker() {
     }
     let Some((w, h, q, frames, recon)) = padded else { panic!("no frame needed the padding: widen the search") };
     // The padded frames decode exactly, with FilmCraft's decoder and with ffmpeg.
-    let mut d = Decoder::new();
+    let mut d = Decoder::with_threads(1);
     for (t, (f, r)) in frames.iter().zip(&recon).enumerate() {
         let mut pics = d.decode(f, t as i64).unwrap_or_else(|e| panic!("{w}x{h} q{q} frame {t}: {e:?}"));
         assert_eq!(planes_of(&pics.remove(0), w, h), *r, "{w}x{h} q{q} frame {t}");
