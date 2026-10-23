@@ -213,7 +213,7 @@ fn output_menu(it: &RenderQueueItem, available: &[OutputFormat], templates: &Ren
                 v.push((mark(o.quality == q, &format!("Quality: {q}")), json!({"quality": q})));
             }
         }
-        OutputFormat::Gif => {
+        OutputFormat::Gif | OutputFormat::WebP => {
             v.push(("-".into(), Value::Null));
             v.push((mark(o.gif_loop, "Loop Forever"), json!({"loop": !o.gif_loop})));
         }

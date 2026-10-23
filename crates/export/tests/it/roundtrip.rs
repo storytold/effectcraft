@@ -394,6 +394,83 @@ fn gif_roundtrip() {
     }
 }
 
+/// An animated WebP's frames (composited, as a player shows them) with their durations in ms,
+/// and the `VP8X` flags and `ANIM` loop count from its headers.
+fn decode_webp(path: &Path) -> (Vec<(Image, u32)>, u8, u16) {
+    use image::AnimationDecoder;
+    let bytes = std::fs::read(path).expect("read webp");
+    assert_eq!((&bytes[0..4], &bytes[8..16]), (&b"RIFF"[..], &b"WEBPVP8X"[..]));
+    assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize, bytes.len() - 8, "RIFF size");
+    assert_eq!(&bytes[30..34], b"ANIM");
+    let (flags, loops) = (bytes[20], u16::from_le_bytes([bytes[42], bytes[43]]));
+    let dec = image::codecs::webp::WebPDecoder::new(std::io::Cursor::new(bytes)).expect("webp header");
+    let frames = dec
+        .into_frames()
+        .map(|f| {
+            let f = f.expect("webp frame");
+            let (n, d) = f.delay().numer_denom_ms();
+            let buf = f.into_buffer();
+            assert_eq!(buf.dimensions(), (W, H));
+            (Image::from_rgba8(W, H, buf.as_raw()), n / d)
+        })
+        .collect();
+    (frames, flags, loops)
+}
+
+/// The decoded frames as the comp's 100 ms frames.
+fn webp_timeline(frames: &[(Image, u32)]) -> Vec<&Image> {
+    frames
+        .iter()
+        .flat_map(|(img, ms)| {
+            assert_eq!(ms % 100, 0, "{ms} ms is not whole comp frames");
+            std::iter::repeat_n(img, (ms / 100) as usize)
+        })
+        .collect()
+}
+
+#[test]
+fn webp_roundtrip() {
+    let (p, cid) = project(None);
+    let d = out_dir("webp");
+    let om = OutputModule::for_format(OutputFormat::WebP);
+    let path = d.join("anim.webp");
+    run(&p, cid, &NoFootage, &om, &path);
+    let (frames, flags, loops) = decode_webp(&path);
+    assert_eq!(flags, 0x02, "animation, no alpha");
+    assert_eq!(loops, 0, "loop forever");
+    // Five frames of background, then seven of the red solid: two pictures, each held.
+    assert_eq!(frames.iter().map(|(_, ms)| *ms).collect::<Vec<_>>(), [500, 700]);
+    let timeline = webp_timeline(&frames);
+    assert_eq!(timeline.len() as u64, FRAMES);
+    for (k, img) in timeline.into_iter().enumerate() {
+        check_frame(img, k as u64, 0.01);
+    }
+    // EffectCraft reads it back as footage: 12 frames at 10 fps.
+    decode_movie(&path, FRAMES, 0.01);
+}
+
+#[test]
+fn webp_keeps_alpha() {
+    let (p, cid) = project(None);
+    let d = out_dir("webp-alpha");
+    let mut om = OutputModule::for_format(OutputFormat::WebP);
+    om.channels = Channels::Rgba;
+    om.gif_loop = false;
+    let path = d.join("alpha.webp");
+    run(&p, cid, &NoFootage, &om, &path);
+    let (frames, flags, loops) = decode_webp(&path);
+    assert_eq!(flags, 0x12, "animation and alpha");
+    assert_eq!(loops, 1, "play once");
+    let timeline = webp_timeline(&frames);
+    assert_eq!(timeline.len() as u64, FRAMES);
+    for (k, img) in timeline.into_iter().enumerate() {
+        assert_eq!(px(img, 2, 2)[3], 0.0, "frame {k}: the corner is transparent");
+        let c = px(img, W / 2, H / 2);
+        let want = if k >= 5 { [1.0, 0.0, 0.0, 1.0] } else { [0.0, 0.0, 0.0, 0.0] };
+        assert!(c.iter().zip(want).all(|(a, b)| (a - b).abs() < 0.01), "frame {k} centre {c:?} want {want:?}");
+    }
+}
+
 #[test]
 fn cancel_stops_early() {
     let (p, cid) = project(None);
