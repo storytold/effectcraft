@@ -1386,7 +1386,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
     let ctx = ui.ctx().clone();
     let Some(cid) = app.session.active_comp_id() else {
-        ui.painter().text(rect.center(), Align2::CENTER_CENTER, "(no composition)", Tokens::ui(12.0), t.text_faint);
+        ui.painter().text(rect.center(), Align2::CENTER_CENTER, tr("(no composition)"), Tokens::ui(12.0), t.text_faint);
         // Dropping footage into an empty Timeline should create its first composition,
         // just like dropping onto the Project panel's New Composition button (#649).
         if let Some(crate::panels::DragPayload::Item(dragged)) = egui::DragAndDrop::payload::<crate::panels::DragPayload>(&ctx).as_deref()
@@ -1517,7 +1517,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
     let sr = Rect::from_min_size(pos2(tc_rect.max.x + 14.0, top + 12.0), vec2((left_w - 420.0).clamp(120.0, 220.0), 22.0));
     let mut search = app.ui.timeline.search.clone();
-    widgets::search_field(ui, sr, &mut search, "Search", &t);
+    widgets::search_field(ui, sr, &mut search, tr("Search"), &t);
     app.ui.timeline.search = search;
     app.auto.add("timeline.search", sr, "Search");
     let mut bx = rect.min.x + left_w - 10.0;
@@ -1786,7 +1786,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     // Column headers scroll with the outline and never spill into the time ruler.
     let hp = p.with_clip_rect(Rect::from_min_max(ch.min, pos2(graph_x0 - 1.0, ch.max.y)));
     let hic = |icon: Icon, x: f32| icons::paint(&hp, Rect::from_center_size(pos2(x, hy), vec2(12.0, 12.0)), icon, t.text_dim);
-    let htext = |x: f32, s: &str| hp.text(pos2(x, hy), Align2::LEFT_CENTER, s, Tokens::ui(11.0), t.text_dim);
+    let htext = |x: f32, s: &str| hp.text(pos2(x, hy), Align2::LEFT_CENTER, tr(s), Tokens::ui(11.0), t.text_dim);
     if vis.av {
         hic(Icon::Eye, cw.av + 10.0);
         hic(Icon::Speaker, cw.av + 28.0);
@@ -2218,7 +2218,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                         crate::i18n::tr("Parent pick whip: drag onto a layer"),
                     );
                     let pr_rect = Rect::from_min_size(pos2(cw.parent + 20.0, cy - 9.0), vec2(94.0, 18.0));
-                    let plabel = layer.parent.and_then(|p| comp.layer(p)).map(|l| format!("{}. {}", idx_of(l.id), l.name)).unwrap_or_else(|| "None".into());
+                    let plabel = layer.parent.and_then(|p| comp.layer(p)).map(|l| format!("{}. {}", idx_of(l.id), l.name)).unwrap_or_else(|| tr("None").into());
                     let presp = widgets::dropdown(ui, pr_rect, &plabel, &t, egui::Id::new(("parent", layer.id.0)));
                     app.auto.add(&format!("timeline.layer.{}.parent", layer.id.0), pr_rect, "Parent");
                     let pop = egui::Id::new(("par-pop", layer.id.0));
@@ -2226,7 +2226,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                         widgets::open_popup(ui, pop);
                     }
                     let mut cands: Vec<&Layer> = vec![];
-                    let mut popts = vec!["None".to_string(), "-".to_string()];
+                    let mut popts = vec![tr("None").to_string(), "-".to_string()];
                     if widgets::popup_is_open(ui, pop) {
                         for (i, l) in comp.layers.iter().enumerate().filter(|(_, l)| l.id != layer.id) {
                             popts.push(format!("{}. {}", i + 1, l.name));

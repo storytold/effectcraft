@@ -1565,6 +1565,17 @@ const SIMPLIFIED_CHINESE: &[(&str, &str)] = &[
     ("Total Offset", "总偏移"),
     ("Per Layer", "每个图层"),
     ("Track", "跟踪"),
+    ("Effect Controls", "效果控件"),
+    ("Timeline", "时间线"),
+    ("Review", "审阅"),
+    ("Small Screen", "小屏"),
+    ("Standard", "标准"),
+    ("Select an item to see its details", "选择某个项目以查看详情"),
+    ("Search project", "在项目中搜索"),
+    ("Search", "搜索"),
+    ("Layer Name", "图层名称"),
+    ("Parent & Link", "父级和链接"),
+    ("(no composition)", "（无合成）"),
 ];
 
 const TRADITIONAL_CHINESE: &[(&str, &str)] = &[
@@ -2300,6 +2311,17 @@ const TRADITIONAL_CHINESE: &[(&str, &str)] = &[
     ("Total Offset", "總偏移"),
     ("Per Layer", "每個圖層"),
     ("Track", "追蹤"),
+    ("Effect Controls", "效果控制項"),
+    ("Timeline", "時間軸"),
+    ("Review", "檢閱"),
+    ("Small Screen", "小螢幕"),
+    ("Standard", "標準"),
+    ("Select an item to see its details", "選取項目以查看詳細資訊"),
+    ("Search project", "在專案中搜尋"),
+    ("Search", "搜尋"),
+    ("Layer Name", "圖層名稱"),
+    ("Parent & Link", "父層和連結"),
+    ("(no composition)", "（無合成）"),
 ];
 
 /// Ukrainian (uk): original translations of the same interface rows as the Chinese catalogs.
@@ -4639,6 +4661,30 @@ mod tests {
         assert_eq!(tr_args("Step {} of {}: {}", &[&1, &3, &"Colour"]), "Paso 1 de 3: Colour");
         set_current("en");
         assert_eq!(tr("Cancel"), "Cancel");
+    }
+
+    /// The Simplified Chinese interface translates the panel tabs, search fields, Project and Timeline headers and workspace names (#2186).
+    #[test]
+    fn zh_hans_translates_panel_tabs_headers_and_workspaces() {
+        set_current("zh-hans");
+        for (en, zh) in [
+            ("Effect Controls", "效果控件"),
+            ("Timeline", "时间线"),
+            ("Select an item to see its details", "选择某个项目以查看详情"),
+            ("Search project", "在项目中搜索"),
+            ("Search", "搜索"),
+            ("Layer Name", "图层名称"),
+            ("Parent & Link", "父级和链接"),
+            ("(no composition)", "（无合成）"),
+            ("Review", "审阅"),
+            ("Small Screen", "小屏"),
+            ("Standard", "标准"),
+            ("Default", "默认"),
+            ("Learn", "学习"),
+        ] {
+            assert_eq!(tr(en), zh);
+        }
+        set_current("en");
     }
 
     /// Values fill the placeholders in order, and a missing value is dropped instead of panicking.

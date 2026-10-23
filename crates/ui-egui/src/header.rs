@@ -259,7 +259,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     if mresp.clicked() {
         widgets::open_popup(ui, egui::Id::new("ws-pop"));
     }
-    let names: Vec<String> = crate::dock::WORKSPACES.iter().map(|s| s.to_string()).collect();
+    let names: Vec<String> = crate::dock::WORKSPACES.iter().map(|s| tr(s).to_string()).collect();
     if let Some(i) = widgets::popup_menu(
         ui,
         egui::Id::new("ws-pop"),
@@ -274,7 +274,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     // Small Screen, Standard.
     let shown = ["Standard", "Small Screen", "Learn", "Review", "Default"];
     for name in shown {
-        let g = p.layout_no_wrap(name.to_string(), Tokens::ui(12.0), t.text);
+        let g = p.layout_no_wrap(tr(name).to_string(), Tokens::ui(12.0), t.text);
         let w = g.size().x + 16.0;
         let r = Rect::from_min_max(pos2(rx - w, cy - 13.0), pos2(rx, cy + 13.0));
         if r.min.x < x + 120.0 {
