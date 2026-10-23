@@ -39,6 +39,16 @@ fn gaussian(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
+/// How far `it` passes of a box blur of radius `r` grow the layer, plus a pixel for rounding.
+/// The passes reach `r × it` pixels, but past three of them all but a sliver of the light lies
+/// within three standard deviations (`r √(3 it)`), and the growth is capped like other effects'.
+/// Growing by `r × it` asked a 1080p frame at Radius 3000 and 50 Iterations for a buffer
+/// 300 000 px wide, and the failed allocation aborted the app.
+fn box_reach(r: usize, it: usize) -> u32 {
+    let spread = (r as f64 * (3.0 * it as f64).sqrt()).ceil();
+    (r.saturating_mul(it) as f64).min(spread).min(4096.0) as u32 + 1
+}
+
 fn box_blur(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let r = (ctx.params.f("radius") * b.scale).round().max(0.0) as usize;
     if r == 0 {
@@ -48,7 +58,7 @@ fn box_blur(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let (kx, ky) = dims_xy(ctx.params.e("dimensions"));
     let repeat = ctx.params.b("repeatEdge");
     if !repeat && !ctx.adjustment {
-        b.pad((r * it) as u32 + 1);
+        b.pad(box_reach(r, it));
     }
     b.img = effectcraft_raster::box_blur(&b.img, r * kx as usize, r * ky as usize, it, repeat || ctx.adjustment);
     b
@@ -747,6 +757,31 @@ mod tests {
             }
         }
         img
+    }
+
+    /// Fast Box Blur at Blur Radius 3000 and 50 Iterations (both on its sliders) grew the layer by
+    /// 150 001 px a side: the buffer's allocation failed and aborted the app. One to three
+    /// passes grow it as before.
+    #[test]
+    fn fast_box_blur_growth_is_bounded() {
+        assert_eq!(box_reach(5, 1), 6);
+        assert_eq!(box_reach(5, 3), 16, "three passes reach r × it, as before");
+        assert_eq!(box_reach(10, 50), 124, "r √(3 it), not r × it = 500");
+        assert_eq!(box_reach(3000, 50), 4097);
+        assert_eq!(box_reach(usize::MAX, usize::MAX), 4097);
+        let dot = |w| {
+            let mut img = effectcraft_raster::Image::new(w, w);
+            img.set(w / 2, w / 2, [1.0; 4]);
+            img
+        };
+        let vals = [("radius", num(3000.0)), ("iterations", num(50.0))];
+        let out = run_fx("ec.blur.fastbox", &vals, dot(8), 0.0, EffectEnv::default());
+        assert_eq!((out.img.width, out.img.height), (8 + 2 * 4097, 8 + 2 * 4097));
+        // A moderate blur keeps all its light.
+        let vals = [("radius", num(4.0)), ("iterations", num(10.0))];
+        let out = run_fx("ec.blur.fastbox", &vals, dot(9), 0.0, EffectEnv::default());
+        let total: f32 = out.img.data.iter().map(|p| p[3]).sum();
+        assert!((total - 1.0).abs() < 1e-3, "{total}");
     }
 
     #[test]

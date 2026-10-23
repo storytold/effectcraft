@@ -252,6 +252,10 @@ pub fn warning(g: &PropGroup, eval: &mut dyn FnMut(&Property) -> Value) -> Optio
     ocio::warning(effect, &flatten_params(g, eval))
 }
 
+/// The widest and tallest an effect may grow a buffer to ([`Buf::pad_xy`]), in pixels: 4 GiB of
+/// RGBA float at most.
+pub const MAX_PADDED_SIDE: u32 = 16384;
+
 /// A layer image in flight: point `p` sits at pixel `p * scale + offset`. Points are in layer
 /// space, or in effect space while the layer's effects run (see [`Buf::rebase`]).
 #[derive(Clone, Debug, Default)]
@@ -290,8 +294,12 @@ impl Buf {
     pub fn pad(&mut self, pad: u32) {
         self.pad_xy(pad, pad);
     }
-    /// Grow by `px` transparent pixels on the left and right and `py` above and below.
+    /// Grow by `px` transparent pixels on the left and right and `py` above and below, up to
+    /// [`MAX_PADDED_SIDE`] pixels a side: an effect asked to grow further (a huge blur) is cut off
+    /// there rather than asking for more memory than there is, which aborts the app.
     pub fn pad_xy(&mut self, px: u32, py: u32) {
+        let room = |side: u32| MAX_PADDED_SIDE.saturating_sub(side) / 2;
+        let (px, py) = (px.min(room(self.img.width)), py.min(room(self.img.height)));
         if px == 0 && py == 0 {
             return;
         }
@@ -1263,6 +1271,23 @@ pub(crate) fn run_fx(id: &str, vals: &[(&str, Value)], img: Image, time: f64, en
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// No effect grows a buffer past [`MAX_PADDED_SIDE`]: a huge growth asked for more memory
+    /// than there is, and the failed allocation aborted the app.
+    #[test]
+    fn padding_stops_at_the_largest_buffer() {
+        let mut b = Buf { img: Image::filled(100, 40, [1.0; 4]), offset: [0.0, 0.0], scale: 1.0 };
+        b.pad_xy(10, 3);
+        assert_eq!((b.img.width, b.img.height, b.offset), (120, 46, [10.0, 3.0]));
+        assert_eq!(b.img.get(10, 3), [1.0; 4]);
+        b.pad(u32::MAX);
+        assert_eq!((b.img.width, b.img.height), (16384, 16384));
+        assert_eq!(b.offset, [10.0 + (16384.0 - 120.0) / 2.0, 3.0 + (16384.0 - 46.0) / 2.0]);
+        // Already as large as allowed: no growth.
+        let mut big = Buf { img: Image::new(16384, 2), offset: [0.0, 0.0], scale: 1.0 };
+        big.pad_xy(5, 0);
+        assert_eq!(big.img.width, 16384);
+    }
 
     #[test]
     fn run_fx_passthrough() {
