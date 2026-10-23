@@ -128,13 +128,13 @@ fn fxk_arith(op: u32, a: f32, b: f32) -> f32 {
             }
             return 1.0 - 2.0 * (1.0 - a) * (1.0 - b);
         }
-        default: {
-            if (b < 0.5) {
-                return 2.0 * a * b;
-            }
-            return 1.0 - 2.0 * (1.0 - a) * (1.0 - b);
-        }
+        default: {}
     }
+    // Default (hard light) after the switch: FXC wants a return on every path (X3507).
+    if (b < 0.5) {
+        return 2.0 * a * b;
+    }
+    return 1.0 - 2.0 * (1.0 - a) * (1.0 - b);
 }
 
 // channel2::overflow.
@@ -305,7 +305,7 @@ fn fxk_point(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
             } else {
                 let spill = max(s[u1.x] - max(s[u1.y], s[u1.z]), 0.0);
-                s[u1.x] = s[u1.x] - spill * f0.w;
+                s = vset3f(s, u32(u1.x), s[u1.x] - spill * f0.w);
             }
             o = vec4<f32>(s * px.w, px.w);
         }
@@ -352,7 +352,7 @@ fn fxk_point(@builtin(global_invocation_id) gid: vec3<u32>) {
             let avg = 0.5 * (s[o1] + s[o2]);
             let lim = mx + (avg - mx) * spill_range;
             let spill = max(s[pi] - lim, 0.0) * amt * w;
-            s[pi] = s[pi] - spill;
+            s = vset3f(s, u32(pi), s[pi] - spill);
             let lw = vec3<f32>(0.2126, 0.7152, 0.0722);
             let back = spill * lw[pi] * luma + spill * neutral / 3.0;
             s = s + back;
@@ -455,7 +455,7 @@ fn fxk_point(@builtin(global_invocation_id) gid: vec3<u32>) {
                     if (u0.y != 0u) {
                         v = min(v, px.w);
                     }
-                    o[i] = v;
+                    o = vset4f(o, u32(i), v);
                 }
             }
         }
@@ -488,9 +488,9 @@ fn fxk_point(@builtin(global_invocation_id) gid: vec3<u32>) {
                     default: { x = 1.0 - (1.0 - v) * (1.0 - kv); }
                 }
                 if (u0.z != 0u) {
-                    r[i] = clamp(x, 0.0, 1.0);
+                    r = vset3f(r, u32(i), clamp(x, 0.0, 1.0));
                 } else {
-                    r[i] = max(x, 0.0);
+                    r = vset3f(r, u32(i), max(x, 0.0));
                 }
             }
             o = vec4<f32>(r * px.w, px.w);
@@ -662,7 +662,7 @@ fn fxk_point(@builtin(global_invocation_id) gid: vec3<u32>) {
             var ra = a;
             if (u0.z != 2u) {
                 for (var i = 0u; i < 3u; i++) {
-                    rc[i] = fxk_overflow(u0.y, fxk_arith(u0.y, c[i], oc[i]), u0.w);
+                    rc = vset3f(rc, u32(i), fxk_overflow(u0.y, fxk_arith(u0.y, c[i], oc[i]), u0.w));
                 }
             }
             if (u0.z != 0u) {
@@ -674,7 +674,7 @@ fn fxk_point(@builtin(global_invocation_id) gid: vec3<u32>) {
         case 20u: {
             let q = textureLoad(aux, p, 0);
             o = px;
-            o[u0.y] = dst_pick(u0.z, fxk_straight(q), max(q.w, 0.0));
+            o = vset4f(o, u32(u0.y), dst_pick(u0.z, fxk_straight(q), max(q.w, 0.0)));
         }
         case 21u: {
             o = fxk_premul(px.xyz, clamp(px.w, 0.0, 1.0));
@@ -703,11 +703,11 @@ fn fxk_point(@builtin(global_invocation_id) gid: vec3<u32>) {
                 if (!(u0.z != 0u || k <= 1e-4)) {
                     let s = 1.0 - k;
                     for (var i = 0; i < 3; i++) {
-                        fg[i] = min(max(c[i] - s * screen[i], 0.0) / k, max(c[i], 1.0));
+                        fg = vset3f(fg, u32(i), min(max(c[i] - s * screen[i], 0.0) / k, max(c[i], 1.0)));
                     }
                 }
                 let spill = max(fg[u1.x] - fxk_secondary(fg, u1.y, u1.z, f0.w), 0.0);
-                fg[u1.x] = fg[u1.x] - spill * P.f[1].x;
+                fg = vset3f(fg, u32(u1.x), fg[u1.x] - spill * P.f[1].x);
                 o = fxk_premul(fg, alpha);
             }
         }

@@ -235,7 +235,7 @@ fn fxd_point(@builtin(global_invocation_id) gid: vec3<u32>) {
                         x = clamp(x, 0.0, 1.0);
                     }
                 }
-                v[k] = x;
+                v = vset4f(v, u32(k), x);
             }
             let al = clamp(v.w, 0.0, 1.0);
             var c = v.xyz;

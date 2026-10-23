@@ -99,6 +99,8 @@ symphonia = { version = "0.5.5", default-features = false, features = ["aiff"] }
 
 # gpu (the same wgpu eframe / egui-wgpu use)
 wgpu = { version = "30.0.1", features = ["fragile-send-sync-non-atomic-wasm"] }
+# Not used in code: pins wgpu-hal to the [patch.crates-io] copy (#613) so cargo can't swap it out; move or drop it with wgpu.
+wgpu-hal = "=30.0.1"
 bytemuck = "1"
 pollster = "0.4"
 
@@ -212,3 +214,6 @@ codegen-units = 1
 
 [patch.crates-io]
 hayro-syntax = { git = "https://github.com/storytold/craft-libs", rev = "ca50d63b773c99f96e75c77ce5a1d21e7c9cda0d", version = "=0.7.2" }
+# EffectCraft patch (#613): wgpu-hal 30.0.1 + DXC IEEE strictness (-Gis) + UAV barriers between
+# write-only storage-texture writes on DX12; drop once upstream has both.
+wgpu-hal = { path = "third_party/wgpu-hal" }

@@ -177,7 +177,7 @@ fn fxt_point(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let aa = max(a, 0.0);
                 var nc: vec3<f32>;
                 for (var i = 0u; i < 3u; i++) {
-                    nc[i] = fxt_lv(i + 1u, fxt_lv(0u, c[i], cb, cw), cb, cw);
+                    nc = vset3f(nc, u32(i), fxt_lv(i + 1u, fxt_lv(0u, c[i], cb, cw), cb, cw));
                 }
                 let na = clamp(clamp(fxt_lv(4u, aa, cb, cw), 0.0, 1.0), 0.0, 1.0);
                 o = vec4<f32>(nc * na, na);
@@ -196,7 +196,7 @@ fn fxt_point(@builtin(global_invocation_id) gid: vec3<u32>) {
                     v = v + stretch * 0.25 * v * (q * q * q * q);
                 }
                 let g = P.f[i];
-                r[i] = max(g.y + (g.z - g.y) * powz(max(v, 0.0), g.x), 0.0);
+                r = vset3f(r, u32(i), max(g.y + (g.z - g.y) * powz(max(v, 0.0), g.x), 0.0));
             }
             o = vec4<f32>(r * a, a);
         }
@@ -404,13 +404,13 @@ fn fxt_point(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
                 let x = c[k] + f0[k];
                 if (x <= 1.0) {
-                    r[k] = x;
+                    r = vset3f(r, u32(k), x);
                 } else if (u0.y == 1u) {
-                    r[k] = max(2.0 - x, 0.0);
+                    r = vset3f(r, u32(k), max(2.0 - x, 0.0));
                 } else if (u0.y == 2u) {
-                    r[k] = select(1.0, 0.0, x - 1.0 < 0.5);
+                    r = vset3f(r, u32(k), select(1.0, 0.0, x - 1.0 < 0.5));
                 } else {
-                    r[k] = fract_euclid(x);
+                    r = vset3f(r, u32(k), fract_euclid(x));
                 }
             }
             o = vec4<f32>(r * a, a);
@@ -516,7 +516,7 @@ fn fxt_point(@builtin(global_invocation_id) gid: vec3<u32>) {
             var r = c;
             if (!straight_skip) {
                 for (var i = 0u; i < 3u; i++) {
-                    r[i] = fxt_level(0u, c[i]);
+                    r = vset3f(r, u32(i), fxt_level(0u, c[i]));
                 }
             }
             // The master pass writes premultiplied values; the channel pass reads them back.
@@ -540,7 +540,7 @@ fn fxt_point(@builtin(global_invocation_id) gid: vec3<u32>) {
             for (var i = 0u; i < 3u; i++) {
                 let off = 7u + 7u * i;
                 if (!fxt_level_ident(off)) {
-                    oc[i] = fxt_level(off, qc[i]);
+                    oc = vset3f(oc, u32(i), fxt_level(off, qc[i]));
                 }
             }
             var na = qa;
@@ -559,7 +559,7 @@ fn fxt_point(@builtin(global_invocation_id) gid: vec3<u32>) {
             var r: vec3<f32>;
             for (var k = 0; k < 3; k++) {
                 let st = clamp((c[k] - lo[k]) / (hi[k] - lo[k]), 0.0, 1.0);
-                r[k] = powz(st, g[k]);
+                r = vset3f(r, u32(k), powz(st, g[k]));
             }
             r = fxt_mix(r, c, g.w);
             let na = clamp(max(a, 0.0), 0.0, 1.0);
@@ -686,7 +686,7 @@ fn fxt_point(@builtin(global_invocation_id) gid: vec3<u32>) {
                 var v = c[k] + d * keep;
                 v = 0.5 + (v - 0.5) * (1.0 + contrast);
                 v += darks * 0.25 * (1.0 - l) * (1.0 - l) + brights * 0.25 * l * l;
-                r[k] = max(v, 0.0);
+                r = vset3f(r, u32(k), max(v, 0.0));
             }
             r = fxt_mix(r, c, P.f[3].y);
             o = vec4<f32>(r * a, a);
@@ -710,7 +710,7 @@ fn fxt_point(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let ay = data[base + 2u + 2u * (i - 1u)];
                 let cx = data[base + 1u + 2u * i];
                 let cy = data[base + 2u + 2u * i];
-                r[k] = ay + (cy - ay) * (v - ax) / max(cx - ax, 1e-9);
+                r = vset3f(r, u32(k), ay + (cy - ay) * (v - ax) / max(cx - ax, 1e-9));
             }
             o = vec4<f32>(r * a, a);
         }

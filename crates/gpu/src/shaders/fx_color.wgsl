@@ -81,8 +81,8 @@ fn fxc_sc_weights(c0: vec3<f32>) -> array<f32, 9> {
         var j = i;
         while (j > 0u && c[idx[j]] > c[idx[j - 1u]]) {
             let t = idx[j];
-            idx[j] = idx[j - 1u];
-            idx[j - 1u] = t;
+            idx = vset3u(idx, u32(j), idx[j - 1u]);
+            idx = vset3u(idx, u32(j - 1u), t);
             j--;
         }
     }
@@ -194,7 +194,7 @@ fn fxc_point(@builtin(global_invocation_id) gid: vec3<u32>) {
                 var o: vec3<f32>;
                 for (var i = 0; i < 3; i++) {
                     let r = P.f[i];
-                    o[i] = max(c.x * r.x + c.y * r.y + c.z * r.z + r.w, 0.0);
+                    o = vset3f(o, u32(i), max(c.x * r.x + c.y * r.y + c.z * r.z + r.w, 0.0));
                 }
                 if (P.u[0].y != 0u) {
                     o = vec3<f32>(o.x);
@@ -224,7 +224,7 @@ fn fxc_point(@builtin(global_invocation_id) gid: vec3<u32>) {
                     if (relative) {
                         delta = delta * max(ink, 0.0);
                     }
-                    o[i] -= wr * delta;
+                    o = vset3f(o, u32(i), o[i] - (wr * delta));
                 }
             }
             let na = clamp(max(a, 0.0), 0.0, 1.0);
@@ -434,11 +434,11 @@ fn fxc_lumetri(@builtin(global_invocation_id) gid: vec3<u32>) {
         c = c + (d - c) * intensity;
     }
     for (var i = 0u; i < 3u; i++) {
-        c[i] = fxc_tone_curve(c[i], data[20], data[21], data[22]);
+        c = vset3f(c, u32(i), fxc_tone_curve(c[i], data[20], data[21], data[22]));
     }
     for (var i = 0u; i < 3u; i++) {
         let b = 23u + i * 3u;
-        c[i] = fxc_tone_curve(c[i], data[b], data[b + 1u], data[b + 2u]);
+        c = vset3f(c, u32(i), fxc_tone_curve(c[i], data[b], data[b + 1u], data[b + 2u]));
     }
     let ws = fxc_d3(32u);
     let wm = fxc_d3(35u);
@@ -539,9 +539,9 @@ fn fxc_morph(@builtin(global_invocation_id) gid: vec3<u32>) {
     var o = centre;
     for (var i = 0; i < 4; i++) {
         if (modes[i] == 0u) {
-            o[i] = lo[i];
+            o = vset4f(o, u32(i), lo[i]);
         } else if (modes[i] == 1u) {
-            o[i] = hi[i];
+            o = vset4f(o, u32(i), hi[i]);
         }
     }
     textureStore(out, p, o);
@@ -699,7 +699,7 @@ fn fxc_kl_final(@builtin(global_invocation_id) gid: vec3<u32>) {
     let ar = max(raw, 1e-4);
     var fg = max((c - (1.0 - ar) * screen) / ar, vec3<f32>(0.0));
     let spill = max(fxc_screen_diff(fxc_neutralise(fg, dbias), ix, bal), 0.0);
-    fg[ix.x] -= spill / P.f[1].w;
+    fg = vset3f(fg, u32(ix.x), fg[ix.x] - (spill / P.f[1].w));
     let intermediate = fg;
     fg = fxc_kl_replace(fg, c, P.u[1].x, P.f[2].xyz, max(sm - raw, 0.0));
     if (fg_cc) {
@@ -715,7 +715,7 @@ fn fxc_kl_final(@builtin(global_invocation_id) gid: vec3<u32>) {
         case 2u: {
             var cs = fxc_neutralise(c, dbias);
             let s2 = max(fxc_screen_diff(cs, ix, bal), 0.0);
-            cs[ix.x] -= s2;
+            cs = vset3f(cs, u32(ix.x), cs[ix.x] - s2);
             if (fg_cc) {
                 cs = fxc_correct(cs, P.f[3].x, P.f[3].y, P.f[3].z);
             }

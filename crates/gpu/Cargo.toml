@@ -25,8 +25,11 @@ web-time = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 pollster = { workspace = true }
+# Not used in code: pins the patched wgpu-hal (#613), see the root Cargo.toml.
+wgpu-hal = { workspace = true }
 
 [dev-dependencies]
+env_logger = "0.11"
 effectcraft-text = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

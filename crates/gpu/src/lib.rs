@@ -53,6 +53,10 @@
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+// Fails to compile if wgpu isn't using the patched wgpu-hal from [patch.crates-io] (#613).
+#[cfg(not(target_arch = "wasm32"))]
+const _: () = wgpu::hal::EFFECTCRAFT_PATCH_613;
+
 mod adv3d;
 mod bokeh;
 mod classic3d;

@@ -50,6 +50,28 @@ fn acos_p(x: f32) -> f32 {
     return 1.5707963267948966 - asin_p(x);
 }
 
+// atan2 to f32 precision on every backend (Cephes' atanf polynomial), with the CPU's signed zeros:
+// atan2(-0, x < 0) = -π. HLSL's `atan2` is approximate: FXC expands it to a short polynomial with
+// errors near 1.2e-5 rad, and about 1.3e-4 relative near zero, which moves samples by up to
+// 0.01 px in effects that scale the angle by a large radius.
+fn atan2_p(y: f32, x: f32) -> f32 {
+    let ax = abs(x);
+    let ay = abs(y);
+    let mn = min(ax, ay);
+    let mx = max(ax, ay);
+    // Equal magnitudes give a ratio of 1, except 0/0 (the CPU's angle is then 0 or ±π) and ∞/∞
+    // (±π/4 or ±3π/4); the division itself would be NaN there.
+    var t = select(mn / mx, select(0.0, 1.0, mx > 0.0), mn == mx);
+    let big = t > 0.41421356;
+    t = select(t, (t - 1.0) / (t + 1.0), big);
+    let z = t * t;
+    var a = (((8.05374449538e-2 * z - 1.38776856032e-1) * z + 1.99777106478e-1) * z - 3.33329491539e-1) * z * t + t;
+    a = select(a, 0.7853981633974483 + a, big);
+    a = select(a, 1.5707963267948966 - a, ay > ax);
+    a = select(a, 3.141592653589793 - a, (bitcast<u32>(x) & 0x80000000u) != 0u);
+    return select(a, -a, (bitcast<u32>(y) & 0x80000000u) != 0u);
+}
+
 // ---------------------------------------------------------------- sampling (raster::Image)
 
 fn tex_get(t: texture_2d<f32>, x: i32, y: i32) -> vec4<f32> {
@@ -538,4 +560,23 @@ fn curve_encode(curve: u32, v: f32) -> f32 {
         e = hlg_encode(a);
     }
     return select(e, -e, v < 0.0);
+}
+
+// Component writes through a runtime index (`v[i] = x`). FXC (DirectX 12) cannot address a
+// vector component that way: it aborts or tries to unroll the surrounding loops, so the
+// kernel fails to build. A select-based write gives the same result on every backend.
+fn vset3f(v: vec3<f32>, i: u32, x: f32) -> vec3<f32> {
+    return select(v, vec3<f32>(x), vec3<u32>(0u, 1u, 2u) == vec3<u32>(i));
+}
+
+fn vset4f(v: vec4<f32>, i: u32, x: f32) -> vec4<f32> {
+    return select(v, vec4<f32>(x), vec4<u32>(0u, 1u, 2u, 3u) == vec4<u32>(i));
+}
+
+fn vset3u(v: vec3<u32>, i: u32, x: u32) -> vec3<u32> {
+    return select(v, vec3<u32>(x), vec3<u32>(0u, 1u, 2u) == vec3<u32>(i));
+}
+
+fn vset4u(v: vec4<u32>, i: u32, x: u32) -> vec4<u32> {
+    return select(v, vec4<u32>(x), vec4<u32>(0u, 1u, 2u, 3u) == vec4<u32>(i));
 }

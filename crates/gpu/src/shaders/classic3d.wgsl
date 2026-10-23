@@ -255,16 +255,14 @@ fn occlusion(c: u32, p: vec3<f32>, l: u32) -> vec3<f32> {
     }
     let tr = pl.mat1.y;
     let dark = li.shadow.x;
-    var o = vec3<f32>(1.0);
-    for (var k = 0; k < 3; k++) {
-        var st = 0.0;
-        if (px.w > 0.0) {
-            st = clamp(px[k] / px.w, 0.0, 1.0);
-        }
-        let through = (1.0 - alpha) + alpha * tr * st;
-        o[k] = 1.0 - dark * (1.0 - through);
+    // Per channel, as whole vectors: FXC (DirectX 12) can't write a vector component through a
+    // loop index without unrolling every loop around the call, and fails (#613).
+    var st = vec3<f32>(0.0);
+    if (px.w > 0.0) {
+        st = clamp(px.xyz / px.w, vec3<f32>(0.0), vec3<f32>(1.0));
     }
-    return o;
+    let through = (1.0 - alpha) + alpha * tr * st;
+    return 1.0 - dark * (1.0 - through);
 }
 
 fn shadow_of(it: u32, l: u32, p: vec3<f32>) -> vec3<f32> {

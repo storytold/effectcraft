@@ -30,7 +30,8 @@ const ENTRIES: &[&str] = &[
 const EFFECT_ENTRIES: &[&str] = &["box_h", "box_v", "directional", "glow_bright", "glow_combine", "shadow_make", "shadow_combine", "pointwise"];
 
 /// Entry points that also bind group 1 (four read-only storage buffers; see
-/// [`Enc::dispatch_ext`]).
+/// [`Enc::dispatch_ext`]). Like the effect kernels, one that fails to build (FXC on DirectX 12
+/// can't unroll `classic3d`'s loops, #613) leaves its work to the CPU.
 const EXT_ENTRIES: &[&str] = &["classic3d"];
 
 /// Pixel format of every working texture: premultiplied RGBA, 32-bit float (32 bpc headroom;
@@ -604,15 +605,21 @@ impl GpuContext {
             })
         };
         // The compositor's own kernels are required; an effect kernel that doesn't build is
-        // left out, and its effects render on the CPU (see `Enc::take_missing`).
-        let mut pipelines = ENTRIES
-            .iter()
-            .chain(crate::adv3d::SKY_KERNELS)
-            .map(|e| (e, &layout))
-            .chain(EXT_ENTRIES.iter().map(|e| (e, &layout_ext)))
-            .map(|(e, layout)| Ok((*e, build(e, layout)?)))
-            .collect::<Result<HashMap<_, _>, String>>()?;
+        // left out, and its effects render on the CPU (see `Enc::take_missing`). So is a
+        // missing Classic 3D kernel: its 3D runs render on the CPU.
+        let mut pipelines = ENTRIES.iter().chain(crate::adv3d::SKY_KERNELS).map(|e| Ok((*e, build(e, &layout)?))).collect::<Result<HashMap<_, _>, String>>()?;
         let mut unavailable = vec![];
+        for e in EXT_ENTRIES {
+            match build(e, &layout_ext) {
+                Ok(p) => {
+                    pipelines.insert(*e, p);
+                }
+                Err(why) => {
+                    log::warn!("gpu {name}: kernel {e} unavailable, its 3D layers render on the CPU: {why}");
+                    unavailable.push((*e, why));
+                }
+            }
+        }
         for e in EFFECT_ENTRIES
             .iter()
             .chain(crate::fx_color::KERNELS)
@@ -895,6 +902,11 @@ impl GpuContext {
     /// Effect kernels the device couldn't build, with why: their effects render on the CPU.
     pub fn unavailable_kernels(&self) -> &[(&'static str, String)] {
         &self.unavailable
+    }
+
+    /// Whether kernel `entry` was built (an effect or Classic 3D kernel can be missing, #613).
+    pub(crate) fn has_kernel(&self, entry: &str) -> bool {
+        self.pipelines.contains_key(entry)
     }
 
     /// Leave kernel `entry` out, as if it had failed to build (tests of the CPU fallback).

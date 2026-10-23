@@ -31,13 +31,13 @@ fn fxl_lut_apply(o: u32, c0: vec3<f32>, interp: u32) -> vec3<f32> {
         for (var i = 0u; i < 3u; i++) {
             let x = t[i] * f32(n1 - 1u);
             if (interp == 0u) {
-                c[i] = data[b1 + min(u32(round_away(x)), n1 - 1u) * 3u + i];
+                c = vset3f(c, u32(i), data[b1 + min(u32(round_away(x)), n1 - 1u) * 3u + i]);
             } else {
                 let i0 = min(u32(floor(x)), n1 - 2u);
                 let f = x - f32(i0);
                 let a = data[b1 + i0 * 3u + i];
                 let b = data[b1 + (i0 + 1u) * 3u + i];
-                c[i] = a + (b - a) * f;
+                c = vset3f(c, u32(i), a + (b - a) * f);
             }
         }
     }
@@ -161,7 +161,7 @@ fn fxl_file_fwd(o: u32, sh: i32, c0: vec3<f32>, interp: u32) -> vec3<f32> {
     if (sh >= 0) {
         for (var k = 0u; k < 3u; k++) {
             let a = fxl_shaper_at(u32(sh), k);
-            c[k] = fxl_shape(a.x, a.y, c[k], false);
+            c = vset3f(c, u32(k), fxl_shape(a.x, a.y, c[k], false));
         }
     }
     return fxl_lut_apply(o, c, interp);
@@ -207,7 +207,7 @@ fn fxl_file(o: u32, sh: i32, c: vec3<f32>, interp: u32, inverse: bool) -> vec3<f
         if (sh >= 0) {
             for (var k = 0u; k < 3u; k++) {
                 let a = fxl_shaper_at(u32(sh), k);
-                x[k] = fxl_shape(a.x, a.y, x[k], true);
+                x = vset3f(x, u32(k), fxl_shape(a.x, a.y, x[k], true));
             }
         }
         return x;
@@ -340,11 +340,11 @@ fn fxl_cdl(a: u32, c0: vec3<f32>) -> vec3<f32> {
         for (var i = 0u; i < 3u; i++) {
             let v = c0[i] * slope[i] + offset[i];
             if (clampo) {
-                o[i] = powz(clamp(v, 0.0, 1.0), power[i]);
+                o = vset3f(o, u32(i), powz(clamp(v, 0.0, 1.0), power[i]));
             } else if (v >= 0.0) {
-                o[i] = powz(v, power[i]);
+                o = vset3f(o, u32(i), powz(v, power[i]));
             } else {
-                o[i] = v;
+                o = vset3f(o, u32(i), v);
             }
         }
         let l = o.x * FXL_LUMA.x + o.y * FXL_LUMA.y + o.z * FXL_LUMA.z;
@@ -379,7 +379,7 @@ fn fxl_cdl(a: u32, c0: vec3<f32>) -> vec3<f32> {
         if (abs(sl) < 1e-9) {
             sl = 1e-9;
         }
-        r[i] = (u - offset[i]) / sl;
+        r = vset3f(r, u32(i), (u - offset[i]) / sl);
     }
     if (clampo) {
         r = clamp(r, zero, one);
@@ -446,9 +446,9 @@ fn fxl_run(c0: vec3<f32>) -> vec3<f32> {
                 let g = data[pc + 2u];
                 for (var i = 0u; i < 3u; i++) {
                     if (op == 1u) {
-                        c[i] = fxl_decode(tf, g, c[i]);
+                        c = vset3f(c, u32(i), fxl_decode(tf, g, c[i]));
                     } else {
-                        c[i] = fxl_encode(tf, g, c[i]);
+                        c = vset3f(c, u32(i), fxl_encode(tf, g, c[i]));
                     }
                 }
                 pc += 3u;
@@ -522,7 +522,7 @@ fn fxl_run(c0: vec3<f32>) -> vec3<f32> {
                 let lnb = log(base);
                 if (data[pc + 14u] != 0.0) {
                     for (var i = 0u; i < 3u; i++) {
-                        c[i] = (exp((c[i] - lo[i]) / ls[i] * lnb) - lio[i]) / lis[i];
+                        c = vset3f(c, u32(i), (exp((c[i] - lo[i]) / ls[i] * lnb) - lio[i]) / lis[i]);
                     }
                 } else {
                     for (var i = 0u; i < 3u; i++) {
@@ -531,7 +531,7 @@ fn fxl_run(c0: vec3<f32>) -> vec3<f32> {
                         if (v >= 1.1754944e-38) {
                             ln = log(v);
                         }
-                        c[i] = ls[i] * (ln / lnb) + lo[i];
+                        c = vset3f(c, u32(i), ls[i] * (ln / lnb) + lo[i]);
                     }
                 }
                 pc += 16u;
@@ -543,7 +543,7 @@ fn fxl_run(c0: vec3<f32>) -> vec3<f32> {
                 let inv = data[pc + 7u] != 0.0;
                 let mirror = data[pc + 8u] != 0.0;
                 for (var i = 0u; i < 3u; i++) {
-                    c[i] = fxl_moncurve(c[i], g[i], o[i], inv, mirror);
+                    c = vset3f(c, u32(i), fxl_moncurve(c[i], g[i], o[i], inv, mirror));
                 }
                 pc += 9u;
             }

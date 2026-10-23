@@ -98,7 +98,7 @@ fn fg2_segs(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
             }
             if (c > o[j]) {
-                o[j] = c;
+                o = vset4f(o, u32(j), c);
             }
         }
     }

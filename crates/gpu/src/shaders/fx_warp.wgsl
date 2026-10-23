@@ -85,17 +85,18 @@ fn fxw_style(style: u32, k: f32, u: f32, v: f32) -> vec2<f32> {
         case 13u: {
             return vec2<f32>(u * (1.0 - 0.5 * k * (1.0 - v * v)), v * (1.0 + 0.5 * k * bell));
         }
-        default: {
-            let r = sqrt(u * u + v * v);
-            if (r >= 1.0) {
-                return vec2<f32>(u, v);
-            }
-            let a = k * FXW_PI * (1.0 - r);
-            let s = sin(a);
-            let c = cos(a);
-            return vec2<f32>(u * c - v * s, u * s + v * c);
-        }
+        default: {}
     }
+    // Twist (the default style), after the switch: FXC (DirectX 12) rejects a function whose
+    // every return sits inside a switch ("not all control paths return a value", #613).
+    let r = sqrt(u * u + v * v);
+    if (r >= 1.0) {
+        return vec2<f32>(u, v);
+    }
+    let a = k * FXW_PI * (1.0 - r);
+    let s = sin(a);
+    let c = cos(a);
+    return vec2<f32>(u * c - v * s, u * s + v * c);
 }
 
 fn fxw_warp_fwd(q: vec2<f32>) -> vec2<f32> {
@@ -183,7 +184,7 @@ fn fxw_bendit(@builtin(global_invocation_id) gid: vec3<u32>) {
     let ly = dot(v, n);
     // Arc: rho - |(lx, ly - rho)| without cancellation for large radii.
     let dy = ly - rho;
-    let th = atan2(lx, -dy);
+    let th = atan2_p(lx, -dy);
     let dd = lx * lx + ly * ly - 2.0 * ly * rho;
     let w_arc = -dd / (rho + sqrt(max(rho * rho + dd, 0.0)));
     var cand: array<vec3<f32>, 3>;

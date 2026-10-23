@@ -524,7 +524,7 @@ fn fxv_gen(@builtin(global_invocation_id) gid: vec3<u32>) {
                     let q = fxv_equi_px(nd, w, h);
                     s = fxv_sample_equi(q.x, q.y);
                 }
-                res[c] = s[c];
+                res = vset4f(res, u32(c), s[c]);
                 res.w = max(res.w, s.w);
             }
             o = res;

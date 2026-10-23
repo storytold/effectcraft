@@ -577,6 +577,50 @@ fn straight(px: vec4<f32>) -> vec3<f32> {
     return px.xyz / px.w;
 }
 
+// Per-channel helpers for pointwise. Its channel loops used to write `o[i]` through the loop
+// index, which FXC cannot address (X3550) and then fails to unroll (X3511), so the whole
+// kernel failed to build on DirectX 12.
+fn bc_modern(c: f32, br: f32, ct: f32, g: f32) -> f32 {
+    if (c >= 1.0) {
+        return c;
+    }
+    var v = max(c, 0.0);
+    if (br > 0.0) {
+        v = 1.0 - powz(1.0 - v, exp2(1.24 * br));
+    } else if (br < 0.0) {
+        v = powz(v, exp2(-1.32 * br));
+    }
+    if (ct != 0.0) {
+        if (v < 0.5) {
+            v = 0.5 * powz(2.0 * v, g);
+        } else {
+            v = 1.0 - 0.5 * powz(max(2.0 - 2.0 * v, 0.0), g);
+        }
+    }
+    return v;
+}
+
+fn levels_ch(c: f32, ib: f32, iw: f32, g: f32, ob: f32, ow: f32) -> f32 {
+    var t = (c - ib) / max(iw - ib, 1e-6);
+    if (P.u[0].y != 0u) {
+        t = max(t, 0.0);
+    }
+    if (P.u[0].z != 0u) {
+        t = min(t, 1.0);
+    }
+    t = powz(max(t, 0.0), 1.0 / g);
+    return ob + (ow - ob) * t;
+}
+
+fn exposure_ch(c: f32, gain: f32, offset: f32, gamma: f32, lin: bool) -> f32 {
+    if (lin) {
+        let x = c * gain + offset;
+        return sign(x) * powz(abs(x), 1.0 / gamma);
+    }
+    let x = srgb_to_linear(max(c, 0.0)) * gain + offset;
+    return sign(x) * linear_to_srgb(powz(abs(x), 1.0 / gamma));
+}
+
 // u[0].x = op:
 //  1 Tint            f[0] = black, f[1] = white, f[2].x = amount
 //  2 Bright/Contrast f[0] = (brightness, k)
@@ -622,26 +666,8 @@ fn pointwise(@builtin(global_invocation_id) gid: vec3<u32>) {
                     px = vec4<f32>(max((c + br - 0.5) * k + 0.5, vec3<f32>(0.0)) * a, a);
                 } else if (P.u[0].y == 2u) {
                     // Brightness & Contrast tone curves (effects crate bc_modern, AE-fitted #681).
-                    var o = c;
                     let g = max(1.0 + 0.53 * ct, 0.05);
-                    for (var i = 0; i < 3; i++) {
-                        if (c[i] < 1.0) {
-                            var v = max(c[i], 0.0);
-                            if (br > 0.0) {
-                                v = 1.0 - powz(1.0 - v, exp2(1.24 * br));
-                            } else if (br < 0.0) {
-                                v = powz(v, exp2(-1.32 * br));
-                            }
-                            if (ct != 0.0) {
-                                if (v < 0.5) {
-                                    v = 0.5 * powz(2.0 * v, g);
-                                } else {
-                                    v = 1.0 - 0.5 * powz(max(2.0 - 2.0 * v, 0.0), g);
-                                }
-                            }
-                            o[i] = v;
-                        }
-                    }
+                    let o = vec3<f32>(bc_modern(c.x, br, ct, g), bc_modern(c.y, br, ct, g), bc_modern(c.z, br, ct, g));
                     px = vec4<f32>(o * a, a);
                 }
             }
@@ -693,36 +719,19 @@ fn pointwise(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let g = P.f[0].z;
                 let ob = P.f[0].w;
                 let ow = P.f[1].x;
-                var o = vec3<f32>(0.0);
-                for (var i = 0; i < 3; i++) {
-                    var t = (c[i] - ib) / max(iw - ib, 1e-6);
-                    if (P.u[0].y != 0u) {
-                        t = max(t, 0.0);
-                    }
-                    if (P.u[0].z != 0u) {
-                        t = min(t, 1.0);
-                    }
-                    t = powz(max(t, 0.0), 1.0 / g);
-                    o[i] = ob + (ow - ob) * t;
-                }
+                let o = vec3<f32>(levels_ch(c.x, ib, iw, g, ob, ow), levels_ch(c.y, ib, iw, g, ob, ow), levels_ch(c.z, ib, iw, g, ob, ow));
                 px = vec4<f32>(o * a, a);
             }
         }
         case 5u: {
             if (a > 0.0) {
                 let c = straight(px);
-                var o = vec3<f32>(0.0);
-                for (var i = 0; i < 3; i++) {
-                    // Per-channel gain, offset, gamma; negative values are mirrored.
-                    if (P.u[0].y != 0u) {
-                        let x = c[i] * P.f[0][i] + P.f[1][i];
-                        o[i] = sign(x) * powz(abs(x), 1.0 / P.f[2][i]);
-                    } else {
-                        let lin = srgb_to_linear(max(c[i], 0.0));
-                        let x = lin * P.f[0][i] + P.f[1][i];
-                        o[i] = sign(x) * linear_to_srgb(powz(abs(x), 1.0 / P.f[2][i]));
-                    }
-                }
+                // Per-channel gain, offset, gamma; negative values are mirrored.
+                let lin = P.u[0].y != 0u;
+                let o = vec3<f32>(
+                    exposure_ch(c.x, P.f[0].x, P.f[1].x, P.f[2].x, lin),
+                    exposure_ch(c.y, P.f[0].y, P.f[1].y, P.f[2].y, lin),
+                    exposure_ch(c.z, P.f[0].z, P.f[1].z, P.f[2].z, lin));
                 px = vec4<f32>(o * a, a);
             }
         }
@@ -779,10 +788,11 @@ fn pointwise(@builtin(global_invocation_id) gid: vec3<u32>) {
                     c = px.xyz / a;
                     aa = a;
                 }
-                var o = vec3<f32>(0.0);
-                for (var i = 0; i < 3; i++) {
-                    o[i] = curve_eval(P.f[0][i + 1], curve_eval(P.f[0].x, c[i]));
-                }
+                // Unrolled by hand: FXC cannot write a vector component through a loop index.
+                let o = vec3<f32>(
+                    curve_eval(P.f[0].y, curve_eval(P.f[0].x, c.x)),
+                    curve_eval(P.f[0].z, curve_eval(P.f[0].x, c.y)),
+                    curve_eval(P.f[0].w, curve_eval(P.f[0].x, c.z)));
                 let na = clamp(curve_eval(P.f[1].x, aa), 0.0, 1.0);
                 px = vec4<f32>(o * na, na);
             }

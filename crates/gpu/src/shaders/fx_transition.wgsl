@@ -614,7 +614,7 @@ fn ftr_blob(@builtin(global_invocation_id) gid: vec3<u32>) {
 // GPU's approximate atan2 can land just across it, which wraps to the opposite edge of the
 // texture). x = ±0 takes the CPU's −π (its zero is negative there).
 fn ftr_lon_u(x: f32, z: f32) -> f32 {
-    let u = 0.5 + atan2(x, z) / 6.283185307179586;
+    let u = 0.5 + atan2_p(x, z) / 6.283185307179586;
     if (x <= 0.0) {
         return clamp(u, 0.0, 0.5);
     }

@@ -121,11 +121,11 @@ fn fxn_median_huang(@builtin(global_invocation_id) gid: vec3<u32>) {
                 for (var c = 0u; c < 4u; c++) {
                     hist[c * 512u + o[c]] -= 1u;
                     if (o[c] < med[c]) {
-                        lt[c] -= 1u;
+                        lt = vset4u(lt, u32(c), lt[c] - 1u);
                     }
                     hist[c * 512u + n[c]] += 1u;
                     if (n[c] < med[c]) {
-                        lt[c] += 1u;
+                        lt = vset4u(lt, u32(c), lt[c] + 1u);
                     }
                 }
             }
@@ -133,12 +133,12 @@ fn fxn_median_huang(@builtin(global_invocation_id) gid: vec3<u32>) {
         for (var c = 0u; c < 4u; c++) {
             let base = c * 512u;
             while (lt[c] > half) {
-                med[c] -= 1u;
-                lt[c] -= hist[base + med[c]];
+                med = vset4u(med, u32(c), med[c] - 1u);
+                lt = vset4u(lt, u32(c), lt[c] - (hist[base + med[c]]));
             }
             while (lt[c] + hist[base + med[c]] <= half) {
-                lt[c] += hist[base + med[c]];
-                med[c] += 1u;
+                lt = vset4u(lt, u32(c), lt[c] + (hist[base + med[c]]));
+                med = vset4u(med, u32(c), med[c] + 1u);
             }
         }
         textureStore(out, vec2<i32>(x, y), vec4<f32>(data[med.x], data[med.y], data[med.z], data[med.w]));
@@ -285,7 +285,7 @@ fn fxn_unsharp(@builtin(global_invocation_id) gid: vec3<u32>) {
     for (var c = 0; c < 3; c++) {
         let d = o[c] - bl[c];
         if (abs(d) * 255.0 >= P.f[0].y) {
-            o[c] = max(o[c] + d * P.f[0].x, 0.0);
+            o = vset4f(o, u32(c), max(o[c] + d * P.f[0].x, 0.0));
         }
     }
     textureStore(out, p, o);
@@ -305,7 +305,7 @@ fn fxn_pick(@builtin(global_invocation_id) gid: vec3<u32>) {
     let a = textureLoad(aux, p, 0);
     for (var c = 0; c < 4; c++) {
         if (P.u[1][c] != 0u) {
-            o[c] = select(a[c], a.w, P.u[0].x == 1u);
+            o = vset4f(o, u32(c), select(a[c], a.w, P.u[0].x == 1u));
         }
     }
     textureStore(out, p, o);
@@ -324,7 +324,7 @@ fn fxn_cblur_out(@builtin(global_invocation_id) gid: vec3<u32>) {
     var s = vec3<f32>(0.0);
     for (var c = 0; c < 3; c++) {
         if (ba[c] > 1e-6) {
-            s[c] = v[c] / ba[c];
+            s = vset3f(s, u32(c), v[c] / ba[c]);
         }
     }
     let a = clamp(ba.w, 0.0, 1.0);
@@ -380,9 +380,9 @@ fn fxn_morph(@builtin(global_invocation_id) gid: vec3<u32>) {
     var o = centre;
     for (var c = 0; c < 4; c++) {
         if (P.u[1][c] == 0u) {
-            o[c] = lo[c];
+            o = vset4f(o, u32(c), lo[c]);
         } else if (P.u[1][c] == 1u) {
-            o[c] = hi[c];
+            o = vset4f(o, u32(c), hi[c]);
         }
     }
     textureStore(out, p, o);
@@ -856,7 +856,7 @@ fn fxn_rg_unsharp(@builtin(global_invocation_id) gid: vec3<u32>) {
     let l = textureLoad(aux, p, 0);
     for (var c = 0; c < 3; c++) {
         if (abs(v[c] - l[c]) > P.f[0].y) {
-            v[c] = v[c] + (v[c] - l[c]) * P.f[0].x;
+            v = vset4f(v, u32(c), v[c] + (v[c] - l[c]) * P.f[0].x);
         }
     }
     textureStore(out, p, v);

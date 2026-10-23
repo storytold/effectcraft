@@ -33,6 +33,9 @@ use crate::Gpu;
 /// concurrent devices on llvmpipe can crash. Every test helper that hands out a device calls this
 /// first; calling it again on the same thread is a no-op.
 pub(crate) fn hold_gpu_lock() {
+    // Every GPU test passes here: route wgpu's log (D3D12 debug-layer / Vulkan validation
+    // messages, with WGPU_VALIDATION=1) to the test output. RUST_LOG picks the level.
+    let _ = env_logger::builder().is_test(true).try_init();
     use std::cell::RefCell;
     use std::sync::{Mutex, MutexGuard, PoisonError};
     static GPU_LOCK: Mutex<()> = Mutex::new(());
