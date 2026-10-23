@@ -769,12 +769,12 @@ fn warp_editor(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, l
     let busy = app.session.is_warp_analyzing();
     let b1 = Rect::from_min_size(pos2(r.min.x + 24.0, r.min.y + 4.0), vec2(84.0, 22.0));
     let b2 = Rect::from_min_size(pos2(b1.max.x + 8.0, b1.min.y), vec2(84.0, 22.0));
-    if widgets::text_button(ui, b1, "Analyze", false, &t, egui::Id::new(("warp-analyze", g.uid))).clicked() && !busy {
+    if widgets::text_button(ui, b1, crate::i18n::tr("Analyze"), false, &t, egui::Id::new(("warp-analyze", g.uid))).clicked() && !busy {
         actions.push(("warp.analyze".into(), json!({"layer": layer.id.0, "effect": g.uid})));
     }
     app.auto.add(&format!("effectControls.warp.{}.analyze", g.uid), b1, "Analyze");
     if running {
-        if widgets::text_button(ui, b2, "Cancel", false, &t, egui::Id::new(("warp-cancel", g.uid))).clicked() {
+        if widgets::text_button(ui, b2, crate::i18n::tr("Cancel"), false, &t, egui::Id::new(("warp-cancel", g.uid))).clicked() {
             actions.push(("warp.cancel".into(), json!({})));
         }
         app.auto.add(&format!("effectControls.warp.{}.cancel", g.uid), b2, "Cancel");
@@ -1159,7 +1159,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         bp.text(
             pos2(body.center().x, body.min.y + 40.0),
             Align2::CENTER_CENTER,
-            "No effects. Drag one from Effects & Presets.",
+            crate::i18n::tr("No effects. Drag one from Effects & Presets."),
             Tokens::ui(12.0),
             t.text_faint,
         );

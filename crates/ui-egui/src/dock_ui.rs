@@ -39,10 +39,23 @@ impl EffectcraftApp {
                 out.push((panels::viewers::panel(id), t));
             }
         }
-        let Some(comp) = self.session.active_comp() else { return out };
-        if let Some(l) = self.session.state.selected_layers.first().and_then(|id| comp.layer(*id)) {
+        if let Some(comp) = self.session.active_comp()
+            && let Some(l) = self.session.state.selected_layers.first().and_then(|id| comp.layer(*id))
+        {
             out.push((PanelKind::EffectControls, format!("Effect Controls {}", l.name)));
             out.push((PanelKind::Properties, format!("Properties: {}", l.name)));
+        }
+        // The panels named for themselves, in the interface language. The Window menu has carried a
+        // (`window.panel`, title) row for these in every catalog that exists, so the dock reads the
+        // same pair instead of drawing `title()`'s English; a panel the menu does not list (`History`,
+        // `ScriptUI Panel`) keeps its English name, and a tab that names a comp or a layer is listed
+        // above and wins, being found first.
+        for p in PanelKind::ALL {
+            // The Window menu lists most of these; `Markers` is only in the panel catalog, and the
+            // two panels in neither (`History`, `ScriptUI Panel`) keep their English names.
+            let listed = crate::i18n::label(self, "window.panel", p.title());
+            let label = if listed == p.title() { crate::i18n::tr(p.title()) } else { listed };
+            out.push((p, label.to_string()));
         }
         out
     }
@@ -570,7 +583,7 @@ impl EffectcraftApp {
             }
         }
         // Ghost of the dragged tab.
-        let g = painter.layout_no_wrap(p.title().to_string(), crate::theme::Tokens::ui(12.0), Color32::WHITE);
+        let g = painter.layout_no_wrap(crate::i18n::label(self, "window.panel", p.title()).to_string(), crate::theme::Tokens::ui(12.0), Color32::WHITE);
         let gr = Rect::from_min_size(pos + vec2(12.0, 10.0), g.size() + vec2(16.0, 8.0));
         painter.rect_filled(gr, 4.0, t.focus.gamma_multiply(0.85));
         painter.galley(gr.min + vec2(8.0, 4.0), g, Color32::WHITE);

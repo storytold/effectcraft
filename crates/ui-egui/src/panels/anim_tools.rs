@@ -109,7 +109,7 @@ pub fn wiggler(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     app.ui.anim_tools = st.clone();
     let b = Rect::from_min_size(pos2(rect.max.x - 92.0, y), vec2(80.0, 24.0));
     let enabled = app.session.state.selected_keys.len() >= 2;
-    if widgets::text_button(ui, b, "Apply", enabled, &t, egui::Id::new("wg-apply")).clicked() {
+    if widgets::text_button(ui, b, crate::i18n::tr("Apply"), enabled, &t, egui::Id::new("wg-apply")).clicked() {
         let params = json!({
             "apply": if st.wiggle_spatial { "spatial" } else { "temporal" },
             "noise": if st.wiggle_smooth { "smooth" } else { "jagged" },
@@ -150,7 +150,7 @@ pub fn smoother(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     y += ROW + 8.0;
     let b = Rect::from_min_size(pos2(rect.max.x - 92.0, y), vec2(80.0, 24.0));
     let enabled = app.session.state.selected_keys.len() >= 3;
-    if widgets::text_button(ui, b, "Apply", enabled, &t, egui::Id::new("sm-apply")).clicked() {
+    if widgets::text_button(ui, b, crate::i18n::tr("Apply"), enabled, &t, egui::Id::new("sm-apply")).clicked() {
         apply(app, "keys.smooth", json!({"tolerance": tol}));
     }
     app.auto.add("smoother.apply", b, "Apply");
@@ -321,7 +321,7 @@ pub fn mask_interpolation(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rec
             changes.insert("keyframeRate".into(), json!(nr));
         }
     } else {
-        p.text(pos2(xv + 78.0, y + 9.0), Align2::LEFT_CENTER, "per second", Tokens::ui(12.0), t.text_dim);
+        p.text(pos2(xv + 78.0, y + 9.0), Align2::LEFT_CENTER, crate::i18n::tr("per second"), Tokens::ui(12.0), t.text_dim);
     }
     y += ROW;
     let mut check = |app: &mut EffectcraftApp, y: f32, key: &str, text: &str, on: bool| {
@@ -392,7 +392,7 @@ pub fn mask_interpolation(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rec
     }
     let b = Rect::from_min_size(pos2(rect.max.x - 92.0, y), vec2(80.0, 24.0));
     let enabled = app.session.state.selected_keys.len() >= 2;
-    if widgets::text_button(ui, b, "Apply", enabled, &t, egui::Id::new("mi-apply")).clicked() {
+    if widgets::text_button(ui, b, crate::i18n::tr("Apply"), enabled, &t, egui::Id::new("mi-apply")).clicked() {
         match app.session.execute("mask.interpolate", json!({})) {
             Ok(r) => app.ui.status = format!("Mask Interpolation: {} keyframes added ({} vertices)", r["keys"], r["vertices"]),
             Err(e) => app.ui.status = e.to_string(),
