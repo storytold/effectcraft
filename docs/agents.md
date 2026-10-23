@@ -610,6 +610,13 @@ Extension points and the bundled extensions: [plugins.md](plugins.md).
   Dragged onto another property's name or value, in the Timeline or Effect Controls
   (`effectControls.prop.<uid>.value[.<d>]`), it runs `prop.pickWhip`: the reference replaces the
   property's expression, or is added as one, and the expression is enabled.
+* Parent and Track Matte for several layers: on a selected layer's row, the Timeline's Parent
+  menu and pick whip (`timeline.layer.<id>.parent`, `timeline.layer.<id>.pickWhip`) and its Track
+  Matte menu and pick whip (`timeline.layer.<id>.trackMatte`,
+  `timeline.layer.<id>.trackMattePickWhip`) set every selected layer's (on an unselected row,
+  that layer's), in one undo step. Directly: `layer.setParent {layers, parent}` and
+  `layer.setTrackMatte {layers, matte, kind}`, where `kind: "preserve"` keeps each layer's
+  own matte mode.
 * A property's menu (right-click its name; entries `timeline.prop.<uid>.menu.<entry>`): Reset
   (`prop.reset`: no expression, and the property's default value, an effect parameter's or a
   Transform property's; an animated property keeps its keyframes and gets the default as a
