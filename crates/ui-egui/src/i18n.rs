@@ -10,6 +10,8 @@ pub(crate) mod effects;
 /// Translations for the panels, tooltips and dialogs below the menu bar (see the module docs).
 mod ui;
 use effectcraft_engine::menus::{MenuEntry, MenuNode};
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use ui::catalog_characters;
 pub(crate) use ui::{set_current, tr, tr_args};
 
 /// Every language with a catalog, in the order Settings ▸ General ▸ Language lists them.

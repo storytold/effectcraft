@@ -226,7 +226,7 @@ fn new_shape(s: &mut Session, p: &Value) -> Result<Value> {
     let id = s.edit("New Shape Layer", None, |proj, st| {
         let lid = super::shape_tool::new_shape_layer(proj, st, &comp, cid, Some(&name), pos)?;
         let mut next = proj.next_id;
-        let g = super::shape_tool::shape_group(&mut Ids(&mut next), &kind, size, &paint);
+        let g = super::shape_tool::shape_group(&mut Ids(&mut next), &kind, size, &paint, &Default::default());
         proj.next_id = next;
         if let Some(g) = g {
             super::shape_tool::add_to_contents(proj, cid, lid, g, [0.0, 0.0], "layer.newShape")?;
@@ -1219,11 +1219,13 @@ fn add_mask(s: &mut Session, p: &Value) -> Result<Value> {
         None => (if w > 0.0 { w / 2.0 } else { 0.0 }, h / 2.0, w * 0.6, h * 0.6),
     };
     // The shape tools' masks: rectangle, ellipse, rounded rectangle, polygon or star.
-    let path = super::shape_tool::mask_path(shape, [cx, cy], [rw, rh])
+    let options = super::shape_tool::ShapeOptions::from_params(p, "layer.addMask")?;
+    let path = super::shape_tool::mask_path(shape, [cx, cy], [rw, rh], &options)
         .ok_or_else(|| bad("layer.addMask", format!("unknown shape `{shape}`; one of rect, ellipse, rounded, polygon, star")))?;
     let mode = str_p(p, "mode").and_then(MaskMode::from_name).unwrap_or(MaskMode::Add);
     let cycle = s.prefs.appearance.cycle_mask_colors;
-    let uid = s.edit("New Mask", None, |proj, _| {
+    let n_vertices = path.vertices.len();
+    let uid = s.edit("New Mask", None, |proj, st| {
         let mut next = proj.next_id;
         let l = layer_mut(proj, cid, lid)?;
         let masks = l.props.sub_mut("masks").ok_or_else(|| bad("layer.addMask", "this layer can't have masks"))?;
@@ -1232,8 +1234,13 @@ fn add_mask(s: &mut Session, p: &Value) -> Result<Value> {
         let uid = g.uid;
         masks.children.push(g.into());
         proj.next_id = next;
+        st.selected_layers = vec![lid];
+        st.selected_props = vec![(lid, uid)];
+        st.selected_keys.clear();
+        st.selected_vertices = (0..n_vertices).map(|index| crate::VertexRef { layer: lid, mask: uid, index }).collect();
         Ok(uid)
     })?;
+    super::mask::reveal(s, lid, uid);
     Ok(json!({"mask": uid}))
 }
 
@@ -1710,7 +1717,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "New Mask",
             ["Layer", "Mask"],
             Some("Cmd+Shift+N"),
-            "{layer?, shape?: rect|ellipse|rounded|polygon|star, rect? [x,y,w,h] (layer space; a polygon or star fits its width), mode?}",
+            "{layer?, shape?: rect|ellipse|rounded|polygon|star, rect? [x,y,w,h] (layer space; a polygon or star fits its width), mode?, points? (polygon, star), rotation?: deg, roundness? % (rounded), innerRadius? %, outerRoundness? %, innerRoundness? %}",
             has_layers,
             add_mask
         ),

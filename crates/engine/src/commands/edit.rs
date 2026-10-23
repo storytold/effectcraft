@@ -110,6 +110,11 @@ fn duplicate(s: &mut Session, p: &Value) -> Result<Value> {
             }
             return Ok(json!({"effects": out}));
         }
+        // A selected mask or Mask Path duplicates inside its layer, before the layer fallback.
+        let masks = super::prop_groups::selected_masks(s);
+        if !masks.is_empty() {
+            return super::mask::duplicate_selected(s, &masks);
+        }
         // Shape items selected → duplicate them inside their layers.
         let items = super::prop_groups::selected_contents(s);
         if !items.is_empty() {
@@ -910,7 +915,7 @@ pub fn specs() -> Vec<CommandSpec> {
             paste_reversed
         ),
         cmd!("edit.clear", "Clear", ["Edit"], Some("Delete"), "{layers?}", layers_or_keys, delete),
-        cmd!("edit.duplicate", "Duplicate", ["Edit"], Some("Cmd+D"), "{layers?} (effects or shape items when they are selected)", has_layers, duplicate),
+        cmd!("edit.duplicate", "Duplicate", ["Edit"], Some("Cmd+D"), "{layers?} (effects, masks or shape items when they are selected)", has_layers, duplicate),
         cmd!("edit.splitLayer", "Split Layer", ["Edit"], Some("Cmd+Shift+D"), "{layers?}", has_layers, split),
         cmd!("edit.liftWorkArea", "Lift Work Area", ["Edit"], None, "{layers?}", has_comp, lift),
         cmd!("edit.extractWorkArea", "Extract Work Area", ["Edit"], None, "{layers?}", has_comp, extract),

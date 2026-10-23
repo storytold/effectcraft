@@ -408,7 +408,14 @@ fn install_script_fallbacks(family_fonts: &mut FontDefinitions, language: &str) 
         let cjk = if is_chinese(language) { [han, KANA] } else { [KANA, han] };
         let mut names = Vec::new();
         let mut seen = Vec::new();
-        for &(probe, name) in cjk.iter().chain(SCRIPT_PROBES).chain(std::iter::once(&HANGUL)) {
+        // A font covering one Han probe may be a sparse subset. Register additional faces
+        // needed by the actual interface catalog instead of assuming whole-script coverage.
+        let extra = if is_chinese(language) { crate::i18n::catalog_characters(language) } else { Vec::new() };
+        let extra: Vec<_> = extra.into_iter().filter(|ch| *ch >= '\u{2e80}').map(|ch| (ch, "catalog-system")).collect();
+        for &(probe, name) in cjk.iter().chain(SCRIPT_PROBES).chain(std::iter::once(&HANGUL)).chain(&extra) {
+            if name == "catalog-system" && seen.iter().any(|&id| fonts::face(id).has_char(probe)) {
+                continue;
+            }
             let id = fonts::fallback_for(probe, base);
             if seen.contains(&id) {
                 continue;
@@ -422,7 +429,8 @@ fn install_script_fallbacks(family_fonts: &mut FontDefinitions, language: &str) 
             // Use the already-read, parsed bytes rather than reading a font file twice.
             let mut data = FontData::from_owned(font.data().as_bytes().to_vec());
             data.index = face.info.index;
-            family_fonts.font_data.insert(name.to_string(), Arc::new(data));
+            let name = if name == "catalog-system" { format!("{name}-{:x}", probe as u32) } else { name.to_string() };
+            family_fonts.font_data.insert(name.clone(), Arc::new(data));
             for family in family_fonts.families.values_mut() {
                 family.push(name.to_string());
             }

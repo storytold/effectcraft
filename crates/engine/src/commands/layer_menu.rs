@@ -249,7 +249,7 @@ fn center_anchor(s: &mut Session, p: &Value) -> Result<Value> {
     let mut centers = vec![];
     for lid in &ids {
         let Some(l) = comp.layer(*lid) else { continue };
-        if let Some([x0, y0, x1, y1]) = effectcraft_render::content_bounds(&ctx, l) {
+        if let Some([x0, y0, x1, y1]) = effectcraft_render::selection_bounds(&ctx, l) {
             centers.push((*lid, [(x0 + x1) / 2.0, (y0 + y1) / 2.0]));
         }
     }
@@ -268,25 +268,16 @@ fn center_anchor(s: &mut Session, p: &Value) -> Result<Value> {
             if let Some(a) = tr.get_mut("anchor") {
                 a.set_value_at(lt, KV::Vec3([c[0], c[1], anchor[2]]));
             }
-            // Shift every key so the layer stays put over its whole animation (X and Y Position
-            // when the dimensions are separated).
-            let offset = |pr: &mut effectcraft_project::Property, f: &dyn Fn(&KV) -> KV| {
-                pr.value = f(&pr.value);
-                for k in &mut pr.keys {
-                    k.value = f(&k.value);
-                }
-            };
+            // Like editing Position at the CTI: compensate here, without moving other keys.
             if tr.get("positionX").is_some() {
                 for (m, d) in [("positionX", shift[0]), ("positionY", shift[1])] {
                     if let Some(pr) = tr.get_mut(m) {
-                        offset(pr, &|v| KV::Scalar(v.as_f64() + d));
+                        pr.set_value_at(lt, KV::Scalar(pr.value_at(lt).as_f64() + d));
                     }
                 }
             } else if let Some(pr) = tr.get_mut("position") {
-                offset(pr, &|v| {
-                    let c = v.as_vec3();
-                    KV::Vec3([c[0] + shift[0], c[1] + shift[1], c[2]])
-                });
+                let c = pr.value_at(lt).as_vec3();
+                pr.set_value_at(lt, KV::Vec3([c[0] + shift[0], c[1] + shift[1], c[2]]));
             }
         }
         Ok(())

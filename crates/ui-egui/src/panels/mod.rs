@@ -302,3 +302,7 @@ mod preset_drop_tests {
         assert_eq!(PresetRef::Text("typewriter".into()).command(), ("layer.applyTextPreset", json!({"preset": "typewriter"})));
     }
 }
+
+pub(crate) mod shape_draft;
+
+pub(crate) mod free_transform;

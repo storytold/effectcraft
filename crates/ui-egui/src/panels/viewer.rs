@@ -4,7 +4,7 @@
 //! 3D views (Active Camera / Front / … / Custom View 3), camera tools (orbit, pan, dolly) and
 //! camera/light wireframes.
 
-use effectcraft_engine::commands::shape_tool::PaintKind;
+use effectcraft_engine::commands::shape_tool::{PaintKind, ShapeOptions};
 use effectcraft_engine::effects::puppet::PinKind;
 use effectcraft_engine::geom::{Mat3, vec2 as gv2};
 use effectcraft_engine::project::{Comp, Layer, LayerId, LayerSource};
@@ -121,6 +121,8 @@ enum Gesture {
     },
     Marquee {
         start: Pos2,
+        /// Active paths; empty means layer selection rather than point selection.
+        paths: Vec<(LayerId, u64)>,
     },
     /// Dragging selected mask / shape path vertices: press point, the grabbed vertex (comp px,
     /// it snaps), the comp-space move applied so far and comp → path space.
@@ -128,7 +130,6 @@ enum Gesture {
         start: [f64; 2],
         src: [f64; 2],
         applied: [f64; 2],
-        inv: Mat3,
         layer: LayerId,
     },
     /// Dragging a vertex's Bezier tangent (both sides symmetric unless Alt breaks them).
@@ -355,7 +356,7 @@ fn box_corners(b: [f64; 4]) -> [[f64; 2]; 4] {
 /// Layer → comp matrix and its bounds quad (in comp pixels). None for a 3D layer reaching to or
 /// behind the camera (its quad would flip; [`layer_outline`] draws the part in front).
 pub(crate) fn layer_quad(ctx: &EvalCtx, layer: &Layer) -> Option<(Mat3, [[f64; 2]; 4], [f64; 4])> {
-    let b = effectcraft_engine::render::content_bounds(ctx, layer)?;
+    let b = effectcraft_engine::render::selection_bounds(ctx, layer)?;
     let (m, _) = l2c(ctx, layer);
     let corners = box_corners(b);
     if corners.iter().any(|p| homogeneous(&m, *p)[2] < NEAR_W) {
@@ -370,7 +371,7 @@ pub(crate) fn layer_quad(ctx: &EvalCtx, layer: &Layer) -> Option<(Mat3, [[f64; 2
 
 /// The outline of a layer's content box in comp pixels, clipped at the camera's near plane.
 pub(crate) fn layer_outline(ctx: &EvalCtx, layer: &Layer) -> Vec<[f64; 2]> {
-    let Some(b) = effectcraft_engine::render::content_bounds(ctx, layer) else { return vec![] };
+    let Some(b) = effectcraft_engine::render::selection_bounds(ctx, layer) else { return vec![] };
     project_clipped(&l2c(ctx, layer).0, &box_corners(b))
 }
 
@@ -769,6 +770,15 @@ pub(crate) fn checker(p: &egui::Painter, r: Rect) {
     }
 }
 
+pub(crate) fn cancel_transform_gesture(ctx: &egui::Context) {
+    ctx.data_mut(|d| {
+        d.remove::<Gesture>(egui::Id::new("viewer-gesture"));
+        let id = egui::Id::new("viewer-drag-n");
+        let n = d.get_temp::<u64>(id).unwrap_or(0);
+        d.insert_temp(id, n.saturating_add(1));
+    });
+}
+
 pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
     let ctx = ui.ctx().clone();
@@ -987,11 +997,22 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     // Pen path in progress ends when the tool changes or its mask is gone; Esc / Enter also end
     // free transform.
     let finish = ui.input(|i| i.key_pressed(egui::Key::Escape) || i.key_pressed(egui::Key::Enter)) && !ctx.egui_wants_keyboard_input();
+    if finish
+        && app.ui.tool == Tool::Pen
+        && let Some((layer, uid)) = ctx.data(|d| d.get_temp::<(LayerId, u64)>(pen_id()))
+        && app.session.state.selected_props.contains(&(layer, uid))
+    {
+        let _ = app.session.execute("prop.select", json!({"layer": layer.0, "prop": uid}));
+    }
     if app.ui.tool != Tool::Pen || finish {
         ui.data_mut(|d| d.remove::<(LayerId, u64)>(pen_id()));
     }
+    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) && super::shape_draft::active(&ctx) {
+        ctx.data_mut(|d| d.remove::<Gesture>(egui::Id::new("viewer-gesture")));
+        super::shape_draft::end(&ctx);
+    }
     if finish || app.ui.tool != Tool::Selection {
-        ov::end_free_transform(&ctx);
+        ov::end_free_transform(app, &ctx);
     }
     if app.layer_controls_visible() {
         // Settings ▸ General ▸ Path Point and Handle Size; Appearance ▸ Use Label Color for
@@ -1396,10 +1417,29 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 }
             }
         };
+        let cursor = if app.ui.tool == Tool::Selection { ft.as_ref().and_then(|f| ov::ft_cursor(f, hp, &map)).unwrap_or(cursor) } else { cursor };
         ctx.set_cursor_icon(cursor);
-        // Scroll wheel zooms around the pointer.
+        if app.ui.tool == Tool::Selection
+            && let Some(f) = &ft
+        {
+            let rotating = ui.data(|d| matches!(d.get_temp::<Gesture>(egui::Id::new("viewer-gesture")), Some(Gesture::Overlay(ov::Drag::Ft { mode: 2, .. }))));
+            ov::rotation_cursor(&ctx, f, hp, rotating);
+        }
+        // Drawing owns the wheel, including egui's smoothed tail after pointer release.
+        // A fresh wheel event after drawing immediately restores ordinary viewer zoom.
+        let drafting = super::shape_draft::active(&ctx);
+        let wheel =
+            ctx.input(|i| i.events.iter().filter_map(|e| if let egui::Event::MouseWheel { delta, .. } = e { Some(delta.y) } else { None }).sum::<f32>());
         let scroll = ui.input(|i| i.smooth_scroll_delta.y + i.zoom_delta().ln() * 300.0);
-        if scroll.abs() > 0.1 && area.contains(hp) {
+        let capture_id = egui::Id::new("viewer-shape-wheel-capture");
+        let captured = ctx.data(|d| d.get_temp::<bool>(capture_id)).unwrap_or(false);
+        let capture = drafting || (captured && wheel == 0.0 && scroll.abs() > 0.1);
+        ctx.data_mut(|d| d.insert_temp(capture_id, capture));
+        if drafting && wheel != 0.0 {
+            super::shape_draft::key(&ctx, if wheel > 0.0 { egui::Key::ArrowUp } else { egui::Key::ArrowDown }, true);
+        }
+        // Scroll wheel zooms around the pointer outside a drawing gesture.
+        if !capture && scroll.abs() > 0.1 && area.contains(hp) {
             let k = (scroll / 300.0).exp();
             let nz = (zoom * k).clamp(0.01, 32.0);
             let before = map.to_comp(hp);
@@ -1447,8 +1487,8 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             _ if app.ui.viewer.roi_draw => Some(Gesture::Overlay(ov::Drag::Roi { start: map.to_comp(press), keep: [None, None] })),
             // A region of interest handle: resize it from the opposite corner / edge.
             _ if roi_drag(app, &map, comp_rect, zoom, press).is_some() => roi_drag(app, &map, comp_rect, zoom, press).map(Gesture::Overlay),
-            Tool::Selection if ft.as_ref().and_then(|f| ov::begin_ft_drag(f, press, &map)).is_some() => {
-                ft.as_ref().and_then(|f| ov::begin_ft_drag(f, press, &map)).map(Gesture::Overlay)
+            Tool::Selection if ft.as_ref().and_then(|f| ov::begin_ft_drag_with_paths(f, press, &map, mods, &paths)).is_some() => {
+                ft.as_ref().and_then(|f| ov::begin_ft_drag_with_paths(f, press, &map, mods, &paths)).map(Gesture::Overlay)
             }
             Tool::Selection if key_hits.iter().any(|h| h.pos.distance(press) < 6.0) => {
                 ov::begin_key_drag(app, &key_hits, press, map.to_comp(press), mods.shift).map(Gesture::Overlay)
@@ -1503,7 +1543,10 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             }),
             // From where the button went down: by the time the pointer has moved far enough to
             // count as a drag it has already left the press point, and the shape is drawn there.
-            t if t.is_shape() => Some(Gesture::Create { tool: t, start: map.to_comp(press) }),
+            t if t.is_shape() => {
+                super::shape_draft::begin(&ctx, shape_kind(t));
+                Some(Gesture::Create { tool: t, start: map.to_comp(press) })
+            }
             Tool::ObjectMatte => Some(Gesture::ObjectMatteBox { start: press }),
             t if t.puppet_kind().is_some() && super::puppet_tool::hit(&pin_hits, press).is_none() => {
                 // Off the pins: Alt or a press outside the art drags a marquee that selects pins.
@@ -1562,21 +1605,22 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     let _ = app.session.execute("mask.selectVertices", json!({"vertices": [me], "add": mods.shift}));
                 }
                 let src = h.l2c.apply(gv2(h.vertex[0], h.vertex[1]));
-                Gesture::Vertices {
-                    start: map.to_comp(press),
-                    src: [src.x, src.y],
-                    applied: [0.0; 2],
-                    inv: h.l2c.inverse().unwrap_or(Mat3::IDENTITY),
-                    layer: h.layer,
-                }
+                Gesture::Vertices { start: map.to_comp(press), src: [src.x, src.y], applied: [0.0; 2], layer: h.layer }
             }),
             // Everything starts where the button went down: by the time the pointer has moved
             // far enough to count as a drag it may have left a small handle.
             Tool::Selection => {
                 let cpt = map.to_comp(press);
-                // A gizmo arrow is drawn over the box handles, so it is grabbed first: move along
-                // that axis only, without snapping.
-                if let Some((lid, _, ax, ay)) = axis_at(&axis_hits, press) {
+                // In path-editing mode a drag in free space selects vertices, even over art.
+                let mut editing_paths: Vec<_> = app.session.state.selected_vertices.iter().map(|v| (v.layer, v.mask)).collect();
+                let editing_layers: Vec<_> = editing_paths.iter().map(|(layer, _)| *layer).collect();
+                editing_paths = paths.iter().filter(|p| editing_layers.contains(&p.layer)).map(|p| (p.layer, p.uid)).collect();
+                editing_paths.sort();
+                editing_paths.dedup();
+                if !editing_paths.is_empty() {
+                    Some(Gesture::Marquee { start: press, paths: editing_paths })
+                } else if let Some((lid, _, ax, ay)) = axis_at(&axis_hits, press) {
+                    // A gizmo arrow moves along its axis without snapping.
                     let p0 = comp.layer(lid).and_then(|l| Some(ectx.v3(l, l.transform()?, "position", [0.0; 3])));
                     p0.map(|p0| Gesture::Move { layers: vec![(lid, p0, ax, ay)], start: cpt, snap_src: None })
                 } else if let Some((lid, hi, ..)) = handle_hits.iter().find(|(_, _, h, _)| h.distance(press) < HANDLE + 2.0).cloned() {
@@ -1587,7 +1631,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                         let inv = l2c.inverse()?;
                         let a = ectx.v3(&layer, tr, "anchor", [0.0; 3]);
                         let lp = inv.apply(gv2(cpt[0], cpt[1]));
-                        let hp = handle_point(effectcraft_engine::render::content_bounds(&ectx, &layer)?, hi);
+                        let hp = handle_point(effectcraft_engine::render::selection_bounds(&ectx, &layer)?, hi);
                         Some(Gesture::Scale {
                             layer: lid,
                             start_scale: ectx.v3(&layer, tr, "scale", [100.0; 3]),
@@ -1633,7 +1677,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     if !mods.shift && !vertex_hits.iter().any(|h| h.tangent.is_none()) {
                         let _ = app.session.execute("edit.deselectAll", json!({}));
                     }
-                    Some(Gesture::Marquee { start: press })
+                    Some(Gesture::Marquee { start: press, paths: paths.iter().map(|p| (p.layer, p.uid)).collect() })
                 }
             }
             // The Roto Brush paints in the Layer panel only: say so instead of doing nothing.
@@ -1733,21 +1777,38 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     }
                 }
             }
-            Gesture::Create { tool, start } => {
-                if let Some(d) = shape_drag(app, tool, start, cpt, mods) {
+            Gesture::Create { tool, start: from } => {
+                // The keys change the shape while it is dragged out; Spacebar held moves it.
+                let (start, options) = super::shape_draft::frame(&ctx, from, cpt, mods);
+                if start != from {
+                    ui.data_mut(|dd| dd.insert_temp(gid, Gesture::Create { tool, start }));
+                }
+                if let Some(d) = shape_drag(app, tool, start, cpt, mods, options) {
                     draw_shape_ghost(&painter, &map, app, &d, &t);
                 }
             }
-            Gesture::Vertices { start, src, applied, inv, layer } => {
-                // The grabbed vertex snaps (to other layers' vertices and features, guides, grid).
-                let want = [cpt[0] - start[0], cpt[1] - start[1]];
-                let c = vt::snap(app, &ctx, &ectx, &map, &[layer], &[[src[0] + want[0], src[1] + want[1]]], mods);
-                let total = [want[0] + c[0], want[1] + c[1]];
-                let d = inv.apply_vec(gv2(total[0] - applied[0], total[1] - applied[1]));
-                if d.x != 0.0 || d.y != 0.0 {
-                    let _ = app.session.execute("mask.moveVertices", json!({"delta": [d.x, d.y], "merge": merge}));
+            Gesture::Vertices { start, src, applied, layer } => {
+                let want = ov::constrain_move([cpt[0] - start[0], cpt[1] - start[1]], mods.shift);
+                let source = [src[0] + want[0], src[1] + want[1]];
+                let correction = if mods.shift {
+                    let axis = if want[0].abs() >= want[1].abs() { vt::SnapAxis::Horizontal } else { vt::SnapAxis::Vertical };
+                    vt::snap_along_axis(app, &ctx, &ectx, &map, &[layer], source, mods, axis)
+                } else {
+                    vt::snap(app, &ctx, &ectx, &map, &[layer], &[source], mods)
+                };
+                let total = [want[0] + correction[0], want[1] + correction[1]];
+                let delta = [total[0] - applied[0], total[1] - applied[1]];
+                let mut completed = applied;
+                if delta != [0.0; 2] {
+                    let paths: std::collections::BTreeSet<_> = app.session.state.selected_vertices.iter().map(|v| (v.layer, v.mask)).collect();
+                    let paths: Vec<_> = paths.into_iter().map(|(layer, mask)| json!({"layer": layer.0, "mask": mask})).collect();
+                    if let Err(e) = app.session.execute("path.freeTransform", json!({"paths": paths, "space": "comp", "offset": delta, "merge": merge})) {
+                        app.ui.status = e.to_string();
+                    } else {
+                        completed = total;
+                    }
                 }
-                ui.data_mut(|dd| dd.insert_temp(gid, Gesture::Vertices { start, src, applied: total, inv, layer }));
+                ui.data_mut(|dd| dd.insert_temp(gid, Gesture::Vertices { start, src, applied: completed, layer }));
             }
             Gesture::Overlay(d) => match d {
                 ov::Drag::Guide { index, vertical } => {
@@ -1761,7 +1822,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 }
                 d => {
                     let mut snapper = |a: &EffectcraftApp, p: [f64; 2], l: LayerId| vt::snap(a, &ctx, &ectx, &map, &[l], &[p], mods);
-                    if let Some(nd) = ov::update(app, &d, cpt, pos, mods, &merge, zoom, &mut snapper) {
+                    if let Some(nd) = ov::update(app, &ctx, &d, cpt, pos, mods, &merge, zoom, &mut snapper) {
                         ui.data_mut(|dd| dd.insert_temp(gid, Gesture::Overlay(nd)));
                     }
                 }
@@ -1834,7 +1895,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 let _ = app.session.execute("track.setPoint", q);
             }
             Gesture::ObjectMatteBox { start } => super::object_matte_tool::draw_box(app, &painter, start, pos),
-            Gesture::Marquee { start } | Gesture::PinMarquee { start } => {
+            Gesture::Marquee { start, .. } | Gesture::PinMarquee { start } => {
                 let r = Rect::from_two_pos(start, pos);
                 painter.rect_filled(r, 0.0, t.accent.gamma_multiply(0.12));
                 painter.rect_stroke(r, 0.0, Stroke::new(1.0, t.accent), StrokeKind::Middle);
@@ -1877,7 +1938,8 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 Gesture::ObjectMatteBox { start } => super::object_matte_tool::apply(app, &ectx, &map, start, Some(pos), mods.shift),
                 Gesture::Create { tool, start } => {
                     let end = map.to_comp(pos);
-                    create_shape(app, tool, start, end, mods);
+                    let options = super::shape_draft::end(&ctx);
+                    create_shape(app, tool, start, end, mods, options);
                 }
                 Gesture::Overlay(ov::Drag::Roi { start, keep }) => {
                     let c = map.to_comp(pos);
@@ -1894,17 +1956,17 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 Gesture::Overlay(ov::Drag::Guide { index, .. }) if !area.contains(pos) || !comp_rect.expand(40.0).contains(pos) => {
                     let _ = app.session.execute("view.removeGuide", json!({"index": index}));
                 }
-                Gesture::Marquee { start } if vertex_hits.iter().any(|h| h.tangent.is_none() && Rect::from_two_pos(start, pos).contains(h.pos)) => {
+                Gesture::Marquee { start, paths } if !paths.is_empty() => {
                     // Marquee over path vertices selects them.
                     let r = Rect::from_two_pos(start, pos);
                     let v: Vec<serde_json::Value> = vertex_hits
                         .iter()
-                        .filter(|h| h.tangent.is_none() && r.contains(h.pos))
+                        .filter(|h| h.tangent.is_none() && paths.contains(&(h.layer, h.mask)) && r.contains(h.pos))
                         .map(|h| json!({"layer": h.layer.0, "mask": h.mask, "index": h.index}))
                         .collect();
                     let _ = app.session.execute("mask.selectVertices", json!({"vertices": v, "add": mods.shift}));
                 }
-                Gesture::Marquee { start } => {
+                Gesture::Marquee { start, .. } => {
                     let a = map.to_comp(start);
                     let b = map.to_comp(pos);
                     let hits: Vec<u64> = selectable_layers(&comp, time)
@@ -1916,6 +1978,8 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 _ => {}
             }
         }
+        ov::finish_transform_step(app, &ctx);
+        super::shape_draft::end(&ctx);
         ui.data_mut(|d| {
             d.remove::<Gesture>(gid);
             let n: u64 = d.get_temp(egui::Id::new("viewer-drag-n")).unwrap_or(0);
@@ -1974,9 +2038,9 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     let _ = app.session.execute("mask.convertVertex", json!({"layer": h.layer.0, "mask": h.mask, "index": h.index}));
                 }
             }
-            Tool::Selection if ft.is_some() && ft.as_ref().and_then(|f| ov::begin_ft_drag(f, pos, &map)).is_none() => {
+            Tool::Selection if ft.is_some() && ft.as_ref().and_then(|f| ov::begin_ft_drag(f, pos, &map, mods)).is_none() => {
                 // Clicking away from the free-transform box ends it.
-                ov::end_free_transform(&ctx);
+                ov::end_free_transform(app, &ctx);
             }
             Tool::ObjectMatte => super::object_matte_tool::apply(app, &ectx, &map, pos, None, mods.shift),
             t if t.puppet_kind().is_some() => {
@@ -2034,7 +2098,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             let all: Vec<serde_json::Value> = (0..p.sp.vertices.len()).map(|index| json!({"layer": l.0, "mask": m, "index": index})).collect();
             let _ = app.session.execute("mask.selectVertices", json!({"vertices": all}));
         }
-        ov::begin_free_transform(&ctx, l, m);
+        ov::begin_free_transform(app, &ctx, l, m);
     } else if resp.double_clicked()
         && !text_owns
         && !app.ui.tool.is_pen()
@@ -2447,6 +2511,8 @@ struct ShapeDrag {
     centre: [f64; 2],
     size: [f64; 2],
     target: ShapeTarget,
+    /// What the keys made of it while it was dragged out.
+    options: ShapeOptions,
     /// The selected layer's name and the index its next mask would take, for the ghost's caption
     /// and colour.
     layer_name: String,
@@ -2465,9 +2531,9 @@ fn shape_kind(tool: Tool) -> &'static str {
 }
 
 /// What a shape tool drag from `start` to `end` makes, or `None` while it is too small to make
-/// anything. Alt (Option) draws from the press point and Shift squares the box; the live ghost and
+/// anything. Cmd (Ctrl) draws from the press point and Shift squares the box; the live ghost and
 /// [`create_shape`] both go through this, so the drag always shows what it will commit.
-fn shape_drag(app: &EffectcraftApp, tool: Tool, start: [f64; 2], end: [f64; 2], mods: egui::Modifiers) -> Option<ShapeDrag> {
+fn shape_drag(app: &EffectcraftApp, tool: Tool, start: [f64; 2], end: [f64; 2], mods: egui::Modifiers, mut options: ShapeOptions) -> Option<ShapeDrag> {
     let comp = app.session.active_comp()?;
     let selected = app.session.state.selected_layers.first().copied();
     let sel = selected.and_then(|id| comp.layer(id));
@@ -2483,9 +2549,27 @@ fn shape_drag(app: &EffectcraftApp, tool: Tool, start: [f64; 2], end: [f64; 2], 
     };
     let (target, layer) = target;
     let mask_index = if target == ShapeTarget::Mask { layer.and_then(|l| l.masks()).map_or(0, |m| m.groups().count()) } else { 0 };
+    if matches!(tool, Tool::Polygon | Tool::Star) {
+        let radius = (end[0] - start[0]).hypot(end[1] - start[1]);
+        if radius < 1.0 {
+            return None;
+        }
+        options.rotation = if mods.shift { 0.0 } else { (end[1] - start[1]).atan2(end[0] - start[0]).to_degrees() + 90.0 };
+        return Some(ShapeDrag {
+            kind: shape_kind(tool),
+            centre: start,
+            size: [radius * 2.0; 2],
+            target,
+            options,
+            layer_name: layer.map_or_else(String::new, |l| l.name.clone()),
+            mask_index,
+        });
+    }
     let (mut w, mut h) = ((end[0] - start[0]).abs(), (end[1] - start[1]).abs());
-    // Ctrl/Cmd draws from the press point as the centre, as in After Effects.
-    if mods.command {
+    // Ctrl/Cmd draws from the press point as the centre; on a star it changes the outer radius
+    // alone instead (`shape_draft`).
+    let centred = mods.command && tool != Tool::Star;
+    if centred {
         w *= 2.0;
         h *= 2.0;
     }
@@ -2499,9 +2583,10 @@ fn shape_drag(app: &EffectcraftApp, tool: Tool, start: [f64; 2], end: [f64; 2], 
     }
     Some(ShapeDrag {
         kind: shape_kind(tool),
-        centre: if mods.command { start } else { [start[0].min(end[0]) + w / 2.0, start[1].min(end[1]) + h / 2.0] },
+        centre: if centred { start } else { [start[0] + (end[0] - start[0]).signum() * w / 2.0, start[1] + (end[1] - start[1]).signum() * h / 2.0] },
         size: [w, h],
         target,
+        options,
         layer_name: layer.map_or_else(String::new, |l| l.name.clone()),
         mask_index,
     })
@@ -2517,7 +2602,7 @@ fn paint_rgb(c: [f32; 3], opacity: f64, alpha: f32) -> Color32 {
 /// outlined in its Stroke (or the mask colour, for a mask), captioned with where it goes.
 fn draw_shape_ghost(painter: &egui::Painter, map: &ViewerMap, app: &EffectcraftApp, d: &ShapeDrag, t: &Tokens) {
     // The engine's own geometry for the kind, so the ghost is the shape and not a stand-in for it.
-    let Some(sp) = effectcraft_engine::commands::shape_tool::mask_path(d.kind, d.centre, d.size) else { return };
+    let Some(sp) = effectcraft_engine::commands::shape_tool::mask_path(d.kind, d.centre, d.size, &d.options) else { return };
     let mut pts = ov::flatten(&sp, &Mat3::IDENTITY, map);
     if pts.first() == pts.last() {
         pts.pop();
@@ -2561,8 +2646,15 @@ fn bounds_of(pts: &[Pos2]) -> Option<Rect> {
     Some(r)
 }
 
-fn create_shape(app: &mut EffectcraftApp, tool: Tool, a: [f64; 2], b: [f64; 2], mods: egui::Modifiers) {
-    let Some(d) = shape_drag(app, tool, a, b, mods) else { return };
+fn create_shape(app: &mut EffectcraftApp, tool: Tool, a: [f64; 2], b: [f64; 2], mods: egui::Modifiers, options: ShapeOptions) {
+    let Some(d) = shape_drag(app, tool, a, b, mods, options) else { return };
+    // The shape's own parameters join the command's.
+    let with_options = |mut q: serde_json::Value| {
+        if let (Some(q), serde_json::Value::Object(o)) = (q.as_object_mut(), d.options.to_params()) {
+            q.extend(o);
+        }
+        q
+    };
     let (kind, (w, h), (cx, cy)) = (d.kind, (d.size[0], d.size[1]), (d.centre[0], d.centre[1]));
     // A mask on the selected layer, as the ghost showed.
     if d.target == ShapeTarget::Mask {
@@ -2583,7 +2675,7 @@ fn create_shape(app: &mut EffectcraftApp, tool: Tool, a: [f64; 2], b: [f64; 2], 
             let p0 = inv.apply(gv2(cx - w / 2.0, cy - h / 2.0));
             let p1 = inv.apply(gv2(cx + w / 2.0, cy + h / 2.0));
             let rect = [p0.x.min(p1.x), p0.y.min(p1.y), (p1.x - p0.x).abs(), (p1.y - p0.y).abs()];
-            if let Err(e) = app.session.execute("layer.addMask", json!({"layer": l.id.0, "shape": kind, "rect": rect})) {
+            if let Err(e) = app.session.execute("layer.addMask", with_options(json!({"layer": l.id.0, "shape": kind, "rect": rect}))) {
                 app.ui.status = e.to_string();
             }
         }
@@ -2591,7 +2683,7 @@ fn create_shape(app: &mut EffectcraftApp, tool: Tool, a: [f64; 2], b: [f64; 2], 
     }
     // Into the selected shape layer's Contents as a new group (as in After Effects), else a new
     // shape layer; painted with the Tools bar's Fill and Stroke.
-    if let Err(e) = app.session.execute("shape.newShape", json!({"kind": kind, "size": [w, h], "position": [cx, cy]})) {
+    if let Err(e) = app.session.execute("shape.newShape", with_options(json!({"kind": kind, "size": [w, h], "position": [cx, cy]}))) {
         app.ui.status = e.to_string();
     }
 }
@@ -2782,6 +2874,28 @@ fn show_frame(app: &mut EffectcraftApp, ctx: &egui::Context, key: crate::frames:
 mod tests {
     use super::*;
     use effectcraft_engine::geom::{Mat4, vec3};
+
+    #[test]
+    fn masked_layer_quad_handles_and_picking_follow_the_mask() {
+        let mut s = effectcraft_engine::Session::default();
+        s.execute("comp.new", serde_json::json!({"width": 200, "height": 100, "duration": 2})).unwrap();
+        let id = s.execute("layer.newSolid", serde_json::json!({"width": 200, "height": 100})).unwrap()["layer"].as_u64().unwrap();
+        s.execute("mask.new", serde_json::json!({"layer": id, "vertices": [[30,30],[70,30],[70,70],[30,70]], "closed": true})).unwrap();
+        let cid = s.active_comp_id().unwrap();
+        let comp = s.active_comp().unwrap();
+        let layer = comp.layer(LayerId(id)).unwrap();
+        let ctx = EvalCtx::new(&s.project, cid, comp, s.time());
+        let (_, quad, b) = layer_quad(&ctx, layer).unwrap();
+        assert_eq!(b, [30.0, 30.0, 70.0, 70.0]);
+        assert_eq!(quad, box_corners(b));
+        assert_eq!(handle_point(b, 0), [30.0, 30.0]);
+        assert_eq!(handle_point(b, 5), [70.0, 50.0]);
+        assert_eq!(layers_at(&ctx, [50.0, 50.0]).count(), 1);
+        assert_eq!(layers_at(&ctx, [150.0, 50.0]).count(), 0);
+        let features = effectcraft_engine::viewer::layer_features(&ctx, layer);
+        assert!(features.contains(&[70.0, 50.0]));
+        assert!(!features.contains(&[200.0, 50.0]));
+    }
 
     /// #1544: Shift-clicking with the Pen keeps the new segment horizontal, vertical or diagonal.
     #[test]

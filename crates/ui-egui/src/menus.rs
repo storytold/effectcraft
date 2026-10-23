@@ -310,6 +310,9 @@ fn only_comp(p: &Value) -> Option<effectcraft_engine::project::ItemId> {
 
 /// Execute a UI or engine command by id.
 pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: Value) -> Result<Value, String> {
+    if id == "path.freeTransform" && no_params(&params) && crate::panels::viewer_overlays::begin_selected_free_transform(app, ctx) {
+        return Ok(json!({"interactive": true}));
+    }
     if matches!(id, "effects.copyPresetsFolderPath" | "mediaBrowser.copySourcePath") {
         return frontend(app, ctx, id, params);
     }
@@ -872,6 +875,11 @@ fn clipboard_note(s: &effectcraft_engine::Session) -> String {
 }
 
 pub(crate) fn run_engine(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: Value) -> Result<Value, String> {
+    if matches!(id, "edit.undo" | "edit.redo")
+        && let Some(result) = crate::panels::viewer_overlays::transform_undo(app, ctx, id == "edit.redo")
+    {
+        return result;
+    }
     // Events already queued belong to earlier invocations (`engine.execute` defers them).
     let queued = app.session.events.len();
     let mut r = app.session.execute(id, params).map_err(|e| e.to_string());
@@ -879,6 +887,27 @@ pub(crate) fn run_engine(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str
         app.ui.status = e.clone();
     } else if COPY_COMMANDS.contains(&id) && app.session.state.text_edit.is_none() {
         ctx.copy_text(clipboard_note(&app.session));
+    }
+    if r.is_ok() {
+        match id {
+            "layer.select" => {
+                app.session.state.selected_vertices.clear();
+                crate::panels::viewer_overlays::end_free_transform(app, ctx);
+            }
+            "prop.select"
+                if app.session.state.selected_props.iter().any(|(lid, uid)| {
+                    app.session.active_comp().and_then(|c| c.layer(*lid)).is_some_and(|l| {
+                        let group = l.props.find_group(*uid).or_else(|| l.props.parent_of(*uid));
+                        group.is_some_and(|g| g.get("path").is_some_and(|p| g.uid == *uid || p.uid == *uid))
+                    })
+                }) =>
+            {
+                app.ui.tool = Tool::Selection;
+                crate::panels::viewer_overlays::end_free_transform(app, ctx);
+            }
+            "edit.undo" | "edit.redo" => crate::panels::viewer_overlays::reset_free_transform_pivot(app, ctx),
+            _ => {}
+        }
     }
     let events = app.session.drain_events();
     for (index, ev) in events.into_iter().enumerate() {
@@ -910,6 +939,59 @@ pub fn frontend(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, p: Valu
     let now = ctx.input(|i| i.time);
     let v = &mut app.ui.viewer;
     Ok(match id {
+        "timeline.revealShape" => {
+            if let (Some(lid), Some(uid)) = (p.get("layer").and_then(Value::as_u64), p.get("shape").and_then(Value::as_u64)) {
+                let layer_id = effectcraft_engine::project::LayerId(lid);
+                if app.session.state.selected_props.contains(&(layer_id, uid))
+                    && let Some(layer) = app.session.active_comp().and_then(|c| c.layer(layer_id))
+                    && layer.props.sub("contents").is_some_and(|g| g.find_group(uid).is_some())
+                {
+                    let mut ancestors = vec![uid];
+                    let mut current = uid;
+                    for _ in 0..64 {
+                        let Some(parent) = layer.props.parent_of(current) else { break };
+                        ancestors.push(parent.uid);
+                        current = parent.uid;
+                    }
+                    let tl = &mut app.ui.timeline;
+                    tl.open_layers.insert(lid);
+                    tl.open_groups.extend(ancestors);
+                    if let Some(kinds) = tl.layer_reveal.get_mut(&lid)
+                        && !kinds.is_empty()
+                        && !kinds.iter().any(|kind| kind == "selected")
+                    {
+                        kinds.push("selected".into());
+                    }
+                    tl.search.clear();
+                    tl.scroll_to = Some(crate::state::ScrollTo::Property(uid));
+                }
+            }
+            Value::Null
+        }
+        "timeline.revealMask" => {
+            if let (Some(lid), Some(uid)) = (p.get("layer").and_then(Value::as_u64), p.get("mask").and_then(Value::as_u64)) {
+                let layer_id = effectcraft_engine::project::LayerId(lid);
+                // Deferred events must not reopen masks after selection or composition changed.
+                if app.session.state.selected_props.contains(&(layer_id, uid))
+                    && let Some(masks) = app.session.active_comp().and_then(|c| c.layer(layer_id)).and_then(|l| l.masks())
+                    && masks.find_group(uid).is_some()
+                {
+                    let masks_uid = masks.uid;
+                    let tl = &mut app.ui.timeline;
+                    tl.open_layers.insert(lid);
+                    tl.open_groups.extend([masks_uid, uid]);
+                    if let Some(kinds) = tl.layer_reveal.get_mut(&lid)
+                        && !kinds.is_empty()
+                        && !kinds.iter().any(|kind| kind == "masks")
+                    {
+                        kinds.push("masks".into());
+                    }
+                    tl.search.clear();
+                    tl.scroll_to = Some(crate::state::ScrollTo::Property(uid));
+                }
+            }
+            Value::Null
+        }
         "mediaBrowser.copySourcePath" => {
             let path = p.get("path").and_then(Value::as_str).filter(|path| !path.is_empty()).ok_or("A source path is required")?;
             ctx.copy_text(path.to_string());
@@ -1527,6 +1609,12 @@ pub fn menus() -> Vec<&'static str> {
 
 pub(crate) fn entry_label(app: &EffectcraftApp, e: &MenuEntry) -> String {
     let shown = match e.command.as_str() {
+        "edit.undo" if crate::panels::viewer_overlays::transform_history_label(app, false).is_some() => {
+            format!("Undo {}", crate::panels::viewer_overlays::transform_history_label(app, false).unwrap_or("Free Transform"))
+        }
+        "edit.redo" if crate::panels::viewer_overlays::transform_history_label(app, true).is_some() => {
+            format!("Redo {}", crate::panels::viewer_overlays::transform_history_label(app, true).unwrap_or("Free Transform"))
+        }
         "edit.undo" => app.session.history.undo.last().map(|u| format!("Undo {}", u.0)).unwrap_or_else(|| "Can't Undo".into()),
         "edit.redo" => app.session.history.redo.last().map(|u| format!("Redo {}", u.0)).unwrap_or_else(|| "Can't Redo".into()),
         // Window ▸ Layer: the layer open in the Layer panel.
@@ -1606,6 +1694,11 @@ pub(crate) fn entry_checked(app: &EffectcraftApp, e: &MenuEntry) -> Option<bool>
 }
 
 pub(crate) fn entry_enabled(app: &EffectcraftApp, e: &MenuEntry) -> bool {
+    if matches!(e.command.as_str(), "edit.undo" | "edit.redo")
+        && crate::panels::viewer_overlays::transform_history_label(app, e.command == "edit.redo").is_some()
+    {
+        return true;
+    }
     if app.ui.focused == PanelKind::Project {
         match e.command.as_str() {
             "edit.duplicate" => {
@@ -1910,6 +2003,7 @@ fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only
         out
     });
     events.retain(|(key, _, _, _)| (*key == egui::Key::Tab) == tab_only);
+    events.retain(|(key, _, pressed, _)| !crate::panels::shape_draft::key(ctx, *key, *pressed));
     // Numpad * (or `*` typed with Shift+8): Add Marker (#275). egui has no key for it, so it
     // comes as text.
     if !tab_only && clipboard && app.dialog.is_none() && ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Text(t) if t == "*"))) {
@@ -2008,6 +2102,16 @@ fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only
             app.session.shortcuts().find(&key).is_none_or(|b| b.scope != app.ui.focused.id())
         }) {
             let (id, params) = (id.clone(), if params.is_null() { json!({}) } else { params.clone() });
+            // Cmd/Ctrl+T transforms a selected path before falling back to the Type tool.
+            // Resolve the active keymap first so a custom binding on this chord still wins.
+            if id == "tool.type"
+                && key == egui::Key::T
+                && mods_match(egui::Modifiers::COMMAND, mods)
+                && matches!(app.ui.focused, PanelKind::Composition | PanelKind::Timeline | PanelKind::Viewer(_))
+                && crate::panels::viewer_overlays::begin_selected_free_transform(app, ctx)
+            {
+                continue;
+            }
             if id == "edit.paste"
                 && let Some(t) = &pasted
             {
@@ -2212,6 +2316,211 @@ fn zoom_step(cur: f32, ppp: f32, zoom_in: bool) -> f32 {
 mod tests {
     use super::*;
 
+    fn free_transform_app() -> (EffectcraftApp, u64, u64) {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.session.execute("comp.new", json!({"width":200,"height":100,"duration":2})).unwrap();
+        let lid = app.session.execute("layer.newSolid", json!({"width":200,"height":100})).unwrap()["layer"].as_u64().unwrap();
+        let uid =
+            app.session.execute("mask.new", json!({"layer":lid,"vertices":[[30,30],[70,30],[70,70],[30,70]],"closed":true})).unwrap()["mask"].as_u64().unwrap();
+        app.ui.focused = PanelKind::Timeline;
+        (app, lid, uid)
+    }
+
+    fn press_free_transform_key(app: &mut EffectcraftApp, ctx: &egui::Context) {
+        let modifiers = egui::Modifiers::COMMAND;
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                events: vec![
+                    egui::Event::ModifiersChanged(modifiers),
+                    egui::Event::Key { key: egui::Key::T, physical_key: None, pressed: true, repeat: false, modifiers },
+                ],
+                ..Default::default()
+            },
+            |ui| handle_shortcuts(app, ui.ctx()),
+        );
+        output.textures_delta.clear();
+    }
+
+    #[test]
+    fn created_shape_items_replace_stale_selection_and_reveal_their_own_rows() {
+        let (mut app, _, _) = free_transform_app();
+        let ctx = egui::Context::default();
+        let result = run_engine(&mut app, &ctx, "shape.newShape", json!({"kind":"rect"})).unwrap();
+        let lid = result["layer"].as_u64().unwrap();
+        let group = result["group"].as_u64().unwrap();
+        let layer = effectcraft_engine::project::LayerId(lid);
+        assert_eq!(app.session.state.selected_props, vec![(layer, group)]);
+        assert!(app.session.state.selected_vertices.is_empty());
+        assert!(app.ui.timeline.open_layers.contains(&lid));
+        assert!(app.ui.timeline.open_groups.contains(&group));
+        app.ui.timeline.layer_reveal.insert(lid, vec!["position".into()]);
+        app.ui.timeline.search = "unrelated".into();
+        let result = run_engine(&mut app, &ctx, "shape.newPath", json!({"layer":lid,"vertices":[[10,10],[40,10],[40,40]],"closed":true})).unwrap();
+        let path = result["path"].as_u64().unwrap();
+        assert_eq!(app.session.state.selected_props, vec![(layer, path)]);
+        assert_eq!(app.session.state.selected_vertices.len(), 3);
+        assert!(app.ui.timeline.open_groups.contains(&path));
+        assert!(app.ui.timeline.layer_reveal[&lid].iter().any(|kind| kind == "selected"));
+        assert!(app.ui.timeline.search.is_empty());
+        assert_eq!(app.ui.timeline.scroll_to, Some(crate::state::ScrollTo::Property(path)));
+        press_free_transform_key(&mut app, &ctx);
+        assert_eq!(crate::panels::viewer_overlays::free_transform_target(&app), Some(vec![(layer, path)]));
+        app.session.execute("edit.deselectAll", json!({})).unwrap();
+        app.ui.timeline.open_groups.clear();
+        frontend(&mut app, &ctx, "timeline.revealShape", json!({"layer":lid,"shape":path})).unwrap();
+        assert!(app.ui.timeline.open_groups.is_empty(), "stale creation events cannot reopen a deselected path");
+    }
+
+    #[test]
+    fn new_mask_reveals_the_selected_row_and_is_ready_for_free_transform() {
+        let (mut app, lid, _) = free_transform_app();
+        app.ui.timeline.open_layers.clear();
+        app.ui.timeline.open_groups.clear();
+        app.ui.timeline.layer_reveal.insert(lid, vec!["position".into()]);
+        app.ui.timeline.search = "unrelated search".into();
+        for command in ["mask.new", "layer.addMask"] {
+            let ctx = egui::Context::default();
+            let result = run_engine(&mut app, &ctx, command, json!({"layer": lid, "vertices": [[90,20],[130,20],[130,60]], "closed": true})).unwrap();
+            let uid = result["mask"].as_u64().unwrap();
+            let masks = app.session.active_comp().unwrap().layer(effectcraft_engine::project::LayerId(lid)).unwrap().masks().unwrap();
+            assert!(app.ui.timeline.open_layers.contains(&lid));
+            assert!(app.ui.timeline.open_groups.contains(&masks.uid));
+            assert!(app.ui.timeline.open_groups.contains(&uid));
+            assert!(app.ui.timeline.layer_reveal[&lid].iter().any(|k| k == "masks"));
+            assert!(app.ui.timeline.search.is_empty());
+            assert_eq!(app.ui.timeline.scroll_to, Some(crate::state::ScrollTo::Property(uid)));
+            press_free_transform_key(&mut app, &ctx);
+            assert_eq!(crate::panels::viewer_overlays::free_transform_target(&app), Some(vec![(effectcraft_engine::project::LayerId(lid), uid)]));
+        }
+        let ctx = egui::Context::default();
+        let before = app.ui.timeline.clone();
+        app.session.execute("edit.deselectAll", json!({})).unwrap();
+        frontend(&mut app, &ctx, "timeline.revealMask", json!({"layer": lid, "mask": 999999})).unwrap();
+        assert_eq!(app.ui.timeline.open_groups, before.open_groups);
+    }
+
+    #[test]
+    fn free_transform_shortcut_opens_the_mask_box() {
+        let (mut app, lid, uid) = free_transform_app();
+        let ctx = egui::Context::default();
+        // A selected Mask Path in the Timeline, without selected viewer vertices.
+        app.session.state.selected_vertices.clear();
+        app.session.execute("prop.select", json!({"layer":lid,"prop":uid})).unwrap();
+        let before = app.session.project.clone();
+        press_free_transform_key(&mut app, &ctx);
+        assert_eq!(crate::panels::viewer_overlays::free_transform_target(&app), Some(vec![(effectcraft_engine::project::LayerId(lid), uid)]));
+        assert_eq!(app.ui.tool, Tool::Selection);
+        assert_eq!(app.session.state.selected_vertices.len(), 4);
+        assert!(app.dialog.is_none());
+        assert_eq!(app.session.project, before, "entering the mode must not edit the project");
+    }
+
+    #[test]
+    fn free_transform_menu_preserves_a_selected_subset() {
+        let (mut app, lid, uid) = free_transform_app();
+        let ctx = egui::Context::default();
+        app.session.execute("mask.selectVertices", json!({"vertices":[{"layer":lid,"mask":uid,"index":0},{"layer":lid,"mask":uid,"index":1}]})).unwrap();
+        let result = invoke(&mut app, &ctx, "path.freeTransform", json!({})).unwrap();
+        assert_eq!(result, json!({"interactive":true}));
+        assert_eq!(app.session.state.selected_vertices.len(), 2);
+        // Parameterised calls still apply numerical transforms, with undo.
+        invoke(&mut app, &ctx, "path.freeTransform", json!({"offset":[10,0]})).unwrap();
+        let comp = app.session.active_comp().unwrap();
+        let layer = comp.layer(effectcraft_engine::project::LayerId(lid)).unwrap();
+        let path = layer.props.find_group(uid).unwrap().get("path").unwrap().value.as_path().unwrap();
+        assert_eq!(path.vertices[0], [40.0, 30.0]);
+        assert_eq!(path.vertices[2], [70.0, 70.0]);
+        app.session.execute("edit.undo", json!({})).unwrap();
+    }
+
+    #[test]
+    fn free_transform_multiple_masks_share_one_box_and_one_undo() {
+        use crate::panels::viewer_overlays as ov;
+        use effectcraft_engine::{project::LayerId, render::EvalCtx};
+        let (mut app, lid, first) = free_transform_app();
+        let second = app.session.execute("mask.new", json!({"layer":lid,"vertices":[[100,30],[140,30],[140,70],[100,70]],"closed":true})).unwrap()["mask"]
+            .as_u64()
+            .unwrap();
+        app.session.execute("prop.select", json!({"layer":lid,"prop":first})).unwrap();
+        app.session.execute("prop.select", json!({"layer":lid,"prop":second,"add":true})).unwrap();
+        let ctx = egui::Context::default();
+        press_free_transform_key(&mut app, &ctx);
+        assert_eq!(ov::free_transform_target(&app), Some(vec![(LayerId(lid), first), (LayerId(lid), second)]));
+        assert_eq!(app.session.state.selected_vertices.len(), 8);
+        let cid = app.session.active_comp_id().unwrap();
+        let comp = app.session.active_comp_arc().unwrap();
+        let layer = comp.layer(LayerId(lid)).unwrap();
+        let eval = EvalCtx::new(&app.session.project, cid, &comp, app.session.time());
+        let paths: Vec<_> = [first, second]
+            .into_iter()
+            .map(|uid| ov::PathInfo {
+                layer: LayerId(lid),
+                uid,
+                m: eval.layer_to_comp(layer).0,
+                sp: layer.props.find_group(uid).unwrap().get("path").unwrap().value.as_path().unwrap().clone(),
+                is_mask: true,
+                feather: Vec::new(),
+            })
+            .collect();
+        let map = crate::panels::viewer::ViewerMap {
+            origin: egui::Pos2::ZERO,
+            zoom: 1.0,
+            comp: [200.0, 100.0],
+            area: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 200.0)),
+        };
+        let mut box_ = None;
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            box_ = ov::draw_free_transform(&mut app, ui.ctx(), ui.painter(), &map, &paths);
+        });
+        output.textures_delta.clear();
+        let box_ = box_.unwrap();
+        assert_eq!(box_.b, [30.0, 30.0, 140.0, 70.0]);
+        let before = app.session.project.clone();
+        let drag = ov::begin_ft_drag(&box_, box_.handles[1], &map, egui::Modifiers::NONE).unwrap();
+        let mut snap = |_: &EffectcraftApp, _: [f64; 2], _: LayerId| [0.0; 2];
+        let drag = ov::update(&mut app, &ctx, &drag, [250.0, 30.0], egui::pos2(250.0, 30.0), egui::Modifiers::NONE, "multi-mask-test", 1.0, &mut snap).unwrap();
+        ov::update(&mut app, &ctx, &drag, [360.0, 30.0], egui::pos2(360.0, 30.0), egui::Modifiers::NONE, "multi-mask-test", 1.0, &mut snap);
+        let comp = app.session.active_comp().unwrap();
+        let layer = comp.layer(LayerId(lid)).unwrap();
+        let a = layer.props.find_group(first).unwrap().get("path").unwrap().value.as_path().unwrap();
+        let b = layer.props.find_group(second).unwrap().get("path").unwrap().value.as_path().unwrap();
+        assert!((a.vertices[1][0] - 150.0).abs() < 1e-8);
+        assert!((b.vertices[1][0] - 360.0).abs() < 1e-8);
+        app.session.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(app.session.project, before, "one undo restores every mask and every drag tick");
+    }
+
+    #[test]
+    fn free_transform_preserves_one_selected_vertex_per_path_and_ignores_stale_props() {
+        let (mut app, lid, first) = free_transform_app();
+        let second =
+            app.session.execute("mask.new", json!({"layer":lid,"vertices":[[100,30],[140,30],[140,70]],"closed":true})).unwrap()["mask"].as_u64().unwrap();
+        let third = app.session.execute("layer.addMask", json!({"layer":lid})).unwrap()["mask"].as_u64().unwrap();
+        app.session.execute("mask.selectVertices", json!({"vertices":[{"layer":lid,"mask":first,"index":0},{"layer":lid,"mask":second,"index":2}]})).unwrap();
+        let selected = app.session.state.selected_vertices.clone();
+        app.session.state.selected_props = vec![(effectcraft_engine::project::LayerId(lid), third)];
+        let ctx = egui::Context::default();
+        press_free_transform_key(&mut app, &ctx);
+        assert_eq!(app.session.state.selected_vertices, selected);
+        assert_eq!(crate::panels::viewer_overlays::free_transform_target(&app).unwrap().len(), 2);
+        app.ui.tool = Tool::Pen;
+        run_engine(&mut app, &ctx, "prop.select", json!({"layer":lid,"prop":first})).unwrap();
+        assert_eq!(app.ui.tool, Tool::Selection, "Timeline mask selection enables point editing");
+        assert_eq!(app.session.state.selected_vertices.len(), 4);
+        run_engine(&mut app, &ctx, "layer.select", json!({"layers":[lid]})).unwrap();
+        assert!(app.session.state.selected_vertices.is_empty(), "explicit layer selection leaves point editing");
+    }
+
+    #[test]
+    fn free_transform_shortcut_keeps_type_tool_without_a_path() {
+        let (mut app, _, _) = free_transform_app();
+        app.session.execute("edit.deselectAll", json!({})).unwrap();
+        let ctx = egui::Context::default();
+        press_free_transform_key(&mut app, &ctx);
+        assert_eq!(app.ui.tool, Tool::Type);
+        assert_eq!(crate::panels::viewer_overlays::free_transform_target(&app), None);
+    }
+
     /// #882: at 125 % / 150 % display scaling Zoom In reaches 100 % (one comp pixel per screen
     /// pixel), not 100 % in points (125 % / 150 % on screen).
     #[test]
@@ -2330,6 +2639,7 @@ mod tests {
             ("keys.deselectAll", "Cmd+Alt+Shift+A"),
             ("layer.extendSelectionNext", "Cmd+Shift+ArrowDown"),
             ("layer.moveInToStart", "Alt+Home"),
+            ("layer.centerAnchor", "Cmd+Alt+Home"),
             ("layer.moveEarlier", "Alt+PageUp"),
             ("layer.moveLater10", "Alt+Shift+PageDown"),
             ("layer.stretchInToTime", "Cmd+Shift+,"),

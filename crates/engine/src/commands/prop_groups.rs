@@ -100,6 +100,22 @@ pub(crate) fn selected_contents(s: &Session) -> Vec<(LayerId, Uid)> {
     out
 }
 
+/// Mask groups or their Mask Path properties selected in the Timeline, once per mask.
+pub(crate) fn selected_masks(s: &Session) -> Vec<(LayerId, Uid)> {
+    let Some(comp) = s.active_comp() else { return vec![] };
+    comp.layers
+        .iter()
+        .flat_map(|layer| {
+            layer.masks().into_iter().flat_map(move |masks| {
+                masks.groups().filter_map(move |mask| {
+                    let selected = |uid| s.state.selected_props.contains(&(layer.id, uid));
+                    (selected(mask.uid) || mask.get("path").is_some_and(|path| selected(path.uid))).then_some((layer.id, mask.uid))
+                })
+            })
+        })
+        .collect()
+}
+
 /// Text animators and their selectors selected on the active comp's text layers, top to bottom.
 /// A selector inside a selected animator isn't listed, since it is copied with it.
 pub(crate) fn selected_animator_items(s: &Session) -> Vec<(LayerId, Uid)> {

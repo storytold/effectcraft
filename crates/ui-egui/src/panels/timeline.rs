@@ -278,6 +278,57 @@ struct Row {
     kind: RowKind,
 }
 
+/// Shared selection for group and property names in the visible Timeline outline.
+fn row_target(row: &Row) -> Option<(LayerId, u64)> {
+    match row.kind {
+        RowKind::Group { uid, .. } if uid & (WAVE_BIT | GEOM_BIT) == 0 => Some((row.layer, uid)),
+        RowKind::Prop { uid } => Some((row.layer, uid)),
+        _ => None,
+    }
+}
+
+fn property_click_actions(
+    app: &EffectcraftApp,
+    ctx: &egui::Context,
+    comp: &Comp,
+    rows: &[Row],
+    target: (LayerId, u64),
+    mods: egui::Modifiers,
+) -> Vec<(String, serde_json::Value)> {
+    let Some(cid) = app.session.active_comp_id() else { return Vec::new() };
+    let anchor_id = egui::Id::new(("timeline-property-anchor", cid.0));
+    let clicked = rows.iter().position(|r| row_target(r) == Some(target));
+    let anchor = ctx
+        .data(|d| d.get_temp::<(LayerId, u64)>(anchor_id))
+        .filter(|a| app.session.state.selected_props.contains(a))
+        .or_else(|| app.session.state.selected_props.iter().rev().find(|a| rows.iter().any(|r| row_target(r) == Some(**a))).copied());
+    if !mods.shift || anchor.is_none() {
+        ctx.data_mut(|d| d.insert_temp(anchor_id, target));
+    }
+    if mods.command && !mods.shift && app.session.state.selected_props.contains(&target) {
+        return vec![("prop.deselect".into(), json!({"layer":target.0.0,"prop":target.1}))];
+    }
+    let start = anchor.and_then(|a| rows.iter().position(|r| row_target(r) == Some(a)));
+    let chosen: Vec<_> = if let (true, Some(a), Some(b)) = (mods.shift, start, clicked) {
+        let parent = |t: (LayerId, u64)| comp.layer(t.0).and_then(|l| l.props.parent_of(t.1)).map(|p| (t.0, p.uid));
+        let sibling_parent = anchor.and_then(parent).filter(|p| Some(*p) == parent(target));
+        rows.iter()
+            .skip(a.min(b))
+            .take(a.abs_diff(b).saturating_add(1))
+            .filter_map(|row| row_target(row).map(|t| (row, t)))
+            .filter(|(_, t)| sibling_parent.is_none_or(|p| parent(*t) == Some(p)))
+            .map(|(row, t)| (t, matches!(row.kind, RowKind::Prop { .. })))
+            .collect()
+    } else {
+        vec![(target, clicked.and_then(|i| rows.get(i)).is_some_and(|r| matches!(r.kind, RowKind::Prop { .. })))]
+    };
+    chosen
+        .into_iter()
+        .enumerate()
+        .map(|(i, ((lid, uid), keys))| ("prop.select".into(), json!({"layer":lid.0,"prop":uid,"add":mods.command || i>0,"selectKeys":keys})))
+        .collect()
+}
+
 const AV_W: f32 = 76.0;
 const LABEL_W: f32 = 20.0;
 const NUM_W: f32 = 26.0;
@@ -937,6 +988,9 @@ fn reveal_rows(app: &EffectcraftApp, l: &Layer, kinds: &[String], rows: &mut Vec
     let mut shown_groups: Vec<u64> = vec![];
     let mut group_rows = |rows: &mut Vec<Row>, g: &PropGroup, fx: bool| {
         for g in g.groups() {
+            if shown_groups.contains(&g.uid) {
+                continue;
+            }
             shown_groups.push(g.uid);
             rows.push(Row {
                 layer: l.id,
@@ -1009,17 +1063,23 @@ fn reveal_rows(app: &EffectcraftApp, l: &Layer, kinds: &[String], rows: &mut Vec
             if has("props") { tl.reveal_props.iter().copied().chain(selected.iter().copied().filter(|_| has("selected"))).collect() } else { selected };
         let reveal_props = &picked;
         // Animation ▸ Reveal Properties…: the engine picked the uids.
-        fn groups_in<'a>(g: &'a PropGroup, set: &std::collections::BTreeSet<u64>, out: &mut Vec<&'a PropGroup>) {
+        fn groups_in<'a>(g: &'a PropGroup, set: &std::collections::BTreeSet<u64>, skip: &[u64], out: &mut Vec<&'a PropGroup>, depth: usize) {
+            if depth > 64 || skip.contains(&g.uid) {
+                return;
+            }
             for sg in g.groups() {
+                if skip.contains(&sg.uid) {
+                    continue;
+                }
                 if set.contains(&sg.uid) {
                     out.push(sg);
                 } else {
-                    groups_in(sg, set, out);
+                    groups_in(sg, set, skip, out, depth + 1);
                 }
             }
         }
         let mut groups = vec![];
-        groups_in(&l.props, reveal_props, &mut groups);
+        groups_in(&l.props, reveal_props, &shown_groups, &mut groups, 0);
         for g in groups {
             let open = tl.open_groups.contains(&g.uid);
             rows.push(Row {
@@ -1091,6 +1151,20 @@ fn revealed_rows(
             }
         }
     }
+    // Non-effect properties are revealed as flat rows. Prune groups already listed above,
+    // including collapsed masks: their children must neither repeat nor leak out of the group.
+    fn collect_unshown(g: &PropGroup, tree: &Tree<'_>, out: &mut Vec<u64>, depth: usize) {
+        if depth > 64 || tree.skip.contains(&g.uid) {
+            return;
+        }
+        for node in &g.children {
+            match node {
+                Node::Prop(p) if (tree.wanted)(p) => out.push(p.uid),
+                Node::Group(g) => collect_unshown(g, tree, out, depth + 1),
+                _ => {}
+            }
+        }
+    }
     let wanted = |p: &Property| shown.contains(&p.uid) && prop_visible(p, l);
     let tree = Tree { l, wanted: &wanted, skip, open, full };
     for c in &l.props.children {
@@ -1102,7 +1176,7 @@ fn revealed_rows(
             }
             Node::Group(g) => {
                 let mut found = vec![];
-                collect_props(g, &mut found, &wanted);
+                collect_unshown(g, &tree, &mut found, 0);
                 rows.extend(found.into_iter().map(|uid| Row { layer: l.id, depth: 1, kind: RowKind::Prop { uid } }));
             }
             Node::Prop(p) if wanted(p) => rows.push(Row { layer: l.id, depth: 1, kind: RowKind::Prop { uid: p.uid } }),
@@ -1896,7 +1970,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             app.ui.timeline.scroll_y = rows.iter().take(i).map(|r| row_height(r, rh)).sum();
         }
     } else if let Some(crate::state::ScrollTo::Property(uid)) = scroll_to
-        && let Some(i) = rows.iter().position(|r| matches!(r.kind, RowKind::Prop { uid: p } if p == uid))
+        && let Some(i) = rows.iter().position(|r| matches!(r.kind, RowKind::Prop { uid: p } | RowKind::Group { uid: p, .. } if p == uid))
     {
         app.ui.timeline.scroll_y = rows.iter().take(i).map(|r| row_height(r, rh)).sum();
     }
@@ -2511,7 +2585,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 let gr = ui.interact(gr_rect, egui::Id::new(("grow", uid)), Sense::click());
                 app.auto.add(&format!("timeline.group.{uid}.name"), gr_rect, name);
                 if gr.clicked() && uid & (WAVE_BIT | GEOM_BIT) == 0 {
-                    actions.push(("prop.select".into(), json!({"layer": layer.id.0, "prop": uid, "selectKeys": false})));
+                    actions.extend(property_click_actions(app, &ctx, &comp, &rows, (layer.id, *uid), ui.input(|i| i.modifiers)));
                 }
                 if gr.double_clicked() {
                     if fx.is_some() {
@@ -2785,7 +2859,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                         .show(|ui| ui.label(&prop.name));
                 }
                 if name_resp.clicked() {
-                    actions.push(("prop.select".into(), json!({"layer": layer.id.0, "prop": uid, "add": ui.input(|i| i.modifiers.shift)})));
+                    actions.extend(property_click_actions(app, &ctx, &comp, &rows, (layer.id, *uid), ui.input(|i| i.modifiers)));
                 }
                 crate::widgets::context_menu(&name_resp, |ui| prop_menu(ui, &mut app.auto, cid, layer, prop, &mut actions));
                 // Value editors.
@@ -3934,8 +4008,13 @@ pub(crate) fn layer_menu(
 ) {
     let Some(&id) = layers.first() else { return };
     let (auto, prefix) = auto;
+    let mut center_anchor_rect = None;
     let mut item = |ui: &mut egui::Ui, label: &str, cmd: &str, params: serde_json::Value| {
-        if ui.button(crate::i18n::context_item(cmd, &params, label)).clicked() {
+        let response = ui.button(crate::i18n::context_item(cmd, &params, label));
+        if cmd == "layer.centerAnchor" {
+            center_anchor_rect = Some(response.rect);
+        }
+        if response.clicked() {
             actions.push(("layer.select".into(), json!({"layers": layers})));
             actions.push((cmd.into(), params));
             ui.close();
@@ -3962,9 +4041,10 @@ pub(crate) fn layer_menu(
     ui.menu_button(crate::i18n::tr("Masks"), |ui| {
         item(ui, "New Mask", "layer.addMask", json!({"layer": id}));
     });
-    ui.menu_button(crate::i18n::tr("Transform"), |ui| {
+    let transform_menu = ui.menu_button(crate::i18n::tr("Transform"), |ui| {
         item(ui, "Reset", "layer.transform", json!({"layers": layers, "op": "reset"}));
         item(ui, "Center In View", "layer.transform", json!({"layers": layers, "op": "center"}));
+        item(ui, "Center Anchor Point in Layer Content", "layer.centerAnchor", json!({"layers": layers}));
         item(ui, "Fit to Comp", "layer.transform", json!({"layers": layers, "op": "fit"}));
         item(ui, "Flip Horizontal", "layer.transform", json!({"layers": layers, "op": "flipH"}));
         item(ui, "Flip Vertical", "layer.transform", json!({"layers": layers, "op": "flipV"}));
@@ -4014,6 +4094,10 @@ pub(crate) fn layer_menu(
     item(ui, "Duplicate", "edit.duplicate", json!({"layers": layers}));
     item(ui, "Split Layer", "edit.splitLayer", json!({"layers": layers}));
     item(ui, "Delete", "edit.clear", json!({"layers": layers}));
+    auto.add(&format!("{prefix}.transform"), transform_menu.response.rect, "Transform");
+    if let Some(rect) = center_anchor_rect {
+        auto.add(&format!("{prefix}.centerAnchor"), rect, "Center Anchor Point in Layer Content");
+    }
     actions.extend(switch_actions);
 }
 
@@ -4262,6 +4346,69 @@ fn value_editor(
 
 #[cfg(test)]
 mod tests {
+    fn property_selection_fixture() -> (EffectcraftApp, LayerId, Vec<u64>) {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.session.execute("comp.new", json!({"width":400,"height":200,"duration":2})).unwrap();
+        let lid = LayerId(app.session.execute("layer.newSolid", json!({})).unwrap()["layer"].as_u64().unwrap());
+        let mut masks = Vec::new();
+        for x in [30, 130, 230] {
+            masks.push(
+                app.session.execute("mask.new", json!({"layer":lid.0,"vertices":[[x,20],[x+40,20],[x+40,60],[x,60]],"closed":true})).unwrap()["mask"]
+                    .as_u64()
+                    .unwrap(),
+            );
+        }
+        let layer = app.session.active_comp().unwrap().layer(lid).unwrap();
+        let root = layer.masks().unwrap().uid;
+        app.ui.timeline.open_layers.insert(lid.0);
+        app.ui.timeline.open_groups.insert(root);
+        app.ui.timeline.open_groups.extend(masks.iter().copied());
+        app.session.execute("edit.deselectAll", json!({})).unwrap();
+        (app, lid, masks)
+    }
+
+    fn click_property(app: &mut EffectcraftApp, ctx: &egui::Context, target: (LayerId, u64), mods: egui::Modifiers) {
+        let comp = app.session.active_comp_arc().unwrap();
+        let rows = build_rows(app, &comp);
+        assert!(rows.iter().any(|r| row_target(r) == Some(target)), "test row must be visible");
+        for (cmd, params) in property_click_actions(app, ctx, &comp, &rows, target, mods) {
+            app.session.execute(&cmd, params).unwrap();
+        }
+    }
+
+    #[test]
+    fn timeline_property_selection_shift_ranges_and_command_toggle() {
+        let (mut app, lid, masks) = property_selection_fixture();
+        let ctx = egui::Context::default();
+        click_property(&mut app, &ctx, (lid, masks[0]), egui::Modifiers::NONE);
+        click_property(&mut app, &ctx, (lid, masks[2]), egui::Modifiers::SHIFT);
+        assert_eq!(app.session.state.selected_props, masks.iter().map(|m| (lid, *m)).collect::<Vec<_>>());
+        assert_eq!(app.session.state.selected_vertices.len(), 12, "expanded mask children do not replace their sibling mask range");
+        click_property(&mut app, &ctx, (lid, masks[1]), egui::Modifiers::SHIFT);
+        assert_eq!(app.session.state.selected_props, vec![(lid, masks[0]), (lid, masks[1])], "range shrinks from the original anchor");
+        click_property(&mut app, &ctx, (lid, masks[2]), egui::Modifiers::COMMAND);
+        assert_eq!(app.session.state.selected_vertices.len(), 12);
+        click_property(&mut app, &ctx, (lid, masks[1]), egui::Modifiers::COMMAND);
+        assert_eq!(app.session.state.selected_props, vec![(lid, masks[0]), (lid, masks[2])]);
+        assert_eq!(app.session.state.selected_vertices.len(), 8);
+    }
+
+    #[test]
+    fn timeline_property_selection_ranges_cover_mask_parameters() {
+        let (mut app, lid, masks) = property_selection_fixture();
+        let ctx = egui::Context::default();
+        let group = app.session.active_comp().unwrap().layer(lid).unwrap().props.find_group(masks[0]).unwrap();
+        let props: Vec<_> = group.props().map(|p| p.uid).collect();
+        let first = *props.first().unwrap();
+        let last = *props.last().unwrap();
+        click_property(&mut app, &ctx, (lid, first), egui::Modifiers::NONE);
+        click_property(&mut app, &ctx, (lid, last), egui::Modifiers::SHIFT);
+        assert_eq!(app.session.state.selected_props, props.iter().map(|p| (lid, *p)).collect::<Vec<_>>());
+        click_property(&mut app, &ctx, (lid, first), egui::Modifiers::COMMAND);
+        assert!(!app.session.state.selected_props.contains(&(lid, first)));
+        assert_eq!(app.session.state.selected_props.len(), props.len() - 1);
+    }
+
     use super::*;
 
     /// Alt/Cmd-click twirls Audio's Waveform row (not in the property tree) with the rest.
@@ -4391,6 +4538,49 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    #[test]
+    fn overlapping_reveal_filters_never_repeat_mask_rows() {
+        let mut app = app();
+        let lid = app.session.state.selected_layers[0];
+        let mut masks = vec![];
+        for _ in 0..3 {
+            masks.push(app.session.execute("layer.addMask", json!({"layer": lid.0})).unwrap()["mask"].as_u64().unwrap());
+        }
+        app.ui.timeline.open_layers.insert(lid.0);
+        for open in [true, false] {
+            app.ui.timeline.open_groups.clear();
+            if open {
+                app.ui.timeline.open_groups.extend(masks.iter().copied());
+            }
+            for kinds in [vec!["maskPath", "masks"], vec!["masks", "props", "maskPath"], vec!["effects", "paint", "selected", "masks", "maskPath"]] {
+                app.ui.timeline.layer_reveal.insert(lid.0, kinds.iter().map(|k| k.to_string()).collect());
+                app.ui.timeline.reveal_props.extend(masks.iter().copied());
+                let comp = app.session.active_comp().unwrap();
+                let layer = comp.layer(lid).unwrap();
+                let rows = build_rows(&app, comp);
+                let mut seen = std::collections::BTreeSet::new();
+                for row in rows.iter().filter(|r| r.layer == lid) {
+                    let uid = match row.kind {
+                        RowKind::Prop { uid } | RowKind::Group { uid, .. } => uid,
+                        _ => continue,
+                    };
+                    assert!(seen.insert(uid), "duplicate row {uid} for {kinds:?}, open={open}");
+                }
+                for uid in &masks {
+                    let path = layer.props.find_group(*uid).unwrap().get("path").unwrap().uid;
+                    assert_eq!(
+                        rows.iter().filter(|r| matches!(r.kind, RowKind::Prop { uid } if uid == path)).count(),
+                        usize::from(open),
+                        "hidden group contents must stay hidden"
+                    );
+                }
+            }
+        }
+        // A single M reveal still shows each Mask Path once without its group.
+        app.ui.timeline.layer_reveal.insert(lid.0, vec!["maskPath".into()]);
+        assert_eq!(labels(&app).iter().filter(|r| r.trim() == "Mask Path").count(), 3);
     }
 
     #[test]

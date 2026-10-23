@@ -82,6 +82,24 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         {
             app.ui.status = e;
         }
+        if resp.double_clicked()
+            && cur.is_shape()
+            && let Some((id, params)) = create_full_shape(app, cur)
+        {
+            crate::panels::shape_draft::reset(
+                ui.ctx(),
+                match cur {
+                    Tool::RoundedRect => "rounded",
+                    Tool::Ellipse => "ellipse",
+                    Tool::Polygon => "polygon",
+                    Tool::Star => "star",
+                    _ => "rect",
+                },
+            );
+            if let Err(e) = crate::menus::invoke(app, ui.ctx(), id, params) {
+                app.ui.status = e;
+            }
+        }
         if slot.len() > 1 {
             let held_for = resp.is_pointer_button_down_on().then(|| ui.input(|i| i.pointer.press_start_time().map(|s| i.time - s))).flatten();
             if let Some(seconds) = held_for
@@ -298,6 +316,39 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             app.set_workspace(name);
         }
         rx = r.min.x - 2.0;
+    }
+}
+
+/// A double-click fills the source layer; with a shape target it uses comp dimensions.
+fn create_full_shape(app: &EffectcraftApp, tool: Tool) -> Option<(&'static str, serde_json::Value)> {
+    let kind = match tool {
+        Tool::Rectangle => "rect",
+        Tool::RoundedRect => "rounded",
+        Tool::Ellipse => "ellipse",
+        Tool::Polygon => "polygon",
+        Tool::Star => "star",
+        _ => return None,
+    };
+    let comp = app.session.active_comp()?;
+    let layer = app.session.state.selected_layers.first().and_then(|id| comp.layer(*id));
+    if let Some(layer) = layer
+        .filter(|l| l.source.is_av() && (app.session.state.shape_tool.creates_mask || !matches!(l.source, effectcraft_engine::project::LayerSource::Shape)))
+    {
+        let (w, h) = effectcraft_engine::render::source_size(&app.session.project, layer);
+        let (mut w, mut h) = (w as f64, h as f64);
+        let (cx, cy) = (w / 2.0, h / 2.0);
+        if matches!(tool, Tool::Polygon | Tool::Star) {
+            w = w.min(h);
+            h = w;
+        }
+        Some(("layer.addMask", json!({"layer":layer.id.0,"shape":kind,"rect":[cx-w/2.0,cy-h/2.0,w,h]})))
+    } else {
+        let (mut w, mut h) = (comp.width as f64, comp.height as f64);
+        if matches!(tool, Tool::Polygon | Tool::Star) {
+            w = w.min(h);
+            h = w;
+        }
+        Some(("shape.newShape", json!({"kind":kind,"size":[w,h],"position":[comp.width as f64/2.0,comp.height as f64/2.0]})))
     }
 }
 
@@ -690,6 +741,23 @@ mod tests {
             },
         );
         out.textures_delta.clear();
+    }
+
+    #[test]
+    fn shape_tool_double_click_uses_source_layer_dimensions() {
+        let mut session = effectcraft_engine::Session::default();
+        session.execute("comp.new", json!({"width":640,"height":360,"duration":3})).unwrap();
+        let lid = session.execute("layer.newSolid", json!({"width":200,"height":100})).unwrap()["layer"].as_u64().unwrap();
+        session.execute("prop.set", json!({"layer":lid,"path":"transform/position","value":[20,30]})).unwrap();
+        let mut app = EffectcraftApp::new(session);
+        let (command, params) = create_full_shape(&app, Tool::Rectangle).unwrap();
+        assert_eq!(params["rect"], json!([0.0, 0.0, 200.0, 100.0]));
+        app.session.execute(command, params).unwrap();
+        app.session.execute("edit.deselectAll", json!({})).unwrap();
+        let (command, params) = create_full_shape(&app, Tool::Ellipse).unwrap();
+        assert_eq!(params["size"], json!([640.0, 360.0]));
+        app.session.execute(command, params).unwrap();
+        assert!(matches!(app.session.active_comp().unwrap().layers[0].source, effectcraft_engine::project::LayerSource::Shape));
     }
 
     #[test]
