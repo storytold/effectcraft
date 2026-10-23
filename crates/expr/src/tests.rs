@@ -193,6 +193,47 @@ fn functions_and_let_are_reusable_across_evaluations() {
 }
 
 #[test]
+fn an_expression_cannot_rebind_a_prelude_name_for_the_next_one() {
+    let f = fx();
+    // #2133: one runtime serves every expression on a thread and user code runs at global scope, so
+    // a write to a prelude name used to outlive the expression that made it and poison every later
+    // one — in this session's other projects too.
+    assert_close!(f.num("linear = function () { return 777 };\n50", 0.0), 50.0);
+    assert_close!(f.num("linear(time, 0, 1, 0, 100)", 0.0), 0.0);
+    assert_close!(f.num("var clamp = 5;\n10", 0.0), 10.0);
+    assert_close!(f.num("clamp(50, 0, 100)", 0.0), 50.0);
+    assert_close!(f.num("Math.sin = function () { return 9 };\n1", 0.0), 1.0);
+    assert_close!(f.num("Math.sin(Math.PI / 2) * 100", 0.0), 100.0);
+    assert_close!(f.num("Object.prototype.leak = 9;\n2", 0.0), 2.0);
+    assert_close!(f.num("({}).leak === undefined ? 1 : 0", 0.0), 1.0);
+}
+
+/// The same leak, reached through the objects instead of the names: a prelude constructor keeps its
+/// methods on its `prototype`, the prelude itself calls `Array.isArray` and `Object.setPrototypeOf`
+/// while it answers an expression, and `thisProject` is reachable surface that holds no function at
+/// all (#2133).
+#[test]
+fn an_expression_cannot_tamper_with_a_prelude_object_for_the_next_one() {
+    let f = fx();
+    // An unqualified name is an accessor, so it takes a `defineProperty` or a `delete` rather than
+    // an assignment; the setter an assignment goes through writes per-evaluation state.
+    assert_close!(f.num("try { Object.defineProperty(globalThis, 'width', { value: 777 }) } catch (e) {}\n1", 0.0), 1.0);
+    assert_close!(f.num("delete width;\n2", 0.0), 2.0);
+    assert_close!(f.num("width", 0.0), 20.0);
+    assert_close!(f.num("Comp.prototype = {};\n3", 0.0), 3.0);
+    assert_close!(f.num("Comp.prototype.leak = 9;\n4", 0.0), 4.0);
+    assert_close!(f.num("thisComp.width", 0.0), 200.0);
+    // `add` reads its arguments through `Array.isArray`, and reaching an effect builds a group with
+    // `Object.setPrototypeOf`, so a replacement for either would change the answers below.
+    assert_close!(f.num("Array.isArray = function () { return false };\n5", 0.0), 5.0);
+    assert_close!(f.num("Object.setPrototypeOf = function (o) { return o };\n6", 0.0), 6.0);
+    assert_close!(f.num("add([1, 2], [3, 4])[0]", 0.0), 4.0);
+    assert_close!(f.num("effect(\"Slider Control\")(\"Slider\")", 0.0), 42.0);
+    assert_close!(f.num("thisProject = 5;\nthisProject.leak = 9;\n7", 0.0), 7.0);
+    assert_close!(f.num("typeof thisProject === 'object' && thisProject.leak === undefined ? 1 : 0", 0.0), 1.0);
+}
+
+#[test]
 fn comments_are_ignored() {
     let f = fx();
     assert_close!(f.num("// spin\n/* fast */ time * 100 // per second", 1.0), 100.0);

@@ -1027,7 +1027,10 @@ Markers.prototype = {
 
 function __global(name, get) {
   Object.defineProperty(globalThis, name, {
-    configurable: true,
+    // Not configurable: the prelude runs once per runtime, so an `Object.defineProperty` over one
+    // of these names (or a `delete`) would take the getter away from every later expression. The
+    // setter stays, and that is what an assignment in an expression goes through.
+    configurable: false,
     get: function () { return name in __S.vars ? __S.vars[name] : get(); },
     set: function (v) { __S.vars[name] = v; },
   });
@@ -1069,3 +1072,52 @@ function velocityAtTime(t) { return thisProperty.velocityAtTime(t); }
 function speedAtTime(t) { return thisProperty.speedAtTime(t); }
 function key(n) { return thisProperty.key(n); }
 function nearestKey(t) { return thisProperty.nearestKey(t); }
+
+// One runtime serves every expression on a thread, and user code runs as a script at global scope,
+// so `linear = …` or a top-level `var clamp` would otherwise rebind a prelude name for every later
+// expression — and for every later project in the session (#2133). A non-writable, non-configurable
+// binding makes such a write a silent no-op in sloppy mode, and `var` leaves an existing global
+// property alone. The `__global` names keep their setters: those already route a write into
+// `__S.vars`, which `__begin` clears. A name the user introduces is not frozen, so re-running an
+// expression that declares its own functions still works.
+(function () {
+  var g = globalThis;
+  // A write to a locked binding is a silent no-op in sloppy mode, which is what an expression runs
+  // as, and `var` leaves an existing global property alone. The descriptor is spelled out rather
+  // than left to merge: a script's own function declarations are already non-configurable, and the
+  // built-ins arrive configurable and are closed off here so a redefinition cannot reopen them.
+  var lock = function (n) {
+    var d = Object.getOwnPropertyDescriptor(g, n);
+    if (!d || !d.writable) return;
+    Object.defineProperty(g, n, { value: d.value, writable: false, enumerable: d.enumerable, configurable: false });
+  };
+  // Freezing a function also makes its own `prototype` property non-writable, so `Comp.prototype =
+  // {}` is a no-op; freezing that prototype object closes the methods hanging off it, which is
+  // where `Comp`, `Layer`, `Prop`, `Footage`, `Markers` and `__Path` keep theirs.
+  var shut = function (o) {
+    var d = Object.getOwnPropertyDescriptor(o, 'prototype');
+    if (d && d.value !== null && (typeof d.value === 'object' || typeof d.value === 'function')) {
+      Object.freeze(d.value);
+    }
+    Object.freeze(o);
+  };
+  Object.getOwnPropertyNames(g).forEach(function (n) {
+    var d = Object.getOwnPropertyDescriptor(g, n);
+    if (!d || typeof d.value !== 'function') return;
+    // The function object as well as the binding: the prelude calls `Array.isArray` and
+    // `Object.setPrototypeOf` while it answers an expression, so a replacement for one of those
+    // would not merely shadow a name, it would change what a later expression computes.
+    shut(d.value);
+    lock(n);
+  });
+  // The prelude's plain objects need both halves, and the loop passes over them because they hold
+  // no function: `thisProject` is surface an expression can reach, and `__mkGroup` hands
+  // `__GroupProto` and the two proxy handlers to every property group it builds.
+  ['thisProject', '__GroupProto', '__groupHandler', '__propHandler'].forEach(function (n) {
+    Object.freeze(g[n]);
+    lock(n);
+  });
+  // `Math.sin = …` goes the same way, and the prelude leans on both of these itself.
+  Object.freeze(Math);
+  Object.freeze(JSON);
+})();
