@@ -479,8 +479,14 @@ Trained model (Roto Brush 2.0 / 3.0):
   licence, size, URL, SHA-256 and whether it is installed, selected and active.
 - `roto.model.download {id}` fetches and verifies the official weights in the background;
   `roto.model.install {path, id?}` installs a file you already have.
-- `roto.model.select {id: classical|mobilesam}` chooses which one Roto Brush uses. Loading runs
+- `roto.model.select {id: classical|mobilesam|sam2.1-hiera-tiny}` chooses which one Roto Brush uses (SAM 2 also tracks the object through the clip, see [roto-brush-sam2.md](roto-brush-sam2.md); `roto.status` then reports `source` and per-frame `tracker.frames` with `confidence` and `occluded`). Loading runs
   in the background; `"wait": true` (also on download and install) returns once it is in use.
+- `roto.propagate` never falls back to the classic engine silently: a chosen model that is not installed, or failed
+  to load, is an error, and without `"wait": true` so is a model still loading. `roto.status` reports `model`
+  (`selected`, `installed`, `active`, `loading`, `error`) and a `notice` while the chosen model is not the one in use.
+  Tracked frames are saved in the project with the instance (`tracker.saved` names their model): they apply while the
+  strokes and span are unchanged, whichever model Settings choose (`notice` says when that differs), and a new
+  Propagate replaces them.
 - `roto.model.remove {id}` deletes the installed weights.
 - The `version` property (`effects/#1/version`: 0 = 1.0, 1 = 2.0, 2 = 3.0) picks between the
   classic engine (1.0) and the chosen model (2.0, 3.0).

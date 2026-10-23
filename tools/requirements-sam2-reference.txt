@@ -1,0 +1,4 @@
+# Pinned versions the SAM 2 reference fixtures were generated with (CPU).
+torch==2.7.0
+transformers==5.19.0
+safetensors==0.8.0
