@@ -472,6 +472,9 @@ pub struct Session {
     pub autosave_folder_override: Option<std::path::PathBuf>,
     /// The viewer snapshot (Take Snapshot / Show Snapshot).
     pub snapshot: Option<viewer::Snapshot>,
+    /// The four snapshot slots (Shift+F5–F8 take, F5–F8 show); `snapshot` is the one taken or
+    /// shown last.
+    pub snapshot_slots: [Option<viewer::Snapshot>; 4],
     /// The JavaScript scripting engine (set by the host that links `effectcraft-script`):
     /// `script.run`, File ▸ Scripts ▸ Run Script File… (`.jsx`/`.js`) and the Script Console.
     pub script: Option<ScriptRunner>,
@@ -598,6 +601,7 @@ impl Default for Session {
             autosave: autosave::AutoSaveState::default(),
             autosave_folder_override: None,
             snapshot: None,
+            snapshot_slots: Default::default(),
             script: None,
             plugin_loader: None,
             script_ui: scriptui::ScriptUi::default(),

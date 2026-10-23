@@ -496,6 +496,23 @@ fn cut(s: &mut Session, p: &Value) -> Result<Value> {
     delete(s, p)
 }
 
+/// Cmd+Alt+V: paste the copied layers so that they start at the current time, keeping their
+/// offsets from each other. One undo step.
+fn paste_at_time(s: &mut Session, p: &Value) -> Result<Value> {
+    let layers = s.state.text_edit.is_none()
+        && s.state.link_clipboard.is_none()
+        && s.state.value_clipboard.is_empty()
+        && !(s.state.clip_is_keys && !s.state.key_clipboard.is_empty())
+        && s.state.effect_clipboard.is_empty()
+        && s.state.contents_clipboard.is_empty();
+    let Some(first) = s.state.clipboard.iter().map(|l| l.in_point).min().filter(|_| layers) else { return paste(s, p) };
+    let cid = super::comp_id(s, p)?;
+    let delta = (s.time_of(cid) - first).seconds();
+    let steps = json!([{"command": "edit.paste", "params": p}, {"command": "layer.timing", "params": {"delta": delta}}]);
+    let r = s.execute("engine.batch", json!({"label": "Paste", "steps": steps}))?;
+    Ok(r["results"][0].clone())
+}
+
 fn paste(s: &mut Session, p: &Value) -> Result<Value> {
     if s.state.text_edit.is_some() {
         return super::text_edit::paste(s, p);
@@ -757,6 +774,7 @@ fn purge_caches(s: &mut Session, p: &Value) -> Result<Value> {
     let what = str_p(p, "what").unwrap_or("all").to_string();
     if matches!(what.as_str(), "all" | "snapshot") {
         s.snapshot = None;
+        s.snapshot_slots = Default::default();
         s.state.viewer.show_snapshot = false;
     }
     let memory = matches!(what.as_str(), "all" | "memoryAndDisk" | "memory" | "image");
@@ -882,6 +900,15 @@ pub fn specs() -> Vec<CommandSpec> {
             |s, p| copy_links(s, p, true)
         ),
         cmd!("edit.copyExpressionOnly", "Copy Expression Only", ["Edit"], None, "{}", has_props_or_layers, copy_expression_only),
+        cmd!(
+            "edit.pasteAtTime",
+            "Paste Layers at Current Time",
+            [],
+            Some("Cmd+Alt+V"),
+            "{} (copied layers start at the current time, the earliest one's In point on it; anything else copied pastes as Paste does)",
+            has_clip,
+            paste_at_time
+        ),
         cmd!(
             "edit.paste",
             "Paste",

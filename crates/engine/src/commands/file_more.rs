@@ -976,7 +976,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "file.newCompFromSelection",
             "New Comp from Selection...",
             ["File"],
-            Some("Cmd+Alt+\\"),
+            Some("Alt+\\"),
             "{duration? (s, for stills), single?: bool (one comp for all), dimensionsFrom?: index, sequence?: bool, overlap?: bool, overlapDuration? (s), transition?: off|dissolveFront|crossDissolve, addToRenderQueue?: bool} → {comps}",
             has_project_selection,
             new_comp_from_selection
@@ -1043,7 +1043,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "file.rememberInterpretation",
             "Remember Interpretation",
             ["File", "Interpret Footage"],
-            None,
+            Some("Cmd+Alt+C"),
             "{item?}",
             has_footage_selection,
             remember_interpretation

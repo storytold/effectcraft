@@ -61,6 +61,63 @@ pub fn text_target(app: &EffectcraftApp) -> Option<TextTarget> {
     effectcraft_engine::render::text::source_text(&ectx, layer).map(|d| TextTarget { layer: layer.id.0, doc: d, range: None })
 }
 
+/// The `text.format.<name>` commands: the formatting shortcuts of the text being edited, on its
+/// selected characters (with only a caret: on what is typed next) and their paragraphs. Each is
+/// one `layer.setText`, as the Character and Paragraph panels send it.
+pub fn format(app: &mut EffectcraftApp, ctx: &egui::Context, name: &str) -> Result<serde_json::Value, String> {
+    let Some(edit) = app.session.state.text_edit.clone() else { return Err("no text is being edited".into()) };
+    let t = text_target(app).ok_or("no text is being edited")?;
+    let d = &t.doc;
+    let step = |name: &str, prefix: &str| name.strip_prefix(prefix).and_then(|n| n.parse::<f64>().ok());
+    let v = match name {
+        "alignLeft" => json!({"justify": "left"}),
+        "alignCenter" => json!({"justify": "center"}),
+        "alignRight" => json!({"justify": "right"}),
+        "justifyLeft" => json!({"justify": "justifyLeft"}),
+        "justifyRight" => json!({"justify": "justifyRight"}),
+        "justifyAll" => json!({"justify": "justifyAll"}),
+        "allCaps" => json!({"allCaps": !d.all_caps}),
+        "smallCaps" => json!({"smallCaps": !d.small_caps}),
+        "superscript" => json!({"superscript": d.baseline != BaselineOption::Superscript}),
+        "subscript" => json!({"subscript": d.baseline != BaselineOption::Subscript}),
+        "horizontalScale100" => json!({"hScale": 100.0}),
+        "verticalScale100" => json!({"vScale": 100.0}),
+        "autoLeading" => json!({"leading": "auto"}),
+        "tracking0" => json!({"tracking": 0.0}),
+        "composer" => json!({"composer": if d.composer == Composer::SingleLine { "everyLine" } else { "singleLine" }}),
+        _ => {
+            if let Some(n) = step(name, "size") {
+                json!({"size": (d.size + n).max(1.0)})
+            } else if let Some(n) = step(name, "leading") {
+                // From Auto Leading: 120% of the size.
+                json!({"leading": (d.leading.unwrap_or(d.size * 1.2) + n).max(0.0), "merge": "text-leading"})
+            } else if let Some(n) = step(name, "baseline") {
+                json!({"baselineShift": d.baseline_shift + n, "merge": "text-baseline"})
+            } else if let Some(n) = step(name, "tracking") {
+                // Kerning at the caret (between it and the next character), tracking over a
+                // selection.
+                if !edit.is_empty() {
+                    json!({"tracking": d.tracking + n, "merge": "text-track"})
+                } else {
+                    let full = effectcraft_engine::commands::text_edit::layer_doc(&app.session, edit.layer).unwrap_or_default();
+                    if edit.caret >= full.char_len() {
+                        return Ok(serde_json::Value::Null);
+                    }
+                    let cur = match full.style_at(edit.caret).kerning {
+                        Kerning::Manual(v) => v,
+                        _ => 0.0,
+                    };
+                    let p = json!({"layer": t.layer, "range": [edit.caret, edit.caret + 1], "kerning": cur + n, "merge": format!("text-kern-{}", edit.caret)});
+                    return crate::menus::invoke(app, ctx, "layer.setText", p);
+                }
+            } else {
+                return Err(format!("unknown text format `{name}`"));
+            }
+        }
+    };
+    crate::menus::invoke(app, ctx, "layer.setText", t.params(v))
+}
+
 fn toggle(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, r: Rect, id: &str, label: &str, on: bool, bold: bool) -> bool {
     let t = app.tokens;
     let resp = ui.interact(r, egui::Id::new(("text-toggle", id)), Sense::click());
