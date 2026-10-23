@@ -229,6 +229,41 @@ checkpoint after a client restart.
 Commands: `file.autoSave` (now), `file.recoveryInfo`, `file.openRecent {index? | path?}`,
 `file.clearRecent`, `file.revert`, `file.incrementAndSave`.
 
+## AI Chat
+
+Window ▸ AI Chat (Settings ▸ AI Chat) chats with a user-configured Ollama server or a local
+endpoint implementing the bridge protocol below. Requests run on a worker thread.
+Endpoints accept `host:port` or `http://host:port/`, including bracketed IPv6. Every resolved
+address must be loopback (`127.0.0.0/8` or `::1`); the connection uses those validated addresses.
+HTTPS is rejected, never downgraded. Credentials, paths other than `/`, queries and fragments
+are not supported. This restriction applies even when preferences are set through MCP or the
+control channel. A local bridge may itself contact remote services; its privacy and credential
+handling are the user's responsibility. No bridge implementation is bundled or endorsed.
+
+Input, transcript, conversation, agent list and status are session-only. They are omitted from
+serialized UI state (including control-channel snapshots), and legacy saved chat state is ignored
+on load. Clear removes the visible conversation. Connection preferences and the configured system
+prompt remain persistent preferences; do not put secrets in them.
+
+| Key | What |
+|---|---|
+| `aiChat.agent` | the agent the panel talks to (`ollama`, or empty, = the local model directly) |
+| `aiChat.agentModel` | model identifier passed unchanged to the bridge; empty = the bridge's default |
+| `aiChat.bridgeUrl` | the bridge to talk to (`127.0.0.1:8765`) |
+| `aiChat.ollamaUrl` | the Ollama server for the direct connection (`127.0.0.1:11434`) |
+| `aiChat.model` | installed model identifier for direct Ollama; must be configured (no vendor default) |
+| `aiChat.systemPrompt` | the first message of every conversation |
+
+### Local bridge protocol
+
+- `GET /agents` returns `{"agents":[{"id":"local-agent","label":"Local agent","ready":true,"note":""}]}`.
+- `POST /chat` receives `{"agent":"local-agent","messages":[{"role":"system","content":"…"},{"role":"user","content":"…"}],"model":"custom-model"}`.
+  `model` is omitted when `aiChat.agentModel` is empty. Messages include prior turns.
+- A successful HTTP 200 response is `{"reply":"…","model":"custom-model"}` (`model` optional).
+  Failures may return `{"error":"description"}`.
+- Responses must be UTF-8 JSON, not streaming or chunked, and close the connection after the body.
+  Responses larger than 8 MiB are rejected. Direct Ollama uses `POST /api/chat` with `stream: false`.
+
 ## Logs
 
 The desktop app writes its log records to standard error and to `Logs/effectcraft.log` in the

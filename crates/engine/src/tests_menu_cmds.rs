@@ -889,9 +889,11 @@ fn frontend_commands_emit_events_and_stubs_are_disabled() {
     s.drain_events();
     s.execute("view.zoomIn", json!({})).unwrap();
     s.execute("window.panel", json!({"panel": "align"})).unwrap();
+    s.execute("window.panel", json!({"panel": "aiChat"})).unwrap();
     let ev = frontend_events(&mut s);
     assert_eq!(ev[0].0, "view.zoomIn");
     assert_eq!(ev[1], ("window.panel".to_string(), json!({"panel": "align"})));
+    assert_eq!(ev[2], ("window.panel".to_string(), json!({"panel": "aiChat"})));
     for id in ["layer.autoTrace", "layer.sceneEditDetection", "layer.create", "track.motion"] {
         assert!(!s.is_enabled(id), "{id}");
         assert!(matches!(s.execute(id, json!({})), Err(EngineError::Disabled(..))), "{id}");

@@ -1,5 +1,6 @@
 //! Panel bodies.
 
+pub mod ai_chat;
 pub mod anim_tools;
 pub mod camera_tracker_ui;
 pub mod comp_settings;
@@ -188,6 +189,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: PanelKind, rect: Rec
         PanelKind::Markers => misc::markers(app, ui, rect),
         PanelKind::MaskInterpolation => anim_tools::mask_interpolation(app, ui, rect),
         PanelKind::ScriptConsole => script_console::show(app, ui, rect),
+        PanelKind::AiChat => ai_chat::show(app, ui, rect),
         PanelKind::Wiggler => anim_tools::wiggler(app, ui, rect),
         PanelKind::Smoother => anim_tools::smoother(app, ui, rect),
         PanelKind::MotionSketch => anim_tools::motion_sketch(app, ui, rect),

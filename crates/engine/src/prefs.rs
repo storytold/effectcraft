@@ -312,6 +312,24 @@ page!(Scripting {
     error_banner: bool = true,
 });
 
+page!(
+    /// Window ▸ AI Chat: the panel's connections and prompt.
+    AiChatPrefs {
+        /// A user-configured local endpoint implementing the AI Chat bridge protocol.
+        bridge_url: String = "127.0.0.1:8765".into(),
+        /// A local Ollama server, for the direct connection.
+        ollama_url: String = "127.0.0.1:11434".into(),
+        /// The model the direct Ollama connection asks for (`aiChat.agent` = `ollama`).
+        model: String = "".into(),
+        /// The agent the panel talks to; `ollama` (or empty) = the local model directly.
+        agent: String = "ollama".into(),
+        /// A model identifier passed unchanged to the bridge; empty = its default.
+        agent_model: String = "".into(),
+        /// Sent as the first message of every conversation.
+        system_prompt: String = "You are the AI Chat panel inside EffectCraft, an open-source After Effects-style motion graphics app. Keep replies short, concrete and friendly. You cannot see the project yet; if asked to change it, say what you would do.".into(),
+    }
+);
+
 impl Scripting {
     /// Whether `other` grants scripts the same as this: Application Scripting (file and network
     /// access, the warning before executing files, the debugger). Scripts can't change these
@@ -417,6 +435,7 @@ pub struct Prefs {
     #[serde(rename = "threeD")]
     pub three_d: ThreeD,
     pub scripting: Scripting,
+    pub ai_chat: AiChatPrefs,
     pub roto: RotoPrefs,
     pub face: FacePrefs,
     /// File ▸ Open Recent, newest first.
@@ -464,6 +483,7 @@ impl Default for Prefs {
             video: Video::default(),
             three_d: ThreeD::default(),
             scripting: Scripting::default(),
+            ai_chat: AiChatPrefs::default(),
             roto: RotoPrefs::default(),
             face: FacePrefs::default(),
             recent_projects: vec![],
@@ -1021,6 +1041,7 @@ pub fn section_key(page: &str) -> Option<&'static str> {
         "scripting" => "scripting",
         "roto" => "roto",
         "face" => "face",
+        "aiChat" => "aiChat",
         _ => return None,
     })
 }
@@ -1047,6 +1068,7 @@ pub fn page_id(name: &str) -> Option<&'static str> {
         "video" | "videopreview" => "video",
         "3d" | "threed" => "3d",
         "scripting" | "scriptingexpressions" => "scripting",
+        "aichat" => "aiChat",
         "roto" | "rotobrush" | "models" => "roto",
         "face" | "facetracking" => "face",
         _ => return None,
@@ -1425,6 +1447,24 @@ pub fn pages() -> Vec<Page> {
                 s("scripting.wordWrap", "Word Wrap", B, true),
                 s("scripting.errorBanner", "Show Expression Error Banner", B, true),
                 Note("Expressions use the JavaScript engine. Script errors report their file and line in the Script Console; there is no step debugger."),
+            ],
+        },
+        Page {
+            id: "aiChat",
+            title: "AI Chat",
+            items: vec![
+                Section("Agent"),
+                s("aiChat.agent", "Agent", Kind::Text, true),
+                s("aiChat.agentModel", "Agent Model", Kind::Text, true),
+                Section("Connection"),
+                s("aiChat.bridgeUrl", "Bridge URL", Kind::Text, true),
+                s("aiChat.ollamaUrl", "Ollama URL", Kind::Text, true),
+                s("aiChat.model", "Ollama Model", Kind::Text, true),
+                Section("Prompt"),
+                s("aiChat.systemPrompt", "System Prompt", Kind::Text, true),
+                Note(
+                    "AI Chat accepts only loopback HTTP endpoints; HTTPS is rejected. Configure an installed Ollama Model or a bridge implementing the documented protocol. Agent Model is passed unchanged; empty uses the bridge default. Chat is session-only and excluded from serialized UI state.",
+                ),
             ],
         },
         Page {

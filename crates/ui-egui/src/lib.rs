@@ -322,6 +322,8 @@ pub struct EffectcraftApp {
     /// Pointer position in comp pixels (Info panel).
     pub(crate) pointer_comp: Option<[f32; 2]>,
     pub(crate) dialog_state: panels::dialogs::DialogState,
+    /// AI Chat: a pending model reply or agent fetch from a worker thread (`panels::ai_chat`).
+    pub(crate) ai_chat: panels::ai_chat::Runtime,
     pub integrated_titlebar: bool,
     /// Audio preview while playing (audio clock drives playback).
     pub audio: Option<audio::AudioPlayback>,
@@ -409,6 +411,7 @@ impl EffectcraftApp {
             gpu_failure_applied: None,
             device_lost_close: None,
             dialog_answers: std::sync::mpsc::channel(),
+            ai_chat: panels::ai_chat::Runtime::default(),
             command_inbox: None,
             pointer_comp: None,
             dialog_state: Default::default(),

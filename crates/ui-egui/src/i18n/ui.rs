@@ -4450,6 +4450,7 @@ mod tests {
         ("header.rs", include_str!("../header.rs")),
         ("menus.rs", include_str!("../menus.rs")),
         ("widgets.rs", include_str!("../widgets.rs")),
+        ("panels/ai_chat.rs", include_str!("../panels/ai_chat.rs")),
         ("panels/anim_tools.rs", include_str!("../panels/anim_tools.rs")),
         ("panels/camera_tracker_ui.rs", include_str!("../panels/camera_tracker_ui.rs")),
         ("panels/comp_settings.rs", include_str!("../panels/comp_settings.rs")),

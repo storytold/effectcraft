@@ -506,6 +506,7 @@ pub const TREE: &str = r#"
     Video... | app.settings {"page":"video"}
     3D... | app.settings {"page":"3d"}
     Scripting & Expressions... | app.settings {"page":"scripting"}
+    AI Chat... | app.settings {"page":"aiChat"}
   ---
   Hide EffectCraft | app.hide
   Hide Others | app.hideOthers
@@ -1191,6 +1192,7 @@ Window
   Assign Shortcut to Workspace
     @dynamic:workspaceShortcuts
   ---
+  AI Chat | window.panel {"panel":"aiChat"}
   Align | window.panel {"panel":"align"}
   Audio | window.panel {"panel":"audio"} | Cmd+4
   Brushes | window.panel {"panel":"brushes"} | Cmd+9

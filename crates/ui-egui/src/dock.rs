@@ -37,6 +37,7 @@ pub enum PanelKind {
     Markers,
     MaskInterpolation,
     ScriptConsole,
+    AiChat,
     EssentialGraphics,
     /// A dockable ScriptUI panel (a script from the ScriptUI Panels folder), by script window id.
     ScriptPanel(u32),
@@ -55,7 +56,7 @@ pub enum PanelKind {
 }
 
 impl PanelKind {
-    pub const ALL: [PanelKind; 34] = [
+    pub const ALL: [PanelKind; 35] = [
         PanelKind::Project,
         PanelKind::EffectControls,
         PanelKind::Composition,
@@ -81,6 +82,7 @@ impl PanelKind {
         PanelKind::Markers,
         PanelKind::MaskInterpolation,
         PanelKind::ScriptConsole,
+        PanelKind::AiChat,
         PanelKind::EssentialGraphics,
         PanelKind::LumetriScopes,
         PanelKind::Footage,
@@ -118,6 +120,7 @@ impl PanelKind {
             PanelKind::Markers => "Markers",
             PanelKind::MaskInterpolation => "Mask Interpolation",
             PanelKind::ScriptConsole => "Script Console",
+            PanelKind::AiChat => "AI Chat",
             PanelKind::EssentialGraphics => "Essential Graphics",
             PanelKind::ScriptPanel(_) => "ScriptUI Panel",
             PanelKind::Viewer(_) => "Composition",
