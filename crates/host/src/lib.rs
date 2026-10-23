@@ -556,6 +556,38 @@ mod tests {
         assert!(bytes.starts_with(b"GIF89a"));
     }
 
+    /// A script's `render()` does not replace the file an earlier render left (#1743); `render(true)` does.
+    #[test]
+    fn script_render_replaces_an_existing_file_only_when_told_to() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-out/host-script-overwrite");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("again.gif");
+        std::fs::write(&out, b"EARLIER").unwrap();
+        let mut s = super::session();
+        let code = format!(
+            r#"
+            var comp = app.project.items.addComp("Again", 32, 24, 1, 0.1, 10);
+            comp.layers.addSolid([1, 0.5, 0], "Square", 16, 16, 1);
+            var item = app.project.renderQueue.items.add(comp);
+            item.outputModule(1).applyTemplate("GIF");
+            item.outputModule(1).file = new File({});
+            var refused = "";
+            try {{ app.project.renderQueue.render(); }} catch (e) {{ refused = String(e); }}
+            var after = item.status == RQItemStatus.QUEUED;
+            app.project.renderQueue.render(true);
+            [refused, after, item.status == RQItemStatus.DONE]
+            "#,
+            serde_json::to_string(&out.to_string_lossy()).unwrap()
+        );
+        let r = s.execute("script.run", json!({"code": code})).unwrap();
+        assert_eq!(r["ok"], json!(true), "{r}");
+        assert!(r["result"][0].as_str().unwrap().contains("already exists"), "{r}");
+        assert_eq!(r["result"][1], json!(true), "still queued after the refusal: {r}");
+        assert_eq!(r["result"][2], json!(true), "{r}");
+        assert!(std::fs::read(&out).unwrap().starts_with(b"GIF89a"), "replaced by the render");
+    }
+
     /// importFile, layers.add(footage) and project save/open from a script.
     #[test]
     fn script_imports_footage_and_saves() {

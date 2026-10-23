@@ -297,6 +297,30 @@ build real projects through these interfaces; they are worked examples of everyt
   proresProfile: 4444, output}` then `renderQueue.render {"wait": true}`. Check a render by
   importing it (`file.import`, `file.newCompFromSelection`) and `render_frame {transparent: true}`
   for its alpha (ProRes 4444 and WebM VP9 alpha both read back as straight alpha).
+  **A render never replaces a file the project reads:** footage (every frame of a sequence), a
+  proxy or the project file. That item fails with the reason (the others render), even with
+  `overwrite`. Any other file that exists is replaced only with `renderQueue.render
+  {"overwrite": true}`; without it the whole render is refused before anything is written, and
+  the queue is left as it was. `renderQueue.checkOutputs` says beforehand which outputs would
+  replace files (`existing`) and which are files the project reads (`blocked`). Files are
+  compared as the file system sees them: through links, and without regard to case on Windows
+  and macOS. A default output name (`[compName].[fileExtension]`) that would be one of those
+  files is numbered when the item is added (comp `footage` made from `footage.mp4` renders to
+  `footage_1.mp4`); a name you give is kept, and rendering it is refused. The desktop app asks
+  Replace or Cancel when you press Render (`dialog.overwrite.replace`, `dialog.overwrite.cancel`;
+  `ui.menu.invoke renderQueue.render` opens the same prompt), and `effectcraft-cli render` needs
+  `--overwrite` to replace a file. **A render never writes one file twice either:** when two
+  outputs of the job (two items, a `renderQueue.duplicate` copy, output modules, segments) name
+  the same file, the whole render is refused before anything is written, `overwrite` or not
+  (that flag is for files that exist). `renderQueue.checkOutputs` lists them under `duplicates`
+  (`{item, index, comp, path, files, sequence, with: {item, index, comp}, reason}`; `with` is the
+  output written first). Sequences clash only on frames both write, and a later item with Skip
+  Existing Files leaves the earlier one's frames alone. Default names are numbered like footage
+  collisions when another queue item writes them (`renderQueue.add`, `render.preRender`,
+  `comp.saveFrameAs {queue}`, `file.createProxy`: a second `Main` renders to `Main_1.mp4`); a name
+  you give is kept, and `renderQueue.duplicate` copies the output as it is, so change one with
+  `renderQueue.setOutput` or turn it off. A watched folder (`file.watchFolder`) renders unattended and
+  replaces the outputs of a project it renders again. Scripts: `renderQueue.render(true)`.
 * **Essential Graphics**: controls can be addressed by name (`essential.set {"layer":"#1",
   "control":"Title","value":"John Smith"}`); a command that targets an explicit `comp` runs even
   when the active comp would disable it (`essential.exportTemplate {"comp":"Lower Third", …}`).
