@@ -82,7 +82,8 @@ filmcraft-color = { git = "https://github.com/storytold/filmcraft", rev = "2c5ba
 filmcraft-time = { git = "https://github.com/storytold/filmcraft", rev = "2c5ba7a72619935f0481f99d59409e0d1844b234" }
 # encoders + muxer (crates/export)
 filmcraft-h264enc = { git = "https://github.com/storytold/filmcraft", rev = "2c5ba7a72619935f0481f99d59409e0d1844b234" }
-filmcraft-prores = { git = "https://github.com/storytold/filmcraft", rev = "2c5ba7a72619935f0481f99d59409e0d1844b234" }
+# Alpha slices require a terminal run code, including the final singleton.
+filmcraft-prores = { git = "https://github.com/storytold/filmcraft", rev = "e4be1577443c9c8b56ff605beafe6186af4a7254" }
 filmcraft-aac = { git = "https://github.com/storytold/filmcraft", rev = "2c5ba7a72619935f0481f99d59409e0d1844b234" }
 filmcraft-isobmff = { git = "https://github.com/storytold/filmcraft", rev = "2c5ba7a72619935f0481f99d59409e0d1844b234" }
 # decoder used as the round-trip oracle of effectcraft-opusenc (crates/export dev-dependency)

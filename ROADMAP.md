@@ -2,7 +2,7 @@
 
 **Stage: alpha** · next: beta, ~30 points of "ready for real work" and ~350–620 h away
 
-> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-12 · **Change:** minor (open-issue count, crash list and localization share re-audited against `upstream/main` 470ea7a3) · **Target:** Adobe After Effects 2026 (26.5.0.89)
+> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-23 · **Change:** minor (ProRes alpha final-run conformance) · **Target:** Adobe After Effects 2026 (26.5.0.89)
 
 EffectCraft aims to do what After Effects does, with the same panels, menus and behaviour, written
 from scratch in Rust. This page is the one-page summary; the evidence is in
@@ -117,6 +117,10 @@ Come tell us what matters most to you on [Discord](https://discord.gg/artcraft).
 
 ## Progress log
 
+- 2026-10-23: ProRes 4444 and XQ exports write the required run after the final alpha
+  difference. The FilmCraft encoder pin fixes alpha movies rejected by native macOS
+  decoding; an export regression checks the stored bytes for both profiles, alpha modes,
+  and motion-blur settings (#293). Resolve itself still needs confirmation.
 - 2026-10-16: Convert To Bezier Path turns a shape layer's Rectangle, Ellipse or Polystar
   path into an editable Path 1 with the same geometry, as After Effects does; it used to
   apply to mask RotoBezier only, so a parametric shape path could not be converted at all

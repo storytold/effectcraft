@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use effectcraft_color::Label;
-use effectcraft_export::render_queue::{AudioOutput, Channels, OutputFormat, OutputModule, ProResProfile, RenderSettings, TimeSpan, sequence_path};
+use effectcraft_export::render_queue::{AlphaMode, AudioOutput, Channels, OutputFormat, OutputModule, ProResProfile, RenderSettings, TimeSpan, sequence_path};
 use effectcraft_export::{Job, Progress, export};
 use effectcraft_media::MediaPool;
 use effectcraft_project::{Comp, ItemId, ItemKind, LayerSource, Project, Solid, build};
@@ -52,6 +52,7 @@ fn settings() -> RenderSettings {
     RenderSettings { time_span: TimeSpan::LengthOfComp, ..Default::default() }
 }
 
+/// Exports the standard test comp and checks progress for all [`FRAMES`] frames.
 fn run(p: &Project, cid: ItemId, footage: &dyn FootageSource, om: &OutputModule, path: &Path) -> effectcraft_export::Report {
     run_frames(p, cid, footage, om, path, FRAMES)
 }
@@ -230,6 +231,65 @@ fn prores_4444_with_alpha() {
     assert!(c[3] > 0.98 && c[0] > 0.95 && c[1] < 0.05, "centre opaque red: {c:?}");
     if let Some(s) = ffprobe(&path) {
         assert!(s.starts_with("prores|64|48|yuva444"), "{s}");
+    }
+}
+
+/// Checks stored alpha run codewords in exported MOVs across both 4444 profiles,
+/// alpha modes and motion-blur settings, without relying on permissive decoders.
+#[test]
+fn prores_alpha_final_run_is_present_in_exported_movies() {
+    let dir = out_dir("prores-alpha-final-run");
+    let png = dir.join("alpha.png");
+    // One macroblock with 255 transparent pixels followed by one opaque pixel.
+    // The last alpha difference is -1 (modulo 65536), requiring a singleton run.
+    let mut pixels = image::RgbaImage::new(16, 16);
+    pixels.put_pixel(15, 15, image::Rgba([255, 80, 20, 255]));
+    pixels.save(&png).expect("synthetic alpha PNG");
+
+    for profile in [ProResProfile::P4444, ProResProfile::P4444Xq] {
+        for alpha_mode in [AlphaMode::Straight, AlphaMode::Premultiplied] {
+            for motion_blur in [false, true] {
+                let mut project = Project::default();
+                let rate = FrameRate::FPS_30;
+                let mut comp = Comp::new(16, 16, rate, rate.tick_of(1));
+                comp.enable_motion_blur = motion_blur;
+                let footage = effectcraft_media::probe(&png).expect("probe synthetic PNG");
+                let item = project.add_item("Alpha", Label::SeaFoam, None, ItemKind::Footage(footage));
+                let mut layer = build::layer(&mut project, &comp, "Alpha", LayerSource::Footage { item }, (16, 16), None);
+                layer.switches.motion_blur = motion_blur;
+                comp.layers.push(layer);
+                let comp = project.add_item("Alpha", Label::Sandstone, None, ItemKind::Comp(comp.into()));
+                let output = OutputModule {
+                    channels: Channels::Rgba,
+                    prores_profile: profile,
+                    alpha_mode,
+                    audio: AudioOutput::Off,
+                    ..OutputModule::for_format(OutputFormat::ProRes)
+                };
+                let path = dir.join(format!("{profile:?}-{alpha_mode:?}-blur-{motion_blur}.mov"));
+                run_frames(&project, comp, &MediaPool::new(), &output, &path, 1);
+
+                let bytes = std::fs::read(&path).expect("exported MOV");
+                let movie = filmcraft_isobmff::open(bytes.as_slice()).expect("demux exported MOV");
+                let video = movie.tracks.iter().find(|track| track.kind == filmcraft_isobmff::TrackKind::Video).expect("video track");
+                assert_eq!(video.samples.len(), 1);
+                let sample = &video.samples[0];
+                let frame = &bytes[sample.offset as usize..][..sample.size as usize];
+                let (header, start, size) = filmcraft_prores::FrameHeader::parse(frame).expect("ProRes header");
+                assert_eq!((header.width, header.height), (16, 16));
+                let picture = &frame[start..size];
+                let header = filmcraft_prores::PictureHeader::parse(picture).expect("picture header");
+                assert_eq!(header.num_slices, 1);
+                let slice = &picture[header.header_size + 2..];
+                let color_bytes: usize = slice[2..8].as_chunks::<2>().0.iter().map(|b| u16::from_be_bytes(*b) as usize).sum();
+                let alpha = &slice[(slice[0] >> 3) as usize + color_bytes..];
+                // RDD 36:2022 Tables 12–14: +1, run 255, -1, run 1, alignment.
+                // The old encoder stopped after -1, giving [00 00 fe 01]. Its
+                // own decoder and FFmpeg accept that truncated payload, so a
+                // round-trip alone cannot enforce the native decoder's syntax.
+                assert_eq!(alpha, [0x00, 0x00, 0xfe, 0x01, 0x80], "{profile:?}, {alpha_mode:?}, blur={motion_blur}");
+            }
+        }
     }
 }
 

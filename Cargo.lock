@@ -1311,7 +1311,7 @@ dependencies = [
  "filmcraft-h264enc",
  "filmcraft-isobmff",
  "filmcraft-opus",
- "filmcraft-prores",
+ "filmcraft-prores 0.12.0",
  "filmcraft-vp9",
  "gif",
  "image",
@@ -2066,7 +2066,7 @@ name = "filmcraft-aac"
 version = "0.1.1"
 source = "git+https://github.com/storytold/filmcraft?rev=2c5ba7a72619935f0481f99d59409e0d1844b234#2c5ba7a72619935f0481f99d59409e0d1844b234"
 dependencies = [
- "filmcraft-bitstream",
+ "filmcraft-bitstream 0.1.1",
  "thiserror 2.0.21",
 ]
 
@@ -2083,7 +2083,7 @@ name = "filmcraft-av1"
 version = "0.1.1"
 source = "git+https://github.com/storytold/filmcraft?rev=2c5ba7a72619935f0481f99d59409e0d1844b234#2c5ba7a72619935f0481f99d59409e0d1844b234"
 dependencies = [
- "filmcraft-bitstream",
+ "filmcraft-bitstream 0.1.1",
  "rayon",
  "thiserror 2.0.21",
 ]
@@ -2092,6 +2092,11 @@ dependencies = [
 name = "filmcraft-bitstream"
 version = "0.1.1"
 source = "git+https://github.com/storytold/filmcraft?rev=2c5ba7a72619935f0481f99d59409e0d1844b234#2c5ba7a72619935f0481f99d59409e0d1844b234"
+
+[[package]]
+name = "filmcraft-bitstream"
+version = "0.12.0"
+source = "git+https://github.com/storytold/filmcraft?rev=e4be1577443c9c8b56ff605beafe6186af4a7254#e4be1577443c9c8b56ff605beafe6186af4a7254"
 
 [[package]]
 name = "filmcraft-cfb"
@@ -2106,7 +2111,7 @@ dependencies = [
  "filmcraft-aac",
  "filmcraft-ac3",
  "filmcraft-av1",
- "filmcraft-bitstream",
+ "filmcraft-bitstream 0.1.1",
  "filmcraft-color",
  "filmcraft-dnx",
  "filmcraft-frame",
@@ -2120,7 +2125,7 @@ dependencies = [
  "filmcraft-mxf",
  "filmcraft-ogg",
  "filmcraft-opus",
- "filmcraft-prores",
+ "filmcraft-prores 0.1.1",
  "filmcraft-time",
  "filmcraft-vp9",
  "image",
@@ -2143,7 +2148,7 @@ name = "filmcraft-dnx"
 version = "0.1.1"
 source = "git+https://github.com/storytold/filmcraft?rev=2c5ba7a72619935f0481f99d59409e0d1844b234#2c5ba7a72619935f0481f99d59409e0d1844b234"
 dependencies = [
- "filmcraft-bitstream",
+ "filmcraft-bitstream 0.1.1",
  "rayon",
  "thiserror 2.0.21",
 ]
@@ -2172,7 +2177,7 @@ name = "filmcraft-h264"
 version = "0.1.1"
 source = "git+https://github.com/storytold/filmcraft?rev=2c5ba7a72619935f0481f99d59409e0d1844b234#2c5ba7a72619935f0481f99d59409e0d1844b234"
 dependencies = [
- "filmcraft-bitstream",
+ "filmcraft-bitstream 0.1.1",
  "rayon",
  "thiserror 2.0.21",
 ]
@@ -2182,7 +2187,7 @@ name = "filmcraft-h264enc"
 version = "0.1.1"
 source = "git+https://github.com/storytold/filmcraft?rev=2c5ba7a72619935f0481f99d59409e0d1844b234#2c5ba7a72619935f0481f99d59409e0d1844b234"
 dependencies = [
- "filmcraft-bitstream",
+ "filmcraft-bitstream 0.1.1",
  "rayon",
  "thiserror 2.0.21",
 ]
@@ -2192,7 +2197,7 @@ name = "filmcraft-hevc"
 version = "0.1.1"
 source = "git+https://github.com/storytold/filmcraft?rev=2c5ba7a72619935f0481f99d59409e0d1844b234#2c5ba7a72619935f0481f99d59409e0d1844b234"
 dependencies = [
- "filmcraft-bitstream",
+ "filmcraft-bitstream 0.1.1",
  "rayon",
  "thiserror 2.0.21",
 ]
@@ -2219,7 +2224,7 @@ name = "filmcraft-isobmff"
 version = "0.1.1"
 source = "git+https://github.com/storytold/filmcraft?rev=2c5ba7a72619935f0481f99d59409e0d1844b234#2c5ba7a72619935f0481f99d59409e0d1844b234"
 dependencies = [
- "filmcraft-bitstream",
+ "filmcraft-bitstream 0.1.1",
  "thiserror 2.0.21",
 ]
 
@@ -2293,7 +2298,17 @@ name = "filmcraft-prores"
 version = "0.1.1"
 source = "git+https://github.com/storytold/filmcraft?rev=2c5ba7a72619935f0481f99d59409e0d1844b234#2c5ba7a72619935f0481f99d59409e0d1844b234"
 dependencies = [
- "filmcraft-bitstream",
+ "filmcraft-bitstream 0.1.1",
+ "rayon",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "filmcraft-prores"
+version = "0.12.0"
+source = "git+https://github.com/storytold/filmcraft?rev=e4be1577443c9c8b56ff605beafe6186af4a7254#e4be1577443c9c8b56ff605beafe6186af4a7254"
+dependencies = [
+ "filmcraft-bitstream 0.12.0",
  "rayon",
  "thiserror 2.0.21",
 ]
@@ -2311,7 +2326,7 @@ name = "filmcraft-vp9"
 version = "0.1.1"
 source = "git+https://github.com/storytold/filmcraft?rev=2c5ba7a72619935f0481f99d59409e0d1844b234#2c5ba7a72619935f0481f99d59409e0d1844b234"
 dependencies = [
- "filmcraft-bitstream",
+ "filmcraft-bitstream 0.1.1",
  "rayon",
  "thiserror 2.0.21",
 ]
