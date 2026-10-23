@@ -511,6 +511,8 @@ pub enum OutputFormat {
     ExrSequence,
     /// Animated GIF.
     Gif,
+    /// Animated WebP: lossless frames, with alpha.
+    WebP,
     /// WebM: VP9 video (alpha with RGB + Alpha) + Opus audio.
     WebM,
     /// Audio only: WAV (16-bit PCM).
@@ -528,7 +530,7 @@ pub enum OutputFormat {
 }
 
 impl OutputFormat {
-    pub const ALL: [OutputFormat; 13] = [
+    pub const ALL: [OutputFormat; 14] = [
         OutputFormat::H264,
         OutputFormat::Hevc,
         OutputFormat::Av1,
@@ -540,6 +542,7 @@ impl OutputFormat {
         OutputFormat::TiffSequence,
         OutputFormat::ExrSequence,
         OutputFormat::Gif,
+        OutputFormat::WebP,
         OutputFormat::Wav,
         OutputFormat::Aiff,
     ];
@@ -553,6 +556,7 @@ impl OutputFormat {
             OutputFormat::TiffSequence => "TIFF Sequence",
             OutputFormat::ExrSequence => "OpenEXR Sequence",
             OutputFormat::Gif => "Animated GIF",
+            OutputFormat::WebP => "Animated WebP",
             OutputFormat::WebM => "WebM (VP9 + Opus)",
             OutputFormat::Wav => "WAV",
             OutputFormat::Aiff => "AIFF",
@@ -570,6 +574,7 @@ impl OutputFormat {
             OutputFormat::TiffSequence => "tif",
             OutputFormat::ExrSequence => "exr",
             OutputFormat::Gif => "gif",
+            OutputFormat::WebP => "webp",
             OutputFormat::WebM => "webm",
             OutputFormat::Wav => "wav",
             OutputFormat::Aiff => "aif",
@@ -603,7 +608,7 @@ impl OutputFormat {
         if matches!(self, OutputFormat::H264 | OutputFormat::Hevc) { (even(w), even(h)) } else { (w, h) }
     }
     /// Parse a format name: `h264`, `mp4`, `prores`, `mov`, `uncompressed`, `png`, `jpeg`/`jpg`,
-    /// `tiff`/`tif`, `exr`, `gif`, or a label.
+    /// `tiff`/`tif`, `exr`, `gif`, `webp`, or a label.
     pub fn from_name(s: &str) -> Option<OutputFormat> {
         let n = s.trim().to_ascii_lowercase().replace([' ', '.', '-', '_'], "");
         Some(match n.as_str() {
@@ -617,6 +622,7 @@ impl OutputFormat {
             "tif" | "tiff" | "tiffsequence" => OutputFormat::TiffSequence,
             "exr" | "openexr" | "openexrsequence" => OutputFormat::ExrSequence,
             "gif" | "animatedgif" => OutputFormat::Gif,
+            "webp" | "animatedwebp" => OutputFormat::WebP,
             "webm" | "vp9" | "webmvp9opus" => OutputFormat::WebM,
             "wav" | "wave" => OutputFormat::Wav,
             "aif" | "aiff" | "aifc" => OutputFormat::Aiff,
@@ -1050,7 +1056,7 @@ pub struct OutputModule {
     /// 1 (mono) or 2 (stereo).
     pub audio_channels: u8,
     pub audio_format: AudioFormat,
-    /// GIF: loop forever.
+    /// GIF and WebP: loop forever (otherwise play once).
     pub gif_loop: bool,
     /// HEVC / AV1 options.
     pub codec: VideoCodecOptions,
@@ -1661,6 +1667,19 @@ mod tests {
         m.crop = Crop { enabled: true, use_roi: true, roi: Some([100.0, 50.0, 800.0, 400.0]), ..Default::default() };
         let half = RenderSettings { resolution: 0.5, ..Default::default() };
         assert_eq!(m.output_size(&c, &half), (400, 200));
+    }
+
+    #[test]
+    fn animated_webp_format() {
+        let f = OutputFormat::from_name("webp").unwrap();
+        assert_eq!(f, OutputFormat::WebP);
+        assert_eq!(OutputFormat::from_name(&format!("{f:?}")), Some(f));
+        assert_eq!(OutputFormat::from_name("Animated WebP"), Some(f));
+        assert_eq!(OutputFormat::from_path("/out/logo.webp"), Some(f));
+        assert!(OutputFormat::ALL.contains(&f));
+        assert!(f.supports_alpha() && !f.supports_audio() && !f.is_movie() && !f.is_sequence());
+        assert_eq!(f.coded_size(3, 5), (3, 5));
+        assert_eq!(f.with_extension("/out/Comp 1.gif"), "/out/Comp 1.webp");
     }
 
     #[test]
