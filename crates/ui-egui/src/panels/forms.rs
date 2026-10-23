@@ -823,7 +823,7 @@ fn form_grid(ui: &mut egui::Ui, f: &mut Form, regs: &mut Vec<(String, egui::Rect
                     .inner
                     .rect
                 }
-                FieldKind::Bool(b) => ui.checkbox(b, "").rect,
+                FieldKind::Bool(b) => crate::widgets::labelled_checkbox(ui, b, "").rect,
                 FieldKind::Choice { options, sel } => {
                     let cur = options.get(*sel).map(|o| o.0.clone()).unwrap_or_default();
                     // The column keeps its width: a long choice (a GPU adapter's name) ends in an
@@ -953,13 +953,13 @@ pub fn show_view_options(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Toke
     let mut close = false;
     super::dialogs::modal(ctx, "View Options", vec2(360.0, 330.0), t, |ui| {
         let v = &mut app.ui.viewer;
-        ui.checkbox(&mut v.show_layer_controls, tr("Layer controls"));
-        ui.checkbox(&mut v.show_masks, tr("Masks"));
-        ui.checkbox(&mut v.rulers, tr("Rulers"));
-        ui.checkbox(&mut v.guides, tr("Guides"));
-        ui.checkbox(&mut v.grid, tr("Grid"));
-        ui.checkbox(&mut v.safe_margins, tr("Title/action safe"));
-        ui.checkbox(&mut v.transparency_grid, tr("Transparency grid"));
+        crate::widgets::labelled_checkbox(ui, &mut v.show_layer_controls, tr("Layer controls"));
+        crate::widgets::labelled_checkbox(ui, &mut v.show_masks, tr("Masks"));
+        crate::widgets::labelled_checkbox(ui, &mut v.rulers, tr("Rulers"));
+        crate::widgets::labelled_checkbox(ui, &mut v.guides, tr("Guides"));
+        crate::widgets::labelled_checkbox(ui, &mut v.grid, tr("Grid"));
+        crate::widgets::labelled_checkbox(ui, &mut v.safe_margins, tr("Title/action safe"));
+        crate::widgets::labelled_checkbox(ui, &mut v.transparency_grid, tr("Transparency grid"));
         ui.add_space(12.0);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.add(egui::Button::new(egui::RichText::new(tr("   OK   ")).color(Color32::WHITE)).fill(t.accent)).clicked() {

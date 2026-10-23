@@ -382,9 +382,96 @@ pub fn text_button(ui: &mut Ui, rect: Rect, text: &str, primary: bool, t: &Token
     resp
 }
 
-/// Checkbox in the AE look (small square).
+/// A primary-button gesture shared by custom and labelled checkboxes in this context.
+#[derive(Clone, Default)]
+struct CheckboxDrag {
+    press_frame: u64,
+    target: Option<bool>,
+    visited: std::collections::HashSet<egui::Id>,
+}
+
+/// Returns the requested value. Mixed checkboxes (`None`) and disabled controls are
+/// skipped. Each checkbox is visited once, so crossing it again cannot toggle it back.
+fn drag_toggle(ui: &Ui, response: &Response, value: Option<bool>) -> Option<bool> {
+    let (pressed, down, released) = ui.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_down(), i.pointer.primary_released()));
+    let frame = ui.ctx().cumulative_frame_nr();
+    // clicked() reads Context input; do not call it while Context data is locked.
+    let clicked = response.clicked();
+    ui.data_mut(|data| {
+        let drag = data.get_temp_mut_or_default::<CheckboxDrag>(egui::Id::new("checkbox-drag"));
+        if (!down && !released) || (pressed && drag.press_frame != frame) {
+            *drag = CheckboxDrag { press_frame: frame, ..Default::default() };
+        }
+        let on = value?;
+        if !response.enabled() {
+            return None;
+        }
+        if pressed && drag.target.is_none() && response.is_pointer_button_down_on() && response.contains_pointer() {
+            drag.target = Some(!on);
+        }
+        if down
+            && response.contains_pointer()
+            && let Some(target) = drag.target
+        {
+            if drag.visited.insert(response.id) && on != target {
+                return Some(target);
+            }
+            return None;
+        }
+        // The source already changed on press. Suppress its ordinary release click.
+        if released && drag.target.is_some() {
+            return None;
+        }
+        clicked.then_some(!on)
+    })
+}
+
+/// A labelled checkbox with the same drag behavior as the custom panel checkbox.
+/// Use through `ui.add`, `ui.put`, or `ui.add_enabled` like `egui::Checkbox`.
+pub struct DragCheckbox<'a> {
+    value: &'a mut bool,
+    text: egui::WidgetText,
+}
+
+impl<'a> DragCheckbox<'a> {
+    pub fn new(value: &'a mut bool, text: impl Into<egui::WidgetText>) -> Self {
+        Self { value, text: text.into() }
+    }
+}
+
+impl egui::Widget for DragCheckbox<'_> {
+    fn ui(self, ui: &mut Ui) -> Response {
+        let before = *self.value;
+        let mut response = ui.add(egui::Checkbox::new(self.value, self.text));
+        // egui changes on release; our shared gesture changes on press and entry.
+        *self.value = before;
+        response.flags.remove(egui::response::Flags::CHANGED);
+        if response.clicked() {
+            ui.ctx().request_repaint();
+        }
+        if let Some(value) = drag_toggle(ui, &response, Some(before)) {
+            *self.value = value;
+            response.mark_changed();
+            ui.ctx().request_repaint();
+        }
+        response
+    }
+}
+
+/// A labelled checkbox that allocates its own rectangle.
+pub fn labelled_checkbox(ui: &mut Ui, value: &mut bool, text: impl Into<egui::WidgetText>) -> Response {
+    ui.add(DragCheckbox::new(value, text))
+}
+
+/// Checkbox in the AE look (small square). `changed()` requests a toggle, including
+/// keyboard activation and entry during a drag begun on another checkbox.
 pub fn checkbox(ui: &mut Ui, rect: Rect, on: bool, t: &Tokens, id: egui::Id) -> Response {
-    let resp = ui.interact(rect, id, Sense::click());
+    let mut resp = ui.interact(rect, id, Sense::click());
+    let next = drag_toggle(ui, &resp, Some(on));
+    if next.is_some() {
+        resp.mark_changed();
+    }
+    let on = next.unwrap_or(on);
     let b = Rect::from_center_size(rect.center(), vec2(12.0, 12.0));
     ui.painter().rect_filled(b, 2.0, if on { t.accent } else { t.field_bg });
     ui.painter().rect_stroke(b, 2.0, Stroke::new(1.0, if on { t.accent } else { t.field_border }), StrokeKind::Inside);
@@ -665,6 +752,106 @@ pub(crate) fn constrained(c: &[f64], d: usize, v: f64) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn checkbox_frame(ctx: &egui::Context, values: &mut [Option<bool>; 5], events: Vec<egui::Event>) {
+        let t = Tokens::for_kind(Default::default());
+        let input = egui::RawInput { events, ..Default::default() };
+        let mut output = ctx.run_ui(input, |ui| {
+            for (index, value) in values.iter_mut().enumerate() {
+                let rect = Rect::from_min_size(pos2(20.0, 20.0 + index as f32 * 30.0), vec2(120.0, 20.0));
+                ui.add_enabled_ui(index != 3, |ui| {
+                    if index == 4 {
+                        if let Some(on) = value {
+                            ui.put(rect, DragCheckbox::new(on, crate::i18n::tr("Grid")));
+                        }
+                    } else if let Some(on) = value {
+                        if checkbox(ui, rect, *on, &t, egui::Id::new(index)).changed() {
+                            *on = !*on;
+                        }
+                    } else {
+                        let response = ui.interact(rect, egui::Id::new(index), Sense::click());
+                        assert_eq!(drag_toggle(ui, &response, None), None);
+                    }
+                });
+            }
+        });
+        output.textures_delta.clear();
+    }
+
+    fn checkbox_pointer(y: f32, pressed: Option<bool>) -> Vec<egui::Event> {
+        let pos = pos2(28.0, y);
+        let mut events = vec![egui::Event::PointerMoved(pos)];
+        if let Some(pressed) = pressed {
+            events.push(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() });
+        }
+        events
+    }
+
+    #[test]
+    fn checkbox_drag_sets_one_state_skips_mixed_and_disabled_and_ends_on_release() {
+        let ctx = egui::Context::default();
+        let mut values = [Some(false), Some(true), None, Some(false), Some(false)];
+        checkbox_frame(&ctx, &mut values, vec![]);
+        checkbox_frame(&ctx, &mut values, checkbox_pointer(28.0, Some(true)));
+        assert_eq!(values[0], Some(true));
+        // An already-matching neighbour must not invert, even after revisiting.
+        for y in [58.0, 88.0, 118.0, 148.0, 58.0, 28.0] {
+            checkbox_frame(&ctx, &mut values, checkbox_pointer(y, None));
+        }
+        assert_eq!(values, [Some(true), Some(true), None, Some(false), Some(true)]);
+        checkbox_frame(&ctx, &mut values, checkbox_pointer(28.0, Some(false)));
+        assert_eq!(values[0], Some(true), "release must not toggle the source again");
+        // Begin on the labelled wrapper and drag back into custom checkboxes.
+        checkbox_frame(&ctx, &mut values, checkbox_pointer(148.0, Some(true)));
+        assert_eq!(values[4], Some(false));
+        for y in [58.0, 28.0] {
+            checkbox_frame(&ctx, &mut values, checkbox_pointer(y, None));
+        }
+        checkbox_frame(&ctx, &mut values, checkbox_pointer(28.0, Some(false)));
+        assert_eq!(values, [Some(false), Some(false), None, Some(false), Some(false)]);
+        checkbox_frame(&ctx, &mut values, checkbox_pointer(58.0, None));
+        assert_eq!(values[1], Some(false), "hover after release must not paint");
+    }
+
+    #[test]
+    fn checkbox_click_and_keyboard_toggle_once_and_drag_must_start_on_a_checkbox() {
+        let ctx = egui::Context::default();
+        let mut values = [Some(false), Some(false), None, Some(false), Some(false)];
+        checkbox_frame(&ctx, &mut values, vec![]);
+        // Pressing outside the checkboxes must not start a gesture on entry.
+        checkbox_frame(&ctx, &mut values, checkbox_pointer(200.0, Some(true)));
+        checkbox_frame(&ctx, &mut values, checkbox_pointer(28.0, None));
+        checkbox_frame(&ctx, &mut values, checkbox_pointer(28.0, Some(false)));
+        assert_eq!(values[0], Some(false));
+        for source_y in [88.0, 118.0] {
+            checkbox_frame(&ctx, &mut values, checkbox_pointer(source_y, Some(true)));
+            checkbox_frame(&ctx, &mut values, checkbox_pointer(28.0, None));
+            checkbox_frame(&ctx, &mut values, checkbox_pointer(28.0, Some(false)));
+            assert_eq!(values[0], Some(false), "mixed and disabled sources cannot begin a drag");
+        }
+        for y in [28.0, 148.0] {
+            checkbox_frame(&ctx, &mut values, checkbox_pointer(y, Some(true)));
+            checkbox_frame(&ctx, &mut values, checkbox_pointer(y, Some(false)));
+        }
+        assert_eq!(values[0], Some(true));
+        assert_eq!(values[4], Some(true));
+        ctx.memory_mut(|m| m.request_focus(egui::Id::new(0usize)));
+        checkbox_frame(
+            &ctx,
+            &mut values,
+            vec![egui::Event::Key { key: egui::Key::Space, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() }],
+        );
+        assert_eq!(values[0], Some(false), "keyboard activation still works");
+        // Fast clicks may deliver press and release together in one input frame.
+        // This also exercises clicked() without an active drag (outside the data lock).
+        for (index, y) in [(0, 28.0), (4, 148.0)] {
+            let before = values[index];
+            let mut events = checkbox_pointer(y, Some(true));
+            events.extend(checkbox_pointer(y, Some(false)));
+            checkbox_frame(&ctx, &mut values, events);
+            assert_eq!(values[index], before.map(|on| !on));
+        }
+    }
 
     /// #488: an inline editor selects its whole text only as it opens. Should it be without the
     /// keyboard for a frame later (an input method, another handler), it takes the keyboard back

@@ -106,7 +106,7 @@ fn page_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, page: &Page, cur: &Value
                 match kind {
                     Kind::Bool => {
                         let mut b = v.as_bool().unwrap_or(false);
-                        let r = ui.checkbox(&mut b, tr(label));
+                        let r = crate::widgets::labelled_checkbox(ui, &mut b, tr(label));
                         if r.changed() {
                             acts.push(Act::Set(key.into(), json!(b)));
                         }

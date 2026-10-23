@@ -321,7 +321,7 @@ pub fn show(
                     let r = ui.add(crate::widgets::drag_value(egui::DragValue::new(&mut d.width).range(4..=30000).suffix(" px")));
                     auto.add("dialog.comp.width", r.rect, "Width");
                     let lbl = format!("Lock Aspect Ratio to {}", aspect_label(ow as f64, oh as f64));
-                    let r = ui.checkbox(&mut d.lock_aspect, lbl);
+                    let r = crate::widgets::labelled_checkbox(ui, &mut d.lock_aspect, lbl);
                     auto.add("dialog.comp.lockAspect", r.rect, "Lock Aspect Ratio");
                     if d.lock_aspect && ow != d.width && ow > 0 {
                         d.height = ((d.width as f64) * oh as f64 / ow as f64).round().max(4.0) as u32;
@@ -416,11 +416,11 @@ pub fn show(
                 });
                 ui.end_row();
                 ui.label("");
-                let r = ui.checkbox(&mut d.preserve_frame_rate, tr("Preserve frame rate when nested or in render queue"));
+                let r = crate::widgets::labelled_checkbox(ui, &mut d.preserve_frame_rate, tr("Preserve frame rate when nested or in render queue"));
                 auto.add("dialog.comp.preserveFrameRate", r.rect, "Preserve frame rate when nested or in render queue");
                 ui.end_row();
                 ui.label("");
-                let r = ui.checkbox(&mut d.preserve_resolution, tr("Preserve resolution when nested"));
+                let r = crate::widgets::labelled_checkbox(ui, &mut d.preserve_resolution, tr("Preserve resolution when nested"));
                 auto.add("dialog.comp.preserveResolution", r.rect, "Preserve resolution when nested");
                 ui.end_row();
                 ui.label(egui::RichText::new(tr("Motion Blur")).strong());

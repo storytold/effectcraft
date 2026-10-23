@@ -240,7 +240,7 @@ fn fmt_rate(r: f64) -> String {
 fn check_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, at: egui::Pos2, key: &str, text: &str, on: bool) -> bool {
     let t = app.tokens;
     let r = Rect::from_min_size(pos2(at.x, at.y - 8.0), vec2(16.0, 16.0));
-    let clicked = widgets::checkbox(ui, r, on, &t, egui::Id::new(("pv-check", key))).clicked();
+    let clicked = widgets::checkbox(ui, r, on, &t, egui::Id::new(("pv-check", key))).changed();
     p.text(pos2(r.max.x + 5.0, at.y), Align2::LEFT_CENTER, text, Tokens::ui(12.0), t.text);
     app.auto.add(&format!("preview.{key}"), r, text);
     clicked
