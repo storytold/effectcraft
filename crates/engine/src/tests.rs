@@ -423,7 +423,7 @@ fn time_navigation_per_property() {
 
 #[test]
 fn set_text_paragraph_fill_and_leading() {
-    use effectcraft_keyframe::{Justify, Value as KValue};
+    use effectcraft_keyframe::{Justify, LineJoin, Value as KValue};
     let mut s = demo();
     let t = s.execute("layer.newText", json!({"text": "Hi"})).unwrap()["layer"].as_u64().unwrap();
     let doc = |s: &Session| {
@@ -451,6 +451,13 @@ fn set_text_paragraph_fill_and_leading() {
     s.execute("layer.setText", json!({"layer": t, "hScale": 120, "vScale": 80, "baselineShift": 4, "smallCaps": true, "strokeOverFill": true})).unwrap();
     let d = doc(&s);
     assert_eq!((d.h_scale, d.v_scale, d.baseline_shift, d.small_caps, d.stroke_over_fill), (120.0, 80.0, 4.0, true, true));
+    // Line Join: stored, and an unknown name is an error that leaves it alone.
+    for (key, j) in [("bevel", LineJoin::Bevel), ("round", LineJoin::Round), ("miter", LineJoin::Miter)] {
+        s.execute("layer.setText", json!({"layer": t, "lineJoin": key})).unwrap();
+        assert_eq!(doc(&s).line_join, j, "{key}");
+    }
+    assert!(s.execute("layer.setText", json!({"layer": t, "lineJoin": "pointy"})).is_err());
+    assert_eq!(doc(&s).line_join, LineJoin::Miter);
 }
 
 #[test]

@@ -3,7 +3,7 @@
 //! otherwise they apply to the whole selected text layer.
 
 use crate::i18n::tr;
-use effectcraft_engine::keyframe::{BaselineOption, Composer, Direction, FigureStyle, FigureWidth, Justify, Kerning, TextDoc};
+use effectcraft_engine::keyframe::{BaselineOption, Composer, Direction, FigureStyle, FigureWidth, Justify, Kerning, LineJoin, TextDoc};
 use effectcraft_engine::render::EvalCtx;
 use egui::{Align2, Rect, Sense, pos2, vec2};
 use serde_json::json;
@@ -61,7 +61,7 @@ pub fn text_target(app: &EffectcraftApp) -> Option<TextTarget> {
     effectcraft_engine::render::text::source_text(&ectx, layer).map(|d| TextTarget { layer: layer.id.0, doc: d, range: None })
 }
 
-fn toggle(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, r: Rect, id: &str, label: &str, on: bool, bold: bool) -> bool {
+pub(super) fn toggle(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, r: Rect, id: &str, label: &str, on: bool, bold: bool) -> bool {
     let t = app.tokens;
     let resp = ui.interact(r, egui::Id::new(("text-toggle", id)), Sense::click());
     p.rect_filled(
@@ -79,6 +79,30 @@ fn toggle(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, r: Rec
     p.text(r.center(), Align2::CENTER_CENTER, label, font, if on { egui::Color32::WHITE } else { t.text });
     app.auto.add(id, r, label);
     resp.clicked()
+}
+
+/// The three Line Join buttons of a stroke (Miter, Round, Bevel) in a row starting at `at`.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn join_buttons(
+    app: &mut EffectcraftApp,
+    ui: &mut egui::Ui,
+    p: &egui::Painter,
+    at: egui::Pos2,
+    w: f32,
+    auto: &str,
+    current: LineJoin,
+    enabled: bool,
+    mut pick: impl FnMut(LineJoin),
+) {
+    let t = app.tokens;
+    p.text(pos2(at.x, at.y + 11.0), Align2::LEFT_CENTER, tr("Join"), Tokens::semibold(11.0), t.text_dim);
+    let bw = ((w - 40.0 - 2.0 * 4.0) / 3.0).clamp(30.0, 64.0);
+    for (i, (j, label)) in [(LineJoin::Miter, "Miter"), (LineJoin::Round, "Round"), (LineJoin::Bevel, "Bevel")].into_iter().enumerate() {
+        let r = Rect::from_min_size(pos2(at.x + 40.0 + i as f32 * (bw + 4.0), at.y), vec2(bw, 22.0));
+        if toggle(app, ui, p, r, &format!("{auto}.lineJoin.{}", j.key()), tr(label), current == j, false) && enabled {
+            pick(j);
+        }
+    }
 }
 
 pub fn character(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
@@ -183,7 +207,9 @@ pub fn character(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             actions.push(json!({"strokeOverFill": i == 1}));
         }
     }
-    y += 5.0 * 28.0 + 8.0;
+    // Line Join: Miter / Round / Bevel (row 5).
+    join_buttons(app, ui, &p, pos2(x0, y + 5.0 * 28.0), w, "character", doc.line_join, enabled, |j| actions.push(json!({"lineJoin": j.key()})));
+    y += 6.0 * 28.0 + 8.0;
     // Fill / stroke swatches with their enable boxes.
     for (i, (key, label, on, c)) in [("fill", "Fill", doc.apply_fill, doc.fill), ("stroke", "Stroke", doc.apply_stroke, doc.stroke)].into_iter().enumerate() {
         let fx = x0 + i as f32 * (w / 2.0);

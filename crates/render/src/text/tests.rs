@@ -524,6 +524,7 @@ fn touching_glyphs_join_without_a_seam() {
             fill,
             stroke: [0.0; 4],
             stroke_width: 0.0,
+            line_join: effectcraft_path::Join::Round,
             apply_fill: true,
             char_index: 0,
             rest: [0.0; 2],
@@ -563,4 +564,68 @@ fn range_bar_drag_values() {
     assert_eq!(range_value_of(3.4 / 7.0, 0.0, true, 7), 3.0);
     assert_eq!(range_value_of(3.6 / 7.0, 0.0, true, 7), 4.0);
     assert_eq!(range_value_of(3.6 / 7.0, 2.0 / 7.0, true, 7), 2.0, "less a 2-character Offset");
+}
+
+#[test]
+fn stroke_line_join_changes_the_corners() {
+    use effectcraft_keyframe::LineJoin;
+    // A thick outlined "I": its square corners are sharp with Miter, cut with Bevel and rounded
+    // with Round, so the stroked area shrinks in that order.
+    let alpha_sum = |join: LineJoin| {
+        let (mut p, cid, comp) = setup(200, 200);
+        let d = TextDoc {
+            text: "I".into(),
+            size: 120.0,
+            apply_fill: false,
+            apply_stroke: true,
+            stroke: [1.0, 1.0, 1.0, 1.0],
+            stroke_width: 24.0,
+            line_join: join,
+            ..Default::default()
+        };
+        let mut l = text_layer(&mut p, &comp, d);
+        set(&mut l, "transform/position", Value::Vec3([80.0, 150.0, 0.0]));
+        p.comp_mut(cid).unwrap().layers.push(l);
+        let c = ctx(&p, cid, 0.0);
+        let geom = text_geom(&c, &p.comp(cid).unwrap().layers[0]).unwrap();
+        assert!(geom.glyphs.iter().all(|g| g.line_join == path_join(join)));
+        let img = crate::render_frame(&p, cid, Tick::ZERO, 1.0);
+        img.data.iter().map(|px| f64::from(px[3])).sum::<f64>()
+    };
+    let (miter, round, bevel) = (alpha_sum(LineJoin::Miter), alpha_sum(LineJoin::Round), alpha_sum(LineJoin::Bevel));
+    assert!(miter > round, "miter {miter} should cover more than round {round}");
+    assert!(round > bevel, "round {round} should cover more than bevel {bevel}");
+}
+
+#[test]
+fn miter_tips_are_not_clipped_by_the_glyph_patch() {
+    // A synthetic glyph (no font needed): a sharp triangle, 30° at its apex. With a 10 px Miter
+    // stroke the tip reaches 5 / sin 15° ≈ 19 px above the apex, past one stroke width (10 px);
+    // the patch it is drawn into must reach that far, or the tip is cut flat.
+    let mut tri = BezPath::new();
+    tri.move_to((100.0, 50.0));
+    tri.line_to((100.0 + 100.0 * 15f64.to_radians().tan(), 150.0));
+    tri.line_to((100.0 - 100.0 * 15f64.to_radians().tan(), 150.0));
+    tri.close_path();
+    let glyph = |join| PlacedGlyph {
+        local: tri.clone(),
+        m: Mat4::IDENTITY,
+        xf: CharXf::default(),
+        fill: [0.0; 4],
+        stroke: [1.0; 4],
+        stroke_width: 10.0,
+        line_join: join,
+        apply_fill: false,
+        char_index: 0,
+        rest: [0.0; 2],
+    };
+    let tip_alpha = |join| {
+        let geom = TextGeom { doc: TextDoc::default(), glyphs: vec![glyph(join)], fill_stroke: 0, blend: BlendMode::Normal };
+        let mut img = crate::Image::new(200, 200);
+        draw_glyphs(&geom, &mut img, &Mat3::IDENTITY, 1.0, None);
+        // 15 px above the apex: inside the miter tip, beyond one stroke width (+ 2 px).
+        img.data[35 * 200 + 100][3]
+    };
+    assert!(tip_alpha(effectcraft_path::Join::Miter) > 0.5, "the miter tip is clipped");
+    assert_eq!(tip_alpha(effectcraft_path::Join::Bevel), 0.0, "a bevel join has no tip there");
 }

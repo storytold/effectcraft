@@ -479,6 +479,8 @@ pub struct PlacedGlyph {
     pub fill: [f32; 4],
     pub stroke: [f32; 4],
     pub stroke_width: f64,
+    /// How the corners of the stroke are joined (the document's Line Join).
+    pub line_join: effectcraft_path::Join,
     /// The character's style fills it (Character panel fill on).
     pub apply_fill: bool,
     /// Index of the character in the text.
@@ -488,7 +490,22 @@ pub struct PlacedGlyph {
     pub rest: [f64; 2],
 }
 
+/// The renderer's join for a document's Line Join.
+pub fn path_join(j: effectcraft_keyframe::LineJoin) -> effectcraft_path::Join {
+    match j {
+        effectcraft_keyframe::LineJoin::Miter => effectcraft_path::Join::Miter,
+        effectcraft_keyframe::LineJoin::Round => effectcraft_path::Join::Round,
+        effectcraft_keyframe::LineJoin::Bevel => effectcraft_path::Join::Bevel,
+    }
+}
+
 impl PlacedGlyph {
+    /// How far the stroke can reach past the outline: half the width, times the miter limit
+    /// where Miter joins can make tips (at least the full width, as before Line Join existed).
+    pub fn stroke_reach(&self) -> f64 {
+        let k = if self.line_join == effectcraft_path::Join::Miter { (StrokeStyle::default().miter * 0.5).max(1.0) } else { 1.0 };
+        self.stroke_width * k
+    }
     /// Character space → layer space, flattened to 2D (ignores Z).
     pub fn m2(&self) -> Mat3 {
         let m = &self.m.0;
@@ -777,6 +794,7 @@ pub fn text_geom(ctx: &EvalCtx, layer: &Layer) -> Option<TextGeom> {
             fill,
             stroke,
             stroke_width: (base_stroke_w + x.stroke_width).max(0.0),
+            line_join: path_join(doc.line_join),
             apply_fill: st.apply_fill,
             char_index: g.char_index,
             rest,
@@ -833,7 +851,7 @@ fn raster_pass(g: &PlacedGlyph, stroke: bool, paths: &[BezPath], m: &Mat3, rect:
     let (w, h) = ((rect[2] - rect[0]) as u32, (rect[3] - rect[1]) as u32);
     let mm = Mat3::translate(vec2(-rect[0] as f64, -rect[1] as f64)) * *m;
     let cov = if stroke {
-        let st = StrokeStyle { width: g.stroke_width, join: effectcraft_path::Join::Round, ..Default::default() };
+        let st = StrokeStyle { width: g.stroke_width, join: g.line_join, ..Default::default() };
         effectcraft_path::stroke_coverage(paths, &st, &mm, w, h)
     } else {
         effectcraft_path::fill_coverage(paths, &mm, w, h, FillRule::NonZero)
@@ -927,7 +945,7 @@ fn draw_glyphs(geom: &TextGeom, img: &mut Image, to_px: &Mat3, s: f64, only: Opt
         };
         let Some(b) = effectcraft_path::bounds(&paths) else { continue };
         let blur = [g.xf.blur[0] * s, g.xf.blur[1] * s];
-        let pad = g.stroke_width * m.mean_scale() + 2.0 + blur[0].max(blur[1]) * 1.5;
+        let pad = g.stroke_reach() * m.mean_scale() + 2.0 + blur[0].max(blur[1]) * 1.5;
         let r = m.map_rect(&effectcraft_geom::Rect::new(b.x0, b.y0, b.x1, b.y1));
         let rect = [
             ((r.x0 - pad).floor() as i64).max(0),
@@ -950,7 +968,7 @@ pub fn render(ctx: &EvalCtx, layer: &Layer, s: f64) -> Buf {
     let mut bounds: Option<kurbo::Rect> = None;
     for g in &geom.glyphs {
         if let Some(b) = effectcraft_path::bounds(&[g.path()]) {
-            let pad = g.stroke_width + 2.0 + g.xf.blur[0].max(g.xf.blur[1]) * 1.5;
+            let pad = g.stroke_reach() + 2.0 + g.xf.blur[0].max(g.xf.blur[1]) * 1.5;
             let b = b.inflate(pad, pad);
             bounds = Some(bounds.map_or(b, |a| a.union(b)));
         }
@@ -976,7 +994,7 @@ pub fn per_char_planes(ctx: &EvalCtx, layer: &Layer, s: f64) -> Vec<(Buf, Mat4)>
             continue;
         }
         let Some(b) = effectcraft_path::bounds(std::slice::from_ref(&g.local)) else { continue };
-        let pad = g.stroke_width + 2.0 + g.xf.blur[0].max(g.xf.blur[1]) * 1.5;
+        let pad = g.stroke_reach() + 2.0 + g.xf.blur[0].max(g.xf.blur[1]) * 1.5;
         let b = b.inflate(pad, pad);
         let w = ((b.width() * s).ceil() as u32 + 4).clamp(1, 4096);
         let h = ((b.height() * s).ceil() as u32 + 4).clamp(1, 4096);

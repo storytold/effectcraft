@@ -97,6 +97,39 @@ impl Justify {
     }
 }
 
+/// How the corners of a text stroke are joined.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum LineJoin {
+    #[default]
+    Miter,
+    Round,
+    Bevel,
+}
+
+impl LineJoin {
+    /// The `layer.setText` name.
+    pub fn key(self) -> &'static str {
+        match self {
+            LineJoin::Miter => "miter",
+            LineJoin::Round => "round",
+            LineJoin::Bevel => "bevel",
+        }
+    }
+    pub fn parse(s: &str) -> Option<LineJoin> {
+        Some(match s.to_ascii_lowercase().replace(['_', ' ', '-'], "").as_str() {
+            "miter" | "miterjoin" => LineJoin::Miter,
+            "round" | "roundjoin" => LineJoin::Round,
+            "bevel" | "beveljoin" => LineJoin::Bevel,
+            _ => return None,
+        })
+    }
+}
+
+/// Documents saved before Line Join existed drew round corners.
+fn round_join() -> LineJoin {
+    LineJoin::Round
+}
+
 /// Kerning between a character and the one before it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub enum Kerning {
@@ -402,6 +435,8 @@ pub struct TextDoc {
     pub apply_fill: bool,
     pub apply_stroke: bool,
     pub stroke_over_fill: bool,
+    #[serde(default = "round_join")]
+    pub line_join: LineJoin,
     pub tracking: f64,
     /// None = auto (120% of size).
     pub leading: Option<f64>,
@@ -463,6 +498,7 @@ impl Default for TextDoc {
             apply_fill: true,
             apply_stroke: false,
             stroke_over_fill: true,
+            line_join: LineJoin::Miter,
             tracking: 0.0,
             leading: None,
             justify: Justify::Left,
@@ -905,6 +941,11 @@ impl TextDoc {
     /// characters `r` (None = the whole text). Returns false for unknown keys.
     pub fn set_attr(&mut self, key: &str, v: &J, r: Option<Range<usize>>) -> Result<bool, String> {
         match key {
+            "lineJoin" => {
+                let name = v.as_str().ok_or("lineJoin: expected \"miter\", \"round\" or \"bevel\"")?;
+                self.line_join = LineJoin::parse(name).ok_or_else(|| format!("lineJoin: unknown join {name:?} (use miter, round or bevel)"))?;
+                return Ok(true);
+            }
             "strokeOverFill" => {
                 self.stroke_over_fill = v.as_bool().ok_or("strokeOverFill: expected a boolean")?;
                 return Ok(true);
@@ -1511,5 +1552,35 @@ mod tests {
         apply_char_attr(&mut s, "allCaps", &J::Bool(true)).unwrap();
         apply_char_attr(&mut s, "allSmallCaps", &J::Bool(true)).unwrap();
         assert!(!s.all_caps && s.opentype.all_small_caps);
+    }
+
+    #[test]
+    fn line_join_defaults_to_miter_and_old_documents_stay_round() {
+        assert_eq!(TextDoc::default().line_join, LineJoin::Miter);
+        // A document saved before Line Join existed has no `line_join`: it drew round corners.
+        let mut v = serde_json::to_value(TextDoc::default()).unwrap();
+        v.as_object_mut().unwrap().remove("line_join");
+        let old: TextDoc = serde_json::from_value(v).unwrap();
+        assert_eq!(old.line_join, LineJoin::Round);
+        // A saved choice survives a round trip.
+        for j in [LineJoin::Miter, LineJoin::Round, LineJoin::Bevel] {
+            let doc = TextDoc { line_join: j, ..TextDoc::default() };
+            let back: TextDoc = serde_json::from_value(serde_json::to_value(&doc).unwrap()).unwrap();
+            assert_eq!(back.line_join, j);
+        }
+    }
+
+    #[test]
+    fn set_attr_line_join_accepts_the_three_names_and_rejects_the_rest() {
+        let mut doc = TextDoc::plain("Hi");
+        for (name, j) in [("bevel", LineJoin::Bevel), ("Round", LineJoin::Round), ("MITER", LineJoin::Miter), ("bevel join", LineJoin::Bevel)] {
+            assert_eq!(doc.set_attr("lineJoin", &serde_json::json!(name), None), Ok(true), "{name}");
+            assert_eq!(doc.line_join, j, "{name}");
+        }
+        doc.line_join = LineJoin::Bevel;
+        assert!(doc.set_attr("lineJoin", &serde_json::json!("sharp"), None).is_err());
+        assert!(doc.set_attr("lineJoin", &serde_json::json!(3), None).is_err());
+        assert!(doc.set_attr("lineJoin", &serde_json::Value::Null, None).is_err());
+        assert_eq!(doc.line_join, LineJoin::Bevel, "a rejected value leaves the join alone");
     }
 }

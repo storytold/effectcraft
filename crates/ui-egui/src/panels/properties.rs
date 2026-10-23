@@ -436,6 +436,8 @@ fn text_section(
         p.text(pos2(sw.max.x + 8.0, sw.center().y), Align2::LEFT_CENTER, label, Tokens::ui(12.0), t.text);
     }
     y += 52.0;
+    super::text_panels::join_buttons(app, ui, p, pos2(x0, y), w, "properties.text", doc.line_join, true, |j| set(actions, json!({"lineJoin": j.key()})));
+    y += 28.0;
     y = more_button(app, ui, p, x0, y, "props-text-more", "properties.text.more", PanelKind::Character);
     y + 10.0
 }
