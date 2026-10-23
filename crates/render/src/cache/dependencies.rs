@@ -6,7 +6,11 @@ use crate::EvalCtx;
 use effectcraft_project::{ItemId, ItemKind, Layer, LayerId, LayerSource, Node, PropGroup};
 use std::hash::Hash;
 
-pub(super) fn hash(h: &mut KeyHasher, ctx: &EvalCtx, layer: &Layer, effects: Option<usize>) -> Option<()> {
+pub(super) fn hash(h: &mut KeyHasher, ctx: &EvalCtx, layer: &Layer, effects: super::EffectScope) -> Option<()> {
+    if effects == super::EffectScope::Footprint {
+        // A footprint runs no effects: nothing they read is in its pixels or keys.
+        return Some(());
+    }
     let mut deps = Dependencies { h, path: vec![(ctx.comp_id, layer.id)], remaining: 1024, other_times: super::reads_other_times(layer) };
     deps.effects(ctx, layer, effects)
 }
@@ -19,13 +23,18 @@ struct Dependencies<'a> {
 }
 
 impl Dependencies<'_> {
-    fn effects(&mut self, ctx: &EvalCtx, layer: &Layer, limit: Option<usize>) -> Option<()> {
+    fn effects(&mut self, ctx: &EvalCtx, layer: &Layer, scope: super::EffectScope) -> Option<()> {
         let previous = self.other_times;
         self.other_times |= super::reads_other_times(layer);
+        let limit = match scope {
+            super::EffectScope::All => usize::MAX,
+            super::EffectScope::First(n) => n,
+            super::EffectScope::Footprint => 0,
+        };
         if layer.switches.effects
             && let Some(fx) = layer.effects()
         {
-            for g in fx.groups().take(limit.unwrap_or(usize::MAX)).filter(|g| g.enabled) {
+            for g in fx.groups().take(limit).filter(|g| g.enabled) {
                 self.group(ctx, layer, g, 0)?;
             }
         }
@@ -107,7 +116,7 @@ impl Dependencies<'_> {
             }
             _ => {}
         }
-        self.effects(ctx, layer, None)?;
+        self.effects(ctx, layer, super::EffectScope::All)?;
         self.path.pop();
         Some(())
     }

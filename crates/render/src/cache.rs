@@ -422,10 +422,10 @@ fn hash_debug(h: &mut KeyHasher, v: &impl std::fmt::Debug) {
 }
 
 /// Time-based layer content: does any part of the source/effects read the clock directly
-/// (rather than through property values)?
-/// `effects: false` ignores the effects (a key of the source and masks only).
-fn time_dependent(layer: &Layer, effects: bool) -> bool {
-    if effects
+/// (rather than through property values)? `with_effects`: false when the keyed content is an
+/// adjustment layer's footprint (source through masks) — only its shape/text wiggles then count.
+fn time_dependent(layer: &Layer, with_effects: bool) -> bool {
+    if with_effects
         && layer.switches.effects
         && let Some(fx) = layer.effects()
     {
@@ -500,7 +500,7 @@ pub fn input_key(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bo
     if layer.switches.adjustment {
         return None;
     }
-    let base = key_any(ctx, layer, scale, draft, blur, true, Some(effects))?;
+    let base = key_any(ctx, layer, scale, draft, blur, true, EffectScope::First(effects))?;
     let mut h = KeyHasher(base ^ 0x5bd1_e995_7a3c_11d3);
     effects.hash(&mut h);
     Some(h.finish())
@@ -527,20 +527,35 @@ pub fn footprint_key(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur
     // The footprint is the source through the masks, without the effects: a time-dependent
     // effect (Noise on a finishing adjustment layer) must not re-key it every frame (on the GPU,
     // a full-frame re-upload per frame).
-    Some(derive(key_any(ctx, layer, scale, draft, blur, false, Some(0))?, 0xf007_9417))
+    Some(derive(key_any(ctx, layer, scale, draft, blur, false, EffectScope::Footprint)?, 0xf007_9417))
 }
 
 fn key_with(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool, footage: bool) -> Option<u64> {
     if layer.switches.adjustment {
         return None;
     }
-    key_any(ctx, layer, scale, draft, blur, footage, None)
+    key_any(ctx, layer, scale, draft, blur, footage, EffectScope::All)
 }
 
-/// `blur`: the layer is motion blurred in this render (`Renderer::mb_on`). `effects`: key only
-/// the first that many effects (a layer's input, see [`input_key`]).
+/// How far the effect stack reaches into a cache key. [`EffectScope::Footprint`] keys an
+/// adjustment layer's footprint — its source through its masks, without any effects — so the
+/// stack must not reach the key at all: Noise or Grain on a finishing adjustment layer changes
+/// every frame, and hashing it there re-keyed the footprint each frame, forcing the GPU to
+/// re-render and re-upload a full-frame buffer the footprint never needed (#687).
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum EffectScope {
+    /// The whole stack (the processed layer).
+    All,
+    /// Only the first `n` effects (a layer's input, see [`input_key`]).
+    First(usize),
+    /// None of it (an adjustment layer's footprint).
+    Footprint,
+}
+
+/// `blur`: the layer is motion blurred in this render (`Renderer::mb_on`). `effects`: how far
+/// the effect stack reaches into the key (see [`EffectScope`]).
 #[allow(clippy::too_many_arguments)]
-fn key_any(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool, footage: bool, effects: Option<usize>) -> Option<u64> {
+fn key_any(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool, footage: bool, effects: EffectScope) -> Option<u64> {
     let mut h = KeyHasher(0xcbf2_9ce4_8422_2325);
     ctx.comp.frame_rate.as_f64().to_bits().hash(&mut h);
     ctx.comp.enable_frame_blending.hash(&mut h);
@@ -578,7 +593,8 @@ fn key_any(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool, fo
     hash_debug(&mut h, &layer.switches.pixels());
     // Mask motion blur and effects that read the shutter depend on whether the layer is motion
     // blurred in this render and on the comp's shutter.
-    if layer.masks().is_some_and(|m| !m.children.is_empty()) || layer.effects().is_some_and(|fx| !fx.children.is_empty()) {
+    if layer.masks().is_some_and(|m| !m.children.is_empty()) || (effects != EffectScope::Footprint && layer.effects().is_some_and(|fx| !fx.children.is_empty()))
+    {
         blur.hash(&mut h);
         ctx.comp.enable_motion_blur.hash(&mut h);
         ctx.comp.shutter_angle.to_bits().hash(&mut h);
@@ -592,9 +608,13 @@ fn key_any(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool, fo
         {
             continue;
         }
+        // A footprint is its source through its masks: the effect stack is not in it at all.
+        if effects == EffectScope::Footprint && matches!(c, Node::Group(g) if g.match_id == "effects") {
+            continue;
+        }
         // A layer's input runs only its first effects: the later ones (a Puppet whose pins are
         // dragged, #212) don't change it, so it stays cached.
-        if let (Some(n), Node::Group(g)) = (effects, c)
+        if let (EffectScope::First(n), Node::Group(g)) = (effects, c)
             && g.match_id == "effects"
         {
             let mut first = g.clone();
@@ -617,7 +637,8 @@ fn key_any(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool, fo
         }
     }
     // Paint strokes appear and disappear with their Duration spans (not property values).
-    if layer.switches.effects
+    if effects != EffectScope::Footprint
+        && layer.switches.effects
         && let Some(fx) = layer.effects()
     {
         let lt = layer.layer_time(ctx.time).seconds();
@@ -625,14 +646,14 @@ fn key_any(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool, fo
             effectcraft_effects::paint::cache_key(g, lt).0.hash(&mut h);
         }
     }
-    if time_dependent(layer, effects != Some(0)) {
+    if time_dependent(layer, effects != EffectScope::Footprint) {
         layer.layer_time(ctx.time).0.hash(&mut h);
         // Effects also see the layer's time mapping.
         layer.start_time.0.hash(&mut h);
         layer.stretch.to_bits().hash(&mut h);
     }
     // Effects that see the comp camera or lights (#397) change when they or the layer move.
-    if reads_comp_scene(layer) {
+    if effects != EffectScope::Footprint && reads_comp_scene(layer) {
         hash_debug(&mut h, &crate::comp_scene(ctx, layer));
     }
     Some(h.finish())

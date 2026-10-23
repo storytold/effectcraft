@@ -37,8 +37,15 @@ const EXT_ENTRIES: &[&str] = &["classic3d"];
 /// 8/16 bpc are emulated by clamping and quantising, as on the CPU).
 pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
 
-/// Uploaded layer buffers kept on the GPU by default (bytes; [`GpuContext::set_upload_budget`]).
+/// Uploaded layer buffers kept on the GPU by default (bytes; [`GpuContext::set_upload_budget`],
+/// overridable through `EFFECTCRAFT_GPU_UPLOAD_BUDGET_MB`).
 const UPLOAD_BUDGET: usize = 1536 << 20;
+
+/// `EFFECTCRAFT_GPU_UPLOAD_BUDGET_MB`'s value in megabytes, if it is a positive integer.
+fn parse_upload_budget_mb(v: &str) -> Option<usize> {
+    let v = v.trim();
+    v.parse::<usize>().ok().filter(|mb| *mb > 0)
+}
 
 /// Working textures kept for reuse once their last image is dropped (bytes).
 const POOL_BUDGET: usize = 768 << 20;
@@ -338,11 +345,19 @@ struct Upload {
     last_use: u64,
 }
 
-#[derive(Default)]
 struct Uploads {
     map: HashMap<usize, Upload>,
     bytes: usize,
     clock: u64,
+    /// Live textures dropped to stay under [`GpuContext::upload_budget`] (#687): every one is a
+    /// full re-upload on a later frame. Counted and warned once, never silently.
+    starves: u64,
+}
+
+impl Default for Uploads {
+    fn default() -> Self {
+        Self { map: HashMap::new(), bytes: 0, clock: 0, starves: 0 }
+    }
 }
 
 /// The device and everything compiled for it.
@@ -365,7 +380,6 @@ pub struct GpuContext {
     dummy_buf: wgpu::Buffer,
     uploads: Mutex<Uploads>,
     upload_budget: std::sync::atomic::AtomicUsize,
-    upload_full_warned: std::sync::atomic::AtomicBool,
     pool: Arc<Mutex<Pool>>,
     /// CPU ↔ GPU traffic (diagnostics: `bench --gpu`).
     pub(crate) transfers: Transfers,
@@ -695,7 +709,7 @@ impl GpuContext {
             init_resource(&device, "dummy storage buffer", || buffer_init(&device, &queue, Some("dummy"), &[0u8; 16], wgpu::BufferUsages::STORAGE))?;
         let dummy_tex = init_resource(&device, "dummy texture view", || dummy.create_view(&Default::default()))?;
         let max_dim = device.limits().max_texture_dimension_2d;
-        Ok(GpuContext {
+        let ctx = GpuContext {
             device,
             queue,
             name,
@@ -712,7 +726,6 @@ impl GpuContext {
             dummy_buf,
             uploads: Mutex::new(Uploads::default()),
             upload_budget: std::sync::atomic::AtomicUsize::new(UPLOAD_BUDGET),
-            upload_full_warned: Default::default(),
             pool: Default::default(),
             staging: Default::default(),
             transfers: Default::default(),
@@ -723,7 +736,13 @@ impl GpuContext {
             particle_states: Default::default(),
             deferred: None,
             readbacks,
-        })
+        };
+        // An embedder sizes the upload cache through the environment (the same channel the
+        // face landmarkers use); unset keeps the default.
+        if let Some(mb) = std::env::var("EFFECTCRAFT_GPU_UPLOAD_BUDGET_MB").ok().and_then(|v| parse_upload_budget_mb(&v)) {
+            ctx.set_upload_budget(mb.saturating_mul(1 << 20));
+        }
+        Ok(ctx)
     }
 
     /// Whether this context has observed a readback timeout or device failure.
@@ -953,9 +972,9 @@ impl GpuContext {
         (GpuImage { texture, width: w, height: h, _lease: Some(lease), levels: None }, was_reused)
     }
 
-    /// Bytes of uploaded layer textures the context keeps (default 1536 MB). An application that
-    /// knows the device's memory can raise it (static layers of a big frame upload once) or lower
-    /// it (a small GPU); the least recently used textures go first.
+    /// Size the layer-texture upload budget in bytes (default 1536 MB). An embedder on a
+    /// small-memory device lowers it so the working pool keeps room; over-budget evictions of
+    /// live layers are logged, never silent (#687).
     pub fn set_upload_budget(&self, bytes: usize) {
         self.upload_budget.store(bytes.max(1 << 20), std::sync::atomic::Ordering::Relaxed);
     }
@@ -1035,17 +1054,20 @@ impl GpuContext {
                     u.bytes -= e.bytes;
                 }
             }
-            if u.bytes > budget && !self.upload_full_warned.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                log::warn!(
-                    target: "effectcraft_gpu",
-                    "GPU upload cache full ({} MB): evicting layer textures, which upload again when next used; a frame whose static layers exceed it re-uploads them every frame",
-                    budget >> 20
-                );
-            }
             while u.bytes > budget {
                 let Some(k) = u.map.iter().min_by_key(|(_, e)| e.last_use).map(|(k, _)| *k) else { break };
                 if let Some(e) = u.map.remove(&k) {
                     u.bytes -= e.bytes;
+                    if e.buf.strong_count() > 0 {
+                        u.starves += 1;
+                        if u.starves == 1 {
+                            log::warn!(
+                                "gpu {}: the {} MB upload budget cannot hold this project's layers; their textures now re-upload every frame (Help ▸ Reveal Logs)",
+                                self.name,
+                                budget >> 20
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -1471,6 +1493,21 @@ impl<'g> Enc<'g> {
 /// Mip levels of a full chain for a `w × h` texture (down to 1 × 1).
 pub(crate) fn mip_levels(w: u32, h: u32) -> u32 {
     u32::BITS - w.max(h).max(1).leading_zeros()
+}
+
+#[cfg(test)]
+mod env_tests {
+    use super::parse_upload_budget_mb;
+
+    #[test]
+    fn upload_budget_env_parses_only_positive_integers() {
+        for v in ["1024", " 512 ", "2048"] {
+            assert_eq!(parse_upload_budget_mb(v).map(|mb| mb << 20), Some(v.trim().parse::<usize>().unwrap() << 20));
+        }
+        for v in ["", "0", "-8", "64.5", "512mb", "x".repeat(64).as_str()] {
+            assert_eq!(parse_upload_budget_mb(v), None, "{v:?}");
+        }
+    }
 }
 
 #[cfg(test)]
