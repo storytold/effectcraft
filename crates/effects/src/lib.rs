@@ -270,6 +270,16 @@ impl Buf {
     /// keeps its place; the new area is transparent. No-op when the buffer already covers it.
     pub fn cover(&mut self, size: [f64; 2]) {
         let Some((dx, dy, w, h)) = cover_plan(self.offset, self.scale, size, self.img.width, self.img.height) else { return };
+        self.regrow(dx, dy, w, h);
+    }
+    /// Grow the buffer so it also spans the pixel box `lo`..`hi` (see [`grow_plan`]), like
+    /// [`Buf::cover`] but for an arbitrary region. Content keeps its place; the new area is transparent.
+    pub fn grow_to(&mut self, lo: [f64; 2], hi: [f64; 2]) {
+        let Some((dx, dy, w, h)) = grow_plan(lo, hi, self.img.width, self.img.height) else { return };
+        self.regrow(dx, dy, w, h);
+    }
+    /// Move the pixels to `(dx, dy)` of a new transparent `w` × `h` image, keeping their place.
+    fn regrow(&mut self, dx: u32, dy: u32, w: u32, h: u32) {
         let src = std::mem::replace(&mut self.img, Image::new(w, h));
         let (sw, sh) = (src.width as usize, src.height as usize);
         for y in 0..sh {
@@ -316,6 +326,31 @@ pub fn cover_plan(offset: [f64; 2], scale: f64, size: [f64; 2], width: u32, heig
     let (dx, dy) = ((-lo_x) as u32, (-lo_y) as u32);
     let (nw, nh) = (nw_f.round().max(1.0) as u32, nh_f.round().max(1.0) as u32);
     (dx != 0 || dy != 0 || nw != width || nh != height).then_some((dx, dy, nw, nh))
+}
+
+/// Where [`Buf::grow_to`] would take a `width` × `height` buffer: shift its pixels by `(dx, dy)` and
+/// resize it to `width` × `height` so it also spans the pixel box `lo`..`hi` (in the buffer's own
+/// coordinates). `None` when the buffer already spans it, the box is not finite, or the result
+/// would be larger than 16384 pixels on a side.
+pub fn grow_plan(lo: [f64; 2], hi: [f64; 2], width: u32, height: u32) -> Option<(u32, u32, u32, u32)> {
+    if !lo.iter().chain(hi.iter()).all(|v| v.is_finite()) {
+        return None;
+    }
+    let (lo_x, lo_y) = (lo[0].min(0.0).floor(), lo[1].min(0.0).floor());
+    let (hi_x, hi_y) = (hi[0].max(width as f64).ceil(), hi[1].max(height as f64).ceil());
+    let (nw_f, nh_f) = (hi_x - lo_x, hi_y - lo_y);
+    if !(nw_f <= 16384.0 && nh_f <= 16384.0) {
+        return None;
+    }
+    let (dx, dy) = ((-lo_x) as u32, (-lo_y) as u32);
+    let (nw, nh) = (nw_f as u32, nh_f as u32);
+    (dx != 0 || dy != 0 || nw != width || nh != height).then_some((dx, dy, nw, nh))
+}
+
+/// The pixel box (min, max) enclosing the four points of a quad.
+pub fn quad_bounds(q: &[[f64; 2]; 4]) -> ([f64; 2], [f64; 2]) {
+    let f = |i: usize, init: f64, g: fn(f64, f64) -> f64| q.iter().fold(init, |a, p| g(a, p[i]));
+    ([f(0, f64::INFINITY, f64::min), f(1, f64::INFINITY, f64::min)], [f(0, f64::NEG_INFINITY, f64::max), f(1, f64::NEG_INFINITY, f64::max)])
 }
 
 /// A layer mask at the current time, flattened to a polyline in layer coordinates.
