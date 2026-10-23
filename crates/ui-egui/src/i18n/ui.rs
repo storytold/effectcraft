@@ -825,6 +825,18 @@ const JAPANESE: &[(&str, &str)] = &[
     ("Total Offset", "合計オフセット"),
     ("Per Layer", "レイヤーごと"),
     ("Track", "トラック"),
+    ("Replace Existing File?", "既存のファイルを置き換えますか？"),
+    ("Replace Existing Files?", "既存のファイルを置き換えますか？"),
+    ("“{}” already exists in “{}”. Do you want to replace it?", "「{}」は「{}」にすでに存在します。置き換えますか?"),
+    (
+        "{} files that this render writes already exist. Do you want to replace them?",
+        "このレンダリングで書き込まれるファイルのうち {} 個がすでに存在します。置き換えますか?",
+    ),
+    ("{} ({} frames)", "{}（{} フレーム）"),
+    ("and {} more", "ほか {} 件"),
+    ("Replacing it can't be undone.", "置き換えると元に戻せません。"),
+    ("Replacing them can't be undone.", "置き換えると元に戻せません。"),
+    ("  Replace  ", "  置き換え  "),
 ];
 
 const SIMPLIFIED_CHINESE: &[(&str, &str)] = &[
@@ -1565,6 +1577,15 @@ const SIMPLIFIED_CHINESE: &[(&str, &str)] = &[
     ("Total Offset", "总偏移"),
     ("Per Layer", "每个图层"),
     ("Track", "跟踪"),
+    ("Replace Existing File?", "替换现有文件？"),
+    ("Replace Existing Files?", "替换现有文件？"),
+    ("“{}” already exists in “{}”. Do you want to replace it?", "“{}”已存在于“{}”中。要替换它吗?"),
+    ("{} files that this render writes already exist. Do you want to replace them?", "此次渲染要写入的文件中，有 {} 个已存在。要替换它们吗?"),
+    ("{} ({} frames)", "{}（{} 帧）"),
+    ("and {} more", "另外还有 {} 项"),
+    ("Replacing it can't be undone.", "替换后无法撤销。"),
+    ("Replacing them can't be undone.", "替换后无法撤销。"),
+    ("  Replace  ", "  替换  "),
 ];
 
 const TRADITIONAL_CHINESE: &[(&str, &str)] = &[
@@ -2300,6 +2321,15 @@ const TRADITIONAL_CHINESE: &[(&str, &str)] = &[
     ("Total Offset", "總偏移"),
     ("Per Layer", "每個圖層"),
     ("Track", "追蹤"),
+    ("Replace Existing File?", "取代現有檔案？"),
+    ("Replace Existing Files?", "取代現有檔案？"),
+    ("“{}” already exists in “{}”. Do you want to replace it?", "“{}”已存在於“{}”中。要取代它嗎?"),
+    ("{} files that this render writes already exist. Do you want to replace them?", "此次渲染要寫入的檔案中，有 {} 個已存在。要取代它們嗎?"),
+    ("{} ({} frames)", "{}（{} 影格）"),
+    ("and {} more", "另外還有 {} 項"),
+    ("Replacing it can't be undone.", "取代後無法復原。"),
+    ("Replacing them can't be undone.", "取代後無法復原。"),
+    ("  Replace  ", "  取代  "),
 ];
 
 /// Ukrainian (uk): original translations of the same interface rows as the Chinese catalogs.
@@ -2875,6 +2905,18 @@ const UKRAINIAN: &[(&str, &str)] = &[
     ("Project", "Проєкт"),
     ("Total Offset", "Загальний зсув"),
     ("Per Layer", "На шар"),
+    ("Replace Existing File?", "Замінити наявний файл?"),
+    ("Replace Existing Files?", "Замінити наявні файли?"),
+    ("“{}” already exists in “{}”. Do you want to replace it?", "«{}» уже існує в «{}». Замінити його?"),
+    (
+        "{} files that this render writes already exist. Do you want to replace them?",
+        "Цей рендеринг записує файли, що вже існують (кількість: {}). Замінити їх?",
+    ),
+    ("{} ({} frames)", "{} (кадрів: {})"),
+    ("and {} more", "і ще {}"),
+    ("Replacing it can't be undone.", "Заміну не можна скасувати."),
+    ("Replacing them can't be undone.", "Заміну не можна скасувати."),
+    ("  Replace  ", "  Замінити  "),
 ];
 
 // Brazilian Portuguese.
@@ -3326,6 +3368,18 @@ const PORTUGUESE: &[(&str, &str)] = &[
     ("⚠ {} is used by:", "⚠ {} é usado por:"),
     ("Total Offset", "Deslocamento total"),
     ("Per Layer", "Por camada"),
+    ("Replace Existing File?", "Substituir o arquivo existente?"),
+    ("Replace Existing Files?", "Substituir os arquivos existentes?"),
+    ("“{}” already exists in “{}”. Do you want to replace it?", "“{}” já existe em “{}”. Deseja substituí-lo?"),
+    (
+        "{} files that this render writes already exist. Do you want to replace them?",
+        "Esta renderização grava arquivos que já existem (quantidade: {}). Deseja substituí-los?",
+    ),
+    ("{} ({} frames)", "{} ({} quadros)"),
+    ("and {} more", "e mais {}"),
+    ("Replacing it can't be undone.", "A substituição não pode ser desfeita."),
+    ("Replacing them can't be undone.", "A substituição não pode ser desfeita."),
+    ("  Replace  ", "  Substituir  "),
 ];
 
 /// Czech (cs): original translations covering every row in the Chinese panel catalogs.
@@ -3878,6 +3932,18 @@ const CZECH: &[(&str, &str)] = &[
     ("Variable fonts only", "Jen proměnná písma"),
     ("Total Offset", "Celkový posun"),
     ("Per Layer", "Na vrstvu"),
+    ("Replace Existing File?", "Nahradit existující soubor?"),
+    ("Replace Existing Files?", "Nahradit existující soubory?"),
+    ("“{}” already exists in “{}”. Do you want to replace it?", "Soubor „{}“ již existuje ve složce „{}“. Chcete jej nahradit?"),
+    (
+        "{} files that this render writes already exist. Do you want to replace them?",
+        "Tento render zapisuje soubory, které již existují (počet: {}). Chcete je nahradit?",
+    ),
+    ("{} ({} frames)", "{} (snímků: {})"),
+    ("and {} more", "a dalších: {}"),
+    ("Replacing it can't be undone.", "Nahrazení nelze vrátit zpět."),
+    ("Replacing them can't be undone.", "Nahrazení nelze vrátit zpět."),
+    ("  Replace  ", "  Nahradit  "),
 ];
 
 /// Spanish: neutral, tú, sentence case; the same source strings as the Chinese catalogs, in the same
@@ -4436,6 +4502,18 @@ const SPANISH: &[(&str, &str)] = &[
     ("After Effects project", "Proyecto de After Effects"),
     ("Lottie animation", "Animación de Lottie"),
     ("Project", "Proyecto"),
+    ("Replace Existing File?", "¿Reemplazar el archivo existente?"),
+    ("Replace Existing Files?", "¿Reemplazar los archivos existentes?"),
+    ("“{}” already exists in “{}”. Do you want to replace it?", "“{}” ya existe en “{}”. ¿Quieres reemplazarlo?"),
+    (
+        "{} files that this render writes already exist. Do you want to replace them?",
+        "Este procesamiento escribe archivos que ya existen (cantidad: {}). ¿Quieres reemplazarlos?",
+    ),
+    ("{} ({} frames)", "{} ({} fotogramas)"),
+    ("and {} more", "y {} más"),
+    ("Replacing it can't be undone.", "No se puede deshacer el reemplazo."),
+    ("Replacing them can't be undone.", "No se puede deshacer el reemplazo."),
+    ("  Replace  ", "  Reemplazar  "),
 ];
 
 #[cfg(test)]
@@ -4477,6 +4555,7 @@ mod tests {
         ("panels/media_panels.rs", include_str!("../panels/media_panels.rs")),
         ("panels/misc.rs", include_str!("../panels/misc.rs")),
         ("panels/mod.rs", include_str!("../panels/mod.rs")),
+        ("panels/overwrite.rs", include_str!("../panels/overwrite.rs")),
         ("panels/paint_panels.rs", include_str!("../panels/paint_panels.rs")),
         ("panels/path_vr_panels.rs", include_str!("../panels/path_vr_panels.rs")),
         ("panels/precomp.rs", include_str!("../panels/precomp.rs")),
@@ -4561,6 +4640,35 @@ mod tests {
         assert_eq!(tr_args("Proxy Use: {}", &[]), "Použití zástupných souborů: ");
         set_current("en");
         assert_eq!(tr("Composition Name:"), "Composition Name:");
+    }
+
+    /// The Replace / Cancel prompt for an existing render output reads in every language the panels are translated
+    /// into: each of its strings has a row (a missing row would silently fall back to English).
+    #[test]
+    fn the_overwrite_prompt_is_translated_in_every_language() {
+        let strings = [
+            "Replace Existing File?",
+            "Replace Existing Files?",
+            "“{}” already exists in “{}”. Do you want to replace it?",
+            "{} files that this render writes already exist. Do you want to replace them?",
+            "{} ({} frames)",
+            "and {} more",
+            "Replacing it can't be undone.",
+            "Replacing them can't be undone.",
+            "  Replace  ",
+            "Cancel",
+        ];
+        for language in ["ja", "zh-hans", "zh-hant", "uk", "pt-br", "cs", "es"] {
+            set_current(language);
+            for s in strings {
+                // a row, not a different string: a language may keep a loan word such as "frames"
+                assert!(catalog(language).is_some_and(|c| c.contains_key(s)), "{language}: no row for {s:?}");
+            }
+            // the values land in the order of the English sentence: the file, then its folder
+            let sentence = tr_args("“{}” already exists in “{}”. Do you want to replace it?", &[&"Main.mp4", &"renders"]);
+            assert!(sentence.find("Main.mp4") < sentence.find("renders"), "{language}: {sentence}");
+        }
+        set_current("en");
     }
 
     /// A row that translates nothing, repeats a source string, or changes the number of values the

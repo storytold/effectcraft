@@ -51,6 +51,15 @@ receive `resultType: complete` and list/read cache hints; document reads are nev
 {"jsonrpc":"2.0","id":2,"method":"resources/read","params":{"uri":"effectcraft://document"}}
 ```
 
+## Existing files
+
+`renderQueue.render` refuses to replace a file that exists unless the call passes
+`"overwrite": true`: the reply is `isError: true`, nothing is rendered and the queue is left as it
+was. `renderQueue.checkOutputs` lists beforehand the outputs that would replace files and the
+ones that are files the project reads. Those are never replaced, with `overwrite` or without: the
+item fails with the reason (the other items render), the reply lists it under `refused` and its
+status is `Failed`.
+
 ## Progress and cancellation
 
 Headless `command_run` / `execute_command` calls to `renderQueue.render` (unless `wait: false`)

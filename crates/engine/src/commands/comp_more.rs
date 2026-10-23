@@ -93,8 +93,11 @@ fn queue_frame(s: &mut Session, p: &Value) -> Result<Value> {
     it.output = s.project.render_templates.default_output_module(TemplateSlot::Still);
     if let Some(path) = str_p(p, "path") {
         it.output.output = path.to_string();
-    } else if !it.output.format.is_sequence() {
-        it.output.output = "[compName]_frame.[fileExtension]".into();
+    } else {
+        if !it.output.format.is_sequence() {
+            it.output.output = "[compName]_frame.[fileExtension]".into();
+        }
+        s.avoid_sources(&mut it);
     }
     let id = s.edit("Save Frame As", None, |proj, _| {
         it.id = proj.render_queue.iter().map(|i| i.id).max().unwrap_or(0) + 1;

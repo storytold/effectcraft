@@ -75,6 +75,25 @@ pub type LocalFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output =
 /// The error string an [`Exporter`] returns when cancelled.
 pub const CANCELLED: &str = "cancelled";
 
+/// What [`Session::start_render_with`] started.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RenderStart {
+    /// The items being rendered (queue ids).
+    pub started: Vec<u64>,
+    /// The items not rendered because an output would replace a file the project reads.
+    pub refused: Vec<Refused>,
+}
+
+/// A queued item that was not rendered, and why.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Refused {
+    /// The queue item's id.
+    pub item: u64,
+    /// The file in the way.
+    pub path: String,
+    pub reason: String,
+}
+
 /// Live progress of a render job (serde for agents / the control channel).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct JobState {
@@ -432,11 +451,57 @@ impl Session {
         self.render_job.as_ref().map(|j| j.shared.snapshot())
     }
 
-    /// Start rendering every queued item. `wait`: block until done (otherwise a background thread
-    /// renders, or the [`Session::offload`] worker; call [`Session::poll_render`] regularly).
-    /// Returns the ids being rendered. Without threads or an offload (wasm32) the render always
-    /// runs to completion before this returns.
+    /// The (item, resolved output path) of each output of `it`: one per output module and, with
+    /// Segment Sequences / Segment Movie Files, per segment. `formats`: the ones that can be
+    /// written (`None`: all). Fails with the status the item gets instead.
+    pub(crate) fn outputs_of(&self, it: &RenderQueueItem, formats: Option<&[OutputFormat]>) -> Result<Vec<(RenderQueueItem, String)>, RenderStatus> {
+        let mut modules = vec![];
+        for om in it.output_modules() {
+            let mut m = it.clone();
+            m.output = om.clone();
+            match self.resolve_output(&m) {
+                Some(p) if formats.is_none_or(|f| f.contains(&om.format)) => {
+                    // Settings ▸ Export: Append Bit Depth to File Name, Segment Sequences /
+                    // Movie Files.
+                    let bits = output_bits(om.format, self.project.settings.bit_depth);
+                    let p = self.prefs.output_name(&p, bits);
+                    modules.extend(self.segments(&m, &p));
+                }
+                Some(_) => return Err(RenderStatus::Failed(format!("{} export is not available", om.format.label()))),
+                None if self.project.comp(it.comp).is_none() => return Err(RenderStatus::Failed("composition missing".into())),
+                None => return Err(RenderStatus::NeedsOutput),
+            }
+        }
+        Ok(modules)
+    }
+
+    /// What the next Render would write: for each queued item its [`Session::outputs_of`], and
+    /// the status of each queued item that has none.
+    pub(crate) fn queued_outputs(&self, formats: &[OutputFormat]) -> (Vec<Vec<(RenderQueueItem, String)>>, Vec<(u64, RenderStatus)>) {
+        let (mut items, mut problems) = (Vec::new(), Vec::new());
+        for it in self.project.render_queue.iter().filter(|i| i.is_queued()) {
+            match self.outputs_of(it, Some(formats)) {
+                Ok(modules) => items.push(modules),
+                Err(status) => problems.push((it.id, status)),
+            }
+        }
+        (items, problems)
+    }
+
+    /// Start rendering every queued item, refusing to replace files that exist
+    /// ([`Session::start_render_with`] without `overwrite`). `wait`: block until done (otherwise
+    /// a background thread renders, or the [`Session::offload`] worker; call
+    /// [`Session::poll_render`] regularly). Returns the ids being rendered. Without threads or an
+    /// offload (wasm32) the render always runs to completion before this returns.
     pub fn start_render(&mut self, wait: bool) -> Result<Vec<u64>, String> {
+        self.start_render_with(wait, false).map(|start| start.started)
+    }
+
+    /// [`Session::start_render`], told whether files that exist may be replaced. A render never
+    /// replaces a file the project reads, whatever `overwrite` says: such an item fails on its
+    /// own, with the reason, and the others render. Without `overwrite`, any other file that
+    /// exists refuses the whole render before anything changes ([`crate::output_guard`]).
+    pub fn start_render_with(&mut self, wait: bool, overwrite: bool) -> Result<RenderStart, String> {
         let offload = self.offload.clone().filter(|_| !wait);
         let wait = wait || (cfg!(target_arch = "wasm32") && offload.is_none());
         if self.is_rendering() {
@@ -445,46 +510,37 @@ impl Session {
         self.poll_render();
         let exporter = self.exporter.clone().ok_or("export is not available in this build")?;
         let formats = exporter.formats();
-        let mut items = Vec::new();
-        let mut needs_output = Vec::new();
-        for it in self.project.render_queue.iter().filter(|i| i.is_queued()) {
-            let mut modules = vec![];
-            let mut problem = None;
-            for om in it.output_modules() {
-                let mut m = it.clone();
-                m.output = om.clone();
-                match self.resolve_output(&m) {
-                    Some(p) if formats.contains(&om.format) => {
-                        // Settings ▸ Export: Append Bit Depth to File Name, Segment Sequences /
-                        // Movie Files.
-                        let bits = output_bits(om.format, self.project.settings.bit_depth);
-                        let p = self.prefs.output_name(&p, bits);
-                        modules.extend(self.segments(&m, &p));
-                    }
-                    Some(_) => problem = Some(RenderStatus::Failed(format!("{} export is not available", om.format.label()))),
-                    None if self.project.comp(it.comp).is_none() => problem = Some(RenderStatus::Failed("composition missing".into())),
-                    None => problem = Some(RenderStatus::NeedsOutput),
-                }
-                if problem.is_some() {
-                    break;
-                }
-            }
-            match problem {
-                Some(st) => needs_output.push((it.id, st)),
-                None => items.push(modules),
-            }
+        let (mut items, mut problems) = self.queued_outputs(&formats);
+        let check = self.check_outputs(&items);
+        if !overwrite && let Some(refusal) = check.existing_refusal() {
+            return Err(refusal);
         }
-        if !needs_output.is_empty() {
+        let refused = check.refusals();
+        items.retain(|modules| modules.first().is_none_or(|(it, _)| !refused.iter().any(|r| r.item == it.id)));
+        problems.extend(refused.iter().map(|r| (r.item, RenderStatus::Failed(r.reason.clone()))));
+        if !problems.is_empty() {
             let p = Arc::make_mut(&mut self.project);
-            for (id, st) in needs_output {
+            for (id, st) in problems {
                 if let Some(i) = p.render_queue.iter_mut().find(|i| i.id == id) {
                     i.status = st;
                 }
             }
             self.bump();
         }
+        if let Some(first) = refused.first() {
+            let message = if refused.len() == 1 {
+                format!("Not rendered: {}", first.reason)
+            } else {
+                format!("{} items were not rendered; first: {}", refused.len(), first.reason)
+            };
+            self.events.push(Event::Toast { message, error: true });
+        }
         if items.is_empty() {
-            return Err("nothing is queued: add a composition (Composition ▸ Add to Render Queue) and tick Render".into());
+            return Err(match refused.as_slice() {
+                [] => "nothing is queued: add a composition (Composition ▸ Add to Render Queue) and tick Render".into(),
+                [only] => only.reason.clone(),
+                [first, ..] => format!("{} items would replace files the project reads; first: {}", refused.len(), first.reason),
+            });
         }
         let ids: Vec<u64> = items.iter().filter_map(|m| m.first().map(|(i, _)| i.id)).collect();
         if let Some(off) = offload {
@@ -501,7 +557,7 @@ impl Session {
             lock(&shared.state).items_total = ids.len();
             self.render_job = Some(RenderJob { shared, thread: None, remote: Some(crate::offload::RemoteRender { id, inbox, ids: ids.clone() }) });
             self.poll_render();
-            return Ok(ids);
+            return Ok(RenderStart { started: ids, refused });
         }
         let work = Work {
             project: self.project.clone(),
@@ -541,7 +597,7 @@ impl Session {
             self.render_job = Some(RenderJob { shared, thread: Some(thread), remote: None });
         }
         self.poll_render();
-        Ok(ids)
+        Ok(RenderStart { started: ids, refused })
     }
 
     /// Stop the running render (the current item becomes "User Stopped").

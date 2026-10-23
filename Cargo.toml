@@ -70,6 +70,7 @@ skrifa = { version = "0.44", default-features = false, features = ["std"] }
 harfrust = { version = "0.12", default-features = false, features = ["std"] }
 exr = "1.74"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+same-file = "1.0"
 
 # media codecs + containers: FilmCraft's pure-Rust crates, pinned to a revision (plan/adr/0001).
 # Only `crates/media`, `crates/export` and `crates/interchange` may depend on these.

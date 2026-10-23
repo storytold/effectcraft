@@ -324,6 +324,50 @@ fn render_out_is_relative_to_the_working_directory() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// #1743: a render does not replace a file that is there unless `--overwrite` says so, and never
+/// replaces footage, whatever it says.
+#[test]
+fn render_replaces_a_file_only_with_overwrite_and_never_footage() {
+    let root = tmp("render-overwrite");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let out = root.join("clip.mp4");
+    let o = out.to_str().unwrap();
+    let render = |extra: &[&str]| {
+        let mut args = vec!["render", "--format", "h264", "--start", "0", "--end", "0.2", "--resolution", "quarter", "--out", o];
+        args.extend_from_slice(extra);
+        run_json(&args)
+    };
+    let (code, v) = render(&[]);
+    assert_eq!(code, 0, "{v}");
+    let first = std::fs::read(&out).unwrap();
+    assert!(first.len() > 100);
+
+    // Again: refused, the file is as it was, and the message names the flag this command has.
+    let (code, v) = render(&[]);
+    assert_eq!(code, 1, "{v}");
+    let error = v["error"].as_str().unwrap();
+    assert!(error.contains("clip.mp4") && error.contains("already exists") && error.contains("--overwrite"), "{v}");
+    assert_eq!(std::fs::read(&out).unwrap(), first);
+    let (code, v) = render(&["--overwrite"]);
+    assert_eq!(code, 0, "{v}");
+
+    // Imported as footage, the file can't be an output any more.
+    let project = root.join("p.ecproj");
+    let p = project.to_str().unwrap();
+    let imported = json!({"paths": [o]}).to_string();
+    ok_json(&["run", "file.import", &imported, "comp.new", r#"{"name":"T","width":64,"height":36,"duration":1}"#, "--empty", "--save-as", p]);
+    let before = std::fs::read(&out).unwrap();
+    for extra in [&[][..], &["--overwrite"][..]] {
+        let (code, v) = render(&[&["--project", p][..], extra].concat());
+        assert_eq!(code, 1, "{extra:?}: {v}");
+        let error = v["error"].as_str().unwrap();
+        assert!(error.contains("clip.mp4") && error.contains("footage"), "{extra:?}: {v}");
+        assert_eq!(std::fs::read(&out).unwrap(), before, "{extra:?}: the footage is as it was");
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// A real stdio client: each edit's reply is read before disconnecting or killing the server.
 struct McpChild {
     child: std::process::Child,

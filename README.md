@@ -214,7 +214,7 @@ To build it yourself you need [Rust](https://rustup.rs/) 1.95 or newer.
 git clone https://github.com/storytold/effectcraft
 cd effectcraft
 cargo run --release -p effectcraft          # the app (add `-- --demo` to open the demo project)
-cargo run --release -p effectcraft-cli -- render --out intro.mp4    # render the demo headless
+cargo run --release -p effectcraft-cli -- render --out intro.mp4    # render the demo headless (--overwrite replaces an existing file)
 cargo xtask web --serve 8765                # the browser build on http://127.0.0.1:8765/ (docs/web.md)
 ```
 

@@ -386,6 +386,10 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
     if crate::panels::delete_items::guard(app, id, &params) {
         return Ok(json!({"dialog": "deleteItems"}));
     }
+    // Rendering over files that exist asks first; footage is never replaced, asked or not.
+    if crate::panels::overwrite::guard(app, id, &params) {
+        return Ok(json!({"dialog": "overwrite"}));
+    }
     // J / K and Select All Keyframes act on what the Timeline shows (its revealed properties).
     if matches!(id, "time.nextKey" | "time.previousKey" | "keys.selectAll")
         && ["visible", "layers", "layer", "prop"].iter().all(|k| params.get(*k).is_none())
