@@ -505,6 +505,14 @@ pub trait FxTarget {
             buf
         });
     }
+    /// Give the buffer the pixel-grid phase the layer rectangle's cover would
+    /// ([`effectcraft_effects::Buf::align`]): grows left/top by less than 64 pixels.
+    fn align(&mut self, size: [f64; 2]) {
+        self.cpu(&mut |mut buf| {
+            buf.align(size);
+            buf
+        });
+    }
 }
 
 /// The CPU effect target (GPU chains go through [`Accelerator::effects`]: upload, readback).
@@ -1149,14 +1157,26 @@ impl<'a> Renderer<'a> {
         let Some(fx) = layer.effects() else { return };
         let lt = layer.layer_time(ctx.time);
         let layer_size = ctx.effect_bounds(layer).0;
-        // #659: an authored layer's buffer spans only its painted content while the stack works
-        // on the layer's whole region (`layer_size`): give the buffer the room a sized source
-        // already has, so tiling or displacement can place pixels outside the content instead
-        // of losing them at its edge. Only when something will actually run, and not for an
-        // adjustment layer, whose buffer is the comp below and already spans it.
-        if !adjustment
-            && fx.groups().any(|g| g.enabled && matches!(&g.kind, GroupKind::Effect { effect } if effectcraft_effects::find(effect).is_some_and(|s| !effectcraft_effects::audio_fx::is_audio_effect(s.id)))) {
-            target.cover(layer_size);
+        // #659 / #1205: an authored layer's buffer spans only its painted content. Effects that
+        // place pixels outside it grow the buffer themselves, by exactly what they need
+        // (`layer_cover_pad`: CC Tiler, CC Smear, CC Mosaic sharp) instead of a blanket cover of
+        // the whole layer rectangle on every stack — which paid a comp-sized texture per layer,
+        // per frame in flight, for glow and blur that never use the extra room. The buffer still
+        // takes the cover's pixel-grid phase: a downscaled layer resamples along that grid.
+        // Effects not known to stay inside their own margins (Twirl, Bulge, Transform, ...) still
+        // get the cover: they move content past the painted bounds without growing the buffer.
+        let video = || {
+            fx.groups().filter(|g| g.enabled).filter_map(|g| match &g.kind {
+                GroupKind::Effect { effect } => effectcraft_effects::find(effect).filter(|s| !effectcraft_effects::audio_fx::is_audio_effect(s.id)),
+                _ => None,
+            })
+        };
+        if !adjustment && video().next().is_some() {
+            if video().all(|s| s.skips_cover()) {
+                target.align(layer_size);
+            } else {
+                target.cover(layer_size);
+            }
         }
         let mut mask_shapes = masks::shapes(ctx, layer);
         if origin != [0.0; 2] {

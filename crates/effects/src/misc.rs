@@ -34,6 +34,9 @@ fn gaussian(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let repeat = ctx.params.b("repeatEdge");
     if !repeat && !ctx.adjustment {
         b.pad((s * 3.0).ceil() as u32);
+    } else if repeat && !ctx.adjustment {
+        // The edge it repeats is the layer's, not the painted content's (#1205).
+        b.cover(ctx.layer_size);
     }
     b.img = gaussian_blur(&b.img, s * kx, s * ky, repeat || ctx.adjustment);
     b
@@ -49,6 +52,9 @@ fn box_blur(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let repeat = ctx.params.b("repeatEdge");
     if !repeat && !ctx.adjustment {
         b.pad((r * it) as u32 + 1);
+    } else if repeat && !ctx.adjustment {
+        // The edge it repeats is the layer's, not the painted content's (#1205).
+        b.cover(ctx.layer_size);
     }
     b.img = effectcraft_raster::box_blur(&b.img, r * kx as usize, r * ky as usize, it, repeat || ctx.adjustment);
     b
