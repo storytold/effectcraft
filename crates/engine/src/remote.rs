@@ -448,6 +448,10 @@ impl FrameServer {
         {
             pick.record(key, chose, ms);
         }
+        // The frame is done (its `frame_begin` ran in `handle`): the GPU pool ages its sizes.
+        if let Some(a) = &self.accel {
+            a.frame_end();
+        }
         vec![(
             FrameReply::Frame { id: pr.id, width: img.width, height: img.height, ms, passes: pr.passes, gpu, layer_misses, layer_hits },
             Some(rgba8_premultiplied(&img)),
