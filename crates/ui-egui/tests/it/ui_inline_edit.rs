@@ -334,6 +334,213 @@ fn the_expression_field_grows_while_editing_and_drags_taller() {
     assert_eq!(h.state().ui.timeline.expr_lines.get(&opacity), Some(&1));
 }
 
+/// The bounce expression of #1396: 21 lines, more than its field shows.
+const BOUNCE: &str = "amp = 0.02;    // Amplitude — how strong the bounce is
+freq = 2;      // Frequency — how fast the bounce oscillates
+decay = 6;     // Decay — how quickly the bounce slows down
+
+
+if (numKeys == 0) {
+  value;
+} else {
+  n = nearestKey(time).index;
+  if (key(n).time > time) n--;
+
+
+  if (n == 0) {
+    value;
+  } else {
+    t = time - key(n).time;
+    v = velocityAtTime(key(n).time - thisComp.frameDuration / 10);
+    oscillation = Math.sin(freq * t * 2 * Math.PI) / Math.exp(decay * t);
+    value + v * amp * oscillation;
+  }
+}";
+
+/// A layer named Plate with `expression` on `prop` (under eight more layers), twirled open: the
+/// layer and the property's uid.
+fn with_expression(h: &mut Harness<'_, EffectcraftApp>, prop: &str, expression: &str) -> (u64, u64) {
+    let (layer, uid, transform) = {
+        let s = &mut h.state_mut().session;
+        for i in 0..8 {
+            s.execute("layer.newSolid", json!({"name": format!("Under {i}"), "color": "#d04040"})).unwrap();
+        }
+        let l = s.execute("layer.newSolid", json!({"name": "Plate", "color": "#406080"})).unwrap()["layer"].as_u64().unwrap();
+        s.execute("prop.setExpression", json!({"layer": l, "path": format!("transform/{prop}"), "expression": expression})).unwrap();
+        let tr = s.active_comp().unwrap().layer(effectcraft_engine::project::LayerId(l)).unwrap().props.sub("transform").unwrap().clone();
+        (l, tr.get(prop).unwrap().uid, tr.uid)
+    };
+    h.state_mut().ui.timeline.open_layers.insert(layer);
+    h.state_mut().ui.timeline.open_groups.insert(transform);
+    h.run_steps(3);
+    (layer, uid)
+}
+
+fn rect_of(h: &Harness<'_, EffectcraftApp>, id: &str) -> egui::Rect {
+    let e = h.state().auto.find(id).unwrap_or_else(|| panic!("no {id}"));
+    egui::Rect::from_min_size(pos2(e.rect[0], e.rect[1]), egui::vec2(e.rect[2], e.rect[3]))
+}
+
+/// The text drawn containing `needle`: where it is laid out, and the part of it that shows.
+fn text_drawn(h: &Harness<'_, EffectcraftApp>, needle: &str) -> (egui::Rect, egui::Rect) {
+    h.output()
+        .shapes
+        .iter()
+        .find_map(|cs| match &cs.shape {
+            egui::epaint::Shape::Text(ts) if ts.galley.text().contains(needle) => {
+                Some((ts.visual_bounding_rect(), cs.clip_rect.intersect(ts.visual_bounding_rect())))
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no text with {needle}"))
+}
+
+/// The part of each line number drawn next to `field` that shows.
+fn line_numbers_shown(h: &Harness<'_, EffectcraftApp>, field: egui::Rect) -> Vec<egui::Rect> {
+    let mut out = vec![];
+    for cs in &h.output().shapes {
+        if let egui::epaint::Shape::Text(ts) = &cs.shape
+            && ts.galley.text().parse::<u32>().is_ok()
+            && (ts.visual_bounding_rect().center().x - field.min.x).abs() < 40.0
+        {
+            out.push(cs.clip_rect.intersect(ts.visual_bounding_rect()));
+        }
+    }
+    out
+}
+
+/// A wheel turn of `dy` points over `at`.
+fn wheel(h: &mut Harness<'_, EffectcraftApp>, at: Pos2, dy: f32) {
+    wheel_by(h, at, egui::vec2(0.0, dy));
+}
+
+/// A wheel turn of `delta` points (sideways too) over `at`.
+fn wheel_by(h: &mut Harness<'_, EffectcraftApp>, at: Pos2, delta: egui::Vec2) {
+    h.input_mut().events.push(Event::PointerMoved(at));
+    h.input_mut().events.push(Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta, modifiers: Modifiers::NONE, phase: egui::TouchPhase::Move });
+    h.run_steps(20);
+}
+
+/// #1396: an expression taller than its field scrolls inside it. No line is drawn over the rows
+/// below (past the ninth line the text used to run under the next rows, cut off and unreadable),
+/// a scroll handle shows there is more, the wheel over the field scrolls the text rather than the
+/// Timeline, and the last line can be brought into view.
+#[test]
+fn a_long_expression_scrolls_inside_its_field() {
+    let (mut h, _) = harness();
+    let (layer, position) = with_expression(&mut h, "position", BOUNCE);
+    let field = rect_of(&h, &format!("timeline.prop.{position}.expression"));
+    let inside = |r: egui::Rect| !r.is_positive() || field.expand(1.0).contains_rect(r);
+    let (laid_out, shown) = text_drawn(&h, "oscillation");
+    assert!(laid_out.height() > field.height() + 100.0, "the text is taller than its field");
+    assert!(inside(shown), "the text shows only in its field {field:?}: {shown:?}");
+    let numbers = line_numbers_shown(&h, field);
+    assert!(numbers.len() >= 8 && numbers.iter().all(|r| inside(*r)), "the line numbers show only in the field: {numbers:?}");
+    let handle = h.output().shapes.iter().any(|cs| match &cs.shape {
+        egui::epaint::Shape::Rect(r) => r.fill.a() > 0 && field.contains_rect(r.rect) && r.rect.min.x > field.max.x - 12.0 && r.rect.height() < field.height(),
+        _ => false,
+    });
+    assert!(handle, "a scroll handle at the field's right edge");
+    // The wheel over the field scrolls the text, not the Timeline...
+    let scroll_y = h.state().ui.timeline.scroll_y;
+    for _ in 0..4 {
+        wheel(&mut h, field.center(), -200.0);
+    }
+    assert_eq!(h.state().ui.timeline.scroll_y, scroll_y, "the Timeline stays");
+    let (scrolled, shown) = text_drawn(&h, "oscillation");
+    assert!(scrolled.min.y < laid_out.min.y - 100.0, "the text scrolled up: {scrolled:?} from {laid_out:?}");
+    // ...down to its last line.
+    assert!(scrolled.max.y <= field.max.y + 1.0, "the last line shows: {scrolled:?} in {field:?}");
+    assert!(inside(shown) && line_numbers_shown(&h, field).iter().all(|r| inside(*r)), "still only in the field");
+    // Elsewhere the wheel still scrolls the Timeline.
+    let row = center(&h, &format!("timeline.layer.{layer}.row"));
+    wheel(&mut h, row, -100.0);
+    assert!(h.state().ui.timeline.scroll_y > scroll_y, "the Timeline scrolls outside the field");
+}
+
+/// #1396: without Word Wrap, a line longer than its field scrolls sideways inside it (it used to
+/// run on past the field), and a one-line field keeps its line in view under the scroll bar.
+#[test]
+fn a_long_line_stays_inside_its_field() {
+    let (mut h, _) = harness();
+    let long = format!("50{}", " + thisComp.layer(\"Controls\").effect(\"Slider Control\")(\"Slider\") * 0".repeat(4));
+    let (_, opacity) = with_expression(&mut h, "opacity", &long);
+    let field = rect_of(&h, &format!("timeline.prop.{opacity}.expression"));
+    let (laid_out, shown) = text_drawn(&h, "Slider Control");
+    assert!(laid_out.width() > field.width() + 100.0, "the line is longer than its field");
+    assert!(field.expand(1.0).x_range().contains(shown.min.x) && shown.max.x <= field.max.x + 1.0, "the line shows only across its field {field:?}: {shown:?}");
+    assert!(shown.height() >= laid_out.height() - 1.0, "the whole height of the line shows: {shown:?}");
+    // A line fits its row: the field doesn't scroll up and down, so the wheel over it still
+    // scrolls the Timeline.
+    let scroll_y = h.state().ui.timeline.scroll_y;
+    wheel(&mut h, field.center(), -100.0);
+    assert!(h.state().ui.timeline.scroll_y > scroll_y, "the Timeline scrolls over a one-line field");
+    let moved = rect_of(&h, &format!("timeline.prop.{opacity}.expression"));
+    let offset = text_drawn(&h, "Slider Control").0.min.y - moved.min.y;
+    assert!((offset - (laid_out.min.y - field.min.y)).abs() < 1.0, "the line stays put in its field: {offset}");
+    // Zoomed in, a sideways turn pans the Timeline's time, but over the field it scrolls the line.
+    h.state_mut().ui.timeline.pps = Some(300.0);
+    h.run_steps(3);
+    let start = h.state().ui.timeline.start;
+    let (before, _) = text_drawn(&h, "Slider Control");
+    wheel_by(&mut h, moved.center(), egui::vec2(-200.0, 0.0));
+    assert_eq!(h.state().ui.timeline.start, start, "the Timeline's time stays");
+    let (after, shown) = text_drawn(&h, "Slider Control");
+    assert!(after.min.x < before.min.x - 50.0, "the line scrolled sideways: {after:?} from {before:?}");
+    assert!(shown.max.x <= moved.max.x + 1.0, "and still shows only across its field");
+    wheel_by(&mut h, pos2(moved.center().x, moved.max.y + 40.0), egui::vec2(-200.0, 0.0));
+    assert!(h.state().ui.timeline.start > start, "below the field the Timeline's time pans");
+}
+
+/// #1396: with Word Wrap a long line wraps instead of scrolling sideways, so a sideways wheel
+/// turn over its field still pans the Timeline's time; the wrapped lines, taller than the
+/// field's row, scroll up and down inside it.
+#[test]
+fn a_wrapped_long_line_leaves_the_sideways_wheel_to_the_timeline() {
+    let (mut h, _) = harness();
+    h.state_mut().session.prefs.scripting.word_wrap = true;
+    let long = format!("50{}", " + thisComp.layer(\"Controls\").effect(\"Slider Control\")(\"Slider\") * 0".repeat(4));
+    let (_, opacity) = with_expression(&mut h, "opacity", &long);
+    h.state_mut().ui.timeline.pps = Some(300.0);
+    h.run_steps(3);
+    let field = rect_of(&h, &format!("timeline.prop.{opacity}.expression"));
+    let (laid_out, shown) = text_drawn(&h, "Slider Control");
+    assert!(laid_out.width() <= field.width() + 1.0 && laid_out.height() > field.height() + 19.0, "the line wraps: {laid_out:?} in {field:?}");
+    assert!(field.expand(1.0).contains_rect(shown), "the wrapped lines show only in the field {field:?}: {shown:?}");
+    let start = h.state().ui.timeline.start;
+    wheel_by(&mut h, field.center(), egui::vec2(-200.0, 0.0));
+    assert!(h.state().ui.timeline.start > start, "a sideways turn over the field pans the Timeline's time");
+    let scroll_y = h.state().ui.timeline.scroll_y;
+    wheel(&mut h, field.center(), -100.0);
+    assert_eq!(h.state().ui.timeline.scroll_y, scroll_y, "the wheel over the field scrolls the wrapped lines, not the Timeline");
+    let (scrolled, shown) = text_drawn(&h, "Slider Control");
+    assert!(scrolled.min.y < laid_out.min.y - 10.0, "the wrapped lines scrolled up: {scrolled:?} from {laid_out:?}");
+    assert!(field.expand(1.0).contains_rect(shown), "and still show only in the field");
+}
+
+/// #1396: with a large editor font a field can hold fewer lines than it has rows. Two lines at
+/// 32 pt are taller than a two-row field: they scroll inside it too, rather than running under
+/// the rows below.
+#[test]
+fn a_large_font_scrolls_inside_its_field() {
+    let (mut h, _) = harness();
+    h.state_mut().session.prefs.scripting.editor_font_size = 32;
+    let (_, opacity) = with_expression(
+        &mut h,
+        "opacity",
+        "value
+  * 0.5 // Slider Control",
+    );
+    let field = rect_of(&h, &format!("timeline.prop.{opacity}.expression"));
+    let (laid_out, shown) = text_drawn(&h, "Slider Control");
+    assert!(laid_out.height() > field.height() + 19.0, "two lines at 32 pt are taller than two rows: {laid_out:?} in {field:?}");
+    assert!(field.expand(1.0).contains_rect(shown), "the text shows only in its field {field:?}: {shown:?}");
+    let scroll_y = h.state().ui.timeline.scroll_y;
+    wheel(&mut h, field.center(), -100.0);
+    assert_eq!(h.state().ui.timeline.scroll_y, scroll_y, "the wheel scrolls the text, not the Timeline");
+    assert!(text_drawn(&h, "Slider Control").0.min.y < laid_out.min.y - 10.0, "the text scrolled up");
+}
+
 fn key_with(h: &mut Harness<'_, EffectcraftApp>, key: Key, modifiers: Modifiers) {
     h.input_mut().events.push(Event::ModifiersChanged(modifiers));
     h.input_mut().events.push(Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers });
