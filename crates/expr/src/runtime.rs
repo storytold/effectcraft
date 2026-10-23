@@ -51,6 +51,8 @@ thread_local! {
     pub static FRAMES: RefCell<Vec<Frame>> = const { RefCell::new(Vec::new()) };
     /// Script runs since the outermost evaluation on this thread began (nested ones included).
     pub static RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static MOTION_GENERATION: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    pub(crate) static MOTION_ERRORS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -189,6 +191,11 @@ fn native_host(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsV
         16 => Req::Ancestor { comp: id(args, 1, ctx)?, layer: id(args, 2, ctx)?, path: string(args, 3, ctx)?, up: num(args, 4, ctx)? as i64 },
         _ => return Err(JsNativeError::typ().with_message("unknown host request").into()),
     };
+    // Xform is derived from the versioned project. Nested expressions can still invalidate
+    // reuse by reading pixels/font geometry below, or abort the search on an evaluation error.
+    if matches!(req, Req::Sample { .. } | Req::SourceRect { .. }) {
+        MOTION_GENERATION.set(MOTION_GENERATION.get().wrapping_add(1));
+    }
     let found = FRAMES.with(|f| {
         let mut f = f.borrow_mut();
         let frame = f.last_mut()?;

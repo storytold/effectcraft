@@ -12,6 +12,36 @@ use effectcraft_time::Tick;
 pub trait ExprHost: Send + Sync {
     /// Evaluate the expression of `prop` (on `layer`, comp time `t`), given the keyframed value.
     fn eval(&self, ctx: &EvalCtx, layer: &Layer, prop: &Property, value: &Value) -> Result<Value, String>;
+    /// Whether the expression is algebraic in its keyframed input alone. This lets auto-orient
+    /// retain the exact keyframe path without scanning an otherwise stationary timeline.
+    fn is_keyframe_only(&self, _prop: &Property) -> bool {
+        false
+    }
+    /// Whether this expression is provably independent of time, property values and host reads.
+    /// Unknown expressions must return false; equal samples do not prove a constant expression.
+    fn is_constant(&self, _prop: &Property) -> bool {
+        false
+    }
+    /// Optional identity for memoizing sampled motion. Must change whenever any input to an
+    /// expression changes, including referenced properties. None disables cross-frame reuse.
+    fn motion_cache_key(&self, _ctx: &EvalCtx, _layer: &Layer) -> Option<u64> {
+        None
+    }
+    /// Changes when evaluation reads unversioned external data or fails. A search that observes
+    /// a change must neither reuse nor populate motion history with those samples.
+    fn motion_cache_generation(&self) -> u64 {
+        0
+    }
+    /// Changes on expression errors, including errors in a dependency. Unlike an external read,
+    /// an error must stop history sampling, not just prevent memoization of the result.
+    fn motion_error_generation(&self) -> u64 {
+        0
+    }
+    /// Optional proof that current-comp positions cannot change after this time. Unknown
+    /// expressions/dependencies must return None; a few equal samples are not such a proof.
+    fn motion_hold_start(&self, _ctx: &EvalCtx) -> Option<Tick> {
+        None
+    }
     /// Evaluate a text Expression Selector's Amount expression (on `prop`) for one unit:
     /// `textIndex` (1-based), `textTotal` and `selectorValue` (percent, per dimension) are
     /// defined. Returns the amount in percent per dimension.

@@ -219,16 +219,52 @@ pub fn rig_rotation(ctx: &EvalCtx, layer: &Layer) -> Mat4 {
 fn path_tangent(ctx: &EvalCtx, layer: &Layer) -> Option<Vec3> {
     let tr = layer.transform()?;
     // Position (or its separated X/Y/Z dimensions) must be animated.
-    let dims = ["position", "positionX", "positionY", "positionZ"];
+    let dims: &[&str] = if tr.get("positionX").is_some() { &["positionX", "positionY", "positionZ"] } else { &["position"] };
     let moving = dims.iter().any(|m| tr.get(m).is_some_and(|p| p.keys.len() > 1 || p.has_expression()));
     if !moving {
         return None;
     }
     let dt = effectcraft_time::Tick::from_seconds_f64(0.005);
+    let errors = ctx.expr.map_or(0, |h| h.motion_error_generation());
+    let failed = || ctx.expr.is_some_and(|h| h.motion_error_generation() != errors);
     let pos = |t| Vec3::from(ctx.at(t).v3(layer, tr, "position", [0.0; 3]));
     let dir = |d: Vec3| (d.length() > 1e-9 && d.length().is_finite()).then(|| d.normalize());
-    if let Some(d) = dir(pos(ctx.time + dt) - pos(ctx.time - dt)) {
+    let tangent = dir(pos(ctx.time + dt) - pos(ctx.time - dt));
+    if failed() {
+        return None;
+    }
+    if let Some(d) = tangent {
         return Some(d);
+    }
+    // Expressions may drive Position without any Position keys (for example a traced path).
+    // Sample the evaluated motion itself, rather than relying on unrelated underlying keys.
+    if ctx.expr.is_some_and(|h| dims.iter().any(|m| tr.get(m).is_some_and(|p| p.has_expression() && !h.is_keyframe_only(p)))) {
+        if ctx.expr.is_some_and(|h| dims.iter().filter_map(|m| tr.get(m)).all(|p| p.keys.len() <= 1 && (!p.has_expression() || h.is_constant(p)))) {
+            return None;
+        }
+        let frame = ctx.comp.frame_rate.frame_duration().max(effectcraft_time::Tick(1));
+        let host = ctx.expr?;
+        let generation = host.motion_cache_generation();
+        let cache_key = host.motion_cache_key(ctx, layer);
+        if let Some(heading) = super::motion::held(
+            &pos,
+            ctx.time,
+            layer.in_point.min(effectcraft_time::Tick::ZERO),
+            layer.out_point.max(ctx.comp.duration),
+            frame,
+            dt,
+            cache_key,
+            &|| host.motion_hold_start(ctx),
+            &|| host.motion_cache_generation() == generation && ctx.footage.is_none_or(|f| !f.called_off()),
+            &|| failed() || ctx.footage.is_some_and(|f| f.called_off()),
+        ) {
+            return Some(heading);
+        }
+        if failed() || ctx.footage.is_some_and(|f| f.called_off()) {
+            return None;
+        }
+        // If bounded sampling found no direction, preserve the original evaluated-key
+        // fallback. Expressions such as `value` still follow keys outside that horizon.
     }
     // No motion here: fall back on the nearest motion before this time (a backward difference at
     // each earlier key, latest first), then on the first motion after it.
