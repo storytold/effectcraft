@@ -41,7 +41,10 @@ Desktop, Cursor and the like) take the same `command` and `args`.
   its own; if no adapter is usable the server says why and exits. `get_project`'s `renderer`
   (`render.backend`) reports `active` (`gpu` / `cpu`) and, on the CPU, `why`.
 - **Bridge** (`["mcp", "--bridge", "9877"]`): drives a running `effectcraft --control 9877`, so you
-  see every change live. Bridge mode adds `screenshot` and the `ui_*` tools.
+  see every change live. Bridge mode adds `screenshot` and the `ui_*` tools. It authenticates with
+  the token the app writes to `control-9877.token` in the settings folder each launch (see
+  [control-protocol.md](control-protocol.md#authentication)); run the server as the same user as
+  the app.
 
 After a broken connection, the bridge retries explicitly read-only control queries once.
 Engine commands, UI edits and unknown methods whose transmission or reply fails report an

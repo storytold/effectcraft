@@ -184,7 +184,8 @@ them:
   or `effectcraft-cli render --comp Main --out main.mp4`, or
   `effectcraft-cli exec file.exportLottie '{"comp":"Main","path":"main.json"}' main.ecproj`.
 - **Control channel:** `effectcraft --control 9877` accepts JSON lines to run commands, inspect
-  and click any widget by its automation id, and take screenshots.
+  and click any widget by its automation id, and take screenshots. Clients authenticate with a
+  per-launch token the app writes to its settings folder.
 
 See [docs/agents.md](docs/agents.md) and [docs/control-protocol.md](docs/control-protocol.md).
 

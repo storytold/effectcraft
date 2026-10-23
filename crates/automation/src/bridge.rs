@@ -7,26 +7,31 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
+use crate::control_auth::{TokenSource, auth_request};
 use crate::{Error, Result};
 
 /// Slightly longer than the app's own 60 s per-request timeout, so its error reply wins.
 const READ_TIMEOUT: Duration = Duration::from_secs(65);
+/// How long the app may take to answer `auth` (it doesn't wait on the UI thread).
+const AUTH_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct BridgeClient {
     addr: String,
+    token: TokenSource,
     conn: Option<(BufReader<TcpStream>, TcpStream)>,
     next_id: u64,
 }
 
 impl BridgeClient {
     /// `addr`: a port (`9877`) or `host:port` on loopback (`127.0.0.1`, `localhost`, `[::1]`).
-    pub fn new(addr: &str) -> Result<Self> {
+    /// Every connection starts with `auth`, the token read from `token` at that moment (#2122).
+    pub fn new(addr: &str, token: TokenSource) -> Result<Self> {
         let addr = if addr.parse::<u16>().is_ok() { format!("127.0.0.1:{addr}") } else { addr.to_string() };
         let host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(&addr);
         if !matches!(host, "127.0.0.1" | "localhost" | "[::1]" | "::1") {
             return Err(Error::BadArgs(format!("bridge address must be loopback (PORT or 127.0.0.1:PORT), got `{addr}`")));
         }
-        Ok(Self { addr, conn: None, next_id: 1 })
+        Ok(Self { addr, token, conn: None, next_id: 1 })
     }
 
     pub fn addr(&self) -> &str {
@@ -42,10 +47,14 @@ impl BridgeClient {
             .ok_or_else(|| Error::Bridge(format!("cannot resolve {}", self.addr)))?;
         let s = TcpStream::connect_timeout(&sa, Duration::from_secs(5))
             .map_err(|e| Error::Bridge(format!("cannot connect to {} ({e}); start the app with `effectcraft --control <port>`", self.addr)))?;
-        s.set_read_timeout(Some(READ_TIMEOUT)).ok();
         s.set_nodelay(true).ok();
         let r = s.try_clone().map_err(|e| Error::Bridge(e.to_string()))?;
-        Ok((BufReader::new(r), s))
+        let mut conn = (BufReader::new(r), s);
+        // Read the token now, not at construction: the app writes a new one each launch.
+        let token = self.token.token()?;
+        authenticate(&mut conn, &token)?;
+        conn.1.set_read_timeout(Some(READ_TIMEOUT)).ok();
+        Ok(conn)
     }
 
     /// Call a control method; returns the reply's `result`, or the app's `error` as [`Error::App`].
@@ -103,4 +112,24 @@ impl BridgeClient {
         }
         Err(last)
     }
+}
+
+/// Send `auth` on a fresh connection and check the app accepted it. Nothing else has been sent,
+/// so a failure here never leaves a request's outcome unknown.
+fn authenticate((r, w): &mut (BufReader<TcpStream>, TcpStream), token: &str) -> Result<()> {
+    w.set_read_timeout(Some(AUTH_TIMEOUT)).ok();
+    let failed = |e: String| Error::Bridge(format!("control channel authentication failed: {e}"));
+    w.write_all(format!("{}\n", auth_request(token)).as_bytes()).map_err(|e| failed(e.to_string()))?;
+    let mut buf = String::new();
+    match r.read_line(&mut buf) {
+        Ok(0) => return Err(failed("connection closed by the app".into())),
+        Ok(_) => {}
+        Err(e) => return Err(failed(e.to_string())),
+    }
+    let reply: Value = serde_json::from_str(&buf).map_err(|e| failed(format!("bad reply: {e}")))?;
+    if reply.get("ok").and_then(Value::as_bool) == Some(true) {
+        return Ok(());
+    }
+    let why = reply.get("error").and_then(Value::as_str).unwrap_or("refused");
+    Err(failed(format!("the app refused the control token: {why}")))
 }
