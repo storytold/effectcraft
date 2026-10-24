@@ -1173,6 +1173,11 @@ pub struct Footage {
     /// timecode isn't read). It only relabels source time, as in After Effects.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_timecode: Option<i64>,
+    /// Movies: where the file puts its first video frame (e.g. 0.08 s for an MP4 with B-frames
+    /// and no edit list). That frame is footage time 0, as in After Effects, so the decoder adds
+    /// this to the time it asks the file for.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub first_frame_time: Tick,
 }
 
 fn is_default<T: Default + PartialEq>(v: &T) -> bool {
@@ -1208,6 +1213,7 @@ impl Default for Footage {
             page: 0,
             alphabetical: false,
             start_timecode: None,
+            first_frame_time: Tick::ZERO,
         }
     }
 }

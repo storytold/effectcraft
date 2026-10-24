@@ -705,7 +705,7 @@ impl Inner {
                 let i = Self::frame_index(rate, t, n, footage.loop_count);
                 // Middle of the frame in the file's own timing (robust to timestamp rounding).
                 let native = footage.native_rate.unwrap_or(rate);
-                let mt = native.tick_of(i) + Tick(native.frame_duration().0 / 2);
+                let mt = native.tick_of(i) + Tick(native.frame_duration().0 / 2) + footage.first_frame_time;
                 Loc { key: key(&footage.path, i), media_t: Some(mt), float }
             }
         }
@@ -978,6 +978,20 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #1940: a movie whose first frame sits at 0.08 s is asked for that time at footage time 0,
+    /// not frames early (which showed its first frame three times).
+    #[test]
+    fn a_movie_is_read_from_its_first_frame_time() {
+        let mut f = Footage { path: "clip.mp4".into(), kind: FootageKind::Video, has_video: true, duration: Tick::from_seconds_f64(2.0), ..Default::default() };
+        f.frame_rate = FrameRate::new(25, 1);
+        let at = |f: &Footage, frame: i64| Inner::locate(f, f.frame_rate.tick_of(frame), FloatCurve::Srgb).media_t.unwrap();
+        let plain = at(&f, 3);
+        f.first_frame_time = Tick::from_seconds_f64(0.08);
+        assert_eq!(at(&f, 3), plain + Tick::from_seconds_f64(0.08));
+        // Footage frame 0 is read at the file's first frame (0.08 s), plus half a frame.
+        assert_eq!(at(&f, 0), Tick::from_seconds_f64(0.08) + Tick(f.frame_rate.frame_duration().0 / 2));
+    }
 
     /// Conforming a long file's audio reads every chunk at its own time: the sample index times
     /// ticks per second overflowed `i64` past 12:36 at 48 kHz, and later chunks came out silent
