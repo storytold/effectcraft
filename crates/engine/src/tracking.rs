@@ -197,7 +197,8 @@ pub(crate) struct Work {
 }
 
 /// The layer's source frame at comp time `t` at 100 % (layer pixels + offset = image pixels).
-/// Footage at its native size is used straight from the footage source (no copy).
+/// Footage at its native size is used straight from the footage source (no copy unless its
+/// Cineon Settings convert it).
 pub(crate) fn source_frame(
     r: &Renderer,
     project: &Project,
@@ -215,7 +216,7 @@ pub(crate) fn source_frame(
         && img.width == f.width
         && img.height == f.height
     {
-        return Some((img, [0.0; 2]));
+        return Some((effectcraft_render::cineon_frame(img, f), [0.0; 2]));
     }
     let buf = r.layer_source(&ctx, layer)?;
     if (buf.scale - 1.0).abs() > 1e-9 && buf.scale > 0.0 {

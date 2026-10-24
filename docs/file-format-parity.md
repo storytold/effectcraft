@@ -49,7 +49,7 @@ trips and renders, checked by tests, not against After Effects), **partial** (na
 | BMP | R | yes | — | good |
 | WebP | — | yes (still; animated WebP as footage with its frames, timing and alpha, #762) | — | beyond After Effects |
 | Targa `.tga` | R/W | yes (still and sequence; alpha interpreted on import) | none | good for import (#745); no Targa output |
-| DPX / Cineon `.dpx` `.cin` | R/W | yes (still and sequence; 8/10/12/16-bit luma, RGB, RGBA, both byte orders; log code values shown as stored) | none | partial: import (#756); no Interpret Footage ▸ Cineon Settings (log to linear), no DPX output; common in film VFX |
+| DPX / Cineon `.dpx` `.cin` | R/W | yes (still and sequence; 8/10/12/16-bit luma, RGB, RGBA, both byte orders; log code values shown as stored, or converted by Interpret Footage ▸ Cineon Settings ▸ Logarithmic Conversion) | none | partial: import (#756) and Cineon Settings; no DPX output; common in film VFX |
 | Radiance `.hdr` | R/W | yes (still and sequence, 32-bit linear float like OpenEXR) | none | good for import (#745); no Radiance output |
 | SGI, PICT, ElectricImage, RLA/RPF images | R | none | none | Legacy; RPF camera data import exists (`keys.rpfCameraImport`) |
 | Camera Raw (DNG, CR3, NEF…) | R (Camera Raw) | none | none | LightCraft has decoders that could be shared |

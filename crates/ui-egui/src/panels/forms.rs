@@ -213,7 +213,7 @@ pub fn open_form(app: &mut EffectcraftApp, id: &str, p: &Value) -> bool {
     let layer = comp.and_then(|c| s.state.selected_layers.first().and_then(|l| c.layer(*l)));
     let t = s.time();
     let lt = layer.map(|l| l.layer_time(t)).unwrap_or(t);
-    let base = p.clone();
+    let mut base = p.clone();
     let (title, fields): (String, Vec<Field>) = match id {
         // Photoshop files: Import Kind (Footage / Composition / – Retain Layer Sizes). Dropped
         // files start at Settings ▸ Import ▸ Default Drag Import As.
@@ -477,6 +477,30 @@ pub fn open_form(app: &mut EffectcraftApp, id: &str, p: &Value) -> bool {
                 Field::bool("preserveRgb", "Preserve RGB", f.preserve_rgb),
                 Field::bool("linearLight", "Interpret As Linear Light", f.linear_light),
             ];
+            // Color ▸ Cineon Settings (DPX and Cineon files). The converted points show in the
+            // footage's Units, and `pointUnits` reads them back in those units when Units changes.
+            if f.is_cineon_file() {
+                use effectcraft_engine::project::CineonUnits;
+                let c = f.cineon;
+                let units: Vec<(&str, Value)> = CineonUnits::ALL.iter().map(|u| (u.label(), json!(u.id()))).collect();
+                fields.extend([
+                    Field::note("cineonSettings", "Cineon Settings"),
+                    Field::bool("logConversion", "Logarithmic Conversion", c.log_conversion),
+                    Field::num("convertedBlack", "Converted Black Point", c.units.from_ten_bit(f64::from(c.converted_black))),
+                    Field::num("convertedWhite", "Converted White Point", c.units.from_ten_bit(f64::from(c.converted_white))),
+                    Field::num("tenBitBlack", "10 Bit Black Point", f64::from(c.black)),
+                    Field::num("tenBitWhite", "10 Bit White Point", f64::from(c.white)),
+                    Field::num("currentGamma", "Current Gamma", f64::from(c.gamma)),
+                    Field::num("highlightRolloff", "Highlight Rolloff", f64::from(c.rolloff)),
+                    Field::choice("cineonUnits", "Units", &units, CineonUnits::ALL.iter().position(|u| *u == c.units).unwrap_or(0)),
+                ]);
+                if !base.is_object() {
+                    base = json!({});
+                }
+                if let Some(m) = base.as_object_mut() {
+                    m.insert("pointUnits".into(), json!(c.units.id()));
+                }
+            }
             // After Frame Rate: an image sequence's frames (missing ones show colour bars, as in
             // After Effects), then Start Timecode.
             let mut timing = Vec::new();
@@ -1057,5 +1081,46 @@ mod tests {
         let r = app.session.execute("file.exportTimeline", params).unwrap();
         assert_eq!(r["path"], path.as_str());
         assert!(std::fs::read_to_string(&path).unwrap().contains("<xmeml"));
+    }
+
+    /// Interpret Footage shows Cineon Settings for DPX footage only. The converted points show in
+    /// the footage's Units, and choosing other Units reads the shown values in the old ones.
+    #[test]
+    fn interpret_footage_shows_cineon_settings_for_dpx() {
+        use effectcraft_engine::project::{CineonUnits, Footage, FootageKind, ItemKind};
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        let still =
+            |path: &str| ItemKind::Footage(Footage { path: path.into(), kind: FootageKind::Still, width: 4, height: 4, has_video: true, ..Default::default() });
+        let project = std::sync::Arc::make_mut(&mut app.session.project);
+        let dpx = project.add_item("scan.dpx", Default::default(), None, still("/m/scan.dpx"));
+        let png = project.add_item("still.png", Default::default(), None, still("/m/still.png"));
+        let keys = |app: &EffectcraftApp| app.dialog_state.form.fields.iter().map(|f| f.key.clone()).collect::<Vec<_>>();
+        app.session.state.project_selection = vec![png];
+        assert!(open_form(&mut app, "file.interpretFootage", &json!({})));
+        assert!(!keys(&app).iter().any(|k| k == "logConversion"), "{:?}", keys(&app));
+        app.session.state.project_selection = vec![dpx];
+        assert!(open_form(&mut app, "file.interpretFootage", &json!({})));
+        for k in ["logConversion", "convertedBlack", "convertedWhite", "tenBitBlack", "tenBitWhite", "currentGamma", "highlightRolloff", "cineonUnits"] {
+            assert!(keys(&app).iter().any(|x| x == k), "{k}: {:?}", keys(&app));
+        }
+        // Units ▸ 8-bit with Converted White Point still showing 1023 (10-bit).
+        let form = &mut app.dialog_state.form;
+        for f in form.fields.iter_mut() {
+            match (f.key.as_str(), &mut f.kind) {
+                ("cineonUnits", FieldKind::Choice { sel, .. }) => *sel = 1,
+                ("logConversion", FieldKind::Bool(b)) => *b = true,
+                _ => {}
+            }
+        }
+        let params = form.params();
+        assert_eq!((params["pointUnits"].as_str(), params["cineonUnits"].as_str()), (Some("10bit"), Some("8bit")), "{params}");
+        app.session.execute("file.interpretFootage", params).unwrap();
+        let Some(ItemKind::Footage(f)) = app.session.project.item(dpx).map(|i| &i.kind) else { panic!("not footage") };
+        assert!(f.cineon.log_conversion && f.cineon.units == CineonUnits::EightBit, "{:?}", f.cineon);
+        assert!((f.cineon.converted_white - 1023.0).abs() < 1e-3, "{:?}", f.cineon);
+        // Opened again, the point shows in 8-bit units.
+        assert!(open_form(&mut app, "file.interpretFootage", &json!({})));
+        let white = app.dialog_state.form.fields.iter().find(|f| f.key == "convertedWhite").map(|f| f.kind.clone());
+        assert!(matches!(white, Some(FieldKind::Number { value, .. }) if (value - 255.0).abs() < 1e-6), "{white:?}");
     }
 }
