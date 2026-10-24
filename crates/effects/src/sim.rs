@@ -1081,20 +1081,44 @@ fn pw_phys(ctx: &EffectCtx) -> Phys {
     }
 }
 
+/// CC Particle World's Particle Type ▸ Textured Square.
+const PW_TEXTURED_SQUARE: u32 = 8;
+/// CC Particle World's Particle ▸ Texture ▸ Texture Layer.
+const PW_TEXTURE_LAYER: &str = "particle/texture/textureLayer";
+
+/// Whether CC Particle World draws its Texture Layer on the particles (Textured Square with a
+/// layer chosen). Only the CPU does: `catalog::gpu_supported` keeps this case off the GPU.
+pub(crate) fn particle_world_textured(ctx: &EffectCtx) -> bool {
+    ctx.params.e("particle/particleType") == PW_TEXTURED_SQUARE && ctx.params.get(PW_TEXTURE_LAYER).and_then(Value::as_layer).is_some()
+}
+
 fn particle_world(ctx: &EffectCtx, b: Buf) -> Buf {
+    // The texture at the current comp time, shared by every shutter sample. A layer the host
+    // can't give (the effect's own layer with its effects, a reference cycle) leaves the
+    // squares in the particle colour. Authored buffers (text, shapes) span only their content:
+    // covering the whole layer keeps the clamped sampling from stretching their edge pixels.
+    let tex = particle_world_textured(ctx).then(|| ctx.layer_param(PW_TEXTURE_LAYER, true)).flatten().map(|mut t| {
+        t.buf.cover(t.size);
+        t
+    });
+    let (w, h) = (b.img.width, b.img.height);
+    let draw = |plan: &SpritePlan| match &tex {
+        Some(t) => splat_textured(w, h, &plan.sprites, plan.acc, t),
+        None => splat(w, h, &plan.sprites, plan.acc),
+    };
     // #1195: with the comp's motion-blur shutter open, particles draw as motion trails: the
     // sprite fields of samples across the shutter are averaged, as Transform averages its
     // matrix samples. (The GPU compositor runs this case on the CPU: catalog::gpu_supported.)
     if let Some((angle, phase, n)) = ctx.env.shutter.filter(|(a, _, _)| *a > 0.0) {
         let n = (n.clamp(2, 64) as usize).max(2);
         let fd = 1.0 / ctx.fps().max(0.001);
-        let mut acc = Image::new(b.img.width, b.img.height);
+        let mut acc = Image::new(w, h);
         let mut post: Option<Post> = None;
         for k in 0..n {
             let t = ctx.time + (phase + angle * k as f64 / (n - 1) as f64) / 360.0 * fd;
             let sub = EffectCtx { params: ctx.params, time: t, layer_size: ctx.layer_size, seed: ctx.seed, adjustment: ctx.adjustment, env: ctx.env };
             if let Some(plan) = particle_world_plan(&sub, &b) {
-                let fx = splat(b.img.width, b.img.height, &plan.sprites, plan.acc);
+                let fx = draw(&plan);
                 acc.data.iter_mut().zip(&fx.data).for_each(|(a, o)| (0..4).for_each(|c| a[c] += o[c]));
                 post.get_or_insert(plan.post);
             }
@@ -1106,9 +1130,36 @@ fn particle_world(ctx: &EffectCtx, b: Buf) -> Buf {
         };
     }
     match particle_world_plan(ctx, &b) {
-        Some(plan) => plan.finish(b),
+        Some(plan) => {
+            let fx = draw(&plan);
+            plan.finish_with(b, fx)
+        }
         None => b,
     }
+}
+
+/// Draw square sprites into a new transparent image of `w`×`h`, each showing the layer `tex`
+/// stretched over the square (turned with it) at the sprite's opacity.
+fn splat_textured(w: u32, hgt: u32, sprites: &[Sprite], acc: Acc, tex: &crate::LayerPixels) -> Image {
+    let mut img = Image::new(w, hgt);
+    let (tw, th) = (tex.size[0], tex.size[1]);
+    let shade = |s: &Sprite, x: f32, y: f32| {
+        // As [`sprite_shade`]'s Square, sub-pixel sprites included.
+        let (r, fade) = if s.r < 0.5 { (0.5, s.r / 0.5) } else { (s.r, 1.0) };
+        let (sn, cs) = s.rot.sin_cos();
+        let (dx, dy) = (x - s.x, y - s.y);
+        let (ux, uy) = (dx * cs + dy * sn, -dx * sn + dy * cs);
+        let e = r * 0.75;
+        let a = aa(e - ux.abs()) * aa(e - uy.abs()) * s.c[3] * fade;
+        if a <= 1e-6 {
+            return None;
+        }
+        let (u, v) = (((ux / e + 1.0) * 0.5).clamp(0.0, 1.0) as f64, ((uy / e + 1.0) * 0.5).clamp(0.0, 1.0) as f64);
+        let (px, py) = tex.buf.to_px([u * tw, v * th]);
+        Some(tex.buf.img.sample_bilinear_clamped(px, py).map(|c| c * a))
+    };
+    raster(&mut img, sprites, sprite_bbox, shade, acc);
+    img
 }
 
 /// CC Particle World's Extras ▸ Effect Camera parameters (id prefix).
@@ -1543,6 +1594,7 @@ pub fn specs() -> Vec<EffectSpec> {
                 p("physics/gravityVector/gravityY", "Gravity Y", num(1.0), slider(-1.0, 1.0, -1.0, 1.0, 2)),
                 p("physics/gravityVector/gravityZ", "Gravity Z", num(0.0), slider(-1.0, 1.0, -1.0, 1.0, 2)),
                 p("particle/particleType", "Particle Type", Value::Enum(0), popup(PARTICLE_TYPES)),
+                p(PW_TEXTURE_LAYER, "Texture Layer", Value::Layer(None), ParamUi::Layer),
                 p("particle/birthSize", "Birth Size", num(0.2), slider(0.0, 10.0, 0.0, 1.0, 3)),
                 p("particle/deathSize", "Death Size", num(0.2), slider(0.0, 10.0, 0.0, 1.0, 3)),
                 p("particle/sizeVariation", "Size Variation", num(0.0), pct()),
@@ -1952,6 +2004,110 @@ mod tests {
         assert_eq!(key(&params), key(&moved));
         moved.values.insert("extras/randomSeed".into(), num(9.0));
         assert_ne!(key(&params), key(&moved));
+    }
+
+    /// A host whose every layer is `img`.
+    struct TexHost(Image);
+    impl crate::EffectHost for TexHost {
+        fn layer(&self, _: u64, _: bool) -> Option<crate::LayerPixels> {
+            let s = [self.0.width as f64, self.0.height as f64];
+            Some(crate::LayerPixels { buf: Buf { img: self.0.clone(), offset: [0.0; 2], scale: 1.0 }, size: s })
+        }
+        fn audio(&self, _: u64, _: f64, _: usize, _: u32) -> Option<Vec<f32>> {
+            None
+        }
+    }
+
+    /// A texture whose left half is green and right half blue.
+    fn two_tone_tex() -> Image {
+        let mut tex = Image::new(8, 8);
+        for y in 0..8 {
+            for x in 0..8 {
+                tex.set(x, y, if x < 4 { [0.0, 1.0, 0.0, 1.0] } else { [0.0, 0.0, 1.0, 1.0] });
+            }
+        }
+        tex
+    }
+
+    /// CC Particle World drawing red Textured Squares with Texture Layer `layer`.
+    fn pw_textured_vals(layer: Option<u64>) -> Vec<(&'static str, Value)> {
+        vec![
+            ("birthRate", num(1.0)),
+            ("extras/randomSeed", num(4.0)),
+            ("particle/particleType", Value::Enum(8)),
+            ("particle/texture/textureLayer", Value::Layer(layer)),
+            ("particle/birthSize", num(1.0)),
+            ("particle/deathSize", num(1.0)),
+            ("particle/birthColor", col(1.0, 0.0, 0.0)),
+            ("particle/deathColor", col(1.0, 0.0, 0.0)),
+        ]
+    }
+
+    /// #1465: Textured Square draws the Texture Layer on each particle, not the particle colour.
+    #[test]
+    fn particle_world_textured_square_draws_the_texture_layer() {
+        let host = TexHost(two_tone_tex());
+        let vals = pw_textured_vals;
+        let env = EffectEnv { host: Some(&host), ..Default::default() };
+        let out = run_fx("ec.sim.ccparticleworld", &vals(Some(1)), Image::new(48, 48), 1.0, env).img;
+        let seen: Vec<_> = out.data.iter().filter(|p| p[3] > 0.05).collect();
+        assert!(!seen.is_empty(), "particles drawn");
+        assert!(seen.iter().all(|p| p[0] < 0.02 * p[3]), "no particle colour: {:?}", seen.iter().find(|p| p[0] >= 0.02 * p[3]));
+        // Both halves of the texture show: it is mapped across the square, not sampled once.
+        assert!(seen.iter().any(|p| p[1] > 2.0 * p[2]) && seen.iter().any(|p| p[2] > 2.0 * p[1]), "both texture halves");
+        // Without a texture layer the squares keep the particle colour.
+        let plain = run_fx("ec.sim.ccparticleworld", &vals(None), Image::new(48, 48), 1.0, env).img;
+        assert!(plain.data.iter().any(|p| p[3] > 0.05 && p[0] > 0.9 * p[3]));
+    }
+
+    /// #1465 with #1195's motion trails: with the shutter open the averaged samples still show
+    /// the Texture Layer, not the particle colour.
+    #[test]
+    fn particle_world_textured_square_motion_trails_draw_the_texture_layer() {
+        let host = TexHost(two_tone_tex());
+        let env = EffectEnv { host: Some(&host), frame_rate: 10.0, shutter: Some((360.0, -180.0, 8)), ..Default::default() };
+        let blurred = run_fx("ec.sim.ccparticleworld", &pw_textured_vals(Some(1)), Image::new(48, 48), 1.0, env).img;
+        let sharp = run_fx("ec.sim.ccparticleworld", &pw_textured_vals(Some(1)), Image::new(48, 48), 1.0, EffectEnv { shutter: None, ..env }).img;
+        assert_ne!(sharp.data, blurred.data, "the shutter smears the particles");
+        let seen: Vec<_> = blurred.data.iter().filter(|p| p[3] > 0.02).collect();
+        assert!(!seen.is_empty(), "particles drawn");
+        assert!(seen.iter().all(|p| p[0] < 0.02 * p[3]), "no particle colour: {:?}", seen.iter().find(|p| p[0] >= 0.02 * p[3]));
+        assert!(seen.iter().any(|p| p[1] > 2.0 * p[2]) && seen.iter().any(|p| p[2] > 2.0 * p[1]), "both texture halves");
+    }
+
+    /// A host whose every layer is `0` as given (a buffer that may span only its content).
+    struct PixelsHost(crate::LayerPixels);
+    impl crate::EffectHost for PixelsHost {
+        fn layer(&self, _: u64, _: bool) -> Option<crate::LayerPixels> {
+            Some(self.0.clone())
+        }
+        fn audio(&self, _: u64, _: f64, _: usize, _: u32) -> Option<Vec<f32>> {
+            None
+        }
+    }
+
+    /// #1465: a Texture Layer whose buffer spans only its content (text, shapes) is mapped as
+    /// the whole layer, transparent around the content, not with its edge pixels stretched.
+    #[test]
+    fn particle_world_texture_layer_with_a_content_sized_buffer() {
+        // An 8×8 layer with a green 4×4 square in the middle: once as the full layer, once as
+        // just the square's pixels.
+        let mut full = Image::new(8, 8);
+        for y in 2..6 {
+            for x in 2..6 {
+                full.set(x, y, [0.0, 1.0, 0.0, 1.0]);
+            }
+        }
+        let content = Image::filled(4, 4, [0.0, 1.0, 0.0, 1.0]);
+        let render = |buf: Buf| {
+            let host = PixelsHost(crate::LayerPixels { buf, size: [8.0, 8.0] });
+            let env = EffectEnv { host: Some(&host), ..Default::default() };
+            run_fx("ec.sim.ccparticleworld", &pw_textured_vals(Some(1)), Image::new(48, 48), 1.0, env).img
+        };
+        let want = render(Buf { img: full, offset: [0.0; 2], scale: 1.0 });
+        let got = render(Buf { img: content, offset: [-2.0, -2.0], scale: 1.0 });
+        assert!(want.data.iter().any(|p| p[3] > 0.05), "particles drawn");
+        assert_eq!(want.data, got.data, "the content-sized buffer draws as the full layer");
     }
 
     #[test]
