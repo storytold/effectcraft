@@ -111,6 +111,7 @@ pub const COMPLETIONS: &[&str] = &[
     "ease",
     "easeIn",
     "easeOut",
+    "bezier",
     "clamp",
     "random",
     "gaussRandom",
