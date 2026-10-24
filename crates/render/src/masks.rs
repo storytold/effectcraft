@@ -122,6 +122,72 @@ pub fn shapes(ctx: &EvalCtx, layer: &Layer) -> Vec<effectcraft_effects::MaskShap
     out
 }
 
+/// Layer-space bounds `[x0, y0, x1, y1]` outside which the layer's masks hide everything, or
+/// `None` when they don't limit it (no closed masks, a Subtract or inverted mask first…). The
+/// bounds are conservative: expansion and feather pad each mask's path bounds.
+pub fn visible_bounds(ctx: &EvalCtx, layer: &Layer) -> Option<[f64; 4]> {
+    let masks = layer.masks()?;
+    let union = |a: [f64; 4], b: [f64; 4]| [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])];
+    let inter = |a: [f64; 4], b: [f64; 4]| [a[0].max(b[0]), a[1].max(b[1]), a[2].min(b[2]), a[3].min(b[3])];
+    // `None`: unbounded; `Some(None)`: nothing visible yet; `Some(Some(r))`: within `r`.
+    let mut acc: Option<Option<[f64; 4]>> = None;
+    let mut first = true;
+    for g in masks.groups().filter(|g| g.enabled) {
+        let GroupKind::Mask { mode, inverted, .. } = g.kind else { continue };
+        if mode == MaskMode::None {
+            continue;
+        }
+        let Some(Value::Path(sp)) = ctx.group_value(layer, g, "path") else { continue };
+        if !sp.closed {
+            continue;
+        }
+        // As in `apply`: the first mask starts from nothing (or everything for Subtract), and
+        // a first Intersect or Darken covers like Add.
+        let mode = if first && matches!(mode, MaskMode::Intersect | MaskMode::Darken) { MaskMode::Add } else { mode };
+        if first {
+            first = false;
+            if mode == MaskMode::Subtract {
+                continue;
+            }
+            acc = Some(None);
+        }
+        // Region this mask's coverage can reach (`None`: anywhere).
+        let cov = if inverted || !sp.feather.is_empty() {
+            None
+        } else if ctx.f(layer, g, "opacity", 100.0) <= 0.0 {
+            Some(None)
+        } else {
+            let exp = ctx.f(layer, g, "expansion", 0.0);
+            let feather = ctx.v2(layer, g, "feather", [0.0; 2]);
+            let pad = |f: f64| exp + if f > 0.0 { f * 1.5 } else { 0.0 };
+            let (px, py) = (pad(feather[0]), pad(feather[1]));
+            let path = effectcraft_path::to_kurbo(&sp);
+            Some(
+                effectcraft_path::bounds(std::slice::from_ref(&path))
+                    .map(|r| [r.x0 - px, r.y0 - py, r.x1 + px, r.y1 + py])
+                    .filter(|r| r[0] < r[2] && r[1] < r[3]),
+            )
+        };
+        acc = match mode {
+            MaskMode::Subtract | MaskMode::None => acc,
+            MaskMode::Add | MaskMode::Lighten | MaskMode::Difference => match (acc, cov) {
+                (Some(a), Some(c)) => Some(match (a, c) {
+                    (Some(a), Some(c)) => Some(union(a, c)),
+                    (a, c) => a.or(c),
+                }),
+                _ => None,
+            },
+            MaskMode::Intersect | MaskMode::Darken => match (acc, cov) {
+                (Some(Some(a)), Some(Some(c))) => Some(Some(inter(a, c)).filter(|r| r[0] < r[2] && r[1] < r[3])),
+                (Some(None), _) | (_, Some(None)) => Some(None),
+                (a, None) => a,
+                (None, c) => c,
+            },
+        };
+    }
+    acc.flatten()
+}
+
 /// Apply the layer's masks to its buffer.
 /// Returns whether any mask was applied.
 pub fn apply(ctx: &EvalCtx, layer: &Layer, buf: &mut Buf, blur: MaskBlur) -> bool {
