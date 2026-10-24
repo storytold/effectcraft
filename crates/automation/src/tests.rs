@@ -491,6 +491,8 @@ fn bridge_forwards_to_control_channel() {
 
     call_json(&mut s, "execute_command", json!({"command": "comp.new", "params": {"name": "B", "width": 64, "height": 64}}));
     assert_eq!(call_json(&mut s, "get_comp", json!({}))["name"], "B");
+    let cmds = call_json(&mut s, "list_commands", json!({"filter": "layer.newSolid", "compact": true}));
+    assert!(cmds.as_array().unwrap().contains(&json!({"id": "layer.newSolid", "label": "Solid..."})), "{cmds}");
 
     let (c, err) = call(&mut s, "render_frame", json!({}));
     assert!(!err, "{c:?}");
@@ -735,6 +737,40 @@ fn every_engine_command_is_reachable_over_mcp() {
         let (content, err) = call(&mut s, "execute_command", json!({"command": spec.id, "params": {"__audit": 1}}));
         let text = content[0]["text"].as_str().unwrap_or_default();
         assert!(err && text.contains("unknown parameter") && text.contains(spec.id), "{}: {text}", spec.id);
+    }
+}
+
+/// `compact: true` shrinks the listings for MCP clients' tool-result limits (#2020): commands with
+/// only `id` and `label`, effects with only `id`, `name` and `category`.
+#[test]
+fn compact_listings_keep_only_ids_and_names() {
+    let mut s = server();
+    let cmds = call_json(&mut s, "list_commands", json!({"filter": "layer.new", "compact": true}));
+    assert!(cmds.as_array().unwrap().contains(&json!({"id": "layer.newSolid", "label": "Solid..."})), "{cmds}");
+    let fx = call_json(&mut s, "list_effects", json!({"filter": "gaussian", "compact": true}));
+    assert!(fx.as_array().unwrap().contains(&json!({"id": "ec.blur.gaussian", "name": "Gaussian Blur", "category": "Blur & Sharpen"})), "{fx}");
+    // Each compact listing is the full one with the same arguments, entry for entry; `compact`
+    // wins over `schemas`.
+    let check = |s: &mut McpServer, tool: &str, args: Value, keys: &[&str]| {
+        let full = call_json(s, tool, args.clone());
+        let want: Value = full.as_array().unwrap().iter().map(|e| Value::Object(keys.iter().map(|&k| (k.to_string(), e[k].clone())).collect())).collect();
+        let mut compact = args.clone();
+        compact["compact"] = json!(true);
+        assert_eq!(call_json(s, tool, compact), want, "{tool} {args}");
+    };
+    for args in [json!({}), json!({"filter": "layer.new"}), json!({"enabled_only": true}), json!({"schemas": true})] {
+        check(&mut s, "list_commands", args.clone(), &["id", "label"]);
+        check(&mut s, "command_list", args, &["id", "label"]);
+    }
+    check(&mut s, "list_effects", json!({}), &["id", "name", "category"]);
+    check(&mut s, "list_effects", json!({"filter": "gaussian"}), &["id", "name", "category"]);
+    // `compact: false` is the default listing, byte for byte; `compact: true` is a fraction of it.
+    let text = |s: &mut McpServer, tool: &str, args: Value| call(s, tool, args).0[0]["text"].as_str().unwrap().to_string();
+    for (tool, ratio) in [("list_commands", 2), ("list_effects", 10)] {
+        let full = text(&mut s, tool, json!({}));
+        assert_eq!(text(&mut s, tool, json!({"compact": false})), full, "{tool}");
+        let compact = text(&mut s, tool, json!({"compact": true})).len();
+        assert!(compact * ratio < full.len(), "{tool}: {compact} of {} bytes", full.len());
     }
 }
 

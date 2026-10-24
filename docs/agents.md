@@ -101,7 +101,7 @@ See [MCP conventions](mcp.md) for core tools, resources, strict arguments, and r
 
 | Tool | What it does |
 |---|---|
-| `list_commands {filter?, enabled_only?, schemas?}` | Discover command ids, their param docs (and, with `schemas`, a JSON Schema each), and whether each can run now. |
+| `list_commands {filter?, enabled_only?, schemas?, compact?}` | Discover command ids, their param docs (and, with `schemas`, a JSON Schema each), and whether each can run now; `compact` lists only ids and labels (and overrides `schemas`). |
 | `describe_command {command \| id}` | One command in full: label, menu, shortcut, params doc, JSON `schema`, enabled / `why`. |
 | `execute_command {command \| id, params?}` | Run any command (undoable). Unknown parameter keys are rejected with the accepted list. |
 | `get_state` | Editor state (active comp, time, selections, tool) plus `app`: version, command and effect counts, export formats, parity summary. |
@@ -111,7 +111,7 @@ See [MCP conventions](mcp.md) for core tools, resources, strict arguments, and r
 | `get_property {layer, path, comp?, time?}` | A leaf property's value at a time, keyframes and expression. Group paths (for example `geometryOptions`) contain children: inspect them with `get_layer`, then query a leaf such as `geometryOptions/extrusionDepth`. |
 | `set_property {layer, path, value?, time?, timeBase?, expression?, comp?}` | Sets a static value. With `time` it sets a keyframe (`timeBase: "comp"` for comp seconds); with `expression` it sets an expression. |
 | `add_keyframe {layer, path, time+value \| keys:[...], timeBase?, interpolation?, comp?}` | Adds keys (layer seconds, or comp seconds with `timeBase: "comp"`), then optionally applies linear/bezier/hold/easyEase. |
-| `list_effects {filter?}` | Effect ids, names, categories, GPU / 32-bpc support and parameters. |
+| `list_effects {filter?, compact?}` | Effect ids, names, categories, GPU / 32-bpc support and parameters; `compact` lists only ids, names and categories. |
 | `list_fonts {query?, variable?, rescan?}` | Font families text layers can use, bundled and installed, with their styles, origin, whether each is a variable font and own-language name; `variable` lists only variable fonts; `rescan` picks up fonts installed since launch. |
 | `add_effect {layer, effect, values?, comp?}` | Apply an effect and set its parameters in one call and one undo step (a failing value leaves nothing applied); returns the instance path (`effects/#n`) and its parameter paths. |
 | `render_frame {comp?, time?, max_side?, path?, inline?, transparent?}` | Returns a PNG image of a frame; `transparent: true` keeps the alpha (as an RGB + Alpha render writes it) instead of compositing over the comp background. |
