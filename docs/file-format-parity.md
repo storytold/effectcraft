@@ -63,6 +63,7 @@ trips and renders, checked by tests, not against After Effects), **partial** (na
 | HEVC (H.265) | R/W | yes | yes (MP4 `hvc1`, Main / Main 10) | encoder bit-exact with ffmpeg's decode; no B-frames / SAO, larger files |
 | AV1 | R | yes | yes (MP4 `av01`, WebM) | beyond After Effects' export; no B-frames / CDEF |
 | Apple ProRes (422 family, 4444) | R/W | yes | yes | good; 4444 colour tag wrong (#340); no ProRes RAW |
+| QuickTime Animation (`rle `) | R/W | yes (16- and 24-bit, and 32-bit with alpha) | none | the "Millions of Colors+" MOV After Effects writes; paletted 1–8-bit is refused |
 | WebM / Matroska (VP9, AV1, Opus) | R (limited) | yes, incl. VP9 alpha | yes | beyond After Effects |
 | MXF (OP1a / OP-Atom) | R/W | yes (FilmCraft's demuxer: AVC, MPEG-2 incl. XDCAM / D-10, VC-3 / DNxHD, ProRes; PCM audio) | none | partial: import (#767), checked against ffmpeg; no MXF output |
 | AVI | R | none | none | Media Browser lists it |

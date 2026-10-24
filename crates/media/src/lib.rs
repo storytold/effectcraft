@@ -24,6 +24,7 @@ mod layered;
 pub use layered::vector_doc;
 mod pool;
 mod probe;
+mod qt_anim;
 mod stream;
 mod webp_anim;
 
