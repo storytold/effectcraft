@@ -150,6 +150,28 @@ fn operators_below_repeater_act_on_copies() {
     assert!((coverage(&img) - 3.0 * 24.0 * 24.0).abs() < 30.0, "{}", coverage(&img));
 }
 
+/// After Effects 2026 (case 709): a 400 × 200 rectangle with Fill, then a Repeater of 3 copies
+/// (Position 150, 60, Rotation 10, Scale 90 / 80, End Opacity 40) gives the copies 100 %, 80 %
+/// and 60 % opacity (EffectCraft gave 70 % and 40 %). The points are comp pixels where AE shows
+/// only the last copy, only the middle one, and both.
+#[test]
+fn repeater_copy_opacity_matches_after_effects() {
+    let (p, cid) = shape_comp_sized(1920, 1080, |ids| {
+        let mut rep = build::shape_repeater(ids, 3.0, [150.0, 60.0]);
+        set(&mut rep, "transform/rotation", Value::Scalar(10.0));
+        set(&mut rep, "transform/scale", Value::Vec2([90.0, 80.0]));
+        set(&mut rep, "transform/endOpacity", Value::Scalar(40.0));
+        let items = vec![build::shape_rect(ids, [400.0, 200.0], [0.0, 0.0], 0.0), build::shape_fill(ids, [0.0, 1.0, 0.0, 1.0]), rep];
+        vec![build::shape_group(ids, "Group 1", items)]
+    });
+    let img = frame(&p, cid);
+    // AE's green over its red layer, 153, 153, 204, 235 and 255 of 255.
+    for (x, y, want) in [(1360, 700, 0.6), (1300, 620, 0.6), (1220, 560, 0.8), (1180, 630, 0.92), (1100, 600, 1.0)] {
+        let a = alpha(&img, x, y);
+        assert!((a - want).abs() < 2.0 / 255.0, "({x}, {y}): {a} vs AE {want}");
+    }
+}
+
 #[test]
 fn repeater_then_merge_unites_copies() {
     let (p, cid) = shape_comp(|ids| {

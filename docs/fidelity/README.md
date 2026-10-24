@@ -71,6 +71,16 @@ After the fix, all ten tangents equal AE's to the printed 0.001 px, and the two 
 test `spatial_auto_bezier_tangents_follow_after_effects` checks the rule on other original keys,
 including a timing change. AE's output stays local; only the script and these scores are tracked.
 
+## Rectangle path start point
+
+Measured on 19 October 2026 with After Effects 2026 (26.2) on 400 × 300 shape rectangles with Trim
+Paths: a plain rectangle starts at its top-right corner and runs clockwise (0–25 % covers the right
+edge and 50 px of the bottom); with Roundness 40 it starts where the top-right arc meets the right
+edge. Start 70 / End 30 draws 30–70 %. EffectCraft started at the top-left corner (and the rounded
+rectangle elsewhere), so trimmed rectangles drew the wrong segment (86 of 5184 grid points off,
+now 5 at stroke edges). `effectcraft_path::rect` now draws AE's order, which also gives Convert to
+Bezier AE's vertex order. Regression test: `rectangles_start_where_after_effects_starts_them`.
+
 ## Still unmeasured
 
 Rendered frame comparisons now have a deterministic `effectcraft_effects::fidelity::compare_frames`

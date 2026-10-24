@@ -395,7 +395,10 @@ fn collect(ctx: &EvalCtx, layer: &Layer, contents: &PropGroup, arena: &mut Vec<B
                 }
                 for i in order {
                     let m = step(i as f64 + offset);
-                    let t = if n > 1 { i as f32 / (n - 1) as f32 } else { 0.0 };
+                    // Copy i's opacity moves 1 / Copies of the way from Start to End Opacity per
+                    // copy, so the last copy stops one step short of End Opacity (After Effects
+                    // 2026, case 709: 3 copies, End Opacity 40 give 100 %, 80 %, 60 %).
+                    let t = if copies > 0.0 { (i as f64 / copies) as f32 } else { 0.0 };
                     let opk = so + (eo - so) * t;
                     let partial = if i + 1 == n && copies.fract() > 0.0 { copies.fract() as f32 } else { 1.0 };
                     for d in &base_draws {

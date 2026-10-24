@@ -2451,6 +2451,8 @@ mod tests_mask_blur;
 #[cfg(test)]
 mod tests_mask_expansion;
 #[cfg(test)]
+mod tests_mask_feather;
+#[cfg(test)]
 mod tests_motion_tile;
 #[cfg(test)]
 mod tests_nested;

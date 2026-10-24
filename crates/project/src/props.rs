@@ -205,7 +205,8 @@ pub enum MaskMotionBlur {
     Off,
 }
 
-/// How a mask's feather ramps: Smooth (Gaussian) or Linear.
+/// How a mask's feather ramps: Smooth (three box passes, an S-shaped ramp of finite reach, as
+/// measured in After Effects) or Linear (one box pass: a straight ramp).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum FeatherFalloff {
     #[default]
