@@ -288,6 +288,14 @@ fn prop_row(
     let set = |actions: &mut Actions, v: serde_json::Value| {
         actions.push(("prop.set".into(), json!({"layer": layer.id.0, "prop": uid, "value": v, "merge": merge, "selected": true, "offset": scrub})))
     };
+    // A discrete choice (a drop-down pick, a checkbox click) is its own undo step: no merge key,
+    // so two picks in a row don't fold into one the way a scrub's steps do (#2152).
+    let pick = |actions: &mut Actions, v: serde_json::Value| {
+        set(actions, v);
+        if let Some(a) = actions.last_mut().and_then(|(_, a)| a.as_object_mut()) {
+            a.remove("merge");
+        }
+    };
     let twirl_open = |app: &mut EffectcraftApp, ui: &mut egui::Ui| {
         let open = app.ui.fx_slider_open.contains(&uid);
         let tw = Rect::from_center_size(pos2(swr.min.x - 9.0, cy), vec2(10.0, 10.0));
@@ -316,7 +324,7 @@ fn prop_row(
             }
             app.auto.add(&format!("effectControls.prop.{uid}.value"), dr, &prop.name);
             if let Some(ni) = widgets::popup_menu(ui, pop, dr.left_bottom(), &opts, Some(i)) {
-                set(actions, json!(ni as f64));
+                pick(actions, json!(ni as f64));
             }
         }
         Value::Scalar(v) if matches!(prop.ui, ParamUi::Angle) => {
@@ -415,7 +423,7 @@ fn prop_row(
         Value::Bool(b) => {
             let cr = Rect::from_min_size(pos2(vx, cy - 8.0), vec2(16.0, 16.0));
             if widgets::checkbox(ui, cr, *b, &t, egui::Id::new(("ec-b", uid))).clicked() {
-                set(actions, json!(!b));
+                pick(actions, json!(!b));
             }
             p.text(pos2(cr.max.x + 6.0, cy), Align2::LEFT_CENTER, &prop.name, Tokens::ui(12.0), t.text_dim);
             app.auto.add(&format!("effectControls.prop.{uid}.value"), cr, &prop.name);
@@ -430,7 +438,7 @@ fn prop_row(
                 }
                 app.auto.add(&format!("effectControls.prop.{uid}.value"), dr, &prop.name);
                 if let Some(ni) = widgets::popup_menu(ui, pop, dr.left_bottom(), options, Some(*i as usize)) {
-                    set(actions, json!(ni));
+                    pick(actions, json!(ni));
                 }
             }
         }
@@ -439,7 +447,7 @@ fn prop_row(
             if let Some(comp) = comp {
                 let dr = Rect::from_min_size(pos2(vx, cy - 9.0), vec2(((r.max.x - vx) * 0.55).clamp(90.0, 170.0), 18.0));
                 if let Some(chosen) = widgets::layer_picker(ui, dr, &comp.layers, *l, &t, egui::Id::new(("ec-l", uid))) {
-                    set(actions, chosen.map(|id| json!(id)).unwrap_or(serde_json::Value::Null));
+                    pick(actions, chosen.map(|id| json!(id)).unwrap_or(serde_json::Value::Null));
                 }
                 app.auto.add(&format!("effectControls.prop.{uid}.value"), dr, &prop.name);
                 // Source / Masks / Effects & Masks (the hidden companion parameter).

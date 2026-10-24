@@ -814,6 +814,83 @@ fn effect_rename_escape_keeps_the_name() {
     assert!(!ids(&h).contains(&format!("effectControls.effect.{}.nameEdit", x.point_fx)));
 }
 
+/// #2152: each drop-down pick and checkbox click is its own undo step, in Effect Controls and in
+/// the Timeline; two picks in a row used to fold into one (the scrub merge key), so one undo
+/// jumped back past the first pick.
+#[test]
+fn each_drop_down_pick_and_checkbox_click_is_its_own_undo_step() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"width": 640, "height": 360, "frameRate": 30, "duration": 5})).unwrap();
+    let lid = s.execute("layer.newSolid", json!({"color": "#000000", "name": "Base"})).unwrap()["layer"].as_u64().unwrap();
+    let fx = s.execute("effect.apply", json!({"effect": "Gaussian Blur"})).unwrap()["effects"][0].as_u64().unwrap();
+    let lc = s.execute("effect.apply", json!({"effect": "Layer Control"})).unwrap()["effects"][0].as_u64().unwrap();
+    let other = s.execute("layer.newSolid", json!({"color": "#ffffff", "name": "Other"})).unwrap()["layer"].as_u64().unwrap();
+    let l = layer(&s, lid);
+    let g = l.effects().unwrap().groups().find(|g| g.uid == fx).unwrap();
+    let (dims, repeat, effects) = (g.get("dimensions").unwrap().uid, g.get("repeatEdge").unwrap().uid, l.effects().unwrap().uid);
+    let lay = l.effects().unwrap().groups().find(|g| g.uid == lc).and_then(|g| g.get("layer")).unwrap().uid;
+    s.state.selected_layers = vec![LayerId(lid)];
+    let mut app = EffectcraftApp::new(s);
+    app.show_panel(PanelKind::EffectControls);
+    app.ui.timeline.open_layers.insert(lid);
+    app.ui.timeline.open_groups.extend([effects, fx, lc]);
+    let mut h = Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).build_eframe(|_| app);
+    h.run_steps(4);
+    let value = |h: &Harness<'_, EffectcraftApp>, uid: u64| layer(&h.state().session, lid).props.find(uid).unwrap().value.clone();
+    let undo_len = |h: &Harness<'_, EffectcraftApp>| h.state().session.history.undo.len();
+    let choose = |h: &mut Harness<'_, EffectcraftApp>, id: &str, option: &str| {
+        let at = rect_of(h, id).center();
+        click(h, at);
+        h.get_by_label(option).click();
+        h.run_steps(3);
+    };
+
+    let n = undo_len(&h);
+    let ec = format!("effectControls.prop.{dims}.value");
+    choose(&mut h, &ec, "Vertical");
+    choose(&mut h, &ec, "Horizontal");
+    assert_eq!(value(&h, dims), KV::Enum(1));
+    assert_eq!(undo_len(&h), n + 2, "two picks, two steps");
+    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(value(&h, dims), KV::Enum(2), "undo goes back to the first pick");
+    h.run_steps(2);
+
+    let n = undo_len(&h);
+    for _ in 0..2 {
+        let at = rect_of(&h, &format!("effectControls.prop.{repeat}.value")).center();
+        click(&mut h, at);
+    }
+    assert_eq!(value(&h, repeat), KV::Bool(false));
+    assert_eq!(undo_len(&h), n + 2, "two clicks, two steps");
+    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(value(&h, repeat), KV::Bool(true));
+    h.run_steps(2);
+
+    let n = undo_len(&h);
+    let tl = format!("timeline.prop.{dims}.value");
+    choose(&mut h, &tl, "Horizontal");
+    choose(&mut h, &tl, "Horizontal and Vertical");
+    assert_eq!(value(&h, dims), KV::Enum(0));
+    assert_eq!(undo_len(&h), n + 2, "two Timeline picks, two steps");
+    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(value(&h, dims), KV::Enum(1));
+    h.run_steps(2);
+
+    // The shared layer drop-down (a Layer Control's layer, an Environment light's Source), in both
+    // panels: "1. Other" is the top layer, "2. Base" this one.
+    for id in [format!("effectControls.prop.{lay}.value"), format!("timeline.prop.{lay}.value")] {
+        let n = undo_len(&h);
+        let first = if value(&h, lay) == KV::Layer(Some(other)) { "2. Base" } else { "1. Other" };
+        let second = if first == "1. Other" { "2. Base" } else { "1. Other" };
+        choose(&mut h, &id, first);
+        choose(&mut h, &id, second);
+        assert_eq!(undo_len(&h), n + 2, "two layer picks, two steps ({id})");
+        h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(value(&h, lay), KV::Layer(Some(if first == "1. Other" { other } else { lid })), "{id}");
+        h.run_steps(2);
+    }
+}
+
 /// Two presses within egui's double-click time (one frame apart).
 fn double_click(h: &mut Harness<'_, EffectcraftApp>, pos: egui::Pos2) {
     h.event(egui::Event::PointerMoved(pos));

@@ -4328,6 +4328,14 @@ fn value_editor(
             json!({"layer": layer.id.0, "prop": uid, "value": v, "merge": merge, "selected": true, "offset": scrub, "proportional": proportional}),
         ))
     };
+    // A discrete choice (a drop-down pick, a checkbox click) is its own undo step: no merge key,
+    // so two picks in a row don't fold into one the way a scrub's steps do (#2152).
+    let pick = |actions: &mut Vec<(String, serde_json::Value)>, v: serde_json::Value| {
+        set(actions, v);
+        if let Some(a) = actions.last_mut().and_then(|(_, a)| a.as_object_mut()) {
+            a.remove("merge");
+        }
+    };
     let is_3d = layer.is_3d();
     let mut x = at.x;
     let y = at.y - 9.0;
@@ -4432,7 +4440,7 @@ fn value_editor(
         Value::Bool(b) => {
             let r = Rect::from_min_size(pos2(x, at.y - 8.0), vec2(16.0, 16.0));
             if widgets::checkbox(ui, r, *b, &t, egui::Id::new(("cb", uid))).clicked() {
-                set(actions, json!(!b));
+                pick(actions, json!(!b));
             }
             app.auto.add(&format!("timeline.prop.{uid}.value"), r, &prop.name);
         }
@@ -4453,7 +4461,7 @@ fn value_editor(
                 }
                 app.auto.add(&format!("timeline.prop.{uid}.value"), r, &prop.name);
                 if let Some(ni) = widgets::popup_menu(ui, pop, r.left_bottom(), options, Some(*i as usize)) {
-                    set(actions, json!(ni));
+                    pick(actions, json!(ni));
                 }
             } else {
                 p.text(pos2(x, at.y), Align2::LEFT_CENTER, fmt_num(*i as f64, 0), Tokens::ui(12.0), t.hot_text);
@@ -4471,7 +4479,7 @@ fn value_editor(
             if let Some(comp) = app.session.active_comp_arc()
                 && let Some(chosen) = widgets::layer_picker(ui, r, &comp.layers, *l, &t, egui::Id::new(("tl-lay", uid)))
             {
-                set(actions, chosen.map(|id| json!(id)).unwrap_or(serde_json::Value::Null));
+                pick(actions, chosen.map(|id| json!(id)).unwrap_or(serde_json::Value::Null));
             }
             app.auto.add(&format!("timeline.prop.{uid}.value"), r, &prop.name);
         }
