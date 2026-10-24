@@ -1,6 +1,6 @@
 # Hardware parity
 
-> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-12 · **Change:** minor (closed issue references re-audited against `upstream/main` 470ea7a3) · **Target:** Adobe After Effects 2026
+> **Last reviewed:** 2026-10-19 · **Last updated:** 2026-10-19 · **Change:** minor (Content-Aware Fill's PatchMatch and flow search on the GPU) · **Target:** Adobe After Effects 2026
 
 Each piece of hardware After Effects uses, per platform, against EffectCraft. Ours comes from the
 code at `origin/main` 1446e27 (`crates/gpu`, `crates/render`, `crates/ui-egui`) and the issue
@@ -14,6 +14,7 @@ monitors are missing, and two GPU start-up failures are open.
 | Feature | After Effects 2026 | EffectCraft macOS | Windows | Linux | Web | Notes / evidence |
 |---|---|---|---|---|---|---|
 | GPU compositing and effects | Mercury GPU (Metal; CUDA / OpenCL / DirectX on Windows) | yes, Metal via wgpu | Vulkan yes; **Direct3D 12 fails** (FXC can't compile the `pointwise` kernel, #613) | Vulkan | WebGPU, in frame workers | 280 of 306 effects on the GPU, checked against the CPU renderer; Fractal and the analysis/tool effects stay on the CPU ([effects-parity.md](effects-parity.md)) |
+| GPU analysis | GPU-accelerated Content-Aware Fill | Content-Aware Fill's PatchMatch **and** flow block matching on the GPU (`Gpu::inpaint`); every other stage on the CPU | same | same | no (needs synchronous readback) | On an Intel Arc iGPU a four-frame 1920 × 1080 fill is ≈ 1.4× faster than the CPU's (PatchMatch is the dominant win, the flow search a smaller one), and even a 16 × 16 hole at 1920 × 1080 is ≈ 1.9× faster — the CPU's own stages are O(frame), not O(hole). The device's flow field matches `block_flow` to a float rounding. The membrane and the flow's hole completion stay on the CPU: both are bandwidth-bound, and the device's full-frame transfers cost more than they save — see `effectcraft_gpu::inpaint` |
 | CPU fallback and device-loss recovery | yes | yes | yes; Windows ARM64 Adreno panic after device loss (#591, closed) | yes | yes (#225 fixed) | Out of video memory falls back to the CPU (#106) |
 | GPU detection and choice | GPU info, renderer choice | Backend Auto per comp | "GPU isn't being detected" (#596, closed); Intel HD 5500 fix unverified (#198) | yes | yes | No settings page listing adapters yet |
 | Multi-core rendering | Multi-Frame Rendering | rayon pools; preview scheduler sized to the render pool | same | same | Web Workers, one engine per worker | No benchmark against Multi-Frame Rendering |
@@ -39,5 +40,6 @@ the Adreno and Intel cases.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-19 | minor | Content-Aware Fill's PatchMatch and flow block matching run on the GPU (`FillBackend`/`Accelerator::inpaint`, `effectcraft_gpu::inpaint`) |
 | 2026-10-12 | minor | #591, #596 and #554 marked closed; #498 answer and open PR #819 |
 | 2026-10-10 | major | First hardware parity document |

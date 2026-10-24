@@ -51,6 +51,21 @@ impl Flow {
     }
 }
 
+/// The `Plane::luma` of `a` and `b` packed into one image (`a` in the red channel, `b` in the
+/// green; the rest zero). A device block matcher takes this as its input rather than computing
+/// the luma itself: the weighted sum is not reproducible on a device, which may contract
+/// `a·b + c` into a fused multiply-add, and the search's near-tie choices would then differ.
+pub fn luma_pair(a: &Image, b: &Image) -> Image {
+    let luma = |p: &[f32; 4]| 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2] + 0.25 * p[3];
+    let mut out = Image::new(a.width, a.height);
+    out.data.par_iter_mut().enumerate().for_each(|(i, q)| {
+        let la = a.data.get(i).map(luma).unwrap_or(0.0);
+        let lb = b.data.get(i).map(luma).unwrap_or(0.0);
+        *q = [la, lb, 0.0, 0.0];
+    });
+    out
+}
+
 /// A single-channel plane.
 struct Plane {
     w: usize,
