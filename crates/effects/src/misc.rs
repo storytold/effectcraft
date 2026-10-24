@@ -247,6 +247,242 @@ fn glow(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
+/// Physical Glow's settings in buffer pixels, shared by the CPU effect and the GPU kernels.
+pub struct PhysicalGlowPlan {
+    /// Transparent pixels to add on every side (0 on adjustment layers).
+    pub pad: u32,
+    /// Per octave: the Gaussian's sigmas (x, y) and its RGBA weights, exposure and tint folded in.
+    pub octaves: Vec<([f64; 2], [f32; 4])>,
+    /// Bright pass: 0 = everything glows, 1 = hard threshold at `thr[0]`, 2 = smoothstep from
+    /// `thr[1]` to `thr[2]`.
+    pub threshold_mode: u32,
+    pub thr: [f32; 3],
+    /// 1 Screen, 2 Glow Only, anything else Add.
+    pub composite: u32,
+    /// Fast Mode: blur each octave on a downsampled pyramid level ([`Self::fast_octaves`]).
+    pub fast: bool,
+}
+
+/// One Fast Mode octave, per axis (x, y): the pyramid level (halvings), the Gaussian's radius in
+/// taps at that level (0 = no blur) and its `1 / (2 sigma^2)`; plus the octave's RGBA weights.
+///
+/// Level pixel `i` at level `m` is centred at buffer coordinate `(i + 0.5) * 2^m`. A level above 0
+/// stores one extra pixel on the low side (array index = `i + 1`): the edge pixel's outer
+/// [1, 3, 3, 1] tap lands on level pixel −1, and keeping it conserves energy at both edges.
+pub struct PhysicalGlowOctave {
+    pub level: [u32; 2],
+    pub taps: [u32; 2],
+    pub k: [f32; 2],
+    pub weights: [f32; 4],
+}
+
+impl PhysicalGlowPlan {
+    /// The bright pass of one premultiplied pixel (non-finite channels count as 0).
+    fn bright(&self, px: [f32; 4]) -> [f32; 4] {
+        let px = px.map(|v| if v.is_finite() { v } else { 0.0 });
+        let m = px[0].max(px[1]).max(px[2]);
+        let w = match self.threshold_mode {
+            0 => 1.0,
+            1 => {
+                if m >= self.thr[0] {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            _ => crate::util::smoothstep(self.thr[1], self.thr[2], m),
+        };
+        px.map(|v| v * w)
+    }
+
+    /// Fast Mode's octaves for a `w` × `h` buffer, smallest sigma first, so levels only grow.
+    pub fn fast_octaves(&self, w: u32, h: u32) -> Vec<PhysicalGlowOctave> {
+        let axis = |s: f64, n: u32| {
+            if !s.is_finite() || s <= 0.05 {
+                return (0, 0, 0.0);
+            }
+            // Deepest level that keeps at least 8 px on this axis.
+            let (mut cap, mut size) = (0u32, n);
+            while size.div_ceil(2) >= 8 {
+                size = size.div_ceil(2);
+                cap += 1;
+            }
+            let m = ((s / 2.0).log2().floor().max(0.0) as u32).min(cap);
+            let s4 = 4f64.powi(m as i32);
+            // Each [1, 3, 3, 1] halving adds 3/4 of its input's px², (4^m - 1) / 4 px² in all; the
+            // bilinear upsample from a level below adds about 4^m / 6 (none at level 0: no upsample).
+            let up = if m > 0 { s4 / 6.0 } else { 0.0 };
+            let v = ((s * s - (s4 - 1.0) / 4.0 - up) / s4).max(0.0);
+            let sl = v.sqrt();
+            if sl <= 0.05 {
+                return (m, 0, 0.0);
+            }
+            (m, (3.0 * sl).ceil().min(128.0) as u32, (0.5 / v) as f32)
+        };
+        self.octaves
+            .iter()
+            .rev()
+            .map(|(s, weights)| {
+                let (x, y) = (axis(s[0], w), axis(s[1], h));
+                PhysicalGlowOctave { level: [x.0, y.0], taps: [x.1, y.1], k: [x.2, y.2], weights: *weights }
+            })
+            .collect()
+    }
+
+    /// The source `s` with the glow `g`; non-finite channels become 0.
+    fn composite(&self, s: [f32; 4], g: [f32; 4]) -> [f32; 4] {
+        let o = match self.composite {
+            1 => {
+                let sc = |c: usize| s[c] + g[c].clamp(0.0, 1.0) * (1.0 - s[c].min(1.0));
+                [sc(0), sc(1), sc(2), s[3] + g[3].clamp(0.0, 1.0) * (1.0 - s[3])]
+            }
+            2 => [g[0], g[1], g[2], g[3].min(1.0)],
+            _ => [s[0] + g[0], s[1] + g[1], s[2] + g[2], (s[3] + g[3]).min(1.0)],
+        };
+        o.map(|v| if v.is_finite() { v } else { 0.0 })
+    }
+}
+
+/// [`PhysicalGlowPlan`] for an instance at buffer scale `scale`.
+pub fn physical_glow_plan(ctx: &EffectCtx, scale: f64) -> PhysicalGlowPlan {
+    // Non-finite values fall back; finite ones are held to the slider's valid range.
+    let f = |id: &str, fallback: f64, lo: f64, hi: f64| {
+        let v = ctx.params.f(id);
+        if v.is_finite() { v.clamp(lo, hi) } else { fallback }
+    };
+    let smax = f("radius", 0.0, 0.0, 4000.0) * scale / 2.0;
+    let sigmas: Vec<f64> = if smax.is_finite() && smax >= 0.5 {
+        let n = ((smax / 0.5).log2().floor() as usize + 1).min(12);
+        (0..n).map(|k| smax / 2f64.powi(k as i32)).collect()
+    } else {
+        vec![0.0]
+    };
+    let sa = f("aspectRatio", 1.0, 0.05, 20.0).sqrt();
+    let alpha = f("falloff", 2.0, 1.0, 4.0);
+    let d = f("dispersion", 0.0, -100.0, 100.0) / 100.0;
+    let exps = [alpha - d, alpha, alpha + d, alpha].map(|a| a.clamp(0.5, 4.5));
+    // Octave weights per channel: sigma_k^(2 - alpha) up to a constant, normalised to sum to 1.
+    let raw = |k: usize, a: f64| 2f64.powf(-(k as f64) * (2.0 - a));
+    let sums = exps.map(|a| (0..sigmas.len()).map(|k| raw(k, a)).sum::<f64>());
+    let g = 2f64.powf(f("exposure", 0.0, -10.0, 10.0));
+    let t = f("tintAmount", 0.0, 0.0, 100.0) / 100.0;
+    let tint = ctx.params.color("tint").map(|v| if v.is_finite() { f64::from(v) } else { 1.0 });
+    let gain = [0, 1, 2].map(|c| g * ((1.0 - t) + t * tint[c]));
+    let gain = [gain[0], gain[1], gain[2], g];
+    let octaves: Vec<([f64; 2], [f32; 4])> =
+        sigmas.iter().enumerate().map(|(k, &s)| ([s * sa, s / sa], [0, 1, 2, 3].map(|c| (raw(k, exps[c]) / sums[c] * gain[c]) as f32))).collect();
+    let s0 = sigmas.first().map_or(0.0, |s| s * sa.max(1.0 / sa));
+    let pad = if ctx.adjustment { 0 } else { ((3.0 * s0).ceil() + 2.0).min(4096.0) as u32 };
+    let thr = f("threshold", 0.0, 0.0, 100.0);
+    let soft = f("thresholdSoftness", 50.0, 0.0, 100.0) / 100.0;
+    let (lo, hi) = (thr * (1.0 - soft), thr * (1.0 + soft));
+    let threshold_mode = if thr <= 0.0 {
+        0
+    } else if hi - lo < 1e-6 {
+        1
+    } else {
+        2
+    };
+    PhysicalGlowPlan {
+        pad,
+        octaves,
+        threshold_mode,
+        thr: [thr as f32, lo as f32, hi as f32],
+        composite: ctx.params.e("composite"),
+        fast: ctx.params.b("fastMode"),
+    }
+}
+
+/// Physical Glow: an energy-conserving glow whose falloff follows a power law (inverse square by
+/// default), built from a sum of Gaussians whose widths double per octave.
+fn physical_glow(ctx: &EffectCtx, mut b: Buf) -> Buf {
+    let plan = physical_glow_plan(ctx, b.scale);
+    b.pad(plan.pad);
+    let mut bright = b.img.clone();
+    bright.data.par_iter_mut().for_each(|px| *px = plan.bright(*px));
+    let mut glow = Image::new(b.img.width, b.img.height);
+    if plan.fast {
+        let (mut level, mut lv) = (bright, [0u32; 2]);
+        for o in plan.fast_octaves(b.img.width, b.img.height) {
+            for (axis, vertical) in [(0, false), (1, true)] {
+                while lv[axis] < o.level[axis] {
+                    level = pglow_halve(&level, vertical, i64::from(lv[axis] > 0));
+                    lv[axis] += 1;
+                }
+            }
+            let bx = pglow_gauss(&level, false, o.taps[0], o.k[0]);
+            let by = pglow_gauss(bx.as_ref().unwrap_or(&level), true, o.taps[1], o.k[1]);
+            let blurred = by.as_ref().or(bx.as_ref()).unwrap_or(&level);
+            let inv = o.level.map(|m| 0.5f64.powi(m as i32));
+            let shift = o.level.map(|m| if m > 0 { 1.0 } else { 0.0 });
+            glow.rows_mut().for_each(|(y, row)| {
+                for (x, g) in row.iter_mut().enumerate() {
+                    let v = blurred.sample_bilinear((x as f64 + 0.5) * inv[0] + shift[0], (y as f64 + 0.5) * inv[1] + shift[1]);
+                    for c in 0..4 {
+                        g[c] += o.weights[c] * v[c];
+                    }
+                }
+            });
+        }
+    } else {
+        for (s, w) in &plan.octaves {
+            let blurred = gaussian_blur(&bright, s[0], s[1], false);
+            glow.data.par_iter_mut().zip(blurred.data.par_iter()).for_each(|(g, v)| {
+                for c in 0..4 {
+                    g[c] += w[c] * v[c];
+                }
+            });
+        }
+    }
+    b.img.data.par_iter_mut().zip(glow.data.par_iter()).for_each(|(o, g)| *o = plan.composite(*o, *g));
+    b
+}
+
+/// Fast Mode: halve `img` along one axis with the centroid-preserving [1, 3, 3, 1] / 8 filter
+/// (the transpose of the bilinear ×2 upsample): level pixel `i` takes input pixels `2i - 1 ..=
+/// 2i + 2`, transparent outside. `shift` is 1 when `img` is itself a level above 0 (see
+/// [`PhysicalGlowOctave`]); the result always is.
+fn pglow_halve(img: &Image, vertical: bool, shift: i64) -> Image {
+    let half = |n: u32| n.saturating_sub(shift as u32) / 2 + 2;
+    let (w, h) = if vertical { (img.width, half(img.height)) } else { (half(img.width), img.height) };
+    let mut out = Image::new(w, h);
+    out.rows_mut().for_each(|(y, row)| {
+        for (x, px) in row.iter_mut().enumerate() {
+            let (x, y) = (x as i64, y as i64);
+            let tap = |t: i64| if vertical { img.get(x, 2 * y - 3 + shift + t) } else { img.get(2 * x - 3 + shift + t, y) };
+            let (a, b, c, d) = (tap(0), tap(1), tap(2), tap(3));
+            *px = [0, 1, 2, 3].map(|i| (a[i] + 3.0 * b[i] + 3.0 * c[i] + d[i]) / 8.0);
+        }
+    });
+    out
+}
+
+/// Fast Mode: a sampled Gaussian along one axis, taps `exp(-i² k)` for |i| ≤ `taps`, normalised;
+/// transparent outside. `None` when `taps` is 0 (no blur). The GPU kernel computes the same taps.
+fn pglow_gauss(img: &Image, vertical: bool, taps: u32, k: f32) -> Option<Image> {
+    if taps == 0 {
+        return None;
+    }
+    let r = i64::from(taps);
+    let w: Vec<f32> = (-r..=r).map(|i| (-((i * i) as f32) * k).exp()).collect();
+    let sum: f32 = w.iter().sum();
+    let mut out = Image::new(img.width, img.height);
+    out.rows_mut().for_each(|(y, row)| {
+        for (x, px) in row.iter_mut().enumerate() {
+            let mut acc = [0.0f32; 4];
+            for (j, wj) in w.iter().enumerate() {
+                let d = j as i64 - r;
+                let p = if vertical { img.get(x as i64, y as i64 + d) } else { img.get(x as i64 + d, y as i64) };
+                for c in 0..4 {
+                    acc[c] += wj * p[c];
+                }
+            }
+            *px = acc.map(|v| v / sum);
+        }
+    });
+    Some(out)
+}
+
 fn drop_shadow(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let color = ctx.params.color("color");
     let opacity = ctx.params.f("opacity") as f32 / 100.0;
@@ -650,6 +886,27 @@ pub fn specs() -> Vec<EffectSpec> {
             glow,
         ),
         spec(
+            "ec.stylize.physicalglow",
+            "Physical Glow",
+            "Stylize",
+            vec![
+                p("radius", "Radius", num(100.0), slider(0.0, 4000.0, 0.0, 500.0, 1)),
+                p("exposure", "Exposure", num(0.0), slider(-10.0, 10.0, -4.0, 4.0, 2)),
+                p("falloff", "Falloff", num(2.0), slider(1.0, 4.0, 1.0, 4.0, 2)),
+                p("threshold", "Threshold", num(0.0), slider(0.0, 100.0, 0.0, 2.0, 2)),
+                p("thresholdSoftness", "Threshold Softness", num(50.0), slider(0.0, 100.0, 0.0, 100.0, 1)),
+                p("aspectRatio", "Aspect Ratio", num(1.0), slider(0.05, 20.0, 0.25, 4.0, 2)),
+                p("dispersion", "Dispersion", num(0.0), slider(-100.0, 100.0, -100.0, 100.0, 1)),
+                p("tint", "Tint", col(1.0, 1.0, 1.0), ParamUi::Color),
+                p("tintAmount", "Tint Amount", num(0.0), slider(0.0, 100.0, 0.0, 100.0, 1)),
+                p("composite", "Composite", Value::Enum(0), popup(&["Add", "Screen", "Glow Only"])),
+                p("fastMode", "Fast Mode", Value::Bool(false), ParamUi::Checkbox),
+                // The CPU always renders this instance (see catalog::CPU_ONLY_CONTROLS).
+                p("renderMethod", "Render Method", Value::Enum(0), popup(&["GPU", "CPU"])),
+            ],
+            physical_glow,
+        ),
+        spec(
             "ec.stylize.mosaic",
             "Mosaic",
             "Stylize",
@@ -837,5 +1094,282 @@ mod tests {
         let red = run(&[("colors", Value::Enum(2)), ("arbitraryMap", Value::Str("0,1 1,1|0,0 1,0|0,0 1,0".into())), ("operation", Value::Enum(2))]);
         let p = red.get(6, 12);
         assert!(p[0] > 0.05 && p[1] < 1e-4 && p[2] < 1e-4, "{p:?}");
+    }
+
+    fn pglow(vals: &[(&str, Value)], img: Image) -> Buf {
+        run_fx("ec.stylize.physicalglow", vals, img, 0.0, EffectEnv::default())
+    }
+
+    /// Pixel (x, y) in layer space (Physical Glow pads its buffer).
+    fn at(b: &Buf, x: i64, y: i64) -> [f32; 4] {
+        b.img.get(x + b.offset[0] as i64, y + b.offset[1] as i64)
+    }
+
+    /// A transparent `w` × `h` layer with one opaque white pixel at (x, y).
+    fn point(w: u32, h: u32, x: u32, y: u32) -> Image {
+        let mut img = Image::new(w, h);
+        img.set(x, y, [1.0; 4]);
+        img
+    }
+
+    const GLOW_ONLY: (&str, Value) = ("composite", Value::Enum(2));
+
+    #[test]
+    fn physical_glow_is_deterministic() {
+        let vals = [
+            ("aspectRatio", num(2.5)),
+            ("dispersion", num(30.0)),
+            ("threshold", num(0.5)),
+            ("thresholdSoftness", num(20.0)),
+            ("tint", col(1.0, 0.6, 0.2)),
+            ("tintAmount", num(40.0)),
+            ("composite", Value::Enum(1)),
+        ];
+        let a = pglow(&vals, scene());
+        let b = pglow(&vals, scene());
+        assert_eq!(a.img, b.img);
+        assert!(a.img.data.iter().all(|p| p.iter().all(|v| v.is_finite())));
+    }
+
+    #[test]
+    fn physical_glow_conserves_energy() {
+        let mut img = Image::new(64, 64);
+        for y in 30..34 {
+            for x in 30..34 {
+                img.set(x, y, [1.0, 0.5, 0.25, 1.0]);
+            }
+        }
+        let src: f64 = img.data.iter().map(|p| f64::from(p[0] + p[1] + p[2])).sum();
+        let out = pglow(&[GLOW_ONLY], img);
+        let glow: f64 = out.img.data.iter().map(|p| f64::from(p[0] + p[1] + p[2])).sum();
+        assert!((glow / src - 1.0).abs() < 0.02, "{glow} vs {src}");
+    }
+
+    #[test]
+    fn physical_glow_falls_off_as_a_power_law() {
+        let ratios = |falloff: f64| {
+            let out = pglow(&[("radius", num(400.0)), ("falloff", num(falloff)), GLOW_ONLY], point(32, 32, 16, 16));
+            [16, 32, 64].map(|r| at(&out, 16 + 2 * r, 16)[0] / at(&out, 16 + r, 16)[0])
+        };
+        let (square, cube) = (ratios(2.0), ratios(3.0));
+        for (k, r) in square.iter().enumerate() {
+            assert!((0.15..=0.40).contains(r), "{square:?}");
+            assert!(cube[k] < *r, "{cube:?} vs {square:?}");
+        }
+    }
+
+    #[test]
+    fn physical_glow_threshold_drops_dark_pixels() {
+        // Threshold 1, softness 50 %: below 0.5 nothing glows.
+        let vals = [("threshold", num(1.0)), GLOW_ONLY];
+        let dim = Image::filled(24, 24, [0.4, 0.4, 0.4, 1.0]);
+        assert!(pglow(&vals, dim.clone()).img.data.iter().all(|p| *p == [0.0; 4]));
+        let mut lit = dim;
+        lit.set(12, 12, [2.0, 2.0, 2.0, 1.0]);
+        let out = pglow(&vals, lit);
+        assert!(at(&out, 2, 2)[0] > 0.0);
+    }
+
+    #[test]
+    fn physical_glow_aspect_and_dispersion() {
+        let out = pglow(&[("radius", num(40.0)), ("aspectRatio", num(4.0)), GLOW_ONLY], point(40, 40, 20, 20));
+        assert!(at(&out, 30, 20)[0] > at(&out, 20, 30)[0]);
+        // Wavelength-dependent spread: far from a white source, red outreaches blue at +50 %.
+        for (d, red_wins) in [(50.0, true), (-50.0, false)] {
+            let out = pglow(&[("radius", num(200.0)), ("dispersion", num(d)), GLOW_ONLY], point(40, 40, 20, 20));
+            let p = at(&out, 80, 20);
+            assert_eq!(p[0] > p[2], red_wins, "{d}: {p:?}");
+        }
+    }
+
+    #[test]
+    fn physical_glow_screen_stays_in_range() {
+        let out = pglow(&[("radius", num(20.0)), ("exposure", num(4.0)), ("composite", Value::Enum(1))], scene());
+        assert!(out.img.data.iter().all(|p| p.iter().all(|v| *v <= 1.0)), "screen went over 1");
+    }
+
+    #[test]
+    fn physical_glow_survives_hostile_values() {
+        let mut img = Image::filled(4, 4, [0.5, 0.2, 0.9, 1.0]);
+        img.set(1, 1, [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 1.0]);
+        let finite = |b: &Buf| b.img.data.iter().all(|p| p.iter().all(|v| v.is_finite()));
+        for v in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1e300, 1e300] {
+            let vals = [
+                ("radius", num(if v.is_finite() { 3.0 } else { v })),
+                ("exposure", num(v)),
+                ("falloff", num(v)),
+                ("threshold", num(v)),
+                ("thresholdSoftness", num(v)),
+                ("aspectRatio", num(v)),
+                ("dispersion", num(v)),
+                ("tint", Value::Color([v, v, v, 1.0])),
+                ("tintAmount", num(v)),
+                ("composite", Value::Enum(99)),
+            ];
+            assert!(finite(&pglow(&vals, img.clone())), "{v}");
+        }
+        // The widest radius on a tiny layer: the padding stays capped. Checked on the plan, since
+        // rendering it allocates gigabytes.
+        let s = crate::find("ec.stylize.physicalglow").unwrap();
+        let mut params = crate::Params { values: s.params.iter().map(|p| (p.id.to_string(), crate::default_value(p, [4.0, 4.0]))).collect() };
+        params.values.insert("radius".into(), num(4000.0));
+        params.values.insert("aspectRatio".into(), num(0.05));
+        let ctx = EffectCtx { params: &params, time: 0.0, layer_size: [4.0, 4.0], seed: 1, adjustment: false, env: EffectEnv::default() };
+        let plan = physical_glow_plan(&ctx, 1.0);
+        assert_eq!(plan.pad, 4096);
+        assert_eq!(plan.octaves.len(), 12);
+        assert!(plan.octaves.iter().all(|(s, w)| s.iter().all(|v| v.is_finite()) && w.iter().all(|v| v.is_finite())));
+    }
+
+    const FAST: (&str, Value) = ("fastMode", Value::Bool(true));
+
+    #[test]
+    fn physical_glow_fast_mode_is_deterministic() {
+        let vals = [FAST, ("aspectRatio", num(2.5)), ("dispersion", num(30.0)), ("radius", num(40.0)), ("composite", Value::Enum(1))];
+        let a = pglow(&vals, scene());
+        assert_eq!(a.img, pglow(&vals, scene()).img);
+        assert!(a.img.data.iter().all(|p| p.iter().all(|v| v.is_finite())));
+    }
+
+    #[test]
+    fn physical_glow_fast_mode_conserves_energy() {
+        let mut img = Image::new(64, 64);
+        for y in 30..34 {
+            for x in 30..34 {
+                img.set(x, y, [1.0, 0.5, 0.25, 1.0]);
+            }
+        }
+        let src: f64 = img.data.iter().map(|p| f64::from(p[0] + p[1] + p[2])).sum();
+        let out = pglow(&[GLOW_ONLY, FAST], img);
+        let glow: f64 = out.img.data.iter().map(|p| f64::from(p[0] + p[1] + p[2])).sum();
+        assert!((glow / src - 1.0).abs() < 0.02, "{glow} vs {src}");
+    }
+
+    /// Red glow at (x, y) in layer space.
+    fn red(b: &Buf, x: i64, y: i64) -> f32 {
+        at(b, x, y)[0]
+    }
+
+    #[test]
+    fn physical_glow_fast_mode_matches_the_reference() {
+        let run = |fast: bool| pglow(&[("radius", num(200.0)), GLOW_ONLY, ("fastMode", Value::Bool(fast))], point(32, 32, 16, 16));
+        let (reference, fast) = (run(false), run(true));
+        let sum = |b: &Buf| b.img.data.iter().map(|p| f64::from(p[0])).sum::<f64>();
+        assert!((sum(&fast) / sum(&reference) - 1.0).abs() < 0.02, "{} vs {}", sum(&fast), sum(&reference));
+        // Fast Mode against true sampled Gaussians (sigma 100 / 2^k, k < 8, equal weights at
+        // falloff 2) along the source's row, everywhere they are above 1e-4 of the peak.
+        let sigmas: Vec<f64> = (0..8).map(|k| 100.0 / 2f64.powi(k)).collect();
+        let norms: Vec<f64> = sigmas.iter().map(|s| (-700..=700).map(|j: i64| (-((j * j) as f64) / (2.0 * s * s)).exp()).sum()).collect();
+        let ideal = |d: i64| sigmas.iter().zip(&norms).map(|(s, n)| (-((d * d) as f64) / (2.0 * s * s)).exp() / (n * n)).sum::<f64>() / 8.0;
+        for d in -320..320 {
+            if ideal(d) > 1e-4 * ideal(0) {
+                let f = f64::from(red(&fast, 16 + d, 16));
+                assert!((f / ideal(d) - 1.0).abs() < 0.03, "{d}: {f} vs {}", ideal(d));
+            }
+        }
+        // Against the box-pass reference from 8 px out: nearer, the reference's small octaves are
+        // far from Gaussian (43 % below one at the centre), and it is up to 11 % off further out.
+        let peak = red(&reference, 16, 16);
+        for d in (-320..=-8).chain(8..320) {
+            let (f, r) = (red(&fast, 16 + d, 16), red(&reference, 16 + d, 16));
+            if r > 1e-4 * peak {
+                assert!((f / r - 1.0).abs() < 0.15, "{d}: {f} vs {r}");
+            }
+        }
+    }
+
+    #[test]
+    fn physical_glow_fast_mode_falls_off_as_a_power_law() {
+        let out = pglow(&[("radius", num(400.0)), GLOW_ONLY, FAST], point(32, 32, 16, 16));
+        let ratios = [16, 32, 64].map(|r| red(&out, 16 + 2 * r, 16) / red(&out, 16 + r, 16));
+        assert!(ratios.iter().all(|r| (0.15..=0.40).contains(r)), "{ratios:?}");
+    }
+
+    #[test]
+    fn physical_glow_fast_mode_is_round() {
+        let out = pglow(&[("radius", num(200.0)), GLOW_ONLY, FAST], point(32, 32, 16, 16));
+        // On an axis at d vs at (a, b) near the diagonal, a² + b² = d².
+        for (d, a, b) in [(5, 3, 4), (29, 20, 21), (58, 40, 42)] {
+            let (axis, diagonal) = (red(&out, 16 + d, 16), red(&out, 16 + a, 16 + b));
+            assert!((axis / diagonal - 1.0).abs() < 0.03, "{d}: {axis} vs {diagonal}");
+        }
+    }
+
+    /// A moving highlight's glow must not swim: wherever the source sits on the coarse levels'
+    /// grid, the glow's centre of mass stays on it and its profile keeps its shape.
+    #[test]
+    fn physical_glow_fast_mode_does_not_swim() {
+        let offsets = [0, 2, 8, 24, 64, 128, -8, -64];
+        let mut profiles = vec![];
+        for x0 in (100..108).chain([111, 115, 119]) {
+            let out = pglow(&[("radius", num(200.0)), GLOW_ONLY, FAST], point(208, 32, x0, 16));
+            let (mut m, mut mx) = (0.0f64, 0.0f64);
+            for (i, p) in out.img.data.iter().enumerate() {
+                let x = (i % out.img.width as usize) as f64 + 0.5 - out.offset[0];
+                m += f64::from(p[0]);
+                mx += f64::from(p[0]) * x;
+            }
+            let centre = f64::from(x0) + 0.5;
+            assert!((mx / m - centre).abs() < 0.05, "{x0}: centroid {} vs {centre}", mx / m);
+            profiles.push(offsets.map(|d| red(&out, i64::from(x0) + d, 16)));
+        }
+        for (k, d) in offsets.iter().enumerate() {
+            let (lo, hi) = profiles.iter().map(|p| p[k]).fold((f32::MAX, 0.0f32), |(lo, hi), v| (lo.min(v), hi.max(v)));
+            assert!(hi / lo - 1.0 < 0.03, "offset {d}: {lo} .. {hi}");
+        }
+    }
+
+    /// Without padding (an adjustment layer), a source on the left edge and one on the right edge
+    /// keep the same glow energy: the levels keep the edge pixels' outer taps on both sides.
+    #[test]
+    fn physical_glow_fast_mode_edges_are_symmetric() {
+        let spec = crate::find("ec.stylize.physicalglow").unwrap();
+        let mut params = crate::Params { values: spec.params.iter().map(|p| (p.id.to_string(), crate::default_value(p, [40.0, 9.0]))).collect() };
+        params.values.insert("fastMode".into(), Value::Bool(true));
+        params.values.insert("composite".into(), Value::Enum(2));
+        params.values.insert("radius".into(), num(30.0));
+        let ctx = EffectCtx { params: &params, time: 0.0, layer_size: [40.0, 9.0], seed: 1, adjustment: true, env: EffectEnv::default() };
+        let energy = |x: u32| {
+            let out = (spec.render)(&ctx, Buf { img: point(40, 9, x, 4), offset: [0.0; 2], scale: 1.0 });
+            out.img.data.iter().map(|p| f64::from(p[0])).sum::<f64>()
+        };
+        let (left, right) = (energy(0), energy(39));
+        assert!((left / right - 1.0).abs() < 1e-4, "{left} vs {right}");
+    }
+
+    #[test]
+    fn physical_glow_fast_mode_keeps_narrow_axes_narrow() {
+        for aspect in [20.0, 0.05] {
+            let run =
+                |fast: bool| pglow(&[("radius", num(100.0)), ("aspectRatio", num(aspect)), GLOW_ONLY, ("fastMode", Value::Bool(fast))], point(32, 32, 16, 16));
+            let (reference, fast) = (run(false), run(true));
+            assert!(fast.img.data.iter().all(|p| p.iter().all(|v| v.is_finite())));
+            // (narrow, wide) offsets: y is the narrow axis at aspect 20, x at 0.05.
+            let axes = |d: i64| if aspect > 1.0 { ((0, d), (d, 0)) } else { ((d, 0), (0, d)) };
+            for d in [2, 4, 8] {
+                let (n, w) = axes(d);
+                let (f, r) = (red(&fast, 16 + n.0, 16 + n.1), red(&reference, 16 + n.0, 16 + n.1));
+                assert!((f / r - 1.0).abs() < 0.2, "{aspect} {d}: {f} vs {r}");
+                assert!(f < 0.05 * red(&fast, 16 + w.0, 16 + w.1), "{aspect} {d}");
+            }
+        }
+    }
+
+    #[test]
+    fn physical_glow_fast_mode_on_tiny_buffers() {
+        let spec = crate::find("ec.stylize.physicalglow").unwrap();
+        for (w, h) in [(1, 1), (3, 5), (7, 6)] {
+            for adjustment in [false, true] {
+                for radius in [0.6, 100.0] {
+                    let size = [f64::from(w), f64::from(h)];
+                    let mut params = crate::Params { values: spec.params.iter().map(|p| (p.id.to_string(), crate::default_value(p, size))).collect() };
+                    params.values.insert("fastMode".into(), Value::Bool(true));
+                    params.values.insert("radius".into(), num(radius));
+                    let ctx = EffectCtx { params: &params, time: 0.0, layer_size: size, seed: 1, adjustment, env: EffectEnv::default() };
+                    let out = (spec.render)(&ctx, Buf { img: Image::filled(w, h, [0.8, 0.5, 0.2, 1.0]), offset: [0.0; 2], scale: 1.0 });
+                    assert!(out.img.data.iter().all(|p| p.iter().all(|v| v.is_finite())), "{w}x{h} adj {adjustment} r {radius}");
+                }
+            }
+        }
     }
 }

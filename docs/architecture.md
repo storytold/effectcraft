@@ -303,7 +303,7 @@ Preserve Transparency / blend kernels (a 3D track matte renders solo through the
 Environment Light Background layers draw their sky in a kernel (`adv_sky`, from
 `Renderer::sky_draw`) before the rest of the run, in Classic and Advanced 3D comps. Wireframe
 outlines draw on the GPU from the CPU's pixel list (`Renderer::wireframe_pixels`). GPU effects
-(`effects::GPU_EFFECTS`, 280 of them: blurs, colour correction, keying incl. Key Light, mattes,
+(`effects::GPU_EFFECTS`, 281 of them: blurs, colour correction, keying incl. Key Light, mattes,
 channel, stylize, distortion and warps (Warp, Bezier Warp, Smear, Reshape, CC Bend It, CC Page
 Turn, CC Bender, CC Blobbylize), Cartoon, bevels, shapes, the transitions (CC light family, CC
 transitions, Block Dissolve), perspective (Radial Shadow, CC Cylinder / Sphere / Spotlight /

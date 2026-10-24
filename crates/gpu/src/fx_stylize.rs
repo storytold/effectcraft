@@ -37,6 +37,12 @@ pub(crate) const KERNELS: &[&str] = &[
     "fxs_add",
     "fxs_div",
     "fxs_flomotion",
+    "fxs_pglow_bright",
+    "fxs_pglow_acc",
+    "fxs_pglow_out",
+    "fxs_pglow_half",
+    "fxs_pglow_gauss",
+    "fxs_pglow_up",
 ];
 
 /// Effect ids implemented here.
@@ -54,6 +60,7 @@ pub(crate) const IDS: &[&str] = &[
     "ec.stylize.motiontile",
     "ec.stylize.cckaleida",
     "ec.stylize.ccrepetile",
+    "ec.stylize.physicalglow",
     "ec.distort.mirror",
     "ec.distort.offset",
     "ec.distort.polar",
@@ -90,6 +97,7 @@ pub(crate) fn apply(e: &mut Enc, id: &str, ctx: &EffectCtx, b: GBuf) -> Option<G
         "ec.stylize.motiontile" => motion_tile(e, ctx, b),
         "ec.stylize.cckaleida" => kaleida(e, ctx, b),
         "ec.stylize.ccrepetile" => repetile(e, ctx, b),
+        "ec.stylize.physicalglow" => physical_glow(e, ctx, b),
         "ec.distort.mirror" => mirror(e, ctx, b),
         "ec.distort.offset" => offset(e, ctx, b),
         "ec.distort.polar" => polar(e, ctx, b),
@@ -951,6 +959,72 @@ pub(crate) fn glow(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
         p.u[0][0] = operation.min(2);
         e.pixels("glow_combine", &p, &b.img, Some(&blurred), &out, None);
     }
+    b.img = out;
+    Some(b)
+}
+
+/// misc::physical_glow, with the plan the CPU uses ([`effectcraft_effects::physical_glow_plan`]).
+fn physical_glow(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
+    let plan = effectcraft_effects::physical_glow_plan(ctx, b.scale);
+    b.pad(e, plan.pad)?;
+    let (w, h) = (b.img.width, b.img.height);
+    let mut p = Params::default();
+    p.u[0][0] = plan.threshold_mode;
+    p.f[0] = [plan.thr[0], plan.thr[1], plan.thr[2], 0.0];
+    let bright = e.scratch(w, h);
+    e.pixels("fxs_pglow_bright", &p, &b.img, None, &bright, None);
+    let mut glow = e.image(w, h);
+    if plan.fast {
+        // PhysicalGlowPlan::fast_octaves: halve, blur at the level, upsample into the glow.
+        let (mut level, mut lv) = (bright, [0u32; 2]);
+        for o in plan.fast_octaves(w, h) {
+            for axis in 0..2 {
+                while lv[axis] < o.level[axis] {
+                    // misc::pglow_halve: a level above 0 keeps one extra pixel on the low side.
+                    let shift = u32::from(lv[axis] > 0);
+                    let half = |n: u32| n.saturating_sub(shift) / 2 + 2;
+                    let (lw, lh) = if axis == 1 { (level.width, half(level.height)) } else { (half(level.width), level.height) };
+                    let mut p = Params::default();
+                    p.u[0] = [axis as u32, shift, 0, 0];
+                    let half = e.scratch(lw, lh);
+                    e.pixels("fxs_pglow_half", &p, &level, None, &half, None);
+                    level = half;
+                    lv[axis] += 1;
+                }
+            }
+            let mut blurred = level.clone();
+            for axis in 0..2 {
+                if o.taps[axis] > 0 {
+                    let mut p = Params::default();
+                    p.u[0] = [axis as u32, o.taps[axis], 0, 0];
+                    p.f[0][0] = o.k[axis];
+                    let out = e.scratch(blurred.width, blurred.height);
+                    e.pixels("fxs_pglow_gauss", &p, &blurred, None, &out, None);
+                    blurred = out;
+                }
+            }
+            let mut p = Params::default();
+            p.f[0] = o.weights;
+            let shift = o.level.map(|m| if m > 0 { 1.0 } else { 0.0 });
+            p.f[1] = [0.5f32.powi(o.level[0] as i32), 0.5f32.powi(o.level[1] as i32), shift[0], shift[1]];
+            let sum = e.scratch(w, h);
+            e.pixels("fxs_pglow_up", &p, &glow, Some(&blurred), &sum, None);
+            glow = sum;
+        }
+    } else {
+        for (s, wt) in &plan.octaves {
+            let blurred = gaussian_blur(e, &bright, s[0], s[1], false);
+            let mut p = Params::default();
+            p.f[0] = *wt;
+            let sum = e.scratch(w, h);
+            e.pixels("fxs_pglow_acc", &p, &glow, Some(&blurred), &sum, None);
+            glow = sum;
+        }
+    }
+    let mut p = Params::default();
+    p.u[0][0] = plan.composite;
+    let out = e.scratch(w, h);
+    e.pixels("fxs_pglow_out", &p, &b.img, Some(&glow), &out, None);
     b.img = out;
     Some(b)
 }

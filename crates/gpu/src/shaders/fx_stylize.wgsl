@@ -960,3 +960,117 @@ fn fxs_div(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     textureStore(out, p, textureLoad(src, p, 0) / P.f[0].x);
 }
+
+// ---------------------------------------------------------------- Physical Glow (misc::physical_glow)
+
+// Each channel finite (not NaN or ±inf), read from the bits: drivers may fold float compares on NaN.
+fn fxs_finite(v: vec4<f32>) -> vec4<bool> {
+    return (bitcast<vec4<u32>>(v) & vec4<u32>(0x7f800000u)) != vec4<u32>(0x7f800000u);
+}
+
+// PhysicalGlowPlan::bright. u[0].x = 0 everything glows, 1 hard threshold at f[0].x,
+// 2 smoothstep from f[0].y to f[0].z.
+@compute @workgroup_size(16, 16)
+fn fxs_pglow_bright(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let p = vec2<i32>(gid.xy);
+    if (!fxs_inside(p)) {
+        return;
+    }
+    let s = textureLoad(src, p, 0);
+    let px = select(vec4<f32>(0.0), s, fxs_finite(s));
+    let m = max(max(px.x, px.y), px.z);
+    var w = 1.0;
+    if (P.u[0].x == 1u) {
+        w = select(0.0, 1.0, m >= P.f[0].x);
+    } else if (P.u[0].x == 2u) {
+        w = fxs_smoothstep(P.f[0].y, P.f[0].z, m);
+    }
+    textureStore(out, p, px * w);
+}
+
+// out = src + f[0] * aux (one octave's weighted Gaussian added to the glow)
+@compute @workgroup_size(16, 16)
+fn fxs_pglow_acc(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let p = vec2<i32>(gid.xy);
+    if (!fxs_inside(p)) {
+        return;
+    }
+    textureStore(out, p, textureLoad(src, p, 0) + P.f[0] * textureLoad(aux, p, 0));
+}
+
+// PhysicalGlowPlan::composite: the layer `src` with the glow `aux`. u[0].x = 1 Screen, 2 Glow
+// Only, else Add; non-finite channels become 0.
+@compute @workgroup_size(16, 16)
+fn fxs_pglow_out(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let p = vec2<i32>(gid.xy);
+    if (!fxs_inside(p)) {
+        return;
+    }
+    let s = textureLoad(src, p, 0);
+    let g = textureLoad(aux, p, 0);
+    var o = vec4<f32>(s.xyz + g.xyz, min(s.w + g.w, 1.0));
+    if (P.u[0].x == 1u) {
+        let gc = clamp(g, vec4<f32>(0.0), vec4<f32>(1.0));
+        o = vec4<f32>(s.xyz + gc.xyz * (1.0 - min(s.xyz, vec3<f32>(1.0))), s.w + gc.w * (1.0 - s.w));
+    } else if (P.u[0].x == 2u) {
+        o = vec4<f32>(g.xyz, min(g.w, 1.0));
+    }
+    textureStore(out, p, select(vec4<f32>(0.0), o, fxs_finite(o)));
+}
+
+// Fast Mode (misc::pglow_halve): halve along u[0].x (0 = x, 1 = y) with the [1, 3, 3, 1] / 8
+// filter; level pixel i takes input pixels 2i − 1 ..= 2i + 2 (transparent outside). Array index =
+// level pixel + 1 in the output, and in the input when u[0].y = 1 (a level above 0).
+@compute @workgroup_size(16, 16)
+fn fxs_pglow_half(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let p = vec2<i32>(gid.xy);
+    if (!fxs_inside(p)) {
+        return;
+    }
+    let s = i32(P.u[0].y);
+    var q = vec2<i32>(2 * p.x - 3 + s, p.y);
+    var dir = vec2<i32>(1, 0);
+    if (P.u[0].x == 1u) {
+        q = vec2<i32>(p.x, 2 * p.y - 3 + s);
+        dir = vec2<i32>(0, 1);
+    }
+    let a = tex_get(src, q.x, q.y);
+    let b = tex_get(src, q.x + dir.x, q.y + dir.y);
+    let c = tex_get(src, q.x + 2 * dir.x, q.y + 2 * dir.y);
+    let d = tex_get(src, q.x + 3 * dir.x, q.y + 3 * dir.y);
+    textureStore(out, p, (a + 3.0 * b + 3.0 * c + d) / 8.0);
+}
+
+// Fast Mode (misc::pglow_gauss): sampled Gaussian along u[0].x (0 = x, 1 = y), taps
+// exp(-i² f[0].x) for |i| ≤ u[0].y, normalised by their sum; transparent outside.
+@compute @workgroup_size(16, 16)
+fn fxs_pglow_gauss(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let p = vec2<i32>(gid.xy);
+    if (!fxs_inside(p)) {
+        return;
+    }
+    let r = i32(P.u[0].y);
+    let dir = select(vec2<i32>(1, 0), vec2<i32>(0, 1), P.u[0].x == 1u);
+    var acc = vec4<f32>(0.0);
+    var sum = 0.0;
+    for (var i = -r; i <= r; i++) {
+        let w = exp(-f32(i * i) * P.f[0].x);
+        let q = p + dir * i;
+        acc += w * tex_get(src, q.x, q.y);
+        sum += w;
+    }
+    textureStore(out, p, acc / sum);
+}
+
+// Fast Mode upsample-accumulate: out = src + f[0] * bilinear(aux) at this pixel's centre scaled
+// by f[1].xy (2^-level per axis) and moved by f[1].zw (1 above level 0: the level's extra low
+// pixel); `aux` is the smaller level texture, transparent outside.
+@compute @workgroup_size(16, 16)
+fn fxs_pglow_up(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let p = vec2<i32>(gid.xy);
+    if (!fxs_inside(p)) {
+        return;
+    }
+    let v = sample_bilinear(aux, (f32(p.x) + 0.5) * P.f[1].x + P.f[1].z, (f32(p.y) + 0.5) * P.f[1].y + P.f[1].w);
+    textureStore(out, p, textureLoad(src, p, 0) + P.f[0] * v);
+}

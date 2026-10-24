@@ -7,6 +7,7 @@ use effectcraft_render::RenderOpts;
 use effectcraft_time::Tick;
 
 use crate::tests::{Scene, allow_llvmpipe_boundary_flips, c, check, compare_at, effect_case, n, opts, set};
+use crate::tests_adjust::adjustment_scene;
 
 fn e(v: u32) -> Value {
     Value::Enum(v)
@@ -180,6 +181,107 @@ fn glow_operations_and_arbitrary_map() {
     effect_case("ec.stylize.glow", &[("glowOperation", e(3)), ("colors", e(1)), ("intensity", n(2.0))]);
     effect_case("ec.stylize.glow", &[("colors", e(2)), ("arbitraryMap", Value::Str("0,0 0.5,0.8 1,1|0,0.2 1,0.6|".into())), ("threshold", n(20.0))]);
     effect_case("ec.stylize.glow", &[("colors", e(2)), ("arbitraryMap", Value::Str("0,1 1,0||0,0 1,1".into())), ("operation", e(1)), ("glowOperation", e(4))]);
+}
+
+#[test]
+fn physical_glow() {
+    effect_case("ec.stylize.physicalglow", &[]);
+    effect_case(
+        "ec.stylize.physicalglow",
+        &[("radius", n(30.0)), ("composite", e(1)), ("exposure", n(1.5)), ("aspectRatio", n(2.5)), ("threshold", n(0.4)), ("thresholdSoftness", n(30.0))],
+    );
+    effect_case(
+        "ec.stylize.physicalglow",
+        &[("radius", n(24.0)), ("composite", e(2)), ("dispersion", n(60.0)), ("falloff", n(3.0)), ("tint", c(1.0, 0.5, 0.2)), ("tintAmount", n(70.0))],
+    );
+    // Hard threshold (no softness), tall glow, blue spreading farther.
+    effect_case(
+        "ec.stylize.physicalglow",
+        &[("radius", n(40.0)), ("threshold", n(0.5)), ("thresholdSoftness", n(0.0)), ("aspectRatio", n(0.3)), ("dispersion", n(-40.0))],
+    );
+    // Below half a pixel of sigma: one octave, no blur.
+    effect_case("ec.stylize.physicalglow", &[("radius", n(0.6)), ("exposure", n(-1.0))]);
+}
+
+#[test]
+fn physical_glow_fast_mode() {
+    let id = "ec.stylize.physicalglow";
+    effect_case(id, &[("fastMode", on())]);
+    effect_case(id, &[("fastMode", on()), ("radius", n(30.0)), ("composite", e(1)), ("aspectRatio", n(2.5)), ("exposure", n(1.0))]);
+    effect_case(id, &[("fastMode", on()), ("radius", n(40.0)), ("aspectRatio", n(20.0))]);
+    effect_case(id, &[("fastMode", on()), ("radius", n(40.0)), ("aspectRatio", n(0.05)), ("dispersion", n(50.0))]);
+    // Deep pyramid levels; as an adjustment (no padding) the 8 px level cap stops the halving.
+    effect_case(id, &[("fastMode", on()), ("radius", n(1000.0)), ("composite", e(2))]);
+    effect_case(id, &[("fastMode", on()), ("radius", n(0.6))]);
+    for depth in [BitDepth::Bpc8, BitDepth::Bpc32] {
+        let s = adjustment_scene(depth, &[(id, vec![("fastMode", on()), ("radius", n(30.0)), ("threshold", n(0.3))])], true);
+        check(&format!("physical glow fast adjustment {depth:?}"), compare_at(&s, opts(), Tick::ZERO), 0.0);
+    }
+}
+
+/// Fast Mode on single bright pixels at odd positions, inside and on all four edges, run on a
+/// buffer directly: padded and as an adjustment (no padding), so the [1, 3, 3, 1] halving and the
+/// upsample are compared at both ends of every level and in the middle.
+#[test]
+fn physical_glow_fast_mode_odd_sources() {
+    let Some(g) = crate::tests::gpu() else { return };
+    let spec = effectcraft_effects::find("ec.stylize.physicalglow").unwrap();
+    let (w, h) = (37, 29);
+    let mut img = effectcraft_raster::Image::new(w, h);
+    for (x, y) in [(17, 11), (0, 0), (36, 28), (0, 27), (35, 1)] {
+        img.set(x, y, [100.0, 60.0, 30.0, 1.0]);
+    }
+    let size = [f64::from(w), f64::from(h)];
+    let mut params =
+        effectcraft_effects::Params { values: spec.params.iter().map(|ps| (ps.id.to_string(), effectcraft_effects::default_value(ps, size))).collect() };
+    for (k, v) in [("fastMode", on()), ("radius", n(60.0)), ("aspectRatio", n(1.7)), ("composite", e(2))] {
+        params.values.insert(k.to_string(), v);
+    }
+    for adjustment in [false, true] {
+        let ctx = || effectcraft_effects::EffectCtx { params: &params, time: 0.0, layer_size: size, seed: 1, adjustment, env: Default::default() };
+        let buf = effectcraft_effects::Buf { img: img.clone(), offset: [0.0; 2], scale: 1.0 };
+        let cpu = (spec.render)(&ctx(), buf.clone());
+        let out = effectcraft_render::Accelerator::effects(g, &[effectcraft_render::FxStep { spec, ctx: ctx() }], &buf, None).expect("the GPU runs the effect");
+        assert_eq!((out.offset, out.scale), (cpu.offset, cpu.scale), "adj {adjustment}: geometry");
+        let d = crate::tests::diff(&cpu.img, &out.img, 1e-3);
+        let allow = if crate::tests::on_gl() { (d.total as f64 * crate::tests::GL_BOUNDARY_FLIPS) as usize } else { 0 };
+        assert!(d.over <= allow, "adj {adjustment}: {} of {} pixels over 1e-3 (max {}); worst {:?}", d.over, d.total, d.max, d.worst);
+    }
+}
+
+/// Render Method CPU: the GPU declines the instance, and in a stack the GPU effects before and
+/// after it hand the buffer to the CPU and take it back, on a layer and on an adjustment layer.
+#[test]
+fn physical_glow_render_method_cpu() {
+    let id = "ec.stylize.physicalglow";
+    let cpu_only = vec![("radius", n(20.0)), ("renderMethod", e(1))];
+    if let Some(g) = crate::tests::gpu() {
+        let spec = effectcraft_effects::find(id).unwrap();
+        let mut params = effectcraft_effects::Params {
+            values: spec.params.iter().map(|ps| (ps.id.to_string(), effectcraft_effects::default_value(ps, [70.0, 44.0]))).collect(),
+        };
+        for (k, v) in &cpu_only {
+            params.values.insert(k.to_string(), v.clone());
+        }
+        let ctx = effectcraft_effects::EffectCtx { params: &params, time: 0.0, layer_size: [70.0, 44.0], seed: 1, adjustment: false, env: Default::default() };
+        let buf = effectcraft_effects::Buf { img: crate::tests::pattern(7, 70, 44), offset: [0.0; 2], scale: 1.0 };
+        assert!(effectcraft_render::Accelerator::effects(g, &[effectcraft_render::FxStep { spec, ctx }], &buf, None).is_none());
+    }
+    let stack = [("ec.blur.gaussian", vec![("blurriness", n(4.0))]), (id, cpu_only), ("ec.color.levels", vec![("inBlack", n(0.1)), ("gamma", n(1.4))])];
+    for depth in [BitDepth::Bpc8, BitDepth::Bpc32] {
+        let mut s = Scene::new(depth);
+        let bg = s.solid([0.15, 0.1, 0.2], 97, 61);
+        s.push(bg);
+        let mut l = s.footage(70, 44);
+        for (fx, vals) in &stack {
+            s.effect(&mut l, fx, vals);
+        }
+        set(&mut l, "transform/rotation", Value::Scalar(8.0));
+        s.push(l);
+        check(&format!("render method cpu stack {depth:?}"), compare_at(&s, opts(), Tick::ZERO), 0.0);
+        let s = adjustment_scene(depth, &stack, false);
+        check(&format!("render method cpu adjustment {depth:?}"), compare_at(&s, opts(), Tick::ZERO), 0.0);
+    }
 }
 
 /// Texturize with a texture layer (Tile / Center / Stretch), composited.

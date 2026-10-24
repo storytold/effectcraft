@@ -89,6 +89,8 @@ const CPU_ONLY_CONTROLS: &[(&str, &[&str])] = &[
     ("ec.distort.ccpowerpin", &["unstretch"]),
     ("ec.matte.refinesoft", &["reduceChatter", "useMotionBlur", "invert"]),
     ("ec.matte.refinehard", &["reduceChatter", "useMotionBlur", "invert"]),
+    // Render Method: CPU.
+    ("ec.stylize.physicalglow", &["renderMethod"]),
 ];
 
 /// Whether the GPU kernel of effect `id` covers the instance's current settings (see
@@ -216,6 +218,8 @@ mod tests {
         assert!(ok("ec.distort.ccpowerpin", &[]));
         assert!(!ok("ec.distort.ccpowerpin", &[("unstretch", Value::Bool(true))]));
         assert!(ok("ec.blur.gaussian", &[]));
+        assert!(ok("ec.stylize.physicalglow", &[("fastMode", Value::Bool(true))]));
+        assert!(!ok("ec.stylize.physicalglow", &[("renderMethod", Value::Enum(1))]));
     }
 
     #[test]

@@ -3,11 +3,11 @@
 <!-- Generated from the effect registry (crates/effects/src/catalog.rs); do not edit by hand.
      Regenerate: UPDATE_DOCS=1 cargo test -p effectcraft-effects --lib effects_doc_is_current -->
 
-EffectCraft ships 307 effects with 3032 parameters in total, grouped into the same categories as the Effects & Presets panel. Every effect is our own implementation, written from public behaviour descriptions and standard image-processing literature. Parameter names, order, popup options, units, defaults and ranges follow the reference application so that projects, expressions and muscle memory carry over.
+EffectCraft ships 308 effects with 3044 parameters in total, grouped into the same categories as the Effects & Presets panel. Every effect is our own implementation, written from public behaviour descriptions and standard image-processing literature. Parameter names, order, popup options, units, defaults and ranges follow the reference application so that projects, expressions and muscle memory carry over.
 
-- **GPU**: 280 effects also run on the GPU compositor with identical results.
-- **32**: 307 effects process 32-bit float (HDR, overbright) pixels without clamping.
-- **Status**: 307 implemented in full, 0 partial (what is missing is listed).
+- **GPU**: 281 effects also run on the GPU compositor with identical results.
+- **32**: 308 effects process 32-bit float (HDR, overbright) pixels without clamping.
+- **Status**: 308 implemented in full, 0 partial (what is missing is listed).
 
 Effects are addressed by id (`ec.<category>.<name>`) or display name in commands, scripts and the control channel, and every parameter by its id (`effects/#1/blurriness`).
 
@@ -360,6 +360,7 @@ Effects are addressed by id (`ec.<category>.<name>`) or display name in commands
 | Glow | `ec.stylize.glow` | 14 | GPU | 32 | Implemented |
 | Mosaic | `ec.stylize.mosaic` | 3 | GPU | 32 | Implemented |
 | Motion Tile | `ec.stylize.motiontile` | 8 | GPU | 32 | Implemented |
+| Physical Glow | `ec.stylize.physicalglow` | 12 | GPU | 32 | Implemented |
 | Posterize | `ec.stylize.posterize` | 1 | GPU | 32 | Implemented |
 | Roughen Edges | `ec.stylize.roughenedges` | 13 | GPU | 32 | Implemented |
 | Scatter | `ec.stylize.scatter` | 3 | GPU | 32 | Implemented |

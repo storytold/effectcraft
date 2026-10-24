@@ -9,7 +9,7 @@ use effectcraft_time::Tick;
 
 use crate::tests::{Pattern, Scene, c, check, compare_at, gpu, n, opts, set};
 
-fn adjustment_scene(depth: BitDepth, stack: &[(&str, Vec<(&str, Value)>)], masked: bool) -> Scene {
+pub(crate) fn adjustment_scene(depth: BitDepth, stack: &[(&str, Vec<(&str, Value)>)], masked: bool) -> Scene {
     let mut s = Scene::new(depth);
     let bg = s.footage(97, 61);
     s.push(bg);

@@ -386,6 +386,7 @@ const SIMPLIFIED_CHINESE: &[Row] = &[
     ("ec.stylize.emboss", "Emboss", "浮雕"),
     ("ec.stylize.findedges", "Find Edges", "查找边缘"),
     ("ec.stylize.glow", "Glow", "发光"),
+    ("ec.stylize.physicalglow", "Physical Glow", "物理发光"),
     ("ec.stylize.mosaic", "Mosaic", "马赛克"),
     ("ec.stylize.motiontile", "Motion Tile", "动态拼贴"),
     ("ec.stylize.posterize", "Posterize", "色调分离"),
