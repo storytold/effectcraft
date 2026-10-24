@@ -834,7 +834,8 @@ pub fn footage_salt_with(project: &effectcraft_project::Project, virtual_id: Opt
 /// Content key of a composition's pixels: project render settings, the comp and everything it
 /// uses (nested comps, footage, solids, their proxies and Use Proxy switches, footage and proxy
 /// files' size and time). With expressions in play (which can read any comp) the whole project
-/// counts. Switches that don't change pixels (Audio, Lock, Shy, Hide Shy Layers) don't count.
+/// counts. Switches that don't change pixels (Audio, Lock, Shy, Hide Shy Layers) don't count, and
+/// neither do markers unless an expression mentions them.
 pub fn comp_content_key(project: &effectcraft_project::Project, comp: effectcraft_project::ItemId) -> u128 {
     comp_content_key_with(project, comp, None)
 }
@@ -864,13 +865,15 @@ pub fn comp_content_key_with(project: &effectcraft_project::Project, comp: effec
             }
         }
     }
+    // Markers are pixels only to the expressions that read them (#1083).
+    let markers = project.reads_markers();
     let ids: Vec<effectcraft_project::ItemId> = if expressions { project.items.keys().copied().collect() } else { seen.into_iter().collect() };
     for id in ids {
         let Some(it) = project.item(id) else { continue };
         h.write_u64(id.0);
         h.write(it.name.as_bytes());
         match &it.kind {
-            ItemKind::Comp(c) => hash_debug(&mut h, &c.pixel_form()),
+            ItemKind::Comp(c) => hash_debug(&mut h, &c.pixel_form_with(markers)),
             k => hash_debug(&mut h, k),
         }
         if let ItemKind::Footage(f) = &it.kind {
