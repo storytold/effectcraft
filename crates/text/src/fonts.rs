@@ -505,20 +505,27 @@ fn style_wants(style: &str) -> (u16, bool) {
 /// Resolve a family + style name. Family matching is case-insensitive; a style that the family
 /// lacks picks the nearest weight and synthesises bold (≥ 600 requested, ≤ 500 found) or italic.
 pub fn resolve(family: &str, style: &str) -> Resolved {
-    if let Some(r) = resolve_in(family, style).or_else(|| resolve_by_name(family)) {
+    if let Some(r) = resolve_in(family, style).or_else(|| resolve_by_name(&all_faces(), family)) {
         return r;
     }
     if !system_scanned() && !family.is_empty() && !family.eq_ignore_ascii_case(DEFAULT_FAMILY) {
         scan_system();
-        if let Some(r) = resolve_in(family, style).or_else(|| resolve_by_name(family)) {
-            return r;
-        }
     }
-    if let Some(r) = resolve_alias(family, style) {
+    resolve_available(&all_faces(), family, style)
+}
+
+/// Resolve against a fixed font list after discovery, including aliases and the bundled fallback.
+/// Keeping discovery outside this step also lets tests model installed and missing families.
+fn resolve_available(faces: &[Arc<Face>], family: &str, style: &str) -> Resolved {
+    if let Some(r) = resolve_in_faces(faces, family, style).or_else(|| resolve_by_name(faces, family)) {
+        return r;
+    }
+    if let Some(r) = resolve_alias(faces, family, style) {
         return r;
     }
     // Inter is bundled; face 0 (the first bundled face) is the last resort.
-    let mut r = resolve_in(DEFAULT_FAMILY, style).unwrap_or(Resolved { face: 0, synth_bold: false, synth_italic: false, missing: true, instance: None });
+    let mut r =
+        resolve_in_faces(faces, DEFAULT_FAMILY, style).unwrap_or(Resolved { face: 0, synth_bold: false, synth_italic: false, missing: true, instance: None });
     r.missing = !family.is_empty() && !family.eq_ignore_ascii_case(DEFAULT_FAMILY);
     r
 }
@@ -539,14 +546,18 @@ const METRIC_ALIASES: &[(&str, &[&str])] = &[
 
 /// An installed metric-compatible substitute for a missing family. The result stays `missing`,
 /// so Find Missing Fonts still lists the requested name.
-fn resolve_alias(family: &str, style: &str) -> Option<Resolved> {
+fn resolve_alias(faces: &[Arc<Face>], family: &str, style: &str) -> Option<Resolved> {
     let family = family.trim();
     let (_, subs) = METRIC_ALIASES.iter().find(|(name, _)| name.eq_ignore_ascii_case(family))?;
-    subs.iter().find_map(|s| resolve_in(s, style)).map(|r| Resolved { missing: true, ..r })
+    subs.iter().find_map(|s| resolve_in_faces(faces, s, style)).map(|r| Resolved { missing: true, ..r })
 }
 
 fn resolve_in(family: &str, style: &str) -> Option<Resolved> {
-    let faces = all_faces();
+    resolve_in_faces(&all_faces(), family, style)
+}
+
+/// Find the requested family and nearest style within a fixed font list.
+fn resolve_in_faces(faces: &[Arc<Face>], family: &str, style: &str) -> Option<Resolved> {
     let fam: Vec<&Arc<Face>> = faces.iter().filter(|f| f.info.family.eq_ignore_ascii_case(family)).collect();
     if fam.is_empty() {
         return None;
@@ -581,12 +592,11 @@ fn resolve_in(family: &str, style: &str) -> Option<Resolved> {
 
 /// A face whose full name or PostScript name is `name` (case-insensitive), the way After Effects
 /// scripts (`textDocument.font = "YuGothic-Bold"`) and `.aep`-derived data refer to fonts.
-fn resolve_by_name(name: &str) -> Option<Resolved> {
+fn resolve_by_name(faces: &[Arc<Face>], name: &str) -> Option<Resolved> {
     let name = name.trim();
     if name.is_empty() {
         return None;
     }
-    let faces = all_faces();
     let found = |f: &Arc<Face>, instance: Option<usize>| Resolved {
         face: f.id,
         synth_bold: false,
@@ -1402,17 +1412,41 @@ mod tests {
     /// substitute instead of Inter, and still reports itself missing (#1677).
     #[test]
     fn microsoft_families_resolve_to_metric_compatible_substitutes() {
-        add_font_data(test_font("Carlito"));
-        add_font_data(test_font("Caladea"));
-        let calibri = resolve("Calibri", "Regular");
-        assert_eq!(face(calibri.face).info.family, "Carlito");
-        assert!(calibri.missing, "the original name stays missing for Find Missing Fonts");
-        let cambria = resolve("Cambria", "Bold");
-        assert_eq!(face(cambria.face).info.family, "Caladea");
-        assert!(cambria.missing);
-        let unknown = resolve("No Such Family 1677", "Regular");
-        assert_eq!(face(unknown.face).info.family, DEFAULT_FAMILY);
+        // No system scan or shared database: another test may discover real Microsoft fonts.
+        let mut fonts = Db { faces: Vec::new(), scanned: true };
+        let mut add = |family: &str| {
+            let data = Arc::new(test_font(family));
+            for names in read_faces_bytes(&data) {
+                push(&mut fonts, info_from(names, FaceData::Shared(data.clone()), "test"));
+            }
+        };
+        for family in [DEFAULT_FAMILY, "Carlito", "Caladea"] {
+            add(family);
+        }
+        // Without a substitute, a missing Microsoft family still uses the bundled default.
+        let missing = resolve_available(&fonts.faces[..1], "Calibri", "Regular");
+        assert_eq!(fonts.faces[missing.face].info.family, DEFAULT_FAMILY);
+        assert!(missing.missing);
+        for (requested, substitute, style, bold) in [("Calibri", "Carlito", "Regular", false), ("Cambria", "Caladea", "Bold", true)] {
+            let r = resolve_available(&fonts.faces, requested, style);
+            assert_eq!(fonts.faces[r.face].info.family, substitute);
+            assert!(r.missing, "the original name stays missing for Find Missing Fonts");
+            assert_eq!(r.synth_bold, bold);
+        }
+        let unknown = resolve_available(&fonts.faces, "No Such Family 1677", "Regular");
+        assert_eq!(fonts.faces[unknown.face].info.family, DEFAULT_FAMILY);
         assert!(unknown.missing);
+
+        // An installed original must win over its substitute and must not be marked missing.
+        for family in ["Calibri", "Cambria"] {
+            let data = Arc::new(test_font(family));
+            for names in read_faces_bytes(&data) {
+                push(&mut fonts, info_from(names, FaceData::Shared(data.clone()), "test"));
+            }
+            let r = resolve_available(&fonts.faces, family, "Regular");
+            assert_eq!(fonts.faces[r.face].info.family, family);
+            assert!(!r.missing);
+        }
     }
 
     #[test]
