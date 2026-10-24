@@ -138,16 +138,19 @@ pub(crate) fn frame_to_image_in(f: &VideoFrame, op: AlphaOp, mut buf: Vec<Px>) -
 
 /// A movie frame turned the way its file says it is shown ([`crate::probe::video_turn`]:
 /// clockwise quarter turns; anything else leaves it as decoded).
-pub(crate) fn turned(img: Image, turn: image::metadata::Orientation) -> Image {
+pub(crate) fn turned(mut img: Image, turn: image::metadata::Orientation) -> Image {
     use image::metadata::Orientation;
     let (w, h) = (img.width as usize, img.height as usize);
-    if img.data.len() != w * h || w == 0 || h == 0 {
+    if w.checked_mul(h) != Some(img.data.len()) || w == 0 || h == 0 {
+        return img;
+    }
+    if turn == Orientation::Rotate180 {
+        img.data.reverse();
         return img;
     }
     // The source pixel shown at (x, y) of the turned picture.
     let (tw, th, from): (usize, usize, fn(usize, usize, usize, usize) -> usize) = match turn {
         Orientation::Rotate90 => (h, w, |x, y, w, h| (h - 1 - x) * w + y),
-        Orientation::Rotate180 => (w, h, |x, y, w, h| (h - 1 - y) * w + (w - 1 - x)),
         Orientation::Rotate270 => (h, w, |x, y, w, _| x * w + (w - 1 - y)),
         _ => return img,
     };
@@ -445,6 +448,71 @@ pub(crate) fn straight_to_image(w: u32, h: u32, px: &[[f32; 4]], op: AlphaOp) ->
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[test]
+    fn turned_180_reuses_pixels() {
+        use image::metadata::Orientation;
+        let a = [1.0, 2.0, 3.0, 4.0];
+        let b = [5.0, 6.0, 7.0, 8.0];
+        let c = [9.0, 10.0, 11.0, 12.0];
+        let d = [13.0, 14.0, 15.0, 16.0];
+        let e = [17.0, 18.0, 19.0, 20.0];
+        let f = [21.0, -0.0, f32::from_bits(0x7fc0_1234), 24.0];
+        let mut data = Vec::with_capacity(12);
+        data.extend([a, b, c, d, e, f]);
+        let (ptr, len, capacity) = (data.as_ptr(), data.len(), data.capacity());
+
+        let img = turned(Image { width: 2, height: 3, data }, Orientation::Rotate180);
+
+        assert_eq!((img.width, img.height), (2, 3));
+        assert_eq!((img.data.as_ptr(), img.data.len(), img.data.capacity()), (ptr, len, capacity));
+        let bits = |p: Px| p.map(f32::to_bits);
+        assert_eq!(img.data.iter().copied().map(bits).collect::<Vec<_>>(), [f, e, d, c, b, a].map(bits));
+        assert_eq!(img.data[0][1].to_bits(), 0x8000_0000);
+        assert_eq!(img.data[0][2].to_bits(), 0x7fc0_1234);
+    }
+
+    #[test]
+    fn turned_edge_cases_and_parity() {
+        use image::metadata::Orientation::*;
+        let a = [1.0, 2.0, 3.0, 4.0];
+        let b = [5.0, 6.0, 7.0, 8.0];
+        let c = [9.0, 10.0, 11.0, 12.0];
+        let d = [13.0, 14.0, 15.0, 16.0];
+        let e = [17.0, 18.0, 19.0, 20.0];
+        let f = [21.0, 22.0, 23.0, 24.0];
+        let g = [25.0, 26.0, 27.0, 28.0];
+        let h = [29.0, 30.0, 31.0, 32.0];
+        let i = [33.0, 34.0, 35.0, 36.0];
+        let cases = [
+            ((3, 3), vec![a, b, c, d, e, f, g, h, i], Rotate180, (3, 3), vec![i, h, g, f, e, d, c, b, a]),
+            ((3, 1), vec![a, b, c], Rotate180, (3, 1), vec![c, b, a]),
+            ((1, 3), vec![a, b, c], Rotate180, (1, 3), vec![c, b, a]),
+            ((1, 1), vec![a], Rotate180, (1, 1), vec![a]),
+            ((0, 0), vec![], Rotate180, (0, 0), vec![]),
+            ((0, 2), vec![a], Rotate180, (0, 2), vec![a]),
+            ((2, 0), vec![a], Rotate180, (2, 0), vec![a]),
+            ((2, 2), vec![a, b, c], Rotate180, (2, 2), vec![a, b, c]),
+            ((u32::MAX, u32::MAX), vec![a], Rotate180, (u32::MAX, u32::MAX), vec![a]),
+            ((2, 3), vec![a, b, c, d, e, f], NoTransforms, (2, 3), vec![a, b, c, d, e, f]),
+            ((2, 3), vec![a, b, c, d, e, f], FlipHorizontal, (2, 3), vec![a, b, c, d, e, f]),
+            ((2, 3), vec![a, b, c, d, e, f], FlipVertical, (2, 3), vec![a, b, c, d, e, f]),
+            ((2, 3), vec![a, b, c, d, e, f], Rotate90FlipH, (2, 3), vec![a, b, c, d, e, f]),
+            ((2, 3), vec![a, b, c, d, e, f], Rotate270FlipH, (2, 3), vec![a, b, c, d, e, f]),
+            ((2, 3), vec![a, b, c, d, e, f], Rotate90, (3, 2), vec![e, c, a, f, d, b]),
+            ((2, 3), vec![a, b, c, d, e, f], Rotate270, (3, 2), vec![b, d, f, a, c, e]),
+        ];
+        for ((width, height), data, turn, dimensions, expected) in cases {
+            let storage = (data.as_ptr(), data.len(), data.capacity());
+            let img = turned(Image { width, height, data }, turn);
+            assert_eq!((img.width, img.height), dimensions, "{width}x{height} {turn:?}");
+            let bits = |p: Px| p.map(f32::to_bits);
+            assert_eq!(img.data.iter().copied().map(bits).collect::<Vec<_>>(), expected.into_iter().map(bits).collect::<Vec<_>>(), "{width}x{height} {turn:?}");
+            if !matches!(turn, Rotate90 | Rotate270) {
+                assert_eq!((img.data.as_ptr(), img.data.len(), img.data.capacity()), storage, "{width}x{height} {turn:?}");
+            }
+        }
+    }
 
     fn yuv_frame(y: u8, u: u8, v: u8, color: filmcraft_color::ColorInfo) -> VideoFrame {
         VideoFrame {
