@@ -261,7 +261,7 @@ fn fp2_vector(@builtin(global_invocation_id) gid: vec3<u32>) {
 fn fp2_log_to_lin(v: f32, c: vec4<f32>, r: vec2<f32>) -> f32 {
     let code = v * 1023.0;
     var lin = (pow(10.0, (code - c.z) * 0.002 / 0.6) - c.x) / max(1.0 - c.x, 1e-6);
-    lin = powz(max(lin, 0.0), 1.7 / max(c.w, 0.01));
+    lin = powz(max(lin, 0.0), 1.0 / max(c.w, 0.01));
     let k = c.y;
     if (k < 1.0 && lin > k) {
         let w = 1.0 - k;
@@ -279,7 +279,7 @@ fn fp2_lin_to_log(v: f32, c: vec4<f32>, r: vec2<f32>) -> f32 {
         let w = 1.0 - k;
         lin = k - w * log(max(1.0 - (lin - k) / w, 1e-6));
     }
-    lin = powz(max(lin, 0.0), max(c.w, 0.01) / 1.7);
+    lin = powz(max(lin, 0.0), max(c.w, 0.01));
     let code = c.z + log(max(lin * (1.0 - c.x) + c.x, 1e-9)) * 0.4342944819032518 * 0.6 / 0.002;
     return code / 1023.0;
 }

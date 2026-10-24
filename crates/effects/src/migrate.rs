@@ -458,6 +458,41 @@ fn same_point(a: &Value, b: &Value) -> bool {
     a.len() == b.len() && a.iter().zip(&b).all(|(x, y)| (x - y).abs() < 1e-6)
 }
 
+/// The Cineon Converter Gamma that gave linear output before project schema 3.
+pub const CINEON_LINEAR_GAMMA_BEFORE_SCHEMA_3: f64 = 1.7;
+
+/// Bring Cineon Converter's Gamma, saved before project schema 3, onto today's scale.
+///
+/// Log to Linear raised the linear value to `1.7 / gamma`, and Linear to Log to `gamma / 1.7`;
+/// they now use `1 / gamma` and `gamma`, so Gamma 1 is linear and a larger value lightens the
+/// midtones. Dividing the value, its keyframes and their speeds by 1.7 keeps
+/// what the effect renders. Expressions are not rewritten. Instances of other effects are left
+/// as they are.
+pub fn cineon_gamma_to_unit_scale(effect: &str, g: &mut PropGroup) {
+    if effect == "ec.utility.cineon"
+        && let Some(pr) = g.get_mut("gamma")
+    {
+        scale_cineon_gamma(pr);
+    }
+}
+
+/// [`cineon_gamma_to_unit_scale`] for one Gamma property (an animation preset that saved the
+/// property without its effect).
+pub fn scale_cineon_gamma(pr: &mut Property) {
+    let scale = |v: &mut Value| {
+        if let Value::Scalar(x) = v {
+            *x /= CINEON_LINEAR_GAMMA_BEFORE_SCHEMA_3;
+        }
+    };
+    scale(&mut pr.value);
+    for k in &mut pr.keys {
+        scale(&mut k.value);
+        for e in k.in_ease.iter_mut().chain(k.out_ease.iter_mut()) {
+            e.speed /= CINEON_LINEAR_GAMMA_BEFORE_SCHEMA_3;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

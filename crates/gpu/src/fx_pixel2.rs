@@ -228,7 +228,7 @@ fn point(e: &mut Enc, id: &str, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
             p.u[0] = [0, pr.e("conversionType"), 0, 0];
             p.f[0] = [offset(black, white), knee, white, pr.f("gamma") as f32];
             p.f[1] = [pr.f("internalBlackPoint") as f32, pr.f("internalWhitePoint") as f32, 0.0, 0.0];
-            p.f[2] = [offset(95.0, 685.0), knee, 685.0, 1.7];
+            p.f[2] = [offset(95.0, 685.0), knee, 685.0, 1.0];
         }
         "ec.utility.hdrcompander" => {
             p.u[0] = [1, (pr.e("mode") == 1) as u32, 0, 0];

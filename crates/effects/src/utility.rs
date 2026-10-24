@@ -100,12 +100,13 @@ impl Cineon {
     fn knee(&self) -> f32 {
         1.0 - (self.rolloff / 100.0).clamp(0.0, 0.99)
     }
-    /// Normalised code value (code / 1023) → linear.
+    /// Normalized code value (code / 1023) → linear, raised to `1 / gamma`: Gamma 1 gives linear
+    /// light, and a larger Gamma lightens the midtones.
     pub fn log_to_lin(&self, v: f32) -> f32 {
         let off = self.offset();
         let code = v * 1023.0;
         let mut lin = (10f32.powf((code - self.white) * 0.002 / 0.6) - off) / (1.0 - off).max(1e-6);
-        lin = lin.max(0.0).powf(1.7 / self.gamma.max(0.01));
+        lin = lin.max(0.0).powf(1.0 / self.gamma.max(0.01));
         let k = self.knee();
         if k < 1.0 && lin > k {
             let w = 1.0 - k;
@@ -123,7 +124,7 @@ impl Cineon {
             let w = 1.0 - k;
             lin = k - w * (1.0 - (lin - k) / w).max(1e-6).ln();
         }
-        lin = lin.max(0.0).powf(self.gamma.max(0.01) / 1.7);
+        lin = lin.max(0.0).powf(self.gamma.max(0.01));
         let code = self.white + (lin * (1.0 - off) + off).max(1e-9).log10() * 0.6 / 0.002;
         code / 1023.0
     }
@@ -138,7 +139,7 @@ fn cineon(ctx: &EffectCtx, mut b: Buf) -> Buf {
         gamma: ctx.params.f("gamma") as f32,
         rolloff: ctx.params.f("highlightRolloff") as f32,
     };
-    let std = Cineon { black: 95.0, white: 685.0, ib: 0.0, iw: 1.0, gamma: 1.7, rolloff: c.rolloff };
+    let std = Cineon { black: 95.0, white: 685.0, ib: 0.0, iw: 1.0, gamma: 1.0, rolloff: c.rolloff };
     let kind = ctx.params.e("conversionType");
     b.img.map_straight(|v| {
         v.map(|x| match kind {
@@ -380,7 +381,7 @@ pub fn specs() -> Vec<EffectSpec> {
                 p("internalBlackPoint", "Internal Black Point", num(0.0), slider(-1.0, 2.0, 0.0, 1.0, 3)),
                 p("tenBitWhitePoint", "10 Bit White Point", num(685.0), slider(0.0, 1023.0, 0.0, 1023.0, 0)),
                 p("internalWhitePoint", "Internal White Point", num(1.0), slider(-1.0, 2.0, 0.0, 1.0, 3)),
-                p("gamma", "Gamma", num(1.7), slider(0.1, 5.0, 0.1, 5.0, 2)),
+                p("gamma", "Gamma", num(1.0), slider(0.05, 5.0, 0.1, 5.0, 2)),
                 p("highlightRolloff", "Highlight Rolloff", num(20.0), slider(0.0, 100.0, 0.0, 100.0, 0)),
             ],
             cineon,
@@ -486,13 +487,34 @@ mod tests {
 
     #[test]
     fn cineon_round_trip() {
-        let c = Cineon { black: 95.0, white: 685.0, ib: 0.0, iw: 1.0, gamma: 1.7, rolloff: 20.0 };
-        for code in [100.0f32, 200.0, 350.0, 500.0, 600.0] {
-            let v = code / 1023.0;
-            let back = c.lin_to_log(c.log_to_lin(v));
-            assert!((back - v).abs() < 1e-3, "{code}: {back}");
+        for gamma in [1.0, 1.7, 0.6] {
+            let c = Cineon { black: 95.0, white: 685.0, ib: 0.0, iw: 1.0, gamma, rolloff: 20.0 };
+            for code in [100.0f32, 200.0, 350.0, 500.0, 600.0] {
+                let v = code / 1023.0;
+                let back = c.lin_to_log(c.log_to_lin(v));
+                assert!((back - v).abs() < 1e-3, "gamma {gamma}, {code}: {back}");
+            }
+            assert!(c.log_to_lin(95.0 / 1023.0).abs() < 1e-4);
         }
-        assert!(c.log_to_lin(95.0 / 1023.0).abs() < 1e-4);
+    }
+
+    /// Gamma 1 (the default) gives linear light: Kodak's printing-density curve with nothing
+    /// raised, so code 400 is (10^(-0.95) - 10^(-1.9667)) / (1 - 10^(-1.9667)) = 0.10251. A larger
+    /// Gamma lightens the midtones (`lin^(1/gamma)`), and Linear to Log undoes it.
+    #[test]
+    fn cineon_gamma_1_is_linear_and_larger_lightens() {
+        let c = |gamma| Cineon { black: 95.0, white: 685.0, ib: 0.0, iw: 1.0, gamma, rolloff: 0.0 };
+        let lin = c(1.0).log_to_lin(400.0 / 1023.0);
+        assert!((lin - 0.10251).abs() < 1e-4, "{lin}");
+        let lighter = c(2.0).log_to_lin(400.0 / 1023.0);
+        assert!((lighter - 0.10251f32.sqrt()).abs() < 1e-4, "{lighter}");
+        assert!((c(2.0).lin_to_log(lighter) - 400.0 / 1023.0).abs() < 1e-4);
+        let out = run("ec.utility.cineon", &[], {
+            let mut img = Image::new(1, 1);
+            img.set(0, 0, [400.0 / 1023.0, 400.0 / 1023.0, 400.0 / 1023.0, 1.0]);
+            img
+        });
+        assert!((out.img.data[0][0] - 0.10251).abs() < 1e-4, "the default Gamma is linear: {:?}", out.img.data[0]);
     }
 
     #[test]

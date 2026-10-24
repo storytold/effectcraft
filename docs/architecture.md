@@ -121,6 +121,14 @@ their bottom-right quarter. Tracking data of effects that analyse footage (Warp 
 Camera Tracker, Mocha shape) is left as it is: footage has a source rectangle, whose effect space
 did not change.
 
+Schema 3 changed Cineon Converter's Gamma so that Gamma 1 gives linear output (it was 1.7): Log
+to Linear raises the linear value to `1 / gamma` (it was `1.7 / gamma`).
+Opening a project from an earlier schema divides each Cineon Converter's Gamma, its keyframes and
+their speeds by 1.7, so the effect renders as before; expressions are not rewritten. Animation
+presets carry the same change as format version 2 (`effectcraftAnimationPreset: 2`): applying a
+version 1 preset divides the Gamma of each Cineon Converter it holds, and a Gamma property it
+holds alone, by 1.7.
+
 ## 4. Rendering
 
 `Renderer::comp_frame(comp, t)` walks the layers bottom to top. For each visible layer it renders

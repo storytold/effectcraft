@@ -1224,7 +1224,9 @@ impl Session {
 
 /// Bring effect instances saved by earlier versions up to date with the effect registry
 /// (renamed / regrouped / added parameters, reordered popups; see
-/// [`effectcraft_effects::migrate`]), and a project from before
+/// [`effectcraft_effects::migrate`]), Cineon Converter's Gamma in a project from before
+/// [`effectcraft_project::SCHEMA_CINEON_GAMMA`] onto today's scale
+/// ([`effectcraft_effects::migrate::cineon_gamma_to_unit_scale`]), and a project from before
 /// [`effectcraft_project::SCHEMA_EFFECT_SPACE`] into effect space
 /// ([`effectcraft_effects::migrate::to_effect_space`]). Stamps the current schema.
 pub fn upgrade_effects(p: &mut Project) {
@@ -1236,6 +1238,7 @@ pub fn upgrade_effects(p: &mut Project) {
             bounds.insert((*cid, l.id), effectcraft_render::effect_bounds(p, c, l));
         }
     }
+    let unit_gamma = p.schema < effectcraft_project::SCHEMA_CINEON_GAMMA;
     let mut next = p.next_id;
     for (cid, it) in p.items.iter_mut() {
         let effectcraft_project::ItemKind::Comp(c) = &mut it.kind else { continue };
@@ -1257,6 +1260,9 @@ pub fn upgrade_effects(p: &mut Project) {
                     effectcraft_effects::migrate::upgrade_instance(spec, g, &mut effectcraft_project::build::Ids(&mut next), size);
                     if to_effect_space {
                         effectcraft_effects::migrate::to_effect_space(spec, g, size, d, &clone_d);
+                    }
+                    if unit_gamma {
+                        effectcraft_effects::migrate::cineon_gamma_to_unit_scale(spec.id, g);
                     }
                 }
             }

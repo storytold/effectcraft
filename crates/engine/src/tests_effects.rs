@@ -625,7 +625,7 @@ fn opening_an_old_project_upgrades_effect_instances() {
 /// its origin. Opening converts them to effect space so points that were set keep their place
 /// in the comp; points at their default become the layer centre; layers with a source
 /// rectangle, adjustment layers (their effects see the comp below as it is) and expression
-/// controls keep their values. Saving writes schema 2, and opening that again changes nothing.
+/// controls keep their values. Saving writes the current schema, and opening that again changes nothing.
 #[test]
 fn opening_a_schema_1_project_moves_shape_layer_effect_points_into_effect_space() {
     let mut s = Session::default();
@@ -656,7 +656,7 @@ fn opening_a_schema_1_project_moves_shape_layer_effect_points_into_effect_space(
     set(&mut s, adjust, on_adjust, "center", [40.0, 30.0]);
     assert_eq!(point(&s, shape, bulge, "center"), KV::Vec2([100.0, 50.0]), "Bulge's default centre");
 
-    let old = s.project.to_file_json().unwrap().replacen("\"schema\": 2", "\"schema\": 1", 1);
+    let old = s.project.to_file_json().unwrap().replacen(&format!("\"schema\": {}", effectcraft_project::SCHEMA_VERSION), "\"schema\": 1", 1);
     assert!(old.contains("\"schema\": 1"));
     let dir = std::env::temp_dir().join(format!("ec-effect-space-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -673,12 +673,109 @@ fn opening_a_schema_1_project_moves_shape_layer_effect_points_into_effect_space(
         assert_eq!(point(s2, adjust, on_adjust, "center"), KV::Vec2([40.0, 30.0]), "an adjustment layer's effects see the comp");
     };
     check(&s2);
-    // Saved as schema 2 and opened again: nothing moves twice.
+    // Saved with the current schema and opened again: nothing moves twice.
     s2.execute("file.save", json!({"path": path})).unwrap();
     let mut s3 = Session::default();
     s3.execute("file.open", json!({"path": path})).unwrap();
     let _ = std::fs::remove_dir_all(dir);
     check(&s3);
+}
+
+/// Cineon Converter's Log to Linear before schema 3: the linear value raised to `1.7 / gamma`
+/// (no Highlight Rolloff).
+fn cineon_before_schema_3(v: f32, gamma: f32) -> f32 {
+    let off = 10f32.powf((95.0 - 685.0) * 0.002 / 0.6);
+    ((10f32.powf((v * 1023.0 - 685.0) * 0.002 / 0.6) - off) / (1.0 - off)).max(0.0).powf(1.7 / gamma)
+}
+
+/// A project saved before schema 3 holds Cineon Converter's Gamma on the old scale, where 1.7
+/// gave linear output. Opening it divides the Gamma, its keyframes and their speeds by 1.7, so
+/// the frames render as they did; saving and opening again converts nothing a second time.
+#[test]
+fn opening_a_schema_2_project_keeps_what_cineon_converter_renders() {
+    let mut s = Session::default();
+    // 32 bpc, so frames are not rounded to 8-bit steps.
+    s.execute("file.projectSettings", json!({"bitDepth": 32})).unwrap();
+    s.execute("comp.new", json!({"name": "Main", "width": 8, "height": 8, "frameRate": 30, "duration": 2})).unwrap();
+    let animated = s.execute("layer.newSolid", json!({"color": [0.4, 0.5, 0.6], "width": 8, "height": 8})).unwrap()["layer"].as_u64().unwrap();
+    let cid = s.active_comp_id().unwrap();
+    let input = s.render(cid, Tick::ZERO, Default::default()).get(4, 4);
+    let fx = apply(&mut s, animated, "Cineon Converter");
+    s.execute("prop.set", json!({"layer": animated, "path": "effects/#1/highlightRolloff", "value": 0.0})).unwrap();
+    // Old-scale values: 2.2 at 0 s and 3.4 at 1 s.
+    animate_effect(&mut s, animated, fx, "gamma", &[(0.0, 2.2), (1.0, 3.4)]);
+    let still = s.execute("layer.newSolid", json!({"color": [0.4, 0.5, 0.6], "width": 8, "height": 8})).unwrap()["layer"].as_u64().unwrap();
+    let still_fx = apply(&mut s, still, "Cineon Converter");
+    s.execute("prop.set", json!({"layer": still, "path": "effects/#1/gamma", "value": 2.2})).unwrap();
+    s.execute("layer.setSwitch", json!({"layers": [still], "switch": "video", "value": false})).unwrap();
+
+    let mut old: serde_json::Value = serde_json::from_str(&s.project.to_file_json().unwrap()).unwrap();
+    old["schema"] = json!(2);
+    let dir = std::env::temp_dir().join(format!("ec-cineon-gamma-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("old.ecproj").to_string_lossy().to_string();
+    std::fs::write(&path, old.to_string()).unwrap();
+    let mut s2 = Session::default();
+    s2.execute("file.open", json!({"path": path})).unwrap();
+    assert_eq!(s2.project.schema, effectcraft_project::SCHEMA_VERSION);
+    let check = |s2: &Session| {
+        let gamma = |lid: u64, uid: u64| effect_group(s2, lid, uid).prop("gamma").unwrap().clone();
+        let g = gamma(animated, fx);
+        let keys: Vec<f64> = g.keys.iter().map(|k| k.value.as_f64()).collect();
+        assert!((keys[0] - 2.2 / 1.7).abs() < 1e-9 && (keys[1] - 3.4 / 1.7).abs() < 1e-9, "{keys:?}");
+        assert!((gamma(still, still_fx).value.as_f64() - 2.2 / 1.7).abs() < 1e-9, "a static Gamma is converted too");
+        for (t, old_gamma) in [(0.0, 2.2), (0.5, 2.8), (1.0, 3.4)] {
+            let got = s2.render(cid, Tick::from_seconds_f64(t), Default::default()).get(4, 4);
+            for c in 0..3 {
+                let want = cineon_before_schema_3(input[c], old_gamma);
+                assert!((got[c] - want).abs() < 1e-4, "{t} s, channel {c}: {} rendered, {want} before", got[c]);
+            }
+        }
+    };
+    check(&s2);
+    s2.execute("file.save", json!({"path": path})).unwrap();
+    let mut s3 = Session::default();
+    s3.execute("file.open", json!({"path": path})).unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+    check(&s3);
+}
+
+/// An animation preset saved before Cineon Converter's Gamma scale changed (format version 1)
+/// is converted when applied, for a saved effect and for a saved Gamma property alone; a preset
+/// saved now is applied as it is.
+#[test]
+fn version_1_presets_convert_cineon_converter_gamma() {
+    let (mut s, a, _) = comp_with_two_solids();
+    let fx = apply(&mut s, a, "Cineon Converter");
+    s.execute("prop.set", json!({"layer": a, "path": "effects/#1/gamma", "value": 2.2})).unwrap();
+    let gamma = |s: &Session, n: usize| layer(s, a).effects().unwrap().groups().nth(n).unwrap().get("gamma").unwrap().value.as_f64();
+    let tag = "effectcraftAnimationPreset";
+    let dir = std::env::temp_dir().join(format!("ec-cineon-preset-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let effect_path = dir.join("effect.ecpreset").to_string_lossy().to_string();
+    select_effect(&mut s, a, fx);
+    s.execute("anim.savePreset", json!({"path": effect_path})).unwrap();
+    let prop_path = dir.join("gamma.ecpreset").to_string_lossy().to_string();
+    s.execute("prop.select", json!({"layer": a, "path": "effects/#1/gamma"})).unwrap();
+    s.execute("anim.savePreset", json!({"path": prop_path})).unwrap();
+    let read = |p: &str| serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(p).unwrap()).unwrap();
+    let (effect_preset, prop_preset) = (read(&effect_path), read(&prop_path));
+    let _ = std::fs::remove_dir_all(dir);
+    assert_eq!(effect_preset[tag], json!(2));
+
+    s.execute("anim.applyPreset", json!({"preset": effect_preset.clone(), "layers": [a]})).unwrap();
+    assert!((gamma(&s, 1) - 2.2).abs() < 1e-9, "a current preset is applied as saved");
+    let mut v1 = effect_preset;
+    v1[tag] = json!(1);
+    s.execute("anim.applyPreset", json!({"preset": v1, "layers": [a]})).unwrap();
+    assert!((gamma(&s, 2) - 2.2 / 1.7).abs() < 1e-9, "a version 1 effect is converted");
+
+    s.execute("prop.set", json!({"layer": a, "path": "effects/#1/gamma", "value": 1.0})).unwrap();
+    let mut v1 = prop_preset;
+    v1[tag] = json!(1);
+    let r = s.execute("anim.applyPreset", json!({"preset": v1, "layers": [a]})).unwrap();
+    assert_eq!(r["skipped"], json!([]), "{r}");
+    assert!((gamma(&s, 0) - 2.2 / 1.7).abs() < 1e-9, "a version 1 Gamma property is converted");
 }
 
 /// #410: `effect.warning` reports what an OCIO effect can't render as asked (Effect Controls

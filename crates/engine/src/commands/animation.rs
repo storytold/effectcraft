@@ -16,6 +16,11 @@ use crate::{EngineError, KeyRef, Result, Session, cmd};
 /// Preset file format version tag (`*.ecpreset`, JSON).
 pub const PRESET_TAG: &str = "effectcraftAnimationPreset";
 
+/// The preset format version written under [`PRESET_TAG`]. 2: Cineon Converter's Gamma is on
+/// the scale of project schema 3 (1 is linear); Gamma values in version 1 presets are converted
+/// when applied ([`effectcraft_effects::migrate::cineon_gamma_to_unit_scale`]).
+pub const PRESET_VERSION: u64 = 2;
+
 fn has_selected_props(s: &Session) -> std::result::Result<(), String> {
     has_comp(s)?;
     if selected_leaf_props(s).is_empty() && selected_effects(s).is_empty() { Err("select properties or effects first".into()) } else { Ok(()) }
@@ -82,7 +87,7 @@ fn save_preset(s: &mut Session, p: &Value) -> Result<Value> {
     let name = str_p(p, "name")
         .map(str::to_string)
         .unwrap_or_else(|| std::path::Path::new(&path).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default());
-    let doc = json!({PRESET_TAG: 1, "name": name, "properties": props_json, "effects": fx_json});
+    let doc = json!({PRESET_TAG: PRESET_VERSION, "name": name, "properties": props_json, "effects": fx_json});
     let text = serde_json::to_string_pretty(&doc).unwrap_or_default();
     s.services.write_file(&path, text.as_bytes()).map_err(|e| EngineError::Other(format!("cannot write {path}: {e}")))?;
     Ok(json!({"path": path, "properties": props.len(), "effects": effects.len()}))
@@ -110,9 +115,18 @@ fn apply_preset(s: &mut Session, p: &Value) -> Result<Value> {
         s.save_prefs();
         s.prefs_revision += 1;
     }
-    let effects: Vec<PropGroup> =
+    let mut effects: Vec<PropGroup> =
         doc["effects"].as_array().map(|a| a.iter().filter_map(|v| serde_json::from_value(v.clone()).ok()).collect()).unwrap_or_default();
-    let props: Vec<(String, Property)> = doc["properties"]
+    let unit_gamma = doc[PRESET_TAG].as_u64().unwrap_or(1) < PRESET_VERSION;
+    if unit_gamma {
+        for g in &mut effects {
+            if let GroupKind::Effect { effect } = &g.kind {
+                let effect = effect.clone();
+                effectcraft_effects::migrate::cineon_gamma_to_unit_scale(&effect, g);
+            }
+        }
+    }
+    let mut props: Vec<(String, Property)> = doc["properties"]
         .as_array()
         .map(|a| {
             a.iter()
@@ -129,6 +143,13 @@ fn apply_preset(s: &mut Session, p: &Value) -> Result<Value> {
                 .collect()
         })
         .unwrap_or_default();
+    if unit_gamma {
+        for (path, pr) in &mut props {
+            if is_cineon_gamma_path(path) {
+                effectcraft_effects::migrate::scale_cineon_gamma(pr);
+            }
+        }
+    }
     let t = s.time();
     let mut applied = 0;
     let mut skipped = vec![];
@@ -173,6 +194,14 @@ fn apply_preset(s: &mut Session, p: &Value) -> Result<Value> {
         Ok(())
     })?;
     Ok(json!({"applied": applied, "skipped": skipped}))
+}
+
+/// Whether a preset property path (`effects/<match name>[#n]/<property>`, as
+/// [`match_path_of`] writes it) is a Cineon Converter's Gamma.
+fn is_cineon_gamma_path(path: &str) -> bool {
+    let Some((seg, tail)) = path.strip_prefix("effects/").and_then(|r| r.split_once('/')) else { return false };
+    let match_id = seg.rsplit_once('#').map_or(seg, |(m, _)| m);
+    match_id == "ec.utility.cineon" && tail == "gamma"
 }
 
 // ---------------------------------------------------------------- keyframes
