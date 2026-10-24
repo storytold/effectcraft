@@ -431,10 +431,69 @@ pub fn spatial_segment_length(keys: &[Keyframe], i: usize) -> f64 {
     SpatialSeg::new([p0, [p0[0] + out_t[0], p0[1] + out_t[1], p0[2] + out_t[2]], [p3[0] + in_t[0], p3[1] + in_t[1], p3[2] + in_t[2]], p3]).length()
 }
 
+/// Cumulative path length (spatial) or value distance (other) of the keys `a..=b`, starting at 0.
+fn run_lengths(keys: &[Keyframe], a: usize, b: usize, spatial: bool) -> Vec<f64> {
+    let mut acc = vec![0.0];
+    for i in a..b {
+        let (Some(k), Some(next)) = (keys.get(i), keys.get(i + 1)) else { break };
+        let len = if spatial && matches!(k.value, Value::Vec2(_) | Value::Vec3(_)) {
+            spatial_segment_length(keys, i)
+        } else {
+            let x = k.value.components();
+            let y = next.value.components();
+            x.iter().zip(&y).map(|(p, q)| (q - p) * (q - p)).sum::<f64>().sqrt()
+        };
+        acc.push(acc.last().unwrap_or(&0.0) + len);
+    }
+    acc
+}
+
+/// The fixed keys `(a, b)` around segment `i` → `i + 1` when it lies in a run of roving keys
+/// that moves as one eased span (`a` not holding, at least one roving key between them).
+fn roving_run(keys: &[Keyframe], i: usize) -> Option<(usize, usize)> {
+    let n = keys.len();
+    if i + 1 >= n || !(keys[i].roving || keys[i + 1].roving) {
+        return None;
+    }
+    let a = (1..=i).rev().find(|&j| !keys[j].roving).unwrap_or(0);
+    let b = (i + 1..n - 1).find(|&j| !keys[j].roving).unwrap_or(n - 1);
+    let ka = &keys[a];
+    (b > a + 1 && ka.out_interp != Interp::Hold && ka.value.interpolates()).then_some((a, b))
+}
+
+/// Progress 0..1 (fraction of the run's length `total`) at time fraction `x` through the roving
+/// run `a..=b`: one temporal ease from key `a`'s out side to key `b`'s in side, so roving keys
+/// only slide in time and the speed through them stays continuous.
+fn roving_progress(keys: &[Keyframe], a: usize, b: usize, total: f64, spatial: bool, x: f64) -> f64 {
+    let (ka, kb) = (&keys[a], &keys[b]);
+    let dur = (secs(kb.time) - secs(ka.time)).max(1e-12);
+    let is_spatial = spatial && matches!(ka.value, Value::Vec2(_) | Value::Vec3(_));
+    let side = |i: usize, interp: Interp, out: bool| -> Ease {
+        if interp != Interp::Bezier || total <= 1e-12 {
+            return Ease { speed: 1.0, influence: 1.0 / 3.0 };
+        }
+        let e = effective_ease(keys, i, 0, is_spatial, out);
+        let speed = if is_spatial {
+            e.speed
+        } else {
+            let dims = keys[i].value.components().len().max(1);
+            (0..dims).map(|d| effective_ease(keys, i, d, false, out).speed.powi(2)).sum::<f64>().sqrt()
+        };
+        Ease { speed: speed * dur / total, influence: e.influence }
+    };
+    let eo = side(a, ka.out_interp, true);
+    let ei = side(b, kb.in_interp, false);
+    if ka.out_interp == Interp::Hold || ka.out_interp != Interp::Bezier && kb.in_interp != Interp::Bezier {
+        return x;
+    }
+    ease_progress(eo.speed, eo.influence, ei.speed, ei.influence, x)
+}
+
 /// Re-time roving keyframes: each run of roving keys between two fixed (non-roving) keys gets
-/// times proportional to the motion-path length, so the layer moves through them at one
-/// constant speed (After Effects' "Rove Across Time"). The first and last keys never rove.
-/// Returns true when any key time changed. Key order is preserved.
+/// times at which the run's single ease (key `a`'s out side to key `b`'s in side) reaches the
+/// key's share of the motion-path length, so the layer moves through them at one continuous
+/// speed (After Effects' "Rove Across Time"; constant speed between linear fixed keys). The first
+/// and last keys never rove. Returns true when any key time changed. Key order is preserved.
 pub fn retime_roving(keys: &mut [Keyframe], spatial: bool) -> bool {
     let n = keys.len();
     if n < 3 {
@@ -453,22 +512,30 @@ pub fn retime_roving(keys: &mut [Keyframe], spatial: bool) -> bool {
     while a < n - 1 {
         let Some(b) = (a + 1..n).find(|&j| !keys[j].roving) else { break };
         if b > a + 1 {
-            // Cumulative path length (spatial) or value distance (other) of the run a..=b.
-            let mut acc = vec![0.0];
-            for i in a..b {
-                let len = if spatial && matches!(keys[i].value, Value::Vec2(_) | Value::Vec3(_)) {
-                    spatial_segment_length(keys, i)
-                } else {
-                    let x = keys[i].value.components();
-                    let y = keys[i + 1].value.components();
-                    x.iter().zip(&y).map(|(p, q)| (q - p) * (q - p)).sum::<f64>().sqrt()
-                };
-                acc.push(acc.last().unwrap_or(&0.0) + len);
-            }
+            let acc = run_lengths(keys, a, b, spatial);
             let total = *acc.last().unwrap_or(&0.0);
             let (t0, t1) = (keys[a].time, keys[b].time);
+            // Time fraction at which the run's ease reaches each roving key's share of the length.
+            let times: Vec<f64> = (1..b - a)
+                .map(|o| {
+                    let target = if total > 1e-9 { acc.get(o).unwrap_or(&total) / total } else { o as f64 / (b - a) as f64 };
+                    if total <= 1e-9 {
+                        return target;
+                    }
+                    let (mut lo, mut hi) = (0.0, 1.0);
+                    for _ in 0..60 {
+                        let mid = (lo + hi) * 0.5;
+                        if roving_progress(keys, a, b, total, spatial, mid) < target {
+                            lo = mid;
+                        } else {
+                            hi = mid;
+                        }
+                    }
+                    (lo + hi) * 0.5
+                })
+                .collect();
             for (o, i) in (a + 1..b).enumerate() {
-                let f = if total > 1e-9 { acc[o + 1] / total } else { (o + 1) as f64 / (b - a) as f64 };
+                let f = times.get(o).copied().unwrap_or(0.0);
                 let span = i128::from(t1.0) - i128::from(t0.0);
                 let mut retimed = i128::from(t0.0) + (span as f64 * f).round() as i128;
                 // Keep every roving key strictly between its neighbours: a zero-length segment would otherwise
@@ -536,6 +603,16 @@ pub fn segment_value(keys: &[Keyframe], i: usize, t: Tick, spatial: bool) -> Val
     // it shapes the incoming segment like a linear side, as in the Graph Editor and Lottie export.
     let lin_in = b.in_interp != Interp::Bezier;
     let is_spatial = spatial && matches!(a.value, Value::Vec2(_) | Value::Vec3(_));
+    // Inside a roving run, the run's single ease decides how far along this segment the key is.
+    let run = roving_run(keys, i).and_then(|(ra, rb)| {
+        let acc = run_lengths(keys, ra, rb, spatial);
+        let total = *acc.last()?;
+        let (s0, s1) = (*acc.get(i - ra)?, *acc.get(i + 1 - ra)?);
+        let (r0, r1) = (secs(keys[ra].time), secs(keys[rb].time));
+        let rx = ((secs(t) - r0) / (r1 - r0).max(1e-12)).clamp(0.0, 1.0);
+        let along = roving_progress(keys, ra, rb, total, spatial, rx) * total;
+        (total > 1e-12 && s1 - s0 > 1e-12).then(|| ((along - s0) / (s1 - s0)).clamp(0.0, 1.0))
+    });
     if is_spatial {
         let p0 = v3(&a.value);
         let p3 = v3(&b.value);
@@ -543,7 +620,9 @@ pub fn segment_value(keys: &[Keyframe], i: usize, t: Tick, spatial: bool) -> Val
         let (in_t, _) = spatial_tangents(keys, i + 1);
         let seg = SpatialSeg::new([p0, [p0[0] + out_t[0], p0[1] + out_t[1], p0[2] + out_t[2]], [p3[0] + in_t[0], p3[1] + in_t[1], p3[2] + in_t[2]], p3]);
         let len = seg.length();
-        let f = if lin_out && lin_in || len <= 1e-12 {
+        let f = if let Some(f) = run {
+            f
+        } else if lin_out && lin_in || len <= 1e-12 {
             x
         } else {
             let eo = if lin_out { Ease { speed: len / dur, influence: 1.0 / 3.0 } } else { effective_ease(keys, i, 0, true, true) };
@@ -558,6 +637,9 @@ pub fn segment_value(keys: &[Keyframe], i: usize, t: Tick, spatial: bool) -> Val
             seg.at_length(f * len)
         };
         return a.value.with_components(&p);
+    }
+    if let Some(f) = run {
+        return a.value.lerp(&b.value, f);
     }
     if lin_out && lin_in {
         return a.value.lerp(&b.value, x);
@@ -996,6 +1078,29 @@ mod tests {
         keys[0].roving = true;
         retime_roving(&mut keys, true);
         assert!(!keys[0].roving);
+    }
+
+    #[test]
+    fn roving_span_eases_as_one_speed_hill() {
+        // Issue #1935: rove the middle keys, Easy Ease the ends: one smooth speed hill across the span.
+        let pts = [[100.0, 500.0], [400.0, 200.0], [800.0, 450.0], [1100.0, 150.0], [1500.0, 400.0]];
+        let times = [0.0, 0.865, 1.525, 2.003, 3.0];
+        let mut keys: Vec<Keyframe> = pts.iter().zip(times).map(|(p, t)| Keyframe::new(s(t), Value::Vec2(*p))).collect();
+        for k in &mut keys[1..4] {
+            k.roving = true;
+        }
+        retime_roving(&mut keys, true);
+        for i in [0, 4] {
+            easy_ease(&mut keys[i], true, true);
+        }
+        retime_roving(&mut keys, true);
+        let v: Vec<f64> = (1..60).map(|i| speed(&keys, s(i as f64 * 0.05), true)).collect();
+        let peak = v.iter().enumerate().fold(0, |m, (i, x)| if *x > v[m] { i } else { m });
+        assert!(v[..=peak].windows(2).all(|w| w[1] > w[0]) && v[peak..].windows(2).all(|w| w[1] < w[0]), "not one hill: {v:?}");
+        for k in &keys[1..4] {
+            let (a, b) = (speed(&keys, k.time - s(0.003), true), speed(&keys, k.time + s(0.003), true));
+            assert!((a - b).abs() < 0.02 * a.max(b), "speed jumps at {}: {a} vs {b}", k.time.seconds());
+        }
     }
 
     #[test]
