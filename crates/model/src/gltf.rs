@@ -11,7 +11,7 @@
 //! `KHR_lights_punctual` lights (directional, point, spot). Sparse accessors and morph targets
 //! are ignored.
 
-use std::sync::Arc;
+use std::{cell::Cell, sync::Arc};
 
 use serde_json::Value;
 
@@ -112,6 +112,9 @@ fn load_uri(uri: &str, resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<Vec<
 struct Doc<'a> {
     j: &'a Value,
     buffers: Vec<Vec<u8>>,
+    /// Zero components that buffer-less accessors may still allocate, across the whole file:
+    /// nothing backs them, so many references to one capped accessor must not multiply (#2139).
+    zero_left: Cell<usize>,
 }
 
 fn arr<'v>(v: &'v Value, k: &str) -> &'v [Value] {
@@ -126,8 +129,9 @@ fn indices(v: &Value, k: &str) -> Vec<usize> {
     arr(v, k).iter().filter_map(Value::as_u64).filter_map(|c| usize::try_from(c).ok()).collect()
 }
 
-/// The most components an accessor without a buffer view (all zeros) may have: nothing in the
-/// file backs its count, so it is capped instead of checked against a buffer (#1235).
+/// The most components accessors without a buffer view (all zeros) may have, together: nothing
+/// in the file backs their counts, so they are capped instead of checked against a buffer
+/// (#1235, #2139).
 const MAX_ZERO_COMPONENTS: usize = 1 << 24;
 
 /// Where an accessor's elements lie in its buffer: `count` elements of `elem` bytes, `stride`
@@ -150,6 +154,13 @@ fn nums<const N: usize>(v: &Value, k: &str, d: [f64; N]) -> [f64; N] {
     out
 }
 
+/// Bytes of component `c` of element `i`, with checked offsets (the span was validated, but
+/// nothing derived from the file is indexed unchecked).
+fn component(buf: &[u8], base: usize, stride: usize, i: usize, c: usize, csize: usize) -> Result<&[u8]> {
+    let o = i.checked_mul(stride).and_then(|o| o.checked_add(base)).and_then(|o| o.checked_add(c.checked_mul(csize)?));
+    o.and_then(|o| buf.get(o..o.checked_add(csize)?)).ok_or_else(|| perr("accessor reads past its buffer"))
+}
+
 impl Doc<'_> {
     /// The accessor's element count and total components (`count * n`), checked; and its span in
     /// the buffer, validated before anything is allocated from the count. `None` for an
@@ -161,16 +172,18 @@ impl Doc<'_> {
         };
         let total = count.checked_mul(n).ok_or_else(|| perr("accessor count is too large"))?;
         let Some(bv) = idx(acc, "bufferView") else {
-            if total > MAX_ZERO_COMPONENTS {
-                return Err(perr(format!("accessor without a bufferView has {total} components (at most {MAX_ZERO_COMPONENTS})")));
-            }
+            let left = self.zero_left.get();
+            let Some(rest) = left.checked_sub(total) else {
+                return Err(perr(format!("accessors without a bufferView have more than {MAX_ZERO_COMPONENTS} components ({total} requested, {left} left)")));
+            };
+            self.zero_left.set(rest);
             return Ok((count, total, None));
         };
         let view = arr(self.j, "bufferViews").get(bv).ok_or_else(|| perr(format!("no bufferView {bv}")))?;
         let buf = self.buffers.get(idx(view, "buffer").unwrap_or(0)).ok_or_else(|| perr("bufferView buffer out of range"))?;
         let past = || perr("accessor reads past its buffer");
         let base = idx(view, "byteOffset").unwrap_or(0).checked_add(idx(acc, "byteOffset").unwrap_or(0)).ok_or_else(past)?;
-        let elem = csize * n;
+        let elem = csize.checked_mul(n).ok_or_else(past)?;
         let stride = idx(view, "byteStride").filter(|s| *s > 0).unwrap_or(elem);
         if stride < elem {
             return Err(perr(format!("bufferView byteStride {stride} is smaller than its {elem}-byte elements")));
@@ -214,8 +227,7 @@ impl Doc<'_> {
         // Matrices of 1/2-byte components pad columns to 4 bytes; ignored (rare).
         for i in 0..count {
             for c in 0..n {
-                let o = base + i * stride + c * csize;
-                let s = buf.get(o..o + csize).ok_or_else(|| perr("accessor reads past its buffer"))?;
+                let s = component(buf, base, stride, i, c, csize)?;
                 out[i * n + c] = match ct {
                     5126 => f32::from_le_bytes([s[0], s[1], s[2], s[3]]),
                     5125 => u32::from_le_bytes([s[0], s[1], s[2], s[3]]) as f32,
@@ -264,8 +276,7 @@ impl Doc<'_> {
         let mut out = Vec::with_capacity(total);
         for i in 0..count {
             for c in 0..n {
-                let o = base + i * stride + c * csize;
-                let s = buf.get(o..o + csize).ok_or_else(|| perr("accessor reads past its buffer"))?;
+                let s = component(buf, base, stride, i, c, csize)?;
                 out.push(match csize {
                     1 => s[0] as u32,
                     2 => u16::from_le_bytes([s[0], s[1]]) as u32,
@@ -300,7 +311,7 @@ pub fn parse(bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<
         };
         buffers.push(data);
     }
-    let d = Doc { j: &j, buffers };
+    let d = Doc { j: &j, buffers, zero_left: Cell::new(MAX_ZERO_COMPONENTS) };
 
     // Images → textures (decoded once per image; samplers set the wrap modes).
     let mut images: Vec<Option<Arc<Texture>>> = vec![];

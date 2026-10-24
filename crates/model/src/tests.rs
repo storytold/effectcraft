@@ -564,3 +564,35 @@ fn gltf_strided_and_buffer_less_accessors_still_import() {
     let doc = gltf_doc(r#"{"bufferView": 0, "componentType": 5126, "type": "VEC3", "count": 3}"#, r#"{"buffer": 0, "byteStride": 24}"#, 59);
     assert!(crate::gltf::parse(doc.as_bytes(), &|_| None).is_err());
 }
+
+#[test]
+fn gltf_issue_2139_huge_mat4_count_is_an_error() {
+    // The audit's trigger (#2139): a MAT4 accessor with a count of 10^11, with and without a
+    // buffer view, must fail cleanly instead of sizing an allocation from the count.
+    let view = r#"{"buffer": 0, "byteLength": 64}"#;
+    for acc in [
+        r#"{"bufferView": 0, "componentType": 5126, "type": "MAT4", "count": 100000000000}"#,
+        r#"{"componentType": 5126, "type": "MAT4", "count": 100000000000}"#,
+    ] {
+        let doc = gltf_doc(r#"{"bufferView": 0, "componentType": 5126, "type": "VEC3", "count": 1}"#, view, 64)
+            .replace(r#""count": 1}]"#, &format!(r#""count": 1}}, {acc}]"#))
+            .replace(r#""nodes": [{"mesh": 0}]"#, r#""nodes": [{"mesh": 0, "skin": 0}], "skins": [{"joints": [0], "inverseBindMatrices": 1}]"#);
+        assert!(doc.contains("inverseBindMatrices"), "{doc}");
+        assert!(crate::gltf::parse(doc.as_bytes(), &|_| None).is_err(), "{acc}");
+    }
+}
+
+#[test]
+fn gltf_buffer_less_accessors_share_one_zero_budget() {
+    // Each buffer-less accessor is capped, but nothing backs any of them, so referencing a capped
+    // one from many primitives must not multiply the allocation (#2139).
+    let acc = r#"{"componentType": 5126, "type": "VEC3", "count": 5000000}"#;
+    let prims = [r#"{"attributes": {"POSITION": 0}}"#; 4].join(", ");
+    let doc = gltf_doc(acc, r#"{"buffer": 0}"#, 3).replace(r#"[{"attributes": {"POSITION": 0}}]"#, &format!("[{prims}]"));
+    assert_eq!(doc.matches(r#""POSITION": 0"#).count(), 4);
+    let e = crate::gltf::parse(doc.as_bytes(), &|_| None).err().unwrap_or_else(|| panic!("imported"));
+    assert!(e.to_string().contains("without a bufferView"), "{e}");
+    // One such accessor read once still imports.
+    let doc = gltf_doc(acc, r#"{"buffer": 0}"#, 3);
+    assert!(crate::gltf::parse(doc.as_bytes(), &|_| None).is_ok());
+}
