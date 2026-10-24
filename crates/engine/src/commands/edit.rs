@@ -146,6 +146,11 @@ fn duplicate(s: &mut Session, p: &Value) -> Result<Value> {
         st.selected_layers = created.clone();
         Ok(created)
     })?;
+    // Duplicating selects the copies, so an open text edit on a now-deselected layer ends
+    // (#2226): typing must not keep editing an unselected layer.
+    if s.state.text_edit.as_ref().is_some_and(|e| !s.state.selected_layers.contains(&e.layer)) {
+        super::text_edit::end_edit(s, &Value::Null)?;
+    }
     Ok(json!(new.iter().map(|l| l.0).collect::<Vec<_>>()))
 }
 
