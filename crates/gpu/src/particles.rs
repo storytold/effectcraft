@@ -33,6 +33,13 @@ pub(crate) struct Checkpoints {
     clock: u64,
 }
 
+impl Checkpoints {
+    /// Forget every kept state (after a failed frame, whose buffers may be invalid).
+    pub(crate) fn clear(&mut self) {
+        self.list.clear();
+    }
+}
+
 fn pipes(g: &GpuContext) -> &Pipes {
     g.particles.get_or_init(|| {
         let d = &g.device;
