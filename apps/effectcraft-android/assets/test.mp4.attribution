@@ -1,0 +1,6 @@
+asset: test.mp4.attribution
+title: Self-test clip (320x240 H.264)
+author: The EffectCraft contributors
+source: generated with ffmpeg from a synthetic test pattern for the on-device self-test
+license: MIT OR Apache-2.0
+added: 2026-10-24

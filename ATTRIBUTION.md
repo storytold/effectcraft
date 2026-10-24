@@ -124,3 +124,25 @@ under [`docs/brand/LICENSE-brand.txt`](docs/brand/LICENSE-brand.txt). Forks and 
 | `docs/brand/artcraft-mark.svg` | ArtCraft Team | Original work: first-party ArtCraft brand mark (ArtCraft symbol ("A" mark), blue) | ArtCraft brand terms, not open source (`docs/brand/LICENSE-brand.txt`) |
 
 - Appearance theme previews, drawn procedurally from original shapes: `crates/ui-egui/src/panels/settings.rs` (original work, MIT OR Apache-2.0).
+
+## Android launcher icons and self-test fixtures (effectcraft)
+
+`apps/effectcraft-android` ships the Android Studio new-project template's default launcher art (as a
+stand-in -- the app's own brand icon is not in this repository), plus the fixture the on-device
+start-up self-test decodes.
+
+| Asset | Author | Source | Licence |
+|---|---|---|---|
+| `apps/effectcraft-android/android/app/src/main/res/drawable/ic_launcher_foreground.png` | The Android Open Source Project | Android Studio new-project template, unmodified | Apache-2.0 |
+| `apps/effectcraft-android/android/app/src/main/res/mipmap-hdpi/ic_launcher.png` | The Android Open Source Project | Android Studio new-project template, unmodified | Apache-2.0 |
+| `apps/effectcraft-android/android/app/src/main/res/mipmap-hdpi/ic_launcher_round.png` | The Android Open Source Project | Android Studio new-project template, unmodified | Apache-2.0 |
+| `apps/effectcraft-android/android/app/src/main/res/mipmap-mdpi/ic_launcher.png` | The Android Open Source Project | Android Studio new-project template, unmodified | Apache-2.0 |
+| `apps/effectcraft-android/android/app/src/main/res/mipmap-mdpi/ic_launcher_round.png` | The Android Open Source Project | Android Studio new-project template, unmodified | Apache-2.0 |
+| `apps/effectcraft-android/android/app/src/main/res/mipmap-xhdpi/ic_launcher.png` | The Android Open Source Project | Android Studio new-project template, unmodified | Apache-2.0 |
+| `apps/effectcraft-android/android/app/src/main/res/mipmap-xhdpi/ic_launcher_round.png` | The Android Open Source Project | Android Studio new-project template, unmodified | Apache-2.0 |
+| `apps/effectcraft-android/android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png` | The Android Open Source Project | Android Studio new-project template, unmodified | Apache-2.0 |
+| `apps/effectcraft-android/android/app/src/main/res/mipmap-xxhdpi/ic_launcher_round.png` | The Android Open Source Project | Android Studio new-project template, unmodified | Apache-2.0 |
+| `apps/effectcraft-android/android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png` | The Android Open Source Project | Android Studio new-project template, unmodified | Apache-2.0 |
+| `apps/effectcraft-android/android/app/src/main/res/mipmap-xxxhdpi/ic_launcher_round.png` | The Android Open Source Project | Android Studio new-project template, unmodified | Apache-2.0 |
+| `apps/effectcraft-android/assets/test.mp4` | The EffectCraft contributors | generated with ffmpeg from a synthetic test pattern for the on-device self-test | MIT OR Apache-2.0 |
+| `apps/effectcraft-android/assets/test.png` | The Android Open Source Project | Android Studio new-project template, unmodified | Apache-2.0 |
