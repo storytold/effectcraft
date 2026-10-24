@@ -803,6 +803,32 @@ fn manifest_controls(project: &Project, cid: ItemId, eg: &EssentialGraphics) -> 
     out
 }
 
+/// The files a footage item is read from: its frames for a sequence, else its file.
+fn footage_files(f: &effectcraft_project::Footage) -> Vec<String> {
+    if f.sequence.is_empty() { vec![f.path.clone()] } else { f.sequence.clone() }
+}
+
+/// The files exporting `cid` as a template reads and packs: every file of every footage item it
+/// uses, as [`export_template`] reads them.
+pub fn template_source_files(project: &Project, cid: ItemId) -> Vec<String> {
+    let mut out = vec![];
+    for id in essential::dependencies(project, cid) {
+        if let Some(ItemKind::Footage(f)) = project.item(id).map(|i| &i.kind)
+            && f.data.is_none()
+        {
+            out.extend(footage_files(f));
+        }
+    }
+    out
+}
+
+/// The files `essential.exportTemplate` would read for the same `comp`, so a confined agent's
+/// export can be checked against its read roots first (#1228).
+fn template_sources(s: &mut Session, p: &Value) -> Result<Value> {
+    let cid = eg_comp(s, p)?;
+    Ok(json!({"comp": cid.0, "files": template_source_files(&s.project, cid)}))
+}
+
 fn export_template(s: &mut Session, p: &Value) -> Result<Value> {
     const C: &str = "essential.exportTemplate";
     let cid = eg_comp(s, p)?;
@@ -823,7 +849,7 @@ fn export_template(s: &mut Session, p: &Value) -> Result<Value> {
         if let ItemKind::Footage(f) = &mut it.kind
             && f.data.is_none()
         {
-            let files: Vec<String> = if f.sequence.is_empty() { vec![f.path.clone()] } else { f.sequence.clone() };
+            let files = footage_files(f);
             let mut stored = vec![];
             for (k, file) in files.iter().enumerate() {
                 if let Ok(bytes) = s.services.read_file(file) {
@@ -1074,5 +1100,6 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
         query!("essential.instance", "Essential Properties of a precomp layer", "{layer}", instance_json),
         query!("essential.templateInfo", "Read a template's manifest", "{path}", template_info),
+        query!("essential.templateSources", "Files a template export would read", "{comp?} → {comp, files: [path]}", template_sources),
     ]
 }
