@@ -228,7 +228,8 @@ fn property_reply(p: &Value, layer: &Layer, pr: &Property, time: Tick, value: Va
 /// property (by match path, `transform/position`, `effects/<effect>#n/<param>`) of every other
 /// selected, unlocked layer of the comp whose value is of the same kind, as (layer, uid). Empty
 /// when `selected` is not set or the edited layer isn't selected. After Effects applies a value
-/// edit, the stopwatch and the keyframe button to all selected layers (#355, #491).
+/// edit, the stopwatch and the keyframe button to all selected layers (#355, #491). A parameter
+/// of a selected Puppet pin also reaches the same parameter of the other selected pins (#1751).
 fn selected_twins(s: &Session, p: &Value, cmd: &str) -> Result<Vec<(LayerId, Uid)>> {
     if b_p(p, "selected") != Some(true) {
         return Ok(vec![]);
@@ -241,14 +242,31 @@ fn selected_twins(s: &Session, p: &Value, cmd: &str) -> Result<Vec<(LayerId, Uid
         return Ok(vec![]);
     }
     let kind = (pr.value.kind_name(), pr.value.components().len());
-    Ok(s.state
+    let same_kind = |q: &&Property| (q.value.kind_name(), q.value.components().len()) == kind;
+    let mut twins: Vec<(LayerId, Uid)> = s
+        .state
         .selected_layers
         .iter()
         .filter(|o| **o != lid)
         .filter_map(|o| comp.layer(*o))
         .filter(|l| !l.switches.locked)
-        .filter_map(|l| l.props.prop(&path).filter(|q| (q.value.kind_name(), q.value.components().len()) == kind).map(|q| (l.id, q.uid)))
-        .collect())
+        .filter_map(|l| l.props.prop(&path).filter(same_kind).map(|q| (l.id, q.uid)))
+        .collect();
+    // A parameter of a selected Puppet pin: the same parameter of every other selected pin, on
+    // this layer too, so several pins move or key together (#1751).
+    let pin = super::puppet::layer_pins(layer).find(|g| g.props().any(|q| q.uid == uid)).map(|g| g.uid);
+    if let Some(pin) = pin
+        && s.state.selected_props.contains(&(lid, pin))
+    {
+        for (ol, ou) in &s.state.selected_props {
+            let Some(other) = comp.layer(*ol).filter(|l| !l.switches.locked) else { continue };
+            let Some(q) = super::puppet::layer_pins(other).find(|g| g.uid == *ou).and_then(|g| g.get(&pr.match_id)).filter(same_kind) else { continue };
+            if (*ol, q.uid) != (lid, uid) && !twins.contains(&(*ol, q.uid)) {
+                twins.push((*ol, q.uid));
+            }
+        }
+    }
+    Ok(twins)
 }
 
 /// `p` aimed at property `uid` of layer `lid` instead.
