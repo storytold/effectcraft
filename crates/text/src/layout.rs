@@ -565,6 +565,34 @@ fn space_item(glyphs: &mut [ShapedGlyph], style: &TextStyle, text: &str, para_st
     }
 }
 
+/// After Effects' first-baseline offset of paragraph (box) text for a face at nominal size
+/// `px`: the height of its lowercase `d`, in whole thousandths of an em. Measured in After
+/// Effects 2026 (case 818): the first baseline sits 69.50 px below the box top for Times New
+/// Roman at 100 px (its `d` is 1422/2048 em, 694.3 thousandths, rounded 695) and 71.60 px for
+/// Arial (1466/2048, 715.8, rounded 716), at 50 px half of that; superscript text keeps the
+/// line where normal text puts it and only raises its glyphs. `None` without a `d` outline.
+fn first_ascent(face: FaceId, px: f32) -> Option<f32> {
+    let f = fonts::face(face);
+    let gid = f.glyph('d')?;
+    let units = crate::outline_units(face, gid)?;
+    let top = kurbo::Shape::bounding_box(&*units).y1 as f32;
+    let em = (top / f.units_per_em() * 1000.0).round() / 1000.0;
+    plausible_first(em, px, f.metrics(px).ascent)
+}
+
+/// A `d` at least this fraction of the font ascent is a Latin lowercase ascender; a shorter one
+/// (a symbol or icon font's `d`) would put the first baseline almost at the box top, so the font
+/// ascent is used instead (the rule before the `d` height).
+const MIN_D_OF_ASCENT: f32 = 0.3;
+
+/// The first baseline `em * px` below the box top, if `em` (the `d` height in em) is plausible:
+/// finite, positive, under 4 em and at least [`MIN_D_OF_ASCENT`] of the font `ascent` (px).
+fn plausible_first(em: f32, px: f32, ascent: f32) -> Option<f32> {
+    let h = em * px;
+    let tall_enough = !(ascent.is_finite() && ascent > 0.0) || h >= MIN_D_OF_ASCENT * ascent;
+    (h.is_finite() && h > 0.0 && em < 4.0 && tall_enough).then_some(h)
+}
+
 struct ParaLine {
     range: Range<usize>,
     glyphs: Vec<Glyph>,
@@ -575,6 +603,9 @@ struct ParaLine {
     hang: (f32, f32),
     ascent: f32,
     descent: f32,
+    /// Where a box's first line puts its baseline below the box top ([`first_ascent`] of the
+    /// line's styles at their nominal size; the font ascent where a face has no `d`).
+    first: f32,
     /// Line advance (largest leading on the line).
     advance: f32,
     align: Align,
@@ -619,8 +650,16 @@ fn paragraph(
         let st = &runs[si].1;
         fonts::face(primaries[si].face).metrics(st.glyph_size())
     };
+    let style_first = |si: usize| {
+        let st = &runs[si].1;
+        first_ascent(primaries[si].face, st.size).unwrap_or_else(|| fonts::face(primaries[si].face).metrics(st.size).ascent)
+    };
     let eff_align = |last: bool| -> Align {
-        if (last || width.is_none()) && para.align == Align::Justify {
+        if rtl_para && width.is_none() && para.align == Align::Justify {
+            // Right-to-left point text with a justified paragraph sits flush at its start, the
+            // right (After Effects 2026, every justify code; left-to-right not measured).
+            Align::Right
+        } else if (last || width.is_none()) && para.align == Align::Justify {
             if width.is_none() && para.justify_last == Align::Justify { Align::Left } else { para.justify_last }
         } else {
             para.align
@@ -638,6 +677,7 @@ fn paragraph(
             hang: (0.0, 0.0),
             ascent: pm.ascent,
             descent: pm.descent,
+            first: style_first(si),
             advance: runs[si].1.line_advance(),
             align: eff_align(true),
             avail: avail_for(true),
@@ -753,7 +793,10 @@ fn paragraph(
             let opps: Vec<usize> = unicode_linebreak::linebreaks(text).map(|(p, _)| p).collect();
             let avail = |line: usize| avail_for(line == 0).unwrap_or(f32::MAX);
             if para.every_line && opps.len() > 1 && opps.len() <= 1500 {
-                // Minimise the summed squared slack of every line but the last.
+                // Minimise the summed squared slack of every line but the last; with Justify All
+                // the last line is stretched too, so its slack counts (After Effects then balances
+                // the lines: 4 / 4 / 4 words where the other modes break 6 / 6 / 1).
+                let last_counts = para.align == Align::Justify && para.justify_last == Align::Justify;
                 let nodes: Vec<usize> = std::iter::once(0).chain(opps.iter().copied()).collect();
                 let m = nodes.len();
                 let mut best = vec![(f32::INFINITY, 0usize); m];
@@ -773,7 +816,7 @@ fn paragraph(
                         let slack = maxw - w;
                         let cost = if over {
                             1e12 + w
-                        } else if j == m - 1 {
+                        } else if j == m - 1 && !last_counts {
                             0.0
                         } else {
                             slack * slack
@@ -925,7 +968,7 @@ fn paragraph(
         carets.sort_by_key(|c| c.0);
         carets.dedup_by_key(|c| c.0);
         // Line metrics: the tallest face and the largest leading on the line.
-        let (mut asc, mut desc, mut adv) = (0.0f32, 0.0f32, 0.0f32);
+        let (mut asc, mut desc, mut adv, mut first) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
         let char_start = chars.partition_point(|c| c.0 < r.start);
         let char_end = chars.partition_point(|c| c.0 < r.end);
         let mut seen: Vec<usize> = chars[char_start..char_end].iter().map(|c| c.6).collect();
@@ -940,6 +983,7 @@ fn paragraph(
             asc = asc.max(m.ascent + rise.max(0.0));
             desc = desc.max(m.descent - rise.min(0.0));
             adv = adv.max(runs[si].1.line_advance());
+            first = first.max(style_first(si));
         }
         for g in &glyphs {
             if g.face != primaries[g.run].face {
@@ -958,6 +1002,7 @@ fn paragraph(
             hang,
             ascent: asc,
             descent: desc,
+            first,
             advance: adv,
             align,
             avail,
@@ -1038,7 +1083,9 @@ pub fn layout_rich_uncached(text: &str, runs: &[(Range<usize>, TextStyle)], para
     for (i, (pi, pl)) in plines.into_iter().enumerate() {
         let para = para_at(pi);
         if i == 0 {
-            baseline = if width.is_some() { pl.ascent } else { 0.0 };
+            // Vertical type keeps its first column at the font ascent (not measured in AE).
+            let vertical = runs.iter().any(|r| r.1.vertical);
+            baseline = if width.is_some() { if vertical { pl.ascent } else { pl.first } } else { 0.0 };
         } else {
             let prev_para = lay.lines.last().map_or(pi, |l| l.para);
             let mut adv = pl.advance + para.leading;
@@ -1269,6 +1316,65 @@ mod tests {
         assert!(left.lines.iter().all(|l| l.width <= 300.0 + 0.01));
     }
 
+    /// After Effects 2026 (case 818): box text's first baseline is the `d` height (in whole
+    /// thousandths of an em) below the box top, at the nominal size also for superscript, whose
+    /// glyphs are then raised. EffectCraft used the font ascent of the drawn size (plus the
+    /// superscript rise): 89.1 px instead of 69.5 for Times New Roman at 100 px, and the
+    /// superscript glyphs 15.8 px low.
+    #[test]
+    fn box_text_first_baseline_is_the_d_height_as_after_effects() {
+        let boxed = ParagraphStyle { width: Some(600.0), ..Default::default() };
+        // The rule on a bundled face (works everywhere).
+        for (family, size) in [("Inter", 100.0f32), ("Noto Serif", 50.0)] {
+            let s = TextStyle { family: family.into(), ..st(size) };
+            let r = fonts::resolve(family, "Regular");
+            let f = fonts::face(r.face);
+            let d = crate::outline_units(r.face, f.glyph('d').unwrap()).unwrap();
+            let em = (kurbo::Shape::bounding_box(&*d).y1 as f32 / f.units_per_em() * 1000.0).round() / 1000.0;
+            let l = layout("Hxg", &s, &boxed);
+            assert!((l.lines[0].baseline - em * size).abs() < 1e-3, "{family}: {} vs {}", l.lines[0].baseline, em * size);
+            assert!(l.lines[0].baseline < l.lines[0].ascent, "{family}: below the full ascent");
+        }
+        // After Effects' numbers, where the real fonts are installed.
+        for (family, ae_normal) in [("Times New Roman", 69.5008f32), ("Arial", 71.5988)] {
+            let r = fonts::resolve(family, "Regular");
+            if fonts::face(r.face).info.family != family {
+                continue;
+            }
+            for (size, script, glyph_baseline) in
+                [(100.0, Script::Normal, ae_normal), (50.0, Script::Normal, ae_normal / 2.0), (100.0, Script::Super, ae_normal - 100.0 * SCRIPT_OFFSET)]
+            {
+                let s = TextStyle { family: family.into(), script, ..st(size) };
+                let l = layout("Hxg", &s, &boxed);
+                let drawn = l.glyphs[0].y;
+                assert!((drawn - glyph_baseline).abs() < 0.15, "{family} {size} {script:?}: {drawn} vs AE {glyph_baseline}");
+            }
+        }
+    }
+
+    /// CodeRabbit on #1875: a face whose `d` is very short (a symbol or icon font) would put the
+    /// first baseline almost at the box top; below 0.3 of the ascent the font ascent is used.
+    #[test]
+    fn a_short_d_falls_back_to_the_font_ascent() {
+        // Latin faces: the `d` is about 0.7 em, the ascent about 0.9 em.
+        let near = |v: Option<f32>, want: f32| v.is_some_and(|v| (v - want).abs() < 1e-3);
+        assert!(near(plausible_first(0.7, 100.0, 90.0), 70.0));
+        // A `d` a tenth of the ascent: not a lowercase ascender.
+        assert_eq!(plausible_first(0.09, 100.0, 90.0), None);
+        assert_eq!(plausible_first(0.26, 100.0, 90.0), None);
+        assert!(near(plausible_first(0.28, 100.0, 90.0), 28.0));
+        // Broken values stay rejected; an unusable ascent does not reject a sane `d`.
+        for (em, px) in [(0.0, 100.0), (-0.5, 100.0), (f32::NAN, 100.0), (5.0, 100.0), (0.7, f32::INFINITY)] {
+            assert_eq!(plausible_first(em, px, 90.0), None, "{em} {px}");
+        }
+        assert!(near(plausible_first(0.7, 100.0, f32::NAN), 70.0));
+        // The bundled faces keep the `d` rule.
+        for family in ["Inter", "Noto Serif"] {
+            let r = fonts::resolve(family, "Regular");
+            assert!(first_ascent(r.face, 100.0).is_some(), "{family}");
+        }
+    }
+
     #[test]
     fn newlines_make_paragraphs_and_leading_adds() {
         let l = layout("one\ntwo\n\nfour", &st(30.0), &ParagraphStyle::default());
@@ -1456,6 +1562,23 @@ mod tests {
         assert!(every.lines.iter().all(|ln| ln.width <= 320.0 + 0.5));
     }
 
+    /// After Effects 2026 (EXPORTER t6): with Justify All and the every-line composer, a box that
+    /// the other justifications break into lines of 6, 6 and 1 words breaks 4 / 4 / 4, so the
+    /// stretched last line is not a lone word; word positions then match AE to 1 px.
+    #[test]
+    fn justify_all_balances_the_lines_with_the_every_line_composer() {
+        let text = "one two three four five six seven eight nine ten eleven twelve";
+        let s = st(30.0);
+        let words = |l: &Layout| -> Vec<usize> { l.lines.iter().map(|ln| text[ln.range.clone()].split_whitespace().count()).collect() };
+        let p = |last: Align| ParagraphStyle { width: Some(450.0), align: Align::Justify, justify_last: last, every_line: true, ..Default::default() };
+        let left = layout_rich_uncached(text, &[(0..text.len(), s.clone())], &[p(Align::Left)]);
+        let all = layout_rich_uncached(text, &[(0..text.len(), s)], &[p(Align::Justify)]);
+        let (wl, wa) = (words(&left), words(&all));
+        assert!(wl.last().copied().unwrap_or(0) < *wl.first().unwrap_or(&0), "{wl:?}");
+        let (lo, hi) = (wa.iter().min().copied().unwrap_or(0), wa.iter().max().copied().unwrap_or(0));
+        assert!(hi - lo <= 1, "Justify All balances the lines: {wa:?} (left-justified: {wl:?})");
+    }
+
     #[test]
     fn hanging_punctuation_overhangs_the_box() {
         let s = st(40.0);
@@ -1469,6 +1592,25 @@ mod tests {
             &[ParagraphStyle { width: Some(400.0), hanging: true, align: Align::Right, ..Default::default() }],
         );
         assert!(r.lines[0].x + r.lines[0].width > 401.0, "closing quote hangs right");
+    }
+
+    /// After Effects 2026 (EXPORTER read-back t7): right-to-left point text with any justified
+    /// code (justify last left / centre / right, justify all) sits flush right at its anchor, as
+    /// right-aligned text does.
+    #[test]
+    fn rtl_point_text_with_a_justified_paragraph_is_flush_at_its_start() {
+        let text = "Right to left";
+        let s = st(30.0);
+        let at = |align: Align, last: Align| {
+            let p = ParagraphStyle { align, justify_last: last, rtl: Some(true), ..Default::default() };
+            let l = layout_rich_uncached(text, &[(0..text.len(), s.clone())], &[p]);
+            (l.lines[0].x, l.lines[0].x + l.lines[0].width)
+        };
+        let right = at(Align::Right, Align::Left);
+        for last in [Align::Left, Align::Center, Align::Right, Align::Justify] {
+            let got = at(Align::Justify, last);
+            assert!((got.0 - right.0).abs() < 1e-3 && (got.1 - right.1).abs() < 1e-3, "{last:?}: {got:?} vs right-aligned {right:?}");
+        }
     }
 
     #[test]

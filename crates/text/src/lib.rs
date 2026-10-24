@@ -659,7 +659,9 @@ mod tests {
         let doc = TextDoc { text: "ab cd".into(), size: 20.0, box_size: Some([200.0, 100.0]), box_pos: [-100.0, -50.0], ..Default::default() };
         let l = layout_doc(&doc);
         let (a, _) = l.caret(0);
-        assert!((a.x + 100.0).abs() < 1e-6 && (a.y + 50.0).abs() < 1.0, "{a:?}");
+        // The first baseline sits the `d` height below the box top (After Effects), so the
+        // caret, which spans the font's full ascent, starts a little above the box.
+        assert!((a.x + 100.0).abs() < 1e-6 && a.y + 50.0 < 0.0 && a.y + 50.0 > -0.35 * 20.0, "{a:?}");
         // Vertical: characters run down a column, carets are horizontal.
         let v = layout_doc(&TextDoc { text: "abc\nde".into(), size: 20.0, vertical: true, ..Default::default() });
         let ys: Vec<f64> = v.glyphs.iter().filter(|g| g.line_index == 0).map(|g| g.origin.y).collect();

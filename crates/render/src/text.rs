@@ -42,7 +42,8 @@ pub struct CharXf {
     pub stroke_hsb: [f64; 3],
     pub stroke_opacity: f64,
     pub stroke_width: f64,
-    /// Tracking (1/1000 em) added before / after the character.
+    /// Tracking (pixels: an animator's Tracking Amount, as After Effects) added before / after
+    /// the character.
     pub track_before: f64,
     pub track_after: f64,
     /// Line Anchor (percent) and the selection weight it was set with.
@@ -672,10 +673,12 @@ pub fn text_geom(ctx: &EvalCtx, layer: &Layer) -> Option<TextGeom> {
         let (mut la, mut la_k) = (50.0 * f64::from(align_index(justify)), 0.0);
         for gi in li_start..li_end {
             let x = &xfs[gi];
-            let em = lay.styles.get(lay.glyphs[gi].run).map_or(doc.size, |s| s.size) / 1000.0;
-            pen += x.track_before * em;
+            // An animator's Tracking Amount is in pixels, whatever the font size (After Effects
+            // 2026: Amount 30 adds 30 px between selected characters at 80 px and at 40 px), unlike
+            // the Character panel's tracking in 1/1000 em.
+            pen += x.track_before;
             shift[gi] = pen;
-            pen += x.track_after * em + vadv[gi];
+            pen += x.track_after + vadv[gi];
             if x.line_anchor_k > la_k {
                 la = x.line_anchor;
                 la_k = x.line_anchor_k;
@@ -783,9 +786,12 @@ pub fn text_geom(ctx: &EvalCtx, layer: &Layer) -> Option<TextGeom> {
         };
         // Outline relative to the pivot.
         let local = kurbo::Affine::translate((o[0] - pivot[0], o[1] - pivot[1])) * outline;
-        let char_m = Mat4::rotate_z(x.rotation)
+        // Rx · Ry · Rz (Z turns first): the order After Effects gives a 3D layer's X / Y / Z
+        // Rotation too. #1876 moves layers to it with a helper, `Mat4::rotation_xyz`; once both
+        // land, this should call that helper (one convention, one place).
+        let char_m = Mat4::rotate_x(x.rotation_x)
             * Mat4::rotate_y(x.rotation_y)
-            * Mat4::rotate_x(x.rotation_x)
+            * Mat4::rotate_z(x.rotation)
             * Mat4::from_mat3_affine(&Mat3::skew_deg(-x.skew, x.skew_axis))
             * Mat4::scale(Vec3::from(x.scale) / 100.0)
             * Mat4::translate(-Vec3::from(x.anchor));

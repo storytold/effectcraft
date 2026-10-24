@@ -71,6 +71,15 @@ impl Mode {
     pub fn combine(self, acc: f64, v: f64) -> f64 {
         let r = match self {
             Mode::Add => acc + v,
+            // Subtracting more than is selected leaves nothing, not a negative selection (After
+            // Effects 2026: a Subtract selector over unselected characters leaves their
+            // Tracking at 0, EXPORTER read-back t8).
+            // Intended for every animator property, not only Tracking: selectors combine into one
+            // selection per character for the whole animator (`render::text::animator_selection`),
+            // which then scales each of its properties, as in After Effects, where selectors
+            // belong to the animator. The read-back observed that selection through Tracking;
+            // Opacity, Position and the rest were not measured separately.
+            Mode::Subtract if acc >= 0.0 => (acc - v).max(0.0),
             Mode::Subtract => acc - v,
             Mode::Intersect => acc * v,
             Mode::Min => acc.min(v),
@@ -352,6 +361,9 @@ mod tests {
         // A lone Subtract inverts.
         assert_eq!(Mode::Subtract.combine(Mode::Subtract.initial(), 1.0), 0.0);
         assert_eq!(Mode::Subtract.combine(Mode::Subtract.initial(), 0.0), 1.0);
+        // Subtracting from what is not selected leaves 0, not a negative selection (AE t8).
+        assert_eq!(Mode::Subtract.combine(0.0, 1.0), 0.0);
+        assert_eq!(Mode::Subtract.combine(0.25, 1.0), 0.0);
         assert_eq!(Mode::from_index(5), Mode::Difference);
     }
 

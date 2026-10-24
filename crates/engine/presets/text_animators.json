@@ -77,7 +77,7 @@
           "name": "Tracking In",
           "properties": { "tracking": 0, "opacity": 100 },
           "keys": {
-            "tracking": [[0, 400], [1.6, 0]],
+            "tracking": [[0, 40], [1.6, 0]],
             "opacity": [[0, 0], [0.8, 100]]
           },
           "ease": true,
