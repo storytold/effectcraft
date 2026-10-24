@@ -287,14 +287,15 @@ impl Buf {
         self.offset[0] += origin[0] * self.scale;
         self.offset[1] += origin[1] * self.scale;
     }
-    /// Grow by `pad` transparent pixels on every side.
+    /// Grow by `pad` transparent pixels on every side (as clamped by [`Image::effective_pad`]).
     pub fn pad(&mut self, pad: u32) {
-        if pad == 0 {
+        let eff = self.img.effective_pad(pad);
+        if eff == 0 {
             return;
         }
-        self.img = self.img.padded(pad);
-        self.offset[0] += pad as f64;
-        self.offset[1] += pad as f64;
+        self.img = self.img.padded(eff);
+        self.offset[0] += eff as f64;
+        self.offset[1] += eff as f64;
     }
 }
 
@@ -1305,6 +1306,20 @@ mod tests {
         let img = Image::filled(4, 3, [0.5, 0.25, 0.125, 1.0]);
         let out = run_fx("ec.control.slider", &[("slider", num(3.0))], img.clone(), 0.0, EffectEnv::default());
         assert_eq!(out.img.data, img.data);
+    }
+
+    #[test]
+    fn pad_offset_follows_the_clamped_pad() {
+        // Image::padded clamps a hostile pad to keep each side within MAX_PADDED_SIDE; the offset
+        // must move by the pad actually applied, or the content drifts from its layer position.
+        let mut img = Image::new(29_990, 2);
+        img.set(0, 0, [1.0, 0.0, 0.0, 1.0]);
+        let mut buf = Buf { img, offset: [3.0, 4.0], scale: 1.0 };
+        buf.pad(u32::MAX);
+        // Width binds: (MAX_PADDED_SIDE - 29 990) / 2 = 5.
+        assert_eq!(buf.offset, [8.0, 9.0]);
+        let (x, y) = buf.to_px([-3.0, -4.0]);
+        assert_eq!(buf.img.get(x as i64, y as i64), [1.0, 0.0, 0.0, 1.0]);
     }
 
     #[test]

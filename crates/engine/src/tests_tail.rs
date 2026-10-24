@@ -421,6 +421,70 @@ fn camera_focus_commands_undo_and_serde() {
     assert!(s.execute("camera.linkFocusToPoi", json!({})).is_ok());
 }
 
+/// Set Focus Distance to Layer: degenerate targets (behind the camera, exactly at it) are clean
+/// errors, and a depth-of-field frame renders right after the command.
+#[test]
+fn camera_set_focus_to_layer_degenerate_targets_and_dof_frame() {
+    let mut s = comp(400, 300);
+    let t = s.execute("layer.newSolid", json!({"color": "#ffffff", "width": 50, "height": 50})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.setSwitch", json!({"layers": [t], "switch": "threeD", "value": true})).unwrap();
+    let cam = s.execute("layer.newCamera", json!({})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("prop.set", json!({"layer": cam, "path": "transform/position", "value": [200, 150, -500]})).unwrap();
+    s.execute("prop.set", json!({"layer": cam, "path": "cameraOptions/dof", "value": true})).unwrap();
+    s.execute("layer.select", json!({"layers": [cam, t]})).unwrap();
+    // Behind the camera (which now sits at z = −500 looking towards +z).
+    s.execute("layer.setTransform", json!({"layer": t, "prop": "position", "value": [200, 150, -1000]})).unwrap();
+    let e = s.execute("camera.setFocusToLayer", json!({})).unwrap_err().to_string();
+    assert!(e.contains("behind the camera"), "{e}");
+    // Exactly at the camera: depth 0, still a clean error.
+    s.execute("layer.setTransform", json!({"layer": t, "prop": "position", "value": [200, 150, -500]})).unwrap();
+    assert!(s.execute("camera.setFocusToLayer", json!({})).is_err());
+    // In front: the command works, and the depth-of-field frame renders with finite pixels.
+    s.execute("layer.setTransform", json!({"layer": t, "prop": "position", "value": [200, 150, 400]})).unwrap();
+    let d = s.execute("camera.setFocusToLayer", json!({})).unwrap()["focusDistance"].as_f64().unwrap();
+    assert!((d - 900.0).abs() < 1e-6, "{d}");
+    // An out-of-focus 3D layer, which must visibly blur, and a 0%-scaled one, whose pixels cover
+    // ~0 screen pixels and so turn an ordinary defocus into a radius of ~1e9 buffer pixels.
+    s.execute("prop.set", json!({"layer": cam, "path": "cameraOptions/aperture", "value": 120})).unwrap();
+    let blur = s.execute("layer.newSolid", json!({"color": "#00ff00", "width": 60, "height": 60})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.setSwitch", json!({"layers": [blur], "switch": "threeD", "value": true})).unwrap();
+    s.execute("layer.setTransform", json!({"layer": blur, "prop": "position", "value": [200, 150, 1200]})).unwrap();
+    let invis = s.execute("layer.newSolid", json!({"color": "#ff0000", "width": 40, "height": 40})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.setSwitch", json!({"layers": [invis], "switch": "threeD", "value": true})).unwrap();
+    s.execute("layer.setTransform", json!({"layer": invis, "prop": "position", "value": [200, 150, 1600]})).unwrap();
+    s.execute("layer.setTransform", json!({"layer": invis, "prop": "scale", "value": [0.0, 0.0, 0.0]})).unwrap();
+    let cid = s.active_comp_id().unwrap();
+    let img = s.render(cid, effectcraft_time::Tick::ZERO, Default::default());
+    assert!(img.data.iter().all(|p| p.iter().all(|c| c.is_finite())), "non-finite pixels after setFocusToLayer");
+    // The DoF frame actually blurred (not a no-op blur): the same frame with DoF off differs.
+    s.execute("prop.set", json!({"layer": cam, "path": "cameraOptions/dof", "value": false})).unwrap();
+    let plain = s.render(cid, effectcraft_time::Tick::ZERO, Default::default());
+    assert_ne!(img.data, plain.data, "the out-of-focus layer should have blurred");
+}
+
+/// Set Focus Distance to Layer fails cleanly on a depth that isn't finite. Every stored number
+/// here is finite, but their difference overflows f64 to infinity; JSON has no infinity, so
+/// storing it would leave a project that can't be saved.
+#[test]
+fn camera_set_focus_to_layer_rejects_non_finite_depth() {
+    let mut s = comp(400, 300);
+    let t = s.execute("layer.newSolid", json!({"color": "#ffffff", "width": 50, "height": 50})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.setSwitch", json!({"layers": [t], "switch": "threeD", "value": true})).unwrap();
+    s.execute("layer.setTransform", json!({"layer": t, "prop": "position", "value": [200.0, 150.0, 1e308]})).unwrap();
+    let cam = s.execute("layer.newCamera", json!({})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.setTransform", json!({"layer": cam, "prop": "position", "value": [200.0, 150.0, -1e308]})).unwrap();
+    s.execute("layer.select", json!({"layers": [cam, t]})).unwrap();
+    let before = s.execute("prop.get", json!({"layer": cam, "path": "cameraOptions/focusDistance"})).unwrap()["value"].as_f64().unwrap();
+    let e = s.execute("camera.setFocusToLayer", json!({})).unwrap_err().to_string();
+    assert!(e.contains("out of range"), "{e}");
+    let after = s.execute("prop.get", json!({"layer": cam, "path": "cameraOptions/focusDistance"})).unwrap()["value"].as_f64().unwrap();
+    assert!((after - before).abs() < 1e-9, "a non-finite focus distance was written: {after}");
+    // The project still round-trips through serde (a stored infinity would come back as null).
+    let back = roundtrip(&s);
+    let f = back.comp(s.active_comp_id().unwrap()).unwrap().layer(LayerId(cam)).unwrap().props.prop("cameraOptions/focusDistance").unwrap().value.as_f64();
+    assert!((f - before).abs() < 1e-9, "serde focus distance: {f}");
+}
+
 /// An id sent as a string (`"98"`, as MCP clients often do) resolves as an id when no name matches.
 #[test]
 fn numeric_string_resolves_as_id() {
