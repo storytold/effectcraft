@@ -1,6 +1,6 @@
 # Roadmap detail
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-10 · **Change:** major (new file: milestones moved from ROADMAP.md, current focus and next steps with Opus 5.5 estimates) · **Target:** Adobe After Effects 2026
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-22 · **Change:** minor (the Chinese Han fallback reaches the installed Chinese faces, #453; previous: major, new file: milestones moved from ROADMAP.md, current focus and next steps with Opus 5.5 estimates) · **Target:** Adobe After Effects 2026
 
 Forward-looking detail behind the [ROADMAP](../ROADMAP.md). The work list itself, one gap at a
 time, is [gaps.md](gaps.md); the numbers are in [target-app-parity.md](target-app-parity.md).
@@ -31,7 +31,7 @@ none blocks the workflow.
 |---|---|---|---|
 | 1. Set up: new comp, import footage, stills, PSD/AI and audio, arrange and trim layers | yes | `file.import` and image-sequence tests, `ui_drag_drop`, `ui_project_*`; rough: a still imports as a sequence (#431), an MP3 layer can go silent (#324), multi-file drops (#552) | 2–4 |
 | 2. Animate: keyframes, easing in the Graph Editor, motion paths, parenting | yes | 168 live samples match After Effects 26.3 ([fidelity/](fidelity/README.md)); `ui_keyframes`; rough: Graph Editor jitter and clipped buttons (#456, #457), negative rotation drag (#569) | 3–6 |
-| 3. Motion graphics: text layers with animators, shape layers with operators | yes | `ui_text_edit`, `ui_timeline_shapes`, text and shape engine tests; rough: paragraph alignment inverted (#316), CJK text in comps (#453) | 3–6 |
+| 3. Motion graphics: text layers with animators, shape layers with operators | yes | `ui_text_edit`, `ui_timeline_shapes`, text and shape engine tests; rough: paragraph alignment inverted (#316), Chinese text in comps follows the Han fallback (#453 fixed) | 3–6 |
 | 4. Composite: masks, track mattes, blend modes, keying and effects | yes | Compositor and mask tests, 306 effects with CPU/GPU agreement; rough: mask bugs (#510, #513, #527), 32-bpc blend differences (#494), effect bugs (#580 crash, #514) | 6–12 |
 | 5. Preview with audio (RAM preview, cache) | yes | `ui_ram_preview`, `ui_live_preview`; rough: stutter on cached frames (#595, #304), late audio (#554, #504) | 10–20 |
 | 6. Save, reopen and deliver: `.ecproj`, auto-save, Render Queue to H.264 / ProRes / sequences | yes | Versioned-schema reopen tests, crash recovery, render-queue and encoder tests; rough: the macOS default output folder is `/`, so a render fails until an output path is chosen (#446), ProRes 4444 colour tag (#340), projects don't relink when moved | 1–3 |
@@ -83,5 +83,6 @@ To beta (≈ 75% ready and `.aep` opening): **≈ 350–620 h**. To full parity:
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-22 | minor | The Chinese Han fallback reaches the installed Chinese faces (#453) |
 | 2026-10-10 | minor | Alpha gate: six core workflows checked; all pass, stage stays alpha |
 | 2026-10-10 | major | New file: milestones from ROADMAP.md, current focus, next steps with estimates |

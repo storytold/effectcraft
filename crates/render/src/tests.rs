@@ -219,6 +219,27 @@ fn text_layer_renders_glyphs() {
     assert!(covered > 300, "{covered}");
 }
 
+/// #453: a composition's Japanese (and Chinese) text layer draws its glyphs, not missing-glyph
+/// boxes. Skipped where no CJK face is installed.
+#[test]
+fn text_layer_renders_cjk_glyphs() {
+    let cjk = effectcraft_text::fonts::resolve("Inter", "Regular").face;
+    if !effectcraft_text::fonts::face(effectcraft_text::fonts::fallback_for('日', cjk)).has_char('日') {
+        eprintln!("no Japanese face installed; skipping");
+        return;
+    }
+    for text in ["日本語", "中文"] {
+        let (mut p, cid, comp) = setup();
+        let mut l = build::layer(&mut p, &comp, "Text", LayerSource::Text, (200, 100), None);
+        l.props.prop_mut("text/sourceText").unwrap().value = Value::Text(Box::new(TextDoc { text: text.into(), size: 46.0, ..Default::default() }));
+        l.props.prop_mut("transform/position").unwrap().value = Value::Vec3([100.0, 70.0, 0.0]);
+        p.comp_mut(cid).unwrap().layers.push(l);
+        let img = render_frame(&p, cid, Tick::ZERO, 1.0);
+        let covered = img.data.iter().filter(|px| px[3] > 0.5).count();
+        assert!(covered > 200, "{text}: {covered} covered pixels");
+    }
+}
+
 #[test]
 fn precomp_and_3d_render() {
     let (mut p, cid, comp) = setup();

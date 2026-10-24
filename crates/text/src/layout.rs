@@ -1340,6 +1340,30 @@ mod tests {
         assert!(l.glyphs.iter().all(|g| g.id != 0));
     }
 
+    /// CJK text drawn with a bundled Latin family falls back to an installed face that has the
+    /// glyph, so a composition's Japanese or Chinese text is not drawn as missing-glyph boxes
+    /// (#453). Skipped where no CJK face is installed, like the font-fallback tests.
+    #[test]
+    fn cjk_text_falls_back_to_a_face_with_the_glyph() {
+        // The CJK locale is process-global; keep a font test from changing it while this lays out.
+        let _locale = crate::fonts::TEST_CJK_LOCALE.lock().unwrap_or_else(|e| e.into_inner());
+        let primary = fonts::resolve("Inter", "Regular").face;
+        if !fonts::face(fonts::fallback_for('日', primary)).has_char('日') {
+            eprintln!("no Japanese face installed; skipping");
+            return;
+        }
+        for text in ["日本語", "中文漢字"] {
+            let l = layout(text, &st(40.0), &ParagraphStyle::default());
+            assert_eq!(l.glyphs.len(), text.chars().count(), "{text}");
+            for g in &l.glyphs {
+                let ch = text.get(g.cluster..).and_then(|rest| rest.chars().next()).unwrap_or('?');
+                assert_ne!(g.id, 0, "{ch} has a glyph");
+                let f = fonts::face(g.face);
+                assert!(f.has_char(ch), "{ch} drawn by {} {} which lacks it", f.info.family, f.info.style);
+            }
+        }
+    }
+
     #[test]
     fn empty_text_has_a_caret() {
         let l = layout("", &st(40.0), &ParagraphStyle::default());

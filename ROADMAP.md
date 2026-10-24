@@ -2,7 +2,7 @@
 
 **Stage: alpha** · next: beta, ~30 points of "ready for real work" and ~350–620 h away
 
-> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-12 · **Change:** minor (open-issue count, crash list and localization share re-audited against `upstream/main` 470ea7a3) · **Target:** Adobe After Effects 2026 (26.5.0.89)
+> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-22 · **Change:** minor (Simplified Chinese Han text in compositions reaches the installed macOS Chinese faces instead of the Japanese face, with regression tests, #453; previous: minor, open-issue count, crash list and localization share re-audited against `upstream/main` 470ea7a3) · **Target:** Adobe After Effects 2026 (26.5.0.89)
 
 EffectCraft aims to do what After Effects does, with the same panels, menus and behaviour, written
 from scratch in Rust. This page is the one-page summary; the evidence is in
@@ -117,6 +117,11 @@ Come tell us what matters most to you on [Discord](https://discord.gg/artcraft).
 
 ## Progress log
 
+- 2026-10-22: Text: Chinese Han text in compositions now draws with the installed Chinese face
+  instead of the Japanese one. macOS does not install the on-demand PingFang SC, so the Simplified
+  Han list names Hiragino Sans GB, Heiti SC, Songti SC and STSong (Heiti TC and Songti TC for
+  Traditional) before the fallback search can reach a Japanese face (#453). Japanese kana and kanji
+  are unchanged; a text-layer render test and a macOS fallback test cover both languages.
 - 2026-10-16: Convert To Bezier Path turns a shape layer's Rectangle, Ellipse or Polystar
   path into an editable Path 1 with the same geometry, as After Effects does; it used to
   apply to mask RotoBezier only, so a parametric shape path could not be converted at all
@@ -155,6 +160,7 @@ Come tell us what matters most to you on [Discord](https://discord.gg/artcraft).
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-22 | minor | Chinese Han text in compositions uses the installed macOS Chinese faces instead of the Japanese face; CJK text-layer and macOS fallback regression tests (#453) |
 | 2026-10-12 | minor | Open-issue count (134 to 216), crash list and localization share (12% to 18%) updated to match docs/gaps.md |
 | 2026-10-12 | patch | Roto Brush span validation after trimming; command regressions for both layer edges |
 | 2026-10-10 | minor | Hours to ≈ 95% for each audience |

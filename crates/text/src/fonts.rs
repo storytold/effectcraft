@@ -688,14 +688,28 @@ const JAPANESE_FAMILIES: &[&str] = &[
 ];
 /// Han ideograph families for Simplified Chinese, in the order the platforms' own fallback tables
 /// prefer them (Windows, macOS, then the Linux/Noto names). Missing ones cost one name lookup each.
-const SIMPLIFIED_CHINESE_FAMILIES: &[&str] =
-    &["Microsoft YaHei", "SimSun", "PingFang SC", "Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC", "WenQuanYi Micro Hei"];
+/// `Hiragino Sans GB`, `Heiti SC` and `Songti SC` are the Simplified faces a macOS install without
+/// the on-demand PingFang has (macOS 27 on an English install ships them, not PingFang): without
+/// them Chinese Han text fell through to the Japanese face and drew Japanese glyph forms (#453).
+const SIMPLIFIED_CHINESE_FAMILIES: &[&str] = &[
+    "Microsoft YaHei",
+    "SimSun",
+    "PingFang SC",
+    "Hiragino Sans GB",
+    "Heiti SC",
+    "Songti SC",
+    "STSong",
+    "Noto Sans CJK SC",
+    "Noto Sans SC",
+    "Source Han Sans SC",
+    "WenQuanYi Micro Hei",
+];
 /// The same for Traditional Chinese. The two scripts share almost all of their code points but not
 /// the glyph forms (`东` against `東`'s neighbours, `直`, `骨`), so one list for both drew a
 /// Traditional interface with Simplified forms - the faces do not differ in *coverage*, which is
 /// what the fallback search checks, so the script has to pick the list.
 const TRADITIONAL_CHINESE_FAMILIES: &[&str] =
-    &["Microsoft JhengHei", "MingLiU", "PingFang TC", "Heiti TC", "Hiragino Sans CNS", "Noto Sans CJK TC", "Noto Sans TC", "Source Han Sans TC"];
+    &["Microsoft JhengHei", "MingLiU", "PingFang TC", "Heiti TC", "Hiragino Sans CNS", "Songti TC", "Noto Sans CJK TC", "Noto Sans TC", "Source Han Sans TC"];
 const KOREAN_FAMILIES: &[&str] = &["Malgun Gothic", "Gulim", "Apple SD Gothic Neo", "Noto Sans CJK KR", "Noto Sans KR", "Source Han Sans KR", "NanumGothic"];
 /// The platforms' plain text families for the other scripts the bundled fonts lack, in the same
 /// order (Windows, macOS, then the Linux/Noto names).
@@ -733,6 +747,12 @@ const GEORGIAN_FAMILIES: &[&str] = &["Sylfaen", ".SF Georgian", "SF Georgian", "
 
 /// The CJK locale the host asked fallbacks to prefer, when it has one (see [`set_cjk_locale`]).
 static REQUESTED_CJK_LOCALE: RwLock<Option<String>> = RwLock::new(None);
+
+/// Serialises the tests that change the process-global CJK locale with the tests that read it
+/// through [`fallback_for`] (the layout tests), which would otherwise cache the other order's
+/// families.
+#[cfg(test)]
+pub(crate) static TEST_CJK_LOCALE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Ask CJK font fallbacks to prefer `tag`'s language for Han ideographs instead of the locale
 /// environment, so a Chinese interface is drawn with a Chinese face on a machine whose locale is
@@ -1033,6 +1053,15 @@ fn system_fallback(c: char, style: &str) -> Option<FaceId> {
 mod tests {
     use super::*;
 
+    /// Clears the requested CJK locale when a test that set it ends, panic or not.
+    struct LocaleReset;
+
+    impl Drop for LocaleReset {
+        fn drop(&mut self) {
+            set_cjk_locale("");
+        }
+    }
+
     /// Concurrent language requests must neither choose another context's font nor reuse its
     /// cached family order. Synthetic fonts in a child process keep this independent of the host
     /// font installation and of other tests that exercise the process-global database/locale.
@@ -1297,6 +1326,11 @@ mod tests {
     /// loaded a CJK font first. Skipped where no family from the list is installed.
     #[test]
     fn cjk_falls_back_to_a_system_family() {
+        // Japanese text must reach the Japanese list even on a Chinese-language host, where the
+        // ambient locale puts the Chinese families first for the shared ideographs.
+        let _locale = TEST_CJK_LOCALE.lock().unwrap_or_else(|e| e.into_inner());
+        set_cjk_locale("ja-JP");
+        let _reset = LocaleReset;
         scan_system();
         let inter = resolve("Inter", "Bold").face;
         let installed = JAPANESE_FAMILIES.iter().any(|f| resolve_in(f, "Regular").is_some());
@@ -1417,6 +1451,7 @@ mod tests {
 
     #[test]
     fn the_han_order_follows_the_cjk_locale() {
+        let _locale = TEST_CJK_LOCALE.lock().unwrap_or_else(|e| e.into_inner());
         // Chinese first for any Chinese tag, whether or not it names a script.
         for tag in ["zh", "zh-CN", "zh_Hans", "ZH-Hant-TW.UTF-8", "zh_MO"] {
             assert_eq!(han_order_for(tag)[0], FallbackScript::Han, "{tag}");
@@ -1434,6 +1469,7 @@ mod tests {
 
     #[test]
     fn the_chinese_family_list_follows_the_script_the_locale_asks_for() {
+        let _locale = TEST_CJK_LOCALE.lock().unwrap_or_else(|e| e.into_inner());
         for tag in ["zh", "zh-CN", "zh_Hans", "zh_CN.UTF-8", "zh-SG"] {
             assert_eq!(chinese_families_for(tag), SIMPLIFIED_CHINESE_FAMILIES, "{tag}");
         }
@@ -1452,6 +1488,71 @@ mod tests {
         assert_eq!(families_for(FallbackScript::Han, CjkLocale::from_tag(&active_cjk_locale())), chinese_families_for(&active_cjk_locale()));
         // Han text is the only thing these lists serve; the Japanese order does not change.
         assert_eq!(han_order_for("ja_JP.UTF-8")[0], FallbackScript::Japanese);
+    }
+
+    /// macOS ships no Simplified Chinese PingFang on an English install (macOS 27 has the
+    /// on-demand PingFang instead): Hiragino Sans GB, Heiti SC and Songti SC are the installed
+    /// Chinese faces, so the Han list has to name them or Han text falls through to the Japanese
+    /// face and draws Japanese glyph forms (#453). The system check is skipped where none of them
+    /// is installed; the list itself is checked everywhere.
+    #[test]
+    fn macos_chinese_faces_are_tried_for_han_text() {
+        for face in ["Hiragino Sans GB", "Heiti SC", "Songti SC"] {
+            assert!(SIMPLIFIED_CHINESE_FAMILIES.iter().any(|l| l.eq_ignore_ascii_case(face)), "{face} missing from the Han list");
+        }
+        assert!(TRADITIONAL_CHINESE_FAMILIES.iter().any(|l| l.eq_ignore_ascii_case("Songti TC")), "Songti TC missing from the Traditional list");
+        scan_system();
+        let installed: Vec<&str> = ["Hiragino Sans GB", "Heiti SC", "Songti SC"].into_iter().filter(|f| resolve_in(f, "Regular").is_some()).collect();
+        if installed.is_empty() {
+            eprintln!("no macOS Simplified Chinese face installed; skipping the system check");
+            return;
+        }
+        // Walking the Han branch's own list finds a Chinese face before the Japanese face the
+        // exhaustive search would have found (Hiragino Sans), and it covers the shared ideographs.
+        let (family, resolved) =
+            SIMPLIFIED_CHINESE_FAMILIES.iter().find_map(|f| resolve_in(f, "Regular").map(|r| (*f, r))).expect("an installed Simplified Chinese family");
+        // An earlier name can win the walk when this Mac has it as well (`PingFang SC` on an older
+        // install, or Microsoft YaHei / Noto Sans CJK SC through Office or Homebrew). That is just
+        // as valid a Chinese fallback as the macOS trio; only the Japanese face would be a
+        // regression. Each installed macOS face is on the list (checked above) and covers the
+        // shared ideographs.
+        assert!(!JAPANESE_FAMILIES.iter().any(|j| j.eq_ignore_ascii_case(family)), "{family} is a Japanese family");
+        for c in ['骨', '直', '日'] {
+            assert!(face(resolved.face).has_char(c), "{family} cannot draw {c}");
+        }
+        for name in installed {
+            let resolved = resolve_in(name, "Regular").expect("installed above");
+            for c in ['骨', '直', '日'] {
+                assert!(face(resolved.face).has_char(c), "{name} cannot draw {c}");
+            }
+        }
+    }
+
+    /// #453 under a Chinese interface: Han text in a Latin-only family falls back through the Han
+    /// list, in the locale's order, to an installed Simplified Chinese family; it must not reach the
+    /// Japanese face the exhaustive search would pick. The direct family lookup above would not
+    /// catch a `fallback_for` that skipped `han_order`. Skipped where no Simplified family is
+    /// installed.
+    #[test]
+    fn chinese_han_text_falls_back_to_a_simplified_chinese_family() {
+        let _locale = TEST_CJK_LOCALE.lock().unwrap_or_else(|e| e.into_inner());
+        scan_system();
+        if !SIMPLIFIED_CHINESE_FAMILIES.iter().any(|f| resolve_in(f, "Regular").is_some()) {
+            eprintln!("no Simplified Chinese family installed; skipping");
+            return;
+        }
+        set_cjk_locale("zh-CN");
+        let _reset = LocaleReset;
+        let inter = resolve("Inter", "Regular").face;
+        for c in ['骨', '直', '日', '真'] {
+            let f = face(fallback_for(c, inter));
+            assert!(f.has_char(c), "{c}: {} {} lacks it", f.info.family, f.info.style);
+            assert!(
+                SIMPLIFIED_CHINESE_FAMILIES.iter().any(|n| n.eq_ignore_ascii_case(&f.info.family)),
+                "{c} → {} is not a Simplified Chinese family",
+                f.info.family
+            );
+        }
     }
 
     #[test]
