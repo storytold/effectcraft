@@ -527,8 +527,11 @@ fn compatibility_report_and_logging() {
     log::warn!(target: "effectcraft::tests", "hello log");
     assert!(std::fs::read_to_string(&file).unwrap().contains("logging enabled"));
     assert_eq!(crate::menus::checked(&s, "help.enableLogging", &Value::Null), Some(true));
+    s.drain_events();
     let r = s.execute("help.revealLogFile", json!({})).unwrap();
-    assert!(r["url"].as_str().unwrap().starts_with("file://"));
+    let events = s.drain_events();
+    assert!(events.contains(&crate::Event::RevealFile(r["path"].as_str().unwrap().to_string())), "{events:?}");
+    assert!(!events.iter().any(|e| matches!(e, crate::Event::OpenUrl(_))), "{events:?}");
     s.execute("help.enableLogging", json!({"on": false})).unwrap();
     assert!(!crate::logging::is_enabled());
 }

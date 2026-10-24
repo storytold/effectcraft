@@ -102,8 +102,12 @@ fn footage_on_other_computers_is_never_looked_at() {
         let revealed = o.execute("file.revealInFinder", json!({}));
         assert_eq!((opened.is_ok(), revealed.is_ok()), (*name == "beside", *name == "beside"), "{name}: {opened:?} {revealed:?}");
     }
-    let urls: Vec<String> = o.drain_events().into_iter().filter_map(|e| if let Event::OpenUrl(u) = e { Some(u) } else { None }).collect();
-    assert_eq!(urls.len(), 2, "{urls:?}");
+    let events = o.drain_events();
+    let urls: Vec<&String> = events.iter().filter_map(|e| if let Event::OpenUrl(u) = e { Some(u) } else { None }).collect();
+    let revealed: Vec<&String> = events.iter().filter_map(|e| if let Event::RevealFile(p) = e { Some(p) } else { None }).collect();
+    // Edit Original opens a URL; Reveal in Finder hands the file itself to the file manager (a URL opens the browser on Windows).
+    assert_eq!((urls.len(), revealed.len()), (1, 1), "{urls:?} {revealed:?}");
+    assert!(revealed[0].ends_with("clip.png"), "{revealed:?}");
 
     let seen = rec.0.lock().unwrap().clone();
     assert!(seen.iter().any(|p| std::path::Path::new(p) == dir.join("clip.png")), "{seen:?}");

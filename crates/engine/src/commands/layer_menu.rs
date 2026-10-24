@@ -671,12 +671,6 @@ fn open_source(s: &mut Session, p: &Value) -> Result<Value> {
     frontend(s, "window.panel", &json!({"panel": "layer"}))
 }
 
-/// Folder containing a file as a `file://` URL.
-pub(crate) fn folder_url(path: &str) -> String {
-    let dir = std::path::Path::new(path).parent().map(|d| d.to_string_lossy().to_string()).unwrap_or_default();
-    file_url(&dir)
-}
-
 /// Extensions of folders that macOS opens as an app, plug-in or other bundle rather than showing
 /// their contents.
 const BUNDLE_EXTENSIONS: &[&str] = &[
@@ -712,17 +706,17 @@ fn opens_as_bundle(dir: &std::path::Path) -> bool {
     ext.starts_with('{') || BUNDLE_EXTENSIONS.contains(&ext.as_str())
 }
 
-/// The folder of the footage file `stored` (a path stored in the project) as a `file://` URL for
-/// Reveal in Finder. A path that is not followed ([`crate::doc_path`]), or a folder that is not a
-/// plain folder after following links, is refused.
-pub(crate) fn reveal_url(s: &Session, stored: &str) -> std::result::Result<String, String> {
+/// The footage file `stored` (a path stored in the project) as the file Reveal in Finder shows in
+/// the system file manager ([`crate::Event::RevealFile`]). A path that is not followed
+/// ([`crate::doc_path`]), or a folder that is not a plain folder after following links, is refused.
+pub(crate) fn reveal_path(s: &Session, stored: &str) -> std::result::Result<std::path::PathBuf, String> {
     let path = s.stored_path(stored).map_err(|why| crate::doc_path::refusal(stored, why))?;
     let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).ok_or_else(|| format!("{stored} is not in a folder"))?;
     let real = std::fs::canonicalize(dir).map_err(|e| format!("cannot show the folder of {stored}: {e}"))?;
     if !real.is_dir() || opens_as_bundle(dir) || opens_as_bundle(&real) {
         return Err(format!("the folder of {stored} is not a plain folder"));
     }
-    Ok(file_url(&dir.to_string_lossy()))
+    Ok(path)
 }
 
 /// `path` as a `file://` URL: backslashes become `/`, a Windows drive path gets the third slash
@@ -748,9 +742,9 @@ fn reveal_in_finder(s: &mut Session, p: &Value) -> Result<Value> {
         Some(effectcraft_project::ItemKind::Footage(f)) if !f.path.is_empty() => f.path.clone(),
         _ => return Err(bad("layer.revealInFinder", "the layer's source is not a file")),
     };
-    let url = reveal_url(s, &path).map_err(|e| bad("layer.revealInFinder", e))?;
-    s.events.push(crate::Event::OpenUrl(url.clone()));
-    Ok(json!({"url": url}))
+    let path = reveal_path(s, &path).map_err(|e| bad("layer.revealInFinder", e))?.to_string_lossy().into_owned();
+    s.events.push(crate::Event::RevealFile(path.clone()));
+    Ok(json!({"path": path}))
 }
 
 fn reveal_source(s: &mut Session, p: &Value) -> Result<Value> {
@@ -942,7 +936,7 @@ pub fn specs() -> Vec<CommandSpec> {
 
 #[cfg(test)]
 mod tests {
-    use super::{file_url, folder_url};
+    use super::file_url;
 
     #[test]
     fn file_urls_are_well_formed() {
@@ -950,11 +944,6 @@ mod tests {
         assert_eq!(file_url("/home/ann/a#b%c?d.mov"), "file:///home/ann/a%23b%25c%3Fd.mov");
         assert_eq!(file_url("/Users/ann/Café/x.mov"), "file:///Users/ann/Caf%C3%A9/x.mov");
         assert_eq!(file_url("/plain/path-1_2.~(x).mov"), "file:///plain/path-1_2.~(x).mov", "plain characters stay");
-    }
-
-    #[test]
-    fn folder_url_names_the_containing_folder() {
-        assert_eq!(folder_url("/media/My Clips/a.mov"), "file:///media/My%20Clips");
     }
 
     /// Reveal in Finder shows plain folders only: a bundle the system would open as an app, or a
@@ -967,8 +956,8 @@ mod tests {
             std::fs::create_dir_all(d.join(f)).unwrap();
         }
         let s = crate::Session::default();
-        let reveal = |folder: &str| super::reveal_url(&s, &d.join(folder).join("a.mov").to_string_lossy());
-        assert_eq!(reveal("Clips"), Ok(super::file_url(&d.join("Clips").to_string_lossy())));
+        let reveal = |folder: &str| super::reveal_path(&s, &d.join(folder).join("a.mov").to_string_lossy());
+        assert_eq!(reveal("Clips"), Ok(d.join("Clips").join("a.mov")));
         assert!(reveal("Tool.app").is_err());
         assert!(reveal("Shell.{20D04FE0-3AEA-1069-A2D8-08002B30309D}").is_err());
         assert!(reveal("Gone").is_err());
@@ -977,6 +966,29 @@ mod tests {
             std::os::unix::fs::symlink(d.join("Tool.app"), d.join("Footage")).unwrap();
             assert!(reveal("Footage").is_err(), "a link to a bundle");
         }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Layer ▸ Reveal in Finder hands the source file itself to the file manager: a `file://` URL
+    /// would open the web browser on Windows (#1961).
+    #[test]
+    fn layer_reveal_shows_the_source_file() {
+        use effectcraft_project::{Footage, ItemKind};
+        use serde_json::json;
+        let d = std::env::temp_dir().join(format!("ec-reveal-layer-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let file = d.join("a.png");
+        let mut s = crate::Session::default();
+        let f = Footage { path: file.to_string_lossy().into_owned(), width: 64, height: 48, has_video: true, ..Default::default() };
+        let item = std::sync::Arc::make_mut(&mut s.project).add_item("a.png", Default::default(), None, ItemKind::Footage(f));
+        let comp = s.execute("comp.new", json!({"name": "Main", "width": 32, "height": 32, "frameRate": 30, "duration": 1})).unwrap()["comp"].clone();
+        let layer = s.execute("layer.addItem", json!({"comp": comp, "item": item.0, "time": 0.0})).unwrap()["layer"].clone();
+        s.drain_events();
+        let r = s.execute("layer.revealInFinder", json!({"comp": comp, "layer": layer})).unwrap();
+        assert_eq!(std::path::Path::new(r["path"].as_str().unwrap()), file);
+        let events = s.drain_events();
+        assert!(events.contains(&crate::Event::RevealFile(file.to_string_lossy().into_owned())), "{events:?}");
+        assert!(!events.iter().any(|e| matches!(e, crate::Event::OpenUrl(_))), "{events:?}");
         let _ = std::fs::remove_dir_all(&d);
     }
 }

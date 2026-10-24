@@ -364,9 +364,9 @@ fn reveal_log(s: &mut Session, _: &Value) -> Result<Value> {
         .or_else(crate::logging::current_file)
         .unwrap_or_else(|| log_file(s));
     let path = file.to_string_lossy().to_string();
-    let url = super::layer_menu::folder_url(&path);
-    s.events.push(Event::OpenUrl(url.clone()));
-    Ok(json!({"path": path, "url": url}))
+    // The file manager shows the file (a folder's `file://` URL opens the web browser on Windows).
+    s.events.push(Event::RevealFile(path.clone()));
+    Ok(json!({"path": path}))
 }
 
 /// Media formats File ▸ Import reads (with the desktop host's decoders).
