@@ -220,9 +220,9 @@ fn tracking_line_anchor_and_character_offset() {
     animator(&mut p, &mut l, &["tracking", "lineAnchor"], &["range"]);
     p.comp_mut(cid).unwrap().layers.push(l);
     let w0 = bounds_of(&glyph_paths(&ctx(&p, cid, 0.0), &p.comp(cid).unwrap().layers[0]));
-    set(&mut p.comp_mut(cid).unwrap().layers[0], "text/animators/#1/properties/tracking", Value::Scalar(500.0));
+    set(&mut p.comp_mut(cid).unwrap().layers[0], "text/animators/#1/properties/tracking", Value::Scalar(20.0));
     let w1 = bounds_of(&glyph_paths(&ctx(&p, cid, 0.0), &p.comp(cid).unwrap().layers[0]));
-    // 4 chars × 500/1000 em × 40 px: the last glyph moves ~ 3.5 × 20 px further (before & after).
+    // 4 chars with 20 px tracking: the last glyph moves ~ 3.5 × 20 px further (before & after).
     assert!((w1.width() - w0.width() - 3.0 * 20.0).abs() < 1.5, "{} {}", w0.width(), w1.width());
     assert!((w1.x0 - w0.x0 - 10.0).abs() < 1.0, "first char shifts by half its tracking: {} {}", w0.x0, w1.x0);
     // Line Anchor 100%: tracking grows to the left.
@@ -262,10 +262,10 @@ fn tracking_grows_from_each_paragraphs_alignment() {
         p.comp_mut(cid).unwrap().layers.push(l);
         glyph_paths(&ctx(&p, cid, 0.0), &p.comp(cid).unwrap().layers[0])
     };
-    // 4 chars × 500/1000 em × 40 px: 20 px of tracking each, half before and half after.
+    // 4 chars with 20 px of tracking each, half before and half after.
     for (justify, x0, centre, x1) in [(Justify::Left, 10.0, 40.0, 70.0), (Justify::Center, -30.0, 0.0, 30.0), (Justify::Right, -70.0, -40.0, -10.0)] {
         let d = TextDoc { justify, ..doc("ABCD", 40.0) };
-        let (w0, w1) = (bounds_of(&tracked(d.clone(), 0.0)), bounds_of(&tracked(d, 500.0)));
+        let (w0, w1) = (bounds_of(&tracked(d.clone(), 0.0)), bounds_of(&tracked(d, 20.0)));
         let got = [w1.x0 - w0.x0, w1.center().x - w0.center().x, w1.x1 - w0.x1];
         assert!(got.iter().zip([x0, centre, x1]).all(|(g, w)| (g - w).abs() < 1.0), "{justify:?}: moved {got:?}, want {:?}", [x0, centre, x1]);
     }
@@ -277,9 +277,34 @@ fn tracking_grows_from_each_paragraphs_alignment() {
         let (a, b): (Vec<_>, Vec<_>) = paths.into_iter().partition(|g| bounds_of(std::slice::from_ref(g)).center().y < 10.0);
         [bounds_of(&a), bounds_of(&b)]
     };
-    let ([a0, b0], [a1, b1]) = (lines(tracked(d.clone(), 0.0)), lines(tracked(d, 500.0)));
+    let ([a0, b0], [a1, b1]) = (lines(tracked(d.clone(), 0.0)), lines(tracked(d, 20.0)));
     assert!((a1.x0 - a0.x0 - 10.0).abs() < 1.0, "the left paragraph grows right: {} {}", a0.x0, a1.x0);
     assert!((b1.x1 - b0.x1 + 10.0).abs() < 1.0, "the right paragraph grows left: {} {}", b0.x1, b1.x1);
+}
+
+/// #1798: After Effects adds Tracking Amount in absolute pixels between neighbouring characters,
+/// independent of font size.
+#[test]
+fn text_animator_tracking_amount_uses_pixels_independent_of_font_size() {
+    let width_diff = |font_size: f64, amount: f64| {
+        let (mut p, cid, comp) = setup(2000, 400);
+        let mut l = text_layer(&mut p, &comp, doc("ABCDE", font_size));
+        animator(&mut p, &mut l, &["tracking"], &["range"]);
+        set(&mut l, "text/animators/#1/properties/tracking", Value::Scalar(amount));
+        p.comp_mut(cid).unwrap().layers.push(l);
+        let w = bounds_of(&glyph_paths(&ctx(&p, cid, 0.0), &p.comp(cid).unwrap().layers[0])).width();
+        let (mut p0, cid0, comp0) = setup(2000, 400);
+        let l0 = text_layer(&mut p0, &comp0, doc("ABCDE", font_size));
+        p0.comp_mut(cid0).unwrap().layers.push(l0);
+        let w0 = bounds_of(&glyph_paths(&ctx(&p0, cid0, 0.0), &p0.comp(cid0).unwrap().layers[0])).width();
+        w - w0
+    };
+    // 5 characters = 4 gaps. In After Effects, Tracking Amount 100 adds 100 px per gap = 400 px total width delta,
+    // regardless of whether font size is 50 px or 200 px.
+    let diff_50 = width_diff(50.0, 100.0);
+    let diff_200 = width_diff(200.0, 100.0);
+    assert!((diff_50 - 400.0).abs() < 1.0, "font_size 50 px width delta: {diff_50}");
+    assert!((diff_200 - 400.0).abs() < 1.0, "font_size 200 px width delta: {diff_200}");
 }
 
 #[test]
