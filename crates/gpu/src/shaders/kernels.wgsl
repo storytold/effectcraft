@@ -359,8 +359,9 @@ fn glow_ab_t(l: f32) -> f32 {
     return pow(max(t, 0.0), log(0.5) / log(m));
 }
 
-// Glow bright pass. u[0].x = A & B colours; u[0].y = based on alpha; f[0].x = threshold;
-// f[1] = colour A; f[2] = colour B.
+// Glow bright pass. u[0].x = the glow takes a gradient (A & B colours or the Arbitrary Map), in
+// which case only the glow's strength is written and the gradient is applied after the blur by
+// `glow_colorize` / `fxs_glow_map` (see misc::glow); u[0].y = based on alpha; f[0].x = threshold.
 @compute @workgroup_size(16, 16)
 fn glow_bright(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dims = out_dims();
@@ -381,14 +382,29 @@ fn glow_bright(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let k = clamp((l - thr) / max(1.0 - thr, 1e-3), 0.0, 1.0);
     if (P.u[0].x != 0u) {
-        let t = glow_ab_t(l);
-        let ca = P.f[1].xyz;
-        let cb = P.f[2].xyz;
-        let c = ca + (cb - ca) * t;
-        textureStore(out, p, vec4<f32>(c * k * a, k * a));
+        let m = k * a;
+        textureStore(out, p, vec4<f32>(m, m, m, m));
     } else {
         textureStore(out, p, px * k);
     }
+}
+
+// Glow's A & B gradient over the blurred glow's own strength, so Color Loops rings the glow
+// (misc::glow). src = the blurred glow; f[1] = colour A; f[2] = colour B; the gradient's
+// parameters are in f[0].yzw / u[0].z, as for `glow_bright`.
+@compute @workgroup_size(16, 16)
+fn glow_colorize(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let dims = out_dims();
+    let p = vec2<i32>(gid.xy);
+    if (p.x >= dims.x || p.y >= dims.y) {
+        return;
+    }
+    let m = textureLoad(src, p, 0).w;
+    let t = glow_ab_t(m);
+    let ca = P.f[1].xyz;
+    let cb = P.f[2].xyz;
+    let c = ca + (cb - ca) * t;
+    textureStore(out, p, vec4<f32>(c * m, m));
 }
 
 // Glow composite: original `src` with the blurred glow `aux`. u[0].x = 0 on top, 1 behind,
