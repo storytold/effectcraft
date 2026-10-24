@@ -107,6 +107,20 @@ fn typing_deleting_and_caret_movement() {
     assert!(s.state.text_edit.is_none());
 }
 
+/// Duplicating during a text edit moves the selection to the copy: the edit on the original ends
+/// (#2226), as in After Effects — typing must not keep editing an unselected layer.
+#[test]
+fn duplicate_during_a_text_edit_ends_the_edit() {
+    let (mut s, t) = session("Hello");
+    s.execute("text.edit", json!({"layer": t, "caret": 5})).unwrap();
+    let copy = s.execute("edit.duplicate", json!({"layers": [t]})).unwrap()[0].as_u64().unwrap();
+    assert_ne!(copy, t, "the duplicate is created");
+    assert_eq!(s.state.selected_layers, vec![effectcraft_project::LayerId(copy)], "the copy is selected");
+    assert!(s.state.text_edit.is_none(), "the edit ended with the selection move (#2226)");
+    assert_eq!(doc(&s, t).text, "Hello", "the original keeps its text");
+    assert_eq!(doc(&s, copy).text, "Hello", "and the copy carries it");
+}
+
 #[test]
 fn caret_style_applies_to_the_next_typed_text() {
     let (mut s, t) = session("ab");
