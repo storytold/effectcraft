@@ -1044,7 +1044,7 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("render.preRender", "Pre-render...", ["Composition"], None, "{comp?, output?: path|template, format?}", can_add, pre_render),
         cmd!("render.saveCurrentPreview", "Save Current Preview...", ["Composition"], None, "{comp?, path}", has_comp, save_current_preview),
         cmd!("renderQueue.move", "Move in Render Queue", [], None, "{item?|index?, to: n (1-based)}", has_items, move_item),
-        cmd!("renderQueue.duplicate", "Duplicate Render Item", [], None, "{item?|index?}", has_items, duplicate),
+        cmd!("renderQueue.duplicate", "Duplicate Render Item", [], Some("Cmd+Shift+D"), "{item?|index?}", has_items, duplicate),
         cmd!("renderQueue.render", "Render", [], None, "{wait?: bool (default true; the UI renders in the background)}", has_queued, render),
         cmd!("renderQueue.stop", "Stop Rendering", [], None, "{}", rendering, stop),
         query!("renderQueue.list", "Render Queue Items", "{}", list),
