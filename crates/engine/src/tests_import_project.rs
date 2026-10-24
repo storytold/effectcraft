@@ -143,7 +143,7 @@ fn import_project_rejects_bad_files_and_leaves_the_project() {
     assert!(t.execute("file.importProject", json!({"path": dir.join("absent.ecproj").to_string_lossy()})).is_err());
 
     // Regression: an id at the top of the range saturated instead of overflowing (opening and
-    // importing must not panic), and the import refuses it.
+    // importing must not panic), and loading refuses it (#1251).
     let mut p = Project::default();
     let id = p.add_item("Huge", Default::default(), None, ItemKind::Folder);
     let mut it = p.items.remove(&id).unwrap();
@@ -151,8 +151,8 @@ fn import_project_rejects_bad_files_and_leaves_the_project() {
     p.items.insert(it.id, it);
     let huge = dir.join("huge.ecproj");
     std::fs::write(&huge, p.to_json()).unwrap();
-    assert_eq!(Project::from_json(&p.to_json()).unwrap().next_id, u64::MAX);
+    assert!(Project::from_json(&p.to_json()).unwrap_err().to_string().contains("ids"));
     let e = t.execute("file.importProject", json!({"path": huge.to_string_lossy()})).unwrap_err();
-    assert!(e.to_string().contains("out of range"), "{e}");
+    assert!(e.to_string().contains("ids"), "{e}");
     assert_eq!(t.project.items.len(), before);
 }
