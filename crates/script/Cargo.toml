@@ -16,6 +16,7 @@ effectcraft-keyframe = { workspace = true }
 effectcraft-time = { workspace = true }
 effectcraft-render = { workspace = true }
 effectcraft-path = { workspace = true }
+effectcraft-expr = { workspace = true }
 serde_json = { workspace = true }
 boa_engine = { workspace = true }
 web-time = { workspace = true }
@@ -25,7 +26,6 @@ web-time = { workspace = true }
 boa_engine = { workspace = true, features = ["js"] }
 
 [dev-dependencies]
-effectcraft-expr = { workspace = true }
 effectcraft-psd = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]

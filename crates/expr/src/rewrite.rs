@@ -598,7 +598,7 @@ fn compound_assignment_target(items: &[Item], start: usize, end: usize) -> Strin
 
 /// Stack cost of one level of brackets (also of a template substitution, a regex group and a
 /// prefix operator, which cost the parser about as much or are never chained in real code).
-const LEVEL: usize = 256;
+pub const LEVEL: usize = 256;
 /// Stack cost of a construct the parser recurses on without a bracket: `?:`, `=>`, assignments,
 /// `**`, `||`, labels, `if`/`else`/`while`/`for`/`with`/`do` without a block (about 1/8 of a
 /// bracket: 256 of them in a row are allowed; boa overflows from about 750).
@@ -608,11 +608,38 @@ const HEAVY: usize = 32;
 /// about 3 800 links).
 const LIGHT: usize = 6;
 
+/// What [`too_nested`]'s estimate charges, in units where one level of brackets costs
+/// [`LEVEL`]. Constructs the parser recurses on without a bracket (`?:`, `=>`, assignments,
+/// `**`, `||`, labels, `if`/`else`/`while`/`for`/`with`/`do` without a block) always cost
+/// [`HEAVY`], and a prefix operator a whole level.
+#[derive(Clone, Copy, Debug)]
+pub struct Weights {
+    /// The budget, in levels of brackets.
+    pub levels: usize,
+    /// A binary operator in a chain (`a + b + …`).
+    pub operator: usize,
+    /// A member access, call, index or tagged template in a chain (`a.b`, `f()`, `a[0]`).
+    pub access: usize,
+    /// A comma operator (`(a, b, …)`).
+    pub comma: usize,
+    /// Tell object literals, argument lists and parameter lists from blocks and comma
+    /// operators, and array literals from indexing: the parser reads a list's items in a loop,
+    /// so its commas cost nothing. Without it only `[` holds a list.
+    pub lists: bool,
+}
+
+/// The expressions' weights.
+const EXPRESSION: Weights = Weights { levels: MAX_NESTING, operator: LIGHT, access: LIGHT, comma: LIGHT, lists: false };
+
 /// One bracket level of [`too_nested`]'s walk.
 #[derive(Default)]
 struct Level {
-    /// `[`: commas separate elements (a loop in the parser), not operands.
-    array: bool,
+    /// Commas separate items (a loop in the parser), not operands.
+    list: bool,
+    /// An object literal (`:` precedes its values).
+    object: bool,
+    /// The header of `if`, `while`, `for`, `switch`, `catch` or `with` (not a call).
+    header: bool,
     /// Cost of the chains of the current statement or element.
     chain: usize,
     /// Comma operators so far in the current statement.
@@ -707,14 +734,53 @@ fn substitutions(template: &str) -> Vec<String> {
 /// use, summing brackets, runs of prefix operators and, per bracket level, the chains of the
 /// current statement (or array element) weighted by what each link costs the parser.
 fn too_nested(toks: &[Tok]) -> bool {
-    too_nested_from(toks, 0)
+    too_nested_from(toks, 0, EXPRESSION)
 }
 
-/// [`too_nested`] for code that already sits `base` deep (a template substitution).
-fn too_nested_from(toks: &[Tok], base: usize) -> bool {
+/// Whether `code` nests deeper than [`too_nested`]'s estimate allows with weights `w`, without
+/// the expression rewrite: for other JavaScript, run on another stack (scripts).
+pub fn nests_deeper_than(code: &str, w: Weights) -> bool {
+    too_nested_from(&tokenize(code).0, 0, w)
+}
+
+/// Whether the bracket `open`, after `prev`, holds a list ([`Weights::lists`]). `parent` is the
+/// level it opens in; `after_header` is set when `prev` closes an `if (…)`-style header.
+fn opens_list(open: &Tok, prev: Option<&Tok>, parent: Option<&Level>, after_header: bool, lists: bool) -> bool {
+    if !lists {
+        return open.text == "[";
+    }
+    let Some(prev) = prev else { return open.text == "[" };
+    // A value: what follows it is a call or an index, not a literal.
+    let value = match prev.kind {
+        Kind::Ident => !prev.is_kw(DELIM_KW) && !prev.is_kw(PREFIX_KW),
+        Kind::Num | Kind::Str | Kind::Template | Kind::Regex => true,
+        Kind::Punct => matches!(prev.text.as_str(), ")" | "]" | "}"),
+    };
+    match open.text.as_str() {
+        "[" => !value,
+        // Arguments (`f(a, b)`, `f(a)(b, c)`) and parameters (`function f(a, b)`); after a block's
+        // `}` or an `if (…)` header, `(` groups a comma operator.
+        "(" => value && !prev.is("}") && !(after_header && prev.is(")")),
+        // An object literal stands where an operand is expected; anywhere else `{` opens a block
+        // (also after `=>`, a label, `case …:` and a `return` that ends its line).
+        _ => match prev.kind {
+            Kind::Punct if prev.is(":") => parent.is_some_and(|l| l.object),
+            Kind::Punct => !matches!(prev.text.as_str(), ")" | "]" | "}" | "=>" | ";" | "++" | "--"),
+            Kind::Ident => {
+                prev.is_kw(&["throw", "typeof", "void", "delete", "in", "instanceof", "of", "yield", "await", "case"]) || (prev.is_kw(&["return"]) && !open.nl)
+            }
+            _ => false,
+        },
+    }
+}
+
+/// [`too_nested`] for code that already sits `base` deep (a template substitution), with
+/// weights `w`.
+fn too_nested_from(toks: &[Tok], base: usize, w: Weights) -> bool {
     let mut levels = vec![Level::default()];
     let mut prefix = 0usize;
     let mut prev: Option<&Tok> = None;
+    let mut after_header = false;
     for t in toks {
         let p = t.kind == Kind::Punct;
         if let Some(l) = levels.last_mut() {
@@ -734,30 +800,36 @@ fn too_nested_from(toks: &[Tok], base: usize) -> bool {
             if t.text != "{"
                 && let Some(l) = levels.last_mut()
             {
-                l.chain = l.chain.saturating_add(LIGHT);
+                l.chain = l.chain.saturating_add(w.access);
             }
-            levels.push(Level { array: t.text == "[", ..Level::default() });
+            let list = opens_list(t, prev, levels.last(), after_header, w.lists);
+            let header = t.text == "(" && prev.is_some_and(|p| p.is_kw(HEADER_KW));
+            levels.push(Level { list, object: list && t.text == "{", header, ..Level::default() });
         } else if p && matches!(t.text.as_str(), ")" | "]" | "}") {
-            if levels.len() > 1 {
-                levels.pop();
+            if levels.len() > 1
+                && let Some(closed) = levels.pop()
+            {
+                after_header = closed.header;
             }
         } else if let Some(l) = levels.last_mut() {
             if t.is(";") {
                 l.boundary();
             } else if t.is(",") {
-                l.commas += usize::from(!l.array);
-                l.chain = l.commas.saturating_mul(LIGHT);
+                l.commas += usize::from(!l.list);
+                l.chain = l.commas.saturating_mul(w.comma);
             } else if t.is_kw(&["else"]) {
                 l.elses += 1;
             } else if (p && (matches!(t.text.as_str(), "?" | ":" | "=>" | "**" | "||") || ASSIGN.contains(&t.text.as_str())))
                 || t.is_kw(&["if", "while", "for", "with", "do"])
             {
                 l.chain = l.chain.saturating_add(HEAVY);
+            } else if t.is(".") || t.is("?.") {
+                l.chain = l.chain.saturating_add(w.access);
             } else if p || t.is_kw(&["in", "instanceof"]) {
-                l.chain = l.chain.saturating_add(LIGHT);
+                l.chain = l.chain.saturating_add(w.operator);
             } else if matches!(t.kind, Kind::Template | Kind::Regex) {
                 // A tagged template is a link like a call.
-                l.chain = l.chain.saturating_add(LIGHT);
+                l.chain = l.chain.saturating_add(w.access);
                 inner = inner_depth(&t.text);
             }
         }
@@ -767,7 +839,7 @@ fn too_nested_from(toks: &[Tok], base: usize) -> bool {
         for l in &levels {
             cost = cost.saturating_add(l.chain).saturating_add(l.elses.saturating_mul(HEAVY));
         }
-        if cost > MAX_NESTING * LEVEL {
+        if cost > w.levels.saturating_mul(LEVEL) {
             return true;
         }
         // The code inside `${…}` is parsed like any other, one level deeper (the depth check
@@ -776,7 +848,7 @@ fn too_nested_from(toks: &[Tok], base: usize) -> bool {
             && t.text.contains("${")
             && substitutions(&t.text)
                 .iter()
-                .any(|sub| too_nested_from(&tokenize(sub).0, cost.saturating_sub(inner.saturating_mul(LEVEL)).saturating_add(LEVEL)))
+                .any(|sub| too_nested_from(&tokenize(sub).0, cost.saturating_sub(inner.saturating_mul(LEVEL)).saturating_add(LEVEL), w))
         {
             return true;
         }
