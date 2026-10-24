@@ -198,7 +198,9 @@ impl FrameRate {
                 return r;
             }
         }
-        FrameRate::new((fps * 1000.0).round() as i64, 1000)
+        let num = (fps * 1000.0).round() as i64;
+        // A tiny positive rate must not round to the invalid 0/1 rate.
+        FrameRate::new(if fps > 0.0 { num.max(1) } else { num }, 1000)
     }
 
     pub fn as_f64(self) -> f64 {
@@ -532,6 +534,12 @@ pub const SAMPLE_RATES: [i64; 6] = [32_000, 44_100, 48_000, 88_200, 96_000, 192_
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn from_f64_tiny_positive_fps_is_nonzero() {
+        let r = FrameRate::from_f64(0.0001);
+        assert!(r.num > 0 && r.den > 0, "got {r:?}");
+    }
 
     #[test]
     fn frame_rate_constructors_accept_extreme_numbers() {
