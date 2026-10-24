@@ -223,6 +223,19 @@ fn plan_cached(akey: u64, a: &WarpAnalysis, s: &StabSettings) -> Arc<Plan> {
     p
 }
 
+/// Validate and cache the default stabilization plan after analysis. Use the serialized
+/// analysis so the cached plan has exactly the same inputs as the first render, including
+/// any floating-point round trip through JSON. Other settings still get their own plan.
+pub fn prepare_default_plan(json: &str) -> bool {
+    let Some((key, a)) = analysis_cached(json) else { return false };
+    if a.is_empty() {
+        return false;
+    }
+    let fps = if a.frame_duration > 0.0 { 1.0 / a.frame_duration } else { 30.0 };
+    let p = plan_cached(key, &a, &StabSettings { fps, ..Default::default() });
+    p.warps.len() == a.frames.len() && p.warps.iter().all(|h| h.0.iter().flatten().all(|v| v.is_finite()))
+}
+
 /// The stored analysis of an instance (`None` when not analysed).
 pub fn analysis(params: &Params) -> Option<Arc<WarpAnalysis>> {
     let j = s(params, ANALYSIS);
@@ -602,6 +615,42 @@ mod tests {
         let img = frame([10.0, 10.0]);
         let ctx = EffectCtx { params: &ps, time: 0.0, layer_size: [64.0, 48.0], seed: 1, adjustment: false, env: EffectEnv::default() };
         assert_eq!(render(&ctx, Buf { img: img.clone(), offset: [0.0; 2], scale: 1.0 }).img.data, img.data);
+    }
+
+    #[test]
+    fn prepared_default_plan_preserves_first_render_and_is_reused() {
+        let json = analysis_json(25, 64.0, 48.0, |k| [((k * 7) % 5) as f64 - 2.0, k as f64 * 0.1]);
+        let mut a = WarpAnalysis::from_json(&json).unwrap();
+        a.start = 0.012345678901234567;
+        a.tracks = (0..24)
+            .map(|id| effectcraft_track::camtrack::Track2D {
+                id,
+                start: 0,
+                pts: (0..25).map(|k| [8.0 + (id % 6) as f32 * 8.0 + ((k * 7) % 5) as f32, 8.0 + (id / 6) as f32 * 8.0 + k as f32 * 0.1]).collect(),
+            })
+            .collect();
+        let json = a.to_json();
+        let ps = params(&json, 2, 0);
+        let ctx = EffectCtx { params: &ps, time: a.start, layer_size: a.size, seed: 1, adjustment: false, env: EffectEnv::default() };
+        let input = Buf { img: frame([30.0, 22.0]), offset: [0.0; 2], scale: 1.0 };
+        // Original flow: validate, discard the plan, then render from the stored analysis.
+        let _discarded = plan(&a, &StabSettings { fps: 25.0, ..Default::default() });
+        let before = render(&ctx, input.clone());
+        let key = (fnv(json.as_bytes()), settings_key(&settings(&ps, 25.0)));
+        plans().lock().unwrap().remove(&key);
+        assert!(prepare_default_plan(&json));
+        let prepared = plans().lock().unwrap().get(&key).unwrap().clone();
+        assert!(!prepared.meshes.is_empty(), "exercise the Subspace Warp plan");
+        let after = render(&ctx, input);
+        let (_, _, rendered) = plan_at(&ps, a.start).unwrap();
+        assert!(Arc::ptr_eq(&prepared, &rendered));
+        assert_eq!(before.offset, after.offset);
+        assert_eq!(before.scale.to_bits(), after.scale.to_bits());
+        for (a, b) in before.img.data.iter().flatten().zip(after.img.data.iter().flatten()) {
+            assert_eq!(a.to_bits(), b.to_bits());
+        }
+        assert!(!prepare_default_plan("invalid"));
+        assert!(!prepare_default_plan(&WarpAnalysis::default().to_json()));
     }
 
     #[test]
