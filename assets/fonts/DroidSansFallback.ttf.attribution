@@ -1,0 +1,8 @@
+asset:        DroidSansFallback.ttf
+title:        Droid Sans Fallback CJK font
+author:       Google Corporation (digitized data); Steve Matteson / Ascender Corporation (design)
+source:       https://android.googlesource.com/platform/frameworks/base/+/android-4.4_r1/data/fonts/DroidSansFallback.ttf
+license:      Apache-2.0
+license-file: LICENSE-APACHE; assets/fonts/NOTICE-Droid.txt
+added:        2026-10-16 by IntegrateCraft
+notes:        Unmodified AOSP font; browser CJK fallback. SHA256 05d71b179ef97b82cf1bb91cef290c600a510f77f39b4964359e3ef88378c79d

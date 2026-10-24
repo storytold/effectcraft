@@ -284,6 +284,24 @@ fn web(args: &[String]) -> Result<(), String> {
     let _ = std::fs::remove_dir_all(&dist);
     std::fs::create_dir_all(&dist).map_err(|e| e.to_string())?;
     run(Command::new("wasm-bindgen").args(["--target", "web", "--no-typescript", "--out-dir"]).arg(&dist).arg(&wasm))?;
+    // Embedded hosts may prohibit persistent render buffers independently of user preferences.
+    // Bake the policy into the one shared page/worker module; no runtime/URL override exists.
+    if args.iter().any(|a| a == "--no-persistent-frame-cache") {
+        let marker = "const PERSISTENT_FRAME_CACHE_DISABLED = false;";
+        let mut patched = false;
+        for file in dist_files(&dist).iter().filter(|f| f.ends_with("/js/host.js")) {
+            let path = dist.join(file);
+            let source = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+            if !source.contains(marker) {
+                return Err(format!("{file}: persistent-cache build policy marker missing"));
+            }
+            std::fs::write(&path, source.replace(marker, "const PERSISTENT_FRAME_CACHE_DISABLED = true;")).map_err(|e| e.to_string())?;
+            patched = true;
+        }
+        if !patched {
+            return Err("persistent-cache policy: shared host module missing".into());
+        }
+    }
     let bg = dist.join("effectcraft_web_bg.wasm");
     if !dev && Command::new("wasm-opt").arg("--version").output().is_ok() {
         // optional: smaller and faster (binaryen); skipped when not installed

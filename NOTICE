@@ -12,6 +12,12 @@ Third-party material
 This product bundles third-party material under its own licenses, listed below. The per-file
 list (author, source, license) is in ATTRIBUTION.md.
 
+Droid Sans Fallback font: Digitized data copyright Google Corporation © 2006.
+Font designer: Steve Matteson; manufacturer: Ascender Corporation.
+Licensed under the Apache License, Version 2.0. See LICENSE-APACHE and
+assets/fonts/NOTICE-Droid.txt (the original AOSP fonts directory notice).
+Source: platform/frameworks/base android-4.4_r1/data/fonts/DroidSansFallback.ttf.
+
 Inter (assets/fonts/Inter-*.ttf) — SIL Open Font License 1.1. See assets/fonts/OFL-Inter.txt.
 Noto Serif (assets/fonts/NotoSerif-Regular.ttf) — SIL Open Font License 1.1. See assets/fonts/OFL-NotoSerif.txt.
 JetBrains Mono (assets/fonts/JetBrainsMono-Regular.ttf) — SIL Open Font License 1.1. See assets/fonts/OFL-JetBrainsMono.txt.
