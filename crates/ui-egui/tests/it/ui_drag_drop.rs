@@ -128,16 +128,20 @@ fn alt_dragging_a_project_item_replaces_the_layer_source() {
 /// under the pointer, as in the Timeline, instead of adding a layer (#2173).
 #[test]
 fn alt_dropping_a_project_item_on_the_viewer_replaces_the_layer_source() {
+    use effectcraft_engine::project::{ItemId, LayerId, LayerSource};
     let (mut h, clip) = harness();
     let item = rect(&h, &format!("project.item.{clip}.name")).center();
     let to = comp_to_screen(&h.ctx, [160.0, 90.0]).unwrap();
+    // The three solids overlap completely, so the topmost one is under the pointer.
+    let (top, middle, bottom) = (layer_id(&h, "Top"), layer_id(&h, "Middle"), layer_id(&h, "Bottom"));
+    let source = |h: &Harness<'_, EffectcraftApp>, id: u64| h.state().session.active_comp().unwrap().layer(LayerId(id)).unwrap().source.clone();
+    let (middle_before, bottom_before) = (source(&h, middle), source(&h, bottom));
     let before = stack(&h);
     drag(&mut h, item, to, Modifiers::ALT);
     assert_eq!(stack(&h), before, "no layer is added");
-    let comp = h.state().session.active_comp().unwrap();
-    let replaced =
-        comp.layers.iter().filter(|l| l.source == effectcraft_engine::project::LayerSource::Comp { item: effectcraft_engine::project::ItemId(clip) }).count();
-    assert_eq!(replaced, 1, "only the layer under the pointer takes the new source");
+    assert_eq!(source(&h, top), LayerSource::Comp { item: ItemId(clip) }, "the layer under the pointer takes the new source");
+    assert_eq!(source(&h, middle), middle_before, "the layer below it keeps its source");
+    assert_eq!(source(&h, bottom), bottom_before, "the bottom layer keeps its source");
 }
 
 /// Ctrl+Alt+/ (Cmd+Opt+/ on macOS) replaces every selected layer's source with the Project panel
