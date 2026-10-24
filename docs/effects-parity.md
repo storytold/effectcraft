@@ -16,7 +16,7 @@ After Effects', and does the preset library exist. The per-effect catalogue is t
 | On the GPU | **280** (92%) | Measured: registry flags; GPU vs CPU agreement tested per effect |
 | 32-bit float, no clamping | 306 | Measured: registry flags |
 | **Rendered output matches After Effects** | **partly measured** | Some colour effects are checked against After Effects 2026 renders of our own test projects: Tint, Tritone, Black & White, Exposure, Levels, Curves, Luma Key, Extract, 4-Color Gradient and Fill within 1–3/255, Brightness & Contrast up to 6.2/255 (Color Correction, Generate and Keying rows below); every other effect is unmeasured. `effectcraft_effects::fidelity::compare_frames` exists for the corpus ([fidelity/README.md](fidelity/README.md)); simulation effects are pinned by golden hashes of our own output (M13.27) |
-| Animation presets | **54** original presets (8 text-animator, 23 Transitions, 23 Backgrounds) against After Effects' **621** `.ffx` presets | Measured: `crates/engine/presets/text_animators.json`, `crates/engine/presets/transitions.json`, `crates/engine/presets/backgrounds.json`; the After Effects `Presets` folder |
+| Animation presets | **76** original presets (8 text-animator, 23 Transitions, 23 Backgrounds, 22 Behaviors) against After Effects' **621** `.ffx` presets | Measured: `crates/engine/presets/text_animators.json`, `crates/engine/presets/transitions.json`, `crates/engine/presets/backgrounds.json`, `crates/engine/presets/behaviors.json`; the After Effects `Presets` folder |
 | 26.x additions | Curl Noise (26.3) present (#463 open); effect colour labels (26.5) present in Effect Controls only, not in the Timeline; the rebuilt Effect Controls (26.5) missing | Release notes |
 
 **Breadth ≈ 85%** (presets weigh in; the effects themselves are ≈ 100%). **Ready ≈ 40%**: until a
@@ -56,7 +56,7 @@ implemented under a generic name ("Key Light").
 **≈ 70–130 h**: a fidelity corpus case per effect at default and one non-default setting, compared
 with After Effects renders, and the fixes they turn up (40–80 h, most of it parallel, but every
 reference render needs After Effects on the owner's Mac); an original preset library covering
-After Effects' preset categories (Behaviors, Shapes, Synthetics, Text, Image effects remain; Backgrounds and
+After Effects' preset categories (Shapes, Synthetics, Text, Image effects remain; Backgrounds, Behaviors and
 Transitions exist) 15–35 h; the open effect bugs 10–20 h. Moving Fractal and the analysis effects to
 the GPU is performance, not parity.
 
