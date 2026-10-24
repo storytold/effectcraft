@@ -523,7 +523,7 @@ pub enum OutputFormat {
     TargaSequence,
     /// Animated GIF.
     Gif,
-    /// Animated WebP: lossless frames, with alpha.
+    /// Animated WebP: lossy (VP8) or lossless frames, with alpha.
     WebP,
     /// WebM: VP9 video (alpha with RGB + Alpha) + Opus audio.
     WebM,
@@ -1062,7 +1062,7 @@ pub struct OutputModule {
     pub alpha_mode: AlphaMode,
     /// Output path or template (see the module docs).
     pub output: String,
-    /// JPEG / WebM quality 1–100.
+    /// JPEG / WebM / lossy WebP quality 1–100.
     pub quality: u8,
     /// H.264 target bitrate (and WebM's when `webm_bitrate`; HEVC / AV1 with [`RateControlMode::Bitrate`]).
     pub bitrate_kbps: u32,
@@ -1080,6 +1080,10 @@ pub struct OutputModule {
     pub audio_format: AudioFormat,
     /// GIF and WebP: loop forever (otherwise play once).
     pub gif_loop: bool,
+    /// WebP: lossless frames instead of lossy ones at `quality`.
+    pub webp_lossless: bool,
+    /// Lossy WebP: the quality of the alpha beside each frame, 1–100; 100 keeps it exact.
+    pub webp_alpha_quality: u8,
     /// HEVC / AV1 options.
     pub codec: VideoCodecOptions,
     /// WebM video codec.
@@ -1112,6 +1116,8 @@ impl Default for OutputModule {
             audio_channels: 2,
             audio_format: AudioFormat::S16,
             gif_loop: true,
+            webp_lossless: false,
+            webp_alpha_quality: 100,
             codec: VideoCodecOptions::default(),
             webm_codec: WebmVideoCodec::Vp9,
             opus_bitrate_kbps: 192,
@@ -1163,6 +1169,14 @@ impl OutputModule {
             OutputFormat::ProRes => v.push(("Codec", self.prores_profile.label().into())),
             OutputFormat::WebM if self.webm_bitrate => v.push(("Bitrate", format!("{} kbps", self.bitrate_kbps))),
             OutputFormat::WebM | OutputFormat::JpegSequence => v.push(("Quality", self.quality.to_string())),
+            OutputFormat::WebP if self.webp_lossless => v.push(("Compression", "Lossless".into())),
+            OutputFormat::WebP => {
+                v.push(("Compression", "Lossy".into()));
+                v.push(("Quality", self.quality.to_string()));
+                if self.channels == Channels::Rgba {
+                    v.push(("Alpha Quality", self.webp_alpha_quality.to_string()));
+                }
+            }
             _ => {}
         }
         if self.crop.enabled {

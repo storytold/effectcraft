@@ -190,6 +190,10 @@ pub fn builtin_output_modules() -> Vec<OutputModule> {
     let mut webp_alpha = om("Animated WebP with Alpha", OutputFormat::WebP);
     webp_alpha.channels = Channels::Rgba;
     v.push(webp_alpha);
+    let mut webp_lossless = om("Animated WebP (Lossless) with Alpha", OutputFormat::WebP);
+    webp_lossless.channels = Channels::Rgba;
+    webp_lossless.webp_lossless = true;
+    v.push(webp_lossless);
     v.push(om("WebM (VP9 + Opus)", OutputFormat::WebM));
     let mut wa = om("WebM with Alpha", OutputFormat::WebM);
     wa.channels = Channels::Rgba;

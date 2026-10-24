@@ -428,11 +428,32 @@ fn webp_timeline(frames: &[(Image, u32)]) -> Vec<&Image> {
         .collect()
 }
 
+/// The fourcc of every `ANMF` frame's image chunk, in order (`ALPH` first when there is one).
+fn webp_frame_chunks(path: &Path) -> Vec<Vec<[u8; 4]>> {
+    let b = std::fs::read(path).expect("read webp");
+    let chunks = |data: &[u8]| {
+        let mut out = Vec::new();
+        let mut pos = 0;
+        while pos + 8 <= data.len() {
+            let size = u32::from_le_bytes(data[pos + 4..pos + 8].try_into().unwrap()) as usize;
+            out.push((<[u8; 4]>::try_from(&data[pos..pos + 4]).unwrap(), pos + 8, size));
+            pos += 8 + size + size % 2;
+        }
+        out
+    };
+    chunks(&b[12..])
+        .into_iter()
+        .filter(|(f, _, _)| f == b"ANMF")
+        .map(|(_, at, size)| chunks(&b[12 + at + 16..12 + at + size]).into_iter().map(|(f, _, _)| f).collect())
+        .collect()
+}
+
 #[test]
 fn webp_roundtrip() {
     let (p, cid) = project(None);
     let d = out_dir("webp");
-    let om = OutputModule::for_format(OutputFormat::WebP);
+    let mut om = OutputModule::for_format(OutputFormat::WebP);
+    om.webp_lossless = true;
     let path = d.join("anim.webp");
     run(&p, cid, &NoFootage, &om, &path);
     let (frames, flags, loops) = decode_webp(&path);
@@ -447,6 +468,7 @@ fn webp_roundtrip() {
     }
     // EffectCraft reads it back as footage: 12 frames at 10 fps.
     decode_movie(&path, FRAMES, 0.01);
+    assert!(webp_frame_chunks(&path).iter().all(|c| c == &[*b"VP8L"]), "lossless frames are VP8L");
 }
 
 #[test]
@@ -454,6 +476,7 @@ fn webp_keeps_alpha() {
     let (p, cid) = project(None);
     let d = out_dir("webp-alpha");
     let mut om = OutputModule::for_format(OutputFormat::WebP);
+    om.webp_lossless = true;
     om.channels = Channels::Rgba;
     om.gif_loop = false;
     let path = d.join("alpha.webp");
@@ -468,6 +491,52 @@ fn webp_keeps_alpha() {
         let c = px(img, W / 2, H / 2);
         let want = if k >= 5 { [1.0, 0.0, 0.0, 1.0] } else { [0.0, 0.0, 0.0, 0.0] };
         assert!(c.iter().zip(want).all(|(a, b)| (a - b).abs() < 0.01), "frame {k} centre {c:?} want {want:?}");
+    }
+}
+
+#[test]
+fn webp_lossy_by_default() {
+    let (p, cid) = project(None);
+    let d = out_dir("webp-lossy");
+    let om = OutputModule::for_format(OutputFormat::WebP);
+    assert!(!om.webp_lossless, "lossy is the default");
+    let path = d.join("lossy.webp");
+    run(&p, cid, &NoFootage, &om, &path);
+    assert!(webp_frame_chunks(&path).iter().all(|c| c == &[*b"VP8 "]), "opaque lossy frames are VP8 alone: {:?}", webp_frame_chunks(&path));
+    let (frames, flags, _) = decode_webp(&path);
+    assert_eq!(flags, 0x02);
+    assert_eq!(frames.iter().map(|(_, ms)| *ms).collect::<Vec<_>>(), [500, 700], "held frames still merge");
+    for (k, img) in webp_timeline(&frames).into_iter().enumerate() {
+        check_frame(img, k as u64, 0.05);
+    }
+    decode_movie(&path, FRAMES, 0.05);
+}
+
+#[test]
+fn webp_lossy_keeps_alpha_exactly() {
+    let (p, cid) = project(None);
+    let d = out_dir("webp-lossy-alpha");
+    let mut om = OutputModule::for_format(OutputFormat::WebP);
+    om.channels = Channels::Rgba;
+    om.quality = 50;
+    let path = d.join("alpha.webp");
+    run(&p, cid, &NoFootage, &om, &path);
+    // The first frame is all transparent, so it carries its alpha; the next stores only the
+    // area that changed, the solid, which is opaque and so needs none.
+    let kinds = webp_frame_chunks(&path);
+    assert_eq!(kinds.first().map(Vec::as_slice), Some(&[*b"ALPH", *b"VP8 "][..]), "{kinds:?}");
+    assert!(kinds.iter().all(|c| c.last() == Some(b"VP8 ")), "{kinds:?}");
+    let (frames, flags, _) = decode_webp(&path);
+    assert_eq!(flags, 0x12);
+    for (k, img) in webp_timeline(&frames).into_iter().enumerate() {
+        assert_eq!(px(img, 2, 2)[3], 0.0, "frame {k}: the corner is transparent");
+        let c = px(img, W / 2, H / 2);
+        if k >= 5 {
+            assert_eq!(c[3], 1.0, "frame {k}: the solid is opaque");
+            assert!(c[0] > 0.9 && c[1] < 0.1 && c[2] < 0.1, "frame {k} centre {c:?}");
+        } else {
+            assert_eq!(c[3], 0.0, "frame {k}: nothing there yet");
+        }
     }
 }
 

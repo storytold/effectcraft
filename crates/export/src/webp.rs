@@ -2,9 +2,16 @@
 //!
 //! The file is a RIFF `WEBP` with a `VP8X` header (animation flag; alpha flag with RGB + Alpha),
 //! an `ANIM` chunk (background colour, loop count) and one `ANMF` chunk per frame. Each frame's
-//! image is a lossless `VP8L` bitstream from the `image` crate's pure-Rust encoder, lifted out
-//! of the still file it writes. It is the only WebP encoder in the workspace: lossy (`VP8 `)
-//! frames would need a VP8 encoder, which nothing here has yet.
+//! image is, by the Output Module's compression:
+//!
+//! * **Lossy** (the default): a `VP8 ` key frame from `effectcraft-vp8enc` at the module's
+//!   quality, with an `ALPH` chunk before it when the frame has any transparency (§2.7.1.2): the
+//!   alpha plane compressed with the lossless format (a `VP8L` image-stream without its header),
+//!   through a prediction filter when that codes smaller, and below alpha quality 100 reduced to
+//!   fewer levels first (full transparency and full opacity always stay exact).
+//! * **Lossless**: a `VP8L` bitstream from the `image` crate's pure-Rust encoder.
+//!
+//! Both lossless streams are lifted out of the still file that encoder writes.
 //!
 //! A frame stores only the area that changed since the frame before it (its corner snapped to
 //! the even offsets the format stores), drawn over the canvas without blending, so what it
@@ -23,6 +30,32 @@ use crate::{Cx, ExportError, Report, Result, State, batch_size, io};
 
 /// Largest frame side: `VP8L` stores width − 1 and height − 1 in 14 bits.
 pub(crate) const MAX_SIDE: u32 = 1 << 14;
+/// Largest lossy frame side: the VP8 key frame header stores the size itself in 14 bits.
+pub(crate) const MAX_SIDE_LOSSY: u32 = effectcraft_vp8enc::MAX_SIDE;
+/// `ALPH` header bits: compressed with the lossless format; level reduction applied (P = 1); the
+/// filter method sits in bits 2–3.
+const ALPH_LOSSLESS: u8 = 0x01;
+const ALPH_LEVEL_REDUCTION: u8 = 0x10;
+
+/// How frames are compressed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Codec {
+    Lossless,
+    /// VP8 at `quality` (1–100); alpha beside it at `alpha_quality` (100 = exact).
+    Lossy {
+        quality: u8,
+        alpha_quality: u8,
+    },
+}
+
+impl Codec {
+    fn max_side(self) -> u32 {
+        match self {
+            Codec::Lossless => MAX_SIDE,
+            Codec::Lossy { .. } => MAX_SIDE_LOSSY,
+        }
+    }
+}
 /// Largest frame duration in milliseconds (24 bits).
 const MAX_DURATION: u32 = (1 << 24) - 1;
 /// `ANMF` flags: do not blend (bit 1 set), do not dispose (bit 0 clear).
@@ -41,8 +74,14 @@ pub(crate) struct Rect {
 }
 
 pub(crate) async fn webp(cx: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut State<'_>) -> Result<Report> {
-    if w == 0 || h == 0 || w > MAX_SIDE || h > MAX_SIDE {
-        return Err(ExportError::Unsupported(format!("WebP frames are limited to {MAX_SIDE} px a side (this one is {w}×{h})")));
+    let codec = if cx.output.webp_lossless {
+        Codec::Lossless
+    } else {
+        Codec::Lossy { quality: cx.output.quality.clamp(1, 100), alpha_quality: cx.output.webp_alpha_quality.clamp(1, 100) }
+    };
+    let max = codec.max_side();
+    if w == 0 || h == 0 || w > max || h > max {
+        return Err(ExportError::Unsupported(format!("WebP frames are limited to {max} px a side (this one is {w}×{h})")));
     }
     let rate = cx.settings.rate(comp);
     let mut clock = Clock::new(rate.num as f64, rate.den as f64)?;
@@ -90,7 +129,7 @@ pub(crate) async fn webp(cx: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut Stat
         let encoded: Vec<Result<Option<Frame>>> = plan
             .par_iter()
             .map(|(area, _, ms)| match area {
-                Some((r, px)) => encode_frame(px, r.w, r.h).map(|data| Some(Frame { rect: *r, data, ms: *ms })),
+                Some((r, px)) => encode_frame(px, r.w, r.h, codec).map(|data| Some(Frame { rect: *r, data, ms: *ms })),
                 None => Ok(None),
             })
             .collect();
@@ -106,7 +145,7 @@ pub(crate) async fn webp(cx: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut Stat
                 // A hold longer than a frame can last (4.6 hours) goes on in a new one-pixel
                 // frame that changes nothing.
                 (None, _) => {
-                    let still = Frame { rect: Rect { x: 0, y: 0, w: 1, h: 1 }, data: encode_frame(corner, 1, 1)?, ms: *ms };
+                    let still = Frame { rect: Rect { x: 0, y: 0, w: 1, h: 1 }, data: encode_frame(corner, 1, 1, codec)?, ms: *ms };
                     if let Some(done) = pending.replace(still) {
                         anim.frame(&done)?;
                     }
@@ -124,7 +163,7 @@ pub(crate) async fn webp(cx: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut Stat
     Ok(Report { path, frames: 0, width: w, height: h, seconds: 0.0, bytes, audio: false, log: None, overflow: vec![] })
 }
 
-/// One `ANMF` frame: where it goes, its `VP8L` chunk and how long it shows.
+/// One `ANMF` frame: where it goes, its image chunks and how long it shows.
 pub(crate) struct Frame {
     pub rect: Rect,
     pub data: Vec<u8>,
@@ -204,13 +243,143 @@ pub(crate) fn crop(px: &[u8], w: u32, r: Rect) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// `px` (`w`×`h` RGBA) as a lossless `VP8L` chunk, header and padding included. Opaque frames
-/// go to the encoder as RGB, which it compresses better.
-pub(crate) fn encode_frame(px: &[u8], w: u32, h: u32) -> Result<Vec<u8>> {
+/// `px` (`w`×`h` RGBA) as a frame's image chunks, headers and padding included.
+pub(crate) fn encode_frame(px: &[u8], w: u32, h: u32, codec: Codec) -> Result<Vec<u8>> {
     let n = (w as usize).checked_mul(h as usize).and_then(|n| n.checked_mul(4));
-    if w == 0 || h == 0 || w > MAX_SIDE || h > MAX_SIDE || n != Some(px.len()) {
+    let max = codec.max_side();
+    if w == 0 || h == 0 || w > max || h > max || n != Some(px.len()) {
         return Err(ExportError::Encode(format!("WebP frame of {w}×{h} with {} bytes", px.len())));
     }
+    match codec {
+        Codec::Lossless => encode_lossless(px, w, h),
+        Codec::Lossy { quality, alpha_quality } => encode_lossy(px, w, h, quality, alpha_quality),
+    }
+}
+
+/// A `VP8 ` chunk, after an `ALPH` chunk when any pixel is not opaque (§2.7.1.2).
+fn encode_lossy(px: &[u8], w: u32, h: u32, quality: u8, alpha_quality: u8) -> Result<Vec<u8>> {
+    let frame = effectcraft_vp8enc::encode_rgba(px, w, h, &effectcraft_vp8enc::Vp8Params { quality, loop_filter: None })
+        .map_err(|e| ExportError::Encode(e.to_string()))?;
+    let mut out = Vec::with_capacity(frame.data.len() + 16);
+    if !px.chunks_exact(4).all(|p| p.get(3) == Some(&255)) {
+        let mut alpha: Vec<u8> = px.chunks_exact(4).map(|p| p[3]).collect();
+        let levels = alpha_levels(alpha_quality);
+        reduce_levels(&mut alpha, levels);
+        // The lossless format predicts on its own, and a filter's residuals can defeat that as
+        // easily as help it, so the filter whose residuals look cheapest is kept only when it
+        // actually codes smaller than no filter.
+        let best = (1..4u8)
+            .map(|m| (m, filter_alpha(&alpha, w as usize, h as usize, m)))
+            .min_by(|(_, a), (_, b)| entropy(a).total_cmp(&entropy(b)))
+            .ok_or_else(|| ExportError::Encode("no alpha filter".into()))?;
+        let plain = alpha_stream(&alpha, w, h)?;
+        let filtered = alpha_stream(&best.1, w, h)?;
+        let (method, chunk) = if filtered.len() < plain.len() { (best.0, filtered) } else { (0, plain) };
+        let header = ALPH_LOSSLESS | (method << 2) | if levels < 256 { ALPH_LEVEL_REDUCTION } else { 0 };
+        put_chunk(&mut out, b"ALPH", &[&[header], image_stream(&chunk)?])?;
+    }
+    put_chunk(&mut out, b"VP8 ", &[&frame.data])?;
+    Ok(out)
+}
+
+/// An alpha plane (or its filter residuals) as a `VP8L` chunk: grey, as the decoder takes the
+/// green channel, so the lossless format's subtract-green transform leaves one channel to code.
+fn alpha_stream(alpha: &[u8], w: u32, h: u32) -> Result<Vec<u8>> {
+    let grey: Vec<u8> = alpha.iter().flat_map(|&a| [a; 3]).collect();
+    let mut still = Vec::new();
+    image::codecs::webp::WebPEncoder::new_lossless(&mut still).encode(&grey, w, h, ExtendedColorType::Rgb8).map_err(|e| ExportError::Encode(e.to_string()))?;
+    vp8l_chunk(&still)
+}
+
+/// Alpha levels kept at an alpha quality: all 256 at 100, fewer below on a logarithmic scale
+/// (about 147 at 90, 64 at 75, 16 at 50, 4 at 25).
+pub(crate) fn alpha_levels(quality: u8) -> u32 {
+    if quality >= 100 { 256 } else { 256f64.powf(f64::from(quality.max(1)) / 100.0).round().clamp(2.0, 256.0) as u32 }
+}
+
+/// Alpha rounded to `levels` evenly spaced values; 0 and 255 stay as they are.
+pub(crate) fn reduce_levels(alpha: &mut [u8], levels: u32) {
+    if !(2..256).contains(&levels) {
+        return;
+    }
+    let n = levels - 1;
+    for a in alpha {
+        let k = (u32::from(*a) * n + 127) / 255;
+        *a = ((k * 255 + n / 2) / n) as u8;
+    }
+}
+
+/// The alpha plane as filter method `method`'s residuals (RFC 9649 §2.7.1.2): each value less its
+/// prediction (none, left, above or gradient), modulo 256, with the edge rules the decoder applies.
+pub(crate) fn filter_alpha(alpha: &[u8], w: usize, h: usize, method: u8) -> Vec<u8> {
+    if alpha.len() != w * h || method == 0 {
+        return alpha.to_vec();
+    }
+    let at = |x: usize, y: usize| alpha.get(y * w + x).copied().unwrap_or(0);
+    let mut out = Vec::with_capacity(alpha.len());
+    for y in 0..h {
+        for x in 0..w {
+            let pred = match (x, y) {
+                (0, 0) => 0,
+                (0, _) if method != 2 => at(0, y - 1),
+                (_, 0) if method != 1 => at(x - 1, 0),
+                _ => match method {
+                    1 => at(x - 1, y),
+                    2 => at(x, y - 1),
+                    _ => (i32::from(at(x - 1, y)) + i32::from(at(x, y - 1)) - i32::from(at(x - 1, y - 1))).clamp(0, 255) as u8,
+                },
+            };
+            out.push(at(x, y).wrapping_sub(pred));
+        }
+    }
+    out
+}
+
+/// Bits per value the values' histogram promises: how compressible a filter's residuals are.
+fn entropy(v: &[u8]) -> f64 {
+    let mut hist = [0u32; 256];
+    for &b in v {
+        hist[usize::from(b)] += 1;
+    }
+    let n = v.len().max(1) as f64;
+    hist.iter()
+        .filter(|&&c| c > 0)
+        .map(|&c| {
+            let p = f64::from(c) / n;
+            -p * p.log2()
+        })
+        .sum()
+}
+
+/// The image-stream of a `VP8L` chunk: its data after the 5-byte image header (the signature and
+/// the packed width, height, alpha hint and version), which `ALPH` leaves out (RFC 9649 §3.4).
+pub(crate) fn image_stream(chunk: &[u8]) -> Result<&[u8]> {
+    let size =
+        chunk.get(4..8).and_then(|s| <[u8; 4]>::try_from(s).ok()).map(u32::from_le_bytes).ok_or_else(|| ExportError::Encode("short VP8L chunk".into()))?
+            as usize;
+    if chunk.get(8) != Some(&0x2f) {
+        return Err(ExportError::Encode("VP8L chunk without its signature".into()));
+    }
+    chunk.get(13..8usize.saturating_add(size)).ok_or_else(|| ExportError::Encode("VP8L chunk shorter than its size".into()))
+}
+
+/// Appends a chunk made of `parts`, with its header and the pad byte of an odd size.
+fn put_chunk(out: &mut Vec<u8>, fourcc: &[u8; 4], parts: &[&[u8]]) -> Result<()> {
+    let size: usize = parts.iter().map(|p| p.len()).sum();
+    let size32 = u32::try_from(size).map_err(|_| ExportError::Unsupported("a WebP frame is limited to 4 GB".into()))?;
+    out.extend_from_slice(fourcc);
+    out.extend_from_slice(&size32.to_le_bytes());
+    for p in parts {
+        out.extend_from_slice(p);
+    }
+    if size % 2 == 1 {
+        out.push(0);
+    }
+    Ok(())
+}
+
+/// A lossless `VP8L` chunk. Opaque frames go to the encoder as RGB, which it compresses better.
+fn encode_lossless(px: &[u8], w: u32, h: u32) -> Result<Vec<u8>> {
     let opaque = px.chunks_exact(4).all(|p| p.get(3) == Some(&255));
     let (data, color) = if opaque {
         (px.chunks_exact(4).flat_map(|p| p.iter().take(3).copied()).collect(), ExtendedColorType::Rgb8)
@@ -364,9 +533,12 @@ mod tests {
     fn short_buffers_are_errors_not_panics() {
         assert!(changed(&[0; 8], &[0; 4], 2, 1).is_err());
         assert!(crop(&[0; 8], 2, Rect { x: 0, y: 0, w: 2, h: 2 }).is_err());
-        assert!(encode_frame(&[0; 8], 2, 2).is_err());
-        assert!(encode_frame(&[], 0, 0).is_err());
-        assert!(encode_frame(&[0; 4], MAX_SIDE + 1, 1).is_err());
+        assert!(encode_frame(&[0; 8], 2, 2, Codec::Lossless).is_err());
+        assert!(encode_frame(&[0; 8], 2, 2, Codec::Lossy { quality: 90, alpha_quality: 100 }).is_err());
+        assert!(encode_frame(&[], 0, 0, Codec::Lossless).is_err());
+        assert!(encode_frame(&[0; 4], MAX_SIDE + 1, 1, Codec::Lossless).is_err());
+        assert!(encode_frame(&[0; 4], MAX_SIDE_LOSSY + 1, 1, Codec::Lossy { quality: 90, alpha_quality: 100 }).is_err());
+        assert!(image_stream(b"VP8L\x09\0\0\0\x2f").is_err());
         assert!(vp8l_chunk(b"RIFF\0\0\0\0WEBPVP8L\xff\xff\xff\x7f").is_err());
         assert!(vp8l_chunk(b"RIFF\0\0\0\0WEBPVP8X\x0a\0\0\0").is_err());
         assert!(vp8l_chunk(b"not webp").is_err());
@@ -394,7 +566,7 @@ mod tests {
         let (w, h) = (5, 3);
         let mut px = solid(w, h, [200, 100, 50, 128]);
         set(&mut px, w, 1, 1, [0, 255, 0, 255]);
-        let chunk = encode_frame(&px, w, h).unwrap();
+        let chunk = encode_frame(&px, w, h, Codec::Lossless).unwrap();
         assert_eq!(&chunk[0..4], b"VP8L");
         assert_eq!(chunk.len() % 2, 0);
         // As a still file again, it decodes to the same pixels.
@@ -406,11 +578,146 @@ mod tests {
         assert_eq!(img.as_raw(), &px);
     }
 
+    /// The chunks of a frame's image data: (fourcc, payload).
+    fn chunks(data: &[u8]) -> Vec<([u8; 4], Vec<u8>)> {
+        let mut out = Vec::new();
+        let mut pos = 0;
+        while pos + 8 <= data.len() {
+            let size = u32::from_le_bytes(data[pos + 4..pos + 8].try_into().unwrap()) as usize;
+            out.push((data[pos..pos + 4].try_into().unwrap(), data[pos + 8..pos + 8 + size].to_vec()));
+            pos += 8 + size + size % 2;
+        }
+        out
+    }
+
+    /// As a still WebP file: `VP8X` with the alpha flag, then the frame's chunks.
+    fn still(data: &[u8], w: u32, h: u32) -> Vec<u8> {
+        let mut body = b"WEBPVP8X".to_vec();
+        body.extend_from_slice(&10u32.to_le_bytes());
+        body.extend_from_slice(&[ALPHA_FLAG, 0, 0, 0]);
+        body.extend_from_slice(&put24(w - 1));
+        body.extend_from_slice(&put24(h - 1));
+        body.extend_from_slice(data);
+        let mut f = b"RIFF".to_vec();
+        f.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        f.extend_from_slice(&body);
+        f
+    }
+
+    #[test]
+    fn lossy_frames_carry_their_alpha_beside_them() {
+        let (w, h) = (24, 20);
+        let mut px = solid(w, h, [40, 80, 200, 255]);
+        for y in 0..h {
+            for x in 0..w {
+                // A soft-edged hole: transparent at the left, half at the middle.
+                let a = (x * 255 / (w - 1)) as u8;
+                set(&mut px, w, x, y, [40, 80, 200, a]);
+            }
+        }
+        clear_transparent(&mut px);
+        let data = encode_frame(&px, w, h, Codec::Lossy { quality: 90, alpha_quality: 100 }).unwrap();
+        let c = chunks(&data);
+        assert_eq!(c.iter().map(|(f, _)| *f).collect::<Vec<_>>(), [*b"ALPH", *b"VP8 "], "ALPH before the bitstream");
+        assert_eq!(c[0].1[0] & 0x03, ALPH_LOSSLESS, "compressed with the lossless format");
+        assert_eq!(c[0].1[0] & ALPH_LEVEL_REDUCTION, 0, "exact at alpha quality 100");
+        let img = image::load_from_memory_with_format(&still(&data, w, h), image::ImageFormat::WebP).unwrap().to_rgba8();
+        for (got, want) in img.as_raw().chunks_exact(4).zip(px.chunks_exact(4)) {
+            assert_eq!(got[3], want[3], "alpha is lossless");
+            if want[3] == 255 {
+                assert!(got.iter().zip(want).take(3).all(|(a, b)| a.abs_diff(*b) <= 12), "{got:?} vs {want:?}");
+            }
+        }
+    }
+
+    /// The decoder's side of §2.7.1.2: residuals back to alpha.
+    fn unfilter(res: &[u8], w: usize, h: usize, method: u8) -> Vec<u8> {
+        let mut a = vec![0u8; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                let pred = if method == 0 || (x == 0 && y == 0) {
+                    0
+                } else if x == 0 && (method == 1 || method == 3) {
+                    a[(y - 1) * w]
+                } else if y == 0 && (method == 2 || method == 3) {
+                    a[x - 1]
+                } else {
+                    match method {
+                        1 => a[y * w + x - 1],
+                        2 => a[(y - 1) * w + x],
+                        _ => (a[y * w + x - 1] as i32 + a[(y - 1) * w + x] as i32 - a[(y - 1) * w + x - 1] as i32).clamp(0, 255) as u8,
+                    }
+                };
+                a[y * w + x] = res[y * w + x].wrapping_add(pred);
+            }
+        }
+        a
+    }
+
+    #[test]
+    fn alpha_filters_undo_exactly() {
+        let (w, h) = (13, 9);
+        let alpha: Vec<u8> = (0..w * h).map(|i| ((i * 37) ^ (i / 3)) as u8).collect();
+        for m in 0..4 {
+            assert_eq!(unfilter(&filter_alpha(&alpha, w, h, m), w, h, m), alpha, "method {m}");
+        }
+        // A smooth ramp leaves a horizontal filter almost nothing to code.
+        let ramp: Vec<u8> = (0..w * h).map(|i| (i % w * 19) as u8).collect();
+        assert!(entropy(&filter_alpha(&ramp, w, h, 1)) < entropy(&ramp));
+    }
+
+    #[test]
+    fn alpha_levels_keep_the_ends() {
+        assert_eq!(alpha_levels(100), 256);
+        assert_eq!((alpha_levels(75), alpha_levels(50), alpha_levels(1)), (64, 16, 2));
+        let mut a: Vec<u8> = (0..=255).collect();
+        reduce_levels(&mut a, 16);
+        assert_eq!((a[0], a[255]), (0, 255));
+        let mut distinct = a.clone();
+        distinct.dedup();
+        assert_eq!(distinct.len(), 16);
+    }
+
+    #[test]
+    fn reduced_alpha_decodes_to_the_reduced_values() {
+        let (w, h) = (24, 20);
+        let mut px = solid(w, h, [200, 60, 90, 255]);
+        for y in 0..h {
+            for x in 0..w {
+                set(&mut px, w, x, y, [200, 60, 90, ((x * 11 + y * 7) % 256) as u8]);
+            }
+        }
+        clear_transparent(&mut px);
+        let data = encode_frame(&px, w, h, Codec::Lossy { quality: 90, alpha_quality: 50 }).unwrap();
+        let c = chunks(&data);
+        assert_eq!(c[0].1[0] & ALPH_LEVEL_REDUCTION, ALPH_LEVEL_REDUCTION, "level reduction is signalled");
+        let mut want: Vec<u8> = px.chunks_exact(4).map(|p| p[3]).collect();
+        reduce_levels(&mut want, alpha_levels(50));
+        let img = image::load_from_memory_with_format(&still(&data, w, h), image::ImageFormat::WebP).unwrap().to_rgba8();
+        let got: Vec<u8> = img.as_raw().chunks_exact(4).map(|p| p[3]).collect();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn opaque_lossy_frames_have_no_alpha_chunk() {
+        let data = encode_frame(&solid(16, 16, [9, 200, 30, 255]), 16, 16, Codec::Lossy { quality: 75, alpha_quality: 100 }).unwrap();
+        assert_eq!(chunks(&data).iter().map(|(f, _)| *f).collect::<Vec<_>>(), [*b"VP8 "]);
+    }
+
+    #[test]
+    fn the_image_stream_is_the_chunk_after_its_header() {
+        let chunk = encode_frame(&solid(3, 3, [1, 2, 3, 255]), 3, 3, Codec::Lossless).unwrap();
+        let stream = image_stream(&chunk).unwrap();
+        let size = u32::from_le_bytes(chunk[4..8].try_into().unwrap()) as usize;
+        assert_eq!(stream.len(), size - 5);
+        assert_eq!(stream, &chunk[13..8 + size]);
+    }
+
     #[test]
     fn container_headers_and_size() {
         let mut buf = Cursor::new(Vec::new());
         let mut a = Anim::start(&mut buf, 300, 200, true, [1, 2, 3, 4], 0).unwrap();
-        let data = encode_frame(&solid(2, 2, [255, 0, 0, 255]), 2, 2).unwrap();
+        let data = encode_frame(&solid(2, 2, [255, 0, 0, 255]), 2, 2, Codec::Lossless).unwrap();
         a.frame(&Frame { rect: Rect { x: 6, y: 4, w: 2, h: 2 }, data: data.clone(), ms: 40 }).unwrap();
         a.finish().unwrap();
         let f = buf.into_inner();
