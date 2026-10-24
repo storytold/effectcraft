@@ -144,6 +144,24 @@ fn alt_dropping_a_project_item_on_the_viewer_replaces_the_layer_source() {
     assert_eq!(source(&h, bottom), bottom_before, "the bottom layer keeps its source");
 }
 
+/// A locked layer under the pointer refuses the Alt-drop; the layer behind it is not replaced
+/// instead (#2173).
+#[test]
+fn alt_dropping_on_a_locked_layer_in_the_viewer_replaces_nothing() {
+    use effectcraft_engine::project::LayerId;
+    let (mut h, clip) = harness();
+    let item = rect(&h, &format!("project.item.{clip}.name")).center();
+    let to = comp_to_screen(&h.ctx, [160.0, 90.0]).unwrap();
+    let top = layer_id(&h, "Top");
+    h.state_mut().session.execute("layer.setSwitch", json!({"layers": [top], "switch": "locked", "value": true})).unwrap();
+    h.run_steps(3);
+    let sources = |h: &Harness<'_, EffectcraftApp>| h.state().session.active_comp().unwrap().layers.iter().map(|l| l.source.clone()).collect::<Vec<_>>();
+    let before = sources(&h);
+    drag(&mut h, item, to, Modifiers::ALT);
+    assert_eq!(sources(&h), before, "no layer takes the new source");
+    assert!(h.state().session.active_comp().unwrap().layer(LayerId(top)).unwrap().switches.locked);
+}
+
 /// Ctrl+Alt+/ (Cmd+Opt+/ on macOS) replaces every selected layer's source with the Project panel
 /// selection (#991).
 #[test]

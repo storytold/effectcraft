@@ -11,7 +11,7 @@ use egui::{Rect, Stroke, StrokeKind, vec2};
 use serde_json::{Value, json};
 
 use super::DragPayload;
-use super::viewer::{ViewerMap, layer_at, layer_quad};
+use super::viewer::{ViewerMap, layer_at, layer_at_including_locked, layer_quad};
 use crate::EffectcraftApp;
 
 /// While something is dragged over the viewer, show where it goes; drop it on release.
@@ -46,7 +46,7 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &egui::Ui, painter: &egui::Pain
             })
             .into_iter()
             .collect(),
-        DragPayload::Item(item) if alt_item => layer_at(ectx, at)
+        DragPayload::Item(item) if alt_item => layer_at_including_locked(ectx, at)
             .filter(|l| super::timeline::replace_source_target(app, ectx.comp_id, ItemId(*item), l.id, ectx.comp))
             .map(|l| {
                 if let Some((_, q, _)) = layer_quad(ectx, l) {
