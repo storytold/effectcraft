@@ -56,6 +56,15 @@ impl V {
             _ => String::new(),
         }
     }
+    /// Return the array/procedure length without cloning its payload; other values have no items.
+    fn item_count(&self) -> usize {
+        match self {
+            V::Array(a) => a.borrow().len(),
+            V::Proc(p) => p.len(),
+            _ => 0,
+        }
+    }
+
     fn items(&self) -> Option<Vec<V>> {
         match self {
             V::Array(a) => Some(a.borrow().clone()),
@@ -316,6 +325,8 @@ pub(crate) struct Interp {
     gs: GState,
     saved: Vec<GState>,
     budget: usize,
+    /// Cumulative runtime array/procedure payload bytes and string bytes; never refunded.
+    allocation_budget: usize,
     /// Nested procedure calls (recursion is cut off at [`MAX_CALL_DEPTH`]).
     calls: usize,
     /// Fonts by name: `definefont`d dictionaries.
@@ -336,9 +347,21 @@ fn array(v: Vec<V>) -> V {
     V::Array(Rc::new(RefCell::new(v)))
 }
 
+/// Borrow an array/procedure and read exactly six numeric entries, ignoring nonnumeric entries.
 fn matrix_of(v: &V) -> Option<Affine> {
-    let a: Vec<f64> = v.items()?.iter().filter_map(V::num).collect();
-    (a.len() == 6).then(|| Affine::new([a[0], a[1], a[2], a[3], a[4], a[5]]))
+    let read = |items: &[V]| {
+        let mut nums = items.iter().filter_map(V::num);
+        let mut a = [0.0; 6];
+        for n in &mut a {
+            *n = nums.next()?;
+        }
+        nums.next().is_none().then(|| Affine::new(a))
+    };
+    match v {
+        V::Array(a) => read(&a.borrow()),
+        V::Proc(p) => read(p),
+        _ => None,
+    }
 }
 
 fn matrix_val(m: Affine) -> V {
@@ -357,7 +380,14 @@ const MAX_ARC_TURNS: f64 = 1024.0;
 /// The deepest procedure nesting run (deeper recursion stops the program).
 const MAX_CALL_DEPTH: usize = 256;
 
+/// The most operands retained on the operand stack.
+const MAX_STACK: usize = 100_000;
+
+/// Runtime compound payloads, excluding source tokens, graphics, fonts and container overhead.
+const MAX_ALLOCATION: usize = 256 * 1024 * 1024;
+
 impl Interp {
+    /// Create an interpreter with independent operation and cumulative runtime-payload budgets.
     pub fn new(page: [f64; 4]) -> Interp {
         Interp {
             b: Builder::new(),
@@ -379,6 +409,7 @@ impl Interp {
             },
             saved: vec![],
             budget: 8_000_000,
+            allocation_budget: MAX_ALLOCATION,
             calls: 0,
             font_dir: HashMap::new(),
             embedded: HashMap::new(),
@@ -404,10 +435,68 @@ impl Interp {
     fn popn(&mut self) -> f64 {
         self.pop().num().unwrap_or(0.0)
     }
+    /// Retain one operand if it fits; bulk callers must preflight their complete result.
     fn push(&mut self, v: V) {
-        if self.st.len() < 100_000 {
+        if self.st.len() < MAX_STACK {
             self.st.push(v);
         }
+    }
+
+    /// Refuse a bulk result before any operands are copied when `n` more slots would exceed the cap.
+    fn stack_room(&mut self, n: usize) -> Result<(), Flow> {
+        if self.st.len().saturating_add(n) <= MAX_STACK {
+            return Ok(());
+        }
+        self.b.skip("PostScript (operand stack limit)");
+        Err(Flow::Quit)
+    }
+
+    /// Charge before allocating: discarded or overwritten objects do not replenish the budget.
+    fn allocate(&mut self, bytes: usize) -> Result<(), Flow> {
+        match self.allocation_budget.checked_sub(bytes) {
+            Some(left) => {
+                self.allocation_budget = left;
+                Ok(())
+            }
+            None => {
+                self.b.skip("PostScript (allocation limit)");
+                Err(Flow::Quit)
+            }
+        }
+    }
+
+    /// Charge runtime value slots by their in-memory size, saturating oversized byte counts.
+    fn allocate_items(&mut self, n: usize) -> Result<(), Flow> {
+        self.allocate(n.saturating_mul(std::mem::size_of::<V>()))
+    }
+
+    /// Charge then snapshot array/procedure slots shallowly, returning no items for other values.
+    fn items(&mut self, v: &V) -> Result<Vec<V>, Flow> {
+        self.allocate_items(v.item_count())?;
+        Ok(v.items().unwrap_or_default())
+    }
+
+    /// Precharge a string's worst-case lossy UTF-8 copy before producing the existing equality key.
+    fn comparison_key(&mut self, v: &V) -> Result<String, Flow> {
+        if let V::Str(s) = v {
+            // Lossy UTF-8 replaces each invalid byte with at most three output bytes.
+            self.allocate(s.borrow().len().saturating_mul(3))?;
+        }
+        Ok(v.key())
+    }
+
+    /// Charge the six matrix slots before constructing and pushing their array.
+    fn push_matrix(&mut self, m: Affine) -> Result<(), Flow> {
+        self.allocate_items(6)?;
+        self.push(matrix_val(m));
+        Ok(())
+    }
+
+    /// Charge all 256 encoding slots before constructing and pushing their glyph-name array.
+    fn push_encoding(&mut self, name: &str) -> Result<(), Flow> {
+        self.allocate_items(256)?;
+        self.push(encoding_array(name));
+        Ok(())
     }
 
     fn lookup(&self, k: &str) -> Option<V> {
@@ -646,12 +735,13 @@ impl Interp {
         self.b.fill_stroke(path, Affine::IDENTITY, fill.map(|r| (Paint::Color(self.gs.color), 1.0, r)), st);
     }
 
+    /// Read scalar or array rectangle operands, charging array snapshots and generated path work.
     fn rect_path(&mut self) -> Result<Vec<BezPath>, Flow> {
         // x y w h, or an array / string of numbers.
         let top = self.pop();
         let nums: Vec<f64> = match &top {
             V::Array(_) | V::Proc(_) => {
-                let items = top.items().unwrap_or_default();
+                let items = self.items(&top)?;
                 // An array's rectangles count against the budget, five path elements each.
                 self.spend(items.len() / 4 * 5)?;
                 items.iter().filter_map(V::num).collect()
@@ -690,6 +780,7 @@ impl Interp {
         }
     }
 
+    /// Dispatch a built-in operator, propagating resource-limit quits to stop the program.
     fn builtin(&mut self, n: &str, src: &mut Src) -> Result<(), Flow> {
         match n {
             // Stack.
@@ -709,11 +800,13 @@ impl Interp {
             "copy" => match self.pop() {
                 V::Num(k) => {
                     let k = (k.max(0.0) as usize).min(self.st.len());
-                    let tail: Vec<V> = self.st[self.st.len() - k..].to_vec();
-                    self.st.extend(tail);
+                    self.stack_room(k)?;
+                    self.allocate_items(k)?;
+                    self.st.extend_from_within(self.st.len() - k..);
                 }
                 V::Array(dst) => {
-                    let s = self.pop().items().unwrap_or_default();
+                    let a = self.pop();
+                    let s = self.items(&a)?;
                     let mut d = dst.borrow_mut();
                     for (i, v) in s.into_iter().enumerate() {
                         if i < d.len() {
@@ -755,6 +848,7 @@ impl Interp {
             }
             "]" => {
                 let k = self.st.iter().rev().position(|v| matches!(v, V::Mark)).unwrap_or(self.st.len());
+                self.allocate_items(k)?;
                 let items = self.st.split_off(self.st.len() - k);
                 self.st.pop();
                 self.push(array(items));
@@ -826,7 +920,10 @@ impl Interp {
                     (V::Null, V::Null) => true,
                     (V::Array(x), V::Array(y)) => Rc::ptr_eq(x, y),
                     (V::Dict(x), V::Dict(y)) => Rc::ptr_eq(x, y),
-                    (x, y) => !x.key().is_empty() && x.key() == y.key(),
+                    (x, y) => {
+                        let key = self.comparison_key(x)?;
+                        !key.is_empty() && key == self.comparison_key(y)?
+                    }
                 };
                 self.push(V::Bool(eq == (n == "eq")));
             }
@@ -938,6 +1035,7 @@ impl Interp {
                         }
                     }
                     V::Str(s) => {
+                        self.allocate(s.borrow().len())?;
                         let bytes = s.borrow().clone();
                         for c in bytes {
                             self.spend(1)?;
@@ -949,7 +1047,7 @@ impl Interp {
                         }
                     }
                     a => {
-                        for v in a.items().unwrap_or_default() {
+                        for v in self.items(&a)? {
                             self.spend(1)?;
                             self.push(v);
                             match self.exec_obj(p.clone(), src) {
@@ -1052,7 +1150,7 @@ impl Interp {
                         let f = self.find_font(&key);
                         self.push(V::Dict(f));
                     }
-                    ("findencoding", _) | (_, "Encoding") => self.push(encoding_array(&key)),
+                    ("findencoding", _) | (_, "Encoding") => self.push_encoding(&key)?,
                     _ => self.push(V::Dict(new_dict())),
                 }
             }
@@ -1073,10 +1171,12 @@ impl Interp {
             // Arrays and strings.
             "array" => {
                 let k = self.popn().clamp(0.0, 1e6) as usize;
+                self.allocate_items(k)?;
                 self.push(array(vec![V::Null; k]));
             }
             "string" => {
                 let k = self.popn().clamp(0.0, 1e7) as usize;
+                self.allocate(k)?;
                 self.push(V::Str(Rc::new(RefCell::new(vec![0; k]))));
             }
             "length" => {
@@ -1084,7 +1184,7 @@ impl Interp {
                     V::Str(s) => s.borrow().len(),
                     V::Dict(d) => d.borrow().len(),
                     V::Name(s) | V::Lit(s) => s.len(),
-                    v => v.items().map_or(0, |i| i.len()),
+                    v => v.item_count(),
                 };
                 self.push(V::Num(l as f64));
             }
@@ -1093,7 +1193,9 @@ impl Interp {
                 let v = match self.pop() {
                     V::Dict(d) => d.borrow().get(&k.key()).cloned().unwrap_or(V::Null),
                     V::Str(s) => V::Num(s.borrow().get(k.num().unwrap_or(0.0) as usize).copied().unwrap_or(0) as f64),
-                    a => a.items().and_then(|i| i.get(k.num().unwrap_or(0.0) as usize).cloned()).unwrap_or(V::Null),
+                    V::Array(a) => a.borrow().get(k.num().unwrap_or(0.0) as usize).cloned().unwrap_or(V::Null),
+                    V::Proc(p) => p.get(k.num().unwrap_or(0.0) as usize).cloned().unwrap_or(V::Null),
+                    _ => V::Null,
                 };
                 self.push(v);
             }
@@ -1125,13 +1227,22 @@ impl Interp {
                 match self.pop() {
                     V::Str(s) => {
                         let b = s.borrow();
-                        let part = b.get(i.min(b.len())..(i + c).min(b.len())).unwrap_or(&[]).to_vec();
+                        let part = b.get(i.min(b.len())..i.saturating_add(c).min(b.len())).unwrap_or(&[]);
+                        self.allocate(part.len())?;
+                        let part = part.to_vec();
                         drop(b);
                         self.push(V::Str(Rc::new(RefCell::new(part))));
                     }
                     a => {
-                        let items = a.items().unwrap_or_default();
-                        let part = items.get(i.min(items.len())..(i + c).min(items.len())).unwrap_or(&[]).to_vec();
+                        let len = a.item_count();
+                        let start = i.min(len);
+                        let end = i.saturating_add(c).min(len);
+                        self.allocate_items(end.saturating_sub(start))?;
+                        let part = match a {
+                            V::Array(a) => a.borrow().get(start..end).unwrap_or(&[]).to_vec(),
+                            V::Proc(p) => p.get(start..end).unwrap_or(&[]).to_vec(),
+                            _ => vec![],
+                        };
                         self.push(array(part));
                     }
                 }
@@ -1143,7 +1254,9 @@ impl Interp {
             }
             "aload" => {
                 let a = self.pop();
-                for v in a.items().unwrap_or_default() {
+                let len = a.item_count();
+                self.stack_room(len.saturating_add(1))?;
+                for v in self.items(&a)? {
                     self.push(v);
                 }
                 self.push(a);
@@ -1152,16 +1265,24 @@ impl Interp {
                 let a = self.pop();
                 if let V::Array(arr) = &a {
                     let k = arr.borrow().len().min(self.st.len());
+                    self.allocate_items(k)?;
                     let items = self.st.split_off(self.st.len() - k);
                     *arr.borrow_mut() = items;
                 }
                 self.push(a);
             }
             "cvx" => match self.pop() {
-                V::Array(a) => self.push(V::Proc(Rc::new(a.borrow().clone()))),
+                V::Array(a) => {
+                    self.allocate_items(a.borrow().len())?;
+                    self.push(V::Proc(Rc::new(a.borrow().clone())));
+                }
                 V::Lit(s) => self.push(V::Name(s)),
                 V::Str(s) => {
                     // Executable string: tokenize it as a procedure.
+                    // At most one value per source byte, plus up to four decoded bytes per
+                    // source byte (ASCII85's `z`), and the source snapshot itself. Charge the
+                    // conservative bound before parsing.
+                    self.allocate(s.borrow().len().saturating_mul(std::mem::size_of::<V>() + 5))?;
                     let bytes = s.borrow().clone();
                     let mut sub = Src { d: &bytes, pos: 0 };
                     let mut body = vec![];
@@ -1173,7 +1294,10 @@ impl Interp {
                 v => self.push(v),
             },
             "cvlit" => match self.pop() {
-                V::Proc(p) => self.push(array(p.as_ref().clone())),
+                V::Proc(p) => {
+                    self.allocate_items(p.len())?;
+                    self.push(array(p.as_ref().clone()));
+                }
                 V::Name(s) => self.push(V::Lit(s)),
                 v => self.push(v),
             },
@@ -1183,7 +1307,15 @@ impl Interp {
             }
             "cvs" => {
                 self.pop();
-                let k = self.pop().key();
+                let v = self.pop();
+                let bytes = match &v {
+                    V::Str(s) => s.borrow().len().saturating_mul(3),
+                    V::Name(s) | V::Lit(s) => s.len(),
+                    // f64's non-exponential decimal representation, a boolean or an empty key.
+                    _ => 512,
+                };
+                self.allocate(bytes)?;
+                let k = v.key();
                 self.push(V::Str(Rc::new(RefCell::new(k.into_bytes()))));
             }
             "xcheck" => {
@@ -1207,7 +1339,10 @@ impl Interp {
             }
             "bind" | "readonly" | "executeonly" | "noaccess" => {}
             "languagelevel" => self.push(V::Num(3.0)),
-            "version" | "product" => self.push(V::Str(Rc::new(RefCell::new(b"3010".to_vec())))),
+            "version" | "product" => {
+                self.allocate(4)?;
+                self.push(V::Str(Rc::new(RefCell::new(b"3010".to_vec()))));
+            }
             "save" => {
                 self.spend(self.gs.path.elements().len())?;
                 self.saved.push(self.gs.clone());
@@ -1354,7 +1489,8 @@ impl Interp {
             "setmiterlimit" => self.gs.miter = self.popn(),
             "setdash" => {
                 let off = self.popn();
-                let a: Vec<f64> = self.pop().items().unwrap_or_default().iter().filter_map(V::num).collect();
+                let v = self.pop();
+                let a: Vec<f64> = self.items(&v)?.iter().filter_map(V::num).collect();
                 self.gs.dash = (!a.is_empty() && a.iter().any(|v| *v > 0.0)).then_some((a, off));
             }
             "setflat" | "setstrokeadjust" | "setoverprint" | "setrenderingintent" | "setcolorrendering" | "sethalftone" | "settransfer" => {
@@ -1419,14 +1555,14 @@ impl Interp {
                 }
             }
             // Coordinates.
-            "matrix" => self.push(matrix_val(Affine::IDENTITY)),
+            "matrix" => self.push_matrix(Affine::IDENTITY)?,
             "identmatrix" | "defaultmatrix" => {
                 self.pop();
-                self.push(matrix_val(Affine::IDENTITY));
+                self.push_matrix(Affine::IDENTITY)?;
             }
             "currentmatrix" => {
                 self.pop();
-                self.push(matrix_val(self.gs.ctm));
+                self.push_matrix(self.gs.ctm)?;
             }
             "setmatrix" => {
                 let m = self.pop();
@@ -1443,12 +1579,12 @@ impl Interp {
                 let b = self.pop();
                 let a = self.pop();
                 let (a, b) = (matrix_of(&a).unwrap_or(Affine::IDENTITY), matrix_of(&b).unwrap_or(Affine::IDENTITY));
-                self.push(matrix_val(b * a));
+                self.push_matrix(b * a)?;
             }
             "invertmatrix" => {
                 self.pop();
                 let a = self.pop();
-                self.push(matrix_val(matrix_of(&a).unwrap_or(Affine::IDENTITY).inverse()));
+                self.push_matrix(matrix_of(&a).unwrap_or(Affine::IDENTITY).inverse())?;
             }
             "translate" | "scale" => {
                 let top = self.pop();
@@ -1459,7 +1595,7 @@ impl Interp {
                 let x = self.popn();
                 let t = if n == "translate" { Affine::translate((x, y)) } else { Affine::scale_non_uniform(x, y) };
                 match m_out {
-                    Some(_) => self.push(matrix_val(t)),
+                    Some(_) => self.push_matrix(t)?,
                     None => self.gs.ctm *= t,
                 }
             }
@@ -1468,7 +1604,7 @@ impl Interp {
                 match top {
                     V::Array(_) => {
                         let a = self.popn();
-                        self.push(matrix_val(Affine::rotate(a.to_radians())));
+                        self.push_matrix(Affine::rotate(a.to_radians()))?;
                     }
                     v => self.gs.ctm *= Affine::rotate(v.num().unwrap_or(0.0).to_radians()),
                 }
@@ -1829,11 +1965,15 @@ impl Interp {
         self.b.fill_stroke_named(&name, path, Affine::IDENTITY, Some((Paint::Color(self.gs.color), 1.0, FillRule::NonZero)), None);
     }
 
-    fn pop_string(&mut self) -> Vec<u8> {
-        match self.pop() {
-            V::Str(s) => s.borrow().clone(),
+    /// Pop and precharge a string-byte snapshot for text operators; nonstrings produce no bytes.
+    fn pop_string(&mut self) -> Result<Vec<u8>, Flow> {
+        Ok(match self.pop() {
+            V::Str(s) => {
+                self.allocate(s.borrow().len())?;
+                s.borrow().clone()
+            }
             _ => vec![],
-        }
+        })
     }
 
     fn show_with(&mut self, s: &[u8], extra: impl FnMut(usize, u32) -> (f64, f64)) -> Result<(), Flow> {
@@ -1896,26 +2036,26 @@ impl Interp {
                 let key = self.pop().key();
                 self.font_dir.remove(&key);
             }
-            "StandardEncoding" | "ISOLatin1Encoding" => self.push(encoding_array(n)),
+            "StandardEncoding" | "ISOLatin1Encoding" => self.push_encoding(n)?,
             "show" => {
-                let s = self.pop_string();
+                let s = self.pop_string()?;
                 self.show_with(&s, |_, _| (0.0, 0.0))?;
             }
             "ashow" => {
-                let s = self.pop_string();
+                let s = self.pop_string()?;
                 let ay = self.popn();
                 let ax = self.popn();
                 self.show_with(&s, |_, _| (ax, ay))?;
             }
             "widthshow" => {
-                let s = self.pop_string();
+                let s = self.pop_string()?;
                 let ch = self.popn() as u32;
                 let cy = self.popn();
                 let cx = self.popn();
                 self.show_with(&s, |_, c| if c == ch { (cx, cy) } else { (0.0, 0.0) })?;
             }
             "awidthshow" => {
-                let s = self.pop_string();
+                let s = self.pop_string()?;
                 let ay = self.popn();
                 let ax = self.popn();
                 let ch = self.popn() as u32;
@@ -1925,13 +2065,14 @@ impl Interp {
             }
             "kshow" | "cshow" => {
                 // The procedure between characters is not run.
-                let s = self.pop_string();
+                let s = self.pop_string()?;
                 self.pop();
                 self.show_with(&s, |_, _| (0.0, 0.0))?;
             }
             "xshow" | "yshow" | "xyshow" => {
-                let disp: Vec<f64> = self.pop().items().unwrap_or_default().iter().filter_map(V::num).collect();
-                let s = self.pop_string();
+                let v = self.pop();
+                let disp: Vec<f64> = self.items(&v)?.iter().filter_map(V::num).collect();
+                let s = self.pop_string()?;
                 self.explicit_show(&s, &disp, n)?;
             }
             "glyphshow" => {
@@ -1948,7 +2089,7 @@ impl Interp {
             }
             "charpath" => {
                 self.pop();
-                let s = self.pop_string();
+                let s = self.pop_string()?;
                 let saved = std::mem::take(&mut self.gs.path);
                 let start = self.gs.start;
                 match self.text_path(&s, |_, _| (0.0, 0.0))? {
@@ -1968,7 +2109,7 @@ impl Interp {
                 }
             }
             "stringwidth" => {
-                let s = self.pop_string();
+                let s = self.pop_string()?;
                 let (mut w, mut h) = (0.0, 0.0);
                 if let Some(d) = self.gs.font.clone()
                     && let Some((font, m)) = self.font_of(&d)
@@ -2034,5 +2175,444 @@ impl Interp {
             let (dx, dy) = d.get(k).copied().unwrap_or((0.0, 0.0));
             (dx - adv.x, dy - adv.y)
         })
+    }
+}
+
+#[cfg(test)]
+mod allocation_tests {
+    use super::*;
+
+    /// Repeated short array/procedure slices spend only their returned slots, not source snapshots.
+    #[test]
+    fn eps_getinterval_short_slices_charge_only_returned_slots() {
+        let mut failures = vec![];
+        for setup in ["/a 4096 array def", "/a 4096 array cvx def"] {
+            let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+            it.run(setup.as_bytes());
+            assert_eq!(it.lookup("a").unwrap().item_count(), 4096);
+            it.allocation_budget = 3 * std::mem::size_of::<V>();
+            it.run(b"3 { /a load 17 1 getinterval pop } repeat 0 0 10 10 rectfill");
+            let left = it.allocation_budget;
+            let (nodes, _, skipped) = it.b.finish();
+            if left != 0 || nodes.len() != 1 || !skipped.is_empty() {
+                failures.push((setup, left, nodes.len(), skipped));
+            }
+        }
+        assert!(failures.is_empty(), "short intervals must fit their exact cumulative budget: {failures:?}");
+    }
+
+    /// A one-byte-short interval budget quits through `stopped` without losing earlier slices or art.
+    #[test]
+    fn eps_getinterval_refuses_only_the_slice_that_exceeds_the_budget() {
+        for setup in ["/a 4096 array def", "/a 4096 array cvx def"] {
+            let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+            it.run(setup.as_bytes());
+            it.run(b"0 0 10 10 rectfill");
+            it.allocation_budget = 3 * std::mem::size_of::<V>() - 1;
+            it.run(b"{ 3 { /a load 17 1 getinterval } repeat } stopped 20 20 10 10 rectfill");
+            assert_eq!(it.st.len(), 2, "{setup}: only two complete slices fit");
+            assert!(it.st.iter().all(|v| matches!(v, V::Array(_)) && v.item_count() == 1));
+            assert_eq!(it.allocation_budget, std::mem::size_of::<V>() - 1);
+            let (nodes, _, skipped) = it.b.finish();
+            assert_eq!(nodes.len(), 1, "{setup}: the resource quit must escape stopped and retain prior artwork");
+            assert_eq!(skipped, ["PostScript (allocation limit)"]);
+        }
+    }
+
+    /// Array/procedure intervals clamp empty, oversized and saturating ranges before charging.
+    #[test]
+    fn eps_getinterval_clamps_compound_bounds_before_charging() {
+        for setup in ["/a [ 11 22 33 ] def", "/a { 11 22 33 } def"] {
+            for (range, expected) in [
+                ("1 0", &[][..]),
+                ("3 1", &[][..]),
+                ("99 99", &[][..]),
+                ("9999999999999999999999999999999999999999 9999999999999999999999999999999999999999", &[][..]),
+                ("2 9", &[33.0][..]),
+                ("1 9999999999999999999999999999999999999999", &[22.0, 33.0][..]),
+                ("0 3", &[11.0, 22.0, 33.0][..]),
+            ] {
+                let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+                it.run(setup.as_bytes());
+                it.allocation_budget = expected.len() * std::mem::size_of::<V>();
+                it.run(format!("/a load {range} getinterval").as_bytes());
+                assert_eq!(it.st.len(), 1, "{setup}: {range}");
+                let V::Array(part) = it.st.last().unwrap() else { panic!("intervals must still return arrays") };
+                assert_eq!(part.borrow().iter().map(|v| v.num().unwrap()).collect::<Vec<_>>(), expected);
+                assert_eq!(it.allocation_budget, 0);
+                let (_, _, skipped) = it.b.finish();
+                assert!(skipped.is_empty(), "{setup}: {range}: {skipped:?}");
+            }
+        }
+    }
+
+    /// Interval payloads retain slot order and shallow references to mutable compound values.
+    #[test]
+    fn eps_getinterval_preserves_order_and_shallow_identity() {
+        for setup in ["/a [ 0 [ 11 ] (ab) /tag 9 ] def", "/a [ 0 [ 11 ] (ab) /tag 9 ] cvx def"] {
+            let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+            it.run(setup.as_bytes());
+            let source = it.lookup("a").unwrap().items().unwrap();
+            it.allocation_budget = 4 * std::mem::size_of::<V>();
+            it.run(b"/a load 1 4 getinterval /slice exch def /a load 1 get 0 77 put /a load 2 get 0 122 put slice");
+            let V::Array(part) = it.st.last().unwrap() else { panic!("intervals must still return arrays") };
+            let part = part.borrow();
+            assert_eq!(part.len(), 4);
+            assert!(matches!((&source[1], &part[0]), (V::Array(a), V::Array(b)) if Rc::ptr_eq(a, b) && b.borrow()[0].num() == Some(77.0)));
+            assert!(matches!((&source[2], &part[1]), (V::Str(a), V::Str(b)) if Rc::ptr_eq(a, b) && *b.borrow() == b"zb"));
+            assert!(matches!(&part[2], V::Lit(name) if name.as_ref() == "tag"));
+            assert_eq!(part[3].num(), Some(9.0));
+            assert_eq!(it.allocation_budget, 0);
+            let (_, _, skipped) = it.b.finish();
+            assert!(skipped.is_empty(), "{setup}: {skipped:?}");
+        }
+    }
+
+    /// String intervals keep their existing byte-based bounds, exact charge and refusal behavior.
+    #[test]
+    fn eps_getinterval_preserves_string_budget_and_bounds() {
+        for (range, expected, budget, allowed) in [
+            ("1 2", &b"bc"[..], 2, true),
+            ("1 2", &b"bc"[..], 1, false),
+            ("1 0", &b""[..], 0, true),
+            ("99 99", &b""[..], 0, true),
+            ("9999999999999999999999999999999999999999 9999999999999999999999999999999999999999", &b""[..], 0, true),
+            ("2 9999999999999999999999999999999999999999", &b"cd"[..], 2, true),
+        ] {
+            let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+            it.run(b"/s (abcd) def");
+            it.allocation_budget = budget;
+            it.run(format!("s {range} getinterval").as_bytes());
+            assert_eq!(it.st.len(), usize::from(allowed));
+            if allowed {
+                assert!(matches!(it.st.last(), Some(V::Str(s)) if *s.borrow() == expected));
+                assert_eq!(it.allocation_budget, 0);
+            } else {
+                assert_eq!(it.allocation_budget, budget);
+            }
+            let (_, _, skipped) = it.b.finish();
+            if allowed {
+                assert!(skipped.is_empty(), "{range}: {skipped:?}");
+            } else {
+                assert_eq!(skipped, ["PostScript (allocation limit)"]);
+            }
+        }
+    }
+
+    /// Exhausted string equality must stop execution before subsequent artwork is drawn.
+    #[test]
+    fn eps_string_comparison_eq_stops_at_exhausted_budget() {
+        let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+        it.run(b"/s 10 string def");
+        it.allocation_budget = 0;
+        it.run(b"s s eq pop 0 0 10 10 rectfill");
+        let (nodes, _, skipped) = it.b.finish();
+        assert!(nodes.is_empty(), "a denied comparison copy must stop execution before rectfill");
+        assert_eq!(skipped, ["PostScript (allocation limit)"]);
+    }
+
+    /// String inequality must honor the same copy refusal as equality.
+    #[test]
+    fn eps_string_comparison_ne_stops_at_exhausted_budget() {
+        let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+        it.run(b"/s 10 string def");
+        it.allocation_budget = 0;
+        it.run(b"s s ne pop 0 0 10 10 rectfill");
+        let (nodes, _, skipped) = it.b.finish();
+        assert!(nodes.is_empty(), "a denied comparison copy must stop execution before rectfill");
+        assert_eq!(skipped, ["PostScript (allocation limit)"]);
+    }
+
+    /// Discarding comparison results must not refund their temporary string-copy charges.
+    #[test]
+    fn eps_string_comparison_repeated_copies_are_cumulative() {
+        for op in ["eq", "ne"] {
+            let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+            it.run(b"/s 10 string def");
+            // Two worst-case UTF-8 conversion bounds fit exactly once, not twice.
+            it.allocation_budget = 60;
+            it.run(format!("2 {{ s s {op} pop }} repeat 0 0 10 10 rectfill").as_bytes());
+            let (nodes, _, skipped) = it.b.finish();
+            assert!(nodes.is_empty(), "{op}: discarded comparison strings must not refund the budget");
+            assert_eq!(skipped, ["PostScript (allocation limit)"], "{op}");
+        }
+    }
+
+    /// Preserve lenient cross-type, lossy UTF-8, empty-key and compound-identity comparisons.
+    #[test]
+    fn eps_string_comparison_preserves_existing_equality_semantics() {
+        // These are compatibility controls, including lenient cross-type and lossy-UTF-8
+        // comparisons and the existing rule that an empty key is never equal.
+        for (operands, expected) in [
+            ("(same) (same)", true),
+            ("(same) (other)", false),
+            ("() ()", false),
+            ("() /same", false),
+            ("/same ()", false),
+            ("<ff> <fe>", true),
+            ("<ff> <efbfbd>", true),
+            ("<ff> (x)", false),
+            ("(same) /same", true),
+            ("/same (same)", true),
+            ("/same /same", true),
+            ("/same /other", false),
+            ("(12) 12", true),
+            ("12 (12)", true),
+            ("(true) true", true),
+            ("true (true)", true),
+            ("1 1", true),
+            ("1 2", false),
+            ("true true", true),
+            ("true false", false),
+            ("1 true", false),
+            ("null null", true),
+            ("0 array dup", true),
+            ("0 array 0 array", false),
+            ("0 dict dup", true),
+            ("0 dict 0 dict", false),
+            ("{} dup", false),
+        ] {
+            for op in ["eq", "ne"] {
+                let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+                it.run(format!("{operands} {op}").as_bytes());
+                assert_eq!(it.st.len(), 1, "{operands} {op}");
+                assert!(matches!(it.st.last(), Some(V::Bool(b)) if *b == (expected == (op == "eq"))), "{operands} {op}");
+                let (_, _, skipped) = it.b.finish();
+                assert!(skipped.is_empty(), "{operands} {op}: {skipped:?}");
+            }
+        }
+    }
+
+    /// Each UTF-8 conversion must fit before copying, while short-circuited operands cost nothing.
+    #[test]
+    fn eps_string_comparison_charges_each_lossy_copy_before_conversion() {
+        for op in ["eq", "ne"] {
+            for (operands, budget, left, allowed) in [
+                ("(0123456789) (0123456789)", 60, 0, true),
+                ("(0123456789) (0123456789)", 59, 29, false),
+                ("/same (same)", 11, 11, false),
+                ("(same) /same", 11, 11, false),
+                ("<fffe> <fffe>", 12, 0, true),
+                ("<fffe> <fffe>", 11, 5, false),
+                ("() ()", 0, 0, true),
+                ("() (not copied)", 0, 0, true),
+                ("1 1", 0, 0, true),
+                ("true false", 0, 0, true),
+            ] {
+                let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+                it.allocation_budget = budget;
+                it.run(format!("{operands} {op}").as_bytes());
+                assert_eq!(it.allocation_budget, left, "{operands} {op}, budget {budget}");
+                assert_eq!(it.st.len(), usize::from(allowed), "denied comparisons must not push a partial result");
+                let (_, _, skipped) = it.b.finish();
+                if allowed {
+                    assert!(skipped.is_empty(), "{operands} {op}: {skipped:?}");
+                } else {
+                    assert_eq!(skipped, ["PostScript (allocation limit)"], "{operands} {op}");
+                }
+            }
+        }
+    }
+
+    /// A comparison resource quit must escape `stopped` while retaining earlier artwork.
+    #[test]
+    fn eps_string_comparison_quit_inside_stopped_preserves_prior_artwork() {
+        for op in ["eq", "ne"] {
+            let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+            it.run(b"0 0 10 10 rectfill /s 10 string def");
+            it.allocation_budget = 0;
+            it.run(format!("{{ s s {op} pop 20 20 10 10 rectfill }} stopped pop 40 40 10 10 rectfill").as_bytes());
+            let (nodes, _, skipped) = it.b.finish();
+            assert_eq!(nodes.len(), 1, "{op}: stopped must not swallow a resource quit or discard prior artwork");
+            assert_eq!(skipped, ["PostScript (allocation limit)"]);
+        }
+    }
+
+    /// The executable-string estimate must still admit nested procedures and ASCII85 zero groups.
+    #[test]
+    fn eps_cvx_accepts_nested_procedures_and_ascii85_zero_expansion() {
+        let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+        it.run(b"({ { 7 } exec } exec <~z~> length) cvx exec");
+        assert_eq!(it.st.iter().filter_map(V::num).collect::<Vec<_>>(), [7.0, 4.0]);
+        let (_, _, skipped) = it.b.finish();
+        assert!(skipped.is_empty(), "{skipped:?}");
+    }
+
+    /// Constructors, intervals and conversions must each refuse an over-budget runtime payload.
+    #[test]
+    fn eps_runtime_copies_share_the_allocation_budget() {
+        // A reduced private counter exercises the real operators without large allocations.
+        // Setup allocates before the seam; each body tries to allocate more than 64 bytes.
+        let mut missed = vec![];
+        for (setup, body) in [
+            ("", "10 array"),
+            ("", "65 string"),
+            ("/a 10 array def", "a 0 10 getinterval"),
+            ("/s 65 string def", "s 0 65 getinterval"),
+            ("/a 10 array def", "a cvx"),
+            ("/p { 1 2 3 4 5 6 7 8 9 10 } def", "/p load cvlit"),
+            ("/s (1 2 3 4 5 6 7 8 9 10) def", "s cvx"),
+            ("", "[ 1 2 3 4 5 6 7 8 9 10 ]"),
+            ("/a 10 array def", "1 2 3 4 5 6 7 8 9 10 a astore"),
+            ("/a 10 array def", "a 10 array copy"),
+            ("/a 10 array def", "a {} forall"),
+            ("/s 65 string def", "s {} forall"),
+        ] {
+            let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+            it.run(setup.as_bytes());
+            it.allocation_budget = 64;
+            it.run(format!("{body} clear 0 0 10 10 rectfill").as_bytes());
+            let (nodes, _, skipped) = it.b.finish();
+            if skipped != ["PostScript (allocation limit)"] || !nodes.is_empty() {
+                missed.push(body);
+            }
+        }
+        assert!(missed.is_empty(), "unbudgeted operator allocations: {missed:?}");
+    }
+
+    /// Read-side snapshots, matrix values and encodings must share the runtime payload cap.
+    #[test]
+    fn eps_runtime_read_snapshots_share_the_allocation_budget() {
+        let mut missed = vec![];
+        for (setup, body) in [
+            ("/a 10 array def", "a 0 setdash"),
+            ("/a 10 array def", "a rectfill"),
+            ("/a 10 array def", "a 10 array def"),
+            ("/a 10 array def /b 10 array def", "a b copy"),
+            ("/s 65 string def", "s show"),
+            ("/s 65 string def", "s 0 string cvs"),
+            ("", "StandardEncoding"),
+            ("", "matrix matrix"),
+        ] {
+            let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+            it.run(setup.as_bytes());
+            it.allocation_budget = 64;
+            it.run(format!("{body} clear").as_bytes());
+            let (_, _, skipped) = it.b.finish();
+            if skipped != ["PostScript (allocation limit)"] {
+                missed.push(body);
+            }
+        }
+        assert!(missed.is_empty(), "unbudgeted payloads: {missed:?}");
+    }
+
+    /// Numeric `copy` must charge all new operand slots before extending the stack.
+    #[test]
+    fn eps_numeric_copy_charges_new_operand_slots() {
+        let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+        it.run(b"1 2 3 4");
+        it.allocation_budget = 0;
+        it.run(b"4 copy 0 0 10 10 rectfill");
+        assert_eq!(it.st.len(), 4, "refuse before copying any operands");
+        let (nodes, _, skipped) = it.b.finish();
+        assert_eq!(skipped, ["PostScript (allocation limit)"]);
+        assert!(nodes.is_empty());
+    }
+
+    /// Small built-in strings must accumulate charges just like explicit string constructors.
+    #[test]
+    fn eps_small_runtime_strings_share_the_allocation_budget() {
+        let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+        it.allocation_budget = 7;
+        it.run(b"version product 0 0 10 10 rectfill");
+        let (nodes, _, skipped) = it.b.finish();
+        assert_eq!(skipped, ["PostScript (allocation limit)"]);
+        assert!(nodes.is_empty());
+    }
+
+    /// Exact stack limits must preserve operand order, shared arrays and consume-first `astore`.
+    #[test]
+    fn eps_stack_boundaries_preserve_order_and_compound_identity() {
+        let nums = |it: &Interp| it.st.iter().map(|v| v.num().unwrap()).collect::<Vec<_>>();
+        let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+        it.run(b"1 2 3 2 copy");
+        assert_eq!(nums(&it), [1.0, 2.0, 3.0, 2.0, 3.0]);
+        it.run(b"clear [ 4 5 6 ] 3 array copy aload pop");
+        assert_eq!(nums(&it), [4.0, 5.0, 6.0]);
+        it.run(b"clear 7 8 9 3 array astore aload pop");
+        assert_eq!(nums(&it), [7.0, 8.0, 9.0]);
+        it.run(b"clear /a [ 10 11 ] def a 1 copy 0 99 put clear a aload pop pop");
+        assert_eq!(nums(&it), [99.0]);
+
+        // Numeric copy and aload admit the exact final depth, including aload's array.
+        it.st = vec![V::Num(1.0); MAX_STACK / 2];
+        it.run(b"50000 copy");
+        assert_eq!(it.st.len(), MAX_STACK);
+        it.run(b"clear 99999 array aload");
+        assert_eq!(it.st.len(), MAX_STACK);
+        assert!(matches!(it.st.last(), Some(V::Array(_))));
+        // astore consumes before returning its array; it needs no extra stack room.
+        it.run(b"astore");
+        assert_eq!(it.st.len(), 1);
+        assert_eq!(it.st[0].item_count(), MAX_STACK - 1);
+        let (_, _, skipped) = it.b.finish();
+        assert!(skipped.is_empty(), "{skipped:?}");
+    }
+
+    /// Array slots and string bytes must consume one counter without refunds on overwrite or drop.
+    #[test]
+    fn eps_mixed_payloads_exhaust_one_budget_without_refunds() {
+        let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+        let slots = 2 * std::mem::size_of::<V>();
+        it.allocation_budget = slots + 3;
+        it.run(b"/a 2 array def 3 string pop /a null def");
+        assert_eq!(it.allocation_budget, 0);
+        it.run(b"0 string pop 1 string");
+        assert_eq!(it.allocation_budget, 0);
+        assert!(it.st.is_empty(), "refused allocation must not push a partial result");
+        let (_, _, skipped) = it.b.finish();
+        assert_eq!(skipped, ["PostScript (allocation limit)"]);
+    }
+
+    /// `aload` must check its whole result, including the array, before cloning or charging slots.
+    #[test]
+    fn eps_aload_refuses_before_cloning_or_pushing_items() {
+        let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+        it.run(b"42 /a 100000 array def");
+        let left = it.allocation_budget;
+        it.run(b"a aload");
+        assert_eq!(it.st.len(), 1);
+        assert_eq!(it.st[0].num(), Some(42.0));
+        assert_eq!(it.allocation_budget, left);
+        let (_, _, skipped) = it.b.finish();
+        assert_eq!(skipped, ["PostScript (operand stack limit)"]);
+    }
+
+    /// An overflowing numeric `copy` must leave both stack contents and allocation budget intact.
+    #[test]
+    fn eps_copy_refuses_before_extending_the_stack() {
+        let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+        it.st = vec![V::Num(1.0); MAX_STACK / 2 + 1];
+        let left = it.allocation_budget;
+        it.run(b"50000 copy");
+        assert_eq!(it.st.len(), MAX_STACK / 2 + 1);
+        assert_eq!(it.allocation_budget, left);
+        let (_, _, skipped) = it.b.finish();
+        assert_eq!(skipped, ["PostScript (operand stack limit)"]);
+    }
+
+    /// Repeated discarded payloads must exhaust the cumulative cap despite bounded live storage.
+    #[test]
+    fn eps_runtime_payload_allocations_are_cumulative() {
+        // Only one 1 MB string is live at a time. The reduced counter exercises repeated
+        // allocation even when each object is discarded before the next one is created.
+        let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+        it.allocation_budget = 2_500_000;
+        it.run(b"3 { 1000000 string pop } repeat 0 0 10 10 rectfill");
+        let (nodes, _, skipped) = it.b.finish();
+        assert_eq!(skipped, ["PostScript (allocation limit)"]);
+        assert!(nodes.is_empty(), "execution must stop, not merely discard an allocation");
+    }
+
+    /// Length, element and matrix reads must still work when no payload-copy budget remains.
+    #[test]
+    fn eps_reads_do_not_copy_entire_arrays() {
+        let mut it = Interp::new([0.0, 0.0, 100.0, 100.0]);
+        it.run(b"/a [ 1 2 3 ] def /m [ 2 0 0 3 0 0 ] def");
+        it.allocation_budget = 0;
+        it.run(b"a length a 1 get m setmatrix 1 1 transform");
+        assert_eq!(it.st.iter().filter_map(V::num).collect::<Vec<_>>(), [3.0, 2.0, 2.0, 3.0]);
+        let (_, _, skipped) = it.b.finish();
+        assert!(skipped.is_empty(), "{skipped:?}");
     }
 }
