@@ -168,19 +168,37 @@ pub fn character(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             actions.push(json!({"kerning": v}));
         }
     }
-    // Stroke Over Fill / Fill Over Stroke (row 2, right).
+    // Stroke order (row 2, right): per character (Fill Over Stroke / Stroke Over Fill), or for
+    // the whole layer, which is the layer's More Options > Fill & Stroke.
+    let fill_stroke = target.as_ref().map_or(0, |tt| layer_fill_stroke(app, tt.layer));
+    let mut layer_fill_stroke_pick = None;
     {
         let fx = x0 + w / 2.0;
         let fy = y + 2.0 * 28.0;
         let dr = Rect::from_min_size(pos2(fx, fy), vec2(w / 2.0, 20.0));
-        let labels = vec!["Fill Over Stroke".to_string(), "Stroke Over Fill".to_string()];
+        let labels: Vec<String> =
+            ["Fill Over Stroke", "Stroke Over Fill", "-", "All Fills Over All Strokes", "All Strokes Over All Fills"].iter().map(|s| s.to_string()).collect();
+        let current = match fill_stroke {
+            1 => 3,
+            2 => 4,
+            _ => doc.stroke_over_fill as usize,
+        };
         let pop = egui::Id::new("char-stroke-order-pop");
-        if widgets::dropdown(ui, dr, &labels[doc.stroke_over_fill as usize], &t, egui::Id::new("char-stroke-order")).clicked() && enabled {
+        if widgets::dropdown(ui, dr, &labels[current], &t, egui::Id::new("char-stroke-order")).clicked() && enabled {
             widgets::open_popup(ui, pop);
         }
         app.auto.add("character.strokeOverFill", dr, "Stroke order");
-        if let Some(i) = widgets::popup_menu(ui, pop, dr.left_bottom(), &labels, Some(doc.stroke_over_fill as usize)) {
-            actions.push(json!({"strokeOverFill": i == 1}));
+        match widgets::popup_menu(ui, pop, dr.left_bottom(), &labels, Some(current)) {
+            Some(i @ (3 | 4)) => layer_fill_stroke_pick = Some(i as u32 - 2),
+            Some(i) => {
+                // A per-character order puts the layer back on the Per Character Palette, or it
+                // would have no visible effect.
+                if fill_stroke != 0 {
+                    layer_fill_stroke_pick = Some(0);
+                }
+                actions.push(json!({"strokeOverFill": i == 1}));
+            }
+            None => {}
         }
     }
     y += 5.0 * 28.0 + 8.0;
@@ -312,11 +330,30 @@ pub fn character(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         _ => {}
     }
     let Some(tt) = target else { return };
+    if let Some(v) = layer_fill_stroke_pick {
+        let set = json!({"command": "prop.set", "params": {"layer": tt.layer, "path": "text/moreOptions/fillStroke", "value": v}});
+        // With the per-character order it changes, as one undo step.
+        let steps: Vec<serde_json::Value> =
+            std::iter::once(set).chain(actions.drain(..).map(|a| json!({"command": "layer.setText", "params": tt.params(a)}))).collect();
+        if let Err(e) = crate::menus::invoke(app, &ctx, "engine.batch", json!({"steps": steps, "label": "Stroke Order"})) {
+            app.ui.status = e;
+        }
+    }
     for a in actions {
         if let Err(e) = crate::menus::invoke(app, &ctx, "layer.setText", tt.params(a)) {
             app.ui.status = e;
         }
     }
+}
+
+/// A text layer's More Options > Fill & Stroke in the active comp: 0 per character palette,
+/// 1 all fills over all strokes, 2 all strokes over all fills.
+fn layer_fill_stroke(app: &EffectcraftApp, layer: u64) -> u32 {
+    let (Some(comp), Some(cid)) = (app.session.active_comp(), app.session.active_comp_id()) else { return 0 };
+    let Some(l) = comp.layer(effectcraft_engine::project::LayerId(layer)) else { return 0 };
+    let Some(more) = l.props.sub("text").and_then(|t| t.sub("moreOptions")) else { return 0 };
+    let ectx = EvalCtx { project: &app.session.project, comp_id: cid, comp, time: app.session.time(), expr: app.session.expr.as_deref(), footage: None };
+    ectx.e(l, more, "fillStroke")
 }
 
 /// The Character panel's OpenType popup: feature toggles (dimmed when the font lacks them),
