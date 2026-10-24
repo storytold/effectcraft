@@ -1126,15 +1126,20 @@ mod tests {
         assert!(!b.synth_bold);
         let faces = all_faces();
         assert!(faces.iter().any(|f| f.info.family == "Noto Serif" && f.info.style == "Regular" && f.info.origin == "bundled"));
-        // A real installed Bold Italic takes priority. Partial installed families can instead
-        // supply the nearest weight/slant, so neither synthesis flag is fixed by the OS.
+        // A real installed Bold Italic — the face's own style, or a named instance of a variable
+        // face — takes priority. Partial installed families can instead supply the nearest
+        // weight/slant, so neither synthesis flag is fixed by the OS.
         for family in ["Noto Serif", "Inter"] {
             let resolved = resolve(family, "Bold Italic");
             let selected = face(resolved.face);
             assert!(selected.info.family.eq_ignore_ascii_case(family));
             assert!(!resolved.missing);
             let candidates: Vec<_> = faces.iter().filter(|f| f.info.family.eq_ignore_ascii_case(family)).collect();
-            if let Some(exact) = candidates.iter().find(|f| f.info.style.eq_ignore_ascii_case("Bold Italic")) {
+            let exact = candidates
+                .iter()
+                .find(|f| f.info.style.eq_ignore_ascii_case("Bold Italic"))
+                .or_else(|| candidates.iter().find(|f| f.info.instances.iter().any(|i| i.style.eq_ignore_ascii_case("Bold Italic"))));
+            if let Some(exact) = exact {
                 assert_eq!(resolved.face, exact.id, "real style wins for {family}");
                 assert!(!resolved.synth_bold && !resolved.synth_italic);
             } else {
