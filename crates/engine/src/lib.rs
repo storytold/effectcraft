@@ -132,6 +132,12 @@ pub trait Services: Send + Sync {
     fn is_dir(&self, path: &str) -> bool {
         std::path::Path::new(path).is_dir()
     }
+    /// `path` as a list of recent files keeps it (File ▸ Scripts ▸ Recent Script Files): a
+    /// relative path is made absolute against the working directory, so it opens the same file
+    /// after the working directory changes.
+    fn full_path(&self, path: &str) -> String {
+        std::path::absolute(path).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| path.to_string())
+    }
 }
 
 /// Native filesystem.

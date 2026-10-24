@@ -1406,7 +1406,7 @@ fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) -> Option<Res
         "file.importProject" => ("path", Ask::Open(&["ecproj", "ecprojx"])),
         "file.importTimeline" => ("path", Ask::Open(&["xml", "fcpxml", "otio", "edl", "aaf", "omf"])),
         "render.saveCurrentPreview" => ("path", Ask::Save("Preview.mp4")),
-        "file.runScript" if params.get("name").is_none() => ("path", Ask::Open(&["jsx", "js", "jsonl", "json", "txt"])),
+        "file.runScript" if params.get("name").is_none() && params.get("recent").is_none() => ("path", Ask::Open(&["jsx", "js", "jsonl", "json", "txt"])),
         "file.installScript" | "file.installScriptUIPanel" => ("path", Ask::Open(&["jsx", "js"])),
         "effect.plugins.load" if params.get("folder").is_none() => ("path", Ask::Open(&["wasm", "wat"])),
         "file.replaceFootage" => ("path", Ask::Import),
@@ -2220,6 +2220,7 @@ fn menu_nodes(
                         "recentProjects" => app.session.prefs.recent_projects.get(i).cloned(),
                         "recentFootage" => app.session.prefs.recent_footage.get(i).cloned(),
                         "recentPresets" => app.session.prefs.recent_presets.get(i).cloned(),
+                        "recentScripts" => app.session.prefs.recent_scripts.get(i).map(|r| r.text().to_string()),
                         _ => None,
                     };
                     let r = ui.add_enabled(entry_enabled(app, e), egui::Button::new((gutter(entry_checked(app, e) == Some(true)), e.label.as_str())));
@@ -2664,6 +2665,25 @@ mod tests {
         asked.borrow_mut().clear();
         invoke(&mut app, &ctx, "comp.saveFrameAs", json!({})).unwrap();
         assert_eq!(*asked.borrow(), ["project Frame.png"]);
+    }
+
+    /// File ▸ Scripts ▸ Recent Script Files and its key run a script again without a file dialog.
+    #[test]
+    fn recent_script_files_run_without_a_dialog() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        let ctx = egui::Context::default();
+        let dir = std::env::temp_dir().join(format!("ec-recent-script-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("New Comp.jsonl");
+        std::fs::write(&script, r#"{"command": "comp.new", "params": {"name": "From Script", "width": 64, "height": 36, "frameRate": 30, "duration": 1}}"#)
+            .unwrap();
+        app.session.execute("file.runScript", json!({"path": script.to_string_lossy()})).unwrap();
+        let (m, k, id, params) =
+            bindings(&app.session).into_iter().find(|b| b.2 == "file.runScript" && b.3 == json!({"recent": 0})).expect("the most recent script has a key");
+        assert_eq!((m, k), parse_shortcut("Cmd+Alt+Shift+D").unwrap());
+        assert_eq!(invoke(&mut app, &ctx, &id, params).unwrap()["steps"], 1);
+        assert_eq!(app.session.project.items.values().filter(|i| i.name.starts_with("From Script")).count(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// #511: with a host's non-blocking dialogs, a command's file dialog opens without running

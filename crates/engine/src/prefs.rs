@@ -430,6 +430,8 @@ pub struct Prefs {
     /// Animation ▸ Recent Animation Presets (`.ecpreset` paths or built-in preset ids), newest
     /// first.
     pub recent_presets: Vec<String>,
+    /// File ▸ Scripts ▸ Recent Script Files, newest first, at most [`MAX_RECENT_SCRIPTS`].
+    pub recent_scripts: Vec<RecentScript>,
     /// Character panel: recently used font families, newest first.
     pub recent_fonts: Vec<String>,
     /// Effects & Presets: the starred effects' ids, in the order starred.
@@ -473,6 +475,7 @@ impl Default for Prefs {
             recent_projects: vec![],
             recent_footage: vec![],
             recent_presets: vec![],
+            recent_scripts: vec![],
             recent_fonts: vec![],
             effects_favorites: vec![],
             preview: crate::preview::PreviewSettings::default(),
@@ -659,6 +662,7 @@ impl Prefs {
         self.grids.grid_spacing = self.grids.grid_spacing.clamp(1.0, 10_000.0);
         let n = self.general.recent_items as usize;
         self.recent_projects.truncate(n);
+        self.recent_scripts.truncate(MAX_RECENT_SCRIPTS);
     }
 
     /// The value at a dotted key (`general.undoLevels`, `labels.3.color`); `""` = everything.
@@ -724,6 +728,7 @@ impl Prefs {
                 recent_projects: std::mem::take(&mut self.recent_projects),
                 recent_footage: std::mem::take(&mut self.recent_footage),
                 recent_presets: std::mem::take(&mut self.recent_presets),
+                recent_scripts: std::mem::take(&mut self.recent_scripts),
                 recent_fonts: std::mem::take(&mut self.recent_fonts),
                 effects_favorites: std::mem::take(&mut self.effects_favorites),
                 preview: std::mem::take(&mut self.preview),
@@ -958,6 +963,34 @@ impl Prefs {
     /// Remember an applied animation preset for Animation ▸ Recent Animation Presets.
     pub fn push_recent_preset(&mut self, path: &str) {
         push_mru(&mut self.recent_presets, path, self.general.recent_items as usize);
+    }
+
+    /// Remember a script that ran for File ▸ Scripts ▸ Recent Script Files.
+    pub fn push_recent_script(&mut self, script: RecentScript) {
+        self.recent_scripts.retain(|x| *x != script);
+        self.recent_scripts.insert(0, script);
+        self.recent_scripts.truncate(MAX_RECENT_SCRIPTS);
+    }
+}
+
+/// Most scripts File ▸ Scripts ▸ Recent Script Files lists.
+pub const MAX_RECENT_SCRIPTS: usize = 10;
+
+/// A File ▸ Scripts ▸ Recent Script Files entry, stored as the `file.runScript` parameter that
+/// ran it: `{"path": …}` for a script file, `{"name": …}` for an installed or bundled script.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RecentScript {
+    Path(String),
+    Name(String),
+}
+
+impl RecentScript {
+    /// The file's path or the script's name.
+    pub fn text(&self) -> &str {
+        match self {
+            RecentScript::Path(s) | RecentScript::Name(s) => s,
+        }
     }
 }
 
