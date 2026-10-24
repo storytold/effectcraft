@@ -407,6 +407,30 @@ fn offset_paths_miter_uses_animatable_lottie_value() {
     assert_eq!(second.get("miter").unwrap().value, Value::Scalar(6.0));
 }
 
+#[test]
+fn extra_dash_gap_pairs_survive_a_roundtrip() {
+    let (mut p, cid) = setup();
+    let l = shape_layer(&mut p, cid, |ids| {
+        let mut stroke = build::shape_stroke(ids, [0.0, 0.0, 1.0, 1.0], 3.0);
+        let d = stroke.sub_mut("dashes").unwrap();
+        d.get_mut("dash").unwrap().value = Value::Scalar(10.0);
+        d.get_mut("gap").unwrap().value = Value::Scalar(5.0);
+        let at = d.children.iter().position(|n| n.match_id() == "offset").unwrap();
+        d.children.insert(at, ids.prop("gap2", "Gap 2", Value::Scalar(3.0)).into());
+        d.children.insert(at, ids.prop("dash2", "Dash 2", Value::Scalar(20.0)).into());
+        let rect = build::shape_rect(ids, [60.0, 40.0], [0.0, 0.0], 0.0);
+        vec![build::shape_group(ids, "G", vec![rect, stroke])]
+    });
+    push(&mut p, cid, l);
+    let (q, nc, _, _) = roundtrip(&p, cid, &ExportOptions::default());
+    let c = q.comp(nc).unwrap();
+    let g = c.layers[0].props.sub("contents").unwrap().groups().next().unwrap();
+    let stroke = g.sub("contents").unwrap().groups().find(|g| g.match_id == "stroke").unwrap();
+    let d = stroke.sub("dashes").unwrap();
+    let v = |m: &str| d.get(m).map(|p| p.value.as_f64());
+    assert_eq!((v("dash"), v("gap"), v("dash2"), v("gap2")), (Some(10.0), Some(5.0), Some(20.0), Some(3.0)));
+}
+
 // ---------------------------------------------------------------- layers
 
 #[test]
