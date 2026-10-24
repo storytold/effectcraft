@@ -98,11 +98,12 @@ pub(crate) fn file_reader(_path: &Path) -> Option<Box<dyn filmcraft_media::ByteR
 
 /// The leading `ftyp` and the `moov` box of an ISO-BMFF movie on disk (all a track's display
 /// matrix needs), without reading the samples: top-level box headers are walked with positional
-/// reads. `None` when the file isn't ISO-BMFF or its `moov` is missing or implausibly large.
+/// reads. `None` when the file isn't ISO-BMFF, its `moov` is missing, or the retained boxes total
+/// more than 64 MiB, including their headers.
 #[cfg(any(unix, windows))]
 pub(crate) fn movie_header(path: &Path) -> Option<Vec<u8>> {
     use std::io::{Read, Seek, SeekFrom};
-    const MAX_MOOV: u64 = 64 << 20;
+    const MAX_HEADER: usize = 64 << 20;
     let mut f = std::fs::File::open(path).ok()?;
     let len = f.metadata().ok()?.len();
     let mut out = Vec::new();
@@ -126,11 +127,12 @@ pub(crate) fn movie_header(path: &Path) -> Option<Vec<u8>> {
             return None;
         }
         if kind == *b"ftyp" || kind == *b"moov" {
-            if size > MAX_MOOV {
+            let size = usize::try_from(size).ok()?;
+            if out.len().checked_add(size)? > MAX_HEADER {
                 return None;
             }
             f.seek(SeekFrom::Start(pos)).ok()?;
-            let mut b = vec![0u8; usize::try_from(size).ok()?];
+            let mut b = vec![0u8; size];
             f.read_exact(&mut b).ok()?;
             out.extend_from_slice(&b);
             if kind == *b"moov" {
@@ -170,4 +172,91 @@ pub(crate) fn probe_source(path: &Path) -> Option<Result<SharedSource>> {
 #[cfg(not(any(unix, windows)))]
 pub(crate) fn probe_source(_path: &Path) -> Option<Result<SharedSource>> {
     None
+}
+
+#[cfg(all(test, any(unix, windows)))]
+mod tests {
+    use std::fs::{File, OpenOptions};
+    use std::io::{self, Seek, SeekFrom, Write};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::movie_header;
+
+    struct TempMovie(PathBuf);
+
+    impl TempMovie {
+        fn new() -> io::Result<(Self, File)> {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            loop {
+                let id = NEXT.fetch_add(1, Ordering::Relaxed);
+                let path = std::env::temp_dir().join(format!("effectcraft-movie-header-{}-{id}.mp4", std::process::id()));
+                match OpenOptions::new().write(true).create_new(true).open(&path) {
+                    Ok(file) => return Ok((Self(path), file)),
+                    Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+
+        fn bytes(bytes: &[u8]) -> io::Result<Self> {
+            let (movie, mut file) = Self::new()?;
+            file.write_all(bytes)?;
+            Ok(movie)
+        }
+
+        fn boxes(boxes: &[(u32, &[u8; 4])]) -> io::Result<Self> {
+            let (movie, mut file) = Self::new()?;
+            let mut offset = 0u64;
+            for &(size, kind) in boxes {
+                file.seek(SeekFrom::Start(offset))?;
+                file.write_all(&size.to_be_bytes())?;
+                file.write_all(kind)?;
+                offset = offset.checked_add(u64::from(size)).ok_or_else(|| io::Error::other("fixture offset overflow"))?;
+            }
+            file.set_len(offset)?;
+            Ok(movie)
+        }
+    }
+
+    impl Drop for TempMovie {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    #[test]
+    fn movie_header_rejects_repeated_ftyp_over_budget() -> io::Result<()> {
+        let movie = TempMovie::boxes(&[(33_554_440, b"ftyp"), (33_554_440, b"ftyp"), (8, b"moov")])?;
+        assert!(movie_header(&movie.0).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn movie_header_retained_byte_boundary() -> io::Result<()> {
+        {
+            let movie = TempMovie::boxes(&[(67_108_856, b"ftyp"), (8, b"moov")])?;
+            let header = movie_header(&movie.0).expect("exactly 64 MiB of retained boxes is accepted");
+            assert_eq!(header.len(), 67_108_864);
+            assert_eq!(header.get(..8), Some(b"\x03\xff\xff\xf8ftyp".as_slice()));
+            assert_eq!(header.get(67_108_856..), Some(b"\0\0\0\x08moov".as_slice()));
+        }
+        let movie = TempMovie::boxes(&[(67_108_857, b"ftyp"), (8, b"moov")])?;
+        assert!(movie_header(&movie.0).is_none());
+        let movie = TempMovie::boxes(&[(67_108_865, b"moov")])?;
+        assert!(movie_header(&movie.0).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn movie_header_preserves_bytes_and_errors() -> io::Result<()> {
+        let movie = TempMovie::bytes(b"\0\0\0\x0cftypisom\0\0\0\x0cmdatdata\0\0\0\x0cmoovinfo")?;
+        assert_eq!(movie_header(&movie.0), Some(b"\0\0\0\x0cftypisom\0\0\0\x0cmoovinfo".to_vec()));
+
+        for bytes in [b"\0\0\0\x0cmoov".as_slice(), b"\0\0\0\x08moo", b"\0\0\0\x08ftyp"] {
+            let movie = TempMovie::bytes(bytes)?;
+            assert!(movie_header(&movie.0).is_none());
+        }
+        Ok(())
+    }
 }
