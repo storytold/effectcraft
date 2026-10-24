@@ -351,7 +351,7 @@ fn hex_cell(x: f64, y: f64, r: f64) -> ((f64, f64), (i64, i64)) {
     let rr = (2.0 / 3.0 * y) / r;
     // Cube rounding.
     let (cx, cz) = (q, rr);
-    let cy = -cx - cz;
+    let cy = (-3f64.sqrt() / 3.0 * x - y / 3.0) / r;
     let (mut rx, ry, mut rz) = (cx.round(), cy.round(), cz.round());
     let (dx, dy, dz) = ((rx - cx).abs(), (ry - cy).abs(), (rz - cz).abs());
     if dx > dy && dx > dz {
