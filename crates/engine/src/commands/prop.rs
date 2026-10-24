@@ -491,6 +491,9 @@ fn get(s: &mut Session, p: &Value) -> Result<Value> {
         "time": t.seconds(), "value": raw.to_json(), "animated": !pr.keys.is_empty(),
         "keys": keys, "expression": pr.expr.as_ref().map(|e| e.text.clone()),
     });
+    if let Some(o) = l.popup_options(pr) {
+        out["options"] = super::popup_options(&o);
+    }
     // With an expression, `value` is the keyframed (pre-expression) value; also report what the
     // expression makes of it (what renders), or why it fails. A disabled one renders `value`; one
     // disabled by its syntax error (prop.setExpression) reports that error.

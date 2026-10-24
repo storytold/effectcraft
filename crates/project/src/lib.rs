@@ -1044,6 +1044,19 @@ impl Layer {
     pub fn masks(&self) -> Option<&PropGroup> {
         self.props.sub("masks")
     }
+    /// The labels popup property `p` of this layer offers: Text Path Options ▸ Path lists None and
+    /// the layer's masks (value k = mask k), every other popup its own options. `None` when `p` is
+    /// not a popup.
+    pub fn popup_options<'a>(&'a self, p: &'a Property) -> Option<std::borrow::Cow<'a, [String]>> {
+        if self.props.prop("text/pathOptions/path").is_some_and(|q| q.uid == p.uid) {
+            let masks = self.masks().into_iter().flat_map(|m| m.groups().map(|g| g.name.clone()));
+            return Some(std::iter::once("None".to_string()).chain(masks).collect::<Vec<_>>().into());
+        }
+        match &p.ui {
+            ParamUi::Popup { options } => Some(options.as_slice().into()),
+            _ => None,
+        }
+    }
     pub fn is_camera(&self) -> bool {
         matches!(self.source, LayerSource::Camera)
     }

@@ -4437,14 +4437,7 @@ fn value_editor(
             app.auto.add(&format!("timeline.prop.{uid}.value"), r, &prop.name);
         }
         Value::Enum(i) => {
-            // Text Path Options ▸ Path lists the layer's masks.
-            let mask_opts: Option<Vec<String>> = layer
-                .props
-                .prop("text/pathOptions/path")
-                .filter(|q| q.uid == uid)
-                .map(|_| std::iter::once("None".to_string()).chain(layer.masks().into_iter().flat_map(|m| m.groups().map(|g| g.name.clone()))).collect());
-            let ui_opts = mask_opts.map(|options| ParamUi::Popup { options });
-            if let ParamUi::Popup { options } = ui_opts.as_ref().unwrap_or(&prop.ui) {
+            if let Some(options) = layer.popup_options(prop) {
                 let r = Rect::from_min_size(pos2(x, at.y - 9.0), vec2(150.0, 18.0));
                 let label = options.get(*i as usize).cloned().unwrap_or_default();
                 let pop = egui::Id::new(("epop", uid));
@@ -4452,7 +4445,7 @@ fn value_editor(
                     widgets::open_popup(ui, pop);
                 }
                 app.auto.add(&format!("timeline.prop.{uid}.value"), r, &prop.name);
-                if let Some(ni) = widgets::popup_menu(ui, pop, r.left_bottom(), options, Some(*i as usize)) {
+                if let Some(ni) = widgets::popup_menu(ui, pop, r.left_bottom(), &options, Some(*i as usize)) {
                     set(actions, json!(ni));
                 }
             } else {

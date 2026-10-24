@@ -57,6 +57,50 @@ fn property_group_error_points_to_layer_inspection() {
     assert!(call_json(&mut s, "get_property", json!({"layer": l, "path": "geometryOptions/extrusionDepth"}))["value"].is_number());
 }
 
+/// Enum properties list their values and labels, so a client can set one without guessing (#2085).
+#[test]
+fn enum_properties_list_their_options() {
+    let mut s = server();
+    call_json(&mut s, "execute_command", json!({"command": "comp.new", "params": {"name": "probe"}}));
+    call_json(&mut s, "execute_command", json!({"command": "layer.newText", "params": {"name": "T", "text": "Hello"}}));
+    call_json(&mut s, "execute_command", json!({"command": "layer.addTextAnimator", "params": {"layer": "T", "properties": ["opacity"], "name": "A"}}));
+    let path = "text/animators/animator/selectors/rangeSelector/advanced/shape";
+    let shapes = ["Square", "Ramp Up", "Ramp Down", "Triangle", "Round", "Smooth"];
+    let expected = json!(shapes.iter().enumerate().map(|(value, label)| json!({"value": value, "label": label})).collect::<Vec<_>>());
+
+    let p = call_json(&mut s, "get_property", json!({"layer": "T", "path": path}));
+    assert_eq!(p["type"], "enum");
+    assert_eq!(p["options"], expected, "{p}");
+    let opacity = call_json(&mut s, "get_property", json!({"layer": "T", "path": "transform/opacity"}));
+    assert!(opacity.get("options").is_none(), "{opacity}");
+
+    fn find<'a>(node: &'a Value, path: &str) -> Option<&'a Value> {
+        if node["path"] == path {
+            return Some(node);
+        }
+        node["children"].as_array()?.iter().find_map(|c| find(c, path))
+    }
+    let tree = call_json(&mut s, "get_layer", json!({"layer": "T"}));
+    let node = find(&tree["properties"], path).unwrap_or_else(|| panic!("{tree}"));
+    assert_eq!(node["options"], expected);
+    assert!(find(&tree["properties"], "transform/opacity").unwrap()["options"].is_null());
+
+    let flat = call_json(&mut s, "get_layer", json!({"layer": "T", "flat": true}));
+    let props = flat["properties"].as_array().unwrap();
+    assert_eq!(props.iter().find(|p| p["path"] == path).unwrap()["options"], expected);
+    assert!(props.iter().find(|p| p["path"] == "transform/opacity").unwrap().get("options").is_none());
+
+    // Path Options ▸ Path offers None and the layer's masks, as the Timeline does.
+    for _ in 0..2 {
+        call_json(&mut s, "execute_command", json!({"command": "mask.new", "params": {"layer": "T", "vertices": [[0, 0], [40, 0], [40, 40]], "closed": true}}));
+    }
+    let masks = json!([{"value": 0, "label": "None"}, {"value": 1, "label": "Mask 1"}, {"value": 2, "label": "Mask 2"}]);
+    let p = call_json(&mut s, "get_property", json!({"layer": "T", "path": "text/pathOptions/path"}));
+    assert_eq!(p["options"], masks, "{p}");
+    let tree = call_json(&mut s, "get_layer", json!({"layer": "T"}));
+    assert_eq!(find(&tree["properties"], "text/pathOptions/path").unwrap_or_else(|| panic!("{tree}"))["options"], masks);
+}
+
 #[test]
 fn initialize_and_list_tools() {
     let mut s = server();
