@@ -131,6 +131,23 @@ fn environment_light_is_listed_and_takes_a_source_layer() {
     assert_eq!(prop(&s, env, "lightOptions/source").as_layer(), None);
 }
 
+/// Deleting the layer a Source points at leaves no dangling id: "None" means the comp's
+/// Environment Layer, and a dead id rendered as nothing at all (#2153).
+#[test]
+fn deleting_a_source_layer_clears_the_reference() {
+    let mut s = session();
+    let sky = s.execute("layer.newSolid", json!({"width": 256, "height": 128, "name": "Sky"})).unwrap()["layer"].as_u64().unwrap();
+    let env = s.execute("layer.newLight", json!({"kind": "Environment", "name": "Env"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("prop.set", json!({"layer": env, "path": "lightOptions/source", "value": sky})).unwrap();
+    assert_eq!(prop(&s, env, "lightOptions/source").as_layer(), Some(sky));
+    s.execute("edit.clear", json!({"layers": [sky]})).unwrap();
+    assert_eq!(prop(&s, env, "lightOptions/source").as_layer(), None, "the reference goes with the layer");
+    // One history step with the delete, so undo brings both back.
+    s.undo();
+    assert_eq!(prop(&s, env, "lightOptions/source").as_layer(), Some(sky));
+    assert!(s.active_comp().unwrap().layer(effectcraft_project::LayerId(sky)).is_some());
+}
+
 #[test]
 fn three_d_switch_undo_redo() {
     let mut s = session();

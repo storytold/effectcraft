@@ -263,6 +263,8 @@ pub struct FrameServer {
     /// The disk cache's layer buffers (see the module docs) and the project's salt.
     layer_store: Option<Arc<PrefetchStore>>,
     salt: u64,
+    /// Size and content hash for footage paths with no native metadata (the browser file table).
+    virtual_id: Option<Arc<dyn Fn(&str) -> Option<(u64, u64)> + Send + Sync>>,
 }
 
 /// A frame whose readbacks are in flight.
@@ -294,7 +296,14 @@ impl FrameServer {
             pending: None,
             layer_store: None,
             salt: 0,
+            virtual_id: None,
         }
+    }
+
+    /// Identity of virtual footage files, used when native metadata cannot describe the path.
+    /// Called from [`FrameServer::load`], not from the UI thread's cache lookup.
+    pub fn set_virtual_id(&mut self, id: Option<Arc<dyn Fn(&str) -> Option<(u64, u64)> + Send + Sync>>) {
+        self.virtual_id = id;
     }
 
     /// The store behind the layer cache when a request asks for `layers` (the browser: the
@@ -338,7 +347,7 @@ impl FrameServer {
 
     fn load(&mut self, revision: u64) -> Result<(), String> {
         let p = Project::from_json(&self.doc.to_string()).map_err(|e| e.to_string())?;
-        self.salt = effectcraft_render::disk_cache::footage_salt(&p);
+        self.salt = effectcraft_render::disk_cache::footage_salt_with(&p, self.virtual_id.as_deref());
         self.cache.set_store_salt(self.salt);
         self.project = Some(Arc::new(p));
         self.revision = Some(revision);

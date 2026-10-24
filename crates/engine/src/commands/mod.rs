@@ -442,6 +442,24 @@ pub fn match_path_of(g: &effectcraft_project::PropGroup, uid: effectcraft_projec
     None
 }
 
+/// Turn `effects/<match name>[#n]/<property>` (as [`match_path_of`] writes it) into a uid path on
+/// `l`. Path parsing splits on `.`, which would cut a match name like `ec.control.slider` apart.
+/// Any other path, or an effect that is not on the layer, comes back unchanged.
+pub(crate) fn resolve_effect_path(l: &Layer, path: &str) -> String {
+    let Some((seg, tail)) = path.strip_prefix("effects/").and_then(|r| r.split_once('/')) else { return path.to_string() };
+    let (match_id, nth) = match seg.rsplit_once('#') {
+        Some((m, n)) if !m.is_empty() => match n.parse::<usize>() {
+            Ok(n) if n >= 1 => (m, n),
+            _ => (seg, 1),
+        },
+        _ => (seg, 1),
+    };
+    match l.effects().and_then(|fx| fx.groups().filter(|g| g.match_id == match_id).nth(nth - 1)) {
+        Some(g) => format!("effects/@{}/{tail}", g.uid),
+        None => path.to_string(),
+    }
+}
+
 /// Selected properties (leaves) of the active comp as (layer, uid); selected groups expand to
 /// their properties.
 pub(crate) fn selected_leaf_props(s: &Session) -> Vec<(LayerId, effectcraft_project::Uid)> {

@@ -16,6 +16,7 @@ EffectCraft is a clean-room, open-source, pure-Rust motion graphics and visual e
 - **Pure Rust.** Media codecs come from FilmCraft crates (git deps behind `crates/media`, see `plan/adr/0001`).
 - **Layering** (`cargo xtask layers`): nothing below L5 depends on egui/eframe/winit/rfd/cpal; L0–L4 build for wasm32.
 - **Exact time:** `effectcraft_time::Tick` (254 016 000 000/s). Keyframe times are **layer time**.
+- **Time goes through `chrono`** (workspace dependency). Never hand-roll UTC/calendar conversion (days-to-date algorithms, leap-year math); a crate owns only its output format string. The one exception is range extension: past the years chrono can represent, shift the date by whole 400-year Gregorian cycles (146,097 days, after which the calendar repeats), let chrono compute the month and day, and add the cycles back to the year (splitting seconds into hours, minutes and seconds is plain arithmetic).
 - **Property tree:** everything animatable is a `Property` in the layer's `PropGroup` tree, addressed by paths (`transform/position`, `effects/#1/blurriness`, `@uid`).
 - **Everything is a command** (`crates/engine`): id, label, menu path, shortcut, params, enabled(), run(). UI, CLI, control channel and MCP dispatch by id.
 - **Everything is agent-drivable:** every interactive widget registers an automation id; UI state is serde.

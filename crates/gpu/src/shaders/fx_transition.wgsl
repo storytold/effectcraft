@@ -569,9 +569,11 @@ fn ftr_bender(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 
 // ---------------------------------------------------------------- CC Blobbylize (distort3::cc_blobbylize)
-// aux = the blurred blob plane (x). f[0] = (depth, cut away, intensity, ambient);
-// f[1] = (diffuse, specular, shininess, metal); f[2] = (light x, y, point light height,
-// point light); f[3] = distant light direction; f[4] = light colour.
+// aux = the Softness-blurred blob plane (x). f[0] = (cut away, intensity, ambient,
+// matte slope); f[1] = (diffuse, specular, shininess, metal); f[2] = (light x, y,
+// point light height, point); f[3] = distant light direction; f[4] = light colour;
+// f[5] = (matte depth, RGB depth, light slope, matte antialias width);
+// f[6].x = displacement clamp.
 
 @compute @workgroup_size(16, 16)
 fn ftr_blob(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -579,32 +581,55 @@ fn ftr_blob(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (!ftr_inside(p)) {
         return;
     }
-    let depth = P.f[0].x;
-    let cut = P.f[0].y;
+    let cut = P.f[0].x;
+    if (cut >= 1.0) {
+        // Endpoint guard: an opaque source can reach h = 1.0, where the gradient antialias
+        // would otherwise leave a half-covered pixel at Cut Away 100.
+        textureStore(out, p, vec4<f32>(0.0));
+        return;
+    }
     let hv = textureLoad(aux, p, 0).x;
     let g = ftr_grad(p);
+    let grad = length(g);
+    var m = 0.0;
+    if (grad > 1e-9) {
+        let aa = max(P.f[5].w * grad, 5e-4);
+        m = clamp(0.5 + (hv - cut) / aa, 0.0, 1.0);
+    } else if (hv > cut) {
+        m = 1.0;
+    }
+    if (m <= 0.0) {
+        textureStore(out, p, vec4<f32>(0.0));
+        return;
+    }
     let f = ftr_centre(p);
-    let s = sample_bilinear(src, f.x - g.x * depth * 2.0, f.y - g.y * depth * 2.0);
-    let c = ftr_unpremul(s);
-    let a = max(s.w, 0.0);
-    let m = clamp((hv - cut) / max((1.0 - cut) * 0.5, 1e-3), 0.0, 1.0);
-    let alpha = max(a, s.w) * m;
+    // Softness-scaled bevel warp of the source matte (normal z = 1).
+    let na = normalize(vec3<f32>(-g.x * P.f[0].w, -g.y * P.f[0].w, 1.0));
+    let sa = sample_bilinear(src, f.x + na.x * P.f[5].x, f.y + na.y * P.f[5].x);
+    let alpha = max(sa.w, 0.0) * m;
     if (alpha <= 0.0) {
         textureStore(out, p, vec4<f32>(0.0));
         return;
     }
-    let n = normalize(vec3<f32>(-g.x * depth, -g.y * depth, 1.0));
+    // Height-field refraction of the colour (normal z = height), independent of Softness.
+    let hz = max(hv, 1e-3);
+    let d = -g * P.f[5].y / hz;
+    let lim = P.f[6].x;
+    let disp = vec2<f32>(clamp(d.x, -lim, lim), clamp(d.y, -lim, lim));
+    let srgb = sample_bilinear(src, f.x + disp.x, f.y + disp.y);
+    let c = ftr_unpremul(srgb);
+    let n = normalize(vec3<f32>(-g.x * P.f[5].z, -g.y * P.f[5].z, 1.0));
     var l = P.f[3].xyz;
     if (P.f[2].w != 0.0) {
-        l = normalize(vec3<f32>(P.f[2].x - f32(p.x), P.f[2].y - f32(p.y), P.f[2].z));
+        l = normalize(vec3<f32>(P.f[2].x - f.x, P.f[2].y - f.y, P.f[2].z));
     }
-    let intensity = P.f[0].z;
+    let intensity = P.f[0].y;
     let ndl = max(dot(n, l), 0.0);
     let h3 = normalize(vec3<f32>(l.x, l.y, l.z + 1.0));
     let sp = powz(max(dot(n, h3), 0.0), P.f[1].z) * P.f[1].y;
     let lc = P.f[4].xyz;
     let metal = P.f[1].w;
-    let lit = (P.f[0].w + P.f[1].x * ndl * intensity) * lc;
+    let lit = (P.f[0].z + P.f[1].x * ndl * intensity) * lc;
     let spec_col = (1.0 - metal) * lc + metal * c * lc;
     let o = c * lit + (sp * intensity) * spec_col;
     textureStore(out, p, vec4<f32>(o * alpha, alpha));

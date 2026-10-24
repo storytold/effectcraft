@@ -1,5 +1,5 @@
 //! File ▸ Import / Export ▸ Adobe Premiere Pro Project… (timeline interchange) through the command
-//! registry, without media decoding (pixels: `crates/host/tests/timeline_interop.rs`).
+//! registry, without media decoding (pixels: `crates/host/tests/it/timeline_interop.rs`).
 
 use serde_json::json;
 

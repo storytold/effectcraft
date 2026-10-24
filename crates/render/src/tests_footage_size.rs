@@ -81,3 +81,28 @@ fn reduced_renders_take_footage_resampled_by_the_source() {
     Renderer::new(&p, &sized, RenderOpts { scale: 0.5, ..Default::default() }).comp_frame(cid, Tick::ZERO);
     assert!(sized.sizes.unwrap().into_inner().unwrap().is_empty());
 }
+
+/// #1812: a still's layer is kept in the layer cache across times (its texture then uploads to
+/// the GPU once, not every frame); a movie's is fetched again at every time.
+#[test]
+fn still_layers_are_cached_across_times_and_movies_are_not() {
+    for (kind, fetches) in [(FootageKind::Still, 1), (FootageKind::Video, 3)] {
+        let (mut p, cid) = project(BitDepth::Bpc8, false);
+        let Some(LayerSource::Footage { item }) = p.comp(cid).map(|c| c.layers[0].source.clone()) else { panic!("footage layer") };
+        if let Some(ItemKind::Footage(f)) = p.item_mut(item).map(|it| &mut it.kind) {
+            f.kind = kind;
+        }
+        let cache = crate::LayerCache::default();
+        let src = Clip { sizes: Some(Mutex::default()) };
+        let opts = RenderOpts { scale: 0.5, ..Default::default() };
+        for t in [0.0, 0.25, 0.5] {
+            let t = Tick::from_seconds_f64(t);
+            let mut r = Renderer::new(&p, &src, opts);
+            r.cache = Some(&cache);
+            let frame = r.comp_frame(cid, t);
+            assert_eq!(frame, Renderer::new(&p, &src, opts).comp_frame(cid, t), "{kind:?} at {t:?}");
+        }
+        // (each uncached render above fetches once more)
+        assert_eq!(src.sizes.unwrap().into_inner().unwrap().len(), fetches + 3, "{kind:?}");
+    }
+}

@@ -26,16 +26,19 @@ pub const PREFS_FILE: &str = "prefs.json";
 pub const LANGUAGES: &[(&str, &str)] = &[
     ("Match System", "system"),
     ("English", "en"),
+    // Alphabetical by the language's own name after English; Cyrillic, Georgian, then CJK names
+    // follow the Latin ones.
+    ("Čeština", "cs"),
+    ("Deutsch", "de"),
+    ("Español", "es"),
+    ("Français", "fr"),
+    ("Português (Brasil)", "pt-br"),
+    ("Русский", "ru"),
+    ("Українська", "uk"),
+    ("ქართული", "ka"),
     ("日本語", "ja"),
     ("简体中文", "zh-hans"),
     ("繁體中文", "zh-hant"),
-    ("Українська", "uk"),
-    ("Español", "es"),
-    ("Português (Brasil)", "pt-br"),
-    ("Русский", "ru"),
-    ("Français", "fr"),
-    ("Deutsch", "de"),
-    ("Čeština", "cs"),
 ];
 
 /// Settings ▸ Startup & Repair ▸ Window Graphics: (label, `startup.windowGraphics` value).
@@ -110,7 +113,8 @@ page!(General {
     /// Synchronize Time of All Related Items.
     sync_time_related_items: bool = true,
     expression_pick_whip_compact: bool = true,
-    create_split_layers_above: bool = false,
+    /// Create Split Layers Above Original Layer (After Effects' default).
+    create_split_layers_above: bool = true,
     use_system_color_picker: bool = false,
     /// Number of projects in File ▸ Open Recent.
     recent_items: u32 = 10,
@@ -428,6 +432,8 @@ pub struct Prefs {
     pub recent_presets: Vec<String>,
     /// Character panel: recently used font families, newest first.
     pub recent_fonts: Vec<String>,
+    /// Effects & Presets: the starred effects' ids, in the order starred.
+    pub effects_favorites: Vec<String>,
     /// Preview panel: every shortcut's options.
     pub preview: crate::preview::PreviewSettings,
     /// View ▸ Simulate Output ▸ My Custom RGB.
@@ -468,6 +474,7 @@ impl Default for Prefs {
             recent_footage: vec![],
             recent_presets: vec![],
             recent_fonts: vec![],
+            effects_favorites: vec![],
             preview: crate::preview::PreviewSettings::default(),
             custom_rgb: crate::viewer::CustomRgb::default(),
             comp_presets: vec![],
@@ -597,6 +604,9 @@ impl Prefs {
     pub fn normalize(&mut self) {
         self.version = PREFS_VERSION;
         self.comp_presets.retain(CompPreset::is_valid);
+        let mut seen = std::collections::HashSet::new();
+        self.effects_favorites.retain(|id| !id.is_empty() && seen.insert(id.clone()));
+        self.effects_favorites.truncate(MAX_EFFECTS_FAVORITES);
         if !is_choice(WINDOW_GRAPHICS, &self.startup.window_graphics) {
             self.startup.window_graphics = Startup::default().window_graphics;
         }
@@ -715,6 +725,7 @@ impl Prefs {
                 recent_footage: std::mem::take(&mut self.recent_footage),
                 recent_presets: std::mem::take(&mut self.recent_presets),
                 recent_fonts: std::mem::take(&mut self.recent_fonts),
+                effects_favorites: std::mem::take(&mut self.effects_favorites),
                 preview: std::mem::take(&mut self.preview),
                 comp_presets: std::mem::take(&mut self.comp_presets),
                 ..d
@@ -916,6 +927,23 @@ impl Prefs {
         push_mru(&mut self.recent_fonts, family, 30);
     }
 
+    /// Is effect `id` starred in Effects & Presets?
+    pub fn is_effect_favorite(&self, id: &str) -> bool {
+        self.effects_favorites.iter().any(|f| f == id)
+    }
+
+    /// Star effect `id` in Effects & Presets, or un-star it; true when it is starred now.
+    pub fn toggle_effect_favorite(&mut self, id: &str) -> bool {
+        if self.is_effect_favorite(id) {
+            self.effects_favorites.retain(|f| f != id);
+            false
+        } else {
+            self.effects_favorites.push(id.to_string());
+            self.effects_favorites.truncate(MAX_EFFECTS_FAVORITES);
+            self.is_effect_favorite(id)
+        }
+    }
+
     /// The recent fonts the Character panel shows (at most Number of Recent Fonts to Display).
     pub fn recent_fonts_shown(&self) -> &[String] {
         let n = (self.type_.recent_fonts as usize).min(self.recent_fonts.len());
@@ -932,6 +960,9 @@ impl Prefs {
         push_mru(&mut self.recent_presets, path, self.general.recent_items as usize);
     }
 }
+
+/// Most effects Effects & Presets keeps starred (a hand-edited settings file can hold more).
+const MAX_EFFECTS_FAVORITES: usize = 1000;
 
 fn push_mru(list: &mut Vec<String>, v: &str, max: usize) {
     list.retain(|x| x != v);

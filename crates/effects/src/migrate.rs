@@ -499,6 +499,22 @@ mod tests {
         assert_eq!(pr.ui, popup.ui);
     }
 
+    /// #1797: Shift Channels' menu put Half On before Full Off; a project saved then keeps the
+    /// option it chose, by label.
+    #[test]
+    fn shift_channels_half_on_and_full_off_are_remapped_by_label() {
+        const OLD: [&str; 11] = ["Alpha", "Red", "Green", "Blue", "Luminance", "Hue", "Lightness", "Saturation", "Full On", "Half On", "Full Off"];
+        for (saved, want) in [(9u32, 10u32), (10, 9), (1, 1)] {
+            let mut next = 1;
+            let (spec, mut g) = instance("ec.channel.shiftchannels", &mut next);
+            let pr = g.get_mut("takeGreenFrom").unwrap();
+            pr.ui = ParamUi::Popup { options: OLD.iter().map(|s| s.to_string()).collect() };
+            pr.value = Value::Enum(saved);
+            upgrade_instance(spec, &mut g, &mut Ids(&mut next), SIZE);
+            assert_eq!(g.get("takeGreenFrom").unwrap().value, Value::Enum(want), "saved {saved}");
+        }
+    }
+
     /// #514: Apply Color LUT's LUT was hidden (set only by commands) and the OCIO files were
     /// plain text; old projects get the Choose… file parameter, keeping the path.
     #[test]

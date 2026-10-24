@@ -98,6 +98,8 @@ var ImportAsType = __enum("ImportAsType", ["COMP_CROPPED_LAYERS", "FOOTAGE", "CO
 ImportAsType.COMPOSITION_CROPPED_LAYERS = ImportAsType.COMP_CROPPED_LAYERS;
 ImportAsType.COMPOSITION = ImportAsType.COMP;
 var TimeDisplayType = __enum("TimeDisplayType", ["FRAMES", "TIMECODE"], 2012);
+// After Effects' values (FC_START_0 = 2612), as in docsforadobe/Types-for-Adobe.
+var FramesCountType = __enum("FramesCountType", ["FC_START_0", "FC_START_1", "FC_TIMECODE_CONVERSION"], 2612);
 var LogType = __enum("LogType", ["ERRORS_ONLY", "ERRORS_AND_SETTINGS", "ERRORS_AND_PER_FRAME_INFO"], 3212);
 var KeyframeLabel = __enum("KeyframeLabel", ["NONE"], 0);
 
@@ -869,8 +871,11 @@ Property.prototype.property = function () { return null; };
     }
     if (info.dims > 1) {
       if (!(v instanceof Array)) throw __err("value must be an array of " + info.dims + " numbers");
+      // After Effects rejects an array of the wrong length instead of truncating or broadcasting it
+      // (#1936). Two values for a 3-D property stay legal, as they are in After Effects: z is 0.
+      if (v.length !== info.dims && !(info.dims === 3 && v.length === 2)) throw __err("Array is not of the correct dimension");
       var o = [];
-      for (var d = 0; d < info.dims; d++) o.push(d < v.length ? __num(v[d]) : (d === 2 ? 0 : __num(v[v.length - 1])));
+      for (var d = 0; d < info.dims; d++) o.push(d < v.length ? __num(v[d]) : 0);
       return o;
     }
     if (v instanceof Array) throw __err("value must be a number, not an array");
@@ -1301,7 +1306,14 @@ AVLayer.prototype.constructor = AVLayer;
   }
   P.sourcePointToComp = function (p) { return pointIn(this, p, true); };
   P.compPointToSource = function (p) { return pointIn(this, p, false); };
-  P.replaceSource = function () { throw __err("replaceSource is not supported yet"); };
+  // Replace the layer's source item, keeping every layer property (After Effects'
+  // AVLayer.replaceSource). `fixExpressions` is accepted for compatibility: only AV sources are
+  // replaced, so the property tree and the layer's name stay and expressions keep resolving.
+  P.replaceSource = function (newSource, fixExpressions) {
+    if (!newSource || newSource.__id === undefined) throw __err("replaceSource needs a project item");
+    __call("layer.replaceSource", { comp: this.__comp, layers: [this.__id], item: newSource.__id, fixExpressions: !!fixExpressions });
+    return null;
+  };
   P.openInViewer = function () { __call("layer.openLayer", this.__p1()); return null; };
 })();
 
@@ -1503,8 +1515,11 @@ function AVItem() {}
 AVItem.prototype = Object.create(Item.prototype);
 (function () {
   function def(name, get, set) { Object.defineProperty(AVItem.prototype, name, { get: get, set: set }); }
-  def("width", function () { return this.__info().width; }, function (v) { this.__settings({ width: Math.round(__num(v, "width")) }); });
-  def("height", function () { return this.__info().height; }, function (v) { this.__settings({ height: Math.round(__num(v, "height")) }); });
+  // `anchor: 0` (top left): After Effects' width and height setters resize the frame and leave the
+  // layers at their coordinates. Re-anchoring the old frame in the new one belongs to the
+  // Composition Settings dialog, which is what `comp.settings` defaults to (#1942).
+  def("width", function () { return this.__info().width; }, function (v) { this.__settings({ width: Math.round(__num(v, "width")), anchor: 0 }); });
+  def("height", function () { return this.__info().height; }, function (v) { this.__settings({ height: Math.round(__num(v, "height")), anchor: 0 }); });
   def("pixelAspect", function () { return this.__info().pixelAspect; }, function (v) { this.__settings({ pixelAspect: __num(v) }); });
   def("duration", function () { return this.__info().duration; }, function (v) { this.__settings({ duration: __num(v, "duration") }); });
   def("frameRate", function () { return this.__info().frameRate; }, function (v) { this.__settings({ frameRate: __num(v, "frameRate") }); });
@@ -1884,6 +1899,14 @@ Project.prototype = {
   set workingGamma(v) { __call("file.projectSettings", { workingGamma: __num(v) }); },
   get timeDisplayType() { return this.__info().timeDisplayFrames ? TimeDisplayType.FRAMES : TimeDisplayType.TIMECODE; },
   set timeDisplayType(v) { __call("file.projectSettings", { timeDisplay: v === TimeDisplayType.FRAMES ? "frames" : "timecode" }); },
+  get framesCountType() { return this.__info().displayStartFrame === 1 ? FramesCountType.FC_START_1 : FramesCountType.FC_START_0; },
+  set framesCountType(v) {
+    if (v === FramesCountType.FC_TIMECODE_CONVERSION) throw __err("framesCountType: Timecode Conversion is not supported, use FC_START_0 or FC_START_1");
+    if (v !== FramesCountType.FC_START_0 && v !== FramesCountType.FC_START_1) throw __err("Bad framesCountType value " + v);
+    __call("file.projectSettings", { frameStart: v === FramesCountType.FC_START_1 ? 1 : 0 });
+  },
+  get displayStartFrame() { return this.__info().displayStartFrame; },
+  set displayStartFrame(v) { __call("file.projectSettings", { frameStart: __num(v) }); },
   get expressionEngine() { return "javascript-1.0"; },
   set expressionEngine(v) {},
   item: function (i) {

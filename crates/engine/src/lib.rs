@@ -15,6 +15,7 @@ pub mod camera_track;
 pub mod commands;
 pub mod config;
 pub mod demo;
+pub mod doc_path;
 pub mod footage_check;
 pub mod footage_reload;
 pub mod guard;
@@ -344,6 +345,11 @@ fn one_view() -> u8 {
     1
 }
 
+/// `t` as a current time of `comp`: a frame within its duration.
+fn comp_frame_at(comp: &Comp, t: Tick) -> Tick {
+    comp.frame_rate.snap_nearest(t.min(comp.duration - comp.frame_duration()).max(Tick::ZERO))
+}
+
 /// What Copy with Property Links / Copy Expression Only put on the clipboard.
 #[derive(Clone, Debug, PartialEq)]
 pub enum LinkClip {
@@ -508,11 +514,15 @@ pub struct Session {
     /// event loop (the desktop app) turn this on; headless sessions run `footage.check` when
     /// they want it.
     pub check_footage_on_open: bool,
+    /// Footage paths that came from a document, with that document ([`doc_path`]).
+    pub stored_paths: doc_path::StoredPaths,
     /// Each footage file's size and modification time when last seen (Settings ▸ Import ▸
     /// Reload Footage Changed on Disk, [`footage_reload`]).
     pub footage_stamps: std::collections::HashMap<String, footage_reload::Stamp>,
     /// The stamps being taken on a worker thread ([`footage_reload::start_scan`]).
     pub footage_scan: Option<footage_reload::Scan>,
+    /// The disk cache's footage salt and the footage it was taken for ([`Session::refresh_disk_salt`]).
+    pub disk_salt: Option<(u64, u64)>,
     /// How many script-issued commands are running ([`Session::execute_for_script`]): while one
     /// is, settings that guard what scripts may do can't change (see
     /// [`prefs::Scripting::same_permissions`]).
@@ -608,7 +618,9 @@ impl Default for Session {
             next_task_id: 1,
             learn: None,
             check_footage_on_open: false,
+            stored_paths: Default::default(),
             footage_stamps: Default::default(),
+            disk_salt: None,
             footage_scan: None,
             script_calls: ScriptCalls::default(),
         }
@@ -727,10 +739,40 @@ impl Session {
         if Arc::ptr_eq(&self.project, &self.saved_project) {
             self.saved_revision = self.revision;
         }
-        if self.disk_cache.is_some() {
-            self.layer_cache.set_disk_salt(effectcraft_render::disk_cache::footage_salt(&self.project));
-        }
+        self.refresh_disk_salt(false);
         self.events.push(Event::ProjectChanged { revision: self.revision });
+    }
+
+    /// Salt the disk cache's layer keys with the project's footage files
+    /// ([`effectcraft_render::disk_cache::footage_salt`]). Taking it reads the size and time of
+    /// every file, every frame of an image sequence included, so it is taken again only when the
+    /// footage items changed, or with `force` (a project opened, footage reloaded, the disk cache
+    /// attached), not at every edit: with a few large sequences that cost each keystroke in a
+    /// text field over half a second (#1926).
+    pub fn refresh_disk_salt(&mut self, force: bool) -> Option<u64> {
+        use std::hash::{Hash, Hasher};
+        if self.disk_cache.is_none() {
+            self.disk_salt = None;
+            return None;
+        }
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for (id, it) in &self.project.items {
+            if let effectcraft_project::ItemKind::Footage(f) = &it.kind {
+                id.hash(&mut h);
+                format!("{f:?}").hash(&mut h);
+            }
+        }
+        let footage = h.finish();
+        if let Some((seen, salt)) = self.disk_salt
+            && seen == footage
+            && !force
+        {
+            return Some(salt);
+        }
+        let salt = effectcraft_render::disk_cache::footage_salt(&self.project);
+        self.disk_salt = Some((footage, salt));
+        self.layer_cache.set_disk_salt(salt);
+        Some(salt)
     }
 
     /// Set a comp's Resolution. As in After Effects it is saved with the project (which becomes
@@ -860,11 +902,7 @@ impl Session {
 
     pub fn set_time(&mut self, t: Tick) {
         if let Some(c) = self.state.active_comp {
-            let comp = self.project.comp(c);
-            let t = match comp {
-                Some(comp) => comp.frame_rate.snap_nearest(t.clamp(Tick::ZERO, comp.duration - comp.frame_duration())),
-                None => t,
-            };
+            let t = self.project.comp(c).map_or(t, |comp| comp_frame_at(comp, t));
             self.state.times.insert(c, t);
             if self.prefs.general.sync_time_related_items {
                 self.sync_related_times(c, t);
@@ -983,15 +1021,24 @@ impl Session {
         self.events.push(Event::OpenComp(id));
     }
 
-    /// The open compositions, as a project file records them ([`effectcraft_project::SavedView`]).
+    /// The open compositions and their current times, as a project file records them
+    /// ([`effectcraft_project::SavedView`]).
     pub fn saved_view(&self) -> effectcraft_project::SavedView {
-        effectcraft_project::SavedView { active_comp: self.state.active_comp, open_comps: self.state.open_comps.clone() }
+        let comp_times = self.state.times.iter().filter(|(id, _)| self.project.comp(**id).is_some()).map(|(id, t)| (*id, *t)).collect();
+        effectcraft_project::SavedView { active_comp: self.state.active_comp, open_comps: self.state.open_comps.clone(), comp_times }
     }
 
-    /// Reopen the compositions a project file was saved with (#748). Ids that no longer name a
-    /// comp are skipped; with none left the project stays on the comp [`Session::replace_project`]
-    /// opened (its first), as files from before the view was saved do.
+    /// Reopen the compositions a project file was saved with (#748), each at its saved current
+    /// time (#1714). Ids that no longer name a comp are skipped; with none left the project stays
+    /// on the comp [`Session::replace_project`] opened (its first), as files from before the view
+    /// was saved do.
     pub fn restore_view(&mut self, view: &effectcraft_project::SavedView) {
+        for (id, t) in &view.comp_times {
+            if let Some(comp) = self.project.comp(*id) {
+                let t = comp_frame_at(comp, *t);
+                self.state.times.insert(*id, t);
+            }
+        }
         let mut open: Vec<ItemId> = Vec::new();
         for id in view.open_comps.iter().copied().filter(|id| self.project.comp(*id).is_some()) {
             if !open.contains(&id) {
@@ -1022,12 +1069,18 @@ impl Session {
 
     /// Render a comp frame with the session's footage + expression hosts.
     pub fn render(&self, comp: ItemId, t: Tick, opts: RenderOpts) -> Image {
+        self.renderer(opts).comp_frame(comp, t)
+    }
+
+    /// The renderer [`Session::render`] uses: the session's footage, expressions, layer cache and
+    /// accelerator, and the render prefs (nested switches, draft shadows) over `opts`.
+    pub fn renderer(&self, opts: RenderOpts) -> Renderer<'_> {
         let opts = RenderOpts { nested_switches: self.prefs.general.switches_affect_nested_comps, draft_shadows: self.prefs.three_d.realtime_shadows, ..opts };
         let mut r = Renderer::new(&self.project, self.footage.as_ref(), opts);
         r.expr = self.expr.as_deref();
         r.cache = Some(&self.layer_cache);
         r.accel = self.accel.as_deref();
-        r.comp_frame(comp, t)
+        r
     }
 
     /// Resolve a comp reference (item id number or name; `None`/null = the active comp).
@@ -1128,6 +1181,7 @@ impl Session {
             job.wait();
         }
         self.render_job = None;
+        self.stored_paths = Default::default();
         self.stop_track();
         self.track_job = None;
         self.stop_mask_track();
@@ -1154,6 +1208,8 @@ impl Session {
         }
         self.layer_cache.clear();
         self.project = Arc::new(p);
+        // Its files may have changed since they were last stamped.
+        self.disk_salt = None;
         self.history = History::default();
         self.state = EditorState { snapping: true, view_layout: 1, ..Default::default() };
         self.path = path;
@@ -1227,6 +1283,10 @@ mod tests_codec_options;
 #[cfg(test)]
 mod tests_color_view;
 #[cfg(test)]
+mod tests_crypto_pick;
+#[cfg(test)]
+mod tests_delete_keys;
+#[cfg(test)]
 mod tests_disk_cache;
 #[cfg(test)]
 mod tests_effects;
@@ -1272,6 +1332,8 @@ mod tests_project_items;
 mod tests_proxy;
 #[cfg(test)]
 mod tests_quick_offset;
+#[cfg(test)]
+mod tests_replace_source;
 #[cfg(test)]
 mod tests_rig3d;
 #[cfg(test)]

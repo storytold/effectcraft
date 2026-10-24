@@ -1,6 +1,6 @@
 # Where EffectCraft falls short
 
-> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-12 · **Change:** minor (issue, PR and catalog references gap 21: percentage guides and effect colour labels in; earlier change: re-audited against `upstream/main` 470ea7a3; ranked gap list from the 10 October re-measure otherwise unchanged) · **Target:** Adobe After Effects 2026 (26.5.0.89)
+> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-13 · **Change:** minor (path-editing layer bounds, #1220; issue, PR and catalog references gap 21: percentage guides and effect colour labels in; earlier change: re-audited against `upstream/main` 470ea7a3; ranked gap list from the 10 October re-measure otherwise unchanged) · **Target:** Adobe After Effects 2026 (26.5.0.89)
 
 An honest assessment of how far EffectCraft is from being a real replacement for After Effects,
 and the work that closes the gap. This document is meant for contributors and agents choosing
@@ -64,7 +64,7 @@ are grouped by area; the issue tracker has the rest.
 | 5 | **Playback and scrubbing feel** | #595 stutter on cached frames (partly addressed: nearest-first RAM preview prefetch, cache bars at 1/3 resolution), #304, #504 / #335 audio late or crackling, #586 puppet lag (maintainers asked for details); #329 slow scrubbing (#784) and #554 closed | Preview is where motion designers spend their day | 25–50 h | G5 · [hardware-parity.md](hardware-parity.md) |
 | 6 | **Linux and Windows interaction bugs** | Open: #488 rename arrows (hardening landed, reporter asked for details), #492 anchor drag, #268 file drops on Wayland (winit), #613 Direct3D 12 compositor. Now closed: #491, #493, #467, #320, #302, #596 | Many reports come from Linux; some Windows GPUs fail to start the compositor | 25–45 h | G2 · [ui-parity.md](ui-parity.md) |
 | 7 | **Animation presets: 54 against 621** | After Effects ships 621 `.ffx` presets (Behaviors, Backgrounds, Shapes, Synthetics, Text, Transitions…); we ship 54 original presets (8 text-animator; 23 Transitions: wipes, clock and fan reveals, blinds, dissolves, card flips, CC wipes, fades, #757; 23 Backgrounds: drifting gradients, fog, cloud and smoke, plasma and magma, cells, hexagons, scrolling grids and checks, pulse rings, bokeh, light sweep, #1096, driven by expressions so they keep moving, not seamless loops) and read only our `.ecpreset`. Missing: Behaviors, Shapes, Synthetics, Image and more Text | Presets are how many designers start; tutorials assume them | 15–35 h (original presets; `.ffx` reading is out of clean-room scope) | G8 · [effects-parity.md](effects-parity.md) |
-| 8 | **Mask and shape bugs** | Open: #1004 mask vertex multi-select, #999 auto-pan, #1042 / #1033 vertex nodes under the bounding box, #932 Convert to Bezier Path, #959 / #960 shape group toggles and operators. Now closed: #510, #513, #527, #509, #303, #553 | Masks are core compositing | 10–20 h | G2 · [target-app-parity.md](target-app-parity.md) |
+| 8 | **Mask and shape bugs** | Open: #1004 mask vertex multi-select, #999 auto-pan, #1042 / #1033 vertex nodes under the bounding box, #959 / #960 shape group toggles and operators. Now closed: #510, #513, #527, #509, #303, #553, #932 (Convert To Bezier Path on a shape layer's parametric path) | Masks are core compositing | 10–20 h | G2 · [target-app-parity.md](target-app-parity.md) |
 | 9 | **Effect behaviour bugs** | #580, #463 Curl Noise, #369 Motion Tile output size, #943 Turbulent Displace Evolution, #473 Cryptomatte selection (quoted names with commas fixed, 3b7f1ace; UI and GPU time open), #474 multi-layer EXR (decode shared, faffad3a; f16 storage and cache sizing open). Closed: #526, #514, #533–#536 | Each one breaks a look someone built | 10–20 h | G1/G2 · [effects-parity.md](effects-parity.md) |
 | 10 | **Colour pipeline differences** | #340 ProRes 4444 tagged bt709 but sRGB-encoded (open); ACES 2.0 / OCIO 2.5 configs (26.5) missing; now closed: #494 32-bpc blend modes, #495 and #750 Working Gamma 2.4, #546 / #547 viewer colour | Wrong colour in delivery is a client-visible failure | 15–30 h | G1 · [file-format-parity.md](file-format-parity.md) |
 | 11 | **Text rendering and layout** | Open: #453 CJK text in comps, #316 paragraph alignment inverted (maintainers' tests show Left/Right correct; asked for a project), #417 soft at Fit (mostly fixed by #444), #550 toolbar font options. Closed: #483, #583 | Text is in almost every motion graphic | 10–20 h | G2 · [ui-parity.md](ui-parity.md) |
@@ -72,7 +72,7 @@ are grouped by area; the issue tracker has the rest.
 | 13 | **3D model formats and materials** | After Effects 26 imports FBX, USD/USDZ, STL besides glTF and OBJ (`usd_plugins`), and Substance 3D materials with mesh displacement (26.0–26.2); we read glTF, OBJ, STL (binary and ASCII, with facet colours) and FBX 7.x (binary and ASCII: meshes, hierarchy, Lambert/Phong materials and textures; no FBX animation or skinning yet) | Product shots and 3D scenes come as FBX/USDZ | 25–45 h | — · [file-format-parity.md](file-format-parity.md) |
 | 14 | **Object Matte** (26.2, disk cache in 26.5) | First slice (#783): the Object Matte effect (Effect ▸ Matte) and `objectMatte.apply` turn a point (and optional box) on a reference frame into a matte and follow the object up to 600 frames each way, or segment every frame on its own; Roto Brush's engine, cache and model (MobileSAM from Settings ▸ Roto Brush, classical graph cut without it). Since then: the Object Matte tool in the viewer (click / drag a box, hover crosshair), the box as the model's box prompt, background tracking with progress and cancel, Freeze, and segmentations kept in the disk cache (26.5). Missing: a comparison with After Effects ([plan](fidelity/object-matte.md)) | The new one-click roto | 10–20 h | G7 · [target-app-parity.md](target-app-parity.md) |
 | 15 | **Hardware video decode and encode** | No VideoToolbox, NVENC, Quick Sync or VA-API; #498 asks for it (answered: CUDA / NVENC need Nvidia's proprietary SDK through FFI, which the no-`unsafe` rule forbids); open PR #819 adds hardware decoding via `filmcraft-platform`; FilmCraft has VideoToolbox / NVENC / VA-API paths to borrow | 4K playback and export speed | 25–45 h | G5/G6 · [hardware-parity.md](hardware-parity.md) |
-| 16 | **Localization depth** | Menus in 10 languages (ja, zh-hans, zh-hant, uk, es, pt-br, ru, fr, de, cs: 624 rows each); panels in 6 (ja, zh-hans, zh-hant, uk, pt-br, cs); effect names translated in Simplified Chinese (306, plus the generated Effect menu), their ~1,650 parameter names untranslated; Korean and Italian (After Effects ships them) absent; Hangul probe added (#599 closed) | After Effects is used heavily in Japan, China, Korea, Brazil, Europe | 60–110 h + native review | G9 · [localization-parity.md](localization-parity.md) |
+| 16 | **Localization depth** | Menus in 11 languages (ja, zh-hans, zh-hant, uk, es, pt-br, ru, fr, de, cs, ka: 628 rows each); panels in 7 (ja, zh-hans, zh-hant, uk, pt-br, cs, ka); effect names translated in Simplified Chinese and Georgian (307, plus the generated Effect menu), their ~1,650 parameter names untranslated; Korean and Italian (After Effects ships them) absent; Hangul probe added (#599 closed) | After Effects is used heavily in Japan, China, Korea, Brazil, Europe | 60–110 h + native review | G9 · [localization-parity.md](localization-parity.md) |
 | 17 | **Media Browser lists files import refuses** | `media_browser.rs` lists AVI; `media::is_importable` has none of them (Targa and Radiance HDR import since #745; DPX and Cineon since #756, log shown as stored: no Cineon Settings conversion yet; MXF OP1a / OP-Atom since #767; FilmCraft has no AVI demuxer); #431 and #324 closed | Confusing failures on common VFX formats | 15–30 h | G6 · [file-format-parity.md](file-format-parity.md) |
 | 18 | **Relative paths and relinking** | Projects store absolute footage paths; no relink when a project moves | Moving or sharing a project breaks it | 6–12 h | G4 · [file-format-parity.md](file-format-parity.md) |
 | 19 | **Plug-in ecosystem** | No After Effects SDK hosting (#600, #327 OpenFX, #334, #376 plug-in manager); our WebAssembly API has no third-party plug-ins | Many pro projects depend on Trapcode, Element, Saber… | 40–80 h for API growth; SDK hosting needs an owner decision | G8 · [scripting-parity.md](scripting-parity.md) |
@@ -114,6 +114,9 @@ The most important missing piece: it turns every other estimate here into a meas
 - Run the headless snapshot and control-channel checks on Linux (X11 and Wayland) and Windows, not
   only macOS. Interactions that only fail with real input (docking drags, viewer pan, drag-and-drop
   import, inline rename) need scripted input tests.
+- Path editing (#1220): selected shape and mask paths suppress the layer transform box while
+  their points are edited. `ui_viewer` regressions cover Pen-family tools, Selection vertex
+  dragging and undo, restoration of layer controls, and layers without visible paths.
 - Regression evidence for [#66](https://github.com/storytold/effectcraft/issues/66): scripted
   pointer tests in `ui_viewer` and `ui_text_edit`, checked headlessly on Linux, cover viewer clicks,
   marquee selection and text picking when layers are hidden or excluded by solo. They also check
@@ -146,6 +149,15 @@ The most important missing piece: it turns every other estimate here into a meas
   tests, checked headlessly on Windows, drag a selected Gradient Fill's start and end points in
   the Composition viewer: one undo step, the layer stays, a point inside a moved and scaled group
   converts to the group's space, and the handles show only for a selected gradient.
+- Regression evidence for [#1011](https://github.com/storytold/effectcraft/issues/1011): the
+  `ui_text_range_handles` input tests, checked headlessly on macOS, drag a text Range Selector's
+  End bar in the Composition viewer: one undo step, Start and the layer stay, and on an animated
+  End a keyframe at the current time. The bars show only for a selected selector or a selected
+  animator (or a property in it), with the Selection tool and layer controls on. Unit tests in
+  `text` place the bars on unit boundaries (words and Characters Excluding Spaces skip spaces,
+  inside a ligature, on the second line, right to left) and invert them; `render` covers the
+  value a drag writes (less the Offset, whole units in Index). Not done: dragging Offset, bars on
+  vertical text and on text on a path.
 - Regression evidence for the toolbar's gradient swatches (#612, reported on Discord): the
   `ui_toolbar_gradient` input tests, checked headlessly on Windows, click a Linear Fill swatch and
   a Radial Stroke swatch on a selected shape layer and get the Gradient Editor on its Gradient Fill
@@ -301,8 +313,8 @@ Issues #41–#47 (all from the Linux AppImage 0.1.1, 5 October): panning the vie
 
 - Localisation of the interface ([localization-parity.md](localization-parity.md)): since 6–12
   October the menus are translated into Japanese, Simplified and Traditional Chinese, Ukrainian,
-  Spanish, Brazilian Portuguese, Russian, French, German and Czech, and the panel catalog covers
-  Japanese, both Chinese, Ukrainian, Brazilian Portuguese and Czech. Next: effect and parameter
+  Spanish, Brazilian Portuguese, Russian, French, German, Czech and Georgian, and the panel catalog covers
+  Japanese, both Chinese, Ukrainian, Brazilian Portuguese, Czech and Georgian. Next: effect and parameter
   names, the remaining panel strings (Spanish, Russian, French, German), Korean and Italian, and
   native-speaker review of all of them.
 - Accessibility (keyboard navigation, screen readers, contrast), user documentation and
@@ -323,6 +335,8 @@ Issues #41–#47 (all from the Linux AppImage 0.1.1, 5 October): panning the vie
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-16 | minor | Gap 8: #932 closed (Convert To Bezier Path converts a shape layer's parametric path, not only mask RotoBezier) |
+| 2026-10-13 | patch | G2: layer bounds no longer compete with editable shape/mask path points (#1220) |
 | 2026-10-12 | minor | Audited against `upstream/main` 470ea7a3: open-issue count and crash list, closed issues removed from rows 1, 3, 5, 6, 8–12, 15–17, 22–24, G8 and G9 (#759 `#include`), localization catalogs recounted (≈ 12% to ≈ 18%); rows 7, 14 and 21 left to open PRs #1102, #792 and #1098 |
 | 2026-10-10 | minor | Alpha gate checked: no alpha blockers |
 | 2026-10-12 | minor | Gap 21: percentage guides and effect colour labels added (#1095) |

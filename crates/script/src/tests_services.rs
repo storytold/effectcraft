@@ -2,7 +2,7 @@
 //! that keeps files in memory (the web editor's browser storage) answers for its own files.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use effectcraft_engine::{Services, Session};
 
@@ -13,14 +13,19 @@ struct Mem(Mutex<HashMap<String, Vec<u8>>>);
 
 impl Services for Mem {
     fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {
-        self.0.lock().unwrap().get(path).cloned().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, path.to_string()))
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(path)
+            .cloned()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, path.to_string()))
     }
     fn write_file(&self, path: &str, data: &[u8]) -> std::io::Result<()> {
-        self.0.lock().unwrap().insert(path.into(), data.into());
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).insert(path.into(), data.into());
         Ok(())
     }
     fn exists(&self, path: &str) -> bool {
-        self.0.lock().unwrap().contains_key(path)
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).contains_key(path)
     }
     fn is_dir(&self, path: &str) -> bool {
         path == "/browser/footage"

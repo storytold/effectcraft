@@ -1,4 +1,4 @@
-// Ease Presets: easing curves kept by name and applied to pairs of neighbouring selected keyframes.
+// Ease Presets: easing curves kept by name and applied to the sides of selected keyframes.
 //
 // A ScriptUI panel that ships with EffectCraft as an optional extension (Window ▸ Ease
 // Presets.jsx). It uses only After Effects' documented scripting API: comp.selectedProperties,
@@ -11,6 +11,13 @@
 // segment's average speed (1 = as fast as a straight line, 0 = at rest). Applied to a segment, the
 // speeds are scaled to it: per dimension, along the motion path for spatial properties, or as
 // overall progress for shapes.
+//
+// Applied to selected keyframes, In eases each key's incoming side with the curve's in side, Out
+// its outgoing side with the curve's out side, In-Out both: a side is eased when it has a
+// neighbouring key (selected or not; the neighbour isn't changed), its speeds scaled to the
+// segment on that side. So a selected pair gets the whole curve, and a single key works too.
+// Roving keys are skipped: they pass speed straight through (their sides stay linear), so an ease
+// set on them wouldn't play.
 //
 // User presets are kept with app.settings (section "Ease Presets", key "userPresets") as JSON:
 // {"version": 1, "presets": [{"name": …, "curve": {"outInfluence", "outSpeed", "inInfluence",
@@ -98,9 +105,8 @@
 
   // ------------------------------------------------------------------ keyframes
 
-  // Pairs of neighbouring selected keyframes of the active comp: {prop, key} (the earlier key's
-  // index), by property.
-  function selectedPairs() {
+  // Selected properties of the active comp whose keys can ease: {prop, keys} (their selected keys).
+  function selectedKeyed() {
     var comp = app.project.activeItem;
     var out = [];
     if (!(comp instanceof CompItem)) return out;
@@ -109,7 +115,17 @@
       var p = props[i];
       if (p.propertyType !== PropertyType.PROPERTY || p.numKeys < 2 || !p.isInterpolationTypeValid(BEZIER)) continue;
       var keys = p.selectedKeys;
-      for (var k = 0; k + 1 < keys.length; k++) if (keys[k + 1] === keys[k] + 1) out.push({ prop: p, key: keys[k] });
+      if (keys.length) out.push({ prop: p, keys: keys });
+    }
+    return out;
+  }
+
+  // Pairs of neighbouring selected keyframes: {prop, key} (the earlier key's index), by property.
+  function selectedPairs() {
+    var keyed = selectedKeyed(), out = [];
+    for (var i = 0; i < keyed.length; i++) {
+      var keys = keyed[i].keys;
+      for (var k = 0; k + 1 < keys.length; k++) if (keys[k + 1] === keys[k] + 1) out.push({ prop: keyed[i].prop, key: keys[k] });
     }
     return out;
   }
@@ -175,29 +191,43 @@
     }
   }
 
-  // Ease every pair of neighbouring selected keyframes with `c` (one undo step). Returns the
-  // number of pairs eased.
-  function applyCurve(c) {
-    var pairs = selectedPairs(), n = 0;
-    if (!pairs.length) return 0;
+  // The eases of one side with `speed` (relative to the segment's average) and `influence`.
+  function eases(s, speed, influence) {
+    var out = [];
+    for (var d = 0; d < s.length; d++) out.push(new KeyframeEase(speed * s[d], influence));
+    return out;
+  }
+
+  // Ease the sides `mode` names ("In", "Out" or "In-Out") of every selected keyframe with `c`, in
+  // one undo step: a side with a neighbouring key, scaled to the segment on that side. Returns
+  // {eased, roving}: the number of keyframes eased, and of selected roving keyframes skipped.
+  function applyCurve(c, mode) {
+    var keyed = selectedKeyed(), sides = [], keys = 0, roving = 0;
+    var doIn = mode !== "Out", doOut = mode !== "In";
+    // Every side and its eases first: the segments are measured before any key changes.
+    for (var i = 0; i < keyed.length; i++) {
+      var p = keyed[i].prop;
+      for (var j = 0; j < keyed[i].keys.length; j++) {
+        var k = keyed[i].keys[j], before = sides.length;
+        if (p.keyRoving(k)) {
+          roving++;
+          continue;
+        }
+        var s = doIn && k > 1 ? slopes(p, k - 1) : null;
+        if (s) sides.push({ prop: p, key: k, out: false, eases: eases(s, c.inSpeed, c.inInfluence) });
+        s = doOut && k < p.numKeys ? slopes(p, k) : null;
+        if (s) sides.push({ prop: p, key: k, out: true, eases: eases(s, c.outSpeed, c.outInfluence) });
+        if (sides.length > before) keys++;
+      }
+    }
+    if (!sides.length) return { eased: 0, roving: roving };
     app.beginUndoGroup("Apply Ease Preset");
     try {
-      for (var i = 0; i < pairs.length; i++) {
-        var p = pairs[i].prop, a = pairs[i].key, s = slopes(p, a);
-        if (!s) continue;
-        var outE = [], inE = [];
-        for (var d = 0; d < s.length; d++) {
-          outE.push(new KeyframeEase(c.outSpeed * s[d], c.outInfluence));
-          inE.push(new KeyframeEase(c.inSpeed * s[d], c.inInfluence));
-        }
-        easeSide(p, a, true, outE);
-        easeSide(p, a + 1, false, inE);
-        n++;
-      }
+      for (var e = 0; e < sides.length; e++) easeSide(sides[e].prop, sides[e].key, sides[e].out, sides[e].eases);
     } finally {
       app.endUndoGroup();
     }
-    return n;
+    return { eased: keys, roving: roving };
   }
 
   // The curve between the first selected pair of keyframes (measured on the dimension that
@@ -288,6 +318,13 @@
   var inInfluence = field(inRow, "In %", "inInfluence");
   var inSpeed = field(inRow, "Speed", "inSpeed");
 
+  var modeRow = ui.add("group");
+  modeRow.add("statictext", undefined, "Ease");
+  var MODES = ["In", "Out", "In-Out"];
+  var mode = modeRow.add("dropdownlist", undefined, MODES, { name: "mode" });
+  mode.selection = 2;
+  mode.helpTip = "The sides of each selected keyframe to ease: incoming, outgoing or both";
+
   var actions = ui.add("group");
   var applyButton = actions.add("button", undefined, "Apply", { name: "apply" });
   var fromKeys = actions.add("button", undefined, "From Keys", { name: "fromKeys" });
@@ -346,8 +383,12 @@
   }
 
   function apply(c, what) {
-    var n = applyCurve(c);
-    status.text = n > 0 ? "Eased " + n + " keyframe pair(s) with " + what : "Select two or more neighbouring keyframes of a property";
+    var m = mode.selection ? mode.selection.text : "In-Out";
+    var r = applyCurve(c, m), n = r.eased;
+    var side = m === "In" ? "before it" : m === "Out" ? "after it" : "next to it";
+    var skipped = r.roving > 0 ? "skipped " + r.roving + " roving keyframe(s); turn off Roving to ease them" : "";
+    if (n > 0) status.text = "Eased " + n + " keyframe(s) (" + m + ") with " + what + (skipped ? "; " + skipped : "");
+    else status.text = skipped ? "Nothing eased: " + skipped : "Select keyframes with another keyframe " + side;
     return n;
   }
 

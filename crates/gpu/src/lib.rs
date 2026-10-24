@@ -461,3 +461,5 @@ mod tests_fx_warp;
 mod tests_init;
 #[cfg(test)]
 mod tests_particles;
+#[cfg(test)]
+mod tests_wgsl_grammar;

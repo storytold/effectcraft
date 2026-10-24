@@ -1,20 +1,15 @@
 //! Regression gates must fail when benchmark evidence is corrupt or incomplete.
 use serde_json::{Value, json};
-use std::path::PathBuf;
 use std::process::{Command, Output};
 
-struct ResultsDir(PathBuf);
+struct ResultsDir(tempfile::TempDir);
 impl ResultsDir {
     fn new() -> Self {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let dir = std::env::temp_dir().join(format!("effectcraft-bench-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
-        std::fs::create_dir_all(&dir).unwrap();
-        Self(dir)
+        Self(tempfile::Builder::new().prefix("effectcraft-bench-").tempdir().unwrap())
     }
     fn compare(&self, old: &str, new: &str, gate: bool) -> Output {
-        let baseline = self.0.join("baseline.jsonl");
-        let candidate = self.0.join("candidate.jsonl");
+        let baseline = self.0.path().join("baseline.jsonl");
+        let candidate = self.0.path().join("candidate.jsonl");
         std::fs::write(&baseline, old).unwrap();
         std::fs::write(&candidate, new).unwrap();
         let mut command = Command::new(env!("CARGO_BIN_EXE_xtask"));
@@ -23,11 +18,6 @@ impl ResultsDir {
             command.args(["--fail-over", "5"]);
         }
         command.output().unwrap()
-    }
-}
-impl Drop for ResultsDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
@@ -131,4 +121,32 @@ fn valid_results_keep_comparison_and_exploratory_mode() {
     let output = files.compare(&good.to_string(), &format!("{good}\n{failed}"), false);
     assert!(output.status.success(), "exploratory comparison stays available");
     assert!(diagnostic(&output).contains("failed"), "latest failure is visible: {}", diagnostic(&output));
+}
+
+/// With `--repeat`, a summary row (metrics = medians) follows the runs; comparison uses it.
+/// The last raw run (cpu 2.0, +0 %) differs from the median (2.2, +10 %), so only the summary fails
+/// the 5 % gate. Both sides are summaries, so the mixed-sample check stays out of the way.
+#[test]
+fn repeat_summary_rows_are_compared_by_median() {
+    let dir = ResultsDir::new();
+    let summary = |cpu: f64| {
+        let mut r = row("demo", true);
+        r["metrics"]["cpu_s"] = json!(cpu);
+        r["kind"] = json!("summary");
+        r["summary"] = json!({"runs": 3, "failed": 0, "stats": {}});
+        format!("{r}\n")
+    };
+    let baseline = summary(2.0);
+    let mut candidate = String::new();
+    for wall in [1.1, 9.0, 1.0] {
+        let mut r = row("demo", true);
+        r["metrics"]["cpu_s"] = json!(wall * 2.0);
+        candidate.push_str(&format!("{r}\n"));
+    }
+    let raw_only = dir.compare(&baseline, &candidate, false);
+    assert!(diagnostic(&raw_only).contains("median of 3→1 run"), "{}", diagnostic(&raw_only));
+    candidate.push_str(&summary(2.2));
+    let output = dir.compare(&baseline, &candidate, true);
+    assert!(!output.status.success(), "{}", diagnostic(&output));
+    assert!(diagnostic(&output).contains("cpu_s +10.0%"), "{}", diagnostic(&output));
 }

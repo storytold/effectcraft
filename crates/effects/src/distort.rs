@@ -164,7 +164,10 @@ fn wave_warp(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let kind = ctx.params.e("waveType");
     let pin = ctx.params.e("pinning");
     let seed = ctx.seed ^ 0x3a7e;
-    let (dx, dy) = (dir.sin(), -dir.cos());
+    // Cardinal directions must not acquire a tiny perpendicular slope: at a square-wave
+    // boundary cos(90°)'s rounding residue can flip a whole column on CPU but not GPU.
+    let axis = |v: f64| if v.abs() < 4.0 * f64::EPSILON { 0.0 } else { v };
+    let (dx, dy) = (axis(dir.sin()), -axis(dir.cos()));
     if !ctx.adjustment {
         b.pad(h.abs().ceil() as u32 + 1);
     }
@@ -556,8 +559,21 @@ mod tests {
             let (a, b) = (o.img.get(pad, y + pad), im.get(0, y));
             assert!((0..4).all(|i| (a[i] - b[i]).abs() < 0.01), "row {y}: {a:?} vs {b:?}");
         }
-        let free = run("ec.distort.wavewarp", &[("direction", num(0.0)), ("height", num(5.0))], im);
+        let free = run("ec.distort.wavewarp", &[("direction", num(0.0)), ("height", num(5.0))], im.clone());
         assert!(free.img.data.iter().zip(&o.img.data).any(|(a, b)| differs(*a, *b)));
+        // #1181: direction 90° → vertical displacement. Top Edge (4) holds the first row,
+        // Bottom Edge (6) the last, and the rest of the layer still moves.
+        for (pin, edge_row) in [(Value::Enum(4), 0i64), (Value::Enum(6), 29i64)] {
+            let set = [("direction", num(90.0)), ("height", num(5.0)), ("pinning", pin)];
+            let o = run("ec.distort.wavewarp", &set, im.clone());
+            let pad = ((o.img.width - im.width) / 2) as i64;
+            for x in 0..40 {
+                let (a, b) = (o.img.get(x + pad, edge_row + pad), im.get(x, edge_row));
+                assert!((0..4).all(|i| (a[i] - b[i]).abs() < 0.01), "pin {edge_row} col {x}: {a:?} vs {b:?}");
+            }
+            let mid = 15;
+            assert!((0..40).any(|x| differs(o.img.get(x + pad, mid + pad), im.get(x, mid))), "pin {edge_row}: the middle of the layer must still distort");
+        }
     }
 
     #[test]

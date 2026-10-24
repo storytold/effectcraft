@@ -35,22 +35,44 @@ fn gaussian(ctx: &EffectCtx, mut b: Buf) -> Buf {
     if !repeat && !ctx.adjustment {
         b.pad((s * 3.0).ceil() as u32);
     }
-    b.img = gaussian_blur(&b.img, s * kx, s * ky, repeat || ctx.adjustment);
+    let (sx, sy) = (s * kx, s * ky);
+    // Small sigmas: integer-radius box passes would step (and do nothing below ~0.6 px), so sample the kernel (#1939).
+    b.img = if effectcraft_raster::gaussian_is_exact(sx, sy) {
+        effectcraft_raster::gaussian_blur_exact(&b.img, sx, sy, repeat || ctx.adjustment)
+    } else {
+        gaussian_blur(&b.img, sx, sy, repeat || ctx.adjustment)
+    };
     b
 }
 
 fn box_blur(ctx: &EffectCtx, mut b: Buf) -> Buf {
-    let r = (ctx.params.f("radius") * b.scale).round().max(0.0) as usize;
-    if r == 0 {
+    let radius = (ctx.params.f("radius") * b.scale).max(0.0);
+    let r = radius.floor() as usize;
+    let frac = (radius - r as f64) as f32;
+    // Fractional radius: blend the two neighbouring integer radii so the result changes continuously (#1939).
+    let frac = if frac < 1e-4 { 0.0 } else { frac };
+    if r == 0 && frac == 0.0 {
         return b;
     }
     let it = ctx.params.f("iterations").round().clamp(1.0, 50.0) as usize;
     let (kx, ky) = dims_xy(ctx.params.e("dimensions"));
     let repeat = ctx.params.b("repeatEdge");
     if !repeat && !ctx.adjustment {
-        b.pad((r * it) as u32 + 1);
+        let reach = if frac > 0.0 { r + 1 } else { r };
+        b.pad((reach * it) as u32 + 1);
     }
-    b.img = effectcraft_raster::box_blur(&b.img, r * kx as usize, r * ky as usize, it, repeat || ctx.adjustment);
+    let edge = repeat || ctx.adjustment;
+    let lo = effectcraft_raster::box_blur(&b.img, r * kx as usize, r * ky as usize, it, edge);
+    if frac == 0.0 {
+        b.img = lo;
+        return b;
+    }
+    let hi = effectcraft_raster::box_blur(&b.img, (r + 1) * kx as usize, (r + 1) * ky as usize, it, edge);
+    for ((l, h), o) in lo.data.iter().zip(hi.data.iter()).zip(b.img.data.iter_mut()) {
+        for c in 0..4 {
+            o[c] = l[c] + (h[c] - l[c]) * frac;
+        }
+    }
     b
 }
 
@@ -737,6 +759,42 @@ pub fn specs() -> Vec<EffectSpec> {
 mod tests {
     use super::*;
     use crate::{EffectEnv, run_fx};
+
+    /// White left half, black right half (one vertical edge at x = 20).
+    fn edge() -> effectcraft_raster::Image {
+        let mut img = effectcraft_raster::Image::filled(40, 8, [0.0, 0.0, 0.0, 1.0]);
+        for y in 0..8 {
+            for x in 0..20 {
+                img.set(x, y, [1.0, 1.0, 1.0, 1.0]);
+            }
+        }
+        img
+    }
+
+    fn blurred_row(id: &str, param: &str, v: f64) -> Vec<f32> {
+        let out = run_fx(id, &[(param, num(v)), ("repeatEdge", Value::Bool(true))], edge(), 0.0, EffectEnv::default());
+        (16..24).map(|x| out.img.get(x, 4)[0]).collect()
+    }
+
+    #[test]
+    fn small_gaussian_blurriness_is_continuous() {
+        // #1939: 0.9 used to be identical to 0, and 1.2 / 1.6 / 2.0 identical to each other.
+        let row = |v| blurred_row("ec.blur.gaussian", "blurriness", v);
+        assert_ne!(row(0.0), row(0.9));
+        assert_ne!(row(0.9), row(1.2));
+        assert_ne!(row(1.2), row(1.6));
+        assert_ne!(row(1.6), row(2.0));
+        assert_ne!(row(2.0), row(2.4));
+    }
+
+    #[test]
+    fn fractional_box_blur_radius_is_continuous() {
+        let row = |v| blurred_row("ec.blur.fastbox", "radius", v);
+        assert_ne!(row(0.0), row(0.5));
+        assert_ne!(row(0.5), row(0.9));
+        assert_ne!(row(1.2), row(1.6));
+        assert_ne!(row(1.6), row(2.4));
+    }
 
     /// A bright square on mid grey.
     fn scene() -> effectcraft_raster::Image {

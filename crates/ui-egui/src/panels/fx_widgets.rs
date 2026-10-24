@@ -291,7 +291,8 @@ impl CurvePoints {
     pub fn hit(&self, x: f32, y: f32, r: f32) -> Option<usize> {
         self.0.iter().enumerate().map(|(i, p)| (i, (p[0] - x).hypot(p[1] - y))).filter(|(_, d)| *d <= r).min_by(|a, b| a.1.total_cmp(&b.1)).map(|(i, _)| i)
     }
-    /// The curve the effect renders (the same monotone spline), evaluated at `x`.
+    /// The monotone spline (`Curve::parse`) through the points, evaluated at `x`: the curve
+    /// Lumetri's RGB curves and Glow's arbitrary map render.
     pub fn eval(&self, x: f32) -> f32 {
         effectcraft_engine::effects::Curve::parse(&self.format()).map(|c| c.eval(x)).unwrap_or(x)
     }
@@ -326,8 +327,18 @@ pub struct CurveEdit {
 
 /// The Curves graph: grid, identity diagonal, the curve, its points. Click adds a point, drag
 /// moves one, dragging a point off the graph (or Alt-clicking it) removes it. In pencil mode a
-/// drag draws the curve freehand.
-pub fn curves_graph(ui: &mut egui::Ui, rect: Rect, pts: &CurvePoints, channel: usize, pencil: bool, id: egui::Id, t: &Tokens) -> (egui::Response, CurveEdit) {
+/// drag draws the curve freehand. `natural` draws the natural spline the Curves effect renders
+/// (`Curve::parse_natural`) instead of the monotone one.
+pub fn curves_graph(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    pts: &CurvePoints,
+    channel: usize,
+    pencil: bool,
+    natural: bool,
+    id: egui::Id,
+    t: &Tokens,
+) -> (egui::Response, CurveEdit) {
     let resp = ui.interact(rect.expand(6.0), id, Sense::click_and_drag());
     let p = ui.painter().with_clip_rect(rect.expand(8.0));
     p.rect_filled(rect, 0.0, Color32::from_rgb(0x1c, 0x1c, 0x1c));
@@ -349,7 +360,16 @@ pub fn curves_graph(ui: &mut egui::Ui, rect: Rect, pts: &CurvePoints, channel: u
     };
     let to_s = |x: f32, y: f32| pos2(rect.min.x + x * rect.width(), rect.max.y - y * rect.height());
     let to_g = |s: Pos2| [((s.x - rect.min.x) / rect.width()), ((rect.max.y - s.y) / rect.height())];
-    let spline = effectcraft_engine::effects::Curve::parse(&pts.format());
+    let spline =
+        if natural { effectcraft_engine::effects::Curve::parse_natural(&pts.format()) } else { effectcraft_engine::effects::Curve::parse(&pts.format()) };
+    let seed = || {
+        (0..=64)
+            .map(|i| {
+                let x = i as f32 / 64.0;
+                spline.as_ref().map(|c| c.eval(x)).unwrap_or(x)
+            })
+            .collect::<Vec<f32>>()
+    };
     let line: Vec<Pos2> = (0..=96)
         .map(|i| {
             let x = i as f32 / 96.0;
@@ -375,12 +395,12 @@ pub fn curves_graph(ui: &mut egui::Ui, rect: Rect, pts: &CurvePoints, channel: u
     let alt = ui.input(|i| i.modifiers.alt);
     if pencil {
         if resp.drag_started() {
-            ui.data_mut(|d| d.insert_temp(pencil_id, (0..=64).map(|i| pts.eval(i as f32 / 64.0)).collect::<Vec<f32>>()));
+            ui.data_mut(|d| d.insert_temp(pencil_id, seed()));
         }
         if (resp.dragged() || resp.clicked())
             && let Some(pt) = resp.interact_pointer_pos()
         {
-            let mut samples: Vec<f32> = ui.data(|d| d.get_temp(pencil_id)).unwrap_or_else(|| (0..=64).map(|i| pts.eval(i as f32 / 64.0)).collect());
+            let mut samples: Vec<f32> = ui.data(|d| d.get_temp(pencil_id)).unwrap_or_else(seed);
             let g = to_g(pt);
             let i = (g[0].clamp(0.0, 1.0) * 64.0).round() as usize;
             samples[i.min(64)] = g[1].clamp(0.0, 1.0);

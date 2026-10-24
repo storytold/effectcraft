@@ -5,6 +5,7 @@
 use crate::i18n::{tr, tr_args};
 use crate::icons::Icon;
 use effectcraft_engine::prefs::CompPreset;
+use effectcraft_engine::project::Resolution;
 use effectcraft_engine::time::{FrameRate, format_timecode_frames, parse_timecode};
 use egui::{Color32, vec2};
 use serde_json::json;
@@ -94,6 +95,9 @@ pub struct CompDraft {
     pub preserve_frame_rate: bool,
     pub preserve_resolution: bool,
     pub advanced_3d: bool,
+    /// The comp's Resolution (the Composition panel's popup): saved with the project but no undo
+    /// step, so OK sets it apart from `comp.new` / `comp.settings`.
+    pub resolution: Resolution,
     pub tab: Tab,
     /// Timecode text being edited (start, duration).
     pub start_tc: Option<String>,
@@ -122,6 +126,7 @@ impl Default for CompDraft {
             preserve_frame_rate: false,
             preserve_resolution: false,
             advanced_3d: false,
+            resolution: Resolution::Auto,
             tab: Tab::Basic,
             start_tc: None,
             dur_tc: None,
@@ -376,9 +381,30 @@ pub fn show(
                     }
                 });
                 ui.end_row();
-                ui.label("");
-                let mb = d.width as f64 * d.height as f64 * 4.0 / (1024.0 * 1024.0);
-                ui.label(egui::RichText::new(tr_args("{} x {}, {}MB per 8bpc frame", &[&d.width, &d.height, &format!("{mb:.1}")])).color(Color32::GRAY));
+                // As in After Effects, the Resolution menu (the Composition panel's popup) with
+                // the frame it renders beside it.
+                ui.label(tr("Resolution:"));
+                ui.horizontal(|ui| {
+                    let r = egui::ComboBox::from_id_salt("comp-resolution").width(90.0).selected_text(tr(d.resolution.label())).show_ui(ui, |ui| {
+                        for res in Resolution::ALL {
+                            ui.selectable_value(&mut d.resolution, res, tr(res.label()));
+                        }
+                        let custom = matches!(d.resolution, Resolution::Custom(_));
+                        if ui.selectable_label(custom, tr("Custom")).clicked() && !custom {
+                            d.resolution = Resolution::Custom(5);
+                        }
+                    });
+                    auto.add("dialog.comp.resolution", r.response.rect, "Resolution");
+                    if let Resolution::Custom(n) = d.resolution {
+                        let mut n = n;
+                        let r = ui.add(crate::widgets::drag_value(egui::DragValue::new(&mut n).range(2..=40)));
+                        auto.add("dialog.comp.resolutionFactor", r.rect, "Custom Resolution");
+                        d.resolution = Resolution::Custom(n);
+                    }
+                    let (w, h) = frame_at(d.width, d.height, d.resolution);
+                    let mb = w as f64 * h as f64 * 4.0 / (1024.0 * 1024.0);
+                    ui.label(egui::RichText::new(tr_args("{} x {}, {}MB per 8bpc frame", &[&w, &h, &format!("{mb:.1}")])).color(Color32::GRAY));
+                });
                 ui.end_row();
                 ui.label(tr("Start Timecode:"));
                 let r = ui.horizontal(|ui| timecode_field(ui, &mut d.start_tc, &mut d.start, rate, i64::MIN / 4)).inner;
@@ -486,9 +512,25 @@ pub fn params(d: &CompDraft) -> serde_json::Value {
     })
 }
 
+/// The frame size the comp renders at `res` (Auto follows the magnification, so the dialog shows
+/// the full frame for it).
+pub fn frame_at(w: u32, h: u32, res: Resolution) -> (u32, u32) {
+    effectcraft_render::frame_size(w, h, 1.0 / f64::from(res.factor().unwrap_or(1).max(1)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frame_size_follows_the_resolution() {
+        // The renderer's size, which rounds: 1081 / 3 = 360.33 and 1920 / 7 = 274.3.
+        assert_eq!(frame_at(1920, 1081, Resolution::Third), (640, 360));
+        assert_eq!(frame_at(1920, 1080, Resolution::Custom(7)), (274, 154));
+        assert_eq!(frame_at(1920, 1081, Resolution::Half), (960, 541));
+        assert_eq!(frame_at(1920, 1080, Resolution::Full), (1920, 1080));
+        assert_eq!(frame_at(1920, 1080, Resolution::Auto), (1920, 1080));
+    }
 
     #[test]
     fn aspect_labels_match_ae() {

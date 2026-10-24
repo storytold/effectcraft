@@ -475,3 +475,35 @@ fn gradient_glow_uses_gradient() {
     let px = img.straight(121, 50);
     assert!(px[0] > px[2], "near the edge the glow takes the gradient's start colour {px:?}");
 }
+
+/// #1812 (review of #1928): a styled layer rendered by several workers at once shares its body and
+/// style passes, as unstyled layers share their buffer.
+#[test]
+fn workers_styling_a_layer_at_once_share_its_buffers() {
+    let (p, cid) = scene([1.0; 3], None, |p, c, l| {
+        add(p, c, l, "dropShadow");
+        add(p, c, l, "stroke");
+    });
+    let cache = crate::LayerCache::default();
+    let start = std::sync::Barrier::new(8);
+    let styled: Vec<_> = std::thread::scope(|s| {
+        let hs: Vec<_> = (0..8)
+            .map(|_| {
+                s.spawn(|| {
+                    let mut r = Renderer::new(&p, &NoFootage, RenderOpts::default());
+                    r.cache = Some(&cache);
+                    let ctx = r.eval_ctx(cid, Tick::ZERO).unwrap();
+                    start.wait();
+                    r.styled_layer(&ctx, &p.comp(cid).unwrap().layers[0]).unwrap()
+                })
+            })
+            .collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    let first = &styled[0];
+    assert!(!first.passes.is_empty(), "the drop shadow is a pass");
+    for st in &styled {
+        assert!(std::sync::Arc::ptr_eq(&st.body, &first.body), "one body");
+        assert!(st.passes.iter().zip(&first.passes).all(|(a, b)| std::sync::Arc::ptr_eq(&a.0, &b.0)), "one set of passes");
+    }
+}

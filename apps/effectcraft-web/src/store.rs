@@ -20,6 +20,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use effectcraft_engine::config::{ConfigStore, FileOps};
@@ -45,6 +46,8 @@ pub struct Entry {
     /// Which write this is: new with every write of the key, so a file replaced by another of
     /// the same size still reads as changed (workers are sent it again, #218).
     pub version: u64,
+    /// FNV-1a of `data`, filled the first time a disk-cache key asks for it.
+    hash: Option<u64>,
 }
 
 /// A queued write for the browser storage: `data` = `None` deletes the key.
@@ -69,13 +72,13 @@ impl Mirror {
     /// An entry read from the browser's storage at startup (nothing to flush).
     pub fn load(&mut self, key: &str, data: Arc<[u8]>, modified: f64) {
         let version = self.next_version();
-        self.entries.insert(key.to_string(), Entry { data, modified, persist: true, version });
+        self.entries.insert(key.to_string(), Entry { data, modified, persist: true, version, hash: None });
     }
 
     pub fn put(&mut self, key: &str, data: Arc<[u8]>, modified: f64, persist: bool) {
         let was_persisted = self.entries.get(key).is_some_and(|e| e.persist);
         let version = self.next_version();
-        self.entries.insert(key.to_string(), Entry { data, modified, persist, version });
+        self.entries.insert(key.to_string(), Entry { data, modified, persist, version, hash: None });
         if persist || was_persisted {
             self.touch(key);
         }
@@ -149,14 +152,31 @@ pub fn key_path(key: &str) -> Option<&str> {
     key.strip_prefix(FILES).filter(|p| p.starts_with('/'))
 }
 
+/// FNV-1a 64. Computed when a disk-cache key first needs the file, not on every write.
+fn content_hash(data: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in data {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
 /// The persistent store: a [`Mirror`] and a hook that wakes the flusher after changes.
-#[derive(Default)]
 pub struct Store {
     pub mirror: Mutex<Mirror>,
     /// Called after every change that needs flushing (the web host schedules a flush).
     pub on_change: OnceLock<fn()>,
     /// Clock in milliseconds since the Unix epoch (tests pin it).
     pub clock: OnceLock<fn() -> f64>,
+    /// Bumped when a virtual file is written. Preview cache lookups key on it; they do not hash.
+    media_epoch: Arc<AtomicU64>,
+}
+
+impl Default for Store {
+    fn default() -> Self {
+        Self { mirror: Mutex::default(), on_change: OnceLock::new(), clock: OnceLock::new(), media_epoch: Arc::new(AtomicU64::new(0)) }
+    }
 }
 
 impl Store {
@@ -179,10 +199,38 @@ impl Store {
     /// Store a file under `path` (persisted unless `persist` is false: render outputs).
     pub fn put_file(&self, path: &str, data: Arc<[u8]>, persist: bool) {
         let now = self.now();
-        self.lock().put(&file_key(path), data, now, persist);
+        let key = file_key(path);
+        let replaced = self.lock().get(&key).is_none_or(|e| !Arc::ptr_eq(&e.data, &data));
+        self.lock().put(&key, data, now, persist);
+        if replaced {
+            self.media_epoch.fetch_add(1, Ordering::Relaxed);
+        }
         if persist {
             self.changed();
         }
+    }
+
+    /// The generation preview cache lookups key on. It changes when [`Self::put_file`] writes
+    /// a different blob, and it is not a content hash.
+    pub fn media_epoch(&self) -> Arc<AtomicU64> {
+        self.media_epoch.clone()
+    }
+
+    /// Size and content hash of the file under `path`. The hash is stored on the entry so a
+    /// later key does not walk the bytes again.
+    pub fn file_identity(&self, path: &str) -> Option<(u64, u64)> {
+        let key = file_key(path);
+        let mut mirror = self.lock();
+        let entry = mirror.entries.get(&key)?;
+        if let Some(hash) = entry.hash {
+            return Some((entry.data.len() as u64, hash));
+        }
+        let hash = content_hash(&entry.data);
+        let len = entry.data.len() as u64;
+        if let Some(entry) = mirror.entries.get_mut(&key) {
+            entry.hash = Some(hash);
+        }
+        Some((len, hash))
     }
 
     pub fn file(&self, path: &str) -> Option<Arc<[u8]>> {
@@ -446,6 +494,11 @@ mod tests {
         assert_ne!(a, b);
         assert_eq!(&data[..], b"blue");
         assert_eq!(s.file_versioned("/collision.png").map(|f| f.1), Some(b), "reading doesn't change it");
+        let epoch = s.media_epoch().load(Ordering::Relaxed);
+        let id = s.file_identity("/collision.png").expect("identity");
+        assert_eq!(id, (4, content_hash(b"blue")));
+        assert_eq!(s.file_identity("/collision.png"), Some(id), "the hash is kept on the entry");
+        assert!(epoch >= 2, "each new blob bumps the generation the preview keys on");
     }
 
     /// A write that failed is flushed again with the key's latest state (#215).

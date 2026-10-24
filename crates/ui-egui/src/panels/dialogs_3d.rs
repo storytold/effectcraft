@@ -29,7 +29,7 @@ pub struct CameraDraft {
 pub struct LightDraft {
     pub layer: Option<u64>,
     pub name: String,
-    pub kind: usize,
+    pub kind: LightKind,
     pub color: [f32; 3],
     pub intensity: f64,
     pub cone_angle: f64,
@@ -42,8 +42,13 @@ pub struct LightDraft {
     pub shadow_diffusion: f64,
 }
 
-const KINDS: [LightKind; 4] = [LightKind::Parallel, LightKind::Spot, LightKind::Point, LightKind::Ambient];
 const FALLOFFS: [&str; 3] = ["None", "Smooth", "Inverse Square Clamped"];
+
+/// Whether a light type has Falloff and Shadows options. Ambient and Environment lights come
+/// from no one place, so they have neither.
+fn falls_off(kind: LightKind) -> bool {
+    !matches!(kind, LightKind::Ambient | LightKind::Environment)
+}
 
 fn comp_w(app: &EffectcraftApp) -> f64 {
     app.session.active_comp().map(|c| c.width as f64).unwrap_or(1920.0)
@@ -105,7 +110,7 @@ pub fn open_light(app: &mut EffectcraftApp, layer: Option<u64>) -> Result<(), St
             LightDraft {
                 layer: Some(l.id.0),
                 name: l.name.clone(),
-                kind: KINDS.iter().position(|k| *k == kind).unwrap_or(1),
+                kind,
                 color: [c[0], c[1], c[2]],
                 intensity: f("intensity", 100.0),
                 cone_angle: f("coneAngle", 90.0),
@@ -123,7 +128,7 @@ pub fn open_light(app: &mut EffectcraftApp, layer: Option<u64>) -> Result<(), St
             LightDraft {
                 layer: None,
                 name: format!("Light {n}"),
-                kind: 1,
+                kind: LightKind::Spot,
                 color: [1.0, 1.0, 1.0],
                 intensity: 100.0,
                 cone_angle: 90.0,
@@ -263,11 +268,13 @@ pub fn light(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             crate::widgets::focus_on_open(ui.ctx(), &r, &d.name);
             ui.end_row();
             ui.label(tr("Light Type"));
-            egui::ComboBox::from_id_salt("light-type").selected_text(KINDS[d.kind.min(3)].label()).show_ui(ui, |ui| {
-                for (i, k) in KINDS.iter().enumerate() {
-                    ui.selectable_value(&mut d.kind, i, k.label());
+            let combo = egui::ComboBox::from_id_salt("light-type").selected_text(tr(d.kind.label())).show_ui(ui, |ui| {
+                for (i, k) in LightKind::ALL.into_iter().enumerate() {
+                    let item = ui.selectable_value(&mut d.kind, k, tr(k.label()));
+                    app.auto.add(&format!("dialog.light.typeItem.{i}"), item.rect, k.label());
                 }
             });
+            app.auto.add_response("dialog.light.type", &combo.response, "Light Type");
             ui.end_row();
             ui.label(tr("Color"));
             crate::widgets::srgb_color_button(ui, &mut d.color);
@@ -275,8 +282,7 @@ pub fn light(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             ui.label(tr("Intensity"));
             ui.add(crate::widgets::drag_value(egui::DragValue::new(&mut d.intensity).range(-10000.0..=10000.0).suffix(" %")));
             ui.end_row();
-            let kind = KINDS[d.kind.min(3)];
-            if kind == LightKind::Spot {
+            if d.kind == LightKind::Spot {
                 ui.label(tr("Cone Angle"));
                 ui.add(crate::widgets::drag_value(egui::DragValue::new(&mut d.cone_angle).range(0.0..=180.0).suffix("°")));
                 ui.end_row();
@@ -284,7 +290,7 @@ pub fn light(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                 ui.add(crate::widgets::drag_value(egui::DragValue::new(&mut d.cone_feather).range(0.0..=100.0).suffix(" %")));
                 ui.end_row();
             }
-            if kind != LightKind::Ambient {
+            if falls_off(d.kind) {
                 ui.label(tr("Falloff"));
                 egui::ComboBox::from_id_salt("light-falloff").selected_text(FALLOFFS[d.falloff.min(2)]).show_ui(ui, |ui| {
                     for (i, f) in FALLOFFS.iter().enumerate() {
@@ -312,15 +318,17 @@ pub fn light(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             }
         });
         ui.add_space(14.0);
-        ui.label(egui::RichText::new(tr("Note: Shadows are only cast from layers with Cast Shadows enabled.")).font(Tokens::ui(11.0)).color(t.text_dim));
-        ui.add_space(8.0);
+        if falls_off(d.kind) {
+            ui.label(egui::RichText::new(tr("Note: Shadows are only cast from layers with Cast Shadows enabled.")).font(Tokens::ui(11.0)).color(t.text_dim));
+            ui.add_space(8.0);
+        }
         rects = buttons(ui, t, &mut ok, &mut close);
     });
     app.auto.add("dialog.light.ok", rects.0, "OK");
     app.auto.add("dialog.light.cancel", rects.1, "Cancel");
     app.dialog_state.light = d.clone();
     if ok || super::dialogs::ui_enter(ctx) {
-        let kind = KINDS[d.kind.min(3)];
+        let kind = d.kind;
         let mut p = json!({
             "name": d.name,
             "kind": kind.label(),
@@ -331,7 +339,7 @@ pub fn light(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             p["coneAngle"] = json!(d.cone_angle);
             p["coneFeather"] = json!(d.cone_feather);
         }
-        if kind != LightKind::Ambient {
+        if falls_off(kind) {
             p["falloff"] = json!(d.falloff);
             p["radius"] = json!(d.radius);
             p["falloffDistance"] = json!(d.falloff_distance);

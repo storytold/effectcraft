@@ -538,7 +538,7 @@ fn fxn_typed_noise(x: f32, y: f32, z: f32, seed: u32, nt: u32) -> f32 {
     let z0 = floor(z);
     let tx = x - x0;
     let ty = y - y0;
-    let fz = fade(z - z0);
+    let fz = z - z0;
     let a = fxn_slice(i32(x0), i32(y0), i32(z0), tx, ty, seed, nt);
     let b = fxn_slice(i32(x0), i32(y0), i32(z0) + 1, tx, ty, seed, nt);
     return a + (b - a) * fz;

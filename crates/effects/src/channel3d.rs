@@ -37,14 +37,22 @@ fn index_map(b: &Buf, a: &AuxChannels) -> Vec<Option<usize>> {
 /// [`index_map`] sampling each pixel at sub-pixel position `at` (0..1).
 fn index_map_at(b: &Buf, a: &AuxChannels, at: [f64; 2]) -> Vec<Option<usize>> {
     let (w, h) = (b.img.width as usize, b.img.height as usize);
-    let inv = 1.0 / b.scale.max(1e-9);
     (0..w * h)
         .into_par_iter()
         .map(|i| {
-            let (x, y) = ((i % w) as f64 + at[0], (i / w) as f64 + at[1]);
-            a.index_at((x - b.offset[0]) * inv, (y - b.offset[1]) * inv)
+            let [x, y] = aux_point(b.scale, b.offset, [(i % w) as f64 + at[0], (i / w) as f64 + at[1]]);
+            a.index_at(x, y)
         })
         .collect()
+}
+
+/// The layer point where 3D Channel effects look up the aux for buffer position `p` (pixel
+/// `i` + sub-pixel offset) of a buffer with `scale` and `offset`. The Cryptomatte pick calls
+/// it too, so the two can't pick different aux pixels.
+#[inline]
+pub fn aux_point(scale: f64, offset: [f64; 2], p: [f64; 2]) -> [f64; 2] {
+    let inv = 1.0 / scale.max(1e-9);
+    [(p[0] - offset[0]) * inv, (p[1] - offset[1]) * inv]
 }
 
 /// A channel sampled into the buffer grid (`fill` outside).
@@ -326,7 +334,7 @@ fn wild(pat: &str, name: &str) -> bool {
 /// Split a selection at its commas. A name in double or single quotes stays whole, commas
 /// included (Blender allows `Green, Glossy`), and a backslash takes the next character
 /// literally (`Green\, Glossy`, `\"`). Unquoted text is trimmed; the quotes are dropped.
-fn selection_names(sel: &str) -> Vec<String> {
+pub(crate) fn selection_names(sel: &str) -> Vec<String> {
     let mut out = vec![];
     let mut cur = String::new();
     let mut quote: Option<char> = None;
@@ -395,13 +403,42 @@ fn crypto_matte(planes: &RankPlanes, sel: &[u32], i: usize) -> f32 {
         .clamp(0.0, 1.0)
 }
 
+/// [`id_color`] of the last ID seen on each rank plane, per worker. Neighbouring pixels mostly
+/// carry the same IDs, so this skips the hash and the HSL conversion for most of them. Keyed by the
+/// ID's bits, so it returns exactly what [`id_color`] would.
+///
+/// Keep the per-pixel loop below as it is: with NaN coverage, which NaN payload ends up in a
+/// channel depends on the order the compiler adds the ranks in, and a row-wise loop let it reorder
+/// them (`crypto_aux_image_is_bit_exact_on_edge_values` catches that).
+#[derive(Default)]
+struct IdColorMemo(Vec<(u32, [f32; 3])>);
+
+impl IdColorMemo {
+    #[inline]
+    fn get(&mut self, rank: usize, id: f32) -> [f32; 3] {
+        let bits = id.to_bits();
+        match self.0.get_mut(rank) {
+            Some(e) if e.0 == bits => e.1,
+            Some(e) => {
+                *e = (bits, id_color(id));
+                e.1
+            }
+            None => {
+                let c = id_color(id);
+                self.0.resize(rank + 1, (bits, c));
+                c
+            }
+        }
+    }
+}
+
 /// The coverage-weighted ID colours at aux pixel `i` (the spec's preview).
 #[inline]
-fn crypto_colors(planes: &RankPlanes, i: usize) -> [f32; 3] {
+fn crypto_colors(planes: &RankPlanes, i: usize, memo: &mut IdColorMemo) -> [f32; 3] {
     let mut c = [0.0f32; 3];
-    for (id, cov) in planes {
+    for (rank, (id, cov)) in planes.iter().enumerate() {
         let (Some(&id), Some(&cov)) = (id.get(i), cov.get(i)) else { continue };
-        let k = id_color(id);
+        let k = memo.get(rank, id);
         for j in 0..3 {
             c[j] += k[j] * cov;
         }
@@ -413,10 +450,37 @@ fn crypto_colors(planes: &RankPlanes, i: usize) -> [f32; 3] {
 /// selection's coverage (A), computed in parallel with the rank planes resolved once. The GPU
 /// effect uploads this image and samples it per layer pixel.
 pub fn crypto_aux_image(a: &AuxChannels, layer: &str, sel: &[u32]) -> Image {
+    crypto_aux_image_with(a, layer, sel, CryptoAux::ColorsAndMatte)
+}
+
+/// What [`crypto_aux_image_with`] computes per aux pixel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CryptoAux {
+    /// The coverage-weighted ID colours (RGB) and the selection's coverage (A).
+    ColorsAndMatte,
+    /// Only the selection's coverage (A); the RGB stays 0.
+    MatteOnly,
+}
+
+impl CryptoAux {
+    /// What the Cryptomatte effect reads for `display` and Matte Only: the ID colours are only
+    /// read by the Colors display (0) without Matte Only; Matte, Preview and Matte Only need the
+    /// matte alone.
+    pub fn for_display(display: u32, matte_only: bool) -> Self {
+        if display == 0 && !matte_only { Self::ColorsAndMatte } else { Self::MatteOnly }
+    }
+}
+
+/// [`crypto_aux_image`]; with [`CryptoAux::MatteOnly`] the RGB stays 0 and only the matte (A) is
+/// computed, for the displays that never read the ID colours.
+pub fn crypto_aux_image_with(a: &AuxChannels, layer: &str, sel: &[u32], what: CryptoAux) -> Image {
     let planes = a.crypto_rank_planes(layer);
     let mut img = Image::new(a.width, a.height);
-    img.data.par_iter_mut().enumerate().for_each(|(i, px)| {
-        let c = crypto_colors(&planes, i);
+    img.data.par_iter_mut().enumerate().for_each_init(IdColorMemo::default, |memo, (i, px)| {
+        let c = match what {
+            CryptoAux::ColorsAndMatte => crypto_colors(&planes, i, memo),
+            CryptoAux::MatteOnly => [0.0; 3],
+        };
         *px = [c[0], c[1], c[2], crypto_matte(&planes, sel, i)];
     });
     img
@@ -436,9 +500,8 @@ fn cryptomatte(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let display = ctx.params.e("display");
     let matte_only = ctx.params.b("matteOnly");
     let planes = a.crypto_rank_planes(&layer);
-    let src = b.img.clone();
-    b.img.data.par_iter_mut().enumerate().for_each(|(i, px)| {
-        let m = idx[i].map_or(0.0, |k| crypto_matte(&planes, &sel, k));
+    b.img.data.par_iter_mut().zip(idx.par_iter()).for_each_init(IdColorMemo::default, |memo, (px, &k)| {
+        let m = k.map_or(0.0, |k| crypto_matte(&planes, &sel, k));
         if matte_only {
             *px = [m, m, m, m];
             return;
@@ -446,15 +509,15 @@ fn cryptomatte(ctx: &EffectCtx, mut b: Buf) -> Buf {
         *px = match display {
             // Colors: coverage-weighted ID colours (the spec's preview), selection brighter.
             0 => {
-                let c = idx[i].map_or([0.0; 3], |k| crypto_colors(&planes, k));
+                let c = k.map_or([0.0; 3], |k| crypto_colors(&planes, k, memo));
                 let c = c.map(|v| v * (1.0 - 0.5 * m) + 0.5 * m);
                 [c[0], c[1], c[2], 1.0]
             }
-            // Matte: the layer keyed by the selection.
-            1 => src.data[i].map(|v| v * m),
+            // Matte: the layer keyed by the selection (each pixel only reads itself, so no copy).
+            1 => px.map(|v| v * m),
             // Preview: the layer with the selection tinted.
             _ => {
-                let s = src.data[i];
+                let s = *px;
                 [s[0] * (1.0 - 0.5 * m) + 0.5 * m * s[3], s[1] * (1.0 - 0.5 * m) + 0.5 * m * s[3], s[2] * (1.0 - 0.5 * m), s[3]]
             }
         };
@@ -814,6 +877,20 @@ mod tests {
         a
     }
 
+    /// The memo hands out exactly `id_color`'s bits for every rank and pixel of the edge values
+    /// (NaN IDs with and without a payload, -0.0 and 0.0 are keyed by their bits).
+    #[test]
+    fn id_color_memo_matches_id_color() {
+        let a = edge_aux(true);
+        let planes = a.crypto_rank_planes("CryptoObject");
+        let mut memo = IdColorMemo::default();
+        for i in 0..12 {
+            for (r, (id, _)) in planes.iter().enumerate() {
+                assert_eq!(memo.get(r, id[i]).map(f32::to_bits), id_color(id[i]).map(f32::to_bits), "pixel {i} rank {r}");
+            }
+        }
+    }
+
     fn edge_selection() -> Vec<u32> {
         vec![crypto_hash("sphere"), f32::NAN.to_bits(), 0x7fc0_1234, (-0.0f32).to_bits()]
     }
@@ -832,6 +909,31 @@ mod tests {
             let want = [c[0], c[1], c[2], m];
             assert_eq!(img.data[i].map(f32::to_bits), want.map(f32::to_bits), "pixel {i}");
             assert_eq!(img.data[i].map(f32::to_bits), without_gap_rank.data[i].map(f32::to_bits), "pixel {i}: the rank after the gap was used");
+        }
+    }
+
+    /// Without the ID colours the matte (A) is bit-identical and the RGB is 0, on the edge values.
+    #[test]
+    fn crypto_aux_image_without_colors_keeps_the_matte() {
+        let a = edge_aux(true);
+        let sel = edge_selection();
+        let full = crypto_aux_image(&a, "CryptoObject", &sel);
+        let matte = crypto_aux_image_with(&a, "CryptoObject", &sel, CryptoAux::MatteOnly);
+        for (f, m) in full.data.iter().zip(&matte.data) {
+            assert_eq!(f[3].to_bits(), m[3].to_bits());
+            assert_eq!(m[..3], [0.0; 3]);
+        }
+    }
+
+    /// Only the Colors display without Matte Only reads the ID colours.
+    #[test]
+    fn crypto_aux_for_display_reads_colors_only_for_the_colors_display() {
+        assert_eq!(CryptoAux::for_display(0, false), CryptoAux::ColorsAndMatte);
+        assert_eq!(CryptoAux::for_display(0, true), CryptoAux::MatteOnly);
+        for display in [1, 2, 3, u32::MAX] {
+            for matte_only in [false, true] {
+                assert_eq!(CryptoAux::for_display(display, matte_only), CryptoAux::MatteOnly, "display {display}");
+            }
         }
     }
 

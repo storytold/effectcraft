@@ -8,6 +8,9 @@
 //! (already sorted back to front) are then shaded per fragment and blended over, depth-tested
 //! against the opaque surfaces.
 
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
+
 use rayon::prelude::*;
 
 use super::scene::{Scene, ShadowMap, Vertex};
@@ -422,6 +425,81 @@ fn shadow_raster(s: &Scene, m: &ShadowMap, casters: &[usize]) -> Vec<f32> {
     d
 }
 
+/// Hard cap on the shadow depth texels one render allocates (f32 depth texels).
+/// Quality map sizes derive from the raster resolution, and both the resolution and
+/// the light count come from the project, so without a scene-wide budget an
+/// arbitrarily large comp with arbitrarily many casting lights (point lights cost
+/// six faces) could balloon the allocation. 26 M texels (≈ 104 MB) holds one point
+/// light's full 2048-texel cube (6 × 2048² ≈ 25.2 M) and stays under WebGPU's default
+/// 128 MiB storage-binding limit; adapters with less fall back to the CPU raster.
+pub(crate) const MAX_SHADOW_TEXELS: u64 = 26_000_000;
+
+/// Long side of a quality shadow map: one map texel per output pixel, to a power of
+/// two, clamped to 512..4096 (raster sizes are user data and may be absurd). Draft
+/// (interactive fast-preview) renders keep the flat 512 budget, unchanged.
+pub(crate) fn shadow_map_size(width: u32, height: u32, draft: bool) -> u32 {
+    if draft {
+        return 512;
+    }
+    let side = width.max(height).clamp(512, 4096);
+    let mut size = 512u32;
+    while size < side {
+        size *= 2;
+    }
+    size
+}
+
+/// Per-face size of a point light's cube map: the full map size, since each face spans
+/// 90° and anything smaller is coarser than a spot light's map in the same comp (a
+/// point light low over a floor shows exactly that as stair-steps), capped at 2048 so
+/// one cube fits [`MAX_SHADOW_TEXELS`]. Draft keeps half the map size as before.
+pub(crate) fn shadow_point_face_size(size: u32, draft: bool) -> u32 {
+    if draft { (size / 2).max(1) } else { size.min(2048) }
+}
+
+/// Per-light map sizes (`None` = this light gets no shadow map). `kinds`: 0 = no
+/// shadows (costs nothing), 1 = single map (spot/parallel), 2 = point cube (budgeted
+/// as its six faces). Lights start at their full size; while the scene exceeds
+/// [`MAX_SHADOW_TEXELS`] the largest map above its floor is halved (power-of-two
+/// steps, the earliest light first on ties), and once every light is at its floor the
+/// last lights lose their shadows entirely. Deterministic, and O(n log n) in the
+/// light count: each light is halved at most a handful of times and dropped once.
+pub(crate) fn shadow_sizes(width: u32, height: u32, draft: bool, kinds: &[u32]) -> Vec<Option<u32>> {
+    let base = shadow_map_size(width, height, draft);
+    let faces = |k: u32| -> u64 { if k == 2 { 6 } else { 1 } };
+    let floor = |k: u32| -> u32 { if k == 2 { 128 } else { 512 } };
+    let mut sizes: Vec<u32> = kinds
+        .iter()
+        .map(|&k| match k {
+            0 => 0,
+            2 => shadow_point_face_size(base, draft),
+            _ => base,
+        })
+        .collect();
+    let cost = |z: u32, k: u32| -> u64 { (z as u64) * (z as u64) * faces(k) };
+    let mut total: u64 = sizes.iter().zip(kinds).map(|(&z, &k)| cost(z, k)).sum();
+    // Largest size first, then the lowest index.
+    let mut heap: BinaryHeap<(u32, Reverse<usize>)> =
+        sizes.iter().zip(kinds).enumerate().filter(|(_, (z, k))| **z > floor(**k)).map(|(i, (&z, _))| (z, Reverse(i))).collect();
+    while total > MAX_SHADOW_TEXELS {
+        let Some((z, Reverse(i))) = heap.pop() else { break };
+        let k = kinds[i];
+        total -= cost(z, k) - cost(z / 2, k);
+        sizes[i] = z / 2;
+        if z / 2 > floor(k) {
+            heap.push((z / 2, Reverse(i)));
+        }
+    }
+    for i in (0..sizes.len()).rev() {
+        if total <= MAX_SHADOW_TEXELS {
+            break;
+        }
+        total -= cost(sizes[i], kinds[i]);
+        sizes[i] = 0;
+    }
+    sizes.into_iter().map(|z| (z > 0).then_some(z)).collect()
+}
+
 /// Build the shadow maps of every shadow-casting light (lights marked `shadow == 0`).
 pub(crate) fn shadow_maps(s: &mut Scene, draft: bool) {
     let casters: Vec<usize> = (0..s.indices.len() / 3)
@@ -443,15 +521,37 @@ pub(crate) fn shadow_maps(s: &mut Scene, draft: bool) {
     }
     let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) * 0.5);
     let radius = ((hi[0] - lo[0]).powi(2) + (hi[1] - lo[1]).powi(2) + (hi[2] - lo[2]).powi(2)).sqrt() * 0.5 + 1.0;
-    let size = if draft { 512 } else { 1024 };
+    // Map sizes come from the raster (a quality map gives ~one texel per output
+    // pixel); the per-light budget keeps the scene allocation bounded because
+    // comp size and light count are user input (point lights cost six faces).
+    let kinds: Vec<u32> = s
+        .lights
+        .iter()
+        .map(|l| {
+            if l.shadow != 0 {
+                0
+            } else if l.kind > 1 {
+                2
+            } else {
+                1
+            }
+        })
+        .collect();
+    let sizes = shadow_sizes(s.width, s.height, draft, &kinds);
     let mut maps: Vec<ShadowMap> = vec![];
     for li in 0..s.lights.len() {
+        let Some(size) = sizes.get(li).copied().flatten() else {
+            s.lights[li].shadow = -1;
+            continue;
+        };
         if s.lights[li].shadow != 0 {
             s.lights[li].shadow = -1;
             continue;
         }
         let l = s.lights[li];
         let first = maps.len() as i32;
+        // Penumbra width in output pixels (the shader turns it into a tap reach at
+        // the receiver); the sampling bias is deliberately independent of it.
         let soft = 1.0 + (l.shadow_diffusion * 0.5).min(24.0);
         let pos = l.pos.map(|v| v as f64);
         let dir = l.dir.map(|v| v as f64);
@@ -468,7 +568,7 @@ pub(crate) fn shadow_maps(s: &mut Scene, draft: bool) {
                 maps.push(ShadowMap { view: basis(pos, dir, hint), focal, ortho: false, size, offset: 0, bias: 1.5, radius: soft });
             }
             _ => {
-                let fs = size / 2;
+                let fs = size;
                 for (f, d) in [
                     ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
                     ([-1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),

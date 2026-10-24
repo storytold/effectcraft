@@ -261,6 +261,10 @@ fn gaussian(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
         return Some(b);
     }
     let (kx, ky) = dims_xy(ctx.params.e("dimensions"));
+    // Small sigmas use the CPU's sampled kernel (#1939).
+    if effectcraft_raster::gaussian_is_exact(s * kx, s * ky) {
+        return None;
+    }
     let repeat = ctx.params.b("repeatEdge");
     if !repeat && !ctx.adjustment {
         b.pad(e, (s * 3.0).ceil() as u32)?;
@@ -270,7 +274,12 @@ fn gaussian(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
 }
 
 fn box_blur(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
-    let r = (ctx.params.f("radius") * b.scale).round().max(0.0) as usize;
+    let radius = (ctx.params.f("radius") * b.scale).max(0.0);
+    // Fractional radii blend two integer radii on the CPU (#1939).
+    if radius - radius.floor() >= 1e-4 {
+        return None;
+    }
+    let r = radius.floor() as usize;
     if r == 0 {
         return Some(b);
     }
@@ -388,7 +397,7 @@ fn transform(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
 // ---------------------------------------------------------------- per-pixel
 
 fn curves(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
-    let parsed = ["rgb", "red", "green", "blue", "alpha"].map(|id| effectcraft_effects::Curve::parse(ctx.params.s(id)));
+    let parsed = ["rgb", "red", "green", "blue", "alpha"].map(|id| effectcraft_effects::Curve::parse_natural(ctx.params.s(id)));
     if parsed.iter().all(Option::is_none) {
         return Some(b);
     }

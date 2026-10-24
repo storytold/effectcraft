@@ -91,8 +91,8 @@ fn moved_footage(footage: &Footage, f: impl Fn(&str) -> Option<String>) -> Optio
     Some(nf)
 }
 
-fn present(s: &dyn Services, f: &Footage) -> bool {
-    !f.path.is_empty() && s.exists(&f.path)
+fn present(s: &dyn Services, stored: &crate::doc_path::StoredPaths, f: &Footage) -> bool {
+    stored.exists(s, &f.path)
 }
 
 /// Footage items whose file is gone (flagged by the footage check, or not there now).
@@ -101,7 +101,7 @@ fn missing_items(s: &Session) -> Vec<(ItemId, Footage)> {
         .items
         .values()
         .filter_map(|i| match &i.kind {
-            ItemKind::Footage(f) if f.kind != FootageKind::Data && !f.path.is_empty() && (f.missing || !present(s.services.as_ref(), f)) => {
+            ItemKind::Footage(f) if f.kind != FootageKind::Data && !f.path.is_empty() && (f.missing || !present(s.services.as_ref(), &s.stored_paths, f)) => {
                 Some((i.id, f.clone()))
             }
             _ => None,
@@ -146,6 +146,9 @@ fn apply(s: &mut Session, label: &str, found: Vec<(ItemId, Footage)>) -> Result<
         return Ok(json!({"relinked": [], "stillMissing": missing_items(s).len()}));
     }
     let ids: Vec<u64> = found.iter().map(|(id, _)| id.0).collect();
+    for (_, nf) in &found {
+        s.stored_paths.allow(nf);
+    }
     s.edit(label, None, |proj: &mut Project, _| {
         for (id, nf) in found {
             if let Some(it) = proj.item_mut(id) {
@@ -175,7 +178,7 @@ pub(crate) fn moved_with(s: &Session, item: ItemId, old_path: &str, new_path: &s
         if id == item {
             continue;
         }
-        let same_place = moved_footage(&f, |q| remap(q, &old_root, &new_root)).filter(|nf| present(services.as_ref(), nf));
+        let same_place = moved_footage(&f, |q| remap(q, &old_root, &new_root)).filter(|nf| present(services.as_ref(), &s.stored_paths, nf));
         let same_folder = || {
             let dir = new_dir.as_deref()?;
             let dir_parts = parts(dir);
@@ -183,7 +186,7 @@ pub(crate) fn moved_with(s: &Session, item: ItemId, old_path: &str, new_path: &s
             let old_dir: Vec<&str> = parts(&f.path).get(..old_dir_len)?.to_vec();
             moved_footage(&f, |q| remap(q, &old_dir, dir).or_else(|| Some(join(dir, &[file_name(q)])))).filter(|nf| {
                 // Only frames in that one folder (a name match, not a guess deeper down).
-                present(services.as_ref(), nf) && parts(&nf.path).len() == dir_parts.len() + 1
+                present(services.as_ref(), &s.stored_paths, nf) && parts(&nf.path).len() == dir_parts.len() + 1
             })
         };
         if let Some(nf) = same_place.or_else(same_folder) {

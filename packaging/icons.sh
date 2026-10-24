@@ -18,7 +18,10 @@ trap 'rm -rf "$TMP"' EXIT
 
 command -v resvg >/dev/null || { echo "error: resvg not found (brew install resvg)" >&2; exit 1; }
 
-render() { resvg -w "$2" -h "$2" "$1" "$3" </dev/null; }
+render() {
+  local svg="$1" size="$2" out="$3"
+  resvg -w "$size" -h "$size" "$svg" "$out" </dev/null
+}
 
 # The tile fills its 512 viewBox edge to edge, which suits Windows and Linux. macOS icons keep
 # Apple's grid instead: an 824 px body centred on a 1024 canvas with a transparent margin.
