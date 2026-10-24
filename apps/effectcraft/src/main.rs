@@ -343,14 +343,11 @@ fn main() -> eframe::Result {
             }))
         }),
     );
-    match &result {
-        Ok(()) => log::info!("the window closed"),
-        Err(e) => {
-            if on_gl {
-                launch_guard::opengl_failed(effectcraft_host::config_dir().as_deref());
-            }
-            startup_failed(e, !on_gl && cfg!(not(target_os = "macos")));
+    if let Err(e) = &result {
+        if on_gl {
+            launch_guard::opengl_failed(effectcraft_host::config_dir().as_deref());
         }
+        startup_failed(e, !on_gl && cfg!(not(target_os = "macos")));
     }
     result
 }
@@ -452,6 +449,9 @@ impl eframe::App for Desktop {
     }
 
     fn on_exit(&mut self) {
+        // On macOS the app quits through `-[NSApplication terminate:]`, and the process ends
+        // before `eframe::run_native` returns (#341).
+        log::info!("the window is closing");
         self.launch.exited();
         self.window.save(self.app.session.config.as_deref());
         self.app.on_exit();

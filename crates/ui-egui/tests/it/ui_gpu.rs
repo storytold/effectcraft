@@ -115,5 +115,12 @@ fn a_lost_device_draws_nothing_autosaves_and_closes() {
     let saved = h.state().session.autosave.last_path.clone().expect("unsaved changes auto-saved");
     assert!(std::path::Path::new(&saved).is_file(), "{saved}");
     assert_eq!(*told.borrow(), vec![Some(Ok(saved))], "the user is told once, with the recovery copy");
+    // The close arrives: on macOS the app quits through `-[NSApplication terminate:]` instead of
+    // closing the window while AppKit's run loop is running (#341).
+    h.input_mut().viewports.entry(egui::ViewportId::ROOT).or_default().events.push(egui::ViewportEvent::Close);
+    h.step();
+    let kept = h.output().viewport_output.get(&egui::ViewportId::ROOT).is_some_and(|v| v.commands.contains(&egui::ViewportCommand::CancelClose));
+    assert_eq!(kept, cfg!(target_os = "macos"), "the platform quit closes the window on macOS");
+    assert_eq!(told.borrow().len(), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
