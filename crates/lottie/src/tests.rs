@@ -516,6 +516,19 @@ fn precomp_with_time_remap() {
 }
 
 #[test]
+fn precomp_size_comes_from_the_layer_when_the_asset_has_none() {
+    // lottie-spec: a precomposition asset has no `w`/`h`; the precomp layer carries them.
+    let doc = json!({"w": 200, "h": 120, "fr": 30, "ip": 0, "op": 30,
+        "assets": [{"id": "c", "layers": []}],
+        "layers": [{"ty": 0, "ind": 1, "refId": "c", "w": 50, "h": 40, "ip": 0, "op": 30, "st": 0, "ks": {}}]});
+    let mut q = Project::default();
+    let nc = import(&mut q, doc.to_string().as_bytes(), "Imported", "", &mut |_| None).unwrap().comp;
+    let LayerSource::Comp { item } = q.comp(nc).unwrap().layers[0].source else { panic!("not a precomp") };
+    let pc = q.comp(item).unwrap();
+    assert_eq!((pc.width, pc.height), (50, 40));
+}
+
+#[test]
 fn text_layers_roundtrip_as_text_and_as_shapes() {
     let (mut p, cid) = setup();
     let c = comp(&p, cid);
