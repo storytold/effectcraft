@@ -2458,7 +2458,7 @@ struct ShapeDrag {
 }
 
 /// The kind `tool` draws, as `shape.newShape` / `layer.addMask` name it.
-fn shape_kind(tool: Tool) -> &'static str {
+pub(crate) fn shape_kind(tool: Tool) -> &'static str {
     match tool {
         Tool::Rectangle => "rect",
         Tool::RoundedRect => "rounded",

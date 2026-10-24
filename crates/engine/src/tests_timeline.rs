@@ -298,6 +298,25 @@ fn interpolation_dialog_temporal_spatial_and_roving() {
     assert_ne!(prop(&s, l, "transform/position").keys[0].out_interp, Interp::Hold);
 }
 
+/// Editing another key's value or time keeps the roving key at its share of the path (#1284: the
+/// roving key went back to where it was after edits to other keys).
+#[test]
+fn roving_key_follows_value_and_time_edits_to_other_keys() {
+    let (mut s, l) = setup();
+    animate(&mut s, l, "transform/position", &[(0.0, json!([0, 0])), (0.3, json!([300, 0])), (2.0, json!([400, 0]))]);
+    let uid = prop(&s, l, "transform/position").uid;
+    s.execute("keys.select", json!({"keys": [{"layer": l, "prop": uid, "time": 0.3}]})).unwrap();
+    s.execute("keys.interpolation", json!({"roving": true})).unwrap();
+    let roving_at = |s: &Session| prop(s, l, "transform/position").keys[1].time.seconds();
+    assert!((roving_at(&s) - 1.5).abs() < 0.01, "start: {}", roving_at(&s));
+    // The last key's value moves to 800 px: the path is 300 + 500 px, so the roving key is at 300 / 800.
+    s.execute("keys.set", json!({"layer": l, "path": "transform/position", "time": 2.0, "value": [800, 0]})).unwrap();
+    assert!((roving_at(&s) - 0.75).abs() < 0.02, "value edit: {}", roving_at(&s));
+    // The last key moves to 3 s: the same 300 / 800 share of 3 s.
+    s.execute("keys.set", json!({"layer": l, "path": "transform/position", "time": 2.0, "newTime": 3.0})).unwrap();
+    assert!((roving_at(&s) - 1.125).abs() < 0.02, "time edit: {}", roving_at(&s));
+}
+
 #[test]
 fn graph_editor_key_and_handle_edits() {
     let (mut s, l) = setup();
