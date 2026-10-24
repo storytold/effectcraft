@@ -201,7 +201,7 @@ impl TimeDisplayStyle {
         }
     }
     pub fn parse(s: &str) -> Option<TimeDisplayStyle> {
-        let k: String = s.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_ascii_lowercase();
+        let k: String = s.chars().filter(char::is_ascii_alphanumeric).collect::<String>().to_ascii_lowercase();
         match k.as_str() {
             "timecode" => Some(TimeDisplayStyle::Timecode),
             "frames" => Some(TimeDisplayStyle::Frames),
@@ -1292,7 +1292,7 @@ impl Footage {
         if self.kind != FootageKind::Data {
             return None;
         }
-        let ext = std::path::Path::new(&self.path).extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+        let ext = std::path::Path::new(&self.path).extension().and_then(std::ffi::OsStr::to_str).unwrap_or("").to_ascii_lowercase();
         Some(match ext.as_str() {
             "csv" => "csv",
             "tsv" | "tab" => "tsv",

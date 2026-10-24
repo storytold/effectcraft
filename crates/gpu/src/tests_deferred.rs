@@ -30,7 +30,7 @@ pub(crate) fn deferred_gpu() -> Option<(&'static Gpu, std::sync::MutexGuard<'sta
         g
     });
     let g = crate::tests::require_gpu("deferred gpu tests", g.as_ref())?;
-    Some((g, LOCK.lock().unwrap_or_else(|e| e.into_inner())))
+    Some((g, LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)))
 }
 
 /// Footage with GPU effects around a CPU-only one, a solid with Glow, and a precomp whose

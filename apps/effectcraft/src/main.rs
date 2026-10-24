@@ -50,7 +50,7 @@ fn app_icon() -> egui::IconData {
 fn is_project_file(path: &str) -> bool {
     std::path::Path::new(path)
         .extension()
-        .and_then(|ext| ext.to_str())
+        .and_then(std::ffi::OsStr::to_str)
         .is_some_and(|ext| ext.eq_ignore_ascii_case("ecproj") || ext.eq_ignore_ascii_case("ecprojx"))
 }
 

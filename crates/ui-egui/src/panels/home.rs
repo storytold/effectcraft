@@ -127,7 +127,7 @@ pub fn format_size(bytes: u64) -> String {
 
 /// The Kind column: what a recent file is, by its extension, in the interface language.
 fn kind_of(path: &str) -> &'static str {
-    tr(match std::path::Path::new(path).extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
+    tr(match std::path::Path::new(path).extension().and_then(std::ffi::OsStr::to_str).map(str::to_ascii_lowercase).as_deref() {
         Some("ecproj") => "EffectCraft project",
         Some("aep" | "aepx") => "After Effects project",
         Some("json" | "lottie") => "Lottie animation",

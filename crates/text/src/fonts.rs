@@ -116,7 +116,7 @@ fn walk(dir: &std::path::Path, depth: u32, out: &mut Vec<PathBuf>) {
             if depth < 8 {
                 walk(&p, depth + 1, out);
             }
-        } else if p.extension().and_then(|x| x.to_str()).is_some_and(|x| matches!(x.to_ascii_lowercase().as_str(), "ttf" | "otf" | "ttc" | "otc")) {
+        } else if p.extension().and_then(std::ffi::OsStr::to_str).is_some_and(|x| matches!(x.to_ascii_lowercase().as_str(), "ttf" | "otf" | "ttc" | "otc")) {
             out.push(p);
         }
     }
@@ -319,7 +319,7 @@ fn push(db: &mut Db, info: FaceInfo) -> FaceId {
 /// added.
 pub fn add_source(src: &dyn FontSource) -> usize {
     let faces = src.faces();
-    let mut d = db().write().unwrap_or_else(|e| e.into_inner());
+    let mut d = db().write().unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut n = 0;
     for f in faces {
         let dup = d.faces.iter().any(|g| g.info.family.eq_ignore_ascii_case(&f.family) && g.info.style.eq_ignore_ascii_case(&f.style));
@@ -329,7 +329,7 @@ pub fn add_source(src: &dyn FontSource) -> usize {
         }
     }
     // A new face can belong to one of a script's usual families.
-    family_faces_cache().write().unwrap_or_else(|e| e.into_inner()).clear();
+    family_faces_cache().write().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
     n
 }
 
@@ -337,9 +337,9 @@ pub fn add_source(src: &dyn FontSource) -> usize {
 pub fn add_font_data(data: Vec<u8>) -> Vec<FaceId> {
     let data = Arc::new(data);
     let names = read_faces_bytes(&data);
-    let mut d = db().write().unwrap_or_else(|e| e.into_inner());
+    let mut d = db().write().unwrap_or_else(std::sync::PoisonError::into_inner);
     let ids = names.into_iter().map(|n| push(&mut d, info_from(n, FaceData::Shared(data.clone()), "user"))).collect();
-    family_faces_cache().write().unwrap_or_else(|e| e.into_inner()).clear();
+    family_faces_cache().write().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
     ids
 }
 
@@ -353,21 +353,21 @@ pub fn scan_system() -> usize {
     if system_scanned() {
         return 0;
     }
-    let _scan = SCAN.lock().unwrap_or_else(|e| e.into_inner());
+    let _scan = SCAN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if system_scanned() {
         return 0;
     }
     let n = if cfg!(target_arch = "wasm32") { 0 } else { add_source(&DirectorySource::system()) };
-    db().write().unwrap_or_else(|e| e.into_inner()).scanned = true;
+    db().write().unwrap_or_else(std::sync::PoisonError::into_inner).scanned = true;
     n
 }
 
 /// Scan the system font folders again, adding fonts installed since the last scan (faces already
 /// known are kept, so font ids stay valid). Returns the number of faces added.
 pub fn rescan_system() -> usize {
-    let _scan = SCAN.lock().unwrap_or_else(|e| e.into_inner());
+    let _scan = SCAN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let n = if cfg!(target_arch = "wasm32") { 0 } else { add_source(&DirectorySource::system()) };
-    db().write().unwrap_or_else(|e| e.into_inner()).scanned = true;
+    db().write().unwrap_or_else(std::sync::PoisonError::into_inner).scanned = true;
     n
 }
 
@@ -388,12 +388,12 @@ pub fn scan_system_in_background() {
 }
 
 pub fn system_scanned() -> bool {
-    db().read().unwrap_or_else(|e| e.into_inner()).scanned
+    db().read().unwrap_or_else(std::sync::PoisonError::into_inner).scanned
 }
 
 /// A face by id (panics never: unknown ids give the default face).
 pub fn face(id: FaceId) -> Arc<Face> {
-    let d = db().read().unwrap_or_else(|e| e.into_inner());
+    let d = db().read().unwrap_or_else(std::sync::PoisonError::into_inner);
     // The bundled fonts are compiled in and always parse (`tests::bundled_families_and_resolution` checks them), so
     // the database is never empty.
     #[allow(clippy::expect_used)]
@@ -402,7 +402,7 @@ pub fn face(id: FaceId) -> Arc<Face> {
 
 /// All faces (bundled first).
 pub fn all_faces() -> Vec<Arc<Face>> {
-    db().read().unwrap_or_else(|e| e.into_inner()).faces.clone()
+    db().read().unwrap_or_else(std::sync::PoisonError::into_inner).faces.clone()
 }
 
 /// Family names in the fonts' own languages: English family → native family (only families
@@ -743,15 +743,15 @@ static REQUESTED_CJK_LOCALE: RwLock<Option<String>> = RwLock::new(None);
 pub fn set_cjk_locale(tag: &str) {
     let tag = tag.trim().to_ascii_lowercase();
     let requested = if tag.is_empty() || tag == "c" || tag == "posix" { None } else { Some(tag) };
-    *REQUESTED_CJK_LOCALE.write().unwrap_or_else(|e| e.into_inner()) = requested;
+    *REQUESTED_CJK_LOCALE.write().unwrap_or_else(std::sync::PoisonError::into_inner) = requested;
     // The order of the CJK families follows the language, so a change of language drops the cached
     // fallbacks.
-    fallback_cache().write().unwrap_or_else(|e| e.into_inner()).clear();
-    family_faces_cache().write().unwrap_or_else(|e| e.into_inner()).clear();
+    fallback_cache().write().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
+    family_faces_cache().write().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
 }
 
 fn requested_cjk_locale() -> Option<String> {
-    REQUESTED_CJK_LOCALE.read().unwrap_or_else(|e| e.into_inner()).clone()
+    REQUESTED_CJK_LOCALE.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
 }
 
 /// The CJK locale to use: [`set_cjk_locale`] when the host asked for one, otherwise the locale
@@ -981,7 +981,7 @@ fn fallback_with_locale(c: char, prefer: FaceId, locale: impl FnOnce() -> CjkLoc
         }
     }
     let key = (c as u32 >> 8, prefer);
-    if let Some(cached) = fallback_cache().read().unwrap_or_else(|e| e.into_inner()).get(&key).copied() {
+    if let Some(cached) = fallback_cache().read().unwrap_or_else(std::sync::PoisonError::into_inner).get(&key).copied() {
         match cached {
             Some(id) if face(id).has_char(c) => return id,
             Some(_) => {}
@@ -992,7 +992,7 @@ fn fallback_with_locale(c: char, prefer: FaceId, locale: impl FnOnce() -> CjkLoc
         scan_system();
     }
     let found = system_fallback(c, &p.info.style);
-    fallback_cache().write().unwrap_or_else(|e| e.into_inner()).insert(key, found);
+    fallback_cache().write().unwrap_or_else(std::sync::PoisonError::into_inner).insert(key, found);
     found.unwrap_or(prefer)
 }
 
@@ -1000,7 +1000,7 @@ fn fallback_with_locale(c: char, prefer: FaceId, locale: impl FnOnce() -> CjkLoc
 /// for `script`, in the order they are tried, each in the style of `prefer`. For CJK, the other CJK
 /// languages' families follow in the locale's order.
 fn family_faces(script: FallbackScript, prefer: &Face, locale: CjkLocale) -> Arc<Vec<FaceId>> {
-    if let Some(faces) = family_faces_cache().read().unwrap_or_else(|e| e.into_inner()).get(&(script, prefer.id, locale)) {
+    if let Some(faces) = family_faces_cache().read().unwrap_or_else(std::sync::PoisonError::into_inner).get(&(script, prefer.id, locale)) {
         return faces.clone();
     }
     let order: Vec<FallbackScript> = match script {
@@ -1016,7 +1016,7 @@ fn family_faces(script: FallbackScript, prefer: &Face, locale: CjkLocale) -> Arc
     let style = &prefer.info.style;
     let faces: Arc<Vec<FaceId>> =
         Arc::new(order.into_iter().flat_map(|s| families_for(s, locale)).filter_map(|fam| resolve_in(fam, style)).map(|r| r.face).collect());
-    family_faces_cache().write().unwrap_or_else(|e| e.into_inner()).insert((script, prefer.id, locale), faces.clone());
+    family_faces_cache().write().unwrap_or_else(std::sync::PoisonError::into_inner).insert((script, prefer.id, locale), faces.clone());
     faces
 }
 

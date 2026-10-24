@@ -756,7 +756,7 @@ impl Inner {
                 drop(c);
                 return Ok(Arc::new(self.decode(&loc, footage)?));
             }
-            c = self.done.wait(c).unwrap_or_else(|e| e.into_inner());
+            c = self.done.wait(c).unwrap_or_else(std::sync::PoisonError::into_inner);
         }
         self.misses.fetch_add(1, Ordering::Relaxed);
         c.inflight.insert(loc.key.clone());
@@ -972,7 +972,7 @@ fn describe_problem(codec: &str, e: &MediaError) -> String {
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(test)]

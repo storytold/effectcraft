@@ -110,7 +110,7 @@ pub struct JobShared {
 }
 
 pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 impl JobShared {

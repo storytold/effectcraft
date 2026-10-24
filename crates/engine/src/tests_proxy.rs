@@ -20,7 +20,7 @@ use crate::render::{FootageSource, RenderOpts};
 struct Synthetic;
 
 fn file_px(path: &str, x: u32, y: u32) -> [f32; 4] {
-    let name = std::path::Path::new(path).file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let name = std::path::Path::new(path).file_name().and_then(std::ffi::OsStr::to_str).unwrap_or("");
     match name {
         "red16.png" => [1.0, 0.0, 0.0, 1.0],
         "blue8.png" => [0.0, 0.0, 1.0, 1.0],
@@ -43,7 +43,7 @@ fn file_px(path: &str, x: u32, y: u32) -> [f32; 4] {
 }
 
 fn size_of(path: &str) -> (u32, u32) {
-    match std::path::Path::new(path).file_name().and_then(|n| n.to_str()).unwrap_or("") {
+    match std::path::Path::new(path).file_name().and_then(std::ffi::OsStr::to_str).unwrap_or("") {
         "red16.png" => (16, 16),
         "blue8.png" => (8, 8),
         "lines.mov" | "matte_black.png" | "matte_white.png" | "half.png" => (4, 4),

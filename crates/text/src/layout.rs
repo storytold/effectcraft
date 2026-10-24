@@ -399,7 +399,7 @@ enum Form {
 pub fn feature_substitutes(face: FaceId, tag: &[u8; 4], c: char) -> bool {
     static C: OnceLock<Mutex<HashMap<(FaceId, [u8; 4], char), bool>>> = OnceLock::new();
     let cache = C.get_or_init(Default::default);
-    if let Some(v) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(&(face, *tag, c)) {
+    if let Some(v) = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&(face, *tag, c)) {
         return *v;
     }
     let f = fonts::face(face);
@@ -419,7 +419,7 @@ pub fn feature_substitutes(face: FaceId, tag: &[u8; 4], c: char) -> bool {
             }
             _ => false,
         };
-    let mut m = cache.lock().unwrap_or_else(|e| e.into_inner());
+    let mut m = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if m.len() > 100_000 {
         m.clear();
     }
@@ -1123,12 +1123,12 @@ pub fn layout_rich(text: &str, runs: &[(Range<usize>, TextStyle)], paras: &[Para
     let key = h.finish();
     static CLOCK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let now = CLOCK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if let Some(e) = cache().lock().unwrap_or_else(|e| e.into_inner()).get_mut(&key) {
+    if let Some(e) = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner).get_mut(&key) {
         e.0 = now;
         return e.1.clone();
     }
     let l = Arc::new(layout_rich_uncached(text, runs, paras));
-    let mut c = cache().lock().unwrap_or_else(|e| e.into_inner());
+    let mut c = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if c.len() >= 512 {
         // evict the oldest quarter
         let mut ages: Vec<u64> = c.values().map(|v| v.0).collect();

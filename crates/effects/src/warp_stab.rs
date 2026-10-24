@@ -191,11 +191,11 @@ fn analysis_cached(json: &str) -> Option<(u64, Arc<WarpAnalysis>)> {
     static C: OnceLock<AnalysisCache> = OnceLock::new();
     let key = fnv(json.as_bytes());
     let c = C.get_or_init(Default::default);
-    if let Some(a) = c.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+    if let Some(a) = c.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&key) {
         return Some((key, a.clone()));
     }
     let a = Arc::new(WarpAnalysis::from_json(json)?);
-    let mut m = c.lock().unwrap_or_else(|e| e.into_inner());
+    let mut m = c.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if m.len() > 8 {
         m.clear();
     }
@@ -294,7 +294,7 @@ pub fn store_summary(key: [u64; 2], summary: PlanSummary) {
 }
 
 fn keep_summary(key: (u64, u64), summary: Arc<PlanSummary>) {
-    let mut m = summaries().lock().unwrap_or_else(|e| e.into_inner());
+    let mut m = summaries().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if m.len() > 32 {
         m.clear();
     }
@@ -305,7 +305,7 @@ fn keep_summary(key: (u64, u64), summary: Arc<PlanSummary>) {
 /// cached (seconds for a long Subspace Warp clip). `None` when not analysed.
 pub fn summary(params: &Params) -> Option<([u64; 2], Arc<PlanSummary>)> {
     let (key, a, st) = plan_key(params)?;
-    let cached = summaries().lock().unwrap_or_else(|e| e.into_inner()).get(&key).cloned();
+    let cached = summaries().lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&key).cloned();
     let sum = match cached {
         Some(s) => s,
         None => {
@@ -333,7 +333,7 @@ pub fn summary_at(params: &Params, time: f64) -> Option<(usize, Arc<PlanSummary>
 pub fn cached_summary_at(params: &Params, time: f64) -> Option<(usize, Arc<PlanSummary>)> {
     let (key, a, _) = plan_key(params)?;
     let k = a.frame_at(time)?;
-    let sum = summaries().lock().unwrap_or_else(|e| e.into_inner()).get(&key).cloned();
+    let sum = summaries().lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&key).cloned();
     let sum = match sum {
         Some(s) => s,
         None => {
@@ -445,13 +445,13 @@ fn render(ctx: &EffectCtx, buf: Buf) -> Buf {
             }
         }
         if !local.is_empty() {
-            let mut n = need_m.lock().unwrap_or_else(|e| e.into_inner());
+            let mut n = need_m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             for (x, w) in local {
                 n[y * ow as usize + x] = w;
             }
         }
     });
-    let need = need_m.into_inner().unwrap_or_else(|e| e.into_inner());
+    let need = need_m.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
     if synth && need.iter().any(|w| *w > 0.0) {
         synthesize(ctx, &a, k, &src_of, &crop, sc, &mut out, &need);
     }

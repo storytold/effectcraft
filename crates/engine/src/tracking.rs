@@ -157,7 +157,7 @@ pub struct TrackShared {
 }
 
 pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// A running (or finished, not yet polled) analysis.
