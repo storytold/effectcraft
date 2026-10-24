@@ -8,7 +8,7 @@
 //! until its window has kept drawing for [`SETTLE`] (or the app quits normally before then). A
 //! launch that finds the previous one's marker switches Window Graphics to OpenGL, which those
 //! drivers run, and says so once the window is up. `WGPU_BACKEND` (wgpu's own override) still
-//! wins over both. The marker is locked while its launch runs, so a second copy opened meanwhile
+//! wins over both. A separate guard file is locked while its launch runs, so a second copy opened meanwhile
 //! isn't taken for a crash; and a window OpenGL can't open either puts Window Graphics back to
 //! Automatic ([`opengl_failed`]) rather than failing every launch.
 
@@ -21,6 +21,40 @@ use eframe::wgpu::Backends;
 
 /// Left in the settings folder from a launch until its window has settled.
 const MARKER: &str = "launch-pending";
+const LOCK: &str = "launch.lock";
+
+/// Keep this file in place: unlinking a locked file lets a second inode acquire a new lock.
+fn acquire_guard(dir: &Path) -> Option<File> {
+    let file = match std::fs::create_dir_all(dir)
+        .and_then(|()| std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(dir.join(LOCK)))
+    {
+        Ok(file) => file,
+        Err(e) => {
+            log::warn!("launch guard unavailable: {e}");
+            return None;
+        }
+    };
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => return None,
+        Err(e) => {
+            log::warn!("launch guard lock unavailable: {e}");
+            return None;
+        }
+    }
+    // Older versions lock the marker itself. Do not disturb an older live launch.
+    if let Ok(marker) = File::open(dir.join(MARKER)) {
+        match marker.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => return None,
+            Err(e) => {
+                log::warn!("launch marker lock unavailable: {e}");
+                return None;
+            }
+        }
+    }
+    Some(file)
+}
 
 /// How long the window keeps drawing after its first frame before the launch counts as made.
 /// A driver that fails as the window is shown and its surface re-created does so within the
@@ -37,7 +71,7 @@ pub struct Launch {
     /// to show.
     pub notice: Option<String>,
     marker: Option<PathBuf>,
-    /// Holds the marker's lock until the launch settles (or the process ends).
+    /// Holds the separate guard file's lock until the launch settles (or the process ends).
     lock: Option<File>,
     /// When the window drew its first frame, until the launch settles.
     first_frame: Option<Instant>,
@@ -52,10 +86,13 @@ impl Launch {
         let prefs_path = dir.join(PREFS_FILE);
         let mut prefs = std::fs::read_to_string(&prefs_path).map(|t| Prefs::from_json(&t)).unwrap_or_default();
         let marker = dir.join(MARKER);
-        // Locked by another launch that is still opening its window: not a crash.
-        let held = File::open(&marker).is_ok_and(|f| matches!(f.try_lock(), Err(std::fs::TryLockError::WouldBlock)));
+        let Some(lock) = acquire_guard(dir) else {
+            return Launch { backends: (prefs.startup.window_graphics == "gl").then_some(Backends::GL), ..Launch::default() };
+        };
+        // Read again while owning the guard: another launch may have just changed preferences.
+        prefs = std::fs::read_to_string(&prefs_path).map(|t| Prefs::from_json(&t)).unwrap_or_default();
         let mut notice = None;
-        if marker.exists() && !held && prefs.startup.window_graphics == "auto" && cfg!(not(target_os = "macos")) {
+        if marker.exists() && prefs.startup.window_graphics == "auto" && cfg!(not(target_os = "macos")) {
             prefs.startup.window_graphics = "gl".into();
             match std::fs::create_dir_all(dir).and_then(|()| std::fs::write(&prefs_path, prefs.to_json())) {
                 Ok(()) => log::warn!("the last launch stopped as its window opened: switching Window Graphics to OpenGL"),
@@ -69,15 +106,14 @@ impl Launch {
             );
         }
         let backends = (prefs.startup.window_graphics == "gl").then_some(Backends::GL);
-        let (marker, lock) = match std::fs::create_dir_all(dir).and_then(|()| File::create(&marker)) {
-            // Where locks aren't available the guard works as before.
-            Ok(f) => (Some(marker), f.try_lock().is_ok().then_some(f)),
+        let marker = match File::create(&marker) {
+            Ok(_) => Some(marker),
             Err(e) => {
                 log::warn!("launch marker: {e}");
-                (None, None)
+                None
             }
         };
-        Launch { backends, notice, marker, lock, first_frame: None }
+        Launch { backends, notice, marker, lock: Some(lock), first_frame: None }
     }
 
     /// The window drew a frame. Until the launch has settled, returns how long that still takes
@@ -104,18 +140,19 @@ impl Launch {
 
     /// The launch made it: release and remove its marker.
     fn settled(&mut self) {
-        self.lock = None;
         if let Some(m) = self.marker.take()
             && let Err(e) = std::fs::remove_file(&m)
         {
             log::warn!("launch marker: {e}");
         }
+        self.lock = None;
     }
 }
 
 /// The window couldn't open with OpenGL (an error, not a crash): back to Automatic, and no marker.
 pub fn opengl_failed(dir: Option<&Path>) {
     let Some(dir) = dir else { return };
+    let Some(_lock) = acquire_guard(dir) else { return };
     let prefs_path = dir.join(PREFS_FILE);
     let mut prefs = std::fs::read_to_string(&prefs_path).map(|t| Prefs::from_json(&t)).unwrap_or_default();
     prefs.startup.window_graphics = "auto".into();
@@ -216,5 +253,209 @@ mod tests {
             assert_eq!(Launch::begin(Some(&dir), false).backends, None);
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod investigation_477 {
+    use super::*;
+
+    fn dir(case: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("ec-477-{case}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn second_normal_exit_preserves_live_owner_marker() {
+        let dir = dir("normal");
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut a = Launch::begin(Some(&dir), false);
+        let mut b = Launch::begin(Some(&dir), false);
+        println!("A lock={}, B lock={}, B backend={:?}", a.lock.is_some(), b.lock.is_some(), b.backends);
+        b.exited();
+        let preserved = dir.join(MARKER).exists();
+        println!("marker after B.exited()={preserved}, A lock={}", a.lock.is_some());
+        let c = Launch::begin(Some(&dir), false);
+        println!("C backend={:?}, C lock={}", c.backends, c.lock.is_some());
+        drop(c);
+        let d = Launch::begin(Some(&dir), false);
+        println!("D backend={:?}, D notice={}, A still locked={}", d.backends, d.notice.is_some(), a.lock.is_some());
+        drop(d);
+        a.exited();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(preserved, "B removed A's live marker");
+    }
+
+    #[test]
+    fn second_opengl_failure_preserves_live_owner_marker() {
+        let dir = dir("failed");
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut a = Launch::begin(Some(&dir), false);
+        let b = Launch::begin(Some(&dir), false);
+        println!("A lock={}, B lock={}", a.lock.is_some(), b.lock.is_some());
+        opengl_failed(Some(&dir));
+        let preserved = dir.join(MARKER).exists();
+        println!("marker after opengl_failed={preserved}, A lock={}", a.lock.is_some());
+        drop(b);
+        a.exited();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(preserved, "OpenGL cleanup removed another live launch's marker");
+    }
+
+    #[test]
+    fn explicit_override_preserves_stale_marker_and_gl_preference() {
+        let dir = dir("override");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut prefs = Prefs::default();
+        prefs.startup.window_graphics = "gl".into();
+        std::fs::write(dir.join(PREFS_FILE), prefs.to_json()).unwrap();
+        std::fs::write(dir.join(MARKER), b"stale-marker").unwrap();
+        let before = std::fs::read(dir.join(PREFS_FILE)).unwrap();
+        let mut l = Launch::begin(Some(&dir), true);
+        assert_eq!(l.backends, None);
+        assert!(l.notice.is_none());
+        l.exited();
+        assert!(dir.join(MARKER).exists());
+        assert_eq!(std::fs::read(dir.join(PREFS_FILE)).unwrap(), before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn failed_gl_then_next_launch_recovers_to_automatic() {
+        let dir = dir("recovery");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut prefs = Prefs::default();
+        prefs.startup.window_graphics = "gl".into();
+        std::fs::write(dir.join(PREFS_FILE), prefs.to_json()).unwrap();
+        let l = Launch::begin(Some(&dir), false);
+        assert_eq!(l.backends, Some(Backends::GL));
+        drop(l);
+        opengl_failed(Some(&dir));
+        assert!(!dir.join(MARKER).exists());
+        assert_eq!(Prefs::from_json(&std::fs::read_to_string(dir.join(PREFS_FILE)).unwrap()).startup.window_graphics, "auto");
+        let mut l = Launch::begin(Some(&dir), false);
+        assert_eq!(l.backends, None);
+        assert!(l.notice.is_none());
+        l.exited();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod root_patch_477_tests {
+    use super::*;
+
+    fn profile(case: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ec-477-root-{case}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stable_lock_file_identity_survives_settle() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = profile("identity");
+        let mut a = Launch::begin(Some(&dir), false);
+        let before = std::fs::metadata(dir.join(LOCK)).unwrap();
+        let t0 = Instant::now();
+        assert_eq!(a.frame_drawn_at(t0), Some(SETTLE));
+        assert_eq!(a.frame_drawn_at(t0 + SETTLE), None);
+        assert!(!dir.join(MARKER).exists());
+        let after = std::fs::metadata(dir.join(LOCK)).unwrap();
+        assert_eq!((before.dev(), before.ino()), (after.dev(), after.ino()));
+        let mut b = Launch::begin(Some(&dir), false);
+        assert!(b.lock.is_some());
+        let reused = std::fs::metadata(dir.join(LOCK)).unwrap();
+        assert_eq!((before.dev(), before.ino()), (reused.dev(), reused.ino()));
+        b.exited();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn non_owner_frame_settling_preserves_owner_marker() {
+        let dir = profile("nonowner-frame");
+        let mut a = Launch::begin(Some(&dir), false);
+        std::fs::write(dir.join(MARKER), b"owner-marker").unwrap();
+        let mut b = Launch::begin(Some(&dir), false);
+        assert!(b.lock.is_none());
+        assert!(b.marker.is_none());
+        let t0 = Instant::now();
+        assert_eq!(b.frame_drawn_at(t0), None);
+        assert_eq!(b.frame_drawn_at(t0 + SETTLE), None);
+        b.exited();
+        assert_eq!(std::fs::read(dir.join(MARKER)).unwrap(), b"owner-marker");
+        let probe = File::open(dir.join(LOCK)).unwrap();
+        assert!(matches!(probe.try_lock(), Err(std::fs::TryLockError::WouldBlock)));
+        a.exited();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn older_live_marker_lock_is_respected() {
+        let dir = profile("old-live");
+        std::fs::write(dir.join(MARKER), b"old-owner").unwrap();
+        std::fs::write(dir.join(PREFS_FILE), Prefs::default().to_json()).unwrap();
+        let old = File::open(dir.join(MARKER)).unwrap();
+        old.try_lock().unwrap();
+        let before = std::fs::read(dir.join(PREFS_FILE)).unwrap();
+        let mut b = Launch::begin(Some(&dir), false);
+        assert!(b.lock.is_none());
+        assert!(b.marker.is_none());
+        assert!(b.backends.is_none());
+        assert!(b.notice.is_none());
+        b.exited();
+        opengl_failed(Some(&dir));
+        assert_eq!(std::fs::read(dir.join(MARKER)).unwrap(), b"old-owner");
+        assert_eq!(std::fs::read(dir.join(PREFS_FILE)).unwrap(), before);
+        drop(old);
+        let mut recovered = Launch::begin(Some(&dir), false);
+        if cfg!(not(target_os = "macos")) {
+            assert_eq!(recovered.backends, Some(Backends::GL));
+        }
+        recovered.exited();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn unavailable_guard_path_preserves_prefs_and_marker() {
+        let dir = profile("unavailable");
+        std::fs::create_dir(dir.join(LOCK)).unwrap();
+        std::fs::write(dir.join(MARKER), b"stale-marker").unwrap();
+        std::fs::write(dir.join(PREFS_FILE), Prefs::default().to_json()).unwrap();
+        let before = std::fs::read(dir.join(PREFS_FILE)).unwrap();
+        let mut l = Launch::begin(Some(&dir), false);
+        assert!(l.backends.is_none());
+        assert!(l.notice.is_none());
+        assert!(l.lock.is_none());
+        assert!(l.marker.is_none());
+        l.exited();
+        opengl_failed(Some(&dir));
+        assert_eq!(std::fs::read(dir.join(PREFS_FILE)).unwrap(), before);
+        assert_eq!(std::fs::read(dir.join(MARKER)).unwrap(), b"stale-marker");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn live_owner_blocks_external_gl_cleanup_then_drop_allows_recovery() {
+        let dir = profile("owner-gl-error");
+        let mut prefs = Prefs::default();
+        prefs.startup.window_graphics = "gl".into();
+        std::fs::write(dir.join(PREFS_FILE), prefs.to_json()).unwrap();
+        let launch = Launch::begin(Some(&dir), false);
+        assert_eq!(launch.backends, Some(Backends::GL));
+        assert!(launch.lock.is_some());
+        let before = std::fs::read(dir.join(PREFS_FILE)).unwrap();
+        opengl_failed(Some(&dir));
+        assert_eq!(std::fs::read(dir.join(PREFS_FILE)).unwrap(), before);
+        assert!(dir.join(MARKER).exists(), "external cleanup cannot remove a live owner's marker");
+        drop(launch);
+        opengl_failed(Some(&dir));
+        let after = Prefs::from_json(&std::fs::read_to_string(dir.join(PREFS_FILE)).unwrap()).startup.window_graphics;
+        assert_eq!(after, "auto", "after the owner drops, failed-GL recovery resets preferences");
+        assert!(!dir.join(MARKER).exists());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
