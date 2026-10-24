@@ -206,6 +206,8 @@ pub fn gpu_summary(s: &crate::Session) -> String {
         Some(adapter) => text.push_str(&format!("Window graphics: {adapter}\n")),
         None => text.push_str("Window graphics: not known yet (the window has not drawn its first frame).\n"),
     }
+    let decoding = s.footage.hardware_decoding().map_or_else(|| "software".to_string(), |h| h.summary());
+    text.push_str(&format!("Video decoding: {decoding}.\n"));
     text
 }
 

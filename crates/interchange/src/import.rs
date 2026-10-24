@@ -271,7 +271,7 @@ impl Importer<'_> {
             MediaKind::AudioOnly => FootageKind::Audio,
             MediaKind::Still => FootageKind::Still,
             MediaKind::ImageSequence => FootageKind::Sequence,
-            _ if v.is_none() && info.audio.is_some() => FootageKind::Audio,
+            _ if v.is_none() && info.has_audio() => FootageKind::Audio,
             _ => FootageKind::Video,
         };
         let _ = name;
@@ -284,7 +284,7 @@ impl Importer<'_> {
             frame_rate: rate_in(info.frame_rate()),
             duration: tick_in(info.duration),
             has_video: kind != FootageKind::Audio,
-            has_audio: info.audio.is_some() || kind == FootageKind::Audio,
+            has_audio: info.has_audio() || kind == FootageKind::Audio,
             alpha: if v.is_some_and(|v| v.has_alpha) { AlphaMode::Straight } else { AlphaMode::Ignore },
             codec: v.map(|v| v.codec.clone()).unwrap_or_default(),
             missing: true,
