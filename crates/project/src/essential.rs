@@ -12,10 +12,11 @@
 //!   [`sync_project`] keeps the groups in step with the controls (and refreshes the values of
 //!   controls that are not overridden), [`with_overrides`] builds the project an instance renders.
 
+use effectcraft_time::Tick;
 use serde::{Deserialize, Serialize};
 
 use crate::props::{GroupKind, Node, ParamUi, PropGroup, Property, Uid};
-use crate::{ItemId, ItemKind, Layer, LayerId, LayerSource, Project, Value};
+use crate::{ItemId, ItemKind, Keyframe, Layer, LayerId, LayerSource, Project, Value};
 
 /// Match id of the Essential Properties group on precomp layers.
 pub const GROUP: &str = "essential";
@@ -647,15 +648,40 @@ pub fn sync_project(before: &Project, after: &mut Project) {
     after.next_id = after.next_id.max(next);
 }
 
+/// Keys given in comp time, in the time of a layer that starts at `start` and is stretched to
+/// `stretch` percent. Empty when the stretch is not a usable factor.
+fn keys_in_layer_time(keys: &[Keyframe], start: Tick, stretch: f64) -> Vec<Keyframe> {
+    if stretch.is_finite() && stretch > 0.0 { keys.iter().map(|k| key_in_layer_time(k, start, stretch)).collect() } else { vec![] }
+}
+
+/// A key given in comp time, moved into the layer time of a layer that starts at `start` and is
+/// stretched to `stretch` percent (the inverse of `Layer::comp_time`). Ease speeds are per
+/// second, so they scale with the time axis; influences are fractions of the segment and stay.
+fn key_in_layer_time(k: &Keyframe, start: Tick, stretch: f64) -> Keyframe {
+    let d = k.time - start;
+    let mut k = k.clone();
+    k.time = if (stretch - 100.0).abs() < 1e-9 { d } else { Tick((d.0 as f64 * 100.0 / stretch) as i64) };
+    if (stretch - 100.0).abs() >= 1e-9 {
+        for e in k.in_ease.iter_mut().chain(k.out_ease.iter_mut()) {
+            e.speed *= stretch / 100.0;
+        }
+    }
+    k
+}
+
 /// One instance override: the control and the value it takes in this instance.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Override {
     pub control: u64,
     pub value: Value,
+    /// The instance property's keyframes, in the nested comp's time (`with_overrides` moves them
+    /// into each target layer's time). Empty when the property is not keyed (or its keys can't
+    /// be mapped); expressions in the comp then see only `value`.
+    pub keys: Vec<Keyframe>,
 }
 
 /// The project as an instance of `comp` renders it: each overridden control's source property
-/// set to the instance value (keyframes dropped; its expression, if any, still applies) and
+/// set to the instance value and keyframes (its expression, if any, still applies) and
 /// replaced media swapped in. `None` when nothing applies.
 pub fn with_overrides(project: &Project, comp: ItemId, overrides: &[Override]) -> Option<Project> {
     let eg = project.comp(comp)?.essential.clone()?;
@@ -682,8 +708,13 @@ pub fn with_overrides(project: &Project, comp: ItemId, overrides: &[Override]) -
             }
             EgKind::Property { .. } => {
                 for (layer, prop) in ctl.kind.targets() {
-                    if let Some(pr) = c.layer_mut(layer).and_then(|l| l.props.find_mut(prop)) {
-                        pr.keys.clear();
+                    if let Some(l) = c.layer_mut(layer) {
+                        let (start, stretch) = (l.start_time, l.stretch);
+                        let Some(pr) = l.props.find_mut(prop) else { continue };
+                        // The keys are in nested comp time; the property reads them in this
+                        // layer's own time (start offset, stretch). Without a usable mapping
+                        // only the value is set.
+                        pr.keys = keys_in_layer_time(&o.keys, start, stretch);
                         pr.value = o.value.clone();
                         any = true;
                     }
