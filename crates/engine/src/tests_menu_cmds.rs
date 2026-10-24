@@ -1103,6 +1103,57 @@ fn transform_commands_keep_depth_and_follow_separated_dimensions() {
     assert_eq!(pos(&s, b)[..2], [200.0, 100.0], "the 200×100 solid's centre");
 }
 
+/// The layer's painted bounds mapped to comp space — what the viewer shows.
+fn seen_bounds(s: &Session, lid: u64) -> [f64; 4] {
+    let cid = s.active_comp_id().unwrap();
+    let comp = s.project.comp(cid).unwrap().clone();
+    let layer = comp.layer(effectcraft_project::LayerId(lid)).unwrap();
+    let ectx = effectcraft_render::EvalCtx::new(&s.project, cid, &comp, s.time());
+    let b = effectcraft_render::content_bounds(&ectx, layer).expect("painted bounds");
+    let m = ectx.layer_to_comp(layer).0;
+    let corners = [[b[0], b[1]], [b[2], b[1]], [b[2], b[3]], [b[0], b[3]]];
+    let pts: Vec<[f64; 2]> = corners
+        .iter()
+        .map(|p| {
+            let q = m.apply(effectcraft_geom::vec2(p[0], p[1]));
+            [q.x, q.y]
+        })
+        .collect();
+    let (mut x0, mut y0, mut x1, mut y1) = (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+    for p in &pts {
+        x0 = x0.min(p[0]);
+        y0 = y0.min(p[1]);
+        x1 = x1.max(p[0]);
+        y1 = y1.max(p[1]);
+    }
+    [x0, y0, x1, y1]
+}
+
+#[test]
+fn fit_to_comp_fills_the_comp_with_shape_and_text_bounds() {
+    let mut s = comp();
+    let close = |x: f64, y: f64| (x - y).abs() < 1e-6;
+    // A shape or text layer has no source item: fit sizes it by its painted bounds, anchored at
+    // the bounds' centre, so what the viewer shows fills the frame (#2198).
+    let a = s.execute("layer.newShape", json!({"kind": "rect", "size": [180, 80]})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.transform", json!({"layers": [a], "op": "fit"})).unwrap();
+    let seen = seen_bounds(&s, a);
+    assert!(close(seen[0], 0.0) && close(seen[1], 0.0) && close(seen[2], 640.0) && close(seen[3], 360.0), "the rect's painted bounds fill the comp: {seen:?}");
+
+    let t = s.execute("layer.newText", json!({"text": "Title", "size": 80})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.transform", json!({"layers": [t], "op": "fit"})).unwrap();
+    let seen = seen_bounds(&s, t);
+    assert!(close(seen[0], 0.0) && close(seen[1], 0.0) && close(seen[2], 640.0) && close(seen[3], 360.0), "the text's painted bounds fill the comp: {seen:?}");
+
+    // fitWidth spans the comp's width and centres vertically.
+    for lid in [a, t] {
+        s.execute("layer.transform", json!({"layers": [lid], "op": "fitWidth"})).unwrap();
+        let seen = seen_bounds(&s, lid);
+        assert!(close(seen[0], 0.0) && close(seen[2], 640.0), "fitWidth spans the comp width: {seen:?}");
+        assert!(close((seen[1] + seen[3]) / 2.0, 180.0), "fitWidth centres vertically: {seen:?}");
+    }
+}
+
 #[test]
 fn duplicated_and_pasted_layers_keep_their_links() {
     let mut s = comp();
