@@ -218,7 +218,7 @@ impl ButtonBar {
         let chosen = widgets::popup_list(ui, pid, pos, r, rows, 0, |ui| {
             let mut chosen = None;
             for (id, label, on, tip) in &self.hidden {
-                let item = ui.selectable_label(*on, label.as_str()).on_hover_text(tip.as_str());
+                let item = ui.selectable_label(*on, crate::i18n::tr(label)).on_hover_text(crate::i18n::tr(tip));
                 app.auto.add(&format!("timeline.graph.more.{id}"), item.rect, tip);
                 if item.clicked() {
                     chosen = Some(id.clone());
@@ -245,14 +245,16 @@ fn text_button(
     tip: &str,
 ) -> bool {
     let t = app.tokens;
-    let w = p.layout_no_wrap(label.to_string(), Tokens::ui(11.0), t.text).size().x + 14.0;
+    let (shown, shown_tip) = (crate::i18n::tr(label), crate::i18n::tr(tip));
+    let w = p.layout_no_wrap(shown.to_string(), Tokens::ui(11.0), t.text).size().x + 14.0;
     // Once one button overflows, the rest follow it into the menu (they keep their order).
     if !bar.hidden.is_empty() || bar.x + w > bar.limit {
+        // The menu translates these English labels when it draws them; automation keeps them.
         bar.hidden.push((id.to_string(), label.to_string(), on, tip.to_string()));
         return bar.chosen.as_deref() == Some(id);
     }
     let r = Rect::from_min_size(pos2(bar.x, y - 9.0), vec2(w, 18.0));
-    let resp = ui.interact(r, egui::Id::new(("graph-btn", id)), Sense::click()).on_hover_text(tip);
+    let resp = ui.interact(r, egui::Id::new(("graph-btn", id)), Sense::click()).on_hover_text(shown_tip);
     p.rect_filled(
         r,
         3.0,
@@ -264,7 +266,7 @@ fn text_button(
             Color32::from_rgb(0x2c, 0x2c, 0x2c)
         },
     );
-    p.text(r.center(), Align2::CENTER_CENTER, label, Tokens::ui(11.0), if on { Color32::WHITE } else { t.text });
+    p.text(r.center(), Align2::CENTER_CENTER, shown, Tokens::ui(11.0), if on { Color32::WHITE } else { t.text });
     app.auto.add(&format!("timeline.graph.{id}"), r, tip);
     bar.x += w + 4.0;
     resp.clicked()

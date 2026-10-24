@@ -264,7 +264,7 @@ pub fn show(
     ui.add_space(8.0);
     ui.horizontal(|ui| {
         for (tab, label, key) in [(Tab::Basic, "Basic", "basic"), (Tab::Advanced, "Advanced", "advanced"), (Tab::Renderer, "3D Renderer", "renderer")] {
-            let r = ui.selectable_label(d.tab == tab, label);
+            let r = ui.selectable_label(d.tab == tab, crate::i18n::tr(label));
             auto.add(&format!("dialog.comp.tab.{key}"), r.rect, label);
             if r.clicked() {
                 d.tab = tab;

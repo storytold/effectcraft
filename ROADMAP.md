@@ -2,7 +2,7 @@
 
 **Stage: alpha** · next: beta, ~30 points of "ready for real work" and ~350–620 h away
 
-> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-12 · **Change:** minor (open-issue count, crash list and localization share re-audited against `upstream/main` 470ea7a3) · **Target:** Adobe After Effects 2026 (26.5.0.89)
+> **Last reviewed:** 2026-10-22 · **Last updated:** 2026-10-22 · **Change:** minor (localization: 303 more panel/dialog rows in Japanese and the Chinese catalogs; Japanese 27% → 39%, Simplified Chinese 29% → 46%, overall 18% → 21%) · **Target:** Adobe After Effects 2026 (26.5.0.89)
 
 EffectCraft aims to do what After Effects does, with the same panels, menus and behaviour, written
 from scratch in Rust. This page is the one-page summary; the evidence is in
@@ -51,7 +51,7 @@ Linux/Windows reliability (30–50 h) and depth in animation, masks, effects and
 | UI/UX fidelity | 65% | 60–120 | [ui-parity.md](docs/ui-parity.md) |
 | File formats | 50% | 130–230 | [file-format-parity.md](docs/file-format-parity.md) |
 | Hardware | 40% | 60–120 | [hardware-parity.md](docs/hardware-parity.md) |
-| Localization | 18% | 60–110 + review | [localization-parity.md](docs/localization-parity.md) |
+| Localization | 21% | 60–110 + review | [localization-parity.md](docs/localization-parity.md) |
 | Performance | 35% | 50–100 | [gaps.md](docs/gaps.md#g5-performance-at-real-world-scale) |
 | Stability | 45% | 40–80 | [gaps.md](docs/gaps.md#g3-stability-and-a-green-main) |
 | Platforms | 65% | 30–60 | [gaps.md](docs/gaps.md#g2-real-user-reliability-on-every-platform) |
@@ -80,24 +80,24 @@ Weights and evidence per row: [target-app-parity.md](docs/target-app-parity.md#b
 
 ## Languages
 
-UI strings translated out of ≈ 3,900 (detail: [localization-parity.md](docs/localization-parity.md)).
+UI strings translated out of ≈ 4,200 (detail: [localization-parity.md](docs/localization-parity.md)).
 
 | Language | Status | % |
 |---|---|---:|
 | English | full | 100% |
-| Simplified Chinese | partial (menus, part of the panels) | 29% |
-| Spanish | menus only | 16% |
+| Simplified Chinese | partial (menus, most of the panels) | 46% |
+| Spanish | menus only | 15% |
 | Hindi | none | 0% |
 | Arabic | none | 0% |
-| French | menus only | 16% |
-| Portuguese (Brazil) | partial (menus, part of the panels) | 26% |
+| French | menus only | 15% |
+| Portuguese (Brazil) | partial (menus, part of the panels) | 25% |
 | Indonesian | none | 0% |
-| Japanese | partial (menus, part of the panels) | 27% |
-| German | menus only | 16% |
+| Japanese | partial (menus, most of the panels) | 39% |
+| German | menus only | 15% |
 | Korean | none | 0% |
 | Vietnamese | none | 0% |
 
-Also shipped: Traditional Chinese (partial, 29%), Ukrainian (partial, 29%), Czech (partial, 29%), Georgian (partial, 38%; native-speaker reviewed) and Russian (menus only, 16%). No other language has had
+Also shipped: Traditional Chinese (partial, 39%), Ukrainian (partial, 27%), Czech (partial, 27%), Georgian (partial, 38%; native-speaker reviewed) and Russian (menus only, 15%). No other language has had
 native-speaker review.
 
 ## Upcoming
@@ -117,6 +117,11 @@ Come tell us what matters most to you on [Discord](https://discord.gg/artcraft).
 
 ## Progress log
 
+- 2026-10-22: Localization: the panel/dialog catalogs gain 303 rows in Japanese, Simplified
+  Chinese and Traditional Chinese — panel tabs, form and dialog labels, panel context menus,
+  tracker/graph/text-panel controls, File-panel footers and credits. Japanese is 1,624 of
+  ≈ 4,200 interface strings (39%); the Chinese panel catalogs hold 998 rows each, and
+  Simplified Chinese is 46% with its 306 effect names.
 - 2026-10-16: Convert To Bezier Path turns a shape layer's Rectangle, Ellipse or Polystar
   path into an editable Path 1 with the same geometry, as After Effects does; it used to
   apply to mask RotoBezier only, so a parametric shape path could not be converted at all
@@ -155,6 +160,7 @@ Come tell us what matters most to you on [Discord](https://discord.gg/artcraft).
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-22 | minor | Localization: 300 more panel/dialog rows in Japanese and the Chinese catalogs, plus the review's three missing rows (Basic, Advanced, Play/Stop) — panel tabs, form and dialog labels, context menus, tracker/graph/text-panel controls, File-panel footers, credits; language shares recounted (Japanese 27% → 39%, Simplified Chinese 29% → 46% with its effect names, Traditional Chinese 29% → 39%, overall 18% → 21%) |
 | 2026-10-12 | minor | Open-issue count (134 to 216), crash list and localization share (12% to 18%) updated to match docs/gaps.md |
 | 2026-10-12 | patch | Roto Brush span validation after trimming; command regressions for both layer edges |
 | 2026-10-10 | minor | Hours to ≈ 95% for each audience |
