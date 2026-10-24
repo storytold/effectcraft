@@ -724,3 +724,85 @@ fn deselect_all_menu_item_follows_the_edit_while_the_project_panel_is_focused() 
     // With no edit, the item deselects Project items again: nothing selected there, nothing to do.
     assert!(!enabled(&h), "Deselect All follows the empty Project selection once the edit is over");
 }
+
+/// Layer ids of the active comp, bottom to top.
+fn layer_ids(h: &Harness<'_, EffectcraftApp>) -> Vec<u64> {
+    h.state().session.active_comp().map_or(vec![], |c| c.layers.iter().map(|l| l.id.0).collect())
+}
+
+#[test]
+fn duplicate_chord_ends_a_type_tool_edit_and_selects_the_copy() {
+    let (mut h, lid) = type_tool_edit(app(), "Hello");
+    key(&mut h, Key::D, Modifiers::COMMAND);
+    let s = &h.state().session;
+    assert!(s.state.text_edit.is_none(), "Duplicate ends the open edit, as Deselect All does");
+    let copy = *s.state.selected_layers.first().expect("the copy is selected");
+    assert_ne!(copy.0, lid, "the copy (not the edited original) holds the selection");
+    assert_eq!(layer_doc(s, LayerId(lid)).unwrap().text, "Hello", "the original keeps its text");
+    assert_eq!(layer_doc(s, copy).unwrap().text, "Hello", "the copy carries it too");
+}
+
+#[test]
+fn duplicate_chord_ends_an_edit_started_while_the_project_panel_is_focused() {
+    let (mut h, lid) = project_focused_text_edit("Hi");
+    key(&mut h, Key::D, Modifiers::COMMAND);
+    let s = &h.state().session;
+    assert!(s.state.text_edit.is_none(), "Cmd+D ends the edit even with Project focused");
+    let copy = s.state.selected_layers.first().expect("the copy is selected");
+    assert_eq!(layer_doc(s, LayerId(lid)).unwrap().text, "Hi", "the typed text is kept");
+    assert_eq!(layer_doc(s, *copy).unwrap().text, "Hi", "on the copy as well");
+}
+
+#[test]
+fn rebound_duplicate_chord_forwards_from_inside_the_edit() {
+    let mut a = app();
+    a.session.execute("shortcuts.set", json!({"command": "edit.duplicate", "keys": ["Cmd+Alt+D"]})).unwrap();
+    let (mut h, lid) = type_tool_edit(a, "Hello");
+    // The default key no longer belongs to Duplicate: while the editor holds the keyboard a
+    // chord that matches no command does nothing, and the current binding is what forwards.
+    let n = layer_ids(&h).len();
+    key(&mut h, Key::D, Modifiers::COMMAND);
+    assert!(h.state().session.state.text_edit.is_some(), "Cmd+D was rebound away: the edit stays open");
+    assert_eq!(layer_ids(&h).len(), n, "and nothing was duplicated");
+    key(&mut h, Key::D, Modifiers { alt: true, ..Modifiers::COMMAND });
+    let s = &h.state().session;
+    assert!(s.state.text_edit.is_none(), "the rebound chord ends the edit");
+    assert_eq!(layer_doc(s, LayerId(lid)).unwrap().text, "Hello", "the text is kept");
+    assert_eq!(layer_ids(&h).len(), n + 1, "and the copy exists");
+}
+
+#[test]
+fn duplicate_rebound_onto_a_bare_letter_stays_typing() {
+    let mut a = app();
+    a.session.execute("shortcuts.set", json!({"command": "edit.duplicate", "keys": ["D"]})).unwrap();
+    let (mut h, lid) = type_tool_edit(a, "Hello");
+    let n = layer_ids(&h).len();
+    // A binding without a command modifier is text as far as the editor is concerned: the editor
+    // must not surrender a key that types (same invariant as the app-wide dispatcher).
+    key(&mut h, Key::D, Modifiers::NONE);
+    assert!(h.state().session.state.text_edit.is_some(), "a bare-letter Duplicate binding does not end the edit");
+    assert_eq!(layer_ids(&h).len(), n, "and does not duplicate");
+    type_text(&mut h, "D");
+    let (lid2, text, _, _) = edited(&h);
+    assert_eq!(lid2, lid, "the same edit on the same layer continues");
+    assert_eq!(text, "HelloD", "and the letter typed into the text");
+}
+
+#[test]
+fn a_chord_bound_to_both_forwarded_commands_resolves_in_list_order() {
+    let mut a = app();
+    // Shortcuts may hold one chord for several commands (the conflict is a toast, not a
+    // refusal), so the editor's forwarding resolves a shared chord in list order — Deselect
+    // All before Duplicate. This pins that documented contract: the shared chord must end the
+    // edit like Deselect All, without running Duplicate behind it.
+    a.session.execute("shortcuts.set", json!({"command": "edit.deselectAll", "keys": ["Cmd+Alt+G"]})).unwrap();
+    a.session.execute("shortcuts.set", json!({"command": "edit.duplicate", "keys": ["Cmd+Alt+G"]})).unwrap();
+    let (mut h, lid) = type_tool_edit(a, "Hello");
+    let n = layer_ids(&h).len();
+    key(&mut h, Key::G, Modifiers { alt: true, ..Modifiers::COMMAND });
+    let s = &h.state().session;
+    assert!(s.state.text_edit.is_none(), "the shared chord still ends the edit");
+    assert!(s.state.selected_layers.is_empty(), "Deselect All wins the shared chord: nothing is selected");
+    assert_eq!(layer_ids(&h).len(), n, "so the chord did not duplicate");
+    assert_eq!(layer_doc(s, LayerId(lid)).unwrap().text, "Hello", "and the text is kept");
+}

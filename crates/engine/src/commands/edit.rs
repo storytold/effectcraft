@@ -126,6 +126,11 @@ fn duplicate(s: &mut Session, p: &Value) -> Result<Value> {
             return super::prop_groups::duplicate_contents(s, &items);
         }
     }
+    // A deselected layer never keeps an open text edit: the copies take the selection, so commit
+    // an open edit first, exactly as `text.endEdit` (typed text kept, an empty Type-tool layer
+    // discarded) and as Deselect All does — one call on the command path so every route (menu,
+    // shortcut, palette, MCP, script) ends the edit and leaves the same final state.
+    super::text_edit::end_edit(s, &Value::Null)?;
     let (cid, ids) = layers_p(s, p)?;
     let new = s.edit("Duplicate", None, |proj, st| {
         let mut next = proj.next_id;

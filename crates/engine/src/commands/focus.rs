@@ -78,6 +78,12 @@ fn set_to_layer(s: &mut Session, p: &Value) -> Result<Value> {
     let c = "camera.setFocusToLayer";
     let (cid, cam, target) = refs(s, p, c, true)?;
     let d = focus_depth(s, cid, cam, target.ok_or_else(|| bad(c, "no layer"))?).ok_or_else(|| bad(c, "can't evaluate the layers"))?;
+    // Only a finite depth can be stored: JSON has no infinity or NaN, so the project could no
+    // longer be saved. Extreme but finite positions can still produce one, and `d <= 0.0` is
+    // false for NaN.
+    if !d.is_finite() {
+        return Err(bad(c, "can't measure the distance to the layer (the camera or layer position is out of range)"));
+    }
     if d <= 0.0 {
         return Err(bad(c, "the layer is behind the camera"));
     }
