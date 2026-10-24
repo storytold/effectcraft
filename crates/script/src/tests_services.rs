@@ -11,6 +11,8 @@ use crate::run_code;
 #[derive(Default)]
 struct Mem(Mutex<HashMap<String, Vec<u8>>>);
 
+// A poisoned fixture mutex should fail the test.
+#[allow(clippy::unwrap_used)]
 impl Services for Mem {
     fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {
         self.0
