@@ -40,6 +40,17 @@ pub const SCHEMA_EFFECT_SPACE: u32 = 2;
 /// The EffectCraft version, written into project files as `savedBy`.
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+fn current_writer() -> String {
+    APP_VERSION.to_string()
+}
+
+fn read_writer<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    // Writer metadata was previously ignored by Project. Keep accepting absent or malformed
+    // metadata, but do not guess an old version and apply a compatibility migration to it.
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(v.as_str().map(str::to_string).unwrap_or_else(current_writer))
+}
+
 /// The EffectCraft version that wrote a project file (its `savedBy`), when it says.
 pub fn saved_by(text: &str) -> Option<String> {
     #[derive(Deserialize)]
@@ -1362,6 +1373,10 @@ impl Item {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Project {
     pub schema: u32,
+    /// Source writer for version-specific migrations. File saves stamp the current writer;
+    /// internal snapshots omit it and already contain the migrated effect properties.
+    #[serde(rename = "savedBy", default = "current_writer", deserialize_with = "read_writer", skip_serializing)]
+    pub saved_by: String,
     pub settings: ProjectSettings,
     pub items: BTreeMap<ItemId, Item>,
     pub next_id: u64,
@@ -1380,6 +1395,7 @@ impl Default for Project {
     fn default() -> Self {
         Project {
             schema: SCHEMA_VERSION,
+            saved_by: current_writer(),
             settings: ProjectSettings::default(),
             items: BTreeMap::new(),
             next_id: 1,

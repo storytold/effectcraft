@@ -1229,6 +1229,13 @@ impl Session {
 /// ([`effectcraft_effects::migrate::to_effect_space`]). Stamps the current schema.
 pub fn upgrade_effects(p: &mut Project) {
     let to_effect_space = p.schema < effectcraft_project::SCHEMA_EFFECT_SPACE;
+    // Before v0.10.0, the CC particle systems composited over their input. Applying the new
+    // replacement behavior to those files hides their artwork and earlier effects (#1898).
+    // A missing/unrecognised writer is not evidence of an old project.
+    let version = p.saved_by.split(['-', '+']).next().unwrap_or("");
+    let legacy_particles = version.split('.').count() == 3
+        && version.split('.').all(|part| part.parse::<u64>().is_ok())
+        && effectcraft_project::is_newer_version("0.10.0", version);
     // Effect bounds per layer: (size, top-left in layer coordinates).
     let mut bounds = std::collections::HashMap::new();
     for (cid, c) in p.comps() {
@@ -1254,7 +1261,13 @@ pub fn upgrade_effects(p: &mut Project) {
                 let effectcraft_project::Node::Group(g) = n else { continue };
                 let effectcraft_project::GroupKind::Effect { effect } = &g.kind else { continue };
                 if let Some(spec) = effectcraft_effects::find(effect) {
+                    let composite = legacy_particles
+                        && matches!(spec.id, "ec.sim.ccparticlesystems2" | "ec.sim.ccparticleworld")
+                        && g.get("compositeWithOriginal").is_none();
                     effectcraft_effects::migrate::upgrade_instance(spec, g, &mut effectcraft_project::build::Ids(&mut next), size);
+                    if composite && let Some(pr) = g.get_mut("compositeWithOriginal") {
+                        pr.value = effectcraft_keyframe::Value::Bool(true);
+                    }
                     if to_effect_space {
                         effectcraft_effects::migrate::to_effect_space(spec, g, size, d, &clone_d);
                     }
@@ -1264,6 +1277,7 @@ pub fn upgrade_effects(p: &mut Project) {
     }
     p.next_id = next;
     p.schema = effectcraft_project::SCHEMA_VERSION;
+    p.saved_by = effectcraft_project::APP_VERSION.to_string();
 }
 
 #[cfg(test)]
