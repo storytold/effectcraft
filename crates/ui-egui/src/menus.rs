@@ -253,9 +253,9 @@ fn reveal_targets(app: &EffectcraftApp) -> Vec<u64> {
 
 /// The arrow keys nudge the selected layers 1 pixel at the viewer's magnification (`up`,
 /// `down`, `left`, `right`), 10 with Shift (`up10`…), as After Effects does, so zoomed in
-/// they move by fractions of a comp pixel. From any panel except Project (which owns the
-/// arrow keys for its own keyboard navigation, #961); not while typing, with a dialog or
-/// menu open. With mask points selected the arrows move the points instead (#1288).
+/// they move by fractions of a comp pixel. From any panel except Project, Effects & Presets and
+/// Render Queue (which own the arrow keys for their own keyboard navigation, #961); not while
+/// typing, with a dialog or menu open. With mask points selected the arrows move the points instead (#1288).
 fn nudge(app: &mut EffectcraftApp, ctx: &egui::Context, dir: &str) -> Result<Value, String> {
     let (side, n) = match dir.strip_suffix("10") {
         Some(side) => (side, 10.0),
@@ -269,7 +269,10 @@ fn nudge(app: &mut EffectcraftApp, ctx: &egui::Context, dir: &str) -> Result<Val
         _ => return Err(format!("unknown nudge `{dir}`")),
     };
     let st = &app.session.state;
-    if app.ui.focused == PanelKind::Project || (st.selected_layers.is_empty() && st.selected_vertices.is_empty()) || st.text_edit.is_some() {
+    if matches!(app.ui.focused, PanelKind::Project | PanelKind::EffectsPresets | PanelKind::RenderQueue)
+        || (st.selected_layers.is_empty() && st.selected_vertices.is_empty())
+        || st.text_edit.is_some()
+    {
         return Ok(Value::Null);
     }
     // Screen pixels per comp pixel.
@@ -2009,8 +2012,10 @@ fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only
         if app.dialog.is_some() {
             continue;
         }
-        // Enter in the Project panel renames the selected item (handled by the panel).
-        if key == egui::Key::Enter && !mods.any() && app.ui.focused == PanelKind::Project {
+        // Enter in the Project panel renames the selected item (handled by the panel); in Effects
+        // & Presets and the Render Queue it applies or opens the row (also handled by the panel),
+        // not the layer rename.
+        if key == egui::Key::Enter && !mods.any() && matches!(app.ui.focused, PanelKind::Project | PanelKind::EffectsPresets | PanelKind::RenderQueue) {
             continue;
         }
         // The Project panel has its own selection; a previously selected Timeline layer

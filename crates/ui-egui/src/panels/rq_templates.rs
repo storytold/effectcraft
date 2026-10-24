@@ -11,6 +11,7 @@ use effectcraft_engine::project::render_templates::{RenderTemplates, TemplateKin
 use egui::{Color32, vec2};
 use serde_json::{Value, json};
 
+use crate::a11y;
 use crate::theme::Tokens;
 use crate::{Dialog, EffectcraftApp};
 
@@ -63,6 +64,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                         ui.selectable_value(&mut pick, n.clone(), n);
                     }
                 });
+                a11y::combo_box(&r.response, slot.label(), &cur, true);
                 app.auto.add(&format!("templates.default.{slot:?}"), r.response.rect, &cur);
                 if pick != cur {
                     actions.push(("renderQueue.setTemplateDefault", json!({"kind": kind, "slot": format!("{slot:?}"), "name": pick})));
@@ -80,6 +82,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                     ui.selectable_value(&mut st.selected, n.clone(), n);
                 }
             });
+            a11y::combo_box(&r.response, tr("Settings Name:").trim_end_matches(':'), &st.selected, true);
             app.auto.add("templates.select", r.response.rect, &st.selected);
         });
         let builtin = RenderTemplates::is_builtin(k, &st.selected)
@@ -135,6 +138,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
         ui.horizontal(|ui| {
             ui.label(tr("New from Render Queue item:"));
             let r = ui.add(egui::TextEdit::singleline(&mut st.new_name).hint_text(tr("template name")).desired_width(180.0));
+            a11y::text_input(&r, tr("template name"), &st.new_name);
             app.auto.add("templates.newName", r.rect, &st.new_name);
             let item = queue.last().map(|i| i.id);
             let ok = item.is_some() && !st.new_name.trim().is_empty();
