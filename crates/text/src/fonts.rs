@@ -15,7 +15,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 use skrifa::instance::{LocationRef, Size};
 use skrifa::{FontRef, MetadataProvider};
 
-use crate::sfnt::{FaceNames, read_faces, read_faces_bytes};
+use crate::sfnt::{FaceNames, NamedInstance, read_faces, read_faces_bytes};
 
 /// Bundled fonts (SIL OFL 1.1; see `assets/fonts/*.attribution` and ATTRIBUTION.md).
 pub static INTER_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/Inter-Regular.ttf");
@@ -60,6 +60,8 @@ pub struct FaceInfo {
     pub postscript: Option<String>,
     /// The face has variation axes (an `fvar` table), read from the table directory at scan time.
     pub variable: bool,
+    /// A variable face's named instances (`Light` … `Black`), read from `fvar` at scan time.
+    pub instances: Vec<NamedInstance>,
 }
 
 /// Something that can list fonts (system folders, a web font picker, a project's font folder…).
@@ -152,6 +154,7 @@ fn info_from(n: FaceNames, data: FaceData, origin: &'static str) -> FaceInfo {
         full_name: n.full_name,
         postscript: n.postscript,
         variable: n.variable,
+        instances: n.instances,
     }
 }
 
@@ -425,8 +428,14 @@ pub fn families() -> Vec<(String, Vec<String>)> {
     let mut m: std::collections::BTreeMap<String, Vec<(bool, u16, String)>> = Default::default();
     for f in all_faces() {
         let v = m.entry(f.info.family.clone()).or_default();
-        if !v.iter().any(|(_, _, s)| s == &f.info.style) {
-            v.push((f.info.italic, f.info.weight, f.info.style.clone()));
+        // A variable face lists its named instances (`Light` … `Black`) as styles, as After
+        // Effects' font menu does; its own style name is usually one of them.
+        let styles = std::iter::once((f.info.italic, f.info.weight, f.info.style.clone()))
+            .chain(f.info.instances.iter().map(|i| (i.italic(f.info.italic), i.weight(f.info.weight), i.style.clone())));
+        for (italic, weight, style) in styles {
+            if !v.iter().any(|(_, _, s)| s.eq_ignore_ascii_case(&style)) {
+                v.push((italic, weight, style));
+            }
         }
     }
     m.into_iter()
@@ -446,6 +455,26 @@ pub struct Resolved {
     pub synth_italic: bool,
     /// The requested family was not found (shown as missing in the UI).
     pub missing: bool,
+    /// The named instance of a variable face the request asked for (an index into the face's
+    /// [`FaceInfo::instances`]); its axis values are the text's base variations (see
+    /// [`instance_variations`]).
+    pub instance: Option<u16>,
+}
+
+/// The axis values a resolved request implies: the named instance's coordinates (sorted by tag),
+/// or none for a static face or the face's own default.
+pub fn instance_variations(r: &Resolved) -> Vec<(String, f32)> {
+    let Some(i) = r.instance else { return Vec::new() };
+    face(r.face).info.instances.get(i as usize).map(|n| n.coords.clone()).unwrap_or_default()
+}
+
+/// `explicit` axis values over the instance's `base` ones: a tag set explicitly wins, the others
+/// keep the instance's value. Sorted by tag, as `TextDoc` keeps them.
+pub fn merge_variations(base: &[(String, f32)], explicit: &[(String, f32)]) -> Vec<(String, f32)> {
+    let mut out: Vec<(String, f32)> = base.iter().filter(|(t, _)| !explicit.iter().any(|(e, _)| e.trim_end() == t.trim_end())).cloned().collect();
+    out.extend(explicit.iter().cloned());
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
 }
 
 fn style_wants(style: &str) -> (u16, bool) {
@@ -485,10 +514,35 @@ pub fn resolve(family: &str, style: &str) -> Resolved {
             return r;
         }
     }
+    if let Some(r) = resolve_alias(family, style) {
+        return r;
+    }
     // Inter is bundled; face 0 (the first bundled face) is the last resort.
-    let mut r = resolve_in(DEFAULT_FAMILY, style).unwrap_or(Resolved { face: 0, synth_bold: false, synth_italic: false, missing: true });
+    let mut r = resolve_in(DEFAULT_FAMILY, style).unwrap_or(Resolved { face: 0, synth_bold: false, synth_italic: false, missing: true, instance: None });
     r.missing = !family.is_empty() && !family.eq_ignore_ascii_case(DEFAULT_FAMILY);
     r
+}
+
+/// Metric-compatible substitutes for common proprietary families, in order of preference (the
+/// same pairs fontconfig's `30-metric-aliases.conf` uses). Text keeps its widths and line breaks.
+const METRIC_ALIASES: &[(&str, &[&str])] = &[
+    ("Calibri", &["Carlito"]),
+    ("Cambria", &["Caladea"]),
+    ("Arial", &["Liberation Sans", "Arimo"]),
+    ("Helvetica", &["Liberation Sans", "Arimo"]),
+    ("Arial Narrow", &["Liberation Sans Narrow"]),
+    ("Times New Roman", &["Liberation Serif", "Tinos"]),
+    ("Times", &["Liberation Serif", "Tinos"]),
+    ("Courier New", &["Liberation Mono", "Cousine"]),
+    ("Courier", &["Liberation Mono", "Cousine"]),
+];
+
+/// An installed metric-compatible substitute for a missing family. The result stays `missing`,
+/// so Find Missing Fonts still lists the requested name.
+fn resolve_alias(family: &str, style: &str) -> Option<Resolved> {
+    let family = family.trim();
+    let (_, subs) = METRIC_ALIASES.iter().find(|(name, _)| name.eq_ignore_ascii_case(family))?;
+    subs.iter().find_map(|s| resolve_in(s, style)).map(|r| Resolved { missing: true, ..r })
 }
 
 fn resolve_in(family: &str, style: &str) -> Option<Resolved> {
@@ -497,15 +551,32 @@ fn resolve_in(family: &str, style: &str) -> Option<Resolved> {
     if fam.is_empty() {
         return None;
     }
+    let instance_named = |f: &Face, name: &str| f.info.instances.iter().position(|i| i.style.eq_ignore_ascii_case(name)).and_then(|i| u16::try_from(i).ok());
+    // A face's own style (a variable face's is its default instance) needs no axis values.
     if let Some(f) = fam.iter().find(|f| f.info.style.eq_ignore_ascii_case(style)) {
-        return Some(Resolved { face: f.id, synth_bold: false, synth_italic: false, missing: false });
+        return Some(Resolved { face: f.id, synth_bold: false, synth_italic: false, missing: false, instance: None });
     }
+    // A named instance of a variable face (`Figtree` `Black`): that face at the instance's axis
+    // values, not the nearest static weight made bold synthetically.
+    if let Some((f, i)) = fam.iter().find_map(|f| Some((f, instance_named(f, style)?))) {
+        return Some(Resolved { face: f.id, synth_bold: false, synth_italic: false, missing: false, instance: Some(i) });
+    }
+    // The nearest weight among the faces and the named instances.
     let (w, it) = style_wants(style);
-    let best = fam.iter().min_by_key(|f| {
-        let italic_pen = if f.info.italic == it { 0 } else { 1000 };
-        italic_pen + (f.info.weight as i32 - w as i32).unsigned_abs()
+    let candidates = fam.iter().flat_map(|f| {
+        std::iter::once((f, None, f.info.weight, f.info.italic)).chain(
+            f.info
+                .instances
+                .iter()
+                .enumerate()
+                .filter_map(move |(i, n)| Some((f, Some(u16::try_from(i).ok()?), n.weight(f.info.weight), n.italic(f.info.italic)))),
+        )
+    });
+    let (best, instance, weight, italic) = candidates.min_by_key(|(_, _, weight, italic)| {
+        let italic_pen = if *italic == it { 0 } else { 1000 };
+        italic_pen + (*weight as i32 - w as i32).unsigned_abs()
     })?;
-    Some(Resolved { face: best.id, synth_bold: w >= 600 && best.info.weight <= 500, synth_italic: it && !best.info.italic, missing: false })
+    Some(Resolved { face: best.id, synth_bold: w >= 600 && weight <= 500, synth_italic: it && !italic, missing: false, instance })
 }
 
 /// A face whose full name or PostScript name is `name` (case-insensitive), the way After Effects
@@ -516,11 +587,31 @@ fn resolve_by_name(name: &str) -> Option<Resolved> {
         return None;
     }
     let faces = all_faces();
-    let f = faces
+    let found = |f: &Arc<Face>, instance: Option<usize>| Resolved {
+        face: f.id,
+        synth_bold: false,
+        synth_italic: false,
+        missing: false,
+        instance: instance.and_then(|i| u16::try_from(i).ok()),
+    };
+    if let Some(f) = faces
         .iter()
         .find(|f| f.info.postscript.as_deref().is_some_and(|p| p.eq_ignore_ascii_case(name)))
-        .or_else(|| faces.iter().find(|f| f.info.full_name.eq_ignore_ascii_case(name)))?;
-    Some(Resolved { face: f.id, synth_bold: false, synth_italic: false, missing: false })
+        .or_else(|| faces.iter().find(|f| f.info.full_name.eq_ignore_ascii_case(name)))
+    {
+        // A variable face's own name is its default instance's (`Figtree-Light`).
+        return Some(found(f, None));
+    }
+    // A named instance of a variable face, by its PostScript name (`Figtree-Black`, what After
+    // Effects scripts use) or its full name (`Figtree Black`).
+    faces.iter().find_map(|f| {
+        let i = f
+            .info
+            .instances
+            .iter()
+            .position(|i| i.postscript.eq_ignore_ascii_case(name) || format!("{} {}", f.info.family, i.style).eq_ignore_ascii_case(name))?;
+        Some(found(f, Some(i)))
+    })
 }
 
 /// The writing systems that need a dedicated fallback family: the bundled fonts cover none of
@@ -542,6 +633,8 @@ enum FallbackScript {
     /// Sinhala (one family covers them all on Windows; elsewhere each has its own).
     Indic,
     Thai,
+    /// Georgian: Mkhedruli, Asomtavruli and Nuskhuri, and Mtavruli capitals.
+    Georgian,
     Other,
 }
 
@@ -570,6 +663,7 @@ fn script_of(c: char) -> FallbackScript {
         0x0590..=0x05FF | 0xFB1D..=0xFB4F => FallbackScript::Hebrew,
         0x0900..=0x0DFF | 0xA8E0..=0xA8FF => FallbackScript::Indic,
         0x0E00..=0x0E7F => FallbackScript::Thai,
+        0x10A0..=0x10FF | 0x1C90..=0x1CBF | 0x2D00..=0x2D2F => FallbackScript::Georgian,
         _ => FallbackScript::Other,
     }
 }
@@ -635,6 +729,7 @@ const INDIC_FAMILIES: &[&str] = &[
     "Noto Sans Sinhala",
 ];
 const THAI_FAMILIES: &[&str] = &["Leelawadee UI", "Tahoma", "Thonburi", "Noto Sans Thai", "Noto Sans Thai UI", "Loma", "Garuda"];
+const GEORGIAN_FAMILIES: &[&str] = &["Sylfaen", ".SF Georgian", "SF Georgian", "Noto Sans Georgian", "DejaVu Sans"];
 
 /// The CJK locale the host asked fallbacks to prefer, when it has one (see [`set_cjk_locale`]).
 static REQUESTED_CJK_LOCALE: RwLock<Option<String>> = RwLock::new(None);
@@ -662,14 +757,48 @@ fn requested_cjk_locale() -> Option<String> {
 /// The CJK locale to use: [`set_cjk_locale`] when the host asked for one, otherwise the locale
 /// environment (`LANG`, `LC_ALL`, `LC_CTYPE`; `EFFECTCRAFT_CJK_LOCALE` overrides them).
 fn active_cjk_locale() -> String {
-    requested_cjk_locale().unwrap_or_else(|| {
-        ["EFFECTCRAFT_CJK_LOCALE", "LC_ALL", "LC_CTYPE", "LANG"]
-            .iter()
-            .filter_map(|k| std::env::var(k).ok())
-            .map(|v| v.trim().to_ascii_lowercase())
-            .find(|v| !v.is_empty() && v != "c" && v != "posix")
-            .unwrap_or_default()
-    })
+    requested_cjk_locale().unwrap_or_else(environment_cjk_locale)
+}
+
+/// Read the environment independently of another UI's process-wide language request.
+fn environment_cjk_locale() -> String {
+    ["EFFECTCRAFT_CJK_LOCALE", "LC_ALL", "LC_CTYPE", "LANG"]
+        .iter()
+        .filter_map(|k| std::env::var(k).ok())
+        .map(|v| v.trim().to_ascii_lowercase())
+        .find(|v| !v.is_empty() && v != "c" && v != "posix")
+        .unwrap_or_default()
+}
+
+/// The four distinct fallback policies, rather than unbounded user-supplied locale cache keys.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum CjkLocale {
+    Japanese,
+    Korean,
+    Simplified,
+    Traditional,
+}
+
+impl CjkLocale {
+    fn from_tag(tag: &str) -> Self {
+        let tag = tag.trim().to_ascii_lowercase();
+        if tag.starts_with("zh") {
+            if asks_traditional_chinese(&tag) { Self::Traditional } else { Self::Simplified }
+        } else if tag.starts_with("ko") {
+            Self::Korean
+        } else {
+            Self::Japanese
+        }
+    }
+
+    fn tag(self) -> &'static str {
+        match self {
+            Self::Japanese => "ja",
+            Self::Korean => "ko",
+            Self::Simplified => "zh-hans",
+            Self::Traditional => "zh-hant",
+        }
+    }
 }
 
 /// The CJK language to try first for Han ideographs. Japanese when nothing says otherwise: the
@@ -687,6 +816,7 @@ fn han_order_for(tag: &str) -> [FallbackScript; 3] {
 }
 
 /// The order for the locale in force ([`active_cjk_locale`]).
+#[cfg(test)]
 fn han_order() -> [FallbackScript; 3] {
     han_order_for(&active_cjk_locale())
 }
@@ -705,20 +835,16 @@ fn chinese_families_for(tag: &str) -> &'static [&'static str] {
     if asks_traditional_chinese(tag) { TRADITIONAL_CHINESE_FAMILIES } else { SIMPLIFIED_CHINESE_FAMILIES }
 }
 
-/// [`chinese_families_for`] for the locale in force ([`active_cjk_locale`]).
-fn chinese_families() -> &'static [&'static str] {
-    chinese_families_for(&active_cjk_locale())
-}
-
-fn families_for(s: FallbackScript) -> &'static [&'static str] {
+fn families_for(s: FallbackScript, locale: CjkLocale) -> &'static [&'static str] {
     match s {
         FallbackScript::Japanese => JAPANESE_FAMILIES,
-        FallbackScript::Han => chinese_families(),
+        FallbackScript::Han => chinese_families_for(locale.tag()),
         FallbackScript::Korean => KOREAN_FAMILIES,
         FallbackScript::Arabic => ARABIC_FAMILIES,
         FallbackScript::Hebrew => HEBREW_FAMILIES,
         FallbackScript::Indic => INDIC_FAMILIES,
         FallbackScript::Thai => THAI_FAMILIES,
+        FallbackScript::Georgian => GEORGIAN_FAMILIES,
         FallbackScript::Other => &[],
     }
 }
@@ -790,9 +916,10 @@ fn fallback_cache() -> &'static RwLock<std::collections::HashMap<(u32, FaceId), 
     CACHE.get_or_init(Default::default)
 }
 
-/// The results of [`family_faces`], per script and preferred face.
-fn family_faces_cache() -> &'static RwLock<std::collections::HashMap<(FallbackScript, FaceId), Arc<Vec<FaceId>>>> {
-    static CACHE: OnceLock<RwLock<std::collections::HashMap<(FallbackScript, FaceId), Arc<Vec<FaceId>>>>> = OnceLock::new();
+/// The results of [`family_faces`], per script, preferred face and captured language policy.
+/// A lookup that finishes after a language change cannot populate another language's entry.
+fn family_faces_cache() -> &'static RwLock<std::collections::HashMap<(FallbackScript, FaceId, CjkLocale), Arc<Vec<FaceId>>>> {
+    static CACHE: OnceLock<RwLock<std::collections::HashMap<(FallbackScript, FaceId, CjkLocale), Arc<Vec<FaceId>>>>> = OnceLock::new();
     CACHE.get_or_init(Default::default)
 }
 
@@ -802,6 +929,27 @@ fn family_faces_cache() -> &'static RwLock<std::collections::HashMap<(FallbackSc
 /// loaded are tried after that (cheap), and any installed face that covers the character is tried
 /// last. `prefer` is returned when nothing covers it (the glyph renders as the missing-glyph box).
 pub fn fallback_for(c: char, prefer: FaceId) -> FaceId {
+    fallback_with_locale(c, prefer, || CjkLocale::from_tag(&active_cjk_locale()))
+}
+
+/// Choose a fallback for an explicit interface language, independent of concurrent global
+/// language changes. Empty, `c` and `posix` use the OS environment rather than the global request.
+pub fn fallback_for_locale(c: char, prefer: FaceId, tag: &str) -> FaceId {
+    let tag = tag.trim();
+    let locale = || {
+        if tag.is_empty() || tag.eq_ignore_ascii_case("c") || tag.eq_ignore_ascii_case("posix") {
+            CjkLocale::from_tag(&environment_cjk_locale())
+        } else {
+            CjkLocale::from_tag(tag)
+        }
+    };
+    fallback_with_locale(c, prefer, locale)
+}
+
+/// Keep a single language snapshot through the family-order lookup and cache insertion. `locale`
+/// is read only for a script with usual families: reading it takes a lock and may consult the
+/// environment, and layout asks for a fallback for every character.
+fn fallback_with_locale(c: char, prefer: FaceId, locale: impl FnOnce() -> CjkLocale) -> FaceId {
     let p = face(prefer);
     if p.has_char(c) || c.is_control() {
         return prefer;
@@ -822,7 +970,7 @@ pub fn fallback_for(c: char, prefer: FaceId) -> FaceId {
         if cfg!(not(target_arch = "wasm32")) && !system_scanned() {
             scan_system();
         }
-        if let Some(&id) = family_faces(script, &p).iter().find(|&&id| face(id).has_char(c)) {
+        if let Some(&id) = family_faces(script, &p, locale()).iter().find(|&&id| face(id).has_char(c)) {
             return id;
         }
     }
@@ -851,23 +999,24 @@ pub fn fallback_for(c: char, prefer: FaceId) -> FaceId {
 /// The script-aware part of [`fallback_for`]: the installed faces of the platform's usual families
 /// for `script`, in the order they are tried, each in the style of `prefer`. For CJK, the other CJK
 /// languages' families follow in the locale's order.
-fn family_faces(script: FallbackScript, prefer: &Face) -> Arc<Vec<FaceId>> {
-    if let Some(faces) = family_faces_cache().read().unwrap_or_else(|e| e.into_inner()).get(&(script, prefer.id)) {
+fn family_faces(script: FallbackScript, prefer: &Face, locale: CjkLocale) -> Arc<Vec<FaceId>> {
+    if let Some(faces) = family_faces_cache().read().unwrap_or_else(|e| e.into_inner()).get(&(script, prefer.id, locale)) {
         return faces.clone();
     }
     let order: Vec<FallbackScript> = match script {
         FallbackScript::Other => vec![],
-        FallbackScript::Han => han_order().to_vec(),
+        FallbackScript::Han => han_order_for(locale.tag()).to_vec(),
         s if s.is_cjk() => {
             let mut v = vec![s];
-            v.extend(han_order().iter().copied().filter(|o| *o != s));
+            v.extend(han_order_for(locale.tag()).iter().copied().filter(|o| *o != s));
             v
         }
         s => vec![s],
     };
     let style = &prefer.info.style;
-    let faces: Arc<Vec<FaceId>> = Arc::new(order.into_iter().flat_map(families_for).filter_map(|fam| resolve_in(fam, style)).map(|r| r.face).collect());
-    family_faces_cache().write().unwrap_or_else(|e| e.into_inner()).insert((script, prefer.id), faces.clone());
+    let faces: Arc<Vec<FaceId>> =
+        Arc::new(order.into_iter().flat_map(|s| families_for(s, locale)).filter_map(|fam| resolve_in(fam, style)).map(|r| r.face).collect());
+    family_faces_cache().write().unwrap_or_else(|e| e.into_inner()).insert((script, prefer.id, locale), faces.clone());
     faces
 }
 
@@ -883,6 +1032,77 @@ fn system_fallback(c: char, style: &str) -> Option<FaceId> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Concurrent language requests must neither choose another context's font nor reuse its
+    /// cached family order. Synthetic fonts in a child process keep this independent of the host
+    /// font installation and of other tests that exercise the process-global database/locale.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn cjk_requests_keep_their_language_and_cache_entries() {
+        const CHILD: &str = "EFFECTCRAFT_TEST_ISOLATED_CJK";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "fonts::tests::cjk_requests_keep_their_language_and_cache_entries", "--nocapture"])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        let families = [("ja", "Yu Gothic"), ("zh-hans", "Microsoft YaHei"), ("zh-hant", "Microsoft JhengHei"), ("ko", "Malgun Gothic")];
+        let mut expected = Vec::new();
+        {
+            let mut d = db().write().unwrap();
+            d.scanned = true; // This test process uses only bundled and synthetic fonts.
+            for (language, family) in families {
+                let mut data = test_font(family);
+                let table = data[12..12 + 8 * 16].as_chunks::<16>().0.iter().find(|t| &t[..4] == b"cmap").unwrap();
+                let cmap = u32::from_be_bytes(table[8..12].try_into().unwrap()) as usize + 12;
+                // Map 页 to the fixture's triangle glyph instead of its private-use range.
+                // All four fonts cover the probe, so coverage cannot choose the right language.
+                for (offset, value) in [(16, '页' as u16), (24, '页' as u16), (30, 2u16.wrapping_sub('页' as u16))] {
+                    data[cmap + offset..cmap + offset + 2].copy_from_slice(&value.to_be_bytes());
+                }
+                let data = Arc::new(data);
+                let names = read_faces_bytes(&data).into_iter().next().unwrap();
+                let id = push(&mut d, info_from(names, FaceData::Shared(data), "test"));
+                expected.push((language, id));
+            }
+        }
+        let base = resolve("Inter", "Regular").face;
+        for &(_, id) in &expected {
+            assert!(face(id).has_char('页'));
+        }
+        // Force the original interleaving: Chinese starts, then Japanese replaces the global
+        // language before Chinese looks up its probe. The explicit request must still win.
+        set_cjk_locale("zh-hans");
+        set_cjk_locale("ja");
+        assert_eq!(fallback_for('页', base), expected[0].1);
+        assert_eq!(fallback_for_locale('页', base, "zh-hans"), expected[1].1);
+        // Do not clear the cache here: different policies must coexist in the same cache.
+        for _ in 0..3 {
+            for &(language, id) in &expected {
+                assert_eq!(fallback_for_locale('页', base, language), id, "{language}");
+            }
+        }
+        let barrier = Arc::new(std::sync::Barrier::new(expected.len()));
+        let threads: Vec<_> = expected
+            .into_iter()
+            .map(|(language, id)| {
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    for _ in 0..128 {
+                        set_cjk_locale(if language == "ja" { "zh-hans" } else { "ja" });
+                        assert_eq!(fallback_for_locale('页', base, language), id, "{language}");
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+    }
 
     #[test]
     fn extra_font_dirs_come_from_a_path_list() {
@@ -965,6 +1185,56 @@ mod tests {
         assert_eq!(face(resolve("Inter", "Bold").face).info.style, "Bold");
     }
 
+    /// #1563: a variable font's named instances are styles of its family. `fontStyle = "Black"`,
+    /// the instance's PostScript name (`font = "Figtree-Black"`) and its full name select the
+    /// instance's axis values instead of the default instance made bold synthetically, and the
+    /// font menus list every instance.
+    #[test]
+    fn variable_named_instances_resolve_and_list() {
+        const FAMILY: &str = "EffectCraft Instance Test";
+        let instances = [
+            ("Light", 300.0, Some("EffectCraftInstanceTest-Light")),
+            ("Regular", 400.0, Some("EffectCraftInstanceTest-Regular")),
+            ("Black", 900.0, Some("EffectCraftInstanceTest-Black")),
+            ("Extra Bold", 800.0, None),
+        ];
+        assert_eq!(add_font_data(crate::sfnt::test_font::variable(FAMILY, &instances, true)).len(), 1);
+        let wght = |r: &Resolved| instance_variations(r);
+        // By style name.
+        let black = resolve(FAMILY, "Black");
+        assert!(!black.missing && !black.synth_bold && !black.synth_italic, "{black:?}");
+        assert_eq!(wght(&black), vec![("wght".to_string(), 900.0)]);
+        assert_eq!(wght(&resolve(FAMILY, "regular")), vec![("wght".to_string(), 400.0)]);
+        // The face's own style is its default instance: no axis values to set.
+        let light = resolve(FAMILY, "Light");
+        assert_eq!((light.face, light.instance), (black.face, None));
+        // A style the family lacks takes the nearest instance's weight, no synthetic bold.
+        let bold = resolve(FAMILY, "Bold");
+        assert!(!bold.synth_bold, "{bold:?}");
+        assert_eq!(wght(&bold), vec![("wght".to_string(), 800.0)]);
+        // By PostScript name, the font's own and the derived one, and by full name.
+        let ps = resolve("EffectCraftInstanceTest-Black", "Regular");
+        assert!(!ps.missing && ps.face == black.face, "{ps:?}");
+        assert_eq!(wght(&ps), vec![("wght".to_string(), 900.0)]);
+        assert_eq!(wght(&resolve("EffectCraftInstanceTest-ExtraBold", "")), vec![("wght".to_string(), 800.0)]);
+        assert_eq!(wght(&resolve("effectcraft instance test extra bold", "")), vec![("wght".to_string(), 800.0)]);
+        // The font menu lists every instance, in weight order.
+        let fams = families();
+        let styles = &fams.iter().find(|(f, _)| f == FAMILY).unwrap().1;
+        assert_eq!(styles, &["Light", "Regular", "Extra Bold", "Black"]);
+        // Static fonts are untouched.
+        assert_eq!(resolve("Inter", "Bold").instance, None);
+    }
+
+    /// Axis values set on the text win over the instance's; the others keep the instance's.
+    #[test]
+    fn explicit_variations_override_the_instance() {
+        let base = vec![("wdth".to_string(), 75.0), ("wght".to_string(), 900.0)];
+        assert_eq!(merge_variations(&base, &[("wght".to_string(), 450.0)]), vec![("wdth".to_string(), 75.0), ("wght".to_string(), 450.0)]);
+        assert_eq!(merge_variations(&base, &[]), base);
+        assert_eq!(merge_variations(&[], &[("opsz".to_string(), 12.0)]), vec![("opsz".to_string(), 12.0)]);
+    }
+
     #[test]
     fn scripts_are_classified() {
         assert_eq!(script_of('あ'), FallbackScript::Japanese);
@@ -981,6 +1251,8 @@ mod tests {
         assert_eq!(script_of('क'), FallbackScript::Indic);
         assert_eq!(script_of('த'), FallbackScript::Indic);
         assert_eq!(script_of('ก'), FallbackScript::Thai);
+        assert_eq!(script_of('ა'), FallbackScript::Georgian);
+        assert_eq!(script_of('\u{1c90}'), FallbackScript::Georgian, "Mtavruli");
         assert_eq!(script_of('\u{feff}'), FallbackScript::Other, "the byte order mark is no Arabic letter");
     }
 
@@ -1002,6 +1274,22 @@ mod tests {
             assert!(f.has_char(c), "{c}: {} lacks it", f.info.family);
             assert!(families.iter().any(|n| f.info.family.eq_ignore_ascii_case(n)), "{c} → {}", f.info.family);
         }
+    }
+
+    /// Native: Mkhedruli in a Latin-only family falls back to a family from the Georgian list,
+    /// ahead of faces already loaded and of the scan order. Skipped where no family from the list
+    /// is installed.
+    #[test]
+    fn georgian_falls_back_to_a_georgian_system_family() {
+        scan_system();
+        let c = 'ა';
+        if !GEORGIAN_FAMILIES.iter().any(|n| resolve_in(n, "Regular").is_some_and(|r| face(r.face).has_char(c))) {
+            eprintln!("no Georgian family from the list is installed; skipping");
+            return;
+        }
+        let f = face(fallback_for(c, resolve("Inter", "Regular").face));
+        assert!(f.has_char(c), "{} lacks it", f.info.family);
+        assert!(GEORGIAN_FAMILIES.iter().any(|n| f.info.family.eq_ignore_ascii_case(n)), "{c} → {}", f.info.family);
     }
 
     /// Native: Japanese text in a Latin-only family falls back to an installed Japanese family
@@ -1034,6 +1322,11 @@ mod tests {
     /// A minimal TrueType font built in code (no font file in the repo): U+0020 and U+E000 map to
     /// an empty glyph, U+E001 to a triangle.
     fn blank_glyph_font() -> Vec<u8> {
+        test_font("Blank Glyph Test")
+    }
+
+    /// The blank-glyph test font under another family name.
+    fn test_font(family: &str) -> Vec<u8> {
         fn u16s(v: &[u16]) -> Vec<u8> {
             v.iter().flat_map(|x| x.to_be_bytes()).collect()
         }
@@ -1061,7 +1354,7 @@ mod tests {
         hhea.extend(u16s(&[0, 3]));
         let hmtx = u16s(&[600, 0, 600, 0, 600, 0]);
         let maxp = u16s(&[1, 0, 3, 3, 1, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0]);
-        let strings: Vec<Vec<u8>> = ["Blank Glyph Test", "Regular"].iter().map(|s| s.encode_utf16().flat_map(|u| u.to_be_bytes()).collect()).collect();
+        let strings: Vec<Vec<u8>> = [family, "Regular"].iter().map(|s| s.encode_utf16().flat_map(|u| u.to_be_bytes()).collect()).collect();
         let mut name = u16s(&[0, 2, 30]);
         let mut off = 0;
         for (id, st) in strings.iter().enumerate() {
@@ -1105,6 +1398,23 @@ mod tests {
         assert_eq!(fallback_for('\u{e001}', inter), id, "fallback finds the drawn one");
     }
 
+    /// A Microsoft family that isn't installed renders in its installed metric-compatible
+    /// substitute instead of Inter, and still reports itself missing (#1677).
+    #[test]
+    fn microsoft_families_resolve_to_metric_compatible_substitutes() {
+        add_font_data(test_font("Carlito"));
+        add_font_data(test_font("Caladea"));
+        let calibri = resolve("Calibri", "Regular");
+        assert_eq!(face(calibri.face).info.family, "Carlito");
+        assert!(calibri.missing, "the original name stays missing for Find Missing Fonts");
+        let cambria = resolve("Cambria", "Bold");
+        assert_eq!(face(cambria.face).info.family, "Caladea");
+        assert!(cambria.missing);
+        let unknown = resolve("No Such Family 1677", "Regular");
+        assert_eq!(face(unknown.face).info.family, DEFAULT_FAMILY);
+        assert!(unknown.missing);
+    }
+
     #[test]
     fn the_han_order_follows_the_cjk_locale() {
         // Chinese first for any Chinese tag, whether or not it names a script.
@@ -1139,9 +1449,33 @@ mod tests {
         assert!(!TRADITIONAL_CHINESE_FAMILIES.iter().any(|f| f.contains(" SC") || f.contains("YaHei") || f.contains("WenQuanYi")));
         assert!(TRADITIONAL_CHINESE_FAMILIES.iter().any(|f| f.contains("Heiti TC") || f.contains("Hiragino Sans CNS")));
         // The arm the fallback itself walks: Han hands over the list the locale's script picked.
-        assert_eq!(families_for(FallbackScript::Han), chinese_families_for(&active_cjk_locale()));
+        assert_eq!(families_for(FallbackScript::Han, CjkLocale::from_tag(&active_cjk_locale())), chinese_families_for(&active_cjk_locale()));
         // Han text is the only thing these lists serve; the Japanese order does not change.
         assert_eq!(han_order_for("ja_JP.UTF-8")[0], FallbackScript::Japanese);
+    }
+
+    #[test]
+    fn the_rendered_order_keeps_the_print_face_first() {
+        // A composed frame renders with these lists, so they keep the platform's print order: the
+        // interface prefers the platform's UI faces on its own (see `install_script_fallbacks` in
+        // the ui crate), and an existing project must not render differently because a window's
+        // chrome changed.
+        let pos = |list: &[&str], name: &str| list.iter().position(|f| *f == name).unwrap_or(usize::MAX);
+        assert!(
+            pos(JAPANESE_FAMILIES, "Yu Gothic") < pos(JAPANESE_FAMILIES, "Yu Gothic UI"),
+            "the print face must come before its UI sibling: {JAPANESE_FAMILIES:?}"
+        );
+        for name in ["Meiryo UI", "MS UI Gothic"] {
+            assert!(!JAPANESE_FAMILIES.contains(&name), "{name} belongs to the interface order, not this list");
+        }
+        assert_eq!(SIMPLIFIED_CHINESE_FAMILIES[0], "Microsoft YaHei");
+        assert_eq!(TRADITIONAL_CHINESE_FAMILIES[0], "Microsoft JhengHei");
+        for name in ["Microsoft YaHei UI", "Microsoft JhengHei UI", "PMingLiU"] {
+            assert!(
+                !SIMPLIFIED_CHINESE_FAMILIES.contains(&name) && !TRADITIONAL_CHINESE_FAMILIES.contains(&name),
+                "{name} belongs to the interface order, not these lists"
+            );
+        }
     }
 
     #[test]

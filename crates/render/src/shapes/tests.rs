@@ -76,6 +76,24 @@ fn merge_add_feeds_fill_below_and_drops_paint_above() {
     assert!((coverage(&img) - 80.0 * 40.0).abs() < 20.0, "{}", coverage(&img));
 }
 
+/// #1174: Adding Merge Paths to a shape layer's Contents, after the group that holds the
+/// shape and its paint, erased the render. The merge drops paints above it *in its group* —
+/// not paint that belongs to a group above it.
+#[test]
+fn merge_paths_below_a_group_keeps_the_group_paint() {
+    for mode in [0u32, 1] {
+        let (p, cid) = shape_comp(|ids| {
+            let rect = build::shape_rect(ids, [40.0, 40.0], [0.0, 0.0], 0.0);
+            let fill = build::shape_fill(ids, RED);
+            vec![build::shape_group(ids, "Group 1", vec![rect, fill]), op(ids, "merge", &[("mode", Value::Enum(mode))])]
+        });
+        let img = frame(&p, cid);
+        let c = img.get(100, 50);
+        assert!(c[0] > 0.99 && c[1] < 0.01 && c[3] > 0.99, "mode {mode}: group rectangle must still render, got {c:?}");
+        assert!((coverage(&img) - 40.0 * 40.0).abs() < 20.0, "mode {mode}: {}", coverage(&img));
+    }
+}
+
 #[test]
 fn merge_subtract_and_intersect() {
     let sub = |mode: u32| {

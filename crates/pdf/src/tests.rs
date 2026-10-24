@@ -1090,3 +1090,47 @@ fn retained_layers_preserve_artwork_beyond_the_bounds_depth_limit() {
     assert_eq!(cropped.pixel_size(), (120, 80), "unknown bounds keep the full page");
     assert_eq!(offset, [0.0, 0.0]);
 }
+
+#[test]
+fn cid_width_entries_at_the_top_of_the_cid_range_do_not_overflow() {
+    // A first CID of u32::MAX (larger values saturate to it) used to overflow `first + k` and `first + 65535`:
+    // a panic in debug builds; in release builds the list wrapped round to CID 0 and the range was dropped.
+    let load = |entry: &str| {
+        let type0 = "<< /Type /Font /Subtype /Type0 /BaseFont /X /Encoding /Identity-H /DescendantFonts [13 0 R] >>";
+        let desc = format!("<< /Type /Font /Subtype /CIDFontType2 {entry} >>");
+        let file = object::File::parse(&page_pdf("", "/Font << /F1 10 0 R >>", vec![(10, type0.into(), None), (13, desc, None)])).unwrap();
+        let d = file.objects.get(&(10, 0)).and_then(object::Obj::dict).unwrap();
+        font::Font::load(&file, d, &mut vec![])
+    };
+    let max = u32::MAX;
+    // c [w1 w2 ...]
+    let f = load("/W [4294967295 [500 600 700]]");
+    assert_eq!((f.width(max), f.width(0)), (0.5, 1.0));
+    // cfirst clast w
+    assert_eq!(load("/W [4294967295 4294967295 400]").width(max), 0.4);
+    // c [w1y vx vy ...]
+    let f = load("/W2 [4294967295 [1 2 3 4 5 6]]");
+    assert_eq!((f.vmetrics(max), f.vmetrics(0)), ((0.001, 0.002, 0.003), (-1.0, 0.5, 0.88)));
+    // cfirst clast w1y vx vy
+    assert_eq!(load("/W2 [4294967295 4294967295 1 2 3]").vmetrics(max), (0.001, 0.002, 0.003));
+}
+
+#[test]
+fn cmap_entries_at_the_top_of_the_code_range_do_not_overflow() {
+    // A bfrange array starting at code 0xFFFFFFFF and a cidrange mapping onto CID u32::MAX used to overflow
+    // `lo + k` and `c + (code - lo)`: a panic in debug builds, a wrap round to code / CID 0 in release builds.
+    let to_unicode = "beginbfrange <FFFFFFFF> <FFFFFFFF> [<0041> <0042>] endbfrange";
+    let encoding = "begincodespacerange <0000> <FFFF> endcodespacerange begincidrange <0000> <FFFF> 4294967295 endcidrange";
+    let objs: Objs = vec![
+        (10, "<< /Type /Font /Subtype /Type0 /Encoding 15 0 R /ToUnicode 14 0 R /DescendantFonts [13 0 R] >>".into(), None),
+        (13, "<< /Type /Font /Subtype /CIDFontType2 /W [0 [700 800] 4294967295 [500]] >>".into(), None),
+        (14, "<< >>".into(), Some(to_unicode.as_bytes().to_vec())),
+        (15, "<< /Type /CMap >>".into(), Some(encoding.as_bytes().to_vec())),
+    ];
+    let file = object::File::parse(&page_pdf("", "/Font << /F1 10 0 R >>", objs)).unwrap();
+    let d = file.objects.get(&(10, 0)).and_then(object::Obj::dict).unwrap();
+    let f = font::Font::load(&file, d, &mut vec![]);
+    assert_eq!((f.unicode(0xFFFF_FFFF), f.unicode(0)), ("A".to_string(), String::new()));
+    // Code 0 is CID u32::MAX; code 2 would be past it, so it falls back to CID 0 like an unmapped code.
+    assert_eq!((f.width(0), f.width(2)), (0.5, 0.7));
+}

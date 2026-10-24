@@ -20,12 +20,47 @@ pub fn rasterize(doc: &Doc, w: u32, h: u32, scale: f64) -> Image {
 
 /// Rasterise `doc` with `m` mapping document pixels to image pixels.
 pub fn rasterize_with(doc: &Doc, w: u32, h: u32, m: Affine) -> Image {
-    let mut img = Image::new(w, h);
-    draw_group(&doc.root, m, 1.0, &mut img);
+    let mut budget = SurfaceBudget { live_bytes: 0, limit_bytes: MAX_LIVE_SURFACE_BYTES };
+    let Some(mut img) = budget.image(w, h, None) else { return Image::default() };
+    draw_group(&doc.root, m, 1.0, &mut img, &mut budget);
     img
 }
 
-fn draw_group(g: &Group, m: Affine, opacity: f64, dst: &mut Image) {
+/// Bound the simultaneously live offscreen image surfaces created by nested groups.
+const MAX_LIVE_SURFACE_BYTES: usize = 512 * 1024 * 1024;
+
+struct SurfaceBudget {
+    live_bytes: usize,
+    limit_bytes: usize,
+}
+
+impl SurfaceBudget {
+    fn image(&mut self, width: u32, height: u32, copy: Option<&Image>) -> Option<Image> {
+        let pixels = (width as usize).checked_mul(height as usize)?;
+        let bytes = pixels.checked_mul(std::mem::size_of::<[f32; 4]>())?;
+        let new_live = self.live_bytes.checked_add(bytes)?;
+        if new_live > self.limit_bytes {
+            return None;
+        }
+        let mut data = Vec::new();
+        data.try_reserve_exact(pixels).ok()?;
+        data.resize(pixels, [0.0; 4]);
+        if let Some(source) = copy {
+            if source.width != width || source.height != height || source.data.len() != pixels {
+                return None;
+            }
+            data.copy_from_slice(&source.data);
+        }
+        self.live_bytes = new_live;
+        Some(Image { width, height, data })
+    }
+
+    fn release(&mut self, image: &Image) {
+        self.live_bytes = self.live_bytes.saturating_sub(image.data.len().saturating_mul(std::mem::size_of::<[f32; 4]>()));
+    }
+}
+
+fn draw_group(g: &Group, m: Affine, opacity: f64, dst: &mut Image, budget: &mut SurfaceBudget) {
     let m = m * g.transform;
     let o = opacity * g.opacity;
     if o <= 0.0 {
@@ -38,7 +73,7 @@ fn draw_group(g: &Group, m: Affine, opacity: f64, dst: &mut Image) {
         || g.knockout;
     if !offscreen {
         for c in &g.children {
-            draw_node(c, m, o, dst);
+            draw_node(c, m, o, dst, budget);
         }
         return;
     }
@@ -46,12 +81,24 @@ fn draw_group(g: &Group, m: Affine, opacity: f64, dst: &mut Image) {
     // Draw the children on their own (isolated) or over a copy of the backdrop, keep what
     // every clip path covers and the soft mask lets through, then composite with the group's
     // opacity and blend mode.
-    let backdrop = if g.isolated { None } else { Some(dst.clone()) };
+    let backdrop = if g.isolated { None } else { budget.image(dst.width, dst.height, Some(dst)) };
+    if !g.isolated && backdrop.is_none() {
+        return;
+    }
     let mut tmp = match &backdrop {
-        Some(b) => b.clone(),
-        None => Image::new(dst.width, dst.height),
+        Some(b) => match budget.image(dst.width, dst.height, Some(b)) {
+            Some(image) => image,
+            None => {
+                budget.release(b);
+                return;
+            }
+        },
+        None => match budget.image(dst.width, dst.height, None) {
+            Some(image) => image,
+            None => return,
+        },
     };
-    draw_children(g, m, &mut tmp, backdrop.as_ref());
+    draw_children(g, m, &mut tmp, backdrop.as_ref(), budget);
     if let Some(b) = &backdrop {
         if only_clip {
             // A non-isolated clipping group: the backdrop where the clip excludes the children.
@@ -61,12 +108,24 @@ fn draw_group(g: &Group, m: Affine, opacity: f64, dst: &mut Image) {
                     d[i] = d[i] * (1.0 - c) + t[i] * c;
                 }
             });
+            budget.release(&tmp);
+            drop(tmp);
+            if let Some(b) = &backdrop {
+                budget.release(b);
+            }
             return;
         }
         // Remove the backdrop's contribution (ISO 32000-1 §11.4.8): with the group's own
         // alpha αg (its children alone), C = Cn + (Cn − C0)·(α0/αg − α0).
-        let mut solo = Image::new(dst.width, dst.height);
-        draw_children(g, m, &mut solo, None);
+        let Some(mut solo) = budget.image(dst.width, dst.height, None) else {
+            budget.release(&tmp);
+            drop(tmp);
+            if let Some(b) = &backdrop {
+                budget.release(b);
+            }
+            return;
+        };
+        draw_children(g, m, &mut solo, None, budget);
         tmp.data.par_iter_mut().zip(b.data.par_iter()).zip(solo.data.par_iter()).for_each(|((t, b0), s)| {
             let ag = s[3];
             if ag <= 0.0 {
@@ -83,6 +142,8 @@ fn draw_group(g: &Group, m: Affine, opacity: f64, dst: &mut Image) {
             out[3] = ag;
             *t = out;
         });
+        budget.release(&solo);
+        drop(solo);
     }
     if !g.clip.is_empty() {
         let cov = clip_coverage(g, m, dst.width, dst.height);
@@ -93,8 +154,15 @@ fn draw_group(g: &Group, m: Affine, opacity: f64, dst: &mut Image) {
         });
     }
     if let Some(sm) = &g.mask {
-        let mut mk = Image::new(dst.width, dst.height);
-        draw_group(&sm.content, m, 1.0, &mut mk);
+        let Some(mut mk) = budget.image(dst.width, dst.height, None) else {
+            budget.release(&tmp);
+            drop(tmp);
+            if let Some(b) = &backdrop {
+                budget.release(b);
+            }
+            return;
+        };
+        draw_group(&sm.content, m, 1.0, &mut mk, budget);
         let bc = sm.backdrop.map(|v| v as f32);
         let lum = sm.luminosity;
         tmp.data.par_iter_mut().zip(mk.data.par_iter()).for_each(|(p, q)| {
@@ -110,6 +178,8 @@ fn draw_group(g: &Group, m: Affine, opacity: f64, dst: &mut Image) {
                 *v *= k;
             }
         });
+        budget.release(&mk);
+        drop(mk);
     }
     if g.blend == BlendMode::Normal {
         over(dst, &tmp, o as f32);
@@ -122,6 +192,11 @@ fn draw_group(g: &Group, m: Affine, opacity: f64, dst: &mut Image) {
                 *d = blend_pixel(mode, *d, s);
             }
         });
+    }
+    budget.release(&tmp);
+    drop(tmp);
+    if let Some(b) = &backdrop {
+        budget.release(b);
     }
 }
 
@@ -142,19 +217,22 @@ fn clip_coverage(g: &Group, m: Affine, w: u32, h: u32) -> Vec<f32> {
 /// Draw a group's children into `dst`. Knockout groups composite each child with the
 /// group's initial backdrop (`backdrop`, or transparent) instead of with the children below:
 /// where the child has shape `f`, `dst = dst·(1 − f) + child + backdrop·(f − αchild)`.
-fn draw_children(g: &Group, m: Affine, dst: &mut Image, backdrop: Option<&Image>) {
+fn draw_children(g: &Group, m: Affine, dst: &mut Image, backdrop: Option<&Image>, budget: &mut SurfaceBudget) {
     if !g.knockout {
         for c in &g.children {
-            draw_node(c, m, 1.0, dst);
+            draw_node(c, m, 1.0, dst, budget);
         }
         return;
     }
     for c in &g.children {
-        let mut ci = Image::new(dst.width, dst.height);
-        draw_node(c, m, 1.0, &mut ci);
+        let Some(mut ci) = budget.image(dst.width, dst.height, None) else { return };
+        draw_node(c, m, 1.0, &mut ci, budget);
         // Shape: the child drawn fully opaque (constant opacities to 1).
-        let mut si = Image::new(dst.width, dst.height);
-        draw_node(&opaque(c), m, 1.0, &mut si);
+        let Some(mut si) = budget.image(dst.width, dst.height, None) else {
+            budget.release(&ci);
+            return;
+        };
+        draw_node(&opaque(c), m, 1.0, &mut si, budget);
         let zero = [0.0f32; 4];
         dst.data.par_iter_mut().enumerate().for_each(|(i, d)| {
             let (cp, f) = (ci.data[i], si.data[i][3].max(ci.data[i][3]));
@@ -166,6 +244,10 @@ fn draw_children(g: &Group, m: Affine, dst: &mut Image, backdrop: Option<&Image>
                 d[k] = d[k] * (1.0 - f) + cp[k] + b[k] * (f - cp[3]);
             }
         });
+        budget.release(&ci);
+        budget.release(&si);
+        drop(ci);
+        drop(si);
     }
 }
 
@@ -299,14 +381,15 @@ fn set_sat(c: [f32; 3], s: f32) -> [f32; 3] {
     c.map(|v| (v - mn) * s / (mx - mn))
 }
 
-fn draw_node(n: &Node, m: Affine, opacity: f64, dst: &mut Image) {
+fn draw_node(n: &Node, m: Affine, opacity: f64, dst: &mut Image, budget: &mut SurfaceBudget) {
     match n {
-        Node::Group(g) => draw_group(g, m, opacity, dst),
+        Node::Group(g) => draw_group(g, m, opacity, dst, budget),
         Node::Shape(s) => {
             if s.opacity < 1.0 && s.fill.is_some() && s.stroke.is_some() {
-                let mut tmp = Image::new(dst.width, dst.height);
+                let Some(mut tmp) = budget.image(dst.width, dst.height, None) else { return };
                 draw_shape(s, m, 1.0, &mut tmp);
                 over(dst, &tmp, (opacity * s.opacity) as f32);
+                budget.release(&tmp);
             } else {
                 draw_shape(s, m, opacity * s.opacity, dst);
             }
@@ -514,12 +597,12 @@ pub(crate) fn eval_stops(stops: &[(f64, [f64; 4])], t: f64) -> [f32; 4] {
     if t <= first.0 {
         return first.1.map(|v| v as f32);
     }
-    for w in stops.windows(2) {
-        let (a, b) = (w[0], w[1]);
-        if t <= b.0 {
-            let k = if b.0 > a.0 { (t - a.0) / (b.0 - a.0) } else { 1.0 };
-            return [0, 1, 2, 3].map(|i| (a.1[i] + (b.1[i] - a.1[i]) * k) as f32);
-        }
-    }
-    stops.last().map_or([0.0; 4], |s| s.1.map(|v| v as f32))
+    // Find the first upper stop (not the last duplicate): equal-offset segments retain the
+    // reference algorithm's exact-boundary behavior, while nearby values are interpolated from
+    // the preceding stop as before.
+    let upper = stops.partition_point(|stop| stop.0 < t);
+    let Some(b) = stops.get(upper) else { return stops.last().map_or([0.0; 4], |s| s.1.map(|v| v as f32)) };
+    let Some(a) = stops.get(upper.saturating_sub(1)) else { return first.1.map(|v| v as f32) };
+    let k = if b.0 > a.0 { (t - a.0) / (b.0 - a.0) } else { 1.0 };
+    [0, 1, 2, 3].map(|i| (a.1[i] + (b.1[i] - a.1[i]) * k) as f32)
 }

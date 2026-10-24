@@ -140,9 +140,10 @@ fn srgb_to_linear(c: f32) -> f32 {
     if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
 }
 
-/// A unique EXR layer name (no dots: they separate the layer from the channel).
+/// A unique EXR layer name (no dots: they separate the layer from the channel). Printable ASCII only:
+/// the `exr` crate panics on characters it cannot store in a channel name (#1702).
 fn exr_name(name: &str, used: &mut Vec<String>) -> String {
-    let base: String = name.chars().map(|c| if c == '.' || c.is_control() { '_' } else { c }).collect();
+    let base: String = name.chars().map(|c| if c == '.' || !(c == ' ' || c.is_ascii_graphic()) { '_' } else { c }).collect();
     let base = if base.trim().is_empty() { "Layer".to_string() } else { base };
     let mut n = base.clone();
     let mut k = 2;

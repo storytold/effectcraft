@@ -2,6 +2,8 @@
 
 use egui::{Align2, Color32, Rect, Response, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 
+use effectcraft_project::ParamUi;
+
 use crate::automation::Registry;
 use crate::icons::{self, Icon};
 use crate::theme::Tokens;
@@ -143,6 +145,16 @@ pub fn hot_number_at(
 /// still scrubs finely and Shift by tens.
 pub fn proportional_scrub(m: egui::Modifiers) -> bool {
     m.command && m.alt
+}
+
+/// How far one pointer pixel scrubs a hot-text field: the property's slider (soft) range over
+/// 300 px. The Timeline and Effect Controls share this so they cannot drift; a large hard range
+/// only allows typing big values, it must not make dragging coarse (#2097).
+pub fn slider_scrub_speed(ui: &ParamUi) -> f64 {
+    match ui {
+        ParamUi::Slider { slider_min, slider_max, .. } => ((slider_max - slider_min) / 300.0).clamp(0.001, 50.0),
+        _ => 0.5,
+    }
 }
 
 /// [`hot_number_at`] for a whole number (an angle's revolutions): a drag steps it once every
@@ -557,6 +569,44 @@ pub fn popup_menu(ui: &mut Ui, id: egui::Id, pos: egui::Pos2, options: &[String]
     })
 }
 
+/// The drop-down for a layer-valued property (`ParamUi::Layer`): the current layer shown as
+/// "N. name" (or "None"), and a popup of "None" plus every layer of the comp. Effect Controls
+/// and the Timeline share it so a layer reference (an Environment light's Source, a Displacement
+/// Map's layer) is picked the same way in every panel, and the reference is shown as its layer's
+/// index and name rather than its internal id. Returns `Some(chosen)` when the user picked —
+/// the layer's id, or `None` for "None" — and `None` while nothing is chosen; the caller writes
+/// it as an undoable `prop.set` (id, or null for "None").
+pub fn layer_picker(
+    ui: &mut Ui,
+    rect: Rect,
+    layers: &[effectcraft_engine::project::Layer],
+    current: Option<u64>,
+    t: &Tokens,
+    id: egui::Id,
+) -> Option<Option<u64>> {
+    let index_of = |wanted: u64| layers.iter().position(|l| l.id.0 == wanted);
+    let entry = |i: usize| layers.get(i).map(|l| format!("{}. {}", i + 1, l.name));
+    let current_index = current.and_then(index_of);
+    let label = current_index.and_then(entry).unwrap_or_else(|| crate::i18n::tr("None").to_string());
+    let pop = id.with("pop");
+    if dropdown(ui, rect, &label, t, id).clicked() {
+        open_popup(ui, pop);
+    }
+    if !popup_is_open(ui, pop) {
+        return None;
+    }
+    // Built only while open: a comp can hold hundreds of layers.
+    let mut options: Vec<String> = Vec::with_capacity(layers.len() + 1);
+    options.push(crate::i18n::tr("None").to_string());
+    options.extend((0..layers.len()).filter_map(entry));
+    // The current entry is highlighted (the first option is "None").
+    match popup_menu(ui, pop, rect.left_bottom(), &options, Some(current_index.map_or(0, |i| i + 1))) {
+        Some(0) => Some(None),
+        Some(picked) => layers.get(picked - 1).map(|l| Some(l.id.0)),
+        None => None,
+    }
+}
+
 /// The open popup list `id` at `pos`, drawn by `body` (`rows` entries and `seps` separators,
 /// for its height): as tall as the window allows, scrolling beyond with a scroll bar (a shape
 /// layer's Add menu has 20 entries, the blend modes 40, the fonts hundreds), and moved up when
@@ -607,9 +657,78 @@ pub fn any_menu_open(ctx: &egui::Context) -> bool {
 /// whole: egui sizes a new menu from a default 400 pt area, so without a minimum a longer one
 /// (Window ▸ Workspace) got stuck at that height with its last entries scrolled out of view
 /// (#191).
-pub fn menu_scroll<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+///
+/// While the bar is mid press-and-browse (`browsing`), resting the pointer against the menu's
+/// bottom or top edge scrolls it from there — a crawl at first, then a run, as native menus do —
+/// so a long list can be walked with no wheel. Without the hold the edges do nothing: the wheel
+/// and the scroll bar are how a normally opened menu scrolls.
+pub fn menu_scroll<R>(ui: &mut Ui, browsing: bool, add: impl FnOnce(&mut Ui) -> R) -> R {
     let max_h = ui.ctx().content_rect().height() - 40.0;
-    egui::ScrollArea::vertical().max_height(max_h).min_scrolled_height(max_h).show(ui, add).inner
+    let out = egui::ScrollArea::vertical().max_height(max_h).min_scrolled_height(max_h).show(ui, add);
+    edge_scroll(ui, &out, browsing);
+    out.inner
+}
+
+/// The edge scroll [`menu_scroll`] adds while browsing: with the pointer resting in the bottom
+/// (top) band of an overflowing menu, its content crawls up (down) after a short pause, ramps to
+/// a run and stops at the end — and stops at once when the pointer leaves the band or the hold.
+///
+/// This runs after `ScrollArea::show`, which laid the menu out for the offset it had, so the new
+/// offset goes into the area's state and shows on the next frame: a frame of lag, invisible at
+/// these speeds. egui's own scrolling (wheel, drag, scroll bar) is untouched.
+fn edge_scroll<R>(ui: &Ui, out: &egui::containers::scroll_area::ScrollAreaOutput<R>, browsing: bool) {
+    /// How far from the top / bottom edge the pointer starts the crawl (points).
+    const BAND: f32 = 18.0;
+    /// The pause before the crawl starts: a pointer merely grazing the edge must not jump.
+    const DELAY: f32 = 0.12;
+    /// Points per second: a crawl at first, reaching the run about three quarters of a second in.
+    const CRAWL: f32 = 45.0;
+    const RAMP: f32 = 700.0;
+    const RUN: f32 = 560.0;
+
+    let ctx = ui.ctx();
+    let over = out.content_size.y - out.inner_rect.height();
+    let dir = match (browsing, over > 0.0, ctx.input(|i| i.pointer.latest_pos())) {
+        (true, true, Some(p)) if out.inner_rect.contains(p) => {
+            if p.y >= out.inner_rect.max.y - BAND {
+                1
+            } else if p.y <= out.inner_rect.min.y + BAND {
+                -1
+            } else {
+                0
+            }
+        }
+        _ => 0,
+    };
+    // The clock the pause counts from, kept per menu: entering or leaving an edge band restarts
+    // it, so a later stay there crawls off again instead of jumping straight to the run.
+    let now = ctx.input(|i| i.time);
+    let key = out.id.with("menu-edge-scroll");
+    let (since, prev) = ctx.data(|d| d.get_temp::<(f64, i32)>(key)).unwrap_or((now, 0));
+    let since = if dir == prev {
+        since
+    } else {
+        ctx.data_mut(|d| d.insert_temp(key, (now, dir)));
+        now
+    };
+    if dir == 0 {
+        return;
+    }
+    if now - since < f64::from(DELAY) {
+        // A pointer resting still fires no events: keep the frames coming until the crawl runs.
+        ctx.request_repaint();
+        return;
+    }
+    let speed = (CRAWL + RAMP * ((now - since) as f32 - DELAY)).min(RUN);
+    let crawl = ctx.input(|i| i.unstable_dt).min(0.05) * speed * dir as f32;
+    let new = (out.state.offset.y + crawl).clamp(0.0, over);
+    if new != out.state.offset.y {
+        let mut state = out.state;
+        state.offset.y = new;
+        state.store(ctx, out.id);
+        // At the end of the list the crawl stands still and asks for no more frames.
+        ctx.request_repaint();
+    }
 }
 
 /// egui's menu style with no gap between the rows: the gap the app's item spacing left between
@@ -665,6 +784,15 @@ pub(crate) fn constrained(c: &[f64], d: usize, v: f64) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #2097: the drag speed comes from the slider range, not a much wider hard range.
+    #[test]
+    fn slider_scrub_speed_uses_the_slider_range() {
+        let slider = |min, max, slider_min, slider_max| ParamUi::Slider { min, max, slider_min, slider_max, decimals: 1 };
+        assert!((slider_scrub_speed(&slider(0.0, 10_000.0, 0.0, 1_000.0)) - 1_000.0 / 300.0).abs() < 1e-9);
+        assert!((slider_scrub_speed(&slider(0.0, 1.0e9, 0.0, 1.0)) - 1.0 / 300.0).abs() < 1e-9);
+        assert_eq!(slider_scrub_speed(&ParamUi::Number), 0.5);
+    }
 
     /// #488: an inline editor selects its whole text only as it opens. Should it be without the
     /// keyboard for a frame later (an input method, another handler), it takes the keyboard back

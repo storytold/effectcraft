@@ -272,7 +272,15 @@ fn prop_row(
     let name_clip = Rect::from_min_max(pos2(swr.max.x + 6.0, r.min.y), pos2(vx - 6.0, r.max.y));
     app.auto.add(&format!("effectControls.prop.{uid}.name"), name_clip, &prop.name);
     p.with_clip_rect(name_clip.intersect(p.clip_rect())).text(pos2(swr.max.x + 6.0, cy), Align2::LEFT_CENTER, &prop.name, Tokens::ui(12.0), t.text);
-    ui.interact(name_clip, egui::Id::new(("ec-prop-name", uid)), Sense::click());
+    let name_response = ui.interact(name_clip, egui::Id::new(("ec-prop-name", uid)), Sense::click());
+    if name_response.double_clicked() {
+        app.ui.timeline.search.clear();
+        app.ui.timeline.scroll_to = Some(crate::state::ScrollTo::Property(uid));
+        if let Err(e) = crate::menus::frontend(app, ui.ctx(), "timeline.revealProps", json!({"props": [{"layer": layer.id.0, "prop": uid}]})) {
+            app.ui.status = e;
+        }
+        app.show_panel(crate::dock::PanelKind::Timeline);
+    }
     app.auto.add(&format!("effectControls.prop.{uid}.name"), name_clip, &prop.name);
     let merge = format!("ec-{uid}");
     // With several layers selected the edit applies to the same effect property of each (#491).
@@ -329,10 +337,7 @@ fn prop_row(
                 ParamUi::Percent => "%",
                 _ => "",
             };
-            let speed = match &prop.ui {
-                ParamUi::Slider { slider_min, slider_max, .. } => ((slider_max - slider_min) / 300.0).clamp(0.001, 50.0),
-                _ => 0.5,
-            };
+            let speed = widgets::slider_scrub_speed(&prop.ui);
             let (vr, nv, _) = widgets::hot_number_at(
                 ui,
                 pos2(vx, cy - 9.0),
@@ -377,6 +382,11 @@ fn prop_row(
                     let mut nc = c.clone();
                     nc[d] = nv;
                     set(actions, json!(nc));
+                    // Typed into this component only: other selected layers keep the rest of
+                    // their own value (#1434).
+                    if let Some((_, a)) = actions.last_mut() {
+                        a["dims"] = json!([d]);
+                    }
                 }
                 x = vr.max.x + 8.0;
             }
@@ -428,19 +438,10 @@ fn prop_row(
             let comp = app.session.active_comp_arc();
             if let Some(comp) = comp {
                 let dr = Rect::from_min_size(pos2(vx, cy - 9.0), vec2(((r.max.x - vx) * 0.55).clamp(90.0, 170.0), 18.0));
-                let idx_of = |id: u64| comp.layers.iter().position(|x| x.id.0 == id);
-                let name = l.and_then(|id| idx_of(id).map(|i| format!("{}. {}", i + 1, comp.layers[i].name))).unwrap_or_else(|| "None".into());
-                let pop = egui::Id::new(("ec-lpop", uid));
-                if widgets::dropdown(ui, dr, &name, &t, egui::Id::new(("ec-l", uid))).clicked() {
-                    widgets::open_popup(ui, pop);
+                if let Some(chosen) = widgets::layer_picker(ui, dr, &comp.layers, *l, &t, egui::Id::new(("ec-l", uid))) {
+                    set(actions, chosen.map(|id| json!(id)).unwrap_or(serde_json::Value::Null));
                 }
                 app.auto.add(&format!("effectControls.prop.{uid}.value"), dr, &prop.name);
-                let mut opts = vec!["None".to_string()];
-                opts.extend(comp.layers.iter().enumerate().map(|(i, l)| format!("{}. {}", i + 1, l.name)));
-                let cur = l.and_then(idx_of).map(|i| i + 1).unwrap_or(0);
-                if let Some(i) = widgets::popup_menu(ui, pop, dr.left_bottom(), &opts, Some(cur)) {
-                    set(actions, if i == 0 { serde_json::Value::Null } else { json!(comp.layers[i - 1].id.0) });
-                }
                 // Source / Masks / Effects & Masks (the hidden companion parameter).
                 if let Some(src) = group.get(&effectcraft_engine::effects::layer_source_id(&prop.match_id)) {
                     let si = src.value.as_enum() as usize;
@@ -967,7 +968,7 @@ fn curves_editor(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter,
     let col = channel_color(ch);
     p.rect_filled(Rect::from_min_max(pos2(gr.min.x, gr.max.y + 3.0), pos2(gr.max.x, gr.max.y + 8.0)), 0.0, col.gamma_multiply(0.5));
     let id = egui::Id::new(("ec-curves", euid, ch));
-    let (resp, edit) = fw::curves_graph(ui, gr, &cur, ch, pencil, id, &t);
+    let (resp, edit) = fw::curves_graph(ui, gr, &cur, ch, pencil, true, id, &t);
     app.auto.add(&format!("effectControls.effect.{euid}.curves.graph"), gr, "Curves");
     let started = resp.drag_started() || resp.clicked();
     if let Some(np) = edit.changed {
@@ -1279,7 +1280,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             let lid = layer.id.0;
             let mut picked_label: Option<usize> = None;
             let mut item = |ui: &mut egui::Ui, label: &str, enabled: bool, cmd: &str, params: serde_json::Value| {
-                if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+                if ui.add_enabled(enabled, egui::Button::new(crate::i18n::context_item(cmd, &params, label))).clicked() {
                     actions.push((cmd.into(), params));
                     ui.close();
                 }
@@ -1394,14 +1395,18 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     ui.set_clip_rect(panel_clip);
     let content_h = y + scroll.offset - body.min.y;
     scroll.end(ui, &mut app.auto, "effectControls.scroll", content_h, &t);
-    // Drop effects here.
+    // Drop effects and animation presets here.
     if let Some(payload) = egui::DragAndDrop::payload::<crate::panels::DragPayload>(&ctx)
         && ui.rect_contains_pointer(rect)
-        && let crate::panels::DragPayload::Effect(e) = payload.as_ref()
+        && let Some((id, params)) = match payload.as_ref() {
+            crate::panels::DragPayload::Effect(e) => Some(("effect.apply", json!({"effect": e, "layers": [layer.id.0]}))),
+            crate::panels::DragPayload::Preset { preset, .. } => Some(preset.apply_to(layer.id.0)),
+            _ => None,
+        }
     {
         p.rect_stroke(rect, 0.0, Stroke::new(2.0, t.accent), egui::StrokeKind::Inside);
         if ctx.input(|i| i.pointer.any_released()) {
-            actions.push(("effect.apply".into(), json!({"effect": e, "layers": [layer.id.0]})));
+            actions.push((id.into(), params));
             egui::DragAndDrop::clear_payload(&ctx);
         }
     }

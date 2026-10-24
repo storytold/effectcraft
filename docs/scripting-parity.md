@@ -15,7 +15,7 @@ our own scripts; no real-world script library has been run against both apps.
 | Feature | After Effects 2026 | EffectCraft | Status | Evidence / gap |
 |---|---|---|---|---|
 | Expression language | JavaScript engine (default) and Legacy ExtendScript | JavaScript (boa) with legacy array maths (`value + [10, 0]`) | good | `crates/expr` tests; no separate Legacy ExtendScript engine mode |
-| Expression object model | `thisComp`, `thisLayer`, `wiggle`, `loopOut`, `valueAtTime`, `sampleImage`, `footage()`, text style API… | Same members, from the reference | good | `crates/expr/src/tests.rs`; behaviour of edge cases unmeasured (G1) |
+| Expression object model | `thisComp`, `thisLayer`, `wiggle`, `loopOut`, `valueAtTime`, `sampleImage`, `footage()`, text style API… | Same members, from the reference, including `propertyGroup(countUp)` and a group's `propertyIndex` for name-independent rigs (#1619) | good | `crates/expr/src/tests.rs`, `tests/property_group.rs`; behaviour of edge cases unmeasured (G1) |
 | Expression editing | Inline field, error bar, pick whip, Expression Language menu, external editors | Inline field that grows, error bar, pick whips (property and value), language menu | partial | External editor support (#364) |
 | Expression performance | Cached, multi-frame | Per-thread boa contexts | unknown | No benchmark |
 | Scripting object model | `app`, `Project`, items, layers, properties, keys, eases, render queue, `TextDocument`, `Shape`, markers, `File`/`Folder`, `Socket`, `app.settings` | Same classes, edits run through undoable engine commands; match names table; layers, groups and properties are callable (`layer("Effects")(1)` is `.property(...)`) | good | `crates/script` tests (≈ 10 test files) |
@@ -42,5 +42,6 @@ performance benchmark 4–8 h.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-16 | minor | Expression object model row names `propertyGroup()` and a group's `propertyIndex` (#1619) |
 | 2026-10-12 | minor | Estimate no longer counts `#include` / `#target` (#759, `tests_include.rs`); the table row was already current |
 | 2026-10-10 | major | First expressions and scripting checklist |

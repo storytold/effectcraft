@@ -28,6 +28,20 @@ pub fn display_time(s: &Session, comp: &Comp, t: Tick) -> String {
     }
 }
 
+/// A length (a layer's Duration) in the project's Time Display Style: a count of frames, so
+/// neither Start Numbering Frames At nor the comp's Start Timecode moves it.
+pub fn display_duration(s: &Session, comp: &Comp, len: Tick) -> String {
+    let fr = comp.frame_rate;
+    let n = fr.frame_at(len);
+    match s.project.settings.time_display {
+        TimeDisplayStyle::Frames => format!("{n:05}"),
+        TimeDisplayStyle::Feet35 | TimeDisplayStyle::Feet16 => {
+            effectcraft_time::format_feet_frames(n, s.project.settings.time_display.frames_per_foot().unwrap_or(16))
+        }
+        TimeDisplayStyle::Timecode => effectcraft_time::format_timecode_ae(n, fr, false),
+    }
+}
+
 /// Parse a time typed in the project's Time Display Style (relative `+n`/`-n` from frame
 /// `current`) into a comp frame.
 pub fn parse_display_time(s: &Session, comp: &Comp, text: &str, current: i64) -> std::result::Result<i64, String> {

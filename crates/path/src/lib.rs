@@ -133,7 +133,9 @@ pub fn from_kurbo(path: &BezPath) -> Vec<ShapePath> {
 /// Rectangle path centred at `pos` with corner `roundness` (AE draws clockwise from the top-right).
 pub fn rect(size: [f64; 2], pos: [f64; 2], roundness: f64) -> BezPath {
     let r = kurbo::Rect::from_center_size(Point::new(pos[0], pos[1]), (size[0].abs(), size[1].abs()));
-    let rad = roundness.clamp(0.0, size[0].abs().min(size[1].abs()) / 2.0);
+    let max_rad = size[0].abs().min(size[1].abs()) / 2.0;
+    // `f64::clamp` panics on a NaN bound (both size components NaN): fall back to no roundness.
+    let rad = if max_rad.is_nan() { 0.0 } else { roundness.clamp(0.0, max_rad) };
     if rad > 0.0 { r.to_rounded_rect(rad).to_path(0.1) } else { r.to_path(0.1) }
 }
 
@@ -353,6 +355,11 @@ pub fn transform(paths: &[BezPath], m: &Mat3) -> Vec<BezPath> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rect_with_nan_size_does_not_panic() {
+        let _ = rect([f64::NAN, f64::NAN], [0.0, 0.0], 5.0);
+    }
 
     #[test]
     fn roundtrip_vertex_model() {

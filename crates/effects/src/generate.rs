@@ -112,10 +112,19 @@ pub(crate) fn gen_blend(o: Px, g: Px, mode: u32) -> Px {
     }
 }
 
+/// 4-Color Gradient's weights are inverse squared distances softened by Blend²: each point
+/// weighs 1 / (d² + Blend²) (pixels). Fitted to After Effects 2026 renders at Blend 10, 50, 100
+/// and 300 (power 2.00 at every Blend, softening 0 / 2367 / 9817 / 90127 ≈ Blend²; mean error
+/// 0.27/255, max 0.9). Returns Blend² in buffer pixels, never 0.
+pub fn four_color_softening(blend: f64, scale: f64) -> f64 {
+    let b = blend.max(0.0) * scale;
+    (b * b).max(1e-6)
+}
+
 fn four_color(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let pts: Vec<((f64, f64), [f32; 4])> =
         (1..=4).map(|i| (b.to_px(ctx.params.v2(&format!("positionsColors/point{i}"))), ctx.params.color(&format!("positionsColors/color{i}")))).collect();
-    let blend = ctx.params.f("blend").max(1.0);
+    let k = four_color_softening(ctx.params.f("blend"), b.scale);
     let jitter = (ctx.params.f("jitter") / 100.0).clamp(0.0, 1.0) as f32;
     let op = ctx.params.f("opacity") as f32 / 100.0;
     let mode = ctx.params.e("blendingMode");
@@ -126,7 +135,7 @@ fn four_color(ctx: &EffectCtx, mut b: Buf) -> Buf {
             let mut wsum = 0.0;
             for ((qx, qy), c) in &pts {
                 let d2 = (x as f64 + 0.5 - qx).powi(2) + (y as f64 + 0.5 - qy).powi(2);
-                let w = 1.0 / (d2 / (blend * 100.0) + 1e-6).powf(1.5);
+                let w = 1.0 / (d2 + k);
                 for i in 0..3 {
                     acc[i] += c[i] as f64 * w;
                 }
@@ -420,6 +429,59 @@ mod generator_tests {
                 assert!(out[..3].iter().all(|&c| c <= out[3] + 1e-6), "blend {blend}: premultiplied colour above alpha");
             }
             assert!(o.img.data.iter().any(|p| p[3] > 0.99), "blend {blend}: the ramp is drawn inside the shape");
+        }
+    }
+
+    /// After Effects 2026, 4-Color Gradient defaults (yellow, green, magenta, blue at 10 % / 90 %
+    /// of a 1920 × 1080 layer) at Blend 100 and 300, here on a tenth-size layer with Blend 10
+    /// and 30 (the weights scale with the layer): colours at AE pixels (10x + 5, 10y + 5).
+    #[test]
+    fn four_color_blend_matches_after_effects() {
+        let pts = [
+            ("positionsColors/point1", [19.2, 10.8]),
+            ("positionsColors/point2", [172.8, 10.8]),
+            ("positionsColors/point3", [19.2, 97.2]),
+            ("positionsColors/point4", [172.8, 97.2]),
+        ];
+        let cols = [
+            ("positionsColors/color1", [1.0, 1.0, 0.0, 1.0]),
+            ("positionsColors/color2", [0.0, 1.0, 0.0, 1.0]),
+            ("positionsColors/color3", [1.0, 0.0, 1.0, 1.0]),
+            ("positionsColors/color4", [0.0, 0.0, 1.0, 1.0]),
+        ];
+        let ae: [(f64, [(i64, i64, [f32; 3]); 5]); 2] = [
+            (
+                10.0,
+                [
+                    (30, 20, [249.0, 240.0, 15.0]),
+                    (150, 30, [20.0, 208.0, 47.0]),
+                    (60, 90, [213.0, 56.0, 199.0]),
+                    (100, 10, [115.0, 177.0, 78.0]),
+                    (10, 50, [238.0, 145.0, 110.0]),
+                ],
+            ),
+            (
+                30.0,
+                [
+                    (30, 20, [236.0, 214.0, 41.0]),
+                    (150, 30, [30.0, 189.0, 66.0]),
+                    (60, 90, [203.0, 67.0, 188.0]),
+                    (100, 10, [117.0, 173.0, 82.0]),
+                    (10, 50, [233.0, 140.0, 115.0]),
+                ],
+            ),
+        ];
+        for (blend, samples) in ae {
+            let mut vals: Vec<(&str, Value)> = pts.iter().map(|(k, v)| (*k, Value::Vec2(*v))).collect();
+            vals.extend(cols.iter().map(|(k, v)| (*k, Value::Color(*v))));
+            vals.push(("blend", num(blend)));
+            let o = run_fx("ec.generate.fourcolor", &vals, Image::filled(192, 108, [1.0, 0.0, 0.0, 1.0]), 0.0, EffectEnv::default());
+            for (x, y, want) in samples {
+                let p = o.img.get(x, y);
+                for c in 0..3 {
+                    assert!((p[c] * 255.0 - want[c]).abs() <= 3.0, "blend {blend} at ({x}, {y}) channel {c}: {} vs AE {}", p[c] * 255.0, want[c]);
+                }
+            }
         }
     }
 

@@ -5,6 +5,15 @@ cargo test --workspace     # everything
 cargo xtask ci             # fmt, clippy -D warnings, tests, layers, assets, wasm
 ```
 
+`cargo xtask ci` builds in the dev profile and runs the tests with `cargo nextest run` (plus
+`cargo test --doc`) when `cargo-nextest` is installed, and with `cargo test` otherwise. It then
+runs `missing_translations_report` with `--nocapture`, which prints the interface strings each
+language has no translation for. Those strings show in English; the report always passes.
+
+Each crate with several integration-test files has one test binary, `tests/it/main.rs`, whose
+modules are the files in `tests/it/`. Run one file with `cargo test -p <crate> --test it <module>::`
+or `cargo nextest run -p <crate> -E 'binary(it) and test(/^<module>::/)'`.
+
 ## What the tests cover
 
 - **Engine commands** (`crates/engine/src/tests*.rs`): every command family, including undo and
@@ -16,7 +25,7 @@ cargo xtask ci             # fmt, clippy -D warnings, tests, layers, assets, was
 - **Effects** (`crates/effects`): each effect has a determinism test and at least one behaviour
   test (identity at neutral settings, known pixel results, or simulations giving the same frame
   whether you seek straight to it or play up to it). A registry-wide test checks that effects
-  which read the clock are declared time-dependent. `crates/effects/tests/sim_golden.rs` pins
+  which read the clock are declared time-dependent. `crates/effects/tests/it/sim_golden.rs` pins
   exact pixel hashes of the simulation effects the GPU shares plans with (CC Rainfall … Card
   Wipe) at several settings, times, bit depths and resolutions, so any change to their CPU output
   fails (re-pin with `SIM_GOLDEN_PRINT=1` after an intended change; pinned for aarch64 macOS,
@@ -68,6 +77,15 @@ instructions retired; `/usr/bin/time -v` on Linux gives max RSS and CPU; elsewhe
 It prints a table and appends one JSON line per run to `target/bench/results.jsonl` (git rev,
 date, load average, scenario, settings, metrics); `--compare OLD.jsonl` prints the % change against
 the latest matching runs there, `--compare OLD --with NEW` compares two files without rendering.
+`--repeat N` runs every scenario N times; with N > 1, one `"kind": "summary"` line per key follows
+the runs. Its `metrics` are the medians of the successful runs (byte and instruction counts
+rounded), `summary` holds `runs`, `failed` and median/p90/min/max per metric (p90 is the nearest
+rank, so it equals the max for N < 10), and its other fields (`date`, `load`, ...) are those of the
+key's last run; scripts that average runs should skip `kind: summary` lines. One failed run marks
+the summary failed. Comparisons use the latest line per key, so a key is a median only if its
+summary is the latest line (a later single run, or a batch that aborted before its summaries,
+leaves a raw run latest). The table labels each side `median of N` or `1 run` and warns when they
+differ; `--fail-over` refuses such keys.
 The table notes the 1-minute load average: on a busy machine wall time is noise, so compare
 peak memory and instructions retired, and rerun when the load differs a lot.
 

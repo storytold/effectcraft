@@ -8,6 +8,7 @@
 
 pub mod build;
 pub mod essential;
+mod file_check;
 pub mod limits;
 pub mod props;
 pub mod render_queue;
@@ -49,8 +50,9 @@ pub fn saved_by(text: &str) -> Option<String> {
     serde_json::from_str::<Meta>(text).ok()?.saved_by
 }
 
-/// The compositions that were open when a project file was saved (`activeComp` and `openComps`
-/// next to `savedBy`), so it reopens where it was left (#748). Editor state rather than project
+/// The compositions that were open when a project file was saved and their current times
+/// (`activeComp`, `openComps` and `compTimes` next to `savedBy`), so it reopens where it was left
+/// (#748, #1714). Editor state rather than project
 /// content: opening a comp doesn't make the project unsaved, and it isn't part of
 /// [`Project`]. Older files have none; older versions ignore it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
@@ -62,6 +64,10 @@ pub struct SavedView {
     /// The open comps (Timeline tabs), in tab order.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub open_comps: Vec<ItemId>,
+    /// Each comp's current time, so a project reopens on the frame it was saved at rather than
+    /// at 0, where its layers may not have started yet (#1714).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub comp_times: BTreeMap<ItemId, Tick>,
 }
 
 /// The view a project file was saved with ([`SavedView`]); empty for older files. Values that
@@ -73,6 +79,8 @@ pub fn saved_view(text: &str) -> SavedView {
         active_comp: Option<serde_json::Value>,
         #[serde(rename = "openComps", default)]
         open_comps: Option<serde_json::Value>,
+        #[serde(rename = "compTimes", default)]
+        comp_times: Option<serde_json::Value>,
     }
     let Ok(m) = serde_json::from_str::<Meta>(text) else { return SavedView::default() };
     SavedView {
@@ -82,6 +90,11 @@ pub fn saved_view(text: &str) -> SavedView {
             .as_ref()
             .and_then(serde_json::Value::as_array)
             .map_or_else(Vec::new, |a| a.iter().filter_map(serde_json::Value::as_u64).map(ItemId).collect()),
+        comp_times: m
+            .comp_times
+            .as_ref()
+            .and_then(serde_json::Value::as_object)
+            .map_or_else(BTreeMap::new, |o| o.iter().filter_map(|(k, v)| Some((ItemId(k.parse().ok()?), Tick(v.as_i64()?)))).collect()),
     }
 }
 
@@ -1466,11 +1479,32 @@ impl Project {
     }
     /// Whether comp `inner` is (transitively) nested inside comp `outer` (to prevent cycles).
     pub fn comp_contains(&self, outer: ItemId, inner: ItemId) -> bool {
+        // A walk with a stack and a visited set rather than recursion (#1237): a damaged project
+        // may hold a precomp cycle that doesn't pass `inner` (recursion never ended), a long
+        // chain must not use up the call stack, and comps shared by many paths are visited once
+        // (recursion re-walked them for every path).
         if outer == inner {
             return true;
         }
-        let Some(c) = self.comp(outer) else { return false };
-        c.layers.iter().any(|l| matches!(l.source, LayerSource::Comp { item } if self.comp_contains(item, inner)))
+        let mut seen = std::collections::HashSet::new();
+        let mut stack = vec![outer];
+        while let Some(id) = stack.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            let Some(c) = self.comp(id) else { continue };
+            for l in &c.layers {
+                if let LayerSource::Comp { item } = l.source {
+                    if item == inner {
+                        return true;
+                    }
+                    if !seen.contains(&item) {
+                        stack.push(item);
+                    }
+                }
+            }
+        }
+        false
     }
     /// Make sure `next_id` exceeds every id in the project (after loading or merging).
     pub fn fix_next_id(&mut self) {
@@ -1507,13 +1541,20 @@ impl Project {
             && self.render_prefs == other.render_prefs
     }
     /// The project file's text: the project with the version that wrote it (`savedBy`), checked
-    /// to read back, so a save never writes a file that can't be opened (JSON has no NaN or
-    /// infinity: such a value would be written as `null`).
+    /// to read back, so a save never writes a file that can't be opened. Values JSON can't hold
+    /// (NaN or infinity, written as `null`, and nesting too deep to parse) are refused on every
+    /// save; debug builds also read the text back.
     pub fn to_file_json(&self) -> Result<String, ProjectError> {
         self.to_file_json_with_view(&SavedView::default())
     }
     /// [`Project::to_file_json`] that also records the open compositions ([`SavedView`]).
     pub fn to_file_json_with_view(&self, view: &SavedView) -> Result<String, ProjectError> {
+        if self.schema > SCHEMA_VERSION {
+            return Err(ProjectError::Invalid(format!(
+                "the project can't be saved: it holds a value a project file can't store (project schema {} is newer than this version supports ({SCHEMA_VERSION}))",
+                self.schema
+            )));
+        }
         #[derive(Serialize)]
         struct File<'a> {
             #[serde(rename = "savedBy")]
@@ -1523,8 +1564,11 @@ impl Project {
             #[serde(flatten)]
             project: &'a Project,
         }
-        let text = serde_json::to_string_pretty(&File { saved_by: APP_VERSION, view, project: self })
-            .map_err(|e| ProjectError::Invalid(format!("the project can't be saved: {e}")))?;
+        let file = File { saved_by: APP_VERSION, view, project: self };
+        file_check::check(&file)
+            .map_err(|e| ProjectError::Invalid(format!("the project can't be saved: it holds a value a project file can't store ({e})")))?;
+        let text = serde_json::to_string_pretty(&file).map_err(|e| ProjectError::Invalid(format!("the project can't be saved: {e}")))?;
+        #[cfg(debug_assertions)]
         Project::from_json(&text)
             .map_err(|e| ProjectError::Invalid(format!("the project can't be saved: it holds a value a project file can't store ({e})")))?;
         Ok(text)

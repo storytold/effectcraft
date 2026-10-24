@@ -25,6 +25,55 @@ fn ink_x(img: &effectcraft_raster::Image) -> (i64, i64) {
     (x0, x1)
 }
 
+/// #955: EPS files that name their operators (`/mo /moveto load def`, as Illustrator's do),
+/// query the device and embed metadata read through a SubFileDecode filter draw their artwork.
+/// They imported as an empty layer.
+#[test]
+fn eps_with_aliased_operators_device_queries_and_embedded_data_draws() {
+    let square = "1 0 0 setrgbcolor 50 25 mo 150 25 li 150 75 li 50 75 li cp f\n";
+    let aliases = "/mo /moveto load def /li /lineto load def /cp /closepath load def /f /fill load def\n";
+    let doc = eps(format!("{aliases}{square}").as_bytes());
+    assert!(coverage(&render(&doc), 50, 25, 150, 75) > 4900.0, "aliased operators draw the square");
+    // Every operator that returns a value pushes it, so the stack stays aligned.
+    let queries = "mark currentflat currentscreen currentpagedevice currenthalftone currentblackgeneration \
+                   currentundercolorremoval currentcolortransfer currentsystemparams counttomark 13 eq /ok exch def cleartomark\n";
+    let doc = eps(format!("{aliases}{queries}ok {{ {square} }} if\n").as_bytes());
+    assert!(coverage(&render(&doc), 50, 25, 150, 75) > 4900.0, "device queries leave 13 values");
+    // Data up to the end-of-data string isn't run: its unbalanced brace would swallow the rest.
+    let data = "currentfile 0 (%END-OF-DATA) /SubFileDecode filter pop\n<x> { ( not PostScript\n%END-OF-DATA\n";
+    let doc = eps(format!("{aliases}{data}{square}").as_bytes());
+    assert!(coverage(&render(&doc), 50, 25, 150, 75) > 4900.0, "drawing after the embedded data");
+}
+
+#[test]
+fn eps_filter_on_a_string_source_does_not_skip_the_program() {
+    let square = "1 0 0 setrgbcolor 50 25 moveto 150 25 lineto 150 75 lineto 50 75 lineto closepath fill\n";
+    let img = "gsave 1 1 8 [1 0 0 1 0 0] (FF) /ASCIIHexDecode filter image grestore\n";
+    // Images aren't drawn yet, so this parses without `eps`'s nothing-skipped check.
+    let doc = parse(format!("%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 200 100\n{img}{square}").as_bytes()).unwrap();
+    assert_eq!(doc.skipped, ["image"]);
+    assert!(coverage(&render(&doc), 50, 25, 150, 75) > 4900.0, "drawing after an image read from a string");
+}
+
+/// A loaded operator runs that operator even after its name is redefined (the prolog idiom
+/// `/_m /moveto load def /moveto {… _m} def`), and an executable name bound with `cvx` runs what
+/// its name is bound to.
+#[test]
+fn eps_loaded_operators_and_executable_name_aliases() {
+    let saved = "/_m /moveto load def /moveto {_m} def 1 0 0 setrgbcolor 50 25 moveto 150 25 lineto 150 75 lineto 50 75 lineto closepath fill\n";
+    assert!(coverage(&render(&eps(saved.as_bytes())), 50, 25, 150, 75) > 4900.0, "a redefined moveto that calls the saved one");
+    let alias = "/sq {50 25 moveto 150 25 lineto 150 75 lineto 50 75 lineto closepath fill} def /y /sq cvx def 1 0 0 setrgbcolor y\n";
+    assert!(coverage(&render(&eps(alias.as_bytes())), 50, 25, 150, 75) > 4900.0, "an executable name bound to a procedure's name");
+}
+
+/// Each `exec` of the executable name `exec` runs the next one: the chain is cut off at the call
+/// depth instead of overflowing the stack.
+#[test]
+fn eps_exec_of_executable_names_stops_at_the_call_depth() {
+    let doc = parse(b"%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 200 100\n/exec cvx 99999 {dup} repeat exec\n").unwrap();
+    assert!(doc.skipped.iter().any(|s| s.contains("recursion limit")), "{:?}", doc.skipped);
+}
+
 #[test]
 fn eps_text_with_bundled_fonts_and_show_variants() {
     // Not embedded: drawn with the bundled stand-in, like the same text in a PDF.
@@ -394,6 +443,100 @@ fn arcs_with_huge_angles_end_at_their_second_angle() {
     assert_eq!(doc.skipped, ["arc (too many turns)"]);
     let img = render(&doc);
     assert!(img.get(50, 50)[3] > 0.99, "{:?}", img.get(50, 50));
+}
+
+/// Parses `body` after a square through [`eps_soon`]: the square stays, and the program stops at
+/// the operation limit.
+fn runs_out_of_budget(body: &str) {
+    let doc = eps_soon(&format!("0 0 10 10 rectfill {body}"));
+    assert_eq!(doc.flatten().len(), 1, "{body}: {:?}", doc.skipped);
+    assert_eq!(doc.skipped, ["PostScript (operation limit)"], "{body}");
+}
+
+#[test]
+fn paths_made_in_a_loop_run_out_of_the_budget() {
+    // Each curve, rectangle element and glyph outline element an operator makes counts against the
+    // operation budget: `arc` at a radius of 2.2 × 10^18 makes about 6,800 curves a call,
+    // `rectclip` with an array of 2,000 rectangles makes 10,000 elements, and `charpath` makes the
+    // outlines of 1,000 H's.
+    for body in [
+        "{ newpath 0 0 2200000000000000000 0 1440 arc } loop",
+        "/a 8000 array def 0 1 7999 { a exch 0 put } for { gsave a rectclip grestore } loop",
+        "/Helvetica findfont 10 scalefont setfont /s 1000 string def 0 1 999 { s exch 72 put } for \
+         { newpath 0 0 moveto s false charpath } loop",
+    ] {
+        runs_out_of_budget(body);
+    }
+}
+
+#[test]
+fn paths_read_or_copied_in_a_loop_run_out_of_the_budget() {
+    // `pathbbox` reads each element of the current path, and `gsave`, `save` and `clip` copy it:
+    // each element counts against the operation budget. The path has 100,001 elements.
+    let path = "newpath 0 0 moveto 0 1 99999 { pop 1 0 rlineto } for";
+    for body in ["{ pathbbox pop pop pop pop } loop", "{ gsave grestore } loop", "{ save restore } loop", "{ gsave clip grestore } loop"] {
+        runs_out_of_budget(&format!("{path} {body}"));
+    }
+}
+
+#[test]
+fn nested_loops_run_out_of_the_budget() {
+    // Each pass of `loop`, `repeat`, `for` and `forall` counts against the operation budget, and
+    // so does each item of a procedure that is not a name. `clear` empties the operand stack that
+    // the passes fill.
+    let literals = format!("{{ {} clear }} loop", "0 ".repeat(100_000));
+    for body in [
+        "{ {} loop } loop",
+        "{ 1000000 {} repeat } loop",
+        "{ 0 1 999999 {} for clear } loop",
+        "/s 1000000 string def { s {} forall clear } loop",
+        "/a 1000000 array def { a {} forall clear } loop",
+        "/d 1 dict def 0 1 99999 { d exch 0 put } for { d {} forall clear } loop",
+        literals.as_str(),
+    ] {
+        runs_out_of_budget(body);
+    }
+}
+
+#[test]
+fn paths_stop_at_the_path_limit() {
+    // A path holds at most 1,048,576 elements. An operator that would add more stops the program:
+    // the square drawn before it stays, and the square after it is left out.
+    for body in [
+        "newpath 0 0 moveto 1100 { 1000 { 1 0 rlineto } repeat } repeat",
+        "newpath 0 0 moveto 0 0 0 0 0 0 1100 { 1000 { 6 copy rcurveto } repeat } repeat",
+        "newpath 0 0 moveto 1100 { 1000 { closepath } repeat } repeat",
+        // 1,024 turns at a radius of 2 × 10^17: about 1,171,000 curves.
+        "newpath 0 0 200000000000000000 0 368640 arc",
+        // At a radius of 10^300, kurbo divides the arc into more curves than a usize can count.
+        "newpath 0 0 10 300 exp 0 90 arc",
+        // The outlines of 100,000 H's, 13 elements each.
+        "/Helvetica findfont 10 scalefont setfont /s 100000 string def 0 1 99999 { s exch 72 put } for \
+         0 0 moveto s false charpath",
+        // 210,000 rectangles of five elements each.
+        "/a 840000 array def 0 1 839999 { a exch 0 put } for a rectfill",
+    ] {
+        let doc = eps_soon(&format!("0 0 10 10 rectfill {body} 20 20 10 10 rectfill"));
+        assert_eq!(doc.flatten().len(), 1, "{body}: {:?}", doc.skipped);
+        assert_eq!(doc.skipped, ["PostScript (path limit)"], "{body}");
+    }
+    // A `moveto` replaces a `moveto` just before it (PostScript Language Reference §8.2, `moveto`),
+    // and so does the current point that `show` sets, so 550,000 pieces of text placed with
+    // `moveto` and `show` leave a path of one element.
+    let doc = eps_soon("/Helvetica findfont 10 scalefont setfont 550 { 1000 { 0 0 moveto ( ) show } repeat } repeat 0 0 10 10 rectfill");
+    assert!(doc.skipped.is_empty(), "{:?}", doc.skipped);
+    assert_eq!(doc.flatten().len(), 1);
+}
+
+#[test]
+fn pdf_paths_stop_at_the_path_limit() {
+    // A content stream's current path holds at most 1,048,576 elements: `re` (five elements each)
+    // and `h` stop the stream at the limit, and the square painted before it stays.
+    for (op, n) in [("0 0 1 1 re ", 210_000), ("h ", 1_100_000)] {
+        let doc = parse(&page_pdf(&format!("0 0 10 10 re f 0 0 m {} f 20 20 10 10 re f", op.repeat(n)), "", vec![])).unwrap();
+        assert_eq!(doc.flatten().len(), 1, "{op}: {:?}", doc.skipped);
+        assert_eq!(doc.skipped, ["content (path limit)"], "{op}");
+    }
 }
 
 #[test]

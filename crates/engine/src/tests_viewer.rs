@@ -637,3 +637,63 @@ fn each_comp_keeps_its_resolution_outside_the_undo_history_and_in_the_file() {
     s.execute_checked("view.res.auto", json!({})).unwrap();
     assert_eq!(s.active_comp().unwrap().resolution, Resolution::Auto);
 }
+
+/// #1685: changing Type updates the property tree in the same undo step, including when
+/// addressed by uid (as in the UI) rather than by path (scripts/control channel).
+#[test]
+fn polystar_type_switch_updates_inner_controls_and_undoes() {
+    let mut s = comp();
+    let lid = s.execute("layer.newShape", json!({"kind": "polygon"})).unwrap()["layer"].as_u64().unwrap();
+    let group = |s: &Session| layer(s, lid).props.group("contents/group/contents/star").unwrap().clone();
+    let polygon = group(&s);
+    let type_uid = polygon.get("type").unwrap().uid;
+    assert!(polygon.get("innerRadius").is_none());
+    s.execute("prop.set", json!({"layer": lid, "prop": type_uid, "value": 0})).unwrap();
+    let star = group(&s);
+    assert_eq!(star.get("innerRadius").unwrap().value, KV::Scalar(50.0));
+    assert_eq!(star.get("innerRoundness").unwrap().value, KV::Scalar(0.0));
+    assert_eq!(star.get("innerRadius").unwrap().ui, effectcraft_project::ParamUi::Pixels);
+    assert_eq!(star.get("innerRoundness").unwrap().ui, effectcraft_project::ParamUi::Percent);
+    let names: Vec<_> = star.children.iter().filter_map(|n| n.as_prop()).map(|p| p.match_id.as_str()).collect();
+    assert_eq!(names, ["direction", "type", "points", "position", "rotation", "innerRadius", "outerRadius", "innerRoundness", "outerRoundness"]);
+    assert_eq!(star.get("outerRadius"), polygon.get("outerRadius"));
+    assert!(s.undo());
+    assert_eq!(group(&s), polygon);
+    assert!(s.redo());
+    assert_eq!(group(&s), star);
+    // Reapplying the same Type must not reset custom inner values or allocate new ids.
+    s.execute("prop.set", json!({"layer": lid, "path": "contents/group/contents/star/innerRadius", "value": 37})).unwrap();
+    let before = group(&s);
+    let next = s.project.next_id;
+    s.execute("prop.set", json!({"layer": lid, "path": "contents/group/contents/star/type", "value": 0})).unwrap();
+    assert_eq!(group(&s), before);
+    assert_eq!(s.project.next_id, next);
+    let inner_uid = before.get("innerRadius").unwrap().uid;
+    s.state.selected_props = vec![(LayerId(lid), inner_uid)];
+    s.state.selected_keys = vec![crate::KeyRef { layer: LayerId(lid), prop: inner_uid, time: Tick::ZERO }];
+    s.execute("prop.set", json!({"layer": lid, "path": "contents/group/contents/star/type", "value": 1})).unwrap();
+    assert_eq!(group(&s).get("type").unwrap().value, KV::Enum(1));
+    assert!(group(&s).get("innerRadius").is_none());
+    assert!(group(&s).get("innerRoundness").is_none());
+    assert!(s.state.selected_props.is_empty());
+    assert!(s.state.selected_keys.is_empty());
+    assert!(s.undo());
+    assert_eq!(group(&s), before, "undo restores the original inner values and ids");
+    assert!(s.redo());
+    assert!(group(&s).get("innerRadius").is_none());
+    s.execute("prop.set", json!({"layer": lid, "prop": type_uid, "value": 0})).unwrap();
+    assert_eq!(group(&s).get("innerRadius").unwrap().value, KV::Scalar(50.0));
+}
+
+#[test]
+fn polystar_animated_type_keeps_the_inner_controls_needed_by_other_frames() {
+    let mut s = comp();
+    let lid = s.execute("layer.newShape", json!({"kind": "star"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("prop.set", json!({"layer": lid, "path": "contents/group/contents/star/innerRadius", "value": 27})).unwrap();
+    s.execute("prop.toggleAnimation", json!({"layer": lid, "path": "contents/group/contents/star/type", "value": true})).unwrap();
+    s.execute("prop.set", json!({"layer": lid, "path": "contents/group/contents/star/type", "time": 1, "value": 1})).unwrap();
+    let star = layer(&s, lid).props.group("contents/group/contents/star").unwrap().clone();
+    assert_eq!(star.get("type").unwrap().value_at(Tick::ZERO), KV::Enum(0));
+    assert_eq!(star.get("type").unwrap().value_at(Tick::from_seconds_f64(1.0)), KV::Enum(1));
+    assert_eq!(star.get("innerRadius").unwrap().value, KV::Scalar(27.0));
+}

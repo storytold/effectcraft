@@ -486,10 +486,10 @@ pub fn encode_thumb(w: u32, h: u32, rgba: &[u8]) -> String {
 /// Decode a thumbnail to RGB bytes (THUMB_W×THUMB_H×3).
 pub fn decode_thumb(text: &str) -> Option<Vec<u8>> {
     let t = text.trim();
-    if t.len() != THUMB_W * THUMB_H * 6 {
+    if t.len() != THUMB_W * THUMB_H * 6 || !t.is_ascii() {
         return None;
     }
-    (0..t.len()).step_by(2).map(|i| u8::from_str_radix(&t[i..i + 2], 16).ok()).collect()
+    (0..t.len()).step_by(2).map(|i| u8::from_str_radix(t.get(i..i + 2)?, 16).ok()).collect()
 }
 
 /// Render a project's main comp at its poster time into a thumbnail.
@@ -942,6 +942,12 @@ pub fn specs() -> Vec<CommandSpec> {
 mod tests {
     use super::*;
     use crate::config::{DirConfig, MemoryConfig};
+
+    #[test]
+    fn non_ascii_thumbnail_is_rejected_without_panicking() {
+        let malformed = format!("aé{}", "0".repeat(THUMB_W * THUMB_H * 6 - 3));
+        assert!(decode_thumb(&malformed).is_none());
+    }
 
     #[test]
     fn every_builtin_builds_with_controls_and_renders() {

@@ -637,13 +637,7 @@ fn motion_tile(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
     let mirror = ctx.params.b("mirrorEdges");
     let phase = ctx.params.f("phase") / 360.0;
     let hshift = ctx.params.b("horizontalPhaseShift");
-    let (nw, nh, noff) = if ctx.adjustment {
-        (b.img.width, b.img.height, b.offset)
-    } else {
-        let ow = (lw * ctx.params.f("outputWidth") / 100.0).max(1.0 / s);
-        let oh = (lh * ctx.params.f("outputHeight") / 100.0).max(1.0 / s);
-        ((ow * s).round().max(1.0) as u32, (oh * s).round().max(1.0) as u32, [(ow - lw) * 0.5 * s, (oh - lh) * 0.5 * s])
-    };
+    let (nw, nh, noff) = effectcraft_effects::motion_tile_frame(ctx, b.offset, (b.img.width, b.img.height), s);
     if !e.g.fits(nw, nh) {
         return None;
     }

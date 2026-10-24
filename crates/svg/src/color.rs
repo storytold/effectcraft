@@ -179,7 +179,11 @@ pub fn parse_color(s: &str) -> Option<[f64; 4]> {
             return None;
         }
         let comp = |t: &str| -> Option<f64> {
-            Some(if let Some(p) = t.strip_suffix('%') { p.trim().parse::<f64>().ok()? / 100.0 } else { t.parse::<f64>().ok()? / 255.0 })
+            Some(if let Some(p) = t.strip_suffix('%') {
+                p.trim().parse::<f64>().ok().filter(|v| v.is_finite())? / 100.0
+            } else {
+                t.parse::<f64>().ok().filter(|v| v.is_finite())? / 255.0
+            })
         };
         let alpha = a.get(3).map_or(Some(1.0), |t| alpha(t))?;
         return Some([comp(a[0])?.clamp(0.0, 1.0), comp(a[1])?.clamp(0.0, 1.0), comp(a[2])?.clamp(0.0, 1.0), alpha]);
@@ -189,9 +193,9 @@ pub fn parse_color(s: &str) -> Option<[f64; 4]> {
         if a.len() < 3 {
             return None;
         }
-        let h = a[0].trim_end_matches("deg").parse::<f64>().ok()?.rem_euclid(360.0) / 360.0;
-        let s = a[1].trim_end_matches('%').parse::<f64>().ok()?.clamp(0.0, 100.0) / 100.0;
-        let l = a[2].trim_end_matches('%').parse::<f64>().ok()?.clamp(0.0, 100.0) / 100.0;
+        let h = a[0].trim_end_matches("deg").parse::<f64>().ok().filter(|v| v.is_finite())?.rem_euclid(360.0) / 360.0;
+        let s = a[1].trim_end_matches('%').parse::<f64>().ok().filter(|v| v.is_finite())?.clamp(0.0, 100.0) / 100.0;
+        let l = a[2].trim_end_matches('%').parse::<f64>().ok().filter(|v| v.is_finite())?.clamp(0.0, 100.0) / 100.0;
         let al = a.get(3).map_or(Some(1.0), |t| alpha(t))?;
         let [r, g, b] = hsl(h, s, l);
         return Some([r, g, b, al]);
@@ -208,7 +212,14 @@ fn split_args(s: &str) -> Vec<&str> {
 }
 
 fn alpha(t: &str) -> Option<f64> {
-    Some(if let Some(p) = t.strip_suffix('%') { p.parse::<f64>().ok()? / 100.0 } else { t.parse::<f64>().ok()? }.clamp(0.0, 1.0))
+    Some(
+        if let Some(p) = t.strip_suffix('%') {
+            p.parse::<f64>().ok().filter(|v| v.is_finite())? / 100.0
+        } else {
+            t.parse::<f64>().ok().filter(|v| v.is_finite())?
+        }
+        .clamp(0.0, 1.0),
+    )
 }
 
 /// CSS HSL → RGB (CSS Color 3 §4.2.4).
@@ -238,6 +249,22 @@ fn hsl(h: f64, s: f64, l: f64) -> [f64; 3] {
 #[cfg(test)]
 mod tests {
     use super::parse_color;
+
+    #[test]
+    fn non_finite_rejected() {
+        for s in [
+            "rgb(nan,0,0)",
+            "rgb(inf,0,0)",
+            "rgba(0,0,0,nan)",
+            "rgba(0,0,0,inf)",
+            "hsl(nan,100%,50%)",
+            "hsl(120,nan%,50%)",
+            "hsl(120,100%,inf%)",
+            "hsl(120,100%,50%,nan)",
+        ] {
+            assert_eq!(parse_color(s), None, "{s}");
+        }
+    }
 
     #[test]
     fn colors() {

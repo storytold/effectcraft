@@ -12,7 +12,7 @@ use effectcraft_project::{BitDepth, MaskMode};
 use effectcraft_render::RenderOpts;
 use effectcraft_time::Tick;
 
-use crate::tests::{Scene, c, check, compare_at, diff, effect_case, gpu, n, opts, pattern, set};
+use crate::tests::{Scene, allow_llvmpipe_boundary_flips, c, check, compare_at, diff, effect_case, gpu, n, opts, pattern, set};
 
 pub(crate) fn e(v: u32) -> Value {
     Value::Enum(v)
@@ -193,6 +193,7 @@ fn composites_and_colour() {
 
 #[test]
 fn stylize() {
+    let _flips = allow_llvmpipe_boundary_flips();
     for (done, flags) in
         [(30.0, [true, true, true, false]), (55.0, [false, true, false, true]), (70.0, [true, false, false, false]), (10.0, [false, false, true, true])]
     {

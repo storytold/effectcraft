@@ -32,13 +32,15 @@ self.addEventListener("fetch", (event) => {
   if (req.method !== "GET" || url.origin !== self.location.origin) return;
   event.respondWith(
     (async () => {
-      const cache = await caches.open(CACHE);
-      // The page itself regardless of its query (?empty, ?demo…).
-      const key = req.mode === "navigate" ? new URL("./", self.registration.scope).href : req;
-      const hit = await cache.match(key, { ignoreSearch: req.mode === "navigate" });
-      if (hit) return hit;
+      const cache = await caches.open(CACHE).catch(() => null);
+      if (cache) {
+        // The page itself regardless of its query (?empty, ?demo…).
+        const key = req.mode === "navigate" ? new URL("./", self.registration.scope).href : req;
+        const hit = await cache.match(key, { ignoreSearch: req.mode === "navigate" }).catch(() => null);
+        if (hit) return hit;
+      }
       const res = await fetch(req);
-      if (res.ok && res.type === "basic") cache.put(req, res.clone());
+      if (cache && res.ok && res.type === "basic") void cache.put(req, res.clone()).catch(() => {});
       return res;
     })(),
   );
