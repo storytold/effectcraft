@@ -377,12 +377,71 @@ pub fn gen_image(w: u32, h: u32, f: impl Fn(usize, usize) -> Px + Sync) -> Image
     img
 }
 
+/// Distance (px) up to which the small colour-fill blur in [`set_alpha`] reaches.
+pub const FILL_REACH: f64 = 8.0;
+
+/// Where `fill` has (almost) no coverage, copy in the colour of the nearest pixel that
+/// has some (jump flooding), so distant growth does not turn black.
+fn nearest_fill(fill: &mut Image) {
+    let (w, h) = (fill.width as usize, fill.height as usize);
+    let mut seed: Vec<Option<u32>> = (0..w * h).map(|i| (fill.data[i][3] > 1e-3).then_some(i as u32)).collect();
+    let mut step = w.max(h).next_power_of_two() / 2;
+    while step >= 1 {
+        let prev = seed.clone();
+        for y in 0..h {
+            for x in 0..w {
+                let i = y * w + x;
+                let mut best = prev[i];
+                let mut bd = best.map_or(i64::MAX, |s| d2(s as usize, x, y, w));
+                for dy in [-(step as isize), 0, step as isize] {
+                    for dx in [-(step as isize), 0, step as isize] {
+                        let (nx, ny) = (x as isize + dx, y as isize + dy);
+                        if nx < 0 || ny < 0 || nx >= w as isize || ny >= h as isize {
+                            continue;
+                        }
+                        if let Some(s) = prev[ny as usize * w + nx as usize] {
+                            let d = d2(s as usize, x, y, w);
+                            if d < bd {
+                                bd = d;
+                                best = Some(s);
+                            }
+                        }
+                    }
+                }
+                seed[i] = best;
+            }
+        }
+        step /= 2;
+    }
+    for i in 0..w * h {
+        if fill.data[i][3] <= 1e-3
+            && let Some(s) = seed[i]
+        {
+            fill.data[i] = fill.data[s as usize];
+        }
+    }
+}
+
+fn d2(s: usize, x: usize, y: usize, w: usize) -> i64 {
+    let (sx, sy) = ((s % w) as i64, (s / w) as i64);
+    (sx - x as i64).pow(2) + (sy - y as i64).pow(2)
+}
+
 /// Replace the alpha of `img` with `new_a`, keeping straight colour. Pixels that were (nearly)
 /// transparent take their colour from a small blur of the surroundings.
 pub fn set_alpha(img: &mut Image, new_a: &Plane) {
+    set_alpha_fill(img, new_a, false);
+}
+
+/// [`set_alpha`]; with `far` the colour also reaches pixels beyond the small blur, from the nearest
+/// pixel that has some (for mattes grown by more than [`FILL_REACH`]).
+pub fn set_alpha_fill(img: &mut Image, new_a: &Plane, far: bool) {
     let needs_fill = img.data.par_iter().zip(new_a.data.par_iter()).any(|(p, &a)| p[3] <= 1e-4 && a > 1e-4);
     let fill = if needs_fill {
-        let blurred = effectcraft_raster::gaussian_blur(img, 3.0, 3.0, true);
+        let mut blurred = effectcraft_raster::gaussian_blur(img, 3.0, 3.0, true);
+        if far {
+            nearest_fill(&mut blurred);
+        }
         Some(blurred)
     } else {
         None
