@@ -1907,8 +1907,11 @@ impl eframe::App for EffectcraftApp {
         if !self.synthetic.is_empty() {
             ctx.request_repaint();
         } else if !self.input_waiters.is_empty() {
+            // A modal dialog open after the input (still, or one it opened) takes the next input.
+            let modal = control::modal(self, ctx);
+            let result = if modal.is_null() { serde_json::Value::Null } else { json!({"modal": modal}) };
             for w in self.input_waiters.drain(..) {
-                let _ = w.send(json!({"ok": true, "result": null}));
+                let _ = w.send(json!({"ok": true, "result": result}));
             }
         }
         self.issue_screenshots(ctx);
@@ -1938,8 +1941,11 @@ impl eframe::App for EffectcraftApp {
             ctx.request_repaint();
         } else if !self.input_waiters.is_empty() {
             ctx.request_repaint();
+            // A modal dialog open after the input (still, or one it opened) takes the next input.
+            let modal = control::modal(self, &ctx);
+            let result = if modal.is_null() { serde_json::Value::Null } else { json!({"modal": modal}) };
             for w in self.input_waiters.drain(..) {
-                let _ = w.send(json!({"ok": true, "result": null}));
+                let _ = w.send(json!({"ok": true, "result": result}));
             }
         }
         if self.frames.inflight() > 0 {

@@ -729,8 +729,13 @@ impl Interpretation {
 /// whether the file is premultiplied (every partly transparent pixel's colour within its alpha
 /// of a black or white matte) or straight. `None` when the frame has no partial alpha.
 pub(crate) fn guess_alpha(s: &Session, item: ItemId, f: &Footage) -> Option<(AlphaMode, [f32; 3])> {
+    guess_alpha_from(s.footage.as_ref(), item, f)
+}
+
+/// [`guess_alpha`] reading the frame from `source` (inside an edit, where the session is borrowed).
+pub(crate) fn guess_alpha_from(source: &dyn crate::render::FootageSource, item: ItemId, f: &Footage) -> Option<(AlphaMode, [f32; 3])> {
     let probe = Footage { alpha: AlphaMode::Straight, invert_alpha: false, ..f.clone() };
-    let img = s.footage.frame(item, &probe, Tick::ZERO)?;
+    let img = source.frame(item, &probe, Tick::ZERO)?;
     let (mut partial, mut black, mut white) = (0usize, true, true);
     let eps = 1.5 / 255.0;
     for px in img.data.iter() {

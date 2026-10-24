@@ -57,7 +57,7 @@ panel registers an element id; both are enforced by `crates/ui-egui/tests/it/ui_
 
 | Method | Params | Result |
 |---|---|---|
-| `ui.inspect` | `{}` | Window size, pixels per point, fps, serialized `UiState`, playback, time, active comp, selection, open dialog, last render ms, `keyboardFocus`, `windowFocused`, `workspaceStorageError`. |
+| `ui.inspect` | `{}` | Window size, pixels per point, fps, serialized `UiState`, playback, time, active comp, selection, open dialog, `modal` (below), last render ms, `keyboardFocus`, `windowFocused`, `workspaceStorageError`. |
 | `ui.elements` | `{prefix?}` | `[{id, label, rect: [x, y, w, h]}]`: the widgets drawn in the last frame, in points. |
 | `ui.set` | `{tool?, workspace?, theme?, focused?, viewer?, timeline?, menuBar?, home?}` | `viewer: {zoom (null = fit), res: Full\|Half\|Third\|Quarter\|Auto, pan: [x,y], grid, rulers, safeMargins, transparencyGrid}`; `timeline: {pps (null = fit), start, graphEditor, showModes, openLayers: [ids], openGroups: [uids]}`. |
 | `ui.panel.show` / `ui.panel.close` | `{panel}` | Panels: `Project`, `Composition`, `Timeline`, `EffectControls`, `EffectsPresets`, `Info`, `Preview`, `Character`, `Paragraph`, `Align` and others. |
@@ -106,6 +106,16 @@ Points are logical window coordinates. A target is `{id}` (the element's centre;
 | `ui.scroll` | `{id \| x,y, dx, dy}` |
 | `ui.key` | `{key}`, for example `Space`, `F9`, `Cmd+Z`, `Cmd+Shift+Z`, `PageDown`, `Escape` |
 | `ui.type` | `{text}`: text input into the focused field |
+
+**Modal dialogs.** A modal dialog (forms such as Composition Settings or Interpret Footage, which
+Settings ▸ Import ▸ Interpret Unlabeled Alpha As: Ask User opens after an import, the
+unsaved-changes prompt…) takes every pointer press and key until it closes. `ui.inspect` reports
+it as `modal: {dialog, title, rect: [x, y, w, h], elements}` (`elements`: the automation ids drawn
+inside it, such as `form.ok` and `form.cancel`), or `null`. While one is open, `ui.click`,
+`ui.drag` (its `from`) and `ui.scroll` at a point outside it (and outside its popups) reply with an
+error naming the dialog and its buttons instead of sending input that would do nothing. Input
+methods reply `null`, or `{"modal": …}` when a modal dialog is open after the input (still open,
+or one the input opened). Engine commands keep running while it is open.
 
 Shortcut presets also accept `Physical+<shortcut>` for a keyboard position, using egui's
 US-position names (for example `Physical+6` and `Physical+Minus` distinguish AZERTY's

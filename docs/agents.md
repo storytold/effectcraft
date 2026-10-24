@@ -210,6 +210,14 @@ Things that tripped up a long agent-driven session (a multi-scene 3D piece built
 - **Save early in headless mode.** Without `--autosave` the headless server keeps the project in
   memory only, so a server restart loses unsaved work: start it with `mcp --autosave` (see above)
   or call `save_project {"path": …}` after each milestone.
+- **Modal dialogs in the desktop app.** A modal dialog (a form such as Interpret Footage, which
+  Ask User opens after importing footage with unlabeled alpha, Composition Settings, the
+  unsaved-changes prompt) takes every click and key. Engine commands still run, but bridge
+  `ui_click`, `ui_drag` and scrolls outside the dialog fail with "a modal dialog is open (…)",
+  naming its buttons; close it first (`ui_click` on `form.ok` / `form.cancel`). `ui_inspect`
+  reports it as `modal: {dialog, title, rect, elements}` (`null` when none is open), and input
+  replies carry `{"modal": …}` while one is open after the input. Import with `alpha` (see the
+  cookbook) so Interpret Footage doesn't open.
 - **Environment light.** `layer.newLight` also accepts `"kind":"Environment"`: an equirectangular
   image that metallic surfaces reflect. Set its `lightOptions/source` to a footage, comp or solid
   layer by layer id; with no source it uses the comp's Environment Layer (`layer.environment`)
@@ -280,6 +288,17 @@ build real projects through these interfaces; they are worked examples of everyt
   colour bars, as in After Effects. `file.interpretFootage {"items":[id], "frameRate":12,
   "startTimecode":1001}` conforms them and sets Override Start (the item and layers that ran to its end get the new
   length). See [footage.md](footage.md).
+* **Unlabeled alpha**: TGA, TIFF and movies with alpha (ProRes 4444, QuickTime Animation…) don't
+  say whether it is straight or premultiplied. With Settings ▸ Import ▸ Interpret Unlabeled Alpha
+  As on Ask User (the default) the desktop app opens Interpret Footage, a modal form, after the
+  import. Pass `alpha` to decide while importing and never ask:
+  `file.import {"paths": ["/r/key.mov"], "alpha": "premultiplied"}` (`straight`,
+  `premultiplied`, `ignore`, or `guess`: Interpret Footage ▸ Guess from the first frame, else
+  premultiplied movies and straight stills). Files that state their alpha (PNG, OpenEXR, PSD…)
+  keep it. The reply lists `unlabeledAlpha` (the items whose alpha is unlabeled), `askedAlpha`
+  (those Ask User opened Interpret Footage for) and `alphaInterpretation: [{item, alpha,
+  matteColor, from: "alpha"|"settings"|"ask"}]`. Change it later with `file.interpretFootage
+  {"items":[id], "alpha": …}`.
 * **Colour of footage**: `file.interpretFootage {"items":[id], "preserveRgb":true}` is Interpret
   Footage ▸ Preserve RGB: the file's values unconverted (float EXRs stay linear), for a
   per-layer OCIO conversion or data passes.

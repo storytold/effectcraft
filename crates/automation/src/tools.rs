@@ -817,7 +817,7 @@ static TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "ui_inspect",
-        description: "UI state: window size, tool, workspace, panels, viewer and timeline view state, playback, active comp, selection, open dialog, render time.",
+        description: "UI state: window size, tool, workspace, panels, viewer and timeline view state, playback, active comp, selection, open dialog, `modal` (the open modal dialog: title, rect and the element ids inside it; it takes all input, so close it with its buttons, e.g. form.ok / form.cancel), render time.",
         bridge_only: true,
         schema: || schema(json!({}), &[]),
         run: ui_inspect,
@@ -831,7 +831,7 @@ static TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "ui_click",
-        description: "Click an element by `id` (from ui_elements) or at `x`,`y` (points). `button`: left|right|middle, `count`: 2 for double-click, `modifiers`: {shift, alt, command, ctrl}.",
+        description: "Click an element by `id` (from ui_elements) or at `x`,`y` (points). `button`: left|right|middle, `count`: 2 for double-click, `modifiers`: {shift, alt, command, ctrl}. While a modal dialog is open (ui_inspect `modal`), a click outside it fails with the dialog's name and buttons.",
         bridge_only: true,
         schema: || {
             schema(

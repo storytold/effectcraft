@@ -127,7 +127,8 @@ Commands (CLI, MCP, control channel):
   (found again by name), and a file that can't be read yet (still being written) is tried again once it changes again.
   `footage.reloadChanged` runs the same check once (CLI, agents)
 - `import.unlabeledAlpha`: alpha of TGA / TIFF / movie footage (Ask opens Interpret Footage;
-  Guess takes premultiplied for movies, straight for stills)
+  Guess takes premultiplied for movies, straight for stills); `file.import {alpha}` overrides it
+  for one import
 - `import.dragImportAs`: layered files dropped on the window import as footage or a comp
 - `export.defaultOutputFolder`: where relative Render Queue outputs go
 - `export.segmentSequences`, `export.segmentSequenceFiles`: sequences split into numbered

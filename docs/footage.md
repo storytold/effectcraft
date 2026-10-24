@@ -101,6 +101,11 @@ when a sequence imports; Interpret Footage lists them too.
 **File ▸ Interpret Footage ▸ Remember Interpretation / Apply Interpretation** copy the alpha,
 fields, pixel aspect, loop and colour settings (Preserve RGB too) to other footage.
 
+Footage whose alpha is unlabeled (TGA, TIFF, movies; PNG, OpenEXR and PSD state theirs) is
+interpreted on import by Settings ▸ Import ▸ **Interpret Unlabeled Alpha As**; Ask User opens
+Interpret Footage. Agents decide per import with `file.import {"paths": […], "alpha":
+"straight"|"premultiplied"|"ignore"|"guess"}`, which never asks.
+
 Agents: `file.interpretFootage {"items": [id], "frameRate": 24, "alpha": "premultiplied",
 "startTimecode": 1001, "preserveRgb": true}` (timecode or a frame number; `"overrideStart":
 false` goes back to Use Source File Timecode).
