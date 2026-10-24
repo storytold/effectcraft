@@ -433,3 +433,17 @@ fn analyze_1080p_single_point_speed() {
     assert!(dist(fc.value_at(frame_time(30)).as_vec2(), [990.0, 555.0]) < 0.25);
     assert!(fps > 30.0, "{fps} frames/s");
 }
+
+#[test]
+fn set_point_bounds_region_sizes_and_analysis_survives_them() {
+    // Huge sizes are clamped to the tracker's limits rather than stored and tracked (#1239).
+    let (mut s, clip, _) = setup(patch_frames(translate_pose));
+    s.execute("track.motion", json!({})).unwrap();
+    s.execute("track.setPoint", json!({"point": 1, "center": translate_pose(0).0, "featureSize": [1e12, 2], "searchSize": [1e15, 1e300]})).unwrap();
+    let tp = &tracker_points(&s, clip)[0];
+    let at = |m: &str| tp.get(m).unwrap().value_at(Tick::ZERO).as_vec2();
+    assert_eq!(at("featureSize"), [effectcraft_track::MAX_FEATURE_SIZE, 4.0]);
+    assert_eq!(at("searchSize"), [effectcraft_track::MAX_SEARCH_SIZE; 2]);
+    s.execute("track.analyze", json!({"direction": "frameForward", "wait": true})).unwrap();
+    assert_eq!(tracker_points(&s, clip)[0].get("featureCenter").unwrap().keys.len(), 2);
+}

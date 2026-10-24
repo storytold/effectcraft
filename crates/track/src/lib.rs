@@ -122,6 +122,45 @@ pub struct PointSpec {
     pub search_size: [f64; 2],
 }
 
+/// The largest feature region a point tracks, per axis (layer pixels). Larger values (from a
+/// command or a loaded project) are clamped to it: they would only multiply the correlation work
+/// and the crop memory (#1239).
+pub const MAX_FEATURE_SIZE: f64 = 256.0;
+/// The largest search region, per axis (layer pixels).
+pub const MAX_SEARCH_SIZE: f64 = 1024.0;
+/// Centres and offsets are clamped to ±this many pixels so crop origins stay far inside `i64`.
+const MAX_COORD: f64 = 1e9;
+/// How far a tracked feature may scale from its start (`track_shape`); the crop around it grows
+/// with the scale.
+const SCALE_RANGE: std::ops::RangeInclusive<f64> = 0.25..=4.0;
+/// Coarse candidates kept for seed selection; the rest of the exhaustive search is only scored.
+const MAX_CANDIDATES: usize = 64;
+
+fn coord(v: f64) -> f64 {
+    if v.is_nan() { 0.0 } else { v.clamp(-MAX_COORD, MAX_COORD) }
+}
+fn coord2(v: [f64; 2]) -> [f64; 2] {
+    [coord(v[0]), coord(v[1])]
+}
+/// A region size at most `max`; NaN becomes the 4-pixel minimum. Smaller sizes are left to the
+/// tracker's own minimum radii.
+fn region(v: [f64; 2], max: f64) -> [f64; 2] {
+    v.map(|x| if x.is_nan() { 4.0 } else { x.min(max) })
+}
+
+impl PointSpec {
+    /// This spec with finite coordinates and region sizes within [`MAX_FEATURE_SIZE`] and
+    /// [`MAX_SEARCH_SIZE`]: what [`Tracker::new`] actually tracks.
+    pub fn bounded(self) -> PointSpec {
+        PointSpec {
+            center: coord2(self.center),
+            feature_size: region(self.feature_size, MAX_FEATURE_SIZE),
+            search_offset: coord2(self.search_offset),
+            search_size: region(self.search_size, MAX_SEARCH_SIZE),
+        }
+    }
+}
+
 /// A frame to track in: layer pixels map to image pixels by adding `offset`.
 #[derive(Clone, Copy)]
 pub struct Frame<'a> {
@@ -338,7 +377,8 @@ impl PointState {
     }
 
     fn new(spec: PointSpec, frame: &Frame, opts: &TrackOptions) -> PointState {
-        let c = [spec.center[0] + frame.offset[0], spec.center[1] + frame.offset[1]];
+        let spec = spec.bounded();
+        let c = coord2([spec.center[0] + frame.offset[0], spec.center[1] + frame.offset[1]]);
         let mut st = PointState { spec, center: c, shape: [1.0, 0.0], velocity: [0.0; 2], templates: vec![], levels: 0 };
         let range = st.range();
         let fr = st.feature_r();
@@ -361,7 +401,8 @@ impl PointState {
     fn step(&mut self, frame: &Frame, opts: &TrackOptions) -> PointResult {
         let prev = self.center;
         let predicted = [prev[0] + self.velocity[0], prev[1] + self.velocity[1]];
-        let sc = [predicted[0] + self.spec.search_offset[0], predicted[1] + self.spec.search_offset[1]];
+        let predicted = coord2(predicted);
+        let sc = coord2([predicted[0] + self.spec.search_offset[0], predicted[1] + self.spec.search_offset[1]]);
         let range = self.range();
         let e = self.extent();
         let crop = Crop::new(frame, opts, sc, [range[0] + e, range[1] + e], self.levels);
@@ -373,7 +414,7 @@ impl PointState {
         let plane = &crop.levels[top];
         let tpl = &self.templates[top];
         let shape = self.shape;
-        let mut cands: Vec<(f64, [f64; 2])> = (-ry..=ry)
+        let cands: Vec<(f64, [f64; 2])> = (-ry..=ry)
             .into_par_iter()
             .flat_map_iter(|j| {
                 (-rx..=rx).map(move |i| {
@@ -383,12 +424,19 @@ impl PointState {
             })
             .collect();
         // Best score first; ties (flat or repetitive regions) go to the candidate nearest the
-        // prediction so featureless areas don't drift.
+        // prediction so featureless areas don't drift. Scores are compared in 1e-9 steps, which
+        // keeps the order total; only the best few are sorted (#1239).
         let cp = crop.to_level(predicted, top);
         let d2 = |c: &[f64; 2]| (c[0] - cp[0]).powi(2) + (c[1] - cp[1]).powi(2);
-        cands.sort_by(|a, b| if (a.0 - b.0).abs() < 1e-9 { d2(&a.1).total_cmp(&d2(&b.1)) } else { b.0.total_cmp(&a.0) });
+        let mut cands: Vec<(i64, f64, [f64; 2])> = cands.into_iter().map(|(v, c)| (-(v * 1e9).round() as i64, d2(&c), c)).collect();
+        let order = |a: &(i64, f64, [f64; 2]), b: &(i64, f64, [f64; 2])| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1));
+        if cands.len() > MAX_CANDIDATES {
+            cands.select_nth_unstable_by(MAX_CANDIDATES - 1, order);
+            cands.truncate(MAX_CANDIDATES);
+        }
+        cands.sort_unstable_by(order);
         let mut seeds: Vec<[f64; 2]> = vec![];
-        for (_, c) in &cands {
+        for (_, _, c) in &cands {
             if seeds.iter().all(|q| (q[0] - c[0]).abs() > 1.5 || (q[1] - c[1]).abs() > 1.5) {
                 seeds.push(*c);
             }
@@ -476,7 +524,9 @@ impl PointState {
         // Only confident matches predict the next search position.
         self.velocity = if low { [0.0; 2] } else { [found[0] - prev[0], found[1] - prev[1]] };
         self.center = found;
-        self.shape = a;
+        if SCALE_RANGE.contains(&(a[0] * a[0] + a[1] * a[1]).sqrt()) {
+            self.shape = a;
+        }
         if opts.adapt_every_frame || status == Status::Adapted {
             status = Status::Adapted;
             self.resample(&crop);
