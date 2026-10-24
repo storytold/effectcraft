@@ -520,6 +520,7 @@ fn copy(s: &mut Session, p: &Value) -> Result<Value> {
     s.state.clipboard.clear();
     s.state.key_clipboard.clear();
     s.state.contents_clipboard.clear();
+    s.state.mask_clipboard.clear();
     s.state.link_clipboard = None;
     s.state.clip_is_keys = false;
     let n = groups.len();
