@@ -126,6 +126,12 @@ fn expr_buf_id(prop: u64) -> egui::Id {
     egui::Id::new(("expr-buf", prop))
 }
 
+/// The expression fields whose text is wider or taller than the field, as last drawn, and which
+/// way: the wheel over one scrolls its text that way rather than the Timeline (#1396).
+fn scrolling_exprs_id() -> egui::Id {
+    egui::Id::new("tl-expr-scrolling")
+}
+
 /// Insert an expression editor row after every property that has an expression: as many lines
 /// as its text (the text being edited, so it grows while typing), up to 8, or the height its
 /// bottom edge was dragged to.
@@ -2041,15 +2047,21 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             // Alt+wheel zooms around the pointer, out until the whole comp shows.
             set_zoom(&mut app.ui.timeline, &comp, tm.pps * (dy as f64 / 200.0).exp(), fit_pps, tm.t(at_x), (at_x - tm.x0) as f64);
         } else {
-            let over_outline = ui.input(|i| i.pointer.hover_pos()).is_some_and(|p| p.x < graph_x0);
+            let hover = ui.input(|i| i.pointer.hover_pos());
+            let over_outline = hover.is_some_and(|p| p.x < graph_x0);
+            let [expr_x, expr_y] = hover
+                .and_then(|p| {
+                    ctx.data(|d| d.get_temp::<Vec<(Rect, [bool; 2])>>(scrolling_exprs_id())).and_then(|v| v.iter().find(|(r, _)| r.contains(p)).map(|e| e.1))
+                })
+                .unwrap_or_default();
             let shift = ui.input(|i| i.modifiers.shift);
             if over_outline && overflow > 0.0 && (dx.abs() > 0.0 || (shift && dy.abs() > 0.0)) {
                 let d = if dx.abs() > 0.0 { dx } else { dy };
                 app.ui.timeline.outline_scroll = (app.ui.timeline.outline_scroll - d).clamp(0.0, overflow);
-            } else {
+            } else if !expr_y {
                 app.ui.timeline.scroll_y = (app.ui.timeline.scroll_y - dy).clamp(0.0, max_scroll);
             }
-            if dx.abs() > 0.0 && app.ui.timeline.pps.is_some() && !over_outline {
+            if dx.abs() > 0.0 && app.ui.timeline.pps.is_some() && !over_outline && !expr_x {
                 app.ui.timeline.start = (app.ui.timeline.start - dx as f64 / pps).max(0.0);
             }
         }
@@ -2088,6 +2100,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let outline_empty = ui.interact(outline_rect, egui::Id::new("tl-layer-bg"), Sense::click_and_drag());
     app.auto.add("timeline.layerMarquee", outline_rect, "Drag empty outline to select layers");
     let mut hit_rows: Vec<(Rect, Row)> = vec![];
+    let mut scrolling_exprs: Vec<(Rect, [bool; 2])> = vec![];
     // The value fields of multi-dimension properties (per dimension), for the pick whip.
     let mut dim_hits: Vec<(u64, Vec<Rect>)> = vec![];
     // Rows stripe by their index among the rows that are not expression editors, so adding or
@@ -2844,7 +2857,11 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 }
                 // Settings ▸ Scripting & Expressions ▸ Expressions Editor.
                 let sp = app.session.prefs.scripting.clone();
-                let resp = super::expr_editor::editor(ui, edit_id, &mut buf, er, &sp, if ex.enabled { expr_col } else { t.text_dim }, *lines, &t);
+                let (resp, overflows) =
+                    super::expr_editor::editor(ui, edit_id, &mut buf, er, &sp, if ex.enabled { expr_col } else { t.text_dim }, *lines as f32 * rh, &t);
+                if overflows.contains(&true) {
+                    scrolling_exprs.push((er, overflows));
+                }
                 app.auto.add(&format!("timeline.prop.{uid}.expression"), er, &prop.name);
                 // Its bottom edge drags to set its height in whole lines, as in After Effects.
                 let edge = Rect::from_min_max(pos2(er.min.x, r.max.y - 4.0), pos2(er.max.x, r.max.y));
@@ -3155,6 +3172,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             }
         }
     }
+    ctx.data_mut(|d| d.insert_temp(scrolling_exprs_id(), scrolling_exprs));
     ui.set_clip_rect(full_clip);
     // The background responses sit below rows, bars and editors, preserving their menus.
     if !graph_on {
@@ -4328,6 +4346,14 @@ fn value_editor(
             json!({"layer": layer.id.0, "prop": uid, "value": v, "merge": merge, "selected": true, "offset": scrub, "proportional": proportional}),
         ))
     };
+    // A discrete choice (a drop-down pick, a checkbox click) is its own undo step: no merge key,
+    // so two picks in a row don't fold into one the way a scrub's steps do (#2152).
+    let pick = |actions: &mut Vec<(String, serde_json::Value)>, v: serde_json::Value| {
+        set(actions, v);
+        if let Some(a) = actions.last_mut().and_then(|(_, a)| a.as_object_mut()) {
+            a.remove("merge");
+        }
+    };
     let is_3d = layer.is_3d();
     let mut x = at.x;
     let y = at.y - 9.0;
@@ -4432,7 +4458,7 @@ fn value_editor(
         Value::Bool(b) => {
             let r = Rect::from_min_size(pos2(x, at.y - 8.0), vec2(16.0, 16.0));
             if widgets::checkbox(ui, r, *b, &t, egui::Id::new(("cb", uid))).clicked() {
-                set(actions, json!(!b));
+                pick(actions, json!(!b));
             }
             app.auto.add(&format!("timeline.prop.{uid}.value"), r, &prop.name);
         }
@@ -4453,7 +4479,7 @@ fn value_editor(
                 }
                 app.auto.add(&format!("timeline.prop.{uid}.value"), r, &prop.name);
                 if let Some(ni) = widgets::popup_menu(ui, pop, r.left_bottom(), options, Some(*i as usize)) {
-                    set(actions, json!(ni));
+                    pick(actions, json!(ni));
                 }
             } else {
                 p.text(pos2(x, at.y), Align2::LEFT_CENTER, fmt_num(*i as f64, 0), Tokens::ui(12.0), t.hot_text);
@@ -4471,7 +4497,7 @@ fn value_editor(
             if let Some(comp) = app.session.active_comp_arc()
                 && let Some(chosen) = widgets::layer_picker(ui, r, &comp.layers, *l, &t, egui::Id::new(("tl-lay", uid)))
             {
-                set(actions, chosen.map(|id| json!(id)).unwrap_or(serde_json::Value::Null));
+                pick(actions, chosen.map(|id| json!(id)).unwrap_or(serde_json::Value::Null));
             }
             app.auto.add(&format!("timeline.prop.{uid}.value"), r, &prop.name);
         }
