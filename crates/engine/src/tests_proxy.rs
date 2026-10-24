@@ -187,6 +187,38 @@ fn interpret_proxy_settings_apply_to_the_proxy() {
     assert_eq!(f.alpha, AlphaMode::Straight, "the main footage keeps its interpretation");
 }
 
+/// Agents and the control channel run commands through `execute_checked`, which refuses keys a
+/// params doc does not list. The Interpret Footage commands list every key they read.
+#[test]
+fn interpret_commands_accept_their_keys_when_checked() {
+    let mut s = session();
+    let mov = import(&mut s, "/m/lines.mov");
+    let b = import(&mut s, "/m/red16.png");
+    s.execute("file.setProxy", json!({"item": mov.0, "path": "/m/lines.mov"})).unwrap();
+    s.execute("file.setProxy", json!({"item": b.0, "path": "/m/matte_black.png"})).unwrap();
+    s.execute_checked("file.interpretProxy", json!({"item": mov.0, "preserveRgb": true, "overrideStart": true, "startTimecode": 25})).unwrap();
+    let px = s.project.item(mov).unwrap().proxy.clone().unwrap().footage;
+    assert!(px.preserve_rgb);
+    assert_eq!(px.start_timecode, Some(25));
+    s.execute_checked("file.interpretProxy", json!({"item": mov.0, "overrideStart": false})).unwrap();
+    assert_eq!(s.project.item(mov).unwrap().proxy.as_ref().unwrap().footage.start_timecode, None);
+    s.execute_checked("file.interpretProxy", json!({"item": b.0, "guessAlpha": true})).unwrap();
+    assert_eq!(s.project.item(b).unwrap().proxy.as_ref().unwrap().footage.alpha, AlphaMode::Premultiplied);
+    s.execute_checked("file.interpretProxy", json!({"item": b.0, "premulColor": [1.0, 0.0, 0.0]})).unwrap();
+    assert_eq!(s.project.item(b).unwrap().proxy.as_ref().unwrap().footage.premul_color, [1.0, 0.0, 0.0]);
+    // `item` names one footage item, as `items` names several.
+    s.execute_checked("file.interpretFootage", json!({"item": b.0, "invertAlpha": true, "premulColor": [0.0, 1.0, 0.0]})).unwrap();
+    s.execute_checked("file.rememberInterpretation", json!({"item": b.0})).unwrap();
+    s.execute_checked("file.applyInterpretation", json!({"item": mov.0})).unwrap();
+    let f = match &s.project.item(mov).unwrap().kind {
+        ItemKind::Footage(f) => f.clone(),
+        _ => panic!("not footage"),
+    };
+    assert!(f.invert_alpha);
+    assert_eq!(f.premul_color, [0.0, 1.0, 0.0]);
+    assert_eq!(s.execute_checked("file.reloadFootage", json!({"item": mov.0})).unwrap()["reloaded"], 1);
+}
+
 /// Separate Fields: each field becomes a frame at twice the frame rate, the other field's lines
 /// interpolated; the dominant field comes first.
 #[test]
