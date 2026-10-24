@@ -62,6 +62,7 @@ const LAYERS: &[(&str, u8)] = &[
     ("effectcraft", 6),
     ("cli", 6),
     ("web", 6),
+    ("android", 6),
 ];
 
 /// Allowed same-layer edges (from, to).
