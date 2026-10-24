@@ -364,3 +364,29 @@ fn a_cut_is_read_with_the_modifiers_where_it_is_in_the_frame() {
         assert_eq!(h.state().session.project.item(solid).is_none(), deletes, "case {n}: {events:?} after {before:?}");
     }
 }
+
+/// An open text edit stands down the Project-panel Clear redirect: the composition being typed
+/// into must not be deleted out from under it, with no confirmation when nothing uses it (#2227).
+#[test]
+fn clear_with_the_project_focused_stands_down_during_a_text_edit() {
+    let (mut h, _, _) = harness();
+    let working = h.state().session.active_comp_id().unwrap();
+    // the composition being typed into is also the Project panel's selection, as when it was opened
+    click(&mut h, &format!("project.item.{}.name", working.0), Modifiers::NONE);
+    let text = h.state_mut().session.execute("layer.newText", json!({"text": "Title", "size": 80})).unwrap()["layer"].as_u64().unwrap();
+    h.state_mut().session.execute("text.edit", json!({"layer": text, "created": true})).unwrap();
+    h.state_mut().ui.focused = PanelKind::Project;
+    h.run_steps(2);
+    assert!(h.state().session.state.project_selection.contains(&working), "the comp is the project selection");
+    let project = h.state().session.project.clone();
+
+    // Edit > Clear (the menu, or the control channel) dispatches through `invoke`
+    let ctx = h.ctx.clone();
+    let cleared = effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "edit.clear", json!({}));
+    h.run_steps(3);
+
+    cleared.expect("Clear stands down during a text edit");
+    assert!(h.state().session.project.item(working).is_some(), "the composition being typed into survives");
+    assert_eq!(h.state().session.project, project, "nothing was deleted");
+    assert!(h.state().session.state.text_edit.is_some(), "the text edit stays open");
+}

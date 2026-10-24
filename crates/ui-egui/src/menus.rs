@@ -361,8 +361,13 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
             return run_engine(app, ctx, "edit.pasteSvg", json!({"svg": svg}));
         }
     }
-    // Clear follows panel focus, including the Edit menu and keyboard shortcut.
+    // Clear follows panel focus, including the Edit menu and keyboard shortcut. An open text
+    // edit stands down: the user is working in a composition, and the Project-panel redirect
+    // would delete it without asking when nothing uses it (#2227).
     if id == "edit.clear" && params.as_object().is_some_and(|p| p.is_empty()) && app.ui.focused == PanelKind::Project {
+        if app.session.state.text_edit.is_some() {
+            return Ok(Value::Null);
+        }
         // Through `invoke`, so deleting items that compositions use still asks first (M3.16).
         return invoke(app, ctx, "project.delete", json!({}));
     }
@@ -1644,7 +1649,8 @@ pub(crate) fn entry_enabled(app: &EffectcraftApp, e: &MenuEntry) -> bool {
         }
     }
     if e.command == "edit.clear" && app.ui.focused == PanelKind::Project {
-        return app.session.is_enabled("project.delete");
+        // An open text edit stands down: Clear must not delete the comp being typed into (#2227).
+        return app.session.state.text_edit.is_none() && app.session.is_enabled("project.delete");
     }
     if e.command == "edit.clear" && app.ui.focused == PanelKind::RenderQueue {
         return !app.session.is_rendering() && !app.session.project.render_queue.is_empty();
