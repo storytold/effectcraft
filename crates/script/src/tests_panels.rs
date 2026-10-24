@@ -86,3 +86,27 @@ fn open_panels_open_again_at_the_next_launch() {
     let mut s = session(&store);
     assert_eq!(s.execute("window.restoreScriptPanels", json!({})).unwrap(), json!({"opened": [], "failed": []}));
 }
+
+/// A panel in a subfolder (Window ▸ Motion Kit ▸ Animate.jsx) is `Motion Kit/Animate.jsx`: it opens
+/// titled after its file and opens again at the next launch.
+#[test]
+fn a_panel_in_a_subfolder_opens_and_opens_again_at_the_next_launch() {
+    let store = Arc::new(MemoryConfig::default());
+    store.write(&format!("{PANELS_DIR}/Motion Kit/Animate.jsx"), PANEL).unwrap();
+    let mut s = session(&store);
+    let list = s.execute("file.scripts.list", json!({})).unwrap();
+    assert!(list.as_array().unwrap().iter().any(|e| e["name"] == "Motion Kit/Animate.jsx" && e["panel"] == true), "{list}");
+    let r = s.execute("window.scriptPanel", json!({"name": "Motion Kit/Animate.jsx"})).unwrap();
+    let w = s.script_ui.window(r["window"].as_u64().unwrap() as u32).unwrap();
+    assert_eq!((w.kind, w.title.as_str()), (WindowKind::Panel, "Animate"));
+    assert_eq!(remembered(&store), json!({"open": ["Motion Kit/Animate.jsx"]}));
+    // A saved name that leaves the folder, or goes two folders deep, fails and is forgotten.
+    store.write(OPEN_PANELS_FILE, &json!({"open": ["../Top.jsx", "Motion Kit/Animate.jsx", "a/b/c.jsx"]}).to_string()).unwrap();
+    drop(s);
+    let mut s = session(&store);
+    let r = s.execute("window.restoreScriptPanels", json!({})).unwrap();
+    assert_eq!(r["opened"], json!(["Motion Kit/Animate.jsx"]));
+    assert_eq!(r["failed"].as_array().unwrap().iter().map(|f| f["name"].as_str().unwrap()).collect::<Vec<_>>(), ["../Top.jsx", "a/b/c.jsx"]);
+    assert!(panel_window(&s, "Motion Kit/Animate.jsx").is_some());
+    assert_eq!(remembered(&store), json!({"open": ["Motion Kit/Animate.jsx"]}));
+}

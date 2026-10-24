@@ -2209,13 +2209,18 @@ fn menu_nodes(
                 // saved workspaces.
                 let ws = app.ui.workspace.clone();
                 let saved = app.saved_workspace_names();
-                let (entries, empty) = effectcraft_engine::menus::dynamic(&app.session, name, &dyn_ctx(&ws, &saved));
-                if entries.is_empty()
+                let (nodes, empty) = effectcraft_engine::menus::dynamic_nodes(&app.session, name, &dyn_ctx(&ws, &saved));
+                if nodes.is_empty()
                     && let Some(e) = empty
                 {
                     ui.add_enabled(false, egui::Button::new((gutter(false), e)));
                 }
-                for (i, e) in entries.iter().enumerate() {
+                for (i, n) in nodes.iter().enumerate() {
+                    // A folder of scripts or panels: a submenu.
+                    let MenuNode::Item(e) = n else {
+                        menu_nodes(app, ui, std::slice::from_ref(n), clicked, nav, depth);
+                        continue;
+                    };
                     let tip = match name.as_str() {
                         "recentProjects" => app.session.prefs.recent_projects.get(i).cloned(),
                         "recentFootage" => app.session.prefs.recent_footage.get(i).cloned(),
