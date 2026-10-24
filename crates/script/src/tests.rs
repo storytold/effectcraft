@@ -402,6 +402,33 @@ fn text_documents() {
 }
 
 #[test]
+fn text_document_language() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"
+        var c = app.project.items.addComp("L", 400, 200, 1, 2, 30);
+        var t = c.layers.addText("istanbul");
+        var st = t.text.sourceText;
+        var before = st.value.language;
+        var doc = st.value;
+        doc.allCaps = true;
+        doc.language = "tr";
+        st.setValue(doc);
+        var after = st.value.language;
+        var d2 = st.value;
+        d2.language = "";
+        st.setValue(d2);
+        [before, after, st.value.language]
+        "#,
+    );
+    assert_eq!(o.result, json!([null, "tr", null]));
+    let (_, c) = comp_named(&s, "L");
+    let KV::Text(d) = &c.layers[0].props.prop("text/sourceText").unwrap().value else { panic!() };
+    assert!(d.all_caps && d.language.is_none());
+}
+
+#[test]
 fn layers_items_and_markers() {
     let mut s = session();
     let o = ok(

@@ -347,6 +347,23 @@ fn variable_font_axes_animator() {
 }
 
 #[test]
+fn text_language_sets_all_caps_casing() {
+    let mut s = comp(600, 200);
+    let t = s.execute("layer.newText", json!({"text": "istanbul ılık", "allCaps": true, "language": "tr"})).unwrap()["layer"].as_u64().unwrap();
+    let doc = |s: &Session| crate::commands::text_edit::layer_doc(s, LayerId(t)).unwrap();
+    let drawn = |s: &Session| effectcraft_text::layout_doc(&doc(s)).glyphs.iter().map(|g| g.ch).collect::<String>();
+    assert_eq!(doc(&s).language.as_deref(), Some("tr"));
+    assert_eq!(drawn(&s), "İSTANBUL ILIK");
+    // Clearing it (undoably) brings back Unicode's default casing.
+    s.execute("layer.setText", json!({"layer": t, "language": null})).unwrap();
+    assert_eq!(drawn(&s), "ISTANBUL ILIK");
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(drawn(&s), "İSTANBUL ILIK");
+    assert!(s.execute("layer.setText", json!({"layer": t, "language": "not a tag"})).is_err());
+    assert_eq!(doc(&s).language.as_deref(), Some("tr"));
+}
+
+#[test]
 fn variable_font_axes_in_the_character_style() {
     let mut s = comp(600, 200);
     let t = s.execute("layer.newText", json!({"text": "Hamburg", "size": 60})).unwrap()["layer"].as_u64().unwrap();

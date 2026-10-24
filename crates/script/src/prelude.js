@@ -488,7 +488,7 @@ var __textKeys = {
   font: "font", fontStyle: "style", fontSize: "size", fillColor: "fill", strokeColor: "stroke", strokeWidth: "strokeWidth",
   applyFill: "applyFill", applyStroke: "applyStroke", strokeOverFill: "strokeOverFill", tracking: "tracking",
   baselineShift: "baselineShift", horizontalScale: "hScale", verticalScale: "vScale", fauxBold: "fauxBold",
-  fauxItalic: "fauxItalic", allCaps: "allCaps", smallCaps: "smallCaps", tsume: "tsume", superscript: "superscript",
+  fauxItalic: "fauxItalic", allCaps: "allCaps", smallCaps: "smallCaps", language: "language", tsume: "tsume", superscript: "superscript",
   subscript: "subscript", ligature: "ligatures", startIndent: "indentLeft", endIndent: "indentRight",
   firstLineIndent: "indentFirst", spaceBefore: "spaceBefore", spaceAfter: "spaceAfter",
 };
@@ -567,6 +567,10 @@ TextDocument.prototype = {
   set allCaps(v) { this.__set("allCaps", !!v); },
   get smallCaps() { return this.__style("smallCaps", false); },
   set smallCaps(v) { this.__set("smallCaps", !!v); },
+  // EffectCraft extension: BCP 47 language tag ("tr", "az"…) or null; selects the casing of All Caps.
+  get language() { var l = this.__style("language", null); return l ? l : null; },
+  // "" clears the language (null attributes are not sent).
+  set language(v) { this.__set("language", v === null || v === undefined ? "" : String(v)); },
   get superscript() { return this.__style("baseline", "normal") === "superscript"; },
   set superscript(v) {
     // The pending document reads the same canonical baseline that setValue will apply.
@@ -601,7 +605,7 @@ TextDocument.prototype = {
   resetCharStyle: function () {
     var d = { font: "Inter", style: "Regular", size: 72, fill: [1, 1, 1, 1], stroke: [0, 0, 0, 1], strokeWidth: 0, applyFill: true,
       applyStroke: false, tracking: 0, leading: "auto", baselineShift: 0, hScale: 100, vScale: 100, tsume: 0, fauxBold: false,
-      fauxItalic: false, allCaps: false, smallCaps: false };
+      fauxItalic: false, allCaps: false, smallCaps: false, language: "" };
     for (var k in d) this.__changed[k] = d[k];
   },
   resetParagraphStyle: function () {

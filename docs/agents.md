@@ -527,7 +527,12 @@ indices): character attributes
 (`font`, `size`, `fill`, `tracking`, `kerning: metrics|optical|<1/1000 em>`, `tsume`,
 `baseline: superscript|subscript`, `allCaps`…) split the text into runs; paragraph attributes
 (`justify`, `indentLeft`, `indentFirst`, `spaceBefore`, `direction`, `composer`,
-`hangingPunctuation`…) apply to the paragraphs the range touches. Editing mirrors the Type tool:
+`hangingPunctuation`…) apply to the paragraphs the range touches. `language` (a BCP 47 tag such as
+`"tr"`, or null; default none) is a character attribute that selects language-specific casing:
+with `"tr"`, `"az"`, `"crh"`, `"gag"`, `"kk"` or `"tt"`, All Caps and Small Caps turn `i` into `İ`
+(so "istanbul ılık" reads "İSTANBUL ILIK"); without it Unicode's default casing applies. All Caps
+keeps multi-letter capitals (`ß` → `SS`); the extra glyphs belong to the source character, so
+character indices and selectors are unchanged. Editing mirrors the Type tool:
 
 1. `layer.newText {"text":"", "box":[100,100,600,300], "edit":true}` makes paragraph text and
    starts editing (`position` instead of `box` makes point text; `vertical: true` vertical type).
