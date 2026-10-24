@@ -45,6 +45,9 @@ struct Key {
     matte: [u32; 3],
     /// A movie frame made at this size for a reduced-resolution render ((0, 0): as decoded).
     size: (u32, u32),
+    /// A still at a reduced `size`: the footage's nominal size, which decides whether it is
+    /// resampled (see `Inner::still_at_size`); (0, 0) otherwise.
+    nominal: (u32, u32),
 }
 
 struct Entry {
@@ -559,7 +562,7 @@ impl Inner {
         let loaded = self.read(path).map_err(|e| e.to_string()).and_then(|bytes| {
             // Files the model names are read only when local or on the model's own network share.
             let resolve = |uri: &str| -> Option<Vec<u8>> {
-                let p = craft_docpath::resolve(uri, Some(std::path::Path::new(path))).ok().filter(|p| p.is_absolute())?;
+                let p = craft_docpath::resolve_absolute(uri, Some(std::path::Path::new(path))).ok()?;
                 self.read(&p.to_string_lossy()).ok().map(|b| b.to_vec())
             };
             effectcraft_model::load(path, &bytes, &resolve).map_err(|e| e.to_string())
@@ -678,7 +681,7 @@ impl Inner {
                 FloatCurve::Gamma24 => 2,
             } << 2);
         let matte = if footage.alpha == AlphaMode::Premultiplied { footage.premul_color.map(f32::to_bits) } else { [0; 3] };
-        let key = |path: &str, frame| Key { path: path.into(), frame, interp, matte, size: (0, 0) };
+        let key = |path: &str, frame| Key { path: path.into(), frame, interp, matte, size: (0, 0), nominal: (0, 0) };
         match footage.kind {
             FootageKind::Sequence if !footage.sequence.is_empty() => {
                 let i = Self::frame_index(footage.frame_rate, t, footage.sequence_frames(), footage.loop_count);
@@ -708,16 +711,20 @@ impl Inner {
         }
     }
 
-    /// The frame of `footage` at `t`; a movie's resampled to `size` when it can be made at that
-    /// size directly (see [`FootageSource::frame_at_size`]).
+    /// The frame of `footage` at `t`, resampled to `size` (see [`FootageSource::frame_at_size`]):
+    /// a movie's made at that size directly, a still's resampled once and kept at that size.
     fn frame_at(self: &Arc<Self>, footage: &Footage, t: Tick, playback: bool, size: Option<(u32, u32)>, float: FloatCurve) -> Result<Arc<Image>> {
         if !footage.has_video {
             return Err(MediaError::Unsupported(format!("{}: no video", footage.path)));
         }
         let mut loc = Self::locate(footage, t, float);
         let movie = loc.media_t.is_some();
-        if movie && let Some(size) = size {
+        // A still asked for at its own size is the unsized frame (one decode, one entry).
+        if let Some(size) = size.filter(|s| movie || *s != (footage.width, footage.height)) {
             loc.key.size = size;
+            if !movie {
+                loc.key.nominal = (footage.width, footage.height);
+            }
         }
         let mut c = lock(&self.cache);
         // sequential playback of a movie: read the next frame ahead
@@ -773,34 +780,62 @@ impl Inner {
     #[cfg(target_arch = "wasm32")]
     fn prefetch(self: &Arc<Self>, _footage: &Footage, _t: Tick, _size: Option<(u32, u32)>, _float: FloatCurve) {}
 
+    /// A still (image file or sequence frame) at `loc.key.size` when one is set: resampled as the
+    /// renderer would ([`FootageSource::frame_at_size`]), so the pool keeps the reduced frame and a
+    /// reduced-resolution render neither decodes nor resamples a large still again for every frame
+    /// (#1812: 21120-px plates at Quarter). Like the renderer's `footage_buf`, an image decoded
+    /// larger than the footage's nominal size (a smart object's pixels) is resampled too, and one
+    /// decoded smaller is not (the renderer scales the layer instead).
+    fn still_at_size(img: Image, loc: &Loc, footage: &Footage) -> Image {
+        let (w, h) = loc.key.size;
+        let smaller = img.width == 0 || footage.width as f64 / img.width as f64 > 1.0 + 1e-9;
+        if w == 0 || h == 0 || smaller || (w, h) == (img.width, img.height) {
+            return img;
+        }
+        effectcraft_raster::resample(&img, w, h)
+    }
+
     fn decode(&self, loc: &Loc, footage: &Footage) -> Result<Image> {
+        match loc.media_t {
+            None => self.decode_still(loc, footage).map(|img| Self::still_at_size(img, loc, footage)),
+            Some(_) => self.decode_media(loc, footage),
+        }
+    }
+
+    fn decode_still(&self, loc: &Loc, footage: &Footage) -> Result<Image> {
+        let op = AlphaOp::of(footage, loc.float);
+        let path = &loc.key.path;
+        if &**path == PLACEHOLDER {
+            return Ok(colour_bars(footage.width, footage.height));
+        }
+        let bytes = self.read(path)?;
+        if let Some(img) = crate::dpx::decode(path, &bytes)? {
+            return Ok(dynamic_to_image(&img, op));
+        }
+        if let Some(img) = crate::layered::decode(path, &bytes, footage, op)? {
+            return Ok(img);
+        }
+        // (an OpenEXR compression the decoder lacks came out transparent or as a missing
+        // channel error)
+        if path.to_ascii_lowercase().ends_with(".exr")
+            && let Some(why) = crate::exr_channels::unsupported_compression(&bytes)
+        {
+            return Err(MediaError::Decode(format!("{path}: {why}")));
+        }
+        let loaded = crate::probe::load_oriented(&bytes, crate::still_format(path, &bytes));
+        let img = match loaded {
+            Ok(img) => img,
+            // A multi-layer OpenEXR file without an unnamed RGB layer: its colour layer.
+            Err(e) => crate::exr_channels::cached_layered_image(path, bytes).ok_or_else(|| MediaError::Decode(format!("{path}: {e}")))?,
+        };
+        Ok(dynamic_to_image(&img, op))
+    }
+
+    fn decode_media(&self, loc: &Loc, footage: &Footage) -> Result<Image> {
         let op = AlphaOp::of(footage, loc.float);
         let path = &loc.key.path;
         match loc.media_t {
-            None if &**path == PLACEHOLDER => Ok(colour_bars(footage.width, footage.height)),
-            None => {
-                let bytes = self.read(path)?;
-                if let Some(img) = crate::dpx::decode(path, &bytes)? {
-                    return Ok(dynamic_to_image(&img, op));
-                }
-                if let Some(img) = crate::layered::decode(path, &bytes, footage, op)? {
-                    return Ok(img);
-                }
-                // (an OpenEXR compression the decoder lacks came out transparent or as a missing
-                // channel error)
-                if path.to_ascii_lowercase().ends_with(".exr")
-                    && let Some(why) = crate::exr_channels::unsupported_compression(&bytes)
-                {
-                    return Err(MediaError::Decode(format!("{path}: {why}")));
-                }
-                let loaded = crate::probe::load_oriented(&bytes, crate::still_format(path, &bytes));
-                let img = match loaded {
-                    Ok(img) => img,
-                    // A multi-layer OpenEXR file without an unnamed RGB layer: its colour layer.
-                    Err(e) => crate::exr_channels::cached_layered_image(path, bytes).ok_or_else(|| MediaError::Decode(format!("{path}: {e}")))?,
-                };
-                Ok(dynamic_to_image(&img, op))
-            }
+            None => self.decode_still(loc, footage),
             Some(mt) if gif_anim::is_animated(footage) => {
                 let anim = self.gif(path)?;
                 let frame = anim.frame_at(Tick(mt.0)).ok_or_else(|| MediaError::Decode(format!("{path}: no frames")))?;
@@ -1030,6 +1065,48 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // Regression test for #382 (#274): resampling footage audio divided by the requested mix
+    // rate, so a rate of 0 panicked (division by zero); the read must come back instead.
+    #[test]
+    fn decoding_audio_at_a_zero_mix_rate_does_not_divide_by_zero() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-zero-rate");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // One second of a 440 Hz tone, 44.1 kHz mono 16-bit PCM: not the 48 kHz mix rate.
+        let native = 44_100u32;
+        let pcm: Vec<u8> =
+            (0..native).flat_map(|n| (((n as f32 * 440.0 * std::f32::consts::TAU / native as f32).sin() * 8000.0) as i16).to_le_bytes()).collect();
+        let mut wav = b"RIFF".to_vec();
+        wav.extend((36 + pcm.len() as u32).to_le_bytes());
+        wav.extend(b"WAVEfmt ");
+        wav.extend(16u32.to_le_bytes());
+        wav.extend([1u16, 1].iter().flat_map(|v| v.to_le_bytes()));
+        wav.extend(native.to_le_bytes());
+        wav.extend((native * 2).to_le_bytes());
+        wav.extend([2u16, 16].iter().flat_map(|v| v.to_le_bytes()));
+        wav.extend(b"data");
+        wav.extend((pcm.len() as u32).to_le_bytes());
+        wav.extend(&pcm);
+        let path = dir.join("tone.wav");
+        std::fs::write(&path, &wav).unwrap();
+        let footage = Footage {
+            path: path.to_string_lossy().into(),
+            kind: FootageKind::Audio,
+            duration: Tick::from_seconds_f64(1.0),
+            has_audio: true,
+            ..Default::default()
+        };
+        let pool = MediaPool::new();
+        // The file really is read, and resampled, at a normal rate...
+        let tone = pool.decode_audio(&footage, Tick::from_seconds_f64(0.1), 1024, 48_000);
+        assert!(tone.iter().any(|v| v.abs() > 0.05), "the tone is audible at 48 kHz");
+        // ...and a mix rate of 0 (which `audio_samples` itself turns away) returns a read of the
+        // requested length instead of dividing by it.
+        let degenerate = pool.try_decode_audio(&footage, Tick::from_seconds_f64(0.1), 64, 0).unwrap();
+        assert_eq!(degenerate.len(), 128);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn frame_index_loops_and_clamps() {
         let r = FrameRate::FPS_30;
@@ -1045,7 +1122,7 @@ mod tests {
     fn lru_respects_budget_and_recycles() {
         let mut c = Lru::default();
         let img = || Arc::new(Image::new(16, 16)); // 4 KiB + overhead
-        let k = |i| Key { path: "a".into(), frame: i, interp: 0, matte: [0; 3], size: (0, 0) };
+        let k = |i| Key { path: "a".into(), frame: i, interp: 0, matte: [0; 3], size: (0, 0), nominal: (0, 0) };
         let budget = 3 * (4096 + 64);
         for i in 0..10 {
             c.insert(k(i), img(), budget);

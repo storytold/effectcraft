@@ -184,7 +184,13 @@ pub fn motion_sketch(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let fr = c.frame_rate;
     let (s, e) = (app.session.time(), c.work_area.1);
     let tc = |x| crate::panels::timecode(&app.session, c, x);
-    p.text(pos2(x0, y + 8.0), Align2::LEFT_CENTER, tr_args("Start: {}   Duration: {}", &[&(tc(s)), &(tc(e - s))]), Tokens::ui(11.0), t.text_faint);
+    p.text(
+        pos2(x0, y + 8.0),
+        Align2::LEFT_CENTER,
+        tr_args("Start: {}   Duration: {}", &[&(tc(s)), &crate::panels::duration(&app.session, c, e - s)]),
+        Tokens::ui(11.0),
+        t.text_faint,
+    );
     let _ = fr;
     y += ROW;
     let b = Rect::from_min_size(pos2(x0, y), vec2(120.0, 24.0));

@@ -46,13 +46,22 @@ pub fn resolve(stored: &str, project: Option<&str>) -> Result<PathBuf, NotFollow
         let p = Path::new(p);
         std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf())
     });
-    let path = craft_docpath::resolve(stored, project.as_deref()).map_err(NotFollowed::Refused)?;
-    // A path that is still relative would be taken from the working directory, which the
-    // project does not choose.
-    if path.is_relative() {
-        return Err(NotFollowed::NoProjectFolder);
-    }
-    Ok(path)
+    craft_docpath::resolve_absolute(stored, project.as_deref()).map_err(|why| match why {
+        // Resolved, but still relative: it would be taken from the working directory, which the
+        // project does not choose. A Windows drive or share path (`C:\x`) stays invalid outside
+        // Windows even with a project.
+        Refused::Invalid if project.is_none() && craft_docpath::resolve(stored, None).is_ok_and(|p| cfg!(windows) || !is_windows_rooted(&p)) => {
+            NotFollowed::NoProjectFolder
+        }
+        why => NotFollowed::Refused(why),
+    })
+}
+
+/// Whether `p` is a Windows drive or share path, which a project cannot make absolute outside Windows.
+fn is_windows_rooted(p: &Path) -> bool {
+    let s = p.to_string_lossy();
+    let b = s.as_bytes();
+    (b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':') || s.starts_with(r"\\") || s.starts_with("//")
 }
 
 /// The paths of `f` (its file and every frame of an image sequence) resolved against the document

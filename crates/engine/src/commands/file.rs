@@ -665,6 +665,15 @@ fn project_settings(s: &mut Session, p: &Value) -> Result<Value> {
             proj.settings.time_display = effectcraft_project::TimeDisplayStyle::parse(t)
                 .ok_or_else(|| bad("file.projectSettings", format!("timeDisplay: timecode|frames|feet35|feet16, not `{t}`")))?;
         }
+        if let Some(f) = p.get("frameStart") {
+            // Frame Count: After Effects offers Start at 0 and Start at 1 only. Scripts and dialog
+            // number fields may send `1.0`.
+            proj.settings.frame_start = match f.as_f64() {
+                Some(0.0) => 0,
+                Some(1.0) => 1,
+                _ => return Err(bad(cmd, format!("frameStart: 0|1, not `{f}`"))),
+            };
+        }
         Ok(())
     })?;
     Ok(serde_json::to_value(&s.project.settings).unwrap_or_default())
@@ -745,7 +754,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Project Settings...",
             ["File"],
             Some("Cmd+Alt+Shift+K"),
-            "{bitDepth?: 8|16|32, colorEngine?: adobe|ocio, workingSpace?: none|srgb|rec709|rec2020|p3|acescg|aces2065, workingGamma?: 2.2|2.4 (with no working space), linearize?, blendLinear?, hdr?: clip|compand|toneMap, outputSpace?: srgb|rec709|rec2020|p3|rec2100pq|rec2100hlg, renderer?: gpu|software, timeDisplay?: timecode|frames|feet35|feet16}",
+            "{bitDepth?: 8|16|32, colorEngine?: adobe|ocio, workingSpace?: none|srgb|rec709|rec2020|p3|acescg|aces2065, workingGamma?: 2.2|2.4 (with no working space), linearize?, blendLinear?, hdr?: clip|compand|toneMap, outputSpace?: srgb|rec709|rec2020|p3|rec2100pq|rec2100hlg, renderer?: gpu|software, timeDisplay?: timecode|frames|feet35|feet16, frameStart?: 0|1 (Frame Count: Start at 0 / Start at 1)}",
             always,
             project_settings
         ),

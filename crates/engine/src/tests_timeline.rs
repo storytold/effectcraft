@@ -613,6 +613,51 @@ fn time_set_reads_frames_style_digits_as_a_frame_count() {
     assert_eq!(r["display"], "00100");
 }
 
+/// Project Settings ▸ Time Display Style ▸ Frames ▸ Frame Count: Start at 0 / Start at 1
+/// (`app.project.framesCountType`), undoable and saved with the project (#1807).
+#[test]
+fn project_settings_frame_count_starts_at_one() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Count", "width": 64, "height": 64, "frameRate": 30, "duration": 2})).unwrap();
+    s.execute("file.projectSettings", json!({"timeDisplay": "frames"})).unwrap();
+    assert_eq!(s.execute("time.set", json!({"frame": 12})).unwrap()["display"], "00012");
+
+    s.execute("file.projectSettings", json!({"frameStart": 1})).unwrap();
+    assert_eq!(s.execute("time.set", json!({"frame": 12})).unwrap()["display"], "00013");
+    for bad in [json!(2), json!(-1), json!("one")] {
+        assert!(s.execute("file.projectSettings", json!({"frameStart": bad})).is_err(), "{bad}");
+    }
+    assert_eq!(s.project.settings.frame_start, 1);
+
+    let dir = std::env::temp_dir().join(format!("ec-frame-start-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("count.ecproj").to_string_lossy().to_string();
+    s.execute("file.save", json!({"path": path})).unwrap();
+    let mut reopened = Session::default();
+    reopened.execute("file.open", json!({"path": path})).unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+    assert_eq!(reopened.project.settings.frame_start, 1);
+
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(s.execute("time.set", json!({"frame": 12})).unwrap()["display"], "00012");
+}
+
+/// A Duration is a count of frames: Start at 1 and the comp's Start Timecode number positions,
+/// not lengths (#1807).
+#[test]
+fn durations_ignore_the_frame_count_and_the_start_timecode() {
+    use crate::commands::time::display_duration;
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Len", "width": 64, "height": 64, "frameRate": 30, "duration": 10, "startTimecode": "0:00:01:00"})).unwrap();
+    s.execute("file.projectSettings", json!({"frameStart": 1})).unwrap();
+    let comp = s.active_comp().unwrap().clone();
+    let len = comp.frame_rate.tick_of(30);
+    for (style, want) in [("frames", "00030"), ("feet35", "0001+14"), ("timecode", "0:00:01:00")] {
+        s.execute("file.projectSettings", json!({"timeDisplay": style})).unwrap();
+        assert_eq!(display_duration(&s, &comp, len), want, "{style}");
+    }
+}
+
 #[test]
 fn separate_dimensions_split_and_rejoin() {
     let (mut s, l) = setup();

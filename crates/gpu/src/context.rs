@@ -462,6 +462,12 @@ pub(crate) fn buffer_init(device: &wgpu::Device, queue: &wgpu::Queue, label: Opt
     buffer
 }
 
+/// The descriptor for a device the compositor owns: `MemoryUsage` so freed textures give their
+/// allocator blocks back instead of a few long-lived objects pinning large ones.
+pub(crate) fn device_descriptor(required_limits: wgpu::Limits) -> wgpu::DeviceDescriptor<'static> {
+    wgpu::DeviceDescriptor { label: Some("effectcraft gpu"), required_limits, memory_hints: wgpu::MemoryHints::MemoryUsage, ..Default::default() }
+}
+
 impl GpuContext {
     /// [`buffer_init`] on this context's device.
     pub(crate) fn buffer_init(&self, label: Option<&str>, contents: &[u8], usage: wgpu::BufferUsages) -> wgpu::Buffer {
@@ -870,10 +876,7 @@ impl GpuContext {
             max_buffer_size: limits.max_buffer_size,
             ..wgpu::Limits::default()
         };
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor { label: Some("effectcraft gpu"), required_limits, ..Default::default() })
-            .await
-            .map_err(|e| match by_name {
+        let (device, queue) = adapter.request_device(&device_descriptor(required_limits)).await.map_err(|e| match by_name {
             true => format!("no device on {} (picked by WGPU_ADAPTER_NAME): {e}", adapter.get_info().name),
             false => format!("no device: {e}"),
         })?;
@@ -1244,6 +1247,24 @@ impl<'g> Enc<'g> {
             wgpu::TexelCopyTextureInfo { texture: &dst.texture, mip_level: 0, origin: wgpu::Origin3d { x, y, z: 0 }, aspect: wgpu::TextureAspect::All },
             wgpu::Extent3d { width: src.width, height: src.height, depth_or_array_layers: 1 },
         );
+    }
+
+    /// A `w` × `h` image showing `src` with its pixel (`x`, `y`) at the top-left, transparent
+    /// where `src` doesn't reach (Image::crop).
+    pub fn crop(&mut self, src: &GpuImage, x: i64, y: i64, w: u32, h: u32) -> GpuImage {
+        let dst = self.image(w, h);
+        let span = |o: i64, n: u32, len: u32| {
+            let (a, b) = (o.max(0), (o + n as i64).min(len as i64));
+            (b > a).then(|| (a as u32, (a - o) as u32, (b - a) as u32))
+        };
+        let (Some((sx, dx, cw)), Some((sy, dy, ch))) = (span(x, w, src.width), span(y, h, src.height)) else { return dst };
+        let enc = self.encoder();
+        enc.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo { texture: &src.texture, mip_level: 0, origin: wgpu::Origin3d { x: sx, y: sy, z: 0 }, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyTextureInfo { texture: &dst.texture, mip_level: 0, origin: wgpu::Origin3d { x: dx, y: dy, z: 0 }, aspect: wgpu::TextureAspect::All },
+            wgpu::Extent3d { width: cw, height: ch, depth_or_array_layers: 1 },
+        );
+        dst
     }
 
     /// Submit recorded work.

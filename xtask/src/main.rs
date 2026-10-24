@@ -9,7 +9,8 @@
 //! - `assets`: every asset file (image, icon, font, LUT, audio, video…) has a complete
 //!   `<file>.attribution` sidecar and an entry in `ATTRIBUTION.md` (AGENTS.md §1).
 //! - `ico <out.ico> <in.png>…`: pack PNGs into a Windows `.ico` (used by `packaging/icons.sh`).
-//! - `ci`: fmt check, clippy -D warnings, tests, PDF dependency policy, layers, assets, wasm.
+//! - `ci`: fmt check, clippy -D warnings, tests (`cargo nextest run` when installed) and doctests,
+//!   PDF dependency policy, layers, assets, wasm. Everything builds in the dev profile.
 //! - `bench [--bin CLI] [--quick] [--compare OLD.jsonl] …`: render benchmark of generated scenarios
 //!   (memory, CPU, wall time) into `target/bench/results.jsonl` (`bench.rs`, docs/testing.md).
 
@@ -235,7 +236,7 @@ const WEB_CRATES: &[&str] = &["effectcraft-ui-egui", "effectcraft-web"];
 fn wasm() -> Result<(), String> {
     let md = metadata()?;
     let mut cmd = Command::new(env!("CARGO"));
-    cmd.args(["check", "--target", "wasm32-unknown-unknown"]);
+    cmd.args(["check", "--target", "wasm32-unknown-unknown", "--keep-going"]);
     let mut n = 0;
     for (name, _) in workspace_crates(&md) {
         if layer_of(&name).is_some_and(|l| l <= 4) || WEB_CRATES.contains(&name.as_str()) {
@@ -406,15 +407,48 @@ fn serve_dir(dir: &std::path::Path, port: u16) -> Result<(), String> {
     Ok(())
 }
 
-fn ci() -> Result<(), String> {
+/// Lib, bin and integration tests (examples aren't linked; clippy checked them), then doctests,
+/// which nextest doesn't run.
+///
+/// `effectcraft-gpu`'s tests share one device and serialise on a lock inside their process (several
+/// devices at once crash software Vulkan and GL), so they run in one `cargo test` process instead of
+/// nextest's process per test.
+///
+/// Each run goes ahead when an earlier one fails; the error names every run that failed.
+fn tests() -> Result<(), String> {
     let cargo = env!("CARGO");
-    run(Command::new(cargo).args(["fmt", "--check"]))?;
-    run(Command::new(cargo).args(["clippy", "--workspace", "--all-targets", "--release", "--", "-D", "warnings"]))?;
-    run(Command::new(cargo).args(["test", "--workspace", "--release"]))?;
-    pdf_deps::run(&root())?;
-    layers()?;
-    assets()?;
-    wasm()
+    let targets = ["--workspace", "--lib", "--bins", "--tests", "--no-fail-fast"];
+    let nextest = Command::new(cargo).args(["nextest", "--version"]).output().is_ok_and(|o| o.status.success());
+    let mut runs = Vec::new();
+    if nextest {
+        runs.push(run(Command::new(cargo).args(["nextest", "run"]).args(targets).args(["-E", "not package(effectcraft-gpu)"])));
+        runs.push(run(Command::new(cargo).args(["test", "-p", "effectcraft-gpu", "--lib", "--no-fail-fast"])));
+    } else {
+        println!("cargo-nextest not found, running cargo test (install: cargo install cargo-nextest --locked)");
+        runs.push(run(Command::new(cargo).arg("test").args(targets)));
+    }
+    // The test runs above hide a passing test's output, so the always-passing report runs again with --nocapture.
+    runs.push(run(Command::new(cargo).args(["test", "-p", "effectcraft-ui-egui", "--lib", "missing_translations_report", "--", "--nocapture"])));
+    runs.push(run(Command::new(cargo).args(["test", "--workspace", "--doc", "--no-fail-fast"])));
+    let failed: Vec<String> = runs.into_iter().filter_map(Result::err).collect();
+    if failed.is_empty() { Ok(()) } else { Err(failed.join("; ")) }
+}
+
+type Stage = fn() -> Result<(), String>;
+
+/// Every stage runs even when an earlier one fails, so one run reports all the problems.
+fn ci() -> Result<(), String> {
+    let stages: [(&str, Stage); 7] = [
+        ("fmt", || run(Command::new(env!("CARGO")).args(["fmt", "--check"]))),
+        ("clippy", || run(Command::new(env!("CARGO")).args(["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]))),
+        ("tests", tests),
+        ("pdf-deps", || pdf_deps::run(&root())),
+        ("layers", layers),
+        ("assets", assets),
+        ("wasm", wasm),
+    ];
+    let failed: Vec<&str> = stages.iter().filter_map(|(name, stage)| stage().map_err(|e| eprintln!("ci: {name} failed: {e}")).err().map(|()| *name)).collect();
+    if failed.is_empty() { Ok(()) } else { Err(format!("ci failed: {}", failed.join(", "))) }
 }
 
 fn main() -> ExitCode {

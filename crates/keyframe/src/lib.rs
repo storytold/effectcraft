@@ -327,7 +327,12 @@ fn auto_spatial(keys: &[Keyframe], i: usize) -> ([f64; 3], [f64; 3]) {
     let a = v3(&keys[i.saturating_sub(1)].value);
     let c = v3(&keys[(i + 1).min(keys.len() - 1)].value);
     let tout = [(c[0] - a[0]) / 6.0, (c[1] - a[1]) / 6.0, (c[2] - a[2]) / 6.0];
-    ([-tout[0], -tout[1], -tout[2]], tout)
+    // A side facing a key at the same position gets no tangent, so the segment between two
+    // identical keys has zero length and the layer holds still (#1675).
+    let p = v3(&keys[i].value);
+    let tin = if i > 0 && a == p { [0.0; 3] } else { [-tout[0], -tout[1], -tout[2]] };
+    let tout = if i + 1 < keys.len() && c == p { [0.0; 3] } else { tout };
+    (tin, tout)
 }
 
 /// Effective spatial tangents of key `i` (auto or stored).
@@ -926,6 +931,26 @@ mod tests {
         let still = [[5.0, 5.0], [9.0, 1.0], [5.0, 5.0]].iter().enumerate().map(|(i, &v)| Keyframe::new(s(i as f64), Value::Vec2(v))).collect::<Vec<_>>();
         assert_eq!(spatial_tangents(&still, 1), ([0.0; 3], [0.0; 3]));
         assert_eq!(spatial_tangents(&still[..1], 0), ([0.0; 3], [0.0; 3]));
+    }
+
+    #[test]
+    fn auto_spatial_holds_between_identical_keys() {
+        let path = [(0.0, [0.0, 540.0]), (0.6, [400.0, 540.0]), (4.4, [400.0, 540.0]), (5.0, [0.0, 540.0])];
+        for eased in [false, true] {
+            let keys: Vec<Keyframe> = path
+                .iter()
+                .map(|&(t, v)| {
+                    let k = Keyframe::new(s(t), Value::Vec2(v));
+                    if eased { k.eased() } else { k }
+                })
+                .collect();
+            assert_eq!(spatial_tangents(&keys, 1).1, [0.0; 3]);
+            assert_eq!(spatial_tangents(&keys, 2).0, [0.0; 3]);
+            for t in [0.7, 1.0, 2.5, 4.0, 4.3] {
+                let p = evaluate(&keys, s(t), true).unwrap().as_vec3();
+                assert!((p[0] - 400.0).abs() < 1e-6 && (p[1] - 540.0).abs() < 1e-6, "eased={eased} t={t} p={p:?}");
+            }
+        }
     }
 
     #[test]

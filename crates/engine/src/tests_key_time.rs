@@ -57,7 +57,10 @@ fn default_layer_times_are_preserved_and_outside_keys_warn() {
     assert!(selected.get("warning").is_some());
     let moved = s.execute("keys.set", json!({"layer": layer, "path": "transform/opacity", "time": 15.3, "newTime": 9.5, "timeBase": "layer"})).unwrap();
     assert_seconds(&moved["compTime"], 20.0);
-    assert!(moved.get("warning").is_some(), "out point is exclusive");
+    assert!(moved.get("warning").is_none(), "a key on the out point is accepted");
+    let past = s.execute("prop.addKey", json!({"layer": layer, "path": "transform/rotation", "time": 20.1, "timeBase": "comp", "value": 45})).unwrap();
+    assert_seconds(&past["compTime"], 20.1);
+    assert!(past.get("warning").is_some(), "a key past the out point warns");
 }
 
 #[test]

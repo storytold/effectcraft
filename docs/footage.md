@@ -70,6 +70,16 @@ next to it.
 Agents: `file.importProject {"path": "/projects/titles.ecproj"}` returns the comps, the root comps,
 `primaryComp` (the only root comp, if there is one) and any missing media.
 
+## Finding a layer's source in the Project panel
+
+Right-click a layer in the Timeline or Composition panel and choose **Reveal Layer Source in
+Project** (also Layer ▸ Reveal ▸ Reveal Layer Source in Project). The Project panel opens, its
+search is cleared, the folders holding the source open, and the source item is selected.
+
+Layers whose image is generated inside the composition — text, shape, null, camera, light and
+3D primitive layers — have no Project item, so the command is not offered for them. Adjustment
+layers do have one: the solid that backs them.
+
 ## Interpret Footage
 
 Select a footage item in the Project panel and choose **File ▸ Interpret Footage ▸ Main…**
@@ -110,6 +120,15 @@ vectors, positions and IDs are never the picture. EXtractoR reads every other la
 Importing a layered file as a composition refreshes the decoded sources used by its layers,
 including files overwritten at the same path and byte size.
 
+- **Replace a layer's source** without rebuilding the layer: Alt-drag (Option-drag on macOS) a
+  footage item, composition or solid from the Project panel onto a layer in the Timeline. The
+  layer keeps its name, timing, transforms, keyframes, expressions, effects, masks, switches,
+  parenting and track matte; only its source changes. A source with audio adds Audio properties
+  when the layer has none. To replace several selected layers with the selected Project item, press
+  Ctrl+Alt+/ (Cmd+Opt+/). Compositions, footage and solids are interchangeable; folders, data files
+  and 3D models are not sources, and a composition can't be nested in itself. Alt-dragging onto a
+  layer is one layer at a time, as in After Effects.
+  Agents: `layer.replaceSource {"item": id, "layers": [ids]}`.
 - **File ▸ Replace Footage ▸ File…** (Ctrl+H) points the item at another file. Pick a numbered
   file to replace it with that file's whole sequence (`file.replaceFootage {"path": …,
   "sequence": false}` for one frame).
@@ -129,7 +148,8 @@ including files overwritten at the same path and byte size.
   File ▸ Open tries each missing file at the same place under the project's new folder, without
   marking the project modified.
 - **File ▸ Reload Footage** (Ctrl+Alt+L) reads the files again. A sequence picks up frames
-  added to its folder (a render still in progress) and keeps its interpretation.
+  added to its folder (a render still in progress) and keeps its interpretation; a still is
+  read as its one file, even when numbered files sit next to it.
 
 **File ▸ Dependencies ▸ Relink Missing Footage…** searches a chosen folder and its subfolders
 for missing source files on the desktop. It relinks unique exact filenames whose decoded type,

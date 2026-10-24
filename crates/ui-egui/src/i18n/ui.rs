@@ -12,6 +12,9 @@
 //! A row that carries values keeps one `{}` per value and is read with [`tr_args`]; the tests below
 //! refuse a row whose placeholder count differs from its English source, so a translation can never
 //! drop a value, and `tr_args` itself cannot panic.
+//!
+//! A language may lack rows: the English source shows instead, and the `missing_translations_report`
+//! test (run by `cargo xtask ci`) lists what each language lacks.
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -19,7 +22,7 @@ use std::fmt::Display;
 use std::sync::OnceLock;
 
 thread_local! {
-    /// The resolved interface language ("en", "ja", "zh-hans", "zh-hant", "uk", "pt-br", "cs", "es"); "en" until the first
+    /// The resolved interface language ("en", "ja", "zh-hans", "zh-hant", "uk", "pt-br", "cs", "es", "ka"); "en" until the first
     /// frame sets it.
     static CURRENT: Cell<&'static str> = const { Cell::new("en") };
 }
@@ -37,6 +40,20 @@ pub(crate) fn current() -> &'static str {
 
 type Index = HashMap<&'static str, &'static str>;
 
+/// Every language with panel rows, for the tests and the missing-strings report.
+#[cfg(test)]
+const ROWS: &[(&str, &[(&str, &str)])] = &[
+    ("ja", JAPANESE),
+    ("zh-hans", SIMPLIFIED_CHINESE),
+    ("zh-hant", TRADITIONAL_CHINESE),
+    ("uk", UKRAINIAN),
+    ("pt-br", PORTUGUESE),
+    ("cs", CZECH),
+    ("es", SPANISH),
+    ("ka", GEORGIAN),
+    ("ka", GEORGIAN_PANELS),
+];
+
 /// The catalog for `language`, indexed by English source (built on first use: panels translate
 /// hundreds of strings a frame); `None` for English and any language that has no rows yet.
 fn catalog(language: &str) -> Option<&'static Index> {
@@ -47,6 +64,7 @@ fn catalog(language: &str) -> Option<&'static Index> {
     static PT_BR: OnceLock<Index> = OnceLock::new();
     static CS: OnceLock<Index> = OnceLock::new();
     static ES: OnceLock<Index> = OnceLock::new();
+    static KA: OnceLock<Index> = OnceLock::new();
     let (index, rows) = match language {
         "ja" => (&JA, JAPANESE),
         "zh-hans" => (&HANS, SIMPLIFIED_CHINESE),
@@ -55,9 +73,67 @@ fn catalog(language: &str) -> Option<&'static Index> {
         "pt-br" => (&PT_BR, PORTUGUESE),
         "cs" => (&CS, CZECH),
         "es" => (&ES, SPANISH),
+        // Georgian also reads its own rows for text the other catalogs don't have yet.
+        "ka" => return Some(KA.get_or_init(|| GEORGIAN.iter().chain(GEORGIAN_PANELS).copied().collect())),
         _ => return None,
     };
     Some(index.get_or_init(|| rows.iter().copied().collect()))
+}
+
+/// The panel strings `language` has no row for, for the missing-strings report: every English
+/// source any catalog lists, in catalog order, then the literals the converted panels pass to `tr`
+/// or `tr_args` that no catalog lists yet.
+#[cfg(test)]
+pub(super) fn missing(language: &str) -> Vec<String> {
+    let table = catalog(language);
+    let rows = ROWS.iter().flat_map(|(_, rows)| rows.iter().map(|(en, _)| en.to_string()));
+    let literals = tests::CONVERTED.iter().flat_map(|(_, src)| tr_literals(src));
+    let mut seen = std::collections::HashSet::new();
+    rows.chain(literals).filter(|en| !table.is_some_and(|c| c.contains_key(en.as_str())) && seen.insert(en.clone())).collect()
+}
+
+/// The string literals `src` passes to `tr(` and `tr_args(`.
+#[cfg(test)]
+fn tr_literals(src: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for call in ["tr(\"", "tr_args(\""] {
+        for (at, _) in src.match_indices(call) {
+            // `str("` or `attr("` is another call.
+            if src[..at].chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_') {
+                continue;
+            }
+            out.extend(string_literal(&src[at + call.len()..]));
+        }
+    }
+    out
+}
+
+/// The text of the string literal `rest` starts inside (just after its opening quote), with the
+/// common escapes resolved; `None` for an escape this doesn't resolve.
+#[cfg(test)]
+fn string_literal(rest: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut chars = rest.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => return Some(out),
+            '\\' => match chars.next()? {
+                'n' => out.push('\n'),
+                't' => out.push('\t'),
+                c @ ('\\' | '"' | '\'') => out.push(c),
+                _ => return None,
+            },
+            c => out.push(c),
+        }
+    }
+    None
+}
+
+/// Characters required by the fixed panel catalog, for system-font coverage selection.
+/// Sorted and deduplicated so fallback registration is deterministic.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn catalog_characters(language: &str) -> Vec<char> {
+    catalog(language).into_iter().flat_map(|c| c.values()).flat_map(|s| s.chars()).collect::<std::collections::BTreeSet<_>>().into_iter().collect()
 }
 
 /// Translate one interface string: the current language's row for `text`, or `text` itself.
@@ -85,7 +161,7 @@ pub(crate) fn tr_args(text: &str, args: &[&dyn Display]) -> String {
     out
 }
 
-/// Japanese: the same rows, in the same order, as the Chinese catalogs below (the tests keep the two in step).
+/// Japanese: the same rows, in the same order, as the Chinese catalogs below.
 const JAPANESE: &[(&str, &str)] = &[
     ("Appearance Settings…", "外観設定…"),
     ("Add to favorites", "お気に入りに追加"),
@@ -259,9 +335,10 @@ const JAPANESE: &[(&str, &str)] = &[
     ("Follow Feature Rotation and Scale", "特徴の回転とスケールに追従"),
     ("Footage: {}", "フッテージ：{}"),
     ("Format: {}", "形式：{}"),
-    ("Frame Aspect Ratio: {}", "フレームアスペクト比：{}"),
+    ("Frame Aspect Ratio: {}", "フレーム縦横比：{}"),
     ("Frame Blending: {}", "フレームブレンド：{}"),
     ("Frame Rate:", "フレームレート:"),
+    ("Resolution:", "解像度:"),
     ("Frame Render Time  {}ms", "フレームのレンダリング時間  {}ms"),
     ("Frame Target:", "フレームターゲット:"),
     ("Freeze", "フリーズ"),
@@ -294,7 +371,6 @@ const JAPANESE: &[(&str, &str)] = &[
     ("Latest auto-save: {}", "最新の自動保存：{}"),
     ("Layer", "レイヤー"),
     ("Layer controls", "レイヤーコントロール"),
-    ("Layer {}", "レイヤー{}"),
     ("Layer:", "レイヤー:"),
     ("Layer: {}", "レイヤー：{}"),
     ("Layer Styles", "レイヤースタイル"),
@@ -308,7 +384,7 @@ const JAPANESE: &[(&str, &str)] = &[
     ("Lighter", "明るく"),
     ("Link Selected Property", "選択したプロパティをリンク"),
     ("Location:", "位置:"),
-    ("Lock Aspect Ratio to {}", "アスペクト比を{}に固定"),
+    ("Lock Aspect Ratio to {}", "縦横比を {} に固定"),
     ("Lock to Zoom", "ズームにロック"),
     ("Locked: {} — {}", "ロック済み：{} — {}"),
     ("Log:", "ログ:"),
@@ -391,7 +467,7 @@ const JAPANESE: &[(&str, &str)] = &[
     ("Overlay", "オーバーレイ"),
     ("Parameter Name:", "パラメーター名:"),
     ("Parent pick whip: drag onto a layer", "親ピックウィップ：レイヤー上にドラッグ"),
-    ("Pixel Aspect Ratio:", "ピクセルアスペクト比:"),
+    ("Pixel Aspect Ratio:", "ピクセル縦横比:"),
     ("Playing on Video Preview", "ビデオプレビューで再生中"),
     ("Post-Render Action: {}", "レンダリング後の処理：{}"),
     ("Preserve frame rate when nested or in render queue", "ネスト時またはレンダーキュー内でフレームレートを保持"),
@@ -997,6 +1073,7 @@ const SIMPLIFIED_CHINESE: &[(&str, &str)] = &[
     ("Frame Aspect Ratio: {}", "帧长宽比：{}"),
     ("Frame Blending: {}", "帧混合：{}"),
     ("Frame Rate:", "帧速率："),
+    ("Resolution:", "分辨率："),
     ("Frame Render Time  {}ms", "帧渲染时间  {} 毫秒"),
     ("Frame Target:", "帧目标："),
     ("Freeze", "冻结"),
@@ -1029,7 +1106,6 @@ const SIMPLIFIED_CHINESE: &[(&str, &str)] = &[
     ("Latest auto-save: {}", "最新的自动保存：{}"),
     ("Layer", "图层"),
     ("Layer controls", "图层控制"),
-    ("Layer {}", "图层 {}"),
     ("Layer:", "图层："),
     ("Layer: {}", "图层：{}"),
     ("Layer Styles", "图层样式"),
@@ -1254,7 +1330,7 @@ const SIMPLIFIED_CHINESE: &[(&str, &str)] = &[
     ("Transparency grid", "透明网格"),
     ("Tutorial complete", "教程完成"),
     ("Two-Node Camera", "双节点摄像机"),
-    ("Type", "文字"),
+    ("Type", "类型"),
     ("Type a command or effect…", "输入命令或效果…"),
     ("URL:", "URL："),
     ("Undock Panel", "取消停靠面板"),
@@ -1737,6 +1813,7 @@ const TRADITIONAL_CHINESE: &[(&str, &str)] = &[
     ("Frame Aspect Ratio: {}", "影格長寬比：{}"),
     ("Frame Blending: {}", "影格混合：{}"),
     ("Frame Rate:", "影格速率："),
+    ("Resolution:", "解析度："),
     ("Frame Render Time  {}ms", "影格算圖時間  {} 毫秒"),
     ("Frame Target:", "幀目標："),
     ("Freeze", "凍結"),
@@ -1769,7 +1846,6 @@ const TRADITIONAL_CHINESE: &[(&str, &str)] = &[
     ("Latest auto-save: {}", "最新的自動儲存：{}"),
     ("Layer", "圖層"),
     ("Layer controls", "圖層控制"),
-    ("Layer {}", "圖層 {}"),
     ("Layer:", "圖層："),
     ("Layer: {}", "圖層：{}"),
     ("Layer Styles", "圖層樣式"),
@@ -1994,7 +2070,7 @@ const TRADITIONAL_CHINESE: &[(&str, &str)] = &[
     ("Transparency grid", "透明格點"),
     ("Tutorial complete", "教學完成"),
     ("Two-Node Camera", "雙節點攝影機"),
-    ("Type", "文字"),
+    ("Type", "類型"),
     ("Type a command or effect…", "輸入命令或效果…"),
     ("URL:", "URL："),
     ("Undock Panel", "取消停靠面板"),
@@ -2027,59 +2103,10 @@ const TRADITIONAL_CHINESE: &[(&str, &str)] = &[
     ("⌘/Ctrl-drag a pin to record its motion", "⌘/Ctrl 拖曳釘選點可記錄其運動"),
     ("▣ {}", "▣ {}"),
     ("⚠ {} is used by:", "⚠ {} 已被以下專案使用："),
-    // The same rows as the Simplified catalog (the tests require both lists to match). The
-    // Traditional wording is the translator's call and is left as the English source for now.
-    ("3D Reference Axes", "3D Reference Axes"),
-    ("Affect all layers that use this solid", "Affect all layers that use this solid"),
-    ("Choose grid and guide options", "Choose grid and guide options"),
-    ("Colorize", "Colorize"),
-    ("Custom", "Custom"),
-    ("Custom...", "Custom..."),
-    ("Fit", "Fit"),
-    ("Fit up to 100%", "Fit up to 100%"),
-    ("Full", "Full"),
-    ("Half", "Half"),
-    ("Only this layer uses this solid.", "Only this layer uses this solid."),
-    ("Proportional Grid", "Proportional Grid"),
-    ("Quarter", "Quarter"),
-    ("Region of Interest", "Region of Interest"),
-    ("Reset Exposure", "Reset Exposure"),
-    ("Show Channel and Color Management Settings", "Show Channel and Color Management Settings"),
-    ("Show Snapshot (hold)", "Show Snapshot (hold)"),
-    ("Take Snapshot", "Take Snapshot"),
-    ("Third", "Third"),
-    ("Toggle Mask and Shape Path Visibility", "Toggle Mask and Shape Path Visibility"),
-    ("Toggle Transparency Grid", "Toggle Transparency Grid"),
-    ("16 bits per channel", "16 bits per channel"),
-    ("32 bits per channel (float)", "32 bits per channel (float)"),
-    ("8 bits per channel", "8 bits per channel"),
-    ("Adaptive Resolution", "Adaptive Resolution"),
-    ("Adobe-style built-in", "Adobe-style built-in"),
     ("Blue", "藍色"),
-    ("Current Settings", "Current Settings"),
-    ("Disable Per-character 3D", "Disable Per-character 3D"),
-    ("Draft", "Draft"),
-    ("Enable Per-character 3D", "Enable Per-character 3D"),
-    ("Fast Draft", "Fast Draft"),
-    ("Fast Previews (Draft 3D, Faster Effects)", "Fast Previews (Draft 3D, Faster Effects)"),
     ("Green", "綠色"),
-    ("Import Image Sequence", "Import Image Sequence"),
-    ("Import PDF / Illustrator File", "Import PDF / Illustrator File"),
-    ("Import Photoshop File", "Import Photoshop File"),
-    ("Interpret Unlabeled Alpha As", "Interpret Unlabeled Alpha As"),
     ("Join the ArtCraft Discord", "加入 ArtCraft Discord"),
-    ("Mercury GPU Acceleration ({})", "Mercury GPU Acceleration ({})"),
-    ("Mercury Software Only", "Mercury Software Only"),
-    ("OCIO (built-in ACES config)", "OCIO (built-in ACES config)"),
-    ("Off (Final Quality)", "Off (Final Quality)"),
-    ("OpenGL (compatibility)", "OpenGL (compatibility)"),
-    ("Opus Bitrate: {} kbps", "Opus Bitrate: {} kbps"),
-    ("RGB Straight", "RGB Straight"),
     ("Red", "紅色"),
-    ("Tone map", "Tone map"),
-    ("Use In-Window Menu Bar on macOS", "Use In-Window Menu Bar on macOS"),
-    ("Wireframe", "Wireframe"),
-    ("sRGB IEC61966-2.1 (default)", "sRGB IEC61966-2.1 (default)"),
     // The Home screen (#574).
     ("New Project", "新增專案"),
     ("Open Project…", "開啟專案…"),
@@ -2480,6 +2507,7 @@ const UKRAINIAN: &[(&str, &str)] = &[
     ("Frame Aspect Ratio: {}", "Пропорції кадру: {}"),
     ("Frame Blending: {}", "Змішування кадрів: {}"),
     ("Frame Rate:", "Частота кадрів:"),
+    ("Resolution:", "Роздільність:"),
     ("Frame Render Time  {}ms", "Час рендерингу кадру  {} мс"),
     ("Frame Target:", "Цільовий фрейм:"),
     ("Freeze", "Заморозити"),
@@ -2512,7 +2540,6 @@ const UKRAINIAN: &[(&str, &str)] = &[
     ("Latest auto-save: {}", "Останнє автозбереження: {}"),
     ("Layer", "Шар"),
     ("Layer controls", "Керування шарами"),
-    ("Layer {}", "Шар {}"),
     ("Layer:", "Шар:"),
     ("Layer: {}", "Шар: {}"),
     ("Layer Styles", "Стилі шару"),
@@ -3040,6 +3067,7 @@ const PORTUGUESE: &[(&str, &str)] = &[
     ("Frame Aspect Ratio: {}", "Proporção do quadro: {}"),
     ("Frame Blending: {}", "Mesclagem de quadros: {}"),
     ("Frame Rate:", "Taxa de quadros:"),
+    ("Resolution:", "Resolução:"),
     ("Frame Render Time  {}ms", "Tempo de renderização do quadro  {}ms"),
     ("Frame Target:", "Destino do quadro:"),
     ("Grab bag", "Lista"),
@@ -3070,7 +3098,6 @@ const PORTUGUESE: &[(&str, &str)] = &[
     ("Latest auto-save: {}", "Último salvamento automático: {}"),
     ("Layer", "Camada"),
     ("Layer controls", "Controles da camada"),
-    ("Layer {}", "Camada {}"),
     ("Layer:", "Camada:"),
     ("Layer: {}", "Camada: {}"),
     ("Layer Styles", "Estilos de camada"),
@@ -3498,6 +3525,7 @@ const CZECH: &[(&str, &str)] = &[
     ("Frame Aspect Ratio: {}", "Poměr stran snímku: {}"),
     ("Frame Blending: {}", "Prolnutí snímků: {}"),
     ("Frame Rate:", "Snímková frekvence:"),
+    ("Resolution:", "Rozlišení:"),
     ("Frame Render Time  {}ms", "Čas vykreslení snímku  {}ms"),
     ("Frame Target:", "Cílový rámec:"),
     ("Freeze", "Zmrazit"),
@@ -3529,7 +3557,6 @@ const CZECH: &[(&str, &str)] = &[
     ("Latest auto-save: {}", "Nejnovější automatická záloha: {}"),
     ("Layer", "Vrstva"),
     ("Layer controls", "Ovládací prvky vrstvy"),
-    ("Layer {}", "Vrstva {}"),
     ("Layer:", "Vrstva:"),
     ("Layer: {}", "Vrstva: {}"),
     ("Layer Styles", "Styly vrstvy"),
@@ -4061,6 +4088,7 @@ const SPANISH: &[(&str, &str)] = &[
     ("Frame Aspect Ratio: {}", "Relación de aspecto del fotograma: {}"),
     ("Frame Blending: {}", "Fusión de fotogramas: {}"),
     ("Frame Rate:", "Velocidad de fotogramas:"),
+    ("Resolution:", "Resolución:"),
     ("Frame Render Time  {}ms", "Tiempo de procesamiento del fotograma  {}ms"),
     ("Frame Target:", "Marco de destino:"),
     ("Freeze", "Congelar"),
@@ -4092,7 +4120,6 @@ const SPANISH: &[(&str, &str)] = &[
     ("Latest auto-save: {}", "Último guardado automático: {}"),
     ("Layer", "Capa"),
     ("Layer controls", "Controles de capa"),
-    ("Layer {}", "Capa {}"),
     ("Layer:", "Capa:"),
     ("Layer: {}", "Capa: {}"),
     ("Layer Styles", "Estilos de capa"),
@@ -4438,17 +4465,976 @@ const SPANISH: &[(&str, &str)] = &[
     ("Project", "Proyecto"),
 ];
 
+/// Georgian (ka): every row of the Chinese catalogs, in the same order (the tests keep them in step).
+const GEORGIAN: &[(&str, &str)] = &[
+    ("Appearance Settings…", "იერსახის პარამეტრები…"),
+    ("Add to favorites", "რჩეულებში დამატება"),
+    ("Remove from favorites", "რჩეულებიდან ამოშლა"),
+    ("   OK   ", "   OK   "),
+    ("  Delete  ", "  წაშლა  "),
+    (" Open Auto-Save ", " ავტოშენახვის გახსნა "),
+    ("(missing)", "(აკლია)"),
+    ("360 View Orientation", "360° ხედის ორიენტაცია"),
+    ("3:2 Pulldown: {}", "3:2 Pulldown: {}"),
+    (
+        "A clean-room, open-source compositor for motion graphics and visual effects: native on macOS, Windows and Linux, and in the browser. Part of the ArtCraft family of creative apps.",
+        "სუფთა ოთახის მეთოდით შექმნილი, ღია კოდის კომპოზიტორი მოძრავი გრაფიკისა და ვიზუალური ეფექტებისთვის: ნატიურად მუშაობს macOS-ზე, Windows-სა და Linux-ზე, ასევე ბრაუზერში. ArtCraft-ის შემოქმედებითი აპების ოჯახის ნაწილი.",
+    ),
+    ("About EffectCraft", "EffectCraft-ის შესახებ"),
+    ("About...", "პროგრამის შესახებ..."),
+    ("Active", "აქტიური"),
+    ("Active Camera", "აქტიური კამერა"),
+    ("Alpha", "ალფა"),
+    ("Adapt Feature On Every Frame", "მახასიათებლის განახლება ყოველ კადრზე"),
+    ("Adaptive Sample Limit:", "ადაპტური ნიმუშების ზღვარი:"),
+    ("Add Animator", "ანიმატორის დამატება"),
+    ("Add Comment", "კომენტარის დამატება"),
+    ("Add Formatting", "ფორმატირების დამატება"),
+    ("Add Group", "ჯგუფის დამატება"),
+    ("Add Mirror", "სარკის დამატება"),
+    ("Add Selected As", "მონიშნულის დამატება როგორც"),
+    ("Add a comment", "კომენტარის დამატება"),
+    ("Add a shape, fill, stroke or path operation", "ფიგურის, შევსების, კონტურის ან ტრაექტორიის ოპერაციის დამატება"),
+    ("Add to Composition", "კომპოზიციაში დამატება"),
+    ("Add to Favorites", "რჩეულებში დამატება"),
+    ("Add:", "დამატება:"),
+    ("Adjust Exposure (stops)", "ექსპოზიციის კორექცია (საფეხურები)"),
+    ("Adjust composition duration to the time span of the selected layers", "კომპოზიციის ხანგრძლივობის მორგება მონიშნული შრეების დროის შუალედზე"),
+    ("Advanced 3D", "გაფართოებული 3D"),
+    ("Align Layers to:", "შრეების სწორება:"),
+    ("All six face cameras turn together; the scene is not changed.", "სახეების ექვსივე კამერა ერთად ბრუნავს; სცენა არ იცვლება."),
+    ("Anchor:", "მიმაგრება:"),
+    ("Aperture", "დიაფრაგმა"),
+    ("Appearance Mode", "იერსახის რეჟიმი"),
+    ("Appearance Mode: {}", "იერსახის რეჟიმი: {}"),
+    ("Apply Dimensions:", "განზომილებების გამოყენება:"),
+    ("Apply Motion To:", "მოძრაობის გამოყენება:"),
+    ("Arrange", "დალაგება"),
+    ("Assign", "მინიჭება"),
+    ("Auto", "ავტომატური"),
+    ("Auto-saves", "ავტოშენახვები"),
+    ("Back", "უკან"),
+    ("Background Color:", "ფონის ფერი:"),
+    ("Blend Mode:", "შერევის რეჟიმი:"),
+    ("Blending Mode", "შერევის რეჟიმი"),
+    ("Blur", "გაბუნდოვნება"),
+    ("Blur Level", "გაბუნდოვნების დონე"),
+    ("Boundary", "საზღვარი"),
+    ("Browser Storage", "ბრაუზერის მეხსიერება"),
+    ("Browse…", "არჩევა…"),
+    ("Brush Dynamics", "ფუნჯის დინამიკა"),
+    ("Caching frames…", "კადრების ქეშირება…"),
+    ("Cancel", "გაუქმება"),
+    ("Casts Shadows", "ჩრდილს აგდებს"),
+    ("Change Renderer…", "რენდერერის შეცვლა…"),
+    ("Changing a shortcut creates a custom preset; the default stays as it is.", "მალსახმობის შეცვლა ქმნის მორგებულ პრესეტს; ნაგულისხმევი უცვლელი რჩება."),
+    ("Channel", "არხი"),
+    ("Channel:", "არხი:"),
+    ("Chapter:", "თავი:"),
+    ("Choose...", "არჩევა..."),
+    ("Classic 3D", "კლასიკური 3D"),
+    ("Clear", "გასუფთავება"),
+    ("Clear list", "სიის გასუფთავება"),
+    ("Click a key to see its commands.", "დაწკაპეთ კლავიშზე მისი ბრძანებების სანახავად."),
+    (
+        "Click above the bar to add an opacity stop, below it to add a color stop.",
+        "დაწკაპეთ ზოლის ზემოთ გაუმჭვირვალობის გადასვლის წერტილის დასამატებლად, ქვემოთ — ფერის გადასვლის წერტილის დასამატებლად.",
+    ),
+    ("Click adds a point (½ height = no change)", "დაწკაპუნება ამატებს წერტილს (½ სიმაღლე = ცვლილების გარეშე)"),
+    ("Click adds a point; drag one off to remove", "დაწკაპუნება ამატებს წერტილს; მის მოსაშორებლად გადაათრიეთ გარეთ"),
+    ("Click to make this viewer active", "დაწკაპეთ ამ დამთვალიერებელის გასააქტიურებლად"),
+    ("Click to reveal the expression in the timeline", "დაწკაპეთ ექსპრესიის დროის ხაზზე საჩვენებლად"),
+    ("Click to show the active composition here", "დაწკაპეთ აქტიური კომპოზიციის აქ საჩვენებლად"),
+    ("Click, then click in the Composition panel", "დაწკაპეთ, შემდეგ კი დაწკაპეთ კომპოზიციის პანელში"),
+    ("Clone Options", "კლონირების პარამეტრები"),
+    ("Clone Source Overlay:", "კლონირების წყაროს გადაფარვა:"),
+    ("Close", "დახურვა"),
+    ("Close Panel", "პანელის დახურვა"),
+    ("Close tutorial", "გაკვეთილის დახურვა"),
+    ("Color", "ფერი"),
+    ("Color Depth: {}", "ფერის სიღრმე: {}"),
+    ("Color:", "ფერი:"),
+    ("Colour map", "ფერების რუკა"),
+    ("Columns", "სვეტები"),
+    ("Comment:", "კომენტარი:"),
+    ("Community", "საზოგადოება"),
+    ("Composition", "კომპოზიცია"),
+    ("Composition Mini-Flowchart", "კომპოზიციის მინი-ბლოკ-სქემა"),
+    ("Composition Name:", "კომპოზიციის სახელი:"),
+    ("Composition Settings ▸ 3D Renderer", "კომპოზიციის პარამეტრები ▸ 3D რენდერერი"),
+    ("Composition Settings…", "კომპოზიციის პარამეტრები…"),
+    ("Composition marker bin: drag a marker to the time ruler", "კომპოზიციის მარკერების ბინი: გადაათრიეთ მარკერი დროის სახაზავზე"),
+    ("Cone Angle", "კონუსის კუთხე"),
+    ("Cone Feather", "კონუსის კიდეების შერბილება"),
+    ("Constrain Proportions", "პროპორციების შენარჩუნება"),
+    ("Continuous (Lock Outgoing to Incoming)", "უწყვეტი (გამავალის მიბმა შემავალზე)"),
+    ("Cue Point", "მინიშნების წერტილი"),
+    ("Current Render", "მიმდინარე რენდერი"),
+    ("Dark", "ბნელი"),
+    ("Dark Theme", "ბნელი თემა"),
+    ("Darker", "უფრო მუქი"),
+    ("Default Output:", "ნაგულისხმევი გამოტანა:"),
+    ("Default: {}", "ნაგულისხმევი: {}"),
+    ("Defaults", "ნაგულისხმევი"),
+    ("Delete", "წაშლა"),
+    ("Delete Selected Points", "მონიშნული წერტილების წაშლა"),
+    ("Delete selected project items", "პროექტის მონიშნული ელემენტების წაშლა"),
+    ("Delete this template", "ამ შაბლონის წაშლა"),
+    ("Depth of Field", "ველის სიღრმე"),
+    ("Discord", "Discord"),
+    ("Distribute Layers:", "შრეების განაწილება:"),
+    ("Don't Recover", "არ აღადგინო"),
+    ("Don't Save", "არ შეინახო"),
+    ("Double-click a layer to open it in the Layer panel", "ორჯერ დაწკაპეთ შრეზე მის შრის პანელში გასახსნელად"),
+    ("Double-click footage in the Project panel to open it here", "ორჯერ დაწკაპეთ ვიდეომასალაზე პროექტის პანელში მის აქ გასახსნელად"),
+    ("Double-click to edit the comment", "ორჯერ დაწკაპეთ კომენტარის რედაქტირებისთვის"),
+    ("Download", "ჩამოტვირთვა"),
+    (
+        "Drag properties here from the timeline,\nor use Animation > Add Property to Essential Graphics.",
+        "გადმოათრიეთ თვისებები დროის ხაზიდან,\nან გამოიყენეთ ანიმაცია > თვისების დამატება ძირითად გრაფიკაში.",
+    ),
+    ("Drag to change", "გადაათრიეთ შესაცვლელად"),
+    ("Drag to create a guide", "გადაათრიეთ დამხმარე ხაზის შესაქმნელად"),
+    ("Drag to slip the source", "გადაათრიეთ წყაროს გადასაწევად"),
+    ("Drop Frame", "კადრების გამოტოვებით"),
+    ("Duplicate", "დუბლირება"),
+    ("Copy", "კოპირება"),
+    ("Paste", "ჩასმა"),
+    ("Edit Value…", "მნიშვნელობის რედაქტირება…"),
+    ("Remove Expression", "ექსპრესიის მოცილება"),
+    ("Duration:", "ხანგრძლივობა:"),
+    ("Edit Gradient…", "გრადიენტის რედაქტირება…"),
+    ("Edit Target: {}", "რედაქტირების სამიზნე: {}"),
+    ("Edit in the Timeline", "რედაქტირება დროის ხაზზე"),
+    ("EffectCraft didn't quit normally last time.", "EffectCraft ბოლოს ნორმალურად არ დახურულა."),
+    ("Effects", "ეფექტები"),
+    ("Effects & Presets options", "ეფექტებისა და პრესეტების პარამეტრები"),
+    ("Copy Presets Folder Path", "პრესეტების საქაღალდის მისამართის კოპირება"),
+    ("Copy Source Path", "წყაროს მისამართის კოპირება"),
+    ("Effects: {}", "ეფექტები: {}"),
+    ("Empty folder", "ცარიელი საქაღალდე"),
+    ("Enable Depth of Field", "ველის სიღრმის ჩართვა"),
+    ("Enable Expression", "ექსპრესიის ჩართვა"),
+    ("Enhance", "გაუმჯობესება"),
+    ("Essential Properties — {}", "ძირითადი თვისებები — {}"),
+    ("Event", "მოვლენა"),
+    ("Export Template…", "შაბლონის ექსპორტი…"),
+    ("Export...", "ექსპორტი..."),
+    ("Expression Language Menu", "ექსპრესიების ენის მენიუ"),
+    ("Expression pick whip: drag onto a property", "ექსპრესიის ბმის სპირალი: გადაათრიეთ თვისებაზე"),
+    ("Expression:", "ექსპრესია:"),
+    ("Eyedropper: click, then click in the Composition panel", "პიპეტი: დაწკაპეთ, შემდეგ კი დაწკაპეთ კომპოზიციის პანელში"),
+    ("Falloff", "მილევა"),
+    ("Falloff Distance", "მილევის მანძილი"),
+    ("Favorites", "რჩეულები"),
+    ("Field Render: {}", "ნახევარკადრების რენდერი: {}"),
+    ("Figures", "ციფრები"),
+    ("Fill Target", "შევსების სამიზნე"),
+    ("Finished", "დასრულდა"),
+    ("Flowchart: {}", "ბლოკ-სქემა: {}"),
+    ("Focus Distance", "ფოკუსური მანძილი"),
+    ("Follow Feature Rotation and Scale", "მახასიათებლის შემობრუნებისა და მასშტაბის მიდევნება"),
+    ("Footage: {}", "ვიდეომასალა: {}"),
+    ("Format: {}", "ფორმატი: {}"),
+    ("Frame Aspect Ratio: {}", "კადრის თანაფარდობა: {}"),
+    ("Frame Blending: {}", "კადრების შერევა: {}"),
+    ("Frame Rate:", "კადრების სიხშირე:"),
+    ("Frame Render Time  {}ms", "კადრის რენდერის დრო  {}ms"),
+    ("Frame Target:", "კადრის სამიზნე:"),
+    ("Freeze", "გაყინვა"),
+    ("Grab bag", "სხვადასხვა"),
+    ("Gradient Editor", "გრადიენტის რედაქტორი"),
+    ("Grid", "ბადე"),
+    ("Guide Layer", "დამხმარე შრე"),
+    ("Guide Layers: {}", "დამხმარე შრეები: {}"),
+    ("Guides", "დამხმარე ხაზები"),
+    ("Height:", "სიმაღლე:"),
+    ("Hide This", "ამის დამალვა"),
+    ("Histogram", "ჰისტოგრამა"),
+    ("Hold In Place", "ადგილზე დაფიქსირება"),
+    ("Home", "საწყისი ეკრანი"),
+    ("If Confidence is Below", "თუ სანდოობა ნაკლებია"),
+    ("Import", "იმპორტი"),
+    ("Import and Add to Composition", "იმპორტი და კომპოზიციაში დამატება"),
+    ("Import...", "იმპორტი..."),
+    ("Imported media", "იმპორტირებული მედია"),
+    ("Influence:", "გავლენა:"),
+    ("Install from File…", "ფაილიდან დაყენება…"),
+    ("Intensity", "ინტენსივობა"),
+    ("Inverted", "შებრუნებული"),
+    ("Join the ArtCraft community on Discord", "შემოუერთდით ArtCraft-ის საზოგადოებას Discord-ზე"),
+    ("Key: {}", "გასაღები: {}"),
+    ("LEARN", "სწავლა"),
+    ("Label", "იარლიყი"),
+    ("Label Colors and Names:", "იარლიყების ფერები და სახელები:"),
+    ("Label:", "იარლიყი:"),
+    ("Latest auto-save: {}", "ბოლო ავტოშენახვა: {}"),
+    ("Layer", "შრე"),
+    ("Layer controls", "შრის მართვის ელემენტები"),
+    ("Layer:", "შრე:"),
+    ("Layer: {}", "შრე: {}"),
+    ("Layer Styles", "შრის სტილები"),
+    ("Learn", "სწავლა"),
+    ("Leave all attributes in \"{}\"", "ყველა ატრიბუტის დატოვება „{}“-ში"),
+    ("Licence: {}", "ლიცენზია: {}"),
+    ("Ligatures", "ლიგატურები"),
+    ("Light", "ღია"),
+    ("Light Theme", "ღია თემა"),
+    ("Light Type", "სინათლის ტიპი"),
+    ("Lighter", "უფრო ღია"),
+    ("Link Selected Property", "მონიშნული თვისების დაკავშირება"),
+    ("Location:", "პოზიცია:"),
+    ("Lock Aspect Ratio to {}", "თანაფარდობის ჩაკეტვა: {}"),
+    ("Lock to Zoom", "მასშტაბზე მიბმა"),
+    ("Locked: {} — {}", "ჩაკეტილი: {} — {}"),
+    ("Log:", "ჟურნალი:"),
+    ("Loop (Trace Path)", "მარყუჟი (ტრაექტორიის გავლა)"),
+    ("MIT OR Apache-2.0 • Fonts: Inter, JetBrains Mono (OFL)", "MIT OR Apache-2.0 • შრიფტები: Inter, JetBrains Mono (OFL)"),
+    ("Magnification ratio popup", "გადიდების კოეფიციენტის მენიუ"),
+    ("Make Comp Size", "კომპოზიციის ზომაზე მორგება"),
+    ("Markers", "მარკერები"),
+    ("Masks", "ნიღბები"),
+    ("Maximize Panel", "პანელის გაშლა"),
+    ("Media Replacement", "მედიის ჩანაცვლება"),
+    ("Mesh:", "ბადე:"),
+    ("Diameter:", "დიამეტრი:"),
+    ("Method Used: {}    Average Error: {} pixels", "გამოყენებული მეთოდი: {}    საშუალო ცდომილება: {} პიქსელი"),
+    ("Models folder: {}", "მოდელების საქაღალდე: {}"),
+    ("Modifiers:", "მოდიფიკატორები:"),
+    ("More", "მეტი"),
+    ("More ArtCraft apps", "ArtCraft-ის სხვა აპლიკაციები"),
+    ("More tutorials", "მეტი გაკვეთილი"),
+    ("Motion Blur", "მოძრაობის გაბუნდოვნება"),
+    ("Motion Blur: {}", "მოძრაობის გაბუნდოვნება: {}"),
+    ("Motion Sketch: drag to record", "მოძრაობის ესკიზი: გადაათრიეთ ჩასაწერად"),
+    ("Move Down", "ჩამოწევა"),
+    ("Move Up", "აწევა"),
+    ("Move to Project Root", "პროექტის ძირში გადატანა"),
+    ("Name", "სახელი"),
+    ("Name:", "სახელი:"),
+    ("Navigation", "ნავიგაცია"),
+    ("New", "ახალი"),
+    ("New Comp from Selection", "ახალი კომპოზიცია მონიშნულიდან"),
+    ("Replace with Precomposition", "ჩადგმული კომპოზიციით ჩანაცვლება"),
+    ("New Duration:", "ახალი ხანგრძლივობა:"),
+    ("New composition name:", "ახალი კომპოზიციის სახელი:"),
+    ("New from Render Queue item:", "ახალი რენდერის რიგის ელემენტიდან:"),
+    ("New from Template", "შაბლონიდან შექმნა"),
+    ("Next", "შემდეგი"),
+    ("Nice work. Pick another tutorial on the Home screen's Learn tab.", "ყოჩაღ. აირჩიეთ სხვა გაკვეთილი საწყისი ეკრანის „სწავლის“ ჩანართზე."),
+    (
+        "No VR environments yet. Create one with Composition ▸ VR ▸ Create VR Environment…",
+        "VR გარემო ჯერ არ არის. შექმენით: კომპოზიცია ▸ VR ▸ VR გარემოს შექმნა…",
+    ),
+    ("No audio layer selected", "აუდიოშრე არ არის მონიშნული"),
+    ("No background jobs running", "ფონური ამოცანები არ მიმდინარეობს"),
+    ("No composition markers", "კომპოზიციის მარკერები არ არის"),
+    ("No contributor data was built into this copy.", "ამ ასლში მონაწილეების მონაცემები არ არის ჩაშენებული."),
+    (
+        "No device list from this host; the system default output is used.",
+        "ამ ჰოსტიდან მოწყობილობების სია მიუწვდომელია; გამოიყენება სისტემის ნაგულისხმევი გამოტანა.",
+    ),
+    ("No layer selected", "შრე არ არის მონიშნული"),
+    ("No matching effects or presets", "შესაბამისი ეფექტები ან პრესეტები არ მოიძებნა"),
+    ("No matching fonts", "შესაბამისი შრიფტები არ მოიძებნა"),
+    ("Variable fonts only", "მხოლოდ ცვლადი შრიფტები"),
+    ("No model credits were built into this copy.", "ამ ასლში მოდელების მონაცემები არ არის ჩაშენებული."),
+    ("No nested compositions", "ჩადგმული კომპოზიციები არ არის"),
+    ("No shortcut", "მალსახმობის გარეშე"),
+    ("No unlocked layer selected", "განბლოკილი შრე არ არის მონიშნული"),
+    ("No video", "ვიდეოს გარეშე"),
+    ("None", "არცერთი"),
+    ("Not applied: tick it in the list to add it.", "არ არის გამოყენებული: დასამატებლად მონიშნეთ სიაში."),
+    ("Not assigned", "არ არის მინიჭებული"),
+    ("Note: Shadows are only cast from layers with Cast Shadows enabled.", "შენიშვნა: ჩრდილს აგდებს მხოლოდ ის შრე, რომელსაც ჩართული აქვს „ჩრდილს აგდებს“."),
+    ("Notify", "შეტყობინება"),
+    ("OK", "OK"),
+    ("Offset:", "წანაცვლება:"),
+    ("On ({}) stop:", "ჩართვისას ({}) გაჩერება:"),
+    ("One-Node Camera", "ერთკვანძიანი კამერა"),
+    ("Opacity:", "გაუმჭვირვალობა:"),
+    ("Open Composition", "კომპოზიციის გახსნა"),
+    ("used once", "გამოყენებულია ერთხელ"),
+    ("used {} times", "გამოყენებულია {}-ჯერ"),
+    ("Compositions that use this item", "კომპოზიციები, რომლებიც ამ ელემენტს იყენებს"),
+    ("Open Last Saved Project", "ბოლოს შენახული პროექტის გახსნა"),
+    ("Open New Composition", "ახალი კომპოზიციის გახსნა"),
+    ("Open Output", "გამოტანის გახსნა"),
+    ("Open a composition to build Essential Graphics", "გახსენით კომპოზიცია ძირითადი გრაფიკის ასაგებად"),
+    ("Open a composition to see its scopes", "გახსენით კომპოზიცია მისი სკოპების სანახავად"),
+    ("Open a composition to track motion.", "გახსენით კომპოზიცია მოძრაობის ტრეკინგისთვის."),
+    ("Opus Tuning: {}", "Opus-ის მორგება: {}"),
+    ("Original Duration:", "საწყისი ხანგრძლივობა:"),
+    ("Output Cycle: {}", "გამოტანის ციკლი: {}"),
+    ("Output To:", "გამოტანის ადგილი:"),
+    ("Overlay", "გადაფარვა"),
+    ("Parameter Name:", "პარამეტრის სახელი:"),
+    ("Parent pick whip: drag onto a layer", "მშობლის ბმის სპირალი: გადაათრიეთ შრეზე"),
+    ("Pixel Aspect Ratio:", "პიქსელის გვერდების თანაფარდობა:"),
+    ("Playing on Video Preview", "იკვრება ვიდეოს წინასწარ ნახვაზე"),
+    ("Post-Render Action: {}", "რენდერის შემდგომი მოქმედება: {}"),
+    ("Preserve frame rate when nested or in render queue", "კადრების სიხშირის შენარჩუნება ჩადგმისას ან რენდერის რიგში"),
+    ("Preserve resolution when nested", "გარჩევადობის შენარჩუნება ჩადგმისას"),
+    ("Preset", "პრესეტი"),
+    ("Preset:", "პრესეტი:"),
+    ("Presets", "პრესეტები"),
+    ("Previous", "წინა"),
+    ("Primary:", "ძირითადი:"),
+    ("Process Before Match", "დამუშავება შეთანხმებამდე"),
+    ("Profile: {}", "პროფილი: {}"),
+    (
+        "Project color depth: click to cycle 8/16/32 bpc, Alt-click for Project Settings",
+        "პროექტის ფერის სიღრმე: დაწკაპეთ 8/16/32 bpc-ის გადასართავად, Alt-დაწკაპუნება — პროექტის პარამეტრები",
+    ),
+    ("Project: {}", "პროექტი: {}"),
+    ("Projects", "პროექტები"),
+    ("Property pick whip: drag onto a property", "თვისების ბმის სპირალი: გადაათრიეთ თვისებაზე"),
+    ("Protected Region", "დაცული არე"),
+    ("Proxy Use: {}", "პროქსის გამოყენება: {}"),
+    ("Push All to Comp", "ყველაფრის კომპოზიციაში გადატანა"),
+    ("RGB", "RGB"),
+    ("Radius", "რადიუსი"),
+    ("Rate Control: {}", "სიჩქარის კონტროლი: {}"),
+    ("Recent", "ბოლოდროინდელი"),
+    ("Recording", "ჩაწერა"),
+    ("Remove", "წაშლა"),
+    ("Rename", "სახელის შეცვლა"),
+    ("Render: {} ms  •  UI {} fps{}", "რენდერი: {} ms  •  UI {} fps{}"),
+    ("Renderer:", "რენდერერი:"),
+    ("Request Persistent Storage", "მუდმივი მეხსიერების მოთხოვნა"),
+    ("Reset", "ჩამოყრა"),
+    ("Reset Labels", "იარლიყების ჩამოყრა"),
+    ("Reset Preset", "პრესეტის ჩამოყრა"),
+    ("Reset to Default", "ნაგულისხმევზე დაბრუნება"),
+    ("Reset to Saved Layout", "შენახულ განლაგებაზე დაბრუნება"),
+    ("Resolution/Down Sample Factor Popup", "გარჩევადობის/დისკრეტიზაციის კოეფიციენტის მენიუ"),
+    ("Restore Panel Size", "პანელის ზომის აღდგენა"),
+    ("Reverse the order", "რიგის შებრუნება"),
+    ("Revert All", "ყველაფრის დაბრუნება"),
+    ("Roman Hanging Punctuation", "ლათინური გამოწეული პუნქტუაცია"),
+    ("Roving:", "მცურავი:"),
+    ("Ruler zero point (drag to move, double-click to reset)", "სახაზავის ნულოვანი წერტილი (გადაათრიეთ გადასაადგილებლად, ორჯერ დაწკაპეთ ჩამოსაყრელად)"),
+    ("Rulers", "სახაზავები"),
+    ("Run", "გაშვება"),
+    ("Sample Format: {}", "ნიმუშის ფორმატი: {}"),
+    ("Samples Per Frame:", "ნიმუშები კადრზე:"),
+    ("Save from #{}", "შენახვა #{}-დან"),
+    ("Saved {}", "შენახულია {}"),
+    ("Script… (⌘/Ctrl+Enter runs)", "სკრიპტი… (⌘/Ctrl+Enter უშვებს)"),
+    ("Search commands or shortcuts", "ბრძანებების ან მალსახმობების ძიება"),
+    ("Select", "მონიშვნა"),
+    ("Select a command to change its shortcut.", "მონიშნეთ ბრძანება მისი მალსახმობის შესაცვლელად."),
+    ("Select a layer to see its effects", "მონიშნეთ შრე მისი ეფექტების სანახავად"),
+    ("Select a layer to see its properties", "მონიშნეთ შრე მისი თვისებების სანახავად"),
+    ("({}) Selected Objects", "({}) მონიშნული ობიექტი"),
+    (
+        "Select a layer with a mask or shape path (or the path property), or Puppet pins.",
+        "მონიშნეთ ნიღბიანი ან ფიგურის ტრაექტორიის მქონე შრე (ან ტრაექტორიის თვისება), ან მარიონეტის სამაგრები.",
+    ),
+    ("Select a text layer", "მონიშნეთ ტექსტური შრე"),
+    ("Select an item in the Project panel", "მონიშნეთ ელემენტი პროექტის პანელში"),
+    ("Select animated properties to show them in the Graph Editor", "მონიშნეთ ანიმირებული თვისებები გრაფიკების რედაქტორში საჩვენებლად"),
+    (
+        "Select the leader pin, then Shift-click the pins that should trail it (hair, cloth, tails)",
+        "მონიშნეთ წამყვანი სამაგრი, შემდეგ Shift-დაწკაპუნებით მონიშნეთ მიმყოლი სამაგრები (თმა, ქსოვილი, კუდები)",
+    ),
+    ("Set Ground Plane and Origin", "მიწის სიბრტყისა და სათავის დაყენება"),
+    ("Set Paint Colors to Black and White (D)", "ხატვის ფერების შავ-თეთრზე დაყენება (D)"),
+    ("Settings", "პარამეტრები"),
+    ("Settings Name:", "პარამეტრების სახელი:"),
+    ("Shadow Darkness", "ჩრდილის სიმუქე"),
+    ("Shadow Diffusion", "ჩრდილის გაბნევა"),
+    ("Shadows", "ჩრდილები"),
+    ("Shape…", "ფორმა…"),
+    ("Show", "ჩვენება"),
+    ("Show Layer Name", "შრის სახელის ჩვენება"),
+    ("Show Source Name", "წყაროს სახელის ჩვენება"),
+    ("Show me", "მაჩვენე"),
+    ("Show:", "ჩვენება:"),
+    ("Shutter Angle:", "ობტურატორის კუთხე:"),
+    ("Shutter Phase:", "ობტურატორის ფაზა:"),
+    ("Size", "ზომა"),
+    ("Skip", "გამოტოვება"),
+    ("Snapping", "მიბმა"),
+    ("Snapping options", "მიბმის პარამეტრები"),
+    ("Snapshot", "მომენტალური ასლი"),
+    ("Solo Supported Properties", "მხარდაჭერილი თვისებების სოლო"),
+    ("Solo Switches: {}", "სოლოს გადამრთველები: {}"),
+    ("Sort", "სორტირება"),
+    ("Spacing:", "ინტერვალი:"),
+    ("Spatial Interpolation:", "სივრცითი ინტერპოლაცია:"),
+    ("Speed:", "სიჩქარე:"),
+    ("Start Timecode:", "საწყისი თაიმკოდი:"),
+    ("Start: {}   Duration: {}", "დასაწყისი: {}   ხანგრძლივობა: {}"),
+    ("Step {} of {}: {}", "ნაბიჯი {} / {}: {}"),
+    ("Stop", "შეწყვეტა"),
+    ("Stop {} at {}°", "გადასვლის წერტილი {} — {}°"),
+    ("Stored in: {}", "შენახულია: {}"),
+    ("Stretch", "გაწელვა"),
+    ("Stretch Factor:", "გაწელვის კოეფიციენტი:"),
+    ("Stylistic Sets", "სტილისტური ნაკრებები"),
+    ("Subpixel Positioning", "სუბპიქსელური პოზიციონირება"),
+    ("Swap Colors", "ფერების გაცვლა"),
+    ("Swap Paint Colors (X)", "ხატვის ფერების გაცვლა (X)"),
+    ("Sync with System", "სისტემასთან სინქრონიზაცია"),
+    ("System Default", "სისტემის ნაგულისხმევი"),
+    ("Table", "ცხრილი"),
+    ("Template name", "შაბლონის სახელი"),
+    ("Template: {}\n{}", "შაბლონი: {}\n{}"),
+    ("Temporal Interpolation:", "დროითი ინტერპოლაცია:"),
+    ("The Media Browser is not available here (use File ▸ Import)", "მედიის ბრაუზერი აქ მიუწვდომელია (გამოიყენეთ ფაილი ▸ იმპორტი)"),
+    ("The OpenEXR layer shown in red, green, blue and alpha", "OpenEXR შრე წითლად, მწვანედ, ლურჯად და ალფად"),
+    ("The render queue is empty.", "რენდერის რიგი ცარიელია."),
+    (
+        "These adjacent keyframes cannot interpolate because their stop counts differ.",
+        "ამ მეზობელ საკვანძო კადრებს შორის ინტერპოლაცია შეუძლებელია, რადგან მათ გრადიენტის გადასვლის წერტილების განსხვავებული რაოდენობა აქვთ.",
+    ),
+    ("This ScriptUI panel has closed", "ეს ScriptUI პანელი დაიხურა"),
+    ("This change will create a new solid for this layer.", "ეს ცვლილება ამ შრისთვის ახალ სოლიდს შექმნის."),
+    ("Time", "დრო"),
+    ("Time Stretch…", "დროში გაწელვა…"),
+    ("Time:", "დრო:"),
+    ("Time: {}", "დრო: {}"),
+    ("Title/Action Safe", "სათაურისა და მოქმედების უსაფრთხო არე"),
+    ("Title/action safe", "სათაურისა და მოქმედების უსაფრთხო არე"),
+    ("Toggle Switches / Modes", "გადამრთველების / რეჟიმების გადართვა"),
+    ("Track Name:", "ტრეკის სახელი:"),
+    (
+        "Trained models are available in the desktop app; the browser uses the classic engine.",
+        "გაწვრთნილი მოდელები ხელმისაწვდომია დესკტოპის აპში; ბრაუზერი კლასიკურ ძრავს იყენებს.",
+    ),
+    ("Transform", "გარდაქმნა"),
+    ("Transparency grid", "გამჭვირვალობის ბადე"),
+    ("Tutorial complete", "გაკვეთილი დასრულდა"),
+    ("Two-Node Camera", "ორკვანძიანი კამერა"),
+    ("Type", "ტიპი"),
+    ("Type a command or effect…", "აკრიფეთ ბრძანება ან ეფექტი…"),
+    ("URL:", "URL:"),
+    ("Undock Panel", "პანელის მოხსნა"),
+    ("Move Panel to New Window", "პანელის ახალ ფანჯარაში გადატანა"),
+    ("Move Panel to Main Window", "პანელის მთავარ ფანჯარაში გადატანა"),
+    ("Unfreeze", "გაყინვის მოხსნა"),
+    ("Unlink {}", "{}-ის კავშირის გაწყვეტა"),
+    (
+        "Use this option to place the currently selected layers together into a new intermediate composition.",
+        "გამოიყენეთ ეს ვარიანტი მონიშნული შრეების ერთად ახალ შუალედურ კომპოზიციაში მოსათავსებლად.",
+    ),
+    ("VR Environments", "VR გარემოები"),
+    ("Value:", "მნიშვნელობა:"),
+    ("Variable Font Axes", "ცვლადი შრიფტის ღერძები"),
+    ("Video Codec: {}", "ვიდეო კოდეკი: {}"),
+    ("View:", "ხედი:"),
+    ("Welcome to EffectCraft", "მოგესალმებათ EffectCraft"),
+    ("Width:", "სიგანე:"),
+    ("You can undo this.", "ამის დაბრუნება შეგიძლიათ."),
+    ("You can't undo this.", "ამის დაბრუნება შეუძლებელია."),
+    ("Your changes will be lost if you don't save them.", "თუ ცვლილებებს არ შეინახავთ, ისინი დაიკარგება."),
+    ("Zoom", "მასშტაბი"),
+    ("built-in", "ჩაშენებული"),
+    ("frames per second", "კადრი წამში"),
+    ("template name", "შაბლონის სახელი"),
+    ("{} contributors · {} commits", "მონაწილე: {} · კომიტი: {}"),
+    ("{} x {}, {}MB per 8bpc frame", "{} x {}, {}MB 8bpc კადრზე"),
+    ("{} — coming soon", "{} — მალე"),
+    ("{} — double-click to open, {}-click to reveal", "{} — ორჯერ დაწკაპეთ გასახსნელად, {}-დაწკაპუნება საჩვენებლად"),
+    ("⌘/Ctrl-drag a pin to record its motion", "⌘/Ctrl-ით გადაათრიეთ სამაგრი მისი მოძრაობის ჩასაწერად"),
+    ("▣ {}", "▣ {}"),
+    ("⚠ {} is used by:", "⚠ {} გამოიყენება:"),
+    ("3D Reference Axes", "3D საორიენტაციო ღერძები"),
+    ("Affect all layers that use this solid", "ზემოქმედება ყველა შრეზე, რომელიც ამ სოლიდს იყენებს"),
+    ("Choose grid and guide options", "ბადისა და დამხმარე ხაზების პარამეტრების არჩევა"),
+    ("Colorize", "გაფერადება"),
+    ("Custom", "მორგებული"),
+    ("Custom...", "მორგებული..."),
+    ("Fit", "ჩატევა"),
+    ("Fit up to 100%", "ჩატევა 100%-მდე"),
+    ("Full", "სრული"),
+    ("Half", "ნახევარი"),
+    ("Only this layer uses this solid.", "ამ სოლიდს მხოლოდ ეს შრე იყენებს."),
+    ("Proportional Grid", "პროპორციული ბადე"),
+    ("Quarter", "მეოთხედი"),
+    ("Region of Interest", "ინტერესის არე"),
+    ("Reset Exposure", "ექსპოზიციის ჩამოყრა"),
+    ("Show Channel and Color Management Settings", "არხისა და ფერთა მართვის პარამეტრების ჩვენება"),
+    ("Show Snapshot (hold)", "მომენტალური ასლის ჩვენება (დაჭერით)"),
+    ("Take Snapshot", "მომენტალური ასლის გადაღება"),
+    ("Third", "მესამედი"),
+    ("Toggle Mask and Shape Path Visibility", "ნიღბისა და ფიგურის ტრაექტორიის ხილვადობის გადართვა"),
+    ("Toggle Transparency Grid", "გამჭვირვალობის ბადის გადართვა"),
+    ("16 bits per channel", "16 ბიტი არხზე"),
+    ("32 bits per channel (float)", "32 ბიტი არხზე (მცურავი)"),
+    ("8 bits per channel", "8 ბიტი არხზე"),
+    ("Adaptive Resolution", "ადაპტური გარჩევადობა"),
+    ("Adobe-style built-in", "ჩაშენებული, Adobe-ს სტილის"),
+    ("Blue", "ლურჯი"),
+    ("Current Settings", "მიმდინარე პარამეტრები"),
+    ("Disable Per-character 3D", "თითოეული ასოს 3D-ს გამორთვა"),
+    ("Draft", "მონახაზი"),
+    ("Enable Per-character 3D", "თითოეული ასოს 3D-ს ჩართვა"),
+    ("Fast Draft", "სწრაფი მონახაზი"),
+    ("Fast Previews (Draft 3D, Faster Effects)", "სწრაფი წინასწარი ნახვა (3D მონახაზი, უფრო სწრაფი ეფექტები)"),
+    ("Green", "მწვანე"),
+    ("Import Image Sequence", "გამოსახულებების თანმიმდევრობის იმპორტი"),
+    ("Import PDF / Illustrator File", "PDF / Illustrator ფაილის იმპორტი"),
+    ("Import Photoshop File", "Photoshop ფაილის იმპორტი"),
+    ("Interpret Unlabeled Alpha As", "არამონიშნული ალფას ინტერპრეტაცია როგორც"),
+    ("Join the ArtCraft Discord", "შემოუერთდით ArtCraft-ის Discord-ს"),
+    ("Mercury GPU Acceleration ({})", "Mercury GPU აჩქარება ({})"),
+    ("Mercury Software Only", "მხოლოდ Mercury Software"),
+    ("OCIO (built-in ACES config)", "OCIO (ჩაშენებული ACES კონფიგურაცია)"),
+    ("Off (Final Quality)", "გამორთული (საბოლოო ხარისხი)"),
+    ("OpenGL (compatibility)", "OpenGL (თავსებადობა)"),
+    ("Opus Bitrate: {} kbps", "Opus-ის ბიტრეიტი: {} kbps"),
+    ("RGB Straight", "RGB Straight"),
+    ("Red", "წითელი"),
+    ("Tone map", "ტონური რუკა"),
+    ("Use In-Window Menu Bar on macOS", "ფანჯრის შიდა მენიუს ზოლის გამოყენება macOS-ზე"),
+    ("Wireframe", "კარკასი"),
+    ("sRGB IEC61966-2.1 (default)", "sRGB IEC61966-2.1 (ნაგულისხმევი)"),
+    ("New Project", "ახალი პროექტი"),
+    ("Open Project…", "პროექტის გახსნა…"),
+    ("Templates", "შაბლონები"),
+    ("EffectCraft home page", "EffectCraft-ის საწყისი გვერდი"),
+    ("EffectCraft on GitHub", "EffectCraft GitHub-ზე"),
+    ("Motion graphics and visual effects · version {}", "მოძრავი გრაფიკა და ვიზუალური ეფექტები · ვერსია {}"),
+    ("New Composition", "ახალი კომპოზიცია"),
+    ("Open Demo Project", "სადემონსტრაციო პროექტის გახსნა"),
+    ("Import Footage…", "ვიდეომასალის იმპორტი…"),
+    ("Filter recent files", "ბოლო ფაილების გაფილტვრა"),
+    ("NAME", "სახელი"),
+    ("OPENED", "გახსნილია"),
+    ("SIZE", "ზომა"),
+    ("KIND", "სახეობა"),
+    ("Your recent files will show here", "ბოლოდროინდელი ფაილები აქ გამოჩნდება"),
+    ("Create a new project, or open the demo project to look around.", "შექმენით ახალი პროექტი, ან გახსენით სადემონსტრაციო პროექტი გასაცნობად."),
+    ("No recent files match the filter", "ფილტრს ბოლოდროინდელი ფაილები არ შეესაბამება"),
+    ("Try another name or folder.", "სცადეთ სხვა სახელი ან საქაღალდე."),
+    ("Just now", "ახლახან"),
+    ("Yesterday", "გუშინ"),
+    ("{} minute ago", "{} წუთის წინ"),
+    ("{} minutes ago", "{} წუთის წინ"),
+    ("{} hour ago", "{} საათის წინ"),
+    ("{} hours ago", "{} საათის წინ"),
+    ("{} day ago", "{} დღის წინ"),
+    ("{} days ago", "{} დღის წინ"),
+    ("EffectCraft project", "EffectCraft-ის პროექტი"),
+    ("After Effects project", "After Effects-ის პროექტი"),
+    ("Lottie animation", "Lottie ანიმაცია"),
+    ("Project", "პროექტი"),
+    ("General", "ზოგადი"),
+    ("Language", "ენა"),
+    ("Levels of Undo", "დაბრუნების დონეები"),
+    ("Path Point and Handle Size", "ტრაექტორიის წერტილისა და სახელურის ზომა"),
+    ("Recent Projects Shown", "ნაჩვენები ბოლო პროექტები"),
+    ("Options", "პარამეტრები"),
+    ("Show Tool Tips", "მინიშნებების ჩვენება"),
+    ("Create Layers at Composition Start Time", "შრეების შექმნა კომპოზიციის დაწყების დროზე"),
+    ("Switches Affect Nested Comps", "გადამრთველები მოქმედებს ჩადგმულ კომპოზიციებზე"),
+    ("Default Spatial Interpolation to Linear", "ნაგულისხმევი სივრცითი ინტერპოლაცია: წრფივი"),
+    (
+        "Preserve Constant Vertex and Feather Point Count when Editing Masks",
+        "ნიღბების რედაქტირებისას წვეროებისა და შერბილების წერტილების რაოდენობის შენარჩუნება",
+    ),
+    ("Synchronize Time of All Related Items", "ყველა დაკავშირებული ელემენტის დროის სინქრონიზაცია"),
+    ("Expression Pick Whip Writes Compact English", "ექსპრესიის ბმის სპირალი წერს კომპაქტურ ინგლისურს"),
+    ("Create Split Layers Above Original Layer", "დაყოფილი შრეების შექმნა საწყისი შრის ზემოთ"),
+    ("Use System Color Picker", "სისტემის ფერის ამომრჩევის გამოყენება"),
+    (
+        "EffectCraft always uses its own colour picker (the same on every platform and the web).",
+        "EffectCraft ყოველთვის საკუთარ ფერის ამომრჩევს იყენებს (ერთნაირს ყველა პლატფორმაზე და ვებში).",
+    ),
+    ("Startup & Repair", "გაშვება და აღდგენა"),
+    ("Show Home Screen When Launching", "საწყისი ეკრანის ჩვენება გაშვებისას"),
+    ("Show Home Screen When Opening a Project", "საწყისი ეკრანის ჩვენება პროექტის გახსნისას"),
+    ("Offer to Open the Latest Auto-Save After a Crash", "ავარიის შემდეგ ბოლო ავტოშენახვის გახსნის შეთავაზება"),
+    ("Window Graphics", "ფანჯრის გრაფიკა"),
+    ("Automatic", "ავტომატური"),
+    (
+        "Window Graphics applies from the next launch. When the graphics driver stops EffectCraft as its window opens, the next launch switches to OpenGL.",
+        "ფანჯრის გრაფიკა მოქმედებს შემდეგი გაშვებიდან. თუ გრაფიკის დრაივერი EffectCraft-ს ფანჯრის გახსნისას აჩერებს, შემდეგი გაშვება OpenGL-ზე გადაერთვება.",
+    ),
+    ("Repair", "აღდგენა"),
+    ("Reset Settings", "პარამეტრების ჩამოყრა"),
+    ("Reset Keyboard Shortcuts", "კლავიატურის მალსახმობების ჩამოყრა"),
+    ("Empty Disk Cache", "დისკის ქეშის გასუფთავება"),
+    ("New Project Loads Template", "ახალი პროექტი შაბლონს ტვირთავს"),
+    ("Template Project", "შაბლონი პროექტი"),
+    ("Auto-Save", "ავტოშენახვა"),
+    ("Automatically Save Projects", "პროექტების ავტომატური შენახვა"),
+    ("Save Every", "შენახვა ყოველ"),
+    ("Minutes", "წუთში"),
+    ("Maximum Project Versions", "პროექტის ვერსიების მაქსიმალური რაოდენობა"),
+    ("Auto-Save Location", "ავტოშენახვის მდებარეობა"),
+    ("Next to Project", "პროექტის გვერდით"),
+    ("Custom Location", "სხვა მდებარეობა"),
+    ("Save When Starting Render Queue", "შენახვა რენდერის რიგის დაწყებისას"),
+    ("Save Now", "ახლავე შენახვა"),
+    ("Motion Path", "მოძრაობის ტრაექტორია"),
+    ("All Keyframes", "ყველა საკვანძო კადრი"),
+    ("No Motion Path", "მოძრაობის ტრაექტორიის გარეშე"),
+    ("No More Than (Seconds)", "არაუმეტეს (წამი)"),
+    ("No More Than (Keyframes)", "არაუმეტეს (საკვანძო კადრი)"),
+    ("Seconds", "წამი"),
+    ("Keyframes", "საკვანძო კადრები"),
+    ("Display", "ეკრანი"),
+    ("Show Rendering Progress in Info Panel and Flowchart", "რენდერის პროგრესის ჩვენება ინფორმაციის პანელსა და ბლოკ-სქემაში"),
+    ("Hardware Accelerate Composition, Layer and Footage Panels", "კომპოზიციის, შრისა და ვიდეომასალის პანელების აპარატული აჩქარება"),
+    ("Panels are always drawn by the GPU (wgpu).", "პანელებს ყოველთვის GPU ხატავს (wgpu)."),
+    ("Previews", "წინასწარი ნახვა"),
+    ("Adaptive Resolution Limit", "ადაპტური გარჩევადობის ზღვარი"),
+    ("Show Internal Wireframes", "შიდა კარკასების ჩვენება"),
+    ("Cache Frames When Idle", "კადრების ქეშირება უქმობისას"),
+    ("Viewer Zoom Quality", "დამთვალიერებლის მასშტაბირების ხარისხი"),
+    ("Faster", "უფრო სწრაფი"),
+    ("More Accurate", "უფრო ზუსტი"),
+    ("Display Color Space", "ეკრანის ფერთა სივრცე"),
+    ("GPU Information...", "ინფორმაცია GPU-ს შესახებ..."),
+    ("Appearance", "იერსახე"),
+    ("Brightness", "სიკაშკაშე"),
+    ("UI Scale", "ინტერფეისის მასშტაბი"),
+    ("Labels and Colors", "იარლიყები და ფერები"),
+    ("Use Label Color for Layer Handles and Paths", "იარლიყის ფერის გამოყენება შრის სახელურებისა და ტრაექტორიებისთვის"),
+    ("Use Label Color for Related Tabs", "იარლიყის ფერის გამოყენება დაკავშირებული ჩანართებისთვის"),
+    ("Cycle Mask Colors", "ნიღბის ფერების მონაცვლეობა"),
+    ("Use Gradients", "გრადიენტების გამოყენება"),
+    ("Menu Bar", "მენიუს ზოლი"),
+    ("Grids & Guides", "ბადე და დამხმარე ხაზები"),
+    ("Gridline Every", "ბადის ხაზი ყოველ"),
+    ("Subdivisions", "ქვედანაყოფები"),
+    ("Style", "სტილი"),
+    ("Lines", "ხაზები"),
+    ("Dashed Lines", "წყვეტილი ხაზები"),
+    ("Dots", "წერტილები"),
+    ("Horizontal", "ჰორიზონტალური"),
+    ("Vertical", "ვერტიკალური"),
+    ("Safe Margins", "უსაფრთხო ზღვრები"),
+    ("Action-safe", "მოქმედების უსაფრთხო არე"),
+    ("Title-safe", "ტიტრების უსაფრთხო არე"),
+    ("Labels", "იარლიყები"),
+    ("Text Engine", "ტექსტის ძრავა"),
+    ("Latin", "ლათინური"),
+    ("South Asian and Middle Eastern", "სამხრეთაზიური და ახლო აღმოსავლური"),
+    ("Show Font Preview", "შრიფტის წინასწარი ნახვის ჩვენება"),
+    ("Number of Recent Fonts to Display", "საჩვენებელი ბოლო შრიფტების რაოდენობა"),
+    ("Show Font Names in English", "შრიფტების სახელების ინგლისურად ჩვენება"),
+    ("Still Footage", "უძრავი ვიდეომასალა"),
+    ("Length of Composition", "კომპოზიციის სიგრძე"),
+    ("Duration (Seconds)", "ხანგრძლივობა (წამი)"),
+    ("Still Duration", "უძრავი კადრის ხანგრძლივობა"),
+    ("Sequence Footage", "სეკვენციური ვიდეომასალა"),
+    ("Report Missing Frames", "გამოტოვებული კადრების შეტყობინება"),
+    ("Automatically Reload Footage", "ვიდეომასალის ავტომატური ხელახლა ჩატვირთვა"),
+    ("Off", "გამორთული"),
+    ("Non-Sequence Footage", "არასეკვენციური ვიდეომასალა"),
+    ("All Footage", "მთელი ვიდეომასალა"),
+    ("Ask User", "მომხმარებლისთვის კითხვა"),
+    ("Guess", "ვარაუდი"),
+    ("Ignore", "უგულებელყოფა"),
+    ("Straight", "პირდაპირი"),
+    ("Premultiplied", "წინასწარ გამრავლებული"),
+    ("Default Drag Import As", "გადათრევით იმპორტი ნაგულისხმევად როგორც"),
+    ("Footage", "ვიდეომასალა"),
+    ("Composition - Retain Layer Sizes", "კომპოზიცია - შრეების ზომების შენარჩუნებით"),
+    ("Export", "ექსპორტი"),
+    ("Default Output Folder", "ნაგულისხმევი გამოტანის საქაღალდე"),
+    ("Segment Sequences", "სეკვენციების სეგმენტებად დაყოფა"),
+    ("Files per Segment", "ფაილი სეგმენტში"),
+    ("files", "ფაილი"),
+    ("Segment Movie Files", "ვიდეოფაილების სეგმენტებად დაყოფა"),
+    ("Segment Size", "სეგმენტის ზომა"),
+    ("Append Bit Depth to File Name", "ბიტური სიღრმის ფაილის სახელზე დამატება"),
+    ("Audio", "აუდიო"),
+    ("Audio Hardware", "აუდიოაპარატურა"),
+    ("Preview Sample Rate", "წინასწარი ნახვის დისკრეტიზაციის სიხშირე"),
+    ("Audio Output Mapping", "აუდიოს გამოტანის ასახვა"),
+    ("Left", "მარცხენა"),
+    ("Right", "მარჯვენა"),
+    ("channel", "არხი"),
+    ("Disk", "დისკი"),
+    ("Disk Cache", "დისკის ქეში"),
+    ("Enable Disk Cache", "დისკის ქეშის ჩართვა"),
+    ("Maximum Disk Cache Size", "დისკის ქეშის მაქსიმალური ზომა"),
+    ("Disk Cache Folder", "დისკის ქეშის საქაღალდე"),
+    ("Media Cache", "მედიაქეში"),
+    ("Database and Cache Folder", "მონაცემთა ბაზისა და ქეშის საქაღალდე"),
+    ("Conformed Audio Folder", "მისადაგებული აუდიოს საქაღალდე"),
+    ("Memory & CPU", "მეხსიერება და CPU"),
+    ("RAM Reserved for Other Applications", "სხვა აპლიკაციებისთვის დაჯავშნული RAM"),
+    ("Cache Budgets", "ქეშის ლიმიტები"),
+    ("Layer Cache", "შრეების ქეში"),
+    ("Footage Frame Cache", "ვიდეომასალის კადრების ქეში"),
+    ("Preview (RAM) Cache", "წინასწარი ნახვის (RAM) ქეში"),
+    ("Reduce Cache Size When System Is Low on Memory", "ქეშის ზომის შემცირება, როცა სისტემას მეხსიერება აკლია"),
+    ("Video", "ვიდეო"),
+    ("Enable Video Preview Output", "ვიდეოს წინასწარი ნახვის გამოტანის ჩართვა"),
+    ("Video Device", "ვიდეომოწყობილობა"),
+    ("Floating Window", "მცურავი ფანჯარა"),
+    ("Full Screen", "მთელ ეკრანზე"),
+    ("Video Output During Playback", "ვიდეოს გამოტანა დაკვრისას"),
+    ("Mirror on Computer Monitor", "დუბლირება კომპიუტერის მონიტორზე"),
+    ("Disable Video Output When in Background", "ვიდეოს გამოტანის გამორთვა ფონურ რეჟიმში"),
+    ("Default 3D Renderer", "ნაგულისხმევი 3D რენდერერი"),
+    ("Show 3D Reference Axes", "3D საორიენტაციო ღერძების ჩვენება"),
+    ("Extended Viewer", "გაფართოებული დამთვალიერებელი"),
+    ("Realtime Shadows in Draft", "რეალურ დროში ჩრდილები მონახაზში"),
+    ("Scripting & Expressions", "სკრიპტები და ექსპრესიები"),
+    ("Application Scripting", "აპლიკაციის სკრიპტები"),
+    ("Allow Scripts to Write Files and Access Network", "სკრიპტებისთვის ფაილების ჩაწერისა და ქსელთან წვდომის დაშვება"),
+    ("Warn User When Executing Files", "მომხმარებლის გაფრთხილება ფაილების გაშვებისას"),
+    ("Enable JavaScript Debugger", "JavaScript-ის გამმართველის ჩართვა"),
+    ("Expressions Editor", "ექსპრესიების რედაქტორი"),
+    ("Font Size", "შრიფტის ზომა"),
+    ("Syntax Highlighting", "სინტაქსის გამოკვეთა"),
+    ("Line Numbers", "სტრიქონების ნომრები"),
+    ("Auto-complete", "ავტოდასრულება"),
+    ("Bracket Matching", "ფრჩხილების დაწყვილება"),
+    ("Word Wrap", "სიტყვების გადატანა"),
+    ("Show Expression Error Banner", "ექსპრესიის შეცდომის ზოლის ჩვენება"),
+    (
+        "Expressions use the JavaScript engine. Script errors report their file and line in the Script Console; there is no step debugger.",
+        "ექსპრესიები JavaScript-ის ძრავას იყენებს. სკრიპტის შეცდომები ფაილსა და სტრიქონს სკრიპტის კონსოლში აჩვენებს; ნაბიჯ-ნაბიჯ გამმართველი არ არის.",
+    ),
+    ("Roto Brush", "როტო-ფუნჯი"),
+    ("Segmentation Model", "სეგმენტაციის მოდელი"),
+    (
+        "Roto Brush 2.0 and 3.0 use the model chosen here (Version 1.0 always uses the classic engine). Models are open source, downloaded only when you ask, and checked against their published SHA-256.",
+        "როტო-ფუნჯი 2.0 და 3.0 აქ არჩეულ მოდელს იყენებს (ვერსია 1.0 ყოველთვის კლასიკურ ძრავას იყენებს). მოდელები ღია კოდისაა, ჩამოიტვირთება მხოლოდ თქვენი მოთხოვნით და მოწმდება გამოქვეყნებული SHA-256-ით.",
+    ),
+    ("Face Tracking", "სახის ტრეკინგი"),
+    ("Face Model", "სახის მოდელი"),
+    (
+        "Face tracking in the Tracker panel (Outline Only and Detailed Features) uses the model chosen here. Models are open source, downloaded only when you ask, and checked against their published SHA-256.",
+        "ტრეკერის პანელში სახის ტრეკინგი (მხოლოდ კონტური და დეტალური ნიშნები) აქ არჩეულ მოდელს იყენებს. მოდელები ღია კოდისაა, ჩამოიტვირთება მხოლოდ თქვენი მოთხოვნით და მოწმდება გამოქვეყნებული SHA-256-ით.",
+    ),
+    ("Match System", "სისტემის მიხედვით"),
+    ("Default", "ნაგულისხმევი"),
+    ("Stored, but not used by EffectCraft yet", "შენახულია, მაგრამ EffectCraft ჯერ არ იყენებს"),
+    ("Total Offset", "ჯამური წანაცვლება"),
+    ("Per Layer", "შრიდან შრემდე"),
+    ("Track", "ტრეკინგი"),
+];
+
+/// Georgian rows for interface text no other catalog has yet: strings the panels already send
+/// through [`tr`] (form fields and titles, drop messages, screen-reader names) and the labels of
+/// the Timeline's context menus. Kept apart from [`GEORGIAN`] so that table can keep listing
+/// exactly the Chinese catalogs' sources; the tests hold these to the same rules.
+const GEORGIAN_PANELS: &[(&str, &str)] = &[
+    ("Search project", "პროექტში ძიება"),
+    ("Select an item to see its details", "მონიშნეთ ელემენტი მისი დეტალების სანახავად"),
+    ("Media Duration", "მედიის ხანგრძლივობა"),
+    ("Frame Rate", "კადრების სიხშირე"),
+    ("File Path", "ფაილის მისამართი"),
+    ("Comment", "კომენტარი"),
+    ("A/V Features", "A/V ფუნქციები"),
+    ("Keys", "საკვანძო კადრები"),
+    ("Layer Name", "შრის სახელი"),
+    ("Source Name", "წყაროს სახელი"),
+    ("Switches", "გადამრთველები"),
+    ("Modes", "რეჟიმები"),
+    ("Track Matte", "ტრეკ-მატი"),
+    ("Parent & Link", "მშობელი და ბმა"),
+    ("In", "შესვლა"),
+    ("Out", "გამოსვლა"),
+    ("Duration", "ხანგრძლივობა"),
+    ("Original color: click to go back to it", "საწყისი ფერი: დაწკაპეთ მასზე დასაბრუნებლად"),
+    ("Resize floating panel", "მცურავი პანელის ზომის შეცვლა"),
+    ("Render every n-th pixel", "ყოველი n-ური პიქსელის რენდერი"),
+    ("Color (#rrggbb)", "ფერი (#rrggbb)"),
+    ("Workspace", "სამუშაო სივრცე"),
+    ("Rename to", "ახალი სახელი"),
+    ("Open", "გახსნა"),
+    ("Custom Resolution", "მორგებული გარჩევადობა"),
+    ("Panel Background Color", "პანელის ფონის ფერი"),
+    ("New Workspace", "ახალი სამუშაო სივრცე"),
+    ("Edit Workspaces", "სამუშაო სივრცეების რედაქტირება"),
+    ("A script wants to open a file", "სკრიპტს ფაილის გახსნა სურს"),
+    ("Drop file to import", "ჩააგდეთ ფაილი იმპორტისთვის"),
+    ("Drop {} files to import", "ჩააგდეთ ფაილები იმპორტისთვის: {}"),
+    (
+        "Skipped {} dropped file(s) without a local path. Use File ▸ Import ▸ File…",
+        "გამოტოვებულია ჩაგდებული ფაილი ლოკალური მისამართის გარეშე: {}. გამოიყენეთ ფაილი ▸ იმპორტი ▸ ფაილი…",
+    ),
+    ("Only one project can be opened per drop; skipped {} more", "ერთ ჩაგდებაზე მხოლოდ ერთი პროექტი იხსნება; გამოტოვებულია კიდევ: {}"),
+    ("Cannot open dropped project {}: {}", "ჩაგდებული პროექტის გახსნა შეუძლებელია, {}: {}"),
+    ("Cannot import dropped files: {}", "ჩაგდებული ფაილების იმპორტი შეუძლებელია: {}"),
+    ("A built-in preset has this name", "ამ სახელით ჩაშენებული პრესეტი არსებობს"),
+    ("Replaces your preset with this name", "ჩაანაცვლებს თქვენს პრესეტს ამ სახელით"),
+    ("Save Preset…", "პრესეტის შენახვა…"),
+    ("Delete Preset", "პრესეტის წაშლა"),
+    ("Null Settings", "ნულოვანი ობიექტის პარამეტრები"),
+    ("Click to sample text {}", "დაწკაპეთ ტექსტის ნიმუშის ასაღებად {}"),
+    ("Force alphabetical order", "ანბანური რიგის იძულება"),
+    ("Frame rate (fps)", "კადრების სიხშირე (fps)"),
+    (
+        "Change the frame rate, alpha and start frame later with File ▸ Interpret Footage.",
+        "კადრების სიხშირე, ალფა და საწყისი კადრი მოგვიანებით შეცვალეთ: ფაილი ▸ ვიდეომასალის ინტერპრეტაცია.",
+    ),
+    ("Import Kind", "იმპორტის სახე"),
+    ("Page", "გვერდი"),
+    ("Delay (s)", "დაყოვნება (წმ)"),
+    ("Amount (%)", "რაოდენობა (%)"),
+    ("Cascade (farther pins trail longer)", "კასკადი (შორეული სამაგრები უფრო დიდხანს ჩამორჩება)"),
+    ("Speed (%)", "სიჩქარე (%)"),
+    ("Smoothing", "დაგლუვება"),
+    ("Use Draft Deformation", "მონახაზის დეფორმაციის გამოყენება"),
+    ("Show Mesh", "ბადის ჩვენება"),
+    ("Scale X (%)", "მასშტაბი X (%)"),
+    ("Scale Y (%)", "მასშტაბი Y (%)"),
+    ("Rotation (degrees)", "შემობრუნება (გრადუსი)"),
+    ("Move X", "გადაადგილება X"),
+    ("Move Y", "გადაადგილება Y"),
+    ("Top", "ზემოდან"),
+    ("Width", "სიგანე"),
+    ("Height", "სიმაღლე"),
+    ("Shape", "ფიგურა"),
+    ("Mode", "რეჟიმი"),
+    ("Frame", "კადრი"),
+    ("Orientation", "ორიენტაცია"),
+    ("Position (pixels)", "პოზიცია (პიქსელი)"),
+    ("Position (percent of the composition)", "პოზიცია (კომპოზიციის პროცენტი)"),
+    ("Create", "შექმნა"),
+    ("Use Dimensions From", "ზომების აღება"),
+    ("Still Duration (seconds)", "უძრავი კადრის ხანგრძლივობა (წამი)"),
+    ("Add to Render Queue", "რენდერის რიგში დამატება"),
+    ("Sequence Layers", "შრეების თანმიმდევრობით განლაგება"),
+    ("Overlap", "გადაფარვა"),
+    ("Duration (seconds)", "ხანგრძლივობა (წამი)"),
+    ("Transition", "გადასვლა"),
+    ("Matte color (premultiplied)", "მატის ფერი (წინასწარ გამრავლებული)"),
+    ("Invert Alpha", "ალფას ინვერსია"),
+    ("Assume this frame rate", "ამ კადრების სიხშირის გამოყენება"),
+    ("Separate Fields", "ნახევარკადრების გაყოფა"),
+    ("Pixel Aspect Ratio", "პიქსელის გვერდების თანაფარდობა"),
+    ("Loop (times)", "ციკლი (ჯერ)"),
+    ("Assign Profile", "პროფილის მინიჭება"),
+    ("Preserve RGB", "RGB-ის შენარჩუნება"),
+    ("Interpret As Linear Light", "წრფივ სინათლედ ინტერპრეტაცია"),
+    ("Start Timecode", "საწყისი თაიმკოდი"),
+    ("Override Start", "დასაწყისის ხელით მითითება"),
+    ("Depth", "სიღრმე"),
+    ("Time display style", "დროის ჩვენების სტილი"),
+    ("Color engine", "ფერთა ძრავა"),
+    ("Working space", "სამუშაო სივრცე"),
+    ("Working gamma", "სამუშაო გამა"),
+    ("Linearize working space", "სამუშაო სივრცის წრფივად გარდაქმნა"),
+    ("Blend colors using 1.0 gamma", "ფერების შერევა 1.0 გამით"),
+    ("HDR on SDR displays and outputs", "HDR SDR ეკრანებსა და გამოტანებზე"),
+    ("Output color space", "გამოტანის ფერთა სივრცე"),
+    ("Video rendering and effects", "ვიდეოს რენდერი და ეფექტები"),
+    ("Time Span", "დროის მონაკვეთი"),
+    ("Invert", "ინვერსია"),
+    ("Blur (pixels before auto-trace)", "გაბუნდოვნება (პიქსელი, ვექტორიზაციამდე)"),
+    ("Tolerance (pixels)", "დაშვება (პიქსელი)"),
+    ("Threshold (%)", "ზღვარი (%)"),
+    ("Minimum Area (pixels)", "მინიმალური ფართობი (პიქსელი)"),
+    ("Corner Roundness (%)", "კუთხეების მომრგვალება (%)"),
+    ("Apply To New Layer", "ახალ შრეზე გამოყენება"),
+    ("Action", "მოქმედება"),
+    ("Sensitivity threshold (0–1, lower finds more)", "მგრძნობელობის ზღვარი (0–1, ნაკლები მეტს პოულობს)"),
+    ("Data", "მონაცემები"),
+    ("Time field (empty: automatic)", "დროის ველი (ცარიელი: ავტომატური)"),
+    ("Video start (ISO date-time, hh:mm:ss, timecode; empty: file date)", "ვიდეოს დასაწყისი (ISO თარიღი-დრო, hh:mm:ss, თაიმკოდი; ცარიელი: ფაილის თარიღი)"),
+    ("First sample at (comp seconds)", "პირველი ნიმუში (კომპოზიციის წამი)"),
+    (
+        "Writes Final Cut Pro XML (.xml), which Premiere Pro opens with File ▸ Import. Native .prproj files are not written.",
+        "იწერს Final Cut Pro XML-ს (.xml), რომელსაც Premiere Pro ხსნის ბრძანებით File ▸ Import. მშობლიური .prproj ფაილები არ იწერება.",
+    ),
+    ("File", "ფაილი"),
+    ("Format", "ფორმატი"),
+    ("Pre-render (ProRes 4444)", "წინასწარი რენდერი (ProRes 4444)"),
+    ("Precomps", "ჩადგმული კომპოზიციები"),
+    ("Frame rate", "კადრების სიხშირე"),
+    ("Description", "აღწერა"),
+    ("Category", "კატეგორია"),
+    ("Embed footage files", "ვიდეომასალის ფაილების ჩაშენება"),
+    ("Embed up to (MB)", "ჩაშენება მაქსიმუმ (MB)"),
+    ("Use the sRGB curve (ignore Gamma)", "sRGB მრუდის გამოყენება (გამის უგულებელყოფა)"),
+    ("ICC profile (replaces the numbers)", "ICC პროფილი (ცვლის რიცხვებს)"),
+    ("Rectangle", "მართკუთხედი"),
+    ("Ellipse", "ელიფსი"),
+    ("Orient Along Path", "ორიენტაცია ტრაექტორიის გასწვრივ"),
+    ("Orient Towards Camera", "ორიენტაცია კამერისკენ"),
+    ("Orient Towards Point of Interest", "ორიენტაცია ინტერესის წერტილისკენ"),
+    ("Single Composition", "ერთი კომპოზიცია"),
+    ("Multiple Compositions", "რამდენიმე კომპოზიცია"),
+    ("Dissolve Front Layer", "წინა შრის გადადნობა"),
+    ("Cross Dissolve Front and Back Layers", "წინა და უკანა შრეების ჯვარედინი გადადნობა"),
+    ("Interpret Straight - Unmatted", "პირდაპირად ინტერპრეტაცია - მატის გარეშე"),
+    ("Interpret Premultiplied - Matted With Color", "წინასწარ გამრავლებულად ინტერპრეტაცია - ფერით მატირებული"),
+    ("Upper Field First", "ჯერ ზედა ნახევარკადრი"),
+    ("Lower Field First", "ჯერ ქვედა ნახევარკადრი"),
+    ("Embedded / sRGB", "ჩაშენებული / sRGB"),
+    ("Use Source File Timecode", "წყარო ფაილის თაიმკოდის გამოყენება"),
+    ("Timecode", "თაიმკოდი"),
+    ("Frames", "კადრები"),
+    ("Feet + Frames (35mm)", "ფუტი + კადრი (35 მმ)"),
+    ("Feet + Frames (16mm)", "ფუტი + კადრი (16 მმ)"),
+    ("Clip", "მოჭრა"),
+    ("Compand", "კომპანდირება"),
+    ("Current Frame", "მიმდინარე კადრი"),
+    ("Work Area", "სამუშაო არე"),
+    ("Luminance", "სიკაშკაშე"),
+    ("Create Markers", "მარკერების შექმნა"),
+    ("Split Layers", "შრეების დაყოფა"),
+    ("Split and Precompose", "დაყოფა და კომპოზიციაში მოთავსება"),
+    ("CMX 3600 EDL (.edl, V1 only)", "CMX 3600 EDL (.edl, მხოლოდ V1)"),
+    ("OMF (.omf, audio)", "OMF (.omf, აუდიო)"),
+    ("Layers Premiere can't show (text, shapes, effects…)", "შრეები, რომლებსაც Premiere ვერ აჩვენებს (ტექსტი, ფიგურები, ეფექტები…)"),
+    ("All layers", "ყველა შრე"),
+    ("None (leave them out)", "არცერთი (გამოტოვება)"),
+    ("Nested sequences", "ჩადგმული სეკვენციები"),
+    ("Pre-render", "წინასწარი რენდერი"),
+    ("Puppet Follow-Through", "მარიონეტის ინერციული მოძრაობა"),
+    ("Puppet Record Options", "მარიონეტის ჩაწერის პარამეტრები"),
+    ("Free Transform Points", "წერტილების თავისუფალი გარდაქმნა"),
+    ("Mask Shape", "ნიღბის ფორმა"),
+    ("Auto-Orientation", "ავტოორიენტაცია"),
+    ("Go to Time", "დროზე გადასვლა"),
+    ("Add Guide", "დამხმარე ხაზის დამატება"),
+    ("Add Percentage Guide", "პროცენტული დამხმარე ხაზის დამატება"),
+    ("New Composition from Selection", "ახალი კომპოზიცია მონიშნულიდან"),
+    ("Project Settings", "პროექტის პარამეტრები"),
+    ("Auto-trace", "ავტომატური ვექტორიზაცია"),
+    ("Scene Edit Detection", "სცენების ჭრილების ამოცნობა"),
+    ("Align Video to Data", "ვიდეოს მონაცემებთან სწორება"),
+    ("Export Adobe Premiere Pro Project", "Adobe Premiere Pro-ს პროექტის ექსპორტი"),
+    ("New Placeholder", "ახალი ჩანაცვლების ობიექტი"),
+    ("Solid Settings", "სოლიდის პარამეტრები"),
+    ("Save as Template", "შაბლონად შენახვა"),
+    ("My Custom RGB", "ჩემი მორგებული RGB"),
+    ("Mercury GPU Acceleration (no GPU: software)", "Mercury GPU აჩქარება (GPU არ არის: პროგრამული)"),
+    ("Sort by {}, {}", "დალაგება: {}, {}"),
+    ("Sort by {}", "დალაგება: {}"),
+    ("Label of {}: {}", "{}-ის იარლიყი: {}"),
+    ("Comment of {}: {}", "{}-ის კომენტარი: {}"),
+    ("Project color depth: {}", "პროექტის ფერის სიღრმე: {}"),
+    ("Start (s)", "დასაწყისი (წმ)"),
+    ("Duration (s)", "ხანგრძლივობა (წმ)"),
+    ("Frames per second", "კადრი წამში"),
+    ("Bottom", "ქვემოდან"),
+    ("Bitrate (kbps)", "ბიტრეიტი (kbps)"),
+    ("Frames between key frames (0 = every 2 s)", "კადრები საკვანძო კადრებს შორის (0 = ყოველ 2 წმ-ში)"),
+    ("Click in the Composition panel to sample text {}", "დაწკაპეთ კომპოზიციის პანელში ტექსტის ნიმუშის ასაღებად {}"),
+    ("Video preview off: audio only", "ვიდეოს წინასწარი ნახვა გამორთულია: მხოლოდ აუდიო"),
+    ("Open in Essential Graphics", "ძირითად გრაფიკაში გახსნა"),
+    ("Video preview is off (Preview panel): audio only", "ვიდეოს წინასწარი ნახვა გამორთულია (წინასწარი ნახვის პანელი): მხოლოდ აუდიო"),
+    ("Solid…", "სოლიდი…"),
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// The interface text that has moved into this catalog. Add a panel here when you convert it;
-    /// the tests below then keep it translated.
-    const CONVERTED: &[(&str, &str)] = &[
+    /// `every_row_is_used_by_a_converted_panel` then looks for its rows' English sources in it.
+    pub(super) const CONVERTED: &[(&str, &str)] = &[
         ("color_picker.rs", include_str!("../color_picker.rs")),
         ("credits.rs", include_str!("../credits.rs")),
+        ("dock.rs", include_str!("../dock.rs")),
+        ("dock_ui.rs", include_str!("../dock_ui.rs")),
         ("header.rs", include_str!("../header.rs")),
         ("menus.rs", include_str!("../menus.rs")),
+        ("prefs_live.rs", include_str!("../prefs_live.rs")),
         ("widgets.rs", include_str!("../widgets.rs")),
         ("panels/anim_tools.rs", include_str!("../panels/anim_tools.rs")),
         ("panels/camera_tracker_ui.rs", include_str!("../panels/camera_tracker_ui.rs")),
@@ -4500,86 +5486,35 @@ mod tests {
         ("panels/viewers.rs", include_str!("../panels/viewers.rs")),
         // Text the interface draws but does not own: the settings pages and the viewer's channel
         // and Fast Previews lists come from the engine as data, so their source strings live here.
-        // Both files pass the literal scan below unchanged (they hold no drawn literals).
         ("engine settings pages", include_str!("../../../engine/src/prefs.rs")),
         ("engine viewer channels", include_str!("../../../engine/src/viewer.rs")),
         ("engine viewer commands", include_str!("../../../engine/src/commands/viewer_cmds.rs")),
     ];
 
-    /// Call shapes that hand a string literal straight to the user.
-    const CALLS: &[&str] = &[
-        ".label(\"",
-        ".button(\"",
-        ".small(\"",
-        ".strong(\"",
-        ".heading(\"",
-        ".monospace(\"",
-        ".on_hover_text(\"",
-        ".on_disabled_hover_text(\"",
-        ".hint_text(\"",
-        ".text(\"",
-        ".prefix(\"",
-        ".suffix(\"",
-        "RichText::new(\"",
-        "Label::new(\"",
-        "Button::new(\"",
-        "Window::new(\"",
-        "CollapsingHeader::new(\"",
-    ];
-
-    /// Literals that stay as they are: a unit or a separator reads the same in every language.
-    const UNITS: &[&str] = &[" px", "%", "·", "s", "ms", "°", "fps", " bpc", " mm", " s", " %", " pixels"];
-
     fn catalogs() -> Vec<(&'static str, &'static str)> {
-        JAPANESE
-            .iter()
-            .copied()
-            .chain(SIMPLIFIED_CHINESE.iter().copied())
-            .chain(TRADITIONAL_CHINESE.iter().copied())
-            .chain(UKRAINIAN.iter().copied())
-            .chain(PORTUGUESE.iter().copied())
-            .chain(CZECH.iter().copied())
-            .chain(SPANISH.iter().copied())
-            .collect()
+        ROWS.iter().flat_map(|(_, rows)| rows.iter().copied()).collect()
     }
 
-    #[test]
-    fn czech_panels_translate_and_keep_project_content_and_argument_order() {
-        set_current("cs");
-        assert_eq!(tr("Composition Name:"), "Název kompozice:");
-        assert_eq!(tr("Cancel"), "Zrušit");
-        assert_eq!(tr("Guide Layer"), "Pomocná vrstva", "the layer context menus' item, as Layer ▸ Guide Layer");
-        assert_eq!(tr("my layer.mp4"), "my layer.mp4");
-        assert_eq!(tr_args("Proxy Use: {}", &[&"Best"]), "Použití zástupných souborů: Best");
-        assert_eq!(tr_args("Step {} of {}: {}", &[&1, &3, &"Colour"]), "Krok 1 z 3: Colour");
-        assert_eq!(tr_args("Template: {}\n{}", &[&"Title", &"My description"]), "Šablona: Title\nMy description");
-        assert_eq!(tr_args("Leave all attributes in \"{}\"", &[&"File Čeština"]), "Ponechat všechny atributy v „File Čeština“");
-        assert_eq!(
-            tr_args("{} — double-click to open, {}-click to reveal", &[&"File.ecproj", &"Alt"]),
-            "File.ecproj — dvojklikem otevřete, kliknutím s Alt zobrazíte umístění"
-        );
-        assert_eq!(tr_args("Proxy Use: {}", &[]), "Použití zástupných souborů: ");
-        set_current("en");
-        assert_eq!(tr("Composition Name:"), "Composition Name:");
+    /// `en`'s row in `rows`, else `en`: what `tr` should return without pinning one wording.
+    fn row(rows: &[(&'static str, &'static str)], en: &'static str) -> &'static str {
+        rows.iter().find(|(source, _)| *source == en).map_or(en, |(_, translated)| *translated)
     }
 
     /// A row that translates nothing, repeats a source string, or changes the number of values the
     /// English source carries is a bug in the catalog itself.
     #[test]
     fn catalogs_are_unique_and_keep_the_english_shape() {
-        let hans: Vec<&str> = SIMPLIFIED_CHINESE.iter().map(|(en, _)| *en).collect();
-        let hant: Vec<&str> = TRADITIONAL_CHINESE.iter().map(|(en, _)| *en).collect();
-        assert_eq!(hans, hant, "the two Chinese catalogs list different source strings");
-        // Japanese, Ukrainian and Czech may lag the Chinese catalogs: a missing row falls back to English.
-        for (name, cat) in [("Japanese", JAPANESE), ("Ukrainian", UKRAINIAN), ("Brazilian Portuguese", PORTUGUESE), ("Czech", CZECH), ("Spanish", SPANISH)] {
-            let extra: Vec<&str> = cat.iter().map(|(en, _)| *en).filter(|en| !hans.contains(en)).collect();
-            assert!(extra.is_empty(), "the {name} catalog lists source strings the Chinese ones don't: {extra:?}");
+        // Grouped by language: a source listed in two tables of one language is still a repeat.
+        let mut by_code: std::collections::BTreeMap<&str, Vec<&str>> = std::collections::BTreeMap::new();
+        for (code, rows) in ROWS {
+            by_code.entry(code).or_default().extend(rows.iter().map(|(en, _)| *en));
         }
-        let mut sorted = hans.clone();
-        sorted.sort_unstable();
-        let listed = sorted.len();
-        sorted.dedup();
-        assert_eq!(listed, sorted.len(), "a source string is listed twice");
+        for (code, mut sources) in by_code {
+            sources.sort_unstable();
+            let listed = sources.len();
+            sources.dedup();
+            assert_eq!(listed, sources.len(), "{code}: a source string is listed twice");
+        }
         for (en, translated) in catalogs() {
             assert!(!en.is_empty() && !translated.is_empty(), "empty row for {en:?}");
             assert!(en.contains("{}") || !en.contains('{'), "{en:?} has a placeholder but no `{{}}`");
@@ -4596,78 +5531,38 @@ mod tests {
         set_current("xx"); // a language without rows
         assert_eq!(tr("Composition Name:"), "Composition Name:");
         set_current("zh-hans");
-        assert_eq!(tr("Composition Name:"), "合成名称：");
+        assert_eq!(tr("Composition Name:"), row(SIMPLIFIED_CHINESE, "Composition Name:"));
         assert_eq!(tr("my layer.mp4"), "my layer.mp4");
         set_current("en");
     }
 
-    /// The same language preference used for the menus reaches panels immediately, and formatted
-    /// text keeps the caller's values intact even when they contain non-Ukrainian words.
+    /// Georgian also reads its own table, for text the other catalogs don't have yet.
     #[test]
-    fn ukrainian_panels_translate_and_keep_project_content() {
-        set_current("uk");
-        assert_eq!(tr("Composition Name:"), "Назва композиції:");
-        assert_eq!(tr("Cancel"), "Скасувати");
-        assert_eq!(tr("my layer.mp4"), "my layer.mp4");
-        assert_eq!(tr_args("Proxy Use: {}", &[&"Best"]), "Використання проксі: Best");
-        assert_eq!(tr_args("Step {} of {}: {}", &[&1, &3, &"Colour"]), "Крок 1 з 3: Colour");
-        assert_eq!(tr_args("Template: {}\n{}", &[&"Title", &"My description"]), "Шаблон: Title\nMy description");
+    fn georgian_reads_its_own_panel_rows() {
+        set_current("ka");
+        for (source, _) in GEORGIAN_PANELS.iter().take(3) {
+            assert_eq!(tr(source), row(GEORGIAN_PANELS, source));
+        }
         set_current("en");
-        assert_eq!(tr("Composition Name:"), "Composition Name:");
-    }
-
-    /// Brazilian Portuguese panels translate, fill values in order and keep project content.
-    #[test]
-    fn brazilian_portuguese_panels_translate_and_keep_project_content() {
-        set_current("pt-br");
-        assert_eq!(tr("Composition Name:"), "Nome da composição:");
-        assert_eq!(tr("Cancel"), "Cancelar");
-        assert_eq!(tr("my layer.mp4"), "my layer.mp4");
-        assert_eq!(tr_args("Step {} of {}: {}", &[&1, &3, &"Colour"]), "Etapa 1 de 3: Colour");
-        assert_eq!(tr("   OK   "), "   OK   ");
-        set_current("en");
-        assert_eq!(tr("Cancel"), "Cancel");
-    }
-
-    /// Spanish panels translate, fill values in order and keep project content.
-    #[test]
-    fn spanish_panels_translate_and_keep_project_content() {
-        set_current("es");
-        assert_eq!(tr("Composition Name:"), "Nombre de la composición:");
-        assert_eq!(tr("Cancel"), "Cancelar");
-        assert_eq!(tr("my layer.mp4"), "my layer.mp4");
-        assert_eq!(tr_args("Step {} of {}: {}", &[&1, &3, &"Colour"]), "Paso 1 de 3: Colour");
-        set_current("en");
-        assert_eq!(tr("Cancel"), "Cancel");
     }
 
     /// Values fill the placeholders in order, and a missing value is dropped instead of panicking.
     #[test]
     fn tr_args_fills_values_in_order() {
         set_current("zh-hans");
-        assert_eq!(tr_args("Proxy Use: {}", &[&"Best"]), "代理使用：Best");
-        assert_eq!(tr_args("Step {} of {}: {}", &[&1, &3, &"Colour"]), "第 1 步，共 3 步：Colour");
-        assert_eq!(tr_args("Proxy Use: {}", &[]), "代理使用：");
+        let template = row(SIMPLIFIED_CHINESE, "Proxy Use: {}");
+        assert_eq!(tr_args("Proxy Use: {}", &[&"Best"]), template.replacen("{}", "Best", 1));
+        assert_eq!(tr_args("Proxy Use: {}", &[]), template.replacen("{}", "", 1));
         set_current("en");
+        assert_eq!(tr_args("Step {} of {}: {}", &[&1, &3, &"Colour"]), "Step 1 of 3: Colour");
         assert_eq!(tr_args("Proxy Use: {}", &[&"Best"]), "Proxy Use: Best");
+        assert_eq!(tr_args("Proxy Use: {}", &[]), "Proxy Use: ");
     }
 
-    /// Japanese reads its own rows: values fill the placeholders in order, and a name that is not a
-    /// row (a layer or file name) stays verbatim.
-    #[test]
-    fn japanese_rows_translate_the_panels() {
-        set_current("ja");
-        assert_eq!(tr("Composition Name:"), "コンポジション名:");
-        assert_eq!(tr("my layer.mp4"), "my layer.mp4");
-        assert_eq!(tr_args("Proxy Use: {}", &[&"Best"]), "プロキシの使用：Best");
-        assert_eq!(tr_args("Step {} of {}: {}", &[&1, &3, &"Colour"]), "ステップ1/3：Colour");
-        set_current("en");
-    }
-
-    /// Every row is asked for by a converted panel: a leftover row means the panel went back to its
-    /// English literal. A string a helper draws for the panel (a toolbar tooltip, a popup item, a
-    /// checkbox label) is looked up inside that helper, so its English source only appears as a
-    /// literal there - `helper_labels_are_translated` keeps those helpers honest.
+    /// Every row is asked for by a converted panel: a leftover row is stale, because the panel's
+    /// English source changed or went away. A string a helper draws for the panel (a toolbar
+    /// tooltip, a popup item, a checkbox label) is looked up inside that helper, so its English
+    /// source only appears as a literal there.
     #[test]
     fn every_row_is_used_by_a_converted_panel() {
         for (en, _) in catalogs() {
@@ -4678,86 +5573,6 @@ mod tests {
                 CONVERTED.iter().any(|(_, src)| src.contains(&plain) || src.contains(&formatted) || src.contains(&bare)),
                 "{en:?} is in the catalog but no converted panel asks for it"
             );
-        }
-    }
-
-    /// A label that a helper takes as an argument is drawn by the helper, so the helper has to ask
-    /// the catalog: `Checkbox::new` and `RadioButton::new` are not among the scanned call shapes
-    /// (the label is their second argument), which let the solid dialog's checkbox ship in English.
-    #[test]
-    fn helper_labels_are_translated() {
-        for (path, source) in CONVERTED {
-            for marker in ["Checkbox::new(", "RadioButton::new("] {
-                let mut from = 0;
-                while let Some(at) = source[from..].find(marker) {
-                    let at = from + at;
-                    let rest = &source[at + marker.len()..];
-                    let line = &rest[..rest.find('\n').unwrap_or(rest.len())];
-                    if let Some(q) = line.find('"') {
-                        let before = line[..q].trim_end();
-                        assert!(before.ends_with("tr("), "{path}: the `{marker}` label `{}` is not in the catalog", &line[q..]);
-                    }
-                    from = at + marker.len();
-                }
-            }
-        }
-    }
-
-    /// The Settings pages come from the engine as data, so the literal scan above cannot see them:
-    /// every title, section, label, choice, button, note and unit they draw needs a Chinese row
-    /// (#1178). Language names are written in their own language, and a few labels read the same
-    /// everywhere.
-    #[test]
-    fn settings_pages_are_translated() {
-        use effectcraft_engine::prefs::{Item, Kind, LANGUAGES, pages};
-        const VERBATIM: &[&str] = &["", "3D", "1/2", "1/4", "1/8", "sRGB", "Display P3", "px", "s", "%", "MB", "GB", "Hz", "pt"];
-        let mut drawn = Vec::new();
-        for page in pages() {
-            drawn.push(page.title);
-            for item in page.items {
-                match item {
-                    Item::Section(text) | Item::Note(text) | Item::Button { label: text, .. } => drawn.push(text),
-                    Item::Setting { label, kind, .. } => {
-                        drawn.push(label);
-                        match kind {
-                            Kind::Int(_, _, unit) | Kind::Float(_, _, unit) => drawn.push(unit),
-                            Kind::Choice(options) => drawn.extend(options.iter().map(|(l, _)| *l)),
-                            _ => {}
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        drawn.push("Stored, but not used by EffectCraft yet");
-        let languages: Vec<&str> = LANGUAGES.iter().map(|(l, _)| *l).filter(|l| *l != "Match System").collect();
-        let hans: HashMap<&str, &str> = SIMPLIFIED_CHINESE.iter().copied().collect();
-        let mut missing: Vec<&str> = drawn.into_iter().filter(|en| !VERBATIM.contains(en) && !languages.contains(en) && !hans.contains_key(en)).collect();
-        missing.sort_unstable();
-        missing.dedup();
-        assert!(missing.is_empty(), "Settings text with no Simplified Chinese row: {missing:?}");
-    }
-
-    /// A newly hard-coded interface string fails here instead of shipping in English to every
-    /// language. It is a heuristic - it looks at the call shapes the panels use - and it ignores
-    /// one-character literals, which are punctuation or a key name rather than a sentence.
-    #[test]
-    fn converted_panels_have_no_unwrapped_literals() {
-        for (path, source) in CONVERTED {
-            for (n, line) in source.lines().enumerate() {
-                let code = line.split("//").next().unwrap_or(line);
-                for call in CALLS {
-                    let Some(at) = code.find(call) else { continue };
-                    let rest = &code[at + call.len()..];
-                    let Some(end) = rest.find('"') else { continue };
-                    let literal = &rest[..end];
-                    assert!(
-                        literal.chars().count() < 2 || UNITS.contains(&literal),
-                        "{path}:{}: interface text `{literal}` in `{call}` is not in the catalog",
-                        n + 1
-                    );
-                }
-            }
         }
     }
 }

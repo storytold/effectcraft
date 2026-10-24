@@ -461,7 +461,7 @@ Comp.prototype = {
       var l = this.layer(i);
       if (l.__info[10] === 'Camera' && l.active) return l;
     }
-    __err('Composition "' + this.name + '" has no active camera');
+    return __err('Composition "' + this.name + '" has no active camera');
   },
   layer: function (a, rel) {
     if (a !== null && typeof a === 'object' && a.__isLayer) return this.layer(a.index + (rel || 0));

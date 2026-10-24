@@ -337,10 +337,7 @@ fn prop_row(
                 ParamUi::Percent => "%",
                 _ => "",
             };
-            let speed = match &prop.ui {
-                ParamUi::Slider { slider_min, slider_max, .. } => ((slider_max - slider_min) / 300.0).clamp(0.001, 50.0),
-                _ => 0.5,
-            };
+            let speed = widgets::slider_scrub_speed(&prop.ui);
             let (vr, nv, _) = widgets::hot_number_at(
                 ui,
                 pos2(vx, cy - 9.0),
@@ -441,19 +438,10 @@ fn prop_row(
             let comp = app.session.active_comp_arc();
             if let Some(comp) = comp {
                 let dr = Rect::from_min_size(pos2(vx, cy - 9.0), vec2(((r.max.x - vx) * 0.55).clamp(90.0, 170.0), 18.0));
-                let idx_of = |id: u64| comp.layers.iter().position(|x| x.id.0 == id);
-                let name = l.and_then(|id| idx_of(id).map(|i| format!("{}. {}", i + 1, comp.layers[i].name))).unwrap_or_else(|| "None".into());
-                let pop = egui::Id::new(("ec-lpop", uid));
-                if widgets::dropdown(ui, dr, &name, &t, egui::Id::new(("ec-l", uid))).clicked() {
-                    widgets::open_popup(ui, pop);
+                if let Some(chosen) = widgets::layer_picker(ui, dr, &comp.layers, *l, &t, egui::Id::new(("ec-l", uid))) {
+                    set(actions, chosen.map(|id| json!(id)).unwrap_or(serde_json::Value::Null));
                 }
                 app.auto.add(&format!("effectControls.prop.{uid}.value"), dr, &prop.name);
-                let mut opts = vec!["None".to_string()];
-                opts.extend(comp.layers.iter().enumerate().map(|(i, l)| format!("{}. {}", i + 1, l.name)));
-                let cur = l.and_then(idx_of).map(|i| i + 1).unwrap_or(0);
-                if let Some(i) = widgets::popup_menu(ui, pop, dr.left_bottom(), &opts, Some(cur)) {
-                    set(actions, if i == 0 { serde_json::Value::Null } else { json!(comp.layers[i - 1].id.0) });
-                }
                 // Source / Masks / Effects & Masks (the hidden companion parameter).
                 if let Some(src) = group.get(&effectcraft_engine::effects::layer_source_id(&prop.match_id)) {
                     let si = src.value.as_enum() as usize;
@@ -980,7 +968,7 @@ fn curves_editor(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter,
     let col = channel_color(ch);
     p.rect_filled(Rect::from_min_max(pos2(gr.min.x, gr.max.y + 3.0), pos2(gr.max.x, gr.max.y + 8.0)), 0.0, col.gamma_multiply(0.5));
     let id = egui::Id::new(("ec-curves", euid, ch));
-    let (resp, edit) = fw::curves_graph(ui, gr, &cur, ch, pencil, id, &t);
+    let (resp, edit) = fw::curves_graph(ui, gr, &cur, ch, pencil, true, id, &t);
     app.auto.add(&format!("effectControls.effect.{euid}.curves.graph"), gr, "Curves");
     let started = resp.drag_started() || resp.clicked();
     if let Some(np) = edit.changed {

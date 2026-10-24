@@ -224,13 +224,19 @@ pub struct FrameSeg {
 
 impl FrameSeg {
     pub fn empty(w: usize, h: usize) -> FrameSeg {
-        FrameSeg { w, h, matte: vec![0; w * h], refine: vec![0; w * h], ..Default::default() }
+        let Some(n) = w.checked_mul(h).filter(|n| *n <= rle::MAX_PLANE_BYTES) else {
+            return FrameSeg::default();
+        };
+        FrameSeg { w, h, matte: vec![0; n], refine: vec![0; n], ..Default::default() }
     }
     pub fn area(&self) -> usize {
         self.matte.iter().filter(|v| **v != 0).count()
     }
     /// Centroid of the matte (pixels), if any.
     pub fn centroid(&self) -> Option<[f64; 2]> {
+        if self.w == 0 || self.w.checked_mul(self.h)? > self.matte.len() {
+            return None;
+        }
         let (mut sx, mut sy, mut n) = (0.0, 0.0, 0.0);
         for (i, v) in self.matte.iter().enumerate() {
             if *v != 0 {
@@ -246,8 +252,18 @@ impl FrameSeg {
     /// Worker to the page): `ECSG`, width, height (u32 LE), the colour models as JSON (length
     /// prefixed), then the matte and the Refine Edge band run-length encoded (u16 LE run, byte).
     pub fn to_bytes(&self) -> Vec<u8> {
+        let Some(pixels) = self.w.checked_mul(self.h).filter(|n| *n <= rle::MAX_PLANE_BYTES) else {
+            return Vec::new();
+        };
+        if self.matte.len() != pixels || self.refine.len() != pixels || self.w > u32::MAX as usize || self.h > u32::MAX as usize {
+            return Vec::new();
+        }
         let models = serde_json::to_vec(&(&self.fg, &self.bg)).unwrap_or_default();
-        let mut out = Vec::with_capacity(16 + models.len() + 64);
+        let Some(header_len) = 16usize.checked_add(models.len()) else { return Vec::new() };
+        let mut out = Vec::new();
+        if out.try_reserve(header_len.saturating_add(64)).is_err() {
+            return Vec::new();
+        }
         out.extend_from_slice(b"ECSG");
         out.extend_from_slice(&(self.w as u32).to_le_bytes());
         out.extend_from_slice(&(self.h as u32).to_le_bytes());
@@ -260,6 +276,9 @@ impl FrameSeg {
                 let mut n = 1;
                 while i + n < plane.len() && plane[i + n] == v && n < u16::MAX as usize {
                     n += 1;
+                }
+                if out.try_reserve(3).is_err() {
+                    return Vec::new();
                 }
                 out.extend_from_slice(&(n as u16).to_le_bytes());
                 out.push(v);
@@ -277,23 +296,40 @@ impl FrameSeg {
         let u = |i: usize| u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]) as usize;
         let (w, h, ml) = (u(4), u(8), u(12));
         let n = w.checked_mul(h)?;
-        let models = b.get(16..16 + ml)?;
+        if n > rle::MAX_PLANE_BYTES || w == 0 || h == 0 {
+            return None;
+        }
+        let models_end = 16usize.checked_add(ml)?;
+        let models = b.get(16..models_end)?;
         let (fg, bg): (Gmm, Gmm) = serde_json::from_slice(models).ok()?;
-        let mut rest = &b[16 + ml..];
+        let mut rest = b.get(models_end..)?;
+        // Each run covers at most u16::MAX pixels; refuse before reserving a plane the input can't fill.
+        if rest.len() < n.div_ceil(usize::from(u16::MAX)).saturating_mul(6) {
+            return None;
+        }
         let mut plane = || -> Option<Vec<u8>> {
-            let mut v = Vec::with_capacity(n);
+            let mut v = Vec::new();
+            v.try_reserve_exact(n).ok()?;
             while v.len() < n {
                 if rest.len() < 3 {
                     return None;
                 }
-                let run = u16::from_le_bytes([rest[0], rest[1]]) as usize;
-                v.resize(v.len() + run, rest[2]);
-                rest = &rest[3..];
+                let run = u16::from_le_bytes([*rest.first()?, *rest.get(1)?]) as usize;
+                let next = v.len().checked_add(run)?;
+                if run == 0 || next > n {
+                    return None;
+                }
+                let value = *rest.get(2)?;
+                v.resize(next, value);
+                rest = rest.get(3..)?;
             }
             (v.len() == n).then_some(v)
         };
         let matte = plane()?;
         let refine = plane()?;
+        if !rest.is_empty() {
+            return None;
+        }
         Some(FrameSeg { w, h, matte, refine, fg, bg })
     }
 }

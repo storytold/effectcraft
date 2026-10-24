@@ -159,7 +159,7 @@ fn edit(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 /// `text.endEdit`: stop editing (a Type-tool layer left empty is deleted).
-fn end_edit(s: &mut Session, _: &Value) -> Result<Value> {
+pub(crate) fn end_edit(s: &mut Session, _: &Value) -> Result<Value> {
     let Some(e) = s.state.text_edit.take() else { return Ok(Value::Null) };
     if e.created && layer_doc(s, e.layer).is_some_and(|d| d.text.is_empty()) {
         let cid = s.active_comp_id().ok_or(EngineError::NoComp)?;

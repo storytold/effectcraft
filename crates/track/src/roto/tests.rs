@@ -95,6 +95,21 @@ fn strokes_segment_the_base_frame() {
     assert!(bytes.len() < seg.w * seg.h / 4, "{} bytes", bytes.len());
     assert!(FrameSeg::from_bytes(&bytes[..bytes.len() - 1]).is_none());
     assert!(FrameSeg::from_bytes(b"nope").is_none());
+
+    // Untrusted plane dimensions and run lengths are rejected before allocation/resize.
+    let mut hostile = b"ECSG".to_vec();
+    hostile.extend_from_slice(&u32::MAX.to_le_bytes());
+    hostile.extend_from_slice(&u32::MAX.to_le_bytes());
+    hostile.extend_from_slice(&0u32.to_le_bytes());
+    assert!(FrameSeg::from_bytes(&hostile).is_none());
+    let mut overrun = bytes.clone();
+    let plane_at = 16 + u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+    overrun[plane_at..plane_at + 2].copy_from_slice(&u16::MAX.to_le_bytes());
+    assert!(FrameSeg::from_bytes(&overrun).is_none());
+    let mut trailing = bytes.clone();
+    trailing.push(0);
+    assert!(FrameSeg::from_bytes(&trailing).is_none());
+    assert_eq!(FrameSeg::empty(usize::MAX, 2), FrameSeg::default());
 }
 
 #[test]

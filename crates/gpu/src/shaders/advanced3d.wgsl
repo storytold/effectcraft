@@ -179,7 +179,41 @@ fn equirect_uv(d: vec3<f32>, rot: f32) -> vec2<f32> {
     return vec2<f32>(u - floor(u), v);
 }
 
-fn shadow_factor(m: u32, p: vec3<f32>, n_l: f32) -> f32 {
+fn shadow_texel_at(offset: u32, sz: i32, x: i32, y: i32) -> f32 {
+    if (x < 0 || y < 0 || x >= sz || y >= sz) {
+        return 1e30; // outside the map: the light was never blocked there (finite stand-in for the CPU path's infinity sentinel)
+    }
+    return shadow_texels[offset + u32(y * sz + x)];
+}
+
+fn tap_hash(x: i32, y: i32) -> u32 {
+    var h: u32 = (u32(x) * 0x9E3779B9u) ^ (u32(y) * 0x85EBCA6Bu);
+    h = h ^ (h >> 16u);
+    h = h * 0x2545F491u;
+    h = h ^ (h >> 15u);
+    return h;
+}
+
+const PCF_MAX_TAPS: i32 = 10;
+const PLANE_SLOPE_MAX: f32 = 64.0;
+
+// shade::shadow_factor's `open`: 1 where texel (x, y) does not occlude the receiver
+// plane (depth slope -t in texel footprints per texel) at the texel's centre; the
+// perspective compare runs on inverse depth (iz + g·iq), which is linear across the map.
+fn shadow_open(offset: u32, sz: i32, x: i32, y: i32, ortho: bool, z: f32, texel: f32, bias: f32, t: vec2<f32>, u: f32, v: f32, iz: f32, iq: f32) -> f32 {
+    let s = shadow_texel_at(offset, sz, x, y) + bias;
+    let g = t.x * (f32(x) + 0.5 - u) + t.y * (f32(y) + 0.5 - v);
+    var lit: bool;
+    if (ortho) {
+        lit = z - g * texel <= s;
+    } else {
+        let inv = iz + g * iq;
+        lit = inv <= 0.0 || inv * s >= 1.0;
+    }
+    return select(0.0, 1.0, lit);
+}
+
+fn shadow_factor(m: u32, p: vec3<f32>, ng: vec3<f32>, n_l: f32) -> f32 {
     let r0 = shadows[m];
     let r1 = shadows[m + 1u];
     let r2 = shadows[m + 2u];
@@ -205,28 +239,66 @@ fn shadow_factor(m: u32, p: vec3<f32>, n_l: f32) -> f32 {
     }
     let z = q.z;
     let texel = select(abs(z) / focal, 1.0 / focal, ortho);
-    let bias = extra.x * texel * (1.0 + extra.y) * (1.0 + 3.0 * (1.0 - clamp(n_l, 0.0, 1.0)));
-    let step = extra.y / 2.0;
+    // CPU mirror (shade::shadow_factor), step for step: slope-scaled bias at texel
+    // scale (independent of the PCF radius extra.y; a diffusion-scaled bias lifts
+    // shadows off their casters), each texel compared against the receiver plane's
+    // depth at its centre so wide kernels never self-shadow a lit surface, an N×N grid
+    // jittered by an integer hash (bit-identical across backends) of the sub-texel
+    // cell and tap index, and bilinear compares of the four nearest texel centres.
+    // extra.y is the wanted penumbra in output pixels; dividing by the receiver's
+    // texel footprint keeps it in output pixels at any map resolution, and the reach
+    // is at least two texels so hard edges ramp over texel steps instead of showing them.
+    let bias = extra.x * texel * (1.0 + 3.0 * (1.0 - clamp(n_l, 0.0, 1.0)));
     let sz = i32(size);
+    let nv = vec3<f32>(dot(r0.xyz, ng), dot(r1.xyz, ng), dot(r2.xyz, ng));
+    var den0 = nv.z;
+    if (!ortho) {
+        den0 = nv.x * ((u - c) / focal) + nv.y * ((v - c) / focal) + nv.z;
+    }
+    var t = vec2<f32>(0.0, 0.0);
+    if (den0 < -1e-6) {
+        t = vec2<f32>(clamp(nv.x / den0, -PLANE_SLOPE_MAX, PLANE_SLOPE_MAX), clamp(nv.y / den0, -PLANE_SLOPE_MAX, PLANE_SLOPE_MAX));
+    }
+    let iz = 1.0 / z;
+    let iq = 1.0 / (focal * z);
+    var reach = clamp(extra.y / texel, 2.0, 256.0);
+    if (!(reach < 1e30)) {
+        reach = 1.0;
+    }
+    let n = clamp(i32(ceil(reach)) + 1, 5, PCF_MAX_TAPS);
+    let step = reach / f32(n - 1);
+    let half = f32(n - 1) * 0.5;
+    let cx = i32(floor(u * 8.0));
+    let cy = i32(floor(v * 8.0));
     var lit = 0.0;
-    for (var j = -2; j <= 2; j = j + 1) {
-        for (var i = -2; i <= 2; i = i + 1) {
-            let x = i32(floor(u + f32(i) * step));
-            let y = i32(floor(v + f32(j) * step));
-            if (x < 0 || y < 0 || x >= sz || y >= sz) {
-                lit = lit + 1.0;
-                continue;
-            }
-            let d = shadow_texels[offset + u32(y * sz + x)];
-            if (z - bias <= d) {
-                lit = lit + 1.0;
-            }
+    for (var j = 0; j < n; j = j + 1) {
+        for (var i = 0; i < n; i = i + 1) {
+            let h = tap_hash(cx + i * 7919, cy + j * 7919);
+            let jx = f32(h & 0xFFFFu) * (1.0 / 65536.0) - 0.5;
+            let jy = f32((h >> 16u) & 0xFFFFu) * (1.0 / 65536.0) - 0.5;
+            let su = u + ((f32(i) - half) + jx) * step;
+            let sv = v + ((f32(j) - half) + jy) * step;
+            // Texel (x, y) holds the depth at its centre (x + 0.5, y + 0.5); each of the
+            // four is compared against the receiver plane at that centre.
+            let tu = su - 0.5;
+            let tv = sv - 0.5;
+            let fx = tu - floor(tu);
+            let fy = tv - floor(tv);
+            let x0 = i32(floor(tu));
+            let y0 = i32(floor(tv));
+            let h00 = shadow_open(offset, sz, x0, y0, ortho, z, texel, bias, t, u, v, iz, iq);
+            let h10 = shadow_open(offset, sz, x0 + 1, y0, ortho, z, texel, bias, t, u, v, iz, iq);
+            let h01 = shadow_open(offset, sz, x0, y0 + 1, ortho, z, texel, bias, t, u, v, iz, iq);
+            let h11 = shadow_open(offset, sz, x0 + 1, y0 + 1, ortho, z, texel, bias, t, u, v, iz, iq);
+            let a = h00 + (h10 - h00) * fx;
+            let b = h01 + (h11 - h01) * fx;
+            lit = lit + a + (b - a) * fy;
         }
     }
-    return lit / 25.0;
+    return lit / f32(n * n);
 }
 
-fn light_shadow(li: u32, kind: u32, lpos: vec3<f32>, shadow: i32, darkness: f32, p: vec3<f32>, n_l: f32) -> f32 {
+fn light_shadow(li: u32, kind: u32, lpos: vec3<f32>, shadow: i32, darkness: f32, p: vec3<f32>, ng: vec3<f32>, n_l: f32) -> f32 {
     if (shadow < 0) {
         return 1.0;
     }
@@ -242,7 +314,7 @@ fn light_shadow(li: u32, kind: u32, lpos: vec3<f32>, shadow: i32, darkness: f32,
             face = select(5u, 4u, d.z > 0.0);
         }
     }
-    let f = shadow_factor((u32(shadow) + face) * SHADOW_STRIDE, p, n_l);
+    let f = shadow_factor((u32(shadow) + face) * SHADOW_STRIDE, p, ng, n_l);
     return 1.0 - darkness * (1.0 - f);
 }
 
@@ -330,7 +402,7 @@ fn shadow_only_amount(unlit: bool, normal: vec3<f32>, front: bool, pos: vec3<f32
         if (n_l <= 0.0) {
             continue;
         }
-        amount = max(amount, 1.0 - light_shadow(li, kind, l0.xyz, i32(l3.w), l4.x, pos, n_l));
+        amount = max(amount, 1.0 - light_shadow(li, kind, l0.xyz, i32(l3.w), l4.x, pos, n, n_l));
     }
     return amount;
 }
@@ -399,6 +471,8 @@ fn fs(i: VOut, @builtin(front_facing) front: bool) -> FOut {
     if (!front) {
         n = -n;
     }
+    // Shadow lookups follow the geometric surface, not the normal map.
+    let ng = n;
     let tex_n = i32(m3.z);
     if (tex_n >= 0) {
         let t = sample_tex(tex_n, i.uv);
@@ -446,7 +520,7 @@ fn fs(i: VOut, @builtin(front_facing) front: bool) -> FOut {
         }
         var sh = 1.0;
         if (receives_shadows) {
-            sh = light_shadow(li, kind, l0.xyz, i32(l3.w), l4.x, i.pos, n_l);
+            sh = light_shadow(li, kind, l0.xyz, i32(l3.w), l4.x, i.pos, ng, n_l);
         }
         let b = brdf(rgb, metallic, rough, spec_k, diff_k, n, v, to_l);
         acc = acc + b * l2.xyz * k * sh;

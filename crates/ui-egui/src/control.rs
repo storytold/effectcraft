@@ -321,6 +321,26 @@ pub fn handle(app: &mut EffectcraftApp, ctx: &egui::Context, req: &ControlReques
                 Err(e) => return err(e),
             };
             let m = modifiers(p);
+            // Validate the complete gesture before mutating the queue; the loopback control
+            // channel is externally reachable and must not amplify tiny requests into huge work.
+            const MAX_PENDING_EVENTS: usize = 4096;
+            const MAX_CLICK_COUNT: u64 = 512;
+            let pending = app.synthetic.len();
+            let gesture_events = if req.method == "ui.click" {
+                let count = p.get("count").and_then(Value::as_u64).unwrap_or(1);
+                if count == 0 || count > MAX_CLICK_COUNT {
+                    return err(format!("`count` must be between 1 and {MAX_CLICK_COUNT}"));
+                }
+                let Some(events) = usize::try_from(count).ok().and_then(|n| n.checked_mul(2)).and_then(|n| n.checked_add(3)) else {
+                    return err("click event count overflow");
+                };
+                events
+            } else {
+                3
+            };
+            if pending.checked_add(gesture_events).is_none_or(|n| n > MAX_PENDING_EVENTS) {
+                return err("synthetic input queue is full");
+            }
             // egui keeps the modifiers from `ModifiersChanged` (not the ones on a pointer event)
             // and the synthetic events arrive one per frame: hold them for the whole gesture.
             app.synthetic.push(egui::Event::ModifiersChanged(m));
@@ -348,6 +368,15 @@ pub fn handle(app: &mut EffectcraftApp, ctx: &egui::Context, req: &ControlReques
                 (Err(e), _) | (_, Err(e)) => return err(e),
             };
             let steps = p.get("steps").and_then(Value::as_u64).unwrap_or(12).max(2);
+            const MAX_PENDING_EVENTS: usize = 4096;
+            const MAX_DRAG_STEPS: u64 = 2048;
+            if steps > MAX_DRAG_STEPS {
+                return err(format!("`steps` must be at most {MAX_DRAG_STEPS}"));
+            }
+            let Some(gesture_events) = usize::try_from(steps).ok().and_then(|n| n.checked_add(5)) else { return err("drag event count overflow") };
+            if app.synthetic.len().checked_add(gesture_events).is_none_or(|n| n > MAX_PENDING_EVENTS) {
+                return err("synthetic input queue is full");
+            }
             let m = modifiers(p);
             app.synthetic.push(egui::Event::ModifiersChanged(m));
             app.synthetic.push(egui::Event::PointerMoved(a));

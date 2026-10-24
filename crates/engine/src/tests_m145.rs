@@ -42,14 +42,14 @@ fn split_layers_go_above_or_below_the_original() {
     let mut s = session();
     let a = solid(&mut s, "#ff0000");
     s.execute("time.set", json!({"time": 1.0})).unwrap();
-    let below = s.execute("edit.splitLayer", json!({"layers": [a]})).unwrap()[0].as_u64().unwrap();
-    let order: Vec<u64> = s.active_comp().unwrap().layers.iter().map(|l| l.id.0).collect();
-    assert_eq!(order, vec![a, below], "off (default): the new part goes below");
-    s.execute("edit.undo", json!({})).unwrap();
-    s.execute("prefs.set", json!({"key": "general.createSplitLayersAbove", "value": true})).unwrap();
     let above = s.execute("edit.splitLayer", json!({"layers": [a]})).unwrap()[0].as_u64().unwrap();
     let order: Vec<u64> = s.active_comp().unwrap().layers.iter().map(|l| l.id.0).collect();
-    assert_eq!(order, vec![above, a]);
+    assert_eq!(order, vec![above, a], "on (default): the new part goes above");
+    s.execute("edit.undo", json!({})).unwrap();
+    s.execute("prefs.set", json!({"key": "general.createSplitLayersAbove", "value": false})).unwrap();
+    let below = s.execute("edit.splitLayer", json!({"layers": [a]})).unwrap()[0].as_u64().unwrap();
+    let order: Vec<u64> = s.active_comp().unwrap().layers.iter().map(|l| l.id.0).collect();
+    assert_eq!(order, vec![a, below]);
 }
 
 #[test]

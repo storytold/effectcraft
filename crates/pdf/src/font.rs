@@ -263,8 +263,8 @@ fn parse_cmap(data: &[u8]) -> CMap {
                                 }
                                 Obj::Array(list) => {
                                     for (k, s) in list.iter().enumerate() {
-                                        if let Obj::Str(s) = s {
-                                            m.unicode.insert(lo + k as u32, utf16(s));
+                                        if let (Obj::Str(s), Some(c)) = (s, lo.checked_add(k as u32)) {
+                                            m.unicode.insert(c, utf16(s));
                                         }
                                     }
                                 }
@@ -401,13 +401,15 @@ impl Font {
                     match w.get(i + 1).map(|x| file.resolve(x)) {
                         Some(Obj::Array(list)) => {
                             for (k, v) in list.iter().enumerate() {
-                                f.cid_widths.insert(first + k as u32, file.resolve(v).num().unwrap_or(0.0) / 1000.0);
+                                if let Some(cid) = first.checked_add(k as u32) {
+                                    f.cid_widths.insert(cid, file.resolve(v).num().unwrap_or(0.0) / 1000.0);
+                                }
                             }
                             i += 2;
                         }
                         Some(Obj::Num(last)) => {
                             let wv = w.get(i + 2).and_then(|x| file.resolve(x).num()).unwrap_or(0.0) / 1000.0;
-                            for c in first..=(*last as u32).min(first + 65535) {
+                            for c in first..=(*last as u32).min(first.saturating_add(65535)) {
                                 f.cid_widths.insert(c, wv);
                             }
                             i += 3;
@@ -432,13 +434,15 @@ impl Font {
                         Some(Obj::Array(list)) => {
                             let v: Vec<f64> = list.iter().filter_map(|x| file.resolve(x).num()).collect();
                             for (k, t) in v.as_chunks::<3>().0.iter().enumerate() {
-                                f.cid_vmetrics.insert(first + k as u32, (t[0] / 1000.0, t[1] / 1000.0, t[2] / 1000.0));
+                                if let Some(cid) = first.checked_add(k as u32) {
+                                    f.cid_vmetrics.insert(cid, (t[0] / 1000.0, t[1] / 1000.0, t[2] / 1000.0));
+                                }
                             }
                             i += 2;
                         }
                         Some(Obj::Num(last)) => {
                             let (Some(w1), Some(vx), Some(vy)) = (num(i + 2), num(i + 3), num(i + 4)) else { break };
-                            for c in first..=(last.max(0.0) as u32).min(first + 65535) {
+                            for c in first..=(last.max(0.0) as u32).min(first.saturating_add(65535)) {
                                 f.cid_vmetrics.insert(c, (w1 / 1000.0, vx / 1000.0, vy / 1000.0));
                             }
                             i += 5;
@@ -609,7 +613,7 @@ impl Font {
         if self.cid_ranges.is_empty() {
             return code;
         }
-        self.cid_ranges.iter().find(|(lo, hi, _)| code >= *lo && code <= *hi).map(|(lo, _, c)| c + (code - lo)).unwrap_or(0)
+        self.cid_ranges.iter().find(|(lo, hi, _)| code >= *lo && code <= *hi).and_then(|(lo, _, c)| c.checked_add(code - lo)).unwrap_or(0)
     }
 
     /// Vertical metrics of a code in text space (before the font size): the vertical

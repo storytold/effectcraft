@@ -168,6 +168,44 @@ fn gpu_matches_cpu_shadow_catcher() {
 }
 
 #[test]
+fn gpu_matches_cpu_wide_penumbrae() {
+    // Both lights cast with wide Shadow Diffusion. Penumbrae cover much of the frame, so a
+    // backend drift in the PCF (jitter hash, tap grid, receiver-plane compare) would hide
+    // inside the scene-wide 1.5 % silhouette budget; here every shadowed pixel off a
+    // silhouette must match the CPU within 2/255.
+    let Some(g) = gpu() else { return };
+    let (mut p, cid) = scene_project();
+    let comp = p.comp_mut(cid).unwrap();
+    set(&mut comp.layers[1], "lightOptions/shadowDiffusion", Value::Scalar(48.0));
+    set(&mut comp.layers[0], "lightOptions/castsShadows", Value::Bool(true));
+    set(&mut comp.layers[0], "lightOptions/shadowDiffusion", Value::Scalar(30.0));
+    let s = scene(&p, cid);
+    let (cpu, gt) = (adv::raster::render(&s), g.raster_3d(&s).expect("gpu raster"));
+    for l in &mut p.comp_mut(cid).unwrap().layers[..2] {
+        set(l, "lightOptions/castsShadows", Value::Bool(false));
+    }
+    let unshadowed = adv::raster::render(&scene(&p, cid));
+    let w = cpu.width as usize;
+    let luma = |c: &[f32; 4]| (c[0] + c[1] + c[2]) / 3.0;
+    // Off a silhouette: the pixel and its four neighbours see one continuous surface.
+    let smooth = |i: usize| -> bool {
+        let (x, y) = (i % w, i / w);
+        let d = cpu.depth[i];
+        x > 0
+            && y > 0
+            && x + 1 < w
+            && i + w < cpu.depth.len()
+            && d.is_finite()
+            && [i - 1, i + 1, i - w, i + w].iter().all(|&j| (cpu.depth[j] - d).abs() < 0.01 * d.abs().max(1.0))
+    };
+    let shadowed: Vec<usize> = (0..cpu.color.len()).filter(|&i| luma(&unshadowed.color[i]) - luma(&cpu.color[i]) > 0.01 && smooth(i)).collect();
+    let bad = shadowed.iter().filter(|&&i| (0..4).any(|k| (cpu.color[i][k] - gt.color[i][k]).abs() / cpu.color[i][k].abs().max(1.0) > 2.0 / 255.0)).count();
+    eprintln!("adv3d wide penumbrae: {bad}/{} shadowed pixels beyond 2/255", shadowed.len());
+    assert!(shadowed.len() > 2000, "the shadows cover a large area: {}", shadowed.len());
+    assert!(bad as f64 <= 0.002 * shadowed.len() as f64, "{bad}/{} shadowed pixels differ", shadowed.len());
+}
+
+#[test]
 fn gpu_raster_perf_smoke() {
     let Some(g) = gpu() else { return };
     let (p, cid) = scene_project();

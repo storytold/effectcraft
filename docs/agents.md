@@ -180,6 +180,7 @@ Short recipes; every step is one tool call.
 | Animate | `add_keyframe {"layer":2,"path":"transform/scale","keys":[{"time":0,"value":[0,0]},{"time":0.5,"value":[100,100]}],"interpolation":"easyEase"}` |
 | Effect with settings | `list_effects {"filter":"glow"}` → `add_effect {"layer":2,"effect":"Glow","values":{"threshold":40,"radius":30}}` → `set_property {"layer":2,"path":"effects/#1/intensity","value":2}` |
 | Key a green screen | `add_effect {"layer":2,"effect":"Keylight (1.2)"}` → `execute_command effect.pickColor {"layer":2,"effect":1,"param":"screenColour","x":20,"y":20,"average":true}` (a screen pixel, layer space; samples the effect's input) → `set_property {"layer":2,"path":"effects/#1/screenMatte/clipBlack","value":10}` → `render_frame {"transparent":true}` |
+| Key objects by Cryptomatte | `add_effect {"layer":2,"effect":"Cryptomatte"}` → `execute_command effect.pickCryptomatte {"layer":2,"effect":1,"x":120,"y":80}` (the ID under that layer pixel replaces the Selection; `"mode":"add"` / `"remove"` edit it; `effect.cryptomatteAt` with the same point only reports the name) → `render_frame` |
 | Drive with an expression | `set_property {"layer":2,"path":"transform/rotation","expression":"time*90"}` |
 | Inspect a layer | `get_layer {"layer":2,"flat":true}` (every property with its `path`, value, key count) |
 | Check the result | `render_frame {"time":1.5,"max_side":640}`; in bridge mode `screenshot {"panel":"Timeline"}` |
@@ -216,7 +217,7 @@ Things that tripped up a long agent-driven session (a multi-scene 3D piece built
 
 ### Cookbook (from end-to-end QA)
 
-The scenarios in `crates/automation/tests/qa/` and `apps/effectcraft-cli/tests/qa_template.rs`
+The scenarios in `crates/automation/tests/qa/` and `apps/effectcraft-cli/tests/it/qa_template.rs`
 build real projects through these interfaces; they are worked examples of everything below.
 
 * **Name things when you create them**: `layer.newText`, `layer.newShape`, `layer.newSolid`,
@@ -323,8 +324,8 @@ build real projects through these interfaces; they are worked examples of everyt
 ### Effect positions
 
 Effect points, Puppet pins (`puppet.addPin`, `puppet.recordPin`), Paint, Liquify and Roto Brush
-strokes and `effect.pickColor` are in **effect space**: layer pixels from the top-left of the
-layer's effect bounds. For footage, solids and precomps that is the layer's own pixel grid. Shape
+strokes, `effect.pickColor` and `effect.pickCryptomatte` are in **effect space**: layer pixels
+from the top-left of the layer's effect bounds. For footage, solids and precomps that is the layer's own pixel grid. Shape
 and text layers have comp-sized bounds centred on their content's origin, so in a `w` × `h` comp
 the point `[w / 2, h / 2]` is that origin (a new effect's default point). `prop.get` / `prop.set`
 read and write these values as they are.
@@ -595,6 +596,12 @@ Extension points and the bundled extensions: [plugins.md](plugins.md).
   properties, FF missing effects, EE Expressions, LL Waveform, UU everything changed from its
   default. Shift+key adds or removes a set; the same key again hides it; Ctrl/Cmd+` twirls the
   selected layers open or closed. With no layer selected they apply to every layer.
+* A row control clicked on one of several selected layers applies to every selected layer, as in
+  After Effects: the A/V switches (video, audio, solo, lock), the Switches column (shy, collapse,
+  quality, fx, frame blending, motion blur, adjustment, 3D), the label swatch and the Modes column
+  (blending mode, Preserve Transparency), one undo step, with the layers the switch doesn't apply
+  to left out. A control on an unselected row changes that layer alone; Alt-clicking an A/V feature
+  still sets the selected layers apart from the rest.
 * `keys.toggleTransform {"layers"?: [...], "prop": "position"}` (Alt+Shift+A/P/S/R/T) adds or
   removes a keyframe at the current time on that Transform property of each layer, in one undo
   step (separated X/Y/Z Position; Orientation and X/Y/Z Rotation on 3D layers).

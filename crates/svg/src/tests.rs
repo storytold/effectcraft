@@ -12,6 +12,25 @@ fn near(a: [f32; 4], b: [f32; 4], tol: f32) -> bool {
 }
 
 #[test]
+fn gradient_stop_lookup_handles_duplicate_offsets() {
+    use crate::raster::eval_stops;
+    let stops = [(0.0, [0.0, 0.0, 0.0, 1.0]), (0.5, [1.0, 0.0, 0.0, 1.0]), (0.5, [0.0, 1.0, 0.0, 1.0]), (1.0, [0.0, 0.0, 1.0, 1.0])];
+    assert_eq!(eval_stops(&stops, 0.5), [1.0, 0.0, 0.0, 1.0]);
+    assert!(near(eval_stops(&stops, 0.5001), [0.0, 1.0, 0.0, 1.0], 3e-4));
+    assert_eq!(eval_stops(&stops, 0.75), [0.0, 0.5, 0.5, 1.0]);
+}
+
+#[test]
+fn raster_surface_budget_rejects_oversized_destination_before_allocation() {
+    let doc = parse(br#"<svg xmlns="http://www.w3.org/2000/svg"/>"#).unwrap();
+    // 16,384² RGBA-f32 pixels exceed the bounded destination-surface budget; no giant
+    // allocation should be attempted and the caller receives an empty image.
+    let img = rasterize(&doc, 16_384, 16_384, 1.0);
+    assert!(img.data.is_empty());
+    assert_eq!((img.width, img.height), (0, 0));
+}
+
+#[test]
 fn basic_shapes_structure() {
     let d = parse(BASIC).unwrap();
     assert_eq!((d.width, d.height), (200.0, 100.0));
@@ -276,4 +295,130 @@ fn a_symbol_used_a_thousand_times_still_imports() {
     );
     let doc = parse(svg.as_bytes()).unwrap();
     assert_eq!(depth_and_shapes(&doc.root).1, 3000);
+}
+
+/// An SVG with one `<style>` sheet and one rectangle per given class list.
+fn styled(css: &str, rects: &[&str]) -> Vec<u8> {
+    let rects: String = rects.iter().map(|attrs| format!(r#"<rect width="1" height="1" {attrs}/>"#)).collect();
+    format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><style>{css}</style>{rects}</svg>"#).into_bytes()
+}
+
+#[test]
+fn comma_selector_lists_share_one_declaration_block() {
+    // Before #2140 every selector of a comma list got its own copy of the declaration block, so
+    // `a,a,a…{…}` stored selectors × declarations strings; one selector past the cap is refused.
+    let sels = vec!["rect"; MAX_CSS_SELECTORS + 1].join(",");
+    let decls: String = (0..10).map(|i| format!("p{i}:v;")).collect();
+    let svg = styled(&format!("{sels}{{fill:red;{decls}}}"), &[""]);
+    let e = parse(&svg).unwrap_err();
+    assert!(e.to_string().contains("selectors"), "{e}");
+}
+
+#[test]
+fn a_style_sheet_with_too_many_declarations_errors() {
+    let decls: String = (0..=MAX_CSS_DECLARATIONS).map(|i| format!("p{i}:v;")).collect();
+    let svg = styled(&format!("rect{{{decls}}}"), &[""]);
+    let e = parse(&svg).unwrap_err();
+    assert!(e.to_string().contains("declarations"), "{e}");
+}
+
+#[test]
+fn selector_lists_keep_the_css_cascade() {
+    let green = Some(Paint::Color([0.0, 1.0, 0.0]));
+    let blue = Some(Paint::Color([0.0, 0.0, 1.0]));
+    let red = Some(Paint::Color([1.0, 0.0, 0.0]));
+    let css = "rect, .b, #c { fill: #00ff00 } .b, .d { fill: #0000ff; stroke: #000000; stroke-width: 3 } rect.e, #c { fill: #ff0000 }";
+    let svg = styled(css, &["", r#"class="b""#, r#"id="c" class="b""#, r#"class="b" style="fill:#00ff00""#, r##"class="e" fill="#0000ff""##, r#"class="d""#]);
+    let doc = parse(&svg).unwrap();
+    let shapes = doc.flatten();
+    let fills: Vec<_> = shapes.iter().map(|s| s.2.fill.clone()).collect();
+    // Type selector; class beats type; id beats class; inline style beats every rule; a later,
+    // more specific rule beats the presentation attribute.
+    assert_eq!(fills, vec![green.clone(), blue.clone(), red.clone(), green, red, blue]);
+    assert!(shapes[0].2.stroke.is_none());
+    // The second list's block reaches both of its selectors.
+    for i in [1, 5] {
+        assert_eq!(shapes[i].2.stroke.as_ref().map(|s| s.width), Some(3.0), "shape {i}");
+    }
+}
+
+#[test]
+fn a_comma_list_stores_its_declarations_once() {
+    let sels = vec!["rect"; 1000].join(",");
+    let decls: String = (0..50).map(|i| format!("p{i}:v;")).collect();
+    let mut sheet = StyleSheet::default();
+    parse_css(&format!("{sels}{{{decls}}}"), &mut sheet).unwrap();
+    assert_eq!(sheet.rules.len(), 1000);
+    assert_eq!(sheet.blocks.len(), 1);
+    assert_eq!(sheet.decls, 50);
+}
+
+#[test]
+fn rules_of_unsupported_selectors_store_no_blocks() {
+    let mut sheet = StyleSheet::default();
+    parse_css(&"a b{}".repeat(100_000), &mut sheet).unwrap();
+    parse_css("a b{fill:red} a>b, rect{fill:blue} c:hover, d{fill:red}", &mut sheet).unwrap();
+    assert_eq!(sheet.rules.len(), 2);
+    assert_eq!(sheet.blocks.len(), 2);
+    assert!(sheet.rules.iter().all(|r| sheet.blocks.get(r.block).is_some_and(|b| b.len() == 1)));
+}
+
+#[test]
+fn huge_class_lists_count_against_the_matching_budget() {
+    // One rule, but a 1 MB class attribute re-split on each of 100 `<use>` copies (#2140).
+    let class = "a ".repeat(500_000);
+    let uses: String = (0..100).map(|i| format!(r##"<use href="#r" x="{i}"/>"##)).collect();
+    let svg = |uses: &str| {
+        format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><style>.z{{fill:red}}</style><defs><rect id="r" width="1" height="1" class="{class}"/></defs>{uses}</svg>"##
+        )
+    };
+    let e = parse(svg(&uses).as_bytes()).unwrap_err();
+    assert!(e.to_string().contains("<style> rules"), "{e}");
+    let few: String = uses.split_inclusive("/>").take(10).collect();
+    assert!(parse(svg(&few).as_bytes()).is_ok());
+}
+
+#[test]
+fn a_selector_with_many_classes_counts_against_the_matching_budget() {
+    // `.z.z.z…` lands in one class bucket, but each match checks every class it lists.
+    let rule = ".z".repeat(300_000);
+    let uses: String = (0..200).map(|i| format!(r##"<use href="#r" x="{i}"/>"##)).collect();
+    let svg = |uses: &str| {
+        format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><style>{rule}{{fill:red}}</style><defs><rect id="r" width="1" height="1" class="z"/></defs>{uses}</svg>"##
+        )
+    };
+    let e = parse(svg(&uses).as_bytes()).unwrap_err();
+    assert!(e.to_string().contains("<style> rules"), "{e}");
+    let few: String = uses.split_inclusive("/>").take(10).collect();
+    assert!(parse(svg(&few).as_bytes()).is_ok());
+}
+
+#[test]
+fn matching_work_past_the_budget_errors_without_doing_it() {
+    // Within both sheet caps, yet one rectangle would apply 10 000 x 5 001 declarations.
+    let sels = vec!["rect"; 10_000].join(",");
+    let decls: String = (0..5_001).map(|i| format!("p{i}:v;")).collect();
+    let svg = styled(&format!("{sels}{{{decls}}}"), &[""]);
+    let e = parse(&svg).unwrap_err();
+    assert!(e.to_string().contains("<style> rules"), "{e}");
+    // The same sheet styles an element it does not match at no cost.
+    let ok = styled(&format!("{}{{{decls}}}", vec!["circle"; 10_000].join(",")), &[""]);
+    assert!(parse(&ok).is_ok());
+}
+
+#[test]
+fn font_size_percentage_resolves_against_the_parent_font_size() {
+    for (body, expected) in [
+        (r#"<g font-size="200%"><rect width="1em" height="1em"/></g>"#, 32.0),
+        (r#"<g font-size="200%"><rect width="2ex" height="1em"/></g>"#, 32.0),
+        (r#"<g font-size="200%"><g font-size="200%"><rect width="1em" height="1em"/></g></g>"#, 64.0),
+    ] {
+        let svg = format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">{body}</svg>"#);
+        let d = parse(svg.as_bytes()).unwrap();
+        let shapes = d.flatten();
+        assert_eq!(shapes.len(), 1);
+        assert!(matches!(shapes[0].2.geom, Geom::Rect { w, .. } if w == expected), "{body}: {:?}", shapes[0].2.geom);
+    }
 }

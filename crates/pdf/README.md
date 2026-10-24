@@ -138,15 +138,17 @@ ffmpeg elsewhere) to check the code tables against an independent implementation
 ## Shared parser setup and bounds
 
 The workspace pins `craft-pdf` to `craft-libs` Git revision
-`ca50d63b773c99f96e75c77ce5a1d21e7c9cda0d`, with `default-features = false` and only the explicit `read`
+`9f75d3dc19b4b514c4f3d4847ed1ec1b0e86b4ef`, with `default-features = false` and only the explicit `read`
 feature. This excludes the backend's bundled fonts and Adobe CMaps and preserves EffectCraft's
 font and asset policies. The shared parser does not change the supported drawing operators,
 image codecs, continuously rasterized SVG tree, editable shapes, or EPS interpreter.
 This revision removes an unchecked lazy-array read and preserves later values and pages after
 sign-only numeric entries; the app exercises those inputs through its object adapter, public
-page parser and rasterizer on native and WASM targets.
+page parser and rasterizer on native and WASM targets. It also bounds xref, object-stream and
+graphics-state work, reads the full `/W[0]` xref type width, and caps JBIG2 segment references
+and bitmap allocation.
 
-The root Cargo patch pins Hayro-syntax to the same `storytold/craft-libs` revision. `cargo xtask pdf-deps` checks this graph and refuses
+The root Cargo patch pins Hayro-syntax and Hayro-jbig2 to the same `storytold/craft-libs` revision. `cargo xtask pdf-deps` checks this graph and refuses
 an enabled Hayro interpreter, rasterizer or CMap dependency. The shared revision must be
 published before a fresh app checkout can resolve it; no sibling checkout is required.
 

@@ -129,17 +129,22 @@ pub fn reload_items(s: &mut Session, ids: &[ItemId]) -> crate::Result<usize> {
 /// writing it) is left as it was. Returns the number reloaded and the files that couldn't be read
 /// (only without `undoable`).
 fn reload(s: &mut Session, ids: &[ItemId], undoable: bool) -> crate::Result<(usize, BTreeSet<String>)> {
-    if s.importer.is_none() {
+    let Some(importer) = s.importer.clone() else {
         return Err(crate::EngineError::Other("media import is not available in this build".into()));
-    }
+    };
     let mut updates = vec![];
     let mut paths = BTreeSet::new();
     let mut failed = BTreeSet::new();
     for i in ids {
         if let Some(ItemKind::Footage(f)) = s.project.item(*i).map(|x| &x.kind) {
-            // Probed the way it imports by default, so a sequence is found as one. A path that
-            // is not followed is not read.
-            let probed = s.stored_paths.check(f).map_err(|(p, why)| crate::doc_path::refusal(&p, why)).and_then(|_| s.probe_footage(&f.path));
+            // A sequence is probed the way it imports by default, so its run is found again; any
+            // other item is its one file, not the run a numbered still sits in (#2074). A path
+            // that is not followed is not read.
+            let probed = s
+                .stored_paths
+                .check(f)
+                .map_err(|(p, why)| crate::doc_path::refusal(&p, why))
+                .and_then(|_| if f.kind == FootageKind::Sequence { s.probe_footage(&f.path) } else { importer.probe(&f.path) });
             let nf = match probed {
                 Ok(p) => refreshed(s, f, p),
                 Err(_) if undoable => Footage { missing: true, ..f.clone() },
@@ -193,6 +198,8 @@ fn forget(s: &mut Session, paths: &BTreeSet<String>) {
         s.footage.forget(p);
     }
     s.layer_cache.clear();
+    // Reloaded files may keep their footage settings but not their size and time.
+    s.refresh_disk_salt(true);
     s.events.push(crate::Event::PurgeCaches);
 }
 

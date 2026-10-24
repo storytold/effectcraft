@@ -1,20 +1,15 @@
 //! Regression gates must fail when benchmark evidence is corrupt or incomplete.
 use serde_json::{Value, json};
-use std::path::PathBuf;
 use std::process::{Command, Output};
 
-struct ResultsDir(PathBuf);
+struct ResultsDir(tempfile::TempDir);
 impl ResultsDir {
     fn new() -> Self {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let dir = std::env::temp_dir().join(format!("effectcraft-bench-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
-        std::fs::create_dir_all(&dir).unwrap();
-        Self(dir)
+        Self(tempfile::Builder::new().prefix("effectcraft-bench-").tempdir().unwrap())
     }
     fn compare(&self, old: &str, new: &str, gate: bool) -> Output {
-        let baseline = self.0.join("baseline.jsonl");
-        let candidate = self.0.join("candidate.jsonl");
+        let baseline = self.0.path().join("baseline.jsonl");
+        let candidate = self.0.path().join("candidate.jsonl");
         std::fs::write(&baseline, old).unwrap();
         std::fs::write(&candidate, new).unwrap();
         let mut command = Command::new(env!("CARGO_BIN_EXE_xtask"));
@@ -23,11 +18,6 @@ impl ResultsDir {
             command.args(["--fail-over", "5"]);
         }
         command.output().unwrap()
-    }
-}
-impl Drop for ResultsDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 

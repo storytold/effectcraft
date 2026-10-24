@@ -41,6 +41,31 @@ fn alpha_at_25(p: &Project, cid: ItemId, motion_blur: bool) -> f32 {
     Renderer::new(p, &NoFootage, RenderOpts { motion_blur, ..Default::default() }).comp_frame(cid, half).get(25, 50)[3]
 }
 
+/// A mask that holds from frame 0 to 2, then moves: frames 1 and 2 have the same mask value, but at
+/// frame 2 the shutter already sees it move. The layer cache must not serve frame 1's layer there.
+#[test]
+fn mask_motion_blur_keys_the_layer_cache_by_time() {
+    let (mut p, cid) = project(true);
+    let rect = |x: f64| Value::Path(ShapePath::rect([x, 50.0], 20.0, 100.0));
+    let l = &mut p.comp_mut(cid).unwrap().layers[0];
+    let Some(Node::Group(m)) = l.props.sub_mut("masks").unwrap().children.first_mut() else { panic!("mask") };
+    m.get_mut("path").unwrap().keys = vec![
+        Keyframe::new(Tick::ZERO, rect(20.0)),
+        Keyframe::new(FrameRate::FPS_30.tick_of(2), rect(20.0)),
+        Keyframe::new(FrameRate::FPS_30.tick_of(3), rect(60.0)),
+    ];
+    let cache = crate::LayerCache::default();
+    let render = |t: Tick, cached: bool| {
+        let mut r = Renderer::new(&p, &NoFootage, RenderOpts { motion_blur: true, ..Default::default() });
+        r.cache = cached.then_some(&cache);
+        r.comp_frame(cid, t)
+    };
+    let (f1, f2) = (FrameRate::FPS_30.tick_of(1), FrameRate::FPS_30.tick_of(2));
+    assert_ne!(render(f1, false), render(f2, false), "the shutter at frame 2 sees the move");
+    render(f1, true);
+    assert_eq!(render(f2, true), render(f2, false));
+}
+
 #[test]
 fn mask_motion_blur_follows_the_render_and_the_comp() {
     let (p, cid) = project(true);

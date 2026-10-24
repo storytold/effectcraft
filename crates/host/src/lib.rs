@@ -82,7 +82,7 @@ impl Exporter for FileExporter {
 
 /// A new session with media, import, expressions, scripting and export enabled.
 pub fn session() -> Session {
-    Session {
+    let mut s = Session {
         // The desktop app, the CLI and the MCP server share installed Roto Brush models.
         models_dir: config_dir().map(|d| d.join("models")),
         exporter: Some(Arc::new(FileExporter::default())),
@@ -90,11 +90,11 @@ pub fn session() -> Session {
         importer: Some(Arc::new(MediaImporter)),
         expr: Some(Arc::new(effectcraft_expr::Expressions)),
         expr_check: Some(effectcraft_expr::check_syntax),
-        script: Some(effectcraft_script::runner),
-        script_ui: effectcraft_engine::scriptui::ScriptUi { dispatch: Some(effectcraft_script::dispatch_ui), ..Default::default() },
         plugin_loader: effectcraft_plugin::wasm_available().then_some(effectcraft_plugin::loader as effectcraft_engine::PluginLoader),
         ..Default::default()
-    }
+    };
+    effectcraft_script::install(&mut s);
+    s
 }
 
 /// The platform config directory for EffectCraft (`EFFECTCRAFT_CONFIG_DIR` overrides):
@@ -108,6 +108,20 @@ pub fn config_dir() -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+
+    #[test]
+    fn host_runs_tasks_scheduled_by_panel_handlers() {
+        let mut s = super::session();
+        let result = s.execute("script.run", json!({"code": "var w=new Window('palette','Timer regression'); var b=w.add('button',undefined,'Import'); b.onClick=function(){app.scheduleTask(\"app.project.items.addComp('Scheduled',64,64,1,1,25)\",0,false);};w.show();"})).unwrap();
+        assert_eq!(result["ok"], true, "{result}");
+        s.execute("scriptui.click", json!({"window":"Timer regression","widget":"Import"})).unwrap();
+        assert!(s.project.items.is_empty());
+        let tick = s.execute("script.runTasks", json!({})).unwrap();
+        assert_eq!(tick["ran"], 1, "{tick}");
+        assert_eq!(tick["errors"], json!([]), "{tick}");
+        assert!(s.project.items.values().any(|item| item.name == "Scheduled"));
+        s.execute("scriptui.close", json!({"window":"Timer regression"})).unwrap();
+    }
 
     /// Layer ▸ Camera ▸ Link Focus Distance to Point of Interest / to Layer: the expressions
     /// evaluate to the camera's focus on the target.

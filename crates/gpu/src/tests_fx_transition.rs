@@ -126,6 +126,7 @@ fn distort() {
         "ec.distort.ccblobbylize",
         &[("property", e(4)), ("softness", n(3.0)), ("cutAway", n(30.0)), ("lightType", e(1)), ("lightPosition", pt(20.0, 10.0))],
     );
+    effect_case("ec.distort.ccblobbylize", &[("cutAway", n(100.0))]);
     effect_case("ec.distort.ccblobbylize", &[("property", e(5)), ("metal", n(30.0)), ("roughness", n(0.2))]);
 }
 

@@ -1011,9 +1011,12 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 painter.add(egui::Shape::closed_line(outline.into_iter().map(|p| map.to_screen(p)).collect(), Stroke::new(1.0, col)));
             }
         }
-        // A layer whose Video switch is off has no box, handles or paths in the viewer (a hidden
-        // null disappears from the comp, as in After Effects), even while it is selected.
-        for l in comp.layers.iter().filter(|l| selected.contains(&l.id) && l.is_active_at(time) && l.switches.video) {
+        // The eye hides a layer's pixels, not its controls: a selected AV layer keeps its box,
+        // handles, anchor, motion path and mask/shape paths so it stays editable over the visible
+        // artwork (#1769). Nulls, cameras and lights have no pixels and disappear from the viewer
+        // when hidden (#1332/#1642). Picking still uses `selectable_layers`, so a hidden layer is
+        // selected from the Timeline; its controls are interactive once selected.
+        for l in comp.layers.iter().filter(|l| selected.contains(&l.id) && l.is_active_at(time) && (l.switches.video || l.source.is_av())) {
             let col = if label_handles { t.label(l.label) } else { t.accent };
             // Motion path of animated position (keyframes and spatial tangents are draggable).
             ov::motion_path(app, &painter, &map, &ectx, l, col, &mut key_hits, &mut motion_frames);
@@ -1291,7 +1294,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let hits = ui.data(|d| d.get_temp::<Vec<(u64, String)>>(menu_hits_id)).unwrap_or_default();
         if !hits.is_empty() {
             ui.menu_button(crate::i18n::tr("Select"), |ui| {
-                crate::widgets::menu_scroll(ui, |ui| {
+                crate::widgets::menu_scroll(ui, false, |ui| {
                     for (id, name) in &hits {
                         if ui.button(name).clicked() {
                             context_actions.push(("layer.select".to_owned(), serde_json::json!({"layers":[id]})));
@@ -1311,6 +1314,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     let c = super::timeline::LayerMenuCaps::of(&app.session.project, layer);
                     caps.vector |= c.vector;
                     caps.text |= c.text;
+                    caps.source |= c.source;
                     caps
                 },
             );

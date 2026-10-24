@@ -370,6 +370,7 @@ const SCRIPT_PROBES: &[(char, &str)] = &[
     ('ಕ', "kannada-system"),
     ('ക', "malayalam-system"),
     ('ก', "thai-system"),
+    ('ა', "georgian-system"),
 ];
 
 /// Register the system fallbacks for scripts the bundled fonts lack in every font family, and
@@ -408,27 +409,77 @@ fn install_script_fallbacks(family_fonts: &mut FontDefinitions, language: &str) 
         let cjk = if is_chinese(language) { [han, KANA] } else { [KANA, han] };
         let mut names = Vec::new();
         let mut seen = Vec::new();
-        for &(probe, name) in cjk.iter().chain(SCRIPT_PROBES).chain(std::iter::once(&HANGUL)) {
-            let id = fonts::fallback_for(probe, base);
-            if seen.contains(&id) {
+        // A font covering one Han probe may be a sparse subset. Register additional faces
+        // needed by the actual interface catalog instead of assuming whole-script coverage.
+        let extra = if is_chinese(language) { crate::i18n::catalog_characters(language) } else { Vec::new() };
+        let extra: Vec<_> = extra.into_iter().filter(|ch| *ch >= '\u{2e80}').map(|ch| (ch, "catalog-system")).collect();
+        // 256-character blocks where a catalog character found no face: with nothing installed
+        // covering them, each lookup would read every installed font file again.
+        let mut uncovered_blocks = std::collections::HashSet::new();
+        for &(probe, name) in cjk.iter().chain(SCRIPT_PROBES).chain(std::iter::once(&HANGUL)).chain(&extra) {
+            let catalog = name == "catalog-system";
+            if catalog && (uncovered_blocks.contains(&(probe as u32 >> 8)) || seen.iter().any(|&id| fonts::face(id).has_char(probe))) {
                 continue;
             }
+            // The interface asks for the platform's UI face first; the order a composed frame
+            // renders with is `fonts::fallback_for`'s and is not touched here. Another context may
+            // install a different language concurrently, so the shared fallback is asked with this
+            // context's own locale rather than the global request.
+            let id = interface_fallback_candidates(name, language)
+                .iter()
+                .find_map(|family| {
+                    let r = fonts::resolve(family, "Regular");
+                    (!r.missing && fonts::face(r.face).has_char(probe)).then_some(r.face)
+                })
+                .unwrap_or_else(|| fonts::fallback_for_locale(probe, base, cjk_locale(language)));
             let face = fonts::face(id);
             if !face.has_char(probe) {
+                if catalog {
+                    uncovered_blocks.insert(probe as u32 >> 8);
+                }
                 continue; // nothing installed covers this script
+            }
+            if seen.contains(&id) {
+                continue;
             }
             let Some(font) = face.font() else { continue };
             seen.push(id);
             // Use the already-read, parsed bytes rather than reading a font file twice.
             let mut data = FontData::from_owned(font.data().as_bytes().to_vec());
             data.index = face.info.index;
-            family_fonts.font_data.insert(name.to_string(), Arc::new(data));
+            let name = if name == "catalog-system" { format!("{name}-{:x}", probe as u32) } else { name.to_string() };
+            family_fonts.font_data.insert(name.clone(), Arc::new(data));
             for family in family_fonts.families.values_mut() {
                 family.push(name.to_string());
             }
             names.push(name.to_string());
         }
         names
+    }
+}
+
+/// The faces the interface asks for before it settles on the one a composed frame renders with.
+///
+/// Windows ships a UI variant of its Japanese and Chinese families - `Meiryo`/`Meiryo UI`, `Yu
+/// Gothic`/`Yu Gothic UI`, `MS Gothic`/`MS UI Gothic`, `Microsoft YaHei`/`Microsoft YaHei UI`,
+/// `Microsoft JhengHei`/`Microsoft JhengHei UI` - and its own link table for `Segoe UI`
+/// (`FontLink\SystemLink`) picks the UI one for what it draws on screen. `PMingLiU` is the one face
+/// here that is not a sibling: it is `MingLiU`'s proportional relative, and proportional spacing is
+/// what makes the chrome read better in it.
+///
+/// Only the interface takes this order. `fonts::fallback_for` keeps the order a document renders
+/// with, so an existing project's output does not move when the chrome changes.
+#[cfg(not(target_arch = "wasm32"))]
+fn interface_fallback_candidates(name: &str, language: &str) -> &'static [&'static str] {
+    match (name, cjk_locale(language)) {
+        // Kana, and the Han ideographs of a Japanese interface: the language asks for the Japanese
+        // face, so its UI sibling is the one the platform would draw chrome with.
+        ("japanese-system", _) | ("chinese-system", "ja") => &["Meiryo UI", "Yu Gothic UI", "MS UI Gothic"],
+        ("chinese-system", "zh-hant") => &["Microsoft JhengHei UI", "PMingLiU"],
+        ("chinese-system", "zh-hans") => &["Microsoft YaHei UI"],
+        // The other scripts have no UI variant, and their shared order already picks the face made
+        // for the script - the one that draws it correctly at all.
+        _ => &[],
     }
 }
 
@@ -443,9 +494,9 @@ fn cjk_locale(language: &str) -> &str {
 }
 
 /// The Han character that picks the Chinese fallback face. A Simplified Chinese interface asks for
-/// a simplified-only hanzi: a Japanese face covers the shared ideographs (文) but not 页, 选 or 删,
-/// and the fallback takes a face already loaded first, so the Japanese face loaded for kana would
-/// draw the Chinese interface with boxes (#1141).
+/// a hanzi used by its catalog. Some Japanese faces also cover 页 while lacking 选 or 删, so
+/// coverage of this probe alone is not enough: the fallback must use the interface's own language
+/// policy, even while another context is installing Japanese fonts (#1141).
 #[cfg(not(target_arch = "wasm32"))]
 fn han_probe(language: &str) -> char {
     if language == "zh-hans" { '页' } else { '文' }
@@ -530,6 +581,7 @@ pub fn apply_visuals(ctx: &egui::Context, t: &Tokens) {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod script_font_tests {
+    use super::{SCRIPT_PROBES, interface_fallback_candidates};
     use effectcraft_text::fonts;
 
     /// Whether an installed face covers `probe` (else the glyph check is skipped).
@@ -595,9 +647,35 @@ mod script_font_tests {
         }
     }
 
-    /// #1141: switching the interface to Simplified Chinese drew most labels as boxes. The English
-    /// interface had already loaded a Japanese face for kana, and that face covers the Han probe,
-    /// so it became the Chinese fallback too, without the simplified-only hanzi.
+    #[test]
+    fn the_interface_asks_for_the_platforms_ui_faces() {
+        // The face a window draws its own chrome with, which is not the one a composed frame
+        // renders with: the two orders are deliberately separate.
+        let ja = &["Meiryo UI", "Yu Gothic UI", "MS UI Gothic"][..];
+        assert_eq!(interface_fallback_candidates("japanese-system", "ja"), ja);
+        assert_eq!(interface_fallback_candidates("chinese-system", "ja"), ja);
+        assert_eq!(interface_fallback_candidates("chinese-system", "zh-hans"), &["Microsoft YaHei UI"][..]);
+        assert_eq!(interface_fallback_candidates("chinese-system", "zh-hant"), &["Microsoft JhengHei UI", "PMingLiU"][..]);
+        // Every other script the install probes has no UI variant, so it keeps the shared order.
+        for &(_, name) in SCRIPT_PROBES.iter() {
+            assert!(interface_fallback_candidates(name, "en").is_empty(), "{name} asked for a UI face");
+        }
+    }
+
+    /// The Georgian interface draws its Mkhedruli text with an installed Georgian face (Sylfaen,
+    /// SF Georgian, Noto Sans Georgian…): Inter has no Georgian, so the labels showed as boxes.
+    #[test]
+    fn installed_georgian_fallback_draws_the_georgian_interface() {
+        if !installed('ა') {
+            eprintln!("no Georgian system font installed; skipping glyph coverage");
+            return;
+        }
+        assert_drawn("ka", "კომპოზიციაფენასაკვანძოკადრიეფექტიპარამეტრები");
+    }
+
+    /// #1141: switching the interface to Simplified Chinese drew most labels as boxes. A Japanese face
+    /// can cover the Han probe while lacking other catalog characters. The context must keep its
+    /// own language policy even when another context installs Japanese fallbacks concurrently.
     #[test]
     fn simplified_chinese_interface_draws_simplified_hanzi_after_another_language() {
         let ctx = egui::Context::default();
@@ -609,7 +687,7 @@ mod script_font_tests {
         let font = egui::FontId::new(13.0, egui::FontFamily::Proportional);
         let missing: String = ctx.fonts_mut(|fonts| {
             let replacement = fonts.layout_no_wrap("\u{10ffff}".into(), font.clone(), egui::Color32::WHITE).rows[0].glyphs[0].uv_rect;
-            // Simplified-only hanzi of the zh-hans catalog (选择, 删除, 图层, 设置, 导入, 页面).
+            // Representative hanzi of the zh-hans catalog (选择, 删除, 图层, 设置, 导入, 页面).
             "选删层设导页"
                 .chars()
                 .filter(|ch| {

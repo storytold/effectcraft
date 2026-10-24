@@ -102,7 +102,7 @@ impl Session {
     /// and attach it to the layer cache. Without a folder setting the platform cache folder is
     /// used, but only by frontends with a settings store (headless sessions stay off disk).
     pub fn configure_disk_cache(&mut self) {
-        use effectcraft_render::disk_cache::{DiskCache, default_folder, footage_salt};
+        use effectcraft_render::disk_cache::{DiskCache, default_folder};
         let d = &self.prefs.disk;
         let folder = if d.disk_cache_folder.trim().is_empty() {
             (self.config.is_some() && !cfg!(target_arch = "wasm32")).then(default_folder)
@@ -116,6 +116,11 @@ impl Session {
             self.layer_cache.set_disk(None);
             return;
         };
+        // Tests: the Roto/Object Matte segment store below is one per process, so a test that
+        // opens a disk cache (often the platform folder, through a settings store) would take
+        // over the store of a roto test running beside it. Serialise them with the roto tests.
+        #[cfg(test)]
+        crate::tests_roto::hold_roto_cache_test_lock();
         let dc = match &self.disk_cache {
             Some(c) if c.folder() == folder.as_path() => {
                 c.set_max_bytes(max);
@@ -131,7 +136,9 @@ impl Session {
                 }
             },
         };
-        self.layer_cache.set_disk(Some((dc.clone(), footage_salt(&self.project))));
+        self.disk_cache = Some(dc.clone());
+        let salt = self.refresh_disk_salt(true).unwrap_or_default();
+        self.layer_cache.set_disk(Some((dc.clone(), salt)));
         // Roto Brush / Object Matte segmentations persist there too (held weakly: switching the
         // disk cache off drops it).
         let store: std::sync::Arc<dyn effectcraft_effects::roto::SegStore> = dc.clone();

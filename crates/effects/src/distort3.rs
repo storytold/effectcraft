@@ -107,7 +107,14 @@ fn norm3(v: [f64; 3]) -> [f64; 3] {
     [v[0] / l, v[1] / l, v[2] / l]
 }
 
-fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
+/// f32 normal/dot helpers for the CC Blobbylize lighting pass. The GPU kernel runs in f32;
+/// matching its precision here keeps specular highlights within the CPU/GPU parity tolerance.
+fn norm3f(v: [f32; 3]) -> [f32; 3] {
+    let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-12);
+    [v[0] / l, v[1] / l, v[2] / l]
+}
+
+fn dot3f(a: [f32; 3], b: [f32; 3]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
@@ -115,14 +122,23 @@ fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
 
 fn cc_blobbylize(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let soft = ctx.params.f("softness").max(0.0) * b.scale;
-    let cut = (ctx.params.f("cutAway") / 100.0).clamp(0.0, 0.99) as f32;
+    let cut = (ctx.params.f("cutAway") / 100.0).clamp(0.0, 1.0) as f32;
+    if cut >= 1.0 {
+        // Endpoint guard: at Cut Away 100 the gradient antialias must not leave a half-covered
+        // pixel where an opaque source reaches exactly 1.0.
+        b.img.data.fill([0.0; 4]);
+        return b;
+    }
     let blob = layer_or_self(ctx, &b, "blobLayer", true, false);
     let prop = src_at(ctx.params.e("property"));
     let raw = Plane::from_image(&blob, |px| {
         let (c, a) = unpremul(px);
         pick(prop, c, a) * if matches!(prop, crate::util::Src::Alpha) { 1.0 } else { a }
     });
-    let h = gauss_plane(&raw, soft, soft);
+    // Oracle (AE 26.2, 16 bpc): a step thresholded at Cut 25/75 with Softness 20 moves the
+    // 50% contour by 5.55 px. For a Gaussian that is 0.67449 sigma, so sigma = 0.42 Softness.
+    // The same probe shows the matte stays a ~1 px antialiased threshold, not a broad ramp.
+    let h = gauss_plane(&raw, soft * 0.42, soft * 0.42);
     let intensity = ctx.params.f("lightIntensity") / 100.0;
     let lc = ctx.params.color("lightColor");
     let point = ctx.params.e("lightType") == 1;
@@ -135,37 +151,69 @@ fn cc_blobbylize(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let rough = ctx.params.f("roughness").clamp(0.001, 1.0);
     let metal = (ctx.params.f("metal") / 100.0) as f32;
     let shininess = (1.0 / rough).min(500.0);
-    let depth = (soft * 0.5).max(1.0);
     let src = b.img.clone();
     let (w, hh) = (b.img.width as usize, b.img.height as usize);
     let span = (w.max(hh) as f64).max(1.0);
+
+    // The source matte and the RGB refraction are separate in the oracle:
+    // - the matte edge of a self step moves 5/9/14/18 px at Softness 5/10/20/40. A normal
+    //   with z = 1, a ~30 px depth at 1920 and a slope scale of 1.5 Softness reproduces that;
+    // - RGB follows a height-field refraction with z = height: on a linear ramp the measured
+    //   horizontal offset is dx = -0.34 / h, independent of Softness.
+    let matte_slope = soft * 1.5;
+    let matte_depth = if soft > 0.05 { span / 64.0 } else { 0.0 };
+    let rgb_depth = span * 0.34 * b.scale;
+    let light_slope = (soft * 0.65).max(1.0);
+    let limit = span * 0.5;
     b.img.rows_mut().for_each(|(y, row)| {
         for (x, px) in row.iter_mut().enumerate() {
             let (xi, yi) = (x as i64, y as i64);
             let hv = h.get(x, y);
             let gx = (h.get_clamped(xi + 1, yi) - h.get_clamped(xi - 1, yi)) as f64 * 0.5;
             let gy = (h.get_clamped(xi, yi + 1) - h.get_clamped(xi, yi - 1)) as f64 * 0.5;
-            // Refraction-like displacement down the slope, then the blobby matte.
-            let sx = x as f64 + 0.5 - gx * depth * 2.0;
-            let sy = y as f64 + 0.5 - gy * depth * 2.0;
-            let s = src.sample_bilinear(sx, sy);
-            let (c, a) = unpremul(s);
-            let m = ((hv - cut) / ((1.0 - cut) * 0.5).max(1e-3)).clamp(0.0, 1.0);
-            let alpha = a.max(s[3]) * m;
+            let grad = (gx * gx + gy * gy).sqrt();
+            // One-pixel antialiased threshold. A flat field is either fully in or fully out.
+            let aa = (1.25 * grad).max(5e-4);
+            let m = if grad > 1e-9 {
+                (0.5 + (hv - cut) as f64 / aa).clamp(0.0, 1.0) as f32
+            } else if hv > cut {
+                1.0
+            } else {
+                0.0
+            };
+            if m <= 0.0 {
+                *px = [0.0; 4];
+                continue;
+            }
+            // Warp the source matte with the softness-scaled bevel normal (z = 1).
+            let na = norm3([-gx * matte_slope, -gy * matte_slope, 1.0]);
+            let sa = src.sample_bilinear(x as f64 + 0.5 + na[0] * matte_depth, y as f64 + 0.5 + na[1] * matte_depth);
+            let alpha = sa[3].max(0.0) * m;
             if alpha <= 0.0 {
                 *px = [0.0; 4];
                 continue;
             }
-            let n = norm3([-gx * depth, -gy * depth, 1.0]);
-            let l = if point { norm3([lpos.0 - x as f64, lpos.1 - y as f64, lheight / 100.0 * span]) } else { ldir };
-            let ndl = dot3(n, l).max(0.0);
-            let hv3 = norm3([l[0], l[1], l[2] + 1.0]);
-            let sp = dot3(n, hv3).max(0.0).powf(shininess) * specular;
+            // Refract the colour through the height field (z = height for this pass).
+            let hz = (hv as f64).max(1e-3);
+            let rx = (-rgb_depth * gx / hz).clamp(-limit, limit);
+            let ry = (-rgb_depth * gy / hz).clamp(-limit, limit);
+            let srgb = src.sample_bilinear(x as f64 + 0.5 + rx, y as f64 + 0.5 + ry);
+            let (c, _) = unpremul(srgb);
+            let (gx32, gy32) = (gx as f32, gy as f32);
+            let n = norm3f([-gx32 * light_slope as f32, -gy32 * light_slope as f32, 1.0]);
+            let l = if point {
+                norm3f([lpos.0 as f32 - (x as f32 + 0.5), lpos.1 as f32 - (y as f32 + 0.5), (lheight / 100.0 * span) as f32])
+            } else {
+                [ldir[0] as f32, ldir[1] as f32, ldir[2] as f32]
+            };
+            let ndl = dot3f(n, l).max(0.0);
+            let hv3 = norm3f([l[0], l[1], l[2] + 1.0]);
+            let sp = dot3f(n, hv3).max(0.0).powf(shininess as f32) * specular as f32;
             let mut out = [0.0f32; 3];
             for i in 0..3 {
-                let lit = (ambient + diffuse * ndl * intensity) as f32 * lc[i];
+                let lit = (ambient + diffuse * ndl as f64 * intensity) as f32 * lc[i];
                 let spec_col = (1.0 - metal) * lc[i] + metal * c[i] * lc[i];
-                out[i] = c[i] * lit + (sp * intensity) as f32 * spec_col;
+                out[i] = c[i] * lit + (sp as f64 * intensity) as f32 * spec_col;
             }
             *px = premul(out, alpha);
         }
@@ -880,19 +928,19 @@ pub fn specs() -> Vec<EffectSpec> {
             "CC Blobbylize",
             vec![
                 p("blobLayer", "Blob Layer", Value::Layer(None), ParamUi::Layer),
-                p("property", "Property", Value::Enum(3), popup(&crate::util::SRC_NAMES[..8])),
-                p("softness", "Softness", num(6.0), slider(0.0, 200.0, 0.0, 50.0, 1)),
-                p("cutAway", "Cut Away", num(0.0), pct()),
-                p("lightIntensity", "Light Intensity", num(100.0), slider(0.0, 400.0, 0.0, 200.0, 1)),
+                p("property", "Property", Value::Enum(0), popup(&crate::util::SRC_NAMES[..8])),
+                p("softness", "Softness", num(20.0), slider(0.0, 500.0, 0.0, 50.0, 1)),
+                p("cutAway", "Cut Away", num(25.0), pct()),
+                p("lightIntensity", "Light Intensity", num(100.0), slider(0.0, 1000.0, 0.0, 200.0, 1)),
                 p("lightColor", "Light Color", col(1.0, 1.0, 1.0), ParamUi::Color),
                 p("lightType", "Light Type", Value::Enum(0), popup(&["Distant Light", "Point Light"])),
-                p("lightHeight", "Light Height", num(50.0), slider(0.0, 100.0, 0.0, 100.0, 1)),
-                p("lightPosition", "Light Position", pt(0.25, 0.25), ParamUi::Point),
+                p("lightHeight", "Light Height", num(65.0), slider(0.0, 100.0, 0.0, 100.0, 1)),
+                p("lightPosition", "Light Position", pt(0.5, 0.5), ParamUi::Point),
                 p("lightDirection", "Light Direction", num(-45.0), ParamUi::Angle),
-                p("ambient", "Ambient", num(20.0), slider(0.0, 200.0, 0.0, 100.0, 1)),
-                p("diffuse", "Diffuse", num(70.0), slider(0.0, 200.0, 0.0, 100.0, 1)),
-                p("specular", "Specular", num(40.0), slider(0.0, 200.0, 0.0, 100.0, 1)),
-                p("roughness", "Roughness", num(0.05), slider(0.001, 0.5, 0.001, 0.5, 3)),
+                p("ambient", "Ambient", num(75.0), slider(0.0, 200.0, 0.0, 100.0, 1)),
+                p("diffuse", "Diffuse", num(25.0), slider(0.0, 200.0, 0.0, 100.0, 1)),
+                p("specular", "Specular", num(100.0), slider(0.0, 200.0, 0.0, 100.0, 1)),
+                p("roughness", "Roughness", num(0.025), slider(0.001, 1.0, 0.001, 1.0, 3)),
                 p("metal", "Metal", num(100.0), pct()),
             ],
             cc_blobbylize,
@@ -1125,6 +1173,83 @@ mod tests {
             assert!(a.img.data.iter().all(|p| p.iter().all(|v| v.is_finite())), "{id}");
             assert!(a.img.width != im.width || a.img.height != im.height || maxd(&a.img, &im) > 1e-3, "{id} did nothing");
         }
+    }
+
+    #[test]
+    fn blobbylize_defaults_match_ae() {
+        let s = crate::find("ec.distort.ccblobbylize").unwrap();
+        let default = |id: &str| s.params.iter().find(|p| p.id == id).unwrap().default.clone();
+        assert_eq!(default("property"), Value::Enum(0), "Property defaults to Red");
+        assert_eq!(default("softness"), num(20.0));
+        assert_eq!(default("cutAway"), num(25.0));
+        assert_eq!(default("lightHeight"), num(65.0));
+        assert_eq!(default("lightPosition"), pt(0.5, 0.5));
+        assert_eq!(default("ambient"), num(75.0));
+        assert_eq!(default("diffuse"), num(25.0));
+        assert_eq!(default("specular"), num(100.0));
+        assert_eq!(default("roughness"), num(0.025));
+        assert_eq!(default("metal"), num(100.0));
+    }
+
+    #[test]
+    fn blobbylize_cut_away_thresholds_a_height_ramp() {
+        // AE oracle: Cut Away is a linear height threshold with a ~1 px antialiased edge.
+        let im = crate::util::gen_image(1920, 8, |x, _| {
+            let h = x as f32 / 1920.0;
+            [h, h, h, 1.0]
+        });
+        let o = run("ec.distort.ccblobbylize", &[("property", Value::Enum(0)), ("softness", num(0.0)), ("cutAway", num(25.0))], im, &[]);
+        assert_eq!(o.img.get(400, 4)[3], 0.0, "below Cut Away must be transparent");
+        assert_eq!(o.img.get(560, 4)[3], 1.0, "above Cut Away must be opaque");
+        let edge = o.img.get(480, 4)[3];
+        assert!((0.45..=0.55).contains(&edge), "edge alpha {edge} is not a one-pixel threshold");
+        let partial = (450..510).filter(|&x| (0.001..0.999).contains(&o.img.get(x, 4)[3])).count();
+        assert!(partial <= 2, "{partial} antialiased columns instead of one");
+    }
+
+    #[test]
+    fn blobbylize_cut_away_100_is_empty() {
+        // Regression: the old clamp to 0.99 left the top of the ramp opaque at Cut Away 100.
+        let im = crate::util::gen_image(1920, 8, |x, _| {
+            let h = x as f32 / 1920.0;
+            [h, h, h, 1.0]
+        });
+        let o = run("ec.distort.ccblobbylize", &[("property", Value::Enum(0)), ("softness", num(0.0)), ("cutAway", num(100.0))], im, &[]);
+        assert!(o.img.data.iter().all(|p| p[3] == 0.0), "Cut Away 100 left opaque pixels");
+    }
+
+    #[test]
+    fn blobbylize_cut_away_100_clears_an_opaque_edge() {
+        // An opaque source reaches h = 1 on the high side of an edge; the gradient antialias
+        // used to leave m = 0.5 there, so Cut Away 100 still produced visible pixels.
+        let im = crate::util::gen_image(64, 8, |x, _| if x < 32 { [1.0; 4] } else { [0.0; 4] });
+        let o = run("ec.distort.ccblobbylize", &[("property", Value::Enum(3)), ("softness", num(0.0)), ("cutAway", num(100.0))], im, &[]);
+        assert!(o.img.data.iter().all(|p| p[3] == 0.0), "Cut Away 100 left an opaque edge");
+    }
+
+    #[test]
+    fn blobbylize_softness_warps_a_step_matte_inward() {
+        // AE oracle T2: a self alpha step at x = 960, Softness 20, Cut Away 0 puts the matte
+        // edge at about x = 946, not at the source edge. The PR's matte-preserving version
+        // left it at 960; the effect must warp the source matte.
+        let im = crate::util::gen_image(1920, 32, |x, _| if x < 960 { [1.0; 4] } else { [0.0; 4] });
+        let o = run(
+            "ec.distort.ccblobbylize",
+            &[
+                ("property", Value::Enum(3)),
+                ("softness", num(20.0)),
+                ("cutAway", num(0.0)),
+                ("ambient", num(100.0)),
+                ("diffuse", num(0.0)),
+                ("specular", num(0.0)),
+                ("metal", num(0.0)),
+            ],
+            im,
+            &[],
+        );
+        assert!(o.img.get(945, 16)[3] > 0.95, "the matte did not move inward: {}", o.img.get(945, 16)[3]);
+        assert!(o.img.get(949, 16)[3] < 0.05, "source alpha leaked past the warped edge");
+        assert_eq!(o.img.get(960, 16)[3], 0.0, "the source matte was preserved instead of warped");
     }
 
     /// A text layer's buffer: 20 × 10 opaque pixels at (90, 45)–(110, 55) of its comp-sized

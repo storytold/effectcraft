@@ -392,7 +392,17 @@ enum PaintRef {
     Current,
 }
 
-/// A CSS rule: selector (type, class, id; `*`) with its specificity and declarations.
+/// The most selectors (each entry of a comma list counts) the `<style>` sheets of a document may
+/// hold (#2140).
+const MAX_CSS_SELECTORS: usize = 20_000;
+/// The most declarations the `<style>` sheets of a document may hold, each block counted once.
+const MAX_CSS_DECLARATIONS: usize = 50_000;
+
+/// The most matching work (candidate rules checked plus declarations applied) the elements of a
+/// document may cost, `<use>` copies included: a bound on elements x rules x declarations.
+const MAX_CSS_WORK: usize = 50_000_000;
+
+/// A CSS rule: selector (type, class, id; `*`) with its specificity and declaration block.
 #[derive(Clone, Debug)]
 struct Rule {
     tag: Option<String>,
@@ -400,7 +410,39 @@ struct Rule {
     id: Option<String>,
     specificity: u32,
     order: usize,
-    decls: Vec<(String, String)>,
+    /// Index into [`StyleSheet::blocks`]: every selector of a comma list shares one block.
+    block: usize,
+}
+
+/// The rules of a document's `<style>` sheets, indexed by the part of the selector an element
+/// must have (id, else first class, else type) so an element only checks rules that can match.
+#[derive(Default, Debug)]
+struct StyleSheet {
+    rules: Vec<Rule>,
+    blocks: Vec<Vec<(String, String)>>,
+    /// Declarations over all blocks.
+    decls: usize,
+    by_id: HashMap<String, Vec<usize>>,
+    by_class: HashMap<String, Vec<usize>>,
+    by_tag: HashMap<String, Vec<usize>>,
+    universal: Vec<usize>,
+}
+
+impl StyleSheet {
+    fn index(&mut self) {
+        for (i, r) in self.rules.iter().enumerate() {
+            let bucket = if let Some(id) = &r.id {
+                self.by_id.entry(id.clone()).or_default()
+            } else if let Some(c) = r.classes.first() {
+                self.by_class.entry(c.clone()).or_default()
+            } else if let Some(t) = &r.tag {
+                self.by_tag.entry(t.clone()).or_default()
+            } else {
+                &mut self.universal
+            };
+            bucket.push(i);
+        }
+    }
 }
 
 fn parse_decls(s: &str) -> Vec<(String, String)> {
@@ -428,7 +470,9 @@ fn strip_comments(s: &str) -> String {
     out
 }
 
-fn parse_css(css: &str, rules: &mut Vec<Rule>) {
+/// Add the rules of one `<style>` sheet. Errs once the sheets exceed [`MAX_CSS_SELECTORS`] or
+/// [`MAX_CSS_DECLARATIONS`] (#2140).
+fn parse_css(css: &str, sheet: &mut StyleSheet) -> Result<(), Error> {
     let css = strip_comments(css);
     let mut rest = css.as_str();
     while let Some(open) = rest.find('{') {
@@ -439,13 +483,28 @@ fn parse_css(css: &str, rules: &mut Vec<Rule>) {
         if sel.starts_with('@') {
             continue;
         }
-        let decls = parse_decls(body);
+        let mut decls = parse_decls(body);
+        sheet.decls = sheet.decls.saturating_add(decls.len());
+        if sheet.decls > MAX_CSS_DECLARATIONS {
+            return Err(Error::Xml(format!("its <style> sheets hold more than {MAX_CSS_DECLARATIONS} declarations")));
+        }
+        // Stored with the rule's first accepted selector: a rule of unsupported selectors only
+        // (`a b{}`, repeated) adds no block.
+        let mut block = None;
         for one in sel.split(',') {
             let one = one.trim();
             // Only simple selectors (no combinators / pseudo-classes / attributes).
             if one.is_empty() || one.contains([' ', '>', '+', '~', ':', '[']) {
                 continue;
             }
+            if sheet.rules.len() >= MAX_CSS_SELECTORS {
+                return Err(Error::Xml(format!("its <style> sheets hold more than {MAX_CSS_SELECTORS} selectors")));
+            }
+            let block = *block.get_or_insert_with(|| {
+                let i = sheet.blocks.len();
+                sheet.blocks.push(std::mem::take(&mut decls));
+                i
+            });
             let mut tag = None;
             let mut classes = vec![];
             let mut id = None;
@@ -474,11 +533,14 @@ fn parse_css(css: &str, rules: &mut Vec<Rule>) {
                 }
             }
             flush(kind, &mut cur, &mut tag, &mut classes, &mut id);
-            let specificity = id.is_some() as u32 * 100 + classes.len() as u32 * 10 + tag.is_some() as u32;
-            let order = rules.len();
-            rules.push(Rule { tag, classes, id, specificity, order, decls: decls.clone() });
+            let specificity = (id.is_some() as u32 * 100)
+                .saturating_add(u32::try_from(classes.len()).unwrap_or(u32::MAX).saturating_mul(10))
+                .saturating_add(tag.is_some() as u32);
+            let order = sheet.rules.len();
+            sheet.rules.push(Rule { tag, classes, id, specificity, order, block });
         }
     }
+    Ok(())
 }
 
 const PROPS: &[&str] = &[
@@ -505,7 +567,9 @@ const PROPS: &[&str] = &[
 
 struct Parser<'a, 'i> {
     ids: HashMap<String, roxmltree::Node<'a, 'i>>,
-    rules: Vec<Rule>,
+    css: StyleSheet,
+    /// CSS matching work done so far; past [`MAX_CSS_WORK`] rules stop applying and the import errs.
+    css_work: std::cell::Cell<usize>,
     vw: f64,
     vh: f64,
     skipped: Vec<String>,
@@ -531,30 +595,66 @@ impl<'a, 'i> Parser<'a, 'i> {
                 out.insert(a.name().to_string(), a.value().to_string());
             }
         }
-        let tag = n.tag_name().name();
-        let classes: Vec<&str> = n.attribute("class").map(|c| c.split_whitespace().collect()).unwrap_or_default();
-        let id = n.attribute("id");
-        let mut matching: Vec<&Rule> = self
-            .rules
-            .iter()
-            .filter(|r| {
-                r.tag.as_deref().is_none_or(|t| t == tag)
-                    && r.id.as_deref().is_none_or(|i| Some(i) == id)
-                    && r.classes.iter().all(|c| classes.contains(&c.as_str()))
-            })
-            .collect();
-        matching.sort_by_key(|r| (r.specificity, r.order));
-        for r in matching {
-            for (k, v) in &r.decls {
-                out.insert(k.clone(), v.clone());
-            }
-        }
+        self.apply_rules(n, &mut out);
         if let Some(st) = n.attribute("style") {
             for (k, v) in parse_decls(st) {
                 out.insert(k, v);
             }
         }
         out
+    }
+
+    /// Charge `n` units of CSS work; false once the budget is spent.
+    fn charge_css(&self, n: usize) -> bool {
+        let w = self.css_work.get().saturating_add(n);
+        self.css_work.set(w);
+        w <= MAX_CSS_WORK
+    }
+
+    /// Apply the matching `<style>` rules to `out`, by specificity then source order.
+    fn apply_rules(&self, n: roxmltree::Node, out: &mut HashMap<String, String>) {
+        let css = &self.css;
+        if css.rules.is_empty() {
+            return;
+        }
+        // Splitting and sorting the class list is work too: charge its length first.
+        let class = n.attribute("class").unwrap_or_default();
+        if !self.charge_css(class.len()) {
+            return;
+        }
+        let tag = n.tag_name().name();
+        let mut classes: Vec<&str> = class.split_whitespace().collect();
+        classes.sort_unstable();
+        classes.dedup();
+        let id = n.attribute("id");
+        // Each rule sits in exactly one bucket and the classes are distinct: no rule twice.
+        let mut buckets: Vec<&Vec<usize>> = vec![&css.universal];
+        buckets.extend(id.and_then(|i| css.by_id.get(i)));
+        buckets.extend(classes.iter().filter_map(|c| css.by_class.get(*c)));
+        buckets.extend(css.by_tag.get(tag));
+        if !self.charge_css(buckets.iter().map(|b| b.len()).fold(0, usize::saturating_add)) {
+            return;
+        }
+        let candidates = || buckets.iter().flat_map(|b| b.iter()).filter_map(|&i| css.rules.get(i));
+        // A selector like `.z.z.z…` checks each of its classes: charge them too.
+        if !self.charge_css(candidates().map(|r| r.classes.len()).fold(0, usize::saturating_add)) {
+            return;
+        }
+        let mut matching: Vec<&Rule> = candidates()
+            .filter(|r| {
+                r.tag.as_deref().is_none_or(|t| t == tag)
+                    && r.id.as_deref().is_none_or(|i| Some(i) == id)
+                    && r.classes.iter().all(|c| classes.binary_search(&c.as_str()).is_ok())
+            })
+            .collect();
+        matching.sort_by_key(|r| (r.specificity, r.order));
+        let blocks: Vec<&Vec<(String, String)>> = matching.iter().filter_map(|r| css.blocks.get(r.block)).collect();
+        if !self.charge_css(blocks.iter().map(|b| b.len()).fold(0, usize::saturating_add)) {
+            return;
+        }
+        for (k, v) in blocks.into_iter().flatten() {
+            out.insert(k.clone(), v.clone());
+        }
     }
 
     fn length(&self, s: &str, axis: char, font: f64) -> Option<f64> {
@@ -621,7 +721,11 @@ impl<'a, 'i> Parser<'a, 'i> {
         if let Some(c) = d.get("color").and_then(|v| parse_color(v)) {
             st.color = c;
         }
-        if let Some(v) = d.get("font-size").and_then(|v| self.length(v, 'o', st.font_size)) {
+        let font_size = d.get("font-size").and_then(|v| match v.trim().strip_suffix('%') {
+            Some(p) => p.trim().parse::<f64>().ok().map(|p| p / 100.0 * st.font_size),
+            None => self.length(v, 'o', st.font_size),
+        });
+        if let Some(v) = font_size.filter(|v| v.is_finite()) {
             st.font_size = v;
         }
         if let Some(p) = d.get("fill").and_then(|v| self.paint_ref(v)) {
@@ -1147,20 +1251,31 @@ pub fn parse(bytes: &[u8]) -> Result<Doc, Error> {
         return Err(Error::NotSvg);
     }
     let mut ids = HashMap::new();
-    let mut rules = vec![];
+    let mut css = StyleSheet::default();
     for n in root.descendants().filter(|n| n.is_element()) {
         if let Some(id) = n.attribute("id") {
             ids.entry(id.to_string()).or_insert(n);
         }
         if n.tag_name().name() == "style" {
-            let css: String = n.children().filter_map(|c| c.text()).collect();
-            parse_css(&css, &mut rules);
+            let text: String = n.children().filter_map(|c| c.text()).collect();
+            parse_css(&text, &mut css)?;
         }
     }
+    css.index();
     let vb = viewbox(root);
     // Room for generous reuse, and always for every element of the file itself.
     let budget = MAX_EXPANDED_ELEMENTS.max(root.descendants().filter(|n| n.is_element()).count().saturating_mul(2));
-    let mut p = Parser { ids, rules, vw: vb.map_or(300.0, |v| v.1), vh: vb.map_or(150.0, |v| v.2), skipped: vec![], work: 0, budget, using: vec![] };
+    let mut p = Parser {
+        ids,
+        css,
+        css_work: std::cell::Cell::new(0),
+        vw: vb.map_or(300.0, |v| v.1),
+        vh: vb.map_or(150.0, |v| v.2),
+        skipped: vec![],
+        work: 0,
+        budget,
+        using: vec![],
+    };
     let st = Style::default();
     let pct_or = |name: &str, axis: char, def: f64| -> f64 {
         match root.attribute(name) {
@@ -1199,6 +1314,10 @@ pub fn parse(bytes: &[u8]) -> Result<Doc, Error> {
     if p.work > p.budget {
         // Never a silently partial drawing.
         return Err(Error::Xml(format!("its <use> references expand to more than {} elements", p.budget)));
+    }
+    if p.css_work.get() > MAX_CSS_WORK {
+        // Never a silently unstyled drawing.
+        return Err(Error::Xml(format!("matching its <style> rules takes more than {MAX_CSS_WORK} steps")));
     }
     let transform = viewbox_transform(root, dw, dh);
     Ok(Doc {

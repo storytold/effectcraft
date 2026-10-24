@@ -7,3 +7,6 @@ publish = false
 
 [dependencies]
 serde_json = { workspace = true }
+
+chrono = { workspace = true }
+tempfile = "3"

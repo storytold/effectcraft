@@ -35,6 +35,7 @@ pub mod paint_panels;
 pub mod panel_kit;
 pub mod path_vr_panels;
 pub mod precomp;
+pub mod primitive_dialog;
 pub mod project;
 pub mod properties;
 pub mod puppet_tool;
@@ -149,6 +150,11 @@ pub(crate) fn project_drop_items(app: &EffectcraftApp, dragged: u64) -> Vec<u64>
 /// or Feet + Frames).
 pub fn timecode(session: &Session, comp: &Comp, t: Tick) -> String {
     effectcraft_engine::commands::time::display_time(session, comp, t)
+}
+
+/// A length (a Duration) formatted per project settings, with no start offset.
+pub fn duration(session: &Session, comp: &Comp, len: Tick) -> String {
+    effectcraft_engine::commands::time::display_duration(session, comp, len)
 }
 
 /// Ctrl/Cmd-click on a current-time display toggles the project's Time Display Style between

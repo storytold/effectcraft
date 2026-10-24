@@ -284,9 +284,13 @@ pub fn frozen_alpha(params: &Params, layer_size: [f64; 2], fps: f64, f: i64, w: 
         return None;
     }
     let fr = fc.frames.get(&f)?;
-    let a = rle::decode(&fr.a)?;
     let [fw, fh] = fc.size;
-    if fw == 0 || fh == 0 || a.len() != fw.checked_mul(fh)? {
+    let expected = fw.checked_mul(fh)?;
+    if fw == 0 || fh == 0 || expected > rle::MAX_PLANE_BYTES {
+        return None;
+    }
+    let a = rle::decode_bounded(&fr.a, expected)?;
+    if a.len() != expected {
         return None;
     }
     let af: Vec<f32> = a.iter().map(|v| *v as f32 / 255.0).collect();

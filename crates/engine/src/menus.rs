@@ -733,6 +733,7 @@ Layer
     Shape Layer | layer.newShape
     Adjustment Layer | layer.newAdjustment
     Content-Aware Fill Layer... | layer.newContentAwareFill
+    3D Primitive... | layer.newPrimitive
     Cube | layer.new3dPrimitive {"kind":"cube"}
     Sphere | layer.new3dPrimitive {"kind":"sphere"}
     Plane | layer.new3dPrimitive {"kind":"plane"}

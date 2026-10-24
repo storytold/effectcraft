@@ -206,6 +206,8 @@ pub fn build(app: &EffectcraftApp) -> NativeMenu {
                                     "Serviços"
                                 } else if crate::i18n::czech(app) {
                                     "Služby"
+                                } else if crate::i18n::georgian(app) {
+                                    "სერვისები"
                                 } else {
                                     "Services"
                                 }
@@ -488,6 +490,27 @@ mod tests {
         let mut translated = vec![];
         labels(&build(&app).menus, &mut translated);
         assert_eq!(translated, ["Služby", "Skrýt EffectCraft", "Skrýt ostatní", "Zobrazit vše"]);
+    }
+
+    #[test]
+    fn georgian_translates_macos_predefined_items() {
+        if !cfg!(target_os = "macos") {
+            return;
+        }
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.session.execute("prefs.set", json!({"key": "general.language", "value": "ka"})).unwrap();
+        fn labels(nodes: &[NativeNode], out: &mut Vec<String>) {
+            for node in nodes {
+                match node {
+                    NativeNode::Predefined { label, .. } => out.push(label.clone()),
+                    NativeNode::Submenu { children, .. } => labels(children, out),
+                    _ => {}
+                }
+            }
+        }
+        let mut translated = vec![];
+        labels(&build(&app).menus, &mut translated);
+        assert_eq!(translated, ["სერვისები", "EffectCraft-ის დამალვა", "სხვების დამალვა", "ყველას ჩვენება"]);
     }
 
     #[test]

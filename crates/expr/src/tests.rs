@@ -1166,6 +1166,13 @@ fn sample_image_reads_rendered_pixels() {
     assert_close!(f.num(&code("thisComp.layer(\"B\").sampleImage([-50, -50])"), 0.0), 0.0);
 }
 
+/// A huge sample point saturates the pixel coordinates; it must not overflow the loop bounds.
+#[test]
+fn sample_image_huge_point_is_transparent() {
+    let f = fx();
+    assert_close!(f.num("var c = thisComp.layer(\"B\").sampleImage([1e300, 1e300]); c[3]", 0.0), 0.0);
+}
+
 fn data_item(p: &mut Project, name: &str, text: &str) {
     let f = effectcraft_project::Footage {
         path: format!("/data/{name}"),

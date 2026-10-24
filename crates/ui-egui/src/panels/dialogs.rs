@@ -47,6 +47,7 @@ pub struct DialogState {
     pub info: (String, String),
     pub camera: super::dialogs_3d::CameraDraft,
     pub light: super::dialogs_3d::LightDraft,
+    pub primitive: super::primitive_dialog::PrimitiveDraft,
     pub velocity: super::key_dialogs::VelocityDraft,
     pub interp: super::key_dialogs::InterpDraft,
     pub stretch: super::key_dialogs::StretchDraft,
@@ -102,6 +103,7 @@ pub fn open_comp_settings_for(app: &mut EffectcraftApp, cid: ItemId) -> Result<(
         preserve_frame_rate: c.preserve_frame_rate,
         preserve_resolution: c.preserve_resolution,
         advanced_3d: c.renderer == effectcraft_engine::project::Renderer::Advanced3D,
+        resolution: c.resolution,
         ..Default::default()
     };
     app.dialog_state.editing_existing = true;
@@ -248,6 +250,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context) {
         Dialog::ViewOptions => super::forms::show_view_options(app, ctx, &t),
         Dialog::CameraSettings => super::dialogs_3d::camera(app, ctx, &t),
         Dialog::LightSettings => super::dialogs_3d::light(app, ctx, &t),
+        Dialog::NewPrimitive => super::primitive_dialog::dialog(app, ctx, &t),
         Dialog::KeyVelocity => super::key_dialogs::velocity(app, ctx, &t),
         Dialog::KeyInterpolation => super::key_dialogs::interpolation(app, ctx, &t),
         Dialog::TimeStretch => super::key_dialogs::time_stretch(app, ctx, &t),
@@ -408,6 +411,11 @@ fn comp_settings(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens, exis
                 m.insert("comp".into(), json!(cid.0));
             }
             let r = if existing { app.session.execute("comp.settings", params) } else { app.session.execute("comp.new", params) };
+            let cid = if existing { app.dialog_state.editing_comp.map(|c| c.0) } else { r.as_ref().ok().and_then(|v| v["comp"].as_u64()) };
+            let r = match cid {
+                Some(cid) if r.is_ok() => set_resolution(app, cid, app.dialog_state.comp.resolution).and(r),
+                _ => r,
+            };
             if !existing && r.is_ok() {
                 app.dialog_state.last_new_comp = Some(app.dialog_state.comp.clone());
             }
@@ -417,6 +425,15 @@ fn comp_settings(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens, exis
             app.dialog = None;
         }
         None => {}
+    }
+}
+
+/// The Resolution chosen in Composition Settings, set as the Composition panel's popup sets it:
+/// saved with the project but no undo step, so it stays out of `comp.new` / `comp.settings`.
+fn set_resolution(app: &mut EffectcraftApp, cid: u64, r: effectcraft_engine::project::Resolution) -> effectcraft_engine::Result<Value> {
+    match r.factor() {
+        None => app.session.execute("view.res.auto", json!({"comp": cid})),
+        Some(n) => app.session.execute("view.res.custom", json!({"comp": cid, "factor": n})),
     }
 }
 
@@ -825,6 +842,59 @@ mod tests {
         frame(&mut app, &ctx);
         frame(&mut app, &ctx);
         assert_eq!(selected(&ctx), Some(0..app.dialog_state.solid_name.chars().count()));
+    }
+
+    /// One frame of Composition Settings (or New Composition) with Enter pressed: OK.
+    fn press_ok(app: &mut EffectcraftApp, ctx: &egui::Context, existing: bool) {
+        let t = app.tokens;
+        let mut out = ctx.run_ui(Default::default(), |ui| {
+            app.auto.begin_frame();
+            ui.input_mut(|i| {
+                i.events.push(egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() })
+            });
+            comp_settings(app, ui.ctx(), &t, existing);
+        });
+        out.textures_delta.clear();
+        assert!(app.dialog.is_none(), "OK closed the dialog");
+    }
+
+    /// The Resolution menu sets the comp's Resolution on OK. As from the Composition panel's popup
+    /// it is no undo step: the settings are one step, and undoing them keeps the Resolution.
+    #[test]
+    fn composition_settings_resolution_applies_on_ok_outside_the_undo_history() {
+        use effectcraft_engine::project::Resolution;
+        let (mut app, ctx) = app();
+        let cid = app.session.active_comp_id().unwrap();
+        app.session.execute("view.res.third", json!({})).unwrap();
+        open_comp_settings(&mut app).unwrap();
+        assert_eq!(app.dialog_state.comp.resolution, Resolution::Third, "the dialog opens on the comp's Resolution");
+        frame(&mut app, &ctx);
+        assert!(app.auto.find("dialog.comp.resolution").is_some());
+        let steps = app.session.history.undo.len();
+        (app.dialog_state.comp.resolution, app.dialog_state.comp.width) = (Resolution::Half, 700);
+        app.dialog_state.comp.lock_aspect = false;
+        press_ok(&mut app, &ctx, true);
+        let c = app.session.project.comp(cid).unwrap();
+        assert_eq!((c.width, c.resolution), (700, Resolution::Half));
+        assert_eq!(app.session.history.undo.len(), steps + 1, "Composition Settings is one undo step");
+        app.session.execute("edit.undo", json!({})).unwrap();
+        let c = app.session.project.comp(cid).unwrap();
+        assert_eq!((c.width, c.resolution), (640, Resolution::Half), "undo keeps the Resolution");
+        // Only the Resolution changed: still set, and no extra step.
+        open_comp_settings(&mut app).unwrap();
+        app.dialog_state.comp.resolution = Resolution::Custom(6);
+        let steps = app.session.history.undo.len();
+        press_ok(&mut app, &ctx, true);
+        assert_eq!(app.session.project.comp(cid).unwrap().resolution, Resolution::Custom(6));
+        assert_eq!(app.session.history.undo.len(), steps, "no undo step");
+        // New Composition makes its comp at the menu's Resolution; the comp the viewer showed keeps its own.
+        open_new_comp(&mut app);
+        app.dialog_state.comp.resolution = Resolution::Quarter;
+        press_ok(&mut app, &ctx, false);
+        let new = app.session.active_comp_id().unwrap();
+        assert_ne!(new, cid);
+        assert_eq!(app.session.project.comp(new).unwrap().resolution, Resolution::Quarter);
+        assert_eq!(app.session.project.comp(cid).unwrap().resolution, Resolution::Custom(6));
     }
 
     #[test]
