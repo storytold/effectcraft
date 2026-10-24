@@ -243,6 +243,9 @@ fn main() -> eframe::Result {
             // Fit the window to its monitor, or put it back where it was (still hidden).
             let saved_window = session.config.as_deref().and_then(window::load);
             let opened = cc.winit_window().map(|w| window::restore(w, saved_window));
+            // Scripts in Scripts/Startup run before a project opens (a failing one is reported in
+            // a toast).
+            let _ = session.execute("file.runStartupScripts", json!({}));
             let recovery = if control_port.is_none() { session.begin_recovery() } else { None };
             let project = files.iter().find(|f| is_project_file(f)).cloned();
             if let Some(p) = project {
@@ -455,6 +458,8 @@ impl eframe::App for Desktop {
         self.launch.exited();
         self.window.save(self.app.session.config.as_deref());
         self.app.on_exit();
+        // Scripts in Scripts/Shutdown run with the project closed.
+        let _ = self.app.session.execute("file.runShutdownScripts", json!({}));
     }
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {

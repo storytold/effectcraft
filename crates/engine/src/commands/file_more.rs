@@ -480,7 +480,7 @@ fn run_script(s: &mut Session, p: &Value) -> Result<Value> {
             }
             _ => return Err(bad("file.runScript", format!("step {}: needs `command`", i + 1))),
         };
-        if id == "file.runScript" || id == "script.run" {
+        if super::scripts::RUNS_SCRIPTS.contains(&id.as_str()) {
             return Err(bad("file.runScript", "scripts can't run scripts"));
         }
         let r = if from_file { s.execute_for_script(&id, params) } else { s.execute(&id, params) };
@@ -505,7 +505,7 @@ fn is_jsxbin(name: &str) -> bool {
 }
 
 /// A script error becomes a toast and a command error.
-fn report_js(s: &mut Session, name: &str, out: Value) -> Result<Value> {
+pub(crate) fn report_js(s: &mut Session, name: &str, out: Value) -> Result<Value> {
     if let Some(e) = out.get("error").filter(|e| !e.is_null()) {
         let line = e.get("line").and_then(Value::as_u64).map(|l| format!(" (line {l})")).unwrap_or_default();
         let msg = e.get("message").and_then(Value::as_str).unwrap_or("script error");
@@ -518,6 +518,13 @@ fn report_js(s: &mut Session, name: &str, out: Value) -> Result<Value> {
 /// Run a script's code under its file name (installed / sample scripts, ScriptUI panels).
 pub(crate) fn run_js_named(s: &mut Session, code: &str, name: &str) -> Result<Value> {
     let out = run_js(s, code, name, false)?;
+    report_js(s, name, out)
+}
+
+/// Run the code of the script file at `path` (its `#include`s and `$.fileName` use that path),
+/// reported under its file name `name` (Startup and Shutdown scripts).
+pub(crate) fn run_js_file(s: &mut Session, code: &str, path: &str, name: &str) -> Result<Value> {
+    let out = run_js(s, code, path, false)?;
     report_js(s, name, out)
 }
 

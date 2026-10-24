@@ -238,6 +238,8 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
                 }
                 let mut session = session();
                 session.load_settings();
+                // Scripts in Scripts/Startup run before a project opens.
+                let _ = session.execute("file.runStartupScripts", json!({}));
                 let recovery = session.begin_recovery();
                 // `?empty`: a blank project; `?demo`: the demo project; otherwise the last visit's
                 // project (the demo on a first visit).

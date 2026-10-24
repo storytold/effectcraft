@@ -28,10 +28,9 @@ pub struct Confinement {
     write: Vec<PathBuf>,
 }
 
-/// Commands that run code, act outside the project or open other applications.
+/// Commands that run code, act outside the project or open other applications, besides the
+/// commands that run scripts ([`effectcraft_engine::commands::scripts::RUNS_SCRIPTS`]).
 const REFUSED: &[&str] = &[
-    "script.run",
-    "file.runScript",
     "file.installScript",
     "file.installScriptUIPanel",
     "file.uninstallScript",
@@ -135,7 +134,7 @@ impl Confinement {
     /// Check engine command `id` with `params` before it runs. Returns what must still be looked
     /// up and passed to [`Confinement::check_lookup`] for commands that write implicitly.
     pub fn check_command(&self, id: &str, params: &Value) -> Result<Option<Lookup>> {
-        if REFUSED.contains(&id) {
+        if REFUSED.contains(&id) || effectcraft_engine::commands::scripts::RUNS_SCRIPTS.contains(&id) {
             return Err(Error::BadArgs(format!("`{id}` is not available while file access is confined (--automation-read-root/--automation-write-root)")));
         }
         if id == "engine.batch" {

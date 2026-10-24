@@ -580,7 +580,9 @@ A dialog's `show()` waits for the user: the `script.run` / `file.runScript` repl
 `"waiting": true`, and the script continues (its final output arrives in the reply of the click
 that closes the dialog). File ▸ Scripts: `file.scripts.list`, `file.runScript {"name": …}`,
 `file.installScript` / `file.installScriptUIPanel {"path": …}`, `window.scriptPanel {"name": …}`,
-`window.restoreScriptPanels` (the panels open when the app last quit). Scripts' `app.settings`:
+`window.restoreScriptPanels` (the panels open when the app last quit), `file.runStartupScripts` and
+`file.runShutdownScripts` (the scripts in `Scripts/Startup` and `Scripts/Shutdown`; the second closes
+the project first). Scripts' `app.settings`:
 `script.settings.get {"section": …, "key": …}` and `script.settings.save {…, "value": …}`.
 Extension points and the bundled extensions: [plugins.md](plugins.md).
 

@@ -6,6 +6,9 @@
 //!   lists them with the bundled sample scripts and extensions ([`BUNDLED`]) and runs them by name; ScriptUI
 //!   panels appear at the bottom of the Window menu and open as dockable panels
 //!   (`window.scriptPanel`), running with `this` = the panel as in After Effects.
+//! * **Startup and Shutdown scripts** in `Scripts/Startup/` and `Scripts/Shutdown/` run by
+//!   themselves, in alphabetical order: at launch (`file.runStartupScripts`) and as EffectCraft
+//!   quits, after the project is closed (`file.runShutdownScripts`).
 //! * **ScriptUI windows** (`scriptui.*`): list the open script windows, read their control
 //!   trees, click buttons and set values like a user, close them (see [`crate::scriptui`]).
 //! * **Script settings** (`script.settings.*`): After Effects' `app.settings`, string values by
@@ -22,6 +25,18 @@ use crate::{EngineError, Event, Result, Session, cmd, scriptui};
 /// The settings-store folders of installed scripts.
 pub const SCRIPTS_DIR: &str = "Scripts";
 pub const PANELS_DIR: &str = "Scripts/ScriptUI Panels";
+/// The settings-store folders whose scripts run at launch and as EffectCraft quits.
+pub const STARTUP_DIR: &str = "Scripts/Startup";
+pub const SHUTDOWN_DIR: &str = "Scripts/Shutdown";
+/// Commands that run script files or script code (a ScriptUI panel runs its script when it
+/// opens). Scripts and batches can't run them, and confined automation sessions refuse them.
+pub const RUNS_SCRIPTS: &[&str] =
+    &["script.run", "file.runScript", "file.runStartupScripts", "file.runShutdownScripts", "window.scriptPanel", "window.restoreScriptPanels"];
+/// Largest script file the Startup and Shutdown folders run (bytes), as `#include` and
+/// `$.evalFile` allow.
+const MAX_SCRIPT_BYTES: usize = 16 << 20;
+/// Modal dialogs a Shutdown script may open one after another; each closes as if canceled.
+const MAX_SHUTDOWN_DIALOGS: usize = 64;
 /// The ScriptUI panels open when EffectCraft last quit (settings store), reopened at launch.
 pub const OPEN_PANELS_FILE: &str = "scriptui_panels.json";
 /// Scripts' `app.settings` in the settings store: `{section: {key: value}}`, as After Effects
@@ -308,6 +323,72 @@ fn restore_panels(s: &mut Session, _: &Value) -> Result<Value> {
     Ok(json!({"opened": opened, "failed": failed}))
 }
 
+/// Run the scripts in `dir` of the settings store one after another, in alphabetical order (case
+/// ignored), as After Effects runs its Startup and Shutdown folders. A script that fails is
+/// reported in a toast and the log and listed in `failed`; the next one still runs. A script waiting in a
+/// modal dialog is listed in `waiting` and goes on when the dialog closes; the next one runs
+/// meanwhile. With `quitting`, no window is left to show a dialog in, so each dialog closes as
+/// if canceled (`show()` returns 2) and the script runs on.
+fn run_folder(s: &mut Session, dir: &str, quitting: bool) -> Value {
+    let mut names: Vec<String> = s.config.as_ref().map(|c| c.list(dir)).unwrap_or_default().into_iter().filter(|n| is_script(n) && is_script_name(n)).collect();
+    names.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()).then_with(|| a.cmp(b)));
+    let (mut ran, mut waiting, mut failed) = (vec![], vec![], vec![]);
+    for name in names {
+        let code = match s.config.as_ref().map(|c| c.read_bounded(&format!("{dir}/{name}"), MAX_SCRIPT_BYTES)) {
+            Some(Ok(Some(code))) => code,
+            read => {
+                let why = match read {
+                    Some(Err(e)) => format!(": {e}"),
+                    _ => String::new(),
+                };
+                let error = format!("{name}: cannot read the script{why}");
+                log::warn!("{dir}: {error}");
+                s.events.push(Event::Toast { message: error.clone(), error: true });
+                failed.push(json!({"name": name, "error": error}));
+                continue;
+            }
+        };
+        let is_waiting = |r: &Result<Value>| r.as_ref().is_ok_and(|v| v.get("waiting").and_then(Value::as_bool) == Some(true));
+        // In a settings folder on disk, the script runs as its file, so `#include`, `$.fileName`
+        // and `$.evalFile` find the files beside it.
+        let path = s.config.as_ref().and_then(|c| c.dir()).map(|d| d.join(dir).join(&name).to_string_lossy().into_owned()).unwrap_or_else(|| name.clone());
+        // Windows open before this script runs belong to other scripts, perhaps of the same name.
+        let before: Vec<u32> = s.script_ui.windows.iter().map(|w| w.id).collect();
+        let mut r = super::file_more::run_js_file(s, &code, &path, &name);
+        let mut closed = 0;
+        while quitting && closed < MAX_SHUTDOWN_DIALOGS && is_waiting(&r) {
+            let Some(id) = s.script_ui.windows.iter().rev().find(|w| w.modal && w.script == path && !before.contains(&w.id)).map(|w| w.id) else { break };
+            // report_js reports an error the script throws after its dialog closes, as it does for an
+            // error in the script's first run.
+            r = scriptui::close(s, &json!({"window": id})).and_then(|out| super::file_more::report_js(s, &name, out));
+            closed += 1;
+        }
+        match r {
+            Ok(_) if is_waiting(&r) => waiting.push(name),
+            Ok(_) => ran.push(name),
+            Err(e) => {
+                // Also in the log: no frame draws a Shutdown script's toast.
+                log::warn!("{dir}: {e}");
+                failed.push(json!({"name": name, "error": e.to_string()}));
+            }
+        }
+    }
+    json!({"ran": ran, "waiting": waiting, "failed": failed})
+}
+
+/// `file.runStartupScripts`: run the scripts in `Scripts/Startup` (frontends call it once at
+/// launch, before a project opens).
+fn run_startup(s: &mut Session, _: &Value) -> Result<Value> {
+    Ok(run_folder(s, STARTUP_DIR, false))
+}
+
+/// `file.runShutdownScripts`: close the project, then run the scripts in `Scripts/Shutdown`
+/// (frontends call it as the app quits, after the unsaved-changes prompt).
+fn run_shutdown(s: &mut Session, _: &Value) -> Result<Value> {
+    s.replace_project(effectcraft_project::Project::default(), None);
+    Ok(run_folder(s, SHUTDOWN_DIR, true))
+}
+
 /// Window ▸ <ScriptUI panel>: run the panel script (or bring its panel forward).
 fn open_panel(s: &mut Session, p: &Value) -> Result<Value> {
     let c = "window.scriptPanel";
@@ -373,6 +454,24 @@ pub fn specs() -> Vec<CommandSpec> {
             "{} → reopens the ScriptUI panels open when EffectCraft last quit (frontends call it at launch) → {opened: [name], failed: [{name, error}]}",
             always,
             restore_panels
+        ),
+        cmd!(
+            "file.runStartupScripts",
+            "Run Startup Scripts",
+            [],
+            None,
+            "{} → runs the scripts in Scripts/Startup in alphabetical order (frontends call it at launch) → {ran: [name], waiting: [name] (in a modal dialog), failed: [{name, error}]}",
+            always,
+            run_startup
+        ),
+        cmd!(
+            "file.runShutdownScripts",
+            "Run Shutdown Scripts",
+            [],
+            None,
+            "{} → closes the project, then runs the scripts in Scripts/Shutdown in alphabetical order (frontends call it as the app quits; their modal dialogs close as if canceled) → {ran: [name], waiting: [name], failed: [{name, error}]}",
+            always,
+            run_shutdown
         ),
         crate::query!("script.settings.get", "Get Script Setting", "{section, key} → {have, value} (app.settings.haveSetting / getSetting)", settings_get),
         cmd!(

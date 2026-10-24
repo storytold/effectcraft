@@ -97,6 +97,8 @@ mod tests_include;
 #[cfg(test)]
 mod tests_panels;
 #[cfg(test)]
+mod tests_startup;
+#[cfg(test)]
 mod tests_tasks;
 #[cfg(test)]
 mod tests_ui;

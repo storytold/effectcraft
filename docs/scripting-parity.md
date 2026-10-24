@@ -23,7 +23,7 @@ our own scripts; no real-world script library has been run against both apps.
 | ScriptUI | Dialogs, palettes, dockable panels, resource strings, `onDraw` / ScriptUIGraphics, mouse events | Same, dockable panels reopen at launch | good | `ui_scriptui`, `tests_ui*` |
 | `app.scheduleTask` / `cancelTask` | One-shot and repeating tasks (polling, panel refresh) until `cancelTask` | Same: repeating tasks run every `delay` ms (at least 50 ms, at most 64 pending per script) until `cancelTask`, until they throw (reported once, then cancelled), or until their owner goes: a script's last window closing, or the project closing for scripts without windows; frontends tick them every frame, agents with `script.runTasks` | good | `tests_tasks.rs` (#773); one-shot tasks of a script file still run right after it, not after their delay |
 | Scripts menu, ScriptUI Panels folder | yes | yes | same | [plugins.md](plugins.md) |
-| Startup / Shutdown folders | yes | not run | missing | plugins.md |
+| Startup / Shutdown folders | yes | `Scripts/Startup` runs at launch and `Scripts/Shutdown` runs as the desktop app quits, after the project is closed, each in alphabetical order | partial | `tests_startup.rs`; each script has its own global scope, so a Startup script's variables and functions are not available to later scripts ([plugins.md](plugins.md)) |
 | `#include`, `#target` directives | yes | `#include` / `//@include` / `#includepath` inline files relative to the including script (once each, nested at most 32 deep, under the scripts' file gate; errors name the included file and line); `#target`, `#targetengine`, `#strict` are ignored | good | `tests_include.rs` (#759); installed scripts and panels have no folder of their own, so they include from the project's folder or absolute paths |
 | `.jsxbin` | yes | no | out of scope | No public specification |
 | Keyboard shortcuts for scripts | yes | no | missing | plugins.md |
@@ -34,7 +34,7 @@ our own scripts; no real-world script library has been run against both apps.
 
 ## Estimate
 
-**≈ 20–40 h**: `#include` / `#target` (landed, #759) and Startup / Shutdown folders 4–8 h as first estimated (Startup / Shutdown remain), script shortcuts 2–4 h,
+**≈ 20–40 h**: `#include` / `#target` (landed, #759) and Startup / Shutdown folders 4–8 h as first estimated (Startup / Shutdown landed; a global scope shared between scripts remains), script shortcuts 2–4 h,
 a corpus of public scripts and expressions with the fixes it finds 10–20 h, an expression
 performance benchmark 4–8 h.
 

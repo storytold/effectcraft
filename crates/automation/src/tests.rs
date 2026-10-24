@@ -1376,6 +1376,18 @@ fn automation_roots_confine_file_access() {
     // Scripts can read and write anything: refused.
     denied(&mut s, "run_script", json!({"code": "1 + 1"}));
     denied(&mut s, "execute_command", json!({"command": "file.runScript", "params": {"path": p(&read, "x.jsx")}}));
+    for (id, params) in [
+        ("file.runStartupScripts", json!({})),
+        ("file.runShutdownScripts", json!({})),
+        // ScriptUI panels run their script when they open.
+        ("window.scriptPanel", json!({"name": "Layer Tools.jsx"})),
+        ("window.restoreScriptPanels", json!({})),
+    ] {
+        let msg = denied(&mut s, "execute_command", json!({"command": id, "params": params}));
+        assert!(msg.contains("not available while file access is confined"), "{id}: {msg}");
+        let msg = denied(&mut s, "batch", json!({"steps": [{"command": id, "params": params}]}));
+        assert!(msg.contains("not available while file access is confined"), "{id}: {msg}");
+    }
     // Writes to the files the agent named: none outside.
     assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 1, "only the unconfined save");
     let _ = std::fs::remove_dir_all(&base);
