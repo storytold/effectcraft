@@ -111,6 +111,29 @@ fn set_switch_others() {
     assert!(s.execute("layer.setSwitch", json!({"layers": [c], "switch": "nope", "others": true})).is_err());
 }
 
+/// The Video switch has a cell on every layer's row, cameras and lights included, so Alt-clicking
+/// it (and Hide Other Video) takes them along with the rest.
+#[test]
+fn video_others_takes_cameras_and_lights() {
+    let mut s = comp();
+    let a = solid(&mut s, "#ff0000");
+    let cam = s.execute("layer.newCamera", json!({})).unwrap()["layer"].as_u64().unwrap();
+    let light = s.execute("layer.newLight", json!({"kind": "Point"})).unwrap()["layer"].as_u64().unwrap();
+    let get = |s: &Session, f: fn(&effectcraft_project::Layer) -> bool| [a, cam, light].map(|l| f(&layer(s, l)));
+    // The camera and the light are hidden: Alt-click on the solid's eye brings them back, since
+    // they stand apart with it, and the next Alt-click hides them with every other layer.
+    s.execute("layer.setSwitch", json!({"layers": [cam, light], "switch": "video", "value": false})).unwrap();
+    s.execute("layer.setSwitch", json!({"layers": [a], "switch": "video", "others": true})).unwrap();
+    assert_eq!(get(&s, |l| l.switches.video), [true; 3]);
+    s.execute("layer.setSwitch", json!({"layers": [a], "switch": "video", "others": true})).unwrap();
+    assert_eq!(get(&s, |l| l.switches.video), [true, false, false]);
+    // Hide Other Video takes them too.
+    s.execute("layer.showAllVideo", json!({})).unwrap();
+    assert_eq!(get(&s, |l| l.switches.video), [true; 3]);
+    s.execute("layer.hideOtherVideo", json!({"layers": [a]})).unwrap();
+    assert_eq!(get(&s, |l| l.switches.video), [true, false, false]);
+}
+
 /// A null's Video switch (the eye) works like any layer's, as in After Effects: it toggles,
 /// Alt-click and Hide Other Video take nulls along, and its children still follow it while it is
 /// hidden (parenting ignores the eye).
@@ -723,6 +746,37 @@ fn reveal_properties() {
     assert_eq!(n(&s.execute("anim.reveal", json!({"kind": "animation"})).unwrap()), 2);
     assert_eq!(n(&s.execute("anim.reveal", json!({"kind": "modified"})).unwrap()), 3);
     assert!(frontend_events(&mut s).iter().all(|(c, _)| c == "timeline.revealProps"));
+}
+
+#[test]
+fn reveal_layer_source_selects_each_layers_source_item() {
+    let mut s = comp();
+    let a = solid(&mut s, "#ff0000");
+    let b = solid(&mut s, "#00ff00");
+    let ia = layer(&s, a).source.item().unwrap();
+    let ib = layer(&s, b).source.item().unwrap();
+    assert_ne!(ia, ib);
+    s.execute("layer.select", json!({"layers": [a, b]})).unwrap();
+    let r = s.execute("layer.revealSource", json!({})).unwrap();
+    assert_eq!(r["item"], ia.0);
+    assert_eq!(r["items"], json!([ia.0, ib.0]));
+    assert_eq!(s.state.project_selection, vec![ia, ib]);
+    assert_eq!(frontend_events(&mut s), vec![("project.reveal".to_string(), json!({"items": [ia.0, ib.0]}))]);
+    // A null has no source. Alone it is refused; in a mixed selection only the sources are revealed.
+    let n = s.execute("layer.newNull", json!({})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.select", json!({"layers": [n]})).unwrap();
+    assert!(s.execute("layer.revealSource", json!({})).is_err());
+    s.execute("layer.select", json!({"layers": [n, a]})).unwrap();
+    let r = s.execute("layer.revealSource", json!({})).unwrap();
+    assert_eq!(r["items"], json!([ia.0]));
+    assert_eq!(s.state.project_selection, vec![ia]);
+    // Reveal Composition in Project opens the same panel and folders.
+    let cid = s.active_comp_id().unwrap();
+    s.drain_events();
+    let r = s.execute("comp.revealInProject", json!({"comp": cid.0})).unwrap();
+    assert_eq!(r["item"], cid.0);
+    assert_eq!(s.state.project_selection, vec![cid]);
+    assert_eq!(frontend_events(&mut s), vec![("project.reveal".to_string(), json!({"items": [cid.0]}))]);
 }
 
 #[test]

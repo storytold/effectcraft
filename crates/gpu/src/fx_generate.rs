@@ -117,10 +117,13 @@ fn radial_blur(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
     run(e, "gen_radial_blur", &p, b, None, Some(&data))
 }
 
-fn radial_fast(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
+fn radial_fast(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
     let s = (ctx.params.f("amount") / 100.0).clamp(0.0, 1.0) * 0.5;
     if s <= 0.0 {
         return Some(b);
+    }
+    if !ctx.adjustment {
+        b.pad(e, effectcraft_effects::radial_fast_pad(b.to_px(ctx.params.v2("center")), b.img.width, b.img.height, s))?;
     }
     let c = b.to_px(ctx.params.v2("center"));
     let mut p = Params::default();
@@ -353,10 +356,10 @@ fn four_color(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
         p.f[i] = [q.0 as f32, q.1 as f32, 0.0, 0.0];
         p.f[4 + i] = ctx.params.color(&format!("positionsColors/color{}", i + 1));
     }
-    let blend = ctx.params.f("blend").max(1.0);
+    let k = effectcraft_effects::four_color_softening(ctx.params.f("blend"), b.scale);
     let jitter = (ctx.params.f("jitter") / 100.0).clamp(0.0, 1.0) as f32;
     p.u[0] = [gen_mode(ctx.params.e("blendingMode")), ctx.seed, 0, 0];
-    p.f[8] = [(blend * 100.0) as f32, jitter, ctx.params.f("opacity") as f32 / 100.0, 0.0];
+    p.f[8] = [k as f32, jitter, ctx.params.f("opacity") as f32 / 100.0, 0.0];
     run(e, "gen_fourcolor", &p, b, None, None)
 }
 

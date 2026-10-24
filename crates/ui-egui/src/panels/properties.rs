@@ -120,7 +120,9 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         divider(&p, x0, w, y - 4.0, &t);
         section_header(app, ui, &p, x0, w, y + 4.0, "Text Animation", "properties.textAnimation");
         y += ROW_H + 10.0;
-        let br = Rect::from_min_size(pos2(x0, y), vec2(116.0, 24.0));
+        // Both buttons grow with their (translated) labels; English keeps its 116 / 84 px.
+        let text_w = |s: &str| p.layout_no_wrap(s.to_string(), Tokens::ui(12.0), t.text).size().x;
+        let br = Rect::from_min_size(pos2(x0, y), vec2(116f32.max(text_w(crate::i18n::tr("Add Animator")) + 36.0), 24.0));
         let resp = ui.interact(br, egui::Id::new("props-add-animator"), Sense::click());
         p.rect_stroke(br, 4.0, Stroke::new(1.0, if resp.hovered() { t.text_dim } else { t.field_border }), egui::StrokeKind::Inside);
         icons::paint(&p, Rect::from_center_size(pos2(br.min.x + 14.0, br.center().y), vec2(10.0, 10.0)), Icon::Plus, t.text);
@@ -142,7 +144,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             }
         }
         // Our own presets (original work, see presets/text_animators.json).
-        let pr = Rect::from_min_size(pos2(br.max.x + 8.0, y), vec2(84.0, 24.0));
+        let pr = Rect::from_min_size(pos2(br.max.x + 8.0, y), vec2(84f32.max(text_w(crate::i18n::tr("Presets")) + 16.0), 24.0));
         let presp = ui.interact(pr, egui::Id::new("props-text-presets"), Sense::click());
         p.rect_stroke(pr, 4.0, Stroke::new(1.0, if presp.hovered() { t.text_dim } else { t.field_border }), egui::StrokeKind::Inside);
         p.text(pr.center(), Align2::CENTER_CENTER, crate::i18n::tr("Presets"), Tokens::ui(12.0), t.text);

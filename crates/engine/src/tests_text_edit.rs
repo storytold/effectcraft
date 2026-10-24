@@ -392,3 +392,38 @@ fn set_text_schema_accepts_every_opentype_key_and_requires_none() {
     s.execute_checked("layer.setText", json!({"layer": t, "discretionaryLigatures": true, "ss02": true, "ss20": true})).unwrap();
     assert!(doc(&s, t).style_at(0).opentype.stylistic_set(20));
 }
+
+#[test]
+fn deselect_all_ends_the_open_edit() {
+    let (mut s, t) = session("Hello");
+    s.execute("text.edit", json!({"layer": t, "caret": 5})).unwrap();
+    s.execute("text.insert", json!({"text": "!"})).unwrap();
+    assert_eq!(doc(&s, t).text, "Hello!");
+    s.execute("edit.deselectAll", json!({})).unwrap();
+    assert!(s.state.text_edit.is_none(), "Deselect All ends the open text edit on every route");
+    assert!(s.state.selected_layers.is_empty(), "and leaves nothing selected");
+    assert_eq!(doc(&s, t).text, "Hello!", "the text stays committed");
+    // Ending an edit is no undoable step of its own (as with text.endEdit): undo takes
+    // the typed text, it does not reopen the edit.
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(doc(&s, t).text, "Hello", "undo reverts the typed text, not the deselection");
+    assert!(s.state.text_edit.is_none(), "undo does not reopen the edit");
+}
+
+#[test]
+fn deselect_all_discards_an_empty_type_tool_layer() {
+    let (mut s, _keep) = session("Hello");
+    let new = s.execute("layer.newText", json!({"text": "", "position": [80.0, 80.0], "edit": true})).unwrap()["layer"].as_u64().unwrap();
+    assert!(
+        s.state.text_edit.as_ref().is_some_and(|e| e.created && e.layer == effectcraft_project::LayerId(new)),
+        "the Type tool opens the edit on its new, empty layer"
+    );
+    let count = |s: &Session| s.active_comp().map_or(0, |c| c.layers.len());
+    let before = count(&s);
+    s.execute("edit.deselectAll", json!({})).unwrap();
+    assert!(s.state.text_edit.is_none());
+    assert!(s.state.selected_layers.is_empty());
+    assert_eq!(count(&s), before - 1, "a Type-tool layer left empty is removed, as text.endEdit does");
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(count(&s), before, "that removal is one undo step of its own, as on text.endEdit");
+}

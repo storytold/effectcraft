@@ -9,31 +9,31 @@ use effectcraft_time::{FrameRate, Tick};
 
 use crate::{Accelerator, AutoKey, AutoPick, Backend, NoFootage, RenderOpts, Renderer};
 
-/// An accelerator that takes `delay` per frame (or declines with `handle = false`) and keeps
-/// Auto timing history.
-struct TimedAccel {
-    delay: std::time::Duration,
+/// An accelerator that returns a representative pixel (or declines) and keeps Auto history.
+struct MockAccel {
     handle: bool,
     calls: AtomicUsize,
     pick: AutoPick,
 }
 
-impl TimedAccel {
-    fn new(ms: u64, handle: bool) -> TimedAccel {
-        TimedAccel { delay: std::time::Duration::from_millis(ms), handle, calls: Default::default(), pick: Default::default() }
+impl MockAccel {
+    /// Construct a renderer stand-in without making assumptions about scheduling or speed.
+    fn new(handle: bool) -> MockAccel {
+        MockAccel { handle, calls: Default::default(), pick: Default::default() }
     }
+    /// Number of full-frame requests dispatched to this accelerator.
     fn calls(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
     }
 }
 
-impl Accelerator for TimedAccel {
+impl Accelerator for MockAccel {
     fn name(&self) -> String {
         "timed".into()
     }
+    /// Count dispatched frames and return the same centre pixel as the CPU fixture.
     fn comp_frame(&self, _r: &Renderer, _comp: ItemId, _t: Tick) -> Option<crate::Image> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        std::thread::sleep(self.delay);
         // The centre of the comp, as the CPU draws it (a red solid).
         self.handle.then(|| {
             let mut img = crate::Image::new(200, 100);
@@ -52,6 +52,7 @@ impl Accelerator for TimedAccel {
     }
 }
 
+/// A small red solid whose centre pixel is shared by the CPU and mock GPU fixtures.
 fn project() -> (Project, ItemId) {
     let mut p = Project::default();
     p.settings.gpu_acceleration = true;
@@ -64,7 +65,7 @@ fn project() -> (Project, ItemId) {
 }
 
 /// Render `n` frames with `backend`; how many the accelerator was asked for.
-fn frames(p: &Project, cid: ItemId, a: &TimedAccel, backend: Backend, n: usize) -> usize {
+fn frames(p: &Project, cid: ItemId, a: &MockAccel, backend: Backend, n: usize) -> usize {
     let before = a.calls();
     for _ in 0..n {
         let mut r = Renderer::new(p, &NoFootage, RenderOpts { backend, ..Default::default() });
@@ -76,50 +77,60 @@ fn frames(p: &Project, cid: ItemId, a: &TimedAccel, backend: Backend, n: usize) 
     a.calls() - before
 }
 
+/// Drive the production selector with measured costs supplied by the test, not the OS clock.
+fn measured_frames(pick: &AutoPick, key: AutoKey, cpu_ms: f64, gpu_ms: f64, n: usize) -> usize {
+    (0..n)
+        .filter(|_| {
+            let gpu = pick.choose(key);
+            pick.record(key, gpu, if gpu { gpu_ms } else { cpu_ms });
+            gpu
+        })
+        .count()
+}
+
+/// A slower GPU is periodically re-probed; explicit GPU and Software Only ignore that history.
 #[test]
 fn auto_backend_moves_light_comps_to_the_cpu() {
-    // A light comp on a slow accelerator: after the warm-up (three frames on
-    // each side) Auto renders on the CPU, re-measuring the accelerator now and then.
     let (p, cid) = project();
-    // Several times the CPU's frame time (unoptimised test builds are slow).
-    let t0 = std::time::Instant::now();
-    for _ in 0..3 {
-        Renderer::new(&p, &NoFootage, RenderOpts::default()).comp_frame(cid, Tick::ZERO);
-    }
-    let cpu_ms = t0.elapsed().as_millis() as u64 / 3;
-    let slow = TimedAccel::new((cpu_ms * 5).max(20), true);
+    let slow = MockAccel::new(true);
+    let key = AutoKey::new(cid, 1.0, false);
     let n = 6 + 2 * AutoPick::REPROBE as usize;
-    let asked = frames(&p, cid, &slow, Backend::Auto, n);
+    let asked = measured_frames(&slow.pick, key, 1.0, 20.0, n);
     assert!((3..=5).contains(&asked), "asked the slow accelerator {asked} times in {n} frames");
-    let s = slow.pick.stats(AutoKey::new(cid, 1.0, false)).unwrap();
+    let s = slow.pick.stats(key).unwrap();
     assert!(s.gpu_ms.unwrap() > s.cpu_ms.unwrap(), "{s:?}");
-    // Backend::Gpu ignores the history; Software Only never asks.
+    // Check renderer wiring with known history before a real measurement can change it.
+    assert_eq!(frames(&p, cid, &slow, Backend::Auto, 1), 0);
     assert_eq!(frames(&p, cid, &slow, Backend::Gpu, 3), 3);
     let mut sw = p.clone();
     sw.settings.gpu_acceleration = false;
     assert_eq!(frames(&sw, cid, &slow, Backend::Auto, 3), 0);
 }
 
+/// Faster, tied and slightly noisier GPU costs stay on the GPU except during warm-up/probes.
 #[test]
 fn auto_backend_keeps_fast_accelerators() {
-    // As fast as the CPU (ties stay on the accelerator): every frame but the CPU warm-up and
-    // re-probes.
     let (p, cid) = project();
-    let fast = TimedAccel::new(0, true);
-    let asked = frames(&p, cid, &fast, Backend::Auto, 40);
-    assert!(asked >= 36, "asked {asked} of 40");
+    for gpu_ms in [1.0, 5.0, 5.5] {
+        let fast = MockAccel::new(true);
+        let asked = measured_frames(&fast.pick, AutoKey::new(cid, 1.0, false), 5.0, gpu_ms, 40);
+        assert!(asked >= 36, "asked {asked} of 40 for GPU cost {gpu_ms}");
+        assert_eq!(frames(&p, cid, &fast, Backend::Auto, 1), 1);
+    }
 }
 
+/// A declining accelerator is retried only periodically while the CPU supplies frames.
 #[test]
 fn auto_backend_falls_back_when_the_accelerator_declines() {
     let (p, cid) = project();
-    let declining = TimedAccel::new(0, false);
+    let declining = MockAccel::new(false);
     let n = 2 * AutoPick::REPROBE as usize;
     let asked = frames(&p, cid, &declining, Backend::Auto, n);
     // Asked first, then only on the periodic re-probes.
     assert!((1..=4).contains(&asked), "asked {asked} times in {n} frames");
 }
 
+/// Periodic probes detect a formerly slow GPU becoming faster, without mixing cache keys.
 #[test]
 fn auto_pick_follows_changing_costs() {
     let pick = AutoPick::default();

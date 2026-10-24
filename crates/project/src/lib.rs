@@ -8,6 +8,7 @@
 
 pub mod build;
 pub mod essential;
+mod file_check;
 pub mod limits;
 pub mod props;
 pub mod render_queue;
@@ -1478,11 +1479,32 @@ impl Project {
     }
     /// Whether comp `inner` is (transitively) nested inside comp `outer` (to prevent cycles).
     pub fn comp_contains(&self, outer: ItemId, inner: ItemId) -> bool {
+        // A walk with a stack and a visited set rather than recursion (#1237): a damaged project
+        // may hold a precomp cycle that doesn't pass `inner` (recursion never ended), a long
+        // chain must not use up the call stack, and comps shared by many paths are visited once
+        // (recursion re-walked them for every path).
         if outer == inner {
             return true;
         }
-        let Some(c) = self.comp(outer) else { return false };
-        c.layers.iter().any(|l| matches!(l.source, LayerSource::Comp { item } if self.comp_contains(item, inner)))
+        let mut seen = std::collections::HashSet::new();
+        let mut stack = vec![outer];
+        while let Some(id) = stack.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            let Some(c) = self.comp(id) else { continue };
+            for l in &c.layers {
+                if let LayerSource::Comp { item } = l.source {
+                    if item == inner {
+                        return true;
+                    }
+                    if !seen.contains(&item) {
+                        stack.push(item);
+                    }
+                }
+            }
+        }
+        false
     }
     /// Make sure `next_id` exceeds every id in the project (after loading or merging).
     pub fn fix_next_id(&mut self) {
@@ -1519,13 +1541,20 @@ impl Project {
             && self.render_prefs == other.render_prefs
     }
     /// The project file's text: the project with the version that wrote it (`savedBy`), checked
-    /// to read back, so a save never writes a file that can't be opened (JSON has no NaN or
-    /// infinity: such a value would be written as `null`).
+    /// to read back, so a save never writes a file that can't be opened. Values JSON can't hold
+    /// (NaN or infinity, written as `null`, and nesting too deep to parse) are refused on every
+    /// save; debug builds also read the text back.
     pub fn to_file_json(&self) -> Result<String, ProjectError> {
         self.to_file_json_with_view(&SavedView::default())
     }
     /// [`Project::to_file_json`] that also records the open compositions ([`SavedView`]).
     pub fn to_file_json_with_view(&self, view: &SavedView) -> Result<String, ProjectError> {
+        if self.schema > SCHEMA_VERSION {
+            return Err(ProjectError::Invalid(format!(
+                "the project can't be saved: it holds a value a project file can't store (project schema {} is newer than this version supports ({SCHEMA_VERSION}))",
+                self.schema
+            )));
+        }
         #[derive(Serialize)]
         struct File<'a> {
             #[serde(rename = "savedBy")]
@@ -1535,8 +1564,11 @@ impl Project {
             #[serde(flatten)]
             project: &'a Project,
         }
-        let text = serde_json::to_string_pretty(&File { saved_by: APP_VERSION, view, project: self })
-            .map_err(|e| ProjectError::Invalid(format!("the project can't be saved: {e}")))?;
+        let file = File { saved_by: APP_VERSION, view, project: self };
+        file_check::check(&file)
+            .map_err(|e| ProjectError::Invalid(format!("the project can't be saved: it holds a value a project file can't store ({e})")))?;
+        let text = serde_json::to_string_pretty(&file).map_err(|e| ProjectError::Invalid(format!("the project can't be saved: {e}")))?;
+        #[cfg(debug_assertions)]
         Project::from_json(&text)
             .map_err(|e| ProjectError::Invalid(format!("the project can't be saved: it holds a value a project file can't store ({e})")))?;
         Ok(text)

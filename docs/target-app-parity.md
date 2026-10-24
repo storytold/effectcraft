@@ -688,8 +688,10 @@ Fixes from measured reports:
   step (undo and redo keep it) and keeps the comp's cached frames; projects saved before open
   with Auto. View ▸ Resolution and the panel's popup run `view.res.full|half|third|quarter|auto`
   and `view.res.custom {factor}`, which now work headless too; `comp.info` reports `resolution`
-  and `resolutionFactor` (#417). Not yet: the magnification is not saved per comp, and the
-  Composition Settings dialog has no Resolution popup.
+  and `resolutionFactor` (#417). Composition Settings ▸ Basic has the same Resolution menu, with
+  the frame size and memory per 8bpc frame at that resolution beside it; OK sets it as the popup
+  does, outside the undo step of the other settings (#2167). Not yet: the magnification is not
+  saved per comp.
 
 ### Update: plug-ins and extensions as in After Effects; ease presets become a ScriptUI panel
 
@@ -1068,7 +1070,7 @@ resolution, adjustment) and composited at 8 and 32 bpc:
   Bucket's flood-filled region, Eyedropper Fill's sample); segments and convex polygons are
   binned into 16 × 16 tiles and rasterised on the GPU with the CPU's coverage functions, glows
   and compositing included. The CPU effects were refactored to draw from the same plans with
-  bit-identical output (`crates/effects/tests/gen_golden.rs`: 288 frame hashes pinned before
+  bit-identical output (`crates/effects/tests/it/gen_golden.rs`: 288 frame hashes pinned before
   the refactor). Exception: CC Threads decides band membership and fibre shade per pixel, and at
   round parameter values (the defaults) pixel centres sit exactly on band edges, where f32 and
   the CPU's f64 can fall on either side: up to 5 % of pixels allowed (measured ≤ 3.6 % at half
@@ -1082,7 +1084,7 @@ resolution, adjustment) and composited at 8 and 32 bpc:
 7 more effects run on the GPU (280 in all, with M13.28's 37), and five CPU fallbacks are gone. Each case is
 checked against the CPU oracle (≤ 1/255 at 8 bpc, ≤ 1e-3 at 32 bpc) directly on a buffer (full
 and half resolution) and composited at 8 and 32 bpc; the CPU refactors behind the shared plans
-are pinned bit for bit by golden hashes (`crates/effects/tests/particle_golden.rs`,
+are pinned bit for bit by golden hashes (`crates/effects/tests/it/particle_golden.rs`,
 `timewarp_golden.rs`, `sim_golden.rs`).
 
 - **Particle render passes** (`gpu::fx_particles`): CC Particle World and CC Particle Systems II

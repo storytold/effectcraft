@@ -779,8 +779,12 @@ fn hash_debug(h: &mut Hash128, v: &impl std::fmt::Debug) {
     h.write(&[0xff]);
 }
 
-/// A file's size and modification time (so edited footage gets new keys).
-fn file_stamp(h: &mut Hash128, path: &str) {
+/// Size and content hash of a path that has no native metadata (the browser file table).
+pub type VirtualFileId<'a> = &'a (dyn Fn(&str) -> Option<(u64, u64)> + Send + Sync);
+
+/// A file's size and modification time (so edited footage gets new keys). When the path has no
+/// native metadata, `virtual_id` supplies a durable size and content hash instead.
+fn file_stamp(h: &mut Hash128, path: &str, virtual_id: Option<VirtualFileId<'_>>) {
     if path.is_empty() {
         return;
     }
@@ -791,26 +795,36 @@ fn file_stamp(h: &mut Hash128, path: &str) {
         {
             h.write_u64(d.as_nanos() as u64);
         }
+        return;
+    }
+    if let Some((len, hash)) = virtual_id.and_then(|id| id(path)) {
+        h.write_u64(len);
+        h.write_u64(hash);
     }
 }
 
-fn footage_stamp(h: &mut Hash128, f: &effectcraft_project::Footage) {
-    file_stamp(h, &f.path);
+fn footage_stamp(h: &mut Hash128, f: &effectcraft_project::Footage, virtual_id: Option<VirtualFileId<'_>>) {
+    file_stamp(h, &f.path, virtual_id);
     for p in &f.sequence {
-        file_stamp(h, p);
+        file_stamp(h, p, virtual_id);
     }
 }
 
 /// Salt for layer cache keys on disk: the renderer version and every footage file's identity
 /// (layer keys name footage items, not file contents).
 pub fn footage_salt(project: &effectcraft_project::Project) -> u64 {
+    footage_salt_with(project, None)
+}
+
+/// [`footage_salt`] with [`VirtualFileId`] for paths `std::fs::metadata` cannot describe.
+pub fn footage_salt_with(project: &effectcraft_project::Project, virtual_id: Option<VirtualFileId<'_>>) -> u64 {
     let mut h = Hash128::default();
     h.write(RENDER_VERSION.as_bytes());
     for (id, it) in &project.items {
         if let effectcraft_project::ItemKind::Footage(f) = &it.kind {
             h.write_u64(id.0);
             hash_debug(&mut h, f);
-            footage_stamp(&mut h, f);
+            footage_stamp(&mut h, f, virtual_id);
         }
     }
     let v = h.finish();
@@ -822,6 +836,11 @@ pub fn footage_salt(project: &effectcraft_project::Project) -> u64 {
 /// files' size and time). With expressions in play (which can read any comp) the whole project
 /// counts. Switches that don't change pixels (Audio, Lock, Shy, Hide Shy Layers) don't count.
 pub fn comp_content_key(project: &effectcraft_project::Project, comp: effectcraft_project::ItemId) -> u128 {
+    comp_content_key_with(project, comp, None)
+}
+
+/// [`comp_content_key`] with [`VirtualFileId`] for paths `std::fs::metadata` cannot describe.
+pub fn comp_content_key_with(project: &effectcraft_project::Project, comp: effectcraft_project::ItemId, virtual_id: Option<VirtualFileId<'_>>) -> u128 {
     use effectcraft_project::{ItemKind, LayerSource};
     let mut h = Hash128::default();
     h.write(RENDER_VERSION.as_bytes());
@@ -855,11 +874,11 @@ pub fn comp_content_key(project: &effectcraft_project::Project, comp: effectcraf
             k => hash_debug(&mut h, k),
         }
         if let ItemKind::Footage(f) = &it.kind {
-            footage_stamp(&mut h, f);
+            footage_stamp(&mut h, f, virtual_id);
         }
         hash_debug(&mut h, &it.proxy);
         if let Some(px) = &it.proxy {
-            footage_stamp(&mut h, &px.footage);
+            footage_stamp(&mut h, &px.footage, virtual_id);
         }
     }
     h.write_u64(comp.0);
@@ -1081,5 +1100,30 @@ mod tests {
         for k in 0..5u128 {
             assert_eq!(b.get_layer(k).unwrap().img, buf(k as u32, 16, 16).img);
         }
+    }
+
+    /// A path with no native metadata takes its key from the caller's size and content hash (#1253).
+    #[test]
+    fn virtual_file_bytes_change_content_keys() {
+        use effectcraft_project::build;
+        use effectcraft_project::{Comp, Footage, ItemKind, LayerSource, Project};
+        use effectcraft_time::{FrameRate, Tick};
+
+        let mut p = Project::default();
+        let f = Footage { path: "/virtual.mov".into(), width: 16, height: 9, duration: Tick::from_seconds_f64(1.0), has_video: true, ..Default::default() };
+        let fid = p.add_item("virtual.mov", effectcraft_color::Label::None, None, ItemKind::Footage(f));
+        let mut comp = Comp::new(16, 9, FrameRate::FPS_30, Tick::from_seconds_f64(1.0));
+        comp.layers = vec![build::layer(&mut p, &comp, "clip", LayerSource::Footage { item: fid }, (16, 9), None)];
+        let cid = p.add_item("C", effectcraft_color::Label::None, None, ItemKind::Comp(comp.into()));
+
+        let id = |mark: u64| move |path: &str| (path == "/virtual.mov").then_some((8, mark));
+        let (one, two) = (id(1), id(2));
+        let a = footage_salt_with(&p, Some(&one));
+        let b = footage_salt_with(&p, Some(&two));
+        let ka = comp_content_key_with(&p, cid, Some(&one));
+        let kb = comp_content_key_with(&p, cid, Some(&two));
+        assert_ne!(a, b, "replaced virtual media must not reuse the salt");
+        assert_ne!(ka, kb, "replaced virtual media must not reuse the frame key");
+        assert_eq!(comp_content_key(&p, cid), comp_content_key_with(&p, cid, None));
     }
 }

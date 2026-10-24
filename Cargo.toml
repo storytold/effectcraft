@@ -4,14 +4,14 @@ members = ["crates/*", "apps/*", "xtask"]
 default-members = ["crates/*", "apps/*"]
 
 [workspace.package]
-version = "0.12.0"
+version = "0.16.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.95"
 repository = "https://github.com/storytold/effectcraft"
 
 [workspace.dependencies]
-craft-pdf = { git = "https://github.com/storytold/craft-libs", rev = "ca50d63b773c99f96e75c77ce5a1d21e7c9cda0d", version = "=0.1.0", default-features = false, features = ["read"] }
+craft-pdf = { git = "https://github.com/storytold/craft-libs", rev = "9f75d3dc19b4b514c4f3d4847ed1ec1b0e86b4ef", version = "=0.1.0", default-features = false, features = ["read"] }
 craft-docpath = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "82a24b006eefa036b43c09a67fb9a3fbd17ffe63" }
 # internal
 effectcraft-time = { path = "crates/time" }
@@ -52,6 +52,8 @@ thiserror = "2"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 log = "0.4"
+# All date/time conversion goes through chrono (no hand-rolled calendar code beyond the 400-year range extension; AGENTS.md).
+chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 rayon = "1"
 # std::time::Instant/SystemTime on native; the browser clock on wasm32 (std's panic there).
 web-time = "1"
@@ -137,9 +139,12 @@ type_complexity = "allow"
 
 [profile.dev.package."*"]
 opt-level = 2
+debug = false
 
 [profile.dev]
 opt-level = 1
+# Panics and backtraces keep file and line; full debug info only made the many test binaries large.
+debug = "line-tables-only"
 
 # Pixel hot loops: keep debug builds interactive.
 [profile.dev.package.effectcraft-raster]
@@ -211,4 +216,5 @@ lto = "thin"
 codegen-units = 1
 
 [patch.crates-io]
-hayro-syntax = { git = "https://github.com/storytold/craft-libs", rev = "ca50d63b773c99f96e75c77ce5a1d21e7c9cda0d", version = "=0.7.2" }
+hayro-syntax = { git = "https://github.com/storytold/craft-libs", rev = "9f75d3dc19b4b514c4f3d4847ed1ec1b0e86b4ef", version = "=0.7.2" }
+hayro-jbig2 = { git = "https://github.com/storytold/craft-libs", rev = "9f75d3dc19b4b514c4f3d4847ed1ec1b0e86b4ef", version = "=0.3.0" }

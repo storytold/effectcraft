@@ -35,21 +35,33 @@ pub fn hms(secs: f64) -> String {
     format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
 }
 
-/// Unix seconds → `YYYY-MM-DD hh:mm:ss` (UTC).
+/// Unix seconds → (proleptic Gregorian year, the same wall-clock instant moved into chrono's range
+/// by whole 400-year cycles). The Gregorian calendar repeats every 400 years (146_097 days), so
+/// month, day and time of day come from chrono and only the year is carried, which keeps every
+/// input exact instead of collapsing out-of-range years to the epoch. `unix` is `u64`, so `days`
+/// always fits an `i64`.
+fn utc_parts(unix: u64) -> (i64, chrono::NaiveDateTime) {
+    use chrono::Datelike;
+    let (days, sod) = ((unix / 86_400) as i64, (unix % 86_400) as i64);
+    let (cycles, rest) = (days.div_euclid(146_097), days.rem_euclid(146_097));
+    // `rest + 719_163` (1970-01-01 is CE day 719_163) is always a valid CE day, and `sod` < 86_400.
+    let date = i32::try_from(rest + 719_163).ok().and_then(chrono::NaiveDate::from_num_days_from_ce_opt);
+    let time = u32::try_from(sod).ok().and_then(|s| chrono::NaiveTime::from_num_seconds_from_midnight_opt(s, 0));
+    match (date, time) {
+        (Some(d), Some(t)) => {
+            let y = i128::from(d.year()) + i128::from(cycles) * 400;
+            (i64::try_from(y).unwrap_or(i64::MAX), d.and_time(t))
+        }
+        _ => (1970, chrono::NaiveDateTime::default()), // unreachable
+    }
+}
+
+/// Unix seconds → `YYYY-MM-DD hh:mm:ss` (UTC). Years far outside chrono's own range are preserved
+/// (the old hand-rolled conversion kept them) rather than collapsing to the epoch.
 pub fn utc_stamp(unix: u64) -> String {
-    let days = (unix / 86_400) as i64;
-    let rem = unix % 86_400;
-    // Civil-from-days (proleptic Gregorian).
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + i64::from(m <= 2);
-    format!("{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}", rem / 3600, rem / 60 % 60, rem % 60)
+    let (y, t) = utc_parts(unix);
+    // `{:04}` rather than `%Y`, which writes a `+` before years past 9999.
+    format!("{y:04}-{}", t.format("%m-%d %H:%M:%S"))
 }
 
 fn status_color(t: &Tokens, s: &RenderStatus) -> Color32 {
@@ -807,6 +819,10 @@ mod tests {
     fn stamps() {
         assert_eq!(super::utc_stamp(0), "1970-01-01 00:00:00");
         assert_eq!(super::utc_stamp(1_700_000_000), "2023-11-14 22:13:20");
+        // Years far outside chrono's own range are preserved (the old hand-rolled conversion kept
+        // them) rather than collapsing to the epoch.
+        assert_eq!(super::utc_stamp(10_000_000_000_000), "318857-05-20 17:46:40");
+        assert_eq!(super::utc_stamp(u64::MAX), "584554051223-11-09 07:00:15");
         assert_eq!(super::hms(3725.4), "1:02:05");
     }
 }

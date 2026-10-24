@@ -500,7 +500,7 @@ fn gen_fourcolor(@builtin(global_invocation_id) gid: vec3<u32>) {
         let dx = f32(p.x) + 0.5 - q.x;
         let dy = f32(p.y) + 0.5 - q.y;
         let d2 = dx * dx + dy * dy;
-        let w = 1.0 / pow(d2 / bl + 1e-6, 1.5);
+        let w = 1.0 / (d2 + bl);
         acc += P.f[4 + i].xyz * w;
         wsum += w;
     }

@@ -4,6 +4,19 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
+/// Keep process-wide variation storage bounded; id 0 is the safe default location when full.
+const MAX_INTERNED_LOCATIONS: usize = 8192;
+const MAX_AXES_PER_LOCATION: usize = 32;
+const MAX_AXIS_TAG_BYTES: usize = 16;
+
+type CoordKey = Vec<(String, u32)>;
+
+#[derive(Default)]
+struct Table {
+    values: Vec<Arc<Vec<(String, f32)>>>,
+    by_coords: HashMap<CoordKey, u32>,
+}
+
 use kurbo::BezPath;
 use skrifa::instance::{LocationRef, Size};
 use skrifa::outline::DrawSettings;
@@ -14,15 +27,27 @@ use crate::{CharGlyph, Pen};
 
 /// Intern a set of axis values (0 for none), so `Copy` glyphs can carry them.
 pub fn intern(coords: &[(String, f32)]) -> u32 {
-    if coords.is_empty() {
+    if coords.is_empty() || coords.len() > MAX_AXES_PER_LOCATION || coords.iter().any(|(tag, v)| tag.len() > MAX_AXIS_TAG_BYTES || !v.is_finite()) {
+        return 0;
+    }
+    // Axis order is not significant. Canonicalize it once so equivalent locations share one key.
+    let mut key: CoordKey = coords.iter().map(|(tag, v)| (tag.clone(), if *v == 0.0 { 0 } else { v.to_bits() })).collect();
+    key.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    if key.windows(2).any(|w| w[0].0 == w[1].0) {
         return 0;
     }
     let mut t = table().lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(i) = t.iter().position(|c| c.as_slice() == coords) {
-        return i as u32 + 1;
+    if let Some(id) = t.by_coords.get(&key) {
+        return *id;
     }
-    t.push(Arc::new(coords.to_vec()));
-    t.len() as u32
+    if t.values.len() >= MAX_INTERNED_LOCATIONS {
+        return 0;
+    }
+    let Some(id) = u32::try_from(t.values.len()).ok().and_then(|n| n.checked_add(1)) else { return 0 };
+    let value = Arc::new(key.iter().map(|(tag, bits)| (tag.clone(), f32::from_bits(*bits))).collect());
+    t.values.push(value);
+    t.by_coords.insert(key, id);
+    id
 }
 
 /// The axis values of an interned id (empty for 0).
@@ -30,11 +55,11 @@ pub fn coords(id: u32) -> Arc<Vec<(String, f32)>> {
     if id == 0 {
         return Arc::new(Vec::new());
     }
-    table().lock().unwrap_or_else(|e| e.into_inner()).get(id as usize - 1).cloned().unwrap_or_default()
+    table().lock().unwrap_or_else(|e| e.into_inner()).values.get(id as usize - 1).cloned().unwrap_or_default()
 }
 
-fn table() -> &'static Mutex<Vec<Arc<Vec<(String, f32)>>>> {
-    static T: OnceLock<Mutex<Vec<Arc<Vec<(String, f32)>>>>> = OnceLock::new();
+fn table() -> &'static Mutex<Table> {
+    static T: OnceLock<Mutex<Table>> = OnceLock::new();
     T.get_or_init(Default::default)
 }
 
@@ -197,6 +222,9 @@ mod tests {
         let id = intern(&[("wght".into(), 700.0)]);
         assert_eq!(intern(&[("wght".into(), 700.0)]), id);
         assert_eq!(coords(id).as_slice(), &[("wght".to_string(), 700.0)]);
+        assert_eq!(intern(&[("wdth".into(), 20.0), ("wght".into(), 700.0)]), intern(&[("wght".into(), 700.0), ("wdth".into(), 20.0)]));
+        assert_eq!(intern(&[("wght".into(), f32::NAN)]), 0);
+        assert_eq!(intern(&vec![("wght".into(), 1.0); MAX_AXES_PER_LOCATION + 1]), 0);
         let Some((face, axes)) = find_variable_face() else {
             eprintln!("no variable font installed: skipped");
             return;

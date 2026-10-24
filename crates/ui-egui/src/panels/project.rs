@@ -224,6 +224,11 @@ fn focused_row_id() -> egui::Id {
     egui::Id::new("project-focused-row")
 }
 
+/// The item whose selection the panel last scrolled into view.
+fn selection_seen_id() -> egui::Id {
+    egui::Id::new("proj-sel-seen")
+}
+
 /// The focused widget is one of the panel's rows, or nothing has keyboard focus: the panel's keys
 /// apply. Any other focused widget (a text field, a button reached with Tab) keeps them.
 fn keys_reach_rows(app: &EffectcraftApp, ctx: &egui::Context) -> bool {
@@ -347,6 +352,33 @@ pub(crate) fn visible_rows(app: &EffectcraftApp) -> Vec<(ItemId, usize)> {
     rows
 }
 
+/// Bring `items` into view: clear the panel's search, open every folder holding them, select
+/// them, and show and focus the Project panel. Used by Reveal Layer Source in Project and
+/// Reveal Composition in Project, so the item is visible even in a large, filtered project.
+pub(crate) fn reveal(app: &mut EffectcraftApp, ctx: &egui::Context, items: &[ItemId]) {
+    let items: Vec<ItemId> = items.iter().copied().filter(|item| app.session.project.item(*item).is_some()).collect();
+    if items.is_empty() {
+        return;
+    }
+    for item in &items {
+        let mut parent = app.session.project.item(*item).and_then(|item| item.parent);
+        let mut depth = 0;
+        while let Some(folder) = parent {
+            app.ui.project_open_folders.insert(folder.0);
+            parent = app.session.project.item(folder).and_then(|item| item.parent);
+            depth += 1;
+            if depth > 256 {
+                break;
+            }
+        }
+    }
+    app.ui.project_search.clear();
+    app.session.state.project_selection = items;
+    // Force the panel's selection scroll on its next draw, even when the item was already selected.
+    ctx.data_mut(|d| d.remove_temp::<Option<u64>>(selection_seen_id()));
+    app.show_panel(crate::dock::PanelKind::Project);
+}
+
 pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
     let p = ui.painter().clone();
@@ -437,13 +469,13 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         }
     } else {
         let hint = "Select an item to see its details";
-        let r = widgets::text_fit(&p, head.center(), Align2::CENTER_CENTER, hint, Tokens::ui(11.0), head.width() - 20.0, t.text_faint);
+        let r = widgets::text_fit(&p, head.center(), Align2::CENTER_CENTER, crate::i18n::tr(hint), Tokens::ui(11.0), head.width() - 20.0, t.text_faint);
         app.auto.add("project.details.hint", r, hint);
     }
     // Search.
     let sr = Rect::from_min_size(pos2(rect.min.x + 8.0, head.max.y + 2.0), vec2(rect.width() - 16.0, 22.0));
     let mut q = app.ui.project_search.clone();
-    widgets::search_field(ui, sr, &mut q, "Search project", &t);
+    widgets::search_field(ui, sr, &mut q, crate::i18n::tr("Search project"), &t);
     app.ui.project_search = q;
     app.auto.add("project.search", sr, "Search");
     // Column header: Name, Label, then the visible optional columns.
@@ -475,7 +507,13 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             continue;
         }
         let resp = ui.interact(hr.intersect(hdr), egui::Id::new(("proj-sort", *key)), Sense::click());
-        hp.with_clip_rect(hr).text(pos2(*x, hdr.center().y), Align2::LEFT_CENTER, *label, Tokens::ui(11.0), if resp.hovered() { t.text } else { t.text_dim });
+        hp.with_clip_rect(hr).text(
+            pos2(*x, hdr.center().y),
+            Align2::LEFT_CENTER,
+            crate::i18n::tr(label),
+            Tokens::ui(11.0),
+            if resp.hovered() { t.text } else { t.text_dim },
+        );
         if *key == "label" {
             icons::paint(&hp, Rect::from_center_size(pos2(label_x, hdr.center().y), vec2(10.0, 10.0)), Icon::Keyframe, t.text_dim);
         }
@@ -562,7 +600,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         }
     }
     // A selection made elsewhere (a command, an agent, the viewer) scrolls into view.
-    let sel_key = egui::Id::new("proj-sel-seen");
+    let sel_key = selection_seen_id();
     let sel_now = app.session.state.project_selection.last().map(|i| i.0);
     if ctx.data(|d| d.get_temp::<Option<u64>>(sel_key)) != Some(sel_now) {
         ctx.data_mut(|d| d.insert_temp(sel_key, sel_now));
@@ -870,6 +908,20 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 ctx.data_mut(|d| d.insert_temp::<Editing>(edit_id(), (id.0, "name".into(), it.name.clone())));
                 ui.close();
             }
+            let duplicate_items = targets(app, *id, selected);
+            // Like Edit > Duplicate: folders disable the whole operation, including mixed selections.
+            let can_duplicate =
+                !duplicate_items.is_empty() && duplicate_items.iter().all(|id| app.session.project.item(ItemId(*id)).is_some_and(|i| !i.is_folder()));
+            let mut duplicate = egui::Button::new(crate::i18n::tr("Duplicate"));
+            if let Some(shortcut) = app.session.shortcuts().shortcut_of("edit.duplicate", &serde_json::Value::Null) {
+                duplicate = duplicate.shortcut_text(crate::menus::shortcut_text(shortcut));
+            }
+            let response = ui.add_enabled(can_duplicate, duplicate);
+            app.auto.add("project.context.duplicate", response.rect, "Duplicate");
+            if response.clicked() {
+                actions.push(("project.duplicate".into(), json!({"items": duplicate_items})));
+                ui.close();
+            }
             if it.parent.is_some() && ui.button(crate::i18n::tr("Move to Project Root")).clicked() {
                 actions.push(("project.move".into(), json!({"items": targets(app, *id, selected), "folder": null})));
                 ui.close();
@@ -1106,7 +1158,7 @@ fn column_menu(app: &mut EffectcraftApp, resp: &egui::Response) {
         ui.label(egui::RichText::new(crate::i18n::tr("Columns")).weak());
         for (key, label, _) in COLUMNS {
             let mut on = app.ui.project_columns.iter().any(|c| c == key);
-            if ui.checkbox(&mut on, label).changed() {
+            if ui.checkbox(&mut on, crate::i18n::tr(label)).changed() {
                 set_column(&mut app.ui.project_columns, key, on);
             }
         }

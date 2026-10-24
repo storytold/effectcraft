@@ -772,6 +772,27 @@ fn preset_round_trips_effect_properties_by_match_name() {
     }
 }
 
+/// #2064: `prop.addKey` accepts the `effects/<match name>[#n]/<property>` path that
+/// `essential.list` reports.
+#[test]
+fn add_key_resolves_effect_match_name_paths() {
+    let (mut s, a, _) = comp_with_two_solids();
+    apply(&mut s, a, "Slider Control");
+    apply(&mut s, a, "Slider Control");
+    let slider = |s: &Session, n: usize| match layer(s, a).effects().unwrap().groups().nth(n).unwrap().get("slider").unwrap().value {
+        KV::Scalar(v) => v,
+        ref other => panic!("not a scalar: {other:?}"),
+    };
+    for (path, n, value) in [("effects/ec.control.slider/slider", 0, 30.0), ("effects/ec.control.slider#2/slider", 1, 70.0)] {
+        let reply = s.execute("prop.addKey", json!({"layer": a, "path": path, "time": 0, "value": value})).unwrap();
+        assert_eq!(reply, json!(1), "{path}");
+        let got = s.execute("prop.get", json!({"layer": a, "path": path, "time": 0})).unwrap();
+        assert_eq!(got["value"], json!(value), "{path}");
+        assert_eq!(got["keys"].as_array().unwrap().len(), 1, "{path}");
+        assert_eq!(slider(&s, n), 0.0, "the static value stays put; the key carries {value}");
+    }
+}
+
 /// #1746: Edit ▸ Copy of an effect property writes the same `effects/ec.blur.gaussian/blurriness` path,
 /// and Paste (the value, or Copy Expression Only) sets that property of the other layer's effect.
 #[test]

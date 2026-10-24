@@ -486,10 +486,14 @@ fn keyboard(app: &mut EffectcraftApp, ui: &mut egui::Ui, viewer: Rect) {
                     Key::Escape => {
                         exec(app, "text.endEdit", json!({}));
                     }
-                    Key::A if cmd => {
+                    // The editor owns exactly Cmd/Ctrl+A (Select All) and Cmd/Ctrl+Z with or
+                    // without Shift (Undo, Redo). Other modifiers on those keys aren't editing
+                    // chords, so they fall through to the binding match below: Shift+A is
+                    // Deselect All's default, and Alt variants are free for a rebound one.
+                    Key::A if cmd && !m.shift && !m.alt => {
                         exec(app, "text.setSelection", json!({"select": "all"}));
                     }
-                    Key::Z if cmd => {
+                    Key::Z if cmd && !m.alt => {
                         let _ = crate::menus::invoke(app, &ctx, if m.shift { "edit.redo" } else { "edit.undo" }, json!({}));
                     }
                     Key::Comma | Key::Period if cmd && m.shift => {
@@ -498,6 +502,16 @@ fn keyboard(app: &mut EffectcraftApp, ui: &mut egui::Ui, viewer: Rect) {
                         let size = sel.pending.as_ref().map_or_else(|| doc.style_at(r.start).size, |p| p.size);
                         let ns = (size + if key == Key::Period { 2.0 } else { -2.0 }).max(1.0);
                         exec(app, "layer.setText", json!({"layer": sel.layer.0, "range": [r.start, r.end], "size": ns}));
+                    }
+                    // The app-wide shortcut dispatcher is skipped while this editor holds the
+                    // keyboard, so the Deselect All chord (Cmd/Ctrl+Shift+A or F2 by default)
+                    // must be matched here and run through the command dispatcher like undo
+                    // above. Matching the command's current binding, not a fixed key, keeps
+                    // rebound shortcuts working and gives every route one final state; the
+                    // forwarding test also refuses chords a focused editor must never surrender
+                    // (see `forwardable_during_text_edit`).
+                    _ if crate::menus::chord_matches(&app.session, "edit.deselectAll", key, m) && crate::menus::forwardable_during_text_edit(m, key) => {
+                        let _ = crate::menus::invoke(app, &ctx, "edit.deselectAll", json!({}));
                     }
                     _ => {}
                 }

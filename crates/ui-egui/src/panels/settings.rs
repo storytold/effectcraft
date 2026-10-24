@@ -589,6 +589,7 @@ fn browser_storage_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, t: &Tokens, a
     ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
 }
 
+/// Draw the editable label colors and names in Settings.
 fn labels_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, cur: &Value, acts: &mut Vec<Act>) {
     ui.label(tr("Label Colors and Names:"));
     ui.add_space(4.0);
@@ -622,6 +623,7 @@ fn labels_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, cur: &Value, acts: &mu
     }
 }
 
+/// Draw the Settings dialog, including its translated page list and the selected page's controls.
 pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     let all = pages();
     let mut page = app.dialog_state.settings_page.clone();
@@ -661,28 +663,35 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
         {
             let ui = &mut body;
             // Page list (left, like After Effects).
+            let widest_page = all
+                .iter()
+                .map(|p| ui.painter().layout_no_wrap(crate::i18n::settings_page_title(p.title).to_owned(), Tokens::ui(12.5), t.text).size().x)
+                .fold(0.0_f32, f32::max);
+            let page_width = (widest_page + 20.0).max(176.0).min((ui.available_width() * 0.42).min(300.0));
             ui.vertical(|ui| {
-                ui.set_width(180.0);
+                ui.set_width(page_width + 4.0);
                 egui::ScrollArea::vertical().id_salt("settings-pages").max_height(body_h).auto_shrink([false, false]).show(ui, |ui| {
                     // The rows touch, so the pointer never falls between two of them.
                     ui.spacing_mut().item_spacing.y = 0.0;
                     for p in &all {
-                        let (r, resp) = ui.allocate_exact_size(vec2(176.0, 24.0), egui::Sense::click());
+                        let (r, resp) = ui.allocate_exact_size(vec2(page_width, 24.0), egui::Sense::click());
                         let sel = page == p.id;
                         if sel {
                             ui.painter().rect_filled(r, 3.0, t.accent);
                         } else if resp.hovered() {
                             ui.painter().rect_filled(r, 3.0, t.hover);
                         }
-                        ui.painter().text(
+                        crate::widgets::text_fit(
+                            ui.painter(),
                             r.left_center() + vec2(10.0, 0.0),
                             egui::Align2::LEFT_CENTER,
-                            tr(p.title),
+                            crate::i18n::settings_page_title(p.title),
                             Tokens::ui(12.5),
+                            (page_width - 20.0).max(0.0),
                             if sel { Color32::WHITE } else { t.text },
                         );
                         app.auto.add(&format!("settings.page.{}", p.id), r, p.title);
-                        if resp.clicked() {
+                        if resp.on_hover_text(crate::i18n::settings_page_title(p.title)).clicked() {
                             page = p.id.to_string();
                         }
                     }
@@ -694,7 +703,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                 // dialog scrolled sideways a little (#284).
                 ui.set_width(ui.available_width());
                 let p = &all[idx];
-                ui.label(RichText::new(tr(p.title)).font(Tokens::semibold(14.0)).color(t.tab_text_active));
+                ui.label(RichText::new(crate::i18n::settings_page_title(p.title)).font(Tokens::semibold(14.0)).color(t.tab_text_active));
                 ui.add_space(6.0);
                 egui::ScrollArea::vertical().max_height((body_h - 30.0).max(0.0)).auto_shrink([false, false]).show(ui, |ui| {
                     page_ui(app, ui, p, &cur, t, &mut acts);

@@ -186,6 +186,101 @@ fn pick_color(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"prop": uid, "color": color}))
 }
 
+/// What a Cryptomatte effect has at a layer-space point: the ID with the most coverage in its
+/// Cryptomatte layer, with the aux channels (for the manifest) and the effect's Selection.
+struct CryptoHit {
+    at: (effectcraft_project::ItemId, LayerId, Tick),
+    aux: std::sync::Arc<effectcraft_raster::AuxChannels>,
+    layer: String,
+    hash: u32,
+    selection: String,
+    prop: Uid,
+    /// The Selection has an expression: setting its value wouldn't change what it reads.
+    driven: bool,
+}
+
+impl CryptoHit {
+    fn manifest(&self) -> Option<&[(String, u32)]> {
+        self.aux.manifests.iter().find(|(l, _)| *l == self.layer).map(|(_, m)| m.as_slice())
+    }
+    fn reply(&self, sel: &str) -> Value {
+        let selected = effectcraft_effects::selection_hashes(sel, self.manifest()).contains(&self.hash);
+        let name = self.aux.manifest_name(&self.layer, self.hash);
+        json!({"name": name, "hash": format!("{:08x}", self.hash), "layer": self.layer, "selected": selected})
+    }
+}
+
+/// The ID under `{x, y}` (effect space, which is layer space on footage and precomp layers) for
+/// the Cryptomatte effect `{layer?, effect?}`, from the aux channels its render reads. The point
+/// snaps to the centre of the pixel the effect's input buffer samples in a render at `scale`
+/// (the viewer's resolution).
+fn crypto_hit(s: &Session, p: &Value, cmd: &str) -> Result<Option<CryptoHit>> {
+    let (cid, lid, fx_uid) = find_fx(s, p, cmd)?;
+    let (Some(x), Some(y)) = (f_p(p, "x"), f_p(p, "y")) else { return Err(bad(cmd, "missing `x` / `y` (layer pixels)")) };
+    let scale = f_p(p, "scale").unwrap_or(1.0);
+    if !(scale.is_finite() && scale > 0.0 && scale <= 1.0) {
+        return Err(bad(cmd, "`scale` is the preview's resolution factor, above 0 and at most 1"));
+    }
+    let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
+    let layer = comp.layer(lid).ok_or(EngineError::NoComp)?;
+    let fx = layer.effects().ok_or_else(|| bad(cmd, "no effects"))?;
+    let pos = fx.groups().position(|g| g.uid == fx_uid).ok_or_else(|| bad(cmd, "no such effect"))?;
+    let g = fx.groups().nth(pos).ok_or_else(|| bad(cmd, "no such effect"))?;
+    let prop = g.prop("selection").filter(|_| g.match_id == "ec.3d.cryptomatte").ok_or_else(|| bad(cmd, "not a Cryptomatte effect"))?;
+    let t = super::time_p(s, p, Some(comp));
+    let ctx = effectcraft_render::EvalCtx { project: &s.project, comp_id: cid, comp, time: t, expr: s.expr.as_deref(), footage: None };
+    let params = effectcraft_effects::flatten_params(g, &mut |pr| ctx.value(layer, pr));
+    let r = s.renderer(effectcraft_render::RenderOpts { scale, ..Default::default() });
+    let aux = r.layer_aux(&ctx, layer);
+    let want = effectcraft_effects::CRYPTO_LAYERS.get(params.e("layer") as usize).copied().unwrap_or("CryptoAsset");
+    let Some((aux, layer_name)) = aux.and_then(|a| a.resolve_crypto_layer(want).map(|l| (a, l))) else {
+        return Err(bad(cmd, "this layer has no Cryptomatte channels (a multi-layer OpenEXR with Cryptomatte, or a 3D precomp)"));
+    };
+    // The grid of the effect's input buffer (footage keeps native pixels from 3/4 scale up,
+    // proxies have their own size, earlier effects can pad it), rendered and cached.
+    let b = r.layer_input(&ctx, layer, pos).ok_or_else(|| bad(cmd, "this layer has no pixels"))?;
+    let (bs, o) = (b.scale, b.offset);
+    // The centre of its pixel under the point, at the aux point the effect reads there.
+    let [ax, ay] = effectcraft_effects::aux_point(bs, o, [(x * bs + o[0]).floor() + 0.5, (y * bs + o[1]).floor() + 0.5]);
+    let Some(hash) = aux.index_at(ax, ay).and_then(|i| aux.crypto_id_at(&layer_name, i)) else { return Ok(None) };
+    let (selection, driven) = (params.s("selection").to_string(), prop.expr.as_ref().is_some_and(|e| e.enabled));
+    Ok(Some(CryptoHit { at: (cid, lid, t), aux, layer: layer_name, hash, selection, prop: prop.uid, driven }))
+}
+
+/// `effect.cryptomatteAt`: the ID under a point, for the viewer's hover hint. The first call per
+/// frame renders the effect's input to learn its pixel grid (cached afterwards).
+fn crypto_at(s: &mut Session, p: &Value) -> Result<Value> {
+    Ok(crypto_hit(s, p, "effect.cryptomatteAt")?.map_or(Value::Null, |h| h.reply(&h.selection)))
+}
+
+/// The Cryptomatte eyedropper: replace the effect's Selection with the ID under a point, add it
+/// or remove it, in one undo step at the time it was read (none when its meaning stays).
+fn pick_crypto(s: &mut Session, p: &Value) -> Result<Value> {
+    use effectcraft_effects::crypto_select::{PickMode, edit_selection, token_for};
+    let cmd = "effect.pickCryptomatte";
+    let mode = match str_p(p, "mode").unwrap_or("replace") {
+        "replace" => PickMode::Replace,
+        "add" => PickMode::Add,
+        "remove" => PickMode::Remove,
+        m => return Err(bad(cmd, format!("unknown `mode` {m:?} (replace, add or remove)"))),
+    };
+    let h = crypto_hit(s, p, cmd)?.ok_or_else(|| bad(cmd, "no Cryptomatte ID there (empty or outside the layer)"))?;
+    if h.driven {
+        return Err(bad(cmd, "the Selection is driven by an expression; disable it to pick"));
+    }
+    let m = h.manifest();
+    let sel = edit_selection(&h.selection, &token_for(h.aux.manifest_name(&h.layer, h.hash), h.hash, m), h.hash, mode, m);
+    let changed = sel != h.selection;
+    if changed {
+        let (cid, lid, t) = h.at;
+        s.execute("prop.set", json!({"comp": cid.0, "layer": lid.0, "prop": h.prop, "value": sel, "time": t.seconds(), "timeBase": "comp"}))?;
+    }
+    let mut out = h.reply(&sel);
+    out["selection"] = json!(sel);
+    out["changed"] = json!(changed);
+    Ok(out)
+}
+
 fn remove(s: &mut Session, p: &Value) -> Result<Value> {
     let cid = super::comp_id(s, p)?;
     let fx = effects_p(s, p, "effect.remove")?;
@@ -631,6 +726,21 @@ pub fn specs() -> Vec<CommandSpec> {
             "{layer?, effect?: index|uid|name, param: id (e.g. screenColour) | prop: uid, x, y (effect space), average?: bool (5×5), time?} — the colour of the effect's input there",
             has_layers,
             pick_color
+        ),
+        cmd!(
+            "effect.pickCryptomatte",
+            "Pick Cryptomatte",
+            [],
+            None,
+            "{layer?, effect?: index|uid|name, x, y (effect space), mode?: replace|add|remove (default replace), scale? (preview resolution, default 1), time?} → {name, hash, layer, selection, changed, selected} — edits the Cryptomatte effect's Selection with the ID under the point",
+            has_layers,
+            pick_crypto
+        ),
+        crate::query!(
+            "effect.cryptomatteAt",
+            "Cryptomatte At",
+            "{layer?, effect?: index|uid|name, x, y (effect space), scale?, time?} → {name, hash, layer, selected} | null — the Cryptomatte ID under the point",
+            crypto_at
         ),
         cmd!("effect.applyLast", "Last Effect", ["Effect"], Some("Cmd+Alt+Shift+E"), "{layers?}", has_layers, last),
         cmd!("effect.removeAll", "Remove All", ["Effect"], Some("Cmd+Shift+E"), "{layers?}", has_layers, remove_all),

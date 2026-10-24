@@ -96,9 +96,11 @@ fn external_image(stored: &str, base_dir: &str) -> Result<String, String> {
         let doc = std::path::Path::new(base_dir).join("lottie.json");
         std::path::absolute(&doc).unwrap_or(doc)
     });
-    match craft_docpath::resolve(stored, doc.as_deref()) {
-        Ok(path) if path.is_absolute() => Ok(path.to_string_lossy().into_owned()),
-        Ok(_) => Err(format!("{stored} is relative and the Lottie file's folder is not known")),
+    match craft_docpath::resolve_absolute(stored, doc.as_deref()) {
+        Ok(path) => Ok(path.to_string_lossy().into_owned()),
+        Err(craft_docpath::Refused::Invalid) if doc.is_none() && craft_docpath::resolve(stored, None).is_ok() => {
+            Err(format!("{stored} is relative and the Lottie file's folder is not known"))
+        }
         Err(why) => Err(format!("{stored}: {why}")),
     }
 }

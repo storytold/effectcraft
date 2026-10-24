@@ -521,6 +521,8 @@ pub struct Session {
     pub footage_stamps: std::collections::HashMap<String, footage_reload::Stamp>,
     /// The stamps being taken on a worker thread ([`footage_reload::start_scan`]).
     pub footage_scan: Option<footage_reload::Scan>,
+    /// The disk cache's footage salt and the footage it was taken for ([`Session::refresh_disk_salt`]).
+    pub disk_salt: Option<(u64, u64)>,
     /// How many script-issued commands are running ([`Session::execute_for_script`]): while one
     /// is, settings that guard what scripts may do can't change (see
     /// [`prefs::Scripting::same_permissions`]).
@@ -618,6 +620,7 @@ impl Default for Session {
             check_footage_on_open: false,
             stored_paths: Default::default(),
             footage_stamps: Default::default(),
+            disk_salt: None,
             footage_scan: None,
             script_calls: ScriptCalls::default(),
         }
@@ -736,10 +739,40 @@ impl Session {
         if Arc::ptr_eq(&self.project, &self.saved_project) {
             self.saved_revision = self.revision;
         }
-        if self.disk_cache.is_some() {
-            self.layer_cache.set_disk_salt(effectcraft_render::disk_cache::footage_salt(&self.project));
-        }
+        self.refresh_disk_salt(false);
         self.events.push(Event::ProjectChanged { revision: self.revision });
+    }
+
+    /// Salt the disk cache's layer keys with the project's footage files
+    /// ([`effectcraft_render::disk_cache::footage_salt`]). Taking it reads the size and time of
+    /// every file, every frame of an image sequence included, so it is taken again only when the
+    /// footage items changed, or with `force` (a project opened, footage reloaded, the disk cache
+    /// attached), not at every edit: with a few large sequences that cost each keystroke in a
+    /// text field over half a second (#1926).
+    pub fn refresh_disk_salt(&mut self, force: bool) -> Option<u64> {
+        use std::hash::{Hash, Hasher};
+        if self.disk_cache.is_none() {
+            self.disk_salt = None;
+            return None;
+        }
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for (id, it) in &self.project.items {
+            if let effectcraft_project::ItemKind::Footage(f) = &it.kind {
+                id.hash(&mut h);
+                format!("{f:?}").hash(&mut h);
+            }
+        }
+        let footage = h.finish();
+        if let Some((seen, salt)) = self.disk_salt
+            && seen == footage
+            && !force
+        {
+            return Some(salt);
+        }
+        let salt = effectcraft_render::disk_cache::footage_salt(&self.project);
+        self.disk_salt = Some((footage, salt));
+        self.layer_cache.set_disk_salt(salt);
+        Some(salt)
     }
 
     /// Set a comp's Resolution. As in After Effects it is saved with the project (which becomes
@@ -1036,12 +1069,18 @@ impl Session {
 
     /// Render a comp frame with the session's footage + expression hosts.
     pub fn render(&self, comp: ItemId, t: Tick, opts: RenderOpts) -> Image {
+        self.renderer(opts).comp_frame(comp, t)
+    }
+
+    /// The renderer [`Session::render`] uses: the session's footage, expressions, layer cache and
+    /// accelerator, and the render prefs (nested switches, draft shadows) over `opts`.
+    pub fn renderer(&self, opts: RenderOpts) -> Renderer<'_> {
         let opts = RenderOpts { nested_switches: self.prefs.general.switches_affect_nested_comps, draft_shadows: self.prefs.three_d.realtime_shadows, ..opts };
         let mut r = Renderer::new(&self.project, self.footage.as_ref(), opts);
         r.expr = self.expr.as_deref();
         r.cache = Some(&self.layer_cache);
         r.accel = self.accel.as_deref();
-        r.comp_frame(comp, t)
+        r
     }
 
     /// Resolve a comp reference (item id number or name; `None`/null = the active comp).
@@ -1169,6 +1208,8 @@ impl Session {
         }
         self.layer_cache.clear();
         self.project = Arc::new(p);
+        // Its files may have changed since they were last stamped.
+        self.disk_salt = None;
         self.history = History::default();
         self.state = EditorState { snapping: true, view_layout: 1, ..Default::default() };
         self.path = path;
@@ -1242,6 +1283,8 @@ mod tests_codec_options;
 #[cfg(test)]
 mod tests_color_view;
 #[cfg(test)]
+mod tests_crypto_pick;
+#[cfg(test)]
 mod tests_delete_keys;
 #[cfg(test)]
 mod tests_disk_cache;
@@ -1289,6 +1332,8 @@ mod tests_project_items;
 mod tests_proxy;
 #[cfg(test)]
 mod tests_quick_offset;
+#[cfg(test)]
+mod tests_replace_source;
 #[cfg(test)]
 mod tests_rig3d;
 #[cfg(test)]

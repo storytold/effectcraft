@@ -31,6 +31,8 @@ fn cc_radial_fast_blur() {
     effect_case("ec.blur.ccradialfast", &[("amount", n(40.0))]);
     effect_case("ec.blur.ccradialfast", &[("amount", n(70.0)), ("zoom", e(1)), ("center", pt(22.4, 16.1))]);
     effect_case("ec.blur.ccradialfast", &[("amount", n(25.0)), ("zoom", e(2))]);
+    // Center outside the layer: the buffer grows so the streaks pass its edge (#2095).
+    effect_case("ec.blur.ccradialfast", &[("amount", n(80.0)), ("center", pt(-30.0, 20.0))]);
 }
 
 #[test]

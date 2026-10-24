@@ -28,6 +28,8 @@ enum V {
     Name(Rc<str>),
     /// A literal name (`/name`).
     Lit(Rc<str>),
+    /// A built-in operator, as `load` returns it for a name no dictionary defines.
+    Op(Rc<str>),
     Str(Rc<RefCell<Vec<u8>>>),
     Proc(Rc<Vec<V>>),
     Array(Rc<RefCell<Vec<V>>>),
@@ -47,7 +49,7 @@ impl V {
     }
     fn key(&self) -> String {
         match self {
-            V::Name(n) | V::Lit(n) => n.to_string(),
+            V::Name(n) | V::Lit(n) | V::Op(n) => n.to_string(),
             V::Str(s) => String::from_utf8_lossy(&s.borrow()).into_owned(),
             V::Num(n) => format!("{n}"),
             V::Bool(b) => format!("{b}"),
@@ -441,6 +443,12 @@ impl Interp {
                                 break;
                             }
                         }
+                        V::Op(op) => {
+                            r = self.spend(1).and_then(|()| self.builtin(op, src));
+                            if r.is_err() {
+                                break;
+                            }
+                        }
                         // Other items count against the budget as names do.
                         other => {
                             r = self.spend(1);
@@ -454,7 +462,21 @@ impl Interp {
                 self.calls -= 1;
                 r
             }
-            V::Name(n) => self.exec_name(&n, src),
+            // An executable name can run another (`exec` of `/exec cvx`), so names count too.
+            V::Name(n) => {
+                if self.calls >= MAX_CALL_DEPTH {
+                    self.b.skip("PostScript (recursion limit)");
+                    return Err(Flow::Quit);
+                }
+                self.calls += 1;
+                let r = self.exec_name(&n, src);
+                self.calls -= 1;
+                r
+            }
+            V::Op(op) => {
+                self.spend(1)?;
+                self.builtin(&op, src)
+            }
             other => {
                 self.push(other);
                 Ok(())
@@ -467,6 +489,12 @@ impl Interp {
         if let Some(v) = self.lookup(n) {
             return match v {
                 V::Proc(_) => self.exec_obj(v, src),
+                // An operator stored under another name (`/mo /moveto load def`, as Illustrator's
+                // EPS prolog does for every path operator) runs that operator. It pushed the
+                // operator's name instead, so such files drew nothing (#955).
+                V::Op(op) => self.builtin(&op, src),
+                // An executable name (`/y /x cvx def`) runs what that name is bound to.
+                V::Name(_) => self.exec_obj(v, src),
                 other => {
                     self.push(other);
                     Ok(())
@@ -963,7 +991,7 @@ impl Interp {
             }
             "load" => {
                 let k = self.pop().key();
-                let v = self.lookup(&k).unwrap_or(V::Name(k.into()));
+                let v = self.lookup(&k).unwrap_or(V::Op(k.into()));
                 self.push(v);
             }
             "undef" => {
@@ -1160,13 +1188,14 @@ impl Interp {
             }
             "xcheck" => {
                 let v = self.pop();
-                self.push(V::Bool(matches!(v, V::Proc(_) | V::Name(_))));
+                self.push(V::Bool(matches!(v, V::Proc(_) | V::Name(_) | V::Op(_))));
             }
             "type" => {
                 let t = match self.pop() {
                     V::Num(_) => "realtype",
                     V::Bool(_) => "booleantype",
                     V::Name(_) | V::Lit(_) => "nametype",
+                    V::Op(_) => "operatortype",
                     V::Str(_) => "stringtype",
                     V::Proc(_) | V::Array(_) => "arraytype",
                     V::Dict(_) => "dicttype",
@@ -1203,6 +1232,98 @@ impl Interp {
                 }
             }
             "currentglobal" | "currentpacking" | "currentshared" => self.push(V::Bool(false)),
+            // Operators that return values must push them, or the rest of the program reads a
+            // shifted stack: Illustrator's EPS prolog queries the device this way and then drew
+            // nothing (#955). Values are a plain device's defaults (PostScript Language
+            // Reference, 3rd ed., chapter 8).
+            "currentflat" => self.push(V::Num(1.0)),
+            "currentscreen" => {
+                self.push(V::Num(60.0));
+                self.push(V::Num(45.0));
+                self.push(V::Proc(Rc::new(vec![])));
+            }
+            "currentblackgeneration" | "currentundercolorremoval" | "currenttransfer" => self.push(V::Proc(Rc::new(vec![]))),
+            "currentcolortransfer" => {
+                for _ in 0..4 {
+                    self.push(V::Proc(Rc::new(vec![])));
+                }
+            }
+            "currentpagedevice" | "currenthalftone" | "currentsystemparams" | "currentuserparams" | "currentdevparams" => {
+                if n == "currentdevparams" {
+                    self.pop();
+                }
+                self.push(V::Dict(new_dict()));
+            }
+            "setuserparams" | "setsystemparams" | "setcolortransfer" | "setblackgeneration" | "setundercolorremoval" => {
+                let k = if n == "setcolortransfer" { 4 } else { 1 };
+                for _ in 0..k {
+                    self.pop();
+                }
+            }
+            // `file status` → false; `string status` → false (no such file).
+            "status" => {
+                self.pop();
+                self.push(V::Bool(false));
+            }
+            "dictstack" => {
+                self.pop();
+                let ds: Vec<V> = self.dicts.iter().map(|d| V::Dict(d.clone())).collect();
+                self.push(array(ds));
+            }
+            "maxlength" => {
+                let k = match self.pop() {
+                    V::Dict(d) => d.borrow().len(),
+                    _ => 0,
+                };
+                self.push(V::Num(k.saturating_add(16) as f64));
+            }
+            "internaldict" => {
+                self.pop();
+                let d = self.dicts[0].clone();
+                self.push(V::Dict(d));
+            }
+            "undefineresource" => {
+                self.pop();
+                self.pop();
+            }
+            // `[ … /Name pdfmark`: a Distiller annotation; other interpreters discard it.
+            "pdfmark" => {
+                while let Some(v) = self.st.pop() {
+                    if matches!(v, V::Mark) {
+                        break;
+                    }
+                }
+            }
+            // `source [params] /Name filter`. A SubFileDecode of the current file with a count of
+            // 0 reads to its end-of-data string: skip that data (an embedded XMP packet, which
+            // otherwise ran as PostScript). Other filters read what their source reads.
+            "filter" => {
+                let name = self.pop().key();
+                let mut skipped = false;
+                let source = if name == "SubFileDecode" && !matches!(self.st.last(), Some(V::Dict(_))) {
+                    let eod = match self.pop() {
+                        V::Str(s) => s.borrow().clone(),
+                        _ => vec![],
+                    };
+                    let count = self.popn();
+                    let source = self.pop();
+                    if matches!(source, V::File) && count == 0.0 && !eod.is_empty() {
+                        src.pos = match find_from(src.d, &eod, src.pos) {
+                            Some(p) => p.saturating_add(eod.len()),
+                            None => src.d.len(),
+                        };
+                        skipped = true;
+                    }
+                    source
+                } else {
+                    if matches!(self.st.last(), Some(V::Dict(_))) {
+                        self.pop();
+                    }
+                    self.pop()
+                };
+                // Data already stepped over leaves nothing for `image` to skip.
+                self.push(if skipped { V::Null } else { source });
+            }
             "vmstatus" => {
                 for _ in 0..3 {
                     self.push(V::Num(0.0));
@@ -1236,8 +1357,14 @@ impl Interp {
                 let a: Vec<f64> = self.pop().items().unwrap_or_default().iter().filter_map(V::num).collect();
                 self.gs.dash = (!a.is_empty() && a.iter().any(|v| *v > 0.0)).then_some((a, off));
             }
-            "setflat" | "setstrokeadjust" | "setoverprint" | "setrenderingintent" | "setcolorrendering" | "sethalftone" | "setscreen" | "settransfer" => {
+            "setflat" | "setstrokeadjust" | "setoverprint" | "setrenderingintent" | "setcolorrendering" | "sethalftone" | "settransfer" => {
                 self.pop();
+            }
+            // frequency angle proc
+            "setscreen" => {
+                for _ in 0..3 {
+                    self.pop();
+                }
             }
             "setgray" => {
                 let g = self.popn().clamp(0.0, 1.0);

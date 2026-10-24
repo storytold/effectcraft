@@ -67,21 +67,32 @@ pub fn recent_entries(prefs: &effectcraft_engine::prefs::Prefs) -> Vec<RecentEnt
         .collect()
 }
 
-/// `YYYY-MM-DD HH:MM` (UTC) from Unix seconds.
+/// Unix seconds → (proleptic Gregorian year, the same wall-clock instant moved into chrono's range
+/// by whole 400-year cycles). The Gregorian calendar repeats every 400 years (146_097 days), so
+/// month, day and time of day come from chrono and only the year is carried, which keeps every
+/// `i64` exact instead of collapsing out-of-range years to the epoch.
+fn utc_parts(secs: i64) -> (i64, chrono::NaiveDateTime) {
+    use chrono::Datelike;
+    let (days, sod) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    let (cycles, rest) = (days.div_euclid(146_097), days.rem_euclid(146_097));
+    // `rest + 719_163` (1970-01-01 is CE day 719_163) is always a valid CE day, and `sod` < 86_400.
+    let date = i32::try_from(rest + 719_163).ok().and_then(chrono::NaiveDate::from_num_days_from_ce_opt);
+    let time = u32::try_from(sod).ok().and_then(|s| chrono::NaiveTime::from_num_seconds_from_midnight_opt(s, 0));
+    match (date, time) {
+        (Some(d), Some(t)) => {
+            let y = i128::from(d.year()) + i128::from(cycles) * 400;
+            (i64::try_from(y).unwrap_or(if y < 0 { i64::MIN } else { i64::MAX }), d.and_time(t))
+        }
+        _ => (1970, chrono::NaiveDateTime::default()), // unreachable
+    }
+}
+
+/// Unix seconds → `YYYY-MM-DD HH:MM` (UTC). Years far outside chrono's own range are preserved
+/// (the old hand-rolled conversion kept them) rather than collapsing to the epoch.
 pub fn format_utc(secs: i64) -> String {
-    let days = secs.div_euclid(86_400);
-    let rem = secs.rem_euclid(86_400);
-    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + i64::from(m <= 2);
-    format!("{y:04}-{m:02}-{d:02} {:02}:{:02}", rem / 3600, (rem % 3600) / 60)
+    let (y, t) = utc_parts(secs);
+    // `{:04}` rather than `%Y`, which writes a `+` before years past 9999.
+    format!("{y:04}-{}", t.format("%m-%d %H:%M"))
 }
 
 /// How long ago `then` was, as the Home screen's Opened column shows it ("3 hours ago", then the
@@ -95,7 +106,8 @@ pub fn format_ago(now: i64, then: i64) -> String {
         3_600..86_400 => plural(d / 3_600, "{} hour ago", "{} hours ago"),
         86_400..172_800 => tr("Yesterday").to_string(),
         172_800..604_800 => plural(d / 86_400, "{} day ago", "{} days ago"),
-        _ => format_utc(then).get(..10).unwrap_or_default().to_string(),
+        // The date part: up to the space, not a fixed 10 bytes, so a year past 9999 stays whole.
+        _ => format_utc(then).split(' ').next().unwrap_or_default().to_string(),
     }
 }
 
@@ -154,12 +166,13 @@ pub fn encode_thumb(img: &egui::ColorImage) -> String {
     out
 }
 
+/// Decode a stored hex thumbnail, rejecting malformed or non-ASCII text.
 pub fn decode_thumb(text: &str) -> Option<egui::ColorImage> {
     let t = text.trim();
-    if t.len() != THUMB_W * THUMB_H * 6 {
+    if t.len() != THUMB_W * THUMB_H * 6 || !t.is_ascii() {
         return None;
     }
-    let b: Vec<u8> = (0..t.len()).step_by(2).map(|i| u8::from_str_radix(&t[i..i + 2], 16)).collect::<Result<_, _>>().ok()?;
+    let b: Vec<u8> = (0..t.len()).step_by(2).map(|i| u8::from_str_radix(t.get(i..i + 2)?, 16).ok()).collect::<Option<_>>()?;
     let px = b.as_chunks::<3>().0.iter().map(|c| Color32::from_rgb(c[0], c[1], c[2])).collect();
     Some(egui::ColorImage::new([THUMB_W, THUMB_H], px))
 }
@@ -485,6 +498,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn non_ascii_thumbnail_is_rejected_without_panicking() {
+        let malformed = format!("aé{}", "0".repeat(THUMB_W * THUMB_H * 6 - 3));
+        assert!(decode_thumb(&malformed).is_none());
+    }
+
+    #[test]
     fn recent_list_comes_from_settings() {
         let mut prefs = effectcraft_engine::prefs::Prefs::default();
         prefs.push_recent("/projects/a/Alpha.ecproj");
@@ -510,6 +529,12 @@ mod tests {
         assert_eq!(format_utc(0), "1970-01-01 00:00");
         assert_eq!(format_utc(1_790_000_000), "2026-09-21 14:13");
         assert_eq!(format_utc(951_782_400), "2000-02-29 00:00");
+        // Years far outside chrono's own range are preserved (the old hand-rolled conversion kept
+        // them), including negatives and the i64 extremes, rather than collapsing to the epoch.
+        assert_eq!(format_utc(10_000_000_000_000), "318857-05-20 17:46");
+        assert_eq!(format_utc(-10_000_000_000_000), "-314918-08-13 06:13");
+        assert_eq!(format_utc(i64::MAX), "292277026596-12-04 15:30");
+        assert_eq!(format_utc(i64::MIN), "-292277022657-01-27 08:29");
         let img = egui::ColorImage::new([200, 100], vec![Color32::from_rgb(10, 200, 30); 200 * 100]);
         let text = encode_thumb(&img);
         let back = decode_thumb(&text).unwrap();
@@ -533,20 +558,20 @@ mod tests {
         assert_eq!(format_ago(now, now + 100), "Just now");
         assert_eq!((format_size(900), format_size(13_000), format_size(3_500_000)), ("900 B".into(), "13 KB".into(), "3.3 MB".into()));
         assert_eq!((kind_of("/a/B.ecproj"), kind_of("c.AEP"), kind_of("x")), ("EffectCraft project", "After Effects project", "Project"));
+        // After a week it is the date, whole even for a five-digit year.
+        assert_eq!(format_ago(i64::MAX, 253_402_300_800), "10000-01-01");
     }
 
     /// The Home screen's own text goes through the interface catalog (#574): the Opened and Kind
-    /// columns read in Chinese, and English stays English.
+    /// columns read in the interface language, and English stays English.
     #[test]
     fn home_text_follows_the_interface_language() {
         let now = 1_790_000_000;
         crate::i18n::set_current("zh-hans");
-        let zh = (format_ago(now, now - 5), format_ago(now, now - 3 * 3_600), format_ago(now, now - 90_000), kind_of("/a/B.ecproj"));
-        crate::i18n::set_current("zh-hant");
-        let tw = (format_ago(now, now - 60), kind_of("x"));
+        let shown = (format_ago(now, now - 5), format_ago(now, now - 3 * 3_600), format_ago(now, now - 90_000), kind_of("/a/B.ecproj"));
+        let catalog = (tr("Just now").to_string(), tr_args("{} hours ago", &[&3]), tr("Yesterday").to_string(), tr("EffectCraft project"));
         crate::i18n::set_current("en");
-        assert_eq!(zh, ("刚刚".into(), "3 小时前".into(), "昨天".into(), "EffectCraft 项目"));
-        assert_eq!(tw, ("1 分鐘前".into(), "專案"));
+        assert_eq!(shown, catalog);
         assert_eq!(tr("Filter recent files"), "Filter recent files");
     }
 

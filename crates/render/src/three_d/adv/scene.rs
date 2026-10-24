@@ -157,7 +157,8 @@ pub struct ShadowMap {
     pub offset: u32,
     /// Depth bias in texels (scaled by the texel footprint at the receiver).
     pub bias: f32,
-    /// PCF spread (texels).
+    /// Penumbra width (output pixels) requested by Shadow Diffusion; the shader
+    /// converts it to a tap reach via the receiver's texel footprint.
     pub radius: f32,
 }
 

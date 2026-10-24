@@ -6,7 +6,7 @@ use effectcraft_project::BitDepth;
 use effectcraft_render::RenderOpts;
 use effectcraft_time::Tick;
 
-use crate::tests::{Scene, c, check, compare_at, effect_case, n, opts, set};
+use crate::tests::{Scene, allow_llvmpipe_boundary_flips, c, check, compare_at, effect_case, n, opts, set};
 
 fn e(v: u32) -> Value {
     Value::Enum(v)
@@ -22,6 +22,7 @@ fn pt(x: f64, y: f64) -> Value {
 
 #[test]
 fn posterize_thresholds_strobe_vignette() {
+    let _flips = allow_llvmpipe_boundary_flips();
     effect_case("ec.stylize.posterize", &[("level", n(4.0))]);
     effect_case("ec.stylize.posterize", &[("level", n(9.0))]);
     effect_case("ec.stylize.threshold", &[("level", n(100.0))]);
@@ -88,6 +89,8 @@ fn tiles_kaleida_repetile() {
         "ec.stylize.motiontile",
         &[("horizontalPhaseShift", on()), ("phase", n(33.0)), ("tileCenter", pt(30.0, 17.0)), ("tileHeight", n(55.0)), ("outputWidth", n(80.0))],
     );
+    // Output under 100 % on an adjustment crops the comp below (#1727).
+    effect_case("ec.stylize.motiontile", &[("outputWidth", n(60.0)), ("outputHeight", n(300.0)), ("mirrorEdges", on())]);
     effect_case("ec.stylize.cckaleida", &[]);
     effect_case("ec.stylize.cckaleida", &[("mirroring", e(2)), ("rotation", n(20.0)), ("size", n(150.0))]);
     effect_case("ec.stylize.ccrepetile", &[("expandRight", n(10.0)), ("expandUp", n(4.0))]);
@@ -222,5 +225,44 @@ fn transform_motion_blur() {
         let label = format!("transform motion blur {depth:?}");
         check(&label, compare_at(&s, opts(), Tick::from_seconds_f64(0.3)), 0.0);
         check(&format!("{label} half"), compare_at(&s, RenderOpts { scale: 0.5, ..opts() }, Tick::from_seconds_f64(0.3)), 0.0);
+    }
+}
+
+/// Motion Tile's Output size on an adjustment layer with a Transform after it that scales the
+/// tiles into view, and cropping (Output under 100 %): the stack's grown or cropped frame goes
+/// back onto the canvas as on the CPU (#1727).
+#[test]
+fn adjustment_motion_tile_output_then_transform() {
+    for (out_w, out_h, scale) in [(300.0, 300.0, 40.0), (250.0, 120.0, 70.0), (60.0, 80.0, 100.0)] {
+        for depth in [BitDepth::Bpc8, BitDepth::Bpc32] {
+            let mut s = Scene::new(depth);
+            let bg = s.footage(97, 61);
+            s.push(bg);
+            let mut adj = s.solid([1.0, 1.0, 1.0], 97, 61);
+            adj.switches.adjustment = true;
+            s.effect(&mut adj, "ec.stylize.motiontile", &[("outputWidth", n(out_w)), ("outputHeight", n(out_h)), ("mirrorEdges", on())]);
+            s.effect(&mut adj, "ec.distort.transform", &[("scaleHeight", n(scale)), ("scaleWidth", n(scale))]);
+            s.push(adj);
+            let label = format!("adjustment Motion Tile {out_w}×{out_h} % then Scale {scale} % {depth:?}");
+            check(&label, compare_at(&s, opts(), Tick::ZERO), 0.0);
+            check(&format!("{label} half"), compare_at(&s, RenderOpts { scale: 0.5, ..opts() }, Tick::ZERO), 0.0);
+        }
+    }
+}
+
+/// The same on a full-frame footage layer (#1991).
+#[test]
+fn layer_motion_tile_output_then_transform() {
+    for (out_w, out_h, scale) in [(300.0, 300.0, 40.0), (250.0, 120.0, 70.0)] {
+        for depth in [BitDepth::Bpc8, BitDepth::Bpc32] {
+            let mut s = Scene::new(depth);
+            let mut l = s.footage(97, 61);
+            s.effect(&mut l, "ec.stylize.motiontile", &[("outputWidth", n(out_w)), ("outputHeight", n(out_h)), ("mirrorEdges", on())]);
+            s.effect(&mut l, "ec.distort.transform", &[("scaleHeight", n(scale)), ("scaleWidth", n(scale))]);
+            s.push(l);
+            let label = format!("layer Motion Tile {out_w}×{out_h} % then Scale {scale} % {depth:?}");
+            check(&label, compare_at(&s, opts(), Tick::ZERO), 0.0);
+            check(&format!("{label} half"), compare_at(&s, RenderOpts { scale: 0.5, ..opts() }, Tick::ZERO), 0.0);
+        }
     }
 }

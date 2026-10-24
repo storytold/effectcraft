@@ -26,16 +26,19 @@ pub const PREFS_FILE: &str = "prefs.json";
 pub const LANGUAGES: &[(&str, &str)] = &[
     ("Match System", "system"),
     ("English", "en"),
+    // Alphabetical by the language's own name after English; Cyrillic, Georgian, then CJK names
+    // follow the Latin ones.
+    ("Čeština", "cs"),
+    ("Deutsch", "de"),
+    ("Español", "es"),
+    ("Français", "fr"),
+    ("Português (Brasil)", "pt-br"),
+    ("Русский", "ru"),
+    ("Українська", "uk"),
+    ("ქართული", "ka"),
     ("日本語", "ja"),
     ("简体中文", "zh-hans"),
     ("繁體中文", "zh-hant"),
-    ("Українська", "uk"),
-    ("Español", "es"),
-    ("Português (Brasil)", "pt-br"),
-    ("Русский", "ru"),
-    ("Français", "fr"),
-    ("Deutsch", "de"),
-    ("Čeština", "cs"),
 ];
 
 /// Settings ▸ Startup & Repair ▸ Window Graphics: (label, `startup.windowGraphics` value).
@@ -110,7 +113,8 @@ page!(General {
     /// Synchronize Time of All Related Items.
     sync_time_related_items: bool = true,
     expression_pick_whip_compact: bool = true,
-    create_split_layers_above: bool = false,
+    /// Create Split Layers Above Original Layer (After Effects' default).
+    create_split_layers_above: bool = true,
     use_system_color_picker: bool = false,
     /// Number of projects in File ▸ Open Recent.
     recent_items: u32 = 10,

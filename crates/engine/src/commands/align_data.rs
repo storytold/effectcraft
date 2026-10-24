@@ -33,14 +33,16 @@ pub struct Stamp {
     pub dated: bool,
 }
 
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let mp = (m + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
+/// Days since 1970-01-01 of the proleptic-Gregorian date `(y, m, d)`. `d` is added linearly (as
+/// the previous hand-rolled `days_from_civil` did), so a day past the month's end rolls over;
+/// `None` when the year/month is out of chrono's range. `m` must be 1..=12.
+fn days_from_civil(y: i64, m: i64, d: i64) -> Option<i64> {
+    let year = i32::try_from(y).ok()?;
+    let month = u32::try_from(m).ok()?;
+    let first = chrono::NaiveDate::from_ymd_opt(year, month, 1)?;
+    // Days since the Unix epoch: `num_days_from_ce` counts from 0001-01-01; 719_162 days precede 1970-01-01.
+    use chrono::Datelike;
+    i64::from(first.num_days_from_ce()).checked_sub(719_163)?.checked_add(d.checked_sub(1)?)
 }
 
 /// `hh:mm:ss(.fff)` or timecode `hh:mm:ss:ff` / `hh:mm:ss;ff` → seconds.
@@ -71,7 +73,7 @@ pub fn parse_stamp(v: &Value, fps: f64) -> Option<Stamp> {
             // ISO 8601: date [T| ] time [zone].
             if s.len() >= 10 && s.as_bytes()[4] == b'-' && s.as_bytes()[7] == b'-' {
                 let (y, m, d) = (s[0..4].parse::<i64>().ok()?, s[5..7].parse::<i64>().ok()?, s[8..10].parse::<i64>().ok()?);
-                let mut secs = days_from_civil(y, m, d) as f64 * 86_400.0;
+                let mut secs = days_from_civil(y, m, d)? as f64 * 86_400.0;
                 let rest = s[10..].trim_start_matches(['T', 't', ' ']);
                 if !rest.is_empty() {
                     // Zone: Z or ±hh:mm / ±hhmm.

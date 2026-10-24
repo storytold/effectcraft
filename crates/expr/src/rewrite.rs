@@ -528,8 +528,9 @@ fn rewrite_seq(items: &[Item]) -> String {
                 let end = assignment_end(items, j + 1);
                 let rhs = rewrite_seq(&items[j + 1..end]);
                 let h = helper(&op.text[..1]).unwrap_or("__add");
+                let target = compound_assignment_target(items, i, j);
                 out.push_str(&p.ws);
-                out.push_str(&format!("{} ={}{h}({}, ({rhs}))", p.body, op.ws, p.body));
+                out.push_str(&format!("{target} ={}{h}({target}, ({rhs}))", op.ws));
                 i = end;
                 continue;
             }
@@ -543,6 +544,34 @@ fn rewrite_seq(items: &[Item]) -> String {
     out
 }
 
+fn raw_ref(item: &Item) -> String {
+    match item {
+        Item::Tok(t) => format!("{}{}", t.ws, t.text),
+        Item::Group { open, inner, close } => {
+            let mut out = format!("{}{}", open.ws, open.text);
+            if has_assign(inner) {
+                // shortcut: nested assignments stay verbatim (rewriting them would double per level), so arithmetic beside them is not array-aware
+                for item in inner {
+                    out.push_str(&raw_ref(item));
+                }
+            } else {
+                out.push_str(&rewrite_seq(inner));
+            }
+            if let Some(close) = close {
+                out.push_str(&close.text);
+            }
+            out
+        }
+    }
+}
+
+fn has_assign(items: &[Item]) -> bool {
+    items.iter().any(|it| match it {
+        Item::Tok(t) => ASSIGN.contains(&t.text.as_str()),
+        Item::Group { inner, .. } => has_assign(inner),
+    })
+}
+
 fn push_piece(out: &mut String, p: Piece) {
     out.push_str(&p.ws);
     out.push_str(&p.body);
@@ -554,6 +583,18 @@ fn push_piece(out: &mut String, p: Piece) {
 /// nested brackets, so deeper expressions are rejected with an error instead. Constructs that
 /// nest without brackets count as part of a level ([`too_nested`]).
 pub const MAX_NESTING: usize = 32;
+/// Hard limit on bytes emitted by the array-math source rewrite.
+pub const MAX_REWRITTEN_BYTES: usize = 4 * 1024 * 1024;
+
+fn over_rewrite_limit(text: &str) -> bool {
+    text.len() > MAX_REWRITTEN_BYTES
+}
+
+fn compound_assignment_target(items: &[Item], start: usize, end: usize) -> String {
+    // Rewriting the whole left side duplicates nested computed assignment targets. Keep the
+    // original target syntax for both reads/writes; source length is bounded above.
+    items[start..end].iter().map(raw_ref).collect()
+}
 
 /// Stack cost of one level of brackets (also of a template substitution, a regex group and a
 /// prefix operator, which cost the parser about as much or are never chained in real code).
@@ -746,12 +787,18 @@ fn too_nested_from(toks: &[Tok], base: usize) -> bool {
 
 /// An error when `src` nests deeper than [`MAX_NESTING`] levels (before or after the rewrite).
 pub fn check_nesting(src: &str) -> Result<(), String> {
+    if over_rewrite_limit(src) {
+        return Err(too_large());
+    }
     let (toks, tail) = tokenize(src);
     if too_nested(&toks) {
         return Err(too_deep());
     }
     let mut out = rewrite_seq(&build(toks));
     out.push_str(&tail);
+    if over_rewrite_limit(&out) {
+        return Err(too_large());
+    }
     if too_nested(&tokenize(&out).0) {
         return Err(too_deep());
     }
@@ -765,12 +812,18 @@ fn too_deep() -> String {
 /// Rewrite an expression's source for array-aware arithmetic. Line breaks are preserved.
 /// An expression nested deeper than [`MAX_NESTING`] becomes a `throw` of that error.
 pub fn rewrite(src: &str) -> String {
+    if over_rewrite_limit(src) {
+        return throw_too_large();
+    }
     let (toks, tail) = tokenize(src);
     if too_nested(&toks) {
         return throw_too_deep();
     }
     let mut out = rewrite_seq(&build(toks));
     out.push_str(&tail);
+    if over_rewrite_limit(&out) {
+        return throw_too_large();
+    }
     if too_nested(&tokenize(&out).0) {
         return throw_too_deep();
     }
@@ -779,6 +832,14 @@ pub fn rewrite(src: &str) -> String {
 
 fn throw_too_deep() -> String {
     format!("throw new RangeError({:?})", too_deep().trim_start_matches("Error: "))
+}
+
+fn too_large() -> String {
+    format!("Error: expression exceeds the {MAX_REWRITTEN_BYTES}-byte rewrite limit")
+}
+
+fn throw_too_large() -> String {
+    format!("throw new RangeError({:?})", too_large().trim_start_matches("Error: "))
 }
 
 #[cfg(test)]
@@ -821,11 +882,27 @@ mod tests {
     #[test]
     fn compound_assignment_and_functions() {
         assert_eq!(n(&rewrite("x += [1, 0];")), n("x = __add(x, ( [1, 0]));"));
+        assert_eq!(n(&rewrite("obj[key] += 1")), n("obj[key] = __add(obj[key], (1))"));
+        assert_eq!(n(&rewrite("o[a + b] += 1")), n("o[__add(a, b)] = __add(o[__add(a, b)], (1))"));
         assert_eq!(n(&rewrite("function f(a) { return a * 2 }")), n("function f(a) { return __mul(a,  2) }"));
         assert_eq!(n(&rewrite("var g = (a) => a - 1")), n("var g = (a) => __sub(a,  1)"));
         assert_eq!(n(&rewrite("typeof a + 'x'")), n("__add(typeof a,  'x')"));
         assert_eq!(n(&rewrite("i++ + 1")), n("__add(i++,  1)"));
         assert_eq!(n(&rewrite("2 ** 3 * 2")), n("__mul(2 ** 3,  2)"));
+    }
+
+    #[test]
+    fn source_expansion_is_bounded_before_rewriting() {
+        let src = "x += 1;".repeat(super::MAX_REWRITTEN_BYTES / 6 + 1);
+        assert!(check_nesting(&src).unwrap_err().contains("rewrite limit"));
+        assert!(rewrite(&src).starts_with("throw new RangeError("));
+    }
+
+    #[test]
+    fn output_expansion_is_bounded() {
+        let src = format!("{} += 1", "a".repeat(super::MAX_REWRITTEN_BYTES / 2));
+        assert!(check_nesting(&src).unwrap_err().contains("rewrite limit"));
+        assert!(rewrite(&src).starts_with("throw new RangeError("));
     }
 
     #[test]

@@ -25,6 +25,55 @@ fn ink_x(img: &effectcraft_raster::Image) -> (i64, i64) {
     (x0, x1)
 }
 
+/// #955: EPS files that name their operators (`/mo /moveto load def`, as Illustrator's do),
+/// query the device and embed metadata read through a SubFileDecode filter draw their artwork.
+/// They imported as an empty layer.
+#[test]
+fn eps_with_aliased_operators_device_queries_and_embedded_data_draws() {
+    let square = "1 0 0 setrgbcolor 50 25 mo 150 25 li 150 75 li 50 75 li cp f\n";
+    let aliases = "/mo /moveto load def /li /lineto load def /cp /closepath load def /f /fill load def\n";
+    let doc = eps(format!("{aliases}{square}").as_bytes());
+    assert!(coverage(&render(&doc), 50, 25, 150, 75) > 4900.0, "aliased operators draw the square");
+    // Every operator that returns a value pushes it, so the stack stays aligned.
+    let queries = "mark currentflat currentscreen currentpagedevice currenthalftone currentblackgeneration \
+                   currentundercolorremoval currentcolortransfer currentsystemparams counttomark 13 eq /ok exch def cleartomark\n";
+    let doc = eps(format!("{aliases}{queries}ok {{ {square} }} if\n").as_bytes());
+    assert!(coverage(&render(&doc), 50, 25, 150, 75) > 4900.0, "device queries leave 13 values");
+    // Data up to the end-of-data string isn't run: its unbalanced brace would swallow the rest.
+    let data = "currentfile 0 (%END-OF-DATA) /SubFileDecode filter pop\n<x> { ( not PostScript\n%END-OF-DATA\n";
+    let doc = eps(format!("{aliases}{data}{square}").as_bytes());
+    assert!(coverage(&render(&doc), 50, 25, 150, 75) > 4900.0, "drawing after the embedded data");
+}
+
+#[test]
+fn eps_filter_on_a_string_source_does_not_skip_the_program() {
+    let square = "1 0 0 setrgbcolor 50 25 moveto 150 25 lineto 150 75 lineto 50 75 lineto closepath fill\n";
+    let img = "gsave 1 1 8 [1 0 0 1 0 0] (FF) /ASCIIHexDecode filter image grestore\n";
+    // Images aren't drawn yet, so this parses without `eps`'s nothing-skipped check.
+    let doc = parse(format!("%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 200 100\n{img}{square}").as_bytes()).unwrap();
+    assert_eq!(doc.skipped, ["image"]);
+    assert!(coverage(&render(&doc), 50, 25, 150, 75) > 4900.0, "drawing after an image read from a string");
+}
+
+/// A loaded operator runs that operator even after its name is redefined (the prolog idiom
+/// `/_m /moveto load def /moveto {… _m} def`), and an executable name bound with `cvx` runs what
+/// its name is bound to.
+#[test]
+fn eps_loaded_operators_and_executable_name_aliases() {
+    let saved = "/_m /moveto load def /moveto {_m} def 1 0 0 setrgbcolor 50 25 moveto 150 25 lineto 150 75 lineto 50 75 lineto closepath fill\n";
+    assert!(coverage(&render(&eps(saved.as_bytes())), 50, 25, 150, 75) > 4900.0, "a redefined moveto that calls the saved one");
+    let alias = "/sq {50 25 moveto 150 25 lineto 150 75 lineto 50 75 lineto closepath fill} def /y /sq cvx def 1 0 0 setrgbcolor y\n";
+    assert!(coverage(&render(&eps(alias.as_bytes())), 50, 25, 150, 75) > 4900.0, "an executable name bound to a procedure's name");
+}
+
+/// Each `exec` of the executable name `exec` runs the next one: the chain is cut off at the call
+/// depth instead of overflowing the stack.
+#[test]
+fn eps_exec_of_executable_names_stops_at_the_call_depth() {
+    let doc = parse(b"%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 200 100\n/exec cvx 99999 {dup} repeat exec\n").unwrap();
+    assert!(doc.skipped.iter().any(|s| s.contains("recursion limit")), "{:?}", doc.skipped);
+}
+
 #[test]
 fn eps_text_with_bundled_fonts_and_show_variants() {
     // Not embedded: drawn with the bundled stand-in, like the same text in a PDF.

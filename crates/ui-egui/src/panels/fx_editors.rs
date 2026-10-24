@@ -193,7 +193,7 @@ fn rgb_curves(
     }
     let gr = Rect::from_min_size(pos2(x0, r.min.y + 30.0), vec2(size, size));
     let gid = egui::Id::new(("lumetri-rgb", euid, ch));
-    let (resp, edit) = fw::curves_graph(ui, gr, &cur, ch, false, gid, &t);
+    let (resp, edit) = fw::curves_graph(ui, gr, &cur, ch, false, false, gid, &t);
     app.auto.add(&format!("{prefix}.graph"), gr, "RGB Curves");
     register_points(app, &prefix, gr, &cur.0);
     let key = gesture_key(ui, gid, resp.drag_started() || resp.clicked());
@@ -713,7 +713,7 @@ fn glow_map(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, laye
     }
     let gr = Rect::from_min_size(pos2(x0, r.min.y + 30.0), vec2(size, size));
     let gid = egui::Id::new(("glow-map", euid, ch));
-    let (resp, edit) = fw::curves_graph(ui, gr, &map[ch], ch + 1, false, gid, &t);
+    let (resp, edit) = fw::curves_graph(ui, gr, &map[ch], ch + 1, false, false, gid, &t);
     app.auto.add(&format!("{prefix}.graph"), gr, "Arbitrary Map");
     register_points(app, &prefix, gr, &map[ch].0);
     let key = gesture_key(ui, gid, resp.drag_started() || resp.clicked());
