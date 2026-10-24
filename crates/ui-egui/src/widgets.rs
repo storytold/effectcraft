@@ -322,6 +322,8 @@ pub fn text_field(ui: &mut Ui, rect: Rect, text: &mut String, hint: &str, t: &To
 }
 
 fn field(ui: &mut Ui, rect: Rect, text: &mut String, hint: &str, t: &Tokens, search: bool) -> Response {
+    // Placeholders are interface text: "Search project", "Filter effects", … (a missing row falls back to the English).
+    let hint = crate::i18n::tr(hint);
     let h = rect.height();
     ui.painter().rect_filled(rect, h / 2.0, t.field_bg);
     ui.painter().rect_stroke(rect, h / 2.0, Stroke::new(1.0, t.field_border), StrokeKind::Inside);

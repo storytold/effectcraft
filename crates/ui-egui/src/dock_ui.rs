@@ -41,6 +41,7 @@ impl EffectcraftApp {
         }
         let Some(comp) = self.session.active_comp() else { return out };
         if let Some(l) = self.session.state.selected_layers.first().and_then(|id| comp.layer(*id)) {
+            // The panel's own name is a menu label; only the layer's name is project content.
             out.push((PanelKind::EffectControls, format!("{} {}", crate::i18n::command_label("window.panel", "Effect Controls"), l.name)));
             out.push((PanelKind::Properties, format!("{}: {}", crate::i18n::command_label("window.panel", "Properties"), l.name)));
         }
@@ -206,6 +207,8 @@ impl EffectcraftApp {
         let titles = self.tab_titles();
         let decos = self.tab_decos();
         let docs = self.tab_docs();
+        // Panel tabs are chrome, not project content: their default names come from the menu
+        // catalog's `window.panel` rows, so a translated interface shows translated tabs.
         let title = |p: PanelKind| {
             titles.iter().find(|(k, _)| *k == p).map(|(_, s)| s.clone()).unwrap_or_else(|| crate::i18n::command_label("window.panel", p.title()).to_string())
         };
