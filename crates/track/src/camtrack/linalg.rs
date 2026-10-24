@@ -146,6 +146,33 @@ pub fn slerp(a: &M3, b: &M3, t: f64) -> M3 {
 /// is `n × n` (columns are the right singular vectors).
 pub fn svd(a: &[f64], m: usize, n: usize) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     let rows = m.max(n);
+    let (mut u, mut s, v) = jacobi_factors(a, m, n);
+    for (j, sj) in s.iter().enumerate() {
+        if *sj > 1e-300 {
+            for r in 0..rows {
+                u[r * n + j] /= sj;
+            }
+        }
+    }
+    // Sort descending.
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| s[b].total_cmp(&s[a]));
+    let (mut u2, mut v2) = (vec![0.0; rows * n], vec![0.0; n * n]);
+    for (k, &j) in order.iter().enumerate() {
+        for r in 0..rows {
+            u2[r * n + k] = u[r * n + j];
+        }
+        for r in 0..n {
+            v2[r * n + k] = v[r * n + j];
+        }
+    }
+    s = order.iter().map(|&j| s[j]).collect();
+    (u2, s, v2)
+}
+
+// Unnormalised and unsorted factors; full SVD and null-space queries share every sweep.
+fn jacobi_factors(a: &[f64], m: usize, n: usize) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    let rows = m.max(n);
     let mut u = vec![0.0; rows * n];
     u[..m * n].copy_from_slice(&a[..m * n]);
     let mut v = vec![0.0; n * n];
@@ -192,28 +219,8 @@ pub fn svd(a: &[f64], m: usize, n: usize) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
             break;
         }
     }
-    let mut s: Vec<f64> = (0..n).map(|j| (0..rows).map(|r| u[r * n + j] * u[r * n + j]).sum::<f64>().sqrt()).collect();
-    for (j, sj) in s.iter().enumerate() {
-        if *sj > 1e-300 {
-            for r in 0..rows {
-                u[r * n + j] /= sj;
-            }
-        }
-    }
-    // Sort descending.
-    let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&a, &b| s[b].total_cmp(&s[a]));
-    let (mut u2, mut v2) = (vec![0.0; rows * n], vec![0.0; n * n]);
-    for (k, &j) in order.iter().enumerate() {
-        for r in 0..rows {
-            u2[r * n + k] = u[r * n + j];
-        }
-        for r in 0..n {
-            v2[r * n + k] = v[r * n + j];
-        }
-    }
-    s = order.iter().map(|&j| s[j]).collect();
-    (u2, s, v2)
+    let s: Vec<f64> = (0..n).map(|j| (0..rows).map(|r| u[r * n + j] * u[r * n + j]).sum::<f64>().sqrt()).collect();
+    (u, s, v)
 }
 
 /// SVD of a 3 × 3 matrix: (U, singular values descending, V) with `m = U diag(s) Vᵀ`.
@@ -235,8 +242,10 @@ pub fn svd3(m: &M3) -> (M3, V3, M3) {
 /// The unit vector `x` minimising `|A x|` (`m × n` row-major): the right singular vector of
 /// the smallest singular value.
 pub fn null_vector(a: &[f64], m: usize, n: usize) -> Vec<f64> {
-    let (_, _, v) = svd(a, m, n);
-    (0..n).map(|r| v[r * n + n - 1]).collect()
+    let (_, s, v) = jacobi_factors(a, m, n);
+    // The full SVD uses a stable descending sort: the last of equal minima wins.
+    let smallest = (0..n).min_by(|&i, &j| s[i].total_cmp(&s[j]).then_with(|| j.cmp(&i))).unwrap_or(0);
+    (0..n).map(|r| v[r * n + smallest]).collect()
 }
 
 /// Eigen-decomposition of a symmetric `n × n` matrix (cyclic Jacobi): eigenvalues ascending
@@ -439,6 +448,20 @@ mod tests {
             }
         }
         assert!(s[0] >= s[1] && s[1] >= s[2]);
+    }
+
+    #[test]
+    fn null_vector_matches_full_svd_bits_including_ties() {
+        for (m, n) in [(0, 0), (1, 1), (3, 3), (8, 9), (9, 9), (20, 3), (100, 9)] {
+            for scale in [0.0, 1e-100, 1.0, 1e100] {
+                let a: Vec<f64> = (0..m * n).map(|i| (((i * 37) % 31) as f64 - 15.0) * scale).collect();
+                let (_, _, v) = svd(&a, m, n);
+                let expected: Vec<_> = (0..n).map(|r| v[r * n + n - 1].to_bits()).collect();
+                assert_eq!(null_vector(&a, m, n).iter().map(|v| v.to_bits()).collect::<Vec<_>>(), expected);
+            }
+        }
+        let a = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        assert_eq!(null_vector(&a, 3, 3), vec![0.0, 0.0, 1.0]);
     }
 
     #[test]
