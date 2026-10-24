@@ -27,7 +27,7 @@
 use rayon::prelude::*;
 
 use crate::camtrack::Track2D;
-use crate::camtrack::linalg::{cholesky_solve, sym_eigen};
+use crate::camtrack::linalg::cholesky_solve;
 use crate::fit::{Model, least_squares};
 use crate::solve::Homography;
 
@@ -205,22 +205,73 @@ impl Default for MeshOpts {
     }
 }
 
-/// Normal equations `AᵀA x = Aᵀb`, accumulated row by row.
+/// Normal equations `AᵀA x = Aᵀb`, accumulated row by row. `AᵀA` is symmetric and banded (every
+/// row couples unknowns at most `bw` apart), so only its lower band is stored: entry `(i, j)`
+/// with `i − bw ≤ j ≤ i` sits at `i * (bw + 1) + j + bw − i`.
 struct Normal {
-    n: usize,
+    bw: usize,
     a: Vec<f64>,
     b: Vec<f64>,
 }
 
 impl Normal {
     fn row(&mut self, coefs: &[(usize, f64)], rhs: f64, w: f64) {
+        let width = self.bw + 1;
         for (ia, ca) in coefs {
             self.b[*ia] += w * ca * rhs;
             for (ib, cb) in coefs {
-                self.a[ia * self.n + ib] += w * ca * cb;
+                if ib <= ia {
+                    self.a[ia * width + ib + self.bw - ia] += w * ca * cb;
+                }
             }
         }
     }
+}
+
+/// Cholesky solve of `A x = b` for the banded `Normal::a`, in place. Returns false when `A` is not
+/// positive definite.
+fn cholesky_band(a: &mut [f64], n: usize, bw: usize, b: &mut [f64]) -> bool {
+    let w = bw + 1;
+    for j in 0..n {
+        let kj = j.saturating_sub(bw);
+        let rowj = j * w + kj + bw - j;
+        let mut d = a[j * w + bw];
+        for v in &a[rowj..j * w + bw] {
+            d -= v * v;
+        }
+        if d <= 0.0 || !d.is_finite() {
+            return false;
+        }
+        let d = d.sqrt();
+        a[j * w + bw] = d;
+        for i in j + 1..(j + bw + 1).min(n) {
+            let ki = i - bw.min(i);
+            let mut s = a[i * w + j + bw - i];
+            let len = j - ki;
+            let (head, tail) = a.split_at_mut(i * w);
+            let li = &tail[ki + bw - i..ki + bw - i + len];
+            let lj = &head[j * w + ki + bw - j..j * w + ki + bw - j + len];
+            for (x, y) in li.iter().zip(lj) {
+                s -= x * y;
+            }
+            a[i * w + j + bw - i] = s / d;
+        }
+    }
+    for i in 0..n {
+        let mut s = b[i];
+        for k in i.saturating_sub(bw)..i {
+            s -= a[i * w + k + bw - i] * b[k];
+        }
+        b[i] = s / a[i * w + bw];
+    }
+    for i in (0..n).rev() {
+        let mut s = b[i];
+        for k in i + 1..(i + bw + 1).min(n) {
+            s -= a[k * w + i + bw - k] * b[k];
+        }
+        b[i] = s / a[i * w + bw];
+    }
+    b.iter().all(|v| v.is_finite())
 }
 
 /// Fit the content-preserving warp of one frame: `pairs` are (source position, wanted
@@ -230,7 +281,9 @@ pub fn solve_mesh(size: [f64; 2], o: &MeshOpts, pairs: &[([f64; 2], [f64; 2])], 
     let mut m = Mesh::from_homography(o.cols, o.rows, size, base);
     let nv = (m.cols + 1) * (m.rows + 1);
     let n = 2 * nv;
-    let mut ne = Normal { n, a: vec![0.0; n * n], b: vec![0.0; n] };
+    // A cell couples its four corners and, through the triangles, vertices up to `cols + 2` apart.
+    let bw = (2 * (m.cols + 2) + 1).min(n - 1);
+    let mut ne = Normal { bw, a: vec![0.0; n * (bw + 1)], b: vec![0.0; n] };
     // Prior.
     for k in 0..nv {
         let v = m.verts[k];
@@ -247,7 +300,7 @@ pub fn solve_mesh(size: [f64; 2], o: &MeshOpts, pairs: &[([f64; 2], [f64; 2])], 
         let ks = [m.idx(i, j), m.idx(i + 1, j), m.idx(i, j + 1), m.idx(i + 1, j + 1)];
         let w = [(1.0 - u) * (1.0 - v), u * (1.0 - v), (1.0 - u) * v, u * v];
         for d in 0..2 {
-            let coefs: Vec<(usize, f64)> = ks.iter().zip(w).map(|(k, w)| (2 * k + d, w)).collect();
+            let coefs: [(usize, f64); 4] = std::array::from_fn(|c| (2 * ks[c] + d, w[c]));
             ne.row(&coefs, src[d], 1.0);
         }
         used += 1;
@@ -277,12 +330,163 @@ pub fn solve_mesh(size: [f64; 2], o: &MeshOpts, pairs: &[([f64; 2], [f64; 2])], 
         }
     }
     let mut x = ne.b;
-    if cholesky_solve(&mut ne.a, n, &mut x) {
+    if cholesky_band(&mut ne.a, n, bw, &mut x) {
         for k in 0..nv {
             m.verts[k] = [x[2 * k], x[2 * k + 1]];
         }
     }
     m
+}
+
+/// Symmetric eigen-decomposition by Householder tridiagonalisation and implicit QL (textbook:
+/// Golub & Van Loan §8.3; Wilkinson & Reinsch). Same contract as `sym_eigen`: eigenvalues
+/// ascending, eigenvectors as columns of a row-major matrix.
+fn sym_eigen_ql(a_in: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
+    // z: row-major n x n, starts as A, ends as eigenvectors (columns).
+    let mut z = a_in.to_vec();
+    let mut d = vec![0.0; n];
+    let mut e = vec![0.0; n];
+    // tred2
+    for i in (1..n).rev() {
+        let l = i - 1;
+        let mut h = 0.0;
+        if l > 0 {
+            let scale: f64 = (0..=l).map(|k| z[i * n + k].abs()).sum();
+            if scale == 0.0 {
+                e[i] = z[i * n + l];
+            } else {
+                for k in 0..=l {
+                    z[i * n + k] /= scale;
+                    h += z[i * n + k] * z[i * n + k];
+                }
+                let f = z[i * n + l];
+                let g = if f >= 0.0 { -h.sqrt() } else { h.sqrt() };
+                e[i] = scale * g;
+                h -= f * g;
+                z[i * n + l] = f - g;
+                let mut f = 0.0;
+                for j in 0..=l {
+                    z[j * n + i] = z[i * n + j] / h;
+                    let mut g = 0.0;
+                    for k in 0..=j {
+                        g += z[j * n + k] * z[i * n + k];
+                    }
+                    for k in j + 1..=l {
+                        g += z[k * n + j] * z[i * n + k];
+                    }
+                    e[j] = g / h;
+                    f += e[j] * z[i * n + j];
+                }
+                let hh = f / (h + h);
+                for j in 0..=l {
+                    let f = z[i * n + j];
+                    let g = e[j] - hh * f;
+                    e[j] = g;
+                    for k in 0..=j {
+                        z[j * n + k] -= f * e[k] + g * z[i * n + k];
+                    }
+                }
+            }
+        } else {
+            e[i] = z[i * n + l];
+        }
+        d[i] = h;
+    }
+    d[0] = 0.0;
+    e[0] = 0.0;
+    for i in 0..n {
+        if d[i] != 0.0 {
+            for j in 0..i {
+                let mut g = 0.0;
+                for k in 0..i {
+                    g += z[i * n + k] * z[k * n + j];
+                }
+                for k in 0..i {
+                    z[k * n + j] -= g * z[k * n + i];
+                }
+            }
+        }
+        d[i] = z[i * n + i];
+        z[i * n + i] = 1.0;
+        for j in 0..i {
+            z[j * n + i] = 0.0;
+            z[i * n + j] = 0.0;
+        }
+    }
+    // tqli
+    for i in 1..n {
+        e[i - 1] = e[i];
+    }
+    if n > 0 {
+        e[n - 1] = 0.0;
+    }
+    for l in 0..n {
+        let mut iter = 0;
+        loop {
+            let mut m = l;
+            while m + 1 < n {
+                let dd = d[m].abs() + d[m + 1].abs();
+                if e[m].abs() <= f64::EPSILON * dd {
+                    break;
+                }
+                m += 1;
+            }
+            if m == l {
+                break;
+            }
+            iter += 1;
+            if iter > 60 {
+                break;
+            }
+            let mut g = (d[l + 1] - d[l]) / (2.0 * e[l]);
+            let mut r = g.hypot(1.0);
+            g = d[m] - d[l] + e[l] / (g + if g >= 0.0 { r.abs() } else { -r.abs() });
+            let (mut s, mut c, mut p) = (1.0, 1.0, 0.0);
+            let mut i = m;
+            let mut early = false;
+            while i > l {
+                i -= 1;
+                let f = s * e[i];
+                let b = c * e[i];
+                r = f.hypot(g);
+                e[i + 1] = r;
+                if r == 0.0 {
+                    d[i + 1] -= p;
+                    e[m] = 0.0;
+                    early = true;
+                    break;
+                }
+                s = f / r;
+                c = g / r;
+                g = d[i + 1] - p;
+                r = (d[i] - g) * s + 2.0 * c * b;
+                p = s * r;
+                d[i + 1] = g + p;
+                g = c * r - b;
+                for k in 0..n {
+                    let f = z[k * n + i + 1];
+                    z[k * n + i + 1] = s * z[k * n + i] + c * f;
+                    z[k * n + i] = c * z[k * n + i] - s * f;
+                }
+            }
+            if early {
+                continue;
+            }
+            d[l] -= p;
+            e[l] = g;
+            e[m] = 0.0;
+        }
+    }
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&x, &y| d[x].total_cmp(&d[y]));
+    let vals = order.iter().map(|&j| d[j]).collect();
+    let mut vecs = vec![0.0; n * n];
+    for (k, &j) in order.iter().enumerate() {
+        for r in 0..n {
+            vecs[r * n + k] = z[r * n + j];
+        }
+    }
+    (vals, vecs)
 }
 
 /// Gaussian weights of the frames `lo..=hi` around `t`.
@@ -336,7 +540,7 @@ pub fn smooth_trajectories(tracks: &[Track2D], frames: usize, sigma: f64, rank: 
                     gram[b * m + a] = s;
                 }
             }
-            let (_, vecs) = sym_eigen(&gram, m);
+            let (_, vecs) = sym_eigen_ql(&gram, m);
             // C[q][c] = vecs[c][m − 1 − q] (largest first).
             let cmat: Vec<Vec<f64>> = (0..k).map(|q| (0..m).map(|c| vecs[c * m + (m - 1 - q)]).collect()).collect();
             let g = gauss(lo, hi, t, sigma.max(1e-6));
@@ -443,5 +647,68 @@ mod tests {
             err_h += (qh[0] - s[0]).hypot(qh[1] - s[1]);
         }
         assert!(err_mesh < 0.35 * err_h, "{err_mesh} vs {err_h}");
+    }
+
+    fn lcg(seed: &mut u64) -> f64 {
+        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (*seed >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+    }
+
+    #[test]
+    fn ql_eigen_matches_jacobi() {
+        use crate::camtrack::linalg::sym_eigen;
+        let mut seed = 7;
+        for n in [1, 2, 5, 31, 61] {
+            // Large magnitudes like a trajectory Gram matrix, with a low-rank part.
+            let rank = 3.min(n);
+            let f: Vec<f64> = (0..n * rank).map(|_| 300.0 * lcg(&mut seed)).collect();
+            let mut a = vec![0.0; n * n];
+            for i in 0..n {
+                for j in 0..n {
+                    a[i * n + j] = (0..rank).map(|k| f[i * rank + k] * f[j * rank + k]).sum::<f64>() * 40.0;
+                }
+            }
+            let (v0, e0) = sym_eigen(&a, n);
+            let (v1, e1) = sym_eigen_ql(&a, n);
+            let top = v0[n - 1].abs().max(1.0);
+            for k in 0..n {
+                assert!((v0[k] - v1[k]).abs() < 1e-9 * top, "n {n} value {k}: {} vs {}", v0[k], v1[k]);
+            }
+            // The leading subspace (as a projector; signs and basis are free).
+            let r = rank.min(n);
+            for i in 0..n {
+                for j in 0..n {
+                    let p0: f64 = (0..r).map(|q| e0[i * n + n - 1 - q] * e0[j * n + n - 1 - q]).sum();
+                    let p1: f64 = (0..r).map(|q| e1[i * n + n - 1 - q] * e1[j * n + n - 1 - q]).sum();
+                    assert!((p0 - p1).abs() < 1e-9, "n {n} projector ({i},{j}): {p0} vs {p1}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn band_cholesky_matches_dense() {
+        let mut seed = 11;
+        for (n, bw) in [(1, 0), (6, 2), (40, 7), (40, 39)] {
+            let mut dense = vec![0.0; n * n];
+            let mut band = vec![0.0; n * (bw + 1)];
+            for i in 0..n {
+                for j in i.saturating_sub(bw)..=i {
+                    let v = if i == j { 4.0 * bw as f64 + 2.0 + lcg(&mut seed) } else { lcg(&mut seed) };
+                    dense[i * n + j] = v;
+                    dense[j * n + i] = v;
+                    band[i * (bw + 1) + j + bw - i] = v;
+                }
+            }
+            let b: Vec<f64> = (0..n).map(|_| 10.0 * lcg(&mut seed)).collect();
+            let (mut x0, mut x1) = (b.clone(), b);
+            assert!(cholesky_solve(&mut dense, n, &mut x0));
+            assert!(cholesky_band(&mut band, n, bw, &mut x1));
+            for (a, b) in x0.iter().zip(&x1) {
+                assert!((a - b).abs() < 1e-10, "{a} vs {b}");
+            }
+        }
+        let mut band = vec![-1.0, 0.0, 0.0, 1.0];
+        assert!(!cholesky_band(&mut band, 2, 1, &mut [1.0, 1.0]));
     }
 }
