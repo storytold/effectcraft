@@ -152,15 +152,6 @@ pub fn settings(params: &Params, fps: f64) -> StabSettings {
     }
 }
 
-fn fnv(bytes: &[u8]) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in bytes {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x0100_0000_01b3);
-    }
-    h
-}
-
 struct KeyHasher(u64);
 impl Hasher for KeyHasher {
     fn finish(&self) -> u64 {
@@ -183,24 +174,12 @@ fn settings_key(s: &StabSettings) -> u64 {
     h.finish()
 }
 
-type AnalysisCache = Mutex<HashMap<u64, Arc<WarpAnalysis>>>;
 type PlanCache = Mutex<HashMap<(u64, u64), Arc<Plan>>>;
 
-/// Parsed analyses by content hash (parsing a long clip's JSON every frame would dominate).
+/// Parsed analyses and their content keys; cache hits compare source text without rehashing.
 fn analysis_cached(json: &str) -> Option<(u64, Arc<WarpAnalysis>)> {
-    static C: OnceLock<AnalysisCache> = OnceLock::new();
-    let key = fnv(json.as_bytes());
-    let c = C.get_or_init(Default::default);
-    if let Some(a) = c.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
-        return Some((key, a.clone()));
-    }
-    let a = Arc::new(WarpAnalysis::from_json(json)?);
-    let mut m = c.lock().unwrap_or_else(|e| e.into_inner());
-    if m.len() > 8 {
-        m.clear();
-    }
-    m.insert(key, a.clone());
-    Some((key, a))
+    static C: crate::analysis_cache::AnalysisCache<WarpAnalysis> = crate::analysis_cache::AnalysisCache::new();
+    C.get(json, WarpAnalysis::from_json)
 }
 
 fn plans() -> &'static PlanCache {
@@ -534,6 +513,7 @@ fn dot(img: &mut Image, c: [f64; 2], r: f64, col: Px) {
 mod tests {
     use super::*;
     use crate::EffectEnv;
+    use crate::analysis_cache::fnv;
     use effectcraft_track::stabilize::FrameMotion;
 
     fn analysis_json(n: usize, w: f64, h: f64, shift: impl Fn(usize) -> [f64; 2]) -> String {
@@ -602,6 +582,25 @@ mod tests {
         let img = frame([10.0, 10.0]);
         let ctx = EffectCtx { params: &ps, time: 0.0, layer_size: [64.0, 48.0], seed: 1, adjustment: false, env: EffectEnv::default() };
         assert_eq!(render(&ctx, Buf { img: img.clone(), offset: [0.0; 2], scale: 1.0 }).img.data, img.data);
+    }
+
+    #[test]
+    fn changing_analysis_changes_the_plan_key() {
+        let json = analysis_json(10, 64.0, 48.0, |k| [k as f64 * 0.1, 0.0]);
+        let mut ps = params(&json, 2, 0);
+        let before = summary_key(&ps).unwrap();
+        assert_eq!(before[0], fnv(json.as_bytes()));
+        let mut a = WarpAnalysis::from_json(&json).unwrap();
+        a.start = 1.0;
+        ps.values.insert(ANALYSIS.into(), Value::Str(a.to_json()));
+        let after = summary_key(&ps).unwrap();
+        assert_ne!(before[0], after[0]);
+        assert_eq!(before[1], after[1]);
+        assert_eq!(*analysis(&ps).unwrap(), a);
+        ps.values.insert(ANALYSIS.into(), Value::Str(json));
+        assert_eq!(summary_key(&ps).unwrap(), before);
+        ps.values.insert(ANALYSIS.into(), Value::Str(String::new()));
+        assert!(analysis(&ps).is_none());
     }
 
     #[test]
