@@ -241,7 +241,7 @@ fn commit(app: &mut EffectcraftApp, ctx: &egui::Context) {
     }
 }
 
-fn to_color32(c: [f32; 4]) -> Color32 {
+pub(super) fn to_color32(c: [f32; 4]) -> Color32 {
     let b = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
     Color32::from_rgba_unmultiplied(b(c[0]), b(c[1]), b(c[2]), b(c[3]))
 }
