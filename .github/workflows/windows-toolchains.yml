@@ -1,0 +1,74 @@
+# Windows builds with the toolchains contributors use, not just the MSVC one releases use: build
+# the desktop app and the CLI with MSVC, with GNU (mingw-w64 from MSYS2, the setup CONTRIBUTING.md
+# describes), and with GNU linked by Rust's bundled LLD plus mingw-w64's `libshlwapi.a` (#1886),
+# then run each binary with `--version`. Both packages build in one `cargo build`, the way people
+# build them, so features unify and the CLI links everything the desktop app pulls in.
+name: Windows toolchains
+
+# Nightly on main (a dependency update is what brings in a new system library), and on PRs that
+# change this workflow or the lockfile.
+on:
+  schedule:
+    - cron: "41 5 * * *"
+  pull_request:
+    paths:
+      - .github/workflows/windows-toolchains.yml
+      - Cargo.lock
+  workflow_dispatch:
+
+concurrency:
+  group: windows-toolchains-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: windows-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: msvc, target: x86_64-pc-windows-msvc }
+          - { name: gnu, target: x86_64-pc-windows-gnu }
+          - { name: gnu-rust-lld, target: x86_64-pc-windows-gnu, rust-lld: true }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Rust (stable-${{ matrix.target }})
+        run: |
+          rustup toolchain install stable-${{ matrix.target }} --profile minimal --no-self-update
+          rustup default stable-${{ matrix.target }}
+          rustc -vV
+      - name: mingw-w64 from MSYS2
+        if: matrix.target == 'x86_64-pc-windows-gnu'
+        run: /c/msys64/usr/bin/pacman -Sy --noconfirm --needed mingw-w64-x86_64-gcc
+      - name: Put it first on PATH
+        if: matrix.target == 'x86_64-pc-windows-gnu' && !matrix.rust-lld
+        run: |
+          printf '%s\n' 'C:\msys64\mingw64\bin' >> "$GITHUB_PATH"
+      # Only libshlwapi.a, in a folder of its own: with all of mingw-w64's lib folder on the search
+      # path, its C runtime mixes with Rust's bundled one (undefined `DllEntryPoint`).
+      - name: Link with Rust's bundled LLD and mingw-w64's shlwapi import library
+        if: matrix.rust-lld
+        run: |
+          mkdir -p /c/gnu-import-libs
+          cp /c/msys64/mingw64/lib/libshlwapi.a /c/gnu-import-libs/
+          echo 'CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=rust-lld' >> "$GITHUB_ENV"
+          echo 'CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS=-C link-self-contained=yes -L native=C:/gnu-import-libs' >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ${{ matrix.name }}
+      - name: Build the desktop app and the CLI
+        run: |
+          gcc --version | head -1 || true
+          cargo build --locked --target ${{ matrix.target }} -p effectcraft -p effectcraft-cli
+      - name: Run them
+        run: |
+          target/${{ matrix.target }}/debug/effectcraft.exe --version
+          target/${{ matrix.target }}/debug/effectcraft-cli.exe --version
