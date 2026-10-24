@@ -194,6 +194,25 @@ fn tap_hash(x: i32, y: i32) -> u32 {
     return h;
 }
 
+fn tap_jitter_at(x: i32, y: i32) -> vec2<f32> {
+    let h = tap_hash(x, y);
+    return vec2<f32>(f32(h & 0xFFFFu) * (1.0 / 65536.0) - 0.5, f32((h >> 16u) & 0xFFFFu) * (1.0 / 65536.0) - 0.5);
+}
+
+// shade::tap_jitter: the hash at the four corners of the receiver's 1/8-texel lattice
+// cell (cx, cy), blended bilinearly by the receiver's position w in the cell.
+fn tap_jitter(cx: i32, cy: i32, w: vec2<f32>, i: i32, j: i32) -> vec2<f32> {
+    let x = cx + i * 7919;
+    let y = cy + j * 7919;
+    let c00 = tap_jitter_at(x, y);
+    let c10 = tap_jitter_at(x + 1, y);
+    let c01 = tap_jitter_at(x, y + 1);
+    let c11 = tap_jitter_at(x + 1, y + 1);
+    let a = c00 + (c10 - c00) * w.x;
+    let b = c01 + (c11 - c01) * w.x;
+    return a + (b - a) * w.y;
+}
+
 const PCF_MAX_TAPS: i32 = 10;
 const PLANE_SLOPE_MAX: f32 = 64.0;
 
@@ -244,7 +263,8 @@ fn shadow_factor(m: u32, p: vec3<f32>, ng: vec3<f32>, n_l: f32) -> f32 {
     // shadows off their casters), each texel compared against the receiver plane's
     // depth at its centre so wide kernels never self-shadow a lit surface, an N×N grid
     // jittered by an integer hash (bit-identical across backends) of the sub-texel
-    // cell and tap index, and bilinear compares of the four nearest texel centres.
+    // lattice and tap index, blended across the receiver's lattice cell, and bilinear
+    // compares of the four nearest texel centers.
     // extra.y is the wanted penumbra in output pixels; dividing by the receiver's
     // texel footprint keeps it in output pixels at any map resolution, and the reach
     // is at least two texels so hard edges ramp over texel steps instead of showing them.
@@ -268,16 +288,17 @@ fn shadow_factor(m: u32, p: vec3<f32>, ng: vec3<f32>, n_l: f32) -> f32 {
     let n = clamp(i32(ceil(reach)) + 1, 5, PCF_MAX_TAPS);
     let step = reach / f32(n - 1);
     let half = f32(n - 1) * 0.5;
-    let cx = i32(floor(u * 8.0));
-    let cy = i32(floor(v * 8.0));
+    let gu = u * 8.0;
+    let gv = v * 8.0;
+    let cx = i32(floor(gu));
+    let cy = i32(floor(gv));
+    let wc = vec2<f32>(gu - floor(gu), gv - floor(gv));
     var lit = 0.0;
     for (var j = 0; j < n; j = j + 1) {
         for (var i = 0; i < n; i = i + 1) {
-            let h = tap_hash(cx + i * 7919, cy + j * 7919);
-            let jx = f32(h & 0xFFFFu) * (1.0 / 65536.0) - 0.5;
-            let jy = f32((h >> 16u) & 0xFFFFu) * (1.0 / 65536.0) - 0.5;
-            let su = u + ((f32(i) - half) + jx) * step;
-            let sv = v + ((f32(j) - half) + jy) * step;
+            let jit = tap_jitter(cx, cy, wc, i, j);
+            let su = u + ((f32(i) - half) + jit.x) * step;
+            let sv = v + ((f32(j) - half) + jit.y) * step;
             // Texel (x, y) holds the depth at its centre (x + 0.5, y + 0.5); each of the
             // four is compared against the receiver plane at that centre.
             let tu = su - 0.5;

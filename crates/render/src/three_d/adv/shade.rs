@@ -217,6 +217,25 @@ fn tap_hash(x: i32, y: i32) -> u32 {
     h
 }
 
+/// The jitter of tap (`i`, `j`), each axis in [−0.5, 0.5): [`tap_hash`] values at the four
+/// corners of the receiver's 1/8-texel lattice cell (`cx`, `cy`), blended bilinearly by the
+/// receiver's position in the cell (`wx`, `wy`). The jitter is continuous in the receiver's
+/// map position, so a position that differs between backends in its last bits moves the
+/// taps by an amount proportional to that difference and does not switch them to another
+/// cell's jitter.
+fn tap_jitter(cx: i32, cy: i32, wx: f32, wy: f32, i: i32, j: i32) -> (f32, f32) {
+    let corner = |dx: i32, dy: i32| -> (f32, f32) {
+        let h = tap_hash(cx.wrapping_add(dx).wrapping_add(i.wrapping_mul(7919)), cy.wrapping_add(dy).wrapping_add(j.wrapping_mul(7919)));
+        (((h & 0xFFFF) as f32) * (1.0 / 65536.0) - 0.5, (((h >> 16) & 0xFFFF) as f32) * (1.0 / 65536.0) - 0.5)
+    };
+    let (c00, c10, c01, c11) = (corner(0, 0), corner(1, 0), corner(0, 1), corner(1, 1));
+    let ax = c00.0 + (c10.0 - c00.0) * wx;
+    let bx = c01.0 + (c11.0 - c01.0) * wx;
+    let ay = c00.1 + (c10.1 - c00.1) * wx;
+    let by = c01.1 + (c11.1 - c01.1) * wx;
+    (ax + (bx - ax) * wy, ay + (by - ay) * wy)
+}
+
 /// Upper bound of the PCF grid's taps per axis. The grid grows with the reach so taps
 /// stay about one texel apart for moderate penumbrae; the cap bounds the per-fragment
 /// cost of very wide ones (bilinear taps still overlap and the jitter dithers the rest).
@@ -232,8 +251,9 @@ const PLANE_SLOPE_MAX: f32 = 64.0;
 ///
 /// PCF over an N×N tap grid (5 ≤ N ≤ [`PCF_MAX_TAPS`]) spread over a reach derived
 /// from `radius` (the wanted penumbra in output pixels) divided by the receiver's
-/// texel footprint, each tap jittered by an integer hash of the receiver's
-/// sub-texel cell and the tap index, and each tap comparing against the four
+/// texel footprint, each tap jittered by [`tap_jitter`] (an integer hash of the
+/// receiver's sub-texel lattice and the tap index, blended across the receiver's
+/// lattice cell), and each tap comparing against the four
 /// nearest texel centres with bilinear weights. The jitter detaches the tap grid
 /// from the texel axes (axis-aligned binary taps are what stair-step a straight
 /// shadow edge), and keying it below texel size keeps the dither finer than an
@@ -301,13 +321,13 @@ pub fn shadow_factor(m: &ShadowMap, texels: &[f32], p: [f32; 3], ng: [f32; 3], n
     let n = (reach.ceil() as i32 + 1).clamp(5, PCF_MAX_TAPS);
     let step = reach / (n - 1) as f32;
     let half = (n - 1) as f32 * 0.5;
-    let (cx, cy) = ((u * 8.0).floor() as i32, (v * 8.0).floor() as i32);
+    let (gu, gv) = (u * 8.0, v * 8.0);
+    let (cx, cy) = (gu.floor() as i32, gv.floor() as i32);
+    let (wx, wy) = (gu - gu.floor(), gv - gv.floor());
     let mut lit = 0.0;
     for j in 0..n {
         for i in 0..n {
-            let h = tap_hash(cx.wrapping_add(i.wrapping_mul(7919)), cy.wrapping_add(j.wrapping_mul(7919)));
-            let jx = ((h & 0xFFFF) as f32) * (1.0 / 65536.0) - 0.5;
-            let jy = (((h >> 16) & 0xFFFF) as f32) * (1.0 / 65536.0) - 0.5;
+            let (jx, jy) = tap_jitter(cx, cy, wx, wy, i, j);
             let (su, sv) = (u + ((i as f32 - half) + jx) * step, v + ((j as f32 - half) + jy) * step);
             // Texel (x, y) holds the depth at its centre (x + 0.5, y + 0.5); each of the
             // four is compared against the receiver plane at that centre.

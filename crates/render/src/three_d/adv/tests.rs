@@ -888,6 +888,26 @@ fn penumbra_dithers_along_a_straight_edge() {
 }
 
 #[test]
+fn penumbra_jitter_is_continuous_across_its_lattice() {
+    // Receiver pairs 1/5000 texel either side of a line of the 1/8-texel jitter lattice,
+    // across u and across v, inside the penumbra. The GPU places a receiver within a few
+    // ulps of the CPU, so coverage that jumps at a lattice line differs between the two
+    // backends there; both sides of each line must agree within one 8-bit level.
+    let (m, texels) = wall_map(64, 1.0, 6.0);
+    let f = |p: [f32; 2]| shade::shadow_factor(&m, &texels, [p[0], p[1], 13.5], FACING, 1.0);
+    let mut worst = 0.0f32;
+    for k in 0..16 {
+        let line = k as f32 * 0.125;
+        for (a, b) in [([-16.0 + line - 2e-4, 0.3], [-16.0 + line + 2e-4, 0.3]), ([-16.3, line - 2e-4], [-16.3, line + 2e-4])] {
+            let (fa, fb) = (f(a), f(b));
+            assert!(fa > 0.05 && fa < 0.95, "{a:?} lies in the penumbra: {fa}");
+            worst = worst.max((fa - fb).abs());
+        }
+    }
+    assert!(worst < 1.0 / 255.0, "coverage jumps by {worst} across a jitter lattice line");
+}
+
+#[test]
 fn penumbra_width_is_independent_of_map_resolution() {
     // One wall (edge at world x = −16) in a 64-texel map at 1 texel per world unit and
     // a 256-texel map at 4. Shadow Diffusion sets the penumbra in output pixels (world
