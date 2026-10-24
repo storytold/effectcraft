@@ -802,6 +802,15 @@ fn search_rows(l: &Layer, q: &str) -> Vec<Row> {
             }
         }
     }
+    /// Does property `p` match the search `q` (lowercase)? A 3D layer's Rotation is drawn as
+    /// "Z Rotation" beside X and Y, so that drawn name is searched as well.
+    fn prop_hit(l: &Layer, p: &Property, q: &str) -> bool {
+        crate::i18n::props::matches(&p.name, q)
+            || (p.name == "Rotation"
+                && l.is_3d()
+                && l.transform().and_then(|t| t.get("rotation")).is_some_and(|r| r.uid == p.uid)
+                && crate::i18n::props::matches("Z Rotation", q))
+    }
     /// The children of `g` that match `q`: a name-matching group brings its whole contents
     /// (`all`); otherwise the search recurses and keeps only subtrees with hits. A shape
     /// group's inner Contents is searched through without a row of its own (as in AE).
@@ -814,6 +823,7 @@ fn search_rows(l: &Layer, q: &str) -> Vec<Row> {
                     // An effect group also matches the name the row draws, so a search finds
                     // `高斯模糊` in a Chinese interface and `Gaussian Blur` in an English one.
                     let hit = sg.name.to_lowercase().contains(q)
+                        || crate::i18n::props::matches(&sg.name, q)
                         || matches!(&sg.kind, GroupKind::Effect { effect } if crate::i18n::effects::matches(effect, &sg.name, q));
                     if hit {
                         out.push(group_row(l, sg, depth, g));
@@ -827,7 +837,7 @@ fn search_rows(l: &Layer, q: &str) -> Vec<Row> {
                         out.extend(inner);
                     }
                 }
-                Node::Prop(p) if prop_visible(p, l) && p.name.to_lowercase().contains(q) => {
+                Node::Prop(p) if prop_visible(p, l) && prop_hit(l, p, q) => {
                     out.push(Row { layer: l.id, depth, kind: RowKind::Prop { uid: p.uid } });
                 }
                 _ => {}
@@ -2392,7 +2402,11 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                         crate::i18n::tr("Parent pick whip: drag onto a layer"),
                     );
                     let pr_rect = Rect::from_min_size(pos2(cw.parent + 20.0, cy - 9.0), vec2(94.0, 18.0));
-                    let plabel = layer.parent.and_then(|p| comp.layer(p)).map(|l| format!("{}. {}", idx_of(l.id), l.name)).unwrap_or_else(|| "None".into());
+                    let plabel = layer
+                        .parent
+                        .and_then(|p| comp.layer(p))
+                        .map(|l| format!("{}. {}", idx_of(l.id), l.name))
+                        .unwrap_or_else(|| crate::i18n::tr("None").into());
                     let presp = widgets::dropdown(ui, pr_rect, &plabel, &t, egui::Id::new(("parent", layer.id.0)));
                     app.auto.add(&format!("timeline.layer.{}.parent", layer.id.0), pr_rect, "Parent");
                     let pop = egui::Id::new(("par-pop", layer.id.0));
@@ -2400,7 +2414,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                         widgets::open_popup(ui, pop);
                     }
                     let mut cands: Vec<&Layer> = vec![];
-                    let mut popts = vec!["None".to_string(), "-".to_string()];
+                    let mut popts = vec![crate::i18n::tr("None").to_string(), "-".to_string()];
                     if widgets::popup_is_open(ui, pop) {
                         for (i, l) in comp.layers.iter().enumerate().filter(|(_, l)| l.id != layer.id) {
                             popts.push(format!("{}. {}", i + 1, l.name));
@@ -2573,7 +2587,9 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     _ => None,
                 }) {
                     Some(effect) => crate::i18n::effects::group(effect, name),
-                    None => name.clone(),
+                    // A mask, a shape group, Transform, Contents…: the catalog's name, or the
+                    // name itself when the user renamed the group.
+                    None => crate::i18n::props::name(name),
                 };
                 // Selected groups (an effect, a mask, a shape group…) highlight like selected
                 // property rows.
@@ -2737,7 +2753,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 );
                 let indent = cw.name + 6.0 + 14.0 * row.depth as f32;
                 lp.text(pos2(indent + 12.0, cy), Align2::LEFT_CENTER, crate::i18n::tr("Expression:"), Tokens::ui(11.5), t.text_dim);
-                lp.text(pos2(indent + 82.0, cy), Align2::LEFT_CENTER, &prop.name, Tokens::ui(11.5), t.text);
+                lp.text(pos2(indent + 82.0, cy), Align2::LEFT_CENTER, crate::i18n::props::name(&prop.name), Tokens::ui(11.5), t.text);
                 // "=" enable switch and the property pick whip (AE's expression controls).
                 let en_r = Rect::from_center_size(pos2(cw.switches + 10.0, cy), vec2(16.0, 16.0));
                 let en = ui.interact(en_r, egui::Id::new(("expr-en", uid)), Sense::click()).on_hover_text(crate::i18n::tr("Enable Expression"));
@@ -2956,7 +2972,10 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 let name_x = indent + 12.0;
                 // 3D layers show Rotation as "Z Rotation" next to X/Y Rotation.
                 let is_tr_rot = layer.transform().and_then(|t| t.get("rotation")).is_some_and(|r| r.uid == prop.uid);
-                let base = if is_tr_rot && prop.name == "Rotation" && layer.is_3d() { "Z Rotation".to_string() } else { prop.name.clone() };
+                // A property is stored under its English name, which scripts, expressions and the
+                // control channel match on; only what the row draws goes through the catalog.
+                let english = if is_tr_rot && prop.name == "Rotation" && layer.is_3d() { "Z Rotation".to_string() } else { prop.name.clone() };
+                let base = crate::i18n::props::name(&english);
                 let pname = if prop.has_expression() { format!("{base}  =") } else { base };
                 lp.text(pos2(name_x, cy), Align2::LEFT_CENTER, &pname, Tokens::ui(12.0), if prop.has_expression() { t.expr_text } else { t.text });
                 let name_rect = Rect::from_min_max(pos2(name_x, r.min.y), pos2(cw.switches - 2.0, r.max.y));

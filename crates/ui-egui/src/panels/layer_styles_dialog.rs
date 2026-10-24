@@ -216,7 +216,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                                 if matches!(p.ui, ParamUi::Hidden) {
                                     return;
                                 }
-                                let lbl = ui.label(&p.name);
+                                let lbl = ui.label(crate::i18n::props::name(&p.name));
                                 let v = p.value_at(lt);
                                 let edit = ui.scope(|ui| control(ui, p, &v));
                                 if let Some(nv) = edit.inner {

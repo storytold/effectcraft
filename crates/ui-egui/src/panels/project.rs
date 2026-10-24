@@ -803,7 +803,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             }
             let cp = lp.with_clip_rect(cell);
             let txt = match *key {
-                "type" => it.type_name().to_string(),
+                "type" => crate::i18n::props::name(it.type_name()),
                 "size" => file_size(it).map(fmt_size).unwrap_or_default(),
                 "duration" => it.duration().map(|d| fmt_dur(d.seconds(), it.frame_rate().map(|r| r.as_f64()).unwrap_or(30.0))).unwrap_or_default(),
                 "fps" => it.frame_rate().map(|f| format!("{:.2}", f.as_f64())).unwrap_or_default(),

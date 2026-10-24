@@ -196,9 +196,9 @@ pub(crate) fn toggle_pick(app: &mut EffectcraftApp, kind: &str, layer: &Layer, p
         app.ui.fx_pick = Some(pick);
         app.ui.text_color_pick = None;
         app.ui.status = if kind == "point" {
-            format!("Click in the Composition panel to set {}", prop.name)
+            format!("Click in the Composition panel to set {}", crate::i18n::props::name(&prop.name))
         } else {
-            format!("Click in the Composition panel to sample {}", prop.name)
+            format!("Click in the Composition panel to sample {}", crate::i18n::props::name(&prop.name))
         };
     }
 }
@@ -271,7 +271,15 @@ fn prop_row(
     };
     let name_clip = Rect::from_min_max(pos2(swr.max.x + 6.0, r.min.y), pos2(vx - 6.0, r.max.y));
     app.auto.add(&format!("effectControls.prop.{uid}.name"), name_clip, &prop.name);
-    p.with_clip_rect(name_clip.intersect(p.clip_rect())).text(pos2(swr.max.x + 6.0, cy), Align2::LEFT_CENTER, &prop.name, Tokens::ui(12.0), t.text);
+    // A parameter is stored under its English name, which scripts, expressions and the control
+    // channel match on; only what the row draws goes through the catalog.
+    p.with_clip_rect(name_clip.intersect(p.clip_rect())).text(
+        pos2(swr.max.x + 6.0, cy),
+        Align2::LEFT_CENTER,
+        crate::i18n::props::name(&prop.name),
+        Tokens::ui(12.0),
+        t.text,
+    );
     let name_response = ui.interact(name_clip, egui::Id::new(("ec-prop-name", uid)), Sense::click());
     if name_response.double_clicked() {
         app.ui.timeline.search.clear();
@@ -417,7 +425,7 @@ fn prop_row(
             if widgets::checkbox(ui, cr, *b, &t, egui::Id::new(("ec-b", uid))).clicked() {
                 set(actions, json!(!b));
             }
-            p.text(pos2(cr.max.x + 6.0, cy), Align2::LEFT_CENTER, &prop.name, Tokens::ui(12.0), t.text_dim);
+            p.text(pos2(cr.max.x + 6.0, cy), Align2::LEFT_CENTER, crate::i18n::props::name(&prop.name), Tokens::ui(12.0), t.text_dim);
             app.auto.add(&format!("effectControls.prop.{uid}.value"), cr, &prop.name);
         }
         Value::Enum(i) => {

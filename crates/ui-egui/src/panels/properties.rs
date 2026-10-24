@@ -85,7 +85,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
 
     // ---------------------------------------------------------------- Layer Transform
     if let Some(tr) = layer.transform().cloned() {
-        section_header(app, ui, &p, x0, w, y, "Layer Transform", "properties.transform");
+        section_header(app, ui, &p, x0, w, y, crate::i18n::tr("Layer Transform"), "properties.transform");
         let rr = Rect::from_min_size(pos2(x0 + w - 40.0, y), vec2(40.0, ROW_H));
         let resp = ui.interact(rr, egui::Id::new("props-reset"), Sense::click());
         p.text(rr.right_center(), Align2::RIGHT_CENTER, crate::i18n::tr("Reset"), Tokens::ui(12.0), if resp.hovered() { t.accent_hover } else { t.accent });
@@ -118,7 +118,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         divider(&p, x0, w, y - 4.0, &t);
         y = paragraph_section(app, ui, &p, &layer, &doc, x0, w, y + 4.0, &mut actions);
         divider(&p, x0, w, y - 4.0, &t);
-        section_header(app, ui, &p, x0, w, y + 4.0, "Text Animation", "properties.textAnimation");
+        section_header(app, ui, &p, x0, w, y + 4.0, crate::i18n::tr("Text Animation"), "properties.textAnimation");
         y += ROW_H + 10.0;
         // Both buttons grow with their (translated) labels; English keeps its 116 / 84 px.
         let text_w = |s: &str| p.layout_no_wrap(s.to_string(), Tokens::ui(12.0), t.text).size().x;
@@ -244,7 +244,7 @@ fn transform_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter,
             actions.push(("prop.toggleAnimation".into(), json!({"layer": lid, "prop": uid, "selected": true})));
         }
     }
-    p.text(pos2(r.min.x + 42.0, cy), Align2::LEFT_CENTER, &pr.name, Tokens::ui(12.0), t.text);
+    p.text(pos2(r.min.x + 42.0, cy), Align2::LEFT_CENTER, crate::i18n::props::name(&pr.name), Tokens::ui(12.0), t.text);
     let vx = r.min.x + (r.width() * 0.5).max(130.0);
     let label = Rect::from_min_max(pos2(r.min.x + 42.0, r.min.y), pos2(vx - 20.0, r.max.y));
     let resp = ui.interact(label, egui::Id::new(("props-label", uid)), Sense::click());
@@ -352,7 +352,7 @@ fn text_section(
         v["layer"] = json!(lid);
         actions.push(("layer.setText".into(), v));
     };
-    section_header(app, ui, p, x0, w, y, "Text", "properties.text");
+    section_header(app, ui, p, x0, w, y, crate::i18n::tr("Text"), "properties.text");
     y += ROW_H + 4.0;
     // Font family and style.
     let fr = Rect::from_min_size(pos2(x0, y), vec2(w, 22.0));
@@ -435,7 +435,7 @@ fn text_section(
         if crate::widgets::color_popup(ui, pop, sw.left_bottom(), &mut rgb) {
             set(actions, json!({key: [rgb[0], rgb[1], rgb[2]], "merge": format!("props-text-{key}")}));
         }
-        p.text(pos2(sw.max.x + 8.0, sw.center().y), Align2::LEFT_CENTER, label, Tokens::ui(12.0), t.text);
+        p.text(pos2(sw.max.x + 8.0, sw.center().y), Align2::LEFT_CENTER, crate::i18n::tr(label), Tokens::ui(12.0), t.text);
     }
     y += 52.0;
     y = more_button(app, ui, p, x0, y, "props-text-more", "properties.text.more", PanelKind::Character);
@@ -456,7 +456,7 @@ fn paragraph_section(
     actions: &mut Actions,
 ) -> f32 {
     let t = app.tokens;
-    section_header(app, ui, p, x0, w, y, "Paragraph", "properties.paragraph");
+    section_header(app, ui, p, x0, w, y, crate::i18n::tr("Paragraph"), "properties.paragraph");
     y += ROW_H + 4.0;
     for (i, (j, key)) in ALIGNS.into_iter().enumerate() {
         let r = Rect::from_min_size(pos2(x0 + i as f32 * 26.0, y), vec2(22.0, 22.0));
