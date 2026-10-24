@@ -107,8 +107,11 @@ pub fn probe_bytes(path: &str, bytes: Arc<[u8]>) -> Result<Footage> {
     let name = Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.to_string());
     let turn = video_turn(&bytes);
     let rate = video_rate(&bytes);
+    // A WAV's cue points and XMP markers become the footage's markers.
+    let markers = crate::wav_markers::read(&bytes);
     let src = filmcraft_codecs::open_bytes(&name, bytes)?;
     let mut f = footage_from_info(path, src.info());
+    f.markers = markers;
     turn_footage(&mut f, turn);
     correct_rate(&mut f, rate);
     Ok(f)

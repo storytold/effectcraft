@@ -1454,6 +1454,7 @@ name = "effectcraft-media"
 version = "0.16.0"
 dependencies = [
  "craft-docpath",
+ "effectcraft-color",
  "effectcraft-model",
  "effectcraft-pdf",
  "effectcraft-project",
