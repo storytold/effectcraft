@@ -344,6 +344,23 @@ pub fn upgrade_instance(spec: &EffectSpec, g: &mut PropGroup, ids: &mut Ids, lay
     *g != before
 }
 
+/// The spec id of the parameter that an instance of `spec` saved at `id` (`a/b/param`) is now:
+/// `id` itself when the spec still has it, the new id of a renamed parameter
+/// ([`PARAM_ID_ALIASES`]), or the twirl-down path of a top-level parameter that moved into a
+/// group, as [`upgrade_instance`] finds them. Returns `None` when no parameter matches.
+pub fn current_param_id(spec: &EffectSpec, id: &str) -> Option<&'static str> {
+    if let Some(ps) = spec.params.iter().find(|ps| ps.id == id) {
+        return Some(ps.id);
+    }
+    if let Some((_, _, new)) = PARAM_ID_ALIASES.iter().find(|(e, old, _)| *e == spec.id && *old == id) {
+        return Some(new);
+    }
+    if id.contains('/') {
+        return None;
+    }
+    spec.params.iter().find(|ps| ps.id.rsplit('/').next() == Some(id)).map(|ps| ps.id)
+}
+
 /// Bring an effect instance saved before project schema 2 into effect space (#227).
 ///
 /// Layers without a source rectangle (shape, text) have comp-sized effect bounds centred on
@@ -557,6 +574,21 @@ mod tests {
         assert!(upgrade_instance(spec, &mut g, &mut Ids(&mut next), [100.0, 50.0]));
         assert!(g.get("smoothness").is_none());
         assert_eq!(prop_at(&mut g, "stabilization/smoothness").unwrap().value, Value::Scalar(12.0));
+    }
+
+    /// A saved parameter id maps to the parameter `upgrade_instance` moves it to.
+    #[test]
+    fn current_param_id_follows_renames_and_twirl_down_moves() {
+        let stab = find(crate::warp_stab::ID).unwrap();
+        assert_eq!(current_param_id(stab, "stabilization/smoothness"), Some("stabilization/smoothness"));
+        assert_eq!(current_param_id(stab, "smoothness"), Some("stabilization/smoothness"));
+        let ctc = find("ec.color.changetocolor").unwrap();
+        assert_eq!(current_param_id(ctc, "tolerance"), Some("toleranceGroup/hue"));
+        // Radio Waves' old Velocity is the growth speed, not the new Velocity.
+        let waves = find("ec.generate.radiowaves").unwrap();
+        assert_eq!(current_param_id(waves, "velocity"), Some("waveMotion/expansion"));
+        assert_eq!(current_param_id(stab, "noSuchParam"), None);
+        assert_eq!(current_param_id(stab, "other/smoothness"), None);
     }
 
     #[test]

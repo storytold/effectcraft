@@ -88,6 +88,21 @@ fn save_preset(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"path": path, "properties": props.len(), "effects": effects.len()}))
 }
 
+/// Rewrite an effect property path in a preset (`effects/<effect id>[#n]/<param>`) to the current
+/// parameter id when it names a parameter that the effect has since renamed or moved into a
+/// twirl-down group. Any other path comes back unchanged.
+fn upgrade_effect_path(path: &str) -> String {
+    let Some((seg, tail)) = path.strip_prefix("effects/").and_then(|r| r.split_once('/')) else { return path.to_string() };
+    let effect = match seg.rsplit_once('#') {
+        Some((m, n)) if !m.is_empty() && n.parse::<usize>().is_ok() => m,
+        _ => seg,
+    };
+    match effectcraft_effects::find(effect).and_then(|spec| effectcraft_effects::migrate::current_param_id(spec, tail)) {
+        Some(id) if id != tail => format!("effects/{seg}/{id}"),
+        _ => path.to_string(),
+    }
+}
+
 fn apply_preset(s: &mut Session, p: &Value) -> Result<Value> {
     let doc: Value = match (p.get("preset"), str_p(p, "path")) {
         (Some(v), _) => v.clone(),
@@ -117,7 +132,7 @@ fn apply_preset(s: &mut Session, p: &Value) -> Result<Value> {
         .map(|a| {
             a.iter()
                 .filter_map(|v| {
-                    let path = v["path"].as_str()?.to_string();
+                    let path = upgrade_effect_path(v["path"].as_str()?);
                     let value: KV = serde_json::from_value(v["value"].clone()).ok()?;
                     let keys: Vec<Keyframe> = serde_json::from_value(v["keys"].clone()).unwrap_or_default();
                     let expr = serde_json::from_value(v["expression"].clone()).ok().flatten();
@@ -130,16 +145,29 @@ fn apply_preset(s: &mut Session, p: &Value) -> Result<Value> {
         })
         .unwrap_or_default();
     let t = s.time();
+    // Effect bounds per layer size the point defaults of parameters added since the preset was saved.
+    let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
+    let sizes: BTreeMap<LayerId, [f64; 2]> =
+        ids.iter().filter_map(|lid| comp.layer(*lid).map(|l| (*lid, effectcraft_render::effect_bounds(&s.project, comp, l).0))).collect();
     let mut applied = 0;
     let mut skipped = vec![];
     s.edit("Apply Animation Preset", None, |proj, _| {
         let mut next = proj.next_id;
         for lid in &ids {
+            let size = sizes.get(lid).copied().unwrap_or([100.0, 100.0]);
             let l = layer_mut(proj, cid, *lid)?;
             let lt = l.layer_time(t);
             if let Some(fx) = l.props.sub_mut("effects") {
                 for g in &effects {
                     let mut g = g.clone();
+                    // Effects saved by an earlier version get the upgrade a project gets on open.
+                    let spec = match &g.kind {
+                        GroupKind::Effect { effect } => effectcraft_effects::find(effect),
+                        _ => None,
+                    };
+                    if let Some(spec) = spec {
+                        effectcraft_effects::migrate::upgrade_instance(spec, &mut g, &mut Ids(&mut next), size);
+                    }
                     g.reassign_uids(&mut next);
                     next += 1;
                     fx.children.push(Node::Group(g));

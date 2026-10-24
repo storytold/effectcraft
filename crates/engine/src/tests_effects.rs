@@ -772,6 +772,37 @@ fn preset_round_trips_effect_properties_by_match_name() {
     }
 }
 
+/// An animation preset saved by an earlier version gets the upgrade a project gets on open: a
+/// Change to Color saved with its single Tolerance applies with the Tolerance group, that value
+/// as its Hue and the added parameters at their legacy defaults, and a lone property saved at the
+/// old id applies to the new one.
+#[test]
+fn applying_an_old_preset_upgrades_its_effects_and_property_paths() {
+    let (mut s, a, b) = comp_with_two_solids();
+    apply(&mut s, a, "Change to Color");
+    let mut old = layer(&s, a).effects().unwrap().groups().next().unwrap().clone();
+    old.children.retain(|c| c.match_id() != "toleranceGroup");
+    old.children.push(effectcraft_project::Property::new(0, "tolerance", "Tolerance", KV::Scalar(12.0)).into());
+    let preset = json!({"effectcraftAnimationPreset": 1, "name": "old", "properties": [], "effects": [old]});
+    let r = s.execute("anim.applyPreset", json!({"preset": preset, "layers": [b]})).unwrap();
+    assert_eq!(r["applied"], 1, "{r}");
+    let l = layer(&s, b);
+    let g = l.effects().unwrap().groups().next().unwrap();
+    assert!(g.get("tolerance").is_none(), "the old Tolerance is still there");
+    let tol = g.sub("toleranceGroup").expect("no Tolerance group");
+    assert_eq!(tol.get("hue").unwrap().value, KV::Scalar(12.0));
+    assert_eq!(tol.get("lightness").unwrap().value, KV::Scalar(100.0));
+    assert_eq!(tol.get("saturation").unwrap().value, KV::Scalar(100.0));
+    let path = "effects/ec.color.changetocolor/tolerance";
+    let preset = json!({"effectcraftAnimationPreset": 1, "name": "old", "properties": [{"path": path, "value": KV::Scalar(30.0), "keys": []}], "effects": []});
+    let r = s.execute("anim.applyPreset", json!({"preset": preset, "layers": [a]})).unwrap();
+    assert_eq!(r["applied"], 1, "{r}");
+    assert_eq!(r["skipped"], json!([]), "{r}");
+    let l = layer(&s, a);
+    let hue = l.effects().unwrap().groups().next().unwrap().sub("toleranceGroup").unwrap().get("hue").unwrap().value.clone();
+    assert_eq!(hue, KV::Scalar(30.0));
+}
+
 /// #2064: `prop.addKey` accepts the `effects/<match name>[#n]/<property>` path that
 /// `essential.list` reports.
 #[test]
