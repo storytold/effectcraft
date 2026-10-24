@@ -427,3 +427,69 @@ fn deselect_all_discards_an_empty_type_tool_layer() {
     s.execute("edit.undo", json!({})).unwrap();
     assert_eq!(count(&s), before, "that removal is one undo step of its own, as on text.endEdit");
 }
+
+#[test]
+fn duplicate_ends_an_edit_on_already_committed_text() {
+    // The engine route (MCP, control channel, script) with text that was committed before the
+    // edit opened and nothing typed inside it: the edit still ends and the copy is selected.
+    let (mut s, t) = session("Hello");
+    s.execute("text.edit", json!({"layer": t, "caret": 5})).unwrap();
+    let copy = s.execute("edit.duplicate", json!({})).unwrap()[0].as_u64().unwrap();
+    assert!(s.state.text_edit.is_none(), "the open edit ends on a direct edit.duplicate");
+    assert_eq!(s.state.selected_layers, vec![effectcraft_project::LayerId(copy)], "and the copy is selected");
+    assert_eq!(doc(&s, t).text, "Hello", "the committed text is kept on the original");
+    assert_eq!(doc(&s, copy).text, "Hello", "and carried by the copy");
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(s.active_comp().map_or(0, |c| c.layers.len()), 1, "undo removes the copy");
+    assert!(s.state.text_edit.is_none(), "undo does not reopen the edit");
+}
+
+#[test]
+fn duplicate_ends_the_open_edit_and_selects_the_copy() {
+    let (mut s, t) = session("Hello");
+    s.execute("text.edit", json!({"layer": t, "caret": 5})).unwrap();
+    s.execute("text.insert", json!({"text": "!"})).unwrap();
+    assert_eq!(doc(&s, t).text, "Hello!");
+    let copy = s.execute("edit.duplicate", json!({})).unwrap()[0].as_u64().unwrap();
+    // A deselected layer never keeps an open text edit: Duplicate commits the edit through the
+    // same route as text.endEdit before the selection moves, so every route (menu, shortcut,
+    // palette, MCP, script) leaves one final state.
+    assert!(s.state.text_edit.is_none(), "Duplicate ends the open text edit, as Deselect All does");
+    assert_eq!(s.state.selected_layers, vec![effectcraft_project::LayerId(copy)], "and selects the copy");
+    assert_eq!(doc(&s, t).text, "Hello!", "the original keeps the typed text");
+    assert_eq!(doc(&s, copy).text, "Hello!", "the copy carries it too");
+    // The edit ending is no undoable step of its own (as with text.endEdit): undo takes the
+    // duplicate, it does not reopen the edit or undo the typing.
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(s.active_comp().map_or(0, |c| c.layers.len()), 1, "undo removed the copy");
+    assert_eq!(doc(&s, t).text, "Hello!", "the typed text stays committed");
+    assert!(s.state.text_edit.is_none(), "undo does not reopen the edit");
+    // With no open edit Duplicate is untouched by all of this: same behavior, no extra steps.
+    s.execute("edit.duplicate", json!({"layers": [t]})).unwrap();
+    assert_eq!(s.active_comp().map_or(0, |c| c.layers.len()), 2, "a plain duplicate still duplicates");
+    assert!(s.state.text_edit.is_none());
+}
+
+#[test]
+fn duplicate_of_an_empty_type_tool_layer_discards_it_as_endedit_does() {
+    let (mut s, _keep) = session("Hello");
+    let new = s.execute("layer.newText", json!({"text": "", "position": [80.0, 80.0], "edit": true})).unwrap()["layer"].as_u64().unwrap();
+    assert!(
+        s.state.text_edit.as_ref().is_some_and(|e| e.created && e.layer == effectcraft_project::LayerId(new)),
+        "the Type tool opens the edit on its new, empty layer"
+    );
+    let count = |s: &Session| s.active_comp().map_or(0, |c| c.layers.len());
+    let before = count(&s);
+    s.execute("edit.duplicate", json!({})).unwrap();
+    assert!(s.state.text_edit.is_none(), "the edit ends the way text.endEdit ends it");
+    assert_eq!(count(&s), before - 1, "a Type-tool layer left empty is discarded, not duplicated");
+    assert!(s.state.selected_layers.is_empty(), "nothing is selected: the layer that would be copied is gone");
+    // The edit is committed before Duplicate resolves its layers, so naming the very layer
+    // the empty edit was on addresses nothing: the commit still happened, the duplicate errors.
+    let new2 = s.execute("layer.newText", json!({"text": "", "position": [90.0, 90.0], "edit": true})).unwrap()["layer"].as_u64().unwrap();
+    assert!(s.execute("edit.duplicate", json!({"layers": [new2]})).is_err(), "the named layer is gone once the edit commits");
+    assert!(s.state.text_edit.is_none(), "and the edit ended all the same");
+    assert_eq!(count(&s), before - 1, "with the empty layer discarded, nothing left to duplicate");
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(count(&s), before, "that removal is one undo step of its own, as on text.endEdit");
+}
