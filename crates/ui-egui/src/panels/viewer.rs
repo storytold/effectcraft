@@ -2384,14 +2384,17 @@ fn constrain_45(from: [f64; 2], to: [f64; 2]) -> [f64; 2] {
     [from[0] + ux * along, from[1] + uy * along]
 }
 
-/// Visible, unlocked layers eligible for viewer hit tests, in front-to-back order.
+/// Visible layers eligible for viewer hit tests, locked or not, in front-to-back order.
 /// Solo scope matches the renderer: any soloed AV layer activates it at every time (as in After
 /// Effects), even when hidden, locked or outside its in-out range.
-pub(crate) fn selectable_layers(comp: &Comp, time: Tick) -> impl Iterator<Item = &Layer> {
+fn hit_testable_layers(comp: &Comp, time: Tick) -> impl Iterator<Item = &Layer> {
     let any_solo = comp.layers.iter().any(|l| l.switches.solo && l.source.is_av());
-    comp.layers
-        .iter()
-        .filter(move |l| l.is_active_at(time) && l.switches.video && !l.switches.locked && !l.is_camera() && !l.is_light() && (!any_solo || l.switches.solo))
+    comp.layers.iter().filter(move |l| l.is_active_at(time) && l.switches.video && !l.is_camera() && !l.is_light() && (!any_solo || l.switches.solo))
+}
+
+/// Visible, unlocked layers eligible for viewer hit tests, in front-to-back order.
+pub(crate) fn selectable_layers(comp: &Comp, time: Tick) -> impl Iterator<Item = &Layer> {
+    hit_testable_layers(comp, time).filter(|l| !l.switches.locked)
 }
 
 /// Selectable layers under a comp point, front to back.
@@ -2402,6 +2405,12 @@ pub(crate) fn layers_at<'a, 'b>(ectx: &'b EvalCtx<'a>, cpt: [f64; 2]) -> impl It
 /// Topmost selectable layer under a comp point.
 pub(crate) fn layer_at<'a>(ectx: &EvalCtx<'a>, cpt: [f64; 2]) -> Option<&'a Layer> {
     layers_at(ectx, cpt).next()
+}
+
+/// Topmost visible layer under a comp point, locked or not. An Alt-drop uses it so a locked layer in
+/// front is refused rather than skipped, which would replace the layer behind it.
+pub(crate) fn layer_at_including_locked<'a>(ectx: &EvalCtx<'a>, cpt: [f64; 2]) -> Option<&'a Layer> {
+    hit_testable_layers(ectx.comp, ectx.time).find(|l| layer_quad(ectx, l).is_some_and(|(_, q, _)| point_in_quad(cpt, &q)))
 }
 
 /// The layer a press at a comp point acts on, selected (Shift toggles the topmost layer). As in

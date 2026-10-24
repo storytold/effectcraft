@@ -1487,7 +1487,7 @@ fn replaceable_item(it: &effectcraft_engine::project::Item) -> bool {
 
 /// The Alt/Option-drag target: the layer under the pointer can take this item as its source, and
 /// the item wouldn't put the composition inside itself.
-fn replace_source_target(app: &EffectcraftApp, cid: ItemId, item: ItemId, lid: LayerId, comp: &Comp) -> bool {
+pub(crate) fn replace_source_target(app: &EffectcraftApp, cid: ItemId, item: ItemId, lid: LayerId, comp: &Comp) -> bool {
     app.session.project.item(item).is_some_and(replaceable_item)
         && !app.session.project.comp_contains(item, cid)
         && comp
