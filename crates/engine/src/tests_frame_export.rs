@@ -164,3 +164,45 @@ fn copy_frame_hands_the_rendered_frame_to_the_frontend() {
     assert!(Session::default().execute("comp.copyFrame", json!({})).is_err());
     assert!(crate::menus::entries().iter().any(|(path, e)| e.command == "comp.copyFrame" && path.first().map(String::as_str) == Some("Composition")));
 }
+
+#[test]
+fn save_frame_as_png_preserves_alpha_channel() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "AlphaComp", "width": 32, "height": 32, "frameRate": 24, "duration": 1})).unwrap();
+    let red = s.execute("layer.newSolid", json!({"name": "Red", "color": "#ff0000", "width": 16, "height": 16})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("prop.set", json!({"layer": red, "path": "transform/position", "value": [8, 8, 0]})).unwrap();
+    let dir = out_dir("frame-png-alpha");
+    let path = dir.join("alpha.png").to_string_lossy().to_string();
+
+    s.execute("comp.saveFrameAs", json!({"path": path})).unwrap();
+    let img = image::load_from_memory(&std::fs::read(&path).unwrap()).unwrap().to_rgba8();
+    assert_eq!((img.width(), img.height()), (32, 32));
+    let solid_px = img.get_pixel(8, 8);
+    assert_eq!(solid_px[3], 255, "solid region must be opaque: {solid_px:?}");
+    assert_eq!(solid_px[0], 255);
+    let empty_px = img.get_pixel(24, 24);
+    assert_eq!(empty_px[3], 0, "outside solid region must have alpha 0: {empty_px:?}");
+
+    let flat_path = dir.join("flat.png").to_string_lossy().to_string();
+    s.execute("comp.saveFrameAs", json!({"path": flat_path, "transparent": false})).unwrap();
+    let flat_img = image::load_from_memory(&std::fs::read(&flat_path).unwrap()).unwrap().to_rgba8();
+    let flat_empty_px = flat_img.get_pixel(24, 24);
+    assert_eq!(flat_empty_px[3], 255, "transparent: false must composite over background: {flat_empty_px:?}");
+}
+
+#[test]
+fn save_frame_as_defaults_to_png_sequence_with_alpha() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Comp", "width": 32, "height": 32, "frameRate": 24, "duration": 1})).unwrap();
+    let r = s.execute("comp.saveFrameAs", json!({"queue": true})).unwrap();
+    assert_eq!(r["queued"], true);
+    let it = s.project.render_queue.last().unwrap();
+    assert_eq!(it.output.name, "PNG Sequence with Alpha");
+    assert_eq!(it.output.channels, effectcraft_project::render_queue::Channels::Rgba);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert!(s.project.render_queue.is_empty());
+    s.execute("edit.redo", json!({})).unwrap();
+    let it = s.project.render_queue.last().unwrap();
+    assert_eq!(it.output.name, "PNG Sequence with Alpha");
+    assert_eq!(it.output.channels, effectcraft_project::render_queue::Channels::Rgba);
+}

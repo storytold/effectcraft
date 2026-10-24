@@ -88,7 +88,7 @@ impl Default for TemplateDefaults {
             ]),
             output_modules: s(&[
                 (Movie, "H.264 - Match Render Settings - 15 Mbps"),
-                (Still, "PNG Sequence"),
+                (Still, "PNG Sequence with Alpha"),
                 (PreRender, "Lossless with Alpha"),
                 (MovieProxy, "Lossless with Alpha"),
                 (StillProxy, "PNG Sequence with Alpha"),
