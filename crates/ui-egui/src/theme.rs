@@ -176,12 +176,12 @@ impl Tokens {
             expr_bg: Color32::from_rgb(0x1a, 0x1a, 0x1a),
             expr_text: Color32::from_rgb(0xe8, 0x7c, 0x5c),
             labels: default_labels(),
-            radius: 6.0,
-            radius_sm: 3.0,
+            radius: 0.0,
+            radius_sm: 0.0,
             gap: 4.0,
             tab_h: 30.0,
             row_h: 19.0,
-            gradients: true,
+            gradients: false,
         };
         match kind {
             ThemeKind::Dark => dark,
@@ -266,7 +266,9 @@ impl Tokens {
             let [r, g, b] = p.label_rgb(*l);
             t.labels[i] = Color32::from_rgb(r, g, b);
         }
-        t.gradients = p.appearance.use_gradients;
+        // Keep the UI flat and neutral like After Effects across Linux desktop environments.
+        // Do not let a saved preference reintroduce gradient fills.
+        t.gradients = false;
         t
     }
 
@@ -532,10 +534,10 @@ pub fn apply_visuals(ctx: &egui::Context, t: &Tokens) {
     v.selection.stroke = Stroke::new(1.0, Color32::WHITE);
     v.hyperlink_color = t.accent;
     v.window_stroke = Stroke::new(1.0, t.field_border);
-    v.window_corner_radius = egui::CornerRadius::same(8);
-    v.menu_corner_radius = egui::CornerRadius::same(6);
-    v.popup_shadow = egui::epaint::Shadow { offset: [0, 6], blur: 20, spread: 0, color: Color32::from_black_alpha(150) };
-    v.window_shadow = egui::epaint::Shadow { offset: [0, 10], blur: 36, spread: 0, color: Color32::from_black_alpha(170) };
+    v.window_corner_radius = egui::CornerRadius::same(0);
+    v.menu_corner_radius = egui::CornerRadius::same(0);
+    v.popup_shadow = egui::epaint::Shadow::NONE;
+    v.window_shadow = egui::epaint::Shadow::NONE;
     for w in [&mut v.widgets.noninteractive, &mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
         w.corner_radius = egui::CornerRadius::same(t.radius_sm as u8);
     }
