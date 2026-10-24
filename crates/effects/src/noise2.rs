@@ -75,6 +75,102 @@ pub(crate) fn grain_stats_masked(img: &Image, mask: Option<&[bool]>) -> GrainSta
     GrainStats { std, size: (1.0 / (1.0 - rho as f32)).clamp(0.5, 20.0) * 0.6 }
 }
 
+/// Grain statistics over sample `boxes` (in image pixels), measured from small crops around each
+/// box instead of the whole image. Empty `boxes` measures every opaque pixel, like
+/// [`grain_stats_masked`] without a mask. Overlapping boxes are deduplicated, so the sums match
+/// the masked version.
+pub(crate) fn grain_stats_boxes(img: &Image, boxes: &[(usize, usize, usize)]) -> GrainStats {
+    if boxes.is_empty() {
+        return grain_stats_masked(img, None);
+    }
+    let (w, h) = (img.width as usize, img.height as usize);
+    if w < 3 || h < 3 {
+        return GrainStats::default();
+    }
+    // The Gaussian's three box passes at sigma 1.5 have radius 1 each, so 3 px of halo make the
+    // residual exact inside a box; one more column covers the right neighbour used by the lag-1
+    // correlation.
+    const HALO: usize = 4;
+    let mut mask = vec![false; w * h];
+    for &(x, y, s) in boxes {
+        for yy in y..y.saturating_add(s).min(h) {
+            for xx in x..x.saturating_add(s).min(w) {
+                mask[yy * w + xx] = true;
+            }
+        }
+    }
+    let mut counted = vec![false; w * h];
+    let mut n = [0.0f64; 3];
+    let mut sum = [0.0f64; 3];
+    let mut sq = [0.0f64; 3];
+    let mut rho_num = 0.0f64;
+    let mut rho_den = 0.0f64;
+    let mut crop: Vec<([f32; 3], f32)> = Vec::new();
+    let mut planes: Vec<Plane> = Vec::new();
+    for &(bx, by, bs) in boxes {
+        let x0 = bx.saturating_sub(HALO);
+        let y0 = by.saturating_sub(HALO);
+        let x1 = bx.saturating_add(bs).saturating_add(HALO).min(w);
+        let y1 = by.saturating_add(bs).saturating_add(HALO).min(h);
+        if x1 <= x0 || y1 <= y0 {
+            continue;
+        }
+        let (cw, ch) = (x1 - x0, y1 - y0);
+        crop.clear();
+        crop.extend((y0..y1).flat_map(|y| (x0..x1).map(move |x| unpremul(img.data[y * w + x]))));
+        planes.clear();
+        for k in 0..3 {
+            let pl = Plane { w: cw, h: ch, data: crop.iter().map(|s| s.0[k]).collect() };
+            planes.push(gauss_plane(&pl, 1.5, 1.5));
+        }
+        for ly in 0..bs {
+            let y = by + ly;
+            if y >= h {
+                break;
+            }
+            for lx in 0..bs {
+                let x = bx + lx;
+                if x >= w {
+                    break;
+                }
+                let g = y * w + x;
+                if !mask[g] || counted[g] {
+                    continue;
+                }
+                counted[g] = true;
+                let l = (y - y0) * cw + (x - x0);
+                let (_, a) = crop[l];
+                if a <= 0.5 {
+                    continue;
+                }
+                for k in 0..3 {
+                    let hp = crop[l].0[k] - planes[k].data[l];
+                    sum[k] += hp as f64;
+                    sq[k] += (hp as f64) * (hp as f64);
+                    n[k] += 1.0;
+                }
+                if x + 1 < w && mask[g + 1] && crop[l + 1].1 > 0.5 {
+                    for k in 0..3 {
+                        let hp = crop[l].0[k] - planes[k].data[l];
+                        let hn = crop[l + 1].0[k] - planes[k].data[l + 1];
+                        rho_num += (hp * hn) as f64;
+                        rho_den += (hp * hp) as f64;
+                    }
+                }
+            }
+        }
+    }
+    let mut std = [0.0f32; 3];
+    for k in 0..3 {
+        if n[k] > 1.0 {
+            let mean = sum[k] / n[k];
+            std[k] = ((sq[k] / n[k] - mean * mean).max(0.0)).sqrt() as f32;
+        }
+    }
+    let rho = if rho_den > 1e-12 { (rho_num / rho_den).clamp(0.0, 0.95) } else { 0.0 };
+    GrainStats { std, size: (1.0 / (1.0 - rho as f32)).clamp(0.5, 20.0) * 0.6 }
+}
+
 /// Match Grain's Viewing Mode options.
 const MATCH_GRAIN_VIEWS: [&str; 5] = ["Preview", "Noise Samples", "Compensation Samples", "Blending Matte", "Final Output"];
 
@@ -86,34 +182,24 @@ fn match_grain(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let view = ctx.params.e("viewingMode");
     let source = layer_or_self(ctx, &b, "noiseSourceLayer", false, false);
     let src_boxes = sampling_boxes(ctx, &source, b.scale);
-    let own_boxes = sampling_boxes(ctx, &b.img, b.scale);
     let box_col = ctx.params.get("sampling/sampleBoxColor").map(|v| v.as_color()).unwrap_or([1.0, 1.0, 0.0, 1.0]);
     if view == 1 || view == 2 {
         // Noise Samples (on the source) / Compensation Samples (on this layer).
-        let (mut img, boxes) = if view == 1 { (source, src_boxes) } else { (b.img.clone(), own_boxes) };
+        let (mut img, boxes) = if view == 1 { (source, src_boxes) } else { (b.img.clone(), sampling_boxes(ctx, &b.img, b.scale)) };
         draw_boxes(&mut img, &boxes, box_col);
         b.img = img;
         return b;
     }
-    let mask_of = |img: &Image, boxes: &[(usize, usize, usize)]| -> Option<Vec<bool>> {
-        if boxes.is_empty() {
-            return None;
-        }
-        let w = img.width as usize;
-        let mut m = vec![false; img.data.len()];
-        for &(x, y, s) in boxes {
-            for yy in y..y + s {
-                for xx in x..x + s {
-                    m[yy * w + xx] = true;
-                }
-            }
-        }
-        Some(m)
-    };
-    let src_stats = grain_stats_masked(&source, mask_of(&source, &src_boxes).as_deref());
+    let src_stats = grain_stats_boxes(&source, &src_boxes);
     let comp = (ctx.params.f("compensateForExistingNoise") / 100.0) as f32;
-    let own = if comp > 0.0 { grain_stats_masked(&b.img, mask_of(&b.img, &own_boxes).as_deref()) } else { GrainStats::default() };
-    let orig = b.img.clone();
+    // The own-layer boxes only matter for the compensation term; skip them when it is off.
+    let own = if comp > 0.0 {
+        let own_boxes = sampling_boxes(ctx, &b.img, b.scale);
+        grain_stats_boxes(&b.img, &own_boxes)
+    } else {
+        GrainStats::default()
+    };
+    let orig = (view == 0).then(|| b.img.clone());
     let look = GrainLook::from_params(ctx);
     let amp: [f32; 3] = [0, 1, 2].map(|k| {
         let s = src_stats.std[k];
@@ -147,8 +233,8 @@ fn match_grain(ctx: &EffectCtx, mut b: Buf) -> Buf {
             }
         }
     });
-    if view == 0 {
-        crate::noise::preview_compose(ctx, &mut b, &orig);
+    if let Some(orig) = &orig {
+        crate::noise::preview_compose(ctx, &mut b, orig);
     }
     b
 }
@@ -304,6 +390,63 @@ mod tests {
             }
         }
         img
+    }
+
+    #[test]
+    fn boxed_grain_stats_match_the_masked_ones() {
+        // Noisy image with alpha holes; the boxes cover overlapping, edge-adjacent and
+        // bottom-right corner cases (clamped crops).
+        let mut img = noisy(64, 48, 0.2, 9);
+        for y in 0..img.height {
+            for x in 0..img.width {
+                if (x / 7 + y / 5) % 6 == 0 {
+                    let mut p = img.get(x as i64, y as i64);
+                    p[3] = 0.0;
+                    img.set(x, y, p);
+                }
+            }
+        }
+        let boxes = [(3usize, 4usize, 9usize), (8, 6, 9), (40, 20, 12), (39, 21, 12), (55, 39, 9)];
+        let w = img.width as usize;
+        let mut mask = vec![false; img.data.len()];
+        for &(x, y, s) in &boxes {
+            for yy in y..y + s {
+                for xx in x..x + s {
+                    mask[yy * w + xx] = true;
+                }
+            }
+        }
+        let masked = grain_stats_masked(&img, Some(&mask));
+        let boxed = grain_stats_boxes(&img, &boxes);
+        for k in 0..3 {
+            assert!((masked.std[k] - boxed.std[k]).abs() < 1e-6, "{k}: {masked:?} vs {boxed:?}");
+        }
+        assert!((masked.size - boxed.size).abs() <= 1e-7, "size: {masked:?} vs {boxed:?}");
+        // A denser grid where every box overlaps its neighbours (mask dedup across boxes).
+        let img2 = noisy(96, 64, 0.15, 21);
+        let mut boxes2 = Vec::new();
+        for gy in 0..5 {
+            for gx in 0..6 {
+                boxes2.push((gx * 11 + (gy % 3) * 4, gy * 10 + gx % 2, 12));
+            }
+        }
+        let w2 = img2.width as usize;
+        let mut mask2 = vec![false; img2.data.len()];
+        for &(x, y, s) in &boxes2 {
+            for yy in y..y + s {
+                for xx in x..x + s {
+                    mask2[yy * w2 + xx] = true;
+                }
+            }
+        }
+        let masked2 = grain_stats_masked(&img2, Some(&mask2));
+        let boxed2 = grain_stats_boxes(&img2, &boxes2);
+        for k in 0..3 {
+            assert!((masked2.std[k] - boxed2.std[k]).abs() < 1e-6, "{k}: {masked2:?} vs {boxed2:?}");
+        }
+        assert!((masked2.size - boxed2.size).abs() <= 1e-7, "size: {masked2:?} vs {boxed2:?}");
+        // No boxes measures the whole image, like no mask.
+        assert_eq!(grain_stats_boxes(&img, &[]), grain_stats(&img));
     }
 
     #[test]
