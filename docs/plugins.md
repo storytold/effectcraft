@@ -4,6 +4,9 @@ EffectCraft's core aims at After Effects parity. What After Effects users get fr
 (effect plug-ins, scripts, ScriptUI panels) is an extension in EffectCraft too, and EffectCraft
 offers the same kinds of extension points as After Effects so that anyone can write their own.
 
+For a maintained status list of shipped, planned and bounty-sized plug-in/effect compatibility
+targets, see [Plug-in availability and bounty list](plugins-availability.md).
+
 ## Extension points compared with After Effects
 
 From After Effects' public documentation (the user guide's scripting pages and the Scripting
