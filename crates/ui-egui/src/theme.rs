@@ -119,6 +119,35 @@ pub fn gradient_rect(painter: &egui::Painter, rect: egui::Rect, top: Color32, bo
     painter.add(egui::Shape::mesh(m));
 }
 
+/// A vertical gradient whose top corners are rounded by `radius`, so it fills a rounded frame
+/// edge to edge.
+pub fn gradient_rect_rounded_top(painter: &egui::Painter, rect: egui::Rect, radius: f32, top: Color32, bottom: Color32) {
+    let r = radius.clamp(0.0, rect.width().min(rect.height()) / 2.0);
+    if r <= 0.0 || rect.height() <= 0.0 {
+        return gradient_rect(painter, rect, top, bottom);
+    }
+    const STEPS: u32 = 6;
+    let at = |p: egui::Pos2| top.lerp_to_gamma(bottom, ((p.y - rect.min.y) / rect.height()).clamp(0.0, 1.0));
+    let mut m = egui::Mesh::default();
+    let mut add = |p: egui::Pos2| m.colored_vertex(p, at(p));
+    add(rect.left_bottom());
+    for k in 0..=STEPS {
+        let a = std::f32::consts::FRAC_PI_2 * k as f32 / STEPS as f32;
+        add(egui::pos2(rect.min.x + r - r * a.cos(), rect.min.y + r - r * a.sin()));
+    }
+    for k in 0..=STEPS {
+        let a = std::f32::consts::FRAC_PI_2 * k as f32 / STEPS as f32;
+        add(egui::pos2(rect.max.x - r + r * a.sin(), rect.min.y + r - r * a.cos()));
+    }
+    add(rect.right_bottom());
+    // A convex outline, fanned from its first vertex.
+    let n = 2 * (STEPS + 1) + 2;
+    for k in 1..n - 1 {
+        m.add_triangle(0, k, k + 1);
+    }
+    painter.add(egui::Shape::mesh(m));
+}
+
 impl Tokens {
     /// The gradient top colour for a fill (a little lighter), or the fill itself when gradients
     /// are off.
