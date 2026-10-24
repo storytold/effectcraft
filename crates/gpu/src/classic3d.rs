@@ -123,21 +123,22 @@ const PLANE_BYTES: usize = 12 * 16;
 const GEO_BYTES: usize = 10 * 16;
 const LIGHT_BYTES: usize = 6 * 16;
 
-/// Composite a prepared Classic 3D run over `canvas`. `None` when it cannot run here (the
-/// caller draws it on the CPU).
-pub(crate) fn draw_run(e: &mut Enc, run: &Run3d, canvas: &GpuImage) -> Option<GpuImage> {
-    let (w, h) = (canvas.width, canvas.height);
-    let boxes: Vec<[i64; 4]> = run.planes.iter().filter(|p| p.draw).map(|p| p.bbox).collect();
-    if boxes.is_empty() {
-        return Some(canvas.clone());
-    }
-    if max_overlap(&boxes) > MAX_FRAGS
-        || run.planes.iter().any(|p| p.winv.0[3] != [0.0, 0.0, 0.0, 1.0] || p.geos.iter().any(|g| g.world.0[3] != [0.0, 0.0, 0.0, 1.0]))
-    {
-        return None;
-    }
-    // Plane textures: the layer uploads (cached per buffer), with bokeh depth of field blurred
-    // here when the plane has it.
+/// The planes' textures packed in one atlas: (atlas, each plane's position in it, each plane's
+/// texture size and offset). Plane textures are the layer uploads (cached per buffer), with
+/// bokeh depth of field blurred here when the plane has it. Without depth of field the atlas
+/// depends only on the layer buffers, and is kept for the next frames that draw the same ones.
+#[allow(clippy::type_complexity)]
+fn atlas(e: &mut Enc, run: &Run3d) -> Option<(GpuImage, Vec<(u32, u32)>, Vec<(u32, u32, [f64; 2])>)> {
+    let keep = run.planes.iter().all(|p| p.dof.is_none());
+    let bufs: Vec<_> = run.planes.iter().map(|p| p.buf.clone()).collect();
+    // Held until the atlas is kept: other workers drawing these buffers wait for it.
+    let _claim = match keep.then(|| e.g.atlas_or_claim(&bufs)) {
+        Some(Ok((atlas, pos))) => {
+            return Some((atlas, pos, run.planes.iter().map(|p| (p.buf.img.width.max(1), p.buf.img.height.max(1), p.buf.offset)).collect()));
+        }
+        Some(Err(claim)) => claim,
+        None => None,
+    };
     let mut texs: Vec<(GpuImage, [f64; 2])> = Vec::with_capacity(run.planes.len());
     for p in &run.planes {
         let up = e.g.upload_buf(&p.buf)?;
@@ -154,10 +155,39 @@ pub(crate) fn draw_run(e: &mut Enc, run: &Run3d, canvas: &GpuImage) -> Option<Gp
     if (aw as u64) * (ah as u64) * 16 > 2 << 30 {
         return None;
     }
+    let dims = texs.iter().map(|(t, off)| (t.width, t.height, *off)).collect();
+    if keep && aw as usize * ah as usize * 16 <= e.g.upload_budget() / 2 {
+        // Filled and submitted on its own, so a frame that finds it kept reads it filled.
+        let atlas = e.g.image(aw, ah);
+        let mut fill = Enc::new(e.g);
+        for ((t, _), &(x, y)) in texs.iter().zip(&pos) {
+            fill.copy_into(t, &atlas, x, y);
+        }
+        fill.submit();
+        e.g.keep_atlas(&bufs, atlas.clone(), pos.clone());
+        return Some((atlas, pos, dims));
+    }
     let atlas = e.image(aw, ah);
     for ((t, _), &(x, y)) in texs.iter().zip(&pos) {
         e.copy_into(t, &atlas, x, y);
     }
+    Some((atlas, pos, dims))
+}
+
+/// Composite a prepared Classic 3D run over `canvas`. `None` when it cannot run here (the
+/// caller draws it on the CPU).
+pub(crate) fn draw_run(e: &mut Enc, run: &Run3d, canvas: &GpuImage) -> Option<GpuImage> {
+    let (w, h) = (canvas.width, canvas.height);
+    let boxes: Vec<[i64; 4]> = run.planes.iter().filter(|p| p.draw).map(|p| p.bbox).collect();
+    if boxes.is_empty() {
+        return Some(canvas.clone());
+    }
+    if max_overlap(&boxes) > MAX_FRAGS
+        || run.planes.iter().any(|p| p.winv.0[3] != [0.0, 0.0, 0.0, 1.0] || p.geos.iter().any(|g| g.world.0[3] != [0.0, 0.0, 0.0, 1.0]))
+    {
+        return None;
+    }
+    let (atlas, pos, texs) = atlas(e, run)?;
     // Track mattes (shared by the planes of one layer).
     let mut mattes: Vec<f32> = vec![];
     let mut matte_ix: HashMap<usize, u32> = HashMap::new();
@@ -165,7 +195,7 @@ pub(crate) fn draw_run(e: &mut Enc, run: &Run3d, canvas: &GpuImage) -> Option<Gp
     let mut planes = Words::default();
     let mut geos = Words::default();
     let mut n_geos = 0u32;
-    for ((p, (t, off)), &(ax, ay)) in run.planes.iter().zip(&texs).zip(&pos) {
+    for ((p, &(tw, th, off)), &(ax, ay)) in run.planes.iter().zip(&texs).zip(&pos) {
         let matte = match &p.matte {
             Some(m) if m.len() == n_px => {
                 let key = std::sync::Arc::as_ptr(m) as usize;
@@ -179,7 +209,7 @@ pub(crate) fn draw_run(e: &mut Enc, run: &Run3d, canvas: &GpuImage) -> Option<Gp
             Some(_) => return None,
             None => 0,
         };
-        planes.f([ax as f32, ay as f32, t.width as f32, t.height as f32]);
+        planes.f([ax as f32, ay as f32, tw as f32, th as f32]);
         planes.d([off[0], off[1], p.buf.scale, if p.bicubic { 1.0 } else { 0.0 }]);
         planes.d(p.bbox.map(|v| v as f64));
         planes.d(p.bounds);
