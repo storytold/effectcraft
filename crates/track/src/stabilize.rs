@@ -156,10 +156,27 @@ impl Analyzer {
 
     /// Analyse the next frame.
     pub fn push(&mut self, frame: &Frame) {
+        self.push_impl(frame, !self.opts.detailed);
+    }
+
+    fn push_impl(&mut self, frame: &Frame, share_pyramid: bool) {
+        let share_pyramid = share_pyramid && !self.opts.detailed;
         let (max_side, max_feat) = if self.opts.detailed { (960, 700) } else { (480, 350) };
         let factor = analysis_factor(frame.img.width, frame.img.height, max_side);
-        let pyr = GrayPyramid::from_image(frame.img, frame.offset, factor, 3);
-        self.trajectories.push(frame);
+        let mut pyr = GrayPyramid::from_image(frame.img, frame.offset, factor, if share_pyramid { 4 } else { 3 });
+        if share_pyramid {
+            self.trajectories.push_pyramid(self.prev.as_ref(), &pyr);
+        } else {
+            // Detailed analysis uses different downsampling factors for motion and trajectories.
+            self.trajectories.push(frame);
+        }
+        // Motion tracking historically used only three extra levels. Temporarily remove
+        // the trajectory tracker's fourth level without cloning any planes or gradients.
+        let extra = if share_pyramid && pyr.levels.len() > 4 { pyr.levels.pop().zip(pyr.grads.pop()) } else { None };
+        if share_pyramid && let Some(prev) = &mut self.prev {
+            prev.levels.truncate(4);
+            prev.grads.truncate(4);
+        }
         let mut fm = FrameMotion::default();
         if let Some(prev) = &self.prev
             && prev.width() == pyr.width()
@@ -194,6 +211,10 @@ impl Analyzer {
                 let inl: Vec<[f64; 2]> = dst.iter().zip(&f.inliers).filter(|(_, b)| **b).map(|(p, _)| *p).collect();
                 fm.points = round_pts(&inl, 48);
             }
+        }
+        if let Some((level, grad)) = extra {
+            pyr.levels.push(level);
+            pyr.grads.push(grad);
         }
         self.frames.push(fm);
         self.prev = Some(pyr);
@@ -831,6 +852,39 @@ mod tests {
             }
         }
         tot / cnt.max(1) as f64
+    }
+
+    #[test]
+    fn shared_pyramid_preserves_motion_and_trajectory_bits() {
+        rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap().install(|| {
+            for (size, detailed) in [([321.0, 181.0], false), ([997.0, 565.0], false), ([97.0, 63.0], false), ([1281.0, 721.0], true)] {
+                let mut scene = Scene::new(12);
+                scene.size = size;
+                let mut shared = Analyzer::new(size, AnalyzeOpts { detailed });
+                let mut separate = Analyzer::new(size, AnalyzeOpts { detailed });
+                for k in 0..12 {
+                    // Also cover partial downsample blocks, an offset/size change and the
+                    // resulting reset of active features halfway through the clip.
+                    if k == 6 {
+                        scene.size = [size[0] + 7.0, size[1] + 5.0];
+                    }
+                    let img = scene.frame(k);
+                    let frame = Frame { img: &img, offset: if k < 6 { [2.25, -3.5] } else { [-1.75, 4.5] } };
+                    shared.push(&frame);
+                    separate.push_impl(&frame, false);
+                }
+                let a = shared.finish(0.123456789012345, 1.0 / 24.0);
+                let b = separate.finish(0.123456789012345, 1.0 / 24.0);
+                assert!(!a.tracks.is_empty(), "exercise live trajectories: {size:?}, detailed={detailed}");
+                assert!(a.frames.iter().any(|f| f.features > 0));
+                assert_eq!(a.to_json(), b.to_json(), "{size:?}, detailed={detailed}");
+                for (a, b) in a.frames.iter().zip(&b.frames) {
+                    for (a, b) in a.t.iter().chain(&a.s).chain(&a.h).zip(b.t.iter().chain(&b.s).chain(&b.h)) {
+                        assert_eq!(a.to_bits(), b.to_bits());
+                    }
+                }
+            }
+        });
     }
 
     #[test]
