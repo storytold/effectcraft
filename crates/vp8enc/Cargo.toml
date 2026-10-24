@@ -1,0 +1,16 @@
+[package]
+name = "effectcraft-vp8enc"
+description = "VP8 key-frame encoder (the lossy picture of WebP images and animation frames), from RFC 6386"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+
+[dev-dependencies]
+image = { workspace = true, features = ["webp"] }
