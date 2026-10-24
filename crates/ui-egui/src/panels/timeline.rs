@@ -3192,9 +3192,20 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 (None, Some((_, l, u, fields))) => Some((l, u, dim(&fields))),
                 _ => None,
             };
+            // A pick whip pulled on a selected layer applies to the whole selection, as in After
+            // Effects: pulling any selected layer's whip links every selected layer (the target
+            // is never linked to itself).
+            let selection: Vec<u64> = app.session.state.selected_layers.iter().map(|l| l.0).filter(|l| *l != src_layer).collect();
+            let multi = if app.session.state.selected_layers.iter().any(|l| l.0 == src_layer) { selection } else { vec![] };
             match (kind, target, prop_target) {
                 (WHIP_PARENT, Some((_, row)), _) if row.layer.0 != src_layer => {
-                    actions.push(("layer.setParent".into(), json!({"layers": [src_layer], "parent": row.layer.0})));
+                    let mut layers = multi.clone();
+                    layers.push(src_layer);
+                    layers.retain(|l| *l != row.layer.0);
+                    layers.dedup();
+                    if !layers.is_empty() {
+                        actions.push(("layer.setParent".into(), json!({"layers": layers, "parent": row.layer.0})));
+                    }
                 }
                 // The property pick whip replaces the expression with the reference (or adds one),
                 // as the expression pick whip does when its expression isn't being edited.
@@ -3209,6 +3220,15 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                         params["range"] = json!([a, b]);
                         let after = text.chars().count().saturating_sub(b);
                         ctx.data_mut(|d| d.insert_temp(expr_refocus_id(src_prop), after));
+                    } else {
+                        // The same property on every selected layer (the engine finds it by its
+                        // match path; layers without it are skipped).
+                        let mut layers = multi.clone();
+                        layers.push(src_layer);
+                        layers.dedup();
+                        if layers.len() > 1 {
+                            params["layers"] = json!(layers);
+                        }
                     }
                     actions.push(("prop.pickWhip".into(), params));
                 }

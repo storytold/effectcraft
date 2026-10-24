@@ -290,7 +290,55 @@ fn selected_others<'a>(app: &EffectcraftApp, comp: &'a Comp, layer: LayerId) -> 
     if !sel.contains(&layer) {
         return vec![];
     }
-    sel.iter().filter(|id| **id != layer).filter_map(|id| comp.layer(*id)).filter(|l| !l.switches.locked && l.transform().is_some()).collect()
+    sel.iter()
+        .filter(|id| **id != layer)
+        .filter(|id| !has_ancestor_in(comp, **id, sel))
+        .filter_map(|id| comp.layer(*id))
+        .filter(|l| !l.switches.locked && l.transform().is_some())
+        .collect()
+}
+
+/// Whether `id` has a parent that is in `ids` (through any number of parents): that ancestor
+/// already carries the child, so a multi-selection must not edit the child as well.
+fn has_ancestor_in(comp: &Comp, id: LayerId, ids: &[LayerId]) -> bool {
+    let mut cur = comp.layer(id).and_then(|l| l.parent);
+    let mut guard = 0;
+    while let Some(p) = cur {
+        if ids.contains(&p) {
+            return true;
+        }
+        guard += 1;
+        if guard > 64 {
+            return false;
+        }
+        cur = comp.layer(p).and_then(|l| l.parent);
+    }
+    false
+}
+
+/// The selected layers that do not have a selected ancestor: the ones a transform gesture edits.
+fn top_level_selected(comp: &Comp, ids: &[LayerId]) -> Vec<LayerId> {
+    ids.iter().copied().filter(|id| !has_ancestor_in(comp, *id, ids)).collect()
+}
+
+/// `ids` plus every layer parented (directly or through others) to one of them. Descendants move
+/// with their ancestor, so they must not be snap targets of the drag.
+fn with_descendants(comp: &Comp, ids: &[LayerId]) -> Vec<LayerId> {
+    let mut out = ids.to_vec();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for l in &comp.layers {
+            if let Some(p) = l.parent
+                && out.contains(&p)
+                && !out.contains(&l.id)
+            {
+                out.push(l.id);
+                changed = true;
+            }
+        }
+    }
+    out
 }
 
 /// The least homogeneous depth (`w`: the distance in front of a perspective camera in pixels, 1
@@ -984,14 +1032,22 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let mut motion_frames: Vec<ov::PathFrame> = Vec::new();
     let mut paths: Vec<ov::PathInfo> = Vec::new();
     let sel_vertices = app.session.state.selected_vertices.clone();
+    let pen_now = ui.data(|d| d.get_temp::<(LayerId, u64)>(pen_id()));
+    let point_edit = ov::point_edit_target(&ctx);
     // Pen path in progress ends when the tool changes or its mask is gone; Esc / Enter also end
-    // free transform.
+    // free transform (and point editing).
     let finish = ui.input(|i| i.key_pressed(egui::Key::Escape) || i.key_pressed(egui::Key::Enter)) && !ctx.egui_wants_keyboard_input();
     if app.ui.tool != Tool::Pen || finish {
         ui.data_mut(|d| d.remove::<(LayerId, u64)>(pen_id()));
     }
-    if finish || app.ui.tool != Tool::Selection {
+    if finish {
+        // Enter / Esc leaves point editing: the points deselect and the layer box comes back.
+        let _ = app.session.execute("mask.selectVertices", json!({"vertices": []}));
         ov::end_free_transform(&ctx);
+        ov::end_point_edit(&ctx);
+    } else if app.ui.tool != Tool::Selection {
+        ov::end_free_transform(&ctx);
+        ov::end_point_edit(&ctx);
     }
     if app.layer_controls_visible() {
         // Settings ▸ General ▸ Path Point and Handle Size; Appearance ▸ Use Label Color for
@@ -1019,9 +1075,8 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             ov::motion_path(app, &painter, &map, &ectx, l, col, &mut key_hits, &mut motion_frames);
             // Masks and shape paths.
             if app.ui.viewer.show_masks {
-                let pen = ui.data(|d| d.get_temp::<(LayerId, u64)>(pen_id()));
                 let hover = ui.input(|i| i.pointer.hover_pos());
-                ov::draw_paths(app, &painter, &map, &ectx, l, col, &sel_vertices, pen, hover, &mut vertex_hits, &mut vertex_marks, &mut paths);
+                ov::draw_paths(app, &painter, &map, &ectx, l, col, &sel_vertices, pen_now, hover, &mut vertex_hits, &mut vertex_marks, &mut paths);
             }
             // Settings ▸ Previews ▸ Show Internal Wireframes: outlines of the layers inside a
             // selected collapsed precomp.
@@ -1338,7 +1393,22 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     // Path vertices and tangent handles take the press before the bounding-box handles (#1042).
     let vertex_at = |pos: Pos2, tangents: bool| -> Option<VertexHit> {
         let reach = vertex_grab_radius(pos, handle_hits.iter().map(|(_, _, h, _)| *h));
-        vertex_hits.iter().rev().filter(|h| h.tangent.is_some() == tangents).find(|h| h.pos.distance(pos) < reach).copied()
+        // The nearest candidate wins, not the last one drawn: overlapping points and handles
+        // (several layers, a tangent beside its vertex) must not steal each other's clicks.
+        vertex_hits
+            .iter()
+            .filter(|h| h.tangent.is_some() == tangents)
+            .filter(|h| h.pos.distance(pos) < reach)
+            .min_by(|a, b| a.pos.distance(pos).total_cmp(&b.pos.distance(pos)))
+            .copied()
+    };
+    // The editable path under the pointer: its point or segment, or (for a shape path) anywhere
+    // inside its fill, so a double-click on the shape enters point editing as in After Effects.
+    let path_at = |pos: Pos2| -> Option<(LayerId, u64)> {
+        vertex_at(pos, false)
+            .map(|h| (h.layer, h.mask))
+            .or_else(|| ov::segment_at(&paths, &map, pos, 6.0).map(|s| (s.0, s.1)))
+            .or_else(|| paths.iter().rev().find(|p| !p.is_mask && ov::contains_point(&p.sp, &p.m, &map, pos)).map(|p| (p.layer, p.uid)))
     };
     let gid = egui::Id::new("viewer-gesture");
     // An overlay on top of the viewer (e.g. the camera tracker points) takes the hover, but the pointer is still over the viewer: keep wheel zoom working.
@@ -1605,10 +1675,8 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                         })
                     })
                 } else if let Some(l) = pick(app, &ectx, cpt, mods.shift) {
-                    let layers: Vec<(LayerId, [f64; 3], [f64; 3], [f64; 3])> = app
-                        .session
-                        .state
-                        .selected_layers
+                    let selected = top_level_selected(&comp, &app.session.state.selected_layers);
+                    let layers: Vec<(LayerId, [f64; 3], [f64; 3], [f64; 3])> = selected
                         .iter()
                         .filter_map(|id| comp.layer(*id))
                         .filter(|l| !l.switches.locked)
@@ -1664,7 +1732,10 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 let mut d = one_axis([cpt[0] - start[0], cpt[1] - start[1]], mods.shift);
                 if let Some(src) = snap_src {
                     let ids: Vec<LayerId> = layers.iter().map(|x| x.0).collect();
-                    let c = vt::snap(app, &ctx, &ectx, &map, &ids, &[[src[0] + d[0], src[1] + d[1]]], mods);
+                    // Children follow the moved layers, so their own features must not be snap
+                    // targets: snapping a rig to itself makes it fight the pointer.
+                    let exclude = with_descendants(&comp, &ids);
+                    let c = vt::snap(app, &ctx, &ectx, &map, &exclude, &[[src[0] + d[0], src[1] + d[1]]], mods);
                     d = [d[0] + c[0], d[1] + c[1]];
                     if vt::snapping_on(app, mods) {
                         vt::draw_handle(&painter, map.to_screen([src[0] + d[0], src[1] + d[1]]));
@@ -2012,12 +2083,22 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 app.ui.status = crate::i18n::tr(ROTO_HINT).to_string();
             }
             _ => {
+                // A click away from the edited path leaves point editing (the layer box returns).
+                if point_edit.is_some() && ov::segment_at(&paths, &map, pos, 6.0).is_none() {
+                    let _ = app.session.execute("mask.selectVertices", json!({"vertices": []}));
+                    ov::end_free_transform(&ctx);
+                    ov::end_point_edit(&ctx);
+                }
                 if pick(app, &ectx, cpt, mods.shift).is_none() {
                     let _ = app.session.execute("edit.deselectAll", json!({}));
+                    ov::end_free_transform(&ctx);
+                    ov::end_point_edit(&ctx);
                 } else if !mods.shift && !app.session.state.selected_vertices.is_empty() && ov::segment_at(&paths, &map, pos, 6.0).is_none() {
                     // A click away from the paths, even on their layer, deselects the mask
-                    // points (the layer stays selected), as in After Effects (#513).
+                    // points (the layer stays selected) and leaves point editing, as in After
+                    // Effects (#513).
                     let _ = app.session.execute("mask.selectVertices", json!({"vertices": []}));
+                    ov::end_free_transform(&ctx);
                 }
             }
         }
@@ -2026,16 +2107,12 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         && !text_owns
         && app.ui.tool == Tool::Selection
         && let Some(pos) = resp.interact_pointer_pos()
-        && let Some((l, m)) = vertex_at(pos, false).map(|h| (h.layer, h.mask)).or_else(|| ov::segment_at(&paths, &map, pos, 6.0).map(|s| (s.0, s.1)))
+        && let Some((l, m)) = path_at(pos)
     {
-        // Double-click a path: all its points selected in a free-transform box (Layer ▸ Mask and
-        // Shape Path ▸ Free Transform Points), so dragging any of them, or inside the box, moves
-        // the whole path (After Effects).
-        if let Some(p) = paths.iter().find(|p| p.layer == l && p.uid == m) {
-            let all: Vec<serde_json::Value> = (0..p.sp.vertices.len()).map(|index| json!({"layer": l.0, "mask": m, "index": index})).collect();
-            let _ = app.session.execute("mask.selectVertices", json!({"vertices": all}));
-        }
-        ov::begin_free_transform(&ctx, l, m);
+        // Double-click a path: point editing. Its points show and the layer's transform box
+        // stays hidden; no free-transform box is put around the path (After Effects).
+        ov::end_free_transform(&ctx);
+        ov::begin_point_edit(&ctx, l, m);
     } else if resp.double_clicked()
         && !text_owns
         && !app.ui.tool.is_pen()
@@ -2043,7 +2120,25 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     {
         let cpt = map.to_comp(pos);
         let roto = app.ui.tool.roto_kind(false).is_some();
-        if let Some(l) = pick(app, &ectx, cpt, false).and_then(|l| comp.layer(l)) {
+        // Double-clicking a parametric shape converts it to a Bezier Path and enters point
+        // editing (After Effects): the group becomes a Path, all its points selected inside the
+        // free-transform box.
+        let primitive = (app.ui.tool == Tool::Selection)
+            .then(|| {
+                let lid = pick(app, &ectx, cpt, false)?;
+                let layer = comp.layer(lid)?;
+                if !matches!(layer.source, LayerSource::Shape) {
+                    return None;
+                }
+                let (uid, n) = primitive_at(&ectx, layer, &map, pos)?;
+                Some((lid, uid, n))
+            })
+            .flatten();
+        if let Some((lid, uid, _)) = primitive {
+            let _ = app.session.execute("path.convertToBezier", json!({"layer": lid.0, "mask": uid}));
+            ov::end_free_transform(&ctx);
+            ov::begin_point_edit(&ctx, lid, uid);
+        } else if let Some(l) = pick(app, &ectx, cpt, false).and_then(|l| comp.layer(l)) {
             match &l.source {
                 effectcraft_engine::project::LayerSource::Comp { item } => app.session.open_comp(*item),
                 // With a Roto Brush tool, double-clicking a layer opens it in the Layer panel,
@@ -2399,6 +2494,16 @@ pub(crate) fn layers_at<'a, 'b>(ectx: &'b EvalCtx<'a>, cpt: [f64; 2]) -> impl It
 /// Topmost selectable layer under a comp point.
 pub(crate) fn layer_at<'a>(ectx: &EvalCtx<'a>, cpt: [f64; 2]) -> Option<&'a Layer> {
     layers_at(ectx, cpt).next()
+}
+
+/// The shape primitive (Rectangle, Ellipse, Polystar) of `layer` under screen point `pos`: its
+/// group uid and vertex count. Double-click converts it and enters point editing.
+fn primitive_at(ectx: &EvalCtx, layer: &Layer, map: &ViewerMap, pos: Pos2) -> Option<(u64, usize)> {
+    let (l2c, _) = l2c(ectx, layer);
+    effectcraft_engine::viewer::shape_primitives(ectx, layer).into_iter().find_map(|(uid, sp)| {
+        let im = effectcraft_engine::render::shapes::item_matrix(ectx, layer, uid).unwrap_or(Mat3::IDENTITY);
+        ov::contains_point(&sp, &(l2c * im), map, pos).then_some((uid, sp.vertices.len()))
+    })
 }
 
 /// The layer a press at a comp point acts on, selected (Shift toggles the topmost layer). As in

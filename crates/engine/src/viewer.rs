@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use effectcraft_color::{ColorSpace, space};
 use effectcraft_geom::{Mat3, vec2};
-use effectcraft_keyframe::Value;
-use effectcraft_project::{Layer, LayerId, Property};
+use effectcraft_keyframe::{ShapePath, Value};
+use effectcraft_project::{Layer, LayerId, PropGroup, Property};
 use effectcraft_raster::Image;
 use effectcraft_render::{EvalCtx, ExprHost};
 use effectcraft_time::Tick;
@@ -262,6 +262,47 @@ pub fn shape_paths(ctx: &EvalCtx, layer: &Layer) -> Vec<(u64, effectcraft_keyfra
         }
     }
     walk(ctx, layer, c, &mut out);
+    out
+}
+
+/// The Bezier path a parametric shape group draws (Rectangle, Ellipse, Polystar), in the group's
+/// own space. `None` for another kind of group.
+pub fn primitive_shape(ctx: &EvalCtx, layer: &Layer, g: &PropGroup) -> Option<ShapePath> {
+    let bez = match g.match_id.as_str() {
+        "rect" => effectcraft_path::rect(ctx.v2(layer, g, "size", [100.0; 2]), ctx.v2(layer, g, "position", [0.0; 2]), ctx.f(layer, g, "roundness", 0.0)),
+        "ellipse" => effectcraft_path::ellipse(ctx.v2(layer, g, "size", [100.0; 2]), ctx.v2(layer, g, "position", [0.0; 2])),
+        "star" => effectcraft_path::polystar(
+            ctx.e(layer, g, "type") == 0,
+            ctx.f(layer, g, "points", 5.0),
+            ctx.v2(layer, g, "position", [0.0; 2]),
+            ctx.f(layer, g, "rotation", 0.0),
+            ctx.f(layer, g, "innerRadius", 50.0),
+            ctx.f(layer, g, "outerRadius", 100.0),
+            ctx.f(layer, g, "innerRoundness", 0.0),
+            ctx.f(layer, g, "outerRoundness", 0.0),
+        ),
+        _ => return None,
+    };
+    // One primitive is one subpath; conversion keeps the first, as Convert to Bezier Path does.
+    effectcraft_path::from_kurbo(&bez).into_iter().next().filter(|p| !p.vertices.is_empty())
+}
+
+/// A shape layer's parametric primitives as Bezier paths, in contents order (the topmost first).
+/// Converting one to a Path (After Effects' Convert to Bezier Path) makes it point-editable.
+pub fn shape_primitives(ctx: &EvalCtx, layer: &Layer) -> Vec<(u64, ShapePath)> {
+    fn walk(ctx: &EvalCtx, layer: &Layer, g: &PropGroup, out: &mut Vec<(u64, ShapePath)>) {
+        for sub in g.groups() {
+            match primitive_shape(ctx, layer, sub) {
+                Some(sp) => out.push((sub.uid, sp)),
+                None if sub.match_id == "group" || sub.match_id == "contents" => walk(ctx, layer, sub, out),
+                None => {}
+            }
+        }
+    }
+    let mut out = vec![];
+    if let Some(c) = layer.props.sub("contents") {
+        walk(ctx, layer, c, &mut out);
+    }
     out
 }
 

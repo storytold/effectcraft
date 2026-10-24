@@ -39,14 +39,22 @@ pub(crate) struct VertexMark {
     pub pos: Pos2,
     pub color: Color32,
     pub selected: bool,
+    /// The pointer is over the point (a halo shows where a click will land).
+    pub hovered: bool,
 }
 
-/// Draw the vertex markers collected by [`draw_paths`], `size` points wide.
+/// Draw the vertex markers collected by [`draw_paths`], `size` points wide. Selected points are
+/// filled and slightly larger, with a dark outline; a hovered point gets a halo (After Effects).
 pub(crate) fn draw_vertex_marks(painter: &egui::Painter, marks: &[VertexMark], size: f32) {
     for m in marks {
-        let r = Rect::from_center_size(m.pos, vec2(size, size));
+        let s = if m.selected { size + 2.0 } else { size };
+        let r = Rect::from_center_size(m.pos, vec2(s, s));
+        if m.hovered && !m.selected {
+            painter.rect_stroke(r.expand(2.0), 1.0, Stroke::new(1.0, Color32::from_white_alpha(190)), StrokeKind::Middle);
+        }
         if m.selected {
             painter.rect_filled(r, 0.0, m.color);
+            painter.rect_stroke(r, 0.0, Stroke::new(1.0, Color32::from_black_alpha(220)), StrokeKind::Inside);
         } else {
             painter.rect_filled(r, 0.0, Color32::from_black_alpha(160));
             painter.rect_stroke(r, 0.0, Stroke::new(1.0, m.color), StrokeKind::Inside);
@@ -147,6 +155,28 @@ pub(crate) fn flatten(sp: &ShapePath, m: &Mat3, map: &ViewerMap) -> Vec<Pos2> {
     pts
 }
 
+/// Whether screen point `p` is inside the path `sp` through `m` (even-odd, as fills are drawn).
+/// Open paths are closed for the test, like a fill.
+pub(crate) fn contains_point(sp: &ShapePath, m: &Mat3, map: &ViewerMap, p: Pos2) -> bool {
+    let poly = flatten(sp, m, map);
+    if poly.len() < 3 {
+        return false;
+    }
+    let mut inside = false;
+    let mut j = poly.len() - 1;
+    for i in 0..poly.len() {
+        let (a, b) = (poly[i], poly[j]);
+        if (a.y > p.y) != (b.y > p.y) {
+            let x = a.x + (p.y - a.y) / (b.y - a.y) * (b.x - a.x);
+            if p.x < x {
+                inside = !inside;
+            }
+        }
+        j = i;
+    }
+    inside
+}
+
 /// Draw the masks and (on shape layers) shape paths of a selected layer with their vertices;
 /// selected vertices show their tangent handles. Collects vertex hits and paths.
 #[allow(clippy::too_many_arguments)]
@@ -199,7 +229,8 @@ pub(crate) fn draw_paths(
                     hits.push(VertexHit { layer: l.id, mask: uid, index: i, pos: h, tangent: Some(out), vertex: *v, l2c: pm });
                 }
             }
-            marks.push(VertexMark { pos: s, color: mc, selected });
+            let hovered = hover.is_some_and(|hp| hp.distance(s) <= 6.0);
+            marks.push(VertexMark { pos: s, color: mc, selected, hovered });
             let kind = if is_mask { "mask" } else { "shapePath" };
             app.auto.add(&format!("viewer.{kind}.{uid}.vertex.{i}"), Rect::from_center_size(s, vec2(8.0, 8.0)), &name);
             hits.push(VertexHit { layer: l.id, mask: uid, index: i, pos: s, tangent: None, vertex: *v, l2c: pm });
@@ -391,15 +422,30 @@ pub(crate) fn motion_path(
     }
 }
 
+// ---------------------------------------------------------------- point editing
+
+fn point_edit_id() -> egui::Id {
+    egui::Id::new("viewer-point-edit")
+}
+
+/// Enter point editing on a path (double-click a path or a shape with the Selection tool): its
+/// points show, and the layer's transform box stays hidden until editing ends.
+pub(crate) fn begin_point_edit(ctx: &egui::Context, layer: LayerId, uid: u64) {
+    ctx.data_mut(|d| d.insert_temp(point_edit_id(), (layer, uid)));
+}
+
+pub(crate) fn end_point_edit(ctx: &egui::Context) {
+    ctx.data_mut(|d| d.remove::<(LayerId, u64)>(point_edit_id()));
+}
+
+pub(crate) fn point_edit_target(ctx: &egui::Context) -> Option<(LayerId, u64)> {
+    ctx.data(|d| d.get_temp(point_edit_id()))
+}
+
 // ---------------------------------------------------------------- free transform
 
 fn ft_id() -> egui::Id {
     egui::Id::new("viewer-free-transform")
-}
-
-/// Enter Free Transform on a path (double-click a path with the Selection tool).
-pub(crate) fn begin_free_transform(ctx: &egui::Context, layer: LayerId, uid: u64) {
-    ctx.data_mut(|d| d.insert_temp(ft_id(), (layer, uid)));
 }
 
 pub(crate) fn end_free_transform(ctx: &egui::Context) {
