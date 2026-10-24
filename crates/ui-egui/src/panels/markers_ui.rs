@@ -283,8 +283,8 @@ fn marker(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, comp: 
     let x = tm.x(comp_t);
     let col = marker_color(&t, m.label);
     let h = (y1 - y0).min(10.0);
-    if m.duration > Tick(0) {
-        let xe = tm.x(comp_t + m.duration.seconds());
+    let end = (m.duration > Tick(0)).then(|| tm.x(comp_t + m.duration.seconds()));
+    if let Some(xe) = end {
         let bar = Rect::from_min_max(pos2(x, y0 + 1.0), pos2(xe, y0 + h - 1.0));
         p.rect_filled(bar, 1.0, col.gamma_multiply(if m.protected { 0.35 } else { 0.5 }));
         if m.protected {
@@ -298,7 +298,20 @@ fn marker(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, comp: 
     }
     p.add(egui::Shape::convex_polygon(marker_shape(x, y0, h), col, Stroke::NONE));
     if !m.comment.is_empty() {
-        p.text(pos2(x + 7.0, y0 + h / 2.0), Align2::LEFT_CENTER, m.comment.lines().next().unwrap_or_default(), Tokens::ui(10.0), t.text);
+        // The name sits in a small outlined box beside the flag, as in After Effects. It is drawn in the theme's field
+        // colours, so it follows Dark, Darker and Light.
+        let galley = p.layout_no_wrap(m.comment.lines().next().unwrap_or_default().to_string(), Tokens::ui(10.0), t.text);
+        let (box_w, mut box_x) = (galley.size().x + 8.0, x + 6.0);
+        // A duration that ends under the box would be hidden by its fill: the box steps past the end cap instead.
+        if let Some(xe) = end
+            && xe > box_x
+            && xe < box_x + box_w
+        {
+            box_x = xe + 3.0;
+        }
+        let box_rect = Rect::from_min_size(pos2(box_x, y0), vec2(box_w, h.max(galley.size().y + 2.0)));
+        p.rect(box_rect, t.radius_sm, t.field_bg, Stroke::new(1.0, t.field_border), egui::StrokeKind::Inside);
+        p.galley(pos2(box_rect.min.x + 4.0, box_rect.center().y - galley.size().y / 2.0), galley, t.text);
     }
     let hit = Rect::from_min_max(pos2(x - 5.0, y0 - 1.0), pos2(x + 5.0, y1));
     let id = egui::Id::new(("marker", r.layer, r.index));
