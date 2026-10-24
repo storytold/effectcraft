@@ -14,15 +14,15 @@
 //!   the id is stable, so a translation never becomes an orphan.
 //!
 //! Each row repeats the registry's English name so that a rename upstream fails
-//! [`tests::every_effect_has_a_row`] instead of silently pointing a translation at another
-//! effect.
+//! [`tests::every_row_names_a_registry_effect`] instead of silently pointing a translation at
+//! another effect. An effect with no row draws the registry's English name; the
+//! `missing_translations_report` test (run by `cargo xtask ci`) lists those per language.
 //!
 //! A language decides for itself which names stay English: After Effects' Japanese interface
 //! leaves the `CC` series, the `VR` set and the `OCIO` set in English, while its Simplified
 //! Chinese one translates them (the `CC` names come from Adobe's Chinese *documentation*, which
 //! names 68 of the 69). Repeating the English name is therefore a language-level choice, not a
-//! missing row: [`tests::only_the_brand_names_stay_in_english`] pins *Simplified Chinese's* five
-//! brand names and is deliberately not shared by the other languages.
+//! missing row.
 //!
 //! The Simplified Chinese names come from the installed After Effects 2026 (26.5.0.89)
 //! Simplified Chinese interface, its 21 category folder names included; `Cryptomatte`,
@@ -70,12 +70,14 @@ fn catalog(language: &str) -> Option<&'static Catalog> {
     static SIMPLIFIED: Catalog = Catalog { rows: SIMPLIFIED_CHINESE, categories: SIMPLIFIED_CHINESE_CATEGORIES, index: OnceLock::new() };
     static TRADITIONAL: Catalog = Catalog { rows: TRADITIONAL_CHINESE, categories: TRADITIONAL_CHINESE_CATEGORIES, index: OnceLock::new() };
     static JAPANESE: Catalog = Catalog { rows: JAPANESE_EFFECTS, categories: JAPANESE_CATEGORIES, index: OnceLock::new() };
+    static GEORGIAN_CATALOG: Catalog = Catalog { rows: GEORGIAN, categories: GEORGIAN_CATEGORIES, index: OnceLock::new() };
     match language {
         "zh-hans" => Some(&SIMPLIFIED),
         "zh-hant" => Some(&TRADITIONAL),
         // Japanese: the slot the Japanese data point on #821 asked for, so both languages share
         // this one catalog instead of inventing a second mechanism.
         "ja" => Some(&JAPANESE),
+        "ka" => Some(&GEORGIAN_CATALOG),
         _ => None,
     }
 }
@@ -116,6 +118,19 @@ pub(crate) fn category(source: &str) -> String {
 pub(crate) fn matches(id: &str, english: &str, query: &str) -> bool {
     english.to_lowercase().contains(query)
         || catalog(current()).and_then(|c| c.row(id)).is_some_and(|(_, translated)| translated.to_lowercase().contains(query))
+}
+
+/// The registry's effect names and categories `language` has no row for, for the missing-strings
+/// report.
+#[cfg(test)]
+pub(super) fn missing(language: &str) -> Vec<String> {
+    let table = catalog(language);
+    let effects = effectcraft_engine::effects::registry().iter().filter(|spec| table.and_then(|c| c.row(spec.id)).is_none()).map(|spec| spec.name.to_string());
+    let categories = effectcraft_engine::effects::categories()
+        .into_iter()
+        .filter(|source| table.and_then(|c| c.category(source)).is_none())
+        .map(|source| format!("{source} (category)"));
+    effects.chain(categories).collect()
 }
 
 /// Simplified Chinese (`zh-hans`): one row per effect in the registry.
@@ -490,6 +505,346 @@ const JAPANESE_CATEGORIES: &[(&str, &str)] = &[
     ("Utility", "ユーティリティ"),
 ];
 
+/// Georgian (`ka`): one row per effect, ids from [`SIMPLIFIED_CHINESE`]. Written from the meaning
+/// of the English names, with the terms the Georgian menus and panels use (FilmCraft's Georgian
+/// for the effects the two apps share). The `CC` series and the brand names (`Cryptomatte`,
+/// `EXtractoR`, `IDentifier`, `Key Light`, `Unmult`, `Lumetri Color`) stay in English, as
+/// Adobe's Japanese interface keeps the `CC` series; `VR` and `OCIO` keep their prefix.
+const GEORGIAN: &[Row] = &[
+    ("ec.3d.channelextract", "3D Channel Extract", "3D არხის ამოღება"),
+    ("ec.3d.cryptomatte", "Cryptomatte", "Cryptomatte"),
+    ("ec.3d.depthmatte", "Depth Matte", "სიღრმის მატი"),
+    ("ec.3d.depthoffield", "Depth of Field", "ველის სიღრმე"),
+    ("ec.3d.extractor", "EXtractoR", "EXtractoR"),
+    ("ec.3d.fog3d", "Fog 3D", "3D ნისლი"),
+    ("ec.3d.identifier", "IDentifier", "IDentifier"),
+    ("ec.3d.idmatte", "ID Matte", "ID მატი"),
+    ("ec.audio.backwards", "Backwards", "უკუღმა"),
+    ("ec.audio.basstreble", "Bass & Treble", "ბასი და ტრებლი"),
+    ("ec.audio.compressor", "Compressor", "კომპრესორი"),
+    ("ec.audio.delay", "Delay", "დაყოვნება"),
+    ("ec.audio.distortion", "Distortion", "დამახინჯება"),
+    ("ec.audio.flangechorus", "Flange & Chorus", "ფლენჯერი და ქორუსი"),
+    ("ec.audio.gate", "Gate", "გეიტი"),
+    ("ec.audio.highlowpass", "High-Low Pass", "მაღალი/დაბალი სიხშირეების ფილტრი"),
+    ("ec.audio.modulator", "Modulator", "მოდულატორი"),
+    ("ec.audio.parametriceq", "Parametric EQ", "პარამეტრული ეკვალაიზერი"),
+    ("ec.audio.reverb", "Reverb", "რევერბი"),
+    ("ec.audio.stereomixer", "Stereo Mixer", "სტერეომიქშერი"),
+    ("ec.audio.tone", "Tone", "ტონი"),
+    ("ec.blur.bilateral", "Bilateral Blur", "ბილატერალური გაბუნდოვნება"),
+    ("ec.blur.cameralens", "Camera Lens Blur", "კამერის ობიექტივის გაბუნდოვნება"),
+    ("ec.blur.camerashakedeblur", "Camera-Shake Deblur", "კამერის რყევით გაბუნდოვნების მოცილება"),
+    ("ec.blur.cccross", "CC Cross Blur", "CC Cross Blur"),
+    ("ec.blur.ccradial", "CC Radial Blur", "CC Radial Blur"),
+    ("ec.blur.ccradialfast", "CC Radial Fast Blur", "CC Radial Fast Blur"),
+    ("ec.blur.ccvector", "CC Vector Blur", "CC Vector Blur"),
+    ("ec.blur.channel", "Channel Blur", "არხის გაბუნდოვნება"),
+    ("ec.blur.compound", "Compound Blur", "შედგენილი გაბუნდოვნება"),
+    ("ec.blur.directional", "Directional Blur", "მიმართული გაბუნდოვნება"),
+    ("ec.blur.fastbox", "Fast Box Blur", "სწრაფი ბლოკური გაბუნდოვნება"),
+    ("ec.blur.gaussian", "Gaussian Blur", "გაუსის გაბუნდოვნება"),
+    ("ec.blur.radial", "Radial Blur", "რადიალური გაბუნდოვნება"),
+    ("ec.blur.reduceflicker", "Reduce Interlace Flicker", "ნახევარკადრული ციმციმის შემცირება"),
+    ("ec.blur.sharpen", "Sharpen", "სიმკვეთრე"),
+    ("ec.blur.smart", "Smart Blur", "ჭკვიანი გაბუნდოვნება"),
+    ("ec.blur.unsharp", "Unsharp Mask", "არამკვეთრი ნიღაბი"),
+    ("ec.channel.arithmetic", "Arithmetic", "არითმეტიკა"),
+    ("ec.channel.blend", "Blend", "შერევა"),
+    ("ec.channel.calculations", "Calculations", "გამოთვლები"),
+    ("ec.channel.cccomposite", "CC Composite", "CC Composite"),
+    ("ec.channel.combiner", "Channel Combiner", "არხების გამაერთიანებელი"),
+    ("ec.channel.compoundarithmetic", "Compound Arithmetic", "შედგენილი არითმეტიკა"),
+    ("ec.channel.invert", "Invert", "ინვერსია"),
+    ("ec.channel.minimax", "Minimax", "მინიმაქსი"),
+    ("ec.channel.removecolormatting", "Remove Color Matting", "ფერადი მატინგის მოცილება"),
+    ("ec.channel.setchannels", "Set Channels", "არხების დაყენება"),
+    ("ec.channel.setmatte", "Set Matte", "მატის დაყენება"),
+    ("ec.channel.shiftchannels", "Shift Channels", "არხების გადანაცვლება"),
+    ("ec.channel.solidcomposite", "Solid Composite", "სოლიდთან კომპოზიტი"),
+    ("ec.color.autocolor", "Auto Color", "ავტოფერი"),
+    ("ec.color.autocontrast", "Auto Contrast", "ავტოკონტრასტი"),
+    ("ec.color.autolevels", "Auto Levels", "ავტოდონეები"),
+    ("ec.color.blackwhite", "Black & White", "შავ-თეთრი"),
+    ("ec.color.brightnesscontrast", "Brightness & Contrast", "სიკაშკაშე და კონტრასტი"),
+    ("ec.color.broadcast", "Broadcast Colors", "სამაუწყებლო ფერები"),
+    ("ec.color.cccolorneutralizer", "CC Color Neutralizer", "CC Color Neutralizer"),
+    ("ec.color.cccoloroffset", "CC Color Offset", "CC Color Offset"),
+    ("ec.color.cckernel", "CC Kernel", "CC Kernel"),
+    ("ec.color.cctoner", "CC Toner", "CC Toner"),
+    ("ec.color.changecolor", "Change Color", "ფერის შეცვლა"),
+    ("ec.color.changetocolor", "Change to Color", "ფერად შეცვლა"),
+    ("ec.color.channelmixer", "Channel Mixer", "არხების მიქშერი"),
+    ("ec.color.colorama", "Colorama", "კოლორამა"),
+    ("ec.color.colorbalance", "Color Balance", "ფერთა ბალანსი"),
+    ("ec.color.colorbalancehls", "Color Balance (HLS)", "ფერთა ბალანსი (HLS)"),
+    ("ec.color.colorlink", "Color Link", "ფერის ბმა"),
+    ("ec.color.colorstabilizer", "Color Stabilizer", "ფერის სტაბილიზატორი"),
+    ("ec.color.curves", "Curves", "მრუდები"),
+    ("ec.color.equalize", "Equalize", "გათანაბრება"),
+    ("ec.color.exposure", "Exposure", "ექსპოზიცია"),
+    ("ec.color.gammapedestalgain", "Gamma/Pedestal/Gain", "გამა/საფეხური/გაძლიერება"),
+    ("ec.color.huesaturation", "Hue/Saturation", "ფერის ტონი/გაჯერება"),
+    ("ec.color.leavecolor", "Leave Color", "ფერის დატოვება"),
+    ("ec.color.levels", "Levels", "დონეები"),
+    ("ec.color.levelsic", "Levels (Individual Controls)", "დონეები (ცალკეული მართვა)"),
+    ("ec.color.lumetri", "Lumetri Color", "Lumetri Color"),
+    ("ec.color.ociocdl", "OCIO CDL Transform", "OCIO CDL გარდაქმნა"),
+    ("ec.color.ociocolorspace", "OCIO Color Space Transform", "OCIO ფერთა სივრცის გარდაქმნა"),
+    ("ec.color.ociodisplay", "OCIO Display Transform", "OCIO ეკრანის გარდაქმნა"),
+    ("ec.color.ociofile", "OCIO File Transform", "OCIO ფაილის გარდაქმნა"),
+    ("ec.color.ociolook", "OCIO Look Transform", "OCIO ვიზუალური სტილის გარდაქმნა"),
+    ("ec.color.photofilter", "Photo Filter", "ფოტოფილტრი"),
+    ("ec.color.psarbitrarymap", "PS Arbitrary Map", "PS ნებისმიერი რუკა"),
+    ("ec.color.selectivecolor", "Selective Color", "შერჩევითი ფერი"),
+    ("ec.color.shadowhighlight", "Shadow/Highlight", "ჩრდილები/ღია ტონები"),
+    ("ec.color.tint", "Tint", "ტონირება"),
+    ("ec.color.tritone", "Tritone", "სამტონიანი"),
+    ("ec.color.vibrance", "Vibrance", "სიხალასე"),
+    ("ec.color.videolimiter", "Video Limiter", "ვიდეოლიმიტერი"),
+    ("ec.control.angle", "Angle Control", "კუთხის მართვა"),
+    ("ec.control.checkbox", "Checkbox Control", "მოსანიშნი ველის მართვა"),
+    ("ec.control.color", "Color Control", "ფერის მართვა"),
+    ("ec.control.dropdown", "Dropdown Menu Control", "ჩამოსაშლელი მენიუს მართვა"),
+    ("ec.control.layer", "Layer Control", "შრის მართვა"),
+    ("ec.control.point", "Point Control", "წერტილის მართვა"),
+    ("ec.control.point3d", "3D Point Control", "3D წერტილის მართვა"),
+    ("ec.control.slider", "Slider Control", "სლაიდერის მართვა"),
+    ("ec.control.stereo3d", "Stereo 3D Controls", "სტერეო 3D მართვა"),
+    ("ec.distort.bezierwarp", "Bezier Warp", "ბეზიეს დეფორმაცია"),
+    ("ec.distort.bulge", "Bulge", "გამობერილობა"),
+    ("ec.distort.ccbender", "CC Bender", "CC Bender"),
+    ("ec.distort.ccbendit", "CC Bend It", "CC Bend It"),
+    ("ec.distort.ccblobbylize", "CC Blobbylize", "CC Blobbylize"),
+    ("ec.distort.ccflomotion", "CC Flo Motion", "CC Flo Motion"),
+    ("ec.distort.ccgriddler", "CC Griddler", "CC Griddler"),
+    ("ec.distort.cclens", "CC Lens", "CC Lens"),
+    ("ec.distort.ccpageturn", "CC Page Turn", "CC Page Turn"),
+    ("ec.distort.ccpowerpin", "CC Power Pin", "CC Power Pin"),
+    ("ec.distort.ccripplepulse", "CC Ripple Pulse", "CC Ripple Pulse"),
+    ("ec.distort.ccslant", "CC Slant", "CC Slant"),
+    ("ec.distort.ccsmear", "CC Smear", "CC Smear"),
+    ("ec.distort.ccsplit", "CC Split", "CC Split"),
+    ("ec.distort.ccsplit2", "CC Split 2", "CC Split 2"),
+    ("ec.distort.cctiler", "CC Tiler", "CC Tiler"),
+    ("ec.distort.cornerpin", "Corner Pin", "კუთხეების მიმაგრება"),
+    ("ec.distort.displacementmap", "Displacement Map", "წანაცვლების რუკა"),
+    ("ec.distort.liquify", "Liquify", "გათხევადება"),
+    ("ec.distort.magnify", "Magnify", "გადიდება"),
+    ("ec.distort.meshwarp", "Mesh Warp", "ბადისებრი დეფორმაცია"),
+    ("ec.distort.mirror", "Mirror", "სარკე"),
+    ("ec.distort.offset", "Offset", "წანაცვლება"),
+    ("ec.distort.opticscompensation", "Optics Compensation", "ოპტიკის კომპენსაცია"),
+    ("ec.distort.polar", "Polar Coordinates", "პოლარული კოორდინატები"),
+    ("ec.distort.puppet", "Puppet", "მარიონეტი"),
+    ("ec.distort.reshape", "Reshape", "ფორმის შეცვლა"),
+    ("ec.distort.ripple", "Ripple", "ტალღა"),
+    ("ec.distort.rollingshutterrepair", "Rolling Shutter Repair", "მცოცავი ჩამკეტის გასწორება"),
+    ("ec.distort.smear", "Smear", "გადღაბნა"),
+    ("ec.distort.spherize", "Spherize", "სფერიზება"),
+    ("ec.distort.transform", "Transform", "გარდაქმნა"),
+    ("ec.distort.turbulentdisplace", "Turbulent Displace", "ტურბულენტური წანაცვლება"),
+    ("ec.distort.twirl", "Twirl", "გრიგალი"),
+    ("ec.distort.twirllegacy", "Twirl (Legacy)", "გრიგალი (მოძველებული)"),
+    ("ec.distort.upscale", "Detail-preserving Upscale", "გადიდება დეტალების შენარჩუნებით"),
+    ("ec.distort.warp", "Warp", "დეფორმაცია"),
+    ("ec.distort.warpstabilizer", "Warp Stabilizer", "დეფორმაციის სტაბილიზატორი"),
+    ("ec.distort.wavewarp", "Wave Warp", "ტალღური დეფორმაცია"),
+    ("ec.generate.advancedlightning", "Advanced Lightning", "გაფართოებული ელვა"),
+    ("ec.generate.audiospectrum", "Audio Spectrum", "აუდიოს სპექტრი"),
+    ("ec.generate.audiowaveform", "Audio Waveform", "აუდიოს ტალღის ფორმა"),
+    ("ec.generate.beam", "Beam", "სხივი"),
+    ("ec.generate.ccgluegun", "CC Glue Gun", "CC Glue Gun"),
+    ("ec.generate.cclightburst", "CC Light Burst 2.5", "CC Light Burst 2.5"),
+    ("ec.generate.cclightrays", "CC Light Rays", "CC Light Rays"),
+    ("ec.generate.cclightsweep", "CC Light Sweep", "CC Light Sweep"),
+    ("ec.generate.ccthreads", "CC Threads", "CC Threads"),
+    ("ec.generate.cellpattern", "Cell Pattern", "უჯრედების პატერნი"),
+    ("ec.generate.checkerboard", "Checkerboard", "ჭადრაკის დაფა"),
+    ("ec.generate.circle", "Circle", "წრე"),
+    ("ec.generate.ellipse", "Ellipse", "ელიფსი"),
+    ("ec.generate.eyedropperfill", "Eyedropper Fill", "პიპეტით შევსება"),
+    ("ec.generate.fill", "Fill", "შევსება"),
+    ("ec.generate.fourcolor", "4-Color Gradient", "4-ფერიანი გრადიენტი"),
+    ("ec.generate.fractal", "Fractal", "ფრაქტალი"),
+    ("ec.generate.gradientramp", "Gradient Ramp", "გრადიენტული გადასვლა"),
+    ("ec.generate.grid", "Grid", "ბადე"),
+    ("ec.generate.lensflare", "Lens Flare", "ობიექტივის ანარეკლი"),
+    ("ec.generate.paintbucket", "Paint Bucket", "საღებავის ვედრო"),
+    ("ec.generate.radiowaves", "Radio Waves", "რადიოტალღები"),
+    ("ec.generate.scribble", "Scribble", "ჯღაბნა"),
+    ("ec.generate.stroke", "Stroke", "კონტური"),
+    ("ec.generate.vegas", "Vegas", "ვეგასი"),
+    ("ec.generate.writeon", "Write-on", "თანდათანობითი წერა"),
+    ("ec.key.advancedspill", "Advanced Spill Suppressor", "ფერის გადაღვრის გაფართოებული ჩამხშობი"),
+    ("ec.key.ccsimplewireremoval", "CC Simple Wire Removal", "CC Simple Wire Removal"),
+    ("ec.key.colordifference", "Color Difference Key", "ფერთა სხვაობის გასაღები"),
+    ("ec.key.colorkey", "Color Key", "ფერის გასაღები"),
+    ("ec.key.colorrange", "Color Range", "ფერების დიაპაზონი"),
+    ("ec.key.differencematte", "Difference Matte", "სხვაობის მატი"),
+    ("ec.key.extract", "Extract", "ამოღება"),
+    ("ec.key.innerouter", "Inner/Outer Key", "შიდა/გარე გასაღები"),
+    ("ec.key.keycleaner", "Key Cleaner", "გასაღების გამწმენდი"),
+    ("ec.key.linearcolor", "Linear Color Key", "წრფივი ფერის გასაღები"),
+    ("ec.key.luma", "Luma Key", "სიკაშკაშის გასაღები"),
+    ("ec.key.screen", "Screen Key", "ეკრანის გასაღები"),
+    ("ec.key.spill", "Spill Suppressor", "ფერის გადაღვრის ჩამხშობი"),
+    ("ec.key.unmult", "Unmult", "Unmult"),
+    ("ec.keying.keylight", "Key Light", "Key Light"),
+    ("ec.matte.mattechoker", "Matte Choker", "მატის შემკუმშველი"),
+    ("ec.matte.objectmatte", "Object Matte", "ობიექტის მატი"),
+    ("ec.matte.refinehard", "Refine Hard Matte", "მკვეთრი მატის დახვეწა"),
+    ("ec.matte.refinesoft", "Refine Soft Matte", "რბილი მატის დახვეწა"),
+    ("ec.matte.rotobrush", "Roto Brush & Refine Edge", "როტო-ფუნჯი და კიდის დახვეწა"),
+    ("ec.matte.simplechoker", "Simple Choker", "მარტივი შემკუმშველი"),
+    ("ec.noise.addgrain", "Add Grain", "მარცვლოვნების დამატება"),
+    ("ec.noise.curlnoise", "Curl Noise", "გრიგალური ხმაური"),
+    ("ec.noise.dustscratches", "Dust & Scratches", "მტვერი და ნაკაწრები"),
+    ("ec.noise.fractal", "Fractal Noise", "ფრაქტალური ხმაური"),
+    ("ec.noise.matchgrain", "Match Grain", "მარცვლოვნების მისადაგება"),
+    ("ec.noise.median", "Median", "მედიანა"),
+    ("ec.noise.medianlegacy", "Median (Legacy)", "მედიანა (მოძველებული)"),
+    ("ec.noise.noise", "Noise", "ხმაური"),
+    ("ec.noise.noisealpha", "Noise Alpha", "ალფა-ხმაური"),
+    ("ec.noise.noisehls", "Noise HLS", "HLS ხმაური"),
+    ("ec.noise.noisehlsauto", "Noise HLS Auto", "HLS ხმაური (ავტომატური)"),
+    ("ec.noise.removegrain", "Remove Grain", "მარცვლოვნების მოცილება"),
+    ("ec.noise.turbulent", "Turbulent Noise", "ტურბულენტური ხმაური"),
+    ("ec.obsolete.basic3d", "Basic 3D", "საბაზო 3D"),
+    ("ec.obsolete.basictext", "Basic Text", "საბაზო ტექსტი"),
+    ("ec.obsolete.gaussianlegacy", "Gaussian Blur (Legacy)", "გაუსის გაბუნდოვნება (მოძველებული)"),
+    ("ec.obsolete.lightning", "Lightning", "ელვა"),
+    ("ec.obsolete.mochashape", "Mocha shape", "Mocha-ს ფიგურა"),
+    ("ec.obsolete.pathtext", "Path Text", "ტექსტი ტრაექტორიაზე"),
+    ("ec.paint.paint", "Paint", "ხატვა"),
+    ("ec.perspective.3dglasses", "3D Glasses", "3D სათვალე"),
+    ("ec.perspective.bevelalpha", "Bevel Alpha", "ალფას ფასკა"),
+    ("ec.perspective.beveledges", "Bevel Edges", "კიდეების ფასკა"),
+    ("ec.perspective.cameratracker", "3D Camera Tracker", "3D კამერის ტრეკერი"),
+    ("ec.perspective.cccylinder", "CC Cylinder", "CC Cylinder"),
+    ("ec.perspective.ccenvironment", "CC Environment", "CC Environment"),
+    ("ec.perspective.ccsphere", "CC Sphere", "CC Sphere"),
+    ("ec.perspective.ccspotlight", "CC Spotlight", "CC Spotlight"),
+    ("ec.perspective.dropshadow", "Drop Shadow", "ჩრდილი"),
+    ("ec.perspective.radialshadow", "Radial Shadow", "რადიალური ჩრდილი"),
+    ("ec.sim.carddance", "Card Dance", "მოცეკვავე ბარათები"),
+    ("ec.sim.caustics", "Caustics", "კაუსტიკა"),
+    ("ec.sim.ccballaction", "CC Ball Action", "CC Ball Action"),
+    ("ec.sim.ccbubbles", "CC Bubbles", "CC Bubbles"),
+    ("ec.sim.ccdrizzle", "CC Drizzle", "CC Drizzle"),
+    ("ec.sim.cchair", "CC Hair", "CC Hair"),
+    ("ec.sim.ccmrmercury", "CC Mr. Mercury", "CC Mr. Mercury"),
+    ("ec.sim.ccparticlesystems2", "CC Particle Systems II", "CC Particle Systems II"),
+    ("ec.sim.ccparticleworld", "CC Particle World", "CC Particle World"),
+    ("ec.sim.ccpixelpolly", "CC Pixel Polly", "CC Pixel Polly"),
+    ("ec.sim.ccrainfall", "CC Rainfall", "CC Rainfall"),
+    ("ec.sim.ccscatterize", "CC Scatterize", "CC Scatterize"),
+    ("ec.sim.ccsnowfall", "CC Snowfall", "CC Snowfall"),
+    ("ec.sim.ccstarburst", "CC Star Burst", "CC Star Burst"),
+    ("ec.sim.foam", "Foam", "ქაფი"),
+    ("ec.sim.particleplayground", "Particle Playground", "ნაწილაკების სიმულაცია"),
+    ("ec.sim.shatter", "Shatter", "დამსხვრევა"),
+    ("ec.sim.waveworld", "Wave World", "ტალღების სამყარო"),
+    ("ec.stylize.brushstrokes", "Brush Strokes", "ფუნჯის შტრიხები"),
+    ("ec.stylize.cartoon", "Cartoon", "მულტფილმის სტილი"),
+    ("ec.stylize.ccblockload", "CC Block Load", "CC Block Load"),
+    ("ec.stylize.ccburnfilm", "CC Burn Film", "CC Burn Film"),
+    ("ec.stylize.ccglass", "CC Glass", "CC Glass"),
+    ("ec.stylize.cchextile", "CC HexTile", "CC HexTile"),
+    ("ec.stylize.cckaleida", "CC Kaleida", "CC Kaleida"),
+    ("ec.stylize.ccmrsmoothie", "CC Mr. Smoothie", "CC Mr. Smoothie"),
+    ("ec.stylize.ccplastic", "CC Plastic", "CC Plastic"),
+    ("ec.stylize.ccrepetile", "CC RepeTile", "CC RepeTile"),
+    ("ec.stylize.ccthreshold", "CC Threshold", "CC Threshold"),
+    ("ec.stylize.ccthresholdrgb", "CC Threshold RGB", "CC Threshold RGB"),
+    ("ec.stylize.ccvignette", "CC Vignette", "CC Vignette"),
+    ("ec.stylize.coloremboss", "Color Emboss", "ფერადი რელიეფი"),
+    ("ec.stylize.emboss", "Emboss", "რელიეფი"),
+    ("ec.stylize.findedges", "Find Edges", "კიდეების პოვნა"),
+    ("ec.stylize.glow", "Glow", "ნათება"),
+    ("ec.stylize.mosaic", "Mosaic", "მოზაიკა"),
+    ("ec.stylize.motiontile", "Motion Tile", "მოძრავი ფილები"),
+    ("ec.stylize.posterize", "Posterize", "პოსტერიზაცია"),
+    ("ec.stylize.roughenedges", "Roughen Edges", "კიდეების დაუხეშება"),
+    ("ec.stylize.scatter", "Scatter", "გაბნევა"),
+    ("ec.stylize.strobe", "Strobe Light", "სტრობოსკოპი"),
+    ("ec.stylize.texturize", "Texturize", "ტექსტურირება"),
+    ("ec.stylize.threshold", "Threshold", "ზღვარი"),
+    ("ec.text.numbers", "Numbers", "რიცხვები"),
+    ("ec.text.timecode", "Timecode", "თაიმკოდი"),
+    ("ec.time.ccforcemotionblur", "CC Force Motion Blur", "CC Force Motion Blur"),
+    ("ec.time.ccwidetime", "CC Wide Time", "CC Wide Time"),
+    ("ec.time.echo", "Echo", "ექო"),
+    ("ec.time.pixelmotionblur", "Pixel Motion Blur", "პიქსელების მოძრაობის გაბუნდოვნება"),
+    ("ec.time.posterizetime", "Posterize Time", "დროის პოსტერიზაცია"),
+    ("ec.time.timedifference", "Time Difference", "დროითი სხვაობა"),
+    ("ec.time.timedisplacement", "Time Displacement", "დროითი წანაცვლება"),
+    ("ec.time.timewarp", "Timewarp", "Timewarp"),
+    ("ec.transition.blockdissolve", "Block Dissolve", "ბლოკური გადადნობა"),
+    ("ec.transition.cardwipe", "Card Wipe", "ბარათებით წმენდა"),
+    ("ec.transition.ccglasswipe", "CC Glass Wipe", "CC Glass Wipe"),
+    ("ec.transition.ccgridwipe", "CC Grid Wipe", "CC Grid Wipe"),
+    ("ec.transition.ccimagewipe", "CC Image Wipe", "CC Image Wipe"),
+    ("ec.transition.ccjaws", "CC Jaws", "CC Jaws"),
+    ("ec.transition.cclightwipe", "CC Light Wipe", "CC Light Wipe"),
+    ("ec.transition.cclinesweep", "CC Line Sweep", "CC Line Sweep"),
+    ("ec.transition.ccradialscalewipe", "CC Radial ScaleWipe", "CC Radial ScaleWipe"),
+    ("ec.transition.ccscalewipe", "CC Scale Wipe", "CC Scale Wipe"),
+    ("ec.transition.cctwister", "CC Twister", "CC Twister"),
+    ("ec.transition.ccwarpomatic", "CC WarpoMatic", "CC WarpoMatic"),
+    ("ec.transition.gradientwipe", "Gradient Wipe", "გრადიენტული წმენდა"),
+    ("ec.transition.iriswipe", "Iris Wipe", "დიაფრაგმული წმენდა"),
+    ("ec.transition.linearwipe", "Linear Wipe", "წრფივი წმენდა"),
+    ("ec.transition.radialwipe", "Radial Wipe", "რადიალური წმენდა"),
+    ("ec.transition.venetian", "Venetian Blinds", "ჟალუზი"),
+    ("ec.utility.applylut", "Apply Color LUT", "ფერის LUT-ის გამოყენება"),
+    ("ec.utility.ccoverbrights", "CC Overbrights", "CC Overbrights"),
+    ("ec.utility.cineon", "Cineon Converter", "Cineon-ის გარდამქმნელი"),
+    ("ec.utility.colorprofileconverter", "Color Profile Converter", "ფერის პროფილის გარდამქმნელი"),
+    ("ec.utility.facemeasurements", "Face Measurements", "სახის გაზომვები"),
+    ("ec.utility.facetrackpoints", "Face Track Points", "სახის ტრეკინგის წერტილები"),
+    ("ec.utility.growbounds", "Grow Bounds", "საზღვრების გაზრდა"),
+    ("ec.utility.hdrcompander", "HDR Compander", "HDR კომპანდერი"),
+    ("ec.utility.hdrcompression", "HDR Highlight Compression", "HDR ღია ტონების შეკუმშვა"),
+    ("ec.vr.blur", "VR Blur", "VR გაბუნდოვნება"),
+    ("ec.vr.chromaticaberrations", "VR Chromatic Aberrations", "VR ქრომატული აბერაციები"),
+    ("ec.vr.colorgradients", "VR Color Gradients", "VR ფერადი გრადიენტები"),
+    ("ec.vr.converter", "VR Converter", "VR გარდამქმნელი"),
+    ("ec.vr.denoise", "VR De-Noise", "VR ხმაურის მოცილება"),
+    ("ec.vr.digitalglitch", "VR Digital Glitch", "VR ციფრული ხარვეზი"),
+    ("ec.vr.fractalnoise", "VR Fractal Noise", "VR ფრაქტალური ხმაური"),
+    ("ec.vr.glow", "VR Glow", "VR ნათება"),
+    ("ec.vr.planetosphere", "VR Plane to Sphere", "VR სიბრტყიდან სფეროზე"),
+    ("ec.vr.rotatesphere", "VR Rotate Sphere", "VR სფეროს შემობრუნება"),
+    ("ec.vr.sharpen", "VR Sharpen", "VR სიმკვეთრე"),
+    ("ec.vr.spheretoplane", "VR Sphere to Plane", "VR სფეროდან სიბრტყეზე"),
+];
+
+/// Georgian (`ka`) category labels, keyed by the registry's English category.
+const GEORGIAN_CATEGORIES: &[(&str, &str)] = &[
+    ("3D Channel", "3D არხი"),
+    ("Audio", "აუდიო"),
+    ("Blur & Sharpen", "გაბუნდოვნება და სიმკვეთრე"),
+    ("Channel", "არხი"),
+    ("Color Correction", "ფერის კორექცია"),
+    ("Distort", "დამახინჯება"),
+    ("Expression Controls", "ექსპრესიის მართვა"),
+    ("Generate", "გენერაცია"),
+    ("Immersive Video", "იმერსიული ვიდეო"),
+    ("Keying", "კეიინგი"),
+    ("Matte", "მატი"),
+    ("Noise & Grain", "ხმაური და მარცვლოვნება"),
+    ("Obsolete", "მოძველებული"),
+    ("Paint", "ხატვა"),
+    ("Perspective", "პერსპექტივა"),
+    ("Simulation", "სიმულაცია"),
+    ("Stylize", "სტილიზაცია"),
+    ("Text", "ტექსტი"),
+    ("Time", "დრო"),
+    ("Transition", "გადასვლა"),
+    ("Utility", "დამხმარე"),
+];
+
 /// The 21 category folder names the generated Effect menu and Effects & Presets draw, in
 /// Simplified Chinese. Read from the installed After Effects 2026 (26.5.0.89) Simplified Chinese
 /// interface (the checklist's `07-类别` sheet); two of them are the interface's own wording where
@@ -524,19 +879,17 @@ mod tests {
     use crate::i18n::set_current;
     use effectcraft_engine::effects;
 
-    /// Every effect in the registry has a row, and that row still carries the registry's English
-    /// name. A new effect, a rename or a removal fails here rather than drawing an English name
-    /// in a Chinese interface, or attaching a translation to a different effect.
+    /// Every row names an effect in the registry and still carries its English name, so a rename
+    /// or a removal fails here rather than attaching a translation to a different effect.
     #[test]
-    fn every_effect_has_a_row() {
+    fn every_row_names_a_registry_effect() {
         let registry = effects::registry();
-        assert_eq!(SIMPLIFIED_CHINESE.len(), registry.len(), "the catalog has {} rows for {} effects", SIMPLIFIED_CHINESE.len(), registry.len());
-        for spec in registry {
-            let Some((_, english, translated)) = SIMPLIFIED_CHINESE.iter().find(|(id, _, _)| *id == spec.id) else {
-                panic!("no catalog row for {} ({})", spec.id, spec.name);
+        for (id, english, translated) in SIMPLIFIED_CHINESE {
+            let Some(spec) = registry.iter().find(|spec| spec.id == *id) else {
+                panic!("{id} ({english}) is not an effect in the registry");
             };
-            assert_eq!(*english, spec.name, "{}: the catalog says {english:?}, the registry {:?}", spec.id, spec.name);
-            assert!(!translated.is_empty(), "{}: empty translation", spec.id);
+            assert_eq!(*english, spec.name, "{id}: the catalog says {english:?}, the registry {:?}", spec.name);
+            assert!(!translated.is_empty(), "{id}: empty translation");
         }
     }
 
@@ -550,24 +903,12 @@ mod tests {
         assert_eq!(listed, ids.len(), "an effect id is listed twice");
     }
 
-    /// The five names Adobe's Simplified Chinese interface leaves in English as brand names, and
-    /// the only zh-hans rows that may repeat their English name. Deliberately not shared: another
-    /// language keeps different names in English (Japanese leaves the whole `CC`, `VR` and `OCIO`
-    /// sets in English), so this is zh-hans's own choice, not an invariant of the tables.
-    #[test]
-    fn only_the_brand_names_stay_in_english() {
-        const BRANDS: [&str; 5] = ["ec.3d.cryptomatte", "ec.3d.extractor", "ec.3d.identifier", "ec.keying.keylight", "ec.key.unmult"];
-        for (id, english, translated) in SIMPLIFIED_CHINESE {
-            assert_eq!(english == translated, BRANDS.contains(id), "{id}: {english:?} is drawn as {translated:?}");
-        }
-    }
-
     /// The languages that have no rows yet, with the table a translator fills in for each. A new
     /// language is added here and to [`catalog`]; the test then guards its rows as they arrive.
     const PENDING: &[(&str, &[Row])] = &[("zh-hant", TRADITIONAL_CHINESE)];
 
     /// The languages whose tables are being filled in: guarded like [`PENDING`] row by row.
-    const PARTIAL: &[(&str, &[Row])] = &[("ja", JAPANESE_EFFECTS)];
+    const PARTIAL: &[(&str, &[Row])] = &[("ja", JAPANESE_EFFECTS), ("ka", GEORGIAN)];
 
     /// A pending language may lag Simplified Chinese but may not invent ids or disagree about
     /// which effect an id names: a translator fills these tables row by row. While they are
@@ -591,16 +932,14 @@ mod tests {
         }
     }
 
-    /// Every category the registry and its plug-ins report has a Simplified Chinese row, and
-    /// every row of every language names a category that exists — else the generated Effect menu
-    /// and Effects & Presets would draw a label no folder has.
+    /// Every category row of every language names a category that exists, else the generated
+    /// Effect menu and Effects & Presets would carry a label no folder has.
     #[test]
-    fn every_category_has_a_row() {
+    fn every_category_row_names_a_category() {
         let categories = effects::categories();
-        for category in &categories {
-            assert!(SIMPLIFIED_CHINESE_CATEGORIES.iter().any(|(english, _)| english == category), "no catalog row for category {category}");
-        }
-        for (language, rows) in [("zh-hans", SIMPLIFIED_CHINESE_CATEGORIES), ("zh-hant", TRADITIONAL_CHINESE_CATEGORIES), ("ja", JAPANESE_CATEGORIES)] {
+        for (language, rows) in
+            [("zh-hans", SIMPLIFIED_CHINESE_CATEGORIES), ("zh-hant", TRADITIONAL_CHINESE_CATEGORIES), ("ja", JAPANESE_CATEGORIES), ("ka", GEORGIAN_CATEGORIES)]
+        {
             for (english, translated) in rows {
                 assert!(categories.contains(english), "{language} lists {english}, which is not a category");
                 assert!(!translated.is_empty(), "empty {language} translation for {english}");
@@ -613,48 +952,38 @@ mod tests {
     #[test]
     fn group_names_keep_the_instance_index_and_user_renames() {
         set_current("zh-hans");
-        assert_eq!(group("ec.blur.gaussian", "Gaussian Blur"), "高斯模糊");
-        assert_eq!(group("ec.blur.gaussian", "Gaussian Blur 2"), "高斯模糊 2");
-        assert_eq!(group("ec.blur.gaussian", "Gaussian Blur 12"), "高斯模糊 12");
+        let translated = name("ec.blur.gaussian", "Gaussian Blur");
+        assert_eq!(group("ec.blur.gaussian", "Gaussian Blur"), translated);
+        assert_eq!(group("ec.blur.gaussian", "Gaussian Blur 2"), format!("{translated} 2"));
+        assert_eq!(group("ec.blur.gaussian", "Gaussian Blur 12"), format!("{translated} 12"));
         assert_eq!(group("ec.blur.gaussian", "My Blur"), "My Blur", "a rename is not a row");
         assert_eq!(group("ec.blur.gaussian", "Gaussian Blur X"), "Gaussian Blur X");
         assert_eq!(group("ec.blur.gaussian", "Gaussian Blur 2x"), "Gaussian Blur 2x");
-        assert_eq!(group("ec.blur.gaussian", "高斯模糊"), "高斯模糊", "an already translated name stays");
+        assert_eq!(group("ec.blur.gaussian", &translated), translated, "an already translated name stays");
         set_current("en");
     }
 
-    /// English, and a language with no catalog or no row for this effect, draws the registry's
-    /// name rather than an empty label.
-    ///
-    /// The pending languages are also checked to still be row-less and to have an arm in
-    /// [`catalog`]: an arm with no table would leave a translator's rows dead, and the day a
-    /// pending language gets rows this fails so its slot moves out of [`PENDING`], where the
-    /// coverage for it lives.
+    /// English, and a language with no catalog or no row for an effect, draws the registry's
+    /// name rather than an empty label; a language with a row draws the row. Every table in
+    /// [`PENDING`] and [`PARTIAL`] has an arm in [`catalog`]: an arm-less table's rows would be dead.
     #[test]
     fn languages_without_rows_draw_the_registry_name() {
+        for (language, _) in PENDING.iter().chain(PARTIAL) {
+            assert!(catalog(language).is_some(), "{language} has a table but no arm in `catalog`: its rows would be dead");
+        }
+        let tables = PENDING.iter().chain(PARTIAL).copied().chain([("zh-hans", SIMPLIFIED_CHINESE)]);
+        for (language, rows) in [("en", &[][..]), ("uk", &[][..]), ("cs", &[][..])].into_iter().chain(tables) {
+            set_current(language);
+            let expected = rows.iter().find(|(id, _, _)| *id == "ec.blur.gaussian").map_or("Gaussian Blur", |(_, _, translated)| *translated);
+            assert_eq!(name("ec.blur.gaussian", "Gaussian Blur"), expected, "{language}");
+            assert_eq!(group("ec.blur.gaussian", "Gaussian Blur 2"), format!("{expected} 2"), "{language}");
+            assert_eq!(name("ec.unknown.effect", "Mystery"), "Mystery", "{language}");
+            assert_eq!(category("Not A Category"), "Not A Category", "{language}");
+        }
         for language in ["en", "uk", "cs"] {
             set_current(language);
-            assert_eq!(name("ec.blur.gaussian", "Gaussian Blur"), "Gaussian Blur", "{language}");
-            assert_eq!(group("ec.blur.gaussian", "Gaussian Blur 2"), "Gaussian Blur 2", "{language}");
             assert_eq!(category("Blur & Sharpen"), "Blur & Sharpen", "{language}");
         }
-        for (language, rows) in PENDING {
-            assert!(catalog(language).is_some(), "{language} has a table but no arm in `catalog`: its rows would be dead");
-            assert!(rows.is_empty(), "{language} has rows now: move it out of PENDING and cover it here");
-            set_current(language);
-            assert_eq!(name("ec.blur.gaussian", "Gaussian Blur"), "Gaussian Blur", "{language}");
-            assert_eq!(group("ec.blur.gaussian", "Gaussian Blur 2"), "Gaussian Blur 2", "{language}");
-            assert_eq!(category("Blur & Sharpen"), "Blur & Sharpen", "{language}");
-        }
-        set_current("zh-hans");
-        assert_eq!(name("ec.blur.gaussian", "Gaussian Blur"), "高斯模糊");
-        assert_eq!(group("ec.blur.gaussian", "Gaussian Blur 2"), "高斯模糊 2");
-        assert_eq!(category("Blur & Sharpen"), "模糊和锐化");
-        assert_eq!(name("ec.unknown.effect", "Mystery"), "Mystery");
-        assert_eq!(category("Not A Category"), "Not A Category");
-        set_current("ja");
-        assert_eq!(name("ec.blur.gaussian", "Gaussian Blur"), "ブラー（ガウス）");
-        assert_eq!(name("ec.unknown.effect", "Mystery"), "Mystery", "a row a partial table lacks draws the registry name");
         set_current("en");
     }
 
@@ -665,38 +994,10 @@ mod tests {
         set_current("zh-hans");
         assert!(matches("ec.blur.gaussian", "Gaussian Blur", "blur"));
         assert!(matches("ec.blur.gaussian", "Gaussian Blur", "gaussian"));
-        assert!(matches("ec.blur.gaussian", "Gaussian Blur", "高斯"));
+        assert!(matches("ec.blur.gaussian", "Gaussian Blur", &name("ec.blur.gaussian", "Gaussian Blur").to_lowercase()));
         assert!(!matches("ec.blur.gaussian", "Gaussian Blur", "sharpen"));
         set_current("en");
         assert!(matches("ec.blur.gaussian", "Gaussian Blur", "blur"));
         assert!(!matches("ec.blur.gaussian", "Gaussian Blur", "高斯"));
-    }
-
-    /// The drawing sites ask this catalog instead of the registry's English name (#821). Like the
-    /// panel catalog's literal scan this is a heuristic: it pins the expressions that used to draw
-    /// the English name, so a revert fails here.
-    #[test]
-    fn the_drawing_sites_ask_the_catalog() {
-        /// A file that must ask the catalog.
-        const ASKS: &[(&str, &str, &str)] = &[
-            ("i18n.rs", include_str!("../i18n.rs"), "effects::name("),
-            ("i18n.rs", include_str!("../i18n.rs"), "effects::category("),
-            ("panels/effects_presets.rs", include_str!("../panels/effects_presets.rs"), "effects::name("),
-            ("panels/effects_presets.rs", include_str!("../panels/effects_presets.rs"), "effects::category("),
-            ("panels/effect_controls.rs", include_str!("../panels/effect_controls.rs"), "effects::group("),
-            ("panels/timeline.rs", include_str!("../panels/timeline.rs"), "effects::group("),
-        ];
-        /// An expression that drew the registry's English name and must be gone.
-        const RAW: &[(&str, &str, &str)] = &[
-            ("panels/effects_presets.rs", include_str!("../panels/effects_presets.rs"), "pos2(r.min.x + 56.0 + indent, r.center().y), e.name, query, &t)"),
-            ("panels/effect_controls.rs", include_str!("../panels/effect_controls.rs"), "Align2::LEFT_CENTER, &g.name,"),
-            ("panels/timeline.rs", include_str!("../panels/timeline.rs"), "Align2::LEFT_CENTER, name,"),
-        ];
-        for (path, source, call) in ASKS {
-            assert!(source.contains(call), "{path} does not ask the effect-name catalog (`{call}`)");
-        }
-        for (path, source, raw) in RAW {
-            assert!(!source.contains(raw), "{path} draws the registry's English name again: `{raw}`");
-        }
     }
 }

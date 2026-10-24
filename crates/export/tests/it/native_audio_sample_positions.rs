@@ -1,5 +1,3 @@
-#![cfg(not(target_arch = "wasm32"))]
-
 //! Native MediaPool decoding and native WAV export preserve selected sample positions.
 use effectcraft_export::render_queue::{AudioFormat, OutputFormat, OutputModule, RenderSettings};
 use effectcraft_export::{Job, JobOptions, Sink, export};

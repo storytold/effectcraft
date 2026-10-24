@@ -6,7 +6,7 @@ use effectcraft_project::BitDepth;
 use effectcraft_render::RenderOpts;
 use effectcraft_time::Tick;
 
-use crate::tests::{Scene, c, check, compare_at, effect_case, n, opts, set};
+use crate::tests::{Scene, allow_llvmpipe_boundary_flips, c, check, compare_at, effect_case, n, opts, set};
 
 fn e(v: u32) -> Value {
     Value::Enum(v)
@@ -22,6 +22,7 @@ fn pt(x: f64, y: f64) -> Value {
 
 #[test]
 fn posterize_thresholds_strobe_vignette() {
+    let _flips = allow_llvmpipe_boundary_flips();
     effect_case("ec.stylize.posterize", &[("level", n(4.0))]);
     effect_case("ec.stylize.posterize", &[("level", n(9.0))]);
     effect_case("ec.stylize.threshold", &[("level", n(100.0))]);

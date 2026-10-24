@@ -1238,26 +1238,34 @@ impl EffectcraftApp {
         }
         let step = plan.map_or(1, |p| p.step);
         // Never further ahead than the RAM preview holds: those frames would evict the ones the
-        // preview shows first, or be evicted before it gets there (#595).
-        let window = (ahead * 3).min(self.frames_that_fit(&c, scale) - 1);
-        for k in 0..window {
+        // preview shows first, or be evicted before it gets there (#595). The window starts at the
+        // first uncached frame ahead: after a loop or a restart the frames just ahead are cached,
+        // and a window from the playhead left the workers idle until it came near the end of the
+        // cached run. It stays ahead × 3 frames wide: workers spread over the whole preview render
+        // frames with different layers at once (on the GPU, an atlas each: #1812).
+        let fit_ahead = self.frames_that_fit(&c, scale) - 1;
+        let frame = |k: i64| match plan {
+            Some(p) => p.frame_after(cur, k),
+            None => {
+                let f = cur + k;
+                Some(if f > wb { wa + (f - wb - 1).rem_euclid((wb - wa + 1).max(1)) } else { f })
+            }
+        };
+        let cached = self.frames.cached_frames(&series);
+        let uncached = |f: i64| cached.binary_search(&f).is_err();
+        let first = match plan.filter(|_| self.playback.playing) {
+            Some(p) => (0..fit_ahead.min((p.end - p.start) / p.step.max(1) + 1))
+                .map_while(|k| frame(k).map(|f| (k, f)))
+                .find(|&(_, f)| uncached(f))
+                .map_or(0, |(k, _)| k),
+            None => 0,
+        };
+        for k in first..(first + ahead * 3).min(fit_ahead) {
             if queued >= ahead as usize || !video {
                 break;
             }
-            let f = match plan {
-                Some(p) => match p.frame_after(cur, k) {
-                    Some(f) => f,
-                    None => break,
-                },
-                None => {
-                    let mut f = cur + k;
-                    if f > wb {
-                        f = wa + (f - wb - 1).rem_euclid((wb - wa + 1).max(1));
-                    }
-                    f
-                }
-            };
-            if !self.frames.is_cached(&FrameKey { frame: f, ..series }) {
+            let Some(f) = frame(k) else { break };
+            if uncached(f) {
                 self.request_frame(cid, f, scale);
                 queued += 1;
             }

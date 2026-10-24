@@ -1,5 +1,6 @@
 //! Right-click actions in the blank Project and Timeline areas, and on Timeline property names.
 use effectcraft_engine::Session;
+use effectcraft_engine::project::ItemKind;
 use effectcraft_ui_egui::{Dialog, EffectcraftApp, dock::PanelKind};
 use egui::{Event, Modifiers, PointerButton, Pos2, Rect, pos2, vec2};
 use egui_kittest::{Harness, kittest::Queryable as _};
@@ -297,6 +298,43 @@ fn timeline_layer_context_menu_has_layer_styles_submenu() {
     let comp = h.state().session.active_comp().unwrap();
     let l = comp.layer(effectcraft_engine::project::LayerId(solid)).unwrap();
     assert!(l.layer_styles().is_some_and(|g| g.sub("dropShadow").is_some()));
+}
+
+/// #1809: Reveal Layer Source in Project shows the source in a large project: it clears the
+/// Project panel's search, opens the folders holding the item and selects it.
+#[test]
+fn timeline_layer_context_menu_reveals_the_source_in_project() {
+    let mut h = harness();
+    let layer = h.state_mut().session.execute("layer.newSolid", json!({"name": "Plate", "color": "#406080"})).unwrap()["layer"].as_u64().unwrap();
+    let solid = h.state().session.project.items.values().find(|i| matches!(i.kind, ItemKind::Solid(_))).unwrap().id;
+    let outer = h.state_mut().session.execute("project.newFolder", json!({"name": "Assets"})).unwrap()["item"].as_u64().unwrap();
+    let inner = h.state_mut().session.execute("project.newFolder", json!({"name": "Plates"})).unwrap()["item"].as_u64().unwrap();
+    h.state_mut().session.execute("project.move", json!({"items": [inner], "folder": outer})).unwrap();
+    h.state_mut().session.execute("project.move", json!({"items": [solid.0], "folder": inner})).unwrap();
+    h.state_mut().session.execute("project.select", json!({"items": []})).unwrap();
+    h.state_mut().ui.project_open_folders.clear();
+    h.state_mut().ui.project_search = "no such item".into();
+    h.run_steps(3);
+    assert!(h.state().auto.find(&format!("project.item.{}", solid.0)).is_none(), "the source starts hidden");
+    let r = rect(&h, &format!("timeline.layer.{layer}.row"));
+    right_click(&mut h, pos2(r.min.x + 210.0, r.center().y));
+    h.get_by_label("Reveal Layer Source in Project").click();
+    h.run_steps(3);
+    assert_eq!(h.state().session.state.project_selection, vec![solid]);
+    assert_eq!(h.state().ui.focused, PanelKind::Project);
+    assert!(h.state().ui.project_search.is_empty(), "the search is cleared");
+    assert!([outer, inner].iter().all(|folder| h.state().ui.project_open_folders.contains(folder)), "the folders holding the source open");
+    assert!(h.state().auto.find(&format!("project.item.{}", solid.0)).is_some(), "the source row is visible");
+    // In a mixed selection the command still appears when the right-clicked layer has no source,
+    // because the menu acts on the solid layer too.
+    let shape = h.state_mut().session.execute("layer.newShape", json!({"kind": "none"})).unwrap()["layer"].as_u64().unwrap();
+    h.state_mut().session.execute("layer.select", json!({"layers": [shape, layer]})).unwrap();
+    h.run_steps(3);
+    let r = rect(&h, &format!("timeline.layer.{shape}.row"));
+    right_click(&mut h, pos2(r.min.x + 210.0, r.center().y));
+    h.get_by_label("Reveal Layer Source in Project").click();
+    h.run_steps(3);
+    assert_eq!(h.state().session.state.project_selection, vec![solid], "the solid's source, not the shape");
 }
 
 /// #976: a layer's context menu has After Effects' Markers ▸ Add Marker, which marks the layer that

@@ -121,8 +121,8 @@ fn psd_16bit_cmyk_composition_imports() {
     assert!(d < 2.0 / 255.0, "mean diff {d}");
 }
 
-const SVG: &[u8] = include_bytes!("../../svg/tests/fixtures/basic-shapes.svg");
-const SVG2: &[u8] = include_bytes!("../../svg/tests/fixtures/paths-gradients.svg");
+const SVG: &[u8] = include_bytes!("../../../svg/tests/fixtures/basic-shapes.svg");
+const SVG2: &[u8] = include_bytes!("../../../svg/tests/fixtures/paths-gradients.svg");
 
 #[test]
 fn svg_footage_and_shapes_from_vector_layer() {

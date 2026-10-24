@@ -149,7 +149,23 @@ fn stored_paths_resolve_against_the_project() {
     let doc = doc.to_str().unwrap();
     assert_eq!(super::resolve("clip.mov", Some(doc)), Ok(std::env::temp_dir().join("art").join("clip.mov")));
     assert_eq!(super::resolve("clip.mov", None), Err(super::NotFollowed::NoProjectFolder));
+    assert_eq!(super::resolve("../logo.png", None), Err(super::NotFollowed::NoProjectFolder));
+    // A drive path is not a local file on Unix, with or without a project: it is not a missing project.
+    #[cfg(unix)]
+    for stored in [r"C:\x.mov", "C:x.mov"] {
+        assert_eq!(super::resolve(stored, None), Err(super::NotFollowed::Refused(super::Refused::Invalid)), "{stored}");
+    }
     assert_eq!(super::resolve(r"\\192.0.2.1\share\x.mov", Some(doc)), Err(super::NotFollowed::Refused(super::Refused::Network)));
+    assert_eq!(super::resolve("jar:clip.mov", Some(doc)), Err(super::NotFollowed::Refused(super::Refused::Url)));
+    // Windows reads a colon in a name as an alternate data stream; elsewhere it is a plain character.
+    if cfg!(windows) {
+        assert_eq!(super::resolve("shots/take:1.mov", Some(doc)), Err(super::NotFollowed::Refused(super::Refused::Invalid)));
+    } else {
+        assert_eq!(super::resolve("shots/take:1.mov", Some(doc)), Ok(std::env::temp_dir().join("art").join("shots").join("take:1.mov")));
+    }
+    // A Windows drive path names no file on other platforms.
+    #[cfg(unix)]
+    assert_eq!(super::resolve(r"C:\art\clip.mov", Some(doc)), Err(super::NotFollowed::Refused(super::Refused::Invalid)));
     #[cfg(windows)]
     assert!(super::resolve(r"\\server\share\x.mov", Some(r"\\SERVER\share\job\intro.ecproj")).is_ok());
 }

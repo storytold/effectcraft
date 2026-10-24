@@ -2,7 +2,7 @@
 //! bit for bit. Skipped when `ffmpeg` (with libdav1d) is not installed. ffmpeg's native `av1`
 //! decoder only drives hardware decoders, so it is not used.
 
-mod common;
+use crate::common;
 
 use std::process::Command;
 

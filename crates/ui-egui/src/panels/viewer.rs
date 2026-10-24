@@ -1311,6 +1311,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     let c = super::timeline::LayerMenuCaps::of(&app.session.project, layer);
                     caps.vector |= c.vector;
                     caps.text |= c.text;
+                    caps.source |= c.source;
                     caps
                 },
             );

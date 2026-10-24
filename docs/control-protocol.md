@@ -51,7 +51,7 @@ export formats, parity summary), `jobs.list` (Progress panel jobs, e.g. the back
 `footage.check` after File ▸ Open).
 
 Every engine command is reachable through `engine.execute`, and every interactive widget of every
-panel registers an element id; both are enforced by `crates/ui-egui/tests/ui_agent_audit.rs`.
+panel registers an element id; both are enforced by `crates/ui-egui/tests/it/ui_agent_audit.rs`.
 
 ## UI state
 

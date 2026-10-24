@@ -1290,6 +1290,8 @@ mod tests_proxy;
 #[cfg(test)]
 mod tests_quick_offset;
 #[cfg(test)]
+mod tests_replace_source;
+#[cfg(test)]
 mod tests_rig3d;
 #[cfg(test)]
 mod tests_sequence;

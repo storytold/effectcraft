@@ -38,6 +38,24 @@ fn send(app: &mut EffectcraftApp, method: &str, params: Value) {
 }
 
 #[test]
+fn control_gestures_reject_excessive_counts_without_queue_mutation() {
+    let mut app = EffectcraftApp::new(Session::default());
+    send(&mut app, "ui.click", json!({"x": 10, "y": 10, "count": u64::MAX}));
+    assert!(app.take_synthetic_input().is_empty(), "an oversized click must not partially queue input");
+
+    send(&mut app, "ui.drag", json!({"from": {"x": 10, "y": 10}, "to": {"x": 90, "y": 40}, "steps": u64::MAX}));
+    assert!(app.take_synthetic_input().is_empty(), "an oversized drag must not partially queue input");
+
+    send(&mut app, "ui.click", json!({"x": 10, "y": 10, "count": 512}));
+    send(&mut app, "ui.click", json!({"x": 10, "y": 10, "count": 512}));
+    assert_eq!(app.take_synthetic_input().len(), 2054, "two maximum accepted clicks fit under the aggregate cap");
+    for _ in 0..4 {
+        send(&mut app, "ui.click", json!({"x": 10, "y": 10, "count": 512}));
+    }
+    assert_eq!(app.take_synthetic_input().len(), 3081, "the pending event limit is enforced before requests can exceed it");
+}
+
+#[test]
 fn shift_click_holds_shift_from_press_to_release() {
     let mut app = EffectcraftApp::new(Session::default());
     send(&mut app, "ui.click", json!({"x": 10, "y": 10, "modifiers": {"shift": true}}));

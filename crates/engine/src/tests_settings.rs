@@ -1064,6 +1064,12 @@ fn interface_language_is_validated_persisted_and_backward_compatible() {
     cs.load_settings();
     assert_eq!(cs.prefs.general.language, "cs");
     assert_eq!(Prefs::from_json(r#"{"general":{"language":"cs"}}"#).general.language, "cs");
+    // Georgian too.
+    assert!(crate::prefs::LANGUAGES.contains(&("ქართული", "ka")));
+    s.execute("prefs.set", json!({"key": "general.language", "value": "ka"})).unwrap();
+    let mut ka = Session { config: Some(store.clone()), ..Default::default() };
+    ka.load_settings();
+    assert_eq!(ka.prefs.general.language, "ka");
     s.execute("prefs.set", json!({"key": "general.language", "value": "ja"})).unwrap();
     let mut reloaded = Session { config: Some(store), ..Default::default() };
     reloaded.load_settings();

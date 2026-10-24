@@ -584,6 +584,46 @@ fn sequence_gaps_show_placeholders() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// #1812: a still asked for at a reduced size comes back as the renderer would resample it, and
+/// is kept at that size: later frames at that size neither decode nor resample it again (a
+/// parallax project's 21120-px plates were decoded and resampled for every frame at Quarter).
+#[test]
+fn stills_at_reduced_sizes_are_resampled_once() {
+    let dir = std::env::temp_dir().join(format!("ec-still-size-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let p = dir.join("plate.png");
+    let px = |x: u32, y: u32| {
+        image::Rgba([(x * 7 % 256) as u8, (y * 13 % 256) as u8, ((x ^ y) % 256) as u8, if (x + y).is_multiple_of(5) { 0 } else { 255 - (x % 128) as u8 }])
+    };
+    image::RgbaImage::from_fn(613, 97, px).save(&p).expect("png");
+    let f = probe(&p).expect("probe");
+    let pool = MediaPool::new();
+    let full = pool.frame(ItemId(1), &f, Tick::ZERO).expect("frame");
+    // At its own size it is the unsized frame: no second decode, no second full-size copy.
+    let misses = pool.stats().misses;
+    let native = pool.frame_at_size(ItemId(1), &f, Tick::ZERO, f.width, f.height).expect("frame");
+    assert!(Arc::ptr_eq(&full, &native), "the native size reuses the unsized frame");
+    assert_eq!(pool.stats().misses, misses);
+    for (w, h) in [(306, 48), (153, 24), (77, 12)] {
+        let sized = pool.frame_at_size(ItemId(1), &f, Tick::ZERO, w, h).expect("frame");
+        assert_eq!(*sized, effectcraft_raster::resample(&full, w, h), "{w}×{h}: the renderer's resample");
+        let misses = pool.stats().misses;
+        let again = pool.frame_at_size(ItemId(1), &f, Tick(3 * TICKS_PER_SECOND), w, h).expect("frame");
+        assert!(Arc::ptr_eq(&sized, &again), "{w}×{h}: kept at that size");
+        assert_eq!(pool.stats().misses, misses, "{w}×{h}: not decoded again");
+    }
+    // Pixels larger than the nominal size (a smart object's) are resampled as the renderer does;
+    // smaller ones are left as they are (the renderer scales the layer up instead).
+    // One pool, one file, one requested size: the two decisions don't share a cache entry.
+    let larger = Footage { width: 306, height: 48, ..f.clone() };
+    let smaller = Footage { width: 1226, height: 194, ..f.clone() };
+    let sized = pool.frame_at_size(ItemId(2), &larger, Tick::ZERO, 153, 24).expect("frame");
+    assert_eq!(*sized, effectcraft_raster::resample(&full, 153, 24));
+    let kept = pool.frame_at_size(ItemId(3), &smaller, Tick::ZERO, 153, 24).expect("frame");
+    assert_eq!(*kept, *full);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn png_with_alpha() {
     let Some(p) = alpha_png() else { return };
@@ -837,7 +877,7 @@ fn flac_audio_of_any_shape_reads_in_device_blocks() {
         }
         // ffmpeg's sine source has an amplitude of 1/8 (mono is duplicated). The fixture carries
         // channels 0 and 1 at full level and the others at half, so a multichannel file sounds as
-        // its stereo downmix (tests/downmix.rs checks that matrix channel by channel).
+        // its stereo downmix (tests/it/downmix.rs checks that matrix channel by channel).
         let gains = effectcraft_media::downmix::stereo_gains(channels as usize, false);
         let side = |s: usize| gains.iter().enumerate().map(|(c, g)| f64::from(g[s]) * if c < 2 { 1.0 } else { 0.5 }).sum::<f64>();
         let want = 0.125 * ((side(0).powi(2) + side(1).powi(2)) / 2.0).sqrt() / 2f64.sqrt();

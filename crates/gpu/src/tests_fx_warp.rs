@@ -2,6 +2,8 @@
 //! Emboss, Cartoon) vs the CPU effects (the oracle): direct on a buffer at full and half
 //! resolution, as adjustment, and composited at 8 and 32 bpc.
 
+use std::io::Write;
+
 use effectcraft_effects::MaskShape;
 use effectcraft_keyframe::{ShapePath, Value};
 use effectcraft_project::build::{self, Ids};
@@ -9,7 +11,7 @@ use effectcraft_project::{BitDepth, MaskMode};
 use effectcraft_render::RenderOpts;
 use effectcraft_time::Tick;
 
-use crate::tests::{Scene, c, check, compare_at, diff, effect_case, gpu, n, opts, pattern};
+use crate::tests::{Scene, c, check, compare_at, diff, effect_case, gpu, n, on_llvmpipe, opts, pattern};
 
 fn e(v: u32) -> Value {
     Value::Enum(v)
@@ -182,6 +184,12 @@ fn smear_and_reshape() {
         ],
     ];
     for vals in reshape {
+        if on_llvmpipe() && vals.iter().any(|(k, _)| *k == "boundaryMask") {
+            // Straight to stderr: libtest captures `eprintln!` of passing tests, and the skip
+            // should show in the log.
+            let _ = writeln!(std::io::stderr(), "tests_fx_warp::smear_and_reshape: skipping ec.distort.reshape {vals:?} on llvmpipe (crashes lavapipe, #2238)");
+            continue;
+        }
         direct_with_masks("ec.distort.reshape", vals);
         composite_with_masks("ec.distort.reshape", vals);
     }

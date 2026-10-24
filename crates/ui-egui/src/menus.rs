@@ -939,6 +939,18 @@ pub fn frontend(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, p: Valu
         }
         // View ▸ New Viewer.
         "view.newViewer" => json!({"viewer": crate::panels::viewers::new_viewer(app)}),
+        // Reveal Layer Source / Reveal Composition: show the Project panel on the item, opening
+        // its folders and clearing the search so the row is visible.
+        "project.reveal" => {
+            let ids: Vec<effectcraft_engine::project::ItemId> = p
+                .get("items")
+                .and_then(Value::as_array)
+                .map(|items| items.iter().filter_map(Value::as_u64).map(effectcraft_engine::project::ItemId).collect())
+                .or_else(|| p.get("item").and_then(Value::as_u64).map(|item| vec![effectcraft_engine::project::ItemId(item)]))
+                .unwrap_or_default();
+            crate::panels::project::reveal(app, ctx, &ids);
+            json!({"items": ids.iter().map(|item| item.0).collect::<Vec<_>>()})
+        }
         // Run by id (control channel, MCP): the Project panel's selection, whatever has focus.
         "project.deleteWithoutConfirmation" => crate::panels::delete_items::delete_confirmed(app, ctx, json!({}))?,
         // A gradient property's "Edit Gradient…" (the Timeline's value): the Gradient Editor.

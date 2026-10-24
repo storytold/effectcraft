@@ -108,6 +108,47 @@ fn project_items_land_where_they_are_dropped_in_the_timeline() {
     assert!((in_point(&h, 3) - 1.0).abs() < 1e-9, "Shift starts it at the current time");
 }
 
+/// Alt/Option-drag from the Project panel replaces the source of the layer under the pointer
+/// instead of adding a layer (#991).
+#[test]
+fn alt_dragging_a_project_item_replaces_the_layer_source() {
+    let (mut h, clip) = harness();
+    let top = layer_id(&h, "Top");
+    let item = rect(&h, &format!("project.item.{clip}.name")).center();
+    let row = rect(&h, &format!("timeline.layer.{top}.row"));
+    let before = stack(&h);
+    drag(&mut h, item, row.center(), Modifiers::ALT);
+    assert_eq!(stack(&h), before, "no layer is added");
+    let layer = h.state().session.active_comp().unwrap().layer(effectcraft_engine::project::LayerId(top)).unwrap();
+    assert_eq!(layer.source, effectcraft_engine::project::LayerSource::Comp { item: effectcraft_engine::project::ItemId(clip) });
+    assert_eq!(layer.name, "Top", "the layer keeps its name");
+}
+
+/// Ctrl+Alt+/ (Cmd+Opt+/ on macOS) replaces every selected layer's source with the Project panel
+/// selection (#991).
+#[test]
+fn ctrl_alt_slash_replaces_every_selected_layer_source() {
+    let (mut h, clip) = harness();
+    let top = layer_id(&h, "Top");
+    let middle = layer_id(&h, "Middle");
+    h.state_mut().session.execute("layer.select", json!({"layers": [top, middle]})).unwrap();
+    h.state_mut().session.state.project_selection = vec![effectcraft_engine::project::ItemId(clip)];
+    h.run_steps(3);
+    let modifiers = Modifiers { command: true, alt: true, ..Default::default() };
+    for pressed in [true, false] {
+        h.event(Event::Key { key: egui::Key::Slash, physical_key: Some(egui::Key::Slash), pressed, repeat: false, modifiers });
+    }
+    h.run_steps(3);
+    let comp = h.state().session.active_comp().unwrap();
+    for lid in [top, middle] {
+        assert_eq!(
+            comp.layer(effectcraft_engine::project::LayerId(lid)).unwrap().source,
+            effectcraft_engine::project::LayerSource::Comp { item: effectcraft_engine::project::ItemId(clip) }
+        );
+    }
+    assert_eq!(stack(&h), ["Top", "Middle", "Bottom"], "no layer is added");
+}
+
 /// #85: a Project item dropped on the Composition viewer becomes a layer centred where it was
 /// dropped (above the selected layer, like any new layer).
 #[test]

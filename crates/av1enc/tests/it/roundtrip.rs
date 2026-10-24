@@ -1,7 +1,7 @@
 //! Round trips through FilmCraft's spec-derived AV1 decoder: decoded frames must equal the
 //! encoder's own reconstruction bit for bit.
 
-mod common;
+use crate::common;
 
 use common::*;
 use effectcraft_av1enc::{EncoderConfig, RateControl};

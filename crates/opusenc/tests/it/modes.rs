@@ -2,7 +2,7 @@
 //! mode/bandwidth decodes, waveform quality on speech-like and music-like signals, bitrate
 //! tracking, stereo, the application tables and delay alignment.
 
-mod common;
+use crate::common;
 
 use common::*;
 use effectcraft_opusenc::{Application, Bandwidth, Mode, OpusEncoder};

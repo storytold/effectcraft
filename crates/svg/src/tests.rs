@@ -12,6 +12,25 @@ fn near(a: [f32; 4], b: [f32; 4], tol: f32) -> bool {
 }
 
 #[test]
+fn gradient_stop_lookup_handles_duplicate_offsets() {
+    use crate::raster::eval_stops;
+    let stops = [(0.0, [0.0, 0.0, 0.0, 1.0]), (0.5, [1.0, 0.0, 0.0, 1.0]), (0.5, [0.0, 1.0, 0.0, 1.0]), (1.0, [0.0, 0.0, 1.0, 1.0])];
+    assert_eq!(eval_stops(&stops, 0.5), [1.0, 0.0, 0.0, 1.0]);
+    assert!(near(eval_stops(&stops, 0.5001), [0.0, 1.0, 0.0, 1.0], 3e-4));
+    assert_eq!(eval_stops(&stops, 0.75), [0.0, 0.5, 0.5, 1.0]);
+}
+
+#[test]
+fn raster_surface_budget_rejects_oversized_destination_before_allocation() {
+    let doc = parse(br#"<svg xmlns="http://www.w3.org/2000/svg"/>"#).unwrap();
+    // 16,384² RGBA-f32 pixels exceed the bounded destination-surface budget; no giant
+    // allocation should be attempted and the caller receives an empty image.
+    let img = rasterize(&doc, 16_384, 16_384, 1.0);
+    assert!(img.data.is_empty());
+    assert_eq!((img.width, img.height), (0, 0));
+}
+
+#[test]
 fn basic_shapes_structure() {
     let d = parse(BASIC).unwrap();
     assert_eq!((d.width, d.height), (200.0, 100.0));

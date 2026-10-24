@@ -2,7 +2,7 @@
 //! without errors with both ffmpeg's native `opus` decoder and `libopus`, honour the pre-skip
 //! and end granule, and reproduce the input. Skipped when ffmpeg is not installed.
 
-mod common;
+use crate::common;
 
 use std::process::Command;
 

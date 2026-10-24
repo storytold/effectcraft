@@ -20,7 +20,7 @@ APP_ID=ai.storyteller.effectcraft
 
 SKIP_BUILD=0
 DRY_RUN=0
-while [ $# -gt 0 ]; do
+while [[ $# -gt 0 ]]; do
   case "$1" in
     --skip-build) SKIP_BUILD=1; shift ;;
     --dry-run) DRY_RUN=1; SKIP_BUILD=1; shift ;;
@@ -31,11 +31,13 @@ done
 
 # FreeBSD's uname says amd64; release file names use x86_64 like the Linux and Windows ones.
 release_arch() {
-  case "$1" in
+  local arch="$1"
+  case "$arch" in
     amd64 | x86_64) echo x86_64 ;;
     arm64 | aarch64) echo aarch64 ;;
-    *) echo "unsupported architecture $1" >&2; return 2 ;;
+    *) echo "unsupported architecture $arch" >&2; return 2 ;;
   esac
+  return
 }
 # The release workflow cross-compiles aarch64 in an x86_64 VM with CARGO_BUILD_TARGET set to
 # aarch64-unknown-freebsd (craft-common-actions#39): name the archive after the target.
@@ -47,10 +49,10 @@ esac
 # Only binaries for this machine run here (the --version check at the end); a FreeBSD target built
 # on another OS never does.
 HOST_ARCH="$(release_arch "$(uname -m)" 2>/dev/null)" || HOST_ARCH="$(uname -m)"
-if [ -n "${CARGO_BUILD_TARGET:-}" ] && [ "$(uname -s)" != FreeBSD ]; then
+if [[ -n "${CARGO_BUILD_TARGET:-}" ]] && [[ "$(uname -s)" != FreeBSD ]]; then
   HOST_ARCH="$(uname -s) $HOST_ARCH"
 fi
-if [ "$DRY_RUN" = 0 ] && [ "$(uname -s)" != FreeBSD ]; then
+if [[ "$DRY_RUN" = 0 ]] && [[ "$(uname -s)" != FreeBSD ]]; then
   echo "error: build on FreeBSD (or pass --dry-run to check the tree layout)" >&2
   exit 2
 fi
@@ -64,11 +66,11 @@ export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}"
 # natively under QEMU). With one codegen unit and thin LTO the largest crates each optimize on a
 # single emulated core and the job runs past its 5-hour limit, so trade a little runtime speed for
 # parallel codegen there. x86_64 keeps the workspace's release profile.
-if [ "$ARCH" = aarch64 ]; then
+if [[ "$ARCH" = aarch64 ]]; then
   export CARGO_PROFILE_RELEASE_CODEGEN_UNITS="${CARGO_PROFILE_RELEASE_CODEGEN_UNITS:-16}"
   export CARGO_PROFILE_RELEASE_LTO="${CARGO_PROFILE_RELEASE_LTO:-off}"
 fi
-if [ "$SKIP_BUILD" = 0 ]; then
+if [[ "$SKIP_BUILD" = 0 ]]; then
   (cd "$ROOT" && cargo build --release --locked -p effectcraft -p effectcraft-cli)
 fi
 WORK="$CARGO_TARGET_DIR/freebsd-package"
@@ -79,7 +81,7 @@ mkdir -p "$WORK"
 # Cargo puts a cross build under target/<triple>/release.
 BIN="$CARGO_TARGET_DIR/${CARGO_BUILD_TARGET:+$CARGO_BUILD_TARGET/}release"
 OUT_DIR="$DIST"
-if [ "$DRY_RUN" = 1 ]; then
+if [[ "$DRY_RUN" = 1 ]]; then
   # Stub binaries, and the tarball stays in the work dir so dist/ only ever holds real builds.
   BIN="$WORK/stub-bin"
   OUT_DIR="$WORK"
@@ -104,13 +106,13 @@ sed -e "s/@VERSION@/$VERSION/g" -e "s/@DATE@/$EFFECTCRAFT_BUILD_DATE/g" \
 cp -R "$ROOT/assets/app-icon/hicolor" "$STAGE/share/icons/"
 copy_docs "$STAGE/share/doc/effectcraft"
 for f in NOTICE ATTRIBUTION.md; do
-  if [ -f "$ROOT/$f" ]; then install -m 644 "$ROOT/$f" "$STAGE/share/doc/effectcraft/"; fi
+  if [[ -f "$ROOT/$f" ]]; then install -m 644 "$ROOT/$f" "$STAGE/share/doc/effectcraft/"; fi
 done
 
 for f in bin/effectcraft bin/effectcraft-cli "share/applications/$APP_ID.desktop" \
   "share/icons/hicolor/256x256/apps/$APP_ID.png" "share/icons/hicolor/scalable/apps/$APP_ID.svg" \
   share/doc/effectcraft/LICENSE-MIT share/doc/effectcraft/LICENSE-APACHE; do
-  if [ ! -e "$STAGE/$f" ]; then echo "error: $f is missing from the package" >&2; exit 1; fi
+  if [[ ! -e "$STAGE/$f" ]]; then echo "error: $f is missing from the package" >&2; exit 1; fi
 done
 
 # ---- .tar.gz ------------------------------------------------------------------------------------
@@ -118,12 +120,12 @@ mkdir -p "$OUT_DIR"
 tar -C "$WORK" -czf "$OUT_DIR/$BASENAME.tar.gz" "$BASENAME"
 echo "wrote $OUT_DIR/$BASENAME.tar.gz"
 
-if [ "$DRY_RUN" = 1 ] || [ "$ARCH" = "$HOST_ARCH" ]; then
+if [[ "$DRY_RUN" = 1 ]] || [[ "$ARCH" = "$HOST_ARCH" ]]; then
   "$STAGE/bin/effectcraft-cli" --version
 else
   # They cannot run here, so check what they are instead: executables, not libraries or objects.
   # An older file(1) calls a PIE a shared object; its interpreter still marks it as a program.
-  want="$ARCH"; [ "$ARCH" != x86_64 ] || want=x86-64
+  want="$ARCH"; [[ "$ARCH" != x86_64 ]] || want=x86-64
   for b in "$STAGE"/bin/*; do
     case "$(file -b "$b")" in
       ELF*" executable, "*"$want"*FreeBSD* | ELF*"$want"*FreeBSD*interpreter*) ;;
@@ -132,7 +134,7 @@ else
   done
   echo "skipping --version: an $ARCH binary does not run on this $HOST_ARCH machine"
 fi
-if [ "$DRY_RUN" = 1 ]; then
+if [[ "$DRY_RUN" = 1 ]]; then
   echo "==> dry run: tarball contents"
   tar -tzvf "$OUT_DIR/$BASENAME.tar.gz"
 fi

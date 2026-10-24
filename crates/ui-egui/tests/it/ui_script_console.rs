@@ -44,7 +44,7 @@ fn script_console_runs_scripts() {
 }
 
 /// Headless look at the panel (wgpu offscreen); run with
-/// `SC_SNAPSHOT=/abs/out.png cargo test -p effectcraft-ui-egui --test ui_script_console -- --ignored`.
+/// `SC_SNAPSHOT=/abs/out.png cargo test -p effectcraft-ui-egui --test it ui_script_console:: -- --ignored`.
 #[test]
 #[ignore]
 fn script_console_snapshot() {

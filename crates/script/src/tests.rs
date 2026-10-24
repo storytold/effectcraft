@@ -963,6 +963,37 @@ fn footage_proxies_sequences_and_conform_rate() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// #813: `AVLayer.replaceSource` changes the source item and keeps the layer's name, timing and
+/// properties; a folder is not a source.
+#[test]
+fn av_layer_replace_source_keeps_the_layer() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"
+        var main = app.project.items.addComp("Main", 100, 100, 1, 5, 25);
+        var layer = main.layers.addSolid([1, 0, 0], "Old", 100, 100, 1);
+        layer.transform.position.setValue([10, 20]);
+        layer.startTime = 1;
+        var nested = app.project.items.addComp("Nested", 200, 100, 1, 3, 25);
+        layer.replaceSource(nested, false);
+        [layer.source.name, layer.source.width, layer.source.height, layer.source instanceof CompItem,
+         layer.name, layer.transform.position.value[0], layer.startTime, main.numLayers]
+        "#,
+    );
+    assert_eq!(o.result, json!(["Nested", 200, 100, true, "Old", 10, 1, 1]));
+    let bad = run_code(
+        &mut s,
+        r#"
+        var main = app.project.items.addComp("Other", 100, 100, 1, 2, 25);
+        var layer = main.layers.addSolid([1, 0, 0], "Layer", 100, 100, 1);
+        layer.replaceSource(app.project.items.addFolder("F"), false);
+        "#,
+        "replace-source.jsx",
+    );
+    assert!(bad.error.as_ref().is_some_and(|e| e.message.contains("folder")), "{bad:?}");
+}
+
 /// A flat green footage source, so `sampleImage` on a footage layer has known pixels.
 struct Flat;
 impl effectcraft_engine::render::FootageSource for Flat {

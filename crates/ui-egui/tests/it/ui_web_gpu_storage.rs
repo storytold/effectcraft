@@ -172,7 +172,7 @@ fn gpu_worker_renders_effect_frames_and_the_disk_cache_survives_a_reload() {
     assert!(frames2.remote_disk());
     let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let bar = loop {
-        let bar = frames2.disk_frames(&source(&s, None), &key(fx), 30, &opts);
+        let bar = frames2.disk_frames(&source(&s, None), &key(fx), 0..30, &opts);
         if !bar.is_empty() {
             break bar;
         }

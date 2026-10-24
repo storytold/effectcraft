@@ -1,6 +1,6 @@
 //! Headless UI checks for the 3D viewer (egui_kittest). The `snapshot` test renders the window
 //! with wgpu and writes PNGs when `EC_SNAPSHOT_DIR` is set (`cargo test -p effectcraft-ui-egui
-//! --test ui_3d -- --ignored`); the other test only runs the UI logic.
+//! --test it ui_3d:: -- --ignored`); the other test only runs the UI logic.
 
 use effectcraft_engine::Session;
 use effectcraft_engine::render::three_d::View3D;

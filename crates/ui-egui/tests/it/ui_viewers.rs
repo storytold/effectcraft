@@ -134,7 +134,7 @@ fn a_locked_viewer_keeps_its_comp_when_the_project_panel_opens_another() {
     assert_eq!((h.state().ui.active_viewer, shows(&h, 0), shows(&h, 1)), (1, Some(a), Some(b)));
 }
 
-/// `cargo test -p effectcraft-ui-egui --test ui_viewers -- --ignored`: two viewers side by side
+/// `cargo test -p effectcraft-ui-egui --test it ui_viewers:: -- --ignored`: two viewers side by side
 /// (`target/test-out/viewers.png`).
 #[test]
 #[ignore]

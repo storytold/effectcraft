@@ -1304,7 +1304,14 @@ AVLayer.prototype.constructor = AVLayer;
   }
   P.sourcePointToComp = function (p) { return pointIn(this, p, true); };
   P.compPointToSource = function (p) { return pointIn(this, p, false); };
-  P.replaceSource = function () { throw __err("replaceSource is not supported yet"); };
+  // Replace the layer's source item, keeping every layer property (After Effects'
+  // AVLayer.replaceSource). `fixExpressions` is accepted for compatibility: only AV sources are
+  // replaced, so the property tree and the layer's name stay and expressions keep resolving.
+  P.replaceSource = function (newSource, fixExpressions) {
+    if (!newSource || newSource.__id === undefined) throw __err("replaceSource needs a project item");
+    __call("layer.replaceSource", { comp: this.__comp, layers: [this.__id], item: newSource.__id, fixExpressions: !!fixExpressions });
+    return null;
+  };
   P.openInViewer = function () { __call("layer.openLayer", this.__p1()); return null; };
 })();
 

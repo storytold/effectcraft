@@ -1,6 +1,6 @@
 //! Headless look at the Render Queue panel (wgpu offscreen). Ignored by default (needs a GPU
 //! adapter); run with
-//! `RQ_SNAPSHOT=/abs/out.png cargo test -p effectcraft-ui-egui --test render_queue_snapshot -- --ignored`.
+//! `RQ_SNAPSHOT=/abs/out.png cargo test -p effectcraft-ui-egui --test it render_queue_snapshot:: -- --ignored`.
 
 use effectcraft_engine::Session;
 use effectcraft_engine::project::render_queue::RenderStatus;

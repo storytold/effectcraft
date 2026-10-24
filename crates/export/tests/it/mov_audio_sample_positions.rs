@@ -1,5 +1,3 @@
-#![cfg(not(target_arch = "wasm32"))]
-
 //! Tiny native WAV to ProRes PCM MOV sample-position proof.
 use effectcraft_export::render_queue::{AudioFormat, OutputFormat, OutputModule, RenderSettings};
 use effectcraft_export::{Job, JobOptions, Sink, export};

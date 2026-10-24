@@ -1,7 +1,7 @@
 //! Speed / efficiency measurements on ffmpeg-generated test sources (ignored by default):
-//! `cargo test -p effectcraft-av1enc --test bench -- --ignored --nocapture`.
+//! `cargo test -p effectcraft-av1enc --test it bench:: -- --ignored --nocapture`.
 
-mod common;
+use crate::common;
 
 use std::process::Command;
 use std::time::Instant;

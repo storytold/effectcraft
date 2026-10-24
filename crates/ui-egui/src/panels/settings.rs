@@ -677,7 +677,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                         ui.painter().text(
                             r.left_center() + vec2(10.0, 0.0),
                             egui::Align2::LEFT_CENTER,
-                            tr(p.title),
+                            crate::i18n::settings_page_title(p.title),
                             Tokens::ui(12.5),
                             if sel { Color32::WHITE } else { t.text },
                         );
@@ -694,7 +694,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                 // dialog scrolled sideways a little (#284).
                 ui.set_width(ui.available_width());
                 let p = &all[idx];
-                ui.label(RichText::new(tr(p.title)).font(Tokens::semibold(14.0)).color(t.tab_text_active));
+                ui.label(RichText::new(crate::i18n::settings_page_title(p.title)).font(Tokens::semibold(14.0)).color(t.tab_text_active));
                 ui.add_space(6.0);
                 egui::ScrollArea::vertical().max_height((body_h - 30.0).max(0.0)).auto_shrink([false, false]).show(ui, |ui| {
                     page_ui(app, ui, p, &cur, t, &mut acts);

@@ -4,7 +4,7 @@ members = ["crates/*", "apps/*", "xtask"]
 default-members = ["crates/*", "apps/*"]
 
 [workspace.package]
-version = "0.14.0"
+version = "0.16.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.95"
@@ -52,6 +52,8 @@ thiserror = "2"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 log = "0.4"
+# All date/time conversion goes through chrono (no hand-rolled calendar code beyond the 400-year range extension; AGENTS.md).
+chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 rayon = "1"
 # std::time::Instant/SystemTime on native; the browser clock on wasm32 (std's panic there).
 web-time = "1"
@@ -137,9 +139,12 @@ type_complexity = "allow"
 
 [profile.dev.package."*"]
 opt-level = 2
+debug = false
 
 [profile.dev]
 opt-level = 1
+# Panics and backtraces keep file and line; full debug info only made the many test binaries large.
+debug = "line-tables-only"
 
 # Pixel hot loops: keep debug builds interactive.
 [profile.dev.package.effectcraft-raster]

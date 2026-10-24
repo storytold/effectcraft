@@ -1478,10 +1478,11 @@ impl<'a> Renderer<'a> {
         let mut nb = (*b).clone();
         color::convert(&mut nb.img, &c);
         let nb = Arc::new(nb);
-        if let (Some(cache), Some(k)) = (self.cache_to_keep(), key) {
-            cache.insert(k, nb.clone());
+        // The buffer the cache keeps (another worker's, if it kept one first).
+        match (self.cache_to_keep(), key) {
+            (Some(cache), Some(k)) => cache.insert(k, nb),
+            _ => nb,
         }
-        nb
     }
 
     fn layer_buf_keyed(&self, ctx: &EvalCtx, layer: &Layer) -> Option<(Arc<Buf>, Option<u64>)> {
@@ -1496,9 +1497,11 @@ impl<'a> Renderer<'a> {
             return Some((b, key));
         }
         let flat = Arc::new(styles::Styled { passes: st.passes.iter().map(|(b, m)| ((**b).clone(), *m)).collect(), body: (*st.body).clone() }.flatten());
-        if let (Some(c), Some(k)) = (self.cache_to_keep(), key) {
-            c.insert(k, flat.clone());
-        }
+        // The buffer the cache keeps (another worker's, if it kept one first).
+        let flat = match (self.cache_to_keep(), key) {
+            (Some(c), Some(k)) => c.insert(k, flat),
+            _ => flat,
+        };
         Some((flat, key))
     }
 
@@ -1527,9 +1530,11 @@ impl<'a> Renderer<'a> {
         }
         let buf = self.masked_source(ctx, layer)?;
         let buf = Arc::new(self.apply_effects_timed(ctx, layer, buf, false, usize::MAX, timing.map(|t| &mut t.effects)));
-        if let (Some(c), Some(k)) = (self.cache_to_keep(), key) {
-            c.insert(k, buf.clone());
-        }
+        // The buffer the cache keeps (another worker's, if it kept one first).
+        let buf = match (self.cache_to_keep(), key) {
+            (Some(c), Some(k)) => c.insert(k, buf),
+            _ => buf,
+        };
         Some((buf, key))
     }
 
@@ -1552,9 +1557,11 @@ impl<'a> Renderer<'a> {
             buf = self.effect_space_stack(ctx, layer, buf, false, effects, None, origin);
         }
         let buf = Arc::new(buf);
-        if let (Some(c), Some(k)) = (self.cache_to_keep(), key) {
-            c.insert(k, buf.clone());
-        }
+        // The buffer the cache keeps (another worker's, if it kept one first).
+        let buf = match (self.cache_to_keep(), key) {
+            (Some(c), Some(k)) => c.insert(k, buf),
+            _ => buf,
+        };
         Some(buf)
     }
 
@@ -1582,12 +1589,13 @@ impl<'a> Renderer<'a> {
             t.cached = false;
             t.effects.push(("layerStyles".into(), t0.elapsed().as_secs_f64() * 1e3));
         }
-        let body = Arc::new(st.body);
-        let passes: Vec<_> = st.passes.into_iter().map(|(b, m)| (Arc::new(b), m)).collect();
+        let mut body = Arc::new(st.body);
+        let mut passes: Vec<_> = st.passes.into_iter().map(|(b, m)| (Arc::new(b), m)).collect();
+        // The buffers the cache keeps (another worker's, if it kept them first).
         if let (Some(c), Some(k)) = (self.cache_to_keep(), key) {
-            c.insert(k, body.clone());
-            for (i, (b, _)) in passes.iter().enumerate() {
-                c.insert(cache::derive(k, i as u64 + 1), b.clone());
+            body = c.insert(k, body);
+            for (i, (b, _)) in passes.iter_mut().enumerate() {
+                *b = c.insert(cache::derive(k, i as u64 + 1), b.clone());
             }
         }
         Some(StyledLayer { passes, body, content, key, ckey, plain: false })
@@ -2215,9 +2223,11 @@ impl<'a> Renderer<'a> {
         let mut foot = self.source(ctx, layer)?;
         let _ = masks::apply(ctx, layer, &mut foot, self.mask_blur(ctx, layer));
         let foot = Arc::new(foot);
-        if let (Some(c), Some(k)) = (self.cache_to_keep(), key) {
-            c.insert(k, foot.clone());
-        }
+        // The buffer the cache keeps (another worker's, if it kept one first).
+        let foot = match (self.cache_to_keep(), key) {
+            (Some(c), Some(k)) => c.insert(k, foot),
+            _ => foot,
+        };
         Some(foot)
     }
 
