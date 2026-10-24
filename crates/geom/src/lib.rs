@@ -261,6 +261,9 @@ impl Mat3 {
             return Mat3([[x1 - x0, x3 - x0, x0], [y1 - y0, y3 - y0, y0], [0.0, 0.0, 1.0]]);
         }
         let den = dx1 * dy2 - dx2 * dy1;
+        if den == 0.0 || !den.is_finite() {
+            return Mat3::IDENTITY;
+        }
         let g = (sx * dy2 - dx2 * sy) / den;
         let h = (dx1 * sy - sx * dy1) / den;
         Mat3([[x1 - x0 + g * x1, x3 - x0 + h * x3, x0], [y1 - y0 + g * y1, y3 - y0 + h * y3, y0], [g, h, 1.0]])
