@@ -1370,4 +1370,66 @@ fn time_to_frames_preserves_coercion_and_small_durations() {
     }
 }
 
+/// A layer is a property group too, as in After Effects: `thisLayer("transform")`, another
+/// layer's `("effects")("Slider Control")` or `(1)`, as the pick whip writes them with Compact
+/// English off (they failed: "not a callable function"). It is still a layer.
+#[test]
+fn layers_are_callable_property_groups() {
+    let f = fx();
+    assert_close!(f.num("thisLayer(\"transform\")(\"opacity\")", 0.0), 100.0);
+    assert_close!(f.num("thisComp.layer(\"A\")(\"effects\")(\"ec.control.slider\")(\"slider\")", 0.0), 42.0);
+    assert_close!(f.num("thisComp.layer(\"A\")(\"effects\")(\"Slider Control\")(1)", 0.0), 42.0);
+    assert_close!(f.num("thisComp.layer(1)(\"effects\")(1)(1)", 0.0), 42.0);
+    // Its own name, index and methods, and a layer as the result still reads as its index.
+    assert_close!(f.num("thisLayer.name == \"A\" ? thisComp.layer(\"B\").index : 0", 0.0), 2.0);
+    assert_close!(f.num("thisComp.layer(\"B\")", 0.0), 2.0);
+    assert_close!(f.num("thisComp.layer(thisComp.layer(\"B\"), -1).index", 0.0), 1.0);
+    assert!(f.err("thisLayer(\"nope\")").contains("no property"), "{}", f.err("thisLayer(\"nope\")"));
+}
+
+/// A layer is kept from one evaluation to the next (it is dear to make) but reads the project
+/// afresh in each, and an expression's own fields on it don't reach the next one.
+#[test]
+fn a_kept_layer_reads_the_project_again() {
+    let mut f = fx();
+    let first = "thisComp.layer(\"B\").index * 10 + thisComp.layer(2).name.length";
+    assert_close!(f.num(first, 0.0), 21.0);
+    f.layer_mut(f.b).name = "Bee".into();
+    f.p.comp_mut(f.cid).unwrap().layers.swap(0, 1);
+    assert_close!(f.num("thisComp.layer(\"Bee\").index * 10 + thisComp.layer(2).name.length", 0.0), 11.0);
+    assert_close!(f.num("thisLayer.index", 0.0), 2.0);
+    let _ = f.ev(f.a, ROT, "thisLayer.mine = 5; 0", 0.0);
+    assert_close!(f.num("thisLayer.mine === undefined ? 1 : 0", 0.0), 1.0);
+    let _ = f.ev(f.a, ROT, "var L = thisLayer; L.__c = 'x'; L.__l = 99; L.__i = ['Z', 7]; L.__s = __S; 0", 0.0);
+    assert_close!(f.num("thisLayer.index * 10 + thisLayer.name.length", 0.0), 21.0);
+    let _ = f.ev(f.a, ROT, "var L = thisLayer; delete L.__c; delete L.__l; delete L.__i; delete L.__s; 0", 0.0);
+    assert_close!(f.num("thisLayer.index * 10 + thisLayer.name.length", 0.0), 21.0);
+}
+
+/// The prelude is kept from one evaluation to the next, so an expression can't change its object
+/// model or internals for the ones after it.
+#[test]
+fn an_expression_cant_change_the_prelude_for_the_next() {
+    let f = fx();
+    let read = "[thisComp.layer(1).index, thisLayer.index, thisLayer('transform').property('rotation').value,                 thisLayer.transform.opacity.value, thisProject.bitsPerChannel, comp(thisComp.name).numLayers]";
+    let before = f.ev(f.a, ROT, read, 0.5).unwrap();
+    let attacks = [
+        "Comp.prototype.layer = function () { return 0; }",
+        "Object.getPrototypeOf(thisLayer).index = 0",
+        "Object.getPrototypeOf(thisLayer('transform')).property = function () { return 0; }",
+        "Object.getPrototypeOf(thisLayer.transform.opacity).value = 0",
+        "Comp = function () {}",
+        "Prop = function () {}",
+        "thisProject = null",
+        "__h = function () { return null; }",
+        "__layer = function () { return null; }",
+        "__child = function () {}",
+        "delete __mkProp",
+    ];
+    for a in attacks {
+        let _ = f.ev(f.a, ROT, &format!("try {{ {a} }} catch (e) {{}} 0"), 0.0);
+        assert_eq!(f.ev(f.a, ROT, read, 0.5).unwrap(), before, "after `{a}`");
+    }
+}
+
 mod property_group;
