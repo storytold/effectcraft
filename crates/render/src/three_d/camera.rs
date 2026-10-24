@@ -116,12 +116,15 @@ pub fn basis_view(eye: Vec3, forward: Vec3, down_hint: Vec3) -> Mat4 {
     Mat4([[r.x, r.y, r.z, 0.0], [d.x, d.y, d.z, 0.0], [f.x, f.y, f.z, 0.0], [0.0, 0.0, 0.0, 1.0]]) * Mat4::translate(-eye)
 }
 
-/// Orientation angles (degrees, AE order X→Y→Z with Z = 0) that point +z along `dir`.
+/// Orientation angles (degrees, [`Mat4::orientation`]'s order) that point +z along `dir` with
+/// the layer's x axis kept level (no roll): the pitch about x, then the turn about the world's
+/// vertical axis, written as Orientation.
 pub fn orientation_for(dir: Vec3) -> [f64; 3] {
     let d = dir.normalize();
-    let x = (-d.y).clamp(-1.0, 1.0).asin().to_degrees();
-    let y = d.x.atan2(d.z).to_degrees();
-    [norm360(x), norm360(y), 0.0]
+    let pitch = (-d.y).clamp(-1.0, 1.0).asin().to_degrees();
+    let yaw = d.x.atan2(d.z).to_degrees();
+    let o = (Mat4::rotate_y(yaw) * Mat4::rotate_x(pitch)).orientation_angles();
+    [norm360(o.x), norm360(o.y), norm360(o.z)]
 }
 
 fn norm360(a: f64) -> f64 {
@@ -176,7 +179,7 @@ pub fn layer_rotation(ctx: &EvalCtx, layer: &Layer) -> Mat4 {
     let rx = ctx.f(layer, tr, "rotationX", 0.0);
     let ry = ctx.f(layer, tr, "rotationY", 0.0);
     let rz = ctx.f(layer, tr, "rotation", 0.0);
-    Mat4::orientation(Vec3::from(o)) * Mat4::rotate_z(rz) * Mat4::rotate_y(ry) * Mat4::rotate_x(rx)
+    Mat4::orientation(Vec3::from(o)) * Mat4::rotation_xyz(rx, ry, rz)
 }
 
 /// World matrix of a layer's parent chain (identity when unparented).

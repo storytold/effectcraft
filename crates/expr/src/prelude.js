@@ -166,12 +166,28 @@ function normalize(a) {
   return l === 0 ? a.map(function () { return 0; }) : div(a, l);
 }
 
+// Orientation that points the layer's z axis at `at` with its x axis kept level, in the
+// Orientation order (Rx · Ry · Rz) and wrapped to [0, 360), as After Effects returns it.
 function lookAt(from, at) {
   var d = normalize(sub(__v(at), __v(from)));
   var x = d[0], y = d[1], z = d[2] || 0;
-  var rx = -Math.asin(Math.max(-1, Math.min(1, y))) * 180 / Math.PI;
-  var ry = Math.atan2(x, z) * 180 / Math.PI;
-  return [rx, ry, 0];
+  var p = Math.asin(Math.max(-1, Math.min(1, -y)));
+  var w = Math.atan2(x, z);
+  var cw = Math.cos(w), sw = Math.sin(w), cp = Math.cos(p), sp = Math.sin(p);
+  // The rotation Ry(w) · Rx(p), written as Orientation angles.
+  var oy = Math.asin(Math.max(-1, Math.min(1, sw * cp)));
+  var ox, oz;
+  if (Math.sqrt(cw * cw + sw * sw * sp * sp) > 1e-9) {
+    ox = Math.atan2(sp, cw * cp);
+    oz = Math.atan2(-sw * sp, cw);
+  } else {
+    ox = Math.atan2(cw * sp, cp);
+    oz = 0;
+  }
+  return [ox, oy, oz].map(function (r) {
+    var a = ((r * 180 / Math.PI) % 360 + 360) % 360;
+    return a >= 360 - 1e-9 || Math.abs(a) < 1e-9 ? 0 : a;
+  });
 }
 
 function degreesToRadians(d) { return d * Math.PI / 180; }

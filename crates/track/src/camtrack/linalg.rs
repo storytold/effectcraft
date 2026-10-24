@@ -404,16 +404,16 @@ pub fn umeyama(src: &[V3], dst: &[V3]) -> Option<Similarity> {
     Some(Similarity { s, r, t })
 }
 
-/// Euler angles (degrees) `[x, y, z]` with `m = Rz(z) Ry(y) Rx(x)` (After Effects' Orientation
-/// order: X, then Y, then Z applied to the vector).
+/// Euler angles (degrees) `[x, y, z]` with `m = Rx(x) Ry(y) Rz(z)`: After Effects' Orientation
+/// order (Z is applied to the vector first, then Y, then X; see `effectcraft_geom::Mat4::orientation`).
 pub fn euler_xyz(m: &M3) -> V3 {
-    let sy = (-m[2][0]).clamp(-1.0, 1.0);
+    let sy = m[0][2].clamp(-1.0, 1.0);
     let y = sy.asin();
-    let (x, z) = if sy.abs() < 0.999_999 { (m[2][1].atan2(m[2][2]), m[1][0].atan2(m[0][0])) } else { ((-m[1][2]).atan2(m[1][1]), 0.0) };
+    let (x, z) = if sy.abs() < 0.999_999 { ((-m[1][2]).atan2(m[2][2]), (-m[0][1]).atan2(m[0][0])) } else { (m[2][1].atan2(m[1][1]), 0.0) };
     [x.to_degrees(), y.to_degrees(), z.to_degrees()]
 }
 
-/// `Rz(z) Ry(y) Rx(x)` from degrees.
+/// `Rx(x) Ry(y) Rz(z)` from degrees.
 pub fn from_euler_xyz(e: V3) -> M3 {
     let (sx, cx) = e[0].to_radians().sin_cos();
     let (sy, cy) = e[1].to_radians().sin_cos();
@@ -421,7 +421,7 @@ pub fn from_euler_xyz(e: V3) -> M3 {
     let rx = [[1.0, 0.0, 0.0], [0.0, cx, -sx], [0.0, sx, cx]];
     let ry = [[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]];
     let rz = [[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]];
-    mm(&rz, &mm(&ry, &rx))
+    mm(&rx, &mm(&ry, &rz))
 }
 
 #[cfg(test)]

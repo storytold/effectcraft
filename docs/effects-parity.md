@@ -44,7 +44,7 @@ corpus compares renders, each effect is assumed to differ somewhere, and users k
 | Simulation | 18 | 18 | Particle Playground lacks Particle Exploder, text particles, ephemeral mapper; CC Particle World camera fixed (#397) |
 | Stylize | 25 | 25 | Motion Tile output size (#369) |
 | Text | 2 | 2 | — |
-| Time | 8 | 8 | #535 (Pixel Motion Blur, Vector Detail) is closed |
+| Time | 8 | 8 | Timewarp retimes the layer's source and masks without the effects above it, as After Effects 2026; #535 (Pixel Motion Blur, Vector Detail) is closed |
 | Transition | 17 | 17 | — |
 | Utility | 9 | 7 | — |
 
@@ -64,6 +64,7 @@ the GPU is performance, not parity.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-19 | minor | Timewarp ignores the effects above it (source and masks only), measured against After Effects 2026 |
 | 2026-10-19 | minor | Tritone uses Rec. 601 luminance, measured against After Effects 2026 renders of a red solid and a grey ramp (CPU and GPU) |
 | 2026-10-19 | minor | Black & White's Tint keeps the gray's luminosity (Color blend), measured against After Effects 2026 renders (CPU and GPU) |
 | 2026-10-19 | minor | Levels: "Off for 32 bpc Color" no longer clips in 32 bpc projects, unclipped values extrapolate below Output Black; Levels (Individual Controls) applies the channel controls before the RGB ones, measured against After Effects 2026 (CPU and GPU) |
