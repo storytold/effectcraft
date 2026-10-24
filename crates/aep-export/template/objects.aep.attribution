@@ -1,0 +1,7 @@
+asset:        objects.aep
+title:        After Effects object prototypes for the exporter (markers, cameras, lights, shape layers)
+author:       vangel76 (contributor)
+source:       original work
+license:      MIT OR Apache-2.0
+added:        2026-10-18 by vangel76
+notes:        Extracted by crates/aep-export/examples/mkobjprotos from the contributor's own generated projects: the marker group of fixture 249, the camera and light layer blocks of fixtures 256, 254 and 252 and the option records of 342-345, the shape layer block, shape items and value records of the synthetic cases 519, 731, 451-471, 239, 240 and 242 (generated with Adobe After Effects 2026 from scratch, one scripted change per case); synthetic structure only, no paths, machine names, third-party content or personal data. No Adobe sample project or asset was used.

@@ -1,6 +1,6 @@
 # File format parity
 
-> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-12 · **Change:** minor (closed issue references re-audited against `upstream/main` 470ea7a3) · **Target:** Adobe After Effects 2026
+> **Last reviewed:** 2026-10-19 · **Last updated:** 2026-10-19 · **Change:** `.aep` / `.aepx` import and `.aep` export (`crates/aep`, `crates/aep-import`, `crates/aep-export`) · **Target:** Adobe After Effects 2026
 
 Every format After Effects reads or writes, with EffectCraft's support. After Effects' list comes
 from its installed bundle (26.5.0.89: `Info.plist` `CFBundleDocumentTypes`, `Plug-ins/Format`,
@@ -22,8 +22,8 @@ trips and renders, checked by tests, not against After Effects), **partial** (na
 
 | Format | After Effects | EffectCraft read | Write | Fidelity / notes | Tested by |
 |---|---|---|---|---|---|
-| Project `.aep` | R/W (native) | none | none | Main file format; needs an owner decision on clean-room scope (#190; #248, closed as its duplicate: py-aep as an external converter; open PRs #251 and #860). Blocks beta | — |
-| XML project `.aepx` | R/W | none | none | Same decision as `.aep` | — |
+| Project `.aep` | R/W (native) | partial | partial | Main file format; clean-room scope still needs an owner decision (#190). `crates/aep` reads and writes the RIFX container losslessly (byte-identical round trip) with a typed view of the decoded fields, from our own generated files only ([aep-format.md](aep-format.md)). File ▸ Import ▸ After Effects Project… (`file.importAep`, `crates/aep-import`): folders, project settings, compositions, every layer kind, Transform, keyframes, expressions, masks, text with animators, shapes, cameras, lights, track mattes, markers, time remapping, layer styles, the built-in effects of a table shared with the exporter (Curves, Levels, Glow, Fractal Noise, Gradient Ramp, … and the expression controls), footage and image sequences; everything else is reported ([aep-import.md](aep-import.md)). File ▸ Export ▸ After Effects Project… (`file.exportAep`, `crates/aep-export`) writes the same scope by editing an embedded generated template; exports were opened and read back in After Effects 2026 ([aep-export.md](aep-export.md)); everything else is reported. Effects outside the table (plug-ins, Lumetri, …) are not converted | `crates/aep`, `crates/aep-import` and `crates/aep-export` tests |
+| XML project `.aepx` | R/W | partial | none | Read into the same chunk tree as `.aep` by `crates/aep` (`read_aepx`; mapping in [aep-format.md](aep-format.md) section 1), so `file.importAep` imports it with the same coverage as `.aep`; not written | `crates/aep` and `crates/aep-import` `aepx` tests |
 | Templates `.aet` / `.aetx` | R/W | none | none | Own `.ectemplate` (Home ▸ Templates, Save as Template) | `templates.rs` tests |
 | Motion Graphics template `.mogrt` | W (and R in Premiere) | none | none | Own `.ectemplate` Essential Graphics templates; FilmCraft rejects our `.fcgt` export (#611) | `essential.rs` tests |
 | Animation preset `.ffx` | R/W, 621 bundled | none | none | Own JSON `.ecpreset`; `.ffx` is out of clean-room scope (AGENTS.md §2) | `animation.rs` tests |

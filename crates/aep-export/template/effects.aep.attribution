@@ -1,0 +1,7 @@
+asset:        effects.aep
+title:        After Effects effect prototypes for the exporter
+author:       vangel76 (contributor)
+source:       original work
+license:      MIT OR Apache-2.0
+added:        2026-10-18 by vangel76
+notes:        Chunks (the default instance and EfDf definition copy of every effect of the shared effect table, one static value record per parameter type, one keyed value record per keyed kind) extracted by crates/aep-export/examples/mkfxprotos from the contributor's own synthetic cases 070-076, 215, 217, 219, 356-397, 409-443, 511, 529, 711, 712, 903, 961, 965 (generated with Adobe After Effects 2026); synthetic structure only, no third-party content or personal data. No Adobe sample project or asset was used.

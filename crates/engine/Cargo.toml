@@ -27,6 +27,8 @@ effectcraft-model = { workspace = true }
 effectcraft-lottie = { workspace = true }
 effectcraft-interchange = { workspace = true }
 effectcraft-psd = { workspace = true }
+effectcraft-aep-import = { workspace = true }
+effectcraft-aep-export = { workspace = true }
 kurbo = { workspace = true }
 effectcraft-svg = { workspace = true }
 effectcraft-pdf = { workspace = true }

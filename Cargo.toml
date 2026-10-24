@@ -35,6 +35,9 @@ effectcraft-lottie = { path = "crates/lottie" }
 effectcraft-interchange = { path = "crates/interchange" }
 effectcraft-pdf = { path = "crates/pdf" }
 effectcraft-psd = { path = "crates/psd" }
+effectcraft-aep = { path = "crates/aep" }
+effectcraft-aep-import = { path = "crates/aep-import" }
+effectcraft-aep-export = { path = "crates/aep-export" }
 effectcraft-vp9enc = { path = "crates/vp9enc" }
 effectcraft-svg = { path = "crates/svg" }
 effectcraft-engine = { path = "crates/engine" }

@@ -1,0 +1,12 @@
+[package]
+name = "effectcraft-aep"
+description = "After Effects .aep project container (RIFX 'Egg!') reader and writer: a lossless chunk tree with a byte-identical round trip, from our own observations of generated files"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

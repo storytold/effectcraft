@@ -1,0 +1,7 @@
+asset:        styles.aep
+title:        After Effects layer-style record prototypes for the exporter
+author:       vangel76 (contributor)
+source:       original work
+license:      MIT OR Apache-2.0
+added:        2026-10-19 by vangel76
+notes:        Chunks (one static value record of every layer-style and Blending Options parameter, and one keyed scalar record) extracted by crates/aep-export/examples/mkstyleprotos from the contributor's own synthetic cases 977 and 976 (generated with Adobe After Effects 2026); synthetic structure only, no third-party content or personal data. No Adobe sample project or asset was used.

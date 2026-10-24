@@ -1,0 +1,23 @@
+[package]
+name = "effectcraft-aep-export"
+description = "After Effects project (.aep) exporter: writes an EffectCraft project (folders, compositions, layers of every kind the importer reads, transform, keyframes, expressions, masks, text, shapes, cameras, lights, markers, layer styles, footage, the effects of the shared table) as an .aep by editing a generated template with effectcraft-aep, and reports everything it does not export"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+effectcraft-aep = { workspace = true }
+effectcraft-time = { workspace = true }
+effectcraft-color = { workspace = true }
+effectcraft-keyframe = { workspace = true }
+effectcraft-project = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+effectcraft-aep-import = { workspace = true }

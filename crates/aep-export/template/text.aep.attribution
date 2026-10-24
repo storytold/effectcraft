@@ -1,0 +1,7 @@
+asset:        text.aep
+title:        After Effects text layer prototypes for the exporter
+author:       vangel76 (contributor)
+source:       original work
+license:      MIT OR Apache-2.0
+added:        2026-10-18 by vangel76
+notes:        The layer blocks of a point text layer and of a 400x200 box text layer (Layr with its text document, Ewst, f-records) and the text animator group, animator and value records of 579-592 and 728, extracted by crates/aep-export/examples/mktxprotos from the contributor's own synthetic fixtures 110-text-A, 245-text-box-400x200-Hello, 579-592 and 728 (crates/aep/tests/fixtures, generated with Adobe After Effects 2026); synthetic structure only, no third-party content or personal data. No Adobe sample project or asset was used.

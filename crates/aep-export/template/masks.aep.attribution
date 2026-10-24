@@ -1,0 +1,7 @@
+asset:        masks.aep
+title:        After Effects mask prototypes for the exporter
+author:       vangel76 (contributor)
+source:       original work
+license:      MIT OR Apache-2.0
+added:        2026-10-18 by vangel76
+notes:        Chunks (a mask parade with one mask and static Feather, Opacity and Expansion records, a mask path property with two keys, a Mask Feather property with two keys) extracted by crates/aep-export/examples/mkmaskprotos from the contributor's own synthetic fixtures 091-mask-rect-props, 093-mask-path-2keys and 208-key-mask-feather-2key-linear (crates/aep/tests/fixtures, generated with Adobe After Effects 2026); synthetic structure only, no third-party content or personal data. No Adobe sample project or asset was used.
