@@ -248,8 +248,10 @@ fn transform_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter,
     let vx = r.min.x + (r.width() * 0.5).max(130.0);
     let label = Rect::from_min_max(pos2(r.min.x + 42.0, r.min.y), pos2(vx - 20.0, r.max.y));
     let resp = ui.interact(label, egui::Id::new(("props-label", uid)), Sense::click());
+    crate::a11y::role_name(&resp, egui::accesskit::Role::Button, &pr.name);
     app.auto.add(&format!("{base}.label"), label, &pr.name);
-    if resp.double_clicked() {
+    // A double click, or the keyboard's activation (a primary single click is not one).
+    if resp.double_clicked() || (resp.clicked() && !resp.clicked_by(egui::PointerButton::Primary)) {
         app.ui.timeline.search.clear();
         app.ui.timeline.scroll_to = Some(crate::state::ScrollTo::Property(uid));
         if let Err(e) = crate::menus::frontend(app, ui.ctx(), "timeline.revealProps", json!({"props": [{"layer": lid, "prop": uid}]})) {

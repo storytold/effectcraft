@@ -7,8 +7,8 @@ use egui::{Align2, Rect, Sense, pos2, vec2};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::EffectcraftApp;
 use crate::theme::Tokens;
+use crate::{EffectcraftApp, a11y, widgets};
 
 /// One line of console output.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -105,6 +105,10 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         );
     }
     app.auto.add("scriptConsole.output", out_rect, "Script Console output");
+    // The output is painted text; a screen reader gets the same lines (the newest 200) as a log.
+    let tail = app.ui.script_console.log.len().saturating_sub(200);
+    let text: Vec<&str> = app.ui.script_console.log.iter().skip(tail).map(|l| l.text.as_str()).collect();
+    a11y::log(ui, egui::Id::new("script-console-output"), out_rect, tr("Script Console output"), &text.join("\n"));
     // Input.
     let in_rect = Rect::from_min_size(pos2(rect.min.x + 4.0, out_rect.max.y + 4.0), vec2(rect.width() - 8.0, input_h - 8.0));
     let mut run_now = false;
@@ -114,8 +118,11 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         .font(Tokens::mono(12.0))
         .desired_width(in_rect.width())
         .desired_rows(4)
+        // Tab leaves the field (it would otherwise type a tab character and trap the keyboard).
+        .lock_focus(false)
         .hint_text(tr("Script… (⌘/Ctrl+Enter runs)"));
     let resp = child.add_sized(in_rect.size(), te);
+    a11y::name(&resp, tr("Script… (⌘/Ctrl+Enter runs)"));
     if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command) {
         run_now = true;
     }
@@ -130,6 +137,10 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let clear_resp = ui.interact(clear_r, egui::Id::new("script-console-clear"), Sense::click());
     p.rect_stroke(clear_r, 3.0, egui::Stroke::new(1.0, t.field_border), egui::StrokeKind::Inside);
     p.text(clear_r.center(), Align2::CENTER_CENTER, tr("Clear"), Tokens::ui(12.0), t.text);
+    a11y::button(&run_resp, tr("Run"), !app.ui.script_console.input.trim().is_empty());
+    a11y::button(&clear_resp, tr("Clear"), !app.ui.script_console.log.is_empty());
+    widgets::focus_outline(ui, &run_resp, &t);
+    widgets::focus_outline(ui, &clear_resp, &t);
     app.auto.add("scriptConsole.run", run_r, "Run");
     app.auto.add("scriptConsole.clear", clear_r, "Clear");
     if run_resp.clicked() {

@@ -10,6 +10,7 @@ use egui::{Align2, Color32, Rect, Sense, Stroke, pos2, vec2};
 use serde_json::json;
 use std::sync::Arc;
 
+use crate::a11y;
 use crate::icons::{self, Icon};
 use crate::panels::{DragPayload, PresetRef};
 use crate::theme::Tokens;
@@ -106,10 +107,68 @@ fn highlighted(p: &egui::Painter, pos: egui::Pos2, name: &str, query: &str, t: &
     p.text(pos, Align2::LEFT_CENTER, name, Tokens::ui(12.0), t.text);
 }
 
+#[derive(Clone)]
 enum Apply {
     Effect(String),
     /// A text, built-in (Transitions…) or user file animation preset.
     Preset(PresetRef),
+}
+
+/// One row of the list as drawn this pass, including the rows scrolled out of view: what the
+/// arrow keys, Home / End and Enter work on (the rows are painted by hand, so this is the list).
+struct NavRow {
+    id: egui::Id,
+    /// The favourite star's widget, for an effect row.
+    star: Option<egui::Id>,
+    parent: Option<egui::Id>,
+    /// Where the row starts in the scrolled content.
+    top: f32,
+    /// A folder: (its key, open, forced open by a search).
+    folder: Option<(String, bool, bool)>,
+    /// What Enter applies, for an effect or preset row.
+    apply: Option<Apply>,
+}
+
+/// The list's keyboard state: the rows drawn, and the row the keys work from (the "cursor":
+/// selected, and the one Tab stop of the list).
+struct Nav {
+    rows: Vec<NavRow>,
+    /// The open folders on the way down to the row being drawn, by level.
+    stack: Vec<egui::Id>,
+    cursor: Option<egui::Id>,
+    /// The scroll offset and the list's top, to place rows in the content.
+    offset: f32,
+    list_top: f32,
+}
+
+impl Nav {
+    /// The row `id` is the list's Tab stop: the cursor row, or the first row while there is none.
+    fn tab_stop(&self, id: egui::Id) -> bool {
+        match self.cursor {
+            Some(c) => c == id,
+            None => self.rows.is_empty(),
+        }
+    }
+
+    /// Record the row drawn at `y`; returns whether it is the cursor row.
+    fn push(&mut self, id: egui::Id, y: f32, level: usize, folder: Option<(String, bool, bool)>, apply: Option<Apply>) -> bool {
+        let parent = level.checked_sub(2).and_then(|i| self.stack.get(i)).copied();
+        if folder.is_some() {
+            self.stack.truncate(level.saturating_sub(1));
+            self.stack.push(id);
+        }
+        self.rows.push(NavRow { id, star: None, parent, top: y - self.list_top + self.offset, folder, apply });
+        self.cursor == Some(id)
+    }
+}
+
+fn cursor_id() -> egui::Id {
+    egui::Id::new("fx-cursor")
+}
+
+/// The accessible name of a folder: what the row shows, in the interface language.
+fn folder_name(label: &str) -> &str {
+    tr(label)
 }
 
 /// A folder row; returns whether it is open.
@@ -120,8 +179,10 @@ fn folder_row(
     lp: &egui::Painter,
     list: Rect,
     y: &mut f32,
+    nav: &mut Nav,
     key: &str,
     label: &str,
+    level: usize,
     indent: f32,
     forced_open: bool,
     icon: Option<Icon>,
@@ -129,12 +190,18 @@ fn folder_row(
     let t = app.tokens;
     let open = forced_open || app.ui.effects_open.contains(key);
     let r = Rect::from_min_size(pos2(list.min.x, *y), vec2(list.width(), ROW_H));
+    let id = egui::Id::new(("fxcat", key));
+    let tab = nav.tab_stop(id);
+    let selected = nav.push(id, *y, level, Some((key.to_string(), open, forced_open)), None);
     *y += ROW_H;
     if r.max.y < list.min.y || r.min.y > list.max.y {
         return open;
     }
-    let resp = ui.interact(r.intersect(list), egui::Id::new(("fxcat", key)), Sense::click());
-    if resp.hovered() {
+    let shown = folder_name(label);
+    let resp = ui.interact(r.intersect(list), id, if tab { Sense::click() } else { Sense::CLICK });
+    if selected {
+        lp.rect_filled(r, 0.0, t.row_selected);
+    } else if resp.hovered() {
         lp.rect_filled(r, 0.0, t.hover);
     }
     let tw = Rect::from_center_size(pos2(r.min.x + 12.0 + indent, r.center().y), vec2(12.0, 12.0));
@@ -145,16 +212,42 @@ fn folder_row(
         Some(i) => icons::paint(lp, ic, i, t.text_dim),
         None => icons::paint(lp, ic, Icon::Folder, Color32::from_rgb(0xc8, 0xb0, 0x58)),
     }
-    lp.text(pos2(r.min.x + 40.0 + indent, r.center().y), Align2::LEFT_CENTER, label, Tokens::ui(12.0), t.text);
+    lp.text(pos2(r.min.x + 40.0 + indent, r.center().y), Align2::LEFT_CENTER, shown, Tokens::ui(12.0), t.text);
     app.auto.add(&format!("effects.category.{key}"), r, label);
-    if resp.clicked() && !forced_open {
-        if open {
-            app.ui.effects_open.remove(key);
-        } else {
-            app.ui.effects_open.insert(key.to_string());
+    a11y::tree_item(&resp, shown, selected, level, Some(open));
+    row_focus(app, ui, lp, &resp, r, id);
+    if resp.clicked() {
+        nav_click(ui.ctx(), app, id);
+        if !forced_open {
+            if open {
+                app.ui.effects_open.remove(key);
+            } else {
+                app.ui.effects_open.insert(key.to_string());
+            }
         }
     }
     open
+}
+
+/// What every row does with the keyboard focus: the focus ring, the panel taking the focus, the
+/// list owning its keys, and moving the focus here when the arrow keys asked for it.
+fn row_focus(app: &mut EffectcraftApp, ui: &egui::Ui, lp: &egui::Painter, resp: &egui::Response, r: Rect, id: egui::Id) {
+    let ctx = ui.ctx();
+    if a11y::take_pending_focus(ctx, "fx", id) {
+        resp.request_focus();
+    }
+    if resp.gained_focus() {
+        app.ui.focused = crate::dock::PanelKind::EffectsPresets;
+    }
+    if resp.has_focus() {
+        lp.rect_stroke(r.shrink(0.5), 0.0, Stroke::new(1.0, app.tokens.accent), egui::StrokeKind::Inside);
+    }
+}
+
+/// A click on a row moves the cursor there and gives the panel the keyboard.
+fn nav_click(ctx: &egui::Context, app: &mut EffectcraftApp, id: egui::Id) {
+    ctx.data_mut(|d| d.insert_temp(cursor_id(), id));
+    app.ui.focused = crate::dock::PanelKind::EffectsPresets;
 }
 
 /// An effect row (fx icon, highlighted name, favourite star, 32 bpc badge).
@@ -165,7 +258,9 @@ fn effect_row(
     lp: &egui::Painter,
     list: Rect,
     y: &mut f32,
+    nav: &mut Nav,
     e: &'static effectcraft_engine::effects::EffectSpec,
+    level: usize,
     indent: f32,
     query: &str,
     auto_prefix: &str,
@@ -174,13 +269,22 @@ fn effect_row(
     let t = app.tokens;
     let ctx = ui.ctx().clone();
     let r = Rect::from_min_size(pos2(list.min.x, *y), vec2(list.width(), ROW_H));
+    let id = egui::Id::new((auto_prefix, e.id));
+    let star_id = egui::Id::new((auto_prefix, e.id, "star"));
+    let tab = nav.tab_stop(id);
+    let selected = nav.push(id, *y, level, None, Some(Apply::Effect(e.id.to_string())));
+    if let Some(row) = nav.rows.last_mut() {
+        row.star = Some(star_id);
+    }
     *y += ROW_H;
     if r.max.y < list.min.y || r.min.y > list.max.y {
         return;
     }
     let star = Rect::from_center_size(pos2(r.max.x - 38.0, r.center().y), vec2(16.0, 16.0));
-    let resp = ui.interact(r.intersect(list), egui::Id::new((auto_prefix, e.id)), Sense::click_and_drag());
-    if resp.hovered() {
+    let resp = ui.interact(r.intersect(list), id, if tab { Sense::click_and_drag() } else { Sense::CLICK | Sense::DRAG });
+    if selected {
+        lp.rect_filled(r, 0.0, t.row_selected);
+    } else if resp.hovered() {
         lp.rect_filled(r, 0.0, t.hover);
     }
     icons::paint(lp, Rect::from_center_size(pos2(r.min.x + 44.0 + indent, r.center().y), vec2(12.0, 12.0)), Icon::Fx, t.text_dim);
@@ -192,19 +296,31 @@ fn effect_row(
         lp.text(pos2(r.max.x - 10.0, r.center().y), Align2::RIGHT_CENTER, "32", Tokens::ui(9.5), t.text_faint);
     }
     app.auto.add(&format!("{auto_prefix}.{}", e.id), r, e.name);
-    // Favourite star (always shown when starred, else on hover).
+    a11y::tree_item(&resp, &shown, selected, level, None);
+    row_focus(app, ui, lp, &resp, r, id);
+    // Favourite star (always shown when starred, else on hover or with the keyboard focus).
     let fav = app.session.prefs.is_effect_favorite(e.id);
-    let sresp = ui.interact(star.intersect(list), egui::Id::new((auto_prefix, e.id, "star")), Sense::click());
-    if fav || resp.hovered() || sresp.hovered() {
+    let sresp = ui.interact(star.intersect(list), star_id, if tab { Sense::click() } else { Sense::CLICK });
+    if fav || resp.hovered() || sresp.hovered() || sresp.has_focus() {
         let gold = Color32::from_rgb(0xe8, 0xc0, 0x40);
         filled_star(lp, star.center(), 6.0, fav.then_some(gold), if fav || sresp.hovered() { gold } else { t.text_faint });
     }
     app.auto.add(&format!("{auto_prefix}.{}.star", e.id), star, if fav { "Remove from Favorites" } else { "Add to Favorites" });
+    a11y::button(&sresp, &format!("{}: {shown}", tr(if fav { "Remove from favorites" } else { "Add to favorites" })), true);
+    if sresp.gained_focus() {
+        app.ui.focused = crate::dock::PanelKind::EffectsPresets;
+    }
+    if sresp.has_focus() {
+        widgets::focus_outline(ui, &sresp, &t);
+    }
     if sresp.clicked() {
         // Kept in the settings, so the stars are there next time (#1692).
         app.session.prefs.toggle_effect_favorite(e.id);
         app.session.save_prefs();
         return;
+    }
+    if resp.clicked() {
+        nav_click(&ctx, app, id);
     }
     if resp.double_clicked() {
         *apply = Some(Apply::Effect(e.id.to_string()));
@@ -222,6 +338,7 @@ fn preset_row(
     lp: &egui::Painter,
     list: Rect,
     y: &mut f32,
+    nav: &mut Nav,
     name: &str,
     auto_id: &str,
     query: &str,
@@ -230,23 +347,149 @@ fn preset_row(
 ) {
     let t = app.tokens;
     let r = Rect::from_min_size(pos2(list.min.x, *y), vec2(list.width(), ROW_H));
+    let id = egui::Id::new(("fxpreset", auto_id));
+    let tab = nav.tab_stop(id);
+    let selected = nav.push(id, *y, 3, None, Some(Apply::Preset(preset.clone())));
     *y += ROW_H;
     if r.max.y < list.min.y || r.min.y > list.max.y {
         return;
     }
-    let resp = ui.interact(r.intersect(list), egui::Id::new(("fxpreset", auto_id)), Sense::click_and_drag());
-    if resp.hovered() {
+    let resp = ui.interact(r.intersect(list), id, if tab { Sense::click_and_drag() } else { Sense::CLICK | Sense::DRAG });
+    if selected {
+        lp.rect_filled(r, 0.0, t.row_selected);
+    } else if resp.hovered() {
         lp.rect_filled(r, 0.0, t.hover);
     }
     icons::paint(lp, Rect::from_center_size(pos2(r.min.x + 58.0, r.center().y), vec2(12.0, 12.0)), Icon::Keyframe, t.text_dim);
     highlighted(lp, pos2(r.min.x + 70.0, r.center().y), name, query, &t);
     app.auto.add(auto_id, r, name);
+    a11y::tree_item(&resp, name, selected, 3, None);
+    row_focus(app, ui, lp, &resp, r, id);
+    if resp.clicked() {
+        nav_click(ui.ctx(), app, id);
+    }
     if resp.drag_started() {
         egui::DragAndDrop::set_payload(ui.ctx(), DragPayload::Preset { preset: preset.clone(), name: name.to_string() });
     }
     if resp.double_clicked() {
         *apply = Some(Apply::Preset(preset));
     }
+}
+
+/// The list's keys. With a row focused (Tab, a screen reader): Up / Down move between rows,
+/// Home / End go to the first / last, Page Up / Page Down a page, Right opens a folder (then steps
+/// into it) and Left closes it (then steps out to it), Enter and Space apply the row or open /
+/// close the folder. With the mouse's last click in the panel and no widget focused, the arrows
+/// and Enter work the same, so the list is operable without a mouse either way. The focus follows
+/// the cursor, so a screen reader reads each row as it is reached. Returns what to apply.
+fn list_keys(app: &mut EffectcraftApp, ctx: &egui::Context, nav: &Nav, list: Rect) -> Option<Apply> {
+    use egui::Key;
+    // A cursor whose row is gone (a search hid it): the first row is the Tab stop again.
+    if let Some(c) = nav.cursor
+        && !nav.rows.iter().any(|r| r.id == c)
+    {
+        ctx.data_mut(|d| d.remove::<egui::Id>(cursor_id()));
+        ctx.request_repaint();
+    }
+    let focused = ctx.memory(|m| m.focused());
+    let on_row = focused.is_some_and(|f| nav.rows.iter().any(|r| r.id == f || r.star == Some(f)));
+    // Enter / Space on the star are the star button's (it toggles the favourite), not the row's.
+    let on_star = focused.is_some_and(|f| nav.rows.iter().any(|r| r.star == Some(f)));
+    let by_mouse = focused.is_none() && app.ui.focused == crate::dock::PanelKind::EffectsPresets;
+    if (!on_row && !by_mouse) || app.dialog.is_some() || widgets::any_menu_open(ctx) {
+        return None;
+    }
+    let keys: Vec<Key> = ctx.input(|i| {
+        i.events
+            .iter()
+            .filter_map(|e| match e {
+                egui::Event::Key { key, pressed: true, modifiers, .. } if !modifiers.any() => Some(*key),
+                _ => None,
+            })
+            .collect()
+    });
+    let page = ((list.height() / ROW_H).floor() as usize).saturating_sub(1).max(1);
+    // The row with the keyboard focus is where the keys start (the first Tab lands on a row
+    // before anything is selected); otherwise the cursor.
+    let focus_row = focused.and_then(|f| nav.rows.iter().find(|r| r.id == f || r.star == Some(f))).map(|r| r.id);
+    let mut cursor = focus_row.or_else(|| nav.cursor.filter(|c| nav.rows.iter().any(|r| r.id == *c)));
+    let mut apply = None;
+    let mut moved = false;
+    for key in keys {
+        let at = cursor.and_then(|c| nav.rows.iter().position(|r| r.id == c));
+        let last = nav.rows.len().checked_sub(1)?;
+        let to = match key {
+            Key::ArrowDown => Some(at.map_or(0, |a| a.saturating_add(1).min(last))),
+            Key::ArrowUp => Some(at.map_or(last, |a| a.saturating_sub(1))),
+            Key::Home if on_row => Some(0),
+            Key::End if on_row => Some(last),
+            Key::PageDown if on_row => Some(at.map_or(0, |a| a.saturating_add(page).min(last))),
+            Key::PageUp if on_row => Some(at.map_or(last, |a| a.saturating_sub(page))),
+            Key::ArrowRight | Key::ArrowLeft | Key::Enter | Key::Space if at.is_some() => {
+                let row = at.and_then(|a| nav.rows.get(a))?;
+                let toggle = |app: &mut EffectcraftApp, open: bool| {
+                    if let Some((k, _, forced)) = &row.folder
+                        && !forced
+                    {
+                        if open {
+                            app.ui.effects_open.insert(k.clone());
+                        } else {
+                            app.ui.effects_open.remove(k);
+                        }
+                    }
+                };
+                match (key, &row.folder) {
+                    (Key::ArrowRight, Some((_, false, _))) => {
+                        toggle(app, true);
+                        None
+                    }
+                    (Key::ArrowRight, Some((_, true, _))) => at.map(|a| a.saturating_add(1).min(last)),
+                    (Key::ArrowLeft, Some((_, true, false))) => {
+                        toggle(app, false);
+                        None
+                    }
+                    (Key::ArrowLeft, _) => row.parent.and_then(|p| nav.rows.iter().position(|r| r.id == p)),
+                    (Key::Enter, Some((_, open, _))) | (Key::Space, Some((_, open, _))) if on_row || key == Key::Enter => {
+                        toggle(app, !*open);
+                        None
+                    }
+                    (Key::Enter, None) if !on_star => {
+                        apply = row.apply.clone();
+                        None
+                    }
+                    (Key::Space, None) if on_row && !on_star => {
+                        apply = row.apply.clone();
+                        None
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        if let Some(to) = to
+            && let Some(row) = nav.rows.get(to)
+        {
+            cursor = Some(row.id);
+            moved = true;
+        }
+    }
+    if moved && let Some(c) = cursor {
+        ctx.data_mut(|d| d.insert_temp(cursor_id(), c));
+        // Scroll the row into view.
+        if let Some(row) = nav.rows.iter().find(|r| r.id == c) {
+            widgets::PanelScroll::reveal(ctx, egui::Id::new("fx-scroll"), row.top, row.top + ROW_H, list.height());
+        }
+        app.ui.focused = crate::dock::PanelKind::EffectsPresets;
+        if on_row {
+            a11y::focus_next_pass(ctx, "fx", c);
+        }
+        ctx.request_repaint();
+    }
+    // The arrows are the list's, not egui's spatial focus moves.
+    if on_row {
+        ctx.memory_mut(|m| m.move_focus(egui::FocusDirection::None));
+    }
+    apply
 }
 
 /// User preset files, rescanned every few seconds (and on Refresh List).
@@ -276,13 +519,17 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
     let sr = Rect::from_min_size(rect.min + vec2(8.0, 8.0), vec2(rect.width() - 44.0, 24.0));
     let mut q = app.ui.effects_search.clone();
-    widgets::search_field(ui, sr, &mut q, "Search effects and presets", &t);
+    let search_hint = tr("Search effects and presets");
+    let search = widgets::search_field(ui, sr, &mut q, search_hint, &t);
+    a11y::text_input(&search, search_hint, &q);
     app.ui.effects_search = q.clone();
     app.auto.add("effects.search", sr, "Search");
     // Contents menu.
     let mr = Rect::from_center_size(pos2(rect.max.x - 18.0, sr.center().y), vec2(22.0, 22.0));
     let mpop = egui::Id::new("fx-contents-menu");
-    if widgets::icon_button(ui, mr, Icon::Hamburger, false, &t, egui::Id::new("fx-menu")).on_hover_text(tr("Effects & Presets options")).clicked() {
+    let menu_resp = widgets::icon_button(ui, mr, Icon::Hamburger, false, &t, egui::Id::new("fx-menu")).on_hover_text(tr("Effects & Presets options"));
+    a11y::menu_button(&menu_resp, tr("Effects & Presets options"), widgets::popup_is_open(ui, mpop));
+    if menu_resp.clicked() {
         widgets::open_popup(ui, mpop);
     }
     app.auto.add("effects.menu", mr, "Effects & Presets options");
@@ -315,6 +562,12 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     ui.separator();
                 } else {
                     let resp = ui.selectable_label(false, label);
+                    // The ✓ and the padding are the menu's drawing: say it as a state.
+                    let checkable = matches!(i, 0 | 1 | 2 | 4 | 6 | 7);
+                    a11y::menu_item(&resp, label.trim_start_matches('✓').trim(), checkable.then(|| label.starts_with('✓')));
+                    if i == 0 {
+                        widgets::focus_when_opened(ui, mpop, &resp);
+                    }
                     if label == &copy_label {
                         app.auto.add("effects.copyPresetsFolderPath", resp.rect, "Copy Presets Folder Path");
                     }
@@ -329,6 +582,9 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         None
     };
     if let Some(i) = choice {
+        if widgets::by_keyboard(ui) {
+            menu_resp.request_focus();
+        }
         let v = &mut app.ui.effects_view;
         match i {
             i if menu.get(i) == Some(&copy_label) => {
@@ -355,6 +611,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let searching = !query.is_empty();
     let mut y = list.min.y - scroll.offset;
     let mut apply: Option<Apply> = None;
+    let mut nav = Nav { rows: vec![], stack: vec![], cursor: ctx.data(|d| d.get_temp::<egui::Id>(cursor_id())), offset: scroll.offset, list_top: list.min.y };
     let reg = effectcraft_engine::effects::all();
     let keep = |e: &effectcraft_engine::effects::EffectSpec| {
         depth_keeps(&view.depth, e)
@@ -364,17 +621,17 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
 
     // Favorites and Recently Used.
     let favs: Vec<_> = app.session.prefs.effects_favorites.iter().filter_map(|id| lookup(id)).filter(|e| keep(e)).collect();
-    if !favs.is_empty() && folder_row(app, ui, &lp, list, &mut y, "favorites", "Favorites", 0.0, searching, Some(Icon::Star)) {
+    if !favs.is_empty() && folder_row(app, ui, &lp, list, &mut y, &mut nav, "favorites", "Favorites", 1, 0.0, searching, Some(Icon::Star)) {
         let mut favs = favs;
         favs.sort_by_key(|e| e.name);
         for e in favs {
-            effect_row(app, ui, &lp, list, &mut y, e, 0.0, &query, "effects.favorites", &mut apply);
+            effect_row(app, ui, &lp, list, &mut y, &mut nav, e, 2, 0.0, &query, "effects.favorites", &mut apply);
         }
     }
     let recent: Vec<_> = app.ui.effects_recent.iter().filter_map(|id| lookup(id)).filter(|e| keep(e)).collect();
-    if !recent.is_empty() && !searching && folder_row(app, ui, &lp, list, &mut y, "recent", "Recently Used", 0.0, false, None) {
+    if !recent.is_empty() && !searching && folder_row(app, ui, &lp, list, &mut y, &mut nav, "recent", "Recently Used", 1, 0.0, false, None) {
         for e in recent {
-            effect_row(app, ui, &lp, list, &mut y, e, 0.0, &query, "effects.recent", &mut apply);
+            effect_row(app, ui, &lp, list, &mut y, &mut nav, e, 2, 0.0, &query, "effects.recent", &mut apply);
         }
     }
 
@@ -393,21 +650,45 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let user = user_presets(&ctx, force_scan, || presets_dir().map(|d| scan_presets(&d)).unwrap_or_default());
         let files: Vec<&PresetFile> = user.iter().filter(|f| query.is_empty() || f.name.to_lowercase().contains(&query)).collect();
         let any = !text.is_empty() || !builtin.is_empty() || !files.is_empty();
-        if any && folder_row(app, ui, &lp, list, &mut y, "presets", "* Animation Presets", 0.0, searching, None) {
-            if !text.is_empty() && folder_row(app, ui, &lp, list, &mut y, "presets/Text", "Text", 14.0, searching, None) {
+        if any && folder_row(app, ui, &lp, list, &mut y, &mut nav, "presets", "* Animation Presets", 1, 0.0, searching, None) {
+            if !text.is_empty() && folder_row(app, ui, &lp, list, &mut y, &mut nav, "presets/Text", "Text", 2, 14.0, searching, None) {
                 for (id, name) in text {
-                    preset_row(app, ui, &lp, list, &mut y, &name, &format!("effects.preset.text.{id}"), &query, PresetRef::Text(id.clone()), &mut apply);
+                    preset_row(
+                        app,
+                        ui,
+                        &lp,
+                        list,
+                        &mut y,
+                        &mut nav,
+                        &name,
+                        &format!("effects.preset.text.{id}"),
+                        &query,
+                        PresetRef::Text(id.clone()),
+                        &mut apply,
+                    );
                 }
             }
             for cat in &categories {
-                if !folder_row(app, ui, &lp, list, &mut y, &format!("presets/{cat}"), cat, 14.0, searching, None) {
+                if !folder_row(app, ui, &lp, list, &mut y, &mut nav, &format!("presets/{cat}"), cat, 2, 14.0, searching, None) {
                     continue;
                 }
                 for (id, name, _) in builtin.iter().filter(|(_, _, c)| c == cat) {
-                    preset_row(app, ui, &lp, list, &mut y, name, &format!("effects.preset.builtin.{id}"), &query, PresetRef::Builtin(id.clone()), &mut apply);
+                    preset_row(
+                        app,
+                        ui,
+                        &lp,
+                        list,
+                        &mut y,
+                        &mut nav,
+                        name,
+                        &format!("effects.preset.builtin.{id}"),
+                        &query,
+                        PresetRef::Builtin(id.clone()),
+                        &mut apply,
+                    );
                 }
             }
-            if !files.is_empty() && folder_row(app, ui, &lp, list, &mut y, "presets/User", "User Presets", 14.0, searching, None) {
+            if !files.is_empty() && folder_row(app, ui, &lp, list, &mut y, &mut nav, "presets/User", "User Presets", 2, 14.0, searching, None) {
                 for f in files {
                     preset_row(
                         app,
@@ -415,6 +696,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                         &lp,
                         list,
                         &mut y,
+                        &mut nav,
                         &f.name,
                         &format!("effects.preset.file.{}", f.name),
                         &query,
@@ -431,7 +713,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let mut all: Vec<_> = reg.iter().filter(|e| keep(e)).collect();
         all.sort_by_key(|e| e.name.to_lowercase());
         for e in all {
-            effect_row(app, ui, &lp, list, &mut y, e, -16.0, &query, "effects.item", &mut apply);
+            effect_row(app, ui, &lp, list, &mut y, &mut nav, e, 1, -16.0, &query, "effects.item", &mut apply);
         }
     } else {
         let mut cats: Vec<&str> = effectcraft_engine::effects::categories();
@@ -443,11 +725,11 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             }
             // The folder draws the category in the interface language; `cat` stays the key (the
             // open/closed state and the automation id are the registry's English name).
-            if !folder_row(app, ui, &lp, list, &mut y, cat, &crate::i18n::effects::category(cat), 0.0, searching, None) {
+            if !folder_row(app, ui, &lp, list, &mut y, &mut nav, cat, &crate::i18n::effects::category(cat), 1, 0.0, searching, None) {
                 continue;
             }
             for e in items {
-                effect_row(app, ui, &lp, list, &mut y, e, 0.0, &query, "effects.item", &mut apply);
+                effect_row(app, ui, &lp, list, &mut y, &mut nav, e, 2, 0.0, &query, "effects.item", &mut apply);
             }
         }
     }
@@ -456,6 +738,9 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
     let content = y + scroll.offset - list.min.y;
     scroll.end(ui, &mut app.auto, "effects.scroll", content, &t);
+    if let Some(a) = list_keys(app, &ctx, &nav, list) {
+        apply = Some(a);
+    }
     if let Some(name) = egui::DragAndDrop::payload::<DragPayload>(&ctx).and_then(|p| match p.as_ref() {
         DragPayload::Effect(id) => Some(effectcraft_engine::effects::find(id).map(|e| crate::i18n::effects::name(e.id, e.name)).unwrap_or_default()),
         DragPayload::Preset { name, .. } => Some(name.clone()),

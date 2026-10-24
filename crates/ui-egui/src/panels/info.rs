@@ -4,7 +4,7 @@ use crate::i18n::{tr, tr_args};
 use egui::{Align2, Color32, Rect, pos2, vec2};
 
 use crate::theme::Tokens;
-use crate::{EffectcraftApp, widgets};
+use crate::{EffectcraftApp, a11y, widgets};
 
 pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
@@ -38,18 +38,32 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         }
     };
     let px = rgba.map(unpre).unwrap_or([0, 0, 0, 0]);
+    // The panel paints its text, which assistive technology cannot see: each line is also a
+    // read-out with the same words (a sentence a reader can speak: "Red: 128").
+    let full = rect.width() - 24.0;
+    let say = |key: &str, x: f32, y: f32, w: f32, text: &str| {
+        a11y::readout(ui, egui::Id::new(("info", key)), Rect::from_min_size(pos2(x, y - 8.0), vec2(w.max(24.0), 16.0)), text);
+    };
+    let half = rect.width() * 0.5 - 16.0;
+    say("r", x0, y, half, &tr_args("Red: {}", &[&px[0]]));
+    say("g", x0, y + 18.0, half, &tr_args("Green: {}", &[&px[1]]));
+    say("b", x0, y + 36.0, half, &tr_args("Blue: {}", &[&px[2]]));
+    say("a", x0, y + 54.0, half, &tr_args("Alpha: {}", &[&px[3]]));
     row(&p, y, "R :", format!("{}", px[0]), Color32::from_rgb(0xe0, 0x60, 0x60));
     row(&p, y + 18.0, "G :", format!("{}", px[1]), Color32::from_rgb(0x60, 0xd0, 0x60));
     row(&p, y + 36.0, "B :", format!("{}", px[2]), Color32::from_rgb(0x60, 0x90, 0xf0));
     row(&p, y + 54.0, "A :", format!("{}", px[3]), t.text_dim);
     let cx = rect.min.x + rect.width() * 0.5;
     if let Some((x, yy)) = xy {
+        say("x", cx, y, half, &tr_args("X: {}", &[&format!("{x:.0}")]));
+        say("y", cx, y + 18.0, half, &tr_args("Y: {}", &[&format!("{yy:.0}")]));
         p.text(pos2(cx, y), Align2::LEFT_CENTER, format!("X : {x:.0}"), Tokens::mono(12.0), t.text);
         p.text(pos2(cx, y + 18.0), Align2::LEFT_CENTER, format!("Y : {yy:.0}"), Tokens::mono(12.0), t.text);
     }
     if let Some(c) = rgba {
         let sw = egui::Rect::from_min_size(pos2(cx, y + 34.0), vec2(36.0, 30.0));
         p.rect_filled(sw, 3.0, Color32::from_rgb(px[0], px[1], px[2]));
+        a11y::graphic(ui, egui::Id::new(("info", "swatch")), sw, &tr_args("Color under the pointer: {}", &[&format!("{}, {}, {}", px[0], px[1], px[2])]));
         let _ = c;
     }
     y += 82.0;
@@ -60,14 +74,12 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     if let Some(c) = comp {
         let sel: Vec<String> = app.session.state.selected_layers.iter().filter_map(|id| c.layer(*id)).map(|l| l.name.clone()).collect();
         let tc = crate::panels::timecode(&app.session, &c, app.session.time());
-        p.text(
-            pos2(x0, y),
-            Align2::LEFT_CENTER,
-            if sel.is_empty() { tr("No layer selected").to_string() } else { sel.join(", ") },
-            Tokens::semibold(12.0),
-            t.text,
-        );
-        p.text(pos2(x0, y + 18.0), Align2::LEFT_CENTER, tr_args("Time: {}", &[&tc]), Tokens::ui(12.0), t.text_dim);
+        let selection = if sel.is_empty() { tr("No layer selected").to_string() } else { sel.join(", ") };
+        p.text(pos2(x0, y), Align2::LEFT_CENTER, &selection, Tokens::semibold(12.0), t.text);
+        say("selection", x0, y, full, &tr_args("Selected layers: {}", &[&selection]));
+        let time_line = tr_args("Time: {}", &[&tc]);
+        p.text(pos2(x0, y + 18.0), Align2::LEFT_CENTER, &time_line, Tokens::ui(12.0), t.text_dim);
+        say("time", x0, y + 18.0, full, &time_line);
         // One layer selected: Duration, In and Out like AE's Info panel.
         let mut ly = y + 36.0;
         if let [id] = app.session.state.selected_layers.as_slice()
@@ -84,8 +96,9 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 }),
                 format!("In: {}, Out: {}", tc(l.in_point), tc(effectcraft_engine::time::Tick(l.out_point.0 - c.frame_duration().0))),
             ];
-            for line in lines {
-                p.text(pos2(x0, ly), Align2::LEFT_CENTER, line, Tokens::ui(12.0), t.text_dim);
+            for (k, line) in lines.into_iter().enumerate() {
+                p.text(pos2(x0, ly), Align2::LEFT_CENTER, &line, Tokens::ui(12.0), t.text_dim);
+                say(if k == 0 { "duration" } else { "inout" }, x0, ly, full, &line);
                 ly += 18.0;
             }
         }
@@ -93,6 +106,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         if let (Some(fps), Some(rt)) = (app.playback.achieved_fps(), app.playback.real_time()) {
             let note = if rt { "real-time" } else { "not real-time" };
             p.text(pos2(x0, ly), Align2::LEFT_CENTER, format!("{fps:.2} fps ({note})"), Tokens::ui(11.5), if rt { t.text_dim } else { t.warning });
+            say("fps", x0, ly, full, &format!("{fps:.2} fps ({note})"));
             app.auto.add("info.previewFps", Rect::from_min_size(pos2(x0, ly - 8.0), vec2(200.0, 16.0)), &format!("{fps:.2} fps ({note})"));
             ly += 18.0;
         }
@@ -100,13 +114,9 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         if app.session.prefs.composition.show_rendering_progress {
             let ms = app.frames.last_ms.lock().map(|v| *v).unwrap_or(0.0);
             let rq = app.session.render_job.as_ref().map(|_| "  •  Rendering queue…").unwrap_or("");
-            p.text(
-                pos2(x0, ly),
-                Align2::LEFT_CENTER,
-                tr_args("Render: {} ms  •  UI {} fps{}", &[&format!("{ms:.0}"), &format!("{:.0}", app.fps), &rq]),
-                Tokens::ui(11.5),
-                t.text_faint,
-            );
+            let render_line = tr_args("Render: {} ms  •  UI {} fps{}", &[&format!("{ms:.0}"), &format!("{:.0}", app.fps), &rq]);
+            p.text(pos2(x0, ly), Align2::LEFT_CENTER, &render_line, Tokens::ui(11.5), t.text_faint);
+            say("render", x0, ly, full, &render_line);
         }
         if !app.session.state.selected_keys.is_empty() {
             // One key: its property, time and value (as After Effects' Info panel shows them).
@@ -127,7 +137,8 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 _ => None,
             };
             let line = one.unwrap_or_else(|| format!("{} keyframes selected", sel.len()));
-            p.text(pos2(x0, ly + 18.0), Align2::LEFT_CENTER, line, Tokens::ui(11.5), t.text_dim);
+            p.text(pos2(x0, ly + 18.0), Align2::LEFT_CENTER, &line, Tokens::ui(11.5), t.text_dim);
+            say("keys", x0, ly + 18.0, full, &line);
         }
         bottom = ly + 30.0;
     }
