@@ -485,6 +485,18 @@ fn layers_parenting_timing_mattes_masks_and_blend_modes() {
 }
 
 #[test]
+fn zero_time_stretch_is_not_imported() {
+    let doc = json!({"w": 20, "h": 20, "fr": 30, "ip": 0, "op": 30, "assets": [],
+        "layers": [{"ty": 1, "ind": 1, "sc": "#ff0000", "sw": 20, "sh": 20, "sr": 0, "ip": 0, "op": 30, "st": 0, "ks": {}}]});
+    let mut q = Project::default();
+    let imp = import(&mut q, doc.to_string().as_bytes(), "Imported", "", &mut |_| None).unwrap();
+    let l = &q.comp(imp.comp).unwrap().layers[0];
+    // layer.timeStretch refuses anything below 1 %, and keyframe commands refuse a layer with 0 %.
+    assert_eq!(l.stretch, 100.0);
+    assert!(imp.warnings.iter().any(|w| w.contains("time stretch")), "{:?}", imp.warnings);
+}
+
+#[test]
 fn precomp_with_time_remap() {
     let (mut p, cid) = setup();
     let inner = p.add_item("Inner", Label::Sandstone, None, ItemKind::Comp(Comp::new(100, 100, FrameRate::FPS_30, s(2.0)).into()));

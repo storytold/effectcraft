@@ -399,7 +399,14 @@ fn build_layers(cx: &mut Ctx, project: &mut Project, comp: &mut Comp, layers: &[
         l.in_point = tb.tick(ip);
         l.out_point = tb.tick(op.max(ip));
         l.start_time = tb.tick(f(j, "st").unwrap_or(0.0));
-        l.stretch = f(j, "sr").unwrap_or(1.0) * 100.0;
+        // Below 1 % (or 0) the layer time divides by ~0, and layer.timeStretch refuses it too.
+        let sr = f(j, "sr").unwrap_or(1.0);
+        l.stretch = if sr.is_finite() && sr.abs() >= 0.01 {
+            sr * 100.0
+        } else {
+            cx.im.warn(format!("{name}: a time stretch of {} % is not supported (100 % used)", sr * 100.0));
+            100.0
+        };
         if j.get("ddd").and_then(Json::as_u64) == Some(1) {
             l.switches.three_d = true;
         }
