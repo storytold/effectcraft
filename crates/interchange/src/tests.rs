@@ -36,8 +36,12 @@ fn info(kind: filmcraft_media::MediaKind, video: bool, audio: bool) -> filmcraft
             color: Default::default(),
             has_alpha: false,
             bitrate: None,
+            hdr: None,
         }),
-        audio: audio.then(|| filmcraft_media::AudioStreamInfo { sample_rate: 48_000, channels: 2, codec: "pcm".into(), bits_per_sample: Some(16) }),
+        audio_streams: audio
+            .then(|| filmcraft_media::AudioStreamInfo { sample_rate: 48_000, channels: 2, codec: "pcm".into(), bits_per_sample: Some(16) })
+            .into_iter()
+            .collect(),
         container: String::new(),
         start_timecode: None,
         file_size: None,
