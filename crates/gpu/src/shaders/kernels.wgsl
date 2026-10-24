@@ -11,8 +11,67 @@ fn out_dims() -> vec2<i32> {
 
 // Warp `src` by the inverse matrix (output pixel → source pixel) and blend over `aux`
 // (raster::composite_warp / accumulate_warp).
+// Double-f32 (hi + lo) arithmetic: the inverse transform in about f64 precision, so a pixel maps
+// to the same source position (and bilinear weights) as raster::warp's f64 math.
+// GPU compilers may simplify (a + b) - a to b, losing the rounding error two_sum recovers; the
+// sum is scaled by f[7].x (always 1.0, set by the host) so the compiler can't see through it.
+fn two_sum(a: f32, b: f32) -> vec2<f32> {
+    let s = (a + b) * P.f[7].x;
+    let bb = s - a;
+    return vec2<f32>(s, (a - (s - bb)) + (b - bb));
+}
+
+// (hi, lo) * x + (hi, lo) with x exact in f32.
+fn df_mul_add(c: vec2<f32>, x: f32, acc: vec2<f32>) -> vec2<f32> {
+    let p = (c.x * x) * P.f[7].x;
+    let pe = fma(c.x, x, -p) + c.y * x;
+    let s = two_sum(acc.x, p);
+    return two_sum(s.x, s.y + acc.y + pe);
+}
+
+// Row `k` of the inverse at the pixel centre (fx, fy): hi from f[k], lo from f[5 + k].
+fn df_map(k: u32, fx: f32, fy: f32) -> vec2<f32> {
+    let hi = P.f[k];
+    let lo = P.f[5u + k];
+    var acc = two_sum(hi.z, lo.z);
+    acc = df_mul_add(vec2<f32>(hi.x, lo.x), fx, acc);
+    acc = df_mul_add(vec2<f32>(hi.y, lo.y), fy, acc);
+    return acc;
+}
+
+// Image::sample_bilinear / nearest at a (hi, lo) position: the integer pixel and the fraction
+// (rounded to f32 once) as the CPU takes them from its f64 coordinate.
+fn sample_df(t: texture_2d<f32>, sampling: u32, px: vec2<f32>, py: vec2<f32>) -> vec4<f32> {
+    let fx = two_sum(px.x - 0.5, px.y);
+    let fy = two_sum(py.x - 0.5, py.y);
+    var x0 = floor(fx.x);
+    if (fx.x == x0 && fx.y < 0.0) {
+        x0 -= 1.0;
+    }
+    var y0 = floor(fy.x);
+    if (fy.x == y0 && fy.y < 0.0) {
+        y0 -= 1.0;
+    }
+    let xi = i32(x0);
+    let yi = i32(y0);
+    let tx = (fx.x - x0) + fx.y;
+    let ty = (fy.x - y0) + fy.y;
+    if (sampling == 0u) {
+        // floor(p) rather than floor(p - 0.5): p - 0.5 + 0.5.
+        return tex_get(t, i32(floor(px.x + px.y)), i32(floor(py.x + py.y)));
+    }
+    let a = tex_get(t, xi, yi);
+    let b = tex_get(t, xi + 1, yi);
+    let c = tex_get(t, xi, yi + 1);
+    let d = tex_get(t, xi + 1, yi + 1);
+    let top = a + (b - a) * tx;
+    let bot = c + (d - c) * tx;
+    return top + (bot - top) * ty;
+}
+
 // u[0] = (mode, sampling, seed, flags: 1 accumulate, 2 clear outside bounds)
-// f[0..3] = inverse rows; f[3] = (opacity, weight); f[4] = bounds (x0, y0, x1, y1)
+// f[0..3] = inverse rows; f[3] = (opacity, weight); f[4] = bounds (x0, y0, x1, y1);
+// f[5], f[6] = what f[0], f[1] rounded off from the f64 inverse
 @compute @workgroup_size(16, 16)
 fn warp_blend(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dims = out_dims();
@@ -55,7 +114,13 @@ fn warp_blend(@builtin(global_invocation_id) gid: vec3<u32>) {
         store_q(vec2<i32>(x, y), d, P.f[3].z, P.f[3].w);
         return;
     }
-    var s = sample(src, sampling, px, py);
+    var s: vec4<f32>;
+    let affine = r2.x == 0.0 && r2.y == 0.0 && r2.z == 1.0;
+    if (affine && sampling != 2u) {
+        s = sample_df(src, sampling, df_map(0u, fx, fy), df_map(1u, fx, fy));
+    } else {
+        s = sample(src, sampling, px, py);
+    }
     if ((flags & 1u) != 0u) {
         if (s.w > 0.0) {
             d = d + s * P.f[3].y;
@@ -270,7 +335,7 @@ fn line_get(horizontal: bool, line: i32, i: i32, n: i32, repeat: bool) -> vec4<f
 }
 
 // One box pass of radius r along rows (horizontal) or columns, as running sums over blocks of
-// `block` pixels (each block restarts its sum, as the CPU's vertical pass does).
+// `block` pixels (each block restarts its sum, as the CPU's vertical pass does; rows are one block).
 fn box_pass(gid: vec3<u32>, horizontal: bool) {
     let dims = out_dims();
     let r = i32(P.u[0].x);
