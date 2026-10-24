@@ -677,6 +677,19 @@ effectcraft-cli exec file.importLottie '{"path":"anim.json"}' main.ecproj --save
 effectcraft-cli render main.ecproj --comp Main --out main.mov --format prores --progress   # progress lines on stderr for a program that reads them
 ```
 
+A long `run` doesn't fit on a command line (Windows caps it at 32 767 characters, Linux one
+argument at 128 KiB). `run --args-file F` reads the same `<id> <json>` arguments one per line;
+`run --commands FILE` reads steps as a JSON array of `{"command": ID, "params": {…}}` objects, or one
+such object per line (JSON Lines), and `--commands -` reads them from standard input. `--commands`
+may be repeated; its steps run after the positional pairs and `--args-file`. A malformed step is a
+usage error naming its index (from 0, as in the results) before anything runs, and the error of a step
+that fails ends with `(step N)`:
+
+```sh
+effectcraft-cli run --commands steps.json --empty --save-as main.ecproj
+generate-steps | effectcraft-cli run main.ecproj --commands - --save --json
+```
+
 Scripts written against After Effects' documented scripting API run with `script`:
 
 ```sh
