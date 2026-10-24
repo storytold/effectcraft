@@ -1339,6 +1339,8 @@ mod tests_rig3d;
 #[cfg(test)]
 mod tests_sequence;
 #[cfg(test)]
+mod tests_set_selected_keys;
+#[cfg(test)]
 mod tests_settings;
 #[cfg(test)]
 mod tests_shortcut_cmds;
