@@ -132,17 +132,52 @@ pub(crate) fn path_of(ectx: &EvalCtx, layer: LayerId, uid: u64) -> Option<PathIn
 /// The path on screen: `sp` through `m` and the viewer map, flattened, with the closing point
 /// repeated for a closed path.
 pub(crate) fn flatten(sp: &ShapePath, m: &Mat3, map: &ViewerMap) -> Vec<Pos2> {
-    let k = effectcraft_engine::render::kurbo_path(sp);
+    let mut k = effectcraft_engine::render::kurbo_path(sp);
+    // A path-space tolerance becomes visible corners when the viewer or a layer/group is
+    // magnified. Flatten affine paths in screen space so the error stays below half a point.
+    // Projective transforms must still map the flattened points: projecting Bezier control
+    // points would change the curve rather than just its tessellation.
+    let screen_space = m.is_affine();
+    if screen_space {
+        let z = f64::from(map.zoom);
+        k.apply_affine(kurbo::Affine::new([
+            m.0[0][0] * z,
+            m.0[1][0] * z,
+            m.0[0][1] * z,
+            m.0[1][1] * z,
+            m.0[0][2] * z + f64::from(map.origin.x),
+            m.0[1][2] * z + f64::from(map.origin.y),
+        ]));
+    }
+    if !k.is_finite() {
+        return Vec::new();
+    }
+    let bounds = k.control_box();
+    if [bounds.x0, bounds.y0, bounds.x1, bounds.y1].iter().any(|v| v.abs() > f64::from(f32::MAX)) {
+        return Vec::new();
+    }
+    // Bound subdivision work even for extreme finite scales from a malformed project. For
+    // ordinary on-screen paths the tolerance remains half a point.
+    let tolerance = (bounds.width().max(bounds.height()) / 1_000_000.0).max(0.5);
     let mut pts: Vec<Pos2> = vec![];
-    kurbo::flatten(k.iter(), 0.5, |el| match el {
+    kurbo::flatten(k.iter(), tolerance, |el| match el {
         kurbo::PathEl::MoveTo(q) | kurbo::PathEl::LineTo(q) => {
-            let c = m.apply(gv2(q.x, q.y));
-            pts.push(map.to_screen([c.x, c.y]));
+            let p = if screen_space {
+                egui::pos2(q.x as f32, q.y as f32)
+            } else {
+                let c = m.apply(gv2(q.x, q.y));
+                map.to_screen([c.x, c.y])
+            };
+            if p.is_finite() {
+                pts.push(p);
+            }
         }
         _ => {}
     });
-    if sp.closed && !pts.is_empty() {
-        pts.push(pts[0]);
+    if sp.closed
+        && let Some(first) = pts.first().copied()
+    {
+        pts.push(first);
     }
     pts
 }
@@ -677,6 +712,111 @@ mod tests {
         let n = vertices.len();
         let sp = ShapePath { vertices, in_tangents: vec![[0.0; 2]; n], out_tangents: vec![[0.0; 2]; n], closed, feather: Vec::new() };
         PathInfo { layer: LayerId(3), uid: 7, m: Mat3::IDENTITY, sp, is_mask: true, feather: Vec::new() }
+    }
+
+    fn circle() -> ShapePath {
+        let r = 38.0;
+        let h = r * 0.552_284_749_830_793_6;
+        ShapePath {
+            vertices: vec![[0.0, -r], [r, 0.0], [0.0, r], [-r, 0.0]],
+            in_tangents: vec![[-h, 0.0], [0.0, -h], [h, 0.0], [0.0, h]],
+            out_tangents: vec![[h, 0.0], [0.0, h], [-h, 0.0], [0.0, -h]],
+            closed: true,
+            feather: Vec::new(),
+        }
+    }
+
+    /// Measure the actual screen-space error against dense samples of the original cubics,
+    /// independently of the tessellator's chosen subdivisions.
+    fn screen_error(sp: &ShapePath, m: &Mat3, map: &ViewerMap, points: &[Pos2]) -> f32 {
+        let mut worst = 0.0_f32;
+        for i in 0..sp.vertices.len() {
+            let Some(c) = segment(sp, i) else { continue };
+            for step in 0..=1024 {
+                let q = cubic(c[0], c[1], c[2], c[3], f64::from(step) / 1024.0);
+                let q = m.apply(gv2(q[0], q[1]));
+                let p = map.to_screen([q.x, q.y]);
+                let distance = points
+                    .windows(2)
+                    .map(|pair| {
+                        let a = pair[0];
+                        let v = pair[1] - a;
+                        let t = if v.length_sq() > 0.0 { ((p - a).dot(v) / v.length_sq()).clamp(0.0, 1.0) } else { 0.0 };
+                        p.distance(a + v * t)
+                    })
+                    .fold(f32::INFINITY, f32::min);
+                worst = worst.max(distance);
+            }
+        }
+        worst
+    }
+
+    #[test]
+    fn curve_overlay_stays_smooth_at_viewer_magnifications() {
+        let sp = circle();
+        let mut counts = Vec::new();
+        for zoom in [0.5, 1.0, 5.0] {
+            let map = ViewerMap { origin: egui::pos2(121.25, 210.5), zoom, comp: [640.0, 400.0], area: Rect::EVERYTHING };
+            let points = flatten(&sp, &Mat3::IDENTITY, &map);
+            let error = screen_error(&sp, &Mat3::IDENTITY, &map, &points);
+            assert!(error <= 0.51, "{zoom}x: {error} screen points from the curve");
+            assert_eq!(points.first(), points.last(), "closed paths keep their closing edge");
+            for v in &sp.vertices {
+                let anchor = map.to_screen(*v);
+                assert!(points.iter().any(|p| p.distance(anchor) < 0.001), "original vertex missing at {zoom}x");
+            }
+            counts.push(points.len());
+        }
+        assert!(counts[0] < counts[1] && counts[1] < counts[2], "tessellation follows visible curve size: {counts:?}");
+    }
+
+    #[test]
+    fn curve_overlay_accounts_for_nonuniform_layer_and_group_transforms() {
+        let sp = circle();
+        let layer = Mat3::translate(gv2(70.0, 50.0)) * Mat3::rotate_deg(27.0) * Mat3::scale(gv2(3.2, 0.8));
+        let group = Mat3::rotate_deg(-19.0) * Mat3::skew_deg(25.0, 11.0) * Mat3::scale(gv2(0.7, 2.5));
+        let m = layer * group;
+        for zoom in [0.5, 1.0, 5.0] {
+            let map = ViewerMap { origin: egui::pos2(121.25, 210.5), zoom, comp: [640.0, 400.0], area: Rect::EVERYTHING };
+            let points = flatten(&sp, &m, &map);
+            let error = screen_error(&sp, &m, &map, &points);
+            assert!(error <= 0.51, "{zoom}x transformed path: {error} screen points from the curve");
+        }
+    }
+
+    #[test]
+    fn open_overlay_preserves_its_transformed_endpoints() {
+        let sp = info(vec![[10.0, 20.0], [50.0, 60.0]], false).sp;
+        let m = Mat3::translate(gv2(70.0, 50.0)) * Mat3::rotate_deg(27.0) * Mat3::scale(gv2(3.2, 0.8));
+        let map = ViewerMap { origin: egui::pos2(121.25, 210.5), zoom: 5.0, comp: [640.0, 400.0], area: Rect::EVERYTHING };
+        let points = flatten(&sp, &m, &map);
+        assert_ne!(points.first(), points.last(), "an open path must not gain a closing edge");
+        for (point, vertex) in [points.first(), points.last()].into_iter().zip([sp.vertices.first(), sp.vertices.last()]) {
+            let q = m.apply(gv2(vertex.unwrap()[0], vertex.unwrap()[1]));
+            assert!(point.unwrap().distance(map.to_screen([q.x, q.y])) < 0.001);
+        }
+    }
+
+    #[test]
+    fn invalid_overlay_coordinates_are_not_tessellated() {
+        let sp = circle();
+        for zoom in [f32::NAN, f32::INFINITY] {
+            let map = ViewerMap { origin: Pos2::ZERO, zoom, comp: [640.0, 400.0], area: Rect::EVERYTHING };
+            assert!(flatten(&sp, &Mat3::IDENTITY, &map).is_empty());
+        }
+        let map = ViewerMap { origin: Pos2::ZERO, zoom: 5.0, comp: [640.0, 400.0], area: Rect::EVERYTHING };
+        assert!(flatten(&sp, &Mat3::scale(gv2(f64::INFINITY, 1.0)), &map).is_empty());
+    }
+
+    #[test]
+    fn extreme_finite_overlay_scales_keep_subdivision_bounded() {
+        let map = ViewerMap { origin: Pos2::ZERO, zoom: 5.0, comp: [640.0, 400.0], area: Rect::EVERYTHING };
+        let sp = circle();
+        let points = flatten(&sp, &Mat3::scale(gv2(1e12, 1e12)), &map);
+        assert!(!points.is_empty());
+        assert!(points.len() < 10_000, "extreme scales must not allocate millions of vertices");
+        assert!(points.iter().all(|p| p.is_finite()));
+        assert!(flatten(&sp, &Mat3::scale(gv2(1e300, 1e300)), &map).is_empty());
     }
 
     /// #912: clicking the last vertex of an open path with the Pen resumes that path.
