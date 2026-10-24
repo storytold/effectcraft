@@ -420,7 +420,7 @@ function __callable(o) {
   delete f.length;
   Object.setPrototypeOf(f, Object.getPrototypeOf(o));
   var keys = Object.keys(o);
-  for (var i = 0; i < keys.length; i++) f[keys[i]] = o[keys[i]];
+  for (const elem of keys) f[elem] = o[elem];
   var self = new Proxy(f, {
     get: __attr.get,
     apply: function (t, thisArg, args) { return self.property(args[0]); },
@@ -473,7 +473,7 @@ function MarkerValue(comment, chapter, url, frameTarget, cuePointName, params) {
 }
 MarkerValue.prototype.getParameters = function () {
   var o = {};
-  for (var i = 0; i < this.__params.length; i++) o[this.__params[i][0]] = this.__params[i][1];
+  for (const elem of this.__params) o[elem[0]] = elem[1];
   return o;
 };
 MarkerValue.prototype.setParameters = function (o) {
@@ -513,8 +513,8 @@ TextDocument.prototype = {
   set text(v) { this.__text = String(v); this.__textSet = true; },
   __style: function (k, d) {
     if (k in this.__changed) return this.__changed[k];
-    if (this.__base && this.__base.first && k in this.__base.first) return this.__base.first[k];
-    if (this.__base && this.__base.para && k in this.__base.para) return this.__base.para[k];
+    if (this.__base?.first && k in this.__base.first) return this.__base.first[k];
+    if (this.__base?.para && k in this.__base.para) return this.__base.para[k];
     return d;
   },
   __set: function (k, v) { this.__changed[k] = v; },
@@ -580,14 +580,14 @@ TextDocument.prototype = {
   },
   get tsume() { return this.__style("tsume", 0); },
   set tsume(v) { this.__set("tsume", __num(v)); },
-  get boxText() { return !!(this.__base && this.__base.box_size); },
+  get boxText() { return !!this.__base?.box_size; },
   get pointText() { return !this.boxText; },
-  get boxTextSize() { return this.__base && this.__base.box_size ? this.__base.box_size.slice() : undefined; },
+  get boxTextSize() { return this.__base?.box_size ? this.__base.box_size.slice() : undefined; },
   set boxTextSize(v) {
     var p = this.boxTextPos || [0, 0];
     this.__set("box", [p[0], p[1], v[0], v[1]]);
   },
-  get boxTextPos() { return this.__base && this.__base.box_size ? this.__base.box_pos.slice() : undefined; },
+  get boxTextPos() { return this.__base?.box_size ? this.__base.box_pos.slice() : undefined; },
   get startIndent() { return this.__style("indentLeft", 0); },
   set startIndent(v) { this.__set("indentLeft", __num(v)); },
   get endIndent() { return this.__style("indentRight", 0); },
@@ -665,7 +665,7 @@ PropertyBase.prototype = {
   get isMask() { return !!this.__info().isMask; },
   get selected() {
     var c = __get("item", { id: this.__layer.__comp }).selectedProperties;
-    for (var i = 0; i < c.length; i++) if (c[i][0] === this.__layer.__id && c[i][1] === this.__uid) return true;
+    for (const elem of c) if (elem[0] === this.__layer.__id && elem[1] === this.__uid) return true;
     return false;
   },
   set selected(v) {
@@ -842,7 +842,7 @@ Property.prototype.property = function () { return null; };
     i = __num(i, "keyIndex");
     // Only the key asked for: fetching the whole list made every key call linear (#814).
     var r = i >= 1 && Math.floor(i) === i ? __get("keys", { comp: this.__layer.__comp, layer: this.__layer.__id, uid: this.__uid, index: i - 1 }) : null;
-    if (!r || !r.key) throw __err("keyIndex " + i + " is out of range 1.." + (r ? r.count : this.numKeys));
+    if (!r?.key) throw __err("keyIndex " + i + " is out of range 1.." + (r ? r.count : this.numKeys));
     return r.key;
   };
   // Script value → engine JSON for `prop.set` / `prop.addKey`.
@@ -853,13 +853,13 @@ Property.prototype.property = function () { return null; };
       return __get("textdoc", { comp: this.__layer.__comp, layer: this.__layer.__id, uid: this.__uid, time: time, attrs: td.__attrs() });
     }
     if (t === "SHAPE") {
-      if (!v || !v.vertices) throw __err("value must be a Shape");
+      if (!v?.vertices) throw __err("value must be a Shape");
       var n = v.vertices.length;
-      function fit(a) { var o = []; for (var i = 0; i < n; i++) o.push(a && a[i] ? [a[i][0], a[i][1]] : [0, 0]); return o; }
+      function fit(a) { var o = []; for (var i = 0; i < n; i++) o.push(a?.[i] ? [a[i][0], a[i][1]] : [0, 0]); return o; }
       return { vertices: fit(v.vertices), in_tangents: fit(v.inTangents), out_tangents: fit(v.outTangents), closed: v.closed !== false };
     }
     if (t === "LAYER_INDEX") {
-      var idx = v && v.__id !== undefined ? v.index : __num(v);
+      var idx = v?.__id !== undefined ? v.index : __num(v);
       if (!idx) return null;
       return this.__layer.containingComp.layer(idx).__id;
     }
@@ -1177,7 +1177,7 @@ Layer.prototype = {
   },
   get selectedProperties() {
     var c = this.containingComp.__info().selectedProperties, out = [];
-    for (var i = 0; i < c.length; i++) if (c[i][0] === this.__id) out.push(__propOf(this, __get("node", { comp: this.__comp, layer: this.__id, uid: c[i][1] })));
+    for (const elem of c) if (elem[0] === this.__id) out.push(__propOf(this, __get("node", { comp: this.__comp, layer: this.__id, uid: elem[1] })));
     return out;
   },
   get parent() { var p = this.__info().parent; return p === null ? null : __layer(this.__comp, p); },
@@ -1205,7 +1205,7 @@ Layer.prototype = {
     var before = this.containingComp.__info().layers;
     __call("edit.duplicate", this.__p());
     var after = this.containingComp.__info().layers;
-    for (var i = 0; i < after.length; i++) if (before.indexOf(after[i]) < 0) return __layer(this.__comp, after[i]);
+    for (const elem of after) if (before.indexOf(elem) < 0) return __layer(this.__comp, elem);
     return null;
   },
   copyToComp: function (comp) {
@@ -1310,7 +1310,7 @@ AVLayer.prototype.constructor = AVLayer;
   // AVLayer.replaceSource). `fixExpressions` is accepted for compatibility: only AV sources are
   // replaced, so the property tree and the layer's name stay and expressions keep resolving.
   P.replaceSource = function (newSource, fixExpressions) {
-    if (!newSource || newSource.__id === undefined) throw __err("replaceSource needs a project item");
+    if (newSource?.__id === undefined) throw __err("replaceSource needs a project item");
     __call("layer.replaceSource", { comp: this.__comp, layers: [this.__id], item: newSource.__id, fixExpressions: !!fixExpressions });
     return null;
   };
@@ -1371,7 +1371,7 @@ LayerCollection.prototype = {
     return layer;
   },
   add: function (item, duration) {
-    if (!item || item.id === undefined) throw __err("add(): expected an item");
+    if (item?.id === undefined) throw __err("add(): expected an item");
     var l = this.__new(__call("layer.addItem", { comp: this.__comp, item: item.id, time: 0 }));
     return this.__dur(l, duration);
   },
@@ -1414,15 +1414,15 @@ LayerCollection.prototype = {
   },
   precompose: function (indices, name, moveAllAttributes) {
     var ids = this.__ids(), sel = [];
-    for (var i = 0; i < indices.length; i++) sel.push(ids[indices[i] - 1]);
+    for (const elem of indices) sel.push(ids[elem - 1]);
     var r = __call("layer.precompose", { comp: this.__comp, layers: sel, name: String(name), mode: moveAllAttributes === false ? "leave" : "move" });
     return __item(r.comp);
   },
   byName: function (name) {
     var ids = this.__ids();
-    for (var i = 0; i < ids.length; i++) {
-      var l = __get("layer", { comp: this.__comp, layer: ids[i] });
-      if (l.name === name) return __layer(this.__comp, ids[i]);
+    for (const elem of ids) {
+      var l = __get("layer", { comp: this.__comp, layer: elem });
+      if (l.name === name) return __layer(this.__comp, elem);
     }
     return null;
   },
@@ -1493,7 +1493,7 @@ Item.prototype = {
   get label() { return this.__info().label; },
   set label(v) { __call("project.setLabel", { items: [this.__id], label: __num(v, "label") }); },
   get parentFolder() { return __item(this.__info().parent); },
-  set parentFolder(f) { __call("project.move", { items: [this.__id], folder: f && f.__id ? f.__id : null }); },
+  set parentFolder(f) { __call("project.move", { items: [this.__id], folder: f?.__id ? f.__id : null }); },
   get selected() { return this.__info().selected; },
   set selected(v) {
     var selection = __get("project").selection;
@@ -1527,7 +1527,7 @@ AVItem.prototype = Object.create(Item.prototype);
   def("hasVideo", function () { return this.__info().hasVideo; });
   def("hasAudio", function () { return this.__info().hasAudio; });
   def("footageMissing", function () { return !!this.__info().footageMissing; });
-  def("useProxy", function () { var p = this.__info().proxy; return !!(p && p.enabled); }, function (v) {
+  def("useProxy", function () { var p = this.__info().proxy; return !!p?.enabled; }, function (v) {
     if (!this.__info().proxy) throw __err("\"" + this.name + "\" has no proxy");
     __call("file.useProxy", { item: this.__id, on: !!v });
   });
@@ -1564,9 +1564,9 @@ CompItem.prototype.constructor = CompItem;
   });
   def("activeCamera", function () {
     var ids = this.__info().layers;
-    for (var i = 0; i < ids.length; i++) {
-      var l = __get("layer", { comp: this.__id, layer: ids[i] });
-      if (l.kind === "camera" && l.enabled && l.active) return __layer(this.__id, ids[i]);
+    for (const elem of ids) {
+      var l = __get("layer", { comp: this.__id, layer: elem });
+      if (l.kind === "camera" && l.enabled && l.active) return __layer(this.__id, elem);
     }
     return null;
   });
@@ -1606,7 +1606,7 @@ CompItem.prototype.constructor = CompItem;
       if (a < 1 || a > ids.length || Math.floor(a) !== a) throw __err("layer index " + a + " is out of range 1.." + ids.length);
       return __layer(this.__id, ids[a - 1]);
     }
-    if (a && a.__id !== undefined && typeof b === "number") {
+    if (a?.__id !== undefined && typeof b === "number") {
       var j = a.index + b;
       return j >= 1 && j <= ids.length ? __layer(this.__id, ids[j - 1]) : null;
     }
@@ -1619,9 +1619,9 @@ CompItem.prototype.constructor = CompItem;
   P.__controllers = function () {
     var out = [];
     (function walk(list) {
-      for (var i = 0; i < list.length; i++) {
-        if (list[i].kind === "property" || list[i].kind === "mirror" || list[i].kind === "media") out.push(list[i]);
-        if (list[i].children) walk(list[i].children);
+      for (const elem of list) {
+        if (elem.kind === "property" || elem.kind === "mirror" || elem.kind === "media") out.push(elem);
+        if (elem.children) walk(elem.children);
       }
     })(this.__eg().controls);
     return out;
@@ -1732,7 +1732,7 @@ FolderItem.prototype.constructor = FolderItem;
   Object.defineProperty(P, "numItems", { get: function () { return new ItemCollection(this.__id).length; } });
   Object.defineProperty(P, "parentFolder", {
     get: function () { return this.__id === 0 ? null : __item(this.__info().parent); },
-    set: function (f) { __call("project.move", { items: [this.__id], folder: f && f.__id ? f.__id : null }); },
+    set: function (f) { __call("project.move", { items: [this.__id], folder: f?.__id ? f.__id : null }); },
   });
   P.item = function (i) {
     var v = new ItemCollection(this.__id).__at(__num(i, "index"));
@@ -1776,7 +1776,7 @@ RenderQueueItem.prototype = {
   constructor: RenderQueueItem,
   __info: function () {
     var l = __call("renderQueue.list", {}).items;
-    for (var i = 0; i < l.length; i++) if (l[i].id === this.__id) return l[i];
+    for (const elem of l) if (elem.id === this.__id) return elem;
     throw __err("the render queue item no longer exists");
   },
   get comp() { return __item(this.__info().comp); },
@@ -1812,7 +1812,7 @@ RenderQueueItem.prototype = {
     var before = __call("renderQueue.list", {}).items.map(function (i) { return i.id; });
     __call("renderQueue.duplicate", { item: this.__id });
     var after = __call("renderQueue.list", {}).items;
-    for (var i = 0; i < after.length; i++) if (before.indexOf(after[i].id) < 0) return new RenderQueueItem(after[i].id);
+    for (const elem of after) if (before.indexOf(elem.id) < 0) return new RenderQueueItem(elem.id);
     return null;
   },
   applyTemplate: function () {},
@@ -1945,9 +1945,9 @@ Project.prototype = {
       }
     }
     var r = __call("file.import", args);
-    if (r.errors && r.errors.length) throw __err(r.errors.join("; "));
+    if (r.errors?.length) throw __err(r.errors.join("; "));
     // Composition imports create several footage items, but callers need the comp.
-    return __item(r.comps && r.comps.length ? r.comps[0] : r.items[0]);
+    return __item(r.comps?.length ? r.comps[0] : r.items[0]);
   },
   importFileWithDialog: function () { return null; },
   importPlaceholder: function (name, w, h, rate, dur) {

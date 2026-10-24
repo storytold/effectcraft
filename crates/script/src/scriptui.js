@@ -213,7 +213,7 @@ function __uiResPlain(v) {
   if (v instanceof Array) return v.map(__uiResPlain);
   if (v && typeof v === "object" && v.__object) {
     var o = {};
-    for (var k = 0; k < v.__object.length; k++) o[v.__object[k][0]] = __uiResPlain(v.__object[k][1]);
+    for (const elem of v.__object) o[elem[0]] = __uiResPlain(elem[1]);
     return o;
   }
   return v;
@@ -222,8 +222,8 @@ function __uiResPlain(v) {
 // A resource's own properties and its child elements (in source order).
 function __uiResProps(res) {
   var props = {}, kids = [];
-  for (var k = 0; k < res.list.length; k++) {
-    var e = res.list[k];
+  for (const elem2 of res.list) {
+    var e = elem2;
     if (e[1] && typeof e[1] === "object" && e[1].__element) kids.push([e[0], { type: e[1].__element, list: e[1].list }]);
     else props[e[0]] = __uiResPlain(e[1]);
   }
@@ -239,17 +239,17 @@ function __uiApplyRes(c, res) {
   // Ranges before values, items before selections.
   if (props.minvalue !== undefined) c.minvalue = __num(props.minvalue);
   if (props.maxvalue !== undefined) c.maxvalue = __num(props.maxvalue);
-  if (props.items instanceof Array && c.items) for (var n = 0; n < props.items.length; n++) c.add("item", props.items[n]);
+  if (props.items instanceof Array && c.items) for (const elem of props.items) c.add("item", elem);
   for (var k in props) {
     if (__uiResSkip[k]) continue;
     var v = props[k];
     if (__uiSizes[k] && v instanceof Array) v = __dim(v[0], v[1]);
     c[k] = v;
   }
-  for (var j = 0; j < pk.kids.length; j++) {
-    var child = __uiAddRes(c, pk.kids[j][1]);
-    child.__key = pk.kids[j][0];
-    c[pk.kids[j][0]] = child;
+  for (const elem of pk.kids) {
+    var child = __uiAddRes(c, elem[1]);
+    child.__key = elem[0];
+    c[elem[0]] = child;
   }
   return c;
 }
@@ -268,7 +268,7 @@ Window.alert = function (s) { alert(s); };
 Window.confirm = function (s) { return confirm(s); };
 Window.prompt = function (m, d) { return prompt(m, d); };
 Window.find = function (type, title) {
-  for (var i = 0; i < __uiWins.length; i++) if (__uiWins[i].text === title) return __uiWins[i];
+  for (const elem of __uiWins) if (elem.text === title) return elem;
   return null;
 };
 
@@ -335,7 +335,7 @@ function __uiColor(c) {
   return null;
 }
 function __uiFontSize(f, g) {
-  var x = f && f.size !== undefined ? Number(f.size) : g && g.font && g.font.size !== undefined ? Number(g.font.size) : 12;
+  var x = f?.size !== undefined ? Number(f.size) : g?.font && g.font.size !== undefined ? Number(g.font.size) : 12;
   return x > 0 ? x : 12;
 }
 
@@ -371,11 +371,11 @@ function __uiGraphics() {
       this.__push({ op: "fill", color: brush ? brush.color : null, path: (path || this.currentPath).slice() });
     },
     strokePath: function (pen, path) {
-      this.__push({ op: "stroke", color: pen ? pen.color : null, width: pen && pen.lineWidth !== undefined ? pen.lineWidth : 1, path: (path || this.currentPath).slice() });
+      this.__push({ op: "stroke", color: pen ? pen.color : null, width: pen?.lineWidth !== undefined ? pen.lineWidth : 1, path: (path || this.currentPath).slice() });
     },
     drawString: function (text, pen, x, y, font) {
       var f = font || this.font;
-      this.__push({ op: "text", text: String(text), color: pen ? pen.color : null, x: __num(x || 0), y: __num(y || 0), size: __uiFontSize(f, this), style: String(f && f.style !== undefined ? f.style : "") });
+      this.__push({ op: "text", text: String(text), color: pen ? pen.color : null, x: __num(x || 0), y: __num(y || 0), size: __uiFontSize(f, this), style: String(f?.style !== undefined ? f.style : "") });
     },
     drawOSControl: function () { this.__push({ op: "os" }); },
     drawImage: function (img, x, y, w, h) { this.__push({ op: "image", image: __uiImageJson(img), x: __num(x || 0), y: __num(y || 0), w: w === undefined ? 0 : __num(w), h: h === undefined ? 0 : __num(h) }); },
@@ -384,7 +384,7 @@ function __uiGraphics() {
       var size = __uiFontSize(font, this);
       var lines = String(s).split("\n");
       var cw = size * 0.58, w = 0;
-      for (var i = 0; i < lines.length; i++) w = Math.max(w, Math.ceil(lines[i].length * cw));
+      for (const elem of lines) w = Math.max(w, Math.ceil(elem.length * cw));
       var n = lines.length;
       if (boundaryWidth > 0 && w > boundaryWidth) {
         n = Math.ceil(w / boundaryWidth) + lines.length - 1;
@@ -405,14 +405,14 @@ function __uiRunDraws(win) {
   })(win);
   if (!drawn.length) return;
   __uiLayout(win);
-  for (var k = 0; k < drawn.length; k++) {
-    var c = drawn[k];
+  for (const elem of drawn) {
+    var c = elem;
     c.__draw = [];
     c.graphics.__rec = c.__draw;
     try {
       c.onDraw.call(c, { type: "draw", target: c });
     } catch (e) {
-      try { writeLn("onDraw: " + (e && e.message ? e.message : e)); } catch (e2) {}
+      try { writeLn("onDraw: " + (e?.message ? e.message : e)); } catch (e2) {}
     }
     c.graphics.__rec = null;
   }
@@ -498,7 +498,7 @@ function __uiProto() {
       var arg = t === "image" || t === "iconbutton" ? text : typeof text === "object" && text !== null && !(text instanceof Array) ? "" : text;
       __uiInit(c, t, this.window, this, bounds, arg, props);
       if ((t === "dropdownlist" || t === "listbox") && text instanceof Array) {
-        for (var i = 0; i < text.length; i++) c.add("item", text[i]);
+        for (const elem of text) c.add("item", elem);
         c.text = "";
       }
       if (t === "slider" || t === "scrollbar") {
@@ -521,7 +521,7 @@ function __uiProto() {
       if (t === "checkbox" || t === "radiobutton") c.value = false;
       if (t === "edittext" && c.properties.multiline) c.__multiline = true;
       if (t === "edittext" && c.properties.readonly) c.__readonly = true;
-      if (c.properties && c.properties.name) c.name = c.properties.name;
+      if (c.properties?.name) c.name = c.properties.name;
       this.children.push(c);
       if (t === "tab" && this.type === "tabbedpanel" && this.__sel.length === 0) this.__sel = [this.children.length - 1];
       return c;
@@ -608,21 +608,21 @@ function __uiProto() {
     removeEventListener: function (name, fn, capture) {
       var k = String(name).toLowerCase();
       var m = capture ? this.__capture : this.__listeners;
-      if (m && m[k]) m[k] = m[k].filter(function (f) { return f !== fn; });
+      if (m?.[k]) m[k] = m[k].filter(function (f) { return f !== fn; });
     },
     dispatchEvent: function (e) { this.__fire("on" + String(e.type || e).charAt(0).toUpperCase() + String(e.type || e).slice(1)); },
     __fire: function (name) {
       var r;
       if (typeof this[name] === "function") r = this[name].call(this);
       var l = this.__listeners[name.slice(2).toLowerCase()];
-      if (l) for (var i = 0; i < l.length; i++) l[i].call(this, { type: name.slice(2).toLowerCase(), target: this });
+      if (l) for (const elem of l) elem.call(this, { type: name.slice(2).toLowerCase(), target: this });
       return r;
     },
     __handlers: function () {
       var out = [];
       var names = ["onClick", "onChange", "onChanging", "onDoubleClick", "onClose", "onShow", "onActivate", "onDeactivate", "onResize", "onDraw"];
-      for (var i = 0; i < names.length; i++) {
-        var n = names[i];
+      for (const elem of names) {
+        var n = elem;
         if (typeof this[n] === "function" || (this.__listeners[n.slice(2).toLowerCase()] || []).length) out.push(n);
       }
       return out;
@@ -634,8 +634,8 @@ function __uiProto() {
 (function () {
   var all = ["Window", "Panel", "Group", "Button", "IconButton", "StaticText", "EditText", "Checkbox", "RadioButton", "Slider",
     "Scrollbar", "Progressbar", "DropDownList", "ListBox", "TabbedPanel", "Tab", "ScriptUIImage"];
-  for (var i = 0; i < all.length; i++) {
-    var C = __ecGlobal[all[i]];
+  for (const elem of all) {
+    var C = __ecGlobal[elem];
     var p = __uiProto();
     for (var k in p) C.prototype[k] = p[k];
     Object.defineProperty(C.prototype, "bounds", {
@@ -737,8 +737,8 @@ function __uiMouseListeners(c, type, capture) {
 // The mouse events that reach a listener at `c`: its own, and its containers' (`inherited`).
 function __uiMouseWanted(c, inherited) {
   var out = inherited.slice();
-  for (var i = 0; i < __uiMouseKinds.length; i++) {
-    var t = __uiMouseKinds[i];
+  for (const elem of __uiMouseKinds) {
+    var t = elem;
     if (out.indexOf(t) < 0 && (__uiMouseListeners(c, t, false).length || __uiMouseListeners(c, t, true).length)) out.push(t);
   }
   return out;
@@ -793,7 +793,7 @@ function __uiMouseFire(target, type, v) {
     var l = __uiMouseListeners(c, type, capture);
     e.currentTarget = c;
     e.eventPhase = phase;
-    for (var i = 0; i < l.length; i++) if (typeof l[i] === "function") l[i].call(c, e);
+    for (const elem of l) if (typeof elem === "function") elem.call(c, e);
   };
   var n = path.length - 1;
   for (var i = 0; i < n; i++) {
@@ -832,7 +832,7 @@ function __uiJson(c, inherited) {
     if (m) o.margins = m;
     if (typeof c.spacing === "number") o.spacing = c.spacing;
     var kids = c.children;
-    for (var i = 0; i < kids.length; i++) o.children.push(__uiJson(kids[i], mouse));
+    for (const elem of kids) o.children.push(__uiJson(elem, mouse));
   }
   if (c.alignment !== null && c.alignment !== undefined) o.alignment = __uiAlign(c.alignment);
   if (c.type === "checkbox" || c.type === "radiobutton") o.checked = !!c.value;
@@ -859,8 +859,8 @@ function __uiJson(c, inherited) {
 // The open windows of this script, for the host.
 function __uiSnapshot() {
   var out = [];
-  for (var i = 0; i < __uiWins.length; i++) {
-    var w = __uiWins[i];
+  for (const elem of __uiWins) {
+    var w = elem;
     if (w.__shown && !w.__closed) __uiRunDraws(w);
     out.push({ id: w.__wid, kind: w.__kind, title: String(w.text || ""), visible: !!w.__shown && !w.__closed, modal: !!w.__modal, root: __uiJson(w) });
   }
@@ -871,12 +871,12 @@ function __uiSnapshot() {
 
 function __uiOpenCount() {
   var n = 0;
-  for (var i = 0; i < __uiWins.length; i++) if (__uiWins[i].__shown && !__uiWins[i].__closed) n++;
+  for (const elem of __uiWins) if (elem.__shown && !elem.__closed) n++;
   return n;
 }
 
 function __uiWin(id) {
-  for (var i = 0; i < __uiWins.length; i++) if (__uiWins[i].__wid === id) return __uiWins[i];
+  for (const elem of __uiWins) if (elem.__wid === id) return elem;
   return null;
 }
 function __uiFind(c, id) {
@@ -914,7 +914,7 @@ function __uiDispatch(winId, id, kind, valueJson) {
   if (!c || c.enabled === false) return;
   var radio = function () {
     var sib = c.parent ? c.parent.children : [];
-    for (var i = 0; i < sib.length; i++) if (sib[i] !== c && sib[i].type === "radiobutton") sib[i].value = false;
+    for (const elem of sib) if (elem !== c && elem.type === "radiobutton") elem.value = false;
     c.value = true;
   };
   // A mouse click carries the pointer's details ({x, y, button, detail, …keys}).

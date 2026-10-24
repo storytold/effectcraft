@@ -162,7 +162,7 @@ try {
   const info = await js("effectcraft.info()");
   report.steps.gpu = { webgpu: info.webgpu, backend: info.backend, ...info.gpu };
   if (info.webgpu && info.backend === "BrowserWebGpu") {
-    check(info.gpu && info.gpu.compositor, "GPU compositor on WebGPU");
+    check(info.gpu?.compositor, "GPU compositor on WebGPU");
     check(info.gpu.viewerOnGpu, "viewer frames on the GPU");
   }
 
@@ -250,7 +250,7 @@ try {
   const st = await js(`(async () => { await new Promise((r) => setTimeout(r, 1200)); return effectcraft.execute("storage.info", {}); })()`);
   report.steps.storage = st;
   check(st.available && st.quota > 0 && st.usage > 0, `storage.info: ${JSON.stringify(st)}`);
-  check(st.diskCache && st.diskCache.enabled && st.diskCache.writes > 0, `disk cache in OPFS: ${JSON.stringify(st.diskCache)}`);
+  check(st.diskCache?.enabled && st.diskCache.writes > 0, `disk cache in OPFS: ${JSON.stringify(st.diskCache)}`);
   await js(`effectcraft.execute("prefs.open", {page: "disk"})`);
   await sleep(800);
   report.steps.storage.screenshot = await shot("01c-storage-manager");
@@ -378,14 +378,14 @@ try {
     const jobs = gj.workers.jobs || [];
     const rj = jobs.filter((j) => j.kind === "Render").pop();
     const wj = jobs.filter((j) => j.kind === "Warp").pop();
-    check(gj.workers.gpu && gj.workers.gpu.adapter, `job workers have a GPU: ${JSON.stringify(gj.workers)}`);
+    check(gj.workers.gpu?.adapter, `job workers have a GPU: ${JSON.stringify(gj.workers)}`);
     check(gj.status.every((st) => st === "Done"), `GPU job render: ${JSON.stringify(gj.status)}`);
-    check(rj && rj.gpu && rj.readbacks >= 3 && rj.passes >= 6, `Render Queue frames on the job worker's GPU, in passes: ${JSON.stringify(rj)}`);
+    check(rj?.gpu && rj.readbacks >= 3 && rj.passes >= 6, `Render Queue frames on the job worker's GPU, in passes: ${JSON.stringify(rj)}`);
     check(gj.warp.analyzed, `Warp Stabilizer analysed in a job worker: ${JSON.stringify(gj.warp)}`);
-    check(wj && wj.gpu && wj.readbacks > 0, `Warp Stabilizer input frames on the job worker's GPU: ${JSON.stringify(wj)}`);
+    check(wj?.gpu && wj.readbacks > 0, `Warp Stabilizer input frames on the job worker's GPU: ${JSON.stringify(wj)}`);
     const fj = jobs.filter((j) => j.kind === "ContentFill").pop();
     check(!gj.fill.error && gj.fillLayers.length > 0, `Content-Aware Fill in a job worker: ${JSON.stringify(gj.fill)} ${JSON.stringify(gj.fillLayers)}`);
-    check(fj && fj.gpu && fj.readbacks > 0, `Content-Aware Fill frames on the job worker's GPU: ${JSON.stringify(fj)}`);
+    check(fj?.gpu && fj.readbacks > 0, `Content-Aware Fill frames on the job worker's GPU: ${JSON.stringify(fj)}`);
     check(gj.maxGapMs < 400, `event loop blocked ${gj.maxGapMs} ms during the GPU jobs: ${JSON.stringify(gj.gaps)}`);
     check(gj.gaps.prepareFill < 50, `event loop blocked ${gj.gaps.prepareFill} ms while editing after the analysis (pre-compose, mask): ${JSON.stringify(gj.gaps)}`);
   } else {
@@ -418,7 +418,7 @@ try {
   check(mb.path === "/Browser Storage" && mb.entries.some((e) => e.name === "tone.wav" && e.kind === "audio"), `Media Browser: ${JSON.stringify(report.steps.mediaBrowser)}`);
   check(mb.actions.some((a) => a.id === "addFiles"), "Media Browser: Add Files…");
   const mbImport = await js(`effectcraft.execute("mediaBrowser.import", {paths: [${JSON.stringify(mb.entries.find((e) => e.name === "tone.wav")?.path ?? "/tone.wav")}]})`);
-  check(!mbImport.pending && mbImport.items && mbImport.items.length === 1, `Media Browser import: ${JSON.stringify(mbImport)}`);
+  check(!mbImport.pending && mbImport.items?.length === 1, `Media Browser import: ${JSON.stringify(mbImport)}`);
   await js(`effectcraft.request("ui.playback", {action: "stop"})`);
   await js(`effectcraft.execute("time.set", {time: 0})`);
   await js(`effectcraft.request("ui.playback", {action: "play"})`);
@@ -579,7 +579,7 @@ try {
   report.steps.final2 = { screenshot: await shot("03-offline") };
 } catch (e) {
   failed = true;
-  report.error = String(e && e.stack || e);
+  report.error = String(e?.stack || e);
   try { report.errorShot = await shot("error"); } catch {}
 }
 report.console = logs.slice(-40);
