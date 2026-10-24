@@ -48,6 +48,7 @@ struct KeyPt {
     t: f64,
     v: f64,
     sel: bool,
+    muted: bool,
     handles: Vec<Handle>,
 }
 
@@ -153,7 +154,7 @@ fn curves<'a>(app: &EffectcraftApp, comp: &'a Comp, ectx: &EvalCtx, tm: TMap, pl
                     let dt = e.influence * dur * if out_side { 1.0 } else { -1.0 };
                     let (hv, show) = if speed { (e.speed.abs(), true) } else { (k.value.components().get(d).copied().unwrap_or(0.0) + e.speed * dt, !spatial) };
                     let bezier = if out_side { k.out_interp == Interp::Bezier } else { k.in_interp == Interp::Bezier };
-                    if ks && show && (bezier || speed) {
+                    if ks && !k.muted && show && (bezier || speed) {
                         handles.push(Handle { out: out_side, t: kt + dt, v: hv, speed: e.speed, dur });
                     }
                 }
@@ -162,7 +163,7 @@ fn curves<'a>(app: &EffectcraftApp, comp: &'a Comp, ectx: &EvalCtx, tm: TMap, pl
                 } else {
                     k.value.components().get(d).copied().unwrap_or(0.0)
                 };
-                keys.push(KeyPt { idx: i, time: k.time, t: kt, v, sel: ks, handles });
+                keys.push(KeyPt { idx: i, time: k.time, t: kt, v, sel: ks, muted: k.muted, handles });
             }
             out.push(Curve { layer: l, prop: pr, dim: d, color, pts, keys, editable: !spatial });
         }
@@ -460,9 +461,16 @@ pub(crate) fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
                 }
             }
             // The key itself.
-            let col = if k.sel { t.keyframe_selected } else { Color32::from_gray(0xe0) };
+            let col = if k.muted {
+                if k.sel { t.keyframe_selected.gamma_multiply(0.5) } else { Color32::from_gray(0x70) }
+            } else if k.sel {
+                t.keyframe_selected
+            } else {
+                Color32::from_gray(0xe0)
+            };
+            let edge = if k.muted { c.color.gamma_multiply(0.4) } else { c.color };
             pc.rect_filled(Rect::from_center_size(kp, vec2(7.0, 7.0)), 0.0, col);
-            pc.rect_stroke(Rect::from_center_size(kp, vec2(7.0, 7.0)), 0.0, Stroke::new(1.0, c.color), StrokeKind::Outside);
+            pc.rect_stroke(Rect::from_center_size(kp, vec2(7.0, 7.0)), 0.0, Stroke::new(1.0, edge), StrokeKind::Outside);
             let kr = Rect::from_center_size(kp, vec2(11.0, 11.0));
             let kresp = ui.interact(kr, egui::Id::new(("gkey", uid, d, k.idx)), Sense::click_and_drag());
             app.auto.add(&format!("timeline.graph.key.{uid}.{d}.{}", k.idx), kr, &c.prop.name);

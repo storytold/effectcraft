@@ -360,31 +360,36 @@ pub(crate) fn motion_path(
         }
         let v = k.value.as_vec3();
         let s = to_scr(v);
-        // Auto-Bezier keys show handles on a side the path leaves straight too (a two-key path's
-        // ends), to drag it into a curve; Linear keys (no tangents) show none.
-        let (tin, tout) = if k.spatial_auto {
-            effectcraft_engine::keyframe::spatial_handles(&pos.keys, i)
-        } else {
-            effectcraft_engine::keyframe::spatial_tangents(&pos.keys, i)
-        };
-        for (out, tg) in [(false, tin), (true, tout)] {
-            let has = (out && i + 1 < pos.keys.len()) || (!out && i > 0);
-            if !has || (tg[0] == 0.0 && tg[1] == 0.0) {
-                continue;
+        let selected = sel.contains(&KeyRef { layer: l.id, prop: pos.uid, time: k.time });
+        // A muted position key is off the motion path: no tangents, and a dimmed point.
+        let kc = if k.muted { col.gamma_multiply(if selected { 0.55 } else { 0.35 }) } else { col };
+        if !k.muted {
+            // Auto-Bezier keys show handles on a side the path leaves straight too (a two-key path's
+            // ends), to drag it into a curve; Linear keys (no tangents) show none.
+            let (tin, tout) = if k.spatial_auto {
+                effectcraft_engine::keyframe::spatial_handles(&pos.keys, i)
+            } else {
+                effectcraft_engine::keyframe::spatial_tangents(&pos.keys, i)
+            };
+            for (out, tg) in [(false, tin), (true, tout)] {
+                let has = (out && i + 1 < pos.keys.len()) || (!out && i > 0);
+                if !has || (tg[0] == 0.0 && tg[1] == 0.0) {
+                    continue;
+                }
+                let h = to_scr([v[0] + tg[0], v[1] + tg[1], v[2] + tg[2]]);
+                painter.line_segment([s, h], Stroke::new(1.0, kc));
+                painter.circle_filled(h, 3.0, kc);
+                let side = if out { "out" } else { "in" };
+                app.auto.add(&format!("viewer.motionPath.{}.{i}.{side}", l.id.0), Rect::from_center_size(h, vec2(8.0, 8.0)), "Spatial tangent");
+                hits.push(KeyHit { layer: l.id, prop: pos.uid, time: k.time, pos: h, tangent: Some(out), value: v, p2c });
             }
-            let h = to_scr([v[0] + tg[0], v[1] + tg[1], v[2] + tg[2]]);
-            painter.line_segment([s, h], Stroke::new(1.0, col));
-            painter.circle_filled(h, 3.0, col);
-            let side = if out { "out" } else { "in" };
-            app.auto.add(&format!("viewer.motionPath.{}.{i}.{side}", l.id.0), Rect::from_center_size(h, vec2(8.0, 8.0)), "Spatial tangent");
-            hits.push(KeyHit { layer: l.id, prop: pos.uid, time: k.time, pos: h, tangent: Some(out), value: v, p2c });
         }
         let r = Rect::from_center_size(s, vec2(7.0, 7.0));
-        if sel.contains(&KeyRef { layer: l.id, prop: pos.uid, time: k.time }) {
-            painter.rect_filled(r, 0.0, col);
+        if selected {
+            painter.rect_filled(r, 0.0, kc);
         } else {
             painter.rect_filled(r, 0.0, Color32::from_black_alpha(140));
-            painter.rect_stroke(r, 0.0, Stroke::new(1.0, col), StrokeKind::Inside);
+            painter.rect_stroke(r, 0.0, Stroke::new(1.0, kc), StrokeKind::Inside);
         }
         app.auto.add(&format!("viewer.motionPath.{}.{i}", l.id.0), r.expand(2.0), "Position keyframe");
         hits.push(KeyHit { layer: l.id, prop: pos.uid, time: k.time, pos: s, tangent: None, value: v, p2c });

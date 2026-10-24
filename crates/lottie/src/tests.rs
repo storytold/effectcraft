@@ -829,3 +829,21 @@ fn external_images_are_local_or_skipped() {
     assert_eq!(std::path::Path::new(&paths[0]), base.join("images").join("a.png"));
     assert_eq!(r.warnings.iter().filter(|w| w.contains("is not imported")).count(), assets.len() - 1, "{:?}", r.warnings);
 }
+
+#[test]
+fn muted_keys_are_omitted_from_the_export() {
+    let (mut p, cid) = setup();
+    let mut l = solid_layer(&mut p, cid, [0.0, 1.0, 0.0], 20, 20);
+    let mut b = Keyframe::new(s(1.0), Value::Scalar(100.0));
+    b.muted = true;
+    l.props.prop_mut("transform/opacity").unwrap().keys = vec![Keyframe::new(s(0.0), Value::Scalar(0.0)), b, Keyframe::new(s(2.0), Value::Scalar(300.0))];
+    push(&mut p, cid, l);
+    let (q, nc, warnings, json) = roundtrip(&p, cid, &ExportOptions::default());
+    assert!(warnings.iter().any(|w| w.contains("muted keyframes")), "{warnings:?}");
+    // Lottie has no mute state: the two active keys carry the 0 → 300 animation.
+    assert_eq!(json["layers"][0]["ks"]["o"]["k"].as_array().unwrap().len(), 2);
+    assert_eq!(json["layers"][0]["ks"]["o"]["k"][1]["s"], json!([300.0]));
+    let opacity_at = |p: &Project, cid: ItemId, t: f64| p.comp(cid).unwrap().layers[0].props.prop("transform/opacity").unwrap().value_at(s(t)).as_f64();
+    assert!((opacity_at(&p, cid, 1.0) - 150.0).abs() < 1e-6);
+    assert!((opacity_at(&q, nc, 1.0) - 150.0).abs() < 1e-6);
+}
