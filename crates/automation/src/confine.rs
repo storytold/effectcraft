@@ -29,7 +29,7 @@ pub struct Confinement {
 }
 
 /// Commands that run code, act outside the project or open other applications.
-const REFUSED: &[&str] = &[
+pub(crate) const REFUSED: &[&str] = &[
     "script.run",
     "file.runScript",
     "file.installScript",
@@ -67,7 +67,7 @@ const READS: &[(&str, &[&str])] = &[
 ];
 
 /// Commands that write files named by these parameters.
-const WRITES: &[(&str, &[&str])] = &[
+pub(crate) const WRITES: &[(&str, &[&str])] = &[
     ("file.save", &["path"]),
     ("file.saveAs", &["path"]),
     ("file.saveCopy", &["path"]),
@@ -87,7 +87,7 @@ const WRITES: &[(&str, &[&str])] = &[
 ];
 
 /// Commands that write where they are not told: the project's file, the Render Queue's outputs.
-const IMPLICIT_WRITES: &[&str] = &["file.save", "file.incrementAndSave", "renderQueue.render", "render.preRender"];
+pub(crate) const IMPLICIT_WRITES: &[&str] = &["file.save", "file.incrementAndSave", "renderQueue.render", "render.preRender"];
 
 /// What must be looked up before an implicitly writing command may run.
 #[derive(Debug, PartialEq, Eq)]
