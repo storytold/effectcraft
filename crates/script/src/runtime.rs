@@ -5,10 +5,13 @@ use std::cell::RefCell;
 use std::mem::ManuallyDrop;
 use std::sync::Arc;
 
+use boa_engine::context::HostHooks;
+use boa_engine::realm::Realm;
 use boa_engine::{Context, JsNativeError, JsResult, JsString, JsValue, NativeFunction, Source, js_string};
 use effectcraft_engine::history::History;
 use effectcraft_engine::project::Project;
 use effectcraft_engine::{ScriptRequest, Session};
+use effectcraft_expr::rewrite::{Weights, nests_deeper_than};
 use serde_json::{Value as J, json};
 
 const PRELUDE: &str = include_str!("prelude.js");
@@ -512,8 +515,23 @@ fn native_eval_file(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResul
     r
 }
 
+/// Host hooks of a script's context: code it compiles at run time (`eval`, `new Function`, …)
+/// passes [`check_nesting`] like the script itself, instead of reaching the parser unchecked.
+struct Hooks;
+
+impl HostHooks for Hooks {
+    fn ensure_can_compile_strings(&self, _realm: Realm, parameters: &[JsString], body: &JsString, _direct: bool, _context: &mut Context) -> JsResult<()> {
+        // `Function`'s parameters are parsed joined with commas (`Function("[[a", "b]]", …)`).
+        let params = parameters.iter().map(JsString::to_std_string_lossy).collect::<Vec<_>>().join(",");
+        for code in [params, body.to_std_string_lossy()] {
+            check_nesting(&code).map_err(|e| JsNativeError::range().with_message(e.trim_start_matches("Error: ").to_string()))?;
+        }
+        Ok(())
+    }
+}
+
 pub(crate) fn new_context() -> Result<Context, String> {
-    let mut ctx = Context::default();
+    let mut ctx = Context::builder().host_hooks(std::rc::Rc::new(Hooks)).build().map_err(|e| e.to_string())?;
     let limits = ctx.runtime_limits_mut();
     limits.set_loop_iteration_limit(200_000_000);
     limits.set_recursion_limit(2000);
@@ -745,10 +763,20 @@ fn run_expanded(session: &mut Session, req: &ScriptRequest) -> Outcome {
 /// The deepest bracket nesting a script may have. The JavaScript parser recurses per level and
 /// overflows the stack (aborting the app, which can't be caught) at about 200 levels on an
 /// 8 MiB thread such as the Script Console's, so deeper scripts are rejected up front.
+/// Constructs that nest without brackets (`x => x => …`, `a ? b : c ? …`, `if (a) if (b) …`,
+/// `!!!…`) are limited too, by the expressions' estimate ([`SCRIPT_WEIGHTS`]).
 pub const MAX_NESTING: usize = 96;
 
+/// What the nesting estimate ([`nests_deeper_than`]) charges a script. Measured on a release
+/// build and scaled to an 8 MiB thread, boa overflows at about 2 400 `=>` links, 4 300 `||`
+/// links, 4 900 comma operators, 15 000 member accesses and 15 000 to 30 000 binary
+/// operators, and never on an object literal's keys or a call's arguments (lists). Each is
+/// allowed at least twice less. The budget is a quarter more than [`MAX_NESTING`]: brackets are
+/// counted exactly against it first, and the estimate charges a call's `(` as a link too.
+const SCRIPT_WEIGHTS: Weights = Weights { levels: MAX_NESTING + MAX_NESTING / 4, operator: 4, access: 6, comma: 16, lists: true };
+
 /// An error when `code` nests brackets deeper than [`MAX_NESTING`] (strings, template literals
-/// and comments are skipped).
+/// and comments are skipped), or nests as deep through constructs without brackets.
 pub fn check_nesting(code: &str) -> Result<(), String> {
     let b = code.as_bytes();
     let (mut i, mut depth, mut max) = (0usize, 0usize, 0usize);
@@ -789,6 +817,9 @@ pub fn check_nesting(code: &str) -> Result<(), String> {
     }
     if max > MAX_NESTING {
         return Err(format!("Error: the script is nested too deeply ({max} levels of brackets; at most {MAX_NESTING})"));
+    }
+    if nests_deeper_than(code, SCRIPT_WEIGHTS) {
+        return Err("Error: the script is nested too deeply (too long a chain of operators, or of statements without braces)".to_string());
     }
     Ok(())
 }
@@ -856,6 +887,81 @@ mod nesting_tests {
         assert!(out.error.is_none(), "{:?}", out.error);
         assert_eq!(out.result, serde_json::json!(2));
         assert!(check_nesting(&("(".repeat(MAX_NESTING) + &")".repeat(MAX_NESTING))).is_ok());
+    }
+
+    #[test]
+    fn nesting_without_brackets_is_an_error_not_a_stack_overflow() {
+        // Each of these overflowed the parser's stack and aborted the process: they nest as deep
+        // as brackets do but have none to count.
+        let mut s = Session::default();
+        let deep = [
+            "x => ".repeat(20_000) + "1",
+            "if (1) ".repeat(100_000) + "1",
+            "1 ? ".repeat(100_000) + "1" + &" : 1".repeat(100_000),
+            "2 ** ".repeat(100_000) + "1",
+            "1 || ".repeat(100_000) + "1",
+            "var x; ".to_string() + &"x = ".repeat(100_000) + "1",
+            "!".repeat(200_000) + "1",
+            "typeof ".repeat(100_000) + "1",
+            "while (0) ".repeat(100_000) + "1",
+            (0..100_000).map(|i| format!("L{i}: ")).collect::<String>() + "1",
+            // Long left-deep chains, and comma operators where a list could be mistaken for one.
+            "var s = ".to_string() + &"\"a\" + ".repeat(300_000) + "\"a\"",
+            "var o = {}; o.x = o; o".to_string() + &".x".repeat(200_000),
+            "var x = (".to_string() + &"1, ".repeat(100_000) + "1)",
+            "if (1) {} (".to_string() + &"1, ".repeat(100_000) + "1)",
+            "if (1) (".to_string() + &"1, ".repeat(100_000) + "1)",
+            "var a = [0]; a[".to_string() + &"1, ".repeat(100_000) + "0]",
+            "{ ".to_string() + &"1, ".repeat(100_000) + "1 }",
+        ];
+        for code in &deep {
+            let out = run(&mut s, &ScriptRequest { code, name: "deep", console: true });
+            assert!(out.error.is_some_and(|e| e.message.contains("nested too deeply")), "{}", &code[..20]);
+        }
+        // Ordinary code still runs, however long its lists and chains (on a Script Console-sized
+        // stack): object literals and arguments cost nothing, a long concatenation little.
+        let keys = |n: usize| (0..n).map(|i| format!("\"k{i}\": {i}")).collect::<Vec<_>>().join(", ");
+        let elses = (0..200).map(|i| format!("else if (n == {i}) r = {i};")).collect::<String>();
+        let fine = [
+            (format!("var f = {}1; typeof f", "x => ".repeat(40)), json!("function")),
+            (format!("var o = {{{}}}; o.k5999", keys(6000)), json!(5999)),
+            (format!("var json = '{{{}}}'; var o = eval('(' + json + ')'); o.k5999", keys(6000)), json!(5999)),
+            (format!("var s = {}; s.length", vec!["\"a\""; 6000].join(" + ")), json!(6000)),
+            (format!("Math.max({})", (0..20_000).map(|i| i.to_string()).collect::<Vec<_>>().join(", ")), json!(19_999)),
+            (format!("var a = [{}]; a.length", vec!["[1, 2]"; 20_000].join(", ")), json!(20_000)),
+            (format!("var n = 150, r = -1; if (n < 0) r = 0; {elses} r"), json!(150)),
+            (format!("{}1", "!".repeat(40)), json!(true)),
+        ];
+        let ran = std::thread::Builder::new().stack_size(8 << 20).spawn(move || {
+            let mut s = Session::default();
+            for (code, want) in &fine {
+                let out = run(&mut s, &ScriptRequest { code, name: "ok", console: true });
+                assert!(out.error.is_none(), "{:?}: {}", out.error, &code[..40.min(code.len())]);
+                assert_eq!(&out.result, want, "{}", &code[..40.min(code.len())]);
+            }
+        });
+        ran.unwrap().join().unwrap();
+    }
+
+    #[test]
+    fn code_compiled_at_run_time_is_checked_too() {
+        // `eval` and `new Function` handed the parser their code unchecked: deep nesting in a
+        // string aborted the process like deep nesting in the script.
+        let mut s = Session::default();
+        for code in [
+            "eval(Array(100001).join('(') + '1' + Array(100001).join(')'))",
+            "new Function(Array(100001).join('['))",
+            "eval(Array(20001).join('x => ') + '1')",
+            "new Function('a', 'return ' + Array(100001).join('1 ? ') + '1' + Array(100001).join(' : 1'))",
+            // Each parameter nests 80 deep, but they are parsed joined: 240 deep.
+            "Function(Array(81).join('[') + 'a', Array(81).join('[') + 'b', Array(81).join('[') + 'c' + Array(241).join(']'), 'return 1')",
+        ] {
+            let out = run(&mut s, &ScriptRequest { code, name: "eval", console: true });
+            assert!(out.error.is_some_and(|e| e.message.contains("nested too deeply")), "{code}");
+        }
+        let out = run(&mut s, &ScriptRequest { code: "eval('1 + 1') + new Function('a', 'return a * 2')(3)", name: "ok", console: true });
+        assert!(out.error.is_none(), "{:?}", out.error);
+        assert_eq!(out.result, serde_json::json!(8));
     }
 
     /// A canonical drive path and a lexical one compare once the `\\?\` prefix is gone; a UNC
