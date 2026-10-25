@@ -1747,6 +1747,9 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         p.rect_filled(handle, 2.0, t.accent);
         let resp = ui.interact(hr, egui::Id::unique(("wa", set)), Sense::drag());
         app.auto.add(&format!("timeline.workArea.{set}"), hr, set);
+        if resp.dragged() || resp.hovered() {
+            ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        }
         if resp.dragged()
             && let Some(pt) = resp.interact_pointer_pos()
         {

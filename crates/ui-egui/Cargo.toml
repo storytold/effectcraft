@@ -41,7 +41,7 @@ sys-locale = { workspace = true }
 # here documents the requirement (kittest's own dev-dependencies do not propagate to consumers).
 egui = { workspace = true, features = ["default_fonts", "monochrome_emoji_fonts"] }
 egui_kittest = { workspace = true, features = ["eframe", "wgpu"] }
-pollster = "0.4"
+pollster = "1"
 effectcraft-host = { workspace = true }
 exr = { workspace = true }
 

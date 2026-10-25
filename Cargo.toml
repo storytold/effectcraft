@@ -103,7 +103,7 @@ symphonia = { version = "0.5.5", default-features = false, features = ["aiff"] }
 # gpu (the same wgpu eframe / egui-wgpu use)
 wgpu = { version = "30.0.1", features = ["fragile-send-sync-non-atomic-wasm"] }
 bytemuck = "1"
-pollster = "0.4"
+pollster = "1"
 
 # ui
 # Shared frontend components; keep this dependency above the engine boundary.
