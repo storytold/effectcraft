@@ -18,6 +18,7 @@ and on the user's machine.
 ```sh
 cargo xtask web                 # release build → <target>/web/dist
 cargo xtask web --dev           # unoptimised build (faster to compile, slow to run)
+cargo xtask web --no-persistent-frame-cache # embedding policy: no OPFS frame/layer/matte cache
 cargo xtask web --serve 8765    # build, then serve dist on http://127.0.0.1:8765/
 ```
 
@@ -40,6 +41,11 @@ revalidate it rather than caching it for long (`packaging/web/README.md`).
 On other targets the web crate holds only its portable storage model (`store.rs`, unit-tested by
 `cargo test --workspace`); `cargo xtask wasm` (part of `cargo xtask ci`) checks the whole crate,
 with every L0–L4 crate and `effectcraft-ui-egui`, for `wasm32-unknown-unknown`.
+
+For hosts that prohibit persistent render buffers, `--no-persistent-frame-cache` bakes the
+policy into the shared browser/worker module. It blocks OPFS frame, layer and matte caches
+regardless of Preferences, reset or URL flags; ordinary builds retain their default behaviour.
+Project and media storage are independent: use `?storage=memory` when those must also stay in memory.
 
 URL flags: `?empty` (a blank project; the session is not restored or recorded), `?demo` (the demo
 project instead of the last session), `?home` (show the start screen), `?storage=indexeddb` /
