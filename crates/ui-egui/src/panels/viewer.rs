@@ -38,7 +38,7 @@ impl ViewerMap {
 }
 
 fn map_id() -> egui::Id {
-    egui::Id::new("viewer-map")
+    egui::Id::unique("viewer-map")
 }
 
 pub fn comp_to_screen(ctx: &egui::Context, p: [f32; 2]) -> Option<Pos2> {
@@ -53,7 +53,7 @@ pub fn screen_to_comp(ctx: &egui::Context, p: Pos2) -> Option<[f64; 2]> {
 
 /// The fit magnification from the last frame.
 pub fn last_fit(ctx: &egui::Context) -> f32 {
-    ctx.data(|d| d.get_temp::<f32>(egui::Id::new("viewer-fit"))).unwrap_or(0.5)
+    ctx.data(|d| d.get_temp::<f32>(egui::Id::unique("viewer-fit"))).unwrap_or(0.5)
 }
 
 /// What a drag in the viewer is doing.
@@ -207,7 +207,7 @@ enum Gesture {
 
 /// Pen tool path in progress: (layer, mask uid).
 fn pen_id() -> egui::Id {
-    egui::Id::new("viewer-pen")
+    egui::Id::unique("viewer-pen")
 }
 
 use super::viewer_overlays::{self as ov, VertexHit};
@@ -610,7 +610,7 @@ fn aux_views(
             (app.session.revision, cid.0, t.0, i, scale.to_bits(), format!("{cam:?}")).hash(&mut h);
             h.finish()
         };
-        let id = egui::Id::new(("viewer-aux", i));
+        let id = egui::Id::unique(("viewer-aux", i));
         let cached: Option<(u64, egui::TextureHandle)> = ctx.data(|d| d.get_temp(id));
         let tex = match cached {
             Some((k, tex)) if k == key => tex,
@@ -662,7 +662,7 @@ fn aux_views(
 fn pane_selector(app: &mut EffectcraftApp, ui: &mut egui::Ui, pane: usize, area: Rect, current: View3D) -> Option<View3D> {
     let t = app.tokens;
     let r = Rect::from_min_size(area.min + vec2(6.0, 6.0), vec2(124.0, 20.0));
-    let pid = egui::Id::new(("viewer-pane-view", pane));
+    let pid = egui::Id::unique(("viewer-pane-view", pane));
     let response = widgets::dropdown(ui, r, crate::i18n::tr(current.label()), &t, pid);
     if response.clicked() {
         let open = widgets::popup_is_open(ui, pid);
@@ -717,7 +717,7 @@ fn locked_pane(app: &mut EffectcraftApp, ui: &mut egui::Ui, full: Rect, bg: Colo
         (app.session.revision, lv.comp.0, t.0, scale.to_bits(), dc_key).hash(&mut h);
         h.finish()
     };
-    let id = egui::Id::new("viewer-locked");
+    let id = egui::Id::unique("viewer-locked");
     let cached: Option<(u64, egui::TextureHandle)> = ctx.data(|d| d.get_temp(id));
     let tex = match cached {
         Some((k, tex)) if k == key => tex,
@@ -744,7 +744,7 @@ fn locked_pane(app: &mut EffectcraftApp, ui: &mut egui::Ui, full: Rect, bg: Colo
     app.auto.add("viewer.locked", r, &label);
     // Close the locked viewer.
     let close = Rect::from_min_size(pos2(r.max.x - 26.0, r.min.y + 4.0), vec2(20.0, 20.0));
-    let resp = ui.interact(close, egui::Id::new("viewer-locked-close"), Sense::click());
+    let resp = ui.interact(close, egui::Id::unique("viewer-locked-close"), Sense::click());
     p.text(close.center(), Align2::CENTER_CENTER, "\u{00d7}", Tokens::ui(14.0), if resp.hovered() { Color32::WHITE } else { Color32::from_white_alpha(170) });
     app.auto.add("viewer.locked.close", close, "Close Locked Viewer");
     if resp.clicked() {
@@ -793,7 +793,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let name = app.session.project.item(oc).map(|i| i.name.clone()).unwrap_or_default();
         let g = p.layout_no_wrap(name.clone(), Tokens::ui(11.5), t.text);
         let r = Rect::from_min_size(pos2(x, nav.min.y + 3.0), vec2(g.size().x + 16.0, 18.0));
-        let resp = ui.interact(r, egui::Id::new(("nav", oc.0)), Sense::click());
+        let resp = ui.interact(r, egui::Id::unique(("nav", oc.0)), Sense::click());
         let active = oc == cid;
         p.rect_filled(
             r,
@@ -835,7 +835,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let fit = ((area.width() - 40.0) / cw).min((area.height() - 40.0) / ch).max(0.01);
     // Fit up to 100% follows the panel's size like Fit does, and stops at 100%.
     let fit = if app.ui.viewer.fit_up_to_100 { fit.min(1.0 / ctx.pixels_per_point()) } else { fit };
-    ctx.data_mut(|d| d.insert_temp(egui::Id::new("viewer-fit"), fit));
+    ctx.data_mut(|d| d.insert_temp(egui::Id::unique("viewer-fit"), fit));
     let zoom = app.ui.viewer.zoom.unwrap_or(fit);
     let center = area.center() + vec2(app.ui.viewer.pan[0], app.ui.viewer.pan[1]);
     // On the physical pixel grid, so at 100 % every comp pixel covers exactly one screen pixel
@@ -856,7 +856,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         // Queue the frame on screen before any prefetch.
         app.request_frame_urgent(cid, comp.frame_rate.frame_at(app.session.time()), scale);
     }
-    crate::tick_playback(app, &ctx, scale);
+    crate::note_viewer_scale(app, scale);
     let time = app.session.time();
     let frame = comp.frame_rate.frame_at(time);
     let key = app.frame_key(cid, frame, scale);
@@ -1274,8 +1274,8 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     super::viewer_drop::show(app, ui, &painter, &map, &ectx);
 
     // Interaction.
-    let resp = ui.interact(area, egui::Id::new("viewer-interact"), Sense::click_and_drag());
-    let menu_hits_id = egui::Id::new(("viewer-menu-hits", cid.0));
+    let resp = ui.interact(area, egui::Id::unique("viewer-interact"), Sense::click_and_drag());
+    let menu_hits_id = egui::Id::unique(("viewer-menu-hits", cid.0));
     if resp.secondary_clicked()
         && let Some(pos) = resp.interact_pointer_pos()
     {
@@ -1343,7 +1343,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let reach = vertex_grab_radius(pos, handle_hits.iter().map(|(_, _, h, _)| *h));
         vertex_hits.iter().rev().filter(|h| h.tangent.is_some() == tangents).find(|h| h.pos.distance(pos) < reach).copied()
     };
-    let gid = egui::Id::new("viewer-gesture");
+    let gid = egui::Id::unique("viewer-gesture");
     // An overlay on top of the viewer (e.g. the camera tracker points) takes the hover, but the pointer is still over the viewer: keep wheel zoom working.
     let hover_pos = resp.hover_pos().or_else(|| if resp.contains_pointer() { ui.input(|i| i.pointer.hover_pos()) } else { None });
     if let Some(hp) = hover_pos {
@@ -1371,7 +1371,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             Tool::ObjectMatte => {
                 // The tool draws its own crosshair (and the layer it would matte) while no box
                 // is being dragged.
-                if ui.data(|d| d.get_temp::<Gesture>(egui::Id::new("viewer-gesture"))).is_none() {
+                if ui.data(|d| d.get_temp::<Gesture>(egui::Id::unique("viewer-gesture"))).is_none() {
                     super::object_matte_tool::hover(app, &painter, &map, &ectx, hp);
                 }
                 egui::CursorIcon::None
@@ -1431,10 +1431,10 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
     // A pen click (press + release without a drag) ends its tangent gesture on release.
     if ui.input(|i| i.pointer.primary_released())
-        && matches!(ui.data(|d| d.get_temp::<Gesture>(egui::Id::new("viewer-gesture"))), Some(Gesture::Pen { .. }))
+        && matches!(ui.data(|d| d.get_temp::<Gesture>(egui::Id::unique("viewer-gesture"))), Some(Gesture::Pen { .. }))
         && !resp.drag_stopped()
     {
-        ui.data_mut(|d| d.remove::<Gesture>(egui::Id::new("viewer-gesture")));
+        ui.data_mut(|d| d.remove::<Gesture>(egui::Id::unique("viewer-gesture")));
     }
     // On-canvas text editing (Type tool, double-click a text layer) owns its clicks and drags.
     let text_owns = super::viewer_text::hook(app, ui, &painter, &map, &ectx, &resp, space_pan);
@@ -1654,7 +1654,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let gesture: Option<Gesture> = ui.data(|d| d.get_temp(gid));
     if let (Some(g), Some(pos)) = (gesture.clone(), resp.interact_pointer_pos()) {
         let cpt = map.to_comp(pos);
-        let merge = format!("viewer-drag-{}", ui.data(|d| d.get_temp::<u64>(egui::Id::new("viewer-drag-n")).unwrap_or(0)));
+        let merge = format!("viewer-drag-{}", ui.data(|d| d.get_temp::<u64>(egui::Id::unique("viewer-drag-n")).unwrap_or(0)));
         match g {
             Gesture::Pan { start_pan } => {
                 // No total drag on the release frame: keep the pan reached so far (it used to
@@ -1922,8 +1922,8 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         }
         ui.data_mut(|d| {
             d.remove::<Gesture>(gid);
-            let n: u64 = d.get_temp(egui::Id::new("viewer-drag-n")).unwrap_or(0);
-            d.insert_temp(egui::Id::new("viewer-drag-n"), n + 1);
+            let n: u64 = d.get_temp(egui::Id::unique("viewer-drag-n")).unwrap_or(0);
+            d.insert_temp(egui::Id::unique("viewer-drag-n"), n + 1);
         });
     }
     if resp.clicked()
@@ -2082,7 +2082,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let r = Rect::from_min_size(area.min + vec2(10.0, 10.0), vec2(330.0, 22.0));
         painter.rect_filled(r, 11.0, Color32::from_black_alpha(190));
         painter.text(r.center(), Align2::CENTER_CENTER, crate::i18n::tr("Video preview is off (Preview panel): audio only"), Tokens::ui(11.5), t.timecode);
-        ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("viewer-video-off-chip"), r));
+        ui.ctx().data_mut(|d| d.insert_temp(egui::Id::unique("viewer-video-off-chip"), r));
     }
 
     vt::draw_snap(&ctx, &painter, &map, &ectx);
@@ -2261,7 +2261,7 @@ fn pen_cursor(ctx: &egui::Context, at: Pos2, icon: crate::icons::Icon) {
         Icon::PenConvert => vec2(8.0, 3.5),
         _ => vec2(8.0, 1.8),
     };
-    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("viewer-pen-cursor")));
+    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("viewer-pen-cursor")));
     let rect = Rect::from_min_size(at - tip, vec2(16.0, 16.0));
     for d in [vec2(-1.0, 0.0), vec2(1.0, 0.0), vec2(0.0, -1.0), vec2(0.0, 1.0)] {
         crate::icons::paint(&painter, rect.translate(d), icon, Color32::BLACK);
@@ -2281,7 +2281,7 @@ fn pen_press(
     mods: egui::Modifiers,
 ) {
     use effectcraft_engine::project::LayerSource;
-    let gid = egui::Id::new("viewer-gesture");
+    let gid = egui::Id::unique("viewer-gesture");
     let current: Option<(LayerId, u64)> = ui.data(|d| d.get_temp(pen_id()));
     let c0 = map.to_comp(pos);
     let corr = vt::snap(app, ui.ctx(), ectx, map, &[], &[c0], mods);
@@ -2607,12 +2607,12 @@ fn empty_state(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let c = rect.center();
     p.text(c - vec2(0.0, 40.0), Align2::CENTER_CENTER, crate::i18n::tr("Composition"), Tokens::semibold(16.0), t.text);
     let b1 = Rect::from_center_size(c + vec2(0.0, 0.0), vec2(220.0, 30.0));
-    if widgets::text_button(ui, b1, "New Composition", true, &t, egui::Id::new("empty-newcomp")).clicked() {
+    if widgets::text_button(ui, b1, "New Composition", true, &t, egui::Id::unique("empty-newcomp")).clicked() {
         crate::panels::dialogs::open_new_comp(app);
     }
     app.auto.add("viewer.empty.newComp", b1, "New Composition");
     let b2 = Rect::from_center_size(c + vec2(0.0, 40.0), vec2(220.0, 30.0));
-    if widgets::text_button(ui, b2, "New Composition From Footage", false, &t, egui::Id::new("empty-fromfootage")).clicked() {
+    if widgets::text_button(ui, b2, "New Composition From Footage", false, &t, egui::Id::unique("empty-fromfootage")).clicked() {
         let _ = crate::menus::invoke(app, &ui.ctx().clone(), "file.import", json!({}));
     }
     app.auto.add("viewer.empty.import", b2, "New Composition From Footage");

@@ -497,7 +497,7 @@ fn collapsed_items<'a>(
     let op = ctx.opacity(layer) as f32 * r.opacity_mul();
     let Some((sub, nctx)) = r.collapse_into(ctx, layer, item, op) else { return vec![] };
     let t = nctx.time;
-    let any_solo = nctx.comp.layers.iter().any(|l| l.switches.solo && l.source.is_av());
+    let any_solo = nctx.comp.any_solo();
     let nested: Vec<&'a Layer> = nctx
         .comp
         .layers

@@ -80,10 +80,10 @@ impl MaskMethod {
         }
     }
     pub fn from_name(s: &str) -> Option<MaskMethod> {
-        let n: String = s.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_ascii_lowercase();
+        let n: String = s.chars().filter(char::is_ascii_alphanumeric).collect::<String>().to_ascii_lowercase();
         MaskMethod::ALL
             .into_iter()
-            .find(|m| m.id().to_ascii_lowercase() == n || m.label().chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_ascii_lowercase() == n)
+            .find(|m| m.id().to_ascii_lowercase() == n || m.label().chars().filter(char::is_ascii_alphanumeric).collect::<String>().to_ascii_lowercase() == n)
     }
     pub fn model(self) -> Model {
         match self {

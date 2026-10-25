@@ -227,6 +227,9 @@ fn delete(s: &mut Session, p: &Value) -> Result<Value> {
         st.selected_keys.clear();
         Ok(())
     })?;
+    // A removed layer may have been the edited one: end that session before another command
+    // can reuse it. Undo restores a layer as a new editor, never by reviving the old IME session.
+    s.sanitize_state();
     Ok(json!(ids.len()))
 }
 
@@ -847,7 +850,7 @@ fn original_path(s: &Session) -> Option<String> {
 /// importer takes. Anything else (a folder or app bundle, a script, a shortcut) is refused.
 pub(crate) fn openable_original(path: &str) -> std::result::Result<(), String> {
     let media = |p: &std::path::Path| {
-        let ext = p.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
+        let ext = p.extension().and_then(std::ffi::OsStr::to_str).map(str::to_ascii_lowercase).unwrap_or_default();
         crate::media_browser::kind_of(&p.to_string_lossy()).is_some_and(|k| k != "project") || matches!(ext.as_str(), "pdf" | "ai" | "eps")
     };
     let name = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.to_string());

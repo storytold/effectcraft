@@ -42,7 +42,7 @@ type Listing = (f64, Arc<Result<Vec<Entry>, String>>);
 
 fn listing(h: &Harness<'_, EffectcraftApp>, only: bool) -> Listing {
     let dir = h.state().session.state.media_browser.folder.clone().unwrap_or_else(|| "/Shoot".into());
-    h.ctx.data(|d| d.get_temp(egui::Id::new(("mb-list", dir, only)))).unwrap()
+    h.ctx.data(|d| d.get_temp(egui::Id::unique(("mb-list", dir, only)))).unwrap()
 }
 
 fn names(list: &Arc<Result<Vec<Entry>, String>>) -> Vec<&str> {

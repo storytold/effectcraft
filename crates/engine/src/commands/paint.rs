@@ -107,7 +107,7 @@ impl Default for PaintOptions {
 }
 
 fn norm(s: &str) -> String {
-    s.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_ascii_lowercase()
+    s.chars().filter(char::is_ascii_alphanumeric).collect::<String>().to_ascii_lowercase()
 }
 
 /// Index of `v` in `names` (by number or case/space-insensitive name).

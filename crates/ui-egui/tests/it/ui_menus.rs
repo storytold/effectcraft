@@ -16,12 +16,12 @@ fn harness() -> Harness<'static, EffectcraftApp> {
     h
 }
 
-fn rect(h: &Harness<'_, EffectcraftApp>, id: &str) -> Rect {
+pub(crate) fn rect(h: &Harness<'_, EffectcraftApp>, id: &str) -> Rect {
     let e = h.state().auto.find(id).unwrap_or_else(|| panic!("no {id}"));
     Rect::from_min_size(pos2(e.rect[0], e.rect[1]), vec2(e.rect[2], e.rect[3]))
 }
 
-fn click_at(h: &mut Harness<'_, EffectcraftApp>, p: Pos2) {
+pub(crate) fn click_at(h: &mut Harness<'_, EffectcraftApp>, p: Pos2) {
     h.input_mut().events.push(Event::PointerMoved(p));
     h.input_mut().events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
     h.step();
@@ -30,14 +30,14 @@ fn click_at(h: &mut Harness<'_, EffectcraftApp>, p: Pos2) {
 }
 
 /// Press the primary button at `p` and keep it down.
-fn press(h: &mut Harness<'_, EffectcraftApp>, p: Pos2) {
+pub(crate) fn press(h: &mut Harness<'_, EffectcraftApp>, p: Pos2) {
     h.input_mut().events.push(Event::PointerMoved(p));
     h.input_mut().events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
     h.run_steps(2);
 }
 
 /// Move the pointer to `p` (press or no press, whichever is held).
-fn move_to(h: &mut Harness<'_, EffectcraftApp>, p: Pos2) {
+pub(crate) fn move_to(h: &mut Harness<'_, EffectcraftApp>, p: Pos2) {
     h.input_mut().events.push(Event::PointerMoved(p));
     h.run_steps(2);
 }

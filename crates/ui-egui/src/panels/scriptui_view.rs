@@ -51,7 +51,7 @@ fn draw_children(app: &mut EffectcraftApp, ui: &mut egui::Ui, origin: egui::Pos2
             let tw = (tab.text.chars().count() as f32 * 7.0 + 20.0).max(48.0);
             let hr = Rect::from_min_size(pos2(x, r.min.y), vec2(tw, 22.0));
             let active = i == w.active_tab;
-            let resp = ui.interact(hr, egui::Id::new(("sui-tab", win, tab.id)), Sense::click());
+            let resp = ui.interact(hr, egui::Id::unique(("sui-tab", win, tab.id)), Sense::click());
             ui.painter().rect_filled(
                 hr,
                 3.0,
@@ -86,7 +86,7 @@ fn draw_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, origin: egui::Pos2, 
     let services = app.session.services.clone();
     let rect = rect_of(origin, w.bounds);
     register(app, win, w, rect);
-    let id = egui::Id::new(("sui", win, w.id));
+    let id = egui::Id::unique(("sui", win, w.id));
     let tip = |r: egui::Response| if w.help_tip.is_empty() { r } else { r.on_hover_text(&w.help_tip) };
     // onDraw: the script paints the control. Without drawOSControl() its paint replaces the
     // default look (buttons and toggles still respond to clicks); with it, it goes on top.
@@ -316,7 +316,7 @@ fn paint_draw(ui: &egui::Ui, rect: Rect, ops: &[DrawOp], t: &Tokens, services: &
 /// A ScriptUIImage as a texture (decoded once and kept; `None` when it can't be read or
 /// decoded).
 fn image_texture(ctx: &egui::Context, img: &ImageRef, services: &dyn Services) -> Option<egui::TextureHandle> {
-    let id = egui::Id::new(("scriptui-image", img));
+    let id = egui::Id::unique(("scriptui-image", img));
     if let Some(cached) = ctx.data(|d| d.get_temp::<Option<egui::TextureHandle>>(id)) {
         return cached;
     }
@@ -382,7 +382,7 @@ fn wants_mouse(w: &Widget, depth: usize) -> bool {
 /// same control; it replaces the plain click the control reported, so a checkbox toggles once).
 /// Only events a listener wants are sent; none while `active` is false (a modal dialog is up).
 fn mouse_events(ui: &egui::Ui, origin: egui::Pos2, area: Rect, win: u32, root: &Widget, active: bool, acts: &mut Vec<Act>) {
-    let id = egui::Id::new(("sui-mouse", win));
+    let id = egui::Id::unique(("sui-mouse", win));
     if !wants_mouse(root, 0) {
         ui.data_mut(|d| d.remove::<MouseTrack>(id));
         return;
@@ -490,7 +490,7 @@ fn perform(app: &mut EffectcraftApp, ctx: &egui::Context, acts: Vec<Act>) {
             Ok(r) => {
                 if let Some(e) = r.get("error").filter(|e| !e.is_null()) {
                     let msg = e["message"].as_str().unwrap_or("script error").to_string();
-                    app.toast = Some((msg, ctx.input(|i| i.time)));
+                    app.toast = Some((msg, app.now()));
                 } else if let Some(o) = r["output"].as_str().filter(|o| !o.is_empty()) {
                     app.ui.status = o.lines().last().unwrap_or_default().to_string();
                 }
@@ -512,7 +512,7 @@ pub fn show_windows(app: &mut EffectcraftApp, ctx: &egui::Context) {
     let blocked = windows.iter().any(|w| w.modal);
     if blocked {
         // A modal dialog blocks the app behind it, as in After Effects.
-        let r = egui::Area::new(egui::Id::new("scriptui-modal-block")).order(egui::Order::Middle).fixed_pos(screen.min).show(ctx, |ui| {
+        let r = egui::Area::new(egui::Id::unique("scriptui-modal-block")).order(egui::Order::Middle).fixed_pos(screen.min).show(ctx, |ui| {
             ui.allocate_exact_size(screen.size(), Sense::click_and_drag());
             ui.painter().rect_filled(screen, 0.0, Color32::from_black_alpha(90));
         });
@@ -523,7 +523,7 @@ pub fn show_windows(app: &mut EffectcraftApp, ctx: &egui::Context) {
         let mut open = true;
         let order = if w.modal { egui::Order::Foreground } else { egui::Order::Middle };
         let resp = egui::Window::new(if w.title.is_empty() { &w.script } else { &w.title })
-            .id(egui::Id::new(("scriptui-window", w.id)))
+            .id(egui::Id::unique(("scriptui-window", w.id)))
             .order(order)
             .collapsible(false)
             .resizable(false)

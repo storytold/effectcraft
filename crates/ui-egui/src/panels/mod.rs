@@ -218,7 +218,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: PanelKind, rect: Rec
 
 /// The ≡ panel menu (opened from a tab).
 pub fn panel_menu_popup(app: &mut EffectcraftApp, ui: &mut egui::Ui) {
-    let id = egui::Id::new("panel-menu");
+    let id = egui::Id::unique("panel-menu");
     let Some((panel, pos)) = ui.ctx().data(|d| d.get_temp::<(PanelKind, egui::Pos2)>(id)) else { return };
     // The menu opens in the window that shows the panel (a panel can have its own window).
     if app.panel_viewport(ui.ctx(), panel) != ui.ctx().viewport_id() {

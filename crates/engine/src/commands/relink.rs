@@ -103,7 +103,7 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
             }
             let supported = matches!(old.kind, FootageKind::Still | FootageKind::Sequence | FootageKind::Video | FootageKind::Audio)
                 && old.layer.is_none() && old.page == 0;
-            let name = Path::new(&old.path).file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let name = Path::new(&old.path).file_name().and_then(std::ffi::OsStr::to_str).unwrap_or("");
             let paths = index.get(name).cloned().unwrap_or_default();
             let mut candidates = vec![];
             let mut accepted = vec![];

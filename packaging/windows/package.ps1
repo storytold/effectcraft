@@ -90,6 +90,9 @@ Copy-Item (Join-Path $Bin 'effectcraft.exe'), (Join-Path $Bin 'effectcraft-cli.e
 
 & (Join-Path $PSScriptRoot 'sign.ps1') (Join-Path $Stage 'effectcraft.exe') (Join-Path $Stage 'effectcraft-cli.exe')
 
+# Required embedded-font notices ship independently of optional font inputs.
+Copy-Item -LiteralPath (Join-Path $Root 'NOTICE') -Destination $Stage
+
 # ---- MSI ---------------------------------------------------------------------------------------
 $Msi = Join-Path $Dist "effectcraft-$Version-windows-$Arch.msi"
 Invoke-Native 'wix build' {
@@ -106,7 +109,7 @@ $Portable = Join-Path $TargetDir "windows-package\effectcraft-$Version-windows-$
 Remove-Item -Recurse -Force $Portable -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $Portable | Out-Null
 Copy-Item (Join-Path $Stage '*.exe') $Portable
-foreach ($f in 'README.md', 'LICENSE', 'LICENSE-MIT', 'LICENSE-APACHE') {
+foreach ($f in 'README.md', 'LICENSE', 'LICENSE-MIT', 'LICENSE-APACHE', 'NOTICE') {
   $p = Join-Path $Root $f
   if (Test-Path $p) { Copy-Item $p $Portable }
 }

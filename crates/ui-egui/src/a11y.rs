@@ -48,22 +48,17 @@ pub(crate) fn name(r: &Response, label: &str) {
     node(r, |n| n.set_label(label));
 }
 
+/// Give `r`'s node a current value and keep the name it already has.
+pub(crate) fn value(r: &Response, value: &str) {
+    node(r, |n| n.set_value(value));
+}
+
 /// Name `r`'s node and give it a current value (a spin button's or a text field's text).
 pub(crate) fn name_value(r: &Response, label: &str, value: &str) {
     node(r, |n| {
         n.set_label(label);
         n.set_value(value);
     });
-}
-
-/// Set `r`'s checked state (a check box, a switch, a toggle button).
-pub(crate) fn checked(r: &Response, on: bool) {
-    node(r, |n| n.set_toggled(if on { Toggled::True } else { Toggled::False }));
-}
-
-/// Set `r`'s open state (a twirl, a disclosure).
-pub(crate) fn expanded(r: &Response, open: bool) {
-    node(r, |n| n.set_expanded(open));
 }
 
 /// A push button; `enabled` false marks it disabled for assistive technology (it stays visible).
@@ -232,13 +227,13 @@ pub(crate) fn toggle_button(r: &Response, label: &str, on: bool) {
 /// names the list.
 pub(crate) fn focus_next_pass(ctx: &Context, key: &str, id: Id) {
     let pass = ctx.cumulative_pass_nr();
-    ctx.data_mut(|d| d.insert_temp(Id::new(("a11y-pending-focus", key)), (id, pass)));
+    ctx.data_mut(|d| d.insert_temp(Id::unique(("a11y-pending-focus", key)), (id, pass)));
 }
 
 /// True once, for the widget `focus_next_pass` named for list `key`: the caller then requests the
 /// focus. A request nobody answers within a few passes is dropped.
 pub(crate) fn take_pending_focus(ctx: &Context, key: &str, id: Id) -> bool {
-    let slot = Id::new(("a11y-pending-focus", key));
+    let slot = Id::unique(("a11y-pending-focus", key));
     let now = ctx.cumulative_pass_nr();
     let Some((want, at)) = ctx.data(|d| d.get_temp::<(Id, u64)>(slot)) else { return false };
     if now > at.saturating_add(4) {

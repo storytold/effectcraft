@@ -126,7 +126,7 @@ frames and can be assigned through `shortcuts.set`.
 
 | Method | Params | Result |
 |---|---|---|
-| `ui.screenshot` | `{path?, panel?, id?}` | `{path, width, height}`: a PNG of the window, or cropped to one panel or element. |
+| `ui.screenshot` | `{path?, panel?, id?}` | `{path, width, height}`: a PNG of the window, or cropped to one panel or element. The panel or element rectangle is resolved when the capture is issued (after the UI settles), so it follows a panel that moved; a panel or id that is not on screen is retried and then reported, never replaced by a whole-window shot. |
 
 Element ids are stable, for example `tools.Selection`, `panel.Timeline`, `panel.tab.EffectControls`,
 `panel.tab.Timeline.<comp>` (one Timeline tab per open comp; `panel.tab.Timeline` is the shown

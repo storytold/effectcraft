@@ -284,7 +284,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let w = 18.0 + label.chars().count() as f32 * 6.6;
         let r = Rect::from_min_size(pos2(x - w, bar.min.y + 5.0), vec2(w, 20.0));
         x -= w + 6.0;
-        let resp = widgets::text_button(ui, r, label, on, &t, egui::Id::new(("flow-opt", key)));
+        let resp = widgets::text_button(ui, r, label, on, &t, egui::Id::unique(("flow-opt", key)));
         if key != "direction" {
             // Effects, Layers and Solids stay pressed while they are on.
             a11y::toggle_button(&resp, label, on);
@@ -303,7 +303,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let origin = body.min + vec2(24.0 + o.pan[0], 24.0 + o.pan[1]);
     // Panned with the mouse (or the wheel); the keyboard moves between the nodes and the view
     // follows, so the background is not a Tab stop.
-    let bg = ui.interact(body, egui::Id::new("flow-bg"), Sense::CLICK | Sense::DRAG);
+    let bg = ui.interact(body, egui::Id::unique("flow-bg"), Sense::CLICK | Sense::DRAG);
     a11y::role_name(&bg, egui::accesskit::Role::Group, &tr_args("Flowchart: {}", &[&root_name]));
     if bg.dragged() {
         let d = bg.drag_delta();
@@ -337,7 +337,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         gp.add(egui::Shape::convex_polygon(vec![e, e + l, e + r], col, Stroke::NONE));
     }
     let cmd_down = ui.input(|i| i.modifiers.command || i.modifiers.ctrl);
-    let node_id = |id: &str| egui::Id::new(("flow-node", id));
+    let node_id = |id: &str| egui::Id::unique(("flow-node", id));
     // What a node does: opened (as a double click), revealed (as a Cmd/Ctrl click).
     let open_cmd = |n: &FlowNode| -> Option<(String, Value)> {
         match (n.kind, n.item, n.comp) {

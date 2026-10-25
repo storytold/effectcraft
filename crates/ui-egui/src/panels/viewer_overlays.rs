@@ -394,7 +394,7 @@ pub(crate) fn motion_path(
 // ---------------------------------------------------------------- free transform
 
 fn ft_id() -> egui::Id {
-    egui::Id::new("viewer-free-transform")
+    egui::Id::unique("viewer-free-transform")
 }
 
 /// Enter Free Transform on a path (double-click a path with the Selection tool).

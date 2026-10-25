@@ -54,7 +54,7 @@ fn focused_dock_resize_owns_arrows_and_keeps_pointer_dragging() {
     h.run_steps(3);
     let before_project = h.state().session.project.clone();
     let before_times = h.state().session.state.times.clone();
-    let id = Id::new(("dock-gutter", String::new()));
+    let id = Id::unique(("dock-gutter", String::new()));
     h.ctx.memory_mut(|memory| memory.request_focus(id));
     h.run_steps(2);
     assert_eq!(h.ctx.memory(|memory| memory.focused()), Some(id));

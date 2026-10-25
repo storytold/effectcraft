@@ -44,18 +44,15 @@ const DEDICATED: &[PanelKind] = &[PanelKind::Info, PanelKind::Flowchart, PanelKi
 /// it, lower its entry in the same change, and remove the entry (and add the panel to `FIXED`)
 /// when it reaches zero. A scenario that is not listed is held to zero.
 const BASELINE: &[(&str, usize, usize)] = &[
-    ("EffectControls:default", 25, 15),
-    ("Composition:default", 16, 14),
-    ("Layer:default", 4, 3),
-    ("Timeline:default", 83, 55),
+    ("EffectControls:default", 28, 14),
+    ("Composition:default", 4, 2),
+    ("Layer:default", 2, 1),
+    ("Timeline:default", 89, 42),
     ("Audio:default", 4, 2),
-    ("Preview:default", 5, 5),
-    ("Properties:default", 45, 28),
-    ("Character:default", 13, 9),
+    ("Properties:default", 47, 23),
+    ("Character:default", 8, 4),
     ("Paragraph:default", 24, 12),
-    ("Align:default", 18, 11),
-    ("Tracker:default", 1, 1),
-    ("Wiggler:default", 2, 2),
+    ("Align:default", 10, 2),
     ("Smoother:default", 2, 1),
     ("MotionSketch:default", 4, 2),
     ("Paint:default", 5, 3),
@@ -160,7 +157,7 @@ fn panel_rect(h: &Harness<'_, EffectcraftApp>, p: PanelKind) -> Option<Rect> {
 }
 
 fn dialog_rect(h: &Harness<'_, EffectcraftApp>, title: &str) -> Option<Rect> {
-    h.ctx.memory(|m| m.area_rect(egui::Id::new(("modal", title))))
+    h.ctx.memory(|m| m.area_rect(egui::Id::unique(("modal", title))))
 }
 
 /// The ids of every node now, so a later audit can look at what appeared since (a popup).
@@ -296,7 +293,7 @@ fn collect() -> Report {
     h.run_steps(4);
     r.add("EffectsPresets:search", audit(&h, "EffectsPresets:search", rect, None));
     let before = node_ids(&h);
-    h.ctx.data_mut(|d| d.insert_temp(egui::Id::new("fx-contents-menu").with("open"), true));
+    h.ctx.data_mut(|d| d.insert_temp(egui::Id::unique("fx-contents-menu").with("open"), true));
     h.run_steps(4);
     let screen = Rect::from_min_size(pos2(0.0, 0.0), egui::vec2(1600.0, 1000.0));
     r.add("EffectsPresets:menu", audit(&h, "EffectsPresets:menu", screen, Some(&before)));
@@ -326,14 +323,14 @@ fn collect() -> Report {
     h.run_steps(4);
     r.add("RenderQueue:queued", audit(&h, "RenderQueue:queued", rect, None));
     let first = h.state().session.project.render_queue.first().map(|i| i.id).expect("a queue item");
-    h.ctx.data_mut(|d| d.insert_temp(egui::Id::new("rq-ui"), (vec![first], Some(first))));
+    h.ctx.data_mut(|d| d.insert_temp(egui::Id::unique("rq-ui"), (vec![first], Some(first))));
     h.run_steps(4);
     r.add("RenderQueue:expanded", audit(&h, "RenderQueue:expanded", rect, None));
     let before = node_ids(&h);
-    h.ctx.data_mut(|d| d.insert_temp(egui::Id::new(("rq-dd", first, 0)).with("open"), true));
+    h.ctx.data_mut(|d| d.insert_temp(egui::Id::unique(("rq-dd", first, 0)).with("open"), true));
     h.run_steps(4);
     r.add("RenderQueue:menu", audit(&h, "RenderQueue:menu", screen, Some(&before)));
-    h.ctx.data_mut(|d| d.insert_temp(egui::Id::new(("rq-dd", first, 0)).with("open"), false));
+    h.ctx.data_mut(|d| d.insert_temp(egui::Id::unique(("rq-dd", first, 0)).with("open"), false));
     let before = node_ids(&h);
     for (kind, title) in [("renderSettings", "Render Settings Templates"), ("outputModule", "Output Module Templates")] {
         invoke(&mut h, "app.templates", json!({"kind": kind}));

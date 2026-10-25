@@ -67,7 +67,7 @@ pub fn utc_stamp(unix: u64) -> String {
 
 /// A queue item's row: its click area, keyboard focus and accessibility node.
 fn row_id(item: u64) -> egui::Id {
-    egui::Id::new(("rq-row", item))
+    egui::Id::unique(("rq-row", item))
 }
 
 fn status_color(t: &Tokens, s: &RenderStatus) -> Color32 {
@@ -450,7 +450,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         }
     }
     let mut forms: Vec<(RenderQueueItem, String)> = Vec::new();
-    let state_id = egui::Id::new("rq-ui");
+    let state_id = egui::Id::unique("rq-ui");
     let (mut open, mut selected): (Vec<u64>, Option<u64>) = ui.data(|d| d.get_temp(state_id).unwrap_or_default());
 
     // ---------------------------------------------------------- Current Render strip
@@ -474,7 +474,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let render_b = Rect::from_min_size(pos2(top.max.x - 12.0 - bw, top.min.y + 34.0), vec2(bw, 26.0));
     let stop_b = Rect::from_min_size(pos2(render_b.min.x - 8.0 - bw, render_b.min.y), vec2(bw, 26.0));
     let can_render = !rendering && queue.iter().any(RenderQueueItem::is_queued) && !available.is_empty();
-    let render_resp = widgets::text_button(ui, render_b, "Render", can_render, &t, egui::Id::new("rq-render"));
+    let render_resp = widgets::text_button(ui, render_b, "Render", can_render, &t, egui::Id::unique("rq-render"));
     a11y::button(&render_resp, "Render", can_render);
     if render_resp.clicked() && can_render {
         actions.push(("renderQueue.render", json!({"wait": false})));
@@ -483,7 +483,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     // Notify (sound + notification when the queue finishes).
     let notify = app.session.project.render_prefs.notify;
     let nb = Rect::from_min_size(pos2(render_b.min.x - 8.0 - 2.0 * bw - 8.0, render_b.min.y + 4.0), vec2(18.0, 18.0));
-    let notify_resp = widgets::checkbox(ui, nb, notify, &t, egui::Id::new("rq-notify"));
+    let notify_resp = widgets::checkbox(ui, nb, notify, &t, egui::Id::unique("rq-notify"));
     a11y::check_box(&notify_resp, tr("Notify"), notify, true);
     if notify_resp.clicked() {
         actions.push(("renderQueue.setNotify", json!({"notify": !notify})));
@@ -491,7 +491,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     p.text(pos2(nb.max.x + 5.0, nb.center().y), Align2::LEFT_CENTER, tr("Notify"), Tokens::ui(11.5), t.text_dim);
     app.auto.add("renderQueue.notify", nb, if notify { "Notify: on" } else { "Notify: off" });
     if rendering {
-        if widgets::text_button(ui, stop_b, "Stop", false, &t, egui::Id::new("rq-stop")).clicked() {
+        if widgets::text_button(ui, stop_b, "Stop", false, &t, egui::Id::unique("rq-stop")).clicked() {
             actions.push(("renderQueue.stop", json!({})));
         }
         app.auto.add("renderQueue.stop", stop_b, "Stop");
@@ -520,7 +520,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     };
     p.text(pos2(bar.min.x + 8.0, bar.center().y), Align2::LEFT_CENTER, &bar_text, Tokens::ui(11.5), t.text);
     app.auto.add("renderQueue.progress", bar, &format!("{:.0}%", frac * 100.0));
-    a11y::progress(&ui.interact(bar, egui::Id::new("rq-progress"), Sense::hover()), &bar_text, frac);
+    a11y::progress(&ui.interact(bar, egui::Id::unique("rq-progress"), Sense::hover()), &bar_text, frac);
 
     // ---------------------------------------------------------- column header
     let head = Rect::from_min_size(pos2(rect.min.x, top.max.y), vec2(rect.width(), HEAD_H));
@@ -549,7 +549,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     // ---------------------------------------------------------- items
     let list = Rect::from_min_max(pos2(rect.min.x, head.max.y), pos2(rect.max.x, rect.max.y - FOOT_H));
     let lp = p.with_clip_rect(list);
-    let scroll = widgets::PanelScroll::begin(ui, egui::Id::new("rq-scroll"), list);
+    let scroll = widgets::PanelScroll::begin(ui, egui::Id::unique("rq-scroll"), list);
     // Items scroll under the header and footer: clip their widgets (and hit tests) to the list.
     let panel_clip = ui.clip_rect();
     ui.set_clip_rect(list.intersect(panel_clip));
@@ -560,7 +560,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let ctx = ui.ctx().clone();
     // Where each item's row starts in the scrolled content, for the keys.
     let mut tops: Vec<(u64, f32)> = Vec::new();
-    let editing_id = egui::Id::new("rq-edit-output");
+    let editing_id = egui::Id::unique("rq-edit-output");
     let mut editing: Option<(u64, String)> = ui.data(|d| d.get_temp(editing_id));
     for (k, it) in queue.iter().enumerate() {
         let n = k + 1;
@@ -615,7 +615,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         app.auto.add(&aid("row"), row, &format!("#{n}"));
         let is_open = open.contains(&it.id);
         let tw = Rect::from_center_size(pos2(cx_twirl + 8.0, row.center().y), vec2(14.0, 14.0));
-        let tw_resp = widgets::twirl(ui, tw, is_open, egui::Id::new(("rq-twirl", it.id)), &t);
+        let tw_resp = widgets::twirl(ui, tw, is_open, egui::Id::unique(("rq-twirl", it.id)), &t);
         a11y::disclosure(&tw_resp, &tr_args(if is_open { "Hide details of {}" } else { "Show details of {}" }, &[&name]), is_open);
         if tw_resp.clicked() {
             if is_open {
@@ -626,7 +626,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         }
         app.auto.add(&aid("twirl"), tw, "Twirl");
         let cb = Rect::from_center_size(pos2(cx_render + 20.0, row.center().y), vec2(18.0, 18.0));
-        let cb_resp = widgets::checkbox(ui, cb, it.render, &t, egui::Id::new(("rq-cb", it.id)));
+        let cb_resp = widgets::checkbox(ui, cb, it.render, &t, egui::Id::unique(("rq-cb", it.id)));
         a11y::check_box(&cb_resp, &format!("{}: {name}", tr("Render")), it.render, !rendering);
         if cb_resp.clicked() && !rendering {
             actions.push(("renderQueue.setRender", json!({"item": it.id, "render": !it.render})));
@@ -644,7 +644,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let st_rect = Rect::from_min_size(pos2(cx_status, row.min.y), vec2(w_status, ROW_H));
         lp.text(pos2(cx_status + 2.0, row.center().y), Align2::LEFT_CENTER, &status, Tokens::ui(12.0), status_color(&t, &it.status));
         if let RenderStatus::Failed(e) = &it.status {
-            ui.interact(st_rect, egui::Id::new(("rq-st", it.id)), Sense::hover()).on_hover_text(e);
+            ui.interact(st_rect, egui::Id::unique(("rq-st", it.id)), Sense::hover()).on_hover_text(e);
         }
         app.auto.add(&aid("status"), st_rect, &status);
         a11y::tree_item(&row_resp, &format!("{n}. {name}, {status}"), is_sel, 1, Some(is_open));
@@ -677,7 +677,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             };
             lp.text(pos2(cx_num - 6.0, r.center().y), Align2::LEFT_CENTER, label, Tokens::ui(11.5), t.text_dim);
             let dd = Rect::from_min_size(pos2(ix + 70.0, r.min.y + 3.0), vec2(220.0, ROW_H - 6.0));
-            let did = egui::Id::new(("rq-dd", it.id, sub));
+            let did = egui::Id::unique(("rq-dd", it.id, sub));
             let shown: String = if summary.chars().count() > 31 { summary.chars().take(30).chain(std::iter::once('…')).collect() } else { summary.clone() };
             let dd_resp = widgets::dropdown(ui, dd, &shown, &t, did);
             a11y::combo_box(&dd_resp, label.trim_end_matches(':'), &summary, !rendering);
@@ -715,7 +715,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 // Log: Errors Only / Plus Settings / Plus Per Frame Info.
                 let ld = Rect::from_min_size(pos2(r.max.x - 190.0, r.min.y + 3.0), vec2(150.0, ROW_H - 6.0));
                 lp.text(pos2(ld.min.x - 6.0, r.center().y), Align2::RIGHT_CENTER, tr("Log:"), Tokens::ui(11.5), t.text_dim);
-                let lid = egui::Id::new(("rq-log", it.id));
+                let lid = egui::Id::unique(("rq-log", it.id));
                 let log_resp = widgets::dropdown(ui, ld, it.log.label(), &t, lid);
                 a11y::combo_box(&log_resp, tr("Log:").trim_end_matches(':'), it.log.label(), !rendering);
                 if log_resp.clicked() && !rendering {
@@ -735,7 +735,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             let ox = dd.max.x + 14.0;
             lp.text(pos2(ox, r.center().y), Align2::LEFT_CENTER, tr("Output To:"), Tokens::ui(11.5), t.text_dim);
             let odd = Rect::from_min_size(pos2(ox + 62.0, r.min.y + 3.0), vec2(22.0, ROW_H - 6.0));
-            let oid = egui::Id::new(("rq-out", it.id));
+            let oid = egui::Id::unique(("rq-out", it.id));
             let out_resp = widgets::dropdown(ui, odd, "", &t, oid);
             a11y::combo_box(
                 &out_resp,
@@ -782,7 +782,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 }
             } else {
                 let shown = app.session.resolve_output(it).unwrap_or_else(|| "Not yet specified".into());
-                let resp = ui.interact(path_rect, egui::Id::new(("rq-path", it.id)), Sense::click());
+                let resp = ui.interact(path_rect, egui::Id::unique(("rq-path", it.id)), Sense::click());
                 a11y::button(&resp, &tr_args("Output file: {}", &[&shown]), !rendering);
                 let col = if resp.hovered() { t.accent_hover } else { t.hot_text };
                 lp.with_clip_rect(path_rect.intersect(list)).text(pos2(path_rect.min.x, r.center().y), Align2::LEFT_CENTER, &shown, Tokens::ui(11.5), col);
@@ -862,7 +862,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         }
         if let Some(item) = moved {
             if let Some((_, top)) = tops.iter().find(|(id, _)| *id == item) {
-                widgets::PanelScroll::reveal(&ctx, egui::Id::new("rq-scroll"), *top, *top + ROW_H, list.height());
+                widgets::PanelScroll::reveal(&ctx, egui::Id::unique("rq-scroll"), *top, *top + ROW_H, list.height());
             }
             app.ui.focused = crate::dock::PanelKind::RenderQueue;
             if on_row {
@@ -882,6 +882,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         && !rendering
         && let Some(id) = selected
         && app.dialog.is_none()
+        && !crate::widgets::any_menu_open(ui.ctx())
         && ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))
         // (A focused queue row is not typing; any other focused widget may be.)
         && (on_row || !ui.ctx().egui_wants_keyboard_input())

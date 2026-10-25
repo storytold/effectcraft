@@ -1057,7 +1057,7 @@ fn resize_handle(gap: Rect, vertical: bool, path: &str, t: &Tokens) -> ResizeHan
     let axis = if vertical { SplitAxis::Vertical } else { SplitAxis::Horizontal };
     let style = ResizeHandleStyle { hovered: t.focus.gamma_multiply(0.4), dragged: t.focus.gamma_multiply(0.9), focused: t.focus };
     let label = if vertical { crate::i18n::tr("Height:") } else { crate::i18n::tr("Width:") };
-    ResizeHandle::new(egui::Id::new(("dock-gutter", path.to_string())), axis, gap, label, style)
+    ResizeHandle::new(egui::Id::unique(("dock-gutter", path.to_string())), axis, gap, label, style)
 }
 
 /// The least body height of an open stacked panel (when the stack has room for it).
@@ -1224,7 +1224,7 @@ pub fn draw_group_chrome(ui: &mut egui::Ui, g: &Group, t: &Tokens, reg: &mut cra
             let w = galley.size().x + 16.0 + menu_w + deco_w;
             if x + w > strip.max.x - 20.0 && k > ai {
                 let r = Rect::from_min_size(pos2(strip.max.x - 22.0, strip.min.y + 6.0), vec2(18.0, 20.0));
-                let resp = ui.interact(r, egui::Id::new(("tab-overflow", g.path.clone())), Sense::click());
+                let resp = ui.interact(r, egui::Id::unique(("tab-overflow", g.path.clone())), Sense::click());
                 icons::paint(&painter, r.shrink(4.0).translate(vec2(-2.0, 0.0)), Icon::ChevronRight, t.tab_text);
                 icons::paint(&painter, r.shrink(4.0).translate(vec2(2.0, 0.0)), Icon::ChevronRight, t.tab_text);
                 crate::widgets::focus_outline(ui, &resp, t);
@@ -1241,7 +1241,7 @@ pub fn draw_group_chrome(ui: &mut egui::Ui, g: &Group, t: &Tokens, reg: &mut cra
                 Some((_, r)) => *r = r.union(tab),
                 None => out.tabs.push((*p, tab)),
             }
-            let resp = ui.interact(tab, egui::Id::new(("tab", g.path.clone(), k)), Sense::click_and_drag());
+            let resp = ui.interact(tab, egui::Id::unique(("tab", g.path.clone(), k)), Sense::click_and_drag());
             if resp.drag_started() {
                 out.actions.push(DockAction::BeginDrag(*p));
             }
@@ -1259,7 +1259,7 @@ pub fn draw_group_chrome(ui: &mut egui::Ui, g: &Group, t: &Tokens, reg: &mut cra
                 let mut dx = tab.min.x + 6.0;
                 if is_active && d.viewer {
                     let cr = Rect::from_center_size(pos2(dx + 5.0, text_y), vec2(10.0, 10.0));
-                    let cresp = ui.interact(cr.expand(2.0), egui::Id::new(("tab-close", g.path.clone(), k)), Sense::click());
+                    let cresp = ui.interact(cr.expand(2.0), egui::Id::unique(("tab-close", g.path.clone(), k)), Sense::click());
                     let cc = if cresp.hovered() { t.tab_text_active } else { t.tab_text };
                     let kk = 3.5;
                     painter.line_segment([cr.center() + vec2(-kk, -kk), cr.center() + vec2(kk, kk)], Stroke::new(1.2, cc));
@@ -1277,7 +1277,7 @@ pub fn draw_group_chrome(ui: &mut egui::Ui, g: &Group, t: &Tokens, reg: &mut cra
                 label_x = dx;
                 if lock {
                     let lr = Rect::from_center_size(pos2(dx + 6.0, text_y), vec2(12.0, 12.0));
-                    let lresp = ui.interact(lr.expand(2.0), egui::Id::new(("tab-lock", g.path.clone(), k)), Sense::click());
+                    let lresp = ui.interact(lr.expand(2.0), egui::Id::unique(("tab-lock", g.path.clone(), k)), Sense::click());
                     let lc = if d.locked {
                         t.tab_text_active
                     } else if lresp.hovered() {
@@ -1299,7 +1299,7 @@ pub fn draw_group_chrome(ui: &mut egui::Ui, g: &Group, t: &Tokens, reg: &mut cra
             painter.galley_with_override_text_color(pos2(label_x, text_y - galley.size().y / 2.0), galley, col);
             if is_active {
                 let mr = Rect::from_center_size(pos2(label_x + label_w + 12.0, text_y), vec2(12.0, 10.0));
-                let mresp = ui.interact(mr.expand(3.0), egui::Id::new(("tab-menu", g.path.clone())), Sense::click());
+                let mresp = ui.interact(mr.expand(3.0), egui::Id::unique(("tab-menu", g.path.clone())), Sense::click());
                 reg.add_response(&format!("panel.menu.{}", p.id()), &mresp, "panel menu");
                 let mc = if mresp.hovered() { t.tab_text_active } else { t.tab_text };
                 for dy in [-3.5, 0.0, 3.5] {
@@ -1335,7 +1335,7 @@ pub fn draw_group_chrome(ui: &mut egui::Ui, g: &Group, t: &Tokens, reg: &mut cra
         {
             let rest = Rect::from_min_max(pos2((x - 8.0).max(strip.min.x), strip.min.y), strip.max);
             if rest.width() > 0.0 {
-                let resp = ui.interact(rest, egui::Id::new(("tab-rest", g.path.clone())), Sense::click());
+                let resp = ui.interact(rest, egui::Id::unique(("tab-rest", g.path.clone())), Sense::click());
                 reg.add(&format!("panel.header.{}", e.panel.id()), rest, &e.label);
                 if resp.clicked() {
                     out.actions.push(DockAction::ToggleStacked(e.panel));

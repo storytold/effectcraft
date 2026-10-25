@@ -10,7 +10,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
     let p = ui.painter().with_clip_rect(rect);
     let x0 = rect.min.x + 12.0;
-    let scroll = widgets::PanelScroll::begin(ui, egui::Id::new("info-scroll"), rect);
+    let scroll = widgets::PanelScroll::begin(ui, egui::Id::unique("info-scroll"), rect);
     let mut y = rect.min.y + 14.0 - scroll.offset;
     if app.pointer_comp.is_some() {
         // GPU frames: read the shown frame back for sampling.
@@ -42,7 +42,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     // read-out with the same words (a sentence a reader can speak: "Red: 128").
     let full = rect.width() - 24.0;
     let say = |key: &str, x: f32, y: f32, w: f32, text: &str| {
-        a11y::readout(ui, egui::Id::new(("info", key)), Rect::from_min_size(pos2(x, y - 8.0), vec2(w.max(24.0), 16.0)), text);
+        a11y::readout(ui, egui::Id::unique(("info", key)), Rect::from_min_size(pos2(x, y - 8.0), vec2(w.max(24.0), 16.0)), text);
     };
     let half = rect.width() * 0.5 - 16.0;
     say("r", x0, y, half, &tr_args("Red: {}", &[&px[0]]));
@@ -63,7 +63,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     if let Some(c) = rgba {
         let sw = egui::Rect::from_min_size(pos2(cx, y + 34.0), vec2(36.0, 30.0));
         p.rect_filled(sw, 3.0, Color32::from_rgb(px[0], px[1], px[2]));
-        a11y::graphic(ui, egui::Id::new(("info", "swatch")), sw, &tr_args("Color under the pointer: {}", &[&format!("{}, {}, {}", px[0], px[1], px[2])]));
+        a11y::graphic(ui, egui::Id::unique(("info", "swatch")), sw, &tr_args("Color under the pointer: {}", &[&format!("{}, {}, {}", px[0], px[1], px[2])]));
         let _ = c;
     }
     y += 82.0;

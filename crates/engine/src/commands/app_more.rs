@@ -13,14 +13,23 @@ use super::{CommandSpec, always, b_p, bad, comp_id, has_comp, has_layers, has_pr
 use crate::{EngineError, Event, Result, Session, cmd, query};
 
 /// Run `f` (which may run several undoable commands) as one undo step named `label`; on error
-/// the project is restored.
+/// the project, editor state and undo history are restored.
+///
+/// Front-end events emitted by a failed `f` are discarded with the state. Pending-analysis
+/// queues and the journal are not part of this rollback and keep their existing behaviour.
 pub(crate) fn grouped<T>(s: &mut Session, label: &str, f: impl FnOnce(&mut Session) -> Result<T>) -> Result<T> {
     // The steps `f` records go to an empty stack (so the undo limit can't drop the snapshot
-    // taken before them), then become one step on the real one.
+    // taken before them), then become one step on the real one. Keep the complete pre-`f`
+    // history and editor state for a failure: rollback must not leave a partially retargeted
+    // editor or a `f`-recorded redo/branch behind.
+    let saved_history = s.history.clone();
     let saved = std::mem::take(&mut s.history.undo);
     let before = s.project.clone();
+    let before_state = s.state.clone();
+    let event_mark = s.events.len();
     let r = f(s);
     let changed = !s.history.undo.is_empty();
+    let interim_revision = s.ime_revision;
     s.history.undo = saved;
     s.history.merge_key = None;
     match r {
@@ -36,9 +45,22 @@ pub(crate) fn grouped<T>(s: &mut Session, label: &str, f: impl FnOnce(&mut Sessi
             Ok(v)
         }
         Err(e) => {
+            // Snapshot the failing editor before restoring the pre-`f` state: an intermediate
+            // text.edit / text change / comp switch must invalidate the pre-`f` editor token
+            // instead of reviving it.
+            let edited = super::text_edit::active_editor_snapshot(s);
+            s.project = before;
+            s.state = before_state;
+            s.history = saved_history;
+            s.history.merge_key = None;
+            // A failed intermediate comp switch must not reach the front end through an
+            // `OpenComp` event while its state has been rolled back.
+            s.events.truncate(event_mark);
+            s.sanitize_after_replacement(edited.as_ref());
+            // As in the batch rollback, the IME revision is a high-water mark: leave the highest
+            // intermediate stamp rather than rewinding to before `f`.
+            s.ime_revision = s.ime_revision.max(interim_revision);
             if changed {
-                s.project = before;
-                s.sanitize_state();
                 s.bump();
             }
             Err(e)
@@ -703,6 +725,36 @@ pub fn specs() -> Vec<CommandSpec> {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+
+    #[test]
+    fn grouped_rollback_restores_the_editor_state_and_history_after_a_transient_text_change() {
+        let mut s = crate::Session::default();
+        s.execute("comp.new", json!({"name": "Main", "width": 320, "height": 180, "duration": 1})).unwrap();
+        let lid = s.execute("layer.newText", json!({"text": "abcdef"})).unwrap()["layer"].as_u64().unwrap();
+        s.execute("text.edit", json!({"layer": lid, "caret": 3})).unwrap();
+        let original_comp = s.active_comp_id().unwrap();
+        let owner = s.state.text_edit.as_ref().unwrap().session;
+        let other =
+            s.execute("comp.new", json!({"name": "Other", "width": 160, "height": 90, "duration": 1, "open": false})).unwrap()["comp"].as_u64().unwrap();
+        let undo = s.history.undo.len();
+        s.drain_events();
+
+        let r = super::grouped(&mut s, "Rollback", |s| -> crate::Result<()> {
+            // An intermediate document edit and state switch, both undone by the error path.
+            s.execute("layer.setText", json!({"layer": lid, "text": "ab"}))?;
+            s.execute("comp.open", json!({"comp": other}))?;
+            Err(crate::EngineError::Other("stop".into()))
+        });
+        assert!(r.is_err());
+        assert_eq!(s.active_comp_id(), Some(original_comp), "the pre-group comp is restored");
+        assert_eq!(super::super::text_edit::layer_doc(&s, effectcraft_project::LayerId(lid)).unwrap().text, "abcdef", "the document is restored");
+        assert_eq!(s.history.undo.len(), undo, "the partial grouped steps are not left in history");
+        assert_ne!(s.state.text_edit.as_ref().unwrap().session, owner, "a transient replacement does not revive the old IME token");
+        assert!(
+            !s.drain_events().iter().any(|e| matches!(e, crate::Event::OpenComp(_))),
+            "the failed intermediate comp switch is not published to the front end"
+        );
+    }
 
     /// `File.execute()` opens the file as a well-formed `file://` URL (spaces, `#`, `%`).
     #[test]

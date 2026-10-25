@@ -31,7 +31,7 @@ fn render_queue_panel_snapshot() {
     let ids: Vec<u64> = s.project.render_queue.iter().take(3).map(|i| i.id).collect();
     let mut app = Some(EffectcraftApp::new(s));
     let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| app.take().expect("app"));
-    h.ctx.data_mut(|d| d.insert_temp(egui::Id::new("rq-ui"), (ids, None::<u64>)));
+    h.ctx.data_mut(|d| d.insert_temp(egui::Id::unique("rq-ui"), (ids, None::<u64>)));
     h.state_mut().show_panel(effectcraft_ui_egui::dock::PanelKind::RenderQueue);
     h.run_steps(4);
     let img = h.render().expect("render");

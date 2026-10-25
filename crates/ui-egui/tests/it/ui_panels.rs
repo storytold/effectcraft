@@ -218,7 +218,7 @@ fn saved_workspace_is_listed_in_the_workspace_menu() {
     h.run_steps(3);
     assert_ne!(h.state().ui.dock, saved);
     click(&mut h, "menu.Window");
-    let ws = h.query_by_label(" Workspace ⏵").expect("Window ▸ Workspace").rect();
+    let ws = h.query_by_label(" Workspace").expect("Window ▸ Workspace").rect();
     hover(&mut h, ws.center());
     let entry = h.state().auto.find("menu.savedWorkspaces.0").expect("the saved workspace is listed").clone();
     assert_eq!(entry.label, "My Layout");
@@ -239,7 +239,7 @@ fn saved_workspace_is_listed_in_the_workspace_menu() {
 fn edit_label_menu_shows_the_label_colours() {
     let mut h = harness();
     click(&mut h, "menu.Edit");
-    let label = h.query_by_label(" Label ⏵").expect("Edit ▸ Label").rect();
+    let label = h.query_by_label(" Label").expect("Edit ▸ Label").rect();
     hover(&mut h, label.center());
     // (Not Dark Green; the entry's label starts with its check-mark column.)
     let green = h.query_by_label(" Green").expect("the Label submenu is open").rect();
@@ -388,6 +388,7 @@ fn settings_buttons_stay_in_view_at_200_percent() {
             delta: egui::vec2(0.0, -1000.0),
             modifiers: Default::default(),
             phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
         });
         h.run_steps(5);
     };

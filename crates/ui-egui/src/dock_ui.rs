@@ -13,7 +13,7 @@ use crate::{EffectcraftApp, panels};
 use craft_ui::docking::{Action, DropTarget, resolve_drop};
 
 fn drag_id() -> egui::Id {
-    egui::Id::new("dock-tab-drag")
+    egui::Id::unique("dock-tab-drag")
 }
 
 impl EffectcraftApp {
@@ -183,6 +183,51 @@ impl EffectcraftApp {
         }
     }
 
+    /// Apply one action after the panel bodies have drawn. A panel-window pass runs this at
+    /// its own pass end so the final IME descriptor sees the post-action state.
+    fn handle_dock_action(&mut self, ctx: &egui::Context, action: DockAction) {
+        match action {
+            DockAction::Activate(p) => {
+                let _ = self.dock_command(ctx, Action::Activate { panel: p });
+            }
+            DockAction::ToggleStacked(p) => {
+                let _ = self.dock_command(ctx, Action::SetStackOpen { panel: p, open: !self.ui.dock.is_visible(p) });
+            }
+            DockAction::Focus(p) => {
+                self.ui.focused = p;
+                panels::viewer_text::panel_clicked(self, ctx, p);
+                // A click in (or on the tab of) another Composition viewer makes it active.
+                if let Some(id) = panels::viewers::id_of(p) {
+                    panels::viewers::activate(self, ctx, id);
+                }
+            }
+            DockAction::Close(p) => {
+                let _ = self.dock_command(ctx, Action::Close { panel: p });
+            }
+            DockAction::PanelMenu(p, pos) => {
+                ctx.data_mut(|d| d.insert_temp(egui::Id::unique("panel-menu"), (p, pos)));
+            }
+            DockAction::BeginDrag(p) => ctx.data_mut(|d| {
+                d.insert_temp(drag_id(), p);
+            }),
+            DockAction::ToggleLock(p) => {
+                if !self.ui.locked_tabs.remove(&p.id()) {
+                    self.ui.locked_tabs.insert(p.id().to_string());
+                }
+            }
+            // The Timeline's comp tabs: show that comp / close its Timeline.
+            DockAction::ActivateDoc(p, id) => {
+                let _ = self.dock_command(ctx, Action::Activate { panel: p });
+                if self.session.state.active_comp.map(|c| c.0) != Some(id) {
+                    let _ = crate::menus::invoke(self, ctx, "comp.open", serde_json::json!({"comp": id}));
+                }
+            }
+            DockAction::CloseDoc(_, id) => {
+                let _ = crate::menus::invoke(self, ctx, "comp.close", serde_json::json!({"comp": id}));
+            }
+        }
+    }
+
     pub(crate) fn dock_area(&mut self, ui: &mut egui::Ui, body: Rect) {
         let t = self.tokens;
         let ctx = ui.ctx().clone();
@@ -244,18 +289,28 @@ impl EffectcraftApp {
                 .get(*index)
                 .and_then(|group| group.panels.first())
                 .and_then(|panel| {
-                    let id = egui::Id::new(("floating-panel", panel.id()));
+                    let id = egui::Id::unique(("floating-panel", panel.id()));
                     layers.iter().position(|layer| layer.id == id)
                 })
                 .unwrap_or(usize::MAX)
         });
-        // A native window is kept only for a panel that still floats.
+        // A native window is kept only for a panel that still floats. A native viewport that
+        // goes away releases its IME context: its composition must not reappear elsewhere.
         let ui_state = &mut self.ui;
+        let gone: Vec<egui::ViewportId> = ui_state
+            .panel_windows
+            .iter()
+            .filter(|w| !ui_state.floating.iter().any(|group| group.panels.contains(&w.panel)))
+            .map(|w| panel_window_id(w.panel))
+            .collect();
         ui_state.panel_windows.retain(|w| ui_state.floating.iter().any(|group| group.panels.contains(&w.panel)));
+        for viewport in gone {
+            panels::viewer_text::end_viewport(self, &ctx, viewport);
+        }
         for i in floating_order {
             // Groups in their own native window take no tab drops from the main window.
             if let Some(window) = self.ui.floating.get(i).and_then(|group| self.panel_window_of(&group.panels)) {
-                self.panel_window(&ctx, i, window, &info, &mut actions);
+                self.panel_window(&ctx, i, window, &info);
                 continue;
             }
             if let Some((g, tabs)) = self.floating_window(&ctx, i, &info, &mut actions) {
@@ -267,46 +322,7 @@ impl EffectcraftApp {
             let _ = self.dock_command(&ctx, action);
         }
         for a in actions {
-            match a {
-                DockAction::Activate(p) => {
-                    let _ = self.dock_command(&ctx, Action::Activate { panel: p });
-                }
-                DockAction::ToggleStacked(p) => {
-                    let _ = self.dock_command(&ctx, Action::SetStackOpen { panel: p, open: !self.ui.dock.is_visible(p) });
-                }
-                DockAction::Focus(p) => {
-                    self.ui.focused = p;
-                    panels::viewer_text::panel_clicked(self, &ctx, p);
-                    // A click in (or on the tab of) another Composition viewer makes it active.
-                    if let Some(id) = panels::viewers::id_of(p) {
-                        panels::viewers::activate(self, &ctx, id);
-                    }
-                }
-                DockAction::Close(p) => {
-                    let _ = self.dock_command(&ctx, Action::Close { panel: p });
-                }
-                DockAction::PanelMenu(p, pos) => {
-                    ctx.data_mut(|d| d.insert_temp(egui::Id::new("panel-menu"), (p, pos)));
-                }
-                DockAction::BeginDrag(p) => ctx.data_mut(|d| {
-                    d.insert_temp(drag_id(), p);
-                }),
-                DockAction::ToggleLock(p) => {
-                    if !self.ui.locked_tabs.remove(&p.id()) {
-                        self.ui.locked_tabs.insert(p.id().to_string());
-                    }
-                }
-                // The Timeline's comp tabs: show that comp / close its Timeline.
-                DockAction::ActivateDoc(p, id) => {
-                    let _ = self.dock_command(&ctx, Action::Activate { panel: p });
-                    if self.session.state.active_comp.map(|c| c.0) != Some(id) {
-                        let _ = crate::menus::invoke(self, &ctx, "comp.open", serde_json::json!({"comp": id}));
-                    }
-                }
-                DockAction::CloseDoc(_, id) => {
-                    let _ = crate::menus::invoke(self, &ctx, "comp.close", serde_json::json!({"comp": id}));
-                }
-            }
+            self.handle_dock_action(&ctx, a);
         }
         self.tab_drag(&ctx, &groups, &float_groups, &tab_rects);
         panels::panel_menu_popup(self, ui);
@@ -330,7 +346,7 @@ impl EffectcraftApp {
             (screen.min.x - rect.min.x).max(0.0) + (screen.max.x - 40.0 - rect.min.x).min(0.0),
             (screen.min.y - rect.min.y).max(0.0) + (screen.max.y - 30.0 - rect.min.y).min(0.0),
         ));
-        let id = egui::Id::new(("floating-panel", f.panels.first().map(|p| p.id()).unwrap_or_default()));
+        let id = egui::Id::unique(("floating-panel", f.panels.first().map(|p| p.id()).unwrap_or_default()));
         let mut group = None;
         // Not constrained to the window: the group is drawn where its rect says (the clamp above
         // keeps its strip reachable), so it follows the pointer past the window's edges.
@@ -366,7 +382,7 @@ impl EffectcraftApp {
             // Resize from the corner.
             let grip = Rect::from_min_max(r.max - vec2(14.0, 14.0), r.max);
             let rs = ui.interact(grip, id.with("resize"), Sense::click_and_drag());
-            rs.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, rs.enabled(), crate::i18n::tr("Resize floating panel")));
+            rs.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Splitter, rs.enabled(), crate::i18n::tr("Resize floating panel")));
             self.auto.add_response(&format!("panel.float.{i}.resize"), &rs, "Resize floating panel");
             for k in 0..3 {
                 let o = 4.0 + k as f32 * 4.0;
@@ -456,7 +472,7 @@ impl EffectcraftApp {
 
     /// One floating group in its own native window: the group's tab strip and active panel fill
     /// the window. Closing the window brings the group back into the main window.
-    fn panel_window(&mut self, ctx: &egui::Context, i: usize, window: PanelWindow, info: &dock::TabInfo, actions: &mut Vec<DockAction>) {
+    fn panel_window(&mut self, ctx: &egui::Context, i: usize, window: PanelWindow, info: &dock::TabInfo) {
         let t = self.tokens;
         let Some(f) = self.ui.floating.get(i).cloned() else { return };
         let active = f.active.min(f.panels.len().saturating_sub(1));
@@ -472,8 +488,14 @@ impl EffectcraftApp {
             .with_min_inner_size(dock::PANEL_WINDOW_MIN);
         let mut closed = false;
         let mut placed = None;
+        let mut pass_viewport = None;
+        let mut actions = Vec::new();
         ctx.show_viewport_immediate(panel_window_id(window.panel), builder, |ui, class| {
+            pass_viewport = Some(ui.ctx().viewport_id());
             let native = matches!(class, egui::ViewportClass::Immediate | egui::ViewportClass::Deferred);
+            if native {
+                panels::viewer_text::begin_ui(ui.ctx());
+            }
             egui::CentralPanel::default().frame(egui::Frame::NONE.fill(t.panel_bg)).show(ui, |ui| {
                 let r = ui.max_rect();
                 let g = Group {
@@ -495,6 +517,12 @@ impl EffectcraftApp {
                     panels::panel_menu_popup(self, ui);
                 }
             });
+            // Apply this window's panel/tab actions before publishing its IME descriptor: a
+            // click-away or close in the floating panel must own the pass's final output.
+            for action in actions.drain(..) {
+                self.handle_dock_action(ui.ctx(), action);
+            }
+            panels::viewer_text::finish_ime(self, ui);
             // An embedded window (no native windows on this platform) reads the main window's
             // input: its close request and place aren't this window's.
             if native {
@@ -509,6 +537,10 @@ impl EffectcraftApp {
         });
         if closed {
             self.ui.panel_windows.retain(|w| !f.panels.contains(&w.panel));
+            if let Some(viewport) = pass_viewport {
+                panels::viewer_text::end_viewport(self, ctx, viewport);
+            }
+            panels::viewer_text::end_viewport(self, ctx, panel_window_id(window.panel));
             ctx.data_mut(|d| d.remove::<[f32; 4]>(spawn_id));
             return;
         }
@@ -562,7 +594,7 @@ impl EffectcraftApp {
         let over_group = targets.iter().any(|target| target.rect.contains(pos));
         let float_drop = ctx.input(|i| i.modifiers.command);
         let plan = (!float_drop).then(|| resolve_drop(&p, pos, &targets)).flatten();
-        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("dock-drop")));
+        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("dock-drop")));
         if let Some(proposal) = &plan {
             let preview = proposal.preview.shrink(2.0);
             painter.rect_filled(preview, t.radius, t.focus.gamma_multiply(0.18));
@@ -612,7 +644,7 @@ pub fn panel_window_id(panel: PanelKind) -> egui::ViewportId {
 
 /// Where a native panel window was told to open (kept for as long as it stays open).
 fn panel_window_spawn_id(panel: PanelKind) -> egui::Id {
-    egui::Id::new(("panel-window-spawn", panel.id()))
+    egui::Id::unique(("panel-window-spawn", panel.id()))
 }
 
 /// A new floating group's default rect near the centre of `screen`.

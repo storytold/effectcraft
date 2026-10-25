@@ -377,7 +377,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             }
             let id = format!("shortcuts.key.{}", name.trim_start_matches('#'));
             app.auto.add(&id, r, label);
-            let resp = ui.interact(r, egui::Id::new(("sc-key", name, r.min.x as i32)), Sense::click());
+            let resp = ui.interact(r, egui::Id::unique(("sc-key", name, r.min.x as i32)), Sense::click());
             if resp.clicked() {
                 if let Some(i) = mod_idx {
                     st.mods[i] = !st.mods[i];

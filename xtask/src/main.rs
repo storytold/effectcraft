@@ -176,7 +176,7 @@ fn repo_files() -> Result<Vec<String>, String> {
 }
 
 fn is_asset(path: &str) -> bool {
-    std::path::Path::new(path).extension().and_then(|e| e.to_str()).is_some_and(|e| ASSET_EXT.contains(&e.to_ascii_lowercase().as_str()))
+    std::path::Path::new(path).extension().and_then(std::ffi::OsStr::to_str).is_some_and(|e| ASSET_EXT.contains(&e.to_ascii_lowercase().as_str()))
 }
 
 fn assets() -> Result<(), String> {
@@ -384,7 +384,7 @@ fn serve_dir(dir: &std::path::Path, port: u16) -> Result<(), String> {
                 Ok(b) => ("200 OK", b),
                 Err(_) => ("404 Not Found", b"not found".to_vec()),
             };
-            let mime = match file.extension().and_then(|e| e.to_str()).unwrap_or("") {
+            let mime = match file.extension().and_then(std::ffi::OsStr::to_str).unwrap_or("") {
                 "html" => "text/html; charset=utf-8",
                 "js" => "text/javascript",
                 "wasm" => "application/wasm",

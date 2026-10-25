@@ -365,7 +365,7 @@ fn theme_card(
                         let favorite = favorites.iter().any(|id| id == value);
                         let tip = tr(if favorite { "Remove from favorites" } else { "Add to favorites" });
                         let r = ui.add_visible(favorite || hovered, egui::Button::new("").min_size(vec2(24.0, 24.0)).frame(false)).on_hover_text(tip);
-                        r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("{}: {}", tip, tr(label))));
+                        r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{}: {}", tip, tr(label))));
                         reg(app, &format!("settings.appearance.favoriteThemes.{value}"), &r, tip);
                         if favorite || hovered {
                             crate::icons::paint(
@@ -698,7 +698,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                     // The rows touch, so the pointer never falls between two of them.
                     ui.spacing_mut().item_spacing.y = 0.0;
                     let ctx = ui.ctx().clone();
-                    let page_item = |id: &str| egui::Id::new(("settings-page", id.to_string()));
+                    let page_item = |id: &str| egui::Id::unique(("settings-page", id.to_string()));
                     let on_list = all.iter().any(|q| ctx.memory(|m| m.has_focus(page_item(q.id))));
                     for (n, p) in all.iter().enumerate() {
                         let sel = page == p.id;

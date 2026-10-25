@@ -25,7 +25,7 @@ fn rect(h: &Harness<'_, EffectcraftApp>, id: &str) -> Rect {
     Rect::from_min_size(pos2(e.rect[0], e.rect[1]), vec2(e.rect[2], e.rect[3]))
 }
 
-fn drag(h: &mut Harness<'_, EffectcraftApp>, from: Pos2, to: Pos2) {
+pub(crate) fn drag(h: &mut Harness<'_, EffectcraftApp>, from: Pos2, to: Pos2) {
     h.input_mut().events.push(Event::PointerMoved(from));
     h.input_mut().events.push(Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
     h.step();
@@ -197,6 +197,7 @@ fn layer_style_controls_stay_reachable_in_a_small_window() {
             delta: vec2(-2000.0, -2000.0),
             modifiers: Default::default(),
             phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
         });
         h.run_steps(5);
         let at = in_view(&h, "dialog.layerStyle.value.dropShadow/noise");

@@ -30,7 +30,13 @@ fn over_bar(h: &Harness<'_, EffectcraftApp>, layer: u64) -> Pos2 {
 fn alt_wheel(h: &mut Harness<'_, EffectcraftApp>, at: Pos2, dy: f32) {
     h.event(Event::PointerMoved(at));
     h.event(Event::ModifiersChanged(Modifiers::ALT));
-    h.event(Event::MouseWheel { unit: MouseWheelUnit::Point, delta: vec2(0.0, dy), modifiers: Modifiers::ALT, phase: egui::TouchPhase::Move });
+    h.event(Event::MouseWheel {
+        unit: MouseWheelUnit::Point,
+        delta: vec2(0.0, dy),
+        modifiers: Modifiers::ALT,
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Wheel,
+    });
     h.step();
     h.event(Event::ModifiersChanged(Modifiers::NONE));
     h.step();
@@ -78,7 +84,13 @@ fn ctrl_wheel_and_pinch_zoom_time() {
     let at = over_bar(&h, layer);
     h.event(Event::PointerMoved(at));
     h.event(Event::ModifiersChanged(Modifiers::COMMAND));
-    h.event(Event::MouseWheel { unit: MouseWheelUnit::Point, delta: vec2(0.0, 240.0), modifiers: Modifiers::COMMAND, phase: egui::TouchPhase::Move });
+    h.event(Event::MouseWheel {
+        unit: MouseWheelUnit::Point,
+        delta: vec2(0.0, 240.0),
+        modifiers: Modifiers::COMMAND,
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Wheel,
+    });
     h.step();
     h.event(Event::ModifiersChanged(Modifiers::NONE));
     h.step();

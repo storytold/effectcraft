@@ -2135,7 +2135,7 @@ impl<'a> Renderer<'a> {
     /// applied).
     pub fn visible_layers(&self, ctx: &EvalCtx<'a>) -> Vec<&'a Layer> {
         let (comp, t) = (ctx.comp, ctx.time);
-        let any_solo = comp.layers.iter().any(|l| l.switches.solo && l.source.is_av());
+        let any_solo = comp.any_solo();
         comp.layers
             .iter()
             .rev()

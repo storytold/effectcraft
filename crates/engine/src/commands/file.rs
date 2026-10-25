@@ -560,7 +560,7 @@ pub const DATA_EXTENSIONS: &[&str] = &["json", "csv", "tsv"];
 
 /// A data footage item for `path` (JSON / CSV / TSV), `None` for other files.
 pub(crate) fn data_footage(services: &dyn crate::Services, path: &str) -> Option<std::result::Result<effectcraft_project::Footage, String>> {
-    let ext = std::path::Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    let ext = std::path::Path::new(path).extension().and_then(std::ffi::OsStr::to_str).unwrap_or("").to_ascii_lowercase();
     if !DATA_EXTENSIONS.contains(&ext.as_str()) {
         return None;
     }

@@ -24,7 +24,7 @@ struct Cache {
 }
 
 fn cache_id(cid: ItemId) -> egui::Id {
-    egui::Id::new(("expr-error-bar", cid.0))
+    egui::Id::unique(("expr-error-bar", cid.0))
 }
 
 /// Both layout and painting read the same completed diagnostics; neither evaluates expressions.
@@ -64,7 +64,7 @@ pub fn draw(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect, cid: ItemId
     let count = Rect::from_center_size(pos2(rect.max.x - 44.0, rect.center().y), vec2(40.0, 16.0));
     let prev = Rect::from_center_size(pos2(rect.max.x - 74.0, rect.center().y), vec2(16.0, 16.0));
     for (r, label, auto, d) in [(prev, "◀", "viewer.exprErrors.prev", n - 1), (next, "▶", "viewer.exprErrors.next", 1)] {
-        let resp = ui.interact(r, egui::Id::new(("expr-bar", auto)), Sense::click());
+        let resp = ui.interact(r, egui::Id::unique(("expr-bar", auto)), Sense::click());
         p.text(r.center(), Align2::CENTER_CENTER, label, Tokens::ui(11.0), if resp.hovered() { Color32::WHITE } else { t.text });
         app.auto.add(auto, r, label);
         if resp.clicked() {
@@ -76,7 +76,7 @@ pub fn draw(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect, cid: ItemId
     let comp_name = app.session.project.item(cid).map(|it| it.name.clone()).unwrap_or_default();
     let Some(e) = c.errors.get(i).cloned() else { return };
     let msg_rect = Rect::from_min_max(pos2(rect.min.x + 26.0, rect.min.y), pos2(prev.min.x - 6.0, rect.max.y));
-    let resp = ui.interact(msg_rect, egui::Id::new("expr-bar-msg"), Sense::click()).on_hover_text(tr("Click to reveal the expression in the timeline"));
+    let resp = ui.interact(msg_rect, egui::Id::unique("expr-bar-msg"), Sense::click()).on_hover_text(tr("Click to reveal the expression in the timeline"));
     p.with_clip_rect(msg_rect).text(
         pos2(msg_rect.min.x, rect.center().y),
         Align2::LEFT_CENTER,

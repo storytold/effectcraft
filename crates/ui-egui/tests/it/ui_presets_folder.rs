@@ -37,7 +37,8 @@ fn click(h: &mut Harness<'_, EffectcraftApp>, id: &str) -> Vec<String> {
 fn presets_menu_copies_the_configured_folder_without_editing_the_project() {
     let expected = expected_folder();
     for language in ["en", "ja"] {
-        let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| {
+        // The `ja` run draws Japanese menu text, which needs an installed CJK face.
+        let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).allow_missing_glyphs().build_eframe(|_| {
             let mut app = EffectcraftApp::new(Session::default());
             app.session.prefs.general.language = language.into();
             app.ui.start_screen = false;
@@ -69,7 +70,8 @@ fn presets_folder_control_command_returns_the_path_or_a_configuration_error() {
     let mut reply = None;
     let mut output = ctx.run_ui(Default::default(), |ui| {
         let (request, _rx) = ControlRequest::new("ui.menu.invoke", json!({"id": "effects.copyPresetsFolderPath"}));
-        reply = match control::handle(&mut app, ui.ctx(), &request) {
+        let now = app.now();
+        reply = match control::handle(&mut app, ui.ctx(), &request, now) {
             control::Outcome::Done(value) => Some(value),
             _ => panic!("expected an immediate reply"),
         };
@@ -128,7 +130,7 @@ fn shared_preset_rows_search_apply_and_undo_the_selected_definition() {
     h.run_steps(3);
     let shared = std::sync::Arc::new(entries);
     let now = h.ctx.input(|i| i.time);
-    h.ctx.data_mut(|d| d.insert_temp(egui::Id::new("fx-user-presets"), (now, shared.clone())));
+    h.ctx.data_mut(|d| d.insert_temp(egui::Id::unique("fx-user-presets"), (now, shared.clone())));
     let search = |h: &mut Harness<'_, EffectcraftApp>, text: &str| {
         click(h, "effects.search");
         h.input_mut().events.push(Event::Key { key: egui::Key::A, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::COMMAND });
@@ -160,7 +162,7 @@ fn shared_preset_rows_search_apply_and_undo_the_selected_definition() {
         h.run_steps(2);
         assert_eq!(h.state().session.active_comp().unwrap().layers[0].props.prop("transform/opacity").unwrap().value.as_f64(), 100.0);
     }
-    let (_, cached) = h.ctx.data(|d| d.get_temp::<(f64, std::sync::Arc<Vec<PresetFile>>)>(egui::Id::new("fx-user-presets"))).unwrap();
+    let (_, cached) = h.ctx.data(|d| d.get_temp::<(f64, std::sync::Arc<Vec<PresetFile>>)>(egui::Id::unique("fx-user-presets"))).unwrap();
     assert!(std::sync::Arc::ptr_eq(&shared, &cached));
     assert_eq!(shared.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["Custom Cache A", "Custom Cache B"]);
 }

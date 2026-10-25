@@ -163,7 +163,7 @@ impl Nav {
 }
 
 fn cursor_id() -> egui::Id {
-    egui::Id::new("fx-cursor")
+    egui::Id::unique("fx-cursor")
 }
 
 /// The accessible name of a folder: what the row shows, in the interface language.
@@ -190,7 +190,7 @@ fn folder_row(
     let t = app.tokens;
     let open = forced_open || app.ui.effects_open.contains(key);
     let r = Rect::from_min_size(pos2(list.min.x, *y), vec2(list.width(), ROW_H));
-    let id = egui::Id::new(("fxcat", key));
+    let id = egui::Id::unique(("fxcat", key));
     let tab = nav.tab_stop(id);
     let selected = nav.push(id, *y, level, Some((key.to_string(), open, forced_open)), None);
     *y += ROW_H;
@@ -269,8 +269,8 @@ fn effect_row(
     let t = app.tokens;
     let ctx = ui.ctx().clone();
     let r = Rect::from_min_size(pos2(list.min.x, *y), vec2(list.width(), ROW_H));
-    let id = egui::Id::new((auto_prefix, e.id));
-    let star_id = egui::Id::new((auto_prefix, e.id, "star"));
+    let id = egui::Id::unique((auto_prefix, e.id));
+    let star_id = egui::Id::unique((auto_prefix, e.id, "star"));
     let tab = nav.tab_stop(id);
     let selected = nav.push(id, *y, level, None, Some(Apply::Effect(e.id.to_string())));
     if let Some(row) = nav.rows.last_mut() {
@@ -347,7 +347,7 @@ fn preset_row(
 ) {
     let t = app.tokens;
     let r = Rect::from_min_size(pos2(list.min.x, *y), vec2(list.width(), ROW_H));
-    let id = egui::Id::new(("fxpreset", auto_id));
+    let id = egui::Id::unique(("fxpreset", auto_id));
     let tab = nav.tab_stop(id);
     let selected = nav.push(id, *y, 3, None, Some(Apply::Preset(preset.clone())));
     *y += ROW_H;
@@ -477,7 +477,7 @@ fn list_keys(app: &mut EffectcraftApp, ctx: &egui::Context, nav: &Nav, list: Rec
         ctx.data_mut(|d| d.insert_temp(cursor_id(), c));
         // Scroll the row into view.
         if let Some(row) = nav.rows.iter().find(|r| r.id == c) {
-            widgets::PanelScroll::reveal(ctx, egui::Id::new("fx-scroll"), row.top, row.top + ROW_H, list.height());
+            widgets::PanelScroll::reveal(ctx, egui::Id::unique("fx-scroll"), row.top, row.top + ROW_H, list.height());
         }
         app.ui.focused = crate::dock::PanelKind::EffectsPresets;
         if on_row {
@@ -494,7 +494,7 @@ fn list_keys(app: &mut EffectcraftApp, ctx: &egui::Context, nav: &Nav, list: Rec
 
 /// User preset files, rescanned every few seconds (and on Refresh List).
 fn user_presets(ctx: &egui::Context, force: bool, scan: impl FnOnce() -> Vec<PresetFile>) -> Arc<Vec<PresetFile>> {
-    let id = egui::Id::new("fx-user-presets");
+    let id = egui::Id::unique("fx-user-presets");
     let now = ctx.input(|i| i.time);
     if !force
         && let Some((at, v)) = ctx.data(|d| d.get_temp::<(f64, Arc<Vec<PresetFile>>)>(id))
@@ -526,8 +526,8 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     app.auto.add("effects.search", sr, "Search");
     // Contents menu.
     let mr = Rect::from_center_size(pos2(rect.max.x - 18.0, sr.center().y), vec2(22.0, 22.0));
-    let mpop = egui::Id::new("fx-contents-menu");
-    let menu_resp = widgets::icon_button(ui, mr, Icon::Hamburger, false, &t, egui::Id::new("fx-menu")).on_hover_text(tr("Effects & Presets options"));
+    let mpop = egui::Id::unique("fx-contents-menu");
+    let menu_resp = widgets::icon_button(ui, mr, Icon::Hamburger, false, &t, egui::Id::unique("fx-menu")).on_hover_text(tr("Effects & Presets options"));
     a11y::menu_button(&menu_resp, tr("Effects & Presets options"), widgets::popup_is_open(ui, mpop));
     if menu_resp.clicked() {
         widgets::open_popup(ui, mpop);
@@ -606,7 +606,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let view = app.ui.effects_view.clone();
     let list = Rect::from_min_max(pos2(rect.min.x, sr.max.y + 6.0), rect.max);
     let lp = p.with_clip_rect(list);
-    let scroll = widgets::PanelScroll::begin(ui, egui::Id::new("fx-scroll"), list);
+    let scroll = widgets::PanelScroll::begin(ui, egui::Id::unique("fx-scroll"), list);
     let query = q.trim().to_lowercase();
     let searching = !query.is_empty();
     let mut y = list.min.y - scroll.offset;
@@ -747,7 +747,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         _ => None,
     }) && let Some(pos) = ctx.pointer_hover_pos()
     {
-        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("dnd-fx")));
+        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("dnd-fx")));
         let g = painter.layout_no_wrap(name, Tokens::ui(12.0), t.text);
         let r = Rect::from_min_size(pos + vec2(12.0, 8.0), g.size() + vec2(16.0, 8.0));
         painter.rect_filled(r, 4.0, Color32::from_rgba_premultiplied(40, 40, 40, 230));
@@ -867,7 +867,7 @@ mod tests {
         for _ in 0..5 {
             let start = std::time::Instant::now();
             for _ in 0..1000 {
-                let (_, shared) = ctx.data(|d| d.get_temp::<(f64, Arc<Vec<PresetFile>>)>(egui::Id::new("fx-user-presets"))).unwrap();
+                let (_, shared) = ctx.data(|d| d.get_temp::<(f64, Arc<Vec<PresetFile>>)>(egui::Id::unique("fx-user-presets"))).unwrap();
                 std::hint::black_box((*shared).clone());
             }
             before.push(start.elapsed());

@@ -128,23 +128,23 @@ fn tab_and_shift_tab_traverse_toolbar_and_space_activates_only_focused_tool() {
     h.run_steps(3);
     for _ in 0..8 {
         key(&mut h, Key::Tab, Modifiers::NONE);
-        if h.ctx.memory(|m| m.focused()) == Some(Id::new(("tool-slot", 0usize))) {
+        if h.ctx.memory(|m| m.focused()) == Some(Id::unique(("tool-slot", 0usize))) {
             break;
         }
     }
-    assert_eq!(h.ctx.memory(|m| m.focused()), Some(Id::new(("tool-slot", 0usize))));
+    assert_eq!(h.ctx.memory(|m| m.focused()), Some(Id::unique(("tool-slot", 0usize))));
     key(&mut h, Key::Tab, Modifiers::NONE);
-    assert_eq!(h.ctx.memory(|m| m.focused()), Some(Id::new(("tool-slot", 1usize))));
+    assert_eq!(h.ctx.memory(|m| m.focused()), Some(Id::unique(("tool-slot", 1usize))));
     assert_eq!(h.state().ui.tool, Tool::Selection, "focus movement alone must not select a tool");
     key(&mut h, Key::Tab, Modifiers::NONE);
-    assert_eq!(h.ctx.memory(|m| m.focused()), Some(Id::new(("tool-slot", 2usize))));
+    assert_eq!(h.ctx.memory(|m| m.focused()), Some(Id::unique(("tool-slot", 2usize))));
     key(&mut h, Key::Tab, Modifiers::SHIFT);
-    assert_eq!(h.ctx.memory(|m| m.focused()), Some(Id::new(("tool-slot", 1usize))));
+    assert_eq!(h.ctx.memory(|m| m.focused()), Some(Id::unique(("tool-slot", 1usize))));
     key(&mut h, Key::Space, Modifiers::NONE);
     assert_eq!(h.state().ui.tool, Tool::Hand);
     assert!(!h.state().playback.playing, "Space activates the focused widget, not preview playback");
     assert!(Arc::ptr_eq(&h.state().session.project, &project), "keyboard focus and tool selection do not modify the project");
-    let response = h.ctx.read_response(Id::new(("tool-slot", 1usize))).unwrap();
+    let response = h.ctx.read_response(Id::unique(("tool-slot", 1usize))).unwrap();
     assert!(
         h.output().shapes.iter().any(|shape| {
             matches!(&shape.shape, egui::Shape::Rect(r) if r.rect == response.rect.shrink(1.0) && r.stroke.color == h.state().tokens.text && r.stroke.width > 0.0)
@@ -176,7 +176,7 @@ fn tab_traversal_activates_an_inactive_dock_tab_without_editing_the_project() {
     h.run_steps(3);
     assert!(h.state().auto.find("panel.tab.EffectControls").is_some(), "the inactive tab must be visible in this fixture");
     let before = h.state().ui.dock.clone();
-    let target = Id::new(("tab", "aaa".to_string(), 1usize));
+    let target = Id::unique(("tab", "aaa".to_string(), 1usize));
     let mut tabs = 0;
     for _ in 0..80 {
         key(&mut h, Key::Tab, Modifiers::NONE);
@@ -205,7 +205,7 @@ fn tab_traversal_activates_an_inactive_dock_tab_without_editing_the_project() {
     let inspected = effectcraft_ui_egui::control::inspect(h.state(), &h.ctx);
     assert_eq!(inspected["keyboardFocus"]["automationId"], "panel.tab.EffectControls");
     key(&mut h, Key::Tab, Modifiers::SHIFT);
-    assert_eq!(h.ctx.memory(|m| m.focused()), Some(Id::new(("tab", "aaa".to_string(), 0usize))));
+    assert_eq!(h.ctx.memory(|m| m.focused()), Some(Id::unique(("tab", "aaa".to_string(), 0usize))));
     key(&mut h, Key::Enter, Modifiers::NONE);
     assert_eq!(h.state().ui.focused, PanelKind::Project);
     assert!(!h.state().playback.playing);
@@ -284,7 +284,7 @@ fn control_root_divider_drag_after_toolbar_and_dock_tab_keyboard_activation() {
     d.ok("ui.click", json!({"id":"tools.Selection"}), true);
     // The toolbar can grow as upstream adds controls. Traverse to the actual response
     // identity rather than assuming a fixed number of focus stops.
-    let target = Id::new(("tab", "aaa".to_string(), 1usize));
+    let target = Id::unique(("tab", "aaa".to_string(), 1usize));
     for tabs in 1..=100 {
         d.ok("ui.key", json!({"key":"Tab"}), true);
         assert!(d.h.state().ui.mini_flowchart.is_none(), "dock-tab traversal must not open a foreground popup");
