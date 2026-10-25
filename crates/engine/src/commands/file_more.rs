@@ -949,9 +949,9 @@ fn reveal_in_finder(s: &mut Session, p: &Value) -> Result<Value> {
         Some(ItemKind::Footage(f)) if !f.path.is_empty() => f.path.clone(),
         _ => return Err(bad("file.revealInFinder", "the item is not a file")),
     };
-    let url = super::layer_menu::reveal_url(s, &path).map_err(|e| bad("file.revealInFinder", e))?;
-    s.events.push(crate::Event::OpenUrl(url.clone()));
-    Ok(json!({"url": url}))
+    let path = super::layer_menu::reveal_path(s, &path).map_err(|e| bad("file.revealInFinder", e))?.to_string_lossy().into_owned();
+    s.events.push(crate::Event::RevealFile(path.clone()));
+    Ok(json!({"path": path}))
 }
 
 pub fn specs() -> Vec<CommandSpec> {

@@ -371,6 +371,9 @@ pub enum Event {
     },
     OpenComp(ItemId),
     OpenUrl(String),
+    /// Reveal in Finder: the frontend shows this file in the system file manager (a `file://` URL
+    /// would open the web browser on Windows).
+    RevealFile(String),
     /// A frontend-only command (viewer zoom, panels, dialogs…) ran: the UI performs it. Headless
     /// sessions ignore these.
     Frontend {
