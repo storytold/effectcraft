@@ -186,6 +186,24 @@ fn modal_with_scroll(ctx: &egui::Context, title: &str, size: egui::Vec2, t: &Tok
     });
 }
 
+const SHOWN_MODAL: &str = "effectcraft.shownModal";
+const SHOWN_MODAL_ELEMENTS: &str = "effectcraft.shownModalElements";
+
+/// The dialog [`modal_fit`] showed last: its (untranslated) title and its frame, in points.
+#[derive(Clone, Debug)]
+pub(crate) struct ShownModal {
+    pub title: String,
+    pub rect: Rect,
+}
+
+/// The modal dialog shown last, while egui still treats a modal as open (the top modal layer
+/// takes every pointer press and key outside it), and the automation ids [`show`] drew for it.
+pub(crate) fn shown_modal(ctx: &egui::Context) -> Option<(egui::LayerId, Option<ShownModal>, Vec<String>)> {
+    let layer = ctx.memory(|m| m.top_modal_layer())?;
+    let (shown, ids) = ctx.data(|d| (d.get_temp::<ShownModal>(egui::Id::new(SHOWN_MODAL)), d.get_temp::<Vec<String>>(egui::Id::new(SHOWN_MODAL_ELEMENTS))));
+    Some((layer, shown, ids.unwrap_or_default()))
+}
+
 /// [`modal`] without its scroll area, for a dialog that keeps its buttons in view and scrolls
 /// only its content: `body` gets the height left under the title, with `size` kept within the
 /// window.
@@ -215,6 +233,10 @@ pub(crate) fn modal_fit(ctx: &egui::Context, title: &str, size: egui::Vec2, t: &
             ui.add_space(10.0);
             let title_h = ui.cursor().top() - ui.min_rect().top();
             body(ui, (size.y - 36.0 - title_h).max(40.0));
+            // Its frame (the modal's area is the whole window, with the backdrop), for the
+            // control channel: input outside it does nothing while it is open.
+            let frame = ui.min_rect().expand(18.0);
+            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(SHOWN_MODAL), ShownModal { title: title.to_string(), rect: frame }));
         });
 }
 
@@ -236,6 +258,14 @@ pub(crate) fn above_footer(ui: &mut egui::Ui, height: f32, footer: impl FnOnce(&
 
 pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context) {
     let Some(d) = app.dialog else { return };
+    let start = app.auto.elements.len();
+    show_dialog(app, ctx, d);
+    // The automation ids the dialog drew (its fields and buttons), for the control channel.
+    let ids: Vec<String> = app.auto.elements.get(start..).unwrap_or_default().iter().map(|e| e.id.clone()).collect();
+    ctx.data_mut(|data| data.insert_temp(egui::Id::new(SHOWN_MODAL_ELEMENTS), ids));
+}
+
+fn show_dialog(app: &mut EffectcraftApp, ctx: &egui::Context, d: Dialog) {
     let t = app.tokens;
     match d {
         Dialog::About => about(app, ctx, &t),

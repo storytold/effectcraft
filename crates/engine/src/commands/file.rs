@@ -236,6 +236,44 @@ struct PendingImport {
     errors: Vec<String>,
     /// EffectCraft projects merged in (`file.importProject` results); never added to a comp.
     projects: Vec<Value>,
+    /// The import's `alpha`, which replaces Settings ▸ Import ▸ Interpret Unlabeled Alpha As.
+    alpha: Option<ImportAlpha>,
+}
+
+/// `file.import`'s `alpha`: how to interpret unlabeled alpha for this import, as
+/// `file.interpretFootage`'s `alpha` would afterwards.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ImportAlpha {
+    Mode(effectcraft_project::AlphaMode),
+    /// Interpret Footage ▸ Guess from the first frame; Settings ▸ Import's Guess (premultiplied
+    /// movies, straight stills) when the frame has no partly transparent pixels.
+    Guess,
+}
+
+impl ImportAlpha {
+    fn parse(p: &Value) -> Result<Option<ImportAlpha>> {
+        use effectcraft_project::AlphaMode;
+        Ok(match p.get("alpha") {
+            None | Some(Value::Null) => None,
+            Some(v) => Some(match v.as_str() {
+                Some("straight") => ImportAlpha::Mode(AlphaMode::Straight),
+                Some("premultiplied") => ImportAlpha::Mode(AlphaMode::Premultiplied),
+                Some("ignore") => ImportAlpha::Mode(AlphaMode::Ignore),
+                Some("guess") => ImportAlpha::Guess,
+                _ => return Err(bad("file.import", format!("alpha: straight|premultiplied|ignore|guess, not {v}"))),
+            }),
+        })
+    }
+
+    /// The mode the prober applies to unlabeled footage (stills, or `movie`s).
+    fn mode(self, movie: bool) -> effectcraft_project::AlphaMode {
+        use effectcraft_project::AlphaMode;
+        match self {
+            ImportAlpha::Mode(a) => a,
+            ImportAlpha::Guess if movie => AlphaMode::Premultiplied,
+            ImportAlpha::Guess => AlphaMode::Straight,
+        }
+    }
 }
 
 /// Everything probing a file needs, apart from the session (it can run on a background thread).
@@ -261,6 +299,8 @@ struct Probed {
     /// The Project panel name.
     name: String,
     footage: effectcraft_project::Footage,
+    /// The file has an alpha channel that doesn't say how it is stored.
+    unlabeled_alpha: bool,
     /// Its alpha is unlabeled and Settings say Ask User: open Interpret Footage.
     ask_alpha: bool,
     warning: Option<String>,
@@ -276,7 +316,7 @@ impl Prober {
         if let Source::File(_) = src
             && let Some(f) = data_footage(self.services.as_ref(), path)
         {
-            return f.map(|footage| Probed { name, footage, ask_alpha: false, warning: None }).map_err(fail);
+            return f.map(|footage| Probed { name, footage, unlabeled_alpha: false, ask_alpha: false, warning: None }).map_err(fail);
         }
         let importer = self.importer.as_ref().ok_or_else(|| fail("media import is not available in this build".into()))?;
         let mut f = crate::sequence::probe(importer.as_ref(), src, self.sequence_rate).map_err(fail)?;
@@ -289,13 +329,13 @@ impl Prober {
         {
             warning = Some(format!("{name}: {gaps} (shown as placeholders)"));
         }
-        // Settings ▸ Import ▸ Interpret Unlabeled Alpha As: images only (a 3D model renders its
-        // own alpha, and audio and data have none).
+        // Settings ▸ Import ▸ Interpret Unlabeled Alpha As (or the import's `alpha`): images only
+        // (a 3D model renders its own alpha, and audio and data have none).
         let mut ask_alpha = false;
-        if matches!(f.kind, FootageKind::Still | FootageKind::Sequence | FootageKind::Video)
+        let unlabeled_alpha = matches!(f.kind, FootageKind::Still | FootageKind::Sequence | FootageKind::Video)
             && f.alpha != effectcraft_project::AlphaMode::Ignore
-            && !alpha_is_labeled(path, &f.codec)
-        {
+            && !alpha_is_labeled(path, &f.codec);
+        if unlabeled_alpha {
             let setting = if f.kind == FootageKind::Video { self.movie_alpha } else { self.still_alpha };
             match setting {
                 Some(a) => f.alpha = a,
@@ -326,7 +366,7 @@ impl Prober {
                 .ok_or_else(|| fail(format!("no layer {sel}")))?;
             f.layer = Some(effectcraft_project::SourceLayer { index: index as u32, name, layer_size: false, embedded: None, placed: false });
         }
-        Ok(Probed { name, footage: f, ask_alpha, warning })
+        Ok(Probed { name, footage: f, unlabeled_alpha, ask_alpha, warning })
     }
 }
 
@@ -339,6 +379,7 @@ fn prepare_import(s: &mut Session, p: &Value) -> Result<PendingImport> {
         Some(Value::String(x)) => vec![x.clone()],
         _ => return Err(bad("file.import", "missing `paths`")),
     };
+    let alpha = ImportAlpha::parse(p)?;
     // Photoshop documents as compositions (Import As: Composition / – Retain Layer Sizes).
     // Files dragged in follow Settings ▸ Import ▸ Default Drag Import As.
     let drag = p.get("drag").and_then(Value::as_bool).unwrap_or(false);
@@ -424,19 +465,19 @@ fn prepare_import(s: &mut Session, p: &Value) -> Result<PendingImport> {
         importer: s.importer.clone(),
         services: s.services.clone(),
         report_missing_frames: s.prefs.import.report_missing_frames,
-        still_alpha: s.prefs.unlabeled_alpha(false),
-        movie_alpha: s.prefs.unlabeled_alpha(true),
+        still_alpha: alpha.map(|a| a.mode(false)).or(s.prefs.unlabeled_alpha(false)),
+        movie_alpha: alpha.map(|a| a.mode(true)).or(s.prefs.unlabeled_alpha(true)),
         sequence_rate: effectcraft_time::FrameRate::from_f64(fps),
         page,
         psd_layer: p.get("layer").cloned(),
     };
-    Ok(PendingImport { sources, prober, comps, items, errors, projects })
+    Ok(PendingImport { sources, prober, comps, items, errors, projects, alpha })
 }
 
 /// The last part of an import: add the probed files to the project (one undo step) and select
 /// everything the import made, so the Project panel shows it.
 fn add_footage(s: &mut Session, pending: PendingImport, probed: Vec<std::result::Result<Probed, String>>) -> Result<Value> {
-    let PendingImport { comps, mut items, mut errors, projects, .. } = pending;
+    let PendingImport { comps, mut items, mut errors, projects, alpha, .. } = pending;
     let mut found = vec![];
     let mut warnings = vec![];
     for r in probed {
@@ -449,6 +490,8 @@ fn add_footage(s: &mut Session, pending: PendingImport, probed: Vec<std::result:
         }
     }
     let mut asked: Vec<u64> = vec![];
+    // Footage with unlabeled alpha, and who decided how to interpret it.
+    let mut unlabeled: Vec<(u64, &str)> = vec![];
     let made: Vec<ItemId> = comps.iter().map(|c| ItemId(*c)).collect();
     if !found.is_empty() {
         // The file may have been overwritten since an earlier import or project decoded it (the
@@ -457,6 +500,7 @@ fn add_footage(s: &mut Session, pending: PendingImport, probed: Vec<std::result:
             s.forget_decoded(&f.footage);
             s.stored_paths.allow(&f.footage);
         }
+        let source = s.footage.clone();
         s.edit("Import", None, |proj, st| {
             let mut selection = made;
             for f in found {
@@ -475,6 +519,26 @@ fn add_footage(s: &mut Session, pending: PendingImport, probed: Vec<std::result:
                 };
                 let id = proj.add_item(&name, label, None, ItemKind::Footage(footage));
                 items.push(id.0);
+                if f.unlabeled_alpha {
+                    // `alpha: guess`: Interpret Footage ▸ Guess, in this undo step.
+                    if alpha == Some(ImportAlpha::Guess)
+                        && let Some(ItemKind::Footage(ft)) = proj.item_mut(id).map(|it| &mut it.kind)
+                        && let Some((a, matte)) = super::file_more::guess_alpha_from(source.as_ref(), id, ft)
+                    {
+                        ft.alpha = a;
+                        ft.premul_color = matte;
+                    }
+                    unlabeled.push((
+                        id.0,
+                        if f.ask_alpha {
+                            "ask"
+                        } else if alpha.is_some() {
+                            "alpha"
+                        } else {
+                            "settings"
+                        },
+                    ));
+                }
                 if f.ask_alpha {
                     asked.push(id.0);
                 }
@@ -494,7 +558,20 @@ fn add_footage(s: &mut Session, pending: PendingImport, probed: Vec<std::result:
     if let Some(first) = asked.first() {
         s.events.push(crate::Event::Frontend { command: "file.interpretFootage".into(), params: json!({"item": first, "reason": "unlabeledAlpha"}) });
     }
-    let mut out = json!({"items": items, "comps": comps, "errors": errors, "warnings": warnings, "unlabeledAlpha": asked});
+    // What each item with unlabeled alpha is interpreted as, and by whom: the import's `alpha`,
+    // Settings ▸ Import, or `ask` (Ask User: Straight until Interpret Footage changes it).
+    let interpreted: Vec<Value> = unlabeled
+        .iter()
+        .filter_map(|(id, from)| match s.project.item(ItemId(*id)).map(|it| &it.kind) {
+            Some(ItemKind::Footage(f)) => Some(json!({"item": id, "alpha": format!("{:?}", f.alpha), "matteColor": f.premul_color, "from": from})),
+            _ => None,
+        })
+        .collect();
+    let unlabeled: Vec<u64> = unlabeled.iter().map(|(id, _)| *id).collect();
+    let mut out = json!({
+        "items": items, "comps": comps, "errors": errors, "warnings": warnings,
+        "unlabeledAlpha": unlabeled, "alphaInterpretation": interpreted, "askedAlpha": asked,
+    });
     if !projects.is_empty() {
         out["projects"] = Value::Array(projects);
     }
@@ -745,7 +822,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "File...",
             ["File", "Import"],
             Some("Cmd+I"),
-            "{paths: [string] (files or folders), sequence?: bool (the Sequence checkbox: true imports numbered stills of one run as one image sequence, one picked file bringing its whole run and several picked files that range; default: a numbered still brings its run, except dropped files (drag), which import as stills as in After Effects; folders' runs import as sequences; false imports stills and a folder's files individually), alphabetical?: bool (Force Alphabetical Order: every image of that type in the folder, by name), frameRate?: fps (image sequences; default Settings ▸ Import ▸ Sequence Footage), importAs?: footage|composition|compositionLayerSizes (Photoshop, PDF, Illustrator and EPS files), layer?: name|index (footage of one Photoshop layer), page?: number from 1 (PDF / Illustrator page), drag?: bool (dropped files: Settings ▸ Import ▸ Default Drag Import As; files import as stills unless sequence), addToComp?: bool (also add them to the active comp, at time?, index?, position? as in layer.addItem), background?: bool (probe the files in a background job, jobs.list / jobs.wait; returns {job})}",
+            "{paths: [string] (files or folders), sequence?: bool (the Sequence checkbox: true imports numbered stills of one run as one image sequence, one picked file bringing its whole run and several picked files that range; default: a numbered still brings its run, except dropped files (drag), which import as stills as in After Effects; folders' runs import as sequences; false imports stills and a folder's files individually), alphabetical?: bool (Force Alphabetical Order: every image of that type in the folder, by name), frameRate?: fps (image sequences; default Settings ▸ Import ▸ Sequence Footage), importAs?: footage|composition|compositionLayerSizes (Photoshop, PDF, Illustrator and EPS files), layer?: name|index (footage of one Photoshop layer), page?: number from 1 (PDF / Illustrator page), drag?: bool (dropped files: Settings ▸ Import ▸ Default Drag Import As; files import as stills unless sequence), alpha?: straight|premultiplied|ignore|guess (how to interpret footage whose alpha is unlabeled, instead of Settings ▸ Import ▸ Interpret Unlabeled Alpha As; never asks; guess reads the first frame as Interpret Footage ▸ Guess does), addToComp?: bool (also add them to the active comp, at time?, index?, position? as in layer.addItem), background?: bool (probe the files in a background job, jobs.list / jobs.wait; returns {job})}",
             always,
             import_cmd
         ),

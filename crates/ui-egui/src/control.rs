@@ -169,6 +169,43 @@ fn point(app: &EffectcraftApp, p: &Value) -> Result<egui::Pos2, String> {
     Ok(egui::pos2(x as f32, y as f32))
 }
 
+/// The open modal dialog, which takes every pointer press and key: `{dialog, title, rect,
+/// elements}` (`elements`: the automation ids drawn inside it, such as `form.ok` and
+/// `form.cancel`), or `null`. `ui.inspect` and input replies report it.
+pub fn modal(app: &EffectcraftApp, ctx: &egui::Context) -> Value {
+    // egui's modal layer is last frame's: a dialog closed since then is not open any more.
+    let Some((_, shown, mut elements)) = crate::panels::dialogs::shown_modal(ctx).filter(|_| app.dialog.is_some()) else { return Value::Null };
+    let rect = shown.as_ref().map(|m| m.rect);
+    elements.truncate(64);
+    json!({
+        "dialog": app.dialog.map(|d| format!("{d:?}")),
+        "title": shown.map(|m| m.title),
+        "rect": rect.map(|r| [r.min.x, r.min.y, r.width(), r.height()]),
+        "elements": elements,
+    })
+}
+
+/// The error for pointer input at `pos` while a modal dialog is open and `pos` is outside it (and
+/// outside its popups): egui would drop the input without a word.
+fn outside_modal(app: &EffectcraftApp, ctx: &egui::Context, pos: egui::Pos2) -> Option<String> {
+    let (layer, shown, _) = crate::panels::dialogs::shown_modal(ctx).filter(|_| app.dialog.is_some())?;
+    let rect = shown.map(|m| m.rect)?;
+    // A popup of the dialog (a dropdown list) is a layer above it.
+    let above = ctx.layer_id_at(pos).is_some_and(|l| l != layer && ctx.memory(|m| m.is_above_modal_layer(l)));
+    if rect.contains(pos) || above {
+        return None;
+    }
+    let m = modal(app, ctx);
+    let name = m["title"].as_str().or(m["dialog"].as_str()).unwrap_or("dialog").to_string();
+    let buttons: Vec<&str> =
+        m["elements"].as_array().into_iter().flatten().filter_map(Value::as_str).filter(|id| !id.starts_with("form.field.")).take(8).collect();
+    let close = if buttons.is_empty() { "ui.key Escape".to_string() } else { format!("ui.click on {}", buttons.join(" / ")) };
+    Some(format!(
+        "a modal dialog is open (\"{name}\") and takes all input: the input at {:.0},{:.0} is outside it and would do nothing. Finish or close it first ({close}); ui.inspect reports it as `modal`",
+        pos.x, pos.y
+    ))
+}
+
 pub fn handle(app: &mut EffectcraftApp, ctx: &egui::Context, req: &ControlRequest) -> Outcome {
     let p = &req.params;
     let s = |k: &str| p.get(k).and_then(Value::as_str);
@@ -320,6 +357,11 @@ pub fn handle(app: &mut EffectcraftApp, ctx: &egui::Context, req: &ControlReques
                 Err(e) if e.starts_with(RETRY) => return Outcome::Retry(e.trim_start_matches(RETRY).to_string()),
                 Err(e) => return err(e),
             };
+            if req.method == "ui.click"
+                && let Some(e) = outside_modal(app, ctx, pos)
+            {
+                return err(e);
+            }
             let m = modifiers(p);
             // Validate the complete gesture before mutating the queue; the loopback control
             // channel is externally reachable and must not amplify tiny requests into huge work.
@@ -367,6 +409,9 @@ pub fn handle(app: &mut EffectcraftApp, ctx: &egui::Context, req: &ControlReques
                 (Err(e), _) | (_, Err(e)) if e.starts_with(RETRY) => return Outcome::Retry(e.trim_start_matches(RETRY).to_string()),
                 (Err(e), _) | (_, Err(e)) => return err(e),
             };
+            if let Some(e) = outside_modal(app, ctx, a) {
+                return err(e);
+            }
             let steps = p.get("steps").and_then(Value::as_u64).unwrap_or(12).max(2);
             const MAX_PENDING_EVENTS: usize = 4096;
             const MAX_DRAG_STEPS: u64 = 2048;
@@ -394,6 +439,9 @@ pub fn handle(app: &mut EffectcraftApp, ctx: &egui::Context, req: &ControlReques
                 Ok(p) => p,
                 Err(e) => return err(e),
             };
+            if let Some(e) = outside_modal(app, ctx, pos) {
+                return err(e);
+            }
             let dx = p.get("dx").and_then(Value::as_f64).unwrap_or(0.0) as f32;
             let dy = p.get("dy").and_then(Value::as_f64).unwrap_or(0.0) as f32;
             app.synthetic.push(egui::Event::PointerMoved(pos));
@@ -591,6 +639,7 @@ pub fn inspect(app: &EffectcraftApp, ctx: &egui::Context) -> Value {
         "windowFocused": ctx.input(|i| i.focused),
         "workspaceStorageError": app.workspace_store.error,
         "dialog": app.dialog.map(|d| format!("{d:?}")),
+        "modal": modal(app, ctx),
         "renderMs": app.frames.last_ms.lock().map(|v| *v).unwrap_or(0.0),
     })
 }
