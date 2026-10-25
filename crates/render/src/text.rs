@@ -1010,8 +1010,46 @@ fn draw_glyphs(geom: &TextGeom, img: &mut Image, to_px: &Mat3, s: f64, only: Opt
     }
 }
 
+/// Buffer pixels kept around a clip (see [`raster_window`]).
+const CLIP_PAD: f64 = 24.0;
+
+/// The buffer for content bounds `b` (layer space) at scale `s`: (width, height, layer → buffer
+/// offset), two pixels of padding around it. With `clip`, only the pixels of that grid inside
+/// `clip`, padded by [`CLIP_PAD`]: a whole-pixel window of the whole buffer's grid. Its pixels are
+/// the whole buffer's, except that a glyph cut by the window is rasterised from the window's edge:
+/// tiny-skia's 4 × 4 anti-aliasing then lands a sub-sample differently on a few edge pixels, up to
+/// a dozen rows in from that edge — inside the padding, out of the frame. `None` when `clip`
+/// misses the content.
+pub(crate) fn raster_window(b: kurbo::Rect, s: f64, clip: Option<kurbo::Rect>) -> Option<(u32, u32, [f64; 2])> {
+    let (full_w, full_h) = ((b.width() * s).ceil() + 4.0, (b.height() * s).ceil() + 4.0);
+    let full = [-b.x0 * s + 2.0, -b.y0 * s + 2.0];
+    let (x0, y0, x1, y1) = match clip {
+        None => (0.0, 0.0, full_w, full_h),
+        // Nothing shows (behind the camera).
+        Some(c) if c.area() <= 0.0 => return None,
+        Some(c) => (
+            (c.x0 * s + full[0] - CLIP_PAD).floor().max(0.0),
+            (c.y0 * s + full[1] - CLIP_PAD).floor().max(0.0),
+            (c.x1 * s + full[0] + CLIP_PAD).ceil().min(full_w),
+            (c.y1 * s + full[1] + CLIP_PAD).ceil().min(full_h),
+        ),
+    };
+    if !(x1 > x0 && y1 > y0) {
+        return None;
+    }
+    let w = ((x1 - x0) as u32).clamp(1, 16384);
+    let h = ((y1 - y0) as u32).clamp(1, 16384);
+    Some((w, h, [full[0] - x0, full[1] - y0]))
+}
+
 /// Render a text layer into a layer-space buffer at scale `s`.
 pub fn render(ctx: &EvalCtx, layer: &Layer, s: f64) -> Buf {
+    render_in(ctx, layer, s, None)
+}
+
+/// [`render`], only the part of the layer inside `clip` (layer space; the part the output shows,
+/// see `Renderer::raster_clip`).
+pub fn render_in(ctx: &EvalCtx, layer: &Layer, s: f64, clip: Option<kurbo::Rect>) -> Buf {
     let empty = || Buf { img: Image::new(1, 1), offset: [0.0; 2], scale: s };
     let Some(geom) = text_geom(ctx, layer) else { return empty() };
     let mut bounds: Option<kurbo::Rect> = None;
@@ -1025,9 +1063,7 @@ pub fn render(ctx: &EvalCtx, layer: &Layer, s: f64) -> Buf {
     }
     let Some(b) = bounds else { return empty() };
     let b = b.intersect(kurbo::Rect::new(-20000.0, -20000.0, 20000.0, 20000.0));
-    let w = ((b.width() * s).ceil() as u32 + 4).clamp(1, 16384);
-    let h = ((b.height() * s).ceil() as u32 + 4).clamp(1, 16384);
-    let offset = [-b.x0 * s + 2.0, -b.y0 * s + 2.0];
+    let Some((w, h, offset)) = raster_window(b, s, clip) else { return empty() };
     let mut img = Image::new(w, h);
     let base = Mat3::translate(vec2(offset[0], offset[1])) * Mat3::scale(vec2(s, s));
     draw_glyphs(&geom, &mut img, &base, s, None);

@@ -601,6 +601,9 @@ pub struct Renderer<'a> {
     through: [Option<Through<'a>>; MAX_THROUGH],
     /// More collapsed levels than [`MAX_THROUGH`]: their motion is not blurred.
     through_lost: bool,
+    /// Rasterise 3D text and shapes whole, never only the part the output shows
+    /// ([`Renderer::raster_clip`]; tests compare against it).
+    pub(crate) whole_raster: bool,
 }
 
 /// One collapsed precomp layer a nested comp is drawn through.
@@ -687,6 +690,7 @@ impl<'a> Renderer<'a> {
             top: true,
             through: [None; MAX_THROUGH],
             through_lost: false,
+            whole_raster: false,
         }
     }
 
@@ -743,6 +747,9 @@ impl<'a> Renderer<'a> {
             top: false,
             through: [None; MAX_THROUGH],
             through_lost: false,
+            // Effects read other layers through it in layer space (layer parameters, Echo…):
+            // they need the whole layer, not the part this frame shows (see `raster_clip`).
+            whole_raster: true,
             ..*self
         }
     }
@@ -868,8 +875,9 @@ impl<'a> Renderer<'a> {
         }
         let (scale, draft, blur) = (self.raster_scale(ctx, layer), self.opts.draft, self.mb_on(ctx, layer));
         let prev = ctx.time - ctx.comp.frame_rate.frame_duration();
-        let now = cache::layer_key(ctx, layer, scale, draft, blur);
-        now.is_some() && now == cache::layer_key(&ctx.at(prev), layer, scale, draft, blur)
+        let before = ctx.at(prev);
+        let now = self.clipped_key(ctx, layer, cache::layer_key(ctx, layer, scale, draft, blur));
+        now.is_some() && now == self.clipped_key(&before, layer, cache::layer_key(&before, layer, scale, draft, blur))
     }
 
     /// Rasterisation scale of a layer's source: the output scale, or — for text and shape layers,
@@ -902,12 +910,71 @@ impl<'a> Renderer<'a> {
         // a whole number maps the unit vectors to lengths a hair over 1, which must stay 1 (#390:
         // rounded up to 2^¼, unscaled text was drawn larger and resampled, softer).
         let mut k = 2f64.powf((k.log2() * 4.0 - 1e-6).ceil() / 4.0).clamp(1.0 / 16.0, 64.0);
-        // Keep the buffer within about 16 million pixels.
+        // Keep the buffer within about 16 million pixels (of the part the output shows, when
+        // only that is rasterised: see `raster_clip`).
         if let Some(b) = content_bounds(ctx, layer) {
+            let b = match self.raster_clip(ctx, layer) {
+                Some(c) => {
+                    let r = kurbo::Rect::new(b[0], b[1], b[2], b[3]).intersect(c);
+                    [r.x0, r.y0, r.x1, r.y1]
+                }
+                None => b,
+            };
             let area = ((b[2] - b[0]) * (b[3] - b[1])).max(1.0) * s * s;
             k = k.min((16.0e6 / area).sqrt().max(1.0));
         }
         s * k
+    }
+
+    /// The layer-space part of a 3D text or shape layer the output shows, when only that part
+    /// needs rasterising (#1388: text close to the camera was rasterised whole at up to 16
+    /// million pixels, a quarter gigabyte per frame worker, though the frame showed a fraction
+    /// of it; behind the camera it was rasterised and not drawn). `None` rasterises it whole:
+    /// whenever pixels outside the frame can matter — effects, layer styles, masks, motion blur,
+    /// depth of field, lights (shadows and transmission), Advanced 3D, per-character 3D, a
+    /// collapsed 2D transform — or the visible part can't be bounded (see
+    /// [`three_d::compose::visible_clip`]).
+    pub(crate) fn raster_clip(&self, ctx: &EvalCtx, layer: &Layer) -> Option<kurbo::Rect> {
+        if self.whole_raster || !layer.is_3d() || !matches!(layer.source, LayerSource::Text | LayerSource::Shape) || self.outer.is_some() {
+            return None;
+        }
+        if (layer.switches.effects && layer.effects().is_some_and(|fx| !fx.children.is_empty()))
+            || layer.masks().is_some_and(|m| !m.children.is_empty())
+            || styles::active(ctx, layer)
+            || ctx.comp.layers.iter().any(|l| matches!(l.source, LayerSource::Light { .. }))
+            || self.is_adv3d(ctx)
+            || (matches!(layer.source, LayerSource::Text) && text::per_char_3d(ctx, layer))
+        {
+            return None;
+        }
+        let v = three_d::compose::visible_clip(self, ctx, layer)?;
+        if v.area() <= 0.0 {
+            // Behind the camera.
+            return Some(v);
+        }
+        let b = content_bounds(ctx, layer).map(|b| kurbo::Rect::new(b[0], b[1], b[2], b[3]))?;
+        if v.x0 <= b.x0 && v.y0 <= b.y0 && v.x1 >= b.x1 && v.y1 >= b.y1 {
+            return None;
+        }
+        // Whole cells of a layer-space grid whose cell is about a quarter of the part that shows,
+        // rounded down to a power of two: a moving camera keeps one raster (and its cache entry)
+        // while that part stays within the same cells, and a dolly changes the grid only at each
+        // doubling. The cells cover at most about 2.25 times the part that shows. Worth it only
+        // when it leaves out at least half of the content.
+        let c = 2f64.powf(((v.width().max(v.height()) / 4.0).max(1e-6)).log2().floor());
+        let snap = |v: f64, up: bool| if up { (v / c).ceil() * c } else { (v / c).floor() * c };
+        // (Not cut to the content bounds: a stroke or a glyph's padding reaches past them.)
+        let cells = kurbo::Rect::new(snap(v.x0, false), snap(v.y0, false), snap(v.x1, true), snap(v.y1, true));
+        (cells.is_finite() && cells.intersect(b).area() <= b.area() * 0.5).then_some(cells)
+    }
+
+    /// A layer content cache key that also names the part rasterised ([`Self::raster_clip`]).
+    fn clipped_key(&self, ctx: &EvalCtx, layer: &Layer, key: Option<u64>) -> Option<u64> {
+        let k = key?;
+        Some(match self.raster_clip(ctx, layer) {
+            Some(c) => [c.x0, c.y0, c.x1, c.y1].iter().fold(cache::derive(k, 0xc11b), |d, v| cache::derive(d, (v * 16.0).round() as i64 as u64)),
+            None => k,
+        })
     }
 
     /// Draw a Wireframe-quality layer: its bounds as a one-pixel outline.
@@ -1322,8 +1389,11 @@ impl<'a> Renderer<'a> {
                 let img = self.footage_frame(ctx, layer, *item, pf, lt, size)?;
                 Some(self.footage_buf(&img, pf, f.width, f.height))
             }
-            LayerSource::Text => Some(self.authored(text::render(ctx, layer, self.raster_scale(ctx, layer)))),
-            LayerSource::Shape => layer.props.sub("contents").map(|c| self.authored(shapes::render(ctx, layer, c, self.raster_scale(ctx, layer)))),
+            LayerSource::Text => Some(self.authored(text::render_in(ctx, layer, self.raster_scale(ctx, layer), self.raster_clip(ctx, layer)))),
+            LayerSource::Shape => layer
+                .props
+                .sub("contents")
+                .map(|c| self.authored(shapes::render_in(ctx, layer, c, self.raster_scale(ctx, layer), self.raster_clip(ctx, layer)))),
             _ => None,
         }
     }
@@ -1490,7 +1560,8 @@ impl<'a> Renderer<'a> {
     /// (what the motion tracker analyses, like After Effects' Layer panel). `None` for layers
     /// without pixels.
     pub fn layer_source(&self, ctx: &EvalCtx, layer: &Layer) -> Option<Buf> {
-        self.source(ctx, layer)
+        // The whole layer, not the part the frame shows (see `raster_clip`).
+        Renderer { whole_raster: true, ..*self }.source(ctx, layer)
     }
 
     /// Layer pixels after source → masks → effects (no layer styles).
@@ -1500,7 +1571,7 @@ impl<'a> Renderer<'a> {
 
     fn content_buf_timed(&self, ctx: &EvalCtx, layer: &Layer, mut timing: Option<&mut LayerTiming>) -> Option<(Arc<Buf>, Option<u64>)> {
         let key = self.cache.and_then(|_| cache::layer_key(ctx, layer, self.raster_scale(ctx, layer), self.opts.draft, self.mb_on(ctx, layer)));
-        let key = self.content_key(ctx, layer, key);
+        let key = self.content_key(ctx, layer, self.clipped_key(ctx, layer, key));
         if let (Some(c), Some(k)) = (self.cache, key)
             && let Some(b) = c.get(k)
         {
@@ -1525,7 +1596,7 @@ impl<'a> Renderer<'a> {
     /// so scrubbing reuses frames rendered for earlier output frames.
     pub fn layer_input(&self, ctx: &EvalCtx, layer: &Layer, effects: usize) -> Option<Arc<Buf>> {
         let key = self.cache.and_then(|_| cache::input_key(ctx, layer, self.raster_scale(ctx, layer), self.opts.draft, self.mb_on(ctx, layer), effects));
-        let key = self.content_key(ctx, layer, key);
+        let key = self.content_key(ctx, layer, self.clipped_key(ctx, layer, key));
         if let (Some(c), Some(k)) = (self.cache, key)
             && let Some(b) = c.get(k)
         {
@@ -2229,7 +2300,11 @@ impl<'a> Renderer<'a> {
     /// its effects show. `None` = the layer changes nothing.
     pub fn adjustment_footprint(&self, ctx: &EvalCtx, layer: &Layer) -> Option<Arc<Buf>> {
         // Cached, so an accelerator sees the same buffer (and uploads it once) every frame.
-        let key = self.cache.and_then(|_| cache::footprint_key(ctx, layer, self.raster_scale(ctx, layer), self.opts.draft, self.mb_on(ctx, layer)));
+        let key = self.clipped_key(
+            ctx,
+            layer,
+            self.cache.and_then(|_| cache::footprint_key(ctx, layer, self.raster_scale(ctx, layer), self.opts.draft, self.mb_on(ctx, layer))),
+        );
         if let (Some(c), Some(k)) = (self.cache, key)
             && let Some(b) = c.get(k)
         {
@@ -2456,5 +2531,7 @@ mod tests_motion_tile;
 mod tests_nested;
 #[cfg(test)]
 mod tests_paint;
+#[cfg(test)]
+mod tests_raster_clip;
 #[cfg(test)]
 mod tests_time;

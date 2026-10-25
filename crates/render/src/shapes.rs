@@ -592,6 +592,12 @@ const BATCH_PIXELS: usize = 8 << 20;
 /// Each draw rasterises and composites only its own pixel rectangle; coverage masks of
 /// consecutive draws are rasterised in parallel, then composited in stacking order.
 pub fn render(ctx: &EvalCtx, layer: &Layer, contents: &PropGroup, s: f64) -> Buf {
+    render_in(ctx, layer, contents, s, None)
+}
+
+/// [`render`], only the part of the layer inside `clip` (layer space; the part the output shows,
+/// see `Renderer::raster_clip`).
+pub fn render_in(ctx: &EvalCtx, layer: &Layer, contents: &PropGroup, s: f64, clip: Option<kurbo::Rect>) -> Buf {
     let mut arena = Vec::new();
     let (draws, _) = collect(ctx, layer, contents, &mut arena);
     // Bottom-most draw first.
@@ -608,9 +614,7 @@ pub fn render(ctx: &EvalCtx, layer: &Layer, contents: &PropGroup, s: f64) -> Buf
     let Some(b) = resolved.iter().map(|r| r.2).reduce(|a, b| a.union(b)) else { return Buf { img: Image::new(1, 1), offset: [0.0, 0.0], scale: s } };
     // Keep buffers sane for runaway geometry.
     let b = b.intersect(kurbo::Rect::new(-20000.0, -20000.0, 20000.0, 20000.0));
-    let w = ((b.width() * s).ceil() as u32 + 4).clamp(1, 16384);
-    let h = ((b.height() * s).ceil() as u32 + 4).clamp(1, 16384);
-    let offset = [-b.x0 * s + 2.0, -b.y0 * s + 2.0];
+    let Some((w, h, offset)) = crate::text::raster_window(b, s, clip) else { return Buf { img: Image::new(1, 1), offset: [0.0, 0.0], scale: s } };
     let m = Mat3::translate(vec2(offset[0], offset[1])) * Mat3::scale(vec2(s, s));
     let px_rect = |r: kurbo::Rect| -> Option<PxRect> {
         let x0 = (r.x0 * s + offset[0]).floor().max(0.0);
