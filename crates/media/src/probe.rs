@@ -23,6 +23,9 @@ pub fn probe(path: impl AsRef<Path>) -> Result<Footage> {
         let turn = header.as_deref().map_or(Orientation::NoTransforms, video_turn);
         turn_footage(&mut f, turn);
         correct_rate(&mut f, header.as_deref().and_then(video_rate));
+        if f.kind == FootageKind::Video {
+            f.first_frame_time = header.as_deref().map_or(Tick::ZERO, video_first_frame_time);
+        }
         return Ok(f);
     }
     let bytes = std::fs::read(path).map_err(|e| MediaError::Io(format!("{}: {e}", path.display())))?;
@@ -107,11 +110,32 @@ pub fn probe_bytes(path: &str, bytes: Arc<[u8]>) -> Result<Footage> {
     let name = Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.to_string());
     let turn = video_turn(&bytes);
     let rate = video_rate(&bytes);
+    let first = video_first_frame_time(&bytes);
     let src = filmcraft_codecs::open_bytes(&name, bytes)?;
     let mut f = footage_from_info(path, src.info());
     turn_footage(&mut f, turn);
     correct_rate(&mut f, rate);
+    if f.kind == FootageKind::Video {
+        f.first_frame_time = first;
+    }
     Ok(f)
+}
+
+/// Where an MP4/MOV movie's first video frame is shown, after its edit list: ffmpeg writes H.264
+/// with B-frames and no edit list so that the first frame sits at e.g. 0.08 s. `Tick::ZERO` for
+/// other containers and for movies that start at 0.
+fn video_first_frame_time(bytes: &[u8]) -> Tick {
+    let Ok(file) = filmcraft_isobmff::open(bytes) else { return Tick::ZERO };
+    let Some(t) = file.tracks.iter().find(|t| t.kind == filmcraft_isobmff::TrackKind::Video && !t.samples.is_empty()) else {
+        return Tick::ZERO;
+    };
+    let first = t.samples.iter().map(|s| s.pts).min().unwrap_or(0);
+    first_frame_time(t.timescale, first, t.edit_offset)
+}
+
+/// `first_pts` (raw, in `1 / timescale` s) moved by the edit list's `edit_offset`; never negative.
+fn first_frame_time(timescale: u32, first_pts: i64, edit_offset: i64) -> Tick {
+    Tick::from_units(first_pts.saturating_add(edit_offset).max(0), i64::from(timescale))
 }
 
 /// A movie's frame rate as its frame durations average to ([`video_rate`]), where the reader's
@@ -318,6 +342,15 @@ fn averaged_rate(timescale: u32, durations: impl Iterator<Item = u32>) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn first_frame_time_is_where_the_first_frame_sits() {
+        // 25 fps, timescale 12800: the first frame at 0.08 s (1024 units), no edit list.
+        assert_eq!(first_frame_time(12800, 1024, 0), Tick::from_seconds_f64(0.08));
+        // An edit list that starts the media at that frame puts it at 0.
+        assert_eq!(first_frame_time(12800, 1024, -1024), Tick::ZERO);
+        assert_eq!(first_frame_time(12800, 0, -64), Tick::ZERO);
+    }
 
     /// Durations (in 1/`timescale` s) of `n` frames at `rate` whose times are rounded to the timescale.
     fn rounded(rate: FrameRate, timescale: i64, n: i64) -> Vec<u32> {

@@ -83,6 +83,7 @@ fn refreshed(s: &Session, f: &Footage, probed: Footage) -> Footage {
     nf.has_audio = probed.has_audio;
     if matches!(f.kind, FootageKind::Video | FootageKind::Audio) {
         nf.duration = probed.duration;
+        nf.first_frame_time = probed.first_frame_time;
         // Interpret Footage ▸ Conform to frame rate stays; the file's own rate is refreshed.
         match f.native_rate {
             Some(_) => nf.native_rate = Some(probed.native_rate.unwrap_or(probed.frame_rate)),
