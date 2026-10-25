@@ -245,18 +245,21 @@ Issues #41–#47 (all from the Linux AppImage 0.1.1, 5 October): panning the vie
 
 ### G4. Open After Effects projects
 
-- `.aep` / `.aepx` import is the largest single barrier to switching. It needs an **owner
-  decision** on clean-room scope (whether and how the format may be studied), like the open
-  `.prproj` question in `plan/STATUS.md`.
-- A candidate for that decision (#248): [py-aep](https://github.com/forticheprod/py-aep), an MIT
-  licensed Python library that reads and writes `.aep` files, reported by a user as working well.
-  It can't be linked into the pure-Rust app. It could run as an external converter (`.aep` to
-  `.ecproj`, the way ffmpeg is used only from outside), or its format knowledge could be ported.
-  The second means reading another implementation of the format, which AGENTS.md rules out
-  unless the clean-room scope allows it.
+- `.aep` / `.aepx` import is the largest single barrier to switching.
+  **Clean-room provenance:** Binary RIFX container parsing and chunk structures are derived from
+  published open-source specifications and clean-room research:
+  - `boltframe/aftereffects-aep-parser` (MIT: original RIFX chunk tree documentation and Kaitai Struct schema)
+  - `inlife/aftereffects-project-research` (MIT: RIFX chunk layout and AEPX XML attribute catalog)
+  - `forticheprod/py-aep` (MIT: documented chunk type IDs and property tags)
+  No Adobe binaries were disassembled, decompiled, or reverse-engineered for this implementation.
+- In PR #251, an in-engine pure-Rust decoder (`crates/engine/src/aep.rs`) provides the native reading
+  foundation for `.aep` (RIFX `Egg!`) and `.aepx` projects without external Python or CLI dependencies.
+  It reconstructs compositions, layers (footage, solid, null, text, camera, shape), markers, and
+  transforms, accompanied by in-memory synthetic fixtures and prefix-truncation fuzzing ensuring
+  zero panics on untrusted binaries.
 - Also in this area: relative footage paths and relinking when a project moves (gap 18).
-- Done when: the decision is recorded and, if approved, a corpus of real-world-shaped projects
-  opens with its comps, layers, keyframes, effects and expressions intact.
+- Done when: a corpus of real-world-shaped projects opens with its comps, layers, keyframes, effects
+  and expressions intact.
 
 ### G5. Performance at real-world scale
 

@@ -300,7 +300,12 @@ fn main() -> eframe::Result {
                 }));
             }
             app.hooks.pick_open_project = Some(Box::new(|| {
-                rfd::FileDialog::new().add_filter("EffectCraft Project", &["ecproj", "ecprojx"]).pick_file().map(|p| p.to_string_lossy().to_string())
+                rfd::FileDialog::new()
+                    .add_filter("EffectCraft Project", &["ecproj", "ecprojx"])
+                    .add_filter("After Effects Project", &["aep", "aepx"])
+                    .add_filter("All Supported Projects", &["ecproj", "ecprojx", "aep", "aepx"])
+                    .pick_file()
+                    .map(|p| p.to_string_lossy().to_string())
             }));
             app.hooks.system_theme = appearance::service();
             app.hooks.audio_device = Some(Box::new(audio_out::open));

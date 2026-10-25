@@ -43,14 +43,20 @@ fn demo(s: &mut Session, _: &Value) -> Result<Value> {
 pub(crate) fn open(s: &mut Session, p: &Value) -> Result<Value> {
     let path = str_p(p, "path").ok_or_else(|| bad("file.open", "missing `path`"))?;
     let bytes = s.services.read_file(path).map_err(|e| EngineError::Other(format!("cannot read {path}: {e}")))?;
-    let text = String::from_utf8(bytes).map_err(|_| EngineError::Other("not a text project file".into()))?;
-    // XML copies (File ▸ Save a Copy As XML…) open like the JSON project.
-    let text = if crate::xml_project::is_xml(&text) { crate::xml_project::from_xml(&text).map_err(EngineError::Other)? } else { text };
-    let (mut proj, repaired) =
-        Project::from_json_repaired(&text).map_err(|e| EngineError::Other(format!("{path} is not a project EffectCraft can open: {e}")))?;
-    // Footage saved with a relative path (imported by the CLI or an agent as `clip.mp4`, or
-    // written by hand) is found next to the project file, as After Effects looks for footage
-    // relative to the project (#652).
+    let is_aep = crate::aep::is_aep_or_aepx(path, &bytes);
+    let (mut proj, saved_by, repaired, text) = if is_aep {
+        let (proj, _report) = crate::aep::from_aep_or_aepx_with_report(&bytes, Some(std::path::Path::new(path)))
+            .map_err(EngineError::Other)?;
+        (proj, None, vec![], String::new())
+    } else {
+        let text = String::from_utf8(bytes).map_err(|_| EngineError::Other("not a text project file".into()))?;
+        // XML copies (File ▸ Save a Copy As XML…) open like the JSON project.
+        let text = if crate::xml_project::is_xml(&text) { crate::xml_project::from_xml(&text).map_err(EngineError::Other)? } else { text };
+        let (proj, repaired) =
+            Project::from_json_repaired(&text).map_err(|e| EngineError::Other(format!("{path} is not a project EffectCraft can open: {e}")))?;
+        let saved_by = effectcraft_project::saved_by(&text);
+        (proj, saved_by, repaired, text)
+    };
     let refused = crate::doc_path::resolve_footage(&mut proj, Some(path));
     s.replace_project(proj, Some(path.to_string()));
     s.stored_paths.add(&s.project, Some(path));
@@ -68,7 +74,6 @@ pub(crate) fn open(s: &mut Session, p: &Value) -> Result<Value> {
         s.toast(format!("{n} footage item{} marked missing: {}.", if n == 1 { "" } else { "s" }, crate::doc_path::refusal(first, *why)));
     }
     // Written by a newer EffectCraft: what this version doesn't know would be lost on saving.
-    let saved_by = effectcraft_project::saved_by(&text);
     if let Some(v) = saved_by.as_deref().filter(|v| effectcraft_project::is_newer_version(v, effectcraft_project::APP_VERSION)) {
         s.toast(format!(
             "This project was saved by EffectCraft {v}, newer than this version ({}). Settings this version doesn't know are lost if you save it.",
@@ -80,7 +85,12 @@ pub(crate) fn open(s: &mut Session, p: &Value) -> Result<Value> {
     if s.check_footage_on_open {
         crate::footage_check::start(s, None, false)?;
     }
-    Ok(json!({"path": path, "savedBy": saved_by, "repaired": repaired}))
+    if is_aep {
+        let comp_count = s.project.comps().count();
+        Ok(json!({"path": path, "type": "aep", "comps": comp_count}))
+    } else {
+        Ok(json!({"path": path, "savedBy": saved_by, "repaired": repaired}))
+    }
 }
 
 /// The project file's text for `path`: `.ecproj` JSON, or XML for `.ecprojx` / `.xml` (a
@@ -364,8 +374,79 @@ fn prepare_import(s: &mut Session, p: &Value) -> Result<PendingImport> {
     let mut comps = vec![];
     let mut items = vec![];
     let mut errors = vec![];
+    // After Effects projects (.aep / .aepx): import their compositions and items into this project.
+    let mut non_aep = vec![];
+    for path in paths {
+        let bytes = s.services.read_file(&path).ok();
+        if bytes.as_ref().is_some_and(|b| crate::aep::is_aep_or_aepx(&path, b)) {
+            if let Some(b) = bytes {
+                match crate::aep::from_aep_or_aepx(&b) {
+                    Ok(aep_proj) => {
+                        let imported = s.edit("Import After Effects Project", None, |proj, _st| {
+                            let mut id_map: std::collections::HashMap<effectcraft_project::ItemId, effectcraft_project::ItemId> = std::collections::HashMap::new();
+                            let mut new_item_ids = vec![];
+                            let mut new_comp_ids = vec![];
+
+                            for &old_id in aep_proj.items.keys() {
+                                let new_id = effectcraft_project::ItemId(proj.alloc());
+                                id_map.insert(old_id, new_id);
+                            }
+
+                            for (old_id, it) in aep_proj.items {
+                                let new_id = *id_map.get(&old_id).unwrap_or(&old_id);
+                                let mut cloned_item = it.clone();
+                                cloned_item.id = new_id;
+                                cloned_item.parent = cloned_item.parent.and_then(|p| id_map.get(&p).copied());
+
+                                if let effectcraft_project::ItemKind::Comp(comp_arc) = &mut cloned_item.kind {
+                                    let mut comp = (**comp_arc).clone();
+                                    for layer in &mut comp.layers {
+                                        match &mut layer.source {
+                                            effectcraft_project::LayerSource::Footage { item } => {
+                                                if let Some(&remapped) = id_map.get(item) {
+                                                    *item = remapped;
+                                                }
+                                            }
+                                            effectcraft_project::LayerSource::Solid { item } => {
+                                                if let Some(&remapped) = id_map.get(item) {
+                                                    *item = remapped;
+                                                }
+                                            }
+                                            effectcraft_project::LayerSource::Comp { item } => {
+                                                if let Some(&remapped) = id_map.get(item) {
+                                                    *item = remapped;
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    cloned_item.kind = effectcraft_project::ItemKind::Comp(std::sync::Arc::new(comp));
+                                    new_comp_ids.push(new_id.0);
+                                }
+                                new_item_ids.push(new_id.0);
+                                proj.items.insert(new_id, cloned_item);
+                            }
+                            Ok((new_item_ids, new_comp_ids))
+                        });
+                        match imported {
+                            Ok((new_items, new_comps)) => {
+                                items.extend(new_items);
+                                comps.extend(new_comps);
+                            }
+                            Err(e) => errors.push(format!("{path}: {e}")),
+                        }
+                    }
+                    Err(e) => errors.push(format!("{path}: {e}")),
+                }
+            } else {
+                errors.push(format!("cannot read {path}"));
+            }
+        } else {
+            non_aep.push(path);
+        }
+    }
     // EffectCraft projects import as projects, as After Effects imports an .aep.
-    let (project_paths, mut paths): (Vec<String>, Vec<String>) = paths.into_iter().partition(|x| super::import_project::is_project_path(x));
+    let (project_paths, mut paths): (Vec<String>, Vec<String>) = non_aep.into_iter().partition(|x| super::import_project::is_project_path(x));
     let mut projects = vec![];
     for path in project_paths {
         match s.execute("file.importProject", json!({"path": path})) {
