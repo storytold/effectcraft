@@ -16,7 +16,17 @@ use crate::theme::Tokens;
 use crate::{Dialog, EffectcraftApp};
 
 /// Commands that replace or close the open project (Quit is asked when the window closes).
-const CLOSING: &[&str] = &["file.newProject", "file.open", "file.openRecent", "file.closeProject", "file.revert", "file.openDemoProject", "templates.create"];
+const CLOSING: &[&str] =
+    &["file.newProject", "file.open", "file.openRecent", "file.closeProject", "file.revert", "file.openDemoProject", "templates.create", "app.prepareRestart"];
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RestartState {
+    #[default]
+    Idle,
+    Prompting,
+    Ready,
+    Canceled,
+}
 
 /// The command waiting on the prompt, and whether the user already answered it.
 #[derive(Clone, Debug, Default)]
@@ -26,6 +36,8 @@ pub struct Pending {
     pub answered: bool,
     /// The window closes without asking (the user answered the Quit prompt).
     pub quitting: bool,
+    pub restart: RestartState,
+    pub saving_restart: bool,
 }
 
 /// Whether `id` needs the prompt first. When it does, the prompt opens holding the command and
@@ -49,6 +61,12 @@ fn ask(app: &mut EffectcraftApp, id: &str, params: &Value) -> bool {
 /// The window's close button (and Quit, which closes it): keep the window open and ask.
 pub fn on_close_requested(app: &mut EffectcraftApp, ctx: &egui::Context) {
     if !ctx.input(|i| i.viewport().close_requested()) || app.dialog_state.unsaved.quitting {
+        return;
+    }
+    if app.dialog_state.unsaved.restart == RestartState::Prompting {
+        app.cancel_restart();
+        app.dialog_state.unsaved.restart = RestartState::Canceled;
+        ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         return;
     }
     // Logged, so a window that closes on its own shows it (#234).
@@ -91,12 +109,21 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
         return;
     }
     let revert = is_revert(app);
+    let update = app.dialog_state.unsaved.command.as_ref().is_some_and(|(id, _)| id == "app.prepareRestart");
     let name = project_name(app);
     let mut answer = None;
-    let title = if revert { "Revert Project" } else { "Unsaved Changes" };
+    let title = if revert {
+        "Revert Project"
+    } else if update {
+        "Save Before Update"
+    } else {
+        "Unsaved Changes"
+    };
     super::dialogs::modal(ctx, title, vec2(460.0, 170.0), t, |ui| {
         let text = if revert {
             format!("Revert “{name}” to the last saved version? Changes made since then will be lost.")
+        } else if update {
+            format!("Save changes to “{name}” before installing the update? Cancel stops the update in every window.")
         } else {
             format!("Save changes to “{name}” before closing?")
         };
@@ -151,14 +178,29 @@ fn answer_with(app: &mut EffectcraftApp, ctx: &egui::Context, a: Answer) {
     app.dialog = None;
     let Some((id, params)) = app.dialog_state.unsaved.command.take() else { return };
     match a {
-        Answer::Cancel => return,
+        Answer::Cancel => {
+            if id == "app.prepareRestart" {
+                app.dialog_state.unsaved.restart = RestartState::Canceled;
+            }
+            return;
+        }
         Answer::Save => {
             // An untitled project asks for a path; cancelling that dialog cancels the command.
             if let Err(e) = crate::menus::invoke(app, ctx, "file.save", json!({})) {
                 app.ui.status = e;
+                if id == "app.prepareRestart" {
+                    app.dialog_state.unsaved.restart = RestartState::Canceled;
+                }
                 return;
             }
             if app.session.is_dirty() {
+                if id == "app.prepareRestart" {
+                    if app.hooks.file_dialog_async.is_some() {
+                        app.dialog_state.unsaved.saving_restart = true;
+                    } else {
+                        app.dialog_state.unsaved.restart = RestartState::Canceled;
+                    }
+                }
                 return;
             }
         }
@@ -177,6 +219,12 @@ fn answer_with(app: &mut EffectcraftApp, ctx: &egui::Context, a: Answer) {
     // Leave Home once something opened from it (not when its file dialog was cancelled).
     if (app.session.path.clone(), app.session.revision) != before {
         app.ui.start_screen = false;
+    }
+}
+
+pub(crate) fn restart_save_answered(app: &mut EffectcraftApp, saved: bool) {
+    if std::mem::take(&mut app.dialog_state.unsaved.saving_restart) {
+        app.dialog_state.unsaved.restart = if saved && !app.session.is_dirty() { RestartState::Ready } else { RestartState::Canceled };
     }
 }
 
@@ -339,5 +387,87 @@ mod tests {
         app.session.execute("edit.undo", json!({})).unwrap();
         assert!(!app.session.is_dirty());
         assert!(!frame(&mut app, &ctx, true));
+    }
+    #[test]
+    fn restart_approval_never_closes_a_window_and_cancel_keeps_work() {
+        let (mut app, ctx) = app();
+        modified(&mut app);
+        app.prepare_restart(&ctx).unwrap();
+        assert_eq!(app.restart_state(), RestartState::Prompting);
+        answer_with(&mut app, &ctx, Answer::Cancel);
+        assert_eq!(app.restart_state(), RestartState::Canceled);
+        assert!(app.session.is_dirty());
+        app.prepare_restart(&ctx).unwrap();
+        answer_with(&mut app, &ctx, Answer::Discard);
+        assert_eq!(app.restart_state(), RestartState::Ready);
+        assert!(!app.dialog_state.unsaved.quitting);
+        assert!(app.session.is_dirty());
+        app.cancel_restart();
+        assert_eq!(app.restart_state(), RestartState::Idle);
+    }
+
+    #[test]
+    fn restart_waits_for_async_save_as_and_cancel_or_failure_aborts() {
+        for outcome in ["save", "cancel", "fail"] {
+            let (mut app, ctx) = app();
+            modified(&mut app);
+            let queue = std::sync::Arc::new(std::sync::Mutex::new(None));
+            let pending = queue.clone();
+            app.hooks.file_dialog_async = Some(Box::new(move |_, done| *pending.lock().unwrap() = Some(done)));
+            app.prepare_restart(&ctx).unwrap();
+            answer_with(&mut app, &ctx, Answer::Save);
+            assert_eq!(app.restart_state(), RestartState::Prompting);
+            let dir = std::env::temp_dir().join(format!("ec-restart-{outcome}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let paths = match outcome {
+                "save" => vec![dir.join("saved.ecproj").to_string_lossy().into_owned()],
+                "fail" => vec![dir.to_string_lossy().into_owned()],
+                _ => Vec::new(),
+            };
+            queue.lock().unwrap().take().unwrap()(paths);
+            app.run_dialog_answers();
+            if outcome == "save" {
+                assert_eq!(app.restart_state(), RestartState::Ready);
+                assert!(!app.session.is_dirty());
+                assert!(dir.join("saved.ecproj").is_file());
+            } else {
+                assert_eq!(app.restart_state(), RestartState::Canceled);
+                assert!(app.session.is_dirty());
+            }
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+    #[test]
+    fn approved_restart_rejects_document_changes_but_allows_status_and_cancel() {
+        let (mut app, ctx) = app();
+        app.prepare_restart(&ctx).unwrap();
+        assert_eq!(app.restart_state(), RestartState::Ready);
+        let revision = app.session.revision;
+        let (request, _) = crate::ControlRequest::new("engine.execute", json!({"command": "file.newProject"}));
+        let outcome = crate::control::handle(&mut app, &ctx, &request);
+        assert!(matches!(outcome, crate::control::Outcome::Done(v) if v["ok"] == false));
+        assert_eq!(app.session.revision, revision);
+        app.hooks.update_status = Some(Box::new(|| json!({"phase": "ready"})));
+        let canceled = std::rc::Rc::new(std::cell::Cell::new(false));
+        let callback = canceled.clone();
+        app.hooks.app_action = Some(Box::new(move |id| {
+            callback.set(id == "app.cancelUpdate");
+            true
+        }));
+        let (request, _) = crate::ControlRequest::new("engine.execute", json!({"command": "app.cancelUpdate"}));
+        let _ = crate::control::handle(&mut app, &ctx, &request);
+        assert!(canceled.get(), "cancel must run even while document drawing is paused");
+        let (request, _) = crate::ControlRequest::new("ui.menu.invoke", json!({"id": "app.updateStatus"}));
+        assert!(matches!(crate::control::handle(&mut app, &ctx, &request), crate::control::Outcome::Done(v) if v["result"]["phase"] == "ready"));
+    }
+    #[test]
+    fn closing_a_window_during_restart_preparation_cancels_the_update() {
+        let (mut app, ctx) = app();
+        modified(&mut app);
+        app.prepare_restart(&ctx).unwrap();
+        assert!(frame(&mut app, &ctx, true));
+        assert_eq!(app.restart_state(), RestartState::Canceled);
+        assert!(app.session.is_dirty());
+        assert!(app.dialog.is_none());
     }
 }

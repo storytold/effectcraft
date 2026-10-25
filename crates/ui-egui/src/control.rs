@@ -172,6 +172,17 @@ fn point(app: &EffectcraftApp, p: &Value) -> Result<egui::Pos2, String> {
 pub fn handle(app: &mut EffectcraftApp, ctx: &egui::Context, req: &ControlRequest) -> Outcome {
     let p = &req.params;
     let s = |k: &str| p.get(k).and_then(Value::as_str);
+    if app.restart_state() == crate::RestartState::Ready {
+        let allowed = match req.method.as_str() {
+            "ui.inspect" | "ui.elements" | "ui.screenshot" => true,
+            "ui.click" => s("id") == Some("update.cancel"),
+            "ui.menu.invoke" | "engine.execute" => matches!(s("command").or(s("id")), Some("app.updateStatus" | "app.cancelUpdate")),
+            _ => false,
+        };
+        if !allowed {
+            return err("This window approved an update. Cancel the update before changing the document.");
+        }
+    }
     match req.method.as_str() {
         "engine.execute" | "ui.menu.invoke" => {
             let Some(id) = s("command").or(s("id")) else { return err("missing `command`") };
@@ -179,7 +190,8 @@ pub fn handle(app: &mut EffectcraftApp, ctx: &egui::Context, req: &ControlReques
             // `engine.execute` runs engine commands exactly as headless (never opens a dialog, e.g.
             // `comp.new {}` creates a default comp); UI-only ids (`tool.*`, `view.*`, `window.*`,
             // `playback.*` …) and `ui.menu.invoke` go through the menu dispatcher like a click.
-            let r = if req.method == "engine.execute" && effectcraft_engine::find_command(id).is_some() {
+            let update = matches!(id, "help.checkForUpdates" | "app.updateStatus" | "app.downloadUpdate" | "app.installUpdate" | "app.cancelUpdate");
+            let r = if req.method == "engine.execute" && !update && effectcraft_engine::find_command(id).is_some() {
                 execute_engine(app, id, params)
             } else {
                 crate::menus::invoke(app, ctx, id, params).map(ok)

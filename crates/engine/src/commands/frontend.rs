@@ -18,6 +18,12 @@ pub fn specs() -> Vec<CommandSpec> {
     vec![
         // Application.
         fe!("app.about", "About EffectCraft...", [], None, "{}", always),
+        fe!("help.checkForUpdates", "Check for Updates...", ["Help"], None, "{}", always),
+        fe!("app.updateStatus", "Update Status", [], None, "{}", always),
+        fe!("app.downloadUpdate", "Download Update", [], None, "{}", always),
+        fe!("app.installUpdate", "Install Update and Restart", [], None, "{}", always),
+        fe!("app.cancelUpdate", "Cancel Update", [], None, "{}", always),
+        fe!("app.prepareRestart", "Prepare Restart", [], None, "{}", always),
         fe!("layer.style.options", "Layer Style Options...", ["Layer", "Layer Styles"], None, "{layer?, style?: blendingOptions|dropShadow|…}", has_layers),
         fe!(
             "app.settings",

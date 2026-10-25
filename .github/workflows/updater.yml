@@ -1,0 +1,43 @@
+name: In-app updater
+on:
+  pull_request:
+    paths:
+      - apps/effectcraft/src/update/**
+      - apps/effectcraft/src/main.rs
+      - crates/ui-egui/src/panels/unsaved.rs
+      - crates/ui-egui/src/lib.rs
+      - crates/ui-egui/src/control.rs
+      - crates/ui-egui/src/menus.rs
+      - apps/effectcraft/Cargo.toml
+      - Cargo.lock
+      - packaging/windows/test-updater.ps1
+      - .github/workflows/updater.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  updater:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest, macos-15]
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Linux desktop libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev libxkbcommon-dev
+      - name: Updater and restart tests
+        run: |
+          cargo test --locked -p effectcraft update::
+      - name: Save prompt tests
+        run: |
+          cargo test --locked -p effectcraft-ui-egui --lib panels::unsaved::tests
+      - name: Windows portable replacement and rollback
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: ./packaging/windows/test-updater.ps1
