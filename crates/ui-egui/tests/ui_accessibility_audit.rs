@@ -55,15 +55,13 @@ const BASELINE: &[(&str, usize, usize)] = &[
     ("Align:default", 10, 2),
     ("Smoother:default", 2, 1),
     ("MotionSketch:default", 4, 2),
-    ("Paint:default", 5, 3),
-    ("Brushes:default", 16, 9),
+    ("Paint:default", 6, 3),
+    ("Brushes:default", 11, 2),
     ("History:default", 10, 5),
-    ("Markers:default", 1, 1),
-    ("MaskInterpolation:default", 2, 2),
-    ("EssentialGraphics:default", 1, 1),
-    ("Footage:default", 3, 2),
-    ("Progress:default", 1, 1),
-    ("VrCompEditor:default", 13, 7),
+    ("Markers:default", 2, 1),
+    ("MaskInterpolation:default", 2, 1),
+    ("Footage:default", 2, 1),
+    ("VrCompEditor:default", 6, 0),
 ];
 
 /// How many controls (and, in the panels that paint, described read-outs, graphics and logs) the fixed scenarios must at least show, so that "zero findings" is never
