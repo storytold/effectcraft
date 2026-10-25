@@ -60,40 +60,89 @@ fn coverage(ctx: &EvalCtx, layer: &Layer, g: &effectcraft_project::PropGroup, bu
     coverage_at(ctx, layer, g, buf)
 }
 
+/// Fill the bounded work buffer before paying another tile's repeated feather padding.
+fn coverage_tile_span(frame: [u32; 2], pad: [u32; 2], scale: f64) -> usize {
+    let room = 2048u32.saturating_sub(pad[0].max(pad[1]).saturating_mul(2)).saturating_sub(1).max(1);
+    let dimension = frame[0].max(frame[1]).max(1);
+    if !scale.is_finite() || scale <= 0.0 {
+        return 1;
+    }
+    (f64::from(room) / scale).floor().clamp(1.0, f64::from(dimension)) as usize
+}
+
 fn coverage_at(ctx: &EvalCtx, layer: &Layer, g: &effectcraft_project::PropGroup, buf: &Buf) -> Option<Mask> {
     let Value::Path(sp) = ctx.group_value(layer, g, "path")? else { return None };
     let path = effectcraft_path::to_kurbo(&sp);
     let (w, h) = (buf.img.width, buf.img.height);
+    if !buf.scale.is_finite() || buf.scale <= 0.0 {
+        return None;
+    }
     let m = Mat3::translate(vec2(buf.offset[0], buf.offset[1])) * Mat3::scale(vec2(buf.scale, buf.scale));
     let exp = ctx.f(layer, g, "expansion", 0.0);
     let linear = matches!(g.kind, GroupKind::Mask { feather_falloff: FeatherFalloff::Linear, .. });
-    // Variable-width feather (Mask Feather tool points): expansion and the per-point feather
-    // are applied together from the signed distance to the path.
     let variable = !sp.feather.is_empty();
-    let mut cov = if variable {
-        effectcraft_path::feather::variable_feather_coverage(&sp, &m, w, h, exp, linear)
-    } else if exp.abs() > 0.01 {
-        // Expansion offsets the outline itself (round joins). Offset Paths' geometry stays right
-        // when the expansion exceeds a curvature radius, where a fill + stroke blend leaves a
-        // ring around an uncovered middle (growing) or islands (shrinking).
-        let grown = effectcraft_path::offset::offset_path(&path, exp, Join::Round, 4.0);
-        effectcraft_path::fill_coverage(std::slice::from_ref(&grown), &m, w, h, FillRule::NonZero)
-    } else {
-        effectcraft_path::fill_coverage(std::slice::from_ref(&path), &m, w, h, FillRule::NonZero)
-    };
-    let feather = ctx.v2(layer, g, "feather", [0.0; 2]);
-    if feather[0] > 0.0 || feather[1] > 0.0 {
-        let img = cov.to_image();
-        let b = if linear {
-            // One box pass: a straight ramp `feather` pixels wide across the edge.
-            let r = |f: f64| ((f * buf.scale / 2.0).round() as usize).max(if f > 0.0 { 1 } else { 0 });
-            box_blur(&img, r(feather[0]), r(feather[1]), 1, false)
+    let path = if !variable && exp.abs() > 0.01 { effectcraft_path::offset::offset_path(&path, exp, Join::Round, 4.0) } else { path };
+    let raster = |transform: &Mat3, width, height| {
+        if variable {
+            effectcraft_path::feather::variable_feather_coverage(&sp, transform, width, height, exp, linear)
         } else {
-            gaussian_blur(&img, feather[0] * buf.scale / 2.0, feather[1] * buf.scale / 2.0, false)
-        };
-        cov = Mask::from_alpha(&b);
+            effectcraft_path::fill_coverage(std::slice::from_ref(&path), transform, width, height, FillRule::NonZero)
+        }
+    };
+    let sigma = ctx.v2(layer, g, "feather", [0.0; 2]).map(|f| if !f.is_finite() || f <= 0.0 { 0.0 } else { (f / 2.0 * buf.scale).min(f64::MAX / 16.0) });
+    if sigma == [0.0; 2] || w == 0 || h == 0 {
+        return Some(raster(&m, w, h));
     }
-    Some(cov)
+    // Rasterize the real mask beyond the source before convolving. Transparent padding of
+    // an already clipped coverage would still invent a feather edge at the source boundary.
+    let padding = |sigma: [f64; 2]| {
+        sigma.map(|s| {
+            if s == 0.0 {
+                0
+            } else if linear {
+                (s.round() as u32).max(1)
+            } else {
+                (3.0 * s + 3.0).ceil() as u32
+            }
+        })
+    };
+    let full_pad = padding(sigma);
+    let full_size = full_pad[0].checked_mul(2).and_then(|p| w.checked_add(p)).zip(full_pad[1].checked_mul(2).and_then(|p| h.checked_add(p)));
+    let fits = full_size.is_some_and(|(w, h)| w <= 2048 && h <= 2048);
+    // Bound temporary work to at most 2048² pixels. Large frames use exact full-resolution
+    // tiles; exceptionally broad feather uses a lower-resolution coverage within each tile.
+    let work_scale = if fits { 1.0 } else { (128.0 / sigma[0].max(sigma[1])).min(1.0) };
+    let work_sigma = sigma.map(|s| s * work_scale);
+    let pad = padding(work_sigma);
+    let tile = if fits { w.max(h) as usize } else { coverage_tile_span([w, h], pad, work_scale) };
+    let mut out = Mask::new(w, h, 0.0);
+    for y0 in (0..h).step_by(tile) {
+        for x0 in (0..w).step_by(tile) {
+            let tw = (w - x0).min(tile as u32);
+            let th = (h - y0).min(tile as u32);
+            let ww = ((f64::from(tw) * work_scale).ceil() as u32).max(1).checked_add(pad[0].checked_mul(2)?)?;
+            let wh = ((f64::from(th) * work_scale).ceil() as u32).max(1).checked_add(pad[1].checked_mul(2)?)?;
+            if ww > 2048 || wh > 2048 {
+                return None;
+            }
+            let transform = Mat3::translate(vec2(f64::from(pad[0]) - f64::from(x0) * work_scale, f64::from(pad[1]) - f64::from(y0) * work_scale))
+                * Mat3::scale(vec2(work_scale, work_scale))
+                * m;
+            let coverage = raster(&transform, ww, wh).to_image();
+            let blurred = if linear {
+                box_blur(&coverage, pad[0] as usize, pad[1] as usize, 1, false)
+            } else {
+                gaussian_blur(&coverage, work_sigma[0], work_sigma[1], false)
+            };
+            for (y, row) in out.data.chunks_mut(w as usize).skip(y0 as usize).take(th as usize).enumerate() {
+                let Some(dst) = row.get_mut(x0 as usize..x0 as usize + tw as usize) else { continue };
+                for (x, alpha) in dst.iter_mut().enumerate() {
+                    *alpha = blurred.sample_bilinear(f64::from(pad[0]) + (x as f64 + 0.5) * work_scale, f64::from(pad[1]) + (y as f64 + 0.5) * work_scale)[3];
+                }
+            }
+        }
+    }
+    Some(out)
 }
 
 /// The layer's enabled masks at the context time, flattened to polylines in layer space (for
@@ -133,7 +182,7 @@ pub fn apply(ctx: &EvalCtx, layer: &Layer, buf: &mut Buf, blur: MaskBlur) -> boo
     if list.is_empty() {
         return false;
     }
-    // Masks may extend past the source: grow the buffer to cover them when feather/expansion pads.
+    // Coverage is feathered beyond the source, then cropped; source pixels stay source-sized.
     let n = (buf.img.width * buf.img.height) as usize;
     let first_sub = matches!(list[0].kind, GroupKind::Mask { mode: MaskMode::Subtract, .. });
     let mut acc = vec![if first_sub { 1.0f32 } else { 0.0 }; n];
@@ -168,4 +217,57 @@ pub fn apply(ctx: &EvalCtx, layer: &Layer, buf: &mut Buf, blur: MaskBlur) -> boo
     }
     buf.img.mul_mask(&acc);
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use effectcraft_keyframe::ShapePath;
+    use effectcraft_project::{Comp, ItemId, Project, build};
+    use effectcraft_raster::Image;
+    use effectcraft_time::{FrameRate, Tick};
+
+    #[test]
+    fn feather_tiles_amortize_padding_within_the_work_buffer_limit() {
+        for (pad, scale) in [([303, 303], 1.0), ([387, 303], 1.0), ([387, 0], 0.25), ([0, 387], 0.01)] {
+            let tile = coverage_tile_span([4000, 2160], pad, scale);
+            assert!(4000usize.div_ceil(tile) <= 4, "broad padding should not be repeated for sixteen tiny tiles");
+            for p in pad {
+                assert!((tile as f64 * scale).ceil() as u32 + 2 * p <= 2048);
+            }
+            assert!((1..=4000).contains(&tile));
+        }
+        assert_eq!(coverage_tile_span([8, 4], [387, 387], 0.25), 8);
+    }
+
+    #[test]
+    fn feather_tiles_match_shifted_canvas_and_bound_extreme_parameters() {
+        let mut project = Project::default();
+        let comp = Comp::new(2100, 20, FrameRate::FPS_30, Tick::from_seconds_f64(1.0));
+        let layer = build::layer(&mut project, &comp, "Mask", effectcraft_project::LayerSource::Null, (2100, 20), None);
+        let mut mask = build::mask(&mut build::Ids(&mut project.next_id), "Mask", ShapePath::rect([550.0, 10.0], 1140.0, 60.0), MaskMode::Add, [0; 3]);
+        mask.get_mut("feather").unwrap().value = Value::Vec2([24.0, 12.0]);
+        let ctx = EvalCtx::new(&project, ItemId(0), &comp, Tick::ZERO);
+        let buf = Buf { img: Image::new(2100, 20), offset: [0.0; 2], scale: 1.0 };
+        let reference = Buf { img: Image::new(2300, 220), offset: [100.0; 2], scale: 1.0 };
+        for feather in [[24.0, 12.0], [200.0, 256.0], [256.0, 200.0]] {
+            mask.get_mut("feather").unwrap().value = Value::Vec2(feather);
+            let a = coverage_at(&ctx, &layer, &mask, &buf).unwrap();
+            let b = coverage_at(&ctx, &layer, &mask, &reference).unwrap();
+            for y in [0, 10, 19] {
+                for x in [0, 255, 256, 257, 1023, 1024, 1100, 1119, 1120, 1272, 1273, 1274, 1968, 1969, 1970, 2047, 2048, 2099] {
+                    let ai = y * 2100 + x;
+                    let bi = (y + 100) * 2300 + x + 100;
+                    assert!((a.data[ai] - b.data[bi]).abs() < 1e-5, "tile seam at {x},{y}");
+                }
+            }
+        }
+        for value in [f64::MAX, f64::NAN, f64::INFINITY] {
+            mask.get_mut("feather").unwrap().value = Value::Vec2([value, value]);
+            let buf = Buf { img: Image::new(16, 16), offset: [0.0; 2], scale: 1.0 };
+            let a = coverage_at(&ctx, &layer, &mask, &buf).unwrap();
+            assert_eq!(a.data.len(), 256);
+            assert!(a.data.iter().all(|a| a.is_finite() && *a >= 0.0 && *a <= 1.0001));
+        }
+    }
 }
