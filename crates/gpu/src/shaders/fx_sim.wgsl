@@ -114,8 +114,8 @@ fn fxm_sprite(at: u32, x: f32, y: f32) -> FxmShade {
             cov = min(0.12 * select(0.0, 1.0, d <= 1.0) + ring * 0.8 + hl, 1.0);
         }
         case 5u: {
-            let sn = sin(data[at + 8u]);
-            let cs = cos(data[at + 8u]);
+            let sn = sin_p(data[at + 8u]);
+            let cs = cos_p(data[at + 8u]);
             let ux = (dx * cs + dy * sn) / r;
             let uy = (-dx * sn + dy * cs) / r;
             let d = sqrt(ux * ux + uy * uy);
@@ -125,23 +125,23 @@ fn fxm_sprite(at: u32, x: f32, y: f32) -> FxmShade {
             cov = min(core + stx + sty, 1.0);
         }
         case 6u: {
-            let sn = sin(data[at + 8u]);
-            let cs = cos(data[at + 8u]);
+            let sn = sin_p(data[at + 8u]);
+            let cs = cos_p(data[at + 8u]);
             let ux = dx * cs + dy * sn;
             let uy = -dx * sn + dy * cs;
             let e = r * 0.75;
             cov = fxm_aa(e - abs(ux)) * fxm_aa(e - abs(uy));
         }
         case 7u: {
-            let sn = sin(data[at + 8u]);
-            let cs = cos(data[at + 8u]);
+            let sn = sin_p(data[at + 8u]);
+            let cs = cos_p(data[at + 8u]);
             let ux = dx * cs + dy * sn;
             let uy = -dx * sn + dy * cs;
             let e = r * 0.5;
             var m = 3.4e38;
             for (var k = 0; k < 3; k++) {
                 let a = 1.5707964 + f32(k) * 6.2831855 / 3.0;
-                m = min(m, e - (ux * cos(a) + uy * sin(a)));
+                m = min(m, e - (ux * cos_p(a) + uy * sin_p(a)));
             }
             cov = fxm_aa(m);
         }
@@ -428,8 +428,8 @@ fn fxm_ripples(x: f32, y: f32) -> f32 {
         let r = data[i * 4u + 2u];
         let u = (d - r) / P.f[0].y;
         if (abs(u) < 1.0) {
-            let env = 0.5 + 0.5 * cos(u * 3.1415927);
-            v += data[i * 4u + 3u] * env * cos((d - r) / P.f[0].x * 6.2831855);
+            let env = 0.5 + 0.5 * cos_p(u * 3.1415927);
+            v += data[i * 4u + 3u] * env * cos_p((d - r) / P.f[0].x * 6.2831855);
         }
     }
     return v;

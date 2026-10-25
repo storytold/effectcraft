@@ -174,6 +174,62 @@ fn parse_map(s: &str) -> Vec<f32> {
     vals.iter().map(|v| (v * k).clamp(0.0, 1.0)).collect()
 }
 
+/// Piecewise-linear lookup in the CPU effect's f64 phase domain. Store the
+/// first representable f32 at each boundary, its value and the interval slope.
+/// Computing floor/wrap in shader f32 can select the end of the map instead of
+/// its beginning at a wrap (a full-scale colour error).
+fn arbitrary_map_table(map: &[f32], phase: f64) -> Option<Vec<f32>> {
+    let n = map.len();
+    if !(2..=4096).contains(&n) || !phase.is_finite() {
+        return None;
+    }
+    let scale = (n - 1) as f64;
+    let offset = phase * scale / 255.0;
+    if !offset.is_finite() || offset.abs() >= (1u64 << 52) as f64 {
+        return None;
+    }
+    let at = |v: f32| {
+        let x = (v as f64 * scale + offset).rem_euclid(n as f64);
+        let i = x.floor() as usize;
+        let a = *map.get(i).unwrap_or(&0.0);
+        let b = *map.get((i + 1).min(n - 1)).unwrap_or(&a);
+        (a + (b - a) * (x - x.floor()) as f32, (b - a) * scale as f32)
+    };
+    let mut points = vec![0.0f32];
+    // Search ordered positive f32 encodings using the CPU's actual f64 sum.
+    // Merely rounding a mathematical boundary upward misses the half-ulp
+    // region where f64 addition itself rounds across a wrap.
+    let first = offset.floor() + 1.0;
+    for i in 0..=n {
+        let boundary = first + i as f64;
+        if boundary > scale + offset {
+            break;
+        }
+        let (mut lo, mut hi) = (0u32, 1.0f32.to_bits());
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if f32::from_bits(mid) as f64 * scale + offset < boundary {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        let start = f32::from_bits(lo);
+        if points.last().is_none_or(|last| start > *last) {
+            points.push(start);
+        }
+    }
+    if points.last() != Some(&1.0) {
+        points.push(1.0);
+    }
+    let mut table = Vec::with_capacity(points.len() * 3);
+    for v in points {
+        let (value, slope) = at(v);
+        table.extend([v, value, slope]);
+    }
+    Some(table)
+}
+
 fn point(e: &mut Enc, id: &str, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
     let pr = ctx.params;
     let f = |k: &str| pr.f(k) as f32;
@@ -308,9 +364,9 @@ fn point(e: &mut Enc, id: &str, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
         }
         "ec.color.psarbitrarymap" => {
             let map = parse_map(pr.s("map"));
-            p.u[0] = [12, pr.b("applyPhaseMapToAlpha") as u32, map.len() as u32, 0];
-            p.f[0][0] = (pr.f("phase") * (map.len() - 1) as f64 / 255.0) as f32;
-            data = Some(map);
+            let table = arbitrary_map_table(&map, pr.f("phase"))?;
+            p.u[0] = [12, pr.b("applyPhaseMapToAlpha") as u32, (table.len() / 3) as u32, 0];
+            data = Some(table);
         }
         "ec.color.videolimiter" => {
             const CLIP_LEVELS: [f32; 5] = [0.9, 0.95, 1.0, 1.05, 1.09];

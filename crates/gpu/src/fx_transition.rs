@@ -15,6 +15,8 @@
 use effectcraft_effects::{Buf, EffectCtx};
 use effectcraft_raster::Image;
 
+use rayon::prelude::*;
+
 use crate::context::{Enc, GpuImage, Params};
 use crate::effects::{GBuf, gaussian_blur};
 
@@ -203,25 +205,22 @@ fn grid_wipe(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
     if done <= 0.0 {
         return Some(b);
     }
-    let pr = ctx.params;
-    let c = b.to_px(pr.v2("center"));
-    let rot = pr.f("rotation").to_radians();
-    let border = pr.f("border").max(0.0) * b.scale;
-    let tiles = pr.f("tiles").round().clamp(1.0, 500.0);
-    let shape = pr.e("shape");
-    let cs = (ctx.layer_size[0] * b.scale / tiles).max(1.0);
-    let (s, co) = rot.sin_cos();
-    let metric = |dx: f64, dy: f64| match shape {
-        0 => dx.abs(),
-        2 => dx.abs().max(dy.abs()),
-        _ => dx.hypot(dy),
-    };
-    let maxd = max_corner_dist(&b, c, |dx, dy| metric(dx * co + dy * s, -dx * s + dy * co));
-    let mut p = Params::default();
-    p.u[0] = [shape, pr.b("reverse") as u32, 0, 0];
-    p.f[0] = f4([c.0, c.1, s, co]);
-    p.f[1] = f4([cs, maxd, done, border]);
-    run(e, "ftr_grid", &p, b, None, None)
+    // Decide discontinuous tile coverage in the CPU effect's f64 geometry.
+    // Only a scalar mask is uploaded; source pixels and multiplication stay resident.
+    let count = (b.img.width as usize).checked_mul(b.img.height as usize)?;
+    if count.checked_mul(4)? > e.g.device.limits().max_storage_buffer_binding_size as usize {
+        return None;
+    }
+    let geometry = shape(&b);
+    let grid = effectcraft_effects::GridWipe::new(ctx, &geometry);
+    let mut mask = vec![0.0; count];
+    mask.par_chunks_mut((b.img.width as usize).max(1)).enumerate().for_each(|(y, row)| {
+        for (x, value) in row.iter_mut().enumerate() {
+            *value = grid.coverage(x as u32, y as u32);
+        }
+    });
+    let data = e.data(&mask);
+    run(e, "ftr_grid", &Params::default(), b, None, Some(&data))
 }
 
 fn radial_scale_wipe(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {

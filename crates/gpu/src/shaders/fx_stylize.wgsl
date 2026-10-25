@@ -42,7 +42,11 @@ fn fxs_qdiv(x: vec3<f32>, a: f32) -> vec3<f32> {
     let r = fma(-q, vec3<f32>(a), x);
     // `q + r / a`, written as an fma so drivers (NVIDIA Vulkan) can't contract it another way
     // and round differently from the CPU.
-    return fma(r / a, vec3<f32>(1.0), q);
+    let corrected = fma(r / a, vec3<f32>(1.0), q);
+    return vec3<f32>(
+        select(corrected.x, unit_div(x.x, a), x.x >= 0.0 && x.x <= a),
+        select(corrected.y, unit_div(x.y, a), x.y >= 0.0 && x.y <= a),
+        select(corrected.z, unit_div(x.z, a), x.z >= 0.0 && x.z <= a));
 }
 
 fn fxs_rem2(i: i32) -> i32 {
@@ -61,6 +65,32 @@ fn fxs_rem2(i: i32) -> i32 {
 
 fn fxs_bin(v: f32, t: f32, inv: bool) -> f32 {
     return select(0.0, 1.0, (v >= t) != inv);
+}
+
+// Preserve the CPU's separately-rounded f32 multiply before rounding to a bin.
+// A shader compiler may reassociate division and multiplication across a half
+// threshold. The 24-bit mantissa times at most 254 fits in u32 exactly.
+fn fxs_posterize_bin(v: f32, levels: u32) -> f32 {
+    let bits = bitcast<u32>(clamp(v, 0.0, 1.0));
+    let exponent = (bits >> 23u) & 255u;
+    if (exponent == 0u) { return 0.0; }
+    var product = ((bits & 0x7fffffu) | 0x800000u) * levels;
+    let high = firstLeadingBit(product);
+    if (high > 23u) {
+        let lost = high - 23u;
+        let mask = (1u << lost) - 1u;
+        let remainder = product & mask;
+        let half = 1u << (lost - 1u);
+        var kept = product >> lost;
+        if (remainder > half || (remainder == half && (kept & 1u) != 0u)) { kept += 1u; }
+        product = kept << lost;
+    }
+    let shift = 150u - exponent;
+    if (shift > 32u) { return 0.0; }
+    if (shift == 32u) { return select(0.0, 1.0, product >= 0x80000000u); }
+    let mask = (1u << shift) - 1u;
+    let integer = (product >> shift) + select(0u, 1u, (product & mask) >= (1u << (shift - 1u)));
+    return f32(integer);
 }
 
 fn fxs_strobe_op(op: u32, v: f32, k: f32) -> f32 {
@@ -96,8 +126,8 @@ fn fxs_point(@builtin(global_invocation_id) gid: vec3<u32>) {
     switch mode {
         case 1u: {
             let lv = P.f[0].x;
-            let c = clamp(fxs_qdiv(px.xyz, a), vec3<f32>(0.0), vec3<f32>(1.0)) * lv;
-            let o = vec3<f32>(round_away(c.x), round_away(c.y), round_away(c.z)) / lv;
+            let c = vec3<f32>(unit_div(px.x, a), unit_div(px.y, a), unit_div(px.z, a));
+            let o = vec3<f32>(fxs_posterize_bin(c.x, u32(lv)), fxs_posterize_bin(c.y, u32(lv)), fxs_posterize_bin(c.z, u32(lv))) / lv;
             textureStore(out, p, vec4<f32>(o * a, a));
         }
         case 2u: {

@@ -1444,6 +1444,7 @@ dependencies = [
  "js-sys",
  "log",
  "pollster 0.4.0",
+ "rayon",
  "wasm-bindgen",
  "web-time",
  "wgpu",
