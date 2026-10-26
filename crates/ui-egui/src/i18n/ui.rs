@@ -1641,6 +1641,18 @@ const SIMPLIFIED_CHINESE: &[(&str, &str)] = &[
     ("Total Offset", "总偏移"),
     ("Per Layer", "每个图层"),
     ("Track", "跟踪"),
+    ("is {}  {}", "即 {}  {}"),
+    ("White", "白色"),
+    ("Black", "黑色"),
+    ("Text", "文本"),
+    ("Stroke", "描边"),
+    ("Paragraph", "段落"),
+    ("Text Animation", "文字动画"),
+    ("Layer Transform", "图层变换"),
+    ("Basic", "基本"),
+    ("Base {}{}", "基准 {}{}"),
+    ("Advanced", "高级"),
+    ("3D Renderer", "3D 渲染器"),
 ];
 
 const TRADITIONAL_CHINESE: &[(&str, &str)] = &[
@@ -2327,6 +2339,18 @@ const TRADITIONAL_CHINESE: &[(&str, &str)] = &[
     ("Total Offset", "總偏移"),
     ("Per Layer", "每個圖層"),
     ("Track", "追蹤"),
+    ("is {}  {}", "即 {}  {}"),
+    ("White", "白色"),
+    ("Black", "黑色"),
+    ("Text", "文本"),
+    ("Stroke", "描邊"),
+    ("Paragraph", "段落"),
+    ("Text Animation", "文字動畫"),
+    ("Layer Transform", "圖層變換"),
+    ("Basic", "基本"),
+    ("Base {}{}", "基準 {}{}"),
+    ("Advanced", "高級"),
+    ("3D Renderer", "3D 渲染器"),
 ];
 
 /// Ukrainian (uk): original translations of the same interface rows as the Chinese catalogs.

@@ -7,6 +7,8 @@ use crate::EffectcraftApp;
 
 /// Effect names, keyed by effect id (#821).
 pub(crate) mod effects;
+/// Property and parameter names, keyed by the English name the project stores (#821).
+pub(crate) mod props;
 /// Translations for the panels, tooltips and dialogs below the menu bar (see the module docs).
 mod ui;
 use effectcraft_engine::menus::{MenuEntry, MenuNode};
