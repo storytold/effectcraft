@@ -180,8 +180,11 @@ fn the_star_is_a_named_button_on_the_cursor_row_and_enter_toggles_it() {
     tab_into_list(&mut h);
     h.state_mut().ui.effects_open.insert("Blur & Sharpen".into());
     h.run_steps(3);
+    let mut guard = 0;
     while focused(&h).map(|f| f.1) != Some("Blur & Sharpen".to_string()) {
         key(&mut h, Key::ArrowDown, Modifiers::NONE);
+        guard += 1;
+        assert!(guard < 40, "no Blur & Sharpen folder reached");
     }
     key(&mut h, Key::ArrowDown, Modifiers::NONE);
     let effect = focused(&h).unwrap().1;
