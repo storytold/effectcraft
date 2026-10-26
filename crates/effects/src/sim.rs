@@ -1226,15 +1226,25 @@ fn particle_world_plan(ctx: &EffectCtx, b: &Buf) -> Option<SpritePlan> {
         .collect();
     list.sort_by(|a, b| b.0.total_cmp(&a.0));
     let sprites: Vec<Sprite> = list.into_iter().map(|(_, s)| s).collect();
-    Some(particle_sprites(sprites, pr.e("particle/transferMode")))
+    Some(particle_sprites(sprites, pr.e("particle/transferMode"), pr.b("compositeWithOriginal")))
 }
 
 /// The CC particle systems' sprites with their Transfer Mode (Composite, Screen, Add, Black
 /// Background).
-fn particle_sprites(sprites: Vec<Sprite>, mode: u32) -> SpritePlan {
-    // The particles replace the layer (After Effects shows no trace of the source in any
-    // Transfer Mode, which sets how the particles meet each other).
-    SpritePlan { sprites, tints: vec![], acc: if mode == 2 { Acc::Add } else { Acc::Over }, post: Post::Replace }
+fn particle_sprites(sprites: Vec<Sprite>, mode: u32, with_original: bool) -> SpritePlan {
+    // New instances replace the layer. Projects saved before v0.10.0 keep the old transfer
+    // modes over the input, including any earlier particle effects (#1898). This plan is
+    // shared by CPU and GPU rendering.
+    let post = if with_original {
+        Post::Combine(match mode {
+            0..=2 => mode,
+            3 => 5,
+            _ => 0,
+        })
+    } else {
+        Post::Replace
+    };
+    SpritePlan { sprites, tints: vec![], acc: if mode == 2 { Acc::Add } else { Acc::Over }, post }
 }
 
 // ------------------------------------------------------------------ CC Particle Systems II
@@ -1296,7 +1306,7 @@ fn particle_systems2_plan(ctx: &EffectCtx, b: &Buf) -> SpritePlan {
             type_sprite(kind, bx as f32, by as f32, r, c, q.v[0] * unit * s, q.v[1] * unit * s, (q.id % 628) as f32 * 0.01 + q.age * 2.0)
         })
         .collect();
-    particle_sprites(sprites, pr.e("particle/transferMode"))
+    particle_sprites(sprites, pr.e("particle/transferMode"), pr.b("compositeWithOriginal"))
 }
 
 // ------------------------------------------------------------------ CC Mr. Mercury
@@ -1556,6 +1566,7 @@ pub fn specs() -> Vec<EffectSpec> {
                 p("extras/effectCamera/rotationZ", "Rotation Z", num(0.0), ParamUi::Angle),
                 p("extras/effectCamera/fov", "FOV", num(PW_FOV), slider(1.0, 179.0, 10.0, 120.0, 1)),
                 p("extras/randomSeed", "Random Seed", num(0.0), slider(0.0, 10_000.0, 0.0, 1000.0, 0)),
+                p("compositeWithOriginal", "Composite With Original", Value::Bool(false), ParamUi::Checkbox),
             ],
             particle_world,
         ),
@@ -1584,6 +1595,7 @@ pub fn specs() -> Vec<EffectSpec> {
                 p("particle/deathColor", "Death Color", col(0.6, 0.0, 0.0), ParamUi::Color),
                 p("particle/transferMode", "Transfer Mode", Value::Enum(0), popup(&["Composite", "Screen", "Add", "Black Matte"])),
                 p("randomSeed", "Random Seed", num(0.0), slider(0.0, 10_000.0, 0.0, 1000.0, 0)),
+                p("compositeWithOriginal", "Composite With Original", Value::Bool(false), ParamUi::Checkbox),
             ],
             particle_systems2,
         ),
@@ -2000,6 +2012,23 @@ mod tests {
                 }
                 assert!(out.data.iter().any(|p| p[3] > 0.05), "{id} mode {mode}: particles drawn");
             }
+        }
+    }
+
+    #[test]
+    fn legacy_particle_compositing_keeps_the_original_transfer_modes() {
+        for id in ["ec.sim.ccparticlesystems2", "ec.sim.ccparticleworld"] {
+            for (mode, combine_mode) in [(0, 0), (1, 1), (2, 2), (3, 5)] {
+                let base = ramp(48, 48);
+                let mut vals = vec![("birthRate", num(3.0)), ("particle/transferMode", Value::Enum(mode))];
+                let particles = run(id, &vals, base.clone(), 1.0);
+                vals.push(("compositeWithOriginal", Value::Bool(true)));
+                let legacy = run(id, &vals, base.clone(), 1.0);
+                assert_eq!(legacy, combine(&base, &particles, combine_mode), "{id}, transfer mode {mode}");
+            }
+            let base = grey(48, 48);
+            let vals = [("birthRate", num(0.0)), ("compositeWithOriginal", Value::Bool(true))];
+            assert_eq!(run(id, &vals, base.clone(), 1.0), base, "{id}: no particles leaves the source visible");
         }
     }
 

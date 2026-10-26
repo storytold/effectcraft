@@ -1316,6 +1316,13 @@ impl Session {
 /// ([`effectcraft_effects::migrate::to_effect_space`]). Stamps the current schema.
 pub fn upgrade_effects(p: &mut Project) {
     let to_effect_space = p.schema < effectcraft_project::SCHEMA_EFFECT_SPACE;
+    // Before v0.10.0, the CC particle systems composited over their input. Applying the new
+    // replacement behavior to those files hides their artwork and earlier effects (#1898).
+    // A missing/unrecognised writer is not evidence of an old project.
+    let version = p.saved_by.split(['-', '+']).next().unwrap_or("");
+    let legacy_particles = version.split('.').count() == 3
+        && version.split('.').all(|part| part.parse::<u64>().is_ok())
+        && effectcraft_project::is_newer_version("0.10.0", version);
     // Effect bounds per layer: (size, top-left in layer coordinates).
     let mut bounds = std::collections::HashMap::new();
     for (cid, c) in p.comps() {
@@ -1339,18 +1346,36 @@ pub fn upgrade_effects(p: &mut Project) {
             let Some(fx) = l.props.sub_mut("effects") else { continue };
             for n in &mut fx.children {
                 let effectcraft_project::Node::Group(g) = n else { continue };
-                let effectcraft_project::GroupKind::Effect { effect } = &g.kind else { continue };
-                if let Some(spec) = effectcraft_effects::find(effect) {
-                    effectcraft_effects::migrate::upgrade_instance(spec, g, &mut effectcraft_project::build::Ids(&mut next), size);
-                    if to_effect_space {
-                        effectcraft_effects::migrate::to_effect_space(spec, g, size, d, &clone_d);
-                    }
-                }
+                upgrade_effect_group(g, legacy_particles, to_effect_space, size, d, &clone_d, &mut next);
             }
         }
     }
     p.next_id = next;
     p.schema = effectcraft_project::SCHEMA_VERSION;
+    p.saved_by = effectcraft_project::APP_VERSION.to_string();
+}
+
+/// Upgrade one effect group of a layer: its instance, the legacy composite flag, and (when the
+/// project predates effect space) its positions.
+fn upgrade_effect_group(
+    g: &mut effectcraft_project::PropGroup,
+    legacy_particles: bool,
+    to_effect_space: bool,
+    size: [f64; 2],
+    d: [f64; 2],
+    clone_d: &dyn Fn(Option<u64>) -> [f64; 2],
+    next: &mut u64,
+) {
+    let effectcraft_project::GroupKind::Effect { effect } = &g.kind else { return };
+    let Some(spec) = effectcraft_effects::find(effect.as_str()) else { return };
+    let composite = legacy_particles && matches!(spec.id, "ec.sim.ccparticlesystems2" | "ec.sim.ccparticleworld") && g.get("compositeWithOriginal").is_none();
+    effectcraft_effects::migrate::upgrade_instance(spec, g, &mut effectcraft_project::build::Ids(next), size);
+    if composite && let Some(pr) = g.get_mut("compositeWithOriginal") {
+        pr.value = effectcraft_keyframe::Value::Bool(true);
+    }
+    if to_effect_space {
+        effectcraft_effects::migrate::to_effect_space(spec, g, size, d, clone_d);
+    }
 }
 
 #[cfg(test)]
