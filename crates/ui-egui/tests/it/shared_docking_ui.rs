@@ -154,7 +154,9 @@ fn pointer_drop_merges_floats_and_redocks_without_project_changes() {
     let from = rect(&h, "panel.tab.Info").center();
     drag(&mut h, from, pos2(700.0, 400.0), Modifiers::COMMAND);
     assert_eq!(h.state().ui.floating.len(), 1);
-    assert_eq!(h.get_by_label("Resize floating panel").accesskit_node().role(), egui::accesskit::Role::Button);
+    // The grip is a resize handle: the migration's role mapping (`ResizeHandle → Splitter`) applies
+    // to floating panels too, and the widget reports it (`dock_ui.rs`).
+    assert_eq!(h.get_by_label("Resize floating panel").accesskit_node().role(), egui::accesskit::Role::Splitter);
     action_log.push(action_state(&h, "floated"));
     let original = h.state().ui.floating[0].rect;
     let grip = rect(&h, "panel.float.0.resize").center();
@@ -162,7 +164,7 @@ fn pointer_drop_merges_floats_and_redocks_without_project_changes() {
     assert!(h.state().ui.floating[0].rect[2] > original[2] + 25.0);
     assert!(h.state().ui.floating[0].rect[3] > original[3] + 15.0);
     action_log.push(action_state(&h, "resized"));
-    let grip_id = egui::Id::new(("floating-panel", PanelKind::Info.id())).with("resize");
+    let grip_id = egui::Id::unique(("floating-panel", PanelKind::Info.id())).with("resize");
     assert_eq!(h.ctx.memory(|memory| memory.focused()), Some(grip_id));
     let before_keys = h.state().ui.floating[0].rect;
     for key in [egui::Key::ArrowRight, egui::Key::ArrowDown] {
@@ -365,7 +367,7 @@ fn accordion_resize_routes_pointer_and_keyboard_without_changing_closed_entries(
     };
     h.run_steps(3);
     let project = h.state().session.project.clone();
-    let id = egui::Id::new(("dock-gutter", "s0".to_string()));
+    let id = egui::Id::unique(("dock-gutter", "s0".to_string()));
     h.ctx.memory_mut(|memory| memory.request_focus(id));
     h.run_steps(2);
     for pressed in [true, false] {

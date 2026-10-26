@@ -13,7 +13,7 @@ struct State {
 }
 
 fn state_id() -> Id {
-    Id::new("numeric-pointer-wrap")
+    Id::unique("numeric-pointer-wrap")
 }
 
 /// Opt in only number scrubs, never object, keyframe, panel or scrollbar drags.
@@ -231,12 +231,12 @@ mod tests {
                         crate::widgets::drag_value(egui::DragValue::new(&mut self.value).speed(1.0).max_decimals(3)),
                     );
                 } else if self.ordinary {
-                    ui.interact(Rect::from_min_size(pos2(100.0, 100.0), vec2(60.0, 20.0)), Id::new("ordinary"), egui::Sense::drag());
+                    ui.interact(Rect::from_min_size(pos2(100.0, 100.0), vec2(60.0, 20.0)), Id::unique("ordinary"), egui::Sense::drag());
                 } else if self.angle {
                     let (rr, dr, value) = crate::panels::fx_widgets::angle_field(
                         ui,
                         pos2(100.0, 100.0),
-                        Id::new("scrub"),
+                        Id::unique("scrub"),
                         self.value,
                         1,
                         &crate::theme::Tokens::for_kind(crate::theme::ThemeKind::Dark),
@@ -249,7 +249,7 @@ mod tests {
                     let (_, value, _) = crate::widgets::hot_number_at(
                         ui,
                         pos2(100.0, 100.0),
-                        Id::new("scrub"),
+                        Id::unique("scrub"),
                         self.value,
                         1.0,
                         (-1e9, 1e9),

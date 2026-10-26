@@ -52,7 +52,7 @@ fn a_panel_in_its_own_window_leaves_the_main_window() {
     h.run_steps(3);
     // No in-window floating group is drawn for it (no move strip, no floating area)...
     assert!(!h.state().auto.elements.iter().any(|e| e.id.starts_with("panel.float.")));
-    let area = egui::Id::new(("floating-panel", PanelKind::Project.id()));
+    let area = egui::Id::unique(("floating-panel", PanelKind::Project.id()));
     assert!(!h.ctx.memory(|m| m.layer_ids().any(|layer| layer.id == area && m.areas().is_visible(&layer))));
     // ...the window draws it (here embedded: the test harness has no native windows).
     assert!(h.state().auto.elements.iter().any(|e| e.id == "panel.Project"));

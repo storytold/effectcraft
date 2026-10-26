@@ -83,7 +83,7 @@ fn tabs(
     for (i, name) in names.iter().enumerate() {
         let w = if cols.is_empty() { 16.0 + name.chars().count() as f32 * 6.2 } else { 20.0 };
         let r = Rect::from_min_size(pos2(x, cy - 9.0), vec2(w, 18.0));
-        let resp = ui.interact(r, egui::Id::new((id, i)), Sense::click());
+        let resp = ui.interact(r, egui::Id::unique((id, i)), Sense::click());
         let sel = i == cur;
         if sel {
             p.rect_filled(r, 3.0, t.row_selected);
@@ -113,7 +113,7 @@ fn tabs(
 
 fn reset_link(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, r: Rect, id: &str) -> bool {
     let t = app.tokens;
-    let resp = ui.interact(r, egui::Id::new(id), Sense::click());
+    let resp = ui.interact(r, egui::Id::unique(id), Sense::click());
     p.text(r.center(), Align2::CENTER_CENTER, tr("Reset"), Tokens::ui(11.5), if resp.hovered() { t.hot_text } else { t.text_dim });
     app.auto.add(id, r, "Reset");
     resp.clicked()
@@ -192,7 +192,7 @@ fn rgb_curves(
         set_str(actions, layer, g, id, fw::CurvePoints::identity().format(), None);
     }
     let gr = Rect::from_min_size(pos2(x0, r.min.y + 30.0), vec2(size, size));
-    let gid = egui::Id::new(("lumetri-rgb", euid, ch));
+    let gid = egui::Id::unique(("lumetri-rgb", euid, ch));
     let (resp, edit) = fw::curves_graph(ui, gr, &cur, ch, false, false, gid, &t);
     app.auto.add(&format!("{prefix}.graph"), gr, "RGB Curves");
     register_points(app, &prefix, gr, &cur.0);
@@ -321,7 +321,7 @@ fn huesat_curves(
         })
         .collect();
     p.add(egui::Shape::line(line, Stroke::new(1.5, Color32::from_gray(0xe8))));
-    let gid = egui::Id::new(("lumetri-hs", euid, k));
+    let gid = egui::Id::unique(("lumetri-hs", euid, k));
     let resp = ui.interact(gr.expand(6.0), gid, Sense::click_and_drag());
     app.auto.add(&format!("{prefix}.graph"), gr, name);
     let drag_id = gid.with("drag");
@@ -476,7 +476,7 @@ fn colorama_wheel(
     }
     p.circle_stroke(c, outer, Stroke::new(1.0, Color32::from_black_alpha(160)));
     p.circle_stroke(c, inner, Stroke::new(1.0, Color32::from_black_alpha(160)));
-    let wid = egui::Id::new(("colorama-wheel", euid));
+    let wid = egui::Id::unique(("colorama-wheel", euid));
     let ring = Rect::from_center_size(c, vec2(outer * 2.0 + 40.0, outer * 2.0 + 40.0));
     let resp = ui.interact(ring, wid, Sense::click_and_drag());
     app.auto.add(&format!("{prefix}.wheel"), ring, "Output Cycle");
@@ -712,7 +712,7 @@ fn glow_map(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, laye
         set_str(actions, layer, g, "arbitraryMap", join_map(&m), None);
     }
     let gr = Rect::from_min_size(pos2(x0, r.min.y + 30.0), vec2(size, size));
-    let gid = egui::Id::new(("glow-map", euid, ch));
+    let gid = egui::Id::unique(("glow-map", euid, ch));
     let (resp, edit) = fw::curves_graph(ui, gr, &map[ch], ch + 1, false, false, gid, &t);
     app.auto.add(&format!("{prefix}.graph"), gr, "Arbitrary Map");
     register_points(app, &prefix, gr, &map[ch].0);
@@ -786,19 +786,19 @@ fn reshape_buttons(
     let b1 = Rect::from_min_size(pos2(r.min.x + 24.0, r.min.y + 4.0), vec2(84.0, 22.0));
     let b2 = Rect::from_min_size(pos2(b1.max.x + 8.0, b1.min.y), vec2(96.0, 22.0));
     let b3 = Rect::from_min_size(pos2(b2.max.x + 8.0, b1.min.y), vec2(56.0, 22.0));
-    if widgets::text_button(ui, b1, "Add Point", false, &t, egui::Id::new(("reshape-add", euid))).clicked() {
+    if widgets::text_button(ui, b1, "Add Point", false, &t, egui::Id::unique(("reshape-add", euid))).clicked() {
         let mut v = pairs.clone();
         v.push(add_pair(&pairs));
         set_str(actions, layer, g, "correspondencePoints", format_pairs(&v), None);
     }
     app.auto.add(&format!("effectControls.effect.{euid}.reshape.add"), b1, "Add Point");
-    if widgets::text_button(ui, b2, "Remove Point", false, &t, egui::Id::new(("reshape-remove", euid))).clicked() && !pairs.is_empty() {
+    if widgets::text_button(ui, b2, "Remove Point", false, &t, egui::Id::unique(("reshape-remove", euid))).clicked() && !pairs.is_empty() {
         let mut v = pairs.clone();
         v.pop();
         set_str(actions, layer, g, "correspondencePoints", format_pairs(&v), None);
     }
     app.auto.add(&format!("effectControls.effect.{euid}.reshape.remove"), b2, "Remove Point");
-    if widgets::text_button(ui, b3, "Clear", false, &t, egui::Id::new(("reshape-clear", euid))).clicked() && !pairs.is_empty() {
+    if widgets::text_button(ui, b3, "Clear", false, &t, egui::Id::unique(("reshape-clear", euid))).clicked() && !pairs.is_empty() {
         set_str(actions, layer, g, "correspondencePoints", String::new(), None);
     }
     app.auto.add(&format!("effectControls.effect.{euid}.reshape.clear"), b3, "Clear");
@@ -857,8 +857,8 @@ fn extractor_layers(
     p.text(pos2(r.min.x + 37.0, r.center().y), Align2::LEFT_CENTER, tr("Layer"), Tokens::ui(12.0), t.text);
     let vx = (r.min.x + r.width() * 0.48).max(r.min.x + 161.0);
     let dr = Rect::from_min_size(pos2(vx, r.center().y - 9.0), vec2((r.max.x - vx - 56.0).clamp(80.0, 200.0), 18.0));
-    let pop = egui::Id::new(("extractor-layers", euid));
-    if widgets::dropdown(ui, dr, &label, &t, egui::Id::new(("extractor-layer", euid)))
+    let pop = egui::Id::unique(("extractor-layers", euid));
+    if widgets::dropdown(ui, dr, &label, &t, egui::Id::unique(("extractor-layer", euid)))
         .on_hover_text(tr("The OpenEXR layer shown in red, green, blue and alpha"))
         .clicked()
     {
@@ -899,8 +899,8 @@ pub fn channel_popup(
     let t = app.tokens;
     let uid = prop.uid;
     let label = if cur.trim().is_empty() { NO_CHANNEL } else { cur };
-    let pop = egui::Id::new(("ec-chpop", uid));
-    if widgets::dropdown(ui, r, label, &t, egui::Id::new(("ec-ch", uid))).clicked() {
+    let pop = egui::Id::unique(("ec-chpop", uid));
+    if widgets::dropdown(ui, r, label, &t, egui::Id::unique(("ec-ch", uid))).clicked() {
         widgets::open_popup(ui, pop);
     }
     app.auto.add(&format!("effectControls.prop.{uid}.value"), r, &prop.name);
@@ -992,7 +992,7 @@ pub fn reshape_overlay(
         painter.line_segment([ps, pd], Stroke::new(1.0, Color32::from_white_alpha(150)));
         for (end, s, col) in [(0usize, ps, ys), (1, pd, cs)] {
             let hr = Rect::from_center_size(s, vec2(12.0, 12.0));
-            let id = egui::Id::new(("reshape-pt", g.uid, i, end));
+            let id = egui::Id::unique(("reshape-pt", g.uid, i, end));
             let resp = ui.interact(hr, id, Sense::drag());
             let hot = resp.hovered() || resp.dragged();
             painter.rect_filled(Rect::from_center_size(s, vec2(7.0, 7.0)), 0.0, if hot { Color32::WHITE } else { col });
@@ -1086,7 +1086,7 @@ pub fn mesh_warp_overlay(
     let accent = app.tokens.accent;
     for (k, s) in screen.iter().enumerate() {
         let hr = Rect::from_center_size(*s, vec2(10.0, 10.0));
-        let id = egui::Id::new(("mesh-warp-vertex", g.uid, k));
+        let id = egui::Id::unique(("mesh-warp-vertex", g.uid, k));
         let resp = ui.interact(hr, id, Sense::drag());
         let hot = resp.hovered() || resp.dragged();
         let dot = Rect::from_center_size(*s, vec2(5.0, 5.0));

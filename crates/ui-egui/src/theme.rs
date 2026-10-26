@@ -322,6 +322,10 @@ static INTER_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/Inter-Regula
 static INTER_MEDIUM: &[u8] = include_bytes!("../../../assets/fonts/Inter-Medium.ttf");
 static INTER_SEMIBOLD: &[u8] = include_bytes!("../../../assets/fonts/Inter-SemiBold.ttf");
 static JETBRAINS_MONO: &[u8] = include_bytes!("../../../assets/fonts/JetBrainsMono-Regular.ttf");
+/// Chrome symbols (`✔` U+2714, `▣` U+25A3, …) that Inter, Inter Medium/SemiBold and
+/// JetBrains Mono do not cover. 0.37's default font set no longer includes the old emoji
+/// fonts, and named families (`medium`, `semibold`) never received egui's default fallbacks.
+static NOTO_SYMBOLS2: &[u8] = include_bytes!("../../../assets/fonts/NotoSansSymbols2-Regular.ttf");
 
 /// Install fonts (Inter, Inter Medium/SemiBold, JetBrains Mono) and egui visuals. `language` is the
 /// resolved interface language from [`crate::i18n::language`] (`en`, `ja`, `zh-hans` or `zh-hant`),
@@ -336,16 +340,20 @@ pub fn install(ctx: &egui::Context, t: &Tokens, language: &str) {
     fonts.font_data.insert("inter-medium".into(), Arc::new(FontData::from_static(INTER_MEDIUM)));
     fonts.font_data.insert("inter-semibold".into(), Arc::new(FontData::from_static(INTER_SEMIBOLD)));
     fonts.font_data.insert("jbmono".into(), Arc::new(FontData::from_static(JETBRAINS_MONO)));
+    fonts.font_data.insert("noto-symbols2".into(), Arc::new(FontData::from_static(NOTO_SYMBOLS2)));
     fonts.families.entry(FontFamily::Proportional).or_default().insert(0, "inter".into());
     fonts.families.entry(FontFamily::Monospace).or_default().insert(0, "jbmono".into());
     fonts.families.insert(FontFamily::Name("semibold".into()), vec!["inter-semibold".into(), "inter".into()]);
     fonts.families.insert(FontFamily::Name("medium".into()), vec!["inter-medium".into(), "inter".into()]);
     // Inter and egui's own fallbacks have no small triangles (the `▸` of "File ▸ Import"), which
     // would draw as missing-glyph boxes: JetBrains Mono fills in the symbols the others lack.
+    // Noto Sans Symbols 2 follows it for the check/box glyphs (`✔`, `▣`) that JetBrains Mono
+    // lacks; without it, named families such as `medium` fall straight through to tofu.
     for (family, stack) in &mut fonts.families {
         if *family != FontFamily::Monospace {
             stack.push("jbmono".into());
         }
+        stack.push("noto-symbols2".into());
     }
     install_script_fallbacks(&mut fonts, language);
     ctx.set_fonts(fonts);
@@ -786,7 +794,8 @@ mod tests {
             // another test has loaded a system face without `◻` (the fallback tries loaded faces first).
             let uv = |s: String| ctx.fonts_mut(|f| f.layout_no_wrap(s, id.clone(), egui::Color32::WHITE).rows[0].glyphs[0].uv_rect);
             let missing = uv("\u{10ffff}".into());
-            for c in "▸•›·▶◀●○⚠…×".chars() {
+            // Every chrome symbol the panels, menus, shortcut labels and buttons draw.
+            for c in "✔▣✓⚠▶◀▸●○…×›•·−←→↑↓⌘⇧⌥⌃".chars() {
                 let drawn = uv(c.to_string());
                 assert_ne!((drawn.min, drawn.max), (missing.min, missing.max), "{c} has no glyph in {id:?}");
             }
@@ -807,7 +816,7 @@ mod tests {
         }
         let Some(font) = face.font() else { return };
         let bytes = font.data().as_bytes();
-        let covered = fonts_def.font_data.values().any(|d| d.font.as_ref() == bytes && d.index == face.info.index);
+        let covered = fonts_def.font_data.values().any(|d| d.bytes() == bytes && d.index == face.info.index);
         assert!(covered, "a face covering Hangul must be registered with egui");
     }
 
@@ -823,7 +832,7 @@ mod tests {
             .iter()
             .map(|name| {
                 let data = fonts.font_data.get(name).unwrap_or_else(|| panic!("{name} is missing its font data"));
-                (data.font.as_ref(), data.index)
+                (data.bytes(), data.index)
             })
             .collect();
         for (i, a) in faces.iter().enumerate() {

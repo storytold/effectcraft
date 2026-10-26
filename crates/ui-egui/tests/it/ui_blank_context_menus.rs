@@ -65,7 +65,7 @@ fn timeline_blank_outline_and_time_graph_create_layers() {
         let area = rect(&h, "timeline.layerMarquee");
         let p = if graph { pos2(area.max.x + 150.0, area.center().y) } else { area.center() };
         right_click(&mut h, p);
-        h.get_by_label("New ⏵").click();
+        h.get_by_label("New").click();
         h.run_steps(3);
         snapshot(&mut h, if graph { "timeline-graph" } else { "timeline-outline" });
         h.get_by_label("Null Object").click();
@@ -81,7 +81,7 @@ fn timeline_blank_menu_opens_solid_settings() {
     let mut h = harness();
     let p = rect(&h, "timeline.layerMarquee").center();
     right_click(&mut h, p);
-    h.get_by_label("New ⏵").click();
+    h.get_by_label("New").click();
     h.run_steps(3);
     h.get_by_label("Solid…").click();
     h.run_steps(3);
@@ -252,13 +252,13 @@ fn timeline_layer_context_menu_has_the_effects_submenu_and_applies_an_effect() {
     let r = rect(&h, &format!("timeline.layer.{layer}.row"));
     right_click(&mut h, pos2(r.min.x + 210.0, r.center().y));
     // The palette sits between Blending Mode and Arrange, as After Effects' layer menu does.
-    let blending = h.get_by_label("Blending Mode ⏵").rect();
-    let effects = h.get_by_label("Effects ⏵").rect();
-    let arrange = h.get_by_label("Arrange ⏵").rect();
+    let blending = h.get_by_label("Blending Mode").rect();
+    let effects = h.get_by_label("Effects").rect();
+    let arrange = h.get_by_label("Arrange").rect();
     assert!(blending.bottom() <= effects.top() && effects.bottom() <= arrange.top(), "Effects between Blending Mode and Arrange");
-    h.get_by_label("Effects ⏵").click();
+    h.get_by_label("Effects").click();
     h.run_steps(3);
-    h.get_by_label("Blur & Sharpen ⏵").click();
+    h.get_by_label("Blur & Sharpen").click();
     h.run_steps(3);
     h.get_by_label("Gaussian Blur").click();
     h.run_steps(3);
@@ -283,11 +283,11 @@ fn timeline_layer_context_menu_has_layer_styles_submenu() {
     h.run_steps(3);
     let r = rect(&h, &format!("timeline.layer.{solid}.row"));
     right_click(&mut h, pos2(r.min.x + 210.0, r.center().y));
-    let blending = h.get_by_label("Blending Mode ⏵").rect();
-    let styles = h.get_by_label("Layer Styles ⏵").rect();
-    let effects = h.get_by_label("Effects ⏵").rect();
+    let blending = h.get_by_label("Blending Mode").rect();
+    let styles = h.get_by_label("Layer Styles").rect();
+    let effects = h.get_by_label("Effects").rect();
     assert!(blending.bottom() <= styles.top() && styles.bottom() <= effects.top(), "Layer Styles between Blending Mode and Effects");
-    h.get_by_label("Layer Styles ⏵").click();
+    h.get_by_label("Layer Styles").click();
     h.run_steps(3);
     assert!(h.query_by_label("Layer Style Options...").is_some());
     assert!(h.query_by_label("Drop Shadow").is_some());
@@ -351,7 +351,7 @@ fn layer_context_menu_adds_a_layer_marker() {
     h.run_steps(3);
     let r = rect(&h, &format!("timeline.layer.{top}.row"));
     right_click(&mut h, pos2(r.min.x + 210.0, r.center().y));
-    h.get_by_label("Markers ⏵").click();
+    h.get_by_label("Markers").click();
     h.run_steps(3);
     snapshot(&mut h, "layer-markers");
     h.get_by_label("Add Marker").click();

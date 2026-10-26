@@ -56,6 +56,9 @@ fn batch(s: &mut Session, p: &Value) -> Result<Value> {
     let label = str_p(p, "label").unwrap_or("Batch").to_string();
     let atomic = p.get("atomic").and_then(Value::as_bool).unwrap_or(true);
     let (project, history, state) = (s.project.clone(), s.history.clone(), s.state.clone());
+    // Rolled-back steps may have queued events (an `OpenComp`, a Toast) for the state that is
+    // about to be dropped: the UI must not act on them.
+    let event_mark = s.events.len();
     let mut results: Vec<Value> = Vec::with_capacity(steps.len());
     for (i, step) in steps.iter().enumerate() {
         let run = |s: &mut Session, results: &[Value]| -> Result<Value> {
@@ -75,10 +78,21 @@ fn batch(s: &mut Session, p: &Value) -> Result<Value> {
             Err(e) => {
                 let id = step.get("command").or_else(|| step.get("id")).and_then(Value::as_str).unwrap_or("?");
                 let note = if atomic {
+                    // The snapshot is the intermediate state the failing step left: comparing it
+                    // with the restored editor detects a restart or cross-comp switch inside the
+                    // batch, so the pre-batch token is never revived. Do not restore
+                    // `ime_revision`: a transient text edit inside the batch already advanced
+                    // this process-monotonic high-water mark, and rewinding it would reuse a
+                    // stamp (letting a wide-selection composition look current). An unrelated
+                    // failed batch did not advance it, so its value stays exactly as it was.
+                    let edited = crate::commands::text_edit::active_editor_snapshot(s);
+                    let interim_revision = s.ime_revision;
                     s.project = project;
                     s.history = history;
                     s.state = state;
-                    s.sanitize_state();
+                    s.events.truncate(event_mark);
+                    s.sanitize_after_replacement(edited.as_ref());
+                    s.ime_revision = s.ime_revision.max(interim_revision);
                     s.bump();
                     "; the batch was rolled back (nothing changed)".to_string()
                 } else {

@@ -175,6 +175,7 @@ fn viewer_zooms_and_pans_over_the_track_points() {
         delta: egui::vec2(0.0, 120.0),
         modifiers: Default::default(),
         phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Wheel,
     });
     h.run_steps(20);
     assert_ne!(h.state().ui.viewer.zoom, zoom, "the wheel zooms over the track points");

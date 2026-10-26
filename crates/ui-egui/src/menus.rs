@@ -367,7 +367,7 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
         return invoke(app, ctx, "project.delete", json!({}));
     }
     if id == "edit.clear" && params.as_object().is_some_and(|p| p.is_empty()) && app.ui.focused == PanelKind::RenderQueue {
-        let selected = ctx.data(|d| d.get_temp::<(Vec<u64>, Option<u64>)>(egui::Id::new("rq-ui"))).and_then(|(_, id)| id);
+        let selected = ctx.data(|d| d.get_temp::<(Vec<u64>, Option<u64>)>(egui::Id::unique("rq-ui"))).and_then(|(_, id)| id);
         return match selected {
             Some(item) => run_engine(app, ctx, "renderQueue.remove", json!({"item": item})),
             None => Err("select a Render Queue item first".into()),
@@ -381,7 +381,7 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
         }
         return crate::panels::delete_items::delete_confirmed(app, ctx, json!({}));
     }
-    let now = ctx.input(|i| i.time);
+    let now = app.now();
     // Closing a modified project asks to save it first; the command runs once answered.
     if crate::panels::unsaved::guard(app, id, &params) {
         return Ok(json!({"dialog": "unsavedChanges"}));
@@ -915,7 +915,7 @@ fn toggle(slot: &mut bool, p: &Value) -> Value {
 
 /// Perform a frontend command (from `Event::Frontend`).
 pub fn frontend(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, p: Value) -> Result<Value, String> {
-    let now = ctx.input(|i| i.time);
+    let now = app.now();
     let v = &mut app.ui.viewer;
     Ok(match id {
         "mediaBrowser.copySourcePath" => {
@@ -932,6 +932,10 @@ pub fn frontend(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, p: Valu
             let path = path.to_str().ok_or("The presets folder path is not valid UTF-8")?;
             ctx.copy_text(path.to_string());
             json!({"path": path})
+        }
+        "app.checkForUpdates" | "help.checkForUpdates" => {
+            crate::updates_ui::check(app);
+            Value::Null
         }
         "app.about" => {
             app.dialog = Some(crate::Dialog::About);
@@ -1244,7 +1248,7 @@ pub fn frontend(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, p: Valu
         "view.lookAt" => {
             let r: Vec<f64> = p.get("rect").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_f64).collect()).unwrap_or_default();
             if r.len() == 4 {
-                let map: Option<crate::panels::viewer::ViewerMap> = ctx.data(|d| d.get_temp(egui::Id::new("viewer-map")));
+                let map: Option<crate::panels::viewer::ViewerMap> = ctx.data(|d| d.get_temp(egui::Id::unique("viewer-map")));
                 if let Some(m) = map {
                     let (rw, rh) = (((r[2] - r[0]) as f32).max(1.0), ((r[3] - r[1]) as f32).max(1.0));
                     let zoom = ((m.area.width() - 40.0) / rw).min((m.area.height() - 40.0) / rh).clamp(0.015, 32.0);
@@ -1820,17 +1824,17 @@ pub fn forwardable_during_text_edit(mods: egui::Modifiers, key: egui::Key) -> bo
 /// run the Spacebar shortcut.
 /// The system clipboard's text of this frame's paste event, for the Edit ▸ Paste it runs.
 fn system_paste_id() -> egui::Id {
-    egui::Id::new("menus-system-paste")
+    egui::Id::unique("menus-system-paste")
 }
 
 fn space_tap_id() -> egui::Id {
-    egui::Id::new("spacebar-tap")
+    egui::Id::unique("spacebar-tap")
 }
 
 /// The modifiers held when this frame's input began: the state the last pass ended with, if it
 /// ran this (egui keeps only the state after the frame's events). Records this pass's state.
 fn modifiers_at_start(ctx: &egui::Context) -> Option<egui::Modifiers> {
-    let id = egui::Id::new("shortcut-modifiers");
+    let id = egui::Id::unique("shortcut-modifiers");
     let pass = ctx.cumulative_pass_nr();
     let now = ctx.input(|i| i.modifiers);
     ctx.data_mut(|d| {
@@ -2066,12 +2070,12 @@ fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only
 /// The id under which [`menu_bar`] remembers which of its menus was open at the end of the last
 /// frame (its title's open look, and the hover that switches between the titles).
 fn open_menu_id() -> egui::Id {
-    egui::Id::new("menu-bar-open")
+    egui::Id::unique("menu-bar-open")
 }
 
 /// The id under which [`menu_bar`] remembers a title press still in progress (press-and-browse).
 fn browse_menu_id() -> egui::Id {
-    egui::Id::new("menu-bar-browse")
+    egui::Id::unique("menu-bar-browse")
 }
 
 /// Draw the in-window menu bar (the engine's AE menu tree).

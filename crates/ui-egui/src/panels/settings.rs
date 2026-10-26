@@ -346,7 +346,7 @@ fn theme_card(
                         let favorite = favorites.iter().any(|id| id == value);
                         let tip = tr(if favorite { "Remove from favorites" } else { "Add to favorites" });
                         let r = ui.add_visible(favorite || hovered, egui::Button::new("").min_size(vec2(24.0, 24.0)).frame(false)).on_hover_text(tip);
-                        r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("{}: {}", tip, tr(label))));
+                        r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{}: {}", tip, tr(label))));
                         reg(app, &format!("settings.appearance.favoriteThemes.{value}"), &r, tip);
                         if favorite || hovered {
                             crate::icons::paint(

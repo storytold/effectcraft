@@ -58,7 +58,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         && f.has_video
     {
         let key = (view.item.0, view.time.0, app.session.revision);
-        let tid = egui::Id::new("footage-panel-tex");
+        let tid = egui::Id::unique("footage-panel-tex");
         let cached: Option<((u64, i64, u64), egui::TextureHandle, [u32; 2])> = ctx.data(|d| d.get_temp(tid));
         let tex = match cached {
             Some((k, tex, size)) if k == key => Some((tex, size)),
@@ -97,7 +97,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     p.rect_filled(Rect::from_min_max(pos2(x_of(a), ruler.max.y - 4.0), pos2(x_of(b), ruler.max.y)), 0.0, t.work_area);
     let cx = x_of(view.time);
     p.line_segment([pos2(cx, ruler.min.y), pos2(cx, ruler.max.y)], Stroke::new(1.5, t.cti));
-    let resp = ui.interact(ruler, egui::Id::new("footage-ruler"), Sense::click_and_drag());
+    let resp = ui.interact(ruler, egui::Id::unique("footage-ruler"), Sense::click_and_drag());
     app.auto.add("footage.ruler", ruler, "Time ruler");
     if (resp.clicked() || resp.dragged())
         && let Some(pt) = resp.interact_pointer_pos()
@@ -106,7 +106,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         kit::exec(app, "footage.setTime", json!({"time": s}));
     }
     // Playback.
-    let play_id = egui::Id::new("footage-playing");
+    let play_id = egui::Id::unique("footage-playing");
     let playing: bool = ctx.data(|d| d.get_temp(play_id).unwrap_or(false));
     if playing {
         let dt = ctx.input(|i| i.stable_dt).min(0.1) as f64;

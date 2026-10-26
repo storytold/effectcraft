@@ -533,7 +533,10 @@ indices): character attributes
    starts editing (`position` instead of `box` makes point text; `vertical: true` vertical type).
 2. `text.insert {"text":"Hello world"}` types at the caret (replacing the selection);
    `text.setSelection {"start":6,"end":11}` selects "world"; `text.moveCaret {"to":"wordLeft",
-   "extend":true}` moves like the arrow keys; `text.delete {"word":true}` is Alt+Backspace.
+   "extend":true}` moves like the arrow keys; `text.delete {"word":true}` is Alt+Backspace;
+   `text.deleteSurrounding {"before":1,"after":2,"bytes":true}` deletes the characters around the
+   selection without deleting it (what an input method's replacement asks for: the selection stays
+   for the commit that follows; a byte count ending inside a character leaves that character).
 3. `layer.setText {"range":[6,11], "size":40, "fill":"#ff5500"}` styles the selection (the
    Character panel does the same); with an empty range it sets the style the next typed text takes.
 4. `edit.copy`, `edit.paste`, `edit.pasteTextMatchFormatting` and `edit.pasteTextFormattingOnly`

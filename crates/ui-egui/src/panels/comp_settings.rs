@@ -182,7 +182,7 @@ fn timecode_field(ui: &mut egui::Ui, buf: &mut Option<String>, secs: &mut f64, r
 }
 
 fn name_focus_id() -> egui::Id {
-    egui::Id::new("comp-preset-name-focus")
+    egui::Id::unique("comp-preset-name-focus")
 }
 
 /// Save Preset's Choose Name prompt (drawn in its own modal over the dialog while
@@ -302,7 +302,7 @@ pub fn show(
                     });
                     auto.add("dialog.comp.preset", r.response.rect, "Preset");
                     let (save_r, _) = ui.allocate_exact_size(vec2(20.0, 20.0), egui::Sense::hover());
-                    let save = crate::widgets::icon_button(ui, save_r, Icon::Plus, d.preset_name.is_some(), t, egui::Id::new("comp-preset-save"))
+                    let save = crate::widgets::icon_button(ui, save_r, Icon::Plus, d.preset_name.is_some(), t, egui::Id::unique("comp-preset-save"))
                         .on_hover_text(tr("Save Preset…"));
                     auto.add("dialog.comp.presetSave", save_r, "Save Preset");
                     if save.clicked() {
@@ -311,7 +311,7 @@ pub fn show(
                     }
                     if let Some(q) = own {
                         let (del_r, _) = ui.allocate_exact_size(vec2(20.0, 20.0), egui::Sense::hover());
-                        let del = crate::widgets::icon_button(ui, del_r, Icon::Trash, false, t, egui::Id::new("comp-preset-delete"))
+                        let del = crate::widgets::icon_button(ui, del_r, Icon::Trash, false, t, egui::Id::unique("comp-preset-delete"))
                             .on_hover_text(tr("Delete Preset"));
                         auto.add("dialog.comp.presetDelete", del_r, "Delete Preset");
                         if del.clicked() {

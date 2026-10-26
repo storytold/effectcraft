@@ -241,7 +241,7 @@ impl Default for View {
 /// About ▸ Contributors: a name toggle, a sort, and the list as a grab bag or a table. Every
 /// control registers an automation id under `about.credits.`.
 pub fn contributors_ui(ui: &mut egui::Ui, auto: &mut Registry) {
-    let id = egui::Id::new("credits_view");
+    let id = egui::Id::unique("credits_view");
     let mut v = ui.data_mut(|d| d.get_temp::<View>(id)).unwrap_or_default();
     ui.horizontal_wrapped(|ui| {
         ui.label(tr("Show"));

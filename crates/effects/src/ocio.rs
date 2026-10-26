@@ -617,7 +617,7 @@ pub fn load_file(src: &str) -> Option<Arc<FileXform>> {
     let parsed = if inline {
         parse_file(src, "")
     } else {
-        let ext = std::path::Path::new(src_t).extension().and_then(|e| e.to_str()).unwrap_or("");
+        let ext = std::path::Path::new(src_t).extension().and_then(std::ffi::OsStr::to_str).unwrap_or("");
         std::fs::read_to_string(src_t).ok().and_then(|t| parse_file(&t, ext))
     }
     .map(Arc::new);

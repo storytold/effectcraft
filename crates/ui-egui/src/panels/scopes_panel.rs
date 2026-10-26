@@ -97,7 +97,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let time = app.session.time();
     let key = (app.session.revision, cid.0, time.0, format!("{}{}{}{}{}x{}", st.scope, st.standard, st.float, st.clamp, o.width, o.height), 0);
     let ctx = ui.ctx().clone();
-    let id = egui::Id::new("scopes-cache");
+    let id = egui::Id::unique("scopes-cache");
     let cached: Option<Cached> = ctx.data(|d| d.get_temp(id));
     let cached = match cached {
         Some(c) if c.key == key => c,

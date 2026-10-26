@@ -10,7 +10,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
     let p = ui.painter().with_clip_rect(rect);
     let x0 = rect.min.x + 12.0;
-    let scroll = widgets::PanelScroll::begin(ui, egui::Id::new("info-scroll"), rect);
+    let scroll = widgets::PanelScroll::begin(ui, egui::Id::unique("info-scroll"), rect);
     let mut y = rect.min.y + 14.0 - scroll.offset;
     if app.pointer_comp.is_some() {
         // GPU frames: read the shown frame back for sampling.

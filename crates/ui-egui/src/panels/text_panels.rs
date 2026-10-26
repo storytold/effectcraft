@@ -63,7 +63,7 @@ pub fn text_target(app: &EffectcraftApp) -> Option<TextTarget> {
 
 fn toggle(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, r: Rect, id: &str, label: &str, on: bool, bold: bool) -> bool {
     let t = app.tokens;
-    let resp = ui.interact(r, egui::Id::new(("text-toggle", id)), Sense::click());
+    let resp = ui.interact(r, egui::Id::unique(("text-toggle", id)), Sense::click());
     p.rect_filled(
         r,
         3.0,
@@ -88,7 +88,7 @@ pub fn character(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let target = text_target(app);
     let enabled = target.is_some();
     let doc = target.as_ref().map(|t| t.doc.clone()).unwrap_or_default();
-    let scroll = widgets::PanelScroll::begin(ui, egui::Id::new("character-scroll"), rect);
+    let scroll = widgets::PanelScroll::begin(ui, egui::Id::unique("character-scroll"), rect);
     let top = rect.min.y + 10.0 - scroll.offset;
     let mut y = top;
     let x0 = rect.min.x + 10.0;
@@ -96,14 +96,14 @@ pub fn character(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let mut actions: Vec<serde_json::Value> = vec![];
     // Font family + style.
     let fr = Rect::from_min_size(pos2(x0, y), vec2(w, 22.0));
-    let pop = egui::Id::new("char-font-pop");
+    let pop = egui::Id::unique("char-font-pop");
     if let Some(f) = font_picker(app, ui, pop, fr, &doc.font, "character.font", enabled) {
         actions.push(json!({"font": f}));
     }
     y += 28.0;
     let sr = Rect::from_min_size(pos2(x0, y), vec2(w - 84.0, 22.0));
-    let spop = egui::Id::new("char-style-pop");
-    if widgets::dropdown(ui, sr, &doc.style, &t, egui::Id::new("char-style")).clicked() && enabled {
+    let spop = egui::Id::unique("char-style-pop");
+    if widgets::dropdown(ui, sr, &doc.style, &t, egui::Id::unique("char-style")).clicked() && enabled {
         widgets::open_popup(ui, spop);
     }
     app.auto.add("character.style", sr, "Font style");
@@ -135,7 +135,7 @@ pub fn character(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let fx = x0 + col as f32 * (w / 2.0);
         let fy = y + row as f32 * 28.0;
         p.text(pos2(fx, fy + 9.0), Align2::LEFT_CENTER, glyph, Tokens::semibold(11.0), t.text_dim);
-        let (r, nv, _) = widgets::hot_number_at(ui, pos2(fx + 26.0, fy), egui::Id::new(("char", key)), v, 0.5, range, 0, suffix, &t);
+        let (r, nv, _) = widgets::hot_number_at(ui, pos2(fx + 26.0, fy), egui::Id::unique(("char", key)), v, 0.5, range, 0, suffix, &t);
         app.auto.add(&format!("character.{key}"), r, key);
         if let Some(nv) = nv
             && enabled
@@ -153,8 +153,8 @@ pub fn character(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             Kerning::Manual(v) => format!("{v:.0}"),
         };
         let kr = Rect::from_min_size(pos2(x0 + 26.0, fy), vec2((w / 2.0 - 32.0).max(50.0), 20.0));
-        let kpop = egui::Id::new("char-kerning-pop");
-        if widgets::dropdown(ui, kr, &label, &t, egui::Id::new("char-kerning")).clicked() && enabled {
+        let kpop = egui::Id::unique("char-kerning-pop");
+        if widgets::dropdown(ui, kr, &label, &t, egui::Id::unique("char-kerning")).clicked() && enabled {
             widgets::open_popup(ui, kpop);
         }
         app.auto.add("character.kerning", kr, "Kerning");
@@ -174,8 +174,8 @@ pub fn character(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let fy = y + 2.0 * 28.0;
         let dr = Rect::from_min_size(pos2(fx, fy), vec2(w / 2.0, 20.0));
         let labels = vec!["Fill Over Stroke".to_string(), "Stroke Over Fill".to_string()];
-        let pop = egui::Id::new("char-stroke-order-pop");
-        if widgets::dropdown(ui, dr, &labels[doc.stroke_over_fill as usize], &t, egui::Id::new("char-stroke-order")).clicked() && enabled {
+        let pop = egui::Id::unique("char-stroke-order-pop");
+        if widgets::dropdown(ui, dr, &labels[doc.stroke_over_fill as usize], &t, egui::Id::unique("char-stroke-order")).clicked() && enabled {
             widgets::open_popup(ui, pop);
         }
         app.auto.add("character.strokeOverFill", dr, "Stroke order");
@@ -188,13 +188,13 @@ pub fn character(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     for (i, (key, label, on, c)) in [("fill", "Fill", doc.apply_fill, doc.fill), ("stroke", "Stroke", doc.apply_stroke, doc.stroke)].into_iter().enumerate() {
         let fx = x0 + i as f32 * (w / 2.0);
         let cr = Rect::from_min_size(pos2(fx, y + 3.0), vec2(14.0, 14.0));
-        if widgets::checkbox(ui, cr, on, &t, egui::Id::new(("char-apply", key))).clicked() && enabled {
+        if widgets::checkbox(ui, cr, on, &t, egui::Id::unique(("char-apply", key))).clicked() && enabled {
             actions.push(json!({if key == "fill" { "applyFill" } else { "applyStroke" }: !on}));
         }
         app.auto.add(&format!("character.{key}.enabled"), cr, label);
         let fs = Rect::from_min_size(pos2(fx + 20.0, y), vec2(26.0, 20.0));
-        let pop = egui::Id::new(("char-color-pop", key));
-        if widgets::swatch(ui, fs, c, egui::Id::new(("char-color", key)), &t).clicked() && enabled {
+        let pop = egui::Id::unique(("char-color-pop", key));
+        if widgets::swatch(ui, fs, c, egui::Id::unique(("char-color", key)), &t).clicked() && enabled {
             widgets::open_popup(ui, pop);
         }
         app.auto.add(&format!("character.{key}"), fs, label);
@@ -204,7 +204,7 @@ pub fn character(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         }
         let er = Rect::from_min_size(pos2(fs.max.x + 4.0, y + 1.0), vec2(18.0, 18.0));
         let active = app.ui.text_color_pick.as_ref().is_some_and(|pick| pick.layer == target.as_ref().map_or(0, |tt| tt.layer) && pick.field == key);
-        let eye = super::fx_widgets::eyedropper_button(ui, er, active, egui::Id::new(("char-eye", key)), &t);
+        let eye = super::fx_widgets::eyedropper_button(ui, er, active, egui::Id::unique(("char-eye", key)), &t);
         app.auto.add(&format!("character.{key}.eyedropper"), er, &format!("{label} eyedropper"));
         if eye.clicked() {
             if active {
@@ -240,17 +240,17 @@ pub fn character(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     y += 32.0;
     // Ligatures.
     let lr = Rect::from_min_size(pos2(x0, y), vec2(14.0, 14.0));
-    if widgets::checkbox(ui, lr, doc.ligatures, &t, egui::Id::new("char-ligatures")).clicked() && enabled {
+    if widgets::checkbox(ui, lr, doc.ligatures, &t, egui::Id::unique("char-ligatures")).clicked() && enabled {
         actions.push(json!({"ligatures": !doc.ligatures}));
     }
     app.auto.add("character.ligatures", lr, "Ligatures");
     p.text(pos2(x0 + 20.0, y + 7.0), Align2::LEFT_CENTER, tr("Ligatures"), Tokens::ui(11.5), t.text_dim);
     // OpenType: a popup with the font's layout features (like the Character panel's OpenType menu).
     let or = Rect::from_min_size(pos2(sr.max.x + 6.0, sr.min.y), vec2(78.0, 22.0));
-    let opop = egui::Id::new("char-opentype-pop");
+    let opop = egui::Id::unique("char-opentype-pop");
     let n_on = doc.opentype.feature_settings().len();
     let olabel = if n_on > 0 { format!("OT ({n_on})") } else { "OpenType".to_string() };
-    if widgets::dropdown(ui, or, &olabel, &t, egui::Id::new("char-opentype")).clicked() && enabled {
+    if widgets::dropdown(ui, or, &olabel, &t, egui::Id::unique("char-opentype")).clicked() && enabled {
         widgets::open_popup(ui, opop);
     }
     app.auto.add("character.opentype", or, "OpenType");
@@ -264,7 +264,7 @@ pub fn character(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 .enumerate()
         {
             let cr = Rect::from_min_size(pos2(x0 + i as f32 * 120.0, y), vec2(14.0, 14.0));
-            if widgets::checkbox(ui, cr, on, &t, egui::Id::new(("char-vert", key))).clicked() && enabled {
+            if widgets::checkbox(ui, cr, on, &t, egui::Id::unique(("char-vert", key))).clicked() && enabled {
                 actions.push(json!({key: !on}));
             }
             app.auto.add(&format!("character.{key}"), cr, label);
@@ -288,7 +288,7 @@ pub fn character(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             let v = doc.variations.iter().chain(&instance).find(|(t2, _)| t2.trim_end() == tag).map(|(_, v)| *v).unwrap_or(a.default);
             p.text(pos2(fx, fy + 9.0), Align2::LEFT_CENTER, &tag, Tokens::semibold(10.5), t.text_dim);
             let (r, nv, _) =
-                widgets::hot_number_at(ui, pos2(fx + 34.0, fy), egui::Id::new(("char-axis", &tag)), v as f64, 1.0, (a.min as f64, a.max as f64), 0, "", &t);
+                widgets::hot_number_at(ui, pos2(fx + 34.0, fy), egui::Id::unique(("char-axis", &tag)), v as f64, 1.0, (a.min as f64, a.max as f64), 0, "", &t);
             app.auto.add(&format!("character.axis.{tag}"), r, &a.name);
             if let Some(nv) = nv
                 && enabled
@@ -461,7 +461,7 @@ pub fn paragraph(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let doc = target.as_ref().map(|t| t.doc.clone()).unwrap_or_default();
     let x0 = rect.min.x + 10.0;
     let w = rect.width() - 20.0;
-    let scroll = widgets::PanelScroll::begin(ui, egui::Id::new("paragraph-scroll"), rect);
+    let scroll = widgets::PanelScroll::begin(ui, egui::Id::unique("paragraph-scroll"), rect);
     let top = rect.min.y + 10.0 - scroll.offset;
     let mut y = top;
     let mut actions: Vec<serde_json::Value> = vec![];
@@ -469,7 +469,7 @@ pub fn paragraph(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     for (i, (j, key)) in ALIGNS.into_iter().enumerate() {
         let r = Rect::from_min_size(pos2(x0 + i as f32 * (bw + 3.0), y), vec2(bw, 24.0));
         let on = doc.justify == j;
-        let resp = ui.interact(r, egui::Id::new(("para", key)), Sense::click());
+        let resp = ui.interact(r, egui::Id::unique(("para", key)), Sense::click());
         p.rect_filled(
             r,
             3.0,
@@ -504,7 +504,7 @@ pub fn paragraph(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let fx = x0 + (i % 2) as f32 * (w / 2.0);
         let fy = y + (i / 2) as f32 * 28.0;
         p.text(pos2(fx, fy + 9.0), Align2::LEFT_CENTER, glyph, Tokens::semibold(11.0), t.text_dim);
-        let (r, nv, _) = widgets::hot_number_at(ui, pos2(fx + 26.0, fy), egui::Id::new(("para-f", key)), v, 0.5, (-5000.0, 5000.0), 0, " px", &t);
+        let (r, nv, _) = widgets::hot_number_at(ui, pos2(fx + 26.0, fy), egui::Id::unique(("para-f", key)), v, 0.5, (-5000.0, 5000.0), 0, " px", &t);
         app.auto.add(&format!("paragraph.{key}"), r, key);
         if let Some(nv) = nv
             && enabled
@@ -521,8 +521,8 @@ pub fn paragraph(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     if world_ready || rtl {
         let dr = Rect::from_min_size(pos2(x0, y), vec2(w / 2.0 - 4.0, 22.0));
         let dirs = vec!["Left-to-Right Text".to_string(), "Right-to-Left Text".to_string()];
-        let dpop = egui::Id::new("para-direction-pop");
-        if widgets::dropdown(ui, dr, &dirs[rtl as usize], &t, egui::Id::new("para-direction")).clicked() && enabled {
+        let dpop = egui::Id::unique("para-direction-pop");
+        if widgets::dropdown(ui, dr, &dirs[rtl as usize], &t, egui::Id::unique("para-direction")).clicked() && enabled {
             widgets::open_popup(ui, dpop);
         }
         app.auto.add("paragraph.direction", dr, "Text direction");
@@ -536,9 +536,9 @@ pub fn paragraph(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     } else {
         vec!["Every-line Composer".to_string(), "Single-line Composer".to_string()]
     };
-    let cpop = egui::Id::new("para-composer-pop");
+    let cpop = egui::Id::unique("para-composer-pop");
     let single = doc.composer == Composer::SingleLine;
-    if widgets::dropdown(ui, cr, &comps[single as usize], &t, egui::Id::new("para-composer")).clicked() && enabled {
+    if widgets::dropdown(ui, cr, &comps[single as usize], &t, egui::Id::unique("para-composer")).clicked() && enabled {
         widgets::open_popup(ui, cpop);
     }
     app.auto.add("paragraph.composer", cr, "Composer");
@@ -547,7 +547,7 @@ pub fn paragraph(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
     y += 30.0;
     let hr = Rect::from_min_size(pos2(x0, y), vec2(14.0, 14.0));
-    if widgets::checkbox(ui, hr, doc.hanging_punctuation, &t, egui::Id::new("para-hanging")).clicked() && enabled {
+    if widgets::checkbox(ui, hr, doc.hanging_punctuation, &t, egui::Id::unique("para-hanging")).clicked() && enabled {
         actions.push(json!({"hangingPunctuation": !doc.hanging_punctuation}));
     }
     app.auto.add("paragraph.hangingPunctuation", hr, "Roman Hanging Punctuation");
@@ -610,7 +610,10 @@ pub(super) fn font_picker(app: &mut EffectcraftApp, ui: &mut egui::Ui, id: egui:
         search.request_focus();
     }
     ui.memory_mut(|m| m.set_focus_lock_filter(search_id, egui::EventFilter { vertical_arrows: true, escape: true, ..Default::default() }));
-    if widgets::icon_button(ui, arrow, crate::icons::Icon::ChevronDown, false, &t, id.with("arrow")).clicked() {
+    if widgets::icon_button(ui, arrow, crate::icons::Icon::ChevronDown, false, &t, id.with("arrow"))
+        .on_hover_text(crate::i18n::tr("Close font search"))
+        .clicked()
+    {
         ui.data_mut(|d| {
             d.insert_temp(id.with("open"), false);
             d.remove::<FontSearch>(state_id);
@@ -697,7 +700,7 @@ pub(super) fn font_picker(app: &mut EffectcraftApp, ui: &mut egui::Ui, id: egui:
                     let row_width = ui.available_width();
                     let label_width = if preview { (row_width - 100.0).max(40.0) } else { row_width };
                     let resp = ui.add_sized([row_width, 24.0], egui::Button::selectable(index == state.selected, ""));
-                    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, ui.is_enabled(), index == state.selected, &r.display));
+                    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), index == state.selected, &r.display));
                     let label_rect = Rect::from_min_size(resp.rect.min + vec2(5.0, 0.0), vec2(label_width - 5.0, resp.rect.height()));
                     ui.painter().with_clip_rect(label_rect.intersect(ui.clip_rect())).text(
                         label_rect.left_center(),
@@ -713,7 +716,7 @@ pub(super) fn font_picker(app: &mut EffectcraftApp, ui: &mut egui::Ui, id: egui:
                         resp.scroll_to_me(None);
                     }
                     if preview && ui.is_rect_visible(resp.rect) {
-                        let key = egui::Id::new(("font-preview", &r.family));
+                        let key = egui::Id::unique(("font-preview", &r.family));
                         let lines: std::sync::Arc<Vec<Vec<[f32; 2]>>> = match ui.data(|d| d.get_temp(key)) {
                             Some(l) => l,
                             None => {
@@ -765,7 +768,7 @@ pub fn align(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     p.text(pos2(x0, y + 10.0), Align2::LEFT_CENTER, tr("Align Layers to:"), Tokens::ui(11.5), t.text_dim);
     let dr = Rect::from_min_size(pos2(x0 + 100.0, y), vec2(110.0, 20.0));
     let to_sel = app.ui.align_to_selection;
-    let pid = egui::Id::new("align-to-pop");
+    let pid = egui::Id::unique("align-to-pop");
     if widgets::dropdown(ui, dr, if to_sel { "Selection" } else { "Composition" }, &t, pid.with("btn")).clicked() {
         widgets::open_popup(ui, pid);
     }
@@ -785,7 +788,7 @@ pub fn align(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         }
         for (i, op) in ops.iter().enumerate() {
             let r = Rect::from_min_size(pos2(x0 + i as f32 * 34.0 + if i >= 3 { 12.0 } else { 0.0 }, y), vec2(30.0, 28.0));
-            let resp = ui.interact(r, egui::Id::new((kind, *op)), Sense::click());
+            let resp = ui.interact(r, egui::Id::unique((kind, *op)), Sense::click());
             p.rect_filled(r, 3.0, if resp.hovered() { t.hover } else { t.field_bg });
             align_glyph(&p, r, op, row == 1, &t);
             let tip = align_tip(kind, op);

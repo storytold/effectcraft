@@ -30,6 +30,7 @@ mod pointer_wrap;
 pub mod prefs_live;
 pub mod state;
 pub mod theme;
+pub mod updates_ui;
 pub mod widgets;
 mod workspace_state;
 
@@ -47,10 +48,146 @@ use serde_json::json;
 use state::UiState;
 use theme::Tokens;
 
-const SCREENSHOT_TIMEOUT_S: f64 = 4.0;
+/// How long a screenshot request waits for a frame, from admission (app clock seconds).
+const SCREENSHOT_TIMEOUT_S: f64 = 8.0;
+/// Seconds between a screenshot's admission and the earliest capture: the UI settles first.
+const SCREENSHOT_SETTLE_S: f64 = 0.35;
+/// Final (non-discarded) UI passes a screenshot waits for after admission before it is issued.
+const SCREENSHOT_SETTLE_PASSES: u64 = 3;
+/// Geometry changes a queued screenshot may retry before it reports an error.
+const SCREENSHOT_MAX_RETRIES: u32 = 4;
+/// Outstanding screenshot requests (queued or waiting for their pixels).
+const MAX_PENDING_SHOTS: usize = 4;
+/// One capture's pixels: 128 MiB.
+const MAX_SHOT_BYTES: usize = 128 * 1024 * 1024;
+/// Every pending capture's reserved pixels together: 256 MiB.
+const MAX_SHOT_TOTAL_BYTES: usize = 256 * 1024 * 1024;
 /// Seconds without a project change before paused prefetch resumes (see
 /// [`EffectcraftApp::editing`]).
 const EDIT_QUIET: f64 = 0.3;
+
+/// The application's monotonic clock, in seconds.
+///
+/// Neither `ctx.input(|i| i.time)` nor `RawInput::time` is valid in a logic-only tick:
+/// `Context::run_logic` copies only the viewport information, so both are the previous full
+/// pass's values. Playback, auto-save, screenshot deadlines and the control channel measure time
+/// with this clock instead. Native and web use the same [`web_time::Instant`] source; tests
+/// inject [`AppClock::manual`] and advance it.
+#[derive(Clone, Debug)]
+pub struct AppClock {
+    origin: web_time::Instant,
+    manual: Option<f64>,
+}
+
+impl AppClock {
+    /// The host's monotonic clock.
+    pub fn real() -> Self {
+        Self { origin: web_time::Instant::now(), manual: None }
+    }
+
+    /// A clock tests advance explicitly with [`AppClock::advance`].
+    pub fn manual() -> Self {
+        Self { origin: web_time::Instant::now(), manual: Some(0.0) }
+    }
+
+    /// Seconds since the clock started (monotonic on native and in the browser).
+    pub fn now(&self) -> f64 {
+        match self.manual {
+            Some(t) => t,
+            None => self.origin.elapsed().as_secs_f64(),
+        }
+    }
+
+    /// Move a manual clock forward; a real clock ignores this.
+    pub fn advance(&mut self, seconds: f64) {
+        if let Some(t) = &mut self.manual {
+            *t = (*t + seconds.max(0.0)).max(0.0);
+        }
+    }
+
+    /// Whether the clock is test-driven.
+    pub fn is_manual(&self) -> bool {
+        self.manual.is_some()
+    }
+}
+
+impl Default for AppClock {
+    fn default() -> Self {
+        Self::real()
+    }
+}
+
+/// The root surface geometry of the last completed (non-discarded) UI pass.
+///
+/// The window position is deliberately excluded: moving the window does not change the pixels
+/// a screenshot captures. Size and scale-factor changes advance [`Self::epoch`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DrawGeometry {
+    pub rect: egui::Rect,
+    pub ppp: f32,
+    /// Bumped whenever `rect.size()` or `ppp` differs from the previous recorded pass.
+    pub epoch: u64,
+}
+
+/// Whether a captured image's dimensions match `rect` at `ppp`.
+///
+/// The surface may be smaller than requested when the adapter-limit fit (fork E2) applies, but a
+/// different aspect ratio means the pixels came from another layout than the one issued.
+fn shot_image_matches(image: &egui::ColorImage, rect: egui::Rect, ppp: f32) -> bool {
+    let [w, h] = image.size;
+    if w == 0 || h == 0 || !ppp.is_finite() || ppp <= 0.0 {
+        return false;
+    }
+    let ew = (rect.width() as f64 * ppp as f64).max(1.0);
+    let eh = (rect.height() as f64 * ppp as f64).max(1.0);
+    let want = ew / eh;
+    let got = w as f64 / h as f64;
+    (got - want).abs() <= 0.02 * want.max(1.0)
+}
+
+/// What a `ui.screenshot` captures.
+///
+/// A panel or element is an identity, not a rectangle: it is resolved again when the capture is
+/// issued, after the settle passes, so a panel that moved or resized while the UI settled is
+/// captured where it is now (never with the rectangle from request admission).
+#[derive(Clone, Debug, PartialEq)]
+pub enum ShotTarget {
+    /// The whole root surface.
+    Window,
+    /// A fixed rectangle in logical points, relative to the root surface's top-left corner.
+    Rect([f32; 4]),
+    /// One dock panel's automation rectangle (`panel.<id>`).
+    Panel(PanelKind),
+    /// One automation element id's rectangle.
+    Id(String),
+}
+
+/// One `ui.screenshot` request: its reply, its admission reservation and its completion slot.
+struct PendingShot {
+    path: Option<String>,
+    /// What to capture; resolved afresh at every issuance.
+    target: ShotTarget,
+    /// The crop resolved at issuance, **relative to the issued rect's origin** (the image's
+    /// origin); `None` captures the whole surface.
+    crop: Option<[f32; 4]>,
+    reply: Sender<serde_json::Value>,
+    /// App-clock instant after which the request fails instead of waiting.
+    deadline: f64,
+    /// App-clock instant before which the UI must have settled.
+    settle_at: f64,
+    /// Root geometry and geometry epoch the reservation was admitted against.
+    admitted: DrawGeometry,
+    /// Final UI passes completed when the request was admitted.
+    admitted_pass: u64,
+    /// The geometry epoch bound to the issued capture command, if it was issued.
+    issued: Option<DrawGeometry>,
+    /// The shared completion slot; dropping it cancels a late callback.
+    slot: Option<craft_ui::capture::CaptureSlot>,
+    /// Bytes reserved against [`EffectcraftApp::shot_bytes`].
+    reserved_bytes: usize,
+    /// Geometry retries used.
+    attempts: u32,
+}
 
 /// Modal dialogs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -271,21 +408,45 @@ pub struct EffectcraftApp {
     pub dialog: Option<Dialog>,
     pub hooks: Hooks,
     pub fps: f32,
+    /// The app clock and the value it had at the last [`EffectcraftApp::tick`].
+    clock: AppClock,
+    now: f64,
     last_time: f64,
     styled: bool,
     fonts_ready: bool,
     /// The interface language the fonts were installed for; `""` until the first frame.
     styled_language: &'static str,
+    /// The root viewport's focus, from the viewport information a logic tick refreshes.
+    focused: bool,
+    /// Whether the last UI pass saw events or a moving/held pointer.
+    input_active: bool,
+    /// The pointer was down in the last UI pass (workspace auto-save waits for it to lift).
+    last_pointer_down: bool,
+    /// Geometry of the last completed, non-discarded UI pass.
+    draw_geom: Option<DrawGeometry>,
+    /// Bumped when the root surface size or pixels-per-point changes.
+    geometry_epoch: u64,
+    /// Per-viewport IME owner, generation and change-cause state for the on-canvas text editor.
+    pub(crate) ime_tracker: egui::ImeContextTracker,
+    /// Completed, non-discarded UI passes since launch.
+    ui_pass_seq: u64,
+    /// A hidden window must run a UI pass (queued input, screenshots, playback children, …).
+    want_paint: bool,
+    /// The synthetic batch moved into raw input has not been applied by a UI pass yet.
+    synthetic_in_flight: bool,
+    /// The events of that batch while egui applies them (never fed to a second pass).
+    synthetic_in_flight_events: Vec<egui::Event>,
+    /// The viewer scale the last UI pass drew at: playback prefetches without a viewer pass.
+    last_viewer_scale: Option<f64>,
     pub(crate) control_rx: Option<Receiver<ControlRequest>>,
     pub(crate) deferred: Vec<(ControlRequest, f64)>,
     pub(crate) synthetic: Vec<egui::Event>,
     pub(crate) input_waiters: Vec<Sender<serde_json::Value>>,
     /// Control requests waiting for an offloaded job (`wait: true` in the browser).
     pub(crate) job_waiters: Vec<(control::JobWaiter, Sender<serde_json::Value>)>,
-    queued_screenshots: Vec<(u64, f64, u32)>,
-    pending_screenshots: Vec<(u64, Option<String>, Option<[f32; 4]>, Sender<serde_json::Value>, f64)>,
-    next_token: u64,
-    pub(crate) last_ui_time: f64,
+    pending_screenshots: Vec<PendingShot>,
+    /// Pixels reserved by queued and in-flight screenshot requests.
+    shot_bytes: usize,
     /// When the user last did something (input or an edit): Cache Frames When Idle waits for
     /// a second of quiet. (time, project revision then)
     last_activity: (f64, u64),
@@ -328,6 +489,7 @@ pub struct EffectcraftApp {
     pub audio: Option<audio::AudioPlayback>,
     /// Audio scrubbing's open output (Ctrl/Cmd-drag the current time, `playback.scrubAudio`).
     pub scrub: Option<audio::AudioScrub>,
+    pub(crate) updates_rt: updates_ui::Runtime,
     /// Audio panel VU meters.
     pub meter: audio::Meter,
     /// Waveform peak summaries per footage item (see `panels::waveform`).
@@ -366,6 +528,34 @@ struct SavedWorkspaces {
     floating: std::collections::BTreeMap<String, Vec<dock::Floating>>,
 }
 
+/// The comp frames a playback pass covers (`first..=last`).
+#[derive(Clone, Copy, Debug)]
+struct FrameWindow {
+    first: i64,
+    last: i64,
+}
+
+/// The inputs of one playback pass: the viewer series it renders, the preview plan and
+/// position, and the frame range and clock settings its steps share. `queued` is a snapshot of
+/// the in-flight render count that each step copies. Built once in `advance_playback`.
+#[derive(Clone, Copy)]
+struct PlaybackPass<'a> {
+    ctx: &'a egui::Context,
+    comp: &'a effectcraft_engine::project::Comp,
+    cid: ItemId,
+    scale: f64,
+    now: f64,
+    frame_rate: effectcraft_engine::time::FrameRate,
+    series: FrameKey,
+    plan: Option<effectcraft_engine::preview::PreviewPlan>,
+    window: FrameWindow,
+    cur: i64,
+    video: bool,
+    looping: bool,
+    ahead: i64,
+    queued: usize,
+}
+
 impl EffectcraftApp {
     pub fn new(session: Session) -> Self {
         let mut ui = UiState::default();
@@ -381,19 +571,30 @@ impl EffectcraftApp {
             dialog: None,
             hooks: Hooks::default(),
             fps: 60.0,
+            clock: AppClock::default(),
+            now: 0.0,
             last_time: 0.0,
             styled: false,
             fonts_ready: false,
             styled_language: "",
+            focused: true,
+            input_active: false,
+            last_pointer_down: false,
+            draw_geom: None,
+            geometry_epoch: 0,
+            ime_tracker: egui::ImeContextTracker::new(),
+            ui_pass_seq: 0,
+            want_paint: false,
+            synthetic_in_flight: false,
+            synthetic_in_flight_events: vec![],
+            last_viewer_scale: None,
             control_rx: None,
             deferred: vec![],
             synthetic: vec![],
             input_waiters: vec![],
             job_waiters: vec![],
-            queued_screenshots: vec![],
             pending_screenshots: vec![],
-            next_token: 1,
-            last_ui_time: 0.0,
+            shot_bytes: 0,
             last_activity: (0.0, 0),
             last_edit: (0.0, 0),
             toast: None,
@@ -428,6 +629,7 @@ impl EffectcraftApp {
             window_title: String::new(),
             template_thumbs: Default::default(),
             template_list: None,
+            updates_rt: updates_ui::Runtime::default(),
         }
         .with_ui_commands()
     }
@@ -576,20 +778,76 @@ impl EffectcraftApp {
     /// Feed this frame's share of the queued synthetic input (control channel `ui.click`,
     /// `ui.drag`…) into `raw_input`. Pointer events go one per frame so egui sees press → moves
     /// → release as a real gesture.
+    ///
+    /// Only one batch is ever moved out at a time, even when the host prepares several hidden
+    /// logic-only iterations before the forced UI pass: eframe keeps the last prepared raw input
+    /// and would otherwise apply a whole drag or click as one burst. A batch is released by the
+    /// first UI pass that applies it ([`Self::mark_synthetic_applied`]). Callers must not feed a
+    /// pass that cannot draw (fonts still installing): egui applies what it receives, so putting
+    /// an applied batch back would apply its pointer/key state twice.
     pub fn feed_synthetic(&mut self, raw_input: &mut egui::RawInput) {
-        if !self.synthetic.is_empty() {
-            // Pointer events go one per frame so egui sees press → moves → release as a real drag.
-            let pointer = |e: &egui::Event| matches!(e, egui::Event::PointerMoved(_) | egui::Event::PointerButton { .. } | egui::Event::MouseWheel { .. });
-            let n = if pointer(&self.synthetic[0]) {
-                1
-            } else {
-                self.synthetic
-                    .iter()
-                    .position(|e| pointer(e) || matches!(e, egui::Event::Key { pressed: false, .. }))
-                    .map_or(self.synthetic.len(), |i| if pointer(&self.synthetic[i]) { i.max(1) } else { i + 1 })
-            };
-            raw_input.events.extend(self.synthetic.drain(..n));
+        if self.synthetic_in_flight || self.synthetic.is_empty() {
+            return;
         }
+        // Pointer events go one per frame so egui sees press → moves → release as a real drag.
+        let pointer = |e: &egui::Event| matches!(e, egui::Event::PointerMoved(_) | egui::Event::PointerButton { .. } | egui::Event::MouseWheel { .. });
+        let n = if pointer(&self.synthetic[0]) {
+            1
+        } else {
+            self.synthetic
+                .iter()
+                .position(|e| pointer(e) || matches!(e, egui::Event::Key { pressed: false, .. }))
+                .map_or(self.synthetic.len(), |i| if pointer(&self.synthetic[i]) { i.max(1) } else { i + 1 })
+        };
+        let batch: Vec<egui::Event> = self.synthetic.drain(..n).collect();
+        raw_input.events.extend(batch.iter().cloned());
+        self.synthetic_in_flight_events.extend(batch);
+        self.synthetic_in_flight = true;
+    }
+
+    /// Clear the single-pending-batch guard: a UI pass has applied the injected batch.
+    ///
+    /// [`EffectcraftApp::draw`] calls this itself; harnesses that feed synthetic input
+    /// themselves (the headless kittest tests) call it after each pass they ran.
+    pub fn mark_synthetic_applied(&mut self) {
+        self.synthetic_in_flight_events.clear();
+        self.synthetic_in_flight = false;
+    }
+
+    /// The events of the injected batch that no UI pass has applied yet.
+    pub fn pending_synthetic_events(&self) -> &[egui::Event] {
+        &self.synthetic_in_flight_events
+    }
+
+    /// Whether a synthetic batch is waiting for its UI pass.
+    pub fn synthetic_in_flight(&self) -> bool {
+        self.synthetic_in_flight
+    }
+
+    /// The app clock's value at the last tick.
+    pub fn now(&self) -> f64 {
+        self.now
+    }
+
+    /// The clock itself (tests advance a manual clock).
+    pub fn clock_mut(&mut self) -> &mut AppClock {
+        &mut self.clock
+    }
+
+    /// Use a test-driven clock from now on.
+    pub fn use_manual_clock(&mut self) {
+        self.clock = AppClock::manual();
+        self.now = 0.0;
+    }
+
+    /// Completed, non-discarded UI passes since launch.
+    pub fn ui_passes(&self) -> u64 {
+        self.ui_pass_seq
+    }
+
+    /// The geometry of the last completed UI pass, if one ran.
+    pub fn draw_geometry(&self) -> Option<DrawGeometry> {
+        self.draw_geom
     }
 
     /// Show panel `p` (opening it in its usual place if it is closed), bring it to the front and
@@ -1163,10 +1421,8 @@ impl EffectcraftApp {
 
     /// RAM preview: advance at the preview's frame rate when frames are cached; otherwise hold
     /// and keep rendering ahead (the green cache bar fills, then playback runs in real time).
-    fn advance_playback(&mut self, ctx: &egui::Context, scale: f64) {
-        let Some(cid) = self.session.active_comp_id() else { return };
+    fn advance_playback(&mut self, ctx: &egui::Context, scale: f64, now: f64, input_active: bool, cid: ItemId) {
         let Some(c) = self.session.project.comp_arc(cid) else { return };
-        let now = ctx.input(|i| i.time);
         let fr = c.frame_rate;
         let plan = self.playback.plan.filter(|_| self.playback.playing);
         let (wa, wb) = match plan {
@@ -1177,11 +1433,53 @@ impl EffectcraftApp {
         let video = plan.is_none_or(|p| p.video);
         // Prefetch ahead.
         let cur = fr.frame_at(self.session.time());
-        // While paused (scrubbing, editing) the viewer's frame comes first: prefetch only a few
-        // frames, only once it is done, and not while edits keep coming (a layer dragged in the
-        // viewer): those frames would be stale at the next step and would hold the CPU and GPU
-        // the next viewer frame needs.
-        let ahead = if self.playback.playing {
+        let ahead = self.prefetch_ahead(ctx, now);
+        let queued = self.frames.inflight();
+        let series = self.frame_series(cid, scale);
+        // The preview's position orders prefetch and eviction (#595).
+        let playhead = plan.filter(|p| p.video).map(|p| frames::Playhead { series, cur, start: p.start, end: p.end, step: p.step, looping: p.looping });
+        self.frames.set_playhead(playhead);
+        let pass = PlaybackPass {
+            ctx,
+            comp: &c,
+            cid,
+            scale,
+            now,
+            frame_rate: fr,
+            series,
+            plan,
+            window: FrameWindow { first: wa, last: wb },
+            cur,
+            video,
+            looping,
+            ahead,
+            queued,
+        };
+        if self.cache_preview(&pass) {
+            return;
+        }
+        let step = plan.map_or(1, |p| p.step);
+        let fit_ahead = self.frames_that_fit(&c, scale) - 1;
+        self.prefetch_playback(&pass, fit_ahead);
+        self.pump_meters(ctx, now);
+        if !self.playback.playing {
+            self.cache_when_idle(ctx, &c, &series, now, input_active, (wa, wb));
+            return;
+        }
+        let fit = self.frames_that_fit(&c, scale);
+        self.start_held_audio(&pass, fit);
+        if self.advance_audio_clock(&pass, step) {
+            return;
+        }
+        self.advance_frame_clock(&pass, step);
+    }
+
+    /// While paused (scrubbing, editing) the viewer's frame comes first: prefetch only a few
+    /// frames, only once it is done, and not while edits keep coming (a layer dragged in the
+    /// viewer): those frames would be stale at the next step and would hold the CPU and GPU
+    /// the next viewer frame needs.
+    fn prefetch_ahead(&mut self, ctx: &egui::Context, now: f64) -> i64 {
+        if self.playback.playing {
             (self.frames_parallelism() * 2).max(4) as i64
         } else if self.frames.urgent_pending() {
             0
@@ -1192,59 +1490,61 @@ impl EffectcraftApp {
             // Keep workers available for a newly edited viewer frame. Running obsolete
             // background renders cannot be preempted by the priority queue.
             self.frames_parallelism().saturating_sub(1).min(2) as i64
-        };
-        let mut queued = self.frames.inflight();
-        let series = self.frame_series(cid, scale);
-        // The preview's position orders prefetch and eviction (#595).
-        let playhead = plan.filter(|p| p.video).map(|p| frames::Playhead { series, cur, start: p.start, end: p.end, step: p.step, looping: p.looping });
-        self.frames.set_playhead(playhead);
-        if self.playback.caching
-            && let Some(p) = plan
-        {
-            // Cache Before Playback: the range in play order, then start the clock. A range
-            // larger than the RAM preview budget is cut to the frames that fit (caching more
-            // would evict the first ones and never finish).
-            let mut all = true;
-            let n = (p.end - p.start) / p.step + 1;
-            let fit = self.frames_that_fit(&c, scale);
-            if n > fit {
-                let mut cut = p;
-                (cut.start, cut.end) = (p.first, (p.first + (fit - 1) * p.step).min(p.end));
-                self.playback.plan = Some(cut);
-                self.toast = Some((format!("Preview cut to {fit} of {n} frames: no more fit in the RAM preview (Settings ▸ Memory & CPU)"), now));
-                ctx.request_repaint();
-                return;
-            }
-            let order: Vec<i64> = (0..n).filter_map(|k| p.frame_after(p.first, k)).collect();
-            for f in order {
-                if self.frames.is_cached(&FrameKey { frame: f, ..series }) {
-                    continue;
-                }
-                all = false;
-                if queued < ahead as usize {
-                    self.request_frame(cid, f, scale);
-                    queued += 1;
-                }
-            }
-            self.playback.waiting = !all;
-            if all {
-                self.playback.caching = false;
-                self.playback.start_wall = now;
-                self.playback.start_frame = p.first;
-                self.session.set_time(fr.tick_of(p.first));
-                self.start_audio(fr.tick_of(p.first));
-            }
-            ctx.request_repaint();
-            return;
         }
-        let step = plan.map_or(1, |p| p.step);
-        // Never further ahead than the RAM preview holds: those frames would evict the ones the
-        // preview shows first, or be evicted before it gets there (#595). The window starts at the
-        // first uncached frame ahead: after a loop or a restart the frames just ahead are cached,
-        // and a window from the playhead left the workers idle until it came near the end of the
-        // cached run. It stays ahead × 3 frames wide: workers spread over the whole preview render
-        // frames with different layers at once (on the GPU, an atlas each: #1812).
-        let fit_ahead = self.frames_that_fit(&c, scale) - 1;
+    }
+
+    /// Cache Before Playback: the range in play order, then start the clock. A range larger than
+    /// the RAM preview budget is cut to the frames that fit (caching more would evict the first
+    /// ones and never finish). Returns true when this pass handled the preview.
+    fn cache_preview(&mut self, pass: &PlaybackPass<'_>) -> bool {
+        let PlaybackPass { ctx, comp, cid, scale, now, frame_rate: fr, series, plan, ahead, mut queued, .. } = *pass;
+        if !self.playback.caching {
+            return false;
+        }
+        let Some(p) = plan else { return false };
+        let mut all = true;
+        let n = (p.end - p.start) / p.step + 1;
+        let fit = self.frames_that_fit(comp, scale);
+        if n > fit {
+            let mut cut = p;
+            (cut.start, cut.end) = (p.first, (p.first + (fit - 1) * p.step).min(p.end));
+            self.playback.plan = Some(cut);
+            self.toast = Some((format!("Preview cut to {fit} of {n} frames: no more fit in the RAM preview (Settings ▸ Memory & CPU)"), now));
+            ctx.request_repaint();
+            return true;
+        }
+        let order: Vec<i64> = (0..n).filter_map(|k| p.frame_after(p.first, k)).collect();
+        for f in order {
+            if self.frames.is_cached(&FrameKey { frame: f, ..series }) {
+                continue;
+            }
+            all = false;
+            if queued < ahead as usize {
+                self.request_frame(cid, f, scale);
+                queued += 1;
+            }
+        }
+        self.playback.waiting = !all;
+        if all {
+            self.playback.caching = false;
+            self.playback.start_wall = now;
+            self.playback.start_frame = p.first;
+            self.session.set_time(fr.tick_of(p.first));
+            self.start_audio(fr.tick_of(p.first));
+        }
+        ctx.request_repaint();
+        true
+    }
+
+    /// Never further ahead than the RAM preview holds: those frames would evict the ones the
+    /// preview shows first, or be evicted before it gets there (#595). The window starts at the
+    /// first uncached frame ahead: after a loop or a restart the frames just ahead are cached,
+    /// and a window from the playhead left the workers idle until it came near the end of the
+    /// cached run. It stays ahead × 3 frames wide: workers spread over the whole preview render
+    /// frames with different layers at once (on the GPU, an atlas each: #1812).
+    fn prefetch_playback(&self, pass: &PlaybackPass<'_>, fit_ahead: i64) {
+        let PlaybackPass { cid, scale, plan, cur, ahead, series, mut queued, video, .. } = *pass;
+        let FrameWindow { first: wa, last: wb } = pass.window;
         let frame = |k: i64| match plan {
             Some(p) => p.frame_after(cur, k),
             None => {
@@ -1271,6 +1571,9 @@ impl EffectcraftApp {
                 queued += 1;
             }
         }
+    }
+
+    fn pump_meters(&mut self, ctx: &egui::Context, now: f64) {
         if let Some(a) = &mut self.audio {
             a.pump();
             self.meter.update(a.feed.take_peaks(), now);
@@ -1286,59 +1589,75 @@ impl EffectcraftApp {
             self.meter.update([0.0; 2], now);
             ctx.request_repaint();
         }
-        if !self.playback.playing {
-            self.cache_when_idle(ctx, &c, &series, now, (wa, wb));
+    }
+
+    /// Held sound starts once the frames ahead are cached (see `Playback::audio_held`): the
+    /// prefetch window when the silent preview keeps real time, else the rest of the preview.
+    fn start_held_audio(&mut self, pass: &PlaybackPass<'_>, fit: i64) {
+        let PlaybackPass { now, plan, series, cur, ahead, frame_rate: fr, .. } = *pass;
+        if !self.playback.audio_held {
             return;
         }
-        let snap = |f: i64| wa + (f - wa).div_euclid(step) * step;
-        // Held sound starts once the frames ahead are cached (see `Playback::audio_held`): the
-        // prefetch window when the silent preview keeps real time, else the rest of the preview.
-        let fit = self.frames_that_fit(&c, scale);
-        if self.playback.audio_held
-            && let Some(p) = plan
-            && ((self.playback.keeps_up(now) && self.cached_ahead(&p, &series, cur, ahead.min(fit))) || self.cached_ahead(&p, &series, cur, fit))
-        {
+        let Some(p) = plan else { return };
+        if (self.playback.keeps_up(now) && self.cached_ahead(&p, &series, cur, ahead.min(fit))) || self.cached_ahead(&p, &series, cur, fit) {
             self.playback.audio_held = false;
             self.playback.start_wall = now;
             self.playback.start_frame = cur;
             self.start_audio(fr.tick_of(cur));
         }
-        // Audio clock drives playback: show the frame under the audible sample.
-        if let Some(a) = &self.audio {
-            if a.finished() {
-                if video {
-                    self.session.set_time(fr.tick_of(wb));
-                } else {
-                    self.playback.audio_frame = Some(wb);
-                }
-                self.stop();
-                return;
-            }
-            let target = snap(audio::frame_of_sample(a.clock(), a.rate, fr).clamp(wa, wb));
-            if !video {
-                self.playback.audio_frame = Some(target);
-            } else if self.frames.is_cached(&FrameKey { frame: target, ..series }) {
-                self.playback.waiting = false;
-                if target != cur {
-                    self.session.set_time(fr.tick_of(target));
-                    self.playback.frame_shown(now);
-                }
+    }
+
+    /// Audio clock drives playback: show the frame under the audible sample. Returns true when
+    /// the audio path handled this pass (including stopping at the end).
+    fn advance_audio_clock(&mut self, pass: &PlaybackPass<'_>, step: i64) -> bool {
+        let PlaybackPass { ctx, now, series, video, frame_rate: fr, cur, .. } = *pass;
+        let FrameWindow { first: wa, last: wb } = pass.window;
+        let Some(a) = &self.audio else { return false };
+        if a.finished() {
+            if video {
+                self.session.set_time(fr.tick_of(wb));
             } else {
-                // Rendering can't keep up: rather than skip frames, the sound stops and every
-                // frame shows as it renders until the frames ahead are cached again.
-                self.audio = None;
-                self.playback.audio_held = true;
-                self.playback.waiting = true;
-                // The rate measured before the stall no longer says it keeps up.
-                self.playback.shown_at.clear();
-                self.playback.start_wall = now;
-                self.playback.start_frame = cur;
+                self.playback.audio_frame = Some(wb);
             }
-            ctx.request_repaint();
-            return;
+            self.stop();
+            return true;
         }
+        let snap = |f: i64| wa + (f - wa).div_euclid(step) * step;
+        let target = snap(audio::frame_of_sample(a.clock(), a.rate, fr).clamp(wa, wb));
+        if !video {
+            self.playback.audio_frame = Some(target);
+        } else if self.frames.is_cached(&FrameKey { frame: target, ..series }) {
+            self.playback.waiting = false;
+            if target != cur {
+                self.session.set_time(fr.tick_of(target));
+                self.playback.frame_shown(now);
+            }
+        } else {
+            // Rendering can't keep up: rather than skip frames, the sound stops and every
+            // frame shows as it renders until the frames ahead are cached again.
+            self.audio = None;
+            self.playback.audio_held = true;
+            self.playback.waiting = true;
+            // The rate measured before the stall no longer says it keeps up.
+            self.playback.shown_at.clear();
+            self.playback.start_wall = now;
+            self.playback.start_frame = cur;
+        }
+        ctx.request_repaint();
+        true
+    }
+
+    /// The wall clock advances the preview when no audio device drives it, and shows the target
+    /// frame (or holds when it is not cached yet).
+    fn advance_frame_clock(&mut self, pass: &PlaybackPass<'_>, step: i64) {
+        let PlaybackPass { ctx, now, plan, video, looping, frame_rate: fr, cur, series, .. } = *pass;
+        let FrameWindow { first: wa, last: wb } = pass.window;
         let elapsed = now - self.playback.start_wall;
-        let n = ((elapsed * self.playback.fps) / step as f64).floor() as i64;
+        // The plan carries the rate the preview was started with (and `play_with` copies it to
+        // `Playback::fps`). Deriving the frame from the plan keeps a logic-only tick correct even
+        // when a host/test supplies only the plan; a stale duplicate cannot hold playback open.
+        let fps = plan.map_or(self.playback.fps, |p| p.fps);
+        let n = ((elapsed * fps) / step as f64).floor() as i64;
         let target = match plan {
             Some(p) => p.frame_after(self.playback.start_frame, n),
             None => {
@@ -1399,8 +1718,16 @@ impl EffectcraftApp {
     /// Composition ▸ Preview ▸ Cache Frames When Idle: after a second without input or edits,
     /// render the work area's frames (from the current time on, then from its start) in the
     /// background, a few at a time, until it is cached or the RAM preview budget is full.
-    fn cache_when_idle(&mut self, ctx: &egui::Context, comp: &effectcraft_engine::project::Comp, series: &FrameKey, now: f64, (wa, wb): (i64, i64)) {
-        let active = ctx.input(|i| !i.events.is_empty() || i.pointer.any_down() || i.pointer.is_moving());
+    fn cache_when_idle(
+        &mut self,
+        ctx: &egui::Context,
+        comp: &effectcraft_engine::project::Comp,
+        series: &FrameKey,
+        now: f64,
+        input_active: bool,
+        (wa, wb): (i64, i64),
+    ) {
+        let active = input_active;
         if active || self.last_activity.1 != self.session.revision {
             self.last_activity = (now, self.session.revision);
         }
@@ -1470,16 +1797,15 @@ impl EffectcraftApp {
         ctx.request_repaint();
     }
 
-    fn drain_control(&mut self, ctx: &egui::Context) {
+    fn drain_control(&mut self, ctx: &egui::Context, now: f64) {
         let Some(rx) = self.control_rx.take() else { return };
-        let now = ctx.input(|i| i.time);
         let mut reqs: Vec<(ControlRequest, f64)> = std::mem::take(&mut self.deferred);
         while let Ok(req) = rx.try_recv() {
             reqs.push((req, now + 3.0));
         }
         for (req, deadline) in reqs {
             let reply = req.reply.clone();
-            match control::handle(self, ctx, &req) {
+            match control::handle(self, ctx, &req, now) {
                 control::Outcome::Done(v) => {
                     let _ = reply.send(v);
                 }
@@ -1491,23 +1817,26 @@ impl EffectcraftApp {
                         let _ = reply.send(json!({"ok": false, "error": msg}));
                     }
                 }
-                control::Outcome::AfterInput => self.input_waiters.push(reply),
+                control::Outcome::AfterInput => {
+                    self.input_waiters.push(reply);
+                    // The reply waits for a real UI pass: a hidden window must run one.
+                    self.want_paint = true;
+                }
                 control::Outcome::AwaitJobs(w) => {
                     self.job_waiters.push((w, reply));
                     ctx.request_repaint();
                 }
-                control::Outcome::Screenshot { path, crop } => {
+                control::Outcome::Screenshot { path, target } => {
                     // A covered or minimized window presents no frames (macOS skips its redraws), so
-                    // a screenshot would never arrive and nothing would tick its timeout.
+                    // a screenshot would never arrive and nothing would tick its timeout. The
+                    // hidden-window capture path (a pending screenshot forces a pass in 0.37) needs
+                    // a native platform run before this gate is removed; the web build never paints
+                    // a hidden tab.
                     if ctx.input(|i| i.viewport().occluded == Some(true) || i.viewport().minimized == Some(true)) {
                         let _ = reply.send(json!({"ok": false, "error": "window is covered or minimized: call ui.focus first (render.frame renders comp pixels without the window)"}));
                         continue;
                     }
-                    let token = self.next_token;
-                    self.next_token += 1;
-                    let settle = now + 0.35;
-                    self.queued_screenshots.push((token, settle, 0));
-                    self.pending_screenshots.push((token, path, crop, reply, settle + SCREENSHOT_TIMEOUT_S));
+                    self.admit_screenshot(ctx, path, target, reply);
                 }
             }
         }
@@ -1536,59 +1865,288 @@ impl EffectcraftApp {
         }
     }
 
-    fn issue_screenshots(&mut self, ctx: &egui::Context) {
-        let now = ctx.input(|i| i.time);
-        let mut any = false;
-        let busy = self.frames.inflight() > 0;
-        self.queued_screenshots.retain_mut(|(token, at, frames)| {
-            *frames += 1;
-            any = true;
-            // Wait for the viewer's frame to finish rendering (bounded by the timeout below).
-            if now >= *at && *frames >= 3 && (!busy || now > *at + 2.5) {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(*token)));
-                false
-            } else {
-                true
+    // ---------------------------------------------------------------- screenshots
+
+    /// The root surface geometry a screenshot is admitted against.
+    ///
+    /// The last completed pass's geometry is authoritative. Before any pass, only the viewport's
+    /// `inner_rect` (the client surface a capture returns) is accepted: `outer_rect` also covers
+    /// the title bar and window frame, so a capture issued against it would be cropped and
+    /// validated against a different rectangle than the callback delivers. A request that arrives
+    /// before the geometry is known is refused with an actionable error, and the pass that would
+    /// establish it is requested.
+    fn current_geometry(&self, ctx: &egui::Context) -> Option<DrawGeometry> {
+        if let Some(g) = self.draw_geom {
+            return Some(g);
+        }
+        let rect = ctx.input(|i| i.viewport().inner_rect)?;
+        (rect.width() > 0.0 && rect.height() > 0.0).then_some(DrawGeometry { rect, ppp: ctx.pixels_per_point(), epoch: self.geometry_epoch })
+    }
+
+    /// The point rectangle a request captures: its crop, clamped to the window, or all of it.
+    fn shot_target_rect(geom: &DrawGeometry, crop: Option<[f32; 4]>) -> Option<egui::Rect> {
+        let r = match crop {
+            Some([x, y, w, h]) if [x, y, w, h].iter().all(|v| v.is_finite()) => {
+                egui::Rect::from_min_size(geom.rect.min + egui::vec2(x, y), egui::vec2(w.max(0.0), h.max(0.0))).intersect(geom.rect)
             }
-        });
-        self.pending_screenshots.retain(|(.., reply, deadline)| {
-            if now > *deadline {
-                let _ = reply.send(json!({"ok": false, "error": "no frame was presented (window hidden or display asleep)"}));
-                false
-            } else {
-                true
+            Some(_) => return None,
+            None => geom.rect,
+        };
+        (r.width() > 0.0 && r.height() > 0.0).then_some(r)
+    }
+
+    /// The screen-point crop `target` names right now (a panel's or element's current rectangle),
+    /// or an actionable error when it is not on screen. Resolved at issuance, never stored from
+    /// admission: the UI may move while it settles.
+    fn shot_crop(&self, target: &ShotTarget, geom: &DrawGeometry) -> Result<Option<egui::Rect>, String> {
+        let crop = match target {
+            ShotTarget::Window => None,
+            ShotTarget::Rect(r) => Some(*r),
+            ShotTarget::Panel(p) => {
+                let id = format!("panel.{}", p.id());
+                let found = self.auto.find(&id).ok_or_else(|| format!("the {} panel is not on screen", p.title()))?;
+                Some(found.rect)
             }
-        });
-        if any {
+            ShotTarget::Id(id) => Some(self.auto.find(id).ok_or_else(|| format!("no element `{id}` is on screen"))?.rect),
+        };
+        Self::shot_target_rect(geom, crop).map(Some).ok_or_else(|| "the screenshot area is empty or not a finite rectangle".to_string())
+    }
+
+    /// `target` as a crop relative to `geom`'s origin: what the image's own pixels are cut with.
+    fn shot_relative_crop(&self, target: &ShotTarget, geom: &DrawGeometry) -> Result<Option<[f32; 4]>, String> {
+        let Some(r) = self.shot_crop(target, geom)? else { return Ok(None) };
+        Ok(Some([r.min.x - geom.rect.min.x, r.min.y - geom.rect.min.y, r.width(), r.height()]))
+    }
+
+    /// Pixel bytes `rect` takes at `ppp`, checked (`width * height * 4`).
+    fn shot_pixel_bytes(rect: egui::Rect, ppp: f32) -> Option<usize> {
+        if !ppp.is_finite() || ppp <= 0.0 {
+            return None;
+        }
+        let w = (rect.width() as f64 * ppp as f64).ceil().max(1.0) as usize;
+        let h = (rect.height() as f64 * ppp as f64).ceil().max(1.0) as usize;
+        w.checked_mul(h)?.checked_mul(4)
+    }
+
+    /// Reserve and queue one `ui.screenshot`, or reply with an actionable error.
+    fn admit_screenshot(&mut self, ctx: &egui::Context, path: Option<String>, target: ShotTarget, reply: Sender<serde_json::Value>) {
+        let Some(geom) = self.current_geometry(ctx) else {
+            let _ = reply.send(
+                json!({"ok": false, "error": "the window geometry is not known yet (it is recorded by a completed UI pass; retry after the next frame)"}),
+            );
+            // Ask for the pass that records it.
+            self.want_paint = true;
             ctx.request_repaint();
-        } else if !self.pending_screenshots.is_empty() {
-            ctx.request_repaint_after(std::time::Duration::from_millis(16));
+            return;
+        };
+        if self.pending_screenshots.len() >= MAX_PENDING_SHOTS {
+            let _ = reply.send(json!({"ok": false, "error": format!("too many screenshots are pending (at most {MAX_PENDING_SHOTS})")}));
+            return;
+        }
+        if let Err(e) = self.shot_crop(&target, &geom) {
+            let _ = reply.send(json!({"ok": false, "error": e}));
+            return;
+        }
+        // The capture is always the whole surface (the crop is applied when the PNG is written),
+        // so the reservation and the per-image bound follow the surface's actual dimensions.
+        let Some(bytes) = Self::shot_pixel_bytes(geom.rect, geom.ppp) else {
+            let _ = reply.send(json!({"ok": false, "error": "the screenshot area is too large to reserve"}));
+            return;
+        };
+        if bytes > MAX_SHOT_BYTES {
+            let _ = reply
+                .send(json!({"ok": false, "error": format!("the screenshot would need about {bytes} bytes, over the {MAX_SHOT_BYTES}-byte per-image limit")}));
+            return;
+        }
+        if self.shot_bytes.checked_add(bytes).is_none_or(|n| n > MAX_SHOT_TOTAL_BYTES) {
+            let _ = reply.send(json!({"ok": false, "error": format!("the screenshot would exceed the {MAX_SHOT_TOTAL_BYTES}-byte pending-image budget")}));
+            return;
+        }
+        self.shot_bytes += bytes;
+        self.pending_screenshots.push(PendingShot {
+            path,
+            target,
+            crop: None,
+            reply,
+            deadline: self.now + SCREENSHOT_TIMEOUT_S,
+            settle_at: self.now + SCREENSHOT_SETTLE_S,
+            admitted: geom,
+            admitted_pass: self.ui_pass_seq,
+            issued: None,
+            slot: None,
+            reserved_bytes: bytes,
+            attempts: 0,
+        });
+        // A queued capture needs a settled UI pass before it can be issued.
+        self.want_paint = true;
+    }
+
+    /// Re-reserve request `i` against `geom` after a surface change; false when it no longer fits.
+    fn refresh_shot_reservation(&mut self, i: usize, geom: &DrawGeometry) -> bool {
+        let Some(bytes) = Self::shot_pixel_bytes(geom.rect, geom.ppp) else { return false };
+        if bytes > MAX_SHOT_BYTES {
+            return false;
+        }
+        let released = self.shot_bytes.saturating_sub(self.pending_screenshots[i].reserved_bytes);
+        if released.checked_add(bytes).is_none_or(|n| n > MAX_SHOT_TOTAL_BYTES) {
+            return false;
+        }
+        self.shot_bytes = released + bytes;
+        self.pending_screenshots[i].reserved_bytes = bytes;
+        true
+    }
+
+    /// Reply with an error to request `i` and release its reservation.
+    fn fail_shot(&mut self, i: usize, message: impl Into<String>) {
+        let shot = self.pending_screenshots.remove(i);
+        self.shot_bytes = self.shot_bytes.saturating_sub(shot.reserved_bytes);
+        let _ = shot.reply.send(json!({"ok": false, "error": message.into()}));
+    }
+
+    /// Collect completed captures, enforce timeouts and issue every settled request.
+    ///
+    /// Runs from [`Self::tick`] only: the callback stores pixels in its slot and wakes the
+    /// viewport, and everything that can write a file or reply happens here, on the app thread.
+    fn tick_screenshots(&mut self, ctx: &egui::Context) {
+        let Some(geom) = self.current_geometry(ctx) else { return };
+        self.drain_completed_screenshots(geom);
+        self.timeout_screenshots();
+        self.issue_screenshots(ctx, geom);
+        // 4. Wake up for the earliest deadline even when no further pass is otherwise needed: an
+        //    issued capture whose callback never arrives (hidden window, display asleep, renderer
+        //    failure) would otherwise never reach its timeout. This is a timer, not a paint
+        //    request: the issued screenshot command already forces the frame it needs.
+        if let Some(next) = self.pending_screenshots.iter().map(|s| s.deadline).reduce(f64::min) {
+            let wait = (next - self.now).max(0.001);
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(wait));
         }
     }
 
-    fn collect_screenshots(&mut self, ctx: &egui::Context) {
-        if self.pending_screenshots.is_empty() {
-            return;
-        }
-        let events: Vec<_> = ctx.input(|i| {
-            i.raw
-                .events
-                .iter()
-                .filter_map(|e| match e {
-                    egui::Event::Screenshot { user_data, image, .. } => {
-                        let token = user_data.data.as_ref().and_then(|d| d.downcast_ref::<u64>()).copied()?;
-                        Some((token, image.clone()))
+    /// 1. Drain completed slots. A completion whose surface epoch changed since issuance is
+    ///    discarded even if the geometry changed back: it was cropped with another frame's
+    ///    pixels-per-point.
+    fn drain_completed_screenshots(&mut self, geom: DrawGeometry) {
+        let mut i = 0;
+        while i < self.pending_screenshots.len() {
+            let taken = self.pending_screenshots.get(i).and_then(|s| s.slot.as_ref()).and_then(craft_ui::capture::CaptureSlot::take);
+            let Some(result) = taken else {
+                i += 1;
+                continue;
+            };
+            let issued = self.pending_screenshots[i].issued;
+            match result {
+                Ok(image) => {
+                    if issued.is_none_or(|g| g.epoch != geom.epoch) {
+                        self.pending_screenshots[i].slot = None;
+                        self.pending_screenshots[i].issued = None;
+                        if self.pending_screenshots[i].attempts >= SCREENSHOT_MAX_RETRIES {
+                            self.fail_shot(i, "the window resized while the screenshot was being taken");
+                        } else if !self.refresh_shot_reservation(i, &geom) {
+                            self.fail_shot(i, "the resized window is too large to capture within the screenshot budget");
+                        } else {
+                            let settle_at = self.now + SCREENSHOT_SETTLE_S;
+                            let passes = self.ui_pass_seq;
+                            let s = &mut self.pending_screenshots[i];
+                            s.attempts += 1;
+                            s.admitted = geom;
+                            s.admitted_pass = passes;
+                            s.settle_at = settle_at;
+                            i += 1;
+                        }
+                        continue;
                     }
-                    _ => None,
-                })
-                .collect()
-        });
-        for (token, image) in events {
-            if let Some(i) = self.pending_screenshots.iter().position(|(t, ..)| *t == token) {
-                let (_, path, crop, reply, _) = self.pending_screenshots.remove(i);
-                let r = control::save_screenshot(ctx, &image, path.as_deref(), crop);
-                let _ = reply.send(r);
+                    let Some(issued) = issued else {
+                        i += 1;
+                        continue;
+                    };
+                    if !shot_image_matches(&image, issued.rect, issued.ppp) {
+                        self.fail_shot(i, "the screenshot's pixels do not match the window it was taken from");
+                        continue;
+                    }
+                    // The returned image can be smaller than requested (the E2 adapter-limit fit),
+                    // so the crop uses the image's own scale, never the issued ppp.
+                    let [iw, ih] = image.size;
+                    let (sx, sy) = (iw as f64 / issued.rect.width() as f64, ih as f64 / issued.rect.height() as f64);
+                    if !(sx.is_finite() && sx > 0.0 && sy.is_finite() && sy > 0.0) {
+                        self.fail_shot(i, "the screenshot's size does not describe the window it was taken from");
+                        continue;
+                    }
+                    let shot = self.pending_screenshots.remove(i);
+                    self.shot_bytes = self.shot_bytes.saturating_sub(shot.reserved_bytes);
+                    let r = control::save_screenshot(&image, shot.path.as_deref(), shot.crop, [sx, sy]);
+                    let _ = shot.reply.send(r);
+                }
+                Err(e) => {
+                    self.fail_shot(i, e.to_string());
+                }
             }
+        }
+    }
+
+    /// 2. Timeouts: a late callback finds its slot cancelled and writes nothing.
+    fn timeout_screenshots(&mut self) {
+        let mut i = 0;
+        while i < self.pending_screenshots.len() {
+            if self.now > self.pending_screenshots[i].deadline {
+                self.fail_shot(i, "no frame was presented (window hidden or display asleep)");
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    /// 3. Issue settled requests. The command itself requests the paint; a request still
+    ///    waiting for its passes needs `want_paint` so a hidden window keeps painting.
+    fn issue_screenshots(&mut self, ctx: &egui::Context, geom: DrawGeometry) {
+        let mut i = 0;
+        while i < self.pending_screenshots.len() {
+            if self.pending_screenshots[i].slot.is_some() {
+                i += 1;
+                continue;
+            }
+            if geom.epoch != self.pending_screenshots[i].admitted.epoch {
+                if self.pending_screenshots[i].attempts >= SCREENSHOT_MAX_RETRIES {
+                    self.fail_shot(i, "the window kept resizing before the screenshot could be taken");
+                    continue;
+                }
+                if !self.refresh_shot_reservation(i, &geom) {
+                    self.fail_shot(i, "the resized window is too large to capture within the screenshot budget");
+                    continue;
+                }
+                let (now, passes) = (self.now, self.ui_pass_seq);
+                let s = &mut self.pending_screenshots[i];
+                s.attempts += 1;
+                s.admitted = geom;
+                s.admitted_pass = passes;
+                s.settle_at = now + SCREENSHOT_SETTLE_S;
+                self.want_paint = true;
+                i += 1;
+                continue;
+            }
+            let settled = self.ui_pass_seq >= self.pending_screenshots[i].admitted_pass.saturating_add(SCREENSHOT_SETTLE_PASSES)
+                && self.now >= self.pending_screenshots[i].settle_at;
+            if !settled {
+                self.want_paint = true;
+                i += 1;
+                continue;
+            }
+            // Resolve the crop now, against the settled UI: an element that moved since admission
+            // is captured where it is, and its rectangle is relative to this issued surface.
+            let target = self.pending_screenshots[i].target.clone();
+            let crop = match self.shot_relative_crop(&target, &geom) {
+                Ok(c) => c,
+                Err(e) => {
+                    self.fail_shot(i, e);
+                    continue;
+                }
+            };
+            let (slot, callback) = craft_ui::capture::CaptureSlot::new(ctx, egui::ViewportId::ROOT, MAX_SHOT_BYTES);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(callback));
+            let s = &mut self.pending_screenshots[i];
+            s.slot = Some(slot);
+            s.issued = Some(geom);
+            s.crop = crop;
+            i += 1;
         }
     }
 
@@ -1601,7 +2159,7 @@ impl EffectcraftApp {
                     panels::viewers::on_open_comp(self, c);
                     self.ui.timeline.pps = None;
                 }
-                effectcraft_engine::Event::Toast { message, .. } => self.toast = Some((message, ctx.input(|i| i.time))),
+                effectcraft_engine::Event::Toast { message, .. } => self.toast = Some((message, self.now)),
                 effectcraft_engine::Event::OpenUrl(url) => ctx.open_url(egui::OpenUrl::new_tab(url)),
                 // Frames are keyed by content: an edit keeps those of comps it doesn't touch.
                 effectcraft_engine::Event::ProjectChanged { .. } => {}
@@ -1620,12 +2178,37 @@ impl EffectcraftApp {
         }
     }
 
-    fn frame(&mut self, ui: &mut egui::Ui) {
-        let ctx = ui.ctx().clone();
-        self.apply_gpu_failure(&ctx);
-        self.run_dialog_answers();
-        self.auto.begin_frame();
-        self.frames.set_context(&ctx);
+    /// The app's only non-paint entry: one tick of background work.
+    ///
+    /// This runs for every eframe logic callback, including the logic-only ticks of a hidden
+    /// window (which never reach [`Self::draw`]). It must therefore do no input handling, no
+    /// layout and no presentation: engine/job queues, autosave, playback, audio, the control
+    /// channel, screenshots and the close guard. Everything here is idempotent for a pass that
+    /// `Context::request_discard` replays.
+    pub fn tick(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        self.now = self.clock.now();
+        // The compositor exists before the first paint and while hidden (device-loss handling
+        // must run there too).
+        self.init_gpu(frame);
+        self.apply_gpu_failure(ctx);
+        if self.gpu_failure_applied == Some(true) {
+            self.close_after_device_loss(ctx);
+            return;
+        }
+        // Focus comes from the fresh viewport copy; a full pass's `InputState::focused` is only a
+        // fallback (a logic-only tick leaves it at the previous pass's value).
+        let focused = ctx.input(|i| i.viewport().focused.or(Some(i.focused)));
+        self.focused = focused.unwrap_or(self.focused);
+        // The interface language's fallback fonts are installed in `draw` (fonts need a pass), but
+        // commands handled here use the right catalog already.
+        let language = crate::i18n::language(self);
+        crate::i18n::set_current(language);
+        if self.styled_language != language {
+            self.want_paint = true;
+        }
+        // Frames and worker completions wake the app even while it is hidden.
+        self.frames.set_context(ctx);
+        updates_ui::tick(self, ctx);
         if self.session.render_job.is_some() {
             self.session.poll_render();
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
@@ -1665,25 +2248,186 @@ impl EffectcraftApp {
             self.session.poll_camera(true);
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
-        self.run_script_tasks(&ctx);
-        self.apply_prefs(&ctx);
-        self.handle_events(&ctx);
-        panels::unsaved::on_close_requested(self, &ctx);
-        let title = panels::unsaved::window_title(self);
-        if title != self.window_title {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
-            self.window_title = title;
-        }
-        self.tick_autosave(&ctx);
-        prefs_live::frame(self, &ctx);
+        self.run_script_tasks(ctx);
+        self.run_dialog_answers();
+        self.handle_events(ctx);
         if let Some(rx) = self.command_inbox.take() {
             while let Ok(id) = rx.try_recv() {
-                if let Err(e) = menus::invoke(self, &ctx, &id, json!({})) {
+                if let Err(e) = menus::invoke(self, ctx, &id, json!({})) {
                     self.ui.status = e;
                 }
             }
             self.command_inbox = Some(rx);
         }
+        // A close request (the window's button, Quit, `app.quit`) must be answered while hidden.
+        panels::unsaved::on_close_requested(self, ctx);
+        let title = panels::unsaved::window_title(self);
+        if title != self.window_title {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.window_title = title;
+        }
+        self.tick_autosave(ctx);
+        self.tick_workspace_autosave(ctx);
+        let now = self.now;
+        prefs_live::tick(self, ctx, now);
+        // Playback advances without a paint (its frames and the audio clock are background work).
+        // Idle prefetch keeps its old condition: it only runs once a viewer has drawn.
+        if (self.playback.playing || self.last_viewer_scale.is_some())
+            && let Some(cid) = self.session.active_comp_id()
+        {
+            let (scale, active) = (self.last_viewer_scale.unwrap_or(1.0), self.input_active);
+            self.advance_playback(ctx, scale, now, active, cid);
+        }
+        self.drain_control(ctx, now);
+        // Screenshot completion, deadlines and issuance are app-side work: the callback only
+        // stores pixels and wakes this viewport.
+        self.tick_screenshots(ctx);
+        // Time-based FPS readout over UI passes (a hidden logic-only tick is not a frame).
+        let dt = (now - self.last_time) as f32;
+        if dt > 0.0 && dt < 2.0 {
+            self.fps = self.fps * 0.9 + (1.0 / dt).min(480.0) * 0.1;
+        }
+        self.last_time = now;
+        // A hidden window paints when work needs a UI pass: queued input and waits, a settled
+        // screenshot, or playback into a child viewport.
+        let focused = self.focused;
+        let child_viewports = !self.ui.floating.is_empty() || prefs_live::video_preview_active(self, focused);
+        let paint = self.want_paint
+            || !self.synthetic.is_empty()
+            || !self.input_waiters.is_empty()
+            || self.pending_screenshots.iter().any(|s| s.slot.is_none())
+            || (self.playback.playing && child_viewports);
+        if paint {
+            self.request_hidden_paint(ctx);
+        }
+    }
+
+    /// Ask the host for a UI pass even when the window is minimized or occluded.
+    ///
+    /// Native eframe honours `RequestPaintWhileHidden`; the shared web backend does not carry it
+    /// yet (a browser does not paint a hidden tab), so the web build only requests a normal
+    /// repaint and hidden web screenshots/input remain unqualified.
+    fn request_hidden_paint(&mut self, ctx: &egui::Context) {
+        self.want_paint = false;
+        #[cfg(not(target_arch = "wasm32"))]
+        ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaintWhileHidden);
+        ctx.request_repaint();
+    }
+
+    /// Install the theme and fonts for the current language. Fonts need a real pass: the pass
+    /// that installs them draws nothing, and the next pass draws with them (the two-pass warm-up
+    /// the app has always had). Never call this from a logic-only tick.
+    fn ui_setup(&mut self, ctx: &egui::Context) {
+        panels::viewer_text::install_hooks(ctx);
+        let language = crate::i18n::language(self);
+        crate::i18n::set_current(language);
+        if (!self.styled || self.styled_language != language) && self.synthetic_in_flight {
+            // The install needs a pass that draws nothing, but this pass has already applied a
+            // synthetic batch: defer the theme/font install by one pass instead of dropping the
+            // input (feeds are only put into a pass that can draw).
+            ctx.request_repaint();
+            return;
+        }
+        if !self.styled || self.styled_language != language {
+            theme::install(ctx, &self.tokens, language);
+            self.styled_language = language;
+            if !self.styled {
+                fit_window(ctx);
+                self.styled = true;
+            }
+            self.fonts_ready = false;
+            ctx.request_repaint();
+        } else if !self.fonts_ready {
+            // The pass after the install draws: egui has the new font definitions by now.
+            self.fonts_ready = true;
+            ctx.request_repaint();
+        }
+    }
+
+    /// One UI pass: setup, input-driven shortcuts, layout and painting. Called from
+    /// `eframe::App::ui` and by tests with the root `Ui`.
+    pub fn draw(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
+        panels::viewer_text::begin_ui(ui.ctx());
+        self.draw_inner(ui, frame);
+        // All exits, including fonts/device loss, observe this pass's real custom availability.
+        panels::viewer_text::finish_ime(self, ui);
+    }
+
+    /// Context creators install these hooks before the first full pass.
+    pub fn install_ime_reset_hooks(ctx: &egui::Context) {
+        panels::viewer_text::install_hooks(ctx);
+    }
+
+    /// Host wrappers call this after their last logic mutation, without replaying UI events.
+    pub fn finish_ime_logic(&self, ctx: &egui::Context) {
+        panels::viewer_text::finish_logic(self, ctx);
+    }
+
+    fn draw_inner(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        if self.gpu_failure_applied == Some(true) {
+            self.close_after_device_loss(&ctx);
+            return;
+        }
+        self.ui_setup(&ctx);
+        if !self.fonts_ready {
+            // A pass that installs fonts draws nothing. No synthetic batch is in flight here (the
+            // hook feeds input only to a ready app), and events egui already applied are never
+            // fed again: that would double the pointer/key state of one click.
+            ctx.request_repaint();
+            return;
+        }
+        self.frame(ui);
+        #[cfg(not(target_arch = "wasm32"))]
+        pointer_wrap::finish_native(&ctx, frame);
+        // wasm32: no frame threads; render queued frames now, between UI frames.
+        if cfg!(target_arch = "wasm32") && self.frames.pump(std::time::Duration::from_millis(if self.playback.playing { 24 } else { 40 })) {
+            ctx.request_repaint();
+        }
+        // Input belongs to this known UI phase: record it for the next tick.
+        let active = ctx.input(|i| !i.events.is_empty() || i.pointer.any_down() || i.pointer.is_moving());
+        self.input_active = active;
+        self.last_pointer_down = ctx.input(|i| i.pointer.any_down());
+        // Geometry of a completed pass (a discarded pass is laid out again; only the final one
+        // describes the surface the next capture will see). Window position is irrelevant.
+        if !ctx.will_discard() {
+            let rect = ctx.content_rect();
+            let ppp = ctx.pixels_per_point();
+            let changed = self.draw_geom.is_none_or(|g| g.rect.size() != rect.size() || g.ppp != ppp);
+            if changed {
+                self.geometry_epoch = self.geometry_epoch.wrapping_add(1);
+            }
+            self.draw_geom = Some(DrawGeometry { rect, ppp, epoch: self.geometry_epoch });
+            self.ui_pass_seq = self.ui_pass_seq.saturating_add(1);
+        }
+        // A batch is acknowledged once a UI pass applied it, even if layout was later discarded.
+        self.mark_synthetic_applied();
+        // `AfterInput` replies wait for the final (non-discarded) pass that applied the last
+        // synthetic event: a hidden request is answered only after its forced pass, and a pass
+        // egui throws away cannot produce an early success reply.
+        if !ctx.will_discard() && self.synthetic.is_empty() {
+            for w in self.input_waiters.drain(..) {
+                let _ = w.send(json!({"ok": true, "result": null}));
+            }
+        } else if !self.input_waiters.is_empty() {
+            self.want_paint = true;
+            ctx.request_repaint();
+        }
+        if self.frames.inflight() > 0 {
+            ctx.request_repaint_after(std::time::Duration::from_millis(30));
+        }
+    }
+
+    /// The panels, menus, dialogs and overlays of one pass.
+    fn frame(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        // Only a viewer that draws in *this* pass records a scale: a closed viewer, the Home
+        // screen or another comp must stop idle prefetch at a stale scale.
+        self.last_viewer_scale = None;
+        self.apply_prefs(&ctx);
+        // Video Preview is a second viewport: only a real pass can update it.
+        prefs_live::frame(self, &ctx);
+        self.auto.begin_frame();
         let tab_had_widget_focus = ctx.egui_wants_keyboard_input();
         menus::handle_shortcuts(self, &ctx);
         if !ctx.input(|i| i.pointer.primary_down()) {
@@ -1716,18 +2460,25 @@ impl EffectcraftApp {
         panels::precomp::mini_flowchart(self, &ctx);
         panels::home::capture_thumbnail(self);
         panels::dialogs::show(self, &ctx);
+        updates_ui::show(self, &ctx);
         panels::scriptui_view::sync_panels(self);
         panels::scriptui_view::show_windows(self, &ctx);
         panels::learn::coach(self, &ctx);
         let lift = panels::media_panels::import_card(self, ui, full);
         self.draw_toast(ui, full, lift);
-        if self.session.config.is_some() && self.workspace_store.has_changes(&self.ui) && !ctx.input(|i| i.pointer.any_down()) {
-            if self.workspace_store.due(ctx.input(|i| i.time)) {
-                self.save_workspace_state();
-            }
-            if self.workspace_store.has_changes(&self.ui) {
-                ctx.request_repaint_after(std::time::Duration::from_secs(1));
-            }
+    }
+
+    /// Workspace-layout auto-save: a background write that also runs while hidden, once the
+    /// pointer has lifted.
+    fn tick_workspace_autosave(&mut self, ctx: &egui::Context) {
+        if self.session.config.is_none() || !self.workspace_store.has_changes(&self.ui) || self.last_pointer_down {
+            return;
+        }
+        if self.workspace_store.due(self.now) {
+            self.save_workspace_state();
+        }
+        if self.workspace_store.has_changes(&self.ui) {
+            ctx.request_repaint_after(std::time::Duration::from_secs(1));
         }
     }
 
@@ -1744,7 +2495,7 @@ impl EffectcraftApp {
     /// The status message or the latest toast, bottom left (`lift` points higher while the
     /// Importing card is there).
     fn draw_toast(&mut self, ui: &mut egui::Ui, full: egui::Rect, lift: f32) {
-        let now = ui.input(|i| i.time);
+        let now = self.now;
         let msg = if !self.ui.status.is_empty() {
             Some(self.ui.status.clone())
         } else {
@@ -1758,18 +2509,18 @@ impl EffectcraftApp {
             ui.painter().rect_stroke(r, 6.0, egui::Stroke::new(1.0, t.field_border), egui::StrokeKind::Inside);
             ui.painter().galley(r.min + egui::vec2(12.0, 7.0), galley, t.text);
             self.auto.add("toast", r, &m);
-            let resp = ui.interact(r, egui::Id::new("toast"), egui::Sense::click());
+            let resp = ui.interact(r, egui::Id::unique("toast"), egui::Sense::click());
             if resp.clicked() {
                 self.ui.status.clear();
                 self.toast = None;
             }
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
             if !self.ui.status.is_empty() {
-                let since: f64 = ui.data(|d| d.get_temp(egui::Id::new("status-since")).unwrap_or(now));
-                ui.data_mut(|d| d.insert_temp(egui::Id::new("status-since"), since));
+                let since: f64 = ui.data(|d| d.get_temp(egui::Id::unique("status-since")).unwrap_or(now));
+                ui.data_mut(|d| d.insert_temp(egui::Id::unique("status-since"), since));
                 if now - since > 5.0 {
                     self.ui.status.clear();
-                    ui.data_mut(|d| d.remove::<f64>(egui::Id::new("status-since")));
+                    ui.data_mut(|d| d.remove::<f64>(egui::Id::unique("status-since")));
                 }
             }
         }
@@ -1790,7 +2541,7 @@ impl EffectcraftApp {
             self.ui.start_screen = false;
         }
         if let Some(msg) = r["errors"].as_array().and_then(|e| e.first()).and_then(|e| e["message"].as_str()) {
-            self.toast = Some((format!("Scheduled script task: {msg}"), ctx.input(|i| i.time)));
+            self.toast = Some((format!("Scheduled script task: {msg}"), self.now));
         } else if let Some(line) = r["output"].as_array().and_then(|o| o.last()).and_then(|l| l.as_str()) {
             self.ui.status = line.to_string();
         }
@@ -1801,7 +2552,8 @@ impl EffectcraftApp {
 
     /// Auto-save a dirty project when the interval has passed (Settings ▸ Project ▸ Auto-Save).
     fn tick_autosave(&mut self, ctx: &egui::Context) {
-        let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+        // Monotonic app time: a wall-clock jump must not skip or repeat an auto-save.
+        let now = self.now;
         if let Some(Err(e)) = self.session.autosave_tick(now) {
             self.ui.status = e.to_string();
         }
@@ -1810,7 +2562,7 @@ impl EffectcraftApp {
         }
         // File ▸ Watch Folder: look for new projects every 10 seconds.
         if self.session.state.watch_folder.is_some() {
-            let key = egui::Id::new("watchFolder.lastPoll");
+            let key = egui::Id::unique("watchFolder.lastPoll");
             let last: f64 = ctx.data(|d| d.get_temp(key)).unwrap_or(0.0);
             if now - last >= 10.0 {
                 ctx.data_mut(|d| d.insert_temp(key, now));
@@ -1836,8 +2588,8 @@ impl EffectcraftApp {
         if let Some(Err(e)) = footage_reload::poll_scan(&mut self.session) {
             self.ui.status = e.to_string();
         }
-        let (last_key, focus_key) = (egui::Id::new("footageReload.lastScan"), egui::Id::new("footageReload.focused"));
-        let focused = ctx.input(|i| i.focused);
+        let (last_key, focus_key) = (egui::Id::unique("footageReload.lastScan"), egui::Id::unique("footageReload.focused"));
+        let focused = self.focused;
         let was_focused: bool = ctx.data(|d| d.get_temp(focus_key)).unwrap_or(focused);
         ctx.data_mut(|d| d.insert_temp(focus_key, focused));
         if self.session.prefs.import.auto_reload_footage == "off" || self.session.project.items.is_empty() {
@@ -1873,84 +2625,37 @@ impl eframe::App for EffectcraftApp {
     }
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
-        let injected = !self.synthetic.is_empty();
-        self.feed_synthetic(raw_input);
+        let injected = self.synthetic_in_flight || !self.synthetic.is_empty();
+        // Only a pass that can draw may receive synthetic input: `Context::run_ui` applies
+        // everything the hook feeds to its input state, so a pass that cannot draw (fonts still
+        // installing) would consume a batch it could not put back — putting it back would apply
+        // the click/key state twice. The queue waits here for the first pass that draws.
+        if self.fonts_ready {
+            self.feed_synthetic(raw_input);
+        }
         if pointer_wrap::prepare_input(ctx, raw_input, injected) {
             self.session.history.merge_key = None;
         }
     }
 
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.apply_gpu_failure(ctx);
-        // The CJK fallback fonts depend on the interface language, so they follow a change of
-        // Settings ▸ General ▸ Language instead of only the first frame.
-        let language = crate::i18n::language(self);
-        crate::i18n::set_current(language);
-        if !self.styled || self.styled_language != language {
-            theme::install(ctx, &self.tokens, language);
-            self.styled_language = language;
-            if !self.styled {
-                fit_window(ctx);
-                self.styled = true;
-            }
-            ctx.request_repaint();
-        } else {
-            self.fonts_ready = true;
-        }
-        let now = ctx.input(|i| i.time);
-        let dt = (now - self.last_time) as f32;
-        if dt > 0.0 {
-            self.fps = self.fps * 0.9 + (1.0 / dt).min(480.0) * 0.1;
-        }
-        self.last_time = now;
-        self.drain_control(ctx);
-        if !self.synthetic.is_empty() {
-            ctx.request_repaint();
-        } else if !self.input_waiters.is_empty() {
-            for w in self.input_waiters.drain(..) {
-                let _ = w.send(json!({"ok": true, "result": null}));
-            }
-        }
-        self.issue_screenshots(ctx);
-        self.collect_screenshots(ctx);
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // Never `ctx.input(|i| i.time)` here: `Context::run_logic` leaves events, pointer state and
+        // time at the previous full pass's values (only the viewport information is refreshed).
+        self.tick(ctx, frame);
+        self.finish_ime_logic(ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        if self.gpu_failure_applied == Some(true) {
-            self.close_after_device_loss(ui.ctx());
-            return;
-        }
-        self.init_gpu(frame);
-        if !self.fonts_ready {
-            ui.ctx().request_repaint();
-            return;
-        }
-        self.frame(ui);
-        let ctx = ui.ctx().clone();
-        #[cfg(not(target_arch = "wasm32"))]
-        pointer_wrap::finish_native(&ctx, frame);
-        // wasm32: no frame threads; render queued frames now, between UI frames.
-        if cfg!(target_arch = "wasm32") && self.frames.pump(std::time::Duration::from_millis(if self.playback.playing { 24 } else { 40 })) {
-            ctx.request_repaint();
-        }
-        self.last_ui_time = ctx.input(|i| i.time);
-        if !self.synthetic.is_empty() {
-            ctx.request_repaint();
-        } else if !self.input_waiters.is_empty() {
-            ctx.request_repaint();
-            for w in self.input_waiters.drain(..) {
-                let _ = w.send(json!({"ok": true, "result": null}));
-            }
-        }
-        if self.frames.inflight() > 0 {
-            ctx.request_repaint_after(std::time::Duration::from_millis(30));
-        }
+        self.draw(ui, frame);
     }
 }
 
-/// Advance playback with the viewer's scale (called by the viewer panel each frame).
-pub(crate) fn tick_playback(app: &mut EffectcraftApp, ctx: &egui::Context, scale: f64) {
-    app.advance_playback(ctx, scale);
+/// Record the scale the viewer drew at (called by the viewer panel each pass).
+///
+/// Playback itself advances in [`EffectcraftApp::tick`], so it keeps running while the window is
+/// hidden; using the last drawn scale keeps prefetch keys consistent with the visible viewer.
+pub(crate) fn note_viewer_scale(app: &mut EffectcraftApp, scale: f64) {
+    app.last_viewer_scale = Some(scale);
 }
 
 /// Put `width` × `height` straight-alpha RGBA8 pixels on the system clipboard (Composition ▸ Copy
@@ -2183,5 +2888,523 @@ mod appearance_tests {
         assert_eq!(app.session.prefs.appearance.appearance_mode, "dark");
         assert_eq!(app.session.prefs.appearance.dark_theme, "darker");
         assert_eq!(app.ui.theme, ThemeKind::Darker);
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    //! The logic-only / UI-pass split: queue work in `tick`, input, layout and setup in `draw`.
+    //!
+    //! The driver mirrors eframe's order for a hidden window: `raw_input_hook` prepares the raw
+    //! input, a logic-only iteration runs `tick`, and a forced pass runs `draw` with the same
+    //! prepared input. Nothing may depend on `current_pass_index`, which is zero in both.
+
+    use super::*;
+    use effectcraft_engine::config::{ConfigStore, MemoryConfig};
+
+    fn app_with_comp() -> EffectcraftApp {
+        let mut session = Session::default();
+        session.execute("comp.new", json!({"name": "Lifecycle", "width": 64, "height": 36, "duration": 1})).unwrap();
+        session.execute("layer.newSolid", json!({"color": "#ff0000"})).unwrap();
+        let mut app = EffectcraftApp::new(session);
+        app.ui.start_screen = false;
+        app.ui.show_menu_bar = false;
+        app.use_manual_clock();
+        app
+    }
+
+    fn raw(size: egui::Vec2) -> egui::RawInput {
+        egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)), ..Default::default() }
+    }
+
+    fn tick_with(app: &mut EffectcraftApp, ctx: &egui::Context, frame: &eframe::Frame, raw: &egui::RawInput) -> egui::LogicOutput {
+        ctx.run_logic(raw, |ctx| app.tick(ctx, frame))
+    }
+
+    fn hidden_tick(app: &mut EffectcraftApp, ctx: &egui::Context, frame: &eframe::Frame) {
+        let _ = tick_with(app, ctx, frame, &raw(egui::vec2(800.0, 480.0)));
+    }
+
+    /// One host iteration that ends in a UI pass (the forced hidden pass, or a visible frame).
+    fn pass(app: &mut EffectcraftApp, ctx: &egui::Context, frame: &eframe::Frame, raw: &mut egui::RawInput) -> egui::FullOutput {
+        eframe::App::raw_input_hook(app, ctx, raw);
+        let mut out = ctx.run_ui(raw.take(), |ui| app.draw(ui, frame));
+        out.textures_delta.clear();
+        out
+    }
+
+    fn ready(app: &mut EffectcraftApp, ctx: &egui::Context, frame: &eframe::Frame) -> DrawGeometry {
+        // The first pass installs the fonts, the second draws with them.
+        for _ in 0..3 {
+            let mut raw = raw(egui::vec2(800.0, 480.0));
+            pass(app, ctx, frame, &mut raw);
+        }
+        assert!(app.is_ready(), "fonts are ready after the warm-up passes");
+        app.draw_geometry().expect("a completed pass records its geometry")
+    }
+
+    fn send(app: &mut EffectcraftApp, method: &str, params: serde_json::Value) -> std::sync::mpsc::Receiver<serde_json::Value> {
+        let (request, reply) = ControlRequest::new(method, params);
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(request).unwrap();
+        app.control_rx = Some(rx);
+        reply
+    }
+
+    #[test]
+    fn a_logic_only_tick_installs_no_fonts_and_records_no_geometry() {
+        let ctx = egui::Context::default();
+        let frame = eframe::Frame::_new_kittest();
+        let mut app = app_with_comp();
+        hidden_tick(&mut app, &ctx, &frame);
+        assert!(!app.is_ready(), "fonts need a real pass, not a logic-only tick");
+        assert!(app.draw_geometry().is_none(), "a logic-only tick is not a frame");
+        assert_eq!(app.ui_passes(), 0);
+    }
+
+    #[test]
+    fn a_control_command_that_needs_no_ui_completes_without_a_pass() {
+        let ctx = egui::Context::default();
+        let frame = eframe::Frame::_new_kittest();
+        let mut app = app_with_comp();
+        let reply = send(&mut app, "engine.execute", json!({"command": "comp.new", "params": {"name": "Queued", "width": 32, "height": 18, "duration": 1}}));
+        hidden_tick(&mut app, &ctx, &frame);
+        let value = reply.try_recv().expect("a command that needs no UI is answered by the tick");
+        assert_eq!(value["ok"], true, "{value}");
+        assert_eq!(app.ui_passes(), 0);
+    }
+
+    #[test]
+    fn a_pass_that_cannot_draw_receives_no_synthetic_input() {
+        let ctx = egui::Context::default();
+        let frame = eframe::Frame::_new_kittest();
+        let mut app = app_with_comp();
+        assert!(!app.is_ready(), "a fresh app installs its fonts in its first pass");
+        let reply = send(&mut app, "ui.click", json!({"x": 40, "y": 40}));
+        hidden_tick(&mut app, &ctx, &frame);
+        assert!(reply.try_recv().is_err(), "a click is not answered before its UI pass");
+        // The font-install pass cannot draw. It must not receive the click: `run_ui` applies what
+        // the hook feeds, and a batch cannot be put back without applying its pointer state twice.
+        let mut setup = raw(egui::vec2(800.0, 480.0));
+        eframe::App::raw_input_hook(&mut app, &ctx, &mut setup);
+        assert!(setup.events.is_empty(), "a pass that cannot draw gets no synthetic input");
+        assert_eq!(app.synthetic.len(), 5, "the whole gesture still waits for a drawing pass");
+        assert!(app.pending_synthetic_events().is_empty());
+        let mut setup_pass = ctx.run_ui(setup.take(), |ui| app.draw(ui, &frame));
+        setup_pass.textures_delta.clear();
+        assert!(!app.is_ready(), "the pass that installs the fonts draws nothing");
+        // Once fonts are ready the click reaches the UI exactly once, one event per pass.
+        let mut passes = 0;
+        while reply.try_recv().is_err() {
+            passes += 1;
+            assert!(passes < 40, "the click must be applied within a few passes");
+            let mut raw = raw(egui::vec2(800.0, 480.0));
+            pass(&mut app, &ctx, &frame, &mut raw);
+        }
+        assert!(reply.try_recv().is_err(), "the reply is sent once");
+        assert!(app.pending_synthetic_events().is_empty());
+        assert!(app.synthetic.is_empty(), "every event was applied once");
+    }
+
+    #[test]
+    fn one_pending_synthetic_batch_is_never_duplicated_while_hidden() {
+        let ctx = egui::Context::default();
+        let frame = eframe::Frame::_new_kittest();
+        let mut app = app_with_comp();
+        ready(&mut app, &ctx, &frame);
+        let reply = send(&mut app, "ui.click", json!({"x": 40, "y": 40}));
+        hidden_tick(&mut app, &ctx, &frame);
+        assert!(reply.try_recv().is_err(), "a click is not answered before its UI pass");
+        // Several hidden host iterations: eframe keeps the first prepared input; only its one
+        // event may reach the raw input, and a later hook must not add another.
+        let mut first = raw(egui::vec2(800.0, 480.0));
+        eframe::App::raw_input_hook(&mut app, &ctx, &mut first);
+        assert_eq!(first.events.len(), 1, "the first event of the gesture is fed");
+        let mut second = raw(egui::vec2(800.0, 480.0));
+        eframe::App::raw_input_hook(&mut app, &ctx, &mut second);
+        assert!(second.events.is_empty(), "an unapplied batch blocks the next event");
+        assert_eq!(app.pending_synthetic_events().len(), 1);
+        // The pass that applies the batch acknowledges it once; it is never fed again.
+        pass(&mut app, &ctx, &frame, &mut first);
+        assert!(app.pending_synthetic_events().is_empty());
+        // Drive real passes until the gesture is applied: exactly one reply, no lost events.
+        let mut passes = 0;
+        while reply.try_recv().is_err() {
+            passes += 1;
+            assert!(passes < 40, "the click must be applied within a few passes");
+            let mut raw = raw(egui::vec2(800.0, 480.0));
+            pass(&mut app, &ctx, &frame, &mut raw);
+        }
+        assert!(app.pending_synthetic_events().is_empty());
+        assert!(app.synthetic.is_empty());
+        assert!(reply.try_recv().is_err(), "the reply is sent once");
+    }
+
+    #[test]
+    fn geometry_epoch_tracks_size_and_scale_but_not_window_position() {
+        let ctx = egui::Context::default();
+        let frame = eframe::Frame::_new_kittest();
+        let mut app = app_with_comp();
+        let first = ready(&mut app, &ctx, &frame);
+        let mut moved = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::pos2(120.0, 80.0), first.rect.size())), ..Default::default() };
+        pass(&mut app, &ctx, &frame, &mut moved);
+        assert_eq!(app.draw_geometry().unwrap().epoch, first.epoch, "moving the window does not change a capture");
+        let mut resized = raw(egui::vec2(1024.0, 640.0));
+        pass(&mut app, &ctx, &frame, &mut resized);
+        let after_resize = app.draw_geometry().unwrap();
+        assert!(after_resize.epoch > first.epoch, "a resize advances the epoch");
+        let mut back = raw(egui::vec2(800.0, 480.0));
+        pass(&mut app, &ctx, &frame, &mut back);
+        assert!(app.draw_geometry().unwrap().epoch > after_resize.epoch, "changing back is another change, not the old epoch");
+    }
+
+    #[test]
+    fn only_a_viewer_that_draws_records_a_prefetch_scale() {
+        let ctx = egui::Context::default();
+        let frame = eframe::Frame::_new_kittest();
+        let mut app = app_with_comp();
+        ready(&mut app, &ctx, &frame);
+        assert!(app.last_viewer_scale.is_some(), "the visible viewer recorded the scale it drew at");
+        // The Home screen draws no viewer: the old comp's scale must not keep idle prefetch alive.
+        app.ui.start_screen = true;
+        let mut input = raw(egui::vec2(800.0, 480.0));
+        pass(&mut app, &ctx, &frame, &mut input);
+        assert!(app.last_viewer_scale.is_none(), "no viewer drew, so there is no scale to prefetch at");
+        // Back to the comp: the next pass records it again.
+        app.ui.start_screen = false;
+        let mut input = raw(egui::vec2(800.0, 480.0));
+        pass(&mut app, &ctx, &frame, &mut input);
+        assert!(app.last_viewer_scale.is_some());
+    }
+
+    #[test]
+    fn playback_advances_on_a_logic_only_tick() {
+        let ctx = egui::Context::default();
+        let frame = eframe::Frame::_new_kittest();
+        let mut app = app_with_comp();
+        app.playback.playing = true;
+        app.playback.plan = Some(effectcraft_engine::preview::PreviewPlan {
+            start: 1,
+            end: 1,
+            first: 1,
+            step: 1,
+            fps: 24.0,
+            looping: false,
+            cache_first: false,
+            video: false,
+            audio: false,
+            origin: Tick::ZERO,
+        });
+        app.playback.start_wall = 0.0;
+        app.playback.start_frame = 1;
+        app.clock_mut().advance(1.0);
+        hidden_tick(&mut app, &ctx, &frame);
+        assert!(!app.playback.playing, "a one-frame preview ends without any UI pass");
+        assert_eq!(app.playback.audio_frame, Some(1), "the audio-only playhead reached the plan's end");
+        assert_eq!(app.ui_passes(), 0);
+    }
+
+    #[test]
+    fn workspace_layout_autosave_writes_on_a_hidden_tick() {
+        let store = Arc::new(MemoryConfig::default());
+        let mut app = EffectcraftApp::new(Session { config: Some(store.clone()), ..Default::default() });
+        app.ui.start_screen = false;
+        app.use_manual_clock();
+        app.ui.focused = PanelKind::Timeline;
+        app.clock_mut().advance(2.0);
+        let ctx = egui::Context::default();
+        let frame = eframe::Frame::_new_kittest();
+        hidden_tick(&mut app, &ctx, &frame);
+        assert!(store.read(WORKSPACES_FILE).is_some(), "the layout is saved while the window is hidden");
+        assert_eq!(app.ui_passes(), 0);
+    }
+
+    #[test]
+    fn the_close_guard_answers_a_close_request_without_a_pass() {
+        let ctx = egui::Context::default();
+        let frame = eframe::Frame::_new_kittest();
+        let mut app = app_with_comp();
+        assert!(app.session.is_dirty(), "creating a comp and a layer leaves unsaved changes");
+        let mut raw = raw(egui::vec2(800.0, 480.0));
+        raw.viewports.insert(egui::ViewportId::ROOT, egui::ViewportInfo { events: vec![egui::ViewportEvent::Close], ..Default::default() });
+        let out = tick_with(&mut app, &ctx, &frame, &raw);
+        assert!(app.dialog.is_some(), "a hidden close request opens the unsaved-changes prompt");
+        let cancel = out.viewport_commands.values().flatten().any(|c| matches!(c, egui::ViewportCommand::CancelClose));
+        assert!(cancel, "the window stays open while the prompt is asking");
+        assert_eq!(app.ui_passes(), 0);
+    }
+
+    // ---------------------------------------------------------------- screenshots
+
+    fn screenshot_request(
+        app: &mut EffectcraftApp,
+        ctx: &egui::Context,
+        path: Option<&str>,
+        target: ShotTarget,
+    ) -> std::sync::mpsc::Receiver<serde_json::Value> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.admit_screenshot(ctx, path.map(str::to_string), target, tx);
+        rx
+    }
+
+    fn shot_callbacks(out: &egui::LogicOutput) -> Vec<egui::ScreenshotCallback> {
+        out.viewport_commands
+            .values()
+            .flatten()
+            .filter_map(|c| match c {
+                egui::ViewportCommand::Screenshot(cb) => Some(cb.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Three settled passes and the settle delay, then the tick that issues the capture.
+    fn issue_shot(app: &mut EffectcraftApp, ctx: &egui::Context, frame: &eframe::Frame) -> egui::ScreenshotCallback {
+        issue_shot_at(app, ctx, frame, egui::vec2(800.0, 480.0))
+    }
+
+    fn issue_shot_at(app: &mut EffectcraftApp, ctx: &egui::Context, frame: &eframe::Frame, size: egui::Vec2) -> egui::ScreenshotCallback {
+        for _ in 0..SCREENSHOT_SETTLE_PASSES {
+            let mut raw = raw(size);
+            pass(app, ctx, frame, &mut raw);
+        }
+        app.clock_mut().advance(SCREENSHOT_SETTLE_S + 0.01);
+        let out = tick_with(app, ctx, frame, &raw(size));
+        let cbs = shot_callbacks(&out);
+        assert_eq!(cbs.len(), 1, "one settled screenshot is issued once");
+        cbs.into_iter().next().unwrap()
+    }
+
+    fn image(width: usize, height: usize) -> Arc<egui::ColorImage> {
+        Arc::new(egui::ColorImage::new([width, height], vec![egui::Color32::from_rgb(10, 20, 30); width.checked_mul(height).unwrap()]))
+    }
+
+    #[test]
+    fn a_screenshot_is_issued_only_after_settled_passes_and_writes_from_the_tick() {
+        let ctx = egui::Context::default();
+        let frame = eframe::Frame::_new_kittest();
+        let mut app = app_with_comp();
+        ready(&mut app, &ctx, &frame);
+        let path = std::env::temp_dir().join(format!("effectcraft-shot-{}-ok.png", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let reply = screenshot_request(&mut app, &ctx, path.to_str(), ShotTarget::Window);
+        // Not settled: a tick issues nothing and asks for passes instead.
+        let out = tick_with(&mut app, &ctx, &frame, &raw(egui::vec2(800.0, 480.0)));
+        assert!(shot_callbacks(&out).is_empty(), "no capture before the UI settles");
+        assert_eq!(out.viewport_commands.values().flatten().filter(|c| matches!(c, egui::ViewportCommand::RequestPaintWhileHidden)).count(), 1);
+        let cb = issue_shot(&mut app, &ctx, &frame);
+        assert!(reply.try_recv().is_err(), "the callback must not write or reply itself");
+        cb.complete(image(800, 480));
+        hidden_tick(&mut app, &ctx, &frame);
+        let value = reply.try_recv().expect("the tick drains the completed slot and replies");
+        assert_eq!(value["ok"], true, "{value}");
+        assert!(path.exists(), "{value}");
+        assert_eq!(value["result"]["width"], 800);
+        assert_eq!(value["result"]["height"], 480);
+        assert_eq!(app.shot_bytes, 0, "the reservation is released");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_resize_between_issue_and_completion_rejects_the_pixels_and_retries() {
+        let ctx = egui::Context::default();
+        let frame = eframe::Frame::_new_kittest();
+        let mut app = app_with_comp();
+        ready(&mut app, &ctx, &frame);
+        let path = std::env::temp_dir().join(format!("effectcraft-shot-{}-retry.png", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let reply = screenshot_request(&mut app, &ctx, path.to_str(), ShotTarget::Window);
+        let first = issue_shot(&mut app, &ctx, &frame);
+        let size = egui::vec2(1024.0, 640.0);
+        let mut resized = raw(size);
+        pass(&mut app, &ctx, &frame, &mut resized);
+        first.complete(image(800, 480));
+        let _ = tick_with(&mut app, &ctx, &frame, &raw(size));
+        assert!(reply.try_recv().is_err(), "pixels from the old surface epoch are discarded");
+        assert!(!path.exists(), "a stale image is never written");
+        // The retry is issued against the new geometry and the new image is accepted.
+        let second = issue_shot_at(&mut app, &ctx, &frame, size);
+        second.complete(image(1024, 640));
+        let _ = tick_with(&mut app, &ctx, &frame, &raw(size));
+        let value = reply.try_recv().expect("the retried capture replies");
+        assert_eq!(value["ok"], true, "{value}");
+        assert_eq!(value["result"]["width"], 1024);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn screenshot_admission_bounds_requests_and_a_timeout_releases_its_reservation() {
+        let ctx = egui::Context::default();
+        let frame = eframe::Frame::_new_kittest();
+        let mut app = app_with_comp();
+        ready(&mut app, &ctx, &frame);
+        let mut replies = Vec::new();
+        for _ in 0..MAX_PENDING_SHOTS {
+            replies.push(screenshot_request(&mut app, &ctx, None, ShotTarget::Rect([0.0, 0.0, 4.0, 4.0])));
+        }
+        let refused = screenshot_request(&mut app, &ctx, None, ShotTarget::Rect([0.0, 0.0, 4.0, 4.0]));
+        let value = refused.try_recv().expect("the fifth request is refused immediately");
+        assert_eq!(value["ok"], false, "{value}");
+        // Every queued request times out on a hidden window that presents no frame; each one
+        // releases its reservation exactly once.
+        app.clock_mut().advance(SCREENSHOT_TIMEOUT_S + 1.0);
+        hidden_tick(&mut app, &ctx, &frame);
+        for reply in replies {
+            let value = reply.try_recv().expect("a timed-out request gets an actionable reply");
+            assert_eq!(value["ok"], false, "{value}");
+            assert!(value["error"].as_str().is_some_and(|e| e.contains("no frame")), "{value}");
+        }
+        assert_eq!(app.shot_bytes, 0);
+        assert!(app.pending_screenshots.is_empty());
+    }
+
+    #[test]
+    fn a_late_callback_after_cancellation_writes_nothing_and_replies_once() {
+        let ctx = egui::Context::default();
+        let frame = eframe::Frame::_new_kittest();
+        let mut app = app_with_comp();
+        ready(&mut app, &ctx, &frame);
+        let path = std::env::temp_dir().join(format!("effectcraft-shot-{}-late.png", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let reply = screenshot_request(&mut app, &ctx, path.to_str(), ShotTarget::Window);
+        let late = issue_shot(&mut app, &ctx, &frame);
+        app.clock_mut().advance(SCREENSHOT_TIMEOUT_S + 1.0);
+        hidden_tick(&mut app, &ctx, &frame);
+        let timeout = reply.try_recv().expect("the request times out");
+        assert_eq!(timeout["ok"], false, "{timeout}");
+        late.complete(image(800, 480));
+        hidden_tick(&mut app, &ctx, &frame);
+        assert!(reply.try_recv().is_err(), "a late completion sends no second reply");
+        assert!(!path.exists(), "a late completion writes no file");
+        assert_eq!(app.shot_bytes, 0);
+    }
+
+    /// Every repaint delay requested on `ctx` (what a host uses to wake the app).
+    fn wake_requests(ctx: &egui::Context) -> Arc<std::sync::Mutex<Vec<std::time::Duration>>> {
+        let wakes: Arc<std::sync::Mutex<Vec<std::time::Duration>>> = Arc::default();
+        let record = Arc::clone(&wakes);
+        ctx.set_repaint_observer(move |i| record.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(i.delay));
+        wakes
+    }
+
+    #[test]
+    fn an_issued_capture_schedules_a_wake_up_for_its_deadline() {
+        let ctx = egui::Context::default();
+        let frame = eframe::Frame::_new_kittest();
+        let mut app = app_with_comp();
+        ready(&mut app, &ctx, &frame);
+        let reply = screenshot_request(&mut app, &ctx, None, ShotTarget::Window);
+        for _ in 0..SCREENSHOT_SETTLE_PASSES {
+            let mut raw = raw(egui::vec2(800.0, 480.0));
+            pass(&mut app, &ctx, &frame, &mut raw);
+        }
+        app.clock_mut().advance(SCREENSHOT_SETTLE_S + 0.01);
+        // Record the repaint requests of the tick that issues the capture only.
+        let wakes = wake_requests(&ctx);
+        let out = tick_with(&mut app, &ctx, &frame, &raw(egui::vec2(800.0, 480.0)));
+        assert_eq!(shot_callbacks(&out).len(), 1, "the settled capture is issued once");
+        let delays = wakes.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        // The deadline is 8 s after admission; the capture was issued ~0.31 s in, so the app must
+        // ask for a wake-up close to that timeout, not only for the next paint.
+        let deadline_wake = delays.iter().any(|d| d.as_secs_f64() > 7.0 && d.as_secs_f64() <= SCREENSHOT_TIMEOUT_S);
+        assert!(deadline_wake, "an issued capture asks the host to wake for its timeout: {delays:?}");
+        // The callback never arrives (a hidden window or a display asleep). The host wakes at the
+        // requested delay; without this wake-up the timeout below could never be evaluated.
+        app.clock_mut().advance(SCREENSHOT_TIMEOUT_S + 1.0);
+        hidden_tick(&mut app, &ctx, &frame);
+        let value = reply.try_recv().expect("the deadline wake-up produces the timeout reply");
+        assert_eq!(value["ok"], false, "{value}");
+        assert!(value["error"].as_str().is_some_and(|e| e.contains("no frame")), "{value}");
+        assert_eq!(app.shot_bytes, 0);
+        assert!(app.pending_screenshots.is_empty());
+    }
+
+    #[test]
+    fn a_downscaled_capture_is_cropped_with_the_images_own_scale() {
+        let ctx = egui::Context::default();
+        let frame = eframe::Frame::_new_kittest();
+        let mut app = app_with_comp();
+        let geom = ready(&mut app, &ctx, &frame);
+        assert_eq!((geom.rect.width(), geom.rect.height(), geom.ppp), (800.0, 480.0, 1.0));
+        // The adapter-limit fit (E2) returned half the requested pixels. Left red, right blue.
+        let fitted =
+            Arc::new(egui::ColorImage::new([400, 240], (0..400 * 240).map(|i| if i % 400 < 200 { egui::Color32::RED } else { egui::Color32::BLUE }).collect()));
+        let dir = std::env::temp_dir();
+        for (name, crop, want) in [("left", [0.0, 0.0, 400.0, 240.0], egui::Color32::RED), ("right", [400.0, 0.0, 400.0, 240.0], egui::Color32::BLUE)] {
+            let path = dir.join(format!("effectcraft-shot-{}-scale-{name}.png", std::process::id()));
+            let _ = std::fs::remove_file(&path);
+            let reply = screenshot_request(&mut app, &ctx, path.to_str(), ShotTarget::Rect(crop));
+            let cb = issue_shot(&mut app, &ctx, &frame);
+            cb.complete(Arc::clone(&fitted));
+            hidden_tick(&mut app, &ctx, &frame);
+            let value = reply.try_recv().expect("the downscaled capture replies");
+            assert_eq!(value["ok"], true, "{value}");
+            assert_eq!(value["result"]["width"], 200, "{value}");
+            assert_eq!(value["result"]["height"], 120, "{value}");
+            let png = std::fs::read(&path).expect("the PNG is written");
+            let decoded = image::load_from_memory(&png).expect("our PNG decodes").to_rgba8();
+            assert_eq!((decoded.width(), decoded.height()), (200, 120), "{value}");
+            let px = decoded.get_pixel(100, 60).0;
+            assert!(px[0] == want.r() && px[1] == want.g() && px[2] == want.b(), "{name}: {px:?} is not from its half of the fitted image");
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    #[test]
+    fn a_capture_before_any_pass_never_uses_the_window_frame_rect() {
+        let ctx = egui::Context::default();
+        let frame = eframe::Frame::_new_kittest();
+        let mut app = app_with_comp();
+        // Only the outer (title bar included) rectangle is known: it is not the captured surface.
+        let outer = egui::Rect::from_min_size(egui::pos2(0.0, -30.0), egui::vec2(800.0, 510.0));
+        let mut raw = egui::RawInput::default();
+        raw.viewports.insert(egui::ViewportId::ROOT, egui::ViewportInfo { outer_rect: Some(outer), ..Default::default() });
+        let _ = tick_with(&mut app, &ctx, &frame, &raw);
+        let (tx, reply) = std::sync::mpsc::channel();
+        app.admit_screenshot(&ctx, None, ShotTarget::Window, tx);
+        let value = reply.try_recv().expect("the request is answered now");
+        assert_eq!(value["ok"], false, "{value}");
+        assert!(value["error"].as_str().is_some_and(|e| e.contains("geometry is not known")), "{value}");
+        assert!(app.pending_screenshots.is_empty(), "nothing was reserved against the wrong rectangle");
+        assert_eq!(app.shot_bytes, 0);
+        assert!(app.want_paint, "the pass that records the geometry is requested");
+    }
+
+    #[test]
+    fn an_element_that_moves_while_the_ui_settles_is_captured_where_it_is() {
+        let ctx = egui::Context::default();
+        let frame = eframe::Frame::_new_kittest();
+        let mut app = app_with_comp();
+        let geom = ready(&mut app, &ctx, &frame);
+        // Any registered panel: the crop follows this element's rectangle.
+        let panel = app.auto.previous.iter().chain(app.auto.elements.iter()).find(|e| e.id.starts_with("panel.")).map(|e| e.id.clone());
+        let panel = panel.expect("a dock panel is on screen after a completed pass");
+        let reply = screenshot_request(&mut app, &ctx, None, ShotTarget::Id(panel.clone()));
+        for _ in 0..SCREENSHOT_SETTLE_PASSES {
+            let mut raw = raw(egui::vec2(800.0, 480.0));
+            pass(&mut app, &ctx, &frame, &mut raw);
+        }
+        // The panel moves after its last draw: the crop must follow it, not the admission rect.
+        let moved = [40.0, 30.0, 300.0, 200.0];
+        for list in [&mut app.auto.previous, &mut app.auto.elements] {
+            if let Some(e) = list.iter_mut().find(|e| e.id == panel) {
+                e.rect = moved;
+            }
+        }
+        app.clock_mut().advance(SCREENSHOT_SETTLE_S + 0.01);
+        let out = tick_with(&mut app, &ctx, &frame, &raw(egui::vec2(800.0, 480.0)));
+        assert_eq!(shot_callbacks(&out).len(), 1, "the settled capture is issued once");
+        let crop = app.pending_screenshots.first().and_then(|s| s.crop).expect("the element crop is resolved at issuance");
+        assert!((crop[0] - (moved[0] - geom.rect.min.x)).abs() < 0.01, "{crop:?}");
+        assert!((crop[1] - (moved[1] - geom.rect.min.y)).abs() < 0.01, "{crop:?}");
+        assert!((crop[2] - moved[2]).abs() < 0.01 && (crop[3] - moved[3]).abs() < 0.01, "{crop:?}");
+        // Let it complete and reply, so the request does not outlive the test.
+        if let Some(cb) = shot_callbacks(&out).into_iter().next() {
+            cb.complete(image(800, 480));
+        }
+        hidden_tick(&mut app, &ctx, &frame);
+        let value = reply.try_recv().expect("the capture replies");
+        assert_eq!(value["ok"], true, "{value}");
+        assert_eq!((value["result"]["width"].as_u64(), value["result"]["height"].as_u64()), (Some(300), Some(200)), "{value}");
     }
 }

@@ -21,7 +21,7 @@ fn an_audio_only_preview_says_video_preview_is_off() {
     s.prefs.preview.get_mut(sc).include_video = false;
     let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_step_dt(1.0 / 30.0).build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(4);
-    let chip = |h: &Harness<'_, EffectcraftApp>| h.ctx.data(|d| d.get_temp::<egui::Rect>(egui::Id::new("viewer-video-off-chip")));
+    let chip = |h: &Harness<'_, EffectcraftApp>| h.ctx.data(|d| d.get_temp::<egui::Rect>(egui::Id::unique("viewer-video-off-chip")));
     assert!(chip(&h).is_none());
     let now = h.ctx.input(|i| i.time);
     h.state_mut().play(now);
@@ -30,7 +30,7 @@ fn an_audio_only_preview_says_video_preview_is_off() {
     assert!(chip(&h).is_some(), "the viewer shows the Video-off notice");
     assert_eq!(frame(&h), 0, "the current time stays put with Video off");
     h.state_mut().stop();
-    h.ctx.data_mut(|d| d.remove::<egui::Rect>(egui::Id::new("viewer-video-off-chip")));
+    h.ctx.data_mut(|d| d.remove::<egui::Rect>(egui::Id::unique("viewer-video-off-chip")));
     h.run_steps(3);
     assert!(h.state().video_preview_off().is_none());
     assert!(chip(&h).is_none(), "no notice once stopped");

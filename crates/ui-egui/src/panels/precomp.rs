@@ -209,7 +209,7 @@ pub fn navigator(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         };
         let g = p.layout_no_wrap(label.clone(), Tokens::ui(11.5), col);
         let r = Rect::from_min_size(pos2(x, rect.min.y + 2.0), vec2(g.size().x + 12.0, rect.height() - 4.0));
-        let resp = ui.interact(r, egui::Id::new(("comp-nav", id.0)), Sense::click());
+        let resp = ui.interact(r, egui::Id::unique(("comp-nav", id.0)), Sense::click());
         if active {
             p.rect_filled(r, 3.0, t.row_selected);
         } else if resp.hovered() {
@@ -223,7 +223,7 @@ pub fn navigator(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         x = r.max.x + 2.0;
     }
     let fr = Rect::from_min_size(pos2(rect.max.x - 26.0, rect.min.y + 2.0), vec2(22.0, rect.height() - 4.0));
-    if crate::widgets::icon_button(ui, fr, crate::icons::Icon::Flowchart, false, &t, egui::Id::new("comp-nav-flow"))
+    if crate::widgets::icon_button(ui, fr, crate::icons::Icon::Flowchart, false, &t, egui::Id::unique("comp-nav-flow"))
         .on_hover_text(tr("Composition Mini-Flowchart"))
         .clicked()
     {
@@ -248,64 +248,65 @@ pub fn mini_flowchart(app: &mut EffectcraftApp, ctx: &egui::Context) {
     let downs = downstream(&proj, cid);
     let mut open = None;
     let mut close = false;
-    let area = egui::Area::new(egui::Id::new("mini-flowchart")).order(egui::Order::Foreground).constrain(true).fixed_pos(pos2(at[0], at[1])).show(ctx, |ui| {
-        egui::Frame::popup(ui.style()).fill(t.panel_bg).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
-            let col_w = 160.0;
-            let rows = ups.len().max(downs.len()).max(1) as f32;
-            let h = rows * 26.0 + 8.0;
-            let (rect, _) = ui.allocate_exact_size(vec2(col_w * 3.0 + 60.0, h), Sense::hover());
-            let p = ui.painter().clone();
-            let node = |ui: &mut egui::Ui, app: &mut EffectcraftApp, r: Rect, id: ItemId, active: bool| {
-                let resp = ui.interact(r, egui::Id::new(("mfc", id.0)), Sense::click());
-                p.rect_filled(
-                    r,
-                    4.0,
-                    if active {
-                        t.accent
-                    } else if resp.hovered() {
-                        t.hover
-                    } else {
-                        t.field_bg
-                    },
-                );
-                p.text(r.center(), Align2::CENTER_CENTER, name(&proj, id), Tokens::ui(11.5), if active { Color32::WHITE } else { t.text });
-                app.auto.add(&format!("flowchart.mini.{}", id.0), r, &name(&proj, id));
-                resp.clicked()
-            };
-            let mid = Rect::from_center_size(rect.center(), vec2(col_w, 22.0));
-            if node(ui, app, mid, cid, true) {
-                close = true;
-            }
-            let col = |i: usize, n: usize, x: f32| {
-                let y0 = rect.center().y - (n as f32 * 26.0) / 2.0 + 13.0;
-                Rect::from_center_size(pos2(x, y0 + i as f32 * 26.0), vec2(col_w, 22.0))
-            };
-            let arrow = |a: egui::Pos2, b: egui::Pos2| {
-                p.line_segment([a, b], Stroke::new(1.2, t.text_dim));
-                let d = (b - a).normalized();
-                let n = vec2(-d.y, d.x);
-                p.add(egui::Shape::convex_polygon(vec![b, b - d * 7.0 + n * 3.5, b - d * 7.0 - n * 3.5], t.text_dim, Stroke::NONE));
-            };
-            for (i, u) in ups.iter().enumerate() {
-                let r = col(i, ups.len(), rect.min.x + col_w / 2.0);
-                // Upstream comps contain the active one: arrow from the nested comp up into them.
-                arrow(mid.left_center(), r.right_center());
-                if node(ui, app, r, *u, false) {
-                    open = Some(*u);
+    let area =
+        egui::Area::new(egui::Id::unique("mini-flowchart")).order(egui::Order::Foreground).constrain(true).fixed_pos(pos2(at[0], at[1])).show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).fill(t.panel_bg).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
+                let col_w = 160.0;
+                let rows = ups.len().max(downs.len()).max(1) as f32;
+                let h = rows * 26.0 + 8.0;
+                let (rect, _) = ui.allocate_exact_size(vec2(col_w * 3.0 + 60.0, h), Sense::hover());
+                let p = ui.painter().clone();
+                let node = |ui: &mut egui::Ui, app: &mut EffectcraftApp, r: Rect, id: ItemId, active: bool| {
+                    let resp = ui.interact(r, egui::Id::unique(("mfc", id.0)), Sense::click());
+                    p.rect_filled(
+                        r,
+                        4.0,
+                        if active {
+                            t.accent
+                        } else if resp.hovered() {
+                            t.hover
+                        } else {
+                            t.field_bg
+                        },
+                    );
+                    p.text(r.center(), Align2::CENTER_CENTER, name(&proj, id), Tokens::ui(11.5), if active { Color32::WHITE } else { t.text });
+                    app.auto.add(&format!("flowchart.mini.{}", id.0), r, &name(&proj, id));
+                    resp.clicked()
+                };
+                let mid = Rect::from_center_size(rect.center(), vec2(col_w, 22.0));
+                if node(ui, app, mid, cid, true) {
+                    close = true;
                 }
-            }
-            for (i, d) in downs.iter().enumerate() {
-                let r = col(i, downs.len(), rect.max.x - col_w / 2.0);
-                arrow(r.left_center(), mid.right_center());
-                if node(ui, app, r, *d, false) {
-                    open = Some(*d);
+                let col = |i: usize, n: usize, x: f32| {
+                    let y0 = rect.center().y - (n as f32 * 26.0) / 2.0 + 13.0;
+                    Rect::from_center_size(pos2(x, y0 + i as f32 * 26.0), vec2(col_w, 22.0))
+                };
+                let arrow = |a: egui::Pos2, b: egui::Pos2| {
+                    p.line_segment([a, b], Stroke::new(1.2, t.text_dim));
+                    let d = (b - a).normalized();
+                    let n = vec2(-d.y, d.x);
+                    p.add(egui::Shape::convex_polygon(vec![b, b - d * 7.0 + n * 3.5, b - d * 7.0 - n * 3.5], t.text_dim, Stroke::NONE));
+                };
+                for (i, u) in ups.iter().enumerate() {
+                    let r = col(i, ups.len(), rect.min.x + col_w / 2.0);
+                    // Upstream comps contain the active one: arrow from the nested comp up into them.
+                    arrow(mid.left_center(), r.right_center());
+                    if node(ui, app, r, *u, false) {
+                        open = Some(*u);
+                    }
                 }
-            }
-            if ups.is_empty() && downs.is_empty() {
-                p.text(pos2(rect.center().x, rect.max.y - 4.0), Align2::CENTER_BOTTOM, tr("No nested compositions"), Tokens::ui(10.5), t.text_faint);
-            }
+                for (i, d) in downs.iter().enumerate() {
+                    let r = col(i, downs.len(), rect.max.x - col_w / 2.0);
+                    arrow(r.left_center(), mid.right_center());
+                    if node(ui, app, r, *d, false) {
+                        open = Some(*d);
+                    }
+                }
+                if ups.is_empty() && downs.is_empty() {
+                    p.text(pos2(rect.center().x, rect.max.y - 4.0), Align2::CENTER_BOTTOM, tr("No nested compositions"), Tokens::ui(10.5), t.text_faint);
+                }
+            });
         });
-    });
     let outside = crate::widgets::pressed_outside(ctx, &area.response);
     if let Some(id) = open {
         app.session.open_comp(id);

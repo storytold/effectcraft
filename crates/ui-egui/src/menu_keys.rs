@@ -61,16 +61,16 @@ struct KeyOpened {
 }
 
 fn pending_id() -> Id {
-    Id::new("menu-keys-first")
+    Id::unique("menu-keys-first")
 }
 fn opened_id() -> Id {
-    Id::new("menu-keys-opened")
+    Id::unique("menu-keys-opened")
 }
 fn active_id() -> Id {
-    Id::new("menu-keys-active")
+    Id::unique("menu-keys-active")
 }
 fn alt_id() -> Id {
-    Id::new("menu-keys-alt")
+    Id::unique("menu-keys-alt")
 }
 
 impl Nav {
@@ -118,7 +118,7 @@ impl Nav {
         }
         let Some(level) = self.levels.get_mut(depth) else { return };
         if level.menu.is_none() {
-            level.menu = Some(find_menu_root(ui).id);
+            level.menu = Some(find_menu_root(ui).scope_id);
             level.sizing = ui.is_sizing_pass();
         }
         level.rows.push(Row { id: r.id, enabled: r.enabled(), submenu });

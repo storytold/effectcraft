@@ -200,7 +200,14 @@ fn new_text(s: &mut Session, p: &Value) -> Result<Value> {
         let n = doc.char_len();
         let id = insert_layer(proj, st, cid, l)?;
         if edit {
-            st.text_edit = Some(super::text_edit::TextEdit { layer: id, anchor: 0, caret: n, created: true, ..Default::default() });
+            st.text_edit = Some(super::text_edit::TextEdit {
+                layer: id,
+                anchor: 0,
+                caret: n,
+                created: true,
+                session: super::text_edit::next_edit_session(),
+                ..Default::default()
+            });
         }
         Ok(id)
     })?;
@@ -1474,6 +1481,9 @@ fn set_text(s: &mut Session, p: &Value) -> Result<Value> {
         }
         s.bump();
     }
+    // A changed Source Text is handled by `Session::edit`: its boundary clamps the selection and
+    // starts a new IME epoch only when the CTI document actually changed, so an identical text
+    // write stays a no-op and keeps the editor's owner.
     s.edit("Edit Text", merge_p(p), |proj, _| {
         let l = layer_mut(proj, cid, lid)?;
         let lt = l.layer_time(t);

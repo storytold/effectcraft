@@ -31,7 +31,7 @@ fn render_settings_template_applies_from_a_menu_moved_to_fit_the_window() {
     let mut app = Some(EffectcraftApp::new(s));
     let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| app.take().expect("app"));
     // Twirl the item open, as clicking its twirl does.
-    h.ctx.data_mut(|d| d.insert_temp(egui::Id::new("rq-ui"), (vec![id], None::<u64>)));
+    h.ctx.data_mut(|d| d.insert_temp(egui::Id::unique("rq-ui"), (vec![id], None::<u64>)));
     h.state_mut().show_panel(PanelKind::RenderQueue);
     h.run_steps(4);
     let dd = h.state().auto.find(&format!("renderQueue.item.{id}.renderSettings")).expect("Render Settings menu").clone();
@@ -80,7 +80,7 @@ fn clicking_the_output_file_name_opens_the_save_dialog() {
     }));
     let mut app = Some(app);
     let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| app.take().expect("app"));
-    h.ctx.data_mut(|d| d.insert_temp(egui::Id::new("rq-ui"), (vec![id], None::<u64>)));
+    h.ctx.data_mut(|d| d.insert_temp(egui::Id::unique("rq-ui"), (vec![id], None::<u64>)));
     h.state_mut().show_panel(PanelKind::RenderQueue);
     h.run_steps(4);
     let path = h.state().auto.find(&format!("renderQueue.item.{id}.outputPath")).expect("the output file name").clone();
@@ -88,7 +88,7 @@ fn clicking_the_output_file_name_opens_the_save_dialog() {
     click_with(&mut h, at, Modifiers::NONE);
     assert_eq!(*asked.borrow(), [(expected_default, ext.to_string())], "the dialog opened at the current output");
     assert_eq!(h.state().session.project.render_queue[0].output.output, chosen);
-    let editing = |h: &Harness<'_, EffectcraftApp>| h.ctx.data(|d| d.get_temp::<(u64, String)>(egui::Id::new("rq-edit-output")));
+    let editing = |h: &Harness<'_, EffectcraftApp>| h.ctx.data(|d| d.get_temp::<(u64, String)>(egui::Id::unique("rq-edit-output")));
     assert_eq!(editing(&h), None, "no inline editor");
     // Alt-click edits the template text instead.
     click_with(&mut h, at, Modifiers::ALT);

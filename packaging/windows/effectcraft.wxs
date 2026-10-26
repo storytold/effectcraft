@@ -73,6 +73,9 @@
 
   <Fragment>
     <ComponentGroup Id="EffectcraftFiles" Directory="INSTALLFOLDER">
+      <Component Id="EffectcraftNotice">
+        <File Id="EffectcraftNoticeFile" Source="$(var.BinDir)\NOTICE" KeyPath="yes" />
+      </Component>
       <Component Id="EffectcraftApp" Guid="BA719860-95FE-4154-B265-47006B8E9083">
         <File Id="EffectcraftExe" Source="$(var.BinDir)\effectcraft.exe" KeyPath="yes">
           <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="EffectCraft"

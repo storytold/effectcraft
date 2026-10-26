@@ -29,7 +29,7 @@ type Listing = (f64, Arc<Result<Vec<mb::Entry>, String>>);
 
 /// Thumbnail of a file (cached per path; `None` while not decoded or not decodable).
 fn thumbnail(app: &EffectcraftApp, ctx: &egui::Context, path: &str, budget: &mut u32) -> Thumb {
-    let id = egui::Id::new(("mb-thumb", path));
+    let id = egui::Id::unique(("mb-thumb", path));
     if let Some(t) = ctx.data(|d| d.get_temp::<Thumb>(id)) {
         return t;
     }
@@ -76,7 +76,7 @@ pub fn media_browser(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let st = app.session.state.media_browser.clone();
     let dir = st.folder.clone().unwrap_or_else(|| b.home());
     // Listing cached per folder for a second.
-    let lid = egui::Id::new(("mb-list", dir.clone(), st.importable_only));
+    let lid = egui::Id::unique(("mb-list", dir.clone(), st.importable_only));
     let now = ctx.input(|i| i.time);
     let listing: Option<Listing> = ctx.data(|d| d.get_temp(lid));
     let entries = match listing {
@@ -137,7 +137,7 @@ pub fn media_browser(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     );
     for (i, (name, path)) in places.iter().enumerate() {
         let r = Rect::from_min_size(pos2(side.min.x, fy), vec2(side.width(), 20.0));
-        let resp = ui.interact(r, egui::Id::new(("mb-fav", i)), Sense::click());
+        let resp = ui.interact(r, egui::Id::unique(("mb-fav", i)), Sense::click());
         if *path == dir {
             p.rect_filled(r, 0.0, t.row_selected);
         } else if resp.hovered() {
@@ -162,7 +162,7 @@ pub fn media_browser(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let tile = vec2(140.0, 112.0);
     let cols = ((list.width() - 8.0) / tile.x).floor().max(1.0) as usize;
     let mut budget = 2u32;
-    let scroll = widgets::PanelScroll::begin(ui, egui::Id::new("mb-scroll"), list);
+    let scroll = widgets::PanelScroll::begin(ui, egui::Id::unique("mb-scroll"), list);
     let lp = p.with_clip_rect(list);
     let mut actions: Vec<(&str, Value)> = vec![];
     for (i, e) in entries.iter().enumerate() {
@@ -173,7 +173,7 @@ pub fn media_browser(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         if !r.intersects(list) {
             continue;
         }
-        let resp = ui.interact(r.intersect(list), egui::Id::new(("mb-entry", &e.path)), Sense::click_and_drag());
+        let resp = ui.interact(r.intersect(list), egui::Id::unique(("mb-entry", &e.path)), Sense::click_and_drag());
         app.auto.add(&format!("mediaBrowser.entry.{}", e.name), r, &e.name);
         lp.rect_filled(r, 4.0, if resp.hovered() { t.hover } else { t.row });
         let thumb = Rect::from_min_max(r.min + vec2(6.0, 6.0), pos2(r.max.x - 6.0, r.max.y - 26.0));
@@ -264,7 +264,7 @@ fn rows_of(v: &Value) -> Vec<(String, String)> {
 
 /// An editable comment field; returns the edited text when it changes.
 fn comment_field(ui: &mut egui::Ui, r: Rect, id: &str, text: &str) -> Option<String> {
-    let key = egui::Id::new(("meta-comment", id));
+    let key = egui::Id::unique(("meta-comment", id));
     let mut buf: String = ui.data(|d| d.get_temp(key)).unwrap_or_else(|| text.to_string());
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r));
     let resp = child.add(egui::TextEdit::multiline(&mut buf).desired_width(r.width()).desired_rows(2).hint_text(tr("Add a comment")));
@@ -438,8 +438,8 @@ mod tests {
                 kind: Some("video"),
             })
             .collect();
-        let old_id = egui::Id::new("old-list");
-        let new_id = egui::Id::new("new-list");
+        let old_id = egui::Id::unique("old-list");
+        let new_id = egui::Id::unique("new-list");
         ctx.data_mut(|d| {
             d.insert_temp(old_id, (0.0, Ok::<_, String>(entries.clone())));
             d.insert_temp(new_id, (0.0, Arc::new(Ok::<_, String>(entries))));

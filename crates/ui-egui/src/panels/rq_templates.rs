@@ -22,7 +22,7 @@ struct State {
 }
 
 fn state_id() -> egui::Id {
-    egui::Id::new("rq-templates-dialog")
+    egui::Id::unique("rq-templates-dialog")
 }
 
 /// Open the dialog for `kind` (`renderSettings` | `outputModule`).

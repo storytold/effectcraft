@@ -18,7 +18,10 @@ fn app() -> EffectcraftApp {
 
 /// A headless window at the size and frame step the viewer tests here are written for.
 fn harness(a: EffectcraftApp) -> Harness<'static, EffectcraftApp> {
-    Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).build_eframe(move |_| a)
+    Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).build_eframe(move |cc| {
+        EffectcraftApp::install_ime_reset_hooks(&cc.egui_ctx);
+        a
+    })
 }
 
 fn rect(h: &Harness<'_, EffectcraftApp>, id: &str) -> egui::Rect {
@@ -723,4 +726,1011 @@ fn deselect_all_menu_item_follows_the_edit_while_the_project_panel_is_focused() 
     assert_eq!(h.state().ui.focused, PanelKind::Project, "the Project panel is still the focused panel");
     // With no edit, the item deselects Project items again: nothing selected there, nothing to do.
     assert!(!enabled(&h), "Deselect All follows the empty Project selection once the edit is over");
+}
+
+/// The on-canvas editor's outgoing IME producer: the descriptor carries the edited layer's
+/// committed text, the real owner, a stable generation and an explicit change cause. A normal
+/// typed character is application work; an accepted input-method commit is not.
+#[test]
+fn ime_producer_follows_the_committed_text_and_cause() {
+    // A Latin accent is multi-byte in UTF-8 (the byte offsets below) and Inter draws it, so the
+    // harness keeps its strict missing-glyph check; no CJK fallback face is needed headlessly.
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).build_eframe(|_| app());
+    h.state_mut().show_panel(PanelKind::Composition);
+    h.run_steps(3);
+    h.state_mut().ui.tool = effectcraft_ui_egui::state::Tool::Type;
+    h.run_steps(1);
+    let comp = rect(&h, "viewer.comp");
+    click(&mut h, comp.center(), Modifiers::NONE);
+    type_text(&mut h, "Hi");
+    let (lid, text, a, c) = edited(&h);
+    assert_eq!((text.as_str(), a, c), ("Hi", 2, 2));
+
+    let ime = h.output().platform_output.ime.clone().expect("the on-canvas editor owns IME");
+    let comp_id = h.state().session.active_comp_id().expect("an active comp").0;
+    assert_eq!(ime.owner, egui::Id::unique(("effectcraft-ime-text", comp_id, lid)), "the edited comp and layer");
+    assert!(ime.context_generation > 0);
+    let p = ime.surrounding_text.available().expect("committed text is available");
+    assert_eq!((p.text.as_str(), p.cursor, p.anchor), ("Hi", 2, 2));
+    assert_eq!(ime.change_cause, egui::ImeChangeCause::Other, "ordinary typing is application work");
+    let generation = ime.context_generation;
+
+    h.input_mut().events.push(Event::Ime(egui::ImeEvent::Commit("é".into())));
+    h.run_steps(1);
+    assert_eq!(edited(&h).1, "Hié");
+    let ime = h.output().platform_output.ime.clone().expect("still editing");
+    let p = ime.surrounding_text.available().expect("committed text is available");
+    assert_eq!((p.text.as_str(), p.cursor, p.anchor), ("Hié", 4, 4), "UTF-8 bytes after the commit");
+    assert_eq!(ime.change_cause, egui::ImeChangeCause::InputMethod, "an accepted IME commit earns it");
+    assert_eq!(ime.context_generation, generation, "an ordinary edit keeps one context");
+}
+
+/// A click on the Timeline is processed after the viewer overlay drew. The pass must not leave
+/// the ended on-canvas editor's old descriptor in the platform output.
+#[test]
+fn click_away_clears_the_canvas_ime_descriptor_in_the_final_pass() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Type", "width": 640, "height": 360, "duration": 2})).unwrap();
+    let solid = s.execute("layer.newSolid", json!({"name": "Plate", "color": "#406080"})).unwrap()["layer"].as_u64().unwrap();
+    let title = s.execute("layer.newText", json!({"text": "Title", "size": 80, "position": [100, 120], "justify": "left"})).unwrap()["layer"].as_u64().unwrap();
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).build_eframe(move |_| EffectcraftApp::new(s));
+    h.state_mut().show_panel(PanelKind::Composition);
+    h.run_steps(3);
+    h.state_mut().session.execute("text.edit", json!({"layer": title, "caret": 5})).unwrap();
+    h.run_steps(2);
+    assert!(h.output().platform_output.ime.is_some(), "the editor owns IME before the click");
+    let row = rect(&h, &format!("timeline.layer.{solid}.row")).center();
+    click(&mut h, row, Modifiers::NONE);
+    assert!(h.state().session.state.text_edit.is_none(), "the click ends the edit");
+    assert!(h.output().platform_output.ime.is_none(), "the final pass clears the ended editor's descriptor");
+}
+
+/// A new target on the same focused widget must request a composition interrupt, and a delayed
+/// commit carrying the previous composition's preview must not reach the new layer.
+#[test]
+fn switching_text_targets_interrupts_and_rejects_a_delayed_commit() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Type", "width": 640, "height": 360, "duration": 2})).unwrap();
+    let first = s.execute("layer.newText", json!({"text": "A", "size": 80, "position": [80, 120], "justify": "left"})).unwrap()["layer"].as_u64().unwrap();
+    let second = s.execute("layer.newText", json!({"text": "B", "size": 80, "position": [80, 240], "justify": "left"})).unwrap()["layer"].as_u64().unwrap();
+    // The delayed commit carries a multi-byte accent Inter draws: no broad missing-glyph
+    // allowance, and the stale-composition path is still exercised with real IME events.
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).build_eframe(move |_| EffectcraftApp::new(s));
+    h.state_mut().show_panel(PanelKind::Composition);
+    h.run_steps(3);
+    h.state_mut().session.execute("text.edit", json!({"layer": first, "caret": 1})).unwrap();
+    h.run_steps(2);
+    h.input_mut().events.push(Event::Ime(egui::ImeEvent::Preedit { text: "é".into(), active_range_chars: None }));
+    h.run_steps(1);
+
+    h.state_mut().session.execute("text.edit", json!({"layer": second, "caret": 1})).unwrap();
+    h.run_steps(1);
+    let comp_id = h.state().session.active_comp_id().expect("comp").0;
+    let ime = h.output().platform_output.ime.clone().expect("the second editor owns IME");
+    assert_eq!(ime.owner, egui::Id::unique(("effectcraft-ime-text", comp_id, second)));
+    assert!(ime.should_interrupt_composition, "the session switch cancels the platform composition");
+
+    // The delayed batch may update the old composition before it commits. That preview must not
+    // re-arm the stale guard for the new layer.
+    h.input_mut().events.push(Event::Ime(egui::ImeEvent::Preedit { text: "é".into(), active_range_chars: None }));
+    h.input_mut().events.push(Event::Ime(egui::ImeEvent::Commit("é".into())));
+    h.run_steps(2);
+    assert_eq!(layer_doc(&h.state().session, LayerId(first)).unwrap().text, "A");
+    assert_eq!(layer_doc(&h.state().session, LayerId(second)).unwrap().text, "B", "the stale commit is ignored");
+}
+
+/// A stale pre-edit must not re-arm the guard for a following delete-surrounding/commit batch
+/// either: deleting around the new layer's caret would otherwise mutate it without a commit.
+#[test]
+fn a_delayed_preedit_after_a_target_switch_cannot_rearm_the_stale_guard() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Type", "width": 640, "height": 360, "duration": 2})).unwrap();
+    let first = s.execute("layer.newText", json!({"text": "A", "size": 80, "position": [80, 120], "justify": "left"})).unwrap()["layer"].as_u64().unwrap();
+    let second = s.execute("layer.newText", json!({"text": "B", "size": 80, "position": [80, 240], "justify": "left"})).unwrap()["layer"].as_u64().unwrap();
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).build_eframe(move |_| EffectcraftApp::new(s));
+    h.state_mut().show_panel(PanelKind::Composition);
+    h.run_steps(3);
+    h.state_mut().session.execute("text.edit", json!({"layer": first, "caret": 1})).unwrap();
+    h.run_steps(2);
+    h.input_mut().events.push(Event::Ime(egui::ImeEvent::Preedit { text: "é".into(), active_range_chars: None }));
+    h.run_steps(1);
+
+    h.state_mut().session.execute("text.edit", json!({"layer": second, "caret": 1})).unwrap();
+    h.run_steps(1);
+    h.input_mut().events.push(Event::Ime(egui::ImeEvent::Preedit { text: "é".into(), active_range_chars: None }));
+    h.input_mut().events.push(Event::Ime(egui::ImeEvent::DeleteSurroundingBytes { before_bytes: 1, after_bytes: 0 }));
+    h.input_mut().events.push(Event::Ime(egui::ImeEvent::Commit("X".into())));
+    h.run_steps(2);
+    assert_eq!(layer_doc(&h.state().session, LayerId(first)).unwrap().text, "A");
+    assert_eq!(layer_doc(&h.state().session, LayerId(second)).unwrap().text, "B", "the stale pre-edit cannot re-arm a delete/commit batch");
+}
+
+/// A late pre-edit from the old composition can arrive long after the target switch; timing is
+/// not provenance. Protection survives idle frames and old terminals until the matching fence.
+#[test]
+fn late_preedit_and_commit_split_across_idle_frames_cannot_retarget() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Type", "width": 640, "height": 360, "duration": 2})).unwrap();
+    let first = s.execute("layer.newText", json!({"text": "A", "size": 80, "position": [80, 120], "justify": "left"})).unwrap()["layer"].as_u64().unwrap();
+    let second = s.execute("layer.newText", json!({"text": "B", "size": 80, "position": [80, 240], "justify": "left"})).unwrap()["layer"].as_u64().unwrap();
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).build_eframe(move |_| EffectcraftApp::new(s));
+    h.state_mut().show_panel(PanelKind::Composition);
+    h.run_steps(3);
+    h.state_mut().session.execute("text.edit", json!({"layer": first, "caret": 1})).unwrap();
+    h.run_steps(2);
+    h.input_mut().events.push(Event::Ime(egui::ImeEvent::Preedit { text: "é".into(), active_range_chars: None }));
+    h.run_steps(1);
+
+    h.state_mut().session.execute("text.edit", json!({"layer": second, "caret": 1})).unwrap();
+    // Well past the old two-frame suppression window: ownership, not elapsed frames, keeps the
+    // tombstone.
+    h.run_steps(1);
+    let request_id = ime_reset_request(&h);
+    h.run_steps(4);
+    h.input_mut().events.push(Event::Ime(egui::ImeEvent::Preedit { text: "éé".into(), active_range_chars: None }));
+    h.run_steps(3);
+    h.input_mut().events.push(Event::Ime(egui::ImeEvent::Commit("é".into())));
+    h.run_steps(2);
+    assert_eq!(layer_doc(&h.state().session, LayerId(first)).unwrap().text, "A");
+    assert_eq!(layer_doc(&h.state().session, LayerId(second)).unwrap().text, "B", "the late pre-edit and commit stayed on the old owner");
+
+    // An actual matching fence admits the fresh composition, without an invented old terminal.
+    h.input_mut().events.push(Event::ImeResetCompleted { request_id });
+    h.input_mut().events.push(Event::Ime(egui::ImeEvent::Preedit { text: "é".into(), active_range_chars: None }));
+    h.input_mut().events.push(Event::Ime(egui::ImeEvent::Commit("é".into())));
+    h.run_steps(2);
+    assert_eq!(layer_doc(&h.state().session, LayerId(second)).unwrap().text, "Bé", "a new composition after its matching fence is accepted");
+}
+
+/// A delete-surrounding event belongs to the same stale composition as its late pre-edit even
+/// when idle frames separate them. It must not mutate the replacement layer; only F admits fresh
+/// input, including when no old terminal commit arrives.
+#[test]
+fn late_preedit_and_delete_split_across_idle_frames_cannot_retarget() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Type", "width": 640, "height": 360, "duration": 2})).unwrap();
+    let first = s.execute("layer.newText", json!({"text": "A", "size": 80, "position": [80, 120], "justify": "left"})).unwrap()["layer"].as_u64().unwrap();
+    let second = s.execute("layer.newText", json!({"text": "B", "size": 80, "position": [80, 240], "justify": "left"})).unwrap()["layer"].as_u64().unwrap();
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).build_eframe(move |_| EffectcraftApp::new(s));
+    h.state_mut().show_panel(PanelKind::Composition);
+    h.run_steps(3);
+    h.state_mut().session.execute("text.edit", json!({"layer": first, "caret": 1})).unwrap();
+    h.run_steps(2);
+    h.input_mut().events.push(Event::Ime(egui::ImeEvent::Preedit { text: "é".into(), active_range_chars: None }));
+    h.run_steps(1);
+
+    h.state_mut().session.execute("text.edit", json!({"layer": second, "caret": 1})).unwrap();
+    h.run_steps(1);
+    let request_id = ime_reset_request(&h);
+    h.run_steps(3);
+    h.input_mut().events.push(Event::Ime(egui::ImeEvent::Preedit { text: "éé".into(), active_range_chars: None }));
+    h.run_steps(3);
+    h.input_mut().events.push(Event::Ime(egui::ImeEvent::DeleteSurroundingBytes { before_bytes: 1, after_bytes: 0 }));
+    h.run_steps(2);
+    assert_eq!(layer_doc(&h.state().session, LayerId(first)).unwrap().text, "A");
+    assert_eq!(layer_doc(&h.state().session, LayerId(second)).unwrap().text, "B", "the late delete could not mutate the new owner");
+
+    h.input_mut().events.push(Event::ImeResetCompleted { request_id });
+    h.input_mut().events.push(Event::Ime(egui::ImeEvent::Preedit { text: "é".into(), active_range_chars: None }));
+    h.input_mut().events.push(Event::Ime(egui::ImeEvent::Commit("é".into())));
+    h.run_steps(2);
+    assert_eq!(layer_doc(&h.state().session, LayerId(second)).unwrap().text, "Bé", "the matching fence admits fresh input");
+}
+
+/// An observed empty pre-edit only ends the visible composition; its terminal commit is a
+/// separate event. Switching targets in between must keep the old owner so that delayed commit is
+/// rejected instead of landing at the replacement layer's caret.
+#[test]
+fn empty_preedit_keeps_the_old_target_until_the_pending_commit_arrives() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Type", "width": 640, "height": 360, "duration": 2})).unwrap();
+    let first = s.execute("layer.newText", json!({"text": "A", "size": 80, "position": [80, 120], "justify": "left"})).unwrap()["layer"].as_u64().unwrap();
+    let second = s.execute("layer.newText", json!({"text": "B", "size": 80, "position": [80, 240], "justify": "left"})).unwrap()["layer"].as_u64().unwrap();
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).build_eframe(move |_| EffectcraftApp::new(s));
+    h.state_mut().show_panel(PanelKind::Composition);
+    h.run_steps(3);
+    h.state_mut().session.execute("text.edit", json!({"layer": first, "caret": 1})).unwrap();
+    h.run_steps(2);
+    h.input_mut().events.push(Event::Ime(egui::ImeEvent::Preedit { text: "é".into(), active_range_chars: None }));
+    h.run_steps(1);
+
+    // The input method clears the visible composition before its commit arrives.
+    h.input_mut().events.push(Event::Ime(egui::ImeEvent::Preedit { text: String::new(), active_range_chars: None }));
+    h.run_steps(1);
+    h.state_mut().session.execute("text.edit", json!({"layer": second, "caret": 1})).unwrap();
+    h.run_steps(1);
+
+    h.input_mut().events.push(Event::Ime(egui::ImeEvent::Commit("X".into())));
+    h.run_steps(2);
+    assert_eq!(layer_doc(&h.state().session, LayerId(first)).unwrap().text, "A");
+    assert_eq!(layer_doc(&h.state().session, LayerId(second)).unwrap().text, "B", "the observed empty pre-edit preserved the old owner for its pending commit",);
+}
+
+/// A coalesced raw batch after a target switch may carry the old composition's empty pre-edit and
+/// terminal commit followed by a fence and the first pre-edit of a new composition. Only that
+/// explicit boundary admits the new pre-edit for the current target.
+#[test]
+fn a_matching_fence_after_old_terminals_admits_the_next_preedit_in_the_same_batch() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Type", "width": 640, "height": 360, "duration": 2})).unwrap();
+    let first = s.execute("layer.newText", json!({"text": "A", "size": 80, "position": [80, 120], "justify": "left"})).unwrap()["layer"].as_u64().unwrap();
+    let second = s.execute("layer.newText", json!({"text": "B", "size": 80, "position": [80, 240], "justify": "left"})).unwrap()["layer"].as_u64().unwrap();
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).build_eframe(move |_| EffectcraftApp::new(s));
+    h.state_mut().show_panel(PanelKind::Composition);
+    h.run_steps(3);
+    h.state_mut().session.execute("text.edit", json!({"layer": first, "caret": 1})).unwrap();
+    h.run_steps(2);
+    h.input_mut().events.push(Event::Ime(egui::ImeEvent::Preedit { text: "é".into(), active_range_chars: None }));
+    h.run_steps(1);
+
+    h.state_mut().session.execute("text.edit", json!({"layer": second, "caret": 1})).unwrap();
+    h.run_steps(1);
+    let request_id = ime_reset_request(&h);
+    h.input_mut().events.push(Event::Ime(egui::ImeEvent::Preedit { text: String::new(), active_range_chars: None }));
+    h.input_mut().events.push(Event::Ime(egui::ImeEvent::Commit("X".into())));
+    h.input_mut().events.push(Event::ImeResetCompleted { request_id });
+    h.input_mut().events.push(Event::Ime(egui::ImeEvent::Preedit { text: "é".into(), active_range_chars: None }));
+    h.run_steps(1);
+    assert_eq!(layer_doc(&h.state().session, LayerId(second)).unwrap().text, "B", "the stale empty pre-edit/commit pair never mutates the new layer",);
+
+    h.input_mut().events.push(Event::Ime(egui::ImeEvent::Commit("é".into())));
+    h.run_steps(2);
+    assert_eq!(layer_doc(&h.state().session, LayerId(first)).unwrap().text, "A");
+    assert_eq!(layer_doc(&h.state().session, LayerId(second)).unwrap().text, "Bé", "the new pre-edit after the matching fence owns the current target",);
+}
+
+/// The byte-count delete-surrounding path through the real app/hook keeps a whole UTF-8
+/// character and shares the following commit's undo step.
+#[test]
+fn delete_surrounding_bytes_through_the_app_replaces_the_emoji() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Type", "width": 640, "height": 360, "duration": 2})).unwrap();
+    let lid = s.execute("layer.newText", json!({"text": "café😀", "size": 80, "position": [80, 120], "justify": "left"})).unwrap()["layer"].as_u64().unwrap();
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).build_eframe(move |_| EffectcraftApp::new(s));
+    h.state_mut().show_panel(PanelKind::Composition);
+    h.run_steps(3);
+    h.state_mut().session.execute("text.edit", json!({"layer": lid, "caret": 5})).unwrap();
+    h.run_steps(2);
+    h.input_mut().events.push(Event::Ime(egui::ImeEvent::DeleteSurroundingBytes { before_bytes: 4, after_bytes: 0 }));
+    h.input_mut().events.push(Event::Ime(egui::ImeEvent::Commit("X".into())));
+    h.run_steps(2);
+    assert_eq!(layer_doc(&h.state().session, LayerId(lid)).unwrap().text, "caféX");
+    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(layer_doc(&h.state().session, LayerId(lid)).unwrap().text, "café😀", "the delete and commit are one undo step");
+}
+
+/// Use the real viewer's outgoing caret geometry to aim the interruption at a known position.
+fn ime_interruption_editor() -> (Harness<'static, EffectcraftApp>, Pos2) {
+    crate::add_canonical_test_fonts();
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Type", "width": 640, "height": 360, "duration": 2})).unwrap();
+    let lid = s.execute("layer.newText", json!({"text": "abcd", "size": 80, "position": [80, 120], "justify": "left"})).unwrap()["layer"].as_u64().unwrap();
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).build_eframe(move |cc| {
+        EffectcraftApp::install_ime_reset_hooks(&cc.egui_ctx);
+        EffectcraftApp::new(s)
+    });
+    h.state_mut().show_panel(PanelKind::Composition);
+    h.state_mut().ui.tool = effectcraft_ui_egui::state::Tool::Type;
+    h.run_steps(3);
+    h.state_mut().session.execute("text.edit", json!({"layer": lid, "caret": 1})).unwrap();
+    h.run_steps(2);
+    let point = h.output().platform_output.ime.as_ref().expect("the viewer drew caret1").cursor_rect.center();
+    assert!(rect(&h, "viewer.textEdit").contains(point), "the pointer must hit the actual edited text");
+    h.state_mut().session.execute("text.setSelection", json!({"caret": 4})).unwrap();
+    h.run_steps(2);
+    assert_eq!((edited(&h).2, edited(&h).3), (4, 4));
+    (h, point)
+}
+
+/// Real viewer geometry and raw eframe input, without the split-frame `click` helper.
+fn native_text_pointer_editor() -> (Harness<'static, EffectcraftApp>, u64, Pos2, Pos2) {
+    let (h, caret1) = ime_interruption_editor();
+    let caret4 = h.output().platform_output.ime.as_ref().expect("the viewer drew caret4").cursor_rect.center();
+    let area = rect(&h, "viewer.area");
+    assert!(caret1.is_finite() && caret4.is_finite());
+    assert!(area.contains(caret1) && area.contains(caret4));
+    assert!(rect(&h, "viewer.textEdit").contains(caret4));
+    assert!(caret1.distance(caret4) > 12.0, "separated clicks must not become a double-click");
+    let layer = edited(&h).0;
+    (h, layer, caret1, caret4)
+}
+
+#[test]
+fn native_text_pointer_same_batch_click_moves_caret_and_starts_editing() {
+    for active in [true, false] {
+        let (mut h, layer, caret1, caret4) = native_text_pointer_editor();
+        if !active {
+            h.state_mut().session.execute("text.endEdit", json!({})).unwrap();
+            h.run_steps(2);
+            assert!(h.state().session.state.text_edit.is_none());
+        }
+        let undo = h.state().session.history.undo.len();
+        h.input_mut().events.extend([
+            Event::PointerMoved(caret1),
+            Event::PointerButton { pos: caret1, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE },
+            Event::PointerButton { pos: caret1, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE },
+        ]);
+        h.run_steps(1);
+        assert_eq!(edited(&h), (layer, "abcd".to_owned(), 1, 1), "active={active}");
+        assert!(!h.ctx.input(|i| i.pointer.primary_down()));
+        assert_eq!(h.state().session.history.undo.len(), undo, "placing a caret is not a document edit");
+        h.input_mut().events.push(Event::PointerMoved(caret4));
+        h.run_steps(1);
+        assert_eq!((edited(&h).2, edited(&h).3), (1, 1), "release must end selection dragging");
+        type_text(&mut h, "X");
+        assert_eq!(edited(&h), (layer, "aXbcd".to_owned(), 2, 2), "active={active}");
+    }
+}
+
+#[test]
+fn native_text_pointer_split_press_drag_release_keeps_ownership() {
+    for dragging in [false, true] {
+        let (mut h, layer, caret1, caret4) = native_text_pointer_editor();
+        h.input_mut().events.extend([
+            Event::PointerMoved(caret1),
+            Event::PointerButton { pos: caret1, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE },
+        ]);
+        h.run_steps(1);
+        assert_eq!(edited(&h), (layer, "abcd".to_owned(), 1, 1));
+        assert!(h.ctx.input(|i| i.pointer.primary_down()));
+        let end = if dragging { caret4 } else { caret1 };
+        if dragging {
+            h.input_mut().events.push(Event::PointerMoved(end));
+            h.run_steps(1);
+            assert_eq!((edited(&h).2, edited(&h).3), (1, 4));
+        }
+        h.input_mut().events.push(Event::PointerButton { pos: end, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+        h.run_steps(1);
+        let expected = if dragging { (1, 4) } else { (1, 1) };
+        assert!(!h.ctx.input(|i| i.pointer.primary_down()));
+        assert_eq!((edited(&h).2, edited(&h).3), expected);
+        h.input_mut().events.push(Event::PointerMoved(if dragging { caret1 } else { caret4 }));
+        h.run_steps(1);
+        assert_eq!((edited(&h).2, edited(&h).3), expected, "a released drag must not follow later movement");
+        assert_eq!(layer_doc(&h.state().session, LayerId(layer)).unwrap().text, "abcd");
+    }
+}
+
+#[test]
+fn native_text_pointer_two_completed_primary_clicks_use_the_latest_primary_press() {
+    let (mut h, layer, caret1, caret4) = native_text_pointer_editor();
+    h.input_mut().events.extend([
+        Event::PointerMoved(caret4),
+        Event::PointerButton { pos: caret4, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE },
+        Event::PointerButton { pos: caret4, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE },
+        Event::PointerMoved(caret1),
+        Event::PointerButton { pos: caret1, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE },
+        Event::PointerButton { pos: caret1, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE },
+        // A later non-primary click must not become the recovered primary origin.
+        Event::PointerMoved(caret4),
+        Event::PointerButton { pos: caret4, button: PointerButton::Middle, pressed: true, modifiers: Modifiers::NONE },
+        Event::PointerButton { pos: caret4, button: PointerButton::Middle, pressed: false, modifiers: Modifiers::NONE },
+    ]);
+    h.run_steps(1);
+    assert!(h.ctx.input(|i| i.pointer.primary_pressed() && i.pointer.primary_released() && i.pointer.press_origin().is_none()));
+    assert!(!h.ctx.input(|i| i.pointer.button_double_clicked(PointerButton::Primary) || i.pointer.button_triple_clicked(PointerButton::Primary)));
+    assert_eq!(edited(&h), (layer, "abcd".to_owned(), 1, 1), "the first click must not replace the latest click");
+}
+
+#[test]
+fn native_text_pointer_nonfinite_latest_press_does_not_replay_an_earlier_click() {
+    for (earlier_finite_click, same_frame_release) in [(false, false), (false, true), (true, false), (true, true)] {
+        let (mut h, layer, caret1, caret4) = native_text_pointer_editor();
+        let undo = h.state().session.history.undo.len();
+        if earlier_finite_click {
+            h.input_mut().events.extend([
+                Event::PointerMoved(caret1),
+                Event::PointerButton { pos: caret1, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE },
+                Event::PointerButton { pos: caret1, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE },
+            ]);
+        }
+        let bad = egui::pos2(f32::INFINITY, caret4.y);
+        h.input_mut().events.extend([
+            Event::PointerButton { pos: bad, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE },
+            Event::PointerMoved(caret1),
+        ]);
+        if same_frame_release {
+            h.input_mut().events.push(Event::PointerButton { pos: caret1, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+        }
+        h.run_steps(1);
+        assert_eq!(edited(&h), (layer, "abcd".to_owned(), 4, 4), "earlier_finite_click={earlier_finite_click}");
+        assert_eq!(h.state().session.history.undo.len(), undo);
+        if !same_frame_release {
+            assert!(h.ctx.input(|i| i.pointer.primary_down()));
+            h.input_mut().events.push(Event::PointerButton { pos: caret1, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+            h.run_steps(1);
+            assert_eq!(edited(&h), (layer, "abcd".to_owned(), 4, 4), "later release cannot retarget an invalid press");
+            assert_eq!(h.state().session.history.undo.len(), undo);
+        }
+        assert!(!h.ctx.input(|i| i.pointer.primary_down()));
+    }
+}
+
+#[test]
+fn native_text_pointer_outside_area_origin_cannot_retarget_on_inside_release() {
+    for active in [true, false] {
+        let (mut h, layer, caret1, _) = native_text_pointer_editor();
+        if !active {
+            h.state_mut().session.execute("text.endEdit", json!({})).unwrap();
+            h.run_steps(2);
+        }
+        let area = rect(&h, "viewer.area");
+        let outside = area.min - egui::vec2(8.0, 8.0);
+        assert!(outside.is_finite() && !area.contains(outside));
+        assert!(outside.x >= 0.0 && outside.y >= 0.0, "use an actual window location outside the viewer");
+        let layers = h.state().session.active_comp().unwrap().layers.len();
+        let undo = h.state().session.history.undo.len();
+        h.input_mut().events.extend([
+            Event::PointerMoved(outside),
+            Event::PointerButton { pos: outside, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE },
+            Event::PointerMoved(caret1),
+            Event::PointerButton { pos: caret1, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE },
+        ]);
+        h.run_steps(1);
+        assert_eq!(layer_doc(&h.state().session, LayerId(layer)).unwrap().text, "abcd");
+        assert_eq!(h.state().session.active_comp().unwrap().layers.len(), layers, "outside origins must not create text in the viewer");
+        assert_eq!(h.state().session.history.undo.len(), undo);
+        if active {
+            // A real outside-panel action may close the edit; it must never retarget it.
+            if h.state().session.state.text_edit.is_some() {
+                assert_eq!(edited(&h), (layer, "abcd".to_owned(), 4, 4));
+            }
+        } else {
+            assert!(h.state().session.state.text_edit.is_none(), "release inside is not an inside-origin click");
+        }
+    }
+}
+
+#[test]
+fn native_text_pointer_completed_outside_panel_click_closes_the_editor() {
+    for (panel, target) in [(PanelKind::Timeline, "timeline.empty"), (PanelKind::Project, "project.empty")] {
+        let (mut h, layer, _, _) = native_text_pointer_editor();
+        h.state_mut().show_panel(panel);
+        h.run_steps(3);
+        assert!(h.state().session.state.text_edit.is_some(), "opening a panel is not a pointer click");
+        let outside = rect(&h, target).center();
+        assert!(!rect(&h, "viewer.area").contains(outside));
+        h.input_mut().events.extend([
+            Event::PointerMoved(outside),
+            Event::PointerButton { pos: outside, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE },
+            Event::PointerButton { pos: outside, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE },
+        ]);
+        h.run_steps(1);
+        assert!(h.state().session.state.text_edit.is_none(), "a complete {panel:?} click must close the edit");
+        type_text(&mut h, "X");
+        assert_eq!(layer_doc(&h.state().session, LayerId(layer)).unwrap().text, "abcd", "typing after click-away must not reach the old editor");
+    }
+}
+
+#[test]
+fn native_text_pointer_secondary_click_does_not_move_the_caret() {
+    let (mut h, layer, caret1, _) = native_text_pointer_editor();
+    h.input_mut().events.extend([
+        Event::PointerMoved(caret1),
+        Event::PointerButton { pos: caret1, button: PointerButton::Secondary, pressed: true, modifiers: Modifiers::NONE },
+        Event::PointerButton { pos: caret1, button: PointerButton::Secondary, pressed: false, modifiers: Modifiers::NONE },
+    ]);
+    h.run_steps(1);
+    assert!(!h.ctx.input(|i| i.pointer.primary_pressed()));
+    assert_eq!(edited(&h), (layer, "abcd".to_owned(), 4, 4));
+}
+
+#[test]
+fn native_text_pointer_modal_blocks_background_same_batch_click() {
+    let (mut h, layer, caret1, _) = native_text_pointer_editor();
+    h.state_mut().dialog = Some(effectcraft_ui_egui::Dialog::About);
+    h.run_steps(3);
+    h.input_mut().events.extend([
+        Event::PointerMoved(caret1),
+        Event::PointerButton { pos: caret1, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE },
+        Event::PointerButton { pos: caret1, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE },
+    ]);
+    h.run_steps(1);
+    assert_eq!(edited(&h), (layer, "abcd".to_owned(), 4, 4), "a disabled viewer must not recover a background click");
+}
+
+fn ime_interruption_delete(bytes: bool) -> Event {
+    Event::Ime(if bytes {
+        egui::ImeEvent::DeleteSurroundingBytes { before_bytes: 1, after_bytes: 0 }
+    } else {
+        egui::ImeEvent::DeleteSurrounding { before_chars: 1, after_chars: 0 }
+    })
+}
+
+fn begin_interrupted_composition(h: &mut Harness<'_, EffectcraftApp>, terminal_pending: bool) {
+    EffectcraftApp::install_ime_reset_hooks(&h.ctx);
+    h.input_mut().events.push(Event::Ime(egui::ImeEvent::Preedit { text: "é".into(), active_range_chars: None }));
+    h.run_steps(1);
+    if terminal_pending {
+        h.input_mut().events.push(Event::Ime(egui::ImeEvent::Preedit { text: String::new(), active_range_chars: None }));
+        h.run_steps(1);
+    }
+    assert_eq!(edited(h).1, "abcd", "neither visible nor cleared preedit changes committed text");
+}
+
+fn request_at_caret(h: &mut Harness<'_, EffectcraftApp>, caret: usize) -> egui::ImeResetId {
+    h.state_mut().session.execute("text.setSelection", json!({"caret": caret})).unwrap();
+    h.run_steps(1);
+    ime_reset_request(h)
+}
+
+fn ime_reset_request(h: &Harness<'_, EffectcraftApp>) -> egui::ImeResetId {
+    h.output()
+        .platform_output
+        .ime
+        .as_ref()
+        .expect("the real viewer publishes its descriptor")
+        .reset_request
+        .expect("capture the final request before an unchanged idle pass consumes the one-shot output")
+}
+
+#[test]
+fn pointer_caret_interruption_rejects_same_batch_ime_delete_and_commit() {
+    for bytes in [false, true] {
+        for terminal_pending in [false, true] {
+            let (mut h, point) = ime_interruption_editor();
+            begin_interrupted_composition(&mut h, terminal_pending);
+            let project = h.state().session.project.clone();
+            let undo = h.state().session.history.undo.len();
+            h.input_mut().events.extend([
+                Event::PointerMoved(point),
+                Event::PointerButton { pos: point, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE },
+                ime_interruption_delete(bytes),
+                Event::Ime(egui::ImeEvent::Commit("X".into())),
+            ]);
+            h.run_steps(1);
+            assert_eq!((edited(&h).1.as_str(), edited(&h).2, edited(&h).3), ("abcd", 1, 1), "the actual pointer caret survives stale IME mutations");
+            assert!(std::sync::Arc::ptr_eq(&project, &h.state().session.project), "rejected IME never edits the project");
+            assert_eq!(h.state().session.history.undo.len(), undo, "rejected input creates no undo entry");
+            let request_id = ime_reset_request(&h);
+            h.input_mut().events.push(Event::PointerButton { pos: point, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+            h.run_steps(1);
+            // The explicit native fence, not the rejected terminal, admits fresh composition.
+            h.input_mut().events.extend([
+                Event::ImeResetCompleted { request_id },
+                Event::Ime(egui::ImeEvent::Preedit { text: "é".into(), active_range_chars: None }),
+                Event::Ime(egui::ImeEvent::Commit("é".into())),
+            ]);
+            h.run_steps(1);
+            assert_eq!(edited(&h).1, "aébcd");
+            assert_eq!((edited(&h).2, edited(&h).3), (2, 2));
+            h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+            assert_eq!(edited(&h).1, "abcd", "only the fresh commit needs undo");
+        }
+    }
+}
+
+#[test]
+fn keyboard_caret_interruption_rejects_later_ime_events_and_keeps_fresh_preedit() {
+    for (key, modifiers, expected, fresh_text) in
+        [(Key::ArrowLeft, Modifiers::NONE, (3, 3), "abcéd"), (Key::Home, Modifiers::SHIFT, (4, 0), "é"), (Key::A, Modifiers::COMMAND, (0, 4), "é")]
+    {
+        for bytes in [false, true] {
+            let (mut h, _) = ime_interruption_editor();
+            begin_interrupted_composition(&mut h, false);
+            let project = h.state().session.project.clone();
+            let undo = h.state().session.history.undo.len();
+            h.input_mut().events.extend([
+                Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers },
+                ime_interruption_delete(bytes),
+                Event::Ime(egui::ImeEvent::Commit("X".into())),
+                Event::Ime(egui::ImeEvent::Preedit { text: "é".into(), active_range_chars: None }),
+            ]);
+            h.run_steps(1);
+            assert_eq!(edited(&h).1, "abcd", "the old deletion and commit are refused");
+            assert_eq!((edited(&h).2, edited(&h).3), expected, "the real key's selection survives");
+            assert!(std::sync::Arc::ptr_eq(&project, &h.state().session.project));
+            assert_eq!(h.state().session.history.undo.len(), undo);
+            let request_id = ime_reset_request(&h);
+            h.input_mut().events.extend([
+                Event::Key { key, physical_key: None, pressed: false, repeat: false, modifiers },
+                Event::ImeResetCompleted { request_id },
+                Event::Ime(egui::ImeEvent::Preedit { text: "é".into(), active_range_chars: None }),
+                Event::Ime(egui::ImeEvent::Commit("é".into())),
+            ]);
+            h.run_steps(1);
+            assert_eq!(edited(&h).1, fresh_text, "only the fresh preedit after the matching fence is accepted");
+            h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+            assert_eq!(edited(&h).1, "abcd");
+        }
+    }
+}
+
+#[test]
+fn external_caret_interruption_rejects_pending_composition_mutations() {
+    for bytes in [false, true] {
+        let (mut h, _) = ime_interruption_editor();
+        begin_interrupted_composition(&mut h, true);
+        let project = h.state().session.project.clone();
+        let undo = h.state().session.history.undo.len();
+        // This is the same production command exposed to control clients; no replacement epoch.
+        h.state_mut().session.execute("text.setSelection", json!({"caret": 1})).unwrap();
+        h.input_mut().events.extend([ime_interruption_delete(bytes), Event::Ime(egui::ImeEvent::Commit("X".into()))]);
+        h.run_steps(1);
+        assert_eq!((edited(&h).1.as_str(), edited(&h).2, edited(&h).3), ("abcd", 1, 1));
+        assert!(std::sync::Arc::ptr_eq(&project, &h.state().session.project));
+        assert_eq!(h.state().session.history.undo.len(), undo);
+        let request_id = ime_reset_request(&h);
+        h.input_mut().events.extend([Event::ImeResetCompleted { request_id }, Event::Ime(egui::ImeEvent::Commit("Y".into()))]);
+        h.run_steps(1);
+        assert_eq!(edited(&h).1, "aYbcd", "a later direct commit without preedit is still accepted");
+    }
+}
+
+#[test]
+fn composing_ime_delete_then_commit_and_direct_commit_remain_valid() {
+    for bytes in [false, true] {
+        let (mut h, _) = ime_interruption_editor();
+        begin_interrupted_composition(&mut h, false);
+        let undo = h.state().session.history.undo.len();
+        h.input_mut().events.extend([ime_interruption_delete(bytes), Event::Ime(egui::ImeEvent::Commit("X".into()))]);
+        h.run_steps(1);
+        assert_eq!((edited(&h).1.as_str(), edited(&h).2, edited(&h).3), ("abcX", 4, 4), "the IME deletion's own caret movement must not reject its commit");
+        assert_eq!(h.state().session.history.undo.len(), undo + 1);
+        h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(edited(&h).1, "abcd", "accepted delete and commit remain one undo step");
+        h.run_steps(1);
+        h.input_mut().events.push(Event::Ime(egui::ImeEvent::Commit("Y".into())));
+        h.run_steps(1);
+        assert_eq!(edited(&h).1, "abcdY", "noncomposing direct commit remains valid after undo");
+    }
+}
+
+#[test]
+fn a_noncomposing_direct_commit_can_follow_a_pointer_caret_change_in_the_same_batch() {
+    let (mut h, point) = ime_interruption_editor();
+    let undo = h.state().session.history.undo.len();
+    h.input_mut().events.extend([
+        Event::PointerMoved(point),
+        Event::PointerButton { pos: point, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE },
+        Event::Ime(egui::ImeEvent::Commit("Y".into())),
+    ]);
+    h.run_steps(1);
+    assert_eq!((edited(&h).1.as_str(), edited(&h).2, edited(&h).3), ("aYbcd", 2, 2), "only an interrupted composition is rejected");
+    assert_eq!(h.state().session.history.undo.len(), undo + 1);
+    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(edited(&h).1, "abcd");
+}
+
+fn draws_ime_preview(h: &Harness<'_, EffectcraftApp>) -> bool {
+    fn contains_preview(shape: &egui::Shape) -> bool {
+        match shape {
+            egui::Shape::Text(text) => text.galley.text() == "é",
+            egui::Shape::Vec(shapes) => shapes.iter().any(contains_preview),
+            _ => false,
+        }
+    }
+    h.output().shapes.iter().any(|shape| contains_preview(&shape.shape))
+}
+
+fn replacement_ime_edit(h: &mut Harness<'_, EffectcraftApp>) -> u64 {
+    let replacement =
+        h.state_mut().session.execute("layer.newText", json!({"text": "wxyz", "size": 80, "position": [80, 240], "justify": "left"})).unwrap()["layer"]
+            .as_u64()
+            .unwrap();
+    h.state_mut().session.execute("text.edit", json!({"layer": replacement, "caret": 1})).unwrap();
+    h.run_steps(1);
+    assert_eq!(edited(h), (replacement, "wxyz".to_owned(), 1, 1), "the replacement editor must be live before late IME arrives");
+    let comp = h.state().session.active_comp_id().unwrap().0;
+    let ime = h.output().platform_output.ime.as_ref().expect("the real replacement editor publishes IME");
+    assert_eq!(ime.owner, egui::Id::unique(("effectcraft-ime-text", comp, replacement)));
+    assert!(!draws_ime_preview(h), "the old preview must not be drawn on the replacement");
+    replacement
+}
+
+#[test]
+fn deselect_all_during_composition_rejects_late_ime_on_a_live_replacement_session() {
+    for rebound in [false, true] {
+        for bytes in [false, true] {
+            for terminal_pending in [false, true] {
+                let (mut h, _) = ime_interruption_editor();
+                let (chord, modifiers) = if rebound {
+                    h.state_mut().session.execute("shortcuts.set", json!({"command": "edit.deselectAll", "keys": ["Cmd+Alt+Z"]})).unwrap();
+                    (Key::Z, Modifiers { alt: true, ..Modifiers::COMMAND })
+                } else {
+                    (Key::A, Modifiers { shift: true, ..Modifiers::COMMAND })
+                };
+                let original = edited(&h).0;
+                let old_session = h.state().session.state.text_edit.as_ref().unwrap().session;
+                h.input_mut().events.push(Event::Ime(egui::ImeEvent::Preedit { text: "é".into(), active_range_chars: None }));
+                h.run_steps(1);
+                assert!(draws_ime_preview(&h), "a real active composition must draw before interruption");
+                if terminal_pending {
+                    h.input_mut().events.push(Event::Ime(egui::ImeEvent::Preedit { text: String::new(), active_range_chars: None }));
+                    h.run_steps(1);
+                    assert!(!draws_ime_preview(&h), "empty preedit hides the preview but leaves the terminal pending");
+                }
+                key(&mut h, chord, modifiers);
+                assert!(h.state().session.state.text_edit.is_none(), "the actual current shortcut ends the old edit");
+                assert!(h.state().session.state.selected_layers.is_empty());
+                assert!(h.output().platform_output.ime.is_none(), "the ended editor must not publish a descriptor");
+                assert!(!draws_ime_preview(&h), "Deselect All clears the old preview");
+                assert_eq!(layer_doc(&h.state().session, LayerId(original)).unwrap().text, "abcd");
+
+                let replacement = replacement_ime_edit(&mut h);
+                let request_id = ime_reset_request(&h);
+                assert_ne!(replacement, original);
+                assert_ne!(h.state().session.state.text_edit.as_ref().unwrap().session, old_session);
+                let project = h.state().session.project.clone();
+                let history = (h.state().session.history.undo.len(), h.state().session.history.redo.len());
+                let selection = h.state().session.state.selected_layers.clone();
+                h.input_mut().events.extend([ime_interruption_delete(bytes), Event::Ime(egui::ImeEvent::Commit("X".into()))]);
+                h.run_steps(1);
+                assert_eq!(edited(&h), (replacement, "wxyz".to_owned(), 1, 1), "late delete and commit must reach the live replacement and be rejected");
+                assert_eq!(h.state().session.state.selected_layers, selection);
+                assert!(std::sync::Arc::ptr_eq(&project, &h.state().session.project), "rejected IME never edits either layer");
+                assert_eq!((h.state().session.history.undo.len(), h.state().session.history.redo.len()), history);
+                assert_eq!(layer_doc(&h.state().session, LayerId(original)).unwrap().text, "abcd");
+
+                h.input_mut().events.extend([
+                    Event::ImeResetCompleted { request_id },
+                    Event::Ime(egui::ImeEvent::Preedit { text: "é".into(), active_range_chars: None }),
+                    Event::Ime(egui::ImeEvent::Commit("é".into())),
+                ]);
+                h.run_steps(1);
+                assert_eq!(edited(&h), (replacement, "wéxyz".to_owned(), 2, 2), "a fresh composition still commits after rejecting the old terminal");
+                assert_eq!(h.state().session.history.undo.len(), history.0 + 1);
+                h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+                assert_eq!(edited(&h).1, "wxyz", "only the fresh commit needs undo");
+            }
+        }
+    }
+}
+
+#[test]
+fn deselect_all_without_composition_keeps_a_replacement_direct_commit_valid() {
+    let (mut h, _) = ime_interruption_editor();
+    let original = edited(&h).0;
+    key(&mut h, Key::A, Modifiers { shift: true, ..Modifiers::COMMAND });
+    assert!(h.state().session.state.text_edit.is_none());
+    assert!(h.output().platform_output.ime.is_none());
+    let replacement = replacement_ime_edit(&mut h);
+    let undo = h.state().session.history.undo.len();
+    h.input_mut().events.push(Event::Ime(egui::ImeEvent::Commit("Y".into())));
+    h.run_steps(1);
+    assert_eq!(edited(&h), (replacement, "wYxyz".to_owned(), 2, 2), "a new editor without an interrupted composition accepts a direct commit");
+    assert_eq!(h.state().session.history.undo.len(), undo + 1);
+    assert_eq!(layer_doc(&h.state().session, LayerId(original)).unwrap().text, "abcd");
+    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(edited(&h).1, "wxyz");
+}
+
+fn fresh_ime(text: &str) -> [Event; 2] {
+    [Event::Ime(egui::ImeEvent::Preedit { text: text.into(), active_range_chars: None }), Event::Ime(egui::ImeEvent::Commit(text.into()))]
+}
+
+#[test]
+fn request_fence_alone_admits_the_first_fresh_ime_in_same_or_next_batch() {
+    for terminal_pending in [false, true] {
+        for next_batch in [false, true] {
+            let (mut h, _) = ime_interruption_editor();
+            begin_interrupted_composition(&mut h, terminal_pending);
+            let request_id = request_at_caret(&mut h, 1);
+            h.input_mut().events.push(Event::ImeResetCompleted { request_id });
+            if next_batch {
+                h.run_steps(1);
+            }
+            h.input_mut().events.extend(fresh_ime("が"));
+            h.run_steps(1);
+            assert_eq!((edited(&h).1.as_str(), edited(&h).2, edited(&h).3), ("aがbcd", 2, 2));
+            assert!(h.output().platform_output.ime.as_ref().unwrap().reset_request.is_none(), "completion does not allocate another request");
+            h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+            assert_eq!(edited(&h).1, "abcd");
+        }
+    }
+}
+
+#[test]
+fn newest_opaque_fence_rejects_stale_foreign_duplicate_and_no_ack_payloads() {
+    let (mut h, _) = ime_interruption_editor();
+    begin_interrupted_composition(&mut h, false);
+    let first = request_at_caret(&mut h, 1);
+    let second = request_at_caret(&mut h, 2);
+    assert_ne!(first, second);
+    let foreign = h.ctx.request_ime_reset(egui::ViewportId::from_hash_of("effect-ime-foreign")).unwrap();
+    let foreign_context = egui::Context::default().request_ime_reset(egui::ViewportId::ROOT).unwrap();
+    let project = h.state().session.project.clone();
+    let undo = h.state().session.history.undo.len();
+    for _ in 0..3 {
+        h.input_mut().events.extend([
+            Event::ImeResetCompleted { request_id: first },
+            Event::ImeResetCompleted { request_id: foreign },
+            Event::ImeResetCompleted { request_id: foreign_context },
+            ime_interruption_delete(false),
+            ime_interruption_delete(true),
+            Event::Ime(egui::ImeEvent::Commit("X".into())),
+            Event::Ime(egui::ImeEvent::Preedit { text: "late".into(), active_range_chars: None }),
+            Event::Ime(egui::ImeEvent::Preedit { text: String::new(), active_range_chars: None }),
+        ]);
+        h.run_steps(1);
+        assert_eq!((edited(&h).1.as_str(), edited(&h).3), ("abcd", 2));
+        assert!(std::sync::Arc::ptr_eq(&project, &h.state().session.project));
+        assert_eq!(h.state().session.history.undo.len(), undo);
+        assert!(h.output().platform_output.ime.as_ref().unwrap().reset_request.is_none(), "no-ack does not spin requests");
+    }
+    h.input_mut().events.extend([
+        Event::ImeResetCompleted { request_id: second },
+        Event::Ime(egui::ImeEvent::Preedit { text: "が".into(), active_range_chars: None }),
+        Event::ImeResetCompleted { request_id: second },
+        Event::Ime(egui::ImeEvent::Commit("が".into())),
+    ]);
+    h.run_steps(1);
+    assert_eq!(edited(&h).1, "abがcd", "duplicate F cannot interrupt the newly admitted composition");
+    assert!(h.output().platform_output.ime.as_ref().unwrap().reset_request.is_none());
+}
+
+#[test]
+fn outside_pointer_visits_the_control_suffix_without_mutating_the_old_viewer() {
+    for terminal_pending in [false, true] {
+        let (mut h, _) = ime_interruption_editor();
+        h.state_mut().show_panel(PanelKind::Timeline);
+        h.run_steps(2);
+        begin_interrupted_composition(&mut h, terminal_pending);
+        let first = request_at_caret(&mut h, 1);
+        let layer = edited(&h).0;
+        let outside = rect(&h, "timeline.empty").center();
+        assert!(!rect(&h, "viewer.area").contains(outside));
+        let undo = h.state().session.history.undo.len();
+        h.input_mut().events.extend([
+            Event::PointerMoved(outside),
+            Event::PointerButton { pos: outside, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE },
+            Event::ImeResetCompleted { request_id: first },
+            Event::Text("BAD".into()),
+            Event::Cut,
+            Event::Paste("BAD".into()),
+            Event::Ime(egui::ImeEvent::Preedit { text: "late".into(), active_range_chars: None }),
+            Event::Ime(egui::ImeEvent::Commit("X".into())),
+        ]);
+        h.run_steps(1);
+        assert_eq!(layer_doc(&h.state().session, LayerId(layer)).unwrap().text, "abcd");
+        assert_eq!(h.state().session.history.undo.len(), undo);
+        assert!(!h.ctx.input(|input| input.events.iter().any(|event| matches!(event, Event::ImeResetCompleted { .. }))), "the suffix control was visited");
+        h.input_mut().events.push(Event::PointerButton { pos: outside, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+        h.run_steps(1);
+        h.state_mut().session.execute("text.edit", json!({"layer": layer, "caret": 1})).unwrap();
+        h.state_mut().ui.focused = PanelKind::Composition;
+        h.run_steps(1);
+        let second = ime_reset_request(&h);
+        assert_ne!(first, second);
+        h.input_mut().events.extend([
+            Event::ImeResetCompleted { request_id: first },
+            Event::Ime(egui::ImeEvent::Commit("X".into())),
+            Event::ImeResetCompleted { request_id: second },
+        ]);
+        h.input_mut().events.extend(fresh_ime("が"));
+        h.run_steps(1);
+        assert_eq!(edited(&h).1, "aがbcd");
+    }
+}
+
+#[test]
+fn old_commit_then_fence_then_outside_pointer_keeps_the_prefix_rejected() {
+    let (mut h, _) = ime_interruption_editor();
+    h.state_mut().show_panel(PanelKind::Timeline);
+    h.run_steps(2);
+    begin_interrupted_composition(&mut h, false);
+    let first = request_at_caret(&mut h, 1);
+    let layer = edited(&h).0;
+    let outside = rect(&h, "timeline.empty").center();
+    h.input_mut().events.extend([
+        Event::Ime(egui::ImeEvent::Commit("X".into())),
+        Event::ImeResetCompleted { request_id: first },
+        Event::PointerMoved(outside),
+        Event::PointerButton { pos: outside, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE },
+        Event::Text("BAD".into()),
+        Event::Paste("BAD".into()),
+    ]);
+    h.run_steps(1);
+    assert_eq!(layer_doc(&h.state().session, LayerId(layer)).unwrap().text, "abcd", "F cannot admit its preceding old commit or the outside suffix");
+    h.input_mut().events.push(Event::PointerButton { pos: outside, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.run_steps(1);
+    h.state_mut().session.execute("text.edit", json!({"layer": layer, "caret": 1})).unwrap();
+    h.state_mut().ui.focused = PanelKind::Composition;
+    h.run_steps(1);
+    // A panel may already have ended the custom route before the viewer drew. In that case
+    // its controls-only owner retired F and the actual returned replacement must be used.
+    if let Some(request_id) = h.output().platform_output.ime.as_ref().unwrap().reset_request {
+        assert_ne!(first, request_id);
+        h.input_mut().events.push(Event::ImeResetCompleted { request_id });
+    }
+    h.input_mut().events.extend(fresh_ime("が"));
+    h.run_steps(1);
+    assert_eq!(edited(&h).1, "aがbcd");
+}
+
+#[test]
+fn stock_dialog_suspends_before_sync_and_return_rearms_the_same_model_once() {
+    use egui_kittest::kittest::Queryable as _;
+    let (mut h, _) = ime_interruption_editor();
+    begin_interrupted_composition(&mut h, true);
+    let first = request_at_caret(&mut h, 1);
+    let custom_owner = h.output().platform_output.ime.as_ref().unwrap().owner;
+    h.state_mut().dialog = Some(effectcraft_ui_egui::Dialog::CommandPalette);
+    h.state_mut().session.execute("text.setSelection", json!({"caret": 2})).unwrap();
+    h.run_steps(2);
+    h.input_mut().events.extend([Event::ImeResetCompleted { request_id: first }, Event::Text("xyz".into())]);
+    h.run_steps(1);
+    let stock = h.output().platform_output.ime.as_ref().expect("the actual stock palette field owns IME");
+    assert_ne!(stock.owner, custom_owner);
+    assert!(stock.reset_request.is_none(), "ineligible synchronization cannot allocate a new token into the stock descriptor");
+    // The real accessible name must remain available after typing hides the placeholder.
+    let palette = h.get_by_role_and_label(egui::accesskit::Role::TextInput, "Type a command or effect…");
+    assert_eq!(palette.value().as_deref(), Some("xyz"), "the visible stock field receives the text untouched by custom control routing");
+    assert_eq!(edited(&h).1, "abcd");
+    h.state_mut().dialog = None;
+    h.state_mut().ui.focused = PanelKind::Composition;
+    h.ctx.memory_mut(|memory| {
+        if let Some(field) = memory.focused() {
+            memory.surrender_focus(field);
+        }
+    });
+    h.run_steps(1);
+    let second = ime_reset_request(&h);
+    assert_ne!(first, second);
+    h.run_steps(1);
+    assert!(h.output().platform_output.ime.as_ref().unwrap().reset_request.is_none());
+    h.input_mut().events.extend([
+        Event::ImeResetCompleted { request_id: first },
+        Event::Ime(egui::ImeEvent::Commit("X".into())),
+        Event::ImeResetCompleted { request_id: second },
+    ]);
+    h.input_mut().events.extend(fresh_ime("が"));
+    h.run_steps(1);
+    assert_eq!(edited(&h).1, "abがcd");
+}
+
+#[test]
+fn full_pass_logic_keeps_a_request_while_hidden_logic_rearms_once_on_return() {
+    let (mut h, _) = ime_interruption_editor();
+    begin_interrupted_composition(&mut h, false);
+    let first = request_at_caret(&mut h, 1);
+    h.run_steps(2);
+    assert!(h.output().platform_output.ime.as_ref().unwrap().reset_request.is_none(), "normal App::logic before UI must not rearm");
+    let ctx = h.ctx.clone();
+    let frame = eframe::Frame::_new_kittest();
+    let raw = egui::RawInput::default();
+    for _ in 0..3 {
+        let _ = ctx.run_logic(&raw, |ctx| {
+            h.state_mut().tick(ctx, &frame);
+            h.state().finish_ime_logic(ctx);
+        });
+    }
+    h.run_steps(1);
+    let second = ime_reset_request(&h);
+    assert_ne!(first, second);
+    h.run_steps(1);
+    assert!(h.output().platform_output.ime.as_ref().unwrap().reset_request.is_none());
+    h.input_mut().events.extend([
+        Event::ImeResetCompleted { request_id: first },
+        Event::Ime(egui::ImeEvent::Commit("X".into())),
+        Event::ImeResetCompleted { request_id: second },
+    ]);
+    h.input_mut().events.extend(fresh_ime("が"));
+    h.run_steps(1);
+    assert_eq!(edited(&h).1, "aがbcd");
+}
+
+#[test]
+fn same_caret_application_text_replacement_rejects_the_previous_context_fence() {
+    let (mut h, _) = ime_interruption_editor();
+    begin_interrupted_composition(&mut h, false);
+    let first = request_at_caret(&mut h, 1);
+    let before = edited(&h);
+    let generation = h.output().platform_output.ime.as_ref().unwrap().context_generation;
+    h.state_mut().session.execute("layer.setText", json!({"layer": before.0, "text": "Abcd"})).unwrap();
+    h.input_mut().events.extend([
+        Event::ImeResetCompleted { request_id: first },
+        ime_interruption_delete(true),
+        Event::Ime(egui::ImeEvent::Commit("X".into())),
+    ]);
+    h.run_steps(1);
+    assert_eq!(edited(&h), (before.0, "Abcd".to_owned(), before.2, before.3));
+    let output = h.output().platform_output.ime.as_ref().unwrap();
+    assert_ne!(output.context_generation, generation, "same numeric owner/caret still has a new context");
+    let second = ime_reset_request(&h);
+    assert_ne!(first, second);
+    h.input_mut().events.push(Event::ImeResetCompleted { request_id: second });
+    h.input_mut().events.extend(fresh_ime("が"));
+    h.run_steps(1);
+    assert_eq!(edited(&h).1, "Aがbcd");
 }

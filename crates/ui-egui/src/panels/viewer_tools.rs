@@ -25,7 +25,7 @@ pub(crate) const SNAP_PX: f64 = 8.0;
 const SNAP_COLOR: Color32 = Color32::from_rgb(0xff, 0xd2, 0x3c);
 
 fn snap_id() -> egui::Id {
-    egui::Id::new("viewer-snap")
+    egui::Id::unique("viewer-snap")
 }
 
 /// Layer snapping is on: the Snapping checkbox (View ▸ Snapping), inverted while Cmd/Ctrl is held.
@@ -226,10 +226,10 @@ pub(crate) fn rulers(app: &mut EffectcraftApp, ui: &mut egui::Ui, map: &ViewerMa
     p.line_segment([corner.center() - vec2(4.0, 0.0), corner.center() + vec2(4.0, 0.0)], tick);
     p.line_segment([corner.center() - vec2(0.0, 4.0), corner.center() + vec2(0.0, 4.0)], tick);
     let cr = ui
-        .interact(corner, egui::Id::new("vw-ruler-origin"), Sense::click_and_drag())
+        .interact(corner, egui::Id::unique("vw-ruler-origin"), Sense::click_and_drag())
         .on_hover_text(crate::i18n::tr("Ruler zero point (drag to move, double-click to reset)"));
     app.auto.add("viewer.ruler.origin", corner, "Ruler zero point");
-    let fg = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("vw-ruler-fg")));
+    let fg = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("vw-ruler-fg")));
     if cr.dragged()
         && let Some(hp) = cr.interact_pointer_pos()
     {
@@ -248,7 +248,7 @@ pub(crate) fn rulers(app: &mut EffectcraftApp, ui: &mut egui::Ui, map: &ViewerMa
     // Guides dragged out of the rulers: the top ruler makes horizontal guides, the left one
     // vertical guides.
     for (r, vertical, id) in [(top, false, "top"), (left, true, "left")] {
-        let resp = ui.interact(r, egui::Id::new(("vw-ruler", id)), Sense::drag()).on_hover_text(crate::i18n::tr("Drag to create a guide"));
+        let resp = ui.interact(r, egui::Id::unique(("vw-ruler", id)), Sense::drag()).on_hover_text(crate::i18n::tr("Drag to create a guide"));
         app.auto.add(&format!("viewer.ruler.{id}"), r, if vertical { "Vertical ruler" } else { "Horizontal ruler" });
         if resp.hovered() {
             ui.ctx().set_cursor_icon(if vertical { egui::CursorIcon::ResizeHorizontal } else { egui::CursorIcon::ResizeVertical });
@@ -320,11 +320,11 @@ pub(crate) fn proportional_grid(app: &EffectcraftApp, painter: &egui::Painter, c
 
 /// Remember the region of interest the displayed texture was rendered with.
 pub(crate) fn set_texture_roi(ctx: &egui::Context, roi: Option<[f64; 4]>) {
-    ctx.data_mut(|d| d.insert_temp(egui::Id::new("viewer-tex-roi"), roi));
+    ctx.data_mut(|d| d.insert_temp(egui::Id::unique("viewer-tex-roi"), roi));
 }
 
 fn texture_roi(ctx: &egui::Context) -> Option<[f64; 4]> {
-    ctx.data(|d| d.get_temp::<Option<[f64; 4]>>(egui::Id::new("viewer-tex-roi"))).flatten()
+    ctx.data(|d| d.get_temp::<Option<[f64; 4]>>(egui::Id::unique("viewer-tex-roi"))).flatten()
 }
 
 /// The comp area ([x, y, w, h], comp pixels) the shown frame covers: its region of interest or
@@ -398,7 +398,7 @@ pub(crate) fn draw_frame(app: &mut EffectcraftApp, ctx: &egui::Context, painter:
             (std::sync::Arc::as_ptr(&s.image) as usize, opts.channel.id(), opts.colorized, opts.exposure.to_bits(), &dc_key).hash(&mut h);
             h.finish()
         };
-        let id = egui::Id::new("viewer-snapshot-tex");
+        let id = egui::Id::unique("viewer-snapshot-tex");
         let tex = match ctx.data(|d| d.get_temp::<(u64, egui::TextureHandle)>(id)) {
             Some((k, tex)) if k == key => tex,
             _ => {
@@ -454,7 +454,7 @@ pub(crate) fn draw_frame(app: &mut EffectcraftApp, ctx: &egui::Context, painter:
         (std::sync::Arc::as_ptr(&src) as usize, opts.channel.id(), opts.colorized, opts.exposure.to_bits(), &dc_key, minify).hash(&mut h);
         h.finish()
     };
-    let id = egui::Id::new("viewer-display-tex");
+    let id = egui::Id::unique("viewer-display-tex");
     let tex = match ctx.data(|d| d.get_temp::<(u64, egui::TextureHandle)>(id)) {
         Some((k, tex)) if k == key => tex,
         _ => {
@@ -479,7 +479,7 @@ fn fitted_uv(ctx: &egui::Context, size: [usize; 2], minify: usize) -> Rect {
 /// A popup list above `anchor` (selected entries highlighted); entries register
 /// `viewer.<auto>.<n>` automation ids.
 fn popup(app: &mut EffectcraftApp, ui: &mut egui::Ui, id: &str, anchor: Rect, items: &[(String, bool)], auto: &str) -> Option<usize> {
-    let pid = egui::Id::new(id);
+    let pid = egui::Id::unique(id);
     if !widgets::popup_is_open(ui, pid) {
         return None;
     }
@@ -506,7 +506,7 @@ fn popup(app: &mut EffectcraftApp, ui: &mut egui::Ui, id: &str, anchor: Rect, it
 }
 
 fn toggle_popup(ui: &egui::Ui, id: &str) {
-    let pid = egui::Id::new(id).with("open");
+    let pid = egui::Id::unique(id).with("open");
     let open: bool = ui.data(|d| d.get_temp(pid).unwrap_or(false));
     ui.data_mut(|d| d.insert_temp(pid, !open));
 }
@@ -529,8 +529,8 @@ pub(crate) fn magnification_menu(
     let t = app.tokens;
     let ppp = ui.ctx().pixels_per_point();
     let pop = format!("{id}-pop");
-    let response =
-        widgets::dropdown(ui, r, &magnification_label(zoom * ppp * 100.0), &t, egui::Id::new(id)).on_hover_text(crate::i18n::tr("Magnification ratio popup"));
+    let response = widgets::dropdown(ui, r, &magnification_label(zoom * ppp * 100.0), &t, egui::Id::unique(id))
+        .on_hover_text(crate::i18n::tr("Magnification ratio popup"));
     if response.clicked() {
         toggle_popup(ui, &pop);
     }
@@ -637,7 +637,7 @@ fn bottom_bar_contents(app: &mut EffectcraftApp, ui: &mut egui::Ui, bar: Rect, z
     let r = Rect::from_min_size(pos2(x, cy - 10.0), vec2(84.0, 20.0));
     let scale = app.viewer_scale(zoom, ppp);
     let res = app.viewer_res();
-    let response = widgets::dropdown(ui, r, &resolution_label(res, scale), &t, egui::Id::new("vw-res"))
+    let response = widgets::dropdown(ui, r, &resolution_label(res, scale), &t, egui::Id::unique("vw-res"))
         .on_hover_text(crate::i18n::tr("Resolution/Down Sample Factor Popup"));
     if response.clicked() {
         toggle_popup(ui, "vw-res-pop");
@@ -665,7 +665,7 @@ fn bottom_bar_contents(app: &mut EffectcraftApp, ui: &mut egui::Ui, bar: Rect, z
         let r = Rect::from_min_size(pos2(*x, cy - 11.0), vec2(22.0, 22.0));
         // The tip is the English source: the tooltip is looked up in the catalog, while the
         // automation label stays English for scripts and tests.
-        let resp = widgets::icon_button(ui, r, icon, on, &t, egui::Id::new(("vw-btn", id))).on_hover_text(crate::i18n::tr(tip));
+        let resp = widgets::icon_button(ui, r, icon, on, &t, egui::Id::unique(("vw-btn", id))).on_hover_text(crate::i18n::tr(tip));
         auto.add_response(&format!("viewer.{id}"), &resp, tip);
         *x += 24.0;
         (resp.clicked(), r)
@@ -786,7 +786,7 @@ fn bottom_bar_contents(app: &mut EffectcraftApp, ui: &mut egui::Ui, bar: Rect, z
         let renderers = [(Renderer::Classic3D, "Classic 3D", "classic3D"), (Renderer::Advanced3D, "Advanced 3D", "advanced3D")];
         let current = renderers.iter().find(|(r, ..)| *r == comp.renderer).map_or("Classic 3D", |(_, label, _)| *label);
         let r = Rect::from_min_size(pos2(x, cy - 10.0), vec2(96.0, 20.0));
-        if widgets::dropdown(ui, r, crate::i18n::tr(current), &t, egui::Id::new("vw-3d")).clicked() {
+        if widgets::dropdown(ui, r, crate::i18n::tr(current), &t, egui::Id::unique("vw-3d")).clicked() {
             toggle_popup(ui, "vw-3d-pop");
         }
         app.auto.add("viewer.renderer3d", r, current);
@@ -801,7 +801,7 @@ fn bottom_bar_contents(app: &mut EffectcraftApp, ui: &mut egui::Ui, bar: Rect, z
         let cid = app.session.active_comp_id();
         let cur = cid.and_then(|c| app.session.state.views3d.get(&c)).map(|v| v.current).unwrap_or_default();
         let r = Rect::from_min_size(pos2(x, cy - 10.0), vec2(118.0, 20.0));
-        let response = widgets::dropdown(ui, r, cur.label(), &t, egui::Id::new("vw-cam"));
+        let response = widgets::dropdown(ui, r, cur.label(), &t, egui::Id::unique("vw-cam"));
         if response.clicked() {
             toggle_popup(ui, "vw-cam-pop");
         }
@@ -824,8 +824,8 @@ fn bottom_bar_contents(app: &mut EffectcraftApp, ui: &mut egui::Ui, bar: Rect, z
     let g = p.layout_no_wrap(tc, Tokens::mono(12.0), t.timecode);
     let tr = Rect::from_min_size(pos2(x + 4.0, cy - 9.0), g.size() + vec2(8.0, 4.0));
     p.galley(pos2(tr.min.x + 4.0, tr.min.y + 2.0), g, t.timecode);
-    let resp = ui.interact(tr, egui::Id::new("vw-timecode"), Sense::click());
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Current time"));
+    let resp = ui.interact(tr, egui::Id::unique("vw-timecode"), Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Current time"));
     if resp.has_focus() {
         p.rect_stroke(tr.shrink(1.0), 2.0, Stroke::new(1.0, t.focus), StrokeKind::Inside);
     }

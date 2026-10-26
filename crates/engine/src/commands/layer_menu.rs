@@ -708,7 +708,7 @@ const BUNDLE_EXTENSIONS: &[&str] = &[
 /// Whether the system file manager would open folder `dir` as something other than a folder: a
 /// bundle (`Tool.app`), or a Windows folder with a `{CLSID}` extension.
 fn opens_as_bundle(dir: &std::path::Path) -> bool {
-    let ext = dir.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+    let ext = dir.extension().and_then(std::ffi::OsStr::to_str).unwrap_or_default().to_ascii_lowercase();
     ext.starts_with('{') || BUNDLE_EXTENSIONS.contains(&ext.as_str())
 }
 

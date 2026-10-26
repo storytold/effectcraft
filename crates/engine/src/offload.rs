@@ -289,10 +289,10 @@ pub struct Inbox(Mutex<Vec<WorkerReply>>);
 
 impl Inbox {
     pub fn push(&self, r: WorkerReply) {
-        self.0.lock().unwrap_or_else(|e| e.into_inner()).push(r);
+        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(r);
     }
     pub fn take(&self) -> Vec<WorkerReply> {
-        std::mem::take(&mut *self.0.lock().unwrap_or_else(|e| e.into_inner()))
+        std::mem::take(&mut *self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
     }
 }
 

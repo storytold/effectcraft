@@ -133,7 +133,7 @@ fn folder_row(
     if r.max.y < list.min.y || r.min.y > list.max.y {
         return open;
     }
-    let resp = ui.interact(r.intersect(list), egui::Id::new(("fxcat", key)), Sense::click());
+    let resp = ui.interact(r.intersect(list), egui::Id::unique(("fxcat", key)), Sense::click());
     if resp.hovered() {
         lp.rect_filled(r, 0.0, t.hover);
     }
@@ -179,7 +179,7 @@ fn effect_row(
         return;
     }
     let star = Rect::from_center_size(pos2(r.max.x - 38.0, r.center().y), vec2(16.0, 16.0));
-    let resp = ui.interact(r.intersect(list), egui::Id::new((auto_prefix, e.id)), Sense::click_and_drag());
+    let resp = ui.interact(r.intersect(list), egui::Id::unique((auto_prefix, e.id)), Sense::click_and_drag());
     if resp.hovered() {
         lp.rect_filled(r, 0.0, t.hover);
     }
@@ -194,7 +194,7 @@ fn effect_row(
     app.auto.add(&format!("{auto_prefix}.{}", e.id), r, e.name);
     // Favourite star (always shown when starred, else on hover).
     let fav = app.session.prefs.is_effect_favorite(e.id);
-    let sresp = ui.interact(star.intersect(list), egui::Id::new((auto_prefix, e.id, "star")), Sense::click());
+    let sresp = ui.interact(star.intersect(list), egui::Id::unique((auto_prefix, e.id, "star")), Sense::click());
     if fav || resp.hovered() || sresp.hovered() {
         let gold = Color32::from_rgb(0xe8, 0xc0, 0x40);
         filled_star(lp, star.center(), 6.0, fav.then_some(gold), if fav || sresp.hovered() { gold } else { t.text_faint });
@@ -234,7 +234,7 @@ fn preset_row(
     if r.max.y < list.min.y || r.min.y > list.max.y {
         return;
     }
-    let resp = ui.interact(r.intersect(list), egui::Id::new(("fxpreset", auto_id)), Sense::click_and_drag());
+    let resp = ui.interact(r.intersect(list), egui::Id::unique(("fxpreset", auto_id)), Sense::click_and_drag());
     if resp.hovered() {
         lp.rect_filled(r, 0.0, t.hover);
     }
@@ -251,7 +251,7 @@ fn preset_row(
 
 /// User preset files, rescanned every few seconds (and on Refresh List).
 fn user_presets(ctx: &egui::Context, force: bool, scan: impl FnOnce() -> Vec<PresetFile>) -> Arc<Vec<PresetFile>> {
-    let id = egui::Id::new("fx-user-presets");
+    let id = egui::Id::unique("fx-user-presets");
     let now = ctx.input(|i| i.time);
     if !force
         && let Some((at, v)) = ctx.data(|d| d.get_temp::<(f64, Arc<Vec<PresetFile>>)>(id))
@@ -281,8 +281,8 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     app.auto.add("effects.search", sr, "Search");
     // Contents menu.
     let mr = Rect::from_center_size(pos2(rect.max.x - 18.0, sr.center().y), vec2(22.0, 22.0));
-    let mpop = egui::Id::new("fx-contents-menu");
-    if widgets::icon_button(ui, mr, Icon::Hamburger, false, &t, egui::Id::new("fx-menu")).on_hover_text(tr("Effects & Presets options")).clicked() {
+    let mpop = egui::Id::unique("fx-contents-menu");
+    if widgets::icon_button(ui, mr, Icon::Hamburger, false, &t, egui::Id::unique("fx-menu")).on_hover_text(tr("Effects & Presets options")).clicked() {
         widgets::open_popup(ui, mpop);
     }
     app.auto.add("effects.menu", mr, "Effects & Presets options");
@@ -350,7 +350,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let view = app.ui.effects_view.clone();
     let list = Rect::from_min_max(pos2(rect.min.x, sr.max.y + 6.0), rect.max);
     let lp = p.with_clip_rect(list);
-    let scroll = widgets::PanelScroll::begin(ui, egui::Id::new("fx-scroll"), list);
+    let scroll = widgets::PanelScroll::begin(ui, egui::Id::unique("fx-scroll"), list);
     let query = q.trim().to_lowercase();
     let searching = !query.is_empty();
     let mut y = list.min.y - scroll.offset;
@@ -462,7 +462,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         _ => None,
     }) && let Some(pos) = ctx.pointer_hover_pos()
     {
-        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("dnd-fx")));
+        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("dnd-fx")));
         let g = painter.layout_no_wrap(name, Tokens::ui(12.0), t.text);
         let r = Rect::from_min_size(pos + vec2(12.0, 8.0), g.size() + vec2(16.0, 8.0));
         painter.rect_filled(r, 4.0, Color32::from_rgba_premultiplied(40, 40, 40, 230));
@@ -582,7 +582,7 @@ mod tests {
         for _ in 0..5 {
             let start = std::time::Instant::now();
             for _ in 0..1000 {
-                let (_, shared) = ctx.data(|d| d.get_temp::<(f64, Arc<Vec<PresetFile>>)>(egui::Id::new("fx-user-presets"))).unwrap();
+                let (_, shared) = ctx.data(|d| d.get_temp::<(f64, Arc<Vec<PresetFile>>)>(egui::Id::unique("fx-user-presets"))).unwrap();
                 std::hint::black_box((*shared).clone());
             }
             before.push(start.elapsed());
