@@ -971,7 +971,7 @@ fn curves_editor(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter,
     let col = channel_color(ch);
     p.rect_filled(Rect::from_min_max(pos2(gr.min.x, gr.max.y + 3.0), pos2(gr.max.x, gr.max.y + 8.0)), 0.0, col.gamma_multiply(0.5));
     let id = egui::Id::unique(("ec-curves", euid, ch));
-    let (resp, edit) = fw::curves_graph(ui, gr, &cur, ch, pencil, true, id, &t);
+    let (resp, edit) = fw::curves_graph(ui, gr, &cur, ch, fw::CurveMode { pencil, natural: true }, id, &t);
     app.auto.add(&format!("effectControls.effect.{euid}.curves.graph"), gr, "Curves");
     let started = resp.drag_started() || resp.clicked();
     if let Some(np) = edit.changed {

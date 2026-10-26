@@ -325,23 +325,56 @@ pub struct CurveEdit {
     pub done: bool,
 }
 
+/// How the Curves graph takes input: `pencil` draws freehand, `natural` picks the natural spline.
+#[derive(Clone, Copy)]
+pub struct CurveMode {
+    pub pencil: bool,
+    pub natural: bool,
+}
+
 /// The Curves graph: grid, identity diagonal, the curve, its points. Click adds a point, drag
 /// moves one, dragging a point off the graph (or Alt-clicking it) removes it. In pencil mode a
-/// drag draws the curve freehand. `natural` draws the natural spline the Curves effect renders
-/// (`Curve::parse_natural`) instead of the monotone one.
+/// drag draws the curve freehand. `mode.natural` draws the natural spline the Curves effect
+/// renders (`Curve::parse_natural`) instead of the monotone one.
 pub fn curves_graph(
     ui: &mut egui::Ui,
     rect: Rect,
     pts: &CurvePoints,
     channel: usize,
-    pencil: bool,
-    natural: bool,
+    mode: CurveMode,
     id: egui::Id,
     t: &Tokens,
 ) -> (egui::Response, CurveEdit) {
     let resp = ui.interact(rect.expand(6.0), id, Sense::click_and_drag());
     let p = ui.painter().with_clip_rect(rect.expand(8.0));
     p.rect_filled(rect, 0.0, Color32::from_rgb(0x1c, 0x1c, 0x1c));
+    draw_curve_grid(&p, rect, t);
+    let col = curve_channel_color(channel);
+    let spline =
+        if mode.natural { effectcraft_engine::effects::Curve::parse_natural(&pts.format()) } else { effectcraft_engine::effects::Curve::parse(&pts.format()) };
+    let eval = |x: f32| spline.as_ref().map(|c| c.eval(x)).unwrap_or(x);
+    let line: Vec<Pos2> = (0..=96)
+        .map(|i| {
+            let x = i as f32 / 96.0;
+            curve_to_screen(rect, x, eval(x).clamp(0.0, 1.0))
+        })
+        .collect();
+    p.add(egui::Shape::line(line, Stroke::new(1.5, col)));
+    let drag_id = id.with("drag");
+    let dragging: Option<usize> = ui.data(|d| d.get_temp(drag_id));
+    draw_curve_points(&p, rect, pts, col, dragging);
+    if mode.pencil {
+        let edit = curve_pencil(ui, &resp, rect, id, &eval);
+        return (resp, edit);
+    }
+    let mut edit = CurveEdit::default();
+    curve_drag(ui, &resp, rect, pts, drag_id, dragging, &mut edit);
+    let alt = ui.input(|i| i.modifiers.alt);
+    curve_click(&resp, rect, pts, alt, &mut edit);
+    (resp, edit)
+}
+
+fn draw_curve_grid(p: &egui::Painter, rect: Rect, t: &Tokens) {
     for k in 1..4 {
         let f = k as f32 / 4.0;
         let x = rect.min.x + rect.width() * f;
@@ -351,37 +384,29 @@ pub fn curves_graph(
     }
     p.line_segment([rect.left_bottom(), rect.right_top()], Stroke::new(1.0, Color32::from_white_alpha(40)));
     p.rect_stroke(rect, 0.0, Stroke::new(1.0, t.field_border), StrokeKind::Outside);
-    let col = match channel {
+}
+
+fn curve_channel_color(channel: usize) -> Color32 {
+    match channel {
         1 => Color32::from_rgb(0xf0, 0x60, 0x60),
         2 => Color32::from_rgb(0x60, 0xe0, 0x70),
         3 => Color32::from_rgb(0x60, 0x90, 0xff),
         4 => Color32::from_gray(0xb0),
         _ => Color32::from_gray(0xe8),
-    };
-    let to_s = |x: f32, y: f32| pos2(rect.min.x + x * rect.width(), rect.max.y - y * rect.height());
-    let to_g = |s: Pos2| [((s.x - rect.min.x) / rect.width()), ((rect.max.y - s.y) / rect.height())];
-    let spline =
-        if natural { effectcraft_engine::effects::Curve::parse_natural(&pts.format()) } else { effectcraft_engine::effects::Curve::parse(&pts.format()) };
-    let seed = || {
-        (0..=64)
-            .map(|i| {
-                let x = i as f32 / 64.0;
-                spline.as_ref().map(|c| c.eval(x)).unwrap_or(x)
-            })
-            .collect::<Vec<f32>>()
-    };
-    let line: Vec<Pos2> = (0..=96)
-        .map(|i| {
-            let x = i as f32 / 96.0;
-            to_s(x, spline.as_ref().map(|c| c.eval(x)).unwrap_or(x).clamp(0.0, 1.0))
-        })
-        .collect();
-    p.add(egui::Shape::line(line, Stroke::new(1.5, col)));
-    let drag_id = id.with("drag");
-    let pencil_id = id.with("pencil");
-    let dragging: Option<usize> = ui.data(|d| d.get_temp(drag_id));
+    }
+}
+
+fn curve_to_screen(rect: Rect, x: f32, y: f32) -> Pos2 {
+    pos2(rect.min.x + x * rect.width(), rect.max.y - y * rect.height())
+}
+
+fn screen_to_curve(rect: Rect, s: Pos2) -> [f32; 2] {
+    [((s.x - rect.min.x) / rect.width()), ((rect.max.y - s.y) / rect.height())]
+}
+
+fn draw_curve_points(p: &egui::Painter, rect: Rect, pts: &CurvePoints, col: Color32, dragging: Option<usize>) {
     for (i, q) in pts.0.iter().enumerate() {
-        let s = to_s(q[0], q[1]);
+        let s = curve_to_screen(rect, q[0], q[1]);
         let r = Rect::from_center_size(s, vec2(7.0, 7.0));
         if dragging == Some(i) {
             p.rect_filled(r, 0.0, col);
@@ -390,33 +415,41 @@ pub fn curves_graph(
             p.rect_stroke(r, 0.0, Stroke::new(1.2, col), StrokeKind::Inside);
         }
     }
+}
+
+/// Pencil mode: a drag overwrites the sampled curve under the pointer.
+fn curve_pencil(ui: &mut egui::Ui, resp: &egui::Response, rect: Rect, id: egui::Id, eval: &dyn Fn(f32) -> f32) -> CurveEdit {
+    let pencil_id = id.with("pencil");
+    let seed = || (0..=64).map(|i| eval(i as f32 / 64.0)).collect::<Vec<f32>>();
     let mut edit = CurveEdit::default();
-    let hit_r = 7.0 / rect.width();
-    let alt = ui.input(|i| i.modifiers.alt);
-    if pencil {
-        if resp.drag_started() {
-            ui.data_mut(|d| d.insert_temp(pencil_id, seed()));
-        }
-        if (resp.dragged() || resp.clicked())
-            && let Some(pt) = resp.interact_pointer_pos()
-        {
-            let mut samples: Vec<f32> = ui.data(|d| d.get_temp(pencil_id)).unwrap_or_else(seed);
-            let g = to_g(pt);
-            let i = (g[0].clamp(0.0, 1.0) * 64.0).round() as usize;
-            samples[i.min(64)] = g[1].clamp(0.0, 1.0);
-            ui.data_mut(|d| d.insert_temp(pencil_id, samples.clone()));
-            edit.changed = Some(CurvePoints::from_samples(&samples));
-        }
-        if resp.drag_stopped() {
-            ui.data_mut(|d| d.remove::<Vec<f32>>(pencil_id));
-            edit.done = true;
-        }
-        return (resp, edit);
+    if resp.drag_started() {
+        ui.data_mut(|d| d.insert_temp(pencil_id, seed()));
     }
+    if (resp.dragged() || resp.clicked())
+        && let Some(pt) = resp.interact_pointer_pos()
+    {
+        let mut samples: Vec<f32> = ui.data(|d| d.get_temp(pencil_id)).unwrap_or_else(seed);
+        let g = screen_to_curve(rect, pt);
+        let i = (g[0].clamp(0.0, 1.0) * 64.0).round() as usize;
+        samples[i.min(64)] = g[1].clamp(0.0, 1.0);
+        ui.data_mut(|d| d.insert_temp(pencil_id, samples.clone()));
+        edit.changed = Some(CurvePoints::from_samples(&samples));
+    }
+    if resp.drag_stopped() {
+        ui.data_mut(|d| d.remove::<Vec<f32>>(pencil_id));
+        edit.done = true;
+    }
+    edit
+}
+
+/// Drag a point to move it, or drag from empty space to insert one; dropping a point well off
+/// the graph removes it.
+fn curve_drag(ui: &mut egui::Ui, resp: &egui::Response, rect: Rect, pts: &CurvePoints, drag_id: egui::Id, dragging: Option<usize>, edit: &mut CurveEdit) {
+    let hit_r = 7.0 / rect.width();
     if resp.drag_started()
         && let Some(pt) = ui.input(|i| i.pointer.press_origin())
     {
-        let g = to_g(pt);
+        let g = screen_to_curve(rect, pt);
         let i = match pts.hit(g[0], g[1], hit_r) {
             Some(i) => i,
             None => {
@@ -430,7 +463,7 @@ pub fn curves_graph(
     } else if resp.dragged()
         && let (Some(i), Some(pt)) = (dragging, resp.interact_pointer_pos())
     {
-        let g = to_g(pt);
+        let g = screen_to_curve(rect, pt);
         let mut np = pts.clone();
         np.move_point(i, g[0], g[1]);
         if np != *pts {
@@ -449,10 +482,15 @@ pub fn curves_graph(
         ui.data_mut(|d| d.remove::<usize>(drag_id));
         edit.done = true;
     }
+}
+
+/// A click adds a point on empty space; Alt-clicking a point removes it.
+fn curve_click(resp: &egui::Response, rect: Rect, pts: &CurvePoints, alt: bool, edit: &mut CurveEdit) {
     if resp.clicked()
         && let Some(pt) = resp.interact_pointer_pos()
     {
-        let g = to_g(pt);
+        let g = screen_to_curve(rect, pt);
+        let hit_r = 7.0 / rect.width();
         let mut np = pts.clone();
         match pts.hit(g[0], g[1], hit_r) {
             Some(i) if alt => {
@@ -468,7 +506,6 @@ pub fn curves_graph(
         }
         edit.done = true;
     }
-    (resp, edit)
 }
 
 // ---------------------------------------------------------------------------------------------
