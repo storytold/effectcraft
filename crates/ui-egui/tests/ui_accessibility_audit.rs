@@ -38,6 +38,11 @@ const FIXED: &[&str] = &["EffectsPresets", "Settings", "RenderQueue", "Project",
 /// opens them, so the layout the other panels are measured in does not change.
 const DEDICATED: &[PanelKind] = &[PanelKind::Info, PanelKind::Flowchart, PanelKind::ScriptConsole];
 
+/// Scenarios whose content is the machine's own folder listing (the Media Browser opens on the
+/// home folder), so a runner with fewer files finds fewer controls. They are held to the upper bound
+/// only: the "improved, lower the entry" check would fail on any machine with a different home.
+const MACHINE_DEPENDENT: &[&str] = &["MediaBrowser:default"];
+
 /// (scenario, findings, of them unnamed controls) per not-yet-fixed scenario, as measured in the
 /// shared docking layout (Effect Controls with one Gaussian Blur on the layer, every other panel
 /// as it opens). A ratchet: a number may only go down, never up; when a pass over a panel lowers
@@ -489,7 +494,7 @@ fn fixed_panels_have_no_unnamed_or_roleless_controls_and_the_others_do_not_get_w
         let (allowed, allowed_unnamed) = BASELINE.iter().find(|(k, ..)| k == name).map_or((0, 0), |(_, v, u)| (*v, *u));
         if *n > allowed || *unnamed > allowed_unnamed {
             off.push(format!("{name}: {n} findings ({unnamed} unnamed), the baseline allows {allowed} ({allowed_unnamed}); a panel must not get worse"));
-        } else if *n < allowed || *unnamed < allowed_unnamed {
+        } else if (*n < allowed || *unnamed < allowed_unnamed) && !MACHINE_DEPENDENT.contains(&name.as_str()) {
             off.push(format!("{name}: improved to {n} findings ({unnamed} unnamed); lower its BASELINE entry to ({n}, {unnamed})"));
         }
     }
