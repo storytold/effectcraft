@@ -80,3 +80,30 @@ fn expanded_rect_add_mask_has_round_corners() {
     // The square's bounding corner (280,70) is 42 px from the corner: a miter would cover it.
     assert!(img.get(277, 73)[3] < 0.01);
 }
+
+/// Viewer bounds of the solid in `p` (the layer that `project` builds).
+fn bounds(p: &Project, cid: ItemId) -> Option<[f64; 4]> {
+    let comp = p.comp(cid).unwrap();
+    let ctx = crate::eval::EvalCtx::new(p, cid, comp, Tick::ZERO);
+    crate::content_bounds(&ctx, &comp.layers[0])
+}
+
+#[test]
+fn content_bounds_follow_an_add_mask() {
+    let (p, cid) = project(ShapePath::rect([200.0, 150.0], 40.0, 20.0), MaskMode::Add, 0.0);
+    assert_eq!(bounds(&p, cid), Some([180.0, 140.0, 220.0, 160.0]), "bounds should be the mask's visible area");
+}
+
+#[test]
+fn content_bounds_ignore_a_subtract_mask() {
+    let (p, cid) = project(ShapePath::rect([200.0, 150.0], 40.0, 20.0), MaskMode::Subtract, 0.0);
+    assert_eq!(bounds(&p, cid), Some([0.0, 0.0, 400.0, 300.0]));
+}
+
+#[test]
+fn content_bounds_include_mask_expansion_clamped_to_the_layer() {
+    let (p, cid) = project(ShapePath::rect([200.0, 150.0], 40.0, 20.0), MaskMode::Add, 10.0);
+    assert_eq!(bounds(&p, cid), Some([170.0, 130.0, 230.0, 170.0]));
+    let (p, cid) = project(ShapePath::rect([200.0, 20.0], 40.0, 20.0), MaskMode::Add, 30.0);
+    assert_eq!(bounds(&p, cid), Some([150.0, 0.0, 250.0, 60.0]));
+}

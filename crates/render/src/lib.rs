@@ -2411,8 +2411,16 @@ mod tests_styles;
 
 /// Layer-space bounds `[x0, y0, x1, y1]` of a layer's content at the context time (source size
 /// for solids/footage/precomps, glyph bounds for text, painted bounds for shapes). Used for viewer
-/// handles and hit testing.
+/// handles and hit testing. Closed masks that hide part of the layer narrow the bounds to the
+/// area they can reveal.
 pub fn content_bounds(ctx: &EvalCtx, layer: &effectcraft_project::Layer) -> Option<[f64; 4]> {
+    let b = source_content_bounds(ctx, layer)?;
+    let Some(m) = masks::visible_bounds(ctx, layer) else { return Some(b) };
+    let r = [b[0].max(m[0]), b[1].max(m[1]), b[2].min(m[2]), b[3].min(m[3])];
+    Some(if r[0] < r[2] && r[1] < r[3] { r } else { b })
+}
+
+fn source_content_bounds(ctx: &EvalCtx, layer: &effectcraft_project::Layer) -> Option<[f64; 4]> {
     match &layer.source {
         LayerSource::Text => {
             let glyphs = text::glyph_paths(ctx, layer);
