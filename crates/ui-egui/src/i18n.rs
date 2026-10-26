@@ -5,6 +5,7 @@
 
 use crate::EffectcraftApp;
 
+mod de;
 /// Effect names, keyed by effect id (#821).
 pub(crate) mod effects;
 /// Translations for the panels, tooltips and dialogs below the menu bar (see the module docs).
@@ -241,6 +242,8 @@ pub(crate) fn context_item(command: &str, params: &serde_json::Value, source: &s
         .map_or_else(|| tr(source).to_string(), |(_, _, translated)| (*translated).to_string())
 }
 
+/// Translate a generated menu entry, preserving computed user names and using history-specific
+/// undo/redo text only for languages that provide it.
 pub(crate) fn entry(app: &EffectcraftApp, e: &MenuEntry, shown: String) -> String {
     // The generated Effect menu's entries label themselves with the effect's registry name; the
     // catalog replaces it with the interface language's (#821). The entry keeps its command and
@@ -253,21 +256,25 @@ pub(crate) fn entry(app: &EffectcraftApp, e: &MenuEntry, shown: String) -> Strin
     }
     // Undo/redo names come from the history, so they are formatted per language here rather than
     // looked up in a catalog. An English (or untranslated) interface keeps the shown label.
-    let (undo, no_undo, redo, no_redo) = match language(app) {
-        "ja" => ("取り消し", "取り消しできません", "やり直し", "やり直しできません"),
-        "zh-hans" => ("撤销", "无可撤销的操作", "重做", "无可重做的操作"),
-        "zh-hant" => ("復原", "沒有可復原的操作", "重做", "沒有可重做的操作"),
-        "uk" => ("Скасувати", "Немає дій для скасування", "Повторити", "Немає дій для повторення"),
-        "es" => ("Deshacer", "No se puede deshacer", "Rehacer", "No se puede rehacer"),
-        "pt-br" => ("Desfazer", "Não há nada para desfazer", "Refazer", "Não há nada para refazer"),
-        "cs" => ("Zpět", "Není co vrátit", "Znovu", "Není co zopakovat"),
-        // A colon before the history's (untranslated) action name: "დაბრუნება: Comp1".
-        "ka" => ("დაბრუნება:", "დაბრუნება შეუძლებელია", "ხელახლა შესრულება:", "ხელახლა შესრულება შეუძლებელია"),
-        _ => return shown,
+    let overrides = match language(app) {
+        "ja" => Some(("取り消し", "取り消しできません", "やり直し", "やり直しできません")),
+        "zh-hans" => Some(("撤销", "无可撤销的操作", "重做", "无可重做的操作")),
+        "zh-hant" => Some(("復原", "沒有可復原的操作", "重做", "沒有可重做的操作")),
+        "uk" => Some(("Скасувати", "Немає дій для скасування", "Повторити", "Немає дій для повторення")),
+        "es" => Some(("Deshacer", "No se puede deshacer", "Rehacer", "No se puede rehacer")),
+        "pt-br" => Some(("Desfazer", "Não há nada para desfazer", "Refazer", "Não há nada para refazer")),
+        "cs" => Some(("Zpět", "Není co vrátit", "Znovu", "Není co zopakovat")),
+        "ka" => Some(("დაბრუნება:", "დაბრუნება შეუძლებელია", "ხელახლა შესრულება:", "ხელახლა შესრულება შეუძლებელია")),
+        _ => None,
     };
+    if let Some((undo, no_undo, redo, no_redo)) = overrides {
+        match e.command.as_str() {
+            "edit.undo" => return app.session.history.undo.last().map(|u| format!("{undo} {}", u.0)).unwrap_or_else(|| no_undo.into()),
+            "edit.redo" => return app.session.history.redo.last().map(|u| format!("{redo} {}", u.0)).unwrap_or_else(|| no_redo.into()),
+            _ => {}
+        }
+    }
     match e.command.as_str() {
-        "edit.undo" => app.session.history.undo.last().map(|u| format!("{undo} {}", u.0)).unwrap_or_else(|| no_undo.into()),
-        "edit.redo" => app.session.history.redo.last().map(|u| format!("{redo} {}", u.0)).unwrap_or_else(|| no_redo.into()),
         "window.panel" => {
             let prefix = format!("{}: ", e.label);
             if let Some(name) = shown.strip_prefix(&prefix) {
@@ -5494,7 +5501,7 @@ const GERMAN: &[(&str, &str, &str)] = &[
     ("app.settings", "Memory & CPU...", "Speicher und CPU..."),
     ("app.settings", "Video...", "Video..."),
     ("app.settings", "3D...", "3D..."),
-    ("app.settings", "Scripting & Expressions...", "Skripting und Ausdrücke..."),
+    ("app.settings", "Scripting & Expressions...", "Skripting und Expressions..."),
     ("app.hide", "Hide EffectCraft", "EffectCraft ausblenden"),
     ("app.hideOthers", "Hide Others", "Andere ausblenden"),
     ("app.showAll", "Show All", "Alle einblenden"),
@@ -5580,7 +5587,7 @@ const GERMAN: &[(&str, &str, &str)] = &[
     ("edit.copy", "Copy", "Kopieren"),
     ("edit.copyWithPropertyLinks", "Copy with Property Links", "Mit Eigenschaftslinks kopieren"),
     ("edit.copyWithRelativePropertyLinks", "Copy with Relative Property Links", "Mit relativen Eigenschaftslinks kopieren"),
-    ("edit.copyExpressionOnly", "Copy Expression Only", "Nur Ausdruck kopieren"),
+    ("edit.copyExpressionOnly", "Copy Expression Only", "Nur Expression kopieren"),
     ("edit.paste", "Paste", "Einfügen"),
     ("edit.pasteReversedKeyframes", "Paste Reversed Keyframes", "Umgekehrte Keyframes einfügen"),
     ("edit.pasteTextMatchFormatting", "Paste Text and Match Formatting", "Text mit übereinstimmender Formatierung einfügen"),
@@ -5726,9 +5733,9 @@ const GERMAN: &[(&str, &str, &str)] = &[
     ("layer.hideOtherVideo", "Hide Other Video", "Anderes Video ausblenden"),
     ("layer.showAllVideo", "Show All Video", "Gesamtes Video einblenden"),
     ("layer.unlockAll", "Unlock All Layers", "Alle Ebenen entsperren"),
-    ("layer.expressions", "Enable Expressions", "Ausdrücke aktivieren"),
-    ("layer.expressions", "Disable Expressions", "Ausdrücke deaktivieren"),
-    ("layer.setSwitch", "Shy", "Schüchtern"),
+    ("layer.expressions", "Enable Expressions", "Expressions aktivieren"),
+    ("layer.expressions", "Disable Expressions", "Expressions deaktivieren"),
+    ("layer.setSwitch", "Shy", "Scheu"),
     ("layer.setSwitch", "Lock", "Sperren"),
     ("layer.setSwitch", "Audio", "Audio"),
     ("layer.setSwitch", "Video", "Video"),
@@ -5814,14 +5821,14 @@ const GERMAN: &[(&str, &str, &str)] = &[
     ("layer.setBlendMode", "Luminescent Premul", "Luminanz integrieren"),
     ("layer.setBlendMode", "Next Blending Mode", "Nächste Füllmethode"),
     ("layer.setBlendMode", "Previous Blending Mode", "Vorherige Füllmethode"),
-    ("", "Track Matte", "Spurmaske"),
-    ("layer.trackMatte", "No Track Matte", "Keine Spurmaske"),
+    ("", "Track Matte", "Bewegte Maske"),
+    ("layer.trackMatte", "No Track Matte", "Keine bewegte Maske"),
     ("layer.trackMatte", "Alpha Matte", "Alphamaske"),
     ("layer.trackMatte", "Alpha Inverted Matte", "Umgekehrte Alphamaske"),
     ("layer.trackMatte", "Luma Matte", "Luminanzmaske"),
     ("layer.trackMatte", "Luma Inverted Matte", "Umgekehrte Luminanzmaske"),
-    ("layer.trackMatte", "Matte with Layer Above", "Spurmaske mit Ebene darüber"),
-    ("layer.trackMatte", "Matte with Layer Below", "Spurmaske mit Ebene darunter"),
+    ("layer.trackMatte", "Matte with Layer Above", "Bewegte Maske mit Ebene darüber"),
+    ("layer.trackMatte", "Matte with Layer Below", "Bewegte Maske mit Ebene darunter"),
     ("", "Layer Styles", "Ebenenstile"),
     ("layer.style.options", "Layer Style Options...", "Ebenenstiloptionen..."),
     ("layer.style.convertToEditable", "Convert to Editable Styles", "In bearbeitbare Stile umwandeln"),
@@ -5847,7 +5854,7 @@ const GERMAN: &[(&str, &str, &str)] = &[
     ("layer.revealSource", "Reveal Layer Source in Project", "Ebenenquelle im Projekt anzeigen"),
     ("comp.flowchart", "Reveal Layer in Project Flowchart", "Ebene im Projekt-Flussdiagramm anzeigen"),
     ("comp.revealInProject", "Reveal Composition in Project", "Komposition im Projekt anzeigen"),
-    ("layer.revealExpressionErrors", "Reveal Expression Errors", "Ausdrucksfehler anzeigen"),
+    ("layer.revealExpressionErrors", "Reveal Expression Errors", "Expression-Fehler anzeigen"),
     ("", "Create", "Erstellen"),
     ("layer.create", "Convert to Editable Text", "In editierbaren Text umwandeln"),
     ("layer.create", "Create Shapes from Text", "Formen aus Text erstellen"),
@@ -5907,7 +5914,7 @@ const GERMAN: &[(&str, &str, &str)] = &[
     ("keys.velocity", "Keyframe Velocity...", "Keyframe-Geschwindigkeit..."),
     ("", "Keyframe Assistant", "Keyframe-Assistent"),
     ("keys.audioToKeyframes", "Convert Audio to Keyframes", "Audio in Keyframes konvertieren"),
-    ("prop.convertExpressionToKeyframes", "Convert Expression to Keyframes", "Ausdruck in Keyframes konvertieren"),
+    ("prop.convertExpressionToKeyframes", "Convert Expression to Keyframes", "Expression in Keyframes konvertieren"),
     ("keys.easyEase", "Easy Ease", "Easy Ease"),
     ("keys.easyEaseIn", "Easy Ease In", "Easy Ease In"),
     ("keys.easyEaseOut", "Easy Ease Out", "Easy Ease Out"),
@@ -5941,9 +5948,9 @@ const GERMAN: &[(&str, &str, &str)] = &[
     ("", "Add Text Selector", "Textselektor hinzufügen"),
     ("text.addSelector", "Range", "Bereich"),
     ("text.addSelector", "Wiggly", "Wackeln"),
-    ("text.addSelector", "Expression", "Ausdruck"),
+    ("text.addSelector", "Expression", "Expression"),
     ("text.removeAllAnimators", "Remove All Text Animators", "Alle Text-Animatoren entfernen"),
-    ("prop.setExpression", "Add Expression", "Ausdruck hinzufügen"),
+    ("prop.setExpression", "Add Expression", "Expression hinzufügen"),
     ("essential.addProperty", "Add Property to Essential Graphics", "Eigenschaft zu Essential-Grafik hinzufügen"),
     ("prop.separateDimensions", "Separate Dimensions", "Dimensionen trennen"),
     ("track.camera", "Track Camera", "Kamera verfolgen"),
@@ -6076,14 +6083,14 @@ const GERMAN: &[(&str, &str, &str)] = &[
     ("window.panel", "Footage", "Footage"),
     ("window.panel", "Layer", "Ebene"),
     ("window.panel", "Project", "Projekt"),
-    ("window.panel", "Render Queue", "Render-Warteschlange"),
+    ("window.panel", "Render Queue", "Renderliste"),
     ("window.panel", "Timeline", "Zeitleiste"),
     ("window.panel", "Create Nulls From Paths", "Null-Objekte aus Pfaden erstellen"),
     ("window.panel", "VR Comp Editor", "VR-Kompositionseditor"),
     ("", "Help", "Hilfe"),
     ("help.docs", "EffectCraft Help...", "EffectCraft-Hilfe..."),
     ("help.docs", "Scripting Help...", "Hilfe zu Skripts..."),
-    ("help.docs", "Expression Reference...", "Ausdrucksreferenz..."),
+    ("help.docs", "Expression Reference...", "Expression-Referenz..."),
     ("help.docs", "Effect Reference...", "Effektreferenz..."),
     ("anim.browsePresets", "Animation Presets...", "Animations-Presets..."),
     ("app.keyboardShortcuts", "Keyboard Shortcuts...", "Tastenkürzel..."),
@@ -7400,6 +7407,107 @@ mod tests {
         assert_eq!(settings_page_title("Roto Brush"), tr("Roto Brush"));
         set_current("en");
         assert_eq!(settings_page_title("Type"), "Type");
+    }
+
+    /// Both direct and generated reveal labels follow the platform file manager, while filenames
+    /// and identical labels belonging to other commands stay untouched.
+    #[test]
+    fn german_reveal_labels_follow_the_platform_file_manager() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.session.execute("prefs.set", json!({"key": "general.language", "value": "de"})).unwrap();
+        for command in ["file.revealInFinder", "layer.revealInFinder"] {
+            for (source, translated) in [
+                ("Reveal in Finder", "Im Finder anzeigen"),
+                ("Reveal in Explorer", "Im Explorer anzeigen"),
+                ("Reveal in File Manager", "Im Dateimanager anzeigen"),
+            ] {
+                assert_eq!(label(&app, command, source), translated, "{command} / {source}");
+                let e = MenuEntry { command: command.into(), label: source.into(), params: json!({}), shortcut: None, alt_shortcuts: vec![] };
+                assert_eq!(entry(&app, &e, source.into()), translated, "generated {command} / {source}");
+                // Another command keeps a label that merely looks like one of these.
+                assert_eq!(label(&app, "file.openRecent", source), source);
+            }
+            assert_eq!(label(&app, command, "My file.mp4"), "My file.mp4", "a user's filename is never looked up");
+        }
+    }
+
+    /// Generated German menu entries use the shared catalog without translating user content;
+    /// existing Japanese history overrides still apply.
+    #[test]
+    fn generated_german_entries_reach_the_catalog_and_preserve_names() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.session.execute("prefs.set", json!({"key": "general.language", "value": "de"})).unwrap();
+        let mut e = MenuEntry { command: "file.newProject".into(), label: "New Project".into(), params: json!({}), shortcut: None, alt_shortcuts: vec![] };
+        assert_eq!(entry(&app, &e, "New Project".into()), "Neues Projekt");
+        e.command = "window.panel".into();
+        e.label = "Composition".into();
+        assert_eq!(entry(&app, &e, "Composition: File".into()), "Komposition: File");
+        e.command = "file.openRecent".into();
+        e.label = "File".into();
+        assert_eq!(entry(&app, &e, "File".into()), "File");
+        e.command = "edit.undo".into();
+        e.label = "Undo".into();
+        assert_eq!(entry(&app, &e, "Undo File".into()), "Undo File");
+        app.session.execute("prefs.set", json!({"key": "general.language", "value": "ja"})).unwrap();
+        app.session.history.undo.clear();
+        assert_eq!(entry(&app, &e, "Can't Undo".into()), "取り消しできません");
+    }
+
+    /// Time-reversal and editable-style labels describe their actual commands in German.
+    #[test]
+    fn german_menu_labels_name_what_their_command_does() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.session.execute("prefs.set", json!({"key": "general.language", "value": "de"})).unwrap();
+        // "Ebenenreihenfolge umkehren" reads as reversing the stacking order, not time, and
+        // "Formate" are formats, not layer styles (#1443).
+        assert_eq!(label(&app, "layer.timeReverse", "Time-Reverse Layer"), "Ebene zeitlich umkehren");
+        assert_eq!(label(&app, "keys.timeReverse", "Time-Reverse Keyframes"), "Keyframes zeitlich umkehren");
+        assert_eq!(label(&app, "layer.style.convertToEditable", "Convert to Editable Styles"), "In bearbeitbare Stile umwandeln");
+    }
+
+    /// German command labels use consistent Expression, tracking and reveal terminology.
+    #[test]
+    fn german_uses_one_word_per_term() {
+        let german: Vec<&str> = GERMAN.iter().map(|(_, _, de)| *de).collect();
+        let with = |needle: &str| german.iter().filter(|de| de.contains(needle)).copied().collect::<Vec<_>>();
+        // Keep the review's German AE term "Expression" consistent across the menu catalog.
+        let expressions: Vec<_> = GERMAN.iter().filter(|(_, en, _)| en.contains("Expression")).collect();
+        assert!(!expressions.is_empty());
+        for (_, en, de) in expressions {
+            assert!(de.contains("Expression"), "{en}: {de}");
+        }
+        // "Track" as a verb is "verfolgen", not "tracken".
+        assert!(with("tracken").is_empty(), "{:?}", with("tracken"));
+        // "Reveal <somewhere>" is "anzeigen". ("einblenden" stays right for "Show All",
+        // "Fade from Blur" and the like, so only the Reveal entries are checked.)
+        let reveal: Vec<&str> =
+            GERMAN.iter().filter(|(_, en, _)| en.starts_with("Reveal")).map(|(_, _, de)| *de).filter(|de| !de.to_lowercase().contains("anzeigen")).collect();
+        assert!(reveal.is_empty(), "{reveal:?}");
+        // One spelling of "to the front".
+        let vorn: Vec<&str> = german.iter().filter(|de| de.ends_with("nach vorn")).copied().collect();
+        assert!(vorn.is_empty(), "{vorn:?}");
+        // The terms those entries joined are still the majority ones.
+        assert!(with("verfolgen").len() >= 4, "{:?}", with("verfolgen"));
+        assert!(with("anzeigen").len() >= 12, "{}", with("anzeigen").len());
+    }
+
+    #[test]
+    fn czech_reveal_labels_follow_the_platform_file_manager() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.session.execute("prefs.set", json!({"key": "general.language", "value": "cs"})).unwrap();
+        for command in ["file.revealInFinder", "layer.revealInFinder"] {
+            for (source, translated) in [
+                ("Reveal in Finder", "Zobrazit ve Finderu"),
+                ("Reveal in Explorer", "Zobrazit v Průzkumníku"),
+                ("Reveal in File Manager", "Zobrazit ve správci souborů"),
+            ] {
+                let e = MenuEntry { label: source.into(), command: command.into(), params: json!({}), shortcut: None, alt_shortcuts: vec![] };
+                assert_eq!(label(&app, command, source), translated);
+                assert_eq!(entry(&app, &e, source.into()), translated);
+                assert_eq!(label(&app, "file.openRecent", source), source);
+            }
+            assert_eq!(label(&app, command, "My file.mp4"), "My file.mp4");
+        }
     }
 
     #[test]

@@ -1404,12 +1404,24 @@ mod tests {
     fn microsoft_families_resolve_to_metric_compatible_substitutes() {
         add_font_data(test_font("Carlito"));
         add_font_data(test_font("Caladea"));
-        let calibri = resolve("Calibri", "Regular");
+        let calibri = resolve_alias("Calibri", "Regular").unwrap();
         assert_eq!(face(calibri.face).info.family, "Carlito");
         assert!(calibri.missing, "the original name stays missing for Find Missing Fonts");
-        let cambria = resolve("Cambria", "Bold");
+        let cambria = resolve_alias("Cambria", "Bold").unwrap();
         assert_eq!(face(cambria.face).info.family, "Caladea");
         assert!(cambria.missing);
+        // The public resolver prefers the original when the host has it installed. Testing
+        // the alias directly above keeps fallback coverage independent of the host's fonts.
+        for (family, style, substitute) in [("Calibri", "Regular", "Carlito"), ("Cambria", "Bold", "Caladea")] {
+            let resolved = resolve(family, style);
+            if let Some(installed) = resolve_in(family, style).or_else(|| resolve_by_name(family)) {
+                assert_eq!(resolved.face, installed.face);
+                assert!(!resolved.missing);
+            } else {
+                assert_eq!(face(resolved.face).info.family, substitute);
+                assert!(resolved.missing);
+            }
+        }
         let unknown = resolve("No Such Family 1677", "Regular");
         assert_eq!(face(unknown.face).info.family, DEFAULT_FAMILY);
         assert!(unknown.missing);

@@ -332,14 +332,14 @@ fn render_out_is_relative_to_the_working_directory() {
     };
     // A path that already names the project folder is not doubled.
     let done = render(&root, "proj/x.ecproj", "proj/out/d.gif");
-    assert_eq!(done, root.join("proj/out/d.gif"));
+    assert_eq!(done.canonicalize().unwrap(), root.join("proj/out/d.gif").canonicalize().unwrap());
     assert!(done.exists() && !proj.join("proj").exists());
     // Another working directory: the file lands there, not beside the project.
     let done = render(&elsewhere, project.to_str().unwrap(), "out/card.gif");
-    assert_eq!(done, elsewhere.join("out/card.gif"));
+    assert_eq!(done.canonicalize().unwrap(), elsewhere.join("out/card.gif").canonicalize().unwrap());
     assert!(done.exists() && !proj.join("out/card.gif").exists());
     // `./f.gif` too.
-    assert_eq!(render(&elsewhere, project.to_str().unwrap(), "./f.gif"), elsewhere.join("./f.gif"));
+    assert_eq!(render(&elsewhere, project.to_str().unwrap(), "./f.gif").canonicalize().unwrap(), elsewhere.join("./f.gif").canonicalize().unwrap());
     // An absolute path is unchanged.
     let abs = root.join("abs.gif");
     assert_eq!(render(&elsewhere, project.to_str().unwrap(), abs.to_str().unwrap()), abs);
