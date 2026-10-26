@@ -274,22 +274,23 @@ fn interpolation_dialog_temporal_spatial_and_roving() {
     s.execute("keys.interpolation", json!({"interpolation": "continuousBezier", "spatial": "linear"})).unwrap();
     let p = prop(&s, l, "transform/position");
     assert!(p.keys.iter().all(|k| k.continuous && !k.auto_bezier && !k.spatial_auto && k.spatial_out == [0.0; 3]));
-    // Rove the middle key: its time follows the path length (300 of 400 px → 1.5 s).
+    // Rove the middle key: its time is where the span's one ease (eased ends here) covers 300 of
+    // the 400 px (1.5 s at constant speed).
     let uid = p.uid;
     s.execute("keys.select", json!({"keys": [{"layer": l, "prop": uid, "time": 0.3}]})).unwrap();
     s.execute("keys.interpolation", json!({"roving": true})).unwrap();
     let after = |s: &Session| {
         let p = prop(s, l, "transform/position");
         assert!(p.keys[1].roving);
-        assert!((p.keys[1].time.seconds() - 1.5).abs() < 0.01, "{}", p.keys[1].time.seconds());
+        assert!((p.keys[1].time.seconds() - 1.424).abs() < 0.01, "{}", p.keys[1].time.seconds());
         // The selection follows the roving key.
-        assert!((s.state.selected_keys[0].time.seconds() - 1.5).abs() < 0.01);
+        assert!((s.state.selected_keys[0].time.seconds() - 1.424).abs() < 0.01);
     };
     undo_redo_roundtrip(&mut s, after, |s| assert!(!prop(s, l, "transform/position").keys[1].roving));
     // Moving the last key re-times the roving key.
     s.execute("keys.set", json!({"layer": l, "path": "transform/position", "time": 2.0, "newTime": 4.0})).unwrap();
     let p = prop(&s, l, "transform/position");
-    assert!((p.keys[1].time.seconds() - 3.0).abs() < 0.02, "{}", p.keys[1].time.seconds());
+    assert!((p.keys[1].time.seconds() - 2.847).abs() < 0.02, "{}", p.keys[1].time.seconds());
     // Toggle hold on a key and back.
     s.execute("keys.select", json!({"keys": [{"layer": l, "prop": uid, "time": 0.0}]})).unwrap();
     s.execute("keys.toggleHold", json!({})).unwrap();
