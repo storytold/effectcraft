@@ -323,6 +323,17 @@ fn project_clipped(m: &Mat3, poly: &[[f64; 2]]) -> Vec<[f64; 2]> {
     out.iter().map(|q| [q[0] / q[2], q[1] / q[2]]).filter(|q| q[0].is_finite() && q[1].is_finite()).collect()
 }
 
+/// Length of each 3D gizmo arrow in layer units, so it spans 60 screen px whatever the layer's net
+/// scale (its own and its parents') is (#1910). `w` is the layer's world matrix.
+fn gizmo_axis_lengths(w: &effectcraft_engine::geom::Mat4, zoom: f64) -> [f64; 3] {
+    use effectcraft_engine::geom::vec3;
+    let base = 60.0 / zoom;
+    [vec3(1.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0), vec3(0.0, 0.0, 1.0)].map(|u| {
+        let k = w.apply_vec(u).length();
+        if k.is_finite() && k > 1e-9 { base / k } else { base }
+    })
+}
+
 /// The segment a → b (world space) through the projection `pc`, clipped at the near plane.
 fn project_segment(pc: &effectcraft_engine::geom::Mat4, a: effectcraft_engine::geom::Vec3, b: effectcraft_engine::geom::Vec3) -> Option<[[f64; 2]; 2]> {
     let h = |p: effectcraft_engine::geom::Vec3| {
@@ -1095,12 +1106,12 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     let w = ectx.world_matrix(l);
                     let pc = cam_state(&ectx).projection(cw as f64, ch as f64) * w;
                     let a3 = effectcraft_engine::geom::vec3(a[0], a[1], a[2]);
-                    let len = 60.0 / zoom as f64;
+                    let lens = gizmo_axis_lengths(&w, zoom as f64);
                     let pinv = parent_world_inverse(&ectx, l);
                     for (axis, col, name) in [
-                        (effectcraft_engine::geom::vec3(len, 0.0, 0.0), Color32::from_rgb(0xe0, 0x50, 0x50), "x"),
-                        (effectcraft_engine::geom::vec3(0.0, len, 0.0), Color32::from_rgb(0x60, 0xd0, 0x60), "y"),
-                        (effectcraft_engine::geom::vec3(0.0, 0.0, len), Color32::from_rgb(0x50, 0x8c, 0xf0), "z"),
+                        (effectcraft_engine::geom::vec3(lens[0], 0.0, 0.0), Color32::from_rgb(0xe0, 0x50, 0x50), "x"),
+                        (effectcraft_engine::geom::vec3(0.0, lens[1], 0.0), Color32::from_rgb(0x60, 0xd0, 0x60), "y"),
+                        (effectcraft_engine::geom::vec3(0.0, 0.0, lens[2]), Color32::from_rgb(0x50, 0x8c, 0xf0), "z"),
                     ] {
                         // (clipped at the camera's near plane, #572)
                         let Some([o, e]) = project_segment(&pc, a3, a3 + axis) else { continue };
@@ -2914,6 +2925,17 @@ mod tests {
         assert_eq!(at([24.0, -24.0]), [0.0, 0.0, 60.0]);
         assert_eq!(at([-12.0, 12.0]), [0.0, 0.0, -30.0]);
         assert_eq!(at([10.0, 10.0]), [0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn gizmo_arrows_keep_their_length_when_the_layer_is_scaled() {
+        let scaled = |k: f64| Mat4([[k, 0.0, 0.0, 0.0], [0.0, k, 0.0, 0.0], [0.0, 0.0, k, 0.0], [0.0, 0.0, 0.0, 1.0]]);
+        let l = gizmo_axis_lengths(&scaled(0.1), 1.0);
+        for v in l {
+            assert!((v * 0.1 - 60.0).abs() < 1e-9, "{l:?}");
+        }
+        assert_eq!(gizmo_axis_lengths(&scaled(1.0), 2.0), [30.0; 3]);
+        assert_eq!(gizmo_axis_lengths(&scaled(0.0), 1.0), [60.0; 3]);
     }
 
     #[test]
