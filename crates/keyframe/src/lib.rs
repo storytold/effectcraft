@@ -502,6 +502,10 @@ pub fn time_reverse(keys: &mut [Keyframe]) {
         k.time = Tick(reversed.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64);
         std::mem::swap(&mut k.in_interp, &mut k.out_interp);
         std::mem::swap(&mut k.in_ease, &mut k.out_ease);
+        // Speed is signed units per second; mirroring time flips its sign.
+        for e in k.in_ease.iter_mut().chain(k.out_ease.iter_mut()) {
+            e.speed = -e.speed;
+        }
         std::mem::swap(&mut k.spatial_in, &mut k.spatial_out);
     }
     keys.reverse();
@@ -1032,6 +1036,24 @@ mod tests {
         assert_eq!(keys.iter().map(|k| k.time.seconds().round() as i64).collect::<Vec<_>>(), vec![1, 3, 4]);
         assert_eq!(keys[0].value, Value::Scalar(10.0));
         assert_eq!(keys[2].in_interp, Interp::Hold);
+    }
+
+    #[test]
+    fn time_reverse_negates_ease_speed() {
+        let mut a = Keyframe::new(s(0.0), Value::Scalar(0.0)).eased();
+        let mut b = Keyframe::new(s(2.0), Value::Scalar(100.0)).eased();
+        a.out_ease = vec![Ease { speed: 200.0, influence: 1.0 / 3.0 }];
+        b.in_ease = vec![Ease { speed: 10.0, influence: 1.0 / 3.0 }];
+        let orig = vec![a, b];
+        let mut rev = orig.clone();
+        time_reverse(&mut rev);
+        assert_eq!(rev[0].out_ease[0].speed, -10.0);
+        assert_eq!(rev[1].in_ease[0].speed, -200.0);
+        for t in [0.2, 0.5, 1.3] {
+            let o = evaluate(&orig, s(t), false).unwrap().as_f64();
+            let r = evaluate(&rev, s(2.0 - t), false).unwrap().as_f64();
+            assert!((o - r).abs() < 1e-6, "t={t} orig {o} reversed {r}");
+        }
     }
 
     proptest::proptest! {
