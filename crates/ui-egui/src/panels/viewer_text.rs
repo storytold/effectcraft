@@ -241,6 +241,13 @@ pub(crate) fn begin_ui(ctx: &egui::Context) {
     ctx.data_mut(|data| data.remove::<ImeGeometry>(id));
 }
 
+/// Whether the text editor recorded its IME geometry in this pass of the current viewport.
+pub(crate) fn ime_recorded(ctx: &egui::Context) -> bool {
+    let viewport = ctx.viewport_id();
+    let pass = ctx.cumulative_pass_nr_for(viewport);
+    ctx.data(|d| d.get_temp::<ImeGeometry>(ime_geometry_id(viewport))).is_some_and(|(p, _, _)| p == pass)
+}
+
 pub(crate) fn finish_logic(app: &EffectcraftApp, ctx: &egui::Context) {
     let id = mode_id(ctx.viewport_id());
     if !ctx.data(|data| data.get_temp::<bool>(id).unwrap_or(false)) {
@@ -1507,6 +1514,95 @@ mod tests {
             out.textures_delta.clear();
             out.platform_output.ime
         }
+    }
+
+    /// One native floating window holding the Timeline's group and then the Viewer's.
+    fn two_group_window() -> craft_ui::docking::Floating<PanelKind> {
+        let groups = vec![craft_ui::docking::Group::new(vec![PanelKind::Timeline], 0), craft_ui::docking::Group::new(vec![PanelKind::Viewer(1)], 0)];
+        craft_ui::docking::Floating::stack(groups, [0.0, 0.0, 320.0, 360.0]).expect("two groups make a window")
+    }
+
+    impl ImePass {
+        /// One pass of a native window with a body that edits no text and the Viewer's editor,
+        /// in the order given, publishing as `NativeIme` decides or, with `every`, after each
+        /// body. Returns the descriptor and the preedit the pass ended with.
+        fn window(
+            &mut self,
+            app: &mut EffectcraftApp,
+            window: &craft_ui::docking::Floating<PanelKind>,
+            events: Vec<egui::Event>,
+            viewer_first: bool,
+            every: bool,
+        ) -> (Option<egui::output::IMEOutput>, Option<String>) {
+            let ctx = self.ctx.clone();
+            let (rect, viewport) = (self.rect, self.viewport);
+            let mut viewports = egui::ViewportIdMap::default();
+            viewports.insert(viewport, egui::ViewportInfo::default());
+            let raw = egui::RawInput { viewport_id: viewport, viewports, screen_rect: Some(rect), events, ..Default::default() };
+            let mut preedit = None;
+            let mut out = ctx.run_ui(raw, |ui| {
+                let mut ime = crate::dock_ui::NativeIme::new(std::slice::from_ref(window), &[]);
+                let order = if viewer_first { [true, false] } else { [false, true] };
+                for viewer in order {
+                    if ime.begin_body(viewport) {
+                        begin_ui(ui.ctx());
+                    }
+                    if viewer {
+                        ui.interact(rect, focus_id(), egui::Sense::focusable_noninteractive());
+                        ui.memory_mut(|m| m.request_focus(focus_id()));
+                        sync_ime_target(ui, app);
+                        keyboard(app, ui, rect);
+                        let pass = ui.ctx().cumulative_pass_nr_for(viewport);
+                        ui.data_mut(|d| d.insert_temp(ime_geometry_id(viewport), (pass, rect, rect)));
+                    }
+                    if ime.publishes(viewport, ime_recorded(ui.ctx())) || every {
+                        finish_ime(app, ui);
+                    }
+                }
+                assert!(ime.unpublished().is_empty(), "the window published");
+                preedit = read_preedit(ui).map(|p| p.text);
+            });
+            out.textures_delta.clear();
+            (out.platform_output.ime, preedit)
+        }
+    }
+
+    #[test]
+    fn native_window_with_a_group_before_the_viewer_keeps_the_composition() {
+        let window = two_group_window();
+        let viewport = craft_ui::docking::DockArea::<PanelKind>::window_viewport(crate::dock_ui::area_id(), window.id);
+        let preview = || egui::Event::Ime(egui::ImeEvent::Preedit { text: "é".into(), active_range_chars: None });
+        for viewer_first in [false, true] {
+            let (mut app, _) = editor("abcd", 4, 4);
+            let mut pass = ImePass::new(viewport);
+            let (first, preedit) = pass.window(&mut app, &window, vec![preview()], viewer_first, false);
+            let first = first.expect("the editor publishes");
+            assert_eq!(preedit.as_deref(), Some("é"));
+            for _ in 0..2 {
+                let (ime, preedit) = pass.window(&mut app, &window, vec![], viewer_first, false);
+                let ime = ime.expect("the editor keeps publishing");
+                assert!(!ime.should_interrupt_composition, "viewer first: {viewer_first}");
+                assert_eq!((ime.owner, ime.context_generation), (first.owner, first.context_generation), "the same IME context");
+                assert_eq!(preedit.as_deref(), Some("é"), "the preedit survives the other body");
+            }
+        }
+        // Publishing after the body drawn before the Viewer clears the preedit and interrupts.
+        let (mut app, _) = editor("abcd", 4, 4);
+        let mut pass = ImePass::new(viewport);
+        pass.window(&mut app, &window, vec![preview()], false, true);
+        let (ime, preedit) = pass.window(&mut app, &window, vec![], false, true);
+        assert!(ime.expect("the editor publishes").should_interrupt_composition);
+        assert_eq!(preedit, None);
+        // A window that drew fewer bodies than its layout counts publishes after every body in
+        // its next pass.
+        let mut ime = crate::dock_ui::NativeIme::new(std::slice::from_ref(&window), &[]);
+        ime.begin_body(viewport);
+        assert!(!ime.publishes(viewport, false));
+        let unpublished = ime.unpublished();
+        assert_eq!(unpublished, vec![viewport]);
+        let mut ime = crate::dock_ui::NativeIme::new(std::slice::from_ref(&window), &unpublished);
+        ime.begin_body(viewport);
+        assert!(ime.publishes(viewport, false));
     }
 
     fn ime_text(ime: &egui::output::IMEOutput) -> (&str, usize, usize) {

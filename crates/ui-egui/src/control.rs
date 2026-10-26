@@ -377,7 +377,7 @@ fn panel(app: &mut EffectcraftApp, method: &str, p: &Value) -> Outcome {
     if method == "ui.panel.show" {
         app.show_panel(panel);
     } else {
-        app.ui.dock.close(panel);
+        app.close_panel(panel);
     }
     ok(Value::Null)
 }

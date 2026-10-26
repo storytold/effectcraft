@@ -318,7 +318,8 @@ fn hold_browse_opens_a_submenu_and_the_release_inside_picks_an_entry() {
     h.state_mut().session.state.selected_layers = vec![first];
     let effect = rect(&h, "menu.Effect");
     press(&mut h, effect.center());
-    assert!(shown(&h, "Effect Controls"), "the Effect menu opens on the press");
+    // (Effect ▸ Remove All: "Effect Controls" also names the panel's tab.)
+    assert!(shown(&h, "Remove All"), "the Effect menu opens on the press");
     // The categories come from the effect registry; the first alphabetically is "3D Channel".
     let cat = h.query_by_label_contains("3D Channel").expect("the category row is shown").rect();
     move_to(&mut h, cat.center());
@@ -326,7 +327,7 @@ fn hold_browse_opens_a_submenu_and_the_release_inside_picks_an_entry() {
     let entry = h.query_by_label_contains("Cryptomatte").expect("the submenu is open").rect();
     move_to(&mut h, entry.center());
     release(&mut h, entry.center());
-    assert!(!shown(&h, "Effect Controls"), "the release closed the menus");
+    assert!(!shown(&h, "Remove All"), "the release closed the menus");
     assert!(h.state().session.state.last_effect.is_some(), "and the release chose the entry: it applied its effect");
 }
 

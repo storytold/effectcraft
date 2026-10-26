@@ -220,10 +220,6 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: PanelKind, rect: Rec
 pub fn panel_menu_popup(app: &mut EffectcraftApp, ui: &mut egui::Ui) {
     let id = egui::Id::unique("panel-menu");
     let Some((panel, pos)) = ui.ctx().data(|d| d.get_temp::<(PanelKind, egui::Pos2)>(id)) else { return };
-    // The menu opens in the window that shows the panel (a panel can have its own window).
-    if app.panel_viewport(ui.ctx(), panel) != ui.ctx().viewport_id() {
-        return;
-    }
     let mut close = false;
     let area = egui::Area::new(id.with("area")).order(egui::Order::Foreground).fixed_pos(pos).show(ui.ctx(), |ui| {
         egui::Frame::popup(ui.style()).show(ui, |ui| {
@@ -232,13 +228,14 @@ pub fn panel_menu_popup(app: &mut EffectcraftApp, ui: &mut egui::Ui) {
                 let _ = app.dock_command(ui.ctx(), craft_ui::docking::Action::Close { panel });
                 close = true;
             }
-            let floating = app.ui.floating.iter().any(|f| f.panels.contains(&panel));
+            let floating = crate::dock::WorkspaceExt::is_floating(&app.ui.dock, panel);
             if !floating && ui.button(tr("Undock Panel")).clicked() {
                 let r = crate::dock_ui::default_float_rect(ui.ctx().content_rect());
                 let _ = app.dock_command(ui.ctx(), craft_ui::docking::Action::Float { panel, rect: r });
                 close = true;
             }
-            // Multiple monitors: a native window of its own, which can go on another screen.
+            // Multiple monitors: an OS window of its own, which can go on another screen. Where
+            // egui embeds viewports (the web), floating windows stay in the page.
             if !ui.ctx().embed_viewports() {
                 let windowed = app.in_panel_window(panel);
                 if ui.button(if windowed { tr("Move Panel to Main Window") } else { tr("Move Panel to New Window") }).clicked() {

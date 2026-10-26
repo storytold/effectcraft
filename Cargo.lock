@@ -216,7 +216,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "parking_lot",
  "percent-encoding",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
  "wl-clipboard-rs",
  "x11rb",
 ]
@@ -1038,12 +1038,12 @@ dependencies = [
 [[package]]
 name = "craft-docpath"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=82a24b006eefa036b43c09a67fb9a3fbd17ffe63#82a24b006eefa036b43c09a67fb9a3fbd17ffe63"
+source = "git+https://github.com/storytold/craft-libs?rev=512b54355cd1418f4e8c56a3fbd7483c3c274bf3#512b54355cd1418f4e8c56a3fbd7483c3c274bf3"
 
 [[package]]
 name = "craft-pdf"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=9f75d3dc19b4b514c4f3d4847ed1ec1b0e86b4ef#9f75d3dc19b4b514c4f3d4847ed1ec1b0e86b4ef"
+source = "git+https://github.com/storytold/craft-libs?rev=512b54355cd1418f4e8c56a3fbd7483c3c274bf3#512b54355cd1418f4e8c56a3fbd7483c3c274bf3"
 dependencies = [
  "hayro-syntax",
  "thiserror 2.0.21",
@@ -1052,16 +1052,20 @@ dependencies = [
 [[package]]
 name = "craft-ui"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=25da1314d443171b4adeaad2cd9454b273f35c6f#25da1314d443171b4adeaad2cd9454b273f35c6f"
+source = "git+https://github.com/storytold/craft-libs?rev=512b54355cd1418f4e8c56a3fbd7483c3c274bf3#512b54355cd1418f4e8c56a3fbd7483c3c274bf3"
 dependencies = [
  "egui",
+ "log",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
  "serde",
 ]
 
 [[package]]
 name = "craft-update"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=495e5971bc024aa96e6ed318cb6e7cd3a0103184#495e5971bc024aa96e6ed318cb6e7cd3a0103184"
+source = "git+https://github.com/storytold/craft-libs?rev=512b54355cd1418f4e8c56a3fbd7483c3c274bf3#512b54355cd1418f4e8c56a3fbd7483c3c274bf3"
 dependencies = [
  "chrono",
  "dunce",
@@ -2077,7 +2081,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2866,7 +2870,7 @@ checksum = "9f4d0e94ddd48749f06bbe4e5389fb9799a0c45bcaf00495042076ef05e3241a"
 [[package]]
 name = "hayro-jbig2"
 version = "0.3.0"
-source = "git+https://github.com/storytold/craft-libs?rev=9f75d3dc19b4b514c4f3d4847ed1ec1b0e86b4ef#9f75d3dc19b4b514c4f3d4847ed1ec1b0e86b4ef"
+source = "git+https://github.com/storytold/craft-libs?rev=512b54355cd1418f4e8c56a3fbd7483c3c274bf3#512b54355cd1418f4e8c56a3fbd7483c3c274bf3"
 dependencies = [
  "hayro-ccitt",
 ]
@@ -2880,7 +2884,7 @@ checksum = "c75ab947623ef4ccaa7acf0579edf7cbb5a73838e3839a7be73335e522f433a1"
 [[package]]
 name = "hayro-syntax"
 version = "0.7.2"
-source = "git+https://github.com/storytold/craft-libs?rev=9f75d3dc19b4b514c4f3d4847ed1ec1b0e86b4ef#9f75d3dc19b4b514c4f3d4847ed1ec1b0e86b4ef"
+source = "git+https://github.com/storytold/craft-libs?rev=512b54355cd1418f4e8c56a3fbd7483c3c274bf3#512b54355cd1418f4e8c56a3fbd7483c3c274bf3"
 dependencies = [
  "hayro-jbig2",
  "hayro-jpeg2000",
@@ -3575,7 +3579,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4705,7 +4709,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4762,7 +4766,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5437,7 +5441,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.5",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6507,7 +6511,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

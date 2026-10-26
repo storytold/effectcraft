@@ -126,6 +126,27 @@ impl NativeMenu {
     }
 }
 
+/// The native menu spec as the menu bar shows it now: [`build`], with the Edit items a text field
+/// takes ([`edits_text`]) enabled while one has the keyboard ([`text_field_window`]). Paste
+/// otherwise follows the project clipboard and would be greyed out with nothing copied there,
+/// while the field can paste.
+pub fn build_now(app: &EffectcraftApp, ctx: &egui::Context) -> NativeMenu {
+    fn enable(nodes: &mut [NativeNode]) {
+        for node in nodes {
+            match node {
+                NativeNode::Item(item) if edits_text(&item.command) => item.enabled = true,
+                NativeNode::Submenu { children, .. } => enable(children),
+                _ => {}
+            }
+        }
+    }
+    let mut menu = build(app);
+    if text_field_window(ctx).is_some() {
+        enable(&mut menu.menus);
+    }
+    menu
+}
+
 /// Build the native menu spec for the app's current state.
 pub fn build(app: &EffectcraftApp) -> NativeMenu {
     fn rec(app: &EffectcraftApp, nodes: &[MenuNode], path: &str, out: &mut Vec<NativeNode>) {
@@ -332,9 +353,23 @@ pub fn state_key(app: &EffectcraftApp) -> u64 {
     h.finish()
 }
 
-/// Commands that act on a focused text field instead (Edit menu while typing): the egui event to
-/// send in their place.
-fn text_field_event(command: &str, clipboard: Option<String>) -> Option<Vec<egui::Event>> {
+/// The window whose text field has the keyboard: a floating panel's own OS window, or the main
+/// window, where any widget that holds the keyboard counts (the Viewer's text editor is not an
+/// egui text field).
+pub fn text_field_window(ctx: &egui::Context) -> Option<egui::ViewportId> {
+    craft_ui::docking::typing_window(ctx).or_else(|| ctx.egui_wants_keyboard_input().then_some(egui::ViewportId::ROOT))
+}
+
+/// Whether a focused text field takes the menu command `command` ([`activate`]): the native menu
+/// keeps such items enabled while one has the keyboard, whatever the project allows.
+pub fn edits_text(command: &str) -> bool {
+    text_field_event(command).is_some()
+}
+
+/// Commands that act on a focused text field instead (Edit menu while typing): the egui events
+/// to send in their place. Paste is a Cmd+V press, which the field's window turns into a request
+/// for the clipboard text.
+fn text_field_event(command: &str) -> Option<Vec<egui::Event>> {
     let key = |k: egui::Key, shift: bool| egui::Event::Key {
         key: k,
         physical_key: None,
@@ -345,7 +380,7 @@ fn text_field_event(command: &str, clipboard: Option<String>) -> Option<Vec<egui
     Some(match command {
         "edit.copy" => vec![egui::Event::Copy],
         "edit.cut" => vec![egui::Event::Cut],
-        "edit.paste" => vec![egui::Event::Paste(clipboard?)],
+        "edit.paste" => vec![key(egui::Key::V, false)],
         "edit.selectAll" => vec![key(egui::Key::A, false)],
         "edit.undo" => vec![key(egui::Key::Z, false)],
         "edit.redo" => vec![key(egui::Key::Z, true)],
@@ -353,8 +388,43 @@ fn text_field_event(command: &str, clipboard: Option<String>) -> Option<Vec<egui
     })
 }
 
+/// Hand a text field's Edit command to the window `window` whose field has the keyboard. The
+/// main window gets the clipboard text itself and the events through the synthetic queue; a
+/// floating panel's OS window gets each key pressed and released, and asks for the clipboard
+/// text on Cmd+V (`craft_ui::docking::send_keys`).
+fn send_to_text_field(app: &mut EffectcraftApp, ctx: &egui::Context, window: egui::ViewportId, events: Vec<egui::Event>) {
+    if window == egui::ViewportId::ROOT {
+        for event in events {
+            match event {
+                egui::Event::Key { key: egui::Key::V, .. } => {
+                    if let Some(text) = app.hooks.clipboard_text.as_ref().and_then(|f| f()) {
+                        app.synthetic.push(egui::Event::Paste(text));
+                    }
+                }
+                event => app.synthetic.push(event),
+            }
+        }
+        ctx.request_repaint();
+        return;
+    }
+    let events = events
+        .into_iter()
+        .flat_map(|event| {
+            let release = match &event {
+                egui::Event::Key { key, physical_key, modifiers, .. } => {
+                    Some(egui::Event::Key { key: *key, physical_key: *physical_key, pressed: false, repeat: false, modifiers: *modifiers })
+                }
+                _ => None,
+            };
+            std::iter::once(event).chain(release)
+        })
+        .collect();
+    craft_ui::docking::send_keys(ctx, window, events);
+}
+
 /// Run a native menu item (by id) the way the in-window menu bar does. While a text field has
-/// the keyboard, Edit ▸ Cut/Copy/Paste/Select All/Undo/Redo edit the text instead.
+/// the keyboard ([`text_field_window`]), Edit ▸ Cut/Copy/Paste/Select All/Undo/Redo edit the
+/// text instead.
 pub fn activate(app: &mut EffectcraftApp, ctx: &egui::Context, menu: &NativeMenu, id: &str) -> Result<Value, String> {
     let item = menu.find(id).ok_or_else(|| format!("no native menu item `{id}`"))?;
     let (command, params) = (item.command.clone(), item.params.clone());
@@ -369,13 +439,12 @@ pub fn activate(app: &mut EffectcraftApp, ctx: &egui::Context, menu: &NativeMenu
         ctx.request_repaint();
         return Ok(Value::Null);
     }
-    if ctx.egui_wants_keyboard_input() {
-        let clip = if command == "edit.paste" { app.hooks.clipboard_text.as_ref().and_then(|f| f()) } else { None };
-        if let Some(events) = text_field_event(&command, clip) {
-            app.synthetic.extend(events);
-            ctx.request_repaint();
-            return Ok(Value::Null);
-        }
+    // The menu bar takes the Edit menu's key equivalents before any window sees them: while a
+    // text field has the keyboard, in the main window or a floating panel's own window, the
+    // field gets the key and the project command does not run.
+    if let (Some(window), Some(events)) = (text_field_window(ctx), text_field_event(&command)) {
+        send_to_text_field(app, ctx, window, events);
+        return Ok(Value::Null);
     }
     let params = if params.is_null() { json!({}) } else { params };
     let (command, params) = crate::menus::menu_choice(app, command, params);
@@ -605,7 +674,7 @@ mod tests {
         assert_ne!(state_key(&app), k0);
         // A tab behind another one, a closed panel and panels under a maximized one are not shown.
         assert_eq!((checked(&app, "renderQueue"), checked(&app, "timeline")), (Some(true), Some(false)));
-        app.ui.dock.close(PanelKind::RenderQueue);
+        app.close_panel(PanelKind::RenderQueue);
         assert_eq!((checked(&app, "renderQueue"), checked(&app, "timeline")), (Some(false), Some(true)));
         app.ui.maximized = Some(PanelKind::Timeline);
         assert_eq!((checked(&app, "timeline"), checked(&app, "project")), (Some(true), Some(false)));
@@ -648,9 +717,9 @@ mod tests {
             activate(app, &ctx, &spec, &id).unwrap();
         };
         choose(&mut app);
-        assert!(app.ui.dock.contains(PanelKind::Align));
+        assert!(crate::dock::WorkspaceExt::is_open(&app.ui.dock, PanelKind::Align));
         choose(&mut app);
-        assert!(!app.ui.dock.contains(PanelKind::Align));
+        assert!(!crate::dock::WorkspaceExt::is_open(&app.ui.dock, PanelKind::Align));
     }
 
     #[test]
@@ -663,8 +732,7 @@ mod tests {
         activate(&mut app, &ctx, &spec, &id).unwrap();
         assert_eq!(app.session.active_comp().unwrap().layers.len(), n + 1);
         assert!(activate(&mut app, &ctx, &spec, "m.999").is_err());
-        assert!(text_field_event("edit.copy", None).is_some());
-        assert!(text_field_event("edit.paste", None).is_none());
-        assert!(text_field_event("layer.newNull", None).is_none());
+        assert!(edits_text("edit.copy") && edits_text("edit.paste"));
+        assert!(!edits_text("layer.newNull"));
     }
 }

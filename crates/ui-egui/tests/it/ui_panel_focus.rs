@@ -5,7 +5,8 @@
 use effectcraft_engine::Session;
 use effectcraft_engine::project::ItemId;
 use effectcraft_ui_egui::EffectcraftApp;
-use effectcraft_ui_egui::dock::{DockNode, PanelKind};
+use effectcraft_ui_egui::dock::WorkspaceExt as _;
+use effectcraft_ui_egui::dock::{Node, PanelKind, Workspace};
 use egui::{Event, Pos2, pos2};
 use egui_kittest::Harness;
 use serde_json::json;
@@ -42,15 +43,6 @@ fn click_n(h: &mut Harness<'_, EffectcraftApp>, p: Pos2, n: u32) {
     h.run_steps(2);
 }
 
-/// The tabs of the docked group holding `p`, in order.
-fn group_of(n: &DockNode, p: PanelKind) -> Option<Vec<PanelKind>> {
-    match n {
-        DockNode::Split { a, b, .. } => group_of(a, p).or_else(|| group_of(b, p)),
-        DockNode::Tabs { panels, .. } => panels.contains(&p).then(|| panels.clone()),
-        DockNode::Stack { entries } => entries.iter().find(|e| e.contains(p)).map(|e| e.panels.clone()),
-    }
-}
-
 fn invoke(h: &mut Harness<'_, EffectcraftApp>, id: &str, params: serde_json::Value) {
     let ctx = h.ctx.clone();
     effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, id, params).unwrap();
@@ -66,7 +58,7 @@ fn opening_a_comp_brings_up_a_closed_composition_panel() {
     let (mut h, other, main) = harness();
     assert_eq!(group_of(&h.state().ui.dock, PanelKind::Composition), Some(vec![PanelKind::Composition, PanelKind::Layer]));
     invoke(&mut h, "window.closePanel", json!({"panel": "Composition"}));
-    assert!(!h.state().ui.dock.contains(PanelKind::Composition));
+    assert!(!h.state().ui.dock.is_docked(PanelKind::Composition));
     assert!(h.state().ui.dock.is_visible(PanelKind::Layer), "the centre shows the Layer panel");
 
     // Double-click "Other" in the Project panel.
@@ -75,7 +67,7 @@ fn opening_a_comp_brings_up_a_closed_composition_panel() {
     assert_eq!(h.state().session.active_comp_id(), Some(ItemId(other)));
     let dock = &h.state().ui.dock;
     assert!(dock.is_visible(PanelKind::Composition), "the Composition panel is back and in front");
-    assert_eq!(group_of(dock, PanelKind::Composition), Some(vec![PanelKind::Layer, PanelKind::Composition]), "back in the centre");
+    assert_eq!(group_of(dock, PanelKind::Composition), Some(vec![PanelKind::Composition, PanelKind::Layer]), "back in the centre");
     assert!(h.state().auto.elements.iter().any(|e| e.id == "panel.Composition"), "the Composition panel is drawn");
 
     // Open Composition (the Project panel's context menu) with the panel closed again.
@@ -83,12 +75,12 @@ fn opening_a_comp_brings_up_a_closed_composition_panel() {
     invoke(&mut h, "comp.open", json!({"comp": main}));
     assert_eq!(h.state().session.active_comp_id(), Some(ItemId(main)));
     assert!(h.state().ui.dock.is_visible(PanelKind::Composition));
-    assert_eq!(group_of(&h.state().ui.dock, PanelKind::Composition), Some(vec![PanelKind::Layer, PanelKind::Composition]));
+    assert_eq!(group_of(&h.state().ui.dock, PanelKind::Composition), Some(vec![PanelKind::Composition, PanelKind::Layer]));
 
     // Window ▸ Composition reopens it in the centre too (not beside Effects & Presets).
     invoke(&mut h, "window.closePanel", json!({"panel": "Composition"}));
     invoke(&mut h, "window.panel", json!({"panel": "Composition"}));
-    assert_eq!(group_of(&h.state().ui.dock, PanelKind::Composition), Some(vec![PanelKind::Layer, PanelKind::Composition]));
+    assert_eq!(group_of(&h.state().ui.dock, PanelKind::Composition), Some(vec![PanelKind::Composition, PanelKind::Layer]));
     assert!(h.state().ui.dock.is_visible(PanelKind::Composition));
 }
 
@@ -99,12 +91,12 @@ fn opening_a_comp_in_the_minimal_workspace_docks_the_viewer_above_the_timeline()
     let (mut h, other, _) = harness();
     invoke(&mut h, "window.workspace", json!({"name": "Minimal"}));
     invoke(&mut h, "window.closePanel", json!({"panel": "Composition"}));
-    assert!(!h.state().ui.dock.contains(PanelKind::Composition));
+    assert!(!h.state().ui.dock.is_docked(PanelKind::Composition));
     invoke(&mut h, "comp.open", json!({"comp": other}));
-    match &h.state().ui.dock {
-        DockNode::Split { vertical: true, a, b, .. } => {
-            assert_eq!(group_of(a, PanelKind::Composition), Some(vec![PanelKind::Composition]), "the viewer is on top");
-            assert!(b.contains(PanelKind::Timeline));
+    match &h.state().ui.dock.layout.root {
+        Some(Node::Split { axis: effectcraft_ui_egui::dock::SplitAxis::Vertical, first, second, .. }) => {
+            assert_eq!(**first, Node::Tabs { panels: vec![PanelKind::Composition], active: 0 }, "the viewer is on top");
+            assert!(matches!(&**second, Node::Tabs { panels, .. } if panels.contains(&PanelKind::Timeline)));
         }
         other => panic!("expected the viewer above the Timeline, got {other:?}"),
     }
@@ -147,7 +139,7 @@ fn applying_an_effect_brings_up_effect_controls_on_that_layer() {
 
     // Closed: Effect ▸ Last Effect reopens it.
     invoke(&mut h, "window.closePanel", json!({"panel": "EffectControls"}));
-    assert!(!h.state().ui.dock.contains(PanelKind::EffectControls));
+    assert!(!h.state().ui.dock.is_docked(PanelKind::EffectControls));
     try_invoke(&mut h, "effect.applyLast", json!({}));
     assert!(ec_up(&h), "Effect Controls reopened");
 
@@ -177,7 +169,7 @@ fn double_clicking_an_effect_in_the_timeline_opens_effect_controls() {
     invoke(&mut h, "window.closePanel", json!({"panel": "EffectControls"}));
     let blue = layer_id(&h, "Blue");
     invoke(&mut h, "layer.select", json!({"layers": [blue]}));
-    assert!(!h.state().ui.dock.contains(PanelKind::EffectControls));
+    assert!(!h.state().ui.dock.is_docked(PanelKind::EffectControls));
 
     let name = rect(&h, &format!("timeline.group.{uid}.name"));
     click_n(&mut h, name.center(), 2);
@@ -230,4 +222,9 @@ fn focused_panel_outline_is_painted_over_the_panel_bodies() {
             assert!(r.fill.a() == 0 || !over, "{panel:?}: a filled rect {:?} (fill {:?}) is painted over the focus outline {outline:?}", r.rect, r.fill);
         }
     }
+}
+
+/// The tabs of the group holding `p`, in order.
+fn group_of(w: &Workspace, p: PanelKind) -> Option<Vec<PanelKind>> {
+    Some(w.group_of(p)).filter(|g| !g.is_empty())
 }

@@ -170,6 +170,18 @@ pub(crate) fn modal_space(ctx: &egui::Context) -> egui::Vec2 {
     (ctx.content_rect().size() - vec2(48.0, 48.0)).max(vec2(120.0, 80.0))
 }
 
+fn modal_pass_id() -> egui::Id {
+    egui::Id::unique("effectcraft-modal-pass")
+}
+
+/// Whether a modal dialog showed in this pass or the one before: egui's `Modal` blocks input
+/// only in its own window, so floating panels in OS windows of their own are blocked by the
+/// dock area while this holds. Dialogs draw after the dock, so the previous pass counts.
+pub(crate) fn modal_open(ctx: &egui::Context) -> bool {
+    let shown = ctx.data(|d| d.get_temp::<u64>(modal_pass_id()));
+    shown.is_some_and(|pass| pass.saturating_add(1) >= ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT))
+}
+
 pub(crate) fn modal(ctx: &egui::Context, title: &str, size: egui::Vec2, t: &Tokens, body: impl FnOnce(&mut egui::Ui)) {
     modal_with_scroll(ctx, title, size, t, false, body);
 }
@@ -190,6 +202,8 @@ fn modal_with_scroll(ctx: &egui::Context, title: &str, size: egui::Vec2, t: &Tok
 /// only its content: `body` gets the height left under the title, with `size` kept within the
 /// window.
 pub(crate) fn modal_fit(ctx: &egui::Context, title: &str, size: egui::Vec2, t: &Tokens, body: impl FnOnce(&mut egui::Ui, f32)) {
+    let pass = ctx.cumulative_pass_nr_for(egui::ViewportId::ROOT);
+    ctx.data_mut(|d| d.insert_temp(modal_pass_id(), pass));
     let size = size.min(modal_space(ctx));
     let id = egui::Id::unique(("modal", title));
     // Dragging the title row moves the dialog off what it edits. The offset is kept within the
@@ -688,6 +702,29 @@ fn palette(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn modal_open_holds_from_a_shown_dialog_until_the_pass_after_it_closes() {
+        let (app, ctx) = app();
+        let t = app.tokens;
+        // Asked as the dock asks it: during the pass, before the dialogs draw.
+        let pass = |show: bool| {
+            let mut open = false;
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                open = modal_open(ui.ctx());
+                if show {
+                    modal(ui.ctx(), "Test", vec2(200.0, 100.0), &t, |_| {});
+                }
+            });
+            output.textures_delta.clear();
+            open
+        };
+        assert!(!pass(false));
+        assert!(!pass(true), "the first pass of a dialog finds none shown yet");
+        assert!(pass(true));
+        assert!(pass(false), "the pass after the last one shown still counts");
+        assert!(!pass(false));
+    }
 
     fn app() -> (EffectcraftApp, egui::Context) {
         let ctx = egui::Context::default();

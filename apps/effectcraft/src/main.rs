@@ -128,14 +128,24 @@ fn control_port(name: &str, value: Option<&str>) -> Result<u16, String> {
 /// answer without pumping events, so the window stops answering the compositor and the desktop
 /// offers to force-quit it while the Open dialog is up (#1275). Windows' blocking dialog pumps
 /// its own messages, so it keeps [`effectcraft_ui_egui::Hooks::pick_files`] and friends.
-fn install_file_dialogs(app: &mut EffectcraftApp, ctx: &egui::Context) {
+/// The dialogs asked for in a frame show at its end ([`sheet_dialogs::show_asked`]), where the
+/// main window's handle is at hand.
+fn install_file_dialogs(app: &mut EffectcraftApp) -> Option<std::sync::mpsc::Receiver<sheet_dialogs::Asked>> {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
-        let ctx = ctx.clone();
-        app.hooks.file_dialog_async = Some(Box::new(move |dialog, done| sheet_dialogs::show(dialog, done, ctx.clone())));
+        let (tx, rx) = std::sync::mpsc::channel::<sheet_dialogs::Asked>();
+        app.hooks.file_dialog_async = Some(Box::new(move |dialog, done| {
+            if tx.send((dialog, done)).is_err() {
+                log::error!("file dialog: the window is gone");
+            }
+        }));
+        Some(rx)
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    let _ = (app, ctx);
+    {
+        let _ = app;
+        None
+    }
 }
 
 fn main() -> eframe::Result {
@@ -326,7 +336,7 @@ fn main() -> eframe::Result {
             }));
             // The commands' file dialogs don't block the frame where the platform's backend
             // would (#511, #1275); see [`install_file_dialogs`].
-            install_file_dialogs(&mut app, &cc.egui_ctx);
+            let file_dialogs = install_file_dialogs(&mut app);
             #[cfg(target_os = "macos")]
             {
                 app.hooks.app_action = Some(Box::new(native_menu::app_action));
@@ -344,6 +354,7 @@ fn main() -> eframe::Result {
                 #[cfg(target_os = "macos")]
                 apple_events: apple_events.connect(&cc.egui_ctx),
                 app,
+                file_dialogs,
                 window: window::Tracker::new(opened, saved_window, control_port.is_none()),
                 launch,
                 drawn: false,
@@ -425,6 +436,8 @@ fn startup_failed(e: &eframe::Error, gl_next: bool) {
 /// The desktop app: the egui app plus, on macOS, the system menu bar.
 struct Desktop {
     app: EffectcraftApp,
+    /// The commands' file dialogs, shown at the end of the frame that asked for them.
+    file_dialogs: Option<std::sync::mpsc::Receiver<sheet_dialogs::Asked>>,
     #[cfg(target_os = "macos")]
     menu: native_menu::NativeBar,
     /// Documents opened from Finder, the Dock or `open` (macOS).
@@ -443,10 +456,16 @@ impl eframe::App for Desktop {
         self.menu.update(&mut self.app, ctx);
         self.app.tick(ctx, frame);
         self.app.finish_ime_logic(ctx);
+        if let Some(asked) = &self.file_dialogs {
+            sheet_dialogs::show_asked(asked, frame, ctx);
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.app.ui(ui, frame);
+        if let Some(asked) = &self.file_dialogs {
+            sheet_dialogs::show_asked(asked, frame, ui.ctx());
+        }
         self.window.frame(ui.ctx(), self.app.session.config.as_deref());
         if !self.drawn {
             self.drawn = true;
@@ -646,10 +665,10 @@ mod tests {
     #[test]
     fn commands_file_dialogs_do_not_block_the_frame() {
         let mut app = effectcraft_ui_egui::EffectcraftApp::new(effectcraft_engine::Session::default());
-        super::install_file_dialogs(&mut app, &egui::Context::default());
+        let asked = super::install_file_dialogs(&mut app);
         #[cfg(any(target_os = "macos", target_os = "linux"))]
-        assert!(app.hooks.file_dialog_async.is_some(), "the commands' file dialogs must not block the frame");
+        assert!(app.hooks.file_dialog_async.is_some() && asked.is_some(), "the commands' file dialogs must not block the frame");
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-        assert!(app.hooks.file_dialog_async.is_none(), "the blocking dialog pumps its own messages here");
+        assert!(app.hooks.file_dialog_async.is_none() && asked.is_none(), "the blocking dialog pumps its own messages here");
     }
 }

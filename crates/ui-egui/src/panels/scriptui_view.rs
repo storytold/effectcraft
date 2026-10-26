@@ -15,7 +15,7 @@ use egui::{Align2, Color32, Rect, Sense, Stroke, StrokeKind, UiBuilder, pos2, ve
 use serde_json::{Value, json};
 
 use crate::EffectcraftApp;
-use crate::dock::PanelKind;
+use crate::dock::{PanelKind, WorkspaceExt as _};
 use crate::theme::Tokens;
 
 enum Act {
@@ -579,12 +579,7 @@ pub fn panel_title(app: &EffectcraftApp, id: u32) -> Option<String> {
 /// Close the dock panels whose script window has gone (the script closed it, or a saved
 /// workspace from an earlier run).
 pub fn sync_panels(app: &mut EffectcraftApp) {
-    let mut all = vec![];
-    app.ui.dock.panels(&mut all);
-    for f in &app.ui.floating {
-        all.extend(f.panels.iter().copied());
-    }
-    for p in all {
+    for p in app.ui.dock.panels() {
         if let PanelKind::ScriptPanel(id) = p
             && app.session.script_ui.window(id).is_none()
         {

@@ -246,7 +246,12 @@ fn rows_and_controls_have_names_roles_and_states() {
         h.root().children_recursive().filter(|n| n.accesskit_node().role() == Role::TreeItem && n.accesskit_node().data().level() == Some(2)).collect();
     assert!(!leaves.is_empty());
     assert!(leaves.iter().all(|n| n.accesskit_node().data().is_expanded().is_none()), "effects are leaves: they have no open state");
-    assert!(h.query_by_label_contains("Remove from favorites: ").is_none(), "a favourite hidden in a closed Favorites folder draws no rows");
+    let gaussian_rows = h
+        .root()
+        .children_recursive()
+        .filter(|n| n.accesskit_node().role() == Role::TreeItem && n.accesskit_node().label().as_deref() == Some("Gaussian Blur"))
+        .count();
+    assert!(gaussian_rows <= 1, "a favourite hidden in a closed Favorites folder draws no rows");
     assert!(h.query_all_by_label_contains("Add to favorites: ").count() > 1, "the effects' stars are named");
 }
 

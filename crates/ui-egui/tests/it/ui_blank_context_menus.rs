@@ -1,6 +1,7 @@
 //! Right-click actions in the blank Project and Timeline areas, and on Timeline property names.
 use effectcraft_engine::Session;
 use effectcraft_engine::project::ItemKind;
+use effectcraft_ui_egui::dock::WorkspaceExt as _;
 use effectcraft_ui_egui::{Dialog, EffectcraftApp, dock::PanelKind};
 use egui::{Event, Modifiers, PointerButton, Pos2, Rect, pos2, vec2};
 use egui_kittest::{Harness, kittest::Queryable as _};
@@ -160,7 +161,7 @@ fn timeline_blank_menu_opens_current_comp_in_essential_graphics() {
         h.get_by_label("Open in Essential Graphics").click();
         h.run_steps(3);
         assert_eq!(h.state().session.state.essential_primary, Some(comp));
-        assert!(h.state().ui.dock.contains(PanelKind::EssentialGraphics));
+        assert!(h.state().ui.dock.is_docked(PanelKind::EssentialGraphics));
     }
 }
 
