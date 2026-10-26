@@ -30,6 +30,70 @@ pub enum Caps {
     Small,
 }
 
+/// Language-specific case mapping (Unicode SpecialCasing.txt): Turkic languages capitalise `i`
+/// as `İ` (U+0130). Their `ı` → `I` is already Unicode's default mapping.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Casing {
+    #[default]
+    Default,
+    Turkic,
+}
+
+impl Casing {
+    /// Languages written in a Latin alphabet with dotted and dotless i (Turkish, Azerbaijani,
+    /// Crimean Tatar, Gagauz, Kazakh, Tatar).
+    const TURKIC: &[&str] = &["tr", "az", "crh", "gag", "kk", "tt"];
+
+    /// The casing of a BCP 47 language tag (by its primary language subtag).
+    pub fn for_language(tag: Option<&str>) -> Casing {
+        let primary = tag.and_then(|t| t.trim().split(['-', '_']).next()).unwrap_or("");
+        if Self::TURKIC.iter().any(|l| primary.eq_ignore_ascii_case(l)) { Casing::Turkic } else { Casing::Default }
+    }
+}
+
+/// The capital form of a character: one to three characters (`ß` → `SS`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Upper {
+    chars: [char; 3],
+    len: u8,
+}
+
+impl Upper {
+    fn one(c: char) -> Upper {
+        Upper { chars: [c; 3], len: 1 }
+    }
+
+    /// `c` in capitals under `casing`.
+    pub fn of(c: char, casing: Casing) -> Upper {
+        if casing == Casing::Turkic && c == 'i' {
+            return Upper::one('\u{130}');
+        }
+        let mut u = Upper { chars: [c; 3], len: 0 };
+        // Unicode capitals are at most three characters long.
+        for (slot, x) in u.chars.iter_mut().zip(c.to_uppercase()) {
+            *slot = x;
+            u.len += 1;
+        }
+        if u.len == 0 { Upper::one(c) } else { u }
+    }
+
+    /// The first character (the one that picks the font).
+    pub fn first(&self) -> char {
+        self.chars[0]
+    }
+
+    /// Character `k` of the capital form (the last one past its end).
+    pub fn nth(&self, k: usize) -> char {
+        let last = usize::from(self.len.max(1)) - 1;
+        self.chars.get(k.min(last)).copied().unwrap_or(self.chars[0])
+    }
+
+    /// The characters of the capital form.
+    pub fn chars(&self) -> impl Iterator<Item = char> + '_ {
+        self.chars.iter().copied().take(usize::from(self.len))
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Align {
     #[default]
@@ -74,6 +138,8 @@ pub struct TextStyle {
     pub faux_bold: bool,
     pub faux_italic: bool,
     pub caps: Caps,
+    /// Language-specific casing for All Caps / Small Caps.
+    pub casing: Casing,
     pub underline: bool,
     /// Horizontal / vertical scale (1 = 100%).
     pub h_scale: f32,
@@ -107,6 +173,7 @@ impl Default for TextStyle {
             faux_bold: false,
             faux_italic: false,
             caps: Caps::Normal,
+            casing: Casing::Default,
             underline: false,
             h_scale: 1.0,
             v_scale: 1.0,
@@ -199,7 +266,7 @@ impl Hash for TextStyle {
         }
         self.manual_kern.map(f32::to_bits).hash(h);
         self.leading.map(f32::to_bits).hash(h);
-        (self.kerning, self.optical, self.ligatures, self.faux_bold, self.faux_italic, self.caps, self.underline, self.script).hash(h);
+        (self.kerning, self.optical, self.ligatures, self.faux_bold, self.faux_italic, self.caps, self.casing, self.underline, self.script).hash(h);
         self.opentype.hash(h);
         self.vertical.hash(h);
         for (t, v) in &self.variations {
@@ -373,14 +440,6 @@ struct Item {
     glyphs: Vec<ShapedGlyph>,
 }
 
-fn upper_single(c: char) -> char {
-    let mut u = c.to_uppercase();
-    match (u.next(), u.next()) {
-        (Some(x), None) => x,
-        _ => c,
-    }
-}
-
 const SMALL_CAPS_SCALE: f32 = 0.78;
 
 /// How a character is set: as itself, as a synthesized small capital (a scaled-down capital),
@@ -437,7 +496,7 @@ fn ink_x(face: FaceId, gid: u32) -> Option<(f32, f32)> {
     Some((r.x0 as f32, r.x1 as f32))
 }
 
-fn shape_item(chars: &[(usize, char, char)], rtl: bool, face: FaceId, size: f32, style: &TextStyle, run: usize, form: Form) -> Vec<ShapedGlyph> {
+fn shape_item(chars: &[(usize, char, Upper)], rtl: bool, face: FaceId, size: f32, style: &TextStyle, run: usize, form: Form) -> Vec<ShapedGlyph> {
     let f = fonts::face(face);
     let (Some(font), Some(data)) = (f.font(), f.shaper_data()) else { return Vec::new() };
     let instance = (!style.variations.is_empty()).then(|| {
@@ -448,8 +507,11 @@ fn shape_item(chars: &[(usize, char, char)], rtl: bool, face: FaceId, size: f32,
     });
     let shaper = data.shaper(&font).instance(instance.as_ref()).build();
     let mut buf = UnicodeBuffer::new();
-    for &(b, _, sc) in chars {
-        buf.add(if sc == '\t' { ' ' } else { sc }, b as u32);
+    // A multi-character capital (`ß` → `SS`) shapes as one cluster of its source character.
+    for (b, _, sc) in chars {
+        for x in sc.chars() {
+            buf.add(if x == '\t' { ' ' } else { x }, *b as u32);
+        }
     }
     buf.set_direction(if rtl { Direction::RightToLeft } else { Direction::LeftToRight });
     buf.guess_segment_properties();
@@ -649,8 +711,8 @@ fn paragraph(
     let bidi = BidiInfo::new(text, default_level);
     let pinfo = &bidi.paragraphs[0];
     let base_rtl = pinfo.level.is_rtl();
-    // per char: (byte, char, shaped char, face, rtl, form, run)
-    let chars: Vec<(usize, char, char, FaceId, bool, Form, usize)> = text
+    // per char: (byte, char, shaped characters, face, rtl, form, run)
+    let chars: Vec<(usize, char, Upper, FaceId, bool, Form, usize)> = text
         .char_indices()
         .map(|(b, c)| {
             let si = run_at(runs, base + b);
@@ -661,17 +723,17 @@ fn paragraph(
             let small = (style.caps == Caps::Small || all_small) && c.is_lowercase();
             let small_cap = all_small && c.is_uppercase();
             let (sc, mut form) = match style.caps {
-                Caps::All => (upper_single(c), Form::Normal),
-                _ if small && feature_substitutes(face_of(c), b"smcp", c) => (c, Form::TrueSmall),
-                _ if small_cap && feature_substitutes(face_of(c), b"c2sc", c) => (c, Form::TrueSmall),
-                _ if small => (upper_single(c), Form::FauxSmall),
-                _ if small_cap => (c, Form::FauxSmall),
-                _ => (c, Form::Normal),
+                Caps::All => (Upper::of(c, style.casing), Form::Normal),
+                _ if small && feature_substitutes(face_of(c), b"smcp", c) => (Upper::one(c), Form::TrueSmall),
+                _ if small_cap && feature_substitutes(face_of(c), b"c2sc", c) => (Upper::one(c), Form::TrueSmall),
+                _ if small => (Upper::of(c, style.casing), Form::FauxSmall),
+                _ if small_cap => (Upper::one(c), Form::FauxSmall),
+                _ => (Upper::one(c), Form::Normal),
             };
-            let face = face_of(sc);
-            if form == Form::Normal && style.script != Script::Normal && !sc.is_whitespace() {
+            let face = face_of(sc.first());
+            if form == Form::Normal && style.script != Script::Normal && !sc.first().is_whitespace() {
                 let tag = if style.script == Script::Sub { b"subs" } else { b"sups" };
-                if feature_substitutes(face, tag, sc) {
+                if feature_substitutes(face, tag, sc.first()) {
                     form = Form::TrueScript;
                 }
             }
@@ -683,7 +745,7 @@ fn paragraph(
     let mut i = 0;
     while i < chars.len() {
         let key =
-            |c: &(usize, char, char, FaceId, bool, Form, usize)| (c.3, c.4, c.5, c.6, runs.get(c.6).is_some_and(|run| run.1.vertical) && crate::is_cjk(c.1));
+            |c: &(usize, char, Upper, FaceId, bool, Form, usize)| (c.3, c.4, c.5, c.6, runs.get(c.6).is_some_and(|run| run.1.vertical) && crate::is_cjk(c.1));
         let k0 = key(&chars[i]);
         let mut j = i + 1;
         while j < chars.len() && key(&chars[j]) == k0 {
@@ -691,7 +753,7 @@ fn paragraph(
         }
         let (face, rtl, form, si, _) = k0;
         let style = &runs[si].1;
-        let sub: Vec<(usize, char, char)> = chars[i..j].iter().map(|c| (c.0, c.1, c.2)).collect();
+        let sub: Vec<(usize, char, Upper)> = chars[i..j].iter().map(|c| (c.0, c.1, c.2)).collect();
         let size = match form {
             Form::FauxSmall => style.glyph_size() * SMALL_CAPS_SCALE,
             Form::TrueScript => style.size,
@@ -1319,6 +1381,55 @@ mod tests {
         let l = layout("Hi", &TextStyle { baseline_shift: 10.0, underline: true, ..s }, &ParagraphStyle::default());
         assert!((l.glyphs[0].y + 10.0).abs() < 1e-3);
         assert_eq!(l.underlines.len(), 1);
+    }
+
+    #[test]
+    fn language_casing() {
+        assert_eq!(Casing::for_language(None), Casing::Default);
+        assert_eq!(Casing::for_language(Some("en-US")), Casing::Default);
+        for tag in ["tr", "TR", "tr-TR", "az_Latn", "crh", "gag", "kk", "tt"] {
+            assert_eq!(Casing::for_language(Some(tag)), Casing::Turkic, "{tag}");
+        }
+        // "trv" (Taroko) is not Turkish: the primary subtag must match whole.
+        assert_eq!(Casing::for_language(Some("trv")), Casing::Default);
+        let up = |t: &str, c: Casing| -> String { t.chars().flat_map(|x| Upper::of(x, c).chars().collect::<Vec<_>>()).collect() };
+        assert_eq!(up("istanbul ılık", Casing::Turkic), "İSTANBUL ILIK");
+        assert_eq!(up("istanbul ılık", Casing::Default), "ISTANBUL ILIK");
+        assert_eq!(up("straße", Casing::Default), "STRASSE");
+        let sz = Upper::of('ß', Casing::Default);
+        assert_eq!((sz.first(), sz.nth(1), sz.nth(9)), ('S', 'S', 'S'));
+        assert_eq!(Upper::of('7', Casing::Turkic).chars().collect::<String>(), "7");
+    }
+
+    #[test]
+    fn all_caps_follows_the_language() {
+        let ids = |l: &Layout| l.glyphs.iter().map(|g| g.id).collect::<Vec<_>>();
+        let caps = TextStyle { caps: Caps::All, ..st(50.0) };
+        let turkish = TextStyle { casing: Casing::Turkic, ..caps.clone() };
+        let want = layout_uncached("İSTANBUL ILIK", &caps, &ParagraphStyle::default());
+        let tr = layout_uncached("istanbul ılık", &turkish, &ParagraphStyle::default());
+        assert_eq!(ids(&tr), ids(&want));
+        // Without a language the dotted i loses its dot, as Unicode's default casing says.
+        let plain = layout_uncached("istanbul ılık", &caps, &ParagraphStyle::default());
+        assert_eq!(ids(&plain), ids(&layout_uncached("ISTANBUL ILIK", &caps, &ParagraphStyle::default())));
+        assert_ne!(ids(&plain), ids(&tr));
+        // Small Caps (synthesized) use the same casing.
+        let small = |c: Casing| ids(&layout_uncached("i", &TextStyle { caps: Caps::Small, casing: c, ..st(50.0) }, &ParagraphStyle::default()));
+        assert_eq!(small(Casing::Turkic), ids(&layout_uncached("\u{130}", &st(50.0), &ParagraphStyle::default())));
+        assert_ne!(small(Casing::Turkic), small(Casing::Default));
+        // The cache tells the casings apart.
+        assert_ne!(ids(&layout("i", &turkish, &ParagraphStyle::default())), ids(&layout("i", &caps, &ParagraphStyle::default())));
+    }
+
+    #[test]
+    fn all_caps_keeps_multi_character_capitals() {
+        let caps = TextStyle { caps: Caps::All, ..st(50.0) };
+        let l = layout_uncached("straße", &caps, &ParagraphStyle::default());
+        let want = layout_uncached("STRASSE", &caps, &ParagraphStyle::default());
+        assert_eq!(l.glyphs.iter().map(|g| g.id).collect::<Vec<_>>(), want.glyphs.iter().map(|g| g.id).collect::<Vec<_>>());
+        assert!((l.lines[0].width - want.lines[0].width).abs() < 0.01);
+        // Both S glyphs belong to the ß (byte 4); the e after it keeps its own cluster.
+        assert_eq!(l.glyphs.iter().map(|g| g.cluster).collect::<Vec<_>>(), vec![0, 1, 2, 3, 4, 4, 6]);
     }
 
     #[test]

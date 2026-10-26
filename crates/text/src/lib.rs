@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use effectcraft_keyframe::{BaselineOption, CharStyle, Composer, Direction, Justify, Kerning, ParaStyle, TextDoc};
 pub use fonts::{FaceId, Resolved, families, resolve};
 use kurbo::{Affine, BezPath, Point};
-pub use layout::{Align, Caps, Glyph, Layout, Line, ParagraphStyle, Script, TextStyle, layout as layout_text, layout_rich, measure};
+pub use layout::{Align, Caps, Casing, Glyph, Layout, Line, ParagraphStyle, Script, TextStyle, layout as layout_text, layout_rich, measure};
 use selectors::BasedOn;
 use skrifa::instance::{LocationRef, Size};
 use skrifa::outline::{DrawSettings, OutlinePen};
@@ -161,6 +161,7 @@ pub fn text_style(s: &CharStyle) -> TextStyle {
         } else {
             Caps::Normal
         },
+        casing: Casing::for_language(s.language.as_deref()),
         underline: false,
         h_scale: (s.h_scale / 100.0) as f32,
         v_scale: (s.v_scale / 100.0) as f32,
@@ -290,7 +291,14 @@ pub fn layout_doc(doc: &TextDoc) -> TextLayout {
             let ci = char_of_byte.get(g.cluster).copied().unwrap_or(0);
             let src = text[g.cluster..].chars().next().unwrap_or(' ');
             let st = styles.get(g.run);
-            let ch = if st.is_some_and(|s| s.all_caps) { src.to_uppercase().next().unwrap_or(src) } else { src };
+            let ch = match st {
+                Some(s) if s.all_caps => {
+                    // The k-th glyph of a multi-character capital (`ß` → `SS`) draws its k-th character.
+                    let nth = line_glyphs[..k].iter().rev().take_while(|&&p| lay.glyphs[p].cluster == g.cluster).count();
+                    layout::Upper::of(src, Casing::for_language(s.language.as_deref())).nth(nth)
+                }
+                _ => src,
+            };
             let mut path = glyph_outline(g);
             let mut outline_xf = glyph_affine(g);
             let next_x = lay.glyphs.get(gi + 1).filter(|_| line.glyphs.contains(&(gi + 1))).map(|n| n.x).unwrap_or(line.x + line.width);
@@ -556,6 +564,39 @@ mod tests {
         assert_eq!(actual.line_boxes, expected.line_boxes);
         assert_eq!(cr.text, "Line 1\rLine 2");
         assert_eq!(actual.chars, cr.char_len());
+    }
+
+    /// All Caps in Turkish: "istanbul ılık" reads "İSTANBUL ILIK", per style run.
+    #[test]
+    fn all_caps_uses_the_text_language() {
+        let drawn = |d: &TextDoc| layout_doc(d).glyphs.iter().map(|g| g.ch).collect::<String>();
+        let mut d = TextDoc { all_caps: true, ..TextDoc::plain("istanbul ılık") };
+        assert_eq!(drawn(&d), "ISTANBUL ILIK", "no language: Unicode default casing");
+        d.language = Some("tr".into());
+        assert_eq!(drawn(&d), "İSTANBUL ILIK");
+        let tr = layout_doc(&d);
+        let want = layout_doc(&TextDoc { all_caps: true, ..TextDoc::plain("İSTANBUL ILIK") });
+        assert_eq!(tr.glyphs.iter().map(|g| g.gid).collect::<Vec<_>>(), want.glyphs.iter().map(|g| g.gid).collect::<Vec<_>>());
+        assert_eq!(tr.chars, 13);
+        // Per style run: only the Turkish word gets dotted capitals.
+        let mut d = TextDoc { all_caps: true, ..TextDoc::plain("iki iki") };
+        d.apply_style(4..7, |s| s.language = Some("tr".into()));
+        assert_eq!(drawn(&d), "IKI İKİ");
+        d.apply_style(0..3, |s| s.language = Some("en".into()));
+        d.apply_style(4..7, |s| s.language = None);
+        assert_eq!(drawn(&d), "IKI IKI");
+    }
+
+    /// Multi-character capitals (ß → SS) are drawn in full and stay one source character.
+    #[test]
+    fn all_caps_draws_multi_character_capitals() {
+        let d = TextDoc { all_caps: true, ..TextDoc::plain("straße") };
+        let l = layout_doc(&d);
+        assert_eq!(l.glyphs.iter().map(|g| g.ch).collect::<String>(), "STRASSE");
+        assert_eq!(l.glyphs.iter().map(|g| g.char_index).collect::<Vec<_>>(), vec![0, 1, 2, 3, 4, 4, 5]);
+        assert_eq!(l.chars, 6);
+        let plain = layout_doc(&TextDoc::plain("straße"));
+        assert_eq!(plain.glyphs.iter().map(|g| g.ch).collect::<String>(), "straße");
     }
 
     #[test]

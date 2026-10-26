@@ -343,6 +343,10 @@ pub struct CharStyle {
     /// the Character panel's Variable Font Axes.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub variations: Vec<(String, f32)>,
+    /// Language of the text (BCP 47 tag such as `tr` or `az-Latn`); None = no language, Unicode
+    /// default rules. Selects language-specific casing for All Caps / Small Caps (Turkish `i` → `İ`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
 }
 
 impl Default for CharStyle {
@@ -430,6 +434,9 @@ pub struct TextDoc {
     /// Base variable font axis values (see [`CharStyle::variations`]).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub variations: Vec<(String, f32)>,
+    /// Base language (see [`CharStyle::language`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
     pub indent_left: f64,
     pub indent_right: f64,
     pub indent_first: f64,
@@ -483,6 +490,7 @@ impl Default for TextDoc {
             vertical_roman_upright: false,
             opentype: OpenType::default(),
             variations: vec![],
+            language: None,
             indent_left: 0.0,
             indent_right: 0.0,
             indent_first: 0.0,
@@ -571,6 +579,7 @@ impl TextDoc {
             vertical_roman_upright: self.vertical_roman_upright,
             opentype: self.opentype,
             variations: self.variations.clone(),
+            language: self.language.clone(),
         }
     }
 
@@ -600,6 +609,7 @@ impl TextDoc {
         self.vertical_roman_upright = s.vertical_roman_upright;
         self.opentype = s.opentype;
         self.variations = s.variations.clone();
+        self.language = s.language.clone();
     }
 
     /// The base (first paragraph's) settings.
@@ -978,6 +988,25 @@ fn flag(key: &str, v: &J) -> Result<bool, String> {
     v.as_bool().or_else(|| v.as_f64().map(|x| x != 0.0)).ok_or_else(|| format!("{key}: expected a boolean"))
 }
 
+/// A `language` value: a BCP 47 tag (`tr`, `az-Latn`, `en_US`; `_` becomes `-`), or null / `""`
+/// for no language.
+fn language_tag(v: &J) -> Result<Option<String>, String> {
+    const ERR: &str = "language: expected a BCP 47 language tag such as \"tr\" (or null)";
+    let s = match v {
+        J::Null => return Ok(None),
+        J::String(s) => s.trim(),
+        _ => return Err(ERR.into()),
+    };
+    if s.is_empty() {
+        return Ok(None);
+    }
+    let tag = s.replace('_', "-");
+    let ok = tag.len() <= 64
+        && tag.split('-').all(|sub| (1..=8).contains(&sub.len()) && sub.bytes().all(|b| b.is_ascii_alphanumeric()))
+        && tag.split('-').next().is_some_and(|p| p.bytes().all(|b| b.is_ascii_alphabetic()));
+    if ok { Ok(Some(tag)) } else { Err(ERR.into()) }
+}
+
 /// Character attribute keys of `layer.setText` (also used by the expression style API).
 pub const CHAR_ATTRS: &[&str] = &[
     "font",
@@ -1018,6 +1047,7 @@ pub const CHAR_ATTRS: &[&str] = &[
     "figureWidth",
     "figures",
     "variations",
+    "language",
 ];
 
 /// Paragraph attribute keys of `layer.setText`.
@@ -1157,6 +1187,7 @@ pub fn apply_char_attr(s: &mut CharStyle, key: &str, v: &J) -> Result<bool, Stri
             }
             _ => return Err("variations: expected {tag: number, …}".into()),
         },
+        "language" => s.language = language_tag(v)?,
         k if k.len() == 4 && k.starts_with("ss") && k[2..].parse::<u32>().is_ok_and(|n| (1..=20).contains(&n)) => {
             let n = k[2..].parse::<u32>().unwrap_or(0);
             s.opentype.set_stylistic_set(n, flag(key, v)?);
@@ -1213,6 +1244,7 @@ pub fn char_style_json(s: &CharStyle) -> J {
         "swash": s.opentype.swash, "titling": s.opentype.titling, "ordinals": s.opentype.ordinals, "fractions": s.opentype.fractions,
         "allSmallCaps": s.opentype.all_small_caps,
         "variations": s.variations.iter().map(|(t, v)| (t.clone(), J::from(*v as f64))).collect::<serde_json::Map<String, J>>(),
+        "language": s.language,
         "figureStyle": match s.opentype.figure_style { FigureStyle::Default => "default", FigureStyle::Lining => "lining", FigureStyle::OldStyle => "oldStyle" },
         "figureWidth": match s.opentype.figure_width { FigureWidth::Default => "default", FigureWidth::Proportional => "proportional", FigureWidth::Tabular => "tabular" },
     })
@@ -1511,5 +1543,35 @@ mod tests {
         apply_char_attr(&mut s, "allCaps", &J::Bool(true)).unwrap();
         apply_char_attr(&mut s, "allSmallCaps", &J::Bool(true)).unwrap();
         assert!(!s.all_caps && s.opentype.all_small_caps);
+    }
+
+    #[test]
+    fn language_attribute_per_range_and_serde() {
+        let mut d = TextDoc::plain("istanbul ılık");
+        // Untouched documents serialize without a language, and old documents load without one.
+        assert!(!serde_json::to_string(&d).unwrap().contains("language"));
+        let old = r#"{"text":"Old","font":"Inter","size":50.0,"all_caps":true,
+            "runs":[{"len":1,"style":{"font":"Inter","size":50.0,"all_caps":true}},{"len":2,"style":{"font":"Inter","size":20.0}}]}"#;
+        let o: TextDoc = serde_json::from_str(old).unwrap();
+        assert_eq!(o.language, None);
+        assert!(o.runs().iter().all(|r| r.style.language.is_none()));
+        // Whole text, then one range.
+        assert!(d.set_attr("language", &J::from("tr"), None).unwrap());
+        assert_eq!(d.language.as_deref(), Some("tr"));
+        assert!(d.set_attr("language", &J::from("az_Latn"), Some(9..13)).unwrap());
+        assert_eq!(d.style_at(0).language.as_deref(), Some("tr"));
+        assert_eq!(d.style_at(10).language.as_deref(), Some("az-Latn"));
+        // Round trip, and the JSON form names the attribute as layer.setText does.
+        let back: TextDoc = serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
+        assert_eq!(back, d);
+        assert_eq!(char_style_json(&d.style_at(0))["language"], "tr");
+        // Null or "" clears it; malformed tags are errors, not crashes.
+        assert!(d.set_attr("language", &J::Null, Some(9..13)).unwrap());
+        assert_eq!(d.style_at(10).language, None);
+        assert!(d.set_attr("language", &J::from(""), None).unwrap());
+        assert!(d.is_uniform() && d.language.is_none());
+        for bad in [J::from("t r"), J::from("-tr"), J::from("tr--x"), J::from("123"), J::from("toolongsubtag"), J::from(5), J::from("a".repeat(100))] {
+            assert!(d.set_attr("language", &bad, None).is_err(), "{bad}");
+        }
     }
 }
