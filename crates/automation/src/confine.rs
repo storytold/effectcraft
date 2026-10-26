@@ -6,7 +6,8 @@
 //! `engine.batch`) is checked before it runs: its file parameters must be absolute paths inside
 //! the roots (symbolic links resolved, no `..`), any other absolute path in its parameters too,
 //! and commands that write to a file they are not given (Save, Increment and Save, rendering the
-//! Render Queue) are checked against where they would write. Commands that run code or open
+//! Render Queue) are checked against where they would write, and a template export against
+//! the footage files it packs. Commands that run code or open
 //! other applications (scripts, Execute File, Reveal in Finder…) are refused while confined.
 
 use std::path::{Component, Path, PathBuf};
@@ -96,6 +97,9 @@ pub enum Lookup {
     ProjectFile,
     /// Every output of the queued Render Queue items (`renderQueue.list`).
     RenderOutputs,
+    /// The footage files exporting a template packs (`essential.templateSources` with the
+    /// export's `comp` → `files`): each must be readable.
+    TemplateSources(Value),
 }
 
 impl Confinement {
@@ -148,7 +152,9 @@ impl Confinement {
                     return Err(Error::BadArgs(format!("`{inner}` in a batch: file paths can't be `$N` references while file access is confined")));
                 }
                 if self.check_command(inner, &inner_params)?.is_some() {
-                    return Err(Error::BadArgs(format!("`{inner}` writes to its project's or queue's files: run it on its own while file access is confined")));
+                    return Err(Error::BadArgs(format!(
+                        "`{inner}` reads or writes files it isn't given (its project's, the queue's or a template's footage): run it on its own while file access is confined"
+                    )));
                 }
             }
             return Ok(None);
@@ -188,6 +194,12 @@ impl Confinement {
         if matches!(id, "file.openRecent" | "file.importRecent" | "anim.applyRecentPreset") && !given {
             return Err(Error::BadArgs(format!("`{id}`: give `path` while file access is confined")));
         }
+        // Exporting a template reads the footage it uses, paths the agent didn't give (#1228).
+        if id == "essential.exportTemplate" {
+            // `templateSources` takes the export's `comp` (or its default) and nothing else.
+            let comp = params.get("comp").filter(|c| !c.is_null()).map_or_else(|| serde_json::json!({}), |c| serde_json::json!({"comp": c}));
+            return Ok(Some(Lookup::TemplateSources(comp)));
+        }
         if IMPLICIT_WRITES.contains(&id) && !(given && id == "file.save") {
             return Ok(Some(if id == "file.save" || id == "file.incrementAndSave" { Lookup::ProjectFile } else { Lookup::RenderOutputs }));
         }
@@ -211,6 +223,13 @@ impl Confinement {
                             self.check(p, Access::Write)?;
                         }
                     }
+                }
+                Ok(())
+            }
+            Lookup::TemplateSources(_) => {
+                for p in found.get("files").and_then(Value::as_array).into_iter().flatten() {
+                    let p = p.as_str().ok_or_else(|| Error::BadArgs("a template source file is not a path".into()))?;
+                    self.check(p, Access::Read).map_err(|e| Error::BadArgs(format!("the template's footage can't be packed: {e}")))?;
                 }
                 Ok(())
             }

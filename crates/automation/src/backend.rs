@@ -66,6 +66,10 @@ impl Backend {
             let lookup = match c.check_command(id, &params)? {
                 Some(crate::confine::Lookup::ProjectFile) => Some((crate::confine::Lookup::ProjectFile, self.run("project.summary", json!({}))?)),
                 Some(crate::confine::Lookup::RenderOutputs) => Some((crate::confine::Lookup::RenderOutputs, self.run("renderQueue.list", json!({}))?)),
+                Some(crate::confine::Lookup::TemplateSources(p)) => {
+                    let sources = self.run("essential.templateSources", p.clone())?;
+                    Some((crate::confine::Lookup::TemplateSources(p), sources))
+                }
                 None => None,
             };
             if let Some((lookup, found)) = lookup {
