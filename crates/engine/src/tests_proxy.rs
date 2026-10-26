@@ -281,3 +281,78 @@ fn guess_alpha_invert_and_linear_light() {
     s.execute("file.applyInterpretation", json!({"items": [w.0]})).unwrap();
     assert!(foot(&s, w).preserve_rgb);
 }
+
+#[test]
+fn collect_proxies_preserves_readable_files_when_exists_is_false() {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::Mutex;
+
+    use crate::Services;
+
+    // A finite byte store whose filesystem existence lookup cannot see its readable entries.
+    struct MemoryFiles(Mutex<BTreeMap<String, Vec<u8>>>);
+    impl Services for MemoryFiles {
+        fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {
+            self.0.lock().unwrap().get(path).cloned().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, path.to_string()))
+        }
+        fn write_file(&self, path: &str, data: &[u8]) -> std::io::Result<()> {
+            self.0.lock().unwrap().insert(path.to_string(), data.to_vec());
+            Ok(())
+        }
+        fn exists(&self, _: &str) -> bool {
+            false
+        }
+    }
+
+    let dir = std::env::temp_dir().join(format!("ec-collect-proxy-memory-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let archive = dir.join("archive");
+    let folder = archive.to_string_lossy().into_owned();
+    let sources = [dir.join("outside/shared.png").to_string_lossy().into_owned(), format!("{folder}/(Footage)/shared.png")];
+    let initial = BTreeMap::from([
+        (sources[0].clone(), b"first proxy payload".to_vec()),
+        (sources[1].clone(), b"later proxy payload".to_vec()),
+        (format!("{folder}/(Footage)/2_shared.png"), b"unrelated destination entry".to_vec()),
+    ]);
+    assert_ne!(initial[&sources[0]], initial[&sources[1]]);
+    let files = Arc::new(MemoryFiles(Mutex::new(initial.clone())));
+    for (path, bytes) in &initial {
+        assert!(!files.exists(path));
+        assert_eq!(&files.read_file(path).unwrap(), bytes);
+    }
+    let mut s = session();
+    s.services = files.clone();
+    let mut ids = vec![];
+    for (name, source) in ["First", "Later"].into_iter().zip(&sources) {
+        let id = ItemId(s.execute("comp.new", json!({"name": name, "width": 10, "height": 10, "duration": 1})).unwrap()["comp"].as_u64().unwrap());
+        s.execute("file.setProxy", json!({"item": id.0, "path": source})).unwrap();
+        ids.push(id);
+    }
+    assert!(ids[0] < ids[1], "the external proxy must be visited before the source inside the archive");
+    assert!(s.project.items.values().all(|item| !matches!(&item.kind, ItemKind::Footage(_))));
+    let before = s.project.clone();
+    let path_before = s.path.clone();
+
+    let collected = s.execute("file.collectFiles", json!({"folder": folder})).unwrap();
+    for (path, bytes) in &initial {
+        assert_eq!(&files.read_file(path).unwrap(), bytes, "collection preserves readable entry {path}");
+    }
+    assert_eq!((collected["copied"].clone(), collected["errors"].clone()), (json!(2), json!([])));
+    assert_eq!(s.project, before, "the live source paths and proxy state remain unchanged");
+    assert_eq!(s.path, path_before);
+    let project_path = collected["project"].as_str().unwrap();
+    assert!(std::path::Path::new(project_path).starts_with(&archive));
+    let mut archived = effectcraft_project::Project::from_json(std::str::from_utf8(&files.read_file(project_path).unwrap()).unwrap()).unwrap();
+    let mut archive_paths = BTreeSet::new();
+    for (index, id) in ids.into_iter().enumerate() {
+        let proxy = archived.item_mut(id).unwrap().proxy.as_mut().unwrap();
+        assert!(proxy.enabled);
+        assert!(proxy.footage.sequence.is_empty());
+        assert!(std::path::Path::new(&proxy.footage.path).starts_with(&archive));
+        assert!(archive_paths.insert(proxy.footage.path.clone()), "different payloads need distinct archive paths");
+        assert_eq!(files.read_file(&proxy.footage.path).unwrap(), initial[&sources[index]]);
+        proxy.footage.path = sources[index].clone();
+    }
+    assert_eq!(archived, *before, "only the archived proxy paths change");
+    std::fs::remove_dir_all(dir).unwrap();
+}
