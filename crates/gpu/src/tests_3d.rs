@@ -219,6 +219,47 @@ fn the_gpu_draws_classic_3d_runs_itself() {
     assert!(d.over * 200 <= d.total, "{d:?}");
 }
 
+/// #1812: a run drawn again from the same layer buffers reuses its atlas (frame workers drawing
+/// one each ran the GPU out of memory) and draws the same pixels; new buffers build a new one.
+#[test]
+fn classic_3d_atlases_are_kept_for_the_same_layer_buffers() {
+    let Some(g) = gpu() else { return };
+    let s = crossing(BitDepth::Bpc32, BlendMode::Normal);
+    let r = Renderer::new(&s.p, &Pattern, RenderOpts { backend: Backend::Gpu, ..opts() });
+    let ctx = r.eval_ctx(s.cid, Tick::ZERO).unwrap();
+    let run: Vec<_> = r.visible_layers(&ctx).into_iter().filter(|l| l.is_3d()).collect();
+    let prep = r.prepare_3d_run(&ctx, &run, (W, H)).unwrap();
+    let bufs: Vec<_> = prep.planes.iter().map(|p| p.buf.clone()).collect();
+    let draw = |prep: &effectcraft_render::three_d::Run3d| {
+        let mut e = crate::context::Enc::new(g.context());
+        let canvas = e.image(W, H);
+        let out = crate::classic3d::draw_run(&mut e, prep, &canvas).expect("drawn on the GPU");
+        e.download(&out).unwrap()
+    };
+    let first = draw(&prep);
+    let (atlas, _) = g.context().cached_atlas(&bufs).expect("the atlas is kept");
+    // Another frame (its own encoder) reads the kept atlas, filled.
+    assert_eq!(draw(&prep), first);
+    assert!(g.context().cached_atlas(&bufs).is_some_and(|(a, _)| a.texture == atlas.texture), "the same atlas is reused");
+    // Other buffers (a layer that changed) don't hit it.
+    let mut changed = r.prepare_3d_run(&ctx, &run, (W, H)).unwrap();
+    for p in &mut changed.planes {
+        p.buf = std::sync::Arc::new((*p.buf).clone());
+    }
+    let other: Vec<_> = changed.planes.iter().map(|p| p.buf.clone()).collect();
+    assert!(g.context().cached_atlas(&other).is_none());
+    assert_eq!(draw(&changed), first);
+    assert!(g.context().cached_atlas(&other).is_some());
+    // Keeping one again (workers that missed at once) adds no copy.
+    let n = g.context().atlas_entries();
+    g.context().keep_atlas(&other, atlas.clone(), vec![(0, 0); other.len()]);
+    assert_eq!(g.context().atlas_entries(), n, "no duplicate entry");
+    // Once its buffers are freed, the next lookup drops it.
+    drop((changed, other));
+    assert!(g.context().cached_atlas(&bufs).is_some());
+    assert_eq!(g.context().atlas_entries(), 1, "the atlas of freed buffers is gone");
+}
+
 /// Classic 3D bokeh depth of field runs on the GPU: iris shapes, highlights, fringe, Fast
 /// Rectangle and a tilted plane (progressive blur) match the CPU.
 #[test]
@@ -287,4 +328,29 @@ fn two_d_layer_with_a_three_d_track_matte() {
             check(&format!("3d matte {kind:?} {depth:?} (Advanced 3D)"), compare_at(&s, opts(), Tick::ZERO), 0.005);
         }
     }
+}
+
+/// #1812: workers that miss the same atlas together (a cold start, or after an out-of-memory
+/// error cleared the atlases) build it once: the others wait for it instead of each allocating a
+/// copy.
+#[test]
+fn concurrent_misses_of_one_atlas_build_it_once() {
+    let Some(g) = gpu() else { return };
+    let s = crossing(BitDepth::Bpc32, BlendMode::Normal);
+    let r = Renderer::new(&s.p, &Pattern, RenderOpts { backend: Backend::Gpu, ..opts() });
+    let ctx = r.eval_ctx(s.cid, Tick::ZERO).unwrap();
+    let run: Vec<_> = r.visible_layers(&ctx).into_iter().filter(|l| l.is_3d()).collect();
+    let prep = r.prepare_3d_run(&ctx, &run, (W, H)).unwrap();
+    let bufs: Vec<_> = prep.planes.iter().map(|p| p.buf.clone()).collect();
+    let c = g.context();
+    let Err(Some(claim)) = c.atlas_or_claim(&bufs) else { panic!("the first miss builds it") };
+    let waited = std::thread::scope(|sc| {
+        let h = sc.spawn(|| c.atlas_or_claim(&bufs).ok().map(|(a, _)| a.texture));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let atlas = c.image(8, 8);
+        c.keep_atlas(&bufs, atlas.clone(), vec![(0, 0); bufs.len()]);
+        drop(claim);
+        (h.join().unwrap(), atlas.texture)
+    });
+    assert_eq!(waited.0, Some(waited.1), "the waiter gets the atlas the first one built");
 }
