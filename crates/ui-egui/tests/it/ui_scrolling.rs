@@ -8,6 +8,11 @@ use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use serde_json::json;
 
+// The pointer/geometry helpers are shared with the sibling menu and long-tail test modules:
+// `rect`, `click_at`, `move_to` and press-and-hold (`hold`) live in ui_menus, `drag` in ui_tail.
+use super::ui_menus::{click_at, move_to, press as hold, rect};
+use super::ui_tail::drag;
+
 /// Open the demo project in a UI test harness with the requested window size.
 fn harness(w: f32, h: f32) -> Harness<'static, EffectcraftApp> {
     let mut s = Session::default();
@@ -17,20 +22,6 @@ fn harness(w: f32, h: f32) -> Harness<'static, EffectcraftApp> {
     h
 }
 
-/// Return a registered widget's rectangle so UI tests can inspect its layout.
-fn rect(h: &Harness<'_, EffectcraftApp>, id: &str) -> Rect {
-    let e = h.state().auto.find(id).unwrap_or_else(|| panic!("no {id}"));
-    Rect::from_min_size(pos2(e.rect[0], e.rect[1]), vec2(e.rect[2], e.rect[3]))
-}
-
-fn click_at(h: &mut Harness<'_, EffectcraftApp>, p: Pos2) {
-    h.input_mut().events.push(Event::PointerMoved(p));
-    h.input_mut().events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
-    h.step();
-    h.input_mut().events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
-    h.run_steps(2);
-}
-
 fn wheel(h: &mut Harness<'_, EffectcraftApp>, at: Pos2, dy: f32) {
     h.input_mut().events.push(Event::PointerMoved(at));
     h.input_mut().events.push(Event::MouseWheel {
@@ -38,21 +29,9 @@ fn wheel(h: &mut Harness<'_, EffectcraftApp>, at: Pos2, dy: f32) {
         delta: vec2(0.0, dy),
         modifiers: Default::default(),
         phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Wheel,
     });
     h.run_steps(20);
-}
-
-/// Press the primary button at `p` and keep it down (press-and-browse, as on a menu title).
-fn hold(h: &mut Harness<'_, EffectcraftApp>, p: Pos2) {
-    h.input_mut().events.push(Event::PointerMoved(p));
-    h.input_mut().events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
-    h.run_steps(2);
-}
-
-/// Move the pointer to `p`, keeping whatever button is held.
-fn move_to(h: &mut Harness<'_, EffectcraftApp>, p: Pos2) {
-    h.input_mut().events.push(Event::PointerMoved(p));
-    h.run_steps(2);
 }
 
 /// The open menu popup's rect (frame included), from egui's area memory: the only tall area up.
@@ -88,17 +67,29 @@ fn a_menu_taller_than_the_window_scrolls() {
     assert_eq!(h.state().dialog, Some(effectcraft_ui_egui::Dialog::Shortcuts), "the entry takes the click");
 }
 
+/// Open Edit in a window shorter than the menu (holding or clicking its title) and return the
+/// last entry's rect before any scroll, plus the open popup's rect. `opened` is the failure
+/// message when the menu did not open.
+fn open_tall_edit(h: &mut Harness<'_, EffectcraftApp>, held: bool, opened: &str) -> (Rect, Rect) {
+    let edit = rect(h, "menu.Edit");
+    if held {
+        hold(h, edit.center());
+    } else {
+        click_at(h, edit.center());
+    }
+    let before = h.query_by_label_contains("Keyboard Shortcuts").expect(opened).rect();
+    assert!(before.max.y > 520.0, "Edit is taller than the window ({before:?})");
+    let menu = open_popup(h);
+    (before, menu)
+}
+
 /// With the title still held down (press-and-browse), resting the pointer against the bottom
 /// edge of a menu too tall for the window scrolls it from there — a crawl, then a run, as native
 /// menus do — so the long list can be walked with no wheel.
 #[test]
 fn holding_the_title_scrolls_the_menu_from_its_bottom_edge() {
     let mut h = harness(1200.0, 520.0);
-    let edit = rect(&h, "menu.Edit");
-    hold(&mut h, edit.center());
-    let before = h.query_by_label_contains("Keyboard Shortcuts").expect("the Edit menu opens on the press").rect();
-    assert!(before.max.y > 520.0, "Edit is taller than the window ({before:?})");
-    let menu = open_popup(&h);
+    let (before, menu) = open_tall_edit(&mut h, true, "the Edit menu opens on the press");
     // Creeping down the edge: the 18 pt band above the menu's inner bottom lies at one of these
     // positions, whatever the frame's margin (they are 6 pt apart).
     let mut walked = false;
@@ -120,11 +111,7 @@ fn holding_the_title_scrolls_the_menu_from_its_bottom_edge() {
 #[test]
 fn without_the_hold_the_edge_does_not_scroll_the_menu() {
     let mut h = harness(1200.0, 520.0);
-    let edit = rect(&h, "menu.Edit");
-    click_at(&mut h, edit.center());
-    let before = h.query_by_label_contains("Keyboard Shortcuts").expect("the Edit menu is open").rect();
-    assert!(before.max.y > 520.0, "Edit is taller than the window ({before:?})");
-    let menu = open_popup(&h);
+    let (before, menu) = open_tall_edit(&mut h, false, "the Edit menu is open");
     for step in 0..5 {
         move_to(&mut h, pos2(menu.center().x, menu.max.y - 6.0 - 6.0 * step as f32));
         h.run_steps(8);
@@ -134,16 +121,150 @@ fn without_the_hold_the_edge_does_not_scroll_the_menu() {
     }
 }
 
-fn drag(h: &mut Harness<'_, EffectcraftApp>, from: Pos2, to: Pos2) {
-    h.input_mut().events.push(Event::PointerMoved(from));
-    h.input_mut().events.push(Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
-    h.step();
-    for i in 1..=8 {
-        h.input_mut().events.push(Event::PointerMoved(from + (to - from) * (i as f32 / 8.0)));
-        h.step();
+/// Find the actual Edit popup's bottom crawl band while keeping the title press held.
+fn held_edit_crawl(h: &mut Harness<'_, EffectcraftApp>) -> Pos2 {
+    let edit = rect(h, "menu.Edit");
+    hold(h, edit.center());
+    let before = h.query_by_label_contains("Keyboard Shortcuts").expect("Edit opens on press").rect();
+    let menu = open_popup(h);
+    for step in 0..5 {
+        let p = pos2(menu.center().x, menu.max.y - 6.0 - 6.0 * step as f32);
+        move_to(h, p);
+        h.run_steps(8);
+        let after = h.query_by_label_contains("Keyboard Shortcuts").expect("Edit stays open").rect();
+        if after.min.y < before.min.y - 0.1 {
+            return p;
+        }
     }
-    h.input_mut().events.push(Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    panic!("the held Edit menu never crawled from its bottom edge");
+}
+
+fn menu_at(h: &mut Harness<'_, EffectcraftApp>, time: f64) {
+    h.input_mut().time = Some(time);
+    h.step();
+}
+
+/// A discarded layout pass may consume the queued offset once, but must not crawl again for
+/// the same RawInput time. A subsequent real iteration must still queue and consume its step.
+#[test]
+fn menu_edge_crawl_advances_once_on_replay_then_continues_at_a_later_time() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    let mut h = harness(1200.0, 520.0);
+    held_edit_crawl(&mut h);
+    let discard = Arc::new(AtomicBool::new(true));
+    h.ctx.on_end_pass(
+        "menu crawl replay regression",
+        Arc::new(move |ui| {
+            if discard.swap(false, Ordering::SeqCst) {
+                ui.ctx().request_discard("replay an actual held menu");
+            }
+        }),
+    );
+    let time = h.ctx.input(|i| i.time) + 1.0 / 60.0;
+    menu_at(&mut h, time);
+    assert_eq!(h.output().platform_output.num_completed_passes, 2, "the actual menu was replayed");
+    let once = h.query_by_label_contains("Keyboard Shortcuts").unwrap().rect();
+    for _ in 0..3 {
+        menu_at(&mut h, time);
+        assert_eq!(h.query_by_label_contains("Keyboard Shortcuts").unwrap().rect(), once, "same-time replay cannot queue another crawl");
+    }
+    let later = time + 1.0 / 60.0;
+    menu_at(&mut h, later);
+    menu_at(&mut h, later);
+    let advanced = h.query_by_label_contains("Keyboard Shortcuts").unwrap().rect();
+    assert!(advanced.min.y < once.min.y - 0.1, "a later input time advances the held menu ({once:?} -> {advanced:?})");
+    menu_at(&mut h, later);
+    assert_eq!(h.query_by_label_contains("Keyboard Shortcuts").unwrap().rect(), advanced, "the later time also takes only one step");
+}
+
+/// The actual menu viewport's vertical range, rather than its outer Area/frame rectangle.
+/// Popup's accessibility parent is its title, so background panels and other menus cannot match.
+fn menu_scrollbar(h: &Harness<'_, EffectcraftApp>, title: &str) -> Rect {
+    let menu = h.get_by_label(title);
+    let bars: Vec<_> = menu.query_all_by_role(egui::accesskit::Role::ScrollBar).map(|node| node.rect()).filter(|r| r.height() > r.width()).collect();
+    assert_eq!(bars.len(), 1, "{title}: exactly one actual vertical menu scrollbar ({bars:?})");
+    let bar = bars[0];
+    assert!(bar.height() > 36.0, "{title}: both crawl bands fit inside the viewport ({bar:?})");
+    bar
+}
+
+/// Exercise the real popup, its bounds, band exit and subsequent wheel input. Switching to a
+/// different real menu must not consume Edit's pending target or reuse its crawl clock.
+#[test]
+fn menu_edge_crawl_is_bounded_stops_and_keeps_wheel_and_menu_state_independent() {
+    let mut h = harness(1200.0, 520.0);
+    held_edit_crawl(&mut h);
+    h.run_steps(180);
+    let bottom = h.query_by_label_contains("Keyboard Shortcuts").unwrap().rect();
+    assert!(bottom.max.y <= 520.0, "the last item is inside the viewport at the bottom ({bottom:?})");
+    h.run_steps(20);
+    assert_eq!(h.query_by_label_contains("Keyboard Shortcuts").unwrap().rect(), bottom, "the bottom bound stops the crawl");
+
+    let bar = menu_scrollbar(&h, "Edit");
+    let x = bar.min.x - 12.0; // Inside the menu content, not on the scroll-bar track.
+    let top_band = pos2(x, bar.min.y + 6.0);
+    eprintln!("Edit actual viewport scrollbar {bar:?}; top-band input {top_band:?}");
+    move_to(&mut h, top_band);
+    h.run_steps(180);
+    let top = h.query_by_label_contains("Quick Apply").unwrap().rect();
+    assert!(top.min.y >= 0.0 && top.max.y <= 520.0, "the first entries return into view ({top:?}); actual bar {bar:?}, pointer {top_band:?}");
+    h.run_steps(20);
+    assert_eq!(h.query_by_label_contains("Quick Apply").unwrap().rect(), top, "the top bound stops the crawl");
+
+    let last_at_top = h.query_by_label_contains("Keyboard Shortcuts").unwrap().rect();
+    move_to(&mut h, pos2(x, bar.max.y - 6.0));
+    h.run_steps(15);
+    let scrolled = h.query_by_label_contains("Keyboard Shortcuts").unwrap().rect();
+    assert!(scrolled.min.y < last_at_top.min.y - 0.1, "the bottom band starts scrolling again ({last_at_top:?} -> {scrolled:?})");
+    move_to(&mut h, pos2(x, bar.center().y));
+    h.run_steps(2); // Consume the last one-shot target before checking the stopped menu.
+    let stopped = h.query_by_label_contains("Keyboard Shortcuts").unwrap().rect();
+    h.run_steps(20);
+    assert_eq!(h.query_by_label_contains("Keyboard Shortcuts").unwrap().rect(), stopped, "leaving the band stops the crawl");
+    assert!(
+        last_at_top.min.y > stopped.min.y + 1.0,
+        "there is upward wheel room: bottom {bottom:?}, top {last_at_top:?}, resumed {scrolled:?}, stopped {stopped:?}"
+    );
+    wheel(&mut h, pos2(x, bar.center().y), 120.0);
+    let wheeled_up = h.query_by_label_contains("Keyboard Shortcuts").unwrap().rect();
+    assert!(
+        wheeled_up.min.y > stopped.min.y + 1.0,
+        "upward wheel input moves the menu after the one-shot target: bottom {bottom:?}, top {last_at_top:?}, resumed {scrolled:?}, stopped {stopped:?}, wheeled {wheeled_up:?}"
+    );
+    assert!(wheeled_up.min.y > bottom.min.y + 1.0, "there is downward wheel room ({bottom:?} -> {wheeled_up:?})");
+    wheel(&mut h, pos2(x, bar.center().y), -120.0);
+    let wheeled = h.query_by_label_contains("Keyboard Shortcuts").unwrap().rect();
+    assert!(
+        wheeled.min.y < wheeled_up.min.y - 1.0,
+        "wheel input still moves the menu after the one-shot target ({wheeled_up:?} -> {wheeled:?}); bottom {bottom:?}, top {last_at_top:?}, resumed {scrolled:?}, stopped {stopped:?}"
+    );
+
+    // Queue another Edit crawl, then switch titles before its next draw can consume the target.
+    move_to(&mut h, pos2(x, bar.max.y - 6.0));
+    h.run_steps(15);
+    let file = rect(&h, "menu.File");
+    move_to(&mut h, file.center());
+    let fresh = h.query_by_label_contains("Open Project").expect("File opens while browsing").rect();
+    assert!(fresh.min.y >= file.max.y && fresh.max.y <= 520.0, "File starts at its own top, not Edit's offset ({fresh:?})");
+    h.run_steps(12);
+    assert_eq!(h.query_by_label_contains("Open Project").unwrap().rect(), fresh, "Edit's crawl does not continue in File");
+
+    // Release on its title rather than an entry, retaining a click-opened popup when possible.
+    h.input_mut().events.push(Event::PointerButton { pos: file.center(), button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
     h.run_steps(2);
+    if h.query_by_label_contains("Open Project").is_none() {
+        click_at(&mut h, file.center());
+    }
+    let bar = menu_scrollbar(&h, "File");
+    let x = bar.min.x - 12.0;
+    let released = h.query_by_label_contains("Open Project").unwrap().rect();
+    move_to(&mut h, pos2(x, bar.max.y - 6.0));
+    h.run_steps(20);
+    assert_eq!(h.query_by_label_contains("Open Project").unwrap().rect(), released, "without the hold, the edge does not restart a crawl");
 }
 
 /// A scroll bar's "scroll/max" automation label.
@@ -193,7 +314,8 @@ fn panels_taller_than_their_space_have_a_scroll_bar_to_drag() {
         click_at(&mut h, pos2(bar.center().x, bar.min.y + 2.0));
         assert_eq!(scrolled(&h, id).0, 0.0, "{id}: at the top");
         drag(&mut h, pos2(bar.center().x, bar.min.y + 6.0), pos2(bar.center().x, bar.max.y + 40.0));
-        assert_eq!(scrolled(&h, id).0, max, "{id}: dragged to the end");
+        let end = scrolled(&h, id).0;
+        assert!((end - max).abs() < 0.01, "{id}: dragged to the end: {end} of {max}");
     }
 }
 
@@ -211,7 +333,7 @@ fn effect_values_stay_clear_of_the_keyframe_navigator() {
     app.session.execute("prop.toggleAnimation", json!({"layer": lid, "path": path})).unwrap();
     app.session.execute("prop.set", json!({"layer": lid, "path": path, "value": [123456.7, 123456.7]})).unwrap();
     let uid = app.session.active_comp().unwrap().layer(effectcraft_engine::project::LayerId(lid)).unwrap().props.prop(path).unwrap().uid;
-    assert!(app.edit_layout(|l| l.float(PanelKind::EffectControls, [300.0, 150.0, 330.0, 500.0])));
+    app.apply_dock(craft_ui::docking::Action::Float { panel: PanelKind::EffectControls, rect: [300.0, 150.0, 330.0, 500.0] }).unwrap();
     h.run_steps(3);
     let value = rect(&h, &format!("effectControls.prop.{uid}.value.1"));
     let nav = rect(&h, &format!("effectControls.prop.{uid}.prevKey"));
@@ -234,6 +356,7 @@ fn settings_dialog_does_not_scroll_sideways() {
         delta: vec2(-400.0, 0.0),
         modifiers: Default::default(),
         phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Wheel,
     });
     h.run_steps(20);
     assert_eq!((rect(&h, "settings.ok"), rect(&h, "settings.page.general")), (ok, page), "nothing moved sideways");
@@ -242,22 +365,79 @@ fn settings_dialog_does_not_scroll_sideways() {
 /// #2034: the Settings sidebar uses the translated page names when deciding its width.
 #[test]
 fn settings_page_column_fits_japanese_names() {
+    use effectcraft_text::fonts;
     use effectcraft_ui_egui::theme::Tokens;
 
     let mut session = Session::default();
     session.prefs.general.language = "ja".into();
-    let mut h = Harness::builder().with_size(vec2(1400.0, 900.0)).build_eframe(|_| EffectcraftApp::new(session));
-    h.run_steps(3);
-    let ctx = h.ctx.clone();
-    effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "app.settings", json!({"page": "scripting"})).unwrap();
-    h.run_steps(3);
-
+    let app = EffectcraftApp::new(session);
     // The panel titles a page with its Settings menu row, minus the ellipsis.
-    let name = effectcraft_ui_egui::menus::menu_items(h.state())
+    let name = effectcraft_ui_egui::menus::menu_items(&app)
         .into_iter()
         .find(|m| m.id == "app.settings" && m.params["page"] == "scripting")
         .and_then(|m| m.label.strip_suffix("...").map(str::to_owned))
         .expect("the Settings menu lists the Scripting & Expressions page");
+    assert!(name.chars().any(|c| c >= '\u{3000}'), "the actual sidebar label is Japanese: {name}");
+    // Use the same external-directory scan and face coverage as production, before rendering.
+    // The managed job supplies CRAFT_FONTS_DIR; register its canonical fonts folder through the
+    // same directory source production scans for EFFECTCRAFT_FONT_DIRS, without changing the env.
+    crate::add_canonical_test_fonts();
+    fonts::scan_system();
+    let base = fonts::resolve("Inter", "Regular").face;
+    let japanese = fonts::face(fonts::fallback_for_locale('あ', base, "ja"));
+    for ch in ['あ', 'フ'].into_iter().chain(name.chars()) {
+        assert!(japanese.has_char(ch), "Japanese fixture lacks {ch:?} for {name:?}: {:?}", japanese.info);
+    }
+    let required_canonical = std::env::var("CRAFT_FONTS_REQUIRED").as_deref() == Ok("1");
+    if required_canonical {
+        let root = std::env::var_os("CRAFT_FONTS_DIR").expect("required canonical craft-fonts input");
+        let expected =
+            std::path::PathBuf::from(root).join("fonts/biz-ud-pgothic/BIZUDPGothic-Regular.ttf").canonicalize().expect("canonical BIZ UDPGothic Regular input");
+        let resolved = fonts::resolve("BIZ UDPGothic", "Regular");
+        assert!(!resolved.missing, "required BIZ UDPGothic Regular must resolve without substitution");
+        let face = fonts::face(resolved.face);
+        assert_eq!(face.info.family, "BIZ UDPGothic", "{:?}", face.info);
+        assert_eq!(face.info.style, "Regular", "{:?}", face.info);
+        assert_eq!(japanese.id, face.id, "required production fallback is the canonical BIZ face: selected {:?}, canonical {:?}", japanese.info, face.info);
+        let fonts::FaceData::File(path) = &face.info.data else { panic!("required BIZ face must come from canonical external input: {:?}", face.info) };
+        assert_eq!(path.canonicalize().unwrap(), expected, "required face source: {:?}", face.info);
+        let expected_bytes = std::fs::read(&expected).unwrap();
+        let font = face.font().expect("required canonical BIZ face parses");
+        assert!(font.data().as_bytes() == expected_bytes.as_slice(), "resolved BIZ bytes match canonical input {expected:?}");
+        for ch in ['あ', 'フ'].into_iter().chain(name.chars()) {
+            assert!(face.has_char(ch), "canonical BIZ input lacks actual label glyph {ch:?}: {:?}", face.info);
+        }
+        eprintln!("required Japanese input {expected:?}: {:?}", face.info);
+    }
+
+    let mut h = Harness::builder().with_size(vec2(1400.0, 900.0)).build_eframe(|_| app);
+    h.run_steps(3);
+    let ctx = h.ctx.clone();
+    effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "app.settings", json!({"page": "scripting"})).unwrap();
+    h.run_steps(3);
+    h.ctx.fonts_mut(|fonts| {
+        let definitions = fonts.definitions();
+        assert!(
+            definitions.font_data.contains_key("japanese-system"),
+            "production installs the Japanese fallback; installed {:?}",
+            definitions.font_data.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            definitions.families.get(&egui::FontFamily::Proportional).unwrap().iter().any(|name| name == "japanese-system"),
+            "production proportional stack reaches its Japanese fallback"
+        );
+        if required_canonical {
+            let registered = definitions.font_data.get("japanese-system").unwrap();
+            let selected = japanese.font().expect("selected canonical Japanese face parses");
+            assert_eq!(registered.index, japanese.info.index, "production registration retains selected face index");
+            assert!(
+                registered.font.as_ref().as_ref() == selected.data().as_bytes(),
+                "production japanese-system bytes equal the selected canonical fallback: {:?}",
+                japanese.info
+            );
+        }
+        assert!(fonts.has_glyphs(&Tokens::ui(12.5), &name), "production glyph lookup covers actual Japanese sidebar label {name:?}");
+    });
     let text_width = h.ctx.fonts_mut(|fonts| fonts.layout_no_wrap(name.clone(), Tokens::ui(12.5), egui::Color32::WHITE).size().x);
     let row = rect(&h, "settings.page.scripting");
     assert!(row.width() >= text_width + 20.0, "{name} needs {text_width} points; row is {row:?}");

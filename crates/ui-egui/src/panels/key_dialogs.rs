@@ -191,7 +191,7 @@ pub fn velocity(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
 fn combo(ui: &mut egui::Ui, app: &mut EffectcraftApp, id: &str, sel: &mut usize, opts: &[&str], enabled: bool) {
     ui.add_enabled_ui(enabled, |ui| {
         // The options are the English source strings; the automation id and label stay English.
-        let r = egui::ComboBox::from_id_salt(id).width(200.0).selected_text(tr(opts[*sel])).show_ui(ui, |ui| {
+        let r = craft_ui::ComboBox::from_id_salt(id).width(200.0).selected_text(tr(opts[*sel])).show_ui(ui, |ui| {
             for (i, o) in opts.iter().enumerate() {
                 ui.selectable_value(sel, i, tr(o));
             }

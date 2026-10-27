@@ -111,6 +111,7 @@ fn wheel_zooms_around_the_pointer_and_hand_tool_pans() {
         delta: vec2(0.0, 120.0),
         modifiers: Default::default(),
         phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Wheel,
     });
     h.run_steps(20);
     let after = rect(&h, "layerPanel.canvas");

@@ -181,7 +181,7 @@ impl Default for Store {
 
 impl Store {
     pub fn lock(&self) -> std::sync::MutexGuard<'_, Mirror> {
-        self.mirror.lock().unwrap_or_else(|e| e.into_inner())
+        self.mirror.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn now(&self) -> f64 {

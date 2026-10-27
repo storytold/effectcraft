@@ -4,6 +4,7 @@
 
 use effectcraft_ui_egui::EffectcraftApp;
 use effectcraft_ui_egui::dock::PanelKind;
+use effectcraft_ui_egui::dock::WorkspaceExt as _;
 use egui::{Event, Rect, pos2, vec2};
 use egui_kittest::Harness;
 use serde_json::json;
@@ -75,7 +76,7 @@ fn script_windows_are_drawn_and_clickable() {
     h.state_mut().session.execute("window.scriptPanel", json!({"name": "Layer Tools.jsx"})).unwrap();
     h.run_steps(3);
     let panel = h.state().session.script_ui.windows.iter().find(|w| w.script == "Layer Tools.jsx").unwrap().id;
-    assert!(h.state().ui.dock.contains(PanelKind::ScriptPanel(panel)), "the panel docks");
+    assert!(h.state().ui.dock.is_docked(PanelKind::ScriptPanel(panel)), "the panel docks");
     assert!(h.state().auto.find(&format!("scriptui.{panel}")).is_some());
     // The menus list scripts and panels.
     let cx = effectcraft_engine::menus::DynCtx::default();
@@ -104,7 +105,7 @@ fn panels_open_at_quit_dock_again_at_launch() {
     let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
     let panel = h.state().session.script_ui.windows.iter().find(|w| w.script == "Hello Panel.jsx").expect("the panel's window").id;
-    assert!(h.state().ui.dock.contains(PanelKind::ScriptPanel(panel)), "the panel docks");
+    assert!(h.state().ui.dock.is_docked(PanelKind::ScriptPanel(panel)), "the panel docks");
     assert!(h.state().auto.find(&format!("scriptui.{panel}.hi")).is_some(), "its controls are drawn");
     // Closing its tab forgets it for the next launch.
     h.state_mut().close_panel(PanelKind::ScriptPanel(panel));
@@ -131,7 +132,7 @@ fn ease_presets_panel_eases_the_selected_keys_from_its_list() {
     s.execute("window.scriptPanel", json!({"name": "Ease Presets.jsx"})).unwrap();
     h.run_steps(3);
     let panel = h.state().session.script_ui.windows.iter().find(|w| w.script == "Ease Presets.jsx").unwrap().id;
-    assert!(h.state().ui.dock.contains(PanelKind::ScriptPanel(panel)), "the panel docks");
+    assert!(h.state().ui.dock.is_docked(PanelKind::ScriptPanel(panel)), "the panel docks");
     h.state_mut().ui.maximized = Some(PanelKind::ScriptPanel(panel));
     h.run_steps(3);
     let steps = h.state().session.history.undo.len();

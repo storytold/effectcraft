@@ -1,5 +1,6 @@
 //! The crate's integration tests, one binary (each module is a former `tests/<name>.rs`).
 
+mod native_menu_text_keys;
 mod render_queue_snapshot;
 mod shared_docking_ui;
 mod ui_3d;
@@ -87,3 +88,18 @@ mod ui_workflow_selection;
 mod ui_workspace_focus;
 mod viewer_geometry;
 mod viewer_passive_display;
+
+/// Register the managed build's canonical craft-fonts checkout (`CRAFT_FONTS_DIR/fonts`) through
+/// the same directory source production scans for `EFFECTCRAFT_FONT_DIRS`. The UI tests then render
+/// real Japanese glyphs from the canonical external input instead of relying on host fonts.
+pub(crate) fn add_canonical_test_fonts() {
+    use effectcraft_text::fonts::{self, DirectorySource};
+    static REGISTER: std::sync::Once = std::sync::Once::new();
+    REGISTER.call_once(|| {
+        let Some(root) = std::env::var_os("CRAFT_FONTS_DIR") else { return };
+        let dir = std::path::PathBuf::from(root).join("fonts");
+        if dir.is_dir() {
+            fonts::add_source(&DirectorySource { dirs: vec![dir] });
+        }
+    });
+}

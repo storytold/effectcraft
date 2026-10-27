@@ -5,27 +5,31 @@ use std::sync::Arc;
 use effectcraft_engine::Session;
 use effectcraft_engine::config::{ConfigStore, DirConfig, MemoryConfig};
 use effectcraft_ui_egui::EffectcraftApp;
-use effectcraft_ui_egui::dock::{DockNode, PanelKind, SplitSize};
+use effectcraft_ui_egui::dock::{self, Node, PanelKind, SplitSize};
 use effectcraft_ui_egui::state::Tool;
 use egui::{Event, Id, Key, Modifiers, vec2};
 use egui_kittest::Harness;
 use serde_json::json;
 
+/// The egui id of panel `p`'s dock tab.
+fn tab_id(p: PanelKind) -> Id {
+    craft_ui::docking::DockArea::<PanelKind>::hit_id(effectcraft_ui_egui::dock_ui::area_id(), &craft_ui::docking::Hit::Tab(p))
+}
+
 #[test]
 fn named_and_current_workspaces_survive_frontend_restart() {
     let store = Arc::new(MemoryConfig::default());
     let mut app = EffectcraftApp::new(Session { config: Some(store.clone()), ..Default::default() });
-    app.ui.dock = DockNode::Split {
-        vertical: false,
-        size: SplitSize::FixedA(345.0),
-        a: Box::new(DockNode::Tabs { panels: vec![PanelKind::Project], active: 0 }),
-        b: Box::new(DockNode::Tabs { panels: vec![PanelKind::Composition, PanelKind::Layer], active: 1 }),
-    };
+    app.ui.dock = dock::docked(dock::hsplit(
+        SplitSize::FixedFirst(345.0),
+        dock::tabs(&[PanelKind::Project], 0),
+        dock::tabs(&[PanelKind::Composition, PanelKind::Layer], 1),
+    ));
     let ctx = egui::Context::default();
     effectcraft_ui_egui::menus::invoke(&mut app, &ctx, "window.saveWorkspaceAs", json!({"name": "Restart layout"})).unwrap();
     let saved = app.ui.dock.clone();
-    if let DockNode::Split { size, .. } = &mut app.ui.dock {
-        *size = SplitSize::FixedA(390.0);
+    if let Some(Node::Split { size, .. }) = &mut app.ui.dock.layout.root {
+        *size = SplitSize::FixedFirst(390.0);
     }
     app.ui.focused = PanelKind::Layer;
     let current = app.ui.dock.clone();
@@ -100,15 +104,18 @@ fn unreadable_native_workspace_is_preserved_after_later_layout_changes() {
 #[test]
 fn legacy_named_workspaces_migrate_once_and_survive_actual_app_restart() {
     let store = Arc::new(MemoryConfig::default());
-    let saved = effectcraft_ui_egui::dock::workspace("Minimal");
-    store.write("workspaces.json", &json!({"workspaces":{"Legacy":saved},"floating":{}}).to_string()).unwrap();
+    // An unversioned record from an earlier EffectCraft: its Minimal layout saved as "Legacy".
+    let legacy = r#"{"floating":{},"workspaces":{"Legacy":{"Split":{"a":{"Tabs":{"active":0,"panels":["Composition"]}},"b":{"Tabs":{"active":0,"panels":["Timeline"]}},"size":{"Ratio":0.6000000238418579},"vertical":true}}}}"#;
+    store.write("workspaces.json", legacy).unwrap();
+    let saved = effectcraft_ui_egui::dock::Workspace::new(effectcraft_ui_egui::dock::workspace("Minimal"));
     let mut app = EffectcraftApp::new(Session { config: Some(store.clone()), ..Default::default() });
     assert_eq!(app.ui.saved_workspaces.get("Legacy"), Some(&saved));
     app.set_workspace("Legacy");
     let ctx = egui::Context::default();
     effectcraft_ui_egui::menus::invoke(&mut app, &ctx, "window.saveWorkspaceAs", json!({"name":"Migrated"})).unwrap();
     let text = store.read("workspaces.json").unwrap();
-    assert_eq!(serde_json::from_str::<serde_json::Value>(&text).unwrap()["version"], 1);
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&text).unwrap()["version"], 2);
+    assert_eq!(store.read("workspaces.old.json").as_deref(), Some(legacy));
     let restarted = EffectcraftApp::new(Session { config: Some(store), ..Default::default() });
     assert_eq!(restarted.ui.saved_workspaces.get("Legacy"), Some(&saved));
     assert_eq!(restarted.ui.saved_workspaces.get("Migrated"), Some(&saved));
@@ -128,23 +135,23 @@ fn tab_and_shift_tab_traverse_toolbar_and_space_activates_only_focused_tool() {
     h.run_steps(3);
     for _ in 0..8 {
         key(&mut h, Key::Tab, Modifiers::NONE);
-        if h.ctx.memory(|m| m.focused()) == Some(Id::new(("tool-slot", 0usize))) {
+        if h.ctx.memory(|m| m.focused()) == Some(Id::unique(("tool-slot", 0usize))) {
             break;
         }
     }
-    assert_eq!(h.ctx.memory(|m| m.focused()), Some(Id::new(("tool-slot", 0usize))));
+    assert_eq!(h.ctx.memory(|m| m.focused()), Some(Id::unique(("tool-slot", 0usize))));
     key(&mut h, Key::Tab, Modifiers::NONE);
-    assert_eq!(h.ctx.memory(|m| m.focused()), Some(Id::new(("tool-slot", 1usize))));
+    assert_eq!(h.ctx.memory(|m| m.focused()), Some(Id::unique(("tool-slot", 1usize))));
     assert_eq!(h.state().ui.tool, Tool::Selection, "focus movement alone must not select a tool");
     key(&mut h, Key::Tab, Modifiers::NONE);
-    assert_eq!(h.ctx.memory(|m| m.focused()), Some(Id::new(("tool-slot", 2usize))));
+    assert_eq!(h.ctx.memory(|m| m.focused()), Some(Id::unique(("tool-slot", 2usize))));
     key(&mut h, Key::Tab, Modifiers::SHIFT);
-    assert_eq!(h.ctx.memory(|m| m.focused()), Some(Id::new(("tool-slot", 1usize))));
+    assert_eq!(h.ctx.memory(|m| m.focused()), Some(Id::unique(("tool-slot", 1usize))));
     key(&mut h, Key::Space, Modifiers::NONE);
     assert_eq!(h.state().ui.tool, Tool::Hand);
     assert!(!h.state().playback.playing, "Space activates the focused widget, not preview playback");
     assert!(Arc::ptr_eq(&h.state().session.project, &project), "keyboard focus and tool selection do not modify the project");
-    let response = h.ctx.read_response(Id::new(("tool-slot", 1usize))).unwrap();
+    let response = h.ctx.read_response(Id::unique(("tool-slot", 1usize))).unwrap();
     assert!(
         h.output().shapes.iter().any(|shape| {
             matches!(&shape.shape, egui::Shape::Rect(r) if r.rect == response.rect.shrink(1.0) && r.stroke.color == h.state().tokens.text && r.stroke.width > 0.0)
@@ -166,19 +173,19 @@ fn tab_traversal_activates_an_inactive_dock_tab_without_editing_the_project() {
     app.ui.start_screen = false;
     app.ui.show_menu_bar = false;
     // Leave the inactive, layer-named tab visible instead of behind the overflow control.
-    if let DockNode::Split { a, .. } = &mut app.ui.dock
-        && let DockNode::Split { a, .. } = a.as_mut()
-        && let DockNode::Split { size, .. } = a.as_mut()
+    if let Some(Node::Split { first, .. }) = &mut app.ui.dock.layout.root
+        && let Node::Split { first, .. } = first.as_mut()
+        && let Node::Split { size, .. } = first.as_mut()
     {
-        *size = SplitSize::FixedA(420.0);
+        *size = SplitSize::FixedFirst(420.0);
     }
     let mut h = Harness::builder().with_size(vec2(1200.0, 760.0)).build_eframe(move |_| app);
     h.run_steps(3);
     assert!(h.state().auto.find("panel.tab.EffectControls").is_some(), "the inactive tab must be visible in this fixture");
     let before = h.state().ui.dock.clone();
-    let target = Id::new(("tab", "aaa".to_string(), 1usize));
+    let target = tab_id(PanelKind::EffectControls);
     let mut tabs = 0;
-    for _ in 0..80 {
+    for _ in 0..200 {
         key(&mut h, Key::Tab, Modifiers::NONE);
         tabs += 1;
         if h.ctx.memory(|m| m.focused()) == Some(target) {
@@ -188,24 +195,26 @@ fn tab_traversal_activates_an_inactive_dock_tab_without_editing_the_project() {
     assert_eq!(h.ctx.memory(|m| m.focused()), Some(target));
     println!("Tab presses from no focus to Effect Controls: {tabs}");
     assert_eq!(h.state().ui.dock, before, "traversal alone must not activate a tab");
+    // craft-ui outlines the keyboard-focused tab, inset 2 pt, in the dock's accent (EffectCraft's
+    // focus colour).
+    let response = h.ctx.read_response(target).unwrap();
+    assert!(
+        h.output().shapes.iter().any(|shape| {
+            matches!(&shape.shape, egui::Shape::Rect(r) if r.rect == response.rect.shrink(2.0) && r.stroke.color == h.state().tokens.focus && r.stroke.width > 0.0)
+        }),
+        "the dock tab must visibly show keyboard focus"
+    );
     key(&mut h, Key::Space, Modifiers::NONE);
     let mut activated = before;
-    assert!(activated.activate(PanelKind::EffectControls));
+    activated.apply(craft_ui::docking::Action::Activate { panel: PanelKind::EffectControls }, dock::permissions).unwrap();
     assert_eq!(h.state().ui.dock, activated);
     assert_eq!(h.state().ui.focused, PanelKind::EffectControls);
     assert!(!h.state().playback.playing);
     assert!(Arc::ptr_eq(&h.state().session.project, &project));
-    let response = h.ctx.read_response(target).unwrap();
-    assert!(
-        h.output().shapes.iter().any(|shape| {
-            matches!(&shape.shape, egui::Shape::Rect(r) if r.rect == response.rect.shrink(1.0) && r.stroke.color == h.state().tokens.text && r.stroke.width > 0.0)
-        }),
-        "the active dock tab must visibly retain keyboard focus"
-    );
     let inspected = effectcraft_ui_egui::control::inspect(h.state(), &h.ctx);
     assert_eq!(inspected["keyboardFocus"]["automationId"], "panel.tab.EffectControls");
     key(&mut h, Key::Tab, Modifiers::SHIFT);
-    assert_eq!(h.ctx.memory(|m| m.focused()), Some(Id::new(("tab", "aaa".to_string(), 0usize))));
+    assert_eq!(h.ctx.memory(|m| m.focused()), Some(tab_id(PanelKind::Project)));
     key(&mut h, Key::Enter, Modifiers::NONE);
     assert_eq!(h.state().ui.focused, PanelKind::Project);
     assert!(!h.state().playback.playing);
@@ -284,8 +293,8 @@ fn control_root_divider_drag_after_toolbar_and_dock_tab_keyboard_activation() {
     d.ok("ui.click", json!({"id":"tools.Selection"}), true);
     // The toolbar can grow as upstream adds controls. Traverse to the actual response
     // identity rather than assuming a fixed number of focus stops.
-    let target = Id::new(("tab", "aaa".to_string(), 1usize));
-    for tabs in 1..=100 {
+    let target = tab_id(PanelKind::EffectControls);
+    for tabs in 1..=200 {
         d.ok("ui.key", json!({"key":"Tab"}), true);
         assert!(d.h.state().ui.mini_flowchart.is_none(), "dock-tab traversal must not open a foreground popup");
         if d.h.ctx.memory(|memory| memory.focused()) == Some(target) {
@@ -480,7 +489,7 @@ fn failed_save_or_delete_of_a_saved_workspace_keeps_the_file() {
     let saved = app.ui.dock.clone();
     let before = store.read("workspaces.json").unwrap();
     store.full.store(true, std::sync::atomic::Ordering::Relaxed);
-    app.ui.dock.close(PanelKind::Timeline);
+    app.close_panel(PanelKind::Timeline);
     let error = invoke(&mut app, "window.saveWorkspace", json!({})).unwrap_err();
     assert!(error.contains("synthetic full disk") && error.contains("may be lost after a restart"), "{error}");
     assert!(invoke(&mut app, "window.editWorkspaces", json!({"name": "Kept", "delete": true})).is_err());

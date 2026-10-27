@@ -13,7 +13,7 @@
 //! | AV1 | MP4 (`av01`) | `effectcraft-av1enc` Main 8/10-bit 4:2:0, key + inter frames | no | AAC-LC (FilmCraft) |
 //! | WAV / AIFF | RIFF WAVE / AIFF (AIFF-C for float) | — | — | PCM 16/24-bit or 32-bit float, mono/stereo (audio only) |
 //!
-//! Every frame goes through [`pipeline`]: the Render Settings overrides (Effects, Solo Switches,
+//! Every frame goes through the internal `pipeline` module: the Render Settings overrides (Effects, Solo Switches,
 //! Guide Layers, Frame Blending, Motion Blur, Color Depth), field rendering (two fields half a
 //! frame apart woven line by line, with optional 3:2 pulldown from film frames at 4/5 of the
 //! rate), then the Output Module's Crop (edges or the region of interest) and Resize. Channels

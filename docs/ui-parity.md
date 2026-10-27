@@ -16,7 +16,7 @@ feel and platform differences, and the 26.x interface changes are not in yet.
 | Area | Status | % | Evidence and gaps |
 |---|---|---:|---|
 | Menu bar | After Effects' menus, order, submenus and labels; native on macOS; keyboard-operable in-window bar | 95% | 587 entries in `crates/engine/src/menus.rs`; Adobe-service entries omitted by design; `ui_menus` tests (#279) |
-| Panels and workspaces | Every After Effects panel; all standard workspaces; drag-to-dock, tabs, floating panels, maximise | 75% | `ui_tabs`, `ui_panels`; panels move into their own native windows on any screen (#486 open: no dragging tabs between those windows); #302, #301 and #320 (docking, stacked-panel headers, workspace persistence) are closed |
+| Panels and workspaces | Every After Effects panel; all standard workspaces; drag-to-dock, tabs, floating panels, maximise | 75% | `ui_tabs`, `ui_panels`; on Windows, macOS and X11 floating panels are OS windows of their own on any screen (on Wayland, the web and in embedded viewports they stay in the app window), with tabs and groups dragging between windows and shortcuts working in them (#486); #302, #301 and #320 (docking, stacked-panel headers, workspace persistence) are closed |
 | Timeline | Switches, modes, parent & link, twirl-downs, reveal shortcuts (U, UU, P, S, R, T, A, E, M, F, Alt+Shift…), pick whips, graph editor, work area, markers | 75% | `ui_keyframes`, `ui_timeline_*`; expand precomps in place (#601); #456, #457, #569 and #355 (Graph Editor jitter and buttons, negative rotation, bulk keyframing) are closed; Proportional Scrubbing (26.2: Ctrl+Alt / Cmd+Opt scrub of hot text spreads the change over the selected layers by selection order, #770) matched for layers selected as a whole, not yet for individually selected properties; every layer has the Video switch, nulls, cameras and lights included (a hidden null, camera or light has no box or handles in the viewer and isn't picked there; other selected hidden layers keep their layer controls and paths, #1769); a row control (a switch, the label swatch, a Modes cell) clicked on one of several selected layers acts on the whole selection, with the layers the switch doesn't apply to left out (#1849); a shape group's inner Contents (After Effects' elided Vectors group) draws no row — the group's path, fill/stroke and Transform list directly under it |
 | Composition viewer | Selection, handles with direction-aware cursors, rulers, guides, grids, snapping, channels, exposure, region of interest, snapshots, 3D views, Spacebar hand | 70% | `ui_viewer`, `ui_viewers`; Cmd/Ctrl +/− doesn't zoom (#570); anchor point grab on Linux (#492); #352 (snapping) is closed; no 3D transform gizmos (#392, #347); percentage guides (26.5) exist as View ▸ Add Percentage Guide and Convert Guides to Percentage / Pixels (a guide stores a percent of the comp, so it follows comp-size changes; behaviour inferred from the release note, not compared with After Effects); Copy Frame to Clipboard (26.3) is in the Composition menu and the viewer's context menu |
 | Tools panel | All After Effects tools; long-press flyouts; Tool Creates Shape / Mask; Fill / Stroke options | 80% | #213, #227 fixed; #553 (pen and vertex tools on motion paths) is closed |
@@ -41,9 +41,8 @@ cover shape paths and masks, corner-vertex dragging and undo, and layers without
 
 ## Estimate
 
-**≈ 60–120 h**: the open interaction issues above (25–45 h, about 0.2–0.5 h each with a scripted
-test), 3D gizmos 8–15 h, multi-monitor panels 10–20 h, the 26.x interface changes 10–20 h, an
-accessibility pass 15–30 h. Checking feel against After Effects needs the owner's Mac with After
+**≈ 60–110 h**: the open interaction issues above (25–45 h, about 0.2–0.5 h each with a scripted
+test), 3D gizmos 8–15 h, the 26.x interface changes 10–20 h, an accessibility pass 15–30 h. Checking feel against After Effects needs the owner's Mac with After
 Effects running; most of the rest parallelises.
 
 ## Revision history

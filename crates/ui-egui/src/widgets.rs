@@ -22,9 +22,11 @@ struct TabOrder {
     pending: Option<(egui::Id, bool, u64)>,
 }
 
+/// The temp-data id of the [`TabOrder`] for the panel containing `ui` (unique per panel scope;
+/// `Id::NULL` outside a tagged panel).
 fn tab_order_id(ui: &Ui) -> egui::Id {
-    let panel = ui.stack().iter().find(|s| s.tags().contains(PANEL_TAG)).map_or(egui::Id::NULL, |s| s.id);
-    egui::Id::new(("hot-tab-order", panel))
+    let panel = ui.stack().iter().find(|s| s.tags().contains(PANEL_TAG)).map_or(egui::Id::NULL, |s| s.scope_id);
+    egui::Id::unique(("hot-tab-order", panel))
 }
 
 /// Puts hot-text field `id` in its panel's Tab order. True when a Tab in the field before it
@@ -274,8 +276,13 @@ pub fn icon_toggle(ui: &mut Ui, rect: Rect, icon: Icon, on: bool, t: &Tokens, id
 }
 
 /// Icon button (toolbar style) with optional active state.
+///
+/// The icon alone carries no text, so the button's accessible name is its tooltip: callers chain
+/// `.on_hover_text(…)`, which names the node this reports (an icon button with neither is unnamed
+/// and kittest's accessibility check flags it).
 pub fn icon_button(ui: &mut Ui, rect: Rect, icon: Icon, active: bool, t: &Tokens, id: egui::Id) -> Response {
     let resp = ui.interact(rect, id, Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), active, ""));
     if active {
         ui.painter().rect_filled(rect, 4.0, t.accent);
     } else if resp.hovered() {
@@ -321,6 +328,9 @@ pub fn text_field(ui: &mut Ui, rect: Rect, text: &mut String, hint: &str, t: &To
     field(ui, rect, text, hint, t, false)
 }
 
+/// The shared body of [`text_field`] and [`search_field`]: paints the rounded field (and, for
+/// `search`, a magnifier), places a single-line `TextEdit` on `text` filling the inner rect,
+/// and returns its response.
 fn field(ui: &mut Ui, rect: Rect, text: &mut String, hint: &str, t: &Tokens, search: bool) -> Response {
     let h = rect.height();
     ui.painter().rect_filled(rect, h / 2.0, t.field_bg);
@@ -338,7 +348,7 @@ fn field(ui: &mut Ui, rect: Rect, text: &mut String, hint: &str, t: &Tokens, sea
             // As tall as the field, so the text and the hint sit on its middle (they sat high, #581).
             .min_size(inner.size())
             .font(Tokens::ui(12.0))
-            .vertical_align(egui::Align::Center),
+            .align(egui::Align2::LEFT_CENTER),
     )
 }
 
@@ -350,6 +360,15 @@ pub fn dropdown(ui: &mut Ui, rect: Rect, text: &str, t: &Tokens, id: egui::Id) -
 /// [`dropdown`] with a tooltip `tip` (shown always; it replaces the elided text's tooltip).
 pub fn dropdown_tip(ui: &mut Ui, rect: Rect, text: &str, tip: Option<&str>, t: &Tokens, id: egui::Id) -> Response {
     let resp = ui.interact(rect, id, Sense::click());
+    // A combo box shows its current value; with no separate label widget that value is also the
+    // name a screen reader announces. An empty value falls back to the tooltip (or a generic name)
+    // so the control is still reachable.
+    let name = match (text.is_empty(), tip) {
+        (false, _) => text.to_string(),
+        (true, Some(tip)) if !tip.is_empty() => tip.to_string(),
+        _ => crate::i18n::tr("Options").to_string(),
+    };
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, ui.is_enabled(), &name));
     ui.painter().rect_filled(rect, 3.0, if resp.hovered() { t.hover } else { t.field_bg });
     ui.painter().rect_stroke(rect, 3.0, Stroke::new(1.0, t.field_border), StrokeKind::Inside);
     // Text that doesn't fit before the arrow is elided (narrow panels).
@@ -382,6 +401,7 @@ pub fn dropdown_tip(ui: &mut Ui, rect: Rect, text: &str, tip: Option<&str>, t: &
 /// Text button with a subtle fill.
 pub fn text_button(ui: &mut Ui, rect: Rect, text: &str, primary: bool, t: &Tokens, id: egui::Id) -> Response {
     let resp = ui.interact(rect, id, Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), text));
     let bg = if primary {
         if resp.hovered() { t.accent_hover } else { t.accent }
     } else if resp.hovered() {
@@ -423,7 +443,7 @@ pub fn scroll_bar(ui: &mut Ui, auto: &mut Registry, key: &str, track: Rect, scro
     let thumb_len = (len * len / (len + max.max(0.0)).max(1.0)).max(16.0).min(len).max(0.0);
     let travel = (len - thumb_len).max(1.0);
     let thumb_at = |s: f32| track.min[a] + (len - thumb_len) * if max > 0.0 { (s / max).clamp(0.0, 1.0) } else { 0.0 };
-    let resp = ui.interact(track.expand2(if vertical { vec2(3.0, 0.0) } else { vec2(0.0, 3.0) }), egui::Id::new(key), Sense::drag());
+    let resp = ui.interact(track.expand2(if vertical { vec2(3.0, 0.0) } else { vec2(0.0, 3.0) }), egui::Id::unique(key), Sense::drag());
     let pressed = resp.is_pointer_button_down_on() && ui.input(|i| i.pointer.any_pressed());
     let mut s = scroll;
     if let Some(p) = resp.interact_pointer_pos().filter(|p| pressed && !(thumb_at(scroll)..=thumb_at(scroll) + thumb_len).contains(&p[a])) {
@@ -494,8 +514,10 @@ pub fn check_label(on: bool, label: &str) -> String {
     if on { format!("✓ {label}") } else { format!("   {label}") }
 }
 
-fn label_swatch_id() -> egui::Id {
-    egui::Id::new("label-swatch")
+/// The atom id of [`label_swatch`]'s slot inside a button, which [`paint_label_swatch`] looks
+/// up on the laid-out button.
+fn label_swatch_id() -> egui::IdSalt {
+    egui::IdSalt::new("label-swatch")
 }
 
 /// The colour swatch of a Label menu row, as an atom for its button: Label menus show each
@@ -506,7 +528,7 @@ pub fn label_swatch() -> egui::Atom<'static> {
 }
 
 /// Paint the [`label_swatch`] of a laid-out button: label `l`'s colour, an empty box for None.
-pub fn paint_label_swatch(ui: &Ui, out: &egui::AtomLayoutResponse, l: effectcraft_engine::color::Label, t: &Tokens) {
+pub fn paint_label_swatch(ui: &Ui, out: &egui::WidgetAtomResponse, l: effectcraft_engine::color::Label, t: &Tokens) {
     let Some(r) = out.rect(label_swatch_id()) else { return };
     let r = Rect::from_center_size(r.center(), vec2(11.0, 11.0));
     if l == effectcraft_engine::color::Label::None {
@@ -642,7 +664,7 @@ pub(crate) fn note_open_popup_list(ctx: &egui::Context) {
 
 /// The pass a [`popup_list`] was last drawn in.
 fn popup_list_pass_id() -> egui::Id {
-    egui::Id::new("popup-list-pass")
+    egui::Id::unique("popup-list-pass")
 }
 
 /// Whether a menu, context menu or popup list is open, or the menu bar has the keyboard (as of
@@ -664,8 +686,16 @@ pub fn any_menu_open(ctx: &egui::Context) -> bool {
 /// and the scroll bar are how a normally opened menu scrolls.
 pub fn menu_scroll<R>(ui: &mut Ui, browsing: bool, add: impl FnOnce(&mut Ui) -> R) -> R {
     let max_h = ui.ctx().content_rect().height() - 40.0;
-    let out = egui::ScrollArea::vertical().max_height(max_h).min_scrolled_height(max_h).show(ui, add);
-    edge_scroll(ui, &out, browsing);
+    let pending = ui.scope_id().with("menu-edge-scroll-offset");
+    let target = ui.ctx().data_mut(|d| d.remove_temp::<f32>(pending));
+    let mut area = egui::ScrollArea::vertical().max_height(max_h).min_scrolled_height(max_h);
+    if let Some(target) = target {
+        area = area.vertical_scroll_offset(target);
+    }
+    let out = area.show(ui, add);
+    if let Some(target) = edge_scroll(ui, &out, browsing) {
+        ui.ctx().data_mut(|d| d.insert_temp(pending, target));
+    }
     out.inner
 }
 
@@ -674,9 +704,11 @@ pub fn menu_scroll<R>(ui: &mut Ui, browsing: bool, add: impl FnOnce(&mut Ui) -> 
 /// a run and stops at the end — and stops at once when the pointer leaves the band or the hold.
 ///
 /// This runs after `ScrollArea::show`, which laid the menu out for the offset it had, so the new
-/// offset goes into the area's state and shows on the next frame: a frame of lag, invisible at
-/// these speeds. egui's own scrolling (wheel, drag, scroll bar) is untouched.
-fn edge_scroll<R>(ui: &Ui, out: &egui::containers::scroll_area::ScrollAreaOutput<R>, browsing: bool) {
+/// offset is supplied once to the next draw's builder: a frame of lag, invisible at these speeds.
+/// That explicit vertical offset cancels prior momentum on that draw; later wheel and scroll-bar
+/// input still applies normally. A replay can consume the target but cannot queue another step
+/// at the same input time.
+fn edge_scroll<R>(ui: &Ui, out: &egui::containers::scroll_area::ScrollAreaOutput<R>, browsing: bool) -> Option<f32> {
     /// How far from the top / bottom edge the pointer starts the crawl (points).
     const BAND: f32 = 18.0;
     /// The pause before the crawl starts: a pointer merely grazing the edge must not jump.
@@ -712,23 +744,29 @@ fn edge_scroll<R>(ui: &Ui, out: &egui::containers::scroll_area::ScrollAreaOutput
         now
     };
     if dir == 0 {
-        return;
+        return None;
     }
     if now - since < f64::from(DELAY) {
         // A pointer resting still fires no events: keep the frames coming until the crawl runs.
         ctx.request_repaint();
-        return;
+        return None;
     }
     let speed = (CRAWL + RAMP * ((now - since) as f32 - DELAY)).min(RUN);
     let crawl = ctx.input(|i| i.unstable_dt).min(0.05) * speed * dir as f32;
-    let new = (out.state.offset.y + crawl).clamp(0.0, over);
-    if new != out.state.offset.y {
-        let mut state = out.state;
-        state.offset.y = new;
-        state.store(ctx, out.id);
+    let old = out.state.unclamped_offset().y;
+    let new = (old + crawl).clamp(0.0, over);
+    if new == old {
         // At the end of the list the crawl stands still and asks for no more frames.
-        ctx.request_repaint();
+        return None;
     }
+    ctx.request_repaint();
+    let stepped = out.id.with("menu-edge-scroll-step");
+    if ctx.data(|d| d.get_temp::<f64>(stepped)) == Some(now) {
+        return None;
+    }
+    // Stamp the queue operation, not consumption: a later real frame must still take a step.
+    ctx.data_mut(|d| d.insert_temp(stepped, now));
+    Some(new)
 }
 
 /// egui's menu style with no gap between the rows: the gap the app's item spacing left between

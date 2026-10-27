@@ -36,7 +36,7 @@ pub fn create_nulls(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
     let ctx = ui.ctx().clone();
     let mut ui = area(ui, rect);
-    let loop_id = egui::Id::new("createNulls.loop");
+    let loop_id = egui::Id::unique("createNulls.loop");
     let mut looping: bool = ui.data(|d| d.get_temp(loop_id)).unwrap_or(false);
     let ready = app.session.is_enabled("paths.nullsFollowPoints") && !app.session.state.selected_layers.is_empty();
     ui.label(RichText::new(tr("Select a layer with a mask or shape path (or the path property), or Puppet pins.")).color(t.text_dim).small());
@@ -70,7 +70,7 @@ pub fn vr_editor(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         ui.label(RichText::new(tr("No VR environments yet. Create one with Composition ▸ VR ▸ Create VR Environment…")).color(t.text_faint));
         return;
     }
-    let sel_id = egui::Id::new("vrEditor.selected");
+    let sel_id = egui::Id::unique("vrEditor.selected");
     let active = app.session.state.active_comp.map(|c| c.0);
     let mut sel: u64 = ui.data(|d| d.get_temp(sel_id)).unwrap_or(0);
     // Default: the active comp's environment, else the first.

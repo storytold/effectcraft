@@ -55,6 +55,7 @@ modules:
     build-commands:
       - cargo --offline build --release --locked -p effectcraft -p effectcraft-cli
       - install -Dm755 target/release/effectcraft /app/bin/effectcraft
+      - install -Dm644 NOTICE /app/share/doc/effectcraft/NOTICE
       - install -Dm755 target/release/effectcraft-cli /app/bin/effectcraft-cli
       - install -Dm644 packaging/linux/ai.storyteller.effectcraft.desktop /app/share/applications/ai.storyteller.effectcraft.desktop
       - install -Dm644 packaging/linux/ai.storyteller.effectcraft.mime.xml /app/share/mime/packages/ai.storyteller.effectcraft.xml

@@ -63,7 +63,7 @@ fn none_pick_clears(h: &mut Harness<'_, EffectcraftApp>, value_id: &str, none: &
     let steps = h.state().session.history.undo.len();
     let at = rect_of(h, value_id).center();
     click(h, at);
-    h.get_by_label(none).click();
+    h.get_by_role_and_label(egui::accesskit::Role::Button, none).click();
     h.run_steps(3);
     assert_eq!(layer_value(h, layer, prop), None, "selecting None clears the value");
     assert_eq!(h.state().session.history.undo.len(), steps + 1, "one clear undo step");
@@ -101,11 +101,11 @@ fn timeline_source_drop_down_picks_the_layer_and_undo_restores_none() {
     let at = rect_of(&h, &value_id).center();
     click(&mut h, at);
     let entry = entry_for(&h, sky);
-    assert!(h.query_by_label("None").is_some(), "the list starts with None");
-    assert!(h.query_by_label(&entry).is_some(), "the comp's layers are listed ({entry})");
+    assert!(h.query_by_role_and_label(egui::accesskit::Role::Button, "None").is_some(), "the list starts with None");
+    assert!(h.query_by_role_and_label(egui::accesskit::Role::Button, &entry).is_some(), "the comp's layers are listed ({entry})");
 
     let steps = h.state().session.history.undo.len();
-    h.get_by_label(&entry).click();
+    h.get_by_role_and_label(egui::accesskit::Role::Button, &entry).click();
     h.run_steps(3);
     assert_eq!(layer_value(&h, light, source), Some(sky), "the Source holds the layer id");
     assert_eq!(h.state().session.history.undo.len(), steps + 1, "one undo step");
@@ -119,8 +119,16 @@ fn timeline_source_drop_down_picks_the_layer_and_undo_restores_none() {
     assert_eq!(layer_value(&h, light, source), Some(sky), "dismissing the list writes nothing");
     let reopen = rect_of(&h, &value_id).center();
     click(&mut h, reopen);
-    assert_eq!(h.get_by_label(&entry).accesskit_node().toggled(), Some(egui::accesskit::Toggled::True), "the current entry is highlighted");
-    assert_eq!(h.get_by_label("None").accesskit_node().toggled(), Some(egui::accesskit::Toggled::False), "None is not the current entry");
+    assert_eq!(
+        h.get_by_role_and_label(egui::accesskit::Role::Button, &entry).accesskit_node().toggled(),
+        Some(egui::accesskit::Toggled::True),
+        "the current entry is highlighted"
+    );
+    assert_eq!(
+        h.get_by_role_and_label(egui::accesskit::Role::Button, "None").accesskit_node().toggled(),
+        Some(egui::accesskit::Toggled::False),
+        "None is not the current entry"
+    );
     click(&mut h, pos2(1500.0, 300.0));
     h.run_steps(2);
 
@@ -154,9 +162,9 @@ fn effect_controls_layer_param_picks_through_the_shared_widget() {
     let row = rect_of(&h, &value_id);
     click(&mut h, row.center());
     let entry = entry_for(&h, map);
-    assert!(h.query_by_label(&entry).is_some(), "the comp's layers are listed ({entry})");
+    assert!(h.query_by_role_and_label(egui::accesskit::Role::Button, &entry).is_some(), "the comp's layers are listed ({entry})");
     let steps = h.state().session.history.undo.len();
-    h.get_by_label(&entry).click();
+    h.get_by_role_and_label(egui::accesskit::Role::Button, &entry).click();
     h.run_steps(3);
     assert_eq!(layer_value(&h, base, prop), Some(map), "the parameter holds the layer id");
     assert_eq!(h.state().session.history.undo.len(), steps + 1, "one undo step");
@@ -200,7 +208,7 @@ fn snapshot_source_dropdown_open_and_chosen() {
     click(&mut h, at);
     save(&mut h, "source_dropdown_open.png");
     let entry = entry_for(&h, sky);
-    h.get_by_label(&entry).click();
+    h.get_by_role_and_label(egui::accesskit::Role::Button, &entry).click();
     h.run_steps(3);
     assert_eq!(layer_value(&h, light, source), Some(sky));
     save(&mut h, "source_chosen.png");

@@ -6,6 +6,24 @@ use effectcraft_time::{FrameRate, Tick};
 
 use crate::render_frame;
 
+mod audio_fx;
+mod auto;
+mod aux_channels;
+mod collapse;
+mod color;
+mod footage_size;
+mod frame_blend;
+mod guides;
+mod mask_blur;
+mod mask_expansion;
+mod motion_tile;
+mod nested;
+mod paint;
+mod remap;
+mod roi;
+mod styles;
+mod time;
+
 fn setup() -> (Project, ItemId, Comp) {
     let mut p = Project::default();
     // Exact float maths; 8/16 bpc quantisation has its own tests (tests_color).

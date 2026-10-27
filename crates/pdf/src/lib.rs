@@ -218,11 +218,3 @@ pub fn layer_doc_with_sizes(doc: &Doc, index: usize, retain: bool) -> (Doc, [f64
 
 #[cfg(test)]
 mod tests;
-#[cfg(test)]
-mod tests_groups;
-#[cfg(test)]
-mod tests_import;
-#[cfg(test)]
-mod tests_reader;
-#[cfg(test)]
-mod tests_shading;

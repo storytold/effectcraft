@@ -279,21 +279,25 @@ fn playback_prefetches_past_the_cached_frames_ahead() {
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
     assert_eq!(h.state().frames.cached_frames(&series), (0..120).collect::<Vec<_>>());
+    // Rendering/instrumentation time must not move the playhead near the end of the
+    // cached run. Exercise real prefetch workers while holding playback in its first second.
+    h.state_mut().use_manual_clock();
     h.state_mut().session.set_time(Tick::ZERO);
     invoke(&mut h, "playback.toggle", json!({}));
+    h.state_mut().clock_mut().advance(0.25);
     h.run_steps(2);
     assert!(h.state().playback.playing);
     let cur = h.state().session.time();
+    assert!(cur > Tick::ZERO, "playback advances with the manual clock");
     assert!(cur < Tick::from_seconds_f64(1.0), "{cur:?}");
-    for _ in 0..4000 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while std::time::Instant::now() < deadline {
         if h.state().frames.cached_frames(&series).iter().any(|&f| f >= 120) {
             break;
         }
         h.step();
         std::thread::sleep(std::time::Duration::from_millis(1));
-        if h.state().session.time() >= Tick::from_seconds_f64(1.0) {
-            break;
-        }
+        assert_eq!(h.state().session.time(), cur, "worker waits do not advance playback");
     }
     assert!(h.state().frames.cached_frames(&series).iter().any(|&f| f >= 120), "frames past the cached run render while it plays the first second");
 }

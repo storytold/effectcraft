@@ -14,7 +14,7 @@
 //!   the id is stable, so a translation never becomes an orphan.
 //!
 //! Each row repeats the registry's English name so that a rename upstream fails
-//! [`tests::every_row_names_a_registry_effect`] instead of silently pointing a translation at
+//! `tests::every_row_names_a_registry_effect` instead of silently pointing a translation at
 //! another effect. An effect with no row draws the registry's English name; the
 //! `missing_translations_report` test (run by `cargo xtask ci`) lists those per language.
 //!

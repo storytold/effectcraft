@@ -78,7 +78,7 @@ fn page_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, page: &Page, cur: &Value
                 ui.horizontal(|ui| {
                     ui.add_sized(vec2(label_w, 18.0), egui::Label::new(tr("Default Output:")));
                     let shown = if sel.is_empty() { tr("System Default").to_string() } else { sel.clone() };
-                    let r = egui::ComboBox::from_id_salt(("settings", key)).selected_text(shown).width(260.0).show_ui(ui, |ui| {
+                    let r = craft_ui::ComboBox::from_id_salt(("settings", key)).selected_text(shown).width(260.0).show_ui(ui, |ui| {
                         if ui.selectable_label(sel.is_empty(), tr("System Default")).clicked() {
                             acts.push(Act::Set(key.into(), json!("")));
                         }
@@ -157,7 +157,7 @@ fn page_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, page: &Page, cur: &Value
                                 Kind::Choice(opts) => {
                                     let curv = v.as_str().map_or_else(|| v.to_string(), str::to_string);
                                     let shown = opts.iter().find(|o| o.1 == curv).map(|o| o.0).unwrap_or(curv.as_str()).to_string();
-                                    egui::ComboBox::from_id_salt(("settings", key))
+                                    craft_ui::ComboBox::from_id_salt(("settings", key))
                                         .selected_text(tr(&shown))
                                         .width(220.0)
                                         .show_ui(ui, |ui| {
@@ -346,7 +346,7 @@ fn theme_card(
                         let favorite = favorites.iter().any(|id| id == value);
                         let tip = tr(if favorite { "Remove from favorites" } else { "Add to favorites" });
                         let r = ui.add_visible(favorite || hovered, egui::Button::new("").min_size(vec2(24.0, 24.0)).frame(false)).on_hover_text(tip);
-                        r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("{}: {}", tip, tr(label))));
+                        r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{}: {}", tip, tr(label))));
                         reg(app, &format!("settings.appearance.favoriteThemes.{value}"), &r, tip);
                         if favorite || hovered {
                             crate::icons::paint(
@@ -378,7 +378,7 @@ fn appearance_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, cur: &Value, t: &T
     ui.horizontal(|ui| {
         ui.add_sized(vec2(250.0, 18.0), egui::Label::new(format!("{}:", tr("Appearance Mode"))).truncate());
         let shown = APPEARANCE_MODES.iter().find(|(_, v)| *v == mode).map_or(mode.as_str(), |(l, _)| *l);
-        let r = egui::ComboBox::from_id_salt(("settings", "appearance.appearanceMode"))
+        let r = craft_ui::ComboBox::from_id_salt(("settings", "appearance.appearanceMode"))
             .selected_text(tr(shown))
             .width(220.0)
             .show_ui(ui, |ui| {

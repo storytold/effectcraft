@@ -299,7 +299,7 @@ fn viewer_context_select_reaches_an_obscured_layer() {
         h.step();
     }
     h.run_steps(3);
-    h.get_by_label("Select ⏵").click();
+    h.get_by_label("Select").click();
     h.run_steps(3);
     h.get_by_label("Tile 1").click();
     h.run_steps(3);

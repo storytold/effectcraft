@@ -19,7 +19,7 @@ effectcraft-raster = { workspace = true }
 effectcraft-path = { workspace = true }
 effectcraft-text = { workspace = true }
 effectcraft-effects = { workspace = true }
-lz4_flex = { version = "0.11", default-features = false, features = ["std", "safe-encode", "safe-decode", "checked-decode"] }
+lz4_flex = { version = "0.14", default-features = false, features = ["std", "safe-encode", "safe-decode", "checked-decode"] }
 effectcraft-model = { workspace = true }
 kurbo = { workspace = true }
 rayon = { workspace = true }

@@ -2,6 +2,7 @@
 //! registers its automation ids; the Footage panel's buttons edit into the comp; the Progress
 //! panel lists and cancels a job; Lumetri Scopes switch scope through their dropdown.
 
+use effectcraft_ui_egui::dock::WorkspaceExt as _;
 use std::sync::Arc;
 
 use effectcraft_engine::{Session, config::MemoryConfig};
@@ -60,7 +61,7 @@ fn window_menu_opens_the_new_panels() {
         ("contentAwareFill", PanelKind::ContentAwareFill, "contentFill.method"),
     ] {
         open(&mut h, name);
-        assert!(h.state().ui.dock.contains(kind) || h.state().ui.floating.iter().any(|f| f.panels.contains(&kind)), "{name} shown");
+        assert!(h.state().ui.dock.is_open(kind), "{name} shown");
         if !auto.is_empty() {
             assert!(h.state().auto.find(auto).is_some(), "{name}: {auto}");
         }
@@ -72,9 +73,7 @@ fn window_menu_opens_the_new_panels() {
 #[test]
 fn window_menu_closes_a_checked_panel() {
     let mut h = harness();
-    let shown = |h: &Harness<'_, EffectcraftApp>| {
-        h.state().ui.dock.contains(PanelKind::Align) || h.state().ui.floating.iter().any(|f| f.panels.contains(&PanelKind::Align))
-    };
+    let shown = |h: &Harness<'_, EffectcraftApp>| h.state().ui.dock.is_open(PanelKind::Align);
     open(&mut h, "align");
     assert!(shown(&h));
     click(&mut h, "menu.Window");
@@ -106,7 +105,7 @@ fn footage_panel_buttons_edit_into_the_comp() {
     let item = h.state().session.project.items.values().find(|i| matches!(i.kind, effectcraft_engine::project::ItemKind::Solid(_))).unwrap().id.0;
     h.state_mut().session.execute("footage.open", json!({"item": item})).unwrap();
     h.run_steps(4);
-    assert!(h.state().ui.dock.contains(PanelKind::Footage) || h.state().ui.floating.iter().any(|f| f.panels.contains(&PanelKind::Footage)));
+    assert!(h.state().ui.dock.is_open(PanelKind::Footage));
     assert!(h.state().auto.find("footage.overlayEdit").is_some());
     let before = h.state().session.active_comp().unwrap().layers.len();
     click(&mut h, "footage.overlayEdit");
@@ -218,7 +217,7 @@ fn saved_workspace_is_listed_in_the_workspace_menu() {
     h.run_steps(3);
     assert_ne!(h.state().ui.dock, saved);
     click(&mut h, "menu.Window");
-    let ws = h.query_by_label(" Workspace ⏵").expect("Window ▸ Workspace").rect();
+    let ws = h.query_by_label(" Workspace").expect("Window ▸ Workspace").rect();
     hover(&mut h, ws.center());
     let entry = h.state().auto.find("menu.savedWorkspaces.0").expect("the saved workspace is listed").clone();
     assert_eq!(entry.label, "My Layout");
@@ -239,7 +238,7 @@ fn saved_workspace_is_listed_in_the_workspace_menu() {
 fn edit_label_menu_shows_the_label_colours() {
     let mut h = harness();
     click(&mut h, "menu.Edit");
-    let label = h.query_by_label(" Label ⏵").expect("Edit ▸ Label").rect();
+    let label = h.query_by_label(" Label").expect("Edit ▸ Label").rect();
     hover(&mut h, label.center());
     // (Not Dark Green; the entry's label starts with its check-mark column.)
     let green = h.query_by_label(" Green").expect("the Label submenu is open").rect();
@@ -388,6 +387,7 @@ fn settings_buttons_stay_in_view_at_200_percent() {
             delta: egui::vec2(0.0, -1000.0),
             modifiers: Default::default(),
             phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
         });
         h.run_steps(5);
     };

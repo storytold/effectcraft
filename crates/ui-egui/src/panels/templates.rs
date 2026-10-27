@@ -69,7 +69,7 @@ pub fn home_tab(app: &mut EffectcraftApp, ui: &mut egui::Ui, area: Rect) {
     // Save the open project as a user template.
     let can_save = app.session.project.comps().next().is_some();
     let sr = Rect::from_min_size(pos2(area.max.x - 210.0, y - 4.0), vec2(210.0, 28.0));
-    let save = widgets::text_button(ui, sr, "Save Current as Template…", false, &t, egui::Id::new("home-templates-save")).clicked();
+    let save = widgets::text_button(ui, sr, "Save Current as Template…", false, &t, egui::Id::unique("home-templates-save")).clicked();
     app.auto.add("home.templates.saveCurrent", sr, "Save Current as Template…");
     if save {
         if can_save {
@@ -101,7 +101,7 @@ pub fn home_tab(app: &mut EffectcraftApp, ui: &mut egui::Ui, area: Rect) {
             let (cx, cy) = (full.min.x + (i % cols) as f32 * (card_w + gap), full.min.y + (i / cols) as f32 * (card_h + gap));
             let r = Rect::from_min_size(pos2(cx, cy), vec2(card_w, card_h));
             let visible = r.intersects(ui.clip_rect());
-            let resp = ui.interact(r, egui::Id::new(("template-card", &tpl.id)), Sense::click()).on_hover_text(&tpl.description);
+            let resp = ui.interact(r, egui::Id::unique(("template-card", &tpl.id)), Sense::click()).on_hover_text(&tpl.description);
             p.rect_filled(r, 8.0, if resp.hovered() { Color32::from_rgb(0x2c, 0x2e, 0x37) } else { Color32::from_rgb(0x24, 0x26, 0x2e) });
             let tr = Rect::from_min_size(r.min, vec2(card_w, thumb_h));
             let tex = if visible { thumb(app, &ctx, &tpl.id, &mut budget) } else { None };
@@ -137,7 +137,7 @@ pub fn home_tab(app: &mut EffectcraftApp, ui: &mut egui::Ui, area: Rect) {
             let mut del_hit = false;
             if !tpl.builtin {
                 let dr = Rect::from_min_size(pos2(tr.max.x - 30.0, tr.min.y + 6.0), vec2(24.0, 24.0));
-                let dresp = ui.interact(dr, egui::Id::new(("template-del", &tpl.id)), Sense::click()).on_hover_text(crate::i18n::tr("Delete this template"));
+                let dresp = ui.interact(dr, egui::Id::unique(("template-del", &tpl.id)), Sense::click()).on_hover_text(crate::i18n::tr("Delete this template"));
                 if resp.hovered() || dresp.hovered() {
                     p.circle_filled(dr.center(), 12.0, if dresp.hovered() { Color32::from_rgb(0xc0, 0x3a, 0x3a) } else { Color32::from_black_alpha(170) });
                     icons::paint(&p, dr.shrink(6.0), Icon::Close, Color32::WHITE);
