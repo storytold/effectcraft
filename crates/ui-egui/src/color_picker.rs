@@ -77,6 +77,8 @@ pub fn color_popup(ui: &mut Ui, id: egui::Id, pos: egui::Pos2, c: &mut [f32; 3])
     out.changed
 }
 
+/// The `egui::Id` of the pass number in which a colour picker last stayed open, which
+/// [`open_recently`] uses to keep Escape for the picker rather than the dialog under it.
 fn open_pass_id() -> egui::Id {
     egui::Id::unique("color-picker-open-pass")
 }
@@ -175,6 +177,12 @@ impl Pick {
 const SQUARE: f32 = 200.0;
 const SLIDER_W: f32 = 16.0;
 
+/// The colour picker popup's contents: saturation/value square, channel slider, number fields for
+/// H/S/B and R/G/B, a hex field and an original-colour swatch, plus OK and Cancel. `*c` is updated
+/// as the UI changes and `original` is what Cancel (or the swatch) restores. The chosen channel
+/// and the HSV/RGB pair are remembered in egui temp data so reopening keeps the hue when
+/// saturation or value reaches zero. Returns what the picker did this frame; it never runs a
+/// command itself.
 fn color_picker(ui: &mut Ui, id: egui::Id, c: &mut [f32; 3], original: [f32; 3]) -> Outcome {
     let state_id = id.with("pick");
     let mut pick = match ui.data(|d| d.get_temp::<([f32; 3], [f32; 3])>(state_id)) {

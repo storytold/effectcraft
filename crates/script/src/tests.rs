@@ -10,6 +10,18 @@ use serde_json::{Value, json};
 
 use crate::{Outcome, run_code};
 
+mod callable;
+mod ease_presets;
+mod evalfile;
+mod include;
+mod panels;
+#[cfg(not(windows))]
+mod services;
+mod tasks;
+mod ui;
+mod ui_more;
+mod ui_mouse;
+
 fn session() -> Session {
     let mut s = Session { expr: Some(Arc::new(effectcraft_expr::Expressions)), expr_check: Some(effectcraft_expr::check_syntax), ..Default::default() };
     crate::install(&mut s);

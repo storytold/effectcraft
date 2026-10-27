@@ -333,7 +333,7 @@ impl Fractal {
 }
 
 /// Fractal / Turbulent Noise resolved for the GPU kernel (effectcraft-gpu `fx_noise`): the
-/// per-pixel constants and, per octave, the terms [`Fractal::raw`] computes before touching the
+/// per-pixel constants and, per octave, the terms `Fractal::raw` computes before touching the
 /// pixel, in the same f32 order.
 pub struct FractalGpu {
     pub kind: u32,

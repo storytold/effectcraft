@@ -372,6 +372,8 @@ impl EffectcraftApp {
         v
     }
 
+    /// Draw panel `p`'s body in `rect`: register its automation region, put the Composition Navigator above an active
+    /// viewer when a nested-comp flow exists, then call the panel's `show` and (for a viewer) the sketch overlay.
     fn panel_body(&mut self, ui: &mut egui::Ui, p: PanelKind, rect: Rect) {
         self.auto.add(&format!("panel.{}", p.id()), rect, p.title());
         let mut content = rect.shrink(1.0);
@@ -412,6 +414,9 @@ impl EffectcraftApp {
         self.dialog.is_some() || panels::dialogs::modal_open(ctx) || file_dialog
     }
 
+    /// Draw the Home screen or workspace in `body`. Shared craft-ui docking owns the dock tree,
+    /// group chrome, tab dragging and floating native windows; this adapter draws panel bodies,
+    /// applies the returned events/actions and shows the panel menu.
     pub(crate) fn dock_area(&mut self, ui: &mut egui::Ui, body: Rect) {
         let t = self.tokens;
         let ctx = ui.ctx().clone();

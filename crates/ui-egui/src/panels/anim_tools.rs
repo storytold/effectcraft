@@ -31,6 +31,8 @@ fn choice(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, auto: &str, opti
     widgets::popup_menu(ui, id, r.left_bottom(), &opts, Some(cur)).filter(|i| *i != cur)
 }
 
+/// A drag-to-change number field for an anim-tool setting: `v` clamped to `range`, `speed` points
+/// per pixel, `dec` decimals and a `suffix`; returns the new value, or `v` when it did not change.
 fn number(app: &mut EffectcraftApp, ui: &mut egui::Ui, at: egui::Pos2, auto: &str, v: f64, speed: f64, range: (f64, f64), dec: usize, suffix: &str) -> f64 {
     let t = app.tokens;
     let (r, nv, _) = widgets::hot_number_at(ui, at, egui::Id::unique(("animtool-n", auto)), v, speed, range, dec, suffix, &t);
@@ -38,6 +40,8 @@ fn number(app: &mut EffectcraftApp, ui: &mut egui::Ui, at: egui::Pos2, auto: &st
     nv.unwrap_or(v)
 }
 
+/// A checkbox at `at` with its `text` label drawn to its right; returns the state to store, i.e.
+/// `!on` when it was clicked and `on` otherwise.
 fn checkbox(app: &mut EffectcraftApp, ui: &mut egui::Ui, at: egui::Pos2, auto: &str, text: &str, on: bool) -> bool {
     let t = app.tokens;
     let r = Rect::from_min_size(at, vec2(16.0, 16.0));
@@ -218,6 +222,8 @@ struct Capture {
     points: Vec<[f64; 3]>,
 }
 
+/// The `egui::Id` of the Motion Sketch capture in progress ([`Capture`]): its start time and the
+/// recorded points.
 fn capture_id() -> egui::Id {
     egui::Id::unique("motion-sketch-capture")
 }

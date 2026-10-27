@@ -40,10 +40,14 @@ struct Tex {
     rect: [f64; 4],
 }
 
+/// The `egui::Id` of the cached render of the layer shown in this panel ([`Tex`]), with the key
+/// the image was made from.
 fn tex_id() -> egui::Id {
     egui::Id::unique("layer-panel-tex")
 }
 
+/// The `egui::Id` under which the panel's last Fit magnification is kept, so View ▸ Zoom In/Out
+/// can start from it (see [`last_fit`]).
 fn fit_id() -> egui::Id {
     egui::Id::unique("layer-panel-fit")
 }
@@ -83,6 +87,13 @@ fn default_view(layer: &Layer, tool: Tool) -> usize {
     }
 }
 
+/// The Layer panel: one layer in its own space with its masks and effects up to the View menu's
+/// choice, rendered synchronously at a zoom/pan the panel keeps (the last Fit magnification is
+/// published for the View menu). Wheel or pinch zooms about the pointer, the Hand tool or
+/// Space-drag pans, and the Zoom tool clicks zoom. The paint tools record a stroke's layer-space
+/// points while dragging and run `paint.stroke` on release (or on a click); Alt-click with the
+/// Clone Stamp sets its source. With a Roto Brush effect it hands the canvas to
+/// [`super::roto_tool`]. Without a current layer it shows how to open one.
 pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
     let ctx = ui.ctx().clone();

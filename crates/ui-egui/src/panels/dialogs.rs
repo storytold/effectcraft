@@ -287,6 +287,10 @@ const ABOUT_TABS: [(&str, &str); 3] = [("About", "about"), ("Contributors", "con
 /// Height of the Contributors / Models tab bodies (they scroll inside it).
 const CREDITS_HEIGHT: f32 = 380.0;
 
+/// The About dialog: tabs for the name/version/blurb, the contributors and the models (the last
+/// two scroll in a fixed-height body), the licence and bundled-font line, and Close. The tab is
+/// kept in egui temp data. A command the About body asked for is run once the modal has been
+/// built; Close clears `app.dialog`.
 fn about(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     let mut close = false;
     let mut cmd: Option<&str> = None;
@@ -532,7 +536,7 @@ fn solid(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                 .find(|(_, v)| (v - par).abs() < 1e-3)
                 .map(|p| p.0.to_string())
                 .unwrap_or_else(|| format!("{par:.2}"));
-            let r = egui::ComboBox::from_id_salt("solid-par").width(240.0).selected_text(cur).show_ui(ui, |ui| {
+            let r = craft_ui::ComboBox::from_id_salt("solid-par").width(240.0).selected_text(cur).show_ui(ui, |ui| {
                 for (label, v) in super::comp_settings::PIXEL_ASPECTS {
                     if ui.selectable_label((v - par).abs() < 1e-3, *label).clicked() {
                         par = *v;

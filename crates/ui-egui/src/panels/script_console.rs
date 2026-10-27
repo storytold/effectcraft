@@ -74,6 +74,9 @@ pub fn run(app: &mut EffectcraftApp, ctx: &egui::Context) {
     con.input.clear();
 }
 
+/// The Script Console panel: the output log (newest lines at the bottom, coloured by kind), the
+/// multi-line script input and Run/Clear. Run — the button or ⌘/Ctrl+Enter while typing — hands the
+/// input to the script runner; Clear only empties the log. The input text and log are UI state.
 pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
     let input_h = 86.0;

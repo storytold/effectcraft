@@ -311,6 +311,8 @@ impl Tokens {
     }
 }
 
+/// The default label colours, one RGB colour per [`effectcraft_color::Label`] in
+/// `Label::ALL` order.
 fn default_labels() -> [Color32; 17] {
     effectcraft_color::Label::ALL.map(|l| {
         let [r, g, b] = l.rgb();
@@ -328,7 +330,7 @@ static JETBRAINS_MONO: &[u8] = include_bytes!("../../../assets/fonts/JetBrainsMo
 static NOTO_SYMBOLS2: &[u8] = include_bytes!("../../../assets/fonts/NotoSansSymbols2-Regular.ttf");
 
 /// Install fonts (Inter, Inter Medium/SemiBold, JetBrains Mono) and egui visuals. `language` is the
-/// resolved interface language from [`crate::i18n::language`] (`en`, `ja`, `zh-hans` or `zh-hant`),
+/// resolved interface language from `crate::i18n::language` (`en`, `ja`, `zh-hans` or `zh-hant`),
 /// not the stored `general.language` preference: `system` is already resolved there, so a Chinese
 /// system draws Chinese with the default setting. The CJK fallback that draws the interface's own
 /// script is registered first, so a Chinese interface is drawn by a Chinese face and a Japanese one

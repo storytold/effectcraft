@@ -703,7 +703,7 @@ fn occlusion(c: &Item, p: Vec3, l: &LightState) -> [f32; 3] {
 
 /// A Classic 3D run prepared for an accelerator ([`Renderer::prepare_3d_run`]): every plane
 /// with its geometry, material and buffer, ready for the per-pixel depth sort, lighting and
-/// ray-cast shadows of [`draw_run`] on another device.
+/// ray-cast shadows of `draw_run` on another device.
 #[derive(Clone, Debug)]
 pub struct Run3d {
     /// Drawn planes in stack order, then shadow casters from outside the run (`draw` false).
@@ -971,7 +971,7 @@ pub(crate) fn environment_rotation(ctx: &EvalCtx) -> f32 {
         .to_radians() as f32
 }
 
-/// An Environment Light Background layer ready to draw (see [`draw_sky`]): the layer's
+/// An Environment Light Background layer ready to draw (see `draw_sky`): the layer's
 /// buffer in the blending space, its opacity and the camera's view rays. Also handed to an
 /// accelerator's compositor (`Renderer::sky_draw`).
 #[derive(Clone)]

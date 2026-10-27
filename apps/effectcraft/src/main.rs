@@ -148,6 +148,10 @@ fn install_file_dialogs(app: &mut EffectcraftApp) -> Option<std::sync::mpsc::Rec
     }
 }
 
+/// Run a normal desktop launch: install logging and the panic hook, parse arguments (`--version` exits before the
+/// session log is attached), scan fonts, honor the launch guard's backend choice and open the eframe window.
+/// Builds the session, loads settings, plugins, the requested project/media and the optional control server, then
+/// reports startup failure through `startup_failed`. Returns the event loop's result.
 fn main() -> eframe::Result {
     // Windows: the update helper is a copy of this program started with `--finish-update`.
     #[cfg(windows)]
@@ -451,6 +455,7 @@ struct Desktop {
 }
 
 impl eframe::App for Desktop {
+    /// The desktop host's logic tick: update the macOS menu bar, run the shared app tick and close the IME pass.
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         #[cfg(target_os = "macos")]
         self.menu.update(&mut self.app, ctx);

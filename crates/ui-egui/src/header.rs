@@ -15,6 +15,10 @@ use effectcraft_engine::commands::shape_tool::{PaintKind, ToolPaint};
 use effectcraft_engine::project::{LayerId, LayerSource, PropGroup};
 use effectcraft_engine::viewer as vw;
 
+/// Draws the Tools bar into `rect`: brand (About), Home, the tool slots with their fly-out
+/// menus and press-and-hold picks, options for the active tool (shape paint, puppet, roto),
+/// Snapping, then Discord, GitHub, website, appearance and workspace controls. Clicks apply
+/// tool, dialog, theme and workspace changes to `app` or run their commands.
 pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
     let p = ui.painter().clone();

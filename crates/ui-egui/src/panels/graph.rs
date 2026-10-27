@@ -189,6 +189,9 @@ const MORE_POPUP: &str = "graph-more";
 impl ButtonBar {
     const MORE_W: f32 = 24.0;
 
+    /// A bar starting 8 points into `bar`, stopping short of its right end by the "»" button's
+    /// width. It takes the id picked from the "»" menu in the previous frame, so the button whose
+    /// id that was reports a click on the frame after the pick.
     fn new(ctx: &egui::Context, bar: Rect) -> Self {
         let chosen = ctx.data_mut(|d| d.remove_temp::<String>(egui::Id::unique(MORE_POPUP).with("chosen")));
         ButtonBar { x: bar.min.x + 8.0, limit: bar.max.x - 8.0 - Self::MORE_W - 4.0, hidden: Vec::new(), chosen }
@@ -233,6 +236,10 @@ impl ButtonBar {
     }
 }
 
+/// One text button of the Graph Editor's button bar at the bar's current `x`, in the toolbar row
+/// at `y`: draws it, registers it for automation and advances the bar. Once a button does not fit
+/// (or a previous one overflowed), the button goes to the "»" menu instead and only the id the
+/// menu picked reports a click. Returns whether this button was chosen.
 fn text_button(
     app: &mut EffectcraftApp,
     ui: &mut egui::Ui,
@@ -627,6 +634,8 @@ fn fit_all(app: &mut EffectcraftApp) {
     app.ui.timeline.pps = None;
 }
 
+/// The `egui::Id` of the one-shot flag [`track_open`] sets when the Graph Editor is switched on,
+/// so [`show`] frames all graphs on its next pass, once the plot rectangle is known.
 fn fit_pending_id() -> egui::Id {
     egui::Id::unique("graph-fit-pending")
 }
@@ -739,6 +748,8 @@ struct KeyGrab {
     t: f64,
 }
 
+/// The `egui::Id` of the key drag in progress ([`KeyGrab`]): where the button went down and the
+/// grabbed key's comp time when it did.
 fn key_grab_id() -> egui::Id {
     egui::Id::unique("graph-key-grab")
 }
@@ -786,6 +797,8 @@ impl HandleGrab {
 /// A handle drag: where the button went down, and the handles that move.
 type HandleDrag = (Pos2, Vec<HandleGrab>);
 
+/// The `egui::Id` of the Bezier handle drag in progress ([`HandleDrag`]): the press position and
+/// the handles the drag moves.
 fn handle_drag_id() -> egui::Id {
     egui::Id::unique("graph-handle-drag")
 }

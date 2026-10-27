@@ -24,6 +24,7 @@ use crate::{EffectcraftApp, widgets};
 pub(crate) const SNAP_PX: f64 = 8.0;
 const SNAP_COLOR: Color32 = Color32::from_rgb(0xff, 0xd2, 0x3c);
 
+/// The `egui::Id` under which this frame's snap feedback is stored until `draw_snap` consumes it.
 fn snap_id() -> egui::Id {
     egui::Id::unique("viewer-snap")
 }
@@ -318,11 +319,13 @@ pub(crate) fn proportional_grid(app: &EffectcraftApp, painter: &egui::Painter, c
 
 // ---------------------------------------------------------------- the displayed frame
 
-/// Remember the region of interest the displayed texture was rendered with.
+/// Store the displayed texture's Region of Interest or Extended Viewer area unchanged.
 pub(crate) fn set_texture_roi(ctx: &egui::Context, roi: Option<[f64; 4]>) {
     ctx.data_mut(|d| d.insert_temp(egui::Id::unique("viewer-tex-roi"), roi));
 }
 
+/// The comp region (`[x, y, w, h]` in pixels) used for the texture: Region of Interest or Extended Viewer area,
+/// or `None` when no explicit region is stored, meaning the whole comp.
 fn texture_roi(ctx: &egui::Context) -> Option<[f64; 4]> {
     ctx.data(|d| d.get_temp::<Option<[f64; 4]>>(egui::Id::unique("viewer-tex-roi"))).flatten()
 }
@@ -505,6 +508,7 @@ fn popup(app: &mut EffectcraftApp, ui: &mut egui::Ui, id: &str, anchor: Rect, it
     })
 }
 
+/// Flip the open flag of the popup with `id`; the caller that owns the popup reads the same flag.
 fn toggle_popup(ui: &egui::Ui, id: &str) {
     let pid = egui::Id::unique(id).with("open");
     let open: bool = ui.data(|d| d.get_temp(pid).unwrap_or(false));
@@ -616,6 +620,10 @@ pub(crate) fn bottom_bar(app: &mut EffectcraftApp, ui: &mut egui::Ui, bar: Rect,
     });
 }
 
+/// Lay out the viewer's control row from `bar.min.x`: magnification, resolution, transparency, mask, ROI, grid/guide,
+/// channel/colour management, exposure, snapshot, fast previews, 3D renderer/view and Extended Viewer, timecode and render-time
+/// indicators, running commands or toggling viewer UI state. Returns the width the row
+/// occupies, at least `bar.width()`, for the horizontal scroll area.
 fn bottom_bar_contents(app: &mut EffectcraftApp, ui: &mut egui::Ui, bar: Rect, zoom: f32, time: Tick, comp: &Comp) -> f32 {
     let t = app.tokens;
     let p = ui.painter().clone();

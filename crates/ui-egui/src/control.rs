@@ -39,6 +39,8 @@ pub struct ControlRequest {
 }
 
 impl ControlRequest {
+    /// Creates a request for `method` with `params`, returning it with the channel that will
+    /// receive the UI thread's reply.
     pub fn new(method: impl Into<String>, params: Value) -> (Self, std::sync::mpsc::Receiver<Value>) {
         let (tx, rx) = std::sync::mpsc::channel();
         (Self { method: method.into(), params, reply: tx }, rx)
@@ -170,6 +172,10 @@ fn point(app: &EffectcraftApp, p: &Value) -> Result<egui::Pos2, String> {
     Ok(egui::pos2(x as f32, y as f32))
 }
 
+/// Dispatches one control request on the UI thread. Replies are `{"ok": true, "result": …}`
+/// or `{"ok": false, "error": …}`; an unknown method is an error. Some methods answer with
+/// [`Outcome::Retry`], [`Outcome::AfterInput`], [`Outcome::Screenshot`] or
+/// [`Outcome::AwaitJobs`] instead of replying in this call.
 pub fn handle(app: &mut EffectcraftApp, ctx: &egui::Context, req: &ControlRequest, now: f64) -> Outcome {
     let p = &req.params;
     match req.method.as_str() {
@@ -198,6 +204,10 @@ pub fn handle(app: &mut EffectcraftApp, ctx: &egui::Context, req: &ControlReques
     }
 }
 
+/// Runs `engine.execute` or `ui.menu.invoke`. `engine.execute` with a known engine command id
+/// goes through [`execute_engine`] (so a `wait: true` job can be offloaded); every other id,
+/// and every `ui.menu.invoke`, goes through the menu dispatcher. A failure is copied to the
+/// status line.
 fn execute_command(app: &mut EffectcraftApp, ctx: &egui::Context, method: &str, p: &Value) -> Outcome {
     let s = |k: &str| p.get(k).and_then(Value::as_str);
     let Some(id) = s("command").or(s("id")) else { return err("missing `command`") };
@@ -219,6 +229,7 @@ fn execute_command(app: &mut EffectcraftApp, ctx: &egui::Context, method: &str, 
     }
 }
 
+/// Replies with `command.list`'s result, forwarding `filter` and `enabledOnly`.
 fn engine_commands(app: &mut EffectcraftApp, p: &Value) -> Outcome {
     match app.session.execute("command.list", json!({"filter": p.get("filter"), "enabledOnly": p.get("enabledOnly")})) {
         Ok(v) => ok(v),
@@ -226,6 +237,8 @@ fn engine_commands(app: &mut EffectcraftApp, p: &Value) -> Outcome {
     }
 }
 
+/// Replies with the automation elements whose id starts with `prefix` (all when empty), as
+/// `{id, label, rect}` records.
 fn elements(app: &EffectcraftApp, p: &Value) -> Outcome {
     let prefix = p.get("prefix").and_then(Value::as_str).unwrap_or("");
     ok(serde_json::to_value(app.auto.query(prefix)).unwrap_or_default())
@@ -237,6 +250,9 @@ fn focus(ctx: &egui::Context) -> Outcome {
     ok(Value::Null)
 }
 
+/// Applies `ui.set` in order: tool, workspace, theme, focused panel, viewer settings, then the
+/// layout fields ([`set_ui_layout`]). An unknown tool, workspace or theme name, or an invalid
+/// viewer value, replies with an error after the earlier fields were already applied.
 fn set_ui(app: &mut EffectcraftApp, ctx: &egui::Context, p: &Value) -> Outcome {
     let s = |k: &str| p.get(k).and_then(Value::as_str);
     if let Some(t) = s("tool") {
@@ -297,6 +313,9 @@ fn set_ui_layout(app: &mut EffectcraftApp, p: &Value) -> Outcome {
     ok(Value::Null)
 }
 
+/// Applies viewer `zoom`, the active comp's `res` (stored in the project), `pan` and the
+/// `grid`, `rulers`, `safeMargins` and `transparencyGrid` toggles. An unknown resolution name
+/// is an error; a resolution change without an active comp is ignored.
 fn apply_viewer(app: &mut EffectcraftApp, v: &Value) -> Result<(), String> {
     if let Some(z) = v.get("zoom") {
         app.ui.viewer.zoom = z.as_f64().map(|z| z as f32);
@@ -328,6 +347,8 @@ fn apply_viewer(app: &mut EffectcraftApp, v: &Value) -> Result<(), String> {
     Ok(())
 }
 
+/// Applies timeline `pps`, `start`, `graphEditor`, `showModes`, `openLayers` and `openGroups`
+/// to the UI state, leaving absent fields unchanged.
 fn apply_timeline(app: &mut EffectcraftApp, tl: &Value) {
     if let Some(v) = tl.get("pps") {
         app.ui.timeline.pps = v.as_f64();
@@ -349,6 +370,8 @@ fn apply_timeline(app: &mut EffectcraftApp, tl: &Value) {
     }
 }
 
+/// Replaces the Project panel's optional columns with the names in `a`, in the canonical
+/// `COLUMNS` order; unknown names are kept, sorted after the known ones.
 fn apply_project_columns(app: &mut EffectcraftApp, a: &[Value]) {
     let mut cols = vec![];
     for k in a.iter().filter_map(Value::as_str) {
@@ -357,6 +380,8 @@ fn apply_project_columns(app: &mut EffectcraftApp, a: &[Value]) {
     app.ui.project_columns = cols;
 }
 
+/// Merges `m` over the current Wiggler/Smoother/Motion Sketch settings by round-tripping them
+/// through JSON. A value of the wrong type is an error and leaves the settings unchanged.
 fn apply_anim_tools(app: &mut EffectcraftApp, m: &serde_json::Map<String, Value>) -> Result<(), String> {
     let mut cur = serde_json::to_value(&app.ui.anim_tools).unwrap_or_default();
     for (k, v) in m {
@@ -371,6 +396,8 @@ fn apply_anim_tools(app: &mut EffectcraftApp, m: &serde_json::Map<String, Value>
     }
 }
 
+/// Shows (`ui.panel.show`) or closes (`ui.panel.close`) the named panel; an unknown panel name
+/// is an error.
 fn panel(app: &mut EffectcraftApp, method: &str, p: &Value) -> Outcome {
     let s = |k: &str| p.get(k).and_then(Value::as_str);
     let Some(panel) = s("panel").and_then(PanelKind::from_name) else { return err("unknown `panel`") };
@@ -382,6 +409,8 @@ fn panel(app: &mut EffectcraftApp, method: &str, p: &Value) -> Outcome {
     ok(Value::Null)
 }
 
+/// The number of synthetic events a gesture queues: `2 * count + 3` for `ui.click` (`count`
+/// 1..=512), or 3 for `ui.move`. An out-of-range `count` or an overflow is an error.
 fn click_gesture_events(method: &str, p: &Value) -> Result<usize, String> {
     if method != "ui.click" {
         return Ok(3);
@@ -394,6 +423,10 @@ fn click_gesture_events(method: &str, p: &Value) -> Result<usize, String> {
     usize::try_from(count).ok().and_then(|n| n.checked_mul(2)).and_then(|n| n.checked_add(3)).ok_or_else(|| "click event count overflow".to_string())
 }
 
+/// Queues a click or a plain move at `{id}`'s centre (`fx`/`fy` within its rect, default 0.5)
+/// or at `{x, y}`, holding the request's modifiers across the whole gesture. An element that is
+/// not on screen returns [`Outcome::Retry`]; the gesture is size-checked against the 4096-event
+/// queue limit before anything is pushed. Replies [`Outcome::AfterInput`].
 fn click_or_move(app: &mut EffectcraftApp, method: &str, p: &Value) -> Outcome {
     let s = |k: &str| p.get(k).and_then(Value::as_str);
     let pos = match point(app, p) {
@@ -433,6 +466,10 @@ fn click_or_move(app: &mut EffectcraftApp, method: &str, p: &Value) -> Outcome {
     Outcome::AfterInput
 }
 
+/// Queues a primary-button drag from `from` to `to` over `steps` interpolated moves (default
+/// 12, at least 2, at most 2048), with the request's modifiers. Both endpoints are resolved
+/// first (an unseen element returns [`Outcome::Retry`]) and the event count is checked against
+/// the 4096-event queue limit. Replies [`Outcome::AfterInput`].
 fn drag(app: &mut EffectcraftApp, p: &Value) -> Outcome {
     let (Some(from), Some(to)) = (p.get("from"), p.get("to")) else { return err("need `from` and `to`") };
     let (a, b) = match (point(app, from), point(app, to)) {
@@ -463,6 +500,8 @@ fn drag(app: &mut EffectcraftApp, p: &Value) -> Outcome {
     Outcome::AfterInput
 }
 
+/// Queues a move to the target point, a wheel event of `dx`, `dy` points with the request's
+/// modifiers, and a released Extra1 button. Replies [`Outcome::AfterInput`].
 fn scroll(app: &mut EffectcraftApp, p: &Value) -> Outcome {
     let pos = match point(app, p) {
         Ok(p) => p,
@@ -487,6 +526,9 @@ fn scroll(app: &mut EffectcraftApp, p: &Value) -> Outcome {
     Outcome::AfterInput
 }
 
+/// Queues a press and release of `key`, whose name may carry a shortcut (`Cmd+Shift+Z`); the
+/// separate `modifiers` flags are added. A `Physical+` prefix makes the key positional. An
+/// unknown key name is an error.
 fn key(app: &mut EffectcraftApp, p: &Value) -> Outcome {
     let s = |k: &str| p.get(k).and_then(Value::as_str);
     let Some(name) = s("key") else { return err("missing `key`") };
@@ -499,6 +541,8 @@ fn key(app: &mut EffectcraftApp, p: &Value) -> Outcome {
     Outcome::AfterInput
 }
 
+/// Queues a text event with `text`, followed by a released F35 key. Missing `text` is an
+/// error.
 fn type_text(app: &mut EffectcraftApp, p: &Value) -> Outcome {
     let Some(text) = p.get("text").and_then(Value::as_str) else { return err("missing `text`") };
     app.synthetic.push(egui::Event::Text(text.to_string()));
@@ -506,6 +550,8 @@ fn type_text(app: &mut EffectcraftApp, p: &Value) -> Outcome {
     Outcome::AfterInput
 }
 
+/// Converts comp pixel `x`, `y` to a screen point with the viewer's current transform, or
+/// returns [`Outcome::Retry`] while the viewer is not visible.
 fn viewer_locate(ctx: &egui::Context, p: &Value) -> Outcome {
     let (Some(x), Some(y)) = (p.get("x").and_then(Value::as_f64), p.get("y").and_then(Value::as_f64)) else {
         return err("need `x`, `y` (comp pixels)");
@@ -516,6 +562,8 @@ fn viewer_locate(ctx: &egui::Context, p: &Value) -> Outcome {
     }
 }
 
+/// Converts a point (`{id}`, or `{x, y}`) to comp pixels; replies with an error when the
+/// viewer is not visible.
 fn viewer_hit(app: &mut EffectcraftApp, ctx: &egui::Context, p: &Value) -> Outcome {
     let pos = match point(app, p) {
         Ok(p) => p,
@@ -527,6 +575,9 @@ fn viewer_hit(app: &mut EffectcraftApp, ctx: &egui::Context, p: &Value) -> Outco
     }
 }
 
+/// Returns the screen point at `time` seconds on the ruler row of layer `layer`'s bar;
+/// without a numeric `time`, returns the bar's centre. Returns [`Outcome::Retry`] when the bar
+/// is unavailable, or a numeric `time` is supplied but the ruler is unavailable or malformed.
 fn timeline_locate(app: &EffectcraftApp, p: &Value) -> Outcome {
     let Some(l) = p.get("layer").and_then(Value::as_u64) else { return err("need `layer` (id)") };
     match crate::panels::timeline::locate(app, l, p.get("time").and_then(Value::as_f64)) {
@@ -535,6 +586,9 @@ fn timeline_locate(app: &EffectcraftApp, p: &Value) -> Outcome {
     }
 }
 
+/// Applies `action` (`play`, `stop`, `status`, else toggle) at `now` and replies with the
+/// playing state, current time in seconds, whether audio is present and the meter's level and
+/// peak in dB.
 fn playback(app: &mut EffectcraftApp, p: &Value, now: f64) -> Outcome {
     let action = p.get("action").and_then(Value::as_str).unwrap_or("toggle");
     match action {
@@ -548,6 +602,11 @@ fn playback(app: &mut EffectcraftApp, p: &Value, now: f64) -> Outcome {
     )
 }
 
+/// Resolves the capture target — a named panel, an element id, or the whole window — and
+/// returns [`Outcome::Retry`] while a requested panel or element is not registered, so a
+/// missing target is never silently captured as the window. Requests a repaint without raising
+/// or focusing the window and returns [`Outcome::Screenshot`]; the target is resolved again
+/// when the capture is issued.
 fn screenshot(app: &mut EffectcraftApp, ctx: &egui::Context, p: &Value) -> Outcome {
     let s = |k: &str| p.get(k).and_then(Value::as_str);
     // The panel/element is an identity, not a rectangle: it is resolved when the capture
@@ -574,11 +633,12 @@ fn screenshot(app: &mut EffectcraftApp, ctx: &egui::Context, p: &Value) -> Outco
             crate::ShotTarget::Window | crate::ShotTarget::Rect(_) => "the element is not on screen".into(),
         });
     }
-    // Bring the window on screen so a frame is presented, without taking keyboard focus.
+    // Request a repaint without raising the window or taking keyboard focus.
     app.raise_for_control(ctx);
     Outcome::Screenshot { path: s("path").map(str::to_string), target }
 }
 
+/// Asks the viewport for an inner size of `width`×`height` pixels (default 1600×1000).
 fn resize(ctx: &egui::Context, p: &Value) -> Outcome {
     let w = p.get("width").and_then(Value::as_f64).unwrap_or(1600.0) as f32;
     let h = p.get("height").and_then(Value::as_f64).unwrap_or(1000.0) as f32;
@@ -586,6 +646,8 @@ fn resize(ctx: &egui::Context, p: &Value) -> Outcome {
     ok(Value::Null)
 }
 
+/// Sends the viewport close request. `force: true` marks the unsaved-changes state as
+/// quitting, so a modified project closes without the save prompt.
 fn quit(app: &mut EffectcraftApp, ctx: &egui::Context, p: &Value) -> Outcome {
     // A modified project asks to save first unless `force: true`.
     if p.get("force").and_then(Value::as_bool).unwrap_or(false) {
@@ -653,6 +715,10 @@ pub fn base64(data: &[u8]) -> String {
     s
 }
 
+/// Builds the `ui.inspect` reply: window size and pixels per point, fps, UI state with the
+/// active comp's viewer resolution, playback and time, active comp, selected layer/key counts,
+/// registered element count, keyboard focus (egui id, rect, automation ids and rect
+/// candidates), fresh window focus, workspace storage error, open dialog and last frame time.
 pub fn inspect(app: &EffectcraftApp, ctx: &egui::Context) -> Value {
     // A logic-only tick refreshes the viewport information but not `InputState`'s screen rect.
     let size = ctx.input(|i| i.viewport().inner_rect).map_or_else(|| ctx.content_rect().size(), |r| r.size());

@@ -51,6 +51,8 @@ fn current(app: &EffectcraftApp) -> Option<(LayerId, Uid)> {
     l.trackers().next().map(|(g, _)| (l.id, g.uid))
 }
 
+/// The `egui::Id` of the Motion Source dropdown's transient state; picking a new source removes
+/// whatever is stored under it, so the choice starts fresh.
 fn source_id() -> egui::Id {
     egui::Id::unique("tracker-motion-source")
 }
@@ -113,6 +115,11 @@ fn analyze_glyph(p: &egui::Painter, r: Rect, forward: bool, frame: bool, stop: b
     }
 }
 
+/// The Tracker panel: the camera/warp and motion/stabilize buttons, Motion Source and Current
+/// Track pickers, the track type and its channels, Motion Target with Edit Target and Options, the
+/// four Analyze buttons (the one whose direction is running offers Stop), Reset and Apply, and the
+/// analysis progress. With a mask selected it switches to its mask-tracking mode. Every change runs a
+/// `track.*` command; while an analysis is running it polls the job and asks for repaints.
 pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
     let ctx = ui.ctx().clone();
@@ -530,7 +537,7 @@ pub fn options_dialog(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens)
                 (LowConfidence::Adapt, "Adapt Feature"),
             ];
             let cur = actions.iter().find(|(a, _)| *a == d.opts.action).map(|(_, l)| *l).unwrap_or("Adapt Feature");
-            let r = egui::ComboBox::from_id_salt("track-action")
+            let r = craft_ui::ComboBox::from_id_salt("track-action")
                 .selected_text(cur)
                 .show_ui(ui, |ui| {
                     for (a, l) in actions {
@@ -583,7 +590,7 @@ pub fn target_dialog(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) 
         ui.horizontal(|ui| {
             ui.label(crate::i18n::tr("Layer:"));
             let cur = d.target.and_then(|id| layers.iter().find(|(l, _)| *l == id)).map(|(_, n)| n.clone()).unwrap_or_else(|| "None".into());
-            let r = egui::ComboBox::from_id_salt("track-target")
+            let r = craft_ui::ComboBox::from_id_salt("track-target")
                 .selected_text(cur)
                 .width(240.0)
                 .show_ui(ui, |ui| {
@@ -616,7 +623,7 @@ pub fn apply_dialog(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
         ui.horizontal(|ui| {
             ui.label(crate::i18n::tr("Apply Dimensions:"));
             let labels = ["X and Y", "X only", "Y only"];
-            let r = egui::ComboBox::from_id_salt("track-apply-dims")
+            let r = craft_ui::ComboBox::from_id_salt("track-apply-dims")
                 .selected_text(labels[d.dims.min(2)])
                 .show_ui(ui, |ui| {
                     for (i, l) in labels.iter().enumerate() {

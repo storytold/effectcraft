@@ -388,7 +388,7 @@ impl MediaPool {
     }
 
     /// The conformed-audio file of `path` at `rate` (named by a hash of the path, size and
-    /// modification time, so an edited file conforms again, and of [`CONFORM_VERSION`]).
+    /// modification time, so an edited file conforms again, and of `CONFORM_VERSION`).
     pub fn conformed_path(&self, path: &str, rate: u32) -> Option<std::path::PathBuf> {
         use std::hash::{Hash, Hasher};
         let folder = lock(&self.inner.conform).clone()?;

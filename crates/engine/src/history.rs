@@ -314,6 +314,9 @@ impl Session {
         }
         // Every state off the new line goes into branches: a chain per first child, the other
         // children starting branches of their own.
+        /// Adds to `out` one [`Branch`] for the off-line subtree at `start`: it follows the first
+        /// child that is not on the new history line, and records every other such child as a further
+        /// branch from the state it forked at (`parent`).
         fn chain(a: &Arena, start: usize, parent: usize, in_new: &[bool], out: &mut Vec<Branch>) {
             let mut steps = vec![];
             let mut n = start;

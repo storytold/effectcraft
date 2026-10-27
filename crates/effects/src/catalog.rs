@@ -92,7 +92,7 @@ const CPU_ONLY_CONTROLS: &[(&str, &[&str])] = &[
 ];
 
 /// Whether the GPU kernel of effect `id` covers the instance's current settings (see
-/// [`CPU_ONLY_CONTROLS`]; plus Cell Pattern's HQ variants and Turbulent Displace's locked
+/// `CPU_ONLY_CONTROLS`; plus Cell Pattern's HQ variants and Turbulent Displace's locked
 /// pinning).
 pub fn gpu_supported(id: &str, ctx: &crate::EffectCtx) -> bool {
     match id {

@@ -197,7 +197,7 @@ pub fn dialog(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             ui.label(tr("Label:"));
             let labels = effectcraft_engine::color::Label::ALL;
             let cur = labels.get(d.label).copied().unwrap_or_default();
-            let r = egui::ComboBox::from_id_salt("dialog.marker.label").selected_text(app.session.prefs.label_name(cur)).show_ui(ui, |ui| {
+            let r = craft_ui::ComboBox::from_id_salt("dialog.marker.label").selected_text(app.session.prefs.label_name(cur)).show_ui(ui, |ui| {
                 for (i, l) in labels.into_iter().enumerate() {
                     if crate::widgets::label_entry(ui, l, &app.session.prefs.label_name(l), d.label == i, &app.tokens).clicked() {
                         d.label = i;
@@ -243,6 +243,8 @@ pub fn dialog(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
 
 // ---------------------------------------------------------------- timeline drawing + gestures
 
+/// The `egui::Id` of a marker drag in progress: the dragged marker's layer and index (updated as
+/// the marker moves) and whether Alt was held when the drag started.
 fn drag_state_id() -> egui::Id {
     egui::Id::unique("marker-drag")
 }

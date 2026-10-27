@@ -6,7 +6,7 @@
 //! inventing an id, and a missing row falls back to English instead of to an empty label.
 //!
 //! The language in force is set once per frame, from the same resolved language the fonts are
-//! installed for ([`super::language`], [`set_current`]), so a panel does not have to thread it
+//! installed for (`crate::i18n::language`, [`set_current`]), so a panel does not have to thread it
 //! through every function. It is thread-local: the render threads never draw interface text.
 //!
 //! A row that carries values keeps one `{}` per value and is read with [`tr_args`]; the tests below
@@ -5433,7 +5433,12 @@ mod tests {
         ("dock.rs", include_str!("../dock.rs")),
         ("dock_ui.rs", include_str!("../dock_ui.rs")),
         ("header.rs", include_str!("../header.rs")),
-        ("menus.rs", include_str!("../menus.rs")),
+        ("menus/bar.rs", include_str!("../menus/bar.rs")),
+        ("menus/commands.rs", include_str!("../menus/commands.rs")),
+        ("menus/entries.rs", include_str!("../menus/entries.rs")),
+        ("menus/frontend.rs", include_str!("../menus/frontend.rs")),
+        ("menus/invoke.rs", include_str!("../menus/invoke.rs")),
+        ("menus/shortcuts.rs", include_str!("../menus/shortcuts.rs")),
         ("prefs_live.rs", include_str!("../prefs_live.rs")),
         ("widgets.rs", include_str!("../widgets.rs")),
         ("panels/anim_tools.rs", include_str!("../panels/anim_tools.rs")),
@@ -5444,7 +5449,11 @@ mod tests {
         ("panels/gradient_editor.rs", include_str!("../panels/gradient_editor.rs")),
         ("panels/dialogs.rs", include_str!("../panels/dialogs.rs")),
         ("panels/dialogs_3d.rs", include_str!("../panels/dialogs_3d.rs")),
-        ("panels/effect_controls.rs", include_str!("../panels/effect_controls.rs")),
+        ("panels/effect_controls/common.rs", include_str!("../panels/effect_controls/common.rs")),
+        ("panels/effect_controls/editors.rs", include_str!("../panels/effect_controls/editors.rs")),
+        ("panels/effect_controls/panel.rs", include_str!("../panels/effect_controls/panel.rs")),
+        ("panels/effect_controls/rows.rs", include_str!("../panels/effect_controls/rows.rs")),
+        ("panels/effect_controls/viewer.rs", include_str!("../panels/effect_controls/viewer.rs")),
         ("panels/effects_presets.rs", include_str!("../panels/effects_presets.rs")),
         ("panels/essential.rs", include_str!("../panels/essential.rs")),
         ("panels/expr_bar.rs", include_str!("../panels/expr_bar.rs")),
@@ -5462,7 +5471,7 @@ mod tests {
         ("panels/markers_ui.rs", include_str!("../panels/markers_ui.rs")),
         ("panels/media_panels.rs", include_str!("../panels/media_panels.rs")),
         ("panels/misc.rs", include_str!("../panels/misc.rs")),
-        ("panels/mod.rs", include_str!("../panels/mod.rs")),
+        ("panels.rs", include_str!("../panels.rs")),
         ("panels/paint_panels.rs", include_str!("../panels/paint_panels.rs")),
         ("panels/path_vr_panels.rs", include_str!("../panels/path_vr_panels.rs")),
         ("panels/precomp.rs", include_str!("../panels/precomp.rs")),
@@ -5482,13 +5491,20 @@ mod tests {
         ("panels/tracker.rs", include_str!("../panels/tracker.rs")),
         ("panels/unsaved.rs", include_str!("../panels/unsaved.rs")),
         ("panels/viewer.rs", include_str!("../panels/viewer.rs")),
+        ("panels/viewer/frame.rs", include_str!("../panels/viewer/frame.rs")),
+        ("panels/viewer/geometry.rs", include_str!("../panels/viewer/geometry.rs")),
+        ("panels/viewer/gesture.rs", include_str!("../panels/viewer/gesture.rs")),
+        ("panels/viewer/shapes.rs", include_str!("../panels/viewer/shapes.rs")),
+        ("panels/viewer/tools.rs", include_str!("../panels/viewer/tools.rs")),
+        ("panels/viewer/view.rs", include_str!("../panels/viewer/view.rs")),
         ("panels/viewer_tools.rs", include_str!("../panels/viewer_tools.rs")),
         ("panels/viewers.rs", include_str!("../panels/viewers.rs")),
         // Text the interface draws but does not own: the settings pages and the viewer's channel
         // and Fast Previews lists come from the engine as data, so their source strings live here.
-        ("engine settings pages", include_str!("../../../engine/src/prefs.rs")),
+        ("engine settings pages", include_str!("../../../engine/src/settings/prefs/dialog.rs")),
+        ("engine settings choices", include_str!("../../../engine/src/settings/prefs/choices.rs")),
         ("engine viewer channels", include_str!("../../../engine/src/viewer.rs")),
-        ("engine viewer commands", include_str!("../../../engine/src/commands/viewer_cmds.rs")),
+        ("engine viewer commands", include_str!("../../../engine/src/cmd/viewer_cmds.rs")),
     ];
 
     fn catalogs() -> Vec<(&'static str, &'static str)> {

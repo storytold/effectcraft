@@ -393,6 +393,7 @@ pub(crate) fn motion_path(
 
 // ---------------------------------------------------------------- free transform
 
+/// The `egui::Id` under which the free-transform target (layer and mask or path id) is stored.
 fn ft_id() -> egui::Id {
     egui::Id::unique("viewer-free-transform")
 }
