@@ -12,6 +12,7 @@ workspace = true
 [dependencies]
 effectcraft-engine = { workspace = true }
 effectcraft-host = { workspace = true }
+effectcraft-automation = { workspace = true }
 effectcraft-ui-egui = { workspace = true }
 egui = { workspace = true }
 # `links`: links (Help menu, Discord, Settings) open in the system browser.

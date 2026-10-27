@@ -20,12 +20,14 @@ pub mod backend;
 pub mod base64;
 pub mod bridge;
 pub mod confine;
+pub mod control_auth;
 mod long_job;
 pub mod server;
 pub mod tools;
 
 pub use backend::{Backend, Frame};
 pub use bridge::BridgeClient;
+pub use control_auth::TokenSource;
 pub use effectcraft_engine::Session;
 pub use server::McpServer;
 

@@ -33,7 +33,9 @@
 //! Saving:   --save (back to --project) | --save-as F.ecproj
 //! GPU:      --gpu renders on the GPU compositor (Mercury GPU Acceleration) when an adapter exists;
 //!           the default is the CPU (Mercury Software Only)
-//! Bridge:   --bridge PORT drives a running `effectcraft --control PORT` instead of a headless session
+//! Bridge:   --bridge PORT drives a running `effectcraft --control PORT` instead of a headless session,
+//!           authenticating with the app's token (`control-PORT.token` in the settings folder, or
+//!           `EFFECTCRAFT_CONTROL_TOKEN` / `EFFECTCRAFT_CONTROL_TOKEN_FILE`)
 //! Output:   --json for one compact JSON document on stdout (errors: {"error": …}, exit 1)
 //! ```
 //!
@@ -47,7 +49,7 @@ use std::io::Write;
 mod template;
 
 use effectcraft_automation::tools::{self, Reply};
-use effectcraft_automation::{Backend, McpServer};
+use effectcraft_automation::{Backend, McpServer, TokenSource};
 use serde_json::{Value, json};
 
 /// `println!` that never panics: see [`write_line`].
@@ -344,7 +346,9 @@ fn backend(args: &Args, default_demo: bool) -> Result<Backend, Failure> {
         if args.project.is_some() || args.flag("--demo") {
             return usage_err("--bridge drives the running app's project; use `exec file.open` to open another");
         }
-        return Ok(Backend::bridge(addr)?);
+        // The app writes a per-launch token there (#2122); read again on every connect.
+        let token = TokenSource::for_addr(addr, effectcraft_host::config_dir().as_deref());
+        return Ok(Backend::bridge(addr, token)?);
     }
     let mut b = Backend::headless(session(args)?);
     if let Some(p) = &args.project {

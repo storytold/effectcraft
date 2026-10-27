@@ -5,7 +5,7 @@ use std::net::TcpListener;
 
 use serde_json::{Value, json};
 
-use crate::{Backend, McpServer, Session, base64, png_size};
+use crate::{Backend, McpServer, Session, TokenSource, base64, png_size};
 
 fn server() -> McpServer {
     McpServer::new(Backend::headless(Session::default()))
@@ -442,6 +442,22 @@ fn autosave_flushes_on_read_errors_and_broken_output() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// The fake apps' control token.
+const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+fn bridge(addr: &str) -> Backend {
+    Backend::bridge(addr, TokenSource::Token(TOKEN.into())).unwrap()
+}
+
+/// A fake app's side of the handshake: the first line must be `auth` with [`TOKEN`].
+fn accept_auth(reader: &mut impl BufRead, out: &mut impl Write) {
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    let msg: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!((msg["method"].as_str(), msg["params"]["token"].as_str()), (Some("auth"), Some(TOKEN)), "{msg}");
+    writeln!(out, "{}", json!({"id": msg["id"], "ok": true, "result": {"authenticated": true}})).unwrap();
+}
+
 /// A fake desktop control channel: answers `engine.execute` from a real session, and canned
 /// `render.frame` / `ui.screenshot` replies.
 fn fake_app() -> u16 {
@@ -451,7 +467,9 @@ fn fake_app() -> u16 {
         let (stream, _) = l.accept().unwrap();
         let mut out = stream.try_clone().unwrap();
         let mut session = Session::default();
-        for line in BufReader::new(stream).lines() {
+        let mut reader = BufReader::new(stream);
+        accept_auth(&mut reader, &mut out);
+        for line in reader.lines() {
             let msg: Value = serde_json::from_str(&line.unwrap()).unwrap();
             let p = &msg["params"];
             let reply = match msg["method"].as_str().unwrap() {
@@ -482,7 +500,7 @@ fn fake_app() -> u16 {
 #[test]
 fn bridge_forwards_to_control_channel() {
     let port = fake_app();
-    let mut s = McpServer::new(Backend::bridge(&port.to_string()).unwrap());
+    let mut s = McpServer::new(bridge(&port.to_string()));
     let r = rpc(&mut s, 1, "initialize", json!({}));
     assert!(r["serverInfo"]["title"].as_str().unwrap().contains("bridge"));
     let names: Vec<String> =
@@ -507,8 +525,38 @@ fn bridge_forwards_to_control_channel() {
 
 #[test]
 fn bridge_rejects_non_loopback() {
-    assert!(Backend::bridge("10.0.0.1:9877").is_err());
-    assert!(Backend::bridge("localhost:9877").is_ok());
+    let token = || TokenSource::Token(TOKEN.into());
+    assert!(Backend::bridge("10.0.0.1:9877", token()).is_err());
+    assert!(Backend::bridge("localhost:9877", token()).is_ok());
+}
+
+/// #2122: a fake app that refuses the token. The client reports it and sends nothing else.
+#[test]
+fn bridge_reports_a_refused_token_without_sending_the_request() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let worker = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        let mut out = stream.try_clone().unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        writeln!(out, "{}", json!({"id": "auth", "ok": false, "error": "authentication required"})).unwrap();
+        drop(out);
+        let mut rest = String::new();
+        let _ = reader.read_line(&mut rest);
+        (line, rest)
+    });
+    let wrong = "f".repeat(64);
+    let mut backend = Backend::bridge(&addr, TokenSource::Token(wrong.clone())).unwrap();
+    let error = backend.exec("comp.new", json!({})).unwrap_err().to_string();
+    assert!(error.contains("authentication failed") && error.contains("authentication required"), "{error}");
+    assert!(!error.contains("outcome is unknown"), "nothing but `auth` was sent: {error}");
+    let (first, rest) = worker.join().unwrap();
+    let first: Value = serde_json::from_str(&first).unwrap();
+    assert_eq!(first, json!({"id": "auth", "method": "auth", "params": {"token": wrong}}));
+    assert!(rest.is_empty(), "no request after a refused auth: {rest}");
 }
 
 /// The app applies the first request but loses its reply. The next connection can be either
@@ -524,7 +572,9 @@ fn lost_reply_server(first_reply: Option<&'static str>) -> (String, std::thread:
             stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
             let mut output = stream.try_clone().unwrap();
             let mut input = String::new();
-            BufReader::new(stream).read_line(&mut input).unwrap();
+            let mut reader = BufReader::new(stream);
+            accept_auth(&mut reader, &mut output);
+            reader.read_line(&mut input).unwrap();
             let request: Value = serde_json::from_str(&input).unwrap();
             let result = if request["method"] == "engine.execute" {
                 mutations += 1;
@@ -548,7 +598,7 @@ fn lost_reply_server(first_reply: Option<&'static str>) -> (String, std::thread:
 #[test]
 fn bridge_does_not_replay_a_mutation_when_its_reply_is_lost() {
     let (addr, worker) = lost_reply_server(None);
-    let mut backend = Backend::bridge(&addr).unwrap();
+    let mut backend = bridge(&addr);
     let error = backend.exec("comp.new", json!({"width": 64, "height": 48, "duration": 1})).unwrap_err();
     assert!(error.to_string().contains("outcome is unknown"), "{error}");
     let state = backend.control("ui.inspect", json!({})).unwrap();
@@ -560,7 +610,7 @@ fn bridge_does_not_replay_a_mutation_when_its_reply_is_lost() {
 #[test]
 fn bridge_retries_read_only_queries_after_a_lost_reply() {
     let (addr, worker) = lost_reply_server(None);
-    let mut backend = Backend::bridge(&addr).unwrap();
+    let mut backend = bridge(&addr);
     let state = backend.control("ui.inspect", json!({})).unwrap();
     assert_eq!(state["requests"], 2);
     assert_eq!(state["mutations"], 0);
@@ -570,7 +620,7 @@ fn bridge_retries_read_only_queries_after_a_lost_reply() {
 #[test]
 fn bridge_reports_unknown_outcome_after_a_malformed_mutation_reply() {
     let (addr, worker) = lost_reply_server(Some("{invalid reply"));
-    let mut backend = Backend::bridge(&addr).unwrap();
+    let mut backend = bridge(&addr);
     let error = backend.exec("comp.new", json!({"width": 64, "height": 48, "duration": 1})).unwrap_err();
     let message = error.to_string();
     assert!(message.contains("outcome is unknown") && message.contains("bad reply"), "{message}");
@@ -581,7 +631,7 @@ fn bridge_reports_unknown_outcome_after_a_malformed_mutation_reply() {
 #[test]
 fn bridge_does_not_assume_an_unknown_method_is_read_only() {
     let (addr, worker) = lost_reply_server(None);
-    let mut backend = Backend::bridge(&addr).unwrap();
+    let mut backend = bridge(&addr);
     let error = backend.control("future.customOperation", json!({})).unwrap_err();
     assert!(error.to_string().contains("outcome is unknown"), "{error}");
     assert_eq!(backend.control("ui.inspect", json!({})).unwrap()["mutations"], 1);
@@ -592,7 +642,7 @@ fn bridge_does_not_assume_an_unknown_method_is_read_only() {
 fn bridge_playback_edits_and_default_toggle_are_not_replayed() {
     for params in [json!({}), json!({"action": "toggle"}), json!({"action": "play"}), json!({"action": "stop"})] {
         let (addr, worker) = lost_reply_server(None);
-        let mut backend = Backend::bridge(&addr).unwrap();
+        let mut backend = bridge(&addr);
         let error = backend.control("ui.playback", params).unwrap_err();
         assert!(error.to_string().contains("outcome is unknown"), "{error}");
         assert_eq!(backend.control("ui.inspect", json!({})).unwrap()["mutations"], 1);
@@ -603,7 +653,7 @@ fn bridge_playback_edits_and_default_toggle_are_not_replayed() {
 #[test]
 fn bridge_playback_status_can_be_retried() {
     let (addr, worker) = lost_reply_server(None);
-    let mut backend = Backend::bridge(&addr).unwrap();
+    let mut backend = bridge(&addr);
     let state = backend.control("ui.playback", json!({"action": "status"})).unwrap();
     assert_eq!(state["requests"], 2);
     assert_eq!(state["mutations"], 0);
@@ -615,7 +665,7 @@ fn bridge_connect_failure_can_be_retried_when_the_app_starts() {
     let reserved = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = reserved.local_addr().unwrap();
     drop(reserved);
-    let mut backend = Backend::bridge(&addr.to_string()).unwrap();
+    let mut backend = bridge(&addr.to_string());
     let error = backend.control("ui.inspect", json!({})).unwrap_err();
     assert!(error.to_string().contains("cannot connect"), "{error}");
     assert!(!error.to_string().contains("outcome is unknown"), "nothing was sent");
@@ -625,7 +675,9 @@ fn bridge_connect_failure_can_be_retried_when_the_app_starts() {
         stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
         let mut output = stream.try_clone().unwrap();
         let mut input = String::new();
-        BufReader::new(stream).read_line(&mut input).unwrap();
+        let mut reader = BufReader::new(stream);
+        accept_auth(&mut reader, &mut output);
+        reader.read_line(&mut input).unwrap();
         let request: Value = serde_json::from_str(&input).unwrap();
         writeln!(output, "{}", json!({"id": request["id"], "ok": true, "result": {"ready": true}})).unwrap();
     });

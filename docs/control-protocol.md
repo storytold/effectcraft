@@ -23,12 +23,50 @@ unknown option prints an error and the app exits with status 1 before it opens a
   the server closes the connection, so nothing sent after it runs. An HTTP request (for example a web
   page's cross-origin `fetch` to `127.0.0.1:<port>`) therefore can't smuggle a command in its body: its
   request line is rejected first. At most 16 connections are served at once; further ones get an error
-  line and are closed. The port has no authentication, so only enable it while you use it.
+  line and are closed.
 
-Quick test:
+## Authentication
+
+Loopback alone doesn't keep other local programs out (other users of the machine, containers and
+WSL sharing its network, sandboxed apps), and the channel can run scripts, so every connection must
+authenticate first. Each time it starts listening, the app generates a random 256-bit token
+(64 hexadecimal characters) and writes it to `control-<port>.token` in the
+settings folder (`%APPDATA%\EffectCraft` on Windows,
+`~/Library/Application Support/EffectCraft` on macOS, `~/.config/effectcraft` on Linux;
+`EFFECTCRAFT_CONFIG_DIR` and portable mode move it), or to the path in
+`EFFECTCRAFT_CONTROL_TOKEN_FILE`. The file replaces the previous launch's and is readable only by you:
+mode 0600 on macOS and Linux; on Windows it inherits the settings folder's permissions, which under
+your user profile are you, SYSTEM and administrators only (keep a custom folder just as private).
+The token is never printed or logged.
+
+The first request on every connection must be:
+
+```json
+{"id": "auth", "method": "auth", "params": {"token": "<64 hexadecimal characters>"}}
+```
+
+It is answered with `{"id": "auth", "ok": true, "result": {"authenticated": true}}`. Any other first
+request, or a wrong token, gets `{"ok": false, "error": "authentication required: …"}` and the
+connection is closed, so nothing sent with it runs. A first line that isn't a JSON request object
+at all (an HTTP request, plain text) gets the usual `bad JSON …; closing the connection` or
+`not a control request …` error instead. A connection that hasn't authenticated within 10 seconds
+of connecting is closed (`not authenticated within 10 s of connecting`), however slowly it sends;
+after `auth` there is no such limit. A second `auth` on an authenticated connection gets an
+`already authenticated` error and changes nothing.
+
+`effectcraft-cli --bridge PORT` and `effectcraft-cli mcp --bridge PORT` read the token file
+themselves, again on every reconnect, so they keep working across app restarts. Other clients can
+read it the same way, or take the token from `EFFECTCRAFT_CONTROL_TOKEN` (the CLI uses that variable
+first, then `EFFECTCRAFT_CONTROL_TOKEN_FILE`, then the settings folder). This is the same handshake
+as PhotoCraft's control channel. Prefer the per-launch file: `EFFECTCRAFT_CONTROL_TOKEN` pins a
+secret that is sent to whatever is listening on the port, even after the app has gone. Two app
+instances must not share one `EFFECTCRAFT_CONTROL_TOKEN_FILE`, since each launch replaces it.
+
+Quick test (macOS / Linux, default settings folder):
 
 ```sh
-printf '{"id":1,"method":"engine.execute","params":{"command":"comp.new","params":{"name":"A"}}}\n' | nc 127.0.0.1 9877
+TOKEN=$(cat ~/.config/effectcraft/control-9877.token)   # macOS: ~/Library/Application\ Support/EffectCraft/
+printf '{"id":"auth","method":"auth","params":{"token":"%s"}}\n{"id":1,"method":"engine.execute","params":{"command":"comp.new","params":{"name":"A"}}}\n' "$TOKEN" | nc 127.0.0.1 9877
 ```
 
 ## Engine

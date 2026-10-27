@@ -5,7 +5,7 @@ use effectcraft_engine::time::Tick;
 use serde_json::{Value, json};
 
 use crate::confine::Confinement;
-use crate::{BridgeClient, Error, Result, base64, encode_png, recompress_png};
+use crate::{BridgeClient, Error, Result, TokenSource, base64, encode_png, recompress_png};
 
 pub struct Backend {
     target: Target,
@@ -34,9 +34,10 @@ impl Backend {
         Backend { target: Target::Headless(Box::new(session)), confinement: None }
     }
 
-    /// Bridge to the app's control channel at `addr` (`9877` or `127.0.0.1:9877`).
-    pub fn bridge(addr: &str) -> Result<Self> {
-        Ok(Backend { target: Target::Bridge(BridgeClient::new(addr)?), confinement: None })
+    /// Bridge to the app's control channel at `addr` (`9877` or `127.0.0.1:9877`), authenticating
+    /// with the token from `token` ([`TokenSource::for_addr`] finds the app's token file).
+    pub fn bridge(addr: &str, token: TokenSource) -> Result<Self> {
+        Ok(Backend { target: Target::Bridge(BridgeClient::new(addr, token)?), confinement: None })
     }
 
     /// Confine the files the commands run here may read and write ([`Confinement`]).
