@@ -105,11 +105,8 @@ fn keyed_orientation_matches_after_effects() {
     close(evaluate_orientation(&lin, s(1.0)).unwrap(), [30.6186, 35.7617, 28.4317]);
     close(evaluate_orientation(&lin, s(2.0)).unwrap(), [60.0, 80.0, 40.0]);
     // A middle key reads back as stored (not as another angle triple of the same rotation).
-    let three = vec![
-        Keyframe::new(s(0.0), Value::Vec3([0.0; 3])),
-        Keyframe::new(s(1.0), Value::Vec3([0.0, 120.0, 0.0])),
-        Keyframe::new(s(2.0), Value::Vec3([0.0; 3])),
-    ];
+    let three =
+        vec![Keyframe::new(s(0.0), Value::Vec3([0.0; 3])), Keyframe::new(s(1.0), Value::Vec3([0.0, 120.0, 0.0])), Keyframe::new(s(2.0), Value::Vec3([0.0; 3]))];
     assert_eq!(evaluate_orientation(&three, s(1.0)), Some(Value::Vec3([0.0, 120.0, 0.0])));
     // Easy ease (AE's preset: speed 0, influence 33 %) on both keys.
     let ease = |k: Keyframe| {
