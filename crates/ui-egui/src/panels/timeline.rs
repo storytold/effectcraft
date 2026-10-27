@@ -1946,7 +1946,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         hic(Icon::Lock, cw.av + 64.0);
     }
     if vis.keys {
-        htext(cw.keys + 6.0, "Keys");
+        htext(cw.keys + 6.0, crate::i18n::tr("Keys"));
     }
     if vis.label {
         icons::paint(&hp, Rect::from_center_size(pos2(cw.label + 10.0, hy), vec2(10.0, 10.0)), Icon::Keyframe, t.text_dim);
@@ -1954,10 +1954,10 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     if vis.num {
         htext(cw.num + 6.0, "#");
     }
-    let name_hdr = if app.ui.timeline.source_name { "Source Name" } else { "Layer Name" };
+    let name_hdr = crate::i18n::tr(if app.ui.timeline.source_name { "Source Name" } else { "Layer Name" });
     htext(cw.name + 22.0, name_hdr);
     if vis.comment {
-        htext(cw.comment + 6.0, "Comment");
+        htext(cw.comment + 6.0, crate::i18n::tr("Comment"));
     }
     if vis.switches {
         for (i, icon) in
@@ -1967,17 +1967,17 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         }
     }
     if vis.modes {
-        htext(cw.mode + 4.0, "Mode");
+        htext(cw.mode + 4.0, crate::i18n::tr("Mode"));
         htext(cw.mode + 74.0, "T");
-        htext(cw.trkmat + 4.0, "Track Matte");
+        htext(cw.trkmat + 4.0, crate::i18n::tr("Track Matte"));
     }
     if vis.parent {
         icons::paint(&hp, Rect::from_center_size(pos2(cw.parent + 10.0, hy), vec2(12.0, 12.0)), Icon::PickWhip, t.text_dim);
-        htext(cw.parent + 20.0, "Parent & Link");
+        htext(cw.parent + 20.0, crate::i18n::tr("Parent & Link"));
     }
     for (on, x, s) in [(vis.in_, cw.in_, "In"), (vis.out, cw.out, "Out"), (vis.duration, cw.duration, "Duration"), (vis.stretch, cw.stretch, "Stretch")] {
         if on {
-            htext(x + 6.0, s);
+            htext(x + 6.0, crate::i18n::tr(s));
         }
     }
     let hdr_rect = Rect::from_min_max(ch.min, pos2(graph_x0 - 1.0, ch.max.y));

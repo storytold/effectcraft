@@ -1099,7 +1099,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         for (key, label, command) in
             [("newComp", "New Composition…", "comp.new"), ("newFolder", "New Folder", "project.newFolder"), ("import", "Import File…", "file.import")]
         {
-            let response = ui.button(label);
+            let response = ui.button(crate::i18n::tr(label));
             app.auto.add(&format!("project.context.{key}"), response.rect, label);
             if response.clicked() {
                 actions.push((command.into(), json!({})));
