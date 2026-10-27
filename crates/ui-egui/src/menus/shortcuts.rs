@@ -345,7 +345,10 @@ fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only
         // Enter in the Project panel renames the selected item (handled by the panel).
         // In Effects & Presets and the Render Queue Enter applies or opens the row (handled by the
         // panel), not the layer rename.
-        if key == egui::Key::Enter && !mods.any() && matches!(app.ui.focused, PanelKind::Project | PanelKind::EffectsPresets | PanelKind::RenderQueue | PanelKind::Flowchart) {
+        if key == egui::Key::Enter
+            && !mods.any()
+            && matches!(app.ui.focused, PanelKind::Project | PanelKind::EffectsPresets | PanelKind::RenderQueue | PanelKind::Flowchart)
+        {
             continue;
         }
         // The Project panel has its own selection; a previously selected Timeline layer

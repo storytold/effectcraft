@@ -43,11 +43,6 @@ const DEDICATED: &[PanelKind] = &[PanelKind::Info, PanelKind::Flowchart, PanelKi
 /// only: the "improved, lower the entry" check would fail on any machine with a different home.
 const MACHINE_DEPENDENT: &[&str] = &["MediaBrowser:default"];
 
-/// Scenarios whose content is the machine's own folder listing (the Media Browser opens on the
-/// home folder), so a runner with fewer files finds fewer controls. They are held to the upper bound
-/// only: the "improved, lower the entry" check would fail on any machine with a different home.
-const MACHINE_DEPENDENT: &[&str] = &["MediaBrowser:default"];
-
 /// (scenario, findings, of them unnamed controls) per not-yet-fixed scenario, as measured in the
 /// shared docking layout (Effect Controls with one Gaussian Blur on the layer, every other panel
 /// as it opens). A ratchet: a number may only go down, never up; when a pass over a panel lowers
