@@ -230,7 +230,7 @@ const PLANE_SLOPE_MAX: f32 = 64.0;
 /// Fraction of light reaching `p` through shadow map `m` (1 = lit). `ng` is the
 /// receiver's geometric (not normal-mapped) normal facing the viewer.
 ///
-/// PCF over an N×N tap grid (5 ≤ N ≤ [`PCF_MAX_TAPS`]) spread over a reach derived
+/// PCF over an N×N tap grid (5 ≤ N ≤ `PCF_MAX_TAPS`) spread over a reach derived
 /// from `radius` (the wanted penumbra in output pixels) divided by the receiver's
 /// texel footprint, each tap jittered by an integer hash of the receiver's
 /// sub-texel cell and the tap index, and each tap comparing against the four

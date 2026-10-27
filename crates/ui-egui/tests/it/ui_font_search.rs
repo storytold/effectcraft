@@ -176,3 +176,37 @@ fn font_menu_filters_variable_fonts() {
     key(&mut h, Key::Escape);
     assert_eq!(layer_doc(&h.state().session, LayerId(lid)).unwrap().font, "Inter", "filtering changes nothing");
 }
+
+/// The font menu grows back when a query that matched nothing is cleared, while the search
+/// field keeps its place and the keyboard; a click on a row then picks that font.
+#[test]
+fn font_menu_grows_back_after_an_empty_search() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"width": 320, "height": 180})).unwrap();
+    let lid = s.execute("layer.newText", json!({"text": "Grow", "font": "Inter"})).unwrap()["layer"].as_u64().unwrap();
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(move |_| EffectcraftApp::new(s));
+    h.state_mut().show_panel(PanelKind::Character);
+    h.run_steps(3);
+    let rows = |h: &Harness<'_, EffectcraftApp>| h.state().auto.query("character.font.option.").len();
+    let search = |h: &Harness<'_, EffectcraftApp>| h.state().auto.find("character.font.search").map(|e| e.rect);
+    click(&mut h, "character.font");
+    h.run_steps(2);
+    let (full, field) = (rows(&h), search(&h));
+    assert!(full > 3, "the open menu shows the fonts: {full} rows");
+    let query = "no_such_font_123456789";
+    type_text(&mut h, query);
+    assert_eq!(rows(&h), 0);
+    assert!(h.state().auto.find("character.font.empty").is_some());
+    for pressed in query.chars().flat_map(|_| [true, false]) {
+        h.input_mut().events.push(Event::Key { key: Key::Backspace, physical_key: None, pressed, repeat: false, modifiers: Modifiers::NONE });
+    }
+    h.run_steps(3);
+    // (Within a row: the list scrolls to the current font on opening and to the top when cleared.)
+    assert!(rows(&h) + 1 >= full, "cleared, the menu shows as many fonts as when it opened: {} of {full}", rows(&h));
+    assert_eq!(search(&h), field, "the search field stays put");
+    // The field still has the keyboard: typing filters again.
+    type_text(&mut h, "JetBrains");
+    assert!(rows(&h) > 0 && h.state().auto.query("character.font.option.").iter().all(|r| r.label.contains("JetBrains")));
+    click(&mut h, "character.font.option.JetBrains Mono");
+    assert_eq!(layer_doc(&h.state().session, LayerId(lid)).unwrap().font, "JetBrains Mono", "a click on a row picks the font");
+}

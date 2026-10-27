@@ -840,14 +840,14 @@ var __propHandler = {
     // A layer-valued property (a Layer Control's Layer) is named as its layer (#809).
     if (k === 'name' && t.__info[2] === 'layer') {
       var lv = t.value;
-      if (lv !== null && lv !== undefined && lv.__isLayer) return lv.name;
+      if (lv?.__isLayer) return lv.name;
     }
     if (k in t) return t[k];
     var v = t.value;
     if (v === null || v === undefined) return undefined;
     var x = v[k];
     // Property groups are callable proxies: hand them over as they are, not bound like methods (#809).
-    if (x !== null && x !== undefined && x.__isGroup) return x;
+    if (x?.__isGroup) return x;
     return typeof x === 'function' ? x.bind(v) : x;
   },
 };
@@ -904,8 +904,8 @@ __TextStyle.prototype = {
   },
   get text() {
     var t = this.__d.text;
-    for (var k = 0; k < this.__ops.length; k++) {
-      var o = this.__ops[k];
+    for (const elem of this.__ops) {
+      var o = elem;
       if (o[0] !== 'text') continue;
       if (o[2] < 0) t = String(o[1]);
       else t = t.slice(0, o[2]) + String(o[1]) + (o[3] < 0 ? '' : t.slice(o[2] + o[3]));

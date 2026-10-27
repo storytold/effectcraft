@@ -351,6 +351,7 @@ pub struct GpuContext {
     pub queue: wgpu::Queue,
     pub(crate) name: String,
     pub(crate) max_dim: u32,
+    pub(crate) median_kernel: crate::fx_noise::MedianKernel,
     bgl: wgpu::BindGroupLayout,
     bgl_ext: wgpu::BindGroupLayout,
     pipelines: HashMap<&'static str, wgpu::ComputePipeline>,
@@ -481,6 +482,9 @@ impl GpuContext {
     /// [`Self::device_failure_notifier`] for immediate readback cancellation.
     pub fn new(adapter: &wgpu::Adapter, device: wgpu::Device, queue: wgpu::Queue) -> Result<GpuContext, String> {
         let info = adapter.get_info();
+        let median_kernel = crate::fx_noise::MedianKernel::for_adapter(info.backend, info.device_type);
+        #[cfg(test)]
+        let median_kernel = median_kernel.test_override()?;
         if !adapter.get_downlevel_capabilities().flags.contains(wgpu::DownlevelFlags::COMPUTE_SHADERS) {
             return Err(format!("{} ({:?}): no compute shaders", info.name, info.backend));
         }
@@ -500,6 +504,7 @@ impl GpuContext {
             ("max_compute_workgroup_size_x", l.max_compute_workgroup_size_x, 64),
             ("max_compute_workgroup_size_y", l.max_compute_workgroup_size_y, 16),
             ("max_compute_invocations_per_workgroup", l.max_compute_invocations_per_workgroup, 256),
+            ("max_compute_workgroup_storage_size", l.max_compute_workgroup_storage_size, median_kernel.workgroup_storage()),
         ];
         if let Some((limit, have, need)) = needs.iter().find(|(_, have, need)| have < need) {
             return Err(format!("{} ({:?}): device limit {limit} is {have}, needs {need}", info.name, info.backend));
@@ -525,6 +530,7 @@ impl GpuContext {
             include_str!("shaders/fx_key.wgsl"),
             include_str!("shaders/fx_stylize.wgsl"),
             include_str!("shaders/fx_noise.wgsl"),
+            median_kernel.source(),
             include_str!("shaders/fx_tone.wgsl"),
             include_str!("shaders/fx_warp.wgsl"),
             include_str!("shaders/fx_extra.wgsl"),
@@ -706,6 +712,7 @@ impl GpuContext {
             queue,
             name,
             max_dim,
+            median_kernel,
             bgl,
             bgl_ext,
             pipelines,

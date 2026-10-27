@@ -54,7 +54,7 @@ impl OutlinePen for Pen {
 pub(crate) fn outline_units(face: FaceId, gid: u32) -> Option<Arc<BezPath>> {
     static C: OnceLock<Mutex<HashMap<(FaceId, u32), Option<Arc<BezPath>>>>> = OnceLock::new();
     let c = C.get_or_init(Default::default);
-    if let Some(v) = c.lock().unwrap_or_else(|e| e.into_inner()).get(&(face, gid)) {
+    if let Some(v) = c.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&(face, gid)) {
         return v.clone();
     }
     let f = fonts::face(face);
@@ -64,7 +64,7 @@ pub(crate) fn outline_units(face: FaceId, gid: u32) -> Option<Arc<BezPath>> {
         g.draw(DrawSettings::unhinted(Size::unscaled(), LocationRef::default()), &mut pen).ok()?;
         Some(Arc::new(pen.0))
     });
-    let mut m = c.lock().unwrap_or_else(|e| e.into_inner());
+    let mut m = c.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if m.len() > 50_000 {
         m.clear();
     }

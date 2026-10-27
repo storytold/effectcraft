@@ -126,7 +126,7 @@ frames and can be assigned through `shortcuts.set`.
 
 | Method | Params | Result |
 |---|---|---|
-| `ui.screenshot` | `{path?, panel?, id?}` | `{path, width, height}`: a PNG of the window, or cropped to one panel or element. |
+| `ui.screenshot` | `{path?, panel?, id?}` | `{path, width, height}`: a PNG of the window, or cropped to one panel or element. The panel or element rectangle is resolved when the capture is issued (after the UI settles), so it follows a panel that moved; a panel or id that is not on screen is retried and then reported, never replaced by a whole-window shot. |
 
 Element ids are stable, for example `tools.Selection`, `panel.Timeline`, `panel.tab.EffectControls`,
 `panel.tab.Timeline.<comp>` (one Timeline tab per open comp; `panel.tab.Timeline` is the shown
@@ -186,20 +186,63 @@ including outside the layer's `[in, out)` range. Timing metadata carries outside
 `prop.get.time` is comp seconds. For these commands, `path` or `prop` identifies a property, not a group.
 Set a layer's offset with `layer.timing {layer, start}` (comp seconds).
 
-Panel moves, tab ordering, edge splits and floating geometry use shared docking transactions.
-`window.floatPanel` requires exactly four finite numbers when `rect` is supplied. Invalid
-geometry or missing source/anchor panels leaves the layout unchanged. The persisted workspace
-shape is unchanged: accordion open states and explicit heights, floating groups, and dynamic
-viewer/ScriptUI identities remain app data. Pointer drops use the same shared placement rules
-as commands, with floating groups resolved in their actual window stacking order.
+Panels dock in craft-ui's shared docking (`craft_ui::docking`): split frames, tab groups,
+stacked panels and floating windows. Every change, by pointer, menu or command, is one
+transaction that checks the whole result; an invalid one returns an error and leaves the layout
+unchanged. No move or float may leave the docked area empty; closing its last panel is allowed.
+Panels name themselves by id (`"EffectControls"`), by title (`"Effect Controls"`) where a command
+takes a name, or as `{"Viewer":42}` and `{"ScriptPanel":77}` for viewers and ScriptUI panels.
 
-`window.dockAction` accepts `{action}` using the shared docking action's JSON form. It
-covers tab moves and ordering, split and floating geometry, activation, and closing.
-For example, `{"action":{"ResizeSplit":{"path":[],"size":{"FixedFirst":360}}}}`
-resizes the root split; path entries use `false` for the first child and `true` for
-the second. `{"action":{"MoveFloating":{"panel":"Info","rect":[45,65,420,320]}}}`
-repositions and resizes the floating group containing Info. Invalid actions leave the
-layout unchanged. Pointer gestures dispatch through this same catalog command.
-EffectCraft also supports `SetStackOpen` and `ResizeStack`. Dynamic panel identities use
-`{"Viewer":42}` or `{"ScriptPanel":77}` in the action. Closing runs the existing viewer
-and ScriptUI lifecycle callbacks; opening uses the existing panel creation commands.
+- `window.dockAction {action}` applies one craft-ui `Action` in its JSON form. For example,
+  `{"action":{"ResizeSplit":{"path":[],"size":{"FixedFirst":360}}}}` resizes the root split
+  (path entries are `false` for the first child and `true` for the second), and
+  `{"action":{"MoveFloating":{"panel":"Info","rect":[45,65,420,320]}}}` moves and resizes the
+  floating window holding Info. `Open` and `OpenAt` are refused: panels open through the panel
+  commands (`window.panel`, `ui.panel.show`), which run the viewer and ScriptUI lifecycles.
+  Closing runs them too. Pointer gestures dispatch through this command.
+- craft-ui's commands: `window.panel.move`, `.float`, `.dock`, `.activate`, `.close`,
+  `.closeGroup`, `.closeOthers`, `.minimize`, `.iconic`, `.window` and `.layout`, with the params
+  of craft-ui's `DockCommand` (`docs/ui-docking.md` in craft-libs). `window.panel.<Panel>`
+  (`window.panel.Align`) opens and shows that panel. `window.panel.activate` on a closed panel
+  reopens it where it was.
+- `ui.dock {operation, panel, …}` or `ui.dock {action}`: craft-ui's `ui.dock` operations
+  (`open`, `close`, `activate`, `float {rect}`, `moveFloating {rect}`,
+  `move {target, zone?, before?}`, `setStackOpen {open}`, `resizeStack {height}`,
+  `resizeSplit {path, size}`; `rect` is `[x, y, width, height]`). It returns
+  `{"docking": workspace}`. `ui.dock.reset` returns the current workspace to its saved or
+  built-in layout and returns the same.
+- `window.dockPanel {panel, anchor?, zone?, before?}` docks as `window.panel.dock`: `zone` is
+  `center`, `tab`, `left`, `right`, `top`, `bottom`, `above` or `below`; without an anchor a
+  side zone docks along that edge of the whole workspace. `window.floatPanel {panel, rect?}`
+  requires exactly four finite numbers when `rect` is given and otherwise floats a 420x320
+  window in the middle of the app window. `window.closePanel {panel}` closes it.
+- `window.panelWindow {panel, window?}` puts a panel in a floating window of its own with a
+  desktop place over the panel's place in the main window, and returns `{"window": bool}`. A
+  docked panel floats first. `window` false docks it again, as a tab of the first docked group;
+  without `window` it toggles.
+
+On desktop every floating window is an OS window of its own (craft-ui's `native-windows`), which
+can go on another monitor; on Wayland, on the web and where egui embeds viewports, floating
+windows stay in the main window. Keys pressed in a floating window that none of its widgets uses
+run the main window's shortcuts, and files dropped on one import as on the main window. While a
+modal dialog is open, floating windows take no input.
+
+The automation ids of the docking chrome are `panel.tab.<Panel>`, `panel.drag.<Panel>` (a
+group's drag bar), `panel.tabs.more.<Panel>`, `panel.menu.<Panel>` (≡), `panel.header.<Panel>`
+(a stacked panel's open and close button), `panel.tab.<Panel>.lock` (viewer lock),
+`panel.tab.Timeline.<comp>` and `panel.tab.Timeline.close` (the Timeline's comp tabs),
+`panel.float.<n>.move`, `.close`, `.resize` and `.resize.<Edge>` for floating window `n`,
+`dock.gutter.<path>` for dividers (`a`/`b` per split level; a stack's gap below entry `i` adds
+`s<i>`) and `dock.corner.<outer>.<inner>` where two dividers meet.
+
+Saved workspaces (`workspaces.json`, version 2) hold craft-ui `Workspace`s: the layout, the
+closed panels with where each goes back, the lock, and each floating window's desktop place. A
+version 1 file (EffectCraft 0.10 and earlier) and the older unversioned record of
+named workspaces load with every panel in place: the current layout, the named workspaces,
+floating windows and their native window places. A column of stacked frames becomes tab groups
+split top to bottom: each open frame keeps all its tabs and its height (as a fixed size), and a
+closed frame's tabs join the open frame above it. A native window's place moves from the OS
+window's outer position to its content's, by the main window's title bar, before the first save.
+Panels that were closed stay closed and reopen at their default place. The first save writes version 2 and keeps
+the earlier file as `workspaces.old.json`. A damaged, unknown or newer file loads as the default
+layout and is left unchanged.

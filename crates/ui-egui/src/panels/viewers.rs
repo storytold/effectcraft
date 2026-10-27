@@ -14,7 +14,7 @@ use egui::{Align2, Color32, Rect, Sense, pos2, vec2};
 use serde_json::json;
 
 use crate::EffectcraftApp;
-use crate::dock::PanelKind;
+use crate::dock::{PanelKind, WorkspaceExt as _};
 use crate::frames::{FrameImage, FrameKey};
 use crate::theme::Tokens;
 
@@ -59,7 +59,7 @@ pub fn locked(app: &EffectcraftApp, id: u32) -> bool {
 /// Viewer `id`'s panel is docked or floating.
 fn open(app: &EffectcraftApp, id: u32) -> bool {
     let p = panel(id);
-    app.ui.dock.contains(p) || app.ui.floating.iter().any(|f| f.panels.contains(&p))
+    app.ui.dock.is_open(p)
 }
 
 /// The comp viewer `id` shows: the active comp in the active viewer, else its own.
@@ -89,7 +89,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, id: u32, rect: Rect) {
     let ctx = ui.ctx().clone();
     let p = ui.painter().with_clip_rect(rect);
     p.rect_filled(rect, 0.0, t.pasteboard);
-    let resp = ui.interact(rect, egui::Id::new(("passive-viewer", id)), Sense::click()).on_hover_text(tr("Click to make this viewer active"));
+    let resp = ui.interact(rect, egui::Id::unique(("passive-viewer", id)), Sense::click()).on_hover_text(tr("Click to make this viewer active"));
     app.auto.add(&format!("viewers.{id}"), rect, "Composition viewer (click to make it active)");
     match comp_of(app, id).and_then(|cid| Some((cid, app.session.project.comp(cid)?.clone()))) {
         Some((cid, c)) => {
@@ -137,7 +137,7 @@ fn set_texture(
     dc: Option<effectcraft_engine::viewer::DisplayColor>,
     dkey: u64,
 ) {
-    let dc_id = egui::Id::new(("passive-viewer-display", id));
+    let dc_id = egui::Id::unique(("passive-viewer-display", id));
     let same_display = ctx.data(|d| d.get_temp::<u64>(dc_id)) == Some(dkey);
     if let Some((k, _)) = app.passive_tex.get_mut(&id)
         && *k == key
@@ -241,7 +241,7 @@ pub fn on_open_comp(app: &mut EffectcraftApp, comp: ItemId) {
     // The comp's viewer and its Timeline tab come to the front (unless locked), reopened if they
     // were closed (as in After Effects).
     for p in [active_panel(app), PanelKind::Timeline] {
-        let closed = !app.ui.dock.contains(p) && !app.ui.floating.iter().any(|f| f.panels.contains(&p));
+        let closed = !app.ui.dock.is_open(p);
         if closed || !app.ui.locked_tabs.contains(&p.id()) {
             app.raise_panel(p);
         }
@@ -267,8 +267,8 @@ fn add_viewer(app: &mut EffectcraftApp, near: u32) -> u32 {
     let id = app.ui.viewers.keys().copied().max().unwrap_or(0).saturating_add(1).max(1);
     app.ui.viewers.insert(id, None);
     let p = panel(id);
-    let anchor = if app.ui.dock.contains(panel(near)) { panel(near) } else { PanelKind::Composition };
-    app.ui.dock.open_near(p, anchor);
+    let anchor = [panel(near), PanelKind::Composition].into_iter().find(|q| app.ui.dock.is_open(*q));
+    let _ = app.ui.dock.apply(craft_ui::docking::Action::Open { panel: p, anchor }, crate::dock::permissions);
     id
 }
 

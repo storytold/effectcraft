@@ -89,7 +89,7 @@ mod imp {
             Sock::Listener(_) => None,
         };
         let entry = Arc::new(Entry { sock: Mutex::new(s), wake, closed: AtomicBool::new(false) });
-        let mut t = table().lock().unwrap_or_else(|e| e.into_inner());
+        let mut t = table().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let id = t.next;
         t.next += 1;
         t.socks.insert(id, entry);
@@ -98,12 +98,12 @@ mod imp {
 
     /// The socket `id`, if open. The table is locked only for the lookup.
     fn get(id: u32) -> Option<Arc<Entry>> {
-        table().lock().unwrap_or_else(|e| e.into_inner()).socks.get(&id).cloned()
+        table().lock().unwrap_or_else(std::sync::PoisonError::into_inner).socks.get(&id).cloned()
     }
 
     /// Forget socket `id`; a call blocked on it fails at once.
     fn close(id: u32) {
-        let entry = table().lock().unwrap_or_else(|e| e.into_inner()).socks.remove(&id);
+        let entry = table().lock().unwrap_or_else(std::sync::PoisonError::into_inner).socks.remove(&id);
         if let Some(entry) = entry {
             entry.closed.store(true, Ordering::Release);
             if let Some(w) = &entry.wake {
@@ -261,7 +261,7 @@ mod imp {
                         _ => err("the socket is not open"),
                     };
                 };
-                let mut sock = entry.sock.lock().unwrap_or_else(|e| e.into_inner());
+                let mut sock = entry.sock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 // Recheck after locking: close or a failed mode transition may have retired it
                 // while this caller waited with an Arc obtained from the table.
                 if entry.closed.load(Ordering::Acquire) {

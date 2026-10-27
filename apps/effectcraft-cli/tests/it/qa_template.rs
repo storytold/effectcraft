@@ -9,7 +9,7 @@ use std::process::Command;
 use serde_json::Value;
 
 fn cli(dir: &PathBuf, args: &[&str]) -> (i32, Value) {
-    let out = Command::new(env!("CARGO_BIN_EXE_effectcraft-cli")).current_dir(dir).args(args).arg("--json").output().unwrap();
+    let out = Command::new(crate::binary()).current_dir(dir).args(args).arg("--json").output().unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     let v = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{args:?}: {e}: {stdout} {}", String::from_utf8_lossy(&out.stderr)));
     (out.status.code().unwrap_or(-1), v)
@@ -191,7 +191,7 @@ fn essential_graphics_template_via_script_and_commands() {
         vec!["render", "--template", "lt.ectemplate", "--queue"],
         vec!["render-frame", "--template", "lt.ectemplate", "--bridge", "1"],
     ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_effectcraft-cli")).current_dir(&dir).args(&args).output().unwrap();
+        let output = Command::new(crate::binary()).current_dir(&dir).args(&args).output().unwrap();
         assert_eq!(output.status.code(), Some(2), "{args:?}: {}", String::from_utf8_lossy(&output.stderr));
     }
 
@@ -251,7 +251,7 @@ fn assert_template_output_preserves_inputs(dir: &PathBuf, out: &str) -> Value {
     let template_before = std::fs::read(dir.join("lt.ectemplate")).unwrap();
     let values_before = std::fs::read(dir.join("values.json")).unwrap();
     // Read the inputs before interpreting the subprocess status or error text.
-    let result = Command::new(env!("CARGO_BIN_EXE_effectcraft-cli"))
+    let result = Command::new(crate::binary())
         .current_dir(dir)
         .args(["render-frame", "--template", "lt.ectemplate", "--values", "values.json", "--time", "1", "--out", out, "--json"])
         .output()
@@ -527,7 +527,7 @@ fn template_unknown_control_does_not_replace_extracted_media() {
     let invalid_values_before = std::fs::read(dir.join("bad-values.json")).unwrap();
 
     // Capture every file before interpreting status/JSON, so a failed command cannot hide a write.
-    let result = Command::new(env!("CARGO_BIN_EXE_effectcraft-cli"))
+    let result = Command::new(crate::binary())
         .current_dir(&dir)
         .args(["render-frame", "--template", "lt.ectemplate", "--values", "bad-values.json", "--time", "1", "--out", "failed.png", "--json"])
         .output()
@@ -623,11 +623,8 @@ fn template_missing_output_does_not_replace_extracted_media() {
     assert_ne!(sentinel_before, source_before);
 
     // Observe writes before interpreting the actual CLI usage exit.
-    let result = Command::new(env!("CARGO_BIN_EXE_effectcraft-cli"))
-        .current_dir(&dir)
-        .args(["render", "--template", "lt.ectemplate", "--values", "values.json", "--json"])
-        .output()
-        .unwrap();
+    let result =
+        Command::new(crate::binary()).current_dir(&dir).args(["render", "--template", "lt.ectemplate", "--values", "values.json", "--json"]).output().unwrap();
     let template_after = std::fs::read(dir.join("lt.ectemplate")).unwrap();
     let values_after = std::fs::read(dir.join("values.json")).unwrap();
     let source_after = std::fs::read(dir.join("source.png")).unwrap();

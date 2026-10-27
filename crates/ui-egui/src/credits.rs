@@ -241,7 +241,7 @@ impl Default for View {
 /// About ▸ Contributors: a name toggle, a sort, and the list as a grab bag or a table. Every
 /// control registers an automation id under `about.credits.`.
 pub fn contributors_ui(ui: &mut egui::Ui, auto: &mut Registry) {
-    let id = egui::Id::new("credits_view");
+    let id = egui::Id::unique("credits_view");
     let mut v = ui.data_mut(|d| d.get_temp::<View>(id)).unwrap_or_default();
     ui.horizontal_wrapped(|ui| {
         ui.label(tr("Show"));
@@ -254,7 +254,7 @@ pub fn contributors_ui(ui: &mut egui::Ui, auto: &mut Registry) {
         }
         ui.separator();
         ui.label(tr("Sort"));
-        let combo = egui::ComboBox::from_id_salt("credits_sort").selected_text(v.key.label().0).show_ui(ui, |ui| {
+        let combo = craft_ui::ComboBox::from_id_salt("credits_sort").selected_text(v.key.label().0).show_ui(ui, |ui| {
             for k in SortKey::ALL {
                 let r = ui.selectable_label(v.key == k, k.label().0);
                 auto.add(&format!("about.credits.sort.{}", k.id()), r.rect, k.label().0);

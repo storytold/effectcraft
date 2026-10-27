@@ -5,7 +5,8 @@
 use effectcraft_engine::Session;
 use effectcraft_engine::project::ItemId;
 use effectcraft_ui_egui::EffectcraftApp;
-use effectcraft_ui_egui::dock::{PanelKind, Zone};
+use effectcraft_ui_egui::dock::PanelKind;
+use effectcraft_ui_egui::dock::WorkspaceExt as _;
 use effectcraft_ui_egui::panels::viewers;
 use egui::{Event, pos2};
 use egui_kittest::Harness;
@@ -67,12 +68,18 @@ fn new_viewers_lock_route_comps_and_activate_on_click() {
     h.run_steps(3);
     // View ▸ New Viewer: viewer 1 shows A too, viewer 0 (the Composition panel) is locked.
     invoke(&mut h, "view.newViewer", json!({}));
-    assert!(h.state().ui.dock.contains(PanelKind::Viewer(1)));
+    assert!(h.state().ui.dock.is_docked(PanelKind::Viewer(1)));
     assert!(viewers::locked(h.state(), 0) && !viewers::locked(h.state(), 1));
     assert_eq!((h.state().ui.active_viewer, shows(&h, 0), shows(&h, 1)), (1, Some(a), Some(a)));
     // Side by side, so both draw.
-    assert!(h.state_mut().edit_layout(|l| l.dock(PanelKind::Viewer(1), PanelKind::Composition, Zone::Right)));
-    h.state_mut().ui.dock.activate(PanelKind::Composition);
+    h.state_mut()
+        .apply_dock(craft_ui::docking::Action::Move {
+            panel: PanelKind::Viewer(1),
+            anchor: PanelKind::Composition,
+            placement: craft_ui::docking::Placement::Split(craft_ui::docking::Zone::Right),
+        })
+        .unwrap();
+    h.state_mut().apply_dock(craft_ui::docking::Action::Activate { panel: PanelKind::Composition }).unwrap();
     h.run_steps(3);
     // Opening B shows it in the active (unlocked) viewer; the locked one keeps A.
     invoke(&mut h, "comp.open", json!({"comp": b}));
@@ -90,7 +97,7 @@ fn new_viewers_lock_route_comps_and_activate_on_click() {
     h.state_mut().ui.locked_tabs.insert(PanelKind::Viewer(1).id());
     invoke(&mut h, "comp.open", json!({"comp": b}));
     assert_eq!(h.state().ui.active_viewer, 2);
-    assert!(h.state().ui.dock.contains(PanelKind::Viewer(2)));
+    assert!(h.state().ui.dock.is_docked(PanelKind::Viewer(2)));
     assert_eq!((shows(&h, 0), shows(&h, 1), shows(&h, 2)), (Some(a), Some(c), Some(b)));
     // Closing the active viewer forgets it; another open viewer takes over.
     h.state_mut().close_panel(PanelKind::Viewer(2));
@@ -145,8 +152,14 @@ fn viewers_snapshot() {
     let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
     invoke(&mut h, "view.newViewer", json!({}));
-    assert!(h.state_mut().edit_layout(|l| l.dock(PanelKind::Viewer(1), PanelKind::Composition, Zone::Right)));
-    h.state_mut().ui.dock.activate(PanelKind::Composition);
+    h.state_mut()
+        .apply_dock(craft_ui::docking::Action::Move {
+            panel: PanelKind::Viewer(1),
+            anchor: PanelKind::Composition,
+            placement: craft_ui::docking::Placement::Split(craft_ui::docking::Zone::Right),
+        })
+        .unwrap();
+    h.state_mut().apply_dock(craft_ui::docking::Action::Activate { panel: PanelKind::Composition }).unwrap();
     invoke(&mut h, "comp.open", json!({"comp": other.0}));
     for _ in 0..300 {
         h.step();

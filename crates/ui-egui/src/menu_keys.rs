@@ -60,17 +60,26 @@ struct KeyOpened {
     pointer: Option<Pos2>,
 }
 
+/// The temp-data id of the [`FirstEntry`] depth to highlight after a keyboard-opened menu is
+/// first drawn.
 fn pending_id() -> Id {
-    Id::new("menu-keys-first")
+    Id::unique("menu-keys-first")
 }
+
+/// The temp-data id of the [`KeyOpened`] record: submenus opened from the keyboard and the
+/// pointer position they were opened at.
 fn opened_id() -> Id {
-    Id::new("menu-keys-opened")
+    Id::unique("menu-keys-opened")
 }
+
+/// The temp-data id of the flag saying the menu bar currently holds the keyboard.
 fn active_id() -> Id {
-    Id::new("menu-keys-active")
+    Id::unique("menu-keys-active")
 }
+
+/// The temp-data id of the `(armed, held)` Alt-key state used to detect an Alt tap.
 fn alt_id() -> Id {
-    Id::new("menu-keys-alt")
+    Id::unique("menu-keys-alt")
 }
 
 impl Nav {
@@ -118,7 +127,7 @@ impl Nav {
         }
         let Some(level) = self.levels.get_mut(depth) else { return };
         if level.menu.is_none() {
-            level.menu = Some(find_menu_root(ui).id);
+            level.menu = Some(find_menu_root(ui).scope_id);
             level.sizing = ui.is_sizing_pass();
         }
         level.rows.push(Row { id: r.id, enabled: r.enabled(), submenu });

@@ -193,7 +193,8 @@ fn each_comp_keeps_its_viewer_resolution() {
     assert_eq!(h.state().viewer_res(), Resolution::Auto);
     let (req, _reply) = effectcraft_ui_egui::control::ControlRequest::new("ui.set", json!({"viewer": {"res": "quarter"}}));
     let ctx = h.ctx.clone();
-    let _ = effectcraft_ui_egui::control::handle(h.state_mut(), &ctx, &req);
+    let now = h.state().now();
+    let _ = effectcraft_ui_egui::control::handle(h.state_mut(), &ctx, &req, now);
     assert_eq!(h.state().viewer_res(), Resolution::Quarter);
     let ctx = h.ctx.clone();
     assert_eq!(effectcraft_ui_egui::control::inspect(h.state(), &ctx)["ui"]["viewer"]["res"], json!("Quarter"));
@@ -1870,6 +1871,14 @@ fn key_twice(h: &mut Harness<'_, EffectcraftApp>, k: egui::Key) {
 #[test]
 fn property_shortcuts_reveal_and_key_transform_properties() {
     let mut h = harness();
+    // Reveal shortcuts compare wall-clock instants; drive the app clock so a step count
+    // cannot decide whether a second press is "quick" or a later one.
+    h.state_mut().use_manual_clock();
+    h.run_steps(1);
+    let wait = |h: &mut Harness<'_, EffectcraftApp>| {
+        h.state_mut().clock_mut().advance(1.0);
+        h.run_steps(2);
+    };
     h.state_mut().session.execute("layer.select", json!({"layers": ["Box"]})).unwrap();
     h.run_steps(2);
     let t = |h: &Harness<'_, EffectcraftApp>, p: &str| shown(h, prop_uid(h, "Box", &format!("transform/{p}")));
@@ -1906,16 +1915,16 @@ fn property_shortcuts_reveal_and_key_transform_properties() {
     h.run_steps(2);
     key(&mut h, egui::Key::U, none);
     only(&h, &["opacity"]);
-    h.run_steps(40);
+    wait(&mut h);
     key(&mut h, egui::Key::U, none);
     only(&h, &[]);
     h.state_mut().session.execute("prop.set", json!({"layer": "Box", "path": "transform/rotation", "value": 30})).unwrap();
-    h.run_steps(40);
+    wait(&mut h);
     key_twice(&mut h, egui::Key::U);
     assert!(t(&h, "opacity") && t(&h, "rotation"), "UU: animated and changed properties");
     assert!(!t(&h, "scale"), "an untouched property stays hidden");
     // Ctrl+`: twirl the selected layer open, then closed.
-    h.run_steps(40);
+    wait(&mut h);
     key(&mut h, egui::Key::Backtick, egui::Modifiers::COMMAND);
     let id = layer_id(&h, "Box");
     assert!(h.state().ui.timeline.open_layers.contains(&id) && h.state().ui.timeline.reveal.is_empty());
@@ -1926,6 +1935,14 @@ fn property_shortcuts_reveal_and_key_transform_properties() {
 #[test]
 fn double_press_shortcuts_reveal_their_second_set() {
     let mut h = harness();
+    // Reveal shortcuts compare wall-clock instants; drive the app clock so a step count
+    // cannot decide whether a second press is "quick" or a later one.
+    h.state_mut().use_manual_clock();
+    h.run_steps(1);
+    let wait = |h: &mut Harness<'_, EffectcraftApp>| {
+        h.state_mut().clock_mut().advance(1.0);
+        h.run_steps(2);
+    };
     h.state_mut().session.execute("layer.select", json!({"layers": ["Box"]})).unwrap();
     h.state_mut().session.execute("prop.setExpression", json!({"layer": "Box", "path": "transform/scale", "expression": "value"})).unwrap();
     h.run_steps(2);
@@ -1934,24 +1951,24 @@ fn double_press_shortcuts_reveal_their_second_set() {
     key_twice(&mut h, egui::Key::E);
     assert_eq!(reveal(&h), vec!["expressions"]);
     assert!(shown(&h, prop_uid(&h, "Box", "transform/scale")));
-    h.run_steps(40);
+    wait(&mut h);
     // TT: Mask Opacity; MM: every mask property; a single M: Mask Path.
     key_twice(&mut h, egui::Key::T);
     assert_eq!(reveal(&h), vec!["maskOpacity"]);
-    h.run_steps(40);
+    wait(&mut h);
     key(&mut h, egui::Key::M, Default::default());
     assert_eq!(reveal(&h), vec!["maskPath"]);
-    h.run_steps(40);
+    wait(&mut h);
     key_twice(&mut h, egui::Key::M);
     assert_eq!(reveal(&h), vec!["masks"]);
-    h.run_steps(40);
+    wait(&mut h);
     // RR Time Remap, AA Material Options, PP paint/puppet, SS selected properties, FF missing effects.
     for (k, want) in
         [(egui::Key::R, "timeRemap"), (egui::Key::A, "material"), (egui::Key::P, "paint"), (egui::Key::S, "selected"), (egui::Key::F, "missingEffects")]
     {
         key_twice(&mut h, k);
         assert_eq!(reveal(&h), vec![want], "{k:?}{k:?}");
-        h.run_steps(40);
+        wait(&mut h);
     }
 }
 

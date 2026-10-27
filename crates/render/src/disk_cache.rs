@@ -331,7 +331,7 @@ impl DiskCache {
                 let Ok(files) = std::fs::read_dir(shard.path()) else { continue };
                 for f in files.flatten() {
                     let p = f.path();
-                    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    let name = p.file_name().and_then(std::ffi::OsStr::to_str).unwrap_or("");
                     if name.contains(".tmp") {
                         // A writer that died mid-write; old temporaries are removed.
                         if f.metadata().and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().is_ok_and(|e| e.as_secs() > 600)) {

@@ -710,7 +710,7 @@ pub(crate) fn outcome(output: Vec<String>, result: Result<J, ScriptError>) -> Ou
 /// don't block.
 ///
 /// ExtendScript's `#include` / `#includepath` are inlined first, and errors point at the file
-/// and line they came from ([`crate::include`]).
+/// and line they came from (`crate::include`).
 pub fn run(session: &mut Session, req: &ScriptRequest) -> Outcome {
     let expanded = match crate::include::expand(session, req.code, req.name) {
         Ok(x) => x,

@@ -22,7 +22,7 @@ fn label(p: &egui::Painter, x: f32, y: f32, s: &str, t: &Tokens) {
 /// A dropdown with options; returns the new index when changed.
 fn choice(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, auto: &str, options: &[&str], cur: usize) -> Option<usize> {
     let t = app.tokens;
-    let id = egui::Id::new(("animtool-dd", auto));
+    let id = egui::Id::unique(("animtool-dd", auto));
     if widgets::dropdown(ui, r, options.get(cur).copied().unwrap_or(""), &t, id).clicked() {
         widgets::open_popup(ui, id);
     }
@@ -31,17 +31,21 @@ fn choice(app: &mut EffectcraftApp, ui: &mut egui::Ui, r: Rect, auto: &str, opti
     widgets::popup_menu(ui, id, r.left_bottom(), &opts, Some(cur)).filter(|i| *i != cur)
 }
 
+/// A drag-to-change number field for an anim-tool setting: `v` clamped to `range`, `speed` points
+/// per pixel, `dec` decimals and a `suffix`; returns the new value, or `v` when it did not change.
 fn number(app: &mut EffectcraftApp, ui: &mut egui::Ui, at: egui::Pos2, auto: &str, v: f64, speed: f64, range: (f64, f64), dec: usize, suffix: &str) -> f64 {
     let t = app.tokens;
-    let (r, nv, _) = widgets::hot_number_at(ui, at, egui::Id::new(("animtool-n", auto)), v, speed, range, dec, suffix, &t);
+    let (r, nv, _) = widgets::hot_number_at(ui, at, egui::Id::unique(("animtool-n", auto)), v, speed, range, dec, suffix, &t);
     app.auto.add(auto, r, &format!("{v}"));
     nv.unwrap_or(v)
 }
 
+/// A checkbox at `at` with its `text` label drawn to its right; returns the state to store, i.e.
+/// `!on` when it was clicked and `on` otherwise.
 fn checkbox(app: &mut EffectcraftApp, ui: &mut egui::Ui, at: egui::Pos2, auto: &str, text: &str, on: bool) -> bool {
     let t = app.tokens;
     let r = Rect::from_min_size(at, vec2(16.0, 16.0));
-    let clicked = widgets::checkbox(ui, r, on, &t, egui::Id::new(("animtool-cb", auto))).clicked();
+    let clicked = widgets::checkbox(ui, r, on, &t, egui::Id::unique(("animtool-cb", auto))).clicked();
     ui.painter().text(pos2(r.max.x + 6.0, r.center().y), Align2::LEFT_CENTER, text, Tokens::ui(12.0), t.text);
     app.auto.add(auto, r, text);
     if clicked { !on } else { on }
@@ -109,7 +113,7 @@ pub fn wiggler(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     app.ui.anim_tools = st.clone();
     let b = Rect::from_min_size(pos2(rect.max.x - 92.0, y), vec2(80.0, 24.0));
     let enabled = app.session.state.selected_keys.len() >= 2;
-    if widgets::text_button(ui, b, "Apply", enabled, &t, egui::Id::new("wg-apply")).clicked() {
+    if widgets::text_button(ui, b, "Apply", enabled, &t, egui::Id::unique("wg-apply")).clicked() {
         let params = json!({
             "apply": if st.wiggle_spatial { "spatial" } else { "temporal" },
             "noise": if st.wiggle_smooth { "smooth" } else { "jagged" },
@@ -150,7 +154,7 @@ pub fn smoother(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     y += ROW + 8.0;
     let b = Rect::from_min_size(pos2(rect.max.x - 92.0, y), vec2(80.0, 24.0));
     let enabled = app.session.state.selected_keys.len() >= 3;
-    if widgets::text_button(ui, b, "Apply", enabled, &t, egui::Id::new("sm-apply")).clicked() {
+    if widgets::text_button(ui, b, "Apply", enabled, &t, egui::Id::unique("sm-apply")).clicked() {
         apply(app, "keys.smooth", json!({"tolerance": tol}));
     }
     app.auto.add("smoother.apply", b, "Apply");
@@ -196,7 +200,7 @@ pub fn motion_sketch(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let b = Rect::from_min_size(pos2(x0, y), vec2(120.0, 24.0));
     let armed = st.sketch_armed;
     let has_layer = !app.session.state.selected_layers.is_empty();
-    if widgets::text_button(ui, b, if armed { "Cancel Capture" } else { "Start Capture" }, has_layer && !armed, &t, egui::Id::new("ms-start")).clicked() {
+    if widgets::text_button(ui, b, if armed { "Cancel Capture" } else { "Start Capture" }, has_layer && !armed, &t, egui::Id::unique("ms-start")).clicked() {
         if !has_layer {
             app.ui.status = "Select a layer to sketch its motion".into();
         } else {
@@ -218,8 +222,10 @@ struct Capture {
     points: Vec<[f64; 3]>,
 }
 
+/// The `egui::Id` of the Motion Sketch capture in progress ([`Capture`]): its start time and the
+/// recorded points.
 fn capture_id() -> egui::Id {
-    egui::Id::new("motion-sketch-capture")
+    egui::Id::unique("motion-sketch-capture")
 }
 
 /// The Motion Sketch overlay on the Composition viewer (`area`): while armed, a press starts
@@ -230,9 +236,9 @@ pub fn sketch_overlay(app: &mut EffectcraftApp, ui: &mut egui::Ui) {
         return;
     }
     let ctx = ui.ctx().clone();
-    let Some(map) = ctx.data(|d| d.get_temp::<crate::panels::viewer::ViewerMap>(egui::Id::new("viewer-map"))) else { return };
+    let Some(map) = ctx.data(|d| d.get_temp::<crate::panels::viewer::ViewerMap>(egui::Id::unique("viewer-map"))) else { return };
     let area = map.area;
-    let resp = ui.interact(area, egui::Id::new("motion-sketch-overlay"), Sense::drag());
+    let resp = ui.interact(area, egui::Id::unique("motion-sketch-overlay"), Sense::drag());
     app.auto.add("motionSketch.overlay", area, "Motion Sketch capture area");
     let now = ctx.input(|i| i.time);
     let painter = ui.painter().with_clip_rect(area);
@@ -398,7 +404,7 @@ pub fn mask_interpolation(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rec
     }
     let b = Rect::from_min_size(pos2(rect.max.x - 92.0, y), vec2(80.0, 24.0));
     let enabled = app.session.state.selected_keys.len() >= 2;
-    if widgets::text_button(ui, b, "Apply", enabled, &t, egui::Id::new("mi-apply")).clicked() {
+    if widgets::text_button(ui, b, "Apply", enabled, &t, egui::Id::unique("mi-apply")).clicked() {
         match app.session.execute("mask.interpolate", json!({})) {
             Ok(r) => app.ui.status = format!("Mask Interpolation: {} keyframes added ({} vertices)", r["keys"], r["vertices"]),
             Err(e) => app.ui.status = e.to_string(),

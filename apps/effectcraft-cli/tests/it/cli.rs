@@ -7,7 +7,7 @@ use std::process::{Command, Stdio};
 use serde_json::{Value, json};
 
 fn bin() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_effectcraft-cli"))
+    Command::new(crate::binary())
 }
 
 /// Run with `--json`; returns (exit code, parsed stdout).

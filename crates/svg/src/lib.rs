@@ -470,6 +470,39 @@ fn strip_comments(s: &str) -> String {
     out
 }
 
+/// Splits one simple selector (`tag.class#id`) into its tag, classes and id.
+fn parse_compound(one: &str) -> (Option<String>, Vec<String>, Option<String>) {
+    let mut tag = None;
+    let mut classes = vec![];
+    let mut id = None;
+    let mut cur = String::new();
+    let mut kind = 't';
+    let flush = |kind: char, cur: &mut String, tag: &mut Option<String>, classes: &mut Vec<String>, id: &mut Option<String>| {
+        if !cur.is_empty() {
+            match kind {
+                '.' => classes.push(std::mem::take(cur)),
+                '#' => *id = Some(std::mem::take(cur)),
+                _ => {
+                    if cur != "*" {
+                        *tag = Some(std::mem::take(cur));
+                    }
+                    cur.clear();
+                }
+            }
+        }
+    };
+    for c in one.chars() {
+        if c == '.' || c == '#' {
+            flush(kind, &mut cur, &mut tag, &mut classes, &mut id);
+            kind = c;
+        } else {
+            cur.push(c);
+        }
+    }
+    flush(kind, &mut cur, &mut tag, &mut classes, &mut id);
+    (tag, classes, id)
+}
+
 /// Add the rules of one `<style>` sheet. Errs once the sheets exceed [`MAX_CSS_SELECTORS`] or
 /// [`MAX_CSS_DECLARATIONS`] (#2140).
 fn parse_css(css: &str, sheet: &mut StyleSheet) -> Result<(), Error> {
@@ -505,34 +538,7 @@ fn parse_css(css: &str, sheet: &mut StyleSheet) -> Result<(), Error> {
                 sheet.blocks.push(std::mem::take(&mut decls));
                 i
             });
-            let mut tag = None;
-            let mut classes = vec![];
-            let mut id = None;
-            let mut cur = String::new();
-            let mut kind = 't';
-            let flush = |kind: char, cur: &mut String, tag: &mut Option<String>, classes: &mut Vec<String>, id: &mut Option<String>| {
-                if !cur.is_empty() {
-                    match kind {
-                        '.' => classes.push(std::mem::take(cur)),
-                        '#' => *id = Some(std::mem::take(cur)),
-                        _ => {
-                            if cur != "*" {
-                                *tag = Some(std::mem::take(cur));
-                            }
-                            cur.clear();
-                        }
-                    }
-                }
-            };
-            for c in one.chars() {
-                if c == '.' || c == '#' {
-                    flush(kind, &mut cur, &mut tag, &mut classes, &mut id);
-                    kind = c;
-                } else {
-                    cur.push(c);
-                }
-            }
-            flush(kind, &mut cur, &mut tag, &mut classes, &mut id);
+            let (tag, classes, id) = parse_compound(one);
             let specificity = (id.is_some() as u32 * 100)
                 .saturating_add(u32::try_from(classes.len()).unwrap_or(u32::MAX).saturating_mul(10))
                 .saturating_add(tag.is_some() as u32);

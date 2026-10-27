@@ -86,27 +86,39 @@ pub struct WebApp {
 }
 
 impl eframe::App for WebApp {
+    /// Take dropped files out of `raw_input` before eframe can replay them on a hidden tab, read them asynchronously
+    /// through `open_or_import`, then run the shared app's input hook.
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        // Files dropped on the page are input: read them here, where the browser's drop event is
+        // still the current pass's, not from a later (possibly logic-only) tick.
+        //
+        // The list is *taken* out of the raw input: a hidden tab runs `logic` and eframe appends
+        // the same prepared raw input back for the next pass, so leaving the files there would
+        // import them again on every hidden logic tick.
+        let dropped_files = std::mem::take(&mut raw_input.dropped_files);
+        let dropped: Vec<web_sys::File> = dropped_files.iter().filter_map(|f| f.web_file().cloned()).collect();
+        if !dropped.is_empty() {
+            files::read_files(dropped, |paths| post(move |app| open_or_import(app, paths)));
+        }
         self.app.raw_input_hook(ctx, raw_input);
     }
 
+    /// The browser host's logic tick: run queued UI actions, tick the shared app, poll API replies, flush Render
+    /// Queue downloads, persist the session snapshot when enabled, publish GPU/frame-worker/disk-cache info and close
+    /// the IME pass.
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         let actions = ACTIONS.with(|a| std::mem::take(&mut *a.borrow_mut()));
         for f in actions {
             f(&mut self.app);
         }
-        // Files dropped on the page: read them, then open/import.
-        let dropped: Vec<web_sys::File> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.web_file().cloned()).collect());
-        if !dropped.is_empty() {
-            files::read_files(dropped, |paths| post(move |app| open_or_import(app, paths)));
-        }
-        self.app.logic(ctx, frame);
+        self.app.tick(ctx, frame);
         api::poll_replies();
         // Render Queue outputs written this frame (here or by a worker) → downloads.
         files::flush_downloads();
         // What a reload comes back to.
         if self.persist {
-            persist::snapshot(&self.app.session, ctx.input(|i| i.time), 1.0);
+            // The app's monotonic clock: `ctx.input(|i| i.time)` is stale in a logic-only tick.
+            persist::snapshot(&self.app.session, self.app.now(), 1.0);
         }
         api::set_info("gpu", json!({"compositor": self.app.gpu_adapter(), "viewerOnGpu": self.app.viewer_on_gpu()}));
         api::set_info("frameWorkers", frames::stats());
@@ -114,6 +126,7 @@ impl eframe::App for WebApp {
         let d = &self.app.session.prefs.disk;
         diskcache::configure(d.disk_cache_enabled, d.disk_cache_max_gb, storage::quota());
         api::set_info("diskCache", diskcache::stats());
+        self.app.finish_ime_logic(ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
@@ -195,7 +208,9 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
     let home = query_flag("home");
     // Browser storage: settings, recent projects, imported media, saved projects, auto-saves and
     // the last session come back.
-    let t0 = js_sys::Date::now();
+    // Monotonic (performance.now) rather than the wall clock: a system-time jump must not turn
+    // the storage-load report negative or huge.
+    let t0 = web_time::Instant::now();
     let stored = match persist::load(&query_value("storage").unwrap_or_default()).await {
         Ok(n) => n,
         Err(e) => {
@@ -203,7 +218,7 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
             0
         }
     };
-    api::set_info("storage", json!({"backend": persist::backend(), "entries": stored, "loadMs": js_sys::Date::now() - t0}));
+    api::set_info("storage", json!({"backend": persist::backend(), "entries": stored, "loadMs": t0.elapsed().as_secs_f64() * 1000.0}));
     audio::install_unlock();
     browse::restore();
     diskcache::init();
@@ -214,6 +229,7 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
             canvas,
             eframe::WebOptions::default(),
             Box::new(move |cc| {
+                EffectcraftApp::install_ime_reset_hooks(&cc.egui_ctx);
                 CTX.with(|c| *c.borrow_mut() = Some(cc.egui_ctx.clone()));
                 // The page owns this shared presentation device; worker devices retain their
                 // separate owned-device handlers. No browser error-scope future is blocked on.
