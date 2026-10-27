@@ -27,10 +27,19 @@ pub fn probe(path: impl AsRef<Path>) -> Result<Footage> {
     }
     let bytes = std::fs::read(path).map_err(|e| MediaError::Io(format!("{}: {e}", path.display())))?;
     if crate::MODEL_EXTENSIONS.contains(&ext_of(path).as_str()) {
-        let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
-        return probe_model(&path.to_string_lossy(), &bytes, &|uri| std::fs::read(dir.join(uri)).ok());
+        return probe_model(&path.to_string_lossy(), &bytes, &side_file_reader(path));
     }
     probe_bytes(&path.to_string_lossy(), bytes.into())
+}
+
+/// Reads the files a model file names (buffers, textures, MTL files). Like the pool, it follows only
+/// local files and files on the model's own network share: a URI is a path stored in the model.
+fn side_file_reader(model: &Path) -> impl Fn(&str) -> Option<Vec<u8>> + use<> {
+    let model = std::path::absolute(model).unwrap_or_else(|_| model.to_path_buf());
+    move |uri| {
+        let p = craft_docpath::resolve_absolute(uri, Some(&model)).ok()?;
+        std::fs::read(p).ok()
+    }
 }
 
 /// Probe a 3D model (glTF 2.0 / OBJ / STL / FBX): a [`FootageKind::Model`] item whose duration is its
@@ -314,6 +323,20 @@ mod tests {
     fn rounded(rate: FrameRate, timescale: i64, n: i64) -> Vec<u32> {
         let at = |k: i64| (2 * k * timescale * rate.den + rate.num) / (2 * rate.num);
         (0..n).map(|k| (at(k + 1) - at(k)) as u32).collect()
+    }
+
+    /// A model's side files are read from beside it; a URI to another computer is not followed.
+    #[test]
+    fn model_side_files_are_not_read_from_other_computers() {
+        let dir = std::env::temp_dir().join(format!("ec-probe-side-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("buf.bin"), b"abc").unwrap();
+        let read = side_file_reader(&dir.join("model.gltf"));
+        assert_eq!(read("buf.bin"), Some(b"abc".to_vec()));
+        assert_eq!(read(r"\\192.0.2.1\share\buf.bin"), None);
+        assert_eq!(read("file://192.0.2.1/share/buf.bin"), None);
+        assert_eq!(read(r"C:\buf.bin"), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

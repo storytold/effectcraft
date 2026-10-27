@@ -31,7 +31,7 @@ pub fn home_tab(app: &mut EffectcraftApp, ui: &mut egui::Ui, area: Rect) {
         if r.min.y > area.max.y {
             break;
         }
-        let resp = ui.interact(r, egui::Id::new(("learn-card", &tut.id)), Sense::click());
+        let resp = ui.interact(r, egui::Id::unique(("learn-card", &tut.id)), Sense::click());
         p.rect_filled(r, 8.0, if resp.hovered() { Color32::from_rgb(0x2c, 0x2e, 0x37) } else { Color32::from_rgb(0x24, 0x26, 0x2e) });
         // A small original badge: the step count in a circle.
         let badge = Rect::from_min_size(pos2(r.min.x + 16.0, r.min.y + 16.0), vec2(44.0, 44.0));
@@ -50,7 +50,7 @@ pub fn home_tab(app: &mut EffectcraftApp, ui: &mut egui::Ui, area: Rect) {
         p.galley(pos2(tx, r.min.y + 84.0), g, t.text_faint);
         let br = Rect::from_min_size(pos2(r.max.x - 104.0, r.min.y + 16.0), vec2(88.0, 28.0));
         let label = if running.as_deref() == Some(tut.id.as_str()) { "Resume" } else { "Start" };
-        let clicked = widgets::text_button(ui, br, label, true, &t, egui::Id::new(("learn-start", &tut.id))).clicked();
+        let clicked = widgets::text_button(ui, br, label, true, &t, egui::Id::unique(("learn-start", &tut.id))).clicked();
         app.auto.add(&format!("home.learn.{}", tut.id), r, &tut.title);
         app.auto.add(&format!("home.learn.{}.start", tut.id), br, label);
         if clicked || resp.clicked() {
@@ -92,7 +92,7 @@ pub fn coach(app: &mut EffectcraftApp, ctx: &egui::Context) {
     {
         let time = ctx.input(|i| i.time);
         let pulse = (0.5 + 0.5 * (time * 4.0).sin()) as f32;
-        let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("learn-highlight")));
+        let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("learn-highlight")));
         let hr = r.expand(3.0 + 2.0 * pulse);
         p.rect_stroke(hr, 5.0, Stroke::new(2.0, t.accent.gamma_multiply(0.6 + 0.4 * pulse)), StrokeKind::Outside);
         app.auto.add("learn.highlight", hr, tp);
@@ -100,7 +100,7 @@ pub fn coach(app: &mut EffectcraftApp, ctx: &egui::Context) {
     }
     let w = 340.0;
     let mut action: Option<&str> = None;
-    let area = egui::Area::new(egui::Id::new("learn-coach"))
+    let area = egui::Area::new(egui::Id::unique("learn-coach"))
         .order(egui::Order::Foreground)
         .fixed_pos(pos2(screen.max.x - w - 20.0, screen.max.y - 250.0))
         .show(ctx, |ui| {

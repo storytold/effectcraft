@@ -2,12 +2,13 @@
 //! matte clean-up. Written from public behaviour descriptions and the standard colour-difference /
 //! blue-screen matting literature (Vlahos; Smith & Blinn, "Blue Screen Matting").
 
-use effectcraft_color::{luminance, rgb_to_hsl, srgb_to_linear};
+use effectcraft_color::{rgb_to_hsl, srgb_to_linear};
 use effectcraft_keyframe::Value;
 use effectcraft_project::ParamUi;
 use effectcraft_raster::{Image, gaussian_blur};
 use rayon::prelude::*;
 
+use crate::color_fx::luma_601;
 use crate::util::{Plane, gauss_plane, morph_frac, premul, unpremul};
 use crate::{Buf, EffectCtx, EffectSpec, col, num, p, popup, slider};
 
@@ -135,46 +136,23 @@ fn color_key(ctx: &EffectCtx, mut b: Buf) -> Buf {
 
 // ---- Luma Key ----
 
+/// Luma Key as After Effects 2026 keys a grey ramp (cases 812-814, 719): Key Out Brighter and
+/// Darker cut hard at Threshold and ignore Tolerance; Key Out Similar removes, and Dissimilar
+/// keeps, a hard band of Threshold ± Tolerance (levels of 255). Edge Thin and Edge Feather
+/// then soften the cut.
 fn luma_key(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let kind = ctx.params.e("keyType");
     let thr = ctx.params.f("threshold") as f32 / 255.0;
     let tol = ctx.params.f("tolerance") as f32 / 255.0;
     let m = matte_of(&b.img, |c, _| {
-        let l = luminance(c[0], c[1], c[2]);
-        match kind {
-            0 => {
-                if tol > 0.0 {
-                    ((thr + tol - l) / tol).clamp(0.0, 1.0)
-                } else if l > thr {
-                    0.0
-                } else {
-                    1.0
-                }
-            }
-            2 => {
-                if (l - thr).abs() <= tol {
-                    0.0
-                } else {
-                    1.0
-                }
-            }
-            3 => {
-                if (l - thr).abs() <= tol {
-                    1.0
-                } else {
-                    0.0
-                }
-            }
-            _ => {
-                if tol > 0.0 {
-                    ((l - (thr - tol)) / tol).clamp(0.0, 1.0)
-                } else if l < thr {
-                    0.0
-                } else {
-                    1.0
-                }
-            }
-        }
+        let l = luma_601([c[0], c[1], c[2]]);
+        let keep = match kind {
+            0 => l <= thr,
+            2 => (l - thr).abs() > tol,
+            3 => (l - thr).abs() <= tol,
+            _ => l >= thr,
+        };
+        if keep { 1.0 } else { 0.0 }
     });
     let m = thin_feather(m, ctx.params.f("edgeThin") * b.scale, ctx.params.f("edgeFeather") * b.scale);
     apply_matte(&mut b.img, &m, 0);
@@ -334,7 +312,7 @@ fn extract(ctx: &EffectCtx, mut b: Buf) -> Buf {
                 2 => c[1],
                 3 => c[2],
                 4 => a,
-                _ => luminance(c[0], c[1], c[2]),
+                _ => luma_601([c[0], c[1], c[2]]),
             };
         let mut k = 1.0f32;
         if v < bp {
@@ -800,6 +778,68 @@ mod tests {
         let out = run("ec.key.luma", &[("threshold", num(128.0))], img);
         assert_eq!(out.get(0, 0)[3], 0.0);
         assert_eq!(out.get(1, 0)[3], 1.0);
+    }
+
+    /// After Effects 2026 (cases 812-814): Luma Key on a vertical black-to-white ramp (row y
+    /// has level (y + 0.5) / 1080 × 255), Threshold 140, Tolerance 20. EffectCraft ramped the
+    /// matte over the tolerance (case 719: a 50 % grey kept 80 % of its alpha where AE keys it
+    /// out).
+    #[test]
+    fn luma_key_matches_after_effects() {
+        let ramp = || {
+            let mut img = Image::new(1, 1080);
+            for y in 0..1080 {
+                let v = (y as f32 + 0.5) / 1080.0;
+                img.set(0, y, [v, v, v, 1.0]);
+            }
+            img
+        };
+        let key = |kind: u32, thin: f64, feather: f64| {
+            let set =
+                [("keyType", Value::Enum(kind)), ("threshold", num(140.0)), ("tolerance", num(20.0)), ("edgeThin", num(thin)), ("edgeFeather", num(feather))];
+            let o = run("ec.key.luma", &set, ramp());
+            (0..1080).map(|y| o.get(0, y)[3]).collect::<Vec<f32>>()
+        };
+        // Key Out Darker (AE 2 = EffectCraft 1): keyed up to row 592, kept from 593.
+        let d = key(1, 0.0, 0.0);
+        assert!(d[..593].iter().all(|a| *a == 0.0) && d[593..].iter().all(|a| *a == 1.0), "{:?}", &d[588..598]);
+        // Key Out Similar: AE keys rows 509..=677 (levels 120.3..160.0) and keeps the rest; the
+        // rows at the band's ends sit within 0.1 level of 120 / 160, so they may go either way.
+        let s = key(2, 0.0, 0.0);
+        assert!(
+            (0..1080).filter(|y| !(507..=510).contains(y) && !(676..=679).contains(y)).all(|y| (s[y] == 0.0) == (509..=677).contains(&y)),
+            "{:?} {:?}",
+            &s[505..512],
+            &s[674..681]
+        );
+        // Key Out Brighter and Dissimilar are the complements.
+        let b = key(0, 0.0, 0.0);
+        assert!(b[595] == 0.0 && b[590] == 1.0);
+        let ds = key(3, 0.0, 0.0);
+        assert!(ds[600] == 1.0 && ds[400] == 0.0 && ds[700] == 0.0);
+        // A 50 % grey at Darker 140 / 20 is keyed out entirely (case 719).
+        let o =
+            run("ec.key.luma", &[("keyType", Value::Enum(1)), ("threshold", num(140.0)), ("tolerance", num(20.0))], Image::filled(2, 2, [0.5, 0.5, 0.5, 1.0]));
+        assert_eq!(o.get(0, 0)[3], 0.0);
+        // Edge Thin 1, Edge Feather 2.5 (case 814): AE's alpha rises over rows 591..596.
+        let f = key(1, 1.0, 2.5);
+        for (y, ae) in [(590, 0.0), (591, 0.026), (592, 0.139), (593, 0.357), (594, 0.635), (595, 0.868), (596, 0.97), (597, 1.0)] {
+            assert!((f[y] - ae).abs() < 0.2, "row {y}: {} vs AE {ae}", f[y]);
+        }
+    }
+
+    /// After Effects 2026: Key Out Darker and Extract's Black Point at 65 / 166 / 24 on pure
+    /// red / green / blue keep red and blue and key out green: Rec. 601 luminance (Rec. 709
+    /// would key out red and blue and keep green).
+    #[test]
+    fn luma_key_and_extract_use_rec601_as_after_effects() {
+        for (c, thr, kept) in [([1.0, 0.0, 0.0], 65.0, true), ([0.0, 1.0, 0.0], 166.0, false), ([0.0, 0.0, 1.0], 24.0, true)] {
+            let img = Image::filled(2, 1, [c[0], c[1], c[2], 1.0]);
+            let key = run("ec.key.luma", &[("keyType", Value::Enum(1)), ("threshold", num(thr))], img.clone());
+            let ext = run("ec.key.extract", &[("blackPoint", num(thr))], img);
+            let want = if kept { 1.0 } else { 0.0 };
+            assert_eq!((key.get(0, 0)[3], ext.get(0, 0)[3]), (want, want), "{c:?} at {thr}");
+        }
     }
 
     #[test]

@@ -64,7 +64,7 @@ pub fn draw_overlay(
         (scale * 1000.0) as u32,
         format!("{}{:?}{:?}{}", o.view, o.overlay_color, o.boundary_color, o.overlay_opacity),
     );
-    let id = egui::Id::new("roto-overlay");
+    let id = egui::Id::unique("roto-overlay");
     let cached: Option<Overlay> = ctx.data(|d| d.get_temp(id));
     let ov = match cached {
         Some(c) if c.key == key => Some(c),
@@ -149,7 +149,7 @@ pub fn interact(
     let ctx = ui.ctx().clone();
     let mods = ui.input(|i| i.modifiers);
     let Some(kind) = app.ui.tool.roto_kind(mods.alt) else { return false };
-    let resp = ui.interact(area, egui::Id::new("layer-panel-roto"), Sense::click_and_drag());
+    let resp = ui.interact(area, egui::Id::unique("layer-panel-roto"), Sense::click_and_drag());
     let o = app.session.state.roto.clone();
     let refine = kind.starts_with("refine");
     let dia = if refine { o.refine_diameter } else { o.diameter };
@@ -170,7 +170,7 @@ pub fn interact(
     }
     // ⌘/Ctrl-drag resizes the brush (After Effects): the circle stays at the press point and its
     // edge follows the pointer. No stroke is painted.
-    let rid = egui::Id::new("layer-panel-roto-resize");
+    let rid = egui::Id::unique("layer-panel-roto-resize");
     if resp.drag_started()
         && mods.command
         && let Some(pos) = ui.input(|i| i.pointer.press_origin()).or(resp.interact_pointer_pos())
@@ -194,7 +194,7 @@ pub fn interact(
         }
         return true;
     }
-    let did = egui::Id::new("layer-panel-roto-drag");
+    let did = egui::Id::unique("layer-panel-roto-drag");
     if resp.drag_started()
         && let Some(pos) = ui.input(|i| i.pointer.press_origin()).or(resp.interact_pointer_pos())
     {
@@ -277,8 +277,8 @@ pub fn span_bar(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, 
     p.line_segment([pos2(cx, r.min.y), pos2(cx, r.max.y)], Stroke::new(1.0, t.timecode));
     p.rect_stroke(track, 2.0, Stroke::new(1.0, Color32::from_black_alpha(140)), StrokeKind::Outside);
     app.auto.add("layerPanel.rotoSpan", track, "Segmentation span");
-    let resp = ui.interact(track, egui::Id::new("roto-span-bar"), Sense::click_and_drag());
-    let hid = egui::Id::new("roto-span-handle");
+    let resp = ui.interact(track, egui::Id::unique("roto-span-bar"), Sense::click_and_drag());
+    let hid = egui::Id::unique("roto-span-handle");
     if resp.drag_started()
         && let (Some(pos), Some(_)) = (resp.interact_pointer_pos(), d.base)
     {
@@ -322,7 +322,7 @@ pub fn bar_buttons(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
     for (id, label) in [("alpha", tr("Alpha")), ("alphaBoundary", tr("Boundary")), ("alphaOverlay", tr("Overlay"))] {
         let r = Rect::from_min_size(pos2(x, bar.center().y - 10.0), vec2(66.0, 20.0));
         let on = view == id;
-        if widgets::text_button(ui, r, label, on, &t, egui::Id::new(("roto-view", id))).clicked() {
+        if widgets::text_button(ui, r, label, on, &t, egui::Id::unique(("roto-view", id))).clicked() {
             let v = if on { "none" } else { id };
             let _ = app.session.execute("roto.options", json!({"view": v}));
         }
@@ -337,7 +337,7 @@ pub fn bar_buttons(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
     x += 8.0;
     let r = Rect::from_min_size(pos2(x, bar.center().y - 10.0), vec2(74.0, 20.0));
     let label = if frozen { tr("Unfreeze") } else { tr("Freeze") };
-    if widgets::text_button(ui, r, label, frozen, &t, egui::Id::new(("roto-freeze", uid))).clicked() {
+    if widgets::text_button(ui, r, label, frozen, &t, egui::Id::unique(("roto-freeze", uid))).clicked() {
         let id = if frozen { "roto.unfreeze" } else { "roto.freeze" };
         if let Err(e) = app.session.execute(id, json!({"layer": layer.id.0, "effect": uid})) {
             app.ui.status = e.to_string();
@@ -347,7 +347,7 @@ pub fn bar_buttons(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
     x += 80.0;
     if running {
         let r = Rect::from_min_size(pos2(x, bar.center().y - 10.0), vec2(60.0, 20.0));
-        if widgets::text_button(ui, r, tr("Stop"), false, &t, egui::Id::new("roto-stop")).clicked() {
+        if widgets::text_button(ui, r, tr("Stop"), false, &t, egui::Id::unique("roto-stop")).clicked() {
             let _ = app.session.execute("roto.cancel", json!({}));
         }
         app.auto.add("layerPanel.roto.stop", r, "Stop");

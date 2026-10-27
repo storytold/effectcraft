@@ -314,6 +314,9 @@ impl Session {
         }
         // Every state off the new line goes into branches: a chain per first child, the other
         // children starting branches of their own.
+        /// Adds to `out` one [`Branch`] for the off-line subtree at `start`: it follows the first
+        /// child that is not on the new history line, and records every other such child as a further
+        /// branch from the state it forked at (`parent`).
         fn chain(a: &Arena, start: usize, parent: usize, in_new: &[bool], out: &mut Vec<Branch>) {
             let mut steps = vec![];
             let mut n = start;
@@ -341,13 +344,14 @@ impl Session {
         let k = new_line.iter().position(|&i| i == target).unwrap_or(0);
         let undo: Vec<(String, Arc<Project>)> = (0..k).map(|i| (a.label[new_line[i + 1]].clone(), a.state[new_line[i]].clone())).collect();
         let redo: Vec<(String, Arc<Project>)> = new_line[k + 1..].iter().rev().map(|&i| (a.label[i].clone(), a.state[i].clone())).collect();
+        let edited = crate::commands::text_edit::active_editor_snapshot(self);
         let cur = std::mem::replace(&mut self.project, a.state[target].clone());
         self.keep_view_settings(&cur);
         self.history.undo = undo;
         self.history.redo = redo;
         self.history.branches = branches;
         self.history.merge_key = None;
-        self.sanitize_state();
+        self.sanitize_after_replacement(edited.as_ref());
         self.bump();
         true
     }

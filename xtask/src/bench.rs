@@ -427,15 +427,18 @@ fn footage_cmds(seq_first: &Path, clip: &Path, still: &Path) -> Cmds {
     c
 }
 
-/// Run `cmds` with `effectcraft-cli --empty run … --save-as out`.
+/// Run `cmds` with `effectcraft-cli --empty run --args-file … --save-as out`: a file, because the
+/// `layers` scenario is longer than a Windows command line (32 767 characters).
 fn build_project(bin: &Path, cmds: &Cmds, out: &Path) -> Result<(), String> {
-    let mut cmd = Command::new(bin);
-    cmd.arg("--empty").arg("run");
+    let mut lines = String::new();
     for (id, params) in cmds {
-        cmd.arg(id).arg(params.to_string());
+        lines.push_str(&format!("{id}\n{params}\n"));
     }
-    cmd.arg("--save-as").arg(out);
-    cli(&mut cmd)
+    let args = out.with_extension("args");
+    std::fs::write(&args, lines).map_err(|e| format!("{}: {e}", args.display()))?;
+    let r = cli(Command::new(bin).arg("--empty").arg("run").arg("--args-file").arg(&args).arg("--save-as").arg(out));
+    let _ = std::fs::remove_file(&args);
+    r
 }
 
 /// Run a CLI command quietly; on failure, the tail of its output is the error.
@@ -655,19 +658,25 @@ fn iso_now() -> String {
     utc(unix_now())
 }
 
-/// `YYYY-MM-DD HH:MM UTC` for a Unix time (civil-from-days, no time zone database).
+/// `YYYY-MM-DD HH:MM UTC` for a Unix time. Years far outside chrono's own range are preserved
+/// (the old hand-rolled conversion kept them) rather than collapsing to the epoch.
 fn utc(t: u64) -> String {
-    let (days, secs) = ((t / 86_400) as i64, t % 86_400);
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + i64::from(m <= 2);
-    format!("{y:04}-{m:02}-{d:02} {:02}:{:02} UTC", secs / 3600, secs % 3600 / 60)
+    use chrono::Datelike;
+    // Reduce by whole 400-year Gregorian cycles (146_097 days) into chrono's range, convert the
+    // remainder with chrono, and carry the year back; `t` is `u64`, so `days` fits an `i64`.
+    let (days, sod) = ((t / 86_400) as i64, (t % 86_400) as i64);
+    let (cycles, rest) = (days.div_euclid(146_097), days.rem_euclid(146_097));
+    let date = i32::try_from(rest + 719_163).ok().and_then(chrono::NaiveDate::from_num_days_from_ce_opt);
+    let time = u32::try_from(sod).ok().and_then(|s| chrono::NaiveTime::from_num_seconds_from_midnight_opt(s, 0));
+    let (y, dt) = match (date, time) {
+        (Some(d), Some(ti)) => {
+            let yy = i128::from(d.year()) + i128::from(cycles) * 400;
+            (i64::try_from(yy).unwrap_or(i64::MAX), d.and_time(ti))
+        }
+        _ => (1970, chrono::NaiveDateTime::default()),
+    };
+    // `{:04}` rather than `%Y`, which writes a `+` before years past 9999.
+    format!("{y:04}-{}", dt.format("%m-%d %H:%M UTC"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1094,6 +1103,17 @@ fn compare_table(old: &BTreeMap<String, Value>, new: &BTreeMap<String, Value>) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn utc_preserves_out_of_range_years() {
+        assert_eq!(utc(0), "1970-01-01 00:00 UTC");
+        assert_eq!(utc(1_700_000_000), "2023-11-14 22:13 UTC");
+        // Years far outside chrono's own range are preserved (the old hand-rolled conversion kept
+        // them) rather than collapsing to the epoch.
+        assert_eq!(utc(253_402_300_800), "10000-01-01 00:00 UTC");
+        assert_eq!(utc(10_000_000_000_000), "318857-05-20 17:46 UTC");
+        assert_eq!(utc(u64::MAX), "584554051223-11-09 07:00 UTC");
+    }
 
     const BSD: &str = "        0.33 real         0.67 user         0.15 sys
            743882752  maximum resident set size

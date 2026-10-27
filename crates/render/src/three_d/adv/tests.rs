@@ -681,3 +681,369 @@ fn stroke_regions_are_rings() {
     assert_eq!(outlines.len(), 1);
     assert_eq!(outlines[0].holes.len(), 1);
 }
+
+// ---------------------------------------------------------------- shadow quality
+
+use super::raster::{MAX_SHADOW_TEXELS, shadow_map_size, shadow_point_face_size, shadow_sizes};
+use super::scene::ShadowMap;
+
+/// Geometric normal of a receiver squarely facing a `flat_map` light (which looks along +z).
+const FACING: [f32; 3] = [0.0, 0.0, -1.0];
+
+/// Identity-view orthographic map: map coords are world x, y × `focal` offset by
+/// `size/2` (`focal` texels per world unit).
+fn flat_map(size: u32, focal: f32, radius: f32) -> ShadowMap {
+    ShadowMap { view: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]], focal, ortho: true, size, offset: 0, bias: 1.5, radius }
+}
+
+/// Wall: texel columns ≥ a quarter of the map at depth 10, the rest unoccluded (1000).
+/// Its edge sits at world x = −size / (4·focal).
+fn wall_map(size: u32, focal: f32, radius: f32) -> (ShadowMap, Vec<f32>) {
+    let texels: Vec<f32> = (0..size * size).map(|i| if i % size >= size / 4 { 10.0 } else { 1000.0 }).collect();
+    (flat_map(size, focal, radius), texels)
+}
+
+/// Luma of a render of `cid` with its top layer (a light) set to cast shadows or not,
+/// at the given Shadow Diffusion.
+fn render_light_luma(p: &mut Project, cid: ItemId, casting: bool, diffusion: f64) -> Vec<f32> {
+    let comp = p.comp_mut(cid).unwrap();
+    set(&mut comp.layers[0], "lightOptions/castsShadows", Value::Bool(casting));
+    set(&mut comp.layers[0], "lightOptions/shadowDiffusion", Value::Scalar(diffusion));
+    render(p, cid).data.iter().map(|q| (q[0] + q[1] + q[2]) / 3.0).collect()
+}
+
+#[test]
+fn shadow_map_size_tracks_raster_resolution() {
+    assert_eq!(shadow_map_size(640, 360, false), 1024);
+    assert_eq!(shadow_map_size(1920, 1080, false), 2048);
+    assert_eq!(shadow_map_size(3840, 2160, false), 4096);
+    // Clamped to the pow2 range: small or absurd rasters stay inside 512..4096.
+    assert_eq!(shadow_map_size(64, 64, false), 512);
+    assert_eq!(shadow_map_size(0, 0, false), 512);
+    assert_eq!(shadow_map_size(u32::MAX, u32::MAX, false), 4096);
+    assert_eq!(shadow_map_size(7, 100000, false), 4096);
+    // The fast-preview (draft) budget stays at 512 regardless, so interactivity is
+    // untouched by the quality path's new sizing.
+    assert_eq!(shadow_map_size(3840, 2160, true), 512);
+    assert_eq!(shadow_map_size(0, 0, true), 512);
+}
+
+#[test]
+fn shadow_point_faces_are_capped() {
+    // Cube faces take the full map size up to 2048 (one 2048 cube ≈ 25 M f32 texels).
+    assert_eq!(shadow_point_face_size(4096, false), 2048);
+    assert_eq!(shadow_point_face_size(2048, false), 2048);
+    assert_eq!(shadow_point_face_size(1024, false), 1024);
+    assert_eq!(shadow_point_face_size(512, false), 512);
+    // Draft keeps the historical half-size face.
+    assert_eq!(shadow_point_face_size(512, true), 256);
+}
+
+fn budget_texels(sizes: &[Option<u32>], kinds: &[u32]) -> u64 {
+    sizes.iter().zip(kinds).map(|(s, &k)| s.map(|z| (z as u64) * (z as u64) * if k == 2 { 6 } else { 1 }).unwrap_or(0)).sum()
+}
+
+#[test]
+fn shadow_sizes_stay_within_the_scene_budget() {
+    // Within budget a light gets its full size: one 4K point cube keeps 2048 faces.
+    assert_eq!(shadow_sizes(4096, 2160, false, &[2]), vec![Some(2048)]);
+    // Several cubes overflow: deterministically halved (largest first, earliest light
+    // on ties) until inside: three or four settle at 1024, five push two to 512.
+    assert_eq!(shadow_sizes(4096, 2160, false, &[2; 3]), vec![Some(1024); 3]);
+    assert_eq!(shadow_sizes(4096, 2160, false, &[2; 4]), vec![Some(1024); 4]);
+    let sizes = shadow_sizes(4096, 2160, false, &[2; 5]);
+    assert_eq!(sizes, vec![Some(512), Some(512), Some(1024), Some(1024), Some(1024)]);
+    assert!(budget_texels(&sizes, &[2; 5]) <= MAX_SHADOW_TEXELS);
+    // A hostile light count can never break the cap; sizes only shrink or drop to None.
+    let many = vec![2u32; 1000];
+    let sizes = shadow_sizes(3840, 2160, false, &many);
+    assert_eq!(sizes.len(), 1000);
+    assert!(budget_texels(&sizes, &many) <= MAX_SHADOW_TEXELS);
+    assert!(sizes.iter().flatten().all(|&z| (128..=2048).contains(&z)));
+    // Deterministic: same inputs, same plan.
+    assert_eq!(sizes, shadow_sizes(3840, 2160, false, &many));
+    // Non-point lights and a modest scene keep full quality sizes.
+    assert_eq!(shadow_sizes(1920, 1080, false, &[1; 2]), vec![Some(2048), Some(2048)]);
+    // A light that casts nothing costs nothing: it stays None and leaves its
+    // full-size budget to the lights that do cast.
+    assert_eq!(shadow_sizes(640, 360, false, &[0, 1]), vec![None, Some(1024)]);
+    assert!(shadow_sizes(640, 360, false, &[0; 500]).iter().all(Option::is_none));
+}
+
+#[test]
+fn diffusion_does_not_lift_a_deep_shadow() {
+    // Shadow Diffusion may widen the penumbra but must not scale the depth bias: a
+    // point deep inside a shadow stays fully shadowed at any diffusion.
+    let (m, texels) = wall_map(64, 1.0, 1.0);
+    let deep = [0.0f32, 0.0, 13.5]; // u = 32: ±16 texels of margin around the edge at 16; z − bias 12 > 10
+    let hard = shade::shadow_factor(&m, &texels, deep, FACING, 1.0);
+    assert!(hard < 0.01, "deep shadow at radius 1: {hard}");
+    let wide = shade::shadow_factor(&flat_map(64, 1.0, 25.0), &texels, deep, FACING, 1.0);
+    assert!(wide < 0.01, "deep shadow at radius 25 (bias must not grow with radius): {wide}");
+}
+
+#[test]
+fn pcf_varies_within_a_texel() {
+    // Nearest-texel PCF snaps the edge to texel boundaries: two receivers 1/20 texel
+    // apart get bit-identical factors, which is what stair-steps straight edges.
+    // The filtering must produce coverage that varies within a single texel.
+    let (m, texels) = wall_map(64, 1.0, 2.0);
+    let mut pairs = 0;
+    let mut varying = 0;
+    let mut u = -17.0f32;
+    while u < -15.3 {
+        let a = shade::shadow_factor(&m, &texels, [u, 0.0, 13.5], FACING, 1.0);
+        let b = shade::shadow_factor(&m, &texels, [u + 0.05, 0.0, 13.5], FACING, 1.0);
+        pairs += 1;
+        if (a - b).abs() > 1e-6 {
+            varying += 1;
+        }
+        assert!((0.0..=1.0).contains(&a) && (0.0..=1.0).contains(&b), "{a} {b}");
+        u += 0.05;
+    }
+    assert!(pairs >= 30);
+    assert_eq!(varying, pairs, "coverage varies inside every texel along the edge");
+}
+
+#[test]
+fn wide_diffusion_keeps_shadow_depth_and_contact() {
+    // Scene: camera-facing floor, sphere casting, point light behind the camera and
+    // off to the upper right so most of the shadow lands beside the sphere, not
+    // behind it. Raising Shadow Diffusion must neither wash the shadow out (a
+    // diffusion-scaled bias leaks light into it) nor move where it touches.
+    let (mut p, cid) = project(200, 150);
+    add(&mut p, cid, LayerSource::Primitive { kind: PrimitiveKind::Plane }, |l| {
+        set(l, "geometryOptions/width", Value::Scalar(400.0));
+        set(l, "geometryOptions/height", Value::Scalar(400.0));
+        set(l, "transform/position", Value::Vec3([100.0, 75.0, 200.0]));
+        set(l, "materialOptions/baseColor", Value::Color([1.0, 1.0, 1.0, 1.0]));
+    });
+    add(&mut p, cid, LayerSource::Primitive { kind: PrimitiveKind::Sphere }, |l| {
+        set(l, "geometryOptions/radius", Value::Scalar(30.0));
+        set(l, "transform/position", Value::Vec3([100.0, 75.0, 50.0]));
+        set(l, "materialOptions/castsShadows", Value::Enum(1));
+    });
+    add(&mut p, cid, LayerSource::Light { kind: LightKind::Point }, |l| {
+        set(l, "transform/position", Value::Vec3([180.0, 20.0, -300.0]));
+        set(l, "lightOptions/castsShadows", Value::Bool(true));
+    });
+    let noshadow = render_light_luma(&mut p, cid, false, 0.0);
+    let d0 = render_light_luma(&mut p, cid, true, 0.0);
+    let d40 = render_light_luma(&mut p, cid, true, 40.0);
+    // Per-column darkening vs the shadowless render: depth (max darkening) and the
+    // deepest dark row (contact edge). Diffusion may blur the edge but must keep the
+    // shadow dark (no bias leak) and keep it where it touches (no lift).
+    let dep = |img: &[f32], x: usize| -> f32 { (20..140).map(|y| noshadow[y * 200 + x] - img[y * 200 + x]).fold(0.0f32, f32::max) };
+    let cols: Vec<usize> = (30..170).filter(|&x| dep(&d0, x) > 0.1).collect();
+    assert!(cols.len() > 30, "shadow covers many columns: {}", cols.len());
+    // Core depth: the 90th-percentile darkening over the d0 shadow's pixels. A blur
+    // only softens the rim and leaves the core dark; a bias leak lightens all of it.
+    let shadow_px: Vec<usize> = (20..140).flat_map(|y| (30..170).map(move |x| y * 200 + x)).filter(|&i| noshadow[i] - d0[i] > 0.1).collect();
+    let core = |img: &[f32]| -> f32 {
+        let mut v: Vec<f32> = shadow_px.iter().map(|&i| noshadow[i] - img[i]).collect();
+        v.sort_by(f32::total_cmp);
+        v[v.len() * 9 / 10]
+    };
+    let (core0, core40) = (core(&d0), core(&d40));
+    // Width of the shadow across its centre row: a diffusion-scaled bias shrinks the
+    // shadow (light leaks under its edges), while a correct filter keeps the extent
+    // and only softens the boundary (threshold crossings move at most with the
+    // penumbra, not with the bias).
+    let width = |img: &[f32]| -> f32 {
+        (30..130)
+            .map(|y| {
+                let dark: Vec<bool> = (0..200).map(|x| noshadow[y * 200 + x] - img[y * 200 + x] > 0.06).collect();
+                match (dark.iter().position(|&d| d), dark.iter().rposition(|&d| d)) {
+                    (Some(l), Some(r)) if r > l => (r - l) as f32,
+                    _ => 0.0,
+                }
+            })
+            .fold(0.0f32, f32::max)
+    };
+    let (w0, w40) = (width(&d0), width(&d40));
+    let wratio = w40 / w0;
+    assert!(w0 > 20.0, "shadow is wide enough to judge: {w0}");
+    assert!(core40 >= 0.9 * core0, "diffusion 40 keeps the shadow core dark: {core40:.4} vs {core0:.4}");
+    assert!(wratio >= 0.8, "diffusion 40 does not shrink the shadow: width {w40} vs {w0}");
+}
+
+#[test]
+fn penumbra_dithers_along_a_straight_edge() {
+    // Receivers at the same distance from a straight edge, one texel apart along it.
+    // A fixed tap grid gives each the same coverage, so the penumbra repeats texel by
+    // texel (stair-steps and bands); the jitter, keyed below texel size, must vary it.
+    let (m, texels) = wall_map(64, 1.0, 6.0);
+    let distinct = |vs: &[f32]| -> usize {
+        let mut bits: Vec<u32> = vs.iter().map(|v| v.to_bits()).collect();
+        bits.sort_unstable();
+        bits.dedup();
+        bits.len()
+    };
+    let along: Vec<f32> = (0..32).map(|k| shade::shadow_factor(&m, &texels, [-16.0, -16.0 + k as f32, 13.5], FACING, 1.0)).collect();
+    assert!(distinct(&along) >= 16, "coverage along the edge takes {} distinct values", distinct(&along));
+    // And finer than a texel: where one texel spans several output pixels (a grazing
+    // floor), dither keyed per texel would show as texel-sized blocks of grain.
+    let within: Vec<f32> = (0..8).map(|k| shade::shadow_factor(&m, &texels, [-16.0, 0.0625 + k as f32 * 0.125, 13.5], FACING, 1.0)).collect();
+    assert!(distinct(&within) >= 4, "coverage inside one texel takes {} distinct values", distinct(&within));
+}
+
+#[test]
+fn penumbra_width_is_independent_of_map_resolution() {
+    // One wall (edge at world x = −16) in a 64-texel map at 1 texel per world unit and
+    // a 256-texel map at 4. Shadow Diffusion sets the penumbra in output pixels (world
+    // units here), so a finer map must not narrow it.
+    let width = |size: u32, focal: f32| -> f32 {
+        let (m, texels) = wall_map(size, focal, 8.0);
+        let xs: Vec<f32> = (0..400).map(|k| -30.0 + k as f32 * 0.07).collect();
+        let f: Vec<f32> = xs.iter().map(|&x| shade::shadow_factor(&m, &texels, [x, 0.0, 13.5], FACING, 1.0)).collect();
+        let first_below = |t: f32| f.iter().position(|&v| v < t).map_or(f32::NAN, |i| xs[i]);
+        first_below(0.1) - first_below(0.9)
+    };
+    let (w64, w256) = (width(64, 1.0), width(256, 4.0));
+    assert!(w64 > 4.0 && w64 < 12.0, "penumbra spans about the requested 8 units: {w64}");
+    assert!((w256 / w64 - 1.0).abs() < 0.25, "same penumbra at any map resolution: {w64} vs {w256}");
+}
+
+#[test]
+fn tilted_receivers_do_not_shadow_themselves() {
+    // A receiver plane z = 100 + 4x (76° from the light, n·l ≈ 0.24), each texel holding
+    // its depth half a texel off-centre the way a rasteriser can. Wide taps must compare
+    // against the plane rather than the receiver point, and the slope-scaled bias must
+    // absorb the half-texel error, at every diffusion.
+    let (size, g) = (128u32, 4.0f32);
+    let c = size as f32 * 0.5;
+    let texels: Vec<f32> = (0..size * size).map(|i| 100.0 + g * ((i % size) as f32 - c)).collect();
+    let len = (1.0 + g * g).sqrt();
+    let (ng, n_l) = ([g / len, 0.0, -1.0 / len], 1.0 / len);
+    for radius in [1.0f32, 6.0, 25.0] {
+        let m = flat_map(size, 1.0, radius);
+        for k in 0..40 {
+            let x = -20.0 + k as f32 * 0.97;
+            let f = shade::shadow_factor(&m, &texels, [x, 3.3, 100.0 + g * x], ng, n_l);
+            assert!(f > 0.99, "radius {radius}, x {x}: lit tilted receiver shadowed itself ({f})");
+        }
+    }
+}
+
+#[test]
+fn lit_casters_do_not_shadow_themselves() {
+    // A sphere and a turned cube that cast shadows, lit by each light kind: the lit
+    // surface must render as bright as with shadows off at any Shadow Diffusion (a
+    // wide kernel on a surface tilted to the light must not see its own depth).
+    // 640×360: faces then span enough texels that near-grazing ones exercise the
+    // receiver plane's slope limit.
+    for (prim, rot_y) in [(PrimitiveKind::Sphere, 0.0), (PrimitiveKind::Cube, 35.0)] {
+        for kind in [LightKind::Point, LightKind::Spot, LightKind::Parallel] {
+            let (mut p, cid) = project(640, 360);
+            add(&mut p, cid, LayerSource::Primitive { kind: prim }, |l| {
+                set(l, "transform/position", Value::Vec3([320.0, 180.0, 100.0]));
+                if prim == PrimitiveKind::Sphere {
+                    set(l, "geometryOptions/radius", Value::Scalar(120.0));
+                } else {
+                    for k in ["width", "height", "depth"] {
+                        set(l, &format!("geometryOptions/{k}"), Value::Scalar(216.0));
+                    }
+                    set(l, "transform/rotationX", Value::Scalar(-25.0));
+                }
+                set(l, "transform/rotationY", Value::Scalar(rot_y));
+                set(l, "materialOptions/baseColor", Value::Color([1.0, 1.0, 1.0, 1.0]));
+                set(l, "materialOptions/castsShadows", Value::Enum(1));
+            });
+            add(&mut p, cid, LayerSource::Light { kind }, |l| {
+                set(l, "transform/position", Value::Vec3([-280.0, -108.0, -600.0]));
+                if let Some(poi) = l.props.prop_mut("transform/pointOfInterest") {
+                    poi.value = Value::Vec3([320.0, 180.0, 100.0]);
+                }
+            });
+            let noshadow = render_light_luma(&mut p, cid, false, 0.0);
+            let lit: Vec<usize> = (0..noshadow.len()).filter(|&i| noshadow[i] > 0.15).collect();
+            assert!(lit.len() > 10_000, "{prim:?} {kind:?}: lit area {}", lit.len());
+            for diffusion in [0.0, 20.0, 48.0] {
+                let img = render_light_luma(&mut p, cid, true, diffusion);
+                let dark = lit.iter().filter(|&&i| img[i] < 0.9 * noshadow[i]).count() as f32 / lit.len() as f32;
+                assert!(dark <= 0.02, "{prim:?} {kind:?} diffusion {diffusion}: {:.1} % of the lit surface self-shadowed", dark * 100.0);
+            }
+        }
+    }
+}
+
+#[test]
+fn shadow_sizes_match_the_halve_largest_rule_and_scale_to_many_lights() {
+    // The specification `shadow_sizes` implements, step by step: halve the largest map
+    // above its floor (earliest light on ties) until the scene fits, then drop maps
+    // from the last light.
+    let spec = |w: u32, h: u32, draft: bool, kinds: &[u32]| -> Vec<Option<u32>> {
+        let base = shadow_map_size(w, h, draft);
+        let mut sizes: Vec<u32> = kinds
+            .iter()
+            .map(|&k| {
+                if k == 0 {
+                    0
+                } else if k == 2 {
+                    shadow_point_face_size(base, draft)
+                } else {
+                    base
+                }
+            })
+            .collect();
+        let total = |s: &[u32]| -> u64 { s.iter().zip(kinds).map(|(&z, &k)| (z as u64) * (z as u64) * if k == 2 { 6 } else { 1 }).sum() };
+        while total(&sizes) > MAX_SHADOW_TEXELS {
+            let pick = (0..sizes.len()).filter(|&i| sizes[i] > if kinds[i] == 2 { 128 } else { 512 }).max_by_key(|&i| (sizes[i], std::cmp::Reverse(i)));
+            match pick {
+                Some(i) => sizes[i] /= 2,
+                None => match sizes.iter().rposition(|&z| z > 0) {
+                    Some(i) => sizes[i] = 0,
+                    None => break,
+                },
+            }
+        }
+        sizes.into_iter().map(|z| (z > 0).then_some(z)).collect()
+    };
+    let mut seed = 0x2545_F491u32;
+    for case in 0..300 {
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let n = (seed >> 8) as usize % 40;
+        let kinds: Vec<u32> = (0..n)
+            .map(|_| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (seed >> 16) % 3
+            })
+            .collect();
+        let (w, h, draft) = ([640, 1920, 3840, 8000][case % 4], [360, 1080, 2160, 100][case % 4], case % 7 == 0);
+        assert_eq!(shadow_sizes(w, h, draft, &kinds), spec(w, h, draft, &kinds), "case {case}: {kinds:?}");
+    }
+    // A hostile light count stays fast (n log n) and inside the budget.
+    let many = vec![2u32; 100_000];
+    let sizes = shadow_sizes(3840, 2160, false, &many);
+    assert!(budget_texels(&sizes, &many) <= MAX_SHADOW_TEXELS);
+}
+
+#[test]
+fn wide_penumbrae_are_smooth() {
+    // Coverage at a fixed distance across a wide penumbra, sampled along a straight
+    // edge, should be one smooth value plus fine dither. A 5×5 grid stretched over a
+    // 20-texel reach leaves gaps the jitter turns into coarse grain (σ ≈ 0.04, ten
+    // 8-bit levels); the grid grows with the reach to keep it below 0.02.
+    let (m, texels) = wall_map(256, 1.0, 20.0);
+    for off in [-5.0f32, 0.0, 5.0] {
+        let vs: Vec<f32> = (0..200).map(|k| shade::shadow_factor(&m, &texels, [-64.0 + off, -100.0 + k as f32, 13.5], FACING, 1.0)).collect();
+        let mean = vs.iter().sum::<f32>() / vs.len() as f32;
+        let sd = (vs.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / vs.len() as f32).sqrt();
+        assert!(sd < 0.02, "offset {off}: penumbra grain σ = {sd:.4}");
+    }
+}
+
+#[test]
+fn hard_edges_ramp_over_two_texels() {
+    // At Shadow Diffusion 0 the edge still ramps across about two texels (10–90 %):
+    // where one texel spans several output pixels (a floor grazing a point light) a
+    // one-texel ramp leaves the binary compare's texel steps visible as a sawtooth.
+    let (m, texels) = wall_map(64, 1.0, 1.0);
+    for v0 in [0.0f32, 0.3, 7.6] {
+        let xs: Vec<f32> = (0..400).map(|k| -20.0 + k as f32 * 0.02).collect();
+        let f: Vec<f32> = xs.iter().map(|&x| shade::shadow_factor(&m, &texels, [x, v0, 13.5], FACING, 1.0)).collect();
+        let first_below = |t: f32| f.iter().position(|&v| v < t).map_or(f32::NAN, |i| xs[i]);
+        let w = first_below(0.1) - first_below(0.9);
+        assert!((1.7..3.0).contains(&w), "v {v0}: hard edge ramps over {w} texels");
+    }
+}

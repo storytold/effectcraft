@@ -20,7 +20,7 @@ APP_ID=ai.storyteller.effectcraft
 
 SKIP_BUILD=0
 DRY_RUN=0
-while [ $# -gt 0 ]; do
+while [[ $# -gt 0 ]]; do
   case "$1" in
     --skip-build) SKIP_BUILD=1; shift ;;
     --dry-run) DRY_RUN=1; SKIP_BUILD=1; shift ;;
@@ -36,7 +36,7 @@ case "$MACHINE" in
   arm64 | aarch64) ARCH=aarch64 ;;
   *) echo "unsupported architecture $MACHINE" >&2; exit 2 ;;
 esac
-if [ "$DRY_RUN" = 0 ] && [ "$(uname -s)" != FreeBSD ]; then
+if [[ "$DRY_RUN" = 0 ]] && [[ "$(uname -s)" != FreeBSD ]]; then
   echo "error: build on FreeBSD (or pass --dry-run to check the tree layout)" >&2
   exit 2
 fi
@@ -46,7 +46,15 @@ echo "==> EffectCraft $VERSION for FreeBSD $ARCH"
 
 # The release VM has 12 GB; full parallelism on the biggest crates runs it out of memory.
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}"
-if [ "$SKIP_BUILD" = 0 ]; then
+# The aarch64 release VM is emulated (no rustup toolchain for this tier-3 target, so it builds
+# natively under QEMU). With one codegen unit and thin LTO the largest crates each optimize on a
+# single emulated core and the job runs past its 5-hour limit, so trade a little runtime speed for
+# parallel codegen there. x86_64 keeps the workspace's release profile.
+if [[ "$ARCH" = aarch64 ]]; then
+  export CARGO_PROFILE_RELEASE_CODEGEN_UNITS="${CARGO_PROFILE_RELEASE_CODEGEN_UNITS:-16}"
+  export CARGO_PROFILE_RELEASE_LTO="${CARGO_PROFILE_RELEASE_LTO:-off}"
+fi
+if [[ "$SKIP_BUILD" = 0 ]]; then
   (cd "$ROOT" && cargo build --release --locked -p effectcraft -p effectcraft-cli)
 fi
 WORK="$CARGO_TARGET_DIR/freebsd-package"
@@ -56,7 +64,7 @@ mkdir -p "$WORK"
 
 BIN="$CARGO_TARGET_DIR/release"
 OUT_DIR="$DIST"
-if [ "$DRY_RUN" = 1 ]; then
+if [[ "$DRY_RUN" = 1 ]]; then
   # Stub binaries, and the tarball stays in the work dir so dist/ only ever holds real builds.
   BIN="$WORK/stub-bin"
   OUT_DIR="$WORK"
@@ -81,13 +89,13 @@ sed -e "s/@VERSION@/$VERSION/g" -e "s/@DATE@/$EFFECTCRAFT_BUILD_DATE/g" \
 cp -R "$ROOT/assets/app-icon/hicolor" "$STAGE/share/icons/"
 copy_docs "$STAGE/share/doc/effectcraft"
 for f in NOTICE ATTRIBUTION.md; do
-  if [ -f "$ROOT/$f" ]; then install -m 644 "$ROOT/$f" "$STAGE/share/doc/effectcraft/"; fi
+  if [[ -f "$ROOT/$f" ]]; then install -m 644 "$ROOT/$f" "$STAGE/share/doc/effectcraft/"; fi
 done
 
 for f in bin/effectcraft bin/effectcraft-cli "share/applications/$APP_ID.desktop" \
   "share/icons/hicolor/256x256/apps/$APP_ID.png" "share/icons/hicolor/scalable/apps/$APP_ID.svg" \
   share/doc/effectcraft/LICENSE-MIT share/doc/effectcraft/LICENSE-APACHE; do
-  if [ ! -e "$STAGE/$f" ]; then echo "error: $f is missing from the package" >&2; exit 1; fi
+  if [[ ! -e "$STAGE/$f" ]]; then echo "error: $f is missing from the package" >&2; exit 1; fi
 done
 
 # ---- .tar.gz ------------------------------------------------------------------------------------
@@ -96,7 +104,7 @@ tar -C "$WORK" -czf "$OUT_DIR/$BASENAME.tar.gz" "$BASENAME"
 echo "wrote $OUT_DIR/$BASENAME.tar.gz"
 
 "$STAGE/bin/effectcraft-cli" --version
-if [ "$DRY_RUN" = 1 ]; then
+if [[ "$DRY_RUN" = 1 ]]; then
   echo "==> dry run: tarball contents"
   tar -tzvf "$OUT_DIR/$BASENAME.tar.gz"
 fi

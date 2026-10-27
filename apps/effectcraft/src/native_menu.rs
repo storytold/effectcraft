@@ -2,10 +2,10 @@
 //! [`effectcraft_ui_egui::native_menu`]'s spec of the engine's After Effects menu tree.
 //!
 //! Each frame [`NativeBar::update`] runs menu activations (the same command ids as the in-window
-//! bar), and when [`native_menu::state_key`] changed it rebuilds the spec and pushes labels,
-//! enabled and check state into the existing items; a structural change (Open Recent, a new
-//! shortcut preset) rebuilds the menu. Settings ▸ Appearance ▸ Use In-Window Menu Bar on macOS
-//! swaps back to the in-window bar.
+//! bar), and when [`native_menu::state_key`] or whether a text field has the keyboard changed it
+//! rebuilds the spec and pushes labels, enabled and check state into the existing items; a
+//! structural change (Open Recent, a new shortcut preset) rebuilds the menu. Settings ▸
+//! Appearance ▸ Use In-Window Menu Bar on macOS swaps back to the in-window bar.
 
 use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, channel};
@@ -24,7 +24,7 @@ pub struct NativeBar {
     items: HashMap<String, CheckMenuItem>,
     spec: NativeMenu,
     structure: u64,
-    state: Option<u64>,
+    state: Option<(u64, bool)>,
     events: Receiver<MenuEvent>,
     /// The in-window-bar setting last applied (None: not yet).
     in_window: Option<bool>,
@@ -67,12 +67,13 @@ impl NativeBar {
         if in_window {
             return;
         }
-        let key = native_menu::state_key(app);
+        // While a text field has the keyboard, the Edit items it takes stay enabled.
+        let key = (native_menu::state_key(app), native_menu::text_field_window(ctx).is_some());
         if self.state == Some(key) && self.menu.is_some() {
             return;
         }
         self.state = Some(key);
-        let spec = native_menu::build(app);
+        let spec = native_menu::build_now(app, ctx);
         let structure = spec.structure();
         if self.menu.is_none() || structure != self.structure {
             self.install(&spec);

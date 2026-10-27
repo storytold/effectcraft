@@ -6,6 +6,7 @@
 //! effectcraft-cli exec <command-id> [--params JSON]           run one command
 //! effectcraft-cli exec --list [--filter TEXT] [--schemas]     list engine commands (as `commands`)
 //! effectcraft-cli run <id> <json> [<id> <json> …]             run several commands in order
+//! effectcraft-cli run --args-file F                           the same, one argument per line of F
 //! effectcraft-cli props <comp> <layer> [--flat] [--time S]    a layer's property tree (with paths)
 //! effectcraft-cli get <comp> <layer> <path> [--time S]        read a property
 //! effectcraft-cli set <comp> <layer> <path> <value> [--time S] [--expression E]
@@ -96,6 +97,7 @@ const USAGE: &str = "usage: effectcraft-cli <info|commands|exec|run|props|get|se
   commands [--filter TEXT] [--enabled]     list engine commands
   exec <command-id> [--params JSON]        run one engine command (exec --list: list them, as `commands`)
   run <id> <json> [<id> <json> ...]        run several commands in order
+  run --args-file F                        the same, one argument per line of F (no command-line length limit)
   props <comp> <layer> [--flat] [--time S] a layer's property tree with paths
   get <comp> <layer> <path> [--time S]     read a property
   set <comp> <layer> <path> <value> [--time S] [--expression E]
@@ -148,6 +150,7 @@ const VALUED: &[&str] = &[
     "--expression",
     "--depth",
     "--eval",
+    "--args-file",
     // render
     "--template",
     "--values",
@@ -515,10 +518,15 @@ fn run(cmd: &str, args: &Args, json_out: bool) -> Result<(), Failure> {
             emit(&with_saved(r, saved), json_out);
         }
         "run" => {
-            if args.pos.is_empty() {
+            let mut pairs = args.pos.clone();
+            // Windows caps a command line at 32 767 characters: long batches come from a file.
+            if let Some(f) = args.opt("--args-file") {
+                let text = std::fs::read_to_string(f).map_err(|e| Failure::Usage(format!("--args-file {f}: {e}")))?;
+                pairs.extend(text.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from));
+            }
+            if pairs.is_empty() {
                 return usage_err("run needs <command-id> [<json>] pairs");
             }
-            let pairs = args.pos.clone();
             let mut b = backend(args, true)?;
             let mut results = vec![];
             let mut i = 0;

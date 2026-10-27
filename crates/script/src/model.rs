@@ -85,6 +85,7 @@ fn project(s: &Session) -> J {
         "workingSpace": p.settings.working_space.map(|w| format!("{w:?}")).unwrap_or_default(),
         "workingGamma": if p.settings.working_gamma_24() { 2.4 } else { 2.2 },
         "timeDisplayFrames": p.settings.time_display == effectcraft_project::TimeDisplayStyle::Frames,
+        "displayStartFrame": p.settings.frame_start,
         "renderQueue": p.render_queue.len(),
         "revision": s.revision,
     })

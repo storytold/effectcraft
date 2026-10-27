@@ -247,7 +247,7 @@ impl<'a> Cx<'a> {
         }
         let img = self.crop_resize(img);
         if let Some(ft) = &self.frame_times {
-            ft.lock().unwrap_or_else(|e| e.into_inner()).push((i, t0.elapsed().as_secs_f64()));
+            ft.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((i, t0.elapsed().as_secs_f64()));
         }
         img
     }
@@ -327,7 +327,7 @@ impl<'a> Cx<'a> {
         for dir in &self.job.options.overflow {
             let p = std::path::Path::new(dir).join(&name).to_string_lossy().to_string();
             if q.has_room(&p, bytes) {
-                self.overflowed.lock().unwrap_or_else(|e| e.into_inner()).push(p.clone());
+                self.overflowed.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(p.clone());
                 return p;
             }
         }
@@ -351,7 +351,7 @@ impl<'a> Cx<'a> {
             Ok(r) => s.push_str(&format!("Result: Done ({} frames, {}×{}, {} bytes) in {seconds:.2} s\n", r.frames, r.width, r.height, r.bytes)),
             Err(e) => s.push_str(&format!("Result: Failed\nError: {e}\n")),
         }
-        let over = self.overflowed.lock().unwrap_or_else(|e| e.into_inner());
+        let over = self.overflowed.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if !over.is_empty() {
             s.push_str(&format!("Storage overflow: {} file(s) written to overflow folders (first: {})\n", over.len(), over[0]));
         }
@@ -366,7 +366,7 @@ impl<'a> Cx<'a> {
             }
         }
         if let (RenderLog::PlusPerFrameInfo, Some(ft), Some(c)) = (level, &self.frame_times, comp) {
-            let mut v = ft.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let mut v = ft.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
             v.sort_by_key(|(i, _)| *i);
             s.push_str("\nFrames:\n");
             let f0 = self.job.settings.first_frame(c);

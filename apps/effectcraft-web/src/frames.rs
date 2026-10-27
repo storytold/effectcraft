@@ -416,6 +416,7 @@ fn post_reply(r: &FrameReply, px: Option<&[u8]>) {
 fn new_server() -> FrameServer {
     let mut s = FrameServer::new(crate::worker::pool(), Some(Arc::new(effectcraft_expr::Expressions)));
     s.set_layer_store(Some(Arc::new(effectcraft_engine::render::PrefetchStore::default())));
+    s.set_virtual_id(Some(Arc::new(|path| crate::files::STORE.file_identity(path))));
     s
 }
 

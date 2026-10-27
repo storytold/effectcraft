@@ -49,12 +49,15 @@ fn set_channels(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
+/// Shift Channels' Take … From menu. After Effects' ten options come first, in its order, so a
+/// project or script that sets 10 ("Full Off" there) turns the channel off here too; "Half On" is
+/// an EffectCraft extra and sits last.
 const SHIFT_ORDER: [Src; 11] =
-    [Src::Alpha, Src::Red, Src::Green, Src::Blue, Src::Luminance, Src::Hue, Src::Lightness, Src::Saturation, Src::Full, Src::Half, Src::Off];
-const SHIFT_NAMES: [&str; 11] = ["Alpha", "Red", "Green", "Blue", "Luminance", "Hue", "Lightness", "Saturation", "Full On", "Half On", "Full Off"];
+    [Src::Alpha, Src::Red, Src::Green, Src::Blue, Src::Luminance, Src::Hue, Src::Lightness, Src::Saturation, Src::Full, Src::Off, Src::Half];
+const SHIFT_NAMES: [&str; 11] = ["Alpha", "Red", "Green", "Blue", "Luminance", "Hue", "Lightness", "Saturation", "Full On", "Full Off", "Half On"];
 
 fn shift_channels(ctx: &EffectCtx, mut b: Buf) -> Buf {
-    let s = ["takeRedFrom", "takeGreenFrom", "takeBlueFrom", "takeAlphaFrom"].map(|id| SHIFT_ORDER[(ctx.params.e(id) as usize).min(10)]);
+    let s = ["takeRedFrom", "takeGreenFrom", "takeBlueFrom", "takeAlphaFrom"].map(|id| SHIFT_ORDER[(ctx.params.e(id) as usize).min(SHIFT_ORDER.len() - 1)]);
     route(&mut b, s);
     b
 }
@@ -546,6 +549,24 @@ mod tests {
     fn shift_channels_takes_red_from_green() {
         let out = run("ec.channel.shiftchannels", &[("takeRedFrom", Value::Enum(2))], sample());
         assert!(close(out.get(7, 0), [0.25, 0.25, 0.45, 0.5]));
+    }
+
+    /// #1797: the Take … From menu keeps After Effects' order, where the tenth option (`Enum(9)`
+    /// here, 10 to a script) is Full Off, not Half On.
+    #[test]
+    fn shift_channels_menu_follows_after_effects_order() {
+        assert_eq!(SHIFT_NAMES[8..], ["Full On", "Full Off", "Half On"]);
+        // The sample's right-hand pixels are half transparent, so a straight 0.0 and 0.5 are
+        // stored as 0.0 and 0.25.
+        let off = run("ec.channel.shiftchannels", &[("takeGreenFrom", Value::Enum(9))], sample());
+        assert!(close(off.get(0, 0), [0.2, 0.0, 0.9, 1.0]), "{:?}", off.get(0, 0));
+        assert!(close(off.get(7, 0), [0.1, 0.0, 0.45, 0.5]), "{:?}", off.get(7, 0));
+        let half = run("ec.channel.shiftchannels", &[("takeGreenFrom", Value::Enum(10))], sample());
+        assert!(close(half.get(0, 0), [0.2, 0.5, 0.9, 1.0]), "{:?}", half.get(0, 0));
+        assert!(close(half.get(7, 0), [0.1, 0.25, 0.45, 0.5]), "{:?}", half.get(7, 0));
+        // A value past the last option stays on the last one instead of panicking.
+        let past = run("ec.channel.shiftchannels", &[("takeGreenFrom", Value::Enum(99))], sample());
+        assert_eq!(past.get(0, 0), half.get(0, 0));
     }
 
     #[test]
