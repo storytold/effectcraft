@@ -2,7 +2,7 @@
 
 **Stage: alpha** · next: beta, ~30 points of "ready for real work" and ~350–620 h away
 
-> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-12 · **Change:** minor (open-issue count, crash list and localization share re-audited against `upstream/main` 470ea7a3) · **Target:** Adobe After Effects 2026 (26.5.0.89)
+> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-14 · **Change:** minor (open-issue count, crash list and localization share re-audited against `upstream/main` 470ea7a3) · **Target:** Adobe After Effects 2026 (26.5.0.89)
 
 EffectCraft aims to do what After Effects does, with the same panels, menus and behaviour, written
 from scratch in Rust. This page is the one-page summary; the evidence is in
@@ -163,3 +163,20 @@ Come tell us what matters most to you on [Discord](https://discord.gg/artcraft).
 | 2026-10-10 | minor | Stage checked against the new core-workflow gate (all six pass; still alpha) |
 | 2026-10-10 | major | Rewritten to the shared progress-docs standard: stage, two numbers, dimensions, features, languages, upcoming, progress log; milestones moved to docs/roadmap.md |
 | 2026-10-05 | major | Two numbers (breadth vs real use) and workstreams G1–G9 |
+
+## Packaging update (2026-10-11)
+
+Windows setup now uses the suite's shared `craft-installer` UI, preserving existing folder,
+shortcut and launch options and app-owned installation policy. Install, uninstall and repair
+have explicit completion screens; cancellation and failure have separate endings. Source/profile
+checks, WiX UI library compilation for x64/x86/ARM64, PowerShell parsing and package identity
+comparisons pass. Native fixture MSI linking/UI tables pass on all three architectures, and
+Windows full UI install/repair/uninstall, x86 install/remove, folder upgrades, desktop choices
+and launch checks pass with fixtures. Native evidence and real-release acceptance limits
+are linked from
+[Windows packaging](packaging/windows/README.md).
+
+Windows Settings removal now opens the shared completion screen. Quiet install/removal
+remains unattended; Settings labels preserve compatibility with existing Launchers, and
+previous Modify policy is retained. Windows 11 fixture verification covers both installation
+scopes and x64/x86 removal, with full MSI validation on x64/x86/ARM64.

@@ -23,7 +23,6 @@
         DowngradeErrorMessage="A newer version of EffectCraft is already installed." />
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
     <!-- The setup wizard (installer-ui.wxs): pick the folder on a fresh install. -->
-    <UIRef Id="EffectcraftUI" />
 
     <Icon Id="EffectcraftIcon.ico" SourceFile="$(var.IconPath)" />
     <Property Id="ARPPRODUCTICON" Value="EffectcraftIcon.ico" />
@@ -54,11 +53,12 @@
          DESKTOPSHORTCUT=0 silently); an upgrade keeps what the installed copy chose, and adds none
          to an install from before this option. -->
     <Property Id="DESKTOPSHORTCUT" Value="1" Secure="yes" />
+    <Property Id="CRAFTDESKTOPSHORTCUTSELECTED" Secure="yes" />
     <Property Id="PREVIOUSDESKTOPSHORTCUT" Secure="yes">
       <RegistrySearch Id="PreviousDesktopShortcut" Root="HKLM" Type="raw" Key="Software\EffectCraft" Name="DesktopShortcut" />
     </Property>
     <SetProperty Id="DESKTOPSHORTCUT" Value="[PREVIOUSDESKTOPSHORTCUT]" After="SetINSTALLFOLDERFromExe" Sequence="both"
-        Condition="WIX_UPGRADE_DETECTED" />
+        Condition="WIX_UPGRADE_DETECTED AND NOT CRAFTDESKTOPSHORTCUTSELECTED" />
 
     <StandardDirectory Id="ProgramFiles6432Folder">
       <Directory Id="INSTALLFOLDER" Name="EffectCraft" />
@@ -68,7 +68,10 @@
 
     <Feature Id="Main" Title="EffectCraft" Level="1">
       <ComponentGroupRef Id="EffectcraftFiles" />
+      <ComponentGroupRef Id="CraftInstallerSettings" />
     </Feature>
+    <!-- Shared full UI; app installation policy remains below. -->
+    <UIRef Id="CraftInstallerUI" />
   </Package>
 
   <Fragment>

@@ -107,7 +107,7 @@ Assert-InstalledIn $Custom
 Assert-DesktopShortcut $true
 # Read single values: Get-ItemProperty throws on some machines' malformed Uninstall entries.
 $arp = @(Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall' |
-  ForEach-Object { if ($_.GetValue('DisplayName') -eq 'EffectCraft') { $_.GetValue('DisplayVersion') } })
+  ForEach-Object { if ($_.GetValue('DisplayName') -eq 'EffectCraft (Craft Apps)' -and $_.GetValue('SystemComponent') -ne 1) { $_.GetValue('DisplayVersion') } })
 if ($arp.Count -ne 1 -or $arp[0] -ne '0.0.3') { throw "expected one EffectCraft 0.0.3 in Apps, found: $($arp -join ', ')" }
 
 # Repair the way the wizard's Repair button does: damage the CLI in place (a later write time, as a
