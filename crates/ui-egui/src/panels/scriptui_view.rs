@@ -15,7 +15,7 @@ use egui::{Align2, Color32, Rect, Sense, Stroke, StrokeKind, UiBuilder, pos2, ve
 use serde_json::{Value, json};
 
 use crate::EffectcraftApp;
-use crate::dock::PanelKind;
+use crate::dock::{PanelKind, WorkspaceExt as _};
 use crate::theme::Tokens;
 
 enum Act {
@@ -81,6 +81,11 @@ fn draw_children(app: &mut EffectcraftApp, ui: &mut egui::Ui, origin: egui::Pos2
     }
 }
 
+/// Draws ScriptUI widget `w` of window `win` at its bounds offset by `origin`, registering it for
+/// automation, and recurses into containers. Widgets with an `onDraw` handler are painted by the
+/// script (replacing the default look, or on top of it when it called `drawOSControl()`) while
+/// buttons, checkboxes and radios still take clicks. Edits and clicks are appended to `acts` for
+/// [`perform`]; while a field or slider is in use its live value lives in egui temp data.
 fn draw_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, origin: egui::Pos2, win: u32, w: &Widget, acts: &mut Vec<Act>) {
     let t = app.tokens;
     let services = app.session.services.clone();
@@ -209,7 +214,7 @@ fn draw_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, origin: egui::Pos2, 
             let mut pick: Option<usize> = None;
             ui.add_enabled_ui(w.enabled, |ui| {
                 ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
-                    egui::ComboBox::from_id_salt(id).selected_text(cur).width(rect.width() - 8.0).show_ui(ui, |ui| {
+                    craft_ui::ComboBox::from_id_salt(id).selected_text(cur).width(rect.width() - 8.0).show_ui(ui, |ui| {
                         for (i, it) in w.items.iter().enumerate() {
                             if it == "-" {
                                 ui.separator();
@@ -471,6 +476,9 @@ fn snug(r: Rect, text: &str) -> Rect {
     Rect::from_min_size(r.min, vec2(w, r.height()))
 }
 
+/// Runs the actions collected while drawing a ScriptUI window as `scriptui.*` commands, in order.
+/// A reply carrying an `error` becomes a toast with the script's message; otherwise a non-empty
+/// `output` becomes the status line (its last line). Command failures also go to `app.ui.status`.
 fn perform(app: &mut EffectcraftApp, ctx: &egui::Context, acts: Vec<Act>) {
     for a in acts {
         let (cmd, p) = match a {
@@ -546,7 +554,7 @@ pub fn show_windows(app: &mut EffectcraftApp, ctx: &egui::Context) {
     perform(app, ctx, acts);
 }
 
-/// A dockable ScriptUI panel's content (Window ▸ <panel>.jsx).
+/// A dockable ScriptUI panel's content (Window ▸ `<panel>.jsx`).
 pub fn panel(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect, id: u32) {
     let t = app.tokens;
     let Some(mut w) = app.session.script_ui.window(id).cloned() else {
@@ -579,12 +587,7 @@ pub fn panel_title(app: &EffectcraftApp, id: u32) -> Option<String> {
 /// Close the dock panels whose script window has gone (the script closed it, or a saved
 /// workspace from an earlier run).
 pub fn sync_panels(app: &mut EffectcraftApp) {
-    let mut all = vec![];
-    app.ui.dock.panels(&mut all);
-    for f in &app.ui.floating {
-        all.extend(f.panels.iter().copied());
-    }
-    for p in all {
+    for p in app.ui.dock.panels() {
         if let PanelKind::ScriptPanel(id) = p
             && app.session.script_ui.window(id).is_none()
         {

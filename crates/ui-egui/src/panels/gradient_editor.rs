@@ -246,6 +246,12 @@ fn to_color32(c: [f32; 4]) -> Color32 {
     Color32::from_rgba_unmultiplied(b(c[0]), b(c[1]), b(c[2]), b(c[3]))
 }
 
+/// The Gradient Editor dialog for the gradient in `app.dialog_state.gradient`: a stop track for
+/// the opacity and colour tracks over a checkerboard preview, the selected stop's location,
+/// opacity or colour and a Delete button (when its track has more than one stop), the
+/// mismatched-stop-count warning, and OK/Cancel. Dragging moves stops, Delete/Backspace removes the
+/// selected one unless a widget wants keyboard input. OK runs the commit path; Cancel closes the dialog and drops the
+/// draft. With no gradient target it closes the dialog.
 pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     if app.dialog_state.gradient.target.is_none() {
         app.dialog = None;

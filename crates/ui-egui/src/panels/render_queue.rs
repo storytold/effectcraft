@@ -415,6 +415,11 @@ fn pick_output(app: &EffectcraftApp, it: &RenderQueueItem) -> Option<Option<Stri
     app.hooks.save_dialog(&app.session.resolve_output(it).unwrap_or_default())
 }
 
+/// The Render Queue panel: the Current Render strip (elapsed and remaining time, Render/Stop and
+/// Notify, plus the progress bar), the column header, the queued items with their output template,
+/// status and timings, and the footer totals. Comps dragged from the Project are queued on
+/// release. The open items and the selected item are kept in egui temp data; output-template forms
+/// open through a small form, and every change runs a `renderQueue.*` command.
 pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
     let p = ui.painter().with_clip_rect(rect);

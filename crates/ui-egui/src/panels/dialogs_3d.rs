@@ -172,7 +172,7 @@ pub fn camera(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     super::dialogs::modal(ctx, "Camera Settings", vec2(520.0, 420.0), t, |ui| {
         egui::Grid::new("cam-grid").num_columns(2).spacing([14.0, 9.0]).show(ui, |ui| {
             ui.label(tr("Type"));
-            egui::ComboBox::from_id_salt("cam-type").selected_text(if d.two_node { "Two-Node Camera" } else { "One-Node Camera" }).show_ui(ui, |ui| {
+            craft_ui::ComboBox::from_id_salt("cam-type").selected_text(if d.two_node { "Two-Node Camera" } else { "One-Node Camera" }).show_ui(ui, |ui| {
                 ui.selectable_value(&mut d.two_node, true, tr("Two-Node Camera"));
                 ui.selectable_value(&mut d.two_node, false, tr("One-Node Camera"));
             });
@@ -184,7 +184,7 @@ pub fn camera(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             ui.label(tr("Preset"));
             let focal = focal_for_zoom(w, d.zoom);
             let cur = PRESETS.iter().find(|(_, f)| (f - focal).abs() < 1e-6).map(|(n, _)| *n).unwrap_or("Custom");
-            egui::ComboBox::from_id_salt("cam-preset").selected_text(cur).show_ui(ui, |ui| {
+            craft_ui::ComboBox::from_id_salt("cam-preset").selected_text(cur).show_ui(ui, |ui| {
                 for (n, f) in PRESETS {
                     if ui.selectable_label(cur == n, n).clicked() {
                         d.zoom = zoom_for_focal(w, f);
@@ -268,7 +268,7 @@ pub fn light(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             crate::widgets::focus_on_open(ui.ctx(), &r, &d.name);
             ui.end_row();
             ui.label(tr("Light Type"));
-            let combo = egui::ComboBox::from_id_salt("light-type").selected_text(tr(d.kind.label())).show_ui(ui, |ui| {
+            let combo = craft_ui::ComboBox::from_id_salt("light-type").selected_text(tr(d.kind.label())).show_ui(ui, |ui| {
                 for (i, k) in LightKind::ALL.into_iter().enumerate() {
                     let item = ui.selectable_value(&mut d.kind, k, tr(k.label()));
                     app.auto.add(&format!("dialog.light.typeItem.{i}"), item.rect, k.label());
@@ -292,7 +292,7 @@ pub fn light(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             }
             if falls_off(d.kind) {
                 ui.label(tr("Falloff"));
-                egui::ComboBox::from_id_salt("light-falloff").selected_text(FALLOFFS[d.falloff.min(2)]).show_ui(ui, |ui| {
+                craft_ui::ComboBox::from_id_salt("light-falloff").selected_text(FALLOFFS[d.falloff.min(2)]).show_ui(ui, |ui| {
                     for (i, f) in FALLOFFS.iter().enumerate() {
                         ui.selectable_value(&mut d.falloff, i, *f);
                     }

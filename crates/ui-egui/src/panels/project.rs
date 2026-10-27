@@ -191,6 +191,8 @@ fn fit(r: Rect, w: f32, h: f32) -> Rect {
 
 /// An inline text edit in progress: (item, field `name`|`comment`, text).
 type Editing = (u64, String, String);
+/// The `egui::Id` of the Project panel's inline edit in progress ([`Editing`]): the item, which
+/// field (`name` or `comment`) and the text being typed.
 fn edit_id() -> egui::Id {
     egui::Id::unique("proj-inline-edit")
 }
@@ -379,6 +381,11 @@ pub(crate) fn reveal(app: &mut EffectcraftApp, ctx: &egui::Context, items: &[Ite
     app.show_panel(crate::dock::PanelKind::Project);
 }
 
+/// The Project panel: the selected item's thumbnail and details (with the comps that use it), the
+/// search field, sortable column headers, and the item rows (folders, comps, footage and solids)
+/// with selection, Shift/Cmd ranges, keyboard navigation, inline rename, drag-and-drop move,
+/// marquee selection and context menus. Only the rows in view are drawn. File commands are queued
+/// and run through [`crate::menus::invoke`] at the end, with failures shown in `app.ui.status`.
 pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
     let p = ui.painter().clone();

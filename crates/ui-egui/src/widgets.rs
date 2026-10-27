@@ -22,6 +22,8 @@ struct TabOrder {
     pending: Option<(egui::Id, bool, u64)>,
 }
 
+/// The temp-data id of the [`TabOrder`] for the panel containing `ui` (unique per panel scope;
+/// `Id::NULL` outside a tagged panel).
 fn tab_order_id(ui: &Ui) -> egui::Id {
     let panel = ui.stack().iter().find(|s| s.tags().contains(PANEL_TAG)).map_or(egui::Id::NULL, |s| s.scope_id);
     egui::Id::unique(("hot-tab-order", panel))
@@ -326,6 +328,9 @@ pub fn text_field(ui: &mut Ui, rect: Rect, text: &mut String, hint: &str, t: &To
     field(ui, rect, text, hint, t, false)
 }
 
+/// The shared body of [`text_field`] and [`search_field`]: paints the rounded field (and, for
+/// `search`, a magnifier), places a single-line `TextEdit` on `text` filling the inner rect,
+/// and returns its response.
 fn field(ui: &mut Ui, rect: Rect, text: &mut String, hint: &str, t: &Tokens, search: bool) -> Response {
     let h = rect.height();
     ui.painter().rect_filled(rect, h / 2.0, t.field_bg);
@@ -509,6 +514,8 @@ pub fn check_label(on: bool, label: &str) -> String {
     if on { format!("✓ {label}") } else { format!("   {label}") }
 }
 
+/// The atom id of [`label_swatch`]'s slot inside a button, which [`paint_label_swatch`] looks
+/// up on the laid-out button.
 fn label_swatch_id() -> egui::IdSalt {
     egui::IdSalt::new("label-swatch")
 }

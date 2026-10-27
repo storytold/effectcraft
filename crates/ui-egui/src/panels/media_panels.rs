@@ -63,6 +63,12 @@ fn thumbnail(app: &EffectcraftApp, ctx: &egui::Context, path: &str, budget: &mut
     thumb
 }
 
+/// The Media Browser panel: a toolbar (up, home, favourite, "Media only" filter and the browser's
+/// own actions), the current path, the favourite places and a tile grid of the folder's entries
+/// with thumbnails for images and videos. Double-click opens a folder or imports a file; files
+/// drag out as [`DragPayload::Files`] and a context menu copies paths, imports (optionally into the
+/// comp) or adds a favourite. The listing is cached per folder and filter for a second, and every
+/// change runs a `mediaBrowser.*` command.
 pub fn media_browser(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
     let ctx = ui.ctx().clone();

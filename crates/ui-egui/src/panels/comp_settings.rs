@@ -181,6 +181,8 @@ fn timecode_field(ui: &mut egui::Ui, buf: &mut Option<String>, secs: &mut f64, r
     r
 }
 
+/// The temp-data id of the one-shot flag that makes the Save Preset name field take focus when
+/// it is next drawn.
 fn name_focus_id() -> egui::Id {
     egui::Id::unique("comp-preset-name-focus")
 }
@@ -284,7 +286,7 @@ pub fn show(
                     .or_else(|| PRESETS.iter().find(|(_, w, h, par, f)| matches(d, *w, *h, *par, *f)).map(|p| p.0))
                     .unwrap_or("Custom");
                 ui.horizontal(|ui| {
-                    let r = egui::ComboBox::from_id_salt("comp-preset").width(300.0).selected_text(current).show_ui(ui, |ui| {
+                    let r = craft_ui::ComboBox::from_id_salt("comp-preset").width(300.0).selected_text(current).show_ui(ui, |ui| {
                         // Your own presets first, then the built-in ones.
                         for q in custom {
                             if ui.selectable_label(q.name == current, &q.name).clicked() {
@@ -348,7 +350,7 @@ pub fn show(
                         .find(|(_, v)| (v - d.pixel_aspect).abs() < 1e-3)
                         .map(|p| p.0.to_string())
                         .unwrap_or_else(|| format!("{:.2}", d.pixel_aspect));
-                    let r = egui::ComboBox::from_id_salt("comp-par").width(220.0).selected_text(cur).show_ui(ui, |ui| {
+                    let r = craft_ui::ComboBox::from_id_salt("comp-par").width(220.0).selected_text(cur).show_ui(ui, |ui| {
                         for (name, v) in PIXEL_ASPECTS {
                             if ui.selectable_label((v - d.pixel_aspect).abs() < 1e-3, *name).clicked() {
                                 d.pixel_aspect = *v;
@@ -367,7 +369,7 @@ pub fn show(
                     // Any rate can be typed; the list holds the common ones.
                     let r = ui.add(crate::widgets::drag_value(egui::DragValue::new(&mut d.fps).range(1.0..=999.0).speed(0.01).max_decimals(3)));
                     auto.add("dialog.comp.frameRate", r.rect, "Frame Rate");
-                    let r = egui::ComboBox::from_id_salt("comp-fps").width(18.0).selected_text("").show_ui(ui, |ui| {
+                    let r = craft_ui::ComboBox::from_id_salt("comp-fps").width(18.0).selected_text("").show_ui(ui, |ui| {
                         for f in FRAME_RATES {
                             if ui.selectable_label((d.fps - f).abs() < 1e-3, format!("{f}")).clicked() {
                                 d.fps = *f;
@@ -385,7 +387,7 @@ pub fn show(
                 // the frame it renders beside it.
                 ui.label(tr("Resolution:"));
                 ui.horizontal(|ui| {
-                    let r = egui::ComboBox::from_id_salt("comp-resolution").width(90.0).selected_text(tr(d.resolution.label())).show_ui(ui, |ui| {
+                    let r = craft_ui::ComboBox::from_id_salt("comp-resolution").width(90.0).selected_text(tr(d.resolution.label())).show_ui(ui, |ui| {
                         for res in Resolution::ALL {
                             ui.selectable_value(&mut d.resolution, res, tr(res.label()));
                         }
@@ -472,7 +474,7 @@ pub fn show(
         Tab::Renderer => {
             ui.horizontal(|ui| {
                 ui.label(tr("Renderer:"));
-                let r = egui::ComboBox::from_id_salt("comp-renderer").selected_text(tr(if d.advanced_3d { "Advanced 3D" } else { "Classic 3D" })).show_ui(
+                let r = craft_ui::ComboBox::from_id_salt("comp-renderer").selected_text(tr(if d.advanced_3d { "Advanced 3D" } else { "Classic 3D" })).show_ui(
                     ui,
                     |ui| {
                         ui.selectable_value(&mut d.advanced_3d, false, tr("Classic 3D"));

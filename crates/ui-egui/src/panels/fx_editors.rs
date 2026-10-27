@@ -111,6 +111,8 @@ fn tabs(
     out
 }
 
+/// A small "Reset" link centred in `r`, registered under the automation id `id`; returns whether
+/// it was clicked.
 fn reset_link(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, r: Rect, id: &str) -> bool {
     let t = app.tokens;
     let resp = ui.interact(r, egui::Id::unique(id), Sense::click());
@@ -162,6 +164,10 @@ pub fn inline_editor(
 
 const RGB_CURVES: [(&str, &str); 4] = [("master", "Master"), ("red", "Red"), ("green", "Green"), ("blue", "Blue")];
 
+/// The Lumetri RGB Curves editor for effect group `g`: channel tabs (Master, Red, Green, Blue),
+/// the selected channel's curve graph with its Reset, and the point positions registered for
+/// automation. A curve edit or Reset is queued on `actions` as a `prop.set` of that channel's
+/// curve string; the visible channel is remembered in `app.ui.fx_curve_channel` per group.
 #[allow(clippy::too_many_arguments)]
 fn rgb_curves(
     app: &mut EffectcraftApp,
@@ -193,7 +199,7 @@ fn rgb_curves(
     }
     let gr = Rect::from_min_size(pos2(x0, r.min.y + 30.0), vec2(size, size));
     let gid = egui::Id::unique(("lumetri-rgb", euid, ch));
-    let (resp, edit) = fw::curves_graph(ui, gr, &cur, ch, false, false, gid, &t);
+    let (resp, edit) = fw::curves_graph(ui, gr, &cur, ch, fw::CurveMode { pencil: false, natural: false }, gid, &t);
     app.auto.add(&format!("{prefix}.graph"), gr, "RGB Curves");
     register_points(app, &prefix, gr, &cur.0);
     let key = gesture_key(ui, gid, resp.drag_started() || resp.clicked());
@@ -269,6 +275,11 @@ fn hue_color(h: f32) -> Color32 {
     Color32::from(c)
 }
 
+/// The Lumetri Hue/Saturation Curves editor for effect group `g`: tabs for the Hue vs Sat,
+/// Hue vs Hue, Hue vs Luma, Luma vs Sat and Sat vs Sat curves, drawn as a neutral-relative offset
+/// curve over the axis' colour band, with point drag/add/remove gestures and a Reset. Changes are
+/// queued on `actions` as a `prop.set` of the selected curve's point list; the visible tab is kept
+/// in `app.ui.fx_curve_channel` per group.
 #[allow(clippy::too_many_arguments)]
 fn huesat_curves(
     app: &mut EffectcraftApp,
@@ -441,6 +452,12 @@ fn wheel_point(c: Pos2, radius: f32, phase: f32) -> Pos2 {
     pos2(c.x + radius * a.sin(), c.y - radius * a.cos())
 }
 
+/// Colorama's Output Cycle wheel for effect group `g`: the palette drawn as a ring with its stops.
+/// Clicking the ring adds a stop with the colour there, dragging moves one, and Alt-clicking or
+/// dragging one off removes it while another stop remains; the selected stop's colour can be
+/// edited below. A change queues
+/// the rewritten palette on `actions`, and for a preset palette also switches the effect to the
+/// custom palette in the same undo step.
 #[allow(clippy::too_many_arguments)]
 fn colorama_wheel(
     app: &mut EffectcraftApp,
@@ -657,6 +674,10 @@ pub fn join_map(m: &[fw::CurvePoints; 3]) -> String {
     m.iter().map(|c| c.format()).collect::<Vec<_>>().join(" | ")
 }
 
+/// Glow's Colour Map for effect group `g`: a strip showing the gradient the glow uses (A/B colours,
+/// or the arbitrary map sampled through the loop settings). In arbitrary-map mode it also draws the
+/// RGB curve tabs and the selected channel's graph with a Reset; edits queue a `prop.set` of
+/// `arbitraryMap` on `actions`.
 #[allow(clippy::too_many_arguments)]
 fn glow_map(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, layer: &Layer, g: &PropGroup, ectx: &EvalCtx, r: Rect, actions: &mut Actions) {
     let t = app.tokens;
@@ -713,7 +734,7 @@ fn glow_map(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, laye
     }
     let gr = Rect::from_min_size(pos2(x0, r.min.y + 30.0), vec2(size, size));
     let gid = egui::Id::unique(("glow-map", euid, ch));
-    let (resp, edit) = fw::curves_graph(ui, gr, &map[ch], ch + 1, false, false, gid, &t);
+    let (resp, edit) = fw::curves_graph(ui, gr, &map[ch], ch + 1, fw::CurveMode { pencil: false, natural: false }, gid, &t);
     app.auto.add(&format!("{prefix}.graph"), gr, "Arbitrary Map");
     register_points(app, &prefix, gr, &map[ch].0);
     let key = gesture_key(ui, gid, resp.drag_started() || resp.clicked());
@@ -769,6 +790,10 @@ pub fn add_pair(v: &[(f64, f64)]) -> (f64, f64) {
     ((a.0 + ds * 0.5).rem_euclid(1.0), (a.1 + gap * 0.5).rem_euclid(1.0))
 }
 
+/// Reshape's correspondence buttons: Add Point appends a pair at the widest destination-fraction
+/// gap (or `(0, 0)` for an empty list), Remove Point drops the last stored pair, and Clear removes
+/// all pairs. A status line says whether points are automatic. Each change
+/// queues a `prop.set` of the `correspondencePoints` string on `actions`.
 #[allow(clippy::too_many_arguments)]
 fn reshape_buttons(
     app: &mut EffectcraftApp,

@@ -2,7 +2,7 @@
 use effectcraft_engine::{Session, commands::text_edit::layer_doc, project::LayerId};
 use effectcraft_ui_egui::{
     EffectcraftApp,
-    dock::{DockNode, PanelKind, SplitSize},
+    dock::{self, PanelKind, SplitSize},
     panels::viewer::comp_to_screen,
 };
 use egui::{Event, Modifiers, PointerButton, Pos2, pos2, vec2};
@@ -71,12 +71,7 @@ fn character_stroke_eyedropper_samples_viewer() {
     s.execute("layer.setText", json!({"layer": text, "fill": [0.0, 0.0, 0.0], "size": 32.0})).unwrap();
     let mut app = EffectcraftApp::new(s);
     app.ui.viewer.show_layer_controls = false;
-    app.ui.dock = DockNode::Split {
-        vertical: false,
-        size: SplitSize::FixedB(360.0),
-        a: Box::new(DockNode::Tabs { panels: vec![PanelKind::Composition], active: 0 }),
-        b: Box::new(DockNode::Tabs { panels: vec![PanelKind::Character], active: 0 }),
-    };
+    app.ui.dock = dock::docked(dock::hsplit(SplitSize::FixedSecond(360.0), dock::tabs(&[PanelKind::Composition], 0), dock::tabs(&[PanelKind::Character], 0)));
     let builder = Harness::builder().with_size(vec2(1200.0, 760.0));
     let mut h = if std::env::var_os("EC_SNAPSHOT_DIR").is_some() { builder.wgpu().build_eframe(|_| app) } else { builder.build_eframe(|_| app) };
     h.state_mut().show_panel(PanelKind::Character);

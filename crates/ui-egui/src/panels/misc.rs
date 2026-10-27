@@ -362,6 +362,10 @@ pub fn audio(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
 }
 
+/// The History panel: every state of the session's branching history, indented under the state it
+/// grew from, with the current state highlighted and future/abandoned branches dimmed. Only the
+/// rows in view are drawn; the current state is scrolled into view when it changes. Clicking a
+/// state runs `edit.history.goto`, reporting a failure in `app.ui.status`.
 pub fn history(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
     let p = ui.painter().with_clip_rect(rect);
@@ -419,6 +423,9 @@ pub fn history(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
 }
 
+/// The Markers panel: the active comp's markers in time order, each with its timecode and comment;
+/// clicking a row moves the current time to that marker. Shows a hint when the comp has none and
+/// draws nothing without an active comp.
 pub fn markers(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
     let p = ui.painter().with_clip_rect(rect);

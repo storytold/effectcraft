@@ -41,6 +41,9 @@ fn number(
     nv.filter(|_| enabled)
 }
 
+/// A label at `x`, `y` and, to its right, a dropdown over `options` with `cur` selected. The
+/// dropdown only opens while `enabled`; otherwise only its label is dimmed. Returns the index
+/// picked from the open menu, if any.
 #[allow(clippy::too_many_arguments)]
 fn popup_row(
     app: &mut EffectcraftApp,
@@ -66,6 +69,7 @@ fn popup_row(
     widgets::popup_menu(ui, pop, r.left_bottom(), options, Some(cur))
 }
 
+/// The RGB components of an RGBA paint colour as `f32`, for the swatches and the colour picker.
 fn rgb(c: [f64; 4]) -> [f32; 3] {
     [c[0] as f32, c[1] as f32, c[2] as f32]
 }
@@ -79,6 +83,10 @@ fn paint_swap_icon(p: &egui::Painter, rect: Rect, color: Color32) {
     p.arrow(pos2(right, bottom), vec2(left - right, 0.0), stroke);
 }
 
+/// The Paint panel: opacity and flow, foreground/background colours with swap and reset, mode,
+/// channels, duration, erase mode and the Clone Stamp options. Every change is sent as a
+/// `paint.options` command. Mode and Channels are disabled for the Eraser; Erase is enabled
+/// only for it. The Clone Options heading is dimmed for other tools, but its controls stay enabled.
 pub fn paint(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
     let p = ui.painter().with_clip_rect(rect);
@@ -286,6 +294,9 @@ fn tip_preview(p: &egui::Painter, r: Rect, diameter: f64, angle: f64, roundness:
     }
 }
 
+/// The Brushes panel: a grid of built-in brush presets (each runs `paint.brushPreset`), a tip
+/// preview, diameter/angle/roundness/hardness/spacing fields and the size/opacity/flow pressure
+/// options. Values are sent as `paint.options` commands and failures land in `app.ui.status`.
 pub fn brushes(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
     let p = ui.painter().with_clip_rect(rect);

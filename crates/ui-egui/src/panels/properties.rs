@@ -51,6 +51,12 @@ fn decimals(v: f64) -> usize {
     if (v - v.round()).abs() < 1e-6 { 0 } else { 1 }
 }
 
+/// The Properties panel for the first selected layer: "N Selected Objects" when several are
+/// selected, the Layer Transform section (with Reset) and, for a text layer, the text, paragraph
+/// and Text Animation sections that edit the range being edited in the viewer. Rows are evaluated
+/// against a snapshot of the project; every row edit is queued and run through
+/// [`crate::menus::invoke`] at the end (range-scoped for `layer.setText`), with failures reported
+/// in `app.ui.status`. Without a selected layer it shows a hint.
 pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
     let p = ui.painter().with_clip_rect(rect);

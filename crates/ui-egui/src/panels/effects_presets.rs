@@ -264,6 +264,13 @@ fn user_presets(ctx: &egui::Context, force: bool, scan: impl FnOnce() -> Vec<Pre
     v
 }
 
+/// The Effects & Presets panel: search, a contents menu (colour-depth and GPU filters, whether
+/// presets show, categories or one alphabetical list, refresh and clear of the recently used
+/// list), then Favourites, Recently Used, Animation Presets and the effects by category or
+/// alphabetically, filtered by the query. Picking an effect or preset applies it to the selection
+/// (`effect.apply` or the preset's own command); applying an effect also records it as recently
+/// used and opens Effect Controls. Without a selected layer it only reports that in
+/// `app.ui.status`.
 pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
     let ctx = ui.ctx().clone();
