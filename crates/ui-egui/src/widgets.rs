@@ -2,6 +2,8 @@
 
 use egui::{Align2, Color32, Rect, Response, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 
+use effectcraft_project::ParamUi;
+
 use crate::automation::Registry;
 use crate::icons::{self, Icon};
 use crate::theme::Tokens;
@@ -20,9 +22,11 @@ struct TabOrder {
     pending: Option<(egui::Id, bool, u64)>,
 }
 
+/// The temp-data id of the [`TabOrder`] for the panel containing `ui` (unique per panel scope;
+/// `Id::NULL` outside a tagged panel).
 fn tab_order_id(ui: &Ui) -> egui::Id {
-    let panel = ui.stack().iter().find(|s| s.tags().contains(PANEL_TAG)).map_or(egui::Id::NULL, |s| s.id);
-    egui::Id::new(("hot-tab-order", panel))
+    let panel = ui.stack().iter().find(|s| s.tags().contains(PANEL_TAG)).map_or(egui::Id::NULL, |s| s.scope_id);
+    egui::Id::unique(("hot-tab-order", panel))
 }
 
 /// Puts hot-text field `id` in its panel's Tab order. True when a Tab in the field before it
@@ -145,6 +149,16 @@ pub fn proportional_scrub(m: egui::Modifiers) -> bool {
     m.command && m.alt
 }
 
+/// How far one pointer pixel scrubs a hot-text field: the property's slider (soft) range over
+/// 300 px. The Timeline and Effect Controls share this so they cannot drift; a large hard range
+/// only allows typing big values, it must not make dragging coarse (#2097).
+pub fn slider_scrub_speed(ui: &ParamUi) -> f64 {
+    match ui {
+        ParamUi::Slider { slider_min, slider_max, .. } => ((slider_max - slider_min) / 300.0).clamp(0.001, 50.0),
+        _ => 0.5,
+    }
+}
+
 /// [`hot_number_at`] for a whole number (an angle's revolutions): a drag steps it once every
 /// `1 / speed` pixels however slowly the pointer moves (the fractions add up between frames),
 /// and a typed value is truncated. Returns (rect, Some(new value) when changed, drag finished).
@@ -262,8 +276,13 @@ pub fn icon_toggle(ui: &mut Ui, rect: Rect, icon: Icon, on: bool, t: &Tokens, id
 }
 
 /// Icon button (toolbar style) with optional active state.
+///
+/// The icon alone carries no text, so the button's accessible name is its tooltip: callers chain
+/// `.on_hover_text(…)`, which names the node this reports (an icon button with neither is unnamed
+/// and kittest's accessibility check flags it).
 pub fn icon_button(ui: &mut Ui, rect: Rect, icon: Icon, active: bool, t: &Tokens, id: egui::Id) -> Response {
     let resp = ui.interact(rect, id, Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), active, ""));
     if active {
         ui.painter().rect_filled(rect, 4.0, t.accent);
     } else if resp.hovered() {
@@ -309,6 +328,9 @@ pub fn text_field(ui: &mut Ui, rect: Rect, text: &mut String, hint: &str, t: &To
     field(ui, rect, text, hint, t, false)
 }
 
+/// The shared body of [`text_field`] and [`search_field`]: paints the rounded field (and, for
+/// `search`, a magnifier), places a single-line `TextEdit` on `text` filling the inner rect,
+/// and returns its response.
 fn field(ui: &mut Ui, rect: Rect, text: &mut String, hint: &str, t: &Tokens, search: bool) -> Response {
     let h = rect.height();
     ui.painter().rect_filled(rect, h / 2.0, t.field_bg);
@@ -326,7 +348,7 @@ fn field(ui: &mut Ui, rect: Rect, text: &mut String, hint: &str, t: &Tokens, sea
             // As tall as the field, so the text and the hint sit on its middle (they sat high, #581).
             .min_size(inner.size())
             .font(Tokens::ui(12.0))
-            .vertical_align(egui::Align::Center),
+            .align(egui::Align2::LEFT_CENTER),
     )
 }
 
@@ -338,6 +360,15 @@ pub fn dropdown(ui: &mut Ui, rect: Rect, text: &str, t: &Tokens, id: egui::Id) -
 /// [`dropdown`] with a tooltip `tip` (shown always; it replaces the elided text's tooltip).
 pub fn dropdown_tip(ui: &mut Ui, rect: Rect, text: &str, tip: Option<&str>, t: &Tokens, id: egui::Id) -> Response {
     let resp = ui.interact(rect, id, Sense::click());
+    // A combo box shows its current value; with no separate label widget that value is also the
+    // name a screen reader announces. An empty value falls back to the tooltip (or a generic name)
+    // so the control is still reachable.
+    let name = match (text.is_empty(), tip) {
+        (false, _) => text.to_string(),
+        (true, Some(tip)) if !tip.is_empty() => tip.to_string(),
+        _ => crate::i18n::tr("Options").to_string(),
+    };
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, ui.is_enabled(), &name));
     ui.painter().rect_filled(rect, 3.0, if resp.hovered() { t.hover } else { t.field_bg });
     ui.painter().rect_stroke(rect, 3.0, Stroke::new(1.0, t.field_border), StrokeKind::Inside);
     // Text that doesn't fit before the arrow is elided (narrow panels).
@@ -370,6 +401,7 @@ pub fn dropdown_tip(ui: &mut Ui, rect: Rect, text: &str, tip: Option<&str>, t: &
 /// Text button with a subtle fill.
 pub fn text_button(ui: &mut Ui, rect: Rect, text: &str, primary: bool, t: &Tokens, id: egui::Id) -> Response {
     let resp = ui.interact(rect, id, Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), text));
     let bg = if primary {
         if resp.hovered() { t.accent_hover } else { t.accent }
     } else if resp.hovered() {
@@ -411,7 +443,7 @@ pub fn scroll_bar(ui: &mut Ui, auto: &mut Registry, key: &str, track: Rect, scro
     let thumb_len = (len * len / (len + max.max(0.0)).max(1.0)).max(16.0).min(len).max(0.0);
     let travel = (len - thumb_len).max(1.0);
     let thumb_at = |s: f32| track.min[a] + (len - thumb_len) * if max > 0.0 { (s / max).clamp(0.0, 1.0) } else { 0.0 };
-    let resp = ui.interact(track.expand2(if vertical { vec2(3.0, 0.0) } else { vec2(0.0, 3.0) }), egui::Id::new(key), Sense::drag());
+    let resp = ui.interact(track.expand2(if vertical { vec2(3.0, 0.0) } else { vec2(0.0, 3.0) }), egui::Id::unique(key), Sense::drag());
     let pressed = resp.is_pointer_button_down_on() && ui.input(|i| i.pointer.any_pressed());
     let mut s = scroll;
     if let Some(p) = resp.interact_pointer_pos().filter(|p| pressed && !(thumb_at(scroll)..=thumb_at(scroll) + thumb_len).contains(&p[a])) {
@@ -482,8 +514,10 @@ pub fn check_label(on: bool, label: &str) -> String {
     if on { format!("✓ {label}") } else { format!("   {label}") }
 }
 
-fn label_swatch_id() -> egui::Id {
-    egui::Id::new("label-swatch")
+/// The atom id of [`label_swatch`]'s slot inside a button, which [`paint_label_swatch`] looks
+/// up on the laid-out button.
+fn label_swatch_id() -> egui::IdSalt {
+    egui::IdSalt::new("label-swatch")
 }
 
 /// The colour swatch of a Label menu row, as an atom for its button: Label menus show each
@@ -494,7 +528,7 @@ pub fn label_swatch() -> egui::Atom<'static> {
 }
 
 /// Paint the [`label_swatch`] of a laid-out button: label `l`'s colour, an empty box for None.
-pub fn paint_label_swatch(ui: &Ui, out: &egui::AtomLayoutResponse, l: effectcraft_engine::color::Label, t: &Tokens) {
+pub fn paint_label_swatch(ui: &Ui, out: &egui::WidgetAtomResponse, l: effectcraft_engine::color::Label, t: &Tokens) {
     let Some(r) = out.rect(label_swatch_id()) else { return };
     let r = Rect::from_center_size(r.center(), vec2(11.0, 11.0));
     if l == effectcraft_engine::color::Label::None {
@@ -557,6 +591,44 @@ pub fn popup_menu(ui: &mut Ui, id: egui::Id, pos: egui::Pos2, options: &[String]
     })
 }
 
+/// The drop-down for a layer-valued property (`ParamUi::Layer`): the current layer shown as
+/// "N. name" (or "None"), and a popup of "None" plus every layer of the comp. Effect Controls
+/// and the Timeline share it so a layer reference (an Environment light's Source, a Displacement
+/// Map's layer) is picked the same way in every panel, and the reference is shown as its layer's
+/// index and name rather than its internal id. Returns `Some(chosen)` when the user picked —
+/// the layer's id, or `None` for "None" — and `None` while nothing is chosen; the caller writes
+/// it as an undoable `prop.set` (id, or null for "None").
+pub fn layer_picker(
+    ui: &mut Ui,
+    rect: Rect,
+    layers: &[effectcraft_engine::project::Layer],
+    current: Option<u64>,
+    t: &Tokens,
+    id: egui::Id,
+) -> Option<Option<u64>> {
+    let index_of = |wanted: u64| layers.iter().position(|l| l.id.0 == wanted);
+    let entry = |i: usize| layers.get(i).map(|l| format!("{}. {}", i + 1, l.name));
+    let current_index = current.and_then(index_of);
+    let label = current_index.and_then(entry).unwrap_or_else(|| crate::i18n::tr("None").to_string());
+    let pop = id.with("pop");
+    if dropdown(ui, rect, &label, t, id).clicked() {
+        open_popup(ui, pop);
+    }
+    if !popup_is_open(ui, pop) {
+        return None;
+    }
+    // Built only while open: a comp can hold hundreds of layers.
+    let mut options: Vec<String> = Vec::with_capacity(layers.len() + 1);
+    options.push(crate::i18n::tr("None").to_string());
+    options.extend((0..layers.len()).filter_map(entry));
+    // The current entry is highlighted (the first option is "None").
+    match popup_menu(ui, pop, rect.left_bottom(), &options, Some(current_index.map_or(0, |i| i + 1))) {
+        Some(0) => Some(None),
+        Some(picked) => layers.get(picked - 1).map(|l| Some(l.id.0)),
+        None => None,
+    }
+}
+
 /// The open popup list `id` at `pos`, drawn by `body` (`rows` entries and `seps` separators,
 /// for its height): as tall as the window allows, scrolling beyond with a scroll bar (a shape
 /// layer's Add menu has 20 entries, the blend modes 40, the fonts hundreds), and moved up when
@@ -592,7 +664,7 @@ pub(crate) fn note_open_popup_list(ctx: &egui::Context) {
 
 /// The pass a [`popup_list`] was last drawn in.
 fn popup_list_pass_id() -> egui::Id {
-    egui::Id::new("popup-list-pass")
+    egui::Id::unique("popup-list-pass")
 }
 
 /// Whether a menu, context menu or popup list is open, or the menu bar has the keyboard (as of
@@ -607,9 +679,94 @@ pub fn any_menu_open(ctx: &egui::Context) -> bool {
 /// whole: egui sizes a new menu from a default 400 pt area, so without a minimum a longer one
 /// (Window ▸ Workspace) got stuck at that height with its last entries scrolled out of view
 /// (#191).
-pub fn menu_scroll<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+///
+/// While the bar is mid press-and-browse (`browsing`), resting the pointer against the menu's
+/// bottom or top edge scrolls it from there — a crawl at first, then a run, as native menus do —
+/// so a long list can be walked with no wheel. Without the hold the edges do nothing: the wheel
+/// and the scroll bar are how a normally opened menu scrolls.
+pub fn menu_scroll<R>(ui: &mut Ui, browsing: bool, add: impl FnOnce(&mut Ui) -> R) -> R {
     let max_h = ui.ctx().content_rect().height() - 40.0;
-    egui::ScrollArea::vertical().max_height(max_h).min_scrolled_height(max_h).show(ui, add).inner
+    let pending = ui.scope_id().with("menu-edge-scroll-offset");
+    let target = ui.ctx().data_mut(|d| d.remove_temp::<f32>(pending));
+    let mut area = egui::ScrollArea::vertical().max_height(max_h).min_scrolled_height(max_h);
+    if let Some(target) = target {
+        area = area.vertical_scroll_offset(target);
+    }
+    let out = area.show(ui, add);
+    if let Some(target) = edge_scroll(ui, &out, browsing) {
+        ui.ctx().data_mut(|d| d.insert_temp(pending, target));
+    }
+    out.inner
+}
+
+/// The edge scroll [`menu_scroll`] adds while browsing: with the pointer resting in the bottom
+/// (top) band of an overflowing menu, its content crawls up (down) after a short pause, ramps to
+/// a run and stops at the end — and stops at once when the pointer leaves the band or the hold.
+///
+/// This runs after `ScrollArea::show`, which laid the menu out for the offset it had, so the new
+/// offset is supplied once to the next draw's builder: a frame of lag, invisible at these speeds.
+/// That explicit vertical offset cancels prior momentum on that draw; later wheel and scroll-bar
+/// input still applies normally. A replay can consume the target but cannot queue another step
+/// at the same input time.
+fn edge_scroll<R>(ui: &Ui, out: &egui::containers::scroll_area::ScrollAreaOutput<R>, browsing: bool) -> Option<f32> {
+    /// How far from the top / bottom edge the pointer starts the crawl (points).
+    const BAND: f32 = 18.0;
+    /// The pause before the crawl starts: a pointer merely grazing the edge must not jump.
+    const DELAY: f32 = 0.12;
+    /// Points per second: a crawl at first, reaching the run about three quarters of a second in.
+    const CRAWL: f32 = 45.0;
+    const RAMP: f32 = 700.0;
+    const RUN: f32 = 560.0;
+
+    let ctx = ui.ctx();
+    let over = out.content_size.y - out.inner_rect.height();
+    let dir = match (browsing, over > 0.0, ctx.input(|i| i.pointer.latest_pos())) {
+        (true, true, Some(p)) if out.inner_rect.contains(p) => {
+            if p.y >= out.inner_rect.max.y - BAND {
+                1
+            } else if p.y <= out.inner_rect.min.y + BAND {
+                -1
+            } else {
+                0
+            }
+        }
+        _ => 0,
+    };
+    // The clock the pause counts from, kept per menu: entering or leaving an edge band restarts
+    // it, so a later stay there crawls off again instead of jumping straight to the run.
+    let now = ctx.input(|i| i.time);
+    let key = out.id.with("menu-edge-scroll");
+    let (since, prev) = ctx.data(|d| d.get_temp::<(f64, i32)>(key)).unwrap_or((now, 0));
+    let since = if dir == prev {
+        since
+    } else {
+        ctx.data_mut(|d| d.insert_temp(key, (now, dir)));
+        now
+    };
+    if dir == 0 {
+        return None;
+    }
+    if now - since < f64::from(DELAY) {
+        // A pointer resting still fires no events: keep the frames coming until the crawl runs.
+        ctx.request_repaint();
+        return None;
+    }
+    let speed = (CRAWL + RAMP * ((now - since) as f32 - DELAY)).min(RUN);
+    let crawl = ctx.input(|i| i.unstable_dt).min(0.05) * speed * dir as f32;
+    let old = out.state.unclamped_offset().y;
+    let new = (old + crawl).clamp(0.0, over);
+    if new == old {
+        // At the end of the list the crawl stands still and asks for no more frames.
+        return None;
+    }
+    ctx.request_repaint();
+    let stepped = out.id.with("menu-edge-scroll-step");
+    if ctx.data(|d| d.get_temp::<f64>(stepped)) == Some(now) {
+        return None;
+    }
+    // Stamp the queue operation, not consumption: a later real frame must still take a step.
+    ctx.data_mut(|d| d.insert_temp(stepped, now));
+    Some(new)
 }
 
 /// egui's menu style with no gap between the rows: the gap the app's item spacing left between
@@ -665,6 +822,15 @@ pub(crate) fn constrained(c: &[f64], d: usize, v: f64) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #2097: the drag speed comes from the slider range, not a much wider hard range.
+    #[test]
+    fn slider_scrub_speed_uses_the_slider_range() {
+        let slider = |min, max, slider_min, slider_max| ParamUi::Slider { min, max, slider_min, slider_max, decimals: 1 };
+        assert!((slider_scrub_speed(&slider(0.0, 10_000.0, 0.0, 1_000.0)) - 1_000.0 / 300.0).abs() < 1e-9);
+        assert!((slider_scrub_speed(&slider(0.0, 1.0e9, 0.0, 1.0)) - 1.0 / 300.0).abs() < 1e-9);
+        assert_eq!(slider_scrub_speed(&ParamUi::Number), 0.5);
+    }
 
     /// #488: an inline editor selects its whole text only as it opens. Should it be without the
     /// keyboard for a frame later (an input method, another handler), it takes the keyboard back

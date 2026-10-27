@@ -560,10 +560,14 @@ fn matte_for(ctx: &EffectCtx, f: i64, img: &Arc<Image>, scale: f64) -> Option<(V
         && fc.key == frozen_key(ctx.params, ctx.layer_size, ctx.fps())
         && let Some(fr) = fc.frames.get(&f)
     {
-        let a = rle::decode(&fr.a)?;
-        let bnd = rle::decode(&fr.b)?;
         let [fw, fh] = fc.size;
-        if a.len() == fw * fh && bnd.len() == fw * fh {
+        let expected = fw.checked_mul(fh)?;
+        if fw == 0 || fh == 0 || expected > rle::MAX_PLANE_BYTES {
+            return None;
+        }
+        let a = rle::decode_bounded(&fr.a, expected)?;
+        let bnd = rle::decode_bounded(&fr.b, expected)?;
+        if a.len() == expected && bnd.len() == expected {
             let af: Vec<f32> = a.iter().map(|v| *v as f32 / 255.0).collect();
             let (alpha, band) = if fw == w && fh == h {
                 (af, bnd)

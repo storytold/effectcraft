@@ -80,7 +80,7 @@ pub fn is_importable(path: &std::path::Path) -> bool {
 }
 
 pub(crate) fn ext_of(path: &std::path::Path) -> String {
-    path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase()
+    path.extension().and_then(std::ffi::OsStr::to_str).unwrap_or("").to_ascii_lowercase()
 }
 
 /// The `image` crate format of a still: from its signature, else from its extension (Targa has

@@ -16,7 +16,7 @@ use crate::widgets::{open_popup, popup_is_open, pressed_outside, select_all};
 /// user picks a colour.
 pub fn srgb_color_button(ui: &mut Ui, c: &mut [f32; 3]) -> Response {
     let (rect, mut resp) = ui.allocate_exact_size(ui.spacing().interact_size, Sense::click());
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::ColorButton, ui.is_enabled(), srgb_hex(*c)));
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ColorWell, ui.is_enabled(), srgb_hex(*c)));
     let stroke = if resp.hovered() { ui.visuals().widgets.hovered.fg_stroke } else { ui.visuals().widgets.inactive.bg_stroke };
     ui.painter().rect_filled(rect, 2.0, srgb32(*c));
     ui.painter().rect_stroke(rect, 2.0, stroke, StrokeKind::Inside);
@@ -77,8 +77,10 @@ pub fn color_popup(ui: &mut Ui, id: egui::Id, pos: egui::Pos2, c: &mut [f32; 3])
     out.changed
 }
 
+/// The `egui::Id` of the pass number in which a colour picker last stayed open, which
+/// [`open_recently`] uses to keep Escape for the picker rather than the dialog under it.
 fn open_pass_id() -> egui::Id {
-    egui::Id::new("color-picker-open-pass")
+    egui::Id::unique("color-picker-open-pass")
 }
 
 /// A colour picker is open: it was drawn, and stayed open, in this pass or the last one (so one
@@ -175,6 +177,12 @@ impl Pick {
 const SQUARE: f32 = 200.0;
 const SLIDER_W: f32 = 16.0;
 
+/// The colour picker popup's contents: saturation/value square, channel slider, number fields for
+/// H/S/B and R/G/B, a hex field and an original-colour swatch, plus OK and Cancel. `*c` is updated
+/// as the UI changes and `original` is what Cancel (or the swatch) restores. The chosen channel
+/// and the HSV/RGB pair are remembered in egui temp data so reopening keeps the hue when
+/// saturation or value reaches zero. Returns what the picker did this frame; it never runs a
+/// command itself.
 fn color_picker(ui: &mut Ui, id: egui::Id, c: &mut [f32; 3], original: [f32; 3]) -> Outcome {
     let state_id = id.with("pick");
     let mut pick = match ui.data(|d| d.get_temp::<([f32; 3], [f32; 3])>(state_id)) {
@@ -183,7 +191,7 @@ fn color_picker(ui: &mut Ui, id: egui::Id, c: &mut [f32; 3], original: [f32; 3])
         None => Pick { hsv: rgb_to_hsv(*c), rgb: *c },
     };
     // The slider's channel is remembered between pickers, as After Effects does.
-    let chan_id = egui::Id::new("color-picker-channel");
+    let chan_id = egui::Id::unique("color-picker-channel");
     let mut chan = ui.data(|d| d.get_temp::<usize>(chan_id)).and_then(|i| CHANS.get(i).map(|c| c.0)).unwrap_or(Chan::H);
     let before = pick;
     let mut out = Outcome::default();
@@ -268,7 +276,7 @@ const CHANS: [(Chan, &str); 6] = [(Chan::H, "H"), (Chan::S, "S"), (Chan::V, "B")
 /// Drag or click on the square to set its two channels.
 fn square(ui: &mut Ui, chan: Chan, pick: &mut Pick) {
     let (rect, resp) = ui.allocate_exact_size(vec2(SQUARE, SQUARE), Sense::click_and_drag());
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Slider, true, "Color field"));
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Slider, true, "Color field"));
     let (x, y) = chan.square();
     if let Some(p) = resp.interact_pointer_pos().filter(|_| resp.is_pointer_button_down_on()) {
         *pick = pick.at(chan, (p.x - rect.min.x) / rect.width(), 1.0 - (p.y - rect.min.y) / rect.height());
@@ -297,7 +305,7 @@ fn square(ui: &mut Ui, chan: Chan, pick: &mut Pick) {
 /// Drag or click on the slider to set `chan`; arrows on both sides mark its value.
 fn slider(ui: &mut Ui, chan: Chan, pick: &mut Pick) {
     let (outer, resp) = ui.allocate_exact_size(vec2(SLIDER_W + 12.0, SQUARE), Sense::click_and_drag());
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Slider, true, "Color slider"));
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Slider, true, "Color slider"));
     let bar = Rect::from_center_size(outer.center(), vec2(SLIDER_W, SQUARE));
     if let Some(p) = resp.interact_pointer_pos().filter(|_| resp.is_pointer_button_down_on()) {
         *pick = pick.set(chan, 1.0 - (p.y - bar.min.y) / bar.height());
@@ -332,10 +340,10 @@ fn slider(ui: &mut Ui, chan: Chan, pick: &mut Pick) {
 fn swatches(ui: &mut Ui, new: [f32; 3], original: [f32; 3]) -> bool {
     let (rect, _) = ui.allocate_exact_size(vec2(64.0, 64.0), Sense::hover());
     let (top, bottom) = rect.split_top_bottom_at_fraction(0.5);
-    let new_resp = ui.interact(top, ui.id().with("new-swatch"), Sense::hover());
-    new_resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Other, true, "New color"));
-    let old = ui.interact(bottom, ui.id().with("original-swatch"), Sense::click()).on_hover_text(tr("Original color: click to go back to it"));
-    old.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Original color"));
+    let new_resp = ui.interact(top, ui.scope_id().with("new-swatch"), Sense::hover());
+    new_resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Unknown, true, "New color"));
+    let old = ui.interact(bottom, ui.scope_id().with("original-swatch"), Sense::click()).on_hover_text(tr("Original color: click to go back to it"));
+    old.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Original color"));
     ui.painter().rect_filled(top, 0.0, srgb32(new));
     ui.painter().rect_filled(bottom, 0.0, srgb32(original));
     ui.painter().rect_stroke(rect, 0.0, ui.visuals().widgets.inactive.bg_stroke, StrokeKind::Outside);

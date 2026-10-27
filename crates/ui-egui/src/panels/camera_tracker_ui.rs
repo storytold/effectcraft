@@ -217,11 +217,11 @@ pub fn viewer_hook(
     // Interaction over the image.
     // While Space (Hand tool) is held the overlay only hovers, so the viewer underneath gets the pan drag.
     let sense = if super::space_hand(&ctx) { Sense::hover() } else { Sense::click_and_drag() };
-    let resp = ui.interact(map.area, egui::Id::new("viewer-camera-tracker"), sense);
+    let resp = ui.interact(map.area, egui::Id::unique("viewer-camera-tracker"), sense);
     app.auto.add("viewer.cameraTracker", map.area, "3D Camera Tracker points");
     // The overlay is on top of the viewer, so a middle-button drag lands here: pan the viewer like the Hand tool.
     if resp.dragged_by(egui::PointerButton::Middle) {
-        let pid = egui::Id::new("viewer-camera-tracker-pan");
+        let pid = egui::Id::unique("viewer-camera-tracker-pan");
         if resp.drag_started() {
             let start_pan = app.ui.viewer.pan;
             ui.data_mut(|d| d.insert_temp(pid, start_pan));
@@ -237,7 +237,7 @@ pub fn viewer_hook(
     let hover = resp.hover_pos();
     let point_at = |p: Pos2| hits.iter().filter(|h| h.1.distance(p) <= h.2 + 3.0).min_by(|x, y| x.1.distance(p).total_cmp(&y.1.distance(p))).map(|h| h.0);
     let tri = hover.filter(|p| point_at(*p).is_none()).and_then(|p| triangle_at(&hits, p));
-    let mid = egui::Id::new("viewer-camera-tracker-marquee");
+    let mid = egui::Id::unique("viewer-camera-tracker-marquee");
     let marquee: Option<Pos2> = ui.data(|d| d.get_temp(mid));
     // Hover target / the selection's target.
     if marquee.is_none() {
@@ -284,7 +284,7 @@ pub fn viewer_hook(
         }
     }
     // Right-click: the points under the cursor (selection, else the hovered triangle).
-    let cid = egui::Id::new("viewer-camera-tracker-menu-points");
+    let cid = egui::Id::unique("viewer-camera-tracker-menu-points");
     if resp.secondary_clicked() {
         let pts: Vec<u32> = if !selected.is_empty() {
             selected.clone()
@@ -413,12 +413,12 @@ pub fn editor(
     let b1 = Rect::from_min_size(pos2(r.min.x + 24.0, r.min.y + 4.0), vec2(84.0, 22.0));
     let b2 = Rect::from_min_size(pos2(b1.max.x + 8.0, b1.min.y), vec2(84.0, 22.0));
     let b3 = Rect::from_min_size(pos2(b2.max.x + 8.0, b1.min.y), vec2(110.0, 22.0));
-    if widgets::text_button(ui, b1, "Analyze", false, &t, egui::Id::new(("ct-analyze", g.uid))).clicked() && !busy {
+    if widgets::text_button(ui, b1, "Analyze", false, &t, egui::Id::unique(("ct-analyze", g.uid))).clicked() && !busy {
         actions.push(("camera.analyze".into(), me.clone()));
     }
     app.auto.add(&format!("effectControls.cameraTracker.{}.analyze", g.uid), b1, "Analyze");
     if running {
-        if widgets::text_button(ui, b2, "Cancel", false, &t, egui::Id::new(("ct-cancel", g.uid))).clicked() {
+        if widgets::text_button(ui, b2, "Cancel", false, &t, egui::Id::unique(("ct-cancel", g.uid))).clicked() {
             actions.push(("camera.cancel".into(), json!({})));
         }
         app.auto.add(&format!("effectControls.cameraTracker.{}.cancel", g.uid), b2, "Cancel");
@@ -426,7 +426,7 @@ pub fn editor(
     let params = effectcraft_engine::camera_track::static_params(g);
     let solve = ct::solve(&params);
     if solve.is_some() {
-        if widgets::text_button(ui, b3, "Create Camera", false, &t, egui::Id::new(("ct-camera", g.uid))).clicked() {
+        if widgets::text_button(ui, b3, "Create Camera", false, &t, egui::Id::unique(("ct-camera", g.uid))).clicked() {
             actions.push(("camera.create".into(), me.clone()));
         }
         app.auto.add(&format!("effectControls.cameraTracker.{}.createCamera", g.uid), b3, "Create Camera");

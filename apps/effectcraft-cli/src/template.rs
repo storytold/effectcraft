@@ -150,8 +150,11 @@ fn instantiate(s: &mut Session, source: u64, values: &Map<String, Value>, import
     }
     let added = execute(s, "layer.addItem", json!({"comp": parent, "item": source, "time": 0}))?;
     let instance = added.get("layer").and_then(Value::as_u64).ok_or_else(|| Failure::Error("cannot create template instance".into()))?;
-    // Keep a partial final frame: layer.addItem snaps its default end to the frame grid.
+    // Keep a partial final frame: layer.addItem snaps its default end to the frame grid. Give the
+    // wrapper the source's exact name, not Duplicate's numbered one, for `[compName]` outputs.
     s.edit("Template Duration", None, |project, _| {
+        let name = project.item(ItemId(source)).ok_or_else(|| EngineError::Other("template composition is missing".into()))?.name.clone();
+        project.item_mut(ItemId(parent)).ok_or_else(|| EngineError::Other("template render composition is missing".into()))?.name = name;
         let comp = project.comp_mut(ItemId(parent)).ok_or(EngineError::NoComp)?;
         let duration = comp.duration;
         let layer = comp.layer_mut(LayerId(instance)).ok_or_else(|| EngineError::Other("template instance is missing".into()))?;

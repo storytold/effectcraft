@@ -97,7 +97,7 @@ UI strings translated out of ≈ 3,900 (detail: [localization-parity.md](docs/lo
 | Korean | none | 0% |
 | Vietnamese | none | 0% |
 
-Also shipped: Traditional Chinese (partial, 29%), Ukrainian (partial, 29%), Czech (partial, 29%) and Russian (menus only, 16%). No language has had
+Also shipped: Traditional Chinese (partial, 29%), Ukrainian (partial, 29%), Czech (partial, 29%), Georgian (partial, 38%; native-speaker reviewed) and Russian (menus only, 16%). No other language has had
 native-speaker review.
 
 ## Upcoming
@@ -135,6 +135,7 @@ Come tell us what matters most to you on [Discord](https://discord.gg/artcraft).
   follow the shared standard: `docs/parity.md` became `docs/target-app-parity.md`; new
   `docs/roadmap.md`, `localization-parity.md`, `file-format-parity.md`, `hardware-parity.md`,
   `ui-parity.md`, `effects-parity.md` and `scripting-parity.md`.
+- 2026-10-14: Georgian (`ka`): every menu row, every panel-catalog row the Chinese catalogs have plus 195 Georgian-only ones, and the effect names and categories; Match System for `ka` / `ka-GE` / `ka_GE.UTF-8` locales. Reviewed by a native speaker.
 - 2026-10-10: Spanish (#460) and Brazilian Portuguese (#217) menu translations.
 - 2026-10-10: Japanese now translates the interface below the menu bar too: `crates/ui-egui/src/i18n/ui.rs` has a Japanese table with the same 396 rows as the Chinese ones (panels, dialogs, buttons and tooltips; the shape test keeps the three catalogs listing the same source strings). Menus were already Japanese.
 - 2026-10-09: Ukrainian now covers all 396 current panel-catalog strings, including dialogs, buttons and tooltips, alongside its menu translation. The catalog keeps the same source keys and placeholder counts as the Chinese catalogs; missing or engine-generated text still falls back to English.

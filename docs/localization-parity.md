@@ -1,6 +1,6 @@
 # Localization parity
 
-> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-12 · **Change:** minor (catalogs recounted at `upstream/main` 470ea7a3: menus in 10 languages, panels in 6, Hangul probe (#599)) · **Target:** Adobe After Effects 2026
+> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-23 · **Change:** minor (Georgian: menus, panels and effect names; missing strings show in English; `missing_translations_report` lists them) · **Target:** Adobe After Effects 2026
 
 How much of EffectCraft's interface is translated, language by language, compared with After
 Effects. [gaps.md](gaps.md) gap 16 and workstream G9 hold the work;
@@ -17,16 +17,17 @@ interface; Arabic and Hebrew text *in layers* is supported through its Middle Ea
 ## How EffectCraft translates
 
 - **Menus:** `crates/ui-egui/src/i18n.rs`, one catalog per language keyed by
-  `(command, English label)`. A test (`every_translation_key_exists_in_the_actual_menu_tree`)
-  fails if any fixed menu entry is untranslated or a row is stale, so every catalog covers all
-  fixed entries (624 catalog rows each at 470ea7a3, counted). The generated Effect menu is not part of that fixed tree: its entries
+  `(command, English label)` (624 catalog rows each at 470ea7a3, counted). A test
+  (`menu_catalogs_have_no_stale_or_duplicate_rows`) fails on a row whose entry left the menu tree
+  or on a repeated row. The generated Effect menu is not part of that fixed tree: its entries
   and category submenus take their labels from the effect catalog below.
 - **Panels, dialogs, buttons, tooltips:** `crates/ui-egui/src/i18n/ui.rs`, keyed by the English
   source string, with English fallback. Catalogs exist for Japanese (410 rows), Simplified and
   Traditional Chinese (506 each), Ukrainian (505), Brazilian Portuguese (400) and Czech (501);
-  counted at 470ea7a3.
+  counted at 470ea7a3. Georgian has every row the Chinese catalogs have at this revision (695, as
+  both Chinese catalogs now have), plus 191 for panels converted to the catalog.
 - **Effect names:** `crates/ui-egui/src/i18n/effects.rs`, keyed by **effect id**, in Simplified
-  Chinese (306 rows, one per effect in the registry, plus its 21 categories). The registry's
+  Chinese and Georgian (307 rows, one per effect in the registry, plus its 21 categories). The registry's
   English name stays the effect's identity: `effect.list`, `effect.apply {"effect": …}`, scripts
   and expressions match on it, and the property tree stores it as the effect group's name. Only
   the drawing — the Effect menu, Effect Controls, the Timeline and Effects & Presets — goes
@@ -38,6 +39,12 @@ interface; Arabic and Hebrew text *in layers* is supported through its Middle Ea
   slot is for). Each language decides for itself which names stay English — Adobe's Japanese
   interface leaves the `CC`, `VR` and `OCIO` sets in English while its Chinese one translates
   them — so a row repeating the English name is a choice, not a missing row.
+- **Missing strings:** a string with no row in the interface language shows in English, and no
+  test, build or release fails on a missing translation. The `missing_translations_report` test
+  (`crates/ui-egui/src/i18n.rs`) prints, per language, the fixed menu entries, panel strings, effect
+  names and effect categories that have no row. It always passes; `cargo xtask ci` runs it with
+  `--nocapture`, so the list is in the gate log. Locally:
+  `cargo test -p effectcraft-ui-egui --lib missing_translations_report -- --nocapture`.
 - **Not translated anywhere yet:** effect *parameter* names (≈ 1,650, `crates/effects`),
   engine-generated text (property names, errors, undo labels), the Home screen's unwrapped
   literals (#574), Learn tutorials and documentation.
@@ -76,13 +83,14 @@ the true percentages are slightly lower.
 | Korean | `ko` | 0 | — | Hangul fallback probe added (#599, closed); not checked on macOS here | no | none | 9–13 h + review |
 | Vietnamese | `vi` | 0 | — | Latin with stacked diacritics; untested | no | none (After Effects: none) | 8–12 h + review |
 
-Other languages EffectCraft ships (3):
+Other languages EffectCraft ships (4):
 
 | Language | Code | UI strings translated | Status | To `full` |
 |---|---|---|---|---|
 | Traditional Chinese | `zh-hant` | 1,130 (≈ 29%): menus 624 rows, panels 506 | partial | 6–9 h + review |
 | Ukrainian | `uk` | 1,129 (≈ 29%): menus 624 rows, panels 505 | partial | 6–9 h + review |
 | Czech | `cs` | 1,125 (≈ 29%): menus 624 rows, panels 501 | Existing catalog entries covered; unwrapped UI, effects and engine text still in English; AI-assisted, not yet native-speaker proofread | Remaining strings + independent native review |
+| Georgian | `ka` | 1,514 (≈ 39%): menus 628 rows, panels 886 (the Chinese catalogs' 695 plus 191 Georgian-only rows: form dialogs, context menus, column headers), effect names 307 + 21 categories; native-speaker reviewed | partial | 5–8 h |
 
 Russian (`ru`) has a menu catalog (624 rows, ≈ 16%); After Effects also ships Italian, which EffectCraft does not (8–12 h).
 
@@ -97,13 +105,14 @@ needs ≈ 2,900 more strings (≈ 5–9 h per language at the pace of #398 and #
 Effects' 10 non-English languages: **≈ 60–110 h**; the four extra languages of the standard list
 (Hindi, Arabic, Indonesian, Vietnamese) add ≈ 50–80 h, most of it right-to-left layout and
 complex shaping in the interface. Every language needs native-speaker review, which only a human
-can give; none has had it.
+can give; only Georgian, contributed by a native speaker (#1843), has had it.
 
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
 | 2026-10-12 | minor | Recounted: Russian, French, German and Czech menus (#873, #987), Brazilian Portuguese and Czech panels (#830, #987), Hangul probe (#599); overall ≈ 12% to ≈ 18%; Korean and Italian still absent |
+| 2026-10-14 | minor | Georgian (`ka`): menus 628, panels 886 (191 Georgian-only, in `GEORGIAN_PANELS`), effect names and categories in `effects.rs` |
 | 2026-10-10 | major | First localization parity document: catalog rows counted for all six languages, the twelve-language table, After Effects' 11 shipped languages from its bundle |
 | 2026-10-11 | minor | Ukrainian panel catalog brought level with the Chinese ones (495 of 496 rows, counted at this commit); its share rises to ≈ 29%. The other languages' panel counts are the 10 October measurement |
 | 2026-10-13 | minor | Effect names and the generated Effect menu leave English: `i18n/effects.rs` adds 306 rows keyed by effect id (Simplified Chinese, from After Effects 2026's interface and Adobe's Chinese documentation for the `CC` series) and the 21 category names. Parameter names are still English; no other language has rows |

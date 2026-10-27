@@ -40,12 +40,16 @@ struct Tex {
     rect: [f64; 4],
 }
 
+/// The `egui::Id` of the cached render of the layer shown in this panel ([`Tex`]), with the key
+/// the image was made from.
 fn tex_id() -> egui::Id {
-    egui::Id::new("layer-panel-tex")
+    egui::Id::unique("layer-panel-tex")
 }
 
+/// The `egui::Id` under which the panel's last Fit magnification is kept, so View ▸ Zoom In/Out
+/// can start from it (see [`last_fit`]).
 fn fit_id() -> egui::Id {
-    egui::Id::new("layer-panel-fit")
+    egui::Id::unique("layer-panel-fit")
 }
 
 /// The Layer panel's last Fit magnification (points per layer pixel), for View ▸ Zoom In / Zoom
@@ -83,6 +87,13 @@ fn default_view(layer: &Layer, tool: Tool) -> usize {
     }
 }
 
+/// The Layer panel: one layer in its own space with its masks and effects up to the View menu's
+/// choice, rendered synchronously at a zoom/pan the panel keeps (the last Fit magnification is
+/// published for the View menu). Wheel or pinch zooms about the pointer, the Hand tool or
+/// Space-drag pans, and the Zoom tool clicks zoom. The paint tools record a stroke's layer-space
+/// points while dragging and run `paint.stroke` on release (or on a click); Alt-click with the
+/// Clone Stamp sets its source. With a Roto Brush effect it hands the canvas to
+/// [`super::roto_tool`]. Without a current layer it shows how to open one.
 pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
     let ctx = ui.ctx().clone();
@@ -144,8 +155,8 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         names.extend(fx.groups().map(|g| g.name.clone()));
     }
     let vr = Rect::from_min_size(pos2(vx + 36.0, bar.center().y - 10.0), vec2(150.0, 20.0));
-    let pop = egui::Id::new("layer-view-pop");
-    if widgets::dropdown(ui, vr, &names[view.min(names.len() - 1)], &t, egui::Id::new("layer-view")).clicked() {
+    let pop = egui::Id::unique("layer-view-pop");
+    if widgets::dropdown(ui, vr, &names[view.min(names.len() - 1)], &t, egui::Id::unique("layer-view")).clicked() {
         widgets::open_popup(ui, pop);
     }
     app.auto.add("layerPanel.view", vr, "View");
@@ -233,7 +244,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
     let space = super::space_hand(&ctx);
     if space || matches!(app.ui.tool, Tool::Hand | Tool::Zoom) {
-        let resp = ui.interact(area, egui::Id::new("layer-panel-nav"), Sense::click_and_drag());
+        let resp = ui.interact(area, egui::Id::unique("layer-panel-nav"), Sense::click_and_drag());
         let alt = ui.input(|i| i.modifiers.alt);
         if resp.hovered() {
             ctx.set_cursor_icon(match app.ui.tool {
@@ -264,10 +275,10 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         return;
     }
     // Interaction: paint tools.
-    let resp = ui.interact(area, egui::Id::new("layer-panel-interact"), Sense::click_and_drag());
+    let resp = ui.interact(area, egui::Id::unique("layer-panel-interact"), Sense::click_and_drag());
     let kind = app.ui.tool.paint_kind();
     let o = app.session.state.paint.clone();
-    let did = egui::Id::new("layer-panel-drag");
+    let did = egui::Id::unique("layer-panel-drag");
     if let Some(hp) = resp.hover_pos() {
         let lp = to_layer(hp);
         app.pointer_comp = Some([lp[0] as f32, lp[1] as f32]);

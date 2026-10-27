@@ -157,7 +157,8 @@ pub struct ShadowMap {
     pub offset: u32,
     /// Depth bias in texels (scaled by the texel footprint at the receiver).
     pub bias: f32,
-    /// PCF spread (texels).
+    /// Penumbra width (output pixels) requested by Shadow Diffusion; the shader
+    /// converts it to a tap reach via the receiver's texel footprint.
     pub radius: f32,
 }
 
@@ -879,7 +880,7 @@ fn collapsed_layer<'a>(r: &Renderer<'a>, ctx: &EvalCtx<'a>, layer: &Layer, item:
     let saved = b.outer;
     b.outer = saved * ctx.world_matrix(layer);
     let t = nctx.time;
-    let any_solo = nctx.comp.layers.iter().any(|l| l.switches.solo && l.source.is_av());
+    let any_solo = nctx.comp.any_solo();
     for l in nctx.comp.layers.iter().rev() {
         if !l.is_active_at(t)
             || l.is_light()

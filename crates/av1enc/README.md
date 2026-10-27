@@ -4,8 +4,8 @@ Clean-room, pure-Rust AV1 encoder for EffectCraft's MP4 / WebM export (layer L0,
 no `unsafe`, builds for `wasm32-unknown-unknown`).
 
 Output is decoded **bit-exactly** by libdav1d (`ffmpeg -c:v libdav1d`, checked in
-`tests/ffmpeg_oracle.rs` when ffmpeg is installed) and by FilmCraft's spec-derived
-`filmcraft-av1` decoder (`tests/roundtrip.rs`): every decoded frame equals the encoder's own
+`tests/it/ffmpeg_oracle.rs` when ffmpeg is installed) and by FilmCraft's spec-derived
+`filmcraft-av1` decoder (`tests/it/roundtrip.rs`): every decoded frame equals the encoder's own
 reconstruction, so prediction never drifts.
 
 ## What is implemented

@@ -462,19 +462,19 @@ every request and reply, a render through an in-process offload; `tests_roto.rs`
 propagation through an offload streaming segmentations; `tests_mask_warp.rs`: Warp Stabilizer
 plans solved in the job, never by `warp.status` on the page), the frame-worker protocol
 (`crates/engine/src/remote.rs`: diff / patch, a replica following edits renders the same pixels;
-`crates/ui-egui/tests/ui_web_offload.rs`: the frame cache through a remote renderer, `wait: true`
+`crates/ui-egui/tests/it/ui_web_offload.rs`: the frame cache through a remote renderer, `wait: true`
 deferred until the offloaded job ends) and the Media Browser's virtual tree (`media_browser.rs`,
 `tests_panels.rs`). M13.24: deferred readbacks on a real device (`crates/gpu/src/tests_deferred.rs`:
 whole-frame GPU and CPU-composited frames in passes match the CPU, placeholders never reach the
 layer cache; `deferred.rs`: keys, late readbacks of an older frame dropped), the frame server's
 passes and Auto timing (`remote.rs`, a deferred stand-in accelerator), the browser's routing and
-disk cache (`crates/ui-egui/tests/ui_web_gpu_storage.rs`: a GPU frame worker renders effect frames,
+disk cache (`crates/ui-egui/tests/it/ui_web_gpu_storage.rs`: a GPU frame worker renders effect frames,
 the page's GPU keeps frames without effects, frames stored under their disk keys come back after a
 "reload" without rendering, the blue cache bar sees them; the storage manager's widgets and
 commands), the disk index (`disk_cache.rs`), the store's usage by kind and clearing (`store.rs`),
 `storage.*` (`storage.rs`), and every WGSL float literal fitting f32 (browsers reject the whole
 module otherwise; `tests.rs`). M13.30: job workers on a deferred device
-(`crates/ui-egui/tests/ui_web_job_gpu.rs`: a Render Queue job and a Warp Stabilizer analysis
+(`crates/ui-egui/tests/it/ui_web_job_gpu.rs`: a Render Queue job and a Warp Stabilizer analysis
 render their frames in passes on the device, with the CPU worker's pixels / result),
 particles, Advanced 3D and the job pass driver in passes (`crates/gpu/src/tests_deferred_jobs.rs`),
 layer buffers through the disk store and the prefetch plan (`remote.rs`

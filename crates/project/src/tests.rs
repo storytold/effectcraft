@@ -166,8 +166,31 @@ fn project_files_name_their_version_and_always_read_back() {
     p.comp_mut(cid).unwrap().layers[0].props.prop_mut("transform/opacity").unwrap().value = Value::Scalar(f64::NAN);
     let e = p.to_file_json().unwrap_err().to_string();
     assert!(e.contains("can't be saved"), "{e}");
+    // Infinity too, in either profile: the check doesn't rely on reading the file back.
+    p.comp_mut(cid).unwrap().layers[0].props.prop_mut("transform/opacity").unwrap().value = Value::Scalar(f64::INFINITY);
+    let e = p.to_file_json().unwrap_err().to_string();
+    assert!(e.contains("can't be saved"), "{e}");
     assert!(crate::is_newer_version("0.2.0", "0.1.9") && crate::is_newer_version("1.0.0-rc.1", "0.9.9"));
     assert!(!crate::is_newer_version("0.1.1", "0.1.1") && !crate::is_newer_version("0.1.0", "0.1.1"));
+}
+
+#[test]
+fn project_files_refuse_newer_schemas() {
+    let p = Project { schema: crate::SCHEMA_VERSION + 1, ..Project::default() };
+    let expected = format!(
+        "the project can't be saved: it holds a value a project file can't store (project schema {} is newer than this version supports ({}))",
+        p.schema,
+        crate::SCHEMA_VERSION
+    );
+    assert_eq!(p.to_file_json().unwrap_err().to_string(), expected);
+    assert_eq!(p.to_file_json_with_view(&crate::SavedView::default()).unwrap_err().to_string(), expected);
+}
+
+#[test]
+fn saved_files_reopen_in_pretty_and_compact_form() {
+    let (p, _cid) = project_with_layer();
+    assert_eq!(Project::from_json(&p.to_file_json().unwrap()).unwrap(), p, "the pretty project file");
+    assert_eq!(Project::from_json(&p.to_json_compact()).unwrap(), p, "compact JSON");
 }
 
 #[test]
@@ -211,4 +234,59 @@ fn item_users_count_layers_in_every_comp() {
     assert_eq!(p.item_users(pre), vec![(main, 1)]);
     assert!(p.item_users(unused).is_empty());
     assert!(p.item_users(main).is_empty());
+}
+
+/// A project of `n` empty comps; `links` adds a precomp layer of comp `b` inside comp `a`
+/// (indexes into the returned ids).
+fn comp_graph(n: usize, links: &[(usize, usize)]) -> (Project, Vec<crate::ItemId>) {
+    let mut p = Project::default();
+    let ids: Vec<crate::ItemId> = (0..n)
+        .map(|i| {
+            p.add_item(
+                &format!("C{i}"),
+                effectcraft_color::Label::None,
+                None,
+                ItemKind::Comp(Comp::new(8, 8, FrameRate::FPS_25, Tick::from_seconds_f64(1.0)).into()),
+            )
+        })
+        .collect();
+    for &(a, b) in links {
+        let outer = p.comp(ids[a]).unwrap().clone();
+        let l = build::layer(&mut p, &outer, "pre", LayerSource::Comp { item: ids[b] }, (8, 8), None);
+        let ItemKind::Comp(c) = &mut p.item_mut(ids[a]).unwrap().kind else { panic!("comp") };
+        std::sync::Arc::make_mut(c).layers.push(l);
+    }
+    (p, ids)
+}
+
+#[test]
+fn comp_contains_ends_on_cycles_long_chains_and_shared_precomps() {
+    // A ⇄ B cycle, C unrelated: the walk used to recurse until the stack ran out (#1237).
+    let (p, c) = comp_graph(3, &[(0, 1), (1, 0)]);
+    assert!(!p.comp_contains(c[0], c[2]));
+    assert!(p.comp_contains(c[0], c[1]) && p.comp_contains(c[1], c[0]));
+    // A comp nesting itself.
+    let (p, c) = comp_graph(2, &[(0, 0)]);
+    assert!(!p.comp_contains(c[0], c[1]));
+    assert!(p.comp_contains(c[0], c[0]));
+    // A target reached through a cycle.
+    let (p, c) = comp_graph(3, &[(0, 1), (1, 0), (1, 2)]);
+    assert!(p.comp_contains(c[0], c[2]));
+    assert!(!p.comp_contains(c[2], c[0]));
+    // 40 levels of diamonds: 2^40 paths, each comp visited once.
+    let mut links = vec![];
+    for i in 0..40 {
+        let (top, l, r, bottom) = (i * 3, i * 3 + 1, i * 3 + 2, i * 3 + 3);
+        links.extend([(top, l), (top, r), (l, bottom), (r, bottom)]);
+    }
+    let (p, c) = comp_graph(121, &links);
+    let t0 = std::time::Instant::now();
+    assert!(p.comp_contains(c[0], c[120]));
+    assert!(!p.comp_contains(c[120], c[0]));
+    assert!(t0.elapsed() < std::time::Duration::from_secs(1), "{:?}", t0.elapsed());
+    // A chain 20 000 comps deep (a deep recursion's stack frames).
+    let n = 20_000;
+    let (p, c) = comp_graph(n, &(0..n - 1).map(|i| (i, i + 1)).collect::<Vec<_>>());
+    assert!(p.comp_contains(c[0], c[n - 1]));
+    assert!(!p.comp_contains(c[n - 1], c[0]));
 }

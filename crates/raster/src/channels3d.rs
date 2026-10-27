@@ -148,6 +148,31 @@ impl AuxChannels {
         self.crypto_rank_planes(layer).iter().map(|(id, c)| (id[i], c[i])).collect()
     }
 
+    /// The Cryptomatte layer an effect asking for `want` (`CryptoObject`, …) reads: an exact
+    /// match, else one ending in it (`ViewLayer.CryptoObject`), else the first layer.
+    pub fn resolve_crypto_layer(&self, want: &str) -> Option<String> {
+        let layers = self.crypto_layers();
+        layers.iter().find(|l| l.as_str() == want || l.ends_with(want)).or(layers.first()).cloned()
+    }
+
+    /// The ID (its hash, `f32::to_bits`) with the most coverage at aux pixel `i` of Cryptomatte
+    /// layer `layer`, summed over the ranks it appears in. Ties go to the lower rank; IDs with
+    /// no positive coverage don't count. `None` when nothing covers the pixel.
+    pub fn crypto_id_at(&self, layer: &str, i: usize) -> Option<u32> {
+        let mut ids: Vec<(u32, f32)> = vec![];
+        for (id, cov) in self.crypto_rank_planes(layer) {
+            let (Some(id), Some(&c)) = (id.get(i), cov.get(i)) else { continue };
+            if c > 0.0 {
+                match ids.iter_mut().find(|(h, _)| *h == id.to_bits()) {
+                    Some((_, sum)) => *sum += c,
+                    None => ids.push((id.to_bits(), c)),
+                }
+            }
+        }
+        // `min_by` keeps the first of equal elements: a tie goes to the lower rank.
+        ids.into_iter().min_by(|a, b| b.1.total_cmp(&a.1)).map(|(h, _)| h)
+    }
+
     /// Aux pixel index of a layer-space point (nearest; `None` outside).
     #[inline]
     pub fn index_at(&self, lx: f64, ly: f64) -> Option<usize> {
@@ -210,6 +235,28 @@ pub fn crypto_float(hash: u32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The picked ID: most coverage (summed over ranks), ties to the lower rank, nothing when
+    /// no rank covers the pixel; layers resolve as the Cryptomatte effect does.
+    #[test]
+    fn crypto_id_at_takes_the_top_coverage_and_layers_resolve_by_suffix() {
+        let mut a = AuxChannels::new(4, 1, 1.0);
+        let f = |n: &str| crypto_float(crypto_hash(n));
+        let (x, y, z) = (f("x"), f("y"), f("z"));
+        for (c, v) in [("R", [x, x, x, x]), ("G", [0.3, 0.5, 0.0, 0.2]), ("B", [y, y, y, y]), ("A", [0.6, 0.5, 0.0, 0.3])] {
+            a.channels.push((format!("ViewLayer.CryptoObject00.{c}"), v.to_vec()));
+        }
+        for (c, v) in [("R", [z, z, z, x]), ("G", [0.1, 0.0, -1.0, 0.2])] {
+            a.channels.push((format!("ViewLayer.CryptoObject01.{c}"), v.to_vec()));
+        }
+        a.channels.push(("Other00.R".into(), vec![0.0; 4]));
+        let l = a.resolve_crypto_layer("CryptoObject").unwrap();
+        assert_eq!(l, "ViewLayer.CryptoObject");
+        assert_eq!(a.resolve_crypto_layer("CryptoMaterial").as_deref(), Some("Other"), "falls back to the first");
+        let at = |i| a.crypto_id_at(&l, i);
+        assert_eq!([at(0), at(1), at(2), at(3), at(9)], [Some(crypto_hash("y")), Some(crypto_hash("x")), None, Some(crypto_hash("x")), None]);
+        assert_eq!(AuxChannels::new(1, 1, 1.0).resolve_crypto_layer("CryptoObject"), None);
+    }
 
     #[test]
     fn murmur3_reference_values() {
