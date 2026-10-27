@@ -1355,11 +1355,11 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-aep"
-version = "0.12.0"
+version = "0.17.0"
 
 [[package]]
 name = "effectcraft-aep-export"
-version = "0.12.0"
+version = "0.17.0"
 dependencies = [
  "effectcraft-aep",
  "effectcraft-aep-import",
@@ -1374,7 +1374,7 @@ dependencies = [
 
 [[package]]
 name = "effectcraft-aep-import"
-version = "0.12.0"
+version = "0.17.0"
 dependencies = [
  "effectcraft-aep",
  "effectcraft-color",
