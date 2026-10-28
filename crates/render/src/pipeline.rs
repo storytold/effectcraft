@@ -3,7 +3,18 @@ use super::footage::{FootageSource, is_vector_footage};
 use super::frames::{blend_frames, content_bounds, field_frame, frame_blend_mode, frame_position, frame_size, interpret_pixels, roi_inside};
 use super::fx_host::{FxHost, essential_overrides};
 use super::opts::{Collapse3d, LayerTiming, MAX_THROUGH, RenderOpts, Through};
-use super::*;
+use super::{
+    Arc, AutoKey, AutoPick, BlendMode, Buf, Comp, EffectCtx, EffectEnv, EvalCtx, Footage, FootageKind, FrameBlend, FrameRate, GroupKind, Image, ItemId,
+    ItemKind, Layer, LayerCache, LayerSource, Params, Project, Quality, Region, Renderer, Tick, cache, color, masks, shapes, styles, text, three_d, vec2,
+};
+
+/// Coordinate space and stack range shared by CPU and accelerated effect evaluation.
+#[derive(Clone, Copy)]
+pub(crate) struct EffectStack {
+    pub adjustment: bool,
+    pub limit: usize,
+    pub origin: [f64; 2],
+}
 
 impl<'a> Renderer<'a> {
     pub fn new(project: &'a Project, footage: &'a dyn FootageSource, opts: RenderOpts) -> Renderer<'a> {
@@ -423,26 +434,16 @@ impl<'a> Renderer<'a> {
         // The comp below an adjustment layer is not in its layer space: it stays as it is.
         let origin = if adjustment { [0.0; 2] } else { ctx.effect_bounds(layer).1 };
         buf.rebase(origin);
-        let mut out = self.effect_space_stack(ctx, layer, buf, adjustment, limit, timing, origin);
+        let mut out = self.effect_space_stack(ctx, layer, buf, EffectStack { adjustment, limit, origin }, timing);
         out.rebase([-origin[0], -origin[1]]);
         out
     }
 
     /// [`Renderer::apply_effects_timed`] on a buffer already in effect space (measured from
     /// `origin`, in layer coordinates); the result stays in effect space.
-    #[allow(clippy::too_many_arguments)]
-    fn effect_space_stack(
-        &self,
-        ctx: &EvalCtx,
-        layer: &Layer,
-        buf: Buf,
-        adjustment: bool,
-        limit: usize,
-        timing: Option<&mut Vec<(String, f64)>>,
-        origin: [f64; 2],
-    ) -> Buf {
+    fn effect_space_stack(&self, ctx: &EvalCtx, layer: &Layer, buf: Buf, stack: EffectStack, timing: Option<&mut Vec<(String, f64)>>) -> Buf {
         let mut t = CpuFx { accel: self.active_accel(), levels: self.pipe.levels, buf: Some(buf) };
-        self.run_effect_stack(ctx, layer, adjustment, limit, timing, origin, &mut t);
+        self.run_effect_stack(ctx, layer, stack, timing, &mut t);
         t.buf.unwrap_or_else(|| Buf { img: Image::new(1, 1), offset: [0.0; 2], scale: self.opts.scale })
     }
 
@@ -450,17 +451,15 @@ impl<'a> Renderer<'a> {
     /// in layer coordinates): runs of GPU-capable effects go to [`FxTarget::gpu`] (when an
     /// accelerator is active and supports them), the rest to [`FxTarget::cpu`] one by one
     /// (quantised to the bit depth after each).
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn run_effect_stack(
         &self,
         ctx: &EvalCtx,
         layer: &Layer,
-        adjustment: bool,
-        limit: usize,
+        stack: EffectStack,
         mut timing: Option<&mut Vec<(String, f64)>>,
-        origin: [f64; 2],
         target: &mut dyn FxTarget,
     ) {
+        let EffectStack { adjustment, limit, origin } = stack;
         if !layer.switches.effects {
             return;
         }
@@ -873,7 +872,7 @@ impl<'a> Renderer<'a> {
         let origin = ctx.effect_bounds(layer).1;
         buf.rebase(origin);
         if effects > 0 {
-            buf = self.effect_space_stack(ctx, layer, buf, false, effects, None, origin);
+            buf = self.effect_space_stack(ctx, layer, buf, EffectStack { adjustment: false, limit: effects, origin }, None);
         }
         let buf = Arc::new(buf);
         // The buffer the cache keeps (another worker's, if it kept one first).

@@ -63,6 +63,27 @@ fn thumbnail(app: &EffectcraftApp, ctx: &egui::Context, path: &str, budget: &mut
     thumb
 }
 
+/// The Favorites column: one clickable row per place, the current folder `dir` highlighted.
+fn places_column(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, side: Rect, places: &[(String, String)], dir: &str) {
+    let t = app.tokens;
+    let mut fy = side.min.y + 22.0;
+    for (i, (name, path)) in places.iter().enumerate() {
+        let r = Rect::from_min_size(pos2(side.min.x, fy), vec2(side.width(), 20.0));
+        let resp = ui.interact(r, egui::Id::unique(("mb-fav", i)), Sense::click());
+        if path == dir {
+            p.rect_filled(r, 0.0, t.row_selected);
+        } else if resp.hovered() {
+            p.rect_filled(r, 0.0, t.hover);
+        }
+        p.text(pos2(r.min.x + 14.0, r.center().y), Align2::LEFT_CENTER, name, Tokens::ui(12.0), t.text);
+        app.auto.add(&format!("mediaBrowser.place.{i}"), r, name);
+        if resp.clicked() {
+            kit::exec(app, "mediaBrowser.go", json!({"path": path}));
+        }
+        fy += 20.0;
+    }
+}
+
 /// The Media Browser panel: a toolbar (up, home, favourite, "Media only" filter and the browser's
 /// own actions), the current path, the favourite places and a tile grid of the folder's entries
 /// with thumbnails for images and videos. Double-click opens a folder or imports a file; files
@@ -136,26 +157,11 @@ pub fn media_browser(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let side = Rect::from_min_max(pos2(rect.min.x, rect.min.y + 54.0), pos2(rect.min.x + 160.0_f32.min(rect.width() * 0.3), rect.max.y));
     p.line_segment([side.right_top(), side.right_bottom()], Stroke::new(1.0, t.separator));
     p.text(pos2(side.min.x + 10.0, side.min.y + 10.0), Align2::LEFT_CENTER, tr("Favorites"), Tokens::semibold(11.5), t.text_dim);
-    let mut fy = side.min.y + 22.0;
     let mut places: Vec<(String, String)> = b.places();
     places.extend(
         st.favorites.iter().map(|f| (std::path::Path::new(f).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| f.clone()), f.clone())),
     );
-    for (i, (name, path)) in places.iter().enumerate() {
-        let r = Rect::from_min_size(pos2(side.min.x, fy), vec2(side.width(), 20.0));
-        let resp = ui.interact(r, egui::Id::unique(("mb-fav", i)), Sense::click());
-        if *path == dir {
-            p.rect_filled(r, 0.0, t.row_selected);
-        } else if resp.hovered() {
-            p.rect_filled(r, 0.0, t.hover);
-        }
-        p.text(pos2(r.min.x + 14.0, r.center().y), Align2::LEFT_CENTER, name, Tokens::ui(12.0), t.text);
-        app.auto.add(&format!("mediaBrowser.place.{i}"), r, name);
-        if resp.clicked() {
-            kit::exec(app, "mediaBrowser.go", json!({"path": path}));
-        }
-        fy += 20.0;
-    }
+    places_column(app, ui, &p, side, &places, &dir);
     // Files.
     let list = Rect::from_min_max(pos2(side.max.x + 1.0, side.min.y), rect.max);
     let entries = match entries.as_ref() {

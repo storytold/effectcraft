@@ -82,9 +82,20 @@ pub fn f_schlick(f0: [f32; 3], v_h: f32) -> [f32; 3] {
     [f0[0] + (1.0 - f0[0]) * k, f0[1] + (1.0 - f0[1]) * k, f0[2] + (1.0 - f0[2]) * k]
 }
 
+/// Surface parameters used by the direct-light BRDF after texture sampling.
+#[derive(Clone, Copy)]
+pub struct BrdfSurface {
+    pub base: [f32; 3],
+    pub metallic: f32,
+    pub roughness: f32,
+    pub specular: f32,
+    pub diffuse: f32,
+}
+
 /// Cook–Torrance BRDF × N·L × π for one light: (diffuse colour factor, specular colour).
 /// Returned as the reflected fraction of the light's irradiance.
-pub fn brdf(base: [f32; 3], metallic: f32, rough: f32, spec_k: f32, diff_k: f32, n: [f32; 3], v: [f32; 3], l: [f32; 3]) -> [f32; 3] {
+pub fn brdf(surface: BrdfSurface, n: [f32; 3], v: [f32; 3], l: [f32; 3]) -> [f32; 3] {
+    let BrdfSurface { base, metallic, roughness: rough, specular: spec_k, diffuse: diff_k } = surface;
     let n_l = dot(n, l);
     if n_l <= 0.0 {
         return [0.0; 3];
@@ -484,7 +495,7 @@ pub fn shade(s: &Scene, f: &Frag) -> Option<[f32; 4]> {
             continue;
         }
         let sh = if m.receives_shadows { light_shadow(s, l, f.pos, ng, n_l) } else { 1.0 };
-        let b = brdf(rgb, metallic, rough, m.specular_k, m.diffuse_k, n, v, to_l);
+        let b = brdf(BrdfSurface { base: rgb, metallic, roughness: rough, specular: m.specular_k, diffuse: m.diffuse_k }, n, v, to_l);
         for c in 0..3 {
             out[c] += b[c] * l.color[c] * k * sh;
         }

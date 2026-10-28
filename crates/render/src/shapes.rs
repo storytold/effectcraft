@@ -211,16 +211,16 @@ fn collect(ctx: &EvalCtx, layer: &Layer, contents: &PropGroup, arena: &mut Vec<B
             }
             "star" => {
                 let star = ctx.e(layer, g, "type") == 0;
-                let p = effectcraft_path::polystar(
+                let p = effectcraft_path::polystar(effectcraft_path::Polystar {
                     star,
-                    ctx.f(layer, g, "points", 5.0),
-                    ctx.v2(layer, g, "position", [0.0; 2]),
-                    ctx.f(layer, g, "rotation", 0.0),
-                    ctx.f(layer, g, "innerRadius", 50.0),
-                    ctx.f(layer, g, "outerRadius", 100.0),
-                    ctx.f(layer, g, "innerRoundness", 0.0),
-                    ctx.f(layer, g, "outerRoundness", 0.0),
-                );
+                    points: ctx.f(layer, g, "points", 5.0),
+                    pos: ctx.v2(layer, g, "position", [0.0; 2]),
+                    rotation: ctx.f(layer, g, "rotation", 0.0),
+                    inner: ctx.f(layer, g, "innerRadius", 50.0),
+                    outer: ctx.f(layer, g, "outerRadius", 100.0),
+                    inner_round: ctx.f(layer, g, "innerRoundness", 0.0),
+                    outer_round: ctx.f(layer, g, "outerRoundness", 0.0),
+                });
                 push_shape(ctx, layer, g, p, arena, &mut live);
             }
             "path" => {

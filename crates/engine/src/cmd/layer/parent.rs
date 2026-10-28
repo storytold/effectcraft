@@ -1,4 +1,4 @@
-use super::*;
+use super::{Comp, EngineError, ItemId, KV, Layer, LayerId, PropGroup, Result, Session, Tick, Value, b_p, bad, layers_p, resolve_layer};
 
 /// Re-express a layer in its new parent space without moving its anchor.
 pub(crate) struct ParentFix {
@@ -336,6 +336,7 @@ pub(super) fn set_parent(s: &mut Session, p: &Value) -> Result<Value> {
 
 #[cfg(test)]
 mod parent_chain_tests {
+    use super::super::json;
     use super::*;
     use std::sync::Arc;
 

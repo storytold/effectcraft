@@ -1,4 +1,4 @@
-use super::*;
+use super::{HashMap, Rc, is_white};
 
 /// The PostScript section of an EPS file (DOS EPS binary header handled) and its bounding box
 /// (`%%HiResBoundingBox` preferred).

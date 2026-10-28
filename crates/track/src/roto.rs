@@ -407,7 +407,9 @@ fn beta(img: &[[f32; 3]], free: &[bool], w: usize, h: usize) -> f64 {
 
 /// One min-cut over the `free` pixels; others keep `labels`. `prior`: P(foreground) per pixel
 /// and how much it weighs against the colour models.
-fn cut(img: &[[f32; 3]], w: usize, h: usize, labels: &mut [u8], free: &[bool], hard: &[u8], fg: &Gmm, bg: &Gmm, prior: Option<(&[f32], f64)>) {
+fn cut(img: &[[f32; 3]], size: (usize, usize), labels: &mut [u8], free: &[bool], hard: &[u8], models: (&Gmm, &Gmm), prior: Option<(&[f32], f64)>) {
+    let (w, h) = size;
+    let (fg, bg) = models;
     let mut idx = vec![u32::MAX; w * h];
     let mut nodes = vec![];
     for i in 0..w * h {
@@ -622,6 +624,36 @@ pub struct Prior {
     pub weight: f64,
 }
 
+/// Fit foreground/background colour models from strokes and the propagated matte.
+fn initial_models(rgb: &[[f32; 3]], hard: &[u8], fgs: &[bool], strokes: &[&Stroke], prior: Option<&Prior>, opts: &SegOpts, size: (usize, usize)) -> (Gmm, Gmm) {
+    let (w, h) = size;
+    // Initial colour models: the strokes (and the propagated matte).
+    match prior {
+        Some(p) => {
+            let fgc = samples(rgb, |i| (hard[i] == HARD_FG) || (hard[i] == 0 && p.soft[i] >= 0.5));
+            let bgc = samples(rgb, |i| (hard[i] == HARD_BG) || (hard[i] == 0 && p.soft[i] < 0.5));
+            let f = Gmm::fit(&fgc, COMPONENTS, MAX_SAMPLES);
+            let b = Gmm::fit(&bgc, COMPONENTS, MAX_SAMPLES);
+            (if f.is_empty() { p.fg.clone() } else { f }, if b.is_empty() { p.bg.clone() } else { b })
+        }
+        None => {
+            let fgc = samples(rgb, |i| hard[i] == HARD_FG);
+            let mut bgc = samples(rgb, |i| hard[i] == HARD_BG);
+            if bgc.is_empty() {
+                // No background strokes: what is far from the foreground strokes.
+                let d = matting::distance(fgs, w, h);
+                let r = strokes.iter().filter(|s| s.kind == StrokeKind::Fg).map(|s| s.radius).fold(1.0, f64::max) * opts.scale;
+                let far = (4.0 * r).max(0.25 * w.max(h) as f64) as f32;
+                bgc = samples(rgb, |i| d[i] > far);
+                if bgc.is_empty() {
+                    bgc = samples(rgb, |i| hard[i] != HARD_FG);
+                }
+            }
+            (Gmm::fit(&fgc, COMPONENTS, MAX_SAMPLES), Gmm::fit(&bgc, COMPONENTS, MAX_SAMPLES))
+        }
+    }
+}
+
 /// Segment a frame from its strokes (and a propagated prior): GrabCut iterations on a reduced
 /// copy, then a full-resolution cut in a band around the boundary.
 pub fn segment(img: &Image, strokes: &[&Stroke], prior: Option<&Prior>, opts: &SegOpts, refine_radius: f64) -> FrameSeg {
@@ -649,31 +681,7 @@ pub fn segment(img: &Image, strokes: &[&Stroke], prior: Option<&Prior>, opts: &S
     let soft_prior: Option<Vec<f32>> =
         prior.map(|p| if p.weight > PRIOR { p.soft.clone() } else { matting::gauss(&p.soft, w, h, (opts.search_radius * opts.scale / 4.0).max(1.0)) });
     let pw = prior.map_or(PRIOR, |p| p.weight);
-    // Initial colour models: the strokes (and the propagated matte).
-    let (fg0, bg0) = match prior {
-        Some(p) => {
-            let fgc = samples(&rgb, |i| (hard[i] == HARD_FG) || (hard[i] == 0 && p.soft[i] >= 0.5));
-            let bgc = samples(&rgb, |i| (hard[i] == HARD_BG) || (hard[i] == 0 && p.soft[i] < 0.5));
-            let f = Gmm::fit(&fgc, COMPONENTS, MAX_SAMPLES);
-            let b = Gmm::fit(&bgc, COMPONENTS, MAX_SAMPLES);
-            (if f.is_empty() { p.fg.clone() } else { f }, if b.is_empty() { p.bg.clone() } else { b })
-        }
-        None => {
-            let fgc = samples(&rgb, |i| hard[i] == HARD_FG);
-            let mut bgc = samples(&rgb, |i| hard[i] == HARD_BG);
-            if bgc.is_empty() {
-                // No background strokes: what is far from the foreground strokes.
-                let d = matting::distance(&fgs, w, h);
-                let r = strokes.iter().filter(|s| s.kind == StrokeKind::Fg).map(|s| s.radius).fold(1.0, f64::max) * opts.scale;
-                let far = (4.0 * r).max(0.25 * w.max(h) as f64) as f32;
-                bgc = samples(&rgb, |i| d[i] > far);
-                if bgc.is_empty() {
-                    bgc = samples(&rgb, |i| hard[i] != HARD_FG);
-                }
-            }
-            (Gmm::fit(&fgc, COMPONENTS, MAX_SAMPLES), Gmm::fit(&bgc, COMPONENTS, MAX_SAMPLES))
-        }
-    };
+    let (fg0, bg0) = initial_models(&rgb, &hard, &fgs, strokes, prior, opts, (w, h));
     let iters = if opts.best { 4 } else { 3 };
     let work = if opts.best { 960 } else { 480 };
     let f = w.max(h).div_ceil(work).max(1);
@@ -721,7 +729,7 @@ pub fn segment(img: &Image, strokes: &[&Stroke], prior: Option<&Prior>, opts: &S
         };
         let free = vec![true; cw * ch];
         for it in 0..iters {
-            cut(&crgb, cw, ch, &mut cl, &free, &chard, &fgm, &bgm, cprior.as_deref().map(|c| (c, pw)));
+            cut(&crgb, (cw, ch), &mut cl, &free, &chard, (&fgm, &bgm), cprior.as_deref().map(|c| (c, pw)));
             if it + 1 < iters {
                 let (a, b) = fit_models(&crgb, &cl);
                 if !a.is_empty() && !b.is_empty() {
@@ -743,11 +751,11 @@ pub fn segment(img: &Image, strokes: &[&Stroke], prior: Option<&Prior>, opts: &S
         let sd = matting::signed_distance(&labels, w, h);
         let band = f as f32 + 1.5;
         let free: Vec<bool> = sd.iter().map(|d| d.abs() <= band).collect();
-        cut(&rgb, w, h, &mut labels, &free, &hard, &fgm, &bgm, soft_prior.as_deref().map(|c| (c, pw)));
+        cut(&rgb, (w, h), &mut labels, &free, &hard, (&fgm, &bgm), soft_prior.as_deref().map(|c| (c, pw)));
     } else {
         let free = vec![true; w * h];
         for it in 0..iters {
-            cut(&rgb, w, h, &mut labels, &free, &hard, &fgm, &bgm, soft_prior.as_deref().map(|c| (c, pw)));
+            cut(&rgb, (w, h), &mut labels, &free, &hard, (&fgm, &bgm), soft_prior.as_deref().map(|c| (c, pw)));
             if it + 1 < iters {
                 let (a, b) = fit_models(&rgb, &labels);
                 if !a.is_empty() && !b.is_empty() {
@@ -843,7 +851,7 @@ pub fn propagate(prev_img: &Image, prev: &FrameSeg, next_img: &Image, strokes: &
     let hard = vec![0u8; w * h];
     let soft = matting::gauss(&prior.soft, w, h, (r as f64 / 4.0).max(1.0));
     let (fg, bg) = if prev.fg.is_empty() || prev.bg.is_empty() { fit_models(&rgb, &labels) } else { (prev.fg.clone(), prev.bg.clone()) };
-    cut(&rgb, w, h, &mut labels, &free, &hard, &fg, &bg, Some((&soft, PRIOR)));
+    cut(&rgb, (w, h), &mut labels, &free, &hard, (&fg, &bg), Some((&soft, PRIOR)));
     let seeds = core_of(&prior.soft, w, h, r as f64);
     clean(&mut labels, &seeds, &vec![false; w * h], w, h);
     finish(next_img, &rgb, labels, strokes, Some(&prior.refine), opts, refine_radius)

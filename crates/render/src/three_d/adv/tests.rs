@@ -16,7 +16,7 @@ fn brdf_matches_cook_torrance_formula() {
     let v = shade::norm([0.3, 0.1, 1.0]);
     let l = shade::norm([-0.4, 0.2, 1.0]);
     let (base, metal, rough) = ([0.8, 0.4, 0.2], 0.3f32, 0.45f32);
-    let got = shade::brdf(base, metal, rough, 1.0, 1.0, n, v, l);
+    let got = shade::brdf(shade::BrdfSurface { base, metallic: metal, roughness: rough, specular: 1.0, diffuse: 1.0 }, n, v, l);
     let h = shade::norm([v[0] + l[0], v[1] + l[1], v[2] + l[2]]);
     let (nv, nl, nh, vh) = (shade::dot(n, v), shade::dot(n, l), shade::dot(n, h), shade::dot(v, h));
     let a2 = (rough * rough).powi(2);
@@ -30,9 +30,9 @@ fn brdf_matches_cook_torrance_formula() {
         assert!((got[c] - expect).abs() < 1e-5, "channel {c}: {} vs {expect}", got[c]);
     }
     // No light from behind the surface.
-    assert_eq!(shade::brdf(base, metal, rough, 1.0, 1.0, n, v, [0.0, 0.0, -1.0]), [0.0; 3]);
+    assert_eq!(shade::brdf(shade::BrdfSurface { base, metallic: metal, roughness: rough, specular: 1.0, diffuse: 1.0 }, n, v, [0.0, 0.0, -1.0]), [0.0; 3]);
     // A white rough dielectric lit head-on reflects about its base colour (π folded in).
-    let w = shade::brdf([1.0; 3], 0.0, 1.0, 1.0, 1.0, n, n, n);
+    let w = shade::brdf(shade::BrdfSurface { base: [1.0; 3], metallic: 0.0, roughness: 1.0, specular: 1.0, diffuse: 1.0 }, n, n, n);
     assert!(w[0] > 0.95 && w[0] < 1.05, "{w:?}");
 }
 

@@ -270,7 +270,7 @@ async fn sequence(cx: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut State<'_>) 
                 let path = sequence_path(cx.path, f0 + k as i64);
                 // Encode in memory first: the storage hook decides where it fits.
                 let mut buf = std::io::Cursor::new(Vec::new());
-                write_still(cx, &mut buf, fmt, &img, comp, channels, w, h, cx.output.quality)?;
+                write_still(cx, &mut buf, &img, comp, StillOutput { format: fmt, channels, size: (w, h), quality: cx.output.quality })?;
                 let data = buf.into_inner();
                 let path = cx.place(&path, data.len() as u64);
                 let mut f = cx.create(&path)?;
@@ -287,18 +287,15 @@ async fn sequence(cx: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut State<'_>) 
     Ok(Report { path: sequence_path(cx.path, f0), frames: 0, width: w, height: h, seconds: 0.0, bytes, audio: false, log: None, overflow: vec![] })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn write_still<W: std::io::Write + std::io::Seek>(
-    cx: &Cx,
-    file: &mut W,
-    fmt: OutputFormat,
-    img: &Image,
-    comp: &Comp,
+struct StillOutput {
+    format: OutputFormat,
     channels: Channels,
-    w: u32,
-    h: u32,
+    size: (u32, u32),
     quality: u8,
-) -> Result<()> {
+}
+
+fn write_still<W: std::io::Write + std::io::Seek>(cx: &Cx, file: &mut W, img: &Image, comp: &Comp, output: StillOutput) -> Result<()> {
+    let StillOutput { format: fmt, channels, size: (w, h), quality } = output;
     use image::{ExtendedColorType, ImageEncoder, ImageFormat};
     match fmt {
         OutputFormat::ExrSequence => {

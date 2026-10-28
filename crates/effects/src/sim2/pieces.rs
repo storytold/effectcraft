@@ -1,5 +1,5 @@
 use super::shatter::{ShatterPlan, card_dance_plan, shatter_impl};
-use super::*;
+use super::{Acc, Buf, EffectCtx, Image, Lighting, Proj, raster, unpremul};
 
 // ------------------------------------------------------------------ 3D pieces
 

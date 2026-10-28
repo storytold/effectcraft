@@ -5,7 +5,10 @@
 //! All image points here are **normalised** (calibrated) coordinates `x = (u − c) / f`.
 //! A camera is `(R, C)` with `X_cam = R (X − C)`.
 
-use super::linalg::*;
+use super::linalg::{
+    I3, M3, V3, add, col, cross, det3, dot, from_cols, madd, mm, mscale, mt, mtv, mv, nearest_rotation, normalize, null_vector, outer, scale, sub, svd3,
+    sym_eigen,
+};
 
 /// A deterministic xorshift generator for RANSAC samples.
 pub struct Rng(pub u64);
@@ -361,6 +364,7 @@ pub fn procrustes(a: &[V3], b: &[V3]) -> Option<M3> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::linalg::{log_rot, norm, rodrigues};
     use super::*;
 
     fn scene() -> (Vec<V3>, Pose) {

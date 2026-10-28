@@ -450,7 +450,18 @@ async fn run_work(w: Work, shared: &RotoShared) {
             (RotoTask::Propagate, true) => om::ensure(&w.params, w.size, w.fps, *f, model.clone(), &mut get, &cancel).is_some(),
             (RotoTask::Freeze, true) => {
                 let img = get(*f);
-                match img.map(|img| (om::frame_matte(&w.params, w.size, w.fps, *f, 1.0, &img, model.clone(), &mut get, &cancel), img)) {
+                match img.map(|img| {
+                    (
+                        om::frame_matte(
+                            &w.params,
+                            &om::MatteFrame { layer_size: w.size, fps: w.fps, frame: *f, scale: 1.0, img: &img },
+                            model.clone(),
+                            &mut get,
+                            &cancel,
+                        ),
+                        img,
+                    )
+                }) {
                     Some((om::FrameMatte::Alpha(a), img)) => {
                         frozen.size = [img.width as usize, img.height as usize];
                         frozen.frames.insert(*f, fx::freeze_frame(&a, &[]));

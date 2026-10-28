@@ -1,7 +1,7 @@
 use super::item::LayerId;
 use super::layer::{Layer, LayerSource};
 use super::settings::{Marker, yes};
-use super::*;
+use super::{Deserialize, FrameRate, Node, PropGroup, Serialize, Tick, Value, essential, styles};
 
 /// 3D renderer of a composition.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -1,4 +1,4 @@
-use super::*;
+use super::{EffectcraftApp, FrameKey, FrameWindow, ItemId, PlaybackPass, audio, frames};
 
 /// Seconds without a project change before paused prefetch resumes (see
 /// [`EffectcraftApp::editing`]).

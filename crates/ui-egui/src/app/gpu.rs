@@ -1,4 +1,4 @@
-use super::*;
+use super::{Arc, EffectcraftApp, RenderSource, gpu_failure, menus, panels};
 
 impl EffectcraftApp {
     pub fn render_source(&self) -> RenderSource {
@@ -184,6 +184,7 @@ impl EffectcraftApp {
 #[cfg(test)]
 mod gpu_failure_tests {
     use super::*;
+    use crate::{FrameKey, ItemId, RenderOpts, Session, Tick, json};
 
     #[test]
     fn host_failure_preserves_document_undo_and_cpu_pixels_and_detaches_late_readbacks() {

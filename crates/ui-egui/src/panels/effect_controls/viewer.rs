@@ -1,6 +1,10 @@
+use std::ops::ControlFlow;
+
 use super::common::{Actions, effect_active, gesture_key};
 use super::rows::FxScope;
-use super::*;
+use super::{
+    Align2, Color32, EffectcraftApp, EvalCtx, GroupKind, Layer, Mat3, Node, ParamUi, PropGroup, Property, Rect, Sense, Stroke, Tokens, fw, json, vec2,
+};
 
 // ---------------------------------------------------------------------------------------------
 // Viewer hook
@@ -18,6 +22,156 @@ fn visible_points<'a>(g: &'a PropGroup, scope: &FxScope<'_>, layer: &Layer, ectx
                 visible_points(child, &scope.sub(&child.match_id), layer, ectx, depth + 1, out)
             }
             _ => {}
+        }
+    }
+}
+
+/// An armed crosshair / eyedropper pick: the hint chip, the cursor preview, and the click that
+/// sets or samples. `Break` when the picked layer is gone; `Continue` carries the point preview.
+fn fx_pick_session(
+    app: &mut EffectcraftApp,
+    ui: &mut egui::Ui,
+    painter: &egui::Painter,
+    map: &crate::panels::viewer::ViewerMap,
+    ectx: &EvalCtx,
+    l2c: &dyn Fn(&EvalCtx, &Layer) -> Mat3,
+    actions: &mut Actions,
+) -> ControlFlow<(), Option<egui::Pos2>> {
+    let t = app.tokens;
+    let ctx = ui.ctx().clone();
+    let mut point_preview = None;
+    let Some(pick) = app.ui.fx_pick.clone() else {
+        return ControlFlow::Continue(None);
+    };
+    let Some(layer) = ectx.comp.layer(effectcraft_engine::project::LayerId(pick.layer)).cloned() else {
+        app.ui.fx_pick = None;
+        return ControlFlow::Break(());
+    };
+    // Keyers pick from their input (the shown frame is already keyed): `effect.pickColor`.
+    let keyer = (pick.kind == "color")
+        .then(|| layer.effects()?.groups().find(|g| g.find(pick.prop).is_some()))
+        .flatten()
+        .filter(|g| effectcraft_engine::effects::find(&g.match_id).is_some_and(|s| s.category == "Keying"))
+        .map(|g| g.uid);
+    if pick.kind == "color" && keyer.is_none() {
+        // GPU frames: read the shown frame back for sampling.
+        app.viewer_pixels();
+    }
+    let resp = ui.interact(map.area, egui::Id::unique("viewer-fx-pick"), Sense::click());
+    app.auto.add("viewer.fxPick", map.area, &pick.name);
+    let hint = if pick.kind == "point" { format!("Click to set {}", pick.name) } else { format!("Click to sample {}", pick.name) };
+    let chip = Rect::from_min_size(map.area.min + vec2(10.0, 10.0), vec2(220.0, 22.0));
+    painter.rect_filled(chip, 11.0, Color32::from_black_alpha(180));
+    painter.text(chip.center(), Align2::CENTER_CENTER, hint, Tokens::ui(11.5), t.text);
+    if let Some(hp) = resp.hover_pos() {
+        ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
+        let c = map.to_comp(hp);
+        app.pointer_comp = Some([c[0] as f32, c[1] as f32]);
+        if pick.kind == "point" && fw::comp_to_layer(&l2c(ectx, &layer), c).is_some() {
+            point_preview = Some(hp);
+        }
+        if pick.kind == "color"
+            && keyer.is_none()
+            && let Some(img) = &app.viewer_image
+            && let Some(s) = fw::sample_frame(img, crate::panels::viewer_tools::shown_region(&ctx, map.comp), c)
+        {
+            let sw = Rect::from_min_size(hp + vec2(14.0, 14.0), vec2(26.0, 18.0));
+            painter.rect_filled(sw, 2.0, Color32::from_rgb((s[0] * 255.0) as u8, (s[1] * 255.0) as u8, (s[2] * 255.0) as u8));
+            painter.rect_stroke(sw, 2.0, Stroke::new(1.0, Color32::WHITE), egui::StrokeKind::Outside);
+        }
+    }
+    // No frame to sample yet (it is still rendering, or its readback is pending): the click
+    // leaves the eyedropper armed instead of using it up without a colour.
+    let unsampled = pick.kind == "color" && keyer.is_none() && app.viewer_image.is_none();
+    if resp.clicked()
+        && !unsampled
+        && let Some(pos) = resp.interact_pointer_pos()
+    {
+        let c = map.to_comp(pos);
+        // Effect points and the keyer's input are in effect space.
+        let m = crate::panels::viewer::from_effect_space(ectx, &layer, l2c(ectx, &layer));
+        if pick.kind == "point" {
+            if let Some(lp) = fw::comp_to_layer(&m, c) {
+                actions.push(("prop.set".into(), json!({"layer": pick.layer, "prop": pick.prop, "value": [lp[0], lp[1]]})));
+            }
+        } else if let Some(fx) = keyer {
+            // Ctrl/Cmd+click averages the 5 × 5 pixels around the point.
+            if let Some(lp) = fw::comp_to_layer(&m, c) {
+                let average = ui.input(|i| i.modifiers.command);
+                actions.push((
+                    "effect.pickColor".into(),
+                    json!({"layer": pick.layer, "effect": fx, "prop": pick.prop, "x": lp[0], "y": lp[1], "average": average}),
+                ));
+            }
+        } else if let Some(img) = &app.viewer_image
+            && let Some(s) = fw::sample_frame(img, crate::panels::viewer_tools::shown_region(&ctx, map.comp), c)
+        {
+            actions.push(("prop.set".into(), json!({"layer": pick.layer, "prop": pick.prop, "value": [s[0], s[1], s[2], 1.0]})));
+        }
+        app.ui.fx_pick = None;
+        app.ui.status.clear();
+    }
+    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        app.ui.fx_pick = None;
+        app.ui.status.clear();
+    }
+
+    ControlFlow::Continue(point_preview)
+}
+
+/// An armed text-colour pick: sample the shown frame on click, Esc cancels.
+fn text_color_pick(
+    app: &mut EffectcraftApp,
+    ui: &mut egui::Ui,
+    painter: &egui::Painter,
+    map: &crate::panels::viewer::ViewerMap,
+    ectx: &EvalCtx,
+    actions: &mut Actions,
+) {
+    let t = app.tokens;
+    let ctx = ui.ctx().clone();
+    let Some(pick) = app.ui.text_color_pick.clone() else {
+        return;
+    };
+    if ectx.comp.layer(effectcraft_engine::project::LayerId(pick.layer)).is_none() {
+        app.ui.text_color_pick = None;
+        app.ui.status.clear();
+    } else {
+        app.viewer_pixels();
+        let resp = ui.interact(map.area, egui::Id::unique("viewer-text-color-pick"), Sense::click());
+        app.auto.add("viewer.textColorPick", map.area, &pick.field);
+        let chip = Rect::from_min_size(map.area.min + vec2(10.0, 10.0), vec2(220.0, 22.0));
+        painter.rect_filled(chip, 11.0, Color32::from_black_alpha(180));
+        painter.text(chip.center(), Align2::CENTER_CENTER, crate::i18n::tr_args("Click to sample text {}", &[&pick.field]), Tokens::ui(11.5), t.text);
+        if let Some(pos) = resp.hover_pos() {
+            ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
+            let c = map.to_comp(pos);
+            app.pointer_comp = Some([c[0] as f32, c[1] as f32]);
+            if let Some(img) = &app.viewer_image
+                && let Some(s) = fw::sample_frame(img, crate::panels::viewer_tools::shown_region(&ctx, map.comp), c)
+            {
+                let sw = Rect::from_min_size(pos + vec2(14.0, 14.0), vec2(26.0, 18.0));
+                painter.rect_filled(sw, 2.0, Color32::from_rgb((s[0] * 255.0) as u8, (s[1] * 255.0) as u8, (s[2] * 255.0) as u8));
+                painter.rect_stroke(sw, 2.0, Stroke::new(1.0, Color32::WHITE), egui::StrokeKind::Outside);
+            }
+        }
+        if resp.clicked()
+            && let Some(pos) = resp.interact_pointer_pos()
+            && let Some(img) = &app.viewer_image
+            && let Some(s) = fw::sample_frame(img, crate::panels::viewer_tools::shown_region(&ctx, map.comp), map.to_comp(pos))
+        {
+            let mut params = json!({"layer": pick.layer});
+            params[&pick.field] = json!([s[0], s[1], s[2]]);
+            if let Some(range) = pick.range {
+                params["range"] = json!(range);
+            }
+            actions.push(("layer.setText".into(), params));
+            app.ui.text_color_pick = None;
+            app.ui.status.clear();
+        }
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            app.ui.text_color_pick = None;
+            app.ui.status.clear();
         }
     }
 }
@@ -42,124 +196,11 @@ pub fn viewer_hook(
     let t = app.tokens;
     let ctx = ui.ctx().clone();
     let mut actions: Actions = vec![];
-    let mut point_preview = None;
-    if let Some(pick) = app.ui.fx_pick.clone() {
-        let Some(layer) = ectx.comp.layer(effectcraft_engine::project::LayerId(pick.layer)).cloned() else {
-            app.ui.fx_pick = None;
-            return;
-        };
-        // Keyers pick from their input (the shown frame is already keyed): `effect.pickColor`.
-        let keyer = (pick.kind == "color")
-            .then(|| layer.effects()?.groups().find(|g| g.find(pick.prop).is_some()))
-            .flatten()
-            .filter(|g| effectcraft_engine::effects::find(&g.match_id).is_some_and(|s| s.category == "Keying"))
-            .map(|g| g.uid);
-        if pick.kind == "color" && keyer.is_none() {
-            // GPU frames: read the shown frame back for sampling.
-            app.viewer_pixels();
-        }
-        let resp = ui.interact(map.area, egui::Id::unique("viewer-fx-pick"), Sense::click());
-        app.auto.add("viewer.fxPick", map.area, &pick.name);
-        let hint = if pick.kind == "point" { format!("Click to set {}", pick.name) } else { format!("Click to sample {}", pick.name) };
-        let chip = Rect::from_min_size(map.area.min + vec2(10.0, 10.0), vec2(220.0, 22.0));
-        painter.rect_filled(chip, 11.0, Color32::from_black_alpha(180));
-        painter.text(chip.center(), Align2::CENTER_CENTER, hint, Tokens::ui(11.5), t.text);
-        if let Some(hp) = resp.hover_pos() {
-            ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
-            let c = map.to_comp(hp);
-            app.pointer_comp = Some([c[0] as f32, c[1] as f32]);
-            if pick.kind == "point" && fw::comp_to_layer(&l2c(ectx, &layer), c).is_some() {
-                point_preview = Some(hp);
-            }
-            if pick.kind == "color"
-                && keyer.is_none()
-                && let Some(img) = &app.viewer_image
-                && let Some(s) = fw::sample_frame(img, crate::panels::viewer_tools::shown_region(&ctx, map.comp), c)
-            {
-                let sw = Rect::from_min_size(hp + vec2(14.0, 14.0), vec2(26.0, 18.0));
-                painter.rect_filled(sw, 2.0, Color32::from_rgb((s[0] * 255.0) as u8, (s[1] * 255.0) as u8, (s[2] * 255.0) as u8));
-                painter.rect_stroke(sw, 2.0, Stroke::new(1.0, Color32::WHITE), egui::StrokeKind::Outside);
-            }
-        }
-        // No frame to sample yet (it is still rendering, or its readback is pending): the click
-        // leaves the eyedropper armed instead of using it up without a colour.
-        let unsampled = pick.kind == "color" && keyer.is_none() && app.viewer_image.is_none();
-        if resp.clicked()
-            && !unsampled
-            && let Some(pos) = resp.interact_pointer_pos()
-        {
-            let c = map.to_comp(pos);
-            // Effect points and the keyer's input are in effect space.
-            let m = crate::panels::viewer::from_effect_space(ectx, &layer, l2c(ectx, &layer));
-            if pick.kind == "point" {
-                if let Some(lp) = fw::comp_to_layer(&m, c) {
-                    actions.push(("prop.set".into(), json!({"layer": pick.layer, "prop": pick.prop, "value": [lp[0], lp[1]]})));
-                }
-            } else if let Some(fx) = keyer {
-                // Ctrl/Cmd+click averages the 5 × 5 pixels around the point.
-                if let Some(lp) = fw::comp_to_layer(&m, c) {
-                    let average = ui.input(|i| i.modifiers.command);
-                    actions.push((
-                        "effect.pickColor".into(),
-                        json!({"layer": pick.layer, "effect": fx, "prop": pick.prop, "x": lp[0], "y": lp[1], "average": average}),
-                    ));
-                }
-            } else if let Some(img) = &app.viewer_image
-                && let Some(s) = fw::sample_frame(img, crate::panels::viewer_tools::shown_region(&ctx, map.comp), c)
-            {
-                actions.push(("prop.set".into(), json!({"layer": pick.layer, "prop": pick.prop, "value": [s[0], s[1], s[2], 1.0]})));
-            }
-            app.ui.fx_pick = None;
-            app.ui.status.clear();
-        }
-        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            app.ui.fx_pick = None;
-            app.ui.status.clear();
-        }
-    }
-    if let Some(pick) = app.ui.text_color_pick.clone() {
-        if ectx.comp.layer(effectcraft_engine::project::LayerId(pick.layer)).is_none() {
-            app.ui.text_color_pick = None;
-            app.ui.status.clear();
-        } else {
-            app.viewer_pixels();
-            let resp = ui.interact(map.area, egui::Id::unique("viewer-text-color-pick"), Sense::click());
-            app.auto.add("viewer.textColorPick", map.area, &pick.field);
-            let chip = Rect::from_min_size(map.area.min + vec2(10.0, 10.0), vec2(220.0, 22.0));
-            painter.rect_filled(chip, 11.0, Color32::from_black_alpha(180));
-            painter.text(chip.center(), Align2::CENTER_CENTER, crate::i18n::tr_args("Click to sample text {}", &[&pick.field]), Tokens::ui(11.5), t.text);
-            if let Some(pos) = resp.hover_pos() {
-                ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
-                let c = map.to_comp(pos);
-                app.pointer_comp = Some([c[0] as f32, c[1] as f32]);
-                if let Some(img) = &app.viewer_image
-                    && let Some(s) = fw::sample_frame(img, crate::panels::viewer_tools::shown_region(&ctx, map.comp), c)
-                {
-                    let sw = Rect::from_min_size(pos + vec2(14.0, 14.0), vec2(26.0, 18.0));
-                    painter.rect_filled(sw, 2.0, Color32::from_rgb((s[0] * 255.0) as u8, (s[1] * 255.0) as u8, (s[2] * 255.0) as u8));
-                    painter.rect_stroke(sw, 2.0, Stroke::new(1.0, Color32::WHITE), egui::StrokeKind::Outside);
-                }
-            }
-            if resp.clicked()
-                && let Some(pos) = resp.interact_pointer_pos()
-                && let Some(img) = &app.viewer_image
-                && let Some(s) = fw::sample_frame(img, crate::panels::viewer_tools::shown_region(&ctx, map.comp), map.to_comp(pos))
-            {
-                let mut params = json!({"layer": pick.layer});
-                params[&pick.field] = json!([s[0], s[1], s[2]]);
-                if let Some(range) = pick.range {
-                    params["range"] = json!(range);
-                }
-                actions.push(("layer.setText".into(), params));
-                app.ui.text_color_pick = None;
-                app.ui.status.clear();
-            }
-            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                app.ui.text_color_pick = None;
-                app.ui.status.clear();
-            }
-        }
-    }
+    let point_preview = match fx_pick_session(app, ui, painter, map, ectx, l2c, &mut actions) {
+        ControlFlow::Break(()) => return,
+        ControlFlow::Continue(p) => p,
+    };
+    text_color_pick(app, ui, painter, map, ectx, &mut actions);
     let picking = app.ui.fx_pick.is_some() || app.ui.text_color_pick.is_some();
     let point_pick = app.ui.fx_pick.clone().filter(|p| p.kind == "point");
     if app.ui.viewer.show_layer_controls || point_pick.is_some() {

@@ -1,6 +1,6 @@
 use super::engine::{PState, PW_EFFECT_CAMERA, Phys, accelerated, norm3, particle_look, sim_key, simulate, type_sprite};
 use super::sprites::{Acc, Post, Sprite, SpritePlan, raster, splat};
-use super::*;
+use super::{Buf, EffectCtx, Image, IntoParallelRefIterator, ParallelIterator, SimCache, Value, params_key, unpremul};
 
 // ------------------------------------------------------------------ CC Particle World
 
@@ -169,7 +169,7 @@ pub(super) fn particle_world_plan(ctx: &EffectCtx, b: &Buf) -> Option<SpritePlan
             let PwSeen { depth, x, y, k, v } = cam.see(q.p, q.v, lw, lh, b)?;
             let (c, size) = particle_look(q, birth, death, bs, ds, svar, max_op);
             let r = size * 0.5 * lw * k * s * 0.25;
-            let sp = type_sprite(kind, x, y, r, c, v[0] * lw * k * s, v[1] * lw * k * s, (q.id % 628) as f32 * 0.01 + q.age * 2.0);
+            let sp = type_sprite(kind, x, y, r, c, [v[0] * lw * k * s, v[1] * lw * k * s], (q.id % 628) as f32 * 0.01 + q.age * 2.0);
             Some((depth, sp))
         })
         .collect();
@@ -242,7 +242,7 @@ pub(super) fn particle_systems2_plan(ctx: &EffectCtx, b: &Buf) -> SpritePlan {
             let (bx, by) = b.to_px([(q.p[0] * unit) as f64, (q.p[1] * unit) as f64]);
             let (c, size) = particle_look(q, birth, death, bs, ds, svar, max_op);
             let r = size * unit * 0.02 * s;
-            type_sprite(kind, bx as f32, by as f32, r, c, q.v[0] * unit * s, q.v[1] * unit * s, (q.id % 628) as f32 * 0.01 + q.age * 2.0)
+            type_sprite(kind, bx as f32, by as f32, r, c, [q.v[0] * unit * s, q.v[1] * unit * s], (q.id % 628) as f32 * 0.01 + q.age * 2.0)
         })
         .collect();
     particle_sprites(sprites, pr.e("particle/transferMode"))

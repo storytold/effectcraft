@@ -3,7 +3,7 @@ use super::engine::{PARTICLE_TYPES, PW_ANIMS};
 use super::particle_fx::{PW_FOV, mr_mercury, particle_systems2, particle_systems2_plan, particle_world, particle_world_plan};
 use super::sprites::SpritePlan;
 use super::weather::{bubbles, drizzle, rainfall, rainfall_plan, snowfall, snowfall_plan, star_burst, star_burst_plan};
-use super::*;
+use super::{Buf, EffectCtx, EffectSpec, ParamUi, Value, col, num, p, popup, slider};
 
 /// The sprite plan of a sprite-drawing simulation effect for buffer geometry `b` (its pixels
 /// are not read), `None` for other effects or settings drawn otherwise (the GPU compositor's

@@ -1,5 +1,5 @@
 use super::choices::theme_family;
-use super::*;
+use super::{BTreeMap, Deserialize, Label, Serialize, Value};
 
 /// Unknown keys inside a page, kept so a newer version's settings survive a round trip.
 pub(super) type Extra = BTreeMap<String, Value>;

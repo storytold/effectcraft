@@ -1,4 +1,4 @@
-use super::*;
+use super::{EngineError, Image, ItemId, RenderOpts, Renderer, Result, Session, ThumbnailJob, Tick};
 
 impl Session {
     /// Render a comp frame with the session's footage + expression hosts.

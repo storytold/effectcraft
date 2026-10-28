@@ -1,7 +1,7 @@
 use super::entries::{entry_checked, entry_enabled, entry_label, entry_shortcut, menu_choice};
 use super::invoke::invoke;
 use super::shortcuts::shortcut_text;
-use super::*;
+use super::{EffectcraftApp, MenuEntry, MenuNode, Value, json};
 
 /// The id under which [`menu_bar`] remembers which of its menus was open at the end of the last
 /// frame (its title's open look, and the hover that switches between the titles).

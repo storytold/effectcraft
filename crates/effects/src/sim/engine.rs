@@ -1,7 +1,7 @@
 use super::common::{h, hs};
 use super::particle_fx::{PS2_CACHE, PW_CACHE, ps2_phys, pw_phys};
 use super::sprites::{Shape, Sprite};
-use super::*;
+use super::{Buf, EffectCtx, Image, IntoParallelRefMutIterator, ParallelIterator, SimCache, params_key_except, value_noise};
 
 // ------------------------------------------------------------------ particle engine
 
@@ -263,7 +263,8 @@ pub(super) fn particle_look(q: &Particle, birth: [f32; 4], death: [f32; 4], bsiz
     (c, size.max(0.0))
 }
 
-pub(super) fn type_sprite(kind: u32, x: f32, y: f32, r: f32, c: [f32; 4], vx: f32, vy: f32, rot: f32) -> Sprite {
+pub(super) fn type_sprite(kind: u32, x: f32, y: f32, r: f32, c: [f32; 4], velocity: [f32; 2], rot: f32) -> Sprite {
+    let [vx, vy] = velocity;
     let vl = (vx * vx + vy * vy).sqrt().max(1e-6);
     let shape = match kind {
         0 => Shape::Line { dx: -vx / vl * r * 2.0, dy: -vy / vl * r * 2.0 },

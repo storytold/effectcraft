@@ -1,6 +1,6 @@
 use super::scanner::Src;
 use super::value::{DictRef, Flow, V, array, matrix_of, matrix_val, new_dict};
-use super::*;
+use super::{Affine, BezPath, FillRule, Font, HashMap, Interp, Paint, Point, Rc, RefCell};
 
 // ------------------------------------------------------------------ text
 

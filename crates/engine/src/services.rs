@@ -1,4 +1,4 @@
-use super::*;
+use super::config;
 
 /// Host services (file access) injected by the frontend.
 pub trait Services: Send + Sync {

@@ -580,7 +580,6 @@ fn key_with(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool, f
 
 /// `blur`: the layer is motion blurred in this render (`Renderer::mb_on`). `effects`: key only
 /// the first that many effects (a layer's input, see [`input_key`]).
-#[allow(clippy::too_many_arguments)]
 fn key_any(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool, footage: bool, effects: Option<usize>) -> Option<u64> {
     let mut h = KeyHasher(0xcbf2_9ce4_8422_2325);
     ctx.comp.frame_rate.as_f64().to_bits().hash(&mut h);

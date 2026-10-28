@@ -239,6 +239,28 @@ fn set_param(s: &mut Session, layer: LayerId, path: &str, v: serde_json::Value) 
     s.execute("prop.set", json!({"layer": layer.0, "path": format!("effects/#1/{path}"), "value": v})).unwrap();
 }
 
+/// Stabilize, Crop, Auto-scale (the default) hides the borders; Crop leaves an opaque centre.
+fn assert_crop_framing(s: &mut Session, clip: LayerId) {
+    set_param(s, clip, "borders/framing", json!(2));
+    let st = s.execute("warp.status", json!({})).unwrap();
+    assert!(st["autoScale"].as_f64().unwrap() > 100.5, "{st}");
+    for f in 0..25 {
+        assert_eq!(transparent(&render(s, f)), 0, "frame {f}");
+    }
+    set_param(s, clip, "borders/framing", json!(1));
+    let st = s.execute("warp.status", json!({})).unwrap();
+    let crop: [f64; 4] = serde_json::from_value(st["crop"].clone()).unwrap();
+    for f in [0, 9, 24] {
+        let img = render(s, f);
+        for y in (crop[1].ceil() as u32 + 1)..(crop[3].floor() as u32 - 1) {
+            for x in (crop[0].ceil() as u32 + 1)..(crop[2].floor() as u32 - 1) {
+                assert!(img.get(x as i64, y as i64)[3] > 0.99, "frame {f} ({x}, {y})");
+            }
+        }
+        assert!(img.get(0, 0)[3] < 0.01);
+    }
+}
+
 #[test]
 fn warp_stabilizer_analyzes_and_stabilizes() {
     let (mut s, clip, solid) = setup(shaky);
@@ -289,25 +311,7 @@ fn warp_stabilizer_analyzes_and_stabilizes() {
     }
     set_param(&mut s, clip, "stabilization/result", json!(0));
 
-    // Stabilize, Crop, Auto-scale (the default) hides the borders; Crop leaves an opaque centre.
-    set_param(&mut s, clip, "borders/framing", json!(2));
-    let st = s.execute("warp.status", json!({})).unwrap();
-    assert!(st["autoScale"].as_f64().unwrap() > 100.5, "{st}");
-    for f in 0..25 {
-        assert_eq!(transparent(&render(&s, f)), 0, "frame {f}");
-    }
-    set_param(&mut s, clip, "borders/framing", json!(1));
-    let st = s.execute("warp.status", json!({})).unwrap();
-    let crop: [f64; 4] = serde_json::from_value(st["crop"].clone()).unwrap();
-    for f in [0, 9, 24] {
-        let img = render(&s, f);
-        for y in (crop[1].ceil() as u32 + 1)..(crop[3].floor() as u32 - 1) {
-            for x in (crop[0].ceil() as u32 + 1)..(crop[2].floor() as u32 - 1) {
-                assert!(img.get(x as i64, y as i64)[3] > 0.99, "frame {f} ({x}, {y})");
-            }
-        }
-        assert!(img.get(0, 0)[3] < 0.01);
-    }
+    assert_crop_framing(&mut s, clip);
     // Synthesize Edges fills most of the borders from neighbouring frames.
     set_param(&mut s, clip, "borders/framing", json!(3));
     let synth: usize = (0..25).map(|f| transparent(&render(&s, f))).sum();

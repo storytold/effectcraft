@@ -1,4 +1,4 @@
-use super::*;
+use super::{Align2, EffectcraftApp, Pos2, Rect, Stroke, StrokeKind, Tokens, View3D, ViewerMap, json, pos2, vec2, vt, widgets};
 
 /// Draw the no-composition viewer with New Composition and New Composition From Footage buttons, accepting Project
 /// items dropped on it to create the first composition.

@@ -24,8 +24,6 @@
 //! ```
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
-// The bit-allocation code mirrors the normative integer arithmetic; keep C-like shift expressions.
-#![allow(clippy::precedence, clippy::int_plus_one)]
 
 mod bands;
 mod energy;
@@ -38,14 +36,23 @@ mod tables;
 
 use std::sync::OnceLock;
 
-use bands::{SPREAD_NORMAL, quant_all_bands};
+use bands::{BandCoding, SPREAD_NORMAL, quant_all_bands};
 use energy::{quant_coarse_energy, quant_energy_finalise, quant_fine_energy};
 use mdct::Mdct;
 use range::{BITRES, RangeEncoder};
-use rate::{Mode as CeltMode, compute_allocation};
+use rate::{AllocationInput, Mode as CeltMode, compute_allocation};
 use resample::Downsampler;
 use silk::SilkEncoder;
-use tables::*;
+use tables::{E_MEANS, EBANDS, NB_EBANDS, OVERLAP, PREEMPH, SPREAD_ICDF, TF_SELECT_TABLE, TRIM_ICDF};
+
+/// Band range, channel count and transform size shared by CELT coding stages.
+#[derive(Clone, Copy)]
+struct CeltFrame {
+    start: usize,
+    end: usize,
+    channels: usize,
+    lm: usize,
+}
 
 /// Samples per channel in one 20 ms frame at 48 kHz.
 const N: usize = 960;
@@ -314,7 +321,7 @@ impl OpusEncoder {
             Mode::Celt => {
                 let (log_e, silence) = self.celt_analysis(pcm);
                 let len = self.frame_bytes;
-                packet.extend_from_slice(&self.encode_celt(RangeEncoder::new(), len, 0, NB_EBANDS, &log_e, silence));
+                packet.extend_from_slice(&self.encode_celt(RangeEncoder::new(), len, 0..NB_EBANDS, &log_e, silence));
             }
             Mode::Silk => {
                 let x = self.silk_input(pcm);
@@ -344,7 +351,7 @@ impl OpusEncoder {
                 }
                 let (log_e, _) = self.celt_analysis(pcm);
                 let end = if self.bandwidth == Bandwidth::SuperWideband { 19 } else { NB_EBANDS };
-                packet.extend_from_slice(&self.encode_celt(enc, len, HYBRID_START_BAND, end, &log_e, false));
+                packet.extend_from_slice(&self.encode_celt(enc, len, HYBRID_START_BAND..end, &log_e, false));
             }
         }
         packet
@@ -406,10 +413,11 @@ impl OpusEncoder {
     /// Codes one CELT frame (RFC 6716 §4.3, in bitstream order) of `len` bytes into `enc`
     /// (which already holds the SILK frame in hybrid mode), coding bands `start..end`, and
     /// finalises the frame.
-    #[allow(clippy::too_many_arguments)]
-    fn encode_celt(&mut self, mut enc: RangeEncoder, len: usize, start: usize, end: usize, log_e: &[f32; 2 * NB_EBANDS], silence: bool) -> Vec<u8> {
+    fn encode_celt(&mut self, mut enc: RangeEncoder, len: usize, bands: std::ops::Range<usize>, log_e: &[f32; 2 * NB_EBANDS], silence: bool) -> Vec<u8> {
         let m = celt_mode();
         let c = self.channels;
+        let frame = CeltFrame { start: bands.start, end: bands.end, channels: c, lm: LM };
+        let CeltFrame { start, end, .. } = frame;
         if c == 1 {
             for i in 0..NB_EBANDS {
                 self.old_band_e[i] = self.old_band_e[i].max(self.old_band_e[NB_EBANDS + i]);
@@ -438,10 +446,10 @@ impl OpusEncoder {
             let mut enc_intra = enc.clone();
             let mut old_intra = self.old_band_e;
             enc_intra.bit_logp(true, 3);
-            quant_coarse_energy(start, end, log_e, &mut old_intra, true, &mut enc_intra, c, LM, total_bits_raw);
+            quant_coarse_energy(frame, log_e, &mut old_intra, true, &mut enc_intra, total_bits_raw);
             enc.bit_logp(false, 3);
             let mut old_inter = self.old_band_e;
-            quant_coarse_energy(start, end, log_e, &mut old_inter, false, &mut enc, c, LM, total_bits_raw);
+            quant_coarse_energy(frame, log_e, &mut old_inter, false, &mut enc, total_bits_raw);
             if enc_intra.tell_frac() < enc.tell_frac() {
                 enc = enc_intra;
                 self.old_band_e = old_intra;
@@ -449,14 +457,14 @@ impl OpusEncoder {
                 self.old_band_e = old_inter;
             }
         } else {
-            quant_coarse_energy(start, end, log_e, &mut self.old_band_e, false, &mut enc, c, LM, total_bits_raw);
+            quant_coarse_energy(frame, log_e, &mut self.old_band_e, false, &mut enc, total_bits_raw);
         }
         // TF resolution: no changes.
         {
             let mut budget = total_bits_raw;
             let mut tell = enc.tell();
             let mut logp = 4;
-            let tf_select_rsv = LM > 0 && tell + logp + 1 <= budget;
+            let tf_select_rsv = LM > 0 && tell + logp < budget;
             budget -= tf_select_rsv as i32;
             for _ in start..end {
                 if tell + logp <= budget {
@@ -488,27 +496,11 @@ impl OpusEncoder {
             enc.icdf(alloc_trim as usize, &TRIM_ICDF, 7);
         }
         let bits = (total_bits_raw << BITRES) - enc.tell_frac() - 1;
-        let alloc = compute_allocation(m, start, end, &offsets, &cap, alloc_trim, bits, c, LM, &mut enc);
-        quant_fine_energy(start, end, log_e, &mut self.old_band_e, &alloc.fine_quant, &mut enc, c);
-        quant_all_bands(
-            m,
-            start,
-            end,
-            &self.freq,
-            N,
-            c,
-            &alloc.pulses,
-            SPREAD_NORMAL,
-            alloc.dual_stereo,
-            alloc.intensity,
-            total_bits_raw << BITRES,
-            alloc.balance,
-            &mut enc,
-            LM,
-            alloc.coded_bands,
-        );
+        let alloc = compute_allocation(m, frame, AllocationInput { offsets: &offsets, cap: &cap, trim: alloc_trim, bits }, &mut enc);
+        quant_fine_energy(frame, log_e, &mut self.old_band_e, &alloc.fine_quant, &mut enc);
+        quant_all_bands(m, frame, &self.freq, N, &alloc, BandCoding { spread: SPREAD_NORMAL, total_bits: total_bits_raw << BITRES }, &mut enc);
         let bits_left = total_bits_raw - enc.tell();
-        quant_energy_finalise(start, end, log_e, &mut self.old_band_e, &alloc.fine_quant, &alloc.fine_priority, bits_left, &mut enc, c);
+        quant_energy_finalise(frame, log_e, &mut self.old_band_e, &alloc, bits_left, &mut enc);
         debug_assert!(enc.tell() <= total_bits_raw, "frame overflow: {} > {}", enc.tell(), total_bits_raw);
         if c == 1 {
             let (a, b) = self.old_band_e.split_at_mut(NB_EBANDS);

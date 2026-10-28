@@ -200,7 +200,8 @@ pub fn guided_filter(img: &[[f32; 3]], p: &[f32], w: usize, h: usize, r: usize, 
 /// (K. He, J. Sun and X. Tang, "Fast Matting Using Large Kernel Matting Laplacian Matrices",
 /// CVPR 2010): `(L·x)ᵢ = Σ_{k∋i} (xᵢ − a_kᵀIᵢ − b_k)` with `(a_k, b_k)` the ridge-regression
 /// fit of `x` to the colours in window k.
-pub fn closed_form(img: &[[f32; 3]], init: &[f32], known: &[bool], w: usize, h: usize, r: usize, eps: f32, iters: usize) -> Vec<f32> {
+pub fn closed_form(img: &[[f32; 3]], init: &[f32], known: &[bool], size: (usize, usize), r: usize, eps: f32, iters: usize) -> Vec<f32> {
+    let (w, h) = size;
     let n = w * h;
     if n == 0 || known.iter().all(|k| *k) {
         return init.to_vec();

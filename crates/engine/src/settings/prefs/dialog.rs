@@ -1,5 +1,5 @@
 use super::choices::{APPEARANCE_MODES, DARK_THEMES, LANGUAGES, LIGHT_THEMES, WINDOW_GRAPHICS};
-use super::*;
+use super::{Value, json};
 
 // ---------------------------------------------------------------- schema (Settings dialog)
 

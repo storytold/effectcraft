@@ -64,7 +64,8 @@ pub fn text_target(app: &EffectcraftApp) -> Option<TextTarget> {
 /// A small toggle button at `r` showing `label` (semibold 13 when `bold`, else 12), filled with
 /// the accent while `on`; returns whether it was clicked. It only reports the click: the caller
 /// decides the new state.
-fn toggle(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, r: Rect, id: &str, label: &str, on: bool, bold: bool) -> bool {
+fn toggle(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, r: Rect, id: &str, look: (&str, bool, bool)) -> bool {
+    let (label, on, bold) = look;
     let t = app.tokens;
     let resp = ui.interact(r, egui::Id::unique(("text-toggle", id)), Sense::click());
     p.rect_filled(
@@ -82,6 +83,103 @@ fn toggle(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, r: Rec
     p.text(r.center(), Align2::CENTER_CENTER, label, font, if on { egui::Color32::WHITE } else { t.text });
     app.auto.add(id, r, label);
     resp.clicked()
+}
+
+/// Position of the numeric grid (`x0`, top `y`, width `w`) and whether edits are collected.
+#[derive(Clone, Copy)]
+struct Grid {
+    x0: f32,
+    y: f32,
+    w: f32,
+    enabled: bool,
+}
+
+/// Numeric fields in AE's two-column grid (Kerning is a popup, at row 1 left).
+fn numeric_fields(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, g: Grid, doc: &TextDoc, actions: &mut Vec<serde_json::Value>) {
+    let t = app.tokens;
+    let Grid { x0, y, w, enabled } = g;
+    let fields: [(&str, &str, f64, (f64, f64), &str); 10] = [
+        ("size", "T", doc.size, (1.0, 2000.0), " px"),
+        ("leading", "A", doc.leading.unwrap_or(doc.size * 1.2), (0.0, 5000.0), " px"),
+        ("", "", 0.0, (0.0, 0.0), ""),
+        ("tracking", "VA", doc.tracking, (-1000.0, 10000.0), ""),
+        ("strokeWidth", "W", doc.stroke_width, (0.0, 500.0), " px"),
+        ("", "", 0.0, (0.0, 0.0), ""),
+        ("vScale", "↕T", doc.v_scale, (1.0, 1000.0), " %"),
+        ("hScale", "↔T", doc.h_scale, (1.0, 1000.0), " %"),
+        ("baselineShift", "A↑", doc.baseline_shift, (-1000.0, 1000.0), " px"),
+        ("tsume", "Ts", doc.tsume, (0.0, 100.0), " %"),
+    ];
+    for (i, (key, glyph, v, range, suffix)) in fields.into_iter().enumerate() {
+        if key.is_empty() {
+            continue;
+        }
+        let col = i % 2;
+        let row = i / 2;
+        let fx = x0 + col as f32 * (w / 2.0);
+        let fy = y + row as f32 * 28.0;
+        p.text(pos2(fx, fy + 9.0), Align2::LEFT_CENTER, glyph, Tokens::semibold(11.0), t.text_dim);
+        let (r, nv, _) = widgets::hot_number_at(
+            ui,
+            pos2(fx + 26.0, fy),
+            egui::Id::unique(("char", key)),
+            v,
+            &widgets::HotSpec { speed: 0.5, range, decimals: 0, suffix },
+            &t,
+        );
+        app.auto.add(&format!("character.{key}"), r, key);
+        if let Some(nv) = nv
+            && enabled
+        {
+            actions.push(json!({key: nv, "merge": format!("char-{key}")}));
+        }
+    }
+}
+
+/// Kerning: Metrics / Optical / a manual value (grid row 1, left).
+fn kerning_field(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, g: Grid, doc: &TextDoc, actions: &mut Vec<serde_json::Value>) {
+    let t = app.tokens;
+    let Grid { x0, y, w, enabled } = g;
+    let fy = y + 28.0;
+    p.text(pos2(x0, fy + 9.0), Align2::LEFT_CENTER, "V/A", Tokens::semibold(11.0), t.text_dim);
+    let label = match doc.kerning {
+        Kerning::Metrics => "Metrics".to_string(),
+        Kerning::Optical => "Optical".to_string(),
+        Kerning::Manual(v) => format!("{v:.0}"),
+    };
+    let kr = Rect::from_min_size(pos2(x0 + 26.0, fy), vec2((w / 2.0 - 32.0).max(50.0), 20.0));
+    let kpop = egui::Id::unique("char-kerning-pop");
+    if widgets::dropdown(ui, kr, &label, &t, egui::Id::unique("char-kerning")).clicked() && enabled {
+        widgets::open_popup(ui, kpop);
+    }
+    app.auto.add("character.kerning", kr, "Kerning");
+    let opts: Vec<String> = ["Metrics", "Optical", "0", "-50", "-25", "-10", "10", "25", "50", "100"].iter().map(|s| s.to_string()).collect();
+    if let Some(i) = widgets::popup_menu(ui, kpop, kr.left_bottom(), &opts, None) {
+        let v = match i {
+            0 => json!("metrics"),
+            1 => json!("optical"),
+            _ => json!(opts[i].parse::<f64>().unwrap_or(0.0)),
+        };
+        actions.push(json!({"kerning": v}));
+    }
+}
+
+/// Stroke Over Fill / Fill Over Stroke (grid row 2, right).
+fn stroke_order_field(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: Grid, doc: &TextDoc, actions: &mut Vec<serde_json::Value>) {
+    let t = app.tokens;
+    let Grid { x0, y, w, enabled } = g;
+    let fx = x0 + w / 2.0;
+    let fy = y + 2.0 * 28.0;
+    let dr = Rect::from_min_size(pos2(fx, fy), vec2(w / 2.0, 20.0));
+    let labels = vec!["Fill Over Stroke".to_string(), "Stroke Over Fill".to_string()];
+    let pop = egui::Id::unique("char-stroke-order-pop");
+    if widgets::dropdown(ui, dr, &labels[doc.stroke_over_fill as usize], &t, egui::Id::unique("char-stroke-order")).clicked() && enabled {
+        widgets::open_popup(ui, pop);
+    }
+    app.auto.add("character.strokeOverFill", dr, "Stroke order");
+    if let Some(i) = widgets::popup_menu(ui, pop, dr.left_bottom(), &labels, Some(doc.stroke_over_fill as usize)) {
+        actions.push(json!({"strokeOverFill": i == 1}));
+    }
 }
 
 /// The Character panel for the text being edited (or the selected text layer): font family and
@@ -122,76 +220,10 @@ pub fn character(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         actions.push(json!({"style": st}));
     }
     y += 34.0;
-    // Numeric fields in AE's two-column grid (Kerning is a popup, at row 1 right).
-    let fields: [(&str, &str, f64, (f64, f64), &str); 10] = [
-        ("size", "T", doc.size, (1.0, 2000.0), " px"),
-        ("leading", "A", doc.leading.unwrap_or(doc.size * 1.2), (0.0, 5000.0), " px"),
-        ("", "", 0.0, (0.0, 0.0), ""),
-        ("tracking", "VA", doc.tracking, (-1000.0, 10000.0), ""),
-        ("strokeWidth", "W", doc.stroke_width, (0.0, 500.0), " px"),
-        ("", "", 0.0, (0.0, 0.0), ""),
-        ("vScale", "↕T", doc.v_scale, (1.0, 1000.0), " %"),
-        ("hScale", "↔T", doc.h_scale, (1.0, 1000.0), " %"),
-        ("baselineShift", "A↑", doc.baseline_shift, (-1000.0, 1000.0), " px"),
-        ("tsume", "Ts", doc.tsume, (0.0, 100.0), " %"),
-    ];
-    for (i, (key, glyph, v, range, suffix)) in fields.into_iter().enumerate() {
-        if key.is_empty() {
-            continue;
-        }
-        let col = i % 2;
-        let row = i / 2;
-        let fx = x0 + col as f32 * (w / 2.0);
-        let fy = y + row as f32 * 28.0;
-        p.text(pos2(fx, fy + 9.0), Align2::LEFT_CENTER, glyph, Tokens::semibold(11.0), t.text_dim);
-        let (r, nv, _) = widgets::hot_number_at(ui, pos2(fx + 26.0, fy), egui::Id::unique(("char", key)), v, 0.5, range, 0, suffix, &t);
-        app.auto.add(&format!("character.{key}"), r, key);
-        if let Some(nv) = nv
-            && enabled
-        {
-            actions.push(json!({key: nv, "merge": format!("char-{key}")}));
-        }
-    }
-    // Kerning: Metrics / Optical / a manual value (row 1, left).
-    {
-        let fy = y + 28.0;
-        p.text(pos2(x0, fy + 9.0), Align2::LEFT_CENTER, "V/A", Tokens::semibold(11.0), t.text_dim);
-        let label = match doc.kerning {
-            Kerning::Metrics => "Metrics".to_string(),
-            Kerning::Optical => "Optical".to_string(),
-            Kerning::Manual(v) => format!("{v:.0}"),
-        };
-        let kr = Rect::from_min_size(pos2(x0 + 26.0, fy), vec2((w / 2.0 - 32.0).max(50.0), 20.0));
-        let kpop = egui::Id::unique("char-kerning-pop");
-        if widgets::dropdown(ui, kr, &label, &t, egui::Id::unique("char-kerning")).clicked() && enabled {
-            widgets::open_popup(ui, kpop);
-        }
-        app.auto.add("character.kerning", kr, "Kerning");
-        let opts: Vec<String> = ["Metrics", "Optical", "0", "-50", "-25", "-10", "10", "25", "50", "100"].iter().map(|s| s.to_string()).collect();
-        if let Some(i) = widgets::popup_menu(ui, kpop, kr.left_bottom(), &opts, None) {
-            let v = match i {
-                0 => json!("metrics"),
-                1 => json!("optical"),
-                _ => json!(opts[i].parse::<f64>().unwrap_or(0.0)),
-            };
-            actions.push(json!({"kerning": v}));
-        }
-    }
-    // Stroke Over Fill / Fill Over Stroke (row 2, right).
-    {
-        let fx = x0 + w / 2.0;
-        let fy = y + 2.0 * 28.0;
-        let dr = Rect::from_min_size(pos2(fx, fy), vec2(w / 2.0, 20.0));
-        let labels = vec!["Fill Over Stroke".to_string(), "Stroke Over Fill".to_string()];
-        let pop = egui::Id::unique("char-stroke-order-pop");
-        if widgets::dropdown(ui, dr, &labels[doc.stroke_over_fill as usize], &t, egui::Id::unique("char-stroke-order")).clicked() && enabled {
-            widgets::open_popup(ui, pop);
-        }
-        app.auto.add("character.strokeOverFill", dr, "Stroke order");
-        if let Some(i) = widgets::popup_menu(ui, pop, dr.left_bottom(), &labels, Some(doc.stroke_over_fill as usize)) {
-            actions.push(json!({"strokeOverFill": i == 1}));
-        }
-    }
+    let grid = Grid { x0, y, w, enabled };
+    numeric_fields(app, ui, &p, grid, &doc, &mut actions);
+    kerning_field(app, ui, &p, grid, &doc, &mut actions);
+    stroke_order_field(app, ui, grid, &doc, &mut actions);
     y += 5.0 * 28.0 + 8.0;
     // Fill / stroke swatches with their enable boxes.
     for (i, (key, label, on, c)) in [("fill", "Fill", doc.apply_fill, doc.fill), ("stroke", "Stroke", doc.apply_stroke, doc.stroke)].into_iter().enumerate() {
@@ -242,7 +274,7 @@ pub fn character(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let bw = ((w - 5.0 * 4.0) / 6.0).clamp(22.0, 30.0);
     for (i, (key, label, on, bold)) in toggles.into_iter().enumerate() {
         let r = Rect::from_min_size(pos2(x0 + i as f32 * (bw + 4.0), y), vec2(bw, 24.0));
-        if toggle(app, ui, &p, r, &format!("character.{key}"), label, on, bold) && enabled {
+        if toggle(app, ui, &p, r, &format!("character.{key}"), (label, on, bold)) && enabled {
             actions.push(json!({key: !on}));
         }
     }
@@ -296,8 +328,14 @@ pub fn character(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             let tag = a.tag.trim_end().to_string();
             let v = doc.variations.iter().chain(&instance).find(|(t2, _)| t2.trim_end() == tag).map(|(_, v)| *v).unwrap_or(a.default);
             p.text(pos2(fx, fy + 9.0), Align2::LEFT_CENTER, &tag, Tokens::semibold(10.5), t.text_dim);
-            let (r, nv, _) =
-                widgets::hot_number_at(ui, pos2(fx + 34.0, fy), egui::Id::unique(("char-axis", &tag)), v as f64, 1.0, (a.min as f64, a.max as f64), 0, "", &t);
+            let (r, nv, _) = widgets::hot_number_at(
+                ui,
+                pos2(fx + 34.0, fy),
+                egui::Id::unique(("char-axis", &tag)),
+                v as f64,
+                &widgets::HotSpec { speed: 1.0, range: (a.min as f64, a.max as f64), decimals: 0, suffix: "" },
+                &t,
+            );
             app.auto.add(&format!("character.axis.{tag}"), r, &a.name);
             if let Some(nv) = nv
                 && enabled
@@ -517,7 +555,14 @@ pub fn paragraph(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let fx = x0 + (i % 2) as f32 * (w / 2.0);
         let fy = y + (i / 2) as f32 * 28.0;
         p.text(pos2(fx, fy + 9.0), Align2::LEFT_CENTER, glyph, Tokens::semibold(11.0), t.text_dim);
-        let (r, nv, _) = widgets::hot_number_at(ui, pos2(fx + 26.0, fy), egui::Id::unique(("para-f", key)), v, 0.5, (-5000.0, 5000.0), 0, " px", &t);
+        let (r, nv, _) = widgets::hot_number_at(
+            ui,
+            pos2(fx + 26.0, fy),
+            egui::Id::unique(("para-f", key)),
+            v,
+            &widgets::HotSpec { speed: 0.5, range: (-5000.0, 5000.0), decimals: 0, suffix: " px" },
+            &t,
+        );
         app.auto.add(&format!("paragraph.{key}"), r, key);
         if let Some(nv) = nv
             && enabled

@@ -2,10 +2,166 @@ use super::eps::find_from;
 use super::scanner::Src;
 use super::text::encoding_array;
 use super::value::{Flow, V, array, matrix_of, matrix_val, new_dict};
-use super::*;
+use super::{Affine, BezPath, Cap, FillRule, Interp, Join, PathEl, Point, Rc, RefCell, parse_num};
 
 impl Interp {
     pub(super) fn builtin(&mut self, n: &str, src: &mut Src) -> Result<(), Flow> {
+        // Every handler leaves the stacks untouched when the operator is outside its family.
+        if self.try_stack_op(n)
+            || self.try_arithmetic_op(n)
+            || self.try_logic_op(n)
+            || self.try_control_op(n, src)?
+            || self.try_dictionary_op(n)
+            || self.try_collection_op(n)
+            || self.try_environment_op(n, src)?
+            || self.try_graphics_op(n)?
+            || self.try_coordinate_op(n)
+            || self.try_path_op(n)?
+            || self.try_paint_op(n)?
+        {
+            return Ok(());
+        }
+        match n {
+            // Text (see `text_op`).
+            "scalefont" | "makefont" | "selectfont" | "setfont" | "show" | "charpath" | "glyphshow" | "rootfont" | "currentfont" | "setcachedevice"
+            | "setcharwidth" | "ashow" | "widthshow" | "awidthshow" | "xshow" | "yshow" | "xyshow" | "kshow" | "cshow" | "stringwidth" | "definefont"
+            | "StandardEncoding" | "ISOLatin1Encoding" | "eexec" | "StartData" | "undefinefont" => self.text_op(n, src)?,
+            // Images: operands popped, inline data skipped.
+            "image" | "imagemask" | "colorimage" => {
+                let mut reads_file = false;
+                let check = |v: &V, rf: &mut bool| {
+                    if matches!(v, V::File) || matches!(v, V::Proc(p) if p.iter().any(|x| matches!(x, V::Name(n) if &**n == "currentfile"))) {
+                        *rf = true;
+                    }
+                };
+                if n == "colorimage" {
+                    let ncomp = self.popn().max(1.0) as usize;
+                    let multi = matches!(self.pop(), V::Bool(true));
+                    for _ in 0..if multi { ncomp.min(4) } else { 1 } {
+                        let v = self.pop();
+                        check(&v, &mut reads_file);
+                    }
+                    for _ in 0..4 {
+                        self.pop();
+                    }
+                } else {
+                    match self.pop() {
+                        V::Dict(d) => {
+                            if let Some(ds) = d.borrow().get("DataSource") {
+                                check(ds, &mut reads_file);
+                            }
+                        }
+                        top => {
+                            check(&top, &mut reads_file);
+                            for _ in 0..4 {
+                                self.pop();
+                            }
+                        }
+                    }
+                }
+                if reads_file {
+                    src.skip_image_data();
+                }
+                self.b.skip("image");
+            }
+            _ => {
+                if self.unknown.len() < 32 && !self.unknown.iter().any(|u| u == n) {
+                    self.unknown.push(n.to_string());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn repeat_proc(&mut self, src: &mut Src) -> Result<(), Flow> {
+        let p = self.pop();
+        let k = self.popn().clamp(0.0, 1e6) as usize;
+        for _ in 0..k {
+            self.spend(1)?;
+            match self.exec_obj(p.clone(), src) {
+                Err(Flow::Exit) => break,
+                r => r?,
+            }
+        }
+
+        Ok(())
+    }
+
+    fn for_proc(&mut self, src: &mut Src) -> Result<(), Flow> {
+        let p = self.pop();
+        let lim = self.popn();
+        let inc = self.popn();
+        let mut i = self.popn();
+        let mut guard = 0;
+        while inc != 0.0 && ((inc > 0.0 && i <= lim) || (inc < 0.0 && i >= lim)) && guard < 1_000_000 {
+            self.spend(1)?;
+            self.push(V::Num(i));
+            match self.exec_obj(p.clone(), src) {
+                Err(Flow::Exit) => break,
+                r => r?,
+            }
+            i += inc;
+            guard += 1;
+        }
+
+        Ok(())
+    }
+
+    fn loop_proc(&mut self, src: &mut Src) -> Result<(), Flow> {
+        let p = self.pop();
+        for _ in 0..1_000_000 {
+            self.spend(1)?;
+            match self.exec_obj(p.clone(), src) {
+                Err(Flow::Exit) => break,
+                r => r?,
+            }
+        }
+
+        Ok(())
+    }
+
+    fn forall_proc(&mut self, src: &mut Src) -> Result<(), Flow> {
+        let p = self.pop();
+        match self.pop() {
+            V::Dict(d) => {
+                let items: Vec<(String, V)> = d.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                for (k, v) in items {
+                    self.spend(1)?;
+                    self.push(V::Lit(k.into()));
+                    self.push(v);
+                    match self.exec_obj(p.clone(), src) {
+                        Err(Flow::Exit) => break,
+                        r => r?,
+                    }
+                }
+            }
+            V::Str(s) => {
+                let bytes = s.borrow().clone();
+                for c in bytes {
+                    self.spend(1)?;
+                    self.push(V::Num(c as f64));
+                    match self.exec_obj(p.clone(), src) {
+                        Err(Flow::Exit) => break,
+                        r => r?,
+                    }
+                }
+            }
+            a => {
+                for v in a.items().unwrap_or_default() {
+                    self.spend(1)?;
+                    self.push(v);
+                    match self.exec_obj(p.clone(), src) {
+                        Err(Flow::Exit) => break,
+                        r => r?,
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn try_stack_op(&mut self, n: &str) -> bool {
         match n {
             // Stack.
             "pop" => {
@@ -21,25 +177,27 @@ impl Interp {
                 let a = self.st.last().cloned().unwrap_or(V::Null);
                 self.push(a);
             }
-            "copy" => match self.pop() {
-                V::Num(k) => {
-                    let k = (k.max(0.0) as usize).min(self.st.len());
-                    let tail: Vec<V> = self.st[self.st.len() - k..].to_vec();
-                    self.st.extend(tail);
-                }
-                V::Array(dst) => {
-                    let s = self.pop().items().unwrap_or_default();
-                    let mut d = dst.borrow_mut();
-                    for (i, v) in s.into_iter().enumerate() {
-                        if i < d.len() {
-                            d[i] = v;
-                        }
+            "copy" => {
+                match self.pop() {
+                    V::Num(k) => {
+                        let k = (k.max(0.0) as usize).min(self.st.len());
+                        let tail: Vec<V> = self.st[self.st.len() - k..].to_vec();
+                        self.st.extend(tail);
                     }
-                    drop(d);
-                    self.push(V::Array(dst));
-                }
-                other => self.push(other),
-            },
+                    V::Array(dst) => {
+                        let s = self.pop().items().unwrap_or_default();
+                        let mut d = dst.borrow_mut();
+                        for (i, v) in s.into_iter().enumerate() {
+                            if i < d.len() {
+                                d[i] = v;
+                            }
+                        }
+                        drop(d);
+                        self.push(V::Array(dst));
+                    }
+                    other => self.push(other),
+                };
+            }
             "index" => {
                 let k = self.popn().max(0.0) as usize;
                 let v = if k < self.st.len() { self.st[self.st.len() - 1 - k].clone() } else { V::Null };
@@ -84,6 +242,13 @@ impl Interp {
                 }
                 self.push(V::Dict(d));
             }
+            _ => return false,
+        }
+        true
+    }
+
+    fn try_arithmetic_op(&mut self, n: &str) -> bool {
+        match n {
             // Arithmetic.
             "add" | "sub" | "mul" | "div" | "idiv" | "mod" | "atan" | "exp" | "max" | "min" => {
                 let b = self.popn();
@@ -131,6 +296,13 @@ impl Interp {
                 };
                 self.push(V::Num(if v.is_finite() { v } else { 0.0 }));
             }
+            _ => return false,
+        }
+        true
+    }
+
+    fn try_logic_op(&mut self, n: &str) -> bool {
+        match n {
             // Comparison and logic.
             "eq" | "ne" => {
                 let b = self.pop();
@@ -181,6 +353,13 @@ impl Interp {
             "true" => self.push(V::Bool(true)),
             "false" => self.push(V::Bool(false)),
             "null" => self.push(V::Null),
+            _ => return false,
+        }
+        true
+    }
+
+    fn try_control_op(&mut self, n: &str, src: &mut Src) -> Result<bool, Flow> {
+        match n {
             // Control.
             "exec" => {
                 let v = self.pop();
@@ -199,82 +378,10 @@ impl Interp {
                 self.exec_obj(if c { t } else { f }, src)?;
             }
             // Each pass of a loop counts against the budget.
-            "repeat" => {
-                let p = self.pop();
-                let k = self.popn().clamp(0.0, 1e6) as usize;
-                for _ in 0..k {
-                    self.spend(1)?;
-                    match self.exec_obj(p.clone(), src) {
-                        Err(Flow::Exit) => break,
-                        r => r?,
-                    }
-                }
-            }
-            "for" => {
-                let p = self.pop();
-                let lim = self.popn();
-                let inc = self.popn();
-                let mut i = self.popn();
-                let mut guard = 0;
-                while inc != 0.0 && ((inc > 0.0 && i <= lim) || (inc < 0.0 && i >= lim)) && guard < 1_000_000 {
-                    self.spend(1)?;
-                    self.push(V::Num(i));
-                    match self.exec_obj(p.clone(), src) {
-                        Err(Flow::Exit) => break,
-                        r => r?,
-                    }
-                    i += inc;
-                    guard += 1;
-                }
-            }
-            "loop" => {
-                let p = self.pop();
-                for _ in 0..1_000_000 {
-                    self.spend(1)?;
-                    match self.exec_obj(p.clone(), src) {
-                        Err(Flow::Exit) => break,
-                        r => r?,
-                    }
-                }
-            }
-            "forall" => {
-                let p = self.pop();
-                match self.pop() {
-                    V::Dict(d) => {
-                        let items: Vec<(String, V)> = d.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                        for (k, v) in items {
-                            self.spend(1)?;
-                            self.push(V::Lit(k.into()));
-                            self.push(v);
-                            match self.exec_obj(p.clone(), src) {
-                                Err(Flow::Exit) => break,
-                                r => r?,
-                            }
-                        }
-                    }
-                    V::Str(s) => {
-                        let bytes = s.borrow().clone();
-                        for c in bytes {
-                            self.spend(1)?;
-                            self.push(V::Num(c as f64));
-                            match self.exec_obj(p.clone(), src) {
-                                Err(Flow::Exit) => break,
-                                r => r?,
-                            }
-                        }
-                    }
-                    a => {
-                        for v in a.items().unwrap_or_default() {
-                            self.spend(1)?;
-                            self.push(v);
-                            match self.exec_obj(p.clone(), src) {
-                                Err(Flow::Exit) => break,
-                                r => r?,
-                            }
-                        }
-                    }
-                }
-            }
+            "repeat" => self.repeat_proc(src)?,
+            "for" => self.for_proc(src)?,
+            "loop" => self.loop_proc(src)?,
+            "forall" => self.forall_proc(src)?,
             "exit" => return Err(Flow::Exit),
             "stop" => return Err(Flow::Stop),
             "stopped" => {
@@ -288,6 +395,13 @@ impl Interp {
             }
             "quit" => return Err(Flow::Quit),
             "showpage" | "copypage" => {}
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    fn try_dictionary_op(&mut self, n: &str) -> bool {
+        match n {
             // Dictionaries.
             "def" => {
                 let v = self.pop();
@@ -385,6 +499,13 @@ impl Interp {
                 self.pop();
                 self.push(V::Bool(false));
             }
+            _ => return false,
+        }
+        true
+    }
+
+    fn try_collection_op(&mut self, n: &str) -> bool {
+        match n {
             // Arrays and strings.
             "array" => {
                 let k = self.popn().clamp(0.0, 1e6) as usize;
@@ -521,6 +642,13 @@ impl Interp {
                 self.push(V::Name(t.into()));
             }
             "bind" | "readonly" | "executeonly" | "noaccess" => {}
+            _ => return false,
+        }
+        true
+    }
+
+    fn try_environment_op(&mut self, n: &str, src: &mut Src) -> Result<bool, Flow> {
+        match n {
             "languagelevel" => self.push(V::Num(3.0)),
             "version" | "product" => self.push(V::Str(Rc::new(RefCell::new(b"3010".to_vec())))),
             "save" => {
@@ -644,6 +772,13 @@ impl Interp {
                     self.push(V::Num(0.0));
                 }
             }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    fn try_graphics_op(&mut self, n: &str) -> Result<bool, Flow> {
+        match n {
             // Graphics state.
             "gsave" => {
                 self.spend(self.gs.path.elements().len())?;
@@ -733,6 +868,13 @@ impl Interp {
                     self.push(V::Num(c));
                 }
             }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    fn try_coordinate_op(&mut self, n: &str) -> bool {
+        match n {
             // Coordinates.
             "matrix" => self.push(matrix_val(Affine::IDENTITY)),
             "identmatrix" | "defaultmatrix" => {
@@ -805,6 +947,13 @@ impl Interp {
                 self.push(V::Num(p.x));
                 self.push(V::Num(p.y));
             }
+            _ => return false,
+        }
+        true
+    }
+
+    fn try_path_op(&mut self, n: &str) -> Result<bool, Flow> {
+        match n {
             // Paths.
             "newpath" => {
                 self.gs.path = BezPath::new();
@@ -869,6 +1018,13 @@ impl Interp {
                 let p = self.page;
                 self.gs.path = kurbo::Shape::to_path(&kurbo::Rect::new(p[0], p[1], p[2], p[3]), 0.1);
             }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    fn try_paint_op(&mut self, n: &str) -> Result<bool, Flow> {
+        match n {
             // Painting.
             "fill" => self.paint(Some(FillRule::NonZero), false),
             "eofill" => self.paint(Some(FillRule::EvenOdd), false),
@@ -903,54 +1059,8 @@ impl Interp {
                 self.pop();
                 self.b.skip("smooth shading (shfill)");
             }
-            // Text (see `text_op`).
-            "scalefont" | "makefont" | "selectfont" | "setfont" | "show" | "charpath" | "glyphshow" | "rootfont" | "currentfont" | "setcachedevice"
-            | "setcharwidth" | "ashow" | "widthshow" | "awidthshow" | "xshow" | "yshow" | "xyshow" | "kshow" | "cshow" | "stringwidth" | "definefont"
-            | "StandardEncoding" | "ISOLatin1Encoding" | "eexec" | "StartData" | "undefinefont" => self.text_op(n, src)?,
-            // Images: operands popped, inline data skipped.
-            "image" | "imagemask" | "colorimage" => {
-                let mut reads_file = false;
-                let check = |v: &V, rf: &mut bool| {
-                    if matches!(v, V::File) || matches!(v, V::Proc(p) if p.iter().any(|x| matches!(x, V::Name(n) if &**n == "currentfile"))) {
-                        *rf = true;
-                    }
-                };
-                if n == "colorimage" {
-                    let ncomp = self.popn().max(1.0) as usize;
-                    let multi = matches!(self.pop(), V::Bool(true));
-                    for _ in 0..if multi { ncomp.min(4) } else { 1 } {
-                        let v = self.pop();
-                        check(&v, &mut reads_file);
-                    }
-                    for _ in 0..4 {
-                        self.pop();
-                    }
-                } else {
-                    match self.pop() {
-                        V::Dict(d) => {
-                            if let Some(ds) = d.borrow().get("DataSource") {
-                                check(ds, &mut reads_file);
-                            }
-                        }
-                        top => {
-                            check(&top, &mut reads_file);
-                            for _ in 0..4 {
-                                self.pop();
-                            }
-                        }
-                    }
-                }
-                if reads_file {
-                    src.skip_image_data();
-                }
-                self.b.skip("image");
-            }
-            _ => {
-                if self.unknown.len() < 32 && !self.unknown.iter().any(|u| u == n) {
-                    self.unknown.push(n.to_string());
-                }
-            }
+            _ => return Ok(false),
         }
-        Ok(())
+        Ok(true)
     }
 }

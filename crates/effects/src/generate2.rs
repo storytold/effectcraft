@@ -692,18 +692,33 @@ impl BoltCfg<'_> {
     }
 }
 
-/// Grow a bolt from `a` to `z` by midpoint displacement (`depth` levels), forking at random.
-/// Segments go to `out` with their intensity; `mains` marks the main core's segments.
-#[allow(clippy::too_many_arguments)]
-fn bolt(cfg: &BoltCfg, a: (f64, f64), z: (f64, f64), depth: u32, inten: f32, main: bool, rng: &mut Rng, out: &mut Vec<Seg>, mains: &mut Vec<bool>) {
-    if out.len() > 20_000 {
+/// One branch's geometry and recursive growth state.
+struct BoltBranch {
+    start: (f64, f64),
+    end: (f64, f64),
+    depth: u32,
+    intensity: f32,
+    main: bool,
+}
+
+/// Segments and their matching main-core flags, kept in the same traversal order.
+#[derive(Default)]
+struct BoltOutput {
+    segments: Vec<Seg>,
+    mains: Vec<bool>,
+}
+
+/// Grow a branch by midpoint displacement, recursively appending its segments and forks.
+fn bolt(cfg: &BoltCfg, branch: BoltBranch, rng: &mut Rng, output: &mut BoltOutput) {
+    let BoltBranch { start: a, end: z, depth, intensity: inten, main } = branch;
+    if output.segments.len() > 20_000 {
         return;
     }
     let (dx, dy) = (z.0 - a.0, z.1 - a.1);
     let len = (dx * dx + dy * dy).sqrt();
     if depth == 0 || len < 1.0 {
-        out.push((a, z, inten));
-        mains.push(main);
+        output.segments.push((a, z, inten));
+        output.mains.push(main);
         return;
     }
     let (nx, ny) = (-dy / len.max(1e-9), dx / len.max(1e-9));
@@ -725,8 +740,8 @@ fn bolt(cfg: &BoltCfg, a: (f64, f64), z: (f64, f64), depth: u32, inten: f32, mai
     if cfg.obstacle > 0.0 && !main && cfg.alpha_at(m) > 0.5 && rng.f() < cfg.obstacle / 10.0 {
         return;
     }
-    bolt(cfg, a, m, depth - 1, inten, main, rng, out, mains);
-    bolt(cfg, m, z, depth - 1, inten, main, rng, out, mains);
+    bolt(cfg, BoltBranch { start: a, end: m, depth: depth - 1, intensity: inten, main }, rng, output);
+    bolt(cfg, BoltBranch { start: m, end: z, depth: depth - 1, intensity: inten, main }, rng, output);
     if rng.f() < cfg.fork && inten > cfg.term && len >= cfg.min_fork {
         let ang = rng.s() * 0.7;
         let (s, c) = ang.sin_cos();
@@ -734,7 +749,7 @@ fn bolt(cfg: &BoltCfg, a: (f64, f64), z: (f64, f64), depth: u32, inten: f32, mai
         let k = 1.2;
         // Fork Strength 50 % keeps the decayed intensity; Fork Variation randomises it.
         let fi = inten * (1.0 - cfg.decay) * cfg.fork_strength * 2.0 * if cfg.fork_var > 0.0 { 1.0 - cfg.fork_var * rng.f() as f32 } else { 1.0 };
-        bolt(cfg, m, (m.0 + fx * k, m.1 + fy * k), depth.saturating_sub(1), fi.min(1.0), false, rng, out, mains);
+        bolt(cfg, BoltBranch { start: m, end: (m.0 + fx * k, m.1 + fy * k), depth: depth.saturating_sub(1), intensity: fi.min(1.0), main: false }, rng, output);
     }
 }
 
@@ -772,10 +787,9 @@ pub fn lightning_segments(ctx: &EffectCtx, b: &Buf) -> Vec<Seg> {
         fork_strength: (g("expertSettings/forkStrength", 50.0) / 100.0).clamp(0.0, 1.0) as f32,
         fork_var: (g("expertSettings/forkVariation", 0.0) / 100.0).clamp(0.0, 1.0) as f32,
     };
-    let mut segs = Vec::new();
-    let mut mains = Vec::new();
+    let mut output = BoltOutput::default();
     let (h, w) = (b.img.height as f64, b.img.width as f64);
-    let mut go = |a, z, depth, cfg: &BoltCfg, rng: &mut Rng| bolt(cfg, a, z, depth, 1.0, true, rng, &mut segs, &mut mains);
+    let mut go = |a, z, depth, cfg: &BoltCfg, rng: &mut Rng| bolt(cfg, BoltBranch { start: a, end: z, depth, intensity: 1.0, main: true }, rng, &mut output);
     // LIGHTNING_TYPES order.
     match kind {
         // Direction: travels toward the Direction point and beyond.
@@ -811,6 +825,7 @@ pub fn lightning_segments(ctx: &EffectCtx, b: &Buf) -> Vec<Seg> {
         // Strike.
         _ => go(o, d, depth, &cfg, &mut rng),
     }
+    let BoltOutput { segments: mut segs, mains } = output;
     let dist = |p: (f64, f64)| ((p.0 - o.0).powi(2) + (p.1 - o.1).powi(2)).sqrt();
     let far = segs.iter().map(|(_, z, _)| dist(*z)).fold(1e-9, f64::max);
     // Decay Main Core: the whole bolt fades with distance from the origin.

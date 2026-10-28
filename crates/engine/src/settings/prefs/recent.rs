@@ -1,4 +1,4 @@
-use super::*;
+use super::Prefs;
 
 impl Prefs {
     /// Remember a project in File ▸ Open Recent.

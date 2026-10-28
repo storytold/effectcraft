@@ -1,5 +1,8 @@
 use super::raster::over;
-use super::*;
+use super::{
+    Buf, EffectCtx, IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, PI, ParallelIterator, Plane, Px, gauss_plane, hash1,
+    hsl_to_rgb, morph_frac, premul, rgb_to_hsl, smoothstep, unpremul,
+};
 
 pub(super) fn glue_gun(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let pr = ctx.params;

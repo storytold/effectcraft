@@ -1,7 +1,7 @@
 use super::choices::{APPEARANCE_MODES, DARK_THEMES, LANGUAGES, LIGHT_THEMES, THEMES, WINDOW_GRAPHICS, choices, is_choice, theme_family};
 use super::recent::MAX_EFFECTS_FAVORITES;
 use super::sections::{CompPreset, default_labels, parse_hex};
-use super::*;
+use super::{Appearance, General, Map, PREFS_VERSION, Prefs, Startup, Value, json};
 
 /// Bring an older settings document up to [`PREFS_VERSION`].
 ///

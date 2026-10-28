@@ -165,7 +165,7 @@ fn camera_lens(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
             return None;
         }
         let pre = e.image(w + 1, h);
-        e.dispatch("gen_row_prefix", &Params::default(), &src, None, &pre, None, (h.div_ceil(64), 1));
+        e.dispatch("gen_row_prefix", &Params::default(), crate::context::KernelImages { src: &src, aux: None, out: &pre }, None, (h.div_ceil(64), 1));
         Some(pre)
     } else {
         None

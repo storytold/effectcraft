@@ -1089,6 +1089,13 @@ pub(crate) struct Enc<'g> {
     owner: u64,
 }
 
+/// Images bound to a compute kernel's source, optional auxiliary and output slots.
+pub(crate) struct KernelImages<'a> {
+    pub src: &'a GpuImage,
+    pub aux: Option<&'a GpuImage>,
+    pub out: &'a GpuImage,
+}
+
 impl Drop for Enc<'_> {
     fn drop(&mut self) {
         // Unsubmitted work is discarded, so nothing recorded will read pooled textures.
@@ -1162,32 +1169,21 @@ impl<'g> Enc<'g> {
     }
 
     /// Run kernel `entry` writing `out` (dispatched over `groups` workgroups).
-    pub fn dispatch(
-        &mut self,
-        entry: &str,
-        p: &Params,
-        src: &GpuImage,
-        aux: Option<&GpuImage>,
-        out: &GpuImage,
-        data: Option<&wgpu::Buffer>,
-        groups: (u32, u32),
-    ) {
-        self.dispatch_ext(entry, p, src, aux, out, data, groups, None);
+    pub fn dispatch(&mut self, entry: &str, p: &Params, images: KernelImages<'_>, data: Option<&wgpu::Buffer>, groups: (u32, u32)) {
+        self.dispatch_ext(entry, p, images, data, groups, None);
     }
 
     /// [`Enc::dispatch`] for the kernels in `EXT_ENTRIES`, with their group 1 storage buffers.
-    #[allow(clippy::too_many_arguments)]
     pub fn dispatch_ext(
         &mut self,
         entry: &str,
         p: &Params,
-        src: &GpuImage,
-        aux: Option<&GpuImage>,
-        out: &GpuImage,
+        images: KernelImages<'_>,
         data: Option<&wgpu::Buffer>,
         groups: (u32, u32),
         ext: Option<[&wgpu::Buffer; 4]>,
     ) {
+        let KernelImages { src, aux, out } = images;
         let g = self.g;
         let Some(pipe) = g.pipelines.get(entry) else {
             if !g.unavailable.iter().any(|(e, _)| *e == entry) {
@@ -1243,7 +1239,7 @@ impl<'g> Enc<'g> {
     /// Per-pixel kernel over `out`'s size (16×16 workgroups).
     pub fn pixels(&mut self, entry: &str, p: &Params, src: &GpuImage, aux: Option<&GpuImage>, out: &GpuImage, data: Option<&wgpu::Buffer>) {
         let groups = (out.width.div_ceil(16), out.height.div_ceil(16));
-        self.dispatch(entry, p, src, aux, out, data, groups);
+        self.dispatch(entry, p, KernelImages { src, aux, out }, data, groups);
     }
 
     /// Copy `src` into a larger zeroed image at (`x`, `y`) (Buf::pad).
