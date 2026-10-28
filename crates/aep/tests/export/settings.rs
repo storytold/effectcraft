@@ -100,6 +100,22 @@ fn rec709_gamma_24_is_written_with_a_profile_of_our_own() {
 }
 
 #[test]
+fn our_rec709_profile_without_its_name_is_still_rec709() {
+    // After Effects 26.2.1 drops the name on a re-save (settings-c): the name is then our profile's
+    // description. The name is blanked to spaces, so the JSON keeps its length.
+    let mut bytes = export_all(&with(|s| s.working_space = Some(ColorSpace::Rec709))).bytes;
+    let key = b",\"colorProfileName\":\"Rec.709 Gamma 2.4\"";
+    let at = bytes.windows(key.len()).position(|w| w == key).expect("name");
+    bytes[at..at + key.len()].fill(b' ');
+    let s = effectcraft_aep::ProjectSettings::read(&parse(&bytes).expect("parse"));
+    assert_eq!(s.working_space, Some(WorkingSpace::Profile("Rec.709 Gamma 2.4 (EffectCraft)".into())));
+    let mut q = Project::default();
+    let none = |_: &str| false;
+    let back = effectcraft_aep::import::import(&mut q, &bytes, &effectcraft_aep::import::ImportOptions::new(&none)).expect("import");
+    assert_eq!(back.settings.working_space, Some(ColorSpace::Rec709));
+}
+
+#[test]
 fn what_the_file_cannot_hold_is_reported() {
     let lossy = [
         with(|s| s.working_space = Some(ColorSpace::Rec2020)),
