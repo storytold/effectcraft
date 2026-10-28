@@ -69,9 +69,26 @@ fn the_camera_tracker_block_is_named_and_works_from_the_keyboard() {
     h.get_by_role_and_label(Role::Button, "Analyze").focus();
     h.run_steps(3);
     assert_eq!(h.root().children_recursive().find(|n| n.is_focused()).and_then(|n| n.accesskit_node().label()).as_deref(), Some("Analyze"));
-    // Enter on the focused button starts a new analysis (the job exists for the pass it ends in).
-    assert!(h.state().session.camera_job.is_none());
+    // Enter on the focused button starts a new analysis. On a fast machine the background job can
+    // start, finish and be written back inside one frame, so the job is never seen between two
+    // steps; what persists is its undo step, so count those.
+    let runs = |h: &Harness<'_, EffectcraftApp>| h.state().session.history_tree().iter().filter(|n| n.label.starts_with("3D Camera Tracker")).count();
+    // Undo the first analysis so a new run writes a different state, which the history records.
+    assert!(h.state_mut().session.undo(), "undo the first analysis");
+    h.run_steps(4);
+    assert!(h.state().session.camera_job.is_none() && !h.state().session.is_camera_analyzing(), "undo does not start an analysis by itself");
+    let before = runs(&h);
     h.input_mut().events.push(Event::Key { key: Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
-    h.step();
-    assert!(h.state().session.camera_job.is_some() || h.state().session.is_camera_analyzing(), "Enter on Analyze starts the analysis");
+    for _ in 0..200 {
+        h.run_steps(2);
+        if runs(&h) > before && !h.state().session.is_camera_analyzing() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    assert!(
+        runs(&h) > before,
+        "Enter on Analyze starts the analysis and it writes its result: {:?}",
+        h.state().session.history_tree().iter().map(|n| &n.label).collect::<Vec<_>>()
+    );
 }
