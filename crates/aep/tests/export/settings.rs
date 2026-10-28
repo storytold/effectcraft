@@ -141,9 +141,6 @@ fn settings_fixtures_round_trip() {
         // 621-630 share a file with 628 (scene compensation off), which the round trip does not
         // carry (628 is not in this list); every other setting comes back.
         let back = effectcraft_aep::ProjectSettings { scene_compensation: orig.scene_compensation, ..back };
-        // 622 and 634 share a file without a working-space profile name (After Effects 26.2.1 did
-        // not write it in that save): unread, it cannot come back.
-        let back = if orig.working_space.is_none() { effectcraft_aep::ProjectSettings { working_space: None, ..back } } else { back };
         assert_eq!(back, orig, "{name}");
     }
 }

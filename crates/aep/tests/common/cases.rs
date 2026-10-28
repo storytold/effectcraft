@@ -359,7 +359,7 @@ pub const CASES: &[(&str, &str)] = &[
     ("857-shape-key-group-scale-100-50-150-linear.aep", "shapes.aep"),
     ("900-mask-added-no-path.aep", "masks.aep"),
     ("901-mask-no-path-expansion-m100.aep", "masks.aep"),
-    ("902-settings-rec709-16bpc-steps-png-grey-solid.aep", "902-settings-rec709-16bpc-steps-png-grey-solid.aep"),
+    ("902-settings-rec709-16bpc-steps-png-grey-solid.aep", "settings-c.aep"),
     ("905-fx-24-effects-set-one-comp.aep", "effects.aep"),
     ("906-blendmodes-13-solids-on-steps.aep", "layers-comps.aep"),
     ("951-styles-all-nine-defaults-on-B.aep", "styles.aep"),

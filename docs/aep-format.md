@@ -711,7 +711,7 @@ bytes 20-27 / 28-35, `fdta`) only the bytes below changed.
 | setting | where | stored | cases | conf |
 |---|---|---|---|---|
 | colour depth | `nhed` byte 15 (and `nnhd` byte 24) | 0 = 8, 1 = 16, 2 = 32 bits per channel (the base is 32) | 620, 621, 622, 631 | V |
-| working space | `cpid` (16 bytes) and the `Utf8` right after `PwCs` | None: `cpid` all `0xff` and the JSON `{}`; a profile: JSON `{"baseColorProfile":{"colorProfileData":"<base64 ICC>","colorProfileName":"<name>"},"baseProfileType":2}` (`sRGB IEC61966-2.1` in the base, `Rec.709 Gamma 2.4` in 624) and `cpid` a 16-byte id of the profile | 620, 623, 624, 631 | V (None, the name), ? (`cpid`) |
+| working space | `cpid` (16 bytes) and the `Utf8` right after `PwCs` | None: `cpid` all `0xff` and the JSON `{}`; a profile: JSON `{"baseColorProfile":{"colorProfileData":"<base64 ICC>","colorProfileName":"<name>"},"baseProfileType":2}` (`sRGB IEC61966-2.1` in the base, `Rec.709 Gamma 2.4` in 624) and `cpid` a 16-byte id of the profile; After Effects 26.2.1 leaves `colorProfileName` out in a fresh save (settings-c), and the name is then the profile's ICC `desc` tag (v2 `desc` or v4 `mluc`) | 620, 623, 624, 631, 902 | V (None, the name), ? (`cpid`) |
 | working gamma | `dwga` `u32` @0 | 0 = 2.2, 1 = 2.4 | 625, 631 | V |
 | Linearize Working Space | `lnrp` (1 byte, 1) inserted after `cpid` | absent when off | 626, 632 | V |
 | Blend Colors Using 1.0 Gamma | `lnrb` (1 byte, 1) inserted after `cpid`, before `lnrp` | absent when off | 627, 632 | V |
@@ -774,8 +774,8 @@ gradient / two-rectangle shapes, right justification, faux styles, caps, leading
 depth of field, light colour and cone, marker label and cue data, audio and sequence footage).
 
 The fixtures are the small files of the corpus: as 369 single-case `.aep` files they used 31.4 MB on
-disk (and the five `.aepx` 0.9 MB); combined into one project per family (16 files and the
-`902` case on its own) they use 27.2 MB. In a combined file only the first instance of an effect
+disk (and the five `.aepx` 0.9 MB); combined into one project per family (16 files) they use
+27.1 MB. In a combined file only the first instance of an effect
 type keeps its parameter definitions (later ones read the project copy), layer and item ids are
 the file's, and project settings are per file. Cases that exist in the corpus but have no fixture: 200 and 201 (the save-noise pair), 207 (Rotation keys), 209 (Rectangle Size keys), 244 (point text reference), 250 (comp marker at 2 s),
 255 (default spot light, identical to 121), 257 and 258 (precomps of a 640 x 360 solid and of a

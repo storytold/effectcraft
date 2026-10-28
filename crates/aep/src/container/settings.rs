@@ -97,5 +97,94 @@ fn working_space(file: &AepFile<'_>) -> Option<WorkingSpace> {
     if trimmed == b"{}" {
         return Some(WorkingSpace::None);
     }
-    json_string(json, "colorProfileName").map(WorkingSpace::Profile)
+    // After Effects 26.2.1 saves the profile data without the name (settings-c, 902): the name is
+    // then the profile's own description (ICC.1 `desc`).
+    json_string(json, "colorProfileName")
+        .or_else(|| json_string(json, "colorProfileData").and_then(|b| base64_decode(&b)).and_then(|icc| icc_description(&icc)))
+        .map(WorkingSpace::Profile)
+}
+
+/// Standard base64 (RFC 4648) with or without padding; `None` for any other character.
+fn base64_decode(text: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(text.len() / 4 * 3);
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for c in text.bytes().filter(|c| *c != b'=') {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        };
+        acc = (acc << 6 | u32::from(v)) & 0x00ff_ffff;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((acc >> bits) & 0xff) as u8);
+        }
+    }
+    Some(out)
+}
+
+/// The profile description (ICC.1 tag `desc`): a v2 `desc` (ASCII) or a v4 `mluc` (its first
+/// record, UTF-16BE). `None` when the profile or the tag is cut short.
+fn icc_description(icc: &[u8]) -> Option<String> {
+    let be32 = |at: usize| icc.get(at..at.checked_add(4)?).and_then(|b| b.try_into().ok()).map(u32::from_be_bytes);
+    let count = be32(128)?;
+    let tag = (0..count.min(1024)).find_map(|i| {
+        let at = 132usize.checked_add(usize::try_from(i).ok()?.checked_mul(12)?)?;
+        (icc.get(at..at.checked_add(4)?)? == b"desc").then_some(at)
+    })?;
+    let off = usize::try_from(be32(tag.checked_add(4)?)?).ok()?;
+    let len = usize::try_from(be32(tag.checked_add(8)?)?).ok()?;
+    let body = icc.get(off..off.checked_add(len)?)?;
+    let text = match body.get(..4)? {
+        b"desc" => {
+            let n = usize::try_from(u32::from_be_bytes(body.get(8..12)?.try_into().ok()?)).ok()?;
+            let ascii = body.get(12..12usize.checked_add(n)?)?;
+            String::from_utf8_lossy(ascii.split(|b| *b == 0).next().unwrap_or_default()).into_owned()
+        }
+        b"mluc" => {
+            let n = usize::try_from(u32::from_be_bytes(body.get(20..24)?.try_into().ok()?)).ok()?;
+            let at = usize::try_from(u32::from_be_bytes(body.get(24..28)?.try_into().ok()?)).ok()?;
+            let units: Vec<u16> = body.get(at..at.checked_add(n)?)?.as_chunks::<2>().0.iter().map(|p| u16::from_be_bytes(*p)).collect();
+            String::from_utf16_lossy(&units)
+        }
+        _ => return None,
+    };
+    let text = text.trim_end_matches('\0').trim().to_owned();
+    (!text.is_empty()).then_some(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base64_decodes_with_and_without_padding() {
+        assert_eq!(base64_decode("Zm9vYmFy").as_deref(), Some(&b"foobar"[..]));
+        assert_eq!(base64_decode("Zm9vYmE=").as_deref(), Some(&b"fooba"[..]));
+        assert_eq!(base64_decode("Zm9vYg").as_deref(), Some(&b"foob"[..]));
+        assert_eq!(base64_decode("Zm9v*"), None);
+    }
+
+    #[test]
+    fn the_description_of_our_own_profile_is_read() {
+        let icc = crate::export::icc::rec709_gamma24();
+        assert_eq!(icc_description(&icc).as_deref(), Some("Rec.709 Gamma 2.4 (EffectCraft)"));
+    }
+
+    #[test]
+    fn a_cut_or_damaged_profile_gives_no_description() {
+        let icc = crate::export::icc::rec709_gamma24();
+        for n in 0..icc.len() {
+            let mut cut = icc.get(..n).unwrap_or_default().to_vec();
+            let _ = icc_description(&cut);
+            cut.iter_mut().for_each(|b| *b = 0xff);
+            let _ = icc_description(&cut);
+        }
+        assert_eq!(icc_description(&icc[..140]), None);
+        assert_eq!(icc_description(&[]), None);
+    }
 }

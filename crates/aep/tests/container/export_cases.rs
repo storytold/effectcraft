@@ -109,11 +109,11 @@ fn project_settings_are_read_from_the_header_chunks() {
         ..base.clone()
     };
     let b = ProjectSettings { linearize: true, blend_linear: true, time_display: Some(TimeDisplay::FeetFrames { frames_per_foot: 16 }), ..base.clone() };
-    // The file of 622 and 634 has no working-space profile name: After Effects 26.2.1 did not
-    // write it in that save (902 keeps the older form), so the working space is unread.
+    // The file of 622, 634 and 902 is Rec.709: After Effects 26.2.1 stored the profile without its
+    // name, so the name is the profile's own description.
     let c = ProjectSettings {
         bits_per_channel: Some(16),
-        working_space: None,
+        working_space: Some(WorkingSpace::Profile("Rec.709 Gamma 2.4".into())),
         time_display: Some(TimeDisplay::FeetFrames { frames_per_foot: 40 }),
         ..base.clone()
     };
@@ -130,7 +130,7 @@ fn project_settings_are_read_from_the_header_chunks() {
             a,
         ),
         (&["632-settings-linearize-and-blend-linear.aep", "633-settings-feet-frames-35.aep"][..], b),
-        (&["622-settings-bpc-16.aep", "634-settings-feet-frames-16.aep"][..], c),
+        (&["622-settings-bpc-16.aep", "634-settings-feet-frames-16.aep", "902-settings-rec709-16bpc-steps-png-grey-solid.aep"][..], c),
     ] {
         for name in names {
             assert_eq!(skip!(read(name)), want, "{name}");

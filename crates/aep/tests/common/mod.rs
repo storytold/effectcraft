@@ -11,8 +11,8 @@
 //! (project settings, the effect definitions, the XMP packet) stays, and the layers and items keep
 //! the ids they have in the combined file.
 //!
-//! A case name that is a file of its own in the directory (an old single-case fixture, the
-//! `902` settings case, or a combined file's own name) is read as it is. When the file is not
+//! A case name that is a file of its own in the directory (an old single-case fixture or a
+//! combined file's own name) is read as it is. When the file is not
 //! there the test prints `SKIPPED: fixture <name> missing` and returns without failing (the
 //! macros below), so the suite runs without the projects. The directory is `tests/fixtures` of
 //! this crate, or the one in the `EFFECTCRAFT_AEP_FIXTURES` environment variable (which may
@@ -38,10 +38,9 @@ pub fn dir() -> PathBuf {
     }
 }
 
-/// The combined files the cases live in (and the two files of their own), sorted.
+/// The combined files the cases live in (and the empty project, a file of its own), sorted.
 pub const FILES: &[&str] = &[
     "3d.aep",
-    "902-settings-rec709-16bpc-steps-png-grey-solid.aep",
     "aepx-pair.aep",
     "aepx-pair.aepx",
     "effects.aep",

@@ -24,7 +24,7 @@ mod camlight;
 mod effects;
 mod emit;
 mod footage;
-mod icc;
+pub(crate) mod icc;
 mod markers;
 mod masks;
 mod plan;

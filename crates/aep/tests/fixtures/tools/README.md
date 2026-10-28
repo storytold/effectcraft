@@ -57,5 +57,5 @@ single-case files some cases are merged from, and the contributor's own animatio
    `../../` are that check; `../CASES.md` lists the cases).
 
 Project settings have one value per project, so the settings cases are split over three files.
-In a fresh save After Effects 26.2.1 no longer writes the working-space profile name, so case
-902 (which needs it) is kept as its earlier single-case file.
+In a fresh save After Effects 26.2.1 no longer writes the working-space profile name, only the
+profile data; the reader then takes the name from the profile's own description.
