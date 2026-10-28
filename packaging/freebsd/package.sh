@@ -33,7 +33,8 @@ done
 if [[ -n "${CARGO_BUILD_TARGET:-}" ]]; then
   case "$CARGO_BUILD_TARGET" in
     aarch64-unknown-freebsd) ARCH=aarch64 ;;
-    *) ARCH=x86_64 ;;
+    x86_64-unknown-freebsd) ARCH=x86_64 ;;
+    *) echo "unsupported CARGO_BUILD_TARGET $CARGO_BUILD_TARGET (use x86_64- or aarch64-unknown-freebsd)" >&2; exit 2 ;;
   esac
 else
   # FreeBSD's uname says amd64; release file names use x86_64 like the Linux and Windows ones.
@@ -111,8 +112,15 @@ mkdir -p "$OUT_DIR"
 tar -C "$WORK" -czf "$OUT_DIR/$BASENAME.tar.gz" "$BASENAME"
 echo "wrote $OUT_DIR/$BASENAME.tar.gz"
 
-# A cross-built binary (aarch64 on the x86_64 VM) can't run on the build host.
-if [[ -z "${CARGO_BUILD_TARGET:-}" ]]; then "$STAGE/bin/effectcraft-cli" --version; fi
+# Run the smoke test only when the binary's target is this host's (a cross build can't run here).
+case "$(uname -m)" in
+  amd64 | x86_64) HOST_TRIPLE=x86_64-unknown-freebsd ;;
+  arm64 | aarch64) HOST_TRIPLE=aarch64-unknown-freebsd ;;
+  *) HOST_TRIPLE= ;;
+esac
+if [[ -z "${CARGO_BUILD_TARGET:-}" || "$CARGO_BUILD_TARGET" = "$HOST_TRIPLE" ]]; then
+  "$STAGE/bin/effectcraft-cli" --version
+fi
 if [[ "$DRY_RUN" = 1 ]]; then
   echo "==> dry run: tarball contents"
   tar -tzvf "$OUT_DIR/$BASENAME.tar.gz"
