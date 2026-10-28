@@ -93,7 +93,8 @@ pub fn case_comp(name: &str) -> &str {
 /// broken folder) fails the test, so a fixture that is there but unreadable never turns into a skip.
 fn is_fixture(path: &std::path::Path) -> bool {
     match std::fs::metadata(path) {
-        Ok(m) => m.is_file(),
+        Ok(m) if m.is_file() => true,
+        Ok(_) => panic!("{}: not a file", path.display()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
         Err(e) => panic!("{}: {e}", path.display()),
     }
