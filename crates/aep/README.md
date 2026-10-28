@@ -46,8 +46,10 @@ panics. Which fields are verified, which are not decoded, and how it was found i
 Everything here comes from our own observations: project files that we generated ourselves with
 After Effects, one change per file, compared byte by byte. No source code, specification or
 format documentation of another reader was used, and no Adobe asset is used. The test fixtures are such generated files
-(own test data): a few combined projects in `tests/fixtures/`, one composition per case
-(`tests/fixtures/CASES.md`; the generator is in `tests/fixtures/tools/`). The tests reach them only
+(own test data): a few combined projects, one composition per case (`tests/fixtures/CASES.md`;
+the generator is in `tests/fixtures/tools/`). They are not in this repository: `cargo xtask
+aep-corpus` fetches them from https://github.com/vangel76/effectcraft-aep-corpus, pinned and
+sha256-verified, into the workspace's `corpus/aep/`. The tests reach them only
 through `tests/common/mod.rs`, which hands a test its case as a project of its own cut from the
 combined file (or reads the folder in `EFFECTCRAFT_AEP_FIXTURES`); a test whose fixture is missing
 prints `SKIPPED: fixture <name> missing` and passes.

@@ -17,9 +17,9 @@ same loaded base; batch 3 (cases 299 to 354) was made in three further sessions 
 without any edit, the reference for save noise). The base project `000-base` is one composition `C`
 (1920x1080, 25 fps, 5 s) holding one red solid layer `L` (1920x1080) in the folder `Solids`. 374 of
 these cases (369 `.aep`, and the `.aepx` of `000`, `058`, `060`, `110`, `124`) are the test fixtures. They
-are in the repository as a few combined projects in `crates/aep/tests/fixtures/`, one composition
-per case named like the case and rebuilt from the same recipe (`CASES.md` there, the generator in
-`tools/`); `crates/aep/tests/common/mod.rs` hands a test its case as a project of its own cut from
+are a few combined projects, one composition per case named like the case and rebuilt from the
+same recipe (`crates/aep/tests/fixtures/CASES.md`, the generator in `tools/` there), fetched by
+`cargo xtask aep-corpus` (pinned, sha256-verified) into `corpus/aep/`; `crates/aep/tests/common/mod.rs` hands a test its case as a project of its own cut from
 the combined file (or reads the folder in `EFFECTCRAFT_AEP_FIXTURES`), and a test whose fixture is
 missing prints `SKIPPED: fixture <name> missing` and passes. The tests named below run on them;
 the `.aepx` cases are one pair, `aepx-pair.aep` and `aepx-pair.aepx`. The container
@@ -422,6 +422,7 @@ The expression engine is project-wide (`LIST ExEn/Utf8`, `javascript-1.0`). API:
 | match name | the `tdmn` before the `sspc` | | text | `ADBE Slider Control`, `Pseudo/@@S1iPXtJFTHK4QaDbgJvLhw`, ... | 071, 073, 077, 080, 214 | V |
 | instance name | `sspc/fnam/Utf8` | | text | the effect's own name (`Slider Control`, `Tint`); it stays the same when the instance is renamed (610) | 071, 073, 077, 080, 610 | V |
 | **user name of an instance** | `sspc/tdgp/tdsn/Utf8` (the value group's name) | | text | `-_0_/-` (the placeholder every unnamed group has) while the instance shows the effect's name; the given name otherwise (610: `My Tint`, `fnam` still `Tint`). `Effect::user_name`, `Effect::display_name` | 356, 609, 610 | V |
+| **fx switch** | `sspc/tdgp/tdsb` (the value group's flags, `u32`) | | flag | 1 on, 0 switched off in the Effect Controls (`fx-switch.aep`: two Gaussian Blurs on one layer in one save, the first switched off, the second on; read back `enabled` false / true). `Effect::enabled` | fx-switch | V |
 | parameter count | `sspc/parT/parn` | 0 | u32 | including the implicit input layer and the built-in entry (3 for a slider) | 071 | V |
 | parameter match name | `parT/tdmn` | | text | `<effect match name>-NNNN`; the last is `ADBE Effect Built In Params` | 071 | V |
 | parameter type | `parT/pard` | 12 | u32 | 0 layer, 2 fixed slider (16.16), 3 angle, 4 checkbox, 5 colour, 6 point, 7 popup, 9 no data, 10 float slider, 12 path, **13 group start / 14 group end** (Exposure's Master, Red, Green and Blue twirl-downs; the end repeats the group's name; no value), **15 button** (Swap Colors of Tint and Gradient Ramp: empty name, label in `pdnm`) | 071, 073, 077, 080, 214, 215, 356, 368, 389 | V |
@@ -774,8 +775,8 @@ gradient / two-rectangle shapes, right justification, faux styles, caps, leading
 depth of field, light colour and cone, marker label and cue data, audio and sequence footage).
 
 The fixtures are the small files of the corpus: as 369 single-case `.aep` files they used 31.4 MB on
-disk (and the five `.aepx` 0.9 MB); combined into one project per family (16 files) they use
-27.1 MB. In a combined file only the first instance of an effect
+disk (and the five `.aepx` 0.9 MB); combined into one project per family (16 files, and `fx-switch.aep`)
+they use 27.2 MB in the corpus. In a combined file only the first instance of an effect
 type keeps its parameter definitions (later ones read the project copy), layer and item ids are
 the file's, and project settings are per file. Cases that exist in the corpus but have no fixture: 200 and 201 (the save-noise pair), 207 (Rotation keys), 209 (Rectangle Size keys), 244 (point text reference), 250 (comp marker at 2 s),
 255 (default spot light, identical to 121), 257 and 258 (precomps of a 640 x 360 solid and of a

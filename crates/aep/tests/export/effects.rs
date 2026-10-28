@@ -339,8 +339,17 @@ fn what_cannot_be_written_is_reported() {
         g.get_mut("amount").expect("amount").expr = Some(effectcraft_project::Expression { text: "50".into(), enabled: true });
     }));
     let r = export_all(&p);
-    // The switch is not decoded; the expression is written (534).
-    assert_eq!(r.report.count(LossCategory::Effects), 1, "{:?}", r.report.losses);
+    // The switch (fx-switch cases) and the expression (534) are written; a second import gets the
+    // effect switched off.
+    assert_eq!(r.report.count(LossCategory::Effects), 0, "{:?}", r.report.losses);
+    let back = import_bytes(&r.bytes);
+    let off = back
+        .comps()
+        .flat_map(|(_, c)| c.layers.iter())
+        .filter_map(|l| l.props.sub("effects"))
+        .flat_map(|e| e.children.iter())
+        .any(|n| matches!(n, Node::Group(g) if !g.enabled));
+    assert!(off, "the switched-off effect comes back switched off");
     // An effect outside the table.
     let mut q = import_bytes(&fixture!("356-fx-tint-default.aep"));
     let c = q.items.values().find(|i| i.name == "C").map(|i| i.id).expect("C");

@@ -276,3 +276,17 @@ fn curves_and_mesh_warp_data() {
     }
     assert_eq!(m.to_bytes().as_deref(), Some(data));
 }
+
+#[test]
+fn the_fx_switch_is_the_value_group_flag() {
+    // fx-switch.aep: two Gaussian Blurs on L, the first switched off in After Effects, the second
+    // added after it and left on (one save).
+    let bytes = skip!(crate::common::try_file("fx-switch.aep"));
+    let file = open(&bytes);
+    let p = Project::new(&file).expect("project");
+    let comp = first_comp(&p);
+    let layer = base_layer(&comp);
+    let fx = layer.effects();
+    assert_eq!(fx.iter().map(|e| e.match_name().to_string()).collect::<Vec<_>>(), ["ADBE Gaussian Blur 2", "ADBE Gaussian Blur 2"]);
+    assert_eq!(fx.iter().map(Effect::enabled).collect::<Vec<_>>(), [Some(false), Some(true)]);
+}

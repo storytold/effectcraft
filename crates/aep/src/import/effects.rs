@@ -94,6 +94,10 @@ pub(crate) fn import_effects(
         }
         let size = [f64::from(cx.size.0), f64::from(cx.size.1)];
         let mut group = effectcraft_effects::instantiate(spec, ids, &shown, size);
+        match fx.enabled() {
+            Some(on) => group.enabled = on,
+            None => col.lose(LossCategory::DamagedData, format!("{}: '{}': the fx switch of '{shown}' is unreadable, imported switched on", cx.comp, cx.layer)),
+        }
         let params = view.effect_params(&fx);
         for p in &params {
             import_param(&fx, map, p, cx, &mut group, &shown, refs, col);

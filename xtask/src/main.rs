@@ -1,4 +1,4 @@
-//! Workspace automation: `cargo xtask <layers|assets|pdf-deps|wasm|web|ico|ci>`.
+//! Workspace automation: `cargo xtask <layers|assets|pdf-deps|wasm|web|ico|aep-corpus|ci>`.
 //!
 //! - `layers`: enforces the dependency layering of `docs/architecture.md` §1 (downward-only edges,
 //!   listed same-layer edges, no UI/OS crates below L5).
@@ -8,15 +8,19 @@
 //!   `<target>/web/dist` with `wasm-bindgen` (docs/web.md); `--serve` serves it on localhost.
 //! - `assets`: every asset file (image, icon, font, LUT, audio, video…) has a complete
 //!   `<file>.attribution` sidecar and an entry in `ATTRIBUTION.md` (AGENTS.md §1).
+//! - `aep-corpus [--update-manifest]`: fetch the After Effects test projects of `crates/aep`,
+//!   pinned and sha256-verified, into `corpus/aep/` (`aep_corpus.rs`).
 //! - `ico <out.ico> <in.png>…`: pack PNGs into a Windows `.ico` (used by `packaging/icons.sh`).
-//! - `ci`: fmt check, clippy -D warnings, tests (`cargo nextest run` when installed) and doctests,
+//! - `ci`: fmt check, clippy -D warnings, the After Effects test corpus (`aep-corpus`), tests (`cargo nextest run` when installed) and doctests,
 //!   PDF dependency policy, layers, assets, wasm. Everything builds in the dev profile.
 //! - `bench [--bin CLI] [--quick] [--compare OLD.jsonl] …`: render benchmark of generated scenarios
 //!   (memory, CPU, wall time) into `target/bench/results.jsonl` (`bench.rs`, docs/testing.md).
 
+mod aep_corpus;
 mod bench;
 mod ico;
 mod pdf_deps;
+mod sha256;
 mod version;
 
 use std::process::{Command, ExitCode};
@@ -439,9 +443,10 @@ type Stage = fn() -> Result<(), String>;
 
 /// Every stage runs even when an earlier one fails, so one run reports all the problems.
 fn ci() -> Result<(), String> {
-    let stages: [(&str, Stage); 7] = [
+    let stages: [(&str, Stage); 8] = [
         ("fmt", || run(Command::new(env!("CARGO")).args(["fmt", "--check"]))),
         ("clippy", || run(Command::new(env!("CARGO")).args(["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]))),
+        ("aep-corpus", || aep_corpus::run(&root(), &[])),
         ("tests", tests),
         ("pdf-deps", || pdf_deps::run(&root())),
         ("layers", layers),
@@ -460,6 +465,7 @@ fn main() -> ExitCode {
         "assets" => assets(),
         "pdf-deps" => pdf_deps::run(&root()),
         "ci" => ci(),
+        "aep-corpus" => aep_corpus::run(&root(), &std::env::args().skip(2).collect::<Vec<_>>()),
         "web" => web(&std::env::args().skip(2).collect::<Vec<_>>()),
         "bench" => bench::run(&root(), &std::env::args().skip(2).collect::<Vec<_>>()),
         "ico" => {
@@ -470,7 +476,7 @@ fn main() -> ExitCode {
             let rest: Vec<String> = std::env::args().skip(2).collect();
             version::run(&root(), &rest.iter().map(String::as_str).collect::<Vec<_>>())
         }
-        _ => Err("usage: cargo xtask <layers|assets|pdf-deps|wasm|web [--dev] [--serve PORT]|ico OUT.ico IN.png…|version [set X.Y.Z]|ci|bench [--bin CLI] [--quick] [--project F --comp C] [--compare OLD.jsonl] (--help)>".into()),
+        _ => Err("usage: cargo xtask <layers|assets|pdf-deps|aep-corpus [--update-manifest]|wasm|web [--dev] [--serve PORT]|ico OUT.ico IN.png…|version [set X.Y.Z]|ci|bench [--bin CLI] [--quick] [--project F --comp C] [--compare OLD.jsonl] (--help)>".into()),
     };
     match r {
         Ok(()) => ExitCode::SUCCESS,

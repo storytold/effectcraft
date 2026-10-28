@@ -9,7 +9,7 @@ use crate::Session;
 #[path = "../../../aep/tests/common/mod.rs"]
 mod common;
 
-/// The path of a test project of `effectcraft-aep` (`crates/aep/tests/fixtures`, or the folder in
+/// The path of a test project of `effectcraft-aep` (`corpus/aep`, or the folder in
 /// `EFFECTCRAFT_AEP_FIXTURES`), or `None` after printing the skip line when it is missing. A case
 /// of a combined project is written as a project of its own (see `common`), named like the case,
 /// to a temporary folder.

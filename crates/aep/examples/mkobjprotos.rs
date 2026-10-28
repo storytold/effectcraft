@@ -18,7 +18,7 @@
 //! `cargo run -p effectcraft-aep --example mkobjprotos -- <single-case dir> <corpus synthetic dir> crates/aep/template/objects.aep`
 //!
 //! The prototypes are cut from the earlier single-case files, which are not in the repository
-//! (`tests/fixtures` holds the combined projects; the same cases cut from them give other item
+//! (the corpus holds the combined projects; the same cases cut from them give other item
 //! and layer ids, so the template would change). `<single-case dir>` is a folder with those files.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 use effectcraft_aep::{AepFile, Chunk, parse, write};

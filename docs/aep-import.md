@@ -256,8 +256,8 @@ parameter gets the file's value:
   interpolates them linearly (598), so they arrive linear; another colour ease and the ease of
   popups are not decoded, such bezier sides become linear and are reported in
   `approximated_keyframes`.
-- **Not decoded:** the per-effect on/off switch (imported effects are on; listed in
-  `limitations`), and expressions on effect parameters (reported, the value is imported).
+- **The fx switch** of each instance (the `tdsb` of its value group: 1 on, 0 off; `fx-switch.aep`)
+  is imported and exported. **Not decoded:** expressions on effect parameters (reported, the value is imported).
 
 ## What is reported
 
@@ -285,7 +285,7 @@ parameter gets the file's value:
 | `damaged_data` | a header, key or value that could not be read, numbers that are not finite or beyond ±1e9 (default used); an unreadable text document (the text layer is imported with empty text), damaged style runs |
 
 `limitations` states what the reader cannot see at all, so it can be neither imported nor counted:
-frame blending, 3D material options, audio levels, guides, footage duration/frame rate, the mask colour, lock, feather falloff, motion blur and RotoBezier switches, the per-effect on/off switch, and for text per-character 3D, text on a path and style slots of unknown meaning (stored values of these that differ from the default are reported as text layer features). They are listed in every report.
+frame blending, 3D material options, audio levels, guides, footage duration/frame rate, the mask colour, lock, feather falloff, motion blur and RotoBezier switches, and for text per-character 3D, text on a path and style slots of unknown meaning (stored values of these that differ from the default are reported as text layer features). They are listed in every report.
 
 ## How fidelity is checked
 
@@ -308,7 +308,7 @@ frame blending, 3D material options, audio levels, guides, footage duration/fram
 - `crates/aep/tests/import/combined.rs`: masks and effects on the same layer, an effect on a text
   layer, and the same through `.aepx` (built in-test from the fixtures: the effect parade of one
   fixture grafted onto the layer of another).
-- `crates/aep/tests/import/import.rs`: the synthetic cases of `crates/aep/tests/fixtures` (one
+- `crates/aep/tests/import/import.rs`: the synthetic cases of the corpus (`cargo xtask aep-corpus`; one
   composition per case in a few combined projects, `CASES.md`; each the same one-solid
   composition with one change) are imported and the resulting project is
   compared with the value the fixture was made with: composition size/rate/duration/work

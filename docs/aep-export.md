@@ -103,7 +103,7 @@ at all.
 
 | Category | Counted |
 |---|---|
-| `effects` | an effect outside the table (each instance), a switched-off effect (written on: the switch is not decoded), a parameter without an After Effects counterpart that carries keys or an expression, keys on a popup, checkbox, angle or integer slider (the first key's value is written), keys or expressions on Hue/Saturation's or Levels' data values, a fractional Hue/Saturation master value (written whole), a popup item After Effects does not have, keys or an expression on a layer parameter (its value is written), a layer parameter naming a layer that is not exported (the owning layer is written) or whose layer is taken with its masks and effects (After Effects takes the source) |
+| `effects` | an effect outside the table (each instance), a parameter without an After Effects counterpart that carries keys or an expression, keys on a popup, checkbox, angle or integer slider (the first key's value is written), keys or expressions on Hue/Saturation's or Levels' data values, a fractional Hue/Saturation master value (written whole), a popup item After Effects does not have, keys or an expression on a layer parameter (its value is written), a layer parameter naming a layer that is not exported (the owning layer is written) or whose layer is taken with its masks and effects (After Effects takes the source) |
 | `markers` | a protected marker region (the switch is not decoded; the marker is written), a marker time out of range |
 | `masks` | masks on a text layer (the path unit there is not verified), a disabled mask or one without a usable path (not written), and per written mask: keys on Mask Opacity or Expansion (no keyed prototype; the static value is written), expressions on mask properties, the lock, mask motion blur other than Same As Layer, Linear feather falloff, RotoBezier, variable-width feather points |
 | `text_layers` | per text layer what its document cannot hold: wiggly and expression selectors, animator properties outside the list above (3D rotations, hue / saturation, Character Value, ...), a Tracking Type or Character Range / Alignment other than the default, Path and More Options other than the defaults, Source Text keys (the first key's text is written) and expressions, a manual kerning amount, OpenType features, variable font axes, a font style other than Regular, vertical text |
@@ -251,7 +251,7 @@ AE re-save of the same file differed.
   the Transform values, the keys (time, interpolation, value) and the expressions is compared; the
   container is consistent (writes back byte for byte); the report, the refusal and the JSON round
   trip; the output is deterministic; the embedded template holds no local data.
-- `crates/aep/tests/export/roundtrip.rs`: every fixture of `crates/aep/tests/fixtures` is imported,
+- `crates/aep/tests/export/roundtrip.rs`: every case of the corpus (`cargo xtask aep-corpus`) is imported,
   exported and imported again; the two imported projects are equal for the exported subset (more
   than 100 compositions, masks included).
 - `crates/aep/tests/export/masks.rs`: masks built in code (all seven modes, inverted, feather,

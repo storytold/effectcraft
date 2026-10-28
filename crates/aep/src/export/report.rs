@@ -14,7 +14,7 @@ pub const MAX_DETAILS: usize = 20;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LossCategory {
-    /// Effects on layers that are not written (not in the table, switched off, a parameter
+    /// Effects on layers that are not written (not in the table, a parameter
     /// without a counterpart, an expression on a parameter).
     Effects,
     /// Mask data that is not written: a disabled mask or one without a usable path, keys on Mask

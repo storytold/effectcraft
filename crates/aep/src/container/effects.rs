@@ -184,6 +184,17 @@ impl<'f, 'a> Effect<'f, 'a> {
         (name != "-_0_/-" && !name.is_empty()).then_some(name)
     }
 
+    /// The instance's fx switch: the `tdsb` of its value group is 1 when on and 0 when switched
+    /// off (`fx-switch` cases: one instance on, one off, both in one save). `None` for another
+    /// value or a missing group.
+    pub fn enabled(&self) -> Option<bool> {
+        match be_u32(self.chunk.child_list(b"tdgp")?.child(b"tdsb")?.bytes()?, 0)? {
+            1 => Some(true),
+            0 => Some(false),
+            _ => None,
+        }
+    }
+
     /// The name After Effects shows for the instance: [`Effect::user_name`], else [`Effect::name`].
     pub fn display_name(&self) -> Option<String> {
         self.user_name().or_else(|| self.name())

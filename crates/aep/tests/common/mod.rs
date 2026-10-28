@@ -14,9 +14,10 @@
 //! A case name that is a file of its own in the directory (an old single-case fixture or a
 //! combined file's own name) is read as it is. When the file is not
 //! there the test prints `SKIPPED: fixture <name> missing` and returns without failing (the
-//! macros below), so the suite runs without the projects. The directory is `tests/fixtures` of
-//! this crate, or the one in the `EFFECTCRAFT_AEP_FIXTURES` environment variable (which may
-//! also hold the old single-case files). The engine tests include this file too.
+//! macros below), so the suite runs without the projects. The directory is `corpus/aep/` of the
+//! workspace (`cargo xtask aep-corpus` fetches it, pinned and sha256-verified), or the one in the
+//! `EFFECTCRAFT_AEP_FIXTURES` environment variable (which may also hold the old single-case
+//! files). The engine tests include this file too.
 #![allow(dead_code, unused_macros)]
 
 mod cases;
@@ -33,8 +34,9 @@ pub use cases::CASES;
 pub fn dir() -> PathBuf {
     match std::env::var_os("EFFECTCRAFT_AEP_FIXTURES") {
         Some(d) if !d.is_empty() => PathBuf::from(d),
-        // `../aep` from this crate, so the engine tests (which include this file) find it too.
-        _ => [env!("CARGO_MANIFEST_DIR"), "..", "aep", "tests", "fixtures"].iter().collect(),
+        // The workspace's `corpus/aep` from any crate, so the engine tests (which include this
+        // file) find it too.
+        _ => [env!("CARGO_MANIFEST_DIR"), "..", "..", "corpus", "aep"].iter().collect(),
     }
 }
 
@@ -46,6 +48,7 @@ pub const FILES: &[&str] = &[
     "effects.aep",
     "empty.aep",
     "footage-precomp.aep",
+    "fx-switch.aep",
     "keyframes.aep",
     "layers-comps.aep",
     "markers.aep",

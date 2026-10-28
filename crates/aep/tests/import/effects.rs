@@ -298,3 +298,15 @@ fn a_renamed_effect_keeps_its_name() {
     assert_eq!(skip!(only_effect("610-fx-tint-named-My-Tint.aep")).name, "My Tint");
     assert_eq!(skip!(only_effect("356-fx-tint-default.aep")).name, "Tint");
 }
+
+#[test]
+fn a_switched_off_effect_arrives_switched_off() {
+    let bytes = skip!(crate::common::try_file("fx-switch.aep"));
+    let mut p = Project::default();
+    let none = |_: &str| false;
+    let r = effectcraft_aep::import::import(&mut p, &bytes, &effectcraft_aep::import::ImportOptions::new(&none)).expect("lossless import");
+    let (_, c) = comp(&p, &r, "C");
+    let fx = c.layers[0].props.sub("effects").expect("effects");
+    let on: Vec<bool> = fx.children.iter().filter_map(|n| if let effectcraft_project::Node::Group(g) = n { Some(g.enabled) } else { None }).collect();
+    assert_eq!(on, [false, true]);
+}

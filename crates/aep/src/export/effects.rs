@@ -124,6 +124,8 @@ pub(crate) struct EffectPlan {
     pub data: Option<(u16, Vec<u8>)>,
     /// The layer each layer parameter names (by its index); absent = the owning layer.
     pub layers: Vec<(u16, LayerPick)>,
+    /// The fx switch (the value group's `tdsb`: 1 on, 0 off).
+    pub enabled: bool,
 }
 
 /// What a layer parameter names (`docs/aep-format.md` 3.7: its record always exists, its `tdpi`
@@ -358,9 +360,6 @@ pub(crate) fn plan_effects(layer: &Layer, size: (u32, u32), cp: &CompPlan, comp_
             col.lose(LossCategory::Effects, format!("{comp_name}: '{}' has the effect '{}' ({effect})", layer.name, g.name));
             continue;
         };
-        if !g.enabled {
-            col.lose(LossCategory::Effects, format!("{here}: the effect is switched off; written switched on (the switch is not decoded)"));
-        }
         let mut params = Vec::new();
         let mut layers = Vec::new();
         for pm in spec.params {
@@ -391,7 +390,14 @@ pub(crate) fn plan_effects(layer: &Layer, size: (u32, u32), cp: &CompPlan, comp_
         };
         report_unmapped(g, spec, &here, col);
         col.exported.effects = col.exported.effects.saturating_add(1);
-        out.push(EffectPlan { match_name: spec.match_name, name: crate::export::plan::cut_name(&g.name, 255, &here, col), params, data, layers });
+        out.push(EffectPlan {
+            match_name: spec.match_name,
+            name: crate::export::plan::cut_name(&g.name, 255, &here, col),
+            params,
+            data,
+            layers,
+            enabled: g.enabled,
+        });
     }
     out
 }
@@ -1025,6 +1031,8 @@ fn instance(
         let slot = child_mut(values, b"tdsn")?;
         *slot = nested(*b"tdsn", &fx.name);
     }
+    // The fx switch: the value group's `tdsb` (`fx-switch` cases).
+    put_u32(child_data(list_mut(&mut sspc, b"tdgp")?, b"tdsb")?, 0, u32::from(fx.enabled))?;
     let mut records = Vec::with_capacity(fx.params.len());
     for p in &fx.params {
         let def = pdefs.get(&p.index).ok_or_else(|| tpl("parameter definition missing"))?;

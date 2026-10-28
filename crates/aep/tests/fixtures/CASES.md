@@ -2,15 +2,16 @@
 
 The tests of `effectcraft-aep` (and the After Effects import tests of `effectcraft-engine`) address
 a case by the name of the single-case file it was first written against. The cases live in the
-combined projects of this folder: each case is the composition named like the case without its
+combined projects of the corpus (`cargo xtask aep-corpus` puts them in `corpus/aep/`): each case is the composition named like the case without its
 extension, built like the single-case file's composition `C` (1920x1080, 25 fps, 5 s, black, one
 red 1920x1080 solid `L`) plus the case's change (and the compositions that change uses). A test
 gets the case as a project of its own, cut from the combined file (`tests/common/mod.rs`).
-`empty.aep` is a file of its own.
+`empty.aep` and `fx-switch.aep` (the fx switch of an effect instance) are files of their own.
 
 Project settings have one value per project, so the settings cases share the files `settings-*`
 (each file holds the changes of all its cases). The generator and how to run it:
-[`tools/README.md`](tools/README.md). Every file has an `.attribution` sidecar.
+[`tools/README.md`](tools/README.md). Every file has an `.attribution` sidecar in the corpus
+(https://github.com/vangel76/effectcraft-aep-corpus).
 
 | case | file | composition | change |
 |---|---|---|---|
