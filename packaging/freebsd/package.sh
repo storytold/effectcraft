@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Build and package EffectCraft for FreeBSD:
 #
-#   $DIST/effectcraft-<version>-freebsd-x86_64.tar.gz   a /usr/local-style tree:
-#       effectcraft-<version>-freebsd-x86_64/{bin, share/applications, share/icons, share/mime,
+#   $DIST/effectcraft-<version>-freebsd-<arch>.tar.gz   a /usr/local-style tree (<arch> is x86_64 or aarch64):
+#       effectcraft-<version>-freebsd-<arch>/{bin, share/applications, share/icons, share/mime,
 #       share/metainfo, share/doc/effectcraft}
 #
 # Install by copying the tree's contents into /usr/local:
-#   tar -xzf effectcraft-<version>-freebsd-x86_64.tar.gz --strip-components 1 -C /usr/local
+#   tar -xzf effectcraft-<version>-freebsd-<arch>.tar.gz --strip-components 1 -C /usr/local
 #
 # Usage: packaging/freebsd/package.sh [--skip-build] [--dry-run]
 #   --dry-run   stage the tree from stub binaries and list it, without building (works on any OS)
@@ -29,13 +29,22 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# FreeBSD's uname says amd64; release file names use x86_64 like the Linux and Windows ones.
-MACHINE="$(uname -m)"
-case "$MACHINE" in
-  amd64 | x86_64) ARCH=x86_64 ;;
-  arm64 | aarch64) ARCH=aarch64 ;;
-  *) echo "unsupported architecture $MACHINE" >&2; exit 2 ;;
-esac
+# A cross build runs on the x86_64 VM, so the target names the arch, not uname.
+if [[ -n "${CARGO_BUILD_TARGET:-}" ]]; then
+  case "$CARGO_BUILD_TARGET" in
+    aarch64-unknown-freebsd) ARCH=aarch64 ;;
+    x86_64-unknown-freebsd) ARCH=x86_64 ;;
+    *) echo "unsupported CARGO_BUILD_TARGET $CARGO_BUILD_TARGET (use x86_64- or aarch64-unknown-freebsd)" >&2; exit 2 ;;
+  esac
+else
+  # FreeBSD's uname says amd64; release file names use x86_64 like the Linux and Windows ones.
+  MACHINE="$(uname -m)"
+  case "$MACHINE" in
+    amd64 | x86_64) ARCH=x86_64 ;;
+    arm64 | aarch64) ARCH=aarch64 ;;
+    *) echo "unsupported architecture $MACHINE" >&2; exit 2 ;;
+  esac
+fi
 if [[ "$DRY_RUN" = 0 ]] && [[ "$(uname -s)" != FreeBSD ]]; then
   echo "error: build on FreeBSD (or pass --dry-run to check the tree layout)" >&2
   exit 2
@@ -46,16 +55,15 @@ echo "==> EffectCraft $VERSION for FreeBSD $ARCH"
 
 # The release VM has 12 GB; full parallelism on the biggest crates runs it out of memory.
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}"
-# The aarch64 release VM is emulated (no rustup toolchain for this tier-3 target, so it builds
-# natively under QEMU). With one codegen unit and thin LTO the largest crates each optimize on a
-# single emulated core and the job runs past its 5-hour limit, so trade a little runtime speed for
-# parallel codegen there. x86_64 keeps the workspace's release profile.
+# The aarch64 build once ran in an emulated VM: with one codegen unit and thin LTO the largest
+# crates each optimized on a single emulated core and the job ran past its 5-hour limit, so trade
+# a little runtime speed for parallel codegen there. x86_64 keeps the workspace's release profile.
 if [[ "$ARCH" = aarch64 ]]; then
   export CARGO_PROFILE_RELEASE_CODEGEN_UNITS="${CARGO_PROFILE_RELEASE_CODEGEN_UNITS:-16}"
   export CARGO_PROFILE_RELEASE_LTO="${CARGO_PROFILE_RELEASE_LTO:-off}"
 fi
 if [[ "$SKIP_BUILD" = 0 ]]; then
-  (cd "$ROOT" && cargo build --release --locked -p effectcraft -p effectcraft-cli)
+  (cd "$ROOT" && cargo build --release --locked ${CARGO_BUILD_TARGET:+--target "$CARGO_BUILD_TARGET"} -p effectcraft -p effectcraft-cli)
 fi
 WORK="$CARGO_TARGET_DIR/freebsd-package"
 STAGE="$WORK/$BASENAME"
@@ -63,6 +71,7 @@ rm -rf "$WORK"
 mkdir -p "$WORK"
 
 BIN="$CARGO_TARGET_DIR/release"
+if [[ -n "${CARGO_BUILD_TARGET:-}" ]]; then BIN="$CARGO_TARGET_DIR/$CARGO_BUILD_TARGET/release"; fi
 OUT_DIR="$DIST"
 if [[ "$DRY_RUN" = 1 ]]; then
   # Stub binaries, and the tarball stays in the work dir so dist/ only ever holds real builds.
@@ -103,7 +112,15 @@ mkdir -p "$OUT_DIR"
 tar -C "$WORK" -czf "$OUT_DIR/$BASENAME.tar.gz" "$BASENAME"
 echo "wrote $OUT_DIR/$BASENAME.tar.gz"
 
-"$STAGE/bin/effectcraft-cli" --version
+# Run the smoke test only when the binary's target is this host's (a cross build can't run here).
+case "$(uname -m)" in
+  amd64 | x86_64) HOST_TRIPLE=x86_64-unknown-freebsd ;;
+  arm64 | aarch64) HOST_TRIPLE=aarch64-unknown-freebsd ;;
+  *) HOST_TRIPLE= ;;
+esac
+if [[ -z "${CARGO_BUILD_TARGET:-}" || "$CARGO_BUILD_TARGET" = "$HOST_TRIPLE" ]]; then
+  "$STAGE/bin/effectcraft-cli" --version
+fi
 if [[ "$DRY_RUN" = 1 ]]; then
   echo "==> dry run: tarball contents"
   tar -tzvf "$OUT_DIR/$BASENAME.tar.gz"
