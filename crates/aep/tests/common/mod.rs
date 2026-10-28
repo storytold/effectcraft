@@ -89,10 +89,20 @@ pub fn case_comp(name: &str) -> &str {
     name.rsplit_once('.').map_or(name, |(stem, _)| stem)
 }
 
+/// Whether `path` is a file. Only a missing path is `false`: any other error (no permission, a
+/// broken folder) fails the test, so a fixture that is there but unreadable never turns into a skip.
+fn is_fixture(path: &std::path::Path) -> bool {
+    match std::fs::metadata(path) {
+        Ok(m) => m.is_file(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => panic!("{}: {e}", path.display()),
+    }
+}
+
 /// Where a case is, or `None` (after printing the skip line) when its file is missing.
 pub fn locate(name: &str) -> Option<Source> {
     let own = dir().join(name);
-    if own.is_file() {
+    if is_fixture(&own) {
         return Some(Source::File(own));
     }
     let Some(file) = combined_file(name) else {
@@ -100,7 +110,7 @@ pub fn locate(name: &str) -> Option<Source> {
         return None;
     };
     let path = dir().join(file);
-    if !path.is_file() {
+    if !is_fixture(&path) {
         skipped(name);
         return None;
     }
@@ -127,7 +137,7 @@ pub fn try_fixture(name: &str) -> Option<Vec<u8>> {
 /// The bytes of a whole file of the directory (a combined project), or `None` when it is missing.
 pub fn try_file(file: &str) -> Option<Vec<u8>> {
     let path = dir().join(file);
-    if path.is_file() {
+    if is_fixture(&path) {
         Some(std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display())))
     } else {
         skipped(file);
@@ -140,14 +150,17 @@ pub fn try_file(file: &str) -> Option<Vec<u8>> {
 pub fn names(ext: &str) -> Option<Vec<String>> {
     let mut v: Vec<String> = CASES
         .iter()
-        .filter(|(n, f)| std::path::Path::new(n).extension().is_some_and(|x| x == ext) && (dir().join(n).is_file() || dir().join(f).is_file()))
+        .filter(|(n, f)| std::path::Path::new(n).extension().is_some_and(|x| x == ext) && (is_fixture(&dir().join(n)) || is_fixture(&dir().join(f))))
         .map(|(n, _)| n.to_string())
         .collect();
     if v.is_empty() {
-        v = std::fs::read_dir(dir())
+        let entries = match std::fs::read_dir(dir()) {
+            Ok(entries) => entries.map(|e| e.unwrap_or_else(|e| panic!("{}: {e}", dir().display()))).collect(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => panic!("{}: {e}", dir().display()),
+        };
+        v = entries
             .into_iter()
-            .flatten()
-            .filter_map(|e| e.ok())
             .filter_map(|e| e.file_name().into_string().ok())
             .filter(|n| std::path::Path::new(n).extension().is_some_and(|x| x == ext))
             .collect();
