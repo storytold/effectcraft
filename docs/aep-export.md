@@ -110,7 +110,7 @@ at all.
 | `shape_layers` | shape items outside the list above (wiggle, zig zag, pucker, twist, ...; not written), dashes / taper / wave, blend mode and composite order, the path direction, gradient colour stops other than the default, keys on popups (the first key's value is written), keys and expressions on a path |
 | `cameras`, `lights` | keys or expressions on camera / light options (static value written), iris and highlight settings; parallel and ambient lights (not written), light falloff, radius, shadows |
 | `model_layers` | each 3D model layer (skipped) |
-| `footage_items` | a footage item of a type without a prototype (`.avi`, `.mp3`, `.pdf`, ...), one layer of a layered file, a sequence with gaps, mixed names or no frame number, a sequence or clip at a fractional frame rate, an item without a path, and items in a folder loop or deeper than 64 levels |
+| `footage_items` | a footage item of a type without a prototype (`.avi`, `.mp3`, `.pdf`, ...), one layer of a layered file, a sequence with gaps, mixed names or no frame number, a sequence or clip at a fractional frame rate, an item without a path, a size larger than 30 000 pixels (written smaller), and items in a folder loop or deeper than 64 levels |
 | `layer_timing` | a layer of a clip, sequence or sound that runs a composition frame or more past its source's end without a time remap (After Effects ends it there; the importer ends such layers at their source as After Effects does, so imported projects no longer have them) |
 | `unsupported_layers` | a layer of footage that is not written, a precomposition layer whose composition is not exported or that closes a loop, a solid layer whose solid is not exported |
 | `blend_modes` | a mode without a known code (Dissolve, Dancing Dissolve, Subtract, Divide, Lighter / Darker Color, Alpha Add, Luminescent Premul): the layer is written as Normal. The other 30 modes are written with the codes After Effects saves (906, 907; not read back in After Effects yet) |
@@ -123,11 +123,12 @@ at all.
 | `composition_settings` | a size outside 1 to 30 000, a duration outside 1 frame to 3 hours, a frame rate that has no time base, a pixel aspect that is not an exact fraction |
 | `composition_options` | guides, Essential Graphics, the Advanced 3D renderer (written as Classic 3D) |
 | `parent_links` | a parent that was not exported or that closes a loop |
-| `rounded_times` | a key or work area time that is not a whole unit / frame of the time base |
+| `rounded_times` | a key, work area, layer start, in or out point time that is not a whole unit / frame of the time base |
 | `names` | a name longer than 255 bytes (cut) |
 | `project_settings` | a working space other than None, sRGB and Rec.709 Gamma 2.4 (written as sRGB: After Effects needs the profile data, which the template holds only for sRGB, `export-tests\settings\g4`; Rec.709 Gamma 2.4 has a profile of its own, R49), the OCIO colour engine, HDR handling, an output space other than the working space (an equal one is After Effects' normal case: it renders in the working space, 902), a frame count start other than 0 / 1 |
 | `time_remapping` | a Time Remap on a layer After Effects cannot remap (solid, text, shape, null, camera, light: 319): not written |
 | `layer_styles` | the whole Layer Styles group switched off, an edited gradient, keys on a colour, point, popup or checkbox (the value is written), Knockout, styles on a layer that takes none |
+| `layer_switches` | per layer: Wireframe quality (written as Best), Bicubic sampling, frame blending, Preserve Transparency, Auto-Orient on a layer other than a camera or light, the environment layer setting, Lock Markers |
 
 ## Rules discovered (what After Effects needs for the file to open and read back right)
 
@@ -262,18 +263,17 @@ AE re-save of the same file differed.
   field; every mask fixture goes through import, export and import; what cannot be written is
   reported; hostile masks (70 000 vertices, a single point, a line, a lopsided path, 1e300, a
   1000 character name) never panic and the container stays consistent.
-- `crates/aep/tests/export/effects.rs`: every effect fixture (Tint, Gradient Ramp, Exposure, 23
-  files) is imported, exported and parsed back; every parameter's stored value, keys (time,
+- `crates/aep/tests/export/effects.rs`: every effect case is imported, exported and parsed back; every parameter's stored value, keys (time,
   value, interpolation), the instance name and the input layer equal what After Effects wrote,
   and a second import gives the same EffectCraft values; edited parameters and keys no fixture
-  has, two instances of a type (one full `parT`), the project lists, renamed instances; switched
-  off, expression and unmapped effects reported; NaN, 1e300 and text values never panic.
-- `crates/aep/tests/export/text.rs`: every text fixture (18) through import, export and parse:
+  has, two instances of a type (one full `parT`), the project lists, renamed instances; switched-off
+  effects and expressions written and read back, unmapped effects reported; NaN, 1e300 and text values never panic.
+- `crates/aep/tests/export/text.rs`: every text case through import, export and parse:
   text, paragraphs, style runs (font, size, fill, tracking, faux, caps, leading), box equal to
   After Effects' document, and a second import equal; documents built in code (CRLF / LF, runs
   across a line break, a new font, box text, empty text, the name rule, the layer type); what is
   reported; hostile text (150 000 characters, NaN sizes, emoji, parentheses and backslashes,
-  runs that do not cover the text). `src/textdoc.rs` has the tree's own tests.
+  runs that do not cover the text). `src/export/textdoc.rs` has the tree's own tests.
 - `crates/aep/tests/export/footage.rs`: one item of every kind written and parsed back (type
   tag, size, duration, rate, numbering, the name rule, png options, layer sources and the time
   remapping maximum), escaped paths, fixtures 126 and 603 through import, export and import, what
@@ -286,7 +286,7 @@ AE re-save of the same file differed.
 - `crates/aep/tests/export/robustness.rs`: empty names, huge and zero sizes, NaN and infinite
   numbers, non-positive frame rates, 2 000 layers with 20 000 keys, parent loops, folder loops,
   missing sources, 10 000 character names.
-- `crates/engine/src/tests_aep_export.rs`: the command, refusal, dry run, bad input, the menu entry.
+- `crates/engine/src/tests/aep_export.rs`: the command, refusal, dry run, bad input, the menu entry.
 
 ## Clean-room method
 

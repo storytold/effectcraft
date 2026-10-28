@@ -2,7 +2,7 @@
 
 ```sh
 cargo test --workspace     # everything
-cargo xtask ci             # fmt, clippy -D warnings, tests, layers, assets, wasm
+cargo xtask ci             # fmt, clippy -D warnings, aep-corpus, tests, pdf-deps, layers, assets, wasm
 ```
 
 `cargo xtask ci` builds in the dev profile and runs the tests with `cargo nextest run` (plus

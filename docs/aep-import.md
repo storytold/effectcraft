@@ -267,7 +267,7 @@ parameter gets the file's value:
 
 | Category | Counted |
 |---|---|
-| `effects` | each effect on an imported layer that is not in the table (by name and match name); for an imported effect: each stored parameter outside the table, a parameter whose type or valid maximum differs from the table, an expression on a parameter, an effect without readable parameter definitions |
+| `effects` | each effect on an imported layer that is not in the table (by name and match name); for an imported effect: each stored parameter outside the table, a parameter whose type or valid maximum differs from the table, keys or an expression on a layer parameter, an effect without readable parameter definitions |
 | `masks` | a mask that is not imported because its path cannot be used (a Mask Path entry without shapes, a mask on a text or shape layer whose path was never set (its default is not sampled), unreadable, no vertices, a point count that is not a multiple of three, more than 65 536 vertices, numbers that are not finite), a mask mode code outside the seven known ones (imported as Add) |
 | `layer_styles` | per layer: a style in switch state 3 (not sampled; state 0 is imported as a style switched off, 988), Pattern Overlay, an unknown style or parameter, a gradient (`GCst`, not decoded: EffectCraft's default gradient stays), keys on a popup or checkbox, a value that does not fit, styles on a layer that takes none here (adjustment, camera, light) |
 | `markers` | a marker with an unknown cue type (imported as an event cue) |
@@ -285,7 +285,7 @@ parameter gets the file's value:
 | `damaged_data` | a header, key or value that could not be read, numbers that are not finite or beyond ±1e9 (default used); an unreadable text document (the text layer is imported with empty text), damaged style runs |
 
 `limitations` states what the reader cannot see at all, so it can be neither imported nor counted:
-frame blending, 3D material options, audio levels, guides, footage duration/frame rate, the mask colour, lock, feather falloff, motion blur and RotoBezier switches, and for text per-character 3D, text on a path and style slots of unknown meaning (stored values of these that differ from the default are reported as text layer features). They are listed in every report.
+frame blending, 3D material options, audio levels, guides, the mask colour, lock, feather falloff, motion blur and RotoBezier switches, and for text per-character 3D, text on a path and style slots of unknown meaning (stored values of these that differ from the default are reported as text layer features). They are listed in every report.
 
 ## How fidelity is checked
 

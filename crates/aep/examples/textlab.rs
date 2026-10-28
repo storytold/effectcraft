@@ -7,7 +7,7 @@
 use effectcraft_aep::{Body, Chunk, parse, write};
 use std::borrow::Cow;
 
-/// The test cases, cut from the combined projects of `tests/fixtures` (`tests/fixtures/CASES.md`).
+/// The test cases, cut from the combined projects of the corpus (`corpus/aep`) (`tests/fixtures/CASES.md`).
 #[path = "../tests/common/mod.rs"]
 #[allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)] // test code: a broken fixture ends the tool
 mod common;

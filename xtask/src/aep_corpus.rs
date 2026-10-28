@@ -61,7 +61,10 @@ fn fetch(staging: &Path, dest: &Path, manifest: &Path, update: bool) -> Result<(
     crate::run(&mut curl)?;
     let name = REPO.rsplit('/').next().unwrap_or(REPO);
     let top = format!("{name}-{COMMIT}");
-    let mut tar = Command::new("tar");
+    // On Windows the system's bsdtar: a GNU tar earlier on the PATH (Git's) reads `E:\…` as a
+    // remote host.
+    let system_tar = std::env::var_os("SystemRoot").map(|r| PathBuf::from(r).join("System32").join("tar.exe")).filter(|t| cfg!(windows) && t.is_file());
+    let mut tar = Command::new(system_tar.unwrap_or_else(|| PathBuf::from("tar")));
     tar.arg("-xzf").arg(&archive).arg("-C").arg(staging).arg(format!("{top}/{SUBDIR}"));
     crate::run(&mut tar)?;
     let src = staging.join(&top).join(SUBDIR);

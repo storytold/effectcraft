@@ -506,3 +506,19 @@ fn time_stretch_is_the_exact_ratio_and_scales_the_time_scale() {
     with_layer(&mut p, c, 0, |l| l.stretch = 31.4159265);
     assert_eq!(export_all(&p).report.count(LossCategory::TimeStretch), 1);
 }
+
+#[test]
+fn unwritten_layer_switches_and_off_frame_times_are_reported() {
+    // Each of these changes the result in After Effects, so none may pass as lossless.
+    let (mut p, c, _) = simple();
+    with_layer(&mut p, c, 0, |l| {
+        l.switches.quality = Quality::Wireframe;
+        l.preserve_transparency = true;
+        l.auto_orient = effectcraft_project::AutoOrient::AlongPath;
+        l.in_point = secs(0.013);
+    });
+    let r = export_all(&p);
+    assert_eq!(r.report.count(LossCategory::LayerSwitches), 3, "{:?}", r.report.losses);
+    assert_eq!(r.report.count(LossCategory::RoundedTimes), 1, "{:?}", r.report.losses);
+    assert!(matches!(export(&p, &ExportOptions { allow_losses: false }), Err(AepExportError::Refused(_))));
+}

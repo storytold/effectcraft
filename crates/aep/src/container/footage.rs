@@ -85,12 +85,24 @@ pub(crate) fn json_bool(json: &[u8], key: &str) -> Option<bool> {
 }
 
 /// The string value of `"key"` in a flat JSON object, with the standard escapes decoded.
-/// Returns `None` when the key is missing or the value is not a string.
+/// Returns `None` when the key is missing or the value is not a string. The key is the first
+/// occurrence of `"key"` that is followed by `:` (the same text as a value is skipped).
 pub(crate) fn json_string(json: &[u8], key: &str) -> Option<String> {
     let needle = format!("\"{key}\"");
     let needle = needle.as_bytes();
-    let at = json.windows(needle.len()).position(|w| w == needle)?;
-    let mut i = at.checked_add(needle.len())?;
+    let mut from = 0usize;
+    loop {
+        let at = from.checked_add(json.get(from..)?.windows(needle.len()).position(|w| w == needle)?)?;
+        let after = at.checked_add(needle.len())?;
+        if let Some(v) = json_string_at(json, after) {
+            return Some(v);
+        }
+        from = at.checked_add(1)?;
+    }
+}
+
+/// The string value right after a key ending at `i` (`: "…"`), or `None` when none follows.
+fn json_string_at(json: &[u8], mut i: usize) -> Option<String> {
     let skip_ws = |i: &mut usize| {
         while json.get(*i).is_some_and(|c| c.is_ascii_whitespace()) {
             *i = i.saturating_add(1);
@@ -290,6 +302,8 @@ mod tests {
         assert_eq!(json_string(json, "b").as_deref(), Some("x"));
         assert_eq!(json_string(json, "missing"), None);
         assert_eq!(json_string(br#"{"a" : "spaced"}"#, "a").as_deref(), Some("spaced"));
+        // The key's text as an earlier value is not the key.
+        assert_eq!(json_string(br#"{"a":"fullpath","fullpath":"x"}"#, "fullpath").as_deref(), Some("x"));
         // A surrogate pair is one character; a lone half stays U+FFFD.
         assert_eq!(json_string(br#"{"a":"x\ud83d\ude00y"}"#, "a").as_deref(), Some("x😀y"));
         assert_eq!(json_string(br#"{"a":"\ud83dz"}"#, "a").as_deref(), Some("\u{fffd}z"));

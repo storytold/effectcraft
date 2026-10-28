@@ -19,7 +19,8 @@ pub(crate) fn color_space(name: &str) -> Option<ColorSpace> {
 }
 
 /// `current` with every setting the file stores replaced; a setting the file does not hold (or
-/// holds in an unknown form) keeps the current value. A working space EffectCraft does not have is
+/// holds in an unknown form) keeps the current value. The two linear-light switches are always
+/// held: After Effects writes their chunk only when on (626, 627), so a file without it has them off. A working space EffectCraft does not have is
 /// reported.
 pub(crate) fn map(file: &AepFile<'_>, current: &ProjectSettings, col: &mut Collector) -> ProjectSettings {
     let s = crate::ProjectSettings::read(file);

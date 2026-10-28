@@ -1,6 +1,6 @@
 # Generator of the combined test projects
 
-The test projects in `..` were made from scratch with Adobe After Effects 2026, driven through an
+The test projects of the corpus (`cargo xtask aep-corpus`, `corpus/aep/`) were made from scratch with Adobe After Effects 2026, driven through an
 After Effects MCP server (its `batch.run` of atomic operations; `eval.run`, i.e. running
 ExtendScript, is disabled on that server, so the tables below are written in MCP operation terms
 and small Node scripts turn them into `batch.run` lists). Each file holds one composition per
@@ -9,7 +9,7 @@ base composition `000-base` (1920x1080, 25 fps, 5 s, black, one red 1920x1080 so
 the case's change (and the chain of cases it was made from).
 
 Paths in the scripts are written `<corpus>/...`: a local working folder outside the repository
-that holds an empty project (`combined/gen/empty-work.aep`, a copy of `../empty.aep`), the test
+that holds an empty project (`combined/gen/empty-work.aep`, a copy of the corpus's `empty.aep`), the test
 media the footage cases import (`synthetic/test-media/`: a png, a WAV, png and OpenEXR sequences,
 an mp4, Targa, Photoshop, Illustrator and EPS stills, all made by the contributor), the earlier
 single-case files some cases are merged from, and the contributor's own animation presets
@@ -59,3 +59,5 @@ single-case files some cases are merged from, and the contributor's own animatio
 Project settings have one value per project, so the settings cases are split over three files.
 In a fresh save After Effects 26.2.1 no longer writes the working-space profile name, only the
 profile data; the reader then takes the name from the profile's own description.
+
+`fx-switch.aep` is not generated: it is the base project with two Gaussian Blurs (Blurriness 40) on `L`, added through the MCP server, the first switched off by hand in the Effect Controls (the server has no operation for the fx switch), saved once and scrubbed with `scrub.py`.

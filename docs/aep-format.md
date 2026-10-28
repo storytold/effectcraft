@@ -793,7 +793,7 @@ another value).
 
 **Layer header (`ldta`)**
 
-- Quality Wireframe, a track matte mode with matte layer id 0, frame blending and `autoOrient` on non-camera layers (not sampled); a parent that is not the first layer; layer names of 40 characters and non-ASCII names (a name longer than 31 characters: **?**, `ldta@64` holds 32 bytes); blend modes beyond the six known (Dissolve, Darken, Lighten, Color Dodge, Hue, ...); a negative start time; a stretch of 33.3 % (non-terminating ratio) and -100 %; a stretch on a layer that has keyframes (whether their times are rescaled); in / out points beyond the source duration; the whole `ADBE Layer Styles` subtree.
+- Quality Wireframe, a track matte mode with matte layer id 0, frame blending and `autoOrient` on non-camera layers (not sampled); a parent that is not the first layer; layer names of 40 characters and non-ASCII names (a name longer than 31 characters: **?**, `ldta@64` holds 32 bytes); blend modes beyond the six known (Dissolve, Darken, Lighten, Color Dodge, Hue, ...); a negative start time; a stretch of 33.3 % (non-terminating ratio) and -100 %; a stretch on a layer that has keyframes (whether their times are rescaled); in / out points beyond the source duration.
 - Bytes 56 (1 on AV, shape and text layers, 0 on camera and light; meaning **?**), 96 (2 on AV layers, **?**) and the camera extra at 148 / 152 (a double that equals the 36 mm film size in points: **E** for the value, **H** for the meaning). The start-time denominator of layers made by the API against the precomp operation (258 against 257: 25 600 against 1, **V** in the corpus, no fixture).
 
 **Composition header (`cdta`, `PRin`)**
@@ -814,7 +814,7 @@ another value).
 **Effects**
 
 - `pard` byte 48 (flags: **?**), 68 / 72 (the point default as a percent pair: **V** in the corpus for 074 and 368, not exposed), 120 (the float slider default again as f32: **V**, not exposed), 124 (display decimals: **H**), 132..147 (fixed slider slider-max, default copy and flags; the low bit of @144 is set on the two percent-displayed sliders and clear on Scatter: **H** "display as percent"), the colour default copy at @60, and the stale memory after the parameter name. The fixed slider valid minimum is not decoded (the float slider one is, 389).
-- Effects that are switched off (the per-effect enabled switch: not settable through the tool that made the corpus, **?**), renamed, or stacked twice on ONE layer (`Gradient Ramp 2`: does the second keep an empty `parT`?); which instance keeps the full `parT` when a second instance is created on a layer below the first; expressions on effect parameters; keyed per-channel Exposure values and a keyed checkbox; Curves / Levels (arrays), Fractal Noise, and whether the `tdpi` of a Layer Control holds an id or an index after the referenced layer is reordered or deleted.
+- Effects renamed, or stacked twice on ONE layer (`Gradient Ramp 2`: does the second keep an empty `parT`?); which instance keeps the full `parT` when a second instance is created on a layer below the first; expressions on effect parameters; keyed per-channel Exposure values and a keyed checkbox; Curves / Levels (arrays), Fractal Noise, and whether the `tdpi` of a Layer Control holds an id or an index after the referenced layer is reordered or deleted.
 
 **Masks, shapes**
 
@@ -874,6 +874,6 @@ parser or from Adobe's code.
 The corpus itself and the helper scripts live outside this repository. Projects that were not made
 for this purpose were opened locally only to test the reader's robustness and the importer's
 coverage (does everything parse, which chunk ids occur); no layout in this document comes from them
-and none of them, nor any content of them, is in the repository. Only the
-369 fixtures above (and the five `.aepx` of the same cases) are committed, as the contributor's own test data (see `ATTRIBUTION.md`); the
+and none of them, nor any content of them, is in the repository. The
+cases above are the contributor's own test data, fetched from the corpus repository by `cargo xtask aep-corpus` (see `ATTRIBUTION.md`); the
 repository holds no Adobe sample project, preset or asset.

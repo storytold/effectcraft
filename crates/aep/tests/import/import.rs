@@ -668,6 +668,11 @@ fn a_working_space_without_a_counterpart_is_reported() {
     // Refused without allowLosses.
     let mut q = Project::default();
     assert!(effectcraft_aep::import::import(&mut q, &edited, &effectcraft_aep::import::ImportOptions::new(&none)).is_err());
+    // Into a project whose settings stay (the caller does not take the file's over), nothing is
+    // lost: the import goes through without allowLosses.
+    let keep = effectcraft_aep::import::ImportOptions { settings: false, ..effectcraft_aep::import::ImportOptions::new(&none) };
+    let r = effectcraft_aep::import::import(&mut q, &edited, &keep).expect("settings are not taken over");
+    assert!(r.report.is_lossless(), "{:?}", r.report.losses);
 }
 
 #[test]

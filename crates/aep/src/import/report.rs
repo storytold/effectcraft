@@ -20,27 +20,29 @@ pub enum LossCategory {
     /// Mask data that is not imported: a mask whose path cannot be used (none, unreadable, empty,
     /// not finite) and an unknown mask mode (imported as Add).
     Masks,
-    /// Shape layers (skipped as a whole).
+    /// Parts of shape layers that are not imported: contents items and properties outside the
+    /// imported set, groups nested too deep, material options. (The layers are imported.)
     ShapeLayers,
-    /// Parts of text layers that are not imported: text animators, Path Options and More Options
+    /// Parts of text layers that are not imported: wiggly and expression selectors and the other
+    /// animator entries outside the imported set, Path Options and More Options
     /// with set values, Source Text keyframes and expressions, undecoded character and paragraph
     /// fields that differ from the default, unknown capitalisation or justification codes, control
     /// characters of unknown meaning. (The layers themselves are imported.)
     TextLayers,
-    /// Camera layers (skipped as a whole).
+    /// Camera layers that are not imported (none at present: cameras are imported).
     Cameras,
-    /// Light layers (skipped as a whole).
+    /// Light layers of a light type that is not sampled (the other lights are imported).
     Lights,
     /// Layer styles (drop shadow, glow, stroke, ...) with set values.
     LayerStyles,
-    /// Layer and composition markers.
+    /// Marker data read in another form: a cue type of unknown code (read as an event cue).
     Markers,
-    /// Blend modes other than Normal, Multiply, Add, Screen, Overlay and Difference.
+    /// Blend mode codes outside the known ones (906, 907; the layer keeps Normal).
     BlendModes,
     /// Stored transform properties other than Anchor Point, Position, Scale, Rotation and Opacity
     /// (3D rotations, orientation, separated position dimensions).
     TransformProperties,
-    /// Time remapping.
+    /// Time remapping that is not imported: a Time Remap property without a readable keyframe.
     TimeRemapping,
     /// Keyframe data that was imported in a simplified form (see the detail lines).
     ApproximatedKeyframes,

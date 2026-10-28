@@ -197,6 +197,12 @@ pub(crate) fn plan_footage(name: &str, f: &Footage, col: &mut Collector) -> Opti
         col.lose(LossCategory::FootageItems, what("no usable path"));
         return None;
     }
+    if f.width > crate::export::plan::MAX_SIDE || f.height > crate::export::plan::MAX_SIDE {
+        col.lose(
+            LossCategory::FootageItems,
+            what(&format!("size {} x {} is larger than {}, written smaller", f.width, f.height, crate::export::plan::MAX_SIDE)),
+        );
+    }
     let width = f.width.min(crate::export::plan::MAX_SIDE);
     let height = f.height.min(crate::export::plan::MAX_SIDE);
     let (dir, file) = split_dir(&f.path);

@@ -29,16 +29,16 @@ fn import_aep(s: &mut Session, p: &Value) -> Result<Value> {
     // The renderer's own font lookup (family, full or PostScript name); a miss falls back.
     let has_font = |font: &str| !effectcraft_text::resolve(font, "Regular").missing;
     let name = std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "After Effects Project".into());
-    let options = ImportOptions { allow_losses, exists: &exists, has_font: &has_font, folder_name: &name };
+    // Into a project without compositions the file's settings come along (it is opened as a
+    // project); into one with compositions only when asked (`applySettings`). Settings that are not
+    // taken over cannot be lost, so the dry run and the refusal leave them out.
+    let apply = b_p(p, "applySettings").unwrap_or_else(|| s.project.comps().next().is_none());
+    let options = ImportOptions { allow_losses, exists: &exists, has_font: &has_font, folder_name: &name, settings: apply };
     if dry_run {
         let report = effectcraft_aep::import::analyze_with(&bytes, &options).map_err(|e| EngineError::Other(format!("cannot import {path}: {e}")))?;
         return Ok(json!({"dryRun": true, "report": report}));
     }
-    let apply_settings = b_p(p, "applySettings");
     let res = s.edit("Import After Effects Project", None, |proj, st| {
-        // Into a project without compositions the file's settings come along (it is opened as a
-        // project); into one with compositions only when asked (`applySettings`).
-        let apply = apply_settings.unwrap_or_else(|| proj.comps().next().is_none());
         let r = effectcraft_aep::import::import(proj, &bytes, &options).map_err(|e| match e {
             AepImportError::Refused(_) => {
                 EngineError::Other(format!("{e} (nothing was imported: pass `allowLosses` to import anyway, or `dryRun` for the full report)"))

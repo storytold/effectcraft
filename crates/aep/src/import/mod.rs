@@ -70,12 +70,17 @@ pub struct ImportOptions<'a> {
     pub has_font: &'a dyn Fn(&str) -> bool,
     /// The folder every imported item goes into (After Effects names it after the file).
     pub folder_name: &'a str,
+    /// Whether the caller takes over the file's project settings ([`ImportResult::settings`]).
+    /// When not, a setting EffectCraft has no counterpart for is no loss (nothing is changed), so it
+    /// is not reported.
+    pub settings: bool,
 }
 
 impl<'a> ImportOptions<'a> {
-    /// Losses refused, every font taken as installed, folder `After Effects Project`.
+    /// Losses refused, every font taken as installed, folder `After Effects Project`, the file's
+    /// settings taken over.
     pub fn new(exists: &'a dyn Fn(&str) -> bool) -> Self {
-        Self { allow_losses: false, exists, has_font: &any_font, folder_name: "After Effects Project" }
+        Self { allow_losses: false, exists, has_font: &any_font, folder_name: "After Effects Project", settings: true }
     }
 }
 
@@ -115,7 +120,7 @@ pub fn import(project: &mut Project, bytes: &[u8], options: &ImportOptions<'_>) 
     let (folder, comps, items, mut report) = build::run(&mut work, &view, options);
     let mut col = report::Collector::default();
     let settings = settings::map(&file, &work.settings, &mut col);
-    for loss in col.finish().losses {
+    for loss in col.finish().losses.into_iter().filter(|_| options.settings) {
         let at = report.losses.iter().position(|l| l.category > loss.category).unwrap_or(report.losses.len());
         report.losses.insert(at, loss);
     }

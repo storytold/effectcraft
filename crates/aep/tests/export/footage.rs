@@ -72,6 +72,9 @@ fn all_kinds() -> Project {
         ..still(r"C:\media\conformed.mp4", 64, 48)
     };
     add_footage(&mut p, c, "conformed.mp4", conformed);
+    // Its 25/30 s does not fall on the composition's 25 fps frames: the layer ends on a frame, as
+    // in After Effects (an off-frame out point is a rounded-time loss).
+    with_layer(&mut p, c, 0, |l| l.out_point = l.start_time + secs(0.8));
     p
 }
 

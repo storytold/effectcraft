@@ -70,7 +70,8 @@ pub enum LossCategory {
     /// Layer timing After Effects does not keep: a layer of a clip, sequence or sound that runs
     /// past the end of its source (After Effects ends it there).
     LayerTiming,
-    /// Project settings that are not written: a working space other than None and sRGB, the OCIO
+    /// Project settings that are not written: a working space other than None, sRGB and Rec.709
+    /// Gamma 2.4, the OCIO
     /// colour engine, HDR handling and output space, a frame count start other than 0 and 1.
     ProjectSettings,
     /// Time remapping on a layer After Effects cannot remap (a solid, a text): not written.
@@ -78,6 +79,10 @@ pub enum LossCategory {
     /// Layer-style data that is not written: a style or Layer Styles switched off, edited
     /// gradients, keys on colours, points, popups and checkboxes, Knockout.
     LayerStyles,
+    /// Layer switches and options that are not written: Wireframe quality, Bicubic sampling,
+    /// frame blending, Preserve Transparency, Auto-Orient on a layer other than a camera or light,
+    /// an environment layer, locked markers.
+    LayerSwitches,
 }
 
 impl LossCategory {
@@ -111,6 +116,7 @@ impl LossCategory {
             LossCategory::ProjectSettings => "project settings",
             LossCategory::TimeRemapping => "time remapping",
             LossCategory::LayerStyles => "layer styles",
+            LossCategory::LayerSwitches => "layer switches",
         }
     }
 }
@@ -186,10 +192,10 @@ pub struct Exported {
 
 /// Standing limitations of the exporter (what it cannot write at all), listed in every report.
 pub const LIMITATIONS: &[&str] = &[
-    "The file is built from a generated template project: the render queue, render templates and project settings other than colour depth, working space (None or sRGB), working gamma, the two linear-light switches, time display and frame count start are not exported.",
+    "The file is built from a generated template project: the render queue, render templates and project settings other than colour depth, working space (None, sRGB or Rec.709 Gamma 2.4), working gamma, the two linear-light switches, time display and frame count start are not exported.",
     "Composition options other than size, frame rate, duration, work area, background, pixel aspect, shutter and display start are not exported (draft 3D, preserve frame rate/resolution, hide shy, frame blending, resolution).",
     "Footage is linked, not embedded: png, jpeg, OpenEXR, TIFF, Targa, Photoshop, Illustrator and EPS stills, png, OpenEXR and jpeg sequences, mp4 and mov clips and WAV audio are written with their path, size, duration and frame rate (a conformed clip rate too); the rest of their interpretation (alpha, colour management, fields, loops) is the default.",
-    "Frame blending, layer comments, a 3D layer's X / Y rotation, orientation and material options, parallel and ambient lights, and shape items other than groups, rectangles, ellipses, paths, fills and strokes are not written.",
+    "Layer comments, a 3D layer's X / Y rotation, orientation and material options, parallel and ambient lights, and shape items outside groups, rectangles, ellipses, polystars, paths, fills, strokes, gradients, trim paths, round corners, merge and offset paths and repeaters (wiggle, twist, zig-zag, pucker and bloat, ...) are not written.",
     "Mask colours are not written: After Effects shows its own colour for every exported mask.",
 ];
 

@@ -17,12 +17,21 @@ fn fixture_path(name: &str) -> Option<String> {
     match common::locate(name)? {
         common::Source::File(path) => Some(path.to_string_lossy().to_string()),
         common::Source::Case { .. } => {
+            // Written once per test process: tests running in parallel read the same case, and a
+            // rewrite while another test reads it would hand that test a partial file.
+            static WRITTEN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> = std::sync::OnceLock::new();
+            let mut written = WRITTEN.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(path) = written.get(name) {
+                return Some(path.clone());
+            }
             let bytes = common::try_fixture(name)?;
             let dir = std::env::temp_dir().join(format!("effectcraft-aep-cases-{}", std::process::id()));
             std::fs::create_dir_all(&dir).unwrap();
             let path = dir.join(name);
             std::fs::write(&path, bytes).unwrap();
-            Some(path.to_string_lossy().to_string())
+            let path = path.to_string_lossy().to_string();
+            written.insert(name.to_string(), path.clone());
+            Some(path)
         }
     }
 }

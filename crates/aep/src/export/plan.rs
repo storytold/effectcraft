@@ -833,6 +833,9 @@ fn plan_layer(
     let start = units(layer.start_time, col, "start time");
     let in_abs = units(layer.in_point, col, "in point");
     let out_abs = units(layer.out_point, col, "out point");
+    if rounded {
+        col.lose(LossCategory::RoundedTimes, what("start, in or out point moved to the time base; layer"));
+    }
     // Time stretch: the exact ratio `ldta@8 / @108` (018 200 %: 2 / 1, 316 50 %: 1 / 2, 317 150 %:
     // 3 / 2); in and out points relative to the start are in source time (absolute = start +
     // relative x stretch), and the layer's properties count in the composition's time scale x
@@ -872,6 +875,19 @@ fn plan_layer(
     }
 
     // Switches and features that are not written.
+    let sw = &layer.switches;
+    let unwritten = [
+        (sw.quality == Quality::Wireframe, "Wireframe quality (written as Best)"),
+        (sw.sampling != effectcraft_project::Sampling::Bilinear, "Bicubic sampling (written as Bilinear)"),
+        (sw.frame_blend != effectcraft_project::FrameBlend::Off, "frame blending"),
+        (layer.preserve_transparency, "Preserve Transparency"),
+        (layer.auto_orient != effectcraft_project::AutoOrient::Off && !matches!(src, LayerSrc::Camera(_) | LayerSrc::Light(_)), "Auto-Orient"),
+        (layer.environment || layer.environment_background, "the environment layer setting"),
+        (layer.markers_locked, "Lock Markers"),
+    ];
+    for (_, what_lost) in unwritten.iter().filter(|(on, _)| *on) {
+        col.lose(LossCategory::LayerSwitches, what(&format!("{what_lost} is not written; layer")));
+    }
     // The 3D switch is written (`ldta@38` bit 0x04, 015); a 3D layer's camera, lights and
     // material options are not, and its X / Y rotation and orientation are reported below.
     let per_char_3d = matches!(layer.props.prop("text/perChar3d").map(|p| &p.value), Some(effectcraft_keyframe::Value::Bool(true)));
