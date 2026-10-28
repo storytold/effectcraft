@@ -1,0 +1,3 @@
+*.aep binary
+# The .aepx fixtures are XML read byte for byte: no line-ending conversion.
+*.aepx binary

@@ -1,0 +1,7 @@
+asset:        text.aep
+title:        After Effects project fixture (combined): the text cases (point and box text, character and paragraph styles, text animators)
+author:       vangel76 (contributor)
+source:       original work
+license:      MIT OR Apache-2.0
+added:        2026-10-28 by vangel76
+notes:        Generated from scratch by the contributor with Adobe After Effects 2026, driven by the generator in `tests/fixtures/tools/` (one composition per case, named like the case; tests/fixtures/CASES.md), as their own test data for the effectcraft-aep tests; contains only synthetic project structure, no third-party footage, presets, templates or personal data. No Adobe sample project or asset was used. Cases 732 and 733 were saved as case 517 and then byte-patched by `tools/patch-text.py` with the same one-byte edit of a paragraph slot in the case's text document as the earlier single-case files (not reachable by scripting). The XMP packet after the project container was replaced by the (smaller) packet of the base project.

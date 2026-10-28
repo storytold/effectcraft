@@ -1,0 +1,7 @@
+asset:        effects.aep
+title:        After Effects project fixture (combined): the effect cases (effect controls, blurs, colour effects, Time Warp, expressions) and the templates 000-base and 520
+author:       vangel76 (contributor)
+source:       original work
+license:      MIT OR Apache-2.0
+added:        2026-10-28 by vangel76
+notes:        Generated from scratch by the contributor with Adobe After Effects 2026, driven by the generator in `tests/fixtures/tools/` (one composition per case, named like the case; tests/fixtures/CASES.md), as their own test data for the effectcraft-aep tests; contains only synthetic project structure, no third-party footage, presets, templates or personal data. No Adobe sample project or asset was used. Every effect type's first instance is the case that adds it at its defaults. The footage links name contributor-made test media that are not included (a png image); their stored paths and the host name were replaced by neutral ones of the same length. The XMP packet after the project container was replaced by the (smaller) packet of the base project.

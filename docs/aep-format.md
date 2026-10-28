@@ -15,13 +15,14 @@ one scripted change to a base project. Batch 1 (cases 000 to 126) was made in on
 Save As; batch 2 (cases 200 to 259) was made in later sessions, each case starting again from the
 same loaded base; batch 3 (cases 299 to 354) was made in three further sessions (299 is a Save As
 without any edit, the reference for save noise). The base project `000-base` is one composition `C`
-(1920x1080, 25 fps, 5 s) holding one red solid layer `L` (1920x1080) in the folder `Solids`. 369 of
-these files are the test fixtures, read from `crates/aep/tests/fixtures/` (or the folder in
-`EFFECTCRAFT_AEP_FIXTURES`) through `crates/aep/tests/common/mod.rs`; they are not in the repository
-yet, and a test whose fixture is missing prints `SKIPPED: fixture <name> missing` and passes. The
-tests named below run on them. Five of them
-(`000`, `058`, `060`, `110`, `124`) also have their `.aepx` (the XML form, 0.9 MB together) as a
-fixture. The container
+(1920x1080, 25 fps, 5 s) holding one red solid layer `L` (1920x1080) in the folder `Solids`. 374 of
+these cases (369 `.aep`, and the `.aepx` of `000`, `058`, `060`, `110`, `124`) are the test fixtures. They
+are in the repository as a few combined projects in `crates/aep/tests/fixtures/`, one composition
+per case named like the case and rebuilt from the same recipe (`CASES.md` there, the generator in
+`tools/`); `crates/aep/tests/common/mod.rs` hands a test its case as a project of its own cut from
+the combined file (or reads the folder in `EFFECTCRAFT_AEP_FIXTURES`), and a test whose fixture is
+missing prints `SKIPPED: fixture <name> missing` and passes. The tests named below run on them;
+the `.aepx` cases are one pair, `aepx-pair.aep` and `aepx-pair.aepx`. The container
 of every fixture is byte-identical to the generated file, with two exceptions that keep the
 fixtures small and free of local data: the XMP packet after the container (which grows by 1.7 KB
 with every save of the corpus chain) is replaced by the 5.8 KB packet of the base project in all
@@ -772,10 +773,11 @@ dropdown, pixel aspect / shutter phase / display start, mask modes and the mask 
 gradient / two-rectangle shapes, right justification, faux styles, caps, leading, camera zoom and
 depth of field, light colour and cone, marker label and cue data, audio and sequence footage).
 
-The fixtures are the small files of the corpus: the 369 `.aep` fixtures use 31.4 MB on disk and the
-five `.aepx` fixtures 0.9 MB; they compress well (most of every file is the same base project), but
-whether to keep all of them in the repository, a core set, or to fetch the rest pinned from a corpus
-repository is open. Cases that exist in the corpus but have no fixture: 200 and 201 (the save-noise pair), 207 (Rotation keys), 209 (Rectangle Size keys), 244 (point text reference), 250 (comp marker at 2 s),
+The fixtures are the small files of the corpus: as 369 single-case `.aep` files they used 31.4 MB on
+disk (and the five `.aepx` 0.9 MB); combined into one project per family (16 files and the
+`902` case on its own) they use 27.2 MB. In a combined file only the first instance of an effect
+type keeps its parameter definitions (later ones read the project copy), layer and item ids are
+the file's, and project settings are per file. Cases that exist in the corpus but have no fixture: 200 and 201 (the save-noise pair), 207 (Rotation keys), 209 (Rectangle Size keys), 244 (point text reference), 250 (comp marker at 2 s),
 255 (default spot light, identical to 121), 257 and 258 (precomps of a 640 x 360 solid and of a
 640 x 360 composition), most of batch 1 (011, 020, 036, 045, 050, 051, 061, 070, 072, 074-076, 078,
 079, 092, 100-105, 111, 112, 120, 121, 125) and of batch 3: 308 (the 100x100 solid on its own,

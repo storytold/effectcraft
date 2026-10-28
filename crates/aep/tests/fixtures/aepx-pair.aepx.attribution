@@ -1,0 +1,7 @@
+asset:        aepx-pair.aepx
+title:        After Effects project fixture (combined): cases 000, 058, 060, 110 and 124 (the XML .aepx half of the .aep / .aepx pair)
+author:       vangel76 (contributor)
+source:       original work
+license:      MIT OR Apache-2.0
+added:        2026-10-28 by vangel76
+notes:        Generated from scratch by the contributor with Adobe After Effects 2026, driven by the generator in `tests/fixtures/tools/` (one composition per case, named like the case; tests/fixtures/CASES.md), as their own test data for the effectcraft-aep tests; contains only synthetic project structure, no third-party footage, presets, templates or personal data. No Adobe sample project or asset was used. Saved by After Effects as .aepx right after the .aep of the same name; the XMP packet in its ProjectXMPMetadata element was replaced by the base project's packet, so both halves carry the same one.
