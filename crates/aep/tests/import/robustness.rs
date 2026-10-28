@@ -648,7 +648,17 @@ fn bogus_effect_structure_is_reported_not_imported_blindly() {
     let r = report_of(&bytes);
     assert_eq!(r.imported.effects, own, "{r:?}");
     assert_eq!(r.count(effectcraft_aep::import::LossCategory::Effects), 2 - own, "{r:?}");
-    assert!(try_all(&bytes));
+    assert!(try_all(&bytes)); // 368, the first Gradient Ramp of its file, has its own parT: it still arrives.
+    let bytes = skip!(mutate("368-fx-ramp-default.aep", &mut |c| {
+        if let Body::List { list_type, .. } = &mut c.body
+            && list_type == b"EfdG"
+        {
+            *list_type = *b"XfdG";
+        }
+    }));
+    let r = report_of(&bytes);
+    assert_eq!(r.imported.effects, 1, "{r:?}");
+    assert_eq!(r.count(effectcraft_aep::import::LossCategory::Effects), 0, "{r:?}");
 
     // A parT whose definitions were renamed (no pard at all) and an empty definition list.
     for id in [*b"Xard", *b"pard"] {

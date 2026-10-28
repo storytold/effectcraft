@@ -21,8 +21,11 @@ fn with_params<R>(name: &str, f: impl FnOnce(&[EffectParam<'_, '_>]) -> R) -> Op
         let effects = layer.effects();
         assert_eq!(effects.len(), 1, "{name}");
         assert_eq!(effects[0].match_name(), "ADBE Exposure2", "{name}");
-        // Its own definitions, or (a later instance of the type in its file) the project copy.
-        assert_ne!(project.definition_source(&effects[0]), DefinitionSource::Missing, "{name}");
+        // The first instance of a type in the combined file (the case that adds it at its defaults)
+        // keeps its own definitions; the later cases read the project copy.
+        let first = ["356-fx-tint-default.aep", "368-fx-ramp-default.aep", "389-fx-exposure-default.aep"].contains(&name);
+        let want = if first { DefinitionSource::Instance } else { DefinitionSource::Project };
+        assert_eq!(project.definition_source(&effects[0]), want, "{name}");
         let params = project.effect_params(&effects[0]);
         assert_eq!(params.len(), 24, "{name}");
         f(&params)

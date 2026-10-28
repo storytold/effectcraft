@@ -17,8 +17,11 @@ fn with_params<R>(name: &str, f: impl FnOnce(&Project<'_, '_>, &[EffectParam<'_,
         let layer = base_layer(&first_comp(&project));
         let effects = layer.effects();
         assert_eq!(effects.len(), 1, "{name}");
-        // Its own definitions, or (a later instance of the type in its file) the project copy.
-        assert_ne!(project.definition_source(&effects[0]), DefinitionSource::Missing, "{name}");
+        // The first instance of a type in the combined file (the case that adds it at its defaults)
+        // keeps its own definitions; the later cases read the project copy.
+        let first = ["356-fx-tint-default.aep", "368-fx-ramp-default.aep", "389-fx-exposure-default.aep"].contains(&name);
+        let want = if first { DefinitionSource::Instance } else { DefinitionSource::Project };
+        assert_eq!(project.definition_source(&effects[0]), want, "{name}");
         let params = project.effect_params(&effects[0]);
         f(&project, &params)
     })
@@ -138,9 +141,9 @@ fn effect_stack_order_is_the_parade_order() {
     let project = Project::new(&file).unwrap();
     let fx = base_layer(&first_comp(&project)).effects();
     assert_eq!(fx.iter().map(|e| e.match_name()).collect::<Vec<_>>(), ["ADBE Gaussian Blur 2", "ADBE Tint"]);
-    // Each has its definitions (its own, or the project copy of an earlier instance of its type in
-    // the combined file); the project holds one copy per type.
-    assert!(fx.iter().all(|e| project.definition_source(e) != DefinitionSource::Missing));
+    // Both types first appear in earlier cases of the combined file (214, 356), so both read the
+    // project copy, which holds one copy per type.
+    assert!(fx.iter().all(|e| project.definition_source(e) == DefinitionSource::Project));
     let defs: Vec<String> = project.effect_definitions().into_iter().map(|(m, _)| m).collect();
     for m in ["ADBE Gaussian Blur 2", "ADBE Tint"] {
         assert_eq!(defs.iter().filter(|d| *d == m).count(), 1, "{m}");
