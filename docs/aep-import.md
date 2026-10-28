@@ -308,8 +308,9 @@ frame blending, 3D material options, audio levels, guides, footage duration/fram
 - `crates/aep/tests/import/combined.rs`: masks and effects on the same layer, an effect on a text
   layer, and the same through `.aepx` (built in-test from the fixtures: the effect parade of one
   fixture grafted onto the layer of another).
-- `crates/aep/tests/import/import.rs`: the synthetic fixtures of `crates/aep/tests/fixtures` (232 files)
-  (each the same one-solid project with one change) are imported and the resulting project is
+- `crates/aep/tests/import/import.rs`: the synthetic cases of `crates/aep/tests/fixtures` (one
+  composition per case in a few combined projects, `CASES.md`; each the same one-solid
+  composition with one change) are imported and the resulting project is
   compared with the value the fixture was made with: composition size/rate/duration/work
   area/background, layer names, switches and timing, blend modes, parent links, static
   Position/Scale/Rotation/Opacity/Anchor with their units, key times and values, interpolation sides,
