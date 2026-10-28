@@ -499,6 +499,11 @@ fn native_eval_file(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResul
         let path = scriptfile::resolve(s, &name, dir.as_deref(), &[]).map_err(|e| format!("$.evalFile {e}"))?;
         scriptfile::check_read(s, &path, root.as_deref())?;
         let text = scriptfile::read(s, &path)?;
+        let text = match crate::jsxbin::decode_script_source(&text) {
+            Ok(Some(js)) => js,
+            Ok(None) => text,
+            Err(e) => return Err(format!("JSXBIN decode error in $.evalFile: {e}")),
+        };
         check_nesting(&text)?;
         a.loading.push(path.clone());
         Ok((path, text))
@@ -626,8 +631,21 @@ fn first_use(name: &str, code: &str, start_line: u32) -> Option<(u32, u32)> {
     None
 }
 
-/// Evaluate `code` in `ctx` and convert the result.
+/// Evaluate `code` in `ctx` and convert the result. Last line of defence against JSXBIN reaching
+/// the parser: any code still binary here (a future caller that skipped `crate::jsxbin::decode_script_source`)
+/// is decoded rather than dying with a raw `SyntaxError: unexpected '@'`.
 pub(crate) fn eval_in(ctx: &mut Context, code: &str, file: &str) -> Result<J, ScriptError> {
+    let decoded;
+    let code = match crate::jsxbin::decode_script_source(code) {
+        Ok(Some(js)) => {
+            decoded = js;
+            decoded.as_str()
+        }
+        Ok(None) => code,
+        Err(e) => {
+            return Err(ScriptError { message: format!("JSXBIN decode error: {e}"), file: file.to_string(), ..Default::default() });
+        }
+    };
     let src = Source::from_bytes(code.as_bytes()).with_path(std::path::Path::new(file));
     let script = boa_engine::Script::parse(src, None, ctx).map_err(|e| script_error(&e, ctx, file, code))?;
     let v = script.evaluate(ctx).map_err(|e| script_error(&e, ctx, file, code))?;
@@ -712,15 +730,50 @@ pub(crate) fn outcome(output: Vec<String>, result: Result<J, ScriptError>) -> Ou
 /// ExtendScript's `#include` / `#includepath` are inlined first, and errors point at the file
 /// and line they came from (`crate::include`).
 pub fn run(session: &mut Session, req: &ScriptRequest) -> Outcome {
+    let decoded_storage;
+    let mut decoded = false;
+    let effective_code = match crate::jsxbin::decode_script_source(req.code) {
+        Ok(Some(js)) => {
+            decoded = true;
+            decoded_storage = js;
+            decoded_storage.as_str()
+        }
+        Ok(None) => req.code,
+        Err(e) => {
+            return Outcome {
+                error: Some(ScriptError { message: format!("JSXBIN decode error: {e}"), file: req.name.into(), ..Default::default() }),
+                ..Default::default()
+            };
+        }
+    };
+    let req = ScriptRequest { code: effective_code, name: req.name, console: req.console };
     let expanded = match crate::include::expand(session, req.code, req.name) {
         Ok(x) => x,
         Err(e) => return Outcome { error: Some(e), ..Default::default() },
     };
-    let Some(x) = expanded else { return run_expanded(session, req) };
+    // A syntax error in decoded JSXBIN output means the decoder mis-emitted a construct: quote
+    // the offending decoded line so the report is actionable.
+    let annotate = |out: &mut Outcome, code: &str| {
+        if !decoded {
+            return;
+        }
+        if let Some(e) = out.error.as_mut()
+            && let Some(n) = e.line
+            && let Some(line) = code.lines().nth(n.saturating_sub(1) as usize)
+        {
+            e.message = format!("{} [decoded line {n}: {}]", e.message, line.trim());
+        }
+    };
+    let Some(x) = expanded else {
+        let mut out = run_expanded(session, &req);
+        annotate(&mut out, req.code);
+        return out;
+    };
     let mut out = run_expanded(session, &ScriptRequest { code: &x.code, name: req.name, console: req.console });
     if let Some(e) = out.error.as_mut() {
         x.locate(e);
     }
+    annotate(&mut out, &x.code);
     out
 }
 

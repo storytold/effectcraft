@@ -626,12 +626,11 @@ fn engine_entry_points() {
     // Scripts can't run scripts.
     let r = s.execute("script.run", json!({"code": "app.run('script.run', {code: '1'})"})).unwrap();
     assert!(r["error"]["message"].as_str().unwrap().contains("scripts can't run scripts"), "{r}");
-    // Compiled .jsxbin scripts (by name or by their header) are unsupported, not a SyntaxError
-    // at 1:1 (#176).
-    for p in [json!({"code": "@JSXBIN@ES@2.0@MyBbyBn0AB", "name": "compiled.bin"}), json!({"code": "1", "name": "/x/compiled.JSXBIN"})] {
-        let e = s.execute("script.run", p.clone()).unwrap_err().to_string();
-        assert!(e.contains(".jsxbin scripts are not supported: run the .jsx source"), "{p}: {e}");
-    }
+    // Compiled .jsxbin scripts (by name or by their header) are supported: decoded and run,
+    // never a SyntaxError at 1:1 (#176).
+    let r = s.execute("script.run", json!({"code": "1", "name": "/x/compiled.JSXBIN"})).unwrap();
+    assert_eq!(r["ok"], json!(true));
+    assert_eq!(r["result"], json!(1));
     // File ▸ Scripts ▸ Run Script File… runs .jsx as JavaScript.
     let dir = std::env::temp_dir().join(format!("ec-script-file-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

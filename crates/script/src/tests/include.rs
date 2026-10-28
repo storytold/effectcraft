@@ -49,6 +49,20 @@ fn includes_are_inlined_relative_to_the_script() {
 }
 
 #[test]
+fn a_compiled_include_is_inlined_as_its_decoded_source() {
+    // #include of a .jsxbin used to inline the raw `@JSXBIN@` bytes, which the parser rejected
+    // with `SyntaxError: unexpected '@'` on line 1 of the file.
+    let dir = tmp("jsxbin");
+    write(&dir.join("compiled.jsxbin"), "@JSXBIN@ES@2.0@MyBbyBn0ABJAnAEjzFjBjMjFjSjUBfRBFeFjIjFjMjMjPff0DzACByB\n");
+    write(&dir.join("main.jsx"), "#include \"compiled.jsxbin\"\n'done'");
+    let mut s = session();
+    let o = run_file(&mut s, &dir.join("main.jsx"));
+    assert!(o.error.is_none(), "{:?}", o.error);
+    assert_eq!(o.result, json!("done"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn errors_point_at_the_file_and_line_they_came_from() {
     let dir = tmp("err");
     write(&dir.join("lib.jsx"), "var a = 1;\nvar b = 2;\nnotDefined();");

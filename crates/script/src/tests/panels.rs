@@ -28,6 +28,22 @@ fn remembered(store: &MemoryConfig) -> serde_json::Value {
 }
 
 #[test]
+fn a_jsxbin_panel_opens_as_a_dockable_panel() {
+    // A compiled script (`alert("Hello")`) saved under a `.jsx` name, as real panels often are.
+    let content = "@JSXBIN@ES@2.0@MyBbyBn0ABJAnAEjzFjBjMjFjSjUBfRBFeFjIjFjMjMjPff0DzACByB\n";
+    let store = Arc::new(MemoryConfig::default());
+    store.write(&format!("{PANELS_DIR}/Motion Tools.jsx"), content).unwrap();
+    let mut s = session(&store);
+    let r = s.execute("window.scriptPanel", json!({"name": "Motion Tools.jsx"}));
+    assert!(r.is_ok(), "expected the compiled panel to open without SyntaxError: {r:?}");
+    let id = r.unwrap()["window"].as_u64().unwrap() as u32;
+    let w = s.script_ui.window(id).unwrap();
+    assert_eq!(w.kind, WindowKind::Panel);
+    // The panel title drops the script extension.
+    assert_eq!(w.title, "Motion Tools");
+}
+
+#[test]
 fn a_panel_dropped_in_the_folder_is_listed_and_opens_as_a_panel() {
     let store = Arc::new(MemoryConfig::default());
     store.write(&format!("{PANELS_DIR}/Hello Panel.jsx"), PANEL).unwrap();

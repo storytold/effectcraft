@@ -121,7 +121,7 @@ pub struct ScriptEntry {
 
 fn is_script(name: &str) -> bool {
     let l = name.to_ascii_lowercase();
-    l.ends_with(".jsx") || l.ends_with(".js")
+    l.ends_with(".jsx") || l.ends_with(".js") || l.ends_with(".jsxbin")
 }
 
 /// Whether `name` can name an installed script: a bare file name, never a path (names are joined
@@ -189,10 +189,10 @@ pub fn script_code(s: &Session, name: &str, panel: Option<bool>) -> Option<(bool
 
 fn install(s: &mut Session, p: &Value, panel: bool) -> Result<Value> {
     let c = if panel { "file.installScriptUIPanel" } else { "file.installScript" };
-    let path = str_p(p, "path").ok_or_else(|| bad(c, "missing `path` (a .jsx / .js script)"))?;
+    let path = str_p(p, "path").ok_or_else(|| bad(c, "missing `path` (a .jsx / .js / .jsxbin script)"))?;
     let name = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
     if !is_script(&name) {
-        return Err(bad(c, "scripts are .jsx or .js files (.jsxbin is not supported)"));
+        return Err(bad(c, "scripts are .jsx, .js or .jsxbin files"));
     }
     // A name it could not be run or uninstalled by (`\` is a file-name character on Unix).
     if !is_script_name(&name) {
@@ -312,7 +312,7 @@ fn restore_panels(s: &mut Session, _: &Value) -> Result<Value> {
 fn open_panel(s: &mut Session, p: &Value) -> Result<Value> {
     let c = "window.scriptPanel";
     let name = str_p(p, "name").ok_or_else(|| bad(c, "missing `name` (a script in the ScriptUI Panels folder)"))?.to_string();
-    let title = name.trim_end_matches(".jsx").trim_end_matches(".js").to_string();
+    let title = name.trim_end_matches(".jsxbin").trim_end_matches(".jsx").trim_end_matches(".js").to_string();
     if let Some(w) = s.script_ui.windows.iter().find(|w| w.kind == scriptui::WindowKind::Panel && w.script == name) {
         let id = w.id;
         s.events.push(Event::Frontend { command: c.into(), params: json!({"window": id}) });

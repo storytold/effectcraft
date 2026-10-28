@@ -134,6 +134,12 @@ impl Walk<'_> {
                     }
                     scriptfile::check_read(self.s, &path, self.root.as_deref()).map_err(|e| err(self, e))?;
                     let text = scriptfile::read(self.s, &path).map_err(|e| err(self, e))?;
+                    // A compiled include inlines as its decoded source, never as raw `@JSXBIN@`.
+                    let text = match crate::jsxbin::decode_script_source(&text) {
+                        Ok(Some(js)) => js,
+                        Ok(None) => text,
+                        Err(e) => return Err(err(self, format!("#include \"{name}\": JSXBIN decode error: {e}"))),
+                    };
                     self.total = self.total.saturating_add(text.len());
                     if self.total > MAX_TOTAL_BYTES {
                         return Err(err(self, format!("#include \"{name}\": the included files exceed {} MiB", MAX_TOTAL_BYTES >> 20)));

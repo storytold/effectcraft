@@ -55,6 +55,7 @@
 #![recursion_limit = "256"]
 
 mod include;
+pub mod jsxbin;
 pub mod matchnames;
 mod model;
 mod runtime;
