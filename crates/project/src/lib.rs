@@ -37,7 +37,7 @@ mod settings;
 
 pub use comp::{Comp, Guide, Renderer, Resolution};
 pub use footage::{AlphaMode, FieldOrder, Footage, FootageKind, Proxy, Solid, SourceLayer};
-pub use item::{Item, ItemId, ItemKind, LayerId};
+pub use item::{Item, ItemId, ItemKind, LayerId, NO_LAYER};
 pub use layer::{AutoOrient, FrameBlend, Layer, LayerSource, LightKind, MatteKind, PrimitiveKind, Quality, Sampling, Switches, TrackMatte};
 pub use settings::{
     APP_VERSION, BitDepth, ColorEngine, CuePoint, HdrMode, Marker, ProjectError, ProjectSettings, SCHEMA_EFFECT_SPACE, SCHEMA_VERSION, SavedView,
