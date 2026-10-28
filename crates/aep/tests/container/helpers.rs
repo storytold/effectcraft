@@ -361,7 +361,13 @@ pub fn first_comp<'f, 'a>(project: &Project<'f, 'a>) -> Comp<'f, 'a> {
     project.all_items().into_iter().find_map(|i| i.comp()).expect("a composition")
 }
 
-/// The layer with this id in the first composition (the solid `L` of the corpus has id 0x1b).
+/// The solid `L` of the base composition: the bottom layer (the first one made; id 0x1b in the
+/// single-case files, another id in each case of a combined file).
+pub fn base_layer<'f, 'a>(comp: &Comp<'f, 'a>) -> Layer<'f, 'a> {
+    comp.layers().last().expect("a layer")
+}
+
+/// The layer with this id in a composition.
 pub fn layer_with_id<'f, 'a>(comp: &Comp<'f, 'a>, id: u32) -> Layer<'f, 'a> {
     comp.layers().find(|l| l.id() == Some(id)).unwrap_or_else(|| panic!("no layer with id {id:#x}"))
 }
@@ -379,6 +385,19 @@ pub fn layer_shown_as<'f, 'a>(project: &Project<'f, 'a>, comp: &Comp<'f, 'a>, na
 /// The first layer of this type in a composition.
 pub fn layer_of_type<'f, 'a>(comp: &Comp<'f, 'a>, layer_type: LayerType) -> Layer<'f, 'a> {
     comp.layers().find(|l| l.header().is_some_and(|h| h.layer_type == layer_type)).unwrap_or_else(|| panic!("no {layer_type:?} layer"))
+}
+
+/// A copy of a layer's `LIST Layr` with its id (`ldta` bytes 0-3) set to 0, for comparing the
+/// same layer in two cases of a combined file.
+pub fn without_layer_id(layer: &effectcraft_aep::Chunk<'_>) -> effectcraft_aep::Chunk<'static> {
+    let mut c = layer.clone().into_owned();
+    if let effectcraft_aep::Body::List { children, .. } = &mut c.body
+        && let Some(ldta) = children.iter_mut().find(|x| x.is(b"ldta"))
+        && let effectcraft_aep::Body::Data(d) = &mut ldta.body
+    {
+        d.to_mut()[..4].fill(0);
+    }
+    c
 }
 
 /// Compares floats with a tolerance.

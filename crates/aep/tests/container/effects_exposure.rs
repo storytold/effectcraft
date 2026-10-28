@@ -3,10 +3,9 @@
 //! slider ranges, the Bypass checkbox and a keyed slider. Every expected value is the one the case
 //! was made with (its MANIFEST row).
 
-use crate::helpers::{assert_near, first_comp, layer_with_id, open};
+use crate::helpers::{assert_near, base_layer, first_comp, open};
 use effectcraft_aep::{DefinitionSource, EffectParam, Interpolation, KeyframeKind, ParamKind, ParamValue, Project};
 
-const L: u32 = 0x1b;
 /// Key time 2 s in the property timescale 25600.
 const T2: i32 = 51200;
 /// Float sliders hold the float32 value widened to f64 (0.1 is 0.10000000149).
@@ -18,11 +17,12 @@ fn with_params<R>(name: &str, f: impl FnOnce(&[EffectParam<'_, '_>]) -> R) -> Op
         let bytes = crate::common::try_fixture(name)?;
         let file = open(&bytes);
         let project = Project::new(&file).unwrap();
-        let layer = layer_with_id(&first_comp(&project), L);
+        let layer = base_layer(&first_comp(&project));
         let effects = layer.effects();
         assert_eq!(effects.len(), 1, "{name}");
         assert_eq!(effects[0].match_name(), "ADBE Exposure2", "{name}");
-        assert_eq!(project.definition_source(&effects[0]), DefinitionSource::Instance, "{name}");
+        // Its own definitions, or (a later instance of the type in its file) the project copy.
+        assert_ne!(project.definition_source(&effects[0]), DefinitionSource::Missing, "{name}");
         let params = project.effect_params(&effects[0]);
         assert_eq!(params.len(), 24, "{name}");
         f(&params)
@@ -46,7 +46,7 @@ fn exposure_parameters_and_defaults() {
     let bytes = fixture!("389-fx-exposure-default.aep");
     let file = open(&bytes);
     let project = Project::new(&file).unwrap();
-    let fx = layer_with_id(&first_comp(&project), L).effects();
+    let fx = base_layer(&first_comp(&project)).effects();
     assert_eq!((fx[0].match_name(), fx[0].name().as_deref()), ("ADBE Exposure2", Some("Exposure")));
     assert_eq!(fx[0].declared_param_count(), Some(24));
     skip!(with_params("389-fx-exposure-default.aep", |p| {

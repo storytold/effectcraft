@@ -52,3 +52,18 @@ pub fn comp<'p>(project: &'p Project, r: &ImportResult, name: &str) -> (ItemId, 
     }
     panic!("no comp {name}")
 }
+
+/// The name, item id and layer ids (top first) of every composition of a case, from the
+/// container; `None` when the case is missing. Ids differ between the single-case files and the
+/// cases of a combined file, so tests that patch ids read them here.
+pub fn comp_ids(name: &str) -> Option<Vec<(String, u32, Vec<u32>)>> {
+    let bytes = crate::common::try_fixture(name)?;
+    let file = effectcraft_aep::parse(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
+    let view = effectcraft_aep::Project::new(&file).expect("a project");
+    Some(
+        view.all_items()
+            .into_iter()
+            .filter_map(|i| Some((i.name().unwrap_or_default(), i.id()?, i.comp()?.layers().filter_map(|l| l.id()).collect())))
+            .collect(),
+    )
+}

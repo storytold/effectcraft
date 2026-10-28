@@ -3,7 +3,7 @@
 //! black, shutter angle 180, one solid layer `L` (red, 1920x1080, label 1, Normal, Best, start 0,
 //! in 0, out 5, stretch 100), then one change per file.
 
-use crate::helpers::{first_comp, layer_with_id, open};
+use crate::helpers::{base_layer, first_comp, open};
 use effectcraft_aep::{BlendMode, LayerHeader, LayerType, Project, Quality, Rational};
 
 const L: u32 = 0x1b;
@@ -15,7 +15,7 @@ fn l_header(name: &str) -> Option<LayerHeader> {
         let file = open(&bytes);
         let project = Project::new(&file).unwrap();
         let comp = first_comp(&project);
-        layer_with_id(&comp, L).header().unwrap()
+        base_layer(&comp).header().unwrap()
     })
 }
 
@@ -50,7 +50,7 @@ const NONE: Switches =
 
 /// Everything the base layer and every one-switch case share.
 fn assert_plain(h: &LayerHeader) {
-    assert_eq!(h.id, L);
+    // The id is the case's own (0x1b in the single-case files); the source is the solid `L`.
     assert_eq!(h.layer_type, LayerType::Av);
     assert_eq!(h.label, 1);
     // No name was set, so the copy of the name at byte 64 is empty (the layer shows its source name).
@@ -110,7 +110,7 @@ fn name_blend_mode_and_quality() {
     let bytes = fixture!("010-layer-name.aep");
     let file = open(&bytes);
     let project = Project::new(&file).unwrap();
-    let layer = layer_with_id(&first_comp(&project), L);
+    let layer = base_layer(&first_comp(&project));
     // The layer name is the user's; the source footage keeps its own name.
     assert_eq!(layer.name().as_deref(), Some("Renamed"));
     assert_eq!(project.layer_source(&layer).and_then(|i| i.display_name()).as_deref(), Some("L"));
@@ -125,7 +125,7 @@ fn display_name_falls_back_to_the_source_name() {
     let bytes = fixture!("000-base.aep");
     let file = open(&bytes);
     let project = Project::new(&file).unwrap();
-    let layer = layer_with_id(&first_comp(&project), L);
+    let layer = base_layer(&first_comp(&project));
     assert_eq!(layer.name(), None);
     assert_eq!(project.layer_display_name(&layer).as_deref(), Some("L"));
     assert_eq!(project.layer_source_size(&layer), Some((1920, 1080)));
@@ -181,7 +181,7 @@ fn parent_link_and_null_object() {
     assert_eq!(project.layer_source(null).and_then(|i| i.display_name()).as_deref(), Some("Null 1"));
     assert_eq!(project.layer_source_size(null), Some((100, 100)));
     let lh = layers[1].header().unwrap();
-    assert_eq!(lh.id, L);
+    assert_ne!(lh.id, nh.id);
     assert_eq!(lh.parent_id, Some(nh.id));
     assert!(!lh.is_null_object());
 }

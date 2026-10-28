@@ -69,16 +69,19 @@ fn import_patched(bytes: &[u8]) -> (Project, effectcraft_aep::import::ImportResu
 /// the id): the layer directly above is the matte, as in After Effects before 23.0.
 #[test]
 fn a_matte_without_a_layer_id_uses_the_layer_above() {
+    // The layer ids (top first: M, L; 0x1d and 0x1b in the single-case files).
+    let ids = skip!(crate::helpers::comp_ids("403-matte-L-alpha-M.aep"));
     let mut bytes = fixture!("403-matte-L-alpha-M.aep");
-    let at = matte_id_offset(&bytes, 0x1b);
+    let at = matte_id_offset(&bytes, ids[0].2[1]);
     bytes[at..at + 4].copy_from_slice(&0u32.to_be_bytes());
     let (p, r) = import_patched(&bytes);
     assert!(r.report.is_lossless(), "{:?}", r.report.losses);
     assert_eq!(mattes(&p, &r)[1].2, Some(("M".to_string(), MatteKind::Alpha)));
 
     // On the top layer there is no layer above: reported.
+    let ids = skip!(crate::helpers::comp_ids("407-matte-M-alpha-L-below.aep"));
     let mut bytes = fixture!("407-matte-M-alpha-L-below.aep");
-    let at = matte_id_offset(&bytes, 0x1d);
+    let at = matte_id_offset(&bytes, ids[0].2[0]);
     bytes[at..at + 4].copy_from_slice(&0u32.to_be_bytes());
     let (p, r) = import_patched(&bytes);
     assert_eq!(r.report.count(LossCategory::TrackMattes), 1);
@@ -87,10 +90,12 @@ fn a_matte_without_a_layer_id_uses_the_layer_above() {
 
 #[test]
 fn hostile_matte_fields_are_reported() {
-    // A matte layer that does not exist, the layer itself, and an unknown mode.
-    for (id, mode) in [(0x7fff_u32, 1u8), (0x1b, 1), (0x1d, 9)] {
+    // A matte layer that does not exist, the layer itself (L), and an unknown mode (with M).
+    let ids = skip!(crate::helpers::comp_ids("403-matte-L-alpha-M.aep"));
+    let (m, l) = (ids[0].2[0], ids[0].2[1]);
+    for (id, mode) in [(0x7fff_u32, 1u8), (l, 1), (m, 9)] {
         let mut bytes = fixture!("403-matte-L-alpha-M.aep");
-        let at = matte_id_offset(&bytes, 0x1b);
+        let at = matte_id_offset(&bytes, l);
         bytes[at..at + 4].copy_from_slice(&id.to_be_bytes());
         bytes[at - 160 + 107] = mode;
         let (p, r) = import_patched(&bytes);

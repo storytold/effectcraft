@@ -30,11 +30,12 @@ fn the_four_matte_modes_and_the_matte_layer_id() {
         let l = skip!(layers(case));
         assert_eq!(l.len(), 2, "{case}");
         let (m_name, m_video, m_matte, m_id) = &l[0];
-        let (l_name, l_video, l_matte, _) = &l[1];
+        let (l_name, l_video, l_matte, l_id) = &l[1];
         assert_eq!((m_name.as_str(), l_name.as_str()), ("M", "L"), "{case}");
-        assert_eq!(*m_id, 0x1d, "{case}");
+        // The matte layer M has an id of its own (0x1d in the single-case files).
+        assert_ne!(m_id, l_id, "{case}");
         assert_eq!(*m_matte, None, "{case}: the matte layer has no matte itself");
-        assert_eq!(*l_matte, Some(TrackMatte { mode, layer: Some(0x1d) }), "{case}");
+        assert_eq!(*l_matte, Some(TrackMatte { mode, layer: Some(*m_id) }), "{case}");
         // After Effects switches the matte layer's video off by itself.
         assert!(!m_video, "{case}");
         assert!(l_video, "{case}");
@@ -45,7 +46,8 @@ fn the_four_matte_modes_and_the_matte_layer_id() {
 fn a_matte_layer_below_its_target() {
     let l = skip!(layers("407-matte-M-alpha-L-below.aep"));
     assert_eq!(l[0].2, Some(TrackMatte { mode: MatteMode::Alpha, layer: Some(l[1].3) }));
-    assert_eq!(l[1].3, 0x1b);
+    // The matte is L (0x1b in the single-case file).
+    assert_eq!(l[1].0, "L");
     assert!(l[0].1, "M stays visible");
     assert!(!l[1].1, "L, the matte, is switched off");
     assert_eq!(l[1].2, None);
@@ -55,7 +57,7 @@ fn a_matte_layer_below_its_target() {
 fn a_matte_layer_whose_video_was_switched_back_on() {
     let l = skip!(layers("408-matte-L-alpha-M-visible.aep"));
     assert!(l[0].1, "M visible");
-    assert_eq!(l[1].2, Some(TrackMatte { mode: MatteMode::Alpha, layer: Some(0x1d) }));
+    assert_eq!(l[1].2, Some(TrackMatte { mode: MatteMode::Alpha, layer: Some(l[0].3) }));
 }
 
 #[test]

@@ -1,9 +1,22 @@
-//! Byte-identical round trip over generated fixtures, and the structural facts of the container.
+//! Byte-identical round trip over the generated test projects as After Effects wrote them (the
+//! combined files, not the single-case projects cut from them), and the structural facts of the
+//! container.
 
 use std::collections::BTreeMap;
 
-use crate::helpers::FIXTURES;
 use effectcraft_aep::{AepFile, Body, parse, write};
+
+/// The binary files of the fixture directory (the `.aepx` has its own tests).
+fn files() -> Vec<&'static str> {
+    crate::common::FILES.iter().copied().filter(|n| n.ends_with(".aep")).collect()
+}
+
+/// The bytes of a whole file; returns from the calling test when it is missing.
+macro_rules! file {
+    ($name:expr) => {
+        skip!(crate::common::try_file($name))
+    };
+}
 
 fn id(c: &[u8; 4]) -> String {
     String::from_utf8_lossy(c).into_owned()
@@ -11,8 +24,8 @@ fn id(c: &[u8; 4]) -> String {
 
 #[test]
 fn every_fixture_round_trips_byte_for_byte() {
-    for name in FIXTURES {
-        let bytes = fixture!(name);
+    for name in files() {
+        let bytes = file!(name);
         let file = parse(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
         let back = write(&file).unwrap();
         assert_eq!(back.len(), bytes.len(), "{name}: length");
@@ -25,8 +38,8 @@ fn every_fixture_round_trips_byte_for_byte() {
 
 #[test]
 fn header_and_trailer_facts() {
-    for name in FIXTURES {
-        let bytes = fixture!(name);
+    for name in files() {
+        let bytes = file!(name);
         assert_eq!(&bytes[..4], b"RIFX");
         assert_eq!(&bytes[8..12], b"Egg!");
         let declared = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
@@ -57,8 +70,8 @@ fn top_level_chunks_of_the_base_project() {
 
 #[test]
 fn nesting_depth_is_below_the_limit() {
-    for name in FIXTURES {
-        let bytes = fixture!(name);
+    for name in files() {
+        let bytes = file!(name);
         let file = parse(&bytes).unwrap();
         let max = file.walk().map(|(d, _)| d).max().unwrap();
         assert!(max <= 13, "{name}: depth {max}");
@@ -70,8 +83,8 @@ fn nesting_depth_is_below_the_limit() {
 #[test]
 fn nested_chunk_ids_hold_one_utf8_chunk() {
     let mut nested = BTreeMap::<String, usize>::new();
-    for name in FIXTURES {
-        let bytes = fixture!(name);
+    for name in files() {
+        let bytes = file!(name);
         let file = parse(&bytes).unwrap();
         for (_, c) in file.walk() {
             if matches!(c.body, Body::Chunks(_)) {
@@ -107,8 +120,8 @@ fn raw_text_lists_are_kept_opaque() {
 fn list_types_ending_in_a_space_are_kept() {
     // `LIST Pin ` and `LIST FEE ` occur in every generated project that has an item (all but the
     // empty one); the space is part of the type.
-    for name in FIXTURES.iter().filter(|n| **n != "001-empty.aep") {
-        let bytes = fixture!(name);
+    for name in files().into_iter().filter(|n| *n != "empty.aep") {
+        let bytes = file!(name);
         let file = parse(&bytes).unwrap();
         for ty in [b"Pin ", b"FEE "] {
             assert!(file.walk().any(|(_, c)| c.is_list(ty)), "{name}: no LIST {:?}", String::from_utf8_lossy(ty));

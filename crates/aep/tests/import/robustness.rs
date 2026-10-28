@@ -122,6 +122,27 @@ fn truncated_files_never_panic() {
     }
 }
 
+#[test]
+fn a_damaged_whole_combined_file_never_panics() {
+    // The cases are cut from the combined files by our writer; this is After Effects' own bytes
+    // (the smallest combined file): truncated, and with flipped bytes.
+    let original = skip!(crate::common::try_file("aepx-pair.aep"));
+    assert!(try_all(&original));
+    let n = original.len();
+    for cut in (0..n).step_by(n / 40) {
+        try_all(&original[..cut]);
+    }
+    let mut state = 0x51ed_2701_0bad_cafeu64;
+    for round in 0..40 {
+        let mut bytes = original.clone();
+        for _ in 0..1 + round % 6 {
+            let at = (next(&mut state) % n as u64) as usize;
+            bytes[at] ^= 1 << (next(&mut state) % 8);
+        }
+        try_all(&bytes);
+    }
+}
+
 /// A small deterministic generator (xorshift) for the byte flips.
 fn next(state: &mut u64) -> u64 {
     *state ^= *state << 13;
@@ -300,15 +321,17 @@ fn hostile_values_in_valid_structure() {
 /// parent, must not produce a parent loop in the project.
 #[test]
 fn parent_loops_are_dropped() {
-    // 022: the child (id 27) has parent 29 (the null). Make the null's parent the child, and the
-    // child its own parent.
+    // 022: the child L (id 27 in the single-case file) has the null (29) as its parent. Make the
+    // null's parent the child, and the child's parent the null.
+    let ids = skip!(crate::helpers::comp_ids("022-layer-parent-null.aep"));
+    let (null, child) = (ids[0].2[0], ids[0].2[1]);
     let looped = skip!(mutate("022-layer-parent-null.aep", &mut |c| {
         if c.is(b"ldta") {
             let id = c.bytes().and_then(|b| b.get(..4)).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
-            match id {
-                Some(29) => set(c, 132, &27u32.to_be_bytes()),
-                Some(27) => set(c, 132, &29u32.to_be_bytes()),
-                _ => {}
+            if id == Some(null) {
+                set(c, 132, &child.to_be_bytes());
+            } else if id == Some(child) {
+                set(c, 132, &null.to_be_bytes());
             }
         }
     }));
@@ -321,8 +344,8 @@ fn parent_loops_are_dropped() {
     assert!(c.layers.iter().all(|l| l.parent.is_none()));
 
     let selfish = skip!(mutate("022-layer-parent-null.aep", &mut |c| {
-        if c.is(b"ldta") && c.bytes().and_then(|b| b.get(..4)) == Some(&29u32.to_be_bytes()[..]) {
-            set(c, 132, &29u32.to_be_bytes());
+        if c.is(b"ldta") && c.bytes().and_then(|b| b.get(..4)) == Some(&null.to_be_bytes()[..]) {
+            set(c, 132, &null.to_be_bytes());
         }
     }));
     let mut p = Project::default();
@@ -334,13 +357,15 @@ fn parent_loops_are_dropped() {
 /// at the loop instead of building a cyclic project.
 #[test]
 fn precomposition_loops_are_cut() {
-    // 124: comp C holds a layer of comp Pre (item id 37), and Pre holds the solid (id 26). Point
-    // the layer in Pre at Pre itself, and the layer in C at C.
+    // 124: comp C holds a layer of comp Pre (item id 37 in the single-case file), and Pre holds
+    // the solid (id 26). Point the layer in Pre (39) at Pre itself.
+    let ids = skip!(crate::helpers::comp_ids("124-precomp-Pre.aep"));
+    let (_, pre, pre_layers) = ids.iter().find(|(n, _, _)| n == "Pre").cloned().expect("Pre");
     let looped = skip!(mutate("124-precomp-Pre.aep", &mut |c| {
         if c.is(b"ldta") {
             let id = c.bytes().and_then(|b| b.get(..4)).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
-            if id == Some(39) {
-                set(c, 40, &37u32.to_be_bytes());
+            if id == Some(pre_layers[0]) {
+                set(c, 40, &pre.to_be_bytes());
             }
         }
     }));
@@ -601,8 +626,18 @@ fn bogus_effect_structure_is_reported_not_imported_blindly() {
         "{r:?}"
     );
 
-    // No project-level definitions: the second Ramp (empty parT) cannot be read and is reported;
-    // the first still arrives.
+    // No project-level definitions: a Ramp with an empty parT cannot be read and is reported; one
+    // with its own parT still arrives. (In the single-case file one of the two had its own; in
+    // the combined file an earlier case holds the definitions, so both take the project copy.)
+    let own = {
+        let bytes = skip!(crate::common::try_fixture("383-fx-ramp-on-100x100-start-10-20.aep"));
+        let file = parse(&bytes).unwrap();
+        let view = effectcraft_aep::Project::new(&file).unwrap();
+        let effects: Vec<_> = view.all_items().iter().filter_map(|i| i.comp()).flat_map(|c| c.layers().flat_map(|l| l.effects()).collect::<Vec<_>>()).collect();
+        assert_eq!(effects.len(), 2);
+        effects.iter().filter(|e| e.has_own_definitions()).count()
+    };
+    assert!(own < 2);
     let bytes = skip!(mutate("383-fx-ramp-on-100x100-start-10-20.aep", &mut |c| {
         if let Body::List { list_type, .. } = &mut c.body
             && list_type == b"EfdG"
@@ -611,8 +646,8 @@ fn bogus_effect_structure_is_reported_not_imported_blindly() {
         }
     }));
     let r = report_of(&bytes);
-    assert_eq!(r.imported.effects, 1, "{r:?}");
-    assert_eq!(r.count(effectcraft_aep::import::LossCategory::Effects), 1, "{r:?}");
+    assert_eq!(r.imported.effects, own, "{r:?}");
+    assert_eq!(r.count(effectcraft_aep::import::LossCategory::Effects), 2 - own, "{r:?}");
     assert!(try_all(&bytes));
 
     // A parT whose definitions were renamed (no pard at all) and an empty definition list.

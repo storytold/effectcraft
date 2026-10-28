@@ -1,6 +1,7 @@
-//! `.aepx` (the XML form) read into the chunk tree, compared with the `.aep` of the same case.
+//! `.aepx` (the XML form) read into the chunk tree, compared with the `.aep` of the same project.
 //!
-//! Each pair was saved by After Effects from the same state, the `.aepx` right after the `.aep`.
+//! The pair `aepx-pair` (cases 000, 058, 060, 110 and 124, one composition each) was saved by
+//! After Effects from the same state, the `.aepx` right after the `.aep`.
 //! The trees are identical except for two documented differences: the save counter (`head`
 //! `u32` at byte 16) is one higher in the `.aepx`, and pad bytes are not written in XML (an odd
 //! body gets a zero pad byte). The XMP packet of the fixtures is the base packet in both forms.
@@ -8,7 +9,7 @@
 use effectcraft_aep::{AepError, AepFile, Body, Chunk, Limits, Project, is_aepx, parse, parse_any, read_aepx, read_aepx_with_limits, write};
 
 /// The `.aepx` fixtures; each has the `.aep` of the same name.
-const PAIRS: &[&str] = &["000-base", "058-key-opacity-2key", "060-expr-opacity-wiggle", "110-text-A", "124-precomp-Pre"];
+const PAIRS: &[&str] = &["aepx-pair"];
 
 /// The `.aep` tree with the differences an `.aepx` of the next save has removed: the `head` save
 /// counter is taken from `other`.
@@ -55,8 +56,8 @@ fn head_counter(file: &AepFile<'_>) -> u32 {
 #[test]
 fn every_pair_gives_the_same_chunk_tree() {
     for name in PAIRS {
-        let aep = fixture!(&format!("{name}.aep"));
-        let aepx = fixture!(&format!("{name}.aepx"));
+        let aep = skip!(crate::common::try_file(&format!("{name}.aep")));
+        let aepx = skip!(crate::common::try_file(&format!("{name}.aepx")));
         assert!(is_aepx(&aepx) && !is_aepx(&aep), "{name}");
         let bin = parse(&aep).unwrap();
         let xml = read_aepx(&aepx).unwrap_or_else(|e| panic!("{name}: {e}"));
@@ -76,8 +77,8 @@ fn every_pair_gives_the_same_chunk_tree() {
 #[test]
 fn the_typed_view_reads_the_same_values() {
     for name in PAIRS {
-        let aep = fixture!(&format!("{name}.aep"));
-        let aepx = fixture!(&format!("{name}.aepx"));
+        let aep = skip!(crate::common::try_file(&format!("{name}.aep")));
+        let aepx = skip!(crate::common::try_file(&format!("{name}.aepx")));
         let bin = parse(&aep).unwrap();
         let xml = read_aepx(&aepx).unwrap();
         let (pb, px) = (Project::new(&bin).unwrap(), Project::new(&xml).unwrap());
@@ -89,20 +90,20 @@ fn the_typed_view_reads_the_same_values() {
             assert_eq!(layers(&cb), layers(&cx), "{name}");
         }
     }
-    // Spot checks against the values the cases were made with.
-    let aepx = fixture!("060-expr-opacity-wiggle.aepx");
+    // Spot checks against the values the cases were made with (060's expression, 110's text).
+    let aepx = skip!(crate::common::try_file("aepx-pair.aepx"));
     let xml = read_aepx(&aepx).unwrap();
     assert!(xml.walk().any(|(_, c)| c.is(b"Utf8") && c.bytes() == Some(&b"wiggle(1,10)"[..])));
-    let aepx = fixture!("110-text-A.aepx");
-    let xml = read_aepx(&aepx).unwrap();
     assert!(xml.walk().any(|(_, c)| c.is_list(b"btdk") && matches!(c.body, Body::OpaqueList { .. })));
+    let names: Vec<_> = Project::new(&xml).unwrap().all_items().iter().filter(|i| i.comp().is_some()).filter_map(|i| i.name()).collect();
+    assert_eq!(names, ["000-base", "058-key-opacity-2key", "060-expr-opacity-wiggle", "110-text-A", "124-precomp-Pre", "Pre"]);
 }
 
 #[test]
 fn damaged_aepx_is_an_error_or_a_tree_never_a_panic() {
-    let aepx = fixture!("000-base.aepx");
-    // Truncation at many points.
-    for cut in (0..aepx.len()).step_by(997) {
+    let aepx = skip!(crate::common::try_file("aepx-pair.aepx"));
+    // Truncation at about 160 points.
+    for cut in (0..aepx.len()).step_by(aepx.len() / 160) {
         let _ = read_aepx(&aepx[..cut]);
     }
     assert!(read_aepx(&aepx[..aepx.len() / 2]).is_err());

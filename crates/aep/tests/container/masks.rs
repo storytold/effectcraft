@@ -1,10 +1,9 @@
 //! Masks: mode, invert switch, feather / opacity / expansion, and the path shapes, checked against
 //! the values the corpus was made with (its MANIFEST). The solid `L` is 1920x1080.
 
-use crate::helpers::{first_comp, layer_with_id, open};
+use crate::helpers::{base_layer, first_comp, open};
 use effectcraft_aep::{KeyframeKind, Mask, MaskMode, PathVertex, Project, PropNode, Property, ShapePath, ValueSource};
 
-const L: u32 = 0x1b;
 const SIZE: (f64, f64) = (1920.0, 1080.0);
 
 fn masks(name: &str) -> Option<Vec<Mask>> {
@@ -12,7 +11,7 @@ fn masks(name: &str) -> Option<Vec<Mask>> {
         let bytes = crate::common::try_fixture(name)?;
         let file = open(&bytes);
         let project = Project::new(&file).unwrap();
-        layer_with_id(&first_comp(&project), L).masks()
+        base_layer(&first_comp(&project)).masks()
     })
 }
 
@@ -87,7 +86,7 @@ fn animated_mask_path_has_one_shape_per_key() {
     let bytes = fixture!("093-mask-path-2keys.aep");
     let file = open(&bytes);
     let project = Project::new(&file).unwrap();
-    let layer = layer_with_id(&first_comp(&project), L);
+    let layer = base_layer(&first_comp(&project));
     let Some(PropNode::Group(parade)) = layer.properties().unwrap().get("ADBE Mask Parade") else { panic!("mask parade") };
     let Some(PropNode::Group(atom)) = parade.get("ADBE Mask Atom") else { panic!("mask atom") };
     let Some(PropNode::Other(path)) = atom.get("ADBE Mask Shape") else { panic!("mask shape") };

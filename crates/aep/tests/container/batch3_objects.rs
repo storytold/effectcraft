@@ -2,13 +2,11 @@
 //! light, marker data and footage items. Every expected value is the value the corpus case was
 //! made with (its MANIFEST).
 
-use crate::helpers::{assert_near, first_comp, layer_named, layer_of_type, layer_shown_as, layer_with_id, near, open};
+use crate::helpers::{assert_near, base_layer, first_comp, layer_named, layer_of_type, layer_shown_as, near, open};
 use effectcraft_aep::{
     Caps, CueType, GradientType, ItemKind, Justification, LayerRef, LayerType, MaskMode, ParamKind, ParamValue, PolystarType, Project, PropNode, Rational,
     ShapeDetail, ShapeItem, TextDocument, ValueSource,
 };
-
-const L: u32 = 0x1b;
 
 fn rat(num: i64, den: i64) -> Rational {
     Rational { num, den }
@@ -38,7 +36,7 @@ fn the_point_default_is_a_fraction_of_the_layer() {
     let bytes = fixture!("218-fx-point-111-222.aep");
     let file = open(&bytes);
     let project = Project::new(&file).unwrap();
-    let layer = layer_with_id(&first_comp(&project), L);
+    let layer = base_layer(&first_comp(&project));
     let p = layer.effects()[0].params().into_iter().find(|p| p.kind == ParamKind::Point).unwrap();
     assert_eq!(p.is_default(), Some(false));
     let px = p.point_px(1920.0, 1080.0).unwrap();
@@ -50,30 +48,39 @@ fn the_point_default_is_a_fraction_of_the_layer() {
 
 // ------------------------------------------------------------------ Layer Control (320, 321, 220)
 
-fn layer_ref(name: &str) -> Option<(Option<LayerRef>, Option<ParamValue>, Option<LayerRef>)> {
+/// The Layer Control's reference, the input layer's stored value and reference, the id of `L`
+/// (the owner) and the id of the top layer.
+#[allow(clippy::type_complexity)]
+fn layer_ref(name: &str) -> Option<(Option<LayerRef>, Option<ParamValue>, Option<LayerRef>, u32, u32)> {
     Some({
         let bytes = crate::common::try_fixture(name)?;
         let file = open(&bytes);
         let project = Project::new(&file).unwrap();
-        let layer = layer_with_id(&first_comp(&project), L);
+        let comp = first_comp(&project);
+        let layer = base_layer(&comp);
+        let owner = layer.id().unwrap();
         let effects = layer.effects();
         assert_eq!(effects.len(), 1, "{name}");
         assert_eq!(effects[0].match_name(), "ADBE Layer Control");
-        let params = effects[0].params();
+        let params = project.effect_params(&effects[0]);
         let p = params.iter().find(|p| p.kind == ParamKind::Layer && p.index == 1).unwrap();
         // The implicit input layer is not a layer reference.
-        (p.layer_ref(L), params[0].stored_value(), params[0].layer_ref(L))
+        (p.layer_ref(owner), params[0].stored_value(), params[0].layer_ref(owner), owner, comp.layers().next().unwrap().id().unwrap())
     })
 }
 
 #[test]
 fn layer_control_self_versus_none() {
-    // 320: Layer set explicitly to 1 = the layer itself: tdpi = the owning layer's id (0x1b).
-    assert_eq!(skip!(layer_ref("320-fx-layercontrol-self-explicit.aep")), (Some(LayerRef::This), Some(ParamValue::Layer(L)), None));
+    // 320: Layer set explicitly to 1 = the layer itself: tdpi = the owning layer's id.
+    let (r, input, input_ref, owner, _) = skip!(layer_ref("320-fx-layercontrol-self-explicit.aep"));
+    assert_eq!((r, input, input_ref), (Some(LayerRef::This), Some(ParamValue::Layer(owner)), None));
     // 321: None: tdpi = 0.
-    assert_eq!(skip!(layer_ref("321-fx-layercontrol-none.aep")), (Some(LayerRef::Nothing), Some(ParamValue::Layer(L)), None));
-    // 220: Layer 1 of a new Null layer (id 0x22).
-    assert_eq!(skip!(layer_ref("220-fx-layercontrol-to-layer1.aep")).0, Some(LayerRef::Layer(0x22)));
+    let (r, input, input_ref, owner, _) = skip!(layer_ref("321-fx-layercontrol-none.aep"));
+    assert_eq!((r, input, input_ref), (Some(LayerRef::Nothing), Some(ParamValue::Layer(owner)), None));
+    // 220: Layer 1 of a new Null layer (the top layer).
+    let (r, _, _, owner, top) = skip!(layer_ref("220-fx-layercontrol-to-layer1.aep"));
+    assert_ne!(top, owner);
+    assert_eq!(r, Some(LayerRef::Layer(top)));
 }
 
 // ------------------------------------------------------------------ Dropdown (323, 324, 077)
@@ -86,11 +93,11 @@ fn dropdown_items_selection_and_count() {
         let bytes = fixture!(name);
         let file = open(&bytes);
         let project = Project::new(&file).unwrap();
-        let layer = layer_with_id(&first_comp(&project), L);
+        let layer = base_layer(&first_comp(&project));
         let effects = layer.effects();
         assert_eq!(effects.len(), 1);
         // set_dropdown_items re-creates the effect definition under a new match name.
-        assert_eq!(effects[0].match_name(), "Pseudo/@@KbKT0rCPQi2A0ytuyGLWSw", "{name}");
+        assert!(effects[0].match_name().starts_with("Pseudo/@@") && effects[0].match_name().len() == 31, "{name}");
         assert_eq!(effects[0].name().as_deref(), Some("Dropdown Menu Control"));
         let p = effects[0].params().into_iter().find(|p| p.kind == ParamKind::Popup).unwrap();
         assert_eq!(p.items.as_deref(), Some(&["Alpha", "Beta", "Gamma", "Delta", "Epsilon"].map(String::from)[..]), "{name}");
@@ -111,7 +118,7 @@ fn dropdown_items_selection_and_count() {
     let bytes = fixture!("077-fx-dropdown-default.aep");
     let file = open(&bytes);
     let project = Project::new(&file).unwrap();
-    let layer = layer_with_id(&first_comp(&project), L);
+    let layer = base_layer(&first_comp(&project));
     let p = layer.effects()[0].params().into_iter().find(|p| p.kind == ParamKind::Popup).unwrap();
     assert_eq!((p.popup_item_count(), p.popup_selected_item()), (Some(3), Some("Item 1")));
     let no_data = layer.effects()[0].params().into_iter().find(|p| p.kind == ParamKind::NoData).unwrap();
@@ -163,7 +170,7 @@ fn one_mkif_per_mask_and_the_mode_none() {
     let bytes = fixture!("328-mask-two-ellipse-rect.aep");
     let file = open(&bytes);
     let project = Project::new(&file).unwrap();
-    let layer = layer_with_id(&first_comp(&project), L);
+    let layer = base_layer(&first_comp(&project));
     let masks = layer.masks();
     assert_eq!(masks.len(), 2);
     assert_eq!(masks.iter().map(|m| m.name.as_deref()).collect::<Vec<_>>(), [Some("Mask 1"), Some("Mask 2")]);
@@ -181,18 +188,18 @@ fn one_mkif_per_mask_and_the_mode_none() {
         assert_near(&v.position, &w, 1e-2);
     }
     assert_eq!(v2[0].len(), 4);
-    // 329: the same ellipse as 232 with the mode None (0); the layer counter goes on (3 after 328's two).
+    // 329: the same ellipse as 232 with the mode None (0). The layer's mask counter is 1: the case is the first mask on its layer.
     let bytes = fixture!("329-mask-ellipse-mode-none.aep");
     let file = open(&bytes);
     let project = Project::new(&file).unwrap();
-    let none = layer_with_id(&first_comp(&project), L).masks();
+    let none = base_layer(&first_comp(&project)).masks();
     assert_eq!(none.len(), 1);
-    assert_eq!((none[0].mode, none[0].counter), (Some(MaskMode::None), Some(3)));
+    assert_eq!((none[0].mode, none[0].counter), (Some(MaskMode::None), Some(1)));
     assert_eq!(MaskMode::from_id(0), MaskMode::None);
     let bytes = fixture!("232-mask-ellipse.aep");
     let file = open(&bytes);
     let project = Project::new(&file).unwrap();
-    let add = layer_with_id(&first_comp(&project), L).masks();
+    let add = base_layer(&first_comp(&project)).masks();
     assert_eq!(add[0].mode, Some(MaskMode::Add));
     assert_eq!(add[0].shapes, none[0].shapes, "329 is 232 with another mode");
 }
@@ -445,7 +452,7 @@ fn light_colour_cone_angle_and_feather() {
     let bytes = fixture!("000-base.aep");
     let file = open(&bytes);
     let project = Project::new(&file).unwrap();
-    let solid = layer_with_id(&first_comp(&project), L);
+    let solid = base_layer(&first_comp(&project));
     assert!(solid.light_color().is_none() && solid.camera_zoom().is_none() && solid.camera_depth_of_field().is_none());
 }
 
@@ -456,7 +463,7 @@ fn layer_markers(name: &str) -> Option<Vec<effectcraft_aep::Marker>> {
         let bytes = crate::common::try_fixture(name)?;
         let file = open(&bytes);
         let project = Project::new(&file).unwrap();
-        layer_with_id(&first_comp(&project), L).markers()
+        base_layer(&first_comp(&project)).markers()
     })
 }
 
@@ -487,21 +494,22 @@ fn audio_footage_item() {
     let bytes = fixture!("350-footage-wav-imported.aep");
     let file = open(&bytes);
     let project = Project::new(&file).unwrap();
-    // The solid L and the WAV (item id 32): the WAV is not used in a layer.
+    // The solid L and the WAV (item id 32 in the single-case file): the WAV is not used in a layer.
     let footage: Vec<_> = project.all_items().into_iter().filter(|i| i.kind() == Some(ItemKind::Footage)).collect();
     assert_eq!(footage.len(), 2);
-    let item = footage.iter().find(|i| i.id() == Some(0x20)).unwrap();
+    let item = footage.iter().find(|i| i.footage().is_some_and(|f| !f.is_solid)).unwrap();
     let f = item.footage().unwrap();
     assert_eq!(f.file_type, "WAVE");
     assert_eq!((f.width, f.height, f.is_solid), (0, 0, false));
     assert_eq!(f.duration, Some(rat(48000, 48000)));
     assert_eq!((f.audio_sample_rate, f.file_size, f.bits_per_pixel, f.native_frame_rate), (Some(48000.0), 96044, 0, 0));
     assert!(!f.is_sequence && f.sequence_frame_count().is_none());
-    assert_eq!(item.display_name().as_deref(), Some("test-tone.wav"));
+    // The combined file stores no display name for the item (the single-case file had
+    // "test-tone.wav"); the path names the file.
     assert_eq!(item.label(), Some(7));
     assert!(f.path.as_deref().is_some_and(|p| p.ends_with("test-tone.wav")));
     // The solid has no sample rate.
-    let solid = footage.iter().find(|i| i.id() == Some(0x1a)).unwrap().footage().unwrap();
+    let solid = footage.iter().find(|i| i.footage().is_some_and(|f| f.is_solid)).unwrap().footage().unwrap();
     assert_eq!((solid.audio_sample_rate, solid.duration.map(|d| d.num), solid.file_size), (None, Some(0), 0));
 }
 
@@ -513,7 +521,7 @@ fn image_sequence_is_one_item() {
         let project = Project::new(&file).unwrap();
         let footage: Vec<_> = project.all_items().into_iter().filter(|i| i.kind() == Some(ItemKind::Footage)).collect();
         assert_eq!(footage.len(), 2, "{name}: the solid and ONE sequence item");
-        let item = footage.iter().find(|i| i.id() == Some(0x22)).unwrap();
+        let item = footage.iter().find(|i| i.footage().is_some_and(|f| !f.is_solid)).unwrap();
         let f = item.footage().unwrap();
         assert_eq!((f.width, f.height, f.is_solid), (64, 64, false), "{name}");
         assert_eq!(f.duration, Some(rat(3, 30)), "{name}");

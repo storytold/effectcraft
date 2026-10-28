@@ -444,7 +444,18 @@ fn shape_records(bytes: &[u8]) -> std::collections::BTreeMap<(usize, String), ef
             *n += 1;
             let here = inside || name == "ADBE Root Vectors Group";
             if here && node.is_list(b"tdbs") && node.child(b"cdat").is_some() {
-                out.insert((li, key.clone()), node.clone().into_owned());
+                let has_expression = node.child(b"Utf8").is_some();
+                let mut node = node.clone().into_owned();
+                // Header bytes 76 and 77 next to an expression vary between saves (see
+                // `keyed_shape_records`).
+                if has_expression
+                    && let effectcraft_aep::Body::List { children, .. } = &mut node.body
+                    && let Some(effectcraft_aep::Body::Data(d)) = children.iter_mut().find(|x| x.is(b"tdb4")).map(|x| &mut x.body)
+                    && let Some(b) = d.to_mut().get_mut(76..78)
+                {
+                    b.fill(0);
+                }
+                out.insert((li, key.clone()), node);
             }
             if node.is_list(b"tdgp") {
                 walk(node.children(), &key, li, here, out);
@@ -528,7 +539,15 @@ fn keyed_shape_records(bytes: &[u8]) -> Vec<(String, Vec<u8>, Vec<u8>, Vec<u8>, 
                 let list = node.child_list(b"list");
                 let expr = node.child(b"Utf8").and_then(|u| u.bytes()).map(<[u8]>::to_vec);
                 if list.is_some() || expr.is_some() {
-                    let tdb4 = node.child(b"tdb4").and_then(|c| c.bytes()).unwrap_or_default().to_vec();
+                    let mut tdb4 = node.child(b"tdb4").and_then(|c| c.bytes()).unwrap_or_default().to_vec();
+                    // Header bytes 76 and 77 of a property with an expression: After Effects
+                    // wrote 1 in one save and 0 in another (060 and 856 of the combined files);
+                    // byte 120 marks the expression.
+                    if expr.is_some()
+                        && let Some(b) = tdb4.get_mut(76..78)
+                    {
+                        b.fill(0);
+                    }
                     let lhd3 = list.and_then(|l| l.child(b"lhd3")).and_then(|c| c.bytes()).unwrap_or_default().to_vec();
                     let mut ldat = list.and_then(|l| l.child(b"ldat")).and_then(|c| c.bytes()).unwrap_or_default().to_vec();
                     let size = lhd3.get(16..20).map_or(0, |b| u32::from_be_bytes(b.try_into().unwrap()) as usize);
@@ -541,6 +560,14 @@ fn keyed_shape_records(bytes: &[u8]) -> Vec<(String, Vec<u8>, Vec<u8>, Vec<u8>, 
                             if r[8..12] == [0, 0, 0, 1] {
                                 r[72..104].fill(0);
                             }
+                        }
+                    }
+                    // The colour distance to the next key (f64 at 16) of a colour key: After
+                    // Effects wrote 0 for 854's linear keys in one save and 255 sqrt(2) in
+                    // another (the combined file); the exporter writes 0.
+                    if size == 152 {
+                        for r in ldat.chunks_mut(152) {
+                            r[16..24].fill(0);
                         }
                     }
                     // The ease before the first key and after the last one is never used (the

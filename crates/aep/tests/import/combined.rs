@@ -62,6 +62,30 @@ fn graft<'a>(file: &mut AepFile<'a>, pair: &[Chunk<'a>]) {
     }
 }
 
+/// Gives every effect of a parade whose definitions are the donor's project copy (a later
+/// instance of its type in a combined file has an empty `parT`) that copy as its own `parT`: the
+/// target's project copy does not hold the donor's types.
+fn own_definitions<'a>(pair: &mut [Chunk<'a>], donor: &AepFile<'_>) {
+    let defs: Vec<(String, Chunk<'static>)> = effectcraft_aep::Project::new(donor)
+        .map(|p| p.effect_definitions().into_iter().map(|(m, part)| (m, part.clone().into_owned())).collect())
+        .unwrap_or_default();
+    let Some(effectcraft_aep::Body::List { children, .. }) = pair.get_mut(1).map(|g| &mut g.body) else { return };
+    let mut name: Option<String> = None;
+    for c in children.iter_mut() {
+        if c.is(b"tdmn") {
+            name = c.bytes().map(|b| String::from_utf8_lossy(b.split(|x| *x == 0).next().unwrap_or(b"")).into_owned());
+        } else if c.is_list(b"sspc")
+            && let Some(n) = name.take()
+            && let Some((_, def)) = defs.iter().find(|(m, _)| *m == n)
+            && let effectcraft_aep::Body::List { children: kids, .. } = &mut c.body
+            && let Some(part) = kids.iter_mut().find(|k| k.is_list(b"parT"))
+            && !part.children().iter().any(|x| x.is(b"pard"))
+        {
+            *part = def.clone();
+        }
+    }
+}
+
 /// `target` (read with the `.aep` or `.aepx` reader) with the named parades of the donors, written
 /// as an `.aep`.
 fn build(target: &str, donors: &[(&str, &[u8])]) -> Option<Vec<u8>> {
@@ -71,7 +95,8 @@ fn build(target: &str, donors: &[(&str, &[u8])]) -> Option<Vec<u8>> {
         let mut file = parse_any(&target_bytes).unwrap();
         for ((_, name), bytes) in donors.iter().zip(&donor_bytes) {
             let mut donor = parse(bytes).unwrap();
-            let pair = parade(&mut donor, name);
+            let mut pair = parade(&mut donor, name);
+            own_definitions(&mut pair, &donor);
             graft(&mut file, &pair);
         }
         write(&file).unwrap()

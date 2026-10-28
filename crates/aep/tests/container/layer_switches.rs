@@ -1,17 +1,15 @@
 //! Layer switches, blend modes, composition frame rates and background, cameras, lights and solid
 //! colours, checked against the values the corpus was made with (its MANIFEST, batch 2).
 
-use crate::helpers::{assert_near, first_comp, layer_of_type, layer_shown_as, layer_with_id, open};
+use crate::helpers::{assert_near, base_layer, first_comp, layer_of_type, layer_shown_as, open};
 use effectcraft_aep::{BlendMode, CompHeader, LayerHeader, LayerType, LightType, Project, Rational, ValueSource};
-
-const L: u32 = 0x1b;
 
 fn l_header(name: &str) -> Option<LayerHeader> {
     Some({
         let bytes = crate::common::try_fixture(name)?;
         let file = open(&bytes);
         let project = Project::new(&file).unwrap();
-        layer_with_id(&first_comp(&project), L).header().unwrap()
+        base_layer(&first_comp(&project)).header().unwrap()
     })
 }
 
@@ -44,15 +42,16 @@ fn video_audio_and_effects_switches_are_bits_1_2_and_4_of_byte_39() {
     let bytes = fixture!("222-layer-video-off.aep");
     let file = open(&bytes);
     let project = Project::new(&file).unwrap();
-    let layer = layer_with_id(&first_comp(&project), L);
+    let layer = base_layer(&first_comp(&project));
     assert_eq!((layer.is_enabled(), layer.is_audio_enabled(), layer.is_effects_enabled()), (Some(false), Some(true), Some(true)));
-    // Only byte 39 of ldta differs from the base layer.
+    // Only byte 39 of ldta differs from the base layer (besides the layer id, bytes 0-3: the two
+    // are layers of one combined file).
     let base_bytes = fixture!("000-base.aep");
     let base_file = open(&base_bytes);
     let base_project = Project::new(&base_file).unwrap();
-    let base_ldta = layer_with_id(&first_comp(&base_project), L).chunk().child(b"ldta").unwrap().bytes().unwrap().to_vec();
+    let base_ldta = base_layer(&first_comp(&base_project)).chunk().child(b"ldta").unwrap().bytes().unwrap().to_vec();
     let ldta = layer.chunk().child(b"ldta").unwrap().bytes().unwrap();
-    let differing: Vec<_> = (0..ldta.len()).filter(|i| ldta[*i] != base_ldta[*i]).collect();
+    let differing: Vec<_> = (4..ldta.len()).filter(|i| ldta[*i] != base_ldta[*i]).collect();
     assert_eq!(differing, [39]);
 }
 
@@ -106,7 +105,7 @@ fn keyframe_times_follow_the_ntsc_timescale() {
         let bytes = fixture!(name);
         let file = open(&bytes);
         let project = Project::new(&file).unwrap();
-        let layer = layer_with_id(&first_comp(&project), L);
+        let layer = base_layer(&first_comp(&project));
         let mut scales = std::collections::BTreeSet::new();
         let mut stack = vec![layer.properties().unwrap()];
         while let Some(group) = stack.pop() {
@@ -201,7 +200,7 @@ fn lights_type_and_intensity() {
     let intensity = light.light_intensity().unwrap();
     assert_eq!((intensity.value, intensity.source), (100.0, ValueSource::Default));
     // The solid under it is no light.
-    let solid = layer_with_id(&first_comp(&project), L).header().unwrap();
+    let solid = base_layer(&first_comp(&project)).header().unwrap();
     assert_eq!((solid.light_type(), solid.light_type_code), (None, 0));
 }
 
@@ -219,7 +218,7 @@ fn solid_colour_is_four_float32_argb() {
     assert_eq!(f.solid_argb, Some([1.0, 0.0, 0.0, 1.0]));
     assert_eq!(f.solid_rgb(), Some([0.0, 0.0, 1.0]));
     // L is still red.
-    let red = project.layer_source(&layer_with_id(&comp, L)).unwrap().footage().unwrap();
+    let red = project.layer_source(&base_layer(&comp)).unwrap().footage().unwrap();
     assert_eq!(red.solid_rgb(), Some([1.0, 0.0, 0.0]));
     // The new layer has no user-set name flag (it shows its source's name).
     assert!(!blue.header().unwrap().name_is_user_set());

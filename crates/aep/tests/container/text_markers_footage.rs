@@ -1,10 +1,8 @@
 //! Text documents, markers and footage items, checked against the values the corpus was made
 //! with (its MANIFEST).
 
-use crate::helpers::{first_comp, layer_with_id, open};
+use crate::helpers::{base_layer, first_comp, open};
 use effectcraft_aep::{CueType, ItemKind, KeyframeKind, LayerType, Marker, Project, Property, TextDocument, TextValue, parse_text_dict};
-
-const L: u32 = 0x1b;
 
 fn text_layer_document(name: &str) -> Option<TextDocument> {
     Some({
@@ -48,7 +46,7 @@ fn a_solid_layer_has_no_text_document() {
     let bytes = fixture!("000-base.aep");
     let file = open(&bytes);
     let project = Project::new(&file).unwrap();
-    assert!(layer_with_id(&first_comp(&project), L).text_document().is_none());
+    assert!(base_layer(&first_comp(&project)).text_document().is_none());
 }
 
 #[test]
@@ -114,7 +112,7 @@ fn comp_marker() {
     assert_eq!((keys.len(), keys.header.record_size), (1, 16));
     assert!(keys.keyframes().all(|k| k.kind() == KeyframeKind::Marker));
     // The layer has none.
-    assert!(layer_with_id(&comp, L).markers().is_empty());
+    assert!(base_layer(&comp).markers().is_empty());
 }
 
 #[test]
@@ -125,7 +123,7 @@ fn layer_marker() {
     let project = Project::new(&file).unwrap();
     let comp = first_comp(&project);
     assert_eq!(
-        layer_with_id(&comp, L).markers(),
+        base_layer(&comp).markers(),
         [Marker {
             time_units: 25600,
             seconds: Some(1.0),
@@ -146,7 +144,7 @@ fn no_markers_in_the_base() {
     let project = Project::new(&file).unwrap();
     let comp = first_comp(&project);
     assert!(comp.markers().is_empty());
-    assert!(layer_with_id(&comp, L).markers().is_empty());
+    assert!(base_layer(&comp).markers().is_empty());
 }
 
 // ------------------------------------------------------------------------------------- footage
@@ -257,7 +255,7 @@ fn marker_with_duration_and_all_strings() {
     let file = open(&bytes);
     let project = Project::new(&file).unwrap();
     let comp = first_comp(&project);
-    let markers = layer_with_id(&comp, L).markers();
+    let markers = base_layer(&comp).markers();
     assert_eq!(
         markers,
         [Marker {

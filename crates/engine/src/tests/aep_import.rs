@@ -5,22 +5,38 @@ use serde_json::json;
 
 use crate::Session;
 
+/// The test projects of `effectcraft-aep` and their cases.
+#[path = "../../../aep/tests/common/mod.rs"]
+mod common;
+
 /// The path of a test project of `effectcraft-aep` (`crates/aep/tests/fixtures`, or the folder in
-/// `EFFECTCRAFT_AEP_FIXTURES`), or `None` after printing the skip line when it is missing.
+/// `EFFECTCRAFT_AEP_FIXTURES`), or `None` after printing the skip line when it is missing. A case
+/// of a combined project is written as a project of its own (see `common`), named like the case,
+/// to a temporary folder.
 fn fixture_path(name: &str) -> Option<String> {
-    let dir = match std::env::var_os("EFFECTCRAFT_AEP_FIXTURES") {
-        Some(d) if !d.is_empty() => std::path::PathBuf::from(d),
-        _ => std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../aep/tests/fixtures"),
-    };
-    let path = dir.join(name);
-    if path.is_file() {
-        Some(path.to_string_lossy().to_string())
-    } else {
-        println!("SKIPPED: fixture {name} missing");
-        None
+    match common::locate(name)? {
+        common::Source::File(path) => Some(path.to_string_lossy().to_string()),
+        common::Source::Case { .. } => {
+            let bytes = common::try_fixture(name)?;
+            let dir = std::env::temp_dir().join(format!("effectcraft-aep-cases-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            Some(path.to_string_lossy().to_string())
+        }
     }
 }
 
+/// The path of a whole file of the fixture folder, or `None` after printing the skip line.
+fn file_path(name: &str) -> Option<String> {
+    let path = common::dir().join(name);
+    if path.is_file() {
+        Some(path.to_string_lossy().to_string())
+    } else {
+        common::skipped(name);
+        None
+    }
+}
 /// [`fixture_path`]; returns from the calling test when the file is missing.
 macro_rules! fixture {
     ($name:expr) => {
@@ -33,16 +49,26 @@ macro_rules! fixture {
 
 #[test]
 fn import_aep_reads_the_xml_form_like_the_binary_one() {
+    // The pair holds cases 000, 058 (two Opacity keys), 060, 110 and 124 (with its precomposition),
+    // saved by After Effects as .aep and right after as .aepx.
+    let Some(xml) = file_path("aepx-pair.aepx") else { return };
+    let Some(bin) = file_path("aepx-pair.aep") else { return };
     let mut s = Session::default();
-    let x = s.execute_checked("file.importAep", json!({"path": fixture!("058-key-opacity-2key.aepx")})).unwrap();
+    let x = s.execute_checked("file.importAep", json!({"path": xml})).unwrap();
     let mut t = Session::default();
-    let b = t.execute_checked("file.importAep", json!({"path": fixture!("058-key-opacity-2key.aep")})).unwrap();
+    let b = t.execute_checked("file.importAep", json!({"path": bin})).unwrap();
     assert_eq!(x["report"], b["report"]);
     assert_eq!(x["report"]["imported"]["keyframes"], 2);
     let folder = effectcraft_project::ItemId(x["folder"].as_u64().unwrap());
-    assert_eq!(s.project.item(folder).unwrap().name, "058-key-opacity-2key.aepx");
-    let (cx, cb) = (effectcraft_project::ItemId(x["comps"][0].as_u64().unwrap()), effectcraft_project::ItemId(b["comps"][0].as_u64().unwrap()));
-    assert_eq!(s.project.comp(cx), t.project.comp(cb));
+    assert_eq!(s.project.item(folder).unwrap().name, "aepx-pair.aepx");
+    let comps = |r: &serde_json::Value| r["comps"].as_array().unwrap().iter().map(|c| effectcraft_project::ItemId(c.as_u64().unwrap())).collect::<Vec<_>>();
+    let (cx, cb) = (comps(&x), comps(&b));
+    assert_eq!(cx.len(), 6);
+    assert_eq!(cx.len(), cb.len());
+    for (a, b) in cx.iter().zip(&cb) {
+        assert_eq!(s.project.item(*a).unwrap().name, t.project.item(*b).unwrap().name);
+        assert_eq!(s.project.comp(*a), t.project.comp(*b));
+    }
 }
 
 #[test]
@@ -122,20 +148,22 @@ fn aep_menu_entry_exists() {
 #[test]
 fn import_aep_takes_the_project_settings_into_an_empty_project_only() {
     use effectcraft_project::{BitDepth, TimeDisplayStyle};
-    // 621: the base with 8 bits per channel; 623: working space None; 629: frames.
+    // The settings cases share files (one value per project): 621's file has 8 bits per channel,
+    // working space None and frames (with 623 and 629); 632's and 633's file has 32 bits and feet
+    // + frames 35mm.
     let mut s = Session::default();
     std::sync::Arc::make_mut(&mut s.project).settings.bit_depth = BitDepth::Bpc16;
     s.execute_checked("file.importAep", json!({"path": fixture!("621-settings-bpc-8.aep")})).unwrap();
     assert_eq!(s.project.settings.bit_depth, BitDepth::Bpc8);
-    assert_eq!(s.project.settings.working_space, Some(effectcraft_color::ColorSpace::Srgb));
+    assert_eq!(s.project.settings.working_space, None);
     // A second file into a project with compositions leaves the settings alone ...
-    s.execute_checked("file.importAep", json!({"path": fixture!("623-settings-workingspace-none.aep")})).unwrap();
-    assert_eq!(s.project.settings.working_space, Some(effectcraft_color::ColorSpace::Srgb));
+    s.execute_checked("file.importAep", json!({"path": fixture!("632-settings-linearize-and-blend-linear.aep")})).unwrap();
+    assert_eq!((s.project.settings.bit_depth, s.project.settings.time_display), (BitDepth::Bpc8, TimeDisplayStyle::Frames));
     // ... unless asked; and undo restores them.
-    s.execute_checked("file.importAep", json!({"path": fixture!("629-settings-time-display-frames.aep"), "applySettings": true})).unwrap();
-    assert_eq!(s.project.settings.time_display, TimeDisplayStyle::Frames);
+    s.execute_checked("file.importAep", json!({"path": fixture!("633-settings-feet-frames-35.aep"), "applySettings": true})).unwrap();
+    assert_eq!(s.project.settings.time_display, TimeDisplayStyle::Feet35);
     assert_eq!(s.project.settings.bit_depth, BitDepth::Bpc32);
     s.execute("edit.undo", json!({})).unwrap();
-    assert_eq!(s.project.settings.time_display, TimeDisplayStyle::Timecode);
+    assert_eq!(s.project.settings.time_display, TimeDisplayStyle::Frames);
     assert_eq!(s.project.settings.bit_depth, BitDepth::Bpc8);
 }

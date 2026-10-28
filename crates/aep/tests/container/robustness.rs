@@ -82,6 +82,25 @@ fn random_byte_flips() {
 }
 
 #[test]
+fn a_whole_combined_file_survives_flips_and_truncation() {
+    // The cases above are cut from the combined files by our writer; this one is After Effects'
+    // own bytes (the smallest combined file).
+    let original = skip!(crate::common::try_file("aepx-pair.aep"));
+    let declared = u32::from_be_bytes([original[4], original[5], original[6], original[7]]) as usize + 8;
+    let mut rng = Rng(0x0bad_5eed_1234_5678);
+    for _ in 0..200 {
+        let len = rng.below(original.len() + 1);
+        assert_eq!(check(&original[..len]).is_ok(), len >= declared, "len {len}");
+        let mut b = original.clone();
+        for _ in 0..=rng.below(8) {
+            let at = rng.below(b.len());
+            b[at] = rng.next() as u8;
+        }
+        let _ = check(&b);
+    }
+}
+
+#[test]
 fn flips_in_the_headers_and_sizes() {
     // Aim at the bytes that matter most: the first 200 bytes, every value of every byte.
     let original = fixture!("001-empty.aep");

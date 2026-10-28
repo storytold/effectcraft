@@ -1,21 +1,24 @@
 //! Effect instances: match names, parameter lists from `parT`/`pard` and stored values, checked
 //! against the values the corpus was made with (its MANIFEST).
 
-use crate::helpers::{first_comp, layer_with_id, open};
+use crate::helpers::{base_layer, first_comp, open};
 use effectcraft_aep::{Effect, ParamKind, ParamValue, Project};
-
-const L: u32 = 0x1b;
 
 /// Runs `f` on the single effect of the solid `L` in a fixture.
 fn with_effect<R>(name: &str, f: impl FnOnce(&Effect<'_, '_>) -> R) -> Option<R> {
+    with_effect_in(name, |_, _, e| f(e))
+}
+
+/// Runs `f` on the project, the solid `L` and its single effect in a fixture.
+fn with_effect_in<R>(name: &str, f: impl FnOnce(&Project<'_, '_>, &effectcraft_aep::Layer<'_, '_>, &Effect<'_, '_>) -> R) -> Option<R> {
     Some({
         let bytes = crate::common::try_fixture(name)?;
         let file = open(&bytes);
         let project = Project::new(&file).unwrap();
-        let layer = layer_with_id(&first_comp(&project), L);
+        let layer = base_layer(&first_comp(&project));
         let effects = layer.effects();
         assert_eq!(effects.len(), 1, "{name}");
-        f(&effects[0])
+        f(&project, &layer, &effects[0])
     })
 }
 
@@ -35,13 +38,13 @@ fn no_effects_without_a_parade_entry() {
     let bytes = fixture!("000-base.aep");
     let file = open(&bytes);
     let project = Project::new(&file).unwrap();
-    assert!(layer_with_id(&first_comp(&project), L).effects().is_empty());
+    assert!(base_layer(&first_comp(&project)).effects().is_empty());
 }
 
 #[test]
 fn slider_control_with_a_stored_value() {
     // 071: Slider Control, Slider = 77.
-    skip!(with_effect("071-fx-slider-value77.aep", |e| {
+    skip!(with_effect_in("071-fx-slider-value77.aep", |_, layer, e| {
         assert_eq!((e.match_name(), e.name().as_deref()), ("ADBE Slider Control", Some("Slider Control")));
         assert_eq!(e.declared_param_count(), Some(3));
         assert_eq!(kinds(e), [(ParamKind::Layer, String::new()), (ParamKind::FloatSlider, "Slider".to_string()), (ParamKind::NoData, String::new())]);
@@ -53,7 +56,7 @@ fn slider_control_with_a_stored_value() {
         // The pard default of the slider is 0 (070 has the untouched control).
         assert_eq!(params[1].pard_default(), Some(ParamValue::Number(0.0)));
         // The input layer parameter has a value record of its own: its `tdpi` holds the id of the layer that owns the effect.
-        assert_eq!(params[0].stored_value(), Some(ParamValue::Layer(0x1b)));
+        assert_eq!(params[0].stored_value(), Some(ParamValue::Layer(layer.id().unwrap())));
         assert_eq!(params[0].pard().len(), 148);
     }));
 }
@@ -76,7 +79,9 @@ fn color_control_stores_argb_doubles() {
 fn dropdown_menu_items_and_default() {
     // 077: Dropdown Menu Control with the default items.
     skip!(with_effect("077-fx-dropdown-default.aep", |e| {
-        assert_eq!((e.match_name(), e.name().as_deref()), ("Pseudo/@@S1iPXtJFTHK4QaDbgJvLhw", Some("Dropdown Menu Control")));
+        // A dropdown's match name is a fresh `Pseudo/@@` + 22-character id for every instance.
+        assert!(e.match_name().starts_with("Pseudo/@@") && e.match_name().len() == 31, "{}", e.match_name());
+        assert_eq!(e.name().as_deref(), Some("Dropdown Menu Control"));
         assert_eq!(kinds(e), [(ParamKind::Layer, String::new()), (ParamKind::Popup, "Menu".to_string()), (ParamKind::NoData, String::new())]);
         let menu = &e.params()[1];
         assert_eq!(menu.items.as_deref(), Some(&["Item 1".to_string(), "Item 2".to_string(), "Item 3".to_string()][..]));
@@ -153,8 +158,9 @@ fn gaussian_blur_default_is_the_pard_default_25() {
 #[test]
 fn gaussian_blur_40_adds_a_value_record_and_leaves_pard_at_the_default() {
     // 216: Blurriness 40.
-    skip!(with_effect("216-fx-gaussianblur-40.aep", |e| {
-        let blur = param(e, "Blurriness");
+    // The case takes its definitions from the project copy (an earlier Gaussian Blur of its file).
+    skip!(with_effect_in("216-fx-gaussianblur-40.aep", |project, _, e| {
+        let blur = project.effect_params(e).into_iter().find(|p| p.name == "Blurriness").unwrap();
         assert_eq!(blur.stored().unwrap().flags(), Some(1));
         assert_eq!(blur.stored_value(), Some(ParamValue::Number(40.0)));
         assert_eq!(blur.value(), Some(ParamValue::Number(40.0)));
@@ -217,16 +223,16 @@ fn layer_control_refers_to_a_layer_by_id() {
     let comp = first_comp(&project);
     let null = comp.layers().next().unwrap();
     let null_id = null.id().unwrap();
-    assert_eq!(null_id, 0x22);
+    assert_ne!(Some(null_id), base_layer(&comp).id());
     assert!(null.header().unwrap().is_null_object());
-    let layer = layer_with_id(&comp, L);
+    let layer = base_layer(&comp);
     let e = &layer.effects()[0];
     assert_eq!(e.match_name(), "ADBE Layer Control");
     let p = param(e, "Layer");
     assert_eq!(p.kind, ParamKind::Layer);
     assert_eq!(p.stored_value(), Some(ParamValue::Layer(null_id)));
     // The implicit input layer parameter refers to the layer that owns the effect.
-    assert_eq!(e.params()[0].stored_value(), Some(ParamValue::Layer(L)));
+    assert_eq!(e.params()[0].stored_value(), Some(ParamValue::Layer(layer.id().unwrap())));
 }
 
 #[test]

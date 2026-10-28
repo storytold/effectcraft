@@ -2,17 +2,15 @@
 //! normalisation and the disabled-expression flag, checked against the values the corpus was made
 //! with (its MANIFEST, batch 2). The solid `L` is 1920x1080 in a 1920x1080 composition.
 
-use crate::helpers::{assert_near, first_comp, layer_shown_as, layer_with_id, open};
+use crate::helpers::{assert_near, base_layer, first_comp, layer_shown_as, open};
 use effectcraft_aep::{Interpolation, KeyEase, KeyframeKind, Project, PropNode, Property, ValueSource};
-
-const L: u32 = 0x1b;
 
 fn prop_of<R>(name: &str, path: &[&str], f: impl FnOnce(Property<'_, '_>) -> R) -> Option<R> {
     Some({
         let bytes = crate::common::try_fixture(name)?;
         let file = open(&bytes);
         let project = Project::new(&file).unwrap();
-        let layer = layer_with_id(&first_comp(&project), L);
+        let layer = base_layer(&first_comp(&project));
         let Some(PropNode::Property(p)) = layer.properties().unwrap().find(path) else { panic!("{name}: no {path:?}") };
         f(p)
     })
@@ -108,7 +106,7 @@ fn scale_keys_use_the_plain_template_with_three_components() {
     let bytes = fixture!("206-key-scale-2key-linear.aep");
     let file = open(&bytes);
     let project = Project::new(&file).unwrap();
-    let layer = layer_with_id(&first_comp(&project), L);
+    let layer = base_layer(&first_comp(&project));
     let t = layer.transform(1920, 1080).unwrap();
     assert_eq!((t.scale_percent.source, t.scale_percent.value), (ValueSource::Keyframed, [100.0, 100.0, 100.0]));
 }
@@ -119,7 +117,7 @@ fn two_dimensional_mask_feather_keys() {
     let bytes = fixture!("208-key-mask-feather-2key-linear.aep");
     let file = open(&bytes);
     let project = Project::new(&file).unwrap();
-    let layer = layer_with_id(&first_comp(&project), L);
+    let layer = base_layer(&first_comp(&project));
     let Some(PropNode::Group(parade)) = layer.properties().unwrap().get("ADBE Mask Parade") else { panic!("no mask parade") };
     let Some(PropNode::Group(atom)) = parade.get("ADBE Mask Atom") else { panic!("no mask atom") };
     let Some(PropNode::Property(feather)) = atom.get("ADBE Mask Feather") else { panic!("no feather") };
@@ -138,7 +136,7 @@ fn colour_keys_use_the_spatial_template_with_four_components() {
     let bytes = fixture!("210-key-fill-color-2key-linear.aep");
     let file = open(&bytes);
     let project = Project::new(&file).unwrap();
-    let layer = layer_with_id(&first_comp(&project), L);
+    let layer = base_layer(&first_comp(&project));
     let effects = layer.effects();
     assert_eq!(effects.len(), 1);
     let params = effects[0].params();
@@ -166,8 +164,8 @@ fn keyed_slider_uses_48_byte_records() {
     let bytes = fixture!("221-fx-slider-2key.aep");
     let file = open(&bytes);
     let project = Project::new(&file).unwrap();
-    let layer = layer_with_id(&first_comp(&project), L);
-    let params = layer.effects()[0].params();
+    let layer = base_layer(&first_comp(&project));
+    let params = project.effect_params(&layer.effects()[0]);
     let slider = params.iter().find(|p| p.name == "Slider").unwrap();
     let stored = slider.stored().unwrap();
     assert!(stored.is_animated());
@@ -201,7 +199,7 @@ fn anchor_is_a_fraction_of_the_layer_source_size() {
         // Position stays at the default, the composition centre.
         assert_eq!((t.position.source, t.position.value), (ValueSource::Default, [960.0, 540.0, 0.0]));
         // L is unchanged: the anchor is its centre.
-        let l = layer_with_id(&comp, L);
+        let l = base_layer(&comp);
         let a = project.layer_anchor_px(&l).unwrap();
         assert_eq!((a.source, a.value), (ValueSource::Default, [960.0, 540.0, 0.0]));
     }
@@ -211,7 +209,8 @@ fn expression_state(name: &str) -> Option<(Option<String>, Option<bool>, bool, b
     Some({
         prop_of(name, OPACITY, |p| {
             let f = p.expression_flags().unwrap();
-            (p.expression(), p.expression_enabled(), f.all_set(), f.disabled())
+            // Byte 120 marks the expression (bytes 76 and 77 are not always set with it).
+            (p.expression(), p.expression_enabled(), f.byte_120 == 1, f.disabled())
         })?
     })
 }

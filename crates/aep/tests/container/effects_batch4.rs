@@ -2,10 +2,9 @@
 //! scales, the effect stack order, and the second instance of an effect type whose `parT` is
 //! empty. Every expected value is the one the case was made with (its MANIFEST row).
 
-use crate::helpers::{assert_near, first_comp, layer_with_id, open};
+use crate::helpers::{assert_near, base_layer, first_comp, open};
 use effectcraft_aep::{DefinitionSource, EffectParam, Interpolation, KeyframeKind, ParamKind, ParamValue, Project};
 
-const L: u32 = 0x1b;
 /// Key time 2 s in the property timescale 25600.
 const T2: i32 = 51200;
 
@@ -15,10 +14,11 @@ fn with_params<R>(name: &str, f: impl FnOnce(&Project<'_, '_>, &[EffectParam<'_,
         let bytes = crate::common::try_fixture(name)?;
         let file = open(&bytes);
         let project = Project::new(&file).unwrap();
-        let layer = layer_with_id(&first_comp(&project), L);
+        let layer = base_layer(&first_comp(&project));
         let effects = layer.effects();
         assert_eq!(effects.len(), 1, "{name}");
-        assert_eq!(project.definition_source(&effects[0]), DefinitionSource::Instance, "{name}");
+        // Its own definitions, or (a later instance of the type in its file) the project copy.
+        assert_ne!(project.definition_source(&effects[0]), DefinitionSource::Missing, "{name}");
         let params = project.effect_params(&effects[0]);
         f(&project, &params)
     })
@@ -56,7 +56,7 @@ fn tint_parameters_and_defaults() {
     let bytes = fixture!("356-fx-tint-default.aep");
     let file = open(&bytes);
     let project = Project::new(&file).unwrap();
-    let fx = layer_with_id(&first_comp(&project), L).effects();
+    let fx = base_layer(&first_comp(&project)).effects();
     let e = &fx[0];
     assert_eq!((e.match_name(), e.name().as_deref()), ("ADBE Tint", Some("Tint")));
     assert_eq!(e.declared_param_count(), Some(6));
@@ -136,13 +136,15 @@ fn effect_stack_order_is_the_parade_order() {
     let bytes = fixture!("366-fx-blur-then-tint.aep");
     let file = open(&bytes);
     let project = Project::new(&file).unwrap();
-    let fx = layer_with_id(&first_comp(&project), L).effects();
+    let fx = base_layer(&first_comp(&project)).effects();
     assert_eq!(fx.iter().map(|e| e.match_name()).collect::<Vec<_>>(), ["ADBE Gaussian Blur 2", "ADBE Tint"]);
-    // Both are the only instance of their type and keep their own definitions; the project copy
-    // follows the stack order.
-    assert!(fx.iter().all(|e| project.definition_source(e) == DefinitionSource::Instance));
+    // Each has its definitions (its own, or the project copy of an earlier instance of its type in
+    // the combined file); the project holds one copy per type.
+    assert!(fx.iter().all(|e| project.definition_source(e) != DefinitionSource::Missing));
     let defs: Vec<String> = project.effect_definitions().into_iter().map(|(m, _)| m).collect();
-    assert_eq!(defs, ["ADBE Gaussian Blur 2", "ADBE Tint"]);
+    for m in ["ADBE Gaussian Blur 2", "ADBE Tint"] {
+        assert_eq!(defs.iter().filter(|d| *d == m).count(), 1, "{m}");
+    }
 }
 
 // ---------------------------------------------------------------------------- Gradient Ramp
@@ -244,13 +246,15 @@ fn second_instance_takes_its_definitions_from_the_project_and_its_values_from_it
     let comp = first_comp(&project);
     let layers: Vec<_> = comp.layers().collect();
     assert_eq!(layers.len(), 2);
-    let small = layers.iter().find(|l| l.id() != Some(L)).unwrap();
-    let l = layer_with_id(&comp, L);
+    let l = base_layer(&comp);
+    let small = layers.iter().find(|x| x.id() != l.id()).unwrap();
 
     let small_fx = small.effects();
     let l_fx = l.effects();
     assert_eq!((small_fx.len(), l_fx.len()), (1, 1));
-    assert_eq!(project.definition_source(&small_fx[0]), DefinitionSource::Instance);
+    // In the combined file an earlier case holds the type's full definitions, so here both
+    // instances take them from the project copy.
+    assert_eq!(project.definition_source(&small_fx[0]), DefinitionSource::Project);
     assert_eq!(project.definition_source(&l_fx[0]), DefinitionSource::Project);
     assert!(l_fx[0].params().is_empty());
     assert_eq!(l_fx[0].declared_param_count(), None);
@@ -276,18 +280,25 @@ fn second_instance_takes_its_definitions_from_the_project_and_its_values_from_it
     assert_eq!(lp[5].pard_default(), None);
     assert_eq!(lp[5].items.as_deref().map(<[String]>::len), Some(2));
     // L's own records: the input layer (its own id) and the button.
-    assert_eq!(lp[0].stored_value(), Some(ParamValue::Layer(L)));
+    assert_eq!(lp[0].stored_value(), Some(ParamValue::Layer(l.id().unwrap())));
     assert!(lp[8].stored().is_some());
 
     // One definition for the type, although there are two instances.
     let defs = project.effect_definitions();
-    assert_eq!(defs.iter().map(|(m, _)| m.as_str()).collect::<Vec<_>>(), ["ADBE Ramp"]);
+    assert_eq!(defs.iter().filter(|(m, _)| m == "ADBE Ramp").count(), 1);
 }
 
 #[test]
 fn files_without_effects_have_no_definitions() {
-    let bytes = fixture!("000-base.aep");
-    let file = open(&bytes);
-    let project = Project::new(&file).unwrap();
-    assert!(project.effect_definitions().is_empty());
+    // The definitions are per file: a file has some exactly when one of its layers has an effect.
+    let mut without = 0;
+    for name in crate::common::FILES.iter().filter(|n| n.ends_with(".aep")) {
+        let bytes = skip!(crate::common::try_file(name));
+        let file = open(&bytes);
+        let project = Project::new(&file).unwrap();
+        let has_effects = project.all_items().iter().filter_map(|i| i.comp()).any(|c| c.layers().any(|l| !l.effects().is_empty()));
+        assert_eq!(project.effect_definitions().is_empty(), !has_effects, "{name}");
+        without += usize::from(!has_effects);
+    }
+    assert!(without > 0);
 }

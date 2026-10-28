@@ -1,10 +1,8 @@
 //! Static transform values with their units, the "absent = default" rule, keyframe records and
 //! expressions, checked against the values the corpus was made with (its MANIFEST).
 
-use crate::helpers::{first_comp, layer_with_id, open};
+use crate::helpers::{base_layer, first_comp, open};
 use effectcraft_aep::{Interpolation, KeyEase, KeyframeKind, Project, PropNode, Property, Transform, ValueSource};
-
-const L: u32 = 0x1b;
 
 /// The transform of the solid `L` (comp-size defaults) in a fixture.
 fn transform(name: &str) -> Option<(Transform, (u32, u32))> {
@@ -13,7 +11,7 @@ fn transform(name: &str) -> Option<(Transform, (u32, u32))> {
         let file = open(&bytes);
         let project = Project::new(&file).unwrap();
         let comp = first_comp(&project);
-        let layer = layer_with_id(&comp, L);
+        let layer = base_layer(&comp);
         let ch = comp.header().unwrap();
         let t = layer.transform(u32::from(ch.width), u32::from(ch.height)).unwrap();
         (t, project.layer_source_size(&layer).unwrap())
@@ -98,7 +96,7 @@ fn with_transform_property<R>(name: &str, prop: &str, f: impl FnOnce(Property<'_
         let bytes = crate::common::try_fixture(name)?;
         let file = open(&bytes);
         let project = Project::new(&file).unwrap();
-        let layer = layer_with_id(&first_comp(&project), L);
+        let layer = base_layer(&first_comp(&project));
         let Some(PropNode::Property(p)) = layer.properties().unwrap().find(&["ADBE Transform Group", prop]) else { panic!("{name}: no {prop}") };
         f(p)
     })
@@ -234,8 +232,9 @@ fn expression_text_and_flag_bytes() {
     skip!(with_transform_property("060-expr-opacity-wiggle.aep", "ADBE Opacity", |p| {
         assert_eq!(p.expression().as_deref(), Some("wiggle(1,10)"));
         let flags = p.expression_flags().unwrap();
-        assert!(flags.all_set());
-        assert_eq!((flags.byte_76, flags.byte_77, flags.byte_120), (1, 1, 1));
+        // Byte 120 marks the expression. Bytes 76 and 77 were 1 too in the single-case file and
+        // are 0 in the combined one, so they do not mark it.
+        assert_eq!(flags.byte_120, 1);
         assert_eq!(p.static_value(), Some(vec![1.0]));
         assert!(!p.is_animated());
     }));

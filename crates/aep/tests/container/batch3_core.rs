@@ -2,7 +2,7 @@
 //! stretch and in / out points, Time Remapping, composition aspect / shutter phase / display start.
 //! Every expected value is the value the corpus case was made with (its MANIFEST).
 
-use crate::helpers::{assert_near, first_comp, layer_shown_as, layer_with_id, near, open};
+use crate::helpers::{assert_near, base_layer, first_comp, layer_shown_as, layer_with_id, near, open, without_layer_id};
 use effectcraft_aep::{Interpolation, KeyEase, KeyframeKind, LayerHeader, ParamValue, Project, PropNode, Property, Rational, ValueSource};
 
 const L: u32 = 0x1b;
@@ -13,7 +13,8 @@ fn with_layer<R>(name: &str, id: u32, f: impl FnOnce(&Project<'_, '_>, &effectcr
         let file = open(&bytes);
         let project = Project::new(&file).unwrap();
         let comp = first_comp(&project);
-        let layer = layer_with_id(&comp, id);
+        // `L` names the base solid, whatever its id in the case.
+        let layer = if id == L { base_layer(&comp) } else { layer_with_id(&comp, id) };
         f(&project, &layer)
     })
 }
@@ -51,10 +52,10 @@ fn with_property<R>(name: &str, id: u32, path: &[&str], f: impl FnOnce(&Property
 
 fn blur_param(name: &str) -> Option<(Option<ParamValue>, Option<ParamValue>, Option<bool>, ParamValue, bool)> {
     Some({
-        with_layer(name, L, |_, layer| {
+        with_layer(name, L, |project, layer| {
             let effects = layer.effects();
             assert_eq!(effects.len(), 1, "{name}");
-            let p = effects[0].params().into_iter().find(|p| p.name == "Blurriness").unwrap();
+            let p = project.effect_params(&effects[0]).into_iter().find(|p| p.name == "Blurriness").unwrap();
             (p.stored_value(), p.pard_default(), p.is_default(), p.value().unwrap(), p.stored().is_some())
         })?
     })
@@ -81,27 +82,27 @@ fn an_explicit_zero_blurriness_is_a_value_record_and_25_is_the_default() {
 fn setting_a_parameter_back_to_its_default_leaves_no_record() {
     // 303: Fill Opacity 1 -> 0.5 -> 1 and 302: Opacity set to 1 explicitly: no record, value 1.0 (100 %).
     for name in ["302-fx-fill-opacity-100-explicit.aep", "303-fx-fill-opacity-50-then-100.aep"] {
-        skip!(with_layer(name, L, |_, layer| {
-            let p = layer.effects()[0].params().into_iter().find(|p| p.name == "Opacity").unwrap();
+        skip!(with_layer(name, L, |project, layer| {
+            let p = project.effect_params(&layer.effects()[0]).into_iter().find(|p| p.name == "Opacity").unwrap();
             assert!(p.stored().is_none(), "{name}");
             assert_eq!((p.value(), p.is_default()), (Some(ParamValue::Number(1.0)), Some(true)), "{name}");
         }));
     }
     // 304: Slider set to 0 explicitly: no record, value 0.
-    skip!(with_layer("304-fx-slider-0-explicit.aep", L, |_, layer| {
-        let p = layer.effects()[0].params().into_iter().find(|p| p.name == "Slider").unwrap();
+    skip!(with_layer("304-fx-slider-0-explicit.aep", L, |project, layer| {
+        let p = project.effect_params(&layer.effects()[0]).into_iter().find(|p| p.name == "Slider").unwrap();
         assert!(p.stored().is_none());
         assert_eq!((p.value(), p.is_default()), (Some(ParamValue::Number(0.0)), Some(true)));
     }));
     // The implicit input layer and the built-in entry are not "at default" questions.
-    skip!(with_layer("304-fx-slider-0-explicit.aep", L, |_, layer| {
-        let params = layer.effects()[0].params();
+    skip!(with_layer("304-fx-slider-0-explicit.aep", L, |project, layer| {
+        let params = project.effect_params(&layer.effects()[0]);
         assert_eq!(params.len(), 3);
         assert_eq!(params[0].is_default(), None);
     }));
     // 071 (Slider 77) is a record that differs from the default.
-    skip!(with_layer("071-fx-slider-value77.aep", L, |_, layer| {
-        let p = layer.effects()[0].params().into_iter().find(|p| p.name == "Slider").unwrap();
+    skip!(with_layer("071-fx-slider-value77.aep", L, |project, layer| {
+        let p = project.effect_params(&layer.effects()[0]).into_iter().find(|p| p.name == "Slider").unwrap();
         assert_eq!((p.value(), p.is_default()), (Some(ParamValue::Number(77.0)), Some(false)));
     }));
 }
@@ -115,8 +116,9 @@ fn a_transform_set_to_its_default_adds_no_record() {
         assert_eq!((t.position.value, t.position.source), ([960.0, 540.0, 0.0], ValueSource::Default));
         assert_eq!(t.opacity_percent.source, ValueSource::Default);
         assert!(layer.properties().unwrap().find(&["ADBE Transform Group", "ADBE Position"]).is_none());
-        let a = layer.chunk().clone();
-        skip!(with_layer("299-save-noise.aep", L, |_, other| assert_eq!(&a, other.chunk())));
+        // The two cases are layers of one file: they differ in the layer id only.
+        let a = without_layer_id(layer.chunk());
+        skip!(with_layer("299-save-noise.aep", L, |_, other| assert_eq!(a, without_layer_id(other.chunk()))));
     }));
 }
 
@@ -200,8 +202,8 @@ fn one_component_and_position_ease_through_the_component_accessor() {
 fn bezier_colour_keys_carry_the_distance_to_the_next_key() {
     // 307: Fill Color keys t=0 [1,0,0,1] and t=2 [0,0,1,1], both bezier; ease 0/0; f64@16 = the
     // ARGB distance 255 sqrt(2) = 360.6245 on key 1 and 0 on the last key. The linear keys of 210 have 0.
-    skip!(with_layer("307-key-fillcolor-bezier.aep", L, |_, layer| {
-        let p = layer.effects()[0].params().into_iter().find(|p| p.name == "Color").unwrap();
+    skip!(with_layer("307-key-fillcolor-bezier.aep", L, |project, layer| {
+        let p = project.effect_params(&layer.effects()[0]).into_iter().find(|p| p.name == "Color").unwrap();
         let keys: Vec<_> = p.stored().unwrap().keys().unwrap().keyframes().collect();
         assert_eq!(keys.len(), 2);
         assert_eq!(keys[0].kind(), KeyframeKind::Spatial { components: 4 });
@@ -281,12 +283,13 @@ fn footage_layers_use_the_footage_time_base_as_out_point_denominator() {
     let file = open(&bytes);
     let project = Project::new(&file).unwrap();
     let comp = first_comp(&project);
-    let layer = layer_shown_as(&project, &comp, "test-tone.wav");
+    let layer = comp.layers().find(|l| project.layer_source(l).and_then(|s| s.footage()).is_some_and(|f| f.file_type == "WAVE")).unwrap();
     let h = layer.header().unwrap();
     assert_eq!(h.out_relative, rat(48000, 48000));
     assert_eq!((h.start.den, h.in_relative.den), (25600, 25600));
     assert_eq!(h.out_point(), Some(rat(1, 1)));
-    assert_eq!((h.label, h.source_id), (7, Some(0x20)));
+    // The source is the WAV item (item id 0x20 in the single-case file).
+    assert_eq!(h.label, 7);
     assert!(layer.name().is_none());
     assert!(h.is_video_enabled(), "the video switch stays set on an audio-only layer (flag byte 39 = 07)");
     // 354: the image sequence layer: out point 3/30 = 0.1 s (the frame rate as denominator), label 3,
@@ -299,7 +302,9 @@ fn footage_layers_use_the_footage_time_base_as_out_point_denominator() {
     let h = layer.header().unwrap();
     assert_eq!(h.out_relative, rat(3, 30));
     assert_eq!(h.out_point(), Some(rat(1, 10)));
-    assert_eq!((h.label, h.source_id, h.start.den), (3, Some(0x22), 25600));
+    assert_eq!((h.label, h.start.den), (3, 25600));
+    // The source is the sequence item (item id 0x22 in the single-case file).
+    assert!(project.layer_source(&layer).and_then(|s| s.footage()).is_some_and(|f| f.is_sequence));
 }
 
 // ------------------------------------------------------------------ Time Remapping (319, 354)
@@ -341,7 +346,7 @@ fn time_remapping_is_an_inert_property_until_enabled() {
     assert_eq!(t.keys.len(), 2);
     assert_eq!((t.keys[0].time_units, t.keys[0].value_seconds), (0, 0.0));
     assert!(near(t.keys[1].time_seconds.unwrap(), 0.1, 1e-6) && near(t.keys[1].value_seconds, 0.1, 1e-6), "{t:?}");
-    assert!(!layer_with_id(&comp, L).time_remap().unwrap().enabled);
+    assert!(!base_layer(&comp).time_remap().unwrap().enabled);
 }
 
 // ------------------------------------------------------------------ composition (325-327)

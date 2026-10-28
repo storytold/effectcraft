@@ -312,11 +312,14 @@ fn opacity_pair<'a>(file: &AepFile<'a>, id: u32) -> (Chunk<'a>, Chunk<'a>) {
 
 #[test]
 fn parented_text_with_opacity_keys() {
-    // 113's text layer T, parented to the solid L (layer id 0x1b, `ldta` byte 132 as in 022), with
-    // the two Opacity keys of 058 (0 % at 0 s, 100 % at 2 s) copied into T's transform group.
+    // 113's text layer T, parented to the solid L (`ldta` byte 132 as in 022), with the two
+    // Opacity keys of 058 (0 % at 0 s, 100 % at 2 s) copied into T's transform group. The layer
+    // ids are the cases' own (L is 0x1b in the single-case files).
+    let keys_id = skip!(crate::helpers::comp_ids("058-key-opacity-2key.aep"))[0].2[0];
+    let l_id = *skip!(crate::helpers::comp_ids("113-text-Hello-size60-fillorange.aep"))[0].2.last().unwrap();
     let keys_src = fixture!("058-key-opacity-2key.aep");
     let keys_file = parse(&keys_src).unwrap();
-    let (tdmn, tdbs) = opacity_pair(&keys_file, 0x1b);
+    let (tdmn, tdbs) = opacity_pair(&keys_file, keys_id);
     let (tdmn, tdbs) = (tdmn.into_owned(), tdbs.into_owned());
     let src = fixture!("113-text-Hello-size60-fillorange.aep");
     let mut file = parse(&src).unwrap();
@@ -329,7 +332,7 @@ fn parented_text_with_opacity_keys() {
             if k.is(b"ldta")
                 && let Body::Data(d) = &mut k.body
             {
-                d.to_mut()[132..136].copy_from_slice(&0x1b_u32.to_be_bytes());
+                d.to_mut()[132..136].copy_from_slice(&l_id.to_be_bytes());
                 done.0 = true;
             }
             if k.is_list(b"tdgp") {

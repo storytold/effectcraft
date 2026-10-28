@@ -37,7 +37,12 @@ fn a_composition_counts_the_compositions_it_shows() {
     let items = project.all_items();
     let id = |n: &str| items.iter().find(|i| i.display_name().as_deref() == Some(n)).and_then(|i| i.id()).expect(n);
     let c = items.iter().find(|i| i.display_name().as_deref() == Some("C")).expect("C");
-    assert_eq!(c.used_item_ids(), vec![id("P30"), id("Q")]);
+    // The list holds each used composition once (in no particular order).
+    let mut used = c.used_item_ids();
+    used.sort();
+    let mut want = vec![id("P30"), id("Q")];
+    want.sort();
+    assert_eq!(used, want);
     let idpc = c.chunk().child(b"idpc").and_then(|x| x.bytes()).expect("idpc");
     assert_eq!(&idpc[..4], &2u32.to_le_bytes());
     // The precomposition layers: P30 640x360 30 fps 3 s, Q 320x240 25 fps 2 s.
@@ -92,24 +97,45 @@ fn project_settings_are_read_from_the_header_chunks() {
             frame_start: Some(0),
         }
     );
-    // One change each (MANIFEST 621-634).
-    assert_eq!(skip!(read("621-settings-bpc-8.aep")), ProjectSettings { bits_per_channel: Some(8), ..base.clone() });
-    assert_eq!(skip!(read("622-settings-bpc-16.aep")), ProjectSettings { bits_per_channel: Some(16), ..base.clone() });
-    assert_eq!(skip!(read("623-settings-workingspace-none.aep")), ProjectSettings { working_space: Some(WorkingSpace::None), ..base.clone() });
-    assert_eq!(skip!(read("625-settings-gamma-2.4.aep")), ProjectSettings { working_gamma_24: Some(true), ..base.clone() });
-    assert_eq!(skip!(read("628-settings-scene-compensation-off.aep")), ProjectSettings { scene_compensation: Some(false), ..base.clone() });
-    assert_eq!(skip!(read("629-settings-time-display-frames.aep")), ProjectSettings { time_display: Some(TimeDisplay::Frames), ..base.clone() });
-    assert_eq!(skip!(read("630-settings-frame-start-1.aep")), ProjectSettings { frame_start: Some(1), ..base.clone() });
-    assert_eq!(skip!(read("632-settings-linearize-and-blend-linear.aep")), ProjectSettings { linearize: true, blend_linear: true, ..base.clone() });
-    assert_eq!(
-        skip!(read("633-settings-feet-frames-35.aep")),
-        ProjectSettings { time_display: Some(TimeDisplay::FeetFrames { frames_per_foot: 16 }), ..base.clone() }
-    );
-    assert_eq!(
-        skip!(read("634-settings-feet-frames-16.aep")),
-        ProjectSettings { time_display: Some(TimeDisplay::FeetFrames { frames_per_foot: 40 }), ..base.clone() }
-    );
-    // nnhd repeats the depth at byte 24.
+    // A project has one value per setting, so the settings cases (MANIFEST 621-634) share three
+    // files: each holds the base with the changes of all its cases (tests/fixtures/CASES.md).
+    let a = ProjectSettings {
+        bits_per_channel: Some(8),
+        working_space: Some(WorkingSpace::None),
+        working_gamma_24: Some(true),
+        scene_compensation: Some(false),
+        time_display: Some(TimeDisplay::Frames),
+        frame_start: Some(1),
+        ..base.clone()
+    };
+    let b = ProjectSettings { linearize: true, blend_linear: true, time_display: Some(TimeDisplay::FeetFrames { frames_per_foot: 16 }), ..base.clone() };
+    // The file of 622 and 634 has no working-space profile name: After Effects 26.2.1 did not
+    // write it in that save (902 keeps the older form), so the working space is unread.
+    let c = ProjectSettings {
+        bits_per_channel: Some(16),
+        working_space: None,
+        time_display: Some(TimeDisplay::FeetFrames { frames_per_foot: 40 }),
+        ..base.clone()
+    };
+    for (names, want) in [
+        (
+            &[
+                "621-settings-bpc-8.aep",
+                "623-settings-workingspace-none.aep",
+                "625-settings-gamma-2.4.aep",
+                "628-settings-scene-compensation-off.aep",
+                "629-settings-time-display-frames.aep",
+                "630-settings-frame-start-1.aep",
+            ][..],
+            a,
+        ),
+        (&["632-settings-linearize-and-blend-linear.aep", "633-settings-feet-frames-35.aep"][..], b),
+        (&["622-settings-bpc-16.aep", "634-settings-feet-frames-16.aep"][..], c),
+    ] {
+        for name in names {
+            assert_eq!(skip!(read(name)), want, "{name}");
+        }
+    } // nnhd repeats the depth at byte 24.
     for (name, v) in [("621-settings-bpc-8.aep", 0u8), ("622-settings-bpc-16.aep", 1), ("000-base.aep", 2)] {
         let bytes = fixture!(name);
         let file = open(&bytes);

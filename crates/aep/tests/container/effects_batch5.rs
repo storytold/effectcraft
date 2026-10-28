@@ -136,7 +136,9 @@ fn levels_values_are_arbitrary_data() {
             }
             let clip = by_name(p, "Clip To Output Black");
             assert_eq!(clip.items.as_ref().map(|i| i.join("|")), Some("On|Off|Off for 32 bpc Color".to_string()));
-            assert_eq!(clip.pard_default(), Some(ParamValue::Index(3)));
+            // A borrowed popup (a later Levels of the combined file) has no reliable pard default.
+            let want = if clip.borrowed_definition { None } else { Some(ParamValue::Index(3)) };
+            assert_eq!(clip.pard_default(), want, "{name}");
         }));
     }
 }
