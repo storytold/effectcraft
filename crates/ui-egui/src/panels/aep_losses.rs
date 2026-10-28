@@ -26,7 +26,10 @@ const DETAILS: usize = 3;
 /// holding the command and the caller must not run it. `Err` when the dry run fails (the file
 /// cannot be read or is not a project), with the message.
 pub fn guard(app: &mut EffectcraftApp, id: &str, params: &Value) -> Result<bool, String> {
-    if !matches!(id, "file.importAep" | "file.exportAep") || params.get("allowLosses").is_some() || params.get("dryRun").is_some() {
+    if !matches!(id, "file.importAep" | "file.exportAep")
+        || params.get("allowLosses") == Some(&Value::Bool(true))
+        || params.get("dryRun") == Some(&Value::Bool(true))
+    {
         return Ok(false);
     }
     let mut dry = params.as_object().cloned().unwrap_or_default();
@@ -71,9 +74,9 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     let mut answer: Option<bool> = None;
     super::dialogs::modal(ctx, title, vec2(520.0, 340.0), t, |ui| {
         let text = if import {
-            tr("Some parts of this project cannot be imported. They are left out:")
+            tr("Some parts of this project cannot be imported exactly (left out or changed):")
         } else {
-            tr("Some parts of this project cannot be exported. They are left out:")
+            tr("Some parts of this project cannot be exported exactly (left out or changed):")
         };
         ui.label(egui::RichText::new(text).color(t.tab_text_active));
         ui.add_space(6.0);
@@ -142,9 +145,11 @@ mod tests {
     #[test]
     fn agents_and_consented_calls_are_not_asked() {
         let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
-        assert_eq!(guard(&mut app, "file.importAep", &json!({"path": "x.aep", "allowLosses": false})), Ok(false));
+        assert_eq!(guard(&mut app, "file.importAep", &json!({"path": "x.aep", "allowLosses": true})), Ok(false));
         assert_eq!(guard(&mut app, "file.importAep", &json!({"path": "x.aep", "dryRun": true})), Ok(false));
         assert_eq!(guard(&mut app, "file.open", &json!({"path": "x.aep"})), Ok(false));
+        // `false` is no consent: the dry run still runs (and fails first here).
+        assert!(guard(&mut app, "file.importAep", &json!({"path": "/no/such/file.aep", "allowLosses": false, "dryRun": false})).is_err());
         // A file that cannot be read is an error, not a prompt.
         assert!(guard(&mut app, "file.importAep", &json!({"path": "/no/such/file.aep"})).is_err());
         assert!(app.dialog.is_none());
@@ -157,9 +162,8 @@ mod tests {
         crate::theme::install(&ctx, &app.tokens, crate::i18n::language(&app));
         // Rec. 2020 has no After Effects counterpart: the export reports it.
         std::sync::Arc::make_mut(&mut app.session.project).settings.working_space = Some(effectcraft_engine::color::ColorSpace::Rec2020);
-        let dir = std::env::temp_dir().join(format!("ec-aep-losses-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("out.aep");
+        let dir = TempDir::new();
+        let path = dir.0.join("out.aep");
         let params = json!({"path": path.to_string_lossy()});
         assert_eq!(guard(&mut app, "file.exportAep", &params), Ok(true));
         assert_eq!(app.dialog, Some(Dialog::AepLosses));
@@ -169,6 +173,36 @@ mod tests {
         assert_eq!(guard(&mut app, "file.exportAep", &params), Ok(true));
         finish(&mut app, &ctx, true);
         assert!(app.dialog.is_none() && path.is_file(), "Export Anyway wrote the file");
-        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_false_consent_still_asks() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        std::sync::Arc::make_mut(&mut app.session.project).settings.working_space = Some(effectcraft_engine::color::ColorSpace::Rec2020);
+        let dir = TempDir::new();
+        let params = json!({"path": dir.0.join("out.aep").to_string_lossy(), "allowLosses": false, "dryRun": false});
+        assert_eq!(guard(&mut app, "file.exportAep", &params), Ok(true));
+        assert_eq!(app.dialog, Some(Dialog::AepLosses));
+    }
+
+    /// A folder of its own for one test, removed afterwards.
+    struct TempDir(std::path::PathBuf);
+
+    impl TempDir {
+        fn new() -> Self {
+            static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+            let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!("ec-aep-losses-{}-{nanos}-{n}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            assert!(std::fs::read_dir(&dir).unwrap().next().is_none(), "a fresh folder");
+            Self(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 }
