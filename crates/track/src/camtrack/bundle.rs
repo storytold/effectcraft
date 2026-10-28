@@ -12,7 +12,7 @@ use rayon::prelude::*;
 
 use super::Distortion;
 use super::geometry::Pose;
-use super::linalg::*;
+use super::linalg::{M3, V3, add, cholesky_solve, dot, inv3, mm, mtv, mv, rodrigues, scale, skew, sub};
 
 /// A camera in the adjustment.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -174,6 +174,29 @@ fn cam_jac(l: &Layout, ci: usize, c: &BaCam, xc: V3, a: &[[f64; 3]; 2], p: [f64;
     }
 }
 
+/// Smooth per-camera log focal lengths in the normal equations.
+fn add_focal_prior(cams: &[BaCam], o: &BaOpts, l: &Layout, s_mat: &mut [f64], bc: &mut [f64]) {
+    let n = l.n;
+    // Focal prior.
+    if let FocalMode::PerCamera(k) = o.focal {
+        for i in 0..cams.len().saturating_sub(1) {
+            let r = k * (cams[i].f.ln() - cams[i + 1].f.ln());
+            let (a, b) = (l.fidx[i], l.fidx[i + 1]);
+            let ia = (a != usize::MAX).then_some(a);
+            let ib = (b != usize::MAX).then_some(b);
+            for (idx, g) in [(ia, k), (ib, -k)] {
+                let Some(x) = idx else { continue };
+                bc[x] -= g * r;
+                for (idy, h) in [(ia, k), (ib, -k)] {
+                    if let Some(y) = idy {
+                        s_mat[x * n + y] += g * h;
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Run Levenberg–Marquardt. `cams` and `pts` are updated in place.
 pub fn adjust(cams: &mut [BaCam], pts: &mut [V3], obs: &[BaObs], o: &BaOpts) -> BaReport {
     let l = layout(cams.len(), o);
@@ -298,24 +321,7 @@ pub fn adjust(cams: &mut [BaCam], pts: &mut [V3], obs: &[BaObs], o: &BaOpts) -> 
             let sys = (0..npts).map(|j| build_point(j, &mut s, &mut b)).collect();
             (s, b, sys)
         };
-        // Focal prior.
-        if let FocalMode::PerCamera(k) = o.focal {
-            for i in 0..cams.len().saturating_sub(1) {
-                let r = k * (cams[i].f.ln() - cams[i + 1].f.ln());
-                let (a, b) = (l.fidx[i], l.fidx[i + 1]);
-                let ia = (a != usize::MAX).then_some(a);
-                let ib = (b != usize::MAX).then_some(b);
-                for (idx, g) in [(ia, k), (ib, -k)] {
-                    let Some(x) = idx else { continue };
-                    bc[x] -= g * r;
-                    for (idy, h) in [(ia, k), (ib, -k)] {
-                        if let Some(y) = idy {
-                            s_mat[x * n + y] += g * h;
-                        }
-                    }
-                }
-            }
-        }
+        add_focal_prior(cams, o, &l, &mut s_mat, &mut bc);
         let base_s = s_mat.clone();
         let base_bc = bc.clone();
         let mean_diag = ((0..n).map(|i| base_s[i * n + i]).sum::<f64>() / n.max(1) as f64).max(1e-12);

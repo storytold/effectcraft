@@ -246,7 +246,7 @@ fn refine_edge_recovers_a_soft_edge_and_decontaminates() {
     assert!(frac as f64 > 0.6 * n as f64, "{frac}/{n} fractional");
     // Decontamination: edge pixels' colour is the foreground's, not a blue blend.
     let mut col = rgb.clone();
-    let map = decontaminate(&mut col, &a, &seg.refine, W as usize, H as usize, &p, 9.0, 1.0);
+    let map = decontaminate(&mut col, &a, &seg.refine, (W as usize, H as usize), &p, 9.0, 1.0);
     let (mut blue_before, mut blue_after, mut m) = (0.0f64, 0.0f64, 0usize);
     for i in 0..a.len() {
         if a[i] > 0.2 && a[i] < 0.8 {

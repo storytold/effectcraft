@@ -1,6 +1,6 @@
 use super::geometry::{cam_state, l2c, parent_inverse};
 use super::gesture::{Gesture, pen_id};
-use super::*;
+use super::{CameraState, Color32, EffectcraftApp, EvalCtx, Layer, LayerId, Mat3, Pos2, Rect, Stroke, Tool, ViewerMap, gv2, json, ov, three_d, vec2, vt};
 
 /// The position change per comp pixel of drag (x, y) that moves a layer by `dir` when the
 /// pointer covers the axis' on-screen vector `s` (comp px); drag across the axis is ignored.

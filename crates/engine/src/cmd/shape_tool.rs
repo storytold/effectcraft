@@ -221,7 +221,16 @@ pub fn mask_path(kind: &str, centre: [f64; 2], size: [f64; 2]) -> Option<ShapePa
         "rounded" | "roundedRect" => effectcraft_path::rect(size, centre, roundness(size)),
         k => {
             let (star, points, outer, inner) = polystar_of(k, size)?;
-            effectcraft_path::polystar(star, points, centre, 0.0, inner, outer, 0.0, 0.0)
+            effectcraft_path::polystar(effectcraft_path::Polystar {
+                star,
+                points,
+                pos: centre,
+                rotation: 0.0,
+                inner,
+                outer,
+                inner_round: 0.0,
+                outer_round: 0.0,
+            })
         }
     };
     effectcraft_path::from_kurbo(&bez).into_iter().next()

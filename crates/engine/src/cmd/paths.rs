@@ -121,16 +121,16 @@ fn parametric_path(g: &PropGroup, lt: effectcraft_time::Tick) -> Option<ShapePat
     let path = match g.match_id.as_str() {
         "rect" => effectcraft_path::rect(v2("size", [100.0; 2]), v2("position", [0.0; 2]), f("roundness", 0.0)),
         "ellipse" => effectcraft_path::ellipse(v2("size", [100.0; 2]), v2("position", [0.0; 2])),
-        "star" => effectcraft_path::polystar(
-            g.prop("type").map_or(0, |pr| pr.value_at(lt).as_enum()) == 0,
-            f("points", 5.0),
-            v2("position", [0.0; 2]),
-            f("rotation", 0.0),
-            f("innerRadius", 50.0),
-            f("outerRadius", 100.0),
-            f("innerRoundness", 0.0),
-            f("outerRoundness", 0.0),
-        ),
+        "star" => effectcraft_path::polystar(effectcraft_path::Polystar {
+            star: g.prop("type").map_or(0, |pr| pr.value_at(lt).as_enum()) == 0,
+            points: f("points", 5.0),
+            pos: v2("position", [0.0; 2]),
+            rotation: f("rotation", 0.0),
+            inner: f("innerRadius", 50.0),
+            outer: f("outerRadius", 100.0),
+            inner_round: f("innerRoundness", 0.0),
+            outer_round: f("outerRoundness", 0.0),
+        }),
         _ => return None,
     };
     // A closed parametric shape is one subpath; anything else would not be this shape.

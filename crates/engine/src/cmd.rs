@@ -156,7 +156,7 @@ mod enabled;
 mod params;
 mod schema;
 
-use super::*;
+use super::commands;
 pub use enabled::always;
 pub(crate) use enabled::{has_comp, has_keys, has_layers, has_project_selection, not_yet, not_yet_run};
 pub use params::match_path_of;

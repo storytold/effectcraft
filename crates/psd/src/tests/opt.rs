@@ -1,6 +1,8 @@
 //! The optimised decode / mask / placed-bake paths against the implementations they replaced
 //! (kept below verbatim as references), and counters for the work they no longer do.
 
+use std::borrow::Cow;
+
 use crate::counters::{self, INSIDE, QUAD, SCRATCH};
 use crate::placed::{Warp, square_to_quad};
 use crate::write::*;

@@ -634,7 +634,7 @@ fn render(ctx: &EffectCtx, buf: Buf) -> Buf {
     let (w, h) = (img.width as usize, img.height as usize);
     let mp = matte_params(ctx.params);
     let mut rgb = rb::rgb_of(&img);
-    let map = refine::decontaminate(&mut rgb, &alpha, &band, w, h, &mp, rr * sc, sc);
+    let map = refine::decontaminate(&mut rgb, &alpha, &band, (w, h), &mp, rr * sc, sc);
     let view_map = b(ctx.params, "refineEdgeMatte/decontamination/viewDecontaminationMap");
     let (ox, oy) = (buf.offset[0].round() as i64, buf.offset[1].round() as i64);
     for y in 0..h {

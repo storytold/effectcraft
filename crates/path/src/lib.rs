@@ -144,7 +144,20 @@ pub fn ellipse(size: [f64; 2], pos: [f64; 2]) -> BezPath {
 }
 
 /// Polystar: a star (`inner` radius used) or polygon, rotation in degrees, roundness in percent.
-pub fn polystar(star: bool, points: f64, pos: [f64; 2], rotation: f64, inner: f64, outer: f64, inner_round: f64, outer_round: f64) -> BezPath {
+pub struct Polystar {
+    pub star: bool,
+    pub points: f64,
+    pub pos: [f64; 2],
+    pub rotation: f64,
+    pub inner: f64,
+    pub outer: f64,
+    pub inner_round: f64,
+    pub outer_round: f64,
+}
+
+/// Build the path described by the polystar's geometry.
+pub fn polystar(spec: Polystar) -> BezPath {
+    let Polystar { star, points, pos, rotation, inner, outer, inner_round, outer_round } = spec;
     let n = points.max(3.0).round() as usize;
     let verts = if star { n * 2 } else { n };
     let mut path = BezPath::new();
@@ -398,7 +411,7 @@ mod tests {
 
     #[test]
     fn star_has_right_vertex_count() {
-        let p = polystar(true, 5.0, [0.0, 0.0], 0.0, 20.0, 50.0, 0.0, 0.0);
+        let p = polystar(Polystar { star: true, points: 5.0, pos: [0.0, 0.0], rotation: 0.0, inner: 20.0, outer: 50.0, inner_round: 0.0, outer_round: 0.0 });
         let v = from_kurbo(&p);
         assert_eq!(v[0].vertices.len(), 10);
     }

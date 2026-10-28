@@ -22,6 +22,7 @@ EffectCraft is a clean-room, open-source, pure-Rust motion graphics and visual e
 - **Everything is agent-drivable:** every interactive widget registers an automation id; UI state is serde.
 - **Community links** (Help menu, About, header Discord button): https://discord.gg/artcraft, https://getartcraft.com, https://getartcraft.com/apps/effectcraft, https://github.com/storytold/effectcraft.
 - **Quality gates** before every commit: `cargo xtask ci` (fmt, clippy -D warnings, tests, layers, assets, wasm).
+- **New workspace crates** must include `[lints] workspace = true` in `Cargo.toml` to inherit `[workspace.lints]`. Production crate roots must declare the required crate-level lint attributes before modules or other crate items; crate-level `//!` documentation may precede them.
 - **Commits:** one task id per commit (`M6.3: trim paths`). Only green states.
 
 ## Running and looking at the app

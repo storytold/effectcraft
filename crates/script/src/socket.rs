@@ -55,7 +55,7 @@ mod imp {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
-    use super::*;
+    use super::{J, err, json};
 
     enum Sock {
         Stream { s: TcpStream, buf: Vec<u8>, eof: bool },

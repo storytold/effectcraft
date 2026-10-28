@@ -415,20 +415,21 @@ fn pick_output(app: &EffectcraftApp, it: &RenderQueueItem) -> Option<Option<Stri
     app.hooks.save_dialog(&app.session.resolve_output(it).unwrap_or_default())
 }
 
-/// The Render Queue panel: the Current Render strip (elapsed and remaining time, Render/Stop and
-/// Notify, plus the progress bar), the column header, the queued items with their output template,
-/// status and timings, and the footer totals. Comps dragged from the Project are queued on
-/// release. The open items and the selected item are kept in egui temp data; output-template forms
-/// open through a small form, and every change runs a `renderQueue.*` command.
-pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
+/// A `renderQueue.*` command queued while drawing, run after the frame.
+type Action = (&'static str, Value);
+
+/// What the panel's sections read: the queue, the running render (if any) and the formats.
+#[derive(Clone, Copy)]
+struct RqView<'a> {
+    queue: &'a [RenderQueueItem],
+    progress: Option<&'a effectcraft_engine::render_queue::JobState>,
+    rendering: bool,
+    available: &'a [OutputFormat],
+}
+
+/// Comps dragged from the Project over the panel: an outline while hovering, queued on release.
+fn queue_drop(app: &EffectcraftApp, ui: &egui::Ui, rect: Rect, p: &egui::Painter, rendering: bool, actions: &mut Vec<Action>) {
     let t = app.tokens;
-    let p = ui.painter().with_clip_rect(rect);
-    let queue: Vec<RenderQueueItem> = app.session.project.render_queue.clone();
-    let progress = app.session.render_progress();
-    let rendering = app.session.is_rendering();
-    let available = app.session.exporter.as_ref().map(|e| e.formats()).unwrap_or_default();
-    let mut actions: Vec<(&'static str, Value)> = Vec::new();
-    app.auto.add("renderQueue.drop", rect, "Drop compositions to queue");
     if !rendering
         && let Some(crate::panels::DragPayload::Item(id)) = egui::DragAndDrop::payload::<crate::panels::DragPayload>(ui.ctx()).as_deref()
         && app.session.project.comp(effectcraft_engine::project::ItemId(*id)).is_some()
@@ -448,14 +449,14 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             p.rect_stroke(rect.shrink(2.0), 0.0, Stroke::new(2.0, t.accent), StrokeKind::Inside);
         }
     }
-    let mut forms: Vec<(RenderQueueItem, String)> = Vec::new();
-    let state_id = egui::Id::unique("rq-ui");
-    let (mut open, mut selected): (Vec<u64>, Option<u64>) = ui.data(|d| d.get_temp(state_id).unwrap_or_default());
+}
 
-    // ---------------------------------------------------------- Current Render strip
-    let top = Rect::from_min_size(rect.min, vec2(rect.width(), TOP_H));
-    p.rect_filled(top, 0.0, t.tl_ruler_bg);
-    let x0 = rect.min.x + 12.0;
+/// The Current Render strip inside `top`: title, elapsed / remaining time, Render, Stop, Notify
+/// and the progress bar.
+fn current_render_strip(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, top: Rect, rq: &RqView, actions: &mut Vec<Action>) {
+    let t = app.tokens;
+    let RqView { queue, progress, rendering, available } = *rq;
+    let x0 = top.min.x + 12.0;
     p.text(pos2(x0, top.min.y + 16.0), Align2::LEFT_CENTER, tr("Current Render"), Tokens::semibold(12.5), t.text);
     let cur_item = progress.as_ref().and_then(|p| p.current).and_then(|id| queue.iter().find(|i| i.id == id));
     let cur_name = cur_item.and_then(|i| app.session.project.item(i.comp)).map(|i| i.name.clone());
@@ -515,6 +516,194 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     };
     p.text(pos2(bar.min.x + 8.0, bar.center().y), Align2::LEFT_CENTER, bar_text, Tokens::ui(11.5), t.text);
     app.auto.add("renderQueue.progress", bar, &format!("{:.0}%", frac * 100.0));
+}
+
+/// The footer: the message line and the totals.
+fn footer(p: &egui::Painter, rect: Rect, rq: &RqView, t: &Tokens) {
+    let RqView { queue, progress, rendering, .. } = *rq;
+    let foot = Rect::from_min_max(pos2(rect.min.x, rect.max.y - FOOT_H), rect.max);
+    p.rect_filled(foot, 0.0, t.tl_ruler_bg);
+    p.line_segment([foot.left_top(), foot.right_top()], Stroke::new(1.0, t.separator));
+    let msg = match &progress {
+        Some(pr) if rendering => format!("Message: Rendering {} of {}", (pr.items_done + 1).min(pr.items_total), pr.items_total),
+        _ => {
+            let done = queue.iter().filter(|i| i.status == RenderStatus::Done).count();
+            format!("Message: {done} of {} done", queue.len())
+        }
+    };
+    p.text(pos2(foot.min.x + 12.0, foot.center().y), Align2::LEFT_CENTER, msg, Tokens::ui(11.0), t.text_dim);
+    let started = queue.iter().filter(|i| i.started.is_some()).count();
+    let total: f64 = queue.iter().filter_map(|i| i.render_time).sum();
+    p.text(
+        pos2(foot.max.x - 12.0, foot.center().y),
+        Align2::RIGHT_CENTER,
+        format!("Renders Started: {started}     Total Time Elapsed: {}", hms(progress.as_ref().filter(|_| rendering).map(|p| p.elapsed).unwrap_or(total))),
+        Tokens::ui(11.0),
+        t.text_dim,
+    );
+}
+
+/// An item row's context menu: Duplicate, Remove and Move Up / Down (row `k` of `len`).
+fn row_menu(ui: &mut egui::Ui, actions: &mut Vec<Action>, item_id: u64, k: usize, len: usize) {
+    if ui.button(tr("Duplicate")).clicked() {
+        actions.push(("renderQueue.duplicate", json!({"item": item_id})));
+        ui.close();
+    }
+    if ui.button(tr("Remove")).clicked() {
+        actions.push(("renderQueue.remove", json!({"item": item_id})));
+        ui.close();
+    }
+    if k > 0 && ui.button(tr("Move Up")).clicked() {
+        actions.push(("renderQueue.move", json!({"item": item_id, "to": k})));
+        ui.close();
+    }
+    if k + 1 < len && ui.button(tr("Move Down")).clicked() {
+        actions.push(("renderQueue.move", json!({"item": item_id, "to": k + 2})));
+        ui.close();
+    }
+}
+
+/// Log: Errors Only / Plus Settings / Plus Per Frame Info.
+fn log_dropdown(app: &mut EffectcraftApp, ui: &mut egui::Ui, row: &ItemRow, it: &RenderQueueItem, actions: &mut Vec<Action>) {
+    let ItemRow { lp, r, n, rendering, .. } = *row;
+    let t = app.tokens;
+    let aid = |s: &str| format!("renderQueue.item.{n}.{s}");
+    let ld = Rect::from_min_size(pos2(r.max.x - 190.0, r.min.y + 3.0), vec2(150.0, ROW_H - 6.0));
+    lp.text(pos2(ld.min.x - 6.0, r.center().y), Align2::RIGHT_CENTER, tr("Log:"), Tokens::ui(11.5), t.text_dim);
+    let lid = egui::Id::unique(("rq-log", it.id));
+    if widgets::dropdown(ui, ld, it.log.label(), &t, lid).clicked() && !rendering {
+        widgets::open_popup(ui, lid);
+    }
+    let llabels: Vec<String> = RenderLog::ALL.iter().map(|l| mark(it.log == *l, l.label())).collect();
+    if let Some(i) = widgets::popup_menu(ui, lid, ld.left_bottom(), &llabels, None) {
+        actions.push(("renderQueue.setLog", json!({"item": it.id, "log": RenderLog::ALL[i].label()})));
+    }
+    app.auto.add(&aid("log"), ld, it.log.label());
+}
+
+/// Where an item row's expanded line is drawn.
+#[derive(Clone, Copy)]
+struct ItemRow<'a> {
+    lp: &'a egui::Painter,
+    list: Rect,
+    r: Rect,
+    /// The item's 1-based position in the queue.
+    n: usize,
+    rendering: bool,
+}
+
+/// The expanded "Output To" line: the template menu, and the file name (click to choose it or
+/// edit the template in place).
+fn output_to(
+    app: &mut EffectcraftApp,
+    ui: &mut egui::Ui,
+    row: &ItemRow,
+    it: &RenderQueueItem,
+    dd_right: f32,
+    editing: &mut Option<(u64, String)>,
+    actions: &mut Vec<Action>,
+) {
+    let ItemRow { lp, list, r, n, rendering } = *row;
+    let t = app.tokens;
+    let aid = |s: &str| format!("renderQueue.item.{n}.{s}");
+    let ox = dd_right + 14.0;
+    lp.text(pos2(ox, r.center().y), Align2::LEFT_CENTER, tr("Output To:"), Tokens::ui(11.5), t.text_dim);
+    let odd = Rect::from_min_size(pos2(ox + 62.0, r.min.y + 3.0), vec2(22.0, ROW_H - 6.0));
+    let oid = egui::Id::unique(("rq-out", it.id));
+    if widgets::dropdown(ui, odd, "", &t, oid).clicked() && !rendering {
+        widgets::open_popup(ui, oid);
+    }
+    app.auto.add(&aid("outputTo"), odd, "Output To");
+    let omenu = output_to_menu(it);
+    let olabels: Vec<String> = omenu.iter().map(|(l, _)| l.clone()).collect();
+    if let Some(i) = widgets::popup_menu(ui, oid, odd.left_bottom(), &olabels, None) {
+        if omenu[i].1.get("choose").is_some() {
+            match pick_output(app, it) {
+                Some(Some(path)) => actions.push(("renderQueue.setOutput", json!({"item": it.id, "path": path}))),
+                Some(None) => {}
+                None => *editing = Some((it.id, it.output.output.clone())),
+            }
+        } else {
+            let mut params = omenu[i].1.clone();
+            params["item"] = json!(it.id);
+            actions.push(("renderQueue.setOutput", params));
+        }
+    }
+    let path_rect = Rect::from_min_max(pos2(odd.max.x + 6.0, r.min.y + 2.0), pos2(r.max.x - 8.0, r.max.y - 2.0));
+    if editing.as_ref().is_some_and(|(id, _)| *id == it.id) {
+        let mut buf = editing.as_ref().map(|(_, b)| b.clone()).unwrap_or_default();
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(path_rect));
+        let resp = child.add(egui::TextEdit::singleline(&mut buf).desired_width(path_rect.width()).font(Tokens::ui(11.5)));
+        if resp.lost_focus() {
+            if ui.input(|i| i.key_pressed(egui::Key::Enter)) && !buf.trim().is_empty() {
+                actions.push(("renderQueue.setOutput", json!({"item": it.id, "path": buf.trim()})));
+            }
+            *editing = None;
+        } else {
+            widgets::keep_focus(ui.ctx(), &resp, &buf);
+            *editing = Some((it.id, buf));
+        }
+    } else {
+        let shown = app.session.resolve_output(it).unwrap_or_else(|| "Not yet specified".into());
+        let resp = ui.interact(path_rect, egui::Id::unique(("rq-path", it.id)), Sense::click());
+        let col = if resp.hovered() { t.accent_hover } else { t.hot_text };
+        lp.with_clip_rect(path_rect.intersect(list)).text(pos2(path_rect.min.x, r.center().y), Align2::LEFT_CENTER, &shown, Tokens::ui(11.5), col);
+        // Clicking the file name opens the save dialog (Output Movie To); Alt-click, or a
+        // host without one, edits the name template in place.
+        let dialog = app.hooks.pick_save_file.is_some();
+        if resp.clicked() && !rendering {
+            let picked = if ui.input(|i| i.modifiers.alt) { None } else { pick_output(app, it) };
+            match picked {
+                Some(Some(path)) => actions.push(("renderQueue.setOutput", json!({"item": it.id, "path": path}))),
+                Some(None) => {}
+                None => *editing = Some((it.id, it.output.output.clone())),
+            }
+        }
+        let how = if dialog { "Click to choose where to save; Alt-click to edit the template" } else { "Click to edit" };
+        resp.on_hover_text(tr_args("Template: {}\n{}", &[&it.output.output, &how]));
+        app.auto.add(&aid("outputPath"), path_rect, &shown);
+    }
+}
+
+/// Delete removes the selected item when the panel has focus (`allowed`: not editing a path and
+/// not rendering).
+fn delete_selected(app: &EffectcraftApp, ui: &egui::Ui, allowed: bool, selected: &mut Option<u64>, actions: &mut Vec<Action>) {
+    if app.ui.focused == crate::dock::PanelKind::RenderQueue
+        && allowed
+        && let Some(id) = *selected
+        && app.dialog.is_none()
+        && ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))
+        && !ui.ctx().egui_wants_keyboard_input()
+    {
+        actions.push(("renderQueue.remove", json!({"item": id})));
+        *selected = None;
+    }
+}
+
+/// The Render Queue panel: the Current Render strip (elapsed and remaining time, Render/Stop and
+/// Notify, plus the progress bar), the column header, the queued items with their output template,
+/// status and timings, and the footer totals. Comps dragged from the Project are queued on
+/// release. The open items and the selected item are kept in egui temp data; output-template forms
+/// open through a small form, and every change runs a `renderQueue.*` command.
+pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
+    let t = app.tokens;
+    let p = ui.painter().with_clip_rect(rect);
+    let queue: Vec<RenderQueueItem> = app.session.project.render_queue.clone();
+    let progress = app.session.render_progress();
+    let rendering = app.session.is_rendering();
+    let available = app.session.exporter.as_ref().map(|e| e.formats()).unwrap_or_default();
+    let mut actions: Vec<Action> = Vec::new();
+    let rq = RqView { queue: &queue, progress: progress.as_ref(), rendering, available: &available };
+    app.auto.add("renderQueue.drop", rect, "Drop compositions to queue");
+    queue_drop(app, ui, rect, &p, rendering, &mut actions);
+    let mut forms: Vec<(RenderQueueItem, String)> = Vec::new();
+    let state_id = egui::Id::unique("rq-ui");
+    let (mut open, mut selected): (Vec<u64>, Option<u64>) = ui.data(|d| d.get_temp(state_id).unwrap_or_default());
+
+    // ---------------------------------------------------------- Current Render strip
+    let top = Rect::from_min_size(rect.min, vec2(rect.width(), TOP_H));
+    p.rect_filled(top, 0.0, t.tl_ruler_bg);
+    current_render_strip(app, ui, &p, top, &rq, &mut actions);
 
     // ---------------------------------------------------------- column header
     let head = Rect::from_min_size(pos2(rect.min.x, top.max.y), vec2(rect.width(), HEAD_H));
@@ -575,25 +764,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             selected = Some(it.id);
             app.ui.focused = crate::dock::PanelKind::RenderQueue;
         }
-        let item_id = it.id;
-        crate::widgets::context_menu(&row_resp, |ui| {
-            if ui.button(tr("Duplicate")).clicked() {
-                actions.push(("renderQueue.duplicate", json!({"item": item_id})));
-                ui.close();
-            }
-            if ui.button(tr("Remove")).clicked() {
-                actions.push(("renderQueue.remove", json!({"item": item_id})));
-                ui.close();
-            }
-            if k > 0 && ui.button(tr("Move Up")).clicked() {
-                actions.push(("renderQueue.move", json!({"item": item_id, "to": n - 1})));
-                ui.close();
-            }
-            if n < queue.len() && ui.button(tr("Move Down")).clicked() {
-                actions.push(("renderQueue.move", json!({"item": item_id, "to": n + 1})));
-                ui.close();
-            }
-        });
+        crate::widgets::context_menu(&row_resp, |ui| row_menu(ui, &mut actions, it.id, k, queue.len()));
         app.auto.add(&aid("row"), row, &format!("#{n}"));
         let is_open = open.contains(&it.id);
         let tw = Rect::from_center_size(pos2(cx_twirl + 8.0, row.center().y), vec2(14.0, 14.0));
@@ -686,78 +857,10 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     );
                     lp.text(pos2(dd.max.x + 14.0, r.center().y), Align2::LEFT_CENTER, info, Tokens::ui(11.0), t.text_faint);
                 }
-                // Log: Errors Only / Plus Settings / Plus Per Frame Info.
-                let ld = Rect::from_min_size(pos2(r.max.x - 190.0, r.min.y + 3.0), vec2(150.0, ROW_H - 6.0));
-                lp.text(pos2(ld.min.x - 6.0, r.center().y), Align2::RIGHT_CENTER, tr("Log:"), Tokens::ui(11.5), t.text_dim);
-                let lid = egui::Id::unique(("rq-log", it.id));
-                if widgets::dropdown(ui, ld, it.log.label(), &t, lid).clicked() && !rendering {
-                    widgets::open_popup(ui, lid);
-                }
-                let llabels: Vec<String> = RenderLog::ALL.iter().map(|l| mark(it.log == *l, l.label())).collect();
-                if let Some(i) = widgets::popup_menu(ui, lid, ld.left_bottom(), &llabels, None) {
-                    actions.push(("renderQueue.setLog", json!({"item": it.id, "log": RenderLog::ALL[i].label()})));
-                }
-                app.auto.add(&aid("log"), ld, it.log.label());
+                log_dropdown(app, ui, &ItemRow { lp: &lp, list, r, n, rendering }, it, &mut actions);
                 continue;
             }
-            // Output To.
-            let ox = dd.max.x + 14.0;
-            lp.text(pos2(ox, r.center().y), Align2::LEFT_CENTER, tr("Output To:"), Tokens::ui(11.5), t.text_dim);
-            let odd = Rect::from_min_size(pos2(ox + 62.0, r.min.y + 3.0), vec2(22.0, ROW_H - 6.0));
-            let oid = egui::Id::unique(("rq-out", it.id));
-            if widgets::dropdown(ui, odd, "", &t, oid).clicked() && !rendering {
-                widgets::open_popup(ui, oid);
-            }
-            app.auto.add(&aid("outputTo"), odd, "Output To");
-            let omenu = output_to_menu(it);
-            let olabels: Vec<String> = omenu.iter().map(|(l, _)| l.clone()).collect();
-            if let Some(i) = widgets::popup_menu(ui, oid, odd.left_bottom(), &olabels, None) {
-                if omenu[i].1.get("choose").is_some() {
-                    match pick_output(app, it) {
-                        Some(Some(path)) => actions.push(("renderQueue.setOutput", json!({"item": it.id, "path": path}))),
-                        Some(None) => {}
-                        None => editing = Some((it.id, it.output.output.clone())),
-                    }
-                } else {
-                    let mut params = omenu[i].1.clone();
-                    params["item"] = json!(it.id);
-                    actions.push(("renderQueue.setOutput", params));
-                }
-            }
-            let path_rect = Rect::from_min_max(pos2(odd.max.x + 6.0, r.min.y + 2.0), pos2(r.max.x - 8.0, r.max.y - 2.0));
-            if editing.as_ref().is_some_and(|(id, _)| *id == it.id) {
-                let mut buf = editing.as_ref().map(|(_, b)| b.clone()).unwrap_or_default();
-                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(path_rect));
-                let resp = child.add(egui::TextEdit::singleline(&mut buf).desired_width(path_rect.width()).font(Tokens::ui(11.5)));
-                if resp.lost_focus() {
-                    if ui.input(|i| i.key_pressed(egui::Key::Enter)) && !buf.trim().is_empty() {
-                        actions.push(("renderQueue.setOutput", json!({"item": it.id, "path": buf.trim()})));
-                    }
-                    editing = None;
-                } else {
-                    widgets::keep_focus(ui.ctx(), &resp, &buf);
-                    editing = Some((it.id, buf));
-                }
-            } else {
-                let shown = app.session.resolve_output(it).unwrap_or_else(|| "Not yet specified".into());
-                let resp = ui.interact(path_rect, egui::Id::unique(("rq-path", it.id)), Sense::click());
-                let col = if resp.hovered() { t.accent_hover } else { t.hot_text };
-                lp.with_clip_rect(path_rect.intersect(list)).text(pos2(path_rect.min.x, r.center().y), Align2::LEFT_CENTER, &shown, Tokens::ui(11.5), col);
-                // Clicking the file name opens the save dialog (Output Movie To); Alt-click, or a
-                // host without one, edits the name template in place.
-                let dialog = app.hooks.pick_save_file.is_some();
-                if resp.clicked() && !rendering {
-                    let picked = if ui.input(|i| i.modifiers.alt) { None } else { pick_output(app, it) };
-                    match picked {
-                        Some(Some(path)) => actions.push(("renderQueue.setOutput", json!({"item": it.id, "path": path}))),
-                        Some(None) => {}
-                        None => editing = Some((it.id, it.output.output.clone())),
-                    }
-                }
-                let how = if dialog { "Click to choose where to save; Alt-click to edit the template" } else { "Click to edit" };
-                resp.on_hover_text(tr_args("Template: {}\n{}", &[&it.output.output, &how]));
-                app.auto.add(&aid("outputPath"), path_rect, &shown);
-            }
+            output_to(app, ui, &ItemRow { lp: &lp, list, r, n, rendering }, it, dd.max.x, &mut editing, &mut actions);
         }
     }
     ui.set_clip_rect(panel_clip);
@@ -770,40 +873,10 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         None => d.remove::<(u64, String)>(editing_id),
     });
 
-    // Delete removes the selected item when the panel has focus.
-    if app.ui.focused == crate::dock::PanelKind::RenderQueue
-        && editing.is_none()
-        && !rendering
-        && let Some(id) = selected
-        && app.dialog.is_none()
-        && ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))
-        && !ui.ctx().egui_wants_keyboard_input()
-    {
-        actions.push(("renderQueue.remove", json!({"item": id})));
-        selected = None;
-    }
+    delete_selected(app, ui, editing.is_none() && !rendering, &mut selected, &mut actions);
 
     // ---------------------------------------------------------- footer
-    let foot = Rect::from_min_max(pos2(rect.min.x, rect.max.y - FOOT_H), rect.max);
-    p.rect_filled(foot, 0.0, t.tl_ruler_bg);
-    p.line_segment([foot.left_top(), foot.right_top()], Stroke::new(1.0, t.separator));
-    let msg = match &progress {
-        Some(pr) if rendering => format!("Message: Rendering {} of {}", (pr.items_done + 1).min(pr.items_total), pr.items_total),
-        _ => {
-            let done = queue.iter().filter(|i| i.status == RenderStatus::Done).count();
-            format!("Message: {done} of {} done", queue.len())
-        }
-    };
-    p.text(pos2(foot.min.x + 12.0, foot.center().y), Align2::LEFT_CENTER, msg, Tokens::ui(11.0), t.text_dim);
-    let started = queue.iter().filter(|i| i.started.is_some()).count();
-    let total: f64 = queue.iter().filter_map(|i| i.render_time).sum();
-    p.text(
-        pos2(foot.max.x - 12.0, foot.center().y),
-        Align2::RIGHT_CENTER,
-        format!("Renders Started: {started}     Total Time Elapsed: {}", hms(progress.as_ref().filter(|_| rendering).map(|p| p.elapsed).unwrap_or(total))),
-        Tokens::ui(11.0),
-        t.text_dim,
-    );
+    footer(&p, rect, &rq, &t);
 
     open.retain(|id| queue.iter().any(|i| i.id == *id));
     ui.data_mut(|d| d.insert_temp(state_id, (open, selected)));

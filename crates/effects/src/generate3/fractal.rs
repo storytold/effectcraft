@@ -1,5 +1,5 @@
 use super::raster::over;
-use super::*;
+use super::{Buf, EffectCtx, IndexedParallelIterator, ParallelIterator, ParallelSliceMut, Px, hsl_to_rgb};
 
 // ---------------------------------------------------------------- Fractal
 

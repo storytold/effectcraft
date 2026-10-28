@@ -1,6 +1,16 @@
 use super::frames::adaptive_samples;
 use super::opts::{LayerTiming, Through};
-use super::*;
+use super::{
+    Arc, BlendMode, Buf, Comp, EvalCtx, Image, IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, Layer, LayerSource, Mat3,
+    MatteKind, ParallelIterator, Quality, Region, Renderer, Sampling, Tick, WarpOpts, cache, color, composite_warp_changed, masks, source_size, styles, vec2,
+};
+
+/// Blend policy for placing a layer, including optional output-depth quantization.
+struct PlacementBlend {
+    mode: BlendMode,
+    opacity: f32,
+    quantize: Option<f32>,
+}
 
 /// A motion-blur shutter: the comp's, or for a collapsed precomp's layers the outermost
 /// containing comp's (they are drawn into its frames).
@@ -342,11 +352,17 @@ impl<'a> Renderer<'a> {
 
     /// Draw a processed layer into `target` (transform, motion blur) with `mode`/`opacity`.
     pub(crate) fn place(&self, ctx: &EvalCtx, layer: &Layer, buf: &Buf, target: &mut Image, mode: BlendMode, opacity: f32) {
+        self.place_changed(ctx, layer, buf, target, PlacementBlend { mode, opacity, quantize: None });
+    }
+
+    /// [`Self::place`], returning the target pixels it changed when the warp tracked them (then
+    /// also quantised to `quantize` levels; see [`composite_warp_changed`]).
+    fn place_changed(&self, ctx: &EvalCtx, layer: &Layer, buf: &Buf, target: &mut Image, blend: PlacementBlend) -> Option<[u32; 4]> {
+        let PlacementBlend { mode, opacity, quantize } = blend;
         let pl = self.placement(ctx, layer, buf);
         let opts = WarpOpts { sampling: pl.sampling, opacity, mode, seed: pl.seed, clip: None };
         if let [m] = pl.matrices.as_slice() {
-            composite_warp(target, &buf.img, m, &opts);
-            return;
+            return composite_warp_changed(target, &buf.img, m, &opts, quantize);
         }
         // Sub-samples sum straight into one buffer (each warp is row-parallel).
         let mut acc = Image::new(target.width, target.height);
@@ -355,6 +371,7 @@ impl<'a> Renderer<'a> {
             effectcraft_raster::accumulate_warp(&mut acc, &buf.img, m, opts.sampling, k);
         }
         target.blend_from(&acc, mode, opacity, pl.seed);
+        None
     }
 
     /// Draw a 2D layer into `canvas`; returns the region it may have changed.
@@ -377,8 +394,14 @@ impl<'a> Renderer<'a> {
         let st = self.styled_to_blend(st);
         let t1 = web_time::Instant::now();
         let changed = if st.plain {
-            self.composite_layer(ctx, layer, &st.body, canvas, opacity);
-            self.footprint(ctx, layer, &st.body, opacity, blank)
+            // Pixels the warp tracks are quantised as it blends them (nothing left to do); the
+            // footprint is still needed when it doesn't, or when no pixel needs quantising.
+            let footprint = self.footprint(ctx, layer, &st.body, opacity, blank);
+            let quantize = if footprint == Region::Empty { None } else { self.pipe.levels };
+            match self.composite_layer(ctx, layer, &st.body, canvas, opacity, quantize) {
+                Some(_) if quantize.is_some() => Region::Empty,
+                drawn => narrow(footprint, drawn),
+            }
         } else {
             self.composite_styled(ctx, layer, &st, canvas, opacity);
             Region::Full
@@ -432,16 +455,18 @@ impl<'a> Renderer<'a> {
         });
     }
 
-    fn composite_layer(&self, ctx: &EvalCtx, layer: &Layer, buf: &Buf, canvas: &mut Image, opacity: f32) {
+    /// Composite a plain layer; returns the canvas pixels it changed when they are known (then
+    /// also quantised to `quantize` levels).
+    fn composite_layer(&self, ctx: &EvalCtx, layer: &Layer, buf: &Buf, canvas: &mut Image, opacity: f32, quantize: Option<f32>) -> Option<[u32; 4]> {
         let matte = layer.track_matte.is_some_and(|tm| tm.layer != layer.id && ctx.comp.layer(tm.layer).is_some());
         if !matte && !layer.preserve_transparency {
-            self.place(ctx, layer, buf, canvas, layer.blend_mode, opacity);
-            return;
+            return self.place_changed(ctx, layer, buf, canvas, PlacementBlend { mode: layer.blend_mode, opacity, quantize });
         }
         // Render in isolation, then matte / preserve transparency, then blend.
         let mut iso = Image::new(canvas.width, canvas.height);
         self.place(ctx, layer, buf, &mut iso, BlendMode::Normal, 1.0);
         self.composite_iso(ctx, layer, iso, canvas, opacity);
+        None
     }
 
     /// Apply the track matte / preserve transparency to an isolated layer render, then blend.
@@ -555,4 +580,22 @@ pub struct Placement {
     pub sampling: effectcraft_raster::Sampling,
     /// Dissolve noise seed.
     pub seed: u32,
+}
+
+/// The part of `footprint` a warp actually changed (`drawn`, see [`composite_warp_changed`]):
+/// pixels it left alone are still quantised.
+fn narrow(footprint: Region, drawn: Option<[u32; 4]>) -> Region {
+    let Some([x0, y0, x1, y1]) = drawn else { return footprint };
+    if x0 >= x1 || y0 >= y1 {
+        return Region::Empty;
+    }
+    let r = color::PxRect { x0, y0, x1, y1 };
+    match footprint {
+        Region::Empty => Region::Empty,
+        Region::Full => Region::Rect(r),
+        Region::Rect(f) => {
+            let q = color::PxRect { x0: r.x0.max(f.x0), y0: r.y0.max(f.y0), x1: r.x1.min(f.x1), y1: r.y1.min(f.y1) };
+            if q.x0 >= q.x1 || q.y0 >= q.y1 { Region::Empty } else { Region::Rect(q) }
+        }
+    }
 }

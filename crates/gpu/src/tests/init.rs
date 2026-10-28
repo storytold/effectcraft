@@ -2,7 +2,6 @@
 //! Set EFFECTCRAFT_REQUIRE_GPU=1 for acceptance: unavailable adapters/devices then fail
 //! instead of taking the explicitly logged headless-CI skip path.
 #![cfg(not(target_arch = "wasm32"))]
-#![allow(clippy::expect_used)] // Test helpers require successful setup to exercise rejection.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};

@@ -457,6 +457,38 @@ fn layers_items_and_markers() {
 }
 
 #[test]
+fn folder_paths_trim_trailing_separators() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"
+        var paths = ['', '/', '///', 'a/b/', 'a\\b\\/', 'a/b', 'a/\n'];
+        var result = paths.map(function (path) {
+          var folder = new Folder(path);
+          return [folder.name, folder.path, __join(path, 'child')];
+        });
+        // A long run followed by a non-separator used to cause quadratic regex backtracking.
+        var longPath = Array(20001).join('/') + 'x';
+        result.push([new Folder(longPath).name, new Folder(longPath).path.length, __join(longPath, 'child').length]);
+        result
+        "#,
+    );
+    assert_eq!(
+        o.result,
+        json!([
+            ["", "", "/child"],
+            ["", "", "/child"],
+            ["", "", "/child"],
+            ["b", "a", "a/b/child"],
+            ["b", "a", "a\\b/child"],
+            ["b", "a", "a/b/child"],
+            ["\n", "a", "a/\n/child"],
+            ["x", 19999, 20007]
+        ])
+    );
+}
+
+#[test]
 fn security_gate_for_files() {
     let dir = std::env::temp_dir().join(format!("ec-script-gate-{}", std::process::id()));
     let proj = dir.join("proj");

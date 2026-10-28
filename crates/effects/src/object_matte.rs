@@ -358,20 +358,24 @@ pub enum FrameMatte {
     Outside,
 }
 
-/// The matte of layer frame `f` on the layer grid of `img` (the effect's input on that frame at
-/// `scale`), computing what is missing. `frame(g)`: the input on frame g on the same grid.
-#[allow(clippy::too_many_arguments)]
+/// The layer grid and timing used to compute one object matte.
+pub struct MatteFrame<'a> {
+    pub layer_size: [f64; 2],
+    pub fps: f64,
+    pub frame: i64,
+    pub scale: f64,
+    pub img: &'a Image,
+}
+
+/// Compute the object's alpha for one layer frame, loading other frames on the same grid as needed.
 pub fn frame_matte(
     params: &Params,
-    layer_size: [f64; 2],
-    fps: f64,
-    f: i64,
-    scale: f64,
-    img: &Image,
+    input: &MatteFrame<'_>,
     model: Option<Arc<dyn MaskModel>>,
     frame: &mut dyn FnMut(i64) -> Option<Arc<Image>>,
     cancel: &dyn Fn() -> bool,
 ) -> FrameMatte {
+    let MatteFrame { layer_size, fps, frame: f, scale, img } = *input;
     let Some(chain) = chain(params, layer_size, fps, f, scale, model) else { return FrameMatte::NoPrompt };
     if !chain.data.in_span(f) {
         return FrameMatte::Outside;
@@ -408,7 +412,7 @@ fn render(ctx: &EffectCtx, buf: Buf) -> Buf {
     if let Some(a) = frozen_alpha(ctx.params, layer_size, fps, f, w, h, model.as_deref()) {
         return compose(&buf, Some(&a), w, h, b(ctx.params, "invert"), param(ctx.params, "view").map(Value::as_enum).unwrap_or(0) == 1);
     }
-    let alpha = match frame_matte(ctx.params, layer_size, fps, f, sc, &img, model, &mut frame, &|| false) {
+    let alpha = match frame_matte(ctx.params, &MatteFrame { layer_size, fps, frame: f, scale: sc, img: &img }, model, &mut frame, &|| false) {
         FrameMatte::Alpha(a) if a.len() == w * h => Some(a),
         FrameMatte::NoPrompt => return buf,
         _ => None,
@@ -608,7 +612,11 @@ mod tests {
         assert_ne!(seed(&p, [100.0, 80.0], 25.0, Some(stub.as_ref())), seed(&p, [100.0, 80.0], 25.0, None));
         let img = frame_at(0);
         let mut frame = |g: i64| Some(Arc::new(frame_at(g)));
-        let FrameMatte::Alpha(a) = frame_matte(&p, [100.0, 80.0], 25.0, 0, 1.0, &img, Some(stub.clone()), &mut frame, &|| false) else { panic!("no matte") };
+        let FrameMatte::Alpha(a) =
+            frame_matte(&p, &MatteFrame { layer_size: [100.0, 80.0], fps: 25.0, frame: 0, scale: 1.0, img: &img }, Some(stub.clone()), &mut frame, &|| false)
+        else {
+            panic!("no matte")
+        };
         assert!(a[40 * 100 + 40] > 0.5 && a[5 * 100 + 5] < 0.5);
         assert_eq!(stub.calls.load(std::sync::atomic::Ordering::Relaxed), 1);
         assert_eq!(*stub.bbox.lock().unwrap(), None);
@@ -634,7 +642,11 @@ mod tests {
         let stub = Arc::new(Stub::default());
         let img = frame_at(0);
         let mut frame = |g: i64| Some(Arc::new(frame_at(g)));
-        let FrameMatte::Alpha(a) = frame_matte(&p, [100.0, 80.0], 25.0, 0, 1.0, &img, Some(stub.clone()), &mut frame, &|| false) else { panic!("no matte") };
+        let FrameMatte::Alpha(a) =
+            frame_matte(&p, &MatteFrame { layer_size: [100.0, 80.0], fps: 25.0, frame: 0, scale: 1.0, img: &img }, Some(stub.clone()), &mut frame, &|| false)
+        else {
+            panic!("no matte")
+        };
         assert_eq!(*stub.bbox.lock().unwrap(), Some([74.0, 54.0, 100.0, 80.0]));
         assert!(a[70 * 100 + 90] > 0.5 && a[40 * 100 + 40] < 0.5);
         // At half resolution the box is scaled with the frame (another Input Key, so the
@@ -643,7 +655,8 @@ mod tests {
         p.values.insert(INPUT_KEY.into(), Value::Str("half".into()));
         let half = effectcraft_raster::resample(&img, 50, 40);
         let mut frame = |g: i64| Some(Arc::new(effectcraft_raster::resample(&frame_at(g), 50, 40)));
-        let _ = frame_matte(&p, [100.0, 80.0], 25.0, 0, 0.5, &half, Some(stub.clone()), &mut frame, &|| false);
+        let _ =
+            frame_matte(&p, &MatteFrame { layer_size: [100.0, 80.0], fps: 25.0, frame: 0, scale: 0.5, img: &half }, Some(stub.clone()), &mut frame, &|| false);
         assert_eq!(*stub.bbox.lock().unwrap(), Some([37.0, 27.0, 50.0, 40.0]));
     }
 

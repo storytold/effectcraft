@@ -4,9 +4,10 @@
 //! The quantised energies are updated with exactly the decoder's arithmetic so the prediction
 //! state never drifts between encoder and decoder.
 
+use crate::CeltFrame;
 use crate::range::RangeEncoder;
-use crate::rate::MAX_FINE_BITS;
-use crate::tables::*;
+use crate::rate::{Allocation, MAX_FINE_BITS};
+use crate::tables::{BETA_COEF, BETA_INTRA, E_PROB_MODEL, NB_EBANDS, PRED_COEF, SMALL_ENERGY_ICDF};
 
 const LAPLACE_MINP: u32 = 1;
 const LAPLACE_NMIN: u32 = 16;
@@ -56,18 +57,8 @@ pub fn laplace_encode(enc: &mut RangeEncoder, value: i32, mut fs: u32, decay: u3
 /// `quant_coarse_energy` for one prediction mode. `e` holds the target log2 energies (relative
 /// to `E_MEANS`), `old_e` the quantised energies, updated in place. `budget` is the frame size in
 /// bits.
-#[allow(clippy::too_many_arguments)]
-pub fn quant_coarse_energy(
-    start: usize,
-    end: usize,
-    e: &[f32; 2 * NB_EBANDS],
-    old_e: &mut [f32; 2 * NB_EBANDS],
-    intra: bool,
-    enc: &mut RangeEncoder,
-    c: usize,
-    lm: usize,
-    budget: i32,
-) {
+pub fn quant_coarse_energy(frame: CeltFrame, e: &[f32; 2 * NB_EBANDS], old_e: &mut [f32; 2 * NB_EBANDS], intra: bool, enc: &mut RangeEncoder, budget: i32) {
+    let CeltFrame { start, end, channels: c, lm } = frame;
     let prob = &E_PROB_MODEL[lm][intra as usize];
     let (coef, beta) = if intra { (0.0, BETA_INTRA) } else { (PRED_COEF[lm], BETA_COEF[lm]) };
     let mut prev = [0f32; 2];
@@ -111,15 +102,8 @@ pub fn quant_coarse_energy(
 }
 
 /// `quant_fine_energy`: raw bits refining each band's quantised energy.
-pub fn quant_fine_energy(
-    start: usize,
-    end: usize,
-    e: &[f32; 2 * NB_EBANDS],
-    old_e: &mut [f32; 2 * NB_EBANDS],
-    fine_quant: &[i32; NB_EBANDS],
-    enc: &mut RangeEncoder,
-    c: usize,
-) {
+pub fn quant_fine_energy(frame: CeltFrame, e: &[f32; 2 * NB_EBANDS], old_e: &mut [f32; 2 * NB_EBANDS], fine_quant: &[i32; NB_EBANDS], enc: &mut RangeEncoder) {
+    let CeltFrame { start, end, channels: c, .. } = frame;
     for i in start..end {
         let fq = fine_quant[i];
         if fq <= 0 {
@@ -139,18 +123,16 @@ pub fn quant_fine_energy(
 
 /// `quant_energy_finalise`: spends the bits left at the end of the frame on one more bit of
 /// energy resolution per band, in priority order.
-#[allow(clippy::too_many_arguments)]
 pub fn quant_energy_finalise(
-    start: usize,
-    end: usize,
+    frame: CeltFrame,
     e: &[f32; 2 * NB_EBANDS],
     old_e: &mut [f32; 2 * NB_EBANDS],
-    fine_quant: &[i32; NB_EBANDS],
-    fine_priority: &[i32; NB_EBANDS],
+    allocation: &Allocation,
     mut bits_left: i32,
     enc: &mut RangeEncoder,
-    c: usize,
 ) {
+    let CeltFrame { start, end, channels: c, .. } = frame;
+    let Allocation { fine_quant, fine_priority, .. } = allocation;
     for prio in 0..2 {
         let mut i = start;
         while i < end && bits_left >= c as i32 {

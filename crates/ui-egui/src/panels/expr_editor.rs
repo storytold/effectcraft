@@ -331,8 +331,16 @@ fn layout(text: &str, font: FontId, base: Color32, sx: &Syntax, p: &Scripting, b
     job
 }
 
+/// The scripting preferences, text colour and row count an [`editor`] is drawn with.
+pub struct EditorOpts<'a> {
+    pub prefs: &'a Scripting,
+    pub color: Color32,
+    pub rows: usize,
+}
+
 /// The editor: returns the response; `buf` is edited in place.
-pub fn editor(ui: &mut egui::Ui, id: egui::Id, buf: &mut String, rect: Rect, p: &Scripting, color: Color32, rows: usize, t: &Tokens) -> egui::Response {
+pub fn editor(ui: &mut egui::Ui, id: egui::Id, buf: &mut String, rect: Rect, opts: EditorOpts, t: &Tokens) -> egui::Response {
+    let EditorOpts { prefs: p, color, rows } = opts;
     let size = (p.editor_font_size.clamp(8, 40) as f32) * 0.9;
     let font = Tokens::mono(size);
     // Line numbers in a gutter on the left.

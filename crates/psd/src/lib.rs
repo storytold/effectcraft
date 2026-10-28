@@ -15,7 +15,6 @@ pub mod placed;
 mod read;
 pub mod write;
 
-use std::borrow::Cow;
 use std::sync::Arc;
 
 pub use descriptor::{DValue, Descriptor};

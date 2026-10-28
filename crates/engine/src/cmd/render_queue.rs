@@ -205,23 +205,8 @@ fn apply_om_template(om: &mut OutputModule, t: &OutputModule) {
 /// The `format` parameter's values.
 const FORMATS: &str = "format: h264|hevc|av1|prores|uncompressed|webm|png|jpeg|tiff|exr|gif|wav|aiff";
 
-/// Apply Output Module parameters (`template` first). `roi`: the viewer's region of interest
-/// (captured by `crop.useRoi`).
-fn apply_output(om: &mut OutputModule, templates: &RenderTemplates, roi: Option<[f64; 4]>, p: &Value, cmd: &str) -> Result<bool> {
-    let mut any = false;
-    if let Some(t) = str_p(p, "template") {
-        let t = templates.output_module(t).ok_or_else(|| bad(cmd, format!("no Output Module template “{t}”")))?;
-        apply_om_template(om, &t);
-        any = true;
-    }
-    let before = om.clone();
-    if let Some(f) = str_p(p, "format") {
-        let f = OutputFormat::from_name(f).ok_or_else(|| bad(cmd, FORMATS))?;
-        om.set_format(f);
-    }
-    // Before Channels: the WebM codec decides whether alpha can be written, so an explicit
-    // `channels: rgba` with `webmCodec: av1` is refused rather than dropped (#166).
-    any |= apply_codec_options(om, p, cmd)?;
+/// `channels` (refusing RGBA where the format has no alpha) and `color`/`alphaMode`.
+fn apply_channels_and_alpha(om: &mut OutputModule, p: &Value, cmd: &str) -> Result<()> {
     if let Some(c) = str_p(p, "channels") {
         om.channels = match c.to_ascii_lowercase().replace([' ', '+'], "").as_str() {
             "rgb" => Channels::Rgb,
@@ -244,21 +229,11 @@ fn apply_output(om: &mut OutputModule, templates: &RenderTemplates, roi: Option<
             _ => return Err(bad(cmd, "color: straight|premultiplied")),
         };
     }
-    if let Some(q) = f_p(p, "quality") {
-        om.quality = q.clamp(1.0, 100.0) as u8;
-    }
-    if let Some(b) = f_p(p, "bitrate") {
-        om.bitrate_kbps = b.clamp(50.0, 500_000.0) as u32;
-    }
-    if let Some(b) = b_p(p, "webmBitrate") {
-        om.webm_bitrate = b;
-    }
-    if let Some(k) = p.get("keyframeInterval").and_then(Value::as_u64) {
-        om.keyframe_interval = k.min(100_000) as u32;
-    }
-    if let Some(pp) = str_p(p, "proresProfile") {
-        om.prores_profile = ProResProfile::from_name(pp).ok_or_else(|| bad(cmd, "proresProfile: proxy|lt|standard|hq|4444|4444xq"))?;
-    }
+    Ok(())
+}
+
+/// `crop` plus the flat dialog keys (`cropTop`… and `resizeWidth`/`resizeHeight`).
+fn apply_crop(om: &mut OutputModule, roi: Option<[f64; 4]>, p: &Value, cmd: &str) -> Result<()> {
     match p.get("crop") {
         Some(Value::Bool(b)) => om.crop.enabled = *b,
         Some(Value::Object(c)) => {
@@ -298,6 +273,11 @@ fn apply_output(om: &mut OutputModule, templates: &RenderTemplates, roi: Option<
             om.resize.enabled = true;
         }
     }
+    Ok(())
+}
+
+/// `resize` (bool or object).
+fn apply_resize(om: &mut OutputModule, p: &Value, cmd: &str) -> Result<()> {
     match p.get("resize") {
         Some(Value::Bool(b)) => om.resize.enabled = *b,
         Some(Value::Object(r)) => {
@@ -328,6 +308,44 @@ fn apply_output(om: &mut OutputModule, templates: &RenderTemplates, roi: Option<
         Some(Value::Null) | None => {}
         Some(_) => return Err(bad(cmd, "resize: bool or {enabled?, preset?, width?, height?, lockAspect?, quality?: low|high}")),
     }
+    Ok(())
+}
+
+/// Apply Output Module parameters (`template` first). `roi`: the viewer's region of interest
+/// (captured by `crop.useRoi`).
+fn apply_output(om: &mut OutputModule, templates: &RenderTemplates, roi: Option<[f64; 4]>, p: &Value, cmd: &str) -> Result<bool> {
+    let mut any = false;
+    if let Some(t) = str_p(p, "template") {
+        let t = templates.output_module(t).ok_or_else(|| bad(cmd, format!("no Output Module template “{t}”")))?;
+        apply_om_template(om, &t);
+        any = true;
+    }
+    let before = om.clone();
+    if let Some(f) = str_p(p, "format") {
+        let f = OutputFormat::from_name(f).ok_or_else(|| bad(cmd, FORMATS))?;
+        om.set_format(f);
+    }
+    // Before Channels: the WebM codec decides whether alpha can be written, so an explicit
+    // `channels: rgba` with `webmCodec: av1` is refused rather than dropped (#166).
+    any |= apply_codec_options(om, p, cmd)?;
+    apply_channels_and_alpha(om, p, cmd)?;
+    if let Some(q) = f_p(p, "quality") {
+        om.quality = q.clamp(1.0, 100.0) as u8;
+    }
+    if let Some(b) = f_p(p, "bitrate") {
+        om.bitrate_kbps = b.clamp(50.0, 500_000.0) as u32;
+    }
+    if let Some(b) = b_p(p, "webmBitrate") {
+        om.webm_bitrate = b;
+    }
+    if let Some(k) = p.get("keyframeInterval").and_then(Value::as_u64) {
+        om.keyframe_interval = k.min(100_000) as u32;
+    }
+    if let Some(pp) = str_p(p, "proresProfile") {
+        om.prores_profile = ProResProfile::from_name(pp).ok_or_else(|| bad(cmd, "proresProfile: proxy|lt|standard|hq|4444|4444xq"))?;
+    }
+    apply_crop(om, roi, p, cmd)?;
+    apply_resize(om, p, cmd)?;
     if let Some(a) = p.get("audio") {
         om.audio = match a {
             Value::Bool(true) => AudioOutput::On,

@@ -57,7 +57,15 @@ fn half(src: &Image) -> Image {
 /// bilinear without bounds checks, integer-translation copies, inlined Normal blending); it
 /// matches [`composite_warp_reference`] to float rounding.
 pub fn composite_warp(dst: &mut Image, src: &Image, m: &Mat3, opts: &WarpOpts) {
-    composite_warp_impl(dst, src, m, opts, true, None);
+    composite_warp_impl(dst, src, m, opts, true, None, None);
+}
+
+/// [`composite_warp`], also returning the destination pixels it changed when it knows them:
+/// `Some([x0, y0, x1, y1])` (half-open, empty when nothing was drawn) on the fast affine path,
+/// `None` otherwise. With `quantize` (an 8/16 bpc destination's levels), the fast path also
+/// quantises each pixel it blends ([`crate::quantize_px`]): exactly when this returns `Some`.
+pub fn composite_warp_changed(dst: &mut Image, src: &Image, m: &Mat3, opts: &WarpOpts, quantize: Option<f32>) -> Option<[u32; 4]> {
+    composite_warp_impl(dst, src, m, opts, true, None, quantize)
 }
 
 /// `dst += warp(src) · weight` (plain sum, no blending): motion-blur sub-samples accumulate
@@ -65,7 +73,7 @@ pub fn composite_warp(dst: &mut Image, src: &Image, m: &Mat3, opts: &WarpOpts) {
 pub fn accumulate_warp(dst: &mut Image, src: &Image, m: &Mat3, sampling: Sampling, weight: f32) {
     let opts = WarpOpts { sampling, ..Default::default() };
     if m.is_affine() && m.inverse().is_some_and(|i| i.is_affine()) {
-        composite_warp_impl(dst, src, m, &opts, true, Some(weight));
+        composite_warp_impl(dst, src, m, &opts, true, Some(weight), None);
         return;
     }
     let mut tmp = Image::new(dst.width, dst.height);
@@ -79,7 +87,7 @@ pub fn accumulate_warp(dst: &mut Image, src: &Image, m: &Mat3, sampling: Samplin
 
 /// The straightforward per-pixel implementation (reference for the fast path's tests).
 pub fn composite_warp_reference(dst: &mut Image, src: &Image, m: &Mat3, opts: &WarpOpts) {
-    composite_warp_impl(dst, src, m, opts, false, None);
+    composite_warp_impl(dst, src, m, opts, false, None, None);
 }
 
 /// Bilinear blend of four taps (same operation order as [`Image::sample_bilinear`]).
@@ -94,9 +102,49 @@ fn bilerp(a: Px, b: Px, c: Px, d: Px, tx: f32, ty: f32) -> Px {
     o
 }
 
-/// Bilinear sample with an unchecked interior fast path.
+/// Side of the square source tiles of [`ClearTiles`].
+const TILE: usize = 16;
+
+/// Which `TILE`×`TILE` source tiles are fully transparent, the one-pixel apron to their right
+/// and below included: the four taps of a bilinear sample whose top-left tap lies in such a
+/// tile all have zero alpha, so the sample is transparent and draws nothing.
+struct ClearTiles {
+    cols: usize,
+    clear: Vec<bool>,
+}
+
+impl ClearTiles {
+    fn new(img: &Image) -> ClearTiles {
+        let (w, h) = (img.width as usize, img.height as usize);
+        let (cols, rows) = (w.div_ceil(TILE), h.div_ceil(TILE));
+        let clear = (0..rows)
+            .into_par_iter()
+            .flat_map_iter(|ty| {
+                let mut row_clear = vec![true; cols];
+                for y in ty * TILE..(ty * TILE + TILE + 1).min(h) {
+                    let row = &img.data[y * w..(y + 1) * w];
+                    for (tx, c) in row_clear.iter_mut().enumerate() {
+                        if *c {
+                            *c = row[tx * TILE..(tx * TILE + TILE + 1).min(w)].iter().all(|p| p[3] == 0.0);
+                        }
+                    }
+                }
+                row_clear
+            })
+            .collect();
+        ClearTiles { cols, clear }
+    }
+
+    #[inline(always)]
+    fn is_clear(&self, x: usize, y: usize) -> bool {
+        self.clear.get((y / TILE) * self.cols + x / TILE).copied().unwrap_or(false)
+    }
+}
+
+/// Bilinear sample with an unchecked interior fast path; `None` when every interior tap is in a
+/// [`ClearTiles`] tile (the sample would have zero alpha).
 #[inline(always)]
-fn sample_bilinear_fast(img: &Image, x: f64, y: f64) -> Px {
+fn sample_bilinear_fast(img: &Image, clear: &ClearTiles, x: f64, y: f64) -> Option<Px> {
     let fx = x - 0.5;
     let fy = y - 0.5;
     let x0 = fx.floor();
@@ -104,14 +152,17 @@ fn sample_bilinear_fast(img: &Image, x: f64, y: f64) -> Px {
     let (xi, yi) = (x0 as i64, y0 as i64);
     let (w, h) = (img.width as i64, img.height as i64);
     if xi >= 0 && yi >= 0 && xi + 1 < w && yi + 1 < h {
+        if clear.is_clear(xi as usize, yi as usize) {
+            return None;
+        }
         let tx = (fx - x0) as f32;
         let ty = (fy - y0) as f32;
         let i = yi as usize * w as usize + xi as usize;
         let row0 = &img.data[i..i + 2];
         let row1 = &img.data[i + w as usize..i + w as usize + 2];
-        return bilerp(row0[0], row0[1], row1[0], row1[1], tx, ty);
+        return Some(bilerp(row0[0], row0[1], row1[0], row1[1], tx, ty));
     }
-    img.sample_bilinear(x, y)
+    Some(img.sample_bilinear(x, y))
 }
 
 /// Index range `[lo, hi)` of `i` in `0..n` for which `p0 + i·s` may lie in `[min, max]`
@@ -127,20 +178,43 @@ fn span(p0: f64, s: f64, min: f64, max: f64, n: usize) -> (usize, usize) {
     if hi <= lo { (0, 0) } else { (lo as usize, hi as usize) }
 }
 
-/// Fast affine rows: `blend(dst, src, x, y)` is only called for visible source pixels.
-#[allow(clippy::too_many_arguments)]
-fn affine_rows(
-    dst: &mut Image,
-    img: &Image,
-    inv: &Mat3,
+/// Columns `[a, b)` of one destination row that a warp changed (`a == b`: none).
+#[derive(Clone, Copy)]
+struct RowSpan {
+    a: usize,
+    b: usize,
+}
+
+impl RowSpan {
+    const NONE: RowSpan = RowSpan { a: usize::MAX, b: 0 };
+    #[inline(always)]
+    fn add(&mut self, x: usize) {
+        self.a = self.a.min(x);
+        self.b = x + 1;
+    }
+}
+
+/// Union of changed pixels as `[x0, y0, x1, y1]` (half-open; `x0 >= x1` when empty).
+fn union(r: [usize; 4], q: [usize; 4]) -> [usize; 4] {
+    match (r[0] < r[2], q[0] < q[2]) {
+        (false, _) => q,
+        (_, false) => r,
+        _ => [r[0].min(q[0]), r[1].min(q[1]), r[2].max(q[2]), r[3].max(q[3])],
+    }
+}
+
+/// Sampling, blending and destination bounds for an affine row operation.
+struct AffineRows {
     sampling: Sampling,
-    op: f32,
-    x0: usize,
-    x1: usize,
-    y0: usize,
-    y1: usize,
-    blend: impl Fn(Px, Px, u32, u32) -> Px + Sync,
-) {
+    opacity: f32,
+    quantize: Option<f32>,
+    bounds: [usize; 4],
+}
+
+/// Blend visible source samples and return the rectangle of changed pixels.
+fn affine_rows(dst: &mut Image, img: &Image, inv: &Mat3, rows: AffineRows, blend: impl Fn(Px, Px, u32, u32) -> Px + Sync) -> [usize; 4] {
+    let AffineRows { sampling, opacity: op, quantize, bounds: [x0, x1, y0, y1] } = rows;
+    let levels = quantize.map(|l| (l, 1.0 / l));
     let w = dst.width as usize;
     let m = inv.0;
     let (iw, ih) = (img.width as f64, img.height as f64);
@@ -148,71 +222,104 @@ fn affine_rows(
     // Pure integer translation: every sample lands on a pixel centre, so all filters return the
     // source pixel itself (bicubic still clamps negatives, as in the reference).
     let int_tx = m[0][0] == 1.0 && m[1][1] == 1.0 && m[0][1] == 0.0 && m[1][0] == 0.0 && m[0][2].fract() == 0.0 && m[1][2].fract() == 0.0;
-    dst.data.par_chunks_mut(w).enumerate().skip(y0).take(y1 - y0).for_each(|(y, row)| {
-        let fy = y as f64 + 0.5;
-        let p0 = vec2(m[0][0] * (x0 as f64 + 0.5) + m[0][1] * fy + m[0][2], m[1][0] * (x0 as f64 + 0.5) + m[1][1] * fy + m[1][2]);
-        let n = x1 - x0;
-        let (ax, bx) = span(p0.x, step.x, -1.0, iw + 1.0, n);
-        let (ay, by) = span(p0.y, step.y, -1.0, ih + 1.0, n);
-        let (lo, hi) = (ax.max(ay), bx.min(by));
-        if lo >= hi {
-            return;
-        }
-        if int_tx {
-            let sy = y as i64 + m[1][2] as i64;
-            if sy < 0 || sy >= img.height as i64 {
-                return;
+    // Bilinear samples skip the transparent parts of the source (most of a thin shape's or a
+    // glow-padded layer's buffer) without reading them.
+    let clear = (sampling == Sampling::Bilinear && !int_tx).then(|| ClearTiles::new(img));
+    let empty = [usize::MAX, usize::MAX, 0, 0];
+    dst.data
+        .par_chunks_mut(w)
+        .enumerate()
+        .skip(y0)
+        .take(y1 - y0)
+        .map(|(y, row)| {
+            let mut changed = RowSpan::NONE;
+            let fy = y as f64 + 0.5;
+            let p0 = vec2(m[0][0] * (x0 as f64 + 0.5) + m[0][1] * fy + m[0][2], m[1][0] * (x0 as f64 + 0.5) + m[1][1] * fy + m[1][2]);
+            let n = x1 - x0;
+            let (ax, bx) = span(p0.x, step.x, -1.0, iw + 1.0, n);
+            let (ay, by) = span(p0.y, step.y, -1.0, ih + 1.0, n);
+            let (lo, hi) = (ax.max(ay), bx.min(by));
+            if lo >= hi {
+                return empty;
             }
-            let dx = m[0][2] as i64;
-            let srow = &img.data[sy as usize * img.width as usize..(sy as usize + 1) * img.width as usize];
-            let xa = (x0 as i64 + lo as i64).max(-dx).max(0) as usize;
-            let xb = ((x0 + hi) as i64).min(img.width as i64 - dx).max(0) as usize;
-            for x in xa..xb.max(xa) {
-                let mut s = srow[(x as i64 + dx) as usize];
-                if sampling == Sampling::Bicubic {
-                    s = [s[0].max(0.0), s[1].max(0.0), s[2].max(0.0), s[3].max(0.0)];
+            if int_tx {
+                let sy = y as i64 + m[1][2] as i64;
+                if sy < 0 || sy >= img.height as i64 {
+                    return empty;
                 }
-                if s[3] <= 0.0 {
-                    continue;
-                }
-                if op < 1.0 {
-                    for c in s.iter_mut() {
-                        *c *= op;
+                let dx = m[0][2] as i64;
+                let srow = &img.data[sy as usize * img.width as usize..(sy as usize + 1) * img.width as usize];
+                let xa = (x0 as i64 + lo as i64).max(-dx).max(0) as usize;
+                let xb = ((x0 + hi) as i64).min(img.width as i64 - dx).max(0) as usize;
+                for x in xa..xb.max(xa) {
+                    let mut s = srow[(x as i64 + dx) as usize];
+                    if sampling == Sampling::Bicubic {
+                        s = [s[0].max(0.0), s[1].max(0.0), s[2].max(0.0), s[3].max(0.0)];
                     }
+                    if s[3] <= 0.0 {
+                        continue;
+                    }
+                    if op < 1.0 {
+                        for c in s.iter_mut() {
+                            *c *= op;
+                        }
+                    }
+                    row[x] = blend(row[x], s, x as u32, y as u32);
+                    if let Some((l, inv)) = levels {
+                        crate::quantize_px(&mut row[x], l, inv);
+                    }
+                    changed.add(x);
                 }
-                row[x] = blend(row[x], s, x as u32, y as u32);
-            }
-            return;
-        }
-        for i in lo..hi {
-            let x = x0 + i;
-            let p = vec2(p0.x + step.x * i as f64, p0.y + step.y * i as f64);
-            if p.x < -1.0 || p.y < -1.0 || p.x > iw + 1.0 || p.y > ih + 1.0 {
-                continue;
-            }
-            let mut s = match sampling {
-                Sampling::Nearest => img.get(p.x.floor() as i64, p.y.floor() as i64),
-                Sampling::Bilinear => sample_bilinear_fast(img, p.x, p.y),
-                Sampling::Bicubic => img.sample_bicubic(p.x, p.y),
-            };
-            if s[3] <= 0.0 {
-                continue;
-            }
-            if op < 1.0 {
-                for c in s.iter_mut() {
-                    *c *= op;
+            } else {
+                for i in lo..hi {
+                    let x = x0 + i;
+                    let p = vec2(p0.x + step.x * i as f64, p0.y + step.y * i as f64);
+                    if p.x < -1.0 || p.y < -1.0 || p.x > iw + 1.0 || p.y > ih + 1.0 {
+                        continue;
+                    }
+                    let mut s = match (sampling, &clear) {
+                        (Sampling::Nearest, _) => img.get(p.x.floor() as i64, p.y.floor() as i64),
+                        (Sampling::Bilinear, Some(clear)) => match sample_bilinear_fast(img, clear, p.x, p.y) {
+                            Some(s) => s,
+                            None => continue,
+                        },
+                        (Sampling::Bilinear, None) => img.sample_bilinear(p.x, p.y),
+                        (Sampling::Bicubic, _) => img.sample_bicubic(p.x, p.y),
+                    };
+                    if s[3] <= 0.0 {
+                        continue;
+                    }
+                    if op < 1.0 {
+                        for c in s.iter_mut() {
+                            *c *= op;
+                        }
+                    }
+                    row[x] = blend(row[x], s, x as u32, y as u32);
+                    if let Some((l, inv)) = levels {
+                        crate::quantize_px(&mut row[x], l, inv);
+                    }
+                    changed.add(x);
                 }
             }
-            row[x] = blend(row[x], s, x as u32, y as u32);
-        }
-    });
+            if changed.a < changed.b { [changed.a, y, changed.b, y + 1] } else { empty }
+        })
+        .reduce(|| empty, union)
 }
 
-fn composite_warp_impl(dst: &mut Image, src: &Image, m: &Mat3, opts: &WarpOpts, allow_fast: bool, accumulate: Option<f32>) {
+fn composite_warp_impl(
+    dst: &mut Image,
+    src: &Image,
+    m: &Mat3,
+    opts: &WarpOpts,
+    allow_fast: bool,
+    accumulate: Option<f32>,
+    quantize: Option<f32>,
+) -> Option<[u32; 4]> {
+    const NOTHING: Option<[u32; 4]> = Some([0; 4]);
     if src.is_empty() || dst.is_empty() || opts.opacity <= 0.0 {
-        return;
+        return NOTHING;
     }
-    let Some(inv) = m.inverse() else { return };
+    let Some(inv) = m.inverse() else { return NOTHING };
     // Minification: pick a pre-filtered level so sampling doesn't alias.
     let scale = m.mean_scale();
     let mut level_img;
@@ -239,7 +346,7 @@ fn composite_warp_impl(dst: &mut Image, src: &Image, m: &Mat3, opts: &WarpOpts, 
         area = area.intersect(&c);
     }
     if area.is_empty() {
-        return;
+        return NOTHING;
     }
     let (x0, x1) = (area.x0.max(0.0) as usize, area.x1.min(dst.width as f64) as usize);
     let (y0, y1) = (area.y0.max(0.0) as usize, area.y1.min(dst.height as f64) as usize);
@@ -247,25 +354,34 @@ fn composite_warp_impl(dst: &mut Image, src: &Image, m: &Mat3, opts: &WarpOpts, 
     let affine = inv.is_affine();
     let mode = opts.mode;
     let op = opts.opacity;
+    let changed = |r: [usize; 4]| Some(r.map(|v| v.min(u32::MAX as usize) as u32));
     if let Some(k) = accumulate
         && affine
     {
-        affine_rows(dst, img, &inv, opts.sampling, 1.0, x0, x1, y0, y1, |d, s, _, _| [d[0] + s[0] * k, d[1] + s[1] * k, d[2] + s[2] * k, d[3] + s[3] * k]);
-        return;
+        let r = affine_rows(dst, img, &inv, AffineRows { sampling: opts.sampling, opacity: 1.0, quantize: None, bounds: [x0, x1, y0, y1] }, |d, s, _, _| {
+            [d[0] + s[0] * k, d[1] + s[1] * k, d[2] + s[2] * k, d[3] + s[3] * k]
+        });
+        return changed(r);
     }
     if allow_fast && affine && !mode.is_stencil() {
-        match mode {
-            BlendMode::Normal => affine_rows(dst, img, &inv, opts.sampling, op, x0, x1, y0, y1, |d, s, _, _| {
-                let k = 1.0 - s[3];
-                [s[0] + d[0] * k, s[1] + d[1] * k, s[2] + d[2] * k, s[3] + d[3] * k]
-            }),
+        let r = match mode {
+            BlendMode::Normal => {
+                affine_rows(dst, img, &inv, AffineRows { sampling: opts.sampling, opacity: op, quantize, bounds: [x0, x1, y0, y1] }, |d, s, _, _| {
+                    let k = 1.0 - s[3];
+                    [s[0] + d[0] * k, s[1] + d[1] * k, s[2] + d[2] * k, s[3] + d[3] * k]
+                })
+            }
             BlendMode::Dissolve | BlendMode::DancingDissolve => {
                 let seed = opts.seed;
-                affine_rows(dst, img, &inv, opts.sampling, op, x0, x1, y0, y1, |d, s, x, y| blend_pixel(mode, d, s, hash_noise(x, y, seed)))
+                affine_rows(dst, img, &inv, AffineRows { sampling: opts.sampling, opacity: op, quantize, bounds: [x0, x1, y0, y1] }, |d, s, x, y| {
+                    blend_pixel(mode, d, s, hash_noise(x, y, seed))
+                })
             }
-            _ => affine_rows(dst, img, &inv, opts.sampling, op, x0, x1, y0, y1, |d, s, _, _| blend_pixel(mode, d, s, 0.5)),
-        }
-        return;
+            _ => affine_rows(dst, img, &inv, AffineRows { sampling: opts.sampling, opacity: op, quantize, bounds: [x0, x1, y0, y1] }, |d, s, _, _| {
+                blend_pixel(mode, d, s, 0.5)
+            }),
+        };
+        return changed(r);
     }
     dst.data.par_chunks_mut(w).enumerate().skip(y0).take(y1 - y0).for_each(|(y, row)| {
         let fy = y as f64 + 0.5;
@@ -312,6 +428,7 @@ fn composite_warp_impl(dst: &mut Image, src: &Image, m: &Mat3, opts: &WarpOpts, 
             }
         }
     }
+    None
 }
 
 /// Resize with bilinear filtering (box pre-filter when shrinking).
@@ -388,6 +505,116 @@ mod tests {
                                 assert!((p[c] - q[c]).abs() < 1e-4, "mat {mi} {mode:?} {sampling:?} op {opacity} px {i}: {p:?} vs {q:?}");
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    /// A mostly transparent source: a thin ring with a few stray pixels (one with negative zero alpha).
+    fn sparse_image(w: u32, h: u32) -> Image {
+        let mut img = Image::new(w, h);
+        let (cx, cy, r) = (w as f32 / 2.0, h as f32 / 2.0, w.min(h) as f32 * 0.4);
+        for y in 0..h {
+            for x in 0..w {
+                let d = ((x as f32 + 0.5 - cx).hypot(y as f32 + 0.5 - cy) - r).abs();
+                if d < 1.5 {
+                    let a = 1.0 - d / 1.5;
+                    img.set(x, y, [0.2 * a, 0.6 * a, a, a]);
+                }
+            }
+        }
+        img.set(3, 2, [0.5, 0.5, 0.5, 0.5]);
+        img.set(w - 1, h - 1, [1.0; 4]);
+        img.set(w / 2, 1, [0.0, 0.0, 0.0, -0.0]);
+        img
+    }
+
+    #[test]
+    fn clear_tiles_hold_only_transparent_taps() {
+        let img = sparse_image(150, 97);
+        let clear = ClearTiles::new(&img);
+        let mut skipped = 0;
+        for y in 0..img.height as usize - 1 {
+            for x in 0..img.width as usize - 1 {
+                if clear.is_clear(x, y) {
+                    skipped += 1;
+                    for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                        assert_eq!(img.get(x as i64 + dx, y as i64 + dy)[3], 0.0, "tap ({}, {}) of a clear tile", x as i64 + dx, y as i64 + dy);
+                    }
+                }
+            }
+        }
+        assert!(skipped > 100 * 70, "the ring's empty middle is skipped: {skipped}");
+    }
+
+    /// The changed rectangle holds every pixel a warp changed, and the skipped transparent
+    /// samples leave the result as the reference path draws it.
+    #[test]
+    fn changed_rect_covers_the_changed_pixels() {
+        let src = sparse_image(90, 70);
+        let mats = [
+            Mat3::translate(vec2(7.0, 3.0)),
+            Mat3::translate(vec2(10.25, 4.5)),
+            Mat3::translate(vec2(60.0, 50.0)) * Mat3::rotate_deg(33.0) * Mat3::scale(vec2(0.9, 1.2)) * Mat3::translate(vec2(-45.0, -35.0)),
+            Mat3::translate(vec2(-30.0, -20.0)),
+            Mat3::scale(vec2(0.3, 0.3)),
+        ];
+        for (mi, m) in mats.iter().enumerate() {
+            for mode in [BlendMode::Normal, BlendMode::Add, BlendMode::Dissolve] {
+                let opts = WarpOpts { mode, seed: 3, ..Default::default() };
+                let before = test_image(120, 100, 4);
+                let mut a = before.clone();
+                let r = composite_warp_changed(&mut a, &src, m, &opts, None);
+                let Some([x0, y0, x1, y1]) = r else { panic!("mat {mi}: the fast path tracks what it changed") };
+                for (i, (p, q)) in a.data.iter().zip(&before.data).enumerate() {
+                    let (x, y) = (i as u32 % a.width, i as u32 / a.width);
+                    if p != q {
+                        assert!(x >= x0 && x < x1 && y >= y0 && y < y1, "mat {mi} {mode:?}: ({x}, {y}) changed outside {r:?}");
+                    }
+                }
+                let mut b = before.clone();
+                composite_warp_reference(&mut b, &src, m, &opts);
+                for (i, (p, q)) in a.data.iter().zip(&b.data).enumerate() {
+                    for c in 0..4 {
+                        assert!((p[c] - q[c]).abs() < 1e-4, "mat {mi} {mode:?} px {i}: {p:?} vs {q:?}");
+                    }
+                }
+            }
+        }
+        let mut dst = Image::new(10, 10);
+        assert_eq!(composite_warp_changed(&mut dst, &Image::new(4, 4), &Mat3::IDENTITY, &WarpOpts::default(), None), Some([u32::MAX, u32::MAX, 0, 0]));
+        let stencil = WarpOpts { mode: BlendMode::StencilAlpha, ..Default::default() };
+        assert_eq!(composite_warp_changed(&mut dst, &src, &Mat3::IDENTITY, &stencil, Some(255.0)), None, "stencils change the whole destination");
+    }
+
+    /// Quantising while blending equals blending, then quantising the changed rectangle of an
+    /// already quantised destination (what an 8/16 bpc comp did after every layer), bit for bit.
+    #[test]
+    fn quantize_while_blending_matches_quantizing_after() {
+        let src = sparse_image(90, 70);
+        let mats = [Mat3::translate(vec2(7.0, 3.0)), Mat3::translate(vec2(60.0, 50.0)) * Mat3::rotate_deg(33.0) * Mat3::translate(vec2(-45.0, -35.0))];
+        for m in &mats {
+            for mode in [BlendMode::Normal, BlendMode::Screen, BlendMode::Dissolve] {
+                for (levels, opacity) in [(255.0f32, 1.0), (32_768.0, 0.7)] {
+                    let mut before = test_image(120, 100, 8);
+                    for p in &mut before.data {
+                        crate::quantize_px(p, levels, 1.0 / levels);
+                    }
+                    let opts = WarpOpts { mode, opacity, seed: 5, ..Default::default() };
+                    let mut after = before.clone();
+                    let Some([x0, y0, x1, y1]) = composite_warp_changed(&mut after, &src, m, &opts, None) else { panic!("fast path") };
+                    for y in y0..y1 {
+                        for x in x0..x1 {
+                            let i = after.idx(x, y);
+                            crate::quantize_px(&mut after.data[i], levels, 1.0 / levels);
+                        }
+                    }
+                    let mut fused = before.clone();
+                    let r = composite_warp_changed(&mut fused, &src, m, &opts, Some(levels));
+                    assert_eq!(r, Some([x0, y0, x1, y1]));
+                    for (i, (p, q)) in fused.data.iter().zip(&after.data).enumerate() {
+                        assert_eq!(p.map(f32::to_bits), q.map(f32::to_bits), "{mode:?} {levels} px {i}");
                     }
                 }
             }

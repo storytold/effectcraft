@@ -1,4 +1,4 @@
-use super::*;
+use super::{EffectcraftApp, LayerId, Mat3, Pos2, Rect, Tick, Tool, ViewerMap, ov, vec2};
 
 /// What a drag in the viewer is doing.
 #[derive(Clone, Debug)]

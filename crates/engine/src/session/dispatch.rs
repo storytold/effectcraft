@@ -1,4 +1,4 @@
-use super::*;
+use super::{EngineError, Event, Result, Session, Value, commands, guard};
 
 impl Session {
     pub fn new() -> Session {

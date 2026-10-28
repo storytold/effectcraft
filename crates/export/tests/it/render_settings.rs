@@ -45,7 +45,7 @@ fn custom(start: f64, end: f64) -> RenderSettings {
 }
 
 fn run_with(p: &Project, cid: ItemId, s: &RenderSettings, om: &OutputModule, path: &str, options: JobOptions, cancel: bool) -> (Result<Report, String>, Files) {
-    run_on(p, cid, s, om, path, options, None, cancel)
+    run_on(p, cid, s, om, path, options, (None, cancel))
 }
 
 /// [`run_with`] with an accelerator.
@@ -56,9 +56,9 @@ fn run_on(
     om: &OutputModule,
     path: &str,
     options: JobOptions,
-    accel: Option<&dyn Accelerator>,
-    cancel: bool,
+    execution: (Option<&dyn Accelerator>, bool),
 ) -> (Result<Report, String>, Files) {
+    let (accel, cancel) = execution;
     let files: Files = Default::default();
     let f = files.clone();
     let sink: Box<Sink> = Box::new(move |path: &str, data: Vec<u8>| f.lock().unwrap().push((path.to_string(), data)));
@@ -456,7 +456,7 @@ fn a_job_renders_on_one_compositor() {
     let om = OutputModule::for_format(OutputFormat::PngSequence);
     let s = custom(0.0, 0.4);
     let render = |p: &Project, accel: &GreenAccel, path: &str| {
-        let (r, files) = run_on(p, cid, &s, &om, path, JobOptions::default(), Some(accel), false);
+        let (r, files) = run_on(p, cid, &s, &om, path, JobOptions::default(), (Some(accel), false));
         r.expect("export");
         (0..10).map(|i| png(&files, i)).collect::<Vec<_>>()
     };

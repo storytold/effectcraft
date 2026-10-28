@@ -1,7 +1,7 @@
 use super::eps::embedded_fonts;
 use super::scanner::Src;
 use super::value::{Flow, GState, V, new_dict};
-use super::*;
+use super::{Affine, BezPath, Builder, Cap, HashMap, Interp, Join};
 
 /// The deepest procedure nesting run (deeper recursion stops the program).
 const MAX_CALL_DEPTH: usize = 256;

@@ -4,7 +4,7 @@ use super::effects::{
     space_param, spec,
 };
 use super::space::SPACES;
-use super::*;
+use super::{EffectSpec, ParamUi, Value, num, p, popup, slider};
 
 pub fn specs() -> Vec<EffectSpec> {
     let cc = "Color Correction";

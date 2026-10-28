@@ -3,8 +3,12 @@
 //! processes, so the reconstruction built here is exactly what a decoder produces; the syntax
 //! is written afterwards by `writer.rs`.
 
-use crate::pred::*;
-use crate::tables::*;
+use crate::pred::{INTRA_MODES_USED, InterBlock, IntraEdge, Plane, edges, predict_inter, predict_intra, subpel_plane};
+use crate::tables::{
+    AC_QLOOKUP, BLOCK_8X8, BLOCK_64X64, DC_PRED, DC_QLOOKUP, DCT_DCT, DEFAULT_SCAN_4X4, DEFAULT_SCAN_8X8, DEFAULT_SCAN_16X16, DEFAULT_SCAN_32X32, MODE_TO_TXFM,
+    NEWMV, NUM_4X4_BLOCKS_WIDE, PARTITION_SPLIT, PARTITION_SUBSIZE, TX_4X4, TX_8X8, TX_16X16, TX_32X32, TX_64X64, TX_SET_DCTONLY, TX_SET_INTER_3,
+    TX_SET_INTRA_2, TX_SIZE_SQR_UP, TX_TYPE_IN_SET_INTER, TX_TYPE_IN_SET_INTRA,
+};
 use crate::transform::{forward_2d, inverse_2d};
 
 /// Decisions for one coded block.
@@ -98,6 +102,17 @@ pub(crate) fn tx_in_set(set: usize, is_inter: bool, tx_type: usize) -> bool {
 pub(crate) fn intra_uv_tx_type(uv_mode: usize, uv_tx: usize) -> usize {
     let t = MODE_TO_TXFM[uv_mode] as usize;
     if tx_in_set(tx_set(uv_tx, false), false, t) { t } else { DCT_DCT }
+}
+
+/// Geometry and coding mode of one square transform block.
+#[derive(Clone, Copy)]
+struct TransformBlock {
+    plane: usize,
+    x: usize,
+    y: usize,
+    log2: u32,
+    tx_type: usize,
+    intra: bool,
 }
 
 struct TxResult {
@@ -362,7 +377,7 @@ impl<'a> Decider<'a> {
                 types.push(alt);
             }
             for &t in &types {
-                let (res, recon) = self.try_tx(0, c * 4, r * 4, log2, t, &pred[..n * n], true);
+                let (res, recon) = self.try_tx(TransformBlock { plane: 0, x: c * 4, y: r * 4, log2, tx_type: t, intra: true }, &pred[..n * n]);
                 let type_bits = if !res.nonzero || tx_set(tx_y, false) == TX_SET_DCTONLY {
                     0.0
                 } else if t == DCT_DCT {
@@ -422,7 +437,7 @@ impl<'a> Decider<'a> {
         let uv_type = intra_uv_tx_type(uv_mode, uv_tx);
         let mut code_uv = |i: usize| {
             predict_intra(&ced[i], &ce[i], uv_mode, &mut pred);
-            let t = self.code_tx(1 + i, c * 2, r * 2, clog2, uv_type, &pred[..cn * cn], true);
+            let t = self.code_tx(TransformBlock { plane: 1 + i, x: c * 2, y: r * 2, log2: clog2, tx_type: uv_type, intra: true }, &pred[..cn * cn]);
             self.mark_decoded(1 + i, r, c, n4);
             t
         };
@@ -450,13 +465,17 @@ impl<'a> Decider<'a> {
             let (vw, vh) = self.g.visible(p);
             let pn = n >> s;
             let (x, y) = ((c * 4) >> s, (r * 4) >> s);
-            predict_inter(&refr.planes[p], vw as i32 - 1, vh as i32 - 1, x, y, pn, pn, mv, s, self.bd, &mut pred[..pn * pn]);
+            predict_inter(
+                &refr.planes[p],
+                &InterBlock { last_x: vw as i32 - 1, last_y: vh as i32 - 1, x, y, width: pn, height: pn, mv, subsampling: s, bit_depth: self.bd },
+                &mut pred[..pn * pn],
+            );
             if bsize == BLOCK_64X64 {
                 // coded as a skip block: the prediction is the reconstruction
                 dist += self.sse(p, x, y, pn, &pred[..pn * pn]);
                 self.put(p, x, y, pn, &pred[..pn * pn]);
             } else {
-                let t = self.code_tx(p, x, y, log2 - s as u32, DCT_DCT, &pred[..pn * pn], false);
+                let t = self.code_tx(TransformBlock { plane: p, x, y, log2: log2 - s as u32, tx_type: DCT_DCT, intra: false }, &pred[..pn * pn]);
                 dist += t.dist;
                 tx.push(t);
             }
@@ -771,8 +790,9 @@ impl<'a> Decider<'a> {
 
     /// Transform, quantise and reconstruct one square transform block of `plane` at (x, y)
     /// over the prediction `pred`; the reconstruction is written to `rec`.
-    fn code_tx(&mut self, p: usize, x: usize, y: usize, log2: u32, tx_type: usize, pred: &[u16], intra: bool) -> TxResult {
-        let (res, recon) = self.try_tx(p, x, y, log2, tx_type, pred, intra);
+    fn code_tx(&mut self, block: TransformBlock, pred: &[u16]) -> TxResult {
+        let TransformBlock { plane: p, x, y, log2, .. } = block;
+        let (res, recon) = self.try_tx(block, pred);
         let n = 1usize << log2;
         self.put(p, x, y, n, recon.as_deref().unwrap_or(pred));
         res
@@ -780,7 +800,8 @@ impl<'a> Decider<'a> {
 
     /// Transform and quantise one block; returns the result and its reconstruction (None: the
     /// prediction) without writing it.
-    fn try_tx(&self, p: usize, x: usize, y: usize, log2: u32, tx_type: usize, pred: &[u16], intra: bool) -> (TxResult, Option<Vec<u16>>) {
+    fn try_tx(&self, block: TransformBlock, pred: &[u16]) -> (TxResult, Option<Vec<u16>>) {
+        let TransformBlock { plane: p, x, y, log2, tx_type, intra } = block;
         let n = 1usize << log2;
         let tx_sz = tx_size_for(log2);
         let bd = self.bd;

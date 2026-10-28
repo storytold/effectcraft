@@ -2,7 +2,7 @@ use super::comp::Comp;
 use super::footage::{Footage, FootageKind, Proxy, Solid};
 use super::layer::LayerSource;
 use super::settings::{APP_VERSION, ProjectError, ProjectSettings, SCHEMA_VERSION, SavedView};
-use super::*;
+use super::{Arc, BTreeMap, Deserialize, FrameRate, Label, Project, Serialize, Tick, file_check, limits};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ItemId(pub u64);

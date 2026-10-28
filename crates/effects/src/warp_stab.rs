@@ -453,7 +453,7 @@ fn render(ctx: &EffectCtx, buf: Buf) -> Buf {
     });
     let need = need_m.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
     if synth && need.iter().any(|w| *w > 0.0) {
-        synthesize(ctx, &a, k, &src_of, &crop, sc, &mut out, &need);
+        synthesize(ctx, &a, k, &SynthesisGrid { src_of: &src_of, crop: &crop, scale: sc }, &mut out, &need);
     }
     if b(ctx.params, "advanced/showTrackPoints") {
         let r = (2.5 * f(ctx.params, "advanced/trackPointSize") / 100.0 * sc).max(0.5);
@@ -465,19 +465,16 @@ fn render(ctx: &EffectCtx, buf: Buf) -> Buf {
     Buf { img: out, offset: [0.0; 2], scale: sc }
 }
 
-/// Fill the pixels flagged in `need` (weight = how much synthesized content they take) from
-/// neighbouring frames, nearest first.
-#[allow(clippy::too_many_arguments)]
-fn synthesize(
-    ctx: &EffectCtx,
-    a: &WarpAnalysis,
-    k: usize,
-    src_of: &(dyn Fn([f64; 2]) -> [f64; 2] + Sync),
-    crop: &[f64; 4],
-    sc: f64,
-    out: &mut Image,
-    need: &[f32],
-) {
+/// Maps an output sample into the uncropped source grid shared by neighbouring frames.
+struct SynthesisGrid<'a> {
+    src_of: &'a (dyn Fn([f64; 2]) -> [f64; 2] + Sync),
+    crop: &'a [f64; 4],
+    scale: f64,
+}
+
+/// Fill the pixels flagged in `need` from neighbouring frames, nearest first.
+fn synthesize(ctx: &EffectCtx, a: &WarpAnalysis, k: usize, grid: &SynthesisGrid<'_>, out: &mut Image, need: &[f32]) {
+    let SynthesisGrid { src_of, crop, scale: sc } = *grid;
     let Some(host) = ctx.env.host else { return };
     let n = a.frames.len();
     let range = ((f(ctx.params, "advanced/synthesizeInputRange").max(0.0) / a.frame_duration.max(1e-6)).round() as usize).min(60);

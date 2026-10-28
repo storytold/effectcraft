@@ -18,9 +18,31 @@ use rayon::prelude::*;
 
 pub use blur::{box_blur, directional_blur, gaussian_blur, gaussian_blur_exact, gaussian_is_exact, radial_blur};
 pub use channels3d::AuxChannels;
-pub use warp::{Sampling, WarpOpts, accumulate_warp, composite_warp, composite_warp_reference, resample};
+pub use warp::{Sampling, WarpOpts, accumulate_warp, composite_warp, composite_warp_changed, composite_warp_reference, resample};
 
 pub type Px = [f32; 4];
+
+/// Clamp (colour ≤ alpha ≤ 1, NaN → 0) and round half up to `levels` steps (`inv` = 1 / levels):
+/// one pixel of an 8/16 bpc buffer. Values are non-negative after the clamp, so the integer
+/// conversion rounds like `round()` and vectorises.
+#[allow(clippy::manual_clamp)] // max/min map NaN to 0; clamp would keep NaN
+#[inline(always)]
+pub fn quantize_px(p: &mut Px, levels: f32, inv: f32) {
+    let a = round_half_up(p[3].max(0.0).min(1.0) * levels) * inv;
+    let hi = [a, a, a, a];
+    for c in 0..3 {
+        p[c] = round_half_up(p[c].max(0.0).min(hi[c]) * levels) * inv;
+    }
+    p[3] = a;
+}
+
+/// `v` (0..=65 535) rounded half up. The same either way; the fastest on each target: x86-64's
+/// baseline converts to integers in one instruction but has no `floor` (SSE4.1), while in wasm
+/// `floor` is one instruction and converting back from `u32` several (about 1.5× faster there).
+#[inline(always)]
+fn round_half_up(v: f32) -> f32 {
+    if cfg!(target_arch = "wasm32") { (v + 0.5).floor() } else { (v + 0.5) as u32 as f32 }
+}
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Image {
@@ -199,26 +221,33 @@ impl Image {
     }
     /// Straight-alpha 8-bit RGBA (sRGB-encoded values as stored).
     pub fn to_rgba8(&self) -> Vec<u8> {
-        let mut out = vec![0u8; self.data.len() * 4];
-        out.par_chunks_mut(4).zip(self.data.par_iter()).for_each(|(o, p)| {
+        self.map_rgba8(|o, p| {
             let a = p[3].clamp(0.0, 1.0);
             let inv = if a > 0.0 { 1.0 / p[3] } else { 0.0 };
             for c in 0..3 {
                 o[c] = ((p[c] * inv).clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
             }
             o[3] = (a * 255.0 + 0.5) as u8;
-        });
-        out
+        })
     }
     /// Composite over an opaque background colour and return opaque 8-bit RGBA.
     pub fn to_rgba8_over(&self, bg: [f32; 3]) -> Vec<u8> {
-        let mut out = vec![0u8; self.data.len() * 4];
-        out.par_chunks_mut(4).zip(self.data.par_iter()).for_each(|(o, p)| {
+        self.map_rgba8(|o, p| {
             let k = 1.0 - p[3].clamp(0.0, 1.0);
             for c in 0..3 {
                 o[c] = ((p[c] + bg[c] * k).clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
             }
             o[3] = 255;
+        })
+    }
+    /// 8-bit RGBA with each pixel written by `f`, row-parallel.
+    fn map_rgba8(&self, f: impl Fn(&mut [u8; 4], &Px) + Sync) -> Vec<u8> {
+        let mut out = vec![0u8; self.data.len() * 4];
+        let w = self.width.max(1) as usize;
+        out.par_chunks_mut(w * 4).zip(self.data.par_chunks(w)).for_each(|(o, row)| {
+            for (o, p) in o.as_chunks_mut::<4>().0.iter_mut().zip(row) {
+                f(o, p);
+            }
         });
         out
     }

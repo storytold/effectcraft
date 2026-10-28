@@ -32,7 +32,7 @@ use effectcraft_effects::{Buf, EffectCtx, EffectEnv, EffectHost, LayerPixels, Pa
 use effectcraft_geom::{Mat3, Mat4, vec2};
 use effectcraft_project::{Comp, Footage, FootageKind, FrameBlend, GroupKind, ItemId, ItemKind, Layer, LayerSource, MatteKind, Project, Quality, Sampling};
 pub use effectcraft_raster::Image;
-use effectcraft_raster::{WarpOpts, composite_warp};
+use effectcraft_raster::{WarpOpts, composite_warp_changed};
 use effectcraft_time::{FrameRate, TICKS_PER_SECOND, Tick};
 pub use eval::{EvalCtx, ExprHost, effect_bounds, source_size};
 use rayon::prelude::*;

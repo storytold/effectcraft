@@ -1,6 +1,6 @@
 use super::item::{ItemId, LayerId};
 use super::settings::Marker;
-use super::*;
+use super::{BlendMode, Deserialize, Label, PropGroup, Serialize, Tick};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LightKind {

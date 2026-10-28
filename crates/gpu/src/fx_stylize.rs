@@ -879,7 +879,7 @@ fn corner_pin(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
     let o = b.to_px([0.0, 0.0]);
     let m = quad * Mat3::scale(vec2(1.0 / (w * b.scale), 1.0 / (h * b.scale))) * Mat3::translate(vec2(-o.0, -o.1));
     let empty = e.image(b.img.width, b.img.height);
-    b.img = ops::warp(e, &empty, &b.img, &m, Sampling::Bilinear, BlendMode::Normal, 1.0, 0, None);
+    b.img = ops::warp(e, &empty, &b.img, &m, ops::WarpOptions { sampling: Sampling::Bilinear, mode: BlendMode::Normal, opacity: 1.0, seed: 0 }, None);
     Some(b)
 }
 
@@ -989,7 +989,7 @@ pub(crate) fn transform(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBu
         let Some(pr) = host.params_at(t) else { continue };
         let op = pr.f("opacity") as f32 / 100.0;
         let empty = e.image(w, h);
-        let one = ops::warp(e, &empty, &b.img, &transform_matrix(&pr, &b), sampling, BlendMode::Normal, op, 0, None);
+        let one = ops::warp(e, &empty, &b.img, &transform_matrix(&pr, &b), ops::WarpOptions { sampling, mode: BlendMode::Normal, opacity: op, seed: 0 }, None);
         let sum = e.image(w, h);
         e.pixels("fxs_add", &Params::default(), &acc, Some(&one), &sum, None);
         acc = sum;

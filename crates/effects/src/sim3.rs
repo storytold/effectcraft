@@ -575,7 +575,8 @@ fn mapper_from(ctx: &EffectCtx, group: &str, ephemeral: bool) -> Option<Mapper> 
 
 /// Draw a map layer frame as a particle: centred on (x, y) buffer px, rotated `angle` degrees
 /// and scaled, over `out`.
-fn blit_layer(out: &mut Image, lp: &crate::LayerPixels, x: f64, y: f64, angle: f64, scale: [f64; 2], buf_scale: f64, alpha: f32) {
+fn blit_layer(out: &mut Image, lp: &crate::LayerPixels, position: [f64; 2], angle: f64, scale: [f64; 2], buf_scale: f64, alpha: f32) {
+    let [x, y] = position;
     let (w, h) = (lp.size[0] * scale[0].abs() * buf_scale, lp.size[1] * scale[1].abs() * buf_scale);
     let r = (w * w + h * h).sqrt() * 0.5 + 1.0;
     let (x0, x1) = ((x - r).floor().max(0.0) as i64, (x + r).ceil().min(out.width as f64) as i64);
@@ -925,7 +926,7 @@ impl PgPlan {
     pub fn finish(&self, mut b: Buf) -> Buf {
         let mut fx = splat(b.img.width, b.img.height, &self.sprites.sprites, self.sprites.acc);
         for q in &self.blits {
-            blit_layer(&mut fx, &self.frames[q.frame], q.x, q.y, q.angle, q.scale, b.scale, q.alpha);
+            blit_layer(&mut fx, &self.frames[q.frame], [q.x, q.y], q.angle, q.scale, b.scale, q.alpha);
         }
         // Particles replace the layer's own pixels.
         b.img = combine(&b.img, &fx, 5);

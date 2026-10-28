@@ -1,6 +1,9 @@
+#[cfg(test)]
+use super::counters;
 use super::limits::{Budget, DECODE_BUDGET, Error, Result, decode_pixels, finite_sample, inflate, release_bytes, too_large};
-use super::model::{ColorMode, Pixels, Rect};
-use super::*;
+use super::model::{ColorMode, Layer, Pixels, Rect};
+use super::{Psd, Reader};
+use std::borrow::Cow;
 
 impl Psd {
     fn bytes_per_sample(&self) -> usize {
@@ -29,7 +32,7 @@ impl Psd {
     pub(crate) fn plane_bytes<'a>(&self, comp: u16, r: &mut Reader<'a>, w: usize, h: usize, budget: &mut Budget) -> Result<Cow<'a, [u8]>> {
         let rowb = self.row_bytes(w);
         let size = rowb.checked_mul(h).ok_or_else(|| too_large(w, h))?;
-        Ok(match self.open_planes(comp, r, 1, 1, w, h, budget)? {
+        Ok(match self.open_planes(comp, r, 1, 1, (w, h), budget)? {
             PlaneStream::Raw => Cow::Borrowed(r.bytes(size)?),
             PlaneStream::Rle(counts) => Cow::Owned(Self::unpack_plane(&counts, 0, r, rowb, h, budget)?),
             PlaneStream::Zip(mut v) => {
@@ -44,8 +47,8 @@ impl Psd {
     /// `w`×`h` samples, of which the first `want` are decoded: the RLE row sizes of every plane,
     /// or the inflated ZIP data, which holds all planes one after another (charged to `budget`
     /// before it is inflated).
-    #[allow(clippy::too_many_arguments)]
-    fn open_planes(&self, comp: u16, r: &mut Reader, total: usize, want: usize, w: usize, h: usize, budget: &mut Budget) -> Result<PlaneStream> {
+    fn open_planes(&self, comp: u16, r: &mut Reader, total: usize, want: usize, size: (usize, usize), budget: &mut Budget) -> Result<PlaneStream> {
+        let (w, h) = size;
         let size = self.row_bytes(w).checked_mul(h).ok_or_else(|| too_large(w, h))?;
         Ok(match comp {
             0 => PlaneStream::Raw,
@@ -72,17 +75,16 @@ impl Psd {
     /// planes are read from `r` in order, raw ones borrowed from the file data, ZIP ones from the
     /// inflated buffer (un-predicted in place; already charged by `open_planes`), RLE ones charged
     /// to `budget`.
-    #[allow(clippy::too_many_arguments)]
     fn decode_plane<'x, 'a: 'x>(
         &self,
         comp: u16,
         planes: &'x mut PlaneStream,
         r: &mut Reader<'a>,
         c: usize,
-        w: usize,
-        h: usize,
+        size: (usize, usize),
         budget: &mut Budget,
     ) -> Result<Cow<'x, [u8]>> {
+        let (w, h) = size;
         let rowb = self.row_bytes(w);
         let size = rowb.checked_mul(h).ok_or_else(|| too_large(w, h))?;
         Ok(match planes {
@@ -265,9 +267,9 @@ impl Psd {
         // Opaque black until a channel says otherwise.
         let mut data = budget.filled(n, [0.0f32, 0.0, 0.0, 1.0])?;
         let mut black = if self.mode == ColorMode::Cmyk && want > 3 { Some(budget.filled(n, 0.0f32)?) } else { None };
-        let mut stream = self.open_planes(comp, &mut r, nch, want, w, h, &mut budget)?;
+        let mut stream = self.open_planes(comp, &mut r, nch, want, (w, h), &mut budget)?;
         for c in 0..want {
-            let raw = self.decode_plane(comp, &mut stream, &mut r, c, w, h, &mut budget)?;
+            let raw = self.decode_plane(comp, &mut stream, &mut r, c, (w, h), &mut budget)?;
             self.store_merged_channel(c, &raw, &mut data, &mut black);
             release_bytes(&mut budget, raw);
         }
@@ -407,12 +409,19 @@ impl Psd {
                 }
             }
         }
+        self.apply_layer_mask(l, out_rect, &mut out, &mut budget)?;
+        Ok(Pixels { width: ow as u32, height: oh as u32, data: out })
+    }
+
+    /// Apply the raster mask to alpha, including its default outside the mask bounds.
+    fn apply_layer_mask(&self, l: &Layer, out_rect: Rect, out: &mut [[f32; 4]], budget: &mut Budget) -> Result<()> {
+        let (ow, oh) = (out_rect.width() as usize, out_rect.height() as usize);
         // Layer mask: multiplies alpha (also outside the mask rect, by its default colour).
         if let Some(m) = l.mask.filter(|m| !m.disabled) {
             let mc = l.channels.iter().find(|c| c.id == -2);
             let (mw, mh) = (m.rect.width() as usize, m.rect.height() as usize);
             let mask = match mc {
-                Some(c) if mw > 0 && mh > 0 => Some(self.channel_floats(c.offset, c.len, mw, mh, &mut budget)?),
+                Some(c) if mw > 0 && mh > 0 => Some(self.channel_floats(c.offset, c.len, mw, mh, budget)?),
                 _ => None,
             };
             let def = m.default_color as f32 / 255.0;
@@ -426,7 +435,7 @@ impl Psd {
                 }
             };
             match &mask {
-                None => scale(&mut out, outside),
+                None => scale(out, outside),
                 Some(mk) => {
                     // The columns of the output that fall inside the mask rect (the same for every row).
                     let lo = (i64::from(m.rect.left) - i64::from(out_rect.left)).clamp(0, ow as i64);
@@ -454,7 +463,7 @@ impl Psd {
                 }
             }
         }
-        Ok(Pixels { width: ow as u32, height: oh as u32, data: out })
+        Ok(())
     }
 }
 

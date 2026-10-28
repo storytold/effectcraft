@@ -91,7 +91,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
 
     // ---------------------------------------------------------------- Layer Transform
     if let Some(tr) = layer.transform().cloned() {
-        section_header(app, ui, &p, x0, w, y, "Layer Transform", "properties.transform");
+        section_header(app, &p, x0, w, y, "Layer Transform", "properties.transform");
         let rr = Rect::from_min_size(pos2(x0 + w - 40.0, y), vec2(40.0, ROW_H));
         let resp = ui.interact(rr, egui::Id::unique("props-reset"), Sense::click());
         p.text(rr.right_center(), Align2::RIGHT_CENTER, crate::i18n::tr("Reset"), Tokens::ui(12.0), if resp.hovered() { t.accent_hover } else { t.accent });
@@ -124,7 +124,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         divider(&p, x0, w, y - 4.0, &t);
         y = paragraph_section(app, ui, &p, &layer, &doc, x0, w, y + 4.0, &mut actions);
         divider(&p, x0, w, y - 4.0, &t);
-        section_header(app, ui, &p, x0, w, y + 4.0, "Text Animation", "properties.textAnimation");
+        section_header(app, &p, x0, w, y + 4.0, "Text Animation", "properties.textAnimation");
         y += ROW_H + 10.0;
         // Both buttons grow with their (translated) labels; English keeps its 116 / 84 px.
         let text_w = |s: &str| p.layout_no_wrap(s.to_string(), Tokens::ui(12.0), t.text).size().x;
@@ -180,11 +180,10 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
 }
 
-fn section_header(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, x0: f32, w: f32, y: f32, title: &str, auto: &str) {
+fn section_header(app: &mut EffectcraftApp, p: &egui::Painter, x0: f32, w: f32, y: f32, title: &str, auto: &str) {
     let t = app.tokens;
     p.text(pos2(x0, y + ROW_H / 2.0), Align2::LEFT_CENTER, title, Tokens::semibold(12.0), t.text);
     let r = Rect::from_min_size(pos2(x0, y), vec2(w, ROW_H));
-    let _ = ui;
     app.auto.add(auto, r, title);
 }
 
@@ -286,7 +285,14 @@ fn transform_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter,
         }
         Value::Scalar(v) => {
             let range = if pr.name == "Opacity" { (0.0, 100.0) } else { (-1e9, 1e9) };
-            let (vr, nv, _) = widgets::hot_number_at(ui, pos2(vx, cy - 9.0), egui::Id::unique(("props-v", uid)), *v, 0.5, range, decimals(*v), suffix, &t);
+            let (vr, nv, _) = widgets::hot_number_at(
+                ui,
+                pos2(vx, cy - 9.0),
+                egui::Id::unique(("props-v", uid)),
+                *v,
+                &widgets::HotSpec { speed: 0.5, range, decimals: decimals(*v), suffix },
+                &t,
+            );
             app.auto.add(&format!("{base}.value"), vr, &pr.name);
             if let Some(nv) = nv {
                 set(actions, json!(nv));
@@ -311,8 +317,14 @@ fn transform_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter,
                 }
             }
             for d in 0..n.min(c.len()) {
-                let (vr, nv, _) =
-                    widgets::hot_number_at(ui, pos2(x, cy - 9.0), egui::Id::unique(("props-v", uid, d)), c[d], 1.0, (-1e9, 1e9), decimals(c[d]), suffix, &t);
+                let (vr, nv, _) = widgets::hot_number_at(
+                    ui,
+                    pos2(x, cy - 9.0),
+                    egui::Id::unique(("props-v", uid, d)),
+                    c[d],
+                    &widgets::HotSpec { speed: 1.0, range: (-1e9, 1e9), decimals: decimals(c[d]), suffix },
+                    &t,
+                );
                 app.auto.add(&format!("{base}.value.{d}"), vr, &pr.name);
                 if let Some(nv) = nv {
                     let mut nc = c.clone();
@@ -358,7 +370,7 @@ fn text_section(
         v["layer"] = json!(lid);
         actions.push(("layer.setText".into(), v));
     };
-    section_header(app, ui, p, x0, w, y, "Text", "properties.text");
+    section_header(app, p, x0, w, y, "Text", "properties.text");
     y += ROW_H + 4.0;
     // Font family and style.
     let fr = Rect::from_min_size(pos2(x0, y), vec2(w, 22.0));
@@ -383,7 +395,14 @@ fn text_section(
     let col2 = x0 + w / 2.0;
     let field = |app: &mut EffectcraftApp, ui: &mut egui::Ui, x: f32, y: f32, glyph: &str, key: &str, v: f64, range: (f64, f64), suffix: &str| {
         p.text(pos2(x, y + 9.0), Align2::LEFT_CENTER, glyph, Tokens::semibold(11.0), t.text_dim);
-        let (r, nv, _) = widgets::hot_number_at(ui, pos2(x + 26.0, y), egui::Id::unique(("props-text", key)), v, 0.5, range, decimals(v), suffix, &t);
+        let (r, nv, _) = widgets::hot_number_at(
+            ui,
+            pos2(x + 26.0, y),
+            egui::Id::unique(("props-text", key)),
+            v,
+            &widgets::HotSpec { speed: 0.5, range, decimals: decimals(v), suffix },
+            &t,
+        );
         app.auto.add(&format!("properties.text.{key}"), r, key);
         nv
     };
@@ -462,7 +481,7 @@ fn paragraph_section(
     actions: &mut Actions,
 ) -> f32 {
     let t = app.tokens;
-    section_header(app, ui, p, x0, w, y, "Paragraph", "properties.paragraph");
+    section_header(app, p, x0, w, y, "Paragraph", "properties.paragraph");
     y += ROW_H + 4.0;
     for (i, (j, key)) in ALIGNS.into_iter().enumerate() {
         let r = Rect::from_min_size(pos2(x0 + i as f32 * 26.0, y), vec2(22.0, 22.0));

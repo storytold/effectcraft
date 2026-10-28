@@ -1,4 +1,4 @@
-use super::*;
+use super::{Arc, Buf, EffectHost, EvalCtx, ItemKind, Layer, LayerPixels, LayerSource, Params, Renderer, Tick, three_d};
 
 /// Layer parameters and audio for effects (see [`effectcraft_effects::EffectHost`]). What it
 /// hands out is in effect space (see [`effect_bounds`]): the other layer's for its pixels, the

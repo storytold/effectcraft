@@ -7,7 +7,7 @@ use rayon::prelude::*;
 
 use super::bundle::{self, BaCam, BaObs, BaOpts, FocalMode};
 use super::geometry::{self, Pose};
-use super::linalg::*;
+use super::linalg::{V3, add, log_rot, mm, mt, mtv, mv, norm, normalize, rodrigues, scale, slerp, sub, sym_eigen};
 use super::{CameraSolve, CameraTracks, Distortion, ShotType, SolveMethod, SolveSettings, SolvedFrame, SolvedPoint};
 use crate::fit::{Model, ransac};
 

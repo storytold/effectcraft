@@ -1,4 +1,4 @@
-use super::*;
+use super::{EffectcraftApp, Tokens, json, theme};
 
 impl EffectcraftApp {
     /// Apply changed settings: theme and brightness, label colours, tool tips, preview caches.
@@ -67,6 +67,7 @@ impl EffectcraftApp {
 #[cfg(test)]
 mod appearance_tests {
     use super::*;
+    use crate::menus;
     use crate::theme::ThemeKind;
 
     fn app() -> EffectcraftApp {

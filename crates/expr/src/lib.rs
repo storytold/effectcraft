@@ -93,7 +93,7 @@ impl ExprHost for Expressions {
             return Ok([v.first().copied().unwrap_or(100.0), v.get(1).copied().unwrap_or(100.0), v.get(2).copied().unwrap_or(100.0)]);
         };
         let value = prop.value_at(layer.layer_time(ctx.time));
-        let out = evaluate_out(self, ctx, layer, prop, &value, &e.text, [index as f64 + 1.0, total as f64], selector)?;
+        let out = evaluate_out(self, ctx, layer, prop, &value, &e.text, TextSelector { index_total: [index as f64 + 1.0, total as f64], value: selector })?;
         let num = |o: &runtime::Out| match o {
             runtime::Out::Num(x) => Some(*x),
             runtime::Out::Bool(b) => Some(if *b { 100.0 } else { 0.0 }),
@@ -124,13 +124,17 @@ impl Drop for FrameGuard {
 /// Evaluate `text` as the expression of `prop` on `layer` at `ctx.time`, given its keyframed
 /// `value`. Other properties' expressions are evaluated through `host`.
 pub fn evaluate(host: &dyn ExprHost, ctx: &EvalCtx, layer: &Layer, prop: &Property, value: &Value, text: &str) -> Result<Value, String> {
-    let out = evaluate_out(host, ctx, layer, prop, value, text, [1.0, 1.0], [100.0; 3])?;
+    let out = evaluate_out(host, ctx, layer, prop, value, text, TextSelector { index_total: [1.0, 1.0], value: [100.0; 3] })?;
     runtime::to_value(&out, value)
 }
 
-/// Run an expression and return the raw script result. `text_sel` / `selector` are the text
-/// Expression Selector's `[textIndex, textTotal]` and `selectorValue`.
-#[allow(clippy::too_many_arguments)]
+/// Expression Selector state: `[textIndex, textTotal]` and `selectorValue`.
+struct TextSelector {
+    index_total: [f64; 2],
+    value: [f64; 3],
+}
+
+/// Run an expression and return the raw script result.
 fn evaluate_out(
     host: &dyn ExprHost,
     ctx: &EvalCtx,
@@ -138,9 +142,9 @@ fn evaluate_out(
     prop: &Property,
     value: &Value,
     text: &str,
-    text_sel: [f64; 2],
-    selector: [f64; 3],
+    text_selector: TextSelector,
 ) -> Result<runtime::Out, String> {
+    let TextSelector { index_total: text_sel, value: selector } = text_selector;
     let owner = Owner { comp: ctx.comp_id.0, layer: layer.id.0, uid: prop.uid, time: ctx.time, text: text.to_string() };
     let (depth, cycle) = FRAMES.with(|f| {
         let f = f.borrow();

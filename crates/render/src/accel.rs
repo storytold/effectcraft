@@ -2,7 +2,9 @@ use super::frames::content_bounds;
 use super::fx_host::MAX_FX_DEPTH;
 use super::layers::StyledLayer;
 use super::opts::LayerTiming;
-use super::*;
+use super::{
+    Arc, AutoPick, Buf, EffectCtx, EvalCtx, Image, ItemId, ItemKind, Layer, LayerSource, Mat3, MatteKind, Renderer, Tick, cache, color, masks, three_d, vec2,
+};
 
 /// Which compositor renders a frame (Project Settings ▸ Video Rendering and Effects).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -283,7 +285,7 @@ impl<'a> Renderer<'a> {
     /// layers).
     pub fn run_effects_on(&self, ctx: &EvalCtx, layer: &Layer, adjustment: bool, target: &mut dyn FxTarget) {
         // `target` is used as it is: the comp below for adjustment layers (the callers).
-        self.run_effect_stack(ctx, layer, adjustment, usize::MAX, None, [0.0; 2], target);
+        self.run_effect_stack(ctx, layer, crate::pipeline::EffectStack { adjustment, limit: usize::MAX, origin: [0.0; 2] }, None, target);
     }
 
     /// [`Renderer::run_effects_on`] for a (non-adjustment) layer's own pixels: `target` holds
@@ -291,7 +293,7 @@ impl<'a> Renderer<'a> {
     /// there. Returns the effect-space origin in layer coordinates (rebase by its negation).
     pub fn run_layer_effects_on(&self, ctx: &EvalCtx, layer: &Layer, target: &mut dyn FxTarget) -> [f64; 2] {
         let origin = ctx.effect_bounds(layer).1;
-        self.run_effect_stack(ctx, layer, false, usize::MAX, None, origin, target);
+        self.run_effect_stack(ctx, layer, crate::pipeline::EffectStack { adjustment: false, limit: usize::MAX, origin }, None, target);
         origin
     }
 

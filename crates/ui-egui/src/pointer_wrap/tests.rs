@@ -67,10 +67,7 @@ impl Scrub {
                     pos2(100.0, 100.0),
                     Id::unique("scrub"),
                     self.value,
-                    1.0,
-                    (-1e9, 1e9),
-                    1,
-                    "",
+                    &crate::widgets::HotSpec { speed: 1.0, range: (-1e9, 1e9), decimals: 1, suffix: "" },
                     &crate::theme::Tokens::for_kind(crate::theme::ThemeKind::Dark),
                 );
                 if let Some(v) = value {

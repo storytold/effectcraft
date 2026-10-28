@@ -25,11 +25,19 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     p.rect_filled(rect, 0.0, t.header_bg);
     p.line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0, t.app_bg));
     let cy = rect.center().y;
-    let mut x = rect.min.x + if app.integrated_titlebar && !app.ui.show_menu_bar { 80.0 } else { 10.0 };
+    let x = rect.min.x + if app.integrated_titlebar && !app.ui.show_menu_bar { 80.0 } else { 10.0 };
+    let x = brand_and_home(app, ui, &p, x, cy);
+    let x = tool_slots(app, ui, &p, x, cy);
+    let x = tool_options_bar(app, ui, &p, x + 10.0, cy);
+    let x = snapping_toggle(app, ui, &p, x, cy);
+    right_side(app, ui, &p, rect, x, cy);
+}
 
-    // Brand mark.
+/// The brand mark (About) and the Home button; returns the x after them.
+fn brand_and_home(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, mut x: f32, cy: f32) -> f32 {
+    let t = app.tokens;
     let brand = Rect::from_min_size(pos2(x, cy - 12.0), vec2(24.0, 24.0));
-    paint_logo(&p, brand);
+    paint_logo(p, brand);
     let bresp = ui.interact(brand, egui::Id::unique("brand"), Sense::click());
     app.auto.add_response("header.about", &bresp, "About EffectCraft");
     widgets::focus_outline(ui, &bresp, &t);
@@ -38,7 +46,6 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
     x += 32.0;
 
-    // Home.
     let home = Rect::from_min_size(pos2(x, cy - 13.0), vec2(26.0, 26.0));
     let home_response = widgets::icon_button(ui, home, Icon::Home, app.ui.start_screen, &t, egui::Id::unique("tool-home")).on_hover_text(tr("Home"));
     app.auto.add_response("header.home", &home_response, "Home");
@@ -47,78 +54,19 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
     x += 30.0;
     p.line_segment([pos2(x, cy - 10.0), pos2(x, cy + 10.0)], Stroke::new(1.0, t.separator));
-    x += 6.0;
+    x + 6.0
+}
 
-    // Tool slots (with group separators after camera tools and pan-behind).
+/// The tool slots (with group separators after camera tools and pan-behind); returns the x after them.
+fn tool_slots(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, mut x: f32, cy: f32) -> f32 {
+    let t = app.tokens;
     let held_id = egui::Id::unique("tool-slot-held");
     if ui.input(|i| i.pointer.any_pressed()) {
         ui.data_mut(|d| d.remove::<egui::Id>(held_id));
     }
     for (si, slot) in Tool::SLOTS.iter().enumerate() {
-        let cur = app.ui.slot_tools.get(si).copied().unwrap_or(slot[0]);
         let r = Rect::from_min_size(pos2(x, cy - 13.0), vec2(26.0, 26.0));
-        let active = slot.contains(&app.ui.tool);
-        let id = egui::Id::unique(("tool-slot", si));
-        let resp = widgets::icon_button(ui, r, cur.icon(), active, &t, id);
-        if slot.len() > 1 {
-            // Flyout corner triangle.
-            p.add(egui::Shape::convex_polygon(
-                vec![pos2(r.max.x - 2.0, r.max.y - 6.0), pos2(r.max.x - 2.0, r.max.y - 2.0), pos2(r.max.x - 6.0, r.max.y - 2.0)],
-                if active { Color32::WHITE } else { t.text_dim },
-                Stroke::NONE,
-            ));
-        }
-        app.auto.add_response(&format!("tools.{cur:?}"), &resp, cur.label());
-        let tip = match cur.shortcut() {
-            Some(s) => format!("{} ({})", cur.label(), crate::menus::shortcut_text(s)),
-            None => cur.label().to_string(),
-        };
-        let resp = resp.on_hover_text(tip);
-        let held = ui.data(|d| d.get_temp::<egui::Id>(held_id)) == Some(id);
-        if resp.clicked() && !held {
-            app.ui.tool = cur;
-        }
-        // Ctrl+double-click Pan Behind: Center Anchor Point in Layer Content.
-        if cur == Tool::PanBehind
-            && resp.double_clicked()
-            && ui.input(|i| i.modifiers.command)
-            && let Err(e) = crate::menus::invoke(app, ui.ctx(), "layer.centerAnchor", json!({}))
-        {
-            app.ui.status = e;
-        }
-        if slot.len() > 1 {
-            let held_for = resp.is_pointer_button_down_on().then(|| ui.input(|i| i.pointer.press_start_time().map(|s| i.time - s))).flatten();
-            if let Some(seconds) = held_for
-                && seconds < 0.35
-            {
-                ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(0.35 - seconds));
-            }
-            let long_press = held_for.is_some_and(|seconds| seconds >= 0.35) && !held;
-            let command = if resp.secondary_clicked() || long_press {
-                if long_press {
-                    ui.data_mut(|d| d.insert_temp(held_id, id));
-                }
-                Some(egui::SetOpenCommand::Bool(true))
-            } else if resp.clicked() && !held {
-                Some(egui::SetOpenCommand::Bool(false))
-            } else {
-                None
-            };
-            let close_behavior = if held && resp.clicked() { egui::PopupCloseBehavior::IgnoreClicks } else { egui::PopupCloseBehavior::CloseOnClickOutside };
-            egui::Popup::menu(&resp).style(crate::widgets::menu_style).open_memory(command).close_behavior(close_behavior).show(|ui| {
-                for tool in slot.iter() {
-                    let row = ui.selectable_label(app.ui.tool == *tool, tool.label());
-                    app.auto.add(&format!("tools.select.{tool:?}"), row.rect, tool.label());
-                    if row.clicked() {
-                        app.ui.tool = *tool;
-                        if let Some(saved) = app.ui.slot_tools.get_mut(si) {
-                            *saved = *tool;
-                        }
-                        ui.close();
-                    }
-                }
-            });
-        }
+        tool_slot(app, ui, p, si, slot, r, held_id);
         x += 28.0;
         if matches!(si, 2 | 5 | 7 | 10 | 13) {
             x += 4.0;
@@ -126,17 +74,96 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             x += 6.0;
         }
     }
+    x
+}
 
-    // Tool options.
-    x += 10.0;
-    // Selected shape layers: the options show their paint and edit it (as in After Effects).
-    let shape_layers: Vec<u64> = app
-        .session
+/// One tool slot button in `r`: select on click, Ctrl+double-click Pan Behind, and the fly-out.
+fn tool_slot(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, si: usize, slot: &[Tool], r: Rect, held_id: egui::Id) {
+    let t = app.tokens;
+    let cur = app.ui.slot_tools.get(si).copied().unwrap_or(slot[0]);
+    let active = slot.contains(&app.ui.tool);
+    let id = egui::Id::unique(("tool-slot", si));
+    let resp = widgets::icon_button(ui, r, cur.icon(), active, &t, id);
+    if slot.len() > 1 {
+        // Flyout corner triangle.
+        p.add(egui::Shape::convex_polygon(
+            vec![pos2(r.max.x - 2.0, r.max.y - 6.0), pos2(r.max.x - 2.0, r.max.y - 2.0), pos2(r.max.x - 6.0, r.max.y - 2.0)],
+            if active { Color32::WHITE } else { t.text_dim },
+            Stroke::NONE,
+        ));
+    }
+    app.auto.add_response(&format!("tools.{cur:?}"), &resp, cur.label());
+    let tip = match cur.shortcut() {
+        Some(s) => format!("{} ({})", cur.label(), crate::menus::shortcut_text(s)),
+        None => cur.label().to_string(),
+    };
+    let resp = resp.on_hover_text(tip);
+    let held = ui.data(|d| d.get_temp::<egui::Id>(held_id)) == Some(id);
+    if resp.clicked() && !held {
+        app.ui.tool = cur;
+    }
+    // Ctrl+double-click Pan Behind: Center Anchor Point in Layer Content.
+    if cur == Tool::PanBehind
+        && resp.double_clicked()
+        && ui.input(|i| i.modifiers.command)
+        && let Err(e) = crate::menus::invoke(app, ui.ctx(), "layer.centerAnchor", json!({}))
+    {
+        app.ui.status = e;
+    }
+    if slot.len() > 1 {
+        slot_flyout(app, ui, si, slot, &resp, held_id);
+    }
+}
+
+/// The fly-out menu of a multi-tool slot: right-click or press-and-hold opens it.
+fn slot_flyout(app: &mut EffectcraftApp, ui: &mut egui::Ui, si: usize, slot: &[Tool], resp: &egui::Response, held_id: egui::Id) {
+    let id = resp.id;
+    let held = ui.data(|d| d.get_temp::<egui::Id>(held_id)) == Some(id);
+    let held_for = resp.is_pointer_button_down_on().then(|| ui.input(|i| i.pointer.press_start_time().map(|s| i.time - s))).flatten();
+    if let Some(seconds) = held_for
+        && seconds < 0.35
+    {
+        ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(0.35 - seconds));
+    }
+    let long_press = held_for.is_some_and(|seconds| seconds >= 0.35) && !held;
+    let command = if resp.secondary_clicked() || long_press {
+        if long_press {
+            ui.data_mut(|d| d.insert_temp(held_id, id));
+        }
+        Some(egui::SetOpenCommand::Bool(true))
+    } else if resp.clicked() && !held {
+        Some(egui::SetOpenCommand::Bool(false))
+    } else {
+        None
+    };
+    let close_behavior = if held && resp.clicked() { egui::PopupCloseBehavior::IgnoreClicks } else { egui::PopupCloseBehavior::CloseOnClickOutside };
+    egui::Popup::menu(resp).style(crate::widgets::menu_style).open_memory(command).close_behavior(close_behavior).show(|ui| {
+        for tool in slot.iter() {
+            let row = ui.selectable_label(app.ui.tool == *tool, tool.label());
+            app.auto.add(&format!("tools.select.{tool:?}"), row.rect, tool.label());
+            if row.clicked() {
+                app.ui.tool = *tool;
+                if let Some(saved) = app.ui.slot_tools.get_mut(si) {
+                    *saved = *tool;
+                }
+                ui.close();
+            }
+        }
+    });
+}
+
+/// The ids of the selected shape layers: the options show their paint and edit it.
+fn selected_shape_layers(app: &EffectcraftApp) -> Vec<u64> {
+    app.session
         .active_comp()
         .map(|c| {
             app.session.state.selected_layers.iter().filter(|id| c.layer(**id).is_some_and(|l| matches!(l.source, LayerSource::Shape))).map(|id| id.0).collect()
         })
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+
+/// Mirrors the first selected shape layer's paint into the shape tool (as in After Effects).
+fn sync_layer_paint(app: &mut EffectcraftApp, shape_layers: &[u64]) {
     let layer_paint = shape_layers.first().and_then(|id| app.session.active_comp()?.layer(LayerId(*id))).map(|l| {
         let lt = l.layer_time(app.session.time());
         (effectcraft_engine::commands::shape_stroke::first_paint(l, lt), effectcraft_engine::commands::shape_stroke::first_paint_kinds(l, lt))
@@ -154,6 +181,13 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         }
         tool.stroke_width = width.unwrap_or(0.0);
     }
+}
+
+/// Options for the active tool (shape creation, fill and stroke, puppet, roto); returns the x after them.
+fn tool_options_bar(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, mut x: f32, cy: f32) -> f32 {
+    // Selected shape layers: the options show their paint and edit it (as in After Effects).
+    let shape_layers = selected_shape_layers(app);
+    sync_layer_paint(app, &shape_layers);
     // One undo step per picker session or width drag: end the merge once both are done.
     let picking = ["fill", "stroke"].iter().any(|k| widgets::popup_is_open(ui, picker_id(k)));
     if !picking && !ui.input(|i| i.pointer.any_down()) && app.session.history.merge_key.as_deref().is_some_and(|k| k.starts_with("tool-")) {
@@ -167,14 +201,20 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     // Fill and Stroke, hidden while the tools draw masks.
     let masking = drawing && !shape_layers.is_empty() && app.session.state.shape_tool.creates_mask;
     if (drawing || !shape_layers.is_empty()) && !masking {
-        x = fill_stroke_options(app, ui, &p, &shape_layers, x, cy);
+        x = fill_stroke_options(app, ui, p, &shape_layers, x, cy);
     }
     if app.ui.tool.puppet_kind().is_some() {
-        x = puppet_options(app, ui, &p, x, cy);
+        x = puppet_options(app, ui, p, x, cy);
     }
     if app.ui.tool.roto_kind(false).is_some() {
-        x = roto_options(app, ui, &p, x, cy);
+        x = roto_options(app, ui, p, x, cy);
     }
+    x
+}
+
+/// The Snapping checkbox, its label and options menu; returns the x where it started.
+fn snapping_toggle(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, x: f32, cy: f32) -> f32 {
+    let t = app.tokens;
     let snap = Rect::from_min_size(pos2(x, cy - 10.0), vec2(20.0, 20.0));
     // The engine owns snapping (View ▸ Snapping); the checkbox mirrors it.
     app.ui.snapping = app.session.state.snapping;
@@ -185,9 +225,24 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     app.auto.add("header.snapping", snap, "Snapping");
     let label = p.text(pos2(snap.max.x + 4.0, cy), Align2::LEFT_CENTER, tr("Snapping"), Tokens::ui(12.0), t.text_dim);
     snapping_options(app, ui, Rect::from_min_size(pos2(label.max.x + 2.0, cy - 9.0), vec2(18.0, 18.0)));
+    x
+}
 
-    // Right side: community buttons, workspaces.
-    let mut rx = rect.max.x - 10.0;
+/// Right side: community buttons, appearance and workspaces; `left` is where the tools end.
+fn right_side(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, rect: Rect, left: f32, cy: f32) {
+    let t = app.tokens;
+    let rx = community_buttons(app, ui, p, rect.max.x - 10.0, cy);
+    let mut rx = appearance_button(app, ui, rx, cy);
+    rx -= 10.0;
+    p.line_segment([pos2(rx, cy - 10.0), pos2(rx, cy + 10.0)], Stroke::new(1.0, t.separator));
+    rx -= 10.0;
+    let rx = workspace_menu(app, ui, p, rx, cy);
+    workspace_tabs(app, ui, p, rx, left, cy);
+}
+
+/// The Discord pill and the GitHub and website buttons, right to left from `rx`; returns the new `rx`.
+fn community_buttons(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, mut rx: f32, cy: f32) -> f32 {
+    let t = app.tokens;
     // The pill fits its label (icon, gap, text) with even padding: it was a fixed 104 px with the
     // text at its left, which left a wide gap on the right (#581).
     let label = p.layout_no_wrap(tr("Discord").to_string(), Tokens::semibold(12.0), Color32::WHITE);
@@ -195,7 +250,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let dresp = ui.interact(discord, egui::Id::unique("hdr-discord"), Sense::click());
     let dc = Color32::from_rgb(0x58, 0x65, 0xf2);
     p.rect_filled(discord, 13.0, if dresp.hovered() { dc.gamma_multiply(1.2) } else { dc });
-    icons::paint(&p, Rect::from_center_size(pos2(discord.min.x + 17.0, cy), vec2(14.0, 14.0)), Icon::Chat, Color32::WHITE);
+    icons::paint(p, Rect::from_center_size(pos2(discord.min.x + 17.0, cy), vec2(14.0, 14.0)), Icon::Chat, Color32::WHITE);
     p.galley(pos2(discord.min.x + 30.0, cy - label.size().y / 2.0), label, Color32::WHITE);
     app.auto.add("header.discord", discord, "Join the ArtCraft Discord");
     if dresp.on_hover_text(tr("Join the ArtCraft community on Discord")).clicked() {
@@ -212,7 +267,13 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         app.auto.add(&format!("header.{}", &id[4..]), r, tip);
         rx = r.min.x - 4.0;
     }
-    // Appearance: Sync with System, Light, Dark (a monitor, sun or moon), one click to the next.
+    rx
+}
+
+/// Appearance: Sync with System, Light, Dark (a monitor, sun or moon), one click to the next;
+/// returns the new `rx`.
+fn appearance_button(app: &mut EffectcraftApp, ui: &mut egui::Ui, rx: f32, cy: f32) -> f32 {
+    let t = app.tokens;
     let (icon, mode) = match app.session.prefs.appearance.appearance_mode.as_str() {
         "auto" => (Icon::Monitor, tr("Sync with System")),
         "light" => (Icon::Sun, tr("Light")),
@@ -224,37 +285,41 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     if response.clicked() {
         app.cycle_appearance(ui.ctx());
     }
-    response.context_menu(|ui| {
-        let settings = ui.button(tr("Appearance Settings…"));
-        app.auto.add("header.appearanceSettings", settings.rect, "Appearance Settings…");
-        if settings.clicked() {
-            crate::panels::settings::open(app, "appearance");
-            ui.close();
-        }
-        let favorites = app.session.prefs.appearance.favorite_themes.clone();
-        for options in [effectcraft_engine::prefs::LIGHT_THEMES, effectcraft_engine::prefs::DARK_THEMES] {
-            let group: Vec<_> = options.iter().filter(|(_, id)| favorites.iter().any(|saved| saved == id)).collect();
-            if !group.is_empty() {
-                ui.separator();
-            }
-            for (label, id) in group {
-                let r = ui.selectable_label(app.ui.theme.name() == *id, tr(label));
-                app.auto.add(&format!("header.favoriteTheme.{id}"), r.rect, label);
-                if r.clicked() {
-                    if let Some(kind) = crate::theme::ThemeKind::from_name(id) {
-                        app.set_theme(ui.ctx(), kind);
-                    }
-                    ui.close();
-                }
-            }
-        }
-    });
+    response.context_menu(|ui| appearance_menu(app, ui));
     app.auto.add("header.appearance", r, &tip);
-    rx = r.min.x - 4.0;
-    rx -= 10.0;
-    p.line_segment([pos2(rx, cy - 10.0), pos2(rx, cy + 10.0)], Stroke::new(1.0, t.separator));
-    rx -= 10.0;
-    // Workspace tabs (right to left), with a » menu of all.
+    r.min.x - 4.0
+}
+
+/// The appearance button's context menu: settings and the favorite themes.
+fn appearance_menu(app: &mut EffectcraftApp, ui: &mut egui::Ui) {
+    let settings = ui.button(tr("Appearance Settings…"));
+    app.auto.add("header.appearanceSettings", settings.rect, "Appearance Settings…");
+    if settings.clicked() {
+        crate::panels::settings::open(app, "appearance");
+        ui.close();
+    }
+    let favorites = app.session.prefs.appearance.favorite_themes.clone();
+    for options in [effectcraft_engine::prefs::LIGHT_THEMES, effectcraft_engine::prefs::DARK_THEMES] {
+        let group: Vec<_> = options.iter().filter(|(_, id)| favorites.iter().any(|saved| saved == id)).collect();
+        if !group.is_empty() {
+            ui.separator();
+        }
+        for (label, id) in group {
+            let r = ui.selectable_label(app.ui.theme.name() == *id, tr(label));
+            app.auto.add(&format!("header.favoriteTheme.{id}"), r.rect, label);
+            if r.clicked() {
+                if let Some(kind) = crate::theme::ThemeKind::from_name(id) {
+                    app.set_theme(ui.ctx(), kind);
+                }
+                ui.close();
+            }
+        }
+    }
+}
+
+/// The » button with the menu of all workspaces; returns the new `rx`.
+fn workspace_menu(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, rx: f32, cy: f32) -> f32 {
+    let t = app.tokens;
     let more = Rect::from_min_max(pos2(rx - 20.0, cy - 11.0), pos2(rx, cy + 11.0));
     let mresp = ui.interact(more, egui::Id::unique("ws-more"), Sense::click());
     p.text(more.center(), Align2::CENTER_CENTER, "»", Tokens::ui(15.0), if mresp.hovered() { t.text } else { t.text_dim });
@@ -273,15 +338,19 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     ) {
         app.set_workspace(crate::dock::WORKSPACES[i]);
     }
-    rx = more.min.x - 6.0;
-    // After Effects 2026's workspace bar order (right to left here): Default, Review, Learn,
-    // Small Screen, Standard.
+    more.min.x - 6.0
+}
+
+/// Workspace tabs, right to left from `rx`, stopping 120 px right of `left`.
+/// After Effects 2026's order (right to left here): Default, Review, Learn, Small Screen, Standard.
+fn workspace_tabs(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, mut rx: f32, left: f32, cy: f32) {
+    let t = app.tokens;
     let shown = ["Standard", "Small Screen", "Learn", "Review", "Default"];
     for name in shown {
         let g = p.layout_no_wrap(crate::i18n::command_label("window.workspace", name).to_string(), Tokens::ui(12.0), t.text);
         let w = g.size().x + 16.0;
         let r = Rect::from_min_max(pos2(rx - w, cy - 13.0), pos2(rx, cy + 13.0));
-        if r.min.x < x + 120.0 {
+        if r.min.x < left + 120.0 {
             break;
         }
         let active = app.ui.workspace == name;
@@ -439,7 +508,14 @@ fn fill_stroke_options(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Pa
         x = sr.max.x + 12.0;
     }
     let width = app.session.state.shape_tool.stroke_width;
-    let (r, v, _) = widgets::hot_number_at(ui, pos2(x - 6.0, cy - 9.0), egui::Id::unique("tool-stroke-w"), width, 0.2, (0.0, 1000.0), 0, " px", &t);
+    let (r, v, _) = widgets::hot_number_at(
+        ui,
+        pos2(x - 6.0, cy - 9.0),
+        egui::Id::unique("tool-stroke-w"),
+        width,
+        &widgets::HotSpec { speed: 0.2, range: (0.0, 1000.0), decimals: 0, suffix: " px" },
+        &t,
+    );
     if let Some(v) = v {
         tool_options(app, json!({"strokeWidth": v}));
         paint(app, "strokeWidth", json!(v));
@@ -506,7 +582,14 @@ fn paint_options_popup(app: &mut EffectcraftApp, ui: &mut egui::Ui, shape_layers
             }
             app.auto.add(&format!("header.{key}Options.blend"), blend_rect, "Blend Mode");
             p.text(row(98.0), Align2::LEFT_CENTER, tr("Opacity:"), Tokens::ui(12.0), t.text_dim);
-            let (or, v, _) = widgets::hot_number_at(ui, row(89.0) + vec2(84.0, 0.0), id.with("opacity"), tp.opacity, 0.5, (0.0, 100.0), 0, "%", &t);
+            let (or, v, _) = widgets::hot_number_at(
+                ui,
+                row(89.0) + vec2(84.0, 0.0),
+                id.with("opacity"),
+                tp.opacity,
+                &widgets::HotSpec { speed: 0.5, range: (0.0, 100.0), decimals: 0, suffix: "%" },
+                &t,
+            );
             app.auto.add(&format!("header.{key}Options.opacity"), or, "Opacity");
             if let Some(v) = v {
                 let k_opacity = format!("{key}Opacity");
@@ -577,7 +660,14 @@ fn roto_options(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, 
     let label = tr("Diameter:");
     let lr = p.text(pos2(x, cy), Align2::LEFT_CENTER, label, Tokens::ui(12.0), t.text_dim);
     x = lr.max.x + 6.0;
-    let (r, nv, _) = widgets::hot_number_at(ui, pos2(x, cy - 9.0), egui::Id::unique(("roto-opt", key)), v, 0.5, (1.0, 5000.0), 0, " px", &t);
+    let (r, nv, _) = widgets::hot_number_at(
+        ui,
+        pos2(x, cy - 9.0),
+        egui::Id::unique(("roto-opt", key)),
+        v,
+        &widgets::HotSpec { speed: 0.5, range: (1.0, 5000.0), decimals: 0, suffix: " px" },
+        &t,
+    );
     app.auto.add("header.roto.diameter", r, label);
     if let Some(nv) = nv
         && let Err(e) = app.session.execute("roto.options", json!({key: nv}))
@@ -604,7 +694,14 @@ fn puppet_options(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter
     for (label, key, v, range) in [("Expansion:", "expansion", o.expansion, (-100.0, 200.0)), ("Density:", "density", o.density, (0.0, 100.0))] {
         p.text(pos2(x, cy), Align2::LEFT_CENTER, label, Tokens::ui(12.0), t.text_dim);
         x += if key == "expansion" { 64.0 } else { 52.0 };
-        let (r, nv, _) = widgets::hot_number_at(ui, pos2(x, cy - 9.0), egui::Id::unique(("puppet-opt", key)), v, 0.2, range, 0, "", &t);
+        let (r, nv, _) = widgets::hot_number_at(
+            ui,
+            pos2(x, cy - 9.0),
+            egui::Id::unique(("puppet-opt", key)),
+            v,
+            &widgets::HotSpec { speed: 0.2, range, decimals: 0, suffix: "" },
+            &t,
+        );
         app.auto.add(&format!("header.puppet.{key}"), r, label);
         if let Some(nv) = nv {
             let _ = app.session.execute("puppet.mesh", json!({key: nv, "merge": format!("puppet-opt-{key}")}));
