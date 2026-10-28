@@ -58,7 +58,7 @@ fn h264() -> Option<PathBuf> {
     )
 }
 
-/// VP9: no hardware decoder registered on Linux takes it.
+/// VP9: a codec the hardware of some platforms does not take (none registered on Linux).
 fn vp9() -> Option<PathBuf> {
     fixture("vp9.webm", &["-f", "lavfi", "-i", "testsrc2=s=320x240:r=24:d=1", "-c:v", "libvpx-vp9", "-b:v", "500k", "-pix_fmt", "yuv420p"])
 }
@@ -113,11 +113,19 @@ fn codecs_the_hardware_does_not_take_stay_in_software() {
     hw.set_hardware_decoding(true);
     let before = hw_frames(&hw);
     let a = frames(&hw, &path, 12);
-    assert_eq!(hw_frames(&hw), before, "VP9 is not decoded in hardware");
+    // Whether a platform's hardware takes VP9 depends on the machine (Media Foundation does where
+    // the VP9 extension is installed; Linux has no registered decoder for it). Software keeps it
+    // exactly; a hardware decoder that took it must still match software.
+    let taken = hw_frames(&hw) > before;
     sw.set_hardware_decoding(false);
     let b = frames(&sw, &path, 12);
-    for (x, y) in a.iter().zip(&b) {
-        assert_eq!(x.data, y.data, "same software decoder, same pixels");
+    for (i, (x, y)) in a.iter().zip(&b).enumerate() {
+        if taken {
+            let db = psnr(x, y);
+            assert!(db > 60.0, "frame {i}: hardware vs software {db:.1} dB");
+        } else {
+            assert_eq!(x.data, y.data, "same software decoder, same pixels");
+        }
     }
     sw.set_hardware_decoding(true);
 }
