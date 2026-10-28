@@ -89,8 +89,14 @@ impl StoredPaths {
     /// Record the footage paths of `p`, loaded from the document at `document`. A path already
     /// recorded keeps the document it came from first.
     pub(crate) fn add(&mut self, p: &Project, document: Option<&str>) {
+        self.add_items(p, |_| true, document);
+    }
+
+    /// Record the footage paths of the items of `p` that `pick` selects, loaded from the document
+    /// at `document` (an imported file: the rest of the project keeps its own origin).
+    pub(crate) fn add_items(&mut self, p: &Project, pick: impl Fn(ItemId) -> bool, document: Option<&str>) {
         let map = Arc::make_mut(&mut self.0);
-        for item in p.items.values() {
+        for item in p.items.values().filter(|i| pick(i.id)) {
             if let ItemKind::Footage(f) = &item.kind {
                 for q in paths_of(f) {
                     map.entry(q.clone()).or_insert_with(|| document.map(str::to_string));
@@ -134,8 +140,13 @@ impl StoredPaths {
 /// replaced by the file they resolve to, and an item with a path that is not followed is marked
 /// missing. Returns those items with the refused path and why.
 pub(crate) fn resolve_footage(p: &mut Project, project: Option<&str>) -> Vec<(ItemId, String, NotFollowed)> {
+    resolve_footage_of(p, |_| true, project)
+}
+
+/// [`resolve_footage`] for the items of `p` that `pick` selects (the ones an import added).
+pub(crate) fn resolve_footage_of(p: &mut Project, pick: impl Fn(ItemId) -> bool, project: Option<&str>) -> Vec<(ItemId, String, NotFollowed)> {
     let mut refused = vec![];
-    for item in p.items.values_mut() {
+    for item in p.items.values_mut().filter(|i| pick(i.id)) {
         let ItemKind::Footage(f) = &mut item.kind else { continue };
         match footage_paths(f, project) {
             Ok((path, sequence)) => {

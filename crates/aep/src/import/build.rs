@@ -92,7 +92,10 @@ pub(crate) fn run(project: &mut Project, view: &AepProject<'_, '_>, options: &Im
             }
             Some(AepKind::Composition) => {
                 let name = if name.is_empty() { "Composition".to_string() } else { name };
-                let Some(comp_view) = item.comp() else { continue };
+                let Some(comp_view) = item.comp() else {
+                    cx.col.lose(LossCategory::DamagedData, format!("composition '{name}': composition data missing, not imported"));
+                    continue;
+                };
                 let Some(header) = comp_view.header() else {
                     cx.col.lose(LossCategory::DamagedData, format!("composition '{name}': header unreadable, not imported"));
                     continue;

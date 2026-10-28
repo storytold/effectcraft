@@ -795,3 +795,17 @@ fn huge_image_sequences_are_bounded() {
     assert!(files <= 1_000_000, "{files}");
     assert!(r.report.count(LossCategory::DamagedData) > 0, "{:?}", r.report.losses);
 }
+
+#[test]
+fn a_composition_without_its_data_is_reported_not_dropped() {
+    // A composition item whose `cdta` is gone (renamed here, the same length) is damaged data: the
+    // default import refuses it instead of reporting success without the composition.
+    let mut bytes = fixture!("000-base.aep");
+    let at = bytes.windows(4).position(|w| w == b"cdta").expect("cdta");
+    bytes[at..at + 4].copy_from_slice(b"xdta");
+    let none = |_: &str| false;
+    let mut p = effectcraft_project::Project::default();
+    assert!(effectcraft_aep::import::import(&mut p, &bytes, &effectcraft_aep::import::ImportOptions::new(&none)).is_err());
+    let report = effectcraft_aep::import::analyze(&bytes, &none).expect("analyze");
+    assert_eq!(report.count(effectcraft_aep::import::LossCategory::DamagedData), 1, "{:?}", report.losses);
+}

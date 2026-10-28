@@ -661,6 +661,15 @@ fn run_with_picked(app: &mut EffectcraftApp, id: &str, key: &str, params: &Value
     {
         return Ok(json!({"dialog": id}));
     }
+    // An After Effects conversion that loses something asks first (`panels::aep_losses`).
+    match crate::panels::aep_losses::guard(app, id, &picked) {
+        Ok(true) => return Ok(json!({"dialog": id})),
+        Ok(false) => {}
+        Err(e) => {
+            app.ui.status = e.clone();
+            return Err(e);
+        }
+    }
     // Save (untitled) becomes Save As.
     let id = if id == "file.save" { "file.saveAs" } else { id };
     let r = app.session.execute(id, Value::Object(p)).map_err(|e| e.to_string());

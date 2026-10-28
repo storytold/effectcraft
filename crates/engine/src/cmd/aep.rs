@@ -20,8 +20,12 @@ fn import_aep(s: &mut Session, p: &Value) -> Result<Value> {
     let allow_losses = b_p(p, "allowLosses").unwrap_or(false);
     let dry_run = b_p(p, "dryRun").unwrap_or(false);
     let bytes = s.services.read_file(&path).map_err(|e| EngineError::Other(format!("cannot read {path}: {e}")))?;
+    // Footage paths stored in the file reach the file system only through the document-path policy
+    // (`doc_path`): relative ones are taken from the file's folder, paths to other computers are
+    // never looked at (the footage arrives missing).
     let services = s.services.clone();
-    let exists = move |f: &str| services.exists(f);
+    let doc = path.clone();
+    let exists = move |f: &str| crate::doc_path::resolve(f, Some(&doc)).ok().and_then(|p| p.to_str().map(|p| services.exists(p))).unwrap_or(false);
     // The renderer's own font lookup (family, full or PostScript name); a miss falls back.
     let has_font = |font: &str| !effectcraft_text::resolve(font, "Regular").missing;
     let name = std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "After Effects Project".into());
@@ -44,9 +48,14 @@ fn import_aep(s: &mut Session, p: &Value) -> Result<Value> {
         if apply {
             proj.settings = r.settings.clone();
         }
+        // The new footage keeps the file as its origin: resolved against it, a refused path missing.
+        let created: std::collections::HashSet<_> = r.items.iter().copied().collect();
+        crate::doc_path::resolve_footage_of(proj, |id| created.contains(&id), Some(&path));
         st.project_selection = vec![r.folder];
         Ok(r)
     })?;
+    let created: std::collections::HashSet<_> = res.items.iter().copied().collect();
+    s.stored_paths.add_items(&s.project, |id| created.contains(&id), Some(&path));
     if let Some(first) = res.comps.first() {
         s.open_comp(*first);
     }
