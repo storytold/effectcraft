@@ -256,6 +256,140 @@ fn kind_style(kind: &str) -> (Icon, Color32) {
     }
 }
 
+/// The frame's key presses without modifiers.
+fn plain_key_presses(ctx: &egui::Context) -> Vec<egui::Key> {
+    ctx.input(|i| {
+        i.events
+            .iter()
+            .filter_map(|e| match e {
+                egui::Event::Key { key, pressed: true, modifiers, .. } if !modifiers.any() => Some(*key),
+                _ => None,
+            })
+            .collect()
+    })
+}
+
+/// The node a navigation key moves to from node `at` (Up / Down / Home / End by order, Right to
+/// a node this one uses, Left back to one that uses it); `home_end` only with a node focused.
+fn key_target(g: &FlowGraph, idx: &BTreeMap<&str, usize>, key: egui::Key, at: Option<usize>, home_end: bool) -> Option<usize> {
+    use egui::Key;
+    let last = g.nodes.len().checked_sub(1);
+    match (key, last) {
+        (Key::ArrowDown, Some(last)) => Some(at.map_or(0, |a| a.saturating_add(1).min(last))),
+        (Key::ArrowUp, Some(last)) => Some(at.map_or(last, |a| a.saturating_sub(1))),
+        (Key::Home, Some(_)) if home_end => Some(0),
+        (Key::End, Some(last)) if home_end => Some(last),
+        (Key::ArrowRight, _) => {
+            at.and_then(|a| g.nodes.get(a)).and_then(|n| g.edges.iter().find(|(from, _)| *from == n.id)).and_then(|(_, to)| idx.get(to.as_str()).copied())
+        }
+        (Key::ArrowLeft, _) => {
+            at.and_then(|a| g.nodes.get(a)).and_then(|n| g.edges.iter().find(|(_, to)| *to == n.id)).and_then(|(from, _)| idx.get(from.as_str()).copied())
+        }
+        _ => None,
+    }
+}
+
+/// How far to pan so `r` is inside `body`, with a margin.
+fn pan_into_view(r: Rect, body: Rect) -> (f32, f32) {
+    let axis = |lo: f32, hi: f32, body_lo: f32, body_hi: f32| {
+        if lo < body_lo + 16.0 {
+            body_lo + 16.0 - lo
+        } else if hi > body_hi - 16.0 {
+            body_hi - 16.0 - hi
+        } else {
+            0.0
+        }
+    };
+    (axis(r.min.x, r.max.x, body.min.x, body.max.x), axis(r.min.y, r.max.y, body.min.y, body.max.y))
+}
+
+/// "Mid, Composition, uses 2": the node's name, what it is and how many nodes it leads to.
+fn node_a11y_name(g: &FlowGraph, n: &FlowNode) -> String {
+    let uses = g.edges.iter().filter(|(a, _)| *a == n.id).count();
+    if uses > 0 { tr_args("{}, {}, uses {}", &[&n.label, &kind_name(n.kind), &uses]) } else { tr_args("{}, {}", &[&n.label, &kind_name(n.kind)]) }
+}
+
+/// The `flowchart.options` params for the toolbar switch `key` (currently `on`).
+fn option_params(key: &str, on: bool, vertical: bool) -> Value {
+    if key == "direction" { json!({"direction": if vertical { "lr" } else { "tb" }}) } else { json!({key: !on}) }
+}
+
+fn node_id(id: &str) -> egui::Id {
+    egui::Id::unique(("flow-node", id))
+}
+
+/// What a node does: opened (as a double click).
+fn open_cmd(n: &FlowNode) -> Option<(String, Value)> {
+    match (n.kind, n.item, n.comp) {
+        ("comp", Some(c), _) | (_, _, Some(c)) => Some(("comp.open".into(), json!({"comp": c}))),
+        _ => None,
+    }
+}
+
+/// What a node does: revealed (as a Cmd/Ctrl click).
+fn reveal_cmds(n: &FlowNode) -> Vec<(String, Value)> {
+    match (n.item, n.comp, n.layer) {
+        // Items in the Project panel, layers selected in their comp.
+        (Some(item), ..) => vec![("project.select".into(), json!({"items": [item]})), ("window.panel".into(), json!({"panel": "project"}))],
+        (None, Some(c), Some(l)) => vec![("comp.open".into(), json!({"comp": c})), ("layer.select".into(), json!({"layers": [l]}))],
+        _ => vec![],
+    }
+}
+
+// Keyboard, with a node focused (or after a click, when nothing has the focus): Up / Down and
+// Home / End move through the nodes, Right goes to a node this one uses and Left back to one
+// that uses it, Enter opens (as a double click), Space reveals (as a Cmd/Ctrl click). The
+// focus follows, and the view pans to keep the node in sight.
+fn flow_keys(
+    app: &mut EffectcraftApp,
+    ctx: &egui::Context,
+    (g, idx): (&FlowGraph, &BTreeMap<&str, usize>),
+    (cursor, selected): (Option<usize>, Option<&str>),
+    body: Rect,
+    rects: &[Rect],
+    cmds: &mut Vec<(String, Value)>,
+) {
+    let focused = ctx.memory(|m| m.focused());
+    let on_node = focused.is_some_and(|f| g.nodes.iter().any(|n| node_id(&n.id) == f));
+    let by_mouse = focused.is_none() && app.ui.focused == crate::dock::PanelKind::Flowchart;
+    if (on_node || by_mouse) && app.dialog.is_none() && !widgets::any_menu_open(ctx) {
+        let keys = plain_key_presses(ctx);
+        let mut at = selected.and_then(|s| idx.get(s).copied()).or(cursor);
+        let mut moved = None;
+        for key in keys {
+            use egui::Key;
+            let to = key_target(g, idx, key, at, on_node);
+            if let Some(n) = to.and_then(|to| g.nodes.get(to)) {
+                at = to;
+                app.ui.flowchart.selected = Some(n.id.clone());
+                moved = Some(n.id.clone());
+                continue;
+            }
+            let Some(n) = at.and_then(|a| g.nodes.get(a)) else { continue };
+            match key {
+                Key::Enter => cmds.extend(open_cmd(n)),
+                Key::Space if on_node => cmds.extend(reveal_cmds(n)),
+                _ => {}
+            }
+        }
+        if let Some(i) = moved.as_deref().and_then(|m| idx.get(m).copied()) {
+            // Pan so the node is inside the view, with a margin.
+            let (dx, dy) = pan_into_view(rects.get(i).copied().unwrap_or(body), body);
+            app.ui.flowchart.pan[0] += dx;
+            app.ui.flowchart.pan[1] += dy;
+            app.ui.focused = crate::dock::PanelKind::Flowchart;
+            if on_node && let Some(id) = moved.as_deref() {
+                a11y::focus_next_pass(ctx, "flow", node_id(id));
+            }
+            ctx.request_repaint();
+        }
+        // The arrows are the chart's, not egui's spatial focus moves.
+        if on_node {
+            ctx.memory_mut(|m| m.move_focus(egui::FocusDirection::None));
+        }
+    }
+}
+
 /// Draw the Flowchart panel.
 pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
@@ -290,7 +424,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             a11y::toggle_button(&resp, label, on);
         }
         if resp.clicked() {
-            let v = if key == "direction" { json!({"direction": if o.vertical { "lr" } else { "tb" }}) } else { json!({key: !on}) };
+            let v = option_params(key, on, o.vertical);
             cmds.push(("flowchart.options".into(), v));
         }
         app.auto.add(&format!("flowchart.option.{key}"), r, label);
@@ -337,22 +471,6 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         gp.add(egui::Shape::convex_polygon(vec![e, e + l, e + r], col, Stroke::NONE));
     }
     let cmd_down = ui.input(|i| i.modifiers.command || i.modifiers.ctrl);
-    let node_id = |id: &str| egui::Id::unique(("flow-node", id));
-    // What a node does: opened (as a double click), revealed (as a Cmd/Ctrl click).
-    let open_cmd = |n: &FlowNode| -> Option<(String, Value)> {
-        match (n.kind, n.item, n.comp) {
-            ("comp", Some(c), _) | (_, _, Some(c)) => Some(("comp.open".into(), json!({"comp": c}))),
-            _ => None,
-        }
-    };
-    let reveal_cmds = |n: &FlowNode| -> Vec<(String, Value)> {
-        match (n.item, n.comp, n.layer) {
-            // Items in the Project panel, layers selected in their comp.
-            (Some(item), ..) => vec![("project.select".into(), json!({"items": [item]})), ("window.panel".into(), json!({"panel": "project"}))],
-            (None, Some(c), Some(l)) => vec![("comp.open".into(), json!({"comp": c})), ("layer.select".into(), json!({"layers": [l]}))],
-            _ => vec![],
-        }
-    };
     // One Tab stop for the chart: the selected node (the first one drawn without a selection);
     // the arrow keys move between the others.
     let drawn: Vec<bool> = (0..g.nodes.len()).map(|i| rect_of(i).intersects(body)).collect();
@@ -395,10 +513,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             Color32::WHITE,
         );
         app.auto.add(&format!("flowchart.node.{}", n.id), r, &n.label);
-        // "Mid, Composition, uses 2": the node's name, what it is and how many nodes it leads to.
-        let uses = g.edges.iter().filter(|(a, _)| *a == n.id).count();
-        let name =
-            if uses > 0 { tr_args("{}, {}, uses {}", &[&n.label, &kind_name(n.kind), &uses]) } else { tr_args("{}, {}", &[&n.label, &kind_name(n.kind)]) };
+        let name = node_a11y_name(&g, n);
         a11y::list_item(&resp, &name, selected, i.saturating_add(1), size);
         if resp.clicked() {
             app.ui.flowchart.selected = Some(n.id.clone());
@@ -413,83 +528,8 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         resp.on_hover_text(tr_args("{} — double-click to open, {}-click to reveal", &[&n.label, &(if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" })]));
     }
 
-    // Keyboard, with a node focused (or after a click, when nothing has the focus): Up / Down and
-    // Home / End move through the nodes, Right goes to a node this one uses and Left back to one
-    // that uses it, Enter opens (as a double click), Space reveals (as a Cmd/Ctrl click). The
-    // focus follows, and the view pans to keep the node in sight.
-    let focused = ctx.memory(|m| m.focused());
-    let on_node = focused.is_some_and(|f| g.nodes.iter().any(|n| node_id(&n.id) == f));
-    let by_mouse = focused.is_none() && app.ui.focused == crate::dock::PanelKind::Flowchart;
-    if (on_node || by_mouse) && app.dialog.is_none() && !widgets::any_menu_open(&ctx) {
-        let keys: Vec<egui::Key> = ctx.input(|i| {
-            i.events
-                .iter()
-                .filter_map(|e| match e {
-                    egui::Event::Key { key, pressed: true, modifiers, .. } if !modifiers.any() => Some(*key),
-                    _ => None,
-                })
-                .collect()
-        });
-        let mut at = o.selected.as_deref().and_then(|s| idx.get(s).copied()).or(cursor);
-        let mut moved = None;
-        for key in keys {
-            use egui::Key;
-            let last = g.nodes.len().checked_sub(1);
-            let to = match (key, last) {
-                (Key::ArrowDown, Some(last)) => Some(at.map_or(0, |a| a.saturating_add(1).min(last))),
-                (Key::ArrowUp, Some(last)) => Some(at.map_or(last, |a| a.saturating_sub(1))),
-                (Key::Home, Some(_)) if on_node => Some(0),
-                (Key::End, Some(last)) if on_node => Some(last),
-                (Key::ArrowRight, _) => at
-                    .and_then(|a| g.nodes.get(a))
-                    .and_then(|n| g.edges.iter().find(|(from, _)| *from == n.id))
-                    .and_then(|(_, to)| idx.get(to.as_str()).copied()),
-                (Key::ArrowLeft, _) => at
-                    .and_then(|a| g.nodes.get(a))
-                    .and_then(|n| g.edges.iter().find(|(_, to)| *to == n.id))
-                    .and_then(|(from, _)| idx.get(from.as_str()).copied()),
-                _ => None,
-            };
-            if let Some(n) = to.and_then(|to| g.nodes.get(to)) {
-                at = to;
-                app.ui.flowchart.selected = Some(n.id.clone());
-                moved = Some(n.id.clone());
-                continue;
-            }
-            let Some(n) = at.and_then(|a| g.nodes.get(a)) else { continue };
-            match key {
-                Key::Enter => cmds.extend(open_cmd(n)),
-                Key::Space if on_node => cmds.extend(reveal_cmds(n)),
-                _ => {}
-            }
-        }
-        if let Some(i) = moved.as_deref().and_then(|m| idx.get(m).copied()) {
-            // Pan so the node is inside the view, with a margin.
-            let r = rect_of(i);
-            let (mut dx, mut dy) = (0.0, 0.0);
-            if r.min.x < body.min.x + 16.0 {
-                dx = body.min.x + 16.0 - r.min.x;
-            } else if r.max.x > body.max.x - 16.0 {
-                dx = body.max.x - 16.0 - r.max.x;
-            }
-            if r.min.y < body.min.y + 16.0 {
-                dy = body.min.y + 16.0 - r.min.y;
-            } else if r.max.y > body.max.y - 16.0 {
-                dy = body.max.y - 16.0 - r.max.y;
-            }
-            app.ui.flowchart.pan[0] += dx;
-            app.ui.flowchart.pan[1] += dy;
-            app.ui.focused = crate::dock::PanelKind::Flowchart;
-            if on_node && let Some(id) = moved.as_deref() {
-                a11y::focus_next_pass(&ctx, "flow", node_id(id));
-            }
-            ctx.request_repaint();
-        }
-        // The arrows are the chart's, not egui's spatial focus moves.
-        if on_node {
-            ctx.memory_mut(|m| m.move_focus(egui::FocusDirection::None));
-        }
-    }
+    let rects: Vec<Rect> = (0..g.nodes.len()).map(rect_of).collect();
+    flow_keys(app, &ctx, (&g, &idx), (cursor, o.selected.as_deref()), body, &rects, &mut cmds);
     for (id, params) in cmds {
         if let Err(e) = crate::menus::invoke(app, &ctx, &id, params) {
             app.ui.status = e;
