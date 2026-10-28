@@ -122,9 +122,19 @@ pub(crate) fn json_string(json: &[u8], key: &str) -> Option<String> {
                     b'b' => out.push(8),
                     b'f' => out.push(12),
                     b'u' => {
-                        let hex = json.get(i..i.checked_add(4)?)?;
-                        let code = u32::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()?;
+                        let hex4 = |at: usize| {
+                            json.get(at..at.checked_add(4)?).and_then(|h| std::str::from_utf8(h).ok()).and_then(|h| u32::from_str_radix(h, 16).ok())
+                        };
+                        let mut code = hex4(i)?;
                         i = i.saturating_add(4);
+                        // A character outside the BMP is a high surrogate and a `\u` low surrogate.
+                        if (0xd800..0xdc00).contains(&code)
+                            && json.get(i..i.saturating_add(2)) == Some(b"\\u")
+                            && let Some(lo) = hex4(i.saturating_add(2)).filter(|lo| (0xdc00..0xe000).contains(lo))
+                        {
+                            code = 0x10000 + ((code - 0xd800) << 10) + (lo - 0xdc00);
+                            i = i.saturating_add(6);
+                        }
                         let ch = char::from_u32(code).unwrap_or('\u{fffd}');
                         let mut buf = [0u8; 4];
                         out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
@@ -280,6 +290,10 @@ mod tests {
         assert_eq!(json_string(json, "b").as_deref(), Some("x"));
         assert_eq!(json_string(json, "missing"), None);
         assert_eq!(json_string(br#"{"a" : "spaced"}"#, "a").as_deref(), Some("spaced"));
+        // A surrogate pair is one character; a lone half stays U+FFFD.
+        assert_eq!(json_string(br#"{"a":"x\ud83d\ude00y"}"#, "a").as_deref(), Some("x😀y"));
+        assert_eq!(json_string(br#"{"a":"\ud83dz"}"#, "a").as_deref(), Some("\u{fffd}z"));
+        assert_eq!(json_string(br#"{"a":"\ude00"}"#, "a").as_deref(), Some("\u{fffd}"));
     }
 
     #[test]

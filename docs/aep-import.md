@@ -32,7 +32,7 @@ refused losses) leaves the project unchanged.
 
 ## The command
 
-`file.importAep {path, allowLosses?, dryRun?}`
+`file.importAep {path, allowLosses?, dryRun?, applySettings?}`
 
 - Without `allowLosses` an import that would lose anything is **refused** (nothing changes) and the
   error names the categories, e.g. `importing would lose effects: 3, markers: 1; allow losses to
@@ -363,8 +363,8 @@ frame blending, 3D material options, audio levels, guides, footage duration/fram
   copies of an effect. The result is an error or a report; the project is always valid (keys
   sorted, finite values including effect parameters, no parent loops, mask paths finite with
   matching tangents).
-- `crates/engine/src/tests_aep_import.rs`: the command, undo/redo, refusal, dry run, bad input and
-  the menu entry.
+- `crates/engine/src/tests/aep_import.rs`: the command, undo/redo, refusal, dry run, bad input,
+  `applySettings` and the menu entry.
 
 No Adobe project or asset is used: the tests read only the generated fixtures. The render checks named
 above compare EffectCraft with After Effects on the same generated cases; they are made by hand
@@ -387,5 +387,4 @@ The other direction, File ▸ Export ▸ After Effects Project… (`file.exportA
 ## Not done yet
 
 Effects outside the table (Lumetri; EXtractoR: its channel choice is arbitrary data; Stroke: its path is a mask reference), environment lights, the ease of bezier Orientation keys, wiggly and expression selectors and the other text animator properties (Character Value, Character Alignment other than its default, the Hue / Saturation / Brightness / Opacity variants, 3D rotations, variable font axes), manual kerning, No Break, the stroke line join, the Japanese leading model, Source Text keyframes, layer-style gradients, Pattern Overlay and the switch state 3, Mesh Warp handles moved on their own,
-separated dimensions, footage interpretation and the project settings (colour depth, working space)
-need verified layouts in the reader first.
+separated dimensions and footage interpretation need verified layouts in the reader first.

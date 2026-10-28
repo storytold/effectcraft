@@ -1,12 +1,16 @@
 //! Developer tool: extracts the mask prototypes the exporter clones from three synthetic fixtures
-//! that After Effects saved (`crates/aep/tests/fixtures`, our own generated corpus):
+//! that After Effects saved (the single-case files, our own generated corpus):
 //!
 //! - `091-mask-rect-props`: the `ADBE Mask Parade` group of layer `L` with one mask (its `mkif`, the
 //!   atom with a static path and static Feather, Opacity and Expansion records);
 //! - `093-mask-path-2keys`: the path property (`tdbs`) of a mask with two linear path keys;
 //! - `208-key-mask-feather-2key-linear`: the Mask Feather property with two linear keys.
 //!
-//! `cargo run -p effectcraft-aep --example mkmaskprotos -- crates/aep/tests/fixtures crates/aep/template/masks.aep`
+//! `cargo run -p effectcraft-aep --example mkmaskprotos -- <single-case dir> crates/aep/template/masks.aep`
+//!
+//! The prototypes are cut from the earlier single-case files, which are not in the repository
+//! (`tests/fixtures` holds the combined projects; the same cases cut from them give other item
+//! and layer ids, so the template would change). `<single-case dir>` is a folder with those files.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 use effectcraft_aep::{AepFile, Chunk, parse, write};
 use std::borrow::Cow;

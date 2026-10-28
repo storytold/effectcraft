@@ -1,13 +1,13 @@
-//! Importing the `.aepx` of a case gives the same project and report as importing its `.aep`.
+//! Importing the `.aepx` of a project gives the same project and report as importing its `.aep`.
 //!
-//! The two files of a pair hold the same chunk tree apart from the save counter in `head` (see
-//! `crates/aep/tests/container/aepx.rs`), which the importer does not read, so the results are equal, not
-//! only similar.
+//! The two files of the pair (`aepx-pair.aep` / `.aepx`, the cases 000, 058, 060, 110 and 124)
+//! hold the same chunk tree apart from the save counter in `head` (see
+//! `crates/aep/tests/container/aepx.rs`), which the importer does not read, so the results are
+//! equal, not only similar. The tests read the two whole files: a case cut from the `.aepx` would
+//! be written back as `.aep`.
 
 use effectcraft_aep::import::{AepImportError, ImportOptions, analyze, import};
 use effectcraft_project::Project;
-
-const PAIRS: &[&str] = &["000-base", "058-key-opacity-2key", "060-expr-opacity-wiggle", "110-text-A", "124-precomp-Pre"];
 
 fn import_bytes(bytes: &[u8]) -> (Project, effectcraft_aep::import::ImportResult) {
     let mut project = Project::default();
@@ -17,39 +17,38 @@ fn import_bytes(bytes: &[u8]) -> (Project, effectcraft_aep::import::ImportResult
     (project, r)
 }
 
+fn pair() -> Option<(Vec<u8>, Vec<u8>)> {
+    Some((crate::common::try_file("aepx-pair.aep")?, crate::common::try_file("aepx-pair.aepx")?))
+}
+
 #[test]
 fn aepx_imports_like_the_aep() {
-    for name in PAIRS {
-        let aep = fixture!(&format!("{name}.aep"));
-        let aepx = fixture!(&format!("{name}.aepx"));
-        let (pa, ra) = import_bytes(&aep);
-        let (px, rx) = import_bytes(&aepx);
-        assert_eq!(ra, rx, "{name}: import result and report");
-        assert_eq!(pa, px, "{name}: project");
-        assert!(!ra.comps.is_empty(), "{name}");
-        let none = |_: &str| false;
-        assert_eq!(analyze(&aep, &none).unwrap(), analyze(&aepx, &none).unwrap(), "{name}: dry run");
-    }
+    let (aep, aepx) = skip!(pair());
+    assert!(effectcraft_aep::is_aepx(&aepx) && !effectcraft_aep::is_aepx(&aep));
+    let (pa, ra) = import_bytes(&aep);
+    let (px, rx) = import_bytes(&aepx);
+    assert_eq!(ra, rx, "import result and report");
+    assert_eq!(pa, px, "project");
+    assert_eq!(ra.comps.len(), 6, "the five case compositions and the precomposition of 124");
+    let none = |_: &str| false;
+    assert_eq!(analyze(&aep, &none).unwrap(), analyze(&aepx, &none).unwrap(), "dry run");
 }
 
 #[test]
 fn lossless_aepx_imports_without_allowing_losses() {
-    // The base project imports completely, so the refusal rule applies to `.aepx` as to `.aep`.
+    // The pair imports completely, so the refusal rule applies to `.aepx` as to `.aep`. The text
+    // layer of 110 is imported (with its Source Text), so it needs no `allow_losses` either.
+    let (_, aepx) = skip!(pair());
     let mut project = Project::default();
     let none = |_: &str| false;
-    let r = import(&mut project, &fixture!("000-base.aepx"), &ImportOptions::new(&none)).unwrap();
-    assert!(r.report.is_lossless());
-    // The text layer of 110 is imported (with its Source Text), so it needs no `allow_losses`
-    // either.
-    let mut project = Project::default();
-    let r = import(&mut project, &fixture!("110-text-A.aepx"), &ImportOptions::new(&none)).unwrap();
+    let r = import(&mut project, &aepx, &ImportOptions::new(&none)).unwrap();
     assert!(r.report.is_lossless(), "{:?}", r.report.losses);
     assert_eq!(r.report.imported.text_layers, 1);
 }
 
 #[test]
 fn damaged_aepx_is_an_error_not_a_panic() {
-    let aepx = fixture!("058-key-opacity-2key.aepx");
+    let (_, aepx) = skip!(pair());
     let none = |_: &str| false;
     for cut in (0..aepx.len()).step_by(4999) {
         let _ = analyze(&aepx[..cut], &none);

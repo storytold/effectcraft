@@ -30,13 +30,13 @@ exporter edits a **template** instead:
   still 607, jpeg 605, OpenEXR 604, H.264 mp4 606, WAV 351, png sequence 353, OpenEXR sequence
   603, each with a neutral alias;
 - `crates/aep/template/text.aep` holds the layer blocks of a point (110) and a box (245)
-  text layer, extracted (by `examples/mktxprotos.rs`) from our fixtures;
+  text layer, extracted (by `examples/mktxprotos.rs`) from our single-case fixtures;
 - `crates/aep/template/objects.aep` holds the object prototypes, extracted (by
-  `examples/mkobjprotos.rs`) from our fixtures and synthetic cases: the marker group of 249, the
+  `examples/mkobjprotos.rs`) from our single-case fixtures and synthetic cases: the marker group of 249, the
   camera (256), spot (254) and point light (252) layer blocks with the option records of 342-345,
   and the shape layer block, items and value records of 519, 240, 451-471, 239 and 242;
 - `crates/aep/template/masks.aep` holds the mask prototypes, extracted (by
-  `examples/mkmaskprotos.rs`) from three of our own fixtures in `crates/aep/tests/fixtures`: the
+  `examples/mkmaskprotos.rs`) from three of our own single-case fixtures: the
   mask parade of `091-mask-rect-props` (`mkif`, an atom with a static path and static Feather,
   Opacity and Expansion records), the keyed path property of `093-mask-path-2keys` and the keyed
   Mask Feather of `208-key-mask-feather-2key-linear`.

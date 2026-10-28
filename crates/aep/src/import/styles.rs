@@ -113,6 +113,13 @@ pub(crate) fn import_layer_styles(layer: &AepLayer<'_, '_>, l: &mut Layer, gl: &
         }
     }
     if applied.is_empty() {
+        // Without a style the Blending Options group holds only an empty Advanced Blending group
+        // (every case); stored values there have nowhere to go.
+        if let Some(PropNode::Group(bo)) = ls.get(sm::BLEND_OPTIONS)
+            && holds_values(&bo, 0)
+        {
+            col.lose(LossCategory::LayerStyles, format!("{what}: Blending Options set without a layer style, not imported"));
+        }
         return;
     }
     if !l.can_have_styles() {
@@ -142,6 +149,16 @@ pub(crate) fn import_layer_styles(layer: &AepLayer<'_, '_>, l: &mut Layer, gl: &
         col.imported.layer_styles += 1;
     }
     import_blending(&ls, l, tm, what, col);
+}
+
+/// True when `g` or a group below it (to a bounded depth) stores a property.
+fn holds_values(g: &AepGroup<'_, '_>, depth: usize) -> bool {
+    depth < 8
+        && g.entries().iter().any(|e| match e.node {
+            PropNode::Property(_) => true,
+            PropNode::Group(sub) => holds_values(&sub, depth.saturating_add(1)),
+            PropNode::Other(_) => false,
+        })
 }
 
 /// Blending Options: Global Light (adopted by the composition later) and Advanced Blending.

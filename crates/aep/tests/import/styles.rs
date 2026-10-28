@@ -156,6 +156,33 @@ fn every_parameter_of_977() {
 }
 
 #[test]
+fn blending_options_without_a_style_are_reported() {
+    // 977 with every style marked unused (`tdsb` 2): its Blending Options values have no style.
+    let mut bytes = fixture!("977-styles-all-params-changed.aep");
+    let mut at = 0;
+    let mut marked = 0;
+    while let Some(i) = bytes[at..].windows(9).position(|w| w == b"/enabled\0").map(|i| at + i) {
+        let t = i + bytes[i..].windows(4).position(|w| w == b"tdsb").expect("tdsb");
+        bytes[t + 8..t + 12].copy_from_slice(&2u32.to_be_bytes());
+        marked += 1;
+        at = t + 12;
+    }
+    assert!(marked >= 9, "{marked}");
+    let mut p = Project::default();
+    let none = |_: &str| false;
+    let opts = effectcraft_aep::import::ImportOptions { allow_losses: true, ..effectcraft_aep::import::ImportOptions::new(&none) };
+    let r = effectcraft_aep::import::import(&mut p, &bytes, &opts).expect("import").report;
+    assert_eq!(r.imported.layer_styles, 0);
+    let lost = r.losses.iter().filter(|l| l.category == effectcraft_aep::import::LossCategory::LayerStyles).flat_map(|l| l.details.iter());
+    assert!(lost.clone().any(|d| d.contains("Blending Options set without a layer style")), "{:?}", r.losses);
+    // A layer without styles and without Blending Options values reports nothing.
+    let mut q = Project::default();
+    let base = fixture!("000-base.aep");
+    let r = effectcraft_aep::import::import(&mut q, &base, &effectcraft_aep::import::ImportOptions::new(&none)).expect("base").report;
+    assert_eq!(r.count(effectcraft_aep::import::LossCategory::LayerStyles), 0);
+}
+
+#[test]
 fn a_switched_off_style_arrives_switched_off() {
     // 988: the Drop Shadow's switch group at `tdsb` 0 (After Effects does not draw it).
     let (_, c) = skip!(lossless("988-style-drop-shadow-switched-off.aep"));

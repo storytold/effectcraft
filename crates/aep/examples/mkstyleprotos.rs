@@ -1,5 +1,5 @@
 //! Developer tool: extracts the layer-style prototypes the exporter clones from two synthetic
-//! fixtures that After Effects saved (`crates/aep/tests/fixtures`, our own generated corpus):
+//! fixtures that After Effects saved (the single-case files, our own generated corpus):
 //!
 //! - `977-styles-all-params-changed`: one static record (`tdmn` + `tdbs`) of every parameter of
 //!   the nine styles and of Blending Options, as layer `B` stores them (list `stpr`, in file
@@ -7,7 +7,11 @@
 //! - `976-style-drop-shadow-opacity-keyed-100-20-linear`: the keyed Drop Shadow Opacity record
 //!   (list `stky`), the keyed form of a scalar.
 //!
-//! `cargo run -p effectcraft-aep --example mkstyleprotos -- crates/aep/tests/fixtures crates/aep/template/styles.aep`
+//! `cargo run -p effectcraft-aep --example mkstyleprotos -- <single-case dir> crates/aep/template/styles.aep`
+//!
+//! The prototypes are cut from the earlier single-case files, which are not in the repository
+//! (`tests/fixtures` holds the combined projects; the same cases cut from them give other item
+//! and layer ids, so the template would change). `<single-case dir>` is a folder with those files.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 use effectcraft_aep::{AepFile, Chunk, parse, write};
 use std::borrow::Cow;

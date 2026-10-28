@@ -1,5 +1,5 @@
 //! Developer tool: extracts the object prototypes the exporter clones from fixtures of
-//! `crates/aep/tests/fixtures` (our own generated corpus):
+//! the single-case files (our own generated corpus):
 //!
 //! - `mrkp`: the marker group of `249-marker-layer-full` (`tdmn ADBE Marker` and its `LIST mrst`
 //!   with one marker holding all five strings), used for layer and composition markers;
@@ -15,7 +15,11 @@
 //!   paths, repeater; 240: a path) and the value records of the one-change cases 451-471, 239 and
 //!   242 (synthetic cases of the corpus folder, our own generated files).
 //!
-//! `cargo run -p effectcraft-aep --example mkobjprotos -- crates/aep/tests/fixtures <corpus synthetic dir> crates/aep/template/objects.aep`
+//! `cargo run -p effectcraft-aep --example mkobjprotos -- <single-case dir> <corpus synthetic dir> crates/aep/template/objects.aep`
+//!
+//! The prototypes are cut from the earlier single-case files, which are not in the repository
+//! (`tests/fixtures` holds the combined projects; the same cases cut from them give other item
+//! and layer ids, so the template would change). `<single-case dir>` is a folder with those files.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 use effectcraft_aep::{AepFile, Chunk, parse, write};
 use std::borrow::Cow;

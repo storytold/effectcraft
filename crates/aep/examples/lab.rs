@@ -13,6 +13,15 @@ use effectcraft_project::{
 };
 use effectcraft_time::{FrameRate, TICKS_PER_SECOND, Tick};
 
+/// The test cases, cut from the combined projects of `tests/fixtures` (`tests/fixtures/CASES.md`).
+#[path = "../tests/common/mod.rs"]
+#[allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)] // test code: a broken fixture ends the tool
+mod common;
+
+fn case_bytes(name: &str) -> Vec<u8> {
+    common::try_fixture(name).or_exit("fixture")
+}
+
 /// Ends this developer tool with a message instead of a panic.
 trait OrExit<T> {
     fn or_exit(self, what: &str) -> T;
@@ -100,8 +109,7 @@ fn mask(p: &mut Project, comp: ItemId, idx: usize, name: &str, path: ShapePath, 
 
 /// The first effect group of the first layer of a fixture, imported.
 fn fixture_effect(name: &str) -> PropGroup {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-    let bytes = std::fs::read(dir.join(name)).or_exit("fixture");
+    let bytes = case_bytes(name);
     let mut p = Project::default();
     let none = |_: &str| false;
     let opts = effectcraft_aep::import::ImportOptions { allow_losses: true, ..effectcraft_aep::import::ImportOptions::new(&none) };
@@ -869,8 +877,7 @@ fn cases_3(case: &str, p: &mut Project, r25: FrameRate) -> bool {
             ];
             let ramp = fixture_effect("368-fx-ramp-default.aep");
             for (name, fixture, effect) in list {
-                let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-                let bytes = std::fs::read(dir.join(fixture)).or_exit("fixture");
+                let bytes = case_bytes(fixture);
                 let mut q = Project::default();
                 let none = |_: &str| false;
                 let opts = effectcraft_aep::import::ImportOptions { allow_losses: true, ..effectcraft_aep::import::ImportOptions::new(&none) };
@@ -1228,7 +1235,7 @@ fn cases_4(case: &str, p: &mut Project, r25: FrameRate) -> bool {
             let c = add_comp(p, "C", 1920, 1080, r25, 5.0, None);
             let red = add_solid(p, "L", 1920, 1080, [1.0, 0.0, 0.0], None);
             add_layer(p, c, "L", LayerSource::Solid { item: red }, (1920, 1080));
-            let syn = std::env::var("AEP_SYNTHETIC").unwrap_or_else(|_| r"C:ixtures\".to_string());
+            let syn = std::env::var("AEP_SYNTHETIC").unwrap_or_else(|_| r"C:\fixtures\".to_string());
             let media = format!(r"{syn}test-media\");
             let r30 = FrameRate::new(30, 1);
             let conformed = Footage {

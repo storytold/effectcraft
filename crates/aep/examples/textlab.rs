@@ -7,6 +7,11 @@
 use effectcraft_aep::{Body, Chunk, parse, write};
 use std::borrow::Cow;
 
+/// The test cases, cut from the combined projects of `tests/fixtures` (`tests/fixtures/CASES.md`).
+#[path = "../tests/common/mod.rs"]
+#[allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)] // test code: a broken fixture ends the tool
+mod common;
+
 /// Ends this developer tool with a message instead of a panic.
 trait OrExit<T> {
     fn or_exit(self, what: &str) -> T;
@@ -77,8 +82,7 @@ fn edit(c: &mut Chunk<'static>, f: &dyn Fn(&[u8]) -> Vec<u8>) {
 
 fn main() {
     let a: Vec<String> = std::env::args().collect();
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-    let bytes = std::fs::read(dir.join("113-text-Hello-size60-fillorange.aep")).or_exit("fixture");
+    let bytes = common::try_fixture("113-text-Hello-size60-fillorange.aep").or_exit("fixture");
     let mut f = parse(&bytes).or_exit("parse").into_owned();
     let hello = [b"(".to_vec(), utf16("Hello\r"), b")".to_vec()].concat();
     let case = a.get(1).or_exit("usage: see the comment at the top of this file").clone();

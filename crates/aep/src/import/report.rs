@@ -233,8 +233,7 @@ impl Collector {
 pub const LIMITATIONS: &[&str] = &[
     "Frame blending, 3D material options, audio levels, guides are not decoded and not imported.",
     "Mask colour, lock, feather falloff, motion blur and RotoBezier are not decoded: imported masks get the default colour, unlocked, Smooth falloff, motion blur Same As Layer and no RotoBezier.",
-    "Layer styles are not decoded: a layer with set layer-style values is reported (layer styles), the styles are not imported.",
     "Text: per-character 3D, text on a path and several style slots of unknown meaning are not decoded (stored values that differ from the default are reported as text layer features).",
-    "Footage that is not a solid is linked by its stored path; its duration and frame rate are not decoded (use Reload Footage after the files are found).",
+    "Footage that is not a solid is linked by its stored path with its stored frame rate and duration; the importer never opens the files (use Reload Footage after the files are found).",
     "The per-effect on/off switch is not decoded: imported effects are switched on.",
 ];

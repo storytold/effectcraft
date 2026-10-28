@@ -1,5 +1,5 @@
 //! Developer tool: extracts the text layer prototypes the exporter clones from two fixtures of
-//! `crates/aep/tests/fixtures` (our own generated corpus, `docs/aep-export.md` R32):
+//! the single-case files (our own generated corpus, `docs/aep-export.md` R32):
 //!
 //! - `110-text-A`: the layer block (`Layr`, `Ewst`, f-records) of a point text layer `A`;
 //! - `245-text-box-400x200-Hello`: the same for a 400 x 200 paragraph (box) text layer;
@@ -9,7 +9,11 @@
 //!   (Start, End, Offset, Units and the Index range, Based On, Mode, Amount, Shape, Smoothness,
 //!   Ease High / Low, Randomize Order, Random Seed), 728 (Character Offset).
 //!
-//! `cargo run -p effectcraft-aep --example mktxprotos -- crates/aep/tests/fixtures crates/aep/template/text.aep`
+//! `cargo run -p effectcraft-aep --example mktxprotos -- <single-case dir> crates/aep/template/text.aep`
+//!
+//! The prototypes are cut from the earlier single-case files, which are not in the repository
+//! (`tests/fixtures` holds the combined projects; the same cases cut from them give other item
+//! and layer ids, so the template would change). `<single-case dir>` is a folder with those files.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 use effectcraft_aep::{AepFile, Chunk, parse, write};
 use std::borrow::Cow;

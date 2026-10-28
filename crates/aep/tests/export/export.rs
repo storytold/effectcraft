@@ -393,6 +393,7 @@ fn the_template_holds_no_local_data() {
     let footage = include_bytes!("../../template/footage.aep");
     let text = include_bytes!("../../template/text.aep");
     let objects = include_bytes!("../../template/objects.aep");
+    let styles = include_bytes!("../../template/styles.aep");
     let names = local_names();
     let fixed = ["desktop-", "\\users\\", "/users/", "/home/"];
     for (name, bytes) in [
@@ -403,6 +404,7 @@ fn the_template_holds_no_local_data() {
         ("footage", &footage[..]),
         ("text", &text[..]),
         ("objects", &objects[..]),
+        ("styles", &styles[..]),
     ] {
         // Strings are searched as bytes and, with the NUL bytes removed, as UTF-16 text.
         let utf16: Vec<u8> = bytes.iter().copied().filter(|&c| c != 0).collect();
