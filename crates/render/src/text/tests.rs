@@ -629,3 +629,36 @@ fn miter_tips_are_not_clipped_by_the_glyph_patch() {
     assert!(tip_alpha(effectcraft_path::Join::Miter) > 0.5, "the miter tip is clipped");
     assert_eq!(tip_alpha(effectcraft_path::Join::Bevel), 0.0, "a bevel join has no tip there");
 }
+
+#[test]
+fn layer_bounds_scale_the_stroke_with_the_glyph() {
+    // The miter-tip triangle from above, scaled ×3 by its character transform (as a Scale
+    // animator does). Its 10 px stroke is drawn in character space, so in layer space the
+    // tip reaches 3 × 19.3 ≈ 58 px above the apex; the layer buffer must reach that far too.
+    let mut tri = BezPath::new();
+    tri.move_to((100.0, 50.0));
+    tri.line_to((100.0 + 100.0 * 15f64.to_radians().tan(), 150.0));
+    tri.line_to((100.0 - 100.0 * 15f64.to_radians().tan(), 150.0));
+    tri.close_path();
+    let g = PlacedGlyph {
+        local: tri,
+        m: Mat4::scale(effectcraft_geom::vec3(3.0, 3.0, 1.0)),
+        xf: CharXf::default(),
+        fill: [0.0; 4],
+        stroke: [1.0; 4],
+        stroke_width: 10.0,
+        line_join: effectcraft_path::Join::Miter,
+        apply_fill: false,
+        char_index: 0,
+        rest: [0.0; 2],
+    };
+    let geom = TextGeom { doc: TextDoc::default(), glyphs: vec![g], fill_stroke: 0, blend: BlendMode::Normal };
+
+    // The tip really is painted 50 px above the apex (layer y = 150).
+    let mut img = crate::Image::new(600, 600);
+    draw_glyphs(&geom, &mut img, &Mat3::IDENTITY, 1.0, None);
+    assert!(img.data[100 * 600 + 300][3] > 0.5, "the scaled miter tip is not drawn");
+
+    let b = layer_bounds(&geom).expect("the glyph has an outline");
+    assert!(b.y0 <= 150.0 - 3.0 * 19.3, "layer bounds clip the scaled miter tip: y0 = {}", b.y0);
+}

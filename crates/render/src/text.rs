@@ -961,19 +961,27 @@ fn draw_glyphs(geom: &TextGeom, img: &mut Image, to_px: &Mat3, s: f64, only: Opt
     }
 }
 
-/// Render a text layer into a layer-space buffer at scale `s`.
-pub fn render(ctx: &EvalCtx, layer: &Layer, s: f64) -> Buf {
-    let empty = || Buf { img: Image::new(1, 1), offset: [0.0; 2], scale: s };
-    let Some(geom) = text_geom(ctx, layer) else { return empty() };
+/// Layer-space area the glyphs can paint: outlines plus stroke, blur and a 2 px margin.
+fn layer_bounds(geom: &TextGeom) -> Option<kurbo::Rect> {
     let mut bounds: Option<kurbo::Rect> = None;
     for g in &geom.glyphs {
         if let Some(b) = effectcraft_path::bounds(&[g.path()]) {
-            let pad = g.stroke_reach() + 2.0 + g.xf.blur[0].max(g.xf.blur[1]) * 1.5;
+            // A lone glyph strokes in character space, so its stroke grows with the character
+            // transform; a run strokes in layer space, unscaled. Pad for whichever is larger.
+            let reach = g.stroke_reach() * g.m2().mean_scale().max(1.0);
+            let pad = reach + 2.0 + g.xf.blur[0].max(g.xf.blur[1]) * 1.5;
             let b = b.inflate(pad, pad);
             bounds = Some(bounds.map_or(b, |a| a.union(b)));
         }
     }
-    let Some(b) = bounds else { return empty() };
+    bounds
+}
+
+/// Render a text layer into a layer-space buffer at scale `s`.
+pub fn render(ctx: &EvalCtx, layer: &Layer, s: f64) -> Buf {
+    let empty = || Buf { img: Image::new(1, 1), offset: [0.0; 2], scale: s };
+    let Some(geom) = text_geom(ctx, layer) else { return empty() };
+    let Some(b) = layer_bounds(&geom) else { return empty() };
     let b = b.intersect(kurbo::Rect::new(-20000.0, -20000.0, 20000.0, 20000.0));
     let w = ((b.width() * s).ceil() as u32 + 4).clamp(1, 16384);
     let h = ((b.height() * s).ceil() as u32 + 4).clamp(1, 16384);
