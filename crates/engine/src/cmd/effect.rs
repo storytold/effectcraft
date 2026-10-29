@@ -190,6 +190,7 @@ fn pick_color(s: &mut Session, p: &Value) -> Result<Value> {
 /// Cryptomatte layer, with the aux channels (for the manifest) and the effect's Selection.
 struct CryptoHit {
     at: (effectcraft_project::ItemId, LayerId, Tick),
+    probe: std::sync::Arc<CryptoProbe>,
     aux: std::sync::Arc<effectcraft_raster::AuxChannels>,
     layer: String,
     hash: u32,
@@ -210,13 +211,135 @@ impl CryptoHit {
     }
 }
 
-/// The ID under `{x, y}` (effect space, which is layer space on footage and precomp layers) for
-/// the Cryptomatte effect `{layer?, effect?}`, from the aux channels its render reads. The point
-/// snaps to the centre of the pixel the effect's input buffer samples in a render at `scale`
-/// (the viewer's resolution).
-fn crypto_hit(s: &Session, p: &Value, cmd: &str) -> Result<Option<CryptoHit>> {
+/// What a pick at one frame needs besides the point: the aux channels the Cryptomatte effect
+/// reads, its layer, and the effect's input buffer grid (scale, offset). Building it can render
+/// (a precomp's ID pass, the effects before the Cryptomatte effect); a point lookup in it is a
+/// few array reads. The session keeps the last one (see [`Session::crypto_probe_job`]).
+pub struct CryptoProbe {
+    key: ProbeKey,
+    grid: std::result::Result<ProbeGrid, String>,
+}
+
+#[derive(Clone)]
+struct ProbeGrid {
+    aux: std::sync::Arc<effectcraft_raster::AuxChannels>,
+    layer: String,
+    scale: f64,
+    offset: [f64; 2],
+}
+
+/// What a probe depends on: the project revision, the effect (and its index), the frame, the
+/// scale and the render prefs ([`Session::render_opts`]: nested switches, draft shadows).
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct ProbeKey {
+    revision: u64,
+    at: (effectcraft_project::ItemId, LayerId, Uid, usize),
+    frame: ProbeFrame,
+    scale: f64,
+    prefs: (bool, bool),
+}
+
+/// The frame a probe reads. On footage whose masks and effects up to the Cryptomatte effect
+/// don't change over time, its source frame: a still has one, held or remapped frames share
+/// theirs. Otherwise the comp time.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum ProbeFrame {
+    Source(i64),
+    Comp(Tick),
+}
+
+/// The session's kept probe, and the generation of the latest request: a build stores its
+/// result only while no newer request or edit came since.
+#[derive(Default)]
+pub struct CryptoProbeSlot {
+    probe: Option<std::sync::Arc<CryptoProbe>>,
+    want: Option<ProbeKey>,
+    generation: u64,
+    /// Jobs run (each on its thread), and those that built (not cancelled before they began).
+    jobs: u64,
+    builds: u64,
+}
+
+impl CryptoProbeSlot {
+    /// Drop the kept probe and cancel builds in flight.
+    pub(crate) fn clear(&mut self) {
+        (self.probe, self.want) = (None, None);
+        self.generation += 1;
+    }
+    pub(crate) fn kept(&self) -> bool {
+        self.probe.is_some()
+    }
+    pub(crate) fn builds(&self) -> (u64, u64) {
+        (self.jobs, self.builds)
+    }
+}
+
+/// A probe built off the UI thread into the session's slot.
+pub type CryptoProbeJob = Box<dyn FnOnce() + Send>;
+
+const NO_CRYPTO: &str = "this layer has no Cryptomatte channels (a multi-layer OpenEXR with Cryptomatte, or a 3D precomp)";
+
+impl CryptoProbe {
+    /// `None` when `live` turns false between its stages (a newer request or an edit since):
+    /// a cancelled build stops early and lets go of what it read.
+    fn build(r: &effectcraft_render::Renderer, key: ProbeKey, time: Tick, live: &dyn Fn() -> bool) -> Option<CryptoProbe> {
+        let (cid, lid, _, pos) = key.at;
+        let build = || -> std::result::Result<Option<ProbeGrid>, String> {
+            let comp = r.project.comp(cid).ok_or("no composition")?;
+            let layer = comp.layer(lid).ok_or("no such layer")?;
+            let g = layer.effects().and_then(|fx| fx.groups().nth(pos)).ok_or("no such effect")?;
+            let ctx = effectcraft_render::EvalCtx { project: r.project, comp_id: cid, comp, time, expr: r.expr, footage: None };
+            let params = effectcraft_effects::flatten_params(g, &mut |pr| ctx.value(layer, pr));
+            let want = effectcraft_effects::CRYPTO_LAYERS.get(params.e("layer") as usize).copied().unwrap_or("CryptoAsset");
+            let aux = r.layer_aux(&ctx, layer).ok_or(NO_CRYPTO)?;
+            if !live() {
+                return Ok(None);
+            }
+            let layer_name = aux.resolve_crypto_layer(want).ok_or(NO_CRYPTO)?;
+            // The grid of the effect's input buffer (footage keeps native pixels from 3/4 scale
+            // up, proxies have their own size, earlier effects can pad it), rendered and cached.
+            if !live() {
+                return Ok(None);
+            }
+            let b = r.layer_input(&ctx, layer, pos).ok_or("this layer has no pixels")?;
+            Ok(Some(ProbeGrid { aux, layer: layer_name, scale: b.scale, offset: b.offset }))
+        };
+        // On another thread no command guard runs: a panic becomes the probe's error.
+        let grid = crate::guard::guarded("Reading the Cryptomatte IDs", || Ok(build())).unwrap_or_else(|e| Err(e.to_string()));
+        Some(CryptoProbe { key, grid: grid.transpose()? })
+    }
+}
+
+/// Whether a property in `g` other than `skip` changes over time (keyframes or an expression).
+fn moves(g: &PropGroup, skip: Option<Uid>) -> bool {
+    g.children.iter().any(|c| match c {
+        effectcraft_project::Node::Prop(p) => Some(p.uid) != skip && (p.is_animated() || p.has_expression()),
+        effectcraft_project::Node::Group(g) => moves(g, skip),
+    })
+}
+
+/// [`ProbeFrame`] of the effect at index `pos` of `layer`.
+fn probe_frame(ctx: &effectcraft_render::EvalCtx, layer: &Layer, pos: usize) -> ProbeFrame {
+    let comp = ProbeFrame::Comp(ctx.time);
+    let effectcraft_project::LayerSource::Footage { item } = layer.source else { return comp };
+    let Some(effectcraft_project::ItemKind::Footage(f)) = ctx.project.item(item).map(|i| &i.kind) else { return comp };
+    let fx = layer.effects().into_iter().flat_map(|fx| fx.groups().take(pos + 1));
+    let time_fx = |g: &PropGroup| matches!(&g.kind, GroupKind::Effect { effect } if effect.starts_with("ec.time."));
+    let still = f.kind == effectcraft_project::FootageKind::Still;
+    let blend = !still && ctx.comp.enable_frame_blending && layer.switches.frame_blend != effectcraft_project::FrameBlend::Off;
+    // The Cryptomatte effect's own Selection isn't read by the probe: animated, it keeps it.
+    let own = |i: usize, g: &PropGroup| if i == pos { g.prop("selection").map(|p| p.uid) } else { None };
+    if blend || layer.masks().is_some_and(|m| moves(m, None)) || fx.enumerate().any(|(i, g)| moves(g, own(i, g)) || time_fx(g)) {
+        return comp;
+    }
+    ProbeFrame::Source(if still { 0 } else { effectcraft_render::frame_position(ctx.source_time(layer), f.frame_rate).0 })
+}
+
+/// The Cryptomatte effect `{layer?, effect?, scale?, time?}` names: its probe key, the comp
+/// time, its layer, group and Selection property.
+#[allow(clippy::type_complexity)]
+fn probe_key<'a>(s: &'a Session, p: &Value, cmd: &str) -> Result<(ProbeKey, Tick, &'a Layer, &'a PropGroup, &'a effectcraft_project::Property)> {
     let (cid, lid, fx_uid) = find_fx(s, p, cmd)?;
-    let (Some(x), Some(y)) = (f_p(p, "x"), f_p(p, "y")) else { return Err(bad(cmd, "missing `x` / `y` (layer pixels)")) };
     let scale = f_p(p, "scale").unwrap_or(1.0);
     if !(scale.is_finite() && scale > 0.0 && scale <= 1.0) {
         return Err(bad(cmd, "`scale` is the preview's resolution factor, above 0 and at most 1"));
@@ -227,30 +350,175 @@ fn crypto_hit(s: &Session, p: &Value, cmd: &str) -> Result<Option<CryptoHit>> {
     let pos = fx.groups().position(|g| g.uid == fx_uid).ok_or_else(|| bad(cmd, "no such effect"))?;
     let g = fx.groups().nth(pos).ok_or_else(|| bad(cmd, "no such effect"))?;
     let prop = g.prop("selection").filter(|_| g.match_id == "ec.3d.cryptomatte").ok_or_else(|| bad(cmd, "not a Cryptomatte effect"))?;
-    let t = super::time_p(s, p, Some(comp));
-    let ctx = effectcraft_render::EvalCtx { project: &s.project, comp_id: cid, comp, time: t, expr: s.expr.as_deref(), footage: None };
-    let params = effectcraft_effects::flatten_params(g, &mut |pr| ctx.value(layer, pr));
-    let r = s.renderer(effectcraft_render::RenderOpts { scale, ..Default::default() });
-    let aux = r.layer_aux(&ctx, layer);
-    let want = effectcraft_effects::CRYPTO_LAYERS.get(params.e("layer") as usize).copied().unwrap_or("CryptoAsset");
-    let Some((aux, layer_name)) = aux.and_then(|a| a.resolve_crypto_layer(want).map(|l| (a, l))) else {
-        return Err(bad(cmd, "this layer has no Cryptomatte channels (a multi-layer OpenEXR with Cryptomatte, or a 3D precomp)"));
+    let time = super::time_p(s, p, Some(comp));
+    let ctx = effectcraft_render::EvalCtx { project: &s.project, comp_id: cid, comp, time, expr: s.expr.as_deref(), footage: None };
+    let frame = probe_frame(&ctx, layer, pos);
+    let o = s.render_opts(Default::default());
+    let prefs = (o.nested_switches, o.draft_shadows);
+    Ok((ProbeKey { revision: s.revision, at: (cid, lid, fx_uid, pos), frame, scale, prefs }, time, layer, g, prop))
+}
+
+/// The kept probe if it answers for the current revision, for [`keep_crypto_probe`] (taken
+/// before an undo, redo or history jump).
+pub(crate) fn kept_crypto_probe(s: &Session) -> Option<std::sync::Arc<CryptoProbe>> {
+    s.crypto_probe.lock().ok()?.probe.clone().filter(|p| p.key.revision == s.revision)
+}
+
+/// After an undo, redo or history jump from `before` (which dropped the probe): `kept`, the
+/// probe from before, still answers when only Cryptomatte Selections changed, which the probe
+/// doesn't read (undoing a pick, as the pick itself keeps it).
+pub(crate) fn keep_crypto_probe(s: &Session, kept: Option<std::sync::Arc<CryptoProbe>>, before: &effectcraft_project::Project) {
+    let Some(p) = kept else { return };
+    if !only_crypto_selections_differ(before, &s.project) {
+        return;
+    }
+    if let Ok(mut slot) = s.crypto_probe.lock()
+        && slot.probe.is_none()
+    {
+        slot.probe = Some(std::sync::Arc::new(CryptoProbe { key: ProbeKey { revision: s.revision, ..p.key }, grid: p.grid.clone() }));
+    }
+}
+
+/// Whether projects `a` and `b` differ at most in the Selections of Cryptomatte effects.
+fn only_crypto_selections_differ(a: &effectcraft_project::Project, b: &effectcraft_project::Project) -> bool {
+    let mut x = a.clone();
+    for (cid, it) in x.items.iter_mut() {
+        let effectcraft_project::ItemKind::Comp(c) = &mut it.kind else { continue };
+        let sels: Vec<(LayerId, Uid)> = c
+            .layers
+            .iter()
+            .flat_map(|l| {
+                l.effects()
+                    .into_iter()
+                    .flat_map(|fx| fx.groups())
+                    .filter(|g| g.match_id == "ec.3d.cryptomatte")
+                    .filter_map(move |g| g.get("selection").map(|p| (l.id, p.uid)))
+            })
+            .collect();
+        if sels.is_empty() {
+            continue;
+        }
+        let Some(bc) = b.comp(*cid) else { return false };
+        let c = std::sync::Arc::make_mut(c);
+        for (lid, uid) in sels {
+            let Some(src) = bc.layer(lid).and_then(|l| l.props.find(uid)) else { return false };
+            if let Some(dst) = c.layer_mut(lid).and_then(|l| l.props.find_mut(uid)) {
+                *dst = src.clone();
+            }
+        }
+    }
+    x.same_content(b)
+}
+
+/// The session's probe when it has `key`'s.
+fn cached_probe(s: &Session, key: ProbeKey) -> Option<std::sync::Arc<CryptoProbe>> {
+    s.crypto_probe.lock().ok()?.probe.clone().filter(|p| p.key == key)
+}
+
+/// [`Session::crypto_probe_ready`].
+pub(crate) fn crypto_probe_ready(s: &Session, p: &Value) -> Result<bool> {
+    let (key, ..) = probe_key(s, p, "effect.cryptomatteAt")?;
+    Ok(cached_probe(s, key).is_some())
+}
+
+/// [`Session::crypto_probe_job`].
+pub(crate) fn crypto_probe_job(s: &Session, p: &Value) -> Result<Option<CryptoProbeJob>> {
+    let (key, time, ..) = probe_key(s, p, "effect.cryptomatteAt")?;
+    let generation = {
+        let mut slot = s.crypto_probe.lock().map_err(|_| EngineError::Other("the Cryptomatte probe is unavailable".into()))?;
+        if slot.probe.as_ref().is_some_and(|p| p.key == key) {
+            return Ok(None);
+        }
+        // A request for another probe cancels the one in flight.
+        if slot.want != Some(key) {
+            (slot.want, slot.generation) = (Some(key), slot.generation + 1);
+        }
+        slot.generation
     };
-    // The grid of the effect's input buffer (footage keeps native pixels from 3/4 scale up,
-    // proxies have their own size, earlier effects can pad it), rendered and cached.
-    let b = r.layer_input(&ctx, layer, pos).ok_or_else(|| bad(cmd, "this layer has no pixels"))?;
+    let (project, footage, expr, cache, accel, slot) =
+        (s.project.clone(), s.footage.clone(), s.expr.clone(), s.layer_cache.clone(), s.accel.clone(), s.crypto_probe.clone());
+    let opts = s.render_opts(effectcraft_render::RenderOpts { scale: key.scale, ..Default::default() });
+    // The slot while this is still the newest request.
+    fn current(slot: &std::sync::Mutex<CryptoProbeSlot>, generation: u64) -> Option<std::sync::MutexGuard<'_, CryptoProbeSlot>> {
+        slot.lock().ok().filter(|s| s.generation == generation)
+    }
+    Ok(Some(Box::new(move || {
+        match slot.lock() {
+            Ok(mut s) if s.generation == generation => (s.jobs, s.builds) = (s.jobs + 1, s.builds + 1),
+            Ok(mut s) => return s.jobs += 1,
+            Err(_) => return,
+        }
+        let mut r = effectcraft_render::Renderer::new(&project, footage.as_ref(), opts);
+        r.expr = expr.as_deref();
+        r.cache = Some(&cache);
+        r.accel = accel.as_deref();
+        // Checked between its stages too: a superseded build stops at the next one.
+        let Some(probe) = CryptoProbe::build(&r, key, time, &|| current(&slot, generation).is_some()) else { return };
+        let probe = std::sync::Arc::new(probe);
+        // Only the newest request's result, and never over a newer probe.
+        if let Some(mut s) = current(&slot, generation)
+            && s.probe.as_ref().is_none_or(|p| p.key.revision <= key.revision)
+        {
+            s.probe = Some(probe);
+        }
+    })))
+}
+
+/// What a pick finds at a point.
+enum Hit {
+    /// `probeOnly` and the probe isn't built yet.
+    Pending,
+    Nothing,
+    Id(CryptoHit),
+}
+
+/// The ID under `{x, y}` (effect space, which is layer space on footage and precomp layers) for
+/// the Cryptomatte effect `{layer?, effect?}`, from the aux channels its render reads. The point
+/// snaps to the centre of the pixel the effect's input buffer samples in a render at `scale`
+/// (the viewer's resolution). Without a kept probe it builds one, unless `probeOnly`.
+fn crypto_hit(s: &Session, p: &Value, cmd: &str) -> Result<Hit> {
+    let (key, time, layer, g, prop) = probe_key(s, p, cmd)?;
+    let (Some(x), Some(y)) = (f_p(p, "x"), f_p(p, "y")) else { return Err(bad(cmd, "missing `x` / `y` (layer pixels)")) };
+    let probe = match cached_probe(s, key) {
+        Some(probe) => probe,
+        None if b_p(p, "probeOnly").unwrap_or(false) => return Ok(Hit::Pending),
+        None => {
+            let r = s.renderer(effectcraft_render::RenderOpts { scale: key.scale, ..Default::default() });
+            if let Ok(mut slot) = s.crypto_probe.lock() {
+                slot.clear();
+                slot.builds += 1;
+            }
+            // (Never cancelled here: nothing else runs on this thread.)
+            let Some(probe) = CryptoProbe::build(&r, key, time, &|| true).map(std::sync::Arc::new) else { return Ok(Hit::Pending) };
+            if let Ok(mut slot) = s.crypto_probe.lock() {
+                slot.probe = Some(probe.clone());
+            }
+            probe
+        }
+    };
+    let b = probe.grid.as_ref().map_err(|e| bad(cmd, e.clone()))?;
     let (bs, o) = (b.scale, b.offset);
     // The centre of its pixel under the point, at the aux point the effect reads there.
     let [ax, ay] = effectcraft_effects::aux_point(bs, o, [(x * bs + o[0]).floor() + 0.5, (y * bs + o[1]).floor() + 0.5]);
-    let Some(hash) = aux.index_at(ax, ay).and_then(|i| aux.crypto_id_at(&layer_name, i)) else { return Ok(None) };
-    let (selection, driven) = (params.s("selection").to_string(), prop.expr.as_ref().is_some_and(|e| e.enabled));
-    Ok(Some(CryptoHit { at: (cid, lid, t), aux, layer: layer_name, hash, selection, prop: prop.uid, driven }))
+    let Some(hash) = b.aux.index_at(ax, ay).and_then(|i| b.aux.crypto_id_at(&b.layer, i)) else { return Ok(Hit::Nothing) };
+    let (cid, lid, ..) = key.at;
+    let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
+    let ctx = effectcraft_render::EvalCtx { project: &s.project, comp_id: cid, comp, time, expr: s.expr.as_deref(), footage: None };
+    let selection = effectcraft_effects::flatten_params(g, &mut |pr| ctx.value(layer, pr)).s("selection").to_string();
+    let driven = prop.expr.as_ref().is_some_and(|e| e.enabled);
+    let (aux, layer_name) = (b.aux.clone(), b.layer.clone());
+    Ok(Hit::Id(CryptoHit { at: (cid, lid, time), probe: probe.clone(), aux, layer: layer_name, hash, selection, prop: prop.uid, driven }))
 }
 
 /// `effect.cryptomatteAt`: the ID under a point, for the viewer's hover hint. The first call per
-/// frame renders the effect's input to learn its pixel grid (cached afterwards).
+/// frame renders the effect's input to learn its pixel grid (kept afterwards); with `probeOnly`
+/// it answers `{pending: true}` instead.
 fn crypto_at(s: &mut Session, p: &Value) -> Result<Value> {
-    Ok(crypto_hit(s, p, "effect.cryptomatteAt")?.map_or(Value::Null, |h| h.reply(&h.selection)))
+    Ok(match crypto_hit(s, p, "effect.cryptomatteAt")? {
+        Hit::Pending => json!({"pending": true}),
+        Hit::Nothing => Value::Null,
+        Hit::Id(h) => h.reply(&h.selection),
+    })
 }
 
 /// The Cryptomatte eyedropper: replace the effect's Selection with the ID under a point, add it
@@ -264,7 +532,11 @@ fn pick_crypto(s: &mut Session, p: &Value) -> Result<Value> {
         "remove" => PickMode::Remove,
         m => return Err(bad(cmd, format!("unknown `mode` {m:?} (replace, add or remove)"))),
     };
-    let h = crypto_hit(s, p, cmd)?.ok_or_else(|| bad(cmd, "no Cryptomatte ID there (empty or outside the layer)"))?;
+    let h = match crypto_hit(s, p, cmd)? {
+        Hit::Id(h) => h,
+        Hit::Pending => return Ok(json!({"pending": true, "changed": false})),
+        Hit::Nothing => return Err(bad(cmd, "no Cryptomatte ID there (empty or outside the layer)")),
+    };
     if h.driven {
         return Err(bad(cmd, "the Selection is driven by an expression; disable it to pick"));
     }
@@ -274,6 +546,19 @@ fn pick_crypto(s: &mut Session, p: &Value) -> Result<Value> {
     if changed {
         let (cid, lid, t) = h.at;
         s.execute("prop.set", json!({"comp": cid.0, "layer": lid.0, "prop": h.prop, "value": sel, "time": t.seconds(), "timeBase": "comp"}))?;
+        // The step says what made it (Edit ▸ Undo Pick Cryptomatte, the History panel), not
+        // "Change Property" like any other edit. (A changed Selection is always a new step.)
+        if let Some(step) = s.history.undo.last_mut() {
+            step.0 = "Pick Cryptomatte".into();
+        }
+        // Only the Selection changed, which the probe doesn't read: the next hover keeps it.
+        // (The edit dropped it; a probe built since is newer.)
+        if let Ok(mut slot) = s.crypto_probe.lock()
+            && slot.probe.is_none()
+        {
+            let key = ProbeKey { revision: s.revision, ..h.probe.key };
+            slot.probe = Some(std::sync::Arc::new(CryptoProbe { key, grid: h.probe.grid.clone() }));
+        }
     }
     let mut out = h.reply(&sel);
     out["selection"] = json!(sel);
@@ -732,14 +1017,14 @@ pub fn specs() -> Vec<CommandSpec> {
             "Pick Cryptomatte",
             [],
             None,
-            "{layer?, effect?: index|uid|name, x, y (effect space), mode?: replace|add|remove (default replace), scale? (preview resolution, default 1), time?} → {name, hash, layer, selection, changed, selected} — edits the Cryptomatte effect's Selection with the ID under the point",
+            "{layer?, effect?: index|uid|name, x, y (effect space), mode?: replace|add|remove (default replace), scale? (preview resolution, default 1), time?, probeOnly?} → {name, hash, layer, selection, changed, selected} | {pending} — edits the Cryptomatte effect's Selection with the ID under the point",
             has_layers,
             pick_crypto
         ),
         crate::query!(
             "effect.cryptomatteAt",
             "Cryptomatte At",
-            "{layer?, effect?: index|uid|name, x, y (effect space), scale?, time?} → {name, hash, layer, selected} | null — the Cryptomatte ID under the point",
+            "{layer?, effect?: index|uid|name, x, y (effect space), scale?, time?, probeOnly?: bool (don't build the probe)} → {name, hash, layer, selected} | {pending} | null — the Cryptomatte ID under the point",
             crypto_at
         ),
         cmd!("effect.applyLast", "Last Effect", ["Effect"], Some("Cmd+Alt+Shift+E"), "{layers?}", has_layers, last),

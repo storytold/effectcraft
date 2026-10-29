@@ -280,6 +280,31 @@ fn toolbar_fill_and_stroke_paint_selected_shape_layers() {
     let _ = s.render(cid, s.time(), Default::default());
 }
 
+/// A Wiggle Paths saved without Spatial Phase gets the property, at 0°, after Temporal Phase when
+/// the project opens.
+#[test]
+fn opening_a_wiggle_paths_without_spatial_phase_adds_it() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"width": 400, "height": 300, "duration": 2})).unwrap();
+    let sh = s.execute("layer.newShape", json!({"kind": "rect", "fill": "#ff0000"})).unwrap()["layer"].as_u64().unwrap();
+    let uid = s.execute("layer.addShapeItem", json!({"layer": sh, "kind": "wiggle"})).unwrap()["uid"].as_u64().unwrap();
+    let cid = s.active_comp_id().unwrap();
+    let mut old = effectcraft_project::Project::from_json(&s.project.to_file_json().unwrap()).unwrap();
+    let l = old.comp_mut(cid).unwrap().layer_mut(effectcraft_project::LayerId(sh)).unwrap();
+    let g = l.props.find_group_mut(uid).unwrap();
+    g.children.retain(|c| c.match_id() != "spatialPhase");
+    assert_eq!(g.children.len(), 7);
+    let next = old.next_id;
+    s.replace_project(old, None);
+    let l = s.active_comp().unwrap().layer(effectcraft_project::LayerId(sh)).unwrap().clone();
+    let g = l.props.find_group(uid).unwrap();
+    let ids: Vec<&str> = g.children.iter().map(|c| c.match_id()).collect();
+    assert_eq!(ids, ["size", "detail", "points", "speed", "correlation", "phase", "spatialPhase", "seed"]);
+    let sp = g.get("spatialPhase").unwrap();
+    assert_eq!((sp.name.as_str(), &sp.value), ("Spatial Phase", &effectcraft_keyframe::Value::Scalar(0.0)));
+    assert!(sp.uid >= next && s.project.next_id > sp.uid, "a fresh uid: {} (next {next})", sp.uid);
+}
+
 /// The toolbar's Fill Options / Stroke Options change a selected shape layer's paint kind (#732):
 /// None switches the fill off, a gradient turns the Fill into a Gradient Fill that keeps its
 /// opacity, Solid Color turns it back, and a Stroke kind adds a stroke where there is none.

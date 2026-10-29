@@ -35,7 +35,7 @@ fn disk_cache_settings_persistence_and_invalidation() {
     let mut s = session(&dir);
     let st = s.execute_checked("cache.diskStats", json!({})).unwrap();
     assert_eq!(st["enabled"], json!(true));
-    assert_eq!(st["maxBytes"], json!(100u64 << 30));
+    assert_eq!(st["maxBytes"], json!(20u64 << 30));
     let cid = project(&mut s);
     let t = s.time();
     let first = s.render(cid, t, RenderOpts::default());

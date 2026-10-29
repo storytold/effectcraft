@@ -27,6 +27,7 @@ our own scripts; no real-world script library has been run against both apps.
 | `#include`, `#target` directives | yes | `#include` / `//@include` / `#includepath` inline files relative to the including script (once each, nested at most 32 deep, under the scripts' file gate; errors name the included file and line); `#target`, `#targetengine`, `#strict` are ignored | good | `tests_include.rs` (#759); installed scripts and panels have no folder of their own, so they include from the project's folder or absolute paths |
 | `.jsxbin` | yes | no | out of scope | No public specification |
 | Keyboard shortcuts for scripts | yes | no | missing | plugins.md |
+| Recent Script Files | File ▸ Scripts ▸ Recent Script Files (10 scripts), a key to rerun | Same list, kept in the settings; Cmd+Alt+Shift+D reruns the most recent script | same | `recent_script_files_run_again` ([plugins.md](plugins.md)) |
 | Command-line rendering `aerender` | yes | `effectcraft-cli render`, `script`, `exec` | same purpose | `apps/effectcraft-cli` |
 | Essential Graphics scripting hooks | `addToMotionGraphicsTemplate…` | yes (M13.7) | good | — |
 | Agent control (MCP, control channel, every command) | none | yes | beyond | [agents.md](agents.md), [control-protocol.md](control-protocol.md); `list_effects` omits parameter types and ranges (#441) |

@@ -72,6 +72,14 @@ fn prefs_migrate_old_layout_and_keep_unknown_keys() {
 }
 
 #[test]
+fn prefs_migrate_old_disk_cache_default() {
+    // The old 100 GB default becomes 20 GB; a size the user chose stays (#2551).
+    assert_eq!(Prefs::from_json(r#"{"version": 2, "disk": {"diskCacheMaxGb": 100}}"#).disk.disk_cache_max_gb, 20);
+    assert_eq!(Prefs::from_json(r#"{"version": 2, "disk": {"diskCacheMaxGb": 50}}"#).disk.disk_cache_max_gb, 50);
+    assert_eq!(Prefs::from_json(r#"{"version": 3, "disk": {"diskCacheMaxGb": 100}}"#).disk.disk_cache_max_gb, 100);
+}
+
+#[test]
 fn prefs_set_validates_keys_types_and_ranges() {
     let mut p = Prefs::default();
     assert!(p.set("general.nope", json!(1)).is_err());

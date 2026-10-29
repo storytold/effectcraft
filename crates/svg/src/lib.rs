@@ -510,12 +510,30 @@ fn parse_css(css: &str, sheet: &mut StyleSheet) -> Result<(), Error> {
     let mut rest = css.as_str();
     while let Some(open) = rest.find('{') {
         let sel = rest[..open].trim();
+        if sel.starts_with('@') {
+            // Skip the whole at-rule block, matching nested braces by depth.
+            let mut depth = 0usize;
+            let mut end = None;
+            for (i, c) in rest[open..].char_indices() {
+                match c {
+                    '{' => depth = depth.saturating_add(1),
+                    '}' => {
+                        depth = depth.saturating_sub(1);
+                        if depth == 0 {
+                            end = Some(open + i + 1);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let Some(end) = end else { break };
+            rest = &rest[end..];
+            continue;
+        }
         let Some(close) = rest[open..].find('}') else { break };
         let body = &rest[open + 1..open + close];
         rest = &rest[open + close + 1..];
-        if sel.starts_with('@') {
-            continue;
-        }
         let mut decls = parse_decls(body);
         sheet.decls = sheet.decls.saturating_add(decls.len());
         if sheet.decls > MAX_CSS_DECLARATIONS {

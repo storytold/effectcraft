@@ -198,6 +198,8 @@ impl EffectcraftApp {
             self.command_inbox = Some(rx);
         }
         // A close request (the window's button, Quit, `app.quit`) must be answered while hidden.
+        // An answered file dialog can change the project, so the answers above run first. The host
+        // calls `panels::unsaved::quit_on_close` last in its `logic`.
         panels::unsaved::on_close_requested(self, ctx);
         let title = panels::unsaved::window_title(self);
         if title != self.window_title {

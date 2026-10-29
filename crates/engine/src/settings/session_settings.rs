@@ -82,7 +82,9 @@ impl Session {
     /// Take the latest reading of the system's memory and start the next one in the background
     /// (desktop frontends call this every few seconds; it never waits for the system), then
     /// re-apply the cache budgets when the reading changes them. Returns the effective budgets.
+    /// The disk cache's free disk space is read the same way (it keeps a reserve free).
     pub fn memory_tick(&mut self) -> crate::prefs::CacheBudgets {
+        self.poll_disk_space();
         let before = self.prefs.cache_budgets(self.sys_memory);
         self.sys_memory = self.memory_watch.latest().or(self.sys_memory);
         self.memory_watch.poll();
@@ -96,6 +98,19 @@ impl Session {
             }
         }
         after
+    }
+
+    /// Read the disk cache's free disk space in the background and apply it there (the reserve
+    /// it keeps free): the free space and the cache's size are taken at the same moment, and the
+    /// reader holds its own cache, so a reading never reaches another folder's.
+    fn poll_disk_space(&mut self) {
+        if let Some(dc) = &self.disk_cache {
+            let dc = dc.clone();
+            self.disk_watch.poll_with("ec-disk-space", move || {
+                dc.set_disk_space(crate::sysinfo::disk_space(dc.folder()));
+                Some(())
+            });
+        }
     }
 
     /// Apply Settings ▸ Media & Disk Cache ▸ Disk Cache: open (or close) the persistent cache
@@ -113,6 +128,7 @@ impl Session {
         // (no file system in the browser: the disk cache stays off there)
         let Some(folder) = folder.filter(|_| d.disk_cache_enabled && !cfg!(target_arch = "wasm32")) else {
             self.disk_cache = None;
+            self.disk_watch = Default::default();
             self.layer_cache.set_disk(None);
             return;
         };
@@ -126,17 +142,25 @@ impl Session {
                 c.set_max_bytes(max);
                 c.clone()
             }
+            // A new folder: the free-space reading was for the old one (a reader still running
+            // holds the old watcher's state, so it can't write into the new one).
             _ => match DiskCache::open(&folder, max) {
-                Ok(c) => c,
+                Ok(c) => {
+                    self.disk_watch = Default::default();
+                    c
+                }
                 Err(e) => {
                     log::warn!("disk cache at {}: {e}", folder.display());
                     self.disk_cache = None;
+                    self.disk_watch = Default::default();
                     self.layer_cache.set_disk(None);
                     return;
                 }
             },
         };
         self.disk_cache = Some(dc.clone());
+        // The reserve applies from the start (a new folder's watcher is idle).
+        self.poll_disk_space();
         let salt = self.refresh_disk_salt(true).unwrap_or_default();
         self.layer_cache.set_disk(Some((dc.clone(), salt)));
         // Roto Brush / Object Matte segmentations persist there too (held weakly: switching the

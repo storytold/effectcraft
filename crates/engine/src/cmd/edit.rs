@@ -847,10 +847,12 @@ pub(crate) fn disk_stats(s: &mut Session, _: &Value) -> Result<Value> {
         "layers": dc.keys(effectcraft_render::disk_cache::Kind::Layer).len(),
         "bytes": st.bytes,
         "maxBytes": st.max_bytes,
+        "limitBytes": st.limit_bytes,
         "hits": st.hits,
         "misses": st.misses,
         "writes": st.writes,
         "evictions": st.evictions,
+        "failed": st.failed,
     }))
 }
 

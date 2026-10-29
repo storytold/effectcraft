@@ -380,19 +380,31 @@ fn glow_bright(@builtin(global_invocation_id) gid: vec3<u32>) {
         l = a;
     }
     let k = clamp((l - thr) / max(1.0 - thr, 1e-3), 0.0, 1.0);
+    // Based on the colour channels the glow covers the layer's whole alpha (effects::misc::glow).
+    var ga = a;
+    if (P.u[0].y != 0u) {
+        ga = k * a;
+    }
     if (P.u[0].x != 0u) {
         let t = glow_ab_t(l);
         let ca = P.f[1].xyz;
         let cb = P.f[2].xyz;
         let c = ca + (cb - ca) * t;
-        textureStore(out, p, vec4<f32>(c * k * a, k * a));
+        textureStore(out, p, vec4<f32>(c * k * a, ga));
+    } else if (P.u[0].y != 0u) {
+        textureStore(out, p, vec4<f32>(px.xyz * k, ga));
     } else {
-        textureStore(out, p, px * k);
+        // Original colours, per channel (effects::misc::glow_bright_channel): gain 8.0 is
+        // effects::GLOW_GAIN, 0.0611 is effects::GLOW_KNEE (checked by the test
+        // glow_constants_match_the_cpu).
+        let c = max(8.0 * (px.xyz / a - vec3<f32>(thr - 0.0611)), vec3<f32>(0.0));
+        textureStore(out, p, vec4<f32>(c * a, ga));
     }
 }
 
 // Glow composite: original `src` with the blurred glow `aux`. u[0].x = 0 on top, 1 behind,
-// 2 none (glow only); f[0].x = intensity.
+// 2 none (glow only); u[0].y = based on alpha (intensity also scales the glow's alpha);
+// f[0].x = intensity.
 @compute @workgroup_size(16, 16)
 fn glow_combine(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dims = out_dims();
@@ -401,7 +413,11 @@ fn glow_combine(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     var o = textureLoad(src, p, 0);
-    let g = textureLoad(aux, p, 0) * P.f[0].x;
+    let gs = textureLoad(aux, p, 0);
+    var g = vec4<f32>(gs.xyz * P.f[0].x, gs.w);
+    if (P.u[0].y != 0u) {
+        g.w = gs.w * P.f[0].x;
+    }
     if (P.u[0].x == 2u) {
         o = g;
     } else if (P.u[0].x == 1u) {

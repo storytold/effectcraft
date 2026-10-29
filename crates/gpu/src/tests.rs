@@ -958,6 +958,16 @@ fn effects_whose_kernels_failed_render_on_the_cpu() {
     }
 }
 
+/// WGSL cannot read the CPU's constants, so Glow's bright pass repeats them as literals; this
+/// ties them to `effects::GLOW_GAIN` / `GLOW_KNEE` (runs without a GPU).
+#[test]
+fn glow_constants_match_the_cpu() {
+    use effectcraft_effects::{GLOW_GAIN, GLOW_KNEE};
+    let kernels = include_str!("shaders/kernels.wgsl");
+    let want = format!("max({GLOW_GAIN:?} * (px.xyz / a - vec3<f32>(thr - {GLOW_KNEE:?})), vec3<f32>(0.0))");
+    assert!(kernels.contains(&want), "Glow's bright pass in kernels.wgsl is not `{want}`");
+}
+
 /// The GPU Tint gives After Effects 2026's greys for full-frame solids at its defaults (sRGB
 /// working space, not linearised): Rec. 601 weights, as the CPU (`color_fx::luma_601`).
 #[test]

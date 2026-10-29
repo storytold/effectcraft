@@ -235,6 +235,7 @@ impl<'a> Cx<'a> {
     /// [`Cx::frames`] for `ks` while `encode` runs beside them on `beside`'s threads, so the
     /// render threads don't wait for the (largely sequential) encoder of the previous batch.
     /// With deferred readbacks, or where no encode thread could be started, `encode` runs first.
+    #[cfg(test)]
     pub async fn frames_beside<T: Send, A: Send>(
         &self,
         beside: &Beside,
@@ -243,12 +244,23 @@ impl<'a> Cx<'a> {
         f: impl Fn(u64, Image) -> T + Sync + Send,
         encode: impl FnOnce() -> A + Send,
     ) -> crate::Result<(A, Vec<T>)> {
+        self.beside(beside, self.frames(comp, ks, f), encode).await
+    }
+
+    /// Run `encode` on `beside`'s threads while `frames` renders the next batch. With deferred
+    /// readbacks, or where no encode thread could be started, `encode` runs first.
+    pub async fn beside<T: Send, A: Send>(
+        &self,
+        beside: &Beside,
+        frames: impl std::future::Future<Output = Vec<T>>,
+        encode: impl FnOnce() -> A + Send,
+    ) -> crate::Result<(A, Vec<T>)> {
         match &beside.0 {
             Some(pool) if !self.deferred() => {
                 let mut done = None;
                 let frames = pool.in_place_scope(|s| {
                     s.spawn(|_| done = Some(std::panic::catch_unwind(std::panic::AssertUnwindSafe(encode))));
-                    effectcraft_render::passes::block_on(self.frames(comp, ks, f))
+                    effectcraft_render::passes::block_on(frames)
                 });
                 match done {
                     Some(Ok(a)) => Ok((a, frames)),
@@ -261,7 +273,7 @@ impl<'a> Cx<'a> {
             }
             _ => {
                 let a = encode();
-                Ok((a, self.frames(comp, ks, f).await))
+                Ok((a, frames.await))
             }
         }
     }
@@ -302,6 +314,63 @@ impl<'a> Cx<'a> {
             ft.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((i, t0.elapsed().as_secs_f64()));
         }
         img
+    }
+
+    /// Output frame `i` as the H.264 export's 4:2:0 planes at `w`×`h`, rendered and converted
+    /// by the accelerator ([`effectcraft_render::Accelerator::comp_frame_yuv420`]). Only for
+    /// frames that need nothing done after the render (progressive, at the project's depth, no
+    /// crop or resize, rendered at exactly `w`×`h`). `None`: render it with [`Cx::frame`].
+    pub fn yuv420_frame(&self, comp: &Comp, i: u64, w: u32, h: u32) -> Option<Vec<u8>> {
+        if self.deferred() {
+            return None;
+        }
+        let FrameSample::Progressive(t) = self.job.settings.sample(comp, i) else { return None };
+        let depth = self.job.settings.color_depth;
+        if depth != ColorDepth::Current && depth.resolve(self.project.settings.bit_depth).levels().is_some() {
+            return None;
+        }
+        let om = self.job.output;
+        let scale = self.job.settings.resolution.clamp(0.01, 4.0);
+        let size = |n: u32| ((n as f64 * scale).round() as u32).max(1);
+        if om.resize.enabled || (size(comp.width), size(comp.height)) != (w, h) || om.crop.edges(w, h, scale) != (0, 0, 0, 0) {
+            return None;
+        }
+        let t0 = Instant::now();
+        let r = self.renderer();
+        let planes = r.active_accel()?.comp_frame_yuv420(&r, self.job.comp, t, comp.background)?;
+        let (cw, ch) = (w.div_ceil(2) as usize, h.div_ceil(2) as usize);
+        if planes.len() != w as usize * h as usize + 2 * cw * ch {
+            return None;
+        }
+        if let Some(ft) = &self.frame_times {
+            ft.lock().unwrap_or_else(|e| e.into_inner()).push((i, t0.elapsed().as_secs_f64()));
+        }
+        Some(planes)
+    }
+
+    /// Output frames `ks` for the H.264 encoder: the accelerator's planes
+    /// ([`Cx::yuv420_frame`]) where it can, otherwise `fallback` of the frame rendered as usual.
+    pub(crate) fn h264_frames<T: Send>(
+        &self,
+        comp: &Comp,
+        ks: Vec<u64>,
+        w: u32,
+        h: u32,
+        planes: impl Fn(Vec<u8>) -> T + Sync + Send,
+        fallback: impl Fn(u64, Image) -> T + Sync + Send,
+    ) -> Vec<T> {
+        // As in `frames`: once the GPU has stopped for good, the rest render in parallel.
+        let gpu_live = || self.job.accel.is_none_or(|a| a.available());
+        map_frames_while(
+            ks,
+            self.gpu_cap(),
+            gpu_live,
+            |k| self.yuv420_frame(comp, k, w, h).ok_or_else(|| self.frame(comp, k)),
+            |k, r| match r {
+                Ok(p) => planes(p),
+                Err(img) => fallback(k, img),
+            },
+        )
     }
 
     /// Output Module ▸ Crop, then Resize.

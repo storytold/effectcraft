@@ -270,6 +270,44 @@ fn an_undefined_name_mentioned_earlier_reports_its_use_in_the_reading_function()
     assert_eq!(e.line, Some(6), "{e:?}");
 }
 
+/// Scripts reach Wiggle Paths' properties, Spatial Phase included, by their match names.
+#[test]
+fn wiggle_paths_properties_by_match_name() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"
+        var c = app.project.items.addComp("W", 200, 200, 1, 2, 30);
+        var sh = c.layers.addShape();
+        var w = sh.property("ADBE Root Vectors Group").addProperty("ADBE Vector Filter - Roughen");
+        w.property("ADBE Vector Spatial Phase").setValue(45);
+        var names = [];
+        for (var i = 1; i <= w.numProperties; i++) names.push(w.property(i).matchName);
+        [w.matchName, w.property("ADBE Vector Spatial Phase").name, names]
+        "#,
+    );
+    assert_eq!(
+        o.result,
+        json!([
+            "ADBE Vector Filter - Roughen",
+            "Spatial Phase",
+            [
+                "ADBE Vector Roughen Size",
+                "ADBE Vector Roughen Detail",
+                "ADBE Vector Roughen Points",
+                "ADBE Vector Temporal Freq",
+                "ADBE Vector Correlation",
+                "ADBE Vector Temporal Phase",
+                "ADBE Vector Spatial Phase",
+                "ADBE Vector Random Seed"
+            ]
+        ])
+    );
+    let (_, c) = comp_named(&s, "W");
+    let sh = c.layers.iter().find(|l| l.props.sub("contents").is_some()).unwrap();
+    assert_eq!(sh.props.prop("contents/wiggle/spatialPhase").unwrap().value, KV::Scalar(45.0));
+}
+
 #[test]
 fn match_names_and_lookups() {
     let mut s = session();

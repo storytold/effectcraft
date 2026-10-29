@@ -422,3 +422,15 @@ fn font_size_percentage_resolves_against_the_parent_font_size() {
         assert!(matches!(shapes[0].2.geom, Geom::Rect { w, .. } if w == expected), "{body}: {:?}", shapes[0].2.geom);
     }
 }
+
+#[test]
+fn at_rule_blocks_are_skipped_by_brace_depth() {
+    let mut sheet = StyleSheet::default();
+    parse_css("@media print { .a{fill:#ff0000} .b{fill:#0000ff} } .c{fill:red}", &mut sheet).unwrap();
+    assert_eq!(sheet.rules.len(), 1);
+    assert_eq!(sheet.rules[0].classes, vec!["c".to_string()]);
+    let mut sheet = StyleSheet::default();
+    parse_css("@media x { @supports y { .c{} } .d{} } .e{fill:red}", &mut sheet).unwrap();
+    assert_eq!(sheet.rules.len(), 1);
+    assert_eq!(sheet.rules[0].classes, vec!["e".to_string()]);
+}

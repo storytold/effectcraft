@@ -340,6 +340,7 @@ pub fn state_key(app: &EffectcraftApp) -> u64 {
     s.journal.last().map(|j| &j.0).hash(&mut h);
     s.prefs.recent_projects.hash(&mut h);
     (&s.prefs.recent_footage, &s.prefs.recent_presets).hash(&mut h);
+    s.prefs.recent_scripts.hash(&mut h);
     s.history.undo.iter().for_each(|(l, _)| l.hash(&mut h));
     s.state.open_comps.hash(&mut h);
     s.active_comp_id().and_then(|c| s.state.views3d.get(&c)).map(|v| format!("{:?}", v.current)).hash(&mut h);

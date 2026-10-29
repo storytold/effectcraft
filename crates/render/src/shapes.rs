@@ -324,6 +324,7 @@ fn collect(ctx: &EvalCtx, layer: &Layer, contents: &PropGroup, arena: &mut Vec<B
                     speed: ctx.f(layer, g, "speed", 2.0),
                     correlation: ctx.f(layer, g, "correlation", 50.0),
                     phase_deg: ctx.f(layer, g, "phase", 0.0),
+                    spatial_phase_deg: ctx.f(layer, g, "spatialPhase", 0.0),
                     seed: ctx.f(layer, g, "seed", 0.0),
                 };
                 let t = layer.layer_time(ctx.time).seconds();

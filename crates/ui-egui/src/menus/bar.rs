@@ -160,6 +160,7 @@ fn menu_nodes(
                         "recentProjects" => app.session.prefs.recent_projects.get(i).cloned(),
                         "recentFootage" => app.session.prefs.recent_footage.get(i).cloned(),
                         "recentPresets" => app.session.prefs.recent_presets.get(i).cloned(),
+                        "recentScripts" => app.session.prefs.recent_scripts.get(i).map(|r| r.text().to_string()),
                         _ => None,
                     };
                     let r = ui.add_enabled(entry_enabled(app, e), egui::Button::new((gutter(entry_checked(app, e) == Some(true)), e.label.as_str())));

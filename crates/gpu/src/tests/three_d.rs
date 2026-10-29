@@ -11,7 +11,7 @@ use effectcraft_project::{BitDepth, Comp, ItemKind, Layer, LayerSource, LightKin
 use effectcraft_render::{Backend, RenderOpts, Renderer};
 use effectcraft_time::{FrameRate, Tick};
 
-use crate::tests::{Pattern, Scene, check, compare_at, gpu, n, opts, set};
+use crate::tests::{Pattern, Scene, check, compare_at, diff, gpu, n, opts, set, tolerance};
 
 const W: u32 = 160;
 const H: u32 = 100;
@@ -209,6 +209,10 @@ fn the_gpu_draws_classic_3d_runs_itself() {
     assert_eq!(prep.planes.iter().filter(|p| p.draw).count(), 3);
     let mut e = crate::context::Enc::new(g.context());
     let canvas = e.image(W, H);
+    if !g.context().has_kernel("classic3d") {
+        // FXC (DirectX 12) can't build the kernel (#613); the CPU fallback is tested below.
+        return;
+    }
     let out = crate::classic3d::draw_run(&mut e, &prep, &canvas).expect("the kernel draws the run");
     let img = e.download(&out).unwrap();
     let mut cpu = effectcraft_raster::Image::new(W, H);
@@ -253,7 +257,9 @@ fn bokeh_depth_of_field_runs_on_the_gpu() {
                 assert!(prep.planes.iter().filter(|p| p.draw).all(|p| p.dof.is_some()), "{label}: depth of field deferred to the GPU");
                 let mut e = crate::context::Enc::new(g.context());
                 let canvas = e.image(W, H);
-                assert!(crate::classic3d::draw_run(&mut e, &prep, &canvas).is_some(), "{label}: drawn on the GPU");
+                if g.context().has_kernel("classic3d") {
+                    assert!(crate::classic3d::draw_run(&mut e, &prep, &canvas).is_some(), "{label}: drawn on the GPU");
+                }
             }
         }
     }
@@ -286,5 +292,29 @@ fn two_d_layer_with_a_three_d_track_matte() {
             s.p.comp_mut(s.cid).unwrap().renderer = effectcraft_project::Renderer::Advanced3D;
             check(&format!("3d matte {kind:?} {depth:?} (Advanced 3D)"), compare_at(&s, opts(), Tick::ZERO), 0.005);
         }
+    }
+}
+
+/// #613: FXC on DirectX 12 fails to build `classic3d` (it can't unroll its loops). The
+/// compositor still starts without it, lists it, and 3D runs render on the CPU, matching the
+/// CPU render.
+#[test]
+fn classic_3d_runs_render_on_the_cpu_without_the_kernel() {
+    let Some(base) = gpu() else {
+        return;
+    };
+    let ctx = base.context().without_kernel("classic3d");
+    assert!(!ctx.has_kernel("classic3d"));
+    let g = crate::Gpu::from_context(ctx);
+    for depth in [BitDepth::Bpc8, BitDepth::Bpc32] {
+        let mut s = crossing(depth, BlendMode::Normal);
+        camera(&mut s, [30.0, 20.0, -260.0], None);
+        let cpu = Renderer::new(&s.p, &Pattern, RenderOpts { backend: Backend::Cpu, ..opts() }).comp_frame_cpu(s.cid, Tick::ZERO);
+        let mut r = Renderer::new(&s.p, &Pattern, RenderOpts { backend: Backend::Gpu, ..opts() });
+        r.accel = Some(&g);
+        let img = g.render(&r, s.cid, Tick::ZERO).expect("the GPU renders the frame");
+        let mut d = diff(&cpu, &img, tolerance(depth));
+        d.quantized = depth != BitDepth::Bpc32;
+        check(&format!("classic 3D without its kernel {depth:?}"), Some(d), 0.0);
     }
 }

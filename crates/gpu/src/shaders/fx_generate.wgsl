@@ -42,6 +42,15 @@ fn gen_sum(a: vec2<f32>, b: vec2<f32>) -> f32 {
     return (a.x + b.x) + (a.y + b.y);
 }
 
+// Standard normal CDF (Abramowitz & Stegun 7.1.26 erf; effects::misc::norm_cdf).
+fn gen_norm_cdf(z: f32) -> f32 {
+    let x = abs(z) * 0.70710678;
+    let t = 1.0 / (1.0 + 0.3275911 * x);
+    let poly = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
+    let erf = 1.0 - poly * exp(-x * x);
+    return select(0.5 * (1.0 - erf), 0.5 * (1.0 + erf), z >= 0.0);
+}
+
 // ---------------------------------------------------------------- Radial Blur (raster::radial_blur)
 
 // u[0] = (zoom, samples); f[0] = (cx, cy); data = per sample (sin, cos) (spin) or k (zoom).
@@ -67,7 +76,10 @@ fn gen_radial_blur(@builtin(global_invocation_id) gid: vec3<u32>) {
             let cs = data[2u * i + 1u];
             s = vec2<f32>(c.x + v.x * cs - v.y * sn, c.y + v.x * sn + v.y * cs);
         }
-        acc += sample_bilinear(src, s.x, s.y);
+        // Edge samples repeat (raster::radial_blur).
+        let hi = vec2<f32>(f32(dims.x), f32(dims.y)) - vec2<f32>(0.5);
+        let sc = clamp(s, vec2<f32>(0.5), max(hi, vec2<f32>(0.5)));
+        acc += sample_bilinear(src, sc.x, sc.y);
     }
     textureStore(out, p, acc / f32(n));
 }
@@ -235,9 +247,9 @@ fn gen_linear_wipe(@builtin(global_invocation_id) gid: vec3<u32>) {
     textureStore(out, p, textureLoad(src, p, 0) * k);
 }
 
-// Venetian Blinds. Per column (6 floats): (cx − done·w), (cx − w − done·w), (cx − w) as
-// (hi, lo), with cx = ((x + 0.5)·dx) mod w; per row (2 floats): ((y + 0.5)·dy) mod w.
-// u[0].x = row table offset; f[0].x = feather.
+// Venetian Blinds (effects::venetian_cover). Per column (4 floats): cx, (cx − w) as (hi, lo),
+// with cx = ((x + 0.5 − ox)·dx) mod w; per row (2 floats): ((y + 0.5 − oy)·dy) mod w.
+// u[0] = (row table offset, Gaussian terms per side, 0 = hard edge); f[0] = (w, band, σ).
 @compute @workgroup_size(16, 16)
 fn gen_venetian(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dims = out_dims();
@@ -245,34 +257,33 @@ fn gen_venetian(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (p.x >= dims.x || p.y >= dims.y) {
         return;
     }
-    let col = 6u * u32(p.x);
+    let col = 4u * u32(p.x);
     let row = gen_hl(P.u[0].x + 2u * u32(p.y));
     // (d mod w) wraps once the column and row terms reach w.
-    let wrapped = gen_sum(gen_hl(col + 4u), row) >= 0.0;
-    var t: f32;
-    if (wrapped) {
-        t = gen_sum(gen_hl(col + 2u), row);
-    } else {
-        t = gen_sum(gen_hl(col), row);
+    var d = gen_sum(gen_hl(col), row);
+    if (gen_sum(gen_hl(col + 2u), row) >= 0.0) {
+        d = gen_sum(gen_hl(col + 2u), row);
     }
-    let k = clamp(t / P.f[0].x + 0.5, 0.0, 1.0);
-    textureStore(out, p, textureLoad(src, p, 0) * k);
+    let w = P.f[0].x;
+    let band = P.f[0].y;
+    let sigma = P.f[0].z;
+    let n = i32(P.u[0].y);
+    var t = 0.0;
+    if (n == 0) {
+        t = select(0.0, 1.0, d < band);
+    } else {
+        for (var k = -n; k <= n; k++) {
+            let u = d + f32(k) * w;
+            t += gen_norm_cdf(u / sigma) - gen_norm_cdf((u - band) / sigma);
+        }
+    }
+    let cover = clamp(t, 0.0, 1.0);
+    textureStore(out, p, textureLoad(src, p, 0) * (1.0 - cover));
 }
 
-// Angle (degrees, clockwise from up) of the pixel vector rotated by rotation `r` (0 = start,
-// 1 = start + edge, 2 = start − edge), from the per-column / per-row tables of Radial Wipe.
-fn gen_psi(r: u32, x: u32, y: u32) -> f32 {
-    let c = 9u * x + 3u * r;
-    let w = P.u[0].x + 9u * y + 3u * r;
-    // x' = ux·cos R − uy·sin R (cancels at the edge), y' = uy·cos R + ux·sin R.
-    let xr = (data[c] - data[w]) + (data[c + 1u] - data[w + 1u]);
-    let yr = data[w + 2u] + data[c + 2u];
-    return atan2(xr, yr) * GEN_DEG;
-}
-
-// Radial Wipe. data: per column 9 floats (for each rotation: ux·cos R (hi, lo), ux·sin R),
-// per row 9 floats (uy·sin R (hi, lo), uy·cos R); u[0] = (row offset, wipe);
-// f[0] = (edge, feather).
+// Radial Wipe (effects::misc::radial_wipe_alpha). u[0] = (fully wiped, hard edge);
+// f[0] = (centre x, centre y, σ, first ray in degrees); f[1] = (sin, cos) of both rays;
+// f[2].x = span in degrees.
 @compute @workgroup_size(16, 16)
 fn gen_radial_wipe(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dims = out_dims();
@@ -280,28 +291,29 @@ fn gen_radial_wipe(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (p.x >= dims.x || p.y >= dims.y) {
         return;
     }
-    let x = u32(p.x);
-    let y = u32(p.y);
-    let dir = P.u[0].y;
-    let edge = P.f[0].x;
-    var a = gen_psi(0u, x, y);
-    if (a < 0.0) {
-        a += 360.0;
-    }
-    var base: f32;
-    if (dir == 0u || (dir == 2u && a <= 180.0)) {
-        base = a - edge;
-        if (abs(base) < 90.0) {
-            base = gen_psi(1u, x, y);
-        }
-    } else {
-        base = (360.0 - a) - edge;
-        if (abs(base) < 90.0) {
-            base = -gen_psi(2u, x, y);
+    var k = 0.0;
+    if (P.u[0].x == 0u) {
+        let ux = f32(p.x) + 0.5 - P.f[0].x;
+        let uy = f32(p.y) + 0.5 - P.f[0].y;
+        var a = atan2(ux, -uy) * GEN_DEG - P.f[0].w;
+        a = a - 360.0 * floor(a / 360.0);
+        let wiped = a < P.f[2].x;
+        let d = min(gen_ray_dist(ux, uy, P.f[1].x, P.f[1].y), gen_ray_dist(ux, uy, P.f[1].z, P.f[1].w));
+        if (P.u[0].y != 0u) {
+            k = select(1.0, 0.0, wiped);
+        } else {
+            k = gen_norm_cdf(select(d, -d, wiped) / P.f[0].z);
         }
     }
-    let k = clamp(base / P.f[0].y + 0.5, 0.0, 1.0);
     textureStore(out, p, textureLoad(src, p, 0) * k);
+}
+
+// Distance from (ux, uy) to the ray from the centre in direction (s, −c) (y down).
+fn gen_ray_dist(ux: f32, uy: f32, s: f32, c: f32) -> f32 {
+    if (ux * s - uy * c > 0.0) {
+        return abs(ux * c + uy * s);
+    }
+    return length(vec2<f32>(ux, uy));
 }
 
 // Gradient Wipe: aux = the placed gradient layer. u[0].x = invert; f[0] = (done, softness).

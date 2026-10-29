@@ -235,13 +235,17 @@ fn uninstall(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 /// Run an installed or bundled script by name (File ▸ Scripts ▸ `<name>`). A ScriptUI panel run
-/// this way gets `this` = a floating palette-like panel window.
+/// this way gets `this` = a floating palette-like panel window. A script listed under File ▸
+/// Scripts runs before a panel of the same name.
 pub(crate) fn run_named(s: &mut Session, name: &str) -> Result<Value> {
-    let (panel, code) = script_code(s, name, None).ok_or_else(|| bad("file.runScript", format!("no installed or bundled script `{name}`")))?;
+    let found = script_code(s, name, Some(false)).or_else(|| script_code(s, name, None));
+    let (panel, code) = found.ok_or_else(|| bad("file.runScript", format!("no installed or bundled script `{name}`")))?;
     if panel {
         return open_panel(s, &json!({"name": name}));
     }
-    super::file_more::run_js_named(s, &code, name)
+    let result = super::file_more::run_js_named(s, &code, name)?;
+    super::file_more::remember_script(s, crate::prefs::RecentScript::Name(name.to_string()));
+    Ok(result)
 }
 
 /// The code a ScriptUI panel runs with: `this` is a dockable Panel titled after the script.
@@ -551,6 +555,175 @@ mod tests {
         assert_eq!(script_code(&s, "../../outside.jsx", None), None);
         assert_eq!(script_code(&s, "../../../outside.jsx", Some(true)), None);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// File ▸ Scripts ▸ Recent Script Files: the ten scripts run last, newest first, kept in the
+    /// settings; Cmd+Alt+Shift+D runs the first one again.
+    #[test]
+    fn recent_script_files_run_again() {
+        use crate::prefs::{MAX_RECENT_SCRIPTS, PREFS_FILE, Prefs, RecentScript};
+        let (mut s, root) = session_in_tmp("recent");
+        assert_eq!(crate::menus::dynamic(&s, "recentScripts", &Default::default()), (vec![], Some("No Recent Script Files")));
+        assert!(bad_params(&s.execute("file.runScript", json!({"recent": 0}))));
+        assert_eq!(s.shortcuts().shortcut_of("file.runScript", &json!({"recent": 0})), Some("Cmd+Alt+Shift+D"));
+        let tool = root.join("Tool.jsx");
+        std::fs::write(&tool, "tool").unwrap();
+        let tool = tool.to_string_lossy().into_owned();
+        s.execute("file.runScript", json!({"path": tool})).unwrap();
+        s.execute("file.runScript", json!({"name": "Rename Layers.jsx"})).unwrap();
+        // A ScriptUI panel opened from File ▸ Scripts is not a recent script file.
+        std::fs::write(root.join("settings").join(PANELS_DIR).join("Panel.jsx"), "panel").unwrap();
+        s.execute("file.runScript", json!({"name": "Panel.jsx"})).unwrap();
+        let (path, name) = (RecentScript::Path(tool.clone()), RecentScript::Name("Rename Layers.jsx".into()));
+        assert_eq!(s.prefs.recent_scripts, [name.clone(), path.clone()]);
+        let (e, _) = crate::menus::dynamic(&s, "recentScripts", &Default::default());
+        assert_eq!(e.iter().map(|e| e.label.as_str()).collect::<Vec<_>>(), ["Rename Layers.jsx", "Tool.jsx"]);
+        assert_eq!((e[1].command.as_str(), &e[1].params), ("file.runScript", &json!({"recent": 1})));
+        // Running one again runs that file and moves it to the top.
+        assert_eq!(s.execute("file.runScript", json!({"recent": 1})).unwrap()["ran"], "tool");
+        assert_eq!(s.prefs.recent_scripts, [path.clone(), name.clone()]);
+        let sample = BUNDLED.iter().find(|b| b.0 == "Rename Layers.jsx").unwrap().3;
+        assert_eq!(s.execute("file.runScript", json!({"recent": 1})).unwrap()["ran"], sample);
+        assert!(bad_params(&s.execute("file.runScript", json!({"recent": 2}))));
+        assert!(bad_params(&s.execute("file.runScript", json!({"recent": "Tool.jsx"}))));
+        // A file named like a bundled script runs again as that file.
+        let local = root.join("Rename Layers.jsx");
+        std::fs::write(&local, "local").unwrap();
+        s.execute("file.runScript", json!({"path": local.to_string_lossy()})).unwrap();
+        assert_eq!(s.execute("file.runScript", json!({"recent": 0})).unwrap()["ran"], "local");
+        assert_eq!(s.execute("file.runScript", json!({"recent": 1})).unwrap()["ran"], sample);
+        // Ten at most, saved with the settings.
+        let mut last = String::new();
+        for i in 0..MAX_RECENT_SCRIPTS + 2 {
+            let f = root.join(format!("Step {i}.jsonl"));
+            std::fs::write(&f, "").unwrap();
+            last = f.to_string_lossy().into_owned();
+            s.execute("file.runScript", json!({"path": last})).unwrap();
+        }
+        assert_eq!(s.prefs.recent_scripts.len(), MAX_RECENT_SCRIPTS);
+        assert_eq!(s.prefs.recent_scripts[0], RecentScript::Path(last));
+        let saved = std::fs::read_to_string(root.join("settings").join(PREFS_FILE)).unwrap();
+        assert_eq!(Prefs::from_json(&saved).recent_scripts, s.prefs.recent_scripts);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn recent_script_history_uses_the_selected_script() {
+        let (mut s, root) = session_in_tmp("recent-panel-collision");
+        let name = "Rename Layers.jsx";
+        std::fs::write(root.join("settings").join(PANELS_DIR).join(name), "panel").unwrap();
+        assert!(super::scripts(&s).iter().any(|entry| entry.name == name && !entry.panel));
+        assert!(script_code(&s, name, None).unwrap().0);
+        let sample = BUNDLED.iter().find(|b| b.0 == name).unwrap().3;
+        assert_eq!(s.execute("file.runScript", json!({"name": name})).unwrap()["ran"], sample);
+        assert!(super::open_panel_names(&s).is_empty(), "the listed script runs instead of the panel");
+        assert_eq!(s.prefs.recent_scripts, [crate::prefs::RecentScript::Name(name.to_string())]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn recent_script_history_keeps_successful_entries_when_scripts_fail() {
+        fn fail_or_echo(_: &mut Session, request: &ScriptRequest) -> Value {
+            if request.code == "fail" { json!({"error": {"message": "script failed"}}) } else { json!({"ran": request.code}) }
+        }
+        let (mut s, root) = session_in_tmp("recent-failed");
+        s.script = Some(fail_or_echo);
+        let good = root.join("good.jsonl");
+        std::fs::write(&good, "[]").unwrap();
+        s.execute("file.runScript", json!({"path": good})).unwrap();
+        let remembered = s.prefs.recent_scripts.clone();
+        for (name, code) in [("parse.jsonl", "{"), ("step.jsonl", r#"{"command":"does.not.exist"}"#), ("missing-command.jsonl", "{}"), ("runtime.jsx", "fail")]
+        {
+            let path = root.join(name);
+            std::fs::write(&path, code).unwrap();
+            assert!(s.execute("file.runScript", json!({"path": path})).is_err(), "{name}");
+            assert_eq!(s.prefs.recent_scripts, remembered, "{name}");
+        }
+        std::fs::write(root.join("settings").join(SCRIPTS_DIR).join("Failed.jsx"), "fail").unwrap();
+        assert!(s.execute("file.runScript", json!({"name": "Failed.jsx"})).is_err());
+        assert_eq!(s.prefs.recent_scripts, remembered);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Reads relative paths from a working directory that a test can change.
+    struct InFolder(std::sync::Mutex<PathBuf>);
+
+    impl InFolder {
+        fn at(&self, path: &str) -> PathBuf {
+            self.0.lock().unwrap().join(path)
+        }
+    }
+
+    impl crate::Services for InFolder {
+        fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {
+            std::fs::read(self.at(path))
+        }
+        fn write_file(&self, path: &str, data: &[u8]) -> std::io::Result<()> {
+            std::fs::write(self.at(path), data)
+        }
+        fn full_path(&self, path: &str) -> Option<String> {
+            Some(self.at(path).to_string_lossy().into_owned())
+        }
+    }
+
+    /// Reads from a folder but can't make paths absolute.
+    struct NoFullPath(PathBuf);
+
+    impl crate::Services for NoFullPath {
+        fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {
+            std::fs::read(self.0.join(path))
+        }
+        fn write_file(&self, path: &str, data: &[u8]) -> std::io::Result<()> {
+            std::fs::write(self.0.join(path), data)
+        }
+        fn full_path(&self, _path: &str) -> Option<String> {
+            None
+        }
+    }
+
+    /// A script whose path can't be made absolute still runs, and Recent Script Files does not
+    /// keep its relative path.
+    #[test]
+    fn unresolved_script_paths_are_not_remembered() {
+        let (mut s, root) = session_in_tmp("recent-unresolved");
+        std::fs::write(root.join("Tool.jsx"), "a").unwrap();
+        std::fs::write(root.join("steps.jsonl"), "[]").unwrap();
+        s.services = Arc::new(NoFullPath(root.clone()));
+        assert_eq!(s.execute("file.runScript", json!({"path": "Tool.jsx"})).unwrap()["ran"], "a");
+        s.execute("file.runScript", json!({"path": "steps.jsonl"})).unwrap();
+        assert!(s.prefs.recent_scripts.is_empty(), "{:?}", s.prefs.recent_scripts);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A script run from a relative path runs the same file again from Recent Script Files after
+    /// the working directory changes, and two scripts with the same file name show their paths.
+    #[test]
+    fn recent_script_files_keep_the_file_that_ran() {
+        let (mut s, root) = session_in_tmp("recent-relative");
+        let (a, b) = (root.join("a"), root.join("b"));
+        for (dir, code) in [(&a, "a"), (&b, "b")] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("Tool.jsx"), code).unwrap();
+        }
+        let services = Arc::new(InFolder(std::sync::Mutex::new(a.clone())));
+        s.services = services.clone();
+        assert_eq!(s.execute("file.runScript", json!({"path": "Tool.jsx"})).unwrap()["ran"], "a");
+        *services.0.lock().unwrap() = b.clone();
+        assert_eq!(s.execute("file.runScript", json!({"recent": 0})).unwrap()["ran"], "a");
+        let (e, _) = crate::menus::dynamic(&s, "recentScripts", &Default::default());
+        assert_eq!(e.iter().map(|e| e.label.as_str()).collect::<Vec<_>>(), ["Tool.jsx"]);
+        assert_eq!(s.execute("file.runScript", json!({"path": "Tool.jsx"})).unwrap()["ran"], "b");
+        let (e, _) = crate::menus::dynamic(&s, "recentScripts", &Default::default());
+        let (a, b) = (a.join("Tool.jsx").to_string_lossy().into_owned(), b.join("Tool.jsx").to_string_lossy().into_owned());
+        assert_eq!(e.iter().map(|e| e.label.as_str()).collect::<Vec<_>>(), [b.as_str(), a.as_str()]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Native script paths are kept absolute.
+    #[test]
+    fn native_full_paths_are_absolute() {
+        use crate::Services;
+        assert!(crate::FsServices.full_path("Tool.jsx").is_some_and(|p| std::path::Path::new(&p).is_absolute()));
     }
 
     #[test]

@@ -72,9 +72,9 @@ pub fn parse_stamp(v: &Value, fps: f64) -> Option<Stamp> {
             }
             // ISO 8601: date [T| ] time [zone].
             if s.len() >= 10 && s.as_bytes()[4] == b'-' && s.as_bytes()[7] == b'-' {
-                let (y, m, d) = (s[0..4].parse::<i64>().ok()?, s[5..7].parse::<i64>().ok()?, s[8..10].parse::<i64>().ok()?);
+                let (y, m, d) = (s.get(0..4)?.parse::<i64>().ok()?, s.get(5..7)?.parse::<i64>().ok()?, s.get(8..10)?.parse::<i64>().ok()?);
                 let mut secs = days_from_civil(y, m, d)? as f64 * 86_400.0;
-                let rest = s[10..].trim_start_matches(['T', 't', ' ']);
+                let rest = s.get(10..)?.trim_start_matches(['T', 't', ' ']);
                 if !rest.is_empty() {
                     // Zone: Z or ±hh:mm / ±hhmm.
                     let (time, zone) = match rest.find(['Z', 'z', '+']).or_else(|| rest.rfind('-')) {
@@ -228,6 +228,12 @@ pub fn specs() -> Vec<CommandSpec> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn multibyte_date_is_rejected() {
+        assert_eq!(parse_stamp(&json!("2026-05-0é"), 25.0), None);
+        assert_eq!(parse_stamp(&json!("2026-05-01é"), 25.0), None);
+    }
 
     #[test]
     fn parses_timestamps() {

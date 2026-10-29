@@ -12,6 +12,7 @@ pub mod flow;
 pub mod inpaint;
 pub mod scopes;
 pub mod warp;
+pub mod yuv;
 
 use effectcraft_color::{BlendMode, blend_pixel};
 use rayon::prelude::*;

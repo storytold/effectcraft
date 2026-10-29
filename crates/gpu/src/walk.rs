@@ -17,6 +17,12 @@ use effectcraft_time::Tick;
 use crate::context::{Enc, GpuImage};
 use crate::ops;
 
+/// The size [`render`] renders `comp_id` at, without rendering it.
+pub(crate) fn frame_size(r: &Renderer, comp_id: ItemId, t: Tick) -> Option<(u32, u32)> {
+    let ctx = r.eval_ctx(comp_id, t)?;
+    Some(effectcraft_render::frame_size(ctx.comp.width, ctx.comp.height, r.opts.scale))
+}
+
 /// Render a comp frame into a GPU image (the canvas in the output space, as
 /// `Renderer::comp_frame_cpu` returns it). `None` when something cannot run here (the caller
 /// renders on the CPU instead).

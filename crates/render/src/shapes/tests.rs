@@ -258,6 +258,24 @@ fn round_corners_clip_corner_pixels() {
     assert!((coverage(&img) - std::f32::consts::PI * 400.0).abs() < 15.0, "{}", coverage(&img));
 }
 
+/// Wiggle Paths' Spatial Phase changes the drawn shape; a whole turn draws it as at 0°.
+#[test]
+fn wiggle_paths_spatial_phase_renders() {
+    let render = |phase: f64| {
+        let (p, cid) = shape_comp(|ids| {
+            vec![
+                build::shape_ellipse(ids, [60.0, 60.0], [0.0, 0.0]),
+                op(ids, "wiggle", &[("size", Value::Scalar(8.0)), ("correlation", Value::Scalar(0.0)), ("spatialPhase", Value::Scalar(phase))]),
+                build::shape_fill(ids, RED),
+            ]
+        });
+        render_frame(&p, cid, Tick::from_seconds_f64(0.5), 1.0).data
+    };
+    let zero = render(0.0);
+    assert!(render(90.0) != zero, "Spatial Phase 90° draws the shape of 0°");
+    assert!(render(360.0) == zero, "Spatial Phase 360° draws another shape than 0°");
+}
+
 #[test]
 fn wiggle_paths_vary_over_time_deterministically() {
     let (p, cid) = shape_comp(|ids| {

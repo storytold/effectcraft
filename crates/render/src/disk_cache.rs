@@ -12,9 +12,11 @@
 //!   `FrameSeg::to_bytes` (keyed by their content-keyed chain key and scale, so they are
 //!   reused whenever the same frames, settings and prompt come back, also after a restart). Every file ends in a checksum; damaged files read as misses and
 //!   are deleted.
-//! * Size limit with least-recently-used eviction. The in-memory index is rebuilt from the
-//!   folder when the cache opens (file modification times order it), so the cache survives
-//!   restarts; reads refresh a file's time.
+//! * Size limit with least-recently-used eviction, down to 90% of the limit so the eviction scan
+//!   runs once per tenth of the limit written, not on every write. The limit shrinks to keep
+//!   free space on the cache's disk ([`DiskCache::set_disk_space`]). The in-memory index is
+//!   rebuilt from the folder when the cache opens (file modification times order it), so the
+//!   cache survives restarts; reads refresh a file's time.
 //! * Safe concurrent access: writes go to a unique temporary file that is renamed into place
 //!   (atomic on every desktop OS), so readers in this or another process never see a partial
 //!   entry; a missing or damaged file is just a miss. Writes run on a background thread with a
@@ -22,7 +24,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use effectcraft_effects::Buf;
@@ -75,11 +77,15 @@ pub struct DiskStats {
     pub entries: usize,
     pub bytes: u64,
     pub max_bytes: u64,
+    /// The limit in effect: `max_bytes`, or less when the disk is short of free space.
+    pub limit_bytes: u64,
     pub hits: u64,
     pub misses: u64,
     pub writes: u64,
     pub evictions: u64,
     pub dropped: u64,
+    /// Writes that failed (a full disk, permissions).
+    pub failed: u64,
 }
 
 struct Meta {
@@ -157,15 +163,17 @@ impl DiskIndex {
         v.into_iter().map(|e| e.1).collect()
     }
 
-    /// Remove least recently used entries until the total fits `max` bytes; returns them (the
-    /// caller deletes their files).
+    /// When the total exceeds `max` bytes, remove least recently used entries down to 90% of
+    /// it (so the sort runs once per tenth of `max` written, not on every write); returns them
+    /// (the caller deletes their files).
     pub fn evict(&mut self, max: u64) -> Vec<(Kind, u128)> {
         if self.total <= max {
             return vec![];
         }
+        let target = max - max / 10;
         let mut out = vec![];
         for k in self.lru_order() {
-            if self.total <= max {
+            if self.total <= target {
                 break;
             }
             self.remove(k.0, k.1);
@@ -225,11 +233,16 @@ pub struct DiskCache {
     dir: PathBuf,
     index: Mutex<DiskIndex>,
     max_bytes: AtomicU64,
+    /// The size free disk space allows (`u64::MAX` = unknown), see [`DiskCache::set_disk_space`].
+    disk_cap: AtomicU64,
+    /// Free space is limiting the cache (warned once per episode).
+    space_limited: AtomicBool,
     hits: AtomicU64,
     misses: AtomicU64,
     writes: AtomicU64,
     evictions: AtomicU64,
     dropped: AtomicU64,
+    failed: AtomicU64,
     tmp_counter: AtomicU64,
     queue: Arc<(Mutex<Queue>, Condvar)>,
     /// Layer buffers that took less than this to render are not written (ms).
@@ -298,16 +311,21 @@ impl DiskCache {
             dir,
             index: Mutex::new(DiskIndex::default()),
             max_bytes: AtomicU64::new(max_bytes),
+            disk_cap: AtomicU64::new(u64::MAX),
+            space_limited: AtomicBool::new(false),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
             writes: AtomicU64::new(0),
             evictions: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
+            failed: AtomicU64::new(0),
             tmp_counter: AtomicU64::new(0),
-            queue: Arc::new((Mutex::new(Queue { jobs: Default::default(), busy: false }), Condvar::new())),
+            queue: Arc::new((Mutex::new(Queue { jobs: Default::default(), busy: cfg!(not(target_arch = "wasm32")) }), Condvar::new())),
             min_layer_ms: AtomicU64::new(30),
         });
         dc.rescan();
+        // Shrinking a large cache deletes many files: the writer thread does it.
+        #[cfg(target_arch = "wasm32")]
         dc.evict();
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -371,6 +389,32 @@ impl DiskCache {
         self.evict();
     }
 
+    /// The limit in effect: the setting, or less when the disk is short of free space.
+    pub fn limit_bytes(&self) -> u64 {
+        self.max_bytes().min(self.disk_cap.load(Ordering::Relaxed))
+    }
+
+    /// The cache's disk: `(total, available)` bytes, `None` = unknown. The cache leaves at least
+    /// 2 GB or 5% of the disk free, whichever is more (evicting when it must).
+    pub fn set_disk_space(&self, space: Option<(u64, u64)>) {
+        let cap = match space {
+            // (a disk reported as 0 bytes, such as an automount map, is unknown)
+            Some((total, available)) if total > 0 => {
+                let reserve = (2u64 << 30).max(total / 20);
+                let used = self.index.lock().map(|g| g.total()).unwrap_or_default();
+                // The cache's own files count as free: below the reserve it gives space back.
+                used.saturating_add(available).saturating_sub(reserve)
+            }
+            _ => u64::MAX,
+        };
+        self.disk_cap.store(cap, Ordering::Relaxed);
+        let limited = cap < self.max_bytes();
+        if self.space_limited.swap(limited, Ordering::Relaxed) != limited && limited {
+            log::warn!("disk cache at {}: little free disk space, limiting the cache to {} MB", self.folder().display(), cap >> 20);
+        }
+        self.evict();
+    }
+
     /// Layer buffers faster to render than this are not worth a disk write.
     pub fn set_min_layer_ms(&self, ms: u64) {
         self.min_layer_ms.store(ms, Ordering::Relaxed);
@@ -395,11 +439,13 @@ impl DiskCache {
             entries,
             bytes,
             max_bytes: self.max_bytes(),
+            limit_bytes: self.limit_bytes(),
             hits: self.hits.load(Ordering::Relaxed),
             misses: self.misses.load(Ordering::Relaxed),
             writes: self.writes.load(Ordering::Relaxed),
             evictions: self.evictions.load(Ordering::Relaxed),
             dropped: self.dropped.load(Ordering::Relaxed),
+            failed: self.failed.load(Ordering::Relaxed),
         }
     }
 
@@ -494,30 +540,44 @@ impl DiskCache {
         }
         let path = self.path(kind, key);
         let Some(parent) = path.parent() else { return };
-        if std::fs::create_dir_all(parent).is_err() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            self.write_failed(&e);
             return;
         }
         let data = seal(kind, payload);
-        let n = self.tmp_counter.fetch_add(1, Ordering::Relaxed);
-        let tmp = parent.join(format!("{key:032x}.tmp.{}.{n}", std::process::id()));
-        if std::fs::write(&tmp, &data).is_err() {
-            let _ = std::fs::remove_file(&tmp);
+        // An entry that cannot fit would be evicted straight away.
+        if data.len() as u64 > self.limit_bytes() {
             return;
         }
-        if std::fs::rename(&tmp, &path).is_err() {
+        // Make room first, so the cache never exceeds its limit (or the free-space reserve).
+        self.evict_to(self.limit_bytes().saturating_sub(data.len() as u64));
+        let n = self.tmp_counter.fetch_add(1, Ordering::Relaxed);
+        let tmp = parent.join(format!("{key:032x}.tmp.{}.{n}", std::process::id()));
+        if let Err(e) = std::fs::write(&tmp, &data).and_then(|()| std::fs::rename(&tmp, &path)) {
             let _ = std::fs::remove_file(&tmp);
+            self.write_failed(&e);
             return;
         }
         self.writes.fetch_add(1, Ordering::Relaxed);
         if let Ok(mut g) = self.index.lock() {
             g.insert(kind, key, data.len() as u64);
         }
-        self.evict();
+    }
+
+    /// Count a failed write; the first one is logged (a full disk shouldn't go unnoticed).
+    fn write_failed(&self, e: &std::io::Error) {
+        if self.failed.fetch_add(1, Ordering::Relaxed) == 0 {
+            log::warn!("disk cache at {}: a write failed: {e}", self.folder().display());
+        }
     }
 
     /// Remove least recently used entries until the cache fits its limit.
     fn evict(&self) {
-        let max = self.max_bytes();
+        self.evict_to(self.limit_bytes());
+    }
+
+    /// Remove least recently used entries until the cache fits `max` bytes.
+    fn evict_to(&self, max: u64) {
         let victims = match self.index.lock() {
             Ok(mut g) => g.evict(max),
             Err(_) => return,
@@ -586,6 +646,15 @@ impl DiskCache {
 #[cfg(not(target_arch = "wasm32"))]
 fn writer(dc: std::sync::Weak<DiskCache>, q: Arc<(Mutex<Queue>, Condvar)>) {
     let (m, cv) = &*q;
+    // The eviction at open (a lower limit than the folder holds), off the opening thread;
+    // `busy` starts set, so `flush` waits for it.
+    if let Some(cache) = dc.upgrade() {
+        cache.evict();
+    }
+    if let Ok(mut g) = m.lock() {
+        g.busy = false;
+    }
+    cv.notify_all();
     loop {
         let job = {
             let Ok(mut g) = m.lock() else { return };
@@ -1030,9 +1099,9 @@ mod tests {
         let per = dc.stats().bytes / 6;
         // Touch 0 so it is the most recently used.
         assert!(dc.get_layer(0).is_some());
-        dc.set_max_bytes(per * 3 + per / 2);
+        dc.set_max_bytes(per * 3 + per * 3 / 4);
         let st = dc.stats();
-        assert!(st.bytes <= per * 3 + per / 2, "{st:?}");
+        assert!(st.bytes <= per * 3 + per * 3 / 4, "{st:?}");
         assert_eq!(st.entries, 3);
         assert!(dc.contains(Kind::Layer, 0), "recently used survives");
         assert!(!dc.contains(Kind::Layer, 1) && !dc.contains(Kind::Layer, 2) && !dc.contains(Kind::Layer, 3));
@@ -1042,7 +1111,69 @@ mod tests {
         assert_eq!(files, 3);
         // New writes keep evicting.
         dc.put_layer_now(99, &buf(9, 64, 64));
-        assert!(dc.stats().bytes <= per * 3 + per / 2);
+        assert!(dc.stats().bytes <= per * 3 + per * 3 / 4);
+    }
+
+    #[test]
+    fn eviction_goes_down_to_ninety_percent_in_lru_order() {
+        let mut ix = DiskIndex::default();
+        for k in 0..10u128 {
+            ix.insert(Kind::Layer, k, 100);
+        }
+        assert!(ix.touch(Kind::Layer, 0));
+        // Over 950: down to 855, least recently used first.
+        ix.insert(Kind::Layer, 10, 100);
+        assert_eq!(ix.evict(950), vec![(Kind::Layer, 1), (Kind::Layer, 2), (Kind::Layer, 3)]);
+        assert_eq!(ix.total(), 800);
+        // The slack absorbs the next write without another scan.
+        ix.insert(Kind::Layer, 11, 100);
+        assert!(ix.evict(950).is_empty());
+    }
+
+    #[test]
+    fn free_disk_space_caps_the_limit() {
+        let dir = tmpdir("space");
+        let dc = DiskCache::open(&dir, 1 << 30).unwrap();
+        for k in 0..4u128 {
+            dc.put_layer_now(k, &buf(k as u32, 64, 64));
+        }
+        let used = dc.stats().bytes;
+        // Unknown space: the setting alone.
+        dc.set_disk_space(None);
+        assert_eq!(dc.stats().limit_bytes, 1 << 30);
+        // A disk reported as 0 bytes is unknown.
+        dc.set_disk_space(Some((0, 0)));
+        assert_eq!(dc.stats().limit_bytes, 1 << 30);
+        // 100 GB disk, 5 GB reserved, exactly 5 GB free: the cache may not grow.
+        dc.set_disk_space(Some((100 << 30, 5 << 30)));
+        let st = dc.stats();
+        assert_eq!((st.max_bytes, st.limit_bytes), (1 << 30, used));
+        dc.put_layer_now(9, &buf(9, 64, 64));
+        let st = dc.stats();
+        assert!(st.bytes <= st.limit_bytes && st.bytes <= used - used / 10 && st.evictions > 0, "{st:?}");
+        assert!(dc.contains(Kind::Layer, 9), "the new entry is the most recently used");
+        // Below the reserve the cache gives its space back, and skips writes that can't fit.
+        dc.set_disk_space(Some((100 << 30, 4 << 30)));
+        dc.put_layer_now(10, &buf(10, 64, 64));
+        let st = dc.stats();
+        assert_eq!((st.limit_bytes, st.entries, st.bytes), (0, 0, 0), "{st:?}");
+        // Plenty of space again: back to the setting.
+        dc.set_disk_space(Some((100 << 30, 50 << 30)));
+        assert_eq!(dc.stats().limit_bytes, 1 << 30);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn failed_writes_are_counted() {
+        let dir = tmpdir("failed");
+        let dc = DiskCache::open(&dir, 1 << 30).unwrap();
+        // A file where the layers folder should be: every layer write fails.
+        std::fs::write(dir.join(VERSION).join(Kind::Layer.dir()), b"x").unwrap();
+        dc.put_layer_now(1, &buf(1, 8, 8));
+        dc.put_layer_now(2, &buf(2, 8, 8));
+        let st = dc.stats();
+        assert_eq!((st.failed, st.writes, st.entries), (2, 0, 0));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn walk(d: &Path) -> usize {

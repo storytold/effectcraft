@@ -122,6 +122,38 @@ struct TxResult {
     bits: f64,
 }
 
+/// The output and scratch buffers of one reconstruction, each `n * n` entries long.
+struct ReconBuffers<'a> {
+    deq: &'a mut [i32],
+    resid: &'a mut [i32],
+    recon: &'a mut [u16],
+}
+
+/// Outcome of trying one transform block; the levels and the reconstruction stay in `TxScratch`.
+#[derive(Clone, Copy)]
+struct TxEval {
+    nonzero: bool,
+    dist: f64,
+    bits: f64,
+}
+
+/// Buffers of the transform path, sized for the largest coded transform block (32x32). Only the
+/// first `n * n` entries are used; they are reused across candidates instead of being allocated.
+struct TxScratch {
+    res: [i32; 1024],
+    coef: [f32; 1024],
+    levels: [i32; 1024],
+    deq: [i32; 1024],
+    resid: [i32; 1024],
+    recon: [u16; 1024],
+}
+
+impl Default for TxScratch {
+    fn default() -> Self {
+        TxScratch { res: [0; 1024], coef: [0.0; 1024], levels: [0; 1024], deq: [0; 1024], resid: [0; 1024], recon: [0; 1024] }
+    }
+}
+
 /// Saved encoder state of a block area (reconstruction, BlockDecoded flags).
 struct Snapshot {
     planes: [Vec<u16>; 3],
@@ -146,6 +178,8 @@ pub(crate) struct Decider<'a> {
     lambda_sad: f64,
     /// Half-sample interpolations of the reference luma (visible area): (8, 0), (0, 8), (8, 8).
     half: [Vec<u16>; 3],
+    /// Transform buffers, taken out while a block is being tried (see `code_tx`).
+    scratch: Option<Box<TxScratch>>,
 }
 
 const MODE_BITS_INTRA: f64 = 3.0;
@@ -181,6 +215,7 @@ impl<'a> Decider<'a> {
                 Some(rf) => [(8, 0), (0, 8), (8, 8)].map(|(fx, fy)| subpel_plane(&rf.planes[0], g.width, g.height, fx, fy, bd)),
                 None => Default::default(),
             },
+            scratch: None,
         }
     }
 
@@ -339,8 +374,10 @@ impl<'a> Decider<'a> {
         let log2 = (n4 * 4).trailing_zeros();
         let (sbr, sbc) = ((r & 15) as isize, (c & 15) as isize);
         let bd = self.bd;
-        let mut pred = vec![0u16; 32 * 32];
-        let mut best_pred = vec![0u16; 32 * 32];
+        let mut pred = [0u16; 32 * 32];
+        let mut best_pred = [0u16; 32 * 32];
+        let mut best_levels = [0i32; 32 * 32];
+        let mut best_recon = [0u16; 32 * 32];
         let n = 1usize << log2;
         // luma
         let e = IntraEdge {
@@ -358,26 +395,26 @@ impl<'a> Decider<'a> {
         let ed = edges(&self.rec[0], &e);
         // modes ranked by SATD, then a rate-distortion choice of mode and transform type among
         // the best three
-        let mut ranked: Vec<(f64, usize)> = INTRA_MODES_USED
-            .iter()
-            .map(|&mode| {
-                predict_intra(&ed, &e, mode, &mut pred);
-                let sad = self.satd(0, c * 4, r * 4, n, &pred[..n * n]) as f64;
-                (sad + self.lambda_sad * if mode == DC_PRED { 1.0 } else { MODE_BITS_INTRA }, mode)
-            })
-            .collect();
+        let mut ranked: [(f64, usize); INTRA_MODES_USED.len()] = INTRA_MODES_USED.map(|mode| {
+            predict_intra(&ed, &e, mode, &mut pred);
+            let sad = self.satd(0, c * 4, r * 4, n, &pred[..n * n]) as f64;
+            (sad + self.lambda_sad * if mode == DC_PRED { 1.0 } else { MODE_BITS_INTRA }, mode)
+        });
         ranked.sort_by(|a, b| a.0.total_cmp(&b.0));
         let tx_y = tx_size_for(log2);
-        let mut best: Option<(f64, usize, usize, TxResult, Option<Vec<u16>>)> = None;
+        let mut best: Option<(f64, usize, usize, TxEval, bool)> = None;
+        let mut sc = self.scratch.take().unwrap_or_default();
         for &(_, mode) in ranked.iter().take(3) {
             predict_intra(&ed, &e, mode, &mut pred);
-            let mut types = vec![DCT_DCT];
+            let mut types = [DCT_DCT; 2];
+            let mut n_types = 1;
             let alt = MODE_TO_TXFM[mode] as usize;
             if alt != DCT_DCT && tx_in_set(tx_set(tx_y, false), false, alt) {
-                types.push(alt);
+                types[1] = alt;
+                n_types = 2;
             }
-            for &t in &types {
-                let (res, recon) = self.try_tx(TransformBlock { plane: 0, x: c * 4, y: r * 4, log2, tx_type: t, intra: true }, &pred[..n * n]);
+            for &t in &types[..n_types] {
+                let (res, has_recon) = self.try_tx(&mut sc, TransformBlock { plane: 0, x: c * 4, y: r * 4, log2, tx_type: t, intra: true }, &pred[..n * n]);
                 let type_bits = if !res.nonzero || tx_set(tx_y, false) == TX_SET_DCTONLY {
                     0.0
                 } else if t == DCT_DCT {
@@ -389,18 +426,24 @@ impl<'a> Decider<'a> {
                 let cost = res.dist + self.lambda * (res.bits + type_bits + mode_bits);
                 if best.as_ref().is_none_or(|b| cost < b.0) {
                     best_pred[..n * n].copy_from_slice(&pred[..n * n]);
-                    best = Some((cost, mode, t, res, recon));
+                    best_levels[..n * n].copy_from_slice(&sc.levels[..n * n]);
+                    if has_recon {
+                        best_recon[..n * n].copy_from_slice(&sc.recon[..n * n]);
+                    }
+                    best = Some((cost, mode, t, res, has_recon));
                 }
             }
         }
+        self.scratch = Some(sc);
         // Every ranked mode tries DCT_DCT, so `best` is always set; without a candidate the block
         // can't be coded intra (an infinite cost keeps it from being chosen).
-        let Some((_, y_mode, tx_type_y, ty, recon)) = best else {
+        let Some((_, y_mode, tx_type_y, ty, has_recon)) = best else {
             let leaf =
                 Leaf { bsize, is_inter: false, y_mode: DC_PRED, uv_mode: DC_PRED, tx_type_y: DCT_DCT, mv: [0, 0], skip: true, coefs: Default::default() };
             return (leaf, f64::INFINITY);
         };
-        self.put(0, c * 4, r * 4, n, recon.as_deref().unwrap_or(&best_pred[..n * n]));
+        self.put(0, c * 4, r * 4, n, if has_recon { &best_recon[..n * n] } else { &best_pred[..n * n] });
+        let ty = TxResult { levels: best_levels[..n * n].to_vec(), nonzero: ty.nonzero, dist: ty.dist, bits: ty.bits };
         let tx_type_y = if ty.nonzero { tx_type_y } else { DCT_DCT };
         self.mark_decoded(0, r, c, n4);
         // chroma (one mode for both planes)
@@ -792,32 +835,36 @@ impl<'a> Decider<'a> {
     /// over the prediction `pred`; the reconstruction is written to `rec`.
     fn code_tx(&mut self, block: TransformBlock, pred: &[u16]) -> TxResult {
         let TransformBlock { plane: p, x, y, log2, .. } = block;
-        let (res, recon) = self.try_tx(block, pred);
+        let mut sc = self.scratch.take().unwrap_or_default();
+        let (res, has_recon) = self.try_tx(&mut sc, block, pred);
         let n = 1usize << log2;
-        self.put(p, x, y, n, recon.as_deref().unwrap_or(pred));
-        res
+        self.put(p, x, y, n, if has_recon { &sc.recon[..n * n] } else { pred });
+        let levels = sc.levels[..n * n].to_vec();
+        self.scratch = Some(sc);
+        TxResult { levels, nonzero: res.nonzero, dist: res.dist, bits: res.bits }
     }
 
-    /// Transform and quantise one block; returns the result and its reconstruction (None: the
-    /// prediction) without writing it.
-    fn try_tx(&self, block: TransformBlock, pred: &[u16]) -> (TxResult, Option<Vec<u16>>) {
+    /// Transform and quantise one block without writing it. The levels are left in `sc.levels`;
+    /// the flag tells whether `sc.recon` holds the reconstruction (false: it is the prediction).
+    fn try_tx(&self, sc: &mut TxScratch, block: TransformBlock, pred: &[u16]) -> (TxEval, bool) {
         let TransformBlock { plane: p, x, y, log2, tx_type, intra } = block;
         let n = 1usize << log2;
+        let nn = n * n;
         let tx_sz = tx_size_for(log2);
         let bd = self.bd;
         let src = &self.src[p];
-        let mut res = vec![0i32; n * n];
+        let TxScratch { res, coef, levels, deq, resid, recon } = sc;
+        let (res, coef, levels) = (&mut res[..nn], &mut coef[..nn], &mut levels[..nn]);
         for i in 0..n {
             let row = &src.row(y + i)[x..x + n];
             for j in 0..n {
                 res[i * n + j] = row[j] as i32 - pred[i * n + j] as i32;
             }
         }
-        let mut coef = vec![0f32; n * n];
-        forward_2d(&res, &mut coef, n, tx_type);
+        forward_2d(res, coef, n, tx_type);
         // dead-zone quantiser: rounding offset below one half
         let rnd = if intra { 0.38f32 } else { 0.30f32 };
-        let mut levels = vec![0i32; n * n];
+        levels.fill(0);
         let mut nonzero = false;
         for (k, (&cf, l)) in coef.iter().zip(levels.iter_mut()).enumerate() {
             let q = if k == 0 { self.dc_q } else { self.ac_q };
@@ -829,23 +876,26 @@ impl<'a> Decider<'a> {
         }
         let zero_dist = self.sse(p, x, y, n, pred);
         if !nonzero {
-            return (TxResult { levels, nonzero, dist: zero_dist, bits: 1.0 }, None);
+            return (TxEval { nonzero, dist: zero_dist, bits: 1.0 }, false);
         }
-        let recon = self.reconstruct(&levels, tx_sz, tx_type, pred, n, bd);
-        let dist = self.sse(p, x, y, n, &recon);
-        let bits = estimate_bits(&levels, tx_sz);
+        let recon = &mut recon[..nn];
+        self.reconstruct(levels, ReconBuffers { deq: &mut deq[..nn], resid: &mut resid[..nn], recon }, tx_sz, tx_type, pred, bd);
+        let dist = self.sse(p, x, y, n, recon);
+        let bits = estimate_bits(levels, tx_sz);
         if dist + self.lambda * bits >= zero_dist + self.lambda {
-            levels.iter_mut().for_each(|l| *l = 0);
-            return (TxResult { levels, nonzero: false, dist: zero_dist, bits: 1.0 }, None);
+            levels.fill(0);
+            return (TxEval { nonzero: false, dist: zero_dist, bits: 1.0 }, false);
         }
-        (TxResult { levels, nonzero: true, dist, bits }, Some(recon))
+        (TxEval { nonzero: true, dist, bits }, true)
     }
 
-    /// Dequantisation (7.12.3) and the inverse transform, added to the prediction.
-    fn reconstruct(&self, levels: &[i32], tx_sz: usize, tx_type: usize, pred: &[u16], n: usize, bd: u32) -> Vec<u16> {
+    /// Dequantisation (7.12.3) and the inverse transform, added to the prediction; the result is
+    /// written to `recon`. `deq` and `resid` are scratch buffers of `n * n` entries.
+    fn reconstruct(&self, levels: &[i32], bufs: ReconBuffers, tx_sz: usize, tx_type: usize, pred: &[u16], bd: u32) {
+        let ReconBuffers { deq, resid, recon } = bufs;
         let denom: i64 = if tx_sz == TX_32X32 { 2 } else { 1 };
         let lim = 1i64 << (7 + bd);
-        let mut deq = vec![0i32; n * n];
+        deq.fill(0);
         for (k, (&l, d)) in levels.iter().zip(deq.iter_mut()).enumerate() {
             if l == 0 {
                 continue;
@@ -855,10 +905,11 @@ impl<'a> Decider<'a> {
             let mag = (dq.abs() & 0xFF_FFFF) / denom;
             *d = (if dq < 0 { -mag } else { mag }).clamp(-lim, lim - 1) as i32;
         }
-        let mut resid = vec![0i32; n * n];
-        inverse_2d(&deq, &mut resid, tx_sz, tx_type, bd);
+        inverse_2d(deq, resid, tx_sz, tx_type, bd);
         let max = (1i32 << bd) - 1;
-        pred.iter().zip(&resid).map(|(&p, &r)| (p as i32 + r).clamp(0, max) as u16).collect()
+        for ((o, &p), &r) in recon.iter_mut().zip(pred).zip(resid.iter()) {
+            *o = (p as i32 + r).clamp(0, max) as u16;
+        }
     }
 }
 

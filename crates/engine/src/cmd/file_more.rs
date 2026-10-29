@@ -430,6 +430,20 @@ fn collect_files(s: &mut Session, p: &Value) -> Result<Value> {
 /// array or JSON lines of `{"command": id, "params": {…}}` (also accepts the control channel's
 /// `{"method": "engine.execute", "params": {"id", "params"}}`).
 fn run_script(s: &mut Session, p: &Value) -> Result<Value> {
+    // File ▸ Scripts ▸ Recent Script Files ▸ <script> (0 is the most recent).
+    if let Some(i) = p.get("recent") {
+        let i = i.as_u64().ok_or_else(|| bad("file.runScript", format!("`recent` must be an index, not {i}")))?;
+        let script = match s.prefs.recent_scripts.get(usize::try_from(i).unwrap_or(usize::MAX)) {
+            Some(x) => x.clone(),
+            None if s.prefs.recent_scripts.is_empty() => return Err(bad("file.runScript", "no recent script files")),
+            None => return Err(bad("file.runScript", format!("no recent script file #{i}"))),
+        };
+        let q = match script {
+            crate::prefs::RecentScript::Path(path) => json!({"path": path}),
+            crate::prefs::RecentScript::Name(name) => json!({"name": name}),
+        };
+        return run_script(s, &q);
+    }
     // File ▸ Scripts ▸ <installed or sample script>.
     if let Some(name) = str_p(p, "name")
         && p.get("path").is_none()
@@ -446,15 +460,22 @@ fn run_script(s: &mut Session, p: &Value) -> Result<Value> {
             return Err(bad("file.runScript", JSXBIN));
         }
         let bytes = s.services.read_file(path).map_err(|e| EngineError::Other(format!("cannot read {path}: {e}")))?;
+        let full = s.services.full_path(path);
         let code = String::from_utf8_lossy(&bytes).to_string();
         let name = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.to_string());
         let out = run_js(s, &code, path, false)?;
-        return report_js(s, &name, out);
+        let result = report_js(s, &name, out)?;
+        if let Some(full) = full {
+            remember_script(s, crate::prefs::RecentScript::Path(full));
+        }
+        return Ok(result);
     }
+    let mut script_path = None;
     let steps: Vec<Value> = match (p.get("steps"), str_p(p, "path")) {
         (Some(Value::Array(a)), _) => a.clone(),
         (_, Some(path)) => {
             let bytes = s.services.read_file(path).map_err(|e| EngineError::Other(format!("cannot read {path}: {e}")))?;
+            script_path = s.services.full_path(path);
             let text = String::from_utf8_lossy(&bytes).to_string();
             match serde_json::from_str::<Value>(&text) {
                 Ok(Value::Array(a)) => a,
@@ -487,7 +508,17 @@ fn run_script(s: &mut Session, p: &Value) -> Result<Value> {
         let r = r.map_err(|e| EngineError::Other(format!("step {} ({id}): {e}", i + 1)))?;
         results.push(r);
     }
+    if let Some(path) = script_path {
+        remember_script(s, crate::prefs::RecentScript::Path(path));
+    }
     Ok(json!({"steps": results.len(), "results": results}))
+}
+
+/// Remember a script that runs for File ▸ Scripts ▸ Recent Script Files.
+pub(super) fn remember_script(s: &mut Session, script: crate::prefs::RecentScript) {
+    s.prefs.push_recent_script(script);
+    s.save_prefs();
+    s.prefs_revision += 1;
 }
 
 /// `.jsx` / `.js` (and `.jsxbin`, rejected) are JavaScript; `.json` / `.jsonl` / other files are
@@ -1017,7 +1048,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Run Script File...",
             ["File", "Scripts"],
             None,
-            "{path (.jsx/.js JavaScript, or a .jsonl/.json command script) | name (an installed or sample script, see file.scripts.list) | steps: [{command, params}]}",
+            "{path (.jsx/.js JavaScript, or a .jsonl/.json command script) | name (an installed or sample script, see file.scripts.list) | recent: index (File ▸ Scripts ▸ Recent Script Files, 0 = the most recent) | steps: [{command, params}]}",
             always,
             run_script
         ),
