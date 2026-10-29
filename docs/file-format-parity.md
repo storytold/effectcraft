@@ -109,7 +109,6 @@ encoders ([hardware-parity.md](hardware-parity.md)), and rendering safely over a
 
 **≈ 130–230 h**: `.aep` / `.aepx` 80–160 h (import of the common scope is in `crates/aep`; export is not built; the rest is in [aep-import.md](aep-import.md)), wiring TGA / DPX /
 HDR / MXF / AVI / DNx import and DPX output 10–20 h, FBX animation and skinning, USD and Substance 20–40 h,
-
 relinking 6–12 h, `.mogrt`-compatible templates 15–30 h (partly parallel with the rest).
 
 ## Revision history
