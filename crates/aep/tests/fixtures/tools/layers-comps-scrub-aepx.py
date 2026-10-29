@@ -6,7 +6,9 @@ import sys, zlib
 src, dst, base_path = sys.argv[1], sys.argv[2], sys.argv[3]
 d = open(src, 'rb').read()
 base = open(base_path, 'rb').read()
-packet = base[base.find(b'<?xpacket begin'):]
+at = base.find(b'<?xpacket begin')
+assert at >= 0, 'the base project has no XMP packet'
+packet = base[at:]
 tag = b'<ProjectXMPMetadata><![CDATA['
 start = d.find(tag)
 assert start >= 0

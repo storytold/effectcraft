@@ -257,7 +257,7 @@ parameter gets the file's value:
   popups are not decoded, such bezier sides become linear and are reported in
   `approximated_keyframes`.
 - **The fx switch** of each instance (the `tdsb` of its value group: 1 on, 0 off; `fx-switch.aep`)
-  is imported. **Not decoded:** expressions on effect parameters (reported, the value is imported).
+  is imported, and so is an expression on a stored effect parameter (its text and its switch).
 
 ## What is reported
 
@@ -272,7 +272,7 @@ parameter gets the file's value:
 | `layer_styles` | per layer: a style in switch state 3 (not sampled; state 0 is imported as a style switched off, 988), Pattern Overlay, an unknown style or parameter, a gradient (`GCst`, not decoded: EffectCraft's default gradient stays), keys on a popup or checkbox, a value that does not fit, styles on a layer that takes none here (adjustment, camera, light) |
 | `markers` | a marker with an unknown cue type (imported as an event cue) |
 | `text_layers` ("text layer features") | per text layer, what of it is not imported: wiggly and expression selectors and unmapped animator properties, Path Options or More Options with set values, Source Text keyframes or an expression, character style or paragraph fields that are not decoded and differ from the default (named by their slot, e.g. `/68`), an unknown capitalisation or justification code, manual kerning, No Break, the stroke line join, the Japanese leading model, a digit set other than the default and Arabic, control characters of unknown meaning (they are kept in the text; U+0003 is not one of them, see Text above). The text layer itself is imported |
-| `shape_layers` ("shape layers") | what of a shape layer is not imported: shape items other than groups, rectangle, ellipse, polystar, path, fill, stroke, gradient fill and stroke, trim paths and round corners (merge paths, repeater, offset paths, ...), stroke dashes, taper and wave with values, item blend modes and composite order, shape direction, gradient colour stops other than the default, gradient highlight values other than 0, material options, groups nested deeper than 32, a line cap or join of the unsampled third kind (imported as it), a path without a readable path. The layer itself is imported |
+| `shape_layers` ("shape layers") | what of a shape layer is not imported: shape items other than groups, rectangle, ellipse, polystar, path, fill, stroke, gradient fill and stroke, trim paths, round corners, merge paths, repeater and offset paths (for example wiggle or twist), stroke dashes, taper and wave with values, item blend modes and composite order, shape direction, gradient colour stops other than the default, gradient highlight values other than 0, material options, groups nested deeper than 32, a line cap or join of the unsampled third kind (imported as it), a path without a readable path. The layer itself is imported |
 | `lights` | each environment light (the layer is skipped; the other layers of the composition are imported) |
 | `blend_modes` | a blend mode code that is not mapped (1, 3 = Dissolve or Dancing Dissolve, 21 / 22 = Alpha Add or Luminescent Premul, codes above 34; the layer stays Normal) |
 | `transform_properties` | a stored transform property that is not imported (keyed or expression-driven orientation, separated position dimensions), and the stored camera and light options that are not mapped (Blur Level, Iris, Falloff, ...) |

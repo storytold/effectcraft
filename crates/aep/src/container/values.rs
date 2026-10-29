@@ -202,6 +202,14 @@ impl<'f, 'a> Layer<'f, 'a> {
         })
     }
 
+    /// The time scale of the Orientation's key times (`tdb4` bytes 12..15), which follows the
+    /// layer's stretch like every property of the layer.
+    pub fn orientation_time_scale(&self) -> Option<u32> {
+        let Some(PropNode::Group(group)) = self.properties().and_then(|p| p.get("ADBE Transform Group")) else { return None };
+        let Some(PropNode::Other(otst)) = group.get("ADBE Orientation") else { return None };
+        otst.child_list(b"tdbs").and_then(crate::container::typed::Property::from_chunk).and_then(|p| p.time_scale())
+    }
+
     /// The keyframes of a keyed Orientation (703): the `tdbs` of the `otst` holds one 80-byte
     /// record per key (time, interpolation sides, flags; the rest is not decoded) and `otky` one
     /// `otda` (three `f64` degrees) per key, in the same order. Empty when the Orientation is not

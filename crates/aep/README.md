@@ -40,11 +40,19 @@ sequences), solids and precomp links. Every accessor returns `Option`/an empty l
 panics. Which fields are verified, which are not decoded, and how it was found is in
 [`docs/aep-format.md`](../../docs/aep-format.md).
 
+## Specifications
+
+Public specifications used for parts the format embeds:
+
+- ICC.1:2010: the profile description of a working-space profile (a v2 `desc` or a v4 `mluc`
+  tag), from which the working space's name is read (`container/settings.rs`).
+- RFC 4648 (base64): the profile data in the project's colour settings JSON.
+
 ## Clean room
 
 Everything here comes from our own observations: project files that we generated ourselves with
-After Effects, one change per file, compared byte by byte. No source code, specification or
-format documentation of another reader was used, and no Adobe asset is used. The test fixtures are such generated files
+After Effects, one change per file, compared byte by byte. No source code or format
+documentation of another `.aep` reader or writer was used, and no Adobe asset is used. The test fixtures are such generated files
 (own test data): a few combined projects, one composition per case (`tests/fixtures/CASES.md`;
 the generator is in `tests/fixtures/tools/`). They are not in this repository: `cargo xtask
 aep-corpus` fetches them from https://github.com/vangel76/effectcraft-aep-corpus, pinned and
