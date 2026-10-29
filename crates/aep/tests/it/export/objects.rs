@@ -513,7 +513,7 @@ fn every_shape_value_record_is_written_as_after_effects_wrote_it() {
                 assert!(explicit_default || polygon_inner, "{name}: {k:?} not written");
                 continue;
             };
-            assert_eq!(got, rec, "{name}: {k:?}");
+            assert_eq!(crate::export::helpers::decoded(got), crate::export::helpers::decoded(rec), "{name}: {k:?}");
             compared += 1;
         }
         for k in b.keys() {
@@ -539,7 +539,9 @@ fn keyed_shape_records(bytes: &[u8]) -> Vec<(String, Vec<u8>, Vec<u8>, Vec<u8>, 
                 let list = node.child_list(b"list");
                 let expr = node.child(b"Utf8").and_then(|u| u.bytes()).map(<[u8]>::to_vec);
                 if list.is_some() || expr.is_some() {
-                    let mut tdb4 = node.child(b"tdb4").and_then(|c| c.bytes()).unwrap_or_default().to_vec();
+                    // The header bytes the exporter writes (the others are zero: `decoded`).
+                    let mut tdb4 =
+                        crate::export::helpers::decoded(&node.clone().into_owned()).child(b"tdb4").and_then(|c| c.bytes()).unwrap_or_default().to_vec();
                     // Header bytes 76 and 77 of a property with an expression: After Effects
                     // wrote 1 in one save and 0 in another (060 and 856 of the combined files);
                     // byte 120 marks the expression.

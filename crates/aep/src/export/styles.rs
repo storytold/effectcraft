@@ -268,11 +268,11 @@ impl StyleProtos {
             .iter()
             .map(|(name, dims, template, cls, limits)| {
                 let template = if *template == 0 { KeyTemplate::Plain } else { KeyTemplate::Spatial(*template) };
-                let spec = RecSpec { dims: *dims, template, class: *cls, limits: *limits };
+                let spec = RecSpec { dims: *dims, template, class: *cls, limits: *limits, byte5: None };
                 (name.to_string(), (tdmn(name), tdbs(&spec, false, 25_600)))
             })
             .collect();
-        let scalar = RecSpec { dims: 1, template: KeyTemplate::Plain, class: class::EFFECT_NUMBER, limits: Some((0.0, 100.0)) };
+        let scalar = RecSpec { dims: 1, template: KeyTemplate::Plain, class: class::EFFECT_NUMBER, limits: Some((0.0, 100.0)), byte5: None };
         StyleProtos { records, keyed: tdbs(&scalar, true, 25_600) }
     }
 

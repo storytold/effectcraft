@@ -18,7 +18,7 @@ const MASKS: &[u8] = include_bytes!("../../template/masks.aep");
 pub(crate) const EFFECTS: &[u8] = include_bytes!("../../template/effects.aep");
 const FOOTAGE: &[u8] = include_bytes!("../../template/footage.aep");
 const TEXT: &[u8] = include_bytes!("../../template/text.aep");
-const OBJECTS: &[u8] = include_bytes!("../../template/objects.aep");
+pub(crate) const OBJECTS: &[u8] = include_bytes!("../../template/objects.aep");
 #[cfg(test)]
 pub(crate) const STYLES: &[u8] = include_bytes!("../../template/styles.aep");
 
@@ -83,10 +83,12 @@ fn transform_records(keyed: bool) -> Vec<Chunk<'static>> {
         .iter()
         .flat_map(|k| {
             let spec = match k {
-                PropKind::Anchor | PropKind::Position => RecSpec { dims: 3, template: KeyTemplate::Spatial(3), class: class::SPATIAL, limits: None },
-                PropKind::Scale => RecSpec { dims: 3, template: KeyTemplate::Plain, class: class::LAYER_SCALAR, limits: Some((0.0, 0.0)) },
-                PropKind::Rotation => RecSpec { dims: 1, template: KeyTemplate::Plain, class: class::LAYER_SCALAR, limits: None },
-                PropKind::Opacity => RecSpec { dims: 1, template: KeyTemplate::Plain, class: class::LAYER_SCALAR, limits: Some((0.0, 100.0)) },
+                PropKind::Anchor | PropKind::Position => {
+                    RecSpec { dims: 3, template: KeyTemplate::Spatial(3), class: class::SPATIAL, limits: None, byte5: None }
+                }
+                PropKind::Scale => RecSpec { dims: 3, template: KeyTemplate::Plain, class: class::LAYER_SCALAR, limits: Some((0.0, 0.0)), byte5: None },
+                PropKind::Rotation => RecSpec { dims: 1, template: KeyTemplate::Plain, class: class::LAYER_SCALAR, limits: None, byte5: None },
+                PropKind::Opacity => RecSpec { dims: 1, template: KeyTemplate::Plain, class: class::LAYER_SCALAR, limits: Some((0.0, 100.0)), byte5: None },
             };
             [crate::export::synth::tdmn(k.match_name()), crate::export::synth::tdbs(&spec, keyed, 25_600)]
         })
@@ -150,26 +152,12 @@ impl Template {
         let anims = crate::export::textanim::AnimProtos { group: tx_list(b"tanm")?, animator: tx_list(b"tani")?, records: anim_records };
         let obj_file = parse(OBJECTS).map_err(|_| tpl("the embedded object prototypes do not parse"))?.into_owned();
         let marker_group = obj_file.list(b"mrkp").ok_or_else(|| tpl("marker prototype missing"))?.children().to_vec();
-        let obj = |ty: &[u8; 4]| -> R<Vec<Chunk<'static>>> { Ok(obj_file.list(ty).ok_or_else(|| tpl("object prototype missing"))?.children().to_vec()) };
-        let camera_block = obj(b"camb")?;
-        let spot_block = obj(b"spot")?;
-        let point_block = obj(b"pont")?;
-        let mut records = Vec::new();
-        let mut it = obj(b"opts")?.into_iter();
-        while let (Some(m), Some(node)) = (it.next(), it.next()) {
-            let name = m.bytes().map(|b| String::from_utf8_lossy(b.split(|x| *x == 0).next().unwrap_or_default()).to_string()).unwrap_or_default();
-            records.push((name, node));
-        }
+        use crate::export::{skeleton, tree_defs};
+        let camera_block = skeleton::layer_block(tree_defs::CAMERA_ROOT);
+        let spot_block = skeleton::layer_block(tree_defs::SPOT_ROOT);
+        let point_block = skeleton::layer_block(tree_defs::POINT_ROOT);
+        let records = skeleton::pairs(tree_defs::OPTIONS).into_iter().map(|(name, [_, node])| (name, node)).collect();
         let options = crate::export::camlight::OptionProtos { records };
-        let pairs = |ty: &[u8; 4]| -> R<Vec<(String, [Chunk<'static>; 2])>> {
-            let mut out = Vec::new();
-            let mut it = obj(ty)?.into_iter();
-            while let (Some(m), Some(node)) = (it.next(), it.next()) {
-                let name = m.bytes().map(|b| String::from_utf8_lossy(b.split(|x| *x == 0).next().unwrap_or_default()).to_string()).unwrap_or_default();
-                out.push((name, [m, node]));
-            }
-            Ok(out)
-        };
         // The key list of the keyed Opacity prototype (one-component plain keys; its header is
         // rewritten for every keyed shape property).
         let key_list = keyd
@@ -179,7 +167,12 @@ impl Template {
             .and_then(|c| c.child_list(b"list"))
             .cloned()
             .ok_or_else(|| tpl("keyed prototype without a key list"))?;
-        let shapes = crate::export::shapes::ShapeProtos { block: obj(b"shpb")?, items: pairs(b"shpi")?, records: pairs(b"shpr")?, key_list };
+        let shapes = crate::export::shapes::ShapeProtos {
+            block: skeleton::layer_block(tree_defs::SHAPE_ROOT),
+            items: skeleton::pairs(tree_defs::SHAPE_ITEMS),
+            records: skeleton::pairs(tree_defs::SHAPE_RECORDS),
+            key_list,
+        };
         Ok(Template {
             file,
             comp_shell,

@@ -70,6 +70,9 @@ pub(crate) struct RecSpec {
     pub class: u32,
     /// `tdum` / `tduM`, written when the property has them (Scale `0, 0`, Opacity `0, 100`).
     pub limits: Option<(f64, f64)>,
+    /// `tdb4` byte 5 of the static record when it is not the one [`tdb4`] derives (bits 1..3 are
+    /// not decoded; the keyed record clears bit 0).
+    pub byte5: Option<u8>,
 }
 
 impl RecSpec {
@@ -107,7 +110,10 @@ pub(crate) fn tdb4(spec: &RecSpec, keyed: bool, time_scale: u32) -> Vec<u8> {
         KeyTemplate::Plain => 0,
         KeyTemplate::Spatial(t) => t,
     };
-    let byte5 = if spatial == 0 { 0 } else { spatial_byte5(spatial) } | u8::from(!keyed);
+    let byte5 = match spec.byte5 {
+        Some(b) => (b & !0x01) | u8::from(!keyed),
+        None => (if spatial == 0 { 0 } else { spatial_byte5(spatial) }) | u8::from(!keyed),
+    };
     set(&mut b, 5, &[byte5]);
     set(&mut b, 7, &[spatial]);
     set(&mut b, 8, &spec.class.to_be_bytes());
@@ -172,14 +178,14 @@ mod tests {
 
     #[test]
     fn a_record_has_the_decoded_layout() {
-        let pos = RecSpec { dims: 3, template: KeyTemplate::Spatial(3), class: class::SPATIAL, limits: None };
+        let pos = RecSpec { dims: 3, template: KeyTemplate::Spatial(3), class: class::SPATIAL, limits: None, byte5: None };
         let h = tdb4(&pos, false, 25_600);
         assert_eq!(&h[..8], &[0xdb, 0x99, 0, 3, 0, 0x0f, 0, 3]);
         assert_eq!(&h[8..16], &[0xff, 0xff, 0xff, 0xff, 0, 0, 0x64, 0]);
         assert_eq!((h[68], h[79]), (0, 1));
         assert_eq!(pos.cdat_len(), 72);
         assert_eq!(pos.key_len(), 128);
-        let opacity = RecSpec { dims: 1, template: KeyTemplate::Plain, class: class::LAYER_SCALAR, limits: Some((0.0, 100.0)) };
+        let opacity = RecSpec { dims: 1, template: KeyTemplate::Plain, class: class::LAYER_SCALAR, limits: Some((0.0, 100.0)), byte5: None };
         let k = tdb4(&opacity, true, 25_600);
         assert_eq!((k[5], k[7], k[68]), (0, 0, 1));
         let rec = tdbs(&opacity, false, 25_600);

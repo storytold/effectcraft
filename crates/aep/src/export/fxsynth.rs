@@ -24,14 +24,14 @@ const LAYER_NONE: &[&str] = &["ADBE Timewarp-0029", "ADBE Timewarp-0031"];
 
 /// The record of a parameter type (`pard` code): its components, key template and class word.
 pub(crate) fn value_spec(code: u8, range: Option<(f64, f64)>) -> Option<RecSpec> {
-    let scalar = |class| RecSpec { dims: 1, template: KeyTemplate::Plain, class, limits: None };
+    let scalar = |class| RecSpec { dims: 1, template: KeyTemplate::Plain, class, limits: None, byte5: None };
     Some(match code {
         // Sliders carry their range as `tdum` / `tduM`.
         1 | 2 | 10 => RecSpec { limits: Some(range.unwrap_or((0.0, 0.0))), ..scalar(class::EFFECT_NUMBER) },
         3 => scalar(class::EFFECT_NUMBER),
         4 | 7 => scalar(class::EFFECT_CHOICE),
-        5 => RecSpec { dims: 4, template: KeyTemplate::Spatial(1), class: class::COLOR, limits: None },
-        6 => RecSpec { dims: 2, template: KeyTemplate::Spatial(3), class: class::SPATIAL, limits: None },
+        5 => RecSpec { dims: 4, template: KeyTemplate::Spatial(1), class: class::COLOR, limits: None, byte5: None },
+        6 => RecSpec { dims: 2, template: KeyTemplate::Spatial(3), class: class::SPATIAL, limits: None, byte5: None },
         0 | 13 | 14 | 15 => scalar(class::EFFECT_OTHER),
         _ => return None,
     })
@@ -154,7 +154,7 @@ fn popup_items(fx: &FxDef, index: usize) -> Option<u16> {
 /// A record without a value of its own (layer parameters, groups, buttons): `tdsb` `state`, no
 /// user name, the header and a zero `cdat`.
 fn plain_record(state: u32, extra: Vec<Chunk<'static>>) -> Chunk<'static> {
-    let spec = RecSpec { dims: 1, template: KeyTemplate::Plain, class: class::EFFECT_OTHER, limits: None };
+    let spec = RecSpec { dims: 1, template: KeyTemplate::Plain, class: class::EFFECT_OTHER, limits: None, byte5: None };
     let mut kids = vec![
         Chunk::data(*b"tdsb", state.to_be_bytes().to_vec()),
         tdsn(NO_NAME),
@@ -168,7 +168,7 @@ fn plain_record(state: u32, extra: Vec<Chunk<'static>>) -> Chunk<'static> {
 /// The arbitrary-data record (4-byte `cdat`, class `0x00060007`, colour-like template 1) and the
 /// `LIST aRbs` with the data after it (443, 961).
 fn data_record(data: Vec<u8>) -> [Chunk<'static>; 2] {
-    let spec = RecSpec { dims: 1, template: KeyTemplate::Spatial(1), class: class::ARBITRARY, limits: None };
+    let spec = RecSpec { dims: 1, template: KeyTemplate::Spatial(1), class: class::ARBITRARY, limits: None, byte5: None };
     let rec = Chunk::list(
         *b"tdbs",
         vec![

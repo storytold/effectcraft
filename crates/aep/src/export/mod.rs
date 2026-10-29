@@ -43,6 +43,8 @@ mod textanim;
 mod textdoc;
 mod timebase;
 mod tree;
+mod tree_defs;
+mod tree_spec;
 
 use effectcraft_project::Project;
 

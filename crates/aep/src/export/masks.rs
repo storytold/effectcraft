@@ -384,7 +384,7 @@ const MASK_LIMIT: f64 = 32_000.0;
 /// A shape header (`shph`, 24 bytes, aep-format.md 3.8): byte 3 `0x01` (`0x09` once the path is
 /// open), the box at 4..19 (written per shape), byte 20 1. Bytes 0..2 are not decoded and written
 /// zero.
-fn shph() -> Vec<u8> {
+pub(crate) fn shph() -> Vec<u8> {
     let mut b = vec![0u8; 24];
     let _ = put_u8(&mut b, 3, 0x01);
     let _ = put_u8(&mut b, 20, 1);
@@ -405,7 +405,7 @@ impl MaskProtos {
         let state = || Chunk::data(*b"tdsb", 1u32.to_be_bytes().to_vec());
         // The path property: one component of the path template (`tdb4` byte 7 = 1), a 4-byte
         // `cdat`; the shapes follow in `omks`.
-        let path = RecSpec { dims: 1, template: KeyTemplate::Spatial(1), class: class::PATH, limits: None };
+        let path = RecSpec { dims: 1, template: KeyTemplate::Spatial(1), class: class::PATH, limits: None, byte5: None };
         let path_rec = |keyed: bool| {
             let mut kids = vec![state(), tdsn(NO_NAME), Chunk::data(*b"tdb4", tdb4(&path, keyed, 25_600))];
             if keyed {
@@ -424,9 +424,9 @@ impl MaskProtos {
             Chunk::list(*b"tdbs", kids)
         };
         let shap = Chunk::list(*b"shap", vec![Chunk::data(*b"shph", shph()), key_list(8, 0, Vec::new()), Chunk::data(*b"omtn", Vec::new())]);
-        let feather = RecSpec { dims: 2, template: KeyTemplate::Plain, class: class::EFFECT_NUMBER, limits: Some((0.0, MASK_LIMIT)) };
-        let opacity = RecSpec { dims: 1, template: KeyTemplate::Plain, class: class::EFFECT_NUMBER, limits: Some((0.0, 100.0)) };
-        let offset = RecSpec { dims: 1, template: KeyTemplate::Plain, class: class::EFFECT_NUMBER, limits: Some((-MASK_LIMIT, MASK_LIMIT)) };
+        let feather = RecSpec { dims: 2, template: KeyTemplate::Plain, class: class::EFFECT_NUMBER, limits: Some((0.0, MASK_LIMIT)), byte5: None };
+        let opacity = RecSpec { dims: 1, template: KeyTemplate::Plain, class: class::EFFECT_NUMBER, limits: Some((0.0, 100.0)), byte5: None };
+        let offset = RecSpec { dims: 1, template: KeyTemplate::Plain, class: class::EFFECT_NUMBER, limits: Some((-MASK_LIMIT, MASK_LIMIT)), byte5: None };
         let atom = Chunk::list(
             *b"tdgp",
             vec![

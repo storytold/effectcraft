@@ -46,7 +46,7 @@ pub(crate) fn layer_styles() -> [Chunk<'static>; 2] {
 /// The inert Time Remapping record every layer has (`tdsb` 3, value 0, the maximum written per
 /// layer: aep-format.md 3.4).
 fn time_remap() -> Chunk<'static> {
-    let spec = RecSpec { dims: 1, template: KeyTemplate::Plain, class: class::LAYER_SCALAR, limits: Some((0.0, 0.0)) };
+    let spec = RecSpec { dims: 1, template: KeyTemplate::Plain, class: class::LAYER_SCALAR, limits: Some((0.0, 0.0)), byte5: None };
     let mut rec = tdbs(&spec, false, 25_600);
     if let Some(state) = rec.children_mut().iter_mut().find(|c| c.is(b"tdsb")) {
         *state = Chunk::data(*b"tdsb", 3u32.to_be_bytes().to_vec());
@@ -70,5 +70,28 @@ pub(crate) fn av_layer() -> Vec<Chunk<'static>> {
     let layr = Chunk::list(*b"Layr", vec![Chunk::data(*b"ldta", vec![0; 164]), Chunk::data(*b"Utf8", Vec::new()), Chunk::list(*b"tdgp", root), guides()]);
     let mut out = vec![layr, Chunk::list(*b"Ewst", Vec::new())];
     out.extend(f_records());
+    out
+}
+
+/// The block of a layer whose property tree is `nodes` (cameras, lights, shapes: `tree_defs`),
+/// with a zero `ldta`, the guides, `Ewst` and the f-records.
+pub(crate) fn layer_block(nodes: &[crate::export::tree_spec::Node]) -> Vec<Chunk<'static>> {
+    let mut root = vec![Chunk::data(*b"tdsb", 1u32.to_be_bytes().to_vec()), tdsn("")];
+    root.extend(crate::export::tree_spec::build(nodes));
+    root.push(tdmn("ADBE Group End"));
+    let layr = Chunk::list(*b"Layr", vec![Chunk::data(*b"ldta", vec![0; 164]), Chunk::data(*b"Utf8", Vec::new()), Chunk::list(*b"tdgp", root), guides()]);
+    let mut out = vec![layr, Chunk::list(*b"Ewst", Vec::new())];
+    out.extend(f_records());
+    out
+}
+
+/// `tdmn` + node pairs of `nodes`, by match name.
+pub(crate) fn pairs(nodes: &[crate::export::tree_spec::Node]) -> Vec<(String, [Chunk<'static>; 2])> {
+    let mut out = Vec::new();
+    let mut it = crate::export::tree_spec::build(nodes).into_iter();
+    while let (Some(m), Some(n)) = (it.next(), it.next()) {
+        let name = String::from_utf8_lossy(m.bytes().unwrap_or_default().split(|b| *b == 0).next().unwrap_or_default()).into_owned();
+        out.push((name, [m, n]));
+    }
     out
 }
