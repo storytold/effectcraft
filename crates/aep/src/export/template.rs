@@ -10,7 +10,7 @@ use crate::{AepFile, Chunk, parse};
 
 use crate::export::tree::{R, tpl};
 
-const BASE: &[u8] = include_bytes!("../../template/base.aep");
+pub(crate) const BASE: &[u8] = include_bytes!("../../template/base.aep");
 const PROTOS: &[u8] = include_bytes!("../../template/protos.aep");
 #[cfg(test)]
 const MASKS: &[u8] = include_bytes!("../../template/masks.aep");

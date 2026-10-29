@@ -215,6 +215,13 @@ mod listing {
         for ty in [b"opts", b"shpi", b"shpr"] {
             show(ty, f.list(ty).unwrap().children());
         }
+        let b = crate::parse(crate::export::template::BASE).unwrap();
+        let fold = b.list(b"Fold").unwrap();
+        let comp = fold.children().iter().find(|c| c.is_list(b"Item")).unwrap();
+        let layr = comp.children().iter().find(|c| c.is_list(b"Layr")).unwrap();
+        let root = layr.child_list(b"tdgp").unwrap().children();
+        let at = root.iter().position(|c| c.is(b"tdmn") && c.bytes().unwrap().starts_with(b"ADBE Transform Group")).unwrap();
+        show(b"base-transform", &root[at..at + 2]);
         let t = crate::parse(crate::export::template::TEXT).unwrap();
         for ty in [b"tanm", b"tani", b"tarc"] {
             show(ty, t.list(ty).unwrap().children());

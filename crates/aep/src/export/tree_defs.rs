@@ -286,3 +286,14 @@ pub(crate) static TEXT_ANIMATOR_RECORDS: &[Node] = &[
     R("ADBE Text Random Seed", Rec { state: 1, label: "-_0_/-", dims: 1, template: 0, class: 0xffffffff, byte5: 0x01, header: &[], cdat_len: 40, cdat: &[7.0], key_size: 0, limits: Some((0.0, 10000.0)), tdpi: None }),
     R("ADBE Text Character Offset", Rec { state: 1, label: "-_0_/-", dims: 1, template: 0, class: 0xffffffff, byte5: 0x01, header: &[], cdat_len: 40, cdat: &[3.0], key_size: 0, limits: Some((-65535.0, 65535.0)), tdpi: None }),
 ];
+
+/// The inert Transform records of an AV layer (000): split Position, Orientation, X and Y
+/// Rotation, Appears in Reflections, all at their defaults (state 3).
+pub(crate) static AV_TRANSFORM: &[Node] = &[
+    R("ADBE Position_0", Rec { state: 3, label: "-_0_/-", dims: 1, template: 0, class: 0x0001ffff, byte5: 0x01, header: &[], cdat_len: 40, cdat: &[], key_size: 0, limits: Some((0.0, 0.0)), tdpi: None }),
+    R("ADBE Position_1", Rec { state: 3, label: "-_0_/-", dims: 1, template: 0, class: 0x0001ffff, byte5: 0x01, header: &[], cdat_len: 40, cdat: &[], key_size: 0, limits: Some((0.0, 0.0)), tdpi: None }),
+    O("ADBE Orientation", Rec { state: 3, label: "-_0_/-", dims: 1, template: 0, class: 0x00060007, byte5: 0x07, header: &[(79, 1)], cdat_len: 24, cdat: &[], key_size: 0, limits: None, tdpi: None }),
+    R("ADBE Rotate X", Rec { state: 3, label: "-_0_/-", dims: 1, template: 0, class: 0x0001ffff, byte5: 0x01, header: &[], cdat_len: 40, cdat: &[], key_size: 0, limits: None, tdpi: None }),
+    R("ADBE Rotate Y", Rec { state: 3, label: "-_0_/-", dims: 1, template: 0, class: 0x0001ffff, byte5: 0x01, header: &[], cdat_len: 40, cdat: &[], key_size: 0, limits: None, tdpi: None }),
+    R("ADBE Envir Appear in Reflect", Rec { state: 3, label: "-_0_/-", dims: 1, template: 0, class: 0xffff0004, byte5: 0x01, header: &[], cdat_len: 40, cdat: &[1.0], key_size: 0, limits: None, tdpi: None }),
+];
