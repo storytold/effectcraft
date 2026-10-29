@@ -95,3 +95,14 @@ pub(crate) fn pairs(nodes: &[crate::export::tree_spec::Node]) -> Vec<(String, [C
     }
     out
 }
+
+/// The marker group (`tdmn ADBE Marker` + `LIST mrst`, aep-format.md 3.11) for
+/// `markers::build`: the marker property as a keyed one-component record (class `0x00010004`,
+/// 16-byte keys, 249) and `mrky` with one `Nmrd` whose header (`NmHd`) and strings are written
+/// per marker.
+pub(crate) fn marker_group() -> Vec<Chunk<'static>> {
+    let spec = RecSpec { dims: 1, template: KeyTemplate::Plain, class: class::EFFECT_CHOICE, limits: None, byte5: None };
+    let record = tdbs(&spec, true, 25_600);
+    let nmrd = Chunk::list(*b"Nmrd", vec![Chunk::data(*b"NmHd", vec![0; 20])]);
+    vec![tdmn("ADBE Marker"), Chunk::list(*b"mrst", vec![record, Chunk::list(*b"mrky", vec![nmrd])])]
+}

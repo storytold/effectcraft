@@ -18,6 +18,7 @@ const MASKS: &[u8] = include_bytes!("../../template/masks.aep");
 pub(crate) const EFFECTS: &[u8] = include_bytes!("../../template/effects.aep");
 const FOOTAGE: &[u8] = include_bytes!("../../template/footage.aep");
 pub(crate) const TEXT: &[u8] = include_bytes!("../../template/text.aep");
+#[cfg(test)]
 pub(crate) const OBJECTS: &[u8] = include_bytes!("../../template/objects.aep");
 #[cfg(test)]
 pub(crate) const STYLES: &[u8] = include_bytes!("../../template/styles.aep");
@@ -143,8 +144,7 @@ impl Template {
             animator: crate::export::tree_spec::build(crate::export::tree_defs::TEXT_ANIMATOR),
             records: crate::export::skeleton::pairs(crate::export::tree_defs::TEXT_ANIMATOR_RECORDS),
         };
-        let obj_file = parse(OBJECTS).map_err(|_| tpl("the embedded object prototypes do not parse"))?.into_owned();
-        let marker_group = obj_file.list(b"mrkp").ok_or_else(|| tpl("marker prototype missing"))?.children().to_vec();
+        let marker_group = crate::export::skeleton::marker_group();
         use crate::export::{skeleton, tree_defs};
         let camera_block = skeleton::layer_block(tree_defs::CAMERA_ROOT);
         let spot_block = skeleton::layer_block(tree_defs::SPOT_ROOT);
