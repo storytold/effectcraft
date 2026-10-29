@@ -641,11 +641,14 @@ fn put_effects(cx: &mut Cx<'_>, layr: &mut Chunk<'static>, lp: &LayerPlan, layer
     Ok(())
 }
 
-const GROUP_ORDER: [&str; 12] = [
+/// The order of a Transform group's records; `ADBE Group End` closes the group whatever else it
+/// holds.
+const GROUP_ORDER: [&str; 13] = [
     "ADBE Anchor Point",
     "ADBE Position",
     "ADBE Position_0",
     "ADBE Position_1",
+    "ADBE Position_2",
     "ADBE Scale",
     "ADBE Orientation",
     "ADBE Rotate X",
@@ -706,7 +709,7 @@ fn put_properties(cx: &Cx<'_>, layr: &mut Chunk<'static>, lp: &LayerPlan, cp: &C
             pairs.push((name.to_string(), entry));
         }
     }
-    let rank = |n: &str| GROUP_ORDER.iter().position(|g| *g == n).unwrap_or(GROUP_ORDER.len());
+    let rank = |n: &str| if n == "ADBE Group End" { usize::MAX } else { GROUP_ORDER.iter().position(|g| *g == n).unwrap_or(GROUP_ORDER.len()) };
     pairs.sort_by_key(|(n, _)| rank(n));
     gk.extend(header);
     gk.extend(pairs.into_iter().flat_map(|(_, v)| v));

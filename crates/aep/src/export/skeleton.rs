@@ -4,7 +4,7 @@
 //! e1-sparse).
 
 use crate::Chunk;
-use crate::export::synth::{KeyTemplate, NO_NAME, RecSpec, class, key_list, tdbs, tdmn, tdsn};
+use crate::export::synth::{KeyTemplate, NO_NAME, RecSpec, class, tdbs, tdmn, tdsn};
 
 /// A group: its match name and a `tdgp` with the state `state` (`tdsb`), no user name, `kids` and
 /// the closing `ADBE Group End`.
@@ -54,12 +54,6 @@ fn time_remap() -> Chunk<'static> {
     rec
 }
 
-/// The guides of a layer (`Gide`: `gdta` zero and an empty list: its header only, no `ldat`).
-fn guides() -> Chunk<'static> {
-    let header = key_list(16, 0, Vec::new()).children().iter().filter(|c| c.is(b"lhd3")).cloned().collect();
-    Chunk::list(*b"Gide", vec![Chunk::data(*b"gdta", vec![0; 8]), Chunk::list(*b"list", header)])
-}
-
 /// The block of an AV layer (solid, footage, precomposition): `Layr` (a zero `ldta` the exporter
 /// fills with the decoded fields, read-back t-zldta; the name; the property tree with Time
 /// Remapping, an empty Transform group and the layer styles), `Ewst` and the f-records.
@@ -68,7 +62,10 @@ pub(crate) fn av_layer() -> Vec<Chunk<'static>> {
     root.extend(group("ADBE Transform Group", 1, crate::export::tree_spec::build(crate::export::tree_defs::AV_TRANSFORM)));
     root.extend(layer_styles());
     root.push(tdmn("ADBE Group End"));
-    let layr = Chunk::list(*b"Layr", vec![Chunk::data(*b"ldta", vec![0; 164]), Chunk::data(*b"Utf8", Vec::new()), Chunk::list(*b"tdgp", root), guides()]);
+    let layr = Chunk::list(
+        *b"Layr",
+        vec![Chunk::data(*b"ldta", vec![0; 164]), Chunk::data(*b"Utf8", Vec::new()), Chunk::list(*b"tdgp", root), crate::export::base::guides()],
+    );
     let mut out = vec![layr, Chunk::list(*b"Ewst", Vec::new())];
     // Two sets of f-records follow every layer (000).
     out.extend(f_records());
@@ -82,7 +79,10 @@ pub(crate) fn layer_block(nodes: &[crate::export::tree_spec::Node]) -> Vec<Chunk
     let mut root = vec![Chunk::data(*b"tdsb", 1u32.to_be_bytes().to_vec()), tdsn("")];
     root.extend(crate::export::tree_spec::build(nodes));
     root.push(tdmn("ADBE Group End"));
-    let layr = Chunk::list(*b"Layr", vec![Chunk::data(*b"ldta", vec![0; 164]), Chunk::data(*b"Utf8", Vec::new()), Chunk::list(*b"tdgp", root), guides()]);
+    let layr = Chunk::list(
+        *b"Layr",
+        vec![Chunk::data(*b"ldta", vec![0; 164]), Chunk::data(*b"Utf8", Vec::new()), Chunk::list(*b"tdgp", root), crate::export::base::guides()],
+    );
     let mut out = vec![layr, Chunk::list(*b"Ewst", Vec::new())];
     // Two sets of f-records follow every layer (000).
     out.extend(f_records());
@@ -126,7 +126,10 @@ pub(crate) fn text_layer(doc: &[u8]) -> Vec<Chunk<'static>> {
     root.extend(group("ADBE Transform Group", 1, crate::export::tree_spec::build(crate::export::tree_defs::AV_TRANSFORM)));
     root.extend(layer_styles());
     root.push(tdmn("ADBE Group End"));
-    let layr = Chunk::list(*b"Layr", vec![Chunk::data(*b"ldta", vec![0; 164]), Chunk::data(*b"Utf8", Vec::new()), Chunk::list(*b"tdgp", root), guides()]);
+    let layr = Chunk::list(
+        *b"Layr",
+        vec![Chunk::data(*b"ldta", vec![0; 164]), Chunk::data(*b"Utf8", Vec::new()), Chunk::list(*b"tdgp", root), crate::export::base::guides()],
+    );
     let mut out = vec![layr, Chunk::list(*b"Ewst", Vec::new())];
     out.extend(f_records());
     out.extend(f_records());

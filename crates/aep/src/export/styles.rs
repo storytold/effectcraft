@@ -83,7 +83,10 @@ fn same(a: &[f64], b: &[f64]) -> bool {
 /// The record of one parameter, `None` when it stays at After Effects' default (no record).
 fn plan_record(spec: &StyleParam, full: String, prop: &Property, cp: &CompPlan, what: &str, col: &mut Collector) -> Option<Record> {
     let here = format!("{what}: {full}");
-    let expr = prop.expr.as_ref().map(|e| (e.text.clone(), e.enabled));
+    let expr = prop.expr.as_ref().filter(|e| !e.text.is_empty()).map(|e| (e.text.clone(), e.enabled));
+    if expr.is_some() {
+        col.exported.expressions = col.exported.expressions.saturating_add(1);
+    }
     if !prop.keys.is_empty() {
         if spec.conv == StyleConv::Number {
             let keys = plan_number_keys(prop, cp, &here, col);

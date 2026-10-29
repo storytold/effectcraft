@@ -267,7 +267,6 @@ fn plan_doc(doc: &TextDoc, what: &str, col: &mut Collector) -> TextPlan {
 }
 
 fn style_out(s: &effectcraft_keyframe::text_doc::CharStyle, what: &str, col: &mut Collector) -> StyleOut {
-    let def = effectcraft_keyframe::text_doc::CharStyle::default();
     let auto_kern = match s.kerning {
         Kerning::Metrics => 1,
         Kerning::Optical => 2,
@@ -282,7 +281,6 @@ fn style_out(s: &effectcraft_keyframe::text_doc::CharStyle, what: &str, col: &mu
     if !s.opentype.is_default() || !s.variations.is_empty() {
         col.lose(LossCategory::TextLayers, format!("{what}: OpenType features and variable font axes are not written"));
     }
-    let _ = def;
     if s.style != "Regular" && !s.style.is_empty() {
         col.lose(LossCategory::TextLayers, format!("{what}: the font style '{}' is not written (the font is named by its PostScript name)", s.style));
     }

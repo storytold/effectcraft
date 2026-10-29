@@ -344,7 +344,10 @@ pub(crate) fn rec_value(
     if expr.is_some() {
         cx.col.exported.expressions = cx.col.exported.expressions.saturating_add(1);
     }
-    let value = conv(&p.value)?;
+    let Some(value) = conv(&p.value) else {
+        cx.col.lose(category, format!("{w} holds a value of another type, not written"));
+        return None;
+    };
     if !finite(&value) {
         cx.col.lose(LossCategory::InvalidValues, format!("{w} is not a valid number (the default is written)"));
         return None;

@@ -1,11 +1,9 @@
 //! After Effects project (`.aep`) export: an EffectCraft [`Project`] written as an `.aep` that
 //! After Effects 2026 opens.
 //!
-//! The format has many chunks that are not understood, and After Effects only opens a file whose
-//! chunks are consistent. The exporter therefore does not write a file from scratch: it **edits a
-//! generated template** (a project After Effects saved, embedded in the crate) with
-//! `effectcraft-aep`, cloning the item, layer and property records of the template and changing
-//! only the fields whose layout is verified (`docs/aep-format.md` section 3, `docs/aep-export.md`):
+//! Every chunk is built in code: the project skeleton, the item, layer and property records are
+//! prototypes in the layout After Effects writes (`template.rs` gathers them), and the exporter
+//! clones them and writes only the fields whose layout is verified (`docs/aep-format.md` section 3, `docs/aep-export.md`):
 //! item and layer ids, project settings, the composition header, the layer header (switches
 //! including 3D, time stretch, blend modes, track mattes), solid colour and size, the Transform
 //! properties (static values, keyframes with interpolation and ease, expressions), layer masks,
@@ -59,9 +57,9 @@ pub enum AepExportError {
     /// the report says what would be lost.
     #[error("exporting would lose {}; allow losses to export anyway", .0.summary())]
     Refused(Box<ExportReport>),
-    /// The embedded template does not have the shape the exporter expects (a bug in the crate).
+    /// A prototype built in code does not have the shape the exporter expects (a bug in the crate).
     #[error("internal error: {0}")]
-    Template(&'static str),
+    Internal(&'static str),
     /// The container could not be written (a chunk or the file exceeds the format's 4 GB limit).
     #[error("{0}")]
     Container(#[from] crate::AepError),
@@ -100,7 +98,7 @@ pub fn export(project: &Project, options: &ExportOptions) -> Result<ExportResult
 /// After Effects keeps a sequence's stored numbering only while the stored folder time
 /// (`sspc@118`) equals the folder's; otherwise it scans the folder again when the project opens
 /// and warns about every gap in the numbering in a modal dialog (860, `export-tests` x1-x3).
-/// Without a time the template's stays, and such a folder is scanned again.
+/// Without a time it is written as 0, and such a folder is scanned again.
 ///
 /// # Errors
 /// As [`export`].

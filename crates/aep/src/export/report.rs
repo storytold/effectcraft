@@ -26,11 +26,11 @@ pub enum LossCategory {
     /// Text layer features that are not written (animators, Source Text keys, strokes, ...), and
     /// text layers without a text document.
     TextLayers,
-    /// Shape layers (skipped as a whole).
+    /// Shape layer contents that are not written.
     ShapeLayers,
-    /// Camera layers (skipped as a whole).
+    /// Camera settings that are not written.
     Cameras,
-    /// Light layers (skipped as a whole).
+    /// Light settings that are not written.
     Lights,
     /// 3D model and primitive layers (skipped as a whole).
     ModelLayers,
@@ -40,7 +40,7 @@ pub enum LossCategory {
     /// Layers whose source is not exported (footage that is not written, a precomposition that is
     /// missing or closes a loop, other).
     UnsupportedLayers,
-    /// Blend modes other than Normal, Multiply, Add, Screen, Overlay and Difference.
+    /// Blend modes After Effects has no code for (written as Normal).
     BlendModes,
     /// Track mattes.
     TrackMattes,
@@ -192,7 +192,7 @@ pub struct Exported {
 
 /// Standing limitations of the exporter (what it cannot write at all), listed in every report.
 pub const LIMITATIONS: &[&str] = &[
-    "The file is built from a generated template project: the render queue, render templates and project settings other than colour depth, working space (None, sRGB or Rec.709 Gamma 2.4), working gamma, the two linear-light switches, time display and frame count start are not exported.",
+    "The render queue, render templates and project settings other than colour depth, working space (None, sRGB or Rec.709 Gamma 2.4), working gamma, the two linear-light switches, time display and frame count start are not exported.",
     "Composition options other than size, frame rate, duration, work area, background, pixel aspect, shutter and display start are not exported (draft 3D, preserve frame rate/resolution, hide shy, frame blending, resolution).",
     "Footage is linked, not embedded: png, jpeg, OpenEXR, TIFF, Targa, Photoshop, Illustrator and EPS stills, png, OpenEXR and jpeg sequences, mp4 and mov clips and WAV audio are written with their path, size, duration and frame rate (a conformed clip rate too); the rest of their interpretation (alpha, colour management, fields, loops) is the default.",
     "Layer comments, a 3D layer's X / Y rotation, orientation and material options, parallel and ambient lights, and shape items outside groups, rectangles, ellipses, polystars, paths, fills, strokes, gradients, trim paths, round corners, merge and offset paths and repeaters (wiggle, twist, zig-zag, pucker and bloat, ...) are not written.",

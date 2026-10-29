@@ -1,5 +1,5 @@
 //! Small helpers to edit a chunk tree without panicking: every accessor returns a `Result` with
-//! [`crate::export::AepExportError::Template`] when the template does not have the expected shape.
+//! [`crate::export::AepExportError::Internal`] when a prototype does not have the expected shape.
 
 use crate::{Body, Chunk};
 
@@ -8,7 +8,7 @@ use crate::export::AepExportError;
 pub(crate) type R<T> = Result<T, AepExportError>;
 
 pub(crate) fn tpl(msg: &'static str) -> AepExportError {
-    AepExportError::Template(msg)
+    AepExportError::Internal(msg)
 }
 
 /// The bytes of a data chunk, owned and mutable.

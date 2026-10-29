@@ -615,7 +615,7 @@ fn resolve_mattes(cp: &mut CompPlan, comp_name: &str, col: &mut Collector) {
 /// Parent links to a layer that was not exported, and links that lead into a loop, are cut.
 fn resolve_parents(cp: &mut CompPlan, comp_name: &str, col: &mut Collector) {
     let exported: HashSet<LayerId> = cp.layers.iter().map(|l| l.ec_id).collect();
-    let links: std::collections::HashMap<LayerId, LayerId> = cp.layers.iter().filter_map(|l| l.parent.map(|p| (l.ec_id, p))).collect();
+    let mut links: std::collections::HashMap<LayerId, LayerId> = cp.layers.iter().filter_map(|l| l.parent.map(|p| (l.ec_id, p))).collect();
     for l in &mut cp.layers {
         let Some(p) = l.parent else { continue };
         let mut cut = !exported.contains(&p);
@@ -638,6 +638,7 @@ fn resolve_parents(cp: &mut CompPlan, comp_name: &str, col: &mut Collector) {
         }
         if cut {
             col.lose(LossCategory::ParentLinks, format!("{comp_name}: '{}' has a parent that was not exported or forms a loop", l.name));
+            links.remove(&l.ec_id);
             l.parent = None;
         }
     }
@@ -918,7 +919,8 @@ fn plan_layer(cx: &PlanCx<'_>, at: CompAt<'_>, cp: &CompPlan, layer: &Layer, col
     let masks = if is_text || is_shape {
         let n = layer.masks().map_or(0, |m| m.groups().count());
         if n > 0 {
-            col.lose(LossCategory::Masks, what(&format!("{n} mask(s) on a text layer (the path unit on text layers is not verified) on")));
+            let kind = if is_text { "text" } else { "shape" };
+            col.lose(LossCategory::Masks, what(&format!("{n} mask(s) on a {kind} layer (the path unit on {kind} layers is not verified) on")));
         }
         Vec::new()
     } else {
@@ -932,6 +934,9 @@ fn plan_layer(cx: &PlanCx<'_>, at: CompAt<'_>, cp: &CompPlan, layer: &Layer, col
         }
     };
     let parent = layer.parent.filter(|p| ids.contains(p));
+    if layer.parent.is_some() && parent.is_none() {
+        col.lose(LossCategory::ParentLinks, what("a parent that is not a layer of this composition, written without it, on"));
+    }
 
     let props = plan_transform(layer, &src, comp, source_size, cp, comp_name, col);
     let remap = remap_prop.filter(|_| remapped).map(|p| plan_remap(p, comp, cp, &layer.name, comp_name, col));

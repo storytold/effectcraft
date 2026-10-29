@@ -745,3 +745,26 @@ fn hostile_shape_keys_never_panic() {
     assert_eq!(effectcraft_aep::write(&file).expect("write"), r.bytes);
     assert!(r.report.count(LossCategory::InvalidValues) >= 1, "{:?}", r.report.losses);
 }
+
+/// The Transform group of a camera ends with its Group End: the camera's `ADBE Position_2` record
+/// sorts before it (review finding: an unlisted record used to sort after the end marker).
+#[test]
+fn a_camera_transform_group_ends_with_its_group_end() {
+    use effectcraft_keyframe::Value;
+    let mut p = Project::default();
+    let c = add_comp(&mut p, "C", 1920, 1080, FrameRate::new(25, 1), 2.0, None);
+    add_layer(&mut p, c, "Cam", LayerSource::Camera, (1920, 1080));
+    with_props(&mut p, c, 0, &[("transform/position", Value::Vec3([100.0, 200.0, -1000.0]))]);
+    let bytes = export_all(&p).bytes;
+    let file = parse(&bytes).expect("parse");
+    let view = effectcraft_aep::Project::new(&file).expect("project");
+    let comp = view.all_items().into_iter().find_map(|i| i.comp()).expect("comp");
+    let layer = comp.layers().next().expect("camera");
+    let root = layer.chunk().child_list(b"tdgp").expect("tree").children();
+    let name =
+        |c: &effectcraft_aep::Chunk<'_>| String::from_utf8_lossy(c.bytes().unwrap_or_default().split(|b| *b == 0).next().unwrap_or_default()).into_owned();
+    let at = root.iter().position(|c| c.is(b"tdmn") && name(c) == "ADBE Transform Group").expect("transform");
+    let names: Vec<String> = root[at + 1].children().iter().filter(|c| c.is(b"tdmn")).map(name).collect();
+    assert_eq!(names.last().map(String::as_str), Some("ADBE Group End"), "{names:?}");
+    assert!(names.iter().any(|n| n == "ADBE Position_2"));
+}

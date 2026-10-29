@@ -4,7 +4,7 @@
 //! - [`container`]: the RIFX `Egg!` chunk tree (lossless, byte-identical round trip) and its typed,
 //!   read-only view. Its API is re-exported at the crate root.
 //! - [`import`]: maps the typed view into an EffectCraft project and reports what it drops.
-//! - [`export`]: writes an EffectCraft project as an `.aep` by editing an embedded template.
+//! - [`export`]: writes an EffectCraft project as an `.aep`, every chunk built in code.
 //!
 //! See `docs/aep-format.md`, `docs/aep-import.md` and `docs/aep-export.md`.
 
