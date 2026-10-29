@@ -491,7 +491,7 @@ fn import_mesh(m: &MeshData, here: &str, size: (u32, u32), group: &mut PropGroup
             return;
         }
         // EffectCraft's mesh reads the first two numbers of a vertex; moved handles follow as
-        // eight more (kept in the project, not drawn).
+        // eight more (kept for the export, not drawn).
         let mut token = format!("{},{}", px(dx * w), px(dy * h));
         if own.iter().any(|x| x.abs() > 0.01) {
             handles_moved = true;
@@ -504,7 +504,7 @@ fn import_mesh(m: &MeshData, here: &str, size: (u32, u32), group: &mut PropGroup
     if handles_moved {
         col.lose(
             LossCategory::Effects,
-            format!("{here}: Distortion Mesh Bezier handles moved on their own are not drawn (EffectCraft's mesh is bilinear; they are kept in the project)"),
+            format!("{here}: Distortion Mesh Bezier handles moved on their own are not drawn (EffectCraft's mesh is bilinear; they are kept for the export)"),
         );
     }
     if let Some(p) = group.prop_mut("rows") {

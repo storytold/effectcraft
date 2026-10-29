@@ -376,7 +376,7 @@ out speed, at 40 out influence**). Scale key 1 of 305 (`n = 3`, in 0 / 33 %, out
 15 / 66) is `0,0, .33,.33, 15,15, .66,.66`. Component `i` uses slot `i` of each block (**V** for the
 block layout and the units, Scale speed in fractions per second and Mask Feather speed in pixels
 per second; **E** that different values per dimension sit in the slot of their dimension, because
-the tool that made the corpus applies one ease to all dimensions; **V** since a file of ours with three different eases for the three Scale dimensions read back the same three in After Effects). `Keyframe::plain_ease_slots`
+the tool that made the corpus applies one ease to all dimensions; **V** since the exporter wrote three different eases for the three Scale dimensions and After Effects read the same three back, aep-export.md R13). `Keyframe::plain_ease_slots`
 returns the doubles as stored, `Keyframe::ease_component(i)` one component's `KeyEase`. Layout of
 the spatial template: `u32` at 8 (1 normally, 0 after the spatial auto-bezier and continuous
 switches were turned off together, 054), `f64` arc length of the segment to the next key at 16
@@ -755,7 +755,7 @@ switch group per style, `<style>/enabled` (`dropShadow`, `innerShadow`, `outerGl
 | gradients | `<style>/gradient` is a `GCst` list, not decoded | - | ? |
 
 At 32 bpc After Effects renders the modes 6, 7, 11, 12, 16-22 and 25 of a style as Normal (978);
-at 16 bpc as their formulas. API: `effectcraft_aep::style_map` (the importer's table).
+at 16 bpc as their formulas. API: `effectcraft_aep::style_map` (table shared by importer and exporter).
 
 ### 3.13 What the tests cover
 
@@ -811,7 +811,7 @@ another value).
 **Properties and keyframes**
 
 - `tdb4` bytes 4, 8..11 (a descriptor per property class: **E**), 16 (0.0001: **E**), 24 (the composition pixel aspect on spatial properties: **E**), 32..48 (1.0: **E**), 56..67 (a class pair: **E**), 72..78 except 76 and 77 (**E**), 79 (**E**); `tdsb` bits other than 0x1 and 0x2 (group flags `0x401`, `0x11`, ...) and the `tdsb` 01 / 03 of the Vector Materials Group; `tdum` / `tduM` (**?**).
-- Per-dimension ease values of a colour or a 2-D key (Scale is **V**, above); a colour key with a non-zero ease (a colour has one ease entry; the sample reports 0 / 0); the ease units of a keyed effect Point (the 2-D spatial record itself is **V**, 382, with linear keys only).
+- Per-dimension ease values of a colour or a 2-D key (Scale is **V**, aep-export.md R13); a colour key with a non-zero ease (a colour has one ease entry; the sample reports 0 / 0); the ease units of a keyed effect Point (the 2-D spatial record itself is **V**, 382, with linear keys only).
 - The 8 stale bytes of the marker record and the bytes after the common fields of the mask path record (uninitialised memory).
 - Expressions in effect parameters, multi-line and non-ASCII expressions, the ExtendScript engine.
 - Time Remapping with extra keys, with a stretch, on a nested layer; whether keys are rescaled by a stretch.

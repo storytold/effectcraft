@@ -11,7 +11,9 @@ use crate::import::report::{Collector, LossCategory};
 pub(crate) fn color_space(name: &str) -> Option<ColorSpace> {
     match name {
         "sRGB IEC61966-2.1" => Some(ColorSpace::Srgb),
-        "Rec.709 Gamma 2.4" => Some(ColorSpace::Rec709),
+        // The second name is the one After Effects shows for the profile EffectCraft's exporter
+        // writes (its description tag) once it re-saves such a project.
+        "Rec.709 Gamma 2.4" | "Rec.709 Gamma 2.4 (EffectCraft)" => Some(ColorSpace::Rec709),
         _ => None,
     }
 }
@@ -67,8 +69,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rec709_by_name() {
+    fn rec709_under_both_names() {
         assert_eq!(color_space("Rec.709 Gamma 2.4"), Some(ColorSpace::Rec709));
+        assert_eq!(color_space("Rec.709 Gamma 2.4 (EffectCraft)"), Some(ColorSpace::Rec709));
         assert_eq!(color_space("Rec.709 Gamma 2.4 (other)"), None);
     }
 }

@@ -1,4 +1,5 @@
-//! The layer-style table of the importer (`crate::import`): the After Effects layer styles (`ADBE Layer Styles`, docs
+//! The layer-style table shared by the importer (`crate::import`) and the exporter
+//! (`crate::export`): the After Effects layer styles (`ADBE Layer Styles`, docs
 //! `aep-format.md` 3.14) and their parameters, the EffectCraft style and parameter each maps to,
 //! the unit conversion and After Effects' default as it would be stored.
 //!
@@ -72,6 +73,10 @@ pub struct StyleMap {
 }
 
 impl StyleMap {
+    /// The switch group's match name (`dropShadow/enabled`).
+    pub fn switch_name(&self) -> String {
+        format!("{}/enabled", self.ae)
+    }
     /// A parameter's full match name (`dropShadow/opacity`).
     pub fn param_name(&self, p: &StyleParam) -> String {
         format!("{}/{}", self.ae, p.ae)
@@ -319,6 +324,11 @@ pub const ADVANCED_BLENDING: &[StyleParam] = &[
 /// The style with this switch-group prefix.
 pub fn by_ae(prefix: &str) -> Option<&'static StyleMap> {
     STYLES.iter().find(|s| s.ae == prefix)
+}
+
+/// The style with this EffectCraft id.
+pub fn by_ec(id: &str) -> Option<&'static StyleMap> {
+    STYLES.iter().find(|s| s.ec == id)
 }
 
 #[cfg(test)]

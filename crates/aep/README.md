@@ -5,9 +5,10 @@ After Effects projects (`.aep`, `.aepx`) in one crate, the way `effectcraft-lott
 - `container`: reads and writes the container as a lossless chunk tree, with a typed, read-only
   view (below; its API is re-exported at the crate root);
 - `import`: maps the typed view into an EffectCraft project and reports everything it does not
-  import ([`docs/aep-import.md`](../../docs/aep-import.md)).
-
-Writing an EffectCraft project as an `.aep` (export) is not part of this crate yet.
+  import ([`docs/aep-import.md`](../../docs/aep-import.md));
+- `export`: writes an EffectCraft project as an `.aep` by editing a generated template embedded
+  from `template/`, and reports everything it does not export
+  ([`docs/aep-export.md`](../../docs/aep-export.md)).
 
 No file access: callers pass bytes, so the crate builds for wasm32.
 
@@ -52,10 +53,3 @@ sha256-verified, into the workspace's `corpus/aep/` (opt-in: `cargo xtask ci` do
 through `tests/it/common/mod.rs`, which hands a test its case as a project of its own cut from the
 combined file (or reads the folder in `EFFECTCRAFT_AEP_FIXTURES`); a test whose fixture is missing
 prints `SKIPPED: fixture <name> missing` and passes.
-
-## Tools
-
-- `tests/fixtures/tools/`: the generator of the test projects (regenerates the corpus with After
-  Effects; its README says how).
-- `examples/aepdump.rs`: prints the chunk tree of a file (ids, sizes, short data, match names):
-  `cargo run -p effectcraft-aep --example aepdump -- file.aep`.

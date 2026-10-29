@@ -700,6 +700,8 @@ agent can check what a player will not show. A `.lottie` path writes a dotLottie
 
 `file.importAep {path, allowLosses?, dryRun?, applySettings?}` imports an After Effects project (`.aep` or `.aepx`) into a folder named after the file and returns `{folder, comps, items, report}`. The report counts what arrived and lists, per category, what did not (effects outside the importer's table, undecoded text or style settings, simplified keyframes…); without `allowLosses` an import that would lose anything is refused and changes nothing, and `dryRun` returns just the report ([aep-import.md](aep-import.md)).
 
+`file.exportAep {path, allowLosses?, dryRun?}` writes the project as an After Effects project and returns `{path, bytes, report}`. The report counts what was written and lists, per category, what was not; without `allowLosses` an export that would lose anything is refused and writes nothing, and `dryRun` returns just the report ([aep-export.md](aep-export.md)).
+
 Premiere Pro interop goes through timeline interchange (MCP: the `execute_command` tool; control channel: `engine.execute`
 with the same ids):
 

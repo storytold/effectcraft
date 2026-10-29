@@ -1,6 +1,6 @@
 # File format parity
 
-> **Last reviewed:** 2026-10-19 · **Last updated:** 2026-10-19 · **Change:** `.aep` / `.aepx` import (`crates/aep`: `container`, `import`) · **Target:** Adobe After Effects 2026
+> **Last reviewed:** 2026-10-19 · **Last updated:** 2026-10-19 · **Change:** `.aep` / `.aepx` import and `.aep` export (`crates/aep`: `container`, `import`, `export`) · **Target:** Adobe After Effects 2026
 
 Every format After Effects reads or writes, with EffectCraft's support. After Effects' list comes
 from its installed bundle (26.5.0.89: `Info.plist` `CFBundleDocumentTypes`, `Plug-ins/Format`,
@@ -12,7 +12,7 @@ from its installed bundle (26.5.0.89: `Info.plist` `CFBundleDocumentTypes`, `Plu
 
 **Overall ≈ 50%** (estimated, weighted by use): modern delivery and interchange formats are
 strong, but After Effects' own formats, which decide whether existing work moves over, are the
-weakest: `.aep` / `.aepx` import is partial, export is not built, templates and presets are 0%.
+weakest: `.aep` / `.aepx` import and export are partial, templates and presets are 0%.
 
 Fidelity key: **exact** (bit-exact or within a stated tolerance of a reference), **good** (round
 trips and renders, checked by tests, not against After Effects), **partial** (named limitations),
@@ -22,7 +22,7 @@ trips and renders, checked by tests, not against After Effects), **partial** (na
 
 | Format | After Effects | EffectCraft read | Write | Fidelity / notes | Tested by |
 |---|---|---|---|---|---|
-| Project `.aep` | R/W (native) | partial | none | Main file format; the clean-room method is in [aep-format.md](aep-format.md), the maintainers' decision on it is open (#190). `crates/aep` reads and writes the RIFX container losslessly (byte-identical round trip) with a typed view of the decoded fields, from our own generated files only ([aep-format.md](aep-format.md)). File ▸ Import ▸ After Effects Project… (`file.importAep`, `effectcraft_aep::import`): folders, project settings, compositions, every layer kind, Transform, keyframes, expressions, masks, text with animators, shapes, cameras, lights, track mattes, markers, time remapping, layer styles, the built-in effects of a table (Curves, Levels, Glow, Fractal Noise, Gradient Ramp, … and the expression controls), footage and image sequences; everything else is reported ([aep-import.md](aep-import.md)). Export to `.aep` is not built yet. Effects outside the table (plug-ins, Lumetri, …) are not converted | `crates/aep` tests (`tests/it`: `container`, `import`) |
+| Project `.aep` | R/W (native) | partial | partial | Main file format; the clean-room method is in [aep-format.md](aep-format.md), the maintainers' decision on it is open (#190). `crates/aep` reads and writes the RIFX container losslessly (byte-identical round trip) with a typed view of the decoded fields, from our own generated files only ([aep-format.md](aep-format.md)). File ▸ Import ▸ After Effects Project… (`file.importAep`, `effectcraft_aep::import`): folders, project settings, compositions, every layer kind, Transform, keyframes, expressions, masks, text with animators, shapes, cameras, lights, track mattes, markers, time remapping, layer styles, the built-in effects of a table shared with the exporter (Curves, Levels, Glow, Fractal Noise, Gradient Ramp, … and the expression controls), footage and image sequences; everything else is reported ([aep-import.md](aep-import.md)). File ▸ Export ▸ After Effects Project… (`file.exportAep`, `effectcraft_aep::export`) writes the same scope by editing an embedded generated template; exports were opened and read back in After Effects 2026 ([aep-export.md](aep-export.md)); everything else is reported. Effects outside the table (plug-ins, Lumetri, …) are not converted | `crates/aep` tests (`tests/container`, `tests/import`, `tests/export`) |
 | XML project `.aepx` | R/W | partial | none | Read into the same chunk tree as `.aep` by `crates/aep` (`read_aepx`; mapping in [aep-format.md](aep-format.md) section 1), so `file.importAep` imports it with the same coverage as `.aep`; not written | `crates/aep` `aepx` tests (container and import) |
 | Templates `.aet` / `.aetx` | R/W | none | none | Own `.ectemplate` (Home ▸ Templates, Save as Template) | `templates.rs` tests |
 | Motion Graphics template `.mogrt` | W (and R in Premiere) | none | none | Own `.ectemplate` Essential Graphics templates; FilmCraft rejects our `.fcgt` export (#611) | `essential.rs` tests |
@@ -107,7 +107,7 @@ encoders ([hardware-parity.md](hardware-parity.md)), and rendering safely over a
 
 ## Estimate
 
-**≈ 130–230 h**: `.aep` / `.aepx` 80–160 h (import of the common scope is in `crates/aep`; export is not built; the rest is in [aep-import.md](aep-import.md)), wiring TGA / DPX /
+**≈ 130–230 h**: `.aep` / `.aepx` 80–160 h (import and export of the common scope are in `crates/aep`; the rest is in [aep-import.md](aep-import.md)), wiring TGA / DPX /
 HDR / MXF / AVI / DNx import and DPX/TGA output 10–20 h, FBX animation and skinning, USD and Substance 20–40 h,
 relinking 6–12 h, `.mogrt`-compatible templates 15–30 h (partly parallel with the rest).
 

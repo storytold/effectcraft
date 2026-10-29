@@ -1,4 +1,5 @@
-//! File ▸ Import ▸ After Effects Project… (`effectcraft_aep::import`).
+//! File ▸ Import ▸ After Effects Project… (`effectcraft_aep::import`) and File ▸ Export ▸ After Effects
+//! Project… (`effectcraft_aep::export`).
 //!
 //! Adds the items of an `.aep` (or its XML form, `.aepx`) to the project in a folder named after
 //! the file (`docs/aep-import.md` lists what arrives). What the importer cannot bring over (effects
@@ -7,6 +8,7 @@
 //! in the report's `missingFonts` (not a loss: the text keeps the font name and is drawn with the
 //! fallback font).
 
+use effectcraft_aep::export::{AepExportError, ExportOptions};
 use effectcraft_aep::import::{AepImportError, ImportOptions};
 use serde_json::{Value, json};
 
@@ -71,14 +73,52 @@ fn import_aep(s: &mut Session, p: &Value) -> Result<Value> {
     }))
 }
 
+fn export_aep(s: &mut Session, p: &Value) -> Result<Value> {
+    let path = str_p(p, "path").ok_or_else(|| bad("file.exportAep", "missing `path`"))?.to_string();
+    let allow_losses = b_p(p, "allowLosses").unwrap_or(false);
+    let dry_run = b_p(p, "dryRun").unwrap_or(false);
+    if dry_run {
+        return Ok(json!({"dryRun": true, "report": effectcraft_aep::export::analyze(&s.project)}));
+    }
+    // Image-sequence folders keep their stored numbering in After Effects only with their actual
+    // modification time (otherwise it rescans them and warns about every gap on open).
+    let services = s.services.clone();
+    let folder_time = move |dir: &str| services.stamp(dir).and_then(|(_, ns)| u64::try_from(ns / 1_000_000_000).ok());
+    let res = effectcraft_aep::export::export_with(&s.project, &ExportOptions { allow_losses }, &folder_time).map_err(|e| match e {
+        AepExportError::Refused(_) => {
+            EngineError::Other(format!("{e} (nothing was written: pass `allowLosses` to export anyway, or `dryRun` for the full report)"))
+        }
+        other => EngineError::Other(format!("cannot export {path}: {other}")),
+    })?;
+    s.services.write_file(&path, &res.bytes).map_err(|e| EngineError::Other(format!("cannot write {path}: {e}")))?;
+    let losses = res.report.total_losses();
+    s.toast(if losses == 0 {
+        format!("Exported After Effects project to {path}")
+    } else {
+        format!("Exported After Effects project to {path} ({losses} unsupported item{} not exported)", if losses == 1 { "" } else { "s" })
+    });
+    Ok(json!({"path": path, "bytes": res.bytes.len(), "report": res.report}))
+}
+
 pub fn specs() -> Vec<CommandSpec> {
-    vec![cmd!(
-        "file.importAep",
-        "After Effects Project...",
-        ["File", "Import"],
-        None,
-        "{path (.aep or .aepx), allowLosses?: bool (import although parts cannot be imported), dryRun?: bool (only return the report), applySettings?: bool (take over the file's project settings; default: when the project has no compositions)}",
-        always,
-        import_aep
-    )]
+    vec![
+        cmd!(
+            "file.importAep",
+            "After Effects Project...",
+            ["File", "Import"],
+            None,
+            "{path (.aep or .aepx), allowLosses?: bool (import although parts cannot be imported), dryRun?: bool (only return the report), applySettings?: bool (take over the file's project settings; default: when the project has no compositions)}",
+            always,
+            import_aep
+        ),
+        cmd!(
+            "file.exportAep",
+            "After Effects Project...",
+            ["File", "Export"],
+            None,
+            "{path (.aep), allowLosses?: bool (export although parts cannot be exported), dryRun?: bool (only return the report)}",
+            always,
+            export_aep
+        ),
+    ]
 }

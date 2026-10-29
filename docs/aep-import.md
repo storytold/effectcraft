@@ -13,7 +13,7 @@ and never dropped silently. Wider coverage grows with the reader's verified fiel
 The `import` module of `crates/aep` (`effectcraft_aep::import`; the crate is **L3**) sits between
 the container reader (`effectcraft_aep::container`, the typed view of the file) and the project
 model `effectcraft-project` (L2), the same place `effectcraft-lottie` has for Lottie (one crate for
-import, and later export). Why a crate of its own and not a module of the engine:
+import and export). Why a crate of its own and not a module of the engine:
 
 - the PSD importer lives in the engine (`crates/engine/src/psd_import.rs`) because it creates
   raster layers from engine services; the `.aep` import needs nothing of the engine, only the
@@ -144,7 +144,7 @@ Units, the "absent = default" rule and the keyframe templates are the reader's
 
 ### Effects
 
-A table in `crates/aep/src/container/effect_map.rs` maps an effect's match name and each parameter's
+A table in `crates/aep/src/container/effect_map.rs` (shared with the exporter, which writes the inverse) maps an effect's match name and each parameter's
 index in the file's parameter list to an EffectCraft effect id, a parameter id and a unit
 conversion; it also names the parameter type the file must declare and, for sliders, the valid
 maximum it was verified with (`pard@128` for fixed sliders, `pard@108` for float sliders). A parameter whose type or maximum differs is reported,
@@ -257,7 +257,7 @@ parameter gets the file's value:
   popups are not decoded, such bezier sides become linear and are reported in
   `approximated_keyframes`.
 - **The fx switch** of each instance (the `tdsb` of its value group: 1 on, 0 off; `fx-switch.aep`)
-  is imported. **Not decoded:** expressions on effect parameters (reported, the value is imported).
+  is imported and exported. **Not decoded:** expressions on effect parameters (reported, the value is imported).
 
 ## What is reported
 
@@ -381,8 +381,8 @@ generated corpus and its case numbers, not a claim about what was or was not see
 
 ## Export
 
-Writing a project as an `.aep` (File ▸ Export ▸ After Effects Project…) is not part of this
-crate yet.
+The other direction, File ▸ Export ▸ After Effects Project… (`file.exportAep`), is described in
+[aep-export.md](aep-export.md).
 
 ## Not done yet
 
