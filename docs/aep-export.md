@@ -195,8 +195,8 @@ AE re-save of the same file differed.
 
 | File | Content | Read back | AE re-save |
 |---|---|---|---|
-| `e0-noxmp`, `e0-rename` | template without XMP; renamed composition and layer | accepted, names read back | not run |
-| `x1` | `C` 1920x1080, 25 fps, 5 s, red solid `L` | identical to the template | not run |
+| `e0-noxmp`, `e0-rename` | an export without XMP; renamed composition and layer | accepted, names read back | not run |
+| `x1` | `C` 1920x1080, 25 fps, 5 s, red solid `L` | identical to the base fixture `000` | not run |
 | `x2` | `Comp 2` 1280x720, 30 fps, 4 s, green 400x300 solid, layer `Layer X`; shutter phase -90, motion blur on | all read back | not run |
 | `x3` | folder `Folder A` with a composition and a solid, a 29.97 fps composition, a null layer | tree, parents, 29.97 fps (2.002 s), null 100x100 | not run |
 | `x4` | all five Transform values | Anchor [100,50], Position [300,200], Scale [50,60,100], Rotation 45, Opacity 25 | not run |
@@ -230,6 +230,26 @@ AE re-save of the same file differed.
 | `footage\f1` | png, jpeg and OpenEXR stills, an OpenEXR sequence (101-103, 4 digits), a png sequence, an mp4, a WAV, and an 8 x 8 RGBA png written with the RGB png prototype | every item found, names, sizes, durations, rates; renders identical to EffectCraft for png, OpenEXR, both sequences and the 8 x 8 png (21 points), jpeg and mp4 11-12 levels apart in both (round 1: the template's sRGB working space; re-exported with the project settings, R37, within one level); the timed layers ended at their source (R31) | aliases filled with the machine and volume name, `sspc` / `opti` / colour data of the stale png refreshed from the file (R30), an empty Mask Parade added to the WAV layer (as in 351) |
 | `effects\e1` | Tint on a red solid, Gradient Ramp on a 640 x 360 solid, a keyed Exposure and a second (renamed) Tint on a grey solid | every value and key; the renamed Tint showed the effect's name (R26; `e1b`, written after the fix, shows `Tint 2`); renders: Ramp and Exposure within 1 level of EffectCraft, Tint 10 levels apart from EffectCraft's Rec. 709 luminance (AE uses Rec. 601, `fix-tint-luma`) | value records copied into `EfdG`, `pard` value slots refreshed, `fnam` reset |
 | `precomp\p1` | 5 compositions, a 30 fps 640 x 360 precomposition with anchor and position, one composition used twice, a chain C2 > B > A, Scale keys on a precomposition layer | everything; renders identical to EffectCraft at 39 points (`READBACK.md` there) | C2's `idpc` count rewritten and its two `idpi` swapped (R23; p1b with the count fixed: only the swap), otherwise only noise |
+
+### What After Effects needs: the read-backs behind the code-built chunks (2026-10-29)
+
+Each variant is an export with one change: a chunk left out, or bytes zeroed. After Effects 2026
+opened it, and its own project export (JSON) was compared with the unchanged file; "same" means
+no difference there (renders where noted). The exporter writes only what the "needed" rows name,
+as constants in `export/base.rs`, `export/footage.rs`, `export/synth.rs` and `export/textproto.rs`.
+
+| Chunk | Can be left out or zero (same) | Needed (what After Effects does without it) |
+|---|---|---|
+| top level | `svap`, `gpuG`, `sfnm`, `pcms`, `pdvc`, `ExEn`, `wsns`, `nnhd` absent; `fdta`, `Rhed`, `Rout`, `ppSn`, `prda` zero; `head` 16..19 and the `nhed` / `nnhd` save noise zero; `PTRE`, `CIF*` absent; `AFsi` / `ARsi` zero | `adfr`, `qtlg`, `mrid`, `acer`, `CPPl`, `fcid`, `oacc` ("missing data"); `head` 0..11 ("created with an older version"); the `nhed` rates ("zero denominator"); `LRdr` and `LSIf` ("file is damaged"), with an `AFsi` / `ARsi` body of 1 872 bytes ("missing data") |
+| composition | `idpc` absent; `cdrp` / `comr` zero; the view layers' property trees empty; `ldta` beyond the decoded fields zero | `dats` (**After Effects crashes**); `cdrp` / `comr` present; `cdta` 0..3, 176, 184, 196, 200 (zeroed: crash); the eleven view layers ("invalid number of ... cameras") |
+| items | `Ewst`, `Gide` absent; `idta` beyond 0..24 and 58 zero; `pgui` zero; `mnfo` absent | `idta` 23 (renders differ); the seven f-records after every item and layer ("missing data"); `CLRS` and `ftgi` ("missing data"); a solid's `sspc` constants (`SOLID_SSPC`, "missing data") |
+| footage | `opti` beyond its first 12 bytes zero; `sspc` 64..66, 69, 79, 97..101, 112..115, 159, 199..201, 212 zero; our own sRGB profile (or `{}`) in `CLRS` | the `opti` header and size, the `sspc` constants per kind (`kind_item`) |
+| property records | `tdb4` beyond the decoded bytes zero, except: | `tdb4` 8..11, the class word (keys are dropped without it); 16..55, 0.0001 and four 1.0 (a roving key reads back at time 0 without them, `re-keyframes`) |
+| text document | `/98`, `/1/2`, `/1/3`, `/1/4`, `/1/0/9`, the kinsoku sets `/0/4`; the sheets' and fonts' entries down to their names; the run dictionaries down to the keys the exporter writes; the layout down to `/0` and `/2` | `/0/5`, `/0/6` and `/0/8` (the layer is skipped; `/0/8` holds the box frame: empty, a box text turns into point text); `/1/0` (skipped) and all of `/1/0/0` (After Effects crashed); in every run the other sheet's key (`/6` in a paragraph run, `/5` in a style run; skipped); `/1/5` (without it After Effects rewrites the document on open) |
+
+After all chunks were built in code, 20 cases (the lab cases e1, e2, m1, x3, y3, o1, o2, g3, t4, t7,
+t8, f1-f3 and six corpus re-exports) were read back against the template-based export: no
+difference.
 
 ## How fidelity is checked in this repository
 
