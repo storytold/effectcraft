@@ -4,7 +4,9 @@
 //! so the H.264 encoder writes one slice per frame on any number of cores. The hashes are those of the files written before
 //! frames rendered while the previous batch encoded, before transparent source tiles were
 //! skipped and before blended pixels were quantised as they were drawn: those changes must not
-//! move a single byte.
+//! move a single byte. The comp's motion goes through the platform's libm (`sin`, `cos`), so the
+//! pins hold on x86-64 Linux, where they were written; that the bytes don't depend on the batch
+//! size holds everywhere.
 
 use effectcraft_color::{BlendMode, Label};
 use effectcraft_export::render_queue::{OutputFormat, OutputModule, RenderSettings, TimeSpan};
@@ -92,12 +94,22 @@ fn export_bytes(format: OutputFormat, name: &str) -> Vec<u8> {
 }
 
 #[test]
+fn movie_bytes_do_not_depend_on_the_batch_size() {
+    for (format, name) in [(OutputFormat::H264, "/out/batches.mp4"), (OutputFormat::ProRes, "/out/batches.mov")] {
+        let on = |threads| rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap().install(|| export_bytes(format, name));
+        assert!(on(2) == on(7), "{name}");
+    }
+}
+
+#[test]
+#[cfg_attr(not(all(target_os = "linux", target_arch = "x86_64")), ignore = "pinned with x86-64 Linux's libm")]
 fn h264_movie_bytes_are_pinned() {
     let data = export_bytes(OutputFormat::H264, "/out/pinned.mp4");
     assert_eq!((data.len(), fnv1a(&data)), (104_161, 10_466_446_817_305_548_344), "H.264 MP4");
 }
 
 #[test]
+#[cfg_attr(not(all(target_os = "linux", target_arch = "x86_64")), ignore = "pinned with x86-64 Linux's libm")]
 fn prores_movie_bytes_are_pinned() {
     let data = export_bytes(OutputFormat::ProRes, "/out/pinned.mov");
     assert_eq!((data.len(), fnv1a(&data)), (270_094, 8_038_709_743_204_075_800), "ProRes MOV");

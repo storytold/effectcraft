@@ -107,6 +107,12 @@ impl Beside {
         static SHARED: std::sync::OnceLock<Beside> = std::sync::OnceLock::new();
         SHARED.get_or_init(Beside::new)
     }
+
+    /// No encode threads: encoding and rendering take turns.
+    pub fn taking_turns() -> &'static Beside {
+        static NONE: Beside = Beside(None);
+        &NONE
+    }
 }
 
 /// A job being exported: the job, the project with the Render Settings overrides applied, the
@@ -234,24 +240,35 @@ impl<'a> Cx<'a> {
 
     /// [`Cx::frames`] for `ks` while `encode` runs beside them on `beside`'s threads, so the
     /// render threads don't wait for the (largely sequential) encoder of the previous batch.
-    /// With deferred readbacks, or where no encode thread could be started, `encode` runs first.
+    /// Once `encode` fails, frames not yet started are skipped. With deferred readbacks, or where
+    /// no encode thread could be started, `encode` runs first.
     pub async fn frames_beside<T: Send, A: Send>(
         &self,
         beside: &Beside,
         comp: &Comp,
         ks: Vec<u64>,
         f: impl Fn(u64, Image) -> T + Sync + Send,
-        encode: impl FnOnce() -> A + Send,
+        encode: impl FnOnce() -> crate::Result<A> + Send,
     ) -> crate::Result<(A, Vec<T>)> {
+        use std::sync::atomic::{AtomicBool, Ordering};
         match &beside.0 {
             Some(pool) if !self.deferred() => {
+                let stop = AtomicBool::new(false);
                 let mut done = None;
                 let frames = pool.in_place_scope(|s| {
-                    s.spawn(|_| done = Some(std::panic::catch_unwind(std::panic::AssertUnwindSafe(encode))));
-                    effectcraft_render::passes::block_on(self.frames(comp, ks, f))
+                    s.spawn(|_| {
+                        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(encode));
+                        if !matches!(r, Ok(Ok(_))) {
+                            stop.store(true, Ordering::Relaxed);
+                        }
+                        done = Some(r);
+                    });
+                    let gpu_live = || self.job.accel.is_none_or(|a| a.available());
+                    let render = |k| (!stop.load(Ordering::Relaxed)).then(|| self.frame(comp, k));
+                    map_frames_while(ks, self.gpu_cap(), gpu_live, render, |k, img| img.map(|img| f(k, img)))
                 });
                 match done {
-                    Some(Ok(a)) => Ok((a, frames)),
+                    Some(Ok(a)) => Ok((a?, frames.into_iter().flatten().collect())),
                     Some(Err(panic)) => {
                         let why = panic.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| panic.downcast_ref::<String>().cloned()).unwrap_or_default();
                         Err(crate::ExportError::Encode(format!("the encoder stopped unexpectedly: {why}")))
@@ -260,7 +277,7 @@ impl<'a> Cx<'a> {
                 }
             }
             _ => {
-                let a = encode();
+                let a = encode()?;
                 Ok((a, self.frames(comp, ks, f).await))
             }
         }
@@ -785,16 +802,41 @@ mod tests {
         use effectcraft_render::passes::block_on;
         let want = block_on(cx.frames(comp, (0..6).collect(), |k, img| (k, img.width, img.height)));
         // On threads of their own, and taking turns (no threads): the same frames, in order.
-        for beside in [Beside::shared(), &Beside(None)] {
-            let (a, frames) = block_on(cx.frames_beside(beside, comp, (0..6).collect(), |k, img| (k, img.width, img.height), || 7)).unwrap();
+        for beside in [Beside::shared(), Beside::taking_turns()] {
+            let (a, frames) = block_on(cx.frames_beside(beside, comp, (0..6).collect(), |k, img| (k, img.width, img.height), || Ok(7))).unwrap();
             assert_eq!((a, &frames), (7, &want));
         }
         // A panicking encoder fails the export instead of taking the render thread down.
-        let r = block_on(cx.frames_beside(Beside::shared(), comp, vec![0], |k, _| k, || -> u32 { panic!("encoder bug") }));
+        let r = block_on(cx.frames_beside(Beside::shared(), comp, vec![0], |k, _| k, || -> crate::Result<u32> { panic!("encoder bug") }));
         match r {
             Err(crate::ExportError::Encode(e)) => assert!(e.contains("encoder bug"), "{e}"),
             other => panic!("{:?}", other.map(|(a, f)| (a, f.len()))),
         }
+        // A failing encoder stops the render: frames not yet started are skipped.
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let (failed, rendered) = (AtomicBool::new(false), AtomicUsize::new(0));
+        let f = |k, _| {
+            while !failed.load(Ordering::Acquire) {
+                std::hint::spin_loop();
+            }
+            rendered.fetch_add(1, Ordering::Relaxed);
+            k
+        };
+        let encode = || -> crate::Result<u32> {
+            failed.store(true, Ordering::Release);
+            Err(crate::ExportError::Encode("disk full".into()))
+        };
+        let r = block_on(cx.frames_beside(Beside::shared(), comp, (0..1000).collect(), f, encode));
+        assert!(matches!(r, Err(crate::ExportError::Encode(ref e)) if e == "disk full"));
+        assert!(rendered.load(Ordering::Relaxed) < 500, "{} frames rendered", rendered.load(Ordering::Relaxed));
+        let r = block_on(cx.frames_beside(
+            Beside::taking_turns(),
+            comp,
+            (0..1000).collect(),
+            |k, _| k,
+            || -> crate::Result<u32> { Err(crate::ExportError::Cancelled) },
+        ));
+        assert!(matches!(r, Err(crate::ExportError::Cancelled)));
     }
 
     #[test]

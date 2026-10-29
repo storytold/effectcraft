@@ -305,6 +305,10 @@ pub(crate) fn pcm_bytes(buf: &[f32], fmt: AudioFormat, big_endian: bool) -> Vec<
 
 type Writer<'f, 's> = Mp4Writer<&'f mut crate::out::Out<'s>>;
 
+/// Pixels of one batch that may wait for the encoder while the next batch renders. Larger
+/// batches (16 frames of 4K RGBA) take turns with the encoder, holding one batch at a time.
+const BESIDE_BYTES: usize = 256 << 20;
+
 pub(crate) async fn movie(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut State<'_>) -> Result<Report> {
     let rate = job.settings.rate(comp);
     let fmt = job.output.format;
@@ -331,7 +335,8 @@ pub(crate) async fn movie(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut St
         Pixels::Yuv420(planes) => venc.encode_yuv420(planes, index),
     };
 
-    let beside = crate::pipeline::Beside::shared();
+    let frame_bytes = w as usize * h as usize * if yuv { 3 } else { 8 } / 2;
+    let beside = if batch as usize * frame_bytes <= BESIDE_BYTES { crate::pipeline::Beside::shared() } else { crate::pipeline::Beside::taking_turns() };
     let total = st.total;
 
     // Encode the first batch before creating tracks: encoders finalise their config on frame 1.
@@ -342,14 +347,12 @@ pub(crate) async fn movie(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut St
     let (pending, mut ready) = job
         .frames_beside(beside, comp, (first_end..next_end).collect(), render, || -> Result<Vec<Packet>> {
             let mut pending = Vec::new();
-            for (k, px) in first.iter().enumerate() {
-                pending.extend(encode(&mut venc, px, k as u64)?);
+            for (k, px) in first.into_iter().enumerate() {
+                pending.extend(encode(&mut venc, &px, k as u64)?);
             }
             Ok(pending)
         })
         .await?;
-    let pending = pending?;
-    drop(first);
     st.advance(first_end)?;
 
     let path = job.place(job.path, 1);
@@ -434,16 +437,15 @@ pub(crate) async fn movie(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut St
         let end = (i + batch).min(total);
         let next_end = (end + batch).min(total);
         let frames = std::mem::take(&mut ready);
-        let (done, next) = job
+        let ((), next) = job
             .frames_beside(beside, comp, (end..next_end).collect(), render, || -> Result<()> {
-                for (k, px) in frames.iter().enumerate() {
-                    let ps = encode(&mut venc, px, i + k as u64)?;
+                for (k, px) in frames.into_iter().enumerate() {
+                    let ps = encode(&mut venc, &px, i + k as u64)?;
                     write_video(&mut mux, ps)?;
                 }
                 write_audio_until(&mut mux, frame_end_time(end), &mut cursor)
             })
             .await?;
-        done?;
         ready = next;
         st.advance(end - i)?;
         i = end;
