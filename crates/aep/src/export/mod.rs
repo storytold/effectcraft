@@ -33,6 +33,7 @@ mod plan;
 mod report;
 mod settings;
 mod shapes;
+mod skeleton;
 mod style_defs;
 mod styles;
 mod synth;

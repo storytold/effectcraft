@@ -118,7 +118,7 @@ impl Template {
         let kids = comp.children();
         let first = kids.iter().position(|c| c.is_list(b"Layr")).ok_or_else(|| tpl("template without a layer"))?;
         let end = kids.iter().position(|c| c.is_list(b"DLay")).ok_or_else(|| tpl("template without view layers"))?;
-        let layer_block: Vec<Chunk<'static>> = kids.get(first..end).ok_or_else(|| tpl("layer block"))?.to_vec();
+        let layer_block = crate::export::skeleton::av_layer();
         let mut comp_shell = comp.clone();
         crate::export::tree::kids_mut(&mut comp_shell)?.drain(first..end);
 

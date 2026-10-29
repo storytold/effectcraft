@@ -63,7 +63,9 @@ fn the_remap_fixtures_are_written_as_after_effects_wrote_them() {
         assert_eq!(r.report.exported.time_remaps, 1, "{name}");
         let (a, b) = (enabled_remaps(&bytes), enabled_remaps(&r.bytes));
         assert_eq!(a.len(), 1, "{name}");
-        assert_eq!(a, b, "{name}: the remap record differs from After Effects'");
+        // In the bytes the exporter writes (`decoded`).
+        let d = |v: &[effectcraft_aep::Chunk<'static>]| v.iter().map(crate::export::helpers::decoded).collect::<Vec<_>>();
+        assert_eq!(d(&a), d(&b), "{name}: the remap record differs from After Effects'");
         let p2 = reimport(&r.bytes);
         assert_eq!(remap_of(&p1), remap_of(&p2), "{name}");
     }

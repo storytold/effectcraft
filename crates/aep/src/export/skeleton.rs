@@ -1,0 +1,74 @@
+//! The layer, item and project skeletons the exporter fills, built in code (aep-format.md 3.1-3.4):
+//! only the property groups the exporter writes into, the default records it edits, and the small
+//! fixed records each layer carries. After Effects adds the groups that are left out (read-back
+//! e1-sparse).
+
+use crate::Chunk;
+use crate::export::synth::{KeyTemplate, NO_NAME, RecSpec, class, key_list, tdbs, tdmn, tdsn};
+
+/// A group: its match name and a `tdgp` with the state `state` (`tdsb`), no user name, `kids` and
+/// the closing `ADBE Group End`.
+pub(crate) fn group(name: &str, state: u32, kids: Vec<Chunk<'static>>) -> [Chunk<'static>; 2] {
+    let mut body = vec![Chunk::data(*b"tdsb", state.to_be_bytes().to_vec()), tdsn(NO_NAME)];
+    body.extend(kids);
+    body.push(tdmn("ADBE Group End"));
+    [tdmn(name), Chunk::list(*b"tdgp", body)]
+}
+
+/// The seven records that follow a layer or item block (`fvdv` 3, the others zero; the same in
+/// every sample, meaning not decoded).
+pub(crate) fn f_records() -> Vec<Chunk<'static>> {
+    vec![
+        Chunk::data(*b"fvdv", 3u32.to_be_bytes().to_vec()),
+        Chunk::data(*b"fiop", vec![0]),
+        Chunk::data(*b"ftts", vec![0; 4]),
+        Chunk::data(*b"foac", vec![0]),
+        Chunk::data(*b"fiac", vec![0]),
+        Chunk::data(*b"fipc", vec![0; 2]),
+        Chunk::data(*b"fifl", vec![0; 4]),
+    ]
+}
+
+/// The layer styles in the order After Effects keeps their switch groups (950).
+const STYLE_ORDER: [&str; 10] =
+    ["dropShadow", "innerShadow", "outerGlow", "innerGlow", "bevelEmboss", "chromeFX", "solidFill", "gradientFill", "patternFill", "frameFX"];
+
+/// The empty `ADBE Layer Styles` group (state 3), Blending Options with the advanced group, and
+/// the switch group of every style (state 2: not applied), for `styles::put_styles` to fill.
+pub(crate) fn layer_styles() -> [Chunk<'static>; 2] {
+    let mut kids: Vec<Chunk<'static>> = group("ADBE Blend Options Group", 3, group("ADBE Adv Blend Group", 1, Vec::new()).into()).into();
+    for s in STYLE_ORDER {
+        kids.extend(group(&format!("{s}/enabled"), 2, Vec::new()));
+    }
+    group("ADBE Layer Styles", 3, kids)
+}
+
+/// The inert Time Remapping record every layer has (`tdsb` 3, value 0, the maximum written per
+/// layer: aep-format.md 3.4).
+fn time_remap() -> Chunk<'static> {
+    let spec = RecSpec { dims: 1, template: KeyTemplate::Plain, class: class::LAYER_SCALAR, limits: Some((0.0, 0.0)) };
+    let mut rec = tdbs(&spec, false, 25_600);
+    if let Some(state) = rec.children_mut().iter_mut().find(|c| c.is(b"tdsb")) {
+        *state = Chunk::data(*b"tdsb", 3u32.to_be_bytes().to_vec());
+    }
+    rec
+}
+
+/// The guides of a layer (`Gide`: `gdta` zero and an empty list).
+fn guides() -> Chunk<'static> {
+    Chunk::list(*b"Gide", vec![Chunk::data(*b"gdta", vec![0; 8]), key_list(16, 0, Vec::new())])
+}
+
+/// The block of an AV layer (solid, footage, precomposition): `Layr` (a zero `ldta` the exporter
+/// fills with the decoded fields, read-back t-zldta; the name; the property tree with Time
+/// Remapping, an empty Transform group and the layer styles), `Ewst` and the f-records.
+pub(crate) fn av_layer() -> Vec<Chunk<'static>> {
+    let mut root = vec![Chunk::data(*b"tdsb", 1u32.to_be_bytes().to_vec()), tdsn(""), tdmn("ADBE Time Remapping"), time_remap()];
+    root.extend(group("ADBE Transform Group", 1, Vec::new()));
+    root.extend(layer_styles());
+    root.push(tdmn("ADBE Group End"));
+    let layr = Chunk::list(*b"Layr", vec![Chunk::data(*b"ldta", vec![0; 164]), Chunk::data(*b"Utf8", Vec::new()), Chunk::list(*b"tdgp", root), guides()]);
+    let mut out = vec![layr, Chunk::list(*b"Ewst", Vec::new())];
+    out.extend(f_records());
+    out
+}
