@@ -524,20 +524,27 @@ fn style_wants(style: &str) -> (u16, bool) {
 /// Resolve a family + style name. Family matching is case-insensitive; a style that the family
 /// lacks picks the nearest weight and synthesises bold (≥ 600 requested, ≤ 500 found) or italic.
 pub fn resolve(family: &str, style: &str) -> Resolved {
-    if let Some(r) = resolve_in(family, style).or_else(|| resolve_by_name(family)) {
+    if let Some(r) = resolve_in(family, style).or_else(|| resolve_by_name(&all_faces(), family)) {
         return r;
     }
     if !system_scanned() && !family.is_empty() && !family.eq_ignore_ascii_case(DEFAULT_FAMILY) {
         scan_system();
-        if let Some(r) = resolve_in(family, style).or_else(|| resolve_by_name(family)) {
-            return r;
-        }
     }
-    if let Some(r) = resolve_alias(family, style) {
+    resolve_available(&all_faces(), family, style)
+}
+
+/// Resolve against a fixed font list after discovery, including aliases and the bundled fallback.
+/// Keeping discovery outside this step also lets tests model installed and missing families.
+fn resolve_available(faces: &[Arc<Face>], family: &str, style: &str) -> Resolved {
+    if let Some(r) = resolve_in_faces(faces, family, style).or_else(|| resolve_by_name(faces, family)) {
+        return r;
+    }
+    if let Some(r) = resolve_alias(faces, family, style) {
         return r;
     }
     // Inter is bundled; face 0 (the first bundled face) is the last resort.
-    let mut r = resolve_in(DEFAULT_FAMILY, style).unwrap_or(Resolved { face: 0, synth_bold: false, synth_italic: false, missing: true, instance: None });
+    let mut r =
+        resolve_in_faces(faces, DEFAULT_FAMILY, style).unwrap_or(Resolved { face: 0, synth_bold: false, synth_italic: false, missing: true, instance: None });
     r.missing = !family.is_empty() && !family.eq_ignore_ascii_case(DEFAULT_FAMILY);
     r
 }
@@ -558,14 +565,18 @@ const METRIC_ALIASES: &[(&str, &[&str])] = &[
 
 /// An installed metric-compatible substitute for a missing family. The result stays `missing`,
 /// so Find Missing Fonts still lists the requested name.
-fn resolve_alias(family: &str, style: &str) -> Option<Resolved> {
+fn resolve_alias(faces: &[Arc<Face>], family: &str, style: &str) -> Option<Resolved> {
     let family = family.trim();
     let (_, subs) = METRIC_ALIASES.iter().find(|(name, _)| name.eq_ignore_ascii_case(family))?;
-    subs.iter().find_map(|s| resolve_in(s, style)).map(|r| Resolved { missing: true, ..r })
+    subs.iter().find_map(|s| resolve_in_faces(faces, s, style)).map(|r| Resolved { missing: true, ..r })
 }
 
 fn resolve_in(family: &str, style: &str) -> Option<Resolved> {
-    let faces = all_faces();
+    resolve_in_faces(&all_faces(), family, style)
+}
+
+/// Find the requested family and nearest style within a fixed font list.
+fn resolve_in_faces(faces: &[Arc<Face>], family: &str, style: &str) -> Option<Resolved> {
     let fam: Vec<&Arc<Face>> = faces.iter().filter(|f| f.info.family.eq_ignore_ascii_case(family)).collect();
     if fam.is_empty() {
         return None;
@@ -600,12 +611,11 @@ fn resolve_in(family: &str, style: &str) -> Option<Resolved> {
 
 /// A face whose full name or PostScript name is `name` (case-insensitive), the way After Effects
 /// scripts (`textDocument.font = "YuGothic-Bold"`) and `.aep`-derived data refer to fonts.
-fn resolve_by_name(name: &str) -> Option<Resolved> {
+fn resolve_by_name(faces: &[Arc<Face>], name: &str) -> Option<Resolved> {
     let name = name.trim();
     if name.is_empty() {
         return None;
     }
-    let faces = all_faces();
     let found = |f: &Arc<Face>, instance: Option<usize>| Resolved {
         face: f.id,
         synth_bold: false,

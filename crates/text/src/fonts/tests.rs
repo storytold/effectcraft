@@ -369,17 +369,41 @@ fn an_empty_glyph_does_not_cover_its_character() {
 /// substitute instead of Inter, and still reports itself missing (#1677).
 #[test]
 fn microsoft_families_resolve_to_metric_compatible_substitutes() {
-    add_font_data(test_font("Carlito"));
-    add_font_data(test_font("Caladea"));
-    let calibri = resolve("Calibri", "Regular");
-    assert_eq!(face(calibri.face).info.family, "Carlito");
-    assert!(calibri.missing, "the original name stays missing for Find Missing Fonts");
-    let cambria = resolve("Cambria", "Bold");
-    assert_eq!(face(cambria.face).info.family, "Caladea");
-    assert!(cambria.missing);
-    let unknown = resolve("No Such Family 1677", "Regular");
-    assert_eq!(face(unknown.face).info.family, DEFAULT_FAMILY);
+    // No system scan or shared database: another test may discover real Microsoft fonts.
+    let mut fonts = Db { faces: Vec::new(), scanned: true };
+    let mut add = |family: &str| {
+        let data = Arc::new(test_font(family));
+        for names in read_faces_bytes(&data) {
+            push(&mut fonts, info_from(names, FaceData::Shared(data.clone()), "test"));
+        }
+    };
+    for family in [DEFAULT_FAMILY, "Carlito", "Caladea"] {
+        add(family);
+    }
+    // Without a substitute, a missing Microsoft family still uses the bundled default.
+    let missing = resolve_available(&fonts.faces[..1], "Calibri", "Regular");
+    assert_eq!(fonts.faces[missing.face].info.family, DEFAULT_FAMILY);
+    assert!(missing.missing);
+    for (requested, substitute, style, bold) in [("Calibri", "Carlito", "Regular", false), ("Cambria", "Caladea", "Bold", true)] {
+        let r = resolve_available(&fonts.faces, requested, style);
+        assert_eq!(fonts.faces[r.face].info.family, substitute);
+        assert!(r.missing, "the original name stays missing for Find Missing Fonts");
+        assert_eq!(r.synth_bold, bold);
+    }
+    let unknown = resolve_available(&fonts.faces, "No Such Family 1677", "Regular");
+    assert_eq!(fonts.faces[unknown.face].info.family, DEFAULT_FAMILY);
     assert!(unknown.missing);
+
+    // An installed original must win over its substitute and must not be marked missing.
+    for family in ["Calibri", "Cambria"] {
+        let data = Arc::new(test_font(family));
+        for names in read_faces_bytes(&data) {
+            push(&mut fonts, info_from(names, FaceData::Shared(data.clone()), "test"));
+        }
+        let r = resolve_available(&fonts.faces, family, "Regular");
+        assert_eq!(fonts.faces[r.face].info.family, family);
+        assert!(!r.missing);
+    }
 }
 
 #[test]
