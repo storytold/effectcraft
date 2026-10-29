@@ -520,3 +520,16 @@ fn hostile_text_animators_never_panic() {
     assert!(r.report.count(LossCategory::TextLayers) >= 300, "{:?}", r.report.losses);
     let _ = reimport(&r.bytes);
 }
+
+/// Two fonts whose names differ only in bytes a lossy UTF-8 conversion turns into the same text
+/// (U+4E80 and U+4E81 both read as `N` + U+FFFD) get entries of their own (review finding).
+#[test]
+fn non_ascii_font_names_keep_their_own_font_entries() {
+    let mut d = TextDoc::plain("ab");
+    d.set_runs(vec![StyleRun { len: 1, style: style("\u{4e80}", 40.0) }, StyleRun { len: 1, style: style("\u{4e81}", 40.0) }]);
+    let (p, _) = text_project(vec![d]);
+    let r = export_all(&p);
+    let docs = documents(&r.bytes);
+    let (_, doc) = docs.first().expect("document");
+    assert!(doc.fonts.iter().any(|f| f == "\u{4e80}") && doc.fonts.iter().any(|f| f == "\u{4e81}"), "{:?}", doc.fonts);
+}

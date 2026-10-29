@@ -380,9 +380,11 @@ pub(crate) fn build_doc(proto: &TNode, tp: &TextPlan) -> Option<TNode> {
         let list = doc.path_mut("0/1/0")?;
         let TNode::Array(entries) = list else { return None };
         let template = entries.first()?.clone();
-        let name_of = |e: &TNode| -> Option<String> {
+        // Font names compare as the stored atoms (UTF-16 bytes): a lossy text conversion would
+        // make two non-ASCII names equal.
+        let name_of = |e: &TNode| -> Option<Vec<u8>> {
             match e.path("0/0/0")? {
-                TNode::Atom(a) => Some(String::from_utf8_lossy(a).to_string()),
+                TNode::Atom(a) => Some(a.clone()),
                 _ => None,
             }
         };
@@ -390,11 +392,8 @@ pub(crate) fn build_doc(proto: &TNode, tp: &TextPlan) -> Option<TNode> {
             if font_index.iter().any(|(f, _)| f == &s.font) {
                 continue;
             }
-            let atom = match string(&s.font) {
-                TNode::Atom(a) => String::from_utf8_lossy(&a).to_string(),
-                _ => continue,
-            };
-            let at = match entries.iter().position(|e| name_of(e).as_deref() == Some(atom.as_str())) {
+            let TNode::Atom(atom) = string(&s.font) else { continue };
+            let at = match entries.iter().position(|e| name_of(e).as_ref() == Some(&atom)) {
                 Some(i) => i,
                 None => {
                     let mut e = template.clone();

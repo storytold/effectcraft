@@ -46,7 +46,11 @@ Public specifications used for parts the format embeds:
 
 - ICC.1:2010: the profile description of a working-space profile (a v2 `desc` or a v4 `mluc`
   tag), from which the working space's name is read (`container/settings.rs`).
-- RFC 4648 (base64): the profile data in the project's colour settings JSON.
+- RFC 4648 (base64): the profile data in the project's colour settings JSON (read, and written
+  by the exporter).
+- The exporter's own colour profiles (`export/icc.rs`): ICC.1:2010 version 4.3 display profiles
+  with ITU-R BT.709 primaries, D65 white, a D50 PCS and a Bradford adaptation, the IEC 61966-2-1
+  sRGB curve or a 2.4 power curve; the profile ID is the MD5 of RFC 1321.
 
 ## Clean room
 
