@@ -1,4 +1,4 @@
-//! The camera, light and shape skeletons as tables of [`Node`]s: match names, states, default
+//! The camera, light, shape and text animator skeletons as tables of [`Node`]s: match names, states, default
 //! names and the decoded fields of each record (`tree_spec`). The rows were listed from our own
 //! cases (the case numbers in each doc comment) through the decoded fields only.
 
@@ -231,4 +231,58 @@ pub(crate) static SHAPE_RECORDS: &[Node] = &[
     R("ADBE Vector Stroke Line Join", Rec { state: 1, label: "-_0_/-", dims: 1, template: 0, class: 0x00020000, byte5: 0x01, header: &[], cdat_len: 40, cdat: &[2.0], key_size: 0, limits: None, tdpi: None }),
     R("ADBE Vector Stroke Miter Limit", Rec { state: 3, label: "-_0_/-", dims: 1, template: 0, class: 0xffffffff, byte5: 0x01, header: &[], cdat_len: 40, cdat: &[4.0], key_size: 0, limits: Some((0.0, 100.0)), tdpi: None }),
     R("ADBE Vector Position", Rec { state: 1, label: "-_0_/-", dims: 2, template: 3, class: 0xffffffff, byte5: 0x0f, header: &[], cdat_len: 48, cdat: &[50.0, 50.0], key_size: 0, limits: None, tdpi: None }),
+];
+
+/// The empty text animator group of a text layer (579).
+pub(crate) static TEXT_ANIMATORS: &[Node] = &[
+    G("ADBE Text Animators", 1, "-_0_/-", &[
+    ]),
+];
+
+/// One text animator with a range selector and an empty property group (579, 580).
+pub(crate) static TEXT_ANIMATOR: &[Node] = &[
+    G("ADBE Text Animator", 1, "Animator 1", &[
+        G("ADBE Text Selectors", 1, "-_0_/-", &[
+            G("ADBE Text Selector", 1, "Range Selector 1", &[
+                G("ADBE Text Range Advanced", 1, "-_0_/-", &[
+                ]),
+            ]),
+        ]),
+        G("ADBE Text Animator Properties", 1, "-_0_/-", &[
+        ]),
+    ]),
+];
+
+/// The text animator property records (580-592, 728).
+pub(crate) static TEXT_ANIMATOR_RECORDS: &[Node] = &[
+    R("ADBE Text Position 3D", Rec { state: 1, label: "-_0_/-", dims: 3, template: 3, class: 0xffffffff, byte5: 0x0f, header: &[], cdat_len: 72, cdat: &[0.0, -50.0], key_size: 0, limits: None, tdpi: None }),
+    R("ADBE Text Anchor Point 3D", Rec { state: 1, label: "-_0_/-", dims: 3, template: 3, class: 0xffffffff, byte5: 0x0f, header: &[], cdat_len: 72, cdat: &[3.0, 4.0], key_size: 0, limits: None, tdpi: None }),
+    R("ADBE Text Scale 3D", Rec { state: 1, label: "-_0_/-", dims: 3, template: 0, class: 0x0002ffff, byte5: 0x01, header: &[], cdat_len: 120, cdat: &[150.0, 120.0, 100.0], key_size: 0, limits: Some((-32000.0, 32000.0)), tdpi: None }),
+    R("ADBE Text Skew", Rec { state: 1, label: "-_0_/-", dims: 1, template: 0, class: 0xffffffff, byte5: 0x01, header: &[], cdat_len: 40, cdat: &[10.0], key_size: 0, limits: Some((-70.0, 70.0)), tdpi: None }),
+    R("ADBE Text Skew Axis", Rec { state: 1, label: "-_0_/-", dims: 1, template: 0, class: 0x0002ffff, byte5: 0x01, header: &[], cdat_len: 40, cdat: &[20.0], key_size: 0, limits: None, tdpi: None }),
+    R("ADBE Text Rotation", Rec { state: 1, label: "-_0_/-", dims: 1, template: 0, class: 0x0002ffff, byte5: 0x01, header: &[], cdat_len: 40, cdat: &[45.0], key_size: 0, limits: None, tdpi: None }),
+    R("ADBE Text Opacity", Rec { state: 1, label: "-_0_/-", dims: 1, template: 0, class: 0xffffffff, byte5: 0x01, header: &[], cdat_len: 40, cdat: &[37.0], key_size: 0, limits: Some((0.0, 100.0)), tdpi: None }),
+    R("ADBE Text Fill Color", Rec { state: 1, label: "-_0_/-", dims: 4, template: 0, class: 0x0002ffff, byte5: 0x07, header: &[(79, 1)], cdat_len: 96, cdat: &[255.0, 0.0, 255.0], key_size: 0, limits: None, tdpi: None }),
+    R("ADBE Text Stroke Color", Rec { state: 1, label: "-_0_/-", dims: 4, template: 0, class: 0x0002ffff, byte5: 0x07, header: &[(79, 1)], cdat_len: 96, cdat: &[255.0, 0.0, 0.0, 255.0], key_size: 0, limits: None, tdpi: None }),
+    R("ADBE Text Stroke Width", Rec { state: 1, label: "-_0_/-", dims: 1, template: 0, class: 0xffffffff, byte5: 0x01, header: &[], cdat_len: 40, cdat: &[3.0], key_size: 0, limits: Some((-1000.0, 1000.0)), tdpi: None }),
+    R("ADBE Text Tracking Amount", Rec { state: 1, label: "-_0_/-", dims: 1, template: 0, class: 0xffffffff, byte5: 0x01, header: &[], cdat_len: 40, cdat: &[20.0], key_size: 0, limits: Some((-32000.0, 32000.0)), tdpi: None }),
+    R("ADBE Text Line Spacing", Rec { state: 1, label: "-_0_/-", dims: 2, template: 0, class: 0x0002ffff, byte5: 0x01, header: &[], cdat_len: 80, cdat: &[10.0, 20.0], key_size: 0, limits: Some((-32000.0, 32000.0)), tdpi: None }),
+    R("ADBE Text Blur", Rec { state: 1, label: "-_0_/-", dims: 2, template: 0, class: 0x0002ffff, byte5: 0x01, header: &[], cdat_len: 80, cdat: &[5.0, 6.0], key_size: 0, limits: Some((0.0, 10000.0)), tdpi: None }),
+    R("ADBE Text Percent Start", Rec { state: 1, label: "-_0_/-", dims: 1, template: 0, class: 0xffffffff, byte5: 0x01, header: &[], cdat_len: 40, cdat: &[25.0], key_size: 0, limits: Some((0.0, 100.0)), tdpi: None }),
+    R("ADBE Text Percent End", Rec { state: 1, label: "-_0_/-", dims: 1, template: 0, class: 0xffffffff, byte5: 0x01, header: &[], cdat_len: 40, cdat: &[75.0], key_size: 0, limits: Some((0.0, 100.0)), tdpi: None }),
+    R("ADBE Text Percent Offset", Rec { state: 1, label: "-_0_/-", dims: 1, template: 0, class: 0xffffffff, byte5: 0x01, header: &[], cdat_len: 40, cdat: &[10.0], key_size: 0, limits: Some((-100.0, 100.0)), tdpi: None }),
+    R("ADBE Text Range Units", Rec { state: 1, label: "-_0_/-", dims: 1, template: 0, class: 0x00020000, byte5: 0x01, header: &[], cdat_len: 40, cdat: &[2.0], key_size: 0, limits: None, tdpi: None }),
+    R("ADBE Text Index Start", Rec { state: 1, label: "-_0_/-", dims: 1, template: 0, class: 0xffffffff, byte5: 0x01, header: &[], cdat_len: 40, cdat: &[], key_size: 0, limits: Some((0.0, 32000.0)), tdpi: None }),
+    R("ADBE Text Index End", Rec { state: 1, label: "-_0_/-", dims: 1, template: 0, class: 0xffffffff, byte5: 0x01, header: &[], cdat_len: 40, cdat: &[4.0], key_size: 0, limits: Some((0.0, 32000.0)), tdpi: None }),
+    R("ADBE Text Index Offset", Rec { state: 1, label: "-_0_/-", dims: 1, template: 0, class: 0xffffffff, byte5: 0x01, header: &[], cdat_len: 40, cdat: &[], key_size: 0, limits: Some((-32000.0, 32000.0)), tdpi: None }),
+    R("ADBE Text Range Type2", Rec { state: 1, label: "-_0_/-", dims: 1, template: 0, class: 0x00020000, byte5: 0x01, header: &[], cdat_len: 40, cdat: &[3.0], key_size: 0, limits: None, tdpi: None }),
+    R("ADBE Text Selector Mode", Rec { state: 1, label: "-_0_/-", dims: 1, template: 0, class: 0x00020004, byte5: 0x01, header: &[], cdat_len: 40, cdat: &[2.0], key_size: 0, limits: None, tdpi: None }),
+    R("ADBE Text Selector Max Amount", Rec { state: 1, label: "-_0_/-", dims: 1, template: 0, class: 0xffffffff, byte5: 0x01, header: &[], cdat_len: 40, cdat: &[50.0], key_size: 0, limits: Some((-100.0, 100.0)), tdpi: None }),
+    R("ADBE Text Range Shape", Rec { state: 1, label: "-_0_/-", dims: 1, template: 0, class: 0x00020000, byte5: 0x01, header: &[], cdat_len: 40, cdat: &[2.0], key_size: 0, limits: None, tdpi: None }),
+    R("ADBE Text Selector Smoothness", Rec { state: 1, label: "-_0_/-", dims: 1, template: 0, class: 0xffffffff, byte5: 0x01, header: &[], cdat_len: 40, cdat: &[50.0], key_size: 0, limits: Some((0.0, 100.0)), tdpi: None }),
+    R("ADBE Text Levels Max Ease", Rec { state: 1, label: "-_0_/-", dims: 1, template: 0, class: 0xffffffff, byte5: 0x01, header: &[], cdat_len: 40, cdat: &[30.0], key_size: 0, limits: Some((-100.0, 100.0)), tdpi: None }),
+    R("ADBE Text Levels Min Ease", Rec { state: 1, label: "-_0_/-", dims: 1, template: 0, class: 0xffffffff, byte5: 0x01, header: &[], cdat_len: 40, cdat: &[40.0], key_size: 0, limits: Some((-100.0, 100.0)), tdpi: None }),
+    R("ADBE Text Randomize Order", Rec { state: 1, label: "-_0_/-", dims: 1, template: 0, class: 0xffff0004, byte5: 0x01, header: &[], cdat_len: 40, cdat: &[1.0], key_size: 0, limits: None, tdpi: None }),
+    R("ADBE Text Random Seed", Rec { state: 1, label: "-_0_/-", dims: 1, template: 0, class: 0xffffffff, byte5: 0x01, header: &[], cdat_len: 40, cdat: &[7.0], key_size: 0, limits: Some((0.0, 10000.0)), tdpi: None }),
+    R("ADBE Text Character Offset", Rec { state: 1, label: "-_0_/-", dims: 1, template: 0, class: 0xffffffff, byte5: 0x01, header: &[], cdat_len: 40, cdat: &[3.0], key_size: 0, limits: Some((-65535.0, 65535.0)), tdpi: None }),
 ];

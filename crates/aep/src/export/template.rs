@@ -17,7 +17,7 @@ const MASKS: &[u8] = include_bytes!("../../template/masks.aep");
 #[cfg(test)]
 pub(crate) const EFFECTS: &[u8] = include_bytes!("../../template/effects.aep");
 const FOOTAGE: &[u8] = include_bytes!("../../template/footage.aep");
-const TEXT: &[u8] = include_bytes!("../../template/text.aep");
+pub(crate) const TEXT: &[u8] = include_bytes!("../../template/text.aep");
 pub(crate) const OBJECTS: &[u8] = include_bytes!("../../template/objects.aep");
 #[cfg(test)]
 pub(crate) const STYLES: &[u8] = include_bytes!("../../template/styles.aep");
@@ -138,18 +138,11 @@ impl Template {
         let tx_file = parse(TEXT).map_err(|_| tpl("the embedded text prototypes do not parse"))?.into_owned();
         let text_point = tx_file.list(b"txpt").ok_or_else(|| tpl("text prototype missing"))?.children().to_vec();
         let text_box = tx_file.list(b"txbx").ok_or_else(|| tpl("text prototype missing"))?.children().to_vec();
-        let tx_list =
-            |ty: &[u8; 4]| -> R<Vec<Chunk<'static>>> { Ok(tx_file.list(ty).ok_or_else(|| tpl("text animator prototype missing"))?.children().to_vec()) };
-        let anim_records = {
-            let mut out = Vec::new();
-            let mut it = tx_list(b"tarc")?.into_iter();
-            while let (Some(m), Some(node)) = (it.next(), it.next()) {
-                let name = m.bytes().map(|b| String::from_utf8_lossy(b.split(|x| *x == 0).next().unwrap_or_default()).to_string()).unwrap_or_default();
-                out.push((name, [m, node]));
-            }
-            out
+        let anims = crate::export::textanim::AnimProtos {
+            group: crate::export::tree_spec::build(crate::export::tree_defs::TEXT_ANIMATORS),
+            animator: crate::export::tree_spec::build(crate::export::tree_defs::TEXT_ANIMATOR),
+            records: crate::export::skeleton::pairs(crate::export::tree_defs::TEXT_ANIMATOR_RECORDS),
         };
-        let anims = crate::export::textanim::AnimProtos { group: tx_list(b"tanm")?, animator: tx_list(b"tani")?, records: anim_records };
         let obj_file = parse(OBJECTS).map_err(|_| tpl("the embedded object prototypes do not parse"))?.into_owned();
         let marker_group = obj_file.list(b"mrkp").ok_or_else(|| tpl("marker prototype missing"))?.children().to_vec();
         use crate::export::{skeleton, tree_defs};

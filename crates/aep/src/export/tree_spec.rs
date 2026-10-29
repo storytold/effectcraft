@@ -198,7 +198,11 @@ pub(crate) fn describe(kids: &[Chunk<'_>], depth: usize) -> String {
 
 #[cfg(test)]
 mod listing {
-    /// Prints the tables of the object prototypes (run with `--ignored --nocapture`).
+    fn show(ty: &[u8], kids: &[crate::Chunk<'_>]) {
+        println!("// {}\n{}", String::from_utf8_lossy(ty), super::describe(kids, 1));
+    }
+
+    /// Prints the tables of the object and text prototypes (run with `--ignored --nocapture`).
     #[test]
     #[ignore]
     fn print_object_trees() {
@@ -206,21 +210,14 @@ mod listing {
         for ty in [b"camb", b"spot", b"pont", b"shpb"] {
             let block = f.list(ty).unwrap();
             let layr = block.children().iter().find(|c| c.is_list(b"Layr")).unwrap();
-            let root = layr.child_list(b"tdgp").unwrap();
-            println!(
-                "// {}
-{}",
-                String::from_utf8_lossy(ty),
-                super::describe(root.children(), 1)
-            );
+            show(ty, layr.child_list(b"tdgp").unwrap().children());
         }
         for ty in [b"opts", b"shpi", b"shpr"] {
-            println!(
-                "// {}
-{}",
-                String::from_utf8_lossy(ty),
-                super::describe(f.list(ty).unwrap().children(), 1)
-            );
+            show(ty, f.list(ty).unwrap().children());
+        }
+        let t = crate::parse(crate::export::template::TEXT).unwrap();
+        for ty in [b"tanm", b"tani", b"tarc"] {
+            show(ty, t.list(ty).unwrap().children());
         }
     }
 }

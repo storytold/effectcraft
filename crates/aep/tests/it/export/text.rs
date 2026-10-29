@@ -401,7 +401,8 @@ fn animator_records(bytes: &[u8]) -> (Vec<String>, Vec<(String, Vec<u8>)>) {
             }
             let Some(node) = cs.get(i + 1) else { continue };
             if here && node.is_list(b"tdbs") {
-                let mut f = effectcraft_aep::AepFile { chunks: vec![node.clone()], trailer: Default::default() };
+                // In the bytes the exporter writes (`decoded`).
+                let mut f = effectcraft_aep::AepFile { chunks: vec![crate::export::helpers::decoded(&node.clone().into_owned())], trailer: Default::default() };
                 if let Some(list) = f.chunks[0].children_mut().iter_mut().find(|k| k.is_list(b"list")) {
                     let size = list
                         .child(b"lhd3")
