@@ -440,7 +440,15 @@ pub fn parse_timecode(input: &str, rate: FrameRate, drop_frame: bool, current: i
     } else {
         parts
             .iter()
-            .map(|p| if p.is_empty() { Ok(0) } else { p.parse::<i64>().map_err(|_| ParseError(format!("bad field `{p}`"))) })
+            .map(|p| {
+                if p.is_empty() {
+                    Ok(0)
+                } else if !p.bytes().all(|b| b.is_ascii_digit()) {
+                    Err(ParseError(format!("bad field `{p}`")))
+                } else {
+                    p.parse::<i64>().map_err(|_| ParseError(format!("bad field `{p}`")))
+                }
+            })
             .collect::<Result<_, _>>()?
     };
     if nums.len() > 4 {
@@ -532,6 +540,15 @@ pub const SAMPLE_RATES: [i64; 6] = [32_000, 44_100, 48_000, 88_200, 96_000, 192_
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_timecode_rejects_signed_fields() {
+        let r = FrameRate::new(25, 1);
+        for s in ["00:+5:-30:00", "00:-1:00:00", "00:1a:00:00"] {
+            assert!(parse_timecode(s, r, false, 0).is_err(), "{s}");
+        }
+        assert_eq!(parse_timecode("00:01::00", r, false, 0).unwrap(), 1500);
+    }
 
     #[test]
     fn frame_rate_constructors_accept_extreme_numbers() {
