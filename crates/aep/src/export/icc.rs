@@ -1,11 +1,14 @@
-//! A colour profile for a working space After Effects names without shipping its data to us:
-//! "Rec.709 Gamma 2.4", authored here from the standards (ITU-R BT.709 primaries and D65 white,
-//! a pure 2.4 power curve, ICC.1:2010 v4 with a D50 PCS and a Bradford adaptation), so that no
-//! profile of another party is copied. After Effects keeps a working space as the profile's data
-//! (base64) and its profile ID (`cpid`, 624: the MD5 profile ID of the v4 header), R49.
+//! Colour profiles for the working spaces the exporter writes, authored here from the standards
+//! so that no profile of another party is copied: "Rec.709 Gamma 2.4" (ITU-R BT.709 primaries,
+//! a pure 2.4 power curve) and "sRGB IEC61966-2.1" (the same primaries, the IEC 61966-2-1
+//! curve), both D65, ICC.1:2010 v4 with a D50 PCS and a Bradford adaptation. After Effects keeps
+//! a working space as the profile's data (base64) and its profile ID (`cpid`, 624: the MD5
+//! profile ID of the v4 header), R49.
 
 /// The profile's description and the name After Effects lists the working space under (624).
 pub(crate) const REC709_NAME: &str = "Rec.709 Gamma 2.4";
+/// The name After Effects lists the sRGB working space under (620).
+pub(crate) const SRGB_NAME: &str = "sRGB IEC61966-2.1";
 
 fn s15(v: f64) -> [u8; 4] {
     let x = (v * 65536.0).round();
@@ -66,6 +69,27 @@ fn xyz_tag(v: [f64; 3]) -> Vec<u8> {
 
 /// The Rec.709 Gamma 2.4 display profile (ICC v4.3) with its profile ID filled in.
 pub(crate) fn rec709_gamma24() -> Vec<u8> {
+    // A pure power curve: `para` function type 0.
+    let mut trc = b"para\0\0\0\0".to_vec();
+    trc.extend([0, 0, 0, 0]);
+    trc.extend(s15(2.4));
+    profile("Rec.709 Gamma 2.4 (EffectCraft)", trc)
+}
+
+/// The sRGB display profile (ICC v4.3): IEC 61966-2-1's curve as `para` function type 3, `Y =
+/// ((X + 0.055) / 1.055) ^ 2.4` from 0.04045 and `X / 12.92` below.
+pub(crate) fn srgb() -> Vec<u8> {
+    let mut trc = b"para\0\0\0\0".to_vec();
+    trc.extend([0, 3, 0, 0]);
+    for v in [2.4, 1.0 / 1.055, 0.055 / 1.055, 1.0 / 12.92, 0.04045] {
+        trc.extend(s15(v));
+    }
+    profile("sRGB IEC61966-2.1 (EffectCraft)", trc)
+}
+
+/// A display profile with BT.709 primaries and D65 white, tone curve `trc` and description
+/// `desc`, its profile ID filled in.
+fn profile(desc: &str, trc: Vec<u8>) -> Vec<u8> {
     let prim = [(0.640, 0.330), (0.300, 0.600), (0.150, 0.060)];
     let w65 = xyz(0.3127, 0.3290);
     let w50 = [0.9642, 1.0, 0.8249];
@@ -84,11 +108,8 @@ pub(crate) fn rec709_gamma24() -> Vec<u8> {
             sf32.extend(s15(v));
         }
     }
-    let mut trc = b"para\0\0\0\0".to_vec();
-    trc.extend([0, 0, 0, 0]);
-    trc.extend(s15(2.4));
     let tags: [(&[u8; 4], Vec<u8>); 10] = [
-        (b"desc", mluc("Rec.709 Gamma 2.4 (EffectCraft)")),
+        (b"desc", mluc(desc)),
         (b"cprt", mluc("No copyright, use freely (EffectCraft)")),
         (b"wtpt", xyz_tag(w50)),
         (b"chad", sf32),
@@ -226,6 +247,18 @@ mod tests {
         assert_eq!(base64(b"foobar"), "Zm9vYmFy");
         assert_eq!(base64(b"fooba"), "Zm9vYmE=");
         assert_eq!(base64(b"foob"), "Zm9vYg==");
+    }
+
+    #[test]
+    fn the_srgb_profile_carries_the_iec_curve() {
+        let icc = srgb();
+        assert_eq!(u32::from_be_bytes(icc[0..4].try_into().unwrap()) as usize, icc.len());
+        let mut z = icc.clone();
+        z[84..100].fill(0);
+        assert_eq!(profile_id(&icc), md5(&z));
+        let at = icc.windows(8).position(|w| w == b"para\0\0\0\0").unwrap();
+        assert_eq!(&icc[at + 8..at + 12], &[0, 3, 0, 0]);
+        assert_eq!(icc.len(), rec709_gamma24().len() + 16, "four more curve parameters");
     }
 
     #[test]

@@ -1,5 +1,5 @@
 //! Project settings (`docs/aep-format.md` 3.12a, cases 620-634): colour depth, working space
-//! (None or the template's sRGB), working gamma, the two linear-light switches, time display and
+//! (None, sRGB or Rec.709 Gamma 2.4, with profiles authored here), working gamma, the two linear-light switches, time display and
 //! frame count start, written into the template's top-level chunks.
 
 use crate::{AepFile, Chunk};
@@ -14,7 +14,7 @@ use crate::export::tree::{R, data_mut, put_u8, tpl};
 pub(crate) struct SettingsPlan {
     /// `nhed` byte 15: 0 / 1 / 2 for 8 / 16 / 32 bits per channel.
     pub depth: u8,
-    /// No working space (623); otherwise the template's sRGB is kept.
+    /// No working space (623); otherwise sRGB unless `rec709`.
     pub no_working_space: bool,
     /// Rec.709 Gamma 2.4, written with a profile authored here (`icc.rs`, R49).
     pub rec709: bool,
@@ -117,17 +117,21 @@ pub(crate) fn emit(file: &mut AepFile<'static>, p: &SettingsPlan) -> R<()> {
     if p.linearize {
         top.insert(at, Chunk::data(*b"lnrp", vec![1u8]));
     }
-    if p.rec709 {
-        // 624: `cpid` is the profile ID, the JSON after PwCs holds the profile's data and the
-        // working space's name; the profile is our own (R49).
-        let icc = crate::export::icc::rec709_gamma24();
+    if !p.no_working_space {
+        // 620, 624: `cpid` is the profile ID, the JSON after PwCs holds the profile's data and the
+        // working space's name; the profiles are our own (R49).
+        let (icc, name) = if p.rec709 {
+            (crate::export::icc::rec709_gamma24(), crate::export::icc::REC709_NAME)
+        } else {
+            (crate::export::icc::srgb(), crate::export::icc::SRGB_NAME)
+        };
         *top.get_mut(cpid).ok_or_else(|| tpl("cpid"))? = Chunk::data(*b"cpid", crate::export::icc::profile_id(&icc).to_vec());
         let pw = header(top, b"PwCs")?;
         let json = top.get_mut(pw.saturating_add(1)).filter(|c| c.is(b"Utf8")).ok_or_else(|| tpl("template without the working-space JSON"))?;
         let text = format!(
             "{{\"baseColorProfile\":{{\"colorProfileData\":\"{}\",\"colorProfileName\":\"{}\"}},\"baseProfileType\":2}}",
             crate::export::icc::base64(&icc),
-            crate::export::icc::REC709_NAME
+            name
         );
         *json = Chunk::data(*b"Utf8", text.into_bytes());
     }
