@@ -16,8 +16,10 @@
 
 use std::collections::HashMap;
 
+#[cfg(test)]
+use crate::AepFile;
+use crate::Chunk;
 use crate::style_map::{self as sm, StyleConv, StyleParam};
-use crate::{AepFile, Chunk};
 use effectcraft_keyframe::{Interp, Value};
 use effectcraft_project::build::Ids;
 use effectcraft_project::styles::{self as st, STYLE_BLEND_MODES};
@@ -258,6 +260,23 @@ fn tdmn_name(c: &Chunk<'_>) -> Option<String> {
 }
 
 impl StyleProtos {
+    /// The records built in code from the style table (`style_defs`); the keyed form of a scalar
+    /// takes `tdb4` bytes 5, 68 and 79 and the key list of a keyed one-component record.
+    pub(crate) fn from_table() -> StyleProtos {
+        use crate::export::synth::{KeyTemplate, RecSpec, class, tdbs, tdmn};
+        let records = crate::export::style_defs::STYLE_RECORDS
+            .iter()
+            .map(|(name, dims, template, cls, limits)| {
+                let template = if *template == 0 { KeyTemplate::Plain } else { KeyTemplate::Spatial(*template) };
+                let spec = RecSpec { dims: *dims, template, class: *cls, limits: *limits };
+                (name.to_string(), (tdmn(name), tdbs(&spec, false, 25_600)))
+            })
+            .collect();
+        let scalar = RecSpec { dims: 1, template: KeyTemplate::Plain, class: class::EFFECT_NUMBER, limits: Some((0.0, 100.0)) };
+        StyleProtos { records, keyed: tdbs(&scalar, true, 25_600) }
+    }
+
+    #[cfg(test)]
     pub(crate) fn from_file(f: &AepFile<'static>) -> R<StyleProtos> {
         let mut records = HashMap::new();
         let list = f.list(b"stpr").ok_or_else(|| tpl("style prototypes missing"))?;
@@ -381,4 +400,32 @@ pub(crate) fn put_styles(protos: &StyleProtos, layr: &mut Chunk<'static>, plan: 
         insert_records(protos, g, recs, "ADBE Group End")?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The records built in code have the template's chunks and decoded bytes.
+    #[test]
+    fn the_built_style_records_match_the_template() {
+        let f = crate::parse(crate::export::template::STYLES).unwrap().into_owned();
+        let old = StyleProtos::from_file(&f).unwrap();
+        let new = StyleProtos::from_table();
+        assert_eq!(old.records.len(), new.records.len());
+        let ids = |c: &Chunk<'_>| c.children().iter().map(|k| k.id).collect::<Vec<_>>();
+        let keep = |c: &Chunk<'_>, id: &[u8; 4]| c.child(id).and_then(|k| k.bytes()).map(<[u8]>::to_vec);
+        for (name, (_, a)) in &old.records {
+            let (_, b) = &new.records[name];
+            assert_eq!(ids(a), ids(b), "{name}");
+            for id in [b"tdum", b"tduM"] {
+                assert_eq!(keep(a, id), keep(b, id), "{name}");
+            }
+            assert_eq!(keep(a, b"cdat").map(|d| d.len()), keep(b, b"cdat").map(|d| d.len()), "{name}");
+            let (ta, tb) = (keep(a, b"tdb4").unwrap(), keep(b, b"tdb4").unwrap());
+            for i in [3usize, 5, 7, 8, 9, 10, 11, 68, 79] {
+                assert_eq!(ta[i], tb[i], "{name} tdb4[{i}]");
+            }
+        }
+    }
 }

@@ -67,3 +67,34 @@ pub fn simple() -> (Project, ItemId, ItemId) {
     add_layer(&mut p, c, "L", LayerSource::Solid { item: s }, (1920, 1080));
     (p, c, s)
 }
+
+/// `c` as far as the exporter writes property records: in every `tdbs` the user name is left out
+/// and the header bytes that are not decoded are zero (aep-format.md 3.4; After Effects reads
+/// them as zero, read-back e1-ztdb4d).
+pub fn decoded(c: &effectcraft_aep::Chunk<'static>) -> effectcraft_aep::Chunk<'static> {
+    use effectcraft_aep::{Body, Chunk};
+    const KEEP: &[(usize, usize)] = &[(0, 4), (5, 6), (7, 16), (68, 69), (76, 78), (79, 80), (119, 121)];
+    let record = c.is_list(b"tdbs");
+    let kids = |children: &[Chunk<'static>]| -> Vec<Chunk<'static>> {
+        children
+            .iter()
+            .filter(|k| !(record && k.is(b"tdsn")))
+            .map(|k| {
+                if record && k.is(b"tdb4") {
+                    let d = k.bytes().unwrap_or_default();
+                    Chunk::data(
+                        *b"tdb4",
+                        d.iter().enumerate().map(|(i, b)| if KEEP.iter().any(|(f, e)| (*f..*e).contains(&i)) { *b } else { 0 }).collect::<Vec<u8>>(),
+                    )
+                } else {
+                    decoded(k)
+                }
+            })
+            .collect()
+    };
+    match &c.body {
+        Body::List { list_type, children } => Chunk { id: c.id, body: Body::List { list_type: *list_type, children: kids(children) }, pad: c.pad },
+        Body::Chunks(children) => Chunk { id: c.id, body: Body::Chunks(kids(children)), pad: c.pad },
+        _ => c.clone(),
+    }
+}

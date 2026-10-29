@@ -19,7 +19,8 @@ pub(crate) const EFFECTS: &[u8] = include_bytes!("../../template/effects.aep");
 const FOOTAGE: &[u8] = include_bytes!("../../template/footage.aep");
 const TEXT: &[u8] = include_bytes!("../../template/text.aep");
 const OBJECTS: &[u8] = include_bytes!("../../template/objects.aep");
-const STYLES: &[u8] = include_bytes!("../../template/styles.aep");
+#[cfg(test)]
+pub(crate) const STYLES: &[u8] = include_bytes!("../../template/styles.aep");
 
 /// The chunks cloned by the exporter.
 pub(crate) struct Template {
@@ -128,8 +129,7 @@ impl Template {
         let null_item = list_of(b"nuli")?.into_iter().next().ok_or_else(|| tpl("null item missing"))?;
         let masks = crate::export::masks::MaskProtos::build();
         let effects = crate::export::effects::FxProtos::build();
-        let st_file = parse(STYLES).map_err(|_| tpl("the embedded style prototypes do not parse"))?.into_owned();
-        let styles = crate::export::styles::StyleProtos::from_file(&st_file)?;
+        let styles = crate::export::styles::StyleProtos::from_table();
         let ft_file = parse(FOOTAGE).map_err(|_| tpl("the embedded footage prototypes do not parse"))?.into_owned();
         let footage = crate::export::footage::FtProtos::from_file(&ft_file)?;
         let tx_file = parse(TEXT).map_err(|_| tpl("the embedded text prototypes do not parse"))?.into_owned();

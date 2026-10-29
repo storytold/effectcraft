@@ -51,7 +51,11 @@ fn stored_group(bytes: &[u8]) -> Vec<u8> {
             if let Some(PropNode::Group(g)) = l.properties().and_then(|p| p.get("ADBE Layer Styles"))
                 && g.flags() == Some(1)
             {
-                let mut f2 = effectcraft_aep::AepFile { chunks: vec![g.chunk().clone().into_owned()], trailer: std::borrow::Cow::Owned(vec![]) };
+                // As far as the exporter writes records (`decoded`).
+                let mut f2 = effectcraft_aep::AepFile {
+                    chunks: vec![crate::export::helpers::decoded(&g.chunk().clone().into_owned())],
+                    trailer: std::borrow::Cow::Owned(vec![]),
+                };
                 f2.trailer = std::borrow::Cow::Owned(vec![]);
                 return effectcraft_aep::write(&f2).expect("write");
             }
@@ -85,7 +89,7 @@ fn fixtures_round_trip_without_losses() {
         assert!(losses.is_empty(), "{name} re-import: {losses:?}");
         let (a, b) = (layer(&p, "B"), layer(&q, "B"));
         assert_eq!(values(a.props.sub(GROUP).expect("styles")), values(b.props.sub(GROUP).expect("styles")), "{name}");
-        // The written group is the one After Effects saved.
+        // The written group is the one After Effects saved, in its decoded bytes.
         assert_eq!(stored_group(&bytes), stored_group(&r.bytes), "{name}: stored group differs");
         let (ca, cb) = (p.comps().next().expect("comp").1, q.comps().next().expect("comp").1);
         assert_eq!(ca.global_light, cb.global_light, "{name}");
