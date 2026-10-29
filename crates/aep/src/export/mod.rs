@@ -24,6 +24,8 @@ mod camlight;
 mod effects;
 mod emit;
 mod footage;
+mod fx_defs;
+mod fxsynth;
 pub(crate) mod icc;
 mod markers;
 mod masks;

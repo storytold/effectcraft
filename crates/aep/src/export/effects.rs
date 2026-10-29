@@ -263,25 +263,31 @@ fn par_defs(sspc: &Chunk<'_>) -> HashMap<u16, ParDef> {
     out
 }
 
-/// The parameter definitions of every prototype, by match name (from the embedded template; an
-/// unreadable template gives none, and the export then fails in `Template::load`).
+/// The parameter definitions of every effect type, by match name (read from the default
+/// instances built from the effect table).
 fn defs() -> &'static HashMap<String, HashMap<u16, ParDef>> {
     static DEFS: OnceLock<HashMap<String, HashMap<u16, ParDef>>> = OnceLock::new();
     DEFS.get_or_init(|| {
-        let mut out = HashMap::new();
-        let Ok(f) = crate::parse(crate::export::template::EFFECTS) else { return out };
-        for c in &f.chunks {
-            if c.is_list(b"fxdf") {
-                let k = c.children();
-                if let (Some(m), Some(s)) = (k.first(), k.get(1))
-                    && let Some(name) = tdmn_name(m)
-                {
-                    out.insert(name, par_defs(s));
-                }
+        crate::export::fx_defs::FX_DEFS.iter().map(|fx| (fx.match_name.to_string(), par_defs(&crate::export::fxsynth::default_sspc(fx)))).collect()
+    })
+}
+
+/// The parameter definitions of the template's prototypes (the equivalence tests).
+#[cfg(test)]
+fn template_defs() -> HashMap<String, HashMap<u16, ParDef>> {
+    let mut out = HashMap::new();
+    let Ok(f) = crate::parse(crate::export::template::EFFECTS) else { return out };
+    for c in &f.chunks {
+        if c.is_list(b"fxdf") {
+            let k = c.children();
+            if let (Some(m), Some(s)) = (k.first(), k.get(1))
+                && let Some(name) = tdmn_name(m)
+            {
+                out.insert(name, par_defs(s));
             }
         }
-        out
-    })
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -813,58 +819,26 @@ pub(crate) fn tdmn_name(c: &Chunk<'_>) -> Option<String> {
     Some(d.iter().take_while(|b| **b != 0).map(|b| char::from(*b)).collect())
 }
 
-/// `(tdmn, node)` pairs of a list's children.
-fn pairs(c: &Chunk<'static>) -> Vec<(String, Chunk<'static>)> {
-    let k = c.children();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i + 1 < k.len() {
-        if let (Some(m), Some(n)) = (k.get(i), k.get(i + 1))
-            && m.is(b"tdmn")
-        {
-            out.push((tdmn_name(m).unwrap_or_default(), n.clone()));
-            i += 2;
-            continue;
-        }
-        i += 1;
-    }
-    out
-}
-
 impl FxProtos {
-    pub(crate) fn from_file(f: &AepFile<'static>) -> R<FxProtos> {
+    /// The prototypes built in code from the effect table (`fx_defs`, `fxsynth`).
+    pub(crate) fn build() -> FxProtos {
+        use crate::export::fxsynth::value_spec;
         let mut defaults = HashMap::new();
-        let mut kinds = HashMap::new();
-        let mut keyed = Vec::new();
-        for c in &f.chunks {
-            if c.is_list(b"fxdf") {
-                let k = c.children();
-                let (Some(m), Some(s), Some(d)) = (k.first(), k.get(1), k.get(2)) else { return Err(tpl("effect prototype incomplete")) };
-                let name = tdmn_name(m).ok_or_else(|| tpl("effect prototype without a name"))?;
-                defaults.insert(name, (m.clone(), s.clone(), d.clone()));
-            } else if c.is_list(b"fxkd") {
-                for (n, r) in pairs(c) {
-                    let code = n.strip_prefix("kind-").and_then(|s| s.parse::<u32>().ok()).ok_or_else(|| tpl("unknown kind record"))?;
-                    kinds.insert(code, r);
-                }
-            } else if c.is_list(b"fxky") {
-                for (n, r) in pairs(c) {
-                    let kind = match n.as_str() {
-                        "ADBE Tint-0003" => KeyedKind::Fixed,
-                        "ADBE Tint-0002" => KeyedKind::Color,
-                        "ADBE Ramp-0001" => KeyedKind::Point,
-                        "ADBE Exposure2-0003" => KeyedKind::Float,
-                        _ => return Err(tpl("unknown keyed effect prototype")),
-                    };
-                    keyed.push((kind, r));
-                }
-            }
+        for fx in crate::export::fx_defs::FX_DEFS {
+            let sspc = crate::export::fxsynth::default_sspc(fx);
+            let m = crate::export::synth::tdmn(fx.match_name);
+            let efdf = Chunk::list(*b"EfDf", vec![m.clone(), sspc.clone()]);
+            defaults.insert(fx.match_name.to_string(), (m, sspc, efdf));
         }
-        let all_types = crate::effect_map::EFFECTS.iter().all(|e| defaults.contains_key(e.match_name));
-        if !all_types || kinds.len() != 8 || keyed.len() != 4 {
-            return Err(tpl("effect prototypes missing"));
-        }
-        Ok(FxProtos { defaults, kinds, keyed })
+        let kinds = [1u8, 2, 3, 4, 5, 6, 7, 10]
+            .iter()
+            .filter_map(|c| value_spec(*c, None).map(|s| (u32::from(*c), crate::export::synth::tdbs(&s, false, 25_600))))
+            .collect();
+        let keyed = [(KeyedKind::Fixed, 2u8), (KeyedKind::Color, 5), (KeyedKind::Point, 6), (KeyedKind::Float, 10)]
+            .iter()
+            .filter_map(|(k, c)| value_spec(*c, None).map(|s| (*k, crate::export::synth::tdbs(&s, true, 25_600))))
+            .collect();
+        FxProtos { defaults, kinds, keyed }
     }
 }
 
@@ -890,7 +864,9 @@ pub(crate) fn value_record(protos: &FxProtos, p: &ParamPlan, def: &ParDef, sourc
     let mut rec = protos.kinds.get(&p.kind.code()).cloned().ok_or_else(|| tpl("effect value prototype missing"))?;
     {
         let kids = kids_mut(&mut rec)?;
-        if let Some(slot) = kids.iter_mut().find(|c| c.is(b"tdsn")) {
+        if let Some(slot) = kids.iter_mut().find(|c| c.is(b"tdsn"))
+            && !def.name.is_empty()
+        {
             *slot = tdsn(&def.name);
         }
     }
@@ -1172,4 +1148,64 @@ pub(crate) fn put_project_lists(protos: &FxProtos, file: &mut AepFile<'static>, 
     }
     file.chunks.insert(at + 1, Chunk::list(*b"EfdG", efdg));
     Ok(())
+}
+
+#[cfg(test)]
+mod fx_table {
+    use super::*;
+
+    /// The effect table (`fx_defs`) states what the effect prototypes hold: the same effects,
+    /// parameters in the same order, ids, types, defaults, ranges and valid maxima.
+    #[test]
+    fn the_table_matches_the_prototypes() {
+        let all = template_defs();
+        assert_eq!(all.len(), crate::export::fx_defs::FX_DEFS.len());
+        for fx in crate::export::fx_defs::FX_DEFS {
+            let proto = all.get(fx.match_name).unwrap_or_else(|| panic!("{} has no prototype", fx.match_name));
+            assert_eq!(proto.len(), fx.params.len(), "{}", fx.match_name);
+            for (i, p) in fx.params.iter().enumerate() {
+                let d = &proto[&u16::try_from(i).unwrap()];
+                let what = format!("{} #{i}", fx.match_name);
+                assert_eq!(d.record, fx.record(p), "{what}");
+                assert_eq!(d.code, u32::from(p.code), "{what}");
+                assert_eq!(d.default, p.default, "{what}");
+                assert_eq!(d.range, p.range, "{what}");
+                assert_eq!(d.valid_max, p.valid_max, "{what}");
+            }
+        }
+    }
+
+    /// The default instance built in code has the records of the prototype's value group (by
+    /// match name, in order) and the same arbitrary data.
+    #[test]
+    fn the_built_default_instances_have_the_prototypes_records() {
+        let f = crate::parse(crate::export::template::EFFECTS).unwrap();
+        let built = FxProtos::build();
+        let names = |sspc: &Chunk<'_>| -> Vec<String> { sspc.child_list(b"tdgp").unwrap().children().iter().filter_map(tdmn_name).collect() };
+        let data = |sspc: &Chunk<'_>| -> Vec<Vec<u8>> {
+            sspc.child_list(b"parT").unwrap().children().iter().filter(|c| c.is(b"aRbp")).map(|c| c.bytes().unwrap().to_vec()).collect()
+        };
+        let mut n = 0;
+        for c in f.chunks.iter().filter(|c| c.is_list(b"fxdf")) {
+            let k = c.children();
+            let name = tdmn_name(&k[0]).unwrap();
+            let (_, sspc, _) = &built.defaults[&name];
+            assert_eq!(names(sspc), names(&k[1]), "{name}");
+            let (ours, theirs) = (data(sspc), data(&k[1]));
+            assert_eq!(ours.len(), theirs.len(), "{name}");
+            for (a, b) in ours.iter().zip(&theirs) {
+                if name == "ADBE MESH WARP" {
+                    // After Effects computes the grid in its own arithmetic: equal within 1e-6.
+                    let (a, b) = (crate::MeshData::parse(a).unwrap(), crate::MeshData::parse(b).unwrap());
+                    assert_eq!((a.columns, a.rows, a.tail), (b.columns, b.rows, b.tail));
+                    let flat = |m: &crate::MeshData| m.vertices.iter().flatten().flatten().copied().collect::<Vec<f32>>();
+                    assert!(flat(&a).iter().zip(flat(&b)).all(|(x, y)| (x - y).abs() < 1e-6), "{name}");
+                } else {
+                    assert!(a == b, "{name}: default data differs");
+                }
+            }
+            n += 1;
+        }
+        assert_eq!(n, 57);
+    }
 }

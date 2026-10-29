@@ -6,7 +6,7 @@
 use crate::export::helpers::*;
 use effectcraft_aep::export::LossCategory;
 use effectcraft_aep::import::{ImportOptions, import};
-use effectcraft_aep::{AepFile, ParamValue, parse};
+use effectcraft_aep::{AepFile, Chunk, ParamValue, parse};
 use effectcraft_keyframe::{Interp, Value};
 use effectcraft_project::{ItemKind, Node, Project, PropGroup};
 
@@ -420,11 +420,32 @@ fn static_records(file: &AepFile<'_>) -> std::collections::BTreeMap<(String, usi
     out
 }
 
+/// A value record as far as the exporter writes it: the user name and the header bytes that are
+/// not decoded (written as zero, aep-format.md 3.4) are left out.
+fn decoded_view(rec: &Chunk<'static>) -> Chunk<'static> {
+    const KEEP: &[(usize, usize)] = &[(0, 4), (5, 6), (7, 16), (68, 69), (76, 78), (79, 80), (119, 121)];
+    let kids = rec
+        .children()
+        .iter()
+        .filter(|c| !c.is(b"tdsn"))
+        .map(|c| {
+            if c.is(b"tdb4") {
+                let d = c.bytes().unwrap_or_default();
+                let kept: Vec<u8> = d.iter().enumerate().map(|(i, b)| if KEEP.iter().any(|(f, e)| (*f..*e).contains(&i)) { *b } else { 0 }).collect();
+                Chunk::data(*b"tdb4", kept)
+            } else {
+                c.clone()
+            }
+        })
+        .collect();
+    Chunk::list(*b"tdbs", kids)
+}
+
 #[test]
-fn every_static_value_record_is_rebuilt_byte_for_byte() {
-    // The records are built from one record per parameter type, the parameter's name and its
-    // slider range (R45): every static record After Effects wrote for a mapped parameter of an
-    // effect fixture comes back with the same bytes.
+fn every_static_value_record_is_rebuilt_in_its_decoded_bytes() {
+    // The records are built in code from the parameter's type and slider range (R45): every
+    // static record After Effects wrote for a mapped parameter of an effect fixture comes back
+    // with the same decoded bytes (the rest of the header is zero, the user name the placeholder).
     let mut compared = 0;
     for name in skip!(fixtures_with_effects()) {
         let bytes = fixture!(&name);
@@ -443,7 +464,7 @@ fn every_static_value_record_is_rebuilt_byte_for_byte() {
         b.retain(|k, _| !skip(k));
         for (key, rec) in &a {
             let got = b.get(key).unwrap_or_else(|| panic!("{name}: {key:?} not written"));
-            assert_eq!(got, rec, "{name}: {key:?}");
+            assert_eq!(decoded_view(got), decoded_view(rec), "{name}: {key:?}");
             compared += 1;
         }
         for key in b.keys() {

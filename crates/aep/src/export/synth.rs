@@ -37,13 +37,26 @@ pub(crate) enum KeyTemplate {
 pub(crate) mod class {
     /// Transform Scale, Rotation and Opacity; the other one-dimensional layer properties.
     pub const LAYER_SCALAR: u32 = 0x0001_ffff;
-    /// Positions and points (spatial, no limits).
+    /// Positions and points (spatial, no limits); effect sliders and angles.
     pub const SPATIAL: u32 = 0xffff_ffff;
+    /// Effect sliders (integer, fixed, float) and angles.
+    pub const EFFECT_NUMBER: u32 = 0xffff_ffff;
+    /// Effect checkboxes and popups.
+    pub const EFFECT_CHOICE: u32 = 0x0001_0004;
+    /// Colours.
+    pub const COLOR: u32 = 0x0002_ffff;
+    /// Effect layer parameters, groups and buttons.
+    pub const EFFECT_OTHER: u32 = 0x0001_0000;
+    /// Arbitrary data (Hue/Saturation, Levels, Curves, Mesh Warp).
+    pub const ARBITRARY: u32 = 0x0006_0007;
 }
 
-/// Byte 5 of a static spatial property: bit 0 (static) plus bits 1..3, which every position and
-/// point record has set (`0x0f`, `0x0e` once keyed; protos 044/055). Meaning not decoded.
-const SPATIAL_BYTE5: u8 = 0x0e;
+/// Byte 5 bits 1..3 of a spatial property, next to the static bit 0: `0x0e` on positions and
+/// points (`0x0f` static, `0x0e` keyed: Anchor Point, Position, Gradient Ramp's points), `0x06` on
+/// colours (`0x07` / `0x06`: Tint's colours). Meaning not decoded.
+fn spatial_byte5(template: u8) -> u8 {
+    if template == 3 { 0x0e } else { 0x06 }
+}
 
 /// What a property record needs to know about its property.
 #[derive(Clone, Copy, Debug)]
@@ -92,12 +105,14 @@ pub(crate) fn tdb4(spec: &RecSpec, keyed: bool, time_scale: u32) -> Vec<u8> {
         KeyTemplate::Plain => 0,
         KeyTemplate::Spatial(t) => t,
     };
-    let byte5 = if spatial == 3 { SPATIAL_BYTE5 } else { 0 } | u8::from(!keyed);
+    let byte5 = if spatial == 0 { 0 } else { spatial_byte5(spatial) } | u8::from(!keyed);
     set(&mut b, 5, &[byte5]);
     set(&mut b, 7, &[spatial]);
     set(&mut b, 8, &spec.class.to_be_bytes());
     set(&mut b, 12, &time_scale.to_be_bytes());
     set(&mut b, 68, &[u8::from(keyed)]);
+    // Set on a static spatial property, cleared once it is keyed (aep-format.md 3.4, byte 79).
+    set(&mut b, 79, &[u8::from(spatial != 0 && !keyed)]);
     b
 }
 
@@ -157,7 +172,7 @@ mod tests {
         let h = tdb4(&pos, false, 25_600);
         assert_eq!(&h[..8], &[0xdb, 0x99, 0, 3, 0, 0x0f, 0, 3]);
         assert_eq!(&h[8..16], &[0xff, 0xff, 0xff, 0xff, 0, 0, 0x64, 0]);
-        assert_eq!(h[68], 0);
+        assert_eq!((h[68], h[79]), (0, 1));
         assert_eq!(pos.cdat_len(), 72);
         assert_eq!(pos.key_len(), 128);
         let opacity = RecSpec { dims: 1, template: KeyTemplate::Plain, class: class::LAYER_SCALAR, limits: Some((0.0, 100.0)) };
