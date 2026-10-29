@@ -12,6 +12,7 @@ use crate::export::tree::{R, tpl};
 
 const BASE: &[u8] = include_bytes!("../../template/base.aep");
 const PROTOS: &[u8] = include_bytes!("../../template/protos.aep");
+#[cfg(test)]
 const MASKS: &[u8] = include_bytes!("../../template/masks.aep");
 #[cfg(test)]
 pub(crate) const EFFECTS: &[u8] = include_bytes!("../../template/effects.aep");
@@ -125,8 +126,7 @@ impl Template {
         let keyd = transform_records(true);
         let null_block = list_of(b"nulb")?;
         let null_item = list_of(b"nuli")?.into_iter().next().ok_or_else(|| tpl("null item missing"))?;
-        let mask_file = parse(MASKS).map_err(|_| tpl("the embedded mask prototypes do not parse"))?.into_owned();
-        let masks = crate::export::masks::MaskProtos::from_file(&mask_file)?;
+        let masks = crate::export::masks::MaskProtos::build();
         let effects = crate::export::effects::FxProtos::build();
         let st_file = parse(STYLES).map_err(|_| tpl("the embedded style prototypes do not parse"))?.into_owned();
         let styles = crate::export::styles::StyleProtos::from_file(&st_file)?;
@@ -206,5 +206,34 @@ impl Template {
             shapes,
             styles,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// The mask prototypes built in code have the template's structure (the same chunks in the
+    /// same order) and its decoded bytes.
+    #[test]
+    fn the_built_mask_prototypes_match_the_template() {
+        let f = crate::parse(super::MASKS).unwrap().into_owned();
+        let old = crate::export::masks::MaskProtos::from_file(&f).unwrap();
+        let new = crate::export::masks::MaskProtos::build();
+        fn shape(c: &crate::Chunk<'_>) -> Vec<String> {
+            let mut out = vec![String::from_utf8_lossy(&c.id).into_owned()];
+            if let crate::Body::List { list_type, .. } = &c.body {
+                out.push(String::from_utf8_lossy(list_type).into_owned());
+            }
+            if c.is(b"tdmn") {
+                out.push(String::from_utf8_lossy(c.bytes().unwrap()).into_owned());
+            }
+            for k in c.children() {
+                out.extend(shape(k));
+            }
+            out
+        }
+        for (a, b) in [(&old.atom, &new.atom), (&old.keyed_path, &new.keyed_path), (&old.keyed_feather, &new.keyed_feather), (&old.mkif, &new.mkif)] {
+            assert_eq!(shape(a), shape(b));
+        }
+        assert_eq!(old.parade_header.len(), new.parade_header.len());
     }
 }

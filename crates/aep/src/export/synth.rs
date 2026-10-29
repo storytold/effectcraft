@@ -49,6 +49,8 @@ pub(crate) mod class {
     pub const EFFECT_OTHER: u32 = 0x0001_0000;
     /// Arbitrary data (Hue/Saturation, Levels, Curves, Mesh Warp).
     pub const ARBITRARY: u32 = 0x0006_0007;
+    /// Mask and shape paths.
+    pub const PATH: u32 = 0x0002_0007;
 }
 
 /// Byte 5 bits 1..3 of a spatial property, next to the static bit 0: `0x0e` on positions and
@@ -130,18 +132,20 @@ pub(crate) fn key_list(size: u32, count: u32, records: Vec<u8>) -> Chunk<'static
 
 /// Sets the count words of a key list header for `count` keys of `size` bytes.
 pub(crate) fn put_key_counts(lhd3: &mut [u8], count: u32, size: u32) -> crate::export::tree::R<()> {
-    put_counts(lhd3, count, count.div_ceil(4).max(1), size, count.div_ceil(4).saturating_mul(4).max(2))
+    let capacity = count.div_ceil(4).saturating_mul(4).max(2);
+    put_counts(lhd3, count, count.div_ceil(4).max(1), size, capacity, capacity)
 }
 
-/// Sets the count words of a key list header: word 2 the record count, word 3 `blocks`, word 4
-/// the record size, words 5 and 7 the capacity (in path lists `blocks` and `capacity` count
-/// vertices: aep-format.md 3.5).
-pub(crate) fn put_counts(lhd3: &mut [u8], count: u32, blocks: u32, size: u32, capacity: u32) -> crate::export::tree::R<()> {
+/// Sets the count words of a list header: word 2 the record count, word 3 `blocks`, word 4 the
+/// record size, word 5 `w5`, word 7 the capacity. A key list has `w5` = the capacity; a path
+/// list counts vertices: `blocks` = `w5` = the vertex count, the capacity four times it (090:
+/// 12 points, 4, 4 and 16; aep-format.md 3.5).
+pub(crate) fn put_counts(lhd3: &mut [u8], count: u32, blocks: u32, size: u32, w5: u32, capacity: u32) -> crate::export::tree::R<()> {
     use crate::export::tree::put_u32;
     put_u32(lhd3, 8, count)?;
     put_u32(lhd3, 12, blocks)?;
     put_u32(lhd3, 16, size)?;
-    put_u32(lhd3, 20, capacity)?;
+    put_u32(lhd3, 20, w5)?;
     put_u32(lhd3, 28, capacity)
 }
 

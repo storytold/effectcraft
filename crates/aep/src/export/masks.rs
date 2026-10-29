@@ -378,11 +378,84 @@ pub(crate) fn tdmn_name(c: &Chunk<'_>) -> Option<String> {
     Some(d.iter().take_while(|b| **b != 0).map(|b| char::from(*b)).collect())
 }
 
+/// The limit of a mask's feather and expansion (`tduM` 32 000, 091).
+const MASK_LIMIT: f64 = 32_000.0;
+
+/// A shape header (`shph`, 24 bytes, aep-format.md 3.8): byte 3 `0x01` (`0x09` once the path is
+/// open), the box at 4..19 (written per shape), byte 20 1. Bytes 0..2 are not decoded and written
+/// zero.
+fn shph() -> Vec<u8> {
+    let mut b = vec![0u8; 24];
+    let _ = put_u8(&mut b, 3, 0x01);
+    let _ = put_u8(&mut b, 20, 1);
+    b
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 fn is_name(c: &Chunk<'_>, name: &str) -> bool {
     c.is(b"tdmn") && tdmn_name(c).as_deref() == Some(name)
 }
 
 impl MaskProtos {
+    /// The prototypes built in code (aep-format.md 3.8): the parade and atom groups, `mkif` with
+    /// only its decoded fields (bytes 12..47 zero, read-back t-zmkif), the path, feather, opacity
+    /// and expansion records, and the keyed path and feather records.
+    pub(crate) fn build() -> MaskProtos {
+        use crate::export::synth::{KeyTemplate, NO_NAME, RecSpec, class, key_list, tdb4, tdbs, tdmn, tdsn};
+        let state = || Chunk::data(*b"tdsb", 1u32.to_be_bytes().to_vec());
+        // The path property: one component of the path template (`tdb4` byte 7 = 1), a 4-byte
+        // `cdat`; the shapes follow in `omks`.
+        let path = RecSpec { dims: 1, template: KeyTemplate::Spatial(1), class: class::PATH, limits: None };
+        let path_rec = |keyed: bool| {
+            let mut kids = vec![state(), tdsn(NO_NAME), Chunk::data(*b"tdb4", tdb4(&path, keyed, 25_600))];
+            if keyed {
+                // Path keys are 64-byte records: flags `0x0001`, the `f64` at 16 1 on the first
+                // key (093; the rest of the record is zero: its last bytes were uninitialised).
+                let mut first = vec![0u8; 64];
+                let mut later = vec![0u8; 64];
+                for r in [&mut first, &mut later] {
+                    let _ = put_u16(r, 6, 0x0001);
+                }
+                let _ = put_f64(&mut first, 16, 1.0);
+                kids.push(key_list(64, 2, [first, later].concat()));
+            } else {
+                kids.push(Chunk::data(*b"cdat", vec![0u8; 4]));
+            }
+            Chunk::list(*b"tdbs", kids)
+        };
+        let shap = Chunk::list(*b"shap", vec![Chunk::data(*b"shph", shph()), key_list(8, 0, Vec::new()), Chunk::data(*b"omtn", Vec::new())]);
+        let feather = RecSpec { dims: 2, template: KeyTemplate::Plain, class: class::EFFECT_NUMBER, limits: Some((0.0, MASK_LIMIT)) };
+        let opacity = RecSpec { dims: 1, template: KeyTemplate::Plain, class: class::EFFECT_NUMBER, limits: Some((0.0, 100.0)) };
+        let offset = RecSpec { dims: 1, template: KeyTemplate::Plain, class: class::EFFECT_NUMBER, limits: Some((-MASK_LIMIT, MASK_LIMIT)) };
+        let atom = Chunk::list(
+            *b"tdgp",
+            vec![
+                state(),
+                tdsn("Mask 1"),
+                tdmn("ADBE Mask Shape"),
+                Chunk::list(*b"om-s", vec![path_rec(false), Chunk::list(*b"omks", vec![shap])]),
+                tdmn("ADBE Mask Feather"),
+                tdbs(&feather, false, 25_600),
+                tdmn("ADBE Mask Opacity"),
+                tdbs(&opacity, false, 25_600),
+                tdmn("ADBE Mask Offset"),
+                tdbs(&offset, false, 25_600),
+                tdmn("ADBE Group End"),
+            ],
+        );
+        MaskProtos {
+            parade_name: tdmn("ADBE Mask Parade"),
+            parade_header: vec![state(), tdsn(NO_NAME)],
+            atom_name: tdmn("ADBE Mask Atom"),
+            mkif: Chunk::data(*b"mkif", vec![0u8; 48]),
+            atom,
+            group_end: tdmn("ADBE Group End"),
+            keyed_path: path_rec(true),
+            keyed_feather: tdbs(&feather, true, 25_600),
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn from_file(protos: &crate::AepFile<'static>) -> R<MaskProtos> {
         let mpar = protos.list(b"mpar").ok_or_else(|| tpl("mask prototypes without a parade"))?.children();
         let parade_name = mpar.first().filter(|c| is_name(c, "ADBE Mask Parade")).ok_or_else(|| tpl("mask parade name missing"))?.clone();
@@ -595,7 +668,7 @@ pub(crate) fn build_shap(proto: &Chunk<'static>, s: &ShapePlan) -> R<Chunk<'stat
         // Point lists: word 2 the record count, words 3 and 7 the vertex count and four times it
         // (090: 12 records, 4 and 16; 233: 9 records, 3 and 12), word 4 the record size 8.
         let lhd3 = child_data(list, b"lhd3")?;
-        crate::export::synth::put_counts(lhd3, u32::try_from(records).map_err(|_| tpl("too many points"))?, vertices, 8, vertices.saturating_mul(4))?;
+        crate::export::synth::put_counts(lhd3, u32::try_from(records).map_err(|_| tpl("too many points"))?, vertices, 8, vertices, vertices.saturating_mul(4))?;
     }
     let mut ldat = vec![0u8; records.saturating_mul(8)];
     for (i, [u, v]) in s.points.iter().enumerate() {
