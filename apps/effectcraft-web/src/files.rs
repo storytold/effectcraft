@@ -82,8 +82,11 @@ fn mime(name: &str) -> &'static str {
     }
 }
 
-/// Offer `data` as a download named `name`.
+/// Offer `data` as a download named `name` (in host mode: hand it to the parent page).
 pub fn download(name: &str, data: &[u8]) -> Result<(), JsValue> {
+    if let Some(r) = crate::host::save(name, data) {
+        return r;
+    }
     let doc = web_sys::window().and_then(|w| w.document()).ok_or("no document")?;
     let parts = js_sys::Array::of1(&js_sys::Uint8Array::from(data));
     let bag = web_sys::BlobPropertyBag::new();
