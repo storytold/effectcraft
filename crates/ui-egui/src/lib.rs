@@ -164,6 +164,8 @@ pub struct Playback {
     /// Frames shown / dropped (for the Info/Preview readout).
     pub shown: u64,
     pub waiting: bool,
+    /// When the wait for a frame began (seconds), while [`Playback::waiting`].
+    pub waiting_since: f64,
     pub fps: f64,
     /// The Preview panel shortcut that started this preview and what it plays.
     pub shortcut: effectcraft_engine::preview::PreviewShortcut,
@@ -179,11 +181,12 @@ pub struct Playback {
     pub restore_max: Option<Option<PanelKind>>,
     /// Audio-only previews: the frame under the audible sample (the current time stays put).
     pub audio_frame: Option<i64>,
-    /// The preview's sound waits for frames: while the frames ahead aren't cached, every frame
-    /// shows as it renders, silently; the sound starts once the rest of the preview (or what
-    /// fits in the RAM preview) is cached, so it never plays over skipped frames (#103), or
-    /// sooner once the silent preview keeps real time with the frames ahead cached (#208).
-    pub audio_held: bool,
+    /// When a frame last went on screen (seconds): a preview that shows none for a while gives up
+    /// on the sound rather than play on over a still picture.
+    pub last_shown: f64,
+    /// When the sound was given up last (seconds; 0 when it was not), so it can be taken up again
+    /// once the picture moves, without thrashing.
+    pub gave_up_at: f64,
     /// When the last frames were shown (seconds, the last second's worth): the achieved rate.
     pub shown_at: std::collections::VecDeque<f64>,
 }
@@ -192,6 +195,7 @@ impl Playback {
     /// A new frame went on screen at `now`.
     pub fn frame_shown(&mut self, now: f64) {
         self.shown += 1;
+        self.last_shown = now;
         self.shown_at.push_back(now);
         while self.shown_at.front().is_some_and(|t| now - t > 1.0) {
             self.shown_at.pop_front();

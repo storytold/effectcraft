@@ -326,6 +326,19 @@ fn main() -> eframe::Result {
             app.hooks.system_theme = appearance::service();
             app.hooks.audio_device = Some(Box::new(audio_out::open));
             app.hooks.audio_devices = Some(Box::new(audio_out::devices));
+            // The output device opens now, ahead of the first preview: a press of Space then starts
+            // the sound at once instead of after the device opens (see `audio_out`'s module doc).
+            {
+                let out = effectcraft_ui_egui::audio::AudioOutput::from_prefs(&app.session.prefs);
+                std::thread::Builder::new()
+                    .name("ec-audio-prewarm".into())
+                    .spawn(move || {
+                        if let Err(e) = audio_out::prewarm(&out) {
+                            log::debug!("audio prewarm: {e}");
+                        }
+                    })
+                    .ok();
+            }
             app.hooks.pick_folder = Some(Box::new(|| rfd::FileDialog::new().pick_folder().map(|p| p.to_string_lossy().to_string())));
             app.hooks.pick_save_file = Some(Box::new(|name: &str, ext: &str| {
                 // A default with a folder that exists opens the dialog there.

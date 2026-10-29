@@ -30,6 +30,7 @@ impl EffectcraftApp {
             start_frame: plan.first,
             shown: 0,
             waiting: false,
+            waiting_since: 0.0,
             fps: plan.fps,
             shortcut: sc,
             plan: Some(plan),
@@ -39,20 +40,19 @@ impl EffectcraftApp {
             layer_controls: preset.include_layer_controls,
             restore_max,
             audio_frame: (!plan.video).then_some(plan.first),
-            audio_held: false,
+            last_shown: now,
+            gave_up_at: 0.0,
             shown_at: Default::default(),
         };
         if !self.playback.caching {
-            if plan.video {
-                self.playback.audio_held = self.audio_plays();
-            } else {
-                self.start_audio(fr.tick_of(plan.first));
-            }
+            // The sound starts with the first frame, at once (#947): `start_audio` does nothing
+            // without audio or without a device.
+            self.start_audio(fr.tick_of(plan.first));
         }
     }
 
     /// The preview includes audio at the comp's frame rate and the comp has something audible.
-    fn audio_plays(&self) -> bool {
+    pub(super) fn audio_plays(&self) -> bool {
         let (Some(pl), Some(cid)) = (self.playback.plan, self.session.active_comp_id()) else { return false };
         let Some(c) = self.session.project.comp(cid) else { return false };
         // A preview at another frame rate plays slower or faster than real time: silent.
@@ -159,6 +159,8 @@ impl EffectcraftApp {
         self.playback.caching = false;
         self.playback.start_wall = now;
         self.playback.start_frame = pl.first;
+        // The cache may have taken seconds: the sound's resume watch starts from this moment.
+        self.playback.last_shown = now;
         let t = self.session.active_comp().map(|c| c.frame_rate.tick_of(pl.first)).unwrap_or_default();
         self.start_audio(t);
         true

@@ -168,7 +168,8 @@ The most important missing piece: it turns every other estimate here into a meas
   the viewer; an effect onto a layer in the viewer: #85, #88, #89), `ui_render_queue` (a template
   chosen from a menu moved to fit the window, #117), `angle_revolutions_scrub_and_take_typing`
   (#93), `audio_lock_and_shy_switches_keep_the_frames` and
-  `preview_with_audio_shows_every_frame_and_sounds_once_cached` (#103), and
+  `preview_with_audio_starts_the_sound_at_once` (#103; the sound starts with the first frame
+  since #947), and
   `a_frame_whose_render_panics_is_released` (#106).
 - Follow-up angle-input regressions in `ui_angles` (#141), checked headlessly on Linux and
   Windows, verify that Escape cancels edits and non-finite entries leave the value and undo
@@ -178,7 +179,7 @@ The most important missing piece: it turns every other estimate here into a meas
   `full_resolution_frames_wider_than_the_texture_limit_fit` (#201), the desktop app's
   `no_arguments_start_an_empty_project` (#204) and `device_limits_fit_the_adapter` (#198),
   `audio_spectrum_follows_time_through_the_layer_cache` (#209),
-  `preview_with_audio_sounds_once_rendering_keeps_up` (#208), `ui_timeline_shapes` (the Add menu
+  `a_long_preview_starts_its_sound_at_once_and_keeps_it` (#208; likewise #947), `ui_timeline_shapes` (the Add menu
   and Change Renderer, #206; deselecting below the layers, Alt+Shift+P and the toolbar's stroke,
   #205; linked Mask Feather, #203), `dragging_in_the_empty_area_box_selects_items` and
   `selecting_a_mask_selects_its_points` (#203), and `input_keys_ignore_later_effects` (#212).

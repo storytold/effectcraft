@@ -65,20 +65,78 @@ impl AudioOutput {
 }
 
 /// Lock-protected sample queue between the feeder thread and the device callback.
-#[derive(Default)]
 pub struct AudioFeed {
     queue: Mutex<VecDeque<f32>>,
-    /// Sample frames handed to the device (real audio only: underruns do not count).
+    /// Sample frames handed to the device (real audio only: underruns don't count).
     consumed: AtomicU64,
     /// Peak |sample| per channel since the last [`AudioFeed::take_peaks`] (f32 bits).
     peak: [AtomicU32; 2],
+    /// Pulls that ran dry (the device asked for more than the feeder had queued).
+    underruns: AtomicU64,
     /// The feeder reached the end of a non-looping span.
     finished: AtomicBool,
+    /// The rate the feed is pulled at (0: not told yet; speed easing is timed by it).
+    rate: AtomicU32,
+    /// How fast the sound is read: real time, or slower while the preview waits for a frame.
+    drive: Mutex<Drive>,
+}
+
+impl Default for AudioFeed {
+    /// An idle feed: nothing queued, nothing bound, real time.
+    fn default() -> Self {
+        AudioFeed {
+            queue: Mutex::default(),
+            consumed: AtomicU64::default(),
+            peak: [AtomicU32::new(0), AtomicU32::new(0)],
+            underruns: AtomicU64::default(),
+            finished: AtomicBool::default(),
+            rate: AtomicU32::default(),
+            drive: Mutex::default(),
+        }
+    }
+}
+
+/// Slowest and fastest the sound is read at (a preview waiting for a frame slows it down).
+const MIN_SPEED: f32 = 0.25;
+const MAX_SPEED: f32 = 4.0;
+
+/// How [`AudioFeed::pull`] reads the queue: `speed` 1.0 is real time; below it playback slows
+/// down (varispeed: the pitch drops, as when a tape loses speed) and the clock with it, so a
+/// preview that waits for a frame neither falls silent nor repeats itself.
+struct Drive {
+    /// What the preview asks for (1.0, or less while it waits for a frame).
+    target: f32,
+    /// The speed the sound is read at: eased toward `target`, so a change is smooth.
+    speed: f32,
+    /// Position between `cur` and `nxt`, for reading at a fractional speed.
+    phase: f32,
+    /// The two source frames being read between, kept across blocks so no frame is lost.
+    cur: [f32; 2],
+    nxt: [f32; 2],
+    /// The last real frame read: a dry queue holds it instead of clicking to silence.
+    last: [f32; 2],
+    /// `cur` and `nxt` were filled (the first read after real time).
+    primed: bool,
+}
+
+impl Default for Drive {
+    /// Real time, with nothing to interpolate.
+    fn default() -> Self {
+        Drive { target: 1.0, speed: 1.0, phase: 0.0, cur: [0.0; 2], nxt: [0.0; 2], last: [0.0; 2], primed: false }
+    }
 }
 
 impl AudioFeed {
     /// Fill `out` (interleaved stereo) from the queue; silence where the queue runs dry.
+    ///
+    /// While the preview asks for a speed below real time (see [`AudioFeed::set_speed`]) the
+    /// sound is read at that speed, interpolated between frames, and `consumed` counts only the
+    /// source frames actually taken: the preview's clock slows down with the sound, so a preview
+    /// waiting for a frame eases down and back up instead of falling silent or repeating.
     pub fn pull(&self, out: &mut [f32]) {
+        if self.varispeed(out) {
+            return;
+        }
         let mut real = 0usize;
         let mut pk = [0.0f32; 2];
         if let Ok(mut q) = self.queue.lock() {
@@ -90,7 +148,102 @@ impl AudioFeed {
             real = n;
         }
         out[real..].iter_mut().for_each(|o| *o = 0.0);
+        if real < out.len() {
+            self.underruns.fetch_add(1, Ordering::Relaxed);
+        }
         self.consumed.fetch_add((real / 2) as u64, Ordering::Relaxed);
+        self.note_peaks(pk);
+    }
+
+    /// Read the queue at the eased speed when it is below real time (`true` when it did); at real
+    /// time [`AudioFeed::pull`] takes whole frames, exactly as they were mixed.
+    fn varispeed(&self, out: &mut [f32]) -> bool {
+        let Ok(mut d) = self.drive.lock() else { return false };
+        // Never slowed down: read whole frames, exactly as they were mixed. Once slowed, the
+        // eased path keeps the two frames it has already taken from the queue; snapping back to
+        // the whole-frame path would drop them.
+        if d.target >= 1.0 && (d.speed - 1.0).abs() < 1e-3 && !d.primed {
+            d.speed = 1.0;
+            return false;
+        }
+        let Ok(mut q) = self.queue.lock() else { return false };
+        let rate = self.rate.load(Ordering::Relaxed).max(8000) as f32;
+        // About 150 ms to cover most of the way to a new speed: a smooth ramp, no click.
+        let k = 1.0 / (0.15 * rate);
+        let mut taken = 0u64;
+        let next = |q: &mut VecDeque<f32>, last: &mut [f32; 2], taken: &mut u64| match (q.pop_front(), q.pop_front()) {
+            (Some(l), Some(r)) => {
+                *last = [l, r];
+                *taken += 1;
+                [l, r]
+            }
+            // Past the queue's end: hold the last frame (silence before the first one), and
+            // count nothing, so a dry queue never moves the clock.
+            _ => *last,
+        };
+        let mut last = d.last;
+        let mut cur = d.cur;
+        let mut nxt = d.nxt;
+        if !d.primed {
+            cur = next(&mut q, &mut last, &mut taken);
+            nxt = next(&mut q, &mut last, &mut taken);
+            d.primed = true;
+        }
+        let mut pk = [0.0f32; 2];
+        for f in out.chunks_mut(2) {
+            d.speed += (d.target - d.speed) * k;
+            let speed = d.speed.clamp(MIN_SPEED, MAX_SPEED);
+            let p = d.phase;
+            let l = cur[0] + (nxt[0] - cur[0]) * p;
+            let r = cur[1] + (nxt[1] - cur[1]) * p;
+            f[0] = l;
+            if f.len() > 1 {
+                f[1] = r;
+            }
+            pk[0] = pk[0].max(l.abs());
+            pk[1] = pk[1].max(r.abs());
+            d.phase += speed;
+            while d.phase >= 1.0 {
+                d.phase -= 1.0;
+                cur = nxt;
+                nxt = next(&mut q, &mut last, &mut taken);
+            }
+        }
+        d.last = last;
+        d.cur = cur;
+        d.nxt = nxt;
+        self.consumed.fetch_add(taken, Ordering::Relaxed);
+        if taken == 0 {
+            // The queue had nothing to give: the dry pull the ordinary path counts too, so the
+            // feeder's lead can also grow for a preview that already slowed down.
+            self.underruns.fetch_add(1, Ordering::Relaxed);
+        }
+        drop(q);
+        drop(d);
+        self.note_peaks(pk);
+        true
+    }
+
+    /// Play at `speed` (1.0 = real time): a preview that waits for a frame asks for less, and the
+    /// sound eases down to it and back up, so playback slows smoothly instead of falling silent.
+    pub fn set_speed(&self, speed: f32) {
+        if let Ok(mut d) = self.drive.lock() {
+            d.target = speed.clamp(MIN_SPEED, MAX_SPEED);
+        }
+    }
+
+    /// The speed the sound is being read at (eased toward the one last set).
+    pub fn speed(&self) -> f32 {
+        self.drive.lock().map(|d| d.speed).unwrap_or(1.0)
+    }
+
+    /// The rate the feed is pulled at: a change of speed is eased over about 150 ms of it.
+    pub fn set_rate(&self, rate: u32) {
+        self.rate.store(rate, Ordering::Relaxed);
+    }
+
+    /// Raise the peak meters with the samples just produced.
+    fn note_peaks(&self, pk: [f32; 2]) {
         for (c, v) in pk.into_iter().enumerate() {
             // Rust 1.99 renamed `fetch_update` to `try_update`; keep the old name while the
             // workspace supports Rust 1.95 (`rust-version`).
@@ -115,6 +268,11 @@ impl AudioFeed {
     /// Sample frames waiting in the queue.
     pub fn queued_frames(&self) -> usize {
         self.queue.lock().map(|q| q.len() / 2).unwrap_or(0)
+    }
+
+    /// Pulls that ran dry since the playback started (the feeder was late).
+    pub fn underruns(&self) -> u64 {
+        self.underruns.load(Ordering::Relaxed)
     }
 
     pub fn consumed(&self) -> u64 {
@@ -183,12 +341,79 @@ pub struct AudioPlayback {
     feeder: Option<(RenderSource, ItemId, i64, u32)>,
     pub rate: u32,
     pub span: PlaySpan,
+    /// The clock the stall watch last saw (see [`AudioPlayback::stalled`]).
+    last_clock: Mutex<Watch>,
 }
 
-/// Audio kept queued ahead of the device: ~200 ms (a feeder thread tops it up continuously);
-/// wasm32 tops it up once per UI frame, so it keeps ~350 ms to ride out slow frames.
+/// What the stall watch last saw: the clock's value, when it was seen, and whether the feed had
+/// samples queued then (a feeder filling an empty queue is not a stalled device).
+#[derive(Default)]
+struct Watch {
+    consumed: u64,
+    at: Option<f64>,
+    queued: bool,
+}
+
+/// How long a stream may leave queued samples unpulled before the preview falls back to the frame
+/// clock (seconds): a dead device must not freeze the preview.
+const AUDIO_STALL: f64 = 0.5;
+
+/// How long the preview waits for samples from a feeder that has nothing queued yet (seconds).
+/// Mixing the first block can take seconds (a long FLAC decodes whole, #408), and that is not a
+/// dead stream: give it room before giving up on the sound.
+const AUDIO_STARVE: f64 = 5.0;
+
+/// The stall watch: `true` once the clock has stood still long enough to give up on the sound.
+/// The watch starts again whenever the queue gains its first samples (the device had nothing to
+/// play before that, so a feeder's slow first block is not a stall, #408) and whenever the clock
+/// moves; a stream with samples queued that it does not pull is dead after [`AUDIO_STALL`].
+fn stall_watch(w: &mut Watch, now: f64, consumed: u64, queued: bool) -> bool {
+    let moved = consumed != w.consumed || queued != w.queued;
+    let Some(since) = w.at.filter(|_| !moved) else {
+        *w = Watch { consumed, at: Some(now), queued };
+        return false;
+    };
+    now - since > if queued { AUDIO_STALL } else { AUDIO_STARVE }
+}
+
+/// Audio kept queued ahead of the device: ~100 ms (a feeder thread tops it up continuously), so a
+/// preview that restarts its sound repeats as little of the queue as the device needs; wasm32
+/// tops it up once per UI frame, so it keeps ~350 ms to ride out slow frames.
 fn queue_target(rate: u32) -> usize {
-    if cfg!(target_arch = "wasm32") { rate as usize * 7 / 20 } else { rate as usize / 5 }
+    if cfg!(target_arch = "wasm32") { rate as usize * 7 / 20 } else { rate as usize / 10 }
+}
+
+/// How far ahead the feeder keeps the queue: the base lead, grown whenever the device ran dry
+/// (a render pool takes the cores, and the callback is then served late) and given back once the
+/// machine has settled. Pure arithmetic, so it is unit tested.
+struct Lead {
+    base: usize,
+    target: usize,
+    seen: u64,
+    idle: u32,
+}
+
+impl Lead {
+    fn new(base: usize) -> Lead {
+        Lead { base, target: base, seen: 0, idle: 0 }
+    }
+
+    /// Feed the underrun count seen so far and the step to grow by; returns the lead to keep.
+    fn update(&mut self, underruns: u64, step: usize) -> usize {
+        if underruns != self.seen {
+            self.seen = underruns;
+            self.target = (self.target + step.max(1)).min(self.base * 4);
+            self.idle = 0;
+        } else if self.target > self.base {
+            // About a second of a full queue at the loop's 4 ms sleep: give a little back.
+            self.idle += 1;
+            if self.idle >= 250 {
+                self.target = self.target.saturating_sub(step.saturating_mul(4)).max(self.base);
+                self.idle = 0;
+            }
+        }
+        self.target
+    }
 }
 
 impl AudioPlayback {
@@ -210,10 +435,20 @@ impl AudioPlayback {
         let mix = if mix_rate == 0 { rate } else { mix_rate.clamp(8000, 192_000) };
         let span = PlaySpan::new(start, wa, wb, looping, rate);
         let feed = Arc::new(AudioFeed::default());
+        feed.set_rate(rate);
         let stop = Arc::new(AtomicBool::new(false));
         if cfg!(target_arch = "wasm32") {
             // The device takes samples only in `pump`, which fills the queue first.
-            let mut p = AudioPlayback { feed: feed.clone(), device, stop, thread: None, feeder: Some((src, comp, span.start, mix)), rate, span };
+            let mut p = AudioPlayback {
+                feed: feed.clone(),
+                device,
+                stop,
+                thread: None,
+                feeder: Some((src, comp, span.start, mix)),
+                rate,
+                span,
+                last_clock: Mutex::new(Watch::default()),
+            };
             p.device.start(feed)?;
             p.pump();
             return Ok(p);
@@ -228,8 +463,11 @@ impl AudioPlayback {
                 .name("ec-audio-feed".into())
                 .spawn(move || {
                     let mut cursor = span.start;
-                    let target = queue_target(rate);
+                    let mut lead = Lead::new(queue_target(rate));
                     while !stop.load(Ordering::Relaxed) {
+                        // A render pool takes the cores: keep a longer lead while the device runs
+                        // dry, and give it back once the machine settles (a crackle is an underrun).
+                        let target = lead.update(feed.underruns(), rate as usize / 20);
                         if feed.queued_frames() < target && !feed.finished.load(Ordering::Relaxed) {
                             cursor = feed_block(&src, comp, &feed, &span, cursor, rate, mix);
                         } else {
@@ -239,8 +477,14 @@ impl AudioPlayback {
                 })
                 .map_err(|e| e.to_string())?
         };
-        device.start(feed.clone())?;
-        Ok(AudioPlayback { feed, device, stop, thread: Some(thread), feeder: None, rate, span })
+        if let Err(e) = device.start(feed.clone()) {
+            // The feeder has nothing to feed: signal it and let it leave at its next stop check.
+            // Joining here would wait for a slow mix on the UI thread that starts the preview.
+            stop.store(true, Ordering::Relaxed);
+            drop(thread);
+            return Err(e);
+        }
+        Ok(AudioPlayback { feed, device, stop, thread: Some(thread), feeder: None, rate, span, last_clock: Mutex::new(Watch::default()) })
     }
 
     /// Every UI frame while playing: on wasm32 mix ahead into the feed (what the feeder thread
@@ -253,6 +497,21 @@ impl AudioPlayback {
             }
         }
         self.device.pump();
+    }
+
+    /// Slow the sound (and the clock with it) while the picture waits for a frame: the pitch
+    /// eases down and back up, so playback never falls silent and never repeats itself.
+    pub fn speed(&self, speed: f32) {
+        self.feed.set_speed(speed);
+    }
+
+    /// The audio clock has stood still: the stream is dead, or the feeder has nothing to give it.
+    /// The preview falls back to the frame clock instead of freezing on it. A stream that leaves
+    /// queued samples unpulled is dead after [`AUDIO_STALL`]; one with nothing queued is still
+    /// waiting for its feeder, which may be decoding a long file ([`AUDIO_STARVE`], #408).
+    pub fn stalled(&self, now: f64) -> bool {
+        let Ok(mut w) = self.last_clock.lock() else { return false };
+        stall_watch(&mut w, now, self.feed.consumed(), self.feed.queued_frames() > 0)
     }
 
     /// The comp sample index audible now.
@@ -270,6 +529,15 @@ impl AudioPlayback {
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
+    }
+
+    /// Stop without waiting for the feeder: the stall fallback runs on the UI thread while the
+    /// feeder may still be mixing a slow file, and blocking there is what the fallback avoids. The
+    /// thread leaves at its next stop check; dropping its handle lets it finish on its own.
+    pub fn stop_async(&mut self) {
+        self.device.stop();
+        self.stop.store(true, Ordering::Relaxed);
+        let _ = self.thread.take();
     }
 }
 
@@ -483,6 +751,89 @@ mod tests {
         assert_eq!(f.consumed(), 2);
         assert_eq!(f.take_peaks(), [0.5, 0.9]);
         assert_eq!(f.take_peaks(), [0.0, 0.0]);
+    }
+
+    /// A slow first block is not a stall: the short watch starts when the queue gains samples,
+    /// not when the feeder begins mixing (#408).
+    #[test]
+    fn the_stall_watch_ignores_a_slow_first_block() {
+        let mut w = Watch::default();
+        assert!(!stall_watch(&mut w, 0.0, 0, false), "the watch starts");
+        assert!(!stall_watch(&mut w, 2.0, 0, false), "the feeder is still mixing");
+        // The first block lands: the device finally has something to play, so the 0.5 s watch
+        // starts here rather than 2 s ago.
+        assert!(!stall_watch(&mut w, 2.0, 0, true), "a queue with samples is not a stall yet");
+        assert!(!stall_watch(&mut w, 2.2, 0, true), "the device had 200 ms to pull");
+        assert!(stall_watch(&mut w, 2.6, 0, true), "queued samples that are not pulled: dead");
+        // Nothing queued again: only the long feeder watch applies.
+        assert!(!stall_watch(&mut w, 3.0, 0, false));
+        assert!(!stall_watch(&mut w, 7.0, 0, false), "4 s: still inside the feeder's window");
+        assert!(stall_watch(&mut w, 8.2, 0, false), "5.2 s with nothing to play: stalled");
+        // The clock moving keeps it alive at any speed.
+        assert!(!stall_watch(&mut w, 8.3, 1600, false));
+    }
+
+    /// The slowed path counts a pull that found nothing, so the lead grows after a slowdown too.
+    #[test]
+    fn a_dry_varispeed_pull_counts_as_an_underrun() {
+        let f = AudioFeed::default();
+        f.set_rate(48_000);
+        f.set_speed(0.5);
+        let mut out = vec![0.0f32; 64];
+        f.pull(&mut out);
+        assert_eq!(f.underruns(), 1, "an empty queue counts like the ordinary path");
+        f.push(&vec![0.1f32; 256]);
+        f.pull(&mut out);
+        assert_eq!(f.underruns(), 1, "a served pull does not");
+    }
+
+    /// A lead grows while the device runs dry and shrinks back once it is served in time.
+    #[test]
+    fn the_queue_lead_grows_on_underruns_and_settles_down() {
+        let mut lead = Lead::new(4_800);
+        let step = 2_400;
+        assert_eq!(lead.update(0, step), 4_800, "no underrun: the base lead");
+        assert_eq!(lead.update(1, step), 7_200, "a dry pull adds a step");
+        assert_eq!(lead.update(2, step), 9_600);
+        assert_eq!(lead.update(3, step), 12_000);
+        assert_eq!(lead.update(4, step), 14_400);
+        assert_eq!(lead.update(5, step), 16_800);
+        assert_eq!(lead.update(6, step), 19_200, "four times the base at most");
+        // A second without a dry pull (250 sleeps of 4 ms) gives a little back, then more.
+        for n in 0..249 {
+            assert_eq!(lead.update(6, step), 19_200, "{n}");
+        }
+        assert_eq!(lead.update(6, step), 9_600, "a step-of-four back");
+        for _ in 0..250 {
+            lead.update(6, step);
+        }
+        assert_eq!(lead.update(6, step), 4_800, "and the base after another second");
+    }
+
+    /// A preview that waits for a frame slows the sound down (#947): it is still there, it just
+    /// takes fewer source frames per output frame, and the clock (consumed) slows with it.
+    #[test]
+    fn a_slow_speed_reads_between_frames_and_slows_the_clock() {
+        let f = AudioFeed::default();
+        f.set_rate(48_000);
+        // A steady level: nothing is silent, and every output sample should be the same.
+        f.push(&vec![0.5f32; 400_000]);
+        let mut out = vec![0.0f32; 4800];
+        f.pull(&mut out);
+        assert_eq!(f.consumed(), 2400, "real time takes whole frames");
+        // Slowed down: the same tenth of a second of output takes fewer source frames.
+        f.set_speed(0.5);
+        f.pull(&mut out);
+        let slow = f.consumed() - 2400;
+        assert!(slow > 0 && slow < 2400, "a slowed read took {slow} of 2400 frames");
+        assert!(f.speed() < 1.0, "the speed eases down: {}", f.speed());
+        assert!(out.iter().all(|v| (*v - 0.5).abs() < 1e-6), "the sound is still there, not silence");
+        // Back to real time: the speed eases up again.
+        f.set_speed(1.0);
+        for _ in 0..40 {
+            f.pull(&mut out);
+        }
+        assert!((f.speed() - 1.0).abs() < 0.01, "the speed came back: {}", f.speed());
     }
 
     /// #408: starting a preview with sound returns at once even when reading the footage takes

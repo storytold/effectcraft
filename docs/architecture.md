@@ -229,10 +229,12 @@ keys, with a nesting-depth guard.
 
 **Audio** is mixed by `render::audio::mix_comp` in blocks: Audio switch, solo, Audio Levels and
 the Effect > Audio effects (`effects::audio_fx`, applied per layer with a pre-roll so blocks are
-independent). Export and preview playback share it; the desktop app plays it through cpal and the
-audio clock drives preview playback (`ui-egui::audio`). The sound starts once the frames ahead
-are cached; until then, and whenever playback reaches a frame that isn't cached, every frame
-shows as it renders, silently, rather than being skipped. Layer and frame caches ignore the
+independent). Export and preview playback share it; the desktop app plays it through cpal on one
+output it opens once and keeps open for the session (the app warms it at startup), and the audio
+clock drives preview playback (`ui-egui::audio`). A preview starts its sound with its first
+frame, and a frame it must wait for slows it down rather than stopping it: the sound is read at
+an eased speed below real time (`AudioFeed::set_speed`, varispeed) and the clock slows with it,
+so playback eases down and back up and never falls silent. Layer and frame caches ignore the
 switches that don't change pixels (Audio, Lock, Shy, Hide Shy Layers: `Switches::pixels`,
 `Comp::same_pixels`), so toggling them keeps the cached frames.
 

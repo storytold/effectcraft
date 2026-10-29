@@ -4,6 +4,17 @@ use super::{EffectcraftApp, FrameKey, FrameWindow, ItemId, PlaybackPass, audio, 
 /// [`EffectcraftApp::editing`]).
 const EDIT_QUIET: f64 = 0.3;
 
+/// How long a preview with sound may show no new frame before it gives the sound up (seconds):
+/// past the slowest speed there is nothing left to slow, and playing on over a still frame only
+/// hides what the render is doing (#2472).
+const AUDIO_GIVE_UP: f64 = 1.5;
+
+/// A preview whose sound was given up takes it up again once the picture has moved within this
+/// long (seconds), and no sooner than this long after giving it up — a preview that cannot keep
+/// up must not thrash between the two paths.
+const RESUME_QUIET: f64 = 0.5;
+const RESUME_COOLDOWN: f64 = 1.0;
+
 impl EffectcraftApp {
     /// RAM preview: advance at the preview's frame rate when frames are cached; otherwise hold
     /// and keep rendering ahead (the green cache bar fills, then playback runs in real time).
@@ -52,11 +63,13 @@ impl EffectcraftApp {
             self.cache_when_idle(ctx, &c, &series, now, input_active, (wa, wb));
             return;
         }
-        let fit = self.frames_that_fit(&c, scale);
-        self.start_held_audio(&pass, fit);
         if self.advance_audio_clock(&pass, step) {
             return;
         }
+        // The sound was given up earlier (a stall, a stream that died, a render too slow): take it
+        // up again from the frame on screen once the picture moves, or a preview that stalled once
+        // would stay silent for the rest of the pass (#947).
+        self.resume_audio(&pass);
         self.advance_frame_clock(&pass, step);
     }
 
@@ -115,6 +128,8 @@ impl EffectcraftApp {
             self.playback.caching = false;
             self.playback.start_wall = now;
             self.playback.start_frame = p.first;
+            // The cache may have taken seconds: the sound's resume watch starts from this moment.
+            self.playback.last_shown = now;
             self.session.set_time(fr.tick_of(p.first));
             self.start_audio(fr.tick_of(p.first));
         }
@@ -179,20 +194,28 @@ impl EffectcraftApp {
         }
     }
 
-    /// Held sound starts once the frames ahead are cached (see `Playback::audio_held`): the
-    /// prefetch window when the silent preview keeps real time, else the rest of the preview.
-    fn start_held_audio(&mut self, pass: &PlaybackPass<'_>, fit: i64) {
-        let PlaybackPass { now, plan, series, cur, ahead, frame_rate: fr, .. } = *pass;
-        if !self.playback.audio_held {
+    /// Take the sound up again after [`Self::advance_audio_clock`] gave it up, once the picture is
+    /// moving again (a frame shown lately), no sooner than [`RESUME_COOLDOWN`].
+    fn resume_audio(&mut self, pass: &PlaybackPass<'_>) {
+        if self.audio.is_some() || !self.playback.playing || self.playback.caching || !self.audio_plays() {
             return;
         }
-        let Some(p) = plan else { return };
-        if (self.playback.keeps_up(now) && self.cached_ahead(&p, &series, cur, ahead.min(fit))) || self.cached_ahead(&p, &series, cur, fit) {
-            self.playback.audio_held = false;
-            self.playback.start_wall = now;
-            self.playback.start_frame = cur;
-            self.start_audio(fr.tick_of(cur));
+        let PlaybackPass { now, frame_rate: fr, cur, video, .. } = *pass;
+        if now - self.playback.gave_up_at < RESUME_COOLDOWN {
+            return;
         }
+        // An audio-only preview shows no frames, so "the picture moved lately" says nothing there:
+        // only a preview with video waits for one.
+        if video && now - self.playback.last_shown > RESUME_QUIET {
+            return;
+        }
+        // Each attempt restarts the cooldown, so a preview that cannot keep up tries again at most
+        // once a second instead of every frame.
+        self.playback.gave_up_at = now;
+        // Resume where the sound stopped: the frame on screen for a preview with video, and the
+        // audible frame for an audio-only one (its session time never moves).
+        let at = if video { cur } else { self.playback.audio_frame.unwrap_or(cur) };
+        self.start_audio(fr.tick_of(at));
     }
 
     /// Audio clock drives playback: show the frame under the audible sample. Returns true when
@@ -210,31 +233,65 @@ impl EffectcraftApp {
             self.stop();
             return true;
         }
+        // Whether the frame under the audible sample is there at all: a preview that loops over a
+        // single frame keeps the same frame on screen forever, and that is not a render that fell
+        // behind — only a missing frame is worth giving the sound up for.
+        let audible = audio::frame_of_sample(a.clock(), a.rate, fr).clamp(wa, wb);
+        let missing = !self.frames.is_cached(&FrameKey { frame: wa + (audible - wa).div_euclid(step) * step, ..series });
+        if a.stalled(now) || (video && missing && now - self.playback.last_shown > AUDIO_GIVE_UP) {
+            // The sound stopped, or the picture has not moved for a while (the renderer cannot keep
+            // up even at the slowest speed): fall back to the frame clock from where playback is,
+            // instead of freezing the preview or playing on over a still frame (#947). An
+            // audio-only preview leaves the session time put, so its progress is `audio_frame`.
+            // The feeder may still be mixing a slow file: stop it without waiting for it.
+            let at = if video { cur } else { self.playback.audio_frame.unwrap_or(cur) };
+            self.playback.start_wall = now;
+            self.playback.start_frame = at;
+            self.playback.gave_up_at = now;
+            if let Some(mut a) = self.audio.take() {
+                a.stop_async();
+            }
+            return false;
+        }
         let snap = |f: i64| wa + (f - wa).div_euclid(step) * step;
-        let target = snap(audio::frame_of_sample(a.clock(), a.rate, fr).clamp(wa, wb));
+        let target = snap(audible);
         if !video {
             self.playback.audio_frame = Some(target);
         } else if self.frames.is_cached(&FrameKey { frame: target, ..series }) {
+            // The picture caught up: the sound eases back to real time.
+            a.speed(1.0);
             self.playback.waiting = false;
             if target != cur {
                 self.session.set_time(fr.tick_of(target));
                 self.playback.frame_shown(now);
             }
         } else {
-            // Rendering can't keep up: rather than skip frames, the sound stops and every
-            // frame shows as it renders until the frames ahead are cached again.
-            self.audio = None;
-            self.playback.audio_held = true;
-            self.playback.waiting = true;
-            // The rate measured before the stall no longer says it keeps up.
+            // The frame under the audible sample is not rendered yet. Ask for it here — unless an
+            // urgent request is already in flight, since a new one cancels the previous one and a
+            // frame that is cancelled forever never renders. Then slow the sound (and the clock
+            // with it) so the picture gets time: playback eases down and back up instead of falling
+            // silent or repeating itself (#947, like a tape losing speed).
+            if !self.frames.urgent_pending() {
+                self.request_frame_urgent(pass.cid, target, pass.scale);
+            }
+            if !self.playback.waiting {
+                self.playback.waiting = true;
+                self.playback.waiting_since = now;
+            }
+            let waited = now - self.playback.waiting_since;
+            a.speed(if waited < 0.25 {
+                0.85
+            } else if waited < 0.75 {
+                0.7
+            } else {
+                0.5
+            });
+            // The rate measured before the wait no longer says it keeps up.
             self.playback.shown_at.clear();
-            self.playback.start_wall = now;
-            self.playback.start_frame = cur;
         }
         ctx.request_repaint();
         true
     }
-
     /// The wall clock advances the preview when no audio device drives it, and shows the target
     /// frame (or holds when it is not cached yet).
     fn advance_frame_clock(&mut self, pass: &PlaybackPass<'_>, step: i64) {
@@ -281,11 +338,13 @@ impl EffectcraftApp {
                 self.playback.frame_shown(now);
             }
         } else {
-            // Not cached yet: hold the clock at the current frame (cache first, then play).
+            // Not cached yet: hold the clock at the current frame (cache first, then play). A frame
+            // the cache does have ahead is shown, so the sound's resume watch sees the picture move.
             self.playback.waiting = true;
             let next = plan.and_then(|p| p.frame_after(cur, 1)).unwrap_or(if cur + 1 > wb { wa } else { cur + 1 });
             if self.frames.is_cached(&FrameKey { frame: next, ..series }) {
                 self.session.set_time(fr.tick_of(next));
+                self.playback.frame_shown(now);
             }
             self.playback.start_wall = now;
             self.playback.start_frame = fr.frame_at(self.session.time());
@@ -358,12 +417,6 @@ impl EffectcraftApp {
     /// How many viewer frames of `comp` at `scale` the RAM preview budget holds (90 % of it,
     /// at least one).
     /// The frames of `plan` from `cur` to its end, or as many as fit in the RAM preview, are
-    /// cached: sound can play from `cur` in real time.
-    fn cached_ahead(&self, plan: &effectcraft_engine::preview::PreviewPlan, series: &FrameKey, cur: i64, fit: i64) -> bool {
-        let cached = self.frames.cached_frames(series);
-        (0..fit).map_while(|k| plan.frame_after(cur, k)).take_while(|f| *f >= cur).all(|f| cached.binary_search(&f).is_ok())
-    }
-
     fn frames_that_fit(&self, comp: &effectcraft_engine::project::Comp, scale: f64) -> i64 {
         let side = |n: u32| (n as f64 * scale).ceil().max(1.0);
         let frame = side(comp.width) * side(comp.height) * 4.0;

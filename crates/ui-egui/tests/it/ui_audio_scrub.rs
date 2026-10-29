@@ -1,6 +1,6 @@
 //! Audio scrubbing: Ctrl/Cmd-dragging the current time plays one frame of the comp's mix at each
 //! new frame (each snippet replacing what is still queued); holding still repeats nothing; silent
-//! comps open no output; an idle scrub closes it. Previews with audio wait for frames.
+//! comps open no output; an idle scrub closes it. Previews with audio start their sound at once.
 
 use std::sync::{Arc, Mutex};
 
@@ -166,23 +166,19 @@ fn cmd_dragging_the_current_time_scrubs_and_an_idle_scrub_closes() {
     assert!(h.state().scrub.is_none() && fake.0.lock().unwrap().1, "closed and stopped");
 }
 
-/// A preview with audio waits for frames like a silent one (#103): while the frames ahead aren't
-/// cached, every frame shows as it renders, silently; the sound starts once the rest of the
-/// preview is cached, and a frame that isn't cached stops it instead of being skipped.
+/// A preview with audio starts its sound with the first frame (#947): the opening is heard
+/// instead of being skipped while frames render, and no frame is skipped before it. A frame that
+/// isn't rendered then doesn't stop the sound: the preview slows it down, and the clock with it,
+/// until the picture catches up.
 #[test]
-fn preview_with_audio_shows_every_frame_and_sounds_once_cached() {
+fn preview_with_audio_starts_the_sound_at_once() {
     let fake = Fake::default();
     let (mut app, cid) = setup(true, &fake);
-    // Hold rendering in the test: the cache cannot fill ahead of what the test releases, so the
-    // silently shown frames and the moment the sound starts do not depend on the host's threads.
+    // Hold rendering in the test: a frame is cached only when the test releases it.
     let gate = GatedFrames::default();
     let renderer: Arc<dyn RemoteFrames> = Arc::new(gate.clone());
     app.frames.set_remote(Some(renderer));
-    let ahead = (app.frames.parallelism() * 2).max(4);
-    app.session.execute("comp.settings", json!({"comp": cid.0, "duration": (4 * ahead) as f64 / 30.0})).unwrap();
     let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_step_dt(1.0 / 30.0).build_eframe(|_| app);
-    // Playback measures time on the app clock, never `ctx.input(|i| i.time)`; drive that clock
-    // explicitly at one frame per step.
     h.state_mut().use_manual_clock();
     h.run_steps(2);
     gate.discard(&mut h);
@@ -192,70 +188,60 @@ fn preview_with_audio_shows_every_frame_and_sounds_once_cached() {
     };
     let now = h.state().now();
     h.state_mut().play(now);
-    assert!(h.state().playback.audio_held && h.state().audio.is_none(), "nothing is cached: no sound yet");
+    assert!(h.state().audio.is_some(), "the sound starts with the first frame");
+    assert!(fake.0.lock().unwrap().0.is_some(), "the output was given the feed");
+    // The fake output never pulls, so take one frame's worth of samples each step: the audio
+    // clock then moves one comp frame per step, as a device playing in real time would.
+    let mut one_frame = vec![0.0f32; 3200];
     let mut last = frame(&h);
-    let mut shown = 0;
-    // Show frames while only those frames are cached: they play silently first.
-    for _ in 0..4 {
+    let mut moved = 0;
+    for _ in 0..60 {
         let target = last + 1;
         gate.render(&mut h, cid, &[target]);
-        h.state_mut().clock_mut().advance(1.0 / 30.0);
+        if let Some(a) = &h.state().audio {
+            a.feed.pull(&mut one_frame);
+        }
         h.step();
         let f = frame(&h);
-        // Accumulating 1/30 in f64 can leave the same frame up for one more step; it must never
-        // jump over a frame.
         assert!(f == last || f == last + 1, "{last} → {f}: a frame was skipped");
-        shown += usize::from(f != last);
+        if f != last {
+            moved += 1;
+        }
         last = f;
-    }
-    // A frame that has not rendered holds the clock at the frame on screen; once it renders it is
-    // shown, never jumped over. This exercises the production hold path, not a test-only shortcut.
-    let waiting = last;
-    h.state_mut().clock_mut().advance(1.0 / 30.0);
-    h.step();
-    assert_eq!(frame(&h), waiting, "an uncached frame holds the preview instead of being skipped");
-    gate.render(&mut h, cid, &[waiting + 1]);
-    // f64 clock accumulation need not put the next step exactly on the next frame boundary;
-    // keep stepping until the held frame appears, and never allow it to jump past that frame.
-    let mut showed_waiting = false;
-    for _ in 0..4 {
-        h.state_mut().clock_mut().advance(1.0 / 30.0);
-        h.step();
-        let f = frame(&h);
-        assert!(f == waiting || f == waiting + 1, "{waiting} → {f}: the held frame was skipped");
-        if f == waiting + 1 {
-            showed_waiting = true;
+        if moved >= 3 {
             break;
         }
     }
-    assert!(showed_waiting, "the waiting frame is shown once it renders");
-    shown += 1;
-    last = waiting + 1;
-    assert!(shown > 0, "frames played silently first");
-    assert!(h.state().audio.is_none() && h.state().playback.audio_held, "the rest of the range is not cached: the sound waits");
-    // Cache everything ahead; only then may the sound start.
-    let end = h.state().playback.plan.expect("a preview plan").end;
-    let rest: Vec<i64> = ((last + 1)..=end).collect();
-    gate.render(&mut h, cid, &rest);
-    h.step();
-    assert!(h.state().audio.is_some() && fake.0.lock().unwrap().0.is_some(), "the sound started once the frames ahead were cached");
-    // A frame that isn't cached stops the sound rather than being skipped.
-    gate.discard(&mut h);
+    assert!(moved >= 3, "the preview moved with the sound");
+    // A frame that isn't rendered holds the preview and slows the sound instead of stopping it.
+    let waiting = last;
     h.state().frames.set_budget(0);
     h.state().frames.clear();
+    gate.discard(&mut h);
+    if let Some(a) = &h.state().audio {
+        a.feed.pull(&mut one_frame);
+    }
     h.step();
-    assert!(h.state().audio.is_none() && h.state().playback.audio_held && h.state().playback.playing);
+    assert_eq!(frame(&h), waiting, "an uncached frame holds the preview instead of being skipped");
+    assert!(h.state().playback.waiting, "the picture waits for the frame");
+    let audio = h.state().audio.as_ref().expect("the sound keeps playing while the picture waits");
+    // Top the queue up: the feeder mixes in real time, and the test reads far faster than that.
+    audio.feed.clear();
+    audio.feed.push(&vec![0.5f32; 200_000]);
+    audio.feed.pull(&mut one_frame);
+    assert!(one_frame.iter().any(|v| v.abs() > 0.01), "the sound is still there, not silence");
+    for _ in 0..40 {
+        audio.feed.pull(&mut one_frame);
+    }
+    assert!(audio.feed.speed() < 0.9, "the sound slowed down: {}", audio.feed.speed());
 }
 
-/// A preview whose frames render in real time sounds without waiting for the whole work area to
-/// be cached (#208): once the silent preview has kept up for a moment with the frames ahead
-/// cached, the sound starts, still without skipping a frame before it.
+/// A long preview's sound starts at once too — it no longer waits for the work area to be cached
+/// (#208) — and keeps playing while frames render in time.
 #[test]
-fn preview_with_audio_sounds_once_rendering_keeps_up() {
+fn a_long_preview_starts_its_sound_at_once_and_keeps_it() {
     let fake = Fake::default();
     let (mut app, cid) = setup_long(true, &fake, 30.0);
-    // Release only the frames this test chooses, and drive the app clock: rendering cannot race
-    // the clock, so a frame is never skipped by a slow or loaded test host.
     let gate = GatedFrames::default();
     let renderer: Arc<dyn RemoteFrames> = Arc::new(gate.clone());
     app.frames.set_remote(Some(renderer));
@@ -263,37 +249,24 @@ fn preview_with_audio_sounds_once_rendering_keeps_up() {
     h.state_mut().use_manual_clock();
     h.run_steps(2);
     gate.discard(&mut h);
-    let ahead = (h.state().frames.parallelism() * 2).max(4) as i64;
     let frame = |h: &Harness<'_, EffectcraftApp>| {
         let app = h.state();
         app.session.project.comp(cid).unwrap().frame_rate.frame_at(app.session.time())
     };
     let start = h.state().now();
     h.state_mut().play(start);
-    assert!(h.state().playback.audio_held && h.state().audio.is_none(), "nothing is cached: no sound yet");
+    assert!(h.state().audio.is_some() && fake.0.lock().unwrap().0.is_some(), "the sound starts at once");
+    let mut one_frame = vec![0.0f32; 3200];
     let mut last = frame(&h);
-    let mut shown = 0;
-    // Two seconds of playback at one frame per clock step: keep the prefetch window cached, but
-    // not the rest of the 30 s comp, so the sound has to start by the real-time rule.
-    for step in 1..=60 {
+    for _ in 0..60 {
         let target = last + 1;
-        let window: Vec<i64> = (target..target + ahead).collect();
+        let window: Vec<i64> = (target..target + 4).collect();
         gate.render(&mut h, cid, &window);
-        // Set the clock to this step's exact time rather than adding 1/30 repeatedly: accumulated
-        // f64 error can put one step just below a frame boundary and the next just above it, so
-        // `floor(elapsed × fps)` would otherwise jump from frame N to N + 2 for a one-frame step.
-        let now = h.state().now();
-        let tick_time = start + step as f64 / 30.0;
-        h.state_mut().clock_mut().advance(tick_time - now);
-        h.step();
-        if h.state().audio.is_some() {
-            break;
+        if let Some(a) = &h.state().audio {
+            a.feed.pull(&mut one_frame);
         }
-        let f = frame(&h);
-        assert!(f == last || f == last + 1, "{last} → {f}: a frame was skipped");
-        shown += usize::from(f != last);
-        last = f;
+        h.step();
+        last = frame(&h);
+        assert!(h.state().audio.is_some() && h.state().playback.playing, "the sound kept playing at frame {last}");
     }
-    assert!(h.state().audio.is_some() && fake.0.lock().unwrap().0.is_some(), "the sound started within 2 s, at frame {last} of 900");
-    assert!(shown >= 3, "the sound starts only after the silent preview kept up for a moment");
 }
