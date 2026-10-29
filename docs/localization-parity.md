@@ -27,7 +27,8 @@ interface; Arabic and Hebrew text *in layers* is supported through its Middle Ea
   Brazilian Portuguese (695) and Czech (518), counted at this tree. Georgian has every row the
   Simplified Chinese catalog has, plus 191 for panels converted to the catalog.
 - **Effect names:** `crates/ui-egui/src/i18n/effects.rs`, keyed by **effect id**, in Simplified
-  Chinese and Georgian (307 rows, one per effect in the registry, plus its 21 categories). The registry's
+  Chinese, Georgian and Brazilian Portuguese (307 rows, one per effect in the registry, plus its
+  21 categories). The registry's
   English name stays the effect's identity: `effect.list`, `effect.apply {"effect": …}`, scripts
   and expressions match on it, and the property tree stores it as the effect group's name. Only
   the drawing — the Effect menu, Effect Controls, the Timeline and Effects & Presets — goes
@@ -76,7 +77,7 @@ the true percentages are slightly lower.
 | Hindi | `hi` | 0 | — | UI: Devanagari fallback font but no shaping; text layers shape Devanagari | no | none (After Effects: none) | 9–13 h + shaping in the UI |
 | Arabic | `ar` | 0 | — | UI: Arabic fallback font but no shaping and no RTL layout; text layers: bidi + shaping | no | none (After Effects: none) | 9–13 h + 15–25 h RTL UI |
 | French | `fr` | 624 (≈ 16%) | Menus only | Latin, fine | no | menus only | 7–10 h + review |
-| Portuguese (Brazil) | `pt-br` | 1,324 (≈ 34%): menus 629 rows, panels 695 | Panels and dialogs at the Chinese catalogs' source list; the six keys main added after that count are translated too; AI-assisted, not yet native-speaker proofread | Latin, fine | no | partial | independent native review |
+| Portuguese (Brazil) | `pt-br` | 1,324 (≈ 34%): menus 629 rows, panels 695 | Panels and dialogs at the Chinese catalogs' source list; the six keys main added after that count are translated too; effect names translated (307 + 21 categories), parameter names not; AI-assisted, not yet native-speaker proofread | Latin, fine | no | partial | independent native review |
 | Indonesian | `id` | 0 | — | Latin, fine | no | none (After Effects: none) | 8–12 h + review |
 | Japanese | `ja` | 1,322 (≈ 34%): menus 629 rows, panels 693 | Panels and dialogs partly | Japanese system fallback; vertical text and Tate-Chu-Yoko in text layers; IME | no | partial | 6–9 h + review |
 | German | `de` | 624 (≈ 16%) | Menus only (open PR #666 adds interface translations) | Latin, fine | no | menus only | 7–10 h + review |
@@ -112,6 +113,7 @@ can give; only Georgian, contributed by a native speaker (#1843), has had it.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-18 | minor | Brazilian Portuguese becomes the third language with an effect-name catalog (307 rows keyed by effect id + the 21 category folder names, wired into `catalog()`); the Effect menu, Effect Controls, the Timeline and Effects & Presets draw Portuguese; AI-assisted, not yet native-speaker proofread |
 | 2026-10-18 | minor | Brazilian Portuguese completes its panel catalog (278 new rows, 417 → 695, the Chinese catalogs' source list); the doc recount closes the drift the batch merges left in every language's panel count; AI-assisted, not yet native-speaker proofread |
 | 2026-10-12 | minor | Recounted: Russian, French, German and Czech menus (#873, #987), Brazilian Portuguese and Czech panels (#830, #987), Hangul probe (#599); overall ≈ 12% to ≈ 18%; Korean and Italian still absent |
 | 2026-10-14 | minor | Georgian (`ka`): menus 628, panels 886 (191 Georgian-only, in `GEORGIAN_PANELS`), effect names and categories in `effects.rs` |
