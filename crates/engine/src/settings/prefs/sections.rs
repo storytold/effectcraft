@@ -1,5 +1,5 @@
 use super::choices::theme_family;
-use super::*;
+use super::{BTreeMap, Deserialize, Label, Serialize, Value};
 
 /// Unknown keys inside a page, kept so a newer version's settings survive a round trip.
 pub(super) type Extra = BTreeMap<String, Value>;
@@ -179,7 +179,7 @@ page!(Audio {
 
 page!(Disk {
     disk_cache_enabled: bool = true,
-    disk_cache_max_gb: u32 = 100,
+    disk_cache_max_gb: u32 = 20,
     disk_cache_folder: String = String::new(),
     media_cache_folder: String = String::new(),
     conformed_media_folder: String = String::new(),

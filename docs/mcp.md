@@ -20,7 +20,7 @@ The server provides the same core conventions as FilmCraft #28:
 
 | Tool | Arguments | Result |
 | --- | --- | --- |
-| `command_list` | `filter?`, `enabled_only?`, `schemas?` | Command catalog |
+| `command_list` | `filter?`, `enabled_only?`, `schemas?`, `compact?` | Command catalog |
 | `command_run` | `id`, `params?` | Engine command result |
 | `command_batch` | `steps: [{id, params?}]`, `stop_on_error?` | `completed`, `failed`, per-step `results` |
 | `doc_inspect` | none | Project overview and active composition |

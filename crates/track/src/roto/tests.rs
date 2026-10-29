@@ -182,6 +182,28 @@ fn a_correction_stroke_fixes_a_bad_frame() {
     assert!(iou(&next.matte, &gt2) > 0.93);
 }
 
+/// A stroke corrects the ones painted before it: foreground over an earlier background stroke
+/// restores the area, and background over that removes it again.
+#[test]
+fn later_strokes_override_earlier_ones() {
+    let c = center(0);
+    let (img, gt) = frame_at(c);
+    let spot = [c[0], c[1] + 20.0];
+    let i = spot[1] as usize * W as usize + spot[0] as usize;
+    let red = line(StrokeKind::Bg, 0, [spot[0] - 6.0, spot[1]], [spot[0] + 6.0, spot[1]], 6.0);
+    let green = Stroke { kind: StrokeKind::Fg, ..red.clone() };
+    let seg = |st: &[Stroke]| segment(&img, &st.iter().collect::<Vec<_>>(), None, &SegOpts::default(), 0.0);
+    let mut st = base_strokes(0);
+    st.push(red.clone());
+    assert_eq!(seg(&st).matte[i], 0, "background over the disk removes it");
+    st.push(green);
+    let restored = seg(&st);
+    assert_eq!(restored.matte[i], 1, "foreground over the background stroke restores it");
+    assert!(iou(&restored.matte, &gt) > 0.95, "IoU {}", iou(&restored.matte, &gt));
+    st.push(red);
+    assert_eq!(seg(&st).matte[i], 0, "background again removes it again");
+}
+
 /// A soft-edged disk (alpha ramp over `width` pixels) over a background.
 fn soft_frame(c: [f64; 2], width: f64, fg: [f32; 3], bg: [f32; 3]) -> (Image, Vec<f32>) {
     let mut img = Image::new(W, H);
@@ -246,7 +268,7 @@ fn refine_edge_recovers_a_soft_edge_and_decontaminates() {
     assert!(frac as f64 > 0.6 * n as f64, "{frac}/{n} fractional");
     // Decontamination: edge pixels' colour is the foreground's, not a blue blend.
     let mut col = rgb.clone();
-    let map = decontaminate(&mut col, &a, &seg.refine, W as usize, H as usize, &p, 9.0, 1.0);
+    let map = decontaminate(&mut col, &a, &seg.refine, (W as usize, H as usize), &p, 9.0, 1.0);
     let (mut blue_before, mut blue_after, mut m) = (0.0f64, 0.0f64, 0usize);
     for i in 0..a.len() {
         if a[i] > 0.2 && a[i] < 0.8 {
@@ -263,6 +285,31 @@ fn refine_edge_recovers_a_soft_edge_and_decontaminates() {
     seg2.refine.iter_mut().for_each(|v| *v = 0);
     let a2 = matte_alpha(&rgb, &seg2, None, None, &p, 9.0, 1.0);
     assert!(a2.iter().zip(&seg.matte).all(|(x, y)| (*x - *y as f32).abs() < 1e-6));
+}
+
+/// Refine Edge strokes correct each other the same way: refine over an earlier erase restores
+/// the band there.
+#[test]
+fn later_refine_strokes_override_earlier_erases() {
+    let c = [100.0, 75.0];
+    let (img, _) = soft_frame(c, 10.0, [0.9, 0.25, 0.1], [0.1, 0.3, 0.9]);
+    let spot = [c[0] + R, c[1]];
+    let i = spot[1] as usize * W as usize + spot[0] as usize;
+    let erase = Stroke { kind: StrokeKind::RefineErase, frame: 0, radius: 6.0, points: vec![spot] };
+    let refine = Stroke { kind: StrokeKind::Refine, ..erase.clone() };
+    let band = |st: &[Stroke]| segment(&img, &st.iter().collect::<Vec<_>>(), None, &SegOpts::default(), 9.0).refine[i];
+    let mut st = vec![
+        line(StrokeKind::Fg, 0, [c[0] - 15.0, c[1]], [c[0] + 15.0, c[1]], 5.0),
+        line(StrokeKind::Bg, 0, [c[0] - 60.0, c[1] - 55.0], [c[0] + 60.0, c[1] - 55.0], 5.0),
+        ring(0, c, R, 9.0),
+    ];
+    assert_eq!(band(&st), 1);
+    st.push(erase.clone());
+    assert_eq!(band(&st), 0, "erase removes the band");
+    st.push(refine);
+    assert_eq!(band(&st), 1, "refine over the erase restores it");
+    st.push(erase);
+    assert_eq!(band(&st), 0, "erase again removes it again");
 }
 
 #[test]
@@ -373,9 +420,8 @@ impl effectcraft_segment::MaskModel for FakeModel {
 }
 
 /// A grey bar on a two-tone background whose halves match the bar's halves: colour alone can't
-/// find its edge, a model can.
-#[test]
-fn a_model_prior_shapes_the_cut_and_bad_models_are_ignored() {
+/// find its edge, a model can. The frame, its truth and the bar's rectangle.
+fn bar_frame() -> (Image, Vec<u8>, [usize; 4]) {
     let (w, h) = (160usize, 100usize);
     let rect = [40, 30, 120, 70];
     let mut img = Image::new(w as u32, h as u32);
@@ -390,6 +436,12 @@ fn a_model_prior_shapes_the_cut_and_bad_models_are_ignored() {
             gt[y * w + x] = inside as u8;
         }
     }
+    (img, gt, rect)
+}
+
+#[test]
+fn a_model_prior_shapes_the_cut_and_bad_models_are_ignored() {
+    let (img, gt, rect) = bar_frame();
     let st = [line(StrokeKind::Fg, 0, [50.0, 50.0], [110.0, 50.0], 4.0)];
     let refs: Vec<&Stroke> = st.iter().collect();
     let opts = SegOpts::default();
@@ -450,18 +502,80 @@ fn mobilesam_segments_and_propagates_the_disk() {
 fn box_stroke_is_the_model_box_prompt() {
     let fg = Stroke { kind: StrokeKind::Fg, frame: 0, radius: 2.0, points: vec![[50.0, 40.0]] };
     let bx = Stroke { kind: StrokeKind::Box, frame: 0, radius: 0.0, points: vec![[80.0, 60.0], [20.0, 10.0]] };
-    let p = stroke_prompt(&[&fg, &bx], 0.5);
+    let p = stroke_prompt(&[&fg, &bx], &[], 0.5, 0, 0);
     assert_eq!(p.bbox, Some([10.0, 5.0, 40.0, 30.0]));
     assert_eq!(p.points, vec![([25.0, 20.0], true)]);
     // Degenerate or non-finite boxes are no prompt.
     for pts in [vec![[20.0, 10.0]], vec![[20.0, 10.0], [20.0, 50.0]], vec![[f64::NAN, 10.0], [80.0, 60.0]]] {
         let b = Stroke { points: pts, ..bx.clone() };
-        assert_eq!(stroke_prompt(&[&fg, &b], 1.0).bbox, None);
+        assert_eq!(stroke_prompt(&[&fg, &b], &[], 1.0, 0, 0).bbox, None);
     }
     assert!(!StrokeKind::Box.is_segmentation());
     assert!(rasterize(&[&bx], &[StrokeKind::Fg, StrokeKind::Bg], 1.0, 100, 80).iter().all(|v| !v));
-    let mut q = stroke_prompt(&[&fg, &bx], 1.0);
+    let mut q = stroke_prompt(&[&fg, &bx], &[], 1.0, 0, 0);
     let soft: Vec<f32> = (0..100 * 80).map(|i| ((i % 100) < 10) as u8 as f32).collect();
-    assert!(add_prior_prompt(&mut q, &soft, 100, 80));
+    assert!(add_prior_prompt(&mut q, &soft, &[], 100, 80));
     assert_eq!(q.bbox, Some([20.0, 10.0, 80.0, 60.0]));
+}
+
+/// A model is never prompted against the latest correction: stroke points that a later stroke
+/// of the other kind painted over are dropped, and the propagated matte's points and mask leave
+/// out what this frame's background strokes removed.
+#[test]
+fn model_prompts_follow_the_latest_stroke() {
+    let green = Stroke { kind: StrokeKind::Fg, frame: 0, radius: 4.0, points: vec![[50.0, 40.0]] };
+    let red = Stroke { kind: StrokeKind::Bg, ..green.clone() };
+    let (w, h) = (100, 80);
+    let prompt = |st: &[&Stroke]| stroke_prompt(st, &resolve(st, StrokeKind::Fg, StrokeKind::Bg, 1.0, w, h), 1.0, w, h).points;
+    assert_eq!(prompt(&[&green, &red]), vec![([50.0, 40.0], false)]);
+    assert_eq!(prompt(&[&green, &red, &green]), vec![([50.0, 40.0], true); 2]);
+    let soft: Vec<f32> = (0..w * h).map(|i| ((i % w) < 50) as u8 as f32).collect();
+    let erase = Stroke { kind: StrokeKind::Bg, frame: 0, radius: 15.0, points: vec![[25.0, 40.0]] };
+    let hard = resolve(&[&erase], StrokeKind::Fg, StrokeKind::Bg, 1.0, w, h);
+    let mut q = Prompt::default();
+    assert!(add_prior_prompt(&mut q, &soft, &hard, w, h));
+    assert!(!q.points.is_empty());
+    assert!(q.points.iter().all(|(p, fg)| *fg && owner(&hard, w, h, *p) != Some(HARD_BG)), "{:?}", q.points);
+    let mask = q.mask.unwrap();
+    assert!(hard.iter().zip(&mask).all(|(hd, m)| *hd != HARD_BG || *m == 0.0));
+}
+
+/// A stand-in model that counts its calls; its foreground is a fixed rectangle.
+struct CountingModel([usize; 4], std::sync::atomic::AtomicUsize);
+
+impl effectcraft_segment::MaskModel for CountingModel {
+    fn info(&self) -> &'static effectcraft_segment::ModelInfo {
+        &effectcraft_segment::MOBILE_SAM
+    }
+    fn segment(&self, _: &[[f32; 3]], w: usize, h: usize, _: &Prompt) -> Result<Vec<f32>, String> {
+        self.1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let [x0, y0, x1, y1] = self.0;
+        Ok((0..w * h).map(|i| ((i % w) >= x0 && (i % w) < x1 && (i / w) >= y0 && (i / w) < y1) as u8 as f32 * 0.98 + 0.01).collect())
+    }
+}
+
+/// A small background correction in the middle of a large foreground dot removes the only point
+/// sampled along the dot, but most of the dot is still foreground: the model is still prompted
+/// with it, from a point inside what is left. A dot painted over completely prompts nothing.
+#[test]
+fn a_correction_keeps_the_model_prompted_with_what_is_left() {
+    let (img, gt, rect) = bar_frame();
+    let (w, h) = (img.width as usize, img.height as usize);
+    let dot = Stroke { kind: StrokeKind::Fg, frame: 0, radius: 15.0, points: vec![[80.0, 50.0]] };
+    let tap = Stroke { kind: StrokeKind::Bg, radius: 2.0, ..dot.clone() };
+    let refs = [&dot, &tap];
+    let model = CountingModel(rect, Default::default());
+    let seg = segment_with(&img, &refs, None, &SegOpts::default(), 0.0, Some(&model));
+    assert_eq!(model.1.load(std::sync::atomic::Ordering::Relaxed), 1, "the model was prompted");
+    assert!(iou(&seg.matte, &gt) > 0.95, "IoU {}", iou(&seg.matte, &gt));
+    let hard = resolve(&refs, StrokeKind::Fg, StrokeKind::Bg, 1.0, w, h);
+    let fg: Vec<[f32; 2]> = stroke_prompt(&refs, &hard, 1.0, w, h).points.into_iter().filter(|p| p.1).map(|p| p.0).collect();
+    let [q] = fg.as_slice() else { panic!("one foreground point, got {fg:?}") };
+    let r = (q[0] - 80.0).hypot(q[1] - 50.0);
+    assert!(r > 5.0 && r < 13.0, "{q:?} sits inside what is left of the dot");
+    assert_eq!(hard[q[1] as usize * w + q[0] as usize], HARD_FG);
+    let cover = Stroke { radius: 16.0, ..tap };
+    let refs = [&dot, &cover];
+    let hard = resolve(&refs, StrokeKind::Fg, StrokeKind::Bg, 1.0, w, h);
+    assert!(stroke_prompt(&refs, &hard, 1.0, w, h).points.iter().all(|p| !p.1));
 }

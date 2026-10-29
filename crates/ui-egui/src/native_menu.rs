@@ -149,6 +149,7 @@ pub fn build_now(app: &EffectcraftApp, ctx: &egui::Context) -> NativeMenu {
 
 /// Build the native menu spec for the app's current state.
 pub fn build(app: &EffectcraftApp) -> NativeMenu {
+    /// Append the native nodes of `nodes` to `out`; item ids start with `path`.
     fn rec(app: &EffectcraftApp, nodes: &[MenuNode], path: &str, out: &mut Vec<NativeNode>) {
         let mut services_added = false;
         for (i, n) in nodes.iter().enumerate() {
@@ -159,8 +160,8 @@ pub fn build(app: &EffectcraftApp) -> NativeMenu {
                     // Recent projects / footage / presets, undo history, shortcut slots, viewers,
                     // saved workspaces.
                     let saved = app.saved_workspace_names();
-                    let (entries, empty) = effectcraft_engine::menus::dynamic(&app.session, name, &crate::menus::dyn_ctx(&app.ui.workspace, &saved));
-                    if entries.is_empty()
+                    let (nodes, empty) = effectcraft_engine::menus::dynamic_nodes(&app.session, name, &crate::menus::dyn_ctx(&app.ui.workspace, &saved));
+                    if nodes.is_empty()
                         && let Some(e) = empty
                     {
                         out.push(NativeNode::Item(NativeItem {
@@ -174,7 +175,12 @@ pub fn build(app: &EffectcraftApp) -> NativeMenu {
                             checked: None,
                         }));
                     }
-                    for (k, e) in entries.iter().enumerate() {
+                    for (k, n) in nodes.iter().enumerate() {
+                        // A folder of scripts or panels: a submenu.
+                        let MenuNode::Item(e) = n else {
+                            rec(app, std::slice::from_ref(n), &format!("{id}.d{k}"), out);
+                            continue;
+                        };
                         out.push(NativeNode::Item(NativeItem {
                             id: format!("{id}.d{k}"),
                             label: e.label.clone(),
@@ -340,6 +346,7 @@ pub fn state_key(app: &EffectcraftApp) -> u64 {
     s.journal.last().map(|j| &j.0).hash(&mut h);
     s.prefs.recent_projects.hash(&mut h);
     (&s.prefs.recent_footage, &s.prefs.recent_presets).hash(&mut h);
+    s.prefs.recent_scripts.hash(&mut h);
     s.history.undo.iter().for_each(|(l, _)| l.hash(&mut h));
     s.state.open_comps.hash(&mut h);
     s.active_comp_id().and_then(|c| s.state.views3d.get(&c)).map(|v| format!("{:?}", v.current)).hash(&mut h);

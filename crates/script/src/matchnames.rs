@@ -209,6 +209,14 @@ const SHAPE_PROPS: &[(&str, &str, &str)] = &[
     ("twist", "angle", "ADBE Vector Twist Angle"),
     ("twist", "center", "ADBE Vector Twist Center"),
     ("merge", "mode", "ADBE Vector Merge Type"),
+    ("wiggle", "size", "ADBE Vector Roughen Size"),
+    ("wiggle", "detail", "ADBE Vector Roughen Detail"),
+    ("wiggle", "points", "ADBE Vector Roughen Points"),
+    ("wiggle", "speed", "ADBE Vector Temporal Freq"),
+    ("wiggle", "correlation", "ADBE Vector Correlation"),
+    ("wiggle", "phase", "ADBE Vector Temporal Phase"),
+    ("wiggle", "spatialPhase", "ADBE Vector Spatial Phase"),
+    ("wiggle", "seed", "ADBE Vector Random Seed"),
 ];
 
 /// Effects: our effect id → AE match name (the documented ones; the rest keep our id).

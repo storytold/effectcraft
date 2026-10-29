@@ -1,4 +1,4 @@
-use super::*;
+use super::{Descriptor, engine_data, placed};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ColorMode {

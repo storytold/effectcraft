@@ -1,4 +1,4 @@
-use super::*;
+use super::{CameraState, Comp, EffectcraftApp, EvalCtx, Layer, LayerId, Mat3, Pos2, VIEW_CAM, gv2, three_d, vec2};
 
 /// The camera the viewer shows (view camera or the comp's active camera).
 pub(super) fn cam_state(ctx: &EvalCtx) -> CameraState {

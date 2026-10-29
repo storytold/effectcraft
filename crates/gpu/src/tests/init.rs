@@ -2,7 +2,6 @@
 //! Set EFFECTCRAFT_REQUIRE_GPU=1 for acceptance: unavailable adapters/devices then fail
 //! instead of taking the explicitly logged headless-CI skip path.
 #![cfg(not(target_arch = "wasm32"))]
-#![allow(clippy::expect_used)] // Test helpers require successful setup to exercise rejection.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -149,23 +148,28 @@ fn opengl_adapters_get_cpu_compositing_at_once() {
     assert!(t.elapsed() < std::time::Duration::from_secs(1), "{:?}", t.elapsed());
 }
 
+/// #613: FXC (DirectX 12's default shader compiler) builds Classic 3D, so the compositor starts
+/// on DirectX 12 with its 3D kernel, and initialization leaves the caller's error scope and the
+/// host's error handler untouched. Ignored by default: FXC compiles every kernel, which takes
+/// minutes. Skips where there is no DirectX 12 adapter.
 #[test]
 #[cfg(target_os = "windows")]
-#[ignore = "requires the reproduced Windows DX12/FXC pointwise compiler failure; no adapter skips"]
-fn reproduced_fxc_pointwise_failure_returns_error_without_escaping_or_notifying_host() {
+#[ignore = "slow: FXC compiles every kernel"]
+fn fxc_builds_classic3d_and_initialization_errors_stay_scoped() {
     let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
     desc.backends = wgpu::Backends::DX12;
     desc.backend_options.dx12.shader_compiler = wgpu::Dx12Compiler::Fxc;
-    let (adapter, device, queue) = native_device(desc, true).expect("required DX12 device");
+    let Some((adapter, device, queue)) = native_device(desc, false) else { return };
     assert_eq!(adapter.get_info().backend, wgpu::Backend::Dx12);
     let host = count_host_errors(&device);
     let outer = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| GpuContext::new(&adapter, device.clone(), queue)));
-    let error = match result.expect("FXC compiler failure must not escape the constructor") {
-        Err(error) => error,
-        Ok(_) => panic!("the platform-specific FXC failure no longer reproduces; reassess this diagnostic"),
+    let ctx = match result.expect("an FXC compiler failure must not escape the constructor") {
+        Ok(ctx) => ctx,
+        Err(error) => panic!("the compositor starts on DirectX 12 with FXC: {}", brief(error)),
     };
-    assert!(error.contains("GPU initialization (pointwise)") && error.contains("FXC D3DCompile"), "{}", brief(error));
+    let missing: Vec<&str> = ctx.unavailable_kernels().iter().map(|(e, _)| *e).collect();
+    assert!(ctx.has_kernel("classic3d"), "FXC builds classic3d (unavailable: {missing:?})");
     assert!(pollster::block_on(outer.pop()).is_none(), "constructor must drain its own scopes and leave the caller's scope clean");
     assert_eq!(host.load(Ordering::SeqCst), 0);
     valid_pipeline(&device);

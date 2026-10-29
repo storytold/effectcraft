@@ -24,6 +24,10 @@ impl Cpx {
     fn add(self, o: Cpx) -> Cpx {
         Cpx { re: self.re + o.re, im: self.im + o.im }
     }
+    #[inline]
+    fn sub(self, o: Cpx) -> Cpx {
+        Cpx { re: self.re - o.re, im: self.im - o.im }
+    }
 }
 
 /// Mixed-radix (2, 3, 4, 5) forward complex FFT, unscaled (decimation in time, recursive).
@@ -71,18 +75,64 @@ impl Fft {
                 self.rec(&mut out[q * m..(q + 1) * m], &inp[q * in_stride..], in_stride * p, m, fi + 1, tw_stride * p);
             }
         }
-        let big = self.n;
-        let mut t = [Cpx::default(); 5];
-        for k in 0..m {
-            for (q, tq) in t.iter_mut().enumerate().take(p) {
-                *tq = out[q * m + k].mul(self.twiddle[(q * k * tw_stride) % big]);
-            }
-            for q2 in 0..p {
-                let mut acc = Cpx::default();
-                for (q, tq) in t.iter().enumerate().take(p) {
-                    acc = acc.add(tq.mul(self.twiddle[((q * q2) % p) * (big / p)]));
+        // The twiddle index q * k * tw_stride is always below n, so no modulo is needed.
+        let tw = &self.twiddle;
+        match p {
+            2 => {
+                for k in 0..m {
+                    let a0 = out[k];
+                    let a1 = out[m + k].mul(tw[k * tw_stride]);
+                    out[k] = a0.add(a1);
+                    out[m + k] = a0.sub(a1);
                 }
-                out[q2 * m + k] = acc;
+            }
+            4 => {
+                for k in 0..m {
+                    let t0 = out[k];
+                    let t1 = out[m + k].mul(tw[k * tw_stride]);
+                    let t2 = out[2 * m + k].mul(tw[2 * k * tw_stride]);
+                    let t3 = out[3 * m + k].mul(tw[3 * k * tw_stride]);
+                    let (s0, d0) = (t0.add(t2), t0.sub(t2));
+                    let (s1, d1) = (t1.add(t3), t1.sub(t3));
+                    out[k] = s0.add(s1);
+                    out[2 * m + k] = s0.sub(s1);
+                    // The odd outputs combine d0 with -j * d1 = (d1.im, -d1.re) and its negative.
+                    out[m + k] = Cpx { re: d0.re + d1.im, im: d0.im - d1.re };
+                    out[3 * m + k] = Cpx { re: d0.re - d1.im, im: d0.im + d1.re };
+                }
+            }
+            3 => {
+                // Imaginary part of exp(-2 pi i / 3) = -sqrt(3) / 2.
+                let h = tw[self.n / 3].im;
+                for k in 0..m {
+                    let t0 = out[k];
+                    let t1 = out[m + k].mul(tw[k * tw_stride]);
+                    let t2 = out[2 * m + k].mul(tw[2 * k * tw_stride]);
+                    let (s, d) = (t1.add(t2), t1.sub(t2));
+                    let a = Cpx { re: t0.re - 0.5 * s.re, im: t0.im - 0.5 * s.im };
+                    out[k] = t0.add(s);
+                    // j * h * d = (-h * d.im, h * d.re)
+                    out[m + k] = Cpx { re: a.re - h * d.im, im: a.im + h * d.re };
+                    out[2 * m + k] = Cpx { re: a.re + h * d.im, im: a.im - h * d.re };
+                }
+            }
+            _ => {
+                // Generic DFT butterfly (radix 5, once per transform).
+                let roots: [Cpx; 5] = std::array::from_fn(|q| if q < p { tw[q * (self.n / p)] } else { Cpx::default() });
+                let mut t = [Cpx::default(); 5];
+                for k in 0..m {
+                    t[0] = out[k];
+                    for q in 1..p {
+                        t[q] = out[q * m + k].mul(tw[q * k * tw_stride]);
+                    }
+                    for q2 in 0..p {
+                        let mut acc = t[0];
+                        for q in 1..p {
+                            acc = acc.add(t[q].mul(roots[(q * q2) % p]));
+                        }
+                        out[q2 * m + k] = acc;
+                    }
+                }
             }
         }
     }
@@ -196,6 +246,26 @@ mod tests {
                     / n as f64
             })
             .collect()
+    }
+
+    #[test]
+    fn fft_matches_dft() {
+        // Every radix combination, including the 480-point size of the 20 ms frame.
+        for &n in &[2usize, 3, 4, 5, 6, 8, 12, 15, 16, 20, 24, 30, 48, 60, 120, 240, 480] {
+            let fft = Fft::new(n);
+            let x: Vec<Cpx> = (0..n).map(|i| Cpx { re: ((i * 37 % 101) as f32 - 50.0) / 7.0, im: ((i * 53 % 89) as f32 - 44.0) / 9.0 }).collect();
+            let mut y = x.clone();
+            fft.process(&mut y, &mut Vec::new());
+            for k in 0..n {
+                let (mut re, mut im) = (0f64, 0f64);
+                for (j, v) in x.iter().enumerate() {
+                    let ph = -2.0 * std::f64::consts::PI * ((j * k) % n) as f64 / n as f64;
+                    re += v.re as f64 * ph.cos() - v.im as f64 * ph.sin();
+                    im += v.re as f64 * ph.sin() + v.im as f64 * ph.cos();
+                }
+                assert!((y[k].re as f64 - re).abs() < 2e-3 && (y[k].im as f64 - im).abs() < 2e-3, "n={n} k={k}: ({}, {}) vs ({re}, {im})", y[k].re, y[k].im);
+            }
+        }
     }
 
     #[test]

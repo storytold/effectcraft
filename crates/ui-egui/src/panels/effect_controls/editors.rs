@@ -1,5 +1,5 @@
 use super::common::{Actions, gesture_key};
-use super::*;
+use super::{Align2, Color32, EffectcraftApp, EvalCtx, Layer, PropGroup, Rect, Sense, Tokens, Value, fw, json, pos2, vec2, widgets};
 
 /// Warp Stabilizer's Analyze / Cancel buttons and analysis status.
 pub(super) fn warp_editor(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, layer: &Layer, g: &PropGroup, r: Rect, actions: &mut Actions) {

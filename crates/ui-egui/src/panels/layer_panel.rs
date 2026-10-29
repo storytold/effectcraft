@@ -87,6 +87,141 @@ fn default_view(layer: &Layer, tool: Tool) -> usize {
     }
 }
 
+/// The layer's rendered view `view` at `scale`, cached in egui's temp data per revision, layer,
+/// time, view and scale (the layer cache makes repeats cheap).
+fn render_tex(
+    app: &EffectcraftApp,
+    ctx: &egui::Context,
+    cid: effectcraft_engine::project::ItemId,
+    comp: &effectcraft_engine::project::Comp,
+    layer: &Layer,
+    view: usize,
+    scale: f64,
+) -> Option<Tex> {
+    let time = app.session.time();
+    let key = (app.session.revision, layer.id.0, time.0, view, (scale * 1000.0) as u32);
+    let cached: Option<Tex> = ctx.data(|d| d.get_temp(tex_id()));
+    match cached {
+        Some(c) if c.key == key => Some(c),
+        _ => {
+            let ectx = EvalCtx { project: &app.session.project, comp_id: cid, comp, time, expr: app.session.expr.as_deref(), footage: None };
+            let mut r = Renderer::new(&app.session.project, &*app.session.footage, RenderOpts { scale, ..Default::default() });
+            r.expr = app.session.expr.as_deref();
+            r.cache = Some(&app.session.layer_cache);
+            r.layer_input(&ectx, layer, view).map(|buf| {
+                let img = crate::frames::to_color_image(&buf.img);
+                let x0 = -buf.offset[0] / buf.scale;
+                let y0 = -buf.offset[1] / buf.scale;
+                let rect = [x0, y0, x0 + buf.img.width as f64 / buf.scale, y0 + buf.img.height as f64 / buf.scale];
+                let tex = crate::frames::load_fitted(ctx, "layer-panel", img, egui::TextureOptions::LINEAR);
+                let c = Tex { key, tex, rect };
+                ctx.data_mut(|d| d.insert_temp(tex_id(), c.clone()));
+                c
+            })
+        }
+    }
+}
+
+/// What [`paint_stroke`] needs about the brush and the layer <-> screen mapping.
+#[derive(Clone, Copy)]
+struct StrokeCtx<'a> {
+    layer: u64,
+    kind: &'a str,
+    zoom: f64,
+    did: egui::Id,
+    diameter: f64,
+    color: [f64; 4],
+    to_layer: &'a dyn Fn(Pos2) -> [f64; 2],
+    to_screen: &'a dyn Fn([f64; 2]) -> Pos2,
+}
+
+/// Records a paint stroke's layer-space points while dragging, previews it, and runs
+/// `paint.stroke` on release (or on a click).
+fn paint_stroke(app: &mut EffectcraftApp, ui: &egui::Ui, painter: &egui::Painter, resp: &egui::Response, sc: &StrokeCtx) {
+    let StrokeCtx { layer, kind, zoom, did, diameter, color, to_layer, to_screen } = *sc;
+    let ctx = ui.ctx().clone();
+    let now = ui.input(|i| i.time);
+    if resp.drag_started()
+        && let Some(pos) = ui.input(|i| i.pointer.press_origin()).or(resp.interact_pointer_pos())
+    {
+        ctx.data_mut(|d| d.insert_temp(did, Drag { layer, points: vec![to_layer(pos)], started: now }));
+    }
+    if let Some(mut d) = ctx.data(|d| d.get_temp::<Drag>(did)) {
+        if let Some(pos) = resp.interact_pointer_pos() {
+            let lp = to_layer(pos);
+            let last = d.points.last().copied().unwrap_or(lp);
+            if (lp[0] - last[0]).hypot(lp[1] - last[1]) * zoom >= 1.0 {
+                d.points.push(lp);
+                ctx.data_mut(|dd| dd.insert_temp(did, d.clone()));
+            }
+        }
+        // Live preview of the stroke.
+        let col = if kind == "eraser" {
+            Color32::from_white_alpha(140)
+        } else {
+            Color32::from_rgba_unmultiplied((color[0] * 255.0) as u8, (color[1] * 255.0) as u8, (color[2] * 255.0) as u8, 200)
+        };
+        let width = ((diameter * zoom) as f32).max(1.0);
+        let pts: Vec<Pos2> = d.points.iter().map(|q| to_screen(*q)).collect();
+        if pts.len() == 1 {
+            painter.circle_filled(pts[0], width / 2.0, col);
+        } else {
+            painter.add(egui::Shape::line(pts, Stroke::new(width, col)));
+        }
+        if resp.drag_stopped() {
+            ctx.data_mut(|dd| dd.remove::<Drag>(did));
+            let pts: Vec<[f64; 2]> = d.points.clone();
+            let r = app.session.execute("paint.stroke", json!({"layer": d.layer, "kind": kind, "points": pts, "duration": (now - d.started).max(0.0)}));
+            if let Err(e) = r {
+                app.ui.status = e.to_string();
+            }
+        }
+    }
+    if resp.clicked()
+        && let Some(pos) = resp.interact_pointer_pos()
+    {
+        let r = app.session.execute("paint.stroke", json!({"layer": layer, "kind": kind, "points": [to_layer(pos)], "duration": 0.0}));
+        if let Err(e) = r {
+            app.ui.status = e.to_string();
+        }
+    }
+}
+
+/// The bottom bar: the magnification menu and the View menu over `names` (Masks, then the
+/// effects). Returns where the View dropdown ends.
+fn bottom_bar(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, bar: Rect, names: &[String], view: usize, (zoom, fit): (f64, f32)) -> f32 {
+    let t = app.tokens;
+    p.rect_filled(bar, 0.0, t.panel_bg);
+    let mr = Rect::from_min_size(pos2(bar.min.x + 8.0, bar.center().y - 10.0), vec2(80.0, 20.0));
+    if let Some((z, up)) = super::viewer_tools::magnification_menu(
+        app,
+        ui,
+        mr,
+        "layer-mag",
+        "layerPanel.magnification",
+        "layerMagnification",
+        zoom as f32,
+        app.ui.layer_zoom,
+        false,
+    ) {
+        // The Layer panel keeps no fit mode: Fit up to 100% is the fit, at most 100 %.
+        app.ui.layer_zoom = if up { Some(fit.min(1.0 / ui.ctx().pixels_per_point())) } else { z };
+        app.ui.layer_pan = [0.0, 0.0];
+    }
+    let vx = mr.max.x + 10.0;
+    p.text(pos2(vx, bar.center().y), Align2::LEFT_CENTER, tr("View:"), Tokens::ui(12.0), t.text_dim);
+    let vr = Rect::from_min_size(pos2(vx + 36.0, bar.center().y - 10.0), vec2(150.0, 20.0));
+    let pop = egui::Id::unique("layer-view-pop");
+    if widgets::dropdown(ui, vr, &names[view.min(names.len() - 1)], &t, egui::Id::unique("layer-view")).clicked() {
+        widgets::open_popup(ui, pop);
+    }
+    app.auto.add("layerPanel.view", vr, "View");
+    if let Some(i) = widgets::popup_menu(ui, pop, vr.left_bottom(), names, Some(view)) {
+        app.ui.layer_view = Some(i);
+    }
+    vr.max.x
+}
+
 /// The Layer panel: one layer in its own space with its masks and effects up to the View menu's
 /// choice, rendered synchronously at a zoom/pan the panel keeps (the last Fit magnification is
 /// published for the View menu). Wheel or pinch zooms about the pointer, the Hand tool or
@@ -130,44 +265,17 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     };
     let origin = area.center() + pan - vec2((lw * zoom / 2.0) as f32, (lh * zoom / 2.0) as f32);
 
-    // Bottom bar: magnification and View menus.
-    p.rect_filled(bar, 0.0, t.panel_bg);
-    let mr = Rect::from_min_size(pos2(bar.min.x + 8.0, bar.center().y - 10.0), vec2(80.0, 20.0));
-    if let Some((z, up)) = super::viewer_tools::magnification_menu(
-        app,
-        ui,
-        mr,
-        "layer-mag",
-        "layerPanel.magnification",
-        "layerMagnification",
-        zoom as f32,
-        app.ui.layer_zoom,
-        false,
-    ) {
-        // The Layer panel keeps no fit mode: Fit up to 100% is the fit, at most 100 %.
-        app.ui.layer_zoom = if up { Some(fit.min(1.0 / ui.ctx().pixels_per_point())) } else { z };
-        app.ui.layer_pan = [0.0, 0.0];
-    }
-    let vx = mr.max.x + 10.0;
-    p.text(pos2(vx, bar.center().y), Align2::LEFT_CENTER, tr("View:"), Tokens::ui(12.0), t.text_dim);
     let mut names = vec!["Masks".to_string()];
     if let Some(fx) = layer.effects() {
         names.extend(fx.groups().map(|g| g.name.clone()));
     }
-    let vr = Rect::from_min_size(pos2(vx + 36.0, bar.center().y - 10.0), vec2(150.0, 20.0));
-    let pop = egui::Id::unique("layer-view-pop");
-    if widgets::dropdown(ui, vr, &names[view.min(names.len() - 1)], &t, egui::Id::unique("layer-view")).clicked() {
-        widgets::open_popup(ui, pop);
-    }
-    app.auto.add("layerPanel.view", vr, "View");
-    if let Some(i) = widgets::popup_menu(ui, pop, vr.left_bottom(), &names, Some(view)) {
-        app.ui.layer_view = Some(i);
-    }
+    let vr_right = bottom_bar(app, ui, &p, bar, &names, view, (zoom, fit));
+
     let tc = super::timecode(&app.session, &comp, time);
     p.text(pos2(bar.max.x - 10.0, bar.center().y), Align2::RIGHT_CENTER, tc, Tokens::mono(12.0), t.timecode);
     // Roto Brush: view / Freeze buttons and the segmentation span bar.
     if roto.is_some() {
-        super::roto_tool::bar_buttons(app, ui, &p, bar, vr.max.x + 12.0, &layer);
+        super::roto_tool::bar_buttons(app, ui, &p, bar, vr_right + 12.0, &layer);
         let sb = Rect::from_min_max(pos2(rect.min.x, canvas_bottom), pos2(rect.max.x, bar.min.y));
         super::roto_tool::span_bar(app, ui, &p, sb, &comp, &layer);
     }
@@ -190,27 +298,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     } else {
         0.25
     };
-    let key = (app.session.revision, layer.id.0, time.0, view, (scale * 1000.0) as u32);
-    let cached: Option<Tex> = ctx.data(|d| d.get_temp(tex_id()));
-    let tex = match cached {
-        Some(c) if c.key == key => Some(c),
-        _ => {
-            let ectx = EvalCtx { project: &app.session.project, comp_id: cid, comp: &comp, time, expr: app.session.expr.as_deref(), footage: None };
-            let mut r = Renderer::new(&app.session.project, &*app.session.footage, RenderOpts { scale, ..Default::default() });
-            r.expr = app.session.expr.as_deref();
-            r.cache = Some(&app.session.layer_cache);
-            r.layer_input(&ectx, &layer, view).map(|buf| {
-                let img = crate::frames::to_color_image(&buf.img);
-                let x0 = -buf.offset[0] / buf.scale;
-                let y0 = -buf.offset[1] / buf.scale;
-                let rect = [x0, y0, x0 + buf.img.width as f64 / buf.scale, y0 + buf.img.height as f64 / buf.scale];
-                let tex = crate::frames::load_fitted(&ctx, "layer-panel", img, egui::TextureOptions::LINEAR);
-                let c = Tex { key, tex, rect };
-                ctx.data_mut(|d| d.insert_temp(tex_id(), c.clone()));
-                c
-            })
-        }
-    };
+    let tex = render_tex(app, &ctx, cid, &comp, &layer, view, scale);
     if let Some(tx) = &tex {
         let r = Rect::from_min_max(to_screen([tx.rect[0], tx.rect[1]]), to_screen([tx.rect[2], tx.rect[3]]));
         painter.image(tx.tex.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
@@ -271,7 +359,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
     // Interaction: Roto Brush / Refine Edge.
     if app.ui.tool.roto_kind(false).is_some() {
-        super::roto_tool::interact(app, ui, &painter, area, &layer, zoom, &to_screen, &to_layer);
+        super::roto_tool::interact(app, ui, &painter, area, &layer, zoom, super::roto_tool::LayerXform { to_screen: &to_screen, to_layer: &to_layer });
         return;
     }
     // Interaction: paint tools.
@@ -314,7 +402,6 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         painter.line_segment([s - vec2(0.0, 6.0), s + vec2(0.0, 6.0)], Stroke::new(1.0, Color32::WHITE));
     }
     let mods = ui.input(|i| i.modifiers);
-    let now = ui.input(|i| i.time);
     // Alt/Option-click with the Clone Stamp sets the source.
     if app.ui.tool == Tool::Clone
         && mods.alt
@@ -328,49 +415,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     if let Some(kind) = kind
         && !mods.alt
     {
-        if resp.drag_started()
-            && let Some(pos) = ui.input(|i| i.pointer.press_origin()).or(resp.interact_pointer_pos())
-        {
-            ctx.data_mut(|d| d.insert_temp(did, Drag { layer: layer.id.0, points: vec![to_layer(pos)], started: now }));
-        }
-        if let Some(mut d) = ctx.data(|d| d.get_temp::<Drag>(did)) {
-            if let Some(pos) = resp.interact_pointer_pos() {
-                let lp = to_layer(pos);
-                let last = d.points.last().copied().unwrap_or(lp);
-                if (lp[0] - last[0]).hypot(lp[1] - last[1]) * zoom >= 1.0 {
-                    d.points.push(lp);
-                    ctx.data_mut(|dd| dd.insert_temp(did, d.clone()));
-                }
-            }
-            // Live preview of the stroke.
-            let col = if kind == "eraser" {
-                Color32::from_white_alpha(140)
-            } else {
-                Color32::from_rgba_unmultiplied((o.color[0] * 255.0) as u8, (o.color[1] * 255.0) as u8, (o.color[2] * 255.0) as u8, 200)
-            };
-            let width = ((o.diameter * zoom) as f32).max(1.0);
-            let pts: Vec<Pos2> = d.points.iter().map(|q| to_screen(*q)).collect();
-            if pts.len() == 1 {
-                painter.circle_filled(pts[0], width / 2.0, col);
-            } else {
-                painter.add(egui::Shape::line(pts, Stroke::new(width, col)));
-            }
-            if resp.drag_stopped() {
-                ctx.data_mut(|dd| dd.remove::<Drag>(did));
-                let pts: Vec<[f64; 2]> = d.points.clone();
-                let r = app.session.execute("paint.stroke", json!({"layer": d.layer, "kind": kind, "points": pts, "duration": (now - d.started).max(0.0)}));
-                if let Err(e) = r {
-                    app.ui.status = e.to_string();
-                }
-            }
-        }
-        if resp.clicked()
-            && let Some(pos) = resp.interact_pointer_pos()
-        {
-            let r = app.session.execute("paint.stroke", json!({"layer": layer.id.0, "kind": kind, "points": [to_layer(pos)], "duration": 0.0}));
-            if let Err(e) = r {
-                app.ui.status = e.to_string();
-            }
-        }
+        let stroke = StrokeCtx { layer: layer.id.0, kind, zoom, did, diameter: o.diameter, color: o.color, to_layer: &to_layer, to_screen: &to_screen };
+        paint_stroke(app, ui, &painter, &resp, &stroke);
     }
 }

@@ -344,6 +344,33 @@ fn shadow_darkness_and_accepts_off() {
     assert!(close(v, 0.5, 1e-3), "no shadow accepted: {v}");
 }
 
+#[test]
+fn shadow_diffusion_is_a_soft_ramp_not_copies() {
+    // #2444: a wide Shadow Diffusion stamped 3 × 3 copies of the caster, so the penumbra stepped
+    // through three flat levels instead of ramping smoothly from lit to shadowed.
+    let (mut p, cid, comp) = setup();
+    let mut recv = solid3(&mut p, &comp, [1.0, 1.0, 1.0], 400, 200, [100.0, 50.0, 100.0]);
+    no_specular(&mut recv);
+    let mut caster = solid3(&mut p, &comp, [1.0, 1.0, 1.0], 100, 200, [40.0, 50.0, 0.0]);
+    set(&mut caster, "materialOptions/castsShadows", Value::Enum(2)); // Only: invisible caster
+    let mut l = light(&mut p, &comp, LightKind::Parallel, [100.0, 50.0, -500.0]);
+    set(&mut l, "transform/poi", Value::Vec3([100.0, 50.0, 0.0]));
+    set(&mut l, "lightOptions/castsShadows", Value::Bool(true));
+    // 100 px to the caster over the parallel light's 1000: a 15 px penumbra radius.
+    set(&mut l, "lightOptions/shadowDiffusion", Value::Scalar(150.0));
+    push(&mut p, cid, l);
+    push(&mut p, cid, caster);
+    push(&mut p, cid, recv);
+    let img = render(&p, cid);
+    let row: Vec<f32> = (0..i64::from(W)).map(|x| img.get(x, 50)[0]).collect();
+    // The row crosses both vertical edges of the caster's shadow: lit, ramp, shadowed, ramp, lit.
+    assert!(row.iter().any(|v| *v < 0.01) && close(row[W as usize - 1], 0.5, 1e-3), "shadow and light: {row:?}");
+    let ramp = row.iter().filter(|v| **v > 0.02 && **v < 0.48).count();
+    assert!(ramp >= 16, "two penumbras several pixels wide: {row:?}");
+    let step = row.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0f32, f32::max);
+    assert!(step < 0.08, "no jumps between copies of the caster (largest step {step}): {row:?}");
+}
+
 // ---------------------------------------------------------------- cameras
 
 fn camera(p: &mut Project, comp: &Comp) -> Layer {

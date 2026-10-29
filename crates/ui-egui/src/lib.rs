@@ -184,6 +184,17 @@ pub struct Playback {
     /// fits in the RAM preview) is cached, so it never plays over skipped frames (#103), or
     /// sooner once the silent preview keeps real time with the frames ahead cached (#208).
     pub audio_held: bool,
+    /// Starting a preview with sound (#947): the playhead stays on the first frame while the
+    /// frames ahead render (the prefetch window, at most what fits in the RAM preview), then
+    /// sound and picture start together from it. Without this the picture played on silently
+    /// while they rendered and the sound started at the later frame, so the opening was lost.
+    /// A stall later on still falls back to [`Playback::audio_held`].
+    pub starting: bool,
+    /// When the preview started (seconds): [`Playback::starting`] gives up after `STARTUP_LIMIT`.
+    pub starting_since: f64,
+    /// When the first frame was cached while [`Playback::starting`] (seconds): the wait for the
+    /// frames ahead gives up `STARTUP_WAIT` after it.
+    pub first_cached: Option<f64>,
     /// When the last frames were shown (seconds, the last second's worth): the achieved rate.
     pub shown_at: std::collections::VecDeque<f64>,
 }

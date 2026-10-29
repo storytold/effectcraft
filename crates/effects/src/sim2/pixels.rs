@@ -1,6 +1,6 @@
 use super::pieces::{Cam, Piece, PiecePlan, PieceTex, rot_axis, sort_far_first};
 use super::shatter::{ShatterPlan, shatter_impl};
-use super::*;
+use super::{Acc, Buf, EffectCtx, IntoParallelIterator, ParallelIterator, Post, Shape, Sprite, SpritePlan, h, hs, unpremul};
 
 // ------------------------------------------------------------------ CC Ball Action
 

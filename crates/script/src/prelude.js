@@ -189,7 +189,12 @@ BridgeTalk.pump = function () { return false; };
 
 // ------------------------------------------------------------------ File / Folder
 
-function __join(a, b) { return a.replace(/[\/\\]+$/, "") + "/" + b; }
+function __trimPathSeparators(path) {
+  var end = path.length;
+  while (end > 0 && (path.charAt(end - 1) === "/" || path.charAt(end - 1) === "\\")) end--;
+  return path.slice(0, end);
+}
+function __join(a, b) { return __trimPathSeparators(a) + "/" + b; }
 
 function File(path) {
   if (!(this instanceof File)) return new File(path);
@@ -292,9 +297,9 @@ Folder.prototype = {
   get fsName() { return this.__path; },
   get fullName() { return this.__path; },
   get absoluteURI() { return this.__path; },
-  get name() { return this.__path.replace(/[\/\\]+$/, "").split(/[\/\\]/).pop(); },
+  get name() { return __trimPathSeparators(this.__path).split(/[\/\\]/).pop(); },
   get displayName() { return this.name; },
-  get path() { var p = this.__path.replace(/[\/\\]+$/, "").split(/[\/\\]/); p.pop(); return p.join("/"); },
+  get path() { var p = __trimPathSeparators(this.__path).split(/[\/\\]/); p.pop(); return p.join("/"); },
   get parent() { return new Folder(this.path); },
   get exists() { return JSON.parse(__file("isDir", this.__path)) === true; },
   toString: function () { return this.__path; },

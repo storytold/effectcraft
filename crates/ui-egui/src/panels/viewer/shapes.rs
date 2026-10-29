@@ -1,5 +1,8 @@
 use super::geometry::{l2c, layer_quad, point_in_quad};
-use super::*;
+use super::{
+    Color32, Comp, EffectcraftApp, EvalCtx, Layer, LayerId, LayerSource, Mat3, PaintKind, Pos2, Rect, Stroke, Tick, Tokens, Tool, ViewerMap, gv2, json, ov,
+    pos2,
+};
 
 /// Visible, unlocked layers eligible for viewer hit tests, in front-to-back order.
 /// Solo scope matches the renderer: any soloed AV layer activates it at every time (as in After

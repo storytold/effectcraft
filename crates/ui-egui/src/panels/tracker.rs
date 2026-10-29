@@ -115,6 +115,32 @@ fn analyze_glyph(p: &egui::Painter, r: Rect, forward: bool, frame: bool, stop: b
     }
 }
 
+/// The two button rows at `y`: Track Camera / Warp Stabilizer, then Track Motion / Stabilize Motion.
+fn top_buttons(app: &mut EffectcraftApp, ui: &mut egui::Ui, ctx: &egui::Context, x0: f32, y: f32, half: f32, source: Option<LayerId>) {
+    let can_track = app.session.active_comp().is_some() && source.is_some();
+    // Track Camera / Warp Stabilizer and Track Motion / Stabilize Motion.
+    let r1 = Rect::from_min_size(pos2(x0, y), vec2(half, 22.0));
+    let r2 = Rect::from_min_size(pos2(x0 + half + 6.0, y), vec2(half, 22.0));
+    let src_p = source.map(|l| json!({"layer": l.0})).unwrap_or_else(|| json!({}));
+    let can_camera = app.session.is_enabled("track.camera") && !app.session.is_camera_analyzing();
+    if button(app, ui, r1, "Track Camera", can_camera, "tracker.trackCamera") {
+        run(app, ctx, "track.camera", json!({}));
+    }
+    let can_warp = app.session.is_enabled("track.warpStabilizer") && !app.session.is_warp_analyzing();
+    if button(app, ui, r2, "Warp Stabilizer", can_warp, "tracker.warpStabilizer") {
+        run(app, ctx, "track.warpStabilizer", json!({}));
+    }
+    let y = y + 28.0;
+    let r1 = Rect::from_min_size(pos2(x0, y), vec2(half, 22.0));
+    let r2 = Rect::from_min_size(pos2(x0 + half + 6.0, y), vec2(half, 22.0));
+    if button(app, ui, r1, "Track Motion", can_track, "tracker.trackMotion") {
+        run(app, ctx, "track.motion", src_p.clone());
+    }
+    if button(app, ui, r2, "Stabilize Motion", can_track, "tracker.stabilizeMotion") {
+        run(app, ctx, "track.stabilize", src_p.clone());
+    }
+}
+
 /// The Tracker panel: the camera/warp and motion/stabilize buttons, Motion Source and Current
 /// Track pickers, the track type and its channels, Motion Target with Edit Target and Options, the
 /// four Analyze buttons (the one whose direction is running offers Stop), Reset and Apply, and the
@@ -132,33 +158,11 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let w = (rect.width() - 20.0).max(120.0);
     let half = (w - 6.0) / 2.0;
     let mut y = rect.min.y + 10.0;
-    let has_comp = app.session.active_comp().is_some();
     let source = motion_source(app);
     let cur = current(app);
-    let can_track = has_comp && source.is_some();
 
-    // Track Camera / Warp Stabilizer and Track Motion / Stabilize Motion.
-    let r1 = Rect::from_min_size(pos2(x0, y), vec2(half, 22.0));
-    let r2 = Rect::from_min_size(pos2(x0 + half + 6.0, y), vec2(half, 22.0));
-    let src_p = source.map(|l| json!({"layer": l.0})).unwrap_or_else(|| json!({}));
-    let can_camera = app.session.is_enabled("track.camera") && !app.session.is_camera_analyzing();
-    if button(app, ui, r1, "Track Camera", can_camera, "tracker.trackCamera") {
-        run(app, &ctx, "track.camera", json!({}));
-    }
-    let can_warp = app.session.is_enabled("track.warpStabilizer") && !app.session.is_warp_analyzing();
-    if button(app, ui, r2, "Warp Stabilizer", can_warp, "tracker.warpStabilizer") {
-        run(app, &ctx, "track.warpStabilizer", json!({}));
-    }
-    y += 28.0;
-    let r1 = Rect::from_min_size(pos2(x0, y), vec2(half, 22.0));
-    let r2 = Rect::from_min_size(pos2(x0 + half + 6.0, y), vec2(half, 22.0));
-    if button(app, ui, r1, "Track Motion", can_track, "tracker.trackMotion") {
-        run(app, &ctx, "track.motion", src_p.clone());
-    }
-    if button(app, ui, r2, "Stabilize Motion", can_track, "tracker.stabilizeMotion") {
-        run(app, &ctx, "track.stabilize", src_p.clone());
-    }
-    y += 34.0;
+    top_buttons(app, ui, &ctx, x0, y, half, source);
+    y += 62.0;
     let Some(comp) = app.session.active_comp_arc() else {
         p.text(pos2(x0, y + 8.0), Align2::LEFT_CENTER, crate::i18n::tr("Open a composition to track motion."), Tokens::ui(12.0), t.text_faint);
         return;

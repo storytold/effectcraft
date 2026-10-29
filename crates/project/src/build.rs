@@ -4,7 +4,7 @@ use effectcraft_color::{BlendMode, Label};
 use effectcraft_keyframe::{Gradient, ShapePath, TextDoc, Value};
 use effectcraft_time::Tick;
 
-use crate::props::{GroupKind, MaskMode, ParamUi, PropGroup, Property};
+use crate::props::{GroupKind, MaskMode, Node, ParamUi, PropGroup, Property};
 use crate::{Comp, Layer, LayerId, LayerSource, LightKind, Project, Switches};
 
 /// Id allocator borrowing the project's counter.
@@ -594,6 +594,7 @@ pub fn shape_simple_op(ids: &mut Ids, kind: &str) -> Option<PropGroup> {
             .with(ids.prop("speed", "Wiggles/Second", Value::Scalar(2.0)))
             .with(ids.prop("correlation", "Correlation", Value::Scalar(50.0)).with_ui(ParamUi::Percent))
             .with(ids.prop("phase", "Temporal Phase", Value::Scalar(0.0)).with_ui(ParamUi::Angle))
+            .with(wiggle_spatial_phase(ids))
             .with(ids.prop("seed", "Random Seed", Value::Scalar(0.0))),
         "merge" => indexed(ids.group("merge", "Merge Paths 1")).with(ids.prop("mode", "Mode", Value::Enum(0)).with_ui(popup(&[
             "Merge",
@@ -605,6 +606,32 @@ pub fn shape_simple_op(ids: &mut Ids, kind: &str) -> Option<PropGroup> {
         _ => return None,
     };
     Some(g)
+}
+
+/// Wiggle Paths' Spatial Phase.
+fn wiggle_spatial_phase(ids: &mut Ids) -> Property {
+    ids.prop("spatialPhase", "Spatial Phase", Value::Scalar(0.0)).with_ui(ParamUi::Angle)
+}
+
+/// Adds the properties that shape path operations have gained since a project was saved (Wiggle
+/// Paths' Spatial Phase), at their defaults, to the operations in `contents` and its nested
+/// groups. Returns whether anything was added. It walks the nested groups with a work list and
+/// does not recurse.
+pub fn upgrade_shape_contents(ids: &mut Ids, contents: &mut PropGroup) -> bool {
+    let mut changed = false;
+    let mut todo = vec![contents];
+    while let Some(group) = todo.pop() {
+        for n in &mut group.children {
+            let Node::Group(g) = n else { continue };
+            if g.match_id == "wiggle" && !g.children.iter().any(|c| c.match_id() == "spatialPhase") {
+                let at = g.children.iter().position(|c| c.match_id() == "phase").map_or(g.children.len(), |i| i + 1);
+                g.children.insert(at, wiggle_spatial_phase(ids).into());
+                changed = true;
+            }
+            todo.push(g);
+        }
+    }
+    changed
 }
 
 // ---------------------------------------------------------------- camera / light / 3D

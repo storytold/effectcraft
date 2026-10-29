@@ -1,6 +1,6 @@
 use super::frontend::run_engine;
 use super::invoke::invoke;
-use super::*;
+use super::{EffectcraftApp, PanelKind, Value, json};
 
 /// Shortcut text in this OS's notation (`⇧⌘K` on macOS, `Ctrl+Shift+K` elsewhere).
 pub fn shortcut_text(s: &str) -> String {
@@ -197,54 +197,40 @@ pub fn handle_tab_shortcut(app: &mut EffectcraftApp, ctx: &egui::Context) {
     }
 }
 
-fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only: bool) {
-    let start = modifiers_at_start(ctx);
-    // Dialog cancellation owns Escape even when a text field has keyboard focus.
-    if !tab_only && app.dialog.is_some() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-        // A popup or colour picker takes Escape first (the picker goes back to its original colour).
-        if crate::panels::shortcut_editor::recording(app)
-            || crate::panels::shortcut_editor::confirming(app)
-            || egui::Popup::is_any_open(ctx)
-            || crate::color_picker::open_recently(ctx)
+/// Escape with a dialog open: close the popup/picker first, else cancel the dialog.
+fn escape_dialog(app: &mut EffectcraftApp, ctx: &egui::Context) {
+    // A popup or colour picker takes Escape first (the picker goes back to its original colour).
+    if crate::panels::shortcut_editor::recording(app)
+        || crate::panels::shortcut_editor::confirming(app)
+        || egui::Popup::is_any_open(ctx)
+        || crate::color_picker::open_recently(ctx)
+    {
+        return;
+    }
+    ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+    if app.dialog == Some(crate::Dialog::LayerStyles) {
+        crate::panels::layer_styles_dialog::finish(app, false);
+    } else if app.dialog == Some(crate::Dialog::Info) {
+        crate::panels::forms::close_info(app);
+    } else {
+        if app.dialog == Some(crate::Dialog::Settings)
+            && let Some(p) = app.dialog_state.prefs_snapshot.take()
         {
-            return;
+            app.session.prefs = p;
+            app.session.prefs_changed();
         }
-        ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
-        if app.dialog == Some(crate::Dialog::LayerStyles) {
-            crate::panels::layer_styles_dialog::finish(app, false);
-        } else if app.dialog == Some(crate::Dialog::Info) {
-            crate::panels::forms::close_info(app);
-        } else {
-            if app.dialog == Some(crate::Dialog::Settings)
-                && let Some(p) = app.dialog_state.prefs_snapshot.take()
-            {
-                app.session.prefs = p;
-                app.session.prefs_changed();
-            }
-            if app.dialog == Some(crate::Dialog::UnsavedChanges) {
-                app.dialog_state.unsaved.command = None;
-            }
-            app.dialog = None;
+        if app.dialog == Some(crate::Dialog::UnsavedChanges) {
+            app.dialog_state.unsaved.command = None;
         }
-        return;
+        app.dialog = None;
     }
-    // A mouse button down while Spacebar is held belongs to the Hand tool: its release won't
-    // preview.
-    if ctx.input(|i| i.pointer.any_down()) || ctx.egui_wants_keyboard_input() {
-        ctx.data_mut(|d| d.remove::<bool>(space_tap_id()));
-    }
-    // While a menu or popup list is open, keys go to it, not to the app (Space must not start a
-    // preview behind the menu, #279).
-    if ctx.egui_wants_keyboard_input() || crate::widgets::any_menu_open(ctx) {
-        return;
-    }
-    // Text editing in the viewer takes the clipboard events itself.
-    let clipboard = app.session.state.text_edit.is_none();
-    let project = app.ui.focused == PanelKind::Project;
-    // The paste event's text: Edit ▸ Paste pastes SVG markup as a shape layer.
-    let pasted =
-        if clipboard { ctx.input(|i| i.events.iter().rev().find_map(|e| if let egui::Event::Paste(t) = e { Some(t.clone()) } else { None })) } else { None };
-    let mut events: Vec<(egui::Key, egui::Modifiers, bool, Option<egui::Key>)> = ctx.input(|i| {
+}
+
+type KeyEvent = (egui::Key, egui::Modifiers, bool, Option<egui::Key>);
+
+/// The frame's key presses, with clipboard events mapped back to Ctrl+C / X / V.
+fn collect_key_events(ctx: &egui::Context, start: Option<egui::Modifiers>, clipboard: bool, project: bool) -> Vec<KeyEvent> {
+    ctx.input(|i| {
         // The windowing layer turns Ctrl+C / Ctrl+X / Ctrl+V into clipboard events instead of
         // key presses: map them back to the keys (with the modifiers held) so Edit ▸ Copy, Cut,
         // Paste and their variants (Ctrl+Alt+C…) run. Clipboard events carry no modifiers and
@@ -283,22 +269,57 @@ fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only
             }
         }
         out
-    });
+    })
+}
+
+/// Numpad * (or `*` typed with Shift+8): Add Marker (#275). egui has no key for it, so it
+/// comes as text.
+fn numpad_star_marker(app: &mut EffectcraftApp, ctx: &egui::Context) {
+    if !ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Text(t) if t == "*"))) {
+        return;
+    }
+    let bound = app.session.shortcuts().bindings().into_iter().find(|(k, _)| *k == "Num*").map(|(_, b)| (b.command.clone(), b.params.clone()));
+    // As in After Effects, it marks the selected layers; only with none selected does it add
+    // a composition marker (#976).
+    let bound =
+        bound.map(
+            |(id, params)| {
+                if id == "comp.addMarker" && !app.session.state.selected_layers.is_empty() { ("layer.addMarker".to_owned(), params) } else { (id, params) }
+            },
+        );
+    if let Some((id, params)) = bound
+        && let Err(e) = invoke(app, ctx, &id, if params.is_null() { json!({}) } else { params })
+    {
+        app.ui.status = e;
+    }
+}
+
+fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only: bool) {
+    let start = modifiers_at_start(ctx);
+    if !tab_only && app.dialog.is_some() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        escape_dialog(app, ctx);
+        return;
+    }
+    // A mouse button down while Spacebar is held belongs to the Hand tool: its release won't
+    // preview.
+    if ctx.input(|i| i.pointer.any_down()) || ctx.egui_wants_keyboard_input() {
+        ctx.data_mut(|d| d.remove::<bool>(space_tap_id()));
+    }
+    // While a menu or popup list is open, keys go to it, not to the app (Space must not start a
+    // preview behind the menu, #279).
+    if ctx.egui_wants_keyboard_input() || crate::widgets::any_menu_open(ctx) {
+        return;
+    }
+    // Text editing in the viewer takes the clipboard events itself.
+    let clipboard = app.session.state.text_edit.is_none();
+    let project = app.ui.focused == PanelKind::Project;
+    // The paste event's text: Edit ▸ Paste pastes SVG markup as a shape layer.
+    let pasted =
+        if clipboard { ctx.input(|i| i.events.iter().rev().find_map(|e| if let egui::Event::Paste(t) = e { Some(t.clone()) } else { None })) } else { None };
+    let mut events = collect_key_events(ctx, start, clipboard, project);
     events.retain(|(key, _, _, _)| (*key == egui::Key::Tab) == tab_only);
-    // Numpad * (or `*` typed with Shift+8): Add Marker (#275). egui has no key for it, so it
-    // comes as text.
-    if !tab_only && clipboard && app.dialog.is_none() && ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Text(t) if t == "*"))) {
-        let bound = app.session.shortcuts().bindings().into_iter().find(|(k, _)| *k == "Num*").map(|(_, b)| (b.command.clone(), b.params.clone()));
-        // As in After Effects, it marks the selected layers; only with none selected does it add
-        // a composition marker (#976).
-        let bound = bound.map(|(id, params)| {
-            if id == "comp.addMarker" && !app.session.state.selected_layers.is_empty() { ("layer.addMarker".to_owned(), params) } else { (id, params) }
-        });
-        if let Some((id, params)) = bound
-            && let Err(e) = invoke(app, ctx, &id, if params.is_null() { json!({}) } else { params })
-        {
-            app.ui.status = e;
-        }
+    if !tab_only && clipboard && app.dialog.is_none() {
+        numpad_star_marker(app, ctx);
     }
     if events.is_empty() {
         return;

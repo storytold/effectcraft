@@ -327,7 +327,7 @@ pub fn show(
                     let (ow, oh) = (d.width, d.height);
                     let r = ui.add(crate::widgets::drag_value(egui::DragValue::new(&mut d.width).range(4..=30000).suffix(" px")));
                     auto.add("dialog.comp.width", r.rect, "Width");
-                    let lbl = format!("Lock Aspect Ratio to {}", aspect_label(ow as f64, oh as f64));
+                    let lbl = tr_args("Lock Aspect Ratio to {}", &[&(aspect_label(ow as f64, oh as f64))]);
                     let r = ui.checkbox(&mut d.lock_aspect, lbl);
                     auto.add("dialog.comp.lockAspect", r.rect, "Lock Aspect Ratio");
                     if d.lock_aspect && ow != d.width && ow > 0 {

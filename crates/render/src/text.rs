@@ -42,7 +42,7 @@ pub struct CharXf {
     pub stroke_hsb: [f64; 3],
     pub stroke_opacity: f64,
     pub stroke_width: f64,
-    /// Tracking (1/1000 em) added before / after the character.
+    /// Tracking (pixels) added before / after the character.
     pub track_before: f64,
     pub track_after: f64,
     /// Line Anchor (percent) and the selection weight it was set with.
@@ -287,11 +287,13 @@ pub fn char_transforms(ctx: &EvalCtx, layer: &Layer, text: &PropGroup, lay: &Tex
         let pos = get("position").map(|v| c3(v, 0.0));
         let anchor = get("anchor").map(|v| c3(v, 0.0));
         let scale = get("scale").map(|v| c3(v, 100.0));
-        let rot = get1("rotation");
-        let rx = get1("rotationX");
-        let ry = get1("rotationY");
-        let skew = get1("skew");
-        let skew_axis = get1("skewAxis");
+        let angles = CharacterAngles {
+            rotation: get1("rotation"),
+            rotation_x: get1("rotationX"),
+            rotation_y: get1("rotationY"),
+            skew: get1("skew"),
+            skew_axis: get1("skewAxis"),
+        };
         let op = get1("opacity");
         let fill = props.get("fillColor").map(|p| ctx.value(layer, p).as_color());
         let stroke = props.get("strokeColor").map(|p| ctx.value(layer, p).as_color());
@@ -338,21 +340,7 @@ pub fn char_transforms(ctx: &EvalCtx, layer: &Layer, text: &PropGroup, lay: &Tex
                     c.scale[d] *= 1.0 + (s[d] / 100.0 - 1.0) * k3[d];
                 }
             }
-            if let Some(r) = rot {
-                c.rotation += r * k;
-            }
-            if let Some(r) = rx {
-                c.rotation_x += r * k;
-            }
-            if let Some(r) = ry {
-                c.rotation_y += r * k;
-            }
-            if let Some(s) = skew {
-                c.skew += s * k;
-            }
-            if let Some(a) = skew_axis {
-                c.skew_axis = a;
-            }
+            angles.apply(c, k);
             if let Some(o) = op {
                 c.opacity *= 1.0 + (o / 100.0 - 1.0) * k;
             }
@@ -381,17 +369,7 @@ pub fn char_transforms(ctx: &EvalCtx, layer: &Layer, text: &PropGroup, lay: &Tex
             if let Some(w) = sw {
                 c.stroke_width += w * k;
             }
-            if let Some(t) = tracking {
-                let t = t * k;
-                match tracking_type {
-                    1 => c.track_before += t,
-                    2 => c.track_after += t,
-                    _ => {
-                        c.track_before += t * 0.5;
-                        c.track_after += t * 0.5;
-                    }
-                }
-            }
+            apply_tracking(c, tracking, tracking_type, k);
             if let Some(a) = line_anchor
                 && k.abs() >= c.line_anchor_k
             {
@@ -430,6 +408,50 @@ pub fn char_transforms(ctx: &EvalCtx, layer: &Layer, text: &PropGroup, lay: &Tex
         }
     }
     out
+}
+
+/// Optional animator orientation properties; an omitted property leaves the glyph unchanged.
+struct CharacterAngles {
+    rotation: Option<f64>,
+    rotation_x: Option<f64>,
+    rotation_y: Option<f64>,
+    skew: Option<f64>,
+    skew_axis: Option<f64>,
+}
+
+impl CharacterAngles {
+    fn apply(&self, c: &mut CharXf, k: f64) {
+        if let Some(r) = self.rotation {
+            c.rotation += r * k;
+        }
+        if let Some(r) = self.rotation_x {
+            c.rotation_x += r * k;
+        }
+        if let Some(r) = self.rotation_y {
+            c.rotation_y += r * k;
+        }
+        if let Some(s) = self.skew {
+            c.skew += s * k;
+        }
+        if let Some(a) = self.skew_axis {
+            c.skew_axis = a;
+        }
+    }
+}
+
+/// Distribute selected tracking before and/or after a glyph according to Tracking Type.
+fn apply_tracking(c: &mut CharXf, tracking: Option<f64>, tracking_type: u32, k: f64) {
+    if let Some(t) = tracking {
+        let t = t * k;
+        match tracking_type {
+            1 => c.track_before += t,
+            2 => c.track_after += t,
+            _ => {
+                c.track_before += t * 0.5;
+                c.track_after += t * 0.5;
+            }
+        }
+    }
 }
 
 /// Character Offset / Character Value substitution (None = unchanged).
@@ -672,10 +694,9 @@ pub fn text_geom(ctx: &EvalCtx, layer: &Layer) -> Option<TextGeom> {
         let (mut la, mut la_k) = (50.0 * f64::from(align_index(justify)), 0.0);
         for gi in li_start..li_end {
             let x = &xfs[gi];
-            let em = lay.styles.get(lay.glyphs[gi].run).map_or(doc.size, |s| s.size) / 1000.0;
-            pen += x.track_before * em;
+            pen += x.track_before;
             shift[gi] = pen;
-            pen += x.track_after * em + vadv[gi];
+            pen += x.track_after + vadv[gi];
             if x.line_anchor_k > la_k {
                 la = x.line_anchor;
                 la_k = x.line_anchor_k;

@@ -105,6 +105,21 @@ pub fn bindables(ui: &[UiCommand]) -> Vec<Bindable> {
             &mut out,
         );
     }
+    // File ▸ Scripts ▸ Recent Script Files lists its scripts at run time; the first one, the most
+    // recent, has a key.
+    let recent = json!({"recent": 0});
+    push(
+        Bindable {
+            key: binding_key("file.runScript", &recent),
+            command: "file.runScript".into(),
+            params: recent,
+            label: "Run Most Recent Script File".into(),
+            path: vec!["File".into(), "Scripts".into(), "Recent Script Files".into()],
+            scope: APP_SCOPE.into(),
+            defaults: normalize("Cmd+Alt+Shift+D").into_iter().collect(),
+        },
+        &mut out,
+    );
     for c in crate::command_specs() {
         if !c.journal || entries.iter().any(|(_, e)| e.command == c.id) {
             continue;

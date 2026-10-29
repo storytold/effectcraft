@@ -1,26 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!--
-  EffectCraft MSI (WiX Toolset v5: `dotnet tool install -g wix`). Built by package.ps1:
-
-    wix build effectcraft.wxs installer-ui.wxs -arch x64 -d Version=1.2.3 -d BinDir=... -d IconPath=... -o out.msi
-
-  Per-machine install into Program Files (or a folder the user picks), a Start Menu shortcut and,
-  unless DESKTOPSHORTCUT=0 (the wizard's "Create a desktop shortcut" box), a desktop shortcut.
--->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
-  <Package
-      Name="EffectCraft"
-      Manufacturer="Learning Machines LLC"
-      Version="$(var.Version)"
-      UpgradeCode="AACA8593-C6ED-40A8-BA6C-CB325D8529F9"
-      Scope="perMachine"
-      Compressed="yes"
-      Language="1033">
+  <Package Name="EffectCraft" Manufacturer="Learning Machines LLC" Version="$(var.Version)" UpgradeCode="AACA8593-C6ED-40A8-BA6C-CB325D8529F9" Scope="perUserOrMachine" Compressed="yes" Language="1033">
     <SummaryInformation Description="EffectCraft motion graphics and visual effects" Manufacturer="Learning Machines LLC" />
+    <?include $(sys.SOURCEFILEDIR)install-policy.wxi?>
     <!-- Same-version upgrades let successive pre-releases of one X.Y.Z replace each other
          (MSI versions are numeric, so 1.2.3-rc.1 and 1.2.3-rc.2 are both 1.2.3). -->
-    <MajorUpgrade AllowSameVersionUpgrades="yes"
-        DowngradeErrorMessage="A newer version of EffectCraft is already installed." />
+    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer version of EffectCraft is already installed." />
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
     <!-- The setup wizard (installer-ui.wxs): pick the folder on a fresh install. -->
     <UIRef Id="EffectcraftUI" />
@@ -36,32 +21,24 @@
          could be put elsewhere with INSTALLFOLDER=...) the folder of the effectcraft.exe that App Paths names. A
          "file" search with no FileSearch inside yields that file's folder. A folder passed on the
          command line (INSTALLFOLDER=...) wins. -->
-    <Property Id="INSTALLFOLDER" Secure="yes" />
     <Property Id="PREVIOUSINSTALLFOLDER" Secure="yes">
-      <RegistrySearch Id="PreviousInstallFolder" Root="HKLM" Type="directory"
-          Key="Software\Microsoft\Windows\CurrentVersion\App Paths\effectcraft.exe" Name="Path" />
+      <RegistrySearch Id="PreviousInstallFolder" Root="HKLM" Type="directory" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\effectcraft.exe" Name="Path" />
     </Property>
     <Property Id="PREVIOUSEXEFOLDER" Secure="yes">
-      <RegistrySearch Id="PreviousExeFolder" Root="HKLM" Type="file"
-          Key="Software\Microsoft\Windows\CurrentVersion\App Paths\effectcraft.exe" />
+      <RegistrySearch Id="PreviousExeFolder" Root="HKLM" Type="file" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\effectcraft.exe" />
     </Property>
-    <SetProperty Id="INSTALLFOLDER" Value="[PREVIOUSINSTALLFOLDER]" After="AppSearch" Sequence="both"
-        Condition="PREVIOUSINSTALLFOLDER AND NOT INSTALLFOLDER" />
-    <SetProperty Id="INSTALLFOLDER" Action="SetINSTALLFOLDERFromExe" Value="[PREVIOUSEXEFOLDER]"
-        After="SetINSTALLFOLDER" Sequence="both" Condition="PREVIOUSEXEFOLDER AND NOT INSTALLFOLDER" />
-
     <!-- The desktop shortcut: on by default for a fresh install (a box in the wizard, or
          DESKTOPSHORTCUT=0 silently); an upgrade keeps what the installed copy chose, and adds none
          to an install from before this option. -->
     <Property Id="DESKTOPSHORTCUT" Value="1" Secure="yes" />
     <Property Id="PREVIOUSDESKTOPSHORTCUT" Secure="yes">
-      <RegistrySearch Id="PreviousDesktopShortcut" Root="HKLM" Type="raw" Key="Software\EffectCraft" Name="DesktopShortcut" />
-    </Property>
-    <SetProperty Id="DESKTOPSHORTCUT" Value="[PREVIOUSDESKTOPSHORTCUT]" After="SetINSTALLFOLDERFromExe" Sequence="both"
-        Condition="WIX_UPGRADE_DETECTED" />
+      </Property>
+    <SetProperty Id="DESKTOPSHORTCUT" Value="[PREVIOUSDESKTOPSHORTCUT]" After="CraftLoadOption1U" Sequence="both" Condition="WIX_UPGRADE_DETECTED" />
 
     <StandardDirectory Id="ProgramFiles6432Folder">
-      <Directory Id="INSTALLFOLDER" Name="EffectCraft" />
+      <Directory Id="CraftSuiteFolder" Name="ArtCraft">
+        <Directory Id="INSTALLFOLDER" Name="EffectCraft" />
+      </Directory>
     </StandardDirectory>
     <StandardDirectory Id="ProgramMenuFolder" />
     <StandardDirectory Id="DesktopFolder" />
@@ -69,7 +46,9 @@
     <Feature Id="Main" Title="EffectCraft" Level="1">
       <ComponentGroupRef Id="EffectcraftFiles" />
     </Feature>
-  </Package>
+  <Property Id="CRAFT_OPTION_1_M" Secure="yes"><RegistrySearch Id="CRAFT_OPTION_1_MSearch" Root="HKLM" Type="raw" Key="Software\EffectCraft" Name="DesktopShortcut" />
+    </Property><SetProperty Id="PREVIOUSDESKTOPSHORTCUT" Action="CraftLoadOption1M" Value="[CRAFT_OPTION_1_M]" After="LaunchConditions" Sequence="both" Condition="ALLUSERS = 1" /><Property Id="CRAFT_OPTION_1_U" Secure="yes"><RegistrySearch Id="CRAFT_OPTION_1_USearch" Root="HKCU" Type="raw" Key="Software\EffectCraft" Name="DesktopShortcut" />
+    </Property><SetProperty Id="PREVIOUSDESKTOPSHORTCUT" Action="CraftLoadOption1U" Value="[CRAFT_OPTION_1_U]" After="CraftLoadOption1M" Sequence="both" Condition="ALLUSERS &lt;&gt; 1" /></Package>
 
   <Fragment>
     <ComponentGroup Id="EffectcraftFiles" Directory="INSTALLFOLDER">
@@ -78,15 +57,14 @@
       </Component>
       <Component Id="EffectcraftApp" Guid="BA719860-95FE-4154-B265-47006B8E9083">
         <File Id="EffectcraftExe" Source="$(var.BinDir)\effectcraft.exe" KeyPath="yes">
-          <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="EffectCraft"
-              Description="EffectCraft motion graphics and visual effects" WorkingDirectory="INSTALLFOLDER" Advertise="yes"
-              Icon="EffectcraftIcon.ico" IconIndex="0" />
+          <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="EffectCraft" Description="EffectCraft motion graphics and visual effects" WorkingDirectory="INSTALLFOLDER" Advertise="yes" Icon="EffectcraftIcon.ico" IconIndex="0" />
         </File>
 
-        <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\effectcraft.exe" Value="[#EffectcraftExe]" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\effectcraft.exe" Name="Path" Value="[INSTALLFOLDER]" Type="string" />
+        <RegistryValue Root="HKMU" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\effectcraft.exe" Value="[#EffectcraftExe]" Type="string" />
+        <RegistryValue Root="HKMU" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\effectcraft.exe" Name="Path" Value="[INSTALLFOLDER]" Type="string" />
         <!-- The desktop shortcut choice, for the next upgrade (empty: none). -->
-        <RegistryValue Root="HKLM" Key="Software\EffectCraft" Name="DesktopShortcut" Value="[DESKTOPSHORTCUT]" Type="string" />
+        <RegistryValue Root="HKMU" Key="Software\EffectCraft" Name="DesktopShortcut" Value="[DESKTOPSHORTCUT]" Type="string" />
+      <RegistryValue Root="HKMU" Key="Software\EffectCraft" Name="InstallDir" Value="[INSTALLFOLDER]" Type="string" />
       </Component>
 
       <Component Id="EffectcraftCli">
@@ -95,9 +73,8 @@
 
       <!-- A component under the user's profile folders needs an HKCU key path (ICE38, ICE43). -->
       <Component Id="DesktopShortcut" Directory="DesktopFolder" Condition="DESKTOPSHORTCUT = &quot;1&quot;">
-        <Shortcut Id="DesktopShortcut" Name="EffectCraft" Description="EffectCraft motion graphics and visual effects"
-            Target="[#EffectcraftExe]" WorkingDirectory="INSTALLFOLDER" Icon="EffectcraftIcon.ico" IconIndex="0" />
-        <RegistryValue Root="HKCU" Key="Software\EffectCraft" Name="DesktopShortcut" Value="1" Type="string" KeyPath="yes" />
+        <Shortcut Id="DesktopShortcut" Name="EffectCraft" Description="EffectCraft motion graphics and visual effects" Target="[#EffectcraftExe]" WorkingDirectory="INSTALLFOLDER" Icon="EffectcraftIcon.ico" IconIndex="0" />
+        <RegistryValue Root="HKMU" Key="Software\EffectCraft" Name="DesktopShortcut" Value="1" Type="string" KeyPath="yes" />
       </Component>
     </ComponentGroup>
   </Fragment>

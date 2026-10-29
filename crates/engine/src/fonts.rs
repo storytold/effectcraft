@@ -1,4 +1,4 @@
-use super::*;
+use super::prefs;
 
 pub fn text_families() -> Vec<String> {
     effectcraft_text::families().into_iter().map(|(f, _)| f).collect()

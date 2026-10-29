@@ -26,7 +26,7 @@ pub(crate) fn apply(e: &mut Enc, src: &GpuImage, d: &PlaneDof) -> Option<GpuImag
         padded
     };
     let prefix = e.image(w + 1, h);
-    e.dispatch("bokeh_prefix", &Params::default(), &boosted, None, &prefix, None, (h.div_ceil(64), 1));
+    e.dispatch("bokeh_prefix", &Params::default(), crate::context::KernelImages { src: &boosted, aux: None, out: &prefix }, None, (h.div_ceil(64), 1));
     // Radius map, then every level's spans.
     let mut data: Vec<f32> = d.radius.as_ref().clone();
     let mut levels = vec![];

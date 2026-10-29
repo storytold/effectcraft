@@ -1,5 +1,8 @@
 use super::raster::{Seg, all_masks_px, chaikin, mask_px, over, poly_segs, raster_convex, raster_segs, scan_runs, stroke_outline, trim_poly};
-use super::*;
+use super::{
+    Buf, EffectCtx, Image, IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator, Params, Plane, gauss_plane, hash1,
+    layer_or_self, luminance, poly_length, smoothstep, unpremul,
+};
 
 /// How painted coverage meets the layer: 0 On Original Image, 1 On Transparent, 2 Reveal
 /// Original Image.

@@ -9,8 +9,8 @@
 //!
 //! `--control <port>` (or `EFFECTCRAFT_CONTROL_PORT`) starts a localhost JSON-lines control server;
 //! see `effectcraft_ui_egui::control` for the methods.
-#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
+#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 
 // Built everywhere so its tests run on every platform; only Linux AppImages use it.
 mod appearance;
@@ -365,14 +365,11 @@ fn main() -> eframe::Result {
             }))
         }),
     );
-    match &result {
-        Ok(()) => log::info!("the window closed"),
-        Err(e) => {
-            if on_gl {
-                launch_guard::opengl_failed(effectcraft_host::config_dir().as_deref());
-            }
-            startup_failed(e, !on_gl && cfg!(not(target_os = "macos")));
+    if let Err(e) = &result {
+        if on_gl {
+            launch_guard::opengl_failed(effectcraft_host::config_dir().as_deref());
         }
+        startup_failed(e, !on_gl && cfg!(not(target_os = "macos")));
     }
     result
 }
@@ -381,9 +378,15 @@ fn main() -> eframe::Result {
 /// instead of eframe's fixed set: an older GPU that can't meet those (Intel HD Graphics 5500,
 /// #198) still opens the app, and the compositor then checks what it needs and falls back to
 /// the CPU when the device can't run it. `backends`: Window Graphics' choice, when it makes one.
+///
+/// The surface is eframe's own default, [`eframe::SurfaceConfig::LOW_LATENCY`]: vsync with one
+/// frame in flight, so a drag or a scrub shows one frame sooner. The bare
+/// `WgpuConfiguration::default()` is `HIGH_THROUGHPUT` instead (two frames in flight, three
+/// drawables on Metal): one more frame of pointer-to-screen lag on every interaction, about 8 ms
+/// at 120 Hz and 17 ms at 60 Hz, and a third 15 MB drawable held for the window.
 fn wgpu_options(backends: Option<eframe::wgpu::Backends>) -> eframe::WgpuConfiguration {
     use eframe::egui_wgpu::WgpuSetup;
-    let mut config = eframe::WgpuConfiguration::default();
+    let mut config = eframe::WgpuConfiguration::default().with_surface_config(eframe::SurfaceConfig::LOW_LATENCY);
     if let WgpuSetup::CreateNew(setup) = &mut config.wgpu_setup {
         if let Some(b) = backends {
             setup.instance_descriptor.backends = b;
@@ -455,7 +458,8 @@ struct Desktop {
 }
 
 impl eframe::App for Desktop {
-    /// The desktop host's logic tick: update the macOS menu bar, run the shared app tick and close the IME pass.
+    /// The desktop host's logic tick: update the macOS menu bar, run the shared app tick, close the IME pass, show the
+    /// file dialogs asked for and, last, hand a close to the platform quit.
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         #[cfg(target_os = "macos")]
         self.menu.update(&mut self.app, ctx);
@@ -464,6 +468,7 @@ impl eframe::App for Desktop {
         if let Some(asked) = &self.file_dialogs {
             sheet_dialogs::show_asked(asked, frame, ctx);
         }
+        effectcraft_ui_egui::panels::unsaved::quit_on_close(ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
@@ -484,6 +489,9 @@ impl eframe::App for Desktop {
     }
 
     fn on_exit(&mut self) {
+        // On macOS the app quits through `-[NSApplication terminate:]`, and the process ends
+        // before `eframe::run_native` returns (#341).
+        log::info!("the window is closing");
         self.launch.exited();
         self.window.save(self.app.session.config.as_deref());
         self.app.on_exit();
@@ -563,6 +571,19 @@ mod tests {
         };
         // Intel Metal can't compile the validation's compute shader, and the device is lost.
         assert!(!setup.instance_descriptor.flags.contains(eframe::wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL));
+    }
+
+    /// The window's surface keeps one frame in flight, like eframe's own default, not the two
+    /// of the bare `WgpuConfiguration::default()` (one extra frame of lag on every drag).
+    #[test]
+    fn the_window_surface_is_low_latency() {
+        for backends in [None, Some(eframe::wgpu::Backends::METAL), Some(eframe::wgpu::Backends::GL)] {
+            let surface = super::wgpu_options(backends).surface;
+            assert_eq!(surface, eframe::SurfaceConfig::LOW_LATENCY, "{backends:?}");
+            assert_eq!(surface.desired_maximum_frame_latency, Some(1));
+            assert_eq!(surface.present_mode, eframe::wgpu::PresentMode::AutoVsync);
+        }
+        assert_eq!(super::wgpu_options(None).surface, eframe::NativeOptions::default().wgpu_options.surface, "eframe's default surface");
     }
 
     /// The window's device never asks for more than the adapter offers (#198).

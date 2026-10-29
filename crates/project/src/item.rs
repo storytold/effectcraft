@@ -2,7 +2,7 @@ use super::comp::Comp;
 use super::footage::{Footage, FootageKind, Proxy, Solid};
 use super::layer::LayerSource;
 use super::settings::{APP_VERSION, ProjectError, ProjectSettings, SCHEMA_VERSION, SavedView};
-use super::*;
+use super::{Arc, BTreeMap, Deserialize, FrameRate, Label, Project, Serialize, Tick, file_check, limits};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ItemId(pub u64);
@@ -98,6 +98,21 @@ impl Default for Project {
 }
 
 impl Project {
+    /// Some layer has an expression, which can read markers (`marker.key(1)`, `numKeys`,
+    /// `nearestKey`...). Only then do the markers of comps and layers affect what is rendered, so
+    /// frame caches ignore them otherwise.
+    pub fn reads_markers(&self) -> bool {
+        // Called for every frame identity and disk-cache key: stops at the first expression and
+        // builds no paths (`PropGroup::walk` formats one per node).
+        fn any_expr(g: &crate::PropGroup) -> bool {
+            g.children.iter().any(|c| match c {
+                crate::Node::Prop(p) => p.expr.is_some(),
+                crate::Node::Group(sub) => any_expr(sub),
+            })
+        }
+        self.comps().any(|(_, c)| c.layers.iter().any(|l| any_expr(&l.props)))
+    }
+
     /// Allocate an id (items, layers and property uids share one counter).
     pub fn alloc(&mut self) -> u64 {
         let id = self.next_id;

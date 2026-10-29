@@ -191,6 +191,11 @@ pub fn roto_data(params: &Params, layer_size: [f64; 2], f: i64, with_model: bool
 /// Seed of the chain keys: what the frames are (the Input Key), the layer size, the frame rate,
 /// the mode and the model. The prompt is in each frame's key.
 pub fn seed(params: &Params, layer_size: [f64; 2], fps: f64, model: Option<&dyn MaskModel>) -> u64 {
+    seed_of(params, layer_size, fps, model.map_or(effectcraft_segment::CLASSICAL, |m| m.info().id))
+}
+
+/// [`seed`] for the model with id `model` ([`effectcraft_segment::CLASSICAL`]: no model).
+fn seed_of(params: &Params, layer_size: [f64; 2], fps: f64, model: &str) -> u64 {
     let mut h = 0xcbf2_9ce4_8422_2325;
     fnv(&mut h, ID.as_bytes());
     fnv(&mut h, s(params, INPUT_KEY).as_bytes());
@@ -198,7 +203,7 @@ pub fn seed(params: &Params, layer_size: [f64; 2], fps: f64, model: Option<&dyn 
         fnv(&mut h, &v.to_bits().to_le_bytes());
     }
     fnv(&mut h, &[tracks(params) as u8]);
-    fnv(&mut h, model.map_or(effectcraft_segment::CLASSICAL, |m| m.info().id).as_bytes());
+    fnv(&mut h, model.as_bytes());
     h
 }
 
@@ -255,9 +260,14 @@ pub fn frame_keys(params: &Params, layer_size: [f64; 2], fps: f64, frames: &[i64
 /// What frozen mattes depend on: what the frames are (the seed: Input Key, size, rate, mode,
 /// model), the prompt, the tracked span and the matte settings.
 pub fn frozen_key(params: &Params, layer_size: [f64; 2], fps: f64, model: Option<&dyn MaskModel>) -> String {
-    let mut h = seed(params, layer_size, fps, model);
+    frozen_key_of(params, layer_size, fps, model.map_or(effectcraft_segment::CLASSICAL, |m| m.info().id))
+}
+
+/// [`frozen_key`] for the model with id `model` ([`effectcraft_segment::CLASSICAL`]: no model).
+fn frozen_key_of(params: &Params, layer_size: [f64; 2], fps: f64, model: &str) -> String {
+    let mut h = seed_of(params, layer_size, fps, model);
     let base = reference_frame(params);
-    if let Some(st) = prompt_strokes(params, layer_size, base, model.is_some()) {
+    if let Some(st) = prompt_strokes(params, layer_size, base, model != effectcraft_segment::CLASSICAL) {
         fnv(&mut h, serde_json::to_string(&st).unwrap_or_default().as_bytes());
     }
     for v in [base, reach(params)[0], reach(params)[1]] {
@@ -273,7 +283,9 @@ pub fn is_frozen(params: &Params) -> bool {
 }
 
 /// Frame `f`'s frozen matte on a `w`×`h` grid, when the instance is frozen, the mattes still
-/// match ([`frozen_key`]) and `f` is one of them.
+/// match ([`frozen_key`]) and `f` is one of them. The mattes match under the session's `model`
+/// or under the model that froze them (which this session may not have loaded, e.g. a fresh
+/// headless render): frozen mattes need no segmentation.
 pub fn frozen_alpha(params: &Params, layer_size: [f64; 2], fps: f64, f: i64, w: usize, h: usize, model: Option<&dyn MaskModel>) -> Option<Vec<f32>> {
     let j = s(params, FROZEN);
     if j.is_empty() {
@@ -281,7 +293,10 @@ pub fn frozen_alpha(params: &Params, layer_size: [f64; 2], fps: f64, f: i64, w: 
     }
     let fc = frozen_cache(j)?;
     if fc.key != frozen_key(params, layer_size, fps, model) {
-        return None;
+        let ids = std::iter::once(effectcraft_segment::CLASSICAL).chain(effectcraft_segment::MODELS.iter().map(|m| m.id));
+        if !ids.into_iter().any(|id| fc.key == frozen_key_of(params, layer_size, fps, id)) {
+            return None;
+        }
     }
     let fr = fc.frames.get(&f)?;
     let [fw, fh] = fc.size;
@@ -358,20 +373,24 @@ pub enum FrameMatte {
     Outside,
 }
 
-/// The matte of layer frame `f` on the layer grid of `img` (the effect's input on that frame at
-/// `scale`), computing what is missing. `frame(g)`: the input on frame g on the same grid.
-#[allow(clippy::too_many_arguments)]
+/// The layer grid and timing used to compute one object matte.
+pub struct MatteFrame<'a> {
+    pub layer_size: [f64; 2],
+    pub fps: f64,
+    pub frame: i64,
+    pub scale: f64,
+    pub img: &'a Image,
+}
+
+/// Compute the object's alpha for one layer frame, loading other frames on the same grid as needed.
 pub fn frame_matte(
     params: &Params,
-    layer_size: [f64; 2],
-    fps: f64,
-    f: i64,
-    scale: f64,
-    img: &Image,
+    input: &MatteFrame<'_>,
     model: Option<Arc<dyn MaskModel>>,
     frame: &mut dyn FnMut(i64) -> Option<Arc<Image>>,
     cancel: &dyn Fn() -> bool,
 ) -> FrameMatte {
+    let MatteFrame { layer_size, fps, frame: f, scale, img } = *input;
     let Some(chain) = chain(params, layer_size, fps, f, scale, model) else { return FrameMatte::NoPrompt };
     if !chain.data.in_span(f) {
         return FrameMatte::Outside;
@@ -408,7 +427,7 @@ fn render(ctx: &EffectCtx, buf: Buf) -> Buf {
     if let Some(a) = frozen_alpha(ctx.params, layer_size, fps, f, w, h, model.as_deref()) {
         return compose(&buf, Some(&a), w, h, b(ctx.params, "invert"), param(ctx.params, "view").map(Value::as_enum).unwrap_or(0) == 1);
     }
-    let alpha = match frame_matte(ctx.params, layer_size, fps, f, sc, &img, model, &mut frame, &|| false) {
+    let alpha = match frame_matte(ctx.params, &MatteFrame { layer_size, fps, frame: f, scale: sc, img: &img }, model, &mut frame, &|| false) {
         FrameMatte::Alpha(a) if a.len() == w * h => Some(a),
         FrameMatte::NoPrompt => return buf,
         _ => None,
@@ -608,7 +627,11 @@ mod tests {
         assert_ne!(seed(&p, [100.0, 80.0], 25.0, Some(stub.as_ref())), seed(&p, [100.0, 80.0], 25.0, None));
         let img = frame_at(0);
         let mut frame = |g: i64| Some(Arc::new(frame_at(g)));
-        let FrameMatte::Alpha(a) = frame_matte(&p, [100.0, 80.0], 25.0, 0, 1.0, &img, Some(stub.clone()), &mut frame, &|| false) else { panic!("no matte") };
+        let FrameMatte::Alpha(a) =
+            frame_matte(&p, &MatteFrame { layer_size: [100.0, 80.0], fps: 25.0, frame: 0, scale: 1.0, img: &img }, Some(stub.clone()), &mut frame, &|| false)
+        else {
+            panic!("no matte")
+        };
         assert!(a[40 * 100 + 40] > 0.5 && a[5 * 100 + 5] < 0.5);
         assert_eq!(stub.calls.load(std::sync::atomic::Ordering::Relaxed), 1);
         assert_eq!(*stub.bbox.lock().unwrap(), None);
@@ -634,7 +657,11 @@ mod tests {
         let stub = Arc::new(Stub::default());
         let img = frame_at(0);
         let mut frame = |g: i64| Some(Arc::new(frame_at(g)));
-        let FrameMatte::Alpha(a) = frame_matte(&p, [100.0, 80.0], 25.0, 0, 1.0, &img, Some(stub.clone()), &mut frame, &|| false) else { panic!("no matte") };
+        let FrameMatte::Alpha(a) =
+            frame_matte(&p, &MatteFrame { layer_size: [100.0, 80.0], fps: 25.0, frame: 0, scale: 1.0, img: &img }, Some(stub.clone()), &mut frame, &|| false)
+        else {
+            panic!("no matte")
+        };
         assert_eq!(*stub.bbox.lock().unwrap(), Some([74.0, 54.0, 100.0, 80.0]));
         assert!(a[70 * 100 + 90] > 0.5 && a[40 * 100 + 40] < 0.5);
         // At half resolution the box is scaled with the frame (another Input Key, so the
@@ -643,7 +670,8 @@ mod tests {
         p.values.insert(INPUT_KEY.into(), Value::Str("half".into()));
         let half = effectcraft_raster::resample(&img, 50, 40);
         let mut frame = |g: i64| Some(Arc::new(effectcraft_raster::resample(&frame_at(g), 50, 40)));
-        let _ = frame_matte(&p, [100.0, 80.0], 25.0, 0, 0.5, &half, Some(stub.clone()), &mut frame, &|| false);
+        let _ =
+            frame_matte(&p, &MatteFrame { layer_size: [100.0, 80.0], fps: 25.0, frame: 0, scale: 0.5, img: &half }, Some(stub.clone()), &mut frame, &|| false);
         assert_eq!(*stub.bbox.lock().unwrap(), Some([37.0, 27.0, 50.0, 40.0]));
     }
 
@@ -691,5 +719,29 @@ mod tests {
         p.values.insert("objectPoint".into(), Value::Vec2([40.0, 40.0]));
         p.values.insert(FROZEN.into(), Value::Str(fc2.to_json()));
         assert_eq!(frozen_alpha(&p, [100.0, 80.0], 25.0, 2, 100, 80, None), None);
+    }
+
+    /// Mattes frozen with a model stay usable in a session where that model is not loaded (a
+    /// fresh headless render): they are used as stored, not re-segmented with another model.
+    #[test]
+    fn frozen_mattes_survive_a_session_without_their_model() {
+        let mut p = params(&[
+            ("objectPoint", Value::Vec2([40.0, 40.0])),
+            ("useBox", Value::Bool(true)),
+            ("boxTopLeft", Value::Vec2([10.0, 10.0])),
+            ("boxBottomRight", Value::Vec2([90.0, 70.0])),
+            ("objectTracking/framesAfter", Value::Scalar(3.0)),
+        ]);
+        p.values.insert(INPUT_KEY.into(), Value::Str("frozen-model-test".into()));
+        let stub = Stub::default();
+        let alpha: Vec<f32> = (0..100 * 80).map(|i| ((i % 100) < 50) as u8 as f32).collect();
+        let mut fc = FrozenCache { key: frozen_key(&p, [100.0, 80.0], 25.0, Some(&stub)), size: [100, 80], ..Default::default() };
+        fc.frames.insert(2, roto::freeze_frame(&alpha, &[]));
+        p.values.insert(FROZEN.into(), Value::Str(fc.to_json()));
+        assert!(is_frozen(&p));
+        assert!(frozen_alpha(&p, [100.0, 80.0], 25.0, 2, 100, 80, Some(&stub)).is_some());
+        assert_eq!(frozen_alpha(&p, [100.0, 80.0], 25.0, 2, 50, 40, None).map(|a| (a[20 * 50 + 5], a[20 * 50 + 45])), Some((1.0, 0.0)));
+        let out = run(&p, 2);
+        assert!(out.data[40 * 100 + 10][3] > 0.99 && out.data[40 * 100 + 90][3] < 0.01, "the frozen matte is used");
     }
 }

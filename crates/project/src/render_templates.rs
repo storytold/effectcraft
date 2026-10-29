@@ -8,7 +8,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::render_queue::*;
+use crate::render_queue::{
+    AlphaMode, Channels, CurrentOrOff, FieldRender, OutputFormat, OutputModule, ProResProfile, ProxyUse, RenderQuality, RenderSettings, SwitchOverride,
+};
 use effectcraft_time::FrameRate;
 
 /// A default slot (the Defaults section of the Templates dialogs).
@@ -288,6 +290,7 @@ impl RenderTemplates {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render_queue::{ColorDepth, Crop};
 
     #[test]
     fn builtins_defaults_and_round_trip() {

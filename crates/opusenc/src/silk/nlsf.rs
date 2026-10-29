@@ -3,7 +3,9 @@
 //! dequantisation exactly. The search strategy is our own.
 
 use super::lpc::{MAX_LPC_ORDER, nlsf_decode, smlawb, sqrt_approx};
-use super::tables::*;
+use super::tables::{
+    NLSF_CB_NBMB, NLSF_CB_WB, NLSF_EXT, NLSF_PRED_NBMB, NLSF_PRED_WB, NLSF_PSEL_NBMB, NLSF_PSEL_WB, NLSF_SEL_NBMB, NLSF_SEL_WB, NLSF_STAGE1, NLSF_STAGE2,
+};
 
 /// Number of stage-1 candidates refined with stage 2.
 const SURVIVORS: usize = 8;

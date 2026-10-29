@@ -208,6 +208,16 @@ pub fn bytes_per_frame(om: &OutputModule, w: u32, h: u32, fps: f64) -> f64 {
             let bpp = if om.channels == effectcraft_project::render_queue::Channels::Rgba { 4 } else { 3 };
             ((w as u64 * bpp).next_multiple_of(2) * h as u64) as f64
         }
+        // An 18-byte header and 24-bit BGR, 32-bit BGRA or 8-bit grey (Alpha) pixels, uncompressed.
+        OutputFormat::TargaSequence => {
+            use effectcraft_project::render_queue::Channels;
+            let bpp = match om.channels {
+                Channels::Rgb => 3,
+                Channels::Rgba => 4,
+                Channels::Alpha => 1,
+            };
+            (18 + w as u64 * h as u64 * bpp) as f64
+        }
         OutputFormat::WebM => mbps(8.0) * px / fps,
         OutputFormat::Gif => w as f64 * h as f64 * 0.5,
         OutputFormat::Wav | OutputFormat::Aiff => om.audio_sample_rate as f64 * 4.0 / fps,

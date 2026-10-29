@@ -66,19 +66,9 @@ fn register_points(app: &mut EffectcraftApp, prefix: &str, gr: Rect, pts: &[[f32
 }
 
 /// Small coloured tabs (`names[i]`, swatch `cols[i]`); returns the clicked one.
-fn tabs(
-    app: &mut EffectcraftApp,
-    ui: &mut egui::Ui,
-    p: &egui::Painter,
-    x0: f32,
-    cy: f32,
-    cur: usize,
-    names: &[&str],
-    cols: &[Color32],
-    id: &str,
-) -> Option<usize> {
+fn tabs(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, at: Pos2, cur: usize, (names, cols): (&[&str], &[Color32]), id: &str) -> Option<usize> {
     let t = app.tokens;
-    let mut x = x0;
+    let (mut x, cy) = (at.x, at.y);
     let mut out = None;
     for (i, name) in names.iter().enumerate() {
         let w = if cols.is_empty() { 16.0 + name.chars().count() as f32 * 6.2 } else { 20.0 };
@@ -188,7 +178,7 @@ fn rgb_curves(
     let cy = r.min.y + 15.0;
     let cols = [Color32::from_gray(0xe8), Color32::from_rgb(0xf0, 0x50, 0x50), Color32::from_rgb(0x50, 0xd0, 0x60), Color32::from_rgb(0x50, 0x80, 0xff)];
     let names: Vec<&str> = RGB_CURVES.iter().map(|c| c.1).collect();
-    if let Some(n) = tabs(app, ui, p, x0, cy, ch, &names, &cols, &format!("{prefix}.channel")) {
+    if let Some(n) = tabs(app, ui, p, pos2(x0, cy), ch, (&names, &cols), &format!("{prefix}.channel")) {
         app.ui.fx_curve_channel.insert(g.uid, n);
     }
     let id = RGB_CURVES[ch].0;
@@ -299,7 +289,7 @@ fn huesat_curves(
     let x0 = r.min.x + 38.0;
     let cy = r.min.y + 15.0;
     let names: Vec<&str> = HUESAT.iter().map(|c| c.1).collect();
-    if let Some(n) = tabs(app, ui, p, x0, cy, k, &names, &[], &format!("{prefix}.curve")) {
+    if let Some(n) = tabs(app, ui, p, pos2(x0, cy), k, (&names, &[]), &format!("{prefix}.curve")) {
         app.ui.fx_curve_channel.insert(g.uid, n);
     }
     let (id, name, axis, periodic) = HUESAT[k];
@@ -724,7 +714,7 @@ fn glow_map(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, laye
     }
     let ch = app.ui.fx_curve_channel.get(&euid).copied().unwrap_or(0).min(2);
     let cols = [Color32::from_rgb(0xf0, 0x50, 0x50), Color32::from_rgb(0x50, 0xd0, 0x60), Color32::from_rgb(0x50, 0x80, 0xff)];
-    if let Some(n) = tabs(app, ui, p, x0, r.min.y + 15.0, ch, &["Red", "Green", "Blue"], &cols, &format!("{prefix}.channel")) {
+    if let Some(n) = tabs(app, ui, p, pos2(x0, r.min.y + 15.0), ch, (&["Red", "Green", "Blue"], &cols), &format!("{prefix}.channel")) {
         app.ui.fx_curve_channel.insert(euid, n);
     }
     if reset_link(app, ui, p, Rect::from_min_size(pos2(x0 + size - 44.0, r.min.y + 6.0), vec2(44.0, 18.0)), &format!("{prefix}.reset")) {

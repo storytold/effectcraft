@@ -37,7 +37,7 @@ cpal or muda. Everything in L0 to L4, the egui UI and the web app also build for
 | L3 | `render` | Evaluation and compositing: sources, masks, effects, transforms, 3D, motion blur, mattes, blending, layer cache, audio mixdown |
 | L3 | `media` | Footage decoding (FilmCraft's pure-Rust codecs), image sequences, Photoshop and SVG stills, frame cache |
 | L3 | `expr` | The expression engine (JavaScript via boa) with the After Effects object model |
-| L3 | `export` | Render queue encoding: H.264, HEVC and AV1 MP4, ProRes, WebM (VP9 + alpha or AV1, Opus), PNG/JPEG/TIFF/EXR sequences, GIF, WAV/AIFF |
+| L3 | `export` | Render queue encoding: H.264, HEVC and AV1 MP4, ProRes, WebM (VP9 + alpha or AV1, Opus), PNG/JPEG/TIFF/EXR/Targa sequences, GIF, WAV/AIFF |
 | L3 | `gpu` | The GPU compositor and GPU effects on wgpu compute shaders (Metal, Vulkan, Direct3D 12, WebGPU), checked against the CPU renderer |
 | L3 | `interchange` | Premiere Pro interop through timeline interchange (FCP7 XML, FCPXML, OTIO, EDL, AAF, OMF via FilmCraft's `filmcraft-interchange`): sequences ↔ compositions (§6a) |
 | L3 | `lottie` | Lottie JSON / dotLottie import and export (layers, precomps, eased and spatial keyframes, shapes, masks, mattes) with a warnings list for what Lottie cannot express |
@@ -345,7 +345,10 @@ as NaNs (a kernel that skips pixels fails the oracle) and validation errors pani
 (`ui-egui::frames`); headless renders, the CLI (unless `--gpu`) and CI use the CPU. Outside
 tests, device errors are logged rather than fatal. A viewer frame that runs out of video memory
 (`Gpu::within_memory`) renders on the CPU, the uploaded layers and pooled textures are freed, and
-the RAM preview keeps half as many GPU frames from then on. A frame whose render panics is
+the RAM preview keeps half as many GPU frames from then on. The same guard catches a frame's
+validation errors (an invalid texture, often left by a failed allocation): that frame renders on
+the CPU and the kept textures are freed, but the compositor stays on and, with no allocation
+failure before it, the RAM preview keeps its GPU frames (#1319). A frame whose render panics is
 rendered again on the CPU or released, never left in progress. Native readbacks and timing waits
 share a finite deadline; failure retires pending readbacks exactly once, and late results are
 discarded. The desktop executable and browser page own their shared device's error/loss handlers and forward
@@ -368,6 +371,13 @@ Playground cannons without interacting forces evolve every particle independentl
 backend (reached through `EffectHost::particles` when the GPU compositor is active) simulates one
 particle per invocation from the CPU's birth schedule and keeps per-key state checkpoints on the
 GPU, like `SimCache`; the CPU simulation stays the oracle (tests compare ids and positions).
+CC Particle World, CC Particle Systems II and CC Mr. Mercury sample their Birth Rate at every
+step (`EffectHost::param_at`, #1373), so a keyed rate only decides the births of its own time;
+the rate is left out of the simulation key, and a checkpoint is resumed only with the same rate history (the CPU state's `hist`, the GPU
+checkpoint's births). The rate's keyframes are read at the step's exact layer time
+(`EvalCtx::value_at_layer_time`; mapping it to comp time and back rounds under a fractional
+stretch), a rate without keyframes or an expression isn't sampled, and a layer of one of them with
+expressions isn't layer cached (its key can't see what an expression returned at earlier times).
 `effectcraft-cli bench --gpu` reports CPU vs GPU ms/frame, speed-up, Auto's ms/frame, pixel
 agreement and the steady-state upload / readback MB per frame for every comp plus an
 adjustment-layer comp.

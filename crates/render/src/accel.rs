@@ -2,7 +2,9 @@ use super::frames::content_bounds;
 use super::fx_host::MAX_FX_DEPTH;
 use super::layers::StyledLayer;
 use super::opts::LayerTiming;
-use super::*;
+use super::{
+    Arc, AutoPick, Buf, EffectCtx, EvalCtx, Image, ItemId, ItemKind, Layer, LayerSource, Mat3, MatteKind, Renderer, Tick, cache, color, masks, three_d, vec2,
+};
 
 /// Which compositor renders a frame (Project Settings ▸ Video Rendering and Effects).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -44,6 +46,14 @@ pub trait Accelerator: Send + Sync {
     /// Render a top-level comp frame (what [`Renderer::comp_frame`] returns). `None` = not
     /// handled (the CPU renders it).
     fn comp_frame(&self, r: &Renderer, comp: ItemId, t: Tick) -> Option<Image>;
+    /// Render a top-level comp frame like [`Self::comp_frame`], composite it over `bg` and
+    /// convert it to the H.264 export's 8-bit BT.709 limited-range 4:2:0 (Y plane, then U and V
+    /// at half size; see `effectcraft_raster::yuv`). Every byte is within one level of the CPU
+    /// conversion of the same frame (a driver's arithmetic may move a value near a rounding
+    /// boundary). `None` = not handled (the caller renders and converts on the CPU).
+    fn comp_frame_yuv420(&self, _r: &Renderer, _comp: ItemId, _t: Tick, _bg: [f32; 3]) -> Option<Vec<u8>> {
+        None
+    }
     /// The accelerator implements effect `id` with the CPU effect's semantics.
     fn supports_effect(&self, id: &str) -> bool;
     /// Run a chain of supported effects on `buf`, clamping and quantising to `levels` after
@@ -283,7 +293,7 @@ impl<'a> Renderer<'a> {
     /// layers).
     pub fn run_effects_on(&self, ctx: &EvalCtx, layer: &Layer, adjustment: bool, target: &mut dyn FxTarget) {
         // `target` is used as it is: the comp below for adjustment layers (the callers).
-        self.run_effect_stack(ctx, layer, adjustment, usize::MAX, None, [0.0; 2], target);
+        self.run_effect_stack(ctx, layer, crate::pipeline::EffectStack { adjustment, limit: usize::MAX, origin: [0.0; 2] }, None, target);
     }
 
     /// [`Renderer::run_effects_on`] for a (non-adjustment) layer's own pixels: `target` holds
@@ -291,7 +301,7 @@ impl<'a> Renderer<'a> {
     /// there. Returns the effect-space origin in layer coordinates (rebase by its negation).
     pub fn run_layer_effects_on(&self, ctx: &EvalCtx, layer: &Layer, target: &mut dyn FxTarget) -> [f64; 2] {
         let origin = ctx.effect_bounds(layer).1;
-        self.run_effect_stack(ctx, layer, false, usize::MAX, None, origin, target);
+        self.run_effect_stack(ctx, layer, crate::pipeline::EffectStack { adjustment: false, limit: usize::MAX, origin }, None, target);
         origin
     }
 

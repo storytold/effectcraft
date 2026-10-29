@@ -1,4 +1,4 @@
-use super::*;
+use super::{Affine, BezPath, Cap, HashMap, Join, Point, Rc, RefCell};
 
 pub(crate) type DictRef = Rc<RefCell<HashMap<String, V>>>;
 

@@ -7,7 +7,7 @@ use effectcraft_project::{ItemId, ItemKind, Layer, LayerId, LayerSource, Node, P
 use std::hash::Hash;
 
 pub(super) fn hash(h: &mut KeyHasher, ctx: &EvalCtx, layer: &Layer, effects: Option<usize>) -> Option<()> {
-    let mut deps = Dependencies { h, path: vec![(ctx.comp_id, layer.id)], remaining: 1024, other_times: super::reads_other_times(layer) };
+    let mut deps = Dependencies { h, path: vec![(ctx.comp_id, layer.id)], remaining: 1024, other_times: super::reads_other_times(layer, None) };
     deps.effects(ctx, layer, effects)
 }
 
@@ -21,7 +21,7 @@ struct Dependencies<'a> {
 impl Dependencies<'_> {
     fn effects(&mut self, ctx: &EvalCtx, layer: &Layer, limit: Option<usize>) -> Option<()> {
         let previous = self.other_times;
-        self.other_times |= super::reads_other_times(layer);
+        self.other_times |= super::reads_other_times(layer, None);
         if layer.switches.effects
             && let Some(fx) = layer.effects()
         {
@@ -69,7 +69,7 @@ impl Dependencies<'_> {
             return None;
         }
         self.remaining = self.remaining.checked_sub(1)?;
-        if (self.other_times || super::reads_other_times(layer)) && super::has_expression(&layer.props) {
+        if (self.other_times || super::reads_other_times(layer, None)) && super::has_expression(&layer.props) {
             return None;
         }
         self.path.push(id);

@@ -49,45 +49,38 @@ fn camera(s: &mut Session) -> u64 {
     s.execute("layer.newCamera", json!({"name": "Cam", "position": [320, 180, -800], "poi": [320, 180, 0], "zoom": 900})).unwrap()["layer"].as_u64().unwrap()
 }
 
-#[test]
-fn stereo_rig_builds_eye_comps_and_glasses() {
-    let mut s = session();
-    let src = cid(&s);
-    let cam = camera(&mut s);
-    let items_before = s.project.items.len();
-    let r = s.execute("camera.stereoRig", json!({"sceneDepth": 4})).unwrap();
-    assert_eq!(s.project.items.len(), items_before + 3, "left, right and stereo comps");
-    assert_eq!(r["master"].as_u64(), Some(cam));
-    // Controls on a hidden null in the source comp.
-    let ctl = layer_in(&s, src, r["controls"].as_u64().unwrap());
+/// Controls on a hidden null in the source comp.
+fn assert_stereo_controls(ctl: &Layer) {
     assert_eq!(ctl.name, "Stereo 3D Controls");
     assert!(!ctl.switches.video);
     let fx = ctl.effects().unwrap().groups().next().unwrap().clone();
     assert!(matches!(&fx.kind, GroupKind::Effect { effect } if effect == effectcraft_effects::controls::STEREO_CONTROLS));
     assert_eq!(fx.get("sceneDepth").unwrap().value, KV::Scalar(4.0));
-    // Eye comps: an eye camera (two-node, linked by expressions) and the collapsed source comp.
-    let d = 0.04 * 640.0;
-    for (key, name, x) in [("leftComp", "Scene Left Eye", 320.0 - d / 2.0), ("rightComp", "Scene Right Eye", 320.0 + d / 2.0)] {
-        let ec = ItemId(r[key].as_u64().unwrap());
-        assert_eq!(s.project.item(ec).unwrap().name, name);
-        let c = s.project.comp(ec).unwrap();
-        assert_eq!((c.width, c.height), (640, 360));
-        assert_eq!(c.layers.len(), 2);
-        let cam = &c.layers[0];
-        assert!(cam.is_camera() && effectcraft_render::three_d::camera::is_two_node(cam));
-        assert!(close3(v3(cam, "transform/position"), [x, 180.0, -800.0], 1e-6), "{:?}", v3(cam, "transform/position"));
-        // Parallel eyes (no convergence): each looks straight ahead.
-        assert!(close3(v3(cam, "transform/poi"), [x, 180.0, 0.0], 1e-6), "{:?}", v3(cam, "transform/poi"));
-        assert_eq!(cam.props.prop("cameraOptions/zoom").unwrap().value, KV::Scalar(900.0));
-        for p in ["transform/position", "transform/poi", "cameraOptions/zoom"] {
-            let e = cam.props.prop(p).unwrap().expr.clone().unwrap();
-            assert!(e.text.contains("comp(\"Scene\")") && e.text.contains("Cam"), "{p}: {}", e.text);
-        }
-        let nest = &c.layers[1];
-        assert_eq!(nest.source, LayerSource::Comp { item: src });
-        assert!(nest.switches.collapse && nest.switches.three_d);
+}
+
+/// An eye comp: an eye camera (two-node, linked by expressions) at `x` and the collapsed source comp.
+fn assert_eye_comp(s: &Session, src: ItemId, ec: ItemId, name: &str, x: f64) {
+    assert_eq!(s.project.item(ec).unwrap().name, name);
+    let c = s.project.comp(ec).unwrap();
+    assert_eq!((c.width, c.height), (640, 360));
+    assert_eq!(c.layers.len(), 2);
+    let cam = &c.layers[0];
+    assert!(cam.is_camera() && effectcraft_render::three_d::camera::is_two_node(cam));
+    assert!(close3(v3(cam, "transform/position"), [x, 180.0, -800.0], 1e-6), "{:?}", v3(cam, "transform/position"));
+    // Parallel eyes (no convergence): each looks straight ahead.
+    assert!(close3(v3(cam, "transform/poi"), [x, 180.0, 0.0], 1e-6), "{:?}", v3(cam, "transform/poi"));
+    assert_eq!(cam.props.prop("cameraOptions/zoom").unwrap().value, KV::Scalar(900.0));
+    for p in ["transform/position", "transform/poi", "cameraOptions/zoom"] {
+        let e = cam.props.prop(p).unwrap().expr.clone().unwrap();
+        assert!(e.text.contains("comp(\"Scene\")") && e.text.contains("Cam"), "{p}: {}", e.text);
     }
-    // The stereo comp: left eye on top with 3D Glasses fed by both eyes; right eye hidden.
+    let nest = &c.layers[1];
+    assert_eq!(nest.source, LayerSource::Comp { item: src });
+    assert!(nest.switches.collapse && nest.switches.three_d);
+}
+
+/// The stereo comp: left eye on top with 3D Glasses fed by both eyes; right eye hidden.
+fn assert_stereo_comp(s: &Session, r: &serde_json::Value) {
     let oc = ItemId(r["stereoComp"].as_u64().unwrap());
     let out = s.project.comp(oc).unwrap();
     assert_eq!(s.project.item(oc).unwrap().name, "Scene Stereo 3D");
@@ -98,6 +91,23 @@ fn stereo_rig_builds_eye_comps_and_glasses() {
     assert!(matches!(&g.kind, GroupKind::Effect { effect } if effect == "ec.perspective.3dglasses"));
     assert_eq!(g.get("leftView").unwrap().value, KV::Layer(Some(l)));
     assert_eq!(g.get("rightView").unwrap().value, KV::Layer(Some(rr)));
+}
+
+#[test]
+fn stereo_rig_builds_eye_comps_and_glasses() {
+    let mut s = session();
+    let src = cid(&s);
+    let cam = camera(&mut s);
+    let items_before = s.project.items.len();
+    let r = s.execute("camera.stereoRig", json!({"sceneDepth": 4})).unwrap();
+    assert_eq!(s.project.items.len(), items_before + 3, "left, right and stereo comps");
+    assert_eq!(r["master"].as_u64(), Some(cam));
+    assert_stereo_controls(&layer_in(&s, src, r["controls"].as_u64().unwrap()));
+    let d = 0.04 * 640.0;
+    for (key, name, x) in [("leftComp", "Scene Left Eye", 320.0 - d / 2.0), ("rightComp", "Scene Right Eye", 320.0 + d / 2.0)] {
+        assert_eye_comp(&s, src, ItemId(r[key].as_u64().unwrap()), name, x);
+    }
+    assert_stereo_comp(&s, &r);
     // One undo step; redo; serde.
     let json = serde_json::to_string(&*s.project).unwrap();
     let back: Project = serde_json::from_str(&json).unwrap();

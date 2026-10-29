@@ -264,32 +264,13 @@ fn user_presets(ctx: &egui::Context, force: bool, scan: impl FnOnce() -> Vec<Pre
     v
 }
 
-/// The Effects & Presets panel: search, a contents menu (colour-depth and GPU filters, whether
-/// presets show, categories or one alphabetical list, refresh and clear of the recently used
-/// list), then Favourites, Recently Used, Animation Presets and the effects by category or
-/// alphabetically, filtered by the query. Picking an effect or preset applies it to the selection
-/// (`effect.apply` or the preset's own command); applying an effect also records it as recently
-/// used and opens Effect Controls. Without a selected layer it only reports that in
-/// `app.ui.status`.
-pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
-    let t = app.tokens;
-    let ctx = ui.ctx().clone();
-    let p = ui.painter().clone();
-    // Track the last applied effect (menus, drag and drop, the control channel) as recently used.
-    if let Some(last) = app.session.state.last_effect.clone()
-        && app.ui.effects_recent.first() != Some(&last)
-    {
-        push_recent(&mut app.ui.effects_recent, &last);
-    }
-    let sr = Rect::from_min_size(rect.min + vec2(8.0, 8.0), vec2(rect.width() - 44.0, 24.0));
-    let mut q = app.ui.effects_search.clone();
-    widgets::search_field(ui, sr, &mut q, "Search effects and presets", &t);
-    app.ui.effects_search = q.clone();
-    app.auto.add("effects.search", sr, "Search");
+/// The "Effects & Presets options" hamburger menu beside the search field; returns whether
+/// "Refresh List" was picked.
+fn contents_menu(app: &mut EffectcraftApp, ui: &mut egui::Ui, ctx: &egui::Context, rect: Rect, sr: Rect, t: &Tokens) -> bool {
     // Contents menu.
     let mr = Rect::from_center_size(pos2(rect.max.x - 18.0, sr.center().y), vec2(22.0, 22.0));
     let mpop = egui::Id::unique("fx-contents-menu");
-    if widgets::icon_button(ui, mr, Icon::Hamburger, false, &t, egui::Id::unique("fx-menu")).on_hover_text(tr("Effects & Presets options")).clicked() {
+    if widgets::icon_button(ui, mr, Icon::Hamburger, false, t, egui::Id::unique("fx-menu")).on_hover_text(tr("Effects & Presets options")).clicked() {
         widgets::open_popup(ui, mpop);
     }
     app.auto.add("effects.menu", mr, "Effects & Presets options");
@@ -339,7 +320,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let v = &mut app.ui.effects_view;
         match i {
             i if menu.get(i) == Some(&copy_label) => {
-                if let Err(e) = crate::menus::invoke(app, &ctx, "effects.copyPresetsFolderPath", json!({})) {
+                if let Err(e) = crate::menus::invoke(app, ctx, "effects.copyPresetsFolderPath", json!({})) {
                     app.ui.status = e;
                 }
             }
@@ -354,6 +335,32 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             _ => {}
         }
     }
+    force_scan
+}
+
+/// The Effects & Presets panel: search, a contents menu (colour-depth and GPU filters, whether
+/// presets show, categories or one alphabetical list, refresh and clear of the recently used
+/// list), then Favourites, Recently Used, Animation Presets and the effects by category or
+/// alphabetically, filtered by the query. Picking an effect or preset applies it to the selection
+/// (`effect.apply` or the preset's own command); applying an effect also records it as recently
+/// used and opens Effect Controls. Without a selected layer it only reports that in
+/// `app.ui.status`.
+pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
+    let t = app.tokens;
+    let ctx = ui.ctx().clone();
+    let p = ui.painter().clone();
+    // Track the last applied effect (menus, drag and drop, the control channel) as recently used.
+    if let Some(last) = app.session.state.last_effect.clone()
+        && app.ui.effects_recent.first() != Some(&last)
+    {
+        push_recent(&mut app.ui.effects_recent, &last);
+    }
+    let sr = Rect::from_min_size(rect.min + vec2(8.0, 8.0), vec2(rect.width() - 44.0, 24.0));
+    let mut q = app.ui.effects_search.clone();
+    widgets::search_field(ui, sr, &mut q, "Search effects and presets", &t);
+    app.ui.effects_search = q.clone();
+    app.auto.add("effects.search", sr, "Search");
+    let force_scan = contents_menu(app, ui, &ctx, rect, sr, &t);
     let view = app.ui.effects_view.clone();
     let list = Rect::from_min_max(pos2(rect.min.x, sr.max.y + 6.0), rect.max);
     let lp = p.with_clip_rect(list);

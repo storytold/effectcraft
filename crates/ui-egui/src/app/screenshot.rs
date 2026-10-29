@@ -1,4 +1,4 @@
-use super::*;
+use super::{DrawGeometry, EffectcraftApp, PendingShot, Sender, ShotTarget, control, json};
 
 /// How long a screenshot request waits for a frame, from admission (app clock seconds).
 pub(crate) const SCREENSHOT_TIMEOUT_S: f64 = 8.0;

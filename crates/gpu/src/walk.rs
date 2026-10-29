@@ -17,6 +17,12 @@ use effectcraft_time::Tick;
 use crate::context::{Enc, GpuImage};
 use crate::ops;
 
+/// The size [`render`] renders `comp_id` at, without rendering it.
+pub(crate) fn frame_size(r: &Renderer, comp_id: ItemId, t: Tick) -> Option<(u32, u32)> {
+    let ctx = r.eval_ctx(comp_id, t)?;
+    Some(effectcraft_render::frame_size(ctx.comp.width, ctx.comp.height, r.opts.scale))
+}
+
 /// Render a comp frame into a GPU image (the canvas in the output space, as
 /// `Renderer::comp_frame_cpu` returns it). `None` when something cannot run here (the caller
 /// renders on the CPU instead).
@@ -466,12 +472,12 @@ fn place_src(
 ) -> Option<GpuImage> {
     let pl = r.placement(ctx, layer, buf);
     if let [m] = pl.matrices.as_slice() {
-        return Some(ops::warp_q(e, target, &src, m, pl.sampling, mode, opacity, pl.seed, None, levels));
+        return Some(ops::warp_q(e, target, &src, m, ops::WarpOptions { sampling: pl.sampling, mode, opacity, seed: pl.seed }, None, levels));
     }
     let mut acc = e.zeros(target.width, target.height);
     let k = 1.0 / pl.matrices.len() as f32;
     for m in &pl.matrices {
-        acc = ops::warp(e, &acc, &src, m, pl.sampling, BlendMode::Normal, 1.0, 0, Some(k));
+        acc = ops::warp(e, &acc, &src, m, ops::WarpOptions { sampling: pl.sampling, mode: BlendMode::Normal, opacity: 1.0, seed: 0 }, Some(k));
     }
     Some(ops::blend_full(e, target, &acc, mode, opacity, pl.seed, levels))
 }

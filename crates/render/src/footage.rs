@@ -1,4 +1,4 @@
-use super::*;
+use super::{Arc, AtomicBool, Footage, Image, ItemId, Ordering, Tick};
 
 /// How a [`FootageSource`] hands over float footage (OpenEXR, float TIFF), whose values are
 /// linear light: encoded with a curve, as the compositor takes footage, or as stored. Other

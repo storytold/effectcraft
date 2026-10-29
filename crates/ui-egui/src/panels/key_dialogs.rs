@@ -125,8 +125,16 @@ fn buttons(ui: &mut egui::Ui, app: &mut EffectcraftApp, t: &Tokens, prefix: &str
     (ok, cancel)
 }
 
-fn drag(ui: &mut egui::Ui, app: &mut EffectcraftApp, id: &str, v: &mut f64, speed: f64, range: std::ops::RangeInclusive<f64>, suffix: &str, enabled: bool) {
-    let r = ui.add_enabled(enabled, crate::widgets::drag_value(egui::DragValue::new(v).speed(speed).range(range).max_decimals(2).suffix(suffix)));
+/// Drag speed, clamp range and suffix of a [`drag`] field.
+struct DragSpec<'a> {
+    speed: f64,
+    range: std::ops::RangeInclusive<f64>,
+    suffix: &'a str,
+}
+
+fn drag(ui: &mut egui::Ui, app: &mut EffectcraftApp, id: &str, v: &mut f64, spec: DragSpec, enabled: bool) {
+    let r =
+        ui.add_enabled(enabled, crate::widgets::drag_value(egui::DragValue::new(v).speed(spec.speed).range(spec.range).max_decimals(2).suffix(spec.suffix)));
     app.auto.add(id, r.rect, id);
 }
 
@@ -147,13 +155,13 @@ pub fn velocity(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                     ui.horizontal(|ui| {
                         ui.label(tr("Speed:"));
                         let v = if out { &mut d.out_speed[dim] } else { &mut d.in_speed[dim] };
-                        drag(ui, app, &format!("dialog.velocity.{side}Speed.{dim}"), v, 1.0, -1e7..=1e7, "", enabled);
+                        drag(ui, app, &format!("dialog.velocity.{side}Speed.{dim}"), v, DragSpec { speed: 1.0, range: -1e7..=1e7, suffix: "" }, enabled);
                         ui.label(egui::RichText::new(&d.units).color(t.text_dim));
                     });
                     ui.horizontal(|ui| {
                         ui.label(tr("Influence:"));
                         let v = if out { &mut d.out_inf[dim] } else { &mut d.in_inf[dim] };
-                        drag(ui, app, &format!("dialog.velocity.{side}Influence.{dim}"), v, 0.2, 0.1..=100.0, " %", enabled);
+                        drag(ui, app, &format!("dialog.velocity.{side}Influence.{dim}"), v, DragSpec { speed: 0.2, range: 0.1..=100.0, suffix: " %" }, enabled);
                     });
                     ui.end_row();
                 }
@@ -254,14 +262,14 @@ pub fn time_stretch(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             ui.end_row();
             ui.label(tr("Stretch Factor:"));
             let before = d.percent;
-            drag(ui, app, "dialog.timeStretch.percent", &mut d.percent, 0.5, -10000.0..=10000.0, " %", true);
+            drag(ui, app, "dialog.timeStretch.percent", &mut d.percent, DragSpec { speed: 0.5, range: -10000.0..=10000.0, suffix: " %" }, true);
             if (before - d.percent).abs() > 1e-9 && d.orig_percent.abs() > 1e-9 {
                 d.duration = d.orig_duration * d.percent.abs() / d.orig_percent.abs();
             }
             ui.end_row();
             ui.label(tr("New Duration:"));
             let before = d.duration;
-            drag(ui, app, "dialog.timeStretch.duration", &mut d.duration, 0.05, 0.01..=100000.0, " s", true);
+            drag(ui, app, "dialog.timeStretch.duration", &mut d.duration, DragSpec { speed: 0.05, range: 0.01..=100000.0, suffix: " s" }, true);
             if (before - d.duration).abs() > 1e-9 && d.orig_duration > 1e-9 {
                 d.percent = d.orig_percent.signum() * d.orig_percent.abs() * d.duration / d.orig_duration;
             }

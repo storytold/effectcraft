@@ -1,4 +1,4 @@
-use super::*;
+use super::{invert, mul, mul_vec, rgb_to_xyz};
 
 pub(super) type M3 = [[f64; 3]; 3];
 

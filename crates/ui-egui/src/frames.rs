@@ -31,7 +31,7 @@ use effectcraft_engine::project::{Comp, ItemId, ItemKind, LayerSource, Node, Pro
 use effectcraft_engine::render::disk_cache::{self, DiskCache};
 use effectcraft_engine::render::{CancellableFootage, ExprHost, FootageSource, LayerCache, RenderOpts, Renderer};
 use effectcraft_engine::time::Tick;
-use effectcraft_gpu::{DisplayFrame, Gpu};
+use effectcraft_gpu::{DisplayFrame, FrameError, Gpu};
 use rayon::prelude::*;
 
 /// Comp identities (and the project snapshots behind them) the RAM preview keeps frames of.
@@ -315,23 +315,6 @@ fn content_key(keys: &ContentKeys, project: &Project, revision: u64, comp: u64, 
 /// With expressions in its comps (which can read anything) every item counts.
 pub fn comp_content(project: &Project, comp: ItemId) -> u64 {
     comp_content_with(project, comp, project, |_, c| c)
-}
-
-/// Whether two versions of a comp draw the same pixels. Markers only count when an expression
-/// could read them (`markers_count`).
-fn same_pixels(a: &Comp, b: &Comp, markers_count: bool) -> bool {
-    if markers_count { a.same_pixels(b) } else { a.same_pixels_ignoring_markers(b) }
-}
-
-/// Whether a layer anywhere in the project has an expression, which can read markers.
-fn project_has_expressions(project: &Project) -> bool {
-    fn has_expression(g: &PropGroup) -> bool {
-        g.children.iter().any(|c| match c {
-            Node::Prop(p) => p.expr.is_some(),
-            Node::Group(sub) => has_expression(sub),
-        })
-    }
-    project.items.values().any(|i| matches!(&i.kind, ItemKind::Comp(c) if c.layers.iter().any(|l| has_expression(&l.props))))
 }
 
 /// [`comp_content`] with each comp's version selected for both its sources and its address.
@@ -762,12 +745,12 @@ impl Frames {
     fn identity(&self, project: &Arc<Project>, comp: ItemId) -> Identity {
         let plain = comp_content(project, comp);
         let Ok(mut bases) = self.bases.lock() else { return (plain, None) };
-        // Markers can only change pixels through expressions, which read them.
-        let markers_count = project_has_expressions(project);
+        // Markers are pixels only to the expressions that read them (#1083).
+        let markers = project.reads_markers();
         if let Some((base_id, base)) = bases.get(&comp.0)
             && *base_id != plain
             && comp_content_with(project, comp, project, |id, c| match base.item(id).map(|i| &i.kind) {
-                Some(ItemKind::Comp(b)) if Arc::ptr_eq(b, c) || same_pixels(b, c, markers_count) => b,
+                Some(ItemKind::Comp(b)) if Arc::ptr_eq(b, c) || b.same_pixels_with(c, markers) => b,
                 _ => c,
             }) == *base_id
         {
@@ -779,7 +762,7 @@ impl Frames {
         if let Some((base_id, base)) = bases.get(&comp.0)
             && let (Some(old), Some(new)) = (base.comp(comp), project.comp(comp))
             && comp_content_with(project, comp, base, |id, c| match base.item(id).map(|i| &i.kind) {
-                Some(ItemKind::Comp(b)) if id == comp || Arc::ptr_eq(b, c) || same_pixels(b, c, markers_count) => b,
+                Some(ItemKind::Comp(b)) if id == comp || Arc::ptr_eq(b, c) || b.same_pixels_with(c, markers) => b,
                 _ => c,
             }) == *base_id
             && let Some((s, e)) = new.changed_span(old)
@@ -1318,9 +1301,14 @@ impl Worker {
 
     /// A failed scoped attempt retries on CPU. Retired contexts cannot recover by reducing
     /// their budget; only a healthy device's allocation failure uses the upstream backoff.
-    fn gpu_attempt_failed(&self, gpu: &Gpu, e: &str) {
+    fn gpu_attempt_failed(&self, gpu: &Gpu, e: &FrameError) {
         if gpu.context().check_health().is_err() {
             log::warn!("the GPU context is retired ({e}); the frame renders on the CPU");
+            return;
+        }
+        // Not memory pressure: keeping fewer GPU frames wouldn't help (#1319).
+        if let FrameError::Validation(_) = e {
+            log::warn!("the GPU rejected the frame ({e}); it renders on the CPU, the next frame tries the GPU again");
             return;
         }
         log::warn!("the GPU ran out of memory ({e}); the frame renders on the CPU and fewer GPU frames are kept");

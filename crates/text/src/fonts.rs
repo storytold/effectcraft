@@ -292,15 +292,37 @@ impl Face {
 }
 
 struct Db {
+    fallback: Arc<Face>,
     faces: Vec<Arc<Face>>,
     scanned: bool,
+}
+
+/// Keep the compiled-in regular face available independently of discovery results.
+fn bundled_default_face() -> Arc<Face> {
+    let info =
+        read_faces_bytes(INTER_REGULAR).into_iter().next().map(|n| info_from(n, FaceData::Static(INTER_REGULAR), "bundled")).unwrap_or_else(|| FaceInfo {
+            family: DEFAULT_FAMILY.into(),
+            style: "Regular".into(),
+            weight: 400,
+            italic: false,
+            index: 0,
+            data: FaceData::Static(INTER_REGULAR),
+            origin: "bundled",
+            native_family: None,
+            full_name: "Inter Regular".into(),
+            postscript: Some("Inter-Regular".into()),
+            variable: false,
+            instances: Vec::new(),
+        });
+    Arc::new(Face { id: 0, info, bytes: OnceLock::new(), shaper: OnceLock::new() })
 }
 
 fn db() -> &'static RwLock<Db> {
     static DB: OnceLock<RwLock<Db>> = OnceLock::new();
     DB.get_or_init(|| {
-        let mut db = Db { faces: Vec::new(), scanned: false };
-        for b in [INTER_REGULAR, INTER_MEDIUM, INTER_SEMIBOLD, INTER_BOLD, INTER_ITALIC, JETBRAINS_MONO_REGULAR, NOTO_SERIF_REGULAR] {
+        let fallback = bundled_default_face();
+        let mut db = Db { faces: vec![fallback.clone()], fallback, scanned: false };
+        for b in [INTER_MEDIUM, INTER_SEMIBOLD, INTER_BOLD, INTER_ITALIC, JETBRAINS_MONO_REGULAR, NOTO_SERIF_REGULAR] {
             for n in read_faces_bytes(b) {
                 push(&mut db, info_from(n, FaceData::Static(b), "bundled"));
             }
@@ -394,10 +416,7 @@ pub fn system_scanned() -> bool {
 /// A face by id (panics never: unknown ids give the default face).
 pub fn face(id: FaceId) -> Arc<Face> {
     let d = db().read().unwrap_or_else(std::sync::PoisonError::into_inner);
-    // The bundled fonts are compiled in and always parse (`tests::bundled_families_and_resolution` checks them), so
-    // the database is never empty.
-    #[allow(clippy::expect_used)]
-    d.faces.get(id).or_else(|| d.faces.first()).cloned().expect("bundled fonts present")
+    d.faces.get(id).cloned().unwrap_or_else(|| d.fallback.clone())
 }
 
 /// All faces (bundled first).

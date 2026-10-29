@@ -48,20 +48,21 @@ pub(crate) fn snap(
     sources: &[[f64; 2]],
     mods: egui::Modifiers,
 ) -> [f64; 2] {
-    snap_with(app, ctx, ectx, map, exclude, sources, mods, &[])
+    snap_with(app, ctx, ectx, map, &SnapQuery { exclude, sources, mods, extra: &[] })
 }
 
-/// [`snap`] with `extra` layer targets (the Pan Behind layer's own box).
-pub(crate) fn snap_with(
-    app: &EffectcraftApp,
-    ctx: &egui::Context,
-    ectx: &EvalCtx,
-    map: &ViewerMap,
-    exclude: &[LayerId],
-    sources: &[[f64; 2]],
-    mods: egui::Modifiers,
-    extra: &[vw::SnapTarget],
-) -> [f64; 2] {
+/// What [`snap_with`] snaps: the dragged features and the layers to ignore, plus `extra` layer
+/// targets (the Pan Behind layer's own box).
+pub(crate) struct SnapQuery<'a> {
+    pub exclude: &'a [LayerId],
+    pub sources: &'a [[f64; 2]],
+    pub mods: egui::Modifiers,
+    pub extra: &'a [vw::SnapTarget],
+}
+
+/// [`snap`] with extra layer targets.
+pub(crate) fn snap_with(app: &EffectcraftApp, ctx: &egui::Context, ectx: &EvalCtx, map: &ViewerMap, q: &SnapQuery) -> [f64; 2] {
+    let SnapQuery { exclude, sources, mods, extra } = *q;
     let layers = snapping_on(app, mods);
     let v = &app.ui.viewer;
     let guides = v.snap_guides && v.guides;
@@ -620,6 +621,26 @@ pub(crate) fn bottom_bar(app: &mut EffectcraftApp, ui: &mut egui::Ui, bar: Rect,
     });
 }
 
+/// The exposure drag field (stops) at `er`; a change runs `view.exposure`.
+fn exposure_field(app: &mut EffectcraftApp, ui: &mut egui::Ui, er: Rect, stops: f64) {
+    let mut ev = stops;
+    let resp = ui.put(
+        er,
+        crate::widgets::drag_value(
+            egui::DragValue::new(&mut ev)
+                .speed(0.05)
+                .range(-40.0..=40.0)
+                .fixed_decimals(1)
+                .custom_formatter(|v, _| if v == 0.0 { "0.0".into() } else { format!("{v:+.1}") }),
+        ),
+    );
+    let resp = resp.on_hover_text(crate::i18n::tr("Adjust Exposure (stops)"));
+    app.auto.add_response("viewer.exposure", &resp, "Adjust Exposure");
+    if resp.changed() {
+        let _ = app.session.execute("view.exposure", json!({"stops": ev}));
+    }
+}
+
 /// Lay out the viewer's control row from `bar.min.x`: magnification, resolution, transparency, mask, ROI, grid/guide,
 /// channel/colour management, exposure, snapshot, fast previews, 3D renderer/view and Extended Viewer, timecode and render-time
 /// indicators, running commands or toggling viewer UI state. Returns the width the row
@@ -743,22 +764,7 @@ fn bottom_bar_contents(app: &mut EffectcraftApp, ui: &mut egui::Ui, bar: Rect, z
         let _ = app.session.execute("view.resetExposure", json!({}));
     }
     let er = Rect::from_min_size(pos2(x, cy - 10.0), vec2(42.0, 20.0));
-    let mut ev = vo.exposure as f64;
-    let resp = ui.put(
-        er,
-        crate::widgets::drag_value(
-            egui::DragValue::new(&mut ev)
-                .speed(0.05)
-                .range(-40.0..=40.0)
-                .fixed_decimals(1)
-                .custom_formatter(|v, _| if v == 0.0 { "0.0".into() } else { format!("{v:+.1}") }),
-        ),
-    );
-    let resp = resp.on_hover_text(crate::i18n::tr("Adjust Exposure (stops)"));
-    app.auto.add_response("viewer.exposure", &resp, "Adjust Exposure");
-    if resp.changed() {
-        let _ = app.session.execute("view.exposure", json!({"stops": ev}));
-    }
+    exposure_field(app, ui, er, vo.exposure as f64);
     x = er.max.x + 4.0;
     // Snapshots.
     if tog(ui, &mut app.auto, &mut x, Icon::Snapshot, false, "snapshot", "Take Snapshot").0 {

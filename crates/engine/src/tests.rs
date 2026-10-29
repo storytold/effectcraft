@@ -17,6 +17,7 @@ mod history;
 mod import_project;
 mod key_metadata_order;
 mod key_time;
+mod keyframe_text;
 mod keylight;
 mod limits;
 mod lottie;

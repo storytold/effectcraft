@@ -229,7 +229,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Proxy...",
             ["File", "Interpret Footage"],
             None,
-            "{items?|item?, alpha?, matteColor?, invertAlpha?, frameRate?, loop?, pixelAspect?, fields?, colorProfile?, linearLight?}",
+            "{items?|item?, alpha?, guessAlpha?, matteColor?|premulColor?, invertAlpha?, frameRate?, loop?, pixelAspect?, fields?, colorProfile?, linearLight?, preserveRgb?, overrideStart?, startTimecode? (as file.interpretFootage)}",
             has_proxy,
             interpret_proxy
         ),

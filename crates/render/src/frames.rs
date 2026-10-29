@@ -1,6 +1,6 @@
 use super::footage::NoFootage;
 use super::opts::RenderOpts;
-use super::*;
+use super::{EvalCtx, Footage, FrameBlend, FrameRate, Image, ItemId, Layer, LayerSource, Project, Renderer, TICKS_PER_SECOND, Tick, shapes, source_size, text};
 
 /// The layer's frame blending mode, if the comp's Enable Frame Blending switch is on.
 /// One field of an interlaced frame as a full frame: the field's lines (`parity` 0 = even /

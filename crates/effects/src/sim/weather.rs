@@ -1,6 +1,6 @@
 use super::common::{h, hs};
 use super::sprites::{Acc, Post, Shape, Sprite, SpritePlan, Tint, aa, raster};
-use super::*;
+use super::{Buf, EffectCtx, Image, IntoParallelIterator, ParallelIterator, unpremul};
 
 // ------------------------------------------------------------------ CC Rainfall / CC Snowfall
 

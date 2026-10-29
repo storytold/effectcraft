@@ -469,3 +469,12 @@ fn metrics_and_coverage() {
     assert!(!f.has_char('\u{5d0}'), "Inter has no Hebrew");
     assert!(f.has_feature(b"liga") || f.has_feature(b"calt"));
 }
+
+#[test]
+fn unknown_face_id_returns_bundled_default() {
+    let fallback = face(usize::MAX);
+    assert_eq!(fallback.id, 0);
+    assert_eq!(fallback.info.family, DEFAULT_FAMILY);
+    assert!(fallback.font().is_some());
+    assert!(Arc::ptr_eq(&fallback, &face(0)));
+}

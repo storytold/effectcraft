@@ -1,4 +1,4 @@
-use super::*;
+use super::config;
 
 /// Host services (file access) injected by the frontend.
 pub trait Services: Send + Sync {
@@ -36,6 +36,13 @@ pub trait Services: Send + Sync {
     /// Whether `path` is a folder (dropped or picked folders import their files).
     fn is_dir(&self, path: &str) -> bool {
         std::path::Path::new(path).is_dir()
+    }
+    /// `path` as a list of recent files keeps it (File ▸ Scripts ▸ Recent Script Files): a
+    /// relative path is made absolute against the working directory, so it opens the same file
+    /// after the working directory changes. `None` when the path can't be made absolute (the
+    /// working directory can't be read); the script is then not added to the list.
+    fn full_path(&self, path: &str) -> Option<String> {
+        std::path::absolute(path).ok().map(|p| p.to_string_lossy().into_owned())
     }
 }
 

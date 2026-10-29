@@ -1,4 +1,4 @@
-use super::*;
+use super::{Buf, Image, IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator, ParallelSliceMut, Px, unpremul};
 
 // ------------------------------------------------------------------ band rasteriser
 

@@ -270,6 +270,44 @@ fn an_undefined_name_mentioned_earlier_reports_its_use_in_the_reading_function()
     assert_eq!(e.line, Some(6), "{e:?}");
 }
 
+/// Scripts reach Wiggle Paths' properties, Spatial Phase included, by their match names.
+#[test]
+fn wiggle_paths_properties_by_match_name() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"
+        var c = app.project.items.addComp("W", 200, 200, 1, 2, 30);
+        var sh = c.layers.addShape();
+        var w = sh.property("ADBE Root Vectors Group").addProperty("ADBE Vector Filter - Roughen");
+        w.property("ADBE Vector Spatial Phase").setValue(45);
+        var names = [];
+        for (var i = 1; i <= w.numProperties; i++) names.push(w.property(i).matchName);
+        [w.matchName, w.property("ADBE Vector Spatial Phase").name, names]
+        "#,
+    );
+    assert_eq!(
+        o.result,
+        json!([
+            "ADBE Vector Filter - Roughen",
+            "Spatial Phase",
+            [
+                "ADBE Vector Roughen Size",
+                "ADBE Vector Roughen Detail",
+                "ADBE Vector Roughen Points",
+                "ADBE Vector Temporal Freq",
+                "ADBE Vector Correlation",
+                "ADBE Vector Temporal Phase",
+                "ADBE Vector Spatial Phase",
+                "ADBE Vector Random Seed"
+            ]
+        ])
+    );
+    let (_, c) = comp_named(&s, "W");
+    let sh = c.layers.iter().find(|l| l.props.sub("contents").is_some()).unwrap();
+    assert_eq!(sh.props.prop("contents/wiggle/spatialPhase").unwrap().value, KV::Scalar(45.0));
+}
+
 #[test]
 fn match_names_and_lookups() {
     let mut s = session();
@@ -453,6 +491,38 @@ fn layers_items_and_markers() {
             .iter()
             .any(|l| l.name == "Key"
                 && matches!(l.source, effectcraft_engine::project::LayerSource::Light { kind: effectcraft_engine::project::LightKind::Spot }))
+    );
+}
+
+#[test]
+fn folder_paths_trim_trailing_separators() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"
+        var paths = ['', '/', '///', 'a/b/', 'a\\b\\/', 'a/b', 'a/\n'];
+        var result = paths.map(function (path) {
+          var folder = new Folder(path);
+          return [folder.name, folder.path, __join(path, 'child')];
+        });
+        // A long run followed by a non-separator used to cause quadratic regex backtracking.
+        var longPath = Array(20001).join('/') + 'x';
+        result.push([new Folder(longPath).name, new Folder(longPath).path.length, __join(longPath, 'child').length]);
+        result
+        "#,
+    );
+    assert_eq!(
+        o.result,
+        json!([
+            ["", "", "/child"],
+            ["", "", "/child"],
+            ["", "", "/child"],
+            ["b", "a", "a/b/child"],
+            ["b", "a", "a\\b/child"],
+            ["b", "a", "a/b/child"],
+            ["\n", "a", "a/\n/child"],
+            ["x", 19999, 20007]
+        ])
     );
 }
 

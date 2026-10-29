@@ -3,7 +3,7 @@
 
 use effectcraft_effects::camera_tracker as ct;
 use effectcraft_geom::vec3;
-use effectcraft_project::LayerId;
+use effectcraft_project::{Comp, Layer, LayerId, PropGroup};
 use effectcraft_raster::Image;
 use effectcraft_render::EvalCtx;
 use effectcraft_render::three_d::camera::active_camera;
@@ -11,6 +11,7 @@ use effectcraft_track::camtrack::linalg::{self, M3, V3};
 use serde_json::{Value, json};
 
 use crate::Session;
+use crate::camera_track::Placed;
 use crate::tests::track::{H, W, frame_time, setup, texture};
 
 const F: f64 = 260.0;
@@ -77,10 +78,9 @@ fn status(s: &mut Session) -> Value {
     s.execute("camera.solveStatus", json!({})).unwrap()
 }
 
-#[test]
-fn track_camera_solves_and_creates_layers_on_the_plane() {
-    let (mut s, clip) = tracked(json!({}));
-    let st = status(&mut s);
+/// Solved with a sane error and focal length; returns the Camera Tracker effect group.
+fn assert_solved(s: &mut Session, clip: LayerId) -> PropGroup {
+    let st = status(s);
     assert_eq!(st["solved"], true, "{st}");
     let err = st["averageError"].as_f64().unwrap();
     assert!(err < 0.5, "average error {err}");
@@ -90,9 +90,12 @@ fn track_camera_solves_and_creates_layers_on_the_plane() {
     // Method Used / Average Error are reported in the effect.
     let g = s.active_comp().unwrap().layer(clip).unwrap().effects().unwrap().groups().next().unwrap().clone();
     assert!(matches!(g.prop(ct::METHOD_USED).map(|p| &p.value), Some(effectcraft_keyframe::Value::Str(m)) if !m.is_empty()));
+    g
+}
 
-    // Pick floor points on frame 12 (their 3D positions lie on y = 1.5 in the true scene: the
-    // ones seen below the horizon at the bottom of the frame).
+/// Pick floor points on frame 12 (their 3D positions lie on y = 1.5 in the true scene: the
+/// ones seen below the horizon at the bottom of the frame).
+fn select_floor_points(s: &mut Session) -> Vec<u64> {
     s.execute("time.set", json!({"time": frame_time(12).seconds()})).unwrap();
     let pts = s.execute("camera.points", json!({})).unwrap();
     let list = pts["points"].as_array().unwrap();
@@ -101,32 +104,19 @@ fn track_camera_solves_and_creates_layers_on_the_plane() {
     assert!(floor.len() >= 3, "{floor:?}");
     s.execute("camera.selectPoints", json!({"points": floor})).unwrap();
     assert_eq!(s.state.camera_points.len(), floor.len());
+    floor
+}
 
-    // Create Solid and Camera: one undo step, camera + solid.
-    let r = s.execute_checked("camera.createFromSolve", json!({"kind": "solid"})).unwrap();
-    let cam = LayerId(r["camera"].as_u64().unwrap());
-    let solid = LayerId(r["layers"][0].as_u64().unwrap());
-    let comp = s.active_comp().unwrap().clone();
-    assert!(comp.layer(cam).unwrap().is_camera());
-    assert_eq!(comp.layer(cam).unwrap().name, "3D Tracker Camera");
-    assert_eq!(comp.layers[0].id, cam);
-    let sl = comp.layer(solid).unwrap();
-    assert!(sl.switches.three_d);
-    assert!(sl.name.starts_with("Track Solid"));
-    // The camera is keyed on every frame.
-    assert_eq!(comp.layer(cam).unwrap().props.prop("transform/position").unwrap().keys.len(), 25);
-
-    // Every solved point projects through the created camera exactly where the solve puts it,
-    // and onto its tracked position (the footage fills the comp, so layer pixels are comp
-    // pixels): within 1 px for 95 % of the observations (the rest are the solve's outliers:
-    // features on occlusion edges), 0.5 px on average.
+/// Every solved point projects through the created camera exactly where the solve puts it,
+/// and onto its tracked position (the footage fills the comp, so layer pixels are comp
+/// pixels): within 1 px for 95 % of the observations (the rest are the solve's outliers:
+/// features on occlusion edges), 0.5 px on average.
+fn assert_reprojection(s: &Session, comp: &Comp, pl: &Placed, g: &PropGroup) {
     let cid = s.active_comp_id().unwrap();
-    let uid = g.uid;
-    let pl = crate::camera_track::placed(&s.project, cid, clip, uid).unwrap();
-    let tracks = ct::tracks(&crate::camera_track::static_params(&g)).unwrap();
+    let tracks = ct::tracks(&crate::camera_track::static_params(g)).unwrap();
     let mut errs = vec![];
     for k in [0u32, 6, 12, 18, 24] {
-        let ctx = EvalCtx::new(&s.project, cid, &comp, frame_time(k));
+        let ctx = EvalCtx::new(&s.project, cid, comp, frame_time(k));
         let camst = active_camera(&ctx);
         for sp in pl.solve.visible(k as usize) {
             let Some(obs) = tracks.track(sp.id).and_then(|t| t.at(k)) else { continue };
@@ -142,34 +132,31 @@ fn track_camera_solves_and_creates_layers_on_the_plane() {
     let p95 = errs[errs.len() * 95 / 100];
     let mean = errs.iter().sum::<f64>() / errs.len() as f64;
     assert!(p95 < 1.0 && mean < 0.5, "p95 {p95} px, mean {mean} px");
+}
 
-    // The solid lies on the selected points' plane.
+/// The solid lies on the selected points' plane and faces the camera.
+fn assert_solid_on_plane(s: &Session, comp: &Comp, sl: &Layer, pl: &Placed, size: f64) {
+    let cid = s.active_comp_id().unwrap();
     let tr = sl.props.sub("transform").unwrap();
     let pos = tr.get("position").unwrap().value.as_vec3();
     let ori = tr.get("orientation").unwrap().value.as_vec3();
     let normal = linalg::mv(&linalg::from_euler_xyz(ori), [0.0, 0.0, -1.0]);
-    let size = r["target"]["size"].as_f64().unwrap();
     for id in &s.state.camera_points {
         let w = pl.to_world(pl.solve.point(*id).unwrap().pos);
         let d = linalg::dot(linalg::sub(w, pos), normal).abs();
         assert!(d < 0.05 * size.max(1.0) + 1.0, "point {id} is {d} px off the plane");
     }
-    // The solid faces the camera.
-    let ctx = EvalCtx::new(&s.project, cid, &comp, frame_time(12));
+    let ctx = EvalCtx::new(&s.project, cid, comp, frame_time(12));
     let eye = active_camera(&ctx).eye;
     assert!(linalg::dot(normal, linalg::sub([eye.x, eye.y, eye.z], pos)) > 0.0);
+}
 
-    // Undo removes both layers; redo brings them back.
-    let before = comp.layers.len();
-    assert!(s.undo());
-    assert_eq!(s.active_comp().unwrap().layers.len(), before - 2);
-    assert!(s.redo());
-    assert_eq!(s.active_comp().unwrap().layers.len(), before);
-
-    // A second create reuses the camera: Create Multiple Nulls and Camera.
+/// A second create reuses the camera (Create Multiple Nulls and Camera), then Text and
+/// Shadow Catcher (+ light).
+fn assert_create_kinds(s: &mut Session, cam: LayerId, n_floor: usize) {
     let r = s.execute_checked("camera.createFromSolve", json!({"kind": "null", "multiple": true})).unwrap();
     assert_eq!(r["camera"].as_u64().unwrap(), cam.0);
-    assert_eq!(r["layers"].as_array().unwrap().len(), floor.len());
+    assert_eq!(r["layers"].as_array().unwrap().len(), n_floor);
     // Text and Shadow Catcher (+ light).
     let r = s.execute_checked("camera.createFromSolve", json!({"kind": "text"})).unwrap();
     assert_eq!(r["layers"].as_array().unwrap().len(), 1);
@@ -180,11 +167,12 @@ fn track_camera_solves_and_creates_layers_on_the_plane() {
     assert_eq!(comp.layer(ids[0]).unwrap().props.prop("materialOptions/acceptsShadows").unwrap().value.as_enum(), 2);
     assert!(comp.layer(ids[1]).unwrap().is_light());
     assert!(s.execute_checked("camera.createFromSolve", json!({"kind": "teapot"})).is_err());
+}
 
-    // Set Ground Plane and Origin: the target becomes the origin; a null created there sits at
-    // (0, 0, 0) lying on the X-Z plane (its front facing up, −y).
+/// Set Ground Plane and Origin, then an explicit target.
+fn assert_ground_and_target(s: &mut Session) {
     s.execute_checked("camera.setGroundPlane", json!({})).unwrap();
-    assert_eq!(status(&mut s)["groundPlane"], true);
+    assert_eq!(status(s)["groundPlane"], true);
     let r = s.execute_checked("camera.createFromSolve", json!({"kind": "null"})).unwrap();
     let null = LayerId(r["layers"][0].as_u64().unwrap());
     let tr = s.active_comp().unwrap().layer(null).unwrap().props.sub("transform").unwrap().clone();
@@ -203,6 +191,44 @@ fn track_camera_solves_and_creates_layers_on_the_plane() {
     assert!(linalg::norm(linalg::sub(pos, [10.0, 0.0, 20.0])) < 1e-6, "{pos:?}");
     let front = linalg::mv(&linalg::from_euler_xyz(tr.get("orientation").unwrap().value.as_vec3()), [0.0, 0.0, -1.0]);
     assert!(linalg::norm(linalg::sub(front, [0.0, 0.0, -1.0])) < 1e-6, "{front:?}");
+}
+
+#[test]
+fn track_camera_solves_and_creates_layers_on_the_plane() {
+    let (mut s, clip) = tracked(json!({}));
+    let g = assert_solved(&mut s, clip);
+    let floor = select_floor_points(&mut s);
+
+    // Create Solid and Camera: one undo step, camera + solid.
+    let r = s.execute_checked("camera.createFromSolve", json!({"kind": "solid"})).unwrap();
+    let cam = LayerId(r["camera"].as_u64().unwrap());
+    let solid = LayerId(r["layers"][0].as_u64().unwrap());
+    let comp = s.active_comp().unwrap().clone();
+    assert!(comp.layer(cam).unwrap().is_camera());
+    assert_eq!(comp.layer(cam).unwrap().name, "3D Tracker Camera");
+    assert_eq!(comp.layers[0].id, cam);
+    let sl = comp.layer(solid).unwrap();
+    assert!(sl.switches.three_d);
+    assert!(sl.name.starts_with("Track Solid"));
+    // The camera is keyed on every frame.
+    assert_eq!(comp.layer(cam).unwrap().props.prop("transform/position").unwrap().keys.len(), 25);
+
+    let cid = s.active_comp_id().unwrap();
+    let uid = g.uid;
+    let pl = crate::camera_track::placed(&s.project, cid, clip, uid).unwrap();
+    assert_reprojection(&s, &comp, &pl, &g);
+    assert_solid_on_plane(&s, &comp, sl, &pl, r["target"]["size"].as_f64().unwrap());
+
+    // Undo removes both layers; redo brings them back.
+    let before = comp.layers.len();
+    assert!(s.undo());
+    assert_eq!(s.active_comp().unwrap().layers.len(), before - 2);
+    assert!(s.redo());
+    assert_eq!(s.active_comp().unwrap().layers.len(), before);
+
+    assert_create_kinds(&mut s, cam, floor.len());
+
+    assert_ground_and_target(&mut s);
 
     // Serde keeps the analysis.
     let back = effectcraft_project::Project::from_json(&s.project.to_json()).unwrap();

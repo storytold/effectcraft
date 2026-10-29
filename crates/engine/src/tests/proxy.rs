@@ -14,7 +14,8 @@ use crate::Session;
 use crate::render::{FootageSource, RenderOpts};
 
 /// Files by name: `red16.png` (16×16 red), `blue8.png` (8×8 blue), `lines.mov` (interlaced:
-/// even rows red, odd rows blue; 4×4, 10 fps), `matte_black.png` / `matte_white.png` (a
+/// even rows red, odd rows blue; 4×4, 10 fps), `flash.mov` (10×10, 10 fps: red, then blue from
+/// the second frame), `matte_black.png` / `matte_white.png` (a
 /// semi-transparent green premultiplied against black / white, read as straight), `half.png`
 /// (white at 25 % alpha), `wide.png` (10×10 white).
 struct Synthetic;
@@ -52,9 +53,14 @@ fn size_of(path: &str) -> (u32, u32) {
 }
 
 impl FootageSource for Synthetic {
-    fn frame(&self, _: ItemId, f: &Footage, _t: Tick) -> Option<Arc<Image>> {
+    fn frame(&self, _: ItemId, f: &Footage, t: Tick) -> Option<Arc<Image>> {
         let (w, h) = size_of(&f.path);
         let mut img = Image::new(w, h);
+        // `flash.mov` is red for its first frame and blue from its second (0.1 s) on.
+        if f.path.ends_with("flash.mov") {
+            let c = if t.seconds() >= 0.1 - 1e-9 { [0.0, 0.0, 1.0, 1.0] } else { [1.0, 0.0, 0.0, 1.0] };
+            return Some(Arc::new(Image::filled(w, h, c)));
+        }
         for y in 0..h {
             for x in 0..w {
                 // Decoders hand out premultiplied pixels (straight file colour × alpha).
@@ -171,6 +177,118 @@ fn comp_proxy_and_create_proxy() {
     assert!(blue(px(&s, outer, 0.0, o, 8, 8)));
 }
 
+/// Outer (4×4, 20 fps) holding a layer of Inner (4×4, 10 fps, a red solid): (inner, outer).
+fn nested(s: &mut Session) -> (ItemId, ItemId) {
+    s.execute("comp.new", json!({"name": "Inner", "width": 4, "height": 4, "frameRate": 10, "duration": 2})).unwrap();
+    let inner = s.active_comp_id().unwrap();
+    s.execute("layer.newSolid", json!({"color": "#ff0000"})).unwrap();
+    s.execute("comp.new", json!({"name": "Outer", "width": 4, "height": 4, "frameRate": 20, "duration": 2})).unwrap();
+    let outer = s.active_comp_id().unwrap();
+    s.execute("layer.addItem", json!({"item": inner.0})).unwrap();
+    (inner, outer)
+}
+
+/// Interpret Footage ▸ Proxy's Invert Alpha and Interpret As Linear Light change what a
+/// composition proxy draws, as they do for the same file used as footage.
+#[test]
+fn comp_proxy_draws_with_its_interpretation() {
+    let mut s = session();
+    let (inner, outer) = nested(&mut s);
+    let o = RenderOpts::default();
+    // Invert Alpha: the 25 % proxy covers 75 %.
+    s.execute("file.setProxy", json!({"item": inner.0, "path": "/m/half.png"})).unwrap();
+    s.execute("file.interpretProxy", json!({"item": inner.0, "alpha": "straight", "invertAlpha": true})).unwrap();
+    let p = px(&s, outer, 0.0, o, 1, 1);
+    assert!((p[3] - 0.75).abs() < 0.01, "{p:?}");
+    // Interpret As Linear Light: the proxy draws as the file does as footage with that setting.
+    let f = import(&mut s, "/m/matte_black.png");
+    s.execute("file.interpretFootage", json!({"item": f.0, "linearLight": true})).unwrap();
+    s.execute("comp.new", json!({"name": "Ref", "width": 4, "height": 4, "frameRate": 20, "duration": 2})).unwrap();
+    let r = s.active_comp_id().unwrap();
+    s.execute("layer.addItem", json!({"item": f.0})).unwrap();
+    let want = px(&s, r, 0.0, o, 1, 1);
+    assert!(want[1] / want[3] > 0.7, "linear light re-encodes the 0.5 green: {want:?}");
+    s.execute("file.setProxy", json!({"item": inner.0, "path": "/m/matte_black.png"})).unwrap();
+    s.execute("file.interpretProxy", json!({"item": inner.0, "linearLight": true})).unwrap();
+    let p = px(&s, outer, 0.0, o, 1, 1);
+    assert!((0..4).all(|i| (p[i] - want[i]).abs() < 1e-3), "{p:?} != {want:?}");
+}
+
+/// Interpret Footage ▸ Proxy ▸ Separate Fields: a composition proxy shows one field per frame
+/// at twice the rate, as footage does.
+#[test]
+fn comp_proxy_separates_fields() {
+    let mut s = session();
+    let (inner, outer) = nested(&mut s);
+    let o = RenderOpts::default();
+    s.execute("file.setProxy", json!({"item": inner.0, "path": "/m/lines.mov"})).unwrap();
+    assert!(red(px(&s, outer, 0.05, o, 1, 0)) && blue(px(&s, outer, 0.05, o, 1, 1)), "progressive");
+    s.execute("file.interpretProxy", json!({"item": inner.0, "fields": "upper"})).unwrap();
+    // At 0.05 s the lower field (odd rows, blue) is shown, with the even rows interpolated.
+    for y in 0..3 {
+        assert!(blue(px(&s, outer, 0.05, o, 1, y)), "lower field at row {y}");
+    }
+}
+
+/// Frame Blending on a precomp layer blends the frames of the composition's proxy.
+#[test]
+fn comp_proxy_frames_blend() {
+    let mut s = session();
+    let (inner, outer) = nested(&mut s);
+    let o = RenderOpts::default();
+    s.execute("file.setProxy", json!({"item": inner.0, "path": "/m/flash.mov"})).unwrap();
+    assert!(red(px(&s, outer, 0.05, o, 1, 1)));
+    s.execute("layer.frameBlending", json!({"mode": "frameMix"})).unwrap();
+    s.execute("comp.setSwitch", json!({"switch": "frameBlending", "value": true})).unwrap();
+    // Halfway between the red first frame and the blue second one.
+    let p = px(&s, outer, 0.05, o, 1, 1);
+    assert!((p[0] - 0.5).abs() < 0.05 && (p[2] - 0.5).abs() < 0.05 && p[3] > 0.99, "{p:?}");
+    assert!(blue(px(&s, outer, 0.1, o, 1, 1)));
+}
+
+#[test]
+fn comp_proxy_frame_blend_cache_tracks_alpha_interpretation() {
+    struct Interpreted(std::sync::atomic::AtomicUsize);
+    impl FootageSource for Interpreted {
+        fn frame(&self, _: ItemId, f: &Footage, _: Tick) -> Option<Arc<Image>> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let pixel = match f.alpha {
+                AlphaMode::Straight => [0.4, 0.2, 0.1, 0.5],
+                AlphaMode::Premultiplied => [f.premul_color[0] * 0.5, 0.1, 0.0, 0.5],
+                AlphaMode::Ignore => [0.8, 0.4, 0.2, 1.0],
+            };
+            Some(Arc::new(Image::filled(4, 4, pixel)))
+        }
+    }
+    for mode in ["frameMix", "pixelMotion"] {
+        let mut s = session();
+        let footage = Arc::new(Interpreted(std::sync::atomic::AtomicUsize::new(0)));
+        s.footage = footage.clone();
+        let (inner, outer) = nested(&mut s);
+        s.execute("file.setProxy", json!({"item": inner.0, "path": "/m/alpha.mov"})).unwrap();
+        s.execute("file.interpretProxy", json!({"item": inner.0, "alpha": "straight"})).unwrap();
+        s.execute("layer.frameBlending", json!({"mode": mode})).unwrap();
+        s.execute("comp.setSwitch", json!({"switch": "frameBlending", "value": true})).unwrap();
+        let opts = RenderOpts::default();
+        let first = px(&s, outer, 0.05, opts, 1, 1);
+        let calls = footage.0.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(px(&s, outer, 0.05, opts, 1, 1), first);
+        assert_eq!(footage.0.load(std::sync::atomic::Ordering::Relaxed), calls);
+        for params in [
+            json!({"item": inner.0, "alpha": "ignore"}),
+            json!({"item": inner.0, "alpha": "premultiplied", "premulColor": [0.0, 0.0, 0.0]}),
+            json!({"item": inner.0, "alpha": "premultiplied", "premulColor": [1.0, 0.0, 0.0]}),
+        ] {
+            s.execute("file.interpretProxy", params.clone()).unwrap();
+            let mut fresh = s.renderer(opts);
+            fresh.cache = None;
+            let want = fresh.comp_frame(outer, Tick::from_seconds_f64(0.05)).get(1, 1);
+            let actual = px(&s, outer, 0.05, opts, 1, 1);
+            assert_eq!(actual, want, "{mode} after {params}");
+        }
+    }
+}
+
 #[test]
 fn interpret_proxy_settings_apply_to_the_proxy() {
     let mut s = session();
@@ -185,6 +303,38 @@ fn interpret_proxy_settings_apply_to_the_proxy() {
         _ => panic!("not footage"),
     };
     assert_eq!(f.alpha, AlphaMode::Straight, "the main footage keeps its interpretation");
+}
+
+/// Agents and the control channel run commands through `execute_checked`, which refuses keys a
+/// params doc does not list. The Interpret Footage commands list every key they read.
+#[test]
+fn interpret_commands_accept_their_keys_when_checked() {
+    let mut s = session();
+    let mov = import(&mut s, "/m/lines.mov");
+    let b = import(&mut s, "/m/red16.png");
+    s.execute("file.setProxy", json!({"item": mov.0, "path": "/m/lines.mov"})).unwrap();
+    s.execute("file.setProxy", json!({"item": b.0, "path": "/m/matte_black.png"})).unwrap();
+    s.execute_checked("file.interpretProxy", json!({"item": mov.0, "preserveRgb": true, "overrideStart": true, "startTimecode": 25})).unwrap();
+    let px = s.project.item(mov).unwrap().proxy.clone().unwrap().footage;
+    assert!(px.preserve_rgb);
+    assert_eq!(px.start_timecode, Some(25));
+    s.execute_checked("file.interpretProxy", json!({"item": mov.0, "overrideStart": false})).unwrap();
+    assert_eq!(s.project.item(mov).unwrap().proxy.as_ref().unwrap().footage.start_timecode, None);
+    s.execute_checked("file.interpretProxy", json!({"item": b.0, "guessAlpha": true})).unwrap();
+    assert_eq!(s.project.item(b).unwrap().proxy.as_ref().unwrap().footage.alpha, AlphaMode::Premultiplied);
+    s.execute_checked("file.interpretProxy", json!({"item": b.0, "premulColor": [1.0, 0.0, 0.0]})).unwrap();
+    assert_eq!(s.project.item(b).unwrap().proxy.as_ref().unwrap().footage.premul_color, [1.0, 0.0, 0.0]);
+    // `item` names one footage item, as `items` names several.
+    s.execute_checked("file.interpretFootage", json!({"item": b.0, "invertAlpha": true, "premulColor": [0.0, 1.0, 0.0]})).unwrap();
+    s.execute_checked("file.rememberInterpretation", json!({"item": b.0})).unwrap();
+    s.execute_checked("file.applyInterpretation", json!({"item": mov.0})).unwrap();
+    let f = match &s.project.item(mov).unwrap().kind {
+        ItemKind::Footage(f) => f.clone(),
+        _ => panic!("not footage"),
+    };
+    assert!(f.invert_alpha);
+    assert_eq!(f.premul_color, [0.0, 1.0, 0.0]);
+    assert_eq!(s.execute_checked("file.reloadFootage", json!({"item": mov.0})).unwrap()["reloaded"], 1);
 }
 
 /// Separate Fields: each field becomes a frame at twice the frame rate, the other field's lines

@@ -83,6 +83,16 @@ square positions to the pixel. `LINEAR_SIDE_INFLUENCE` holds the value for evalu
 Editor / velocity dialog sides and the Lottie export; segments that are linear on both sides stay
 straight. Regression test: `a_linear_side_next_to_an_eased_side_matches_after_effects`.
 
+## Rectangle path start point
+
+Measured on 19 October 2026 with After Effects 2026 (26.2) on 400 × 300 shape rectangles with Trim
+Paths: a plain rectangle starts at its top-right corner and runs clockwise (0–25 % covers the right
+edge and 50 px of the bottom); with Roundness 40 it starts where the top-right arc meets the right
+edge. Start 70 / End 30 draws 30–70 %. EffectCraft started at the top-left corner (and the rounded
+rectangle elsewhere), so trimmed rectangles drew the wrong segment (86 of 5184 grid points off,
+now 5 at stroke edges). `effectcraft_path::rect` now draws AE's order, which also gives Convert to
+Bezier AE's vertex order. Regression test: `rectangles_start_where_after_effects_starts_them`.
+
 ## Still unmeasured
 
 Rendered frame comparisons now have a deterministic `effectcraft_effects::fidelity::compare_frames`

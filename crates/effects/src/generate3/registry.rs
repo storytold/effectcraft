@@ -4,7 +4,7 @@ use super::fill::{eyedropper_fill, glue_gun, paint_bucket, threads};
 use super::fractal::{FRACTAL_OVERSAMPLE, FRACTAL_PALETTES, FRACTAL_SETS, fractal};
 use super::paths::{scribble, stroke, vegas, write_on};
 use super::raster::{END_CAPS, JOINS};
-use super::*;
+use super::{EffectSpec, ParamUi, Value, col, num, p, popup, slider};
 
 // ---------------------------------------------------------------- registry
 

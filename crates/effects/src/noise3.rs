@@ -60,6 +60,11 @@ pub const BLEND_NORMAL: u32 = 1;
 /// Index of "Soft Linear" in [`NOISE_TYPES`] (the default, and the GPU path's interpolation).
 pub const NOISE_SOFT_LINEAR: u32 = 2;
 
+/// Lattice cell of Fractal / Turbulent Noise in pixels per percent of Scale: After Effects 2026
+/// draws Block noise at Scale 100 in 66.67 px cells (and Soft Linear noise has the matching
+/// correlation length), not 100 px.
+pub const NOISE_CELL: f64 = 2.0 / 3.0;
+
 fn spec(id: &'static str, name: &'static str, params: Vec<ParamSpec>, render: crate::RenderFn) -> EffectSpec {
     EffectSpec { id, name, category: "Noise & Grain", params, render, gpu: false, float: true }
 }
@@ -236,7 +241,7 @@ impl Fractal {
             overflow: pr.e("overflow"),
             invert: pr.b("invert"),
             rot: rot.sin_cos(),
-            size: [(sw * b.scale).max(1.0) as f32, (sh * b.scale).max(1.0) as f32],
+            size: [(sw * NOISE_CELL * b.scale).max(1.0) as f32, (sh * NOISE_CELL * b.scale).max(1.0) as f32],
             origin: [ox as f32, oy as f32],
             center: [cx as f32, cy as f32],
             perspective: pr.b("transform/perspectiveOffset"),
@@ -535,12 +540,32 @@ mod tests {
 
     #[test]
     fn noise_types_differ_and_block_is_piecewise_constant() {
-        let a = run("ec.noise.fractal", &[("noiseType", Value::Enum(0)), ("complexity", num(1.0)), ("transform/scale", num(10.0))]);
-        // Block noise: neighbours inside one 10 px cell share a value.
+        let a = run("ec.noise.fractal", &[("noiseType", Value::Enum(0)), ("complexity", num(1.0)), ("transform/scale", num(15.0))]);
+        // Block noise: neighbours inside one 10 px cell (Scale 15) share a value.
         assert_eq!(a.get(4, 4), a.get(5, 5));
         let others: Vec<Image> = (1..4).map(|t| run("ec.noise.fractal", &[("noiseType", Value::Enum(t)), ("transform/scale", num(10.0))])).collect();
         assert_ne!(others[0], others[1]);
         assert_ne!(others[1], others[2]);
+    }
+
+    /// After Effects 2026 (R9): Block noise at Scale 100, Complexity 1 changes value every
+    /// 66.67 px along a row.
+    #[test]
+    fn block_noise_cells_are_two_thirds_of_scale_as_in_after_effects() {
+        let img = run_fx(
+            "ec.noise.fractal",
+            &[("noiseType", Value::Enum(0)), ("complexity", num(1.0)), ("blendingMode", Value::Enum(BLEND_NONE))],
+            Image::filled(400, 8, [0.0, 0.0, 0.0, 1.0]),
+            0.0,
+            EffectEnv::default(),
+        )
+        .img;
+        let changes: Vec<i64> = (1..400).filter(|&x| img.get(x, 4) != img.get(x - 1, 4)).collect();
+        assert!(changes.len() >= 4, "{changes:?}");
+        for w in changes.windows(2) {
+            let d = (w[1] - w[0]) as f64;
+            assert!((d - 200.0 / 3.0).abs() <= 1.0, "cell width {d}: {changes:?}");
+        }
     }
 
     #[test]

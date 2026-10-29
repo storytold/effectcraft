@@ -521,6 +521,21 @@ fn export_survives_a_precomp_layer_pointing_at_a_non_comp() {
 }
 
 #[test]
+fn xml_timelines_declaring_entities_are_refused() {
+    // #2129: the timeline parser expands internal entities without a node limit.
+    let dtd = "<!DOCTYPE x [<!ENTITY a \"aaaaaaaaaa\"><!ENTITY b \"&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;\">]>";
+    let docs = [
+        (TimelineFormat::Fcp7Xml, format!("<?xml version=\"1.0\"?>{dtd}<xmeml version=\"5\">&b;</xmeml>")),
+        (TimelineFormat::Fcpxml, format!("<?xml version=\"1.0\"?>{dtd}<fcpxml version=\"1.9\">&b;</fcpxml>")),
+    ];
+    for (format, doc) in docs {
+        let mut p = Project::default();
+        let r = import(&mut p, doc.as_bytes(), Some(format), &ImportOptions::default(), &mut |_| None);
+        assert!(matches!(r, Err(Error::XmlEntities)), "{format:?}");
+    }
+}
+
+#[test]
 fn deeply_nested_documents_error_instead_of_overflowing_the_stack() {
     // A few hundred kilobytes nested 100 000 levels deep overflowed the parsers' stack.
     let n = 100_000;

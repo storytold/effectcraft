@@ -1,5 +1,5 @@
 use super::tools::draw_rigs;
-use super::*;
+use super::{Align2, Color32, EffectcraftApp, EvalCtx, Rect, Sense, Stroke, StrokeKind, Tokens, View3D, ViewerMap, json, pos2, three_d, vec2, widgets};
 
 /// Draw the extra views of a 2- or 4-view layout and return the main view's rectangle.
 pub(super) fn aux_views(

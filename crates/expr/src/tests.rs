@@ -1,5 +1,6 @@
 use std::time::Instant;
 
+mod deep_nesting;
 mod fuzz;
 
 use effectcraft_color::Label;

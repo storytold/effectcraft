@@ -1,4 +1,4 @@
-use super::*;
+use super::{Comp, CompSelection, Event, ItemId, LayerId, Result, Session, Tick, Value, commands};
 
 /// `t` as a current time of `comp`: a frame within its duration.
 fn comp_frame_at(comp: &Comp, t: Tick) -> Tick {

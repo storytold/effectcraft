@@ -1218,8 +1218,8 @@ mod tests {
         assert_eq!(px(&f, FloatCurve::Gamma24), g24);
     }
 
-    /// A model's material library is read beside it; one named by a path to another computer
-    /// is not read.
+    /// A model's material library is read beside it; one named by a path to another computer is
+    /// looked up under its own file name beside the model, never fetched from that machine (#1274).
     #[test]
     fn model_files_on_other_computers_are_not_read() {
         let dir = std::env::temp_dir().join(format!("ec-model-files-{}", std::process::id()));
@@ -1233,11 +1233,13 @@ mod tests {
             model.materials.iter().any(|m| m.base_color[..3] == [1.0, 0.0, 0.0])
         };
         assert!(red("beside.obj", "red.mtl"));
-        assert!(!red("unc.obj", r"\\192.0.2.1\share\red.mtl"));
-        assert!(!red("url.obj", "file://192.0.2.1/s/red.mtl"));
+        // 192.0.2.1 is a test-net address nothing here can reach, so these passes prove the
+        // material library came from beside the model, not from another computer.
+        assert!(red("unc.obj", r"\\192.0.2.1\share\red.mtl"));
+        assert!(red("url.obj", "file://192.0.2.1/s/red.mtl"));
         // Linux reads `//dir/red.mtl` as the local file.
         #[cfg(unix)]
-        assert!(!red("slashes.obj", &format!("/{}", dir.join("red.mtl").display())));
+        assert!(red("slashes.obj", &format!("/{}", dir.join("red.mtl").display())));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

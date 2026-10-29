@@ -1,5 +1,5 @@
 use super::settings::yes;
-use super::*;
+use super::{ColorSpace, Deserialize, FrameRate, Serialize, Tick};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FootageKind {

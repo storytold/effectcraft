@@ -214,7 +214,7 @@ pub(crate) fn median_image(e: &mut Enc, img: &GpuImage, r: usize, straight: bool
     let seg = (4 * r as u32).clamp(32, 512).min(q.width);
     let out = e.scratch(q.width, q.height);
     let groups = (q.height.div_ceil(e.g.median_kernel.rows_per_workgroup()), q.width.div_ceil(seg));
-    e.dispatch("fxn_median_huang", &with_u0([r as u32, seg, 0, 0]), &q, None, &out, Some(&levels), groups);
+    e.dispatch("fxn_median_huang", &with_u0([r as u32, seg, 0, 0]), crate::context::KernelImages { src: &q, aux: None, out: &out }, Some(&levels), groups);
     out
 }
 

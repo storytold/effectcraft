@@ -381,17 +381,9 @@ pub(crate) fn reveal(app: &mut EffectcraftApp, ctx: &egui::Context, items: &[Ite
     app.show_panel(crate::dock::PanelKind::Project);
 }
 
-/// The Project panel: the selected item's thumbnail and details (with the comps that use it), the
-/// search field, sortable column headers, and the item rows (folders, comps, footage and solids)
-/// with selection, Shift/Cmd ranges, keyboard navigation, inline rename, drag-and-drop move,
-/// marquee selection and context menus. Only the rows in view are drawn. File commands are queued
-/// and run through [`crate::menus::invoke`] at the end, with failures shown in `app.ui.status`.
-pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
+/// The selected item's thumbnail and details (with the comps that use it), or a hint.
+fn details_header(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, ctx: &egui::Context, head: Rect) {
     let t = app.tokens;
-    let p = ui.painter().clone();
-    let ctx = ui.ctx().clone();
-    // Preview header.
-    let head = Rect::from_min_size(rect.min, vec2(rect.width(), 74.0));
     let sel = app.session.state.project_selection.first().copied();
     if let Some(it) = sel.and_then(|i| app.session.project.item(i)).cloned() {
         let thumb = Rect::from_min_size(head.min + vec2(10.0, 10.0), vec2(96.0, 54.0));
@@ -400,12 +392,12 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             ItemKind::Solid(s) => {
                 p.rect_filled(thumb.shrink(4.0), 2.0, Color32::from_rgb((s.color[0] * 255.0) as u8, (s.color[1] * 255.0) as u8, (s.color[2] * 255.0) as u8));
             }
-            _ => match thumbnail(app, &ctx, &it) {
+            _ => match thumbnail(app, ctx, &it) {
                 Some(tex) => {
                     let [w, h] = tex.size();
                     p.image(tex.id(), fit(thumb, w as f32, h as f32), Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
                 }
-                None => icons::paint(&p, Rect::from_center_size(thumb.center(), vec2(24.0, 24.0)), item_icon(&it), t.text_dim),
+                None => icons::paint(p, Rect::from_center_size(thumb.center(), vec2(24.0, 24.0)), item_icon(&it), t.text_dim),
             },
         }
         app.auto.add("project.thumbnail", thumb, &it.name);
@@ -418,7 +410,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let count = users.iter().fold(0usize, |n, (_, k)| n.saturating_add(*k));
         let name_y = thumb.min.y + 6.0;
         if count == 0 {
-            let r = widgets::text_fit(&p, pos2(tx, name_y), Align2::LEFT_CENTER, &it.name, Tokens::semibold(12.0), max_w, t.text);
+            let r = widgets::text_fit(p, pos2(tx, name_y), Align2::LEFT_CENTER, &it.name, Tokens::semibold(12.0), max_w, t.text);
             app.auto.add("project.details.name", r, &it.name);
         } else {
             let used = if count == 1 { crate::i18n::tr("used once").to_owned() } else { crate::i18n::tr_args("used {} times", &[&count]) };
@@ -427,17 +419,17 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             let arrow_w = 14.0;
             // The name gives way first, but keeps at least half the room; the count is cut after it.
             let name_max = (max_w - arrow_w - used_w).max(max_w * 0.5);
-            let r = widgets::text_fit(&p, pos2(tx, name_y), Align2::LEFT_CENTER, &it.name, Tokens::semibold(12.0), name_max, t.text);
+            let r = widgets::text_fit(p, pos2(tx, name_y), Align2::LEFT_CENTER, &it.name, Tokens::semibold(12.0), name_max, t.text);
             app.auto.add("project.details.name", r, &it.name);
             let ar = Rect::from_min_size(pos2(r.max.x + 1.0, name_y - 7.0), vec2(arrow_w, 14.0));
             let tip = crate::i18n::tr("Compositions that use this item");
             let aresp = ui.interact(ar, egui::Id::unique("proj-used-in"), Sense::click()).on_hover_text(tip);
-            icons::paint(&p, Rect::from_center_size(ar.center(), vec2(9.0, 9.0)), Icon::ChevronDown, if aresp.hovered() { t.text } else { t.text_dim });
+            icons::paint(p, Rect::from_center_size(ar.center(), vec2(9.0, 9.0)), Icon::ChevronDown, if aresp.hovered() { t.text } else { t.text_dim });
             app.auto.add("project.details.usedIn", ar, tip);
             // The comma sits right after the arrow (its glyph ends short of the hit area).
             let ux = ar.max.x - 3.0;
             let room = (head.max.x - 10.0 - ux).max(0.0);
-            let ur = widgets::text_fit(&p, pos2(ux, name_y), Align2::LEFT_CENTER, &used, Tokens::ui(11.0), room, t.text_dim);
+            let ur = widgets::text_fit(p, pos2(ux, name_y), Align2::LEFT_CENTER, &used, Tokens::ui(11.0), room, t.text_dim);
             app.auto.add("project.details.used", ur, &used);
             let names: Vec<(u64, String, usize)> =
                 users.iter().map(|(cid, n)| (cid.0, app.session.project.item(*cid).map(|c| c.name.clone()).unwrap_or_default(), *n)).collect();
@@ -454,7 +446,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 }
             });
             if let Some(cid) = open
-                && let Err(e) = crate::menus::invoke(app, &ctx, "comp.open", json!({"comp": cid}))
+                && let Err(e) = crate::menus::invoke(app, ctx, "comp.open", json!({"comp": cid}))
             {
                 app.ui.status = e;
             }
@@ -471,23 +463,37 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             lines.push(f.codec.clone());
         }
         for (i, l) in lines.iter().enumerate() {
-            let r = widgets::text_fit(&p, pos2(tx, thumb.min.y + 22.0 + 13.0 * i as f32), Align2::LEFT_CENTER, l, Tokens::ui(11.0), max_w, t.text_dim);
+            let r = widgets::text_fit(p, pos2(tx, thumb.min.y + 22.0 + 13.0 * i as f32), Align2::LEFT_CENTER, l, Tokens::ui(11.0), max_w, t.text_dim);
             app.auto.add(&format!("project.details.{i}"), r, l);
         }
     } else {
         let hint = "Select an item to see its details";
-        let r = widgets::text_fit(&p, head.center(), Align2::CENTER_CENTER, crate::i18n::tr(hint), Tokens::ui(11.0), head.width() - 20.0, t.text_faint);
+        let r = widgets::text_fit(p, head.center(), Align2::CENTER_CENTER, crate::i18n::tr(hint), Tokens::ui(11.0), head.width() - 20.0, t.text_faint);
         app.auto.add("project.details.hint", r, hint);
     }
-    // Search.
-    let sr = Rect::from_min_size(pos2(rect.min.x + 8.0, head.max.y + 2.0), vec2(rect.width() - 16.0, 22.0));
-    let mut q = app.ui.project_search.clone();
-    widgets::search_field(ui, sr, &mut q, crate::i18n::tr("Search project"), &t);
-    app.ui.project_search = q;
-    app.auto.add("project.search", sr, "Search");
-    // Column header: Name, Label, then the visible optional columns.
-    let hdr = Rect::from_min_size(pos2(rect.min.x, sr.max.y + 6.0), vec2(rect.width(), 20.0));
-    p.line_segment([hdr.left_bottom(), hdr.right_bottom()], Stroke::new(1.0, t.separator));
+}
+
+/// Column positions: Name and Label, then the visible optional columns (scrolled by `hscroll`).
+struct Columns {
+    cols: Vec<(&'static str, &'static str, f32, f32)>,
+    name_w: f32,
+    label_x: f32,
+    opt_x0: f32,
+    /// How far the optional columns overflow the panel.
+    overflow: f32,
+    hscroll: f32,
+    /// Where the last column ends.
+    end_x: f32,
+}
+
+impl Columns {
+    /// `r` cut off under the frozen Name and Label columns.
+    fn opt_clip(&self, r: Rect) -> Rect {
+        Rect::from_min_max(pos2(r.min.x.max(self.opt_x0 - 4.0), r.min.y), r.max)
+    }
+}
+
+fn layout_columns(app: &mut EffectcraftApp, rect: Rect) -> Columns {
     let name_w = (rect.width() * 0.40).clamp(120.0, 260.0);
     let label_x = rect.min.x + name_w + 14.0;
     let mut cols: Vec<(&'static str, &'static str, f32, f32)> = vec![("name", "Name", rect.min.x + 26.0, name_w - 26.0), ("label", "", label_x - 8.0, 18.0)];
@@ -505,11 +511,18 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             x += w + 4.0;
         }
     }
-    let opt_clip = |r: Rect| Rect::from_min_max(pos2(r.min.x.max(opt_x0 - 4.0), r.min.y), r.max);
+    Columns { cols, name_w, label_x, opt_x0, overflow, hscroll, end_x: x }
+}
+
+/// The column header row: sort labels with the sort arrow, and the Columns menu.
+fn draw_header(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, hdr: Rect, cl: &Columns) {
+    let t = app.tokens;
+    let Columns { cols, label_x, end_x, .. } = cl;
+    let (label_x, end_x) = (*label_x, *end_x);
     let hp = p.with_clip_rect(hdr);
-    for (key, label, x, w) in &cols {
+    for (key, label, x, w) in cols {
         let hr = Rect::from_min_size(pos2(x - 4.0, hdr.min.y), vec2(*w, hdr.height()));
-        let hr = if matches!(*key, "name" | "label") { hr } else { opt_clip(hr) };
+        let hr = if matches!(*key, "name" | "label") { hr } else { cl.opt_clip(hr) };
         if hr.width() <= 0.0 {
             continue;
         }
@@ -553,446 +566,202 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         }
         column_menu(app, &resp);
     }
-    let hresp = ui.interact(Rect::from_min_max(pos2(x, hdr.min.y), hdr.max), egui::Id::unique("proj-hdr-rest"), Sense::CLICK);
+    let hresp = ui.interact(Rect::from_min_max(pos2(end_x, hdr.min.y), hdr.max), egui::Id::unique("proj-hdr-rest"), Sense::CLICK);
     column_menu(app, &hresp);
     app.auto.add("project.columns", hdr, "Columns (right-click to show or hide)");
-    // Rows.
-    let footer_h = 28.0;
-    let list = Rect::from_min_max(pos2(rect.min.x, hdr.max.y), pos2(rect.max.x, rect.max.y - footer_h));
-    let lp = p.with_clip_rect(list);
-    // The list's empty area (under the rows and the scroll bar, which take their own clicks):
-    // a click deselects, a drag draws a selection box, a double-click imports, as in After
-    // Effects (File ▸ Import ▸ File...).
-    // Not a Tab stop: the keyboard reaches the rows, and nothing else here takes a key.
-    let empty = ui.interact(list, egui::Id::unique("proj-empty"), Sense::CLICK | Sense::DRAG);
-    app.auto.add("project.empty", list, "Double-click to import files; drag to select items; right-click for project actions");
-    if overflow > 0.0 && ui.rect_contains_pointer(list) {
-        let (dx, dy, shift) = ui.input(|i| (i.smooth_scroll_delta.x, i.smooth_scroll_delta.y, i.modifiers.shift));
-        let d = if dx.abs() > 0.0 {
-            dx
-        } else if shift {
-            dy
-        } else {
-            0.0
-        };
-        app.ui.project_hscroll = (app.ui.project_hscroll - d).clamp(0.0, overflow);
+}
+
+/// An item row's context menu: Composition Settings, Delete, Rename, Duplicate, labels and the
+/// footage commands.
+fn item_menu(
+    app: &mut EffectcraftApp,
+    ui: &mut egui::Ui,
+    ctx: &egui::Context,
+    it: &effectcraft_engine::project::Item,
+    id: ItemId,
+    selected: bool,
+    actions: &mut Vec<(String, serde_json::Value)>,
+) {
+    let t = app.tokens;
+    let footage = matches!(it.kind, ItemKind::Footage(_));
+    // First on a comp, as in After Effects; for this comp, not the viewer's (#1058).
+    if matches!(it.kind, ItemKind::Comp(_)) && ui.button(crate::i18n::tr("Composition Settings…")).clicked() {
+        actions.push(("comp.settings".into(), json!({"comp": id.0})));
+        ui.close();
     }
-    let moved = keyboard_nav(app, &ctx);
-    let rows = visible_rows(app);
-    // Enter renames the selected item (Project panel focused, not typing).
-    if app.ui.focused == crate::dock::PanelKind::Project
-        && app.dialog.is_none()
-        && keys_reach_rows(app, &ctx)
-        && ctx.data(|d| d.get_temp::<Editing>(edit_id())).is_none()
-        && ctx.input(|i| i.key_pressed(egui::Key::Enter))
-    {
-        begin_rename(app, &ctx);
+    if ui.button(crate::i18n::tr("Delete")).clicked() {
+        actions.push(("project.delete".into(), json!({"items": targets(app, id, selected)})));
+        ui.close();
     }
-    let editing: Option<Editing> = ctx.data(|d| d.get_temp(edit_id()));
-    let dragging = egui::DragAndDrop::payload::<DragPayload>(&ctx).and_then(|p| match *p {
-        DragPayload::Item(i) => Some(i),
-        _ => None,
+    if matches!(it.kind, ItemKind::Comp(_)) && ui.button(crate::i18n::tr("Open Composition")).clicked() {
+        actions.push(("comp.open".into(), json!({"comp": id.0})));
+        ui.close();
+    }
+    if ui.button(crate::i18n::tr("Rename")).clicked() {
+        ctx.data_mut(|d| d.insert_temp::<Editing>(edit_id(), (id.0, "name".into(), it.name.clone())));
+        ui.close();
+    }
+    let duplicate_items = targets(app, id, selected);
+    // Like Edit > Duplicate: folders disable the whole operation, including mixed selections.
+    let can_duplicate = !duplicate_items.is_empty() && duplicate_items.iter().all(|id| app.session.project.item(ItemId(*id)).is_some_and(|i| !i.is_folder()));
+    let mut duplicate = egui::Button::new(crate::i18n::tr("Duplicate"));
+    if let Some(shortcut) = app.session.shortcuts().shortcut_of("edit.duplicate", &serde_json::Value::Null) {
+        duplicate = duplicate.shortcut_text(crate::menus::shortcut_text(shortcut));
+    }
+    let response = ui.add_enabled(can_duplicate, duplicate);
+    app.auto.add("project.context.duplicate", response.rect, "Duplicate");
+    if response.clicked() {
+        actions.push(("project.duplicate".into(), json!({"items": duplicate_items})));
+        ui.close();
+    }
+    if it.parent.is_some() && ui.button(crate::i18n::tr("Move to Project Root")).clicked() {
+        actions.push(("project.move".into(), json!({"items": targets(app, id, selected), "folder": null})));
+        ui.close();
+    }
+    if !it.is_folder() && ui.button(crate::i18n::tr("Add to Composition")).clicked() {
+        actions.push(("layer.addItem".into(), json!({"item": id.0})));
+        ui.close();
+    }
+    // File ▸ New Comp from Selection on the selection (the right-clicked row joins it
+    // above): several items ask how in its dialog, as in After Effects (#360).
+    if ui.button(crate::i18n::tr("New Comp from Selection")).clicked() {
+        actions.push(("file.newCompFromSelection".into(), json!({})));
+        ui.close();
+    }
+    // File ▸ Replace Footage ▸ With Precomposition: every layer using the item uses a
+    // new composition holding it instead. The label says how many layers that changes.
+    let uses: usize = app.session.project.item_users(id).iter().map(|(_, n)| n).sum();
+    let label = match uses {
+        0 => crate::i18n::tr("Replace with Precomposition").to_owned(),
+        1 => format!("{} ({})", crate::i18n::tr("Replace with Precomposition"), crate::i18n::tr("used once")),
+        n => format!("{} ({})", crate::i18n::tr("Replace with Precomposition"), crate::i18n::tr_args("used {} times", &[&n])),
+    };
+    if (footage || matches!(it.kind, ItemKind::Solid(_))) && ui.button(label).clicked() {
+        actions.push(("file.replaceWithPrecomp".into(), json!({"item": id.0})));
+        ui.close();
+    }
+    ui.separator();
+    ui.menu_button(crate::i18n::tr("Label"), |ui| {
+        for l in Label::ALL {
+            if widgets::label_entry(ui, l, &app.session.prefs.label_name(l), l == it.label, &t).clicked() {
+                actions.push(("project.setLabel".into(), json!({"items": targets(app, id, selected), "label": label_index(l)})));
+                ui.close();
+            }
+        }
     });
-    let hover_y = ctx.pointer_hover_pos().filter(|p| list.contains(*p)).map(|p| p.y);
-    let mut drop_row: Option<ItemId> = None;
-    let mut actions: Vec<(String, serde_json::Value)> = vec![];
-    // Vertical scrolling: only the rows in view are drawn (and registered), so a project with
-    // thousands of items costs what one screenful does.
-    let content_h = rows.len() as f32 * ROW_H;
-    let max_scroll = (content_h - list.height() + ROW_H).max(0.0);
-    if ui.rect_contains_pointer(list) {
-        let (dy, shift) = ui.input(|i| (i.smooth_scroll_delta.y, i.modifiers.shift));
-        if !shift && dy != 0.0 {
-            app.ui.project_scroll -= dy;
-        }
+    // Footage: the File menu's footage commands (Interpret Footage, Replace Footage…).
+    if footage {
+        let mut chosen = None;
+        crate::menus::submenu_at(app, ui, &["File", "Interpret Footage"], &mut chosen);
+        crate::menus::submenu_at(app, ui, &["File", "Replace Footage"], &mut chosen);
+        crate::menus::entry_for(app, ui, "file.reloadFootage", &mut chosen);
+        crate::menus::entry_for(app, ui, "file.revealInFinder", &mut chosen);
+        actions.extend(chosen);
     }
-    // A selection made elsewhere (a command, an agent, the viewer) scrolls into view.
-    let sel_key = selection_seen_id();
-    let sel_now = app.session.state.project_selection.last().map(|i| i.0);
-    if ctx.data(|d| d.get_temp::<Option<u64>>(sel_key)) != Some(sel_now) {
-        ctx.data_mut(|d| d.insert_temp(sel_key, sel_now));
-        if let Some(row) = sel_now.and_then(|s| rows.iter().position(|(id, _)| id.0 == s)) {
-            let top = row as f32 * ROW_H;
-            if top < app.ui.project_scroll {
-                app.ui.project_scroll = top;
-            } else if top + ROW_H > app.ui.project_scroll + list.height() {
-                app.ui.project_scroll = top + ROW_H - list.height();
-            }
-        }
+}
+
+/// The inline rename / comment field over `cell` when it is item `id`'s `field` being edited;
+/// returns whether it took the cell.
+fn cell_edit(
+    app: &mut EffectcraftApp,
+    ui: &mut egui::Ui,
+    actions: &mut Vec<(String, serde_json::Value)>,
+    editing: &Option<Editing>,
+    id: u64,
+    field: &str,
+    cell: Rect,
+) -> bool {
+    let ctx = ui.ctx().clone();
+    let Some((eid, ef, mut buf)) = editing.clone().filter(|(e, f, _)| *e == id && f == field) else { return false };
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(cell));
+    // The field keeps Tab (egui would move the keyboard to the next widget, where Enter no
+    // longer renames, #881): Tab commits like Enter and gives the keyboard back to the panel.
+    let filter = egui::EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, ..Default::default() };
+    let resp = child.add(egui::TextEdit::singleline(&mut buf).desired_width(cell.width()).font(Tokens::ui(12.0)).event_filter(filter));
+    app.auto.add(&format!("project.item.{}.{field}Edit", id), cell, field);
+    let tab = resp.has_focus() && ctx.input(|i| i.key_pressed(egui::Key::Tab));
+    if tab {
+        resp.surrender_focus();
     }
-    // The arrow keys' item scrolls into view (Shift+Up extends upward, past the selection's end).
-    if let Some(row) = moved.and_then(|m| rows.iter().position(|(id, _)| *id == m)) {
-        let top = row as f32 * ROW_H;
-        // Not `clamp`: a panel shorter than a row would make its bounds cross. The row's top wins.
-        app.ui.project_scroll = app.ui.project_scroll.max(top + ROW_H - list.height()).min(top);
-    }
-    app.ui.project_scroll = app.ui.project_scroll.clamp(0.0, max_scroll);
-    let scroll = app.ui.project_scroll;
-    let first = ((scroll / ROW_H).floor() as usize).min(rows.len());
-    let mut y = list.min.y - (scroll - first as f32 * ROW_H);
-    let project = app.session.project.clone();
-    for (i, (id, depth)) in rows.iter().enumerate().skip(first) {
-        let Some(it) = project.item(*id) else { continue };
-        let r = Rect::from_min_size(pos2(list.min.x, y), vec2(list.width(), ROW_H));
-        y += ROW_H;
-        if r.min.y > list.max.y {
-            break;
-        }
-        if hover_y.is_some_and(|hy| hy >= r.min.y && hy < r.max.y) {
-            drop_row = Some(*id);
-        }
-        let selected = app.session.state.project_selection.contains(id);
-        lp.rect_filled(
-            r,
-            0.0,
-            // Flat rows like After Effects' Project panel (no stripes).
-            if selected { t.row_selected } else { t.row },
-        );
-        // The row's click / drag area goes first, so the twirl, proxy, label and comment widgets
-        // on top of it take their own clicks.
-        let mut resp = ui.interact(r.intersect(list), row_id(*id), Sense::click_and_drag());
-        app.auto.add(&format!("project.item.{}", id.0), r, &it.name);
-        // For screen readers: a tree item named by the item and its type, with its selection,
-        // depth and (a folder) open state. One Tab stop per row; the panel's keys then apply.
-        let open = it.is_folder().then(|| app.ui.project_open_folders.contains(&id.0) || !app.ui.project_search.is_empty());
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TreeItem, true, format!("{}, {}", it.name, crate::i18n::tr(it.type_name()))));
-        ctx.accesskit_node_builder(resp.id, |n| {
-            n.set_selected(selected);
-            n.set_level(depth.saturating_add(1));
-            if let Some(open) = open {
-                n.set_expanded(open);
-            }
-        });
-        if resp.has_focus() {
-            ctx.data_mut(|d| d.insert_temp(focused_row_id(), *id));
-        }
-        if resp.gained_focus() {
-            app.ui.focused = crate::dock::PanelKind::Project;
-        }
-        let _ = i;
-        let x0 = r.min.x + 8.0 + 14.0 * *depth as f32;
-        if it.is_folder() {
-            let open = app.ui.project_open_folders.contains(&id.0);
-            let tw = Rect::from_center_size(pos2(x0 + 4.0, r.center().y), vec2(12.0, 12.0));
-            let tresp = widgets::twirl(ui, tw, open, egui::Id::unique(("pf", id.0)), &t);
-            tresp.widget_info(|| {
-                let name = crate::i18n::tr_args(if open { "Close folder {}" } else { "Open folder {}" }, &[&it.name]);
-                egui::WidgetInfo::labeled(egui::Role::Button, true, name)
-            });
-            if tresp.clicked() {
-                // Alt/Cmd-click twirls every folder inside it too.
-                let mut ids = vec![*id];
-                if ui.input(|i| i.modifiers.alt || i.modifiers.command) {
-                    let mut at = 0;
-                    while let Some(f) = ids.get(at).copied() {
-                        ids.extend(app.session.project.children(Some(f)).into_iter().filter(|c| c.is_folder()).map(|c| c.id));
-                        at += 1;
-                    }
-                }
-                for f in ids {
-                    if open {
-                        app.ui.project_open_folders.remove(&f.0);
-                    } else {
-                        app.ui.project_open_folders.insert(f.0);
-                    }
-                }
-            }
-            app.auto.add(&format!("project.item.{}.twirl", id.0), tw, &it.name);
-        }
-        icons::paint(&lp, Rect::from_center_size(pos2(x0 + 18.0, r.center().y), vec2(14.0, 14.0)), item_icon(it), t.text_dim);
-        // Proxy indicator: filled = the proxy is used, hollow = set but off. Click to switch.
-        if let Some(px) = it.proxy.as_ref() {
-            let pr = Rect::from_center_size(pos2(x0 + 4.0, r.center().y), vec2(9.0, 9.0));
-            if px.enabled {
-                lp.rect_filled(pr, 1.0, t.text);
+    if resp.lost_focus() || tab {
+        ctx.data_mut(|d| d.remove::<Editing>(edit_id()));
+        if !ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            let (cmd, params) = if ef == "name" {
+                ("project.rename", json!({"item": eid, "name": buf}))
             } else {
-                lp.rect_stroke(pr, 1.0, Stroke::new(1.0, t.text), egui::StrokeKind::Inside);
-            }
-            let presp = ui.interact(pr.expand(2.0).intersect(list), egui::Id::unique(("pproxy", id.0)), Sense::click()).on_hover_text(format!(
-                "Proxy: {} ({})",
-                px.footage.path,
-                if px.enabled { "in use" } else { "off" }
-            ));
-            app.auto.add(&format!("project.item.{}.proxy", id.0), pr, if px.enabled { "Proxy in use" } else { "Proxy off" });
-            presp.widget_info(|| {
-                let name = crate::i18n::tr_args(if px.enabled { "Proxy of {}: in use" } else { "Proxy of {}: off" }, &[&it.name]);
-                egui::WidgetInfo::labeled(egui::Role::Button, true, name)
-            });
-            if presp.clicked() {
-                actions.push(("file.useProxy".into(), json!({"item": id.0})));
-            }
-        }
-        // Footage that can't be decoded (no decoder for its codec / profile): a warning marker
-        // at the end of the name cell, the reason on hover.
-        let problem = match &it.kind {
-            ItemKind::Footage(f) => app.session.footage.problem(f),
-            _ => None,
-        };
-        let name_clip =
-            Rect::from_min_max(pos2(x0 + 30.0, r.min.y), pos2(r.min.x + name_w + 4.0 - if problem.is_some() { 16.0 } else { 0.0 }, r.max.y)).intersect(list);
-        if let Some(why) = &problem {
-            let m = Rect::from_center_size(pos2(r.min.x + name_w - 8.0, r.center().y), vec2(13.0, 12.0));
-            lp.add(egui::Shape::convex_polygon(vec![m.center_top(), m.right_bottom(), m.left_bottom()], t.warning, Stroke::NONE));
-            lp.text(m.center() + vec2(0.0, 1.5), Align2::CENTER_CENTER, "!", Tokens::semibold(9.0), Color32::BLACK);
-            ui.interact(m.expand(2.0).intersect(list), egui::Id::unique(("pproblem", id.0)), Sense::hover()).on_hover_text(why.as_str());
-            app.auto.add(&format!("project.item.{}.problem", id.0), m, why);
-        }
-        let name_rect = Rect::from_min_max(pos2(x0 + 28.0, r.min.y + 2.0), pos2(r.min.x + name_w + 2.0, r.max.y - 2.0));
-        // Inline edits (rename / comment).
-        let cell_edit = |app: &mut EffectcraftApp, ui: &mut egui::Ui, actions: &mut Vec<(String, serde_json::Value)>, field: &str, cell: Rect| -> bool {
-            let Some((eid, ef, mut buf)) = editing.clone().filter(|(e, f, _)| *e == id.0 && f == field) else { return false };
-            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(cell));
-            // The field keeps Tab (egui would move the keyboard to the next widget, where Enter no
-            // longer renames, #881): Tab commits like Enter and gives the keyboard back to the panel.
-            let filter = egui::EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, ..Default::default() };
-            let resp = child.add(egui::TextEdit::singleline(&mut buf).desired_width(cell.width()).font(Tokens::ui(12.0)).event_filter(filter));
-            app.auto.add(&format!("project.item.{}.{field}Edit", id.0), cell, field);
-            let tab = resp.has_focus() && ctx.input(|i| i.key_pressed(egui::Key::Tab));
-            if tab {
-                resp.surrender_focus();
-            }
-            if resp.lost_focus() || tab {
-                ctx.data_mut(|d| d.remove::<Editing>(edit_id()));
-                if !ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-                    let (cmd, params) = if ef == "name" {
-                        ("project.rename", json!({"item": eid, "name": buf}))
-                    } else {
-                        ("project.setComment", json!({"items": [eid], "comment": buf}))
-                    };
-                    actions.push((cmd.into(), params));
-                }
-            } else {
-                widgets::keep_focus(&ctx, &resp, &buf);
-                ctx.data_mut(|d| d.insert_temp::<Editing>(edit_id(), (eid, ef, buf)));
-            }
-            true
-        };
-        if !cell_edit(app, ui, &mut actions, "name", name_rect) {
-            // The selected item's name sits in a light cell with dark text.
-            if selected {
-                let g = lp.layout_no_wrap(it.name.clone(), Tokens::ui(12.0), Color32::BLACK);
-                let cell = Rect::from_min_max(pos2(x0 + 27.0, r.min.y + 1.0), pos2((x0 + 33.0 + g.size().x).min(name_clip.max.x), r.max.y - 1.0));
-                lp.with_clip_rect(name_clip.expand2(vec2(3.0, 0.0))).rect_filled(cell, 0.0, Color32::from_rgb(0xa6, 0xa6, 0xa6));
-            }
-            // Long names end in "…" before the label column instead of being cut mid-glyph.
-            widgets::text_fit(
-                &lp.with_clip_rect(name_clip),
-                pos2(x0 + 30.0, r.center().y),
-                Align2::LEFT_CENTER,
-                &it.name,
-                Tokens::ui(12.0),
-                name_clip.max.x - (x0 + 30.0) - 2.0,
-                if selected { Color32::from_gray(0x16) } else { t.text },
-            );
-        }
-        // Label swatch: click for the label colour menu.
-        let sw = Rect::from_center_size(pos2(label_x, r.center().y), vec2(10.0, 10.0));
-        lp.rect_filled(sw, 2.0, t.label(it.label));
-        let sresp = ui.interact(sw.expand(3.0).intersect(list), egui::Id::unique(("plabel", id.0)), Sense::click());
-        app.auto.add(&format!("project.item.{}.label", id.0), sw, it.label.name());
-        sresp.widget_info(|| {
-            let name = crate::i18n::tr_args("Label of {}: {}", &[&it.name, &app.session.prefs.label_name(it.label)]);
-            egui::WidgetInfo::labeled(egui::Role::Button, true, name)
-        });
-        let pop = egui::Id::unique(("plabel-pop", id.0));
-        if sresp.clicked() || sresp.secondary_clicked() {
-            widgets::open_popup(ui, pop);
-        }
-        if let Some(l) = widgets::label_popup(ui, pop, sw.left_bottom(), it.label, |l| app.session.prefs.label_name(l), &t) {
-            actions.push(("project.setLabel".into(), json!({"items": targets(app, *id, selected), "label": label_index(l)})));
-        }
-        // Optional columns.
-        for (key, _, cx, w) in cols.iter().skip(2) {
-            let cell = opt_clip(Rect::from_min_size(pos2(*cx, r.min.y), vec2(*w, r.height())).intersect(list));
-            if cell.width() <= 0.0 {
-                continue;
-            }
-            let cp = lp.with_clip_rect(cell);
-            let txt = match *key {
-                "type" => it.type_name().to_string(),
-                "size" => file_size(it).map(fmt_size).unwrap_or_default(),
-                "duration" => it.duration().map(|d| fmt_dur(d.seconds(), it.frame_rate().map(|r| r.as_f64()).unwrap_or(30.0))).unwrap_or_default(),
-                "fps" => it.frame_rate().map(|f| format!("{:.2}", f.as_f64())).unwrap_or_default(),
-                "path" => file_path(it).to_string(),
-                "comment" => {
-                    let cr = Rect::from_min_size(pos2(*cx - 2.0, r.min.y + 2.0), vec2(*w, r.height() - 4.0));
-                    if cell_edit(app, ui, &mut actions, "comment", cr) {
-                        continue;
-                    }
-                    let cresp = ui.interact(cell, egui::Id::unique(("pcomment", id.0)), Sense::CLICK);
-                    app.auto.add(&format!("project.item.{}.comment", id.0), cell, &it.comment);
-                    cresp.widget_info(|| {
-                        egui::WidgetInfo::labeled(egui::Role::Unknown, true, crate::i18n::tr_args("Comment of {}: {}", &[&it.name, &it.comment]))
-                    });
-                    if cresp.double_clicked() {
-                        ctx.data_mut(|d| d.insert_temp::<Editing>(edit_id(), (id.0, "comment".into(), it.comment.clone())));
-                    } else {
-                        // Other clicks select the row and open its context menu.
-                        resp = resp.union(cresp);
-                    }
-                    it.comment.clone()
-                }
-                _ => String::new(),
+                ("project.setComment", json!({"items": [eid], "comment": buf}))
             };
-            let align = if *key == "fps" { Align2::RIGHT_CENTER } else { Align2::LEFT_CENTER };
-            let tx = if *key == "fps" { cx + w - 6.0 } else { *cx };
-            cp.text(pos2(tx, r.center().y), align, txt, Tokens::ui(11.5), t.text_dim);
+            actions.push((cmd.into(), params));
         }
-        if dragging.is_some_and(|d| d != id.0) && drop_row == Some(*id) && it.is_folder() {
-            lp.rect_stroke(r.shrink(1.0), 2.0, Stroke::new(1.5, t.accent), egui::StrokeKind::Inside);
-        }
-        // The row with keyboard focus (Tab, or the arrow keys after it) shows a focus ring.
-        if ctx.memory(|m| m.has_focus(row_id(*id))) {
-            lp.rect_stroke(r.shrink(0.5), 0.0, Stroke::new(1.0, t.accent), egui::StrokeKind::Inside);
-        }
-        // Part of the row: not a second Tab stop.
-        let nresp = ui.interact(name_clip, egui::Id::unique(("pname", id.0)), Sense::CLICK | Sense::DRAG);
-        app.auto.add(&format!("project.item.{}.name", id.0), name_clip, &it.name);
-        let resp = resp.union(nresp);
-        if resp.clicked() {
-            let m = ui.input(|i| i.modifiers);
-            let anchor_key = anchor_id();
-            ctx.data_mut(|d| d.insert_temp(cursor_id(), *id));
-            let anchor = ctx.data(|d| d.get_temp::<ItemId>(anchor_key)).or_else(|| app.session.state.project_selection.first().copied());
-            if m.shift
-                && let Some(a) = anchor.and_then(|a| rows.iter().position(|(i, _)| *i == a))
-            {
-                let b = rows.iter().position(|(i, _)| i == id).unwrap_or(a);
-                app.session.state.project_selection = rows.get(a.min(b)..=a.max(b)).unwrap_or_default().iter().map(|(i, _)| *i).collect();
-            } else if m.command {
-                if app.session.state.project_selection.contains(id) {
-                    app.session.state.project_selection.retain(|i| i != id);
-                } else {
-                    app.session.state.project_selection.push(*id);
-                }
-                ctx.data_mut(|d| d.insert_temp(anchor_key, *id));
-            } else {
-                app.session.state.project_selection = vec![*id];
-                ctx.data_mut(|d| d.insert_temp(anchor_key, *id));
-            }
-        }
-        // Double-click opens the item, as in After Effects (a comp gets its own Timeline tab and
-        // the viewer); Enter or the context menu renames.
-        if resp.double_clicked() {
-            match &it.kind {
-                ItemKind::Comp(_) => actions.push(("comp.open".into(), json!({"comp": id.0}))),
-                ItemKind::Folder if !app.ui.project_open_folders.remove(&id.0) => {
-                    app.ui.project_open_folders.insert(id.0);
-                }
-                // Footage (not data) and solids open in the Footage panel.
-                ItemKind::Footage(f) if f.kind != effectcraft_engine::project::FootageKind::Data => {
-                    actions.push(("footage.open".into(), json!({"item": id.0})))
-                }
-                ItemKind::Solid(_) => actions.push(("footage.open".into(), json!({"item": id.0}))),
-                _ => {}
-            }
-        }
-        if resp.drag_started() {
-            egui::DragAndDrop::set_payload(&ctx, DragPayload::Item(id.0));
-        }
-        // Right-clicking an item selects it (After Effects): the menu's File commands act on the
-        // selection.
-        if resp.secondary_clicked() && !selected {
-            app.session.state.project_selection = vec![*id];
-        }
-        let footage = matches!(it.kind, ItemKind::Footage(_));
-        crate::widgets::context_menu(&resp, |ui| {
-            // First on a comp, as in After Effects; for this comp, not the viewer's (#1058).
-            if matches!(it.kind, ItemKind::Comp(_)) && ui.button(crate::i18n::tr("Composition Settings…")).clicked() {
-                actions.push(("comp.settings".into(), json!({"comp": id.0})));
-                ui.close();
-            }
-            if ui.button(crate::i18n::tr("Delete")).clicked() {
-                actions.push(("project.delete".into(), json!({"items": targets(app, *id, selected)})));
-                ui.close();
-            }
-            if matches!(it.kind, ItemKind::Comp(_)) && ui.button(crate::i18n::tr("Open Composition")).clicked() {
-                actions.push(("comp.open".into(), json!({"comp": id.0})));
-                ui.close();
-            }
-            if ui.button(crate::i18n::tr("Rename")).clicked() {
-                ctx.data_mut(|d| d.insert_temp::<Editing>(edit_id(), (id.0, "name".into(), it.name.clone())));
-                ui.close();
-            }
-            let duplicate_items = targets(app, *id, selected);
-            // Like Edit > Duplicate: folders disable the whole operation, including mixed selections.
-            let can_duplicate =
-                !duplicate_items.is_empty() && duplicate_items.iter().all(|id| app.session.project.item(ItemId(*id)).is_some_and(|i| !i.is_folder()));
-            let mut duplicate = egui::Button::new(crate::i18n::tr("Duplicate"));
-            if let Some(shortcut) = app.session.shortcuts().shortcut_of("edit.duplicate", &serde_json::Value::Null) {
-                duplicate = duplicate.shortcut_text(crate::menus::shortcut_text(shortcut));
-            }
-            let response = ui.add_enabled(can_duplicate, duplicate);
-            app.auto.add("project.context.duplicate", response.rect, "Duplicate");
-            if response.clicked() {
-                actions.push(("project.duplicate".into(), json!({"items": duplicate_items})));
-                ui.close();
-            }
-            if it.parent.is_some() && ui.button(crate::i18n::tr("Move to Project Root")).clicked() {
-                actions.push(("project.move".into(), json!({"items": targets(app, *id, selected), "folder": null})));
-                ui.close();
-            }
-            if !it.is_folder() && ui.button(crate::i18n::tr("Add to Composition")).clicked() {
-                actions.push(("layer.addItem".into(), json!({"item": id.0})));
-                ui.close();
-            }
-            // File ▸ New Comp from Selection on the selection (the right-clicked row joins it
-            // above): several items ask how in its dialog, as in After Effects (#360).
-            if ui.button(crate::i18n::tr("New Comp from Selection")).clicked() {
-                actions.push(("file.newCompFromSelection".into(), json!({})));
-                ui.close();
-            }
-            // File ▸ Replace Footage ▸ With Precomposition: every layer using the item uses a
-            // new composition holding it instead. The label says how many layers that changes.
-            let uses: usize = app.session.project.item_users(*id).iter().map(|(_, n)| n).sum();
-            let label = match uses {
-                0 => crate::i18n::tr("Replace with Precomposition").to_owned(),
-                1 => format!("{} ({})", crate::i18n::tr("Replace with Precomposition"), crate::i18n::tr("used once")),
-                n => format!("{} ({})", crate::i18n::tr("Replace with Precomposition"), crate::i18n::tr_args("used {} times", &[&n])),
-            };
-            if (footage || matches!(it.kind, ItemKind::Solid(_))) && ui.button(label).clicked() {
-                actions.push(("file.replaceWithPrecomp".into(), json!({"item": id.0})));
-                ui.close();
-            }
-            ui.separator();
-            ui.menu_button(crate::i18n::tr("Label"), |ui| {
-                for l in Label::ALL {
-                    if widgets::label_entry(ui, l, &app.session.prefs.label_name(l), l == it.label, &t).clicked() {
-                        actions.push(("project.setLabel".into(), json!({"items": targets(app, *id, selected), "label": label_index(l)})));
-                        ui.close();
-                    }
-                }
-            });
-            // Footage: the File menu's footage commands (Interpret Footage, Replace Footage…).
-            if footage {
-                let mut chosen = None;
-                crate::menus::submenu_at(app, ui, &["File", "Interpret Footage"], &mut chosen);
-                crate::menus::submenu_at(app, ui, &["File", "Replace Footage"], &mut chosen);
-                crate::menus::entry_for(app, ui, "file.reloadFootage", &mut chosen);
-                crate::menus::entry_for(app, ui, "file.revealInFinder", &mut chosen);
-                actions.extend(chosen);
-            }
-        });
+    } else {
+        widgets::keep_focus(&ctx, &resp, &buf);
+        ctx.data_mut(|d| d.insert_temp::<Editing>(edit_id(), (eid, ef, buf)));
     }
-    // The scroll bars, over the rows (which would take their presses otherwise).
-    if overflow > 0.0 {
-        let track = Rect::from_min_max(pos2(opt_x0, list.max.y - 5.0), pos2(rect.max.x - 4.0, list.max.y - 1.0));
-        app.ui.project_hscroll = widgets::scroll_bar(ui, &mut app.auto, "project.hscroll", track, hscroll, overflow, &t);
+    true
+}
+
+/// A click on item `id`'s row: plain selects it, Shift extends from the anchor and Cmd toggles.
+fn select_click(app: &mut EffectcraftApp, ui: &egui::Ui, ctx: &egui::Context, id: ItemId, rows: &[(ItemId, usize)]) {
+    let m = ui.input(|i| i.modifiers);
+    let anchor_key = anchor_id();
+    ctx.data_mut(|d| d.insert_temp(cursor_id(), id));
+    let anchor = ctx.data(|d| d.get_temp::<ItemId>(anchor_key)).or_else(|| app.session.state.project_selection.first().copied());
+    if m.shift
+        && let Some(a) = anchor.and_then(|a| rows.iter().position(|(i, _)| *i == a))
+    {
+        let b = rows.iter().position(|(i, _)| *i == id).unwrap_or(a);
+        app.session.state.project_selection = rows.get(a.min(b)..=a.max(b)).unwrap_or_default().iter().map(|(i, _)| *i).collect();
+    } else if m.command {
+        if app.session.state.project_selection.contains(&id) {
+            app.session.state.project_selection.retain(|i| *i != id);
+        } else {
+            app.session.state.project_selection.push(id);
+        }
+        ctx.data_mut(|d| d.insert_temp(anchor_key, id));
+    } else {
+        app.session.state.project_selection = vec![id];
+        ctx.data_mut(|d| d.insert_temp(anchor_key, id));
     }
-    if max_scroll > 0.0 {
-        let track = Rect::from_min_max(pos2(rect.max.x - 6.0, list.min.y + 1.0), pos2(rect.max.x - 2.0, list.max.y - 7.0));
-        app.ui.project_scroll = widgets::scroll_bar(ui, &mut app.auto, "project.vscroll", track, scroll, max_scroll, &t);
+}
+
+/// Double-click opens the item, as in After Effects: a comp in its Timeline and the viewer, a
+/// folder toggles, footage (not data) and solids open in the Footage panel.
+fn open_item(app: &mut EffectcraftApp, it: &effectcraft_engine::project::Item, id: ItemId, actions: &mut Vec<(String, serde_json::Value)>) {
+    match &it.kind {
+        ItemKind::Comp(_) => actions.push(("comp.open".into(), json!({"comp": id.0}))),
+        ItemKind::Folder if !app.ui.project_open_folders.remove(&id.0) => {
+            app.ui.project_open_folders.insert(id.0);
+        }
+        // Footage (not data) and solids open in the Footage panel.
+        ItemKind::Footage(f) if f.kind != effectcraft_engine::project::FootageKind::Data => actions.push(("footage.open".into(), json!({"item": id.0}))),
+        ItemKind::Solid(_) => actions.push(("footage.open".into(), json!({"item": id.0}))),
+        _ => {}
     }
+}
+
+/// What the pointer is doing over the list: the item being dragged, the row under it, whether it
+/// is over the list at all.
+struct DropState {
+    dragging: Option<u64>,
+    row: Option<ItemId>,
+    hovering: bool,
+}
+
+/// Dragging an item or files over the list: drop outlines, moving items into folders, importing
+/// files and the drag ghost.
+fn drop_targets(app: &mut EffectcraftApp, ctx: &egui::Context, lp: &egui::Painter, list: Rect, ds: DropState, actions: &mut Vec<(String, serde_json::Value)>) {
+    let t = app.tokens;
+    let DropState { dragging, row, hovering } = ds;
     // Dropping a dragged item on the list: into the folder under the pointer (or the folder of
     // the item under it), or the project root below the rows.
     if let Some(iid) = dragging
-        && hover_y.is_some()
+        && hovering
     {
-        if drop_row.is_none() {
+        if row.is_none() {
             lp.rect_stroke(list.shrink(1.0), 0.0, Stroke::new(1.0, t.accent.gamma_multiply(0.6)), egui::StrokeKind::Inside);
         }
-        if ctx.input(|i| i.pointer.any_released()) && drop_row != Some(ItemId(iid)) {
-            let folder = drop_folder(&app.session.project, drop_row);
+        if ctx.input(|i| i.pointer.any_released()) && row != Some(ItemId(iid)) {
+            let folder = drop_folder(&app.session.project, row);
             let cur = app.session.project.item(ItemId(iid)).and_then(|i| i.parent);
             if folder != cur {
                 let moving: Vec<u64> = if app.session.state.project_selection.contains(&ItemId(iid)) {
@@ -1005,21 +774,21 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     app.ui.project_open_folders.insert(f.0);
                 }
             }
-            egui::DragAndDrop::clear_payload(&ctx);
+            egui::DragAndDrop::clear_payload(ctx);
         }
     }
     // Files dragged from the Media Browser: import.
-    if let Some(DragPayload::Files(paths)) = egui::DragAndDrop::payload::<DragPayload>(&ctx).as_deref()
-        && hover_y.is_some()
+    if let Some(DragPayload::Files(paths)) = egui::DragAndDrop::payload::<DragPayload>(ctx).as_deref()
+        && hovering
     {
         lp.rect_stroke(list.shrink(1.0), 0.0, Stroke::new(1.0, t.accent.gamma_multiply(0.6)), egui::StrokeKind::Inside);
         if ctx.input(|i| i.pointer.any_released()) {
             actions.push(("mediaBrowser.import".into(), json!({"paths": paths})));
-            egui::DragAndDrop::clear_payload(&ctx);
+            egui::DragAndDrop::clear_payload(ctx);
         }
     }
     // Drag ghost.
-    if let Some(DragPayload::Item(iid)) = egui::DragAndDrop::payload::<DragPayload>(&ctx).as_deref()
+    if let Some(DragPayload::Item(iid)) = egui::DragAndDrop::payload::<DragPayload>(ctx).as_deref()
         && let Some(pos) = ctx.pointer_hover_pos()
         && let Some(it) = app.session.project.item(ItemId(*iid))
     {
@@ -1029,8 +798,12 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         painter.rect_filled(r, 4.0, Color32::from_rgba_premultiplied(40, 40, 40, 230));
         painter.galley(r.min + vec2(8.0, 4.0), g, t.text);
     }
-    // Footer.
-    let foot = Rect::from_min_max(pos2(rect.min.x, rect.max.y - footer_h), rect.max);
+}
+
+/// The footer: Interpret Footage, New Folder, New Composition, the colour depth and the trash.
+fn footer(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, foot: Rect, actions: &mut Vec<(String, serde_json::Value)>) {
+    let t = app.tokens;
+    let ctx = ui.ctx().clone();
     p.line_segment([foot.left_top(), foot.right_top()], Stroke::new(1.0, t.separator));
     let mut x = foot.min.x + 8.0;
     for (icon, id, tip) in [
@@ -1092,23 +865,102 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         actions.push(("project.delete".into(), json!({})));
     }
     app.auto.add("project.delete", tr, "Delete");
-    if empty.double_clicked() {
-        actions.push(("file.import".into(), json!({})));
-    }
-    crate::widgets::context_menu(&empty, |ui| {
-        for (key, label, command) in
-            [("newComp", "New Composition…", "comp.new"), ("newFolder", "New Folder", "project.newFolder"), ("import", "Import File…", "file.import")]
-        {
-            let response = ui.button(label);
-            app.auto.add(&format!("project.context.{key}"), response.rect, label);
-            if response.clicked() {
-                actions.push((command.into(), json!({})));
-                ui.close();
-            }
+}
+
+/// The optional columns of a row (type, size, duration, fps, path, comment). Returns the comment
+/// cell's response so its clicks select the row and open its context menu.
+fn optional_cells(
+    app: &mut EffectcraftApp,
+    ui: &mut egui::Ui,
+    g: &RowGeom,
+    it: &effectcraft_engine::project::Item,
+    cl: &Columns,
+    editing: &Option<Editing>,
+    actions: &mut Vec<(String, serde_json::Value)>,
+) -> Option<egui::Response> {
+    let t = app.tokens;
+    let ctx = ui.ctx().clone();
+    let RowGeom { lp, list, r, .. } = *g;
+    let mut extra = None;
+    for (key, _, cx, w) in cl.cols.iter().skip(2) {
+        let cell = cl.opt_clip(Rect::from_min_size(pos2(*cx, r.min.y), vec2(*w, r.height())).intersect(list));
+        if cell.width() <= 0.0 {
+            continue;
         }
-    });
-    // Selection box over the rows it touches (#203); Shift or Cmd/Ctrl adds to the selection.
-    let adding = ui.input(|i| i.modifiers.shift || i.modifiers.command);
+        let cp = lp.with_clip_rect(cell);
+        let txt = match *key {
+            "type" => it.type_name().to_string(),
+            "size" => file_size(it).map(fmt_size).unwrap_or_default(),
+            "duration" => it.duration().map(|d| fmt_dur(d.seconds(), it.frame_rate().map(|r| r.as_f64()).unwrap_or(30.0))).unwrap_or_default(),
+            "fps" => it.frame_rate().map(|f| format!("{:.2}", f.as_f64())).unwrap_or_default(),
+            "path" => file_path(it).to_string(),
+            "comment" => {
+                let cr = Rect::from_min_size(pos2(*cx - 2.0, r.min.y + 2.0), vec2(*w, r.height() - 4.0));
+                if cell_edit(app, ui, actions, editing, it.id.0, "comment", cr) {
+                    continue;
+                }
+                let cresp = ui.interact(cell, egui::Id::unique(("pcomment", it.id.0)), Sense::CLICK);
+                app.auto.add(&format!("project.item.{}.comment", it.id.0), cell, &it.comment);
+                cresp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Unknown, true, crate::i18n::tr_args("Comment of {}: {}", &[&it.name, &it.comment])));
+                if cresp.double_clicked() {
+                    ctx.data_mut(|d| d.insert_temp::<Editing>(edit_id(), (it.id.0, "comment".into(), it.comment.clone())));
+                } else {
+                    // Other clicks select the row and open its context menu.
+                    extra = Some(cresp);
+                }
+                it.comment.clone()
+            }
+            _ => String::new(),
+        };
+        let align = if *key == "fps" { Align2::RIGHT_CENTER } else { Align2::LEFT_CENTER };
+        let tx = if *key == "fps" { cx + w - 6.0 } else { *cx };
+        cp.text(pos2(tx, r.center().y), align, txt, Tokens::ui(11.5), t.text_dim);
+    }
+    extra
+}
+
+/// Shift+wheel / trackpad over the list scrolls the optional columns sideways.
+fn hscroll_wheel(app: &mut EffectcraftApp, ui: &egui::Ui, list: Rect, overflow: f32) {
+    if overflow > 0.0 && ui.rect_contains_pointer(list) {
+        let (dx, dy, shift) = ui.input(|i| (i.smooth_scroll_delta.x, i.smooth_scroll_delta.y, i.modifiers.shift));
+        let d = if dx.abs() > 0.0 {
+            dx
+        } else if shift {
+            dy
+        } else {
+            0.0
+        };
+        app.ui.project_hscroll = (app.ui.project_hscroll - d).clamp(0.0, overflow);
+    }
+}
+
+/// Enter renames the selected item (Project panel focused, not typing).
+fn enter_renames(app: &mut EffectcraftApp, ctx: &egui::Context) {
+    if app.ui.focused == crate::dock::PanelKind::Project
+        && app.dialog.is_none()
+        && keys_reach_rows(app, ctx)
+        && ctx.data(|d| d.get_temp::<Editing>(edit_id())).is_none()
+        && ctx.input(|i| i.key_pressed(egui::Key::Enter))
+    {
+        begin_rename(app, ctx);
+    }
+}
+
+/// The warning marker at the end of the name cell for footage that can't be decoded.
+fn problem_marker(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &RowGeom, name_w: f32, id: ItemId, why: &str) {
+    let t = app.tokens;
+    let RowGeom { lp, list, r, .. } = *g;
+    let m = Rect::from_center_size(pos2(r.min.x + name_w - 8.0, r.center().y), vec2(13.0, 12.0));
+    lp.add(egui::Shape::convex_polygon(vec![m.center_top(), m.right_bottom(), m.left_bottom()], t.warning, Stroke::NONE));
+    lp.text(m.center() + vec2(0.0, 1.5), Align2::CENTER_CENTER, "!", Tokens::semibold(9.0), Color32::BLACK);
+    ui.interact(m.expand(2.0).intersect(list), egui::Id::unique(("pproblem", id.0)), Sense::hover()).on_hover_text(why);
+    app.auto.add(&format!("project.item.{}.problem", id.0), m, why);
+}
+
+/// Selection box over the rows it touches (#203); Shift or Cmd/Ctrl adds to the selection.
+fn marquee_select(app: &mut EffectcraftApp, ctx: &egui::Context, lp: &egui::Painter, list: Rect, empty: &egui::Response, rows: &[(ItemId, usize)]) {
+    let t = app.tokens;
+    let adding = ctx.input(|i| i.modifiers.shift || i.modifiers.command);
     if empty.clicked() && !adding {
         app.session.state.project_selection.clear();
     }
@@ -1142,6 +994,333 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             }
         }
     }
+}
+
+/// Where a row is drawn: its clipped painter, the list, the row rectangle and the indented x.
+#[derive(Clone, Copy)]
+struct RowGeom<'a> {
+    lp: &'a egui::Painter,
+    list: Rect,
+    r: Rect,
+    x0: f32,
+}
+
+/// Vertical scrolling: only the rows in view are drawn (and registered), so a project with
+/// thousands of items costs what one screenful does. Returns the scroll offset and its maximum.
+fn update_scroll(app: &mut EffectcraftApp, ui: &egui::Ui, ctx: &egui::Context, list: Rect, rows: &[(ItemId, usize)], moved: Option<ItemId>) -> (f32, f32) {
+    let content_h = rows.len() as f32 * ROW_H;
+    let max_scroll = (content_h - list.height() + ROW_H).max(0.0);
+    if ui.rect_contains_pointer(list) {
+        let (dy, shift) = ui.input(|i| (i.smooth_scroll_delta.y, i.modifiers.shift));
+        if !shift && dy != 0.0 {
+            app.ui.project_scroll -= dy;
+        }
+    }
+    // A selection made elsewhere (a command, an agent, the viewer) scrolls into view.
+    let sel_key = selection_seen_id();
+    let sel_now = app.session.state.project_selection.last().map(|i| i.0);
+    if ctx.data(|d| d.get_temp::<Option<u64>>(sel_key)) != Some(sel_now) {
+        ctx.data_mut(|d| d.insert_temp(sel_key, sel_now));
+        if let Some(row) = sel_now.and_then(|s| rows.iter().position(|(id, _)| id.0 == s)) {
+            let top = row as f32 * ROW_H;
+            if top < app.ui.project_scroll {
+                app.ui.project_scroll = top;
+            } else if top + ROW_H > app.ui.project_scroll + list.height() {
+                app.ui.project_scroll = top + ROW_H - list.height();
+            }
+        }
+    }
+    // The arrow keys' item scrolls into view (Shift+Up extends upward, past the selection's end).
+    if let Some(row) = moved.and_then(|m| rows.iter().position(|(id, _)| *id == m)) {
+        let top = row as f32 * ROW_H;
+        // Not `clamp`: a panel shorter than a row would make its bounds cross. The row's top wins.
+        app.ui.project_scroll = app.ui.project_scroll.max(top + ROW_H - list.height()).min(top);
+    }
+    app.ui.project_scroll = app.ui.project_scroll.clamp(0.0, max_scroll);
+    (app.ui.project_scroll, max_scroll)
+}
+
+/// The folder's open / close twirl (Alt / Cmd-click twirls every folder inside it too).
+fn folder_twirl(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &RowGeom, it: &effectcraft_engine::project::Item) {
+    let t = app.tokens;
+    let RowGeom { r, x0, .. } = *g;
+    let open = app.ui.project_open_folders.contains(&it.id.0);
+    let tw = Rect::from_center_size(pos2(x0 + 4.0, r.center().y), vec2(12.0, 12.0));
+    let tresp = widgets::twirl(ui, tw, open, egui::Id::unique(("pf", it.id.0)), &t);
+    tresp.widget_info(|| {
+        let name = crate::i18n::tr_args(if open { "Close folder {}" } else { "Open folder {}" }, &[&it.name]);
+        egui::WidgetInfo::labeled(egui::Role::Button, true, name)
+    });
+    if tresp.clicked() {
+        // Alt/Cmd-click twirls every folder inside it too.
+        let mut ids = vec![it.id];
+        if ui.input(|i| i.modifiers.alt || i.modifiers.command) {
+            let mut at = 0;
+            while let Some(f) = ids.get(at).copied() {
+                ids.extend(app.session.project.children(Some(f)).into_iter().filter(|c| c.is_folder()).map(|c| c.id));
+                at += 1;
+            }
+        }
+        for f in ids {
+            if open {
+                app.ui.project_open_folders.remove(&f.0);
+            } else {
+                app.ui.project_open_folders.insert(f.0);
+            }
+        }
+    }
+    app.auto.add(&format!("project.item.{}.twirl", it.id.0), tw, &it.name);
+}
+
+/// Proxy indicator: filled = the proxy is used, hollow = set but off. Click to switch.
+fn proxy_indicator(
+    app: &mut EffectcraftApp,
+    ui: &mut egui::Ui,
+    g: &RowGeom,
+    it: &effectcraft_engine::project::Item,
+    actions: &mut Vec<(String, serde_json::Value)>,
+) {
+    let t = app.tokens;
+    let RowGeom { lp, list, r, x0 } = *g;
+    if let Some(px) = it.proxy.as_ref() {
+        let pr = Rect::from_center_size(pos2(x0 + 4.0, r.center().y), vec2(9.0, 9.0));
+        if px.enabled {
+            lp.rect_filled(pr, 1.0, t.text);
+        } else {
+            lp.rect_stroke(pr, 1.0, Stroke::new(1.0, t.text), egui::StrokeKind::Inside);
+        }
+        let presp = ui.interact(pr.expand(2.0).intersect(list), egui::Id::unique(("pproxy", it.id.0)), Sense::click()).on_hover_text(format!(
+            "Proxy: {} ({})",
+            px.footage.path,
+            if px.enabled { "in use" } else { "off" }
+        ));
+        app.auto.add(&format!("project.item.{}.proxy", it.id.0), pr, if px.enabled { "Proxy in use" } else { "Proxy off" });
+        presp.widget_info(|| {
+            let name = crate::i18n::tr_args(if px.enabled { "Proxy of {}: in use" } else { "Proxy of {}: off" }, &[&it.name]);
+            egui::WidgetInfo::labeled(egui::Role::Button, true, name)
+        });
+        if presp.clicked() {
+            actions.push(("file.useProxy".into(), json!({"item": it.id.0})));
+        }
+    }
+}
+
+/// The label swatch: click for the label colour menu.
+fn label_swatch(
+    app: &mut EffectcraftApp,
+    ui: &mut egui::Ui,
+    g: &RowGeom,
+    it: &effectcraft_engine::project::Item,
+    label_x: f32,
+    selected: bool,
+    actions: &mut Vec<(String, serde_json::Value)>,
+) {
+    let t = app.tokens;
+    let RowGeom { lp, list, r, .. } = *g;
+    let sw = Rect::from_center_size(pos2(label_x, r.center().y), vec2(10.0, 10.0));
+    lp.rect_filled(sw, 2.0, t.label(it.label));
+    let sresp = ui.interact(sw.expand(3.0).intersect(list), egui::Id::unique(("plabel", it.id.0)), Sense::click());
+    app.auto.add(&format!("project.item.{}.label", it.id.0), sw, it.label.name());
+    sresp.widget_info(|| {
+        let name = crate::i18n::tr_args("Label of {}: {}", &[&it.name, &app.session.prefs.label_name(it.label)]);
+        egui::WidgetInfo::labeled(egui::Role::Button, true, name)
+    });
+    let pop = egui::Id::unique(("plabel-pop", it.id.0));
+    if sresp.clicked() || sresp.secondary_clicked() {
+        widgets::open_popup(ui, pop);
+    }
+    if let Some(l) = widgets::label_popup(ui, pop, sw.left_bottom(), it.label, |l| app.session.prefs.label_name(l), &t) {
+        actions.push(("project.setLabel".into(), json!({"items": targets(app, it.id, selected), "label": label_index(l)})));
+    }
+}
+
+/// The Project panel: the selected item's thumbnail and details (with the comps that use it), the
+/// search field, sortable column headers, and the item rows (folders, comps, footage and solids)
+/// with selection, Shift/Cmd ranges, keyboard navigation, inline rename, drag-and-drop move,
+/// marquee selection and context menus. Only the rows in view are drawn. File commands are queued
+/// and run through [`crate::menus::invoke`] at the end, with failures shown in `app.ui.status`.
+pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
+    let t = app.tokens;
+    let p = ui.painter().clone();
+    let ctx = ui.ctx().clone();
+    // Preview header.
+    let head = Rect::from_min_size(rect.min, vec2(rect.width(), 74.0));
+    details_header(app, ui, &p, &ctx, head);
+    // Search.
+    let sr = Rect::from_min_size(pos2(rect.min.x + 8.0, head.max.y + 2.0), vec2(rect.width() - 16.0, 22.0));
+    let mut q = app.ui.project_search.clone();
+    widgets::search_field(ui, sr, &mut q, crate::i18n::tr("Search project"), &t);
+    app.ui.project_search = q;
+    app.auto.add("project.search", sr, "Search");
+    // Column header: Name, Label, then the visible optional columns.
+    let hdr = Rect::from_min_size(pos2(rect.min.x, sr.max.y + 6.0), vec2(rect.width(), 20.0));
+    p.line_segment([hdr.left_bottom(), hdr.right_bottom()], Stroke::new(1.0, t.separator));
+    let cl = layout_columns(app, rect);
+    let (name_w, label_x, opt_x0, overflow, hscroll) = (cl.name_w, cl.label_x, cl.opt_x0, cl.overflow, cl.hscroll);
+    draw_header(app, ui, &p, hdr, &cl);
+    // Rows.
+    let footer_h = 28.0;
+    let list = Rect::from_min_max(pos2(rect.min.x, hdr.max.y), pos2(rect.max.x, rect.max.y - footer_h));
+    let lp = p.with_clip_rect(list);
+    // The list's empty area (under the rows and the scroll bar, which take their own clicks):
+    // a click deselects, a drag draws a selection box, a double-click imports, as in After
+    // Effects (File ▸ Import ▸ File...).
+    // Not a Tab stop: the keyboard reaches the rows, and nothing else here takes a key.
+    let empty = ui.interact(list, egui::Id::unique("proj-empty"), Sense::CLICK | Sense::DRAG);
+    app.auto.add("project.empty", list, "Double-click to import files; drag to select items; right-click for project actions");
+    hscroll_wheel(app, ui, list, overflow);
+    let moved = keyboard_nav(app, &ctx);
+    let rows = visible_rows(app);
+    enter_renames(app, &ctx);
+    let editing: Option<Editing> = ctx.data(|d| d.get_temp(edit_id()));
+    let dragging = egui::DragAndDrop::payload::<DragPayload>(&ctx).and_then(|p| match *p {
+        DragPayload::Item(i) => Some(i),
+        _ => None,
+    });
+    let hover_y = ctx.pointer_hover_pos().filter(|p| list.contains(*p)).map(|p| p.y);
+    let mut drop_row: Option<ItemId> = None;
+    let mut actions: Vec<(String, serde_json::Value)> = vec![];
+    let (scroll, max_scroll) = update_scroll(app, ui, &ctx, list, &rows, moved);
+    let first = ((scroll / ROW_H).floor() as usize).min(rows.len());
+    let mut y = list.min.y - (scroll - first as f32 * ROW_H);
+    let project = app.session.project.clone();
+    for (i, (id, depth)) in rows.iter().enumerate().skip(first) {
+        let Some(it) = project.item(*id) else { continue };
+        let r = Rect::from_min_size(pos2(list.min.x, y), vec2(list.width(), ROW_H));
+        y += ROW_H;
+        if r.min.y > list.max.y {
+            break;
+        }
+        if hover_y.is_some_and(|hy| hy >= r.min.y && hy < r.max.y) {
+            drop_row = Some(*id);
+        }
+        let selected = app.session.state.project_selection.contains(id);
+        lp.rect_filled(
+            r,
+            0.0,
+            // Flat rows like After Effects' Project panel (no stripes).
+            if selected { t.row_selected } else { t.row },
+        );
+        // The row's click / drag area goes first, so the twirl, proxy, label and comment widgets
+        // on top of it take their own clicks.
+        let mut resp = ui.interact(r.intersect(list), row_id(*id), Sense::click_and_drag());
+        app.auto.add(&format!("project.item.{}", id.0), r, &it.name);
+        // For screen readers: a tree item named by the item and its type, with its selection,
+        // depth and (a folder) open state. One Tab stop per row; the panel's keys then apply.
+        let open = it.is_folder().then(|| app.ui.project_open_folders.contains(&id.0) || !app.ui.project_search.is_empty());
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TreeItem, true, format!("{}, {}", it.name, crate::i18n::tr(it.type_name()))));
+        ctx.accesskit_node_builder(resp.id, |n| {
+            n.set_selected(selected);
+            n.set_level(depth.saturating_add(1));
+            if let Some(open) = open {
+                n.set_expanded(open);
+            }
+        });
+        if resp.has_focus() {
+            ctx.data_mut(|d| d.insert_temp(focused_row_id(), *id));
+        }
+        if resp.gained_focus() {
+            app.ui.focused = crate::dock::PanelKind::Project;
+        }
+        let _ = i;
+        let x0 = r.min.x + 8.0 + 14.0 * *depth as f32;
+        let g = RowGeom { lp: &lp, list, r, x0 };
+        if it.is_folder() {
+            folder_twirl(app, ui, &g, it);
+        }
+        icons::paint(&lp, Rect::from_center_size(pos2(x0 + 18.0, r.center().y), vec2(14.0, 14.0)), item_icon(it), t.text_dim);
+        proxy_indicator(app, ui, &g, it, &mut actions);
+        // Footage that can't be decoded (no decoder for its codec / profile): a warning marker
+        // at the end of the name cell, the reason on hover.
+        let problem = match &it.kind {
+            ItemKind::Footage(f) => app.session.footage.problem(f),
+            _ => None,
+        };
+        let name_clip =
+            Rect::from_min_max(pos2(x0 + 30.0, r.min.y), pos2(r.min.x + name_w + 4.0 - if problem.is_some() { 16.0 } else { 0.0 }, r.max.y)).intersect(list);
+        if let Some(why) = &problem {
+            problem_marker(app, ui, &g, name_w, it.id, why);
+        }
+        let name_rect = Rect::from_min_max(pos2(x0 + 28.0, r.min.y + 2.0), pos2(r.min.x + name_w + 2.0, r.max.y - 2.0));
+        if !cell_edit(app, ui, &mut actions, &editing, id.0, "name", name_rect) {
+            // The selected item's name sits in a light cell with dark text.
+            if selected {
+                let g = lp.layout_no_wrap(it.name.clone(), Tokens::ui(12.0), Color32::BLACK);
+                let cell = Rect::from_min_max(pos2(x0 + 27.0, r.min.y + 1.0), pos2((x0 + 33.0 + g.size().x).min(name_clip.max.x), r.max.y - 1.0));
+                lp.with_clip_rect(name_clip.expand2(vec2(3.0, 0.0))).rect_filled(cell, 0.0, Color32::from_rgb(0xa6, 0xa6, 0xa6));
+            }
+            // Long names end in "…" before the label column instead of being cut mid-glyph.
+            widgets::text_fit(
+                &lp.with_clip_rect(name_clip),
+                pos2(x0 + 30.0, r.center().y),
+                Align2::LEFT_CENTER,
+                &it.name,
+                Tokens::ui(12.0),
+                name_clip.max.x - (x0 + 30.0) - 2.0,
+                if selected { Color32::from_gray(0x16) } else { t.text },
+            );
+        }
+        label_swatch(app, ui, &g, it, label_x, selected, &mut actions);
+        if let Some(extra) = optional_cells(app, ui, &g, it, &cl, &editing, &mut actions) {
+            resp = resp.union(extra);
+        }
+        if dragging.is_some_and(|d| d != id.0) && drop_row == Some(*id) && it.is_folder() {
+            lp.rect_stroke(r.shrink(1.0), 2.0, Stroke::new(1.5, t.accent), egui::StrokeKind::Inside);
+        }
+        // The row with keyboard focus (Tab, or the arrow keys after it) shows a focus ring.
+        if ctx.memory(|m| m.has_focus(row_id(*id))) {
+            lp.rect_stroke(r.shrink(0.5), 0.0, Stroke::new(1.0, t.accent), egui::StrokeKind::Inside);
+        }
+        // Part of the row: not a second Tab stop.
+        let nresp = ui.interact(name_clip, egui::Id::unique(("pname", id.0)), Sense::CLICK | Sense::DRAG);
+        app.auto.add(&format!("project.item.{}.name", id.0), name_clip, &it.name);
+        let resp = resp.union(nresp);
+        if resp.clicked() {
+            select_click(app, ui, &ctx, *id, &rows);
+        }
+        // Double-click opens the item, as in After Effects (a comp gets its own Timeline tab and
+        // the viewer); Enter or the context menu renames.
+        if resp.double_clicked() {
+            open_item(app, it, *id, &mut actions);
+        }
+        if resp.drag_started() {
+            egui::DragAndDrop::set_payload(&ctx, DragPayload::Item(id.0));
+        }
+        // Right-clicking an item selects it (After Effects): the menu's File commands act on the
+        // selection.
+        if resp.secondary_clicked() && !selected {
+            app.session.state.project_selection = vec![*id];
+        }
+        crate::widgets::context_menu(&resp, |ui| item_menu(app, ui, &ctx, it, *id, selected, &mut actions));
+    }
+    // The scroll bars, over the rows (which would take their presses otherwise).
+    if overflow > 0.0 {
+        let track = Rect::from_min_max(pos2(opt_x0, list.max.y - 5.0), pos2(rect.max.x - 4.0, list.max.y - 1.0));
+        app.ui.project_hscroll = widgets::scroll_bar(ui, &mut app.auto, "project.hscroll", track, hscroll, overflow, &t);
+    }
+    if max_scroll > 0.0 {
+        let track = Rect::from_min_max(pos2(rect.max.x - 6.0, list.min.y + 1.0), pos2(rect.max.x - 2.0, list.max.y - 7.0));
+        app.ui.project_scroll = widgets::scroll_bar(ui, &mut app.auto, "project.vscroll", track, scroll, max_scroll, &t);
+    }
+    drop_targets(app, &ctx, &lp, list, DropState { dragging, row: drop_row, hovering: hover_y.is_some() }, &mut actions);
+    let foot = Rect::from_min_max(pos2(rect.min.x, rect.max.y - footer_h), rect.max);
+    footer(app, ui, &p, foot, &mut actions);
+    if empty.double_clicked() {
+        actions.push(("file.import".into(), json!({})));
+    }
+    crate::widgets::context_menu(&empty, |ui| {
+        for (key, label, command) in
+            [("newComp", "New Composition…", "comp.new"), ("newFolder", "New Folder", "project.newFolder"), ("import", "Import File…", "file.import")]
+        {
+            let response = ui.button(label);
+            app.auto.add(&format!("project.context.{key}"), response.rect, label);
+            if response.clicked() {
+                actions.push((command.into(), json!({})));
+                ui.close();
+            }
+        }
+    });
+    marquee_select(app, &ctx, &lp, list, &empty, &rows);
     for (id, params) in actions {
         if let Err(e) = crate::menus::invoke(app, &ctx, &id, params) {
             app.ui.status = e;

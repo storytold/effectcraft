@@ -123,7 +123,7 @@ fn web_draws(language: &str) -> bool {
 
 /// The language EffectCraft shows for a BCP 47 locale (`ja-JP` → `ja`, `zh-Hans-CN` → `zh-hans`,
 /// `zh-TW` → `zh-hant`, `uk-UA` → `uk`, `es-ES` → `es`, `pt-BR` → `pt-br`, `cs-CZ` → `cs`,
-/// `ka-GE` → `ka`).
+/// `ka-GE` → `ka`, `ru-RU` → `ru`, `de-AT` → `de`, `fr-CA` → `fr`).
 fn supported(locale: Option<&str>) -> &'static str {
     let Some(locale) = locale else { return "en" };
     let mut parts = locale.split(['-', '_']);
@@ -135,6 +135,9 @@ fn supported(locale: Option<&str>) -> &'static str {
         "es" => "es",
         "cs" => "cs",
         "ka" => "ka",
+        "ru" => "ru",
+        "de" => "de",
+        "fr" => "fr",
         // The only Portuguese catalog: Brazil's, also for Portugal rather than English.
         "pt" => "pt-br",
         "zh" => {
@@ -252,22 +255,32 @@ pub(crate) fn entry(app: &EffectcraftApp, e: &MenuEntry, shown: String) -> Strin
         return effects::name(id, &e.label);
     }
     // Undo/redo names come from the history, so they are formatted per language here rather than
-    // looked up in a catalog. An English (or untranslated) interface keeps the shown label.
-    let (undo, no_undo, redo, no_redo) = match language(app) {
-        "ja" => ("取り消し", "取り消しできません", "やり直し", "やり直しできません"),
-        "zh-hans" => ("撤销", "无可撤销的操作", "重做", "无可重做的操作"),
-        "zh-hant" => ("復原", "沒有可復原的操作", "重做", "沒有可重做的操作"),
-        "uk" => ("Скасувати", "Немає дій для скасування", "Повторити", "Немає дій для повторення"),
-        "es" => ("Deshacer", "No se puede deshacer", "Rehacer", "No se puede rehacer"),
-        "pt-br" => ("Desfazer", "Não há nada para desfazer", "Refazer", "Não há nada para refazer"),
-        "cs" => ("Zpět", "Není co vrátit", "Znovu", "Není co zopakovat"),
+    // looked up in a catalog. A language without this wording keeps the shown undo/redo label, and
+    // the rest of its menu still goes through the catalog below (#1449).
+    let history = match language(app) {
+        "en" => return shown,
+        "ja" => Some(("取り消し", "取り消しできません", "やり直し", "やり直しできません")),
+        "zh-hans" => Some(("撤销", "无可撤销的操作", "重做", "无可重做的操作")),
+        "zh-hant" => Some(("復原", "沒有可復原的操作", "重做", "沒有可重做的操作")),
+        "uk" => Some(("Скасувати", "Немає дій для скасування", "Повторити", "Немає дій для повторення")),
+        "es" => Some(("Deshacer", "No se puede deshacer", "Rehacer", "No se puede rehacer")),
+        "pt-br" => Some(("Desfazer", "Não há nada para desfazer", "Refazer", "Não há nada para refazer")),
+        "cs" => Some(("Zpět", "Není co vrátit", "Znovu", "Není co zopakovat")),
         // A colon before the history's (untranslated) action name: "დაბრუნება: Comp1".
-        "ka" => ("დაბრუნება:", "დაბრუნება შეუძლებელია", "ხელახლა შესრულება:", "ხელახლა შესრულება შეუძლებელია"),
-        _ => return shown,
+        "ka" => Some(("დაბრუნება:", "დაბრუნება შეუძლებელია", "ხელახლა შესრულება:", "ხელახლა შესრულება შეუძლებელია")),
+        // A colon before the history's (untranslated) action name: "Отменить: Comp1".
+        "ru" => Some(("Отменить:", "Нечего отменять", "Повторить:", "Нечего повторять")),
+        _ => None,
     };
     match e.command.as_str() {
-        "edit.undo" => app.session.history.undo.last().map(|u| format!("{undo} {}", u.0)).unwrap_or_else(|| no_undo.into()),
-        "edit.redo" => app.session.history.redo.last().map(|u| format!("{redo} {}", u.0)).unwrap_or_else(|| no_redo.into()),
+        "edit.undo" | "edit.redo" => {
+            let Some((undo, no_undo, redo, no_redo)) = history else { return shown };
+            if e.command == "edit.undo" {
+                app.session.history.undo.last().map(|u| format!("{undo} {}", u.0)).unwrap_or_else(|| no_undo.into())
+            } else {
+                app.session.history.redo.last().map(|u| format!("{redo} {}", u.0)).unwrap_or_else(|| no_redo.into())
+            }
+        }
         "window.panel" => {
             let prefix = format!("{}: ", e.label);
             if let Some(name) = shown.strip_prefix(&prefix) {
@@ -469,6 +482,7 @@ const SIMPLIFIED_CHINESE: &[(&str, &str, &str)] = &[
     ("file.installScript", "Install Script File...", "安装脚本文件..."),
     ("file.installScriptUIPanel", "Install ScriptUI Panel...", "安装 ScriptUI 面板..."),
     ("file.runScript", "Run Script File...", "运行脚本文件..."),
+    ("", "Recent Script Files", "最近的脚本文件"),
     ("", "Create Proxy", "创建代理"),
     ("file.createProxy", "Still...", "静止图像..."),
     ("file.createProxy", "Movie...", "影片..."),
@@ -1104,6 +1118,7 @@ const TRADITIONAL_CHINESE: &[(&str, &str, &str)] = &[
     ("file.installScript", "Install Script File...", "安裝指令碼檔案..."),
     ("file.installScriptUIPanel", "Install ScriptUI Panel...", "安裝 ScriptUI 面板..."),
     ("file.runScript", "Run Script File...", "執行指令碼檔案..."),
+    ("", "Recent Script Files", "最近使用的指令碼檔案"),
     ("", "Create Proxy", "建立代理"),
     ("file.createProxy", "Still...", "靜態影像..."),
     ("file.createProxy", "Movie...", "影片..."),
@@ -1736,6 +1751,7 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("file.installScript", "Install Script File...", "スクリプトファイルをインストール..."),
     ("file.installScriptUIPanel", "Install ScriptUI Panel...", "ScriptUIパネルをインストール..."),
     ("file.runScript", "Run Script File...", "スクリプトファイルを実行..."),
+    ("", "Recent Script Files", "最近使用したスクリプトファイル"),
     ("", "Create Proxy", "プロキシを作成"),
     ("file.createProxy", "Still...", "静止画..."),
     ("file.createProxy", "Movie...", "ムービー..."),
@@ -2371,6 +2387,7 @@ const UKRAINIAN: &[(&str, &str, &str)] = &[
     ("file.installScript", "Install Script File...", "Встановити файл скрипту..."),
     ("file.installScriptUIPanel", "Install ScriptUI Panel...", "Встановити панель ScriptUI..."),
     ("file.runScript", "Run Script File...", "Виконати файл скрипту..."),
+    ("", "Recent Script Files", "Нещодавні файли скриптів"),
     ("", "Create Proxy", "Створити проксі"),
     ("file.createProxy", "Still...", "Зображення..."),
     ("file.createProxy", "Movie...", "Відео..."),
@@ -3007,6 +3024,7 @@ const SPANISH: &[(&str, &str, &str)] = &[
     ("file.installScript", "Install Script File...", "Instalar archivo de script..."),
     ("file.installScriptUIPanel", "Install ScriptUI Panel...", "Instalar panel de ScriptUI..."),
     ("file.runScript", "Run Script File...", "Ejecutar archivo de script..."),
+    ("", "Recent Script Files", "Archivos de script recientes"),
     ("", "Create Proxy", "Crear proxy"),
     ("file.createProxy", "Still...", "Imagen fija..."),
     ("file.createProxy", "Movie...", "Película..."),
@@ -3641,6 +3659,7 @@ const PORTUGUESE: &[(&str, &str, &str)] = &[
     ("file.installScript", "Install Script File...", "Instalar arquivo de script..."),
     ("file.installScriptUIPanel", "Install ScriptUI Panel...", "Instalar painel ScriptUI..."),
     ("file.runScript", "Run Script File...", "Executar arquivo de script..."),
+    ("", "Recent Script Files", "Arquivos de script recentes"),
     ("", "Create Proxy", "Criar proxy"),
     ("file.createProxy", "Still...", "Imagem fixa..."),
     ("file.createProxy", "Movie...", "Filme..."),
@@ -4283,6 +4302,7 @@ const RUSSIAN: &[(&str, &str, &str)] = &[
     ("file.installScript", "Install Script File...", "Установить файл скрипта..."),
     ("file.installScriptUIPanel", "Install ScriptUI Panel...", "Установить панель ScriptUI..."),
     ("file.runScript", "Run Script File...", "Выполнить файл скрипта..."),
+    ("", "Recent Script Files", "Недавние файлы скриптов"),
     ("", "Create Proxy", "Создать суррогат"),
     ("file.createProxy", "Still...", "Стоп-кадр..."),
     ("file.createProxy", "Movie...", "Видео..."),
@@ -4917,6 +4937,7 @@ const FRENCH: &[(&str, &str, &str)] = &[
     ("file.installScript", "Install Script File...", "Installer un fichier de script..."),
     ("file.installScriptUIPanel", "Install ScriptUI Panel...", "Installer un panneau ScriptUI..."),
     ("file.runScript", "Run Script File...", "Exécuter un fichier de script..."),
+    ("", "Recent Script Files", "Fichiers de script récents"),
     ("", "Create Proxy", "Créer un proxy"),
     ("file.createProxy", "Still...", "Image fixe..."),
     ("file.createProxy", "Movie...", "Vidéo..."),
@@ -5551,6 +5572,7 @@ const GERMAN: &[(&str, &str, &str)] = &[
     ("file.installScript", "Install Script File...", "Skriptdatei installieren..."),
     ("file.installScriptUIPanel", "Install ScriptUI Panel...", "ScriptUI-Bedienfeld installieren..."),
     ("file.runScript", "Run Script File...", "Skriptdatei ausführen..."),
+    ("", "Recent Script Files", "Zuletzt verwendete Skriptdateien"),
     ("", "Create Proxy", "Proxy erstellen"),
     ("file.createProxy", "Still...", "Standbild..."),
     ("file.createProxy", "Movie...", "Film..."),
@@ -6185,6 +6207,7 @@ const CZECH: &[(&str, &str, &str)] = &[
     ("file.installScript", "Install Script File...", "Nainstalovat soubor skriptu..."),
     ("file.installScriptUIPanel", "Install ScriptUI Panel...", "Nainstalovat panel ScriptUI..."),
     ("file.runScript", "Run Script File...", "Spustit soubor skriptu..."),
+    ("", "Recent Script Files", "Nedávné soubory skriptů"),
     ("", "Create Proxy", "Vytvořit zástupný soubor"),
     ("file.createProxy", "Still...", "Statický snímek..."),
     ("file.createProxy", "Movie...", "Video..."),
@@ -6816,6 +6839,7 @@ const GEORGIAN: &[(&str, &str, &str)] = &[
     ("file.installScript", "Install Script File...", "სკრიპტის ფაილის დაყენება..."),
     ("file.installScriptUIPanel", "Install ScriptUI Panel...", "ScriptUI პანელის დაყენება..."),
     ("file.runScript", "Run Script File...", "სკრიპტის ფაილის გაშვება..."),
+    ("", "Recent Script Files", "ბოლო სკრიპტის ფაილები"),
     ("", "Create Proxy", "პროქსის შექმნა"),
     ("file.createProxy", "Still...", "სტატიკური კადრი..."),
     ("file.createProxy", "Movie...", "ვიდეო..."),
@@ -7558,9 +7582,19 @@ mod tests {
             (Some("ka"), "ka"),
             (Some("ka-GE"), "ka"),
             (Some("ka_GE.UTF-8"), "ka"),
+            (Some("ru"), "ru"),
+            (Some("ru-RU"), "ru"),
+            (Some("ru-SK"), "ru"),
+            (Some("ru_RU.UTF-8"), "ru"),
+            (Some("de"), "de"),
+            (Some("de-DE"), "de"),
+            (Some("de_AT.UTF-8"), "de"),
+            (Some("fr"), "fr"),
+            (Some("fr-FR"), "fr"),
+            (Some("fr_CA.UTF-8"), "fr"),
             (Some("en-US"), "en"),
             (Some("jv-ID"), "en"),
-            (Some("de-DE"), "en"),
+            (Some("nl-NL"), "en"),
             (None, "en"),
         ] {
             assert_eq!(supported(locale), language, "{locale:?}");
@@ -7616,6 +7650,35 @@ mod tests {
         assert!(effectcraft_engine::prefs::LANGUAGES.contains(&("Українська", "uk")));
         assert_eq!(code("uk"), "uk");
         assert_eq!(code("unknown"), "en");
+    }
+
+    /// Every catalog language draws its menu entries from the catalog, including those with no
+    /// undo/redo wording of their own: choosing Deutsch, Русский or Français left the menus in
+    /// English (#1449).
+    #[test]
+    fn every_catalog_language_translates_menu_entries() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        let menu_entry = |command: &str, label: &str| MenuEntry {
+            label: label.into(),
+            command: command.into(),
+            params: serde_json::Value::Null,
+            shortcut: None,
+            alt_shortcuts: Vec::new(),
+        };
+        let new_comp = menu_entry("comp.new", "New Composition...");
+        let undo = menu_entry("edit.undo", "Undo");
+        for code in CATALOG_CODES {
+            app.session.execute("prefs.set", json!({"key":"general.language", "value":code})).unwrap();
+            let drawn = entry(&app, &new_comp, new_comp.label.clone());
+            assert_eq!(drawn, label(&app, "comp.new", "New Composition..."), "{code}");
+            assert_ne!(drawn, new_comp.label, "{code}: the menu entry is drawn in English");
+        }
+        app.session.execute("prefs.set", json!({"key":"general.language", "value":"ru"})).unwrap();
+        assert_eq!(entry(&app, &undo, "Can't Undo".into()), "Нечего отменять");
+        app.session.execute("prefs.set", json!({"key":"general.language", "value":"de"})).unwrap();
+        assert_eq!(entry(&app, &undo, "Can't Undo".into()), "Can't Undo", "no German undo wording yet: the shown label");
+        app.session.execute("prefs.set", json!({"key":"general.language", "value":"en"})).unwrap();
+        assert_eq!(entry(&app, &new_comp, new_comp.label.clone()), "New Composition...");
     }
 
     #[test]

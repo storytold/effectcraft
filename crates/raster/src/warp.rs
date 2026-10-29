@@ -203,22 +203,17 @@ fn union(r: [usize; 4], q: [usize; 4]) -> [usize; 4] {
     }
 }
 
-/// Fast affine rows: `blend(dst, src, x, y)` is only called for visible source pixels. Returns
-/// the rectangle of the pixels it blended.
-#[allow(clippy::too_many_arguments)]
-fn affine_rows(
-    dst: &mut Image,
-    img: &Image,
-    inv: &Mat3,
+/// Sampling, blending and destination bounds for an affine row operation.
+struct AffineRows {
     sampling: Sampling,
-    op: f32,
+    opacity: f32,
     quantize: Option<f32>,
-    x0: usize,
-    x1: usize,
-    y0: usize,
-    y1: usize,
-    blend: impl Fn(Px, Px, u32, u32) -> Px + Sync,
-) -> [usize; 4] {
+    bounds: [usize; 4],
+}
+
+/// Blend visible source samples and return the rectangle of changed pixels.
+fn affine_rows(dst: &mut Image, img: &Image, inv: &Mat3, rows: AffineRows, blend: impl Fn(Px, Px, u32, u32) -> Px + Sync) -> [usize; 4] {
+    let AffineRows { sampling, opacity: op, quantize, bounds: [x0, x1, y0, y1] } = rows;
     let levels = quantize.map(|l| (l, 1.0 / l));
     let w = dst.width as usize;
     let m = inv.0;
@@ -363,22 +358,28 @@ fn composite_warp_impl(
     if let Some(k) = accumulate
         && affine
     {
-        let r = affine_rows(dst, img, &inv, opts.sampling, 1.0, None, x0, x1, y0, y1, |d, s, _, _| {
+        let r = affine_rows(dst, img, &inv, AffineRows { sampling: opts.sampling, opacity: 1.0, quantize: None, bounds: [x0, x1, y0, y1] }, |d, s, _, _| {
             [d[0] + s[0] * k, d[1] + s[1] * k, d[2] + s[2] * k, d[3] + s[3] * k]
         });
         return changed(r);
     }
     if allow_fast && affine && !mode.is_stencil() {
         let r = match mode {
-            BlendMode::Normal => affine_rows(dst, img, &inv, opts.sampling, op, quantize, x0, x1, y0, y1, |d, s, _, _| {
-                let k = 1.0 - s[3];
-                [s[0] + d[0] * k, s[1] + d[1] * k, s[2] + d[2] * k, s[3] + d[3] * k]
-            }),
+            BlendMode::Normal => {
+                affine_rows(dst, img, &inv, AffineRows { sampling: opts.sampling, opacity: op, quantize, bounds: [x0, x1, y0, y1] }, |d, s, _, _| {
+                    let k = 1.0 - s[3];
+                    [s[0] + d[0] * k, s[1] + d[1] * k, s[2] + d[2] * k, s[3] + d[3] * k]
+                })
+            }
             BlendMode::Dissolve | BlendMode::DancingDissolve => {
                 let seed = opts.seed;
-                affine_rows(dst, img, &inv, opts.sampling, op, quantize, x0, x1, y0, y1, |d, s, x, y| blend_pixel(mode, d, s, hash_noise(x, y, seed)))
+                affine_rows(dst, img, &inv, AffineRows { sampling: opts.sampling, opacity: op, quantize, bounds: [x0, x1, y0, y1] }, |d, s, x, y| {
+                    blend_pixel(mode, d, s, hash_noise(x, y, seed))
+                })
             }
-            _ => affine_rows(dst, img, &inv, opts.sampling, op, quantize, x0, x1, y0, y1, |d, s, _, _| blend_pixel(mode, d, s, 0.5)),
+            _ => affine_rows(dst, img, &inv, AffineRows { sampling: opts.sampling, opacity: op, quantize, bounds: [x0, x1, y0, y1] }, |d, s, _, _| {
+                blend_pixel(mode, d, s, 0.5)
+            }),
         };
         return changed(r);
     }

@@ -2,7 +2,7 @@ use super::foam::{FOAM_TEXTURES, foam};
 use super::pixels::{ball_action, pixel_polly, scatterize};
 use super::shatter::{CD_PROPS, CD_SOURCES, SHATTER_PATTERNS, SHATTER_TEXTURE_MODES, card_dance, shatter};
 use super::surfaces::{caustics, wave_world};
-use super::*;
+use super::{EffectSpec, ParamUi, Value, col, num, p, pct, popup, pt, slider, spec};
 
 // ------------------------------------------------------------------ specs
 

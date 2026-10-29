@@ -14,8 +14,8 @@
 //!   so official weights load as published.
 //! - [`mobilesam`]: MobileSAM (Apache-2.0) and [`mediapipe`]: MediaPipe Face Landmarker
 //!   (Apache-2.0), in plain Rust ([`nn`] kernels on rayon).
-#![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::todo, clippy::unreachable)]
+#![forbid(unsafe_code)]
 
 pub mod face;
 pub mod mediapipe;
