@@ -240,6 +240,9 @@ fn import_orientation_keys(layer: &AepLayer<'_, '_>, layer_name: &str, tm: &Time
         col.lose(LossCategory::TransformProperties, format!("{what} keys unreadable, the static value is used"));
         return;
     }
+    // Key times count in the property's time scale (a stretched layer's is scaled), as in
+    // `import_keys`.
+    let scale = layer.orientation_time_scale().filter(|s| *s != 0).unwrap_or(tm.timescale);
     let mut keys: Vec<Keyframe> = Vec::with_capacity(stored.len());
     let mut approximated = false;
     for k in &stored {
@@ -248,7 +251,7 @@ fn import_orientation_keys(layer: &AepLayer<'_, '_>, layer_name: &str, tm: &Time
             col.lose(LossCategory::DamagedData, format!("{what}: keyframe value is not a number"));
             continue;
         }
-        let mut key = Keyframe::new(tm.units(i64::from(k.time_units), tm.timescale), value);
+        let mut key = Keyframe::new(tm.units(i64::from(k.time_units), scale), value);
         for (side, i) in [(&mut key.in_interp, k.interpolation_in), (&mut key.out_interp, k.interpolation_out)] {
             *side = match interp(Some(i), col, &what) {
                 Interp::Bezier => {

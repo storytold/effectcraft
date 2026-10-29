@@ -23,7 +23,10 @@ def fix(m):
 d, n = re.subn(rb'\{"ascendcount_base".*?\}', fix, d)
 print('aliases scrubbed', n)
 base = open(base_path, 'rb').read()
-xi = d.find(b'<?xpacket begin'); xj = base.find(b'<?xpacket begin')
+xi = d.find(b'<?xpacket begin')
+xj = base.find(b'<?xpacket begin')
+assert xi >= 0, 'the saved project has no XMP packet'
+assert xj >= 0, 'the base project has no XMP packet'
 out = d[:xi] + base[xj:]
 # Local folder and machine names that must not remain (comma-separated, from the environment so
 # that they are not written here): e.g. SCRUB_FORBID=<folder name>,<host name prefix>.
