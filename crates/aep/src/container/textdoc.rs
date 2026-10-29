@@ -230,7 +230,7 @@ pub fn parse_text_dict(body: &[u8]) -> TextValue {
 }
 
 /// The run style slots (`RUN/6/0[n]/0/0/6/<slot>`) that are decoded; every other slot is compared
-/// with the sampled default ([`SAMPLED_STYLE`]) and listed in
+/// with its default (`style_defaults`) and listed in
 /// [`TextDocument::undecoded_style_fields`] when it differs.
 pub const DECODED_STYLE_SLOTS: &[&str] =
     &["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "11", "12", "13", "18", "35", "36", "52", "53", "54", "56", "57", "58", "62", "63", "70"];
@@ -238,25 +238,73 @@ pub const DECODED_STYLE_SLOTS: &[&str] =
 /// The paragraph slots (`RUN/5/0[n]/0/0/5/<slot>`) that are decoded (see [`ParagraphRun`]).
 pub const DECODED_PARAGRAPH_SLOTS: &[&str] = &["0", "1", "2", "3", "4", "5", "8", "9", "21", "29", "33"];
 
-/// The run style of an untouched point text document as After Effects stores it (244: `Hello`,
-/// Times New Roman, 100 px, white fill; 110, 243, 245 store the same slots).
-const SAMPLED_STYLE: &[u8] = b"<< /0 0 /1 100.0 /2 false /3 false /4 false /5 98.0 /6 1.0 /7 1.0 /8 0 /9 0.0 /10 0.0 /11 1 /12 0 /13 1 /14 0 /15 0 \
-/16 0 /17 0.0 /18 false /19 false /20 false /21 false /22 false /23 false /24 false /25 false /26 false /27 false /28 false /29 false /30 0 \
-/31 false /32 false /33 false /34 false /35 1 /36 0.0 /37 2 /38 0 /39 0 /40 false /41 2 /42 0 /43 << /0 .5 >> /44 2 /45 2 /46 7 /47 0 /48 0 \
-/49 -1.0 /50 -1.0 /51 0 /52 false /53 << /99 /SimplePaint /0 << /0 1 /1 [ 1.0 1.0 1.0 1.0 ] >> >> /54 << /99 /SimplePaint /0 << /0 1 /1 \
-[ 1.0 1.0 1.0 1.0 ] >> >> /55 << /99 /SimpleBlender >> /56 true /57 false /58 true /59 false /60 false /61 0 /62 0 /63 1.0 /64 4.0 /65 0.0 \
-/66 [ ] /67 [ ] /68 0 /69 0 /70 0 /71 4 /72 0.0 /73 0.0 /74 false /75 false /76 false /77 true /78 true /79 << /99 /SimplePaint /0 << /0 1 \
-/1 [ 1.0 1.0 1.0 0.0 ] >> >> /80 false /81 0 /82 3.0 /83 3.0 /84 false /85 0 /86 << /99 /SimpleCustomFeature >> /87 100.0 /88 true /92 0.0 \
-/95 << /0 0.0 /1 0 >> /96 true >>";
+/// A number slot.
+fn val(v: f64) -> TextValue {
+    TextValue::Float(v)
+}
 
-/// The paragraph settings of the same document (244).
-const SAMPLED_PARAGRAPH: &[u8] = b"<< /0 0 /1 0.0 /2 0.0 /3 0.0 /4 0.0 /5 0.0 /6 1 /7 1.2 /8 0 /9 true /10 6 /11 2 /12 2 /13 0 /14 36.0 /15 true \
-/16 .5 /17 [ .8 1.0 1.33 ] /18 [ 0.0 0.0 0.0 ] /19 [ 1.0 1.0 1.0 ] /20 6 /21 false /22 1 /23 true /24 1 /25 0 /27 /nil /26 true /28 /nil \
-/29 false /30 << >> /31 36.0 /32 << >> /33 0 /34 0 /35 1 /36 /nil /37 0 /38 false /39 0 /40 2 /41 0 >>";
+fn dict(pairs: Vec<(&str, TextValue)>) -> TextValue {
+    TextValue::Dict(pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+}
 
-/// Parses one value (a dictionary) of the text dictionary syntax.
-fn parse_value(body: &[u8]) -> Option<TextValue> {
-    Parser { b: body, i: 0 }.parse(0)
+fn numbers(v: &[f64]) -> TextValue {
+    TextValue::Array(v.iter().map(|x| val(*x)).collect())
+}
+
+/// The default of every run style slot that is not decoded and not neutral (zero, `false`,
+/// empty, `/nil`): the value an untouched point text holds in every sample (110, 243-245). A slot
+/// with a neutral default is left out; [`undecoded_fields`] treats a missing default as neutral.
+fn style_defaults() -> TextValue {
+    let paint = |a: f64| dict(vec![("99", TextValue::Name("SimplePaint".into())), ("0", dict(vec![("0", val(1.0)), ("1", numbers(&[1.0, 1.0, 1.0, a]))]))]);
+    let class = |name: &str| dict(vec![("99", TextValue::Name(name.into()))]);
+    dict(vec![
+        ("37", val(2.0)),
+        ("41", val(2.0)),
+        ("43", dict(vec![("0", val(0.5))])),
+        ("44", val(2.0)),
+        ("45", val(2.0)),
+        ("46", val(7.0)),
+        ("49", val(-1.0)),
+        ("50", val(-1.0)),
+        ("55", class("SimpleBlender")),
+        ("64", val(4.0)),
+        ("71", val(4.0)),
+        ("77", TextValue::Bool(true)),
+        ("78", TextValue::Bool(true)),
+        ("79", paint(0.0)),
+        ("82", val(3.0)),
+        ("83", val(3.0)),
+        ("86", class("SimpleCustomFeature")),
+        ("87", val(100.0)),
+        ("88", TextValue::Bool(true)),
+        ("95", dict(vec![("0", val(0.0)), ("1", val(0.0))])),
+        ("96", TextValue::Bool(true)),
+    ])
+}
+
+/// The same for the paragraph slots (110, 243-245).
+fn paragraph_defaults() -> TextValue {
+    dict(vec![
+        ("6", val(1.0)),
+        ("7", val(1.2)),
+        ("10", val(6.0)),
+        ("11", val(2.0)),
+        ("12", val(2.0)),
+        ("14", val(36.0)),
+        ("15", TextValue::Bool(true)),
+        ("16", val(0.5)),
+        ("17", numbers(&[0.8, 1.0, 1.33])),
+        ("18", numbers(&[0.0, 0.0, 0.0])),
+        ("19", numbers(&[1.0, 1.0, 1.0])),
+        ("20", val(6.0)),
+        ("22", val(1.0)),
+        ("23", TextValue::Bool(true)),
+        ("24", val(1.0)),
+        ("26", TextValue::Bool(true)),
+        ("31", val(36.0)),
+        ("35", val(1.0)),
+        ("40", val(2.0)),
+    ])
 }
 
 /// Equal values; numbers compare by value (`0` equals `0.0`).
@@ -618,7 +666,7 @@ struct RunNotes {
 /// The paragraph runs of a text run dictionary (`RUN/5/0`).
 fn paragraph_runs(run: &TextValue, notes: &mut RunNotes) -> Vec<ParagraphRun> {
     let Some(TextValue::Array(items)) = run.get("5").and_then(|v| v.get("0")) else { return Vec::new() };
-    let sampled = parse_value(SAMPLED_PARAGRAPH);
+    let sampled = Some(paragraph_defaults());
     let mut out: Vec<ParagraphRun> = Vec::with_capacity(items.len());
     for e in items {
         let Some(length) = e.get("1").and_then(usize_of) else {
@@ -670,7 +718,7 @@ fn paragraph_runs(run: &TextValue, notes: &mut RunNotes) -> Vec<ParagraphRun> {
 /// The style runs of a text run dictionary (`RUN/6/0`).
 fn style_runs(run: &TextValue, notes: &mut RunNotes) -> Vec<StyleRun> {
     let Some(TextValue::Array(items)) = run.get("6").and_then(|v| v.get("0")) else { return Vec::new() };
-    let sampled = parse_value(SAMPLED_STYLE);
+    let sampled = Some(style_defaults());
     let mut out: Vec<StyleRun> = Vec::with_capacity(items.len());
     for e in items {
         let Some(length) = e.get("1").and_then(usize_of) else {
