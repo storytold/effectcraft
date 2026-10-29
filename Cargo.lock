@@ -1342,6 +1342,7 @@ dependencies = [
 name = "effectcraft"
 version = "0.18.0"
 dependencies = [
+ "android-activity",
  "cpal",
  "craft-update",
  "effectcraft-engine",
