@@ -128,11 +128,7 @@ pub(crate) fn emit(file: &mut AepFile<'static>, p: &SettingsPlan) -> R<()> {
         *top.get_mut(cpid).ok_or_else(|| tpl("cpid"))? = Chunk::data(*b"cpid", crate::export::icc::profile_id(&icc).to_vec());
         let pw = header(top, b"PwCs")?;
         let json = top.get_mut(pw.saturating_add(1)).filter(|c| c.is(b"Utf8")).ok_or_else(|| tpl("template without the working-space JSON"))?;
-        let text = format!(
-            "{{\"baseColorProfile\":{{\"colorProfileData\":\"{}\",\"colorProfileName\":\"{}\"}},\"baseProfileType\":2}}",
-            crate::export::icc::base64(&icc),
-            name
-        );
+        let text = crate::export::icc::profile_json(&icc, name);
         *json = Chunk::data(*b"Utf8", text.into_bytes());
     }
     if p.no_working_space {

@@ -1,8 +1,9 @@
-//! Footage items (files): each is cloned from the item After Effects wrote when it imported a file
-//! of the same kind (`template/footage.aep`, `examples/mkftprotos.rs`): png still 607, jpeg 605,
-//! OpenEXR 604, TIFF 613, H.264 mp4 606, QuickTime mov 612, WAV 351, png sequence 353, OpenEXR
-//! sequence 603, jpeg sequence 611. The exporter edits
-//! the decoded fields (`docs/aep-format.md` 3.3, `docs/aep-export.md` R28):
+//! Footage items (files), built in code per kind ([`FtProtos::build`]) with the layout of the items
+//! After Effects writes when it imports a file of that kind: png still 607, jpeg 605, OpenEXR 604,
+//! TIFF 613, H.264 mp4 606, QuickTime mov 612, WAV 351, png sequence 353, OpenEXR sequence 603,
+//! jpeg sequence 611, Targa, Photoshop, Illustrator and EPS 650-653. The colour management names
+//! our own sRGB profile (`icc.rs`). The exporter then writes the decoded fields
+//! (`docs/aep-format.md` 3.3, `docs/aep-export.md` R28):
 //!
 //! * the alias JSON (`Als2/alas`): the full path, for a sequence its folder with
 //!   `target_is_folder`;
@@ -12,8 +13,8 @@
 //! * `opti` of png: width, height and the first file's name;
 //! * the item header: id, label, name; a fresh `pgui`.
 //!
-//! Everything else (`opti` of the other formats, colour management, interpretation flags) stays as
-//! the prototype has it.
+//! After Effects reads the format options of the other kinds from the file (their `opti` beyond
+//! the header can be zero: read-backs v-fN-zoptiA).
 
 use effectcraft_project::{Footage, FootageKind};
 
@@ -326,7 +327,7 @@ pub(crate) fn alias_json(p: &FootagePlan) -> Vec<u8> {
 // ---------------------------------------------------------------------------------------------
 // Emit.
 
-use crate::{AepFile, Chunk};
+use crate::Chunk;
 
 use crate::export::tree::{R, child_data, kids_mut, list_mut, put, put_cstr, put_u8, put_u16, put_u32, tpl};
 
@@ -335,8 +336,199 @@ pub(crate) struct FtProtos {
     items: Vec<([u8; 4], Vec<Chunk<'static>>)>,
 }
 
+/// Every kind the exporter writes.
+const KINDS: [FtKind; 14] = [
+    FtKind::Png,
+    FtKind::Jpeg,
+    FtKind::Exr,
+    FtKind::Mp4,
+    FtKind::Wav,
+    FtKind::PngSeq,
+    FtKind::ExrSeq,
+    FtKind::JpegSeq,
+    FtKind::Mov,
+    FtKind::Tiff,
+    FtKind::Tga,
+    FtKind::Psd,
+    FtKind::Ai,
+    FtKind::Eps,
+];
+
+/// The colour management a kind's item carries (`Pin /CLRS`, 351, 353, 603-607, 611-613, 650-653).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Clrs {
+    /// Stills, sequences and audio: interpreted in the sRGB profile (`apid` its id).
+    Assigned,
+    /// A file with an embedded profile (TIFF, Photoshop): `epid` its id, the profile twice.
+    Embedded,
+    /// Video and JPEG: Rec. 709 with the codec's colour description.
+    Video(&'static str),
+}
+
+/// The colour description After Effects gives a JPEG, a jpeg sequence and a ProRes clip.
+const BT709_FULL: &str = r#"{"baseColorProfile":{"colorProfileName":"BT.709 RGB Full"},"baseProfileType":1}"#;
+/// The colour description of an H.264 clip.
+const BT709_DISPLAY: &str =
+    r#"{"baseColorProfile":{"colorProfileData":"AQAAAP////8=","colorProfileName":"BT.709,8-bit,Display-Referred"},"baseProfileType":1}"#;
+
+/// What a kind's item stores beyond the decoded fields: the file type tag (`sspc` 22, `opti` 0),
+/// `idta` byte 23, the bits per pixel of the sampled file (`sspc` 63), `sspc` byte 73 (3, 1 for
+/// OpenEXR, 0 for Illustrator and EPS), the `opti` size and its header bytes 4, 5 and 10 (the rest of
+/// `opti` can be zero: read-back v-fN-zoptiA), and the colour management.
+struct KindSpec {
+    tag: [u8; 4],
+    idta23: u8,
+    bpp: u8,
+    b73: u8,
+    opti: (u16, u8, u8, u8),
+    clrs: Clrs,
+}
+
+fn spec(kind: FtKind) -> KindSpec {
+    let (tag, idta23, bpp, b73, opti, clrs) = match kind {
+        FtKind::Png => (*b"png!", 0x30, 24, 3, (322, 0, 1, 1), Clrs::Assigned),
+        FtKind::Jpeg => (*b"ZPEG", 0x30, 24, 3, (58, 0, 5, 0), Clrs::Video(BT709_FULL)),
+        FtKind::Exr => (*b"oEXR", 0x30, 128, 1, (9750, 0, 1, 1), Clrs::Assigned),
+        FtKind::Mp4 => (*b"XCEX", 0x20, 24, 3, (58, 0, 5, 0), Clrs::Video(BT709_DISPLAY)),
+        FtKind::Wav => (*b"WAVE", 0x04, 0, 3, (58, 0, 5, 0), Clrs::Assigned),
+        FtKind::PngSeq => (*b"png!", 0x20, 24, 3, (322, 0, 1, 1), Clrs::Assigned),
+        FtKind::ExrSeq => (*b"oEXR", 0x20, 128, 1, (9750, 0, 1, 1), Clrs::Assigned),
+        FtKind::JpegSeq => (*b"ZPEG", 0x20, 24, 3, (58, 0, 5, 0), Clrs::Video(BT709_FULL)),
+        FtKind::Mov => (*b"MOoV", 0x20, 48, 3, (58, 0, 5, 0), Clrs::Video(BT709_FULL)),
+        FtKind::Tiff => (*b"TIF ", 0x30, 24, 3, (602, 1, 9, 0), Clrs::Embedded),
+        FtKind::Tga => (*b"TPIC", 0x30, 24, 3, (30, 0, 46, 5), Clrs::Assigned),
+        FtKind::Psd => (*b"8BPS", 0x30, 24, 3, (602, 1, 9, 0), Clrs::Embedded),
+        FtKind::Ai | FtKind::Eps => (*b"TEXT", 0x30, 32, 0, (596, 0, 8, 0), Clrs::Assigned),
+    };
+    KindSpec { tag, idta23, bpp, b73, opti, clrs }
+}
+
+/// The colour-management list of a kind (the order After Effects writes).
+fn clrs(kind: Clrs) -> Chunk<'static> {
+    use crate::export::base::utf8;
+    let icc = crate::export::icc::srgb();
+    let id = crate::export::icc::profile_id(&icc).to_vec();
+    let json = crate::export::icc::profile_json(&icc, crate::export::icc::SRGB_NAME);
+    let none = vec![0xffu8; 16];
+    let one = |id: &[u8; 4]| Chunk::data(*id, vec![1u8]);
+    let tail = |kids: &mut Vec<Chunk<'static>>| {
+        kids.push(one(b"hdrm"));
+        kids.push(utf8("{}"));
+    };
+    let mut kids = match kind {
+        Clrs::Assigned => vec![
+            Chunk::data(*b"epid", none),
+            Chunk::data(*b"apid", id),
+            Chunk::data(*b"linl", vec![2, 0, 0, 0]),
+            one(b"embp"),
+            Chunk::data(*b"ipws", vec![0]),
+            one(b"Mcsp"),
+            utf8(""),
+            one(b"ocsp"),
+            utf8(&json),
+        ],
+        Clrs::Embedded => vec![
+            Chunk::data(*b"epid", id),
+            Chunk::data(*b"apid", none),
+            Chunk::data(*b"linl", vec![2, 0, 0, 0]),
+            one(b"embp"),
+            Chunk::data(*b"ipws", vec![0]),
+            one(b"mcsp"),
+            utf8(&json),
+            one(b"Mcsp"),
+            utf8(&json),
+            one(b"ocsp"),
+            utf8(""),
+        ],
+        Clrs::Video(desc) => vec![
+            Chunk::data(*b"epid", none.clone()),
+            Chunk::data(*b"apid", none),
+            one(b"empd"),
+            utf8("Rec. 709"),
+            Chunk::data(*b"linl", vec![0; 4]),
+            one(b"embp"),
+            Chunk::data(*b"ipws", vec![0]),
+            one(b"mcsp"),
+            utf8(desc),
+            one(b"Mcsp"),
+            utf8(desc),
+            one(b"ocsp"),
+            utf8(""),
+        ],
+    };
+    tail(&mut kids);
+    Chunk::list(*b"CLRS", kids)
+}
+
+/// The item of a kind with zero ids and an empty alias (`build_footage` fills them), and the
+/// f-records after it. `sspc` holds the tag, the bits per pixel, the time base of a still (600:
+/// a clip's is its rate, written per item) and the bytes every sample of its kind has (125, 129,
+/// 139, 143, 188..195; a sequence also 168, 184, 186, 187; a WAV its sample rate at 160); the bytes
+/// left zero were zero in read-backs v-fN-zsspc1..3. `mnfo` is left out (v-fN-nomnfo).
+fn kind_item(kind: FtKind) -> Vec<Chunk<'static>> {
+    use crate::export::base::{bytes, utf8};
+    let s = spec(kind);
+    let mut fields: Vec<(usize, Vec<u8>)> = vec![
+        (22, s.tag.to_vec()),
+        (50, 600u32.to_be_bytes().to_vec()),
+        (63, vec![s.bpp]),
+        (73, vec![s.b73]),
+        (125, vec![0x0c]),
+        (129, vec![1]),
+        (139, vec![1]),
+        (143, vec![1]),
+        (188, vec![0xff; 8]),
+    ];
+    if kind.is_sequence() {
+        fields.extend([(168, 2u32.to_be_bytes().to_vec()), (184, vec![1]), (186, vec![1, 1])]);
+    }
+    if kind == FtKind::Wav {
+        fields.push((160, 48_000f64.to_be_bytes().to_vec()));
+    }
+    let refs: Vec<(usize, &[u8])> = fields.iter().map(|(at, v)| (*at, v.as_slice())).collect();
+    let (len, b4, b5, b10) = s.opti;
+    let opti = bytes(usize::from(len), &[(0, &s.tag), (4, &[b4, b5]), (8, &len.to_be_bytes()), (10, &[b10])]);
+    let mut pin = vec![Chunk::data(*b"sspc", bytes(222, &refs)), utf8(""), Chunk::list(*b"Als2", vec![Chunk::data(*b"alas", b"{}".to_vec())])];
+    if kind.is_sequence() {
+        pin.extend([utf8(""), utf8("")]);
+    }
+    pin.extend([Chunk::data(*b"opti", opti), Chunk::data(*b"pgui", vec![0; 16]), clrs(s.clrs), utf8("")]);
+    let item = Chunk::list(
+        *b"Item",
+        vec![
+            Chunk::data(*b"iide", vec![0; 4]),
+            Chunk::data(*b"idpc", vec![0; 8]),
+            crate::export::base::idta(7, s.idta23),
+            utf8(""),
+            Chunk::list(*b"Pin ", pin),
+            crate::export::base::ftgi(),
+            utf8(""),
+            crate::export::base::guides(),
+        ],
+    );
+    let mut out = vec![item];
+    out.extend(crate::export::skeleton::f_records());
+    out
+}
+
 impl FtProtos {
-    pub(crate) fn from_file(f: &AepFile<'static>) -> R<FtProtos> {
+    /// The items of every kind, built in code.
+    pub(crate) fn build() -> FtProtos {
+        FtProtos { items: KINDS.iter().map(|k| (k.key(), kind_item(*k))).collect() }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn keys(&self) -> Vec<[u8; 4]> {
+        self.items.iter().map(|(k, _)| *k).collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn chunks(&self, key: [u8; 4]) -> &[Chunk<'static>] {
+        self.items.iter().find(|(k, _)| *k == key).map_or(&[], |(_, v)| v.as_slice())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_file(f: &crate::AepFile<'static>) -> R<FtProtos> {
         let items: Vec<([u8; 4], Vec<Chunk<'static>>)> = f.chunks.iter().filter_map(|c| Some((c.list_type()?, c.children().to_vec()))).collect();
         if items.len() != 14 {
             return Err(tpl("footage prototypes missing"));
@@ -372,6 +564,11 @@ pub(crate) fn build_footage(protos: &FtProtos, id: u32, label: u8, name: &str, p
         put_u32(sspc, 38, p.duration.0)?;
         put_u32(sspc, 42, p.duration.1)?;
         if p.fps > 0 {
+            // A clip counts its time in its native rate (606, 612: 25); stills, sequences and
+            // audio in 600ths.
+            if matches!(p.kind, FtKind::Mp4 | FtKind::Mov) {
+                put_u32(sspc, 50, p.fps)?;
+            }
             put_u32(sspc, 56, p.fps)?;
             put_u32(sspc, 150, if p.conform > 0 { p.conform } else { p.fps })?;
         }

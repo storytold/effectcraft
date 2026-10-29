@@ -216,6 +216,12 @@ pub(crate) fn md5(data: &[u8]) -> [u8; 16] {
     out
 }
 
+/// The colour profile JSON After Effects stores for a working space or a footage item (620, 624):
+/// the profile's data and its name.
+pub(crate) fn profile_json(icc: &[u8], name: &str) -> String {
+    format!("{{\"baseColorProfile\":{{\"colorProfileData\":\"{}\",\"colorProfileName\":\"{}\"}},\"baseProfileType\":2}}", base64(icc), name)
+}
+
 /// Standard base64 with padding.
 pub(crate) fn base64(data: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";

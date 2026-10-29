@@ -9,7 +9,7 @@ use crate::Chunk;
 use crate::export::synth::{tdmn, tdsn};
 
 /// A zero buffer of `len` bytes with `fields` (offset, bytes) written into it.
-fn bytes(len: usize, fields: &[(usize, &[u8])]) -> Vec<u8> {
+pub(crate) fn bytes(len: usize, fields: &[(usize, &[u8])]) -> Vec<u8> {
     let mut b = vec![0u8; len];
     for (at, v) in fields {
         if let Some(dst) = b.get_mut(*at..at.saturating_add(v.len())) {
@@ -19,7 +19,7 @@ fn bytes(len: usize, fields: &[(usize, &[u8])]) -> Vec<u8> {
     b
 }
 
-fn utf8(text: &str) -> Chunk<'static> {
+pub(crate) fn utf8(text: &str) -> Chunk<'static> {
     Chunk::data(*b"Utf8", text.as_bytes().to_vec())
 }
 
@@ -105,12 +105,12 @@ pub(crate) fn project_chunks() -> Vec<Chunk<'static>> {
 /// `idta` of an item: the kind at 0, byte 23 per kind (0x20 composition, 0x30 footage, 0 folder;
 /// After Effects renders differently without it, read-backs t-zidta and u-zidta2); `emit` writes
 /// the id and the label.
-fn idta(kind: u16, byte23: u8) -> Chunk<'static> {
+pub(crate) fn idta(kind: u16, byte23: u8) -> Chunk<'static> {
     Chunk::data(*b"idta", bytes(84, &[(0, &kind.to_be_bytes()), (23, &[byte23])]))
 }
 
 /// The guides of a layer or item (`Gide`: `gdta` zero and an empty list header).
-fn guides() -> Chunk<'static> {
+pub(crate) fn guides() -> Chunk<'static> {
     let header = crate::export::synth::key_list(16, 0, Vec::new()).children().iter().filter(|c| c.is(b"lhd3")).cloned().collect();
     Chunk::list(*b"Gide", vec![Chunk::data(*b"gdta", vec![0; 8]), Chunk::list(*b"list", header)])
 }
@@ -229,6 +229,11 @@ pub(crate) fn folder_item() -> Chunk<'static> {
     )
 }
 
+/// `ftgi` of a footage item, the same in every sample (required, read-back u-noftgi).
+pub(crate) fn ftgi() -> Chunk<'static> {
+    Chunk::data(*b"ftgi", bytes(16, &[(7, &[1]), (8, &[0xff; 4]), (12, &600u32.to_be_bytes())]))
+}
+
 /// The `sspc` bytes of a solid that are not decoded, the same in every solid (000, 022, 211, 259);
 /// After Effects refuses a solid with only the decoded fields (read-back u-zsspc).
 const SOLID_SSPC: [(usize, &[u8]); 11] = [
@@ -281,17 +286,5 @@ pub(crate) fn solid_item() -> Chunk<'static> {
             utf8(""),
         ],
     );
-    Chunk::list(
-        *b"Item",
-        vec![
-            Chunk::data(*b"iide", vec![0; 4]),
-            Chunk::data(*b"idpc", vec![0; 8]),
-            idta(7, 0x30),
-            utf8(""),
-            pin,
-            Chunk::data(*b"ftgi", bytes(16, &[(7, &[1]), (8, &[0xff; 4]), (12, &600u32.to_be_bytes())])),
-            utf8(""),
-            guides(),
-        ],
-    )
+    Chunk::list(*b"Item", vec![Chunk::data(*b"iide", vec![0; 4]), Chunk::data(*b"idpc", vec![0; 8]), idta(7, 0x30), utf8(""), pin, ftgi(), utf8(""), guides()])
 }

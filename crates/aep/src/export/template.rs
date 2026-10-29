@@ -16,6 +16,7 @@ pub(crate) const BASE: &[u8] = include_bytes!("../../template/base.aep");
 const MASKS: &[u8] = include_bytes!("../../template/masks.aep");
 #[cfg(test)]
 pub(crate) const EFFECTS: &[u8] = include_bytes!("../../template/effects.aep");
+#[cfg(test)]
 const FOOTAGE: &[u8] = include_bytes!("../../template/footage.aep");
 pub(crate) const TEXT: &[u8] = include_bytes!("../../template/text.aep");
 #[cfg(test)]
@@ -114,8 +115,7 @@ impl Template {
         let masks = crate::export::masks::MaskProtos::build();
         let effects = crate::export::effects::FxProtos::build();
         let styles = crate::export::styles::StyleProtos::from_table();
-        let ft_file = parse(FOOTAGE).map_err(|_| tpl("the embedded footage prototypes do not parse"))?.into_owned();
-        let footage = crate::export::footage::FtProtos::from_file(&ft_file)?;
+        let footage = crate::export::footage::FtProtos::build();
         let tx_file = parse(TEXT).map_err(|_| tpl("the embedded text prototypes do not parse"))?.into_owned();
         // The text documents of a point (110) and a box (245) text layer; the blocks around
         // them are built in code.
@@ -218,5 +218,36 @@ mod tests {
             assert_eq!(shape(a), shape(b));
         }
         assert_eq!(old.parade_header.len(), new.parade_header.len());
+    }
+
+    /// The footage items built in code have the template's chunks in its order, except `mnfo`
+    /// (left out: read-back v-fN-nomnfo), with chunks of the same sizes.
+    #[test]
+    fn the_built_footage_items_match_the_template() {
+        let f = crate::parse(super::FOOTAGE).unwrap().into_owned();
+        let old = crate::export::footage::FtProtos::from_file(&f).unwrap();
+        let new = crate::export::footage::FtProtos::build();
+        fn shape(c: &crate::Chunk<'_>, out: &mut Vec<String>) {
+            if c.is_list(b"mnfo") {
+                return;
+            }
+            let ty = c.list_type().map(|t| String::from_utf8_lossy(&t).into_owned()).unwrap_or_default();
+            let len = if c.is(b"Utf8") || c.is(b"alas") { 0 } else { c.bytes().map_or(0, <[u8]>::len) };
+            out.push(format!("{}{ty}:{len}", String::from_utf8_lossy(&c.id)));
+            for k in c.children() {
+                shape(k, out);
+            }
+        }
+        assert_eq!(old.keys(), new.keys());
+        for key in new.keys() {
+            let (mut a, mut b) = (Vec::new(), Vec::new());
+            for c in old.chunks(key) {
+                shape(c, &mut a);
+            }
+            for c in new.chunks(key) {
+                shape(c, &mut b);
+            }
+            assert_eq!(a, b, "{}", String::from_utf8_lossy(&key));
+        }
     }
 }
