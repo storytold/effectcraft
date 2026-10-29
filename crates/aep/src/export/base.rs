@@ -288,3 +288,45 @@ pub(crate) fn solid_item() -> Chunk<'static> {
     );
     Chunk::list(*b"Item", vec![Chunk::data(*b"iide", vec![0; 4]), Chunk::data(*b"idpc", vec![0; 8]), idta(7, 0x30), utf8(""), pin, ftgi(), utf8(""), guides()])
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The chunks After Effects refuses a file without, or crashes on (aep-export.md, "What After
+    /// Effects needs").
+    #[test]
+    fn the_skeleton_has_what_after_effects_needs() {
+        let top = project_chunks();
+        for id in [b"adfr", b"qtlg", b"mrid", b"acer", b"fcid", b"oacc", b"head", b"nhed"] {
+            assert!(top.iter().any(|c| c.is(id)), "{}", String::from_utf8_lossy(id));
+        }
+        assert!(top.iter().any(|c| c.is_list(b"CPPl")));
+        let head = top.iter().find(|c| c.is(b"head")).and_then(|c| c.bytes()).unwrap();
+        assert_eq!(&head[..8], &[0x00, 0x61, 0x00, 0x05, 0x0f, 0x11, 0x0e, 0x02]);
+        let rq = top.iter().find(|c| c.is_list(b"LRdr")).unwrap();
+        let arsi = rq.child_list(b"LSIf").and_then(|l| l.child(b"ARsi")).and_then(|c| c.bytes()).unwrap();
+        assert_eq!(arsi.len(), RQ_SETTINGS_LEN);
+        let afsi = top.iter().find(|c| c.is_list(b"LSIf")).and_then(|l| l.child(b"AFsi")).and_then(|c| c.bytes()).unwrap();
+        assert_eq!(afsi.len(), RQ_SETTINGS_LEN);
+
+        let (comp, at) = comp_shell();
+        let kids = comp.children();
+        assert!(comp.child_list(b"dats").is_some(), "no dats: After Effects crashes");
+        assert!(kids.iter().any(|c| c.is(b"cdrp")) && kids.iter().any(|c| c.is(b"comr")));
+        let cdta = comp.child(b"cdta").and_then(|c| c.bytes()).unwrap();
+        for at in [1usize, 3, 179, 187, 199, 203] {
+            assert_ne!(cdta[at], 0, "cdta byte {at}: a zero cdta crashes After Effects");
+        }
+        let views = kids.iter().filter(|c| [*b"DLay", *b"SLay", *b"CLay", *b"SecL"].iter().any(|t| c.is_list(t))).count();
+        assert_eq!(views, 11);
+        assert!(kids.get(at).is_some_and(|c| c.is_list(b"DLay")), "the layers go before the view layers");
+
+        let solid = solid_item();
+        let pin = solid.child_list(b"Pin ").unwrap();
+        assert!(pin.child_list(b"CLRS").is_some() && solid.child(b"ftgi").is_some());
+        let sspc = pin.child(b"sspc").and_then(|c| c.bytes()).unwrap();
+        assert!(SOLID_SSPC.iter().all(|(at, v)| &sspc[*at..*at + v.len()] == *v));
+        assert_eq!(solid.child(b"idta").and_then(|c| c.bytes()).unwrap()[23], 0x30);
+    }
+}

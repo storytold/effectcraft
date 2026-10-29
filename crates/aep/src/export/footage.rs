@@ -594,3 +594,27 @@ pub(crate) fn build_footage(protos: &FtProtos, id: u32, label: u8, name: &str, p
     put(child_data(pin, b"pgui")?, 0, &guid)?;
     Ok(chunks)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every kind's item has the chunks After Effects refuses it without (`CLRS`, `ftgi`: read-backs
+    /// u-noclrs, u-noftgi) and the f-records after it; `opti` has its header and its size.
+    #[test]
+    fn every_kind_has_what_after_effects_needs() {
+        let protos = FtProtos::build();
+        assert_eq!(protos.items.len(), KINDS.len());
+        for (key, chunks) in &protos.items {
+            let what = String::from_utf8_lossy(key).into_owned();
+            let item = &chunks[0];
+            let pin = item.child_list(b"Pin ").unwrap();
+            assert!(pin.child_list(b"CLRS").is_some() && item.child(b"ftgi").is_some(), "{what}");
+            assert_eq!(chunks.len(), 8, "{what}: the item and seven f-records");
+            let opti = pin.child(b"opti").and_then(|c| c.bytes()).unwrap();
+            assert_eq!(usize::from(u16::from_be_bytes([opti[8], opti[9]])), opti.len(), "{what}");
+            let sspc = pin.child(b"sspc").and_then(|c| c.bytes()).unwrap();
+            assert_eq!(&sspc[22..26], &opti[0..4], "{what}");
+        }
+    }
+}

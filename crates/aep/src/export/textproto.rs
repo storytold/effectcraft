@@ -158,3 +158,22 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod needed {
+    /// The parts After Effects skips the layer without, or crashes on (read-backs t2-*, t3-*).
+    #[test]
+    fn the_document_keeps_what_after_effects_needs() {
+        for boxed in [false, true] {
+            let doc = super::document(boxed);
+            for path in ["0/5", "0/6", "0/8", "1/0", "1/5", "1/0/0/0"] {
+                assert!(doc.path(path).is_some(), "{path}");
+            }
+            match doc.path("1/0/0/1") {
+                Some(crate::export::textdoc::TNode::Array(classes)) => assert_eq!(classes.len(), 7),
+                other => panic!("line-break classes: {other:?}"),
+            }
+            assert!(doc.path("1/1[0]/0/5/0[0]/0/0/6").is_some() && doc.path("1/1[0]/0/6/0[0]/0/0/5").is_some());
+        }
+    }
+}
