@@ -2,7 +2,7 @@ use super::frames::adaptive_samples;
 use super::opts::{LayerTiming, Through};
 use super::{
     Arc, BlendMode, Buf, Comp, EvalCtx, Image, IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, Layer, LayerSource, Mat3,
-    MatteKind, ParallelIterator, Quality, Region, Renderer, Sampling, Tick, WarpOpts, cache, color, composite_warp_changed, masks, source_size, styles, vec2,
+    MatteKind, ParallelIterator, Quality, Region, Renderer, Sampling, Tick, WarpOpts, cache, color, composite_warp_changed, masks, styles, vec2,
 };
 
 /// Blend policy for placing a layer, including optional output-depth quantization.
@@ -52,7 +52,7 @@ impl<'a> Renderer<'a> {
             }
         }
         let t0 = web_time::Instant::now();
-        let size = source_size(self.project, layer);
+        let size = ctx.source_size(layer);
         let layer_size = if size.0 == 0 { [ctx.comp.width as f64, ctx.comp.height as f64] } else { [size.0 as f64, size.1 as f64] };
         let st = styles::render(ctx, layer, &content, layer_size);
         if let Some(t) = timing {

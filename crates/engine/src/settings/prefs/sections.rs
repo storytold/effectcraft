@@ -62,6 +62,9 @@ page!(ProjectPrefs {
     /// Open a template project for File ▸ New ▸ New Project.
     use_template: bool = false,
     template_path: String = String::new(),
+    /// Write `.ecproj` files as compact JSON on one line (smaller, faster to save and open). Off:
+    /// indented, one value per line, so they read and diff cleanly in version control.
+    compact_project_files: bool = false,
 });
 
 page!(AutoSave {

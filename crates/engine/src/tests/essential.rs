@@ -367,6 +367,128 @@ fn media_replacement_swaps_footage_per_instance() {
     assert!(center(&s, main)[0] > 0.99);
 }
 
+/// #1747: a collapsed precomp with an Essential Property override must keep drawing its nested
+/// layers past the precomp's frame instead of falling back to a flattened, clipped frame.
+#[test]
+fn collapsed_precomp_applies_property_overrides_without_clipping() {
+    struct AddY;
+    impl effectcraft_render::ExprHost for AddY {
+        fn eval(
+            &self,
+            _: &effectcraft_render::EvalCtx,
+            _: &effectcraft_project::Layer,
+            _: &effectcraft_project::Property,
+            value: &effectcraft_keyframe::Value,
+        ) -> Result<effectcraft_keyframe::Value, String> {
+            Ok(match value {
+                effectcraft_keyframe::Value::Vec3([x, y, z]) => effectcraft_keyframe::Value::Vec3([*x, y + 100.0, *z]),
+                _ => value.clone(),
+            })
+        }
+    }
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Inner", "width": 400, "height": 300, "frameRate": 30, "duration": 2})).unwrap();
+    let inner = s.active_comp_id().unwrap();
+    let box_ = s.execute("layer.newSolid", json!({"name": "Box", "color": "#ffffff", "width": 100, "height": 100})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("prop.set", json!({"layer": box_, "path": "transform/position", "value": [200, 50, 0]})).unwrap();
+    // The source property's expression still runs after the instance override.
+    s.execute("prop.setExpression", json!({"layer": box_, "path": "transform/position", "expression": "value + [0, 100, 0]"})).unwrap();
+    let position = s.execute("essential.addProperty", json!({"layer": box_, "path": "transform/position"})).unwrap()["controls"][0].as_u64().unwrap();
+    s.execute("comp.new", json!({"name": "Outer", "width": 400, "height": 600, "frameRate": 30, "duration": 2})).unwrap();
+    let outer = s.active_comp_id().unwrap();
+    let instance = s.execute("layer.addItem", json!({"item": inner.0})).unwrap()["layer"].as_u64().unwrap();
+    let other = s.execute("layer.addItem", json!({"item": inner.0})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.setSwitch", json!({"layers": [instance, other], "switch": "collapse", "value": true})).unwrap();
+    s.expr = Some(std::sync::Arc::new(AddY));
+    s.execute("layer.select", json!({"layers": [instance]})).unwrap();
+    s.execute("essential.set", json!({"layer": instance, "control": position, "value": [200, -120, 0]})).unwrap();
+    s.execute("layer.select", json!({"layers": [other]})).unwrap();
+    s.execute("essential.set", json!({"layer": other, "control": position, "value": [200, 220, 0]})).unwrap();
+    let img = s.render(outer, Tick::ZERO, RenderOpts::default());
+    // The expression adds 100 px: the overrides give inner y = -20 and 320. The first maps to
+    // outer y = 130 (the precomp is centred at 300) and its 100 px box spans 80..179, 70 px above
+    // the instance's frame (150..449), where a flattened precomp would stop. The second maps to
+    // 470 and spans 420..519, past the bottom.
+    assert!(img.get(200, 100)[3] > 0.99, "the override draws above the nested frame: {:?}", img.get(200, 100));
+    assert!(img.get(200, 90)[3] > 0.99, "the box reaches the top of its overridden bounds");
+    assert!(img.get(200, 500)[3] > 0.99, "the other instance keeps its own override: {:?}", img.get(200, 500));
+    assert!(img.get(200, 200)[3] < 0.01, "nothing is left between the instances");
+}
+
+/// #1747: two collapsed instances of the same comp keep their own source-affecting property
+/// overrides in the layer cache (the nested layers' ids and static values are identical).
+#[test]
+fn collapsed_instances_keep_distinct_property_overrides_in_the_cache() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Card", "width": 64, "height": 64, "frameRate": 30, "duration": 2})).unwrap();
+    let card = s.active_comp_id().unwrap();
+    let solid = s.execute("layer.newSolid", json!({"name": "BG", "color": "#ffffff", "width": 64, "height": 64})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("effect.apply", json!({"layer": solid, "effect": "Fill"})).unwrap();
+    let color = s.execute("essential.addProperty", json!({"layer": solid, "path": "effects/#1/color"})).unwrap()["controls"][0].as_u64().unwrap();
+    s.execute("comp.new", json!({"name": "Main", "width": 200, "height": 100, "frameRate": 30, "duration": 2})).unwrap();
+    let main = s.active_comp_id().unwrap();
+    let a = s.execute("layer.addItem", json!({"item": card.0})).unwrap()["layer"].as_u64().unwrap();
+    let b = s.execute("layer.addItem", json!({"item": card.0})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.setSwitch", json!({"layers": [a, b], "switch": "collapse", "value": true})).unwrap();
+    s.execute("prop.set", json!({"layer": a, "path": "transform/position", "value": [60, 50, 0]})).unwrap();
+    s.execute("prop.set", json!({"layer": b, "path": "transform/position", "value": [140, 50, 0]})).unwrap();
+    s.execute("layer.select", json!({"layers": [a]})).unwrap();
+    s.execute("essential.set", json!({"layer": a, "control": color, "value": [1.0, 0.0, 0.0, 1.0]})).unwrap();
+    s.execute("layer.select", json!({"layers": [b]})).unwrap();
+    s.execute("essential.set", json!({"layer": b, "control": color, "value": [0.0, 0.0, 1.0, 1.0]})).unwrap();
+    let img = s.render(main, Tick::ZERO, RenderOpts::default());
+    let left = img.get(60, 50);
+    let right = img.get(140, 50);
+    assert!(left[0] > 0.99 && left[2] < 0.01, "left instance is red: {left:?}");
+    assert!(right[2] > 0.99 && right[0] < 0.01, "right instance is blue: {right:?}");
+}
+
+/// #1747 with Media Replacement: the replacement footage and the position override both apply
+/// while the precomp stays collapsed, so the box is blue and still draws above the frame.
+#[test]
+fn collapsed_precomp_applies_media_replacement_without_clipping() {
+    struct Colors;
+    impl crate::render::FootageSource for Colors {
+        fn frame(&self, _: ItemId, f: &effectcraft_project::Footage, _: Tick) -> Option<std::sync::Arc<effectcraft_raster::Image>> {
+            let c = if f.path.contains("blue") { [0.0, 0.0, 1.0, 1.0] } else { [1.0, 0.0, 0.0, 1.0] };
+            Some(std::sync::Arc::new(effectcraft_raster::Image::filled(100, 100, c)))
+        }
+    }
+    let mut s = Session { footage: std::sync::Arc::new(Colors), ..Default::default() };
+    let footage = |path: &str| effectcraft_project::Footage {
+        path: path.into(),
+        kind: effectcraft_project::FootageKind::Still,
+        width: 100,
+        height: 100,
+        has_video: true,
+        ..Default::default()
+    };
+    let (red, blue) = s
+        .edit("test", None, |proj, _| {
+            let red = proj.add_item("red.png", Default::default(), None, effectcraft_project::ItemKind::Footage(footage("red.png")));
+            let blue = proj.add_item("blue.png", Default::default(), None, effectcraft_project::ItemKind::Footage(footage("blue.png")));
+            Ok((red, blue))
+        })
+        .unwrap();
+    s.execute("comp.new", json!({"name": "Inner", "width": 400, "height": 300, "frameRate": 30, "duration": 2})).unwrap();
+    let inner = s.active_comp_id().unwrap();
+    let clip = s.execute("layer.addItem", json!({"item": red.0})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("prop.set", json!({"layer": clip, "path": "transform/position", "value": [200, 50, 0]})).unwrap();
+    let media = s.execute("essential.addMedia", json!({"layer": clip})).unwrap()["control"].as_u64().unwrap();
+    let position = s.execute("essential.addProperty", json!({"layer": clip, "path": "transform/position"})).unwrap()["controls"][0].as_u64().unwrap();
+    s.execute("comp.new", json!({"name": "Outer", "width": 400, "height": 600, "frameRate": 30, "duration": 2})).unwrap();
+    let outer = s.active_comp_id().unwrap();
+    let instance = s.execute("layer.addItem", json!({"item": inner.0})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.setSwitch", json!({"layers": [instance], "switch": "collapse", "value": true})).unwrap();
+    s.execute("layer.select", json!({"layers": [instance]})).unwrap();
+    s.execute("essential.set", json!({"layer": instance, "control": position, "value": [200, -20, 0]})).unwrap();
+    s.execute("essential.set", json!({"layer": instance, "control": media, "item": blue.0})).unwrap();
+    let img = s.render(outer, Tick::ZERO, RenderOpts::default());
+    let above = img.get(200, 100);
+    assert!(above[2] > 0.99 && above[0] < 0.01, "the replacement media is blue above the frame: {above:?}");
+    assert!(img.get(200, 200)[3] < 0.01, "the collapsed box is not clipped at the nested frame");
+}
+
 /// Responsive Design — Time: stretching a precomp keeps its protected regions at their
 /// original speed; the unprotected parts absorb the stretch.
 #[test]

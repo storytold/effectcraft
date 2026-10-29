@@ -677,6 +677,7 @@ pub fn styled_doc(v: &serde_json::Value, own: &effectcraft_keyframe::TextDoc) ->
             let p0 = src.para(0);
             d.set_paras(vec![p0; d.para_count()]);
             d.stroke_over_fill = src.stroke_over_fill;
+            d.line_join = src.line_join;
         }
     }
     for op in v.get("ops").and_then(|o| o.as_array()).into_iter().flatten() {

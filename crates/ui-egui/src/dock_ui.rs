@@ -843,11 +843,11 @@ impl DockContent<PanelKind> for EffectContent<'_> {
         }
     }
 
-    fn group_extra_tabs_width(&self, panels: &[PanelKind], active: &PanelKind, _floating: bool) -> f32 {
+    fn group_extra_tabs_width(&self, panels: &[PanelKind], _active: &PanelKind, _floating: bool) -> f32 {
         if !self.has_doc_tabs(panels) {
             return 0.0;
         }
-        dock::doc_widths(&self.ctx, &self.docs, *active == PanelKind::Timeline, &self.style.font).iter().sum()
+        dock::doc_widths(&self.ctx, &self.docs, &self.style.font).iter().sum()
     }
 
     /// The Timeline's comp tabs, after its group's panel tabs whichever panel is shown.

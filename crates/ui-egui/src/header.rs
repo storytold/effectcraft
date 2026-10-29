@@ -12,6 +12,7 @@ use crate::widgets;
 use crate::{Dialog, EffectcraftApp};
 use effectcraft_color::BlendMode;
 use effectcraft_engine::commands::shape_tool::{PaintKind, ToolPaint};
+use effectcraft_engine::geom::vec2 as gv2;
 use effectcraft_engine::project::{LayerId, LayerSource, PropGroup};
 use effectcraft_engine::viewer as vw;
 
@@ -93,9 +94,11 @@ fn tool_slot(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, si:
         ));
     }
     app.auto.add_response(&format!("tools.{cur:?}"), &resp, cur.label());
+    // The drawn tooltip asks the catalog; the automation label above keeps the English name.
+    let label = crate::i18n::tr(cur.label());
     let tip = match cur.shortcut() {
-        Some(s) => format!("{} ({})", cur.label(), crate::menus::shortcut_text(s)),
-        None => cur.label().to_string(),
+        Some(s) => format!("{} ({})", label, crate::menus::shortcut_text(s)),
+        None => label.to_string(),
     };
     let resp = resp.on_hover_text(tip);
     let held = ui.data(|d| d.get_temp::<egui::Id>(held_id)) == Some(id);
@@ -107,6 +110,11 @@ fn tool_slot(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, si:
         && resp.double_clicked()
         && ui.input(|i| i.modifiers.command)
         && let Err(e) = crate::menus::invoke(app, ui.ctx(), "layer.centerAnchor", json!({}))
+    {
+        app.ui.status = e;
+    } else if resp.double_clicked()
+        && let Some((id, params)) = create_on_double_click(app, cur)
+        && let Err(e) = crate::menus::invoke(app, ui.ctx(), id, params)
     {
         app.ui.status = e;
     }
@@ -139,7 +147,7 @@ fn slot_flyout(app: &mut EffectcraftApp, ui: &mut egui::Ui, si: usize, slot: &[T
     let close_behavior = if held && resp.clicked() { egui::PopupCloseBehavior::IgnoreClicks } else { egui::PopupCloseBehavior::CloseOnClickOutside };
     egui::Popup::menu(resp).style(crate::widgets::menu_style).open_memory(command).close_behavior(close_behavior).show(|ui| {
         for tool in slot.iter() {
-            let row = ui.selectable_label(app.ui.tool == *tool, tool.label());
+            let row = ui.selectable_label(app.ui.tool == *tool, crate::i18n::tr(tool.label()));
             app.auto.add(&format!("tools.select.{tool:?}"), row.rect, tool.label());
             if row.clicked() {
                 app.ui.tool = *tool;
@@ -371,6 +379,58 @@ fn workspace_tabs(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter
             app.set_workspace(name);
         }
         rx = r.min.x - 2.0;
+    }
+}
+
+/// Double-clicking a creation tool in the Tools bar makes an instance of what it draws, as in
+/// After Effects (#1072): a text layer from the Type tools; from the shape tools, a shape that
+/// fills the comp — into the selected shape layer's Contents, as a mask on the selected layer
+/// (any non-shape layer, or Tool Creates Mask), or as a new shape layer when neither applies.
+fn create_on_double_click(app: &EffectcraftApp, tool: Tool) -> Option<(&'static str, serde_json::Value)> {
+    match tool {
+        // `invoke` turns empty params into an insertion point in the comp centre that starts
+        // editing (#866), which is what double-clicking the Type tool should do.
+        Tool::Type | Tool::TypeVertical => Some(("layer.newText", json!({}))),
+        Tool::Rectangle | Tool::RoundedRect | Tool::Ellipse | Tool::Polygon | Tool::Star => {
+            let kind = match tool {
+                Tool::Rectangle => "rect",
+                Tool::RoundedRect => "rounded",
+                Tool::Ellipse => "ellipse",
+                Tool::Polygon => "polygon",
+                _ => "star",
+            };
+            // Without a comp the command still runs and reports its error on the status line.
+            let Some(comp) = app.session.active_comp() else {
+                return Some(("shape.newShape", json!({"kind": kind})));
+            };
+            let (cw, ch) = (comp.width as f64, comp.height as f64);
+            // Rectangles and ellipses fill the comp; a Polystar's Outer Radius is half the comp
+            // height (Inner Radius: a quarter of it), so it gets a comp-height square.
+            let (w, h) = if matches!(tool, Tool::Polygon | Tool::Star) { (ch, ch) } else { (cw, ch) };
+            // A mask on the selected layer: any non-shape layer (the tool switches to Mask by
+            // itself), or a shape layer while Tool Creates Mask is on — as dragging does.
+            let sel = app.session.state.selected_layers.first().copied().and_then(|id| comp.layer(id));
+            if let Some(l) = sel.filter(|l| l.source.is_av() && (app.session.state.shape_tool.creates_mask || !matches!(l.source, LayerSource::Shape))) {
+                // The box in layer space, so a moved, scaled or rotated layer still gets a
+                // comp-filling mask: all four corners are mapped, and their bounds are the
+                // smallest axis-aligned box around the comp box.
+                let ctx = effectcraft_engine::render::EvalCtx::new(&app.session.project, app.session.active_comp_id()?, comp, app.session.time());
+                let inv = ctx.layer_to_comp(l).0.inverse().unwrap_or(effectcraft_engine::geom::Mat3::IDENTITY);
+                let (x0, y0, x1, y1) = (cw / 2.0 - w / 2.0, ch / 2.0 - h / 2.0, cw / 2.0 + w / 2.0, ch / 2.0 + h / 2.0);
+                let pts = [gv2(x0, y0), gv2(x1, y0), gv2(x1, y1), gv2(x0, y1)].map(|p| inv.apply(p));
+                let (mut lo, mut hi) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
+                for p in pts {
+                    lo = [lo[0].min(p.x), lo[1].min(p.y)];
+                    hi = [hi[0].max(p.x), hi[1].max(p.y)];
+                }
+                let rect = [lo[0], lo[1], hi[0] - lo[0], hi[1] - lo[1]];
+                return Some(("layer.addMask", json!({"layer": l.id.0, "shape": kind, "rect": rect})));
+            }
+            // Into the selected shape layer's Contents, else a new shape layer (the engine's own
+            // target), painted with the Tools bar's Fill and Stroke.
+            Some(("shape.newShape", json!({"kind": kind, "size": [w, h]})))
+        }
+        _ => None,
     }
 }
 
@@ -833,5 +893,255 @@ mod tests {
         assert_eq!(app.ui.slot_tools[10], Tool::TypeVertical);
         frame(&mut app, &ctx, 2.1, vec![]);
         assert!(!app.auto.elements.iter().any(|w| w.id == "tools.select.TypeVertical"));
+    }
+
+    /// Double-clicking a creation tool in the Tools bar makes an instance of what it draws
+    /// (#1072): with nothing selected a shape layer whose shape fills the comp, into the selected
+    /// shape layer's Contents, a mask on a non-shape layer, a text layer from the Type tools.
+    /// Tools that create nothing stay quiet.
+    #[test]
+    fn double_clicking_creation_tools_makes_instances() {
+        let mut s = effectcraft_engine::Session::default();
+        s.execute("comp.new", json!({"width": 640, "height": 360, "duration": 2})).unwrap();
+        let mut app = EffectcraftApp::new(s);
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx, &app.tokens, crate::i18n::language(&app));
+        frame(&mut app, &ctx, 0.0, vec![]);
+        frame(&mut app, &ctx, 0.1, vec![]);
+        let pointer = |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+        // Both click pairs in one frame, as egui counts a double-click.
+        let double_click = |app: &mut EffectcraftApp, ctx: &egui::Context, t: f64, id: &str| {
+            let e = app.auto.elements.iter().find(|w| w.id == id).unwrap_or_else(|| panic!("no {id}"));
+            let at = egui::pos2(e.rect[0] + e.rect[2] / 2.0, e.rect[1] + e.rect[3] / 2.0);
+            frame(app, ctx, t, vec![egui::Event::PointerMoved(at), pointer(at, true), pointer(at, false), pointer(at, true), pointer(at, false)]);
+        };
+        // Nothing selected: a shape layer with a Rectangle Path 1 the size of the comp.
+        double_click(&mut app, &ctx, 1.0, "tools.Rectangle");
+        {
+            let comp = app.session.active_comp().unwrap();
+            assert_eq!(comp.layers.len(), 1, "the double-click made a layer");
+            let l = &comp.layers[0];
+            assert!(matches!(l.source, LayerSource::Shape), "a shape layer");
+            let size = l.props.prop("contents/Rectangle 1/contents/Rectangle Path 1/size").expect("Rectangle Path 1");
+            assert_eq!(size.value.as_vec2(), [640.0, 360.0], "the rectangle fills the comp");
+        }
+        // The shape layer is selected: the Ellipse goes on top of its Contents, no new layer.
+        app.ui.slot_tools[8] = Tool::Ellipse;
+        frame(&mut app, &ctx, 1.05, vec![]);
+        double_click(&mut app, &ctx, 2.0, "tools.Ellipse");
+        {
+            let comp = app.session.active_comp().unwrap();
+            assert_eq!(comp.layers.len(), 1, "into the selected shape layer's Contents");
+            let l = &comp.layers[0];
+            assert!(l.props.prop("contents/Ellipse 1/contents/Ellipse Path 1/size").is_some(), "the new ellipse is on top");
+            assert!(l.props.prop("contents/Rectangle 1/contents/Rectangle Path 1/size").is_some(), "the rectangle still stands");
+        }
+        // The Type tool: a text layer above the selection, editing started (an insertion point, #866).
+        double_click(&mut app, &ctx, 3.0, "tools.Type");
+        {
+            let comp = app.session.active_comp().unwrap();
+            assert_eq!(comp.layers.len(), 2);
+            assert!(matches!(comp.layers[0].source, LayerSource::Text));
+            assert!(app.session.state.text_edit.is_some(), "the text layer is being edited");
+        }
+        // A non-shape layer is selected, so the Rectangle becomes a comp-filling mask on it.
+        app.ui.slot_tools[8] = Tool::Rectangle;
+        frame(&mut app, &ctx, 3.05, vec![]);
+        double_click(&mut app, &ctx, 4.0, "tools.Rectangle");
+        {
+            let comp = app.session.active_comp().unwrap();
+            assert_eq!(comp.layers.len(), 2, "a mask, not a layer");
+            let p = comp.layers[0].props.prop("masks/Mask 1/path").expect("Mask 1");
+            let sh = p.value.as_path().expect("a mask path");
+            let b = effectcraft_path::bounds(&[effectcraft_path::to_kurbo(sh)]).expect("bounds");
+            // The text layer is anchored top-left and centred in the comp: layer = comp - centre.
+            for (got, want) in [(b.x0, -320.0), (b.y0, -180.0), (b.x1, 320.0), (b.y1, 180.0)] {
+                assert!((got - want).abs() < 1.0, "the mask fills the comp: {got} vs {want}");
+            }
+        }
+        // A tool that creates nothing: no layer, no error.
+        double_click(&mut app, &ctx, 5.0, "tools.Hand");
+        assert_eq!(app.session.active_comp().unwrap().layers.len(), 2, "the Hand tool creates nothing");
+        assert!(app.ui.status.is_empty(), "{}", app.ui.status);
+        // Without a comp the command fails with the status line, never a panic.
+        let mut bare = EffectcraftApp::new(effectcraft_engine::Session::default());
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx, &bare.tokens, crate::i18n::language(&bare));
+        frame(&mut bare, &ctx, 0.0, vec![]);
+        frame(&mut bare, &ctx, 0.1, vec![]);
+        double_click(&mut bare, &ctx, 1.0, "tools.Rectangle");
+        assert!(!bare.ui.status.is_empty(), "no comp: a status message, not a crash");
+    }
+
+    /// #1765: a double-click on the Ellipse tool with nothing selected makes its own shape layer
+    /// the size of the comp, as the Rectangle does.
+    #[test]
+    fn double_click_ellipse_with_no_selection_makes_a_layer() {
+        let mut s = effectcraft_engine::Session::default();
+        s.execute("comp.new", json!({"width": 640, "height": 360, "duration": 2})).unwrap();
+        let mut app = EffectcraftApp::new(s);
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx, &app.tokens, crate::i18n::language(&app));
+        frame(&mut app, &ctx, 0.0, vec![]);
+        frame(&mut app, &ctx, 0.1, vec![]);
+        app.ui.slot_tools[8] = Tool::Ellipse;
+        frame(&mut app, &ctx, 1.0, vec![]);
+        let pointer = |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+        let e = app.auto.elements.iter().find(|w| w.id == "tools.Ellipse").unwrap_or_else(|| panic!("no tools.Ellipse"));
+        let at = egui::pos2(e.rect[0] + e.rect[2] / 2.0, e.rect[1] + e.rect[3] / 2.0);
+        frame(&mut app, &ctx, 1.1, vec![egui::Event::PointerMoved(at), pointer(at, true), pointer(at, false), pointer(at, true), pointer(at, false)]);
+        let comp = app.session.active_comp().unwrap();
+        assert_eq!(comp.layers.len(), 1, "the double-click made a layer");
+        let l = &comp.layers[0];
+        assert!(matches!(l.source, LayerSource::Shape), "a shape layer");
+        let size = l.props.prop("contents/Ellipse 1/contents/Ellipse Path 1/size").expect("Ellipse Path 1");
+        assert_eq!(size.value.as_vec2(), [640.0, 360.0], "the ellipse fills the comp");
+        assert!(app.ui.status.is_empty(), "{}", app.ui.status);
+    }
+
+    /// Tool Creates Mask on (#1072): a double-click on a shape tool masks the selected shape
+    /// layer instead of adding to its Contents.
+    #[test]
+    fn double_click_masks_a_shape_layer_while_tool_creates_mask() {
+        let mut s = effectcraft_engine::Session::default();
+        s.execute("comp.new", json!({"width": 640, "height": 360, "duration": 2})).unwrap();
+        let mut app = EffectcraftApp::new(s);
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx, &app.tokens, crate::i18n::language(&app));
+        frame(&mut app, &ctx, 0.0, vec![]);
+        frame(&mut app, &ctx, 0.1, vec![]);
+        let pointer = |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+        let double_click = |app: &mut EffectcraftApp, ctx: &egui::Context, t: f64, id: &str| {
+            let e = app.auto.elements.iter().find(|w| w.id == id).unwrap_or_else(|| panic!("no {id}"));
+            let at = egui::pos2(e.rect[0] + e.rect[2] / 2.0, e.rect[1] + e.rect[3] / 2.0);
+            frame(app, ctx, t, vec![egui::Event::PointerMoved(at), pointer(at, true), pointer(at, false), pointer(at, true), pointer(at, false)]);
+        };
+        // A shape layer, selected by the double-click that made it.
+        double_click(&mut app, &ctx, 1.0, "tools.Rectangle");
+        assert_eq!(app.session.active_comp().unwrap().layers.len(), 1);
+        app.session.state.shape_tool.creates_mask = true;
+        app.ui.slot_tools[8] = Tool::Ellipse;
+        frame(&mut app, &ctx, 1.05, vec![]);
+        double_click(&mut app, &ctx, 2.0, "tools.Ellipse");
+        {
+            let comp = app.session.active_comp().unwrap();
+            assert_eq!(comp.layers.len(), 1, "a mask, not a second shape layer");
+            let l = &comp.layers[0];
+            assert!(l.props.prop("masks/Mask 1/path").is_some(), "an ellipse mask");
+            assert!(l.props.prop("contents/Ellipse 1").is_none(), "nothing added to the Contents");
+            let p = l.props.prop("contents/Rectangle 1/contents/Rectangle Path 1/size").expect("the rectangle stands");
+            assert_eq!(p.value.as_vec2(), [640.0, 360.0]);
+        }
+        assert!(app.ui.status.is_empty(), "{}", app.ui.status);
+    }
+
+    /// The shape tools' geometry defaults (#1072): the Rounded Rectangle tool's Roundness is a
+    /// fixed 20, the Polygon tool a 5-point polygon, the Star tool a 5-point star whose Inner
+    /// Radius is a quarter of its Outer Radius.
+    #[test]
+    fn double_click_shape_tool_geometry_defaults() {
+        let mut s = effectcraft_engine::Session::default();
+        s.execute("comp.new", json!({"width": 640, "height": 360, "duration": 2})).unwrap();
+        let mut app = EffectcraftApp::new(s);
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx, &app.tokens, crate::i18n::language(&app));
+        frame(&mut app, &ctx, 0.0, vec![]);
+        frame(&mut app, &ctx, 0.1, vec![]);
+        let pointer = |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+        let double_click = |app: &mut EffectcraftApp, ctx: &egui::Context, t: f64, id: &str| {
+            let e = app.auto.elements.iter().find(|w| w.id == id).unwrap_or_else(|| panic!("no {id}"));
+            let at = egui::pos2(e.rect[0] + e.rect[2] / 2.0, e.rect[1] + e.rect[3] / 2.0);
+            frame(app, ctx, t, vec![egui::Event::PointerMoved(at), pointer(at, true), pointer(at, false), pointer(at, true), pointer(at, false)]);
+        };
+        // Each shape on its own layer: deselect so the next double-click makes a new one.
+        let deselected = |app: &mut EffectcraftApp, ctx: &egui::Context, t: f64| {
+            app.session.execute("edit.deselectAll", json!({})).unwrap();
+            frame(app, ctx, t, vec![]);
+        };
+        // The Rounded Rectangle: Roundness 20, filling the comp.
+        app.ui.slot_tools[8] = Tool::RoundedRect;
+        frame(&mut app, &ctx, 1.0, vec![]);
+        double_click(&mut app, &ctx, 1.1, "tools.RoundedRect");
+        {
+            let comp = app.session.active_comp().unwrap();
+            let g = comp.layers[0].props.group("contents/Rectangle 1/contents/Rectangle Path 1").expect("Rectangle Path 1");
+            assert_eq!(g.prop("roundness").expect("roundness").value.as_f64(), 20.0, "a fixed roundness");
+            assert_eq!(g.prop("size").expect("size").value.as_vec2(), [640.0, 360.0]);
+        }
+        // The Star: 5 points, Outer Radius half the comp height, Inner Radius a quarter.
+        deselected(&mut app, &ctx, 2.0);
+        app.ui.slot_tools[8] = Tool::Star;
+        frame(&mut app, &ctx, 2.05, vec![]);
+        double_click(&mut app, &ctx, 2.1, "tools.Star");
+        {
+            let comp = app.session.active_comp().unwrap();
+            let g = comp.layers[0].props.group("contents/Polystar 1/contents/Polystar Path 1").expect("Polystar Path 1");
+            assert_eq!(g.prop("type").expect("type").value.as_enum(), 0, "Star");
+            assert_eq!(g.prop("points").expect("points").value.as_f64(), 5.0, "5 points");
+            assert_eq!(g.prop("outerRadius").expect("outer").value.as_f64(), 180.0, "half the comp height");
+            assert_eq!(g.prop("innerRadius").expect("inner").value.as_f64(), 90.0, "a quarter of the comp height");
+        }
+        // The Polygon: 5 points, Outer Radius half the comp height, no inner radius.
+        deselected(&mut app, &ctx, 3.0);
+        app.ui.slot_tools[8] = Tool::Polygon;
+        frame(&mut app, &ctx, 3.05, vec![]);
+        double_click(&mut app, &ctx, 3.1, "tools.Polygon");
+        {
+            let comp = app.session.active_comp().unwrap();
+            let g = comp.layers[0].props.group("contents/Polystar 1/contents/Polystar Path 1").expect("Polystar Path 1");
+            assert_eq!(g.prop("type").expect("type").value.as_enum(), 1, "Polygon");
+            assert_eq!(g.prop("points").expect("points").value.as_f64(), 5.0, "5 points");
+            assert_eq!(g.prop("outerRadius").expect("outer").value.as_f64(), 180.0, "half the comp height");
+            assert!(g.prop("innerRadius").is_none(), "a polygon has no inner radius");
+        }
+        assert!(app.ui.status.is_empty(), "{}", app.ui.status);
+    }
+
+    /// A double-clicked shape is painted with the Tools bar's Fill and Stroke (#1072): the
+    /// colours and stroke width the shape tool is set to — and no outline at all when the tool
+    /// has its Stroke off.
+    #[test]
+    fn double_click_paints_with_the_shape_tools_fill_and_stroke() {
+        let mut s = effectcraft_engine::Session::default();
+        s.execute("comp.new", json!({"width": 640, "height": 360, "duration": 2})).unwrap();
+        let mut app = EffectcraftApp::new(s);
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx, &app.tokens, crate::i18n::language(&app));
+        frame(&mut app, &ctx, 0.0, vec![]);
+        frame(&mut app, &ctx, 0.1, vec![]);
+        let pointer = |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+        let double_click = |app: &mut EffectcraftApp, ctx: &egui::Context, t: f64, id: &str| {
+            let e = app.auto.elements.iter().find(|w| w.id == id).unwrap_or_else(|| panic!("no {id}"));
+            let at = egui::pos2(e.rect[0] + e.rect[2] / 2.0, e.rect[1] + e.rect[3] / 2.0);
+            frame(app, ctx, t, vec![egui::Event::PointerMoved(at), pointer(at, true), pointer(at, false), pointer(at, true), pointer(at, false)]);
+        };
+        // The tool's own Fill and Stroke go onto the created shape.
+        app.session.state.shape_tool.fill.color = [1.0, 0.0, 0.0];
+        app.session.state.shape_tool.stroke.color = [0.0, 1.0, 0.0];
+        app.session.state.shape_tool.stroke_width = 5.0;
+        double_click(&mut app, &ctx, 1.0, "tools.Rectangle");
+        {
+            let comp = app.session.active_comp().unwrap();
+            let g = comp.layers[0].props.group("contents/Rectangle 1/contents").expect("the contents");
+            let fill = g.sub("fill").expect("the fill");
+            assert_eq!(fill.get("color").expect("color").value.as_color(), [1.0, 0.0, 0.0, 1.0], "the tool's Fill");
+            let stroke = g.sub("stroke").expect("the stroke");
+            assert_eq!(stroke.get("color").expect("color").value.as_color(), [0.0, 1.0, 0.0, 1.0], "the tool's Stroke");
+            assert_eq!(stroke.get("width").expect("width").value.as_f64(), 5.0, "the tool's Stroke Width");
+        }
+        // Stroke off ("Keine"): the next shape gets no outline at all, but keeps the Fill.
+        app.session.execute("shape.toolOptions", json!({"stroke": false})).unwrap();
+        app.session.execute("edit.deselectAll", json!({})).unwrap();
+        app.ui.slot_tools[8] = Tool::Ellipse;
+        frame(&mut app, &ctx, 1.05, vec![]);
+        double_click(&mut app, &ctx, 2.0, "tools.Ellipse");
+        {
+            let comp = app.session.active_comp().unwrap();
+            assert_eq!(comp.layers.len(), 2, "a new shape layer");
+            let g = comp.layers[0].props.group("contents/Ellipse 1/contents").expect("the ellipse");
+            assert!(g.sub("stroke").is_none(), "no outline when the tool's Stroke is off");
+            assert_eq!(g.sub("fill").expect("the fill").get("color").expect("color").value.as_color(), [1.0, 0.0, 0.0, 1.0]);
+        }
+        assert!(app.ui.status.is_empty(), "{}", app.ui.status);
     }
 }

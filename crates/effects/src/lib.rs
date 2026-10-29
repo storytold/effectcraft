@@ -312,15 +312,32 @@ impl Buf {
         self.offset[0] += l as f64;
         self.offset[1] += t as f64;
     }
-    /// Grow by `pad` transparent pixels on every side.
+    /// Grow by `pad` transparent pixels on every side, within [`pad_within_budget`] and as
+    /// clamped by [`Image::effective_pad`].
     pub fn pad(&mut self, pad: u32) {
-        if pad == 0 {
+        let eff = self.img.effective_pad(pad_within_budget(self.img.width, self.img.height, pad));
+        if eff == 0 {
             return;
         }
-        self.img = self.img.padded(pad);
-        self.offset[0] += pad as f64;
-        self.offset[1] += pad as f64;
+        self.img = self.img.padded(eff);
+        self.offset[0] += eff as f64;
+        self.offset[1] += eff as f64;
     }
+}
+
+/// `pad` on every side of a `w` × `h` effect buffer, cut so the padded buffer stays within
+/// 16 Mpx (256 MiB of f32 RGBA) or four times its own area, whichever is larger: a small layer
+/// far from an effect's centre can't ask for gigabytes (#2261). Shared with the GPU path.
+pub fn pad_within_budget(w: u32, h: u32, pad: u32) -> u32 {
+    const MIN_BUDGET: f64 = 16_777_216.0;
+    let (w, h) = (f64::from(w), f64::from(h));
+    let budget = MIN_BUDGET.max(4.0 * w * h);
+    if (w + 2.0 * f64::from(pad)) * (h + 2.0 * f64::from(pad)) <= budget {
+        return pad;
+    }
+    // (w + 2p)(h + 2p) = budget, solved for p.
+    let p = (((w - h).powi(2) + 4.0 * budget).sqrt() - (w + h)) / 4.0;
+    (p.floor().max(0.0) as u32).min(pad)
 }
 
 /// Motion Tile's output frame for a buffer with layer origin `offset` (pixels) at `scale`:
@@ -1344,11 +1361,42 @@ pub(crate) fn run_fx(id: &str, vals: &[(&str, Value)], img: Image, time: f64, en
 mod tests {
     use super::*;
 
+    /// #2261: a 20 × 20 layer with CC Radial Fast Blur's Center far away grows to at most 16 Mpx;
+    /// big layers may still grow to four times their area, and small pads are untouched.
+    #[test]
+    fn padded_buffers_stay_within_the_budget() {
+        let area = |w: u32, h: u32, p: u32| (u64::from(w) + 2 * u64::from(p)) * (u64::from(h) + 2 * u64::from(p));
+        let far = radial_fast_pad((6500.0, 6500.0), 20, 20, 0.8);
+        assert_eq!(far, 4096, "the effect asks for its full pad");
+        let mut b = Buf { img: Image::new(20, 20), offset: [0.0; 2], scale: 1.0 };
+        b.pad(far);
+        assert!(area(20, 20, 0) < area(b.img.width, b.img.height, 0) && area(b.img.width, b.img.height, 0) <= 1 << 24, "{}x{}", b.img.width, b.img.height);
+        assert_eq!(b.offset, [f64::from((b.img.width - 20) / 2); 2], "the content keeps its place");
+        let p = pad_within_budget(3840, 2160, 4096);
+        assert!(p > 1000 && area(3840, 2160, p) <= 4 * 3840 * 2160 && area(3840, 2160, p + 1) > 4 * 3840 * 2160);
+        assert_eq!(pad_within_budget(640, 360, 200), 200);
+        assert_eq!(pad_within_budget(20, 20, 0), 0);
+    }
+
     #[test]
     fn run_fx_passthrough() {
         let img = Image::filled(4, 3, [0.5, 0.25, 0.125, 1.0]);
         let out = run_fx("ec.control.slider", &[("slider", num(3.0))], img.clone(), 0.0, EffectEnv::default());
         assert_eq!(out.img.data, img.data);
+    }
+
+    #[test]
+    fn pad_offset_follows_the_clamped_pad() {
+        // Image::padded clamps a hostile pad to keep each side within MAX_PADDED_SIDE; the offset
+        // must move by the pad actually applied, or the content drifts from its layer position.
+        let mut img = Image::new(29_990, 2);
+        img.set(0, 0, [1.0, 0.0, 0.0, 1.0]);
+        let mut buf = Buf { img, offset: [3.0, 4.0], scale: 1.0 };
+        buf.pad(u32::MAX);
+        // Width binds: (MAX_PADDED_SIDE - 29 990) / 2 = 5.
+        assert_eq!(buf.offset, [8.0, 9.0]);
+        let (x, y) = buf.to_px([-3.0, -4.0]);
+        assert_eq!(buf.img.get(x as i64, y as i64), [1.0, 0.0, 0.0, 1.0]);
     }
 
     #[test]

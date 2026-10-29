@@ -531,7 +531,8 @@ pub enum DocAction {
 const TAB_PADDING: f32 = 24.0;
 /// Width of the » button that lists the comp tabs with no room in the strip.
 const DOC_OVERFLOW: f32 = 22.0;
-/// Room for the × after the shown comp's name.
+/// Room for the × after a comp's name. Every comp tab keeps it, so a tab keeps its width when it
+/// is shown or hovered.
 const DOC_CLOSE: f32 = 16.0;
 
 /// A comp tab's text: the label swatch, then the name, as the panel tabs with a swatch show it.
@@ -547,24 +548,46 @@ fn text_width(ctx: &egui::Context, job: egui::text::LayoutJob) -> f32 {
     ctx.fonts_mut(|f| f.layout_job(job)).size().x
 }
 
-/// Whether comp tab `doc` carries the ×: the comp the Timeline shows, while it is the group's
-/// shown panel.
-fn has_close(doc: &DocTab, selected: bool) -> bool {
-    selected && doc.active
+/// The width each comp tab asks for in the Timeline group's tab row.
+pub fn doc_widths(ctx: &egui::Context, docs: &[DocTab], font: &egui::FontId) -> Vec<f32> {
+    docs.iter().map(|d| text_width(ctx, doc_job(d, font, egui::Color32::WHITE)) + TAB_PADDING + DOC_CLOSE).collect()
 }
 
-/// The width each comp tab asks for in the Timeline group's tab row.
-pub fn doc_widths(ctx: &egui::Context, docs: &[DocTab], selected: bool, font: &egui::FontId) -> Vec<f32> {
-    docs.iter().map(|d| text_width(ctx, doc_job(d, font, egui::Color32::WHITE)) + TAB_PADDING + if has_close(d, selected) { DOC_CLOSE } else { 0.0 }).collect()
+/// The × of comp tab `doc` at `rect`, clipped to `clip`; true when clicked. `shown` is the comp
+/// the Timeline shows while it is the group's shown panel. Automation:
+/// `panel.tab.Timeline.<comp>.close`, and `panel.tab.Timeline.close` for the shown comp's.
+fn doc_close(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    clip: Rect,
+    doc: &DocTab,
+    shown: bool,
+    style: &craft_ui::docking::DockStyle,
+    reg: &mut crate::automation::Registry,
+) -> bool {
+    let timeline = PanelKind::Timeline.id();
+    let hit = ui.interact(rect.expand(2.0), egui::Id::unique(("comp-tab-close", doc.id)), Sense::click());
+    hit.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, hit.enabled(), "Close"));
+    let cc = if hit.hovered() { style.text } else { style.inactive_text };
+    let k = 3.5;
+    let painter = ui.painter().with_clip_rect(clip);
+    painter.line_segment([rect.center() + vec2(-k, -k), rect.center() + vec2(k, k)], Stroke::new(1.2, cc));
+    painter.line_segment([rect.center() + vec2(-k, k), rect.center() + vec2(k, -k)], Stroke::new(1.2, cc));
+    reg.add_response(&format!("panel.tab.{timeline}.{}.close", doc.id), &hit, "Close");
+    if shown {
+        reg.add_response(&format!("panel.tab.{timeline}.close"), &hit, "Close");
+    }
+    hit.clicked()
 }
 
 /// Draw the Timeline's comp tabs into `strip`, the part of the Timeline group's tab row after its
-/// panel tabs. Each is a tab like the panel tabs: the comp's label swatch and name, and × on the
-/// shown comp while the Timeline is the group's shown panel (`selected`). Tabs that do not fit go
-/// to a » menu at the end; the shown comp's tab always stays in the row. Shift+, and Shift+. step
-/// through every open comp. Automation: `panel.tab.Timeline.<comp>`, `panel.tab.Timeline.close`
-/// for the shown comp's ×, `panel.tab.Timeline.more` for », and `panel.tab.Timeline.more.<comp>`
-/// for its items.
+/// panel tabs. Each is a tab like the panel tabs: the comp's label swatch and name, then a ×
+/// that closes the comp's Timeline: always on the shown comp while the Timeline is the group's
+/// shown panel (`selected`), on the other comp tabs while the pointer is over them. Tabs that do
+/// not fit go to a » menu at the end; the shown comp's tab always stays in the row. Shift+, and
+/// Shift+. step through every open comp. Automation: `panel.tab.Timeline.<comp>`, the ×s (see
+/// [`doc_close`]), `panel.tab.Timeline.more` for », and `panel.tab.Timeline.more.<comp>` for its
+/// items.
 pub fn doc_tabs(
     ui: &mut egui::Ui,
     strip: Rect,
@@ -575,7 +598,7 @@ pub fn doc_tabs(
 ) -> Vec<DocAction> {
     let mut out = Vec::new();
     let timeline = PanelKind::Timeline.id();
-    let widths = doc_widths(ui.ctx(), docs, selected, &style.font);
+    let widths = doc_widths(ui.ctx(), docs, &style.font);
     let active = docs.iter().position(|d| d.active).unwrap_or(0);
     let fit = craft_ui::tabs::fit_whole(&widths, active, strip.width(), DOC_OVERFLOW);
     let clip = strip.intersect(ui.clip_rect());
@@ -587,10 +610,9 @@ pub fn doc_tabs(
         x += width;
         let on = selected && doc.active;
         let color = if on { style.text } else { style.inactive_text };
-        let close = has_close(doc, selected);
         let mut job = doc_job(doc, &style.font, color);
         job.wrap = egui::text::TextWrapping {
-            max_width: (tab.width() - TAB_PADDING - if close { DOC_CLOSE } else { 0.0 }).max(0.0),
+            max_width: (tab.width() - TAB_PADDING - DOC_CLOSE).max(0.0),
             max_rows: 1,
             break_anywhere: true,
             overflow_character: Some('\u{2026}'),
@@ -608,17 +630,10 @@ pub fn doc_tabs(
         );
         let resp = if galley.elided { resp.on_hover_text(&doc.title) } else { resp };
         reg.add_response(&format!("panel.tab.{timeline}.{}", doc.id), &resp, &doc.title);
-        if close {
+        // After the tab, so the × takes the clicks over it.
+        if on || ui.rect_contains_pointer(tab.intersect(clip)) {
             let cr = Rect::from_center_size(pos2(label_end + DOC_CLOSE / 2.0, mid), vec2(10.0, 10.0));
-            let hit = ui.interact(cr.expand(2.0), egui::Id::unique(("comp-tab-close", doc.id)), Sense::click());
-            hit.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, hit.enabled(), "Close"));
-            let cc = if hit.hovered() { style.text } else { style.inactive_text };
-            let k = 3.5;
-            let painter = ui.painter().with_clip_rect(tab.intersect(clip));
-            painter.line_segment([cr.center() + vec2(-k, -k), cr.center() + vec2(k, k)], Stroke::new(1.2, cc));
-            painter.line_segment([cr.center() + vec2(-k, k), cr.center() + vec2(k, -k)], Stroke::new(1.2, cc));
-            reg.add_response(&format!("panel.tab.{timeline}.close"), &hit, "Close");
-            if hit.clicked() {
+            if doc_close(ui, cr, tab.intersect(clip), doc, on, style, reg) {
                 out.push(DocAction::Close(doc.id));
             }
         }
@@ -654,7 +669,8 @@ pub fn doc_tabs(
     out
 }
 
-/// A viewer lock button (Composition viewers and the Timeline keep their comp while locked).
+/// A viewer lock button (Composition viewers and the Timeline keep their comp while locked): a
+/// closed padlock while locked, an open one while unlocked.
 /// Returns true when clicked. Automation: `panel.tab.<panel>.lock`.
 pub fn lock_button(ui: &mut egui::Ui, rect: Rect, panel: PanelKind, locked: bool, t: &Tokens, reg: &mut crate::automation::Registry) -> bool {
     let resp = ui.interact(rect, egui::Id::unique(("tab-lock", panel.id())), Sense::click());
@@ -665,7 +681,7 @@ pub fn lock_button(ui: &mut egui::Ui, rect: Rect, panel: PanelKind, locked: bool
     } else {
         t.text_faint
     };
-    icons::paint(ui.painter(), rect.shrink(2.0), Icon::Lock, color);
+    icons::paint(ui.painter(), rect.shrink(2.0), if locked { Icon::Lock } else { Icon::LockOpen }, color);
     reg.add_response(&format!("panel.tab.{}.lock", panel.id()), &resp, if locked { "Unlock" } else { "Lock" });
     crate::widgets::focus_outline(ui, &resp, t);
     resp.clicked()

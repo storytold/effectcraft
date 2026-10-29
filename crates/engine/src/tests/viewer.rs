@@ -419,7 +419,7 @@ fn shape_tool_options_paint_new_shapes() {
 fn masks_of_every_shape_tool_kind() {
     let mut s = comp();
     let sol = s.execute("layer.newSolid", json!({"color": "#ffffff"})).unwrap()["layer"].as_u64().unwrap();
-    for (kind, n) in [("rect", 4), ("ellipse", 4), ("rounded", 8), ("polygon", 6), ("star", 10)] {
+    for (kind, n) in [("rect", 4), ("ellipse", 4), ("rounded", 8), ("polygon", 5), ("star", 10)] {
         let m = s.execute("layer.addMask", json!({"layer": sol, "shape": kind, "rect": [100, 100, 80, 80]})).unwrap()["mask"].as_u64().unwrap();
         let path = layer(&s, sol).props.find_group(m).unwrap().get("path").unwrap().value.as_path().unwrap().clone();
         assert!(path.closed, "{kind}");

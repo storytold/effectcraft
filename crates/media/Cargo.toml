@@ -12,6 +12,7 @@ workspace = true
 [dependencies]
 craft-docpath = { workspace = true }
 effectcraft-time = { workspace = true }
+effectcraft-color = { workspace = true }
 effectcraft-project = { workspace = true }
 effectcraft-raster = { workspace = true }
 effectcraft-render = { workspace = true }

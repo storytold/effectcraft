@@ -4,14 +4,17 @@ use super::{
     pos2,
 };
 
-/// Visible, unlocked layers eligible for viewer hit tests, in front-to-back order.
+/// Visible layers eligible for viewer hit tests, locked or not, in front-to-back order.
 /// Solo scope matches the renderer: any soloed AV layer activates it at every time (as in After
 /// Effects), even when hidden, locked or outside its in-out range.
-pub(crate) fn selectable_layers(comp: &Comp, time: Tick) -> impl Iterator<Item = &Layer> {
+fn hit_testable_layers(comp: &Comp, time: Tick) -> impl Iterator<Item = &Layer> {
     let any_solo = comp.layers.iter().any(|l| l.switches.solo && l.source.is_av());
-    comp.layers
-        .iter()
-        .filter(move |l| l.is_active_at(time) && l.switches.video && !l.switches.locked && !l.is_camera() && !l.is_light() && (!any_solo || l.switches.solo))
+    comp.layers.iter().filter(move |l| l.is_active_at(time) && l.switches.video && !l.is_camera() && !l.is_light() && (!any_solo || l.switches.solo))
+}
+
+/// Visible, unlocked layers eligible for viewer hit tests, in front-to-back order.
+pub(crate) fn selectable_layers(comp: &Comp, time: Tick) -> impl Iterator<Item = &Layer> {
+    hit_testable_layers(comp, time).filter(|l| !l.switches.locked)
 }
 
 /// Selectable layers under a comp point, front to back.
@@ -22,6 +25,18 @@ pub(crate) fn layers_at<'a, 'b>(ectx: &'b EvalCtx<'a>, cpt: [f64; 2]) -> impl It
 /// Topmost selectable layer under a comp point.
 pub(crate) fn layer_at<'a>(ectx: &EvalCtx<'a>, cpt: [f64; 2]) -> Option<&'a Layer> {
     layers_at(ectx, cpt).next()
+}
+
+/// Topmost visible layer under a comp point, locked or not. An Alt-drop uses it so a locked layer in
+/// front is refused rather than skipped, which would replace the layer behind it.
+pub(crate) fn layer_at_including_locked<'a>(ectx: &EvalCtx<'a>, cpt: [f64; 2]) -> Option<&'a Layer> {
+    // A layer scaled to nothing has a degenerate quad that `point_in_quad` accepts everywhere.
+    hit_testable_layers(ectx.comp, ectx.time).find(|l| layer_quad(ectx, l).is_some_and(|(_, q, _)| quad_area(&q) > 1e-9 && point_in_quad(cpt, &q)))
+}
+
+/// Area of a quad (shoelace formula); zero when its corners coincide or are collinear.
+fn quad_area(q: &[[f64; 2]; 4]) -> f64 {
+    (0..4).map(|i| q[i][0] * q[(i + 1) % 4][1] - q[(i + 1) % 4][0] * q[i][1]).sum::<f64>().abs() / 2.0
 }
 
 /// The layer a press at a comp point acts on, selected (Shift toggles the topmost layer). As in
@@ -202,6 +217,8 @@ pub(super) fn create_shape(app: &mut EffectcraftApp, tool: Tool, a: [f64; 2], b:
                 time: app.session.time(),
                 expr: None,
                 footage: None,
+                property_overrides: &[],
+                media_overrides: &[],
             };
             let inv = l2c(&ectx, &l).0.inverse().unwrap_or(Mat3::IDENTITY);
             let p0 = inv.apply(gv2(cx - w / 2.0, cy - h / 2.0));

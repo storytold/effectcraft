@@ -48,7 +48,16 @@ impl Env {
         Env { time: s.time_of(cid), expr: s.expr.clone(), footage: s.footage.clone() }
     }
     fn ctx<'a>(&'a self, proj: &'a Project, cid: ItemId, comp: &'a Comp) -> EvalCtx<'a> {
-        EvalCtx { project: proj, comp_id: cid, comp, time: self.time, expr: self.expr.as_deref(), footage: Some(self.footage.as_ref()) }
+        EvalCtx {
+            project: proj,
+            comp_id: cid,
+            comp,
+            time: self.time,
+            expr: self.expr.as_deref(),
+            footage: Some(self.footage.as_ref()),
+            property_overrides: &[],
+            media_overrides: &[],
+        }
     }
 }
 

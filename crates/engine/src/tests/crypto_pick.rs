@@ -190,7 +190,16 @@ fn rendered_matte_of_pick(s: &mut Session, x: f64, y: f64, scale: f64) -> (Strin
     s.execute_checked("prop.set", json!({"path": format!("effects/#{fx}/matteOnly"), "value": true})).unwrap();
     let (cid, comp) = (s.active_comp_id().unwrap(), s.active_comp().unwrap());
     let layer = &comp.layers[0];
-    let ctx = effectcraft_render::EvalCtx { project: &s.project, comp_id: cid, comp, time: Tick::ZERO, expr: None, footage: None };
+    let ctx = effectcraft_render::EvalCtx {
+        project: &s.project,
+        comp_id: cid,
+        comp,
+        time: Tick::ZERO,
+        expr: None,
+        footage: None,
+        property_overrides: &[],
+        media_overrides: &[],
+    };
     let buf = s.renderer(effectcraft_render::RenderOpts { scale, ..Default::default() }).content_buf(&ctx, layer).unwrap();
     let (px, py) = buf.to_px([x, y]);
     let m = buf.img.get(px.floor() as i64, py.floor() as i64)[0];

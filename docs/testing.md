@@ -10,6 +10,10 @@ cargo xtask aep-corpus     # opt-in: the After Effects test projects of crates/a
 and engine tests that need one print `SKIPPED: fixture <name> missing` and pass. Run
 `cargo xtask aep-corpus` once (pinned, sha256-verified) to run them too.
 
+The `dev` profile keeps debug info to line tables (fast builds, readable backtraces). To debug
+interactively — local variables, parameters, column breakpoints — build with the `dev-full`
+profile: `cargo run --profile dev-full -p effectcraft -- --demo` (see `CONTRIBUTING.md`).
+
 `cargo xtask ci` builds in the dev profile and runs the tests with `cargo nextest run` (plus
 `cargo test --doc`) when `cargo-nextest` is installed, and with `cargo test` otherwise. It then
 runs `missing_translations_report` with `--nocapture`, which prints the interface strings each

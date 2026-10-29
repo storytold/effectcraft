@@ -143,6 +143,7 @@ const SIMPLIFIED_CHINESE: &[Row] = &[
     ("ec.3d.fog3d", "Fog 3D", "雾 3D"),
     ("ec.3d.identifier", "IDentifier", "IDentifier"),
     ("ec.3d.idmatte", "ID Matte", "ID 遮罩"),
+    ("ec.3d.instance3d", "3D Layer Instance", "3D 图层实例"),
     ("ec.audio.backwards", "Backwards", "倒放"),
     ("ec.audio.basstreble", "Bass & Treble", "低音和高音"),
     ("ec.audio.compressor", "Compressor", "压缩程序"),
@@ -772,12 +773,13 @@ const JAPANESE_CATEGORIES: &[(&str, &str)] = &[
     ("Color Correction", "カラー補正"),
     ("Distort", "ディストーション"),
     ("Expression Controls", "式制御"),
+    ("Generate", "描画"),
     ("Immersive Video", "イマーシブビデオ"),
     ("Keying", "キーイング"),
     ("Matte", "マット"),
     ("Noise & Grain", "ノイズ＆グレイン"),
     ("Obsolete", "旧バージョン"),
-    ("Paint", "描画"),
+    ("Paint", "ペイント"),
     ("Perspective", "遠近"),
     ("Simulation", "シミュレーション"),
     ("Stylize", "スタイライズ"),
@@ -801,6 +803,7 @@ const GEORGIAN: &[Row] = &[
     ("ec.3d.fog3d", "Fog 3D", "3D ნისლი"),
     ("ec.3d.identifier", "IDentifier", "IDentifier"),
     ("ec.3d.idmatte", "ID Matte", "ID მატი"),
+    ("ec.3d.instance3d", "3D Layer Instance", "3D Layer Instance"),
     ("ec.audio.backwards", "Backwards", "უკუღმა"),
     ("ec.audio.basstreble", "Bass & Treble", "ბასი და ტრებლი"),
     ("ec.audio.compressor", "Compressor", "კომპრესორი"),
@@ -1281,5 +1284,23 @@ mod tests {
         set_current("en");
         assert!(matches("ec.blur.gaussian", "Gaussian Blur", "blur"));
         assert!(!matches("ec.blur.gaussian", "Gaussian Blur", "高斯"));
+    }
+}
+
+#[cfg(test)]
+mod japanese_category_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    /// Two categories drawing the same Japanese name would make the Effect menu show one name twice and
+    /// leave the user unable to tell them apart. `描画` was both `Generate` and `Paint` before #2583.
+    #[test]
+    fn no_two_categories_share_a_japanese_name() {
+        let mut seen: HashMap<&str, &str> = HashMap::new();
+        for (english, japanese) in JAPANESE_CATEGORIES {
+            if let Some(other) = seen.insert(japanese, english) {
+                panic!("`{english}` and `{other}` both draw as `{japanese}`");
+            }
+        }
     }
 }

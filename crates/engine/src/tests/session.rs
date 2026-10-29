@@ -476,6 +476,9 @@ fn set_text_paragraph_fill_and_leading() {
     s.execute("layer.setText", json!({"layer": t, "hScale": 120, "vScale": 80, "baselineShift": 4, "smallCaps": true, "strokeOverFill": true})).unwrap();
     let d = doc(&s);
     assert_eq!((d.h_scale, d.v_scale, d.baseline_shift, d.small_caps, d.stroke_over_fill), (120.0, 80.0, 4.0, true, true));
+    s.execute("layer.setText", json!({"layer": t, "lineJoin": "bevel"})).unwrap();
+    assert_eq!(doc(&s).line_join, effectcraft_keyframe::LineJoin::Bevel);
+    assert!(s.execute("layer.setText", json!({"layer": t, "lineJoin": "square"})).is_err());
 }
 
 #[test]

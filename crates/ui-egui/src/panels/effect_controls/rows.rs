@@ -88,6 +88,11 @@ struct PropCx<'a> {
 }
 
 impl PropCx<'_> {
+    /// The tokens of the value fields: red while an expression drives the parameter (#1306).
+    fn value_tokens(&self) -> Tokens {
+        self.t.for_value(self.prop.has_expression())
+    }
+
     fn set(&self, actions: &mut Actions, v: serde_json::Value) {
         let (layer, uid, merge, scrub) = (self.layer, self.uid, format!("ec-{}", self.uid), self.scrub);
         actions.push(("prop.set".into(), json!({"layer": layer.id.0, "prop": uid, "value": v, "merge": merge, "selected": true, "offset": scrub})))
@@ -243,8 +248,8 @@ fn value_angle(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value: 
     let Value::Scalar(v) = value else {
         return;
     };
-    let PropCx { t, uid, cy, vx, prop, .. } = *cx;
-    let (rr, dr, nv) = fw::angle_field(ui, pos2(vx, cy - 9.0), egui::Id::unique(("ec-v", uid)), *v, 1, &t);
+    let PropCx { uid, cy, vx, prop, .. } = *cx;
+    let (rr, dr, nv) = fw::angle_field(ui, pos2(vx, cy - 9.0), egui::Id::unique(("ec-v", uid)), *v, 1, &cx.value_tokens());
     app.auto.add(&format!("effectControls.prop.{uid}.value"), rr.union(dr), &fw::format_angle(*v, 1));
     app.auto.add(&format!("effectControls.prop.{uid}.revolutions"), rr, &prop.name);
     if let Some(nv) = nv {
@@ -257,7 +262,7 @@ fn value_scalar(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value:
     let Value::Scalar(v) = value else {
         return;
     };
-    let PropCx { t, uid, cy, vx, prop, .. } = *cx;
+    let PropCx { uid, cy, vx, prop, .. } = *cx;
     let (min, max, dec) = match &prop.ui {
         ParamUi::Slider { min, max, decimals, .. } => (*min, *max, *decimals as usize),
         _ => (-1e9, 1e9, 1),
@@ -273,7 +278,7 @@ fn value_scalar(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value:
         egui::Id::unique(("ec-v", uid)),
         *v,
         &widgets::HotSpec { speed, range: (min, max), decimals: dec.max(if dec == 0 { 0 } else { 1 }), suffix },
-        &t,
+        &cx.value_tokens(),
     );
     app.auto.add(&format!("effectControls.prop.{uid}.value"), vr, &prop.name);
     if let Some(nv) = nv {
@@ -290,6 +295,7 @@ fn value_vector(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value:
     let PropCx { t, uid, cy, vx, layer, prop, .. } = *cx;
     let c = value.components();
     let n = shown_dims(layer, prop, value);
+    let vt = cx.value_tokens();
     let mut x = vx;
     if matches!(prop.ui, ParamUi::Point | ParamUi::Point3) {
         let cr = Rect::from_center_size(pos2(x + 8.0, cy), vec2(18.0, 18.0));
@@ -310,7 +316,7 @@ fn value_vector(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value:
             egui::Id::unique(("ec-v", uid, d)),
             c[d],
             &widgets::HotSpec { speed: 1.0, range: (-1e9, 1e9), decimals: 1, suffix: "" },
-            &t,
+            &vt,
         );
         app.auto.add(&format!("effectControls.prop.{uid}.value.{d}"), vr, &prop.name);
         dims.push(vr);

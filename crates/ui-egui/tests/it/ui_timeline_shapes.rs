@@ -380,3 +380,55 @@ fn ctrl_v_pastes_svg_markup_as_a_shape_layer() {
     assert_eq!(c.layers.len(), 4);
     assert_eq!(c.layers[0].name, "Oval 2");
 }
+
+fn drag(h: &mut Harness<'_, EffectcraftApp>, from: Pos2, to: Pos2, cancel: bool) {
+    h.input_mut().events.push(Event::PointerMoved(from));
+    h.step();
+    h.input_mut().events.push(Event::PointerButton { pos: from, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    h.step();
+    for k in 1..=8 {
+        h.input_mut().events.push(Event::PointerMoved(from + (to - from) * (k as f32 / 8.0)));
+        h.step();
+    }
+    if cancel {
+        h.input_mut().events.push(Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
+        h.step();
+    }
+    h.input_mut().events.push(Event::PointerButton { pos: to, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.run_steps(3);
+}
+
+/// #2210: an effect's row drags to a new place in the layer's effect stack, as in After Effects
+/// (not a marquee); Escape cancels the drag.
+#[test]
+fn effects_drag_to_a_new_place_in_the_timeline() {
+    let mut s = session();
+    let l = s.execute("layer.newSolid", json!({"name": "Plate", "color": "#406080"})).unwrap()["layer"].as_u64().unwrap();
+    for fx in ["Gaussian Blur", "Invert", "Tint"] {
+        s.execute("effect.apply", json!({"layers": [l], "effect": fx})).unwrap();
+    }
+    let effects = s.active_comp().unwrap().layer(LayerId(l)).unwrap().props.sub("effects").unwrap().clone();
+    let uids: Vec<u64> = effects.groups().map(|g| g.uid).collect();
+    let mut h = harness(s);
+    h.state_mut().ui.timeline.open_groups.insert(effects.uid);
+    open_layer(&mut h, l);
+    let names = |h: &Harness<'_, EffectcraftApp>| -> Vec<String> {
+        h.state().session.active_comp().unwrap().layer(LayerId(l)).unwrap().props.sub("effects").unwrap().groups().map(|g| g.name.clone()).collect()
+    };
+    let row = |h: &Harness<'_, EffectcraftApp>, uid: u64| {
+        let e = h.state().auto.find(&format!("timeline.group.{uid}.name")).unwrap_or_else(|| panic!("no row for {uid}"));
+        egui::Rect::from_min_size(pos2(e.rect[0], e.rect[1]), egui::vec2(e.rect[2], e.rect[3]))
+    };
+    // Tint above Gaussian Blur.
+    let (tint, blur) = (row(&h, uids[2]), row(&h, uids[0]));
+    drag(&mut h, tint.center(), pos2(blur.center().x, blur.min.y + 2.0), true);
+    assert_eq!(names(&h), ["Gaussian Blur", "Invert", "Tint"], "Escape cancels");
+    drag(&mut h, tint.center(), pos2(blur.center().x, blur.min.y + 2.0), false);
+    assert_eq!(names(&h), ["Tint", "Gaussian Blur", "Invert"]);
+    // Gaussian Blur (now second) below Invert, the last.
+    let (blur, invert) = (row(&h, uids[0]), row(&h, uids[1]));
+    drag(&mut h, blur.center(), pos2(invert.center().x, invert.max.y - 2.0), false);
+    assert_eq!(names(&h), ["Tint", "Invert", "Gaussian Blur"]);
+    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(names(&h), ["Tint", "Gaussian Blur", "Invert"], "one undo step per drop");
+}

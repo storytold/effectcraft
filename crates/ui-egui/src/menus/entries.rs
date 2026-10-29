@@ -119,7 +119,8 @@ pub(crate) fn entry_enabled(app: &EffectcraftApp, e: &MenuEntry) -> bool {
         }
     }
     if e.command == "edit.clear" && app.ui.focused == PanelKind::Project {
-        return app.session.is_enabled("project.delete");
+        // An open text edit stands down: Clear must not delete the comp being typed into (#2227).
+        return app.session.state.text_edit.is_none() && app.session.is_enabled("project.delete");
     }
     if e.command == "edit.clear" && app.ui.focused == PanelKind::RenderQueue {
         return !app.session.is_rendering() && !app.session.project.render_queue.is_empty();

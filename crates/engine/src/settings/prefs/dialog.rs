@@ -122,6 +122,11 @@ pub fn pages() -> Vec<Page> {
                 Section("New Project"),
                 s("project.useTemplate", "New Project Loads Template", B, true),
                 s("project.templatePath", "Template Project", Kind::Path, true),
+                Section("Project Files"),
+                s("project.compactProjectFiles", "Save Compact Project Files", B, true),
+                Note(
+                    "Saves .ecproj files as compact JSON on one line: smaller and faster to save and open, but hard to read or diff in version control. Off, they are indented, one value per line.",
+                ),
                 Section("Auto-Save"),
                 s("autoSave.enabled", "Automatically Save Projects", B, true),
                 s("autoSave.intervalMinutes", "Save Every", Kind::Int(1, 240, "Minutes"), true),

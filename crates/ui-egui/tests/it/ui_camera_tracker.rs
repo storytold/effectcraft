@@ -171,8 +171,8 @@ fn viewer_zooms_and_pans_over_the_track_points() {
     let zoom = h.state().ui.viewer.zoom;
     h.input_mut().events.push(egui::Event::PointerMoved(at));
     h.input_mut().events.push(egui::Event::MouseWheel {
-        unit: egui::MouseWheelUnit::Point,
-        delta: egui::vec2(0.0, 120.0),
+        unit: egui::MouseWheelUnit::Line,
+        delta: egui::vec2(0.0, 3.0),
         modifiers: Default::default(),
         phase: egui::TouchPhase::Move,
         source: egui::MouseWheelSource::Wheel,

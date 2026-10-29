@@ -37,7 +37,8 @@ pub struct Dof {
 impl Dof {
     /// Circle-of-confusion diameter (comp pixels) for a point at camera depth `z`.
     pub fn coc(&self, z: f64) -> f64 {
-        if z <= NEAR || self.focus <= 0.0 {
+        // No defocus can be measured against a non-finite focus or depth, so it counts as in focus.
+        if !z.is_finite() || z <= NEAR || !self.focus.is_finite() || self.focus <= 0.0 {
             return 0.0;
         }
         self.aperture * (z - self.focus).abs() / z * self.blur_level
@@ -360,22 +361,27 @@ pub fn layer_camera(ctx: &EvalCtx, cam: &Layer) -> CameraState {
     let (eye, fwd, down) = layer_frame(ctx, cam);
     let opts = cam.props.sub("cameraOptions");
     let zoom = opts.map(|g| ctx.f(cam, g, "zoom", 1000.0)).unwrap_or(1000.0).max(1e-3);
-    let dof = opts.filter(|g| ctx.b(cam, g, "dof")).map(|g| Dof {
-        focus: ctx.f(cam, g, "focusDistance", zoom),
-        aperture: ctx.f(cam, g, "aperture", default_aperture(w)).max(0.0),
-        blur_level: ctx.f(cam, g, "blurLevel", 100.0).max(0.0) / 100.0,
-        iris: super::bokeh::Iris {
-            sides: super::bokeh::Iris::sides_of_shape(ctx.e(cam, g, "irisShape")),
-            rotation: ctx.f(cam, g, "irisRotation", 0.0),
-            roundness: ctx.f(cam, g, "irisRoundness", 0.0) / 100.0,
-            aspect: ctx.f(cam, g, "irisAspectRatio", 1.0).max(0.01),
-            fringe: ctx.f(cam, g, "irisDiffractionFringe", 0.0).max(0.0) / 100.0,
-        },
-        highlight: super::bokeh::Highlight {
-            gain: ctx.f(cam, g, "highlightGain", 0.0).clamp(0.0, 100.0) / 100.0,
-            threshold: ctx.f(cam, g, "highlightThreshold", 255.0).clamp(0.0, 255.0) / 255.0,
-            saturation: ctx.f(cam, g, "highlightSaturation", 0.0).clamp(0.0, 100.0) / 100.0,
-        },
+    let dof = opts.filter(|g| ctx.b(cam, g, "dof")).map(|g| {
+        // A non-finite Focus Distance would make every blur radius non-finite; use the value the
+        // property defaults to (the zoom plane) instead.
+        let focus = ctx.f(cam, g, "focusDistance", zoom);
+        Dof {
+            focus: if focus.is_finite() { focus } else { zoom },
+            aperture: ctx.f(cam, g, "aperture", default_aperture(w)).max(0.0),
+            blur_level: ctx.f(cam, g, "blurLevel", 100.0).max(0.0) / 100.0,
+            iris: super::bokeh::Iris {
+                sides: super::bokeh::Iris::sides_of_shape(ctx.e(cam, g, "irisShape")),
+                rotation: ctx.f(cam, g, "irisRotation", 0.0),
+                roundness: ctx.f(cam, g, "irisRoundness", 0.0) / 100.0,
+                aspect: ctx.f(cam, g, "irisAspectRatio", 1.0).max(0.01),
+                fringe: ctx.f(cam, g, "irisDiffractionFringe", 0.0).max(0.0) / 100.0,
+            },
+            highlight: super::bokeh::Highlight {
+                gain: ctx.f(cam, g, "highlightGain", 0.0).clamp(0.0, 100.0) / 100.0,
+                threshold: ctx.f(cam, g, "highlightThreshold", 255.0).clamp(0.0, 255.0) / 255.0,
+                saturation: ctx.f(cam, g, "highlightSaturation", 0.0).clamp(0.0, 100.0) / 100.0,
+            },
+        }
     });
     CameraState { view: basis_view(eye, fwd, down), eye, zoom, ortho: false, dof }
 }

@@ -3,7 +3,7 @@
 //! otherwise they apply to the whole selected text layer.
 
 use crate::i18n::tr;
-use effectcraft_engine::keyframe::{BaselineOption, Composer, Direction, FigureStyle, FigureWidth, Justify, Kerning, TextDoc};
+use effectcraft_engine::keyframe::{BaselineOption, Composer, Direction, FigureStyle, FigureWidth, Justify, Kerning, LineJoin, TextDoc};
 use effectcraft_engine::render::EvalCtx;
 use egui::{Align2, Rect, Sense, pos2, vec2};
 use serde_json::json;
@@ -57,7 +57,16 @@ pub fn text_target(app: &EffectcraftApp) -> Option<TextTarget> {
         .iter()
         .filter_map(|id| comp.layer(*id))
         .find(|l| matches!(l.source, effectcraft_engine::project::LayerSource::Text))?;
-    let ectx = EvalCtx { project: &app.session.project, comp_id: cid, comp, time: app.session.time(), expr: app.session.expr.as_deref(), footage: None };
+    let ectx = EvalCtx {
+        project: &app.session.project,
+        comp_id: cid,
+        comp,
+        time: app.session.time(),
+        expr: app.session.expr.as_deref(),
+        footage: None,
+        property_overrides: &[],
+        media_overrides: &[],
+    };
     effectcraft_engine::render::text::source_text(&ectx, layer).map(|d| TextTarget { layer: layer.id.0, doc: d, range: None })
 }
 
@@ -182,6 +191,20 @@ fn stroke_order_field(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: Grid, doc:
     }
 }
 
+/// Line Join of the stroke: Miter / Round / Bevel (grid row 5, under the stroke width).
+fn line_join_field(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, g: Grid, doc: &TextDoc, actions: &mut Vec<serde_json::Value>) {
+    let Grid { x0, y, w, enabled } = g;
+    let bw = (w - 2.0 * 4.0) / 3.0;
+    for (i, (key, label, join)) in
+        [("miter", "Miter", LineJoin::Miter), ("round", "Round", LineJoin::Round), ("bevel", "Bevel", LineJoin::Bevel)].into_iter().enumerate()
+    {
+        let r = Rect::from_min_size(pos2(x0 + i as f32 * (bw + 4.0), y + 5.0 * 28.0), vec2(bw, 22.0));
+        if toggle(app, ui, p, r, &format!("character.lineJoin.{key}"), (label, doc.line_join == join, false)) && enabled {
+            actions.push(json!({"lineJoin": key}));
+        }
+    }
+}
+
 /// The Character panel for the text being edited (or the selected text layer): font family and
 /// style, size, leading, tracking, stroke, scale, baseline shift and other numeric fields, kerning,
 /// fill/stroke colours with eyedroppers, style toggles, OpenType features and variable-font axes.
@@ -224,7 +247,8 @@ pub fn character(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     numeric_fields(app, ui, &p, grid, &doc, &mut actions);
     kerning_field(app, ui, &p, grid, &doc, &mut actions);
     stroke_order_field(app, ui, grid, &doc, &mut actions);
-    y += 5.0 * 28.0 + 8.0;
+    line_join_field(app, ui, &p, grid, &doc, &mut actions);
+    y += 6.0 * 28.0 + 8.0;
     // Fill / stroke swatches with their enable boxes.
     for (i, (key, label, on, c)) in [("fill", "Fill", doc.apply_fill, doc.fill), ("stroke", "Stroke", doc.apply_stroke, doc.stroke)].into_iter().enumerate() {
         let fx = x0 + i as f32 * (w / 2.0);

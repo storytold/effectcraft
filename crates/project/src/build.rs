@@ -881,6 +881,14 @@ pub fn layer(project: &mut Project, comp: &Comp, name: &str, source: LayerSource
             _ => {}
         }
     }
+    // A footage layer starts with the markers its file carries (layer time is footage time).
+    let footage_markers = match &source {
+        LayerSource::Footage { item } => match project.item(*item).map(|i| &i.kind) {
+            Some(crate::ItemKind::Footage(f)) => f.markers.clone(),
+            _ => vec![],
+        },
+        _ => vec![],
+    };
     let has_audio = matches!(&source, LayerSource::Footage { item } if matches!(project.item(*item).map(|i| &i.kind), Some(crate::ItemKind::Footage(f)) if f.has_audio))
         || matches!(source, LayerSource::Comp { .. });
     if has_audio {
@@ -910,7 +918,7 @@ pub fn layer(project: &mut Project, comp: &Comp, name: &str, source: LayerSource
         preserve_transparency: false,
         track_matte: None,
         parent: None,
-        markers: vec![],
+        markers: footage_markers,
         markers_locked: false,
         environment: false,
         environment_background: false,

@@ -185,7 +185,16 @@ fn freeze(s: &mut Session, p: &Value, last: bool) -> Result<Value> {
         return Err(bad("layer.freezeFrame", "freezing needs a footage or composition layer"));
     }
     // What each layer shows now (honouring an existing remap) — evaluated before the edit.
-    let ectx = effectcraft_render::EvalCtx { project: &s.project, comp_id: cid, comp, time: cti, expr: s.expr.as_deref(), footage: Some(s.footage.as_ref()) };
+    let ectx = effectcraft_render::EvalCtx {
+        project: &s.project,
+        comp_id: cid,
+        comp,
+        time: cti,
+        expr: s.expr.as_deref(),
+        footage: Some(s.footage.as_ref()),
+        property_overrides: &[],
+        media_overrides: &[],
+    };
     let now: Vec<(effectcraft_project::LayerId, f64)> = comp
         .layers
         .iter()

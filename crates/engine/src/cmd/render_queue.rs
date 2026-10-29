@@ -619,7 +619,7 @@ fn set_output_module(s: &mut Session, p: &Value) -> Result<Value> {
         let (w, h) = item.settings.output_size(comp);
         let mut crop_only = om.clone();
         crop_only.resize.enabled = false;
-        let (cw, ch) = crop_only.frame_size(w, h, item.settings.resolution.clamp(0.01, 4.0));
+        let (cw, ch) = crop_only.frame_size(w, h, item.settings.effective_scale(comp));
         om.resize.width = ((om.resize.height as f64 * cw as f64 / ch as f64).round() as u32).clamp(1, 30_000);
     }
     let post = match str_p(p, "postRenderAction") {

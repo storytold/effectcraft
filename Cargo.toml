@@ -154,6 +154,13 @@ opt-level = 1
 # Panics and backtraces keep file and line; full debug info only made the many test binaries large.
 debug = "line-tables-only"
 
+# Same settings as `dev`, but with full debug info for interactive debugger sessions: local
+# variables, parameters and column breakpoints work. Use `--profile dev-full` when debugging;
+# everything else stays on the fast default. See CONTRIBUTING.md, "Setup".
+[profile.dev-full]
+inherits = "dev"
+debug = true
+
 # Pixel hot loops: keep debug builds interactive.
 [profile.dev.package.effectcraft-raster]
 opt-level = 3

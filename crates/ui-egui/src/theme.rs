@@ -129,6 +129,16 @@ impl Tokens {
     pub fn grad_top(&self, c: Color32) -> Color32 {
         if self.gradients { c.lerp_to_gamma(Color32::WHITE, 0.06) } else { c }
     }
+
+    /// The tokens a property's value fields use (#1306): with an expression driving the property
+    /// (`expression`, [`Property::has_expression`]) its values show in the expression colour, red
+    /// as in After Effects, hovered and dragged too; otherwise these tokens. For the values only:
+    /// the name, stopwatch and swatches keep the ordinary tokens.
+    ///
+    /// [`Property::has_expression`]: effectcraft_engine::project::Property::has_expression
+    pub fn for_value(self, expression: bool) -> Tokens {
+        if expression { Tokens { hot_text: self.expr_text, accent_hover: self.expr_text, ..self } } else { self }
+    }
 }
 
 impl Tokens {

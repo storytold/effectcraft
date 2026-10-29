@@ -572,7 +572,7 @@ pub fn extruded_meshes(ctx: &EvalCtx, layer: &Layer, p: &model::extrude::Extrude
                         groups.push((vec![g.local.clone()], c, g.m, usize::from(!stroke_on_top), g.xf.surface_colors(c)));
                     }
                     if g.stroke_width > 0.0 && g.stroke[3] * op > 0.0 {
-                        let st = effectcraft_path::StrokeStyle { width: g.stroke_width, join: effectcraft_path::Join::Round, ..Default::default() };
+                        let st = effectcraft_path::StrokeStyle { width: g.stroke_width, join: g.join, ..Default::default() };
                         if let Some(region) = crate::shapes::stroke_region(std::slice::from_ref(&g.local), &st) {
                             let c = [g.stroke[0], g.stroke[1], g.stroke[2], g.stroke[3] * op];
                             groups.push((vec![region], c, g.m, usize::from(stroke_on_top), g.xf.surface_colors(c)));
@@ -857,8 +857,8 @@ fn emit_layer<'a>(r: &Renderer<'a>, ctx: &EvalCtx<'a>, layer: &Layer, b: &mut Bu
     if layer.environment || layer.switches.adjustment || ctx.opacity(layer) <= 0.0 || !layer.has_video() {
         return;
     }
-    if let Some(item) = r.collapsed(ctx, layer) {
-        collapsed_layer(r, ctx, layer, item, b);
+    if let Some(collapsed) = r.collapsed(ctx, layer) {
+        collapsed_layer(r, ctx, layer, &collapsed, b);
     } else if layer.source.is_model() {
         model_layer(r, ctx, layer, b);
     } else if matches!(layer.source, LayerSource::Text | LayerSource::Shape)
@@ -874,9 +874,9 @@ fn emit_layer<'a>(r: &Renderer<'a>, ctx: &EvalCtx<'a>, layer: &Layer, b: &mut Bu
 /// (meshes, extrusions, cards) placed by the precomp layer's world transform, so they
 /// intersect, occlude and shadow the parent's layers. Nested 2D layers lie on the precomp
 /// layer's plane; nested lights and cameras are ignored (the parent's light the scene).
-fn collapsed_layer<'a>(r: &Renderer<'a>, ctx: &EvalCtx<'a>, layer: &Layer, item: effectcraft_project::ItemId, b: &mut Builder) {
+fn collapsed_layer<'a>(r: &Renderer<'a>, ctx: &EvalCtx<'a>, layer: &Layer, collapsed: &crate::Collapsed, b: &mut Builder) {
     let op = ctx.opacity(layer) as f32 * r.opacity_mul();
-    let Some((sub, nctx)) = r.collapse_into(ctx, layer, item, op) else { return };
+    let Some((sub, nctx)) = r.collapse_into(ctx, layer, collapsed, op) else { return };
     let saved = b.outer;
     b.outer = saved * ctx.world_matrix(layer);
     let t = nctx.time;

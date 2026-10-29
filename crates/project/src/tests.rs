@@ -183,7 +183,7 @@ fn project_files_refuse_newer_schemas() {
         crate::SCHEMA_VERSION
     );
     assert_eq!(p.to_file_json().unwrap_err().to_string(), expected);
-    assert_eq!(p.to_file_json_with_view(&crate::SavedView::default()).unwrap_err().to_string(), expected);
+    assert_eq!(p.to_file_json_with_view(&crate::SavedView::default(), false).unwrap_err().to_string(), expected);
 }
 
 #[test]
@@ -197,7 +197,7 @@ fn saved_files_reopen_in_pretty_and_compact_form() {
 fn project_files_remember_the_open_comps() {
     let (p, cid) = project_with_layer();
     let view = crate::SavedView { active_comp: Some(cid), open_comps: vec![cid], comp_times: [(cid, effectcraft_time::Tick(4_237_833_600))].into() };
-    let text = p.to_file_json_with_view(&view).unwrap();
+    let text = p.to_file_json_with_view(&view, false).unwrap();
     assert_eq!(crate::saved_view(&text), view);
     assert_eq!(Project::from_json(&text).unwrap(), p, "the view is not part of the project");
     // Files from before #748 have no view; a garbled one is ignored, not an error.

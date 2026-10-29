@@ -584,3 +584,22 @@ fn convert_to_bezier_reads_the_shape_as_it_is_set() {
     let mid = |v: &[f64]| (v.iter().copied().fold(f64::MAX, f64::min) + v.iter().copied().fold(f64::MIN, f64::max)) / 2.0;
     assert!((mid(&xs) - 10.0).abs() < 1e-6 && (mid(&ys) - 5.0).abs() < 1e-6, "centred on the position: {:?} {:?}", mid(&xs), mid(&ys));
 }
+
+/// #2201: a viewer drag on the free-transform box sends one `path.freeTransform` per frame with a
+/// shared merge key; one undo must revert the whole drag, not the last frame.
+#[test]
+fn free_transform_drag_undoes_in_one_step() {
+    let mut s = comp();
+    let (l, m) = masked(&mut s);
+    s.state.selected_vertices.clear();
+    let before = mask_path(&s, l, m);
+    for k in [90, 90, 90, 90] {
+        s.execute("path.freeTransform", json!({"layer": l, "scale": k, "merge": "viewer-drag-1"})).unwrap();
+    }
+    let after = mask_path(&s, l, m);
+    assert_ne!(after, before);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(mask_path(&s, l, m), before, "one undo reverts the whole drag");
+    s.execute("edit.redo", json!({})).unwrap();
+    assert_eq!(mask_path(&s, l, m), after, "redo restores the whole drag");
+}

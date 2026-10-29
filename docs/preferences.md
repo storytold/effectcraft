@@ -42,6 +42,7 @@ Commands (CLI, MCP, control channel):
 - `startup.windowGraphics`: Window Graphics (`auto` / `gl`), what the desktop window draws with from the next launch. `auto` lets the platform pick (DirectX 12, Vulkan or Metal); `gl` uses OpenGL, with CPU compositing, for graphics drivers that crash with the others. A launch leaves a `launch-pending` marker in the settings folder until its window has been drawing for a few seconds (or the app quits normally before that); a launch that stops earlier (a graphics driver crashing as the window opens or as its surface is re-created) leaves the marker behind, and the next launch switches to `gl` and says so (not on macOS, which has no OpenGL backend). `WGPU_BACKEND` overrides both.
 - `project.useTemplate`: New Project Loads Template
 - `project.templatePath`: Template Project
+- `project.compactProjectFiles`: Save Compact Project Files (default off). Off: File ▸ Save writes `.ecproj` files as indented JSON, one value per line, easy to read and diff in version control. On: compact JSON on one line, smaller and faster to save and open. Either opens the same; auto-saves, XML copies and template packages are not affected.
 - `autoSave.enabled`: Automatically Save Projects
 - `autoSave.intervalMinutes`: Save Every
 - `autoSave.maxVersions`: Maximum Project Versions

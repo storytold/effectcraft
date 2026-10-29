@@ -65,6 +65,47 @@ fn shown(h: &Harness<'_, EffectcraftApp>, label: &str) -> bool {
     h.query_by_label_contains(label).is_some()
 }
 
+#[test]
+fn browse_presets_clears_search_and_scrolls_to_the_visible_presets_list() {
+    use effectcraft_ui_egui::dock::PanelKind;
+
+    let mut h = harness();
+    let ctx = h.ctx.clone();
+    let favorites: Vec<String> = effectcraft_engine::effects::all().iter().map(|effect| effect.id.to_string()).collect();
+    assert!(!favorites.is_empty(), "the test needs registered effects");
+    let recent: Vec<String> = favorites.iter().take(8).cloned().collect();
+
+    h.state_mut().session.prefs.effects_favorites = favorites;
+    h.state_mut().ui.effects_recent = recent;
+    h.state_mut().ui.effects_open.extend(["favorites".into(), "recent".into()]);
+    h.state_mut().ui.effects_search = "no matching animation preset".into();
+    h.state_mut().ui.effects_view.presets = true;
+
+    let managed = effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "effect.manage", json!({}));
+    assert!(managed.is_ok(), "{managed:?}");
+    assert_eq!(h.state().ui.focused, PanelKind::EffectsPresets);
+    assert_eq!(h.state().ui.effects_search, "no matching animation preset", "Manage Effects keeps its existing search behavior");
+    assert!(h.state().ui.effects_view.presets, "Manage Effects keeps the existing presets setting");
+
+    h.run_steps(3);
+    assert!(h.state().auto.find("effects.category.presets").is_none(), "the unmatched search hides Animation Presets");
+    h.state_mut().ui.effects_view.presets = false;
+
+    let result = effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "anim.browsePresets", json!({}));
+
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(h.state().ui.focused, PanelKind::EffectsPresets);
+    assert!(h.state().ui.effects_search.is_empty());
+    assert!(h.state().ui.effects_view.presets);
+    assert!(h.state().ui.effects_open.contains("presets"));
+
+    h.run_steps(3);
+    assert!(
+        h.state().auto.find("effects.category.presets").is_some(),
+        "Animation Presets must be visible after Browse Presets, even below expanded Favorites and Recently Used"
+    );
+}
+
 /// Space (or any shortcut) while a menu is open goes to the menu, not the app: it started the
 /// preview behind the open menu.
 #[test]
