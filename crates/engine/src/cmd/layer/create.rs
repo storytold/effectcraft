@@ -161,7 +161,7 @@ pub(super) fn text_range_p(p: &Value) -> Option<std::ops::Range<usize>> {
 /// It is left justified unless `justify` is given. The layer is named by `name`, else the first 40
 /// characters of the first text line, else "Text". `edit: true` also opens a new editing
 /// session with anchor `0` and the caret after the text, selecting all initial text so the next
-/// insertion replaces it. The session has `created: true`, so leaving it empty removes the layer.
+/// insertion replaces it. The session has `created: true`; leaving it empty keeps the layer, as After Effects does.
 pub(super) fn new_text(s: &mut Session, p: &Value) -> Result<Value> {
     let cid = comp_id(s, p)?;
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?.clone();

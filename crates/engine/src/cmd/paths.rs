@@ -8,7 +8,7 @@ use effectcraft_project::{FeatherFalloff, GroupKind, ItemId, LayerId, LayerSourc
 use serde_json::{Value, json};
 
 use super::layer_menu::target_masks;
-use super::{CommandSpec, b_p, bad, f_p, has_comp, has_layers, layer_mut, layer_p, str_p};
+use super::{CommandSpec, b_p, bad, f_p, has_comp, has_layers, layer_mut, layer_p, merge_p, str_p};
 use crate::{EngineError, Result, Session, VertexRef, cmd};
 
 // ---------------------------------------------------------------- RotoBezier
@@ -308,7 +308,7 @@ fn free_transform(s: &mut Session, p: &Value) -> Result<Value> {
         let y = v[1] * scale[1];
         [x * c - y * sn, x * sn + y * c]
     };
-    let n = s.edit("Free Transform Points", None, |proj, _| {
+    let n = s.edit("Free Transform Points", merge_p(p), |proj, _| {
         let mut n = 0;
         for (lid, uid) in &targets {
             let l = layer_mut(proj, cid, *lid)?;
@@ -542,7 +542,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Free Transform Points",
             ["Layer", "Mask and Shape Path"],
             None,
-            "{layer?, mask?, scale?: % | [x%, y%], rotation?: deg, offset?: [dx, dy], anchor?: [x, y]}",
+            "{layer?, mask?, scale?: % | [x%, y%], rotation?: deg, offset?: [dx, dy], anchor?: [x, y], merge?: string}",
             has_layers,
             free_transform
         ),

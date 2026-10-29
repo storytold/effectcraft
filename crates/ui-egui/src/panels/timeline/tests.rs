@@ -79,7 +79,7 @@ fn a_track_matte_mode_without_a_matte_takes_the_layer_above() {
     let (bottom, matte, top) = (find(&s, "Chain Bottom"), find(&s, "Matte"), find(&s, "Chain Top"));
     let candidates = [top.id, matte.id];
     let pick = |s: &mut effectcraft_engine::Session, name: &str, i: usize, choice: &str| {
-        let (id, params) = track_matte_pick(&find(s, name), &candidates, i, choice).expect("a menu item is an action");
+        let (id, params) = track_matte_pick(&[find(s, name).id.0], &candidates, i, choice).expect("a menu item is an action");
         s.execute(&id, params)
     };
     pick(&mut s, "Chain Bottom", 5, "Alpha Inverted Matte").unwrap();
@@ -97,7 +97,7 @@ fn a_track_matte_mode_without_a_matte_takes_the_layer_above() {
     assert!(pick(&mut s, "Chain Top", 5, "Alpha Matte").is_err());
     pick(&mut s, "Chain Bottom", 0, "No Track Matte").unwrap();
     assert!(find(&s, "Chain Bottom").track_matte.is_none());
-    assert!(track_matte_pick(&bottom, &candidates, 1, "-").is_none(), "a separator does nothing");
+    assert!(track_matte_pick(&[bottom.id.0], &candidates, 1, "-").is_none(), "a separator does nothing");
 }
 
 /// #957: vector footage gets the Continuously Rasterize switch; raster footage does not.

@@ -413,7 +413,8 @@ fn get_3d(s: &mut Session, p: &Value) -> Result<Value> {
     let (w, h) = (comp.width as f64, comp.height as f64);
     let vs = s.state.views3d.get(&cid).cloned().unwrap_or_default();
     let t = s.state.times.get(&cid).copied().unwrap_or(Tick::ZERO);
-    let ctx = EvalCtx { project: &s.project, comp_id: cid, comp, time: t, expr: s.expr.as_deref(), footage: None };
+    let ctx =
+        EvalCtx { project: &s.project, comp_id: cid, comp, time: t, expr: s.expr.as_deref(), footage: None, property_overrides: &[], media_overrides: &[] };
     let cam = vs.override_camera(w, h).unwrap_or_else(|| camera::active_camera(&ctx));
     let f = cam.forward();
     let lights: Vec<Value> = comp
@@ -555,7 +556,8 @@ fn auto_orient(s: &mut Session, p: &Value) -> Result<Value> {
 /// through each layer's world matrix; cameras and lights contribute their position).
 fn layer_points(s: &Session, cid: ItemId, ids: &[LayerId], t: Tick) -> Vec<Vec3> {
     let Some(comp) = s.project.comp(cid) else { return vec![] };
-    let ctx = EvalCtx { project: &s.project, comp_id: cid, comp, time: t, expr: s.expr.as_deref(), footage: None };
+    let ctx =
+        EvalCtx { project: &s.project, comp_id: cid, comp, time: t, expr: s.expr.as_deref(), footage: None, property_overrides: &[], media_overrides: &[] };
     let mut out = vec![];
     for l in comp.layers.iter().filter(|l| ids.contains(&l.id)) {
         let m = ctx.world_matrix(l);

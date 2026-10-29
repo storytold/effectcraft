@@ -707,14 +707,28 @@ const JAPANESE_FAMILIES: &[&str] = &[
 ];
 /// Han ideograph families for Simplified Chinese, in the order the platforms' own fallback tables
 /// prefer them (Windows, macOS, then the Linux/Noto names). Missing ones cost one name lookup each.
-const SIMPLIFIED_CHINESE_FAMILIES: &[&str] =
-    &["Microsoft YaHei", "SimSun", "PingFang SC", "Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC", "WenQuanYi Micro Hei"];
+/// `Hiragino Sans GB`, `Heiti SC` and `Songti SC` are the Simplified faces a macOS install without
+/// the on-demand PingFang has (macOS 27 on an English install ships them, not PingFang): without
+/// them Chinese Han text fell through to the Japanese face and drew Japanese glyph forms (#453).
+const SIMPLIFIED_CHINESE_FAMILIES: &[&str] = &[
+    "Microsoft YaHei",
+    "SimSun",
+    "PingFang SC",
+    "Hiragino Sans GB",
+    "Heiti SC",
+    "Songti SC",
+    "STSong",
+    "Noto Sans CJK SC",
+    "Noto Sans SC",
+    "Source Han Sans SC",
+    "WenQuanYi Micro Hei",
+];
 /// The same for Traditional Chinese. The two scripts share almost all of their code points but not
 /// the glyph forms (`东` against `東`'s neighbours, `直`, `骨`), so one list for both drew a
 /// Traditional interface with Simplified forms - the faces do not differ in *coverage*, which is
 /// what the fallback search checks, so the script has to pick the list.
 const TRADITIONAL_CHINESE_FAMILIES: &[&str] =
-    &["Microsoft JhengHei", "MingLiU", "PingFang TC", "Heiti TC", "Hiragino Sans CNS", "Noto Sans CJK TC", "Noto Sans TC", "Source Han Sans TC"];
+    &["Microsoft JhengHei", "MingLiU", "PingFang TC", "Heiti TC", "Hiragino Sans CNS", "Songti TC", "Noto Sans CJK TC", "Noto Sans TC", "Source Han Sans TC"];
 const KOREAN_FAMILIES: &[&str] = &["Malgun Gothic", "Gulim", "Apple SD Gothic Neo", "Noto Sans CJK KR", "Noto Sans KR", "Source Han Sans KR", "NanumGothic"];
 /// The platforms' plain text families for the other scripts the bundled fonts lack, in the same
 /// order (Windows, macOS, then the Linux/Noto names).

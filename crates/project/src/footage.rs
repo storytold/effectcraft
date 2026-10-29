@@ -1,4 +1,4 @@
-use super::settings::yes;
+use super::settings::{Marker, yes};
 use super::{ColorSpace, Deserialize, FrameRate, Serialize, Tick};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,6 +115,10 @@ pub struct Footage {
     /// timecode isn't read). It only relabels source time, as in After Effects.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_timecode: Option<i64>,
+    /// Markers the file carries (a WAV's cue points and XMP markers), at footage time. A layer
+    /// made from the footage starts with them, and Update Markers From Source copies new ones.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub markers: Vec<Marker>,
 }
 
 fn is_default<T: Default + PartialEq>(v: &T) -> bool {
@@ -150,6 +154,7 @@ impl Default for Footage {
             page: 0,
             alphabetical: false,
             start_timecode: None,
+            markers: vec![],
         }
     }
 }

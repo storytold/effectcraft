@@ -126,12 +126,18 @@ impl EffectcraftApp {
 
     /// Request a prefetch frame render (no-op if cached/in flight).
     pub fn request_frame(&self, comp: ItemId, frame: i64, scale: f64) {
-        self.request_frame_with(comp, frame, scale, false);
+        self.request_frame_with(comp, frame, scale, frames::Frames::request);
     }
 
     /// Request the frame on screen: rendered before any queued prefetch.
     pub fn request_frame_urgent(&self, comp: ItemId, frame: i64, scale: f64) {
-        self.request_frame_with(comp, frame, scale, true);
+        self.request_frame_with(comp, frame, scale, frames::Frames::request_urgent);
+    }
+
+    /// Request a frame nobody waits for (Cache Frames When Idle): rendered on one thread
+    /// (`Frames::request_background`).
+    pub fn request_frame_background(&self, comp: ItemId, frame: i64, scale: f64) {
+        self.request_frame_with(comp, frame, scale, frames::Frames::request_background);
     }
 
     /// Render options of viewer frames of `comp` at `scale`.
@@ -152,15 +158,17 @@ impl EffectcraftApp {
         }
     }
 
-    fn request_frame_with(&self, comp: ItemId, frame: i64, scale: f64, urgent: bool) {
+    fn request_frame_with(
+        &self,
+        comp: ItemId,
+        frame: i64,
+        scale: f64,
+        request: fn(&frames::Frames, &frames::RenderSource, FrameKey, ItemId, Tick, RenderOpts),
+    ) {
         let Some(c) = self.session.project.comp(comp) else { return };
         let key = self.frame_key(comp, frame, scale);
         let t = c.frame_rate.tick_of(frame);
         let opts = self.frame_opts(comp, scale);
-        if urgent {
-            self.frames.request_urgent(&self.render_source(), key, comp, t, opts);
-        } else {
-            self.frames.request(&self.render_source(), key, comp, t, opts);
-        }
+        request(&self.frames, &self.render_source(), key, comp, t, opts);
     }
 }

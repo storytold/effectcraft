@@ -46,6 +46,7 @@ impl GBuf {
 
     /// Buf::pad: grow by `pad` transparent pixels on every side.
     pub fn pad(&mut self, e: &mut Enc, pad: u32) -> Option<()> {
+        let pad = effectcraft_effects::pad_within_budget(self.img.width, self.img.height, pad);
         if pad == 0 {
             return Some(());
         }

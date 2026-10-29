@@ -207,7 +207,7 @@ pub(crate) fn source_frame(
     t: Tick,
     expr: Option<&dyn ExprHost>,
 ) -> Option<(Arc<Image>, [f64; 2])> {
-    let ctx = EvalCtx { project, comp_id: cid, comp, time: t, expr, footage: None };
+    let ctx = EvalCtx { project, comp_id: cid, comp, time: t, expr, footage: None, property_overrides: &[], media_overrides: &[] };
     if let effectcraft_project::LayerSource::Footage { item } = &layer.source
         && let Some(effectcraft_project::ItemKind::Footage(f)) = project.item(*item).map(|i| &i.kind)
         && f.has_video

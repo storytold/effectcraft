@@ -48,6 +48,8 @@ pub enum Icon {
     Speaker,
     Solo,
     Lock,
+    /// An open padlock: the shackle lifted clear of the body on the right.
+    LockOpen,
     Shy,
     Collapse,
     Quality,
@@ -400,6 +402,12 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
         Lock => {
             pen.rect(3.5, 7.0, 12.5, 14.0);
             pen.arc(8.0, 7.0, 3.0, 180.0, 360.0);
+            pen.dot(8.0, 10.5, 1.0);
+        }
+        LockOpen => {
+            pen.rect(3.5, 7.0, 12.5, 14.0);
+            pen.arc(8.0, 4.0, 3.0, 180.0, 360.0);
+            pen.line(&[(5.0, 4.0), (5.0, 7.0)]);
             pen.dot(8.0, 10.5, 1.0);
         }
         Shy => {

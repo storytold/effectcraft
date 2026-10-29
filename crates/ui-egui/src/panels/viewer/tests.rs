@@ -139,3 +139,15 @@ fn gizmo_segments_clip_at_the_near_plane() {
     assert!(s[1][0] > 10.0 && s[1][0].is_finite(), "toward the camera it grows, never flips: {s:?}");
     assert!(project_segment(&pc, vec3(0.0, 0.0, -200.0), vec3(0.0, 0.0, -300.0)).is_none());
 }
+
+/// #999: a vertex drag pans the view only near or past the edge, toward it, faster further out.
+#[test]
+fn edge_pan_speed_moves_toward_the_edge() {
+    let area = Rect::from_min_max(pos2(100.0, 50.0), pos2(900.0, 650.0));
+    assert_eq!(edge_pan_speed(area, pos2(500.0, 350.0)), egui::Vec2::ZERO);
+    let left = edge_pan_speed(area, pos2(105.0, 350.0));
+    assert!(left.x > 0.0 && left.y == 0.0, "near the left edge the view moves right to show more: {left:?}");
+    assert!(edge_pan_speed(area, pos2(20.0, 350.0)).x > left.x, "faster past the edge");
+    let corner = edge_pan_speed(area, pos2(950.0, 700.0));
+    assert!(corner.x < 0.0 && corner.y < 0.0, "{corner:?}");
+}

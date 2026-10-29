@@ -61,7 +61,7 @@ pub fn preview(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let mut yy = y + 46.0;
 
     // Shortcut.
-    label(yy, "Shortcut");
+    label(yy, tr("Shortcut"));
     let names: Vec<String> = PreviewShortcut::ALL.iter().map(|s| s.label().to_string()).collect();
     if let Some(i) = dropdown_row(
         app,
@@ -91,14 +91,14 @@ pub fn preview(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let row = if i < 4 { i / 2 } else { i - 2 };
         let cx = x0 + col as f32 * 110.0 - 2.0;
         let cy = yy + row as f32 * 22.0;
-        if check_row(app, ui, &p, pos2(cx, cy), key, text, on) {
+        if check_row(app, ui, &p, pos2(cx, cy), key, tr(text), on) {
             changes.push(json!({"shortcut": current.id(), key: !on}));
         }
     }
     yy += 4.0 * 22.0 + 6.0;
 
     // Range (and the pre/post-roll of Play Around Current Time).
-    label(yy, "Range");
+    label(yy, tr("Range"));
     let ranges: Vec<String> = PreviewRange::ALL.iter().map(|r| r.label().to_string()).collect();
     let range_ids = ["workArea", "workAreaExtended", "entireDuration", "aroundCurrentTime"];
     if let Some(i) = dropdown_row(
@@ -116,7 +116,7 @@ pub fn preview(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     if o.range == PreviewRange::AroundCurrentTime {
         for (k, (key, text, v)) in [("preRoll", "Pre-roll", o.pre_roll), ("postRoll", "Post-roll", o.post_roll)].into_iter().enumerate() {
             let lx = xv + k as f32 * 100.0;
-            p.text(pos2(lx, yy), Align2::LEFT_CENTER, text, Tokens::ui(11.5), t.text_dim);
+            p.text(pos2(lx, yy), Align2::LEFT_CENTER, tr(text), Tokens::ui(11.5), t.text_dim);
             let (r, nv, _) = widgets::hot_number_at(
                 ui,
                 pos2(lx + 52.0, yy - 9.0),
@@ -134,7 +134,7 @@ pub fn preview(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
 
     // Play From.
-    label(yy, "Play From");
+    label(yy, tr("Play From"));
     let froms: Vec<String> = PlayFrom::ALL.iter().map(|f| f.label().to_string()).collect();
     if let Some(i) = dropdown_row(
         app,
@@ -151,7 +151,7 @@ pub fn preview(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
 
     // Frame Rate, Skip, Resolution.
     let comp_fps = app.session.active_comp().map(|c| c.frame_rate.as_f64());
-    label(yy, "Frame Rate");
+    label(yy, tr("Frame Rate"));
     const RATES: [f64; 12] = [8.0, 10.0, 12.0, 12.5, 15.0, 23.976, 24.0, 25.0, 29.97, 30.0, 50.0, 60.0];
     let auto = format!("({:.2}) Auto", comp_fps.unwrap_or(0.0));
     let mut rates = vec![auto.clone()];
@@ -180,7 +180,7 @@ pub fn preview(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         changes.push(json!({"shortcut": current.id(), "skip": nv.round() as u32}));
     }
     yy += 24.0;
-    label(yy, "Resolution");
+    label(yy, tr("Resolution"));
     let ress: Vec<String> = PreviewResolution::ALL.iter().map(|r| r.label().to_string()).collect();
     let res_ids = ["auto", "full", "half", "third", "quarter", "custom"];
     if let Some(i) = dropdown_row(
@@ -209,7 +209,7 @@ pub fn preview(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         }
     }
     yy += 24.0;
-    if check_row(app, ui, &p, pos2(x0 - 2.0, yy), "fullScreen", "Full Screen", o.full_screen) {
+    if check_row(app, ui, &p, pos2(x0 - 2.0, yy), "fullScreen", tr("Full Screen"), o.full_screen) {
         changes.push(json!({"shortcut": current.id(), "fullScreen": !o.full_screen}));
     }
     yy += 24.0;
@@ -217,7 +217,7 @@ pub fn preview(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     // What stopping does.
     p.text(pos2(x0, yy), Align2::LEFT_CENTER, tr_args("On ({}) stop:", &[&(current.label())]), Tokens::ui(11.5), t.text_dim);
     yy += 20.0;
-    if check_row(app, ui, &p, pos2(x0 - 2.0, yy), "playCachedFrames", "If caching, play cached frames", o.play_cached_frames) {
+    if check_row(app, ui, &p, pos2(x0 - 2.0, yy), "playCachedFrames", tr("If caching, play cached frames"), o.play_cached_frames) {
         changes.push(json!({"shortcut": current.id(), "playCachedFrames": !o.play_cached_frames}));
     }
     yy += 22.0;

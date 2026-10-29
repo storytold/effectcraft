@@ -376,7 +376,7 @@ async fn gif_export(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut State<'_
         let end = (i + batch).min(st.total);
         let frames: Vec<gif::Frame<'static>> = job
             .frames(comp, (i..end).collect(), |_, img| {
-                let mut px = job.pixels(&img, comp, job.output.channels, w, h);
+                let mut px = job.pixels_with(&img, comp, job.output.channels, w, h, false);
                 gif::Frame::from_rgba_speed(w as u16, h as u16, &mut px, 10)
             })
             .await;

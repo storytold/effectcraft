@@ -609,6 +609,7 @@ fn delete_all_markers(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn track_matte_op(s: &mut Session, p: &Value) -> Result<Value> {
     let (cid, ids) = layers_p(s, p)?;
+    let ids = super::unlocked(s, cid, ids, "layer.trackMatte")?;
     let op = str_p(p, "op").ok_or_else(|| bad("layer.trackMatte", "missing `op`"))?.to_string();
     let kind = match op.as_str() {
         "alpha" => Some(MatteKind::Alpha),

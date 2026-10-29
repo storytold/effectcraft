@@ -151,7 +151,16 @@ fn vertex_delta(app: &EffectcraftApp, layer: effectcraft_engine::project::LayerI
     let s = &app.session;
     let (Some(cid), Some(comp)) = (s.active_comp_id(), s.active_comp()) else { return d };
     let Some(l) = comp.layer(layer) else { return d };
-    let ectx = effectcraft_engine::render::EvalCtx { project: &s.project, comp_id: cid, comp, time: s.time(), expr: s.expr.as_deref(), footage: None };
+    let ectx = effectcraft_engine::render::EvalCtx {
+        project: &s.project,
+        comp_id: cid,
+        comp,
+        time: s.time(),
+        expr: s.expr.as_deref(),
+        footage: None,
+        property_overrides: &[],
+        media_overrides: &[],
+    };
     let (l2c, _) = crate::panels::viewer::l2c(&ectx, l);
     l2c.inverse().map_or(d, |inv| {
         let v = inv.apply_vec(vec2(d[0], d[1]));
@@ -223,8 +232,13 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
             return run_engine(app, ctx, "edit.pasteSvg", json!({"svg": svg}));
         }
     }
-    // Clear follows panel focus, including the Edit menu and keyboard shortcut.
+    // Clear follows panel focus, including the Edit menu and keyboard shortcut. An open text
+    // edit stands down: the user is working in a composition, and the Project-panel redirect
+    // would delete it without asking when nothing uses it (#2227).
     if id == "edit.clear" && params.as_object().is_some_and(|p| p.is_empty()) && app.ui.focused == PanelKind::Project {
+        if app.session.state.text_edit.is_some() {
+            return Ok(Value::Null);
+        }
         // Through `invoke`, so deleting items that compositions use still asks first (M3.16).
         return invoke(app, ctx, "project.delete", json!({}));
     }

@@ -174,6 +174,8 @@ pub(crate) struct Decider<'a> {
     ac_q: f32,
     dc_qi: i64,
     ac_qi: i64,
+    /// Smallest magnitude that quantises to a non-zero level, `[dc, ac][intra]`.
+    dead_zone: [[f32; 2]; 2],
     lambda: f64,
     lambda_sad: f64,
     /// Half-sample interpolations of the reference luma (visible area): (8, 0), (0, 8), (8, 8).
@@ -183,6 +185,9 @@ pub(crate) struct Decider<'a> {
 }
 
 const MODE_BITS_INTRA: f64 = 3.0;
+/// Dead-zone quantiser rounding offsets (below one half) for inter and intra blocks.
+const INTER_RND: f32 = 0.30;
+const INTRA_RND: f32 = 0.38;
 
 impl<'a> Decider<'a> {
     pub fn new(g: &'a FrameGeom, bd: u32, qidx: u8, intra_only: bool, src: &'a [Plane; 3], refr: Option<&'a RefFrame>) -> Self {
@@ -209,6 +214,7 @@ impl<'a> Decider<'a> {
             ac_q: ac_qi as f32,
             dc_qi,
             ac_qi,
+            dead_zone: [dc_qi, ac_qi].map(|q| [INTER_RND, INTRA_RND].map(|rnd| zero_threshold(q as f32, rnd))),
             lambda,
             lambda_sad: lambda.sqrt(),
             half: match refr {
@@ -577,8 +583,9 @@ impl<'a> Decider<'a> {
             let (dy, dx) = (m[0] >> 3, m[1] >> 3);
             dx >= lim_x.0 && dx <= lim_x.1 && dy >= lim_y.0 && dy <= lim_y.1
         };
+        let lg = log2_table();
         let mv_bits = |m: [i32; 2]| -> f64 {
-            let comp = |d: i32| if d == 0 { 0.5 } else { 2.0 + 2.0 * ((d.abs() / 8) as f64 + 1.0).log2() };
+            let comp = |d: i32| if d == 0 { 0.5 } else { 2.0 + 2.0 * log2_of(lg, (d.abs() / 8) as usize + 1) };
             comp(m[0] - pred_mv[0]) + comp(m[1] - pred_mv[1])
         };
         let cost =
@@ -863,12 +870,18 @@ impl<'a> Decider<'a> {
         }
         forward_2d(res, coef, n, tx_type);
         // dead-zone quantiser: rounding offset below one half
-        let rnd = if intra { 0.38f32 } else { 0.30f32 };
+        let rnd = if intra { INTRA_RND } else { INTER_RND };
+        let [dc_thr, ac_thr] = [self.dead_zone[0][intra as usize], self.dead_zone[1][intra as usize]];
         levels.fill(0);
         let mut nonzero = false;
         for (k, (&cf, l)) in coef.iter().zip(levels.iter_mut()).enumerate() {
-            let q = if k == 0 { self.dc_q } else { self.ac_q };
-            let a = (cf.abs() / q + rnd).floor() as i32;
+            let (q, thr) = if k == 0 { (self.dc_q, dc_thr) } else { (self.ac_q, ac_thr) };
+            // dead zone: below the exact threshold the level is zero, no division needed
+            if cf.abs() < thr {
+                continue;
+            }
+            // the operand is >= 0, so truncation equals floor
+            let a = (cf.abs() / q + rnd) as i32;
             if a != 0 {
                 *l = if cf < 0.0 { -a.min(1 << 16) } else { a.min(1 << 16) };
                 nonzero = true;
@@ -913,6 +926,33 @@ impl<'a> Decider<'a> {
     }
 }
 
+/// Smallest `x >= 0` with `(x / q + rnd) as i32 >= 1` in f32 arithmetic. The expression is
+/// monotone in `x`, so a binary search over the bit patterns finds the exact boundary.
+fn zero_threshold(q: f32, rnd: f32) -> f32 {
+    let (mut lo, mut hi) = (0u32, f32::MAX.to_bits());
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if (f32::from_bits(mid) / q + rnd) as i32 >= 1 {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    f32::from_bits(lo)
+}
+
+const LOG2_TABLE_LEN: usize = 1025;
+
+/// `log2(i)` for `i < LOG2_TABLE_LEN`, computed with the same `f64::log2` call as the direct form.
+fn log2_table() -> &'static [f64; LOG2_TABLE_LEN] {
+    static TABLE: std::sync::OnceLock<[f64; LOG2_TABLE_LEN]> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| std::array::from_fn(|i| (i as f64).log2()))
+}
+
+fn log2_of(table: &[f64; LOG2_TABLE_LEN], v: usize) -> f64 {
+    if v < LOG2_TABLE_LEN { table[v] } else { (v as f64).log2() }
+}
+
 /// Unnormalised Walsh-Hadamard transform of 4 or 8 values, in place.
 fn hadamard(v: &mut [i32]) {
     let n = v.len();
@@ -941,13 +981,14 @@ fn estimate_bits(levels: &[i32], tx_sz: usize) -> f64 {
     if eob == 0 {
         return 1.0;
     }
-    let mut bits = 3.0 + (eob as f64).log2();
+    let lg = log2_table();
+    let mut bits = 3.0 + log2_of(lg, eob);
     for &pos in &scan[..eob] {
         let a = levels[pos as usize].unsigned_abs();
         bits += match a {
             0 => 0.7,
             1 => 2.5,
-            _ => 3.5 + 1.6 * (a as f64).log2(),
+            _ => 3.5 + 1.6 * log2_of(lg, a as usize),
         };
     }
     bits
@@ -959,5 +1000,66 @@ pub(crate) fn scan_for(tx_sz: usize) -> &'static [u16] {
         TX_8X8 => &DEFAULT_SCAN_8X8,
         TX_16X16 => &DEFAULT_SCAN_16X16,
         _ => &DEFAULT_SCAN_32X32,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tables::{AC_QLOOKUP, DC_QLOOKUP};
+
+    /// The quantiser as it was before the dead-zone threshold and the truncation.
+    fn quant_ref(cf: f32, q: f32, rnd: f32) -> i32 {
+        (cf.abs() / q + rnd).floor() as i32
+    }
+
+    fn quant_new(cf: f32, q: f32, rnd: f32, thr: f32) -> i32 {
+        if cf.abs() < thr {
+            return 0;
+        }
+        (cf.abs() / q + rnd) as i32
+    }
+
+    #[test]
+    fn dead_zone_threshold_is_exact() {
+        let mut state = 0x1234_5678_9abc_def0u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for table in AC_QLOOKUP.iter().chain(DC_QLOOKUP.iter()) {
+            for &qi in table.iter() {
+                let q = qi as f32;
+                for rnd in [INTER_RND, INTRA_RND] {
+                    let thr = zero_threshold(q, rnd);
+                    // the boundary itself and its neighbours
+                    let b = thr.to_bits();
+                    for bits in b.saturating_sub(3)..=b + 3 {
+                        let cf = f32::from_bits(bits);
+                        assert_eq!(quant_ref(cf, q, rnd), quant_new(cf, q, rnd, thr), "q {q} rnd {rnd} cf {cf}");
+                        assert_eq!(quant_ref(-cf, q, rnd), quant_new(-cf, q, rnd, thr));
+                    }
+                    for _ in 0..200 {
+                        let cf = f32::from_bits((next() >> 32) as u32 & 0x7fff_ffff);
+                        if cf.is_nan() {
+                            continue;
+                        }
+                        assert_eq!(quant_ref(cf, q, rnd), quant_new(cf, q, rnd, thr));
+                        let cf = (next() % 100_000) as f32 / 100.0;
+                        assert_eq!(quant_ref(cf, q, rnd), quant_new(cf, q, rnd, thr));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn log2_table_matches_direct_log2() {
+        let t = log2_table();
+        for v in 1..3000usize {
+            assert_eq!(log2_of(t, v).to_bits(), (v as f64).log2().to_bits(), "{v}");
+        }
     }
 }

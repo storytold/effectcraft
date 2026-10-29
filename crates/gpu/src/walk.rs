@@ -89,7 +89,7 @@ fn draw_comp<'a>(e: &mut Enc, r: &Renderer<'a>, ctx: &EvalCtx<'a>, canvas: &mut 
             i = j;
         } else {
             match r.collapsed(ctx, visible[i]) {
-                Some(item) => draw_collapsed(e, r, ctx, visible[i], item, canvas)?,
+                Some(collapsed) => draw_collapsed(e, r, ctx, visible[i], &collapsed, canvas)?,
                 None => draw_layer(e, r, ctx, visible[i], canvas)?,
             }
             i += 1;
@@ -187,19 +187,26 @@ fn draw_split(e: &mut Enc, r: &Renderer, ctx: &EvalCtx, split: &effectcraft_rend
     Some(cv)
 }
 
-fn draw_collapsed<'a>(e: &mut Enc, r: &Renderer<'a>, ctx: &EvalCtx<'a>, layer: &Layer, item: ItemId, canvas: &mut GpuImage) -> Option<()> {
+fn draw_collapsed<'a>(
+    e: &mut Enc,
+    r: &Renderer<'a>,
+    ctx: &EvalCtx<'a>,
+    layer: &'a Layer,
+    collapsed: &effectcraft_render::Collapsed,
+    canvas: &mut GpuImage,
+) -> Option<()> {
     let opacity = r.layer_opacity(ctx, layer);
     if opacity <= 0.0 {
         return Some(());
     }
     let matte = r.track_matte(ctx, layer).is_some();
     if layer.blend_mode == BlendMode::Normal && !matte && !layer.preserve_transparency {
-        if let Some((sub, nctx)) = r.collapse_into(ctx, layer, item, opacity) {
+        if let Some((sub, nctx)) = r.collapse_into(ctx, layer, collapsed, opacity) {
             draw_comp(e, &sub, &nctx, canvas)?;
         }
         return Some(());
     }
-    let Some((sub, nctx)) = r.collapse_into(ctx, layer, item, 1.0) else { return Some(()) };
+    let Some((sub, nctx)) = r.collapse_into(ctx, layer, collapsed, 1.0) else { return Some(()) };
     let mut iso = e.zeros(canvas.width, canvas.height);
     draw_comp(e, &sub, &nctx, &mut iso)?;
     composite_iso(e, r, ctx, layer, iso, canvas, opacity)

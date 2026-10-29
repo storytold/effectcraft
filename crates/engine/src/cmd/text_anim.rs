@@ -142,6 +142,7 @@ fn add_animator_prop(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let layer = s.project.comp(cid).and_then(|c| c.layer(lid)).cloned().ok_or_else(|| bad(C, "no layer"))?;
     let auid = animator_uid(s, &layer, p, C)?;
+    let mut index = 0;
     s.edit("Add Text Animator Property", None, |proj, _| {
         let mut next = proj.next_id;
         let mut ids = Ids(&mut next);
@@ -151,10 +152,13 @@ fn add_animator_prop(s: &mut Session, p: &Value) -> Result<Value> {
         for k in &kinds {
             add_props(&mut ids, anim, k, three);
         }
+        // The requested property's 1-based position in the Properties group. A companion (such as
+        // Tracking Type) is added before it, so the first new child is not always the one asked for.
+        index = kinds.first().and_then(|k| anim.sub("properties")?.children.iter().position(|n| n.match_id() == k.as_str())).map_or(0, |i| i + 1);
         proj.next_id = next;
         Ok(())
     })?;
-    Ok(json!({"animator": auid}))
+    Ok(json!({"animator": auid, "index": index}))
 }
 
 pub(crate) fn add_selector(s: &mut Session, p: &Value) -> Result<Value> {

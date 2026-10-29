@@ -152,7 +152,7 @@ fn clear_recent_presets(s: &mut Session, _: &Value) -> Result<Value> {
 
 fn save_copy_xml(s: &mut Session, p: &Value) -> Result<Value> {
     let path = str_p(p, "path").ok_or_else(|| bad("file.saveCopyAsXml", "missing `path` (.ecprojx)"))?;
-    let xml = crate::xml_project::to_xml(&s.project.to_file_json_with_view(&s.saved_view())?).map_err(EngineError::Other)?;
+    let xml = crate::xml_project::to_xml(&s.project.to_file_json_with_view(&s.saved_view(), false)?).map_err(EngineError::Other)?;
     s.services.write_file(path, xml.as_bytes()).map_err(|e| EngineError::Other(format!("cannot write {path}: {e}")))?;
     s.toast(format!("Saved an XML copy to {path}"));
     Ok(json!({"path": path, "bytes": xml.len()}))

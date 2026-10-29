@@ -7,10 +7,34 @@ work apply to everyone, people and AI agents alike, and they are not negotiable.
 
 You need [Rust](https://rustup.rs/) 1.95 or newer.
 
+On Linux the desktop app plays preview sound through `cpal`, so the build needs a usable ALSA
+pkg-config package: an `alsa.pc` that pkg-config can find, naming the linkable ALSA runtime
+library (usually `libasound.so.2`). `alsa-sys` runs pkg-config at build time; it does not compile
+ALSA's headers. Without a usable package the build fails at link time with an unrelated-looking
+error; `cargo xtask ci` probes pkg-config up front and names the package:
+
+```sh
+sudo dnf install alsa-lib-devel        # Fedora
+sudo apt install libasound2-dev        # Debian / Ubuntu
+sudo pacman -S alsa-lib                # Arch
+```
+
+If you cannot install the package, point `PKG_CONFIG_PATH` at a directory holding an `alsa.pc`
+whose `Libs` line names your system's `libasound` (usually `libasound.so.2`); every CI run needs
+that variable set.
+
 ```sh
 cargo run -p effectcraft -- --demo       # the desktop app, with the demo project
 cargo test --workspace
 cargo xtask ci                           # what every commit must pass
+```
+
+The default `dev` profile keeps debug info to line tables: builds are fast and panics/backtraces
+still name the file and line, but a debugger cannot show local variables. For an interactive
+debugger session use the `dev-full` profile, which is the same build with full debug info:
+
+```sh
+cargo run --profile dev-full -p effectcraft -- --demo
 ```
 
 ## Ground rules

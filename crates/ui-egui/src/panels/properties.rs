@@ -70,7 +70,16 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let project = app.session.project.clone();
     let expr = app.session.expr.clone();
     let now = app.session.time();
-    let ectx = EvalCtx { project: &project, comp_id: cid, comp: &comp, time: now, expr: expr.as_deref(), footage: None };
+    let ectx = EvalCtx {
+        project: &project,
+        comp_id: cid,
+        comp: &comp,
+        time: now,
+        expr: expr.as_deref(),
+        footage: None,
+        property_overrides: &[],
+        media_overrides: &[],
+    };
     let x0 = rect.min.x + PAD;
     let w = rect.width() - 2.0 * PAD;
     let scroll = widgets::PanelScroll::begin(ui, egui::Id::unique("props-scroll"), rect);
@@ -200,6 +209,8 @@ fn triangle(p: &egui::Painter, c: egui::Pos2, left: bool, col: Color32) {
 #[allow(clippy::too_many_arguments)]
 fn transform_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, layer: &Layer, pr: &Property, ectx: &EvalCtx, r: Rect, actions: &mut Actions) {
     let t = app.tokens;
+    // The values themselves: red while an expression drives the property (#1306).
+    let vt = t.for_value(pr.has_expression());
     let cy = r.center().y;
     let uid = pr.uid;
     let lid = layer.id.0;
@@ -276,7 +287,7 @@ fn transform_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter,
     match &value {
         Value::Scalar(v) if pr.name == "Rotation" || pr.name.ends_with(" Rotation") => {
             let (_, deg) = super::fx_widgets::split_angle(*v);
-            let (rr, dr, nv) = super::fx_widgets::angle_field(ui, pos2(vx, cy - 9.0), egui::Id::unique(("props-v", uid)), *v, decimals(deg), &t);
+            let (rr, dr, nv) = super::fx_widgets::angle_field(ui, pos2(vx, cy - 9.0), egui::Id::unique(("props-v", uid)), *v, decimals(deg), &vt);
             app.auto.add(&format!("{base}.value"), dr, &pr.name);
             app.auto.add(&format!("{base}.revolutions"), rr, &pr.name);
             if let Some(nv) = nv {
@@ -291,7 +302,7 @@ fn transform_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter,
                 egui::Id::unique(("props-v", uid)),
                 *v,
                 &widgets::HotSpec { speed: 0.5, range, decimals: decimals(*v), suffix },
-                &t,
+                &vt,
             );
             app.auto.add(&format!("{base}.value"), vr, &pr.name);
             if let Some(nv) = nv {
@@ -323,7 +334,7 @@ fn transform_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter,
                     egui::Id::unique(("props-v", uid, d)),
                     c[d],
                     &widgets::HotSpec { speed: 1.0, range: (-1e9, 1e9), decimals: decimals(c[d]), suffix },
-                    &t,
+                    &vt,
                 );
                 app.auto.add(&format!("{base}.value.{d}"), vr, &pr.name);
                 if let Some(nv) = nv {

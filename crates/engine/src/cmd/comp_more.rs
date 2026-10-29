@@ -5,7 +5,7 @@ use effectcraft_project::Marker;
 use effectcraft_time::Tick;
 use serde_json::{Value, json};
 
-use super::{CommandSpec, always, bad, comp_id, f_p, has_comp, has_layers, layers_p, str_p};
+use super::{CommandSpec, always, b_p, bad, comp_id, f_p, has_comp, has_layers, layers_p, str_p};
 use crate::prefs::CompPreset;
 use crate::{EngineError, Result, Session, cmd, query};
 
@@ -82,7 +82,7 @@ pub(crate) fn encode_png(rgba: &[u8], w: u32, h: u32) -> std::result::Result<Vec
 /// Save Frame As ▸ File with `queue`: a Render Queue item for the current frame, from the Frame
 /// Default templates (Edit ▸ Templates).
 fn queue_frame(s: &mut Session, p: &Value) -> Result<Value> {
-    use effectcraft_project::render_queue::{RenderQueueItem, TimeSpan};
+    use effectcraft_project::render_queue::{Channels, RenderQueueItem, TimeSpan};
     use effectcraft_project::render_templates::TemplateSlot;
     let cid = comp_id(s, p)?;
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
@@ -91,6 +91,9 @@ fn queue_frame(s: &mut Session, p: &Value) -> Result<Value> {
     it.settings = s.project.render_templates.default_render_settings(TemplateSlot::Still);
     it.settings.time_span = TimeSpan::Custom { start: t, end: t + comp.frame_duration() };
     it.output = s.project.render_templates.default_output_module(TemplateSlot::Still);
+    if b_p(p, "transparent") == Some(false) {
+        it.output.channels = Channels::Rgb;
+    }
     if let Some(path) = str_p(p, "path") {
         it.output.output = path.to_string();
     } else if !it.output.format.is_sequence() {
@@ -107,7 +110,7 @@ fn queue_frame(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 fn save_frame(s: &mut Session, p: &Value) -> Result<Value> {
-    if p.get("queue").and_then(Value::as_bool) == Some(true) {
+    if b_p(p, "queue") == Some(true) {
         return queue_frame(s, p);
     }
     let path = str_p(p, "path").ok_or_else(|| bad("comp.saveFrameAs", "missing `path` (.png)"))?.to_string();
@@ -117,7 +120,7 @@ fn save_frame(s: &mut Session, p: &Value) -> Result<Value> {
     let scale = f_p(p, "scale").unwrap_or(1.0).clamp(0.01, 4.0);
     let bg = comp.background;
     let img = s.render(cid, t, effectcraft_render::RenderOpts { scale, backend: effectcraft_render::Backend::Auto, ..Default::default() });
-    let rgba = img.to_rgba8_over(bg);
+    let rgba = if b_p(p, "transparent") == Some(false) { img.to_rgba8_over(bg) } else { img.to_rgba8() };
     let png = encode_png(&rgba, img.width, img.height).map_err(|e| EngineError::Other(format!("PNG encoding failed: {e}")))?;
     s.services.write_file(&path, &png).map_err(|e| EngineError::Other(format!("cannot write {path}: {e}")))?;
     s.toast(format!("Saved frame to {path}"));
@@ -235,7 +238,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "File...",
             ["Composition", "Save Frame As"],
             Some("Cmd+Alt+S"),
-            "{path (.png; with queue: an output path or template), time?, scale?, queue?: bool (add a Render Queue item from the Frame Default templates instead of writing now)}",
+            "{path (.png; with queue: an output path or template), time?, scale?, queue?: bool (add a Render Queue item from the Frame Default templates instead of writing now), transparent?: bool (default true)}",
             has_comp,
             save_frame
         ),

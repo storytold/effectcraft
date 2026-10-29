@@ -314,8 +314,78 @@ fn interpolation_with_arrays() {
     assert_eq!(f.pos("ease(time, 0, 1, [0, 0], [100, 50])", 1.0), [100.0, 50.0, 0.0]);
 }
 
-// ---- object model -----------------------------------------------------------------------------
+#[test]
+fn cubic_bezier_curves() {
+    let f = fx();
+    // ease(t, …) is cubic-bezier(1/3, 0, 2/3, 1): x(u) = u and y(u) = 3u² - 2u³.
+    assert_close!(f.num("bezier(0.25, 0, 1, 0, 100, [0.3333333333333333, 0, 0.6666666666666666, 1])", 0.0), f.num("ease(0.25, 0, 1, 0, 100)", 0.0));
+    assert_close!(f.num("bezier(0.5, 0, 1, 0, 100, [0.3333333333333333, 0, 0.6666666666666666, 1])", 0.0), 50.0);
+    // Symmetric ease-in-out: slower at both ends, faster in the middle.
+    let early = f.num("bezier(0.25, 0, 1, 0, 100, [0.42, 0, 0.58, 1])", 0.0);
+    let late = f.num("bezier(0.75, 0, 1, 0, 100, [0.42, 0, 0.58, 1])", 0.0);
+    assert!(early < 25.0 && late > 75.0, "ease-in-out: {early}, {late}");
+    // Control points on the diagonal are linear.
+    assert_close!(f.num("bezier(0.3, 0, 1, 0, 100, [0, 0, 1, 1])", 0.0), 30.0);
+    // t is clamped to tMin..tMax; tMin == tMax behaves like the other helpers.
+    assert_close!(f.num("bezier(-1, 0, 1, 0, 100, [0.42, 0, 0.58, 1])", 0.0), 0.0);
+    assert_close!(f.num("bezier(2, 0, 1, 0, 100, [0.42, 0, 0.58, 1])", 0.0), 100.0);
+    assert_close!(f.num("bezier(5, 2, 2, 0, 100, [0.42, 0, 0.58, 1])", 0.0), 100.0);
+}
 
+#[test]
+fn cubic_bezier_short_form_arrays_and_fallbacks() {
+    let f = fx();
+    // Short form: no tMin / tMax.
+    assert_close!(f.num("bezier(0.25, 10, 20, [0, 0, 1, 1])", 0.0), 12.5);
+    assert_eq!(f.pos("bezier(time, 0, 1, [0, 0], [100, 50], [0.42, 0, 0.58, 1])", 1.0), [100.0, 50.0, 0.0]);
+    // y outside 0..1 overshoots, as CSS allows.
+    let over = f.num("bezier(0.5, 0, 1, 0, 100, [0.5, 2, 0.5, 2])", 0.0);
+    assert!(over > 100.0, "overshoot: {over}");
+    // A curve that is not four finite numbers falls back to linear instead of throwing.
+    assert_close!(f.num("bezier(0.5, 0, 1, 0, 100, [1, 0])", 0.0), 50.0);
+    assert_close!(f.num("bezier(0.5, 0, 1, 0, 100, 'ease')", 0.0), 50.0);
+    // A missing or unusable curve must not consume the last value: read the curve by position.
+    assert_close!(f.num("bezier(0.5, 0, 1, 0, 100)", 0.0), 50.0);
+    assert_close!(f.num("bezier(0.5, 0, 100)", 0.0), 50.0);
+    assert_close!(f.num("bezier(0.5, 0, 100, [1, 0])", 0.0), 50.0);
+    let v = f.ev(f.shape, "contents/#1/contents/fill/color", "bezier(0.5, 0, 1, [0, 0, 0, 1], [1, 1, 1, 1])", 0.0).unwrap();
+    assert_eq!(v, Value::Color([0.5, 0.5, 0.5, 1.0]));
+    // Exactly four values are a curve; extra ones mean the curve is malformed, so linear.
+    assert_close!(f.num("bezier(0.5, 0, 1, 0, 100, [0.42, 0, 0.58, 1, 0])", 0.0), 50.0);
+    assert_close!(f.num("bezier(0.5, 0, 1, 0, 100, [0.42, 0, 0.58, 1, 2, 3])", 0.0), 50.0);
+    // x control points outside 0..1 are clamped, as CSS requires.
+    let v = f.num("bezier(0.5, 0, 1, 0, 100, [-1, 0, 2, 1])", 0.0);
+    assert!(v.is_finite(), "clamped curve: {v}");
+}
+
+#[test]
+fn cubic_bezier_is_accurate_near_the_endpoints() {
+    /// The value the curve reaches at `x`, by bisection on its monotone x(u).
+    fn reference(x1: f64, y1: f64, x2: f64, y2: f64, x: f64) -> f64 {
+        let bx = |u: f64| 3.0 * (1.0 - u) * (1.0 - u) * u * x1 + 3.0 * (1.0 - u) * u * u * x2 + u * u * u;
+        let by = |u: f64| 3.0 * (1.0 - u) * (1.0 - u) * u * y1 + 3.0 * (1.0 - u) * u * u * y2 + u * u * u;
+        let (mut lo, mut hi) = (0.0f64, 1.0f64);
+        for _ in 0..100 {
+            let mid = 0.5 * (lo + hi);
+            if bx(mid) < x {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        by(0.5 * (lo + hi))
+    }
+    // Steep curves: a residual in x is not a residual in y near the endpoints (dy/dx is in the
+    // thousands), so the solver stops on the estimated y error instead.
+    let f = fx();
+    for (c, x) in [([0.0, 1000.0, 1.0, 1.0], 1e-6), ([0.0, 100.0, 1.0, 0.0], 1e-9), ([0.8, -500.0, 1.0, 1.0], 0.999999)] {
+        let got = f.num(&format!("bezier({x}, 0, 1, [{}, {}, {}, {}])", c[0], c[1], c[2], c[3]), 0.0);
+        let want = reference(c[0], c[1], c[2], c[3], x);
+        assert!((got - want).abs() < 1e-6, "curve {c:?} at {x}: {got} vs {want}");
+    }
+}
+
+// ---- object model -----------------------------------------------------------------------------
 #[test]
 fn comp_attributes() {
     let f = fx();
@@ -908,6 +978,49 @@ fn source_rect_at_time() {
     assert!((s[0] + 31.0).abs() < 2.0 && (s[1] + 16.0).abs() < 2.0 && (s[2] - 62.0).abs() < 3.0, "{s:?}");
 }
 
+#[test]
+fn source_dimensions_follow_media_replacement() {
+    let mut p = Project::default();
+    let comp = Comp::new(200, 100, FrameRate::FPS_30, Tick::from_seconds_f64(2.0));
+    let cid = p.add_item("Main", Label::Sandstone, None, ItemKind::Comp(comp.clone().into()));
+    let footage = |p: &mut Project, name: &str, width, height| {
+        p.add_item(
+            name,
+            Label::SeaFoam,
+            None,
+            ItemKind::Footage(effectcraft_project::Footage {
+                path: name.into(),
+                kind: effectcraft_project::FootageKind::Still,
+                width,
+                height,
+                has_video: true,
+                ..Default::default()
+            }),
+        )
+    };
+    let original = footage(&mut p, "original.png", 100, 80);
+    let replacement = footage(&mut p, "replacement.png", 30, 40);
+    let mut l = build::layer(&mut p, &comp, "Clip", LayerSource::Footage { item: original }, (100, 80), None);
+    l.props.prop_mut(ROT).unwrap().expr =
+        Some(Expression { text: "thisLayer.width + thisLayer.height + thisLayer.source.width + sourceRectAtTime().width".into(), enabled: true });
+    let lid = l.id;
+    p.comp_mut(cid).unwrap().layers.push(l);
+    let c = p.comp(cid).unwrap();
+    let l = c.layer(lid).unwrap();
+    let media = effectcraft_render::MediaOverride::new(lid, replacement);
+    let ctx = EvalCtx {
+        project: &p,
+        comp_id: cid,
+        comp: c,
+        time: Tick::ZERO,
+        expr: Some(&Expressions),
+        footage: None,
+        property_overrides: &[],
+        media_overrides: &[media],
+    };
+    assert_eq!(ctx.value(l, l.props.prop(ROT).unwrap()), Value::Scalar(130.0));
+}
+
 // ---- colour -----------------------------------------------------------------------------------
 
 #[test]
@@ -1115,7 +1228,16 @@ fn text_expression_selector_values() {
     let sel_of = |p: &Project| {
         let c = p.comp(cid).unwrap();
         let l = c.layer(lid).unwrap();
-        let ctx = EvalCtx { project: p, comp_id: cid, comp: c, time: Tick::ZERO, expr: Some(&Expressions), footage: None };
+        let ctx = EvalCtx {
+            project: p,
+            comp_id: cid,
+            comp: c,
+            time: Tick::ZERO,
+            expr: Some(&Expressions),
+            footage: None,
+            property_overrides: &[],
+            media_overrides: &[],
+        };
         let doc = effectcraft_render::text::source_text(&ctx, l).unwrap();
         let lay = effectcraft_text::layout_doc(&doc);
         let anim = l.props.group("text/animators/#1").unwrap();

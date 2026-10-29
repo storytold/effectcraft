@@ -479,6 +479,19 @@ fn group_has(g: &PropGroup, match_id: &str) -> bool {
 
 /// Feed every property of `g` that can change over time (keyframes or expression) as its value
 /// at the context time. The static structure is hashed separately.
+/// Mix the collapsed-instance overrides that target `id` into a cache key. They replace values
+/// without editing the layer, so a key without them would reuse another instance's buffer.
+fn hash_overrides(h: &mut KeyHasher, ctx: &EvalCtx, id: effectcraft_project::LayerId) {
+    for o in ctx.property_overrides.iter().filter(|o| o.layer == id) {
+        o.prop.hash(h);
+        o.font.hash(h);
+        hash_debug(h, &o.value);
+    }
+    for m in ctx.media_overrides.iter().filter(|m| m.layer == id) {
+        m.item.hash(h);
+    }
+}
+
 fn hash_values(h: &mut KeyHasher, ctx: &EvalCtx, layer: &Layer, g: &PropGroup) {
     for c in &g.children {
         match c {
@@ -605,8 +618,9 @@ fn key_any(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool, fo
             hash_debug(&mut h, s);
         }
         LayerSource::Text | LayerSource::Shape => {}
-        LayerSource::Footage { item } if footage || still_footage(ctx, *item) => {
-            let it = ctx.project.item(*item)?;
+        LayerSource::Footage { item } if footage || still_footage(ctx, ctx.media_item(layer, *item)) => {
+            let item = ctx.media_item(layer, *item);
+            let it = ctx.project.item(item)?;
             let ItemKind::Footage(f) = &it.kind else { return None };
             hash_debug(&mut h, f);
             // A proxy (and its Use Proxy switch) changes the pixels.
@@ -629,6 +643,10 @@ fn key_any(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool, fo
     scale.to_bits().hash(&mut h);
     draft.hash(&mut h);
     layer.id.hash(&mut h);
+    // Collapsed-instance overrides replace values without editing the nested layer, so mix them
+    // into the key: a Font override, effect parameter or any other source-affecting override
+    // must not reuse another instance's processed buffer.
+    hash_overrides(&mut h, ctx, layer.id);
     hash_debug(&mut h, &layer.source);
     // (Audio, Lock and Shy don't change pixels.)
     hash_debug(&mut h, &layer.switches.pixels());

@@ -467,6 +467,7 @@ const JAPANESE: &[(&str, &str)] = &[
     ("Overlay", "オーバーレイ"),
     ("Parameter Name:", "パラメーター名:"),
     ("Parent pick whip: drag onto a layer", "親ピックウィップ：レイヤー上にドラッグ"),
+    ("Track Matte pick whip: drag onto a layer", "トラックマットピックウィップ：レイヤー上にドラッグ"),
     ("Pixel Aspect Ratio:", "ピクセル縦横比:"),
     ("Playing on Video Preview", "ビデオプレビューで再生中"),
     ("Post-Render Action: {}", "レンダリング後の処理：{}"),
@@ -1199,6 +1200,7 @@ const SIMPLIFIED_CHINESE: &[(&str, &str)] = &[
     ("Overlay", "叠加"),
     ("Parameter Name:", "参数名称："),
     ("Parent pick whip: drag onto a layer", "父级拾取器：拖到图层上"),
+    ("Track Matte pick whip: drag onto a layer", "轨道遮罩拾取器：拖到图层上"),
     ("Pixel Aspect Ratio:", "像素长宽比："),
     ("Playing on Video Preview", "在视频预览中播放"),
     ("Post-Render Action: {}", "渲染后动作：{}"),
@@ -1641,6 +1643,49 @@ const SIMPLIFIED_CHINESE: &[(&str, &str)] = &[
     ("Total Offset", "总偏移"),
     ("Per Layer", "每个图层"),
     ("Track", "跟踪"),
+    ("Selection Tool", "选择工具"),
+    ("Hand Tool", "抓手工具"),
+    ("Zoom Tool", "缩放工具"),
+    ("Orbit Around Cursor Tool", "绕行摄像机工具"),
+    ("Pan Under Cursor Tool", "平移摄像机工具"),
+    ("Dolly Towards Cursor Tool", "推拉摄像机工具"),
+    ("Rotation Tool", "旋转工具"),
+    ("Pan Behind (Anchor Point) Tool", "向后平移工具"),
+    ("Rectangle Tool", "矩形工具"),
+    ("Rounded Rectangle Tool", "圆角矩形工具"),
+    ("Ellipse Tool", "椭圆工具"),
+    ("Polygon Tool", "多边形工具"),
+    ("Star Tool", "星形工具"),
+    ("Pen Tool", "钢笔工具"),
+    ("Add Vertex Tool", "添加顶点工具"),
+    ("Delete Vertex Tool", "删除顶点工具"),
+    ("Convert Vertex Tool", "转换顶点工具"),
+    ("Mask Feather Tool", "蒙版羽化工具"),
+    ("Horizontal Type Tool", "横排文字工具"),
+    ("Vertical Type Tool", "直排文字工具"),
+    ("Brush Tool", "画笔工具"),
+    ("Clone Stamp Tool", "仿制图章工具"),
+    ("Eraser Tool", "橡皮擦工具"),
+    ("Roto Brush Tool", "Roto 笔刷工具"),
+    ("Refine Edge Tool", "调整边缘工具"),
+    ("Object Matte Tool", "对象遮罩工具"),
+    ("Puppet Position Pin Tool", "人偶位置控点工具"),
+    ("Puppet Starch Pin Tool", "人偶扑粉控点工具"),
+    ("Puppet Bend Pin Tool", "人偶弯曲控点工具"),
+    ("Puppet Advanced Pin Tool", "人偶高级控点工具"),
+    ("Puppet Overlap Pin Tool", "人偶重叠控点工具"),
+    ("Shortcut", "快捷键"),
+    ("Range", "范围"),
+    ("Play From", "从以下位置播放"),
+    ("Frame Rate", "帧速率"),
+    ("Resolution", "分辨率"),
+    ("Overlays", "叠加"),
+    ("Layer Controls", "图层控制"),
+    ("Loop", "循环"),
+    ("Cache Before Playback", "播放前缓存"),
+    ("Pre-roll", "预卷"),
+    ("Post-roll", "后卷"),
+    ("If caching, play cached frames", "缓存时播放已缓存帧"),
 ];
 
 const TRADITIONAL_CHINESE: &[(&str, &str)] = &[
@@ -1939,6 +1984,7 @@ const TRADITIONAL_CHINESE: &[(&str, &str)] = &[
     ("Overlay", "疊加"),
     ("Parameter Name:", "參數名稱："),
     ("Parent pick whip: drag onto a layer", "上層拾取線：拖到圖層上"),
+    ("Track Matte pick whip: drag onto a layer", "軌道遮罩拾取線：拖到圖層上"),
     ("Pixel Aspect Ratio:", "像素長寬比例："),
     ("Playing on Video Preview", "在視訊預覽中播放"),
     ("Post-Render Action: {}", "算圖後動作：{}"),
@@ -2327,6 +2373,49 @@ const TRADITIONAL_CHINESE: &[(&str, &str)] = &[
     ("Total Offset", "總偏移"),
     ("Per Layer", "每個圖層"),
     ("Track", "追蹤"),
+    ("Selection Tool", "選取工具"),
+    ("Hand Tool", "手形工具"),
+    ("Zoom Tool", "縮放工具"),
+    ("Orbit Around Cursor Tool", "繞行攝影機工具"),
+    ("Pan Under Cursor Tool", "平移攝影機工具"),
+    ("Dolly Towards Cursor Tool", "推拉攝影機工具"),
+    ("Rotation Tool", "旋轉工具"),
+    ("Pan Behind (Anchor Point) Tool", "向後平移工具"),
+    ("Rectangle Tool", "矩形工具"),
+    ("Rounded Rectangle Tool", "圓角矩形工具"),
+    ("Ellipse Tool", "橢圓工具"),
+    ("Polygon Tool", "多邊形工具"),
+    ("Star Tool", "星形工具"),
+    ("Pen Tool", "筆型工具"),
+    ("Add Vertex Tool", "添加頂點工具"),
+    ("Delete Vertex Tool", "刪除頂點工具"),
+    ("Convert Vertex Tool", "轉換頂點工具"),
+    ("Mask Feather Tool", "遮色片羽化工具"),
+    ("Horizontal Type Tool", "橫排文字工具"),
+    ("Vertical Type Tool", "垂直文字工具"),
+    ("Brush Tool", "筆刷工具"),
+    ("Clone Stamp Tool", "仿製圖章工具"),
+    ("Eraser Tool", "橡皮擦工具"),
+    ("Roto Brush Tool", "Roto 筆刷工具"),
+    ("Refine Edge Tool", "調整邊緣工具"),
+    ("Object Matte Tool", "物件遮色片工具"),
+    ("Puppet Position Pin Tool", "人偶位置控點工具"),
+    ("Puppet Starch Pin Tool", "人偶撲粉控點工具"),
+    ("Puppet Bend Pin Tool", "人偶彎曲控點工具"),
+    ("Puppet Advanced Pin Tool", "人偶高級控點工具"),
+    ("Puppet Overlap Pin Tool", "人偶重疊控點工具"),
+    ("Shortcut", "快速鍵"),
+    ("Range", "範圍"),
+    ("Play From", "從下列位置播放"),
+    ("Frame Rate", "影格速率"),
+    ("Resolution", "解析度"),
+    ("Overlays", "覆疊"),
+    ("Layer Controls", "圖層控制"),
+    ("Loop", "循環"),
+    ("Cache Before Playback", "播放前快取"),
+    ("Pre-roll", "預卷"),
+    ("Post-roll", "後卷"),
+    ("If caching, play cached frames", "快取時播放已快取影格"),
 ];
 
 /// Ukrainian (uk): original translations of the same interface rows as the Chinese catalogs.
@@ -2639,6 +2728,7 @@ const UKRAINIAN: &[(&str, &str)] = &[
     ("Overlay", "Накладання"),
     ("Parameter Name:", "Назва параметра:"),
     ("Parent pick whip: drag onto a layer", "Зв’язування батьківського шару: перетягніть на шар"),
+    ("Track Matte pick whip: drag onto a layer", "Зв’язування трекової маски: перетягніть на шар"),
     ("Pixel Aspect Ratio:", "Пропорції пікселя:"),
     ("Playing on Video Preview", "Відтворення на відеоперегляді"),
     ("Post-Render Action: {}", "Дія після рендерингу: {}"),
@@ -3192,6 +3282,7 @@ const PORTUGUESE: &[(&str, &str)] = &[
     ("Output To:", "Saída para:"),
     ("Parameter Name:", "Nome do parâmetro:"),
     ("Parent pick whip: drag onto a layer", "Pick whip de pai: arraste até uma camada"),
+    ("Track Matte pick whip: drag onto a layer", "Pick whip de track matte: arraste até uma camada"),
     ("Pixel Aspect Ratio:", "Proporção de pixel:"),
     ("Playing on Video Preview", "Reproduzindo na visualização de vídeo"),
     ("Post-Render Action: {}", "Ação pós-renderização: {}"),
@@ -3950,6 +4041,7 @@ const CZECH: &[(&str, &str)] = &[
     ("Overlay", "Překrytí"),
     ("Parameter Name:", "Název parametru:"),
     ("Parent pick whip: drag onto a layer", "Propojovací nástroj nadřazené vrstvy: přetáhněte na vrstvu"),
+    ("Track Matte pick whip: drag onto a layer", "Propojovací nástroj masky stopy: přetáhněte na vrstvu"),
     ("Pixel Aspect Ratio:", "Poměr stran pixelů:"),
     ("Playing on Video Preview", "Přehrávání ve videonáhledu"),
     ("Post-Render Action: {}", "Akce po vykreslení: {}"),
@@ -4513,6 +4605,7 @@ const SPANISH: &[(&str, &str)] = &[
     ("Overlay", "Superposición"),
     ("Parameter Name:", "Nombre del parámetro:"),
     ("Parent pick whip: drag onto a layer", "Selector de capa padre: arrastra hasta una capa"),
+    ("Track Matte pick whip: drag onto a layer", "Selector de mate de seguimiento: arrastra hasta una capa"),
     ("Pixel Aspect Ratio:", "Relación de aspecto de píxel:"),
     ("Playing on Video Preview", "Reproduciendo en la previsualización de vídeo"),
     ("Post-Render Action: {}", "Acción posterior al procesamiento: {}"),
@@ -5738,6 +5831,7 @@ mod tests {
         ("menus/frontend.rs", include_str!("../menus/frontend.rs")),
         ("menus/invoke.rs", include_str!("../menus/invoke.rs")),
         ("menus/shortcuts.rs", include_str!("../menus/shortcuts.rs")),
+        ("state.rs", include_str!("../state.rs")),
         ("prefs_live.rs", include_str!("../prefs_live.rs")),
         ("widgets.rs", include_str!("../widgets.rs")),
         ("panels/anim_tools.rs", include_str!("../panels/anim_tools.rs")),
@@ -5813,6 +5907,55 @@ mod tests {
     /// `en`'s row in `rows`, else `en`: what `tr` should return without pinning one wording.
     fn row(rows: &[(&'static str, &'static str)], en: &'static str) -> &'static str {
         rows.iter().find(|(source, _)| *source == en).map_or(en, |(_, translated)| *translated)
+    }
+
+    #[test]
+    fn the_toolbar_asks_the_catalog_for_the_tool_names() {
+        let header = include_str!("../header.rs");
+        for call in ["crate::i18n::tr(tool.label())", "crate::i18n::tr(cur.label())"] {
+            assert!(header.contains(call), "header.rs no longer draws {call}");
+        }
+        assert!(
+            header.contains("app.auto.add(&format!(\"tools.select.{tool:?}\"), row.rect, tool.label())"),
+            "the automation label must stay the English tool name"
+        );
+    }
+
+    #[test]
+    fn the_preview_panel_labels_are_translated() {
+        // The Preview panel draws these from a local closure, a check table and a roll tuple, none of
+        // which the call-shape scan sees; they had no rows at all.
+        for key in [
+            "Shortcut",
+            "Range",
+            "Play From",
+            "Frame Rate",
+            "Resolution",
+            "Overlays",
+            "Layer Controls",
+            "Loop",
+            "Cache Before Playback",
+            "Pre-roll",
+            "Post-roll",
+            "If caching, play cached frames",
+        ] {
+            for (name, table) in [("Simplified", SIMPLIFIED_CHINESE), ("Traditional", TRADITIONAL_CHINESE)] {
+                let value = table.iter().find(|(k, _)| *k == key).map(|(_, v)| *v);
+                assert!(value.is_some_and(|v| !v.is_empty()), "{key} has no {name} row");
+            }
+        }
+        // A row is not a translation until the panel asks for it: the labels drawn one by one carry
+        // `tr(..)`, and the table and the roll tuple wrap the text they read at the call.
+        let source = include_str!("../panels/misc.rs");
+        for literal in ["Shortcut", "Range", "Play From", "Frame Rate", "Resolution", "Full Screen", "If caching, play cached frames"] {
+            assert!(source.contains(&format!("tr(\"{literal}\")")), "{literal} is drawn without asking the catalog");
+        }
+        for call in ["check_row(app, ui, &p, pos2(cx, cy), key, tr(text), on)", "Align2::LEFT_CENTER, tr(text),"] {
+            assert!(source.contains(call), "{call} no longer asks the catalog");
+        }
+        for table in ["\"Overlays\"", "\"Layer Controls\"", "\"Loop\"", "\"Cache Before Playback\"", "\"Pre-roll\"", "\"Post-roll\""] {
+            assert!(source.contains(table), "{table} is not in the panel");
+        }
     }
 
     /// A row that translates nothing, repeats a source string, or changes the number of values the

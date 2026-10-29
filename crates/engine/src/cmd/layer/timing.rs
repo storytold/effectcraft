@@ -42,7 +42,9 @@ pub(super) fn timing(s: &mut Session, p: &Value) -> Result<Value> {
                     shift(l, d);
                 }
                 "trimInToTime" => l.in_point = t.min(l.out_point - fd),
-                "trimOutToTime" => l.out_point = t.max(l.in_point + fd),
+                // Alt+]: the Out edge lands one frame after the playhead, so its frame stays the
+                // layer's last visible one (as in After Effects), never before the In point.
+                "trimOutToTime" => l.out_point = t.max(l.in_point) + fd,
                 _ => {
                     if let Some(d) = delta {
                         shift(l, d);

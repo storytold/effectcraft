@@ -442,9 +442,18 @@ impl RenderSettings {
     pub fn frame_time(&self, comp: &Comp, i: u64) -> Tick {
         self.rate(comp).tick_of(self.first_frame(comp) + i as i64)
     }
-    pub fn output_size(&self, comp: &Comp) -> (u32, u32) {
+    pub fn effective_scale(&self, comp: &Comp) -> f64 {
         let s = self.resolution.clamp(0.01, 4.0);
-        (((comp.width as f64 * s).round() as u32).max(1), ((comp.height as f64 * s).round() as u32).max(1))
+        let max = f64::from(crate::limits::MAX_SIZE);
+        s.min(max / f64::from(comp.width.max(1))).min(max / f64::from(comp.height.max(1)))
+    }
+    pub fn output_size(&self, comp: &Comp) -> (u32, u32) {
+        let s = self.effective_scale(comp);
+        // The scale is clamped so neither side exceeds the comp limit, keeping the aspect
+        // ratio: a 30 000 px side at 4x renders at 1x instead of cropping to a corner.
+        let w = ((comp.width as f64 * s).round() as u32).max(1);
+        let h = ((comp.height as f64 * s).round() as u32).max(1);
+        (w, h)
     }
     pub fn resolution_label(&self) -> &'static str {
         match self.resolution {
@@ -779,15 +788,18 @@ impl Crop {
         if self.use_roi
             && let Some([x, y, rw, rh]) = self.roi
         {
-            // The quad arrives unvalidated (control channel or a hand-edited project):
-            // clamp like the sibling edge fields (plus/minus 20 000) and subtract
-            // without overflow.
-            let conv = |v: f64| v.round().clamp(-20_000.0, 20_000.0) as i32;
-            let l = conv(x * scale);
-            let t = conv(y * scale);
-            let r = (w as i32).saturating_sub(conv((x + rw) * scale));
-            let b = (h as i32).saturating_sub(conv((y + rh) * scale));
-            return (t, l, b, r);
+            // The quad arrives unvalidated (control channel or a hand-edited project). As in
+            // After Effects, the region of interest lies inside the frame: each converted edge
+            // is clamped to [0, w] / [0, h] (inf clamps to a side, NaN converts to 0), and the
+            // far edge never passes the near one. Every edge then lies inside the frame, so the
+            // crop can't be larger than the frame and no subtraction can overflow.
+            let (wi, hi) = (i32::try_from(w).unwrap_or(i32::MAX), i32::try_from(h).unwrap_or(i32::MAX));
+            let conv = |v: f64, side: i32| v.round().clamp(0.0, f64::from(side)) as i32;
+            let l = conv(x * scale, wi);
+            let t = conv(y * scale, hi);
+            let r = conv((x + rw) * scale, wi).max(l);
+            let b = conv((y + rh) * scale, hi).max(t);
+            return (t, l, hi - b, wi - r);
         }
         (self.top, self.left, self.bottom, self.right)
     }
@@ -1126,7 +1138,7 @@ impl OutputModule {
     /// rounding).
     pub fn output_size(&self, comp: &Comp, settings: &RenderSettings) -> (u32, u32) {
         let (w, h) = settings.output_size(comp);
-        let (w, h) = self.frame_size(w, h, settings.resolution.clamp(0.01, 4.0));
+        let (w, h) = self.frame_size(w, h, settings.effective_scale(comp));
         self.format.coded_size(w, h)
     }
     /// Every setting as `(label, value)` lines (render logs).
@@ -1659,8 +1671,8 @@ mod tests {
 
     #[test]
     fn hostile_roi_cannot_overflow_crop_math() {
-        // `-1e12` saturates to `i32::MIN` on conversion: `w as i32 - l` must saturate,
-        // not overflow, and still yield a usable (degenerate) frame size.
+        // `-1e12` is clamped into the frame on conversion: it must not overflow and must still
+        // yield a usable (degenerate) frame size.
         let c = Comp::new(1920, 1080, FrameRate::new(30, 1), Tick::from_seconds_f64(1.0));
         let rs = RenderSettings::default();
         let mut m = OutputModule::for_format(OutputFormat::PngSequence);
@@ -1671,6 +1683,66 @@ mod tests {
         m.crop = Crop { enabled: true, use_roi: true, roi: Some([100.0, 50.0, 800.0, 400.0]), ..Default::default() };
         let half = RenderSettings { resolution: 0.5, ..Default::default() };
         assert_eq!(m.output_size(&c, &half), (400, 200));
+    }
+
+    #[test]
+    fn output_size_never_exceeds_the_comp_limit() {
+        // The effective scale is clamped so neither side exceeds the limit (exporter
+        // `w * h * 4` would overflow at 120 000 px sides); the pipeline renders at the
+        // same scale, so it never requests a frame larger than this reports.
+        let rs = RenderSettings { resolution: 4.0, ..Default::default() };
+        let m = OutputModule::for_format(OutputFormat::PngSequence);
+        let square = Comp::new(30_000, 30_000, FrameRate::new(30, 1), Tick::from_seconds_f64(1.0));
+        assert_eq!(rs.effective_scale(&square), 1.0);
+        assert_eq!(rs.output_size(&square), (30_000, 30_000));
+        assert_eq!(m.output_size(&square, &rs), (30_000, 30_000));
+        // Wide comps keep their aspect ratio instead of clamping each side on its own.
+        let wide = Comp::new(30_000, 15_000, FrameRate::new(30, 1), Tick::from_seconds_f64(1.0));
+        assert_eq!(rs.effective_scale(&wide), 1.0);
+        assert_eq!(rs.output_size(&wide), (30_000, 15_000));
+        assert_eq!(m.output_size(&wide, &rs), (30_000, 15_000));
+        // A mid-size comp renders at the largest scale that still fits.
+        let mid = Comp::new(20_000, 10_000, FrameRate::new(30, 1), Tick::from_seconds_f64(1.0));
+        assert_eq!(mid.width as f64 * rs.effective_scale(&mid), 30_000.0);
+        assert_eq!(rs.output_size(&mid), (30_000, 15_000));
+    }
+
+    #[test]
+    fn valid_wide_roi_endpoints_are_preserved() {
+        // A supported 30 000 x 100 frame at scale 1: ROI [10000, 0, 20000, 100] spans x 10 000..30 000
+        // and must give 20 000 x 100 (the absolute right edge 30 000 exceeds the old +/-20 000 clamp).
+        let c = Comp::new(30_000, 100, FrameRate::new(30, 1), Tick::from_seconds_f64(1.0));
+        let rs = RenderSettings::default();
+        let mut m = OutputModule::for_format(OutputFormat::PngSequence);
+        m.crop = Crop { enabled: true, use_roi: true, roi: Some([10_000.0, 0.0, 20_000.0, 100.0]), ..Default::default() };
+        assert_eq!(m.output_size(&c, &rs), (20_000, 100));
+        assert_eq!(m.crop.edges(30_000, 100, 1.0), (0, 10_000, 0, 0));
+        // Scale 4.0 pushes a valid edge to 120 000 px (30 000 x 4); the left edge 40 000 and the
+        // right edge 120 000 are both beyond 20 000 and must survive.
+        assert_eq!(m.crop.edges(120_000, 400, 4.0), (0, 40_000, 0, 0));
+        assert_eq!(m.frame_size(120_000, 400, 4.0), (80_000, 400));
+        // Hostile quads stay inside the frame: never empty, never larger than the frame, so the
+        // export can't be asked for an unbounded crop (an ROI reaching far outside the comp
+        // used to pad the frame instead).
+        let (fw, fh) = (1920, 1080);
+        let hostile = [
+            [1e300, 1e300, 1e300, 1e300],
+            [-1e300, -1e300, 1e300, 1e300],
+            [-1e6, -1e6, 2e6 + 1920.0, 2e6 + 1080.0],
+            [-1e12, -1e12, -1e12, -1e12],
+            [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, f64::NAN],
+            [f64::NEG_INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::INFINITY],
+        ];
+        for roi in hostile {
+            m.crop.roi = Some(roi);
+            let (t, l, b, r) = m.crop.edges(fw, fh, 1.0);
+            assert!([t, l, b, r].iter().all(|e| *e >= 0), "{roi:?}: an edge pads the frame: {:?}", (t, l, b, r));
+            let (w, h) = m.frame_size(fw, fh, 1.0);
+            assert!((1..=fw).contains(&w) && (1..=fh).contains(&h), "{roi:?}: {w}x{h} is outside 1x1..={fw}x{fh}");
+        }
+        // An ROI covering more than the frame is the whole frame.
+        m.crop.roi = Some([-1e6, -1e6, 2e6 + 1920.0, 2e6 + 1080.0]);
+        assert_eq!(m.frame_size(fw, fh, 1.0), (fw, fh));
     }
 
     #[test]

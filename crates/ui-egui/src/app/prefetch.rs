@@ -406,7 +406,8 @@ impl EffectcraftApp {
         }
         let cur = comp.frame_rate.frame_at(self.session.time()).clamp(wa, wb);
         let fit = self.frames_that_fit(comp, series.scale as f64 / 1000.0).min(n);
-        let slots = (self.frames_parallelism() / 2).max(1);
+        // One thread each (`Frames::request_background`), so every frame thread takes one.
+        let slots = self.frames_parallelism().max(1);
         let mut queued = self.frames.inflight();
         let scale = series.scale as f64 / 1000.0;
         let mut pending = false;
@@ -419,7 +420,7 @@ impl EffectcraftApp {
             if queued >= slots {
                 break;
             }
-            self.request_frame(ItemId(series.comp), f, scale);
+            self.request_frame_background(ItemId(series.comp), f, scale);
             queued += 1;
         }
         if pending {

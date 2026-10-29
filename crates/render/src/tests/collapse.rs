@@ -3,7 +3,7 @@
 use effectcraft_color::{BlendMode, Label};
 use effectcraft_keyframe::{TextDoc, Value};
 use effectcraft_project::build::{self, Ids};
-use effectcraft_project::{BitDepth, Comp, ItemId, ItemKind, Layer, LayerSource, Project, Quality, Solid};
+use effectcraft_project::{BitDepth, Comp, FrameBlend, ItemId, ItemKind, Layer, LayerSource, Project, Quality, Solid};
 use effectcraft_time::{FrameRate, Tick};
 
 use crate::{EvalCtx, Image, NoFootage, RenderOpts, Renderer, render_frame};
@@ -108,6 +108,66 @@ fn masks_on_a_collapsed_layer_force_a_flattened_render() {
     let a = render_frame(&p, cid, Tick::ZERO, 1.0);
     let b = render_frame(&p2, cid2, Tick::ZERO, 1.0);
     assert!(max_diff(&a, &b) < 1e-4, "{}", max_diff(&a, &b));
+}
+
+/// #1747: the flattened path honours a composition proxy and frame blending; a collapsed layer
+/// renders the nested comp directly and ignores both, so such a layer must not collapse.
+#[test]
+fn proxy_and_frame_blending_keep_a_precomp_on_the_flattened_path() {
+    let (mut p, cid) = scene(true, false);
+    let id = p.comp(cid).unwrap().layers[0].id;
+    let collapses = |p: &Project| {
+        let r = Renderer::new(p, &NoFootage, RenderOpts::default());
+        let ctx = EvalCtx::new(p, cid, p.comp(cid).unwrap(), Tick::ZERO);
+        r.collapsed(&ctx, ctx.comp.layer(id).unwrap()).is_some()
+    };
+    assert!(collapses(&p), "a plain precomp collapses");
+    // Frame blending needs both the comp's switch and the layer's.
+    p.comp_mut(cid).unwrap().enable_frame_blending = true;
+    p.comp_mut(cid).unwrap().layers[0].switches.frame_blend = FrameBlend::FrameMix;
+    assert!(!collapses(&p), "frame blending keeps the flattened path");
+    p.comp_mut(cid).unwrap().enable_frame_blending = false;
+    p.comp_mut(cid).unwrap().layers[0].switches.frame_blend = FrameBlend::Off;
+    // A composition proxy stands in for the precomp's pixels.
+    let LayerSource::Comp { item } = p.comp(cid).unwrap().layers[0].source else { panic!("a precomp layer") };
+    let proxy =
+        effectcraft_project::Proxy { footage: effectcraft_project::Footage { has_video: true, width: 32, height: 32, ..Default::default() }, enabled: true };
+    p.item_mut(item).unwrap().proxy = Some(Box::new(proxy));
+    assert!(!collapses(&p), "a proxy keeps the flattened path");
+}
+
+/// #1747: an effect on B that reads A must not reuse its cached buffer when two collapsed
+/// instances give A different static overrides (`hash_values` only sees animated values).
+#[test]
+fn referenced_layer_overrides_change_the_owner_cache_key() {
+    let mut p = project();
+    let comp = Comp::new(100, 100, FrameRate::FPS_30, Tick::from_seconds_f64(2.0));
+    let a = solid(&mut p, &comp, [1.0, 1.0, 1.0], (40, 40), [30.0, 50.0, 0.0]);
+    let aid = a.id;
+    let mut b = solid(&mut p, &comp, [1.0, 1.0, 1.0], (100, 100), [50.0, 50.0, 0.0]);
+    let bid = b.id;
+    let mut next = p.next_id;
+    let mut ids = Ids(&mut next);
+    let spec = effectcraft_effects::find("ec.channel.setmatte").unwrap();
+    let mut fx = effectcraft_effects::instantiate(spec, &mut ids, spec.name, [100.0, 100.0]);
+    fx.prop_mut("takeMatteFromLayer").unwrap().value = Value::Layer(Some(a.id.0));
+    p.next_id = next;
+    b.props.sub_mut("effects").unwrap().children.push(fx.into());
+    let mut c = comp;
+    c.layers = vec![b, a];
+    let cid = p.add_item("Comp", Label::Sandstone, None, ItemKind::Comp(c.into()));
+    let comp = p.comp(cid).unwrap();
+    let b = comp.layer(bid).unwrap();
+    let opacity = comp.layer(aid).unwrap().props.prop("transform/opacity").unwrap().uid;
+    let key = |value: f64| {
+        let overrides = [crate::PropertyOverride { layer: aid, prop: opacity, value: Value::Scalar(value), font: false }];
+        let ctx =
+            EvalCtx { project: &p, comp_id: cid, comp, time: Tick::ZERO, expr: None, footage: None, property_overrides: &overrides, media_overrides: &[] };
+        crate::cache::layer_key(&ctx, b, 1.0, false, false)
+    };
+    let (opaque, half) = (key(100.0), key(50.0));
+    assert!(opaque.is_some(), "the owner is cacheable");
+    assert_ne!(opaque, half, "A's static override changes B's key");
 }
 
 #[test]

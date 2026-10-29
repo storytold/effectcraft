@@ -81,6 +81,8 @@ fn refreshed(s: &Session, f: &Footage, probed: Footage) -> Footage {
     nf.codec = probed.codec;
     nf.has_video = probed.has_video;
     nf.has_audio = probed.has_audio;
+    // The markers the file carries now (a WAV's cue points), for Update Markers From Source.
+    nf.markers = probed.markers;
     if matches!(f.kind, FootageKind::Video | FootageKind::Audio) {
         nf.duration = probed.duration;
         // Interpret Footage ▸ Conform to frame rate stays; the file's own rate is refreshed.
