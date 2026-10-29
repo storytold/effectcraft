@@ -7,7 +7,7 @@ use std::io::Write;
 use effectcraft_project::Comp;
 use effectcraft_project::render_queue::{AudioFormat, Channels, OutputFormat, ProResProfile};
 use effectcraft_time::{FrameRate, Tick};
-use filmcraft_isobmff::{Brand, FourCc, Mp4Writer, PcmConfig, SampleEntry, TrackConfig, WriteSample, WriterOptions};
+use filmcraft_isobmff::{Brand, ColorInfo, FourCc, Mp4Writer, PcmConfig, SampleEntry, TrackConfig, WriteSample, WriterOptions};
 use rayon::prelude::*;
 
 use crate::{Cx, ExportError, Report, Result, State, batch_size, wants_audio};
@@ -17,6 +17,17 @@ fn enc(e: impl std::fmt::Display) -> ExportError {
 }
 fn mux_err(e: impl std::fmt::Display) -> ExportError {
     ExportError::Io(e.to_string())
+}
+
+/// Tag a video [`SampleEntry`] with the BT.709 limited-range `colr` (nclx) box every video
+/// encoder here outputs (`rgba_to_yuv420`, `rgba_to_yuv_10` and `rgba_to_yuv420_bits` all use
+/// the 0.2126/0.7152/0.0722 luma and a 16–235 luma range). Without it a re-import falls back to
+/// the container's resolution-based `default_matrix` — BT.601 below 1024×577 — and shifts the
+/// colours (pure red came back as [232,0,1]).
+pub(crate) fn tag_bt709_limited(entry: &mut SampleEntry) {
+    if let Some(v) = entry.video.as_mut() {
+        v.color = Some(ColorInfo::Nclx { primaries: 1, transfer: 1, matrix: 1, full_range: false });
+    }
 }
 
 pub(crate) struct Packet {
@@ -110,7 +121,9 @@ impl VideoEncoder for H264 {
             let (sps, pps) = self.enc.sps_pps();
             filmcraft_isobmff::AvcConfig::new(vec![sps], vec![pps], 4)
         });
-        SampleEntry::avc(cfg, self.w as u16, self.h as u16)
+        let mut entry = SampleEntry::avc(cfg, self.w as u16, self.h as u16);
+        tag_bt709_limited(&mut entry);
+        entry
     }
     fn encode(&mut self, rgba: &[u8], index: u64) -> Result<Vec<Packet>> {
         let (mut y, mut u, mut v) = (std::mem::take(&mut self.y), std::mem::take(&mut self.u), std::mem::take(&mut self.v));

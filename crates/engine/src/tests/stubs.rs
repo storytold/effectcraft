@@ -519,9 +519,10 @@ fn convert_to_bezier_turns_a_parametric_shape_into_an_editable_path() {
     };
     let radius = |v: [f64; 2]| v[0].hypot(v[1]);
 
-    // A 120 x 80 rectangle is its four corners, joined by straight edges.
+    // A 120 x 80 rectangle is its four corners, joined by straight edges, from the top-right
+    // corner clockwise as After Effects draws it.
     let (mut s, l, was, rect) = convert(json!({"kind": "rect", "size": [120, 80]}));
-    assert_eq!(rect.vertices, vec![[-60.0, -40.0], [60.0, -40.0], [60.0, 40.0], [-60.0, 40.0]]);
+    assert_eq!(rect.vertices, vec![[60.0, -40.0], [60.0, 40.0], [-60.0, 40.0], [-60.0, -40.0]]);
     assert!(rect.in_tangents.iter().chain(&rect.out_tangents).all(|t| *t == [0.0, 0.0]), "straight edges: {rect:?}");
     // Undo brings the parametric shape back.
     s.execute("edit.undo", json!({})).unwrap();

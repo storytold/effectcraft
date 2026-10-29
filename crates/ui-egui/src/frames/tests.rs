@@ -895,33 +895,59 @@ fn adding_a_source_does_not_hide_changes_to_existing_dependencies() {
     }
 }
 
+/// Adding, moving or deleting a marker (Num* while a preview plays) keeps the cached frames:
+/// the sound would otherwise stop at the next frame that has to be rendered again (#1083).
+/// Only expressions that read markers make them part of the pixels.
 #[test]
-fn markers_keep_the_frames() {
+fn markers_keep_the_frames_unless_an_expression_reads_them() {
     use effectcraft_engine::Session;
     use serde_json::json;
     let mut s = Session::default();
     let id = |v: serde_json::Value, k: &str| v[k].as_u64().unwrap();
-    let outer = ItemId(id(s.execute("comp.new", json!({"name": "Outer", "width": 8, "height": 8, "duration": 1})).unwrap(), "comp"));
-    let solid = id(s.execute("layer.newSolid", json!({"comp": outer.0, "color": "#ff0000"})).unwrap(), "layer");
+    let inner = ItemId(id(s.execute("comp.new", json!({"name": "Inner", "width": 8, "height": 8, "duration": 2})).unwrap(), "comp"));
+    let solid = id(s.execute("layer.newSolid", json!({"comp": inner.0, "color": "#ff0000"})).unwrap(), "layer");
+    let outer = ItemId(id(s.execute("comp.new", json!({"name": "Outer", "width": 8, "height": 8, "duration": 2})).unwrap(), "comp"));
+    id(s.execute("layer.addItem", json!({"comp": outer.0, "item": inner.0})).unwrap(), "layer");
     let f = Frames::default();
-    let at = |s: &Session| f.content_of(&s.project, s.revision, outer);
-    let o0 = at(&s);
-    s.execute("layer.addMarker", json!({"comp": outer.0, "layers": [solid], "time": 0.5, "comment": "beat"})).unwrap();
-    assert_eq!(at(&s), o0, "a marker changes no pixels, so it keeps the frames");
+    let at = |s: &Session, c: ItemId| f.content_of(&s.project, s.revision, c);
+    let (o0, i0) = (at(&s, outer), at(&s, inner));
+    s.execute("comp.addMarker", json!({"comp": inner.0, "time": 0.5, "comment": "beat"})).unwrap();
+    s.execute("comp.addMarker", json!({"comp": outer.0, "time": 1.0})).unwrap();
+    s.execute("comp.addMarker", json!({"comp": outer.0, "time": 1.5})).unwrap();
+    assert_eq!((at(&s, outer), at(&s, inner)), (o0, i0), "comp markers");
+    s.execute("markers.set", json!({"comp": inner.0, "layer": solid, "new": true, "time": 0.25})).unwrap();
+    assert_eq!((at(&s, outer), at(&s, inner)), (o0, i0), "layer marker");
+    // An expression reading markers makes them count again.
+    s.execute("prop.setExpression", json!({"comp": inner.0, "layer": solid, "path": "transform/opacity", "expression": "thisComp.marker.numKeys"})).unwrap();
+    let (o1, i1) = (at(&s, outer), at(&s, inner));
+    assert_ne!(o1, o0);
+    s.execute("comp.addMarker", json!({"comp": inner.0, "time": 1.0})).unwrap();
+    assert_ne!(at(&s, inner), i1, "marker read by an expression");
+    assert_ne!(at(&s, outer), o1, "marker read by an expression in a nested comp");
 }
 
+/// A protected time marker with a duration sets the comp's timing (Responsive Design), so it
+/// changes the frames even though plain markers do not; and any expression, which can read
+/// markers, makes every marker count.
 #[test]
-fn markers_count_when_an_expression_can_read_them() {
+fn timing_markers_and_expressions_still_change_the_frames() {
     use effectcraft_engine::Session;
     use serde_json::json;
     let mut s = Session::default();
     let id = |v: serde_json::Value, k: &str| v[k].as_u64().unwrap();
     let outer = ItemId(id(s.execute("comp.new", json!({"name": "Outer", "width": 8, "height": 8, "duration": 1})).unwrap(), "comp"));
     let solid = id(s.execute("layer.newSolid", json!({"comp": outer.0, "color": "#ff0000"})).unwrap(), "layer");
-    s.execute("prop.setExpression", json!({"comp": outer.0, "layer": solid, "path": "transform/opacity", "expression": "1"})).unwrap();
     let f = Frames::default();
     let at = |s: &Session| f.content_of(&s.project, s.revision, outer);
     let o0 = at(&s);
     s.execute("layer.addMarker", json!({"comp": outer.0, "layers": [solid], "time": 0.5, "comment": "beat"})).unwrap();
-    assert_ne!(at(&s), o0, "an expression can read the marker, so the frames change");
+    assert_eq!(at(&s), o0, "a plain marker changes no pixels, so it keeps the frames");
+    s.execute("comp.addMarker", json!({"comp": outer.0, "time": 0.25})).unwrap();
+    s.execute("markers.set", json!({"comp": outer.0, "index": 0, "duration": 0.25, "protected": true})).unwrap();
+    let o1 = at(&s);
+    assert_ne!(o1, o0, "a protected time marker with a duration sets the timing");
+    s.execute("prop.setExpression", json!({"comp": outer.0, "layer": solid, "path": "transform/opacity", "expression": "1"})).unwrap();
+    let o2 = at(&s);
+    s.execute("layer.addMarker", json!({"comp": outer.0, "layers": [solid], "time": 0.75})).unwrap();
+    assert_ne!(at(&s), o2, "an expression can read the marker, so the frames change");
 }

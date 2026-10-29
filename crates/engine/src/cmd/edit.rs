@@ -263,6 +263,7 @@ fn clear_clipboards(s: &mut Session) {
     s.state.contents_clipboard.clear();
     s.state.link_clipboard = None;
     s.state.value_clipboard.clear();
+    s.state.keyframe_text = None;
     s.state.clip_is_keys = false;
 }
 
@@ -329,10 +330,12 @@ fn copy_properties(s: &mut Session) -> Result<Option<Value>> {
     }
     let mut keys = s.state.selected_keys.clone();
     let mut values = vec![];
+    let mut statics = vec![];
     for (lid, uid) in &leaves {
         let Some(l) = comp.layer(*lid) else { continue };
         let Some(pr) = l.props.find(*uid) else { continue };
         if pr.keys.is_empty() {
+            statics.push((*lid, *uid));
             if let Some(path) = l.props.match_path_of(*uid)
                 && !values.iter().any(|(p, _)| *p == path)
             {
@@ -342,6 +345,7 @@ fn copy_properties(s: &mut Session) -> Result<Option<Value>> {
             keys.extend(pr.keys.iter().map(|k| KeyRef { layer: *lid, prop: *uid, time: k.time }));
         }
     }
+    let text = crate::keyframe_text::text(&s.project, comp, &keys, &statics);
     clear_clipboards(s);
     let mut n = 0;
     if !keys.is_empty() {
@@ -350,6 +354,7 @@ fn copy_properties(s: &mut Session) -> Result<Option<Value>> {
         s.state.selected_keys = selected;
         n = r?.as_u64().unwrap_or(0);
     }
+    s.state.keyframe_text = text;
     let v = values.len();
     s.state.value_clipboard = values;
     // Keys alone answer as `keys.copy` does (their count).

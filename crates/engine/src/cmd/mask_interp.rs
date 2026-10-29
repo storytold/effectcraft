@@ -289,6 +289,7 @@ fn extract_face(s: &mut Session, p: &Value) -> Result<Value> {
         clip.push(crate::KeyClip { layer: lid, path, keys });
     }
     s.state.key_clipboard = clip;
+    s.state.keyframe_text = None;
     s.state.clip_is_keys = true;
     // The same data as text (tab-separated, one row per frame) for other applications.
     let mut text = String::from("EffectCraft Face Measurements\n\nFrame\tTime");

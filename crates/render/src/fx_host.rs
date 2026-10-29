@@ -118,6 +118,19 @@ impl EffectHost for FxHost<'_, '_, '_> {
         Some(effectcraft_effects::flatten_params(g, &mut |pr| ctx.value(self.layer, pr)))
     }
 
+    fn param_at(&self, effect_index: usize, id: &str, layer_time: f64) -> Option<effectcraft_keyframe::Value> {
+        // Only the one property: a simulation samples it at every step. Its keyframes are read
+        // at the requested layer time exactly (mapping it to comp time and back rounds under a
+        // fractional stretch, so a Hold key there could read its previous value).
+        let p = effect_param(self.layer, effect_index, id)?;
+        let lt = Tick::from_seconds_f64(layer_time);
+        Some(self.ctx.at(self.layer.comp_time(lt)).value_at_layer_time(self.layer, p, lt))
+    }
+
+    fn param_is_static(&self, effect_index: usize, id: &str) -> bool {
+        effect_param(self.layer, effect_index, id).is_some_and(|p| p.keys.is_empty() && !p.has_expression())
+    }
+
     fn comp_scene(&self) -> Option<effectcraft_effects::CompScene> {
         Some(comp_scene(self.ctx, self.layer)?.rebased(self.origin))
     }
@@ -138,6 +151,26 @@ impl EffectHost for FxHost<'_, '_, '_> {
             self.pixels(other, (*sub.layer_input(&ctx, other, 0)?).clone(), false)
         })
     }
+}
+
+/// Parameter `id` (a flattened id: match ids joined by `/`) of effect `effect_index` in
+/// `layer`'s stack.
+fn effect_param<'a>(layer: &'a Layer, effect_index: usize, id: &str) -> Option<&'a effectcraft_project::Property> {
+    let mut g = layer.effects()?.groups().nth(effect_index)?;
+    let mut path = id.split('/').peekable();
+    while let Some(m) = path.next() {
+        if path.peek().is_none() {
+            return g.children.iter().find_map(|c| match c {
+                effectcraft_project::Node::Prop(p) if p.match_id == m => Some(p),
+                _ => None,
+            });
+        }
+        g = g.children.iter().find_map(|c| match c {
+            effectcraft_project::Node::Group(sg) if sg.match_id == m => Some(sg),
+            _ => None,
+        })?;
+    }
+    None
 }
 
 /// The Essential Properties overrides of a precomp layer, evaluated at the context time.

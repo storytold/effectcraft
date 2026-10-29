@@ -123,7 +123,7 @@ fn web_draws(language: &str) -> bool {
 
 /// The language EffectCraft shows for a BCP 47 locale (`ja-JP` → `ja`, `zh-Hans-CN` → `zh-hans`,
 /// `zh-TW` → `zh-hant`, `uk-UA` → `uk`, `es-ES` → `es`, `pt-BR` → `pt-br`, `cs-CZ` → `cs`,
-/// `ka-GE` → `ka`).
+/// `ka-GE` → `ka`, `ru-RU` → `ru`, `de-AT` → `de`, `fr-CA` → `fr`).
 fn supported(locale: Option<&str>) -> &'static str {
     let Some(locale) = locale else { return "en" };
     let mut parts = locale.split(['-', '_']);
@@ -135,6 +135,9 @@ fn supported(locale: Option<&str>) -> &'static str {
         "es" => "es",
         "cs" => "cs",
         "ka" => "ka",
+        "ru" => "ru",
+        "de" => "de",
+        "fr" => "fr",
         // The only Portuguese catalog: Brazil's, also for Portugal rather than English.
         "pt" => "pt-br",
         "zh" => {
@@ -252,22 +255,32 @@ pub(crate) fn entry(app: &EffectcraftApp, e: &MenuEntry, shown: String) -> Strin
         return effects::name(id, &e.label);
     }
     // Undo/redo names come from the history, so they are formatted per language here rather than
-    // looked up in a catalog. An English (or untranslated) interface keeps the shown label.
-    let (undo, no_undo, redo, no_redo) = match language(app) {
-        "ja" => ("取り消し", "取り消しできません", "やり直し", "やり直しできません"),
-        "zh-hans" => ("撤销", "无可撤销的操作", "重做", "无可重做的操作"),
-        "zh-hant" => ("復原", "沒有可復原的操作", "重做", "沒有可重做的操作"),
-        "uk" => ("Скасувати", "Немає дій для скасування", "Повторити", "Немає дій для повторення"),
-        "es" => ("Deshacer", "No se puede deshacer", "Rehacer", "No se puede rehacer"),
-        "pt-br" => ("Desfazer", "Não há nada para desfazer", "Refazer", "Não há nada para refazer"),
-        "cs" => ("Zpět", "Není co vrátit", "Znovu", "Není co zopakovat"),
+    // looked up in a catalog. A language without this wording keeps the shown undo/redo label, and
+    // the rest of its menu still goes through the catalog below (#1449).
+    let history = match language(app) {
+        "en" => return shown,
+        "ja" => Some(("取り消し", "取り消しできません", "やり直し", "やり直しできません")),
+        "zh-hans" => Some(("撤销", "无可撤销的操作", "重做", "无可重做的操作")),
+        "zh-hant" => Some(("復原", "沒有可復原的操作", "重做", "沒有可重做的操作")),
+        "uk" => Some(("Скасувати", "Немає дій для скасування", "Повторити", "Немає дій для повторення")),
+        "es" => Some(("Deshacer", "No se puede deshacer", "Rehacer", "No se puede rehacer")),
+        "pt-br" => Some(("Desfazer", "Não há nada para desfazer", "Refazer", "Não há nada para refazer")),
+        "cs" => Some(("Zpět", "Není co vrátit", "Znovu", "Není co zopakovat")),
         // A colon before the history's (untranslated) action name: "დაბრუნება: Comp1".
-        "ka" => ("დაბრუნება:", "დაბრუნება შეუძლებელია", "ხელახლა შესრულება:", "ხელახლა შესრულება შეუძლებელია"),
-        _ => return shown,
+        "ka" => Some(("დაბრუნება:", "დაბრუნება შეუძლებელია", "ხელახლა შესრულება:", "ხელახლა შესრულება შეუძლებელია")),
+        // A colon before the history's (untranslated) action name: "Отменить: Comp1".
+        "ru" => Some(("Отменить:", "Нечего отменять", "Повторить:", "Нечего повторять")),
+        _ => None,
     };
     match e.command.as_str() {
-        "edit.undo" => app.session.history.undo.last().map(|u| format!("{undo} {}", u.0)).unwrap_or_else(|| no_undo.into()),
-        "edit.redo" => app.session.history.redo.last().map(|u| format!("{redo} {}", u.0)).unwrap_or_else(|| no_redo.into()),
+        "edit.undo" | "edit.redo" => {
+            let Some((undo, no_undo, redo, no_redo)) = history else { return shown };
+            if e.command == "edit.undo" {
+                app.session.history.undo.last().map(|u| format!("{undo} {}", u.0)).unwrap_or_else(|| no_undo.into())
+            } else {
+                app.session.history.redo.last().map(|u| format!("{redo} {}", u.0)).unwrap_or_else(|| no_redo.into())
+            }
+        }
         "window.panel" => {
             let prefix = format!("{}: ", e.label);
             if let Some(name) = shown.strip_prefix(&prefix) {
@@ -7580,9 +7593,19 @@ mod tests {
             (Some("ka"), "ka"),
             (Some("ka-GE"), "ka"),
             (Some("ka_GE.UTF-8"), "ka"),
+            (Some("ru"), "ru"),
+            (Some("ru-RU"), "ru"),
+            (Some("ru-SK"), "ru"),
+            (Some("ru_RU.UTF-8"), "ru"),
+            (Some("de"), "de"),
+            (Some("de-DE"), "de"),
+            (Some("de_AT.UTF-8"), "de"),
+            (Some("fr"), "fr"),
+            (Some("fr-FR"), "fr"),
+            (Some("fr_CA.UTF-8"), "fr"),
             (Some("en-US"), "en"),
             (Some("jv-ID"), "en"),
-            (Some("de-DE"), "en"),
+            (Some("nl-NL"), "en"),
             (None, "en"),
         ] {
             assert_eq!(supported(locale), language, "{locale:?}");
@@ -7638,6 +7661,35 @@ mod tests {
         assert!(effectcraft_engine::prefs::LANGUAGES.contains(&("Українська", "uk")));
         assert_eq!(code("uk"), "uk");
         assert_eq!(code("unknown"), "en");
+    }
+
+    /// Every catalog language draws its menu entries from the catalog, including those with no
+    /// undo/redo wording of their own: choosing Deutsch, Русский or Français left the menus in
+    /// English (#1449).
+    #[test]
+    fn every_catalog_language_translates_menu_entries() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        let menu_entry = |command: &str, label: &str| MenuEntry {
+            label: label.into(),
+            command: command.into(),
+            params: serde_json::Value::Null,
+            shortcut: None,
+            alt_shortcuts: Vec::new(),
+        };
+        let new_comp = menu_entry("comp.new", "New Composition...");
+        let undo = menu_entry("edit.undo", "Undo");
+        for code in CATALOG_CODES {
+            app.session.execute("prefs.set", json!({"key":"general.language", "value":code})).unwrap();
+            let drawn = entry(&app, &new_comp, new_comp.label.clone());
+            assert_eq!(drawn, label(&app, "comp.new", "New Composition..."), "{code}");
+            assert_ne!(drawn, new_comp.label, "{code}: the menu entry is drawn in English");
+        }
+        app.session.execute("prefs.set", json!({"key":"general.language", "value":"ru"})).unwrap();
+        assert_eq!(entry(&app, &undo, "Can't Undo".into()), "Нечего отменять");
+        app.session.execute("prefs.set", json!({"key":"general.language", "value":"de"})).unwrap();
+        assert_eq!(entry(&app, &undo, "Can't Undo".into()), "Can't Undo", "no German undo wording yet: the shown label");
+        app.session.execute("prefs.set", json!({"key":"general.language", "value":"en"})).unwrap();
+        assert_eq!(entry(&app, &new_comp, new_comp.label.clone()), "New Composition...");
     }
 
     #[test]

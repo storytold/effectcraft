@@ -70,6 +70,7 @@ pub use home::templates;
 pub use interchange::psd_import;
 pub use interchange::vector;
 pub use interchange::xml_project;
+use interchange::{keyframe_text, keyframe_text_effects};
 pub use render_queue::{ExportJob, ExportResult, Exporter, JobState};
 pub use settings::autosave;
 pub use settings::config;

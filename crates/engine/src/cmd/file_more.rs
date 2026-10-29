@@ -1066,7 +1066,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Main...",
             ["File", "Interpret Footage"],
             Some("Cmd+Alt+G"),
-            "{items?, frameRate?: fps|\"file\", alpha?: straight|premultiplied|ignore|guess, guessAlpha?, matteColor?, invertAlpha?, loop?, pixelAspect?, fields?: off|upper|lower, colorProfile?: srgb|rec709|rec2020|p3|auto, linearLight?, preserveRgb? (the file's values unconverted), overrideStart?: bool (false: Use Source File Timecode), startTimecode?: timecode|frame (Override Start)}",
+            "{items?|item?, frameRate?: fps|\"file\", alpha?: straight|premultiplied|ignore|guess, guessAlpha?, matteColor?|premulColor?, invertAlpha?, loop?, pixelAspect?, fields?: off|upper|lower, colorProfile?: srgb|rec709|rec2020|p3|auto, linearLight?, preserveRgb? (the file's values unconverted), overrideStart?: bool (false: Use Source File Timecode), startTimecode?: timecode|frame (Override Start)}",
             has_footage_selection,
             interpret
         ),
@@ -1084,7 +1084,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Apply Interpretation",
             ["File", "Interpret Footage"],
             Some("Cmd+Alt+V"),
-            "{items?}",
+            "{items?|item?}",
             has_interpretation,
             apply_interpretation
         ),
@@ -1115,7 +1115,7 @@ pub fn specs() -> Vec<CommandSpec> {
             has_footage_selection,
             replace_with_solid
         ),
-        cmd!("file.reloadFootage", "Reload Footage", ["File"], Some("Cmd+Alt+L"), "{items?}", has_footage_selection, reload),
+        cmd!("file.reloadFootage", "Reload Footage", ["File"], Some("Cmd+Alt+L"), "{items?|item?}", has_footage_selection, reload),
         cmd!("file.revealInFinder", "Reveal in Finder", ["File"], None, "{item?}", has_footage_selection, reveal_in_finder),
     ]
 }

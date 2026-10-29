@@ -210,7 +210,9 @@ takes a name, or as `{"Viewer":42}` and `{"ScriptPanel":77}` for viewers and Scr
   `move {target, zone?, before?}`, `setStackOpen {open}`, `resizeStack {height}`,
   `resizeSplit {path, size}`; `rect` is `[x, y, width, height]`). It returns
   `{"docking": workspace}`. `ui.dock.reset` returns the current workspace to its saved or
-  built-in layout and returns the same.
+  built-in layout and returns the same. Raw `Open` and `OpenAt` actions are refused in both
+  `ui.dock {action}` and `window.panel.layout {action}`, as in `window.dockAction`; use the
+  panel open commands instead.
 - `window.dockPanel {panel, anchor?, zone?, before?}` docks as `window.panel.dock`: `zone` is
   `center`, `tab`, `left`, `right`, `top`, `bottom`, `above` or `below`; without an anchor a
   side zone docks along that edge of the whole workspace. `window.floatPanel {panel, rect?}`

@@ -97,6 +97,29 @@ pub use wgpu;
 
 use crate::context::Enc;
 
+/// Why [`Gpu::within_memory`] discarded a frame.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FrameError {
+    /// The GPU context is retired (device lost, a readback timed out, an uncaptured error).
+    Retired(String),
+    /// Out of video memory (or a driver reporting a failed allocation as an internal error),
+    /// with any validation errors it went on to cause.
+    Memory(String),
+    /// The device rejected a command with no allocation failure before it (an invalid texture
+    /// or parameters, #1319): a compositor bug, not memory pressure.
+    Validation(String),
+}
+
+impl std::fmt::Display for FrameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FrameError::Retired(e) | FrameError::Memory(e) | FrameError::Validation(e) => f.write_str(e),
+        }
+    }
+}
+
+impl std::error::Error for FrameError {}
+
 /// The GPU compositor (cheap to clone; one device shared by all clones).
 #[derive(Clone)]
 pub struct Gpu {
@@ -265,33 +288,42 @@ impl Gpu {
         }
     }
 
-    /// Run work in native thread-local out-of-memory and internal-error scopes. A failed
-    /// result is discarded and cached allocations are released; callers can retry with a fresh
-    /// CPU renderer. Some drivers report a failed allocation as an internal error rather than
-    /// out-of-memory (Adreno's `ERROR_INITIALIZATION_FAILED`, #591), so both count.
+    /// Run work in native thread-local out-of-memory, internal-error and validation scopes. A
+    /// failed result is discarded and the textures and buffers kept for reuse are released;
+    /// callers can retry with a fresh CPU renderer. Some drivers report a failed allocation as an
+    /// internal error rather than out-of-memory (Adreno's `ERROR_INITIALIZATION_FAILED`, #591),
+    /// so both count. A failed allocation leaves an invalid texture whose use is then a
+    /// validation error (`Texture::create_view`, #1319): caught here, it fails this frame only
+    /// instead of retiring the GPU compositor for the session as an uncaptured error.
     /// Browser callers use the host/owned-device failure bridge and bounded readbacks instead
     /// of blocking their event loop on an error-scope future.
-    pub fn within_memory<T>(&self, f: impl FnOnce() -> T) -> Result<T, String> {
-        self.ctx.check_health()?;
+    pub fn within_memory<T>(&self, f: impl FnOnce() -> T) -> Result<T, FrameError> {
+        self.ctx.check_health().map_err(FrameError::Retired)?;
         #[cfg(not(target_arch = "wasm32"))]
         {
             let oom = self.ctx.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
             let internal = self.ctx.device.push_error_scope(wgpu::ErrorFilter::Internal);
+            let validation = self.ctx.device.push_error_scope(wgpu::ErrorFilter::Validation);
             let out = f();
+            let validation = pollster::block_on(validation.pop());
             let internal = pollster::block_on(internal.pop());
             let oom = pollster::block_on(oom.pop());
-            match internal.or(oom) {
-                Some(e) => {
-                    self.ctx.clear_uploads();
-                    Err(e.to_string())
-                }
-                None => self.ctx.check_health().map(|()| out),
+            let memory = oom.is_some() || internal.is_some();
+            // The allocation failure first: a validation error is often its consequence.
+            let errors: Vec<String> = [oom, internal, validation].into_iter().flatten().map(|e| e.to_string()).collect();
+            if errors.is_empty() {
+                return self.ctx.check_health().map(|()| out).map_err(FrameError::Retired);
             }
+            // Its textures go back to the pool when dropped: drop them before emptying it.
+            drop(out);
+            self.ctx.discard_kept();
+            let errors = errors.join("; then: ");
+            Err(if memory { FrameError::Memory(errors) } else { FrameError::Validation(errors) })
         }
         #[cfg(target_arch = "wasm32")]
         {
             let out = f();
-            self.ctx.check_health().map(|()| out)
+            self.ctx.check_health().map(|()| out).map_err(FrameError::Retired)
         }
     }
 

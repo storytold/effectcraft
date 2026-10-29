@@ -94,7 +94,7 @@ fn export_bytes(format: OutputFormat, name: &str) -> Vec<u8> {
 #[test]
 fn h264_movie_bytes_are_pinned() {
     let data = export_bytes(OutputFormat::H264, "/out/pinned.mp4");
-    assert_eq!((data.len(), fnv1a(&data)), (104_161, 10_466_446_817_305_548_344), "H.264 MP4");
+    assert_eq!((data.len(), fnv1a(&data)), (104_180, 8_728_430_532_616_484_528), "H.264 MP4");
 }
 
 #[test]

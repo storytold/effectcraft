@@ -164,6 +164,33 @@ fn alpha_at(s: &Session, f: u32) -> Vec<f32> {
     img.data.iter().map(|p| p[3]).collect()
 }
 
+/// Green, then Alt (red) over part of the object, then green there again: the last stroke wins,
+/// in the render and through Undo / Redo (#1646).
+#[test]
+fn roto_brush_strokes_correct_earlier_ones() {
+    let (mut s, clip, _) = painted(center, "disk-1646.mov");
+    let c = center(0);
+    let spot = [c[0], c[1] + 25.0];
+    let i = spot[1] as usize * W as usize + spot[0] as usize;
+    let paint = |s: &mut Session, kind: &str| {
+        s.execute_checked(
+            "roto.stroke",
+            json!({"layer": clip.0, "kind": kind, "points": line([spot[0] - 6.0, spot[1]], [spot[0] + 6.0, spot[1]]), "radius": 7}),
+        )
+        .unwrap();
+    };
+    assert!(alpha_at(&s, 0)[i] > 0.5, "the spot starts inside the matte");
+    paint(&mut s, "bg");
+    assert!(alpha_at(&s, 0)[i] < 0.5, "Alt removes it");
+    paint(&mut s, "fg");
+    assert!(alpha_at(&s, 0)[i] > 0.5, "green over the Alt stroke restores it");
+    assert!(iou_at(&mut s, clip, 0, c) > 0.95);
+    assert!(s.undo());
+    assert!(alpha_at(&s, 0)[i] < 0.5, "undo brings the removal back");
+    assert!(s.redo());
+    assert!(alpha_at(&s, 0)[i] > 0.5, "redo restores it again");
+}
+
 #[test]
 fn roto_brush_segments_and_propagates() {
     let (mut s, clip, uid) = painted(center, "disk-a.mov");

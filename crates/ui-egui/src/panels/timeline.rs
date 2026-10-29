@@ -795,12 +795,11 @@ fn display_name(app: &EffectcraftApp, l: &Layer) -> String {
 /// layer whose names contain `q` (lowercase), each with its enclosing groups. A matching group
 /// brings its whole contents.
 fn search_rows(l: &Layer, q: &str) -> Vec<Row> {
-    /// The row for a group in search results: depth, its effect's enabled flag, and the eye
-    /// switch for layer-style groups (not Blending Options).
+    /// The row for a group in search results: depth, its effect's enabled flag, and its eye
+    /// switch ([`eye_of`]).
     fn group_row(l: &Layer, g: &PropGroup, depth: usize, parent: &PropGroup) -> Row {
         let fx = matches!(g.kind, GroupKind::Effect { .. }).then_some(g.enabled);
-        let eye =
-            (parent.match_id == effectcraft_engine::project::styles::GROUP && g.match_id != effectcraft_engine::project::styles::BLENDING).then_some(g.enabled);
+        let eye = eye_of(parent, g);
         Row { layer: l.id, depth, kind: RowKind::Group { uid: g.uid, name: g.name.clone(), open: true, has_children: !g.children.is_empty(), fx, eye } }
     }
     /// Every visible child of `g` at `depth`, groups recursed into whole — a matching group
@@ -1235,6 +1234,14 @@ fn collect_props(g: &PropGroup, out: &mut Vec<u64>, f: &dyn Fn(&Property) -> boo
 /// in `open`, text animators list their selectors and properties directly (as in AE), and a
 /// shape group's inner Contents (AE's elided `ADBE Vectors Group`) is skipped so its items
 /// list directly under the group.
+/// The eye switch of group `g` inside `parent`, as in After Effects: layer styles (not Blending
+/// Options) and every item in a shape layer's Contents (#959), which the renderer skips when off.
+fn eye_of(parent: &PropGroup, g: &PropGroup) -> Option<bool> {
+    let style = parent.match_id == effectcraft_engine::project::styles::GROUP && g.match_id != effectcraft_engine::project::styles::BLENDING;
+    let shape_item = parent.match_id == "contents" && g.match_id != "transform";
+    (style || shape_item).then_some(g.enabled)
+}
+
 fn push_group(rows: &mut Vec<Row>, l: &Layer, g: &PropGroup, depth: usize, open: &std::collections::BTreeSet<u64>) {
     for c in &g.children {
         match c {
@@ -1250,9 +1257,7 @@ fn push_group(rows: &mut Vec<Row>, l: &Layer, g: &PropGroup, depth: usize, open:
             Node::Group(sg) => {
                 let o = open.contains(&sg.uid);
                 let fx = matches!(sg.kind, GroupKind::Effect { .. }).then_some(sg.enabled);
-                // Layer style groups have eye switches (not Blending Options).
-                let eye = (g.match_id == effectcraft_engine::project::styles::GROUP && sg.match_id != effectcraft_engine::project::styles::BLENDING)
-                    .then_some(sg.enabled);
+                let eye = eye_of(g, sg);
                 rows.push(Row {
                     layer: l.id,
                     depth,
@@ -1293,6 +1298,13 @@ fn layer_icon(l: &Layer, project: &effectcraft_engine::project::Project) -> Icon
 }
 
 /// Layers being dragged to a new place in the stack (timeline rows).
+#[derive(Clone)]
+struct LayerDrag {
+    comp: ItemId,
+    owner: egui::Id,
+    layers: Vec<u64>,
+}
+
 fn layer_drag_id() -> egui::Id {
     egui::Id::unique("tl-layer-drag")
 }
@@ -1502,10 +1514,18 @@ fn insertion(layer_rows: &[(Rect, LayerId)], py: f32, top: f32) -> (Option<usize
     (at, y)
 }
 
-/// The `egui::Id` of the flag the row drag's release sets, telling the same frame's reorder
-/// drawing code to apply the drop.
-fn layer_drop_id() -> egui::Id {
-    egui::Id::unique("tl-layer-drop")
+/// Resolve a visible insertion boundary through the full outline, including offscreen layers.
+fn layer_drop_target(rows: &[Row], visible: &[(Rect, LayerId)], at: Option<usize>, moving: &[u64]) -> Option<LayerId> {
+    let (anchor, after) = match at {
+        Some(i) => (visible.get(i)?.1, false),
+        None => (visible.last()?.1, true),
+    };
+    rows.iter()
+        .filter(|row| matches!(row.kind, RowKind::Layer))
+        .skip_while(|row| row.layer != anchor)
+        .skip(usize::from(after))
+        .find(|row| !moving.contains(&row.layer.0))
+        .map(|row| row.layer)
 }
 
 /// Whether a Project item can replace a layer's source (the same set `layer.replaceSource`
@@ -2903,13 +2923,10 @@ fn layer_row_actions(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, rc
     let is_sel = rc.is_sel;
     // Locked layers can't be selected or moved (unlock them with the lock switch).
     let locked = layer.switches.locked;
-    if row_resp.drag_started() && !locked {
+    if row_resp.drag_started_by(egui::PointerButton::Primary) && !locked {
         // The selected layers move together; an unselected row moves alone.
         let moving: Vec<u64> = if is_sel { comp.layers.iter().filter(|l| selected.contains(&l.id)).map(|l| l.id.0).collect() } else { vec![layer.id.0] };
-        ctx.data_mut(|d| d.insert_temp(layer_drag_id(), moving));
-    }
-    if row_resp.drag_stopped() {
-        ctx.data_mut(|d| d.insert_temp(layer_drop_id(), true));
+        ctx.data_mut(|d| d.insert_temp(layer_drag_id(), LayerDrag { comp: cid, owner: row_resp.id, layers: moving }));
     }
     app.auto.add(&format!("timeline.layer.{}.row", layer.id.0), left, &layer.name);
     if row_resp.clicked() && !locked {
@@ -3388,11 +3405,16 @@ fn group_switches(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, rc: &
         app.auto.add(&format!("timeline.group.{uid}.fx"), fr_, name);
     }
     if let Some(en) = eye {
-        // Layer style eye switch in the A/V column, like AE.
+        // A layer style's or shape item's eye switch in the A/V column, like AE.
         let er = Rect::from_center_size(pos2(cw.av + 10.0, cy), vec2(15.0, 15.0));
         lp.rect_stroke(er.shrink(1.5), 2.0, Stroke::new(1.0, t.separator), StrokeKind::Inside);
         if widgets::icon_toggle(ui, er, Icon::Eye, *en, &t, egui::Id::unique(("geye", uid)), Sense::click()).clicked() {
-            actions.push(("layer.style.toggle".into(), json!({"layer": layer.id.0, "style": uid})));
+            let style = layer.props.sub(effectcraft_engine::project::styles::GROUP).is_some_and(|s| s.find_group(*uid).is_some());
+            actions.push(if style {
+                ("layer.style.toggle".into(), json!({"layer": layer.id.0, "style": uid}))
+            } else {
+                ("prop.setGroupEnabled".into(), json!({"layer": layer.id.0, "prop": uid, "value": !*en}))
+            });
         }
         app.auto.add(&format!("timeline.group.{uid}.eye"), er, name);
     }
@@ -4286,6 +4308,10 @@ fn pick_whip_drag(g: &mut Rw) {
                     if let Some(d) = d {
                         params["target"]["dimension"] = json!(d);
                     }
+                    // Alt held as it drops: an effect's properties by their index (#1072).
+                    if ctx.input(|i| i.modifiers.alt) {
+                        params["byIndex"] = json!(true);
+                    }
                     if let Some((text, [a, b])) = into {
                         // Into the expression being edited, which goes on being edited.
                         params["expression"] = json!(text);
@@ -4351,6 +4377,7 @@ fn graph_empty_area(ui: &mut egui::Ui, g: &mut Rw) {
 
 /// Layer reorder drag: a line where the layers land.
 fn layer_reorder_drag(ui: &mut egui::Ui, g: &mut Rw) {
+    let cid = g.tl.cid;
     let t = g.tl.t;
     let rect = g.tl.rect;
     let graph_x0 = g.tl.graph_x0;
@@ -4360,16 +4387,29 @@ fn layer_reorder_drag(ui: &mut egui::Ui, g: &mut Rw) {
     let p = g.tl.p.clone();
     let actions = &mut g.tl.actions;
     let hit_rows = &mut g.hit_rows;
-    if let Some(moving) = ctx.data(|d| d.get_temp::<Vec<u64>>(layer_drag_id())) {
-        let dropped = ctx.data_mut(|d| d.remove_temp::<bool>(layer_drop_id())).unwrap_or(false);
+    // The origin row can scroll out of view, so finish the gesture here, independently of
+    // its Response. Disabled UI, Escape or lost ownership cancels; only a primary release drops layers.
+    if let Some(drag) = ctx.data(|d| d.get_temp::<LayerDrag>(layer_drag_id())) {
+        let (down, released, escape) =
+            ctx.input(|i| (i.pointer.primary_down(), i.pointer.button_released(egui::PointerButton::Primary), i.key_pressed(egui::Key::Escape)));
+        let dropped = ctx.drag_stopped_id() == Some(drag.owner) && released;
+        let valid = ui.is_enabled()
+            && drag.comp == cid
+            && drag.layers.iter().all(|id| comp.layer(LayerId(*id)).is_some())
+            && !escape
+            && (dropped || (down && ctx.dragged_id() == Some(drag.owner)));
+        if dropped || !valid {
+            ctx.data_mut(|d| d.remove::<LayerDrag>(layer_drag_id()));
+        }
+        let moving = &drag.layers;
         let layer_rows: Vec<(Rect, LayerId)> = hit_rows.iter().filter(|(_, r)| matches!(r.kind, RowKind::Layer)).map(|(rr, r)| (*rr, r.layer)).collect();
         if let Some(py) = ui.input(|i| i.pointer.interact_pos().or(i.pointer.latest_pos())).map(|p| p.y)
+            && valid
             && !layer_rows.is_empty()
         {
             let (at, line_y) = insertion(&layer_rows, py, rows_rect.min.y);
-            let target = at.and_then(|i| layer_rows[i..].iter().find(|(_, l)| !moving.contains(&l.0)).map(|(_, l)| *l));
+            let target = layer_drop_target(&g.tl.rows, &layer_rows, at, moving);
             if dropped {
-                ctx.data_mut(|d| d.remove::<Vec<u64>>(layer_drag_id()));
                 // Only when the order changes (no empty undo step for a drop in place).
                 let mut order: Vec<u64> = comp.layers.iter().map(|l| l.id.0).filter(|id| !moving.contains(id)).collect();
                 let at = target.and_then(|t| order.iter().position(|id| *id == t.0)).unwrap_or(order.len());
@@ -4385,8 +4425,6 @@ fn layer_reorder_drag(ui: &mut egui::Ui, g: &mut Rw) {
                 ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
                 p.with_clip_rect(rows_rect).line_segment([pos2(rect.min.x, line_y), pos2(graph_x0, line_y)], Stroke::new(2.0, t.accent));
             }
-        } else if dropped {
-            ctx.data_mut(|d| d.remove::<Vec<u64>>(layer_drag_id()));
         }
     }
     // Quick Offset of layer bars: the last selected layer moves by whole frames with the pointer
@@ -5495,15 +5533,17 @@ fn vector_editor(app: &mut EffectcraftApp, ui: &mut egui::Ui, ve: &ValueEdit<'_>
     let feather = prop.match_id == "feather" && layer.props.parent_of(uid).is_some_and(|g| matches!(g.kind, GroupKind::Mask { .. }));
     let range = if feather { (0.0, 1e9) } else { (-1e9, 1e9) };
     // Scale and Mask Feather: the chain link (Constrain Proportions, on by default).
-    let linkable = feather || (pct && prop.match_id == "scale");
-    let linked = linkable && !app.ui.timeline.unlinked.contains(&uid);
+    // Rectangle and Ellipse Path Size have it too, off by default (#2489).
+    let size = prop.match_id == "size" && layer.props.parent_of(uid).is_some_and(|g| matches!(g.match_id.as_str(), "rect" | "ellipse"));
+    let linkable = feather || size || (pct && prop.match_id == "scale");
+    let linked = linkable && app.ui.timeline.is_linked(uid, !size);
     if linkable {
         let lr = Rect::from_center_size(pos2(x + 7.0, at.y), vec2(14.0, 14.0));
         let resp = ui.interact(lr, egui::Id::unique(("tl-link", uid)), Sense::click()).on_hover_text(crate::i18n::tr("Constrain Proportions"));
         icons::paint(p, lr, Icon::Link, if linked { t.accent } else { t.text_faint });
         app.auto.add(&format!("timeline.prop.{uid}.link"), lr, "Constrain Proportions");
-        if resp.clicked() && !app.ui.timeline.unlinked.remove(&uid) {
-            app.ui.timeline.unlinked.insert(uid);
+        if resp.clicked() {
+            app.ui.timeline.toggle_link(uid, !size);
         }
         x += 18.0;
     }

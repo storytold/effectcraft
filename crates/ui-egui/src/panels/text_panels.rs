@@ -762,10 +762,11 @@ pub(super) fn font_picker(app: &mut EffectcraftApp, ui: &mut egui::Ui, id: egui:
             let resp = ui.add_sized([row_width, 24.0], egui::Button::selectable(index == selected, ""));
             resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), index == selected, &r.display));
             let label_rect = Rect::from_min_size(resp.rect.min + vec2(5.0, 0.0), vec2(label_width - 5.0, resp.rect.height()));
+            let name = drawn_font_name(ui.ctx(), r);
             ui.painter().with_clip_rect(label_rect.intersect(ui.clip_rect())).text(
                 label_rect.left_center(),
                 Align2::LEFT_CENTER,
-                &r.display,
+                name,
                 Tokens::ui(12.0),
                 t.text,
             );
@@ -799,7 +800,7 @@ pub(super) fn font_picker(app: &mut EffectcraftApp, ui: &mut egui::Ui, id: egui:
             if resp.clicked() {
                 chosen = Some(r.family.clone());
             }
-            resp.on_hover_text(&r.display);
+            resp.on_hover_text(name);
         }
         chosen
     };
@@ -945,6 +946,13 @@ fn align_glyph(p: &egui::Painter, r: Rect, op: &str, distribute: bool, t: &Token
     }
 }
 
+/// The name a font menu row draws: the font's own-language name when the interface fonts have a
+/// glyph for each of its characters, else its English family name. A Simplified Chinese name
+/// such as 微软雅黑 can have characters that the Han face of an English interface lacks.
+fn drawn_font_name<'a>(ctx: &egui::Context, row: &'a effectcraft_engine::FontRow) -> &'a str {
+    if ctx.fonts_mut(|f| f.has_glyphs(&Tokens::ui(12.0), &row.display)) { &row.display } else { &row.family }
+}
+
 /// Where a font's "Sample" outlines (`lines`, baseline at y = 0) go in `room`: `(scale, origin)`,
 /// a point `p` landing at `origin + p * scale`. At their natural size on `baseline` when they fit;
 /// fonts with large or odd metrics are scaled down (never up) and moved inside, so no preview
@@ -1002,5 +1010,18 @@ mod tests {
         }
         assert!(fit_preview(&[], room, baseline).is_none());
         assert!(fit_preview(&[vec![[f32::NAN, 1.0]]], room, baseline).is_none());
+    }
+
+    /// A font menu row draws the font's own-language name when the interface fonts have its
+    /// glyphs, and the English family name when they do not.
+    #[test]
+    fn font_menu_rows_draw_a_name_the_interface_fonts_have() {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx, &Tokens::for_kind(Default::default()), "en");
+        ctx.run_ui(Default::default(), |_| {}).textures_delta.clear();
+        let row = |display: &str| effectcraft_engine::FontRow { family: "Menu Name Test".into(), display: display.into(), recent: false, variable: false };
+        // U+F1234 is in a private use plane that no interface font maps.
+        assert_eq!(drawn_font_name(&ctx, &row("Menu \u{F1234}")), "Menu Name Test");
+        assert_eq!(drawn_font_name(&ctx, &row("Nom du menu")), "Nom du menu");
     }
 }

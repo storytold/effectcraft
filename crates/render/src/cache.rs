@@ -497,10 +497,11 @@ fn hash_values(h: &mut KeyHasher, ctx: &EvalCtx, layer: &Layer, g: &PropGroup) {
 /// time, or `None` when the layer must not be cached (movie footage, precomps, cameras, adjustment
 /// layers…).
 pub fn layer_key(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool) -> Option<u64> {
-    // Time effects see property values at other times. Keyframes are part of the hashed
-    // structure (and the layer time is folded in), but expressions may read other layers at
-    // those times, which the key cannot see: such layers are not cached.
-    if reads_other_times(layer) && layer.props.children.iter().any(|c| matches!(c, Node::Group(g) if g.match_id != "transform" && has_expression(g))) {
+    // Time effects (and CC Particle World's Birth Rate history) see property values at other
+    // times. Keyframes are part of the hashed structure (and the layer time is folded in), but
+    // expressions may read other layers at those times, which the key cannot see: such layers
+    // are not cached.
+    if history_unkeyable(layer, None) {
         return None;
     }
     key_with(ctx, layer, scale, draft, blur, false)
@@ -510,7 +511,7 @@ pub fn layer_key(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bo
 /// effects (see `Renderer::layer_input`). Unlike [`layer_key`], footage layers are cached here
 /// (keyed by item and source time), since Time effects read many neighbouring frames.
 pub fn input_key(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool, effects: usize) -> Option<u64> {
-    if layer.switches.adjustment {
+    if layer.switches.adjustment || history_unkeyable(layer, Some(effects)) {
         return None;
     }
     let base = key_any(ctx, layer, scale, draft, blur, true, Some(effects))?;
@@ -519,12 +520,24 @@ pub fn input_key(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bo
     Some(h.finish())
 }
 
-/// Does the layer run an effect that reads the layer at other times (Echo, Timewarp…)?
-fn reads_other_times(layer: &Layer) -> bool {
+/// Does the layer run (among its first `effects` effects, all when `None`) an effect that reads
+/// the layer at other times (Echo, Timewarp…) or its own parameters' history (CC Particle
+/// World's Birth Rate, #1373)?
+fn reads_other_times(layer: &Layer, effects: Option<usize>) -> bool {
     layer.switches.effects
         && layer.effects().is_some_and(|fx| {
-            fx.groups().any(|g| g.enabled && matches!(&g.kind, effectcraft_project::GroupKind::Effect { effect } if effect.starts_with("ec.time.")))
+            fx.groups().take(effects.unwrap_or(usize::MAX)).any(|g| {
+                g.enabled
+                    && matches!(&g.kind, effectcraft_project::GroupKind::Effect { effect }
+                        if effect.starts_with("ec.time.") || effectcraft_effects::reads_param_history(effect))
+            })
         })
+}
+
+/// The layer reads values at other times (see [`reads_other_times`]) and has expressions
+/// (outside Transform), whose results at those times the key can't see.
+fn history_unkeyable(layer: &Layer, effects: Option<usize>) -> bool {
+    reads_other_times(layer, effects) && layer.props.children.iter().any(|c| matches!(c, Node::Group(g) if g.match_id != "transform" && has_expression(g)))
 }
 
 /// A still image (no proxy): its layer is cached like a text or shape layer, so the GPU

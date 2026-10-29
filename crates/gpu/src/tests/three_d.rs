@@ -134,6 +134,22 @@ fn lights_specular_transmission_and_shadows() {
 }
 
 #[test]
+fn wide_shadow_diffusion() {
+    // #2444: a wide penumbra takes more than the 3 × 3 kernel's samples; both sides pick the
+    // same count.
+    for depth in [BitDepth::Bpc8, BitDepth::Bpc32] {
+        let mut s = crossing(depth, BlendMode::Normal);
+        for l in &mut s.p.comp_mut(s.cid).unwrap().layers {
+            if l.switches.three_d {
+                set(l, "materialOptions/castsShadows", Value::Enum(1));
+            }
+        }
+        light(&mut s, LightKind::Point, [150.0, 20.0, -80.0], &[("castsShadows", Value::Bool(true)), ("shadowDiffusion", n(60.0))]);
+        check(&format!("wide shadow diffusion {depth:?}"), compare_at(&s, opts(), Tick::ZERO), 0.005);
+    }
+}
+
+#[test]
 fn depth_of_field_and_motion_blur() {
     for depth in [BitDepth::Bpc8, BitDepth::Bpc32] {
         let mut s = crossing(depth, BlendMode::Normal);

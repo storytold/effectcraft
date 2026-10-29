@@ -199,6 +199,12 @@ fn attenuation(l: u32, p: vec3<f32>) -> f32 {
     return k;
 }
 
+// compose::shadow_taps: samples per side of the Shadow Diffusion kernel.
+fn shadow_taps(r_px: f32) -> u32 {
+    let n = clamp(u32(ceil(2.0 * r_px / 1.5)), 3u, 15u);
+    return n | 1u;
+}
+
 // compose::occlusion: RGB transmittance of light `l` reaching `p` past caster `c`.
 fn occlusion(c: u32, p: vec3<f32>, l: u32) -> vec3<f32> {
     let pl = planes[c];
@@ -243,9 +249,14 @@ fn occlusion(c: u32, p: vec3<f32>, l: u32) -> vec3<f32> {
     if (r * pl.tex.z < 0.5) {
         px = texel(c, hit.x, hit.y);
     } else {
-        for (var j = -1; j <= 1; j++) {
-            for (var i = -1; i <= 1; i++) {
-                px += texel(c, hit.x + f32(i) * r * 0.66, hit.y + f32(j) * r * 0.66) / 9.0;
+        // compose::shadow_taps: n × n box filter over the penumbra square.
+        let n = shadow_taps(r * pl.tex.z);
+        let step = 2.0 * r / f32(n);
+        let h = i32(n / 2u);
+        let w = 1.0 / f32(n * n);
+        for (var j = -h; j <= h; j++) {
+            for (var i = -h; i <= h; i++) {
+                px += texel(c, hit.x + f32(i) * step, hit.y + f32(j) * step) * w;
             }
         }
     }

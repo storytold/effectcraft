@@ -7,6 +7,23 @@
 //
 // Plain functions only: the Rust side owns the logic.
 
+// ------------------------------------------------------------------ shortcuts
+
+/// Keep Duplicate on the app canvas instead of also opening the browser's bookmarks.
+/// The physical D key counts on layouts where it types no ASCII letter (e.g. Cyrillic), because
+/// eframe falls back to the key code there; it does not on Dvorak, where it types E.
+/// eframe still receives the key; other chords and HTML inputs keep their browser behavior.
+export function installCanvasShortcuts(canvas) {
+  canvas.addEventListener("keydown", (event) => {
+    if (event.target === canvas && (event.ctrlKey || event.metaKey)
+      && !event.shiftKey && !event.altKey && !event.isComposing
+      && (event.key.toLowerCase() === "d"
+        || (event.code === "KeyD" && !/^[a-z]$/i.test(event.key)))) {
+      event.preventDefault();
+    }
+  }, { capture: true });
+}
+
 // ------------------------------------------------------------------ storage
 
 const DIR = "effectcraft";

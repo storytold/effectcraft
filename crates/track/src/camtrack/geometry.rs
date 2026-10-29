@@ -207,8 +207,8 @@ pub fn triangulate(views: &[(Pose, [f64; 2])]) -> Option<V3> {
     for (p, x) in views {
         let t = p.t();
         let rows = [[p.r[0][0], p.r[0][1], p.r[0][2], t[0]], [p.r[1][0], p.r[1][1], p.r[1][2], t[1]], [p.r[2][0], p.r[2][1], p.r[2][2], t[2]]];
-        let a0: Vec<f64> = (0..4).map(|j| x[0] * rows[2][j] - rows[0][j]).collect();
-        let a1: Vec<f64> = (0..4).map(|j| x[1] * rows[2][j] - rows[1][j]).collect();
+        let a0 = [0, 1, 2, 3].map(|j| x[0] * rows[2][j] - rows[0][j]);
+        let a1 = [0, 1, 2, 3].map(|j| x[1] * rows[2][j] - rows[1][j]);
         for a in [a0, a1] {
             let nrm = a.iter().map(|v| v * v).sum::<f64>().sqrt().max(1e-300);
             for i in 0..4 {

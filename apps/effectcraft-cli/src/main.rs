@@ -7,11 +7,12 @@
 //! effectcraft-cli exec --list [--filter TEXT] [--schemas]     list engine commands (as `commands`)
 //! effectcraft-cli run <id> <json> [<id> <json> …]             run several commands in order
 //! effectcraft-cli run --args-file F                           the same, one argument per line of F
+//! effectcraft-cli run --commands FILE|-                         steps {"command", "params"} from FILE or stdin
 //! effectcraft-cli props <comp> <layer> [--flat] [--time S]    a layer's property tree (with paths)
 //! effectcraft-cli get <comp> <layer> <path> [--time S]        read a property
 //! effectcraft-cli set <comp> <layer> <path> <value> [--time S] [--expression E]
 //! effectcraft-cli render-frame [--comp C] [--time S|--frame N] [--max-side PX|--scale K] [--out F.png] [--transparent]
-//! effectcraft-cli render [--comp C] --out FILE [--format h264|hevc|av1|prores|webm|png|jpeg|tiff|exr|gif|wav|aiff] [--start S] [--end S]
+//! effectcraft-cli render [--comp C] --out FILE [--format h264|hevc|av1|prores|webm|png|jpeg|tiff|exr|tga|gif|wav|aiff] [--start S] [--end S]
 //!     [--work-area] [--fps N] [--resolution full|half|third|quarter|K] [--quality best|draft] [--channels rgb|rgba]
 //!     [--jpeg-quality N] [--bitrate KBPS] [--prores proxy|lt|standard|hq|4444|4444xq] [--audio auto|on|off]
 //!     [--profile main|main10] [--level auto|4.1] [--rate-control bitrate|quality] [--video-quality 1-100]
@@ -98,6 +99,10 @@ const USAGE: &str = "usage: effectcraft-cli <info|commands|exec|run|props|get|se
   exec <command-id> [--params JSON]        run one engine command (exec --list: list them, as `commands`)
   run <id> <json> [<id> <json> ...]        run several commands in order
   run --args-file F                        the same, one argument per line of F (no command-line length limit)
+  run --commands FILE|-                    steps from FILE, or standard input for -: a JSON array of
+                                           {\"command\": ID, \"params\": {...}} (or \"id\" for \"command\"), or one
+                                           such object per line (JSON Lines); at most 64 MiB and 100000 steps.
+                                           Repeatable; run after the <id> <json> pairs and --args-file
   props <comp> <layer> [--flat] [--time S] a layer's property tree with paths
   get <comp> <layer> <path> [--time S]     read a property
   set <comp> <layer> <path> <value> [--time S] [--expression E]
@@ -107,7 +112,7 @@ const USAGE: &str = "usage: effectcraft-cli <info|commands|exec|run|props|get|se
          [--jpeg-quality N] [--bitrate KBPS] [--prores PROFILE] [--audio auto|on|off]
          [--profile main|main10] [--level auto|4.1] [--rate-control bitrate|quality] [--video-quality N]
          [--keyint FRAMES] [--webm-codec vp9|av1] [--audio-bitrate KBPS] [--opus-app audio|voice] | --queue
-                                           (formats h264|hevc|av1|prores|webm|png|jpeg|tiff|exr|gif|wav|aiff;
+                                           (formats h264|hevc|av1|prores|webm|png|jpeg|tiff|exr|tga|gif|wav|aiff;
                                            --profile..--keyint: HEVC / AV1, --audio-bitrate/--opus-app: WebM Opus)
                                            a relative --out is relative to the working directory
                                            --progress: progress lines on stderr when it is not a terminal
@@ -151,6 +156,7 @@ const VALUED: &[&str] = &[
     "--depth",
     "--eval",
     "--args-file",
+    "--commands",
     // render
     "--template",
     "--values",
@@ -279,6 +285,9 @@ fn utf8_args(raw: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Vec<St
 }
 
 fn main() {
+    // Warnings and errors to standard error (`RUST_LOG` overrides), so a GPU that declines
+    // frames or runs out of memory says so instead of silently rendering on the CPU.
+    effectcraft_engine::logging::install_with("warn");
     let raw = match utf8_args(std::env::args_os().skip(1)) {
         Ok(raw) => raw,
         Err(e) => fail_usage(&e),
@@ -332,6 +341,87 @@ impl From<String> for Failure {
     fn from(e: String) -> Self {
         Failure::Error(e)
     }
+}
+
+/// Most bytes `run --commands` reads from a file or standard input: the steps are untrusted input.
+const MAX_COMMANDS_BYTES: u64 = 64 * 1024 * 1024;
+/// Most steps one `run --commands` takes.
+const MAX_COMMANDS_STEPS: usize = 100_000;
+
+/// The text of `--commands source`: the file `source`, or standard input for `-`, refused past
+/// [`MAX_COMMANDS_BYTES`]. This reader, [`parse_commands`] and [`command_step`] are ported from
+/// vectorcraft-cli's (storytold/vectorcraft#3630), with a tuple in place of its `Step` enum.
+fn read_commands(source: &str) -> Result<String, String> {
+    use std::io::Read;
+    let mut bytes = vec![];
+    let read = if source == "-" {
+        std::io::stdin().lock().take(MAX_COMMANDS_BYTES + 1).read_to_end(&mut bytes)
+    } else {
+        std::fs::File::open(source).and_then(|f| f.take(MAX_COMMANDS_BYTES + 1).read_to_end(&mut bytes))
+    };
+    read.map_err(|e| format!("--commands {source}: {e}"))?;
+    if bytes.len() as u64 > MAX_COMMANDS_BYTES {
+        return Err(format!("--commands {source}: more than {} MiB of steps", MAX_COMMANDS_BYTES / (1024 * 1024)));
+    }
+    String::from_utf8(bytes).map_err(|_| format!("--commands {source}: not UTF-8 text"))
+}
+
+/// The steps of `--commands source` from its `text`: a JSON array of `{"command": ID, "params":
+/// {…}}` objects (`"id"` may stand for `"command"`), or one such object per line (JSON Lines, blank
+/// lines skipped). `first` is the run's index of the first of them, which an error names with the
+/// entry's place in the text.
+fn parse_commands(source: &str, text: &str, first: usize) -> Result<Vec<(String, Value)>, String> {
+    // Notepad on Windows starts UTF-8 files with a byte order mark.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let too_many = || format!("--commands {source}: more than {MAX_COMMANDS_STEPS} steps");
+    // Each entry with where it is in the text: its line for JSON Lines.
+    let mut entries: Vec<(Option<usize>, Value)> = vec![];
+    if text.trim_start().starts_with('[') {
+        let v: Value = serde_json::from_str(text).map_err(|e| format!("--commands {source}: {e}"))?;
+        let Value::Array(items) = v else { return Err(format!("--commands {source}: not a JSON array")) };
+        if items.len() > MAX_COMMANDS_STEPS {
+            return Err(too_many());
+        }
+        entries.extend(items.into_iter().map(|v| (None, v)));
+    } else {
+        for (n, line) in text.lines().enumerate().filter(|(_, l)| !l.trim().is_empty()) {
+            if entries.len() == MAX_COMMANDS_STEPS {
+                return Err(too_many());
+            }
+            let v = serde_json::from_str(line).map_err(|e| format!("--commands {source}: step {} (line {}): {e}", first + entries.len(), n + 1))?;
+            entries.push((Some(n + 1), v));
+        }
+    }
+    entries
+        .into_iter()
+        .enumerate()
+        .map(|(k, (line, v))| {
+            command_step(v).map_err(|e| {
+                let place = line.map_or_else(|| format!("entry {}", k + 1), |l| format!("line {l}"));
+                format!("--commands {source}: step {} ({place}): {e}", first + k)
+            })
+        })
+        .collect()
+}
+
+/// The command id and params of one `--commands` entry, `{"command": ID, "params": {…}}`.
+fn command_step(v: Value) -> Result<(String, Value), String> {
+    let Value::Object(mut o) = v else { return Err("a step must be an object such as {\"command\": \"comp.new\", \"params\": {}}".into()) };
+    let id = match (o.remove("command"), o.remove("id")) {
+        (Some(Value::String(id)), None) | (None, Some(Value::String(id))) => id,
+        (Some(_), Some(_)) => return Err("give `command` or `id`, not both".into()),
+        (None, None) => return Err("no `command`".into()),
+        _ => return Err("`command` must be a string, a command id".into()),
+    };
+    let params = match o.remove("params") {
+        None | Some(Value::Null) => json!({}),
+        Some(p @ Value::Object(_)) => p,
+        Some(_) => return Err(format!("`params` of {id} must be a JSON object")),
+    };
+    if let Some(key) = o.keys().next() {
+        return Err(format!("unknown key `{key}`: a step has `command` (or `id`) and `params`"));
+    }
+    Ok((id, params))
 }
 
 fn usage_err<T>(m: &str) -> Result<T, Failure> {
@@ -524,14 +614,14 @@ fn run(cmd: &str, args: &Args, json_out: bool) -> Result<(), Failure> {
                 let text = std::fs::read_to_string(f).map_err(|e| Failure::Usage(format!("--args-file {f}: {e}")))?;
                 pairs.extend(text.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from));
             }
-            if pairs.is_empty() {
-                return usage_err("run needs <command-id> [<json>] pairs");
+            let sources = args.opts("--commands");
+            if pairs.is_empty() && sources.is_empty() {
+                return usage_err("run needs <command-id> [<json>] pairs or --commands FILE|-");
             }
-            let mut b = backend(args, true)?;
-            let mut results = vec![];
+            let mut steps = vec![];
             let mut i = 0;
             while i < pairs.len() {
-                let id = &pairs[i];
+                let id = pairs[i].clone();
                 let params = match pairs.get(i + 1).filter(|p| p.trim_start().starts_with('{')) {
                     Some(p) => {
                         i += 1;
@@ -540,9 +630,26 @@ fn run(cmd: &str, args: &Args, json_out: bool) -> Result<(), Failure> {
                     None => json!({}),
                 };
                 i += 1;
-                let r = b.exec(id, params).map_err(|e| Failure::Error(format!("{id}: {e}")))?;
-                if let Some(e) = failed_render(id, &r) {
-                    return Err(Failure::Error(format!("{id}: {e}")));
+                steps.push((id, params));
+            }
+            if sources.iter().filter(|s| **s == "-").count() > 1 {
+                return usage_err("--commands - is given twice: standard input is read once");
+            }
+            for &source in &sources {
+                let text = read_commands(source).map_err(Failure::Usage)?;
+                steps.extend(parse_commands(source, &text, steps.len()).map_err(Failure::Usage)?);
+            }
+            if steps.is_empty() {
+                return Err(Failure::Usage(format!("--commands {}: no commands", sources.join(", "))));
+            }
+            let mut b = backend(args, true)?;
+            let mut results = vec![];
+            // The step's index closes the message: a generated list repeats ids, and callers match
+            // the leading `<id>: `.
+            for (n, (id, params)) in steps.into_iter().enumerate() {
+                let r = b.exec(&id, params).map_err(|e| Failure::Error(format!("{id}: {e} (step {n})")))?;
+                if let Some(e) = failed_render(&id, &r) {
+                    return Err(Failure::Error(format!("{id}: {e} (step {n})")));
                 }
                 if !json_out {
                     emit(&r, false);

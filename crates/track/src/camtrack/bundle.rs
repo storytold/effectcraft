@@ -216,8 +216,52 @@ fn layout(ncam: usize, o: &BaOpts) -> Layout {
     Layout { start, fidx, shared, dist, n, rot_only: o.fix_centers }
 }
 
+// Six pose parameters, one shared OR per-camera focal parameter, two distortion parameters.
+const MAX_CAMERA_JACOBIAN_ENTRIES: usize = 6 + 1 + 2;
+type CameraJacobianEntry = (usize, [f64; 2]);
+
+/// Keeps the current parameter set on the stack. Extra parameters spill rather than panic
+/// if a future extension grows beyond the inline capacity.
+struct CameraJacobian {
+    entries: [CameraJacobianEntry; MAX_CAMERA_JACOBIAN_ENTRIES],
+    len: usize,
+    overflow: Vec<CameraJacobianEntry>,
+}
+
+impl CameraJacobian {
+    fn new() -> Self {
+        Self { entries: [(0, [0.0; 2]); MAX_CAMERA_JACOBIAN_ENTRIES], len: 0, overflow: Vec::new() }
+    }
+
+    fn clear(&mut self) {
+        self.len = 0;
+        self.overflow.clear();
+    }
+
+    fn push(&mut self, entry: CameraJacobianEntry) {
+        if self.overflow.is_empty() {
+            if let Some(slot) = self.entries.get_mut(self.len) {
+                *slot = entry;
+                self.len += 1;
+                return;
+            }
+            self.overflow.extend_from_slice(&self.entries);
+        }
+        self.overflow.push(entry);
+    }
+
+    fn as_slice(&self) -> &[CameraJacobianEntry] {
+        if self.overflow.is_empty() {
+            // len only grows after a successful get_mut, so it cannot exceed capacity.
+            self.entries.get(..self.len).unwrap_or_default()
+        } else {
+            &self.overflow
+        }
+    }
+}
+
 /// Camera-side Jacobian entries of one observation: (parameter index, d r / d param).
-fn cam_jac(l: &Layout, ci: usize, c: &BaCam, xc: V3, a: &[[f64; 3]; 2], p: [f64; 2], out: &mut Vec<(usize, [f64; 2])>) {
+fn cam_jac(l: &Layout, ci: usize, c: &BaCam, xc: V3, a: &[[f64; 3]; 2], p: [f64; 2], out: &mut CameraJacobian) {
     out.clear();
     let s = l.start[ci];
     if s != usize::MAX {
@@ -304,7 +348,7 @@ pub fn adjust(cams: &mut [BaCam], pts: &mut [V3], obs: &[BaObs], o: &BaOpts) -> 
         }
         let build_point = |j: usize, s_acc: &mut Vec<f64>, bc: &mut Vec<f64>| -> PtSys {
             let mut ps = PtSys { v: [[0.0; 3]; 3], bp: [0.0; 3], w: vec![] };
-            let mut jc: Vec<(usize, [f64; 2])> = Vec::with_capacity(8);
+            let mut jc = CameraJacobian::new();
             for &oi in &by_pt[j] {
                 let ob = &obs[oi as usize];
                 let ci = ob.cam as usize;
@@ -329,6 +373,7 @@ pub fn adjust(cams: &mut [BaCam], pts: &mut [V3], obs: &[BaObs], o: &BaOpts) -> 
                     jc.push((g, [dk[0][0], dk[1][0]]));
                     jc.push((g + 1, [dk[0][1], dk[1][1]]));
                 }
+                let jc = jc.as_slice();
                 // Point Jacobian: A R.
                 let jx = if o.fix_points {
                     [[0.0; 3]; 2]
@@ -337,9 +382,9 @@ pub fn adjust(cams: &mut [BaCam], pts: &mut [V3], obs: &[BaObs], o: &BaOpts) -> 
                     let r1 = mtv(&c.pose.r, a[1]);
                     [r0, r1]
                 };
-                for (ia, ja) in &jc {
+                for (ia, ja) in jc.iter() {
                     bc[*ia] -= w * (ja[0] * r[0] + ja[1] * r[1]);
-                    for (ib, jb) in &jc {
+                    for (ib, jb) in jc.iter() {
                         s_acc[ia * n + ib] += w * (ja[0] * jb[0] + ja[1] * jb[1]);
                     }
                 }
@@ -350,7 +395,7 @@ pub fn adjust(cams: &mut [BaCam], pts: &mut [V3], obs: &[BaObs], o: &BaOpts) -> 
                             ps.v[a1][b1] += w * (jx[0][a1] * jx[0][b1] + jx[1][a1] * jx[1][b1]);
                         }
                     }
-                    for (ia, ja) in &jc {
+                    for (ia, ja) in jc.iter() {
                         let wv =
                             [w * (ja[0] * jx[0][0] + ja[1] * jx[1][0]), w * (ja[0] * jx[0][1] + ja[1] * jx[1][1]), w * (ja[0] * jx[0][2] + ja[1] * jx[1][2])];
                         // Each observation of a point is on another camera: only the shared focal
@@ -616,6 +661,26 @@ mod tests {
         assert!(adjust(&mut cams, &mut [], &[], &BaOpts::default()).is_err());
         assert!(matrix_len(6, 1000, 1000).is_ok());
         assert!(matrix_len(955, 900, 160 * 900).is_ok());
+    }
+
+    #[test]
+    fn camera_jacobian_keeps_extra_parameters_and_resets() {
+        let mut jac = CameraJacobian::new();
+        let count = MAX_CAMERA_JACOBIAN_ENTRIES + 3;
+        for i in 0..count {
+            jac.push((i, [i as f64, -(i as f64)]));
+        }
+        assert_eq!(jac.as_slice().iter().count(), count);
+        for (i, entry) in jac.as_slice().iter().enumerate() {
+            assert_eq!(*entry, (i, [i as f64, -(i as f64)]));
+        }
+        jac.clear();
+        assert_eq!(jac.as_slice().iter().count(), 0);
+        for i in 0..MAX_CAMERA_JACOBIAN_ENTRIES {
+            jac.push((i, [1.0, 2.0]));
+        }
+        assert_eq!(jac.as_slice().iter().count(), MAX_CAMERA_JACOBIAN_ENTRIES);
+        assert!(jac.overflow.is_empty());
     }
 
     #[test]

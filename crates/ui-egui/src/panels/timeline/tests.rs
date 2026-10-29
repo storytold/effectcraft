@@ -535,3 +535,13 @@ fn disk_bar_range_covers_partial_frames() {
     let above_limit = TMap { start: 100_001.0, ..tm };
     assert_eq!(disk_bar_range(&above_limit, clip, 1.0, i64::MAX), 100_000..100_000);
 }
+#[test]
+fn layer_drop_target_skips_moving_layers_beyond_the_viewport() {
+    let mut rows: Vec<Row> = (1..=6).map(|id| Row { layer: LayerId(id), depth: 0, kind: RowKind::Layer }).collect();
+    rows.insert(4, Row { layer: LayerId(4), depth: 1, kind: RowKind::Prop { uid: 0 } });
+    let visible: Vec<_> = (2..=4).map(|id| (Rect::NOTHING, LayerId(id))).collect();
+    for at in [Some(2), None] {
+        assert_eq!(layer_drop_target(&rows, &visible, at, &[1, 4, 5]), Some(LayerId(6)), "skip moving headers and their properties across the viewport edge");
+        assert_eq!(layer_drop_target(&rows, &visible, at, &[1, 4, 5, 6]), None, "the stack ends when no stationary layer follows");
+    }
+}

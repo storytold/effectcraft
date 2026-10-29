@@ -221,6 +221,18 @@ fn transforms() {
 }
 
 #[test]
+fn nested_entities_are_refused_instead_of_expanding_without_bound() {
+    // #2129: each top-level `&b;` stays under roxmltree's per-reference cap but adds 12 500
+    // nodes, so 40 KB of references expands to 5 million.
+    let dtd = format!("<!ENTITY a \"{}\"><!ENTITY b \"{}\">", "<g/>".repeat(50), "&a;".repeat(250));
+    let bomb = format!("<?xml version=\"1.0\"?><!DOCTYPE svg [{dtd}]><svg xmlns=\"http://www.w3.org/2000/svg\">{}</svg>", "&b;".repeat(400));
+    assert!(matches!(crate::parse(bomb.as_bytes()), Err(crate::Error::Xml(_))));
+    // An ordinary entity, as Illustrator declares them, still parses.
+    let ok = "<?xml version=\"1.0\"?><!DOCTYPE svg [<!ENTITY w \"40\">]><svg xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"&w;\" height=\"5\"/></svg>";
+    assert!(crate::parse(ok.as_bytes()).is_ok());
+}
+
+#[test]
 fn deep_nesting_errors_instead_of_overflowing_the_stack() {
     // 100 000 nested groups overflowed the XML parser's stack and aborted the process.
     let deep = |n: usize| format!("<svg xmlns=\"http://www.w3.org/2000/svg\">{}<rect width=\"5\" height=\"5\"/>{}</svg>", "<g>".repeat(n), "</g>".repeat(n));

@@ -42,7 +42,7 @@ pub struct CharXf {
     pub stroke_hsb: [f64; 3],
     pub stroke_opacity: f64,
     pub stroke_width: f64,
-    /// Tracking (1/1000 em) added before / after the character.
+    /// Tracking (pixels) added before / after the character.
     pub track_before: f64,
     pub track_after: f64,
     /// Line Anchor (percent) and the selection weight it was set with.
@@ -694,10 +694,9 @@ pub fn text_geom(ctx: &EvalCtx, layer: &Layer) -> Option<TextGeom> {
         let (mut la, mut la_k) = (50.0 * f64::from(align_index(justify)), 0.0);
         for gi in li_start..li_end {
             let x = &xfs[gi];
-            let em = lay.styles.get(lay.glyphs[gi].run).map_or(doc.size, |s| s.size) / 1000.0;
-            pen += x.track_before * em;
+            pen += x.track_before;
             shift[gi] = pen;
-            pen += x.track_after * em + vadv[gi];
+            pen += x.track_after + vadv[gi];
             if x.line_anchor_k > la_k {
                 la = x.line_anchor;
                 la_k = x.line_anchor_k;
