@@ -7,7 +7,7 @@
 //! channels: silence), converting to the device's sample format.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -20,6 +20,24 @@ use effectcraft_ui_egui::audio::{AudioDevice, AudioFeed, AudioOutput};
 /// multi-hundred-millisecond default buffer that plays as silence at the start of preview (#554).
 fn preferred_buffer_frames(rate: u32) -> u32 {
     (rate / 100).clamp(256, 2048)
+}
+
+/// Frames between "handed over" and "audible": the device's output latency plus one callback's
+/// buffer. `dev_lat` is `playback − callback` from the stream timestamps, trusted only while it
+/// can be a real output latency: cpal's AAudio backend (Android) reports `playback` on
+/// CLOCK_MONOTONIC (absolute, since boot) but `callback` since the stream was created, so their
+/// difference is the device's uptime. An uptime-sized latency holds the preview's audio clock
+/// behind the frames the device consumed — the picture freezes on the first frame while the
+/// sound plays on. A value no device outputs is dropped (the buffer alone still counts).
+fn sync_latency_frames(dev_lat: f64, rate: f64, buffer_frames: usize) -> u64 {
+    const MAX_LATENCY_SECS: f64 = 1.0;
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    let plausible = dev_lat.is_finite() && (0.0..=MAX_LATENCY_SECS).contains(&dev_lat);
+    if !plausible && !WARNED.swap(true, Ordering::Relaxed) {
+        log::warn!("audio output: implausible device latency {dev_lat}s; syncing A/V to this buffer alone");
+    }
+    let secs = if plausible { dev_lat } else { 0.0 };
+    (secs * rate) as u64 + buffer_frames as u64
 }
 
 /// Wait until the feeder has mixed a block, or until preview is stopped. Starting the stream
@@ -115,7 +133,7 @@ fn run<T: SizedSample + FromSample<f32>>(
             // Frames between "handed over" and "audible": device latency plus this buffer.
             let ts = info.timestamp();
             let dev_lat = ts.playback.duration_since(&ts.callback).map(|d| d.as_secs_f64()).unwrap_or(0.0);
-            latency.store((dev_lat * rate) as u64 + frames as u64, Ordering::Relaxed);
+            latency.store(sync_latency_frames(dev_lat, rate, frames), Ordering::Relaxed);
         },
         |e| log::warn!("audio output: {e}"),
         None,
@@ -228,6 +246,28 @@ mod tests {
         assert_eq!(preferred_buffer_frames(48_000), 480);
         assert_eq!(preferred_buffer_frames(8_000), 256);
         assert_eq!(preferred_buffer_frames(192_000), 1920);
+    }
+
+    /// Real device latencies (ALSA/Pulse/PipeWire report a few to a few hundred milliseconds)
+    /// are used as they are, plus the callback's own buffer.
+    #[test]
+    fn sync_latency_keeps_a_plausible_device_latency() {
+        assert_eq!(sync_latency_frames(0.02, 48_000.0, 480), 960 + 480);
+        assert_eq!(sync_latency_frames(0.0, 48_000.0, 480), 480);
+        assert_eq!(sync_latency_frames(0.3, 44_100.0, 441), 13_230 + 441);
+    }
+
+    /// cpal's AAudio backend (Android) subtracts two different clocks — `playback` is
+    /// CLOCK_MONOTONIC since boot, `callback` since the stream was created — so the difference
+    /// is the tablet's uptime. That must not become the A/V-sync latency: pinned there, the
+    /// preview's clock never leaves its first frame (picture frozen while the sound plays).
+    #[test]
+    fn sync_latency_drops_an_uptime_sized_device_latency() {
+        // A tablet up ~5 days at 48 kHz would otherwise ask for ~2e10 frames of latency.
+        assert_eq!(sync_latency_frames(432_000.0, 48_000.0, 480), 480);
+        assert_eq!(sync_latency_frames(f64::INFINITY, 48_000.0, 480), 480);
+        assert_eq!(sync_latency_frames(f64::NAN, 48_000.0, 480), 480);
+        assert_eq!(sync_latency_frames(-0.5, 48_000.0, 480), 480);
     }
 
     #[test]

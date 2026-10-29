@@ -1,6 +1,6 @@
 # Where EffectCraft falls short
 
-> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-13 · **Change:** minor (path-editing layer bounds, #1220; issue, PR and catalog references gap 21: percentage guides and effect colour labels in; earlier change: re-audited against `upstream/main` 470ea7a3; ranked gap list from the 10 October re-measure otherwise unchanged) · **Target:** Adobe After Effects 2026 (26.5.0.89)
+> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-25 · **Change:** minor (G2: the Android arm64 port's touch pass — panels and scroll bars move under a finger, a 24-point scroll-bar hit re-applied every frame on touch screens, an overwriting in-app save asks Replace? first, thumbnails re-decode after a file changes — PR #1508; earlier change: re-audited against `upstream/main` 470ea7a3; ranked gap list from the 10 October re-measure otherwise unchanged) · **Target:** Adobe After Effects 2026 (26.5.0.89)
 
 An honest assessment of how far EffectCraft is from being a real replacement for After Effects,
 and the work that closes the gap. This document is meant for contributors and agents choosing
@@ -217,6 +217,17 @@ The most important missing piece: it turns every other estimate here into a meas
   `shape_tool_options_paint_new_shapes`, `masks_of_every_shape_tool_kind`,
   `tool_creates_mask_draws_a_mask_on_the_selected_shape_layer` and
   `fill_options_paint_the_next_shape` (Tool Creates Shape / Mask, Fill and Stroke Options).
+- Android evidence for [#1508](https://github.com/storytold/effectcraft/pull/1508), checked
+  headlessly with egui's kittest: panels and scroll bars move under a finger, not only a wheel —
+  panel content drags, the drawn scroll bar's hit area widens, dock resize gutters stop eating
+  the panel scroll drag — and `a_touch_screen_widens_the_scroll_bar_target` re-applies a
+  24-point scroll-bar hit every frame on a touch screen, so a theme change that rebuilds the
+  styles cannot drop it. An in-app save that would overwrite an existing file asks
+  "{name} already exists. Replace it?" first (translated in all seven input catalogs), and
+  thumbnails re-decode when a file's size or modification time changes, so a re-saved image is
+  not shown stale. The vendored winit's Android mouse-path fixes (hover, wheel direction,
+  button press/release, dedup of a held button) are described in
+  [architecture.md](architecture.md) §1 and [third_party/winit/README.md](../third_party/winit/README.md).
 - Done when: no open bug blocks a basic workflow (import, arrange, animate, preview, render) on
   any of the three desktop platforms, and every bug users report gets triaged within a day.
 
@@ -335,6 +346,7 @@ Issues #41–#47 (all from the Linux AppImage 0.1.1, 5 October): panning the vie
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-25 | minor | G2: the Android arm64 port's touch pass (PR #1508) — panel scroll drag and widened scroll-bar hit (`touch_scroll_target`, re-applied per frame on touch screens), Replace? before an overwriting in-app save, thumbnails keyed by size+mtime, vendored winit Android mouse-path delta; `upstream/main` merged in |
 | 2026-10-16 | minor | Gap 8: #932 closed (Convert To Bezier Path converts a shape layer's parametric path, not only mask RotoBezier) |
 | 2026-10-13 | patch | G2: layer bounds no longer compete with editable shape/mask path points (#1220) |
 | 2026-10-12 | minor | Audited against `upstream/main` 470ea7a3: open-issue count and crash list, closed issues removed from rows 1, 3, 5, 6, 8–12, 15–17, 22–24, G8 and G9 (#759 `#include`), localization catalogs recounted (≈ 12% to ≈ 18%); rows 7, 14 and 21 left to open PRs #1102, #792 and #1098 |

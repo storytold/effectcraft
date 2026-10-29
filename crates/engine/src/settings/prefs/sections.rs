@@ -111,7 +111,7 @@ page!(Appearance {
     favorite_themes: Vec<String> = Vec::new(),
     /// User interface brightness, -1 (darker) … 1 (lighter).
     brightness: f64 = 0.0,
-    /// The size of the whole interface in percent (75–200), on top of the display's own scale.
+    /// The size of the whole interface in percent (50–200), on top of the display's own scale.
     ui_scale: u32 = 100,
     use_label_color_for_handles: bool = true,
     use_label_color_for_tabs: bool = true,

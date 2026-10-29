@@ -128,7 +128,7 @@ impl Prefs {
             _ => {}
         }
         self.appearance.brightness = self.appearance.brightness.clamp(-1.0, 1.0);
-        self.appearance.ui_scale = self.appearance.ui_scale.clamp(75, 200);
+        self.appearance.ui_scale = self.appearance.ui_scale.clamp(50, 200);
         let defaults = default_labels();
         self.labels.truncate(defaults.len());
         for d in defaults.iter().skip(self.labels.len()) {

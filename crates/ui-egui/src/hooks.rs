@@ -59,6 +59,24 @@ pub struct Hooks {
     /// a drag over the window (#511), and on Linux a blocking desktop-portal dialog never pumps
     /// events, so the compositor marks the window as not responding (#1275).
     pub file_dialog_async: Option<Box<dyn Fn(FileDialog, DialogDone)>>,
+    /// The app-private storage directory on Android (`AndroidApp::internal_data_path`), where the
+    /// in-app Save / Open Project prompts read and write. `None` elsewhere (or when it could not
+    /// be resolved): the commands fail with "no file dialog available", as before.
+    #[cfg(target_os = "android")]
+    pub app_files_dir: Option<std::path::PathBuf>,
+    /// Android's shared internal-storage root (`/storage/emulated/0`), offered as a second
+    /// browse root beside the app-private directory once "All files access" is granted.
+    /// `None` elsewhere (or when it could not be resolved).
+    #[cfg(target_os = "android")]
+    pub shared_storage_root: Option<std::path::PathBuf>,
+    /// Whether Android's "All files access" (`MANAGE_EXTERNAL_STORAGE`) is currently granted.
+    /// `None` elsewhere.
+    #[cfg(target_os = "android")]
+    pub shared_storage_granted: Option<Box<dyn Fn() -> bool>>,
+    /// Asks the user to grant "All files access" (the system settings page on Android 11+, the
+    /// permission dialog before that). `None` elsewhere.
+    #[cfg(target_os = "android")]
+    pub shared_storage_grant: Option<Box<dyn Fn()>>,
     /// Tells the user the graphics device was lost and the window is closing, once. `saved` is
     /// the auto-save of unsaved changes (`None`: nothing was unsaved), its path or why it failed.
     pub device_lost: Option<Box<dyn Fn(Option<Result<String, String>>)>>,

@@ -119,7 +119,7 @@ fn page_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, page: &Page, cur: &Value
                                 Kind::Int(lo, hi, unit) => {
                                     let mut x = v.as_i64().unwrap_or(0);
                                     // A typed number applies once entered: typing 85 into UI Scale
-                                    // doesn't resize the interface to 75 % at its first digit.
+                                    // doesn't resize the interface to 50 % at its first digit.
                                     let drag = egui::DragValue::new(&mut x).range(lo..=hi).speed(0.25).update_while_editing(false);
                                     let r = ui.add(crate::widgets::drag_value(drag));
                                     if !unit.is_empty() {
