@@ -803,9 +803,9 @@ pub fn recovery(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                 if m < 1 {
                     "less than a minute ago".to_string()
                 } else if m < 120 {
-                    format!("{m} minutes ago")
+                    tr_args("{} minutes ago", &[&m])
                 } else {
-                    format!("{} hours ago", m / 60)
+                    tr_args("{} hours ago", &[&(m / 60)])
                 }
             });
             ui.label(tr_args("Latest auto-save: {}", &[&a]));

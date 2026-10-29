@@ -1668,6 +1668,7 @@ version = "0.18.0"
 dependencies = [
  "effectcraft-geom",
  "image",
+ "log",
  "miniz_oxide 0.9.1",
  "serde",
  "serde_json",

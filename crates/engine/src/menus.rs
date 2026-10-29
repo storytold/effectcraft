@@ -82,7 +82,8 @@ fn holder_of(s: &Session, keys: &str) -> Option<String> {
 /// Recent Script Files), `history` (undo steps, newest
 /// first), `view3dShortcuts`, `workspaceShortcuts`, `savedWorkspaces` (Window ▸ Workspace) and
 /// `openViewers` (open compositions other than the active one), `scripts` (File ▸ Scripts) and
-/// `scriptPanels` (ScriptUI panels).
+/// `scriptPanels` (ScriptUI panels; a script in a subfolder is labelled `Folder/File.jsx` here,
+/// and [`dynamic_nodes`] puts it in the folder's submenu).
 pub fn dynamic(s: &Session, name: &str, cx: &DynCtx) -> (Vec<MenuEntry>, Option<&'static str>) {
     use serde_json::json;
     let indexed = |list: &[String], cmd: &str, stem: bool| -> Vec<MenuEntry> {
@@ -165,6 +166,31 @@ pub fn dynamic(s: &Session, name: &str, cx: &DynCtx) -> (Vec<MenuEntry>, Option<
         }
         _ => (vec![], None),
     }
+}
+
+/// [`dynamic`] as menu nodes, which is what frontends draw: scripts and panels in a subfolder
+/// (`Motion Kit/Animate.jsx`) go into a submenu named after the folder (`Motion Kit ▸
+/// Animate.jsx`), placed where the folder sorts among the other entries.
+pub fn dynamic_nodes(s: &Session, name: &str, cx: &DynCtx) -> (Vec<MenuNode>, Option<&'static str>) {
+    let (entries, empty) = dynamic(s, name, cx);
+    let scripts = matches!(name, "scripts" | "scriptPanels");
+    let mut out: Vec<MenuNode> = vec![];
+    for mut e in entries {
+        let Some((folder, file)) = e.label.split_once('/').filter(|_| scripts).map(|(d, f)| (d.to_string(), f.to_string())) else {
+            out.push(MenuNode::Item(e));
+            continue;
+        };
+        e.label = file;
+        let open = out.iter_mut().find_map(|n| match n {
+            MenuNode::Submenu { label, children } if *label == folder => Some(children),
+            _ => None,
+        });
+        match open {
+            Some(children) => children.push(MenuNode::Item(e)),
+            None => out.push(MenuNode::Submenu { label: folder, children: vec![MenuNode::Item(e)] }),
+        }
+    }
+    (out, empty)
 }
 
 /// Display label of a submenu (the "Assign Shortcut to …" submenus name the current view or

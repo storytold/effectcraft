@@ -24,9 +24,40 @@ fn have_ffmpeg() -> bool {
     *HAVE.get_or_init(|| Command::new("ffmpeg").arg("-version").output().is_ok_and(|o| o.status.success()))
 }
 
+/// An H.264 encoder this ffmpeg build actually ships, or `None` when it has none. Distro "free"
+/// builds often omit `libx264` (the one named historically here) but ship an alternative, so pick
+/// the first present by name rather than hard-coding one that may be absent. These tests only
+/// need *an* H.264 encoder to make an oracle fixture; the encoder identity is irrelevant.
+fn h264_encoder() -> Option<&'static str> {
+    static ENC: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
+    *ENC.get_or_init(|| {
+        let out = Command::new("ffmpeg").args(["-hide_banner", "-encoders"]).output().ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        ["libx264", "libopenh264", "h264_nvenc", "h264_vaapi", "h264_qsv", "h264_v4l2m2m", "h264_amf"]
+            .into_iter()
+            .find(|name| text.lines().any(|l| l.split_whitespace().any(|tok| tok == *name)))
+    })
+}
+
 /// Run ffmpeg to produce `name` (once; written to a temp name and renamed so concurrent test
 /// processes never see a partial file). `None` when ffmpeg is unavailable.
 fn ffmpeg_fixture(name: &str, args: &[&str]) -> Option<PathBuf> {
+    ffmpeg_fixture_inner(name, args, true)
+}
+
+/// Like [`ffmpeg_fixture`] for a fixture this build of ffmpeg may fail to make: an encoder found
+/// in the `-encoders` listing can still not run here (the hardware backends need their device,
+/// Fedora's `libopenh264` is the `noopenh264` stub), and fixtures built from one, like
+/// [`h264_mp4`], should skip with a note rather than fail on the packager's choice of ffmpeg —
+/// the same way every test here skips when ffmpeg is missing altogether.
+fn try_ffmpeg_fixture(name: &str, args: &[&str]) -> Option<PathBuf> {
+    ffmpeg_fixture_inner(name, args, false)
+}
+
+fn ffmpeg_fixture_inner(name: &str, args: &[&str], must_succeed: bool) -> Option<PathBuf> {
     if !have_ffmpeg() {
         eprintln!("ffmpeg not found: skipping");
         return None;
@@ -39,7 +70,14 @@ fn ffmpeg_fixture(name: &str, args: &[&str]) -> Option<PathBuf> {
     let ext = out.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
     let tmp = out.with_file_name(format!("tmp-{}-{:?}.{ext}", std::process::id(), std::thread::current().id()).replace(['(', ')'], ""));
     let st = Command::new("ffmpeg").args(["-hide_banner", "-loglevel", "error", "-y"]).args(args).arg(&tmp).status().expect("run ffmpeg");
-    assert!(st.success(), "ffmpeg failed for {name}");
+    if !st.success() {
+        let _ = std::fs::remove_file(&tmp);
+        if must_succeed {
+            panic!("ffmpeg failed for {name}");
+        }
+        eprintln!("this ffmpeg build cannot make {name}: skipping");
+        return None;
+    }
     if std::fs::rename(&tmp, &out).is_err() {
         // Another test made it first; on Windows the rename fails while that test has it open.
         let _ = std::fs::remove_file(&tmp);
@@ -48,39 +86,35 @@ fn ffmpeg_fixture(name: &str, args: &[&str]) -> Option<PathBuf> {
     Some(out)
 }
 
+/// Video options the chosen H.264 encoder actually accepts. `libx264` keeps its constant-quality
+/// `-preset`/`-crf` pair; `libopenh264` rejects both (it takes a bitrate), and the hardware
+/// backends take a bitrate too — without this, a build whose picked encoder is not libx264 failed
+/// the fixture and silently skipped every check gated on it.
+fn h264_video_options(enc: &str) -> Vec<&'static str> {
+    if enc == "libx264" { vec!["-preset", "medium", "-crf", "18"] } else { vec!["-b:v", "2M"] }
+}
+
 fn h264_mp4() -> Option<PathBuf> {
-    ffmpeg_fixture(
-        "testsrc2_1080p.mp4",
-        &[
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc2=size=1920x1080:rate=30:duration=2",
-            "-f",
-            "lavfi",
-            "-i",
-            "sine=frequency=440:sample_rate=48000:duration=2",
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-            "-preset",
-            "medium",
-            "-crf",
-            "18",
-            "-colorspace",
-            "bt709",
-            "-color_primaries",
-            "bt709",
-            "-color_trc",
-            "bt709",
-            "-c:a",
-            "aac",
-            "-ac",
-            "2",
-            "-shortest",
-        ],
-    )
+    // Made with whatever encoder this build has listed: a listed encoder can still fail at run
+    // time (the hardware ones without their device), so this may skip rather than fail.
+    let enc = h264_encoder()?;
+    let mut args: Vec<&'static str> = vec![
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=size=1920x1080:rate=30:duration=2",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:sample_rate=48000:duration=2",
+        "-c:v",
+        enc,
+        "-pix_fmt",
+        "yuv420p",
+    ];
+    args.extend(h264_video_options(enc));
+    args.extend(["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-c:a", "aac", "-ac", "2", "-shortest"]);
+    try_ffmpeg_fixture("testsrc2_1080p.mp4", &args)
 }
 
 fn prores_mov() -> Option<PathBuf> {
@@ -281,7 +315,10 @@ fn h264_audio_samples() {
 /// H.264 + AAC at 44.1 kHz in MP4 (ffmpeg writes an edit list that skips the AAC priming):
 /// 440 Hz left, a 200 → 1000 Hz sweep right, 29.97 fps.
 fn aac_44k_mp4() -> Option<PathBuf> {
-    ffmpeg_fixture(
+    // Made with whatever encoder this build has listed: a listed encoder can still fail at run
+    // time (the hardware ones without their device), so this may skip rather than fail.
+    let enc = h264_encoder()?;
+    try_ffmpeg_fixture(
         "aac_44k.mp4",
         &[
             "-f",
@@ -293,7 +330,7 @@ fn aac_44k_mp4() -> Option<PathBuf> {
             "-i",
             "aevalsrc=0.5*sin(2*PI*440*t)|0.5*sin(2*PI*(200+400*t/3)*t):s=44100:d=3",
             "-c:v",
-            "libx264",
+            enc,
             "-pix_fmt",
             "yuv420p",
             "-c:a",
@@ -1098,7 +1135,7 @@ fn a_called_off_read_does_not_decode() {
 /// footage reports it (not a black frame without a word).
 #[test]
 fn an_unsupported_stream_reports_why_it_shows_no_picture() {
-    let Some(p) = ffmpeg_fixture(
+    let Some(p) = try_ffmpeg_fixture(
         "h264_high422_10bit.mp4",
         &["-f", "lavfi", "-i", "testsrc=size=320x180:rate=24:duration=1", "-c:v", "libx264", "-profile:v", "high422", "-pix_fmt", "yuv422p10le"],
     ) else {
@@ -1121,4 +1158,14 @@ fn an_unsupported_stream_reports_why_it_shows_no_picture() {
     assert_eq!(pool.problem(&f).as_deref(), Some(why.as_str()));
     pool.forget(&f.path);
     assert_eq!(pool.problem(&f), None);
+}
+
+#[test]
+fn the_h264_fixture_options_fit_the_picked_encoder() {
+    assert_eq!(h264_video_options("libx264"), ["-preset", "medium", "-crf", "18"]);
+    for enc in ["libopenh264", "h264_nvenc", "h264_vaapi", "h264_qsv"] {
+        let options = h264_video_options(enc);
+        assert!(!options.iter().any(|o| *o == "-preset" || *o == "-crf"), "{enc} rejects preset/crf: {options:?}");
+        assert!(options.contains(&"-b:v"), "{enc} gets a bitrate: {options:?}");
+    }
 }

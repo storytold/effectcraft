@@ -170,6 +170,21 @@ pub struct FillPlan {
     pub dir: String,
 }
 
+/// The fill holds every frame as float RGBA (16 bytes a pixel), its hole mask (1) and the filled
+/// copy (16) until it finishes (#1789): when even that is more than `available`, the error to
+/// report up front, instead of running out of memory partway through.
+fn memory_shortfall(frames: usize, w: u32, h: u32, available: u64) -> Option<String> {
+    let need = (frames as u64).saturating_mul(u64::from(w)).saturating_mul(u64::from(h)).saturating_mul(33);
+    (need > available).then(|| {
+        let gb = |b: u64| b as f64 / 1e9;
+        format!(
+            "Content-Aware Fill of {frames} frames at {w}×{h} needs at least {:.1} GB of memory, and {:.1} GB is free: fill a shorter range (set the work area and choose Work Area) or close other applications",
+            gb(need),
+            gb(available)
+        )
+    })
+}
+
 /// Run a fill: the layer's frames (rendered in passes with a job worker's GPU), the fill, the
 /// PNG sequence written into `plan.dir` (`Services::store_file`). Returns the files.
 #[allow(clippy::too_many_arguments)]
@@ -275,6 +290,9 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let (fa, fb) = (fr.frame_at(fr.snap_nearest(a)), fr.frame_at(b - Tick(1)));
     let times: Vec<Tick> = (fa..=fb).map(|f| fr.tick_of(f)).collect();
+    if let Some(e) = crate::sysinfo::memory().and_then(|m| memory_shortfall(times.len(), w, h, m.available)) {
+        return Err(bad(c, e));
+    }
     let opts = FillOpts {
         method: FillMethod::from_name(&st.method).unwrap_or_default(),
         lighting: lighting(&st.lighting_correction).unwrap_or(0.0),
@@ -423,4 +441,19 @@ pub fn specs() -> Vec<CommandSpec> {
             journal: true,
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::memory_shortfall;
+
+    /// #1789: 10 s of 1080p30 (300 frames) needs at least 20 GB, which 4 GB free can't hold.
+    #[test]
+    fn a_fill_that_cannot_fit_in_memory_is_refused_up_front() {
+        let e = memory_shortfall(300, 1920, 1080, 4_000_000_000).expect("refused");
+        assert!(e.contains("300 frames") && e.contains("Work Area"), "{e}");
+        assert_eq!(memory_shortfall(30, 1920, 1080, 4_000_000_000), None, "a second of it fits");
+        // Hostile sizes saturate instead of overflowing.
+        assert!(memory_shortfall(usize::MAX, u32::MAX, u32::MAX, u64::MAX - 1).is_some());
+    }
 }

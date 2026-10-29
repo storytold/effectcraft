@@ -14,6 +14,12 @@ fn browse_menu_id() -> egui::Id {
     egui::Id::unique("menu-bar-browse")
 }
 
+/// The id under which [`menu_bar`] remembers where it last saw the pointer (`None`: outside the
+/// window).
+fn last_pointer_id() -> egui::Id {
+    egui::Id::unique("menu-bar-last-pointer")
+}
+
 /// Draw the in-window menu bar (the engine's AE menu tree).
 ///
 /// The titles open on the press, not the release (native menu bars): while one is held the menus
@@ -34,6 +40,12 @@ pub fn menu_bar(app: &mut EffectcraftApp, ui: &mut egui::Ui) {
     if ctx.data(|d| d.get_temp(browse_menu_id())).unwrap_or(false) {
         nav.set_browsing();
     }
+    // Whether the pointer has moved since the last frame. Kept by position rather than egui's
+    // `delta`, which is zero for the first position after the pointer comes back into the window:
+    // coming back in over another title must switch to it too (#1290).
+    let pointer = ctx.pointer_hover_pos();
+    let last = ctx.data_mut(|d| std::mem::replace(d.get_temp_mut_or(last_pointer_id(), None), pointer));
+    let moved = pointer.is_some() && pointer != last;
     let mut drawn = 0;
     ui.horizontal_centered(|ui| {
         ui.add_space(6.0);
@@ -53,7 +65,6 @@ pub fn menu_bar(app: &mut EffectcraftApp, ui: &mut egui::Ui) {
                 // then happened somewhere else), and toggle the menu. Hovering another title
                 // switches to it once the pointer has moved: merely resting there must not take a
                 // keyboard-driven menu over.
-                let moved = ctx.input(|i| i.pointer.delta() != egui::Vec2::ZERO);
                 // With the button down elsewhere nothing is hovered, so the title under the
                 // pointer takes the highlight by hand: the hover-switch to it shows, one frame
                 // later like egui's own hover (the open title keeps its open look).
@@ -149,13 +160,18 @@ fn menu_nodes(
                 // saved workspaces.
                 let ws = app.ui.workspace.clone();
                 let saved = app.saved_workspace_names();
-                let (entries, empty) = effectcraft_engine::menus::dynamic(&app.session, name, &dyn_ctx(&ws, &saved));
-                if entries.is_empty()
+                let (nodes, empty) = effectcraft_engine::menus::dynamic_nodes(&app.session, name, &dyn_ctx(&ws, &saved));
+                if nodes.is_empty()
                     && let Some(e) = empty
                 {
                     ui.add_enabled(false, egui::Button::new((gutter(false), e)));
                 }
-                for (i, e) in entries.iter().enumerate() {
+                for (i, n) in nodes.iter().enumerate() {
+                    // A folder of scripts or panels: a submenu.
+                    let MenuNode::Item(e) = n else {
+                        menu_nodes(app, ui, std::slice::from_ref(n), clicked, nav, depth);
+                        continue;
+                    };
                     let tip = match name.as_str() {
                         "recentProjects" => app.session.prefs.recent_projects.get(i).cloned(),
                         "recentFootage" => app.session.prefs.recent_footage.get(i).cloned(),

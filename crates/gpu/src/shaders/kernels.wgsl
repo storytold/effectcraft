@@ -525,12 +525,25 @@ fn fade(t: f32) -> f32 {
 }
 
 fn value_noise(x: f32, y: f32, z: f32, seed: u32) -> f32 {
+    return value_noise_z(x, y, z, seed, true);
+}
+
+// effects::generate::value_noise_linear_z: z (evolution) interpolates linearly, x and y keep the
+// quintic fade (Turbulent Displace, #943).
+fn value_noise_linear_z(x: f32, y: f32, z: f32, seed: u32) -> f32 {
+    return value_noise_z(x, y, z, seed, false);
+}
+
+fn value_noise_z(x: f32, y: f32, z: f32, seed: u32, ease_z: bool) -> f32 {
     let x0 = floor(x);
     let y0 = floor(y);
     let z0 = floor(z);
     let fx = fade(x - x0);
     let fy = fade(y - y0);
-    let fz = fade(z - z0);
+    var fz = z - z0;
+    if (ease_z) {
+        fz = fade(fz);
+    }
     let ix = i32(x0);
     let iy = i32(y0);
     let iz = i32(z0);

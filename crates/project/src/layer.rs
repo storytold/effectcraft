@@ -195,6 +195,12 @@ impl Switches {
 impl Layer {
     /// Draws the same pixels as `o`: equal but for the Audio, Lock and Shy switches.
     pub fn same_pixels(&self, o: &Layer) -> bool {
+        self.same_pixels_with(o, true)
+    }
+
+    /// [`Self::same_pixels`], with the markers counting only when `with_markers` (they are read by
+    /// expressions alone, so a project without any can edit them freely).
+    pub fn same_pixels_with(&self, o: &Layer, with_markers: bool) -> bool {
         // Every field (no `..`: a new field must be considered here); the property tree last.
         let Layer {
             id,
@@ -232,7 +238,7 @@ impl Layer {
             && *preserve_transparency == o.preserve_transparency
             && *track_matte == o.track_matte
             && *parent == o.parent
-            && *markers == o.markers
+            && (!with_markers || *markers == o.markers)
             && *markers_locked == o.markers_locked
             && *auto_orient == o.auto_orient
             && *environment == o.environment

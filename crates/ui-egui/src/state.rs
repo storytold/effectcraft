@@ -307,6 +307,21 @@ impl Default for ViewerState {
 }
 
 impl TimelineState {
+    /// Whether property `uid`'s chain link (Constrain Proportions) is on. One that starts linked
+    /// (Scale, Mask Feather) records a click in `unlinked`; one that starts unlinked (shape Size)
+    /// records it in `linked`.
+    pub fn is_linked(&self, uid: u64, linked_by_default: bool) -> bool {
+        if linked_by_default { !self.unlinked.contains(&uid) } else { self.linked.contains(&uid) }
+    }
+
+    /// Turn property `uid`'s chain link on or off (see [`Self::is_linked`]).
+    pub fn toggle_link(&mut self, uid: u64, linked_by_default: bool) {
+        let set = if linked_by_default { &mut self.unlinked } else { &mut self.linked };
+        if !set.remove(&uid) {
+            set.insert(uid);
+        }
+    }
+
     /// Show `kinds` on `layers` (twirled open; empty: twirled closed) and remember it as the last
     /// reveal. Other layers keep theirs.
     pub fn apply_reveal(&mut self, layers: &[u64], kinds: Vec<String>) {
@@ -414,6 +429,10 @@ pub struct TimelineState {
     /// was turned off.
     #[serde(default)]
     pub unlinked: BTreeSet<u64>,
+    /// Shape Rectangle and Ellipse Path Size properties whose chain link (off by default) was
+    /// turned on (#2489).
+    #[serde(default)]
+    pub linked: BTreeSet<u64>,
     /// Visible optional columns (column header right-click ▸ Columns): `av`, `keys`, `label`,
     /// `num`, `comment`, `switches`, `parent`, `in`, `out`, `duration`, `stretch`. The name
     /// column is always shown; Modes follows `show_modes` (F4).
@@ -466,6 +485,7 @@ impl Default for TimelineState {
             expr_closed: BTreeSet::new(),
             expr_lines: BTreeMap::new(),
             unlinked: BTreeSet::new(),
+            linked: BTreeSet::new(),
             columns: default_tl_columns(),
             source_name: false,
             scroll_to: None,

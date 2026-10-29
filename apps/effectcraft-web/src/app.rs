@@ -15,6 +15,8 @@ use wasm_bindgen::prelude::*;
 extern "C" {
     #[wasm_bindgen(js_name = showDeviceLost)]
     fn show_device_lost(message: &str, kept: bool);
+    #[wasm_bindgen(js_name = installCanvasShortcuts)]
+    fn install_canvas_shortcuts(canvas: &web_sys::HtmlCanvasElement);
 }
 
 /// Work for the UI thread with access to the app (posted by async tasks: picked files…).
@@ -204,6 +206,7 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
     effectcraft_ui_egui::i18n::set_system_locales(query_value("lang"), browser.collect());
     let doc = web_sys::window().and_then(|w| w.document()).ok_or("no document")?;
     let canvas: web_sys::HtmlCanvasElement = doc.get_element_by_id(&canvas_id).ok_or("no canvas")?.dyn_into()?;
+    install_canvas_shortcuts(&canvas);
     let empty = query_flag("empty");
     let home = query_flag("home");
     // Browser storage: settings, recent projects, imported media, saved projects, auto-saves and

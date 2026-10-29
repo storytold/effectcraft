@@ -378,9 +378,15 @@ fn main() -> eframe::Result {
 /// instead of eframe's fixed set: an older GPU that can't meet those (Intel HD Graphics 5500,
 /// #198) still opens the app, and the compositor then checks what it needs and falls back to
 /// the CPU when the device can't run it. `backends`: Window Graphics' choice, when it makes one.
+///
+/// The surface is eframe's own default, [`eframe::SurfaceConfig::LOW_LATENCY`]: vsync with one
+/// frame in flight, so a drag or a scrub shows one frame sooner. The bare
+/// `WgpuConfiguration::default()` is `HIGH_THROUGHPUT` instead (two frames in flight, three
+/// drawables on Metal): one more frame of pointer-to-screen lag on every interaction, about 8 ms
+/// at 120 Hz and 17 ms at 60 Hz, and a third 15 MB drawable held for the window.
 fn wgpu_options(backends: Option<eframe::wgpu::Backends>) -> eframe::WgpuConfiguration {
     use eframe::egui_wgpu::WgpuSetup;
-    let mut config = eframe::WgpuConfiguration::default();
+    let mut config = eframe::WgpuConfiguration::default().with_surface_config(eframe::SurfaceConfig::LOW_LATENCY);
     if let WgpuSetup::CreateNew(setup) = &mut config.wgpu_setup {
         if let Some(b) = backends {
             setup.instance_descriptor.backends = b;
@@ -565,6 +571,19 @@ mod tests {
         };
         // Intel Metal can't compile the validation's compute shader, and the device is lost.
         assert!(!setup.instance_descriptor.flags.contains(eframe::wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL));
+    }
+
+    /// The window's surface keeps one frame in flight, like eframe's own default, not the two
+    /// of the bare `WgpuConfiguration::default()` (one extra frame of lag on every drag).
+    #[test]
+    fn the_window_surface_is_low_latency() {
+        for backends in [None, Some(eframe::wgpu::Backends::METAL), Some(eframe::wgpu::Backends::GL)] {
+            let surface = super::wgpu_options(backends).surface;
+            assert_eq!(surface, eframe::SurfaceConfig::LOW_LATENCY, "{backends:?}");
+            assert_eq!(surface.desired_maximum_frame_latency, Some(1));
+            assert_eq!(surface.present_mode, eframe::wgpu::PresentMode::AutoVsync);
+        }
+        assert_eq!(super::wgpu_options(None).surface, eframe::NativeOptions::default().wgpu_options.surface, "eframe's default surface");
     }
 
     /// The window's device never asks for more than the adapter offers (#198).

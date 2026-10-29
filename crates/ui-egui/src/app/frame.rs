@@ -131,6 +131,9 @@ impl EffectcraftApp {
         self.apply_gpu_failure(ctx);
         if self.gpu_failure_applied == Some(true) {
             self.close_after_device_loss(ctx);
+            // On macOS the app quits through `-[NSApplication terminate:]` instead of closing the
+            // window while AppKit's run loop is running (#341).
+            craft_quit::on_close_request(ctx);
             return;
         }
         // Focus comes from the fresh viewport copy; a full pass's `InputState::focused` is only a

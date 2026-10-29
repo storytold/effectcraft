@@ -1261,6 +1261,10 @@ fn xml_depth(text: &str) -> usize {
     max
 }
 
+/// Nodes a document may expand to: a few kilobytes of nested internal entities
+/// (`<!ENTITY b "&a;&a;…">`) otherwise expand to millions and exhaust memory.
+const MAX_XML_NODES: u32 = 4_000_000;
+
 /// Parse an SVG document.
 pub fn parse(bytes: &[u8]) -> Result<Doc, Error> {
     let text = String::from_utf8_lossy(bytes);
@@ -1268,7 +1272,8 @@ pub fn parse(bytes: &[u8]) -> Result<Doc, Error> {
     if xml_depth(text) > MAX_XML_DEPTH {
         return Err(Error::Xml(format!("elements nested more than {MAX_XML_DEPTH} levels deep")));
     }
-    let opts = roxmltree::ParsingOptions { allow_dtd: true, ..Default::default() };
+    // DTDs stay allowed (Illustrator's SVGs declare entities), but expansion is bounded (#2129).
+    let opts = roxmltree::ParsingOptions { allow_dtd: true, nodes_limit: MAX_XML_NODES, ..Default::default() };
     let xml = roxmltree::Document::parse_with_options(text, opts).map_err(|e| Error::Xml(e.to_string()))?;
     let root = xml.root_element();
     if root.tag_name().name() != "svg" {

@@ -191,15 +191,32 @@ impl Plane {
 
     /// Central-difference gradients `(d/dx, d/dy)`.
     pub fn gradients(&self) -> (Plane, Plane) {
+        self.gradients_in([0, 0, self.w.saturating_sub(1), self.h.saturating_sub(1)])
+    }
+
+    /// The gradients of the pixels in `[x0, y0, x1, y1]` (inclusive, within the plane); all other
+    /// pixels of the returned planes stay zero.
+    pub fn gradients_in(&self, [x0, y0, x1, y1]: [usize; 4]) -> (Plane, Plane) {
         let mut gx = Plane::new(self.w, self.h, self.ch);
         let mut gy = Plane::new(self.w, self.h, self.ch);
-        for y in 0..self.h {
-            for x in 0..self.w {
-                for c in 0..self.ch {
-                    let (xi, yi) = (x as isize, y as isize);
-                    let i = self.idx(x, y) + c;
-                    gx.data[i] = 0.5 * (self.at(xi + 1, yi, c) - self.at(xi - 1, yi, c));
-                    gy.data[i] = 0.5 * (self.at(xi, yi + 1, c) - self.at(xi, yi - 1, c));
+        if self.w == 0 || self.h == 0 {
+            return (gx, gy);
+        }
+        let (ch, row) = (self.ch, self.w * self.ch);
+        for y in y0..=y1.min(self.h - 1) {
+            for x in x0..=x1.min(self.w - 1) {
+                let i = self.idx(x, y);
+                if x > 0 && y > 0 && x + 1 < self.w && y + 1 < self.h {
+                    for c in i..i + ch {
+                        gx.data[c] = 0.5 * (self.data[c + ch] - self.data[c - ch]);
+                        gy.data[c] = 0.5 * (self.data[c + row] - self.data[c - row]);
+                    }
+                } else {
+                    for c in 0..ch {
+                        let (xi, yi) = (x as isize, y as isize);
+                        gx.data[i + c] = 0.5 * (self.at(xi + 1, yi, c) - self.at(xi - 1, yi, c));
+                        gy.data[i + c] = 0.5 * (self.at(xi, yi + 1, c) - self.at(xi, yi - 1, c));
+                    }
                 }
             }
         }
@@ -239,5 +256,28 @@ mod tests {
         assert!((Plane::from_image(&img, Channel::Luminance, 0, 0, 2, 2).data[0] - (0.2126 + 0.3576)).abs() < 1e-6);
         assert_eq!(Plane::from_image(&img, Channel::Saturation, 0, 0, 2, 2).data[0], 1.0);
         assert_eq!(Channel::from_name("luminance"), Some(Channel::Luminance));
+    }
+
+    #[test]
+    fn gradient_window_and_interior_path_match_the_clamped_definition() {
+        let mut p = Plane::new(11, 9, 3);
+        for (i, v) in p.data.iter_mut().enumerate() {
+            *v = ((i * 7919) % 101) as f32 / 37.0;
+        }
+        let (gx, gy) = p.gradients();
+        let rect = [2, 1, 8, 6];
+        let (wx, wy) = p.gradients_in(rect);
+        for y in 0..p.h {
+            for x in 0..p.w {
+                for c in 0..3 {
+                    let (xi, yi, i) = (x as isize, y as isize, p.idx(x, y) + c);
+                    assert_eq!(gx.data[i].to_bits(), (0.5 * (p.at(xi + 1, yi, c) - p.at(xi - 1, yi, c))).to_bits());
+                    assert_eq!(gy.data[i].to_bits(), (0.5 * (p.at(xi, yi + 1, c) - p.at(xi, yi - 1, c))).to_bits());
+                    let inside = (rect[0]..=rect[2]).contains(&x) && (rect[1]..=rect[3]).contains(&y);
+                    assert_eq!(wx.data[i], if inside { gx.data[i] } else { 0.0 });
+                    assert_eq!(wy.data[i], if inside { gy.data[i] } else { 0.0 });
+                }
+            }
+        }
     }
 }

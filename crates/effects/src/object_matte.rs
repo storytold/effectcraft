@@ -191,6 +191,11 @@ pub fn roto_data(params: &Params, layer_size: [f64; 2], f: i64, with_model: bool
 /// Seed of the chain keys: what the frames are (the Input Key), the layer size, the frame rate,
 /// the mode and the model. The prompt is in each frame's key.
 pub fn seed(params: &Params, layer_size: [f64; 2], fps: f64, model: Option<&dyn MaskModel>) -> u64 {
+    seed_of(params, layer_size, fps, model.map_or(effectcraft_segment::CLASSICAL, |m| m.info().id))
+}
+
+/// [`seed`] for the model with id `model` ([`effectcraft_segment::CLASSICAL`]: no model).
+fn seed_of(params: &Params, layer_size: [f64; 2], fps: f64, model: &str) -> u64 {
     let mut h = 0xcbf2_9ce4_8422_2325;
     fnv(&mut h, ID.as_bytes());
     fnv(&mut h, s(params, INPUT_KEY).as_bytes());
@@ -198,7 +203,7 @@ pub fn seed(params: &Params, layer_size: [f64; 2], fps: f64, model: Option<&dyn 
         fnv(&mut h, &v.to_bits().to_le_bytes());
     }
     fnv(&mut h, &[tracks(params) as u8]);
-    fnv(&mut h, model.map_or(effectcraft_segment::CLASSICAL, |m| m.info().id).as_bytes());
+    fnv(&mut h, model.as_bytes());
     h
 }
 
@@ -255,9 +260,14 @@ pub fn frame_keys(params: &Params, layer_size: [f64; 2], fps: f64, frames: &[i64
 /// What frozen mattes depend on: what the frames are (the seed: Input Key, size, rate, mode,
 /// model), the prompt, the tracked span and the matte settings.
 pub fn frozen_key(params: &Params, layer_size: [f64; 2], fps: f64, model: Option<&dyn MaskModel>) -> String {
-    let mut h = seed(params, layer_size, fps, model);
+    frozen_key_of(params, layer_size, fps, model.map_or(effectcraft_segment::CLASSICAL, |m| m.info().id))
+}
+
+/// [`frozen_key`] for the model with id `model` ([`effectcraft_segment::CLASSICAL`]: no model).
+fn frozen_key_of(params: &Params, layer_size: [f64; 2], fps: f64, model: &str) -> String {
+    let mut h = seed_of(params, layer_size, fps, model);
     let base = reference_frame(params);
-    if let Some(st) = prompt_strokes(params, layer_size, base, model.is_some()) {
+    if let Some(st) = prompt_strokes(params, layer_size, base, model != effectcraft_segment::CLASSICAL) {
         fnv(&mut h, serde_json::to_string(&st).unwrap_or_default().as_bytes());
     }
     for v in [base, reach(params)[0], reach(params)[1]] {
@@ -273,7 +283,9 @@ pub fn is_frozen(params: &Params) -> bool {
 }
 
 /// Frame `f`'s frozen matte on a `w`×`h` grid, when the instance is frozen, the mattes still
-/// match ([`frozen_key`]) and `f` is one of them.
+/// match ([`frozen_key`]) and `f` is one of them. The mattes match under the session's `model`
+/// or under the model that froze them (which this session may not have loaded, e.g. a fresh
+/// headless render): frozen mattes need no segmentation.
 pub fn frozen_alpha(params: &Params, layer_size: [f64; 2], fps: f64, f: i64, w: usize, h: usize, model: Option<&dyn MaskModel>) -> Option<Vec<f32>> {
     let j = s(params, FROZEN);
     if j.is_empty() {
@@ -281,7 +293,10 @@ pub fn frozen_alpha(params: &Params, layer_size: [f64; 2], fps: f64, f: i64, w: 
     }
     let fc = frozen_cache(j)?;
     if fc.key != frozen_key(params, layer_size, fps, model) {
-        return None;
+        let ids = std::iter::once(effectcraft_segment::CLASSICAL).chain(effectcraft_segment::MODELS.iter().map(|m| m.id));
+        if !ids.into_iter().any(|id| fc.key == frozen_key_of(params, layer_size, fps, id)) {
+            return None;
+        }
     }
     let fr = fc.frames.get(&f)?;
     let [fw, fh] = fc.size;
@@ -704,5 +719,29 @@ mod tests {
         p.values.insert("objectPoint".into(), Value::Vec2([40.0, 40.0]));
         p.values.insert(FROZEN.into(), Value::Str(fc2.to_json()));
         assert_eq!(frozen_alpha(&p, [100.0, 80.0], 25.0, 2, 100, 80, None), None);
+    }
+
+    /// Mattes frozen with a model stay usable in a session where that model is not loaded (a
+    /// fresh headless render): they are used as stored, not re-segmented with another model.
+    #[test]
+    fn frozen_mattes_survive_a_session_without_their_model() {
+        let mut p = params(&[
+            ("objectPoint", Value::Vec2([40.0, 40.0])),
+            ("useBox", Value::Bool(true)),
+            ("boxTopLeft", Value::Vec2([10.0, 10.0])),
+            ("boxBottomRight", Value::Vec2([90.0, 70.0])),
+            ("objectTracking/framesAfter", Value::Scalar(3.0)),
+        ]);
+        p.values.insert(INPUT_KEY.into(), Value::Str("frozen-model-test".into()));
+        let stub = Stub::default();
+        let alpha: Vec<f32> = (0..100 * 80).map(|i| ((i % 100) < 50) as u8 as f32).collect();
+        let mut fc = FrozenCache { key: frozen_key(&p, [100.0, 80.0], 25.0, Some(&stub)), size: [100, 80], ..Default::default() };
+        fc.frames.insert(2, roto::freeze_frame(&alpha, &[]));
+        p.values.insert(FROZEN.into(), Value::Str(fc.to_json()));
+        assert!(is_frozen(&p));
+        assert!(frozen_alpha(&p, [100.0, 80.0], 25.0, 2, 100, 80, Some(&stub)).is_some());
+        assert_eq!(frozen_alpha(&p, [100.0, 80.0], 25.0, 2, 50, 40, None).map(|a| (a[20 * 50 + 5], a[20 * 50 + 45])), Some((1.0, 0.0)));
+        let out = run(&p, 2);
+        assert!(out.data[40 * 100 + 10][3] > 0.99 && out.data[40 * 100 + 90][3] < 0.01, "the frozen matte is used");
     }
 }

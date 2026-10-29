@@ -366,6 +366,21 @@ impl ConfigStore for WebConfig {
         v.sort();
         v
     }
+    /// The first name part of the keys under `dir/`.
+    fn list_dirs(&self, dir: &str) -> Vec<String> {
+        let pre = format!("{CONFIG}{}/", dir.trim_end_matches('/'));
+        let mut v: Vec<String> = self
+            .store
+            .lock()
+            .list(&pre)
+            .into_iter()
+            .filter_map(|(k, ..)| k.strip_prefix(&pre)?.split_once('/').map(|(d, _)| d.to_string()))
+            .filter(|d| !d.is_empty())
+            .collect();
+        v.sort();
+        v.dedup();
+        v
+    }
     fn dir(&self) -> Option<PathBuf> {
         Some(PathBuf::from("/"))
     }
@@ -531,6 +546,22 @@ mod tests {
         let f = s.files();
         assert_eq!(f, vec![("/clip.mp4".to_string(), 3, 1000.0, true), ("/out.gif".to_string(), 1, 1000.0, false)]);
         assert_eq!(s.file("/clip.mp4").as_deref(), Some(&b"abc"[..]));
+    }
+
+    /// Scripts in a subfolder of the Scripts folder (`Tools/Hello.jsx`) are listed, as on the desktop.
+    #[test]
+    fn config_store_lists_folders() {
+        let c = WebConfig::new(store());
+        for name in ["Scripts/Top.jsx", "Scripts/Tools/Hello.jsx", "Scripts/Tools/More.jsx", "Scripts/ScriptUI Panels/Kit/A.jsx"] {
+            c.write(name, "x").unwrap();
+        }
+        assert_eq!(c.list("Scripts"), ["Top.jsx"]);
+        assert_eq!(c.list_dirs("Scripts"), ["ScriptUI Panels", "Tools"]);
+        assert_eq!(c.list_dirs("Scripts/ScriptUI Panels"), ["Kit"]);
+        let mut s = effectcraft_engine::Session { config: Some(Arc::new(c)), ..Default::default() };
+        let list = s.execute("file.scripts.list", serde_json::json!({})).unwrap();
+        let installed: Vec<&str> = list.as_array().unwrap().iter().filter(|e| e["source"] == "installed").filter_map(|e| e["name"].as_str()).collect();
+        assert_eq!(installed, ["Tools/Hello.jsx", "Tools/More.jsx", "Top.jsx", "Kit/A.jsx"]);
     }
 
     #[test]

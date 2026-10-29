@@ -226,9 +226,18 @@ fn segment(l: &mut Lex, c: u8, base: Vec2, p: &mut BezPath, cur: &mut Point, las
             let sweep = l.flag()?;
             let e = pt(l)?;
             let arc = SvgArc { from: *cur, to: e, radii: Vec2::new(rx, ry), x_rotation: rot.to_radians(), large_arc: large, sweep };
-            match kurbo::Arc::from_svg_arc(&arc) {
-                Some(a) => a.to_cubic_beziers(0.1, |c1, c2, end| p.curve_to(c1, c2, end)),
-                None => p.line_to(e),
+            let mut last_end = None;
+            if let Some(a) = kurbo::Arc::from_svg_arc(&arc) {
+                // Scale tolerance with the radius so the segment count stays bounded.
+                let tol = 0.1_f64.max(a.radii.x.max(a.radii.y) * 1e-4);
+                a.to_cubic_beziers(tol, |c1, c2, end| {
+                    p.curve_to(c1, c2, end);
+                    last_end = Some(end);
+                });
+            }
+            // Degenerate arcs (e.g. huge radii) may emit nothing or stop short of the end point.
+            if last_end.is_none_or(|q| (q - e).hypot() > 1e-3 * (1.0 + e.to_vec2().hypot())) {
+                p.line_to(e);
             }
             *cur = e;
             *last_cubic = None;
@@ -262,6 +271,12 @@ mod tests {
     use kurbo::PathEl;
 
     #[test]
+    fn huge_arc_radius_stays_bounded() {
+        let p = parse_path_data("M0 0A1e36 1e36 0 1 1 1e30 0");
+        assert!(p.elements().len() < 1000, "got {} elements", p.elements().len());
+    }
+
+    #[test]
     fn commands() {
         let p = parse_path_data("M10,10 L20,10 h10 v10 H10 z m5 5 l1-1.5.5.5e1 C 0 0 1 1 2 2 s3 3 4 4 Q1 1 2 2 t3 3 A5 5 0 0 1 20 20 a5 5 0 1010 0");
         let els = p.elements();
@@ -292,6 +307,18 @@ mod tests {
         let p = parse_path_data("M0 0 L10 0 L10 10 Z9 C1 2 3 4 5 6");
         assert_eq!(p.elements().len(), 4);
         assert!(parse_path_data("M0 0 L10 0 z 9 9").elements().len() <= 4);
+    }
+
+    #[test]
+    fn huge_radius_arc_still_reaches_end_point() {
+        for d in ["M0 0 A1e20 1e20 0 0 1 10 0 L10 10", "M0 0 A1e20 1e20 0 1 1 10 0 L10 10", "M0 0 a1e20 1e20 0 0 1 10 0 L10 10"] {
+            let p = parse_path_data(d);
+            let reaches = p.elements().iter().any(|e| match e {
+                PathEl::LineTo(q) | PathEl::CurveTo(_, _, q) => (q.x - 10.0).abs() < 1e-6 && q.y.abs() < 1e-6,
+                _ => false,
+            });
+            assert!(reaches, "{d}: {:?}", p.elements());
+        }
     }
 
     #[test]

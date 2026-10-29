@@ -74,6 +74,8 @@ struct Lease {
     pool: Weak<Mutex<Pool>>,
     /// The [`Enc`] that took it (see [`Pool::owned`]).
     owner: u64,
+    /// The pool's [`Pool::generation`] when it was taken.
+    generation: u64,
 }
 
 impl std::fmt::Debug for Lease {
@@ -87,7 +89,7 @@ impl Drop for Lease {
         if let Some(pool) = self.pool.upgrade()
             && let Ok(mut p) = pool.lock()
         {
-            p.release_owned(self.texture.clone(), self.owner);
+            p.release_owned(self.texture.clone(), self.owner, self.generation);
         }
     }
 }
@@ -118,6 +120,8 @@ pub(crate) struct Pool {
     /// working texture of another `Enc` before it is gone.
     owned: HashMap<u64, HashMap<(u32, u32), Vec<wgpu::Texture>>>,
     next_owner: u64,
+    /// Raised by [`Pool::discard`]: a texture taken before it never comes back to the pool.
+    generation: u64,
 }
 
 /// In-`Enc` texture reuse ([`Pool::owned`]); tests turn it off to compare.
@@ -276,7 +280,10 @@ impl Pool {
         }
     }
 
-    fn release_owned(&mut self, t: wgpu::Texture, owner: u64) {
+    fn release_owned(&mut self, t: wgpu::Texture, owner: u64, generation: u64) {
+        if generation != self.generation {
+            return;
+        }
         if let Some(m) = self.owned.get_mut(&owner) {
             m.entry((t.width(), t.height())).or_default().push(t);
             return;
@@ -305,6 +312,18 @@ impl Pool {
     fn clear(&mut self) {
         self.free.clear();
         self.bytes = 0;
+    }
+
+    /// After a failed frame (#1319): drop every kept texture, the free ones and those waiting
+    /// for an open encoder or kept by one, and the textures still out never return. The
+    /// encoders' bookkeeping stays, so reuse remains ordered.
+    fn discard(&mut self) {
+        self.clear();
+        self.released.clear();
+        for kept in self.owned.values_mut() {
+            kept.clear();
+        }
+        self.generation = self.generation.wrapping_add(1);
     }
 }
 
@@ -1015,8 +1034,9 @@ impl GpuContext {
     }
 
     fn texture(&self, w: u32, h: u32) -> wgpu::Texture {
+        // Named with its size, so a GPU error about it says which texture failed (#1319).
         self.device.create_texture(&wgpu::TextureDescriptor {
-            label: None,
+            label: Some(&format!("working image {w}×{h}")),
             size: wgpu::Extent3d { width: w.max(1), height: h.max(1), depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
@@ -1031,10 +1051,10 @@ impl GpuContext {
     /// one is zeroed.
     fn pooled(&self, w: u32, h: u32, owner: u64) -> (GpuImage, bool) {
         let (w, h) = (w.max(1), h.max(1));
-        let reused = self.pool.lock().ok().and_then(|mut p| p.take_owned(owner, w, h).or_else(|| p.take(w, h)));
+        let (reused, generation) = self.pool.lock().map(|mut p| (p.take_owned(owner, w, h).or_else(|| p.take(w, h)), p.generation)).unwrap_or((None, u64::MAX));
         let was_reused = reused.is_some();
         let texture = reused.unwrap_or_else(|| self.texture(w, h));
-        let lease = Arc::new(Lease { texture: texture.clone(), pool: Arc::downgrade(&self.pool), owner });
+        let lease = Arc::new(Lease { texture: texture.clone(), pool: Arc::downgrade(&self.pool), owner, generation });
         (GpuImage { texture, width: w, height: h, _lease: Some(lease), levels: None }, was_reused)
     }
 
@@ -1148,6 +1168,21 @@ impl GpuContext {
         }
         if let Ok(mut s) = self.staging.lock() {
             s.clear();
+        }
+    }
+
+    /// After a failed frame: forget every texture and buffer kept for reuse, since any of them
+    /// may be one the device rejected (#1319). Later frames allocate afresh.
+    pub fn discard_kept(&self) {
+        self.clear_uploads();
+        if let Ok(mut p) = self.pool.lock() {
+            p.discard();
+        }
+        if let Ok(mut z) = self.zeros.lock() {
+            z.clear();
+        }
+        if let Ok(mut c) = self.particle_states.lock() {
+            c.clear();
         }
     }
 }

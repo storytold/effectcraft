@@ -765,6 +765,59 @@ fn pick_whip_generates_ae_reference_expressions() {
     assert!(s.execute("prop.pickWhip", json!({"layer": l, "path": "transform/opacity", "target": {"layer": l, "path": "transform/opacity"}})).is_err());
 }
 
+/// #1072: an Alt pick whip (`byIndex`) selects an effect's properties by their index,
+/// `effect("Color Control")(1)`, its place among its group's children (nested groups too). The
+/// effect keeps its name; other properties, dimensions, insertion into an expression and match
+/// names (Compact English off) work as before. (`effectcraft-host`'s `pick_whip` tests check the
+/// references read the right values.)
+#[test]
+fn pick_whip_by_index_selects_effect_properties_by_their_index() {
+    let (mut s, l) = setup();
+    let o = s.execute("layer.newSolid", json!({"name": "Other", "color": "#00ff00"})).unwrap()["layer"].as_u64().unwrap();
+    for fx in ["Color Control", "Fractal Noise", "Point Control"] {
+        s.execute("effect.apply", json!({"layer": o, "effect": fx})).unwrap();
+    }
+    // Fractal Noise ▸ Transform ▸ Scale, by its places in the property tree.
+    let fx = s.active_comp().unwrap().layer(effectcraft_project::LayerId(o)).unwrap().props.sub("effects").unwrap().groups().nth(1).unwrap().clone();
+    let group = fx.children.iter().position(|c| c.match_id() == "transform").unwrap() + 1;
+    let scale = fx.sub("transform").unwrap().children.iter().position(|c| c.match_id() == "scale").unwrap() + 1;
+    let whip = |s: &mut Session, path: &str, target: Value, extra: Value| {
+        let mut p = json!({"layer": l, "path": path, "target": target, "byIndex": true});
+        p.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        s.execute("prop.pickWhip", p).unwrap()
+    };
+    let other = "thisComp.layer(\"Other\")";
+    let undo = s.history.undo.len();
+    assert_eq!(
+        whip(&mut s, "transform/rotation", json!({"layer": o, "path": "effects/#1/color"}), json!({})),
+        json!(format!("{other}.effect(\"Color Control\")(1)[0]")),
+        "a colour into one value: its first"
+    );
+    assert_eq!(s.history.undo.len(), undo + 1, "one undo step");
+    let nested = format!("{other}.effect(\"Fractal Noise\")({group})({scale})");
+    assert_eq!(whip(&mut s, "transform/rotation", json!({"layer": o, "path": "effects/#2/transform/scale"}), json!({})), json!(nested));
+    assert_eq!(
+        whip(&mut s, "transform/opacity", json!({"layer": o, "path": "effects/#3/point", "dimension": 1}), json!({})),
+        json!(format!("{other}.effect(\"Point Control\")(1)[1]"))
+    );
+    assert_eq!(
+        whip(&mut s, "transform/rotation", json!({"layer": o, "path": "effects/#2/transform/scale"}), json!({"expression": "1 + ", "range": [4, 4]})),
+        json!(format!("1 + {nested}")),
+        "inserted at the cursor"
+    );
+    assert_eq!(
+        whip(&mut s, "transform/opacity", json!({"layer": o, "path": "transform/opacity"}), json!({})),
+        json!(format!("{other}.transform.opacity")),
+        "only an effect's properties go by index"
+    );
+    // Match names (Compact English off): the effect by its match name, its properties by index.
+    s.execute("prefs.set", json!({"key": "general.expressionPickWhipCompact", "value": false})).unwrap();
+    let e = whip(&mut s, "transform/rotation", json!({"layer": o, "path": "effects/#2/transform/scale"}), json!({}));
+    assert!(e.as_str().unwrap().ends_with(&format!("({group})({scale})")), "{e}");
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(prop(&s, l, "transform/rotation").expr.unwrap().text, format!("1 + {nested}"), "one undo per pick");
+}
+
 /// #407: Reset without a value gives a property its own default (a Transform property's, an
 /// effect parameter's) besides removing its keyframes and expression.
 #[test]

@@ -130,13 +130,38 @@ pub fn from_kurbo(path: &BezPath) -> Vec<ShapePath> {
     out
 }
 
-/// Rectangle path centred at `pos` with corner `roundness` (AE draws clockwise from the top-right).
+/// Rectangle path centred at `pos` with corner `roundness`, drawn as After Effects draws it
+/// (Trim Paths measures from its first point): clockwise from the top-right corner, or with
+/// round corners from the end of the top-right arc on the right edge (After Effects 2026,
+/// 400 × 300 rectangles trimmed 0–25 %, case 930).
 pub fn rect(size: [f64; 2], pos: [f64; 2], roundness: f64) -> BezPath {
-    let r = kurbo::Rect::from_center_size(Point::new(pos[0], pos[1]), (size[0].abs(), size[1].abs()));
-    let max_rad = size[0].abs().min(size[1].abs()) / 2.0;
+    let (w, h) = (size[0].abs(), size[1].abs());
+    let (x0, y0, x1, y1) = (pos[0] - w / 2.0, pos[1] - h / 2.0, pos[0] + w / 2.0, pos[1] + h / 2.0);
+    let max_rad = w.min(h) / 2.0;
     // `f64::clamp` panics on a NaN bound (both size components NaN): fall back to no roundness.
-    let rad = if max_rad.is_nan() { 0.0 } else { roundness.clamp(0.0, max_rad) };
-    if rad > 0.0 { r.to_rounded_rect(rad).to_path(0.1) } else { r.to_path(0.1) }
+    let rad = if roundness.is_finite() && !max_rad.is_nan() { roundness.clamp(0.0, max_rad) } else { 0.0 };
+    let mut p = BezPath::new();
+    if rad <= 0.0 {
+        p.move_to((x1, y0));
+        p.line_to((x1, y1));
+        p.line_to((x0, y1));
+        p.line_to((x0, y0));
+        p.close_path();
+        return p;
+    }
+    // Quarter circles as cubics (handle 0.5523 × radius).
+    let k = rad * 0.552_284_749_8;
+    p.move_to((x1, y0 + rad));
+    p.line_to((x1, y1 - rad));
+    p.curve_to((x1, y1 - rad + k), (x1 - rad + k, y1), (x1 - rad, y1));
+    p.line_to((x0 + rad, y1));
+    p.curve_to((x0 + rad - k, y1), (x0, y1 - rad + k), (x0, y1 - rad));
+    p.line_to((x0, y0 + rad));
+    p.curve_to((x0, y0 + rad - k), (x0 + rad - k, y0), (x0 + rad, y0));
+    p.line_to((x1 - rad, y0));
+    p.curve_to((x1 - rad + k, y0), (x1, y0 + rad - k), (x1, y0 + rad));
+    p.close_path();
+    p
 }
 
 pub fn ellipse(size: [f64; 2], pos: [f64; 2]) -> BezPath {
@@ -368,6 +393,37 @@ pub fn transform(paths: &[BezPath], m: &Mat3) -> Vec<BezPath> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// After Effects 2026 (case 930): 400 × 300 rectangles at the origin with Trim Paths. Plain:
+    /// 0–25 % runs from the top-right corner down the right edge and 50 px along the bottom.
+    /// Round corners 40: from the end of the top-right arc (200, −110) down, round the
+    /// bottom-right corner, to x 110 on the bottom. Start 70 / End 30 draws 30–70 %.
+    #[test]
+    fn rectangles_start_where_after_effects_starts_them() {
+        let ends = |p: &BezPath| {
+            let mut first = None;
+            let mut last = None;
+            for el in p.elements() {
+                match *el {
+                    PathEl::MoveTo(q) if first.is_none() => first = Some(q),
+                    PathEl::MoveTo(q) | PathEl::LineTo(q) | PathEl::CurveTo(_, _, q) | PathEl::QuadTo(_, q) => last = Some(q),
+                    PathEl::ClosePath => {}
+                }
+            }
+            (first.unwrap_or_default(), last.unwrap_or_default())
+        };
+        let near = |a: Point, b: (f64, f64)| (a.x - b.0).abs() < 1.0 && (a.y - b.1).abs() < 1.0;
+        let plain = ops::trim(&[rect([400.0, 300.0], [0.0, 0.0], 0.0)], 0.0, 25.0, 0.0);
+        let (a, b) = ends(&plain[0]);
+        assert!(near(a, (200.0, -150.0)) && near(b, (150.0, 150.0)), "{a:?} {b:?}");
+        let round = ops::trim(&[rect([400.0, 300.0], [0.0, 0.0], 40.0)], 0.0, 25.0, 0.0);
+        let (a, b) = ends(&round[0]);
+        assert!(near(a, (200.0, -110.0)) && near(b, (110.0, 150.0)), "{a:?} {b:?}");
+        // Start > End: AE draws 30..70 % (plain: from x 80 on the bottom up to y −130 on the left).
+        let swapped = ops::trim(&[rect([400.0, 300.0], [0.0, 0.0], 0.0)], 70.0, 30.0, 0.0);
+        let (a, b) = ends(&swapped[0]);
+        assert!(near(a, (80.0, 150.0)) && near(b, (-200.0, -130.0)), "{a:?} {b:?}");
+    }
 
     #[test]
     fn rect_with_nan_size_does_not_panic() {

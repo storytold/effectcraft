@@ -1,7 +1,8 @@
 //! Timeline rows for shape layers, masks and keyframing: the Contents "Add:" menu and the Classic
 //! 3D "Change Renderer…" row (#206), Alt+Shift+P revealing the key it adds and clicks below the
-//! layers deselecting them (#205), Mask Feather's linked values (#203), and copying shape items
-//! between shape layers (#227), and Ctrl+V of SVG markup making a shape layer (#738).
+//! layers deselecting them (#205), Mask Feather's linked values (#203) and shape Size's chain link
+//! (#2489), copying shape items between shape layers (#227), and Ctrl+V of SVG markup making a shape
+//! layer (#738).
 
 use effectcraft_engine::Session;
 use effectcraft_engine::project::LayerId;
@@ -172,6 +173,52 @@ fn mask_feather_values_are_linked_and_not_negative() {
     assert_eq!(feather(&h).1, vec![0.0, 7.0], "unlinked");
 }
 
+/// #2489: Rectangle and Ellipse Path Size get the Constrain Proportions chain, off by default:
+/// unlinked, W moves alone; linked, H follows W in proportion. Scale on the same layer still starts
+/// linked.
+#[test]
+fn shape_size_chain_starts_unlinked_and_keeps_the_ratio_when_linked() {
+    let mut s = session();
+    let l = s.execute("layer.newShape", json!({"kind": "rect", "size": [100, 50]})).unwrap()["layer"].as_u64().unwrap();
+    let o = s.execute("layer.newShape", json!({"kind": "ellipse", "size": [60, 30]})).unwrap()["layer"].as_u64().unwrap();
+    let uid = |s: &Session, l: u64, path: &str| s.active_comp().unwrap().layer(LayerId(l)).unwrap().props.prop(path).unwrap().uid;
+    let (size, oval, scale) =
+        (uid(&s, l, "contents/group/contents/rect/size"), uid(&s, o, "contents/group/contents/ellipse/size"), uid(&s, l, "transform/scale"));
+    let mut h = harness(s);
+    for (layer, props) in [(l, vec![size, scale]), (o, vec![oval])] {
+        h.state_mut().ui.timeline.open_layers.insert(layer);
+        h.state_mut().ui.timeline.layer_reveal.insert(layer, vec!["props".into()]);
+        h.state_mut().ui.timeline.reveal_props.extend(props);
+    }
+    h.run_steps(2);
+    let value = |h: &Harness<'_, EffectcraftApp>, l: u64, uid: u64| {
+        h.state().session.active_comp().unwrap().layer(LayerId(l)).unwrap().props.prop(&format!("@{uid}")).unwrap().value.components()
+    };
+    let type_value = |h: &mut Harness<'_, EffectcraftApp>, uid: u64, d: usize, v: &str| {
+        click(h, &format!("timeline.prop.{uid}.value.{d}"));
+        h.input_mut().events.push(Event::Text(v.into()));
+        h.step();
+        h.input_mut().events.push(Event::Key { key: Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
+        h.run_steps(3);
+    };
+    type_value(&mut h, size, 0, "80");
+    assert_eq!(value(&h, l, size), vec![80.0, 50.0], "a new rectangle's Size starts unlinked");
+    type_value(&mut h, oval, 1, "40");
+    assert_eq!(value(&h, o, oval), vec![60.0, 40.0], "a new ellipse's Size starts unlinked");
+    click(&mut h, &format!("timeline.prop.{size}.link"));
+    type_value(&mut h, size, 0, "160");
+    assert_eq!(value(&h, l, size), vec![160.0, 100.0], "linked, H follows W in proportion");
+    click(&mut h, &format!("timeline.prop.{size}.link"));
+    type_value(&mut h, size, 0, "40");
+    assert_eq!(value(&h, l, size), vec![40.0, 100.0], "unlinked again, H stays");
+    // The ellipse's Size links the same way: 60x40 linked, W to 90 makes H 60.
+    click(&mut h, &format!("timeline.prop.{oval}.link"));
+    type_value(&mut h, oval, 0, "90");
+    assert_eq!(value(&h, o, oval), vec![90.0, 60.0], "linked, the ellipse keeps its ratio too");
+    type_value(&mut h, scale, 0, "50");
+    assert_eq!(value(&h, l, scale)[..2], [50.0, 50.0], "Scale still starts linked");
+}
+
 /// Two shape layers, "Rect" (Rectangle 1) and "Oval" (Ellipse 1, selected): (harness with Rect's
 /// Contents open, Rect, Oval, Rectangle 1's uid).
 fn two_shape_layers() -> (Harness<'static, EffectcraftApp>, u64, u64, u64) {
@@ -188,6 +235,33 @@ fn two_shape_layers() -> (Harness<'static, EffectcraftApp>, u64, u64, u64) {
 
 fn contents_names(h: &Harness<'_, EffectcraftApp>, l: u64) -> Vec<String> {
     h.state().session.active_comp().unwrap().layer(LayerId(l)).unwrap().props.sub("contents").unwrap().groups().map(|g| g.name.clone()).collect()
+}
+
+/// #959: every item in a shape layer's Contents has an eye switch, as in After Effects; it turns
+/// the item off (the renderer skips it), undoably. The group's Transform has none.
+#[test]
+fn shape_contents_items_have_eye_switches() {
+    let (mut h, a, _, rect) = two_shape_layers();
+    let enabled = |h: &Harness<'_, EffectcraftApp>| {
+        h.state().session.active_comp().unwrap().layer(LayerId(a)).unwrap().props.sub("contents").unwrap().find_group(rect).unwrap().enabled
+    };
+    let eye = format!("timeline.group.{rect}.eye");
+    assert!(enabled(&h));
+    click(&mut h, &eye);
+    assert!(!enabled(&h), "the eye turns Rectangle 1 off");
+    click(&mut h, &eye);
+    assert!(enabled(&h), "and on again");
+    click(&mut h, &eye);
+    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+    assert!(enabled(&h), "one undo step");
+    // Inside the group: its path and fill have eyes, its Transform doesn't.
+    h.state_mut().ui.timeline.open_groups.insert(rect);
+    h.run_steps(3);
+    let group = h.state().session.active_comp().unwrap().layer(LayerId(a)).unwrap().props.find_group(rect).unwrap().clone();
+    let transform = group.sub("transform").expect("a shape group has a Transform").uid;
+    assert!(h.state().auto.find(&format!("timeline.group.{transform}.eye")).is_none(), "no eye on Transform");
+    let items = group.sub("contents").expect("the group's items").groups().map(|g| g.uid).collect::<Vec<_>>();
+    assert!(!items.is_empty() && items.iter().all(|u| h.state().auto.find(&format!("timeline.group.{u}.eye")).is_some()), "every item has an eye");
 }
 
 #[test]

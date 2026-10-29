@@ -1,16 +1,19 @@
-use super::engine::{PState, PW_EFFECT_CAMERA, Phys, accelerated, norm3, particle_look, sim_key, simulate, type_sprite};
+use super::engine::{MERCURY, PS2, PState, PW_EFFECT_CAMERA, Phys, norm3, particle_look, pw_state, type_sprite};
 use super::sprites::{Acc, Post, Sprite, SpritePlan, raster, splat};
-use super::{Buf, EffectCtx, Image, IntoParallelRefIterator, ParallelIterator, SimCache, Value, params_key, unpremul};
+use super::{Buf, EffectCtx, Image, IntoParallelRefIterator, ParallelIterator, SimCache, Value, unpremul};
 
 // ------------------------------------------------------------------ CC Particle World
 
 pub(super) static PW_CACHE: SimCache<PState> = SimCache::new(6);
 
+/// Particles per second per unit of CC Particle World's Birth Rate.
+pub(super) const PW_RATE: f64 = 120.0;
+
 /// CC Particle World's physics.
 pub(super) fn pw_phys(ctx: &EffectCtx) -> Phys {
     let pr = ctx.params;
     Phys {
-        rate: pr.f("birthRate").max(0.0) * 120.0,
+        rate: pr.f("birthRate").max(0.0) * PW_RATE,
         life: pr.f("longevity").max(0.0) as f32,
         producer: [pr.f("producer/producerX") as f32, pr.f("producer/producerY") as f32, pr.f("producer/producerZ") as f32],
         radius: [pr.f("producer/radiusX").max(0.0) as f32, pr.f("producer/radiusY").max(0.0) as f32, pr.f("producer/radiusZ").max(0.0) as f32],
@@ -152,8 +155,7 @@ pub(super) fn particle_world_plan(ctx: &EffectCtx, b: &Buf) -> Option<SpritePlan
     if phys.rate <= 0.0 && ctx.time <= 0.0 {
         return None;
     }
-    let key = sim_key(ctx, 1);
-    let st = accelerated(ctx, key, &phys).unwrap_or_else(|| simulate(&PW_CACHE, key, ctx.time, &phys));
+    let st = pw_state(ctx, &phys);
     let kind = pr.e("particle/particleType");
     let birth = pr.color("particle/birthColor");
     let death = pr.color("particle/deathColor");
@@ -190,6 +192,9 @@ fn particle_sprites(sprites: Vec<Sprite>, mode: u32) -> SpritePlan {
 
 pub(super) static PS2_CACHE: SimCache<PState> = SimCache::new(6);
 
+/// Particles per second per unit of CC Particle Systems II's Birth Rate.
+pub(super) const PS2_RATE: f64 = 60.0;
+
 /// CC Particle Systems II's physics.
 pub(super) fn ps2_phys(ctx: &EffectCtx) -> Phys {
     let pr = ctx.params;
@@ -198,7 +203,7 @@ pub(super) fn ps2_phys(ctx: &EffectCtx) -> Phys {
     let pos = pr.v2("producer/position");
     let dir = (pr.f("physics/direction") as f32).to_radians();
     Phys {
-        rate: pr.f("birthRate").max(0.0) * 60.0,
+        rate: pr.f("birthRate").max(0.0) * PS2_RATE,
         life: pr.f("longevity").max(0.0) as f32,
         producer: [pos[0] as f32 / unit, pos[1] as f32 / unit, 0.0],
         radius: [pr.f("producer/radiusX").max(0.0) as f32 / unit, pr.f("producer/radiusY").max(0.0) as f32 / unit, 0.0],
@@ -225,9 +230,7 @@ pub(super) fn particle_systems2_plan(ctx: &EffectCtx, b: &Buf) -> SpritePlan {
     let pr = ctx.params;
     let lh = ctx.layer_size[1] as f32;
     let unit = lh.max(1.0);
-    let phys = ps2_phys(ctx);
-    let key = sim_key(ctx, 2);
-    let st = accelerated(ctx, key, &phys).unwrap_or_else(|| simulate(&PS2_CACHE, key, ctx.time, &phys));
+    let st = PS2.state(ctx, &ps2_phys(ctx));
     let kind = pr.e("particle/particleType");
     let birth = pr.color("particle/birthColor");
     let death = pr.color("particle/deathColor");
@@ -250,7 +253,10 @@ pub(super) fn particle_systems2_plan(ctx: &EffectCtx, b: &Buf) -> SpritePlan {
 
 // ------------------------------------------------------------------ CC Mr. Mercury
 
-static MERCURY_CACHE: SimCache<PState> = SimCache::new(6);
+pub(super) static MERCURY_CACHE: SimCache<PState> = SimCache::new(6);
+
+/// Blobs per second per unit of CC Mr. Mercury's Birth Rate.
+pub(super) const MERCURY_RATE: f64 = 10.0;
 
 /// A CC Mr. Mercury blob (buffer px).
 #[derive(Clone, Copy, Debug)]
@@ -260,15 +266,14 @@ pub struct Blob {
     pub r: f32,
 }
 
-/// CC Mr. Mercury's blobs this frame, from its particle simulation (for buffer geometry `b`).
-pub fn mercury_blobs(ctx: &EffectCtx, b: &Buf) -> Vec<Blob> {
+/// CC Mr. Mercury's physics.
+pub(super) fn mercury_phys(ctx: &EffectCtx) -> Phys {
     let pr = ctx.params;
-    let lh = ctx.layer_size[1] as f32;
-    let unit = lh.max(1.0);
+    let unit = (ctx.layer_size[1] as f32).max(1.0);
     let pos = pr.v2("producer");
     let dir = (pr.f("direction") as f32).to_radians();
-    let phys = Phys {
-        rate: pr.f("birthRate").max(0.0) * 10.0,
+    Phys {
+        rate: pr.f("birthRate").max(0.0) * MERCURY_RATE,
         life: pr.f("longevity").max(0.0) as f32,
         producer: [pos[0] as f32 / unit, pos[1] as f32 / unit, 0.0],
         radius: [pr.f("radiusX").max(0.0) as f32 / unit, pr.f("radiusY").max(0.0) as f32 / unit, 0.0],
@@ -282,8 +287,15 @@ pub fn mercury_blobs(ctx: &EffectCtx, b: &Buf) -> Vec<Blob> {
         seed: ctx.seed.wrapping_mul(0xc2b2ae35),
         max: 4_000,
         flat: true,
-    };
-    let st = simulate(&MERCURY_CACHE, params_key(ctx, &Buf { img: Image::new(0, 0), offset: [0.0; 2], scale: 1.0 }, 3), ctx.time, &phys);
+    }
+}
+
+/// CC Mr. Mercury's blobs this frame, from its particle simulation (for buffer geometry `b`).
+pub fn mercury_blobs(ctx: &EffectCtx, b: &Buf) -> Vec<Blob> {
+    let pr = ctx.params;
+    let unit = (ctx.layer_size[1] as f32).max(1.0);
+    let phys = mercury_phys(ctx);
+    let st = MERCURY.state(ctx, &phys);
     let (bs, ds) = (pr.f("blobBirthSize") as f32, pr.f("blobDeathSize") as f32);
     let s = b.scale as f32;
     st.parts

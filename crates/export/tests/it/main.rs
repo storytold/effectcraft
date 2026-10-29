@@ -12,5 +12,6 @@ mod native_audio_sample_positions;
 mod opus_roundtrip;
 mod render_settings;
 mod roundtrip;
+mod targa_sequence;
 mod uncompressed_mov;
 mod vp9_roundtrip;

@@ -133,6 +133,78 @@ fn run_reads_arguments_from_a_file() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("--args-file no/such/file.txt"));
 }
 
+/// Run with `stdin` piped in; returns (exit code, stdout, stderr).
+fn run_with_stdin(args: &[&str], stdin: &str) -> (i32, String, String) {
+    let mut child = bin().args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    child.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
+    let out = child.wait_with_output().unwrap();
+    (out.status.code().unwrap_or(-1), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned())
+}
+
+/// `run --commands FILE|-` (#2251) reads `{"command", "params"}` steps from a JSON array or JSON
+/// Lines, from a file or standard input, and runs them as the same positional pairs would: after
+/// the pairs, so a generated list can follow a hand-written prefix. One command whose params are
+/// over Linux's 128 KiB per-argument limit goes through.
+#[test]
+fn run_reads_commands_from_a_file_or_stdin() {
+    let steps = [
+        ("comp.new", json!({"name": "A", "width": 64, "height": 64})),
+        ("layer.newSolid", json!({"width": 8, "height": 8, "name": "One"})),
+        ("layer.newSolid", json!({"width": 8, "height": 8, "name": "Two"})),
+        ("project.summary", json!({})),
+    ];
+    let pairs: Vec<String> = steps.iter().flat_map(|(id, p)| [id.to_string(), p.to_string()]).collect();
+    let pairs: Vec<&str> = pairs.iter().map(String::as_str).collect();
+    let expected = ok_json(&[&["run", "--empty"][..], &pairs[..]].concat());
+    let layers = |v: &Value| v[3]["result"]["items"][0]["layers"].as_u64();
+    assert_eq!(layers(&expected), Some(2), "{expected}");
+
+    let objects: Vec<Value> = steps.iter().map(|(id, p)| json!({"command": id, "params": p})).collect();
+    let array = tmp("commands.json");
+    std::fs::write(&array, serde_json::to_string_pretty(&objects).unwrap()).unwrap();
+    assert_eq!(ok_json(&["run", "--commands", array.to_str().unwrap(), "--empty"]), expected);
+
+    let lines: String = objects.iter().map(|o| format!("{o}\n\n")).collect();
+    let (code, out, err) = run_with_stdin(&["run", "--commands", "-", "--empty", "--json"], &lines);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(serde_json::from_str::<Value>(&out).unwrap(), expected);
+
+    // Positional pairs first, then the file.
+    let rest = tmp("commands-rest.jsonl");
+    std::fs::write(&rest, objects[1..].iter().map(|o| format!("{o}\n")).collect::<String>()).unwrap();
+    assert_eq!(ok_json(&[&["run", "--empty", "--commands", rest.to_str().unwrap()][..], &pairs[..2]].concat()), expected);
+
+    let name = "n".repeat(140 * 1024);
+    let big = tmp("commands-big.jsonl");
+    std::fs::write(&big, format!("{}\n{}\n", json!({"command": "comp.new", "params": {"name": name}}), json!({"command": "project.summary"}))).unwrap();
+    let v = ok_json(&["run", "--commands", big.to_str().unwrap(), "--empty"]);
+    assert_eq!(v[1]["result"]["items"][0]["name"].as_str().map(str::len), Some(name.len()));
+
+    for (input, args, error) in [
+        ("", &["run", "--commands", "-", "--empty"][..], "--commands -: no commands"),
+        (
+            "{\"command\":\"project.summary\"}\n{\"command\":\"x\",\"param\":{}}\n",
+            &["run", "project.summary", "{}", "--commands", "-", "--empty"],
+            "step 2 (line 2): unknown key `param`",
+        ),
+        ("[{\"command\":\"project.summary\"}, {\"params\":{}}]", &["run", "--commands", "-", "--empty"], "step 1 (entry 2): no `command`"),
+        ("{}", &["run", "--commands", "-", "--commands", "-", "--empty"], "standard input is read once"),
+    ] {
+        let (code, out, err) = run_with_stdin(args, input);
+        assert_eq!(code, 2, "{input:?}: {err}");
+        assert!(err.contains(error), "{input:?}: {err}");
+        assert!(out.is_empty(), "{input:?}: nothing ran");
+    }
+    // An empty list after positional pairs is no error: there is still something to run.
+    let (code, _, err) = run_with_stdin(&["run", "project.summary", "--commands", "-", "--empty"], "");
+    assert_eq!(code, 0, "{err}");
+    // A step that fails when it runs is named by its index too.
+    let (code, out, err) = run_with_stdin(&["run", "--commands", "-", "--empty", "--json"], "{\"command\":\"project.summary\"}\n{\"command\":\"no.such\"}\n");
+    assert_eq!(code, 1, "{err}");
+    let e = serde_json::from_str::<Value>(&out).unwrap()["error"].as_str().map(String::from).unwrap_or_default();
+    assert!(e.starts_with("no.such: ") && e.ends_with(" (step 1)"), "{e}");
+}
+
 #[test]
 fn render_frame_writes_png() {
     let out = tmp("f.png");

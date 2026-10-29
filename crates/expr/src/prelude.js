@@ -670,14 +670,17 @@ var __groupHandler = {
   },
 };
 
-function __mkGroup(c, l, info) {
-  var f = function (k) { return f.__get(k); };
-  delete f.name;
-  delete f.length;
-  Object.setPrototypeOf(f, __GroupProto);
-  f.__c = c; f.__l = l; f.__p = info[0]; f.__info = info;
-  return new Proxy(f, __groupHandler);
-}
+// `Proxy` is private to the object model (see "Stack safety" at the end).
+var __mkGroup = (function (P) {
+  return function (c, l, info) {
+    var f = function (k) { return f.__get(k); };
+    delete f.name;
+    delete f.length;
+    Object.setPrototypeOf(f, __GroupProto);
+    f.__c = c; f.__l = l; f.__p = info[0]; f.__info = info;
+    return new P(f, __groupHandler);
+  };
+})(Proxy);
 
 // Properties ------------------------------------------------------------------------------------
 
@@ -852,9 +855,11 @@ var __propHandler = {
   },
 };
 
-function __mkProp(c, l, path) {
-  return new Proxy(new Prop(c, l, path), __propHandler);
-}
+var __mkProp = (function (P) {
+  return function (c, l, path) {
+    return new P(new Prop(c, l, path), __propHandler);
+  };
+})(Proxy);
 
 // Text styles (the Source Text style API) ------------------------------------------------------
 // A TextStyle is the source document (as JSON from the host), the character index it reads its
@@ -1069,3 +1074,101 @@ function velocityAtTime(t) { return thisProperty.velocityAtTime(t); }
 function speedAtTime(t) { return thisProperty.speedAtTime(t); }
 function key(n) { return thisProperty.key(n); }
 function nearestKey(t) { return thisProperty.nearestKey(t); }
+
+// ---------------------------------------------------------------------------------------------
+// Stack safety (#2124, #2125). A stack overflow aborts the whole app, so nothing a script does
+// may nest native code without bound. The expression text is checked for nesting before it is
+// compiled; source handed to `eval` and the function constructors at run time is checked by
+// `__nest`. The natives that walk nested values recursively (`join`, which `toString` and string
+// conversion use, `toLocaleString`, `JSON.stringify`, `flat`) call `__stack` once per level,
+// which throws once the run has used its share of the stack. `Proxy` (chains of proxies nest
+// without any script frame) and `Reflect` are not available to expressions.
+(function () {
+  var nest = __nest, stack = __stack, apply = Reflect.apply, construct = Reflect.construct;
+  var define = Object.defineProperty, describe = Object.getOwnPropertyDescriptor, proto = Object.getPrototypeOf;
+  // Replace `obj[name]` keeping its attributes.
+  function replace(obj, name, f) {
+    var d = describe(obj, name);
+    define(obj, name, { value: f, writable: d.writable, enumerable: d.enumerable, configurable: true });
+  }
+  function guard(obj, name) {
+    var f = obj[name];
+    replace(obj, name, function () { stack(); return apply(f, this, arguments); });
+  }
+
+  // Indirect on purpose: a wrapper can't make a direct eval, so `eval` sees globals and `var`s
+  // but not `let`/`const` locals of the expression. Keeping direct eval would mean leaving it
+  // unchecked; expressions practically never need their locals inside eval.
+  var evalJs = eval;
+  eval = function (x) {
+    if (typeof x === 'string') {
+      stack();
+      nest(x);
+    }
+    return evalJs(x);
+  };
+  // `Function` and the generator / async variants (reachable as `(function* () {}).constructor`).
+  function dynamic(F) {
+    var w = function () {
+      var args = [];
+      for (var i = 0; i < arguments.length; i++) args.push(String(arguments[i]));
+      stack();
+      nest(args.slice(0, -1).join(','));
+      nest(args.length ? args[args.length - 1] : '');
+      return construct(F, args);
+    };
+    define(w, 'name', { value: F.name, configurable: true });
+    w.prototype = F.prototype;
+    replace(F.prototype, 'constructor', w);
+    return w;
+  }
+  Function = dynamic(Function);
+  dynamic(proto(function* () {}).constructor);
+  dynamic(proto(async function () {}).constructor);
+  dynamic(proto(async function* () {}).constructor);
+
+  guard(Array.prototype, 'join');
+  guard(Array.prototype, 'toLocaleString');
+  var flat = Array.prototype.flat;
+  replace(Array.prototype, 'flat', function (depth) {
+    stack();
+    var d = depth === undefined ? 1 : Number(depth);
+    return apply(flat, this, [d > 64 ? 64 : d]);
+  });
+
+  // A replacer function sees every value before it is serialized: the per-level check. An array
+  // replacer (a list of keys) becomes one that copies each object's listed keys, in list order.
+  // Each source object gets one copy per call, so a cycle in the source is a cycle of copies and
+  // the native check reports it (TypeError); an object shared without a cycle is still fine.
+  var stringify = JSON.stringify, MapJs = Map;
+  replace(JSON, 'stringify', function (value, replacer, space) {
+    var fn = typeof replacer === 'function' ? replacer : null;
+    var keys = null, copies = new MapJs();
+    if (Array.isArray(replacer)) {
+      keys = [];
+      for (var i = 0; i < replacer.length; i++) {
+        var k = replacer[i];
+        if (typeof k === 'number' || k instanceof Number || k instanceof String) k = String(k);
+        if (typeof k === 'string' && keys.indexOf(k) < 0) keys.push(k);
+      }
+    }
+    return apply(stringify, JSON, [value, function (key, v) {
+      stack();
+      if (fn !== null) v = apply(fn, this, [key, v]);
+      if (keys !== null && v !== null && typeof v === 'object' && !Array.isArray(v) &&
+          !(v instanceof Number || v instanceof String || v instanceof Boolean)) {
+        var o = copies.get(v);
+        if (o === undefined) {
+          o = {};
+          for (var j = 0; j < keys.length; j++) if (keys[j] in v) o[keys[j]] = v[keys[j]];
+          copies.set(v, o);
+        }
+        v = o;
+      }
+      return v;
+    }, space]);
+  });
+
+  delete globalThis.Proxy;
+  delete globalThis.Reflect;
+})();

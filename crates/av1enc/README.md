@@ -48,8 +48,10 @@ reconstruction, so prediction never drifts.
   reconstruction loop; full coefficient coding (all_zero, tx type, eob_pt, eob_extra,
   coeff_base_eob, coeff_base, coeff_br, dc_sign, Golomb) with the exact contexts.
 - **Rate control**: `ConstantQ(base_q_idx)`; `Bitrate { kbps }` adapts `base_q_idx` per frame
-  towards the average target (key frames get a lower quantizer and a larger share; the first
-  key frame is searched in a few passes).
+  towards the average target (key frames get a lower quantizer and a larger share of the budget of
+  their group of `keyint` frames, the inter frames the rest; the first key frame is searched in a
+  few passes, a later key frame that misses its budget by more than 19 % is coded again; the
+  deviation from the budget is paid back over 16 frames).
 
 ## Limits
 

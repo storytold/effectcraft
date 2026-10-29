@@ -39,6 +39,7 @@ mod ui_layer_source_picker;
 mod ui_light_settings;
 mod ui_live_preview;
 mod ui_locked_color;
+mod ui_marker_names;
 mod ui_media_browser_cache;
 mod ui_media_browser_copy_path;
 mod ui_menus;

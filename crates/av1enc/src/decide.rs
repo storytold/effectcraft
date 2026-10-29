@@ -3,7 +3,7 @@
 //! processes, so the reconstruction built here is exactly what a decoder produces; the syntax
 //! is written afterwards by `writer.rs`.
 
-use crate::pred::{INTRA_MODES_USED, InterBlock, IntraEdge, Plane, edges, predict_inter, predict_intra, subpel_plane};
+use crate::pred::{INTRA_MODES_USED, InterBlock, IntraEdge, Plane, edges, half_planes, predict_inter, predict_intra};
 use crate::tables::{
     AC_QLOOKUP, BLOCK_8X8, BLOCK_64X64, DC_PRED, DC_QLOOKUP, DCT_DCT, DEFAULT_SCAN_4X4, DEFAULT_SCAN_8X8, DEFAULT_SCAN_16X16, DEFAULT_SCAN_32X32, MODE_TO_TXFM,
     NEWMV, NUM_4X4_BLOCKS_WIDE, PARTITION_SPLIT, PARTITION_SUBSIZE, TX_4X4, TX_8X8, TX_16X16, TX_32X32, TX_64X64, TX_SET_DCTONLY, TX_SET_INTER_3,
@@ -212,7 +212,7 @@ impl<'a> Decider<'a> {
             lambda,
             lambda_sad: lambda.sqrt(),
             half: match refr {
-                Some(rf) => [(8, 0), (0, 8), (8, 8)].map(|(fx, fy)| subpel_plane(&rf.planes[0], g.width, g.height, fx, fy, bd)),
+                Some(rf) => half_planes(&rf.planes[0], g.width, g.height, bd),
                 None => Default::default(),
             },
             scratch: None,

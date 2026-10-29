@@ -645,6 +645,13 @@ fn shade_texel(it: &Item, g: &Geo, u: f64, v: f64, t: Px, lights: &[LightState],
     [lit[0] * a, lit[1] * a, lit[2] * a, a]
 }
 
+/// Samples per side of the Shadow Diffusion kernel for a penumbra radius of `r_px` caster pixels:
+/// odd, at least 3, and enough that neighbouring samples are at most 1.5 pixels apart, up to 15.
+pub(crate) fn shadow_taps(r_px: f64) -> u32 {
+    let n = ((2.0 * r_px / 1.5).ceil() as u32).clamp(3, 15);
+    n | 1
+}
+
 /// RGB transmittance of light `l` reaching `p` past caster `c` (1 = unoccluded).
 fn occlusion(c: &Item, p: Vec3, l: &LightState) -> [f32; 3] {
     const FAR: f64 = 1.0e6;
@@ -672,11 +679,17 @@ fn occlusion(c: &Item, p: Vec3, l: &LightState) -> [f32; 3] {
     if r * c.buf.scale < 0.5 {
         px = c.texel(hit.x, hit.y);
     } else {
-        for j in -1..=1 {
-            for i in -1..=1 {
-                let q = c.texel(hit.x + i as f64 * r * 0.66, hit.y + j as f64 * r * 0.66);
+        // Box filter over the penumbra square: n × n cell centres, dense enough that a wide
+        // diffusion blurs the caster instead of stamping copies of it (#2444).
+        let n = shadow_taps(r * c.buf.scale);
+        let step = 2.0 * r / n as f64;
+        let h = (n / 2) as i32;
+        let w = 1.0 / (n * n) as f32;
+        for j in -h..=h {
+            for i in -h..=h {
+                let q = c.texel(hit.x + f64::from(i) * step, hit.y + f64::from(j) * step);
                 for k in 0..4 {
-                    px[k] += q[k] / 9.0;
+                    px[k] += q[k] * w;
                 }
             }
         }

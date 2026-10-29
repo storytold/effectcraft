@@ -98,3 +98,11 @@ sync_github_name = false
 
 [people.ki2pixel]
 display_name = "ki2pixel"
+
+[people.becauseno7]
+real_name = "Shuvra Basak"
+display_name = "Shuvra Basak"
+sync_github_name = false
+
+[people.ashokram-si]
+real_name = "Ashok Ram"

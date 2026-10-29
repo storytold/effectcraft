@@ -25,6 +25,9 @@ use super::{Snapshot, VERSION};
 use crate::dock::{Layout, PanelKind, Workspace};
 use crate::state::UiState;
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Deserialize)]
 enum OldSplitSize {
     Ratio(f32),
@@ -166,7 +169,7 @@ fn node(old: OldNode, depth: usize) -> Result<Node<PanelKind>, String> {
             first: Box::new(node(*a, depth.saturating_add(1))?),
             second: Box::new(node(*b, depth.saturating_add(1))?),
         },
-        OldNode::Stack { entries } => column(entries)?,
+        OldNode::Stack { entries } => column(entries, depth)?,
     })
 }
 
@@ -183,7 +186,7 @@ struct Frame {
 }
 
 /// A column of stacked frames as tab groups split top to bottom (see the module docs).
-fn column(entries: Vec<OldStackEntry>) -> Result<Node<PanelKind>, String> {
+fn column(entries: Vec<OldStackEntry>, depth: usize) -> Result<Node<PanelKind>, String> {
     let mut frames: Vec<Frame> = Vec::new();
     // Tabs of closed frames above the first open one.
     let mut waiting: Vec<PanelKind> = Vec::new();
@@ -199,6 +202,9 @@ fn column(entries: Vec<OldStackEntry>) -> Result<Node<PanelKind>, String> {
         }
         let active = entry.active.min(panels.len().saturating_sub(1));
         if entry.open {
+            if depth.saturating_add(frames.len()) > craft_ui::docking::MAX_DEPTH {
+                return Err("workspace dock tree exceeds supported limits".into());
+            }
             let height = entry.height.filter(|h| h.is_finite() && *h > 0.0).map(|h| h.min(MAX_FRAME));
             frames.push(Frame { panels, active, height });
         } else if let Some(above) = frames.last_mut() {
