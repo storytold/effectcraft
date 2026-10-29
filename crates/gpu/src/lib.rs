@@ -83,6 +83,7 @@ mod ops;
 mod particles;
 mod readback;
 mod walk;
+mod yuv;
 
 use std::sync::Arc;
 
@@ -317,6 +318,10 @@ impl Accelerator for Gpu {
         self.ctx.name.clone()
     }
 
+    fn available(&self) -> bool {
+        self.ctx.check_health().is_ok()
+    }
+
     fn comp_frame(&self, r: &Renderer, comp: ItemId, t: Tick) -> Option<Image> {
         let img = self.render(r, comp, t);
         if img.is_none() {
@@ -333,6 +338,25 @@ impl Accelerator for Gpu {
             }
         }
         img
+    }
+
+    fn comp_frame_yuv420(&self, r: &Renderer, comp: ItemId, t: Tick, bg: [f32; 3]) -> Option<Vec<u8>> {
+        self.ctx.check_health().ok()?;
+        if !self.ctx.can_readback() || self.ctx.deferred.is_some() {
+            return None;
+        }
+        // Sizes the kernel can't take fall back before any GPU work, not after a render.
+        let (w, h) = walk::frame_size(r, comp, t)?;
+        if !yuv::supported(w, h) || !yuv::fits_limits(w, h, &self.ctx.device.limits()) {
+            return None;
+        }
+        let yp = self.ctx.yuv_pipe()?;
+        let mut e = Enc::new(&self.ctx);
+        let img = walk::render(&mut e, r, comp, t)?;
+        let planes = yuv::convert(&mut e, yp, &img, bg)?;
+        // A device fault seen while the frame recorded makes the planes untrustworthy.
+        self.ctx.check_health().ok()?;
+        Some(planes)
     }
 
     fn supports_effect(&self, id: &str) -> bool {
@@ -403,57 +427,3 @@ impl effectcraft_effects::psim::ParticleSim for Gpu {
 
 #[cfg(test)]
 mod tests;
-#[cfg(test)]
-mod tests_3d;
-#[cfg(test)]
-mod tests_adjust;
-#[cfg(test)]
-mod tests_adv3d;
-#[cfg(test)]
-mod tests_deferred;
-#[cfg(test)]
-mod tests_deferred_jobs;
-#[cfg(test)]
-mod tests_fx_color;
-#[cfg(test)]
-mod tests_fx_depth;
-#[cfg(test)]
-mod tests_fx_distort;
-#[cfg(test)]
-mod tests_fx_extra;
-#[cfg(test)]
-mod tests_fx_gen2;
-#[cfg(test)]
-mod tests_fx_generate;
-#[cfg(test)]
-mod tests_fx_key;
-#[cfg(test)]
-mod tests_fx_light;
-#[cfg(test)]
-mod tests_fx_lut;
-#[cfg(test)]
-mod tests_fx_noise;
-#[cfg(test)]
-mod tests_fx_particles;
-#[cfg(test)]
-mod tests_fx_pixel2;
-#[cfg(test)]
-mod tests_fx_sim;
-#[cfg(test)]
-mod tests_fx_stylize;
-#[cfg(test)]
-mod tests_fx_text;
-#[cfg(test)]
-mod tests_fx_time;
-#[cfg(test)]
-mod tests_fx_tone;
-#[cfg(test)]
-mod tests_fx_transition;
-#[cfg(test)]
-mod tests_fx_vr;
-#[cfg(test)]
-mod tests_fx_warp;
-#[cfg(all(test, not(target_arch = "wasm32")))]
-mod tests_init;
-#[cfg(test)]
-mod tests_particles;

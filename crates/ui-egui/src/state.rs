@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::dock::{DockNode, PanelKind};
+use crate::dock::PanelKind;
 use crate::icons::Icon;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -229,6 +229,7 @@ impl Tool {
     }
 }
 
+use super::*;
 /// The viewer's Resolution: each composition keeps its own in the project
 /// ([`effectcraft_engine::project::Comp::resolution`], `EffectcraftApp::viewer_res`).
 pub use effectcraft_engine::project::Resolution;
@@ -335,13 +336,15 @@ impl TimelineState {
     }
 }
 
-/// Where a Timeline shortcut scrolls to.
+/// Where the Timeline scrolls to.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ScrollTo {
     /// D: the current time, centred in the time graph.
     Time,
     /// X: the topmost selected layer, at the top of the layers.
     Layer,
+    /// A revealed property, at the top of the rows.
+    Property(u64),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -419,7 +422,7 @@ pub struct TimelineState {
     /// The name column shows Source Name instead of Layer Name (click its header).
     #[serde(default)]
     pub source_name: bool,
-    /// A scroll asked for by a shortcut (D, X), done when the Timeline is next drawn.
+    /// A pending scroll, applied when the Timeline is next drawn.
     #[serde(skip)]
     pub scroll_to: Option<ScrollTo>,
 }
@@ -566,23 +569,20 @@ pub struct UiState {
     /// Tool shown in each toolbar slot.
     pub slot_tools: Vec<Tool>,
     pub workspace: String,
-    pub dock: DockNode,
+    /// The current layout: docked frames, floating windows (one can be recorded as its own
+    /// native window, Move Panel to New Window) and the places of closed panels.
+    pub dock: crate::dock::Workspace,
     /// Saved workspace layouts (Save Changes to this Workspace / Save as New Workspace).
     #[serde(default)]
-    pub saved_workspaces: std::collections::BTreeMap<String, DockNode>,
-    /// Undocked (floating) panel groups.
-    #[serde(default)]
-    pub floating: Vec<crate::dock::Floating>,
-    /// Floating panels of the saved workspaces.
-    #[serde(default)]
-    pub saved_floating: std::collections::BTreeMap<String, Vec<crate::dock::Floating>>,
-    /// Floating groups shown in their own native window instead of over the dock (Move Panel
-    /// to New Window), so they can be placed on another monitor.
-    #[serde(default)]
-    pub panel_windows: Vec<crate::dock::PanelWindow>,
+    pub saved_workspaces: std::collections::BTreeMap<String, crate::dock::Workspace>,
     /// The panel maximized to fill the dock area (`~`), if any.
     #[serde(default)]
     pub maximized: Option<PanelKind>,
+    /// Floating windows of [`Self::dock`] whose native rect holds the OS window's outer
+    /// position, from a workspace file of an earlier version (see
+    /// `crate::dock_ui::native_outer_to_content`). Workspaces are not saved while any remain.
+    #[serde(skip)]
+    pub native_outer: Vec<u64>,
     /// Locked Composition / Timeline tabs (panel ids): opening another composition does not
     /// bring a locked panel forward (the tab's lock icon, as After Effects' viewer lock).
     #[serde(default)]
@@ -641,9 +641,6 @@ pub struct UiState {
     /// Levels (Individual Controls) editor: shown channel per effect uid.
     #[serde(default)]
     pub fx_levels_channel: BTreeMap<u64, usize>,
-    /// Effects & Presets: favourite effect ids (starred).
-    #[serde(default)]
-    pub effects_favorites: BTreeSet<String>,
     /// Effects & Presets: recently applied effect ids, most recent first.
     #[serde(default)]
     pub effects_recent: Vec<String>,
@@ -701,11 +698,9 @@ impl Default for UiState {
             script_console: Default::default(),
             slot_tools: Tool::SLOTS.iter().map(|s| s[0]).collect(),
             workspace: "Default".into(),
-            dock: crate::dock::workspace("Default"),
+            dock: crate::dock::Workspace::new(crate::dock::workspace("Default")),
             saved_workspaces: Default::default(),
-            floating: vec![],
-            saved_floating: Default::default(),
-            panel_windows: vec![],
+            native_outer: Vec::new(),
             maximized: None,
             locked_tabs: BTreeSet::new(),
             viewers: Default::default(),
@@ -732,7 +727,6 @@ impl Default for UiState {
             fx_curve_channel: BTreeMap::new(),
             fx_curve_pencil: BTreeSet::new(),
             fx_levels_channel: BTreeMap::new(),
-            effects_favorites: BTreeSet::new(),
             effects_recent: Vec::new(),
             effects_view: EffectsView::default(),
             snapping: true,
@@ -752,4 +746,49 @@ impl Default for UiState {
             scopes: Default::default(),
         }
     }
+}
+
+/// What a `ui.screenshot` captures.
+///
+/// A panel or element is an identity, not a rectangle: it is resolved again when the capture is
+/// issued, after the settle passes, so a panel that moved or resized while the UI settled is
+/// captured where it is now (never with the rectangle from request admission).
+#[derive(Clone, Debug, PartialEq)]
+pub enum ShotTarget {
+    /// The whole root surface.
+    Window,
+    /// A fixed rectangle in logical points, relative to the root surface's top-left corner.
+    Rect([f32; 4]),
+    /// One dock panel's automation rectangle (`panel.<id>`).
+    Panel(PanelKind),
+    /// One automation element id's rectangle.
+    Id(String),
+}
+
+/// The comp frames a playback pass covers (`first..=last`).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FrameWindow {
+    pub(crate) first: i64,
+    pub(crate) last: i64,
+}
+
+/// The inputs of one playback pass: the viewer series it renders, the preview plan and
+/// position, and the frame range and clock settings its steps share. `queued` is a snapshot of
+/// the in-flight render count that each step copies. Built once in `advance_playback`.
+#[derive(Clone, Copy)]
+pub(crate) struct PlaybackPass<'a> {
+    pub(crate) ctx: &'a egui::Context,
+    pub(crate) comp: &'a effectcraft_engine::project::Comp,
+    pub(crate) cid: ItemId,
+    pub(crate) scale: f64,
+    pub(crate) now: f64,
+    pub(crate) frame_rate: effectcraft_engine::time::FrameRate,
+    pub(crate) series: FrameKey,
+    pub(crate) plan: Option<effectcraft_engine::preview::PreviewPlan>,
+    pub(crate) window: FrameWindow,
+    pub(crate) cur: i64,
+    pub(crate) video: bool,
+    pub(crate) looping: bool,
+    pub(crate) ahead: i64,
+    pub(crate) queued: usize,
 }

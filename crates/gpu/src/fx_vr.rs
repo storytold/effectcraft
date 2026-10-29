@@ -181,7 +181,13 @@ fn sphere_blur(e: &mut Enc, img: &GpuImage, sigma: f64) -> GpuImage {
         let mut p = Params::default();
         p.u[0][0] = 256;
         let out = e.scratch(cur.width, cur.height);
-        e.dispatch("fxv_box_h", &p, &cur, None, &out, Some(&buf), (cur.height.div_ceil(64), cur.width.div_ceil(256)));
+        e.dispatch(
+            "fxv_box_h",
+            &p,
+            crate::context::KernelImages { src: &cur, aux: None, out: &out },
+            Some(&buf),
+            (cur.height.div_ceil(64), cur.width.div_ceil(256)),
+        );
         cur = out;
     }
     for &r in &radii {
@@ -192,7 +198,13 @@ fn sphere_blur(e: &mut Enc, img: &GpuImage, sigma: f64) -> GpuImage {
         let mut p = Params::default();
         p.u[0] = [block, r as u32, 0, 0];
         let out = e.scratch(cur.width, cur.height);
-        e.dispatch("fxv_box_v", &p, &cur, None, &out, None, (cur.width.div_ceil(64), cur.height.div_ceil(block)));
+        e.dispatch(
+            "fxv_box_v",
+            &p,
+            crate::context::KernelImages { src: &cur, aux: None, out: &out },
+            None,
+            (cur.width.div_ceil(64), cur.height.div_ceil(block)),
+        );
         cur = out;
     }
     cur

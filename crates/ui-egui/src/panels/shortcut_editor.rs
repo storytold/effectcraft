@@ -200,6 +200,12 @@ const SIDE_KEYS: &[(&str, &str, f32, f32)] = &[
     ("→", "ArrowRight", 2.0, 5.0),
 ];
 
+/// The Keyboard Shortcuts dialog: while a shortcut field listens it records the next key
+/// combination (dropping those key events so the field does not type them), the preset bar switches
+/// keymaps, the drawn keyboard lists what the selected key runs, and the command list and editor
+/// remove, assign and reset bindings, warning about conflicts. Enter is OK unless a rename field, a
+/// preset menu or the delete confirmation is open. The collected `shortcuts.*` commands are run
+/// with the session when the frame ends; OK closes the dialog.
 pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     let mut st = std::mem::take(&mut app.dialog_state.shortcuts);
     let mut run: Vec<(String, Value)> = vec![];
@@ -258,7 +264,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
         // ---- preset bar
         ui.horizontal(|ui| {
             ui.label(tr("Preset:"));
-            let r = egui::ComboBox::from_id_salt("sc-preset").selected_text(&active).width(220.0).show_ui(ui, |ui| {
+            let r = craft_ui::ComboBox::from_id_salt("sc-preset").selected_text(&active).width(220.0).show_ui(ui, |ui| {
                 for n in &presets {
                     if ui.selectable_label(*n == active, n).clicked() {
                         run.push(("shortcuts.preset".into(), json!({"op": "select", "name": n})));
@@ -377,7 +383,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             }
             let id = format!("shortcuts.key.{}", name.trim_start_matches('#'));
             app.auto.add(&id, r, label);
-            let resp = ui.interact(r, egui::Id::new(("sc-key", name, r.min.x as i32)), Sense::click());
+            let resp = ui.interact(r, egui::Id::unique(("sc-key", name, r.min.x as i32)), Sense::click());
             if resp.clicked() {
                 if let Some(i) = mod_idx {
                     st.mods[i] = !st.mods[i];

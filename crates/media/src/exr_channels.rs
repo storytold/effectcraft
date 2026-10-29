@@ -183,7 +183,7 @@ fn picture_layer<'a>(aux: &AuxChannels, layers: &[&'a str]) -> Option<&'a str> {
 /// The picture of a multi-layer OpenEXR file without an unnamed RGB layer (Blender's
 /// `ViewLayer.Combined.R`, the compositor's `Image.R`, Nuke's `beauty.R`, …), which the image
 /// decoder rejects. After Effects shows a file's main RGBA channels and leaves the other layers
-/// to EXtractoR; here that is the beauty pass by name ([`BEAUTY`]), else the first colour layer
+/// to EXtractoR; here that is the beauty pass by name (`BEAUTY`), else the first colour layer
 /// that is not a data pass (never Cryptomatte, depth or normals, #412), else the first channel
 /// as grey. Linear, straight RGBA as the file stores it. `None` when it is not a readable EXR.
 pub fn layered_image(bytes: &[u8]) -> Option<image::DynamicImage> {

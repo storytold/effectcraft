@@ -10,9 +10,9 @@
 
 use rayon::prelude::*;
 
-use super::Distortion;
 use super::geometry::Pose;
-use super::linalg::*;
+use super::linalg::{M3, V3, add, cholesky_solve, dot, inv3, mm, mtv, mv, rodrigues, scale, skew, sub};
+use super::{Distortion, SolveError};
 
 /// A camera in the adjustment.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -52,6 +52,7 @@ pub struct BaOpts {
     pub fixed: Vec<bool>,
     /// Huber threshold (pixels).
     pub huber: f64,
+    /// Maximum LM iterations (at most 1000).
     pub max_iter: usize,
     /// Adjust the shared radial distortion `(k1, k2)` too.
     pub distortion: bool,
@@ -76,21 +77,89 @@ fn huber(e2: f64, k: f64) -> f64 {
     if e2 <= k * k { e2 } else { 2.0 * k * e2.sqrt() - k * k }
 }
 
-/// Residual (pixels) of one observation, `None` behind the camera.
+// Bound the temporary systems before any input-sized allocation. Includes dense matrices
+// for the main system, trial copies and both Rayon phases, plus per-point/observation data.
+const MAX_BA_BYTES: usize = 256 * 1024 * 1024;
+const MAX_BA_CAMERAS: usize = 4096;
+const MAX_BA_POINTS: usize = 200_000;
+const MAX_BA_OBSERVATIONS: usize = 1_000_000;
+
+fn valid_camera(c: &BaCam) -> bool {
+    c.f.is_finite()
+        && c.f > 0.0
+        && c.pose.r.iter().flatten().chain(&c.pose.c).all(|v| v.is_finite())
+        && [c.dist.k1, c.dist.k2, c.dist.radius].iter().all(|v| v.is_finite())
+}
+
+fn validate(cams: &[BaCam], pts: &[V3], obs: &[BaObs], o: &BaOpts) -> Result<(), SolveError> {
+    if cams.len() > MAX_BA_CAMERAS || pts.len() > MAX_BA_POINTS || obs.len() > MAX_BA_OBSERVATIONS {
+        return Err(SolveError("bundle adjustment input exceeds the supported size".into()));
+    }
+    if !o.huber.is_finite() || o.huber <= 0.0 || o.max_iter > 1000 || matches!(o.focal, FocalMode::PerCamera(k) if !k.is_finite() || k < 0.0) {
+        return Err(SolveError("invalid bundle adjustment options".into()));
+    }
+    if cams.iter().any(|c| !valid_camera(c)) || pts.iter().flatten().any(|v| !v.is_finite()) {
+        return Err(SolveError("bundle adjustment cameras and points must be finite, with positive focal lengths".into()));
+    }
+    for ob in obs {
+        if cams.get(ob.cam as usize).is_none() || pts.get(ob.pt as usize).is_none() {
+            return Err(SolveError("bundle adjustment observation index is out of range".into()));
+        }
+        if ob.uv.iter().any(|v| !v.is_finite()) {
+            return Err(SolveError("bundle adjustment observations must be finite".into()));
+        }
+    }
+    Ok(())
+}
+
+fn matrix_len(n: usize, npts: usize, nobs: usize) -> Result<usize, SolveError> {
+    let threads = rayon::current_num_threads();
+    let build_workers = if n <= 700 && npts > 64 { threads.clamp(1, 16) } else { 0 };
+    let schur_workers = if n <= 1200 && npts >= 64 && threads > 1 { threads.clamp(1, 8) } else { 0 };
+    // The two worker phases do not coexist; allow the larger phase plus main/trial buffers.
+    let copies = 4 + build_workers.max(schur_workers);
+    let len = n.checked_mul(n);
+    let bytes = len
+        .and_then(|v| v.checked_add(n))
+        .and_then(|v| v.checked_mul(size_of::<f64>()))
+        .and_then(|v| v.checked_mul(copies))
+        .and_then(|v| npts.checked_mul(320).and_then(|p| v.checked_add(p)))
+        .and_then(|v| nobs.checked_mul(2 * 9 * size_of::<(usize, V3)>() + size_of::<BaObs>() + 2 * size_of::<u32>()).and_then(|p| v.checked_add(p)));
+    match (len, bytes) {
+        (Some(len), Some(bytes)) if bytes <= MAX_BA_BYTES => Ok(len),
+        _ => Err(SolveError("bundle adjustment exceeds its 256 MiB workspace budget; use fewer cameras or observations".into())),
+    }
+}
+
+/// Residual (pixels), or `None` for an invalid or behind-camera projection.
 pub fn residual(c: &BaCam, x: V3, uv: [f64; 2]) -> Option<[f64; 2]> {
+    if !valid_camera(c) || x.iter().chain(&uv).any(|v| !v.is_finite()) {
+        return None;
+    }
+    project_residual(c, x, uv)
+}
+
+fn project_residual(c: &BaCam, x: V3, uv: [f64; 2]) -> Option<[f64; 2]> {
     let p = c.pose.to_cam(x);
-    if p[2] <= 1e-9 {
+    if p[2] <= 1e-9 || p.iter().any(|v| !v.is_finite()) {
         return None;
     }
     let q = c.dist.distort([c.f * p[0] / p[2], c.f * p[1] / p[2]]);
-    Some([q[0] - uv[0], q[1] - uv[1]])
+    let r = [q[0] - uv[0], q[1] - uv[1]];
+    r.iter().all(|v| v.is_finite()).then_some(r)
 }
 
-/// Total robust cost.
-pub fn cost(cams: &[BaCam], pts: &[V3], obs: &[BaObs], o: &BaOpts) -> f64 {
+/// Total robust cost. Rejects invalid inputs before starting parallel evaluation.
+pub fn cost(cams: &[BaCam], pts: &[V3], obs: &[BaObs], o: &BaOpts) -> Result<f64, SolveError> {
+    validate(cams, pts, obs, o)?;
+    let c = validated_cost(cams, pts, obs, o);
+    if c.is_finite() { Ok(c) } else { Err(SolveError("bundle adjustment cost is not finite".into())) }
+}
+
+fn validated_cost(cams: &[BaCam], pts: &[V3], obs: &[BaObs], o: &BaOpts) -> f64 {
     let c: f64 = obs
         .par_iter()
-        .map(|ob| match residual(&cams[ob.cam as usize], pts[ob.pt as usize], ob.uv) {
+        .map(|ob| match cams.get(ob.cam as usize).zip(pts.get(ob.pt as usize)).and_then(|(c, x)| project_residual(c, *x, ob.uv)) {
             Some(r) => huber(r[0] * r[0] + r[1] * r[1], o.huber),
             None => BEHIND,
         })
@@ -174,16 +243,45 @@ fn cam_jac(l: &Layout, ci: usize, c: &BaCam, xc: V3, a: &[[f64; 3]; 2], p: [f64;
     }
 }
 
+/// Smooth per-camera log focal lengths in the normal equations.
+fn add_focal_prior(cams: &[BaCam], o: &BaOpts, l: &Layout, s_mat: &mut [f64], bc: &mut [f64]) {
+    let n = l.n;
+    // Focal prior.
+    if let FocalMode::PerCamera(k) = o.focal {
+        for i in 0..cams.len().saturating_sub(1) {
+            let r = k * (cams[i].f.ln() - cams[i + 1].f.ln());
+            let (a, b) = (l.fidx[i], l.fidx[i + 1]);
+            let ia = (a != usize::MAX).then_some(a);
+            let ib = (b != usize::MAX).then_some(b);
+            for (idx, g) in [(ia, k), (ib, -k)] {
+                let Some(x) = idx else { continue };
+                bc[x] -= g * r;
+                for (idy, h) in [(ia, k), (ib, -k)] {
+                    if let Some(y) = idy {
+                        s_mat[x * n + y] += g * h;
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Run Levenberg–Marquardt. `cams` and `pts` are updated in place.
-pub fn adjust(cams: &mut [BaCam], pts: &mut [V3], obs: &[BaObs], o: &BaOpts) -> BaReport {
+/// Invalid inputs or workspaces exceeding 256 MiB return an error before mutation.
+pub fn adjust(cams: &mut [BaCam], pts: &mut [V3], obs: &[BaObs], o: &BaOpts) -> Result<BaReport, SolveError> {
+    validate(cams, pts, obs, o)?;
     let l = layout(cams.len(), o);
+    let matrix_len = matrix_len(l.n, pts.len(), obs.len())?;
     let npts = pts.len();
     // Observations by point.
     let mut by_pt: Vec<Vec<u32>> = vec![vec![]; npts];
     for (i, ob) in obs.iter().enumerate() {
         by_pt[ob.pt as usize].push(i as u32);
     }
-    let mut cur = cost(cams, pts, obs, o);
+    let mut cur = validated_cost(cams, pts, obs, o);
+    if !cur.is_finite() {
+        return Err(SolveError("bundle adjustment cost is not finite".into()));
+    }
     let initial = cur;
     let t0 = web_time::Instant::now();
     let mut tries = 0usize;
@@ -191,7 +289,7 @@ pub fn adjust(cams: &mut [BaCam], pts: &mut [V3], obs: &[BaObs], o: &BaOpts) -> 
     let mut lambda = 1e-4;
     let mut iters = 0;
     if l.n == 0 && o.fix_points {
-        return BaReport { initial_cost: initial, cost: cur, iterations: 0 };
+        return Ok(BaReport { initial_cost: initial, cost: cur, iterations: 0 });
     }
     let n = l.n;
     let parallel = n <= 700;
@@ -274,12 +372,12 @@ pub fn adjust(cams: &mut [BaCam], pts: &mut [V3], obs: &[BaObs], o: &BaOpts) -> 
             let parts: Vec<(Vec<f64>, Vec<f64>, Vec<PtSys>)> = (0..chunks)
                 .into_par_iter()
                 .map(|t| {
-                    let (mut s, mut b) = (vec![0.0; n * n], vec![0.0; n]);
+                    let (mut s, mut b) = (vec![0.0; matrix_len], vec![0.0; n]);
                     let v = (t * per..((t + 1) * per).min(npts)).map(|j| build_point(j, &mut s, &mut b)).collect();
                     (s, b, v)
                 })
                 .collect();
-            let mut s = vec![0.0; n * n];
+            let mut s = vec![0.0; matrix_len];
             let mut b = vec![0.0; n];
             let mut sys = Vec::with_capacity(npts);
             for (ps, pb, pv) in parts {
@@ -293,29 +391,12 @@ pub fn adjust(cams: &mut [BaCam], pts: &mut [V3], obs: &[BaObs], o: &BaOpts) -> 
             }
             (s, b, sys)
         } else {
-            let mut s = vec![0.0; n * n];
+            let mut s = vec![0.0; matrix_len];
             let mut b = vec![0.0; n];
             let sys = (0..npts).map(|j| build_point(j, &mut s, &mut b)).collect();
             (s, b, sys)
         };
-        // Focal prior.
-        if let FocalMode::PerCamera(k) = o.focal {
-            for i in 0..cams.len().saturating_sub(1) {
-                let r = k * (cams[i].f.ln() - cams[i + 1].f.ln());
-                let (a, b) = (l.fidx[i], l.fidx[i + 1]);
-                let ia = (a != usize::MAX).then_some(a);
-                let ib = (b != usize::MAX).then_some(b);
-                for (idx, g) in [(ia, k), (ib, -k)] {
-                    let Some(x) = idx else { continue };
-                    bc[x] -= g * r;
-                    for (idy, h) in [(ia, k), (ib, -k)] {
-                        if let Some(y) = idy {
-                            s_mat[x * n + y] += g * h;
-                        }
-                    }
-                }
-            }
-        }
+        add_focal_prior(cams, o, &l, &mut s_mat, &mut bc);
         let base_s = s_mat.clone();
         let base_bc = bc.clone();
         let mean_diag = ((0..n).map(|i| base_s[i * n + i]).sum::<f64>() / n.max(1) as f64).max(1e-12);
@@ -370,7 +451,7 @@ pub fn adjust(cams: &mut [BaCam], pts: &mut [V3], obs: &[BaObs], o: &BaOpts) -> 
                     let parts: Vec<(Vec<f64>, Vec<f64>)> = (0..chunks)
                         .into_par_iter()
                         .map(|t| {
-                            let (mut ds, mut dr) = (vec![0.0; n * n], vec![0.0; n]);
+                            let (mut ds, mut dr) = (vec![0.0; matrix_len], vec![0.0; n]);
                             reduce(t * per..((t + 1) * per).min(npts), &mut ds, &mut dr);
                             (ds, dr)
                         })
@@ -424,7 +505,11 @@ pub fn adjust(cams: &mut [BaCam], pts: &mut [V3], obs: &[BaObs], o: &BaOpts) -> 
                     *x = add(*x, mv(vi, b));
                 });
             }
-            let c2 = cost(&nc, &np, obs, o);
+            if nc.iter().any(|c| !valid_camera(c)) || np.iter().flatten().any(|v| !v.is_finite()) {
+                lambda *= 4.0;
+                continue;
+            }
+            let c2 = validated_cost(&nc, &np, obs, o);
             if c2.is_finite() && c2 < cur {
                 cams.copy_from_slice(&nc);
                 pts.copy_from_slice(&np);
@@ -443,7 +528,7 @@ pub fn adjust(cams: &mut [BaCam], pts: &mut [V3], obs: &[BaObs], o: &BaOpts) -> 
                             t0.elapsed().as_secs_f64()
                         );
                     }
-                    return BaReport { initial_cost: initial, cost: cur, iterations: iters };
+                    return Ok(BaReport { initial_cost: initial, cost: cur, iterations: iters });
                 }
                 break;
             }
@@ -456,13 +541,82 @@ pub fn adjust(cams: &mut [BaCam], pts: &mut [V3], obs: &[BaObs], o: &BaOpts) -> 
     if dbg {
         eprintln!("ba n={} pts={} obs={} iters={iters} tries={tries} {:.2}s cost {initial:.1} -> {cur:.1}", l.n, npts, obs.len(), t0.elapsed().as_secs_f64());
     }
-    BaReport { initial_cost: initial, cost: cur, iterations: iters }
+    Ok(BaReport { initial_cost: initial, cost: cur, iterations: iters })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::camtrack::geometry::Rng;
+
+    fn test_camera() -> BaCam {
+        BaCam { pose: Pose::IDENTITY, f: 900.0, dist: Distortion::NONE }
+    }
+
+    #[test]
+    fn cost_rejects_invalid_observation_indices() {
+        for (cam, pt) in [(1, 0), (0, 1)] {
+            let obs = [BaObs { cam, pt, uv: [0.0; 2] }];
+            assert!(cost(&[test_camera()], &[[0.0, 0.0, 5.0]], &obs, &BaOpts::default()).is_err());
+        }
+    }
+
+    #[test]
+    fn adjust_rejects_invalid_observation_without_mutating_inputs() {
+        for (cam, pt) in [(1, 0), (0, 1)] {
+            let mut cams = [test_camera()];
+            let mut pts = [[0.0, 0.0, 5.0]];
+            let before = (cams, pts);
+            let obs = [BaObs { cam, pt, uv: [0.0; 2] }];
+            assert!(adjust(&mut cams, &mut pts, &obs, &BaOpts::default()).is_err());
+            assert_eq!((cams, pts), before);
+        }
+    }
+
+    #[test]
+    fn residual_rejects_non_finite_inputs_and_projection_overflow() {
+        let cam = test_camera();
+        assert!(residual(&cam, [0.0, 0.0, f64::NAN], [0.0; 2]).is_none());
+        assert!(residual(&cam, [0.0, 0.0, 5.0], [f64::INFINITY, 0.0]).is_none());
+        for bad in [
+            BaCam { f: f64::NAN, ..cam },
+            BaCam { dist: Distortion { k1: f64::INFINITY, ..Distortion::NONE }, ..cam },
+            BaCam { pose: Pose { c: [f64::NAN; 3], ..Pose::IDENTITY }, ..cam },
+            BaCam { pose: Pose { r: [[f64::INFINITY; 3]; 3], ..Pose::IDENTITY }, ..cam },
+        ] {
+            assert!(residual(&bad, [0.0, 0.0, 5.0], [0.0; 2]).is_none());
+        }
+        assert!(residual(&cam, [f64::MAX, 0.0, 1.0], [0.0; 2]).is_none());
+    }
+
+    #[test]
+    fn adjustment_rejects_non_finite_points_observations_and_options() {
+        let cam = test_camera();
+        let pts = [[0.0, 0.0, 5.0]];
+        let obs = [BaObs { cam: 0, pt: 0, uv: [0.0; 2] }];
+        assert!(cost(&[cam], &[[f64::NAN, 0.0, 5.0]], &obs, &BaOpts::default()).is_err());
+        assert!(cost(&[cam], &pts, &[BaObs { uv: [f64::NAN; 2], ..obs[0] }], &BaOpts::default()).is_err());
+        for opts in [
+            BaOpts { huber: f64::NAN, ..Default::default() },
+            BaOpts { huber: 0.0, ..Default::default() },
+            BaOpts { focal: FocalMode::PerCamera(f64::INFINITY), ..Default::default() },
+            BaOpts { max_iter: usize::MAX, ..Default::default() },
+        ] {
+            let mut trial_pts = pts;
+            assert!(adjust(&mut [cam], &mut trial_pts, &obs, &opts).is_err());
+        }
+    }
+
+    #[test]
+    fn matrix_workspace_is_checked_and_bounded_before_allocation() {
+        assert!(matrix_len(usize::MAX, 0, 0).is_err());
+        assert!(matrix_len(1, usize::MAX, 0).is_err());
+        assert!(matrix_len(1, 0, usize::MAX).is_err());
+        let mut cams = vec![test_camera(); 1000];
+        assert!(adjust(&mut cams, &mut [], &[], &BaOpts::default()).is_err());
+        assert!(matrix_len(6, 1000, 1000).is_ok());
+        assert!(matrix_len(955, 900, 160 * 900).is_ok());
+    }
 
     #[test]
     fn bundle_adjustment_converges_from_noise() {
@@ -493,7 +647,7 @@ mod tests {
         let mut fixed = vec![false; 6];
         fixed[0] = true;
         fixed[1] = true;
-        let rep = adjust(&mut cams, &mut pts, &obs, &BaOpts { fixed, max_iter: 50, ..Default::default() });
+        let rep = adjust(&mut cams, &mut pts, &obs, &BaOpts { fixed, max_iter: 50, ..Default::default() }).unwrap();
         let rms = (rep.cost / obs.len() as f64).sqrt();
         assert!(rms < 1e-4, "{rep:?}");
     }

@@ -246,6 +246,12 @@ fn to_color32(c: [f32; 4]) -> Color32 {
     Color32::from_rgba_unmultiplied(b(c[0]), b(c[1]), b(c[2]), b(c[3]))
 }
 
+/// The Gradient Editor dialog for the gradient in `app.dialog_state.gradient`: a stop track for
+/// the opacity and colour tracks over a checkerboard preview, the selected stop's location,
+/// opacity or colour and a Delete button (when its track has more than one stop), the
+/// mismatched-stop-count warning, and OK/Cancel. Dragging moves stops, Delete/Backspace removes the
+/// selected one unless a widget wants keyboard input. OK runs the commit path; Cancel closes the dialog and drops the
+/// draft. With no gradient target it closes the dialog.
 pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     if app.dialog_state.gradient.target.is_none() {
         app.dialog = None;
@@ -291,7 +297,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
 
         // Clicking a row's empty space adds a stop there.
         for (track, rowr, id) in [(Track::Opacity, opacity_row, "dialog.gradient.addOpacity"), (Track::Color, color_row, "dialog.gradient.addColor")] {
-            let r = ui.interact(rowr, egui::Id::new(("gradient-add", id)), Sense::click());
+            let r = ui.interact(rowr, egui::Id::unique(("gradient-add", id)), Sense::click());
             app.auto.add(id, rowr, id);
             if r.clicked()
                 && let Some(p) = r.interact_pointer_pos()
@@ -323,7 +329,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                     Stroke::new(if selected { 2.0 } else { 1.0 }, if selected { t.accent } else { t.field_border }),
                     StrokeKind::Outside,
                 );
-                let resp = ui.interact(r.expand(2.0), egui::Id::new(("gradient-stop", track == Track::Color, id)), Sense::click_and_drag());
+                let resp = ui.interact(r.expand(2.0), egui::Id::unique(("gradient-stop", track == Track::Color, id)), Sense::click_and_drag());
                 let name = match track {
                     Track::Opacity => format!("dialog.gradient.opacityStop.{i}"),
                     Track::Color => format!("dialog.gradient.colorStop.{i}"),

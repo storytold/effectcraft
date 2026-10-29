@@ -8,7 +8,10 @@
 
 use crate::mc::{Mv, PhasePlanes, RefPlane, clamp_for_plane, predict};
 use crate::probs::{self, P, Writer, cost, tree_cost};
-use crate::tables::*;
+use crate::tables::{
+    COEFBAND_4X4, COL_SCAN_4X4, COUNTER_TO_CONTEXT, DEFAULT_SCAN_4X4, ENERGY_CLASS, KF_PARTITION_PROBS, KF_UV_MODE_PROBS, KF_Y_MODE_PROBS, MODE_2_COUNTER,
+    MV_REF_8X8, MV_REF_16X16, ROW_SCAN_4X4,
+};
 use crate::transform::{ADST_ADST, ADST_DCT, DCT_ADST, DCT_DCT, Quant};
 use crate::{BLOCK_8X8, BLOCK_16X16, Mi, Plane};
 
@@ -21,6 +24,13 @@ pub const NEARESTMV: u8 = 10;
 pub const NEARMV: u8 = 11;
 pub const ZEROMV: u8 = 12;
 pub const NEWMV: u8 = 13;
+
+/// Which reconstructed neighbours are available for intra prediction.
+#[derive(Clone, Copy)]
+struct IntraEdges {
+    left: bool,
+    above: bool,
+}
 
 const PARTITION_TREE: [i8; 6] = [0, 2, -1, 4, -2, -3];
 const INTRA_MODE_TREE: [i8; 18] = [0, 2, -9, 4, -1, 6, 8, 12, -2, 10, -4, -5, -3, 14, -8, 16, -6, -7];
@@ -104,7 +114,8 @@ fn levels_cost(levels: &[i32; 16], eob: usize) -> u32 {
 }
 
 /// Intra prediction (8.5.1) of a square block for DC / V / H / TM.
-fn predict_intra(p: &Plane, x: usize, y: usize, log2: usize, mode: u8, have_left: bool, have_above: bool) -> [i32; 64] {
+fn predict_intra(p: &Plane, x: usize, y: usize, log2: usize, mode: u8, edges: IntraEdges) -> [i32; 64] {
+    let IntraEdges { left: have_left, above: have_above } = edges;
     let size = 1usize << log2;
     let base = 128i32;
     let buf = &p.rec;
@@ -356,11 +367,11 @@ impl<'a> Tile<'a> {
     fn intra_block(&mut self, r: usize, c: usize) {
         let avail_u = r > 0;
         let avail_l = c > self.col_start;
-        let y_mode = self.choose_intra(0, c * 8, r * 8, 3, avail_l, avail_u);
+        let y_mode = self.choose_intra(0, c * 8, r * 8, 3, IntraEdges { left: avail_l, above: avail_u });
         let uv_mode = {
             let mut best = (i64::MAX, DC_PRED);
             for m in MODES {
-                let cost: i64 = (1..3).map(|p| self.intra_cost(p, c * 4, r * 4, 2, m, avail_l, avail_u)).sum();
+                let cost: i64 = (1..3).map(|p| self.intra_cost(p, c * 4, r * 4, 2, m, IntraEdges { left: avail_l, above: avail_u })).sum();
                 if cost < best.0 {
                     best = (cost, m);
                 }
@@ -379,17 +390,16 @@ impl<'a> Tile<'a> {
         // Residual: luma 2×2 transform blocks, then one 4×4 block per chroma plane.
         for (dy, dx) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
             let tx = if self.f.quant.lossless { DCT_DCT } else { mode_tx_type(y_mode) };
-            self.intra_tx(0, c * 8 + dx * 4, r * 8 + dy * 4, y_mode, tx, avail_l || dx > 0, avail_u || dy > 0);
+            self.intra_tx(0, c * 8 + dx * 4, r * 8 + dy * 4, y_mode, tx, IntraEdges { left: avail_l || dx > 0, above: avail_u || dy > 0 });
         }
         for p in 1..3 {
-            self.intra_tx(p, c * 4, r * 4, uv_mode, DCT_DCT, avail_l, avail_u);
+            self.intra_tx(p, c * 4, r * 4, uv_mode, DCT_DCT, IntraEdges { left: avail_l, above: avail_u });
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn intra_cost(&self, plane: usize, x: usize, y: usize, log2: usize, mode: u8, have_left: bool, have_above: bool) -> i64 {
+    fn intra_cost(&self, plane: usize, x: usize, y: usize, log2: usize, mode: u8, edges: IntraEdges) -> i64 {
         let p = &self.planes[plane];
-        let pred = predict_intra(p, x, y, log2, mode, have_left, have_above);
+        let pred = predict_intra(p, x, y, log2, mode, edges);
         let size = 1 << log2;
         let mut s = 0i64;
         for i in 0..size {
@@ -400,10 +410,10 @@ impl<'a> Tile<'a> {
         s
     }
 
-    fn choose_intra(&self, plane: usize, x: usize, y: usize, log2: usize, have_left: bool, have_above: bool) -> u8 {
+    fn choose_intra(&self, plane: usize, x: usize, y: usize, log2: usize, edges: IntraEdges) -> u8 {
         let mut best = (i64::MAX, DC_PRED);
         for m in MODES {
-            let cost = self.intra_cost(plane, x, y, log2, m, have_left, have_above);
+            let cost = self.intra_cost(plane, x, y, log2, m, edges);
             if cost < best.0 {
                 best = (cost, m);
             }
@@ -411,8 +421,7 @@ impl<'a> Tile<'a> {
         best.1
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn intra_tx(&mut self, plane: usize, x: usize, y: usize, mode: u8, tx_type: u8, have_left: bool, have_above: bool) {
+    fn intra_tx(&mut self, plane: usize, x: usize, y: usize, mode: u8, tx_type: u8, edges: IntraEdges) {
         let ss = (plane > 0) as usize;
         let max_x = (self.f.mi_cols * 8) >> ss;
         let max_y = (self.f.mi_rows * 8) >> ss;
@@ -424,7 +433,7 @@ impl<'a> Tile<'a> {
             return;
         }
         let p = &self.planes[plane];
-        let pred = predict_intra(p, x, y, 2, mode, have_left, have_above);
+        let pred = predict_intra(p, x, y, 2, mode, edges);
         let mut res = [0i32; 16];
         for i in 0..4 {
             for j in 0..4 {

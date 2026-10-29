@@ -57,6 +57,10 @@ struct Draw {
     blend: BlendMode,
     /// Front / Bevel / Side / Back colours of the paint's extrusion (Advanced 3D).
     surfaces: SurfaceColors,
+    /// Paint item of the contents group this draw was collected in (as opposed to one bubbled up
+    /// from a nested group). Merge Paths drops only these paints above it (#1174); a group's own
+    /// fill or stroke keeps rendering inside the group.
+    local: bool,
 }
 
 /// Straight RGB colours of an extrusion's surfaces, by [`effectcraft_model::extrude::Surface`]
@@ -207,16 +211,16 @@ fn collect(ctx: &EvalCtx, layer: &Layer, contents: &PropGroup, arena: &mut Vec<B
             }
             "star" => {
                 let star = ctx.e(layer, g, "type") == 0;
-                let p = effectcraft_path::polystar(
+                let p = effectcraft_path::polystar(effectcraft_path::Polystar {
                     star,
-                    ctx.f(layer, g, "points", 5.0),
-                    ctx.v2(layer, g, "position", [0.0; 2]),
-                    ctx.f(layer, g, "rotation", 0.0),
-                    ctx.f(layer, g, "innerRadius", 50.0),
-                    ctx.f(layer, g, "outerRadius", 100.0),
-                    ctx.f(layer, g, "innerRoundness", 0.0),
-                    ctx.f(layer, g, "outerRoundness", 0.0),
-                );
+                    points: ctx.f(layer, g, "points", 5.0),
+                    pos: ctx.v2(layer, g, "position", [0.0; 2]),
+                    rotation: ctx.f(layer, g, "rotation", 0.0),
+                    inner: ctx.f(layer, g, "innerRadius", 50.0),
+                    outer: ctx.f(layer, g, "outerRadius", 100.0),
+                    inner_round: ctx.f(layer, g, "innerRoundness", 0.0),
+                    outer_round: ctx.f(layer, g, "outerRoundness", 0.0),
+                });
                 push_shape(ctx, layer, g, p, arena, &mut live);
             }
             "path" => {
@@ -234,6 +238,7 @@ fn collect(ctx: &EvalCtx, layer: &Layer, contents: &PropGroup, arena: &mut Vec<B
                     opacity: opacity(g),
                     blend: blend_mode(ctx, layer, g),
                     surfaces: [None; 4],
+                    local: true,
                 });
             }
             "stroke" => {
@@ -247,6 +252,7 @@ fn collect(ctx: &EvalCtx, layer: &Layer, contents: &PropGroup, arena: &mut Vec<B
                     opacity: opacity(g),
                     blend: blend_mode(ctx, layer, g),
                     surfaces: [None; 4],
+                    local: true,
                 });
             }
             "gfill" | "gstroke" => {
@@ -270,6 +276,7 @@ fn collect(ctx: &EvalCtx, layer: &Layer, contents: &PropGroup, arena: &mut Vec<B
                     opacity: opacity(g),
                     blend: blend_mode(ctx, layer, g),
                     surfaces: [None; 4],
+                    local: true,
                 });
             }
             "trim" => {
@@ -317,6 +324,7 @@ fn collect(ctx: &EvalCtx, layer: &Layer, contents: &PropGroup, arena: &mut Vec<B
                     speed: ctx.f(layer, g, "speed", 2.0),
                     correlation: ctx.f(layer, g, "correlation", 50.0),
                     phase_deg: ctx.f(layer, g, "phase", 0.0),
+                    spatial_phase_deg: ctx.f(layer, g, "spatialPhase", 0.0),
                     seed: ctx.f(layer, g, "seed", 0.0),
                 };
                 let t = layer.layer_time(ctx.time).seconds();
@@ -328,8 +336,9 @@ fn collect(ctx: &EvalCtx, layer: &Layer, contents: &PropGroup, arena: &mut Vec<B
                 arena.push(ops::merge(&input, mode));
                 live = vec![arena.len() - 1];
                 // As in After Effects, fills and strokes above a Merge Paths in its group are not
-                // rendered: the merged path is painted by the paint items below it.
-                draws.clear();
+                // rendered: the merged path is painted by the paint items below it. Paint inside
+                // groups above the merge still renders — it belongs to those groups (#1174).
+                draws.retain(|d| !d.local);
             }
             "group" => {
                 let Some(inner) = g.sub("contents") else { continue };
@@ -341,6 +350,7 @@ fn collect(ctx: &EvalCtx, layer: &Layer, contents: &PropGroup, arena: &mut Vec<B
                 for mut d in cd {
                     d.xf = m * d.xf;
                     d.opacity *= op;
+                    d.local = false;
                     draws.push(d);
                 }
                 live.extend(cl);
@@ -542,8 +552,23 @@ fn draw_bounds(d: &Draw, paths: &[BezPath]) -> Option<kurbo::Rect> {
         Paint::Gradient { stroke: Some(style), .. } => Some(style),
         _ => None,
     };
-    let grow = stroke.map_or(1.0, |style| style.width * style.miter.max(1.0) * 0.5 * d.xf.mean_scale().max(1.0) + 1.0);
+    let grow = stroke.map_or(1.0, |style| style.width * stroke_reach(style, paths) * 0.5 * d.xf.mean_scale().max(1.0) + 1.0);
     Some(b.inflate(grow, grow))
+}
+
+/// How far a stroke can reach past its path, in half widths: the miter limit only where a
+/// miter join exists (a path of two or more segments, or a closed one), √2 at square cap
+/// corners, else one. Padding every stroke by the miter limit made a 1080 px straight line
+/// (a wipe matte) a 4326×6366 buffer, ~440 MB per layer per frame.
+fn stroke_reach(style: &StrokeStyle, paths: &[BezPath]) -> f64 {
+    if style.is_variable() {
+        // Taper and Wave can widen the stroke: keep the widest padding.
+        return style.miter.max(std::f64::consts::SQRT_2);
+    }
+    let joins =
+        style.join == Join::Miter && paths.iter().any(|p| p.segments().nth(1).is_some() || p.elements().iter().any(|e| matches!(e, kurbo::PathEl::ClosePath)));
+    let cap = if style.cap == Cap::Square { std::f64::consts::SQRT_2 } else { 1.0 };
+    if joins { style.miter.max(cap) } else { cap }
 }
 
 /// Local-space visual bounds of a draw, as After Effects' layer bounds (`sourceRectAtTime` with

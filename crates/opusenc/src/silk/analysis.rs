@@ -1,7 +1,7 @@
 //! Encoder-side signal analysis for SILK (own design): windowed autocorrelation LPC, LPC → NLSF
 //! conversion, open-loop pitch search and LTP codebook search.
 
-use super::tables::*;
+use super::tables::{CB_NB_20, CB_WB_20, LTP_FILTER, LTP_PERIODICITY, LTP_TAPS_0, LTP_TAPS_1, LTP_TAPS_2};
 
 /// Short-term prediction coefficients `a` (prediction `x[n] ≈ Σ a[j] x[n-1-j]`) from the
 /// windowed segment `x`, with a Gaussian lag window and white-noise correction.

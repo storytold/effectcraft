@@ -26,9 +26,49 @@ pub(crate) struct Packet {
     pub(crate) cto: i32,
 }
 
-pub(crate) trait VideoEncoder {
+/// A frame for the movie encoder: 8-bit RGBA, or 8-bit 4:2:0 planes already converted on the
+/// render threads (for encoders whose [`VideoEncoder::takes_yuv420`] is true).
+pub(crate) enum Pixels {
+    Rgba(Vec<u8>),
+    Yuv420(Yuv420),
+}
+
+/// BT.709 limited-range 8-bit 4:2:0 planes ([`rgba_to_yuv420`], or Y then U and V from the
+/// accelerator).
+pub(crate) enum Yuv420 {
+    Planes { y: Vec<u8>, u: Vec<u8>, v: Vec<u8> },
+    Packed(Vec<u8>),
+}
+
+impl Yuv420 {
+    fn from_rgba(rgba: &[u8], w: usize, h: usize) -> Yuv420 {
+        let (mut y, mut u, mut v) = (vec![], vec![], vec![]);
+        rgba_to_yuv420(rgba, w, h, &mut y, &mut u, &mut v);
+        Yuv420::Planes { y, u, v }
+    }
+    fn slices(&self, w: usize, h: usize) -> (&[u8], &[u8], &[u8]) {
+        match self {
+            Yuv420::Planes { y, u, v } => (y, u, v),
+            Yuv420::Packed(p) => {
+                let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+                let (y, uv) = p.split_at(w * h);
+                let (u, v) = uv.split_at(cw * ch);
+                (y, u, v)
+            }
+        }
+    }
+}
+
+pub(crate) trait VideoEncoder: Send {
     fn sample_entry(&self) -> SampleEntry;
     fn encode(&mut self, rgba: &[u8], index: u64) -> Result<Vec<Packet>>;
+    /// Whether frames should come as [`Pixels::Yuv420`] (converted while other frames render).
+    fn takes_yuv420(&self) -> bool {
+        false
+    }
+    fn encode_yuv420(&mut self, _frame: &Yuv420, _index: u64) -> Result<Vec<Packet>> {
+        Err(ExportError::Unsupported("this encoder takes RGBA frames".into()))
+    }
     fn flush(&mut self) -> Result<Vec<Packet>>;
     /// Edit-list media start (B-frame delay) in the track timescale.
     fn media_start(&self) -> Option<i64> {
@@ -73,9 +113,22 @@ impl VideoEncoder for H264 {
         SampleEntry::avc(cfg, self.w as u16, self.h as u16)
     }
     fn encode(&mut self, rgba: &[u8], index: u64) -> Result<Vec<Packet>> {
-        rgba_to_yuv420(rgba, self.w as usize, self.h as usize, &mut self.y, &mut self.u, &mut self.v);
-        let cw = (self.w as usize).div_ceil(2);
-        let frame = filmcraft_h264enc::YuvFrame { y: &self.y, u: &self.u, v: &self.v, y_stride: self.w as usize, uv_stride: cw };
+        let (mut y, mut u, mut v) = (std::mem::take(&mut self.y), std::mem::take(&mut self.u), std::mem::take(&mut self.v));
+        rgba_to_yuv420(rgba, self.w as usize, self.h as usize, &mut y, &mut u, &mut v);
+        let planes = Yuv420::Planes { y, u, v };
+        let r = self.encode_yuv420(&planes, index);
+        if let Yuv420::Planes { y, u, v } = planes {
+            (self.y, self.u, self.v) = (y, u, v);
+        }
+        r
+    }
+    fn takes_yuv420(&self) -> bool {
+        true
+    }
+    fn encode_yuv420(&mut self, p: &Yuv420, index: u64) -> Result<Vec<Packet>> {
+        let (w, cw) = (self.w as usize, (self.w as usize).div_ceil(2));
+        let (y, u, v) = p.slices(w, self.h as usize);
+        let frame = filmcraft_h264enc::YuvFrame { y, u, v, y_stride: w, uv_stride: cw };
         let ps = self.enc.try_encode(&frame, index as i64 * self.rate.den).map_err(enc)?;
         Ok(self.packets(ps))
     }
@@ -88,33 +141,7 @@ impl VideoEncoder for H264 {
     }
 }
 
-/// BT.709 limited-range 8-bit 4:2:0 from RGBA8 (2×2 chroma average; alpha ignored).
-pub(crate) fn rgba_to_yuv420(rgba: &[u8], w: usize, h: usize, y: &mut Vec<u8>, u: &mut Vec<u8>, v: &mut Vec<u8>) {
-    let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
-    y.resize(w * h, 0);
-    u.resize(cw * ch, 0);
-    v.resize(cw * ch, 0);
-    y.par_chunks_mut(w * 2).zip(u.par_chunks_mut(cw).zip(v.par_chunks_mut(cw))).enumerate().for_each(|(cy, (yr, (ur, vr)))| {
-        let rows = yr.len() / w;
-        let mut acc = vec![(0f32, 0f32, 0f32); cw];
-        for dy in 0..rows {
-            let src = &rgba[(cy * 2 + dy) * w * 4..][..w * 4];
-            for x in 0..w {
-                let (r, g, b) = (src[x * 4] as f32 / 255.0, src[x * 4 + 1] as f32 / 255.0, src[x * 4 + 2] as f32 / 255.0);
-                let l = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-                yr[dy * w + x] = (16.0 + 219.0 * l).round().clamp(1.0, 254.0) as u8;
-                let a = &mut acc[x / 2];
-                a.0 += (b - l) / 1.8556;
-                a.1 += (r - l) / 1.5748;
-                a.2 += 1.0;
-            }
-        }
-        for (cx, a) in acc.iter().enumerate() {
-            ur[cx] = (128.0 + 224.0 * a.0 / a.2).round().clamp(1.0, 254.0) as u8;
-            vr[cx] = (128.0 + 224.0 * a.1 / a.2).round().clamp(1.0, 254.0) as u8;
-        }
-    });
-}
+pub(crate) use effectcraft_raster::yuv::rgba_to_yuv420;
 
 // ---------------------------------------------------------------- ProRes
 
@@ -265,15 +292,41 @@ pub(crate) async fn movie(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut St
     };
     let brand = if matches!(fmt, OutputFormat::ProRes | OutputFormat::Uncompressed) { Brand::Mov } else { Brand::Mp4 };
     let batch = batch_size();
-    let render = |_: u64, img: effectcraft_raster::Image| -> Vec<u8> { job.pixels(&img, comp, channels, w, h) };
+    let yuv = venc.takes_yuv420();
+    let render = |_: u64, img: effectcraft_raster::Image| -> Pixels {
+        let px = job.pixels(&img, comp, channels, w, h);
+        if yuv { Pixels::Yuv420(Yuv420::from_rgba(&px, w as usize, h as usize)) } else { Pixels::Rgba(px) }
+    };
+    // H.264 frames the accelerator can convert itself come back as planes (12 MB instead of
+    // 133 MB of RGBA f32 read back at 4K); everything else renders and converts as before.
+    // Deferred readbacks (a browser worker) keep their pass-based path: no blocking there.
+    let gpu_yuv = yuv && channels == Channels::Rgb && !job.deferred();
+    let batch_frames = async |ks: Vec<u64>| -> Vec<Pixels> {
+        if gpu_yuv { job.h264_frames(comp, ks, w, h, |p| Pixels::Yuv420(Yuv420::Packed(p)), render) } else { job.frames(comp, ks, render).await }
+    };
+    let encode = |venc: &mut Box<dyn VideoEncoder>, px: &Pixels, index: u64| match px {
+        Pixels::Rgba(rgba) => venc.encode(rgba, index),
+        Pixels::Yuv420(planes) => venc.encode_yuv420(planes, index),
+    };
+
+    let beside = crate::pipeline::Beside::shared();
+    let total = st.total;
 
     // Encode the first batch before creating tracks: encoders finalise their config on frame 1.
-    let first_end = batch.min(st.total);
-    let first: Vec<Vec<u8>> = job.frames(comp, (0..first_end).collect(), render).await;
-    let mut pending = Vec::new();
-    for (k, px) in first.iter().enumerate() {
-        pending.extend(venc.encode(px, k as u64)?);
-    }
+    // Each batch encodes while the next one renders.
+    let first_end = batch.min(total);
+    let first: Vec<Pixels> = batch_frames((0..first_end).collect()).await;
+    let next_end = (first_end + batch).min(total);
+    let (pending, mut ready) = job
+        .beside(beside, batch_frames((first_end..next_end).collect()), || -> Result<Vec<Packet>> {
+            let mut pending = Vec::new();
+            for (k, px) in first.iter().enumerate() {
+                pending.extend(encode(&mut venc, px, k as u64)?);
+            }
+            Ok(pending)
+        })
+        .await?;
+    let pending = pending?;
     drop(first);
     st.advance(first_end)?;
 
@@ -351,19 +404,25 @@ pub(crate) async fn movie(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut St
         }
         Ok(())
     };
-    let total = st.total;
     let frame_end_time = |k: u64| -> Tick { if k >= total { span_end } else { job.settings.frame_time(comp, k) } };
     write_video(&mut mux, pending)?;
     write_audio_until(&mut mux, frame_end_time(first_end), &mut cursor)?;
     let mut i = first_end;
     while i < total {
         let end = (i + batch).min(total);
-        let frames: Vec<Vec<u8>> = job.frames(comp, (i..end).collect(), render).await;
-        for (k, px) in frames.iter().enumerate() {
-            let ps = venc.encode(px, i + k as u64)?;
-            write_video(&mut mux, ps)?;
-        }
-        write_audio_until(&mut mux, frame_end_time(end), &mut cursor)?;
+        let next_end = (end + batch).min(total);
+        let frames = std::mem::take(&mut ready);
+        let (done, next) = job
+            .beside(beside, batch_frames((end..next_end).collect()), || -> Result<()> {
+                for (k, px) in frames.iter().enumerate() {
+                    let ps = encode(&mut venc, px, i + k as u64)?;
+                    write_video(&mut mux, ps)?;
+                }
+                write_audio_until(&mut mux, frame_end_time(end), &mut cursor)
+            })
+            .await?;
+        done?;
+        ready = next;
         st.advance(end - i)?;
         i = end;
     }
@@ -382,7 +441,73 @@ pub(crate) async fn movie(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut St
 
 #[cfg(test)]
 mod tests {
+    use effectcraft_raster::yuv::{UNIT8, round_pos};
+
     use super::*;
+
+    /// The conversion as first written (per-pixel division and `f32::round`).
+    fn yuv420_reference(rgba: &[u8], w: usize, h: usize) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+        let (mut y, mut u, mut v) = (vec![0u8; w * h], vec![0u8; cw * ch], vec![0u8; cw * ch]);
+        for cy in 0..ch {
+            let mut acc = vec![(0f32, 0f32, 0f32); cw];
+            for row in cy * 2..(cy * 2 + 2).min(h) {
+                for x in 0..w {
+                    let s = &rgba[(row * w + x) * 4..];
+                    let (r, g, b) = (s[0] as f32 / 255.0, s[1] as f32 / 255.0, s[2] as f32 / 255.0);
+                    let l = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+                    y[row * w + x] = (16.0 + 219.0 * l).round().clamp(1.0, 254.0) as u8;
+                    let a = &mut acc[x / 2];
+                    a.0 += (b - l) / 1.8556;
+                    a.1 += (r - l) / 1.5748;
+                    a.2 += 1.0;
+                }
+            }
+            for (cx, a) in acc.iter().enumerate() {
+                u[cy * cw + cx] = (128.0 + 224.0 * a.0 / a.2).round().clamp(1.0, 254.0) as u8;
+                v[cy * cw + cx] = (128.0 + 224.0 * a.1 / a.2).round().clamp(1.0, 254.0) as u8;
+            }
+        }
+        (y, u, v)
+    }
+
+    #[test]
+    fn round_pos_is_round() {
+        for i in 0..2_000_000u32 {
+            let v = i as f32 * 0.000_25;
+            assert_eq!(round_pos(v).to_bits(), v.round().to_bits(), "{v}");
+            let n = f32::from_bits(v.to_bits().wrapping_sub(1)).max(0.0);
+            assert_eq!(round_pos(n).to_bits(), n.round().to_bits(), "{n}");
+        }
+        for k in 0..1024u32 {
+            for v in [k as f32 + 0.5, f32::from_bits((k as f32 + 0.5).to_bits() - 1), f32::from_bits((k as f32 + 0.5).to_bits() + 1)] {
+                assert_eq!(round_pos(v), v.round(), "{v}");
+            }
+        }
+        for (i, u) in UNIT8.iter().enumerate() {
+            assert_eq!(u.to_bits(), (i as f32 / 255.0).to_bits());
+        }
+    }
+
+    #[test]
+    fn yuv420_matches_the_reference() {
+        // Every 8-bit level in every channel, odd sizes, and pseudo-random pixels.
+        for (w, h) in [(1, 1), (2, 2), (3, 5), (17, 9), (64, 33)] {
+            let mut rgba = vec![0u8; w * h * 4];
+            let mut seed = (w * 31 + h) as u32;
+            for (i, b) in rgba.iter_mut().enumerate() {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                *b = if i % 7 == 0 { (i / 4 % 256) as u8 } else { (seed >> 24) as u8 };
+            }
+            let (mut y, mut u, mut v) = (vec![], vec![], vec![]);
+            rgba_to_yuv420(&rgba, w, h, &mut y, &mut u, &mut v);
+            assert_eq!((y, u, v), yuv420_reference(&rgba, w, h), "{w}x{h}");
+        }
+        let grey: Vec<u8> = (0..=255u8).flat_map(|g| [g, g, g, 255, g, 255 - g, g / 2, 255]).collect();
+        let (mut y, mut u, mut v) = (vec![], vec![], vec![]);
+        rgba_to_yuv420(&grey, 512, 1, &mut y, &mut u, &mut v);
+        assert_eq!((y, u, v), yuv420_reference(&grey, 512, 1));
+    }
 
     #[test]
     fn yuv_of_primaries() {

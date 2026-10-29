@@ -356,7 +356,7 @@ to the preview cache. Scoped allocation failures retain the adaptive budget/CPU 
 
 **Recovery boundary:** the host installs handlers through eframe's CreationContext, after egui's
 presentation pipelines but before EffectCraft's pipelines. This does not cover that earlier egui
-startup window. eframe 0.36.2 supports lost-surface recreation, not replacing its live device and
+startup window. eframe 0.37 supports lost-surface recreation, not replacing its live device and
 all presentation resources. Device loss therefore requires restarting the presentation backend;
 CPU compositing alone cannot restore that display. No automatic restart or persistent safe-mode
 sentinel is implemented here. Browser scope futures are not synchronously awaited; the browser page
@@ -721,3 +721,5 @@ JSON parsing is now the bulk of open), and rendering 5,000-layer comps faster.
 | Date | Change | Summary |
 |---|---|---|
 | 2026-10-10 | minor | Status line added; crate table checked against `crates/` (every crate listed); effect count and VP9 encoder description corrected |
+
+PDF document structure uses the `craft-pdf` read feature through an app-owned bounded object adapter. EffectCraft retains its drawing tree, fonts, content/image filters and EPS interpreter; ordinary object/xref limits remain 256 MiB on 64-bit and 64 MiB on 32-bit/WASM, including repair.

@@ -90,11 +90,10 @@ fn point(e: &mut Enc, id: &str, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
         "ec.color.blackwhite" => {
             let w = ["reds", "yellows", "greens", "cyans", "blues", "magentas"].map(|k| f(k) / 100.0);
             let tc = pr.color("tintColor");
-            let (th, ts, _) = rgb_to_hsl(tc[0], tc[1], tc[2]);
             p.u[0] = [3, pr.b("tint") as u32, 0, 0];
             p.f[0] = [w[0], w[1], w[2], w[3]];
             p.f[1] = [w[4], w[5], 0.0, 0.0];
-            p.f[2] = [th, ts, 0.0, 0.0];
+            p.f[2] = [tc[0], tc[1], tc[2], 0.0];
         }
         "ec.color.tritone" => {
             p.u[0][0] = 4;

@@ -308,7 +308,7 @@ pub(crate) fn export_items(ex: &mut Ex, contents: &PropGroup, label: &str) -> Ve
             "op" => {
                 o.put("a", "amount", &anim::num);
                 o.raw("lj", json!(o.e("join") + 1));
-                o.raw("ml", json!(o.f("miter")));
+                o.put("ml", "miter", &anim::num);
                 if (o.f("copies") - 1.0).abs() > 1e-9 || o.animated("copies") || o.f("copyOffset") != 0.0 {
                     o.ex.warn(format!("{lbl}: Offset Paths copies are not part of Lottie (one copy exported)"));
                 }
@@ -543,9 +543,7 @@ pub(crate) fn import_items(im: &mut Im, ids: &mut Ids, items: &[Json]) -> Vec<Pr
                         if let Some(lj) = int(j, "lj") {
                             set_enum(&mut g, "join", lj.saturating_sub(1).clamp(0, 2) as u32);
                         }
-                        if let (Some(ml), Some(p)) = (j.get("ml").and_then(Json::as_f64), g.get_mut("miter")) {
-                            p.value = Value::Scalar(ml);
-                        }
+                        set(im, &mut g, "miter", j.get("ml"), &anim::to_scalar);
                     }
                     "pb" => set(im, &mut g, "amount", j.get("a"), &anim::to_scalar),
                     "tw" => {

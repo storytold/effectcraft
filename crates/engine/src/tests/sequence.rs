@@ -1,0 +1,252 @@
+//! Image sequences (#297): File ▸ Import with the "<format> Sequence" option, picked ranges,
+//! folders, Force Alphabetical Order, the import frame rate, Replace Footage, missing frames
+//! (placeholders, as in After Effects) and Interpret Footage ▸ Start Timecode.
+
+use effectcraft_project::{Footage, FootageKind, ItemId, ItemKind};
+use effectcraft_time::{FrameRate, Tick};
+use serde_json::{Value, json};
+
+use crate::Session;
+
+/// Probes every file as a still 64 + its byte length wide and 32 high (the media layer's
+/// single-file probe).
+struct Stills;
+impl crate::Importer for Stills {
+    fn probe(&self, path: &str) -> Result<Footage, String> {
+        if !std::path::Path::new(path).is_file() {
+            return Err(format!("{path}: no such file"));
+        }
+        let width = 64 + std::fs::metadata(path).map_or(0, |m| m.len() as u32);
+        Ok(Footage { path: path.into(), kind: FootageKind::Still, width, height: 32, has_video: true, codec: "PNG".into(), ..Default::default() })
+    }
+}
+
+/// A fresh folder with empty files of these names; returns its path.
+fn folder(names: &[&str]) -> String {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static N: AtomicU32 = AtomicU32::new(0);
+    let d = std::env::temp_dir().join(format!("ec-seq-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    for n in names {
+        std::fs::write(d.join(n), b"").unwrap();
+    }
+    d.to_string_lossy().to_string()
+}
+
+fn at(dir: &str, name: &str) -> String {
+    std::path::Path::new(dir).join(name).to_string_lossy().to_string()
+}
+
+fn session() -> Session {
+    let mut s = Session { importer: Some(std::sync::Arc::new(Stills)), ..Default::default() };
+    s.prefs.import.sequence_fps = 30.0;
+    s
+}
+
+fn footage(s: &Session, item: &Value) -> (String, Footage) {
+    let it = s.project.item(ItemId(item.as_u64().unwrap())).unwrap();
+    let ItemKind::Footage(f) = &it.kind else { panic!("footage") };
+    (it.name.clone(), f.clone())
+}
+
+const RUN: [&str; 5] = ["shot_0001.png", "shot_0002.png", "shot_0004.png", "shot_0005.png", "notes.txt"];
+
+#[test]
+fn one_picked_numbered_file_imports_its_run_as_one_sequence() {
+    let dir = folder(&RUN);
+    let mut s = session();
+    let r = s.execute("file.import", json!({"paths": [at(&dir, "shot_0002.png")], "sequence": true})).unwrap();
+    assert_eq!(r["items"].as_array().unwrap().len(), 1, "{r}");
+    let (name, f) = footage(&s, &r["items"][0]);
+    assert_eq!(name, "shot_[0001-0005].png");
+    assert_eq!((f.kind, f.sequence.len(), f.alphabetical), (FootageKind::Sequence, 4, false));
+    assert_eq!(f.path, at(&dir, "shot_0001.png"));
+    // Frames 1–5 at Settings ▸ Import ▸ Sequence Footage (30 fps); frame 3 is a placeholder.
+    assert_eq!(f.duration, FrameRate::FPS_30.tick_of(5));
+    assert_eq!(f.sequence_file(2), None);
+    // Settings ▸ Import ▸ Report Missing Frames.
+    let w = r["warnings"][0].as_str().unwrap();
+    assert!(w.contains("1 missing frame (3)"), "{w}");
+}
+
+/// Picking every frame of a sequence used to make one item per frame (each a whole sequence on
+/// the desktop, a still in the browser).
+#[test]
+fn picking_every_frame_imports_one_sequence() {
+    let dir = folder(&RUN);
+    let mut s = session();
+    let all: Vec<String> = RUN[..4].iter().map(|n| at(&dir, n)).collect();
+    let r = s.execute("file.import", json!({"paths": all, "sequence": true, "frameRate": 24})).unwrap();
+    assert_eq!(r["items"].as_array().unwrap().len(), 1, "{r}");
+    let (_, f) = footage(&s, &r["items"][0]);
+    assert_eq!(f.sequence.len(), 4);
+    // `frameRate` sets the sequence's rate on import.
+    assert_eq!((f.frame_rate, f.duration), (FrameRate::FPS_24, FrameRate::FPS_24.tick_of(5)));
+    // A picked range is just that range.
+    let r = s.execute("file.import", json!({"paths": [at(&dir, "shot_0004.png"), at(&dir, "shot_0005.png")], "sequence": true})).unwrap();
+    let (name, f) = footage(&s, &r["items"][0]);
+    assert_eq!((name.as_str(), f.sequence.len()), ("shot_[0004-0005].png", 2));
+    assert!(s.execute("file.import", json!({"paths": all, "sequence": true, "frameRate": 0})).is_err());
+}
+
+/// #431: without the Sequence option, picked or dropped numbered stills import as stills (one
+/// item each), as in After Effects; a dropped folder still makes its runs sequences.
+#[test]
+fn numbered_stills_import_as_stills_by_default() {
+    let dir = folder(&RUN);
+    let mut s = session();
+    let r = s.execute("file.import", json!({"paths": [at(&dir, "shot_0002.png")], "drag": true})).unwrap();
+    let (name, f) = footage(&s, &r["items"][0]);
+    assert_eq!((name.as_str(), f.kind), ("shot_0002.png", FootageKind::Still));
+    let r = s.execute("file.import", json!({"paths": [at(&dir, "shot_0001.png"), at(&dir, "shot_0004.png")], "drag": true})).unwrap();
+    assert_eq!(r["items"].as_array().unwrap().len(), 2, "{r}");
+    let r = s.execute("file.import", json!({"paths": [dir.clone()], "drag": true})).unwrap();
+    let (name, f) = footage(&s, &r["items"][0]);
+    assert_eq!((name.as_str(), f.kind), ("shot_[0001-0005].png", FootageKind::Sequence));
+    // Scripts and agents naming one frame without `sequence` still get its run.
+    let r = s.execute("file.import", json!({"paths": [at(&dir, "shot_0003.png")]})).unwrap();
+    let (_, f) = footage(&s, &r["items"][0]);
+    assert_eq!(f.kind, FootageKind::Sequence);
+}
+
+#[test]
+fn the_sequence_option_off_imports_stills() {
+    let dir = folder(&RUN);
+    let mut s = session();
+    let r = s.execute("file.import", json!({"paths": [at(&dir, "shot_0002.png")], "sequence": false})).unwrap();
+    let (name, f) = footage(&s, &r["items"][0]);
+    assert_eq!((name.as_str(), f.kind), ("shot_0002.png", FootageKind::Still));
+    let r = s.execute("file.import", json!({"paths": [at(&dir, "shot_0001.png"), at(&dir, "shot_0002.png")], "sequence": false})).unwrap();
+    assert_eq!(r["items"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn a_folder_imports_its_files_with_runs_as_sequences() {
+    let dir = folder(&["a_01.png", "a_02.png", "b.png", "readme.txt"]);
+    let mut s = session();
+    let r = s.execute("file.import", json!({"paths": [dir], "background": true})).unwrap();
+    s.execute("jobs.wait", json!({})).unwrap();
+    assert!(r["job"].is_u64() || r["job"].is_string(), "{r}");
+    let names: Vec<String> = s.project.items.values().map(|i| i.name.clone()).collect();
+    assert_eq!(names, ["a_[01-02].png", "b.png"], "the text file is skipped");
+}
+
+#[test]
+fn force_alphabetical_order_takes_every_image_of_the_type() {
+    let dir = folder(&["take_b.png", "take_a.png", "other_7.png", "c.jpg"]);
+    let mut s = session();
+    let r = s.execute("file.import", json!({"paths": [at(&dir, "take_a.png")], "alphabetical": true})).unwrap();
+    let (name, f) = footage(&s, &r["items"][0]);
+    let files: Vec<String> = f.sequence.iter().map(|p| crate::sequence::file_name(p)).collect();
+    assert_eq!(files, ["other_7.png", "take_a.png", "take_b.png"]);
+    // Its numbering doesn't count: the files play one after another.
+    assert_eq!((name.as_str(), f.alphabetical, f.sequence_frames()), ("other_7.png", true, 3));
+    assert!(r["warnings"].as_array().is_none_or(Vec::is_empty), "{r}");
+}
+
+#[test]
+fn interpret_footage_start_timecode_relabels_source_time() {
+    let dir = folder(&RUN);
+    let mut s = session();
+    let item = s.execute("file.import", json!({"paths": [at(&dir, "shot_0001.png")], "sequence": true})).unwrap()["items"][0].clone();
+    s.execute("comp.new", json!({"name": "Main", "width": 64, "height": 32, "frameRate": 30, "duration": 10})).unwrap();
+    let layer = s.execute("layer.addItem", json!({"item": item})).unwrap()["layer"].as_u64().unwrap();
+    let out = |s: &Session| s.active_comp().unwrap().layer(effectcraft_project::LayerId(layer)).unwrap().out_point;
+    assert_eq!(out(&s), FrameRate::FPS_30.tick_of(5));
+    // Override Start changes the timecode the Footage panel shows, not the frames (After Effects).
+    let r = s.execute("file.interpretFootage", json!({"items": [item], "overrideStart": true, "startTimecode": "0:00:01:10"})).unwrap();
+    assert_eq!((r["items"][0]["startTimecode"].as_str(), r["items"][0]["frames"].as_i64()), (Some("0:00:01:10"), Some(5)));
+    assert_eq!((footage(&s, &item).1.start_timecode, out(&s)), (Some(40), FrameRate::FPS_30.tick_of(5)));
+    s.execute("footage.open", json!({"item": item})).unwrap();
+    s.execute("footage.setTime", json!({"frame": 2})).unwrap();
+    assert_eq!(s.execute("footage.info", json!({})).unwrap()["timecode"], "0:00:01:12");
+    // A frame number works too; Use Source File Timecode goes back to 0.
+    s.execute("file.interpretFootage", json!({"items": [item], "startTimecode": 90})).unwrap();
+    assert_eq!(footage(&s, &item).1.start_timecode, Some(90));
+    let r = s.execute("file.interpretFootage", json!({"items": [item], "overrideStart": false, "startTimecode": "0:00:09:00"})).unwrap();
+    assert_eq!((r["items"][0]["startTimecode"].as_str(), footage(&s, &item).1.start_timecode), (Some("0:00:00:00"), None));
+    // Timecode is read at the footage's frame rate.
+    s.execute("file.interpretFootage", json!({"items": [item], "frameRate": 10, "startTimecode": "0:00:01:05"})).unwrap();
+    let f = footage(&s, &item).1;
+    assert_eq!((f.duration, f.start_timecode), (Tick::from_seconds_f64(0.5), Some(15)));
+    for bad in [json!({"startTimecode": "x"}), json!({"startTimecode": 1e300}), json!({"startTimecode": -5}), json!({"startTimecode": "-1:00"})] {
+        let mut p = bad.clone();
+        p["items"] = json!([item]);
+        assert!(s.execute("file.interpretFootage", p).is_err(), "{bad}");
+    }
+    // Undo puts the interpretation back.
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!((footage(&s, &item).1.frame_rate, footage(&s, &item).1.start_timecode), (FrameRate::FPS_30, None));
+}
+
+#[test]
+fn replace_footage_and_reload_keep_sequences() {
+    let dir = folder(&RUN);
+    let mut s = session();
+    let item = s.execute("file.import", json!({"paths": [at(&dir, "shot_0001.png")], "sequence": false})).unwrap()["items"][0].clone();
+    s.state.project_selection = vec![ItemId(item.as_u64().unwrap())];
+    s.execute("file.replaceFootage", json!({"path": at(&dir, "shot_0004.png")})).unwrap();
+    let (name, f) = footage(&s, &item);
+    assert_eq!((name.as_str(), f.sequence.len()), ("shot_[0001-0005].png", 4));
+    // Reload finds a new frame and keeps the interpretation.
+    s.execute("file.interpretFootage", json!({"items": [item], "frameRate": 12, "startTimecode": 2})).unwrap();
+    std::fs::write(at(&dir, "shot_0003.png"), b"").unwrap();
+    s.execute("file.reloadFootage", json!({"items": [item]})).unwrap();
+    let (_, f) = footage(&s, &item);
+    assert_eq!((f.sequence.len(), f.frame_rate, f.start_timecode), (5, FrameRate::from_f64(12.0), Some(2)));
+    assert_eq!(f.duration, FrameRate::from_f64(12.0).tick_of(5));
+}
+
+/// #2074: reloading a numbered still probed it as its run, so it took the first file's size.
+#[test]
+fn reloading_a_numbered_still_measures_its_own_file() {
+    let dir = folder(&RUN);
+    let mut s = session();
+    let item = s.execute("file.import", json!({"paths": [at(&dir, "shot_0002.png")], "sequence": false})).unwrap()["items"][0].clone();
+    std::fs::write(at(&dir, "shot_0002.png"), [0; 16]).unwrap();
+    s.execute("file.reloadFootage", json!({"items": [item]})).unwrap();
+    let (name, f) = footage(&s, &item);
+    assert_eq!((name.as_str(), f.kind, f.width, f.sequence.len()), ("shot_0002.png", FootageKind::Still, 80, 0));
+    assert_eq!(f.path, at(&dir, "shot_0002.png"));
+}
+
+/// #756: numbered DPX and Cineon scans import as sequences, as in After Effects (`.cin` was not
+/// an image to the Media Browser, so its runs came in one file at a time).
+#[test]
+fn dpx_and_cineon_runs_import_as_sequences() {
+    let dir = folder(&["plate.0001.dpx", "plate.0002.dpx", "plate.0003.dpx", "scan_01.cin", "scan_02.cin"]);
+    let mut s = session();
+    let r = s.execute("file.import", json!({"paths": [at(&dir, "plate.0002.dpx"), at(&dir, "scan_01.cin")], "sequence": true})).unwrap();
+    let mut got: Vec<(String, usize)> = r["items"].as_array().unwrap().iter().map(|i| footage(&s, i)).map(|(n, f)| (n, f.sequence.len())).collect();
+    got.sort();
+    assert_eq!(got, [("plate.[0001-0003].dpx".to_string(), 3), ("scan_[01-02].cin".to_string(), 2)], "{r}");
+}
+
+/// #1926: an edit that leaves the footage alone doesn't stamp every frame of its image sequences
+/// again for the disk cache's salt (with large sequences each keystroke in a text field took over
+/// half a second); Reload Footage does, and so does new footage.
+#[test]
+fn edits_keep_the_disk_salt_and_reload_stamps_the_files_again() {
+    let dir = folder(&RUN);
+    let cache = std::env::temp_dir().join(format!("ec-seq-salt-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&cache);
+    let mut s = session();
+    s.execute_checked("prefs.set", json!({"values": {"disk.diskCacheFolder": cache.to_string_lossy(), "disk.diskCacheEnabled": true}})).unwrap();
+    s.execute("comp.new", json!({"name": "C", "width": 64, "height": 32, "frameRate": 30, "duration": 1})).unwrap();
+    let r = s.execute("file.import", json!({"paths": [at(&dir, "shot_0002.png")], "sequence": true, "addToComp": true})).unwrap();
+    let item = r["items"][0].clone();
+    let salt = s.refresh_disk_salt(false).expect("a disk cache");
+    // A frame rewritten in place: same footage settings, another size on disk.
+    std::fs::write(at(&dir, "shot_0004.png"), b"a new render of this frame").unwrap();
+    s.execute("layer.newText", json!({"text": "title"})).unwrap();
+    s.execute("layer.setText", json!({"text": "title 2"})).unwrap();
+    assert_eq!(s.refresh_disk_salt(false), Some(salt), "edits don't stamp the files again");
+    s.execute("file.reloadFootage", json!({"items": [item]})).unwrap();
+    let reloaded = s.refresh_disk_salt(false).unwrap();
+    assert_ne!(reloaded, salt, "Reload Footage stamps them again");
+    std::fs::write(at(&dir, "extra.png"), b"").unwrap();
+    s.execute("file.import", json!({"paths": [at(&dir, "extra.png")]})).unwrap();
+    assert_ne!(s.refresh_disk_salt(false), Some(reloaded), "new footage counts");
+    let _ = std::fs::remove_dir_all(&cache);
+}

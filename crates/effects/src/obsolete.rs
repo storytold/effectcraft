@@ -99,7 +99,13 @@ fn gaussian_legacy(ctx: &EffectCtx, mut b: Buf) -> Buf {
     if !ctx.adjustment {
         b.pad((s * 3.0).ceil() as u32);
     }
-    b.img = gaussian_blur(&b.img, s * kx, s * ky, ctx.adjustment);
+    let (sx, sy) = (s * kx, s * ky);
+    // Small sigmas use the sampled kernel, like Gaussian Blur (#1939).
+    b.img = if effectcraft_raster::gaussian_is_exact(sx, sy) {
+        effectcraft_raster::gaussian_blur_exact(&b.img, sx, sy, ctx.adjustment)
+    } else {
+        gaussian_blur(&b.img, sx, sy, ctx.adjustment)
+    };
     b
 }
 
@@ -173,6 +179,16 @@ mod tests {
         assert!((total - 1.0).abs() < 1e-3, "{total}");
         let c = out.img.width / 2;
         assert!(out.img.get(c as i64, c as i64)[3] < 0.5);
+    }
+
+    #[test]
+    fn gaussian_legacy_small_blurriness_blurs() {
+        // #1939: Blurriness under ~1.2 used to be a no-op.
+        let mut img = Image::new(15, 15);
+        img.set(7, 7, [1.0, 1.0, 1.0, 1.0]);
+        let out = run_fx("ec.obsolete.gaussianlegacy", &[("blurriness", num(0.9))], img, 0.0, EffectEnv::default());
+        let c = out.img.width / 2;
+        assert!(out.img.get(c as i64, c as i64)[3] < 0.9);
     }
 
     #[test]

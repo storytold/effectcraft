@@ -25,7 +25,7 @@ const MAX_DEPTH: usize = 16;
 /// interleaved (L R L R …).
 pub fn mix_comp(project: &Project, footage: &dyn FootageSource, expr: Option<&dyn ExprHost>, comp: ItemId, start: Tick, frames: usize, rate: u32) -> Vec<f32> {
     let mut out = vec![0.0f32; frames * 2];
-    mix_into(project, footage, expr, comp, start, rate, &mut out, 1.0, 1.0, 0);
+    mix_into(&AudioSources { project, footage, expr, rate }, comp, start, &mut out, 0);
     out
 }
 
@@ -151,7 +151,7 @@ impl MixEnv<'_> {
                     return out;
                 }
                 let mut sub = vec![0.0f32; src_n * 2];
-                mix_into(self.project, self.footage, self.expr, *item, lt, rate, &mut sub, 1.0, 1.0, self.depth + 1);
+                mix_into(&AudioSources { project: self.project, footage: self.footage, expr: self.expr, rate }, *item, lt, &mut sub, self.depth + 1);
                 sub
             }
             _ => return out,
@@ -206,19 +206,16 @@ impl MixEnv<'_> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn mix_into(
-    project: &Project,
-    footage: &dyn FootageSource,
-    expr: Option<&dyn ExprHost>,
-    comp_id: ItemId,
-    start: Tick,
+/// Shared inputs for composition audio mixing, including nested compositions.
+struct AudioSources<'a> {
+    project: &'a Project,
+    footage: &'a dyn FootageSource,
+    expr: Option<&'a dyn ExprHost>,
     rate: u32,
-    out: &mut [f32],
-    gl: f32,
-    gr: f32,
-    depth: usize,
-) {
+}
+
+fn mix_into(sources: &AudioSources<'_>, comp_id: ItemId, start: Tick, out: &mut [f32], depth: usize) {
+    let AudioSources { project, footage, expr, rate } = *sources;
     let Some(comp) = project.comp(comp_id) else { return };
     if depth >= MAX_DEPTH || rate == 0 {
         return;
@@ -239,7 +236,6 @@ fn mix_into(
         }
         let t_a = sample_tick(s0 + a as i64, rate);
         let (ll, lr) = levels(&env, l, t_a);
-        let (ll, lr) = (ll * gl, lr * gr);
         if ll == 0.0 && lr == 0.0 {
             continue;
         }

@@ -88,23 +88,7 @@ pub fn run_code(s: &mut Session, code: &str, name: &str) -> Outcome {
 
 #[cfg(test)]
 mod tests;
-#[cfg(test)]
-mod tests_callable;
-#[cfg(test)]
-mod tests_ease_presets;
-#[cfg(test)]
-mod tests_include;
-#[cfg(test)]
-mod tests_panels;
-#[cfg(test)]
-mod tests_tasks;
-#[cfg(test)]
-mod tests_ui;
-#[cfg(test)]
-mod tests_ui_more;
 
 // #760: `$.evalFile` and `BridgeTalk`.
-#[cfg(test)]
-mod tests_evalfile;
-#[cfg(test)]
-mod tests_ui_mouse;
+// `/browser/…` is the web editor's file table, an absolute path on wasm; on Windows it has no
+// drive, so the script runtime resolves it under the current drive, where the host holds nothing.

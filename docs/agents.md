@@ -10,15 +10,6 @@ user can do, an agent can do too. There are three ways in:
 | **CLI** (`effectcraft-cli exec/get/set/...`) | one-shot scripting and CI; JSON output with `--json` | no |
 | **Control channel** (`effectcraft --control 9877`) | driving and seeing the live UI; see [control-protocol.md](control-protocol.md) | yes |
 
-## Find the presets folder
-
-The native Effects & Presets panel's options menu includes **Copy Presets Folder Path**. It copies
-the folder the panel scans: `EC_PRESETS_DIR` when set, otherwise `~/Documents/EffectCraft/Presets`
-using `HOME` or `USERPROFILE`. Relative paths are resolved to an absolute path. The folder may
-not exist yet; this action does not create it.
-Over the live UI control channel, `ui.menu.invoke {"id":"effects.copyPresetsFolderPath"}` copies
-the same path and returns `{path}`. The web app reports that it has no local presets folder.
-
 ## MCP setup
 
 Build once with `cargo build --release -p effectcraft-cli`, then register the server. For Claude
@@ -52,19 +43,24 @@ Desktop, Cursor and the like) take the same `command` and `args`.
 - **Bridge** (`["mcp", "--bridge", "9877"]`): drives a running `effectcraft --control 9877`, so you
   see every change live. Bridge mode adds `screenshot` and the `ui_*` tools.
 
+After a broken connection, the bridge retries explicitly read-only control queries once.
+Engine commands, UI edits and unknown methods whose transmission or reply fails report an
+unknown outcome: the app may already have applied them. Inspect the app before explicitly
+retrying. A later call reconnects; timeouts and malformed replies are never automatically resent.
+
 ### From an installed release
 
 The release packages ship `effectcraft-cli` alongside the desktop app, so no build is needed:
 
 | Install | CLI |
 |---|---|
-| Windows (MSI) | `C:\Program Files\EffectCraft\effectcraft-cli.exe` by default (wherever you installed it otherwise), not on `PATH` |
+| Windows (MSI) | `%LOCALAPPDATA%\Programs\ArtCraft\EffectCraft\effectcraft-cli.exe` by default (`C:\Program Files\ArtCraft\EffectCraft\effectcraft-cli.exe` for an all-users install, under `Program Files (x86)` instead for the 32-bit build, or wherever you installed it otherwise), not on `PATH` |
 | Linux (deb, rpm) | `/usr/bin/effectcraft-cli` |
 | macOS | the separate `effectcraft-cli-<version>-macos-<arch>.zip` release asset (the `.app` holds only the desktop app) |
 
 ```sh
-# Windows, default install folder
-claude mcp add effectcraft -- "C:\Program Files\EffectCraft\effectcraft-cli.exe" mcp
+# Windows (PowerShell), default install folder
+claude mcp add effectcraft -- "$env:LOCALAPPDATA\Programs\ArtCraft\EffectCraft\effectcraft-cli.exe" mcp
 # Linux, or macOS with the CLI unzipped onto PATH
 claude mcp add effectcraft -- effectcraft-cli mcp
 ```
@@ -184,6 +180,7 @@ Short recipes; every step is one tool call.
 | Animate | `add_keyframe {"layer":2,"path":"transform/scale","keys":[{"time":0,"value":[0,0]},{"time":0.5,"value":[100,100]}],"interpolation":"easyEase"}` |
 | Effect with settings | `list_effects {"filter":"glow"}` → `add_effect {"layer":2,"effect":"Glow","values":{"threshold":40,"radius":30}}` → `set_property {"layer":2,"path":"effects/#1/intensity","value":2}` |
 | Key a green screen | `add_effect {"layer":2,"effect":"Keylight (1.2)"}` → `execute_command effect.pickColor {"layer":2,"effect":1,"param":"screenColour","x":20,"y":20,"average":true}` (a screen pixel, layer space; samples the effect's input) → `set_property {"layer":2,"path":"effects/#1/screenMatte/clipBlack","value":10}` → `render_frame {"transparent":true}` |
+| Key objects by Cryptomatte | `add_effect {"layer":2,"effect":"Cryptomatte"}` → `execute_command effect.pickCryptomatte {"layer":2,"effect":1,"x":120,"y":80}` (the ID under that layer pixel replaces the Selection; `"mode":"add"` / `"remove"` edit it; `effect.cryptomatteAt` with the same point only reports the name) → `render_frame` |
 | Drive with an expression | `set_property {"layer":2,"path":"transform/rotation","expression":"time*90"}` |
 | Inspect a layer | `get_layer {"layer":2,"flat":true}` (every property with its `path`, value, key count) |
 | Check the result | `render_frame {"time":1.5,"max_side":640}`; in bridge mode `screenshot {"panel":"Timeline"}` |
@@ -220,7 +217,7 @@ Things that tripped up a long agent-driven session (a multi-scene 3D piece built
 
 ### Cookbook (from end-to-end QA)
 
-The scenarios in `crates/automation/tests/qa/` and `apps/effectcraft-cli/tests/qa_template.rs`
+The scenarios in `crates/automation/tests/qa/` and `apps/effectcraft-cli/tests/it/qa_template.rs`
 build real projects through these interfaces; they are worked examples of everything below.
 
 * **Name things when you create them**: `layer.newText`, `layer.newShape`, `layer.newSolid`,
@@ -307,7 +304,9 @@ build real projects through these interfaces; they are worked examples of everyt
   The CLI also renders an exported template directly:
   `effectcraft-cli render --template lt.ectemplate --values values.json --out 'title_[#####].png'`.
   `values.json` is an object such as `{"Title":"John Smith","Bar Color":"#00c080","Bar Opacity":50}`;
-  names follow `essential.set`, including its case-insensitive matching. Values override one
+  names follow `essential.set`, including its case-insensitive matching. A Media Replacement
+  control takes a footage file path (`{"Clip":"/in/clipB.mp4"}`, or `{"path": …}`), which is
+  imported and set as the control's `item`. Values override one
   imported instance; the template file and its source controls keep their defaults. Omit
   `--values` to render those defaults, or use the same options with `render-frame` for a PNG.
   Values must fit in 1 MiB. Invalid JSON, unknown controls and invalid values fail before rendering.
@@ -325,8 +324,8 @@ build real projects through these interfaces; they are worked examples of everyt
 ### Effect positions
 
 Effect points, Puppet pins (`puppet.addPin`, `puppet.recordPin`), Paint, Liquify and Roto Brush
-strokes and `effect.pickColor` are in **effect space**: layer pixels from the top-left of the
-layer's effect bounds. For footage, solids and precomps that is the layer's own pixel grid. Shape
+strokes, `effect.pickColor` and `effect.pickCryptomatte` are in **effect space**: layer pixels
+from the top-left of the layer's effect bounds. For footage, solids and precomps that is the layer's own pixel grid. Shape
 and text layers have comp-sized bounds centred on their content's origin, so in a `w` × `h` comp
 the point `[w / 2, h / 2]` is that origin (a new effect's default point). `prop.get` / `prop.set`
 read and write these values as they are.
@@ -534,7 +533,10 @@ indices): character attributes
    starts editing (`position` instead of `box` makes point text; `vertical: true` vertical type).
 2. `text.insert {"text":"Hello world"}` types at the caret (replacing the selection);
    `text.setSelection {"start":6,"end":11}` selects "world"; `text.moveCaret {"to":"wordLeft",
-   "extend":true}` moves like the arrow keys; `text.delete {"word":true}` is Alt+Backspace.
+   "extend":true}` moves like the arrow keys; `text.delete {"word":true}` is Alt+Backspace;
+   `text.deleteSurrounding {"before":1,"after":2,"bytes":true}` deletes the characters around the
+   selection without deleting it (what an input method's replacement asks for: the selection stays
+   for the commit that follows; a byte count ending inside a character leaves that character).
 3. `layer.setText {"range":[6,11], "size":40, "fill":"#ff5500"}` styles the selection (the
    Character panel does the same); with an empty range it sets the style the next typed text takes.
 4. `edit.copy`, `edit.paste`, `edit.pasteTextMatchFormatting` and `edit.pasteTextFormattingOnly`
@@ -544,8 +546,10 @@ Fonts: `text.fonts` (MCP `list_fonts`) lists every family a text layer can use, 
 styles, origin (`bundled`, `system`, `user`), `variable` (it has variation axes) and own-language name
 (`{"query":"gothic"}` filters by name, `{"variable":true}` keeps only variable fonts, like the font
 menu's Variable Fonts filter; `{"rescan":true}` first picks up fonts installed since launch). Pass a listed `family` and
-one of its `styles` to `layer.setText {"font", "style"}`; `text.fontFeatures` says which OpenType
-options a font draws with its own glyphs.
+one of its `styles` to `layer.setText {"font", "style"}`. A variable font's named instances (`Light` …
+`Black`) are styles of its family; a style or an instance's PostScript name (`"font": "Figtree-Black"`)
+sets the instance's axis values, and `variations` set on the text override them axis by axis.
+`text.fontFeatures` says which OpenType options a font draws with its own glyphs.
 A tool with its own font library can hand it over without installing it: folders listed in
 `EFFECTCRAFT_FONT_DIRS` (a path list, `:`-separated, `;` on Windows) are scanned like the system font folders.
 On Linux and the BSDs the system font folders are `/usr/share/fonts`, `/usr/local/share/fonts`,
@@ -595,6 +599,12 @@ Extension points and the bundled extensions: [plugins.md](plugins.md).
   properties, FF missing effects, EE Expressions, LL Waveform, UU everything changed from its
   default. Shift+key adds or removes a set; the same key again hides it; Ctrl/Cmd+` twirls the
   selected layers open or closed. With no layer selected they apply to every layer.
+* A row control clicked on one of several selected layers applies to every selected layer, as in
+  After Effects: the A/V switches (video, audio, solo, lock), the Switches column (shy, collapse,
+  quality, fx, frame blending, motion blur, adjustment, 3D), the label swatch and the Modes column
+  (blending mode, Preserve Transparency), one undo step, with the layers the switch doesn't apply
+  to left out. A control on an unselected row changes that layer alone; Alt-clicking an A/V feature
+  still sets the selected layers apart from the rest.
 * `keys.toggleTransform {"layers"?: [...], "prop": "position"}` (Alt+Shift+A/P/S/R/T) adds or
   removes a keyframe at the current time on that Transform property of each layer, in one undo
   step (separated X/Y/Z Position; Orientation and X/Y/Z Rotation on 3D layers).
@@ -667,6 +677,7 @@ effectcraft-cli render-frame main.ecproj --time 1 --max-side 640 --out f.png --j
 effectcraft-cli exec layer.newNull --bridge 9877                 # same commands, against the live app
 effectcraft-cli exec file.exportLottie '{"comp":"Main","path":"main.json","includeExpressions":true}' main.ecproj --json
 effectcraft-cli exec file.importLottie '{"path":"anim.json"}' main.ecproj --save
+effectcraft-cli render main.ecproj --comp Main --out main.mov --format prores --progress   # progress lines on stderr for a program that reads them
 ```
 
 Scripts written against After Effects' documented scripting API run with `script`:
@@ -714,3 +725,12 @@ open the demo project; without it the app starts with an empty project) and use 
 mode or the raw control channel. A good loop is: `ui_elements` to find an id, `ui_click` or `ui_drag`
 to act, then `screenshot {"panel":"Timeline"}` to check the result. `render_frame` shows the
 composition itself at any zoom.
+
+### Effects & Presets
+
+The native Effects & Presets panel's options menu includes **Copy Presets Folder Path**. It copies
+the folder the panel scans: `EC_PRESETS_DIR` when set, otherwise `~/Documents/EffectCraft/Presets`
+using `HOME` or `USERPROFILE`. Relative paths are resolved to an absolute path. The folder may
+not exist yet; this action does not create it.
+Over the live UI control channel, `ui.menu.invoke {"id":"effects.copyPresetsFolderPath"}` copies
+the same path and returns `{path}`. The web app reports that it has no local presets folder.

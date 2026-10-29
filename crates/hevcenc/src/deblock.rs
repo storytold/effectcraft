@@ -78,7 +78,6 @@ pub fn deblock(planes: &mut [Vec<u16>; 3], blk: &[Blk], w: usize, h: usize, qp: 
 
 /// Filter one 4-sample luma edge segment. `o` = offset of q0 of the first line, `step` = distance
 /// between samples across the edge, `along` = distance between lines.
-#[allow(clippy::too_many_arguments)]
 fn filter_luma(s: &mut [u16], o: usize, step: usize, along: usize, tc: i32, beta: i32, bd: u32) {
     let px = |s: &[u16], k: usize, i: usize| s[o + k * along - (i + 1) * step] as i32;
     let qx = |s: &[u16], k: usize, i: usize| s[o + k * along + i * step] as i32;

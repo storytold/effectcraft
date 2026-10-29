@@ -239,6 +239,8 @@ fn refresh(pr: &mut Property, ps: &ParamSpec, spec: &EffectSpec) {
         // A path typed as text, or set only by commands, that got a Choose… button (Apply Color
         // LUT's LUT, the OCIO files, #514).
         (ParamUi::Hidden | ParamUi::Text, ParamUi::File { .. }) => pr.ui = ps.ui.clone(),
+        // An internal point that became a control (Liquify's Distortion Mesh Offset, #1194).
+        (ParamUi::Hidden, ParamUi::Point) => pr.ui = ParamUi::Point,
         // Same kind of value: take the spec's hints (units, ranges).
         (a, b) if std::mem::discriminant(a) == std::mem::discriminant(b) || is_numeric_ui(a) && is_numeric_ui(b) => pr.ui = ps.ui.clone(),
         _ => {}
@@ -497,6 +499,22 @@ mod tests {
         assert_eq!(pr.ui, popup.ui);
     }
 
+    /// #1797: Shift Channels' menu put Half On before Full Off; a project saved then keeps the
+    /// option it chose, by label.
+    #[test]
+    fn shift_channels_half_on_and_full_off_are_remapped_by_label() {
+        const OLD: [&str; 11] = ["Alpha", "Red", "Green", "Blue", "Luminance", "Hue", "Lightness", "Saturation", "Full On", "Half On", "Full Off"];
+        for (saved, want) in [(9u32, 10u32), (10, 9), (1, 1)] {
+            let mut next = 1;
+            let (spec, mut g) = instance("ec.channel.shiftchannels", &mut next);
+            let pr = g.get_mut("takeGreenFrom").unwrap();
+            pr.ui = ParamUi::Popup { options: OLD.iter().map(|s| s.to_string()).collect() };
+            pr.value = Value::Enum(saved);
+            upgrade_instance(spec, &mut g, &mut Ids(&mut next), SIZE);
+            assert_eq!(g.get("takeGreenFrom").unwrap().value, Value::Enum(want), "saved {saved}");
+        }
+    }
+
     /// #514: Apply Color LUT's LUT was hidden (set only by commands) and the OCIO files were
     /// plain text; old projects get the Choose… file parameter, keeping the path.
     #[test]
@@ -512,6 +530,19 @@ mod tests {
             assert!(matches!(&pr.ui, ParamUi::File { filters } if filters.iter().any(|f| f == "cube")), "{fx}: {:?}", pr.ui);
             assert_eq!(pr.value, Value::Str("/luts/look.cube".into()));
         }
+    }
+
+    /// #1194: Liquify's Distortion Mesh Offset was hidden; old projects show it, keeping its value.
+    #[test]
+    fn a_hidden_point_that_became_a_control_is_shown() {
+        let mut next = 1;
+        let (spec, mut g) = instance("ec.distort.liquify", &mut next);
+        let pr = g.get_mut("distortionMeshOffset").unwrap();
+        pr.ui = ParamUi::Hidden;
+        pr.value = Value::Vec2([20.0, -5.0]);
+        assert!(upgrade_instance(spec, &mut g, &mut Ids(&mut next), [100.0, 100.0]));
+        let pr = g.get("distortionMeshOffset").unwrap();
+        assert_eq!((&pr.ui, &pr.value), (&ParamUi::Point, &Value::Vec2([20.0, -5.0])));
     }
 
     #[test]

@@ -533,12 +533,15 @@ pub struct WiggleParams {
     pub correlation: f64,
     /// Temporal phase in degrees (360° = one wiggle period).
     pub phase_deg: f64,
+    /// Spatial phase in degrees: slides each subpath's pattern of displacements along its points
+    /// (360° = once around the subpath).
+    pub spatial_phase_deg: f64,
     pub seed: f64,
 }
 
 impl Default for WiggleParams {
     fn default() -> Self {
-        WiggleParams { size: 10.0, detail: 10.0, smooth: true, speed: 2.0, correlation: 50.0, phase_deg: 0.0, seed: 0.0 }
+        WiggleParams { size: 10.0, detail: 10.0, smooth: true, speed: 2.0, correlation: 50.0, phase_deg: 0.0, spatial_phase_deg: 0.0, seed: 0.0 }
     }
 }
 
@@ -568,9 +571,16 @@ fn noise(seed: u64, idx: u64, t: f64) -> f64 {
     v.clamp(-1.0, 1.0)
 }
 
+/// Catmull-Rom interpolation between `p1` (f = 0) and `p2` (f = 1).
+fn catmull_rom(p0: f64, p1: f64, p2: f64, p3: f64, f: f64) -> f64 {
+    0.5 * (2.0 * p1 + (-p0 + p2) * f + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * f * f + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * f * f * f)
+}
+
 /// Wiggle Paths: subdivides the paths (`detail` points per segment) and displaces every point by
 /// smooth random noise of up to `size` pixels that evolves over `time_s` seconds at `speed`
-/// wiggles per second. Deterministic for a given seed and time.
+/// wiggles per second. The spatial phase moves each point's own share of the noise along the
+/// subpath, and a fraction of a point is interpolated between its neighbors. Deterministic for a
+/// given seed and time.
 pub fn wiggle(paths: &[BezPath], w: &WiggleParams, time_s: f64) -> Vec<BezPath> {
     if w.size == 0.0 {
         return paths.to_vec();
@@ -580,6 +590,7 @@ pub fn wiggle(paths: &[BezPath], w: &WiggleParams, time_s: f64) -> Vec<BezPath> 
     let t = time_s * w.speed + w.phase_deg / 360.0;
     let corr = (w.correlation / 100.0).clamp(0.0, 1.0);
     let shared = Vec2::new(noise(seed, u64::MAX, t), noise(seed, u64::MAX - 1, t));
+    let turns = if w.spatial_phase_deg.is_finite() { (w.spatial_phase_deg / 360.0).rem_euclid(1.0) } else { 0.0 };
     let mut idx: u64 = 0;
     paths
         .iter()
@@ -587,14 +598,28 @@ pub fn wiggle(paths: &[BezPath], w: &WiggleParams, time_s: f64) -> Vec<BezPath> 
             let mut out = BezPath::new();
             for sub in subs(p) {
                 let s = resample(&sub, m);
-                let disp: Vec<Vec2> = s
-                    .iter()
-                    .map(|_| {
-                        let own = Vec2::new(noise(seed, idx * 2, t + idx as f64 * 0.37), noise(seed, idx * 2 + 1, t + idx as f64 * 0.61));
-                        idx += 1;
-                        (shared * corr + own * (1.0 - corr)) * w.size
-                    })
-                    .collect();
+                let n = s.len();
+                let first = idx;
+                let own = |j: usize| {
+                    let i = first + j as u64;
+                    Vec2::new(noise(seed, i * 2, t + i as f64 * 0.37), noise(seed, i * 2 + 1, t + i as f64 * 0.61))
+                };
+                let along = |j: usize| {
+                    if turns == 0.0 {
+                        return own(j);
+                    }
+                    let u = (j as f64 + turns * n as f64).rem_euclid(n as f64);
+                    let k = u.floor();
+                    let f = u - k;
+                    let k = k as usize % n;
+                    if f == 0.0 {
+                        return own(k);
+                    }
+                    let (p0, p1, p2, p3) = (own((k + n - 1) % n), own(k), own((k + 1) % n), own((k + 2) % n));
+                    Vec2::new(catmull_rom(p0.x, p1.x, p2.x, p3.x, f).clamp(-1.0, 1.0), catmull_rom(p0.y, p1.y, p2.y, p3.y, f).clamp(-1.0, 1.0))
+                };
+                let disp: Vec<Vec2> = (0..n).map(|j| (shared * corr + along(j) * (1.0 - corr)) * w.size).collect();
+                idx += n as u64;
                 emit(&s, &disp, sub.closed, w.smooth, 1.0 / 3.0, &mut out);
             }
             out
