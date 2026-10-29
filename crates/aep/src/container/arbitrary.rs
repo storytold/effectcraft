@@ -238,7 +238,7 @@ pub fn curve_lut(points: &[(u8, u8)]) -> Option<[u8; 256]> {
 }
 
 /// Mesh Warp's data (`ADBE MESH WARP-0004`; FORMAT S.2, 965, 985): `u32` rows plus one, `u32`
-/// columns plus one (a 1 x 2-cell export renders as made only in this order, `export-tests\mesh`;
+/// columns plus one (a 1 x 2-cell read-back test renders as made only in this order, `export-tests\mesh`;
 /// the vertices run row-major, columns plus one per row), 12 more bytes (zero, then
 /// `0d 0d`),
 /// then per vertex, row-major, ten `f32`: the position and the handles top, right, bottom and

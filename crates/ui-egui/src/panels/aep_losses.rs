@@ -165,4 +165,27 @@ mod tests {
         assert!(app.dialog.is_none() && app.ui.status.contains("cannot read"), "{}", app.ui.status);
         assert_eq!(with_losses(&params), json!({"path": "/no/such/file.aep", "allowLosses": true}));
     }
+
+    #[test]
+    fn a_lossy_import_asks_and_import_anyway_imports() {
+        // The combined effects project of the test corpus (`cargo xtask aep-corpus`) has effects
+        // outside the importer's table.
+        let dir = std::env::var_os("EFFECTCRAFT_AEP_FIXTURES")
+            .filter(|d| !d.is_empty())
+            .map_or_else(|| [env!("CARGO_MANIFEST_DIR"), "..", "..", "corpus", "aep"].iter().collect(), std::path::PathBuf::from);
+        let path = dir.join("effects.aep");
+        if !path.is_file() {
+            println!("SKIPPED: fixture effects.aep missing");
+            return;
+        }
+        let ctx = egui::Context::default();
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        crate::theme::install(&ctx, &app.tokens, crate::i18n::language(&app));
+        let params = json!({"path": path.to_string_lossy()});
+        assert_eq!(guard(&mut app, "file.importAep", &params), Ok(true));
+        assert_eq!(app.dialog, Some(Dialog::AepLosses));
+        assert!(app.session.project.items.is_empty(), "the dry run imported nothing");
+        finish(&mut app, &ctx, true);
+        assert!(app.dialog.is_none() && !app.session.project.items.is_empty(), "Import Anyway imported the project");
+    }
 }

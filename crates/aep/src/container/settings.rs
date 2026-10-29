@@ -182,7 +182,7 @@ mod tests {
 
     /// A version 2 `desc` body.
     fn desc(text: &str) -> Vec<u8> {
-        let mut b = b"desc    ".to_vec();
+        let mut b = b"desc\0\0\0\0".to_vec();
         b.extend_from_slice(&u32::try_from(text.len() + 1).unwrap().to_be_bytes());
         b.extend_from_slice(text.as_bytes());
         b.push(0);
@@ -192,7 +192,7 @@ mod tests {
     /// A version 4 `mluc` body with one record.
     fn mluc(text: &str) -> Vec<u8> {
         let units: Vec<u8> = text.encode_utf16().flat_map(u16::to_be_bytes).collect();
-        let mut b = b"mluc    ".to_vec();
+        let mut b = b"mluc\0\0\0\0".to_vec();
         b.extend_from_slice(&1u32.to_be_bytes());
         b.extend_from_slice(&12u32.to_be_bytes());
         b.extend_from_slice(b"enUS");

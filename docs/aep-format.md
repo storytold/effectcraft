@@ -30,6 +30,11 @@ fixtures but `001` (and inside `<ProjectXMPMetadata>` of the five `.aepx` fixtur
 file path and machine name inside the footage alias JSON are replaced by neutral text of the same
 length.
 
+**Read-back tests.** Some evidence comes from files we wrote ourselves (not After Effects), opened
+in After Effects 2026 and read back value by value or rendered: an exporter in development, which is
+not in this repository. They are named by an id (`e1`, `f1`, `o1`, `s1`, `t7`, `x1`-`x3`, ...) or by
+their local folder (`export-tests\...`), which is not in the repository either.
+
 Confidence codes in the field tables: **V** = a test in `crates/aep/tests/` asserts that the decoded
 value equals the value the case was made with (the corpus manifest); **E** = decoded and consistent
 in the case diffs, but no manifest value to assert against (the field is exposed only where a test
@@ -251,7 +256,7 @@ Footage items beyond solids and stills (`Pin /sspc`, 222 bytes; audio and image 
 | **sample rate** | 160 | f64 | 48 000.0 for the WAV | 350 | V |
 | **file size** | 208 | u32 | bytes of the source file(s): png 149, WAV 96 044 (44 + 48 000 x 2), three png of 168 bytes 504 | 126, 350, 352 | V |
 | **sequence numbering** | 172, 176, 180 | u32 x 3 | first and last frame number and the digits of a sequence: 1, 3, 3 for `seq_001.png`..`seq_003.png` (353), 101, 103, 4 for `shot_0101.exr`..`shot_0103.exr` (603); 0 for single files (604, 605, 607). The name around the number is the pair of `Utf8` chunks between `Als2` and `opti` in `Pin ` (`seq_` / `.png`, `shot_` / `.exr`), absent on single files. `Item::sequence_info`, `SequenceInfo::file_name` | 353, 603, 604, 605, 607 | V |
-| **sequence folder time** | 118 | u32 (unaligned) | seconds since 1904-01-01 UTC: the modification time of a sequence's folder when After Effects scanned it (860: 0xe6fb443a = 2026-10-19 03:51:22, the folder's and its files' time). With the folder's time After Effects keeps the stored numbering on open; with another (the template's, the first or the last file's time while the folder's differs: x1, x2 against x3) it scans the folder again and warns about a gap in a modal dialog | 860, `export-tests\sparse860\exp` x1-x3 | V |
+| **sequence folder time** | 118 | u32 (unaligned) | seconds since 1904-01-01 UTC: the modification time of a sequence's folder when After Effects scanned it (860: 0xe6fb443a = 2026-10-19 03:51:22, the folder's and its files' time). With the folder's time After Effects keeps the stored numbering on open; with another (an older time, the first or the last file's time while the folder's differs: x1, x2 against x3) it scans the folder again and warns about a gap in a modal dialog | 860, `export-tests\sparse860\exp` x1-x3 | V |
 | still duration denominator | 42 | u32 | 1 for png (126, 607), 600 for jpeg (605), 100 for OpenEXR (604): a still's duration is 0 over a per-format denominator | 126, 604, 605, 607 | V |
 
 An **image sequence is ONE item** (`opti` holds the first file name `seq_001.png` at 58, 322 bytes like
@@ -521,7 +526,7 @@ aRbs` / `aRbp`, also at the default. Curves (`ADBE CurvesCustom-0001`, 1644 byte
 five 256-byte tables (RGB, Red, Green, Blue, Alpha) = the natural cubic spline through the points,
 rounded (0 of 1280 entries differ); five 72-byte point records of 16 (`u16` in, `u16` out) slots,
 the count at 64, an `i32` at 68 (-1 untouched, count - 2 in every edited sample: H). Mesh Warp
-(`ADBE MESH WARP-0004`): `u32` rows + 1, `u32` columns + 1 (a 1 x 2-cell export renders as made only in
+(`ADBE MESH WARP-0004`): `u32` rows + 1, `u32` columns + 1 (a 1 x 2-cell read-back test renders as made only in
 this order, `export-tests\mesh`; AE does not rebuild the stored mesh when Rows / Columns change, 989), 12 bytes
 (zeros, `0d 0d`), then per vertex row-major ten big-endian `f32`: position, handles top, right,
 bottom, left as fractions of the layer (H: or of the comp), outward border handles (0, 0); Rows /
@@ -721,7 +726,7 @@ bytes 20-27 / 28-35, `fdta`) only the bytes below changed.
 | frame count start | `nhed` byte 14 (`nnhd` byte 20) | 2 for a count from 0 (base), 1 for a count from 1 | 630 | E (one value each) |
 
 The audio sample rate of the project is `adfr` (`f64` 48 000 in every case, not varied). API:
-`ProjectSettings::read` (`TimeDisplay`, `WorkingSpace`). Test: `tests/it/container/export_cases.rs`. The
+`ProjectSettings::read` (`TimeDisplay`, `WorkingSpace`). Test: `tests/it/container/cases_600.rs`. The
 fixture of 624 is not in the repository: its working-space JSON holds the profile data After
 Effects embeds for that space.
 
@@ -746,7 +751,7 @@ switch group per style, `<style>/enabled` (`dropShadow`, `innerShadow`, `outerGl
 | popups, checkboxes | class (4, 4), 1-based / 1.0 when on. Blend Mode (`mode2`, `highlightMode`, `shadowMode`): Photoshop's menu with its separators, 1 Normal, 2 Dissolve, 4 Darken, 5 Multiply, 6 Color Burn, 7 Linear Burn, 8 Darker Color, 10 Lighten, 11 Screen, 12 Color Dodge, 13 Linear Dodge, 14 Lighter Color, 16 Overlay, 17 Soft Light, 18 Hard Light, 19 Vivid Light, 20 Linear Light, 21 Pin Light, 22 Hard Mix, 24 Difference, 25 Exclusion, 27 Hue, 28 Saturation, 29 Color, 30 Luminosity, 32 Subtract, 33 Divide (3, 9, 15, 23, 26, 31 render Normal); Inner Glow Source 1 Edge, 2 Center; Stroke Position 1 Outside, 2 Inside, 3 Center; Bevel Style 1-5 Outer Bevel, Inner Bevel, Emboss, Pillow Emboss, Stroke Emboss (2 = default Inner Bevel); Color Type, Technique, Bevel Technique and Direction, Gradient Style 1-based in menu order | 978 (mode sweep rendered at 16 bpc), 979, 980, 977 | V (modes, Source, Position), E (the rest) |
 | Gradient Overlay Offset | 2 components as shown, class (4, 6) | 977 | V (stored), H (unit) |
 | keys | the plain 48-byte records (D.2), `tdb4@5` 1 -> 0, `@68` 1 | 976 | V |
-| expressions | as on effect parameters: `tdb4@120` 1, the text before `tdum` | read-back of an export (`export-tests\styles\s1`) | V |
+| expressions | as on effect parameters: `tdb4@120` 1, the text before `tdum` | read-back test s1 (`export-tests\styles\s1`) | V |
 | gradients | `<style>/gradient` is a `GCst` list, not decoded | - | ? |
 
 At 32 bpc After Effects renders the modes 6, 7, 11, 12, 16-22 and 25 of a style as Normal (978);

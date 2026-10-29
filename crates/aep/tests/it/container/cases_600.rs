@@ -1,6 +1,6 @@
-//! Cases 600-610 (sessions X1 / X2): a renamed effect instance and a
-//! composition that shows two precompositions. Every expected value is the one the case was made
-//! with (its MANIFEST row).
+//! Cases of the 600 series (sessions X1 / X2): a renamed effect instance, a composition that shows
+//! two precompositions, image sequences, project settings, a conformed clip and more still types.
+//! Every expected value is the one the case was made with (its MANIFEST row).
 
 use crate::container::helpers::open;
 use effectcraft_aep::Project;

@@ -280,7 +280,7 @@ fn report_character_extras(doc: &TextDocument, what: &str, col: &mut Collector) 
 
 /// The stored justification is relative to the paragraph direction: in a right-to-left paragraph
 /// After Effects lays "left" (0) and "justify, last line left" (3) out flush right and "right"
-/// (1, 4) flush left (export test t7: point and box text with all seven codes; 2, 5 and 6 are
+/// (1, 4) flush left (read-back test t7: point and box text with all seven codes; 2, 5 and 6 are
 /// the same in both directions). EffectCraft's justification is visual, so the two pairs swap.
 fn justify(j: Justification, rtl: bool, what: &str, col: &mut Collector) -> Justify {
     match j {

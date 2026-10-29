@@ -252,7 +252,7 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
     if crate::panels::delete_items::guard(app, id, &params) {
         return Ok(json!({"dialog": "deleteItems"}));
     }
-    // An After Effects conversion with a path that loses something asks first (the menu's file
+    // An After Effects import with a path that loses something asks first (the menu's file
     // dialog asks in `run_with_picked`).
     if params.get("path").is_some() && crate::panels::aep_losses::guard(app, id, &params)? {
         return Ok(json!({"dialog": "aepLosses"}));

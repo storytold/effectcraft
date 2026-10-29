@@ -256,15 +256,16 @@ fn stored_footage_paths_follow_the_document_path_policy() {
                 _ => None,
             })
             .unwrap_or_else(|| panic!("{name}: no footage"));
-        assert_eq!(footage.missing, name != "beside", "{name}");
-        if name == "beside" {
+        let beside = name == "beside";
+        assert_eq!(footage.missing, !beside, "{name}");
+        if beside {
             assert_eq!(std::path::Path::new(&footage.path), dir.join("clip.png"));
         } else {
             // The session follows the imported path as stored in the .aep.
             assert!(s.stored_path(&footage.path).is_err(), "{name}");
-            let r = s.execute("footage.check", json!({"wait": true})).unwrap();
-            assert_eq!(r["missing"].as_u64(), Some(1), "{name}: {r}");
         }
+        let r = s.execute("footage.check", json!({"wait": true})).unwrap();
+        assert_eq!(r["missing"].as_u64(), Some(u64::from(!beside)), "{name}: {r}");
         for p in rec.0.lock().unwrap().iter() {
             assert!(p.starts_with(&local), "{name}: looked at {p}");
         }

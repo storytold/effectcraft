@@ -1,5 +1,5 @@
 //! Parameter defaults in the form After Effects writes when it saves a project it opened (the
-//! re-saves of export tests e1 and e2): point defaults in percent of the layer instead of
+//! re-saves of read-back tests e1 and e2): point defaults in percent of the layer instead of
 //! fractions, and a popup default slot of 0. Simulated by patching our own fixtures.
 
 use effectcraft_aep::import::{ImportOptions, import};

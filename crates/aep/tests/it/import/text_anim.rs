@@ -183,7 +183,7 @@ fn paragraph_settings_arrive() {
     assert_eq!(skip!(para("538-text-point-HHHH-normal-ref.aep")).composer, Composer::SingleLine);
     assert_eq!(skip!(para("569-text-direction-rtl.aep")).direction, Direction::Rtl);
     // 569 stores "left" (0) in a right-to-left paragraph: After Effects lays it out flush right
-    // (export test t7), so it arrives as visual right.
+    // (read-back test t7), so it arrives as visual right.
     assert_eq!(skip!(para("569-text-direction-rtl.aep")).justify, Justify::Right);
     assert_eq!(skip!(para("556-text-autohyphenate-off.aep")).justify, Justify::Left);
     assert_eq!(skip!(para("565-text-justify-fullleft.aep")).justify, Justify::JustifyLastLeft);

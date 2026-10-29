@@ -393,7 +393,7 @@ impl<'f, 'a> EffectParam<'f, 'a> {
             ParamKind::Point => {
                 let p = [f64::from(be_i32(self.pard, 56)?) / 65536.0, f64::from(be_i32(self.pard, 60)?) / 65536.0];
                 // A fresh instance stores fractions of the layer (0.5, 0.5); After Effects' save of
-                // a project it opened stores percent (50, 50: the re-saves of export tests e1 and
+                // a project it opened stores percent (50, 50: the re-saves of read-back tests e1 and
                 // e2, where Gradient Ramp's Start and End and every other point default came back
                 // as 50 / 0 and 50 / 100). Point
                 // defaults lie inside the layer, so a component beyond 1 tells percent.
