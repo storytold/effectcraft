@@ -1,6 +1,6 @@
 # Localization parity
 
-> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-23 · **Change:** minor (Georgian: menus, panels and effect names; missing strings show in English; `missing_translations_report` lists them) · **Target:** Adobe After Effects 2026
+> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-29 · **Change:** minor (German effect names, from After Effects 2026's German interface; Georgian: menus, panels and effect names; missing strings show in English; `missing_translations_report` lists them) · **Target:** Adobe After Effects 2026
 
 How much of EffectCraft's interface is translated, language by language, compared with After
 Effects. [gaps.md](gaps.md) gap 16 and workstream G9 hold the work;
@@ -27,7 +27,9 @@ interface; Arabic and Hebrew text *in layers* is supported through its Middle Ea
   Brazilian Portuguese (695) and Czech (518), counted at this tree. Georgian has every row the
   Simplified Chinese catalog has, plus 191 for panels converted to the catalog.
 - **Effect names:** `crates/ui-egui/src/i18n/effects.rs`, keyed by **effect id**, in Simplified
-  Chinese and Georgian (307 rows, one per effect in the registry, plus its 21 categories). The registry's
+  Chinese, Georgian and German (307 rows each, one per effect in the registry, plus their 21
+  categories; German's were read from the installed After Effects 2026 German interface). The
+  registry's
   English name stays the effect's identity: `effect.list`, `effect.apply {"effect": …}`, scripts
   and expressions match on it, and the property tree stores it as the effect group's name. Only
   the drawing — the Effect menu, Effect Controls, the Timeline and Effects & Presets — goes
@@ -36,9 +38,10 @@ interface; Arabic and Hebrew text *in layers* is supported through its Middle Ea
   in Effect Controls stays verbatim. Adding a language there is two tables and one arm, and no
   panel changes: Traditional Chinese and Japanese have their tables in place and empty, so those
   languages draw English until a translator fills them (the Japanese set for #821 is what that
-  slot is for). Each language decides for itself which names stay English — Adobe's Japanese
-  interface leaves the `CC`, `VR` and `OCIO` sets in English while its Chinese one translates
-  them — so a row repeating the English name is a choice, not a missing row.
+  slot is for); German's table is filled. Each language decides for itself which names stay
+  English — Adobe's Japanese interface leaves the `CC`, `VR` and `OCIO` sets in English while
+  its Chinese one translates them — so a row repeating the English name is a choice, not a
+  missing row.
 - **Missing strings:** a string with no row in the interface language shows in English, and no
   test, build or release fails on a missing translation. The `missing_translations_report` test
   (`crates/ui-egui/src/i18n.rs`) prints, per language, the fixed menu entries, panel strings, effect
@@ -65,7 +68,7 @@ Measured 10 October 2026 at `origin/main` 1446e27 and recounted on 12 October at
 `i18n/ui.rs`; menu rows 624 per language, so the share is computed from 624 rather than 618). The
 denominator, **≈ 3,900 user-visible strings**, was estimated on 10 October and is kept: 618 fixed menu entries + ≈ 1,320 capitalised UI
 literals in `crates/ui-egui/src` outside tests and catalogs (a regex count, so an upper bound) +
-≈ 1,650 distinct effect parameter names + 306 effect names. Engine messages are not counted, so
+≈ 1,650 distinct effect parameter names + 307 effect names. Engine messages are not counted, so
 the true percentages are slightly lower.
 
 | Language | Code | UI strings translated | Dialogs / tooltips / help | Script support | Native review | Status | To `full` |
@@ -79,7 +82,7 @@ the true percentages are slightly lower.
 | Portuguese (Brazil) | `pt-br` | 1,324 (≈ 34%): menus 629 rows, panels 695 | Panels and dialogs at the Chinese catalogs' source list; the six keys main added after that count are translated too; AI-assisted, not yet native-speaker proofread | Latin, fine | no | partial | independent native review |
 | Indonesian | `id` | 0 | — | Latin, fine | no | none (After Effects: none) | 8–12 h + review |
 | Japanese | `ja` | 1,322 (≈ 34%): menus 629 rows, panels 693 | Panels and dialogs partly | Japanese system fallback; vertical text and Tate-Chu-Yoko in text layers; IME | no | partial | 6–9 h + review |
-| German | `de` | 624 (≈ 16%) | Menus only (open PR #666 adds interface translations) | Latin, fine | no | menus only | 7–10 h + review |
+| German | `de` | 624 (≈ 16%) | Menus only (open PR #666 adds interface translations); effect names translated (307) and their parameter names not | Latin, fine | no | menus only | 7–10 h + review |
 | Korean | `ko` | 0 | — | Hangul fallback probe added (#599, closed); not checked on macOS here | no | none | 9–13 h + review |
 | Vietnamese | `vi` | 0 | — | Latin with stacked diacritics; untested | no | none (After Effects: none) | 8–12 h + review |
 
@@ -118,3 +121,4 @@ can give; only Georgian, contributed by a native speaker (#1843), has had it.
 | 2026-10-10 | major | First localization parity document: catalog rows counted for all six languages, the twelve-language table, After Effects' 11 shipped languages from its bundle |
 | 2026-10-11 | minor | Ukrainian panel catalog brought level with the Chinese ones (495 of 496 rows, counted at this commit); its share rises to ≈ 29%. The other languages' panel counts are the 10 October measurement |
 | 2026-10-13 | minor | Effect names and the generated Effect menu leave English: `i18n/effects.rs` adds 306 rows keyed by effect id (Simplified Chinese, from After Effects 2026's interface and Adobe's Chinese documentation for the `CC` series) and the 21 category names. Parameter names are still English; no other language has rows |
+| 2026-10-17 | minor | German effect names and the generated Effect menu: `i18n/effects.rs` adds 307 rows keyed by effect id (from the installed After Effects 2026 German interface) and the 21 category names, and `catalog()` resolves `de`. The Simplified Chinese table recounts to 307 rows |
