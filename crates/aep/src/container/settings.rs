@@ -169,22 +169,56 @@ mod tests {
         assert_eq!(base64_decode("Zm9v*"), None);
     }
 
+    /// A profile with one tag, `desc`, holding `body`.
+    fn profile(body: &[u8]) -> Vec<u8> {
+        let mut icc = vec![0u8; 128];
+        icc.extend_from_slice(&1u32.to_be_bytes());
+        icc.extend_from_slice(b"desc");
+        icc.extend_from_slice(&144u32.to_be_bytes());
+        icc.extend_from_slice(&u32::try_from(body.len()).unwrap().to_be_bytes());
+        icc.extend_from_slice(body);
+        icc
+    }
+
+    /// A version 2 `desc` body.
+    fn desc(text: &str) -> Vec<u8> {
+        let mut b = b"desc    ".to_vec();
+        b.extend_from_slice(&u32::try_from(text.len() + 1).unwrap().to_be_bytes());
+        b.extend_from_slice(text.as_bytes());
+        b.push(0);
+        b
+    }
+
+    /// A version 4 `mluc` body with one record.
+    fn mluc(text: &str) -> Vec<u8> {
+        let units: Vec<u8> = text.encode_utf16().flat_map(u16::to_be_bytes).collect();
+        let mut b = b"mluc    ".to_vec();
+        b.extend_from_slice(&1u32.to_be_bytes());
+        b.extend_from_slice(&12u32.to_be_bytes());
+        b.extend_from_slice(b"enUS");
+        b.extend_from_slice(&u32::try_from(units.len()).unwrap().to_be_bytes());
+        b.extend_from_slice(&28u32.to_be_bytes());
+        b.extend_from_slice(&units);
+        b
+    }
+
     #[test]
-    fn the_description_of_our_own_profile_is_read() {
-        let icc = crate::export::icc::rec709_gamma24();
-        assert_eq!(icc_description(&icc).as_deref(), Some("Rec.709 Gamma 2.4 (EffectCraft)"));
+    fn the_description_of_a_profile_is_read() {
+        assert_eq!(icc_description(&profile(&desc("Rec.709 Gamma 2.4"))).as_deref(), Some("Rec.709 Gamma 2.4"));
+        assert_eq!(icc_description(&profile(&mluc("sRGB IEC61966-2.1"))).as_deref(), Some("sRGB IEC61966-2.1"));
+        assert_eq!(icc_description(&profile(&desc(""))), None);
     }
 
     #[test]
     fn a_cut_or_damaged_profile_gives_no_description() {
-        let icc = crate::export::icc::rec709_gamma24();
+        let icc = profile(&mluc("Rec.709 Gamma 2.4"));
         for n in 0..icc.len() {
             let mut cut = icc.get(..n).unwrap_or_default().to_vec();
             let _ = icc_description(&cut);
             cut.iter_mut().for_each(|b| *b = 0xff);
             let _ = icc_description(&cut);
         }
-        assert_eq!(icc_description(&icc[..140]), None);
+        assert_eq!(icc_description(&icc[..150]), None);
         assert_eq!(icc_description(&[]), None);
     }
 }

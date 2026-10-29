@@ -199,51 +199,75 @@ impl crate::Services for Recording {
     }
 }
 
+/// `bytes` with the footage path of every file item (`Als2/alas`, key `fullpath`) set to `path`.
+fn with_footage_path(bytes: &[u8], path: &str) -> Vec<u8> {
+    fn set(chunks: &mut [effectcraft_aep::Chunk<'_>], value: &str, n: &mut usize) {
+        for c in chunks {
+            if c.id == *b"alas" {
+                let json = c.bytes().unwrap().to_vec();
+                let key = b"\"fullpath\":\"";
+                let at = json.windows(key.len()).position(|w| w == key).unwrap() + key.len();
+                let mut end = at;
+                while json[end] != b'"' {
+                    end += if json[end] == b'\\' { 2 } else { 1 };
+                }
+                let edited = [&json[..at], value.as_bytes(), &json[end..]].concat();
+                *c = effectcraft_aep::Chunk::data(*b"alas", edited);
+                *n += 1;
+            } else if let effectcraft_aep::Body::List { children, .. } | effectcraft_aep::Body::Chunks(children) = &mut c.body {
+                set(children, value, n);
+            }
+        }
+    }
+    let mut file = effectcraft_aep::parse(bytes).unwrap();
+    let quoted = serde_json::to_string(path).unwrap();
+    let mut n = 0;
+    set(&mut file.chunks, &quoted[1..quoted.len() - 1], &mut n);
+    assert!(n > 0, "no footage path");
+    effectcraft_aep::write(&file).unwrap()
+}
+
 #[test]
 fn stored_footage_paths_follow_the_document_path_policy() {
-    // An .aep whose footage points to other computers and to a file beside it, imported from a
-    // folder that is not the working directory: the foreign paths are never looked at (not even by
-    // the dry run) and arrive missing, the relative one is taken from the .aep's folder.
+    // An .aep whose footage points to another computer or to a file beside it, imported from a
+    // folder that is not the working directory: a foreign path is never looked at (not even by the
+    // dry run) and arrives missing, the relative one is taken from the .aep's folder.
     use effectcraft_project::{Footage, ItemKind};
+    let Some(bytes) = common::try_fixture("126-footage-png-layer.aep") else { return };
     let root = std::env::temp_dir().join(format!("ec-aep-doc-path-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     let dir = root.join("job");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("clip.png"), b"x").unwrap();
-    let stored = [("unc", r"\\192.0.2.1\share\x.png"), ("url", "file://192.0.2.1/s/x.png"), ("beside", "clip.png")];
-    let mut src = Session::default();
-    for (name, path) in stored {
-        let f = Footage { path: path.into(), width: 64, height: 48, has_video: true, ..Default::default() };
-        std::sync::Arc::make_mut(&mut src.project).add_item(name, crate::color::Label::None, None, ItemKind::Footage(f));
-    }
-    let aep = dir.join("p.aep");
-    src.execute("file.exportAep", json!({"path": aep.to_string_lossy(), "allowLosses": true})).unwrap();
-
-    let rec = std::sync::Arc::new(Recording::default());
-    let mut s = Session { services: rec.clone(), ..Default::default() };
-    s.execute("file.importAep", json!({"path": aep.to_string_lossy(), "allowLosses": true, "dryRun": true})).unwrap();
-    s.execute("file.importAep", json!({"path": aep.to_string_lossy(), "allowLosses": true})).unwrap();
-    let footage = |name: &str| -> Footage {
-        s.project
+    let local = root.to_string_lossy().into_owned();
+    for (name, stored) in [("unc", r"\\192.0.2.1\share\x.png"), ("url", "file://192.0.2.1/s/x.png"), ("beside", "clip.png")] {
+        let aep = dir.join(format!("{name}.aep"));
+        std::fs::write(&aep, with_footage_path(&bytes, stored)).unwrap();
+        let rec = std::sync::Arc::new(Recording::default());
+        let mut s = Session { services: rec.clone(), ..Default::default() };
+        s.execute("file.importAep", json!({"path": aep.to_string_lossy(), "allowLosses": true, "dryRun": true})).unwrap();
+        s.execute("file.importAep", json!({"path": aep.to_string_lossy(), "allowLosses": true})).unwrap();
+        let footage: Footage = s
+            .project
             .items
             .values()
             .find_map(|i| match &i.kind {
-                ItemKind::Footage(f) if i.name == name => Some(f.clone()),
+                ItemKind::Footage(f) => Some(f.clone()),
                 _ => None,
             })
-            .unwrap_or_else(|| panic!("no footage {name}"))
-    };
-    for (name, _) in stored {
-        assert_eq!(footage(name).missing, name != "beside", "{name}");
-    }
-    assert_eq!(std::path::Path::new(&footage("beside").path), dir.join("clip.png"));
-    // The session follows the imported paths as stored in the .aep.
-    assert!(s.stored_path(&footage("unc").path).is_err());
-    let r = s.execute("footage.check", json!({"wait": true})).unwrap();
-    assert_eq!(r["missing"].as_u64(), Some(2), "{r}");
-    let local = root.to_string_lossy().into_owned();
-    for p in rec.0.lock().unwrap().iter() {
-        assert!(p.starts_with(&local), "looked at {p}");
+            .unwrap_or_else(|| panic!("{name}: no footage"));
+        assert_eq!(footage.missing, name != "beside", "{name}");
+        if name == "beside" {
+            assert_eq!(std::path::Path::new(&footage.path), dir.join("clip.png"));
+        } else {
+            // The session follows the imported path as stored in the .aep.
+            assert!(s.stored_path(&footage.path).is_err(), "{name}");
+            let r = s.execute("footage.check", json!({"wait": true})).unwrap();
+            assert_eq!(r["missing"].as_u64(), Some(1), "{name}: {r}");
+        }
+        for p in rec.0.lock().unwrap().iter() {
+            assert!(p.starts_with(&local), "{name}: looked at {p}");
+        }
     }
     let _ = std::fs::remove_dir_all(&root);
 }

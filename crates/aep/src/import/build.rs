@@ -641,9 +641,8 @@ fn apply_timing(l: &mut Layer, h: &LayerHeader, tm: &TimeMap) {
 }
 
 /// After Effects ends a layer of timed footage (a clip, a sequence, a sound) at its source's end
-/// when it opens a project, whatever out point the file stores (export test f1: layers written
-/// 5 s long over a 1 s clip, a 3-frame sequence and a 1 s WAV read back 1, 0.1 and 1 s long; R31
-/// of aep-export.md). A remapped or looped layer keeps its out point, and so does one that runs
+/// when it opens a project, whatever out point the file stores (f1: layers stored 5 s long over a
+/// 1 s clip, a 3-frame sequence and a 1 s WAV read back 1, 0.1 and 1 s long). A remapped or looped layer keeps its out point, and so does one that runs
 /// less than a composition frame past (`frame`): a clip's duration need not be whole frames.
 fn end_at_source(project: &Project, l: &mut Layer, frame: Tick) {
     let LayerSource::Footage { item } = &l.source else { return };

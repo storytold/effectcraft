@@ -1,6 +1,6 @@
 [package]
 name = "effectcraft-aep"
-description = "After Effects projects: the .aep (RIFX 'Egg!') / .aepx container as a lossless chunk tree with a typed view, import into an EffectCraft project and export back to .aep by editing a generated template; each reports everything it does not carry over"
+description = "After Effects projects: the .aep (RIFX 'Egg!') / .aepx container as a lossless chunk tree with a typed view, and its import into an EffectCraft project, which reports everything it does not carry over"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

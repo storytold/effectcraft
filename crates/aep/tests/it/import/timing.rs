@@ -1,5 +1,5 @@
 //! A layer of timed footage ends at its source's end, as After Effects ends it when it opens a
-//! project (export test f1, aep-export R31): the three-frame OpenEXR sequence layer of 603 and the
+//! project (f1): the three-frame OpenEXR sequence layer of 603 and the
 //! 1 s WAV layer of 351 with their out points moved to 5 s import as long as their source; the
 //! remapped layer of 354 keeps its out point.
 

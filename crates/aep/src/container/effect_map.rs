@@ -1,8 +1,7 @@
-//! The effect table shared by the importer (`crate::import`) and the exporter
-//! (`crate::export`): an After Effects effect (its match name) and its parameters (by
+//! The effect table of the importer (`crate::import`): an After Effects effect (its match name) and its parameters (by
 //! their index in `parT`) map to an EffectCraft effect, a parameter id and a unit conversion.
 //! Plain data; the evidence for each row is in `docs/aep-format.md` 3.7 and the case numbers in
-//! the comments. The importer reads a file through it, the exporter writes the inverse.
+//! the comments.
 
 use crate::container::effects::ParamKind;
 use ParamKind as K;
@@ -1028,16 +1027,6 @@ pub const GLOW_MIDPOINT_MAX: f64 = 0.990_005_493_164_062_5;
 pub fn popup_key(item: &str) -> String {
     let s = item.trim().to_ascii_lowercase();
     s.strip_suffix(" channel").map(str::to_string).unwrap_or(s)
-}
-
-/// The table row of an After Effects match name.
-pub fn by_match_name(match_name: &str) -> Option<&'static EffectMap> {
-    EFFECTS.iter().find(|m| m.match_name == match_name)
-}
-
-/// The table row of an EffectCraft effect id.
-pub fn by_effect(effect: &str) -> Option<&'static EffectMap> {
-    EFFECTS.iter().find(|m| m.effect == effect)
 }
 
 /// The EffectCraft parameters Hue/Saturation's master values (`Extra::HueSaturation`) go to,

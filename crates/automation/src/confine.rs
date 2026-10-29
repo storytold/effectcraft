@@ -75,7 +75,6 @@ const WRITES: &[(&str, &[&str])] = &[
     ("file.saveCopyAsXml", &["path"]),
     ("file.collectFiles", &["folder"]),
     ("file.exportLottie", &["path"]),
-    ("file.exportAep", &["path"]),
     ("comp.saveFrameAs", &["path"]),
     ("comp.saveFrameAsPsd", &["path"]),
     ("comp.saveFrameAsExr", &["path"]),

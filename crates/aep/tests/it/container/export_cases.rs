@@ -1,4 +1,4 @@
-//! Cases made for the exporter (session X1 / X2, 600-610): a renamed effect instance and a
+//! Cases 600-610 (sessions X1 / X2): a renamed effect instance and a
 //! composition that shows two precompositions. Every expected value is the one the case was made
 //! with (its MANIFEST row).
 

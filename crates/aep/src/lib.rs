@@ -1,17 +1,15 @@
-//! After Effects projects: the `.aep` / `.aepx` container, import into an EffectCraft project and
-//! export back to `.aep`, in one crate (like `effectcraft-lottie`).
+//! After Effects projects: the `.aep` / `.aepx` container and its import into an EffectCraft
+//! project, in one crate (like `effectcraft-lottie`).
 //!
 //! - [`container`]: the RIFX `Egg!` chunk tree (lossless, byte-identical round trip) and its typed,
 //!   read-only view. Its API is re-exported at the crate root.
 //! - [`import`]: maps the typed view into an EffectCraft project and reports what it drops.
-//! - [`export`]: writes an EffectCraft project as an `.aep` by editing an embedded template.
 //!
-//! See `docs/aep-format.md`, `docs/aep-import.md` and `docs/aep-export.md`.
+//! See `docs/aep-format.md` and `docs/aep-import.md`.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 pub mod container;
-pub mod export;
 pub mod import;
 
 pub use container::{
