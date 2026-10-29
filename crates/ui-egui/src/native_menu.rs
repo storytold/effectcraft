@@ -19,7 +19,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::EffectcraftApp;
-use effectcraft_engine::menus::{MenuNode, menu_bar};
+use effectcraft_engine::menus::MenuNode;
 
 /// What macOS performs itself (no command dispatch).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
@@ -257,7 +257,7 @@ pub fn build(app: &EffectcraftApp) -> NativeMenu {
         }
     }
     let mut menus = vec![];
-    rec(app, menu_bar(), "m", &mut menus);
+    rec(app, &crate::remote_menu::bar(app), "m", &mut menus);
     NativeMenu { menus }
 }
 

@@ -9,6 +9,9 @@ macro_rules! uic {
 /// UI-only commands (not in the AE menus; shortcuts and the command palette).
 pub const UI_COMMANDS: &[UiCommand] = &[
     uic!("window.dockAction", "Docking Action", [], None),
+    uic!("file.openRemote", "Open Remote Project...", [], None),
+    uic!("file.importRemote", "Import from Remote...", [], None),
+    uic!("file.saveAsRemote", "Save As Remote...", [], None),
     uic!("playback.ramPreview", "Preview (Numpad 0)", [], Some("Num0")),
     uic!("playback.preview.shiftSpacebar", "Preview (Shift+Spacebar)", [], Some("Shift+Space")),
     uic!("playback.preview.shiftNumpad0", "Preview (Shift+Numpad 0)", [], Some("Shift+Num0")),

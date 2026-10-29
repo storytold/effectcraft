@@ -177,6 +177,7 @@ pub fn media_browser(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let scroll = widgets::PanelScroll::begin(ui, egui::Id::unique("mb-scroll"), list);
     let lp = p.with_clip_rect(list);
     let mut actions: Vec<(&str, Value)> = vec![];
+    let mut open_project: Option<String> = None;
     for (i, e) in entries.iter().enumerate() {
         let r = Rect::from_min_size(
             pos2(list.min.x + 8.0 + (i % cols) as f32 * tile.x, list.min.y + 8.0 + (i / cols) as f32 * tile.y - scroll.offset),
@@ -215,6 +216,8 @@ pub fn media_browser(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         if resp.double_clicked() {
             if e.is_dir {
                 actions.push(("mediaBrowser.go", json!({"path": e.path})));
+            } else if e.kind == Some("project") && app.hooks.remote.is_some() {
+                open_project = Some(e.path.clone());
             } else if e.kind.is_some() {
                 actions.push(("mediaBrowser.import", json!({"paths": [e.path]})));
             }
@@ -229,6 +232,10 @@ pub fn media_browser(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 if let Err(e) = crate::menus::invoke(app, &ctx, "mediaBrowser.copySourcePath", json!({"path": e.path})) {
                     app.ui.status = e;
                 }
+                ui.close();
+            }
+            if e.kind == Some("project") && app.hooks.remote.is_some() && ui.button(tr("Open Project…")).clicked() {
+                open_project = Some(e.path.clone());
                 ui.close();
             }
             if !e.is_dir && ui.button(tr("Import")).clicked() {
@@ -254,6 +261,12 @@ pub fn media_browser(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     }
     for (id, p) in actions {
         kit::exec(app, id, p);
+    }
+    // Through `invoke`: the unsaved-changes prompt comes first, then the host opens it.
+    if let Some(path) = open_project
+        && let Err(e) = crate::menus::invoke(app, &ctx, "file.open", json!({"path": path}))
+    {
+        app.ui.status = e;
     }
 }
 

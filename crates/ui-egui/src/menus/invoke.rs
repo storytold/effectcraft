@@ -252,6 +252,17 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
     if crate::panels::delete_items::guard(app, id, &params) {
         return Ok(json!({"dialog": "deleteItems"}));
     }
+    // A host that opens projects itself (remote storage) gets every open by path, after the
+    // unsaved-changes prompt.
+    if let Some(path) = open_target(app, id, &params) {
+        return app.open_project_path(&path);
+    }
+    if let Some(r) = crate::panels::remote_dialog::command(app, id, &params) {
+        if let Err(e) = &r {
+            app.ui.status = e.clone();
+        }
+        return r;
+    }
     // J / K and Select All Keyframes act on what the Timeline shows (its revealed properties).
     if matches!(id, "time.nextKey" | "time.previousKey" | "keys.selectAll")
         && ["visible", "layers", "layer", "prop"].iter().all(|k| params.get(*k).is_none())
@@ -689,4 +700,20 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
         }
     }
     Ok(Value::Null)
+}
+
+/// The project `file.open` / `file.openRecent` is asked to open, when the host opens projects
+/// itself ([`crate::Hooks::open_project`]).
+fn open_target(app: &EffectcraftApp, id: &str, params: &Value) -> Option<String> {
+    app.hooks.open_project.as_ref()?;
+    let recent = &app.session.prefs.recent_projects;
+    match id {
+        "file.open" => params.get("path").and_then(Value::as_str).map(str::to_string),
+        "file.openRecent" => match (params.get("path").and_then(Value::as_str), params.get("index").and_then(Value::as_u64)) {
+            (Some(p), _) => Some(p.to_string()),
+            (None, Some(i)) => recent.get(usize::try_from(i).ok()?).cloned(),
+            _ => recent.first().cloned(),
+        },
+        _ => None,
+    }
 }

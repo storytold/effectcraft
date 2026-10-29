@@ -145,11 +145,15 @@ impl Browser for WebBrowser {
     fn places(&self) -> Vec<(String, String)> {
         let mut v = vec![("Browser Storage".to_string(), STORAGE.to_string())];
         v.extend(state().open.iter().map(|n| (n.clone(), format!("{FOLDERS}/{n}"))));
+        v.extend(crate::remote::mounts());
         v
     }
 
     fn list(&self, dir: &str, importable_only: bool) -> Result<Vec<Entry>, String> {
         let dir = if dir.len() > 1 { dir.trim_end_matches('/') } else { dir };
+        if let Some(r) = crate::remote::list_entries(dir, importable_only) {
+            return r;
+        }
         if dir == STORAGE || dir.starts_with(&format!("{STORAGE}/")) {
             return storage_tree().list(dir, importable_only);
         }
@@ -179,13 +183,25 @@ impl Browser for WebBrowser {
     }
 
     fn fetch(&self, paths: &[String], params: &Value) -> bool {
-        let missing: Vec<String> = paths.iter().filter(|p| p.starts_with(&format!("{FOLDERS}/")) && crate::files::get(p).is_none()).cloned().collect();
+        // Opened folders' files are read on demand, remote files fetched whole.
+        let missing: Vec<String> = paths
+            .iter()
+            .filter(|p| (p.starts_with(&format!("{FOLDERS}/")) || crate::remote::is_remote(p)) && crate::files::get(p).is_none())
+            .cloned()
+            .collect();
         if missing.is_empty() {
             return true;
         }
         let params = params.clone();
         wasm_bindgen_futures::spawn_local(async move {
             for p in &missing {
+                if crate::remote::is_remote(p) {
+                    if let Err(msg) = crate::remote::fetch_file(p).await {
+                        crate::post(move |app| app.ui.status = msg);
+                        return;
+                    }
+                    continue;
+                }
                 match wasm_bindgen_futures::JsFuture::from(read(p)).await {
                     Ok(b) => crate::files::put(p, js_sys::Uint8Array::new(&b).to_vec().into()),
                     Err(e) => {

@@ -1871,6 +1871,7 @@ version = "0.18.0"
 name = "effectcraft-web"
 version = "0.18.0"
 dependencies = [
+ "chrono",
  "effectcraft-engine",
  "effectcraft-export",
  "effectcraft-expr",
@@ -1882,6 +1883,7 @@ dependencies = [
  "egui",
  "js-sys",
  "log",
+ "roxmltree",
  "serde",
  "serde_json",
  "wasm-bindgen",

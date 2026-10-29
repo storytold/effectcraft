@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use effectcraft_engine::Session;
 
-use crate::{api, audio, browse, diskcache, files, frames, persist, storage, worker};
+use crate::{api, audio, browse, diskcache, files, frames, persist, remote, remote_open, storage, worker};
 use effectcraft_ui_egui::EffectcraftApp;
 use serde_json::json;
 use wasm_bindgen::prelude::*;
@@ -58,13 +58,21 @@ pub fn repaint() {
     });
 }
 
+/// Ask for a UI frame after `d`.
+pub fn repaint_after(d: std::time::Duration) {
+    CTX.with(|c| {
+        if let Some(c) = c.borrow().as_ref() {
+            c.request_repaint_after(d);
+        }
+    });
+}
+
 /// Open a project or import media from table paths (picked or dropped files).
 pub(crate) fn open_or_import(app: &mut EffectcraftApp, paths: Vec<String>) {
     let (projects, media): (Vec<String>, Vec<String>) = paths.into_iter().partition(|p| p.to_ascii_lowercase().ends_with(".ecproj"));
-    if let Some(p) = projects.last()
-        && let Err(e) = app.session.execute("file.open", json!({"path": p}))
-    {
-        app.ui.status = e.to_string();
+    if let Some(p) = projects.last() {
+        // The result is in the status line (`open_project_path` sets it).
+        let _ = app.open_project_path(p);
     }
     if !media.is_empty() {
         match app.session.execute("file.import", json!({"paths": media})) {
@@ -220,6 +228,9 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
     };
     api::set_info("storage", json!({"backend": persist::backend(), "entries": stored, "loadMs": t0.elapsed().as_secs_f64() * 1000.0}));
     audio::install_unlock();
+    // Same-origin WebDAV mounts (optional `./effectcraft-config.json`).
+    remote::load_config().await;
+    api::set_info("remote", json!(remote::enabled()));
     browse::restore();
     diskcache::init();
     storage::refresh();
@@ -271,6 +282,10 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
                     app.offer_recovery(r);
                 }
                 install_hooks(&mut app);
+                remote::install_hooks(&mut app);
+                if restored {
+                    remote_open::refetch_restored(&app);
+                }
                 // Viewer frames render in frame workers (`?frameworkers=N`, 0 or `?noworkers`:
                 // on the page's thread), each on its own WebGPU device where the browser has
                 // WebGPU in workers (`?nogpuworkers`: their CPU).

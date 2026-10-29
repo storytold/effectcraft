@@ -127,12 +127,18 @@ pub(crate) fn entry_enabled(app: &EffectcraftApp, e: &MenuEntry) -> bool {
     if e.command == "window.panel" {
         return true;
     }
+    match e.command.as_str() {
+        "file.openRemote" | "file.importRemote" => return true,
+        "file.saveAsRemote" => return app.session.is_enabled("file.saveAs"),
+        _ => {}
+    }
     app.session.is_enabled(&e.command)
 }
 
 /// Every menu entry, flattened with its submenu path.
 pub fn menu_items(app: &EffectcraftApp) -> Vec<MenuItem> {
-    effectcraft_engine::menus::entries()
+    let bar = crate::remote_menu::bar(app);
+    crate::remote_menu::entries(&bar)
         .into_iter()
         .map(|(path, e)| MenuItem {
             id: e.command.clone(),

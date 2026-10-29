@@ -68,6 +68,8 @@ pub struct DialogState {
     pub gradient: super::gradient_editor::Draft,
     /// The user template the Delete Template prompt asks about: its id and name.
     pub delete_template: Option<(String, String)>,
+    /// The remote storage dialog.
+    pub remote: super::remote_dialog::RemoteDialog,
 }
 
 pub fn open_new_comp(app: &mut EffectcraftApp) {
@@ -279,6 +281,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context) {
         Dialog::DeleteItems => super::delete_items::show(app, ctx, &t),
         Dialog::GradientEditor => super::gradient_editor::show(app, ctx, &t),
         Dialog::DeleteTemplate => super::templates::show_delete(app, ctx, &t),
+        Dialog::Remote => super::remote_dialog::show(app, ctx, &t),
     }
 }
 

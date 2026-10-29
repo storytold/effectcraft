@@ -38,7 +38,8 @@ pub fn menu_bar(app: &mut EffectcraftApp, ui: &mut egui::Ui) {
     ui.horizontal_centered(|ui| {
         ui.add_space(6.0);
         egui::MenuBar::new().config(egui::containers::menu::MenuConfig::new().style(crate::widgets::menu_style)).ui(ui, |ui| {
-            for node in effectcraft_engine::menus::menu_bar() {
+            let bar = crate::remote_menu::bar(app);
+            for node in bar.iter() {
                 let MenuNode::Submenu { label, children } = node else { continue };
                 // The open title takes the open button's look while its menu is up (as in AE).
                 let inactive = ui.style().visuals.widgets.inactive;

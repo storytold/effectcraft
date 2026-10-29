@@ -57,6 +57,7 @@ mod ui_project_new_folder;
 mod ui_project_rows;
 mod ui_quick_offset;
 mod ui_ram_preview;
+mod ui_remote;
 mod ui_render_queue;
 mod ui_script_console;
 mod ui_scriptui;

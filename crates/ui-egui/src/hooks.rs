@@ -29,6 +29,18 @@ impl FileDialog {
 /// Called with the paths a [`FileDialog`] picked (empty: cancelled), from any thread.
 pub type DialogDone = Box<dyn FnOnce(Vec<String>) + Send>;
 
+/// The host's remote storage (the web build with an `effectcraft-config.json` that has mounts).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RemoteInfo {
+    /// The mounts as (name, path): the top level of the remote dialog.
+    pub mounts: Vec<(String, String)>,
+}
+
+impl RemoteInfo {
+    /// What `Browser::list` answers while a remote folder is still being read.
+    pub const LOADING: &'static str = "Loading…";
+}
+
 /// Host hooks provided by the native app (file pickers etc.).
 #[derive(Default)]
 pub struct Hooks {
@@ -38,6 +50,13 @@ pub struct Hooks {
     pub pick_files: Option<Box<dyn Fn(&[&str]) -> Vec<String>>>,
     pub pick_save: Option<Box<dyn Fn(&str) -> Option<String>>>,
     pub pick_open_project: Option<Box<dyn Fn() -> Option<String>>>,
+    /// Opens the project at a path the host has to prepare first (the web build fetches a project
+    /// from remote storage, with its media, before `file.open`). Used by
+    /// [`EffectcraftApp::open_project_path`]; without it the path opens with `file.open` directly.
+    pub open_project: Option<Box<dyn Fn(&str)>>,
+    /// The host has remote storage: File ▸ Open Remote Project…, Import from Remote… and Save As
+    /// Remote… appear and the local entries say "Local". `None`: the menus are unchanged.
+    pub remote: Option<RemoteInfo>,
     /// Opens the audio output for preview playback (the desktop app uses cpal).
     pub audio_device: Option<audio::AudioDeviceFactory>,
     /// Lists audio output devices (Settings ▸ Audio).

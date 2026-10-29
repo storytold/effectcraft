@@ -31,6 +31,11 @@ pub fn put(path: &str, data: Arc<[u8]>) {
     STORE.put_file(path, data, true);
 }
 
+/// Store a file fetched from remote storage: in the table, not persisted to browser storage.
+pub fn put_remote(path: &str, data: Arc<[u8]>) {
+    STORE.put_file(path, data, false);
+}
+
 pub fn get(path: &str) -> Option<Arc<[u8]>> {
     STORE.file(path)
 }
@@ -118,6 +123,10 @@ impl Services for WebServices {
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, format!("{path}: open it with File ▸ Open (or drop it on the page)")))
     }
     fn write_file(&self, path: &str, data: &[u8]) -> std::io::Result<()> {
+        // a path on a remote mount: uploaded to the server (writable mounts) or refused (read-only)
+        if let Some(r) = crate::remote_upload::write(path, data) {
+            return r;
+        }
         put(path, data.into());
         let quiet = {
             let mut q = QUIET.lock().unwrap_or_else(std::sync::PoisonError::into_inner);

@@ -27,6 +27,7 @@ pub mod native_menu;
 pub mod panels;
 mod pointer_wrap;
 pub mod prefs_live;
+mod remote_menu;
 pub mod state;
 pub mod theme;
 pub mod updates_ui;
@@ -54,7 +55,7 @@ mod hooks;
 #[cfg(test)]
 use app::{MAX_PENDING_SHOTS, SCREENSHOT_SETTLE_PASSES, SCREENSHOT_SETTLE_S, SCREENSHOT_TIMEOUT_S};
 pub use clock::AppClock;
-pub use hooks::{DialogDone, FileDialog, Hooks, SystemThemeFn};
+pub use hooks::{DialogDone, FileDialog, Hooks, RemoteInfo, SystemThemeFn};
 pub use state::ShotTarget;
 
 /// The root surface geometry of the last completed (non-discarded) UI pass.
@@ -144,6 +145,8 @@ pub enum Dialog {
     GradientEditor,
     /// Delete a user template from Home? (`panels::templates`).
     DeleteTemplate,
+    /// Open Remote Project / Import from Remote / Save As Remote (`panels::remote_dialog`).
+    Remote,
 }
 
 /// A non-blocking file dialog's answer for the command that asked (`menus::dialog_answered`).
