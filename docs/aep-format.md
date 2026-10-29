@@ -19,7 +19,7 @@ without any edit, the reference for save noise). The base project `000-base` is 
 these cases (369 `.aep`, and the `.aepx` of `000`, `058`, `060`, `110`, `124`) are the test fixtures. They
 are a few combined projects, one composition per case named like the case and rebuilt from the
 same recipe (`crates/aep/tests/fixtures/CASES.md`, the generator in `tools/` there), fetched by
-`cargo xtask aep-corpus` (pinned, sha256-verified) into `corpus/aep/`; `crates/aep/tests/common/mod.rs` hands a test its case as a project of its own cut from
+`cargo xtask aep-corpus` (pinned, sha256-verified) into `corpus/aep/`; `crates/aep/tests/it/common/mod.rs` hands a test its case as a project of its own cut from
 the combined file (or reads the folder in `EFFECTCRAFT_AEP_FIXTURES`), and a test whose fixture is
 missing prints `SKIPPED: fixture <name> missing` and passes. The tests named below run on them;
 the `.aepx` cases are one pair, `aepx-pair.aep` and `aepx-pair.aepx`. The container
@@ -117,12 +117,12 @@ counterpart (a name that is not 1 to 4 characters) are skipped with their conten
   size of the input.
 - Tests: `tests/aepx.rs` compares the five fixture pairs chunk by chunk and byte by byte, compares
   the typed view of both forms, and runs truncated, bit-flipped, deeply nested and oversized
-  inputs; `crates/aep/tests/import/aepx.rs` imports both forms of each pair and expects the same
+  inputs; `crates/aep/tests/it/import/aepx.rs` imports both forms of each pair and expects the same
   project and report. An ignored test runs the comparison over the whole local corpus.
 
 ## 2. Typed view (`Project`, `Item`, `Comp`, `Layer`, `PropGroup`, `Property`, `KeyList`)
 
-The structure the typed view is built on; each row has a test in `crates/aep/tests/container/typed.rs` against
+The structure the typed view is built on; each row has a test in `crates/aep/tests/it/container/typed.rs` against
 the values the cases were made with. The field layouts that build on it (layer and composition
 headers, values with their units, keyframes, effects, masks, shapes, text, markers, cameras,
 lights, footage) are in section 3. Everything else is reachable as raw chunks.
@@ -721,7 +721,7 @@ bytes 20-27 / 28-35, `fdta`) only the bytes below changed.
 | frame count start | `nhed` byte 14 (`nnhd` byte 20) | 2 for a count from 0 (base), 1 for a count from 1 | 630 | E (one value each) |
 
 The audio sample rate of the project is `adfr` (`f64` 48 000 in every case, not varied). API:
-`ProjectSettings::read` (`TimeDisplay`, `WorkingSpace`). Test: `tests/export_cases.rs`. The
+`ProjectSettings::read` (`TimeDisplay`, `WorkingSpace`). Test: `tests/it/container/export_cases.rs`. The
 fixture of 624 is not in the repository: its working-space JSON holds the profile data After
 Effects embeds for that space.
 

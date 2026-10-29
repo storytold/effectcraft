@@ -82,17 +82,22 @@ pub(crate) fn to_path(s: &AepPath, size: (u32, u32)) -> Result<ShapePath, &'stat
     Ok(path)
 }
 
-/// Imports the masks of `layer` into its `masks` group. `size` is the layer's source size (1 x 1
-/// on a layer without a source, whose mask boxes are pixels); `source` says whether the layer has
-/// a source (a mask without a stored path is then its rectangle, 900).
-#[allow(clippy::too_many_arguments)]
+/// The layer whose masks are imported.
+#[derive(Clone, Copy)]
+pub(crate) struct MaskLayer<'a> {
+    /// The layer's source size (1 x 1 on a layer without a source, whose mask boxes are pixels).
+    pub size: (u32, u32),
+    /// Whether the layer has a source (a mask without a stored path is then its rectangle, 900).
+    pub source: bool,
+    pub tm: &'a TimeMap,
+}
+
+/// Imports the masks of `layer` into its `masks` group.
 pub(crate) fn import_masks(
     layer: &AepLayer<'_, '_>,
     comp: &str,
     layer_name: &str,
-    size: (u32, u32),
-    source: bool,
-    tm: &TimeMap,
+    ml: MaskLayer<'_>,
     ids: &mut Ids<'_>,
     target: &mut EcGroup,
     col: &mut Collector,
@@ -100,25 +105,15 @@ pub(crate) fn import_masks(
     for (i, atom) in layer.mask_atoms().iter().enumerate() {
         let shown = atom.mask.name.clone().unwrap_or_else(|| format!("Mask {}", i.saturating_add(1)));
         let what = format!("{comp}: '{layer_name}' {shown}");
-        if let Some(g) = import_mask(atom, i, &shown, &what, size, source, tm, ids, col) {
+        if let Some(g) = import_mask(atom, i, &shown, &what, ml, ids, col) {
             target.children.push(Node::Group(g));
             col.imported.masks = col.imported.masks.saturating_add(1);
         }
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn import_mask(
-    atom: &MaskAtom<'_, '_>,
-    index: usize,
-    name: &str,
-    what: &str,
-    size: (u32, u32),
-    source: bool,
-    tm: &TimeMap,
-    ids: &mut Ids<'_>,
-    col: &mut Collector,
-) -> Option<EcGroup> {
+fn import_mask(atom: &MaskAtom<'_, '_>, index: usize, name: &str, what: &str, ml: MaskLayer<'_>, ids: &mut Ids<'_>, col: &mut Collector) -> Option<EcGroup> {
+    let MaskLayer { size, source, tm } = ml;
     let m = &atom.mask;
     // The path: the first shape (the static path, or the shape of the first key). A mask atom
     // without a Mask Path entry is a mask whose path was never set: After Effects reads it back as
@@ -166,20 +161,11 @@ fn import_mask(
     }
     // Feather, opacity and expansion.
     let feather = m.feather;
-    set_static(&mut g, "feather", Value::Vec2(feather.value), feather.source, |v| v.components().iter().all(|c| *c >= 0.0), what, "feather", col);
+    set_static(&mut g, "feather", Value::Vec2(feather.value), feather.source, |v| v.components().iter().all(|c| *c >= 0.0), what, col);
     let opacity = m.opacity_percent;
-    set_static(
-        &mut g,
-        "opacity",
-        Value::Scalar(opacity.value),
-        opacity.source,
-        |v| v.components().iter().all(|c| (0.0..=100.0).contains(c)),
-        what,
-        "opacity",
-        col,
-    );
+    set_static(&mut g, "opacity", Value::Scalar(opacity.value), opacity.source, |v| v.components().iter().all(|c| (0.0..=100.0).contains(c)), what, col);
     let expansion = m.expansion;
-    set_static(&mut g, "expansion", Value::Scalar(expansion.value), expansion.source, |_| true, what, "expansion", col);
+    set_static(&mut g, "expansion", Value::Scalar(expansion.value), expansion.source, |_| true, what, col);
     for (match_name, id, kind) in [
         ("ADBE Mask Feather", "feather", Kind::MaskFeather),
         ("ADBE Mask Opacity", "opacity", Kind::MaskOpacity),
@@ -195,19 +181,18 @@ fn import_mask(
     Some(g)
 }
 
-/// Sets a static mask value when it is valid; otherwise the default stays and it is reported.
-#[allow(clippy::too_many_arguments)]
-fn set_static(g: &mut EcGroup, id: &str, value: Value, source: ValueSource, valid: impl Fn(&Value) -> bool, what: &str, field: &str, col: &mut Collector) {
+/// Sets the static mask value `id` when it is valid; otherwise the default stays and it is reported.
+fn set_static(g: &mut EcGroup, id: &str, value: Value, source: ValueSource, valid: impl Fn(&Value) -> bool, what: &str, col: &mut Collector) {
     match source {
         ValueSource::Default | ValueSource::Keyframed => {}
-        ValueSource::Unreadable => col.lose(LossCategory::DamagedData, format!("{what}: {field} unreadable, default used")),
+        ValueSource::Unreadable => col.lose(LossCategory::DamagedData, format!("{what}: {id} unreadable, default used")),
         ValueSource::Stored => {
             if crate::import::props::sane(&value) && valid(&value) {
                 if let Some(p) = g.get_mut(id) {
                     p.value = value;
                 }
             } else {
-                col.lose(LossCategory::DamagedData, format!("{what}: {field} holds a number that is not valid, default used"));
+                col.lose(LossCategory::DamagedData, format!("{what}: {id} holds a number that is not valid, default used"));
             }
         }
     }

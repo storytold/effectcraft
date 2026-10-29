@@ -5,7 +5,7 @@ a case by the name of the single-case file it was first written against. The cas
 combined projects of the corpus (`cargo xtask aep-corpus` puts them in `corpus/aep/`): each case is the composition named like the case without its
 extension, built like the single-case file's composition `C` (1920x1080, 25 fps, 5 s, black, one
 red 1920x1080 solid `L`) plus the case's change (and the compositions that change uses). A test
-gets the case as a project of its own, cut from the combined file (`tests/common/mod.rs`).
+gets the case as a project of its own, cut from the combined file (`tests/it/common/mod.rs`).
 `empty.aep` and `fx-switch.aep` (the fx switch of an effect instance) are files of their own.
 
 Project settings have one value per project, so the settings cases share the files `settings-*`

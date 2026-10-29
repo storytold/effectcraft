@@ -366,10 +366,10 @@ pub(crate) fn rec_value(
     Some(RecVal { value, keys, expr })
 }
 
-/// Plans property `id` of `g` as the record `name` unless it is at After Effects' default with
-/// no keys and no expression.
-#[allow(clippy::too_many_arguments)]
-fn rec(out: &mut Records, name: &'static str, g: &PropGroup, id: &str, conv: Conv, default: &[f64], what: &str, cx: &mut ShCx<'_>) {
+/// Plans property `id` of `g` as the record `name` (`names`: `(name, id)`) unless it is at After
+/// Effects' default with no keys and no expression.
+fn rec(out: &mut Records, g: &PropGroup, names: (&'static str, &str), conv: Conv, default: &[f64], what: &str, cx: &mut ShCx<'_>) {
+    let (name, id) = names;
     let Some(p) = g.get(id) else { return };
     let Some(kind) = kind_of(name) else { return };
     let w = format!("{what}: {name}");
@@ -388,11 +388,11 @@ fn en(g: &PropGroup, id: &str) -> Option<u32> {
 /// Opacity, width, cap, join and miter limit of a stroke or gradient stroke; dashes, taper and
 /// wave are reported when they hold values.
 fn stroke_common(r: &mut Records, g: &PropGroup, w: &str, cx: &mut ShCx<'_>) {
-    rec(r, "ADBE Vector Stroke Opacity", g, "opacity", c_scalar, &[100.0], w, cx);
-    rec(r, "ADBE Vector Stroke Width", g, "width", c_scalar, &[2.0], w, cx);
-    rec(r, "ADBE Vector Stroke Line Cap", g, "cap", c_popup, &[1.0], w, cx);
-    rec(r, "ADBE Vector Stroke Line Join", g, "join", c_popup, &[1.0], w, cx);
-    rec(r, "ADBE Vector Stroke Miter Limit", g, "miter", c_scalar, &[4.0], w, cx);
+    rec(r, g, ("ADBE Vector Stroke Opacity", "opacity"), c_scalar, &[100.0], w, cx);
+    rec(r, g, ("ADBE Vector Stroke Width", "width"), c_scalar, &[2.0], w, cx);
+    rec(r, g, ("ADBE Vector Stroke Line Cap", "cap"), c_popup, &[1.0], w, cx);
+    rec(r, g, ("ADBE Vector Stroke Line Join", "join"), c_popup, &[1.0], w, cx);
+    rec(r, g, ("ADBE Vector Stroke Miter Limit", "miter"), c_scalar, &[4.0], w, cx);
     // Dashes, a taper or a wave change the stroke (After Effects' defaults: no dash, no taper
     // length, no wave amount).
     let nonzero = |sub: &str, ids: &[&str]| {
@@ -406,11 +406,11 @@ fn stroke_common(r: &mut Records, g: &PropGroup, w: &str, cx: &mut ShCx<'_>) {
 /// The gradient part of a gradient fill or stroke: type, start, end, highlight; the colour
 /// stops are not decoded (only the default white to black is written).
 fn gradient(r: &mut Records, g: &PropGroup, w: &str, cx: &mut ShCx<'_>) {
-    rec(r, "ADBE Vector Grad Type", g, "type", c_popup, &[1.0], w, cx);
-    rec(r, "ADBE Vector Grad Start Pt", g, "start", c_point, &[0.0, 0.0], w, cx);
-    rec(r, "ADBE Vector Grad End Pt", g, "end", c_point, &[100.0, 0.0], w, cx);
-    rec(r, "ADBE Vector Grad HiLite Length", g, "highlightLength", c_scalar, &[0.0], w, cx);
-    rec(r, "ADBE Vector Grad HiLite Angle", g, "highlightAngle", c_scalar, &[0.0], w, cx);
+    rec(r, g, ("ADBE Vector Grad Type", "type"), c_popup, &[1.0], w, cx);
+    rec(r, g, ("ADBE Vector Grad Start Pt", "start"), c_point, &[0.0, 0.0], w, cx);
+    rec(r, g, ("ADBE Vector Grad End Pt", "end"), c_point, &[100.0, 0.0], w, cx);
+    rec(r, g, ("ADBE Vector Grad HiLite Length", "highlightLength"), c_scalar, &[0.0], w, cx);
+    rec(r, g, ("ADBE Vector Grad HiLite Angle", "highlightAngle"), c_scalar, &[0.0], w, cx);
     if let Some(p) = g.get("colors")
         && (matches!(&p.value, Value::Gradient(gr) if *gr != Gradient::default()) || !p.keys.is_empty() || p.has_expression())
     {
@@ -443,13 +443,13 @@ pub(crate) fn plan_contents(contents: &PropGroup, what: &str, depth: usize, cx: 
                 let items = g.sub("contents").map(|c| plan_contents(c, &w, depth + 1, cx)).unwrap_or_default();
                 let mut transform = Vec::new();
                 if let Some(t) = g.sub("transform") {
-                    rec(&mut transform, "ADBE Vector Anchor", t, "anchor", c_point, &[0.0, 0.0], &w, cx);
-                    rec(&mut transform, "ADBE Vector Position", t, "position", c_point, &[0.0, 0.0], &w, cx);
-                    rec(&mut transform, "ADBE Vector Scale", t, "scale", c_point, &[100.0, 100.0], &w, cx);
-                    rec(&mut transform, "ADBE Vector Skew", t, "skew", c_scalar, &[0.0], &w, cx);
-                    rec(&mut transform, "ADBE Vector Skew Axis", t, "skewAxis", c_scalar, &[0.0], &w, cx);
-                    rec(&mut transform, "ADBE Vector Rotation", t, "rotation", c_scalar, &[0.0], &w, cx);
-                    rec(&mut transform, "ADBE Vector Group Opacity", t, "opacity", c_scalar, &[100.0], &w, cx);
+                    rec(&mut transform, t, ("ADBE Vector Anchor", "anchor"), c_point, &[0.0, 0.0], &w, cx);
+                    rec(&mut transform, t, ("ADBE Vector Position", "position"), c_point, &[0.0, 0.0], &w, cx);
+                    rec(&mut transform, t, ("ADBE Vector Scale", "scale"), c_point, &[100.0, 100.0], &w, cx);
+                    rec(&mut transform, t, ("ADBE Vector Skew", "skew"), c_scalar, &[0.0], &w, cx);
+                    rec(&mut transform, t, ("ADBE Vector Skew Axis", "skewAxis"), c_scalar, &[0.0], &w, cx);
+                    rec(&mut transform, t, ("ADBE Vector Rotation", "rotation"), c_scalar, &[0.0], &w, cx);
+                    rec(&mut transform, t, ("ADBE Vector Group Opacity", "opacity"), c_scalar, &[100.0], &w, cx);
                 }
                 out.push(wrap(ShItem::Group { name: g.name.clone(), items, transform }));
                 continue;
@@ -469,44 +469,44 @@ pub(crate) fn plan_contents(contents: &PropGroup, what: &str, depth: usize, cx: 
                 continue;
             }
             "rect" => {
-                rec(&mut r, "ADBE Vector Rect Size", g, "size", c_point, &[100.0, 100.0], &w, cx);
-                rec(&mut r, "ADBE Vector Rect Position", g, "position", c_point, &[0.0, 0.0], &w, cx);
-                rec(&mut r, "ADBE Vector Rect Roundness", g, "roundness", c_scalar, &[0.0], &w, cx);
+                rec(&mut r, g, ("ADBE Vector Rect Size", "size"), c_point, &[100.0, 100.0], &w, cx);
+                rec(&mut r, g, ("ADBE Vector Rect Position", "position"), c_point, &[0.0, 0.0], &w, cx);
+                rec(&mut r, g, ("ADBE Vector Rect Roundness", "roundness"), c_scalar, &[0.0], &w, cx);
                 "ADBE Vector Shape - Rect"
             }
             "ellipse" => {
-                rec(&mut r, "ADBE Vector Ellipse Size", g, "size", c_point, &[100.0, 100.0], &w, cx);
-                rec(&mut r, "ADBE Vector Ellipse Position", g, "position", c_point, &[0.0, 0.0], &w, cx);
+                rec(&mut r, g, ("ADBE Vector Ellipse Size", "size"), c_point, &[100.0, 100.0], &w, cx);
+                rec(&mut r, g, ("ADBE Vector Ellipse Position", "position"), c_point, &[0.0, 0.0], &w, cx);
                 "ADBE Vector Shape - Ellipse"
             }
             // Polystar (104, 331, 473-477): After Effects' defaults are a 5-point star with radii
             // 100 / 50 (519).
             "star" => {
-                rec(&mut r, "ADBE Vector Star Type", g, "type", c_popup, &[1.0], &w, cx);
-                rec(&mut r, "ADBE Vector Star Points", g, "points", c_scalar, &[5.0], &w, cx);
-                rec(&mut r, "ADBE Vector Star Position", g, "position", c_point, &[0.0, 0.0], &w, cx);
-                rec(&mut r, "ADBE Vector Star Rotation", g, "rotation", c_scalar, &[0.0], &w, cx);
-                rec(&mut r, "ADBE Vector Star Inner Radius", g, "innerRadius", c_scalar, &[50.0], &w, cx);
-                rec(&mut r, "ADBE Vector Star Outer Radius", g, "outerRadius", c_scalar, &[100.0], &w, cx);
-                rec(&mut r, "ADBE Vector Star Inner Roundess", g, "innerRoundness", c_scalar, &[0.0], &w, cx);
-                rec(&mut r, "ADBE Vector Star Outer Roundess", g, "outerRoundness", c_scalar, &[0.0], &w, cx);
+                rec(&mut r, g, ("ADBE Vector Star Type", "type"), c_popup, &[1.0], &w, cx);
+                rec(&mut r, g, ("ADBE Vector Star Points", "points"), c_scalar, &[5.0], &w, cx);
+                rec(&mut r, g, ("ADBE Vector Star Position", "position"), c_point, &[0.0, 0.0], &w, cx);
+                rec(&mut r, g, ("ADBE Vector Star Rotation", "rotation"), c_scalar, &[0.0], &w, cx);
+                rec(&mut r, g, ("ADBE Vector Star Inner Radius", "innerRadius"), c_scalar, &[50.0], &w, cx);
+                rec(&mut r, g, ("ADBE Vector Star Outer Radius", "outerRadius"), c_scalar, &[100.0], &w, cx);
+                rec(&mut r, g, ("ADBE Vector Star Inner Roundess", "innerRoundness"), c_scalar, &[0.0], &w, cx);
+                rec(&mut r, g, ("ADBE Vector Star Outer Roundess", "outerRoundness"), c_scalar, &[0.0], &w, cx);
                 "ADBE Vector Shape - Star"
             }
             "fill" => {
-                rec(&mut r, "ADBE Vector Fill Rule", g, "rule", c_popup, &[1.0], &w, cx);
-                rec(&mut r, "ADBE Vector Fill Color", g, "color", c_color, &[255.0, 255.0, 0.0, 0.0], &w, cx);
-                rec(&mut r, "ADBE Vector Fill Opacity", g, "opacity", c_scalar, &[100.0], &w, cx);
+                rec(&mut r, g, ("ADBE Vector Fill Rule", "rule"), c_popup, &[1.0], &w, cx);
+                rec(&mut r, g, ("ADBE Vector Fill Color", "color"), c_color, &[255.0, 255.0, 0.0, 0.0], &w, cx);
+                rec(&mut r, g, ("ADBE Vector Fill Opacity", "opacity"), c_scalar, &[100.0], &w, cx);
                 "ADBE Vector Graphic - Fill"
             }
             "stroke" => {
-                rec(&mut r, "ADBE Vector Stroke Color", g, "color", c_color, &[255.0, 255.0, 255.0, 255.0], &w, cx);
+                rec(&mut r, g, ("ADBE Vector Stroke Color", "color"), c_color, &[255.0, 255.0, 255.0, 255.0], &w, cx);
                 stroke_common(&mut r, g, &w, cx);
                 "ADBE Vector Graphic - Stroke"
             }
             "gfill" => {
-                rec(&mut r, "ADBE Vector Fill Rule", g, "rule", c_popup, &[1.0], &w, cx);
+                rec(&mut r, g, ("ADBE Vector Fill Rule", "rule"), c_popup, &[1.0], &w, cx);
                 gradient(&mut r, g, &w, cx);
-                rec(&mut r, "ADBE Vector Fill Opacity", g, "opacity", c_scalar, &[100.0], &w, cx);
+                rec(&mut r, g, ("ADBE Vector Fill Opacity", "opacity"), c_scalar, &[100.0], &w, cx);
                 "ADBE Vector Graphic - G-Fill"
             }
             "gstroke" => {
@@ -516,32 +516,32 @@ pub(crate) fn plan_contents(contents: &PropGroup, what: &str, depth: usize, cx: 
             }
             // Trim Paths (101, 465-469, 851-856).
             "trim" => {
-                rec(&mut r, "ADBE Vector Trim Start", g, "start", c_scalar, &[0.0], &w, cx);
-                rec(&mut r, "ADBE Vector Trim End", g, "end", c_scalar, &[100.0], &w, cx);
-                rec(&mut r, "ADBE Vector Trim Offset", g, "offset", c_scalar, &[0.0], &w, cx);
-                rec(&mut r, "ADBE Vector Trim Type", g, "mode", c_popup, &[1.0], &w, cx);
+                rec(&mut r, g, ("ADBE Vector Trim Start", "start"), c_scalar, &[0.0], &w, cx);
+                rec(&mut r, g, ("ADBE Vector Trim End", "end"), c_scalar, &[100.0], &w, cx);
+                rec(&mut r, g, ("ADBE Vector Trim Offset", "offset"), c_scalar, &[0.0], &w, cx);
+                rec(&mut r, g, ("ADBE Vector Trim Type", "mode"), c_popup, &[1.0], &w, cx);
                 "ADBE Vector Filter - Trim"
             }
             // Round Corners (238; default radius 10, 519).
             "round" => {
-                rec(&mut r, "ADBE Vector RoundCorner Radius", g, "radius", c_scalar, &[10.0], &w, cx);
+                rec(&mut r, g, ("ADBE Vector RoundCorner Radius", "radius"), c_scalar, &[10.0], &w, cx);
                 "ADBE Vector Filter - RC"
             }
             // Merge Paths (707, 708, 731).
             "merge" => {
-                rec(&mut r, "ADBE Vector Merge Type", g, "mode", c_popup, &[1.0], &w, cx);
+                rec(&mut r, g, ("ADBE Vector Merge Type", "mode"), c_popup, &[1.0], &w, cx);
                 "ADBE Vector Filter - Merge"
             }
             // Offset Paths (710, 828; defaults 731: amount 10, miter 4, one copy, copy offset 1).
             "offset" => {
-                rec(&mut r, "ADBE Vector Offset Amount", g, "amount", c_scalar, &[10.0], &w, cx);
-                rec(&mut r, "ADBE Vector Offset Line Join", g, "join", c_popup, &[1.0], &w, cx);
-                rec(&mut r, "ADBE Vector Offset Miter Limit", g, "miter", c_scalar, &[4.0], &w, cx);
-                rec(&mut r, "ADBE Vector Offset Copies", g, "copies", c_scalar, &[1.0], &w, cx);
+                rec(&mut r, g, ("ADBE Vector Offset Amount", "amount"), c_scalar, &[10.0], &w, cx);
+                rec(&mut r, g, ("ADBE Vector Offset Line Join", "join"), c_popup, &[1.0], &w, cx);
+                rec(&mut r, g, ("ADBE Vector Offset Miter Limit", "miter"), c_scalar, &[4.0], &w, cx);
+                rec(&mut r, g, ("ADBE Vector Offset Copies", "copies"), c_scalar, &[1.0], &w, cx);
                 // EffectCraft offsets copy i by Amount x (i + 1 + copyOffset), After Effects by
                 // Amount x (i + Copy Offset) (826-828): Copy Offset = copyOffset + 1, the
                 // importer's inverse.
-                rec(&mut r, "ADBE Vector Offset Copy Offset", g, "copyOffset", c_copy_offset, &[1.0], &w, cx);
+                rec(&mut r, g, ("ADBE Vector Offset Copy Offset", "copyOffset"), c_copy_offset, &[1.0], &w, cx);
                 if g.get("copyOffset").is_some_and(|p| p.has_expression()) {
                     cx.col.lose(
                         LossCategory::ShapeLayers,
@@ -552,17 +552,17 @@ pub(crate) fn plan_contents(contents: &PropGroup, what: &str, depth: usize, cx: 
             }
             // Repeater (102, 709; defaults 731: one copy, offset 0, below, identity transform).
             "repeater" => {
-                rec(&mut r, "ADBE Vector Repeater Copies", g, "copies", c_scalar, &[1.0], &w, cx);
-                rec(&mut r, "ADBE Vector Repeater Offset", g, "offset", c_scalar, &[0.0], &w, cx);
-                rec(&mut r, "ADBE Vector Repeater Order", g, "composite", c_popup, &[1.0], &w, cx);
+                rec(&mut r, g, ("ADBE Vector Repeater Copies", "copies"), c_scalar, &[1.0], &w, cx);
+                rec(&mut r, g, ("ADBE Vector Repeater Offset", "offset"), c_scalar, &[0.0], &w, cx);
+                rec(&mut r, g, ("ADBE Vector Repeater Order", "composite"), c_popup, &[1.0], &w, cx);
                 let mut t = Vec::new();
                 if let Some(tr) = g.sub("transform") {
-                    rec(&mut t, "ADBE Vector Repeater Anchor", tr, "anchor", c_point, &[0.0, 0.0], &w, cx);
-                    rec(&mut t, "ADBE Vector Repeater Position", tr, "position", c_point, &[0.0, 0.0], &w, cx);
-                    rec(&mut t, "ADBE Vector Repeater Scale", tr, "scale", c_point, &[100.0, 100.0], &w, cx);
-                    rec(&mut t, "ADBE Vector Repeater Rotation", tr, "rotation", c_scalar, &[0.0], &w, cx);
-                    rec(&mut t, "ADBE Vector Repeater Opacity 1", tr, "startOpacity", c_scalar, &[100.0], &w, cx);
-                    rec(&mut t, "ADBE Vector Repeater Opacity 2", tr, "endOpacity", c_scalar, &[100.0], &w, cx);
+                    rec(&mut t, tr, ("ADBE Vector Repeater Anchor", "anchor"), c_point, &[0.0, 0.0], &w, cx);
+                    rec(&mut t, tr, ("ADBE Vector Repeater Position", "position"), c_point, &[0.0, 0.0], &w, cx);
+                    rec(&mut t, tr, ("ADBE Vector Repeater Scale", "scale"), c_point, &[100.0, 100.0], &w, cx);
+                    rec(&mut t, tr, ("ADBE Vector Repeater Rotation", "rotation"), c_scalar, &[0.0], &w, cx);
+                    rec(&mut t, tr, ("ADBE Vector Repeater Opacity 1", "startOpacity"), c_scalar, &[100.0], &w, cx);
+                    rec(&mut t, tr, ("ADBE Vector Repeater Opacity 2", "endOpacity"), c_scalar, &[100.0], &w, cx);
                 }
                 subs.push(("ADBE Vector Repeater Transform", t));
                 "ADBE Vector Filter - Repeater"

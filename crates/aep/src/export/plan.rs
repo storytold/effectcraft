@@ -566,8 +566,9 @@ fn plan_comp(cx: &PlanCx<'_>, comp_id: ItemId, name: &str, comp: &Comp, col: &mu
         layers: Vec::new(),
     };
     let ids: HashSet<LayerId> = comp.layers.iter().map(|l| l.id).collect();
+    let at = CompAt { id: comp_id, name, comp, ids: &ids };
     for layer in &comp.layers {
-        if let Some(lp) = plan_layer(cx, comp_id, name, comp, &cp, layer, &ids, col) {
+        if let Some(lp) = plan_layer(cx, at, &cp, layer, col) {
             cp.layers.push(lp);
         }
     }
@@ -760,12 +761,13 @@ fn plan_transform(layer: &Layer, src: &LayerSrc, comp: &Comp, source_size: (u32,
     let cam_light = matches!(src, LayerSrc::Camera(_) | LayerSrc::Light(_));
     let is_shape = matches!(src, LayerSrc::Shape(_));
     let mut props = Vec::new();
+    let at = PropAt { comp, comp_name, layer: &layer.name, source: source_size, text: is_text || cam_light || is_shape };
     if let Some(tr) = layer.transform() {
         for kind in PropKind::ALL {
             // A camera's or light's point of interest is After Effects' Anchor Point.
             let id = if cam_light && kind == PropKind::Anchor { "poi" } else { kind.id() };
             let Some(p) = tr.get(id) else { continue };
-            if let Some(pp) = plan_prop(kind, None, p, comp, source_size, is_text || cam_light || is_shape, cp, &layer.name, comp_name, col) {
+            if let Some(pp) = plan_prop(kind, None, p, at, cp, col) {
                 col.exported.properties += 1;
                 props.push(pp);
             }
@@ -799,17 +801,18 @@ fn plan_transform(layer: &Layer, src: &LayerSrc, comp: &Comp, source_size: (u32,
     props
 }
 
-#[allow(clippy::too_many_arguments)]
-fn plan_layer(
-    cx: &PlanCx<'_>,
-    comp_id: ItemId,
-    comp_name: &str,
-    comp: &Comp,
-    cp: &CompPlan,
-    layer: &Layer,
-    ids: &HashSet<LayerId>,
-    col: &mut Collector,
-) -> Option<LayerPlan> {
+/// The composition a layer is planned in.
+#[derive(Clone, Copy)]
+struct CompAt<'a> {
+    id: ItemId,
+    name: &'a str,
+    comp: &'a Comp,
+    /// The ids of its layers.
+    ids: &'a HashSet<LayerId>,
+}
+
+fn plan_layer(cx: &PlanCx<'_>, at: CompAt<'_>, cp: &CompPlan, layer: &Layer, col: &mut Collector) -> Option<LayerPlan> {
+    let CompAt { id: comp_id, name: comp_name, comp, ids } = at;
     let what = |s: &str| format!("{comp_name}: {s} '{}'", layer.name);
     // An enabled Time Remap (the importer's `timeRemap` property) is written on precomposition
     // and footage layers, the layers After Effects can remap (319, 354; a solid cannot).
@@ -1036,19 +1039,20 @@ fn is_non_default_extra(id: &str, p: &Property) -> bool {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn plan_prop(
-    kind: PropKind,
-    label: Option<&str>,
-    p: &Property,
-    comp: &Comp,
+/// The layer a Transform property belongs to.
+#[derive(Clone, Copy)]
+struct PropAt<'a> {
+    comp: &'a Comp,
+    comp_name: &'a str,
+    layer: &'a str,
+    /// The layer's source size.
     source: (u32, u32),
+    /// The anchor is stored in pixels (text, camera, light and shape layers).
     text: bool,
-    cp: &CompPlan,
-    layer: &str,
-    comp_name: &str,
-    col: &mut Collector,
-) -> Option<PropPlan> {
+}
+
+fn plan_prop(kind: PropKind, label: Option<&str>, p: &Property, at: PropAt<'_>, cp: &CompPlan, col: &mut Collector) -> Option<PropPlan> {
+    let PropAt { comp, comp_name, layer, source, text } = at;
     // A text layer's anchor is stored in pixels, with the origin as its default (385).
     let (sw, sh) = if text { (1.0, 1.0) } else { (f64::from(source.0.max(1)), f64::from(source.1.max(1))) };
     let what = format!("{comp_name}: '{layer}' {}", label.unwrap_or(kind.match_name()));
@@ -1186,7 +1190,8 @@ fn plan_prop(
 /// back disabled).
 fn plan_remap(p: &Property, comp: &Comp, cp: &CompPlan, layer: &str, comp_name: &str, col: &mut Collector) -> PropPlan {
     // Rotation has the same layout (one component, stored as is, not spatial).
-    let planned = plan_prop(PropKind::Rotation, Some("Time Remap"), p, comp, (1, 1), false, cp, layer, comp_name, col);
+    let at = PropAt { comp, comp_name, layer, source: (1, 1), text: false };
+    let planned = plan_prop(PropKind::Rotation, Some("Time Remap"), p, at, cp, col);
     col.exported.time_remaps += 1;
     let mut plan = planned.unwrap_or_else(|| PropPlan { kind: PropKind::Rotation, value: vec![0.0], keys: Vec::new(), expr: None });
     if plan.keys.is_empty() {

@@ -14,7 +14,7 @@ use effectcraft_project::{
 use effectcraft_time::{FrameRate, TICKS_PER_SECOND, Tick};
 
 /// The test cases, cut from the combined projects of the corpus (`corpus/aep`) (`tests/fixtures/CASES.md`).
-#[path = "../tests/common/mod.rs"]
+#[path = "../tests/it/common/mod.rs"]
 #[allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)] // test code: a broken fixture ends the tool
 mod common;
 

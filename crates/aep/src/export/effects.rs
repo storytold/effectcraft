@@ -379,7 +379,7 @@ pub(crate) fn plan_effects(layer: &Layer, size: (u32, u32), cp: &CompPlan, comp_
                 col.lose(LossCategory::Effects, format!("{here}: parameter '{}': the prototype has another type", prop.name));
                 continue;
             }
-            if let Some(pp) = plan_param(pm.conv, kind, index, def, prop, size, cp, &here, col) {
+            if let Some(pp) = plan_param(ParamIn { conv: pm.conv, kind, def, prop, size }, index, cp, &here, col) {
                 params.push(pp);
             }
         }
@@ -627,18 +627,19 @@ fn report_unmapped(g: &PropGroup, spec: &EffectMap, here: &str, col: &mut Collec
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn plan_param(
+/// One effect parameter to plan: its table conversion, stored kind, prototype definition and
+/// property, and the layer's source size.
+#[derive(Clone, Copy)]
+struct ParamIn<'a> {
     conv: Conv,
     kind: PKind,
-    index: u16,
-    def: &ParDef,
-    prop: &Property,
+    def: &'a ParDef,
+    prop: &'a Property,
     size: (f64, f64),
-    cp: &CompPlan,
-    here: &str,
-    col: &mut Collector,
-) -> Option<ParamPlan> {
+}
+
+fn plan_param(pin: ParamIn<'_>, index: u16, cp: &CompPlan, here: &str, col: &mut Collector) -> Option<ParamPlan> {
+    let ParamIn { conv, kind, def, prop, size } = pin;
     let what = format!("{here}: parameter '{}'", prop.name);
     // The table's scale was verified with this valid maximum (the importer checks the same).
     let vm = match conv {
@@ -679,7 +680,7 @@ fn plan_param(
         let s = stored(conv, kind, first, size, &prop.ui, def)?;
         return (!is_default(kind, &s, def) || expr.is_some()).then_some(ParamPlan { index, kind, value: ParamValue::Static(s), expr });
     }
-    let keys = plan_keys(conv, kind, def, prop, size, cp, &what, col);
+    let keys = plan_keys(pin, cp, &what, col);
     if keys.is_empty() {
         return None;
     }
@@ -687,8 +688,8 @@ fn plan_param(
     Some(ParamPlan { index, kind, value: ParamValue::Keys(keys), expr })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn plan_keys(conv: Conv, kind: PKind, def: &ParDef, prop: &Property, size: (f64, f64), cp: &CompPlan, what: &str, col: &mut Collector) -> Vec<KeyPlan> {
+fn plan_keys(pin: ParamIn<'_>, cp: &CompPlan, what: &str, col: &mut Collector) -> Vec<KeyPlan> {
+    let ParamIn { conv, kind, def, prop, size } = pin;
     let keys: &[Keyframe] = &prop.keys;
     let mut timed: Vec<(i64, &Keyframe)> = Vec::with_capacity(keys.len());
     for k in keys {

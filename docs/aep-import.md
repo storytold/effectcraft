@@ -139,7 +139,7 @@ Units, the "absent = default" rule and the keyframe templates are the reader's
   403; 408 has it switched back on), and EffectCraft, like After Effects, uses a hidden layer as a
   matte. A mode without a matte layer id has no corpus case (After Effects 2026 always writes the
   id); it is read as the layer directly above, which is how track mattes worked before After
-  Effects 23.0. Tests: `crates/aep/tests/import/mattes.rs` (403-408, the id-less form built
+  Effects 23.0. Tests: `crates/aep/tests/it/import/mattes.rs` (403-408, the id-less form built
   in-test, hostile ids and modes).
 
 ### Effects
@@ -289,15 +289,15 @@ frame blending, 3D material options, audio levels, guides, the mask colour, lock
 
 ## How fidelity is checked
 
-- `crates/aep/tests/import/aepx.rs`: the `.aepx` of five fixtures imports to the same project and
+- `crates/aep/tests/it/import/aepx.rs`: the `.aepx` of five fixtures imports to the same project and
   report as their `.aep` (the reader turns both into the same chunk tree, see
   [aep-format.md](aep-format.md), section 1, "The XML form"); over the whole local corpus all pairs
   import alike.
-- `crates/aep/tests/import/effects_batch5.rs`: Invert, Fast Box Blur, Gaussian Blur, Drop Shadow,
+- `crates/aep/tests/it/import/effects_batch5.rs`: Invert, Fast Box Blur, Gaussian Blur, Drop Shadow,
   Glow, Hue/Saturation, Levels, the expression controls and Fill import without losses with the
   values they were made with (410-448, 512-516; 071, 073, 080, 214-219, 221, 303, 304), including
   After Effects' defaults where they differ from EffectCraft's.
-- `crates/aep/tests/import/effects.rs`: Tint, Gradient Ramp and Exposure from the batch-4 fixtures
+- `crates/aep/tests/it/import/effects.rs`: Tint, Gradient Ramp and Exposure from the batch-4 fixtures
   (356-397; Exposure: defaults 389, Channels 390, Exposure 391, Offset 393, Gamma 394, Red
   Exposure 395, Bypass 396, keys 397 with 0.5 at 1 s):
   every converted value against the case's value (colours, points in pixels including outside the
@@ -305,10 +305,10 @@ frame blending, 3D material options, audio levels, guides, the mask colour, lock
   between them (363: 50 at 1 s; 364: grey at 1 s; 382: [950, 500] at 1 s), the defaults equal to
   EffectCraft's, stack order with a reported Gaussian Blur (366), the second instance (383), and
   lossless imports without `allowLosses`.
-- `crates/aep/tests/import/combined.rs`: masks and effects on the same layer, an effect on a text
+- `crates/aep/tests/it/import/combined.rs`: masks and effects on the same layer, an effect on a text
   layer, and the same through `.aepx` (built in-test from the fixtures: the effect parade of one
   fixture grafted onto the layer of another).
-- `crates/aep/tests/import/import.rs`: the synthetic cases of the corpus (`cargo xtask aep-corpus`; one
+- `crates/aep/tests/it/import/cases.rs`: the synthetic cases of the corpus (`cargo xtask aep-corpus`; one
   composition per case in a few combined projects, `CASES.md`; each the same one-solid
   composition with one change) are imported and the resulting project is
   compared with the value the fixture was made with: composition size/rate/duration/work
@@ -316,19 +316,19 @@ frame blending, 3D material options, audio levels, guides, the mask colour, lock
   Position/Scale/Rotation/Opacity/Anchor with their units, key times and values, interpolation sides,
   ease, tangents, expressions, the NTSC rates, and one report category per unsupported feature.
   The report round-trips through JSON.
-- `crates/aep/tests/import/masks.rs`: every mask fixture (090, 091, 093, 208, 232-237, 306, 309,
+- `crates/aep/tests/it/import/masks.rs`: every mask fixture (090, 091, 093, 208, 232-237, 306, 309,
   328, 329) imports without losses with the values it was made with: vertices and tangents,
   open/closed, mode, inverted, feather, opacity, expansion, path and feather keys with ease.
-- `crates/aep/tests/import/shapes.rs`: every shape fixture (238-242, 330-333, 451, 457, 462, 464,
+- `crates/aep/tests/it/import/shapes.rs`: every shape fixture (238-242, 330-333, 451, 457, 462, 464,
   467, 469, 471, 473, 482, 483, 519) imports without losses: items in file order, names, sizes,
   positions, group transform, layer anchor, paints, trim paths, polystar fields, the defaults of
   every item. Render check against After Effects at 1 s on a 20 px grid (5 184 points per frame):
   451-482 equal but for 2-4 anti-aliased edge points per frame (at most 29/255 there), 519 3 edge
   points.
-- `crates/aep/tests/import/mattes.rs` and `markers.rs`: track mattes (403-408; render check 403-408:
+- `crates/aep/tests/it/import/mattes.rs` and `markers.rs`: track mattes (403-408; render check 403-408:
   equal on every grid point, 406 within 1/255), markers (122, 123, 249, 347-349, 509, 510) and Time
   Remapping (319, 354).
-- `crates/aep/tests/import/text.rs`: every text fixture (110, 113, 114, 243, 245-248, 334-340,
+- `crates/aep/tests/it/import/text.rs`: every text fixture (110, 113, 114, 243, 245-248, 334-340,
   385, 386) imports with the values it was made with (text, paragraphs, size, fill, tracking,
   leading, faux bold/italic, caps, justification, box size and position, the style runs of 248 and
   340, the anchor rule with 385's stored anchor `[10, 20]` px, 386's U+0003 as a paragraph break
@@ -337,21 +337,21 @@ frame blending, 3D material options, audio levels, guides, the mask colour, lock
   keys, and hostile text documents (garbage, truncations, lone surrogates, a 2 MB text, run
   lengths that overflow or exceed the text, NaN sizes and colours, a font index outside the list,
   50 000 levels of nesting) never panic and give usable Source Text.
-- `crates/aep/tests/import/shapes_round2.rs`: masks on 705's text and 706's shape layer in layer
+- `crates/aep/tests/it/import/shapes_round2.rs`: masks on 705's text and 706's shape layer in layer
   pixels, the operators of 707-710 and their defaults (731), Offset Paths' Copy Offset (828).
-- `crates/aep/tests/import/ease_round2.rs`: 597, 598, 599, 700, 730 between their keys within 0.5 px
+- `crates/aep/tests/it/import/ease_round2.rs`: 597, 598, 599, 700, 730 between their keys within 0.5 px
   (colour 1e-3) of After Effects' read-backs.
-- `crates/aep/tests/import/effects_round2.rs`: 711-723 import with the values they were made
+- `crates/aep/tests/it/import/effects_round2.rs`: 711-723 import with the values they were made
   with (712: the eleven effects at After Effects' defaults; Set Matte and CC Radial Blur's default
   Type Scratch are reported).
-- `crates/aep/tests/import/effects_round3.rs`: the 24 effects of 905 with their values and After
+- `crates/aep/tests/it/import/effects_round3.rs`: the 24 effects of 905 with their values and After
   Effects' defaults, the layer parameters of 905 and the Layer Controls of 220, 320, 321, hostile
   layer ids (missing, 0, out of range) reported or neutral.
-- `crates/aep/tests/import/text_anim.rs`: the animators and range selectors of 579-594 and 114
+- `crates/aep/tests/it/import/text_anim.rs`: the animators and range selectors of 579-594 and 114
   (every selector setting, every mapped property, 594's keyed Start with its ease), the character
   and paragraph settings of 538-578, 595, 596, and what is reported (548 a line join without a
   stroke is no loss; 552, 554, 572, 578 are reported).
-- `crates/aep/tests/import/robustness.rs`: every fixture truncated at 40 places, with bit flips and
+- `crates/aep/tests/it/import/robustness.rs`: every fixture truncated at 40 places, with bit flips and
   runs of `0x00`/`0xff`, and files rewritten with hostile values in valid structure (zero or
   maximal sizes and time bases, NaN/infinity/huge numbers in every property, stretch 0, self and
   mutual parents, a precomposition that contains itself), hostile masks (no vertices, 10 points,

@@ -20,7 +20,7 @@ use crate::import::ImportOptions;
 use crate::import::camera::{import_camera_options, import_light_options};
 use crate::import::effects::{LayerCtx, PendingLayerRef, import_effects, resolve_layer_refs};
 use crate::import::markers::{import_markers, import_time_remap, insert_time_remap};
-use crate::import::masks::import_masks;
+use crate::import::masks::{MaskLayer, import_masks};
 use crate::import::props::{AnchorUnit, import_transform};
 use crate::import::report::{Collector, ImportReport, LossCategory};
 use crate::import::shapes::import_shapes;
@@ -535,7 +535,8 @@ fn build_layers(project: &mut Project, cx: &mut Ctx<'_>, view: &AepProject<'_, '
             // On a text or shape layer, which has no source, the mask box is stored in layer
             // pixels (705, 706), so the scale is 1.
             let mask_scale = if is_text || is_shape { (1, 1) } else { size };
-            import_masks(&layer, &comp_name, &name, mask_scale, !(is_text || is_shape), &tm, &mut build::Ids(&mut project.next_id), masks, &mut cx.col);
+            let ml = MaskLayer { size: mask_scale, source: !(is_text || is_shape), tm: &tm };
+            import_masks(&layer, &comp_name, &name, ml, &mut build::Ids(&mut project.next_id), masks, &mut cx.col);
         }
         if let Some(fx) = l.props.sub_mut("effects") {
             let lcx = LayerCtx { comp: &comp_name, layer: &name, aep_id: h.id, ec_id: l.id, size, tm: &tm };

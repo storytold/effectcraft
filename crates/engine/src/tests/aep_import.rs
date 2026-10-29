@@ -6,7 +6,7 @@ use serde_json::json;
 use crate::Session;
 
 /// The test projects of `effectcraft-aep` and their cases.
-#[path = "../../../aep/tests/common/mod.rs"]
+#[path = "../../../aep/tests/it/common/mod.rs"]
 mod common;
 
 /// The path of a test project of `effectcraft-aep` (`corpus/aep`, or the folder in

@@ -247,15 +247,15 @@ AE re-save of the same file differed.
 
 ## How fidelity is checked in this repository
 
-- `crates/aep/tests/export/export.rs`: projects built in code are exported and parsed back with
+- `crates/aep/tests/it/export/built.rs`: projects built in code are exported and parsed back with
   `effectcraft-aep`; every exported field of the composition header, the layer header, the solids,
   the Transform values, the keys (time, interpolation, value) and the expressions is compared; the
   container is consistent (writes back byte for byte); the report, the refusal and the JSON round
   trip; the output is deterministic; the embedded template holds no local data.
-- `crates/aep/tests/export/roundtrip.rs`: every case of the corpus (`cargo xtask aep-corpus`) is imported,
+- `crates/aep/tests/it/export/roundtrip.rs`: every case of the corpus (`cargo xtask aep-corpus`) is imported,
   exported and imported again; the two imported projects are equal for the exported subset (more
   than 100 compositions, masks included).
-- `crates/aep/tests/export/masks.rs`: masks built in code (all seven modes, inverted, feather,
+- `crates/aep/tests/it/export/masks.rs`: masks built in code (all seven modes, inverted, feather,
   opacity, expansion, open path and hexagon with tangents, path keys with hold and label, feather
   keys with per-dimension ease, a 400 x 300 source) are exported and parsed back with
   `effectcraft-aep` (name, mode, invert, counter, values with their default/stored state, vertices
@@ -263,27 +263,27 @@ AE re-save of the same file differed.
   field; every mask fixture goes through import, export and import; what cannot be written is
   reported; hostile masks (70 000 vertices, a single point, a line, a lopsided path, 1e300, a
   1000 character name) never panic and the container stays consistent.
-- `crates/aep/tests/export/effects.rs`: every effect case is imported, exported and parsed back; every parameter's stored value, keys (time,
+- `crates/aep/tests/it/export/effects.rs`: every effect case is imported, exported and parsed back; every parameter's stored value, keys (time,
   value, interpolation), the instance name and the input layer equal what After Effects wrote,
   and a second import gives the same EffectCraft values; edited parameters and keys no fixture
   has, two instances of a type (one full `parT`), the project lists, renamed instances; switched-off
   effects and expressions written and read back, unmapped effects reported; NaN, 1e300 and text values never panic.
-- `crates/aep/tests/export/text.rs`: every text case through import, export and parse:
+- `crates/aep/tests/it/export/text.rs`: every text case through import, export and parse:
   text, paragraphs, style runs (font, size, fill, tracking, faux, caps, leading), box equal to
   After Effects' document, and a second import equal; documents built in code (CRLF / LF, runs
   across a line break, a new font, box text, empty text, the name rule, the layer type); what is
   reported; hostile text (150 000 characters, NaN sizes, emoji, parentheses and backslashes,
   runs that do not cover the text). `src/export/textdoc.rs` has the tree's own tests.
-- `crates/aep/tests/export/footage.rs`: one item of every kind written and parsed back (type
+- `crates/aep/tests/it/export/footage.rs`: one item of every kind written and parsed back (type
   tag, size, duration, rate, numbering, the name rule, png options, layer sources and the time
   remapping maximum), escaped paths, fixtures 126 and 603 through import, export and import, what
   is reported (other types, gaps, NTSC rates, no path, layers past their source), hostile footage
   (100 000 frames, huge sizes, control characters, a sequence without numbers).
-- `crates/aep/tests/export/precomp.rs`: a 640 x 360, 30 fps, 3 s composition in a 25 fps one
+- `crates/aep/tests/it/export/precomp.rs`: a 640 x 360, 30 fps, 3 s composition in a 25 fps one
   (source id, `idpc` / `idpi`, the size used for the anchor, the time remapping maximum, the name),
   import of the result, one composition used twice and chains of three, loops and missing
   compositions reported; `roundtrip.rs` compares the precomposition layers of 124 and 319.
-- `crates/aep/tests/export/robustness.rs`: empty names, huge and zero sizes, NaN and infinite
+- `crates/aep/tests/it/export/robustness.rs`: empty names, huge and zero sizes, NaN and infinite
   numbers, non-positive frame rates, 2 000 layers with 20 000 keys, parent loops, folder loops,
   missing sources, 10 000 character names.
 - `crates/engine/src/tests/aep_export.rs`: the command, refusal, dry run, bad input, the menu entry.

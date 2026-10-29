@@ -9,9 +9,10 @@
 //! - `assets`: every asset file (image, icon, font, LUT, audio, video…) has a complete
 //!   `<file>.attribution` sidecar and an entry in `ATTRIBUTION.md` (AGENTS.md §1).
 //! - `aep-corpus [--update-manifest]`: fetch the After Effects test projects of `crates/aep`,
-//!   pinned and sha256-verified, into `corpus/aep/` (`aep_corpus.rs`).
+//!   pinned and sha256-verified, into `corpus/aep/` (`aep_corpus.rs`). Opt-in: `ci` does not run
+//!   it, and the tests that need the projects print `SKIPPED` without them.
 //! - `ico <out.ico> <in.png>…`: pack PNGs into a Windows `.ico` (used by `packaging/icons.sh`).
-//! - `ci`: fmt check, clippy -D warnings, the After Effects test corpus (`aep-corpus`), tests (`cargo nextest run` when installed) and doctests,
+//! - `ci`: fmt check, clippy -D warnings, tests (`cargo nextest run` when installed) and doctests,
 //!   PDF dependency policy, layers, assets, wasm. Everything builds in the dev profile.
 //! - `bench [--bin CLI] [--quick] [--compare OLD.jsonl] …`: render benchmark of generated scenarios
 //!   (memory, CPU, wall time) into `target/bench/results.jsonl` (`bench.rs`, docs/testing.md).
@@ -443,10 +444,9 @@ type Stage = fn() -> Result<(), String>;
 
 /// Every stage runs even when an earlier one fails, so one run reports all the problems.
 fn ci() -> Result<(), String> {
-    let stages: [(&str, Stage); 8] = [
+    let stages: [(&str, Stage); 7] = [
         ("fmt", || run(Command::new(env!("CARGO")).args(["fmt", "--check"]))),
         ("clippy", || run(Command::new(env!("CARGO")).args(["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]))),
-        ("aep-corpus", || aep_corpus::run(&root(), &[])),
         ("tests", tests),
         ("pdf-deps", || pdf_deps::run(&root())),
         ("layers", layers),

@@ -100,7 +100,7 @@ pub(crate) fn import_effects(
         }
         let params = view.effect_params(&fx);
         for p in &params {
-            import_param(&fx, map, p, cx, &mut group, &shown, refs, col);
+            import_param(&fx, map, p, cx, &shown, ParamOut { group: &mut group, refs: &mut *refs, col: &mut *col });
         }
         col.imported.effects = col.imported.effects.saturating_add(1);
         target.children.push(Node::Group(group));
@@ -125,17 +125,16 @@ pub(crate) struct PendingLayerRef {
     pub what: String,
 }
 
-#[allow(clippy::too_many_arguments)]
-fn import_param(
-    fx: &AepEffect<'_, '_>,
-    map: &EffectMap,
-    p: &EffectParam<'_, '_>,
-    cx: &LayerCtx<'_>,
-    group: &mut PropGroup,
-    shown: &str,
-    refs: &mut Vec<PendingLayerRef>,
-    col: &mut Collector,
-) {
+/// Where a parameter is imported to: the effect's group, the layer parameters still to resolve
+/// and the report.
+struct ParamOut<'a> {
+    group: &'a mut PropGroup,
+    refs: &'a mut Vec<PendingLayerRef>,
+    col: &'a mut Collector,
+}
+
+fn import_param(fx: &AepEffect<'_, '_>, map: &EffectMap, p: &EffectParam<'_, '_>, cx: &LayerCtx<'_>, shown: &str, out: ParamOut<'_>) {
+    let ParamOut { group, refs, col } = out;
     if carries_nothing(p) {
         return;
     }
@@ -160,7 +159,7 @@ fn import_param(
     match m.conv {
         Conv::Skip => return,
         Conv::LayerRef { own } => {
-            import_layer_ref(p, m.target, own, cx, group, &here, &label, refs, col);
+            import_layer_ref(p, m.target, own, cx, (&here, &label), ParamOut { group, refs, col });
             return;
         }
         _ => {}
@@ -294,18 +293,10 @@ fn import_param(
 
 /// A layer parameter: None stays unset, the owning layer is itself (`own`) or unset, another layer
 /// is resolved by [`resolve_layer_refs`] once the composition's layers exist.
-#[allow(clippy::too_many_arguments)]
-fn import_layer_ref(
-    p: &EffectParam<'_, '_>,
-    target: &str,
-    own: bool,
-    cx: &LayerCtx<'_>,
-    group: &mut PropGroup,
-    here: &str,
-    label: &str,
-    refs: &mut Vec<PendingLayerRef>,
-    col: &mut Collector,
-) {
+/// `names` is `(here, label)`, the effect and the parameter for the report.
+fn import_layer_ref(p: &EffectParam<'_, '_>, target: &str, own: bool, cx: &LayerCtx<'_>, names: (&str, &str), out: ParamOut<'_>) {
+    let (here, label) = names;
+    let ParamOut { group, refs, col } = out;
     // After Effects hands the named layer's source to the effect, without its masks and effects
     // (904 E24: Set Matte's luminance from a grey solid that carries a Gradient Ramp is the grey's,
     // 0.5 everywhere); EffectCraft's companion choice defaults to Effects & Masks. Where After

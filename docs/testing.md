@@ -2,8 +2,13 @@
 
 ```sh
 cargo test --workspace     # everything
-cargo xtask ci             # fmt, clippy -D warnings, aep-corpus, tests, pdf-deps, layers, assets, wasm
+cargo xtask ci             # fmt, clippy -D warnings, tests, pdf-deps, layers, assets, wasm
+cargo xtask aep-corpus     # opt-in: the After Effects test projects of crates/aep, into corpus/aep/
 ```
+
+`cargo xtask ci` does not fetch the After Effects test projects; without them the `crates/aep`
+and engine tests that need one print `SKIPPED: fixture <name> missing` and pass. Run
+`cargo xtask aep-corpus` once (pinned, sha256-verified) to run them too.
 
 `cargo xtask ci` builds in the dev profile and runs the tests with `cargo nextest run` (plus
 `cargo test --doc`) when `cargo-nextest` is installed, and with `cargo test` otherwise. It then
