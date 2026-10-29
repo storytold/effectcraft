@@ -10,8 +10,8 @@ use crate::{AepFile, Chunk, parse};
 
 use crate::export::tree::{R, tpl};
 
+#[cfg(test)]
 pub(crate) const BASE: &[u8] = include_bytes!("../../template/base.aep");
-const PROTOS: &[u8] = include_bytes!("../../template/protos.aep");
 #[cfg(test)]
 const MASKS: &[u8] = include_bytes!("../../template/masks.aep");
 #[cfg(test)]
@@ -98,35 +98,19 @@ fn transform_records(keyed: bool) -> Vec<Chunk<'static>> {
 
 impl Template {
     pub fn load() -> R<Template> {
-        let file = parse(BASE).map_err(|_| tpl("the embedded template does not parse"))?.into_owned();
-        let protos = parse(PROTOS).map_err(|_| tpl("the embedded prototypes do not parse"))?.into_owned();
-        let fold = file.list(b"Fold").ok_or_else(|| tpl("template without Fold"))?;
-        let fk = fold.children();
-        let comp = fk.iter().find(|c| c.is_list(b"Item")).ok_or_else(|| tpl("template without a composition"))?.clone();
-        let fee_at = fk.iter().position(|c| c.is_list(b"FEE ")).ok_or_else(|| tpl("template without FEE"))?;
-        let fee = fk.get(fee_at).ok_or_else(|| tpl("template without FEE"))?.clone();
+        let file = AepFile { chunks: crate::export::base::project_chunks(), trailer: std::borrow::Cow::Borrowed(&[]) };
+        let fee = crate::export::base::fee();
         let fset = crate::export::skeleton::f_records();
-        let mut folder_item = fk.iter().rev().find(|c| c.is_list(b"Item")).ok_or_else(|| tpl("template without Solids"))?.clone();
-        let solid_item;
-        {
-            let sfdr = folder_item.child_list(b"Sfdr").ok_or_else(|| tpl("Solids without Sfdr"))?;
-            solid_item = sfdr.children().iter().find(|c| c.is_list(b"Item")).ok_or_else(|| tpl("Solids without a solid"))?.clone();
-        }
-        crate::export::tree::kids_mut(crate::export::tree::list_mut(&mut folder_item, b"Sfdr")?)?.clear();
-
-        let kids = comp.children();
-        let first = kids.iter().position(|c| c.is_list(b"Layr")).ok_or_else(|| tpl("template without a layer"))?;
-        let end = kids.iter().position(|c| c.is_list(b"DLay")).ok_or_else(|| tpl("template without view layers"))?;
+        let folder_item = crate::export::base::folder_item();
+        let solid_item = crate::export::base::solid_item();
+        let (comp_shell, first) = crate::export::base::comp_shell();
         let layer_block = crate::export::skeleton::av_layer();
-        let mut comp_shell = comp.clone();
-        crate::export::tree::kids_mut(&mut comp_shell)?.drain(first..end);
-
-        let list_of = |ty: &[u8; 4]| -> R<Vec<Chunk<'static>>> { Ok(protos.list(ty).ok_or_else(|| tpl("prototype list missing"))?.children().to_vec()) };
         let stat = transform_records(false);
         let keyd = transform_records(true);
         // A null layer has the AV layer's block; `ldta` marks it (byte 38 bit 0x80).
         let null_block = crate::export::skeleton::av_layer();
-        let null_item = list_of(b"nuli")?.into_iter().next().ok_or_else(|| tpl("null item missing"))?;
+        // The hidden solid of a null layer is an ordinary solid item (022).
+        let null_item = crate::export::base::solid_item();
         let masks = crate::export::masks::MaskProtos::build();
         let effects = crate::export::effects::FxProtos::build();
         let styles = crate::export::styles::StyleProtos::from_table();

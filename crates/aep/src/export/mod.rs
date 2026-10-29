@@ -20,6 +20,7 @@
 //! The crate sits at L3 (above `effectcraft-project`, next to the importer) and builds for wasm32:
 //! it does no file access, the caller gets the bytes.
 
+mod base;
 mod camlight;
 mod effects;
 mod emit;
