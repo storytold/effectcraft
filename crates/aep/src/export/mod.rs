@@ -42,6 +42,7 @@ mod template;
 mod text;
 mod textanim;
 mod textdoc;
+mod textproto;
 mod timebase;
 mod tree;
 mod tree_defs;
