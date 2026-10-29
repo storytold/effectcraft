@@ -217,7 +217,7 @@ impl ParDef {
         };
         let pname = pard.get(16..48).map(cname).unwrap_or_default();
         let (name, items) = match (code, pdnm) {
-            (7, Some(p)) => (pname, p.split('|').map(str::to_string).collect()),
+            (7, Some(p)) if !p.is_empty() => (pname, p.split('|').map(str::to_string).collect()),
             (4, Some(p)) if pname.trim().is_empty() => (p.to_string(), Vec::new()),
             _ => (pname, Vec::new()),
         };

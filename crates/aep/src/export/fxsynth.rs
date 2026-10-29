@@ -194,6 +194,11 @@ pub(crate) fn default_sspc(fx: &FxDef) -> Chunk<'static> {
         let record = fx.record(p);
         part.push(tdmn(&record));
         part.push(Chunk::data(*b"pard", pard(p, popup_items(fx, i))));
+        if matches!(p.code, 4 | 7 | 15) {
+            // Checkboxes, popups and buttons have a `pdnm` (their label or items); its text may
+            // be empty.
+            part.push(Chunk { id: *b"pdnm", body: crate::Body::Chunks(vec![Chunk::data(*b"Utf8", Vec::new())]), pad: None });
+        }
         if p.id == BUILT_IN {
             values.push(tdmn(&record));
             values.push(Chunk::list(*b"tdgp", vec![Chunk::data(*b"tdsb", 1u32.to_be_bytes().to_vec()), tdsn(NO_NAME), tdmn("ADBE Group End")]));

@@ -250,6 +250,9 @@ impl<'f, 'a> Effect<'f, 'a> {
                 && let Some(last) = out.last_mut()
                 && let Some(u) = c.children().iter().find(|u| u.is(b"Utf8"))
                 && let Some(b) = u.bytes()
+                // An empty `pdnm` names nothing (EffectCraft's exports write one: the effect
+                // supplies its items).
+                && !b.is_empty()
             {
                 last.items = Some(text(b).split('|').map(str::to_string).collect());
             }
