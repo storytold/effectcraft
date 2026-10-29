@@ -948,10 +948,12 @@ fn reset(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(Value::Null)
 }
 
+/// `effect.swapTintColors`: swaps Tint's Map Black To and Map White To (see [`swap_colors`]).
 fn swap_tint_colors(s: &mut Session, p: &Value) -> Result<Value> {
     swap_colors(s, p, "effect.swapTintColors", "ec.color.tint", ["black", "white"], "Tint")
 }
 
+/// `effect.swapGradientRampColors`: swaps Gradient Ramp's Start Color and End Color (see [`swap_colors`]).
 fn swap_gradient_ramp_colors(s: &mut Session, p: &Value) -> Result<Value> {
     swap_colors(s, p, "effect.swapGradientRampColors", "ec.generate.gradientramp", ["startColor", "endColor"], "Gradient Ramp")
 }

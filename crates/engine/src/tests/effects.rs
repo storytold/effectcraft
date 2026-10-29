@@ -488,6 +488,7 @@ fn tint_swap_rejects_invalid_targets_without_editing() {
 }
 
 #[test]
+/// Swapping one Gradient Ramp changes only its two colours, leaves other instances alone and is one undo step.
 fn gradient_ramp_swaps_only_its_colors_in_one_undo_step() {
     let (mut s, a, b) = comp_with_two_solids();
     let first = apply(&mut s, a, "Gradient Ramp");
@@ -520,6 +521,7 @@ fn gradient_ramp_swaps_only_its_colors_in_one_undo_step() {
 }
 
 #[test]
+/// An animated colour gets a new key at the layer time (time-stretched here); existing keys stay put.
 fn gradient_ramp_swap_keys_animated_colors_at_layer_time() {
     let (mut s, a, _) = comp_with_two_solids();
     let target = apply(&mut s, a, "Gradient Ramp");
@@ -552,6 +554,7 @@ fn gradient_ramp_swap_keys_animated_colors_at_layer_time() {
 }
 
 #[test]
+/// Bad targets and a damaged colour parameter fail without editing the project or the undo history.
 fn gradient_ramp_swap_rejects_invalid_targets_without_editing() {
     let mut empty = Session::default();
     assert!(empty.execute("effect.swapGradientRampColors", json!({})).is_err());

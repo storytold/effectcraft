@@ -159,9 +159,11 @@ fn swap_colors_button(app: &mut EffectcraftApp, ui: &mut egui::Ui, t: &Tokens, g
     let label = crate::i18n::tr("Swap Colors");
     let id = egui::Id::unique(("ec-color-swap", g.uid));
     let resp = if command == "effect.swapGradientRampColors" {
-        // Align the action with the parameter values and use the same quiet field styling.
-        let vx = (row.min.x + row.width() * 0.48).max(row.min.x + PARAM_NAME_X + 124.0);
+        // Align the action with the parameter values and use the same quiet field styling. In a
+        // panel too narrow for the label there, move it left so it stays clickable.
         let width = ui.painter().layout_no_wrap(label.to_owned(), Tokens::ui(12.0), t.text).size().x + 20.0;
+        let preferred = (row.min.x + row.width() * 0.48).max(row.min.x + PARAM_NAME_X + 124.0);
+        let vx = preferred.min(row.max.x - width - 8.0).max(row.min.x + PARAM_NAME_X);
         let r = Rect::from_min_size(pos2(vx, row.min.y + 2.0), vec2(width.min((row.max.x - vx - 8.0).max(0.0)), ROW - 2.0));
         let resp = ui.interact(r, id, Sense::click());
         let bg = if resp.is_pointer_button_down_on() {

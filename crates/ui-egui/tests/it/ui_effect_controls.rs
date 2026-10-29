@@ -170,6 +170,7 @@ fn tint_swap_button_targets_its_instance_and_undoes_both_colors() {
 }
 
 #[test]
+/// Gradient Ramp's Swap Colors button swaps only its own effect, selects it and undoes in one step.
 fn gradient_ramp_swap_button_targets_its_instance_and_undoes_both_colors() {
     let mut s = Session::default();
     s.execute("comp.new", json!({"width": 640, "height": 360, "frameRate": 30, "duration": 5})).unwrap();
