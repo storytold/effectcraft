@@ -66,6 +66,21 @@ focused control into view. Active composition breadcrumbs use the selected-row t
 The `viewer_geometry` tests inspect actual painted contrast, scroll geometry and pointer/keyboard
 reachability across the three themes.
 
+Two layers make a physical keyboard and mouse usable on Android. winit 0.30.13 (the last 0.30
+release, pinned by eframe 0.36) reports no modifier state there — it ignores the meta state the OS
+carries on every key event and never emits the `ModifiersChanged` egui-winit learns `Ctrl`/`Shift`/
+`Alt` from — and drops every motion action that is not a touch, so a mouse has no hover, no wheel
+and no right or middle button. The workspace therefore vends winit with that mouse path filled in
+([third_party/winit](../third_party/winit/README.md): one Android-only file, pinned by
+`[patch.crates-io]`; every other target compiles the published crate byte-for-byte) and stamps the
+modifier keys onto each frame's key events itself (`stamp_android_modifiers` in `ui-egui`, driven
+from `raw_input_hook` after the frame's events are gathered, before egui builds its input state).
+The stamping also keeps a chord from degrading into its plain-key binding: without it a chord's
+letter arrives unmodified and fires whatever that plain key is bound to — the Zoom tool for `Z` —
+so the chord itself never runs. Touch and touch-dragged stylus input is untouched in both layers.
+The same two layers were validated first on FilmCraft's Android port (filmcraft `47f202cb`,
+`ecea29d6`, `685c9cc3`).
+
 ## 2. Time
 
 All time is an integer `Tick`, 254 016 000 000 per second, the least common multiple of every
@@ -730,6 +745,7 @@ JSON parsing is now the bulk of open), and rendering 5,000-layer comps faster.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-16 | minor | Android input: vendored winit (`third_party/winit`) with the mouse/trackpad path filled in — wheel, right/middle button, hover — and in-app keyboard-modifier stamping (`stamp_android_modifiers`), since winit's Android backend emits neither `ModifiersChanged` nor any mouse event (ported from FilmCraft's fix) |
 | 2026-10-10 | minor | Status line added; crate table checked against `crates/` (every crate listed); effect count and VP9 encoder description corrected |
 
 PDF document structure uses the `craft-pdf` read feature through an app-owned bounded object adapter. EffectCraft retains its drawing tree, fonts, content/image filters and EPS interpreter; ordinary object/xref limits remain 256 MiB on 64-bit and 64 MiB on 32-bit/WASM, including repair.

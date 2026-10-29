@@ -7,6 +7,8 @@
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+#[cfg(any(target_os = "android", test))]
+mod android_modifiers;
 pub mod audio;
 pub mod automation;
 pub mod bench;
@@ -280,6 +282,10 @@ pub struct EffectcraftApp {
     /// Input from floating panels' own OS windows for the main window's next frame.
     pub(crate) forwarded: ForwardedInput,
     pub(crate) input_waiters: Vec<Sender<serde_json::Value>>,
+    /// Modifier keys as this device's key events report them (Android only: winit reports no
+    /// modifier state there — see `stamp_android_modifiers`).
+    #[cfg(target_os = "android")]
+    android_modifiers: egui::Modifiers,
     /// Control requests waiting for an offloaded job (`wait: true` in the browser).
     pub(crate) job_waiters: Vec<(control::JobWaiter, Sender<serde_json::Value>)>,
     pending_screenshots: Vec<PendingShot>,

@@ -59,6 +59,8 @@ impl EffectcraftApp {
             synthetic: vec![],
             forwarded: ForwardedInput::default(),
             input_waiters: vec![],
+            #[cfg(target_os = "android")]
+            android_modifiers: egui::Modifiers::NONE,
             job_waiters: vec![],
             pending_screenshots: vec![],
             shot_bytes: 0,
@@ -148,6 +150,10 @@ impl eframe::App for EffectcraftApp {
         if pointer_wrap::prepare_input(ctx, raw_input, injected) {
             self.session.history.merge_key = None;
         }
+        // Last, so it stamps every event the frame carries: Android's winit reports no modifier
+        // state and never emits `ModifiersChanged`, so egui's chords would never match without it.
+        #[cfg(target_os = "android")]
+        crate::android_modifiers::stamp_android_modifiers(&mut raw_input.events, &mut self.android_modifiers);
     }
 
     /// The logic-only tick: run `tick`, close the IME pass with `finish_ime_logic` and, last, hand a close to the
