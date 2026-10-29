@@ -381,12 +381,13 @@ pub(crate) fn tdmn_name(c: &Chunk<'_>) -> Option<String> {
 /// The limit of a mask's feather and expansion (`tduM` 32 000, 091).
 const MASK_LIMIT: f64 = 32_000.0;
 
-/// A shape header (`shph`, 24 bytes, aep-format.md 3.8): byte 3 `0x01` (`0x09` once the path is
-/// open), the box at 4..19 (written per shape), byte 20 1. Bytes 0..2 are not decoded and written
-/// zero.
+/// A shape header (`shph`, 24 bytes, aep-format.md 3.8): bytes 0..2 `b3 de 02` (in every
+/// sample; meaning not decoded, and zero there is "an internally damaged shape" for After Effects,
+/// s13-m1), byte 3 `0x01` (`0x09` once the path is open), the box at 4..19 (written per shape),
+/// byte 20 1.
 pub(crate) fn shph() -> Vec<u8> {
     let mut b = vec![0u8; 24];
-    let _ = put_u8(&mut b, 3, 0x01);
+    let _ = crate::export::tree::put(&mut b, 0, &[0xb3, 0xde, 0x02, 0x01]);
     let _ = put_u8(&mut b, 20, 1);
     b
 }
