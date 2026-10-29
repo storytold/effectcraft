@@ -15,7 +15,7 @@ use egui::{Align2, Color32, Rect, Sense, Stroke, StrokeKind, UiBuilder, pos2, ve
 use serde_json::{Value, json};
 
 use crate::EffectcraftApp;
-use crate::dock::PanelKind;
+use crate::dock::{PanelKind, WorkspaceExt as _};
 use crate::theme::Tokens;
 
 enum Act {
@@ -51,7 +51,7 @@ fn draw_children(app: &mut EffectcraftApp, ui: &mut egui::Ui, origin: egui::Pos2
             let tw = (tab.text.chars().count() as f32 * 7.0 + 20.0).max(48.0);
             let hr = Rect::from_min_size(pos2(x, r.min.y), vec2(tw, 22.0));
             let active = i == w.active_tab;
-            let resp = ui.interact(hr, egui::Id::new(("sui-tab", win, tab.id)), Sense::click());
+            let resp = ui.interact(hr, egui::Id::unique(("sui-tab", win, tab.id)), Sense::click());
             ui.painter().rect_filled(
                 hr,
                 3.0,
@@ -81,12 +81,17 @@ fn draw_children(app: &mut EffectcraftApp, ui: &mut egui::Ui, origin: egui::Pos2
     }
 }
 
+/// Draws ScriptUI widget `w` of window `win` at its bounds offset by `origin`, registering it for
+/// automation, and recurses into containers. Widgets with an `onDraw` handler are painted by the
+/// script (replacing the default look, or on top of it when it called `drawOSControl()`) while
+/// buttons, checkboxes and radios still take clicks. Edits and clicks are appended to `acts` for
+/// [`perform`]; while a field or slider is in use its live value lives in egui temp data.
 fn draw_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, origin: egui::Pos2, win: u32, w: &Widget, acts: &mut Vec<Act>) {
     let t = app.tokens;
     let services = app.session.services.clone();
     let rect = rect_of(origin, w.bounds);
     register(app, win, w, rect);
-    let id = egui::Id::new(("sui", win, w.id));
+    let id = egui::Id::unique(("sui", win, w.id));
     let tip = |r: egui::Response| if w.help_tip.is_empty() { r } else { r.on_hover_text(&w.help_tip) };
     // onDraw: the script paints the control. Without drawOSControl() its paint replaces the
     // default look (buttons and toggles still respond to clicks); with it, it goes on top.
@@ -209,7 +214,7 @@ fn draw_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, origin: egui::Pos2, 
             let mut pick: Option<usize> = None;
             ui.add_enabled_ui(w.enabled, |ui| {
                 ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
-                    egui::ComboBox::from_id_salt(id).selected_text(cur).width(rect.width() - 8.0).show_ui(ui, |ui| {
+                    craft_ui::ComboBox::from_id_salt(id).selected_text(cur).width(rect.width() - 8.0).show_ui(ui, |ui| {
                         for (i, it) in w.items.iter().enumerate() {
                             if it == "-" {
                                 ui.separator();
@@ -316,7 +321,7 @@ fn paint_draw(ui: &egui::Ui, rect: Rect, ops: &[DrawOp], t: &Tokens, services: &
 /// A ScriptUIImage as a texture (decoded once and kept; `None` when it can't be read or
 /// decoded).
 fn image_texture(ctx: &egui::Context, img: &ImageRef, services: &dyn Services) -> Option<egui::TextureHandle> {
-    let id = egui::Id::new(("scriptui-image", img));
+    let id = egui::Id::unique(("scriptui-image", img));
     if let Some(cached) = ctx.data(|d| d.get_temp::<Option<egui::TextureHandle>>(id)) {
         return cached;
     }
@@ -382,7 +387,7 @@ fn wants_mouse(w: &Widget, depth: usize) -> bool {
 /// same control; it replaces the plain click the control reported, so a checkbox toggles once).
 /// Only events a listener wants are sent; none while `active` is false (a modal dialog is up).
 fn mouse_events(ui: &egui::Ui, origin: egui::Pos2, area: Rect, win: u32, root: &Widget, active: bool, acts: &mut Vec<Act>) {
-    let id = egui::Id::new(("sui-mouse", win));
+    let id = egui::Id::unique(("sui-mouse", win));
     if !wants_mouse(root, 0) {
         ui.data_mut(|d| d.remove::<MouseTrack>(id));
         return;
@@ -471,6 +476,9 @@ fn snug(r: Rect, text: &str) -> Rect {
     Rect::from_min_size(r.min, vec2(w, r.height()))
 }
 
+/// Runs the actions collected while drawing a ScriptUI window as `scriptui.*` commands, in order.
+/// A reply carrying an `error` becomes a toast with the script's message; otherwise a non-empty
+/// `output` becomes the status line (its last line). Command failures also go to `app.ui.status`.
 fn perform(app: &mut EffectcraftApp, ctx: &egui::Context, acts: Vec<Act>) {
     for a in acts {
         let (cmd, p) = match a {
@@ -490,7 +498,7 @@ fn perform(app: &mut EffectcraftApp, ctx: &egui::Context, acts: Vec<Act>) {
             Ok(r) => {
                 if let Some(e) = r.get("error").filter(|e| !e.is_null()) {
                     let msg = e["message"].as_str().unwrap_or("script error").to_string();
-                    app.toast = Some((msg, ctx.input(|i| i.time)));
+                    app.toast = Some((msg, app.now()));
                 } else if let Some(o) = r["output"].as_str().filter(|o| !o.is_empty()) {
                     app.ui.status = o.lines().last().unwrap_or_default().to_string();
                 }
@@ -512,7 +520,7 @@ pub fn show_windows(app: &mut EffectcraftApp, ctx: &egui::Context) {
     let blocked = windows.iter().any(|w| w.modal);
     if blocked {
         // A modal dialog blocks the app behind it, as in After Effects.
-        let r = egui::Area::new(egui::Id::new("scriptui-modal-block")).order(egui::Order::Middle).fixed_pos(screen.min).show(ctx, |ui| {
+        let r = egui::Area::new(egui::Id::unique("scriptui-modal-block")).order(egui::Order::Middle).fixed_pos(screen.min).show(ctx, |ui| {
             ui.allocate_exact_size(screen.size(), Sense::click_and_drag());
             ui.painter().rect_filled(screen, 0.0, Color32::from_black_alpha(90));
         });
@@ -523,7 +531,7 @@ pub fn show_windows(app: &mut EffectcraftApp, ctx: &egui::Context) {
         let mut open = true;
         let order = if w.modal { egui::Order::Foreground } else { egui::Order::Middle };
         let resp = egui::Window::new(if w.title.is_empty() { &w.script } else { &w.title })
-            .id(egui::Id::new(("scriptui-window", w.id)))
+            .id(egui::Id::unique(("scriptui-window", w.id)))
             .order(order)
             .collapsible(false)
             .resizable(false)
@@ -546,7 +554,7 @@ pub fn show_windows(app: &mut EffectcraftApp, ctx: &egui::Context) {
     perform(app, ctx, acts);
 }
 
-/// A dockable ScriptUI panel's content (Window ▸ <panel>.jsx).
+/// A dockable ScriptUI panel's content (Window ▸ `<panel>.jsx`).
 pub fn panel(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect, id: u32) {
     let t = app.tokens;
     let Some(mut w) = app.session.script_ui.window(id).cloned() else {
@@ -579,12 +587,7 @@ pub fn panel_title(app: &EffectcraftApp, id: u32) -> Option<String> {
 /// Close the dock panels whose script window has gone (the script closed it, or a saved
 /// workspace from an earlier run).
 pub fn sync_panels(app: &mut EffectcraftApp) {
-    let mut all = vec![];
-    app.ui.dock.panels(&mut all);
-    for f in &app.ui.floating {
-        all.extend(f.panels.iter().copied());
-    }
-    for p in all {
+    for p in app.ui.dock.panels() {
         if let PanelKind::ScriptPanel(id) = p
             && app.session.script_ui.window(id).is_none()
         {

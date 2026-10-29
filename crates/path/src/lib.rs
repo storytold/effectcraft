@@ -133,7 +133,9 @@ pub fn from_kurbo(path: &BezPath) -> Vec<ShapePath> {
 /// Rectangle path centred at `pos` with corner `roundness` (AE draws clockwise from the top-right).
 pub fn rect(size: [f64; 2], pos: [f64; 2], roundness: f64) -> BezPath {
     let r = kurbo::Rect::from_center_size(Point::new(pos[0], pos[1]), (size[0].abs(), size[1].abs()));
-    let rad = roundness.clamp(0.0, size[0].abs().min(size[1].abs()) / 2.0);
+    let max_rad = size[0].abs().min(size[1].abs()) / 2.0;
+    // `f64::clamp` panics on a NaN bound (both size components NaN): fall back to no roundness.
+    let rad = if max_rad.is_nan() { 0.0 } else { roundness.clamp(0.0, max_rad) };
     if rad > 0.0 { r.to_rounded_rect(rad).to_path(0.1) } else { r.to_path(0.1) }
 }
 
@@ -142,7 +144,20 @@ pub fn ellipse(size: [f64; 2], pos: [f64; 2]) -> BezPath {
 }
 
 /// Polystar: a star (`inner` radius used) or polygon, rotation in degrees, roundness in percent.
-pub fn polystar(star: bool, points: f64, pos: [f64; 2], rotation: f64, inner: f64, outer: f64, inner_round: f64, outer_round: f64) -> BezPath {
+pub struct Polystar {
+    pub star: bool,
+    pub points: f64,
+    pub pos: [f64; 2],
+    pub rotation: f64,
+    pub inner: f64,
+    pub outer: f64,
+    pub inner_round: f64,
+    pub outer_round: f64,
+}
+
+/// Build the path described by the polystar's geometry.
+pub fn polystar(spec: Polystar) -> BezPath {
+    let Polystar { star, points, pos, rotation, inner, outer, inner_round, outer_round } = spec;
     let n = points.max(3.0).round() as usize;
     let verts = if star { n * 2 } else { n };
     let mut path = BezPath::new();
@@ -355,6 +370,11 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rect_with_nan_size_does_not_panic() {
+        let _ = rect([f64::NAN, f64::NAN], [0.0, 0.0], 5.0);
+    }
+
+    #[test]
     fn roundtrip_vertex_model() {
         let sp = ShapePath::ellipse([10.0, 20.0], 40.0, 30.0);
         let k = to_kurbo(&sp);
@@ -391,7 +411,7 @@ mod tests {
 
     #[test]
     fn star_has_right_vertex_count() {
-        let p = polystar(true, 5.0, [0.0, 0.0], 0.0, 20.0, 50.0, 0.0, 0.0);
+        let p = polystar(Polystar { star: true, points: 5.0, pos: [0.0, 0.0], rotation: 0.0, inner: 20.0, outer: 50.0, inner_round: 0.0, outer_round: 0.0 });
         let v = from_kurbo(&p);
         assert_eq!(v[0].vertices.len(), 10);
     }

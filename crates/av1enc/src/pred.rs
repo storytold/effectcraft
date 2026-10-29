@@ -2,7 +2,10 @@
 //! modes plus V_PRED / H_PRED without edge filtering, 7.11.3 block inter prediction without
 //! reference scaling) so that the encoder predicts exactly like a decoder.
 
-use crate::tables::*;
+use crate::tables::{
+    DC_PRED, EIGHTTAP, H_PRED, PAETH_PRED, SM_WEIGHTS_TX_4X4, SM_WEIGHTS_TX_8X8, SM_WEIGHTS_TX_16X16, SM_WEIGHTS_TX_32X32, SMOOTH_H_PRED, SMOOTH_PRED,
+    SMOOTH_V_PRED, SUBPEL_FILTERS, V_PRED,
+};
 use crate::transform::round2;
 
 /// A plane buffer (padded to whole superblocks).
@@ -184,19 +187,20 @@ pub(crate) fn predict_intra(ed: &Edges, e: &IntraEdge, mode: usize, pred: &mut [
 /// final rounding is the identity) of the `w x h` block at plane position (x, y) displaced by
 /// `mv` (1/8 luma sample units, [row, col]). `last_x` / `last_y` are the largest sample
 /// coordinates of the reference plane; the result goes to `pred` (row stride `w`).
-pub(crate) fn predict_inter(
-    refp: &Plane,
-    last_x: i32,
-    last_y: i32,
-    x: usize,
-    y: usize,
-    w: usize,
-    h: usize,
-    mv: [i32; 2],
-    ss: usize,
-    bit_depth: u32,
-    pred: &mut [u16],
-) {
+pub(crate) struct InterBlock {
+    pub last_x: i32,
+    pub last_y: i32,
+    pub x: usize,
+    pub y: usize,
+    pub width: usize,
+    pub height: usize,
+    pub mv: [i32; 2],
+    pub subsampling: usize,
+    pub bit_depth: u32,
+}
+
+pub(crate) fn predict_inter(refp: &Plane, block: &InterBlock, pred: &mut [u16]) {
+    let InterBlock { last_x, last_y, x, y, width: w, height: h, mv, subsampling: ss, bit_depth } = *block;
     // positions in 1/16 sample units ((startX >> 6) & 15 is the filter phase)
     let px = ((x as i32) << 4) + ((2 * mv[1]) >> ss);
     let py = ((y as i32) << 4) + ((2 * mv[0]) >> ss);
@@ -340,7 +344,11 @@ mod tests {
             for (bx, by) in [(0i32, 0i32), (8, 8), (24, 16), (-5, 20), (30, -3)] {
                 let mut pred = vec![0u16; 64];
                 let mv = [by * 8 + fy as i32 / 2, bx * 8 + fx as i32 / 2];
-                predict_inter(&p, w as i32 - 1, h as i32 - 1, 0, 0, 8, 8, mv, 0, 8, &mut pred);
+                predict_inter(
+                    &p,
+                    &InterBlock { last_x: w as i32 - 1, last_y: h as i32 - 1, x: 0, y: 0, width: 8, height: 8, mv, subsampling: 0, bit_depth: 8 },
+                    &mut pred,
+                );
                 for r in 0..8 {
                     for c in 0..8 {
                         let (x, y) = ((bx + c).clamp(0, w as i32 - 1), (by + r).clamp(0, h as i32 - 1));

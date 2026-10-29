@@ -360,6 +360,9 @@ impl Mat4 {
     }
     /// General inverse (Gauss-Jordan with partial pivoting).
     pub fn inverse(&self) -> Option<Mat4> {
+        if !self.0.iter().flatten().all(|v| v.is_finite()) {
+            return None;
+        }
         let mut a = self.0;
         let mut inv = Mat4::IDENTITY.0;
         for col in 0..4 {
@@ -448,6 +451,16 @@ mod tests {
 
     fn close(a: Vec2, b: Vec2) -> bool {
         (a - b).length() < 1e-9
+    }
+
+    #[test]
+    fn mat4_inverse_rejects_non_finite() {
+        for (r, c, v) in [(0, 0, f64::NAN), (2, 1, f64::NAN), (1, 3, f64::INFINITY)] {
+            let mut m = Mat4::IDENTITY;
+            m.0[r][c] = v;
+            assert!(m.inverse().is_none(), "{r},{c},{v}");
+        }
+        assert!(Mat4::IDENTITY.inverse().is_some());
     }
 
     #[test]

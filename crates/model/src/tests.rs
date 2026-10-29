@@ -492,3 +492,75 @@ fn stl_hostile_input_is_an_error() {
     let m = stl::parse(&binary_stl(b"", &[([1.0, 0.0, 0.0], [[0.0; 3]; 3], 0)])).unwrap();
     assert_eq!(m.meshes[0].primitives[0].normals[0], [1.0, 0.0, 0.0]);
 }
+
+/// A one-triangle glTF whose POSITION is accessor 0, over a buffer of `bytes` zero bytes.
+fn gltf_doc(accessors: &str, views: &str, bytes: usize) -> String {
+    let b64 = "A".repeat(bytes / 3 * 4) + ["", "AA==", "AAA="][bytes % 3];
+    format!(
+        r#"{{"asset": {{"version": "2.0"}}, "scenes": [{{"nodes": [0]}}], "nodes": [{{"mesh": 0}}],
+        "meshes": [{{"primitives": [{{"attributes": {{"POSITION": 0}}}}]}}],
+        "buffers": [{{"byteLength": {bytes}, "uri": "data:application/octet-stream;base64,{b64}"}}],
+        "bufferViews": [{views}], "accessors": [{accessors}]}}"#
+    )
+}
+
+#[test]
+fn gltf_accessor_counts_are_checked_against_the_buffer_before_allocating() {
+    // Untrusted counts, offsets and strides must fail the import, not allocate from the count or
+    // overflow (#1235).
+    let view = r#"{"buffer": 0, "byteLength": 36}"#;
+    let cases = [
+        // A count far beyond the 36-byte buffer.
+        (r#"{"bufferView": 0, "componentType": 5126, "type": "VEC3", "count": 4000000000}"#, view, "past its buffer"),
+        // count * components overflows.
+        (r#"{"bufferView": 0, "componentType": 5126, "type": "MAT4", "count": 9223372036854775807}"#, view, "too large"),
+        // Offsets that overflow when added.
+        (
+            r#"{"bufferView": 0, "componentType": 5126, "type": "VEC3", "count": 3, "byteOffset": 16}"#,
+            r#"{"buffer": 0, "byteOffset": 18446744073709551610}"#,
+            "past its buffer",
+        ),
+        // A stride that overflows with the count.
+        (r#"{"bufferView": 0, "componentType": 5126, "type": "VEC3", "count": 3000000000}"#, r#"{"buffer": 0, "byteStride": 252}"#, "past its buffer"),
+        // A stride smaller than an element would re-read the same bytes for a huge count.
+        (r#"{"bufferView": 0, "componentType": 5126, "type": "MAT4", "count": 30}"#, r#"{"buffer": 0, "byteStride": 1}"#, "smaller than"),
+        // No buffer view: nothing backs the count, so it is capped.
+        (r#"{"componentType": 5126, "type": "VEC3", "count": 1000000000}"#, view, "without a bufferView"),
+    ];
+    let t0 = std::time::Instant::now();
+    for (acc, v, want) in cases {
+        let doc = gltf_doc(acc, v, 36);
+        let e = crate::gltf::parse(doc.as_bytes(), &|_| None).err().unwrap_or_else(|| panic!("{acc} imported"));
+        assert!(e.to_string().contains(want), "{acc}: {e}");
+    }
+    assert!(t0.elapsed() < std::time::Duration::from_secs(10), "{:?}", t0.elapsed());
+}
+
+#[test]
+fn gltf_integer_accessors_are_checked_too() {
+    let doc = gltf_doc(r#"{"bufferView": 0, "componentType": 5126, "type": "VEC3", "count": 3}"#, r#"{"buffer": 0, "byteLength": 36}"#, 36)
+        .replace(r#""attributes": {"POSITION": 0}"#, r#""attributes": {"POSITION": 0}, "indices": 1"#);
+    for idx in [
+        r#"{"bufferView": 0, "componentType": 5125, "type": "SCALAR", "count": 4000000000}"#,
+        r#"{"componentType": 5125, "type": "SCALAR", "count": 4000000000}"#,
+        r#"{"bufferView": 0, "componentType": 5125, "type": "VEC4", "count": 9223372036854775807}"#,
+    ] {
+        let doc = doc.replace(r#""count": 3}]"#, &format!(r#""count": 3}}, {idx}]"#));
+        assert!(crate::gltf::parse(doc.as_bytes(), &|_| None).is_err(), "{idx}");
+    }
+}
+
+#[test]
+fn gltf_strided_and_buffer_less_accessors_still_import() {
+    // Interleaved positions (stride 24) ending exactly at the buffer's end, and a small all-zero
+    // accessor without a view.
+    let doc = gltf_doc(r#"{"bufferView": 0, "componentType": 5126, "type": "VEC3", "count": 3}"#, r#"{"buffer": 0, "byteStride": 24}"#, 60);
+    let m = crate::gltf::parse(doc.as_bytes(), &|_| None).unwrap();
+    assert_eq!(m.meshes[0].primitives[0].positions.len(), 3);
+    let doc = gltf_doc(r#"{"componentType": 5126, "type": "VEC3", "count": 6}"#, r#"{"buffer": 0}"#, 3);
+    let m = crate::gltf::parse(doc.as_bytes(), &|_| None).unwrap();
+    assert_eq!(m.meshes[0].primitives[0].positions.len(), 6);
+    // One byte short of the third element is an error.
+    let doc = gltf_doc(r#"{"bufferView": 0, "componentType": 5126, "type": "VEC3", "count": 3}"#, r#"{"buffer": 0, "byteStride": 24}"#, 59);
+    assert!(crate::gltf::parse(doc.as_bytes(), &|_| None).is_err());
+}

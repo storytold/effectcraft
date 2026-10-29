@@ -8,7 +8,8 @@
 
 use crate::range::{BITRES, RangeEncoder, ilog};
 use crate::rate::{Mode, QTHETA_OFFSET, get_pulses};
-use crate::tables::*;
+use crate::tables::EBANDS;
+use crate::{CeltFrame, rate::Allocation};
 
 pub const SPREAD_NORMAL: usize = 2;
 
@@ -55,7 +56,7 @@ fn exp_rotation1_inv(x: &mut [f32], len: usize, stride: usize, c: f32, s: f32) {
     if len <= stride {
         return;
     }
-    if len >= 2 * stride + 1 {
+    if len > 2 * stride {
         for i in 0..=len - 2 * stride - 1 {
             let x1 = x[i];
             let x2 = x[i + stride];
@@ -217,7 +218,7 @@ impl BandEnc<'_, '_> {
             let q = qn as u32;
             let half = q >> 1;
             let ft = (half + 1) * (half + 1);
-            let (fl, fs) = if it <= half { (it * (it + 1) >> 1, it + 1) } else { (ft - ((q + 1 - it) * (q + 2 - it) >> 1), q + 1 - it) };
+            let (fl, fs) = if it <= half { ((it * (it + 1)) >> 1, it + 1) } else { (ft - (((q + 1 - it) * (q + 2 - it)) >> 1), q + 1 - it) };
             self.enc.encode(fl, fl + fs, ft);
             itheta = ((it * 16384) / q) as i32;
         }
@@ -294,26 +295,19 @@ impl BandEnc<'_, '_> {
     }
 }
 
-/// Codes all band shapes (`quant_all_bands`, encoder side, long blocks). `x` holds `c` channels
-/// of `n` normalised MDCT coefficients each.
-#[allow(clippy::too_many_arguments)]
-pub fn quant_all_bands(
-    m: &Mode,
-    start: usize,
-    end: usize,
-    x: &[f32],
-    n_total: usize,
-    c: usize,
-    pulses: &[i32; NB_EBANDS],
-    spread: usize,
-    dual_stereo: bool,
-    intensity: usize,
-    total_bits: i32,
-    mut balance: i32,
-    enc: &mut RangeEncoder,
-    lm: usize,
-    coded_bands: usize,
-) {
+/// Shape-coding controls, independent of the selected band allocation.
+pub struct BandCoding {
+    pub spread: usize,
+    pub total_bits: i32,
+}
+
+/// Codes all band shapes (`quant_all_bands`, encoder side, long blocks). `x` holds
+/// `frame.channels` channels of `n_total` normalised MDCT coefficients each.
+pub fn quant_all_bands(m: &Mode, frame: CeltFrame, x: &[f32], n_total: usize, allocation: &Allocation, coding: BandCoding, enc: &mut RangeEncoder) {
+    let CeltFrame { start, end, channels: c, lm } = frame;
+    let Allocation { pulses, dual_stereo, intensity, coded_bands, balance, .. } = allocation;
+    let (dual_stereo, intensity, coded_bands, mut balance) = (*dual_stereo, *intensity, *coded_bands, *balance);
+    let BandCoding { spread, total_bits } = coding;
     let mm = 1usize << lm;
     debug_assert!(c == 1 || dual_stereo || intensity <= start, "stereo frames are coded as dual stereo");
     let mut ctx = BandEnc { m, enc, i: 0, spread, remaining_bits: 0, pvq_v: Vec::new(), iy: Vec::new(), tmp: Vec::new() };
@@ -362,7 +356,7 @@ mod tests {
             x[i + stride] = c * x2 + s * x1;
             x[i] = c * x1 + ms * x2;
         }
-        if len >= 2 * stride + 1 {
+        if len > 2 * stride {
             for i in (0..=len - 2 * stride - 1).rev() {
                 let x1 = x[i];
                 let x2 = x[i + stride];

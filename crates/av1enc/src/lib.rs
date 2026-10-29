@@ -409,11 +409,13 @@ impl Encoder {
         };
         let bd = self.cfg.bit_depth as u32;
         let mut cache: Vec<(u32, u64)> = vec![(0, sse(&rec[0]))];
+        // one working copy of the luma plane for all candidate levels
+        let mut planes = [rec[0].clone(), Plane::new(0, 0), Plane::new(0, 0)];
         let mut eval = |lvl: u32| -> u64 {
             if let Some(&(_, e)) = cache.iter().find(|(l, _)| *l == lvl) {
                 return e;
             }
-            let mut planes = [rec[0].clone(), Plane::new(0, 0), Plane::new(0, 0)];
+            planes[0].data.copy_from_slice(&rec[0].data);
             loop_filter(&mut planes, info, [lvl; 4], bd, true, sb_row_step);
             let e = sse(&planes[0]);
             cache.push((lvl, e));

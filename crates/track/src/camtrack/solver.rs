@@ -7,7 +7,7 @@ use rayon::prelude::*;
 
 use super::bundle::{self, BaCam, BaObs, BaOpts, FocalMode};
 use super::geometry::{self, Pose};
-use super::linalg::*;
+use super::linalg::{V3, add, log_rot, mm, mt, mtv, mv, norm, normalize, rodrigues, scale, slerp, sub, sym_eigen};
 use super::{CameraSolve, CameraTracks, Distortion, ShotType, SolveMethod, SolveSettings, SolvedFrame, SolvedPoint};
 use crate::fit::{Model, ransac};
 
@@ -42,13 +42,54 @@ struct Data {
     noise_bits: std::sync::atomic::AtomicU64,
 }
 
+// Input budgets apply before building the duplicated per-frame/per-track lookup tables.
+const MAX_SOLVE_FRAMES: usize = 100_000;
+const MAX_SOLVE_TRACKS: usize = 200_000;
+const MAX_SOLVE_OBSERVATIONS: usize = 2_000_000;
+
+fn validate_tracks(t: &CameraTracks) -> Result<(), SolveError> {
+    if t.frames as usize > MAX_SOLVE_FRAMES || t.tracks.len() > MAX_SOLVE_TRACKS {
+        return err("camera tracks exceed the supported frame or track count");
+    }
+    if t.size.iter().any(|v| !v.is_finite() || *v <= 0.0)
+        || !t.factor.is_finite()
+        || t.factor < 0.0
+        || !t.start.is_finite()
+        || !t.frame_duration.is_finite()
+        || t.frame_duration <= 0.0
+    {
+        return err("camera tracks have invalid dimensions, timing or analysis scale");
+    }
+    let mut count = 0usize;
+    for tr in &t.tracks {
+        count = count
+            .checked_add(tr.pts.len())
+            .filter(|n| *n <= MAX_SOLVE_OBSERVATIONS)
+            .ok_or_else(|| SolveError("camera tracks exceed the supported observation count".into()))?;
+        let end = u32::try_from(tr.pts.len()).ok().and_then(|n| tr.start.checked_add(n));
+        if end.is_none_or(|end| end > t.frames) {
+            return err("camera track extends beyond the clip's frame range");
+        }
+        if tr.pts.iter().flatten().any(|v| !v.is_finite()) {
+            return err("camera track positions must be finite");
+        }
+    }
+    Ok(())
+}
+
 impl Data {
-    fn new(t: &CameraTracks, deleted: &[u32]) -> Data {
+    fn new(t: &CameraTracks, deleted: &[u32]) -> Result<Data, SolveError> {
+        validate_tracks(t)?;
+        if deleted.len() > MAX_SOLVE_TRACKS {
+            return err("too many deleted camera track ids");
+        }
         let n = t.frames as usize;
         let c = [t.size[0] * 0.5, t.size[1] * 0.5];
         let del: HashSet<u32> = deleted.iter().copied().collect();
         let mut tracks = vec![];
-        let mut by_frame = vec![vec![]; n];
+        let mut by_frame = Vec::new();
+        by_frame.try_reserve_exact(n).map_err(|_| SolveError("not enough memory for camera track frames".into()))?;
+        by_frame.resize_with(n, Vec::new);
         for tr in t.tracks.iter().filter(|tr| !del.contains(&tr.id) && tr.pts.len() >= 3) {
             let ti = tracks.len() as u32;
             let pts: Vec<[f64; 2]> = tr.pts.iter().map(|p| [p[0] as f64 - c[0], p[1] as f64 - c[1]]).collect();
@@ -60,7 +101,7 @@ impl Data {
             tracks.push((tr.id, tr.start as usize, pts));
         }
         let noise = (0.5 * t.factor).max(0.5);
-        Data { n, w: t.size[0], tracks, by_frame, noise_bits: std::sync::atomic::AtomicU64::new(noise.to_bits()) }
+        Ok(Data { n, w: t.size[0], tracks, by_frame, noise_bits: std::sync::atomic::AtomicU64::new(noise.to_bits()) })
     }
     fn at(&self, ti: u32, k: usize) -> Option<[f64; 2]> {
         let (_, s, p) = &self.tracks[ti as usize];
@@ -174,10 +215,10 @@ impl Recon {
     }
 
     /// Bundle-adjust the cameras of `frames` (the first stays fixed) and their points.
-    fn adjust(&mut self, d: &Data, frames: &[usize], cfg: &Cfg, focal: FocalMode, iters: usize) -> f64 {
+    fn adjust(&mut self, d: &Data, frames: &[usize], cfg: &Cfg, focal: FocalMode, iters: usize) -> Result<f64, SolveError> {
         let (mut cams, mut pts, obs, ids) = self.observations(d, frames);
         if obs.is_empty() {
-            return f64::INFINITY;
+            return Ok(f64::INFINITY);
         }
         let mut fixed = vec![false; cams.len()];
         fixed[0] = true;
@@ -186,14 +227,14 @@ impl Recon {
             &mut pts,
             &obs,
             &BaOpts { focal, fix_points: false, fix_centers: cfg.kind == Kind::Tripod, fixed, huber: d.huber(), max_iter: iters, distortion: cfg.distortion },
-        );
+        )?;
         for (k, c) in frames.iter().zip(&cams) {
             self.cams.insert(*k, *c);
         }
         for (ti, x) in ids.iter().zip(&pts) {
             self.pts.insert(*ti, *x);
         }
-        rep.cost
+        Ok(rep.cost)
     }
 
     /// Mark observations above the inlier threshold as outliers; drop points left with fewer
@@ -302,8 +343,12 @@ impl Recon {
                 break;
             }
             let mut cams = vec![start];
-            bundle::adjust(&mut cams, &mut pts.clone(), &obs, &opts(d.inlier_thr() * 4.0));
-            bundle::adjust(&mut cams, &mut pts.clone(), &obs, &opts(d.huber()));
+            if bundle::adjust(&mut cams, &mut pts.clone(), &obs, &opts(d.inlier_thr() * 4.0)).is_err() {
+                return false;
+            }
+            if bundle::adjust(&mut cams, &mut pts.clone(), &obs, &opts(d.huber())).is_err() {
+                return false;
+            }
             let inl = obs.iter().filter(|o| bundle::residual(&cams[0], pts[o.pt as usize], o.uv).is_some_and(|r| r[0] * r[0] + r[1] * r[1] <= thr2)).count();
             if best.as_ref().is_none_or(|b| inl > b.0) {
                 best = Some((inl, cams[0]));
@@ -317,7 +362,9 @@ impl Recon {
         let keep: Vec<BaObs> =
             obs.iter().filter(|o| bundle::residual(&cam, pts[o.pt as usize], o.uv).is_some_and(|r| r[0] * r[0] + r[1] * r[1] <= thr2)).copied().collect();
         let mut cams = vec![cam];
-        bundle::adjust(&mut cams, &mut pts.clone(), &keep, &opts(d.huber()));
+        if bundle::adjust(&mut cams, &mut pts.clone(), &keep, &opts(d.huber())).is_err() {
+            return false;
+        }
         for o in &obs {
             let ok = bundle::residual(&cams[0], pts[o.pt as usize], o.uv).is_some_and(|r| r[0] * r[0] + r[1] * r[1] <= thr2);
             if !ok {
@@ -471,10 +518,11 @@ fn grow(d: &Data, kfs: &[usize], j: usize, init: &(Pose, HashMap<u32, V3>), f: f
     r.pts = init.1.clone();
     let inner = |r: &mut Recon, frames: &[usize]| {
         let focal = if cfg.per_frame_f && frames.len() > 2 { FocalMode::PerCamera(F_PRIOR) } else { FocalMode::Fixed };
-        r.adjust(d, frames, cfg, focal, 10);
+        r.adjust(d, frames, cfg, focal, 10)?;
         r.reject(d);
+        Ok::<(), SolveError>(())
     };
-    inner(&mut r, &[a, b]);
+    inner(&mut r, &[a, b]).ok()?;
     let order: Vec<usize> = kfs[1..j].iter().chain(&kfs[j + 1..]).copied().collect();
     let mut done = 0;
     for k in order {
@@ -491,11 +539,11 @@ fn grow(d: &Data, kfs: &[usize], j: usize, init: &(Pose, HashMap<u32, V3>), f: f
         done += 1;
         let frames: Vec<usize> = r.cams.keys().copied().collect();
         if done % 3 == 0 || frames.len() <= 6 {
-            inner(&mut r, &frames);
+            inner(&mut r, &frames).ok()?;
         }
     }
     let frames: Vec<usize> = r.cams.keys().copied().collect();
-    inner(&mut r, &frames);
+    inner(&mut r, &frames).ok()?;
     (r.cams.len() >= 2 && r.pts.len() >= 8).then_some(r)
 }
 
@@ -531,10 +579,10 @@ fn grow_tripod(d: &Data, kfs: &[usize], f: f64, cfg: &Cfg, cancel: Option<&Atomi
     r.triangulate(d, Kind::Tripod, 0.0, 20.0);
     let frames: Vec<usize> = r.cams.keys().copied().collect();
     let focal = if cfg.per_frame_f && frames.len() > 2 { FocalMode::PerCamera(F_PRIOR) } else { FocalMode::Fixed };
-    r.adjust(d, &frames, cfg, focal, 15);
+    r.adjust(d, &frames, cfg, focal, 15).ok()?;
     r.reject(d);
     r.triangulate(d, Kind::Tripod, 0.0, 1.0);
-    r.adjust(d, &frames, cfg, focal, 15);
+    r.adjust(d, &frames, cfg, focal, 15).ok()?;
     (r.cams.len() >= 2 && r.pts.len() >= 8).then_some(r)
 }
 
@@ -684,7 +732,7 @@ pub fn solve(tracks: &CameraTracks, s: &SolveSettings, cancel: Option<&AtomicBoo
     for pass in 0..2 {
         let und = (pass > 0).then(|| undistorted(tracks, &dist));
         let c = solve_core(und.as_ref().unwrap_or(tracks), s, cancel)?;
-        let d = Data::new(tracks, &s.deleted);
+        let d = Data::new(tracks, &s.deleted)?;
         d.set_noise(c.d.noise());
         let mut r = c.r;
         for cam in r.cams.values_mut() {
@@ -699,10 +747,10 @@ pub fn solve(tracks: &CameraTracks, s: &SolveSettings, cancel: Option<&AtomicBoo
         // The pinhole solve's outliers include the distorted frame edges: start from all
         // observations (the Huber loss keeps real outliers in check), then reject again.
         r.outliers.clear();
-        r.adjust(&d, &frames, &cfg, c.focal, 30);
+        r.adjust(&d, &frames, &cfg, c.focal, 30)?;
         r.outliers.clear();
         r.reject(&d);
-        r.adjust(&d, &frames, &cfg, c.focal, 30);
+        r.adjust(&d, &frames, &cfg, c.focal, 30)?;
         dist = r.cams[&frames[0]].dist;
         for cam in r.cams.values_mut() {
             cam.dist = dist;
@@ -742,7 +790,7 @@ pub fn solve(tracks: &CameraTracks, s: &SolveSettings, cancel: Option<&AtomicBoo
 }
 
 fn solve_core(tracks: &CameraTracks, s: &SolveSettings, cancel: Option<&AtomicBool>) -> Result<Core, SolveError> {
-    let d = Data::new(tracks, &s.deleted);
+    let d = Data::new(tracks, &s.deleted)?;
     if d.n < 2 {
         return err("the clip must be at least two frames long");
     }
@@ -848,7 +896,7 @@ fn solve_core(tracks: &CameraTracks, s: &SolveSettings, cancel: Option<&AtomicBo
     lap("tripod");
     // Keyframes: adjust with the focal length free, reject, re-triangulate, adjust again.
     let kf_frames: Vec<usize> = r.cams.keys().copied().collect();
-    r.adjust(&d, &kf_frames, &cfg, focal, 40);
+    r.adjust(&d, &kf_frames, &cfg, focal, 40)?;
     r.reject(&d);
     // Re-estimate the tracking noise from the inlier residuals (robustly, from their median:
     // for 2D Gaussian noise of deviation σ the median distance is 1.1774 σ), then tighten the
@@ -876,9 +924,9 @@ fn solve_core(tracks: &CameraTracks, s: &SolveSettings, cancel: Option<&AtomicBo
         r.reject(&d);
     }
     r.triangulate(&d, kind, 1.0, 1.0);
-    r.adjust(&d, &kf_frames, &cfg, focal, 40);
+    r.adjust(&d, &kf_frames, &cfg, focal, 40)?;
     r.reject(&d);
-    r.adjust(&d, &kf_frames, &cfg, focal, 20);
+    r.adjust(&d, &kf_frames, &cfg, focal, 20)?;
     if cancelled() {
         return err("cancelled");
     }
@@ -910,7 +958,7 @@ fn solve_core(tracks: &CameraTracks, s: &SolveSettings, cancel: Option<&AtomicBo
     let all: Vec<usize> = r.cams.keys().copied().collect();
     r.reject(&d);
     if all.len() <= 160 {
-        r.adjust(&d, &all, &cfg, focal, 25);
+        r.adjust(&d, &all, &cfg, focal, 25)?;
         r.reject(&d);
     } else {
         // Points only (cameras fixed) would be cheap but the keyframe solution is already

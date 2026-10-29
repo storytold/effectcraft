@@ -48,26 +48,65 @@ pub(crate) fn gpu_inflight(var: Option<&str>) -> usize {
 /// one window of rendered images is held in memory. Chunks hold no lock or slot, so a failing
 /// or panicking frame cannot leak one, and nested parallelism (or a single thread) cannot
 /// deadlock.
+#[cfg(test)]
 pub(crate) fn map_frames<I: Send, T: Send>(
     ks: Vec<u64>,
     cap: Option<usize>,
     render: impl Fn(u64) -> I + Sync + Send,
     encode: impl Fn(u64, I) -> T + Sync + Send,
 ) -> Vec<T> {
+    map_frames_while(ks, cap, || true, render, encode)
+}
+
+/// [`map_frames`] whose `cap` holds only while `capped()`: once it turns false (the GPU stopped
+/// for good, so every frame falls back to the CPU), the remaining frames render in parallel
+/// like the uncapped CPU path instead of one chunk of `cap` at a time.
+pub(crate) fn map_frames_while<I: Send, T: Send>(
+    ks: Vec<u64>,
+    cap: Option<usize>,
+    capped: impl Fn() -> bool,
+    render: impl Fn(u64) -> I + Sync + Send,
+    encode: impl Fn(u64, I) -> T + Sync + Send,
+) -> Vec<T> {
     use rayon::prelude::*;
-    let Some(n) = cap.map(|n| n.max(1)) else {
+    let Some(n) = cap.map(|n| n.max(1)).filter(|_| capped()) else {
         return ks.into_par_iter().map(|k| encode(k, render(k))).collect();
     };
     let window = n.max(rayon::current_num_threads());
     let mut out = Vec::with_capacity(ks.len());
-    for win in ks.chunks(window) {
+    for (w, win) in ks.chunks(window).enumerate() {
+        if !capped() {
+            out.par_extend(ks[w * window..].par_iter().map(|&k| encode(k, render(k))));
+            break;
+        }
         let mut imgs = Vec::with_capacity(win.len());
-        for chunk in win.chunks(n) {
-            imgs.par_extend(chunk.par_iter().map(|&k| render(k)));
+        let mut i = 0;
+        while i < win.len() {
+            let end = if capped() { (i + n).min(win.len()) } else { win.len() };
+            imgs.par_extend(win[i..end].par_iter().map(|&k| render(k)));
+            i = end;
         }
         out.par_extend(win.par_iter().copied().zip(imgs.into_par_iter()).map(|(k, img)| encode(k, img)));
     }
     out
+}
+
+/// Threads that encode one batch of frames while the next renders ([`Cx::frames_beside`]).
+/// Their own pool: the encoder's parallel steps (colour conversion) would otherwise queue behind
+/// the render's work in the global pool. `None` where threads can't be started (a browser
+/// without them): encoding and rendering then take turns.
+pub(crate) struct Beside(Option<rayon::ThreadPool>);
+
+impl Beside {
+    fn new() -> Beside {
+        Beside(rayon::ThreadPoolBuilder::new().thread_name(|i| format!("export-encode-{i}")).build().ok())
+    }
+
+    /// The process's encode threads, started by the first movie export and shared by all.
+    pub fn shared() -> &'static Beside {
+        static SHARED: std::sync::OnceLock<Beside> = std::sync::OnceLock::new();
+        SHARED.get_or_init(Beside::new)
+    }
 }
 
 /// A job being exported: the job, the project with the Render Settings overrides applied, the
@@ -187,7 +226,56 @@ impl<'a> Cx<'a> {
             }
             return out;
         }
-        map_frames(ks, self.gpu_cap(), |k| self.frame(comp, k), f)
+        // The cap is for the GPU's memory: once it has stopped for good, frames render on the
+        // CPU in parallel.
+        let gpu_live = || self.job.accel.is_none_or(|a| a.available());
+        map_frames_while(ks, self.gpu_cap(), gpu_live, |k| self.frame(comp, k), f)
+    }
+
+    /// [`Cx::frames`] for `ks` while `encode` runs beside them on `beside`'s threads, so the
+    /// render threads don't wait for the (largely sequential) encoder of the previous batch.
+    /// With deferred readbacks, or where no encode thread could be started, `encode` runs first.
+    #[cfg(test)]
+    pub async fn frames_beside<T: Send, A: Send>(
+        &self,
+        beside: &Beside,
+        comp: &Comp,
+        ks: Vec<u64>,
+        f: impl Fn(u64, Image) -> T + Sync + Send,
+        encode: impl FnOnce() -> A + Send,
+    ) -> crate::Result<(A, Vec<T>)> {
+        self.beside(beside, self.frames(comp, ks, f), encode).await
+    }
+
+    /// Run `encode` on `beside`'s threads while `frames` renders the next batch. With deferred
+    /// readbacks, or where no encode thread could be started, `encode` runs first.
+    pub async fn beside<T: Send, A: Send>(
+        &self,
+        beside: &Beside,
+        frames: impl std::future::Future<Output = Vec<T>>,
+        encode: impl FnOnce() -> A + Send,
+    ) -> crate::Result<(A, Vec<T>)> {
+        match &beside.0 {
+            Some(pool) if !self.deferred() => {
+                let mut done = None;
+                let frames = pool.in_place_scope(|s| {
+                    s.spawn(|_| done = Some(std::panic::catch_unwind(std::panic::AssertUnwindSafe(encode))));
+                    effectcraft_render::passes::block_on(frames)
+                });
+                match done {
+                    Some(Ok(a)) => Ok((a, frames)),
+                    Some(Err(panic)) => {
+                        let why = panic.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| panic.downcast_ref::<String>().cloned()).unwrap_or_default();
+                        Err(crate::ExportError::Encode(format!("the encoder stopped unexpectedly: {why}")))
+                    }
+                    None => Err(crate::ExportError::Encode("the encoder stopped unexpectedly".into())),
+                }
+            }
+            _ => {
+                let a = encode();
+                Ok((a, frames.await))
+            }
+        }
     }
 
     /// GPU frames rendered at once (#879), decided once per batch: with a GPU accelerator every
@@ -223,9 +311,66 @@ impl<'a> Cx<'a> {
         }
         let img = self.crop_resize(img);
         if let Some(ft) = &self.frame_times {
-            ft.lock().unwrap_or_else(|e| e.into_inner()).push((i, t0.elapsed().as_secs_f64()));
+            ft.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((i, t0.elapsed().as_secs_f64()));
         }
         img
+    }
+
+    /// Output frame `i` as the H.264 export's 4:2:0 planes at `w`×`h`, rendered and converted
+    /// by the accelerator ([`effectcraft_render::Accelerator::comp_frame_yuv420`]). Only for
+    /// frames that need nothing done after the render (progressive, at the project's depth, no
+    /// crop or resize, rendered at exactly `w`×`h`). `None`: render it with [`Cx::frame`].
+    pub fn yuv420_frame(&self, comp: &Comp, i: u64, w: u32, h: u32) -> Option<Vec<u8>> {
+        if self.deferred() {
+            return None;
+        }
+        let FrameSample::Progressive(t) = self.job.settings.sample(comp, i) else { return None };
+        let depth = self.job.settings.color_depth;
+        if depth != ColorDepth::Current && depth.resolve(self.project.settings.bit_depth).levels().is_some() {
+            return None;
+        }
+        let om = self.job.output;
+        let scale = self.job.settings.resolution.clamp(0.01, 4.0);
+        let size = |n: u32| ((n as f64 * scale).round() as u32).max(1);
+        if om.resize.enabled || (size(comp.width), size(comp.height)) != (w, h) || om.crop.edges(w, h, scale) != (0, 0, 0, 0) {
+            return None;
+        }
+        let t0 = Instant::now();
+        let r = self.renderer();
+        let planes = r.active_accel()?.comp_frame_yuv420(&r, self.job.comp, t, comp.background)?;
+        let (cw, ch) = (w.div_ceil(2) as usize, h.div_ceil(2) as usize);
+        if planes.len() != w as usize * h as usize + 2 * cw * ch {
+            return None;
+        }
+        if let Some(ft) = &self.frame_times {
+            ft.lock().unwrap_or_else(|e| e.into_inner()).push((i, t0.elapsed().as_secs_f64()));
+        }
+        Some(planes)
+    }
+
+    /// Output frames `ks` for the H.264 encoder: the accelerator's planes
+    /// ([`Cx::yuv420_frame`]) where it can, otherwise `fallback` of the frame rendered as usual.
+    pub(crate) fn h264_frames<T: Send>(
+        &self,
+        comp: &Comp,
+        ks: Vec<u64>,
+        w: u32,
+        h: u32,
+        planes: impl Fn(Vec<u8>) -> T + Sync + Send,
+        fallback: impl Fn(u64, Image) -> T + Sync + Send,
+    ) -> Vec<T> {
+        // As in `frames`: once the GPU has stopped for good, the rest render in parallel.
+        let gpu_live = || self.job.accel.is_none_or(|a| a.available());
+        map_frames_while(
+            ks,
+            self.gpu_cap(),
+            gpu_live,
+            |k| self.yuv420_frame(comp, k, w, h).ok_or_else(|| self.frame(comp, k)),
+            |k, r| match r {
+                Ok(p) => planes(p),
+                Err(img) => fallback(k, img),
+            },
+        )
     }
 
     /// Output Module ▸ Crop, then Resize.
@@ -303,7 +448,7 @@ impl<'a> Cx<'a> {
         for dir in &self.job.options.overflow {
             let p = std::path::Path::new(dir).join(&name).to_string_lossy().to_string();
             if q.has_room(&p, bytes) {
-                self.overflowed.lock().unwrap_or_else(|e| e.into_inner()).push(p.clone());
+                self.overflowed.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(p.clone());
                 return p;
             }
         }
@@ -327,7 +472,7 @@ impl<'a> Cx<'a> {
             Ok(r) => s.push_str(&format!("Result: Done ({} frames, {}×{}, {} bytes) in {seconds:.2} s\n", r.frames, r.width, r.height, r.bytes)),
             Err(e) => s.push_str(&format!("Result: Failed\nError: {e}\n")),
         }
-        let over = self.overflowed.lock().unwrap_or_else(|e| e.into_inner());
+        let over = self.overflowed.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if !over.is_empty() {
             s.push_str(&format!("Storage overflow: {} file(s) written to overflow folders (first: {})\n", over.len(), over[0]));
         }
@@ -342,7 +487,7 @@ impl<'a> Cx<'a> {
             }
         }
         if let (RenderLog::PlusPerFrameInfo, Some(ft), Some(c)) = (level, &self.frame_times, comp) {
-            let mut v = ft.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let mut v = ft.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
             v.sort_by_key(|(i, _)| *i);
             s.push_str("\nFrames:\n");
             let f0 = self.job.settings.first_frame(c);
@@ -451,6 +596,36 @@ mod tests {
             },
         );
         (out, max.load(Ordering::SeqCst))
+    }
+
+    #[test]
+    fn frames_render_in_parallel_once_the_gpu_stops() {
+        // Every frame after the GPU stopped falls back to the CPU: the cap no longer applies.
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(4).build().unwrap();
+        let (live, now, max) = (AtomicBool::new(true), AtomicUsize::new(0), AtomicUsize::new(0));
+        let out = pool.install(|| {
+            map_frames_while(
+                (0..24).collect(),
+                Some(1),
+                || live.load(Ordering::SeqCst),
+                |k| {
+                    if k == 1 {
+                        live.store(false, Ordering::SeqCst);
+                    }
+                    let c = now.fetch_add(1, Ordering::SeqCst) + 1;
+                    if k >= 2 {
+                        max.fetch_max(c, Ordering::SeqCst);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    now.fetch_sub(1, Ordering::SeqCst);
+                    k * 10
+                },
+                |_, v| v,
+            )
+        });
+        assert_eq!(out, (0..24).map(|k| k * 10).collect::<Vec<_>>());
+        assert!(max.load(Ordering::SeqCst) > 1, "frames after the GPU stopped ran one at a time");
     }
 
     #[test]
@@ -650,6 +825,45 @@ mod tests {
         let stats = cx.cache.stats();
         assert_eq!(stats.misses, renders, "the solid rendered on the first frame only");
         assert!(stats.hits >= 9, "{stats:?}");
+    }
+
+    #[test]
+    fn frames_render_beside_the_encoder() {
+        use effectcraft_project::render_queue::{OutputFormat, OutputModule, RenderSettings};
+        use effectcraft_render::NoFootage;
+        use effectcraft_time::FrameRate;
+        let mut p = Project::default();
+        let comp = Comp::new(32, 16, FrameRate::FPS_25, Tick::from_seconds_f64(1.0));
+        let cid = p.add_item("Comp", effectcraft_color::Label::Sandstone, None, effectcraft_project::ItemKind::Comp(comp.into()));
+        let (settings, output) = (RenderSettings::default(), OutputModule::for_format(OutputFormat::H264));
+        let job = Job {
+            project: &p,
+            footage: &NoFootage,
+            expr: None,
+            accel: None,
+            comp: cid,
+            settings: &settings,
+            output: &output,
+            path: "/c/out.mp4",
+            sink: None,
+            nested_switches: true,
+            options: Default::default(),
+        };
+        let cx = Cx::new(&job);
+        let comp = cx.comp().unwrap();
+        use effectcraft_render::passes::block_on;
+        let want = block_on(cx.frames(comp, (0..6).collect(), |k, img| (k, img.width, img.height)));
+        // On threads of their own, and taking turns (no threads): the same frames, in order.
+        for beside in [Beside::shared(), &Beside(None)] {
+            let (a, frames) = block_on(cx.frames_beside(beside, comp, (0..6).collect(), |k, img| (k, img.width, img.height), || 7)).unwrap();
+            assert_eq!((a, &frames), (7, &want));
+        }
+        // A panicking encoder fails the export instead of taking the render thread down.
+        let r = block_on(cx.frames_beside(Beside::shared(), comp, vec![0], |k, _| k, || -> u32 { panic!("encoder bug") }));
+        match r {
+            Err(crate::ExportError::Encode(e)) => assert!(e.contains("encoder bug"), "{e}"),
+            other => panic!("{:?}", other.map(|(a, f)| (a, f.len()))),
+        }
     }
 
     #[test]

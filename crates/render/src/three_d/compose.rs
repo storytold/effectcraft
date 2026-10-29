@@ -197,7 +197,7 @@ fn mb_samples(r: &Renderer, ctx: &EvalCtx, layer: &Layer) -> usize {
 /// Prepare a layer (buffer, geometry, material). `None` when it shows nothing.
 pub(crate) fn prepare<'a>(r: &Renderer, ctx: &EvalCtx<'a>, layer: &'a Layer, order: usize, out: (u32, u32), in_run: bool) -> Option<Item<'a>> {
     let buf = r.blend_layer_buf(ctx, layer)?;
-    prepare_with(r, ctx, layer, order, out, in_run, buf, Mat4::IDENTITY)
+    prepare_with(r, ctx, layer, order, out, in_run, PlaneInput { buf, local: Mat4::IDENTITY })
 }
 
 /// Prepare a layer as planes: one per character for per-character 3D text, else one.
@@ -205,24 +205,21 @@ pub(crate) fn prepare_all<'a>(r: &Renderer, ctx: &EvalCtx<'a>, layer: &'a Layer,
     if crate::text::per_char_3d(ctx, layer) {
         return crate::text::per_char_planes(ctx, layer, r.opts.scale)
             .into_iter()
-            .filter_map(|(buf, m)| prepare_with(r, ctx, layer, order, out, in_run, r.to_blend(Arc::new(buf), None), m))
+            .filter_map(|(buf, m)| prepare_with(r, ctx, layer, order, out, in_run, PlaneInput { buf: r.to_blend(Arc::new(buf), None), local: m }))
             .collect();
     }
     prepare(r, ctx, layer, order, out, in_run).into_iter().collect()
 }
 
-/// Prepare a plane showing `buf`, whose space maps into the layer through `local`.
-#[allow(clippy::too_many_arguments)]
-fn prepare_with<'a>(
-    r: &Renderer,
-    ctx: &EvalCtx<'a>,
-    layer: &'a Layer,
-    order: usize,
-    out: (u32, u32),
-    in_run: bool,
-    mut buf: Arc<Buf>,
+/// A processed plane and its mapping into the layer's coordinate system.
+struct PlaneInput {
+    buf: Arc<Buf>,
     local: Mat4,
-) -> Option<Item<'a>> {
+}
+
+/// Prepare the plane's geometry, motion samples and material.
+fn prepare_with<'a>(r: &Renderer, ctx: &EvalCtx<'a>, layer: &'a Layer, order: usize, out: (u32, u32), in_run: bool, plane: PlaneInput) -> Option<Item<'a>> {
+    let PlaneInput { mut buf, local } = plane;
     if buf.img.is_empty() {
         return None;
     }
@@ -497,13 +494,13 @@ fn collapsed_items<'a>(
     let op = ctx.opacity(layer) as f32 * r.opacity_mul();
     let Some((sub, nctx)) = r.collapse_into(ctx, layer, item, op) else { return vec![] };
     let t = nctx.time;
-    let any_solo = nctx.comp.layers.iter().any(|l| l.switches.solo && l.source.is_av() && l.is_active_at(t));
+    let any_solo = nctx.comp.any_solo();
     let nested: Vec<&'a Layer> = nctx
         .comp
         .layers
         .iter()
         .rev()
-        .filter(|l| l.is_active_at(t) && l.has_video() && !l.switches.adjustment && (!any_solo || l.switches.solo) && (r.opts.guides || !l.switches.guide))
+        .filter(|l| l.is_active_at(t) && l.has_video() && !l.switches.adjustment && (!any_solo || l.switches.solo) && (sub.opts.guides || !l.switches.guide))
         .collect();
     let mut items = Vec::new();
     for (k, l) in nested.into_iter().enumerate() {
@@ -703,7 +700,7 @@ fn occlusion(c: &Item, p: Vec3, l: &LightState) -> [f32; 3] {
 
 /// A Classic 3D run prepared for an accelerator ([`Renderer::prepare_3d_run`]): every plane
 /// with its geometry, material and buffer, ready for the per-pixel depth sort, lighting and
-/// ray-cast shadows of [`draw_run`] on another device.
+/// ray-cast shadows of `draw_run` on another device.
 #[derive(Clone, Debug)]
 pub struct Run3d {
     /// Drawn planes in stack order, then shadow casters from outside the run (`draw` false).
@@ -971,7 +968,7 @@ pub(crate) fn environment_rotation(ctx: &EvalCtx) -> f32 {
         .to_radians() as f32
 }
 
-/// An Environment Light Background layer ready to draw (see [`draw_sky`]): the layer's
+/// An Environment Light Background layer ready to draw (see `draw_sky`): the layer's
 /// buffer in the blending space, its opacity and the camera's view rays. Also handed to an
 /// accelerator's compositor (`Renderer::sky_draw`).
 #[derive(Clone)]

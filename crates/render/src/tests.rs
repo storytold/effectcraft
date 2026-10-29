@@ -6,6 +6,24 @@ use effectcraft_time::{FrameRate, Tick};
 
 use crate::render_frame;
 
+mod audio_fx;
+mod auto;
+mod aux_channels;
+mod collapse;
+mod color;
+mod footage_size;
+mod frame_blend;
+mod guides;
+mod mask_blur;
+mod mask_expansion;
+mod motion_tile;
+mod nested;
+mod paint;
+mod remap;
+mod roi;
+mod styles;
+mod time;
+
 fn setup() -> (Project, ItemId, Comp) {
     let mut p = Project::default();
     // Exact float maths; 8/16 bpc quantisation has its own tests (tests_color).
@@ -252,6 +270,22 @@ fn effects_run_in_pipeline() {
     let img = render_frame(&p, cid, Tick::ZERO, 1.0);
     let c = img.get(100, 50);
     assert!(c[1] > 0.99 && c[0] < 0.01, "{c:?}");
+}
+
+/// After Effects 2026, sRGB working space (not linearised), Tint at its defaults on full-frame
+/// solids: the effect sees the encoded solid colour and weights it Rec. 601.
+#[test]
+fn tint_in_an_srgb_working_space_matches_after_effects_greys() {
+    for (col, want) in [([1.0, 0.0, 0.0], 76.0), ([0.0, 1.0, 0.0], 150.0), ([0.0, 0.0, 1.0], 29.0), ([0.5, 0.5, 0.5], 128.0)] {
+        let (mut p, cid, comp) = setup();
+        p.settings.working_space = Some(effectcraft_color::ColorSpace::Srgb);
+        let mut l = solid(&mut p, &comp, col, 200, 100);
+        add_effect(&mut p, &mut l, "ec.color.tint", [200.0, 100.0], &[]);
+        p.comp_mut(cid).unwrap().layers.push(l);
+        let o = render_frame(&p, cid, Tick::ZERO, 1.0).get(100, 50);
+        let want = want / 255.0;
+        assert!(o[..3].iter().all(|v| (v - want).abs() <= 1.0 / 255.0), "{col:?}: {o:?} vs {want}");
+    }
 }
 
 /// Card Dance's Comp Camera through the default comp camera reproduces a 2D layer in place.
@@ -952,4 +986,90 @@ fn shape_content_bounds_are_the_visual_edges() {
         let b = crate::content_bounds(&ctx, &l).unwrap();
         assert!(b.iter().zip([-half, -half, half, half]).all(|(a, e)| (a - e).abs() < 1e-6), "{stroke:?}: {b:?}");
     }
+}
+
+/// Solo is not time-dependent (as in After Effects): while any layer is soloed, the others stay
+/// excluded even when the playhead is outside the soloed layer's in-out range.
+#[test]
+fn solo_excludes_other_layers_outside_the_soloed_layers_range() {
+    let (mut p, cid, comp) = setup();
+    let a = solid(&mut p, &comp, [1.0, 0.0, 0.0], 200, 100);
+    let mut b = solid(&mut p, &comp, [0.0, 0.0, 1.0], 200, 100);
+    b.in_point = Tick::from_seconds_f64(1.0);
+    b.switches.solo = true;
+    let c = p.comp_mut(cid).unwrap();
+    c.layers.push(b);
+    c.layers.push(a);
+    let first = render_frame(&p, cid, Tick::from_seconds_f64(0.5), 1.0);
+    assert_eq!(first.get(100, 50), [0.0, 0.0, 0.0, 0.0], "neither A nor B before B's in point");
+    let second = render_frame(&p, cid, Tick::from_seconds_f64(1.5), 1.0);
+    assert_eq!(second.get(100, 50), [0.0, 0.0, 1.0, 1.0], "only B inside its range");
+}
+
+/// #1252: a layer blended with a CC Particle World layer, under a camera panned by `pan` px.
+fn scene_reader_dependency(pan: f64) -> (Project, ItemId) {
+    let (mut p, cid, comp) = setup();
+    let mut source = solid(&mut p, &comp, [0.0, 0.0, 0.0], 200, 100);
+    let vals = [("birthRate", Value::Scalar(2.0)), ("particle/particleType", Value::Enum(2)), ("particle/birthSize", Value::Scalar(0.1))];
+    add_effect(&mut p, &mut source, "ec.sim.ccparticleworld", [200.0, 100.0], &vals);
+    source.switches.video = false;
+    let mut owner = solid(&mut p, &comp, [0.0, 0.0, 0.0], 200, 100);
+    add_effect_200(&mut p, &mut owner, "ec.channel.blend", &[("blendWithLayer", Value::Layer(Some(source.id.0))), ("blendWithOriginal", Value::Scalar(0.0))]);
+    let mut cam = build::layer(&mut p, &comp, "Camera", LayerSource::Camera, (200, 100), None);
+    for path in ["transform/position", "transform/poi"] {
+        let pr = cam.props.prop_mut(path).unwrap();
+        let Value::Vec3(v) = pr.value else { panic!("{path}: {:?}", pr.value) };
+        pr.value = Value::Vec3([v[0] + pan, v[1], v[2]]);
+    }
+    p.comp_mut(cid).unwrap().layers = vec![cam, owner, source];
+    (p, cid)
+}
+
+/// #1252: the owner's cache key covers the comp camera and lights that a layer it selects reads,
+/// though the owner itself runs no scene-reading effect.
+#[test]
+fn a_selected_layer_reading_the_comp_scene_invalidates_its_owner() {
+    let t = Tick::from_seconds_f64(1.0);
+    let (p, cid) = scene_reader_dependency(0.0);
+    let (q, _) = scene_reader_dependency(40.0);
+    let key = |p: &Project| {
+        let c = p.comp(cid).unwrap();
+        crate::cache::layer_key(&crate::EvalCtx::new(p, cid, c, t), &c.layers[1], 1.0, false, false).unwrap()
+    };
+    assert_ne!(key(&p), key(&q), "moving the camera changes the owner's key");
+    let cache = crate::LayerCache::default();
+    let here = render_cached(&p, cid, t, Some(&cache));
+    let panned = render_cached(&q, cid, t, Some(&cache));
+    assert_same(&panned, &render_cached(&q, cid, t, None), "cached render after the camera moved");
+    let (a, b) = (particles_x(&here), particles_x(&panned));
+    assert!(b < a - 20.0, "the blended particles follow the camera: {a} -> {b}");
+}
+
+/// #1812: preview workers that render a layer at once end up with one buffer (the one kept
+/// first), so the GPU compositor uploads and packs it once, not once per worker.
+#[test]
+fn workers_rendering_a_layer_at_once_share_one_buffer() {
+    let (mut p, cid, comp) = setup();
+    let mut l = solid(&mut p, &comp, [0.2, 0.5, 0.8], 1600, 1200);
+    add_effect(&mut p, &mut l, "ec.blur.gaussian", [1600.0, 1200.0], &[("blurriness", Value::Scalar(60.0))]);
+    p.comp_mut(cid).unwrap().layers.push(l);
+    let cache = crate::LayerCache::default();
+    let start = std::sync::Barrier::new(8);
+    let bufs: Vec<_> = std::thread::scope(|s| {
+        let hs: Vec<_> = (0..8)
+            .map(|_| {
+                s.spawn(|| {
+                    let mut r = crate::Renderer::new(&p, &crate::NoFootage, crate::RenderOpts::default());
+                    r.cache = Some(&cache);
+                    let c = p.comp(cid).unwrap();
+                    let ctx = r.eval_ctx(cid, Tick::ZERO).unwrap();
+                    start.wait();
+                    r.layer_buf(&ctx, &c.layers[0]).unwrap()
+                })
+            })
+            .collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    assert!(bufs.iter().all(|b| std::sync::Arc::ptr_eq(b, &bufs[0])), "one shared buffer");
+    assert_eq!(cache.stats().entries, 1);
 }

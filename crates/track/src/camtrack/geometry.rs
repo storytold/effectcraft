@@ -5,7 +5,10 @@
 //! All image points here are **normalised** (calibrated) coordinates `x = (u − c) / f`.
 //! A camera is `(R, C)` with `X_cam = R (X − C)`.
 
-use super::linalg::*;
+use super::linalg::{
+    I3, M3, V3, add, col, cross, det3, dot, from_cols, madd, mm, mscale, mt, mtv, mv, nearest_rotation, normalize, null_vector, outer, scale, sub, svd3,
+    sym_eigen,
+};
 
 /// A deterministic xorshift generator for RANSAC samples.
 pub struct Rng(pub u64);
@@ -244,6 +247,9 @@ pub fn reproj2(pose: &Pose, x: V3, o: [f64; 2]) -> Option<f64> {
 /// Pick the essential decomposition with the most points in front of both cameras; returns
 /// the second camera (the first is the identity) and that count.
 pub fn select_pose(cands: &[(M3, V3)], x1: &[[f64; 2]], x2: &[[f64; 2]]) -> Option<(Pose, usize)> {
+    if x1.len() != x2.len() || x1.is_empty() || x1.iter().chain(x2).flatten().any(|v| !v.is_finite()) {
+        return None;
+    }
     let mut best: Option<(Pose, usize)> = None;
     for (r, t) in cands {
         let p2 = Pose::from_rt(*r, *t);
@@ -361,6 +367,7 @@ pub fn procrustes(a: &[V3], b: &[V3]) -> Option<M3> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::linalg::{log_rot, norm, rodrigues};
     use super::*;
 
     fn scene() -> (Vec<V3>, Pose) {
@@ -378,6 +385,14 @@ mod tests {
     fn proj(p: &Pose, x: V3) -> [f64; 2] {
         let c = p.to_cam(x);
         [c[0] / c[2], c[1] / c[2]]
+    }
+
+    #[test]
+    fn pose_selection_rejects_mismatched_or_non_finite_correspondences() {
+        let candidates = [(I3, [0.1, 0.0, 0.0])];
+        assert!(select_pose(&candidates, &[[0.0; 2]], &[]).is_none());
+        assert!(select_pose(&candidates, &[], &[[0.0; 2]]).is_none());
+        assert!(select_pose(&candidates, &[[f64::NAN, 0.0]], &[[0.0; 2]]).is_none());
     }
 
     #[test]

@@ -4,7 +4,7 @@
 
 use std::sync::OnceLock;
 
-use crate::tables::*;
+use crate::tables::{ADST_ADST, ADST_DCT, COS128_LOOKUP, DCT_ADST, DCT_DCT, TRANSFORM_ROW_SHIFT, TX_WIDTH_LOG2};
 
 #[inline(always)]
 fn round2_64(x: i64, n: u32) -> i32 {
@@ -71,6 +71,12 @@ fn inverse_dct(t: &mut [i32], n: u32, r: u32) {
     for i in 0..len {
         t[i] = copy[brev(n, i)];
     }
+    inverse_dct_initial_stages(t, n, r);
+    inverse_dct_final_stages(t, n, r);
+}
+
+/// Rotate the high-frequency branches before the four-point core.
+fn inverse_dct_initial_stages(t: &mut [i32], n: u32, r: u32) {
     if n >= 5 {
         for i in 0..8 {
             bf(t, 16 + i, 31 - i, 6 + ((brev(3, 7 - i) as i32) << 3), false);
@@ -103,6 +109,10 @@ fn inverse_dct(t: &mut [i32], n: u32, r: u32) {
             }
         }
     }
+}
+
+/// Evaluate the four-point core and merge progressively larger branches.
+fn inverse_dct_final_stages(t: &mut [i32], n: u32, r: u32) {
     for i in 0..2 {
         bf(t, 2 * i, 2 * i + 1, 32 + 16 * i as i32, i == 0);
     }
@@ -454,6 +464,7 @@ pub(crate) fn forward_2d(residual: &[i32], out: &mut [f32], n: usize, tx_type: u
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tables::{TX_4X4, TX_8X8, TX_16X16, TX_32X32};
 
     /// forward (float) then the normative inverse reproduces the residual: the forward basis
     /// and scale match the decoder's inverse transforms for every supported size and type.

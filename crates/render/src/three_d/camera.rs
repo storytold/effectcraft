@@ -408,7 +408,7 @@ impl View3D {
         }
     }
     pub fn from_id(s: &str) -> Option<View3D> {
-        let k: String = s.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_ascii_lowercase();
+        let k: String = s.chars().filter(char::is_ascii_alphanumeric).collect::<String>().to_ascii_lowercase();
         View3D::ALL.into_iter().find(|v| v.id().eq_ignore_ascii_case(&k) || v.label().replace(' ', "").eq_ignore_ascii_case(&k))
     }
     pub fn is_ortho(self) -> bool {

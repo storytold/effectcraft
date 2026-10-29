@@ -85,7 +85,6 @@ pub(crate) struct Plane {
 }
 
 impl Plane {
-    #[allow(clippy::too_many_arguments)]
     fn new(data: &[u8], vw: usize, vh: usize, w: usize, h: usize, max_x: usize, max_y: usize) -> Plane {
         let mut src = vec![0u8; w * h];
         for y in 0..h {

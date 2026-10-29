@@ -8,7 +8,15 @@ use crate::cdf::Cdfs;
 use crate::decide::{FrameGeom, Leaf, Node, intra_uv_tx_type, scan_for, tx_in_set, tx_set, tx_size_for};
 use crate::loopfilter::LfInfo;
 use crate::symbol::SymbolWriter;
-use crate::tables::*;
+use crate::tables::{
+    ADST_ADST, ADST_DCT, ALTREF_FRAME, ALTREF2_FRAME, BLOCK_8X8, BLOCK_64X64, BR_CDF_SIZE, BWDREF_FRAME, CLASS0_SIZE, COEFF_BASE_CTX_OFFSET, COEFF_BASE_RANGE,
+    D67_PRED, DC_PRED, DCT_ADST, DCT_DCT, DEFAULT_INTRA_FRAME_Y_MODE_CDF, GLOBALMV, GOLDEN_FRAME, INTRA_FRAME, INTRA_MODE_CONTEXT, LAST_FRAME, LAST2_FRAME,
+    LAST3_FRAME, MAG_REF_OFFSET_WITH_TX_CLASS, MAX_ANGLE_DELTA, MAX_REF_MV_STACK_SIZE, MI_HEIGHT_LOG2, MI_WIDTH_LOG2, MV_BORDER, MV_CLASS_0, NEARESTMV, NEARMV,
+    NEWMV, NUM_4X4_BLOCKS_HIGH, NUM_4X4_BLOCKS_WIDE, NUM_BASE_LEVELS, PARTITION_HORZ, PARTITION_HORZ_4, PARTITION_HORZ_A, PARTITION_HORZ_B, PARTITION_NONE,
+    PARTITION_SPLIT, PARTITION_SUBSIZE, PARTITION_VERT, PARTITION_VERT_4, PARTITION_VERT_A, PARTITION_VERT_B, REF_CAT_LEVEL, SIG_REF_DIFF_OFFSET, SIZE_GROUP,
+    SUBSAMPLED_SIZE, TX_32X32, TX_CLASS_2D, TX_HEIGHT, TX_HEIGHT_LOG2, TX_SIZE_SQR, TX_SIZE_SQR_UP, TX_TYPE_INTER_INV_SET3, TX_TYPE_INTRA_INV_SET2, TX_WIDTH,
+    TX_WIDTH_LOG2, V_PRED,
+};
 
 type MvP = [i32; 2];
 
@@ -62,6 +70,8 @@ pub(crate) struct TileWriter<'a> {
     left_dc: [Vec<u8>; 3],
     /// LoopfilterTxSizes per plane (row stride mi_cols + 32).
     lf_tx: [Vec<u8>; 3],
+    /// Scratch for the levels coded so far in `coeffs`.
+    quant: Vec<i32>,
     // current block
     r: usize,
     c: usize,
@@ -114,6 +124,7 @@ impl<'a> TileWriter<'a> {
             left_level: std::array::from_fn(|_| vec![0; g.mi_rows + 64]),
             left_dc: std::array::from_fn(|_| vec![0; g.mi_rows + 64]),
             lf_tx: std::array::from_fn(|_| vec![0; (g.mi_cols + 32) * (g.mi_rows + 32)]),
+            quant: Vec::new(),
             r: 0,
             c: 0,
             bsize: 0,
@@ -181,10 +192,10 @@ impl<'a> TileWriter<'a> {
             self.sw.symbol(partition, cdf);
         } else if has_cols || has_rows {
             assert!(split, "blocks crossing the frame edge are split");
-            let pcdf: Vec<u16> = match bsl {
-                2 => self.cdf.partition_w16[ctx].to_vec(),
-                3 => self.cdf.partition_w32[ctx].to_vec(),
-                _ => self.cdf.partition_w64[ctx].to_vec(),
+            let pcdf: &[u16] = match bsl {
+                2 => &self.cdf.partition_w16[ctx],
+                3 => &self.cdf.partition_w32[ctx],
+                _ => &self.cdf.partition_w64[ctx],
             };
             let pr = |k: usize| pcdf[k] as i32 - if k == 0 { 0 } else { pcdf[k - 1] as i32 };
             let psum = if has_cols {
@@ -455,23 +466,7 @@ impl<'a> TileWriter<'a> {
             }
         } else {
             if plane == 0 {
-                // transform_type( )
-                let set = tx_set(tx_sz, b.is_inter);
-                let t = b.tx_type_y;
-                if set > 0 && self.qidx > 0 {
-                    let sqr = TX_SIZE_SQR[tx_sz] as usize;
-                    if b.is_inter {
-                        // The decision only picks types of this set (DCT_DCT otherwise).
-                        let s = TX_TYPE_INTER_INV_SET3.iter().position(|&v| v as usize == t).unwrap_or_default();
-                        self.sw.symbol(s, &mut self.cdf.inter_tx_type_set3[sqr]);
-                    } else {
-                        let s = TX_TYPE_INTRA_INV_SET2.iter().position(|&v| v as usize == t).unwrap_or_default();
-                        self.sw.symbol(s, &mut self.cdf.intra_tx_type_set2[sqr][b.y_mode]);
-                    }
-                } else {
-                    assert_eq!(t, DCT_DCT);
-                }
-                self.set_tx_types(x4, y4, tx_sz, t);
+                self.write_transform_type(x4, y4, tx_sz, b);
             }
             let plane_tx_type = self.compute_tx_type(plane, tx_sz, x4, y4, b);
             debug_assert!(plane_tx_type == DCT_DCT || matches!(plane_tx_type, ADST_DCT | DCT_ADST | ADST_ADST));
@@ -501,7 +496,9 @@ impl<'a> TileWriter<'a> {
             let height = TX_HEIGHT[tx_sz] as usize;
             let width = 1usize << bwl;
             // Quant[] as the decoder sees it while parsing: the levels coded so far (capped)
-            let mut quant = vec![0i32; width * height];
+            let mut quant = std::mem::take(&mut self.quant);
+            quant.clear();
+            quant.resize(width * height, 0);
             for c in (0..eob).rev() {
                 let pos = scan[c] as usize;
                 let a = levels[pos].unsigned_abs().min(15) as i32;
@@ -526,6 +523,7 @@ impl<'a> TileWriter<'a> {
                 }
                 quant[pos] = a;
             }
+            self.quant = quant;
             for c in 0..eob {
                 let pos = scan[c] as usize;
                 let v = levels[pos];
@@ -569,6 +567,26 @@ impl<'a> TileWriter<'a> {
                 self.left_dc[plane][y4 + i] = dc_category;
             }
         }
+    }
+
+    fn write_transform_type(&mut self, x4: usize, y4: usize, tx_sz: usize, b: &Leaf) {
+        // transform_type( )
+        let set = tx_set(tx_sz, b.is_inter);
+        let t = b.tx_type_y;
+        if set > 0 && self.qidx > 0 {
+            let sqr = TX_SIZE_SQR[tx_sz] as usize;
+            if b.is_inter {
+                // The decision only picks types of this set (DCT_DCT otherwise).
+                let s = TX_TYPE_INTER_INV_SET3.iter().position(|&v| v as usize == t).unwrap_or_default();
+                self.sw.symbol(s, &mut self.cdf.inter_tx_type_set3[sqr]);
+            } else {
+                let s = TX_TYPE_INTRA_INV_SET2.iter().position(|&v| v as usize == t).unwrap_or_default();
+                self.sw.symbol(s, &mut self.cdf.intra_tx_type_set2[sqr][b.y_mode]);
+            }
+        } else {
+            assert_eq!(t, DCT_DCT);
+        }
+        self.set_tx_types(x4, y4, tx_sz, t);
     }
 
     fn set_tx_types(&mut self, x4: usize, y4: usize, tx_sz: usize, t: usize) {
