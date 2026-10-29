@@ -96,8 +96,9 @@ impl RecSpec {
     }
 }
 
-/// The 124-byte `tdb4` header of a property (aep-format.md 3.4). Only the decoded bytes and the
-/// class word are written; After Effects reads the other bytes as zero (read-back e1-ztdb4d).
+/// The 124-byte `tdb4` header of a property (aep-format.md 3.4). The decoded bytes, the class
+/// word and the constant doubles at 16..56 are written; After Effects reads the other bytes as
+/// zero (read-back e1-ztdb4d).
 pub(crate) fn tdb4(spec: &RecSpec, keyed: bool, time_scale: u32) -> Vec<u8> {
     let mut b = vec![0u8; 124];
     let set = |b: &mut Vec<u8>, at: usize, bytes: &[u8]| {
@@ -118,6 +119,12 @@ pub(crate) fn tdb4(spec: &RecSpec, keyed: bool, time_scale: u32) -> Vec<u8> {
     set(&mut b, 7, &[spatial]);
     set(&mut b, 8, &spec.class.to_be_bytes());
     set(&mut b, 12, &time_scale.to_be_bytes());
+    // Every record After Effects writes carries 0.0001 and four 1.0 here; without them a roving
+    // key reads back at time zero instead of its retimed place (read-back s14-re-keyframes).
+    set(&mut b, 16, &1e-4f64.to_be_bytes());
+    for at in [24, 32, 40, 48] {
+        set(&mut b, at, &1.0f64.to_be_bytes());
+    }
     set(&mut b, 68, &[u8::from(keyed)]);
     // Set on a static spatial property, cleared once it is keyed (aep-format.md 3.4, byte 79).
     set(&mut b, 79, &[u8::from(spatial != 0 && !keyed)]);
@@ -183,6 +190,9 @@ mod tests {
         assert_eq!(&h[..8], &[0xdb, 0x99, 0, 3, 0, 0x0f, 0, 3]);
         assert_eq!(&h[8..16], &[0xff, 0xff, 0xff, 0xff, 0, 0, 0x64, 0]);
         assert_eq!((h[68], h[79]), (0, 1));
+        // A roving key needs these to keep its time (read-back s14-re-keyframes).
+        assert_eq!(&h[16..24], &1e-4f64.to_be_bytes());
+        assert!(h[24..56].chunks(8).all(|d| d == 1.0f64.to_be_bytes()));
         assert_eq!(pos.cdat_len(), 72);
         assert_eq!(pos.key_len(), 128);
         let opacity = RecSpec { dims: 1, template: KeyTemplate::Plain, class: class::LAYER_SCALAR, limits: Some((0.0, 100.0)), byte5: None };
