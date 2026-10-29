@@ -125,7 +125,8 @@ impl Template {
         let list_of = |ty: &[u8; 4]| -> R<Vec<Chunk<'static>>> { Ok(protos.list(ty).ok_or_else(|| tpl("prototype list missing"))?.children().to_vec()) };
         let stat = transform_records(false);
         let keyd = transform_records(true);
-        let null_block = list_of(b"nulb")?;
+        // A null layer has the AV layer's block; `ldta` marks it (byte 38 bit 0x80).
+        let null_block = crate::export::skeleton::av_layer();
         let null_item = list_of(b"nuli")?.into_iter().next().ok_or_else(|| tpl("null item missing"))?;
         let masks = crate::export::masks::MaskProtos::build();
         let effects = crate::export::effects::FxProtos::build();
