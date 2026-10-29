@@ -932,10 +932,7 @@ pub(crate) fn value_record(protos: &FxProtos, p: &ParamPlan, def: &ParDef, sourc
             };
             {
                 let lhd3 = child_data(&mut list, b"lhd3")?;
-                put_u32(lhd3, 8, n)?;
-                put_u32(lhd3, 12, n.div_ceil(4))?;
-                put_u32(lhd3, 16, u32::try_from(size).map_err(|_| tpl("record size"))?)?;
-                put_u32(lhd3, 28, n.div_ceil(4).saturating_mul(4))?;
+                crate::export::synth::put_key_counts(lhd3, n, u32::try_from(size).map_err(|_| tpl("record size"))?)?;
             }
             let mut ldat = Vec::with_capacity(size * keys.len());
             for k in keys {

@@ -70,6 +70,26 @@ pub(crate) struct Template {
     pub styles: crate::export::styles::StyleProtos,
 }
 
+/// The `tdmn`, `tdbs` pairs of the five Transform properties, static or keyed, built in code
+/// (aep-format.md 3.4): Anchor Point and Position spatial, Scale, Rotation and Opacity plain;
+/// Scale and Opacity carry their limits.
+fn transform_records(keyed: bool) -> Vec<Chunk<'static>> {
+    use crate::export::plan::PropKind;
+    use crate::export::synth::{KeyTemplate, RecSpec, class};
+    PropKind::ALL
+        .iter()
+        .flat_map(|k| {
+            let spec = match k {
+                PropKind::Anchor | PropKind::Position => RecSpec { dims: 3, template: KeyTemplate::Spatial(3), class: class::SPATIAL, limits: None },
+                PropKind::Scale => RecSpec { dims: 3, template: KeyTemplate::Plain, class: class::LAYER_SCALAR, limits: Some((0.0, 0.0)) },
+                PropKind::Rotation => RecSpec { dims: 1, template: KeyTemplate::Plain, class: class::LAYER_SCALAR, limits: None },
+                PropKind::Opacity => RecSpec { dims: 1, template: KeyTemplate::Plain, class: class::LAYER_SCALAR, limits: Some((0.0, 100.0)) },
+            };
+            [crate::export::synth::tdmn(k.match_name()), crate::export::synth::tdbs(&spec, keyed, 25_600)]
+        })
+        .collect()
+}
+
 fn is_f_record(c: &Chunk<'_>) -> bool {
     c.id[0] == b'f' && !c.is_list(b"FEE ")
 }
@@ -100,8 +120,8 @@ impl Template {
         crate::export::tree::kids_mut(&mut comp_shell)?.drain(first..end);
 
         let list_of = |ty: &[u8; 4]| -> R<Vec<Chunk<'static>>> { Ok(protos.list(ty).ok_or_else(|| tpl("prototype list missing"))?.children().to_vec()) };
-        let stat = list_of(b"stat")?;
-        let keyd = list_of(b"keyd")?;
+        let stat = transform_records(false);
+        let keyd = transform_records(true);
         let null_block = list_of(b"nulb")?;
         let null_item = list_of(b"nuli")?.into_iter().next().ok_or_else(|| tpl("null item missing"))?;
         let mask_file = parse(MASKS).map_err(|_| tpl("the embedded mask prototypes do not parse"))?.into_owned();

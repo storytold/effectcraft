@@ -75,9 +75,7 @@ pub(crate) fn build(proto: &[Chunk<'static>], plans: &[MarkerPlan]) -> R<Vec<Chu
         let tdbs = list_mut(mrst, b"tdbs")?;
         let list = list_mut(tdbs, b"list")?;
         let lhd3 = child_data(list, b"lhd3")?;
-        put_u32(lhd3, 8, n)?;
-        put_u32(lhd3, 12, n.div_ceil(4))?;
-        put_u32(lhd3, 28, n.div_ceil(4).saturating_mul(4))?;
+        crate::export::synth::put_key_counts(lhd3, n, 16)?;
         let ldat = child_data(list, b"ldat")?;
         ldat.clear();
         for p in plans {

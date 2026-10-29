@@ -500,10 +500,7 @@ fn set_key_list(tdbs: &mut Chunk<'static>, records: Vec<u8>, count: usize, size:
     let n = u32::try_from(count).map_err(|_| tpl("too many keys"))?;
     {
         let lhd3 = child_data(list, b"lhd3")?;
-        put_u32(lhd3, 8, n)?;
-        put_u32(lhd3, 12, n.div_ceil(4))?;
-        put_u32(lhd3, 16, u32::try_from(size).map_err(|_| tpl("record size"))?)?;
-        put_u32(lhd3, 28, n.div_ceil(4).saturating_mul(4))?;
+        crate::export::synth::put_key_counts(lhd3, n, u32::try_from(size).map_err(|_| tpl("record size"))?)?;
     }
     let ld = kids_mut(list)?;
     match ld.iter_mut().find(|c| c.is(b"ldat")) {
@@ -598,10 +595,7 @@ pub(crate) fn build_shap(proto: &Chunk<'static>, s: &ShapePlan) -> R<Chunk<'stat
         // Point lists: word 2 the record count, words 3 and 7 the vertex count and four times it
         // (090: 12 records, 4 and 16; 233: 9 records, 3 and 12), word 4 the record size 8.
         let lhd3 = child_data(list, b"lhd3")?;
-        put_u32(lhd3, 8, u32::try_from(records).map_err(|_| tpl("too many points"))?)?;
-        put_u32(lhd3, 12, vertices)?;
-        put_u32(lhd3, 16, 8)?;
-        put_u32(lhd3, 28, vertices.saturating_mul(4))?;
+        crate::export::synth::put_counts(lhd3, u32::try_from(records).map_err(|_| tpl("too many points"))?, vertices, 8, vertices.saturating_mul(4))?;
     }
     let mut ldat = vec![0u8; records.saturating_mul(8)];
     for (i, [u, v]) in s.points.iter().enumerate() {

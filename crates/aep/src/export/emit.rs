@@ -458,10 +458,7 @@ fn put_time_remap(cx: &Cx<'_>, layr: &mut Chunk<'static>, remap: &PropPlan) -> R
         let size = 48usize;
         {
             let lhd3 = child_data(&mut list, b"lhd3")?;
-            put_u32(lhd3, 8, n)?;
-            put_u32(lhd3, 12, n.div_ceil(4))?;
-            put_u32(lhd3, 16, 48)?;
-            put_u32(lhd3, 28, round4(n))?;
+            crate::export::synth::put_key_counts(lhd3, n, 48)?;
         }
         let mut ldat = Vec::with_capacity(size * remap.keys.len());
         for k in &remap.keys {
@@ -716,11 +713,6 @@ fn put_properties(cx: &Cx<'_>, layr: &mut Chunk<'static>, lp: &LayerPlan, cp: &C
     Ok(())
 }
 
-/// Round the count up to a multiple of four (the allocation of a key list).
-fn round4(n: u32) -> u32 {
-    n.div_ceil(4).saturating_mul(4)
-}
-
 fn build_prop(cx: &Cx<'_>, p: &PropPlan, lp: &LayerPlan, cp: &CompPlan) -> R<Chunk<'static>> {
     let idx = PropKind::ALL.iter().position(|k| *k == p.kind).ok_or_else(|| tpl("unknown property kind"))?;
     let pool = if p.keys.is_empty() { &cx.t.stat } else { &cx.t.keyd };
@@ -753,10 +745,7 @@ fn build_prop(cx: &Cx<'_>, p: &PropPlan, lp: &LayerPlan, cp: &CompPlan) -> R<Chu
         let size = if p.kind.spatial() { 56 + 24 * p.kind.dims() } else { 8 + 40 * p.kind.dims() };
         {
             let lhd3 = child_data(list, b"lhd3")?;
-            put_u32(lhd3, 8, n)?;
-            put_u32(lhd3, 12, n.div_ceil(4))?;
-            put_u32(lhd3, 16, u32::try_from(size).map_err(|_| tpl("record size"))?)?;
-            put_u32(lhd3, 28, round4(n))?;
+            crate::export::synth::put_key_counts(lhd3, n, u32::try_from(size).map_err(|_| tpl("record size"))?)?;
         }
         let mut ldat = Vec::with_capacity(size * p.keys.len());
         for k in &p.keys {

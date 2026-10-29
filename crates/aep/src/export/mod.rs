@@ -32,6 +32,7 @@ mod report;
 mod settings;
 mod shapes;
 mod styles;
+mod synth;
 mod template;
 mod text;
 mod textanim;
