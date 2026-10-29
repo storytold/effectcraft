@@ -96,10 +96,6 @@ fn transform_records(keyed: bool) -> Vec<Chunk<'static>> {
         .collect()
 }
 
-fn is_f_record(c: &Chunk<'_>) -> bool {
-    c.id[0] == b'f' && !c.is_list(b"FEE ")
-}
-
 impl Template {
     pub fn load() -> R<Template> {
         let file = parse(BASE).map_err(|_| tpl("the embedded template does not parse"))?.into_owned();
@@ -109,7 +105,7 @@ impl Template {
         let comp = fk.iter().find(|c| c.is_list(b"Item")).ok_or_else(|| tpl("template without a composition"))?.clone();
         let fee_at = fk.iter().position(|c| c.is_list(b"FEE ")).ok_or_else(|| tpl("template without FEE"))?;
         let fee = fk.get(fee_at).ok_or_else(|| tpl("template without FEE"))?.clone();
-        let fset: Vec<Chunk<'static>> = fk.iter().skip(fee_at + 1).take_while(|c| is_f_record(c)).cloned().collect();
+        let fset = crate::export::skeleton::f_records();
         let mut folder_item = fk.iter().rev().find(|c| c.is_list(b"Item")).ok_or_else(|| tpl("template without Solids"))?.clone();
         let solid_item;
         {
