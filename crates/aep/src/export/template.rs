@@ -117,8 +117,24 @@ impl Template {
         let ft_file = parse(FOOTAGE).map_err(|_| tpl("the embedded footage prototypes do not parse"))?.into_owned();
         let footage = crate::export::footage::FtProtos::from_file(&ft_file)?;
         let tx_file = parse(TEXT).map_err(|_| tpl("the embedded text prototypes do not parse"))?.into_owned();
-        let text_point = tx_file.list(b"txpt").ok_or_else(|| tpl("text prototype missing"))?.children().to_vec();
-        let text_box = tx_file.list(b"txbx").ok_or_else(|| tpl("text prototype missing"))?.children().to_vec();
+        // The text documents of a point (110) and a box (245) text layer; the blocks around
+        // them are built in code.
+        let doc_of = |ty: &[u8; 4]| -> R<Vec<u8>> {
+            fn find<'c>(c: &'c Chunk<'static>, depth: usize) -> Option<&'c Chunk<'static>> {
+                if depth > 32 {
+                    return None;
+                }
+                if c.list_type() == Some(*b"btdk") {
+                    return Some(c);
+                }
+                c.children().iter().find_map(|k| find(k, depth + 1))
+            }
+            let block = tx_file.list(ty).ok_or_else(|| tpl("text prototype missing"))?;
+            let btdk = find(block, 0).and_then(|c| c.bytes()).ok_or_else(|| tpl("text prototype without a document"))?;
+            Ok(btdk.to_vec())
+        };
+        let text_point = crate::export::skeleton::text_layer(&doc_of(b"txpt")?);
+        let text_box = crate::export::skeleton::text_layer(&doc_of(b"txbx")?);
         let anims = crate::export::textanim::AnimProtos {
             group: crate::export::tree_spec::build(crate::export::tree_defs::TEXT_ANIMATORS),
             animator: crate::export::tree_spec::build(crate::export::tree_defs::TEXT_ANIMATOR),

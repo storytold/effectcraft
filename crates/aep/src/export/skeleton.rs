@@ -90,6 +90,49 @@ pub(crate) fn layer_block(nodes: &[crate::export::tree_spec::Node]) -> Vec<Chunk
     out
 }
 
+/// The Source Text record (`btds/tdbs`, 110): one component, class `0x00010004`, a 4-byte zero
+/// `cdat`.
+const SOURCE_TEXT: crate::export::tree_spec::Rec = crate::export::tree_spec::Rec {
+    state: 1,
+    label: NO_NAME,
+    dims: 1,
+    template: 0,
+    class: class::EFFECT_CHOICE,
+    byte5: 0x01,
+    header: &[],
+    cdat_len: 4,
+    cdat: &[],
+    key_size: 0,
+    limits: None,
+    tdpi: None,
+};
+
+/// The block of a text layer (110, 245): `ADBE Text Properties` with the text document (the
+/// Source Text record, the document `doc` as `LIST btdk`, and `btgu` with the document's id and
+/// a zero one), the empty Path and More Options groups; the inert Transform records and the layer
+/// styles; a zero `ldta`, the guides, `Ewst` and the f-records.
+pub(crate) fn text_layer(doc: &[u8]) -> Vec<Chunk<'static>> {
+    use crate::export::tree_spec::{Node, build};
+    let btdk = Chunk { id: *b"LIST", body: crate::Body::OpaqueList { list_type: *b"btdk", data: doc.to_vec().into() }, pad: None };
+    // The record without its match name (`build` gives the pair).
+    let mut btds_kids: Vec<Chunk<'static>> = build(&[Node::R("ADBE Text Document", SOURCE_TEXT)]).into_iter().filter(|c| c.is_list(b"tdbs")).collect();
+    btds_kids.push(btdk);
+    let btgu = Chunk::list(*b"btgu", vec![Chunk::data(*b"pgui", vec![0; 16]), Chunk::data(*b"pgui", vec![0; 16])]);
+    let mut props = vec![tdmn("ADBE Text Document"), Chunk::list(*b"btds", btds_kids), btgu];
+    props.extend(group("ADBE Text Path Options", 1, Vec::new()));
+    props.extend(group("ADBE Text More Options", 1, Vec::new()));
+    let mut root = vec![Chunk::data(*b"tdsb", 1u32.to_be_bytes().to_vec()), tdsn("")];
+    root.extend(group("ADBE Text Properties", 1, props));
+    root.extend(group("ADBE Transform Group", 1, crate::export::tree_spec::build(crate::export::tree_defs::AV_TRANSFORM)));
+    root.extend(layer_styles());
+    root.push(tdmn("ADBE Group End"));
+    let layr = Chunk::list(*b"Layr", vec![Chunk::data(*b"ldta", vec![0; 164]), Chunk::data(*b"Utf8", Vec::new()), Chunk::list(*b"tdgp", root), guides()]);
+    let mut out = vec![layr, Chunk::list(*b"Ewst", Vec::new())];
+    out.extend(f_records());
+    out.extend(f_records());
+    out
+}
+
 /// `tdmn` + node pairs of `nodes`, by match name.
 pub(crate) fn pairs(nodes: &[crate::export::tree_spec::Node]) -> Vec<(String, [Chunk<'static>; 2])> {
     let mut out = Vec::new();
