@@ -84,7 +84,7 @@ pub(crate) fn srgb() -> Vec<u8> {
     for v in [2.4, 1.0 / 1.055, 0.055 / 1.055, 1.0 / 12.92, 0.04045] {
         trc.extend(s15(v));
     }
-    profile("sRGB IEC61966-2.1 (EffectCraft)", trc)
+    profile(SRGB_NAME, trc)
 }
 
 /// A display profile with BT.709 primaries and D65 white, tone curve `trc` and description
@@ -258,7 +258,10 @@ mod tests {
         assert_eq!(profile_id(&icc), md5(&z));
         let at = icc.windows(8).position(|w| w == b"para\0\0\0\0").unwrap();
         assert_eq!(&icc[at + 8..at + 12], &[0, 3, 0, 0]);
-        assert_eq!(icc.len(), rec709_gamma24().len() + 16, "four more curve parameters");
+        // AE shows its own name for the space only when the description is exactly this.
+        let name: Vec<u8> = SRGB_NAME.encode_utf16().flat_map(u16::to_be_bytes).collect();
+        let at = icc.windows(name.len()).position(|w| w == name.as_slice()).unwrap();
+        assert_ne!(&icc[at + name.len()..at + name.len() + 2], b"\0 ", "no suffix after the name");
     }
 
     #[test]
