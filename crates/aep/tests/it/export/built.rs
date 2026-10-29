@@ -384,28 +384,19 @@ fn email_like(hay: &str) -> Vec<String> {
     found
 }
 
+/// Everything the exporter writes is built in code: an export holds no local name, path or
+/// address.
 #[test]
-fn the_template_holds_no_local_data() {
-    let base = include_bytes!("../../../template/base.aep");
-    let protos = include_bytes!("../../../template/protos.aep");
-    let masks = include_bytes!("../../../template/masks.aep");
-    let effects = include_bytes!("../../../template/effects.aep");
-    let footage = include_bytes!("../../../template/footage.aep");
-    let text = include_bytes!("../../../template/text.aep");
-    let objects = include_bytes!("../../../template/objects.aep");
-    let styles = include_bytes!("../../../template/styles.aep");
+fn the_export_holds_no_local_data() {
+    let mut p = Project::default();
+    let c = add_comp(&mut p, "C", 100, 100, FrameRate::new(25, 1), 1.0, None);
+    let s = add_solid(&mut p, "Red", 50, 50, [1.0, 0.0, 0.0], None);
+    add_layer(&mut p, c, "Red", LayerSource::Solid { item: s }, (50, 50));
+    add_layer(&mut p, c, "N", LayerSource::Null, (100, 100));
+    let export = export_all(&p).bytes;
     let names = local_names();
     let fixed = ["desktop-", "\\users\\", "/users/", "/home/"];
-    for (name, bytes) in [
-        ("base", &base[..]),
-        ("protos", &protos[..]),
-        ("masks", &masks[..]),
-        ("effects", &effects[..]),
-        ("footage", &footage[..]),
-        ("text", &text[..]),
-        ("objects", &objects[..]),
-        ("styles", &styles[..]),
-    ] {
+    for (name, bytes) in [("export", &export[..])] {
         // Strings are searched as bytes and, with the NUL bytes removed, as UTF-16 text.
         let utf16: Vec<u8> = bytes.iter().copied().filter(|&c| c != 0).collect();
         for hay in [String::from_utf8_lossy(bytes).to_lowercase(), String::from_utf8_lossy(&utf16).to_lowercase()] {

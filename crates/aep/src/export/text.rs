@@ -1,6 +1,6 @@
-//! Text layers: the layer block of a point (110) or box (245) text layer of our corpus
-//! (`template/text.aep`, `examples/mktxprotos.rs`) with its text document rewritten from the
-//! layer's Source Text (`docs/aep-format.md` 3.10, `docs/aep-export.md` R32-R34):
+//! Text layers: the layer block of a point (110) or box (245) text layer, built in code
+//! (`skeleton::text_layer`, `textproto`), with its text document rewritten from the layer's Source
+//! Text (`docs/aep-format.md` 3.10, `docs/aep-export.md` R32-R34):
 //!
 //! * the text (paragraphs end with `\r`, the last one too), the paragraph runs with their
 //!   justification, the style runs with font, size, faux bold / italic, automatic or explicit

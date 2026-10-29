@@ -1,11 +1,10 @@
 //! Effects: the inverse of the importer, through the same table (`crate::effect_map`).
 //! An EffectCraft effect the table maps is written as the After Effects effect it came from:
 //!
-//! * the instance is the effect's default instance, cloned from our own synthetic cases
-//!   (`template/effects.aep`, `examples/mkfxprotos.rs`: `tdmn` + `sspc` with its full `parT` and
-//!   the records After Effects always keeps: the input layer, buttons, group markers, hidden
-//!   entries, arbitrary data), with its instance name and the owning layer's id in the input-layer
-//!   record;
+//! * the instance is the effect's default instance, built in code from the effect table
+//!   (`fx_defs`, `fxsynth`: `tdmn` + `sspc` with its full `parT` and the records After Effects
+//!   always keeps: the input layer, buttons, group markers, hidden entries, arbitrary data), with
+//!   its instance name and the owning layer's id in the input-layer record;
 //! * a parameter whose value differs from its `pard` default gets a value record (absent =
 //!   default, `docs/aep-format.md` 3.7). The record is built from the **record of its parameter
 //!   type**: over the whole corpus every static value record of a type has the same `tdsb` and
@@ -270,24 +269,6 @@ fn defs() -> &'static HashMap<String, HashMap<u16, ParDef>> {
     DEFS.get_or_init(|| {
         crate::export::fx_defs::FX_DEFS.iter().map(|fx| (fx.match_name.to_string(), par_defs(&crate::export::fxsynth::default_sspc(fx)))).collect()
     })
-}
-
-/// The parameter definitions of the template's prototypes (the equivalence tests).
-#[cfg(test)]
-fn template_defs() -> HashMap<String, HashMap<u16, ParDef>> {
-    let mut out = HashMap::new();
-    let Ok(f) = crate::parse(crate::export::template::EFFECTS) else { return out };
-    for c in &f.chunks {
-        if c.is_list(b"fxdf") {
-            let k = c.children();
-            if let (Some(m), Some(s)) = (k.first(), k.get(1))
-                && let Some(name) = tdmn_name(m)
-            {
-                out.insert(name, par_defs(s));
-            }
-        }
-    }
-    out
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -786,7 +767,7 @@ fn plan_keys(pin: ParamIn<'_>, cp: &CompPlan, what: &str, col: &mut Collector) -
 // ---------------------------------------------------------------------------------------------
 // Emit.
 
-/// The effect prototypes (`template/effects.aep`).
+/// The effect prototypes, built in code ([`FxProtos::build`]).
 pub(crate) struct FxProtos {
     /// match name -> (`tdmn`, default `sspc`, `EfDf` definition copy).
     defaults: HashMap<String, (Chunk<'static>, Chunk<'static>, Chunk<'static>)>,
@@ -1148,64 +1129,4 @@ pub(crate) fn put_project_lists(protos: &FxProtos, file: &mut AepFile<'static>, 
     }
     file.chunks.insert(at + 1, Chunk::list(*b"EfdG", efdg));
     Ok(())
-}
-
-#[cfg(test)]
-mod fx_table {
-    use super::*;
-
-    /// The effect table (`fx_defs`) states what the effect prototypes hold: the same effects,
-    /// parameters in the same order, ids, types, defaults, ranges and valid maxima.
-    #[test]
-    fn the_table_matches_the_prototypes() {
-        let all = template_defs();
-        assert_eq!(all.len(), crate::export::fx_defs::FX_DEFS.len());
-        for fx in crate::export::fx_defs::FX_DEFS {
-            let proto = all.get(fx.match_name).unwrap_or_else(|| panic!("{} has no prototype", fx.match_name));
-            assert_eq!(proto.len(), fx.params.len(), "{}", fx.match_name);
-            for (i, p) in fx.params.iter().enumerate() {
-                let d = &proto[&u16::try_from(i).unwrap()];
-                let what = format!("{} #{i}", fx.match_name);
-                assert_eq!(d.record, fx.record(p), "{what}");
-                assert_eq!(d.code, u32::from(p.code), "{what}");
-                assert_eq!(d.default, p.default, "{what}");
-                assert_eq!(d.range, p.range, "{what}");
-                assert_eq!(d.valid_max, p.valid_max, "{what}");
-            }
-        }
-    }
-
-    /// The default instance built in code has the records of the prototype's value group (by
-    /// match name, in order) and the same arbitrary data.
-    #[test]
-    fn the_built_default_instances_have_the_prototypes_records() {
-        let f = crate::parse(crate::export::template::EFFECTS).unwrap();
-        let built = FxProtos::build();
-        let names = |sspc: &Chunk<'_>| -> Vec<String> { sspc.child_list(b"tdgp").unwrap().children().iter().filter_map(tdmn_name).collect() };
-        let data = |sspc: &Chunk<'_>| -> Vec<Vec<u8>> {
-            sspc.child_list(b"parT").unwrap().children().iter().filter(|c| c.is(b"aRbp")).map(|c| c.bytes().unwrap().to_vec()).collect()
-        };
-        let mut n = 0;
-        for c in f.chunks.iter().filter(|c| c.is_list(b"fxdf")) {
-            let k = c.children();
-            let name = tdmn_name(&k[0]).unwrap();
-            let (_, sspc, _) = &built.defaults[&name];
-            assert_eq!(names(sspc), names(&k[1]), "{name}");
-            let (ours, theirs) = (data(sspc), data(&k[1]));
-            assert_eq!(ours.len(), theirs.len(), "{name}");
-            for (a, b) in ours.iter().zip(&theirs) {
-                if name == "ADBE MESH WARP" {
-                    // After Effects computes the grid in its own arithmetic: equal within 1e-6.
-                    let (a, b) = (crate::MeshData::parse(a).unwrap(), crate::MeshData::parse(b).unwrap());
-                    assert_eq!((a.columns, a.rows, a.tail), (b.columns, b.rows, b.tail));
-                    let flat = |m: &crate::MeshData| m.vertices.iter().flatten().flatten().copied().collect::<Vec<f32>>();
-                    assert!(flat(&a).iter().zip(flat(&b)).all(|(x, y)| (x - y).abs() < 1e-6), "{name}");
-                } else {
-                    assert!(a == b, "{name}: default data differs");
-                }
-            }
-            n += 1;
-        }
-        assert_eq!(n, 57);
-    }
 }

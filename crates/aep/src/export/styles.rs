@@ -1,11 +1,11 @@
 //! Layer styles: the inverse of the importer, through the shared table
 //! [`crate::style_map`].
 //!
-//! Every layer of the template already holds the `ADBE Layer Styles` group with Blending Options
+//! Every layer block already holds the `ADBE Layer Styles` group with Blending Options
 //! and the ten switch groups at rest (950). A style is applied by setting its switch group's
 //! `tdsb` to 1 and Layer Styles and Blending Options to 1 (951-960); a parameter that differs
-//! from After Effects' default gets a record, cloned from the record After Effects wrote for that
-//! parameter (`template/styles.aep`, from 977) with the value replaced, in After Effects'
+//! from After Effects' default gets a record, built from the table of the record
+//! After Effects writes for that parameter (`style_defs`, from 977) with the value, in After Effects'
 //! property order (970). Keys on a scalar take the keyed form of 976 (`tdb4` bytes 5, 68 and 79
 //! from it, plain 48-byte key records); an expression is stored as on an effect parameter
 //! (`tdb4@120` 1, `@119` the disabled switch, the text before `tdum`).
@@ -16,8 +16,6 @@
 
 use std::collections::HashMap;
 
-#[cfg(test)]
-use crate::AepFile;
 use crate::Chunk;
 use crate::style_map::{self as sm, StyleConv, StyleParam};
 use effectcraft_keyframe::{Interp, Value};
@@ -247,7 +245,7 @@ pub(crate) fn plan_styles(layer: &Layer, comp: &Comp, cp: &CompPlan, what: &str,
 // ---------------------------------------------------------------------------------------------
 // Emit.
 
-/// The style record prototypes (`template/styles.aep`): full match name -> (`tdmn`, `tdbs`), and
+/// The style record prototypes, built in code: full match name -> (`tdmn`, `tdbs`), and
 /// the keyed scalar record.
 pub(crate) struct StyleProtos {
     records: HashMap<String, (Chunk<'static>, Chunk<'static>)>,
@@ -274,31 +272,6 @@ impl StyleProtos {
             .collect();
         let scalar = RecSpec { dims: 1, template: KeyTemplate::Plain, class: class::EFFECT_NUMBER, limits: Some((0.0, 100.0)), byte5: None };
         StyleProtos { records, keyed: tdbs(&scalar, true, 25_600) }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn from_file(f: &AepFile<'static>) -> R<StyleProtos> {
-        let mut records = HashMap::new();
-        let list = f.list(b"stpr").ok_or_else(|| tpl("style prototypes missing"))?;
-        let k = list.children();
-        let mut i = 0;
-        while i + 1 < k.len() {
-            if let (Some(m), Some(n)) = (k.get(i), k.get(i + 1))
-                && m.is(b"tdmn")
-            {
-                records.insert(tdmn_name(m).unwrap_or_default(), (m.clone(), n.clone()));
-            }
-            i += 2;
-        }
-        let keyed = f.list(b"stky").and_then(|l| l.children().get(1).cloned()).ok_or_else(|| tpl("keyed style prototype missing"))?;
-        let all = sm::STYLES.iter().all(|s| s.params.iter().all(|p| p.conv == StyleConv::Gradient || records.contains_key(&s.param_name(p))))
-            && sm::ADVANCED_BLENDING.iter().all(|p| records.contains_key(p.ae))
-            && records.contains_key(sm::GLOBAL_ANGLE)
-            && records.contains_key(sm::GLOBAL_ALTITUDE);
-        if !all {
-            return Err(tpl("style prototypes incomplete"));
-        }
-        Ok(StyleProtos { records, keyed })
     }
 
     /// The `tdmn` + `tdbs` of one record.
@@ -400,32 +373,4 @@ pub(crate) fn put_styles(protos: &StyleProtos, layr: &mut Chunk<'static>, plan: 
         insert_records(protos, g, recs, "ADBE Group End")?;
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The records built in code have the template's chunks and decoded bytes.
-    #[test]
-    fn the_built_style_records_match_the_template() {
-        let f = crate::parse(crate::export::template::STYLES).unwrap().into_owned();
-        let old = StyleProtos::from_file(&f).unwrap();
-        let new = StyleProtos::from_table();
-        assert_eq!(old.records.len(), new.records.len());
-        let ids = |c: &Chunk<'_>| c.children().iter().map(|k| k.id).collect::<Vec<_>>();
-        let keep = |c: &Chunk<'_>, id: &[u8; 4]| c.child(id).and_then(|k| k.bytes()).map(<[u8]>::to_vec);
-        for (name, (_, a)) in &old.records {
-            let (_, b) = &new.records[name];
-            assert_eq!(ids(a), ids(b), "{name}");
-            for id in [b"tdum", b"tduM"] {
-                assert_eq!(keep(a, id), keep(b, id), "{name}");
-            }
-            assert_eq!(keep(a, b"cdat").map(|d| d.len()), keep(b, b"cdat").map(|d| d.len()), "{name}");
-            let (ta, tb) = (keep(a, b"tdb4").unwrap(), keep(b, b"tdb4").unwrap());
-            for i in [3usize, 5, 7, 8, 9, 10, 11, 68, 79] {
-                assert_eq!(ta[i], tb[i], "{name} tdb4[{i}]");
-            }
-        }
-    }
 }

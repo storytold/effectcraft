@@ -1,9 +1,10 @@
 //! Layer masks: the plan (file units, losses reported) and the chunks, cloned from the mask
-//! prototypes of `template/masks.aep` (our own fixtures 091, 093 and 208).
+//! prototypes built in code ([`MaskProtos::build`], with the layout of our fixtures 091, 093 and
+//! 208).
 //!
 //! What is written, each with its verified layout (`docs/aep-format.md` 3.4, 3.5 and 3.8):
 //! - per mask a `mkif` (inverted at byte 0, mode `u32` at 4, the layer's running mask counter at
-//!   8; the other bytes are copied from the prototype) and an atom with the user name;
+//!   8; the other bytes are zero, read-back t-zmkif) and an atom with the user name;
 //! - the path as `LIST shap` (`shph`: open bit `0x08` of byte 3, the box of vertices and handles
 //!   normalised to the layer source size; `list`: three `f32` points per vertex, vertex `i`, out
 //!   handle `i`, in handle `i + 1`, normalised inside the box);
@@ -392,11 +393,6 @@ pub(crate) fn shph() -> Vec<u8> {
     b
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
-fn is_name(c: &Chunk<'_>, name: &str) -> bool {
-    c.is(b"tdmn") && tdmn_name(c).as_deref() == Some(name)
-}
-
 impl MaskProtos {
     /// The prototypes built in code (aep-format.md 3.8): the parade and atom groups, `mkif` with
     /// only its decoded fields (bytes 12..47 zero, read-back t-zmkif), the path, feather, opacity
@@ -454,23 +450,6 @@ impl MaskProtos {
             keyed_path: path_rec(true),
             keyed_feather: tdbs(&feather, true, 25_600),
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn from_file(protos: &crate::AepFile<'static>) -> R<MaskProtos> {
-        let mpar = protos.list(b"mpar").ok_or_else(|| tpl("mask prototypes without a parade"))?.children();
-        let parade_name = mpar.first().filter(|c| is_name(c, "ADBE Mask Parade")).ok_or_else(|| tpl("mask parade name missing"))?.clone();
-        let parade = mpar.get(1).filter(|c| c.is_list(b"tdgp")).ok_or_else(|| tpl("mask parade missing"))?.children();
-        let first = parade.iter().position(|c| c.is(b"tdmn")).ok_or_else(|| tpl("empty mask parade"))?;
-        let parade_header = parade.get(..first).ok_or_else(|| tpl("mask parade header"))?.to_vec();
-        let atom_name = parade.get(first).filter(|c| is_name(c, "ADBE Mask Atom")).ok_or_else(|| tpl("mask atom name missing"))?.clone();
-        let mkif = parade.get(first + 1).filter(|c| c.is(b"mkif")).ok_or_else(|| tpl("mkif missing"))?.clone();
-        let atom = parade.get(first + 2).filter(|c| c.is_list(b"tdgp")).ok_or_else(|| tpl("mask atom missing"))?.clone();
-        let group_end = parade.iter().rev().find(|c| is_name(c, "ADBE Group End")).ok_or_else(|| tpl("mask parade end missing"))?.clone();
-        let one = |ty: &[u8; 4]| -> R<Chunk<'static>> {
-            protos.list(ty).and_then(|l| l.children().first()).filter(|c| c.is_list(b"tdbs")).cloned().ok_or_else(|| tpl("keyed mask prototype missing"))
-        };
-        Ok(MaskProtos { parade_name, parade_header, atom_name, mkif, atom, group_end, keyed_path: one(b"mpth")?, keyed_feather: one(b"mfea")? })
     }
 }
 

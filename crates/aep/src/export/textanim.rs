@@ -6,8 +6,8 @@
 //! animator (one range selector) with the properties and selectors of the EffectCraft animator.
 //! An animator property is written whenever the animator has it (its presence is what After
 //! Effects shows: Animate > Position adds the entry), a range selector property only when it
-//! differs from After Effects' default or carries keys or an expression. Every record is the one
-//! After Effects wrote for that property in a one-change case (579-592, 728; `template/text.aep`):
+//! differs from After Effects' default or carries keys or an expression. Every record has the layout
+//! After Effects writes for that property in a one-change case (579-592, 728; `tree_defs`):
 //! positions, anchor points, stroke widths and line spacing in pixels, scales, opacity, Start /
 //! End / Offset, Amount, Smoothness and the eases in percent, angles in degrees, tracking in 1/1000
 //! em, colours ARGB 0..255, popups 1-based (Units, Based On, Mode, Shape in EffectCraft's item
@@ -42,7 +42,7 @@ pub(crate) struct AnimPlan {
     pub selectors: Vec<SelPlan>,
 }
 
-/// The prototypes (`template/text.aep`).
+/// The prototypes, built in code (`tree_defs`).
 pub(crate) struct AnimProtos {
     /// `tdmn ADBE Text Animators` + the emptied group.
     pub group: Vec<Chunk<'static>>,

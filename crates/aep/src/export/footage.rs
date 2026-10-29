@@ -40,7 +40,7 @@ pub(crate) enum FtKind {
 }
 
 impl FtKind {
-    /// The list type the prototype is stored under in `template/footage.aep`.
+    /// The key a kind's prototype is found under.
     pub(crate) fn key(self) -> [u8; 4] {
         match self {
             FtKind::Png => *b"png ",
@@ -515,25 +515,6 @@ impl FtProtos {
     /// The items of every kind, built in code.
     pub(crate) fn build() -> FtProtos {
         FtProtos { items: KINDS.iter().map(|k| (k.key(), kind_item(*k))).collect() }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn keys(&self) -> Vec<[u8; 4]> {
-        self.items.iter().map(|(k, _)| *k).collect()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn chunks(&self, key: [u8; 4]) -> &[Chunk<'static>] {
-        self.items.iter().find(|(k, _)| *k == key).map_or(&[], |(_, v)| v.as_slice())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn from_file(f: &crate::AepFile<'static>) -> R<FtProtos> {
-        let items: Vec<([u8; 4], Vec<Chunk<'static>>)> = f.chunks.iter().filter_map(|c| Some((c.list_type()?, c.children().to_vec()))).collect();
-        if items.len() != 14 {
-            return Err(tpl("footage prototypes missing"));
-        }
-        Ok(FtProtos { items })
     }
 }
 

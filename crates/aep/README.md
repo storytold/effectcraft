@@ -6,8 +6,7 @@ After Effects projects (`.aep`, `.aepx`) in one crate, the way `effectcraft-lott
   view (below; its API is re-exported at the crate root);
 - `import`: maps the typed view into an EffectCraft project and reports everything it does not
   import ([`docs/aep-import.md`](../../docs/aep-import.md));
-- `export`: writes an EffectCraft project as an `.aep` by editing a generated template embedded
-  from `template/`, and reports everything it does not export
+- `export`: writes an EffectCraft project as an `.aep` with every chunk built in code, and reports everything it does not export
   ([`docs/aep-export.md`](../../docs/aep-export.md)).
 
 No file access: callers pass bytes, so the crate builds for wasm32.

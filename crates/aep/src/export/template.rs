@@ -1,29 +1,12 @@
-//! The generated template the exporter edits: a project that After Effects saved (one
-//! composition `C` with one red solid layer `L` in the `Solids` folder), plus the prototypes of
-//! the property records of a layer with static Transform values, of a layer with keyed Transform
-//! values and of a null layer, all from generated reference projects, and the mask prototypes
-//! from our fixtures 091, 093 and 208 (see `docs/aep-export.md`).
-//!
-//! The bytes are embedded; they are parsed with `effectcraft-aep` on every export (about 90 KB).
+//! The prototypes the exporter clones and edits, all built in code: the project skeleton
+//! (`base`), the layer blocks (`skeleton`, `tree_defs`), and the records of Transform, masks,
+//! effects, layer styles, footage, text and text animators (see `docs/aep-export.md`). Nothing is
+//! read from a file After Effects wrote; each layout was checked by After Effects reading the
+//! export back.
 
 use crate::{AepFile, Chunk};
 
 use crate::export::tree::{R, tpl};
-
-#[cfg(test)]
-pub(crate) const BASE: &[u8] = include_bytes!("../../template/base.aep");
-#[cfg(test)]
-const MASKS: &[u8] = include_bytes!("../../template/masks.aep");
-#[cfg(test)]
-pub(crate) const EFFECTS: &[u8] = include_bytes!("../../template/effects.aep");
-#[cfg(test)]
-const FOOTAGE: &[u8] = include_bytes!("../../template/footage.aep");
-#[cfg(test)]
-pub(crate) const TEXT: &[u8] = include_bytes!("../../template/text.aep");
-#[cfg(test)]
-pub(crate) const OBJECTS: &[u8] = include_bytes!("../../template/objects.aep");
-#[cfg(test)]
-pub(crate) const STYLES: &[u8] = include_bytes!("../../template/styles.aep");
 
 /// The chunks cloned by the exporter.
 pub(crate) struct Template {
@@ -175,65 +158,5 @@ impl Template {
             shapes,
             styles,
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    /// The mask prototypes built in code have the template's structure (the same chunks in the
-    /// same order) and its decoded bytes.
-    #[test]
-    fn the_built_mask_prototypes_match_the_template() {
-        let f = crate::parse(super::MASKS).unwrap().into_owned();
-        let old = crate::export::masks::MaskProtos::from_file(&f).unwrap();
-        let new = crate::export::masks::MaskProtos::build();
-        fn shape(c: &crate::Chunk<'_>) -> Vec<String> {
-            let mut out = vec![String::from_utf8_lossy(&c.id).into_owned()];
-            if let crate::Body::List { list_type, .. } = &c.body {
-                out.push(String::from_utf8_lossy(list_type).into_owned());
-            }
-            if c.is(b"tdmn") {
-                out.push(String::from_utf8_lossy(c.bytes().unwrap()).into_owned());
-            }
-            for k in c.children() {
-                out.extend(shape(k));
-            }
-            out
-        }
-        for (a, b) in [(&old.atom, &new.atom), (&old.keyed_path, &new.keyed_path), (&old.keyed_feather, &new.keyed_feather), (&old.mkif, &new.mkif)] {
-            assert_eq!(shape(a), shape(b));
-        }
-        assert_eq!(old.parade_header.len(), new.parade_header.len());
-    }
-
-    /// The footage items built in code have the template's chunks in its order, except `mnfo`
-    /// (left out: read-back v-fN-nomnfo), with chunks of the same sizes.
-    #[test]
-    fn the_built_footage_items_match_the_template() {
-        let f = crate::parse(super::FOOTAGE).unwrap().into_owned();
-        let old = crate::export::footage::FtProtos::from_file(&f).unwrap();
-        let new = crate::export::footage::FtProtos::build();
-        fn shape(c: &crate::Chunk<'_>, out: &mut Vec<String>) {
-            if c.is_list(b"mnfo") {
-                return;
-            }
-            let ty = c.list_type().map(|t| String::from_utf8_lossy(&t).into_owned()).unwrap_or_default();
-            let len = if c.is(b"Utf8") || c.is(b"alas") { 0 } else { c.bytes().map_or(0, <[u8]>::len) };
-            out.push(format!("{}{ty}:{len}", String::from_utf8_lossy(&c.id)));
-            for k in c.children() {
-                shape(k, out);
-            }
-        }
-        assert_eq!(old.keys(), new.keys());
-        for key in new.keys() {
-            let (mut a, mut b) = (Vec::new(), Vec::new());
-            for c in old.chunks(key) {
-                shape(c, &mut a);
-            }
-            for c in new.chunks(key) {
-                shape(c, &mut b);
-            }
-            assert_eq!(a, b, "{}", String::from_utf8_lossy(&key));
-        }
     }
 }
