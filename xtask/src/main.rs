@@ -1,4 +1,4 @@
-//! Workspace automation: `cargo xtask <layers|assets|pdf-deps|wasm|web|ico|aep-corpus|ci>`.
+//! Workspace automation: `cargo xtask <layers|assets|pdf-deps|wasm|web|ico|ci>`.
 //!
 //! - `layers`: enforces the dependency layering of `docs/architecture.md` §1 (downward-only edges,
 //!   listed same-layer edges, no UI/OS crates below L5).
@@ -8,20 +8,15 @@
 //!   `<target>/web/dist` with `wasm-bindgen` (docs/web.md); `--serve` serves it on localhost.
 //! - `assets`: every asset file (image, icon, font, LUT, audio, video…) has a complete
 //!   `<file>.attribution` sidecar and an entry in `ATTRIBUTION.md` (AGENTS.md §1).
-//! - `aep-corpus [--update-manifest]`: fetch the After Effects test projects of `crates/aep`,
-//!   pinned and sha256-verified, into `corpus/aep/` (`aep_corpus.rs`). Opt-in: `ci` does not run
-//!   it, and the tests that need the projects print `SKIPPED` without them.
 //! - `ico <out.ico> <in.png>…`: pack PNGs into a Windows `.ico` (used by `packaging/icons.sh`).
 //! - `ci`: fmt check, clippy -D warnings, tests (`cargo nextest run` when installed) and doctests,
 //!   PDF dependency policy, layers, assets, wasm. Everything builds in the dev profile.
 //! - `bench [--bin CLI] [--quick] [--compare OLD.jsonl] …`: render benchmark of generated scenarios
 //!   (memory, CPU, wall time) into `target/bench/results.jsonl` (`bench.rs`, docs/testing.md).
 
-mod aep_corpus;
 mod bench;
 mod ico;
 mod pdf_deps;
-mod sha256;
 mod version;
 
 use std::process::{Command, ExitCode};
@@ -42,7 +37,6 @@ const LAYERS: &[(&str, u8)] = &[
     ("keyframe", 1),
     ("path", 1),
     ("psd", 1),
-    ("aep", 3),
     ("segment", 1),
     ("project", 2),
     ("text", 2),
@@ -167,7 +161,7 @@ fn layers() -> Result<(), String> {
 const ASSET_EXT: &[&str] = &[
     "png", "jpg", "jpeg", "gif", "webp", "svg", "ico", "icns", "bmp", "tif", "tiff", "heic", "avif", "exr", "ttf", "otf", "ttc", "woff", "woff2", "cube",
     "3dl", "lut", "look", "wav", "mp3", "aac", "flac", "ogg", "opus", "m4a", "aif", "aiff", "mp4", "mov", "m4v", "mkv", "webm", "avi", "mxf", "psd", "ai",
-    "eps", "pdf", "prproj", "ffx", "prfpset", "mogrt", "aep", "aepx",
+    "eps", "pdf", "prproj", "ffx", "prfpset", "mogrt", "aep",
 ];
 
 /// Sidecar fields that must be present and non-empty.
@@ -522,7 +516,6 @@ fn main() -> ExitCode {
         "assets" => assets(),
         "pdf-deps" => pdf_deps::run(&root()),
         "ci" => ci(),
-        "aep-corpus" => aep_corpus::run(&root(), &std::env::args().skip(2).collect::<Vec<_>>()),
         "audio-backend" => audio_backend(),
         "web" => web(&std::env::args().skip(2).collect::<Vec<_>>()),
         "bench" => bench::run(&root(), &std::env::args().skip(2).collect::<Vec<_>>()),
@@ -534,7 +527,7 @@ fn main() -> ExitCode {
             let rest: Vec<String> = std::env::args().skip(2).collect();
             version::run(&root(), &rest.iter().map(String::as_str).collect::<Vec<_>>())
         }
-        _ => Err("usage: cargo xtask <layers|assets|pdf-deps|aep-corpus [--update-manifest]|wasm|web [--dev] [--serve PORT]|ico OUT.ico IN.png…|version [set X.Y.Z]|ci|audio-backend|bench [--bin CLI] [--quick] [--project F --comp C] [--compare OLD.jsonl] (--help)>".into()),
+        _ => Err("usage: cargo xtask <layers|assets|pdf-deps|wasm|web [--dev] [--serve PORT]|ico OUT.ico IN.png…|version [set X.Y.Z]|ci|audio-backend|bench [--bin CLI] [--quick] [--project F --comp C] [--compare OLD.jsonl] (--help)>".into()),
     };
     match r {
         Ok(()) => ExitCode::SUCCESS,

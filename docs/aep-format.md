@@ -18,10 +18,9 @@ without any edit, the reference for save noise). The base project `000-base` is 
 (1920x1080, 25 fps, 5 s) holding one red solid layer `L` (1920x1080) in the folder `Solids`. 374 of
 these cases (369 `.aep`, and the `.aepx` of `000`, `058`, `060`, `110`, `124`) are the test fixtures. They
 are a few combined projects, one composition per case named like the case and rebuilt from the
-same recipe (`crates/aep/tests/fixtures/CASES.md`, the generator in `tools/` there), fetched by
-`cargo xtask aep-corpus` (pinned, sha256-verified) into `corpus/aep/`; `crates/aep/tests/it/common/mod.rs` hands a test its case as a project of its own cut from
-the combined file (or reads the folder in `EFFECTCRAFT_AEP_FIXTURES`), and a test whose fixture is
-missing prints `SKIPPED: fixture <name> missing` and passes. The tests named below run on them;
+same recipe (`crates/aep/tests/fixtures/CASES.md`, the generator in `tools/` there), read from the
+folder named by `EFFECTCRAFT_AEP_FIXTURES` (opt-in); `crates/aep/tests/it/common/mod.rs` hands a test its case as a project of its own cut from
+the combined file, and a test whose fixture is missing prints `SKIPPED: fixture <name> missing` and passes. The tests named below run on them;
 the `.aepx` cases are one pair, `aepx-pair.aep` and `aepx-pair.aepx`. The container
 of every fixture is byte-identical to the generated file, with two exceptions that keep the
 fixtures small and free of local data: the XMP packet after the container (which grows by 1.7 KB
@@ -880,5 +879,5 @@ The corpus itself and the helper scripts live outside this repository. Projects 
 for this purpose were opened locally only to test the reader's robustness and the importer's
 coverage (does everything parse, which chunk ids occur); no layout in this document comes from them
 and none of them, nor any content of them, is in the repository. The
-cases above are the contributor's own test data, fetched from the corpus repository by `cargo xtask aep-corpus` (see `ATTRIBUTION.md`); the
+cases above are the contributor's own test data, kept outside the repository (see `ATTRIBUTION.md`); the
 repository holds no Adobe sample project, preset or asset.

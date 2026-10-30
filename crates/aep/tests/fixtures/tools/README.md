@@ -1,6 +1,6 @@
 # Generator of the combined test projects
 
-The test projects of the corpus (`cargo xtask aep-corpus`, `corpus/aep/`) were made from scratch with Adobe After Effects 2026, driven through an
+The test projects of the corpus (opt-in, the folder named by `EFFECTCRAFT_AEP_FIXTURES`) were made from scratch with Adobe After Effects 2026, driven through an
 After Effects MCP server (its `batch.run` of atomic operations; `eval.run`, i.e. running
 ExtendScript, is disabled on that server, so the tables below are written in MCP operation terms
 and small Node scripts turn them into `batch.run` lists). Each file holds one composition per

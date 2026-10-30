@@ -14,10 +14,9 @@
 //! A case name that is a file of its own in the directory (an old single-case fixture or a
 //! combined file's own name) is read as it is. When the file is not
 //! there the test prints `SKIPPED: fixture <name> missing` and returns without failing (the
-//! macros below), so the suite runs without the projects. The directory is `corpus/aep/` of the
-//! workspace (`cargo xtask aep-corpus` fetches it, pinned and sha256-verified), or the one in the
+//! macros below), so the suite runs without the projects. The directory is the one in the
 //! `EFFECTCRAFT_AEP_FIXTURES` environment variable (which may also hold the old single-case
-//! files). The engine tests include this file too.
+//! files); without it every such test skips. The engine tests include this file too.
 #![allow(dead_code, unused_macros)]
 
 mod cases;
@@ -30,14 +29,10 @@ use effectcraft_aep::{AepFile, Body, Chunk, ItemKind, Project};
 
 pub use cases::CASES;
 
-/// The directory the test projects are read from.
-pub fn dir() -> PathBuf {
-    match std::env::var_os("EFFECTCRAFT_AEP_FIXTURES") {
-        Some(d) if !d.is_empty() => PathBuf::from(d),
-        // The workspace's `corpus/aep` from any crate, so the engine tests (which include this
-        // file) find it too.
-        _ => [env!("CARGO_MANIFEST_DIR"), "..", "..", "corpus", "aep"].iter().collect(),
-    }
+/// The directory the test projects are read from, or `None` when `EFFECTCRAFT_AEP_FIXTURES` is
+/// not set (the projects are opt-in).
+pub fn dir() -> Option<PathBuf> {
+    std::env::var_os("EFFECTCRAFT_AEP_FIXTURES").filter(|d| !d.is_empty()).map(PathBuf::from)
 }
 
 /// The combined files the cases live in (and the empty project, a file of its own), sorted.
@@ -102,7 +97,11 @@ fn is_fixture(path: &std::path::Path) -> bool {
 
 /// Where a case is, or `None` (after printing the skip line) when its file is missing.
 pub fn locate(name: &str) -> Option<Source> {
-    let own = dir().join(name);
+    let Some(dir) = dir() else {
+        skipped(name);
+        return None;
+    };
+    let own = dir.join(name);
     if is_fixture(&own) {
         return Some(Source::File(own));
     }
@@ -110,7 +109,7 @@ pub fn locate(name: &str) -> Option<Source> {
         skipped(name);
         return None;
     };
-    let path = dir().join(file);
+    let path = dir.join(file);
     if !is_fixture(&path) {
         skipped(name);
         return None;
@@ -137,7 +136,7 @@ pub fn try_fixture(name: &str) -> Option<Vec<u8>> {
 
 /// The bytes of a whole file of the directory (a combined project), or `None` when it is missing.
 pub fn try_file(file: &str) -> Option<Vec<u8>> {
-    let path = dir().join(file);
+    let path = dir()?.join(file);
     if is_fixture(&path) {
         Some(std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display())))
     } else {
@@ -149,16 +148,20 @@ pub fn try_file(file: &str) -> Option<Vec<u8>> {
 /// The case names with this extension (sorted), or `None` when there are none: the cases of
 /// [`CASES`] whose file (of its own or combined) is there, else the files with that extension.
 pub fn names(ext: &str) -> Option<Vec<String>> {
+    let Some(dir) = dir() else {
+        skipped(&format!("*.{ext}"));
+        return None;
+    };
     let mut v: Vec<String> = CASES
         .iter()
-        .filter(|(n, f)| std::path::Path::new(n).extension().is_some_and(|x| x == ext) && (is_fixture(&dir().join(n)) || is_fixture(&dir().join(f))))
+        .filter(|(n, f)| std::path::Path::new(n).extension().is_some_and(|x| x == ext) && (is_fixture(&dir.join(n)) || is_fixture(&dir.join(f))))
         .map(|(n, _)| n.to_string())
         .collect();
     if v.is_empty() {
-        let entries = match std::fs::read_dir(dir()) {
-            Ok(entries) => entries.map(|e| e.unwrap_or_else(|e| panic!("{}: {e}", dir().display()))).collect(),
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries.map(|e| e.unwrap_or_else(|e| panic!("{}: {e}", dir.display()))).collect(),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(e) => panic!("{}: {e}", dir().display()),
+            Err(e) => panic!("{}: {e}", dir.display()),
         };
         v = entries
             .into_iter()

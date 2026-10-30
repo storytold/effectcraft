@@ -5,5 +5,4 @@ target/
 /log
 .DS_Store
 .claude/worktrees/
-/corpus/
 __pycache__/

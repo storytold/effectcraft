@@ -308,7 +308,7 @@ frame blending, 3D material options, audio levels, guides, the mask colour, lock
 - `crates/aep/tests/it/import/combined.rs`: masks and effects on the same layer, an effect on a text
   layer, and the same through `.aepx` (built in-test from the fixtures: the effect parade of one
   fixture grafted onto the layer of another).
-- `crates/aep/tests/it/import/cases.rs`: the synthetic cases of the corpus (`cargo xtask aep-corpus`; one
+- `crates/aep/tests/it/import/cases.rs`: the synthetic cases of the corpus (opt-in, `EFFECTCRAFT_AEP_FIXTURES`; one
   composition per case in a few combined projects, `CASES.md`; each the same one-solid
   composition with one change) are imported and the resulting project is
   compared with the value the fixture was made with: composition size/rate/duration/work

@@ -9,7 +9,7 @@ use crate::Session;
 #[path = "../../../aep/tests/it/common/mod.rs"]
 mod common;
 
-/// The path of a test project of `effectcraft-aep` (`corpus/aep`, or the folder in
+/// The path of a test project of `effectcraft-aep` (in the folder named by
 /// `EFFECTCRAFT_AEP_FIXTURES`), or `None` after printing the skip line when it is missing. A case
 /// of a combined project is written as a project of its own (see `common`), named like the case,
 /// to a temporary folder.
@@ -38,8 +38,8 @@ fn fixture_path(name: &str) -> Option<String> {
 
 /// The path of a whole file of the fixture folder, or `None` after printing the skip line.
 fn file_path(name: &str) -> Option<String> {
-    let path = common::dir().join(name);
-    if path.is_file() {
+    let path = common::dir().map(|d| d.join(name));
+    if let Some(path) = path.filter(|p| p.is_file()) {
         Some(path.to_string_lossy().to_string())
     } else {
         common::skipped(name);
