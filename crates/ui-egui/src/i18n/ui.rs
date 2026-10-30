@@ -7712,7 +7712,7 @@ mod tests {
     }
 
     /// Composition Settings' heading and its three tabs, read from the installed After Effects
-    /// 2026 Japanese interface (see `plan/aftereffects/ref/ae-2026-japanese-terms.md`).
+    /// 2026 Japanese interface: 基本, 高度 and 3D レンダラー.
     #[test]
     fn the_composition_settings_tabs_use_after_effects_words() {
         set_current("ja");
