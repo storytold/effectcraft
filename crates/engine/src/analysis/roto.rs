@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use effectcraft_effects::object_matte as om;
-use effectcraft_effects::roto::{self as fx, FROZEN, FrozenCache, INPUT_KEY};
+use effectcraft_effects::roto::{self as fx, FROZEN, FrozenCache, INPUT_KEY, TRACKED};
 use effectcraft_effects::{Params, flatten_params};
 use effectcraft_keyframe::Value;
 use effectcraft_project::{GroupKind, ItemId, ItemKind, Layer, LayerId, Project, PropGroup, Uid};
@@ -51,6 +51,9 @@ pub struct RotoOptions {
     pub boundary_color: [f64; 3],
     /// Start propagating in the background after each stroke.
     pub auto_propagate: bool,
+    /// The object new strokes belong to (0 is the first). With a tracker every object is followed on its own
+    /// and their mattes are united; the classic engine treats all foreground strokes as one object.
+    pub object: u32,
 }
 
 impl Default for RotoOptions {
@@ -63,9 +66,13 @@ impl Default for RotoOptions {
             overlay_opacity: 50.0,
             boundary_color: [1.0, 0.25, 0.75],
             auto_propagate: true,
+            object: 0,
         }
     }
 }
+
+/// The highest object id (SAM 2 follows up to 32 objects in one pass).
+pub const MAX_OBJECT_ID: u32 = 31;
 
 pub const VIEWS: [&str; 4] = ["alphaBoundary", "alpha", "alphaOverlay", "none"];
 
@@ -112,6 +119,10 @@ pub struct RotoProgress {
     pub error: Option<String>,
     /// The job works on an Object Matte (else a Roto Brush & Refine Edge).
     pub object_matte: bool,
+    /// What the model's tracker found, when one followed the object (SAM 2).
+    pub tracked: Option<fx::TrackSummary>,
+    /// Why the tracker was not used, when a tracking model was chosen but the classic engine ran.
+    pub tracker_note: Option<String>,
 }
 
 impl RotoProgress {
@@ -131,6 +142,8 @@ pub struct RotoShared {
     pub cancel: AtomicBool,
     pub state: Mutex<RotoProgress>,
     frozen: Mutex<Option<FrozenCache>>,
+    /// The tracker's frames, as the saved tracking (JSON) to store with the instance.
+    saved: Mutex<Option<String>>,
 }
 
 pub struct RotoJob {
@@ -249,6 +262,7 @@ pub(crate) fn sync(before: &Project, after: &mut Project) -> Vec<(ItemId, LayerI
             set_str(g, INPUT_KEY, key);
             if had {
                 set_str(g, FROZEN, String::new());
+                set_str(g, TRACKED, String::new());
             }
         }
     }
@@ -279,7 +293,7 @@ pub(crate) fn params_at(p: &Project, cid: ItemId, layer: &Layer, g: &PropGroup, 
 }
 
 /// The layer's source size (layer pixels).
-pub(crate) fn layer_size(p: &Project, comp: &effectcraft_project::Comp, layer: &Layer) -> [f64; 2] {
+pub fn layer_size(p: &Project, comp: &effectcraft_project::Comp, layer: &Layer) -> [f64; 2] {
     effectcraft_render::effect_bounds(p, comp, layer).0
 }
 
@@ -432,10 +446,49 @@ async fn run_work(w: Work, shared: &RotoShared) {
         s.object_matte = w.object_matte;
     }
     let cancel = || shared.cancel.load(Ordering::Relaxed);
-    let chain = fx::Chain::new(&w.params, w.size, w.fps, 1.0);
+    let mut chain = fx::Chain::new(&w.params, w.size, w.fps, 1.0);
+    if w.task == RotoTask::Propagate && !w.object_matte {
+        chain.prepare_propagation();
+    }
     let model = fx::installed_model();
     let key = if w.object_matte { om::frozen_key(&w.params, w.size, w.fps, model.as_deref()) } else { fx::frozen_key(&w.params, w.size, w.fps) };
     let mut frozen = FrozenCache { key, ..Default::default() };
+    // A tracking model (SAM 2) follows the object through the whole span in one pass; the loop
+    // below then finds every frame cached. Without one (or if it fails) nothing changes: the
+    // classic engine runs frame by frame.
+    if w.task == RotoTask::Propagate && !w.object_matte && chain.has_tracker() {
+        let mut get = |g: i64| src.get(g);
+        let mut report = |n: usize| {
+            let mut s = lock(&shared.state);
+            s.done = n as u64;
+            s.elapsed = t0.elapsed().as_secs_f64();
+            s.fps = if s.elapsed > 0.0 { s.done as f64 / s.elapsed } else { 0.0 };
+            crate::offload::report(s.done, s.total);
+        };
+        let result = chain.track_frames(Some(&w.frames), &mut get, &cancel, &mut report);
+        if cancel() {
+            let mut s = lock(&shared.state);
+            s.cancelled = true;
+            s.finished = true;
+            return;
+        }
+        // The frames it followed replace the saved tracking (see `poll_roto_job`): none if it failed.
+        *lock(&shared.saved) = Some(match &result {
+            Ok(_) => fx::tracks_of(&chain).map(|t| t.to_json()).unwrap_or_default(),
+            Err(_) => String::new(),
+        });
+        if result.is_err() {
+            chain.forget_tracking();
+        }
+        let mut s = lock(&shared.state);
+        match result {
+            Ok(summary) => s.tracked = summary,
+            Err(e) => s.tracker_note = Some(format!("tracker unavailable, classic engine used: {e}")),
+        }
+    } else if w.task == RotoTask::Propagate && !w.object_matte {
+        // With the classic engine, Propagate leaves no saved tracking behind.
+        *lock(&shared.saved) = Some(String::new());
+    }
     for (k, f) in w.frames.iter().enumerate() {
         if cancel() {
             let mut s = lock(&shared.state);
@@ -592,9 +645,37 @@ impl Session {
         }
     }
 
+    /// Whether the tracking saved with Roto Brush `effect` covers every frame a Freeze would write.
+    fn freeze_is_saved(&self, comp: ItemId, layer: LayerId, effect: Uid) -> bool {
+        let Some(c) = self.project.comp(comp) else { return false };
+        let Some(l) = c.layer(layer) else { return false };
+        let Some(g) = l.effects().and_then(|f| f.groups().find(|g| g.uid == effect)).filter(|g| is_roto(g)) else { return false };
+        let pstat = params_static(g);
+        let d = fx::data(&pstat);
+        if d.is_empty() {
+            return false;
+        }
+        let t = comp_time_of(c, l, d.base.unwrap_or(0));
+        let params = params_at(&self.project, comp, l, g, t, self.expr.as_deref());
+        fx::saved_covers(&params, layer_size(&self.project, c, l), c.frame_rate.as_f64(), &job_frames(&d, Direction::Both))
+    }
+
+    /// Whether `effect` on `layer` segments with the model Settings chose: Object Matte always,
+    /// Roto Brush unless it is version 1.0 (the classic engine).
+    pub(crate) fn uses_roto_model(&self, comp: ItemId, layer: LayerId, effect: Uid) -> bool {
+        let g = self.project.comp(comp).and_then(|c| c.layer(layer)).and_then(|l| l.effects()).and_then(|f| f.groups().find(|g| g.uid == effect));
+        g.is_some_and(|g| is_object_matte(g) || fx::uses_model(&params_static(g)))
+    }
+
     /// Start propagating (or freezing) Roto Brush `effect` on `layer`. `wait`: block until done
     /// (wasm32 always does). Returns the number of frames.
     pub fn start_roto(&mut self, comp: ItemId, layer: LayerId, effect: Uid, task: RotoTask, dir: Direction, wait: bool) -> Result<usize, String> {
+        // The model must be in use before the job starts: otherwise it would run on the classic
+        // engine without saying so.
+        // A Freeze whose frames all have saved tracking reads them without the model.
+        if self.uses_roto_model(comp, layer, effect) && !(task == RotoTask::Freeze && self.freeze_is_saved(comp, layer, effect)) {
+            self.ensure_roto_model(wait)?;
+        }
         if self.is_roto_running() {
             if !wait {
                 return Err("a Roto Brush job is already running".into());
@@ -697,6 +778,17 @@ impl Session {
         Ok(n)
     }
 
+    /// Save the tracker's frames in the instance, unless its strokes changed while it tracked. No undo
+    /// step: the frames are a cache of the strokes and the span (a stale copy is ignored).
+    fn save_tracks(&mut self, cid: ItemId, lid: LayerId, uid: Uid, strokes: &str, json: String) {
+        let p = Arc::make_mut(&mut self.project);
+        if let Some(g) = p.comp_mut(cid).and_then(|c| c.layer_mut(lid)).and_then(|l| l.props.find_group_mut(uid))
+            && guard_of(g) == strokes
+        {
+            set_str(g, TRACKED, json);
+        }
+    }
+
     /// Finish a done job: Freeze writes the frozen mattes (one undo step).
     fn poll_roto_job(&mut self) -> bool {
         let Some(job) = &self.roto_job else { return false };
@@ -723,6 +815,10 @@ impl Session {
             RotoTask::Propagate => {
                 let verb = if job.object_matte { "tracked" } else { "propagated" };
                 self.events.push(Event::Toast { message: format!("{name}: {verb} {} frame(s) in {:.1} s", st.done, st.elapsed), error: false });
+                // The frames the tracker followed are saved with the instance.
+                if let Some(json) = lock(&job.shared.saved).take() {
+                    self.save_tracks(job.comp, job.layer, job.effect, &job.strokes, json);
+                }
                 // Rendered frames depend on the cache: redraw.
                 self.bump();
             }
@@ -757,15 +853,37 @@ impl Session {
     pub fn poll_roto(&mut self, auto: bool) -> bool {
         self.poll_models();
         let changed = self.poll_roto_job();
-        if auto && self.roto_job.is_none() && self.offloaded_roto().is_none() && self.state.roto.auto_propagate {
+        // Edited instances stay pending while the model they will segment with is still loading.
+        let loading = self.roto_model_loading();
+        if auto && self.roto_job.is_none() && self.offloaded_roto().is_none() && self.state.roto.auto_propagate && !loading {
             while let Some((c, l, e)) = self.roto_pending.first().copied() {
                 self.roto_pending.remove(0);
-                if self.start_roto(c, l, e, RotoTask::Propagate, Direction::Both, false).is_ok() {
-                    return true;
+                match self.start_roto(c, l, e, RotoTask::Propagate, Direction::Both, false) {
+                    Ok(_) => return true,
+                    Err(message) => self.events.push(Event::Toast { message, error: true }),
                 }
             }
         }
         changed
+    }
+
+    /// How far to trust the frames a tracker followed (SAM 2), by layer frame: its confidence and
+    /// whether the object was absent. Frames the classic engine made have no entry.
+    pub fn roto_trust(&self, comp: ItemId, layer: LayerId, effect: Uid) -> BTreeMap<i64, fx::FrameTrust> {
+        let mut out = BTreeMap::new();
+        let Some(c) = self.project.comp(comp) else { return out };
+        let Some(l) = c.layer(layer) else { return out };
+        let Some(g) = l.props.find_group(effect) else { return out };
+        if is_object_matte(g) {
+            return out;
+        }
+        let ch = fx::Chain::new(&params_static(g), layer_size(&self.project, c, l), c.frame_rate.as_f64(), 1.0);
+        for f in ch.keys.keys() {
+            if let Some(t) = ch.trust_at(*f) {
+                out.insert(*f, t);
+            }
+        }
+        out
     }
 
     /// The computed frames of an instance (full resolution), by layer frame.

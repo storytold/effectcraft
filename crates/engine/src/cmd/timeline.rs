@@ -16,6 +16,8 @@ use super::{CommandSpec, always, b_p, bad, comp_id, f_p, has_comp, str_p};
 use crate::jobs::TaskCtl;
 use crate::{EngineError, Exporter, Result, Session, cmd};
 
+mod staging;
+
 fn format_p(p: &Value, cmd: &str) -> Result<Option<TimelineFormat>> {
     match str_p(p, "format") {
         None | Some("") | Some("auto") => Ok(None),
@@ -99,6 +101,7 @@ fn isolate(project: &Project, cid: ItemId, lid: LayerId) -> Option<Project> {
 
 /// What a pre-render needs from the session, so it can run on a background thread.
 struct PrerenderCx {
+    protected: crate::output_guard::Protected,
     exporter: Option<Arc<dyn Exporter>>,
     footage: Arc<dyn effectcraft_render::FootageSource>,
     expr: Option<Arc<dyn effectcraft_render::ExprHost>>,
@@ -157,6 +160,7 @@ fn export_timeline(s: &mut Session, p: &Value) -> Result<Value> {
         }
         path = format!("{path}.{}", format.extension());
     }
+    s.refuse_export(&path)?;
     let cid = comp_id(s, p)?;
     let prerender_mode = match str_p(p, "prerender") {
         None => match p.get("prerender").and_then(Value::as_bool) {
@@ -176,8 +180,8 @@ fn export_timeline(s: &mut Session, p: &Value) -> Result<Value> {
     let relative_to = Some(dir.to_string_lossy().to_string()).filter(|d| !d.is_empty());
     let opts = ExportOptions { format, prerender: prerender_mode, precomps, relative_to };
     let project = s.project.clone();
-    let services = s.services.clone();
     let cx = PrerenderCx {
+        protected: crate::output_guard::Protected::of(s),
         exporter: s.exporter.clone(),
         footage: s.footage.clone(),
         expr: s.expr.clone(),
@@ -188,14 +192,21 @@ fn export_timeline(s: &mut Session, p: &Value) -> Result<Value> {
     // in Window ▸ Progress instead of with the window waiting (#2269).
     let wait = !b_p(p, "background").unwrap_or(false);
     s.spawn_task("exportTimeline", format!("Export {}", format.label()), wait, move |ctl| {
-        let (bytes, mut result) = export_timeline_work(&cx, &project, cid, &opts, &dir, &stem, ctl)?;
-        services.write_file(&path, &bytes).map_err(|e| format!("cannot write {path}: {e}"))?;
+        let (bytes, mut result, staged) = export_timeline_work(&cx, &project, cid, &opts, &dir, &stem, ctl)?;
+        if let Some(source) = cx.protected.find(std::path::Path::new(&path)) {
+            return Err(source.refusal(&path, crate::output_guard::Use::Export));
+        }
         result["path"] = json!(path);
         result["toast"] = json!(match format {
             TimelineFormat::Fcp7Xml => format!("Exported {path} (Final Cut Pro XML; import it in Premiere Pro with File ▸ Import)"),
             _ => format!("Exported {path} ({})", format.label()),
         });
-        Ok(Box::new(move |_: &mut Session| Ok(result)))
+        Ok(Box::new(move |s: &mut Session| {
+            s.refuse_export(&path)?;
+            staging::commit(staged, s)?;
+            s.write_output(&path, &bytes)?;
+            Ok(result)
+        }))
     })
 }
 
@@ -209,23 +220,35 @@ fn export_timeline_work(
     dir: &std::path::Path,
     stem: &str,
     ctl: &TaskCtl,
-) -> std::result::Result<(Vec<u8>, Value), String> {
+) -> std::result::Result<(Vec<u8>, Value, Vec<staging::Movie>), String> {
     let mut pre: HashMap<(ItemId, LayerId), Prerendered> = HashMap::new();
     let mut rendered = vec![];
     let mut errors = vec![];
+    let mut staged = vec![];
     let plan = effectcraft_interchange::plan_prerender(project, cid, opts);
+    if plan.len() > staging::MAX_MOVIES {
+        return Err(format!("too many pre-render movies (limit {})", staging::MAX_MOVIES));
+    }
     let n = plan.len() as u64;
     for (i, (c, l)) in (0u64..).zip(plan) {
         let comp_name = project.item(c).map(|it| it.name.clone()).unwrap_or_default();
         let layer_name = project.comp(c).and_then(|cc| cc.layer(l)).map(|x| x.name.clone()).unwrap_or_default();
         ctl.message(format!("Pre-render {layer_name}"));
         let file = dir.join(format!("{stem}_{}_{}_{}.mov", safe(&comp_name), safe(&layer_name), l.0)).to_string_lossy().to_string();
+        // The movies are outputs too: never over footage, a proxy or the project file.
+        if let Some(source) = cx.protected.find(std::path::Path::new(&file)) {
+            errors.push(format!("{comp_name} ▸ {layer_name}: {}", source.refusal(&file, crate::output_guard::Use::Export)));
+            continue;
+        }
         // Progress over all the layers, each one's frames a share of it.
         let mut progress = |done: u64, total: u64| ctl.progress(i * 1000 + done.saturating_mul(1000) / total.max(1), n * 1000);
-        match prerender(cx, project, c, l, &file, &mut progress) {
-            Ok(r) => {
+        let movie = staging::Movie::new(&file)?;
+        match prerender(cx, project, c, l, &movie.path, &mut progress) {
+            Ok(mut r) => {
+                r.path = file;
                 rendered.push(r.path.clone());
                 pre.insert((c, l), r);
+                staged.push(movie);
             }
             Err(_) if ctl.cancelled() => return Err(crate::render_queue::CANCELLED.into()),
             Err(e) => errors.push(format!("{comp_name} ▸ {layer_name}: {e}")),
@@ -244,7 +267,7 @@ fn export_timeline_work(
         "prerendered": rendered,
         "warnings": warnings,
     });
-    Ok((out.bytes, result))
+    Ok((out.bytes, result, staged))
 }
 
 /// The formats, for agents and the export dialog.

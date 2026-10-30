@@ -67,6 +67,7 @@ fn earliest_key<'a>(groups: impl IntoIterator<Item = &'a PropGroup>) -> Option<T
 
 fn save_preset(s: &mut Session, p: &Value) -> Result<Value> {
     let path = str_p(p, "path").ok_or_else(|| bad("anim.savePreset", "missing `path`"))?.to_string();
+    s.refuse_export(&path)?;
     let comp = s.active_comp().ok_or(EngineError::NoComp)?;
     let t = s.time();
     let mut effects: Vec<(LayerId, PropGroup)> = selected_effects(s);
@@ -106,7 +107,7 @@ fn save_preset(s: &mut Session, p: &Value) -> Result<Value> {
         .unwrap_or_else(|| std::path::Path::new(&path).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default());
     let doc = json!({PRESET_TAG: PRESET_VERSION, "name": name, "properties": props_json, "effects": fx_json});
     let text = serde_json::to_string_pretty(&doc).unwrap_or_default();
-    s.services.write_file(&path, text.as_bytes()).map_err(|e| EngineError::Other(format!("cannot write {path}: {e}")))?;
+    s.write_output(&path, text.as_bytes())?;
     Ok(json!({"path": path, "properties": props.len(), "effects": effects.len()}))
 }
 
