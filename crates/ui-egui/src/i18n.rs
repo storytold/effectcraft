@@ -2288,7 +2288,7 @@ const JAPANESE: &[(&str, &str, &str)] = &[
     ("window.workspace", "Text", "テキスト"),
     ("window.workspace", "Undocked Panels", "ドッキング解除したパネル"),
     ("window.resetWorkspace", "Reset to Saved Layout", "保存したレイアウトにリセット"),
-    ("window.saveWorkspace", "Save Changes to this Workspace", "このワークスペースの変更を保存"),
+    ("window.saveWorkspace", "Save Changes to this Workspace", "このワークスペースへの変更を保存"),
     ("window.saveWorkspaceAs", "Save as New Workspace...", "新規ワークスペースとして保存..."),
     ("window.editWorkspaces", "Edit Workspaces...", "ワークスペースを編集..."),
     ("", "Assign Shortcut to Workspace", "ワークスペースにショートカットを割り当て"),
@@ -8088,6 +8088,22 @@ mod tests {
     use effectcraft_engine::menus::{MenuNode, TREE, parse};
     use serde_json::json;
     use std::collections::BTreeSet;
+
+    /// The four options at the foot of the header's workspace menu say what After Effects says,
+    /// read from its workspace button on 2026-10-31: reset, save over this one, save a copy, then
+    /// edit the list.
+    #[test]
+    fn the_workspace_menu_options_use_after_effects_words() {
+        set_current("ja");
+        for (id, en, ja) in [
+            ("window.resetWorkspace", "Reset to Saved Layout", "保存したレイアウトにリセット"),
+            ("window.saveWorkspace", "Save Changes to this Workspace", "このワークスペースへの変更を保存"),
+            ("window.saveWorkspaceAs", "Save as New Workspace...", "新規ワークスペースとして保存..."),
+            ("window.editWorkspaces", "Edit Workspaces...", "ワークスペースを編集..."),
+        ] {
+            assert_eq!(command_label(id, en), ja, "{id}");
+        }
+    }
 
     /// Labels drawn outside the menu bar take the menu bar's row for their command (with `…` for
     /// `...`), else the panel catalog's row, else stay as they are.

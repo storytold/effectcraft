@@ -334,7 +334,8 @@ fn workspace_menu(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter
     let mresp = ui.interact(more, egui::Id::unique("ws-more"), Sense::click());
     p.text(more.center(), Align2::CENTER_CENTER, "»", Tokens::ui(15.0), if mresp.hovered() { t.text } else { t.text_dim });
     app.auto.add("header.workspaces", more, "Workspaces");
-    crate::widgets::context_menu(&mresp, |ui| ws_menu(app, ui));
+    let current = app.ui.workspace.clone();
+    crate::widgets::context_menu(&mresp, |ui| ws_menu(app, ui, &current));
     if mresp.clicked() {
         widgets::open_popup(ui, egui::Id::unique("ws-pop"));
     }
@@ -381,6 +382,10 @@ fn workspace_tabs(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter
             app.set_workspace(name);
         }
         rx = r.min.x - 2.0;
+        // Right-clicking a workspace opens the same options as the » button, which is where After
+        // Effects keeps them (reset, save, save a copy, edit).
+        let target = name.to_string();
+        resp.context_menu(|ui| ws_menu(app, ui, &target));
     }
 }
 
@@ -808,7 +813,7 @@ fn workspace_label(name: &str) -> &str {
     if crate::dock::WORKSPACES.contains(&name) { crate::i18n::command_label("window.workspace", name) } else { name }
 }
 
-fn ws_menu(app: &mut EffectcraftApp, ui: &mut egui::Ui) {
+fn ws_menu(app: &mut EffectcraftApp, ui: &mut egui::Ui, target: &str) {
     for w in app.workspace_names() {
         if ui.selectable_label(app.ui.workspace == w, workspace_label(&w)).clicked() {
             app.set_workspace(&w);
@@ -816,10 +821,38 @@ fn ws_menu(app: &mut EffectcraftApp, ui: &mut egui::Ui) {
         }
     }
     ui.separator();
-    if ui.button(tr("Reset to Saved Layout")).clicked() {
-        let n = app.ui.workspace.clone();
-        app.set_workspace(&n);
+    // The workspace options After Effects puts at the foot of its workspace menu, in its order and
+    // grouping: reset the current layout, save over it, save a copy, then edit the list. All four
+    // are engine commands, so a script drives the same things from the command line.
+    for (id, source) in [
+        ("window.resetWorkspace", "Reset to Saved Layout"),
+        ("window.saveWorkspace", "Save Changes to this Workspace"),
+        ("window.saveWorkspaceAs", "Save as New Workspace..."),
+    ] {
+        if ui.button(crate::i18n::command_label(id, source)).clicked() {
+            // The menu belongs to the tab it was opened on, so resetting or saving from a right
+            // click acts on that workspace. Save As and Edit keep working on the workspace that is
+            // showing: Save As would otherwise switch the layout before the user has named the
+            // copy, and cancelling the dialog would leave the switch behind.
+            let acts_on_its_tab = matches!(id, "window.resetWorkspace" | "window.saveWorkspace");
+            if acts_on_its_tab && app.ui.workspace != target {
+                app.set_workspace(target);
+            }
+            run_workspace_command(app, ui, id);
+            ui.close();
+        }
+    }
+    ui.separator();
+    if ui.button(crate::i18n::command_label("window.editWorkspaces", "Edit Workspaces...")).clicked() {
+        run_workspace_command(app, ui, "window.editWorkspaces");
         ui.close();
+    }
+}
+
+/// Runs a workspace command, showing a failure in the status line as the menu bar does.
+fn run_workspace_command(app: &mut EffectcraftApp, ui: &egui::Ui, id: &str) {
+    if let Err(e) = crate::menus::invoke(app, ui.ctx(), id, json!({})) {
+        app.ui.status = e;
     }
 }
 
