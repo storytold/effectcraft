@@ -8089,6 +8089,21 @@ mod tests {
     use serde_json::json;
     use std::collections::BTreeSet;
 
+    /// The View menu's resolution rows hold the same spacing as the panel's: they live in this
+    /// catalog, which the panel test in `ui.rs` cannot see.
+    #[test]
+    fn the_view_menu_resolution_rows_match_the_panel() {
+        ui::set_current("ja");
+        for (id, en, ja) in [
+            ("view.res.half", "Half", "1/2 画質"),
+            ("view.res.third", "Third", "1/3 画質"),
+            ("view.res.quarter", "Quarter", "1/4 画質"),
+        ] {
+            assert_eq!(command_label(id, en), ja, "{id}");
+        }
+        ui::set_current("en");
+    }
+
     /// Labels drawn outside the menu bar take the menu bar's row for their command (with `…` for
     /// `...`), else the panel catalog's row, else stay as they are.
     #[test]
