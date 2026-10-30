@@ -735,6 +735,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                         a11y::list_item(&resp, crate::i18n::settings_page_title(p.title), sel, n + 1, all.len());
                         if a11y::take_pending_focus(&ctx, "settings", resp.id) {
                             resp.request_focus();
+                            resp.scroll_to_me(None);
                         }
                         if sel {
                             ui.painter().rect_filled(r, 3.0, t.accent);
