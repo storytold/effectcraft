@@ -331,13 +331,22 @@ fn install(s: &mut Session, p: &Value, task: Task) -> Result<Value> {
     let cmd = format!("{}.model.install", kind(task).prefix);
     let path = str_p(p, "path").ok_or_else(|| bad(&cmd, "missing `path` (the downloaded weights file)"))?;
     let dir = s.models_dir().ok_or_else(|| bad(&cmd, "no settings folder to install into"))?;
+    let len = std::fs::metadata(path).map_err(|e| EngineError::Other(format!("cannot read {path}: {e}")))?.len();
+    let unpublished = || bad(&cmd, "this file is not a published model in the registry (size or SHA-256 differs)");
+    // Which model it is: the one asked for, or the one whose checksum it has. The registry's sizes
+    // are exact, so a file of any other size is refused before it is read.
+    let asked = str_p(p, "id").map(|_| model_p(p, &cmd, task)).transpose()?;
+    match asked {
+        Some(m) if m.size != len => return Err(bad(&cmd, format!("this is not the published {} file (size or SHA-256 differs)", m.name))),
+        None if !seg::models(task).any(|m| m.size == len) => return Err(unpublished()),
+        _ => {}
+    }
     let bytes = std::fs::read(path).map_err(|e| EngineError::Other(format!("cannot read {path}: {e}")))?;
-    // Which model it is: the one asked for, or the one whose checksum it has.
-    let m = match str_p(p, "id") {
-        Some(_) => model_p(p, &cmd, task)?,
+    let m = match asked {
+        Some(m) => m,
         None => {
             let h = seg::sha256::hex(&bytes);
-            seg::models(task).find(|m| m.sha256 == h).ok_or_else(|| bad(&cmd, "this file is not a published model in the registry (SHA-256 differs)"))?
+            seg::models(task).find(|m| m.sha256 == h).ok_or_else(unpublished)?
         }
     };
     let dest = install_bytes(&dir, m, &bytes).map_err(|e| bad(&cmd, e))?;
@@ -362,8 +371,12 @@ fn download(s: &mut Session, p: &Value, task: Task) -> Result<Value> {
     spawn(s.models.lane(task), k.label, format!("Downloading {} ({size})…", m.name), wait, move |_| {
         std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
         let tmp = dir.join(format!("{}.part", m.file_name));
+        // https only, redirects included; and no bigger than the published (exact) size, though curl
+        // before 8.4 skips that cap without a Content-Length. install_bytes checks size and SHA-256.
         let out = std::process::Command::new("curl")
-            .args(["-fsSL", "--retry", "2", "--connect-timeout", "20", "-o"])
+            .args(["-fsSL", "--retry", "2", "--connect-timeout", "20", "--proto", "=https", "--proto-redir", "=https", "--max-filesize"])
+            .arg(m.size.to_string())
+            .arg("-o")
             .arg(&tmp)
             .arg(m.url)
             .output()

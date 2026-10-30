@@ -86,3 +86,22 @@ fn models_are_listed_chosen_and_verified() {
     }
     let _ = std::fs::remove_dir_all(d);
 }
+
+#[test]
+fn install_refuses_a_file_of_another_size_before_reading_it() {
+    let (mut s, d) = session("size");
+    std::fs::create_dir_all(&d).unwrap();
+    let small = d.join("small.bin");
+    std::fs::write(&small, [0u8; 1000]).unwrap();
+    // A folder has a size but can't be read: refused for its size, not "cannot read".
+    for path in [&small, &d] {
+        let path = path.to_string_lossy();
+        for (prefix, model) in [("roto", "mobilesam"), ("face", "mediapipe-face")] {
+            let e = s.execute_checked(&format!("{prefix}.model.install"), json!({"path": path})).unwrap_err().to_string();
+            assert!(e.contains("not a published model in the registry (size or SHA-256 differs)"), "{e}");
+            let e = s.execute_checked(&format!("{prefix}.model.install"), json!({"path": path, "id": model})).unwrap_err().to_string();
+            assert!(e.contains("not the published") && e.contains("(size or SHA-256 differs)"), "{e}");
+        }
+    }
+    let _ = std::fs::remove_dir_all(d);
+}
