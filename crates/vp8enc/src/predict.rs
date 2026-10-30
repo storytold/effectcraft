@@ -66,14 +66,17 @@ pub(crate) fn predict_block<const N: usize>(mode: u8, e: &Edges<N>, out: &mut [u
     }
 }
 
+/// `v` clamped to a sample.
 fn clamp(v: i32) -> u8 {
     v.clamp(0, 255) as u8
 }
 
+/// The weighted average of three neighbours, `(x + 2y + z + 2) / 4`.
 fn avg3(x: u8, y: u8, z: u8) -> u8 {
     ((u32::from(x) + 2 * u32::from(y) + u32::from(z) + 2) >> 2) as u8
 }
 
+/// The average of two neighbours, rounded up.
 fn avg2(x: u8, y: u8) -> u8 {
     ((u32::from(x) + u32::from(y) + 1) >> 1) as u8
 }
@@ -236,6 +239,7 @@ pub(crate) fn predict_sub(mode: u8, a: &[u8; 8], l: &[u8; 4], p: u8) -> [u8; 16]
 mod tests {
     use super::*;
 
+    /// V, TM and DC predictions of a whole block, and DC with an edge missing.
     #[test]
     fn whole_block_modes() {
         let e = Edges::<8> { above: [10, 20, 30, 40, 50, 60, 70, 80], left: [5; 8], corner: 10, have_above: true, have_left: true };
@@ -252,6 +256,7 @@ mod tests {
         assert_eq!(out[0], 5, "left only");
     }
 
+    /// Each subblock mode follows the direction of its lines.
     #[test]
     fn subblock_modes_follow_their_lines() {
         let a = [10, 20, 30, 40, 50, 60, 70, 80];

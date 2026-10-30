@@ -12,6 +12,7 @@ pub(crate) struct BoolWriter {
 }
 
 impl BoolWriter {
+    /// An empty writer, its range full (§7.3).
     pub(crate) fn new() -> BoolWriter {
         BoolWriter { out: Vec::new(), range: 255, bottom: 0, bit_count: 24 }
     }
@@ -118,6 +119,7 @@ pub(crate) fn tree_cost(tree: &[i8], probs: &[u8], leaf: u8) -> f32 {
     path.iter().map(|&(node, bit)| cost(probs.get(node / 2).copied().unwrap_or(128), bit)).sum()
 }
 
+/// Find the path from `node` to `leaf` in a token tree, pushing each (node, bit) on the way; false if it isn't there.
 fn find(tree: &[i8], node: usize, leaf: u8, path: &mut Vec<(usize, bool)>, depth: usize) -> bool {
     if depth > 16 {
         return false;
@@ -148,10 +150,12 @@ pub(crate) mod tests {
     }
 
     impl<'a> BoolReader<'a> {
+        /// A reader over `data`, primed with its first two bytes.
         pub(crate) fn new(data: &'a [u8]) -> Self {
             let byte = |i: usize| u32::from(data.get(i).copied().unwrap_or(0));
             BoolReader { data, pos: 2, value: (byte(0) << 8) | byte(1), range: 255, bit_count: 0 }
         }
+        /// Read one bool coded with probability `prob` (of a 0).
         pub(crate) fn get(&mut self, prob: u8) -> bool {
             let split = 1 + (((self.range - 1) * u32::from(prob)) >> 8);
             let big = split << 8;
@@ -177,6 +181,7 @@ pub(crate) mod tests {
         }
     }
 
+    /// Bools written at assorted probabilities read back unchanged.
     #[test]
     fn bools_read_back() {
         let mut w = BoolWriter::new();
@@ -196,6 +201,7 @@ pub(crate) mod tests {
         }
     }
 
+    /// Each leaf of a tree reads back as the leaf that was written.
     #[test]
     fn trees_write_their_leaves() {
         // kf_ymode_tree (§11.2): B_PRED = 0, DC = 100, V = 101, H = 110, TM = 111.
@@ -217,6 +223,7 @@ pub(crate) mod tests {
         assert!(!put_tree(&mut BoolWriter::new(), &TREE, &[128; 4], 9));
     }
 
+    /// A bool's cost is its information in bits: −log₂ of its probability.
     #[test]
     fn costs_are_information() {
         assert!((cost(128, false) - 1.0).abs() < 1e-6);

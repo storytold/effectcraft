@@ -40,6 +40,7 @@ pub struct Vp8Params {
 }
 
 impl Default for Vp8Params {
+    /// Quality 90, the loop filter chosen from the quantizer.
     fn default() -> Self {
         Vp8Params { quality: 90, loop_filter: None }
     }
