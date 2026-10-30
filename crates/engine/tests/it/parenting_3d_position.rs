@@ -410,12 +410,12 @@ fn parenting_static_orientation_is_exact_just_off_gimbal_lock() {
 fn parenting_animated_orientation_and_nonuniform_parent_keep_authored_pose_boundary() {
     for animated in [true, false] {
         let (mut s, p, c) = fixture(true, true);
+        // A non-uniform parent has no uniform pose to re-express, animated or not.
+        set(&mut s, p, "transform/scale", json!([120.0, 100.0, 80.0]));
         if animated {
             for (time, value) in [(0.0, json!([-8.0, 12.0, -13.0])), (1.0, json!([5.0, 18.0, 14.0]))] {
                 command(&mut s, "prop.addKey", json!({"layer":c,"path":"transform/orientation","time":time,"value":value}));
             }
-        } else {
-            set(&mut s, p, "transform/scale", json!([120.0, 100.0, 80.0]));
         }
         let layer = s.active_comp().unwrap().layer(LayerId(c)).unwrap();
         let orientation = layer.props.prop("transform/orientation").unwrap().clone();
@@ -427,6 +427,27 @@ fn parenting_animated_orientation_and_nonuniform_parent_keep_authored_pose_bound
         assert_eq!(layer.props.prop("transform/scale").unwrap(), &scale, "unsupported animated Euler/shear receives no blind Scale rewrite");
         assert!(anchor_motion(before, world(&s, c, Tick::ZERO)) < 1e-8, "boundary retains already-proved Position behavior");
         assert!(cpu(&s, Tick::ZERO).data.iter().flatten().all(|v| v.is_finite()));
+    }
+}
+
+/// Keyed Orientation under a uniform parent is re-expressed at every key, so the child's world pose
+/// and pixels stay put at every time along the quaternion arcs between keys.
+#[test]
+fn parenting_uniform_parent_re_expresses_keyed_orientation() {
+    for factor in [120.0, -120.0] {
+        let (mut s, p, c) = fixture(true, false);
+        set(&mut s, p, "transform/rotation", json!(42.0));
+        set(&mut s, p, "transform/scale", json!([factor, factor, factor]));
+        for (time, value) in [(0.0, json!([-8.0, 12.0, -13.0])), (1.0, json!([5.0, 18.0, 14.0]))] {
+            command(&mut s, "prop.addKey", json!({"layer":c,"path":"transform/orientation","time":time,"value":value}));
+        }
+        let times = [0.0, 0.25, 0.5, 0.75, 1.0].map(Tick::from_seconds_f64);
+        let before = times.map(|t| world(&s, c, t));
+        let images = times.map(|t| cpu(&s, t));
+        parent(&mut s, c, Some(p), true);
+        let error = times.into_iter().zip(before).map(|(t, b)| displacement(b, world(&s, c, t))).fold(0.0, f64::max);
+        let pixels = times.into_iter().zip(&images).map(|(t, i)| diff(i, &cpu(&s, t))).fold(0.0, f32::max);
+        assert!(error < 1e-8 && pixels < 2e-5, "keyed Orientation under a uniform parent (factor {factor}): corners {error}, pixels {pixels}");
     }
 }
 
@@ -522,4 +543,50 @@ fn parenting_camera_to_default_null_preserves_framing() {
     assert!(frame_error(frame(&s), (eye0, fwd0, down0)) < 1e-9);
     assert_eq!(authored(&s, "transform/position"), pos0, "unparenting restores position");
     assert_eq!(authored(&s, "transform/poi"), poi0, "unparenting restores point of interest");
+}
+
+/// A constant parent rotation preserves the full eased quaternion path, including mixed axes.
+#[test]
+fn parenting_mixed_axis_eased_orientation_preserves_arcs_and_key_metadata() {
+    use effectcraft_engine::keyframe::{Ease, Interp};
+    for factor in [120.0, -120.0] {
+        let (mut s, p, c) = fixture(true, true);
+        set(&mut s, p, "transform/scale", json!([factor, factor, factor]));
+        for (time, value) in [(0.0, json!([-35.0, 48.0, 150.0])), (0.7, json!([62.0, -27.0, -145.0])), (1.6, json!([-12.0, 58.0, 70.0]))] {
+            command(&mut s, "prop.addKey", json!({"layer":c,"path":"transform/orientation","time":time,"value":value}));
+        }
+        let cid = s.active_comp_id().unwrap();
+        let orientation = Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(LayerId(c)).unwrap().props.prop_mut("transform/orientation").unwrap();
+        for key in &mut orientation.keys {
+            key.in_interp = Interp::Bezier;
+            key.out_interp = Interp::Bezier;
+            key.in_ease = vec![Ease { speed: 17.0, influence: 0.3 }];
+            key.out_ease = vec![Ease { speed: 11.0, influence: 0.4 }];
+        }
+        orientation.keys[1].auto_bezier = true;
+        let original = orientation.keys.clone();
+        let times: Vec<_> = (0..=32).map(|i| Tick::from_seconds_f64(i as f64 * 0.05)).collect();
+        let before: Vec<_> = times.iter().map(|&t| world(&s, c, t)).collect();
+        let old_project = s.project.clone();
+        parent(&mut s, c, Some(p), true);
+        let converted = &s.active_comp().unwrap().layer(LayerId(c)).unwrap().props.prop("transform/orientation").unwrap().keys;
+        assert_eq!(converted.len(), original.len());
+        for (new, old) in converted.iter().zip(&original) {
+            let mut metadata = new.clone();
+            metadata.value = old.value.clone();
+            assert_eq!(&metadata, old, "all authored key metadata must survive");
+        }
+        // Rotation matrices represent both q and -q identically, so compare transformed geometry
+        // rather than Euler representatives or quaternion signs.
+        for (&t, &matrix) in times.iter().zip(&before) {
+            assert!(displacement(matrix, world(&s, c, t)) < 1e-8, "pose changed at {t:?}, factor {factor}");
+        }
+        parent(&mut s, c, None, true);
+        for (&t, &matrix) in times.iter().zip(&before) {
+            assert!(displacement(matrix, world(&s, c, t)) < 1e-8, "unparent changed pose at {t:?}");
+        }
+        assert!(s.undo());
+        assert!(s.undo());
+        assert!(Arc::ptr_eq(&old_project, &s.project));
+    }
 }

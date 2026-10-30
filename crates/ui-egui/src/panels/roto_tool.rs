@@ -8,7 +8,7 @@ use effectcraft_engine::render::{EvalCtx, RenderOpts, Renderer};
 use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use serde_json::json;
 
-use crate::i18n::tr;
+use crate::i18n::{tr, tr_args};
 use crate::theme::Tokens;
 use crate::{EffectcraftApp, widgets};
 
@@ -19,6 +19,42 @@ pub fn roto_index(layer: &Layer) -> Option<usize> {
 
 fn roto_group(layer: &Layer) -> Option<&effectcraft_engine::project::PropGroup> {
     layer.effects()?.groups().nth(roto_index(layer)?)
+}
+
+/// The colour of object `o`'s outline: object 0 keeps the chosen boundary colour, the others cycle through a palette.
+pub fn object_color(o: u32, base: [f64; 3]) -> Color32 {
+    const PALETTE: [[u8; 3]; 8] =
+        [[60, 200, 255], [255, 170, 40], [150, 230, 60], [180, 110, 255], [255, 225, 60], [40, 210, 170], [255, 90, 80], [90, 130, 255]];
+    if o == 0 {
+        return c32(base, 255);
+    }
+    let [r, g, b] = PALETTE[(o as usize - 1) % PALETTE.len()];
+    Color32::from_rgb(r, g, b)
+}
+
+/// Sample the layer-grid matte at each input pixel centre, including cropping and preview scale.
+fn object_mask_in_input(seg: &fx::FrameSeg, inp: &effectcraft_engine::effects::Buf) -> Vec<bool> {
+    let width = inp.img.width as usize;
+    if width == 0 || !inp.scale.is_finite() || inp.scale <= 0.0 || inp.offset.iter().any(|v| !v.is_finite()) {
+        return vec![false; inp.img.data.len()];
+    }
+    inp.img
+        .data
+        .iter()
+        .enumerate()
+        .map(|(i, _)| {
+            let x = ((i % width) as f64 + 0.5 - inp.offset[0]) / inp.scale;
+            let y = ((i / width) as f64 + 0.5 - inp.offset[1]) / inp.scale;
+            if x < 0.0 || y < 0.0 || x >= seg.w as f64 || y >= seg.h as f64 {
+                return false;
+            }
+            (y.floor() as usize)
+                .checked_mul(seg.w)
+                .and_then(|row| row.checked_add(x.floor() as usize))
+                .and_then(|index| seg.matte.get(index))
+                .is_some_and(|m| *m != 0)
+        })
+        .collect()
 }
 
 /// A stroke being drawn.
@@ -69,7 +105,16 @@ pub fn draw_overlay(
     let ov = match cached {
         Some(c) if c.key == key => Some(c),
         _ => {
-            let ectx = EvalCtx { project: &app.session.project, comp_id: cid, comp, time, expr: app.session.expr.as_deref(), footage: None };
+            let ectx = EvalCtx {
+                project: &app.session.project,
+                comp_id: cid,
+                comp,
+                time,
+                expr: app.session.expr.as_deref(),
+                footage: None,
+                property_overrides: &[],
+                media_overrides: &[],
+            };
             let mut r = Renderer::new(&app.session.project, &*app.session.footage, RenderOpts { scale, ..Default::default() });
             r.expr = app.session.expr.as_deref();
             r.cache = Some(&app.session.layer_cache);
@@ -85,6 +130,19 @@ pub fn draw_overlay(
             let alpha: Vec<f32> = (0..w * h).map(|i| a_at((i % w) as i64, (i / w) as i64)).collect();
             let inside = |x: i64, y: i64| x >= 0 && y >= 0 && x < w as i64 && y < h as i64 && alpha[y as usize * w + x as usize] >= 0.5;
             let mut px = vec![Color32::TRANSPARENT; w * h];
+            // With several objects the boundary view outlines each in its own colour.
+            let per_object: Vec<(Color32, Vec<bool>)> = match (o.view.as_str(), roto_group(layer)) {
+                ("alphaBoundary", Some(g)) => {
+                    let params = effectcraft_engine::effects::flatten_params(g, &mut |p| p.value.clone());
+                    let size = effectcraft_engine::roto::layer_size(&app.session.project, comp, layer);
+                    let f = fx::frame_of(layer.layer_time(time).seconds(), comp.frame_rate.as_f64());
+                    fx::object_mattes(&params, size, comp.frame_rate.as_f64(), f)
+                        .into_iter()
+                        .map(|(obj, seg)| (object_color(obj, o.boundary_color), object_mask_in_input(&seg, &inp)))
+                        .collect()
+                }
+                _ => vec![],
+            };
             let bc = c32(o.boundary_color, 255);
             let oc = c32(o.overlay_color, (o.overlay_opacity / 100.0 * 255.0).clamp(0.0, 255.0) as u8);
             // View Search Region: the band around the boundary (yellow).
@@ -108,7 +166,30 @@ pub fn draw_overlay(
                         _ => {
                             let me = a >= 0.5;
                             let edge = me && [(-1, 0), (1, 0), (0, -1), (0, 1)].iter().any(|(dx, dy)| !inside(x + dx, y + dy));
-                            if edge { bc } else { Color32::TRANSPARENT }
+                            if per_object.is_empty() {
+                                if edge { bc } else { Color32::TRANSPARENT }
+                            } else {
+                                // the outline of every object whose own matte has an edge here
+                                let inside_of = |m: &Vec<bool>, x: i64, y: i64| {
+                                    x >= 0
+                                        && y >= 0
+                                        && x < w as i64
+                                        && y < h as i64
+                                        && (y as usize)
+                                            .checked_mul(w)
+                                            .and_then(|row| row.checked_add(x as usize))
+                                            .and_then(|index| m.get(index))
+                                            .copied()
+                                            .unwrap_or(false)
+                                };
+                                per_object
+                                    .iter()
+                                    .rev()
+                                    .find(|(_, m)| {
+                                        inside_of(m, x, y) && [(-1, 0), (1, 0), (0, -1), (0, 1)].iter().any(|(dx, dy)| !inside_of(m, x + dx, y + dy))
+                                    })
+                                    .map_or(Color32::TRANSPARENT, |(c, _)| *c)
+                            }
                         }
                     };
                     if let Some((sd, r)) = &search {
@@ -234,6 +315,20 @@ fn run_stroke(app: &mut EffectcraftApp, layer: u64, kind: &str, points: &[[f64; 
     }
 }
 
+/// The span bar's colour for a frame a tracker followed: green when it is sure, amber when it is
+/// doubtful, red when it is not, slate when the object was absent.
+pub(crate) fn trust_color(confidence: f32, occluded: bool) -> Color32 {
+    if occluded {
+        Color32::from_rgb(110, 118, 150)
+    } else if confidence >= 0.85 {
+        Color32::from_rgb(70, 200, 90)
+    } else if confidence >= 0.5 {
+        Color32::from_rgb(230, 180, 50)
+    } else {
+        Color32::from_rgb(220, 70, 60)
+    }
+}
+
 /// The segmentation span bar (above the panel's bottom bar): the layer's frames, the span, the
 /// base frame (yellow), computed frames (green) and stroke frames. Click to go to a frame; drag
 /// the span's ends to change it.
@@ -255,10 +350,17 @@ pub fn span_bar(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, 
         let sp = Rect::from_min_max(pos2(x_of(d.span[0] as f64), track.min.y), pos2(x_of(d.span[1] as f64 + 1.0), track.max.y));
         let frozen = fx::is_frozen(&params);
         p.rect_filled(sp, 2.0, if frozen { Color32::from_rgb(60, 110, 190) } else { Color32::from_rgb(90, 90, 96) });
+        // Computed frames: green, or (frames a tracker followed) coloured by its confidence, with
+        // frames where the object was absent in slate.
+        let trust = app.session.roto_trust(cid, layer.id, uid);
         for (f, done) in app.session.roto_computed(cid, layer.id, uid) {
             if done {
-                let cr = Rect::from_min_max(pos2(x_of(f as f64), track.max.y - 4.0), pos2(x_of(f as f64 + 1.0), track.max.y));
-                p.rect_filled(cr, 0.0, Color32::from_rgb(70, 200, 90));
+                let (color, h) = match trust.get(&f) {
+                    Some(t) => (trust_color(t.confidence, t.occluded), 6.0),
+                    None => (Color32::from_rgb(70, 200, 90), 4.0),
+                };
+                let cr = Rect::from_min_max(pos2(x_of(f as f64), track.max.y - h), pos2(x_of(f as f64 + 1.0), track.max.y));
+                p.rect_filled(cr, 0.0, color);
             }
         }
         for f in d.stroke_frames() {
@@ -343,6 +445,45 @@ pub fn bar_buttons(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
     }
     app.auto.add("layerPanel.roto.freeze", r, label);
     x += 80.0;
+    // Objects: strokes belong to the current object; with a tracker each is followed on its own and the mattes are united.
+    let objects = fx::data(&params).objects();
+    let current = app.session.state.roto.object;
+    let known = objects.contains(&current);
+    let r = Rect::from_min_size(pos2(x, bar.center().y - 10.0), vec2(104.0, 20.0));
+    let strokes = fx::data(&params).strokes.iter().filter(|st| st.object == current && st.kind.is_segmentation()).count();
+    let label = if strokes == 0 { tr_args("Object {}", &[&(current + 1)]) } else { tr_args("Object {} ({})", &[&(current + 1), &strokes]) };
+    if widgets::text_button(ui, r, &label, false, &t, egui::Id::unique(("roto-object", uid))).clicked() {
+        // cycle through the objects that have strokes (and the empty one being drawn)
+        let mut all = objects.clone();
+        if !known {
+            all.push(current);
+            all.sort_unstable();
+        }
+        let next = all.iter().copied().find(|o| *o > current).or_else(|| all.first().copied()).unwrap_or(0);
+        let _ = app.session.execute("roto.options", json!({"object": next}));
+    }
+    p.circle_filled(pos2(r.min.x + 9.0, r.center().y), 4.0, object_color(current, app.session.state.roto.boundary_color));
+    app.auto.add("layerPanel.roto.object", r, &label);
+    x += 108.0;
+    let r = Rect::from_min_size(pos2(x, bar.center().y - 10.0), vec2(26.0, 20.0));
+    if widgets::text_button(ui, r, "+", false, &t, egui::Id::unique(("roto-object-new", uid))).clicked() {
+        let next = objects.iter().copied().chain([current]).max().map_or(0, |m| m + 1);
+        let _ = app.session.execute("roto.options", json!({"object": next}));
+    }
+    app.auto.add("layerPanel.roto.newObject", r, "New object");
+    x += 30.0;
+    // remove the current object's strokes (the object stays selected; with none left it is simply empty)
+    if strokes > 0 {
+        let r = Rect::from_min_size(pos2(x, bar.center().y - 10.0), vec2(26.0, 20.0));
+        let c = widgets::text_button(ui, r, "×", false, &t, egui::Id::unique(("roto-object-clear", uid))).on_hover_text(tr("Remove this object's strokes"));
+        if c.clicked()
+            && let Err(e) = app.session.execute("roto.clearStrokes", json!({"layer": layer.id.0, "effect": uid, "object": current}))
+        {
+            app.ui.status = e.to_string();
+        }
+        app.auto.add("layerPanel.roto.clearObject", r, "Remove object strokes");
+        x += 30.0;
+    }
     if running {
         let r = Rect::from_min_size(pos2(x, bar.center().y - 10.0), vec2(60.0, 20.0));
         if widgets::text_button(ui, r, tr("Stop"), false, &t, egui::Id::unique("roto-stop")).clicked() {
@@ -352,5 +493,41 @@ pub fn bar_buttons(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
         if let Some(pr) = app.session.roto_progress() {
             p.text(pos2(r.max.x + 8.0, bar.center().y), Align2::LEFT_CENTER, pr.banner(), Tokens::ui(11.5), t.text_dim);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn per_object_outlines_follow_cropped_padded_and_scaled_input_coordinates() {
+        use effectcraft_engine::{effects::Buf, raster::Image};
+        let seg = fx::FrameSeg { w: 4, h: 2, matte: vec![0, 0, 255, 255, 0, 0, 255, 255], refine: vec![0; 8], ..Default::default() };
+        for (offset, scale, expected) in [
+            ([-2.0, 0.0], 1.0, vec![true, true]),
+            ([0.0, 0.0], 0.5, vec![false, true]),
+            ([-1.0, 0.0], 0.5, vec![true, false]),
+            ([2.0, 0.0], 1.0, vec![false, false]),
+        ] {
+            let inp = Buf { img: Image::new(2, 1), offset, scale };
+            assert_eq!(object_mask_in_input(&seg, &inp), expected, "offset={offset:?}, scale={scale}");
+        }
+        let inp = Buf { img: Image::new(6, 4), offset: [1.0, 1.0], scale: 1.0 };
+        let expected: Vec<bool> = (0..24).map(|i| matches!((i % 6, i / 6), (3 | 4, 1 | 2))).collect();
+        assert_eq!(object_mask_in_input(&seg, &inp), expected);
+    }
+
+    #[test]
+    fn confidence_colours_run_from_green_to_red_and_absent_is_slate() {
+        let (g, a, r, s) = (trust_color(0.99, false), trust_color(0.6, false), trust_color(0.1, false), trust_color(0.99, true));
+        assert_eq!(g, Color32::from_rgb(70, 200, 90));
+        assert_eq!(a, Color32::from_rgb(230, 180, 50));
+        assert_eq!(r, Color32::from_rgb(220, 70, 60));
+        assert_eq!(s, Color32::from_rgb(110, 118, 150));
+        // the boundaries
+        assert_eq!(trust_color(0.85, false), g);
+        assert_eq!(trust_color(0.5, false), a);
+        assert_eq!(trust_color(f32::NAN, false), r);
     }
 }

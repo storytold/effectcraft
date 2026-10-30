@@ -102,7 +102,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         p.text(
             out_rect.center(),
             Align2::CENTER_CENTER,
-            "JavaScript with the After Effects scripting object model — try app.project.numItems",
+            crate::i18n::tr("JavaScript with the After Effects scripting object model — try app.project.numItems"),
             Tokens::ui(12.0),
             t.text_faint,
         );

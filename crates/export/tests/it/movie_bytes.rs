@@ -61,7 +61,7 @@ fn project() -> (Project, ItemId) {
     }
     box_.blend_mode = BlendMode::Screen;
 
-    comp.layers = vec![box_, ring, solid];
+    comp.layers = vec![box_, ring, solid].into();
     let cid = p.add_item("Comp 1", Label::Sandstone, None, ItemKind::Comp(comp.into()));
     (p, cid)
 }
@@ -94,7 +94,9 @@ fn export_bytes(format: OutputFormat, name: &str) -> Vec<u8> {
 #[test]
 fn h264_movie_bytes_are_pinned() {
     let data = export_bytes(OutputFormat::H264, "/out/pinned.mp4");
-    assert_eq!((data.len(), fnv1a(&data)), (104_180, 8_728_430_532_616_484_528), "H.264 MP4");
+    // FilmCraft 09aaf9b's encoder lists its settings in the first frame's user-data SEI (211
+    // bytes where 0.1.1's name took 50): 161 bytes more than the FilmCraft 2c5ba7a pin.
+    assert_eq!((data.len(), fnv1a(&data)), (104_341, 17_655_680_090_264_218_914), "H.264 MP4");
 }
 
 #[test]

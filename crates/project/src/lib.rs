@@ -1,8 +1,8 @@
 //! The EffectCraft document model.
 //!
 //! `Project` → items (folders, compositions, footage, solids) → `Comp` → `Layer` → property tree
-//! ([`props`]). Compositions sit behind `Arc` so undo snapshots share everything that did not
-//! change.
+//! ([`props`]). Compositions, and each layer within them ([`Layers`]), sit behind `Arc` so undo
+//! snapshots share everything that did not change.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -33,12 +33,14 @@ mod comp;
 mod footage;
 mod item;
 mod layer;
+mod layers;
 mod settings;
 
 pub use comp::{Comp, Guide, Renderer, Resolution};
-pub use footage::{AlphaMode, FieldOrder, Footage, FootageKind, Proxy, Solid, SourceLayer};
+pub use footage::{AlphaMode, CineonSettings, CineonUnits, FieldOrder, Footage, FootageKind, Proxy, Solid, SourceLayer, VIDEO_EXTENSIONS, cineon_log_to_lin};
 pub use item::{Item, ItemId, ItemKind, LayerId};
 pub use layer::{AutoOrient, FrameBlend, Layer, LayerSource, LightKind, MatteKind, PrimitiveKind, Quality, Sampling, Switches, TrackMatte};
+pub use layers::Layers;
 pub use settings::{
     APP_VERSION, BitDepth, ColorEngine, CuePoint, HdrMode, Marker, ProjectError, ProjectSettings, SCHEMA_EFFECT_SPACE, SCHEMA_VERSION, SavedView,
     TimeDisplayStyle, is_newer_version, saved_by, saved_view,

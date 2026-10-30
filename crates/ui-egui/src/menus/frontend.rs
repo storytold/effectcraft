@@ -21,6 +21,8 @@ fn clipboard_text(s: &effectcraft_engine::Session) -> String {
         n(st.effect_clipboard.len(), "effect", "effects")
     } else if !st.contents_clipboard.is_empty() {
         n(st.contents_clipboard.len(), "shape item", "shape items")
+    } else if !st.mask_clipboard.is_empty() {
+        n(st.mask_clipboard.len(), "mask", "masks")
     } else if st.link_clipboard.is_some() {
         "EffectCraft: property links".into()
     } else {
@@ -488,7 +490,15 @@ pub fn frontend(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, p: Valu
             app.ui.home_templates = true;
             Value::Null
         }
-        "effect.manage" | "anim.browsePresets" => {
+        "effect.manage" => {
+            app.show_panel(PanelKind::EffectsPresets);
+            Value::Null
+        }
+        "anim.browsePresets" => {
+            app.ui.effects_search.clear();
+            app.ui.effects_view.presets = true;
+            app.ui.effects_open.insert("presets".into());
+            ctx.data_mut(|data| data.insert_temp(egui::Id::unique(crate::panels::effects_presets::REVEAL_PRESETS_ID), true));
             app.show_panel(PanelKind::EffectsPresets);
             Value::Null
         }
@@ -538,6 +548,8 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
         OpenProject,
         Save(&'static str),
         Open(&'static [&'static str]),
+        /// A movie, or a file with one of these extensions.
+        OpenFootage(&'static [&'static str]),
     }
     let (key, ask) = match id {
         "file.import" | "file.importMultiple" => ("paths", Ask::Import),
@@ -552,6 +564,7 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
         "anim.applyPreset" => ("path", Ask::Open(&["ecpreset", "json"])),
         "view.exportGuides" => ("path", Ask::Save("Guides.json")),
         "view.importGuides" => ("path", Ask::Open(&["json"])),
+        "camera.exportBlender" => ("path", Ask::Save("Tracked Scene.py")),
         "file.exportLottie" => ("path", Ask::Save("Animation.json")),
         "file.importLottie" => ("path", Ask::Open(&["json", "lottie"])),
         "file.importProject" => ("path", Ask::Open(&["ecproj", "ecprojx"])),
@@ -567,9 +580,7 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
         "keys.rpfCameraImport" => ("path", Ask::Open(&["json", "csv", "txt"])),
         "essential.exportTemplate" => ("path", Ask::Save("Template.ectemplate")),
         "essential.importTemplate" => ("path", Ask::Open(&["ectemplate"])),
-        "file.setProxy" => {
-            ("path", Ask::Open(&["mp4", "mov", "m4v", "mkv", "webm", "mxf", "png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "bmp", "tga", "exr"]))
-        }
+        "file.setProxy" => ("path", Ask::OpenFootage(&["png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "bmp", "tga", "exr"])),
         _ => return None,
     };
     if params.get(key).is_some()
@@ -580,10 +591,12 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
     {
         return None;
     }
+    // Importable files besides movies.
     const MEDIA: &[&str] = &[
-        "mp4", "mov", "m4v", "mkv", "webm", "mxf", "png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "bmp", "exr", "dpx", "cin", "wav", "aif", "aiff", "mp3",
-        "flac", "ogg", "opus", "svg", "pdf", "ai", "eps", "psd", "psb", "tga", "hdr", "gltf", "glb", "obj", "stl", "fbx", "json", "csv", "tsv",
+        "png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "bmp", "exr", "dpx", "cin", "wav", "aif", "aiff", "mp3", "flac", "ogg", "opus", "svg", "pdf", "ai",
+        "eps", "psd", "psb", "tga", "hdr", "gltf", "glb", "obj", "stl", "fbx", "json", "csv", "tsv",
     ];
+    let footage = |more: &[&'static str]| effectcraft_project::VIDEO_EXTENSIONS.iter().chain(more).copied().collect::<Vec<_>>();
     // A host whose blocking dialogs are unsafe inside this frame shows the dialog without
     // blocking — macOS: the nested event loop re-entered winit's handler on a drag over the
     // window and aborted the app (#511); Linux: the desktop portal's answer never gets pumped,
@@ -592,9 +605,10 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
     if let Some(spawn) = app.hooks.file_dialog_async.as_ref() {
         let request = match ask {
             Ask::Folder => crate::FileDialog::Folder,
-            Ask::Import => crate::FileDialog::Open { exts: MEDIA.iter().map(|e| e.to_string()).collect(), many: key == "paths" },
+            Ask::Import => crate::FileDialog::Open { exts: footage(MEDIA).iter().map(|e| e.to_string()).collect(), many: key == "paths" },
             Ask::OpenProject => crate::FileDialog::OpenProject,
             Ask::Open(exts) => crate::FileDialog::Open { exts: exts.iter().map(|e| e.to_string()).collect(), many: false },
+            Ask::OpenFootage(more) => crate::FileDialog::Open { exts: footage(more).iter().map(|e| e.to_string()).collect(), many: false },
             Ask::Save(default) => crate::FileDialog::save(default),
         };
         let tx = app.dialog_answers.0.clone();
@@ -615,7 +629,7 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
         }
         Ask::Import => {
             let Some(f) = app.hooks.pick_files.as_ref() else { return Some(Err("no file dialog available (pass `paths`)".into())) };
-            picked_value(key, f(MEDIA))
+            picked_value(key, f(&footage(MEDIA)))
         }
         Ask::OpenProject => {
             let Some(f) = app.hooks.pick_open_project.as_ref() else { return Some(Err("no file dialog available (pass `path`)".into())) };
@@ -624,6 +638,10 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
         Ask::Open(exts) => {
             let Some(f) = app.hooks.pick_files.as_ref() else { return Some(Err("no file dialog available (pass `path`)".into())) };
             f(exts).first().map(|s| json!(s))
+        }
+        Ask::OpenFootage(more) => {
+            let Some(f) = app.hooks.pick_files.as_ref() else { return Some(Err("no file dialog available (pass `path`)".into())) };
+            f(&footage(more)).first().map(|s| json!(s))
         }
         Ask::Save(default) => {
             let Some(picked) = app.hooks.save_dialog(default) else { return Some(Err("no file dialog available (pass `path`)".into())) };

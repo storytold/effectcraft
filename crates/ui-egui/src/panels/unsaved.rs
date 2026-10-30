@@ -16,7 +16,16 @@ use crate::theme::Tokens;
 use crate::{Dialog, EffectcraftApp};
 
 /// Commands that replace or close the open project (Quit is asked when the window closes).
-const CLOSING: &[&str] = &["file.newProject", "file.open", "file.openRecent", "file.closeProject", "file.revert", "file.openDemoProject", "templates.create"];
+const CLOSING: &[&str] = &[
+    "file.newProject",
+    "file.open",
+    "file.openRecent",
+    "file.closeProject",
+    "file.revert",
+    "file.openDemoProject",
+    "templates.create",
+    "file.runShutdownScripts",
+];
 
 /// The command waiting on the prompt, and whether the user already answered it.
 #[derive(Clone, Debug, Default)]
@@ -237,6 +246,23 @@ mod tests {
     fn modified(app: &mut EffectcraftApp) {
         app.session.execute("comp.new", json!({"name": "Main", "width": 64, "height": 64})).unwrap();
         assert!(app.session.is_dirty());
+    }
+
+    #[test]
+    fn shutdown_scripts_prompt_before_discarding_unsaved_work() {
+        let (mut app, ctx) = app();
+        modified(&mut app);
+        let result = crate::menus::invoke(&mut app, &ctx, "file.runShutdownScripts", json!({})).unwrap();
+        assert_eq!(result, json!({"dialog": "unsavedChanges"}));
+        assert_eq!(app.session.project.comps().count(), 1);
+        assert!(app.session.is_dirty());
+        answer_with(&mut app, &ctx, Answer::Cancel);
+        assert_eq!(app.session.project.comps().count(), 1);
+        assert!(app.session.is_dirty());
+        crate::menus::invoke(&mut app, &ctx, "file.runShutdownScripts", json!({})).unwrap();
+        answer_with(&mut app, &ctx, Answer::Discard);
+        assert_eq!(app.session.project.comps().count(), 0);
+        assert!(!app.session.is_dirty() && app.dialog.is_none());
     }
 
     #[test]

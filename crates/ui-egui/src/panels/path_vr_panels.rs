@@ -54,7 +54,7 @@ pub fn create_nulls(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             acts.push((id, if id == "paths.tracePath" { json!({"loop": looping}) } else { json!({}) }));
         }
     }
-    let r = ui.checkbox(&mut looping, tr("Loop (Trace Path)"));
+    let r = crate::widgets::labelled_checkbox(&mut ui, &mut looping, tr("Loop (Trace Path)"));
     app.auto.add("createNulls.loop", r.rect, "Loop");
     ui.data_mut(|d| d.insert_temp(loop_id, looping));
     run(app, &ctx, acts);

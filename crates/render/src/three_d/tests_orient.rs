@@ -239,7 +239,7 @@ fn ae_frame(set: impl Fn(&mut Layer), camera: Option<([f64; 3], [f64; 3])>) -> (
         layers.push(cam);
     }
     layers.push(l);
-    p.comp_mut(cid).unwrap().layers = layers;
+    p.comp_mut(cid).unwrap().layers = layers.into();
     (p, cid)
 }
 

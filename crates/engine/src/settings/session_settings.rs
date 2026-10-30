@@ -195,9 +195,19 @@ impl Session {
         self.shortcut_table = std::sync::OnceLock::new();
     }
 
-    /// The active shortcut preset resolved against every bindable command.
+    /// The scripts in the Scripts folder changed: list File ▸ Scripts' entries again in the
+    /// shortcut table.
+    pub fn scripts_changed(&mut self) {
+        self.shortcut_table = std::sync::OnceLock::new();
+    }
+
+    /// The active shortcut preset resolved against every bindable command, File ▸ Scripts'
+    /// entries included.
     pub fn shortcuts(&self) -> &ShortcutTable {
-        self.shortcut_table.get_or_init(|| ShortcutTable::build(&self.keymaps, &self.ui_commands))
+        self.shortcut_table.get_or_init(|| {
+            let scripts: Vec<String> = crate::commands::scripts::scripts(self).into_iter().filter(|e| !e.panel).map(|e| e.name).collect();
+            ShortcutTable::build_with_scripts(&self.keymaps, &self.ui_commands, &scripts)
+        })
     }
 
     /// Remember a project in File ▸ Open Recent and in the crash-recovery sentinel.

@@ -22,6 +22,20 @@ pub(crate) struct GBuf {
 }
 
 impl GBuf {
+    /// [`effectcraft_effects::Buf::cover`] on the device; `None` when it can't hold it.
+    pub fn cover(&mut self, e: &mut Enc, size: [f64; 2]) -> Option<()> {
+        let Some((dx, dy, w, h)) = effectcraft_effects::cover_plan(self.offset, self.scale, size, self.img.width, self.img.height) else { return Some(()) };
+        if !e.g.fits(w, h) {
+            return None;
+        }
+        let out = e.image(w, h);
+        e.copy_into(&self.img, &out, dx, dy);
+        self.img = out;
+        self.offset[0] += dx as f64;
+        self.offset[1] += dy as f64;
+        Some(())
+    }
+
     pub fn to_px(&self, p: [f64; 2]) -> (f64, f64) {
         (p[0] * self.scale + self.offset[0], p[1] * self.scale + self.offset[1])
     }
@@ -46,6 +60,7 @@ impl GBuf {
 
     /// Buf::pad: grow by `pad` transparent pixels on every side.
     pub fn pad(&mut self, e: &mut Enc, pad: u32) -> Option<()> {
+        let pad = effectcraft_effects::pad_within_budget(self.img.width, self.img.height, pad);
         if pad == 0 {
             return Some(());
         }
@@ -166,12 +181,23 @@ impl effectcraft_render::FxTarget for GpuFx<'_, '_> {
     /// GBuf::cover, like `pad`: a bigger texture with the old one copied into place, no
     /// readback. A region the device can't allocate leaves the buffer as it is.
     fn cover(&mut self, size: [f64; 2]) {
+        let Some(mut b) = self.b.take() else { return };
+        let keep = (b.img.clone(), b.offset);
+        if b.cover(self.e, size).is_none() {
+            (b.img, b.offset) = keep;
+        }
+        self.b = Some(b);
+    }
+
+    /// [`effectcraft_effects::Buf::align`] on the device: a texture grown left/top, the old one
+    /// copied in. A size the device can't allocate leaves the buffer as it is.
+    fn align(&mut self, size: [f64; 2]) {
         let Some(b) = self.b.take() else { return };
-        let out = match effectcraft_effects::cover_plan(b.offset, b.scale, size, b.img.width, b.img.height) {
-            Some((dx, dy, w, h)) if self.e.g.fits(w, h) => {
-                let img = self.e.image(w, h);
-                self.e.copy_into(&b.img, &img, dx, dy);
-                GBuf { img, offset: [b.offset[0] + dx as f64, b.offset[1] + dy as f64], scale: b.scale }
+        let out = match effectcraft_effects::align_plan(b.offset, b.scale, size, b.img.width, b.img.height) {
+            Some((l, t)) if self.e.g.fits(b.img.width + l, b.img.height + t) => {
+                let img = self.e.image(b.img.width + l, b.img.height + t);
+                self.e.copy_into(&b.img, &img, l, t);
+                GBuf { img, offset: [b.offset[0] + l as f64, b.offset[1] + t as f64], scale: b.scale }
             }
             _ => b,
         };
@@ -291,6 +317,9 @@ fn gaussian(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
     let repeat = ctx.params.b("repeatEdge");
     if !repeat && !ctx.adjustment {
         b.pad(e, (s * 3.0).ceil() as u32)?;
+    } else if repeat && !ctx.adjustment {
+        // The edge it repeats is the layer's, not the painted content's (#1205).
+        b.cover(e, ctx.layer_size)?;
     }
     b.img = gaussian_blur(e, &b.img, s * kx, s * ky, repeat || ctx.adjustment);
     Some(b)
@@ -311,6 +340,9 @@ fn box_blur(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
     let repeat = ctx.params.b("repeatEdge");
     if !repeat && !ctx.adjustment {
         b.pad(e, (r * it) as u32 + 1)?;
+    } else if repeat && !ctx.adjustment {
+        // The edge it repeats is the layer's, not the painted content's (#1205).
+        b.cover(e, ctx.layer_size)?;
     }
     b.img = box_passes(e, &b.img, &vec![r * kx as usize; it], &vec![r * ky as usize; it], repeat || ctx.adjustment);
     Some(b)

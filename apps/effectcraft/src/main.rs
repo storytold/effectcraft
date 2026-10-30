@@ -155,7 +155,7 @@ fn install_file_dialogs(app: &mut EffectcraftApp) -> Option<std::sync::mpsc::Rec
 fn main() -> eframe::Result {
     // Windows: the update helper is a copy of this program started with `--finish-update`.
     #[cfg(windows)]
-    if let Some(result) = craft_update::self_update::finish(&craft_update::suite::EFFECTCRAFT, &std::env::args_os().skip(1).collect::<Vec<_>>()) {
+    if let Some(result) = craft_update::self_update::finish(&effectcraft_ui_egui::UPDATE_APP, &std::env::args_os().skip(1).collect::<Vec<_>>()) {
         std::process::exit(i32::from(result.is_err()));
     }
     // First, so the panic hook and every start-up warning are recorded. Records go to stderr
@@ -263,6 +263,9 @@ fn main() -> eframe::Result {
             // Fit the window to its monitor, or put it back where it was (still hidden).
             let saved_window = session.config.as_deref().and_then(window::load);
             let opened = cc.winit_window().map(|w| window::restore(w, saved_window));
+            // Scripts in Scripts/Startup run before a project opens (a failing one is reported in
+            // a toast).
+            let _ = session.execute("file.runStartupScripts", json!({}));
             let recovery = if control_port.is_none() { session.begin_recovery() } else { None };
             let project = files.iter().find(|f| is_project_file(f)).cloned();
             if let Some(p) = project {
@@ -495,6 +498,8 @@ impl eframe::App for Desktop {
         self.launch.exited();
         self.window.save(self.app.session.config.as_deref());
         self.app.on_exit();
+        // Scripts in Scripts/Shutdown run with the project closed.
+        let _ = self.app.session.execute("file.runShutdownScripts", json!({}));
     }
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {

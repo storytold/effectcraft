@@ -296,8 +296,9 @@ fn convert(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(Value::Null)
 }
 
-/// Layer ▸ Markers ▸ Update Markers From Source: copy a precomp's composition markers onto the
-/// layer (layer time is the nested comp's time), skipping ones already there.
+/// Layer ▸ Markers ▸ Update Markers From Source: copy a precomp's composition markers, or the
+/// markers a footage file carries (a WAV's cue points), onto the layer (layer time is the source's
+/// time), skipping ones already there.
 fn update_from_source(s: &mut Session, p: &Value) -> Result<Value> {
     let (cid, ids) = layers_p(s, p)?;
     let src: Vec<(LayerId, Vec<Marker>)> = {
@@ -307,13 +308,17 @@ fn update_from_source(s: &mut Session, p: &Value) -> Result<Value> {
                 let l = comp.layer(*id)?;
                 match &l.source {
                     LayerSource::Comp { item } => Some((*id, s.project.comp(*item)?.markers.clone())),
+                    LayerSource::Footage { item } => match &s.project.item(*item)?.kind {
+                        effectcraft_project::ItemKind::Footage(f) => Some((*id, f.markers.clone())),
+                        _ => None,
+                    },
                     _ => None,
                 }
             })
             .collect()
     };
     if src.is_empty() {
-        return Err(bad("layer.updateMarkersFromSource", "select a precomposition layer"));
+        return Err(bad("layer.updateMarkersFromSource", "select a precomposition or footage layer"));
     }
     let n = s.edit("Update Markers From Source", None, |proj, _| {
         let c = proj.comp_mut(cid).ok_or(EngineError::NoComp)?;
@@ -323,8 +328,11 @@ fn update_from_source(s: &mut Session, p: &Value) -> Result<Value> {
             if l.markers_locked {
                 continue;
             }
+            // One set of the times already on the layer: a file with thousands of markers must not
+            // scan the layer's list for each of them.
+            let mut times: std::collections::HashSet<_> = l.markers.iter().map(|x| x.time).collect();
             for m in ms {
-                if !l.markers.iter().any(|x| x.time == m.time) {
+                if times.insert(m.time) {
                     l.markers.push(m.clone());
                     n += 1;
                 }
@@ -339,10 +347,10 @@ fn update_from_source(s: &mut Session, p: &Value) -> Result<Value> {
 fn has_precomp_layer(s: &Session) -> std::result::Result<(), String> {
     has_layers(s)?;
     let c = s.active_comp().ok_or("no composition")?;
-    if s.state.selected_layers.iter().filter_map(|l| c.layer(*l)).any(|l| matches!(l.source, LayerSource::Comp { .. })) {
+    if s.state.selected_layers.iter().filter_map(|l| c.layer(*l)).any(|l| matches!(l.source, LayerSource::Comp { .. } | LayerSource::Footage { .. })) {
         Ok(())
     } else {
-        Err("select a precomposition layer".into())
+        Err("select a precomposition or footage layer".into())
     }
 }
 

@@ -89,7 +89,7 @@ fn draw_comp<'a>(e: &mut Enc, r: &Renderer<'a>, ctx: &EvalCtx<'a>, canvas: &mut 
             i = j;
         } else {
             match r.collapsed(ctx, visible[i]) {
-                Some(item) => draw_collapsed(e, r, ctx, visible[i], item, canvas)?,
+                Some(collapsed) => draw_collapsed(e, r, ctx, visible[i], &collapsed, canvas)?,
                 None => draw_layer(e, r, ctx, visible[i], canvas)?,
             }
             i += 1;
@@ -187,19 +187,26 @@ fn draw_split(e: &mut Enc, r: &Renderer, ctx: &EvalCtx, split: &effectcraft_rend
     Some(cv)
 }
 
-fn draw_collapsed<'a>(e: &mut Enc, r: &Renderer<'a>, ctx: &EvalCtx<'a>, layer: &Layer, item: ItemId, canvas: &mut GpuImage) -> Option<()> {
+fn draw_collapsed<'a>(
+    e: &mut Enc,
+    r: &Renderer<'a>,
+    ctx: &EvalCtx<'a>,
+    layer: &'a Layer,
+    collapsed: &effectcraft_render::Collapsed,
+    canvas: &mut GpuImage,
+) -> Option<()> {
     let opacity = r.layer_opacity(ctx, layer);
     if opacity <= 0.0 {
         return Some(());
     }
     let matte = r.track_matte(ctx, layer).is_some();
     if layer.blend_mode == BlendMode::Normal && !matte && !layer.preserve_transparency {
-        if let Some((sub, nctx)) = r.collapse_into(ctx, layer, item, opacity) {
+        if let Some((sub, nctx)) = r.collapse_into(ctx, layer, collapsed, opacity) {
             draw_comp(e, &sub, &nctx, canvas)?;
         }
         return Some(());
     }
-    let Some((sub, nctx)) = r.collapse_into(ctx, layer, item, 1.0) else { return Some(()) };
+    let Some((sub, nctx)) = r.collapse_into(ctx, layer, collapsed, 1.0) else { return Some(()) };
     let mut iso = e.zeros(canvas.width, canvas.height);
     draw_comp(e, &sub, &nctx, &mut iso)?;
     composite_iso(e, r, ctx, layer, iso, canvas, opacity)
@@ -345,8 +352,8 @@ fn draw_precomp(e: &mut Enc, r: &Renderer, ctx: &EvalCtx, layer: &Layer, canvas:
 
 /// Adjustment layer (`Renderer::draw_adjustment`): the effect stack runs on the comp below,
 /// resident on the GPU (non-GPU effects read back, run on the CPU and upload), and the result
-/// replaces the canvas inside the layer's footprint × track matte × opacity. `None` = draw it
-/// on the CPU.
+/// replaces the canvas inside the layer's footprint × track matte × opacity, or blends onto it in
+/// the layer's blend mode when that isn't Normal. `None` = draw it on the CPU.
 fn draw_adjustment(e: &mut Enc, r: &Renderer, ctx: &EvalCtx, layer: &Layer, canvas: &mut GpuImage) -> Option<()> {
     let opacity = r.layer_opacity(ctx, layer);
     let Some(foot) = r.adjustment_footprint(ctx, layer) else { return Some(()) };
@@ -372,7 +379,13 @@ fn draw_adjustment(e: &mut Enc, r: &Renderer, ctx: &EvalCtx, layer: &Layer, canv
     if let Some(c) = pipe.to_blend() {
         adjusted = ops::convert(e, &adjusted, &c);
     }
-    *canvas = ops::adjust_mix(e, canvas, &adjusted, &matte, opacity);
+    *canvas = if layer.blend_mode == BlendMode::Normal {
+        ops::adjust_mix(e, canvas, &adjusted, &matte, opacity)
+    } else {
+        // The adjusted comp is a layer in that mode over the comp below (#2618).
+        let iso = ops::matte(e, &adjusted, &matte, effectcraft_project::MatteKind::Alpha);
+        ops::blend_full(e, canvas, &iso, layer.blend_mode, opacity, layer.id.0 as u32, None)
+    };
     Some(())
 }
 

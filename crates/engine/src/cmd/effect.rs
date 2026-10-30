@@ -136,7 +136,16 @@ fn warning(s: &mut Session, p: &Value) -> Result<Value> {
     let layer = comp.layer(lid).ok_or(EngineError::NoComp)?;
     let g = layer.effects().and_then(|fx| fx.groups().find(|g| g.uid == uid)).ok_or_else(|| bad(cmd, "no such effect"))?;
     let t = super::time_p(s, p, Some(comp));
-    let ctx = effectcraft_render::EvalCtx { project: &s.project, comp_id: cid, comp, time: t, expr: s.expr.as_deref(), footage: None };
+    let ctx = effectcraft_render::EvalCtx {
+        project: &s.project,
+        comp_id: cid,
+        comp,
+        time: t,
+        expr: s.expr.as_deref(),
+        footage: None,
+        property_overrides: &[],
+        media_overrides: &[],
+    };
     Ok(json!({"effect": uid, "warning": effectcraft_effects::warning(g, &mut |pr| ctx.value(layer, pr))}))
 }
 
@@ -160,7 +169,16 @@ fn pick_color(s: &mut Session, p: &Value) -> Result<Value> {
     .filter(|pr| pr.ui == effectcraft_project::ParamUi::Color)
     .ok_or_else(|| bad(cmd, "not a colour parameter of this effect"))?;
     let t = super::time_p(s, p, Some(comp));
-    let ctx = effectcraft_render::EvalCtx { project: &s.project, comp_id: cid, comp, time: t, expr: s.expr.as_deref(), footage: None };
+    let ctx = effectcraft_render::EvalCtx {
+        project: &s.project,
+        comp_id: cid,
+        comp,
+        time: t,
+        expr: s.expr.as_deref(),
+        footage: None,
+        property_overrides: &[],
+        media_overrides: &[],
+    };
     let mut r = effectcraft_render::Renderer::new(&s.project, &*s.footage, effectcraft_render::RenderOpts::default());
     r.expr = s.expr.as_deref();
     r.cache = Some(&s.layer_cache);
@@ -288,7 +306,16 @@ impl CryptoProbe {
             let comp = r.project.comp(cid).ok_or("no composition")?;
             let layer = comp.layer(lid).ok_or("no such layer")?;
             let g = layer.effects().and_then(|fx| fx.groups().nth(pos)).ok_or("no such effect")?;
-            let ctx = effectcraft_render::EvalCtx { project: r.project, comp_id: cid, comp, time, expr: r.expr, footage: None };
+            let ctx = effectcraft_render::EvalCtx {
+                project: r.project,
+                comp_id: cid,
+                comp,
+                time,
+                expr: r.expr,
+                footage: None,
+                property_overrides: &[],
+                media_overrides: &[],
+            };
             let params = effectcraft_effects::flatten_params(g, &mut |pr| ctx.value(layer, pr));
             let want = effectcraft_effects::CRYPTO_LAYERS.get(params.e("layer") as usize).copied().unwrap_or("CryptoAsset");
             let aux = r.layer_aux(&ctx, layer).ok_or(NO_CRYPTO)?;
@@ -351,7 +378,16 @@ fn probe_key<'a>(s: &'a Session, p: &Value, cmd: &str) -> Result<(ProbeKey, Tick
     let g = fx.groups().nth(pos).ok_or_else(|| bad(cmd, "no such effect"))?;
     let prop = g.prop("selection").filter(|_| g.match_id == "ec.3d.cryptomatte").ok_or_else(|| bad(cmd, "not a Cryptomatte effect"))?;
     let time = super::time_p(s, p, Some(comp));
-    let ctx = effectcraft_render::EvalCtx { project: &s.project, comp_id: cid, comp, time, expr: s.expr.as_deref(), footage: None };
+    let ctx = effectcraft_render::EvalCtx {
+        project: &s.project,
+        comp_id: cid,
+        comp,
+        time,
+        expr: s.expr.as_deref(),
+        footage: None,
+        property_overrides: &[],
+        media_overrides: &[],
+    };
     let frame = probe_frame(&ctx, layer, pos);
     let o = s.render_opts(Default::default());
     let prefs = (o.nested_switches, o.draft_shadows);
@@ -503,7 +539,16 @@ fn crypto_hit(s: &Session, p: &Value, cmd: &str) -> Result<Hit> {
     let Some(hash) = b.aux.index_at(ax, ay).and_then(|i| b.aux.crypto_id_at(&b.layer, i)) else { return Ok(Hit::Nothing) };
     let (cid, lid, ..) = key.at;
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
-    let ctx = effectcraft_render::EvalCtx { project: &s.project, comp_id: cid, comp, time, expr: s.expr.as_deref(), footage: None };
+    let ctx = effectcraft_render::EvalCtx {
+        project: &s.project,
+        comp_id: cid,
+        comp,
+        time,
+        expr: s.expr.as_deref(),
+        footage: None,
+        property_overrides: &[],
+        media_overrides: &[],
+    };
     let selection = effectcraft_effects::flatten_params(g, &mut |pr| ctx.value(layer, pr)).s("selection").to_string();
     let driven = prop.expr.as_ref().is_some_and(|e| e.enabled);
     let (aux, layer_name) = (b.aux.clone(), b.layer.clone());
@@ -806,6 +851,7 @@ fn copy(s: &mut Session, p: &Value) -> Result<Value> {
     s.state.key_clipboard.clear();
     s.state.keyframe_text = None;
     s.state.contents_clipboard.clear();
+    s.state.mask_clipboard.clear();
     s.state.link_clipboard = None;
     s.state.clip_is_keys = false;
     let n = groups.len();
@@ -955,8 +1001,7 @@ fn list(_: &mut Session, p: &Value) -> Result<Value> {
                 let mut out = json!({"id": p.id, "name": p.name, "type": p.default.kind_name(), "default": p.default.to_json()});
                 match &p.ui {
                     effectcraft_project::ParamUi::Popup { options } => {
-                        // Engine/MCP popup values are zero-based; JSX exposes one-based values.
-                        out["options"] = json!(options.iter().enumerate().map(|(value, label)| json!({"value": value, "label": label})).collect::<Vec<_>>());
+                        out["options"] = super::popup_options(options);
                     }
                     effectcraft_project::ParamUi::Slider { min, max, slider_min, slider_max, decimals } => {
                         out["min"] = json!(min);

@@ -31,6 +31,9 @@ page!(General {
     /// Path Point and Handle Size (px).
     path_point_size: u32 = 5,
     show_tool_tips: bool = true,
+    /// Step frames with an unmodified mouse wheel over the Composition viewer.
+    /// Off: the wheel zooms, which is what current After Effects does.
+    viewer_wheel_scrubbing: bool = false,
     /// Create New Layers at Composition Start Time (off: at the current time).
     create_layers_at_comp_start: bool = true,
     switches_affect_nested_comps: bool = true,
@@ -62,6 +65,9 @@ page!(ProjectPrefs {
     /// Open a template project for File ▸ New ▸ New Project.
     use_template: bool = false,
     template_path: String = String::new(),
+    /// Write `.ecproj` files as compact JSON on one line (smaller, faster to save and open). Off:
+    /// indented, one value per line, so they read and diff cleanly in version control.
+    compact_project_files: bool = false,
 });
 
 page!(AutoSave {
@@ -150,7 +156,8 @@ page!(Import {
     sequence_fps: f64 = 30.0,
     report_missing_frames: bool = true,
     /// Automatically Reload Footage whose file another app changed (size or modification time),
-    /// checked every two seconds and when the window comes back to the front: `off`,
+    /// checked every two seconds while the window is in front, every ten seconds while it is
+    /// not, and when it comes back to the front: `off`,
     /// `nonSequence` (the default, as in After Effects: image sequences are left alone) or `all`.
     auto_reload_footage: String = "nonSequence".into(),
     /// Interpret unlabeled alpha as: `ask`, `guess`, `ignore`, `straight`, `premultiplied`.

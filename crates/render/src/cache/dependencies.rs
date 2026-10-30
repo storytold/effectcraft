@@ -3,12 +3,18 @@
 //! cyclic/over-budget graphs or expressions sampled at unknown times.
 use super::{KeyHasher, hash_debug, hash_values};
 use crate::EvalCtx;
-use effectcraft_project::{ItemId, ItemKind, Layer, LayerId, LayerSource, Node, PropGroup};
+use effectcraft_project::{ItemId, ItemKind, Layer, LayerId, LayerSource, LightKind, Node, PropGroup};
 use std::hash::Hash;
 
-pub(super) fn hash(h: &mut KeyHasher, ctx: &EvalCtx, layer: &Layer, effects: Option<usize>) -> Option<()> {
+pub(super) fn hash(h: &mut KeyHasher, ctx: &EvalCtx, layer: &Layer, effects: super::EffectScope) -> Option<()> {
+    // A footprint runs no effects: nothing they read is in its pixels or its key.
+    let limit = match effects {
+        super::EffectScope::Footprint => return Some(()),
+        super::EffectScope::All => None,
+        super::EffectScope::First(n) => Some(n),
+    };
     let mut deps = Dependencies { h, path: vec![(ctx.comp_id, layer.id)], remaining: 1024, other_times: super::reads_other_times(layer, None) };
-    deps.effects(ctx, layer, effects)
+    deps.effects(ctx, layer, limit)
 }
 
 struct Dependencies<'a> {
@@ -63,10 +69,67 @@ impl Dependencies<'_> {
         Some(())
     }
 
+    /// What a referenced 3D model or primitive layer's solo render depends on: the layer itself
+    /// (geometry, materials, switches, in/out), its animated values and transform at the time,
+    /// the mesh item, the comp's camera (with its depth of field) and its lights at the time
+    /// (the lights are off in draft 3D, and the renderer setting changes the pixels), the model's
+    /// layer time while it plays an animation clip, and the in/out gate (outside the range the
+    /// read is transparent). An Environment light's image can be any layer's render: with one on
+    /// the read is not cached. Comp size and render scale are in the owner's key already.
+    fn soloed_model(&mut self, ctx: &EvalCtx, layer: &Layer) -> Option<()> {
+        self.remaining = self.remaining.checked_sub(1)?;
+        // Expressions sampled at other times: not cacheable, as in the ordinary path.
+        if (self.other_times || super::reads_other_times(layer, None)) && super::has_expression(&layer.props) {
+            return None;
+        }
+        hash_debug(self.h, layer);
+        hash_values(self.h, ctx, layer, &layer.props);
+        hash_debug(self.h, &ctx.world_matrix(layer));
+        if let Some(item) = layer.source.item() {
+            hash_debug(self.h, &ctx.project.item(item));
+        }
+        // The solo render goes through the comp's camera and lights. The camera's depth of
+        // field blurs it (focus, aperture, iris, highlights) — none of that is in the
+        // projection hashed above.
+        hash_debug(self.h, &ctx.camera());
+        hash_debug(self.h, &crate::three_d::active_camera(ctx).dof);
+        hash_debug(self.h, &crate::three_d::light::lights_at(ctx));
+        hash_debug(self.h, &ctx.comp.draft_3d);
+        hash_debug(self.h, &ctx.comp.renderer);
+        // An Environment light's image lights Advanced 3D models (its source can be any
+        // layer's render, or any environment layer) — too open-ended to hash: while one is
+        // on (and lighting: Draft 3D lights nothing), don't cache the read.
+        if ctx.comp.renderer == effectcraft_project::Renderer::Advanced3D
+            && !ctx.comp.draft_3d
+            && ctx.comp.layers.iter().any(|l| {
+                l.is_light() && l.switches.video && l.is_active_at(ctx.time) && matches!(l.source, LayerSource::Light { kind: LightKind::Environment })
+            })
+        {
+            return None;
+        }
+        // A model with an animation clip selected is posed at its layer time (Animation Speed
+        // and Looping are static, hashed above): every time is its own entry. Without one the
+        // pose is the same at every time: keep the static key.
+        if layer.props.sub("geometryOptions").map_or(0, |g| ctx.e(layer, g, "animation")) != 0 {
+            layer.layer_time(ctx.time).0.hash(self.h);
+        }
+        // Outside the layer's in/out range the read is transparent: fold the gate in, so a
+        // static model renders once inside it and again when it leaves.
+        layer.is_active_at(ctx.time).hash(self.h);
+        Some(())
+    }
+
     fn layer(&mut self, ctx: &EvalCtx, layer: &Layer) -> Option<()> {
         let id = (ctx.comp_id, layer.id);
         if self.path.len() > crate::MAX_FX_DEPTH || self.path.contains(&id) {
             return None;
+        }
+        // A referenced 3D model or primitive layer renders through the comp's camera and lights
+        // (an effect layer parameter reads it that way — Create 3D Layer Instance): hash what
+        // moves its pixels, so the owner keeps a cache entry that changes when any of it does.
+        if layer.source.is_model() {
+            self.soloed_model(ctx, layer)?;
+            return Some(());
         }
         self.remaining = self.remaining.checked_sub(1)?;
         if (self.other_times || super::reads_other_times(layer, None)) && super::has_expression(&layer.props) {
@@ -76,6 +139,9 @@ impl Dependencies<'_> {
         // Include transforms/parents as well as pixels: selected-layer anchors and
         // continuously rasterized sources can depend on them.
         hash_debug(self.h, layer);
+        // A referenced layer's static values can be overridden by the collapsed instance without
+        // editing it (`hash_values` only sees animated ones), so the owner's key needs them too.
+        super::hash_overrides(self.h, ctx, layer.id);
         hash_values(self.h, ctx, layer, &layer.props);
         hash_debug(self.h, &ctx.world_matrix(layer));
         // A cached owner never runs this layer's effects, so the comp camera and lights its
@@ -88,6 +154,10 @@ impl Dependencies<'_> {
         }
         match layer.source {
             LayerSource::Solid { item } | LayerSource::Footage { item } | LayerSource::Comp { item } => {
+                let item = match layer.source {
+                    LayerSource::Footage { .. } => ctx.media_item(layer, item),
+                    _ => item,
+                };
                 let source = ctx.project.item(item);
                 hash_debug(self.h, &source);
                 if let Some(source) = source {

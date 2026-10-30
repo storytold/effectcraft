@@ -267,10 +267,11 @@ impl Project {
     /// (NaN or infinity, written as `null`, and nesting too deep to parse) are refused on every
     /// save; debug builds also read the text back.
     pub fn to_file_json(&self) -> Result<String, ProjectError> {
-        self.to_file_json_with_view(&SavedView::default())
+        self.to_file_json_with_view(&SavedView::default(), false)
     }
-    /// [`Project::to_file_json`] that also records the open compositions ([`SavedView`]).
-    pub fn to_file_json_with_view(&self, view: &SavedView) -> Result<String, ProjectError> {
+    /// [`Project::to_file_json`] that also records the open compositions ([`SavedView`]), on one
+    /// line when `compact` (Settings ▸ Project ▸ Save Compact Project Files).
+    pub fn to_file_json_with_view(&self, view: &SavedView, compact: bool) -> Result<String, ProjectError> {
         if self.schema > SCHEMA_VERSION {
             return Err(ProjectError::Invalid(format!(
                 "the project can't be saved: it holds a value a project file can't store (project schema {} is newer than this version supports ({SCHEMA_VERSION}))",
@@ -289,7 +290,8 @@ impl Project {
         let file = File { saved_by: APP_VERSION, view, project: self };
         file_check::check(&file)
             .map_err(|e| ProjectError::Invalid(format!("the project can't be saved: it holds a value a project file can't store ({e})")))?;
-        let text = serde_json::to_string_pretty(&file).map_err(|e| ProjectError::Invalid(format!("the project can't be saved: {e}")))?;
+        let text = if compact { serde_json::to_string(&file) } else { serde_json::to_string_pretty(&file) }
+            .map_err(|e| ProjectError::Invalid(format!("the project can't be saved: {e}")))?;
         #[cfg(debug_assertions)]
         Project::from_json(&text)
             .map_err(|e| ProjectError::Invalid(format!("the project can't be saved: it holds a value a project file can't store ({e})")))?;

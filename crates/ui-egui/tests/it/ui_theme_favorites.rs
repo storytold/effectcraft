@@ -1,3 +1,4 @@
+use crate::gpu_test::RenderSerial;
 use effectcraft_engine::{Session, config::MemoryConfig, prefs::Prefs};
 use effectcraft_ui_egui::{EffectcraftApp, menus};
 use egui::{Event, Modifiers, PointerButton, Pos2, pos2, vec2};
@@ -49,7 +50,7 @@ fn star_controls_save_and_favorite_menu_selects_the_family() {
     assert_eq!(h.state().session.prefs.appearance.favorite_themes, vec!["light"]);
     if let Some(path) = std::env::var_os("FAVORITES_SCREENSHOT_DIR") {
         std::fs::create_dir_all(&path).unwrap();
-        h.render().unwrap().save(std::path::Path::new(&path).join("effectcraft-favorites.png")).unwrap();
+        h.render_serialized().unwrap().save(std::path::Path::new(&path).join("effectcraft-favorites.png")).unwrap();
     }
     assert_eq!(h.state().session.prefs.appearance.appearance_mode, "dark");
     let p = at(&h, "settings.ok");

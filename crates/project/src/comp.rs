@@ -87,8 +87,8 @@ pub struct Comp {
     pub display_start: Tick,
     pub background: [f32; 3],
     pub work_area: (Tick, Tick),
-    /// Layer #1 first (top of the stack).
-    pub layers: Vec<Layer>,
+    /// Layer #1 first (top of the stack). Each layer is shared between undo states until edited.
+    pub layers: super::Layers,
     #[serde(default)]
     pub markers: Vec<Marker>,
     pub shutter_angle: f64,
@@ -188,7 +188,7 @@ impl Comp {
             display_start: Tick::ZERO,
             background: [0.0, 0.0, 0.0],
             work_area: (Tick::ZERO, duration),
-            layers: vec![],
+            layers: super::Layers::new(),
             markers: vec![],
             shutter_angle: 180.0,
             shutter_phase: -90.0,
@@ -239,7 +239,7 @@ impl Comp {
     }
 
     pub fn layer_mut(&mut self, id: LayerId) -> Option<&mut Layer> {
-        self.layers.iter_mut().find(|l| l.id == id)
+        self.layers.find_mut(|l| l.id == id)
     }
 
     /// 1-based layer number (#) of a layer.

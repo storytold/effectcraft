@@ -136,8 +136,8 @@ pub fn chord_matches(session: &effectcraft_engine::Session, command: &str, key: 
     bindings(session).into_iter().any(|(m, k, id, _)| id == command && k == key && mods_match(m, mods))
 }
 
-/// Whether a Deselect All chord matched by [`chord_matches`] may run while a text editor holds
-/// the keyboard. Chords carrying Cmd/Ctrl/Alt are command chords (the editor treats them as
+/// Whether a Deselect All or Duplicate chord matched by [`chord_matches`] may run while a text
+/// editor holds the keyboard. Chords carrying Cmd/Ctrl/Alt are command chords (the editor treats them as
 /// such for undo and the rest), and function keys never type, so those forward from the editor;
 /// a chord that could instead produce a character — a bare or Shift-only letter, digit or
 /// punctuation key, as from a pathological bare-letter rebinding — stays with the editor so
@@ -210,6 +210,9 @@ fn escape_dialog(app: &mut EffectcraftApp, ctx: &egui::Context) {
     ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
     if app.dialog == Some(crate::Dialog::LayerStyles) {
         crate::panels::layer_styles_dialog::finish(app, false);
+    } else if app.dialog == Some(crate::Dialog::GradientEditor) {
+        // Escape is Cancel: the preview rolls back.
+        crate::panels::gradient_editor::finish(app, false, ctx);
     } else if app.dialog == Some(crate::Dialog::Info) {
         crate::panels::forms::close_info(app);
     } else {
@@ -222,8 +225,35 @@ fn escape_dialog(app: &mut EffectcraftApp, ctx: &egui::Context) {
         if app.dialog == Some(crate::Dialog::UnsavedChanges) {
             app.dialog_state.unsaved.command = None;
         }
+        // Escape is Cancel: a Preview that edited the project rolls back.
+        crate::panels::live_preview::cancel(app);
         app.dialog = None;
     }
+}
+
+/// Escape with a dialog open: it is Cancel. Escape while recording a shortcut cancels the
+/// recording, not the editor; so does Escape in its Delete Preset prompt.
+fn cancel_dialog(app: &mut EffectcraftApp, ctx: &egui::Context) {
+    if crate::panels::shortcut_editor::recording(app) || crate::panels::shortcut_editor::confirming(app) {
+        return;
+    }
+    if app.dialog == Some(crate::Dialog::Info) {
+        crate::panels::forms::close_info(app);
+        return;
+    }
+    if app.dialog == Some(crate::Dialog::GradientEditor) {
+        crate::panels::gradient_editor::finish(app, false, ctx);
+        return;
+    }
+    // Escape in Settings is Cancel: restore the settings from when it opened.
+    if app.dialog == Some(crate::Dialog::Settings)
+        && let Some(p) = app.dialog_state.prefs_snapshot.take()
+    {
+        app.session.prefs = p;
+        app.session.prefs_changed();
+    }
+    crate::panels::live_preview::cancel(app);
+    app.dialog = None;
 }
 
 type KeyEvent = (egui::Key, egui::Modifiers, bool, Option<egui::Key>);
@@ -294,6 +324,11 @@ fn numpad_star_marker(app: &mut EffectcraftApp, ctx: &egui::Context) {
     }
 }
 
+/// Panels that handle Enter themselves (rename, apply, open the row).
+fn panel_owns_enter(kind: PanelKind) -> bool {
+    matches!(kind, PanelKind::Project | PanelKind::EffectsPresets | PanelKind::RenderQueue)
+}
+
 fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only: bool) {
     let start = modifiers_at_start(ctx);
     if !tab_only && app.dialog.is_some() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -341,30 +376,16 @@ fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only
         }
         // Escape closes dialogs.
         if key == egui::Key::Escape && app.dialog.is_some() {
-            // Escape while recording a shortcut cancels the recording, not the editor; so does
-            // Escape in its Delete Preset prompt.
-            if crate::panels::shortcut_editor::recording(app) || crate::panels::shortcut_editor::confirming(app) {
-                continue;
-            }
-            if app.dialog == Some(crate::Dialog::Info) {
-                crate::panels::forms::close_info(app);
-                continue;
-            }
-            // Escape in Settings is Cancel: restore the settings from when it opened.
-            if app.dialog == Some(crate::Dialog::Settings)
-                && let Some(p) = app.dialog_state.prefs_snapshot.take()
-            {
-                app.session.prefs = p;
-                app.session.prefs_changed();
-            }
-            app.dialog = None;
+            cancel_dialog(app, ctx);
             continue;
         }
         if app.dialog.is_some() {
             continue;
         }
         // Enter in the Project panel renames the selected item (handled by the panel).
-        if key == egui::Key::Enter && !mods.any() && app.ui.focused == PanelKind::Project {
+        // In Effects & Presets and the Render Queue Enter applies or opens the row (handled by the
+        // panel), not the layer rename.
+        if key == egui::Key::Enter && !mods.any() && panel_owns_enter(app.ui.focused) {
             continue;
         }
         // The Project panel has its own selection; a previously selected Timeline layer

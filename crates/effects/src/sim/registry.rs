@@ -1,6 +1,6 @@
 use super::common::{pct, pt, spec};
 use super::engine::{PARTICLE_TYPES, PW_ANIMS};
-use super::particle_fx::{PW_FOV, mr_mercury, particle_systems2, particle_systems2_plan, particle_world, particle_world_plan};
+use super::particle_fx::{PW_FOV, PW_TEXTURE_LAYER, mr_mercury, particle_systems2, particle_systems2_plan, particle_world, particle_world_plan};
 use super::sprites::SpritePlan;
 use super::weather::{bubbles, drizzle, rainfall, rainfall_plan, snowfall, snowfall_plan, star_burst, star_burst_plan};
 use super::{Buf, EffectCtx, EffectSpec, ParamUi, Value, col, num, p, popup, slider};
@@ -151,6 +151,7 @@ pub fn specs() -> Vec<EffectSpec> {
                 p("physics/gravityVector/gravityY", "Gravity Y", num(1.0), slider(-1.0, 1.0, -1.0, 1.0, 2)),
                 p("physics/gravityVector/gravityZ", "Gravity Z", num(0.0), slider(-1.0, 1.0, -1.0, 1.0, 2)),
                 p("particle/particleType", "Particle Type", Value::Enum(0), popup(PARTICLE_TYPES)),
+                p(PW_TEXTURE_LAYER, "Texture Layer", Value::Layer(None), ParamUi::Layer),
                 p("particle/birthSize", "Birth Size", num(0.2), slider(0.0, 10.0, 0.0, 1.0, 3)),
                 p("particle/deathSize", "Death Size", num(0.2), slider(0.0, 10.0, 0.0, 1.0, 3)),
                 p("particle/sizeVariation", "Size Variation", num(0.0), pct()),

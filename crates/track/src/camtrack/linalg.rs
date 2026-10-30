@@ -398,6 +398,60 @@ pub fn cholesky_solve(a: &mut [f64], n: usize, b: &mut [f64]) -> bool {
     b.iter().all(|v| v.is_finite())
 }
 
+/// Preconditioned conjugate gradients with an independently recomputed residual check.
+/// Failure to converge (or non-finite/non-positive curvature) requests the direct fallback.
+pub(crate) fn conjugate_gradient(rhs: &[f64], apply: impl Fn(&[f64], &mut [f64]), precondition: impl Fn(&[f64], &mut [f64])) -> Option<Vec<f64>> {
+    let n = rhs.len();
+    let norm2 = dot_n(rhs, rhs);
+    if !norm2.is_finite() {
+        return None;
+    }
+    if rhs.iter().all(|v| *v == 0.0) {
+        return Some(vec![0.0; n]);
+    }
+    let tolerance2 = norm2 * 1e-22;
+    if tolerance2 == 0.0 {
+        return None;
+    }
+    let mut x = vec![0.0; n];
+    let mut r = rhs.to_vec();
+    let mut z = vec![0.0; n];
+    let mut ap = vec![0.0; n];
+    precondition(&r, &mut z);
+    let mut p = z.clone();
+    let mut rz = dot_n(&r, &z);
+    for _ in 0..n.saturating_mul(2).min(512) {
+        if !rz.is_finite() || rz <= 0.0 {
+            return None;
+        }
+        apply(&p, &mut ap);
+        let curvature = dot_n(&p, &ap);
+        if !curvature.is_finite() || curvature <= 0.0 {
+            return None;
+        }
+        let alpha = rz / curvature;
+        for i in 0..n {
+            x[i] += alpha * p[i];
+            r[i] -= alpha * ap[i];
+        }
+        if dot_n(&r, &r) <= tolerance2 {
+            apply(&x, &mut ap);
+            for i in 0..n {
+                ap[i] = rhs[i] - ap[i];
+            }
+            return (x.iter().all(|v| v.is_finite()) && dot_n(&ap, &ap) <= 100.0 * tolerance2).then_some(x);
+        }
+        precondition(&r, &mut z);
+        let next_rz = dot_n(&r, &z);
+        let beta = next_rz / rz;
+        for i in 0..n {
+            p[i] = z[i] + beta * p[i];
+        }
+        rz = next_rz;
+    }
+    None
+}
+
 /// A similarity transform `x ↦ s R x + t`.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Similarity {
@@ -584,6 +638,30 @@ mod tests {
         assert!(!cholesky_solve(&mut [1.0], 2, &mut [1.0, 1.0]));
         assert!(!cholesky_solve(&mut [1.0], 1, &mut []));
         assert!(cholesky_solve(&mut [], 0, &mut []));
+    }
+
+    #[test]
+    fn conjugate_gradient_checks_residual_and_bad_curvature() {
+        let n = 64;
+        let rhs: Vec<f64> = (0..n).map(|i| (i % 11) as f64 - 5.0).collect();
+        let apply = |x: &[f64], y: &mut [f64]| {
+            for i in 0..n {
+                y[i] = 4.0 * x[i] + if i > 0 { x[i - 1] } else { 0.0 } + if i + 1 < n { x[i + 1] } else { 0.0 };
+            }
+        };
+        let x = conjugate_gradient(&rhs, apply, |r, z| {
+            for (r, z) in r.iter().zip(z) {
+                *z = *r / 4.0;
+            }
+        })
+        .unwrap();
+        let mut product = vec![0.0; n];
+        apply(&x, &mut product);
+        let residual: f64 = rhs.iter().zip(product).map(|(b, ax)| (b - ax).powi(2)).sum();
+        assert!(residual < 1e-18 * dot_n(&rhs, &rhs));
+        assert!(conjugate_gradient(&[1.0], |x, y| y[0] = -x[0], |r, z| z.copy_from_slice(r)).is_none());
+        assert!(conjugate_gradient(&[f64::NAN], |_, _| {}, |_, _| {}).is_none());
+        assert_eq!(conjugate_gradient(&[0.0], |_, _| {}, |_, _| {}).unwrap(), vec![0.0]);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! Window ▸ Script Console: the panel shows, runs JavaScript through `script.run` (persistent
 //! context) and logs output, results and errors (egui_kittest, UI logic only).
 
+use crate::gpu_test::RenderSerial;
 use effectcraft_ui_egui::EffectcraftApp;
 use effectcraft_ui_egui::dock::PanelKind;
 use egui_kittest::Harness;
@@ -59,7 +60,7 @@ fn script_console_snapshot() {
     }
     h.state_mut().ui.script_console.input = "app.project.numItems".into();
     h.run_steps(3);
-    let img = h.render().expect("render");
+    let img = h.render_serialized().expect("render");
     let out = std::env::var("SC_SNAPSHOT").unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/test-out/script_console.png").into());
     if let Some(d) = std::path::Path::new(&out).parent() {
         std::fs::create_dir_all(d).unwrap();

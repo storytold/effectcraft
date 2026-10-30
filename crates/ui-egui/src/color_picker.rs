@@ -1,6 +1,7 @@
 //! The colour picker every colour input opens, laid out like After Effects' Color Picker: a
 //! square and a slider for the channel chosen with the H / S / B / R / G / B buttons, the new
-//! colour over the original, the HSB and RGB values, the hex code, and OK / Cancel.
+//! colour over the original, the HSB and RGB values, the hex code with an eyedropper that samples
+//! the Composition viewer, and OK / Cancel.
 //!
 //! Colours are sRGB components (0–1), as the project stores them. Changes apply as they are made
 //! (After Effects' Preview); Cancel or Escape goes back to the colour the picker opened with.
@@ -30,35 +31,55 @@ pub fn srgb_color_button(ui: &mut Ui, c: &mut [f32; 3]) -> Response {
 }
 
 /// The colour picker as a popup at `pos`, bound to `c`, opened with [`open_popup`]. Returns true
-/// when the colour changed (Cancel, Escape and the original swatch change it back).
+/// when the colour changed (Cancel, Escape and the original swatch change it back; the eyedropper
+/// changes it to the colour it samples).
 pub fn color_popup(ui: &mut Ui, id: egui::Id, pos: egui::Pos2, c: &mut [f32; 3]) -> bool {
     if !popup_is_open(ui, id) {
         return false;
     }
     let orig_id = id.with("original");
     let original = ui.data_mut(|d| *d.get_temp_mut_or_insert_with(orig_id, || *c));
+    // Read before a sample is taken: the press that samples the viewer lands outside the picker, and
+    // must not close it.
+    let armed = armed_for(ui.ctx(), id);
+    let mut sampled = false;
+    if let Some(rgb) = take_sample(ui.ctx(), id)
+        && rgb != *c
+    {
+        *c = rgb;
+        sampled = true;
+    }
     let mut out = Outcome::default();
     let area = egui::Area::new(id.with("area")).order(egui::Order::Foreground).fixed_pos(pos + vec2(0.0, 4.0)).show(ui.ctx(), |ui| {
         egui::Frame::popup(ui.style()).show(ui, |ui| out = color_picker(ui, id, c, original));
     });
-    // Escape is the picker's: consume it, so nothing later this pass takes it too.
+    // Escape is the picker's: consume it, so nothing later this pass takes it too. While the
+    // eyedropper is armed, Escape cancels it and the picker stays open.
     if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
-        out.close = Some(false);
+        if armed {
+            disarm(ui.ctx(), id);
+        } else {
+            out.close = Some(false);
+        }
     }
+    // A press outside closes the picker, unless it is the armed eyedropper's press on the viewer.
+    let on_viewer = armed && eyedropper_point(ui.ctx()).is_some();
     // A press in the pass that first draws the picker must not close it: an Area's rect is only
     // at its requested position from its second pass on (the first pass reports it at the
     // origin), so the click that just opened the picker would be read as a press outside it and
     // the picker would flash and close in that one frame (#1476).
     let pass_id = id.with("open-pass");
     let drawn_before = ui.data(|d| d.get_temp::<u64>(pass_id)).is_some_and(|p| p < ui.ctx().cumulative_pass_nr());
-    if drawn_before && pressed_outside(ui.ctx(), &area.response) {
+    if drawn_before && pressed_outside(ui.ctx(), &area.response) && !on_viewer {
         out.close.get_or_insert(true);
     }
+    note_overlay(ui.ctx(), area.response.rect);
     if let Some(keep) = out.close {
         if !keep && *c != original {
             *c = original;
             out.changed = true;
         }
+        disarm(ui.ctx(), id);
         ui.data_mut(|d| {
             d.insert_temp(id.with("open"), false);
             d.remove::<[f32; 3]>(orig_id);
@@ -67,6 +88,7 @@ pub fn color_popup(ui: &mut Ui, id: egui::Id, pos: egui::Pos2, c: &mut [f32; 3])
             d.remove::<u64>(open_pass_id());
         });
     } else {
+        refresh_armed(ui.ctx(), id);
         // Still open after this pass: dialogs leave Escape to the picker (see `open_recently`).
         let pass = ui.ctx().cumulative_pass_nr();
         ui.data_mut(|d| {
@@ -74,7 +96,7 @@ pub fn color_popup(ui: &mut Ui, id: egui::Id, pos: egui::Pos2, c: &mut [f32; 3])
             d.insert_temp(open_pass_id(), pass);
         });
     }
-    out.changed
+    out.changed || sampled
 }
 
 /// The `egui::Id` of the pass number in which a colour picker last stayed open, which
@@ -90,6 +112,196 @@ fn open_pass_id() -> egui::Id {
 pub fn open_recently(ctx: &egui::Context) -> bool {
     let pass: Option<u64> = ctx.data(|d| d.get_temp(open_pass_id()));
     pass.is_some_and(|p| p.saturating_add(1) >= ctx.cumulative_pass_nr())
+}
+
+/// The armed eyedropper of a picker: the picker's popup id, the pass it was last drawn in, and the
+/// colour the viewer sampled for it, if one is waiting for the picker's next draw. It lives in the
+/// egui context, since the viewer that samples has no picker in hand.
+#[derive(Clone, Copy)]
+struct Armed {
+    popup: egui::Id,
+    pass: u64,
+    sample: Option<[f32; 3]>,
+    dialog: Option<crate::Dialog>,
+}
+
+fn armed_key() -> egui::Id {
+    egui::Id::unique("color-picker-eyedropper")
+}
+
+fn dialog_key() -> egui::Id {
+    egui::Id::unique("color-picker-dialog")
+}
+
+/// Record the modal before drawing the viewer. A picker may sample behind its own dialog, but
+/// a new, unrelated modal must block it from its very first pass, before its rect is known.
+pub(crate) fn note_dialog(ctx: &egui::Context, dialog: Option<crate::Dialog>) {
+    ctx.data_mut(|data| data.insert_temp(dialog_key(), dialog));
+}
+
+fn current_dialog(ctx: &egui::Context) -> Option<crate::Dialog> {
+    ctx.data(|data| data.get_temp::<Option<crate::Dialog>>(dialog_key())).flatten()
+}
+
+/// The armed eyedropper, if its picker was drawn in this pass or the last: one whose picker stops
+/// being drawn (its dialog gone) lapses.
+fn armed_record(ctx: &egui::Context) -> Option<Armed> {
+    let armed: Option<Armed> = ctx.data(|d| d.get_temp(armed_key()));
+    let pass = ctx.cumulative_pass_nr();
+    armed.filter(|a| a.pass.saturating_add(1) >= pass)
+}
+
+fn armed_for(ctx: &egui::Context, popup: egui::Id) -> bool {
+    armed_record(ctx).is_some_and(|a| a.popup == popup)
+}
+
+/// Some picker's eyedropper is armed: a press on the Composition viewer samples the frame for it.
+pub fn eyedropper_armed(ctx: &egui::Context) -> bool {
+    armed_record(ctx).is_some()
+}
+
+fn arm(ctx: &egui::Context, popup: egui::Id) {
+    let pass = ctx.cumulative_pass_nr();
+    let dialog = current_dialog(ctx);
+    ctx.data_mut(|d| d.insert_temp(armed_key(), Armed { popup, pass, sample: None, dialog }));
+}
+
+fn disarm(ctx: &egui::Context, popup: egui::Id) {
+    let armed: Option<Armed> = ctx.data(|d| d.get_temp(armed_key()));
+    if armed.is_some_and(|a| a.popup == popup) {
+        ctx.data_mut(|d| d.remove::<Armed>(armed_key()));
+    }
+}
+
+/// Keeps `popup`'s eyedropper armed while its picker is drawn.
+fn refresh_armed(ctx: &egui::Context, popup: egui::Id) {
+    if let Some(armed) = armed_record(ctx).filter(|a| a.popup == popup) {
+        let pass = ctx.cumulative_pass_nr();
+        ctx.data_mut(|d| d.insert_temp(armed_key(), Armed { pass, ..armed }));
+    }
+}
+
+/// The colour the viewer sampled for `popup`, once: taking it disarms the eyedropper.
+fn take_sample(ctx: &egui::Context, popup: egui::Id) -> Option<[f32; 3]> {
+    let armed = armed_record(ctx).filter(|a| a.popup == popup)?;
+    let sample = armed.sample?;
+    disarm(ctx, popup);
+    Some(sample)
+}
+
+/// The viewer sampled `rgb` for the armed picker, which takes it on its next draw.
+pub fn deliver_sample(ctx: &egui::Context, rgb: [f32; 3]) {
+    if let Some(armed) = armed_record(ctx) {
+        ctx.data_mut(|d| d.insert_temp(armed_key(), Armed { sample: Some(rgb), ..armed }));
+        ctx.request_repaint();
+    }
+}
+
+fn viewer_key() -> egui::Id {
+    egui::Id::unique("color-picker-viewer")
+}
+
+/// The Composition viewer's rect as it was drawn this pass: where an armed eyedropper samples.
+pub fn note_viewer(ctx: &egui::Context, rect: Rect) {
+    let pass = ctx.cumulative_pass_nr();
+    ctx.data_mut(|d| d.insert_temp(viewer_key(), (pass, rect)));
+}
+
+fn overlay_key() -> egui::Id {
+    egui::Id::unique("color-picker-overlays")
+}
+
+/// A popup or dialog drawn over the viewer: a press inside `rect` is not a sample.
+pub fn note_overlay(ctx: &egui::Context, rect: Rect) {
+    let pass = ctx.cumulative_pass_nr();
+    ctx.data_mut(|d| {
+        // This pass's and the last's: the viewer may be drawn before an overlay in a pass.
+        let mut rects = d.get_temp::<Vec<(u64, Rect)>>(overlay_key()).unwrap_or_default();
+        rects.retain(|(p, _)| p.saturating_add(1) >= pass);
+        rects.push((pass, rect));
+        d.insert_temp(overlay_key(), rects);
+    });
+}
+
+/// Whether `pos` is over a popup or dialog drawn this pass or the last.
+fn overlaid(ctx: &egui::Context, pos: egui::Pos2) -> bool {
+    let pass = ctx.cumulative_pass_nr();
+    let rects: Option<Vec<(u64, Rect)>> = ctx.data(|d| d.get_temp(overlay_key()));
+    rects.unwrap_or_default().iter().any(|(p, r)| p.saturating_add(1) >= pass && r.contains(pos))
+}
+
+/// Where an armed eyedropper samples: the pointer, if it is over the viewer and not over a popup or
+/// dialog. The pointer is read rather than the viewer's responses, since a modal dialog over the
+/// viewer takes its clicks.
+pub fn eyedropper_point(ctx: &egui::Context) -> Option<egui::Pos2> {
+    if armed_record(ctx).is_some_and(|armed| armed.dialog != current_dialog(ctx)) {
+        return None;
+    }
+    let viewer: Option<(u64, Rect)> = ctx.data(|d| d.get_temp(viewer_key()));
+    let viewer = viewer.filter(|(p, _)| p.saturating_add(1) >= ctx.cumulative_pass_nr())?.1;
+    let pos = ctx.input(|i| i.pointer.interact_pos())?;
+    (viewer.contains(pos) && !overlaid(ctx, pos)).then_some(pos)
+}
+
+/// The press that samples for an armed eyedropper this frame, if there is one.
+pub fn sample_press(ctx: &egui::Context) -> Option<egui::Pos2> {
+    if ctx.input(|i| i.pointer.primary_pressed()) { eyedropper_point(ctx) } else { None }
+}
+
+fn automation_key() -> egui::Id {
+    egui::Id::unique("color-picker-eyedropper-rect")
+}
+
+/// The eyedropper's rect, for the automation registry; [`take_automation`] hands it over.
+fn note_automation(ctx: &egui::Context, rect: Rect) {
+    ctx.data_mut(|d| d.insert_temp(automation_key(), rect));
+}
+
+/// The eyedropper rect the last picker drawing noted, once. Pickers have no registry in hand, so the
+/// app registers it each frame.
+pub fn take_automation(ctx: &egui::Context) -> Option<Rect> {
+    ctx.data_mut(|d| {
+        let rect = d.get_temp::<Rect>(automation_key());
+        d.remove::<Rect>(automation_key());
+        rect
+    })
+}
+
+/// The eyedropper of the hex row. A press arms it, or disarms it while armed; the next press on the
+/// Composition viewer then samples the colour under the pointer into this picker.
+fn eyedropper(ui: &mut Ui, popup: egui::Id) {
+    let armed = armed_for(ui.ctx(), popup);
+    let (rect, resp) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::click());
+    let resp = resp.on_hover_text(tr("Eyedropper: click, then click in the Composition panel"));
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, resp.enabled(), "Eyedropper"));
+    let fill = if armed {
+        ui.visuals().selection.bg_fill
+    } else if resp.hovered() {
+        ui.visuals().widgets.hovered.bg_fill
+    } else {
+        Color32::TRANSPARENT
+    };
+    ui.painter().rect_filled(rect, 2.0, fill);
+    let col = if armed { ui.visuals().selection.stroke.color } else { ui.visuals().strong_text_color() };
+    draw_pipette(ui.painter(), rect, col);
+    if resp.clicked() {
+        if armed {
+            disarm(ui.ctx(), popup);
+        } else {
+            arm(ui.ctx(), popup);
+        }
+    }
+    note_automation(ui.ctx(), rect);
+}
+
+/// A pipette: a diagonal glass tube with a bulb at the top right and a tip at the bottom left, drawn
+/// within `rect`.
+pub fn draw_pipette(p: &egui::Painter, rect: Rect, col: Color32) {
+    let r = rect.shrink(rect.width() * 0.2);
+    let at = |x: f32, y: f32| pos2(r.min.x + x * r.width(), r.min.y + y * r.height());
+    p.line_segment([at(0.08, 0.92), at(0.62, 0.38)], Stroke::new(2.2, col));
+    p.circle_filled(at(0.76, 0.24), r.width() * 0.2, col);
+    p.line_segment([at(0.5, 0.3), at(0.7, 0.5)], Stroke::new(1.4, col));
 }
 
 /// What the picker did this frame.
@@ -255,6 +467,7 @@ fn color_picker(ui: &mut Ui, id: egui::Id, c: &mut [f32; 3], original: [f32; 3])
                 if hex_field(ui, id.with("hex"), &mut rgb) {
                     pick = Pick { hsv: keep_hue(rgb_to_hsv(rgb), pick.hsv), rgb };
                 }
+                eyedropper(ui, id);
             });
         });
     });
@@ -446,4 +659,126 @@ pub fn hsv_to_rgb([h, s, v]: [f32; 3]) -> [f32; 3] {
         v - v * s * k.min(4.0 - k).clamp(0.0, 1.0)
     };
     [f(5.0), f(3.0), f(1.0)]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sampling_viewer() -> egui_kittest::Harness<'static, crate::EffectcraftApp> {
+        let mut session = effectcraft_engine::Session::default();
+        session.execute("comp.new", serde_json::json!({"width": 320, "height": 180, "duration": 2})).unwrap();
+        session.execute("layer.newSolid", serde_json::json!({"color": "#204060"})).unwrap();
+        let mut harness = egui_kittest::Harness::builder().with_size(vec2(1200.0, 800.0)).build_eframe(|_| crate::EffectcraftApp::new(session));
+        settle_sampling_viewer(&mut harness);
+        harness
+    }
+
+    fn settle_sampling_viewer(harness: &mut egui_kittest::Harness<'_, crate::EffectcraftApp>) {
+        for _ in 0..200 {
+            harness.step();
+            if harness.state().frames.inflight() == 0 && harness.state().viewer_image.is_some() {
+                harness.run_steps(3);
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("the synthetic viewer frame did not arrive");
+    }
+
+    fn press_sampling_viewer(harness: &mut egui_kittest::Harness<'_, crate::EffectcraftApp>) -> Option<[f32; 3]> {
+        let ctx = harness.ctx.clone();
+        arm(&ctx, egui::Id::unique("test-popup"));
+        let point = crate::panels::viewer::comp_to_screen(&ctx, [20.0, 20.0]).unwrap();
+        harness.event(egui::Event::PointerMoved(point));
+        harness.event(egui::Event::PointerButton { pos: point, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+        harness.step();
+        let sample = ctx.data(|data| data.get_temp::<Armed>(armed_key())).and_then(|armed| armed.sample);
+        harness.event(egui::Event::PointerButton { pos: point, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+        harness.step();
+        sample
+    }
+
+    #[test]
+    fn popup_eyedropper_samples_the_displayed_channel_and_exposure() {
+        let mut harness = sampling_viewer();
+        harness.state_mut().session.state.viewer.channel = effectcraft_engine::viewer::Channel::Green;
+        let green = press_sampling_viewer(&mut harness).unwrap();
+        assert!(green.iter().all(|value| (*value - 64.0 / 255.0).abs() < 0.01), "{green:?}");
+        let options = &mut harness.state_mut().session.state.viewer;
+        options.channel = effectcraft_engine::viewer::Channel::Rgb;
+        options.exposure = 1.0;
+        let exposed = press_sampling_viewer(&mut harness).unwrap();
+        let mut expected = [[32, 64, 96, 255]];
+        effectcraft_engine::viewer::display_transform(&mut expected, effectcraft_engine::viewer::Channel::Rgb, false, 1.0);
+        for (actual, expected) in exposed.iter().zip(expected[0]) {
+            assert!((*actual - expected as f32 / 255.0).abs() < 0.01, "{exposed:?}");
+        }
+    }
+
+    #[test]
+    fn popup_eyedropper_samples_snapshot_and_refuses_wireframe() {
+        let mut harness = sampling_viewer();
+        harness.state_mut().session.execute("view.takeSnapshot", serde_json::json!({})).unwrap();
+        harness.state_mut().session.execute("layer.newSolid", serde_json::json!({"color": "#a0b0c0"})).unwrap();
+        settle_sampling_viewer(&mut harness);
+        harness.event(egui::Event::Key { key: egui::Key::F5, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+        // Let the snapshot texture's discard passes finish before arming this synthetic picker.
+        harness.step();
+        let snapshot = press_sampling_viewer(&mut harness).unwrap();
+        for (actual, expected) in snapshot.iter().zip([32, 64, 96]) {
+            assert!((*actual - expected as f32 / 255.0).abs() < 0.01, "{snapshot:?}");
+        }
+        let options = &mut harness.state_mut().session.state.viewer;
+        options.show_snapshot = false;
+        options.fast_previews = effectcraft_engine::commands::viewer_cmds::FastPreviews::Wireframe;
+        harness.event(egui::Event::Key { key: egui::Key::F5, physical_key: None, pressed: false, repeat: false, modifiers: egui::Modifiers::NONE });
+        assert_eq!(press_sampling_viewer(&mut harness), None, "wireframe must not sample an old pixel frame");
+    }
+
+    #[test]
+    fn a_new_modal_backdrop_cannot_deliver_a_pending_sample() {
+        let mut harness = sampling_viewer();
+        harness.state_mut().dialog = Some(crate::Dialog::About);
+        assert_eq!(press_sampling_viewer(&mut harness), None, "the first modal pass must already exclude its backdrop");
+    }
+
+    #[test]
+    fn a_picker_can_sample_behind_its_own_dialog_but_not_a_new_modal() {
+        let ctx = egui::Context::default();
+        let point = pos2(20.0, 20.0);
+        let mut output = ctx.run_ui(egui::RawInput { events: vec![egui::Event::PointerMoved(point)], ..Default::default() }, |ui| {
+            let ctx = ui.ctx();
+            note_dialog(ctx, Some(crate::Dialog::SolidSettings));
+            note_viewer(ctx, Rect::from_min_size(pos2(0.0, 0.0), vec2(320.0, 180.0)));
+            note_overlay(ctx, Rect::from_min_size(pos2(100.0, 100.0), vec2(120.0, 80.0)));
+            arm(ctx, egui::Id::unique("test-picker"));
+            assert_eq!(eyedropper_point(ctx), Some(point));
+            note_dialog(ctx, Some(crate::Dialog::About));
+            assert_eq!(eyedropper_point(ctx), None);
+        });
+        output.textures_delta.clear();
+    }
+
+    #[test]
+    fn armed_eyedropper_takes_one_sample_then_disarms() {
+        let ctx = egui::Context::default();
+        let popup = egui::Id::unique("test-picker");
+        arm(&ctx, popup);
+        assert!(eyedropper_armed(&ctx));
+        assert_eq!(take_sample(&ctx, popup), None);
+        deliver_sample(&ctx, [0.1, 0.2, 0.3]);
+        assert_eq!(take_sample(&ctx, popup), Some([0.1, 0.2, 0.3]));
+        assert!(!eyedropper_armed(&ctx));
+        assert_eq!(take_sample(&ctx, popup), None);
+    }
+
+    #[test]
+    fn points_over_a_dialog_are_not_samples() {
+        let ctx = egui::Context::default();
+        let dialog = Rect::from_min_size(pos2(100.0, 100.0), vec2(120.0, 80.0));
+        note_overlay(&ctx, dialog);
+        assert!(overlaid(&ctx, pos2(150.0, 150.0)));
+        assert!(!overlaid(&ctx, pos2(20.0, 20.0)));
+    }
 }

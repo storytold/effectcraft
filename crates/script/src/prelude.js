@@ -734,9 +734,8 @@ PropertyGroup.prototype.addProperty = function (name) {
   } else if (r.kind === "animator") {
     uid = __call("layer.addTextAnimator", { comp: L.__comp, layer: L.__id, properties: [] }).animator;
   } else if (r.kind === "animatorProperty") {
-    var before = this.numProperties;
-    __call("layer.addTextAnimatorProperty", { comp: L.__comp, layer: L.__id, animator: r.animator, property: r.property });
-    return this.property(before + 1);
+    var added = __call("layer.addTextAnimatorProperty", { comp: L.__comp, layer: L.__id, animator: r.animator, property: r.property });
+    return this.property(added.index);
   } else if (r.kind === "selector") {
     var n0 = this.numProperties;
     __call("layer.addTextSelector", { comp: L.__comp, layer: L.__id, animator: r.animator, kind: r.selector });
@@ -1707,7 +1706,8 @@ Object.defineProperty(FootageItem.prototype, "mainSource", {
     return this.__mainSource;
   },
 });
-FootageItem.prototype.replace = function (f) { __call("file.replaceFootage", { item: this.__id, path: __str(f) }); };
+// replace() swaps in one file, even a numbered still (replaceWithSequence brings a run), as in After Effects.
+FootageItem.prototype.replace = function (f) { __call("file.replaceFootage", { item: this.__id, path: __str(f), sequence: false }); };
 FootageItem.prototype.replaceWithSequence = function (f, forceAlphabetical) {
   __call("file.replaceFootage", { item: this.__id, path: __str(f), sequence: true, alphabetical: !!forceAlphabetical });
 };

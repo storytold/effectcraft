@@ -15,6 +15,7 @@ mod screenshot;
 mod viewer_frames;
 mod window;
 
+pub use gpu::{GPU_PREPARING, GpuBuild};
 #[cfg(test)]
 pub(crate) use screenshot::{MAX_PENDING_SHOTS, SCREENSHOT_SETTLE_PASSES, SCREENSHOT_SETTLE_S, SCREENSHOT_TIMEOUT_S};
 
@@ -74,8 +75,12 @@ impl EffectcraftApp {
             wgpu: None,
             gpu: None,
             gpu_checked: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            gpu_build: None,
             gpu_failures: None,
             gpu_failure_applied: None,
+            footage_watcher: None,
+            footage_watch_key: None,
             device_lost_close: None,
             dialog_answers: std::sync::mpsc::channel(),
             file_dialogs: FileDialogsUp::default(),

@@ -458,7 +458,7 @@ fn time_dependent(layer: &Layer, effects: bool) -> bool {
     if matches!(layer.source, LayerSource::Shape)
         && let Some(c) = layer.props.sub("contents")
     {
-        return group_has(c, "wiggle");
+        return group_has(c, "wiggle") || group_has(c, "wiggler");
     }
     // Wiggly selectors move with time; Expression selectors evaluate per character (their
     // property value alone doesn't capture the result).
@@ -479,6 +479,19 @@ fn group_has(g: &PropGroup, match_id: &str) -> bool {
 
 /// Feed every property of `g` that can change over time (keyframes or expression) as its value
 /// at the context time. The static structure is hashed separately.
+/// Mix the collapsed-instance overrides that target `id` into a cache key. They replace values
+/// without editing the layer, so a key without them would reuse another instance's buffer.
+fn hash_overrides(h: &mut KeyHasher, ctx: &EvalCtx, id: effectcraft_project::LayerId) {
+    for o in ctx.property_overrides.iter().filter(|o| o.layer == id) {
+        o.prop.hash(h);
+        o.font.hash(h);
+        hash_debug(h, &o.value);
+    }
+    for m in ctx.media_overrides.iter().filter(|m| m.layer == id) {
+        m.item.hash(h);
+    }
+}
+
 fn hash_values(h: &mut KeyHasher, ctx: &EvalCtx, layer: &Layer, g: &PropGroup) {
     for c in &g.children {
         match c {
@@ -514,7 +527,7 @@ pub fn input_key(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bo
     if layer.switches.adjustment || history_unkeyable(layer, Some(effects)) {
         return None;
     }
-    let base = key_any(ctx, layer, scale, draft, blur, true, Some(effects))?;
+    let base = key_any(ctx, layer, scale, draft, blur, true, EffectScope::First(effects))?;
     let mut h = KeyHasher(base ^ 0x5bd1_e995_7a3c_11d3);
     effects.hash(&mut h);
     Some(h.finish())
@@ -575,25 +588,39 @@ fn has_expression(g: &PropGroup) -> bool {
     })
 }
 
+/// How far the effect stack reaches into a cache key. [`EffectScope::Footprint`] keys an
+/// adjustment layer's footprint — its source through its masks, without any effects — so the
+/// stack must not reach the key at all (#687).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum EffectScope {
+    /// The whole stack (the processed layer).
+    All,
+    /// Only the first `n` effects (a layer's input, see [`input_key`]).
+    First(usize),
+    /// None of it (an adjustment layer's footprint).
+    Footprint,
+}
+
 /// Cache key for an adjustment layer's footprint (its source through its masks, see
 /// `Renderer::adjustment_footprint`): the GPU compositor then uploads it once, not every frame.
 pub fn footprint_key(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool) -> Option<u64> {
     // The footprint is the source through the masks, without the effects: a time-dependent
     // effect (Noise on a finishing adjustment layer) must not re-key it every frame (on the GPU,
-    // a full-frame re-upload per frame).
-    Some(derive(key_any(ctx, layer, scale, draft, blur, false, Some(0))?, 0xf007_9417))
+    // a full-frame re-upload per frame). Shutter, paint, the comp scene and effect dependencies
+    // stay out of this key too; a mask still does.
+    Some(derive(key_any(ctx, layer, scale, draft, blur, false, EffectScope::Footprint)?, 0xf007_9417))
 }
 
 fn key_with(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool, footage: bool) -> Option<u64> {
     if layer.switches.adjustment {
         return None;
     }
-    key_any(ctx, layer, scale, draft, blur, footage, None)
+    key_any(ctx, layer, scale, draft, blur, footage, EffectScope::All)
 }
 
-/// `blur`: the layer is motion blurred in this render (`Renderer::mb_on`). `effects`: key only
-/// the first that many effects (a layer's input, see [`input_key`]).
-fn key_any(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool, footage: bool, effects: Option<usize>) -> Option<u64> {
+/// `blur`: the layer is motion blurred in this render (`Renderer::mb_on`). `effects`: how far
+/// the effect stack reaches into the key (see [`EffectScope`]).
+fn key_any(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool, footage: bool, effects: EffectScope) -> Option<u64> {
     let mut h = KeyHasher(0xcbf2_9ce4_8422_2325);
     ctx.comp.frame_rate.as_f64().to_bits().hash(&mut h);
     ctx.comp.enable_frame_blending.hash(&mut h);
@@ -605,8 +632,9 @@ fn key_any(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool, fo
             hash_debug(&mut h, s);
         }
         LayerSource::Text | LayerSource::Shape => {}
-        LayerSource::Footage { item } if footage || still_footage(ctx, *item) => {
-            let it = ctx.project.item(*item)?;
+        LayerSource::Footage { item } if footage || still_footage(ctx, ctx.media_item(layer, *item)) => {
+            let item = ctx.media_item(layer, *item);
+            let it = ctx.project.item(item)?;
             let ItemKind::Footage(f) = &it.kind else { return None };
             hash_debug(&mut h, f);
             // A proxy (and its Use Proxy switch) changes the pixels.
@@ -629,12 +657,18 @@ fn key_any(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool, fo
     scale.to_bits().hash(&mut h);
     draft.hash(&mut h);
     layer.id.hash(&mut h);
+    // Collapsed-instance overrides replace values without editing the nested layer, so mix them
+    // into the key: a Font override, effect parameter or any other source-affecting override
+    // must not reuse another instance's processed buffer.
+    hash_overrides(&mut h, ctx, layer.id);
     hash_debug(&mut h, &layer.source);
     // (Audio, Lock and Shy don't change pixels.)
     hash_debug(&mut h, &layer.switches.pixels());
     // Mask motion blur and effects that read the shutter depend on whether the layer is motion
-    // blurred in this render and on the comp's shutter.
-    if layer.masks().is_some_and(|m| !m.children.is_empty()) || layer.effects().is_some_and(|fx| !fx.children.is_empty()) {
+    // blurred in this render and on the comp's shutter. A footprint has no effects, so only its
+    // masks put the shutter in the key.
+    if layer.masks().is_some_and(|m| !m.children.is_empty()) || (effects != EffectScope::Footprint && layer.effects().is_some_and(|fx| !fx.children.is_empty()))
+    {
         blur.hash(&mut h);
         ctx.comp.enable_motion_blur.hash(&mut h);
         ctx.comp.shutter_angle.to_bits().hash(&mut h);
@@ -648,23 +682,29 @@ fn key_any(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool, fo
         {
             continue;
         }
+        // A footprint is its source through its masks: the effect stack is not in it at all.
         // A layer's input runs only its first effects: the later ones (a Puppet whose pins are
         // dragged, #212) don't change it, so it stays cached.
-        if let (Some(n), Node::Group(g)) = (effects, c)
+        if let Node::Group(g) = c
             && g.match_id == "effects"
         {
-            let mut first = g.clone();
-            let mut seen = 0;
-            first.children.retain(|e| match e {
-                Node::Prop(_) => true,
-                Node::Group(_) => {
-                    seen += 1;
-                    seen <= n
-                }
-            });
-            hash_debug(&mut h, &first);
-            hash_values(&mut h, ctx, layer, &first);
-            continue;
+            if effects == EffectScope::Footprint {
+                continue;
+            }
+            if let EffectScope::First(n) = effects {
+                let mut first = g.clone();
+                let mut seen = 0;
+                first.children.retain(|e| match e {
+                    Node::Prop(_) => true,
+                    Node::Group(_) => {
+                        seen += 1;
+                        seen <= n
+                    }
+                });
+                hash_debug(&mut h, &first);
+                hash_values(&mut h, ctx, layer, &first);
+                continue;
+            }
         }
         // Static structure: values, keyframes, expressions, enabled flags, effect ids, modes.
         hash_debug(&mut h, c);
@@ -673,7 +713,9 @@ fn key_any(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool, fo
         }
     }
     // Paint strokes appear and disappear with their Duration spans (not property values).
-    if layer.switches.effects
+    // A footprint does not include them.
+    if effects != EffectScope::Footprint
+        && layer.switches.effects
         && let Some(fx) = layer.effects()
     {
         let lt = layer.layer_time(ctx.time).seconds();
@@ -686,14 +728,14 @@ fn key_any(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool, fo
     if mask_motion_blur(ctx, layer, blur) {
         layer.layer_time(ctx.time).0.hash(&mut h);
     }
-    if time_dependent(layer, effects != Some(0)) {
+    if time_dependent(layer, effects != EffectScope::Footprint) {
         layer.layer_time(ctx.time).0.hash(&mut h);
         // Effects also see the layer's time mapping.
         layer.start_time.0.hash(&mut h);
         layer.stretch.to_bits().hash(&mut h);
     }
     // Effects that see the comp camera or lights (#397) change when they or the layer move.
-    if reads_comp_scene(layer) {
+    if effects != EffectScope::Footprint && reads_comp_scene(layer) {
         hash_debug(&mut h, &crate::comp_scene(ctx, layer));
     }
     Some(h.finish())

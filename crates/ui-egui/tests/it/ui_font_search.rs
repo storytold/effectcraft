@@ -1,4 +1,5 @@
 //! Real keyboard/pointer coverage for the font menus in both text panels.
+use crate::gpu_test::RenderSerial;
 use effectcraft_engine::{Session, commands::text_edit::layer_doc, project::LayerId};
 use effectcraft_ui_egui::{EffectcraftApp, dock::PanelKind};
 use egui::{Event, Key, Modifiers, PointerButton};
@@ -29,6 +30,7 @@ fn type_text(h: &mut Harness<'_, EffectcraftApp>, text: &str) {
 
 #[test]
 fn font_search_filters_selects_and_undoes_in_both_panels() {
+    let _device = crate::gpu_test::lock();
     for (panel, prefix) in [(PanelKind::Character, "character.font"), (PanelKind::Properties, "properties.text.font")] {
         let mut s = Session::default();
         s.execute("comp.new", json!({"width": 320, "height": 180})).unwrap();
@@ -56,7 +58,7 @@ fn font_search_filters_selects_and_undoes_in_both_panels() {
         assert!(!rows.is_empty());
         assert!(rows.iter().all(|r| r.label.to_lowercase().contains("jetbrains")));
         if let Ok(dir) = std::env::var("EC_SNAPSHOT_DIR") {
-            h.render().unwrap().save(format!("{dir}/{prefix}-search.png")).unwrap();
+            h.render_serialized().unwrap().save(format!("{dir}/{prefix}-search.png")).unwrap();
         }
         assert_eq!(layer_doc(&h.state().session, LayerId(lid)).unwrap().font, "Inter", "typing only filters");
         key(&mut h, Key::Enter);
@@ -76,7 +78,7 @@ fn font_search_filters_selects_and_undoes_in_both_panels() {
         // Reopening clears the previous query, and mouse selection still works.
         h.run_steps(2);
         if let Ok(dir) = std::env::var("EC_SNAPSHOT_DIR") {
-            h.render().unwrap().save(format!("{dir}/{prefix}-reopened.png")).unwrap();
+            h.render_serialized().unwrap().save(format!("{dir}/{prefix}-reopened.png")).unwrap();
         }
         assert!(h.state().auto.query(&format!("{prefix}.option.")).len() > 1);
         type_text(&mut h, "JetBrains");
@@ -255,4 +257,25 @@ fn font_menu_grows_back_after_an_empty_search() {
     assert!(rows(&h) > 0 && h.state().auto.query("character.font.option.").iter().all(|r| r.label.contains("JetBrains")));
     click(&mut h, "character.font.option.JetBrains Mono");
     assert_eq!(layer_doc(&h.state().session, LayerId(lid)).unwrap().font, "JetBrains Mono", "a click on a row picks the font");
+}
+
+/// #1089: the font menu can re-run the system scan without restarting the app, and the press
+/// does not also flip the "Variable fonts only" filter.
+#[test]
+fn font_menu_rescan_button_adds_fonts_installed_later() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"width": 320, "height": 180})).unwrap();
+    s.execute("layer.newText", json!({"text": "Keep this text", "font": "Inter"})).unwrap();
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(move |_| EffectcraftApp::new(s));
+    h.state_mut().show_panel(PanelKind::Character);
+    h.run_steps(3);
+    click(&mut h, "character.font");
+    h.run_steps(3);
+    assert!(h.state().auto.find("character.font.rescan").is_some(), "the filter row offers a rescan");
+    click(&mut h, "character.font.rescan");
+    assert!(h.state().ui.status.contains("Rescan Fonts"), "the status reports the rescan: {}", h.state().ui.status);
+    // The popup stays open, the variable filter did not flip, and the list still has the bundled families.
+    assert!(h.state().auto.find("character.font.search").is_some(), "the popup stays open");
+    let rows = h.state().auto.query("character.font.option.");
+    assert!(rows.iter().any(|r| r.label == "Inter"), "{:?}", rows.iter().map(|r| &r.label).collect::<Vec<_>>());
 }

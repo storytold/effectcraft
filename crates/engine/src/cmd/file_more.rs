@@ -5,13 +5,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use effectcraft_color::Label;
-use effectcraft_project::{AlphaMode, Comp, Footage, FootageKind, ItemId, ItemKind, LayerSource, Project, Solid, limits};
+use effectcraft_project::{AlphaMode, CineonSettings, CineonUnits, Comp, Footage, FootageKind, ItemId, ItemKind, LayerSource, Project, Solid, limits};
 use effectcraft_time::{FrameRate, Tick};
 use serde_json::{Value, json};
 
 use super::{CommandSpec, always, b_p, bad, f_p, has_comp, has_project_selection, str_p};
 use crate::sequence::SequenceOptions;
-use crate::{EngineError, Result, Session, cmd};
+use crate::{EngineError, Result, Session, cmd, query};
 
 fn has_footage_selection(s: &Session) -> std::result::Result<(), String> {
     if selected_footage(s).is_empty() { Err("select footage in the Project panel".into()) } else { Ok(()) }
@@ -78,9 +78,17 @@ fn close_project(s: &mut Session, _: &Value) -> Result<Value> {
 
 fn save_copy(s: &mut Session, p: &Value) -> Result<Value> {
     let path = str_p(p, "path").ok_or_else(|| bad("file.saveCopy", "missing `path`"))?;
+    s.refuse_export(path)?;
     let json = super::file::file_text(s, path)?;
-    s.services.write_file(path, json.as_bytes()).map_err(|e| EngineError::Other(format!("cannot write {path}: {e}")))?;
+    s.write_output(path, json.as_bytes())?;
     Ok(json!({"path": path, "bytes": json.len()}))
+}
+
+/// `file.checkOutput {path}`: the commands that write to a path never replace footage, a proxy
+/// or the project file; this says beforehand, for callers that write the file themselves.
+fn check_output(s: &mut Session, p: &Value) -> Result<Value> {
+    let path = str_p(p, "path").ok_or_else(|| bad("file.checkOutput", "missing `path`"))?;
+    Ok(s.output_status(path))
 }
 
 fn rate_of(p: &Value) -> FrameRate {
@@ -376,41 +384,6 @@ fn find_missing(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn collect_files(s: &mut Session, p: &Value) -> Result<Value> {
     let folder = str_p(p, "folder").ok_or_else(|| bad("file.collectFiles", "missing `folder`"))?.trim_end_matches('/').to_string();
-    // Collect Files makes its folder (and the footage folder inside it).
-    #[cfg(not(target_arch = "wasm32"))]
-    std::fs::create_dir_all(format!("{folder}/(Footage)")).map_err(|e| EngineError::Other(format!("cannot create {folder}: {e}")))?;
-    let mut proj = (*s.project).clone();
-    let mut copied = 0;
-    let mut errors = vec![];
-    let mut used_names = BTreeSet::new();
-    for it in proj.items.values_mut() {
-        let ItemKind::Footage(f) = &mut it.kind else { continue };
-        if f.path.is_empty() {
-            continue;
-        }
-        let files: Vec<String> = if f.sequence.is_empty() { vec![f.path.clone()] } else { f.sequence.clone() };
-        let mut new_paths = vec![];
-        for src in &files {
-            let mut name = std::path::Path::new(src).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "footage".into());
-            let mut k = 2;
-            while !used_names.insert(name.clone()) {
-                name = format!("{k}_{name}");
-                k += 1;
-            }
-            let dst = format!("{folder}/(Footage)/{name}");
-            match s.services.read_file(src).and_then(|bytes| s.services.write_file(&dst, &bytes)) {
-                Ok(()) => copied += 1,
-                Err(e) => errors.push(format!("{src}: {e}")),
-            }
-            new_paths.push(dst);
-        }
-        if f.sequence.is_empty() {
-            f.path = new_paths.remove(0);
-        } else {
-            f.path = new_paths.first().cloned().unwrap_or_default();
-            f.sequence = new_paths;
-        }
-    }
     let stem = s
         .path
         .as_deref()
@@ -418,7 +391,67 @@ fn collect_files(s: &mut Session, p: &Value) -> Result<Value> {
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "Untitled Project".into());
     let out = format!("{folder}/{stem}.ecproj");
-    s.services.write_file(&out, proj.to_json().as_bytes()).map_err(|e| EngineError::Other(format!("cannot write {out}: {e}")))?;
+    // Where every copy goes, before anything is made: a copy never lands on a file the project
+    // reads (other footage, a proxy, the project file itself), and then nothing is written.
+    let protected = s.protected_files();
+    let mut used_names = BTreeSet::new();
+    let mut plan: Vec<(ItemId, Vec<(String, String)>)> = vec![];
+    for it in s.project.items.values() {
+        let ItemKind::Footage(f) = &it.kind else { continue };
+        if f.path.is_empty() {
+            continue;
+        }
+        let files: Vec<&String> = if f.sequence.is_empty() { vec![&f.path] } else { f.sequence.iter().collect() };
+        let mut pairs = vec![];
+        for src in files {
+            let mut name = std::path::Path::new(src).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "footage".into());
+            let mut k = 2;
+            while !used_names.insert(name.clone()) {
+                name = format!("{k}_{name}");
+                k += 1;
+            }
+            let dst = format!("{folder}/(Footage)/{name}");
+            // A file that is already where its copy goes stays (it is not copied onto itself).
+            if !crate::output_guard::same_file(std::path::Path::new(src), std::path::Path::new(&dst))
+                && let Some(source) = protected.find(std::path::Path::new(&dst))
+            {
+                return Err(EngineError::Other(format!("Nothing was collected. {}", source.refusal(&dst, crate::output_guard::Use::Export))));
+            }
+            pairs.push((src.clone(), dst));
+        }
+        plan.push((it.id, pairs));
+    }
+    if let Some(source) = protected.find(std::path::Path::new(&out)) {
+        return Err(EngineError::Other(format!("Nothing was collected. {}", source.refusal(&out, crate::output_guard::Use::Export))));
+    }
+    // Collect Files makes its folder (and the footage folder inside it).
+    #[cfg(not(target_arch = "wasm32"))]
+    std::fs::create_dir_all(format!("{folder}/(Footage)")).map_err(|e| EngineError::Other(format!("cannot create {folder}: {e}")))?;
+    let mut proj = (*s.project).clone();
+    let mut copied = 0;
+    let mut errors = vec![];
+    for (id, pairs) in plan {
+        let mut new_paths = vec![];
+        for (src, dst) in &pairs {
+            if crate::output_guard::same_file(std::path::Path::new(src), std::path::Path::new(dst)) {
+                copied += 1;
+            } else {
+                match s.services.read_file(src).and_then(|bytes| s.write_output_with(&protected, dst, &bytes).map_err(std::io::Error::other)) {
+                    Ok(()) => copied += 1,
+                    Err(e) => errors.push(format!("{src}: {e}")),
+                }
+            }
+            new_paths.push(dst.clone());
+        }
+        let Some(ItemKind::Footage(f)) = proj.items.get_mut(&id).map(|it| &mut it.kind) else { continue };
+        if f.sequence.is_empty() {
+            f.path = new_paths.pop().unwrap_or_default();
+        } else {
+            f.path = new_paths.first().cloned().unwrap_or_default();
+            f.sequence = new_paths;
+        }
+    }
+    s.write_output_with(&protected, &out, proj.to_json().as_bytes())?;
     s.toast(format!("Collected {copied} file(s) into {folder}"));
     Ok(json!({"project": out, "copied": copied, "errors": errors}))
 }
@@ -501,7 +534,7 @@ fn run_script(s: &mut Session, p: &Value) -> Result<Value> {
             }
             _ => return Err(bad("file.runScript", format!("step {}: needs `command`", i + 1))),
         };
-        if id == "file.runScript" || id == "script.run" {
+        if super::scripts::RUNS_SCRIPTS.contains(&id.as_str()) {
             return Err(bad("file.runScript", "scripts can't run scripts"));
         }
         let r = if from_file { s.execute_for_script(&id, params) } else { s.execute(&id, params) };
@@ -536,7 +569,7 @@ fn is_jsxbin(name: &str) -> bool {
 }
 
 /// A script error becomes a toast and a command error.
-fn report_js(s: &mut Session, name: &str, out: Value) -> Result<Value> {
+pub(crate) fn report_js(s: &mut Session, name: &str, out: Value) -> Result<Value> {
     if let Some(e) = out.get("error").filter(|e| !e.is_null()) {
         let line = e.get("line").and_then(Value::as_u64).map(|l| format!(" (line {l})")).unwrap_or_default();
         let msg = e.get("message").and_then(Value::as_str).unwrap_or("script error");
@@ -549,6 +582,13 @@ fn report_js(s: &mut Session, name: &str, out: Value) -> Result<Value> {
 /// Run a script's code under its file name (installed / sample scripts, ScriptUI panels).
 pub(crate) fn run_js_named(s: &mut Session, code: &str, name: &str) -> Result<Value> {
     let out = run_js(s, code, name, false)?;
+    report_js(s, name, out)
+}
+
+/// Run the code of the script file at `path` (its `#include`s and `$.fileName` use that path),
+/// reported under its file name `name` (Startup and Shutdown scripts).
+pub(crate) fn run_js_file(s: &mut Session, code: &str, path: &str, name: &str) -> Result<Value> {
+    let out = run_js(s, code, path, false)?;
     report_js(s, name, out)
 }
 
@@ -594,6 +634,131 @@ pub(crate) struct Interpretation {
     preserve_rgb: Option<bool>,
     /// Start Timecode.
     start: Option<StartTimecode>,
+    /// Cineon Settings (DPX and Cineon footage).
+    cineon: CineonEdit,
+}
+
+/// Interpret Footage ▸ Cineon Settings parsed from command parameters (every field optional).
+#[derive(Clone, Debug, Default)]
+struct CineonEdit {
+    /// Logarithmic Conversion.
+    log: Option<bool>,
+    units: Option<CineonUnits>,
+    /// The units the Converted Black and White Points are given in (`pointUnits`, else `cineonUnits`,
+    /// else the footage's own Units).
+    point_units: Option<CineonUnits>,
+    converted_black: Option<f64>,
+    converted_white: Option<f64>,
+    /// 10 Bit Black and White Points.
+    black: Option<f64>,
+    white: Option<f64>,
+    gamma: Option<f64>,
+    rolloff: Option<f64>,
+}
+
+impl CineonEdit {
+    fn parse(p: &Value, cmd: &str) -> Result<CineonEdit> {
+        let units = |key: &str| -> Result<Option<CineonUnits>> {
+            match str_p(p, key) {
+                None => Ok(None),
+                Some(u) => CineonUnits::parse(u).map(Some).ok_or_else(|| bad(cmd, format!("{key}: 10bit|8bit|float, not `{u}`"))),
+            }
+        };
+        let num = |key: &str, lo: f64, hi: f64| -> Result<Option<f64>> {
+            match p.get(key) {
+                None | Some(Value::Null) => Ok(None),
+                Some(v) => v
+                    .as_f64()
+                    .filter(|x| x.is_finite() && (lo..=hi).contains(x))
+                    .map(Some)
+                    .ok_or_else(|| bad(cmd, format!("{key}: a number from {lo} to {hi}"))),
+            }
+        };
+        let units_now = units("cineonUnits")?;
+        Ok(CineonEdit {
+            log: b_p(p, "logConversion"),
+            units: units_now,
+            point_units: units("pointUnits")?.or(units_now),
+            // Range-checked once their units are known (`settings_for`).
+            converted_black: num("convertedBlack", f64::MIN, f64::MAX)?,
+            converted_white: num("convertedWhite", f64::MIN, f64::MAX)?,
+            black: num("tenBitBlack", 0.0, 1023.0)?,
+            white: num("tenBitWhite", 0.0, 1023.0)?,
+            gamma: num("currentGamma", 0.1, 10.0)?,
+            rolloff: num("highlightRolloff", 0.0, 100.0)?,
+        })
+    }
+
+    fn is_empty(&self) -> bool {
+        self.log.is_none()
+            && self.units.is_none()
+            && self.converted_black.is_none()
+            && self.converted_white.is_none()
+            && self.black.is_none()
+            && self.white.is_none()
+            && self.gamma.is_none()
+            && self.rolloff.is_none()
+    }
+
+    /// Footage `f`'s Cineon Settings after this edit; `None` when nothing changes them (no Cineon
+    /// parameters, or `f` is not a DPX or Cineon file).
+    fn settings_for(&self, f: &Footage, cmd: &str) -> Result<Option<CineonSettings>> {
+        if self.is_empty() || !f.is_cineon_file() {
+            return Ok(None);
+        }
+        let mut c = f.cineon;
+        let units = self.point_units.unwrap_or(c.units);
+        let point = |v: f64| -> Result<f32> {
+            let ten = units.to_ten_bit(v);
+            let max = units.from_ten_bit(f64::from(CineonSettings::MAX));
+            if (0.0..=f64::from(CineonSettings::MAX)).contains(&ten) {
+                Ok(ten as f32)
+            } else {
+                Err(bad(cmd, format!("converted points: 0 to {max} in {} units", units.label())))
+            }
+        };
+        if let Some(v) = self.converted_black {
+            c.converted_black = point(v)?;
+        }
+        if let Some(v) = self.converted_white {
+            c.converted_white = point(v)?;
+        }
+        if let Some(v) = self.log {
+            c.log_conversion = v;
+        }
+        if let Some(u) = self.units {
+            c.units = u;
+        }
+        if let Some(v) = self.black {
+            c.black = v as f32;
+        }
+        if let Some(v) = self.white {
+            c.white = v as f32;
+        }
+        if let Some(v) = self.gamma {
+            c.gamma = v as f32;
+        }
+        if let Some(v) = self.rolloff {
+            c.rolloff = v as f32;
+        }
+        if c.black >= c.white {
+            return Err(bad(cmd, "the 10 Bit Black Point must be below the 10 Bit White Point"));
+        }
+        Ok(Some(c))
+    }
+}
+
+/// Footage `f`'s Cineon Settings as commands report them (`null` for files they don't apply to).
+fn cineon_json(f: &Footage) -> Value {
+    if !f.is_cineon_file() {
+        return Value::Null;
+    }
+    let c = &f.cineon;
+    json!({
+        "logConversion": c.log_conversion, "units": c.units.id(),
+        "convertedBlack": c.units.from_ten_bit(f64::from(c.converted_black)), "convertedWhite": c.units.from_ten_bit(f64::from(c.converted_white)),
+        "tenBitBlack": c.black, "tenBitWhite": c.white, "currentGamma": c.gamma, "highlightRolloff": c.rolloff,
+    })
 }
 
 /// Interpret Footage ▸ Start Timecode.
@@ -687,7 +852,21 @@ impl Interpretation {
                 v.as_f64().filter(|x| x.is_finite() && (0.0..=StartTimecode::MAX as f64).contains(x)).map(|x| x.round() as i64).ok_or_else(start_err)?,
             )),
         };
+        it.cineon = CineonEdit::parse(p, cmd)?;
         Ok(it)
+    }
+
+    /// Check the Cineon Settings this interpretation gives each of `footage`: an error names a
+    /// value out of range, or Cineon parameters when none of the footage is DPX or Cineon.
+    pub(crate) fn check<'a>(&self, footage: impl IntoIterator<Item = &'a Footage>, cmd: &str) -> Result<()> {
+        if self.cineon.is_empty() {
+            return Ok(());
+        }
+        let mut any = false;
+        for f in footage {
+            any |= self.cineon.settings_for(f, cmd)?.is_some();
+        }
+        if any { Ok(()) } else { Err(bad(cmd, "Cineon Settings apply to DPX and Cineon footage only")) }
     }
 
     pub(crate) fn apply(&self, f: &mut Footage, guessed: Option<(AlphaMode, [f32; 3])>) {
@@ -749,6 +928,10 @@ impl Interpretation {
         if let Some(v) = self.preserve_rgb {
             f.preserve_rgb = v;
         }
+        // Checked before the edit (`Interpretation::check`).
+        if let Ok(Some(c)) = self.cineon.settings_for(f, "file.interpretFootage") {
+            f.cineon = c;
+        }
         // After the frame rate: timecode is read at the footage's rate.
         if let Some(start) = self.start.as_ref().and_then(|t| t.frame(f.frame_rate)) {
             f.start_timecode = start;
@@ -795,6 +978,11 @@ fn interpret(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(bad("file.interpretFootage", "select footage"));
     }
     let it = Interpretation::parse(p, "file.interpretFootage")?;
+    let footage = items.iter().filter_map(|i| match s.project.item(*i).map(|x| &x.kind) {
+        Some(ItemKind::Footage(f)) => Some(f),
+        _ => None,
+    });
+    it.check(footage, "file.interpretFootage")?;
     let guesses: Vec<Option<(AlphaMode, [f32; 3])>> = items
         .iter()
         .map(|i| match (it.guess, s.project.item(*i).map(|x| &x.kind)) {
@@ -830,7 +1018,7 @@ fn interpret(s: &mut Session, p: &Value) -> Result<Value> {
                 "item": i.0, "alpha": format!("{:?}", f.alpha), "matteColor": f.premul_color, "invertAlpha": f.invert_alpha,
                 "fields": f.fields.label(), "pixelAspect": f.pixel_aspect, "loop": f.loop_count, "frameRate": f.frame_rate.as_f64(),
                 "linearLight": f.linear_light, "preserveRgb": f.preserve_rgb, "startTimecode": f.timecode(0), "overrideStart": f.start_timecode.is_some(),
-                "frames": f.sequence_frames(),
+                "frames": f.sequence_frames(), "cineon": cineon_json(f),
             })),
             _ => None,
         })
@@ -861,6 +1049,9 @@ fn apply_interpretation(s: &mut Session, p: &Value) -> Result<Value> {
                 f.linear_light = src.linear_light;
                 f.preserve_rgb = src.preserve_rgb;
                 f.color_profile = src.color_profile;
+                if f.is_cineon_file() && src.is_cineon_file() {
+                    f.cineon = src.cineon;
+                }
                 if src.native_rate.is_some() {
                     if f.native_rate.is_none() {
                         f.native_rate = Some(f.frame_rate);
@@ -878,10 +1069,34 @@ fn replace_footage(s: &mut Session, p: &Value) -> Result<Value> {
     let path = str_p(p, "path").ok_or_else(|| bad("file.replaceFootage", "missing `path`"))?.to_string();
     let item = *items_p(s, p).first().ok_or_else(|| bad("file.replaceFootage", "select footage"))?;
     let importer = s.importer.clone().ok_or_else(|| EngineError::Other("media import is not available in this build".into()))?;
-    // A numbered still brings its image sequence, as on import (`sequence: false` for one frame).
-    let opts = SequenceOptions::from_params(p);
+    // Replacing a still keeps it a still; replacing a sequence keeps bringing the new file's run.
+    // `sequence`/`alphabetical` override that (#2073).
+    let previous = match s.project.item(item).map(|it| &it.kind) {
+        Some(ItemKind::Footage(f)) if f.kind == FootageKind::Sequence => (true, true, f.alphabetical),
+        _ => (false, false, false),
+    };
+    // Only `sequence` decides whether the item keeps its kind; `alphabetical` is a sequence
+    // modifier, not a request to make one.
+    let inherited = b_p(p, "sequence").is_none();
+    let mut opts = SequenceOptions::from_params(p);
+    if inherited {
+        (opts.sequence, opts.folders) = (previous.0, previous.1);
+        if previous.0 && b_p(p, "alphabetical").is_none() {
+            opts.alphabetical = previous.2;
+        }
+    }
     let src = crate::sequence::source_of(s.services.as_ref(), &path, opts);
-    let f = crate::sequence::probe(importer.as_ref(), &src, s.sequence_rate()).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+    let mut f = crate::sequence::probe(importer.as_ref(), &src, s.sequence_rate()).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+    // A single-file source comes back as a still; an inherited sequence kind keeps it a
+    // one-frame sequence, so a later default replacement still brings numbered runs (#2073).
+    if inherited && previous.0 && matches!(src, crate::sequence::Source::File(_)) && f.kind == FootageKind::Still {
+        f.kind = FootageKind::Sequence;
+        f.sequence = vec![f.path.clone()];
+        f.alphabetical = opts.alphabetical;
+        f.frame_rate = s.sequence_rate();
+        f.native_rate = None;
+        f.sync_sequence_duration();
+    }
     let name = src.name();
     // Replacing a missing file relinks the other missing files that moved with it (as After Effects
     // does when you locate one).
@@ -991,6 +1206,12 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("file.close", "Close", ["File"], Some("Cmd+W"), "{comp?}", has_comp, close),
         cmd!("file.closeProject", "Close Project", ["File"], None, "{}", always, close_project),
         cmd!("file.saveCopy", "Save a Copy...", ["File", "Save As"], None, "{path}", always, save_copy),
+        query!(
+            "file.checkOutput",
+            "Check Output File",
+            "{path} → {path, blocked, source?: footage|proxy|project, reason?}: whether an export may be written to path (it may not replace a file the project reads)",
+            check_output
+        ),
         cmd!("file.importMultiple", "Multiple Files...", ["File", "Import"], Some("Cmd+Alt+I"), "{paths: [string]}", always, |s, p| s
             .execute("file.import", p.clone())),
         cmd!(
@@ -1066,7 +1287,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Main...",
             ["File", "Interpret Footage"],
             Some("Cmd+Alt+G"),
-            "{items?|item?, frameRate?: fps|\"file\", alpha?: straight|premultiplied|ignore|guess, guessAlpha?, matteColor?|premulColor?, invertAlpha?, loop?, pixelAspect?, fields?: off|upper|lower, colorProfile?: srgb|rec709|rec2020|p3|auto, linearLight?, preserveRgb? (the file's values unconverted), overrideStart?: bool (false: Use Source File Timecode), startTimecode?: timecode|frame (Override Start)}",
+            "{items?|item?, frameRate?: fps|\"file\", alpha?: straight|premultiplied|ignore|guess, guessAlpha?, matteColor?|premulColor?, invertAlpha?, loop?, pixelAspect?, fields?: off|upper|lower, colorProfile?: srgb|rec709|rec2020|p3|auto, linearLight?, preserveRgb? (the file's values unconverted), overrideStart?: bool (false: Use Source File Timecode), startTimecode?: timecode|frame (Override Start), logConversion? (Cineon Settings of DPX and Cineon files), cineonUnits?: 10bit|8bit|float, convertedBlack?, convertedWhite?, pointUnits?: 10bit|8bit|float (the units of convertedBlack and convertedWhite; default cineonUnits, else the footage's Units), tenBitBlack?, tenBitWhite? (0..1023), currentGamma? (0.1..10), highlightRolloff? (0..100)}",
             has_footage_selection,
             interpret
         ),
@@ -1093,7 +1314,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "File...",
             ["File", "Replace Footage"],
             Some("Cmd+H"),
-            "{path, item?, sequence?: bool (default true: a numbered still brings its image sequence), alphabetical?: bool}",
+            "{path, item?, sequence?: bool (a numbered still brings its image sequence; default: the item keeps its kind, so a still stays a still and a sequence stays a sequence), alphabetical?: bool}",
             has_footage_selection,
             replace_footage
         ),

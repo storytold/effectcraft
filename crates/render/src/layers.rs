@@ -2,7 +2,7 @@ use super::frames::adaptive_samples;
 use super::opts::{LayerTiming, Through};
 use super::{
     Arc, BlendMode, Buf, Comp, EvalCtx, Image, IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, Layer, LayerSource, Mat3,
-    MatteKind, ParallelIterator, Quality, Region, Renderer, Sampling, Tick, WarpOpts, cache, color, composite_warp_changed, masks, source_size, styles, vec2,
+    MatteKind, ParallelIterator, Quality, Region, Renderer, Sampling, Tick, WarpOpts, cache, color, composite_warp_changed, masks, styles, vec2,
 };
 
 /// Blend policy for placing a layer, including optional output-depth quantization.
@@ -52,7 +52,7 @@ impl<'a> Renderer<'a> {
             }
         }
         let t0 = web_time::Instant::now();
-        let size = source_size(self.project, layer);
+        let size = ctx.source_size(layer);
         let layer_size = if size.0 == 0 { [ctx.comp.width as f64, ctx.comp.height as f64] } else { [size.0 as f64, size.1 as f64] };
         let st = styles::render(ctx, layer, &content, layer_size);
         if let Some(t) = timing {
@@ -522,7 +522,7 @@ impl<'a> Renderer<'a> {
     }
 
     /// Adjustment layer: effects applied to the comp below, limited to the layer's footprint
-    /// and its track matte.
+    /// and its track matte, and blended back in the layer's blend mode.
     fn draw_adjustment(&self, ctx: &EvalCtx, layer: &Layer, canvas: &mut Image, opacity: f32) {
         let Some(mut foot) = self.source(ctx, layer) else { return };
         let _ = masks::apply(ctx, layer, &mut foot, self.mask_blur(ctx, layer));
@@ -546,6 +546,18 @@ impl<'a> Renderer<'a> {
             color::convert(&mut adjusted.img, &c);
         }
         if adjusted.img.width != canvas.width || adjusted.img.height != canvas.height {
+            return;
+        }
+        if layer.blend_mode != BlendMode::Normal {
+            // The adjusted comp is a layer in that mode over the comp below, as in After Effects:
+            // an adjustment layer with no effects in Screen screens the comp with itself (#2618).
+            let mut iso = adjusted.img;
+            iso.data.par_iter_mut().zip(matte.data.par_iter()).for_each(|(p, m)| {
+                for c in p.iter_mut() {
+                    *c *= m[3];
+                }
+            });
+            canvas.blend_from(&iso, layer.blend_mode, opacity, layer.id.0 as u32);
             return;
         }
         canvas.data.par_iter_mut().zip(adjusted.img.data.par_iter()).zip(matte.data.par_iter()).for_each(|((c, a), m)| {

@@ -35,6 +35,7 @@ Commands (CLI, MCP, control channel):
 - `general.pathPointSize`: Path Point and Handle Size
 - `general.recentItems`: Recent Projects Shown
 - `general.showToolTips`: Show Tool Tips
+- `general.viewerWheelScrubbing`: Scrub Composition Frames with Mouse Wheel (off by default). On: an unmodified mouse wheel over the Composition viewer steps frames, and the smoothed tail of that notch does not zoom or pan. Ctrl/Cmd+wheel and a trackpad still zoom and pan.
 - `general.createLayersAtCompStart`: Create Layers at Composition Start Time
 - `general.defaultSpatialLinear`: Default Spatial Interpolation to Linear
 - `startup.showHomeOnLaunch`: Show Home Screen When Launching
@@ -42,6 +43,7 @@ Commands (CLI, MCP, control channel):
 - `startup.windowGraphics`: Window Graphics (`auto` / `gl`), what the desktop window draws with from the next launch. `auto` lets the platform pick (DirectX 12, Vulkan or Metal); `gl` uses OpenGL, with CPU compositing, for graphics drivers that crash with the others. A launch leaves a `launch-pending` marker in the settings folder until its window has been drawing for a few seconds (or the app quits normally before that); a launch that stops earlier (a graphics driver crashing as the window opens or as its surface is re-created) leaves the marker behind, and the next launch switches to `gl` and says so (not on macOS, which has no OpenGL backend). `WGPU_BACKEND` overrides both.
 - `project.useTemplate`: New Project Loads Template
 - `project.templatePath`: Template Project
+- `project.compactProjectFiles`: Save Compact Project Files (default off). Off: File ▸ Save writes `.ecproj` files as indented JSON, one value per line, easy to read and diff in version control. On: compact JSON on one line, smaller and faster to save and open. Either opens the same; auto-saves, XML copies and template packages are not affected.
 - `autoSave.enabled`: Automatically Save Projects
 - `autoSave.intervalMinutes`: Save Every
 - `autoSave.maxVersions`: Maximum Project Versions
@@ -119,9 +121,11 @@ Commands (CLI, MCP, control channel):
 - `import.reportMissingFrames`: gaps in an image sequence's numbering are reported on import
   (they show as colour-bar placeholders, as in After Effects; see [footage.md](footage.md))
 - `import.autoReloadFootage`: Automatically Reload Footage, `off`, `nonSequence` (the default, as
-  in After Effects) or `all` (image sequences too). Every two seconds,
-  and as soon as the window comes back to the front, the desktop app compares each footage file's
-  size and modification time with what they were, and reloads what another app saved: a
+  in After Effects) or `all` (image sequences too). Every two seconds while its window is in
+  front (every ten seconds while another app has the front), and as soon as the window comes back
+  to the front, the desktop app compares each footage file's size and modification time with what
+  they were, on a worker thread that only wakes the interface when something changed, and reloads
+  what another app saved: a
   Photoshop file edited in PhotoCraft or Photoshop shows its new pixels without File ▸ Reload
   Footage. It is not an undo step and doesn't modify the project; a layer item stays on its layer
   (found again by name), and a file that can't be read yet (still being written) is tried again once it changes again.
@@ -189,7 +193,8 @@ Effect Controls uses compact, fixed 20 pt parameter rows, as After Effects does:
 Edit ▸ Keyboard Shortcuts (`Cmd+Alt+'`) opens the shortcut editor: an on-screen keyboard showing
 which keys are assigned for the held modifiers (purple: application-wide, green: panel-specific,
 both: split), modifier toggles, a searchable list of every command (all engine commands, menu
-entries with bound parameters and the frontend's tool / panel commands), and a preset menu.
+entries with bound parameters, the scripts File ▸ Scripts lists and the frontend's tool / panel
+commands), and a preset menu.
 
 - **Presets.** "EffectCraft Default" is After Effects' default layout and is read-only; editing
   it creates a "Custom" copy. Custom presets store only their differences from the default and

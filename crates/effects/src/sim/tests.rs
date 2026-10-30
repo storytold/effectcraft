@@ -97,6 +97,60 @@ fn bubbles_rise() {
     assert!(y0 >= 0.0 && y1 >= 0.0 && (y1 < y0 || y0 < 8.0), "{y0} -> {y1}");
 }
 
+/// #2024: bubbles near the layer's edges show its edge pixels, not the pale colour that stands
+/// in for transparent ones.
+#[test]
+fn bubbles_near_edges_show_the_layer() {
+    let blue = Image::filled(40, 40, [0.0, 0.0, 1.0, 1.0]);
+    let pale = [0, 1].map(|reflection| {
+        let vals = [("bubbleAmount", num(200.0)), ("bubbleSize", num(3.0)), ("reflectionType", Value::Enum(reflection))];
+        let a = run("ec.sim.ccbubbles", &vals, blue.clone(), 0.3);
+        assert!(a.data.iter().any(|p| p[3] > 0.5), "bubbles drawn");
+        // Blue plus the white highlight keeps blue − red = alpha; the pale colour leaves 0.2 · alpha.
+        a.data.iter().filter(|p| (p[2] - p[0] - p[3]).abs() > 1e-4).count()
+    });
+    assert_eq!(pale, [0, 0], "pale bubble pixels (liquid, metal)");
+}
+
+/// CC Bubbles on a 40 × 40 layer `img` at `scale`, in a buffer padded by 6 transparent pixels
+/// (a half-resolution preview's layout).
+fn padded_bubbles(img: Image, scale: f64, reflection: u32) -> Image {
+    let size = 40.0;
+    let s = crate::find("ec.sim.ccbubbles").unwrap();
+    let mut params = crate::Params { values: s.params.iter().map(|p| (p.id.to_string(), crate::default_value(p, [size; 2]))).collect() };
+    for (k, v) in [("bubbleAmount", num(200.0)), ("bubbleSize", num(3.0)), ("reflectionType", Value::Enum(reflection))] {
+        params.values.insert(k.into(), v);
+    }
+    let ctx = EffectCtx { params: &params, time: 0.3, layer_size: [size; 2], seed: 1, adjustment: false, env: EffectEnv::default() };
+    let mut b = Buf { img, offset: [0.0; 2], scale };
+    b.pad(6);
+    crate::apply(s, &ctx, b).img
+}
+
+/// #2024: the same when the buffer has transparent padding around the layer: samples past the
+/// layer's edges repeat its edge pixels, not the padding, and a clear hole inside the layer is
+/// still refracted as the pale colour.
+#[test]
+fn bubbles_near_padded_edges_show_the_layer() {
+    let blue = |side| Image::filled(side, side, [0.0, 0.0, 1.0, 1.0]);
+    let pale = |img: &Image| img.data.iter().filter(|p| (p[2] - p[0] - p[3]).abs() > 1e-4).count();
+    for (scale, side) in [(1.0, 40), (0.5, 20)] {
+        let counts = [0, 1].map(|reflection| {
+            let a = padded_bubbles(blue(side), scale, reflection);
+            assert!(a.data.iter().any(|p| p[3] > 0.5), "bubbles drawn");
+            pale(&a)
+        });
+        assert_eq!(counts, [0, 0], "pale bubble pixels at scale {scale} (liquid, metal)");
+    }
+    let mut holed = blue(40);
+    for y in 12..28 {
+        for x in 12..28 {
+            holed.set(x, y, [0.0; 4]);
+        }
+    }
+    assert!(pale(&padded_bubbles(holed, 1.0, 0)) > 0, "the hole refracts as the pale colour");
+}
+
 #[test]
 fn drizzle_ripples() {
     let a = run("ec.sim.ccdrizzle", &[], ramp(48, 48), 0.6);
@@ -327,6 +381,110 @@ fn particle_world_effect_camera() {
     assert_eq!(key(&params), key(&moved));
     moved.values.insert("extras/randomSeed".into(), num(9.0));
     assert_ne!(key(&params), key(&moved));
+}
+
+/// A host whose every layer is `img`.
+struct TexHost(Image);
+impl crate::EffectHost for TexHost {
+    fn layer(&self, _: u64, _: bool) -> Option<crate::LayerPixels> {
+        let s = [self.0.width as f64, self.0.height as f64];
+        Some(crate::LayerPixels { buf: Buf { img: self.0.clone(), offset: [0.0; 2], scale: 1.0 }, size: s })
+    }
+    fn audio(&self, _: u64, _: f64, _: usize, _: u32) -> Option<Vec<f32>> {
+        None
+    }
+}
+
+/// A texture whose left half is green and right half blue.
+fn two_tone_tex() -> Image {
+    let mut tex = Image::new(8, 8);
+    for y in 0..8 {
+        for x in 0..8 {
+            tex.set(x, y, if x < 4 { [0.0, 1.0, 0.0, 1.0] } else { [0.0, 0.0, 1.0, 1.0] });
+        }
+    }
+    tex
+}
+
+/// CC Particle World drawing red Textured Squares with Texture Layer `layer`.
+fn pw_textured_vals(layer: Option<u64>) -> Vec<(&'static str, Value)> {
+    vec![
+        ("birthRate", num(1.0)),
+        ("extras/randomSeed", num(4.0)),
+        ("particle/particleType", Value::Enum(8)),
+        ("particle/texture/textureLayer", Value::Layer(layer)),
+        ("particle/birthSize", num(1.0)),
+        ("particle/deathSize", num(1.0)),
+        ("particle/birthColor", col(1.0, 0.0, 0.0)),
+        ("particle/deathColor", col(1.0, 0.0, 0.0)),
+    ]
+}
+
+/// #1465: Textured Square draws the Texture Layer on each particle, not the particle colour.
+#[test]
+fn particle_world_textured_square_draws_the_texture_layer() {
+    let host = TexHost(two_tone_tex());
+    let vals = pw_textured_vals;
+    let env = EffectEnv { host: Some(&host), ..Default::default() };
+    let out = run_fx("ec.sim.ccparticleworld", &vals(Some(1)), Image::new(48, 48), 1.0, env).img;
+    let seen: Vec<_> = out.data.iter().filter(|p| p[3] > 0.05).collect();
+    assert!(!seen.is_empty(), "particles drawn");
+    assert!(seen.iter().all(|p| p[0] < 0.02 * p[3]), "no particle colour: {:?}", seen.iter().find(|p| p[0] >= 0.02 * p[3]));
+    // Both halves of the texture show: it is mapped across the square, not sampled once.
+    assert!(seen.iter().any(|p| p[1] > 2.0 * p[2]) && seen.iter().any(|p| p[2] > 2.0 * p[1]), "both texture halves");
+    // Without a texture layer the squares keep the particle colour.
+    let plain = run_fx("ec.sim.ccparticleworld", &vals(None), Image::new(48, 48), 1.0, env).img;
+    assert!(plain.data.iter().any(|p| p[3] > 0.05 && p[0] > 0.9 * p[3]));
+}
+
+/// #1465 with #1195's motion trails: with the shutter open the averaged samples still show
+/// the Texture Layer, not the particle colour.
+#[test]
+fn particle_world_textured_square_motion_trails_draw_the_texture_layer() {
+    let host = TexHost(two_tone_tex());
+    let env = EffectEnv { host: Some(&host), frame_rate: 10.0, shutter: Some((360.0, -180.0, 8)), ..Default::default() };
+    let blurred = run_fx("ec.sim.ccparticleworld", &pw_textured_vals(Some(1)), Image::new(48, 48), 1.0, env).img;
+    let sharp = run_fx("ec.sim.ccparticleworld", &pw_textured_vals(Some(1)), Image::new(48, 48), 1.0, EffectEnv { shutter: None, ..env }).img;
+    assert_ne!(sharp.data, blurred.data, "the shutter smears the particles");
+    let seen: Vec<_> = blurred.data.iter().filter(|p| p[3] > 0.02).collect();
+    assert!(!seen.is_empty(), "particles drawn");
+    assert!(seen.iter().all(|p| p[0] < 0.02 * p[3]), "no particle colour: {:?}", seen.iter().find(|p| p[0] >= 0.02 * p[3]));
+    assert!(seen.iter().any(|p| p[1] > 2.0 * p[2]) && seen.iter().any(|p| p[2] > 2.0 * p[1]), "both texture halves");
+}
+
+/// A host whose every layer is `0` as given (a buffer that may span only its content).
+struct PixelsHost(crate::LayerPixels);
+impl crate::EffectHost for PixelsHost {
+    fn layer(&self, _: u64, _: bool) -> Option<crate::LayerPixels> {
+        Some(self.0.clone())
+    }
+    fn audio(&self, _: u64, _: f64, _: usize, _: u32) -> Option<Vec<f32>> {
+        None
+    }
+}
+
+/// #1465: a Texture Layer whose buffer spans only its content (text, shapes) is mapped as
+/// the whole layer, transparent around the content, not with its edge pixels stretched.
+#[test]
+fn particle_world_texture_layer_with_a_content_sized_buffer() {
+    // An 8×8 layer with a green 4×4 square in the middle: once as the full layer, once as
+    // just the square's pixels.
+    let mut full = Image::new(8, 8);
+    for y in 2..6 {
+        for x in 2..6 {
+            full.set(x, y, [0.0, 1.0, 0.0, 1.0]);
+        }
+    }
+    let content = Image::filled(4, 4, [0.0, 1.0, 0.0, 1.0]);
+    let render = |buf: Buf| {
+        let host = PixelsHost(crate::LayerPixels { buf, size: [8.0, 8.0] });
+        let env = EffectEnv { host: Some(&host), ..Default::default() };
+        run_fx("ec.sim.ccparticleworld", &pw_textured_vals(Some(1)), Image::new(48, 48), 1.0, env).img
+    };
+    let want = render(Buf { img: full, offset: [0.0; 2], scale: 1.0 });
+    let got = render(Buf { img: content, offset: [-2.0, -2.0], scale: 1.0 });
+    assert!(want.data.iter().any(|p| p[3] > 0.05), "particles drawn");
+    assert_eq!(want.data, got.data, "the content-sized buffer draws as the full layer");
 }
 
 #[test]

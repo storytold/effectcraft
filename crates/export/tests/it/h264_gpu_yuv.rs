@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use effectcraft_color::Label;
-use effectcraft_export::render_queue::{OutputFormat, OutputModule, RenderSettings, TimeSpan};
+use effectcraft_export::render_queue::{ColorDepth, OutputFormat, OutputModule, RenderSettings, TimeSpan};
 use effectcraft_export::{Job, export};
 use effectcraft_project::{Comp, ItemId, ItemKind, LayerSource, Project, Solid, build};
 use effectcraft_raster::Image;
@@ -144,6 +144,20 @@ fn frames_the_accelerator_cannot_take_fall_back_to_rgba() {
     let a = run(&p, cid, Some(&yuv), &odd, &d.join("yuv.mp4"));
     let c = run(&p, cid, None, &odd, &d.join("cpu.mp4"));
     assert_eq!(yuv.yuv_frames.load(Ordering::SeqCst), 0);
+    assert!(a == c);
+}
+
+/// Above 8 bpc the colour is dithered on its way to 8 bits, which the accelerator's planes
+/// don't do: those frames take the RGBA path, so an H.264 export doesn't band (#2022).
+#[test]
+fn renders_above_8_bpc_skip_the_planes() {
+    let d = out_dir("h264-gpu-yuv-16bpc");
+    let (p, cid) = project();
+    let s = RenderSettings { time_span: TimeSpan::LengthOfComp, color_depth: ColorDepth::Bpc16, ..Default::default() };
+    let yuv = Fake::new(true, false, usize::MAX);
+    let a = run(&p, cid, Some(&yuv), &s, &d.join("yuv.mp4"));
+    let c = run(&p, cid, None, &s, &d.join("cpu.mp4"));
+    assert_eq!(yuv.yuv_frames.load(Ordering::SeqCst), 0, "no planes asked for above 8 bpc");
     assert!(a == c);
 }
 

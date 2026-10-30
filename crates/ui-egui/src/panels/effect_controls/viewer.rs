@@ -119,6 +119,20 @@ fn fx_pick_session(
     ControlFlow::Continue(point_preview)
 }
 
+/// Shared hint chip and sampled-color swatch for text and popup eyedroppers.
+fn color_pick_preview(app: &EffectcraftApp, painter: &egui::Painter, map: &crate::panels::viewer::ViewerMap, hint: &str, pointer: Option<egui::Pos2>) {
+    let chip = Rect::from_min_size(map.area.min + vec2(10.0, 10.0), vec2(220.0, 22.0));
+    painter.rect_filled(chip, 11.0, Color32::from_black_alpha(180));
+    painter.text(chip.center(), Align2::CENTER_CENTER, hint, Tokens::ui(11.5), app.tokens.text);
+    if let Some(pos) = pointer
+        && let Some(sample) = crate::panels::viewer_tools::sample_displayed(app, painter.ctx(), map.to_comp(pos))
+    {
+        let swatch = Rect::from_min_size(pos + vec2(14.0, 14.0), vec2(26.0, 18.0));
+        painter.rect_filled(swatch, 2.0, Color32::from_rgb((sample[0] * 255.0) as u8, (sample[1] * 255.0) as u8, (sample[2] * 255.0) as u8));
+        painter.rect_stroke(swatch, 2.0, Stroke::new(1.0, Color32::WHITE), egui::StrokeKind::Outside);
+    }
+}
+
 /// An armed text-colour pick: sample the shown frame on click, Esc cancels.
 fn text_color_pick(
     app: &mut EffectcraftApp,
@@ -128,7 +142,6 @@ fn text_color_pick(
     ectx: &EvalCtx,
     actions: &mut Actions,
 ) {
-    let t = app.tokens;
     let ctx = ui.ctx().clone();
     let Some(pick) = app.ui.text_color_pick.clone() else {
         return;
@@ -140,25 +153,15 @@ fn text_color_pick(
         app.viewer_pixels();
         let resp = ui.interact(map.area, egui::Id::unique("viewer-text-color-pick"), Sense::click());
         app.auto.add("viewer.textColorPick", map.area, &pick.field);
-        let chip = Rect::from_min_size(map.area.min + vec2(10.0, 10.0), vec2(220.0, 22.0));
-        painter.rect_filled(chip, 11.0, Color32::from_black_alpha(180));
-        painter.text(chip.center(), Align2::CENTER_CENTER, crate::i18n::tr_args("Click to sample text {}", &[&pick.field]), Tokens::ui(11.5), t.text);
+        color_pick_preview(app, painter, map, &crate::i18n::tr_args("Click to sample text {}", &[&pick.field]), resp.hover_pos());
         if let Some(pos) = resp.hover_pos() {
             ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
             let c = map.to_comp(pos);
             app.pointer_comp = Some([c[0] as f32, c[1] as f32]);
-            if let Some(img) = &app.viewer_image
-                && let Some(s) = fw::sample_frame(img, crate::panels::viewer_tools::shown_region(&ctx, map.comp), c)
-            {
-                let sw = Rect::from_min_size(pos + vec2(14.0, 14.0), vec2(26.0, 18.0));
-                painter.rect_filled(sw, 2.0, Color32::from_rgb((s[0] * 255.0) as u8, (s[1] * 255.0) as u8, (s[2] * 255.0) as u8));
-                painter.rect_stroke(sw, 2.0, Stroke::new(1.0, Color32::WHITE), egui::StrokeKind::Outside);
-            }
         }
         if resp.clicked()
             && let Some(pos) = resp.interact_pointer_pos()
-            && let Some(img) = &app.viewer_image
-            && let Some(s) = fw::sample_frame(img, crate::panels::viewer_tools::shown_region(&ctx, map.comp), map.to_comp(pos))
+            && let Some(s) = crate::panels::viewer_tools::sample_displayed(app, &ctx, map.to_comp(pos))
         {
             let mut params = json!({"layer": pick.layer});
             params[&pick.field] = json!([s[0], s[1], s[2]]);
@@ -173,6 +176,27 @@ fn text_color_pick(
             app.ui.text_color_pick = None;
             app.ui.status.clear();
         }
+    }
+}
+
+/// A colour picker's eyedropper is armed (its popup stays open): the viewer shows the colour under
+/// the pointer, and the next press on it samples the frame into the picker. The press is read from
+/// the pointer, since a modal dialog over the viewer takes its clicks.
+fn popup_eyedropper(app: &mut EffectcraftApp, ui: &mut egui::Ui, painter: &egui::Painter, map: &crate::panels::viewer::ViewerMap) {
+    let ctx = ui.ctx().clone();
+    if !crate::color_picker::eyedropper_armed(&ctx) {
+        return;
+    }
+    let _ = ui.interact(map.area, egui::Id::unique("viewer-popup-eyedropper"), Sense::click());
+    // The sampling surface, apart from the picker's button that arms it (`colorPicker.eyedropper`).
+    app.auto.add("viewer.colorPickerEyedropper", map.area, "Sample color");
+    ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
+    app.viewer_pixels();
+    color_pick_preview(app, painter, map, crate::i18n::tr("Click to sample color"), crate::color_picker::eyedropper_point(&ctx));
+    if let Some(pos) = crate::color_picker::sample_press(&ctx)
+        && let Some(s) = crate::panels::viewer_tools::sample_displayed(app, &ctx, map.to_comp(pos))
+    {
+        crate::color_picker::deliver_sample(&ctx, [s[0], s[1], s[2]]);
     }
 }
 
@@ -195,12 +219,14 @@ pub fn viewer_hook(
 ) {
     let t = app.tokens;
     let ctx = ui.ctx().clone();
+    crate::color_picker::note_viewer(&ctx, map.area);
     let mut actions: Actions = vec![];
     let point_preview = match fx_pick_session(app, ui, painter, map, ectx, l2c, &mut actions) {
         ControlFlow::Break(()) => return,
         ControlFlow::Continue(p) => p,
     };
     text_color_pick(app, ui, painter, map, ectx, &mut actions);
+    popup_eyedropper(app, ui, painter, map);
     let picking = app.ui.fx_pick.is_some() || app.ui.text_color_pick.is_some();
     let point_pick = app.ui.fx_pick.clone().filter(|p| p.kind == "point");
     if app.ui.viewer.show_layer_controls || point_pick.is_some() {

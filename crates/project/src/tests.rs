@@ -183,7 +183,7 @@ fn project_files_refuse_newer_schemas() {
         crate::SCHEMA_VERSION
     );
     assert_eq!(p.to_file_json().unwrap_err().to_string(), expected);
-    assert_eq!(p.to_file_json_with_view(&crate::SavedView::default()).unwrap_err().to_string(), expected);
+    assert_eq!(p.to_file_json_with_view(&crate::SavedView::default(), false).unwrap_err().to_string(), expected);
 }
 
 #[test]
@@ -197,7 +197,7 @@ fn saved_files_reopen_in_pretty_and_compact_form() {
 fn project_files_remember_the_open_comps() {
     let (p, cid) = project_with_layer();
     let view = crate::SavedView { active_comp: Some(cid), open_comps: vec![cid], comp_times: [(cid, effectcraft_time::Tick(4_237_833_600))].into() };
-    let text = p.to_file_json_with_view(&view).unwrap();
+    let text = p.to_file_json_with_view(&view, false).unwrap();
     assert_eq!(crate::saved_view(&text), view);
     assert_eq!(Project::from_json(&text).unwrap(), p, "the view is not part of the project");
     // Files from before #748 have no view; a garbled one is ignored, not an error.
@@ -289,6 +289,49 @@ fn comp_contains_ends_on_cycles_long_chains_and_shared_precomps() {
     let (p, c) = comp_graph(n, &(0..n - 1).map(|i| (i, i + 1)).collect::<Vec<_>>());
     assert!(p.comp_contains(c[0], c[n - 1]));
     assert!(!p.comp_contains(c[n - 1], c[0]));
+}
+
+/// Interpret Footage ▸ Cineon Settings: the 10 Bit Black and White Points become the converted
+/// points, Current Gamma 1 gives linear light, Highlight Rolloff 0 keeps over-range values and
+/// a higher one ramps them off; the settings apply only to DPX and Cineon files, and projects
+/// saved without them read the defaults.
+#[test]
+fn cineon_settings_convert_log_code_values() {
+    use crate::{CineonSettings, CineonUnits, Footage};
+    let code = |v: f32| v / 1023.0;
+    let c = CineonSettings { log_conversion: true, rolloff: 0.0, ..Default::default() };
+    assert!(c.convert(code(95.0)).abs() < 1e-6, "black point");
+    assert!((c.convert(code(685.0)) - 1.0).abs() < 1e-5, "white point");
+    // Code 400: (10^(-0.95) - 10^(-1.9667)) / (1 - 10^(-1.9667)) = 0.10251 linear, ^(1/1.7).
+    assert!((c.convert(code(400.0)) - 0.26190).abs() < 1e-4, "{}", c.convert(code(400.0)));
+    let linear = CineonSettings { gamma: 1.0, ..c };
+    assert!((linear.convert(code(400.0)) - 0.10251).abs() < 1e-4, "{}", linear.convert(code(400.0)));
+    assert!(c.convert(code(1023.0)) > 1.5, "over range kept: {}", c.convert(code(1023.0)));
+    // The default rolloff (20) ramps the white point and above off, up to 1.
+    let rolled = CineonSettings { rolloff: 20.0, ..c };
+    let (w, mid, top) = (rolled.convert(code(685.0)), rolled.convert(code(720.0)), rolled.convert(code(1023.0)));
+    assert!(w > 0.8 && w < mid && mid < top && top <= 1.0, "{w} {mid} {top}");
+    let points = CineonSettings { converted_black: 64.0, converted_white: 940.0, ..c };
+    assert!((points.convert(code(95.0)) - 64.0 / 1023.0).abs() < 1e-5);
+    assert!((points.convert(code(685.0)) - 940.0 / 1023.0).abs() < 1e-5);
+    // Units.
+    assert!((CineonUnits::EightBit.from_ten_bit(1023.0) - 255.0).abs() < 1e-9);
+    assert!((CineonUnits::Float.to_ten_bit(0.5) - 511.5).abs() < 1e-9);
+    assert_eq!(CineonUnits::parse("8-bit"), Some(CineonUnits::EightBit));
+    assert!(CineonUnits::ALL.iter().all(|u| CineonUnits::parse(u.id()) == Some(*u)));
+    // DPX and Cineon files only, and only with Logarithmic Conversion on.
+    let on = CineonSettings { log_conversion: true, ..Default::default() };
+    let dpx = Footage { path: "/m/plate.0001.DPX".into(), cineon: on, ..Default::default() };
+    assert!(dpx.cineon_applies());
+    assert!(Footage { path: "/m/scan.cin".into(), cineon: on, ..Default::default() }.cineon_applies());
+    assert!(!Footage { path: "/m/still.png".into(), cineon: on, ..Default::default() }.cineon_applies());
+    assert!(!Footage { path: "/m/plate.dpx".into(), ..Default::default() }.cineon_applies());
+    // Saved only when changed; read back, and absent in older projects.
+    let plain = serde_json::to_value(Footage { path: "/m/a.dpx".into(), ..Default::default() }).unwrap();
+    assert!(plain.get("cineon").is_none(), "{plain}");
+    let saved = serde_json::to_string(&dpx).unwrap();
+    assert_eq!(serde_json::from_str::<Footage>(&saved).unwrap().cineon, on);
+    assert_eq!(serde_json::from_value::<Footage>(plain).unwrap().cineon, CineonSettings::default());
 }
 
 /// A Wiggle Paths 100 000 groups deep gets Spatial Phase on a 2 MiB stack.

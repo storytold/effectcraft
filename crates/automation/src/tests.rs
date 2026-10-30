@@ -57,6 +57,50 @@ fn property_group_error_points_to_layer_inspection() {
     assert!(call_json(&mut s, "get_property", json!({"layer": l, "path": "geometryOptions/extrusionDepth"}))["value"].is_number());
 }
 
+/// Enum properties list their values and labels, so a client can set one without guessing (#2085).
+#[test]
+fn enum_properties_list_their_options() {
+    let mut s = server();
+    call_json(&mut s, "execute_command", json!({"command": "comp.new", "params": {"name": "probe"}}));
+    call_json(&mut s, "execute_command", json!({"command": "layer.newText", "params": {"name": "T", "text": "Hello"}}));
+    call_json(&mut s, "execute_command", json!({"command": "layer.addTextAnimator", "params": {"layer": "T", "properties": ["opacity"], "name": "A"}}));
+    let path = "text/animators/animator/selectors/rangeSelector/advanced/shape";
+    let shapes = ["Square", "Ramp Up", "Ramp Down", "Triangle", "Round", "Smooth"];
+    let expected = json!(shapes.iter().enumerate().map(|(value, label)| json!({"value": value, "label": label})).collect::<Vec<_>>());
+
+    let p = call_json(&mut s, "get_property", json!({"layer": "T", "path": path}));
+    assert_eq!(p["type"], "enum");
+    assert_eq!(p["options"], expected, "{p}");
+    let opacity = call_json(&mut s, "get_property", json!({"layer": "T", "path": "transform/opacity"}));
+    assert!(opacity.get("options").is_none(), "{opacity}");
+
+    fn find<'a>(node: &'a Value, path: &str) -> Option<&'a Value> {
+        if node["path"] == path {
+            return Some(node);
+        }
+        node["children"].as_array()?.iter().find_map(|c| find(c, path))
+    }
+    let tree = call_json(&mut s, "get_layer", json!({"layer": "T"}));
+    let node = find(&tree["properties"], path).unwrap_or_else(|| panic!("{tree}"));
+    assert_eq!(node["options"], expected);
+    assert!(find(&tree["properties"], "transform/opacity").unwrap()["options"].is_null());
+
+    let flat = call_json(&mut s, "get_layer", json!({"layer": "T", "flat": true}));
+    let props = flat["properties"].as_array().unwrap();
+    assert_eq!(props.iter().find(|p| p["path"] == path).unwrap()["options"], expected);
+    assert!(props.iter().find(|p| p["path"] == "transform/opacity").unwrap().get("options").is_none());
+
+    // Path Options ▸ Path offers None and the layer's masks, as the Timeline does.
+    for _ in 0..2 {
+        call_json(&mut s, "execute_command", json!({"command": "mask.new", "params": {"layer": "T", "vertices": [[0, 0], [40, 0], [40, 40]], "closed": true}}));
+    }
+    let masks = json!([{"value": 0, "label": "None"}, {"value": 1, "label": "Mask 1"}, {"value": 2, "label": "Mask 2"}]);
+    let p = call_json(&mut s, "get_property", json!({"layer": "T", "path": "text/pathOptions/path"}));
+    assert_eq!(p["options"], masks, "{p}");
+    let tree = call_json(&mut s, "get_layer", json!({"layer": "T"}));
+    assert_eq!(find(&tree["properties"], "text/pathOptions/path").unwrap_or_else(|| panic!("{tree}"))["options"], masks);
+}
+
 #[test]
 fn initialize_and_list_tools() {
     let mut s = server();
@@ -442,6 +486,21 @@ fn autosave_flushes_on_read_errors_and_broken_output() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+fn fake_render_frame(session: &Session, params: &Value) -> Value {
+    let png = crate::encode_png(4, 2, vec![255; 32], 0).unwrap();
+    if params["write"] == true {
+        let Some(path) = params["path"].as_str() else { return json!({"ok": false, "error": "missing output path"}) };
+        if let Err(error) = session.write_output(path, &png) {
+            return json!({"ok": false, "error": error.to_string()});
+        }
+    }
+    let mut result = json!({"comp": 1, "time": 0.5, "width": 4, "height": 2, "png": base64::encode(&png)});
+    if params["write"] == true {
+        result["path"] = params["path"].clone();
+    }
+    json!({"ok": true, "result": result})
+}
+
 /// A fake desktop control channel: answers `engine.execute` from a real session, and canned
 /// `render.frame` / `ui.screenshot` replies.
 fn fake_app() -> u16 {
@@ -459,10 +518,7 @@ fn fake_app() -> u16 {
                     Ok(v) => json!({"ok": true, "result": v}),
                     Err(e) => json!({"ok": false, "error": e.to_string()}),
                 },
-                "render.frame" => {
-                    let png = crate::encode_png(4, 2, vec![255; 32], 0).unwrap();
-                    json!({"ok": true, "result": {"comp": 1, "time": 0.5, "width": 4, "height": 2, "png": base64::encode(&png)}})
-                }
+                "render.frame" => fake_render_frame(&session, p),
                 "ui.screenshot" => {
                     let png = crate::encode_png(8, 8, vec![128; 256], 0).unwrap();
                     std::fs::write(p["path"].as_str().unwrap(), png).unwrap();
@@ -1372,6 +1428,12 @@ fn automation_roots_confine_file_access() {
         assert!(err, "{name} {args} should be refused: {c:?}");
         c[0]["text"].as_str().unwrap_or_default().to_string()
     };
+    // #2479: an unsaved project's queue item without `output` would write to the home folder.
+    call_json(&mut s, "execute_command", json!({"command": "comp.new", "params": {"name": "Unsaved", "width": 64, "height": 64}}));
+    let msg = denied(&mut s, "execute_command", json!({"command": "renderQueue.add", "params": {"comp": "Unsaved"}}));
+    assert!(msg.contains("home folder") && msg.contains("give `output`"), "{msg}");
+    call_json(&mut s, "execute_command", json!({"command": "renderQueue.add", "params": {"comp": "Unsaved", "output": p(&write, "unsaved.mp4")}}));
+    call_json(&mut s, "execute_command", json!({"command": "renderQueue.remove"}));
     // Reading: inside a read root, not outside.
     call_json(&mut s, "open_project", json!({"path": p(&read, "source.ecproj")}));
     let msg = denied(&mut s, "open_project", json!({"path": p(&outside, "free.ecproj")}));
@@ -1412,8 +1474,73 @@ fn automation_roots_confine_file_access() {
     // Scripts can read and write anything: refused.
     denied(&mut s, "run_script", json!({"code": "1 + 1"}));
     denied(&mut s, "execute_command", json!({"command": "file.runScript", "params": {"path": p(&read, "x.jsx")}}));
+    for (id, params) in [
+        ("file.runStartupScripts", json!({})),
+        ("file.runShutdownScripts", json!({})),
+        // ScriptUI panels run their script when they open.
+        ("window.scriptPanel", json!({"name": "Layer Tools.jsx"})),
+        ("window.restoreScriptPanels", json!({})),
+    ] {
+        let msg = denied(&mut s, "execute_command", json!({"command": id, "params": params}));
+        assert!(msg.contains("not available while file access is confined"), "{id}: {msg}");
+        let msg = denied(&mut s, "batch", json!({"steps": [{"command": id, "params": params}]}));
+        assert!(msg.contains("not available while file access is confined"), "{id}: {msg}");
+    }
     // Writes to the files the agent named: none outside.
     assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 1, "only the unconfined save");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// #2479: a queued output the agent didn't name is derived from where the project sits, so on a
+/// project that has never been saved it lands in the home folder, outside every automation root.
+/// Queueing it there is refused, rather than leaving an item that can never be rendered.
+#[test]
+fn automation_roots_refuse_a_queued_output_from_an_unsaved_project() {
+    use crate::confine::Confinement;
+    let base = std::env::temp_dir().join(format!("ec-mcp-default-out-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let write = base.join("out");
+    std::fs::create_dir_all(&write).unwrap();
+    let p = |f: &str| write.join(f).to_string_lossy().into_owned();
+    let mut s = server();
+    s.backend().confine(Confinement::new(&[], std::slice::from_ref(&write)).unwrap());
+    call_json(&mut s, "execute_command", json!({"command": "comp.new", "params": {"name": "A", "width": 64, "height": 64}}));
+    // Never saved: neither way of queueing a render may fall back to the home folder.
+    for command in ["renderQueue.add", "render.preRender", "file.createProxy"] {
+        let (c, err) = call(&mut s, "execute_command", json!({"command": command, "params": {"comp": "A"}}));
+        assert!(err, "`{command}` without an output should be refused: {c:?}");
+        let msg = c[0]["text"].as_str().unwrap_or_default();
+        assert!(msg.contains("the project has no file yet"), "`{command}`: {msg}");
+    }
+    // An array where a path goes: the engine reads a scalar, so this is no output either.
+    let (c, err) = call(&mut s, "execute_command", json!({"command": "file.createProxy", "params": {"comp": "A", "path": [p("arr.mov")]}}));
+    assert!(err, "an array where the output goes should be refused: {c:?}");
+    assert!(c[0]["text"].as_str().unwrap_or_default().contains("the project has no file yet"), "{c:?}");
+    // Naming an Output Module template instead of a file is the same: its own output is relative.
+    let (c, err) = call(&mut s, "execute_command", json!({"command": "render.preRender", "params": {"comp": "A", "output": "Lossless"}}));
+    assert!(err, "a template output should be refused too: {c:?}");
+    assert!(c[0]["text"].as_str().unwrap_or_default().contains("the project has no file yet"), "{c:?}");
+    let queue = call_json(&mut s, "execute_command", json!({"command": "renderQueue.list"}));
+    assert_eq!(queue["items"].as_array().map(Vec::len), Some(0), "nothing was queued: {queue}");
+    // Naming an output inside a write root is how it is done.
+    call_json(&mut s, "execute_command", json!({"command": "renderQueue.add", "params": {"comp": "A", "output": p("named.mp4")}}));
+    // A proxy named outside the roots is refused. Whether that reads as a write or a read is
+    // #1347's to classify, so this asserts the refusal and not its wording. The path is a sibling
+    // of the write root rather than `/elsewhere/…`, which is not absolute on Windows and would be
+    // refused for that instead.
+    let outside = base.join("elsewhere").join("proxy.mov").to_string_lossy().into_owned();
+    let (c, err) = call(&mut s, "execute_command", json!({"command": "file.createProxy", "params": {"comp": "A", "path": outside}}));
+    assert!(err, "a proxy outside the roots should be refused: {c:?}");
+    assert!(c[0]["text"].as_str().unwrap_or_default().contains("outside the automation roots"), "{c:?}");
+    // Once the project is saved there, the default output (beside it) is queued as before.
+    call_json(&mut s, "save_project", json!({"path": p("proj.ecproj")}));
+    // A name that is not a path is an Output Module template, and the output it resolves to lands
+    // beside the saved project: inside the write root, so it is allowed (#1347 relies on this).
+    call_json(&mut s, "execute_command", json!({"command": "file.createProxy", "params": {"comp": "A", "path": "ProxyTemplate"}}));
+    call_json(&mut s, "execute_command", json!({"command": "renderQueue.add", "params": {"comp": "A"}}));
+    let queue = call_json(&mut s, "execute_command", json!({"command": "renderQueue.list"}));
+    let out = queue["items"][1]["outputPath"].as_str().unwrap_or_default();
+    assert!(out.starts_with(&*write.to_string_lossy()), "{queue}");
     let _ = std::fs::remove_dir_all(&base);
 }
 
@@ -1472,4 +1599,134 @@ fn automation_roots_refuse_running_script_code() {
     call_json(&mut s, "execute_command", json!({"command": "prefs.set", "params": {"key": "general.showToolTips", "value": false}}));
     call_json(&mut s, "execute_command", json!({"command": "scriptui.list"}));
     let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn blender_export_requires_an_absolute_path_in_a_write_root() {
+    use crate::confine::Confinement;
+    let base = std::env::temp_dir().join(format!("ec-blender-confine-{}", std::process::id()));
+    let (read, write) = (base.join("read"), base.join("write"));
+    for dir in [&read, &write] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    let confinement = Confinement::new(std::slice::from_ref(&read), std::slice::from_ref(&write)).unwrap();
+    let check = |path: &std::path::Path| confinement.check_command("camera.exportBlender", &json!({"path": path}));
+    assert!(check(&write.join("scene.py")).unwrap().is_empty());
+    for path in [read.join("scene.py"), base.join("outside.py"), write.join("../read/scene.py")] {
+        assert!(check(&path).is_err(), "must deny {}", path.display());
+    }
+    for path in ["scene.py", "./scene.py", "write/scene.py", "../scene.py"] {
+        let error = check(std::path::Path::new(path)).unwrap_err().to_string();
+        assert!(error.contains("give an absolute path"), "{path}: {error}");
+    }
+    let read_only = Confinement::new(std::slice::from_ref(&write), &[]).unwrap();
+    assert!(read_only.check_command("camera.exportBlender", &json!({"path": write.join("scene.py")})).is_err());
+    for path in [json!(read.join("scene.py")), json!("scene.py"), json!("$1.path")] {
+        let batch = json!({"steps": [{"command": "camera.exportBlender", "params": {"path": path}}]});
+        assert!(confinement.check_command("engine.batch", &batch).is_err());
+    }
+    std::fs::remove_dir_all(&base).unwrap();
+}
+
+/// `render_frame` writes the frame to the `path` it is given, and never over a file the open
+/// project reads (#1743): footage, a proxy or the project file. The refusal comes before the
+/// frame is rendered, and the file is untouched.
+#[test]
+fn render_frame_never_writes_over_a_file_the_project_reads() {
+    use effectcraft_engine::{
+        color::Label,
+        project::{Footage, FootageKind, ItemKind},
+    };
+    use std::sync::Arc;
+    let dir = std::env::temp_dir().join(format!("effectcraft-mcp-overwrite-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (clip, project) = (dir.join("clip.png"), dir.join("Project.ecproj"));
+    std::fs::write(&clip, b"SOURCE FOOTAGE").unwrap();
+    let mut session = Session::default();
+    session.execute("comp.new", json!({"width": 16, "height": 16})).unwrap();
+    session.execute("file.saveAs", json!({"path": project.to_string_lossy()})).unwrap();
+    Arc::make_mut(&mut session.project).add_item(
+        "clip.png",
+        Label::Aqua,
+        None,
+        ItemKind::Footage(Footage {
+            path: clip.to_string_lossy().into_owned(),
+            kind: FootageKind::Still,
+            width: 16,
+            height: 16,
+            has_video: true,
+            ..Default::default()
+        }),
+    );
+    let saved = std::fs::read(&project).unwrap();
+    let mut s = McpServer::new(Backend::headless(session));
+    for (file, what) in [(&clip, "footage"), (&project, "project")] {
+        let (c, err) = call(&mut s, "render_frame", json!({"path": file.to_string_lossy(), "inline": false}));
+        let text = c[0]["text"].as_str().unwrap();
+        assert!(err && text.contains(&*file.to_string_lossy()) && text.contains(what), "{what}: {text}");
+    }
+    assert_eq!(std::fs::read(&clip).unwrap(), b"SOURCE FOOTAGE", "the footage is as it was");
+    assert_eq!(std::fs::read(&project).unwrap(), saved, "the project file is as it was");
+    // Anywhere else it writes the PNG.
+    let free = dir.join("frame.png");
+    let (c, err) = call(&mut s, "render_frame", json!({"path": free.to_string_lossy(), "inline": false}));
+    assert!(!err, "{c:?}");
+    assert_eq!(&std::fs::read(&free).unwrap()[..8], b"\x89PNG\r\n\x1a\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The same through the desktop app: the app knows the project's files, so the tool asks it
+/// (`file.checkOutput`) before it writes anything.
+#[test]
+fn bridged_render_frame_asks_the_app_before_it_writes() {
+    use effectcraft_engine::project::{Footage, FootageKind};
+    struct Probe;
+    impl effectcraft_engine::Importer for Probe {
+        fn probe(&self, path: &str) -> Result<Footage, String> {
+            Ok(Footage { path: path.to_string(), kind: FootageKind::Still, width: 4, height: 4, has_video: true, ..Default::default() })
+        }
+    }
+    let dir = std::env::temp_dir().join(format!("effectcraft-mcp-bridge-overwrite-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let clip = dir.join("clip.png");
+    std::fs::write(&clip, b"SOURCE FOOTAGE").unwrap();
+
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let (stream, _) = l.accept().unwrap();
+        let mut out = stream.try_clone().unwrap();
+        let mut session = Session { importer: Some(std::sync::Arc::new(Probe)), ..Default::default() };
+        for line in BufReader::new(stream).lines() {
+            let msg: Value = serde_json::from_str(&line.unwrap()).unwrap();
+            let p = &msg["params"];
+            let mut reply = match msg["method"].as_str().unwrap() {
+                "engine.execute" => match session.execute(p["command"].as_str().unwrap(), p["params"].clone()) {
+                    Ok(v) => json!({"ok": true, "result": v}),
+                    Err(e) => json!({"ok": false, "error": e.to_string()}),
+                },
+                "render.frame" if p["write"] == true && p["path"].is_string() => fake_render_frame(&session, p),
+                "render.frame" => json!({"ok": false, "error": "a frame save must be one app-owned write"}),
+                m => json!({"ok": false, "error": format!("unknown method `{m}`")}),
+            };
+            reply["id"] = msg["id"].clone();
+            writeln!(out, "{reply}").unwrap();
+        }
+    });
+    let mut s = McpServer::new(Backend::bridge(&port.to_string()).unwrap());
+    call_json(&mut s, "execute_command", json!({"command": "comp.new", "params": {"width": 16, "height": 16}}));
+    call_json(&mut s, "execute_command", json!({"command": "file.import", "params": {"paths": [clip.to_string_lossy()]}}));
+
+    let (c, err) = call(&mut s, "render_frame", json!({"path": clip.to_string_lossy(), "inline": false}));
+    let text = c[0]["text"].as_str().unwrap();
+    assert!(err && text.contains("clip.png") && text.contains("footage"), "{text}");
+    assert_eq!(std::fs::read(&clip).unwrap(), b"SOURCE FOOTAGE", "the footage is as it was");
+    // Anywhere else it writes the PNG.
+    let free = dir.join("frame.png");
+    let (c, err) = call(&mut s, "render_frame", json!({"path": free.to_string_lossy(), "inline": false}));
+    assert!(!err, "{c:?}");
+    assert_eq!(&std::fs::read(&free).unwrap()[..8], b"\x89PNG\r\n\x1a\n");
+    let _ = std::fs::remove_dir_all(&dir);
 }

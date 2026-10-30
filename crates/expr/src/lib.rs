@@ -17,7 +17,8 @@
 //!   `sourceRectAtTime`), property methods (`valueAtTime`, `velocityAtTime`, `speedAtTime`, `key`,
 //!   `nearestKey`, `numKeys`, `wiggle`, `temporalWiggle`, `smooth`, `loopIn/Out[Duration]`) and the
 //!   global helpers (`linear`/`ease`/`easeIn`/`easeOut`, `random`/`gaussRandom`/`seedRandom`/
-//!   `noise`, vector maths, `clamp`, `lookAt`, time and colour conversions, `posterizeTime`).
+//!   `noise`, vector maths, `clamp`, `lookAt`, time and colour conversions, `posterizeTime`),
+//!   plus `bezier`, a CSS-style cubic-Bezier easing helper that After Effects does not have.
 //! * **Determinism**: `wiggle` and `random` are seeded by layer index, property uid (and time /
 //!   `seedRandom`), so frames render identically on every thread and platform.
 //! * **Runtime**: one boa `Context` per thread with compiled scripts cached by text. Scripts read
@@ -162,7 +163,16 @@ fn evaluate_out(
         return Err("Error: expressions reference each other too deeply (circular reference?)".into());
     }
     budget_left()?;
-    let ctx = EvalCtx { project: ctx.project, comp_id: ctx.comp_id, comp: ctx.comp, time: ctx.time, expr: Some(host), footage: ctx.footage };
+    let ctx = EvalCtx {
+        project: ctx.project,
+        comp_id: ctx.comp_id,
+        comp: ctx.comp,
+        time: ctx.time,
+        expr: Some(host),
+        footage: ctx.footage,
+        property_overrides: ctx.property_overrides,
+        media_overrides: ctx.media_overrides,
+    };
     let comp = ctx.comp_id.0;
     let path = layer.props.path_of(prop.uid).unwrap_or_else(|| format!("@{}", prop.uid));
     let resolver = Resolver { ctx, own: Own { comp, layer, prop, path: path.clone() } };

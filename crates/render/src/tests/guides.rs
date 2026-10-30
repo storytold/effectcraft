@@ -40,7 +40,7 @@ fn scene(nest: Nest) -> (Project, ItemId, ItemId) {
     guide.switches.guide = true;
     let bg = solid(&mut p, &inner, [1.0, 0.0, 0.0], (100, 100), three_d);
     let mut inner = inner;
-    inner.layers = vec![guide, bg];
+    inner.layers = vec![guide, bg].into();
     let iid = p.add_item("Inner", Label::Sandstone, None, ItemKind::Comp(inner.into()));
     let mut outer = Comp::new(100, 100, FrameRate::FPS_30, Tick::from_seconds_f64(2.0));
     if matches!(nest, Nest::CollapsedAdvanced) {
@@ -49,7 +49,7 @@ fn scene(nest: Nest) -> (Project, ItemId, ItemId) {
     let mut pre = build::layer(&mut p, &outer, "Inner", LayerSource::Comp { item: iid }, (100, 100), None);
     pre.switches.collapse = !matches!(nest, Nest::Precomp);
     pre.switches.three_d = three_d;
-    outer.layers = vec![pre];
+    outer.layers = vec![pre].into();
     let oid = p.add_item("Outer", Label::Sandstone, None, ItemKind::Comp(outer.into()));
     (p, iid, oid)
 }

@@ -23,6 +23,11 @@ pub use warp::{Sampling, WarpOpts, accumulate_warp, composite_warp, composite_wa
 
 pub type Px = [f32; 4];
 
+/// Maximum padded side in pixels — mirrors the project crate's `limits::MAX_SIZE` (30 000;
+/// raster sits below it in the layering and may not depend on it, so the two must stay equal).
+/// A padded side beyond the largest supported comp side has no render use.
+pub const MAX_PADDED_SIDE: u32 = 30_000;
+
 /// Clamp (colour ≤ alpha ≤ 1, NaN → 0) and round half up to `levels` steps (`inv` = 1 / levels):
 /// one pixel of an 8/16 bpc buffer. Values are non-negative after the clamp, so the integer
 /// conversion rounds like `round()` and vectorises.
@@ -161,13 +166,28 @@ impl Image {
         }
         o
     }
-    /// Copy with `pad` transparent pixels on every side.
+    /// The pad [`Image::padded`] applies for a requested `pad`: clamped so neither output side
+    /// exceeds [`MAX_PADDED_SIDE`]. At most `(MAX_PADDED_SIDE - side) / 2`, so
+    /// `side + 2 · pad ≤ MAX_PADDED_SIDE` and overflow is unreachable by construction (a side
+    /// already past the cap gets pad 0). Callers that track where the pixels went (a buffer
+    /// offset) must move by this, not by the requested pad.
+    pub fn effective_pad(&self, pad: u32) -> u32 {
+        pad.min(MAX_PADDED_SIDE.saturating_sub(self.width) / 2).min(MAX_PADDED_SIDE.saturating_sub(self.height) / 2)
+    }
+    /// Copy with [`Image::effective_pad`] transparent pixels on every side.
+    ///
+    /// The clamp keeps the output within the largest image the engine supports (a max-size comp
+    /// frame), so an unbounded pad cannot overflow or size a buffer past that. It is not a memory
+    /// budget: callers that pad by a derived, possibly large amount bound the area themselves
+    /// (`DOF_PAD_BUDGET` in render's `three_d/compose.rs`, `fits()` on the GPU path) or reject an
+    /// oversized pad first (`padded_size`); legitimate bounded pads are byte-identical.
     pub fn padded(&self, pad: u32) -> Image {
-        let mut out = Image::new(self.width + 2 * pad, self.height + 2 * pad);
+        let eff = self.effective_pad(pad);
+        let mut out = Image::new(self.width + 2 * eff, self.height + 2 * eff);
         let ow = out.width as usize;
         for y in 0..self.height as usize {
             let src = &self.data[y * self.width as usize..(y + 1) * self.width as usize];
-            let o = (y + pad as usize) * ow + pad as usize;
+            let o = (y + eff as usize) * ow + eff as usize;
             out.data[o..o + self.width as usize].copy_from_slice(src);
         }
         out
@@ -222,7 +242,7 @@ impl Image {
     }
     /// Straight-alpha 8-bit RGBA (sRGB-encoded values as stored).
     pub fn to_rgba8(&self) -> Vec<u8> {
-        self.map_rgba8(|o, p| {
+        self.map_rgba8(|o, p, _, _| {
             let a = p[3].clamp(0.0, 1.0);
             let inv = if a > 0.0 { 1.0 / p[3] } else { 0.0 };
             for c in 0..3 {
@@ -231,9 +251,20 @@ impl Image {
             o[3] = (a * 255.0 + 0.5) as u8;
         })
     }
+    /// [`Image::to_rgba8`] with the colour dithered ([`dither_u8`]); alpha is rounded.
+    pub fn to_rgba8_dithered(&self) -> Vec<u8> {
+        self.map_rgba8(|o, p, x, y| {
+            let a = p[3].clamp(0.0, 1.0);
+            let inv = if a > 0.0 { 1.0 / p[3] } else { 0.0 };
+            for c in 0..3 {
+                o[c] = dither_u8(p[c] * inv, x, y);
+            }
+            o[3] = (a * 255.0 + 0.5) as u8;
+        })
+    }
     /// Composite over an opaque background colour and return opaque 8-bit RGBA.
     pub fn to_rgba8_over(&self, bg: [f32; 3]) -> Vec<u8> {
-        self.map_rgba8(|o, p| {
+        self.map_rgba8(|o, p, _, _| {
             let k = 1.0 - p[3].clamp(0.0, 1.0);
             for c in 0..3 {
                 o[c] = ((p[c] + bg[c] * k).clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
@@ -241,13 +272,23 @@ impl Image {
             o[3] = 255;
         })
     }
-    /// 8-bit RGBA with each pixel written by `f`, row-parallel.
-    fn map_rgba8(&self, f: impl Fn(&mut [u8; 4], &Px) + Sync) -> Vec<u8> {
+    /// [`Image::to_rgba8_over`] with the colour dithered ([`dither_u8`]).
+    pub fn to_rgba8_over_dithered(&self, bg: [f32; 3]) -> Vec<u8> {
+        self.map_rgba8(|o, p, x, y| {
+            let k = 1.0 - p[3].clamp(0.0, 1.0);
+            for c in 0..3 {
+                o[c] = dither_u8(p[c] + bg[c] * k, x, y);
+            }
+            o[3] = 255;
+        })
+    }
+    /// 8-bit RGBA with each pixel written by `f` (given its x and y), row-parallel.
+    fn map_rgba8(&self, f: impl Fn(&mut [u8; 4], &Px, u32, u32) + Sync) -> Vec<u8> {
         let mut out = vec![0u8; self.data.len() * 4];
         let w = self.width.max(1) as usize;
-        out.par_chunks_mut(w * 4).zip(self.data.par_chunks(w)).for_each(|(o, row)| {
-            for (o, p) in o.as_chunks_mut::<4>().0.iter_mut().zip(row) {
-                f(o, p);
+        out.par_chunks_mut(w * 4).zip(self.data.par_chunks(w)).enumerate().for_each(|(y, (o, row))| {
+            for (x, (o, p)) in o.as_chunks_mut::<4>().0.iter_mut().zip(row).enumerate() {
+                f(o, p, x as u32, y as u32);
             }
         });
         out
@@ -322,6 +363,22 @@ pub fn hash_noise(x: u32, y: u32, seed: u32) -> f32 {
     (h & 0x00ff_ffff) as f32 / 16_777_216.0
 }
 
+/// Seed of the output dither: fixed, so a frame converts to the same bytes every time.
+const DITHER_SEED: u32 = 0x5bd1_e995;
+
+/// A colour value in 0..1 as an 8-bit code, dithered by pixel position (#2022): the value is
+/// scaled to 0..255 and rounded up or down against a per-pixel hash threshold, so the codes of
+/// a smooth gradient average to the gradient instead of stepping in bands. A value already on
+/// an 8-bit code (anything rendered at 8 bpc) comes out unchanged. Deterministic: depends only
+/// on the value and the pixel position, never on a clock or a global generator.
+#[inline]
+pub fn dither_u8(v: f32, x: u32, y: u32) -> u8 {
+    let s = v.clamp(0.0, 1.0) * 255.0;
+    // The threshold stays inside (1e-4, 1 - 1e-4) so float error on an exact code can't flip it.
+    let t = hash_noise(x, y, DITHER_SEED) * (1.0 - 2e-4) + 1e-4;
+    (s + t).floor() as u8
+}
+
 /// A single-channel coverage mask.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Mask {
@@ -345,6 +402,35 @@ impl Mask {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dither_keeps_exact_codes_and_averages_the_rest() {
+        // A value on an 8-bit code is that code at every position.
+        for code in 0..=255u32 {
+            let v = code as f32 / 255.0;
+            for (x, y) in [(0, 0), (1, 0), (17, 3), (1919, 1079), (4095, 4095)] {
+                assert_eq!(dither_u8(v, x, y) as u32, code, "code {code} at ({x}, {y})");
+            }
+        }
+        // Out-of-range and NaN values saturate instead of wrapping.
+        assert_eq!((dither_u8(-3.0, 5, 5), dither_u8(7.0, 5, 5), dither_u8(f32::NAN, 5, 5)), (0, 255, 0));
+        // A value between two codes lands on both, in proportion: the mean over a block is the value.
+        let v = (100.0 + 0.3) / 255.0;
+        let n = 64u32;
+        let sum: u32 = (0..n * n).map(|i| dither_u8(v, i % n, i / n) as u32).sum();
+        let mean = sum as f32 / (n * n) as f32;
+        assert!((mean - 100.3).abs() < 0.03, "{mean}");
+        // Deterministic.
+        assert_eq!(dither_u8(v, 9, 4), dither_u8(v, 9, 4));
+    }
+
+    #[test]
+    fn dithered_conversions_match_the_plain_ones_on_exact_codes() {
+        let src: Vec<u8> = vec![255, 128, 0, 255, 10, 20, 30, 255, 0, 0, 0, 255, 1, 2, 3, 255];
+        let img = Image::from_rgba8(2, 2, &src);
+        assert_eq!(img.to_rgba8_dithered(), img.to_rgba8());
+        assert_eq!(img.to_rgba8_over_dithered([0.0; 3]), img.to_rgba8_over([0.0; 3]));
+    }
 
     #[test]
     fn rgba8_roundtrip() {
@@ -383,5 +469,30 @@ mod tests {
             let n = hash_noise(i, i * 7, 3);
             assert!((0.0..1.0).contains(&n));
         }
+    }
+
+    #[test]
+    fn padded_bounds_hostile_pad_at_the_api() {
+        // Fail-before (#2092 class): before the clamp, a caller passing a hostile pad sized an
+        // oversized buffer here — the very OOM this guard exists to stop, now caught in padded().
+        // (Wide-flat source so the clamped-to-cap output stays a test-sized allocation.)
+        let mut img = Image::new(29_990, 2);
+        img.set(29_989, 1, [1.0, 0.0, 0.0, 1.0]);
+        let out = img.padded(u32::MAX);
+        // Width binds first: eff = (MAX_PADDED_SIDE - 29 990) / 2 = 5.
+        assert_eq!((out.width, out.height), (MAX_PADDED_SIDE, 12));
+        // The source lands intact at the clamped offset, not the requested one.
+        assert_eq!(out.get(29_994, 6), [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(out.get(0, 0), [0.0; 4]); // clamped pad region stays transparent
+    }
+
+    #[test]
+    fn padded_leaves_legit_pads_untouched() {
+        // Anti-over-clamp: an ordinary pad must round exactly, byte for byte.
+        let mut img = Image::new(8, 6);
+        img.set(3, 2, [1.0, 0.0, 0.0, 1.0]);
+        let out = img.padded(4);
+        assert_eq!((out.width, out.height), (16, 14));
+        assert_eq!(out.get(7, 6), [1.0, 0.0, 0.0, 1.0]); // (3+4, 2+4)
     }
 }

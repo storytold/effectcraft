@@ -246,7 +246,7 @@ pub fn contributors_ui(ui: &mut egui::Ui, auto: &mut Registry) {
     ui.horizontal_wrapped(|ui| {
         ui.label(tr("Show"));
         for m in NameMode::ALL {
-            let r = ui.selectable_label(v.names == m, m.label());
+            let r = ui.selectable_label(v.names == m, tr(m.label()));
             auto.add(&format!("about.credits.show.{}", m.id()), r.rect, m.label());
             if r.clicked() {
                 v.names = m;
@@ -254,9 +254,9 @@ pub fn contributors_ui(ui: &mut egui::Ui, auto: &mut Registry) {
         }
         ui.separator();
         ui.label(tr("Sort"));
-        let combo = craft_ui::ComboBox::from_id_salt("credits_sort").selected_text(v.key.label().0).show_ui(ui, |ui| {
+        let combo = craft_ui::ComboBox::from_id_salt("credits_sort").selected_text(tr(v.key.label().0)).show_ui(ui, |ui| {
             for k in SortKey::ALL {
-                let r = ui.selectable_label(v.key == k, k.label().0);
+                let r = ui.selectable_label(v.key == k, tr(k.label().0));
                 auto.add(&format!("about.credits.sort.{}", k.id()), r.rect, k.label().0);
                 if r.clicked() {
                     v.key = k;
@@ -309,7 +309,7 @@ fn table(ui: &mut egui::Ui, list: &[&Contributor], v: &mut View, auto: &mut Regi
     egui::Grid::new("credits_table").striped(true).num_columns(SortKey::ALL.len()).show(ui, |ui| {
         for k in SortKey::ALL {
             let arrow = if v.key == k { if v.ascending { " ▲" } else { " ▼" } } else { "" };
-            let r = ui.button(RichText::new(format!("{}{arrow}", k.label().1)).strong()).on_hover_text(k.label().0);
+            let r = ui.button(RichText::new(format!("{}{arrow}", k.label().1)).strong()).on_hover_text(tr(k.label().0));
             auto.add(&format!("about.credits.header.{}", k.id()), r.rect, k.label().0);
             if r.clicked() {
                 if v.key == k {

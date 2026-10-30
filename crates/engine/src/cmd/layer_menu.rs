@@ -61,7 +61,7 @@ fn quality(s: &mut Session, p: &Value) -> Result<Value> {
         q => return Err(bad("layer.quality", format!("quality must be best|draft|wireframe, not `{q}`"))),
     };
     s.edit("Layer Quality", None, |proj, _| {
-        for l in proj.comp_mut(cid).ok_or(EngineError::NoComp)?.layers.iter_mut().filter(|l| ids.contains(&l.id)) {
+        for l in proj.comp_mut(cid).ok_or(EngineError::NoComp)?.layers.iter_mut_where(|l| ids.contains(&l.id)) {
             l.switches.quality = q;
         }
         Ok(())
@@ -84,7 +84,7 @@ fn sampling(s: &mut Session, p: &Value) -> Result<Value> {
         q => q,
     };
     s.edit("Layer Sampling", None, |proj, _| {
-        for l in proj.comp_mut(cid).ok_or(EngineError::NoComp)?.layers.iter_mut().filter(|l| ids.contains(&l.id)) {
+        for l in proj.comp_mut(cid).ok_or(EngineError::NoComp)?.layers.iter_mut_where(|l| ids.contains(&l.id)) {
             l.switches.sampling = q;
         }
         Ok(())
@@ -101,7 +101,7 @@ fn frame_blending(s: &mut Session, p: &Value) -> Result<Value> {
         m => return Err(bad("layer.frameBlending", format!("mode must be off|frameMix|pixelMotion, not `{m}`"))),
     };
     s.edit("Frame Blending", None, |proj, _| {
-        for l in proj.comp_mut(cid).ok_or(EngineError::NoComp)?.layers.iter_mut().filter(|l| ids.contains(&l.id)) {
+        for l in proj.comp_mut(cid).ok_or(EngineError::NoComp)?.layers.iter_mut_where(|l| ids.contains(&l.id)) {
             l.switches.frame_blend = m;
         }
         Ok(())
@@ -116,7 +116,7 @@ fn hide_other_video(s: &mut Session, p: &Value) -> Result<Value> {
     s.edit("Hide Other Video", None, |proj, _| {
         // Every layer has a Video switch (nulls, cameras and lights included, as the Timeline's
         // eye cell shows): the selection stays shown.
-        for l in proj.comp_mut(cid).ok_or(EngineError::NoComp)?.layers.iter_mut().filter(|l| !ids.contains(&l.id)) {
+        for l in proj.comp_mut(cid).ok_or(EngineError::NoComp)?.layers.iter_mut_where(|l| !ids.contains(&l.id)) {
             l.switches.video = false;
         }
         Ok(())
@@ -130,7 +130,7 @@ fn show_all_video(s: &mut Session, p: &Value) -> Result<Value> {
         let c = proj.comp_mut(cid).ok_or(EngineError::NoComp)?;
         // Track mattes stay hidden (their video switch is off by design).
         let mattes: Vec<LayerId> = c.layers.iter().filter_map(|l| l.track_matte.map(|m| m.layer)).collect();
-        for l in c.layers.iter_mut().filter(|l| !mattes.contains(&l.id)) {
+        for l in c.layers.iter_mut_where(|l| !mattes.contains(&l.id)) {
             l.switches.video = true;
         }
         Ok(())
@@ -154,7 +154,7 @@ fn expressions(s: &mut Session, p: &Value) -> Result<Value> {
     let on = b_p(p, "enabled").unwrap_or(true);
     let n = s.edit(if on { "Enable Expressions" } else { "Disable Expressions" }, None, |proj, _| {
         let mut n = 0;
-        for l in proj.comp_mut(cid).ok_or(EngineError::NoComp)?.layers.iter_mut().filter(|l| ids.contains(&l.id)) {
+        for l in proj.comp_mut(cid).ok_or(EngineError::NoComp)?.layers.iter_mut_where(|l| ids.contains(&l.id)) {
             l.props.walk_mut(&mut |pr| {
                 if let Some(e) = &mut pr.expr {
                     e.enabled = on;
@@ -586,7 +586,7 @@ fn markers_lock(s: &mut Session, p: &Value) -> Result<Value> {
     let r = s.edit("Lock Markers", None, |proj, _| {
         let c = proj.comp_mut(cid).ok_or(EngineError::NoComp)?;
         let target = v.unwrap_or_else(|| !c.layers.iter().find(|l| ids.contains(&l.id)).is_some_and(|l| l.markers_locked));
-        for l in c.layers.iter_mut().filter(|l| ids.contains(&l.id)) {
+        for l in c.layers.iter_mut_where(|l| ids.contains(&l.id)) {
             l.markers_locked = target;
         }
         Ok(target)
@@ -597,7 +597,7 @@ fn markers_lock(s: &mut Session, p: &Value) -> Result<Value> {
 fn delete_all_markers(s: &mut Session, p: &Value) -> Result<Value> {
     let (cid, ids) = layers_p(s, p)?;
     s.edit("Delete All Markers", None, |proj, _| {
-        for l in proj.comp_mut(cid).ok_or(EngineError::NoComp)?.layers.iter_mut().filter(|l| ids.contains(&l.id) && !l.markers_locked) {
+        for l in proj.comp_mut(cid).ok_or(EngineError::NoComp)?.layers.iter_mut_where(|l| ids.contains(&l.id) && !l.markers_locked) {
             l.markers.clear();
         }
         Ok(())
@@ -609,6 +609,7 @@ fn delete_all_markers(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn track_matte_op(s: &mut Session, p: &Value) -> Result<Value> {
     let (cid, ids) = layers_p(s, p)?;
+    let ids = super::unlocked(s, cid, ids, "layer.trackMatte")?;
     let op = str_p(p, "op").ok_or_else(|| bad("layer.trackMatte", "missing `op`"))?.to_string();
     let kind = match op.as_str() {
         "alpha" => Some(MatteKind::Alpha),

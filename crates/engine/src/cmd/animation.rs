@@ -67,6 +67,7 @@ fn earliest_key<'a>(groups: impl IntoIterator<Item = &'a PropGroup>) -> Option<T
 
 fn save_preset(s: &mut Session, p: &Value) -> Result<Value> {
     let path = str_p(p, "path").ok_or_else(|| bad("anim.savePreset", "missing `path`"))?.to_string();
+    s.refuse_export(&path)?;
     let comp = s.active_comp().ok_or(EngineError::NoComp)?;
     let t = s.time();
     let mut effects: Vec<(LayerId, PropGroup)> = selected_effects(s);
@@ -106,7 +107,7 @@ fn save_preset(s: &mut Session, p: &Value) -> Result<Value> {
         .unwrap_or_else(|| std::path::Path::new(&path).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default());
     let doc = json!({PRESET_TAG: PRESET_VERSION, "name": name, "properties": props_json, "effects": fx_json});
     let text = serde_json::to_string_pretty(&doc).unwrap_or_default();
-    s.services.write_file(&path, text.as_bytes()).map_err(|e| EngineError::Other(format!("cannot write {path}: {e}")))?;
+    s.write_output(&path, text.as_bytes())?;
     Ok(json!({"path": path, "properties": props.len(), "effects": effects.len()}))
 }
 
@@ -243,7 +244,7 @@ fn add_keyframe(s: &mut Session, _: &Value) -> Result<Value> {
     }
     let cid = s.active_comp_id().ok_or(EngineError::NoComp)?;
     let t = s.time();
-    let n = s.edit("Add Keyframe", None, |proj, _| {
+    let n = s.edit("Add Keyframe", None, |proj, state| {
         let mut n = 0;
         for (lid, uid) in &targets {
             let l = layer_mut(proj, cid, *lid)?;
@@ -259,6 +260,9 @@ fn add_keyframe(s: &mut Session, _: &Value) -> Result<Value> {
                 pr.set_value_at(lt, v);
             }
             n += 1;
+            if pr.match_id == "type" {
+                super::prop::sync_polystar_property(proj, state, cid, *lid, *uid, t)?;
+            }
         }
         Ok(n)
     })?;
@@ -268,7 +272,8 @@ fn add_keyframe(s: &mut Session, _: &Value) -> Result<Value> {
 /// Selected keys grouped by (layer, property).
 fn keys_by_prop(s: &Session) -> BTreeMap<(LayerId, Uid), Vec<Tick>> {
     let mut m: BTreeMap<(LayerId, Uid), Vec<Tick>> = BTreeMap::new();
-    for k in &s.state.selected_keys {
+    let Some(comp) = s.active_comp() else { return m };
+    for k in super::prop::editable_keys(comp, &s.state.selected_keys) {
         m.entry((k.layer, k.prop)).or_default().push(k.time);
     }
     m

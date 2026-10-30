@@ -1,4 +1,5 @@
 //! User-reported selection, Project deletion, and render-queue drop regressions.
+use crate::gpu_test::RenderSerial;
 use effectcraft_engine::{Session, project::LayerId};
 use effectcraft_ui_egui::{Dialog, EffectcraftApp, dock::PanelKind};
 use egui::{Event, Modifiers, PointerButton, Pos2, Rect, pos2, vec2};
@@ -273,7 +274,7 @@ fn viewer_right_click_targets_hit_and_duplicate_preserves_group() {
         }
         assert!(h.state().frames.is_cached(&key));
         h.run_steps(3);
-        h.render().expect("offscreen context menu render").save(out).unwrap();
+        h.render_serialized().expect("offscreen context menu render").save(out).unwrap();
     }
     h.get_by_label("Duplicate").click();
     h.run_steps(3);
@@ -433,7 +434,7 @@ fn workflow_snapshot() {
     }
     assert!(h.state().frames.is_cached(&key), "current composition rendered before capture");
     h.run_steps(3);
-    h.render().expect("offscreen UI render").save(out).unwrap();
+    h.render_serialized().expect("offscreen UI render").save(out).unwrap();
 }
 
 /// Filled rects painted this frame (flattening nested shape lists).

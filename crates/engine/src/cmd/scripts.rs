@@ -7,6 +7,9 @@
 //!   panels appear at the bottom of the Window menu and open as dockable panels
 //!   (`window.scriptPanel`), running with `this` = the panel as in After Effects. A subfolder of
 //!   either folder (one level) is a submenu named after it; its scripts are named `Folder/File.jsx`.
+//! * **Startup and Shutdown scripts** in `Scripts/Startup/` and `Scripts/Shutdown/` run by
+//!   themselves, in alphabetical order: at launch (`file.runStartupScripts`) and as EffectCraft
+//!   quits, after the project is closed (`file.runShutdownScripts`).
 //! * **ScriptUI windows** (`scriptui.*`): list the open script windows, read their control
 //!   trees, click buttons and set values like a user, close them (see [`crate::scriptui`]).
 //! * **Script settings** (`script.settings.*`): After Effects' `app.settings`, string values by
@@ -23,6 +26,18 @@ use crate::{EngineError, Event, Result, Session, cmd, scriptui};
 /// The settings-store folders of installed scripts.
 pub const SCRIPTS_DIR: &str = "Scripts";
 pub const PANELS_DIR: &str = "Scripts/ScriptUI Panels";
+/// The settings-store folders whose scripts run at launch and as EffectCraft quits.
+pub const STARTUP_DIR: &str = "Scripts/Startup";
+pub const SHUTDOWN_DIR: &str = "Scripts/Shutdown";
+/// Commands that run script files or script code (a ScriptUI panel runs its script when it
+/// opens). Scripts and batches can't run them, and confined automation sessions refuse them.
+pub const RUNS_SCRIPTS: &[&str] =
+    &["script.run", "file.runScript", "file.runStartupScripts", "file.runShutdownScripts", "window.scriptPanel", "window.restoreScriptPanels"];
+/// Largest script file the Startup and Shutdown folders run (bytes), as `#include` and
+/// `$.evalFile` allow.
+const MAX_SCRIPT_BYTES: usize = 16 << 20;
+/// Modal dialogs a Shutdown script may open one after another; each closes as if canceled.
+const MAX_SHUTDOWN_DIALOGS: usize = 64;
 /// [`PANELS_DIR`]'s name in [`SCRIPTS_DIR`]: it holds the panels, so it is not a folder of scripts.
 const PANELS_FOLDER: &str = "ScriptUI Panels";
 /// Subfolders of Scripts that hold scripts the app runs itself (panels; launch and quit, as in
@@ -221,6 +236,7 @@ fn install(s: &mut Session, p: &Value, panel: bool) -> Result<Value> {
     let cfg = s.config.clone().ok_or_else(|| EngineError::Other("this session has no settings folder to install scripts into".into()))?;
     let dir = if panel { PANELS_DIR } else { SCRIPTS_DIR };
     cfg.write(&format!("{dir}/{name}"), &code).map_err(|e| EngineError::Other(format!("cannot install {name}: {e}")))?;
+    s.scripts_changed();
     // After Effects asks for a restart; our menus pick it up at once.
     s.toast(if panel {
         format!("Installed ScriptUI panel {name}: find it at the bottom of the Window menu")
@@ -256,6 +272,7 @@ fn uninstall(s: &mut Session, p: &Value) -> Result<Value> {
             removed = true;
         }
     }
+    s.scripts_changed();
     if removed { Ok(json!({"removed": name})) } else { Err(bad(c, format!("`{name}` is not installed"))) }
 }
 
@@ -337,6 +354,85 @@ fn restore_panels(s: &mut Session, _: &Value) -> Result<Value> {
     Ok(json!({"opened": opened, "failed": failed}))
 }
 
+/// Run the scripts in `dir` of the settings store one after another, in alphabetical order (case
+/// ignored), as After Effects runs its Startup and Shutdown folders. A script that fails is
+/// reported in a toast and the log and listed in `failed`; the next one still runs. A script waiting in a
+/// modal dialog is listed in `waiting` and goes on when the dialog closes; the next one runs
+/// meanwhile. With `quitting`, no window is left to show a dialog in, so each dialog closes as
+/// if canceled (`show()` returns 2) and the script runs on.
+fn run_folder(s: &mut Session, dir: &str, quitting: bool) -> Value {
+    let mut names: Vec<String> = s.config.as_ref().map(|c| c.list(dir)).unwrap_or_default().into_iter().filter(|n| is_script(n) && is_script_name(n)).collect();
+    names.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()).then_with(|| a.cmp(b)));
+    let (mut ran, mut waiting, mut failed) = (vec![], vec![], vec![]);
+    for name in names {
+        let code = match s.config.as_ref().map(|c| c.read_bounded(&format!("{dir}/{name}"), MAX_SCRIPT_BYTES)) {
+            Some(Ok(Some(code))) => code,
+            read => {
+                let why = match read {
+                    Some(Err(e)) => format!(": {e}"),
+                    _ => String::new(),
+                };
+                let error = format!("{name}: cannot read the script{why}");
+                log::warn!("{dir}: {error}");
+                s.events.push(Event::Toast { message: error.clone(), error: true });
+                failed.push(json!({"name": name, "error": error}));
+                continue;
+            }
+        };
+        let is_waiting = |r: &Result<Value>| r.as_ref().is_ok_and(|v| v.get("waiting").and_then(Value::as_bool) == Some(true));
+        // In a settings folder on disk, the script runs as its file, so `#include`, `$.fileName`
+        // and `$.evalFile` find the files beside it.
+        let path = s.config.as_ref().and_then(|c| c.dir()).map(|d| d.join(dir).join(&name).to_string_lossy().into_owned()).unwrap_or_else(|| name.clone());
+        // Windows open before this script runs belong to other scripts, perhaps of the same name.
+        let before: Vec<u32> = s.script_ui.windows.iter().map(|w| w.id).collect();
+        let hosts_before = s.script_ui.task_hosts.clone();
+        let mut r = super::file_more::run_js_file(s, &code, &path, &name);
+        if !quitting {
+            // The Startup script's context: the one that scheduled tasks or holds the windows it
+            // opened (a task scheduled after its dialog closes runs there too).
+            let tasks = s.script_ui.task_hosts.iter().filter(|h| !hosts_before.contains(h)).copied();
+            let windows = s.script_ui.windows.iter().filter(|w| !before.contains(&w.id)).map(|w| w.host);
+            let hosts: Vec<u32> = tasks.chain(windows).collect();
+            for h in hosts {
+                if !s.script_ui.startup_hosts.contains(&h) {
+                    s.script_ui.startup_hosts.push(h);
+                }
+            }
+        }
+        let mut closed = 0;
+        while quitting && closed < MAX_SHUTDOWN_DIALOGS && is_waiting(&r) {
+            let Some(id) = s.script_ui.windows.iter().rev().find(|w| w.modal && w.script == path && !before.contains(&w.id)).map(|w| w.id) else { break };
+            // report_js reports an error the script throws after its dialog closes, as it does for an
+            // error in the script's first run.
+            r = scriptui::close(s, &json!({"window": id})).and_then(|out| super::file_more::report_js(s, &name, out));
+            closed += 1;
+        }
+        match r {
+            Ok(_) if is_waiting(&r) => waiting.push(name),
+            Ok(_) => ran.push(name),
+            Err(e) => {
+                // Also in the log: no frame draws a Shutdown script's toast.
+                log::warn!("{dir}: {e}");
+                failed.push(json!({"name": name, "error": e.to_string()}));
+            }
+        }
+    }
+    json!({"ran": ran, "waiting": waiting, "failed": failed})
+}
+
+/// `file.runStartupScripts`: run the scripts in `Scripts/Startup` (frontends call it once at
+/// launch, before a project opens).
+fn run_startup(s: &mut Session, _: &Value) -> Result<Value> {
+    Ok(run_folder(s, STARTUP_DIR, false))
+}
+
+/// `file.runShutdownScripts`: close the project, then run the scripts in `Scripts/Shutdown`
+/// (frontends call it as the app quits, after the unsaved-changes prompt).
+fn run_shutdown(s: &mut Session, _: &Value) -> Result<Value> {
+    s.replace_project(effectcraft_project::Project::default(), None);
+    Ok(run_folder(s, SHUTDOWN_DIR, true))
+}
+
 /// Window ▸ `<ScriptUI panel>`: run the panel script (or bring its panel forward).
 fn open_panel(s: &mut Session, p: &Value) -> Result<Value> {
     let c = "window.scriptPanel";
@@ -414,6 +510,24 @@ pub fn specs() -> Vec<CommandSpec> {
             always,
             restore_panels
         ),
+        cmd!(
+            "file.runStartupScripts",
+            "Run Startup Scripts",
+            [],
+            None,
+            "{} → runs the scripts in Scripts/Startup in alphabetical order (frontends call it at launch) → {ran: [name], waiting: [name] (in a modal dialog), failed: [{name, error}]}",
+            always,
+            run_startup
+        ),
+        cmd!(
+            "file.runShutdownScripts",
+            "Run Shutdown Scripts",
+            [],
+            None,
+            "{} → closes the project, then runs the scripts in Scripts/Shutdown in alphabetical order (frontends call it as the app quits; their modal dialogs close as if canceled) → {ran: [name], waiting: [name], failed: [{name, error}]}",
+            always,
+            run_shutdown
+        ),
         crate::query!("script.settings.get", "Get Script Setting", "{section, key} → {have, value} (app.settings.haveSetting / getSetting)", settings_get),
         cmd!(
             "script.settings.save",
@@ -463,9 +577,18 @@ pub fn specs() -> Vec<CommandSpec> {
             "Mouse Event on Script Window Control",
             [],
             None,
-            "{window?, widget, type: mousedown | mouseup | mousemove | mouseover | mouseout | click (default), x?, y? (relative to the control; default its centre), button? (0 left, 1 middle, 2 right), detail? (click count), screenX?, screenY?, altKey?, ctrlKey?, metaKey?, shiftKey?} → the script's addEventListener listeners on the control and its containers receive a MouseEvent",
+            "{window?, widget, type: mousedown | mouseup | mousemove | mouseover | mouseout | click (default), x?, y? (relative to the control; default its centre), button? (0 left, 1 middle, 2 right), buttons? (held: 1 left, 2 right, 4 middle), detail? (click count), screenX?, screenY?, altKey?, ctrlKey?, metaKey?, shiftKey?} → the script's addEventListener listeners on the control and its containers receive a MouseEvent",
             always,
             scriptui::mouse
+        ),
+        cmd!(
+            "scriptui.resize",
+            "Resize Script Window",
+            [],
+            None,
+            "{window?, size: [width, height] (pixels)} → the window takes the size, lays itself out again and its onResizing / onResize run (a docked ScriptUI panel gets its dock's size)",
+            always,
+            scriptui::resize
         ),
         cmd!(
             "scriptui.close",
@@ -946,6 +1069,66 @@ mod tests {
         s.execute("file.uninstallScript", json!({"name": "Hello.jsx"})).unwrap();
         assert!(installed.iter().all(|p| !p.exists()));
         assert!(bad_params(&s.execute("file.uninstallScript", json!({"name": "Hello.jsx"}))), "no longer installed");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Edit ▸ Keyboard Shortcuts lists the scripts File ▸ Scripts lists (not ScriptUI panels),
+    /// as soon as one is installed and until it is uninstalled; a key given to one is saved with
+    /// the preset.
+    #[test]
+    fn file_scripts_entries_take_keyboard_shortcuts() {
+        use crate::shortcuts::{Keymaps, SHORTCUTS_FILE, binding_key};
+        let (mut s, root) = session_in_tmp("shortcuts");
+        let (script, panel) = (root.join("Hello.jsx"), root.join("Hello Panel.jsx"));
+        std::fs::write(&script, "hello").unwrap();
+        std::fs::write(&panel, "panel").unwrap();
+        let listed = |s: &Session, name: &str| {
+            s.shortcuts().find(&binding_key("file.runScript", &json!({"name": name}))).map(|b| (b.label.clone(), b.path.join(" ▸ "), b.defaults.clone()))
+        };
+        assert_eq!(listed(&s, "Rename Layers.jsx"), Some(("Rename Layers.jsx".into(), "File ▸ Scripts".into(), vec![])), "the bundled samples");
+        assert_eq!(listed(&s, "Hello.jsx"), None);
+        s.execute("file.installScript", json!({"path": script.to_string_lossy()})).unwrap();
+        s.execute("file.installScriptUIPanel", json!({"path": panel.to_string_lossy()})).unwrap();
+        assert_eq!(listed(&s, "Hello.jsx"), Some(("Hello.jsx".into(), "File ▸ Scripts".into(), vec![])));
+        assert_eq!(listed(&s, "Hello Panel.jsx"), None, "panels are in the Window menu");
+        let r = s.execute("shortcuts.set", json!({"command": "file.runScript", "params": {"name": "Hello.jsx"}, "keys": "Cmd+Alt+Shift+F7"})).unwrap();
+        let key = binding_key("file.runScript", &json!({"name": "Hello.jsx"}));
+        assert_eq!((&r["command"], &r["keys"]), (&json!(key), &json!(["Cmd+Alt+Shift+F7"])), "{r}");
+        assert_eq!(s.shortcuts().shortcut_of("file.runScript", &json!({"name": "Hello.jsx"})), Some("Cmd+Alt+Shift+F7"));
+        let saved = Keymaps::from_json(&std::fs::read_to_string(root.join("settings").join(SHORTCUTS_FILE)).unwrap());
+        assert_eq!(saved.active_preset().and_then(|p| p.overrides.get(&key)), Some(&vec!["Cmd+Alt+Shift+F7".to_string()]));
+        s.execute("file.uninstallScript", json!({"name": "Hello.jsx"})).unwrap();
+        assert_eq!(listed(&s, "Hello.jsx"), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `shortcuts.list` and `shortcuts.set` see a script copied into the Scripts folder by hand
+    /// after the shortcut table was built; a script the folder doesn't hold (never there, or
+    /// removed by hand) can't take a key, and Run Script File… keeps its own keys.
+    #[test]
+    fn shortcut_commands_find_scripts_copied_into_the_folder() {
+        let (mut s, root) = session_in_tmp("copied");
+        assert!(s.shortcuts().find("file.runScript").is_some(), "the table is built");
+        std::fs::create_dir_all(root.join("settings").join(SCRIPTS_DIR)).unwrap();
+        std::fs::write(root.join("settings").join(SCRIPTS_DIR).join("Copied.jsx"), "copied").unwrap();
+        let list = s.execute("shortcuts.list", json!({"query": "copied.jsx"})).unwrap();
+        assert_eq!(list["count"], 1, "{list}");
+        let r = s.execute("shortcuts.set", json!({"command": "file.runScript", "params": {"name": "Copied.jsx"}, "keys": "Cmd+Alt+Shift+F7"})).unwrap();
+        assert_eq!(r["command"], r#"file.runScript {"name":"Copied.jsx"}"#, "{r}");
+        let r = s.execute("shortcuts.set", json!({"command": "file.runScript", "params": {"name": "Missing.jsx"}, "keys": "Cmd+Alt+Shift+F8"}));
+        assert!(bad_params(&r), "{r:?}");
+        // The binding-key form finds a script copied in since the last lookup, too.
+        std::fs::write(root.join("settings").join(SCRIPTS_DIR).join("Second.jsx"), "second").unwrap();
+        let r = s.execute("shortcuts.set", json!({"command": r#"file.runScript {"name":"Second.jsx"}"#, "keys": "Cmd+Alt+Shift+F10"})).unwrap();
+        assert_eq!(r["command"], r#"file.runScript {"name":"Second.jsx"}"#, "{r}");
+        // Removed by hand: no longer in the folder.
+        std::fs::remove_file(root.join("settings").join(SCRIPTS_DIR).join("Copied.jsx")).unwrap();
+        std::fs::remove_file(root.join("settings").join(SCRIPTS_DIR).join("Second.jsx")).unwrap();
+        let r = s.execute("shortcuts.set", json!({"command": r#"file.runScript {"name":"Second.jsx"}"#, "keys": "Cmd+Alt+Shift+F11"}));
+        assert!(bad_params(&r), "{r:?}");
+        let r = s.execute("shortcuts.set", json!({"command": "file.runScript", "params": {"name": "Copied.jsx"}, "keys": "Cmd+Alt+Shift+F9"}));
+        assert!(bad_params(&r), "{r:?}");
+        assert_eq!(s.shortcuts().shortcut_of("file.runScript", &Value::Null), None, "Run Script File… has no key");
         let _ = std::fs::remove_dir_all(&root);
     }
 }

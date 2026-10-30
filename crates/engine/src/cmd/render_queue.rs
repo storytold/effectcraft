@@ -550,6 +550,9 @@ fn add(s: &mut Session, p: &Value) -> Result<Value> {
         object.remove("template");
     }
     apply_output(&mut it.output, &templates, s.state.region_of_interest, &output_params, "renderQueue.add")?;
+    if str_p(p, "output").or(str_p(p, "path")).is_none() {
+        s.avoid_sources(&mut it);
+    }
     if let Some(l) = enum_p(p, "log", "renderQueue.add", RenderLog::parse, "errorsOnly|plusSettings|plusPerFrameInfo")? {
         it.log = l;
     }
@@ -619,7 +622,7 @@ fn set_output_module(s: &mut Session, p: &Value) -> Result<Value> {
         let (w, h) = item.settings.output_size(comp);
         let mut crop_only = om.clone();
         crop_only.resize.enabled = false;
-        let (cw, ch) = crop_only.frame_size(w, h, item.settings.resolution.clamp(0.01, 4.0));
+        let (cw, ch) = crop_only.frame_size(w, h, item.settings.effective_scale(comp));
         om.resize.width = ((om.resize.height as f64 * cw as f64 / ch as f64).round() as u32).clamp(1, 30_000);
     }
     let post = match str_p(p, "postRenderAction") {
@@ -696,8 +699,18 @@ fn render(s: &mut Session, p: &Value) -> Result<Value> {
     {
         log::warn!("{e}");
     }
+    let queued: std::collections::HashSet<u64> = s.project.render_queue.iter().filter(|i| i.is_queued()).map(|i| i.id).collect();
     let ids = s.start_render(wait).map_err(EngineError::Other)?;
-    let items: Vec<Value> = s.project.render_queue.iter().enumerate().filter(|(_, i)| ids.contains(&i.id)).map(|(k, i)| item_json(s, i, k)).collect();
+    // Source refusals fail before the exporter starts. Report them just like encoding
+    // failures, so CLI/MCP callers do not mistake a partly refused queue for full success.
+    let items: Vec<Value> = s
+        .project
+        .render_queue
+        .iter()
+        .enumerate()
+        .filter(|(_, i)| ids.contains(&i.id) || (queued.contains(&i.id) && matches!(i.status, RenderStatus::Failed(_))))
+        .map(|(k, i)| item_json(s, i, k))
+        .collect();
     Ok(json!({"rendering": s.is_rendering(), "items": items}))
 }
 
@@ -788,6 +801,9 @@ fn pre_render(s: &mut Session, p: &Value) -> Result<Value> {
     it.output = templates.default_output_module(TemplateSlot::PreRender);
     it.output.output = "[compName]_prerender.[fileExtension]".into();
     apply_output(&mut it.output, &templates, s.state.region_of_interest, p, "render.preRender")?;
+    if str_p(p, "output").or(str_p(p, "path")).is_none() {
+        s.avoid_sources(&mut it);
+    }
     it.post_render = PostRenderAction::ImportAndReplace;
     let id = s.edit("Pre-render", None, |proj, _| {
         it.id = proj.render_queue.iter().map(|i| i.id).max().unwrap_or(0) + 1;
@@ -813,6 +829,9 @@ fn save_current_preview(s: &mut Session, p: &Value) -> Result<Value> {
     let mut item = RenderQueueItem::new(0, cid);
     item.output = OutputModule::for_format(format);
     item.output.output = path.clone();
+    if let Some(refusal) = s.check_outputs(&[vec![(item.clone(), path.clone())]]).first() {
+        return Err(EngineError::Other(refusal.reason.clone()));
+    }
     let job = crate::ExportJob {
         project: &s.project,
         footage: s.footage.as_ref(),

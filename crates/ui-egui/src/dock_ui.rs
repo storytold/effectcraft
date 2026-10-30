@@ -406,7 +406,7 @@ impl EffectcraftApp {
 
     /// A press in a panel (its body, tab or group header) focuses it; another Composition viewer
     /// also becomes the active one.
-    fn focus_panel(&mut self, ctx: &egui::Context, p: PanelKind) {
+    pub(crate) fn focus_panel(&mut self, ctx: &egui::Context, p: PanelKind) {
         self.ui.focused = p;
         panels::viewer_text::panel_clicked(self, ctx, p);
         if let Some(id) = panels::viewers::id_of(p) {
@@ -799,7 +799,11 @@ impl DockContent<PanelKind> for EffectContent<'_> {
     }
 
     fn logical_label(&self, panel: &PanelKind) -> String {
-        crate::i18n::command_label("window.panel", panel.title()).to_string()
+        let title = panel.title();
+        // The Window menu names most panels; `Markers` is only in the panel catalog, and the two
+        // panels in neither (`History`, `ScriptUI Panel`) keep their English names.
+        let listed = crate::i18n::command_label("window.panel", title);
+        if listed == title { crate::i18n::tr(title).to_string() } else { listed.to_string() }
     }
 
     /// The tab names what the panel shows ("Composition Intro"), after the label swatch of its
@@ -843,11 +847,11 @@ impl DockContent<PanelKind> for EffectContent<'_> {
         }
     }
 
-    fn group_extra_tabs_width(&self, panels: &[PanelKind], active: &PanelKind, _floating: bool) -> f32 {
+    fn group_extra_tabs_width(&self, panels: &[PanelKind], _active: &PanelKind, _floating: bool) -> f32 {
         if !self.has_doc_tabs(panels) {
             return 0.0;
         }
-        dock::doc_widths(&self.ctx, &self.docs, *active == PanelKind::Timeline, &self.style.font).iter().sum()
+        dock::doc_widths(&self.ctx, &self.docs, &self.style.font).iter().sum()
     }
 
     /// The Timeline's comp tabs, after its group's panel tabs whichever panel is shown.

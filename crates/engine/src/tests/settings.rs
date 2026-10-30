@@ -80,6 +80,15 @@ fn prefs_migrate_old_disk_cache_default() {
 }
 
 #[test]
+fn prefs_migrate_old_split_layers_default() {
+    // Settings saved before #2083 kept "below"; they move to After Effects' "above" once (#2545).
+    let above = |doc: &str| Prefs::from_json(doc).general.create_split_layers_above;
+    assert!(above(r#"{"version": 3, "general": {"createSplitLayersAbove": false}}"#));
+    assert!(above(r#"{"version": 2, "general": {"createSplitLayersAbove": false}}"#));
+    assert!(!above(r#"{"version": 4, "general": {"createSplitLayersAbove": false}}"#), "a choice made since stays");
+}
+
+#[test]
 fn prefs_set_validates_keys_types_and_ranges() {
     let mut p = Prefs::default();
     assert!(p.set("general.nope", json!(1)).is_err());
@@ -386,6 +395,23 @@ fn new_project_template_and_default_renderer() {
     s.execute("prefs.set", json!({"key": "threeD.defaultRenderer", "value": "advanced"})).unwrap();
     s.execute("comp.new", json!({})).unwrap();
     assert_eq!(s.active_comp().unwrap().renderer, effectcraft_project::Renderer::Advanced3D);
+    let _ = std::fs::remove_dir_all(d);
+}
+
+#[test]
+fn project_files_are_indented_unless_compact_is_on() {
+    let d = tmp("compact-project-files");
+    let path = d.join("p.ecproj");
+    let mut s = session_with_comp();
+    s.execute("file.saveAs", json!({"path": path.to_string_lossy()})).unwrap();
+    let pretty = std::fs::read_to_string(&path).unwrap();
+    assert!(pretty.starts_with("{\n  \"savedBy\""), "indented by default");
+    s.execute("prefs.set", json!({"key": "project.compactProjectFiles", "value": true})).unwrap();
+    s.execute("file.saveAs", json!({"path": path.to_string_lossy()})).unwrap();
+    let compact = std::fs::read_to_string(&path).unwrap();
+    assert!(!compact.contains('\n'), "one line when Save Compact Project Files is on");
+    let open = |text: &str| effectcraft_project::Project::from_json(text).unwrap();
+    assert_eq!(open(&compact), open(&pretty), "both read back as the same project");
     let _ = std::fs::remove_dir_all(d);
 }
 
@@ -1072,6 +1098,14 @@ fn interface_language_is_validated_persisted_and_backward_compatible() {
     cs.load_settings();
     assert_eq!(cs.prefs.general.language, "cs");
     assert_eq!(Prefs::from_json(r#"{"general":{"language":"cs"}}"#).general.language, "cs");
+    // Polish, likewise.
+    assert!(crate::prefs::LANGUAGES.contains(&("Polski", "pl")));
+    s.execute("prefs.set", json!({"key": "general.language", "value": "pl"})).unwrap();
+    assert_eq!(s.execute("prefs.get", json!({"key": "general.language"})).unwrap(), json!("pl"));
+    let mut pl = Session { config: Some(store.clone()), ..Default::default() };
+    pl.load_settings();
+    assert_eq!(pl.prefs.general.language, "pl");
+    assert_eq!(Prefs::from_json(r#"{"general":{"language":"pl"}}"#).general.language, "pl");
     // Georgian too.
     assert!(crate::prefs::LANGUAGES.contains(&("ქართული", "ka")));
     s.execute("prefs.set", json!({"key": "general.language", "value": "ka"})).unwrap();

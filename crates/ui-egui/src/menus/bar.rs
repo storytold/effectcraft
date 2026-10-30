@@ -179,7 +179,12 @@ fn menu_nodes(
                         "recentScripts" => app.session.prefs.recent_scripts.get(i).map(|r| r.text().to_string()),
                         _ => None,
                     };
-                    let r = ui.add_enabled(entry_enabled(app, e), egui::Button::new((gutter(entry_checked(app, e) == Some(true)), e.label.as_str())));
+                    let mut b = egui::Button::new((gutter(entry_checked(app, e) == Some(true)), e.label.as_str()));
+                    // File ▸ Scripts entries show the key a script was given.
+                    if let Some(s) = entry_shortcut(app, e) {
+                        b = b.shortcut_text(shortcut_text(&s));
+                    }
+                    let r = ui.add_enabled(entry_enabled(app, e), b);
                     let r = match &tip {
                         Some(t) => r.on_hover_text(t),
                         None => r,

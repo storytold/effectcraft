@@ -1103,6 +1103,66 @@ fn transform_commands_keep_depth_and_follow_separated_dimensions() {
     assert_eq!(pos(&s, b)[..2], [200.0, 100.0], "the 200×100 solid's centre");
 }
 
+/// The layer's painted bounds mapped to comp space — what the viewer shows.
+fn seen_bounds(s: &Session, lid: u64) -> [f64; 4] {
+    let cid = s.active_comp_id().unwrap();
+    let comp = s.project.comp(cid).unwrap().clone();
+    let layer = comp.layer(effectcraft_project::LayerId(lid)).unwrap();
+    let ectx = effectcraft_render::EvalCtx::new(&s.project, cid, &comp, s.time());
+    let b = effectcraft_render::content_bounds(&ectx, layer).expect("painted bounds");
+    let m = ectx.layer_to_comp(layer).0;
+    let corners = [[b[0], b[1]], [b[2], b[1]], [b[2], b[3]], [b[0], b[3]]];
+    let pts: Vec<[f64; 2]> = corners
+        .iter()
+        .map(|p| {
+            let q = m.apply(effectcraft_geom::vec2(p[0], p[1]));
+            [q.x, q.y]
+        })
+        .collect();
+    let (mut x0, mut y0, mut x1, mut y1) = (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+    for p in &pts {
+        x0 = x0.min(p[0]);
+        y0 = y0.min(p[1]);
+        x1 = x1.max(p[0]);
+        y1 = y1.max(p[1]);
+    }
+    [x0, y0, x1, y1]
+}
+
+#[test]
+fn fit_to_comp_fills_the_comp_with_shape_and_text_bounds() {
+    let mut s = comp();
+    let close = |x: f64, y: f64| (x - y).abs() < 1e-6;
+    // A shape or text layer has no source item: fit sizes it by its painted bounds, anchored at
+    // the bounds' centre, so what the viewer shows fills the frame (#2198).
+    let a = s.execute("layer.newShape", json!({"kind": "rect", "size": [180, 80]})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.transform", json!({"layers": [a], "op": "fit"})).unwrap();
+    let seen = seen_bounds(&s, a);
+    assert!(close(seen[0], 0.0) && close(seen[1], 0.0) && close(seen[2], 640.0) && close(seen[3], 360.0), "the rect's painted bounds fill the comp: {seen:?}");
+
+    let t = s.execute("layer.newText", json!({"text": "Title", "size": 80})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.transform", json!({"layers": [t], "op": "fit"})).unwrap();
+    let seen = seen_bounds(&s, t);
+    assert!(close(seen[0], 0.0) && close(seen[1], 0.0) && close(seen[2], 640.0) && close(seen[3], 360.0), "the text's painted bounds fill the comp: {seen:?}");
+
+    // fitWidth spans the comp's width and centres vertically.
+    for lid in [a, t] {
+        s.execute("layer.transform", json!({"layers": [lid], "op": "fitWidth"})).unwrap();
+        let seen = seen_bounds(&s, lid);
+        assert!(close(seen[0], 0.0) && close(seen[2], 640.0), "fitWidth spans the comp width: {seen:?}");
+        assert!(close((seen[1] + seen[3]) / 2.0, 180.0), "fitWidth centres vertically: {seen:?}");
+    }
+}
+
+#[test]
+fn fit_to_comp_refuses_a_scale_that_overflows() {
+    let mut s = comp();
+    let a = s.execute("layer.newShape", json!({"kind": "rect", "size": [1e-305, 80]})).unwrap()["layer"].as_u64().unwrap();
+    let before = s.project.clone();
+    assert!(s.execute("layer.transform", json!({"layers": [a], "op": "fit"})).is_err(), "an infinite scale is refused");
+    assert_eq!(s.project, before, "nothing was written");
+}
+
 #[test]
 fn duplicated_and_pasted_layers_keep_their_links() {
     let mut s = comp();
@@ -1421,6 +1481,68 @@ fn key_selection_toggles_and_skips_locked_layers_and_hold_restores_bezier() {
     assert!(s.state.selected_keys.is_empty());
     s.execute("keys.selectAll", json!({"layers": [a]})).unwrap();
     assert!(s.state.selected_keys.is_empty());
+}
+
+#[test]
+fn muting_keys_skips_them_in_the_timeline_value_and_undoes() {
+    let mut s = comp();
+    let a = solid(&mut s, "#ff0000");
+    for (t, v) in [(0.0, 0.0), (1.0, 100.0), (2.0, 300.0)] {
+        s.execute("prop.addKey", json!({"layer": a, "path": "transform/opacity", "time": t, "value": v})).unwrap();
+    }
+    let value_at = |s: &Session, t: f64| layer(s, a).props.prop("transform/opacity").unwrap().value_at(Tick::from_seconds_f64(t)).as_f64();
+    let select = |s: &mut Session| s.execute("keys.select", json!({"keys": [{"layer": a, "path": "transform/opacity", "time": 1.0}]})).unwrap();
+    select(&mut s);
+    let before = value_at(&s, 0.5);
+    s.execute("keys.setMuted", json!({"muted": true})).unwrap();
+    assert!(layer(&s, a).props.prop("transform/opacity").unwrap().keys[1].muted);
+    // The muted key no longer bends the 0 → 300 segment.
+    assert!((value_at(&s, 0.5) - 75.0).abs() < 1e-6);
+    assert!((value_at(&s, 1.5) - 225.0).abs() < 1e-6);
+    s.undo();
+    assert!(!layer(&s, a).props.prop("transform/opacity").unwrap().keys[1].muted);
+    assert!((value_at(&s, 0.5) - before).abs() < 1e-6);
+    // The same command unmutes.
+    select(&mut s);
+    s.execute("keys.setMuted", json!({"muted": true})).unwrap();
+    s.execute("keys.setMuted", json!({"muted": false})).unwrap();
+    assert!(!layer(&s, a).props.prop("transform/opacity").unwrap().keys[1].muted);
+}
+
+/// Both Animation-menu rows mute and unmute through `Session::execute`, and undo/redo work.
+#[test]
+fn mute_and_unmute_keyframes_menu_rows_work_and_undo() {
+    fn rows(nodes: &[crate::menus::MenuNode], out: &mut Vec<(String, Value)>) {
+        for n in nodes {
+            match n {
+                crate::menus::MenuNode::Item(e) if e.command == "keys.setMuted" => out.push((e.label.clone(), e.params.clone())),
+                crate::menus::MenuNode::Submenu { children, .. } => rows(children, out),
+                _ => {}
+            }
+        }
+    }
+    let mut menu = vec![];
+    rows(&crate::menus::parse(crate::menus::TREE, false).unwrap(), &mut menu);
+    assert_eq!(menu.iter().map(|(l, _)| l.as_str()).collect::<Vec<_>>(), ["Mute Keyframes", "Unmute Keyframes"], "{menu:?}");
+
+    let mut s = comp();
+    let a = solid(&mut s, "#ff0000");
+    for (t, v) in [(0.0, 0.0), (1.0, 100.0)] {
+        s.execute("prop.addKey", json!({"layer": a, "path": "transform/opacity", "time": t, "value": v})).unwrap();
+    }
+    let muted = |s: &Session| layer(s, a).props.prop("transform/opacity").unwrap().keys[1].muted;
+    s.execute("keys.select", json!({"keys": [{"layer": a, "path": "transform/opacity", "time": 1.0}]})).unwrap();
+    let run = |s: &mut Session, params: &Value| {
+        s.execute("keys.setMuted", if params.is_null() { json!({}) } else { params.clone() }).unwrap();
+    };
+    run(&mut s, &menu[0].1);
+    assert!(muted(&s));
+    s.undo();
+    assert!(!muted(&s));
+    s.redo();
+    assert!(muted(&s));
+    run(&mut s, &menu[1].1);
+    assert!(!muted(&s));
 }
 
 #[test]
@@ -1820,4 +1942,96 @@ fn old_guides_load_as_pixel_guides_and_percent_round_trips() {
     assert_eq!(back, g);
     // A zero-sized comp never divides by zero.
     assert!(g.px(0, 0).is_finite());
+}
+
+#[test]
+fn copy_paste_masks_between_layers() {
+    let mut s = comp();
+    let a = solid(&mut s, "#ff0000");
+    let b = solid(&mut s, "#00ff00");
+    let n = s.active_comp().unwrap().layers.len();
+    s.execute("layer.select", json!({"layers": [a]})).unwrap();
+    s.execute("layer.addMask", json!({})).unwrap();
+    s.execute("layer.addMask", json!({"shape": "ellipse"})).unwrap();
+    let names = |s: &Session, id: u64| layer(s, id).masks().unwrap().groups().map(|m| m.name.clone()).collect::<Vec<_>>();
+    let uids = |s: &Session, id: u64| layer(s, id).masks().unwrap().groups().map(|m| m.uid).collect::<Vec<_>>();
+    let first = uids(&s, a)[0];
+    s.execute("prop.select", json!({"layer": a, "prop": first})).unwrap();
+    // Copy the mask: it is the mask that is copied, not its layer.
+    assert_eq!(s.execute("edit.copy", json!({})).unwrap()["masks"], json!(1));
+    assert!(s.state.clipboard.is_empty(), "not the layer");
+    assert!(s.is_enabled("edit.paste"));
+    s.execute("layer.select", json!({"layers": [b]})).unwrap();
+    let r = s.execute("edit.paste", json!({})).unwrap();
+    assert_eq!(s.active_comp().unwrap().layers.len(), n, "no new layer");
+    assert_eq!(names(&s, b), ["Mask 1"]);
+    let pasted = r["masks"][0].as_u64().unwrap();
+    assert_eq!(uids(&s, b), [pasted]);
+    assert_ne!(pasted, first);
+    assert_eq!(s.state.selected_props, vec![(effectcraft_project::LayerId(b), pasted)]);
+    assert_eq!(names(&s, a), ["Mask 1", "Mask 2"], "the source keeps its masks");
+    // Pasting again onto the same layer keeps names unique.
+    s.execute("edit.paste", json!({})).unwrap();
+    assert_eq!(names(&s, b), ["Mask 1", "Mask 2"]);
+    // One undo step per paste.
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(names(&s, b), ["Mask 1"]);
+}
+
+#[test]
+fn paste_masks_skips_locked_layers() {
+    let mut s = comp();
+    let a = solid(&mut s, "#ff0000");
+    let b = solid(&mut s, "#00ff00");
+    s.execute("layer.select", json!({"layers": [a]})).unwrap();
+    s.execute("layer.addMask", json!({})).unwrap();
+    let mask = layer(&s, a).masks().unwrap().groups().next().unwrap().uid;
+    s.execute("prop.select", json!({"layer": a, "prop": mask})).unwrap();
+    s.execute("edit.copy", json!({})).unwrap();
+    s.execute("layer.select", json!({"layers": [b]})).unwrap();
+    s.execute("layer.setSwitch", json!({"layers": [b], "switch": "lock", "value": true})).unwrap();
+    assert!(s.execute("edit.paste", json!({})).is_err());
+    assert_eq!(layer(&s, b).masks().unwrap().groups().count(), 0);
+}
+
+#[test]
+fn copy_with_an_explicit_layer_ignores_the_selected_mask() {
+    let mut s = comp();
+    let a = solid(&mut s, "#ff0000");
+    s.execute("layer.select", json!({"layers": [a]})).unwrap();
+    s.execute("layer.addMask", json!({})).unwrap();
+    let mask = layer(&s, a).masks().unwrap().groups().next().unwrap().uid;
+    s.execute("prop.select", json!({"layer": a, "prop": mask})).unwrap();
+    s.execute("edit.copy", json!({"layer": a})).unwrap();
+    assert_eq!(s.state.clipboard.len(), 1, "the named layer is copied");
+    assert!(s.state.mask_clipboard.is_empty());
+}
+
+#[test]
+fn selecting_a_mask_drops_stale_key_selection_so_copy_copies_the_mask() {
+    let mut s = comp();
+    let a = solid(&mut s, "#ff0000");
+    s.execute("layer.select", json!({"layers": [a]})).unwrap();
+    s.execute("layer.addMask", json!({})).unwrap();
+    let mask = layer(&s, a).masks().unwrap().groups().next().unwrap().uid;
+    s.state.selected_keys = vec![crate::KeyRef { layer: effectcraft_project::LayerId(a), prop: 1, time: Default::default() }];
+    s.execute("prop.select", json!({"layer": a, "prop": mask})).unwrap();
+    assert!(s.state.selected_keys.is_empty());
+    assert_eq!(s.execute("edit.copy", json!({})).unwrap()["masks"], json!(1));
+}
+
+#[test]
+fn pasting_a_mask_onto_its_own_layer_drops_the_source_vertex_selection() {
+    let mut s = comp();
+    let a = solid(&mut s, "#ff0000");
+    s.execute("layer.select", json!({"layers": [a]})).unwrap();
+    s.execute("layer.addMask", json!({})).unwrap();
+    let mask = layer(&s, a).masks().unwrap().groups().next().unwrap().uid;
+    s.execute("prop.select", json!({"layer": a, "prop": mask})).unwrap();
+    assert!(!s.state.selected_vertices.is_empty());
+    s.execute("edit.copy", json!({})).unwrap();
+    s.execute("edit.paste", json!({})).unwrap();
+    assert!(s.state.selected_vertices.is_empty());
+    s.execute("edit.clear", json!({})).unwrap();
+    assert_eq!(layer(&s, a).masks().unwrap().groups().count(), 1, "the pasted mask goes, the source stays");
 }
