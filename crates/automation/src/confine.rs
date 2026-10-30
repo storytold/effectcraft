@@ -61,6 +61,7 @@ const READS: &[(&str, &[&str])] = &[
     ("file.importMultiple", &["paths"]),
     ("file.importRecent", &["path"]),
     ("file.importLottie", &["path"]),
+    ("file.importAep", &["path"]),
     ("file.importTimeline", &["path"]),
     ("file.replaceFootage", &["path"]),
     ("file.relinkFootage", &["folder"]),
@@ -108,6 +109,7 @@ const WRITES: &[(&str, &[&str])] = &[
     // This query checks a proposed write destination, so it follows write confinement.
     ("file.checkOutput", &["path"]),
     ("file.exportLottie", &["path"]),
+    ("file.exportAep", &["path"]),
     ("comp.saveFrameAs", &["path"]),
     ("comp.saveFrameAsPsd", &["path"]),
     ("comp.saveFrameAsExr", &["path"]),
