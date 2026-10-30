@@ -489,7 +489,7 @@ fn raster_into(e: &mut Enc, s: &Scene) -> Option<(wgpu::Texture, wgpu::Texture)>
     let zout = tex(DEPTH_OUT, rt);
     let depth = tex(DEPTH, wgpu::TextureUsages::RENDER_ATTACHMENT);
     let (cv, zv, dv) = (color.create_view(&Default::default()), zout.create_view(&Default::default()), depth.create_view(&Default::default()));
-    let enc = e.encoder();
+    let enc = e.record(&[]);
     {
         let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("adv3d"),
@@ -763,7 +763,7 @@ fn dispatch(e: &mut Enc, kernel: &str, u0: [u32; 4], f0: [f32; 4], b: Binds, gro
     }
     entries.push(wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(b.out.unwrap_or(&post.dummy_out)) });
     let bg = g.device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some(kernel), layout: &post.bgl, entries: &entries });
-    let enc = e.encoder();
+    let enc = e.record(&[]);
     let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some(kernel), timestamp_writes: None });
     pass.set_pipeline(pipe);
     pass.set_bind_group(0, &bg, &[]);
@@ -799,7 +799,7 @@ fn read_buffer(e: &mut Enc, buf: &wgpu::Buffer, size: u64) -> Option<Vec<u8>> {
         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    e.encoder().copy_buffer_to_buffer(buf, 0, &rb, 0, size);
+    e.record(&[]).copy_buffer_to_buffer(buf, 0, &rb, 0, size);
     e.submit();
     let out = e.g.read_buffer(&rb, row, row, 1).map_err(|e| log::error!("gpu 3d readback: {e}")).ok()?;
     Some(out)
@@ -922,6 +922,7 @@ fn depth_of_field(e: &mut Enc, acc: &wgpu::Buffer, depth: &wgpu::Buffer, (w, h):
 
 /// The resolved run as an image in the canvas's encoding, composited over `canvas` when given.
 pub(crate) fn finish(e: &mut Enc, r: &Resolved, encode: bool, canvas: Option<&GpuImage>) -> GpuImage {
+    canvas.inspect(|c| e.uses(c));
     let out = e.image(r.width, r.height);
     let ov = out.texture.create_view(&Default::default());
     let cv = canvas.map(|c| c.texture.create_view(&Default::default()));
@@ -1023,7 +1024,7 @@ fn render_prepared_deferred(g: &GpuContext, d: &std::sync::Arc<crate::deferred::
         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    e.encoder().copy_buffer_to_buffer(&r.depth, 0, &rb, 0, size);
+    e.record(&[]).copy_buffer_to_buffer(&r.depth, 0, &rb, 0, size);
     e.submit();
     let done = d.start(kz, w, h, [0.0; 2], 1.0);
     g.map_readback(&rb, row, row, 1, move |r| done(r.map_err(|e| log::error!("gpu depth readback: {e}")).ok()));
@@ -1080,6 +1081,7 @@ pub(crate) fn sky(e: &mut Enc, sky: &effectcraft_render::three_d::SkyDraw, canva
 /// Wireframe-quality layer outlines: `canvas` with `pixels` set to opaque white
 /// ([`effectcraft_render::Renderer::wireframe_pixels`]).
 pub(crate) fn wireframe(e: &mut Enc, canvas: &GpuImage, pixels: &[(u32, u32)]) -> GpuImage {
+    e.uses(canvas);
     let out = e.image(canvas.width, canvas.height);
     e.copy_into(canvas, &out, 0, 0);
     if pixels.is_empty() {

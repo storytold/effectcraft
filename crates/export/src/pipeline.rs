@@ -391,11 +391,14 @@ impl<'a> Cx<'a> {
         }
         let t0 = Instant::now();
         let r = self.renderer();
-        let planes = r.active_accel()?.comp_frame_yuv420(&r, self.job.comp, t, comp.background)?;
+        let a = r.active_accel()?;
+        let planes = a.comp_frame_yuv420(&r, self.job.comp, t, comp.background)?;
         let (cw, ch) = (w.div_ceil(2) as usize, h.div_ceil(2) as usize);
         if planes.len() != w as usize * h as usize + 2 * cw * ch {
             return None;
         }
+        // A frame rendered off `passes::comp_frame` ends here; on a `None` the fallback renders and ends it.
+        a.frame_end();
         if let Some(ft) = &self.frame_times {
             ft.lock().unwrap_or_else(|e| e.into_inner()).push((i, t0.elapsed().as_secs_f64()));
         }

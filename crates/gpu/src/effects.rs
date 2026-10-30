@@ -101,6 +101,7 @@ pub(crate) fn run_chain(e: &mut Enc, chain: &[FxStep], buf: &Buf, levels: Option
     e.take_missing();
     for step in chain {
         b = apply(e, step.spec.id, &step.ctx, b)?;
+        e.mem_gate();
         if e.take_missing() {
             return None;
         }
@@ -158,6 +159,7 @@ impl effectcraft_render::FxTarget for GpuFx<'_, '_> {
         self.e.take_missing();
         for step in steps {
             let Some(next) = apply(self.e, step.spec.id, &step.ctx, cur) else { return false };
+            self.e.mem_gate();
             // A kernel the device couldn't build: the effects render on the CPU (#613).
             if self.e.take_missing() {
                 return false;
