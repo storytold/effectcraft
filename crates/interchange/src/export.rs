@@ -138,7 +138,7 @@ fn unsupported(project: &Project, comp: &Comp, l: &Layer, format: TimelineFormat
     if l.is_3d() {
         return Some("3D layer".into());
     }
-    if l.props.sub("layerStyles").is_some_and(|g| !g.children.is_empty()) {
+    if l.styles_change_pixels() {
         return Some("layer styles".into());
     }
     if l.props.get("timeRemap").is_some_and(|p| p.is_animated()) {
@@ -688,8 +688,12 @@ fn media_info(name: &str, kind: MediaKind, duration: Tick, video: Option<VideoSp
             color: Default::default(),
             has_alpha,
             bitrate: None,
+            hdr: None,
         }),
-        audio: audio.then(|| AudioStreamInfo { sample_rate: 48_000, channels: 2, codec: "pcm".into(), bits_per_sample: Some(16) }),
+        audio_streams: audio
+            .then(|| AudioStreamInfo { sample_rate: 48_000, channels: 2, codec: "pcm".into(), bits_per_sample: Some(16) })
+            .into_iter()
+            .collect(),
         container: String::new(),
         start_timecode: None,
         file_size: None,

@@ -26,7 +26,8 @@ fn auto_orient_command() {
     assert!(!effectcraft_render::three_d::camera::is_two_node(&s.active_comp().unwrap().layers[0]));
 }
 
-fn layer_count(s: &Session) -> usize {
+/// Layers in the active comp.
+pub(crate) fn layer_count(s: &Session) -> usize {
     s.active_comp().unwrap().layers.len()
 }
 

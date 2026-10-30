@@ -84,8 +84,9 @@ pub(super) fn move_frames(s: &mut Session, p: &Value, frames: i64) -> Result<Val
 
 /// Slip edit: move a layer's source (footage or precomp) under its fixed in and out points, like
 /// dragging the source-duration bar in After Effects. `delta` in seconds or `frames`; positive
-/// moves the source later. Clamped so the source still covers the in–out span. Keyframes and
-/// layer markers are in layer time, so they travel with the source.
+/// moves the source later. Clamped so the source still covers the in–out span: the result gives
+/// the `requested` shift and, per layer, the `delta` applied and whether it was `clamped` (#2371).
+/// Keyframes and layer markers are in layer time, so they travel with the source.
 pub(super) fn slip(s: &mut Session, p: &Value) -> Result<Value> {
     let (cid, ids) = layers_p(s, p)?;
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
@@ -130,7 +131,10 @@ pub(super) fn slip(s: &mut Session, p: &Value) -> Result<Value> {
         }
         Ok(())
     })?;
-    Ok(json!({"slipped": shifts.iter().map(|(id, d)| json!({"layer": id.0, "delta": d.seconds()})).collect::<Vec<_>>()}))
+    Ok(json!({
+        "requested": delta.seconds(),
+        "slipped": shifts.iter().map(|(id, d)| json!({"layer": id.0, "delta": d.seconds(), "clamped": *d != delta})).collect::<Vec<_>>(),
+    }))
 }
 
 pub(super) fn arrange(s: &mut Session, p: &Value) -> Result<Value> {

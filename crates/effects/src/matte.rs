@@ -362,6 +362,22 @@ mod tests {
         assert!(a > 0.99 && c[0] > 0.5, "{c:?}");
     }
 
+    /// #2102: negative Choke Matte keeps growing the matte past -20, down to -100: a 120 px hole
+    /// in an opaque frame closes a bit more with every step.
+    #[test]
+    fn simple_choker_grows_the_matte_at_large_negative_values() {
+        let mut img = Image::filled(200, 200, [1.0, 1.0, 1.0, 1.0]);
+        for y in 40..160 {
+            for x in 40..160 {
+                img.set(x, y, [0.0; 4]);
+            }
+        }
+        let filled = |c: f64| alpha_sum(&run("ec.matte.simplechoker", &[("chokeMatte", num(c))], img.clone()));
+        let sums: Vec<f32> = [-10.0, -20.0, -40.0, -60.0].into_iter().map(filled).collect();
+        assert!(sums.windows(2).all(|w| w[1] > w[0] + 100.0), "{sums:?}");
+        assert!((filled(-100.0) - 200.0 * 200.0).abs() < 1.0, "-100 closes the hole");
+    }
+
     #[test]
     fn matte_choker_defaults_shrink() {
         let img = square();

@@ -4,7 +4,7 @@ use effectcraft_engine::Session;
 use effectcraft_engine::time::Tick;
 use serde_json::{Value, json};
 
-use crate::confine::Confinement;
+use crate::confine::{Confinement, Lookup};
 use crate::{BridgeClient, Error, Result, base64, encode_png, recompress_png};
 
 pub struct Backend {
@@ -63,12 +63,11 @@ impl Backend {
     pub fn exec(&mut self, id: &str, params: Value) -> Result<Value> {
         let params = if params.is_null() { json!({}) } else { params };
         if let Some(c) = self.confinement.clone() {
-            let lookup = match c.check_command(id, &params)? {
-                Some(crate::confine::Lookup::ProjectFile) => Some((crate::confine::Lookup::ProjectFile, self.run("project.summary", json!({}))?)),
-                Some(crate::confine::Lookup::RenderOutputs) => Some((crate::confine::Lookup::RenderOutputs, self.run("renderQueue.list", json!({}))?)),
-                None => None,
-            };
-            if let Some((lookup, found)) = lookup {
+            for lookup in c.check_command(id, &params)? {
+                let found = match lookup {
+                    Lookup::ProjectFile | Lookup::QueueDefault => self.run("project.summary", json!({}))?,
+                    Lookup::RenderOutputs => self.run("renderQueue.list", json!({}))?,
+                };
                 c.check_lookup(&lookup, &found)?;
             }
         }

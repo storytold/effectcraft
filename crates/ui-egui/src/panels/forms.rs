@@ -760,7 +760,16 @@ pub fn open_form(app: &mut EffectcraftApp, id: &str, p: &Value) -> bool {
             )
         }
         // File ▸ Export ▸ Adobe Premiere Pro Project…: Final Cut Pro XML (or FCPXML / OTIO / EDL).
-        "file.exportTimeline" if !has(p, &["path"]) => export_timeline_form(s),
+        "file.exportTimeline" if !has(p, &["path"]) => {
+            // Its pre-renders run as a job in Window ▸ Progress, not with the window waiting (#2269).
+            match base.as_object_mut() {
+                Some(m) => {
+                    m.insert("background".into(), json!(true));
+                }
+                None => base = json!({"background": true}),
+            }
+            export_timeline_form(s)
+        }
         "file.importPlaceholder" | "file.replaceWithPlaceholder" if p.as_object().is_none_or(|m| m.is_empty()) => (
             "New Placeholder".into(),
             vec![
@@ -888,7 +897,7 @@ fn form_grid(ui: &mut egui::Ui, f: &mut Form, regs: &mut Vec<(String, egui::Rect
                     .inner
                     .rect
                 }
-                FieldKind::Bool(b) => ui.checkbox(b, "").rect,
+                FieldKind::Bool(b) => crate::widgets::labelled_checkbox(ui, b, "").rect,
                 FieldKind::Choice { options, sel } => {
                     let cur = options.get(*sel).map(|o| o.0.clone()).unwrap_or_default();
                     // The column keeps its width: a long choice (a GPU adapter's name) ends in an
@@ -1018,13 +1027,13 @@ pub fn show_view_options(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Toke
     let mut close = false;
     super::dialogs::modal(ctx, "View Options", vec2(360.0, 330.0), t, |ui| {
         let v = &mut app.ui.viewer;
-        ui.checkbox(&mut v.show_layer_controls, tr("Layer controls"));
-        ui.checkbox(&mut v.show_masks, tr("Masks"));
-        ui.checkbox(&mut v.rulers, tr("Rulers"));
-        ui.checkbox(&mut v.guides, tr("Guides"));
-        ui.checkbox(&mut v.grid, tr("Grid"));
-        ui.checkbox(&mut v.safe_margins, tr("Title/action safe"));
-        ui.checkbox(&mut v.transparency_grid, tr("Transparency grid"));
+        crate::widgets::labelled_checkbox(ui, &mut v.show_layer_controls, tr("Layer controls"));
+        crate::widgets::labelled_checkbox(ui, &mut v.show_masks, tr("Masks"));
+        crate::widgets::labelled_checkbox(ui, &mut v.rulers, tr("Rulers"));
+        crate::widgets::labelled_checkbox(ui, &mut v.guides, tr("Guides"));
+        crate::widgets::labelled_checkbox(ui, &mut v.grid, tr("Grid"));
+        crate::widgets::labelled_checkbox(ui, &mut v.safe_margins, tr("Title/action safe"));
+        crate::widgets::labelled_checkbox(ui, &mut v.transparency_grid, tr("Transparency grid"));
         ui.add_space(12.0);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.add(egui::Button::new(egui::RichText::new(tr("   OK   ")).color(Color32::WHITE)).fill(t.accent)).clicked() {
@@ -1117,8 +1126,11 @@ mod tests {
         let params = app.dialog_state.form.params();
         assert!(params.get("note").is_none());
         assert_eq!(params["format"], "xml");
-        let r = app.session.execute("file.exportTimeline", params).unwrap();
-        assert_eq!(r["path"], path.as_str());
+        assert_eq!(params["background"], true, "the dialog exports in the background");
+        assert!(app.session.execute("file.exportTimeline", params).unwrap()["job"].is_string());
+        app.session.wait_jobs();
+        let done = app.session.job_log.last().unwrap();
+        assert_eq!((done.status.as_str(), &done.result["path"]), ("done", &json!(path)));
         assert!(std::fs::read_to_string(&path).unwrap().contains("<xmeml"));
     }
 

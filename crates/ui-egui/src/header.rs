@@ -226,7 +226,9 @@ fn snapping_toggle(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painte
     let snap = Rect::from_min_size(pos2(x, cy - 10.0), vec2(20.0, 20.0));
     // The engine owns snapping (View ▸ Snapping); the checkbox mirrors it.
     app.ui.snapping = app.session.state.snapping;
-    if widgets::checkbox(ui, snap, app.ui.snapping, &t, egui::Id::unique("snapping")).clicked() {
+    let snap_resp = widgets::checkbox(ui, snap, app.ui.snapping, &t, egui::Id::unique("snapping"));
+    crate::a11y::check_box(&snap_resp, tr("Snapping"), app.ui.snapping, true);
+    if snap_resp.changed() {
         let _ = app.session.execute("view.snapping", serde_json::json!({}));
         app.ui.snapping = app.session.state.snapping;
     }
@@ -745,7 +747,7 @@ fn puppet_options(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter
     p.text(pos2(x, cy), Align2::LEFT_CENTER, tr("Mesh:"), Tokens::ui(12.0), t.text_dim);
     x += 40.0;
     let show = Rect::from_min_size(pos2(x, cy - 10.0), vec2(20.0, 20.0));
-    if widgets::checkbox(ui, show, o.show_mesh, &t, egui::Id::unique("puppet-show-mesh")).clicked() {
+    if widgets::checkbox(ui, show, o.show_mesh, &t, egui::Id::unique("puppet-show-mesh")).changed() {
         let _ = app.session.execute("puppet.mesh", json!({"showMesh": !o.show_mesh}));
     }
     app.auto.add("header.puppet.showMesh", show, "Show mesh");

@@ -2,6 +2,7 @@
 //! windows (clicks reach the script's handlers), the branching History panel, and the Window /
 //! File ▸ Scripts menus listing scripts (egui_kittest, UI logic only).
 
+use crate::gpu_test::RenderSerial;
 use effectcraft_ui_egui::EffectcraftApp;
 use effectcraft_ui_egui::dock::PanelKind;
 use effectcraft_ui_egui::dock::WorkspaceExt as _;
@@ -210,6 +211,7 @@ fn history_panel_jumps_between_branches() {
 /// onDraw fills of concave paths and real images (drawImage, image controls), rendered.
 #[test]
 fn on_draw_concave_fills_and_images_render() {
+    let _device = crate::gpu_test::lock();
     let dir = std::env::temp_dir().join(format!("effectcraft-scriptui-img-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let png = dir.join("green.png");
@@ -244,7 +246,7 @@ fn on_draw_concave_fills_and_images_render() {
     let g = &win.root.children[0];
     assert!(matches!(&g.draw[1], effectcraft_engine::scriptui::DrawOp::Image { image: Some(i), .. } if i.src.as_deref() == Some(png.as_str())));
     assert_eq!(win.root.children[1].image.as_ref().and_then(|i| i.src.clone()).as_deref(), Some(png.as_str()));
-    let img = h.render().expect("render");
+    let img = h.render_serialized().expect("render");
     if let Ok(d) = std::env::var("EC_SNAPSHOT_DIR") {
         img.save(format!("{d}/scriptui_paint.png")).unwrap();
     }
@@ -339,6 +341,38 @@ fn a_drag_keeps_its_control_past_the_window_edge() {
     assert!(log.contains("mousedown in B1|mousemove out B1"), "moves outside the window still arrive, with the button held: {log}");
     assert!(log.ends_with("|mouseup out B0"), "the release outside reaches the control: {log}");
     h.state_mut().session.execute("scriptui.close", json!({})).unwrap();
+}
+
+/// #2585: a window the host resizes takes the size, lays out again and runs onResize; a docked
+/// ScriptUI panel gets its dock's size that way.
+#[test]
+fn script_windows_learn_the_size_they_are_given() {
+    let mut h = harness();
+    let code = r#"
+      var w = new Window("palette", "Sized");
+      var log = w.add("statictext", undefined, "", { name: "log" });
+      log.preferredSize = [200, 20];
+      w.onResize = function () { log.text = "resized " + w.size.width + "x" + w.size.height; };
+      w.show();
+    "#;
+    let r = h.state_mut().session.execute("script.run", json!({"code": code, "name": "sized.jsx"})).unwrap();
+    assert_eq!(r["ok"], true, "{r}");
+    h.run_steps(2);
+    h.state_mut().session.execute("scriptui.resize", json!({"window": "Sized", "size": [300, 180]})).unwrap();
+    let win = h.state().session.script_ui.windows[0].clone();
+    assert_eq!(win.root.lookup(&json!("log")).unwrap().text, "resized 300x180");
+    let list = h.state_mut().session.execute("scriptui.list", json!({})).unwrap();
+    assert_eq!(list[0]["size"], json!([300.0, 180.0]), "{list}");
+    assert!(h.state_mut().session.execute("scriptui.resize", json!({"window": "Sized", "size": ["wide", 1]})).is_err());
+    h.state_mut().session.execute("scriptui.close", json!({})).unwrap();
+    // A docked panel: its window is its dock's size, not its preferred size.
+    h.state_mut().session.execute("window.scriptPanel", json!({"name": "Layer Tools.jsx"})).unwrap();
+    h.run_steps(4);
+    let panel = h.state().session.script_ui.windows.iter().find(|w| w.script == "Layer Tools.jsx").unwrap().clone();
+    let dock = rect(&h, &format!("scriptui.{}", panel.id));
+    assert_eq!([panel.root.bounds[2].round(), panel.root.bounds[3].round()], [dock.width().round() as f64, dock.height().round() as f64]);
+    h.state_mut().close_panel(PanelKind::ScriptPanel(panel.id));
+    h.run_steps(2);
 }
 
 fn click_at(h: &mut Harness<'_, EffectcraftApp>, c: egui::Pos2) {

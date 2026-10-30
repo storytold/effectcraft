@@ -1,5 +1,5 @@
-//! Composition menu, part two: crop to region of interest / layer bounds, Save Frame As ▸ File,
-//! Copy Frame to Clipboard, Responsive Design — Time.
+//! Composition menu, part two: crop to region of interest / layer bounds, Scale Composition, Save
+//! Frame As ▸ File, Copy Frame to Clipboard, Responsive Design — Time.
 
 use effectcraft_project::Marker;
 use effectcraft_time::Tick;
@@ -71,6 +71,164 @@ fn crop_to_layers(s: &mut Session, p: &Value) -> Result<Value> {
     crop(s, cid, [x0, y0, b[2].ceil() - x0, b[3].ceil() - y0], "Crop Comp to Selected Layer(s) Bounds")
 }
 
+/// Multiply a property's value, every key, its spatial tangents and its speeds by `f`.
+fn scale_prop(pr: &mut effectcraft_project::Property, f: f64) {
+    use effectcraft_keyframe::Value as KV;
+    let mul = |v: &KV| match v {
+        KV::Scalar(x) => KV::Scalar(x * f),
+        KV::Vec2(a) => KV::Vec2(a.map(|x| x * f)),
+        KV::Vec3(a) => KV::Vec3(a.map(|x| x * f)),
+        other => other.clone(),
+    };
+    pr.value = mul(&pr.value);
+    for k in &mut pr.keys {
+        k.value = mul(&k.value);
+        k.spatial_in = k.spatial_in.map(|x| x * f);
+        k.spatial_out = k.spatial_out.map(|x| x * f);
+        for e in k.in_ease.iter_mut().chain(&mut k.out_ease) {
+            e.speed *= f;
+        }
+    }
+}
+
+/// Multiply only the Z of a 3D value (and of its keys and spatial tangents) by `f`. Speeds follow:
+/// a spatial side's speed by how much the path's direction there stretches, so the ease keeps
+/// its shape; a per-dimension one (Scale) by `f` for Z only.
+fn scale_prop_z(pr: &mut effectcraft_project::Property, f: f64) {
+    use effectcraft_keyframe::Value as KV;
+    let stretch = |v: [f64; 3]| {
+        let n = v[0].hypot(v[1]).hypot(v[2]);
+        if n > 1e-12 && n.is_finite() { v[0].hypot(v[1]).hypot(v[2] * f) / n } else { 1.0 }
+    };
+    let pos = |k: &effectcraft_project::Keyframe| k.value.as_vec3();
+    let sub = |a: [f64; 3], b: [f64; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    let is_zero = |v: [f64; 3]| v.iter().all(|x| x.abs() <= 1e-12);
+    // Read every side's direction before anything changes (auto tangents come from the neighbours).
+    let sides: Vec<(f64, f64)> = (0..pr.keys.len())
+        .map(|i| {
+            let (tin, tout) = effectcraft_keyframe::spatial_tangents(&pr.keys, i);
+            let here = pr.keys.get(i).map(pos).unwrap_or_default();
+            let chord = |j: Option<usize>| j.and_then(|j| pr.keys.get(j)).map(|k| sub(pos(k), here)).unwrap_or_default();
+            let tin = if is_zero(tin) { chord(i.checked_sub(1)) } else { tin };
+            let tout = if is_zero(tout) { chord(Some(i + 1)) } else { tout };
+            (stretch(tin), stretch(tout))
+        })
+        .collect();
+    let spatial = pr.spatial;
+    let mul = |v: &mut KV| {
+        if let KV::Vec3(a) = v {
+            a[2] *= f;
+        }
+    };
+    mul(&mut pr.value);
+    for (k, (s_in, s_out)) in pr.keys.iter_mut().zip(sides) {
+        mul(&mut k.value);
+        k.spatial_in[2] *= f;
+        k.spatial_out[2] *= f;
+        if spatial {
+            k.in_ease.iter_mut().for_each(|e| e.speed *= s_in);
+            k.out_ease.iter_mut().for_each(|e| e.speed *= s_out);
+        } else {
+            // A shorter list lends its first ease to Z (`effective_ease`): give Z its own.
+            for list in [&mut k.in_ease, &mut k.out_ease] {
+                if let Some(&first) = list.first() {
+                    list.resize(list.len().max(3), first);
+                }
+                if let Some(e) = list.get_mut(2) {
+                    e.speed *= f;
+                }
+            }
+        }
+    }
+}
+
+/// Scale Composition (After Effects ships it as File ▸ Scripts ▸ Scale Composition.jsx): the comp
+/// and its contents grow or shrink by one factor, keys included, in one undo step. Layers whose
+/// parent has a Scale follow that parent; everything else scales its Position (and Point of
+/// Interest) and Scale. Anchor Point, masks, shapes and effects live in layer space and follow the
+/// layer's Scale. Cameras scale their Zoom so 3D layers keep their place in the frame; a 2D parent
+/// carries no depth, so its 3D children scale their Z themselves.
+fn scale_comp(s: &mut Session, p: &Value) -> Result<Value> {
+    const C: &str = "comp.scale";
+    let cid = comp_id(s, p)?;
+    let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
+    let (ow, oh) = (f64::from(comp.width), f64::from(comp.height));
+    // The three are alternatives: with two, one would be ignored without a word.
+    if ["factor", "width", "height"].iter().filter(|k| f_p(p, k).is_some()).count() > 1 {
+        return Err(bad(C, "pass only one of `factor`, `width` or `height`"));
+    }
+    let f = match (f_p(p, "factor"), f_p(p, "width"), f_p(p, "height")) {
+        (Some(f), ..) => f,
+        (None, Some(w), _) => w / ow,
+        (None, None, Some(h)) => h / oh,
+        _ => return Err(bad(C, "pass `factor`, `width` or `height`")),
+    };
+    let (w, h) = ((ow * f).round(), (oh * f).round());
+    let max = f64::from(effectcraft_project::limits::MAX_SIZE);
+    if !f.is_finite() || f <= 0.0 || !(4.0..=max).contains(&w) || !(4.0..=max).contains(&h) {
+        return Err(bad(C, format!("the composition would be {w}×{h}: width and height run from 4 to 30,000 px")));
+    }
+    let (w, h) = (w as u32, h as u32);
+    let active = s.active_comp_id() == Some(cid);
+    s.edit("Scale Composition", None, |proj, st| {
+        let c = proj.comp_mut(cid).ok_or(EngineError::NoComp)?;
+        // An ancestor's Scale carries its descendants (X and Y only when that ancestor is 2D),
+        // through cameras and lights too: the renderer applies every ancestor's transform.
+        let chain: std::collections::HashMap<_, _> =
+            c.layers.iter().map(|l| (l.id, (l.transform().is_some_and(|tr| tr.get("scale").is_some()), l.is_3d(), l.parent))).collect();
+        // (X and Y carried, Z carried); bounded, as parent chains in a file can loop.
+        let carried = |mut cur: Option<effectcraft_project::LayerId>| {
+            let (mut xy, mut z) = (false, false);
+            for _ in 0..64 {
+                let Some(&(has_scale, three_d, up)) = cur.and_then(|id| chain.get(&id)) else { break };
+                xy |= has_scale;
+                z |= has_scale && three_d;
+                cur = up;
+            }
+            (xy, z)
+        };
+        for l in &mut c.layers {
+            let (xy_carried, z_carried) = carried(l.parent);
+            let three_d = l.is_3d();
+            let Some(tr) = l.transform_mut() else { continue };
+            if !xy_carried {
+                for name in ["position", "positionX", "positionY", "positionZ", "poi", "scale"] {
+                    if let Some(pr) = tr.get_mut(name) {
+                        scale_prop(pr, f);
+                    }
+                }
+            } else if three_d && !z_carried {
+                if let Some(pr) = tr.get_mut("positionZ") {
+                    scale_prop(pr, f);
+                }
+                for name in ["position", "poi", "scale"] {
+                    if let Some(pr) = tr.get_mut(name) {
+                        scale_prop_z(pr, f);
+                    }
+                }
+            }
+            if let Some(cam) = l.props.sub_mut("cameraOptions") {
+                for name in ["zoom", "focusDistance", "aperture"] {
+                    if let Some(pr) = cam.get_mut(name) {
+                        scale_prop(pr, f);
+                    }
+                }
+            }
+        }
+        // Percentage guides keep their percent.
+        for g in c.guides.iter_mut().filter(|g| !g.percent) {
+            g.position *= f;
+        }
+        c.width = w;
+        c.height = h;
+        if active && let Some(r) = &mut st.region_of_interest {
+            *r = r.map(|v| v * f);
+        }
+        Ok(())
+    })?;
+    Ok(json!({"width": w, "height": h, "factor": f}))
+}
+
 /// Encode straight 8-bit RGBA as PNG.
 pub(crate) fn encode_png(rgba: &[u8], w: u32, h: u32) -> std::result::Result<Vec<u8>, String> {
     use image::ImageEncoder;
@@ -96,8 +254,11 @@ fn queue_frame(s: &mut Session, p: &Value) -> Result<Value> {
     }
     if let Some(path) = str_p(p, "path") {
         it.output.output = path.to_string();
-    } else if !it.output.format.is_sequence() {
-        it.output.output = "[compName]_frame.[fileExtension]".into();
+    } else {
+        if !it.output.format.is_sequence() {
+            it.output.output = "[compName]_frame.[fileExtension]".into();
+        }
+        s.avoid_sources(&mut it);
     }
     let id = s.edit("Save Frame As", None, |proj, _| {
         it.id = proj.render_queue.iter().map(|i| i.id).max().unwrap_or(0) + 1;
@@ -233,6 +394,15 @@ pub fn specs() -> Vec<CommandSpec> {
     vec![
         cmd!("comp.cropToRegionOfInterest", "Crop Comp to Region of Interest", ["Composition"], None, "{comp?}", has_roi, crop_to_roi),
         cmd!("comp.cropToLayerBounds", "Crop Comp to Selected Layer(s) Bounds", ["Composition"], None, "{layers?}", has_layers, crop_to_layers),
+        cmd!(
+            "comp.scale",
+            "Scale Composition",
+            [],
+            None,
+            "{comp?, factor? (2 = twice the size) | width? | height? (the other side keeps the aspect ratio)}",
+            has_comp,
+            scale_comp
+        ),
         cmd!(
             "comp.saveFrameAs",
             "File...",

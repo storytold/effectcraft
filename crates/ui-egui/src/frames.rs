@@ -539,16 +539,14 @@ impl Default for Frames {
 /// Premultiplied f32 → egui premultiplied Color32 (alpha kept, so the viewer can show the
 /// transparency grid or the comp background colour underneath).
 pub fn to_color_image(img: &effectcraft_engine::render::Image) -> egui::ColorImage {
-    let px: Vec<egui::Color32> = img
-        .data
-        .par_iter()
-        .map(|p| {
-            let a = p[3].clamp(0.0, 1.0);
-            let c = |v: f32| (v.clamp(0.0, a) * 255.0 + 0.5) as u8;
-            egui::Color32::from_rgba_premultiplied(c(p[0]), c(p[1]), c(p[2]), (a * 255.0 + 0.5) as u8)
-        })
-        .collect();
+    let px: Vec<egui::Color32> = img.data.par_iter().map(|p| display_pixel(*p)).collect();
     egui::ColorImage::new([img.width as usize, img.height as usize], px)
+}
+
+pub(crate) fn display_pixel(pixel: [f32; 4]) -> egui::Color32 {
+    let alpha = if pixel[3].is_nan() { 0.0 } else { pixel[3].clamp(0.0, 1.0) };
+    let component = |value: f32| (value.clamp(0.0, alpha) * 255.0 + 0.5) as u8;
+    egui::Color32::from_rgba_premultiplied(component(pixel[0]), component(pixel[1]), component(pixel[2]), (alpha * 255.0 + 0.5) as u8)
 }
 
 /// The whole factor an image of `size` is averaged down by for a texture: at least `min_k`, and

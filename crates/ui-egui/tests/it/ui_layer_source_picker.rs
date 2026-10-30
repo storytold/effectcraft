@@ -3,6 +3,7 @@
 //! Effect Controls' layer parameters (a Displacement Map's layer) pick through the same widget,
 //! and both write an undoable `prop.set`.
 
+use crate::gpu_test::RenderSerial;
 use effectcraft_engine::Session;
 use effectcraft_engine::keyframe::Value;
 use effectcraft_engine::project::LayerId;
@@ -52,8 +53,7 @@ fn entry_for(h: &Harness<'_, EffectcraftApp>, layer: u64) -> String {
     format!("{}. {}", i + 1, comp.layers[i].name)
 }
 
-/// Puts the layer-valued `prop` of `layer` back to `value` with a direct `prop.set` (no merge key,
-/// so the pick below records its own step instead of folding into a picker write), picks `none`
+/// Puts the layer-valued `prop` of `layer` back to `value` with a direct `prop.set`, picks `none`
 /// from the drop-down at `value_id`, and checks the clear takes one undo step that restores `value`.
 #[track_caller]
 fn none_pick_clears(h: &mut Harness<'_, EffectcraftApp>, value_id: &str, none: &str, layer: u64, prop: u64, value: u64) {
@@ -70,6 +70,24 @@ fn none_pick_clears(h: &mut Harness<'_, EffectcraftApp>, value_id: &str, none: &
     h.state_mut().session.execute("edit.undo", json!({})).unwrap();
     h.run_steps(2);
     assert_eq!(layer_value(h, layer, prop), Some(value), "undo restores the selected layer");
+}
+
+/// #2152: two picks in a row from the drop-down at `value_id` (`first`, the layer `value`, then
+/// `none`) are two undo steps: one Undo goes back to the first pick, not past it.
+#[track_caller]
+fn picks_are_separate_steps(h: &mut Harness<'_, EffectcraftApp>, value_id: &str, first: &str, none: &str, layer: u64, prop: u64, value: u64) {
+    let steps = h.state().session.history.undo.len();
+    for entry in [first, none] {
+        let at = rect_of(h, value_id).center();
+        click(h, at);
+        h.get_by_role_and_label(egui::accesskit::Role::Button, entry).click();
+        h.run_steps(3);
+    }
+    assert_eq!(layer_value(h, layer, prop), None);
+    assert_eq!(h.state().session.history.undo.len(), steps + 2, "each pick is its own undo step");
+    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+    h.run_steps(2);
+    assert_eq!(layer_value(h, layer, prop), Some(value), "one undo goes back to the first pick");
 }
 
 /// A light's Source (a layer-valued Light Options property) picks a comp layer from the
@@ -137,6 +155,9 @@ fn timeline_source_drop_down_picks_the_layer_and_undo_restores_none() {
     assert_eq!(layer_value(&h, light, source), None, "undo restores None");
 
     none_pick_clears(&mut h, &value_id, "None", light, source, sky);
+    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+    h.run_steps(2);
+    picks_are_separate_steps(&mut h, &value_id, &entry, "None", light, source, sky);
 }
 
 /// The shared widget is the one Effect Controls already used: a Displacement Map's layer
@@ -175,6 +196,9 @@ fn effect_controls_layer_param_picks_through_the_shared_widget() {
     assert_eq!(layer_value(&h, base, prop), None, "undo restores None");
 
     none_pick_clears(&mut h, &value_id, "None", base, prop, map);
+    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+    h.run_steps(2);
+    picks_are_separate_steps(&mut h, &value_id, &entry, "None", base, prop, map);
 }
 
 /// The visual record (the `ui_3d` ignored-snapshot convention): the Source drop-down open over
@@ -183,6 +207,7 @@ fn effect_controls_layer_param_picks_through_the_shared_widget() {
 #[test]
 #[ignore = "renders with wgpu; run with --ignored (set EC_SNAPSHOT_DIR to keep PNGs)"]
 fn snapshot_source_dropdown_open_and_chosen() {
+    let _device = crate::gpu_test::lock();
     let mut s = Session::default();
     s.execute("comp.new", json!({"name": "Main", "width": 1280, "height": 720, "frameRate": 30, "duration": 5})).unwrap();
     s.execute("comp.settings", json!({"renderer": "advanced3D"})).unwrap();
@@ -200,7 +225,7 @@ fn snapshot_source_dropdown_open_and_chosen() {
     h.run_steps(4);
     let save = |h: &mut Harness<'_, EffectcraftApp>, name: &str| {
         if let Ok(dir) = std::env::var("EC_SNAPSHOT_DIR") {
-            h.render().expect("render").save(format!("{dir}/{name}")).expect("save");
+            h.render_serialized().expect("render").save(format!("{dir}/{name}")).expect("save");
         }
     };
     save(&mut h, "source_unset.png");

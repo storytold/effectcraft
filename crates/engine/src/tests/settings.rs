@@ -80,6 +80,15 @@ fn prefs_migrate_old_disk_cache_default() {
 }
 
 #[test]
+fn prefs_migrate_old_split_layers_default() {
+    // Settings saved before #2083 kept "below"; they move to After Effects' "above" once (#2545).
+    let above = |doc: &str| Prefs::from_json(doc).general.create_split_layers_above;
+    assert!(above(r#"{"version": 3, "general": {"createSplitLayersAbove": false}}"#));
+    assert!(above(r#"{"version": 2, "general": {"createSplitLayersAbove": false}}"#));
+    assert!(!above(r#"{"version": 4, "general": {"createSplitLayersAbove": false}}"#), "a choice made since stays");
+}
+
+#[test]
 fn prefs_set_validates_keys_types_and_ranges() {
     let mut p = Prefs::default();
     assert!(p.set("general.nope", json!(1)).is_err());

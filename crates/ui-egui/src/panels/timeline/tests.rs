@@ -195,6 +195,11 @@ fn shape_group_inner_contents_is_elided() {
             "        Size",
             "        Position",
             "        Roundness",
+            "        Per-Corner Roundness",
+            "        Top Left Roundness",
+            "        Top Right Roundness",
+            "        Bottom Right Roundness",
+            "        Bottom Left Roundness",
             "      >Fill 1",
             "        Composite",
             "        Fill Rule",
@@ -535,6 +540,94 @@ fn disk_bar_range_covers_partial_frames() {
     let above_limit = TMap { start: 100_001.0, ..tm };
     assert_eq!(disk_bar_range(&above_limit, clip, 1.0, i64::MAX), 100_000..100_000);
 }
+
+/// The keyframe menu is one for the Timeline and the Graph Editor: its commands are drawn in the
+/// interface language, and a locked layer's keys can be copied and selected but not edited.
+#[test]
+fn the_key_menu_is_translated_and_cannot_edit_a_locked_layers_keys() {
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::{NodeT, Queryable};
+    let mut s = effectcraft_engine::Session::default();
+    s.execute("comp.new", json!({"name": "C", "width": 64, "height": 64, "duration": 2})).unwrap();
+    let id = s.execute("layer.newSolid", json!({"name": "Box", "color": "#fff"})).unwrap()["layer"].as_u64().unwrap();
+    for (t, v) in [(0.0, 0), (1.0, 50)] {
+        s.execute("prop.addKey", json!({"layer": id, "path": "transform/opacity", "time": t, "value": v})).unwrap();
+    }
+    let app = EffectcraftApp::new(s);
+    let layer = app.session.active_comp().unwrap().layer(LayerId(id)).unwrap().clone();
+    let prop = layer.props.prop("transform/opacity").unwrap().clone();
+    let key = prop.keys[0].clone();
+    let enabled = |locked: bool, selected: bool, label: &str| {
+        let mut layer = layer.clone();
+        layer.switches.locked = locked;
+        let mut actions = vec![];
+        let mut h = Harness::new_ui(|ui| key_menu(ui, &app, &layer, &prop, &key, selected, &mut actions));
+        h.run();
+        !h.get_by_label(label).accesskit_node().is_disabled()
+    };
+    for label in [
+        "Copy",
+        "Select Equal Keyframes",
+        "Select All Keyframes",
+        "Delete",
+        "Edit Value…",
+        "Easy Ease",
+        "Time-Reverse Keyframes",
+        "Keyframe Velocity…",
+        "Mute Keyframes",
+    ] {
+        assert!(enabled(false, true, label), "{label} on an unlocked layer");
+    }
+    for label in ["Copy", "Select Equal Keyframes", "Select All Keyframes"] {
+        assert!(enabled(true, true, label), "{label} is still available on a locked layer");
+    }
+    for label in ["Delete", "Edit Value…", "Easy Ease", "Time-Reverse Keyframes", "Keyframe Velocity…", "Mute Keyframes", "Linear"] {
+        assert!(!enabled(true, true, label), "{label} is off on a locked layer");
+        assert!(!enabled(true, false, label), "{label} is off on an unselected locked key");
+    }
+    for label in ["Copy", "Select Equal Keyframes", "Select Previous Keyframes", "Select Following Keyframes"] {
+        assert!(!enabled(true, false, label), "{label} requires selecting the clicked key");
+    }
+    assert!(enabled(true, false, "Select All Keyframes"));
+    // The labels follow the interface language.
+    crate::i18n::set_current("es");
+    let copy = crate::i18n::context_item("keys.copy", &json!({}), "Copy");
+    assert_ne!(copy, "Copy", "the catalog translates Copy");
+    assert!(enabled(false, true, &copy));
+    crate::i18n::set_current("en");
+}
+
+#[test]
+fn a_key_menu_edit_selects_the_clicked_key_before_applying_the_command() {
+    use egui_kittest::{Harness, kittest::Queryable};
+    let mut s = effectcraft_engine::Session::default();
+    s.execute("comp.new", json!({"width": 64, "height": 64, "duration": 2})).unwrap();
+    let id = s.execute("layer.newSolid", json!({"color": "#fff"})).unwrap()["layer"].as_u64().unwrap();
+    for (time, value) in [(0.0, 0), (1.0, 50)] {
+        s.execute("prop.addKey", json!({"layer": id, "path": "transform/opacity", "time": time, "value": value})).unwrap();
+    }
+    let layer = s.active_comp().unwrap().layer(LayerId(id)).unwrap().clone();
+    let prop = layer.props.prop("transform/opacity").unwrap().clone();
+    s.execute("keys.select", json!({"keys": [{"layer": id, "prop": prop.uid, "time": 1.0}]})).unwrap();
+    let mut app = EffectcraftApp::new(s);
+    let mut actions = vec![];
+    {
+        let mut h = Harness::new_ui(|ui| key_menu(ui, &app, &layer, &prop, &prop.keys[0], false, &mut actions));
+        h.run();
+        h.get_by_label("Easy Ease").click();
+        h.run();
+    }
+    assert_eq!(actions.iter().map(|(command, _)| command.as_str()).collect::<Vec<_>>(), ["keys.select", "keys.easyEase"]);
+    for (command, params) in actions {
+        app.session.execute(&command, params).unwrap();
+    }
+    let keys = &app.session.active_comp().unwrap().layer(LayerId(id)).unwrap().props.find(prop.uid).unwrap().keys;
+    assert_ne!(keys[0], prop.keys[0], "the clicked key was eased");
+    assert_eq!(keys[1], prop.keys[1], "the previously selected key was not edited");
+    assert_eq!(app.session.state.selected_keys.len(), 1);
+    assert_eq!(app.session.state.selected_keys[0].time, prop.keys[0].time);
+}
+
 #[test]
 fn layer_drop_target_skips_moving_layers_beyond_the_viewport() {
     let mut rows: Vec<Row> = (1..=6).map(|id| Row { layer: LayerId(id), depth: 0, kind: RowKind::Layer }).collect();

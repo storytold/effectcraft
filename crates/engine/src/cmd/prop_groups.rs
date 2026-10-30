@@ -135,6 +135,61 @@ pub(crate) fn copy_contents(s: &Session) -> Vec<PropGroup> {
     selected_contents(s).into_iter().filter_map(|(lid, uid)| c.layer(lid)?.props.find_group(uid).cloned()).collect()
 }
 
+/// Masks selected on the active comp's layers, top to bottom (#2091).
+pub(crate) fn selected_masks(s: &Session) -> Vec<(LayerId, Uid)> {
+    let Some(c) = s.active_comp().filter(|_| !s.state.selected_props.is_empty()) else { return vec![] };
+    c.layers
+        .iter()
+        .flat_map(|l| {
+            let masks = l.masks().into_iter().flat_map(|m| m.groups());
+            masks.filter(|m| s.state.selected_props.contains(&(l.id, m.uid))).map(|m| (l.id, m.uid))
+        })
+        .collect()
+}
+
+/// Copies of the selected masks (Edit ▸ Copy), top to bottom.
+pub(crate) fn copy_masks(s: &Session) -> Vec<PropGroup> {
+    let Some(c) = s.active_comp() else { return vec![] };
+    selected_masks(s).into_iter().filter_map(|(lid, uid)| c.layer(lid)?.props.find_group(uid).cloned()).collect()
+}
+
+/// Edit ▸ Paste with masks on the clipboard: each is added, with a unique name, below the masks of
+/// every selected unlocked layer that can have masks, and the copies are selected (#2091).
+pub(crate) fn paste_masks(s: &mut Session, p: &Value) -> Result<Value> {
+    let c = "edit.paste";
+    let clip = s.state.mask_clipboard.clone();
+    let (cid, ids) = layers_p(s, p)?;
+    let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
+    let targets: Vec<LayerId> = ids.into_iter().filter(|l| comp.layer(*l).is_some_and(|l| l.masks().is_some() && !l.switches.locked)).collect();
+    if targets.is_empty() {
+        return Err(bad(c, "select an unlocked layer that can have masks to paste masks into"));
+    }
+    let label = match clip.as_slice() {
+        [g] => format!("Paste {}", g.name),
+        _ => "Paste".to_string(),
+    };
+    let pasted = s.edit(&label, None, |proj, st| {
+        let mut next = proj.next_id;
+        let mut out = vec![];
+        for lid in &targets {
+            let masks = layer_mut(proj, cid, *lid)?.props.sub_mut("masks").ok_or_else(|| bad(c, "the layer can't have masks"))?;
+            for g in &clip {
+                let mut g = g.clone();
+                g.reassign_uids(&mut next);
+                g.name = super::effect::unique_name(masks, &g.name);
+                out.push((*lid, g.uid));
+                masks.children.push(g.into());
+            }
+        }
+        proj.next_id = next + 1;
+        st.selected_props = out.clone();
+        // The source mask's points (selected with it) must not outlive its selection.
+        st.selected_vertices.clear();
+        Ok(out)
+    })?;
+    Ok(json!({"masks": pasted.iter().map(|(_, u)| *u).collect::<Vec<_>>()}))
+}
+
 /// Edit ▸ Cut's removal of the selected shape items (once copied).
 pub(crate) fn cut_contents(s: &mut Session, items: &[(LayerId, Uid)]) -> Result<Value> {
     let cid = s.active_comp_id().ok_or(EngineError::NoComp)?;

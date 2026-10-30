@@ -206,6 +206,32 @@ fn track_matte_limits_an_adjustment_layer() {
     }
 }
 
+/// An adjustment layer's blend mode blends the adjusted comp onto the comp below, inside its
+/// footprint: with no effects, Screen screens a 0.25 grey with itself, Multiply darkens it,
+/// Normal leaves it, and Opacity mixes toward the result (#2618).
+#[test]
+fn adjustment_layer_blends_in_its_mode() {
+    for (mode, opacity, want) in
+        [(BlendMode::Normal, 100.0, 0.25), (BlendMode::Screen, 100.0, 0.4375), (BlendMode::Multiply, 100.0, 0.0625), (BlendMode::Screen, 50.0, 0.34375)]
+    {
+        let (mut p, cid, comp) = setup();
+        let mut adj = solid(&mut p, &comp, [1.0, 1.0, 1.0], 100, 100);
+        adj.props.prop_mut("transform/position").unwrap().value = Value::Vec3([50.0, 50.0, 0.0]);
+        adj.props.prop_mut("transform/opacity").unwrap().value = Value::Scalar(opacity);
+        adj.switches.adjustment = true;
+        adj.blend_mode = mode;
+        let bg = solid(&mut p, &comp, [0.25, 0.25, 0.25], 200, 100);
+        let c = p.comp_mut(cid).unwrap();
+        c.layers.push(adj);
+        c.layers.push(bg);
+        let img = render_frame(&p, cid, Tick::ZERO, 1.0);
+        let (inside, outside) = (img.get(50, 50), img.get(150, 50));
+        assert!((inside[0] - want).abs() < 1e-4, "{mode:?} {opacity}: {inside:?}");
+        assert!((outside[0] - 0.25).abs() < 1e-4, "{mode:?} {opacity}: outside the footprint {outside:?}");
+        assert_eq!(inside[3], 1.0, "{mode:?} keeps the comp opaque");
+    }
+}
+
 #[test]
 fn shape_layer_draws_fill_and_stroke() {
     let (mut p, cid, comp) = setup();
@@ -901,6 +927,54 @@ fn default_effect_points_sit_at_the_centre_of_a_shape_layer() {
         // Symmetric about the centre: opposite quadrants change alike.
         assert!((q[0] - q[3]).abs() < 0.05 * q[0].max(q[3]) && (q[1] - q[2]).abs() < 0.05 * q[1].max(q[2]), "{id}: {q:?}");
     }
+}
+
+/// #687: an adjustment layer's footprint (its source through its masks) must not be keyed by
+/// its effect stack. Noise on a finishing adjustment changes every frame, and letting that
+/// reach the key re-rendered and re-uploaded a full-frame buffer every frame. A moving mask
+/// must still re-key it, and the cached buffer must follow the mask.
+#[test]
+fn adjustment_footprint_key_ignores_the_effect_stack() {
+    let (mut p, cid, comp) = setup();
+    let mut adj = solid(&mut p, &comp, [1.0, 1.0, 1.0], 200, 100);
+    adj.switches.adjustment = true;
+    add_effect_200(&mut p, &mut adj, "ec.noise.noise", &[("amount", Value::Scalar(50.0))]);
+    let key = |p: &Project, t: f64| {
+        let c = p.comp(cid).unwrap();
+        crate::cache::footprint_key(&crate::EvalCtx::new(p, cid, c, Tick::from_seconds_f64(t)), &c.layers[0], 1.0, false, false).unwrap()
+    };
+    let mut next = p.next_id;
+    let mut m = build::mask(&mut Ids(&mut next), "Mask 1", ShapePath::rect([50.0, 50.0], 40.0, 40.0), MaskMode::Add, [255, 255, 0]);
+    p.next_id = next;
+    m.prop_mut("path").unwrap().keys = vec![
+        Keyframe::new(Tick::ZERO, Value::Path(ShapePath::rect([50.0, 50.0], 40.0, 40.0))),
+        Keyframe::new(Tick::from_seconds_f64(1.0), Value::Path(ShapePath::rect([150.0, 50.0], 40.0, 40.0))),
+    ];
+    // Effects alone must not put the shutter in the footprint key. Masks, added below, may.
+    p.comp_mut(cid).unwrap().layers.push(adj.clone());
+    let bare = key(&p, 0.0);
+    p.comp_mut(cid).unwrap().shutter_angle = 90.0;
+    assert_eq!(bare, key(&p, 0.0), "the comp shutter must not re-key a footprint");
+    p.comp_mut(cid).unwrap().shutter_angle = 180.0;
+    p.comp_mut(cid).unwrap().layers[0].props.sub_mut("masks").unwrap().children.push(m.into());
+    let foot = |p: &Project, t: f64| {
+        let c = p.comp(cid).unwrap();
+        let mut r = crate::Renderer::new(p, &crate::NoFootage, crate::RenderOpts::default());
+        let cache = crate::LayerCache::default();
+        r.cache = Some(&cache);
+        let layer = c.layers[0].clone();
+        let b = r.adjustment_footprint(&crate::EvalCtx::new(p, cid, c, Tick::from_seconds_f64(t)), &layer).unwrap();
+        b.img.get(50, 50)
+    };
+    assert_ne!(key(&p, 0.0), key(&p, 0.5), "an animated mask path must re-key the footprint");
+    assert_ne!(key(&p, 0.0), key(&p, 1.0));
+    assert_ne!(foot(&p, 0.0), foot(&p, 1.0), "the moved mask must reach the cached footprint");
+    assert_eq!(key(&p, 1.0), key(&p, 1.5), "a per-frame effect on the adjustment re-keyed its footprint");
+    assert_eq!(key(&p, 1.0), key(&p, 3.5), "the footprint key followed the clock past the mask");
+    assert_eq!(foot(&p, 1.0), foot(&p, 3.5));
+    let before = key(&p, 0.0);
+    p.comp_mut(cid).unwrap().layers[0].props.prop_mut("effects/#1/amount").unwrap().value = Value::Scalar(90.0);
+    assert_eq!(before, key(&p, 0.0), "editing an effect parameter must not re-key the footprint");
 }
 
 /// #659: a tiling effect on a text layer tiles across the layer's whole region. The glyphs

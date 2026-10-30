@@ -1,5 +1,5 @@
 use super::engine::{MERCURY, PS2, PState, PW_EFFECT_CAMERA, Phys, norm3, particle_look, pw_state, type_sprite};
-use super::sprites::{Acc, Post, Sprite, SpritePlan, raster, splat};
+use super::sprites::{Acc, Post, Sprite, SpritePlan, aa, raster, splat, sprite_bbox};
 use super::{Buf, EffectCtx, Image, IntoParallelRefIterator, ParallelIterator, SimCache, Value, unpremul};
 
 // ------------------------------------------------------------------ CC Particle World
@@ -35,20 +35,44 @@ pub(super) fn pw_phys(ctx: &EffectCtx) -> Phys {
     }
 }
 
+/// CC Particle World's Particle Type ▸ Textured Square.
+const PW_TEXTURED_SQUARE: u32 = 8;
+/// CC Particle World's Particle ▸ Texture ▸ Texture Layer.
+pub(super) const PW_TEXTURE_LAYER: &str = "particle/texture/textureLayer";
+
+/// Whether CC Particle World draws its Texture Layer on the particles (Textured Square with a
+/// layer chosen). Only the CPU does: `catalog::gpu_supported` keeps this case off the GPU.
+pub(crate) fn particle_world_textured(ctx: &EffectCtx) -> bool {
+    ctx.params.e("particle/particleType") == PW_TEXTURED_SQUARE && ctx.params.get(PW_TEXTURE_LAYER).and_then(Value::as_layer).is_some()
+}
+
 pub(super) fn particle_world(ctx: &EffectCtx, b: Buf) -> Buf {
+    // The texture at the current comp time, shared by every shutter sample. A layer the host
+    // can't give (the effect's own layer with its effects, a reference cycle) leaves the
+    // squares in the particle colour. Authored buffers (text, shapes) span only their content:
+    // covering the whole layer keeps the clamped sampling from stretching their edge pixels.
+    let tex = particle_world_textured(ctx).then(|| ctx.layer_param(PW_TEXTURE_LAYER, true)).flatten().map(|mut t| {
+        t.buf.cover(t.size);
+        t
+    });
+    let (w, h) = (b.img.width, b.img.height);
+    let draw = |plan: &SpritePlan| match &tex {
+        Some(t) => splat_textured(w, h, &plan.sprites, plan.acc, t),
+        None => splat(w, h, &plan.sprites, plan.acc),
+    };
     // #1195: with the comp's motion-blur shutter open, particles draw as motion trails: the
     // sprite fields of samples across the shutter are averaged, as Transform averages its
     // matrix samples. (The GPU compositor runs this case on the CPU: catalog::gpu_supported.)
     if let Some((angle, phase, n)) = ctx.env.shutter.filter(|(a, _, _)| *a > 0.0) {
         let n = (n.clamp(2, 64) as usize).max(2);
         let fd = 1.0 / ctx.fps().max(0.001);
-        let mut acc = Image::new(b.img.width, b.img.height);
+        let mut acc = Image::new(w, h);
         let mut post: Option<Post> = None;
         for k in 0..n {
             let t = ctx.time + (phase + angle * k as f64 / (n - 1) as f64) / 360.0 * fd;
             let sub = EffectCtx { params: ctx.params, time: t, layer_size: ctx.layer_size, seed: ctx.seed, adjustment: ctx.adjustment, env: ctx.env };
             if let Some(plan) = particle_world_plan(&sub, &b) {
-                let fx = splat(b.img.width, b.img.height, &plan.sprites, plan.acc);
+                let fx = draw(&plan);
                 acc.data.iter_mut().zip(&fx.data).for_each(|(a, o)| (0..4).for_each(|c| a[c] += o[c]));
                 post.get_or_insert(plan.post);
             }
@@ -60,9 +84,36 @@ pub(super) fn particle_world(ctx: &EffectCtx, b: Buf) -> Buf {
         };
     }
     match particle_world_plan(ctx, &b) {
-        Some(plan) => plan.finish(b),
+        Some(plan) => {
+            let fx = draw(&plan);
+            plan.finish_with(b, fx)
+        }
         None => b,
     }
+}
+
+/// Draw square sprites into a new transparent image of `w`×`h`, each showing the layer `tex`
+/// stretched over the square (turned with it) at the sprite's opacity.
+fn splat_textured(w: u32, hgt: u32, sprites: &[Sprite], acc: Acc, tex: &crate::LayerPixels) -> Image {
+    let mut img = Image::new(w, hgt);
+    let (tw, th) = (tex.size[0], tex.size[1]);
+    let shade = |s: &Sprite, x: f32, y: f32| {
+        // As [`sprite_shade`]'s Square, sub-pixel sprites included.
+        let (r, fade) = if s.r < 0.5 { (0.5, s.r / 0.5) } else { (s.r, 1.0) };
+        let (sn, cs) = s.rot.sin_cos();
+        let (dx, dy) = (x - s.x, y - s.y);
+        let (ux, uy) = (dx * cs + dy * sn, -dx * sn + dy * cs);
+        let e = r * 0.75;
+        let a = aa(e - ux.abs()) * aa(e - uy.abs()) * s.c[3] * fade;
+        if a <= 1e-6 {
+            return None;
+        }
+        let (u, v) = (((ux / e + 1.0) * 0.5).clamp(0.0, 1.0) as f64, ((uy / e + 1.0) * 0.5).clamp(0.0, 1.0) as f64);
+        let (px, py) = tex.buf.to_px([u * tw, v * th]);
+        Some(tex.buf.img.sample_bilinear_clamped(px, py).map(|c| c * a))
+    };
+    raster(&mut img, sprites, sprite_bbox, shade, acc);
+    img
 }
 
 /// Effect Camera ▸ FOV's default (degrees).

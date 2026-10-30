@@ -93,8 +93,19 @@ impl PropCx<'_> {
         self.t.for_value(self.prop.has_expression())
     }
 
+    /// Queues the `prop.set` of one edit; consecutive edits of the parameter (a scrub) are one undo step.
     fn set(&self, actions: &mut Actions, v: serde_json::Value) {
-        let (layer, uid, merge, scrub) = (self.layer, self.uid, format!("ec-{}", self.uid), self.scrub);
+        self.push(actions, v, Some(format!("ec-{}", self.uid)));
+    }
+
+    /// Queues the `prop.set` of a discrete choice (a pop-up pick, a check box): its own undo step,
+    /// never merged with the parameter's previous edit (#2152).
+    fn set_step(&self, actions: &mut Actions, v: serde_json::Value) {
+        self.push(actions, v, None);
+    }
+
+    fn push(&self, actions: &mut Actions, v: serde_json::Value, merge: Option<String>) {
+        let (layer, uid, scrub) = (self.layer, self.uid, self.scrub);
         actions.push(("prop.set".into(), json!({"layer": layer.id.0, "prop": uid, "value": v, "merge": merge, "selected": true, "offset": scrub})))
     }
 
@@ -240,7 +251,7 @@ fn value_mask(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value: &
     }
     app.auto.add(&format!("effectControls.prop.{uid}.value"), dr, &prop.name);
     if let Some(ni) = widgets::popup_menu(ui, pop, dr.left_bottom(), &opts, Some(i)) {
-        cx.set(actions, json!(ni as f64));
+        cx.set_step(actions, json!(ni as f64));
     }
 }
 
@@ -367,8 +378,8 @@ fn value_toggle(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value:
     };
     let PropCx { t, uid, cy, vx, p, prop, .. } = *cx;
     let cr = Rect::from_min_size(pos2(vx, cy - 8.0), vec2(16.0, 16.0));
-    if widgets::checkbox(ui, cr, *b, &t, egui::Id::unique(("ec-b", uid))).clicked() {
-        cx.set(actions, json!(!b));
+    if widgets::checkbox(ui, cr, *b, &t, egui::Id::unique(("ec-b", uid))).changed() {
+        cx.set_step(actions, json!(!b));
     }
     p.text(pos2(cr.max.x + 6.0, cy), Align2::LEFT_CENTER, &prop.name, Tokens::ui(12.0), t.text_dim);
     app.auto.add(&format!("effectControls.prop.{uid}.value"), cr, &prop.name);
@@ -388,7 +399,7 @@ fn value_popup(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value: 
         }
         app.auto.add(&format!("effectControls.prop.{uid}.value"), dr, &prop.name);
         if let Some(ni) = widgets::popup_menu(ui, pop, dr.left_bottom(), options, Some(*i as usize)) {
-            cx.set(actions, json!(ni));
+            cx.set_step(actions, json!(ni));
         }
     }
 }
@@ -402,7 +413,7 @@ fn value_layer_ref(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, val
     if let Some(comp) = comp {
         let dr = Rect::from_min_size(pos2(vx, cy - 9.0), vec2(((r.max.x - vx) * 0.55).clamp(90.0, 170.0), 18.0));
         if let Some(chosen) = widgets::layer_picker(ui, dr, &comp.layers, *l, &t, egui::Id::unique(("ec-l", uid))) {
-            cx.set(actions, chosen.map(|id| json!(id)).unwrap_or(serde_json::Value::Null));
+            cx.set_step(actions, chosen.map(|id| json!(id)).unwrap_or(serde_json::Value::Null));
         }
         app.auto.add(&format!("effectControls.prop.{uid}.value"), dr, &prop.name);
         // Source / Masks / Effects & Masks (the hidden companion parameter).

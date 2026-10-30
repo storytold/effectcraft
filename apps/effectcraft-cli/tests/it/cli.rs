@@ -605,6 +605,49 @@ fn a_failed_render_under_run_and_exec_exits_1() {
     assert!(v["error"].as_str().is_some_and(|e| e.starts_with("T: ")), "{v}");
 }
 
+/// A source refusal happens before encoding and has no started timestamp. It must still
+/// fail the CLI, while the valid queue item finishes and the imported frame stays intact.
+#[test]
+fn a_partly_protected_queue_exits_1_under_render_run_and_exec() {
+    let root = tmp("protected-mixed-queue");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let source = root.join("source_00000.png");
+    image::RgbaImage::from_pixel(4, 4, image::Rgba([40, 80, 120, 255])).save(&source).unwrap();
+    let original = std::fs::read(&source).unwrap();
+    let project = root.join("q.ecproj");
+    let good = root.join("good.gif");
+    let import = json!({"paths": [source]}).to_string();
+    let blocked = json!({"format": "png", "output": root.join("source_[#####].png")}).to_string();
+    let valid = json!({"format": "gif", "output": good}).to_string();
+    ok_json(&[
+        "run",
+        "--empty",
+        "--save-as",
+        project.to_str().unwrap(),
+        "comp.new",
+        r#"{"name":"Main","width":16,"height":16,"frameRate":10,"duration":0.1}"#,
+        "layer.newSolid",
+        "{}",
+        "file.import",
+        &import,
+        "renderQueue.add",
+        &blocked,
+        "renderQueue.add",
+        &valid,
+    ]);
+    let p = project.to_str().unwrap();
+    for args in [vec!["render", "--queue", "--project", p], vec!["run", p, "renderQueue.render", "{}"], vec!["exec", "renderQueue.render", "--project", p]] {
+        std::fs::write(&good, b"previous output").unwrap();
+        let (code, result) = run_json(&args);
+        assert_eq!(code, 1, "{args:?}: {result}");
+        assert!(result["error"].as_str().is_some_and(|e| e.contains("footage") && e.contains("source_00000.png")), "{result}");
+        assert_eq!(std::fs::read(&source).unwrap(), original);
+        assert!(std::fs::read(&good).unwrap().starts_with(b"GIF8"), "the valid item still rendered");
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 /// `render --bitrate` (#440) targets the bitrate in VP9 WebM.
 #[test]
 fn render_bitrate_applies_to_vp9_webm() {

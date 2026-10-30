@@ -431,12 +431,13 @@ impl<'a> Cx<'a> {
     fn crop_resize(&self, img: Image) -> Image {
         let om = self.job.output;
         let scale = self.comp().map(|c| self.job.settings.effective_scale(c)).unwrap_or_else(|| self.job.settings.resolution.clamp(0.01, 4.0));
+        // frame_size applies crop itself: use the original frame and the same scale as edges.
+        let (w, h) = om.frame_size(img.width, img.height, scale);
         let (t, l, b, r) = om.crop.edges(img.width, img.height, scale);
         let img = if (t, l, b, r) == (0, 0, 0, 0) { img } else { crop(&img, t, l, b, r) };
         if !om.resize.enabled {
             return img;
         }
-        let (w, h) = om.frame_size(img.width, img.height, 1.0);
         if (w, h) == (img.width, img.height) {
             return img;
         }
@@ -1059,6 +1060,91 @@ mod tests {
         for y in 0..4u32 {
             assert_eq!(up.data[up.idx(1, y)][0], if y % 2 == 0 { 1.0 } else { 0.0 }, "upper first: line {y}");
             assert_eq!(lo.data[lo.idx(1, y)][0], if y % 2 == 1 { 1.0 } else { 0.0 }, "lower first: line {y}");
+        }
+    }
+
+    /// Regress the locked-aspect example: cropping 1920x1080 must resize to 1280x1440.
+    #[test]
+    fn crop_resize_applies_margins_once() {
+        use effectcraft_project::render_queue::{Crop, OutputModule, Resize};
+        let output = OutputModule {
+            crop: Crop { enabled: true, left: 480, right: 480, ..Default::default() },
+            resize: Resize { enabled: true, width: 1280, lock_aspect: true, quality: ResizeQuality::Low, ..Default::default() },
+            ..Default::default()
+        };
+        assert_eq!(output.frame_size(1920, 1080, 1.0), (1280, 1440));
+        let img = run_crop_resize(Image::new(1920, 1080), &output, 1.0);
+        assert_eq!((img.width, img.height), (1280, 1440));
+        assert_eq!(img.data.len(), 1280 * 1440);
+    }
+
+    /// Apply output-module geometry to a synthetic frame without rendering or writing files.
+    fn run_crop_resize(img: Image, output: &effectcraft_project::render_queue::OutputModule, scale: f64) -> Image {
+        use effectcraft_project::render_queue::RenderSettings;
+        let project = Project::default();
+        let settings = RenderSettings { resolution: scale, ..Default::default() };
+        let job = Job {
+            project: &project,
+            footage: &effectcraft_render::NoFootage,
+            expr: None,
+            accel: None,
+            comp: effectcraft_project::ItemId(0),
+            settings: &settings,
+            output,
+            path: "unused.png",
+            sink: None,
+            nested_switches: true,
+            options: Default::default(),
+        };
+        Cx::new(&job).crop_resize(img)
+    }
+
+    /// Match predicted dimensions across crop, padding, ROI scale, aspect locks and resize qualities.
+    #[test]
+    fn crop_resize_dimensions_match_the_output_module() {
+        use effectcraft_project::render_queue::{Crop, OutputModule, Resize};
+        let edges = Crop { enabled: true, left: 2, right: 2, ..Default::default() };
+        let padding = Crop { enabled: true, left: -2, bottom: -2, ..Default::default() };
+        let roi = |rect| Crop { enabled: true, use_roi: true, roi: Some(rect), ..Default::default() };
+        for quality in [ResizeQuality::Low, ResizeQuality::High] {
+            let resize = |width| Resize { enabled: true, width, height: 1, lock_aspect: true, quality };
+            for (crop, resize, scale, expected) in [
+                (Crop::default(), Resize::default(), 1.0, (8, 6)),
+                (edges, Resize::default(), 1.0, (4, 6)),
+                (Crop::default(), resize(4), 1.0, (4, 3)),
+                (edges, resize(8), 1.0, (8, 12)),
+                (padding, resize(5), 1.0, (5, 4)),
+                (roi([4.0, 2.0, 8.0, 6.0]), resize(8), 0.5, (8, 6)),
+                (roi([1.0, 0.5, 2.0, 1.5]), resize(8), 2.0, (8, 6)),
+                (edges, Resize { lock_aspect: false, height: 2, ..resize(5) }, 1.0, (5, 2)),
+            ] {
+                let output = OutputModule { crop, resize, ..Default::default() };
+                assert_eq!(output.frame_size(8, 6, scale), expected);
+                let img = run_crop_resize(Image::filled(8, 6, [0.25, 0.0, 0.0, 0.5]), &output, scale);
+                assert_eq!((img.width, img.height), expected, "{crop:?}, {resize:?}, scale {scale}");
+                assert_eq!(img.data.len(), expected.0 as usize * expected.1 as usize);
+            }
+        }
+    }
+
+    /// Exercise zero/empty inputs, collapsed crops and existing caps on extreme single-axis resizes.
+    #[test]
+    fn crop_resize_zero_and_extreme_sizes_stay_bounded() {
+        use effectcraft_project::render_queue::{Crop, OutputModule, Resize};
+        for quality in [ResizeQuality::Low, ResizeQuality::High] {
+            for (size, crop, width, height, expected) in [
+                ((8, 6), Crop::default(), 0, 0, (1, 1)),
+                ((8, 1), Crop::default(), u32::MAX, 1, (30_000, 1)),
+                ((1, 8), Crop::default(), 1, u32::MAX, (1, 30_000)),
+                ((8, 6), Crop { enabled: true, left: 20_000, right: 20_000, ..Default::default() }, 2, 3, (2, 3)),
+                ((0, 0), Crop { enabled: true, left: 1, top: 1, ..Default::default() }, 2, 3, (2, 3)),
+            ] {
+                let output = OutputModule { crop, resize: Resize { enabled: true, width, height, lock_aspect: false, quality }, ..Default::default() };
+                let img = run_crop_resize(Image::new(size.0, size.1), &output, 1.0);
+                assert_eq!((img.width, img.height), expected);
+                assert_eq!(img.data.len(), expected.0 as usize * expected.1 as usize);
+                assert!(img.data.iter().all(|p| *p == [0.0; 4]));
+            }
         }
     }
 

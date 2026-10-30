@@ -1943,3 +1943,95 @@ fn old_guides_load_as_pixel_guides_and_percent_round_trips() {
     // A zero-sized comp never divides by zero.
     assert!(g.px(0, 0).is_finite());
 }
+
+#[test]
+fn copy_paste_masks_between_layers() {
+    let mut s = comp();
+    let a = solid(&mut s, "#ff0000");
+    let b = solid(&mut s, "#00ff00");
+    let n = s.active_comp().unwrap().layers.len();
+    s.execute("layer.select", json!({"layers": [a]})).unwrap();
+    s.execute("layer.addMask", json!({})).unwrap();
+    s.execute("layer.addMask", json!({"shape": "ellipse"})).unwrap();
+    let names = |s: &Session, id: u64| layer(s, id).masks().unwrap().groups().map(|m| m.name.clone()).collect::<Vec<_>>();
+    let uids = |s: &Session, id: u64| layer(s, id).masks().unwrap().groups().map(|m| m.uid).collect::<Vec<_>>();
+    let first = uids(&s, a)[0];
+    s.execute("prop.select", json!({"layer": a, "prop": first})).unwrap();
+    // Copy the mask: it is the mask that is copied, not its layer.
+    assert_eq!(s.execute("edit.copy", json!({})).unwrap()["masks"], json!(1));
+    assert!(s.state.clipboard.is_empty(), "not the layer");
+    assert!(s.is_enabled("edit.paste"));
+    s.execute("layer.select", json!({"layers": [b]})).unwrap();
+    let r = s.execute("edit.paste", json!({})).unwrap();
+    assert_eq!(s.active_comp().unwrap().layers.len(), n, "no new layer");
+    assert_eq!(names(&s, b), ["Mask 1"]);
+    let pasted = r["masks"][0].as_u64().unwrap();
+    assert_eq!(uids(&s, b), [pasted]);
+    assert_ne!(pasted, first);
+    assert_eq!(s.state.selected_props, vec![(effectcraft_project::LayerId(b), pasted)]);
+    assert_eq!(names(&s, a), ["Mask 1", "Mask 2"], "the source keeps its masks");
+    // Pasting again onto the same layer keeps names unique.
+    s.execute("edit.paste", json!({})).unwrap();
+    assert_eq!(names(&s, b), ["Mask 1", "Mask 2"]);
+    // One undo step per paste.
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(names(&s, b), ["Mask 1"]);
+}
+
+#[test]
+fn paste_masks_skips_locked_layers() {
+    let mut s = comp();
+    let a = solid(&mut s, "#ff0000");
+    let b = solid(&mut s, "#00ff00");
+    s.execute("layer.select", json!({"layers": [a]})).unwrap();
+    s.execute("layer.addMask", json!({})).unwrap();
+    let mask = layer(&s, a).masks().unwrap().groups().next().unwrap().uid;
+    s.execute("prop.select", json!({"layer": a, "prop": mask})).unwrap();
+    s.execute("edit.copy", json!({})).unwrap();
+    s.execute("layer.select", json!({"layers": [b]})).unwrap();
+    s.execute("layer.setSwitch", json!({"layers": [b], "switch": "lock", "value": true})).unwrap();
+    assert!(s.execute("edit.paste", json!({})).is_err());
+    assert_eq!(layer(&s, b).masks().unwrap().groups().count(), 0);
+}
+
+#[test]
+fn copy_with_an_explicit_layer_ignores_the_selected_mask() {
+    let mut s = comp();
+    let a = solid(&mut s, "#ff0000");
+    s.execute("layer.select", json!({"layers": [a]})).unwrap();
+    s.execute("layer.addMask", json!({})).unwrap();
+    let mask = layer(&s, a).masks().unwrap().groups().next().unwrap().uid;
+    s.execute("prop.select", json!({"layer": a, "prop": mask})).unwrap();
+    s.execute("edit.copy", json!({"layer": a})).unwrap();
+    assert_eq!(s.state.clipboard.len(), 1, "the named layer is copied");
+    assert!(s.state.mask_clipboard.is_empty());
+}
+
+#[test]
+fn selecting_a_mask_drops_stale_key_selection_so_copy_copies_the_mask() {
+    let mut s = comp();
+    let a = solid(&mut s, "#ff0000");
+    s.execute("layer.select", json!({"layers": [a]})).unwrap();
+    s.execute("layer.addMask", json!({})).unwrap();
+    let mask = layer(&s, a).masks().unwrap().groups().next().unwrap().uid;
+    s.state.selected_keys = vec![crate::KeyRef { layer: effectcraft_project::LayerId(a), prop: 1, time: Default::default() }];
+    s.execute("prop.select", json!({"layer": a, "prop": mask})).unwrap();
+    assert!(s.state.selected_keys.is_empty());
+    assert_eq!(s.execute("edit.copy", json!({})).unwrap()["masks"], json!(1));
+}
+
+#[test]
+fn pasting_a_mask_onto_its_own_layer_drops_the_source_vertex_selection() {
+    let mut s = comp();
+    let a = solid(&mut s, "#ff0000");
+    s.execute("layer.select", json!({"layers": [a]})).unwrap();
+    s.execute("layer.addMask", json!({})).unwrap();
+    let mask = layer(&s, a).masks().unwrap().groups().next().unwrap().uid;
+    s.execute("prop.select", json!({"layer": a, "prop": mask})).unwrap();
+    assert!(!s.state.selected_vertices.is_empty());
+    s.execute("edit.copy", json!({})).unwrap();
+    s.execute("edit.paste", json!({})).unwrap();
+    assert!(s.state.selected_vertices.is_empty());
+    s.execute("edit.clear", json!({})).unwrap();
+    assert_eq!(layer(&s, a).masks().unwrap().groups().count(), 1, "the pasted mask goes, the source stays");
+}

@@ -406,7 +406,7 @@ impl EffectcraftApp {
 
     /// A press in a panel (its body, tab or group header) focuses it; another Composition viewer
     /// also becomes the active one.
-    fn focus_panel(&mut self, ctx: &egui::Context, p: PanelKind) {
+    pub(crate) fn focus_panel(&mut self, ctx: &egui::Context, p: PanelKind) {
         self.ui.focused = p;
         panels::viewer_text::panel_clicked(self, ctx, p);
         if let Some(id) = panels::viewers::id_of(p) {

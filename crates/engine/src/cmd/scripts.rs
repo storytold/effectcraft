@@ -582,6 +582,15 @@ pub fn specs() -> Vec<CommandSpec> {
             scriptui::mouse
         ),
         cmd!(
+            "scriptui.resize",
+            "Resize Script Window",
+            [],
+            None,
+            "{window?, size: [width, height] (pixels)} → the window takes the size, lays itself out again and its onResizing / onResize run (a docked ScriptUI panel gets its dock's size)",
+            always,
+            scriptui::resize
+        ),
+        cmd!(
             "scriptui.close",
             "Close Script Window",
             [],

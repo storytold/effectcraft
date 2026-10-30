@@ -7,6 +7,7 @@ use serde_json::json;
 
 use crate::Session;
 use crate::commands::text_edit::{MAX_IME_TEXT_BYTES, ime_stamp_revision, ime_surrounding, layer_doc};
+use crate::tests::three_d::layer_count;
 
 fn session(text: &str) -> (Session, u64) {
     let mut s = Session::default();
@@ -1231,10 +1232,188 @@ fn deselect_all_keeps_an_empty_type_tool_layer() {
         s.state.text_edit.as_ref().is_some_and(|e| e.created && e.layer == effectcraft_project::LayerId(new)),
         "the Type tool opens the edit on its new, empty layer"
     );
-    let count = |s: &Session| s.active_comp().map_or(0, |c| c.layers.len());
-    let before = count(&s);
+    let before = layer_count(&s);
     s.execute("edit.deselectAll", json!({})).unwrap();
     assert!(s.state.text_edit.is_none());
     assert!(s.state.selected_layers.is_empty());
-    assert_eq!(count(&s), before, "an empty Type-tool layer is kept, as in After Effects");
+    assert_eq!(layer_count(&s), before, "an empty Type-tool layer is kept, as in After Effects");
+}
+
+#[test]
+fn duplicate_ends_an_edit_on_already_committed_text() {
+    // The engine route (MCP, control channel, script) with text that was committed before the
+    // edit opened and nothing typed inside it: the edit still ends and the copy is selected.
+    let (mut s, t) = editing("Hello", 5);
+    let copy = s.execute("edit.duplicate", json!({})).unwrap()[0].as_u64().unwrap();
+    assert!(s.state.text_edit.is_none(), "the open edit ends on a direct edit.duplicate");
+    assert_eq!(s.state.selected_layers, vec![effectcraft_project::LayerId(copy)], "and the copy is selected");
+    assert_eq!(doc(&s, t).text, "Hello", "the committed text is kept on the original");
+    assert_eq!(doc(&s, copy).text, "Hello", "and carried by the copy");
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(layer_count(&s), 1, "undo removes the copy");
+    assert!(s.state.text_edit.is_none(), "undo does not reopen the edit");
+}
+
+#[test]
+fn duplicate_during_an_edit_copies_the_layer_not_a_selected_property_group() {
+    use effectcraft_project::LayerId;
+    // Opening the editor by command, as a Type-tool click does, keeps the property selection, so
+    // an effect, shape item or text animator can still be selected while the user types.
+    for what in ["effect", "shape item", "text animator"] {
+        let (mut s, t) = session("Hello");
+        let (owner, path) = match what {
+            "effect" => {
+                s.execute("effect.apply", json!({"layers": [t], "effect": "Gaussian Blur"})).unwrap();
+                (t, "effects")
+            }
+            "shape item" => (s.execute("layer.newShape", json!({"kind": "rect"})).unwrap()["layer"].as_u64().unwrap(), "contents"),
+            _ => {
+                s.execute("layer.addTextAnimator", json!({"layer": t, "properties": ["opacity"]})).unwrap();
+                (t, "text/animators")
+            }
+        };
+        let items =
+            |s: &Session| s.active_comp().unwrap().layer(LayerId(owner)).unwrap().props.group(path).unwrap().groups().map(|g| g.uid).collect::<Vec<_>>();
+        let item = items(&s)[0];
+        let n = items(&s).len();
+        let before = layer_count(&s);
+        s.execute("prop.select", json!({"layer": owner, "prop": item})).unwrap();
+        begin_edit_at(&mut s, t, 5);
+        let r = s.execute("edit.duplicate", json!({})).unwrap();
+        assert!(s.state.text_edit.is_none(), "{what}: Duplicate ends the open edit");
+        assert_eq!(items(&s).len(), n, "{what}: the selected {what} is not duplicated");
+        assert_eq!(layer_count(&s), before + 1, "{what}: the edited layer is");
+        assert_eq!(s.state.selected_layers, vec![LayerId(r[0].as_u64().unwrap())], "{what}: and its copy is selected");
+        // The selection the edit passed over goes with it: the next Duplicate copies the selected
+        // copy rather than reaching back to the original's {what}.
+        s.execute("edit.duplicate", json!({})).unwrap();
+        assert_eq!(items(&s).len(), n, "{what}: a second Duplicate leaves the original's {what} alone");
+        assert_eq!(layer_count(&s), before + 2, "{what}: and copies the copy");
+        // With no edit open, the selected item keeps its precedence over the layers.
+        s.execute("prop.select", json!({"layer": owner, "prop": item})).unwrap();
+        s.execute("edit.duplicate", json!({})).unwrap();
+        assert_eq!(items(&s).len(), n + 1, "{what}: outside an edit Duplicate copies the selected {what}");
+        assert_eq!(layer_count(&s), before + 2, "{what}: and no layer");
+    }
+}
+
+#[test]
+fn duplicate_during_an_edit_leaves_no_key_or_vertex_selected_on_the_original() {
+    use effectcraft_project::LayerId;
+    // Opening the editor keeps the keyframe and mask-vertex selection too. Once the copy takes the
+    // selection, Clear deletes the copy, not a key or a vertex of the original.
+    for what in ["keyframe", "mask vertex"] {
+        let (mut s, t) = session("Hello");
+        let mask = match what {
+            "keyframe" => {
+                for time in [0.0, 1.0] {
+                    s.execute("prop.addKey", json!({"layer": t, "path": "transform/opacity", "time": time, "value": 50})).unwrap();
+                }
+                s.execute("keys.select", json!({"keys": [{"layer": t, "path": "transform/opacity", "time": 0.0}]})).unwrap();
+                None
+            }
+            // The Pen leaves the new mask's last vertex selected.
+            _ => Some(s.execute("mask.new", json!({"layer": t, "vertices": [[0, 0], [40, 0], [40, 40]], "closed": true})).unwrap()["mask"].as_u64().unwrap()),
+        };
+        let original = |s: &Session| {
+            let l = s.active_comp().unwrap().layer(LayerId(t)).unwrap();
+            match mask {
+                None => l.props.prop("transform/opacity").unwrap().keys.len(),
+                Some(m) => l.props.find_group(m).unwrap().get("path").unwrap().value.as_path().unwrap().vertices.len(),
+            }
+        };
+        let (n, before) = (original(&s), layer_count(&s));
+        begin_edit_at(&mut s, t, 5);
+        let copy = s.execute("edit.duplicate", json!({})).unwrap()[0].as_u64().unwrap();
+        assert_eq!(s.state.selected_layers, vec![LayerId(copy)], "{what}: the copy is selected");
+        s.execute("edit.clear", json!({})).unwrap();
+        assert_eq!(layer_count(&s), before, "{what}: Clear deletes the selected copy");
+        assert_eq!(original(&s), n, "{what}: and leaves the original's {what} alone");
+    }
+}
+
+#[test]
+fn duplicate_during_an_edit_copies_the_edited_layer_after_another_is_selected() {
+    use effectcraft_project::LayerId;
+    // An engine route (MCP, control channel, script) can select another layer while the edit
+    // stays open. The implicit Duplicate still means the edited layer, as Clear does; a named
+    // target keeps its meaning.
+    let (mut s, t) = session("Hello");
+    let other = s.execute("layer.newText", json!({"text": "Other"})).unwrap()["layer"].as_u64().unwrap();
+    begin_edit_at(&mut s, t, 5);
+    s.execute("layer.select", json!({"layer": other})).unwrap();
+    assert!(s.state.text_edit.as_ref().is_some_and(|e| e.layer == LayerId(t)), "selecting another layer leaves the edit open");
+    let before = layer_count(&s);
+    let copy = s.execute("edit.duplicate", json!({})).unwrap()[0].as_u64().unwrap();
+    assert!(s.state.text_edit.is_none(), "Duplicate ends the open edit");
+    assert_eq!(layer_count(&s), before + 1, "one layer is copied");
+    assert_eq!(doc(&s, copy).text, "Hello", "the edited layer is copied, not the newly selected one");
+    assert_eq!(s.state.selected_layers, vec![LayerId(copy)], "and its copy is selected");
+    // Null parameters name no layer, as everywhere else layers are read.
+    for unnamed in [json!({"layers": null}), json!({"layer": null})] {
+        begin_edit_at(&mut s, t, 5);
+        s.execute("layer.select", json!({"layer": other})).unwrap();
+        let copy = s.execute("edit.duplicate", unnamed.clone()).unwrap()[0].as_u64().unwrap();
+        assert_eq!(doc(&s, copy).text, "Hello", "{unnamed}: the edited layer is copied");
+    }
+    begin_edit_at(&mut s, t, 5);
+    let named = s.execute("edit.duplicate", json!({"layer": other})).unwrap()[0].as_u64().unwrap();
+    assert_eq!(doc(&s, named).text, "Other", "a named layer is copied as named");
+}
+
+#[test]
+fn duplicate_during_an_edit_with_nothing_selected_copies_the_edited_layer() {
+    use effectcraft_project::LayerId;
+    // An engine route can also clear the selection while the edit stays open. Duplicate stays
+    // available, since its unnamed target is the edited layer, not the selection.
+    let (mut s, _) = editing("Hello", 5);
+    s.execute("layer.select", json!({"layers": []})).unwrap();
+    assert!(s.state.selected_layers.is_empty() && s.state.text_edit.is_some(), "the edit is open with nothing selected");
+    let copy = s.execute("edit.duplicate", json!({})).unwrap()[0].as_u64().unwrap();
+    assert!(s.state.text_edit.is_none(), "Duplicate ends the open edit");
+    assert_eq!(doc(&s, copy).text, "Hello", "and copies the edited layer");
+    assert_eq!(s.state.selected_layers, vec![LayerId(copy)], "which is selected");
+    // With no edit open, nothing selected still means nothing to duplicate.
+    s.execute("layer.select", json!({"layers": []})).unwrap();
+    let before = layer_count(&s);
+    assert!(s.execute("edit.duplicate", json!({})).is_err(), "outside an edit Duplicate needs a selection");
+    assert_eq!(layer_count(&s), before, "and copies nothing");
+}
+
+#[test]
+fn duplicate_ends_the_open_edit_and_selects_the_copy() {
+    let (mut s, t) = editing("Hello", 5);
+    s.execute("text.insert", json!({"text": "!"})).unwrap();
+    assert_eq!(doc(&s, t).text, "Hello!");
+    let copy = s.execute("edit.duplicate", json!({})).unwrap()[0].as_u64().unwrap();
+    // A deselected layer never keeps an open text edit: Duplicate commits the edit through the
+    // same route as text.endEdit before the selection moves, so every route (menu, shortcut,
+    // palette, MCP, script) leaves one final state.
+    assert!(s.state.text_edit.is_none(), "Duplicate ends the open text edit, as Deselect All does");
+    assert_eq!(s.state.selected_layers, vec![effectcraft_project::LayerId(copy)], "and selects the copy");
+    assert_eq!(doc(&s, t).text, "Hello!", "the original keeps the typed text");
+    assert_eq!(doc(&s, copy).text, "Hello!", "the copy carries it too");
+    // The edit ending is no undoable step of its own (as with text.endEdit): undo takes the
+    // duplicate, it does not reopen the edit or undo the typing.
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(layer_count(&s), 1, "undo removed the copy");
+    assert_eq!(doc(&s, t).text, "Hello!", "the typed text stays committed");
+    assert!(s.state.text_edit.is_none(), "undo does not reopen the edit");
+    // With no open edit Duplicate is untouched by all of this: same behavior, no extra steps.
+    s.execute("edit.duplicate", json!({"layers": [t]})).unwrap();
+    assert_eq!(layer_count(&s), 2, "a plain duplicate still duplicates");
+    assert!(s.state.text_edit.is_none());
+}
+
+#[test]
+fn duplicate_of_an_empty_type_tool_layer_ends_the_edit_and_copies_it() {
+    use effectcraft_project::LayerId;
+    let (mut s, _keep) = session("Hello");
+    let new = s.execute("layer.newText", json!({"text": "", "position": [80.0, 80.0], "edit": true})).unwrap()["layer"].as_u64().unwrap();
+    assert!(s.state.text_edit.as_ref().is_some_and(|e| e.created && e.layer == LayerId(new)), "the Type tool opens the edit on its new, empty layer");
+    let before = layer_count(&s);
+    let copy = s.execute("edit.duplicate", json!({})).unwrap()[0].as_u64().unwrap();
+    assert!(s.state.text_edit.is_none(), "the edit ends the way text.endEdit ends it");
+    assert_eq!(layer_count(&s), before + 1, "the empty layer is kept, as text.endEdit keeps it, and copied");
+    assert_eq!(s.state.selected_layers, vec![LayerId(copy)], "and the copy is selected");
 }

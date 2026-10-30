@@ -851,6 +851,7 @@ fn copy(s: &mut Session, p: &Value) -> Result<Value> {
     s.state.key_clipboard.clear();
     s.state.keyframe_text = None;
     s.state.contents_clipboard.clear();
+    s.state.mask_clipboard.clear();
     s.state.link_clipboard = None;
     s.state.clip_is_keys = false;
     let n = groups.len();
@@ -1000,8 +1001,7 @@ fn list(_: &mut Session, p: &Value) -> Result<Value> {
                 let mut out = json!({"id": p.id, "name": p.name, "type": p.default.kind_name(), "default": p.default.to_json()});
                 match &p.ui {
                     effectcraft_project::ParamUi::Popup { options } => {
-                        // Engine/MCP popup values are zero-based; JSX exposes one-based values.
-                        out["options"] = json!(options.iter().enumerate().map(|(value, label)| json!({"value": value, "label": label})).collect::<Vec<_>>());
+                        out["options"] = super::popup_options(options);
                     }
                     effectcraft_project::ParamUi::Slider { min, max, slider_min, slider_max, decimals } => {
                         out["min"] = json!(min);

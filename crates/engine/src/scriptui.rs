@@ -769,6 +769,17 @@ pub(crate) fn mouse(s: &mut Session, p: &Value) -> Result<Value> {
     dispatch(s, ScriptUiEvent { window, widget, kind: (*ty).to_string(), value })
 }
 
+/// `scriptui.resize`: the host gave the window a new size (a docked panel's dock, #2585): the
+/// script's window takes it, lays itself out again and gets `onResizing` / `onResize`.
+pub(crate) fn resize(s: &mut Session, p: &Value) -> Result<Value> {
+    let c = "scriptui.resize";
+    let window = window_p(s, p, c)?;
+    let size = p.get("size").and_then(Value::as_array).ok_or_else(|| crate::commands::bad(c, "missing `size` [width, height]"))?;
+    let side = |i: usize| size.get(i).and_then(Value::as_f64).filter(|v| v.is_finite()).map(|v| v.round().clamp(1.0, 16384.0));
+    let (Some(w), Some(h)) = (side(0), side(1)) else { return Err(crate::commands::bad(c, "`size` must be [width, height] in pixels")) };
+    dispatch(s, ScriptUiEvent { window, widget: 0, kind: "resize".into(), value: json!([w, h]) })
+}
+
 /// `scriptui.close`: close a window (a dialog's `show()` returns `result`, default 2 = Cancel).
 pub(crate) fn close(s: &mut Session, p: &Value) -> Result<Value> {
     let window = window_p(s, p, "scriptui.close")?;

@@ -2,7 +2,7 @@
 
 **Stage: alpha** · next: beta, ~30 points of "ready for real work" and ~350–620 h away
 
-> **Last reviewed:** 2026-10-22 · **Last updated:** 2026-10-30 · **Change:** minor (localization: 303 more panel/dialog rows in Japanese and the Chinese catalogs; recounted after #1774: Japanese 27% → 46%, Simplified Chinese 29% → 46%, Traditional Chinese 29% → 38%, overall 18% → 24%) · **Target:** Adobe After Effects 2026 (26.5.0.89)
+> **Last reviewed:** 2026-10-22 · **Last updated:** 2026-10-30 · **Change:** minor (features of 30 October in the progress log: text Line Join, Timeline drag-reorder and multi-select of effects, viewer edge pan, ScriptUI drag capture and dock size; previously: localization recount after #1774) · **Target:** Adobe After Effects 2026 (26.5.0.89)
 
 EffectCraft aims to do what After Effects does, with the same panels, menus and behaviour, written
 from scratch in Rust. This page is the one-page summary; the evidence is in
@@ -117,6 +117,14 @@ Come tell us what matters most to you on [Discord](https://discord.gg/artcraft).
 
 ## Progress log
 
+- 2026-10-30: Text strokes take a Line Join (Miter, Round or Bevel) in the Character panel,
+  Miter for new text as in After Effects (#2077). In the Timeline, effects, masks and shape items
+  drag to a new place in their stack (#2210) and Shift-click adds them to the selection, so one
+  animation preset can hold several (#2552). The Composition panel pans while a mask vertex is
+  held at its edge (#999). Effect buffers that pad a small layer stay within a memory budget
+  (#2261); an MP4 lasts as long as its edit list shows (#2592); the Render Queue's times tick
+  between frames (#2593). ScriptUI drags keep their control past the window edge with
+  `MouseEvent.buttons` (#2584), and docked panels get their dock's size and `onResize` (#2585).
 - 2026-10-28: A shape layer's Rectangle and Ellipse Size get the Constrain Proportions chain
   that Scale has, so a circle stays a circle while its size is typed, scrubbed or keyed; it
   starts off, so existing shapes behave as before (#2489).
@@ -169,6 +177,7 @@ Come tell us what matters most to you on [Discord](https://discord.gg/artcraft).
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-30 | minor | Progress log: text Line Join, Timeline drag-reorder and Shift multi-select of effects, viewer edge pan, effect padding budget, MP4 edit-list duration, Render Queue clock, ScriptUI drag capture and docked-panel size |
 | 2026-10-22 | minor | Localization: 300 more panel/dialog rows in Japanese and the Chinese catalogs, plus the review's three missing rows (Basic, Advanced, Play/Stop) — panel tabs, form and dialog labels, context menus, tracker/graph/text-panel controls, File-panel footers, credits; language shares recounted after #1774 (Japanese 27% → 46% with 297 effect names, Simplified Chinese 29% → 46% with 307 effect names, Traditional Chinese 29% → 38%, overall 18% → 24%) |
 | 2026-10-12 | minor | Open-issue count (134 to 216), crash list and localization share (12% to 18%) updated to match docs/gaps.md |
 | 2026-10-12 | patch | Roto Brush span validation after trimming; command regressions for both layer edges |

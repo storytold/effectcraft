@@ -9,6 +9,8 @@ use super::{Appearance, General, Map, PREFS_VERSION, Prefs, Startup, Value, json
 ///   `autoSaveMinutes`, `autoSaveVersions`, `labelNames` (array) and `theme` at the top level.
 /// - version 2 defaulted the disk cache to 100 GB, more than most laptops have free; the stored
 ///   old default becomes the new one (a size the user chose is kept).
+/// - version 3 and earlier could still hold `createSplitLayersAbove: false`, the default before
+///   #2083 (every save kept it); it becomes After Effects' default, above (#2545).
 pub fn migrate(mut v: Value) -> Value {
     let Some(obj) = v.as_object_mut() else { return json!({}) };
     let version = obj.get("version").and_then(Value::as_u64).unwrap_or(0);
@@ -41,6 +43,12 @@ pub fn migrate(mut v: Value) -> Value {
         && d.get("diskCacheMaxGb").and_then(Value::as_u64) == Some(100)
     {
         d.insert("diskCacheMaxGb".into(), json!(20));
+    }
+    if version < 4
+        && let Some(g) = obj.get_mut("general").and_then(Value::as_object_mut)
+        && g.get("createSplitLayersAbove") == Some(&json!(false))
+    {
+        g.insert("createSplitLayersAbove".into(), json!(true));
     }
     // Settings saved before appearance modes had one theme: keep showing it, as a fixed Dark or
     // Light mode, instead of switching established users to Auto.

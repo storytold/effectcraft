@@ -1,5 +1,11 @@
 use super::*;
 
+#[test]
+fn converting_a_frame_with_nan_alpha_keeps_the_viewer_alive() {
+    let image = effectcraft_engine::render::Image::filled(1, 1, [0.5, 0.25, 0.1, f32::NAN]);
+    assert_eq!(to_color_image(&image).pixels, [egui::Color32::TRANSPARENT]);
+}
+
 struct ProbeDisk {
     keys: Mutex<HashSet<u128>>,
     probes: std::sync::atomic::AtomicUsize,
