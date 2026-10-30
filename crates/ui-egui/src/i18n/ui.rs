@@ -664,18 +664,18 @@ const JAPANESE: &[(&str, &str)] = &[
     ("Fit", "フィット"),
     ("Fit up to 100%", "100%までフィット"),
     ("Full", "フル画質"),
-    ("Half", "1/2画質"),
+    ("Half", "1/2 画質"),
     ("Only this layer uses this solid.", "この平面を使用するのはこのレイヤーだけです。"),
     ("Proportional Grid", "プロポーショナルグリッド"),
-    ("Quarter", "1/4画質"),
+    ("Quarter", "1/4 画質"),
     ("Region of Interest", "関心領域"),
     ("Reset Exposure", "露出をリセット"),
     ("Show Channel and Color Management Settings", "チャンネルとカラーマネジメント設定を表示"),
     ("Show Snapshot (hold)", "スナップショットを表示（長押し）"),
-    ("Take Snapshot", "スナップショットを取得"),
-    ("Third", "1/3画質"),
+    ("Take Snapshot", "スナップショット"),
+    ("Third", "1/3 画質"),
     ("Toggle Mask and Shape Path Visibility", "マスクとシェイプのパスを表示"),
-    ("Toggle Transparency Grid", "透明グリッドを切り替え"),
+    ("Toggle Transparency Grid", "透明グリッド"),
     ("16 bits per channel", "チャンネルあたり16ビット"),
     ("32 bits per channel (float)", "チャンネルあたり32ビット（浮動小数点）"),
     ("8 bits per channel", "チャンネルあたり8ビット"),
@@ -1115,7 +1115,7 @@ const JAPANESE: &[(&str, &str)] = &[
     ("Cache Before Playback", "再生前にキャッシュ"),
     ("Pre-roll", "プリロール"),
     ("Post-roll", "ポストロール"),
-    ("If caching, play cached frames", "キャッシュ中はキャッシュ済みフレームを再生"),
+    ("If caching, play cached frames", "キャッシュ中なら再生"),
     ("File Path", "ファイルパス"),
     ("Interpret Footage", "フッテージの解釈"),
     ("Create a new Folder", "新しいフォルダーを作成"),
@@ -10165,6 +10165,32 @@ mod tests {
             header.contains("app.auto.add(&format!(\"tools.select.{tool:?}\"), row.rect, tool.label())"),
             "the automation label must stay the English tool name"
         );
+    }
+
+    #[test]
+    fn the_measured_after_effects_terms_are_the_ones_the_panel_catalog_uses() {
+        // Read from the installed After Effects 2026 (26.5) Japanese interface with Windows UI
+        // Automation: the Composition panel's buttons and the Preview panel's checkbox. Nothing
+        // pinned these words before, and the menu's `Crop Comp to Region of Interest` read
+        // 目標範囲 until ccae8411 replaced it with AE's 関心領域.
+        const MEASURED: &[(&str, &str)] = &[
+            ("Choose grid and guide options", "グリッドとガイドのオプションを選択"),
+            ("Fast Previews", "高速プレビュー"),
+            ("Half", "1/2 画質"),
+            ("If caching, play cached frames", "キャッシュ中なら再生"),
+            ("Quarter", "1/4 画質"),
+            ("Region of Interest", "関心領域"),
+            ("Reset Exposure", "露出をリセット"),
+            ("Show Channel and Color Management Settings", "チャンネルとカラーマネジメント設定を表示"),
+            ("Take Snapshot", "スナップショット"),
+            ("Third", "1/3 画質"),
+            ("Toggle Mask and Shape Path Visibility", "マスクとシェイプのパスを表示"),
+            ("Toggle Transparency Grid", "透明グリッド"),
+        ];
+        for (en, ae) in MEASURED {
+            assert!(JAPANESE.iter().any(|(key, _)| *key == *en), "{en} has no Japanese row");
+            assert_eq!(row(JAPANESE, en), *ae, "{en} must use After Effects' own word");
+        }
     }
 
     #[test]
