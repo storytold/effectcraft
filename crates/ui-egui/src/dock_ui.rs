@@ -530,6 +530,9 @@ impl EffectcraftApp {
         let typing = ctx.egui_wants_keyboard_input();
         let events = events.into_iter().filter(|event| !typing && !matches!(event, egui::Event::Text(_) | egui::Event::Ime(_)));
         self.forwarded.events.extend(events);
+        if handed_over_to_the_timeline(files.iter().map(|window| (window.panel, !window.dropped.is_empty()))) {
+            self.forwarded.dropped_on_timeline = true;
+        }
         self.forwarded.files.extend(files.into_iter().flat_map(|window| window.dropped));
         if !self.forwarded.events.is_empty() || !self.forwarded.files.is_empty() {
             ctx.request_repaint();
@@ -859,6 +862,36 @@ impl DockContent<PanelKind> for EffectContent<'_> {
         if self.has_doc_tabs(panels) {
             let selected = *active == PanelKind::Timeline;
             self.doc_actions.extend(dock::doc_tabs(ui, ui.max_rect(), &self.docs, selected, &self.style, &mut self.app.auto));
+        }
+    }
+}
+
+/// Whether a handed-over *drop* named the Timeline. A floating window reports its hovered files
+/// too, so a drag that only passes over the Timeline window must not count: its flag would survive
+/// and send the next drop somewhere else. The panel comes from the window, which the main window's
+/// pointer can never reach (#2661).
+fn handed_over_to_the_timeline(drops: impl Iterator<Item = (PanelKind, bool)>) -> bool {
+    drops.into_iter().any(|(panel, has_files)| has_files && matches!(panel, PanelKind::Timeline))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A drop handed over by a floating window says which panel it landed on; only the Timeline
+    /// turns it into a layer instead of a project item. A window that only saw the file hover over
+    /// it carries no files and must not count, or its flag would outlive the drag (#2661).
+    #[test]
+    fn only_a_timeline_drop_is_handed_over_to_the_timeline() {
+        let cases = [
+            (vec![(PanelKind::Timeline, true)], true),
+            (vec![(PanelKind::Project, true)], false),
+            (vec![(PanelKind::Timeline, false)], false),
+            (vec![(PanelKind::Project, true), (PanelKind::Timeline, true)], true),
+            (vec![], false),
+        ];
+        for (windows, want) in cases {
+            assert_eq!(handed_over_to_the_timeline(windows.into_iter()), want, "{want}");
         }
     }
 }

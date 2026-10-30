@@ -442,6 +442,10 @@ impl FileDialogsUp {
 pub(crate) struct ForwardedInput {
     pub(crate) events: Vec<egui::Event>,
     pub(crate) files: Vec<egui::DroppedFileHandle>,
+    /// Files handed over by a floating window whose panel under the pointer was the Timeline. The
+    /// paths lose the window they came from, so this keeps the one thing the import still needs
+    /// (#2661); each drop clears it.
+    pub(crate) dropped_on_timeline: bool,
 }
 
 /// Record the scale the viewer drew at (called by the viewer panel each pass).

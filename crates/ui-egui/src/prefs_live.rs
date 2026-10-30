@@ -63,6 +63,10 @@ pub fn dropped_files(app: &mut EffectcraftApp, ui: &egui::Ui, bounds: Rect) {
         errors.push(crate::i18n::tr_args("Skipped {} dropped file(s) without a local path. Use File ▸ Import ▸ File…", &[&skipped]));
     }
 
+    // Taken once per drop frame, so a handed-over flag cannot survive into a later, unrelated
+    // drop (#2661).
+    let handed_by_a_floating_window = std::mem::take(&mut app.forwarded.dropped_on_timeline);
+
     let (proj, rest): (Vec<String>, Vec<String>) = paths.into_iter().partition(|p| {
         let l = p.to_ascii_lowercase();
         l.ends_with(".ecproj") || l.ends_with(".ecprojx")
@@ -88,13 +92,14 @@ pub fn dropped_files(app: &mut EffectcraftApp, ui: &egui::Ui, bounds: Rect) {
 
         // Dropping a file on the Timeline adds it to the composition the panel shows, as it does
         // on the viewer (#2588); the import decides the layer's position.
-        let over_timeline = ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| {
-            app.auto
-                .elements
-                .iter()
-                .find(|e| e.id == "panel.Timeline")
-                .is_some_and(|e| Rect::from_min_size(egui::pos2(e.rect[0], e.rect[1]), egui::vec2(e.rect[2], e.rect[3])).contains(p))
-        });
+        let over_timeline = handed_by_a_floating_window
+            || ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| {
+                app.auto
+                    .elements
+                    .iter()
+                    .find(|e| e.id == "panel.Timeline")
+                    .is_some_and(|e| Rect::from_min_size(egui::pos2(e.rect[0], e.rect[1]), egui::vec2(e.rect[2], e.rect[3])).contains(p))
+            });
 
         let at = if proj.is_empty() && !over_timeline {
             ctx.input(|i| i.pointer.hover_pos()).filter(|p| viewer.is_some_and(|v| v.contains(*p))).and_then(|p| crate::panels::viewer::screen_to_comp(&ctx, p))
